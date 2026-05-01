@@ -41,8 +41,37 @@
 
 | 項目 | 状態 |
 |------|------|
+| 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ (v0.19, 2026-05-01) |
 | 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | 🔲 |
 | `context_profile` / `model_type` / `exclude_pulse_id` の完全削除 | 🔲 (全 Playbook 翻訳後) |
+
+#### 整理結果 (2026-05-01)
+
+翻訳作業に入る前に、対象 Playbook を圧縮するため以下を実施:
+
+- **削除した Playbook**: 19 件
+  - 旧自律稼働プロトタイプ: `meta_auto`, `meta_auto_full`, `sub_router_auto`, `sub_perceive`, `sub_reaction`, `sub_finalize_auto`, `sub_execute_phase`, `sub_detect_situation_change`, `sub_generate_want`, `wait`
+  - テスト/残骸: `meta_websearch_demo`, `detail_recall_playbook`, `meta_agentic`, `agentic_chat_playbook`
+  - Spell 代替済み: `memory_recall_playbook` (`memory_recall_unified` Spell), `web_search_step` (`source_web` Playbook)
+  - 新規 Spell 化: `uri_view` (`resolve_uri` ツールに `spell=True`), `send_email_to_user_playbook` (`send_email_to_user` ツールに `spell=True`)
+  - サンプル保存後削除: `web_search_sub` ([sub_line_playbook_sample.md](sub_line_playbook_sample.md) に内容を保存)
+
+- **更新した Playbook**: `deep_research_playbook` の `exec_search` ノードを `web_search_step` → `source_web` に差し替え
+
+- **コード側の整理**:
+  - `sea/runtime.py`: `run_meta_auto` 関数削除、`_choose_playbook` の `meta_auto` fallback 削除
+  - `sea/pulse_controller.py`: 旧 `auto-without-meta_playbook` 分岐削除、auto pulse は `meta_playbook` 必須化
+  - `saiverse/conversation_manager.py`: `ConversationManager` クラスを no-op 化 (新認知モデルの `track_autonomous` + PulseScheduler 経路に統一)
+  - `builtin_data/tools/detail_recall.py`: 削除
+
+- **DB**: playbooks テーブル 67 → 48 件
+
+整理に伴うコード経路の変更詳細は [revisions.md](../revisions.md) v0.19 を参照。
+
+#### 残課題 (Phase 3 翻訳作業外で対応)
+
+- `ConversationManager` クラスごと削除 (saiverse_manager.py / manager/runtime.py / manager/admin.py の参照整理を伴う)
+- DB に残った別セッション削除済み Playbook の残骸 (`read_url_content`, `searxng_search`, `sub_speak_meta`, `sub_speak_simple`) の整理
 
 ---
 

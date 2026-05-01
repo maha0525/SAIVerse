@@ -455,9 +455,10 @@ class SAIVerseManager(
         """Run autonomous pulse via PulseController.
 
         Args:
-            meta_playbook: 指定された場合、その Playbook を auto pulse として起動
-                する (例: SubLineScheduler から track_autonomous を回す用途)。
-                None の場合は従来の meta_auto playbook が使われる。
+            meta_playbook: auto pulse として起動する Playbook 名 (例:
+                SubLineScheduler から track_autonomous を回す用途)。
+                2026-05-01 の認知モデル移行以降は **必須**。None で呼ぶと
+                PulseController が ERROR ログを出して何もしない。
             args: Playbook 起動時に渡す引数。
 
         Discord visitors (DiscordVisitorStub) are handled by DiscordConnector,

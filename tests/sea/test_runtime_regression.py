@@ -50,21 +50,6 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
     persona.history_manager.add_message.assert_called_once()
 
 
-def test_run_meta_auto_returns_none() -> None:
-    runtime, persona = _runtime_and_persona()
-    playbook = SimpleNamespace(name="meta_auto/think", start_node="think", context_requirements=None)
-
-    runtime._choose_playbook = Mock(return_value=playbook)
-    runtime._prepare_context = Mock(return_value=[])
-    runtime._compile_with_langgraph = Mock(return_value=[])
-    runtime._maybe_run_metabolism = Mock()
-
-    result = runtime.run_meta_auto(persona=persona, building_id="b1", occupants=[])
-
-    assert result is None
-    assert getattr(persona, "_last_conscious_prompt_time_utc", None) is not None
-
-
 def test_preview_context_delegates_to_preview_context_impl(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, persona = _runtime_and_persona()
 
@@ -134,34 +119,6 @@ def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> 
     assert captured["parent_state"]["_playbook_chain"] == "meta_user/exec"
     assert captured["parent_state"]["_cancellation_token"] is token
     assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
-
-
-def test_run_meta_auto_propagates_runtime_identifiers() -> None:
-    runtime, persona = _runtime_and_persona()
-    playbook = SimpleNamespace(name="meta_auto/think", start_node="think", context_requirements=None)
-    captured: dict = {}
-    token = CancellationToken()
-
-    runtime._choose_playbook = Mock(return_value=playbook)
-
-    def _prepare_context(*args, **kwargs):
-        captured["prepare_pulse_id"] = kwargs["pulse_id"]
-        return []
-
-    def _compile(*args, **kwargs):
-        captured["compile_pulse_id"] = args[6]
-        captured["parent_state"] = kwargs["parent_state"]
-        return []
-
-    runtime._prepare_context = Mock(side_effect=_prepare_context)
-    runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
-
-    runtime.run_meta_auto(persona, "b1", occupants=[], cancellation_token=token)
-
-    assert captured["prepare_pulse_id"] == captured["compile_pulse_id"]
-    assert captured["parent_state"]["_playbook_chain"] == "meta_auto/think"
-    assert captured["parent_state"]["_cancellation_token"] is token
 
 
 def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:

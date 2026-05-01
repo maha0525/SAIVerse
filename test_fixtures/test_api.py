@@ -37,7 +37,7 @@ EXPECTED_PERSONAS = [
     {"AIID": "test_persona_b", "AINAME": "Test Persona B"},
 ]
 
-EXPECTED_PLAYBOOKS = ["basic_chat", "meta_user", "meta_auto", "sub_router_user"]
+EXPECTED_PLAYBOOKS = ["basic_chat", "meta_user", "sub_router_user"]
 
 
 def request(method: str, path: str, data: dict = None, streaming: bool = False) -> dict:

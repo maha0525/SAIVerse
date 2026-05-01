@@ -10,6 +10,33 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.19 (2026-05-01) — Phase 3 翻訳前段の Playbook 整理
+
+**確定事項**:
+
+- 旧自律稼働プロトタイプ用 Playbook 群を一括削除 (`meta_auto`, `meta_auto_full`, `sub_router_auto`, `sub_perceive`, `sub_reaction`, `sub_finalize_auto`, `sub_execute_phase`, `sub_detect_situation_change`, `sub_generate_want`, `wait`)
+- テスト用 / 残骸 Playbook を削除 (`meta_websearch_demo`, `detail_recall_playbook`, `meta_agentic`, `agentic_chat_playbook`)
+- Spell 階層に置き換え可能な Playbook を削除し、対応するツールに `spell=True` を付与:
+  - `memory_recall_playbook` → `memory_recall_unified` Spell (既存)
+  - `web_search_step` → `source_web` Playbook (依存していた `deep_research` は `source_web` 呼び出しに切り替え)
+  - `uri_view` → `resolve_uri` Spell (新規 Spell 化)
+  - `send_email_to_user_playbook` → `send_email_to_user` Spell (新規 Spell 化)
+- `web_search_sub` (Phase C-2b 動作確認サンプル) は `phases/sub_line_playbook_sample.md` に内容を保存して本体 Playbook 削除
+- `run_meta_auto` 関数 (sea/runtime.py) と関連分岐 (sea/pulse_controller.py の auto-without-meta_playbook 分岐、`_choose_playbook` の `meta_auto` fallback) を削除。auto pulse は `meta_playbook` 必須化
+- `ConversationManager` (saiverse/conversation_manager.py) を no-op 化。Building 内 AI 自律会話は PulseScheduler + `track_autonomous` 経由に統一済みのため、旧プロトタイプの周回駆動は不要
+- 削除を反映してテスト類を整理 (`tests/sea/test_runtime_regression.py` の `run_meta_auto` テスト、`tests/test_subplay_line.py` の `web_search_sub` テスト、`test_fixtures/test_api.py` の `EXPECTED_PLAYBOOKS`)
+- `builtin_data/tools/detail_recall.py` を削除 (`detail_recall_playbook` 専用ツールだったため)
+
+**改訂理由**:
+
+Phase 3 残件「既存 Playbook の `context_profile` / `model_type` → `line: "main"|"sub"` 翻訳」に着手する前に、翻訳対象の総数を減らして作業を圧縮するため。Spell 階層 (`memory_recall_unified` / `resolve_uri` / `searxng_search` / `read_url_*` 等) が充実してきており、旧 Playbook で表現していたパターンの大半は Spell 単発呼び出しで賄えるようになっていた。
+
+加えて、新認知モデル (Track + メタ判断 Playbook) への完全移行に伴い、旧自律稼働プロトタイプ (`meta_auto` 経路 + `ConversationManager` の周回駆動) は呼ばれなくなっていた。コード側で残骸を抱え続けると Phase 3 翻訳作業時に「これは現役か旧版か」の判定が増えてミスが起きやすくなるため、翻訳前に旧経路を完全に断つ判断。
+
+DB 上の Playbook は 67 → 48 件。翻訳対象 (`context_profile` / `model_type` を使う Playbook) も同時に減る (旧プロトタイプ系が消えたため)。
+
+不変条件としての変更はなし。あくまで Phase 3 翻訳前のクリーンアップ。
+
 ### v0.18 (2026-05-01) — 自律先制と外部 alert のレース解消 (Phase 2.6)
 
 **確定事項**:

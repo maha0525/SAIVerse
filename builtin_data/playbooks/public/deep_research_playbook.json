@@ -70,9 +70,12 @@
         {
             "id": "exec_search",
             "type": "subplay",
-            "playbook": "web_search_step",
+            "playbook": "source_web",
             "args": {
-                "input": "## 調査トピック\n{research_topic}\n\n## 調査指示\n{research_plan.directives}\n\n## 検索のヒント\n{research_plan.search_hints}\n\n## 参考資料\n{reference_content}"
+                "objective": "{research_topic}",
+                "context_text": "## 調査指示\n{research_plan.directives}\n\n## 検索のヒント\n{research_plan.search_hints}\n\n## 参考資料\n{reference_content}",
+                "depth": "deep",
+                "max_iterations": 4
             },
             "propagate_output": true,
             "execution": "subagent",
@@ -83,7 +86,7 @@
             "id": "generate_report",
             "type": "llm",
             "context_profile": "conversation",
-            "action": "収集した調査結果を基に包括的なレポートを作成してください。結果はdocument_createツールでドキュメント化されます。\n\n## 調査計画（方針）\n{research_plan.directives}\n\n## 調査結果\n{research_findings}\n\nレポート要件:\n- 明確な構成（概要、本文、結論）\n- 各情報の出典URL明記\n- 事実と数字を優先した客観的な記述\n- 読みやすいMarkdown形式\n- 調査で得られた全ての重要事実を漏れなく含めること\n- 調査計画の方針に沿った構成にすること",
+            "action": "収集した調査結果を基に包括的なレポートを作成してください。結果はdocument_createツールでドキュメント化されます。\n\n## 調査計画（方針）\n{research_plan.directives}\n\n## 調査結果サマリー\n{research_result.summary}\n\n## 調査結果ステータス\n{research_result.status} (信頼度: {research_result.confidence})\n\n## 各発見の詳細\n{research_result.findings}\n\nレポート要件:\n- 明確な構成（概要、本文、結論）\n- 各情報の出典URL明記（findingsのsource_refを参照）\n- 事実と数字を優先した客観的な記述\n- 読みやすいMarkdown形式\n- 調査で得られた全ての重要事実を漏れなく含めること\n- 調査計画の方針に沿った構成にすること",
             "response_schema": {
                 "type": "object",
                 "properties": {

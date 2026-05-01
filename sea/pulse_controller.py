@@ -325,30 +325,28 @@ class PulseController:
         if request.is_resumption and request.original_prompt:
             user_input = self._build_resumption_prompt(request)
         
-        # Call SEARuntime with cancellation token and pulse_type
+        # All requests (user / schedule / auto) go through run_meta_user.
+        # auto pulse は必ず meta_playbook を指定して呼ばれる前提
+        # (track_autonomous など)。旧 run_meta_auto / meta_auto Playbook 経路は
+        # 2026-05-01 の認知モデル移行に伴い廃止済み。
         if request.type == "auto" and request.meta_playbook is None:
-            # Auto uses run_meta_auto which has no return value
-            self.sea_runtime.run_meta_auto(
-                persona=persona,
-                building_id=request.building_id,
-                occupants=self._get_occupants(request.building_id),
-                cancellation_token=request.cancellation_token,
-                pulse_type=request.type,
+            LOGGER.error(
+                "[PulseController] auto request requires meta_playbook (旧 run_meta_auto 経路は廃止)。persona=%s",
+                request.persona_id,
             )
             return []
-        else:
-            # User and schedule use run_meta_user
-            return self.sea_runtime.run_meta_user(
-                persona=persona,
-                user_input=user_input,
-                building_id=request.building_id,
-                metadata=request.metadata,
-                meta_playbook=request.meta_playbook,
-                args=request.args,
-                event_callback=request.event_callback,
-                cancellation_token=request.cancellation_token,
-                pulse_type=request.type,
-            )
+
+        return self.sea_runtime.run_meta_user(
+            persona=persona,
+            user_input=user_input,
+            building_id=request.building_id,
+            metadata=request.metadata,
+            meta_playbook=request.meta_playbook,
+            args=request.args,
+            event_callback=request.event_callback,
+            cancellation_token=request.cancellation_token,
+            pulse_type=request.type,
+        )
     
     def _build_resumption_prompt(self, request: ExecutionRequest) -> str:
         """Build prompt with resumption context."""
@@ -484,9 +482,9 @@ class PulseController:
 
         Args:
             persona_id, building_id: 対象。
-            meta_playbook: 指定された場合、_do_execute は run_meta_user 経路を
-                使ってこの Playbook を起動する (例: track_autonomous)。None の
-                場合は従来通り run_meta_auto (meta_auto playbook) を使う。
+            meta_playbook: auto pulse として起動する Playbook 名 (例:
+                track_autonomous)。2026-05-01 の認知モデル移行以降は **必須**。
+                None で呼ぶと _do_execute が ERROR ログを出して空配列を返す。
             args: meta_playbook に渡す引数。
         """
         request = ExecutionRequest(

@@ -143,4 +143,6 @@ def schema() -> ToolSchema:
             "required": ["user_id", "subject", "body"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="メール送信",
     )

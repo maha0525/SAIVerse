@@ -196,56 +196,6 @@ class SEARuntime:
 
         return result
 
-    def run_meta_auto(
-        self,
-        persona,
-        building_id: str,
-        occupants: List[str],
-        cancellation_token: Optional[CancellationToken] = None,
-        pulse_type: str = "auto",
-    ) -> None:
-        """Router -> subgraph -> think. For autonomous loop, no direct user output."""
-        # Check for cancellation before starting
-        if cancellation_token:
-            cancellation_token.raise_if_cancelled()
-
-        # Store pulse_type in persona for tools to access
-        persona._current_pulse_type = pulse_type
-
-        # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入
-        try:
-            from saiverse.dynamic_state import DynamicStateManager
-            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
-        except Exception:
-            LOGGER.exception("[dynamic_state] Event injection failed in run_meta_auto")
-
-        # 同Building内の他ペルソナ発言を自動取り込み
-        try:
-            from builtin_data.tools.get_building_messages import auto_ingest_building_messages
-            auto_ingest_building_messages(persona, self.manager)
-        except Exception:
-            LOGGER.exception("[auto_ingest] Failed in run_meta_auto")
-
-        # Update last pulse time for get_situation_snapshot
-        persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
-        playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
-        # Resolve Pulse-root entry-line from the running Track (typically the
-        # autonomous Track that SubLineScheduler just activated).
-        _root_role, _root_track_id = self._resolve_pulse_root_line(persona)
-        self._run_playbook(
-            playbook, persona, building_id, user_input=None,
-            auto_mode=True, record_history=True,
-            cancellation_token=cancellation_token, pulse_type=pulse_type,
-            pulse_line_role=_root_role,
-            pulse_line_track_id=_root_track_id,
-        )
-
-        # Post-auto metabolism check (no event_callback for auto pulses)
-        try:
-            self._maybe_run_metabolism(persona, building_id)
-        except Exception:
-            LOGGER.exception("[metabolism] Post-auto metabolism failed")
-
     # ---------------- helpers -----------------
     def _resolve_pulse_root_line(self, persona: Any) -> Tuple[Optional[str], Optional[str]]:
         """Resolve (entry_line_role, track_id) for the persona's current Pulse root.
@@ -2154,8 +2104,12 @@ class SEARuntime:
         }
 
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
-        """Resolve playbook by kind with DB→disk→fallback."""
-        candidates = ["meta_user" if kind == "user" else "meta_auto", "basic_chat"]
+        """Resolve playbook by kind with DB→disk→fallback.
+
+        kind="user" のみサポート。auto pulse は必ず meta_playbook 指定で
+        run_meta_user 経由で実行されるため、ここに来ることはない。
+        """
+        candidates = ["meta_user", "basic_chat"]
         for name in candidates:
             pb = self._load_playbook_for(name, persona, building_id)
             if pb:

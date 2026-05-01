@@ -2,7 +2,7 @@
 
 **ステータス**: 整理中 (旧 `persona_cognitive_model.md` v0.14 + `persona_action_tracks.md` v0.11 を再構造化中)
 **親 Intent**: なし (本セットが上位概念)
-**最終更新**: 2026-04-30
+**最終更新**: 2026-05-01
 
 ---
 
@@ -161,7 +161,8 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `track_waiting.json` Playbook | 🔲 | 未着手 | C-2 残件 |
 | `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
 | `exclude_pulse_id` 廃止 | 🔲 | 旧仕様コードは現存 | C-2 残件 |
-| 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | 🔲 | 未着手 | C-2 残件 |
+| Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 48 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化 (v0.19, 2026-05-01) | Phase 3 整理 |
+| 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | 🔲 | 未着手 (整理後の対象 Playbook 数を再カウント要) | C-2 残件 |
 | `context_profile` / `model_type` / `exclude_pulse_id` の完全削除 | 🔲 | 全 Playbook 翻訳後 | C-2 残件 |
 
 **詳細**: `phases/phase_3_lines_playbooks.md`

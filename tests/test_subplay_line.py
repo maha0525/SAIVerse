@@ -147,37 +147,6 @@ def test_run_playbook_line_main_calls_prepare_context():
 
 
 # ---------------------------------------------------------------------------
-# サンプル Playbook web_search_sub.json が読み込み可能で line=sub 起動向けに
-# 必要な output_schema を持つ
-# ---------------------------------------------------------------------------
-
-def test_web_search_sub_playbook_loads_with_report_to_main():
-    """サンプル web_search_sub Playbook が正しくロードでき report_to_main を含む。"""
-    import json
-    from pathlib import Path
-
-    pb_path = Path(__file__).resolve().parent.parent / "builtin_data" / "playbooks" / "public" / "web_search_sub.json"
-    assert pb_path.exists(), f"sample sub-line playbook missing: {pb_path}"
-    pb = json.loads(pb_path.read_text(encoding="utf-8"))
-    assert pb["name"] == "web_search_sub"
-    assert "report_to_main" in pb["output_schema"], (
-        "sub-line playbook must include 'report_to_main' in output_schema"
-    )
-
-
-def test_web_search_sub_playbook_summarize_node_targets_report_to_main():
-    """サマリ生成ノードの output_key が report_to_main になっている。"""
-    import json
-    from pathlib import Path
-
-    pb_path = Path(__file__).resolve().parent.parent / "builtin_data" / "playbooks" / "public" / "web_search_sub.json"
-    pb = json.loads(pb_path.read_text(encoding="utf-8"))
-    summarize = next((n for n in pb["nodes"] if n["id"] == "summarize_for_main"), None)
-    assert summarize is not None
-    assert summarize["output_key"] == "report_to_main"
-
-
-# ---------------------------------------------------------------------------
 # subplay node の line='sub' 完了処理: report_to_main を 2 経路で親に渡す
 #
 # (1) state["_messages"] への append (context_profile 不使用ノード向け)
