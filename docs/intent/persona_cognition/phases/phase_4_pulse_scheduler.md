@@ -1,7 +1,7 @@
 # Phase 4 — Pulse 階層 + Scheduler + メタ定期判断
 
 **親**: [../README.md](../README.md)
-**ステータス**: 🟡 約 40%
+**ステータス**: 🟡 約 60%
 **旧称**: Phase C-3 (Pulse スケジューラ / 定期実行)
 
 ---
@@ -27,17 +27,18 @@
 | 項目 | 状態 | 実装場所 |
 |------|------|---------|
 | `SubLineScheduler` クラス | ✅ | `saiverse/pulse_scheduler.py:76-127` |
-| `MainLineScheduler` クラス | 🔲 | コメント `Phase C-3c で別途実装予定` (`pulse_scheduler.py:18`) |
-| `AutonomyManager` の `MainLineScheduler` への移管 | 🔲 | 旧 `autonomy_manager.py` は現存 (レガシー残置) |
-| `MainLineScheduler` ↔ `SubLineScheduler` の連携 (TTL 接近で main 起動) | 🔲 | MainLineScheduler 実装後 |
+| `AutonomyManager` のメタレイヤー定期 tick タイマー化 | ✅ | `saiverse/autonomy_manager.py:228-` (Phase C-2 で純粋タイマー化済み、判断ロジックは meta_judgment Playbook に委譲) |
+| `MainLineScheduler` 相当の責務分割 (MainLine 起動経路 vs AutonomyManager) | 🟡 | 当初予定の MainLineScheduler 新設は再考。AutonomyManager + alert observer (MetaLayer) で大部分を担っており、純粋な「サブライン → メインライン昇格」専用ロジックが残っているかは精査が必要 |
+| `MainLineScheduler` ↔ `SubLineScheduler` の連携 (TTL 接近で main 起動) | 🔲 | 上記精査後に判断 |
 
 ### メタレイヤー定期実行 (Phase 4-c)
 
-| 項目 | 状態 |
-|------|------|
-| `MetaLayer.on_periodic_tick(persona_id, context)` 入口 | 🔲 |
-| `on_track_alert` と `on_periodic_tick` の判断ループ共通化 | 🔲 |
-| 環境変数 `SAIVERSE_META_LAYER_INTERVAL_SECONDS` (デフォルト 3000) | 🔲 |
+| 項目 | 状態 | 実装場所 |
+|------|------|---------|
+| `MetaLayer.on_periodic_tick(persona_id, context)` 入口 | ✅ | `saiverse/meta_layer.py:192-` |
+| `on_track_alert` と `on_periodic_tick` の判断ループ共通化 | ✅ | 両者とも `meta_judgment` Playbook を起動する共通経路に統一 |
+| 環境変数 `SAIVERSE_META_LAYER_INTERVAL_SECONDS` (デフォルト 3000) | 🟡 | `AutonomyManager.DEFAULT_INTERVAL_MINUTES = 50` (= 3000s)。env による上書きは未確認、要検証 |
+| メタ判断 Pulse の失敗時挙動 (LLM error / parse error / Lock 解放) | 🔲 | `_run_judgment` 失敗時のリカバリ経路が未定義。`waiting` Track のタイムアウト通知失敗時のフォールバックも空欄 |
 
 ### 7 制御点の実装場所明確化
 
@@ -109,20 +110,27 @@ class MetaLayer:
 
 メタレイヤーのプロンプトは両ケースで「現状を見て判断する」共通形式。専用の判断ロジックを増やさない。
 
-### `AutonomyManager` の責務再配置
+### `AutonomyManager` の現状と今後の方針
 
-既存 `saiverse/autonomy_manager.py` (872 行) は **MainLineScheduler** に再配置する:
+`saiverse/autonomy_manager.py` は Phase C-2 で **純粋なメタレイヤー定期 tick タイマー** に再構成済み (廃止ではなく再利用)。判断ロジックは `meta_judgment` Playbook に委譲済みで、AutonomyManager 自体は `MetaLayer.on_periodic_tick` を一定間隔で呼ぶだけ。
 
-- 既存の Decision/Execution 分離 → メインライン Pulse の起動経路に転用
-- 自律行動の意思決定ロジック → メタ判断 Playbook へ移植 (中身は Playbook で書く)
-- `pause_for_user` / `resume_from_user` → MainLineScheduler の優先度制御に統合 (alert 駆動と同じ枠組み)
+```
+[現状]
+AutonomyManager.start() → background loop
+  → MetaLayer.on_periodic_tick(persona_id) を DEFAULT_INTERVAL_MINUTES (=50) ごとに発火
+  → MetaLayer 内で meta_judgment Playbook 起動
+  → ペルソナが Track 操作を判断
+```
 
-**段階的移行**:
+**残作業**:
 
-1. MainLineScheduler を新設して動作確認
-2. AutonomyManager の Decision/Execution ロジックを段階的に移植
-3. AutonomyManager を空殻化 (deprecated 警告のみ)
-4. すべての参照を MainLineScheduler に切り替え後、削除
+- `pause_for_user` / `resume_from_user` の挙動を alert 経路と整合させる (ユーザー割り込み駆動の Track 切り替えが alert で表現できているか検証)
+- env `SAIVERSE_META_LAYER_INTERVAL_SECONDS` で interval 上書きできるようにする (現状は引数経由のみ)
+- 当初想定していた「MainLineScheduler 新設して AutonomyManager を削除」は不要 (再利用方針に修正)
+
+**未解決の論点**:
+
+「メインライン Pulse の起動」と「メタ判断 Pulse の起動」を区別する必要があるか？ 現状はメタ判断 Pulse 1 種類だけだが、Phase 4-d で `MainLineScheduler` 相当の機構が要るかは要再検討。要らないなら AutonomyManager + alert observer で完結する。
 
 ### `model_configs.py` への `cache_ttl_seconds` 追加
 
@@ -170,10 +178,12 @@ def detect_pulse_pattern(default_model: str, lightweight_model: str) -> str:
 |-----------|------|------|
 | 4-a (旧 C-3a) | Handler に v0.10 拡張属性追加 + AutonomousTrackHandler 新設 + track_autonomous.json | ✅ 完了 |
 | 4-b (旧 C-3b) | SubLineScheduler 新設 (まずこちらを動かす、メインラインは手動起動でも OK) | ✅ 完了 |
-| 4-c (旧 C-3c) | AutonomyManager → MainLineScheduler 再配置 + メタ判断 Playbook 新設 | 🔲 未着手 |
-| 4-d (旧 C-3d) | 既存 ConversationManager との関係整理 | 🔲 未着手 |
+| 4-c (旧 C-3c) | AutonomyManager のタイマー化 + `meta_judgment` Playbook + `on_periodic_tick` 入口 | ✅ 完了 (Phase C-2 で実施済み) |
+| 4-d (旧 C-3d) | 既存 ConversationManager との関係整理 | ✅ 完了 (2026-05-01 で no-op 化) |
+| 4-e (新規) | メタ判断 Pulse の失敗時リカバリ + `pause_for_user` / `resume_from_user` の alert 経路統合 | 🔲 未着手 |
+| 4-f (新規) | `MainLineScheduler` 相当の機構が必要かの精査 + 必要なら設計 | 🔲 未着手 |
 
-最小実装としては 4-a + 4-b で「自律 Track が立ったら勝手に走り続ける」状態は作れる (= 既に達成)。4-c でメインライン定期実行が乗る。
+最小実装としては 4-a + 4-b + 4-c で「自律 Track が立ったら勝手に走り続け、メタ判断が定期的に走る」状態は既に達成。残りは 4-e のリカバリ整備と 4-f の設計判断。
 
 ---
 
@@ -181,10 +191,13 @@ def detect_pulse_pattern(default_model: str, lightweight_model: str) -> str:
 
 - [x] SubLineScheduler が動作し、自律 Track が立ったら定期的に Pulse が走る
 - [x] Handler に Pulse 制御属性が揃い、metadata 経由で個別調整可能
-- [ ] MainLineScheduler が動作し、`SAIVERSE_META_LAYER_INTERVAL_SECONDS` 経過で `on_periodic_tick` が呼ばれる
-- [ ] AutonomyManager のロジックが完全に MainLineScheduler に移植され、autonomy_manager.py が削除される
+- [x] AutonomyManager がメタレイヤー定期 tick タイマーとして動作し、`on_periodic_tick` が呼ばれる
+- [x] ConversationManager と Scheduler 群の責務が整理され、重複や競合がない (ConversationManager は no-op 化)
+- [ ] env `SAIVERSE_META_LAYER_INTERVAL_SECONDS` で interval 上書き可能
+- [ ] メタ判断 Pulse の失敗時リカバリ (LLM error / parse error / Lock 解放 / Track 状態整合) が定義され、テスト済み
+- [ ] `pause_for_user` / `resume_from_user` の挙動が alert 経路で表現可能であることが検証済み
 - [ ] Pattern A/B/C が自動推定され、ペルソナ作成時に metadata に書き込まれる
-- [ ] ConversationManager と Scheduler 群の責務が整理され、重複や競合がない
+- [ ] 「MainLineScheduler 相当が必要か」の精査結果に基づく対応が完了
 
 ---
 

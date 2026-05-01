@@ -66,6 +66,30 @@
 | 既存 `recall_conversation_with` の段階的廃止 | 🔲 |
 | 移行期間中の既存実装と新実装の共存 | 🔲 |
 
+### Track ライフサイクル補完 (新規)
+
+`track_social.json` 着手の前提として整理が必要。永続 Track と単発 Track の生成・終了・再開条件は定義済みだが、以下が空欄:
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| ペルソナ削除時の Track 始末 | 🔲 | 自分の Track 全削除 + 他者の social/user_conversation Track のうち相手参照が破綻するものの扱い |
+| Building 移動時の social Track 継続条件 | 🔲 | 別 Building に移動した相手との social Track は dormant にすべきか保持か |
+| ユーザーが複数アカウントで合流した場合 | 🔲 | 同一ユーザーが別 Building 経由で再合流するケースの user_conversation Track 統合可否 |
+| Building 削除時の Track 影響 | 🔲 | Building scope の Track が無いか確認、あれば移行ロジック |
+
+**着手タイミング**: `track_social.json` 設計と一体で進める。社交 Track が現実的に運用される時に必ず踏むケースを先に詰める。
+
+### Track 忘却の自動化 (新規)
+
+不変条件 5「古い Track の忘却」を担保する仕組みが現状空欄。`SAIVERSE_TRACK_MAX_DORMANT_COUNT` / `SAIVERSE_TRACK_FORGET_AFTER_DAYS` (`03_data_model.md:457-458`) は暫定値として定義済みだが、自動 dormant → forgotten の遷移ロジックがどこにも実装されていない。
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| Handler tick 内で dormant Track の経過時間判定 + forgotten 遷移 | 🔲 | track_handlers/* で共通化、または専用 ForgetterHandler 検討 |
+| forgotten Track のメタ判断プロンプトでの扱い (除外 or 名前のみ提示) | 🔲 | 完全削除はしない (不変条件 5)、再開可能にしておく |
+| dormant Track 数が `MAX_DORMANT_COUNT` 超過時の優先 forget 順 | 🔲 | LRU? 最終 alert からの経過時間? |
+| メタ判断側からの明示的 forget スペル | 🔲 | ペルソナが「この Track はもう忘れていい」と意思決定できる経路 |
+
 ---
 
 ## 残タスクの詳細

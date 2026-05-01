@@ -60,10 +60,10 @@ docs/intent/persona_cognition/
    action_tracks / notes / track_handlers / track_* ツール群
    ↓
 [Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 60%
-   line: main/sub フィールド + 各 Track 種別の Playbook 整備
+   line: main/sub フィールド + 各 Track 種別の Playbook 整備 + 入れ子サブライン Spell 機構
    ↓
-[Phase 4] Pulse 階層 + Scheduler + メタ定期判断  🟡 約 40%
-   MainLineScheduler / SubLineScheduler / on_periodic_tick
+[Phase 4] Pulse 階層 + Scheduler + メタ定期判断  🟡 約 60%
+   AutonomyManager (定期 tick タイマー) / SubLineScheduler / on_periodic_tick / 失敗時リカバリ
    ↓
 [Phase 5] 自律稼働の本格化                🔲 未着手
    Handler tick / 内部 alert / Track パラメータ / Schedule 統合
@@ -161,8 +161,9 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `track_waiting.json` Playbook | 🔲 | 未着手 | C-2 残件 |
 | `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
 | `exclude_pulse_id` 廃止 | 🔲 | 旧仕様コードは現存 | C-2 残件 |
-| Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 48 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化 (v0.19, 2026-05-01) | Phase 3 整理 |
-| 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | 🔲 | 未着手 (整理後の対象 Playbook 数を再カウント要) | C-2 残件 |
+| Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
+| 入れ子サブライン Spell (`/run_playbook` + 深さ 4 階層 + report_to_main 昇り経路) | 🔲 | intent doc 起草が前段 | Phase 3 新規 |
+| 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | 🔲 | 未着手 (対象: cp 33 件, mt 12 件) | C-2 残件 |
 | `context_profile` / `model_type` / `exclude_pulse_id` の完全削除 | 🔲 | 全 Playbook 翻訳後 | C-2 残件 |
 
 **詳細**: `phases/phase_3_lines_playbooks.md`
@@ -178,13 +179,16 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | Handler に `pulse_completion_notice` / `post_complete_behavior` 属性 | ✅ | `track_handlers/social_track_handler.py:48`, `autonomous_track_handler.py:43` | C-3 |
 | Handler に `default_pulse_interval` / `default_max_consecutive_pulses` / `default_subline_pulse_interval` | ✅ | `autonomous_track_handler.py:44-46` | C-3 |
 | `SubLineScheduler` クラス | ✅ | `saiverse/pulse_scheduler.py:76-127` | C-3b |
-| `MainLineScheduler` クラス | 🔲 | コメント `Phase C-3c で別途実装予定` (`pulse_scheduler.py:18`) | C-3c |
-| `MetaLayer.on_periodic_tick` (定期実行入口) | 🔲 | 未着手 | C-3 |
+| `AutonomyManager` をメタレイヤー定期 tick タイマー化 (廃止ではなく再利用) | ✅ | `saiverse/autonomy_manager.py` (Phase C-2 で純粋タイマー化済み) | C-3c |
+| `MetaLayer.on_periodic_tick` (定期実行入口) | ✅ | `saiverse/meta_layer.py:192-` | C-3 |
 | `MetaLayer` の per-persona 直列化 Lock (`on_track_alert` / `on_periodic_tick`) | ✅ | `saiverse/meta_layer.py:__init__`, `_get_lock` (v0.16, 2026-04-30) | handoff Part 1 |
 | `meta_judgment_log` スキーマ v0.15 整合化 + 書き込み + 動的注入 | ✅ | `database/models.py`, `saiverse/meta_layer.py`, `sea/runtime_graph.py`, `sea/runtime_llm.py`, `sea/pulse_context.py` (v0.16, 2026-04-30) | handoff Part 2 |
 | SAIMemory `messages.pulse_id` カラム化 (Phase 2.5) | ✅ | `sai_memory/memory/storage.py`, `saiverse_memory/adapter.py`, `sea/runtime.py` (v0.17, 2026-05-01) | Phase 2.5 |
 | 自律先制と外部 alert のレース解消 (Phase 2.6) | ✅ | `saiverse/track_manager.py`, `saiverse/meta_layer.py`, `meta_judgment.json` (v0.18, 2026-05-01) | Phase 2.6 |
-| `AutonomyManager` の `MainLineScheduler` への移管 | 🔲 | 旧 `autonomy_manager.py` は現存 (レガシー残置) | C-3c |
+| メタ判断 Pulse の失敗時リカバリ (LLM error / parse error / Lock 解放) | 🔲 | 未着手 | Phase 4 新規 |
+| `pause_for_user` / `resume_from_user` の alert 経路統合検証 | 🔲 | AutonomyManager 残作業 | Phase 4 新規 |
+| env `SAIVERSE_META_LAYER_INTERVAL_SECONDS` で interval 上書き | 🟡 | コード上 `DEFAULT_INTERVAL_MINUTES = 50` のみ、env 連動は未確認 | C-3 |
+| 「`MainLineScheduler` 相当が必要か」の精査 | 🔲 | AutonomyManager で十分か再判断 | Phase 4 新規 |
 | 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | 未着手 | C-3 |
 | 7 制御点の実装場所明確化 (action_tracks.metadata + 環境変数 + Handler 属性 + モデル設定) | 🔲 | 部分的に Handler 属性のみ実装、残りは未着手 | C-3 |
 
@@ -207,6 +211,8 @@ Handler tick による内部 alert + Track パラメータ機構 + ScheduleManag
 | `PerceptualHandler` 雛形 (SNS 経過時間等の知覚起因 Track) | 🔲 | Intent B v0.7 |
 | 既存 ScheduleManager の Track metadata.schedules 形式への並走対応 | 🔲 | Intent B v0.7 |
 | ペルソナ再会機能の汎用化 (Person Note 自動開封 + alert 化に統合) | 🔲 | C-1 後半相当 |
+| **Track ライフサイクル補完** (ペルソナ削除 / Building 移動 / 複数アカウント合流時の挙動) | 🔲 | Phase 5 新規 (track_social 着手前提) |
+| **Track 忘却の自動化** (dormant → forgotten 遷移 / `MAX_DORMANT_COUNT` 超過時の優先 forget) | 🔲 | Phase 5 新規 (不変条件 5 担保) |
 
 **詳細**: `phases/phase_5_autonomy.md`
 

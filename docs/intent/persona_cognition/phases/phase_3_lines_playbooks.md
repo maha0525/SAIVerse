@@ -33,9 +33,26 @@
 | `meta_judgment_dispatch.py` 経由パス | ✅ | (Phase 1.2 マージ済み) |
 | `track_user_conversation.json` | ✅ | `builtin_data/playbooks/public/` |
 | `track_autonomous.json` | ✅ | `builtin_data/playbooks/public/` |
-| `track_social.json` | 🔲 | 未着手 |
+| `track_social.json` | 🔲 | 未着手 (Track ライフサイクル補完が前提、Phase 5 タスク参照) |
 | `track_external.json` | 🔲 | 未着手 |
 | `track_waiting.json` | 🔲 | 未着手 |
+
+### 入れ子サブライン Spell 機構 (Phase 3 新規)
+
+メインライン (or 親サブライン) の Playbook から `/run_playbook` Spell 経由で別 Playbook をサブラインとして起動できるようにする。Playbook グラフ内の `sub_play` ノードでなく、**Spell loop の中から動的に Playbook を呼び出す**経路を新設する。
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| `/run_playbook` Spell 仕様確定 | 🔲 | 引数は Playbook 名のみ。Playbook 引数は呼ばれた側で構造化出力で決める (旧 router 踏襲) |
+| Spell loop → Playbook 起動の橋渡し runtime | 🔲 | sub_play ノード経路と共通化できる部分を切り出す |
+| 入れ子深さ制限 (上限 4 階層) | 🔲 | `_line_stack` の深さで判定、超過時は ERROR + skip |
+| `report_to_main` のスタック昇り経路 | 🔲 | 子サブラインの結果を親サブライン → さらに上位 → 最終的にメインラインまで集約 |
+| line_id の親子関係 + cancellation 伝搬 | 🔲 | 親キャンセル時に子サブラインも止める |
+| intent doc 起草 | 🔲 | 設計を先に固める (handoff_2026-05-01 後) |
+
+**動機**: `track_user_conversation` 等のメインライン Playbook が `meta_user` から各種サブ Playbook を呼んでいた経路を、Spell + 入れ子サブラインで再構築する。これにより `sub_router_user` のような分岐 Playbook が不要になり、ペルソナの意思決定 (どの Playbook を呼ぶか) が Playbook グラフではなくメインライン LLM 側に乗る。
+
+**Phase 4 着手前に必須**: MainLineScheduler が Playbook を呼ぶ際の入口がここに依存する可能性が高い。
 
 ### 旧 Playbook の翻訳
 
