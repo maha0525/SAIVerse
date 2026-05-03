@@ -80,6 +80,10 @@ class ExecutionRequest:
     metadata: Optional[Dict[str, Any]] = None
     meta_playbook: Optional[str] = None
     args: Optional[Dict[str, Any]] = None  # Arguments for meta playbook
+    # UI-triggered pre-spells executed before the first LLM call. Each entry is
+    # a Spell invocation string (e.g. '/run_playbook(name="memory_research")').
+    # See docs/intent/persona_cognition/nested_subline_spell.md §13.
+    pre_spells: Optional[List[str]] = None
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     pulse_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
@@ -346,6 +350,7 @@ class PulseController:
             event_callback=request.event_callback,
             cancellation_token=request.cancellation_token,
             pulse_type=request.type,
+            pre_spells=request.pre_spells,
         )
     
     def _build_resumption_prompt(self, request: ExecutionRequest) -> str:
@@ -436,6 +441,7 @@ class PulseController:
         meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        pre_spells: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """Submit a user input request."""
         request = ExecutionRequest(
@@ -446,6 +452,7 @@ class PulseController:
             metadata=metadata,
             meta_playbook=meta_playbook,
             args=args,
+            pre_spells=pre_spells,
             event_callback=event_callback,
         )
         return self.submit(request)

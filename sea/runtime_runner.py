@@ -109,6 +109,7 @@ def run_playbook(
     line: str = "main",
     pulse_line_role: Optional[str] = None,
     pulse_line_track_id: Optional[str] = None,
+    pre_spells: Optional[List[str]] = None,
 ) -> List[str]:
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
@@ -119,6 +120,12 @@ def run_playbook(
         LOGGER.debug("[sea] _run_playbook received args: %s", list(initial_params.keys()))
         # Store args for compile_with_langgraph to resolve via input_schema
         parent["_args"] = dict(initial_params)
+
+    # UI-triggered pre-spells: forwarded into initial_state so lg_llm_node
+    # can execute them before the first LLM call. See nested_subline_spell.md §13.
+    if pre_spells:
+        parent["_pre_spells"] = list(pre_spells)
+        LOGGER.info("[sea] _run_playbook received pre_spells: %s", pre_spells)
     LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
     if "_pulse_id" in parent:
         pulse_id = str(parent["_pulse_id"])

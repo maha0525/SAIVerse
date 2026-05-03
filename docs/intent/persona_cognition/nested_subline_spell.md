@@ -1,7 +1,7 @@
 # Intent: 入れ子サブライン Spell 機構
 
 **親 Intent**: [README.md](README.md)
-**ステータス**: 起草中 (v0.1, 2026-05-01)
+**ステータス**: 起草中 (v0.2, 2026-05-02)
 **位置付け**: Phase 3 残件 (Phase 4 着手前に必須)
 
 ---
@@ -435,7 +435,114 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 ---
 
-## 13. Phase 3 タスクへのマッピング
+## 13. UI からの Playbook 起動 (pre_spells 機構)
+
+### 動機
+
+旧 `meta_user_manual.json` は「ユーザーが UI で選んだ Playbook を強制実行する」経路として、`auto_route` をスキップして `selected_playbook` を直接 `exec` する設計だった。これにより **メインライン LLM ラウンドは 1 回 + サブライン内コール** で旧 router 系より軽かった。
+
+新アーキ (本 intent doc 本体) は「メインライン LLM が発話の中で `/run_playbook` Spell を呼ぶ」を中心に据えるため、UI からの即時実行を「LLM への助言 (`<system>` タグ付き user メッセージ)」で表現すると:
+
+```
+メインライン LLM 1 回目: "ユーザー要望を読んで /run_playbook を呼ぶ" を発話
+  → Spell loop が /run_playbook 検出 → サブライン実行 (N 回)
+  → メインライン LLM 2 回目: 結果を踏まえて応答
+```
+
+旧経路に対して **メインライン LLM ラウンドが +1 回**増える。「絶対に実行できる」かどうかとは別次元で、コスト面で旧 `meta_user_manual` の代替にならない。
+
+### 設計
+
+メインライン Pulse の起動引数として `pre_spells: List[str]` を受け取り、Spell loop の入口で **メインライン LLM の最初のラウンド「前」に Spell を機械的に発火**する。
+
+```
+[ユーザー送信 + UI 選択]
+  → track_user_conversation 起動 (pre_spells=["/run_playbook(name=memory_research)"])
+  → Spell loop 入口: pre_spells を LLM 介さず実行
+    → /run_playbook(name=memory_research) → サブライン Pulse 起動
+      → サブライン Playbook 実行 (元から N 回)
+      → report_to_parent が親 messages に append
+  → メインライン LLM 1 回目: 既に結果が入った状態で応答生成 ← ここで終わり
+```
+
+メインライン LLM ラウンドが旧 `meta_user_manual` と同じ 1 回に揃う。
+
+### なぜこの形にするか
+
+- **既存 Spell loop の機構 (report_to_parent / media transport / line_role 自動分離) をそのまま流用できる**: 新規ランタイム経路は不要、`tools/run_playbook.py` を Spell loop の入口で直接呼べばいい
+- **「ペルソナが意思決定する」哲学を完全には壊さない**: Spell 結果がメインライン LLM に流入するという形は、LLM が自分で `/run_playbook` を呼んだ場合と同形。`<system>` タグ付き user メッセージで「ユーザー要望により実行しました」と添えれば、ペルソナから見ても文脈が自然に繋がる
+- **「強制実行」の哲学的歪みを最小化**: ペルソナ側の意思決定ノードはそのまま残り、結果を踏まえて応答する自由は保たれる。「LLM 判断をバイパスして機械的に実行」する範囲は Spell 1 回分だけ
+
+### `pre_spells` の構文
+
+文字列リスト。各要素は Spell 構文と同じ形 (`/spell_name(arg1=value1, ...)` または `/spell_name`)。
+
+```json
+{
+  "pre_spells": [
+    "/run_playbook(name=\"memory_research\")"
+  ]
+}
+```
+
+- 複数 Spell を並べた場合は **Spell loop の通常実行と同じ並列 / 直列規則**に従う (現状: 同ラウンドの spell を並列 `asyncio.gather`)
+- 解析失敗 (`/spell_name(...)` パース不可) は WARNING ログ + 該当エントリを skip。pulse は通常起動を続行
+- 個々の Spell 実行失敗は通常の Spell loop と同じく、エラー文字列が user message として親 context に注入される
+
+### `<system>` タグ付き user メッセージの併用
+
+UI が `pre_spells` を送る時、合わせて user メッセージ側に文脈ヒントを埋めると自然:
+
+```
+<system>このターン、ユーザーの選択により memory_research を事前実行しました。
+結果を踏まえて返答してください。</system>
+{ユーザーが入力した本文}
+```
+
+これでペルソナから見ると「ユーザーが要望を出し、自分が応じて Spell を呼び、結果を踏まえて応答する」という連続的な流れに見える。`<system>` タグの付与は UI 側 or chat API 側の責務とする (実装時に判断)。
+
+### スコープと適用範囲
+
+- 本機構は **メインライン Pulse の起動時にだけ** 使える (= ユーザーターン応答の直前)
+- 自律 Pulse (`track_autonomous` 等) には適用しない (= ユーザー UI 操作起点でないため)
+- サブライン Pulse 内の `pre_spells` 指定は不要 (サブラインは Playbook グラフで完全制御されているため)
+
+### 実装スコープ (概要)
+
+詳細は実装着手時に handoff doc に展開する。
+
+1. **runtime 側**
+   - `sea/runtime_llm.py` の Spell loop entry に `pre_spells: Optional[List[str]] = None` 引数を追加
+   - LLM 1 ラウンド目を回す前に pre_spells を Spell parser に通して実行 → 結果を `messages` に append
+   - 通常の Spell loop と同じ経路 (`_run_spell_tool_async` / `_run_spell_loop`) を使う
+2. **API 側**
+   - `/api/chat` リクエストに `pre_spells: Optional[List[str]]` を追加
+   - `pulse_controller` 経由で track_user_conversation の起動引数に伝播
+3. **UI 側**
+   - `ToolModeSelector.tsx` の `TOOL_MODES` ハードコード列挙を撤去 (既存 TODO 解消)
+   - `/api/config/playbooks?router_callable=true` で動的に Playbook 一覧を取得
+   - 選択時、chat 送信ペイロードに `pre_spells: ["/run_playbook(name=...)"]` を含める
+   - 「自動 (= pre_spells なし)」モードも残す (= 通常の track_user_conversation)
+4. **旧経路の廃止**
+   - `meta_user_manual.json` Playbook を deprecated → 削除
+   - `meta_user.json` / `sub_router_user.json` の deprecated 化と一体実施 (§12 のステップ 5-6)
+
+### 失敗時の挙動
+
+| ケース | 挙動 |
+|---|---|
+| `pre_spells` 構文不正 | WARNING ログ、該当エントリ skip、pulse は通常起動 |
+| `/run_playbook(name="存在しない")` | 通常の Spell エラー経路 (エラー文字列が user message に注入)、メインライン LLM がそれを見て応答 |
+| `router_callable=false` の Playbook 指定 | 同上 (`run_playbook` Spell 内のチェックで弾かれる) |
+| 深さ超過 | メインライン起動時の pre_spells は深さ 0 → 1 への遷移なので、原理的に発生しない |
+
+### Phase との位置付け
+
+Phase 3 の §12 段階移行ステップ 5-6 (`track_user_conversation` 書き換え + `meta_user` / `meta_user_manual` 廃止) と一体で実施。`/run_playbook` Spell 本体 (v0.24) が完成しているので、追加で必要なのは **Spell loop 入口の pre_spells 引数受け入れ** + **API / UI 配線**のみ。
+
+---
+
+## 14. Phase 3 タスクへのマッピング
 
 [phase_3_lines_playbooks.md](phases/phase_3_lines_playbooks.md) §"入れ子サブライン Spell 機構" に追加した項目との対応:
 
@@ -446,6 +553,7 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 | 入れ子深さ制限 (上限 4 階層) | §6 |
 | `report_to_main` → `report_to_parent` リネームと伝搬経路 | §7 |
 | line_id の親子関係 + cancellation 伝搬 | §11 |
+| UI からの Playbook 起動 (pre_spells 機構) | §13 |
 
 実装タスクとしては §12 の段階移行ステップ通りに進める。
 

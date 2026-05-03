@@ -113,6 +113,7 @@ class SEARuntime:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
+        pre_spells: Optional[List[str]] = None,
     ) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
         # Check for cancellation before starting
@@ -179,6 +180,7 @@ class SEARuntime:
             initial_params=effective_args if effective_args else None,
             pulse_line_role=_root_role,
             pulse_line_track_id=_root_track_id,
+            pre_spells=pre_spells,
         )
 
         # Post-response metabolism check
@@ -245,6 +247,7 @@ class SEARuntime:
         line: str = "main",
         pulse_line_role: Optional[str] = None,
         pulse_line_track_id: Optional[str] = None,
+        pre_spells: Optional[List[str]] = None,
     ) -> List[str]:
         return run_playbook(
             self,
@@ -263,6 +266,7 @@ class SEARuntime:
             line=line,
             pulse_line_role=pulse_line_role,
             pulse_line_track_id=pulse_line_track_id,
+            pre_spells=pre_spells,
         )
 
     # LangGraph compile wrapper -----------------------------------------

@@ -1,46 +1,37 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, ReactNode } from 'react';
-import { ChevronDown, Wrench, Unplug, Hammer, MessageSquare } from 'lucide-react';
+import { ChevronDown, Wrench, Hammer } from 'lucide-react';
 import styles from './ToolModeSelector.module.css';
 
+const ICON_SIZE = 14;
+
+// Sentinel value for "ツール指定" mode. Real Playbook names are sent via
+// `pre_spells` in the chat payload; this string is only an internal UI mode
+// identifier (not a Playbook name on the server).
+//
+// See: docs/intent/persona_cognition/nested_subline_spell.md §13
+export const TOOL_MODE_SELECTED = 'tool_selected';
+
 interface ToolMode {
-    id: string;
+    id: string | null;
     shortLabel: string;
     icon: ReactNode;
     description: string;
 }
 
-const ICON_SIZE = 14;
-
-// TODO: TOOL_MODES のハードコード列挙はやめて /api/config/playbooks の動的列挙に切り替えたい。
-//       Playbook 整理 (2026-05-01) で meta_agentic / meta_websearch_demo を削除したのに伴い
-//       本リストからも除外したが、ハードコードである根本問題は残っている。
-//       新しい Playbook を UI に出す必要が出るたびに TODO の重みが増える想定。
 const TOOL_MODES: ToolMode[] = [
     {
-        id: 'meta_user',
+        id: null,
         shortLabel: '自動',
         icon: <Wrench size={ICON_SIZE} />,
-        description: '応答前に自動で一度だけツールを使用できます',
+        description: 'ペルソナがツール利用を自分で判断します',
     },
     {
-        id: 'meta_simple_speak',
-        shortLabel: 'なし',
-        icon: <Unplug size={ICON_SIZE} />,
-        description: 'ツールを利用しません',
-    },
-    {
-        id: 'meta_user_manual',
+        id: TOOL_MODE_SELECTED,
         shortLabel: 'ツール指定',
         icon: <Hammer size={ICON_SIZE} />,
-        description: 'ユーザーが選んだツールを必ず使います',
-    },
-    {
-        id: 'track_user_conversation',
-        shortLabel: '対ユーザー Track',
-        icon: <MessageSquare size={ICON_SIZE} />,
-        description: '[Phase C-2d] 対ユーザー会話 Track メインライン (応答 + Track 操作スペル)',
+        description: '応答前に指定したツールを必ず実行します',
     },
 ];
 
@@ -70,10 +61,14 @@ export default function ToolModeSelector({
     const containerRef = useRef<HTMLDivElement>(null);
     const subContainerRef = useRef<HTMLDivElement>(null);
 
-    // Find current mode (fallback to meta_user)
-    const currentMode = TOOL_MODES.find(m => m.id === selectedPlaybook) || TOOL_MODES[0];
+    // Treat anything other than the sentinel as "auto" — legacy values
+    // (meta_user / meta_user_manual / meta_simple_speak) persisted on the
+    // server are silently mapped here so the UI doesn't get stuck.
+    const normalizedMode: string | null =
+        selectedPlaybook === TOOL_MODE_SELECTED ? TOOL_MODE_SELECTED : null;
 
-    // Click-outside handler for main popover
+    const currentMode = TOOL_MODES.find(m => m.id === normalizedMode) || TOOL_MODES[0];
+
     useEffect(() => {
         if (!isOpen) return;
         const handler = (e: MouseEvent) => {
@@ -85,7 +80,6 @@ export default function ToolModeSelector({
         return () => document.removeEventListener('mousedown', handler);
     }, [isOpen]);
 
-    // Click-outside handler for sub-playbook popover
     useEffect(() => {
         if (!isSubOpen) return;
         const handler = (e: MouseEvent) => {
@@ -97,29 +91,31 @@ export default function ToolModeSelector({
         return () => document.removeEventListener('mousedown', handler);
     }, [isSubOpen]);
 
-    // Fetch sub-playbook options when meta_user_manual is selected
+    // Pull the list of router_callable Playbooks dynamically when "ツール指定" is active.
     const fetchSubPlaybooks = useCallback(async () => {
         if (subPlaybooksLoaded) return;
         try {
-            const res = await fetch('/api/config/playbooks/meta_user_manual/params');
+            const res = await fetch('/api/config/playbooks?router_callable=true');
             if (res.ok) {
                 const data = await res.json();
-                const selectedParam = data.params?.find((p: any) => p.name === 'selected_playbook');
-                if (selectedParam?.resolved_options) {
-                    setSubPlaybooks(selectedParam.resolved_options);
+                if (Array.isArray(data)) {
+                    setSubPlaybooks(data.map((p: any) => ({
+                        value: p.id,
+                        label: p.name || p.id,
+                    })));
                 }
             }
         } catch (e) {
-            console.error("Failed to fetch sub-playbook options", e);
+            console.error("Failed to fetch router_callable playbooks", e);
         }
         setSubPlaybooksLoaded(true);
     }, [subPlaybooksLoaded]);
 
     useEffect(() => {
-        if (selectedPlaybook === 'meta_user_manual') {
+        if (normalizedMode === TOOL_MODE_SELECTED) {
             fetchSubPlaybooks();
         }
-    }, [selectedPlaybook, fetchSubPlaybooks]);
+    }, [normalizedMode, fetchSubPlaybooks]);
 
     const syncToServer = async (playbookId: string | null, params: Record<string, any>) => {
         try {
@@ -138,8 +134,7 @@ export default function ToolModeSelector({
         const newParams: Record<string, any> = {};
         onPlaybookArgsChange(newParams);
         setIsOpen(false);
-        // Reset sub-playbook cache when switching modes
-        if (mode.id !== 'meta_user_manual') {
+        if (mode.id !== TOOL_MODE_SELECTED) {
             setSubPlaybooksLoaded(false);
             setSubPlaybooks([]);
         }
@@ -160,7 +155,6 @@ export default function ToolModeSelector({
 
     return (
         <div className={styles.container}>
-            {/* Main tool mode button */}
             <div ref={containerRef} style={{ position: 'relative' }}>
                 <button
                     className={`${styles.toolModeBtn} ${isOpen ? styles.toolModeBtnActive : ''}`}
@@ -179,14 +173,14 @@ export default function ToolModeSelector({
                         </div>
                         {TOOL_MODES.map(mode => (
                             <button
-                                key={mode.id}
-                                className={`${styles.modeOption} ${mode.id === selectedPlaybook ? styles.modeOptionSelected : ''}`}
+                                key={mode.id ?? 'auto'}
+                                className={`${styles.modeOption} ${mode.id === normalizedMode ? styles.modeOptionSelected : ''}`}
                                 onClick={() => handleModeChange(mode)}
                             >
                                 <div className={styles.modeOptionLabel}>
                                     {mode.icon}
                                     <span>{mode.shortLabel}</span>
-                                    {mode.id === selectedPlaybook && (
+                                    {mode.id === normalizedMode && (
                                         <span className={styles.modeOptionCheck}>&#10003;</span>
                                     )}
                                 </div>
@@ -199,8 +193,7 @@ export default function ToolModeSelector({
                 )}
             </div>
 
-            {/* Sub-playbook button (only when meta_user_manual is selected) */}
-            {selectedPlaybook === 'meta_user_manual' && (
+            {normalizedMode === TOOL_MODE_SELECTED && (
                 <div ref={subContainerRef} style={{ position: 'relative' }}>
                     <button
                         className={styles.subPlaybookBtn}
@@ -217,7 +210,7 @@ export default function ToolModeSelector({
                                 className={`${styles.subOption} ${styles.subNone} ${!selectedSubPlaybook ? styles.subOptionSelected : ''}`}
                                 onClick={() => handleSubPlaybookChange(null)}
                             >
-                                （自動判定）
+                                （未選択）
                             </button>
                             {subPlaybooks.map(opt => (
                                 <button

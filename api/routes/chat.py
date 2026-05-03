@@ -315,6 +315,11 @@ class SendMessageRequest(BaseModel):
     meta_playbook: Optional[str] = None
     args: Optional[Dict[str, Any]] = None  # Arguments for meta playbook
     metadata: Optional[Dict[str, Any]] = None
+    # UI-triggered pre-spells: list of Spell invocation strings executed before the
+    # first LLM call (e.g. ['/run_playbook(name="memory_research")']). Replaces the
+    # deprecated meta_user_manual route. See docs/intent/persona_cognition/
+    # nested_subline_spell.md §13.
+    pre_spells: Optional[List[str]] = None
 
 def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
     """Decode and save base64 attachment."""
@@ -612,6 +617,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 meta_playbook=req.meta_playbook,
                 args=req.args,
                 building_id=building_id,
+                pre_spells=req.pre_spells,
             )
             
             for chunk in stream:

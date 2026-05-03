@@ -158,6 +158,17 @@ def compile_with_langgraph(
         # サブライン子 Playbook は run_playbook で _force_lightweight_model を立てる。
         # 子の中の LLM ノードがこれを見て軽量モデルを選ぶ。
         "_force_lightweight_model": parent.get("_force_lightweight_model", False),
+        # UI-triggered pre-spells: executed once at the entry of the first LLM node.
+        # Only seeded for top-level Pulses; sub-pulses (sub_play / run_playbook)
+        # must not re-execute UI choices. Top-level is detected by absence of
+        # both a parent pulse context AND a parent pulse_id, so isolate_pulse_context
+        # sub-pulses (subagent / line='sub') still get None here.
+        # See nested_subline_spell.md §13.
+        "_pre_spells": (
+            parent.get("_pre_spells")
+            if parent_pulse_ctx is None and parent.get("_pulse_id") is None
+            else None
+        ),
         # Playbook variables (no prefix)
         "last": user_input or "",
         "input": user_input or "",

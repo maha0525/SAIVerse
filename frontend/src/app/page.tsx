@@ -9,7 +9,7 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
-import ToolModeSelector from '@/components/ToolModeSelector';
+import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
 import RightSidebar from '@/components/RightSidebar';
 import PeopleModal from '@/components/PeopleModal';
 import TutorialWizard from '@/components/tutorial/TutorialWizard';
@@ -355,7 +355,7 @@ export default function Home() {
         adjustTextareaHeight();
     }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
-    const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>('meta_user');
+    const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
     const [playbookArgs, setPlaybookArgs] = useState<Record<string, any>>({});
     const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
     const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
@@ -778,13 +778,19 @@ export default function Home() {
             .catch(() => setBackendConnected(false));
         fetchHistory();
         fetchBuildingInfo();
-        // Fetch saved playbook setting and params from server
+        // Fetch saved playbook setting and params from server.
+        // Legacy values (meta_user / meta_user_manual / meta_simple_speak,
+        // and the old track_user_conversation explicit selection) are
+        // collapsed to "auto" because the new 2-mode UI only recognises
+        // null and the TOOL_MODE_SELECTED sentinel.
         fetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data) {
-                    if (data.playbook) {
-                        setSelectedPlaybook(data.playbook);
+                    if (data.playbook === TOOL_MODE_SELECTED) {
+                        setSelectedPlaybook(TOOL_MODE_SELECTED);
+                    } else {
+                        setSelectedPlaybook(null);
                     }
                     if (data.args && Object.keys(data.args).length > 0) {
                         setPlaybookArgs(data.args);
@@ -1244,6 +1250,21 @@ export default function Home() {
         // Reset playbook args after sending
         setPlaybookArgs({});
 
+        // ツール指定モードの場合は selected_playbook を pre_spells に変換し、
+        // meta_playbook と args は送らない (UI センチネルはサーバー側に存在しない
+        // Playbook 名なので、そのまま渡すと "playbook not found" になる)。
+        const isToolSelectedMode = currentPlaybook === TOOL_MODE_SELECTED;
+        const selectedToolName = isToolSelectedMode
+            ? (currentPlaybookArgs?.selected_playbook || null)
+            : null;
+        const preSpells = selectedToolName
+            ? [`/run_playbook(name="${selectedToolName}")`]
+            : undefined;
+        const sendMetaPlaybook = isToolSelectedMode ? undefined : (currentPlaybook || undefined);
+        const sendArgs = !isToolSelectedMode && Object.keys(currentPlaybookArgs).length > 0
+            ? currentPlaybookArgs
+            : undefined;
+
         try {
             const res = await fetch('/api/chat/send', {
                 method: 'POST',
@@ -1257,8 +1278,9 @@ export default function Home() {
                         type: a.type,
                         mime_type: a.mimeType
                     })) : undefined,
-                    meta_playbook: currentPlaybook,
-                    args: Object.keys(currentPlaybookArgs).length > 0 ? currentPlaybookArgs : undefined
+                    meta_playbook: sendMetaPlaybook,
+                    args: sendArgs,
+                    pre_spells: preSpells,
                 })
             });
 
@@ -1758,13 +1780,19 @@ export default function Home() {
 
         try {
             const attachmentTypes = attachments.map(a => a.type === 'image' ? 'image' : 'document');
+            // ツール指定モードのセンチネルは meta_playbook として送らない
+            // (サーバー側に該当 Playbook はなく、preview のコンテキスト計算は
+            // どちらのモードでも default Playbook 基準で問題ない)。
+            const previewMetaPlaybook = selectedPlaybook === TOOL_MODE_SELECTED
+                ? undefined
+                : (selectedPlaybook || undefined);
             const res = await fetch('/api/chat/preview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: inputValue || '(empty)',
                     building_id: currentBuildingIdRef.current,
-                    meta_playbook: selectedPlaybook || undefined,
+                    meta_playbook: previewMetaPlaybook,
                     attachment_count: attachments.length,
                     attachment_types: attachmentTypes,
                 }),

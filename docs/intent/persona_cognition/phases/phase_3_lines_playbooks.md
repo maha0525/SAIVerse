@@ -72,6 +72,7 @@
 | Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 (実機検証と一体) |
 | `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 (現状: 18 件 true、25 件 false) |
 | `track_user_conversation` を 1-LLM + Spell 構成に書き換え | 🔲 | meta_user / sub_router_user の統合廃止と一体、実機検証必須 |
+| **UI からの Playbook 起動 (pre_spells 機構)** | 🔲 | 旧 `meta_user_manual` の代替。`/api/chat` に `pre_spells` 引数 + Spell loop 入口で LLM 介さず機械実行 + ToolModeSelector の動的列挙化。intent doc [../nested_subline_spell.md](../nested_subline_spell.md) §13 (v0.2) |
 
 **動機**: 従来 `meta_user` で router → 通常発話と 2 回 LLM を呼んでいた構造を、スペルで Playbook を呼べる通常発話ノード一個に統一する。判断と発話の合体。
 

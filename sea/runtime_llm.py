@@ -658,12 +658,151 @@ async def _run_spell_loop(
         return text, details_blocks, loop_count
 
 
+async def _execute_pre_spells(
+    pre_spells: List[str],
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    state: dict,
+    playbook: Any,
+    event_callback: Optional[Callable],
+) -> None:
+    """Execute UI-requested spells before the first LLM call of a Pulse.
+
+    Triggered by the chat API when the user manually selects a Playbook in
+    the UI ("ツール指定" mode, the replacement for the deprecated
+    ``meta_user_manual`` Playbook). Each entry in ``pre_spells`` is a Spell
+    invocation string (e.g. ``/run_playbook(name="memory_research")``).
+
+    Behavior:
+    - Parse each entry via ``_parse_spell_lines``; unknown / unparseable
+      entries log a warning and are skipped.
+    - Execute valid spells in parallel via ``_run_spell_tool_async``, the
+      same path used by the regular spell loop.
+    - Append a single ``<system>``-tagged user message to
+      ``state["_messages"]`` containing the combined results, so the
+      first LLM round sees them as if the user had requested them.
+    - Forward any media (images, etc.) returned by spells via
+      ``message["metadata"]["media"]`` so the LLM gets attachments.
+
+    Idempotency is enforced by the caller via ``state["_pre_spells_executed"]``.
+    See: docs/intent/persona_cognition/nested_subline_spell.md §13 (v0.2)
+    """
+    from sea.pulse_context import PulseLogEntry
+
+    if not pre_spells:
+        return
+
+    messages = state.get("_messages")
+    if not isinstance(messages, list):
+        LOGGER.warning("[sea][pre_spells] state['_messages'] is missing; skipping")
+        return
+
+    valid_specs: List[Tuple[str, dict, str]] = []
+    for entry in pre_spells:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        parsed = _parse_spell_lines(entry)
+        if not parsed:
+            LOGGER.warning("[sea][pre_spells] Could not parse spell entry: %r", entry)
+            continue
+        for name, args, _, normalized in parsed:
+            if name not in SPELL_TOOL_NAMES:
+                LOGGER.warning("[sea][pre_spells] Unknown spell '%s', skipping", name)
+                continue
+            valid_specs.append((name, args, normalized))
+
+    if not valid_specs:
+        return
+
+    LOGGER.info(
+        "[sea][pre_spells] Executing %d UI-requested spell(s) before first LLM call: %s",
+        len(valid_specs), [s[0] for s in valid_specs],
+    )
+
+    results: List[Tuple[str, Optional[Dict[str, Any]]]] = list(await asyncio.gather(*[
+        _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback, messages=messages)
+        for name, args, _ in valid_specs
+    ]))
+
+    triggered_lines = [norm for _, _, norm in valid_specs]
+    result_lines = [
+        f"[Spell Result: {name}]\n{result_text}"
+        for (name, _, _), (result_text, _) in zip(valid_specs, results)
+    ]
+    system_body = (
+        "ユーザーの操作により以下のスペルを事前に実行しました。"
+        "結果を踏まえて応答してください。\n\n"
+        "[Triggered by user]\n"
+        + "\n".join(triggered_lines)
+        + "\n\n"
+        + "\n\n".join(result_lines)
+    )
+    spell_result_msg: Dict[str, Any] = {
+        "role": "user",
+        "content": f"<system>{system_body}</system>",
+    }
+
+    aggregated_media: List[Dict[str, Any]] = []
+    for _, result_meta in results:
+        if isinstance(result_meta, dict):
+            media_list = result_meta.get("media")
+            if isinstance(media_list, list):
+                aggregated_media.extend(media_list)
+    if aggregated_media:
+        spell_result_msg["metadata"] = {"media": aggregated_media}
+        LOGGER.info(
+            "[sea][pre_spells] Attached %d media item(s) from pre-spell results",
+            len(aggregated_media),
+        )
+
+    messages.append(spell_result_msg)
+
+    pulse_ctx = state.get("_pulse_context")
+    if pulse_ctx:
+        pulse_ctx.append(PulseLogEntry(
+            role="system", content=system_body,
+            node_id="pre_spells", playbook_name=playbook.name,
+        ))
+
+    pulse_id = state.get("_pulse_id")
+    try:
+        runtime._store_memory(
+            persona, system_body, role="system",
+            tags=["conversation", "spell", "pre_spell"],
+            pulse_id=pulse_id, playbook_name=playbook.name,
+            pulse_context=pulse_ctx,
+        )
+    except Exception:
+        LOGGER.exception("[sea][pre_spells] Failed to persist pre-spell results to SAIMemory")
+
+    _at = state.get("_activity_trace")
+    if isinstance(_at, list):
+        for name, _, _ in valid_specs:
+            _at.append({"action": "pre_spell", "name": name, "playbook": playbook.name})
+
+
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
     async def node(state: dict):
         # Check for cancellation at start of node
         cancellation_token = state.get("_cancellation_token")
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
+
+        # ── Pre-spells: execute UI-requested spells before the first LLM call ──
+        # Set by the chat API for "ツール指定" mode (replaces deprecated
+        # meta_user_manual). Runs at most once per Pulse, gated by
+        # state["_pre_spells_executed"]. Result messages flow into state["_messages"]
+        # via the normal spell-loop machinery, so the first LLM round sees them.
+        _pre_spells = state.get("_pre_spells")
+        if _pre_spells and not state.get("_pre_spells_executed"):
+            state["_pre_spells_executed"] = True
+            try:
+                await _execute_pre_spells(
+                    _pre_spells, runtime, persona, building_id, state, playbook, event_callback,
+                )
+            except Exception:
+                LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
 
         # Send status event for node execution
         node_id = getattr(node_def, "id", "llm")
