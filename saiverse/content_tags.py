@@ -31,6 +31,23 @@ def strip_in_heart(text: str) -> str:
     return _IN_HEART_RE.sub("", text).strip()
 
 
+def strip_user_only(text: str) -> str:
+    """Remove ``<user_only>...</user_only>`` blocks entirely (for voice / external).
+
+    The ``<user_only>`` tag literally means "for user UI display only" — its
+    contents must not flow to TTS, gateway audio, or other voice/external
+    output paths. This includes spell ``<details class="spellBlock">`` blocks
+    that ``wrap_spell_blocks`` produces, which would otherwise leak the spell
+    name, args, and result text into voice output.
+
+    For inter-persona ingestion, use ``strip_for_other_persona`` instead — it
+    preserves the ``alt`` text so the listener perceives a placeholder.
+    """
+    if not text:
+        return text
+    return _USER_ONLY_RE.sub("", text).strip()
+
+
 def resolve_item_slot_uris(
     text: str,
     item_service: Any,

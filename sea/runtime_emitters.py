@@ -54,7 +54,7 @@ class RuntimeEmitters:
         msg_id_for_hook: Optional[str] = None
         if record_history:
             try:
-                from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart
+                from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, strip_user_only
                 heard_by_list = list(occupants)
                 if persona.persona_id not in heard_by_list:
                     heard_by_list.append(persona.persona_id)
@@ -68,7 +68,11 @@ class RuntimeEmitters:
                     building_content = resolve_item_slot_uris(
                         building_content, item_service, persona.persona_id, building_id
                     )
-                building_content_for_hook = building_content
+                # text_for_voice: <user_only> ブロックを完全除去 (TTS / 音声系
+                # アドオンに UI 専用の HTML 等を読み上げさせないため)。emit_speak
+                # は通常 wrap_spell_blocks を経由しないが、ペルソナが手書きで
+                # <user_only> を出力するケースに備えて防御的に適用する。
+                building_content_for_hook = strip_user_only(building_content)
                 building_msg_dict = {**msg, "content": building_content}
                 building_msg = persona.history_manager.add_to_building_only(
                     building_id, building_msg_dict, heard_by=heard_by_list
@@ -91,12 +95,18 @@ class RuntimeEmitters:
         if record_history and msg_id_for_hook:
             try:
                 from saiverse.addon_hooks import dispatch_hook
+                from saiverse.content_tags import strip_in_heart, strip_user_only
+                voice_text = (
+                    building_content_for_hook
+                    if building_content_for_hook is not None
+                    else strip_user_only(strip_in_heart(text))
+                )
                 dispatch_hook(
                     "persona_speak",
                     persona_id=persona.persona_id,
                     building_id=building_id,
                     text_raw=text,
-                    text_for_voice=building_content_for_hook if building_content_for_hook is not None else text,
+                    text_for_voice=voice_text,
                     message_id=msg_id_for_hook,
                     pulse_id=pulse_id,
                     source="speak",
@@ -143,7 +153,7 @@ class RuntimeEmitters:
         building_content_for_hook: Optional[str] = None
         msg_id_for_hook: Optional[str] = None
         try:
-            from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, wrap_spell_blocks
+            from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, strip_user_only, wrap_spell_blocks
             heard_by_list = list(occupants)
             if persona.persona_id not in heard_by_list:
                 heard_by_list.append(persona.persona_id)
@@ -155,7 +165,11 @@ class RuntimeEmitters:
                 building_content = resolve_item_slot_uris(
                     building_content, item_service, persona.persona_id, building_id
                 )
-            building_content_for_hook = building_content
+            # text_for_voice: <user_only> ブロック (= スペル HTML 詳細含む) を
+            # 完全除去する。voice/外部出力系アドオン (TTS, gateway audio 等) が
+            # スペル名・引数・結果といった UI 専用要素を読み上げないようにするため。
+            # building_content 自体は UI / 履歴用に <user_only> ラップを保持する。
+            building_content_for_hook = strip_user_only(building_content)
             building_msg_for_hist = {**msg, "content": building_content}
             building_msg = persona.history_manager.add_to_building_only(
                 building_id, building_msg_for_hist, heard_by=heard_by_list
@@ -178,12 +192,18 @@ class RuntimeEmitters:
         if msg_id_for_hook:
             try:
                 from saiverse.addon_hooks import dispatch_hook
+                from saiverse.content_tags import strip_in_heart, strip_user_only
+                voice_text = (
+                    building_content_for_hook
+                    if building_content_for_hook is not None
+                    else strip_user_only(strip_in_heart(text))
+                )
                 dispatch_hook(
                     "persona_speak",
                     persona_id=persona.persona_id,
                     building_id=building_id,
                     text_raw=text,
-                    text_for_voice=building_content_for_hook if building_content_for_hook is not None else text,
+                    text_for_voice=voice_text,
                     message_id=msg_id_for_hook,
                     pulse_id=pulse_id,
                     source="say",
