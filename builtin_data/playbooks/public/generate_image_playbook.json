@@ -67,6 +67,21 @@
             ],
             "description": "アスペクト比。デフォルトは1:1"
           },
+          "size": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "1024x1024",
+              "1536x1024",
+              "1024x1536",
+              "2048x2048",
+              "2048x1152",
+              "1152x2048",
+              "3840x2160",
+              "2160x3840"
+            ],
+            "description": "出力ピクセルサイズ（gpt_image_2 / gpt_image_1_5 専用）。'auto'はaspect_ratioから自動。'2048x2048'等を直接指定すればaspect_ratio無視で固定サイズに。Gemini/Grokでは無視されます。デフォルトはauto"
+          },
           "prompt": {
             "type": "string",
             "description": "Detailed image generation prompt in English"
@@ -103,6 +118,7 @@
         "model": "gen_params.model",
         "aspect_ratio": "gen_params.aspect_ratio",
         "quality": "gen_params.quality",
+        "size": "gen_params.size",
         "input_images": "gen_params.input_images"
       },
       "output_keys": [

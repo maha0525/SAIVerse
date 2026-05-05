@@ -2114,8 +2114,20 @@ class SEARuntime:
 
         kind="user" のみサポート。auto pulse は必ず meta_playbook 指定で
         run_meta_user 経由で実行されるため、ここに来ることはない。
+
+        対ユーザー会話の Pulse は UserConversationTrackHandler が事前に
+        対ユーザー Track を running 化 + Track コンテキストを注入してから
+        メインラインを起動するため、Playbook は `track_user_conversation`
+        (Phase 3 の 1-LLM + Spell 構成) を使う。旧 `meta_user` は Phase 3
+        移行で廃止予定 (handoff_2026-05-01 §[5])。
+
+        フォールバック先の `basic_chat` も旧 `meta_user` の "no-op で meta
+        layer に委譲" 用に作られた pass ノード 1 個の Playbook で、新構成
+        だと選んでも無音になるため候補から外している。最終フォールバック
+        として残っている `_basic_chat_playbook()` (in-memory) は、絶対に
+        ここに到達しないことを期待した保険。
         """
-        candidates = ["meta_user", "basic_chat"]
+        candidates = ["track_user_conversation"]
         for name in candidates:
             pb = self._load_playbook_for(name, persona, building_id)
             if pb:

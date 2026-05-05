@@ -11,6 +11,8 @@ import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
 import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
 import RightSidebar from '@/components/RightSidebar';
+import CityMap from '@/components/CityMap';
+import cityMapStyles from '@/components/CityMap.module.css';
 import PeopleModal from '@/components/PeopleModal';
 import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
@@ -20,7 +22,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import TweetConfirmDialog, { TweetConfirmData } from '@/components/TweetConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 import { useAddonEvents } from '@/hooks/useAddonEvents';
 import { useActiveClientTab } from '@/hooks/useActiveClientTab';
@@ -374,6 +376,8 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+    // City Map: 街全体をシンボルマップで俯瞰するモーダル。展示用にデフォルト ON で起動。
+    const [isMapModalOpen, setIsMapModalOpen] = useState<boolean>(true);
 
     // Tutorial state
     const [showTutorial, setShowTutorial] = useState(false);
@@ -755,6 +759,46 @@ export default function Home() {
             console.error('Failed to fetch building info', err);
         }
     };
+
+    // CityMap で家アイコンをクリックされたとき: サーバ側 move → ローカル state 更新 → モーダルを閉じてチャットへ
+    const handleSelectBuildingFromMap = async (buildingId: string) => {
+        if (!buildingId) return;
+        if (currentBuildingId === buildingId) {
+            // 既にいる Building ならモーダルを閉じるだけ
+            setIsMapModalOpen(false);
+            return;
+        }
+        try {
+            const res = await fetch('/api/user/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_building_id: buildingId }),
+            });
+            if (!res.ok) return;
+            const data = await res.json();
+            if (!data.success) return;
+            setCurrentBuildingId(buildingId);
+            currentBuildingIdRef.current = buildingId;
+            setMessages([]);
+            setIsHistoryLoaded(false);
+            fetchHistory(undefined, buildingId);
+            fetchBuildingInfo(buildingId);
+            setMoveTrigger(prev => prev + 1);
+            setIsMapModalOpen(false);
+        } catch (err) {
+            console.error('Map move error', err);
+        }
+    };
+
+    // Esc キーでマップモーダルを閉じる
+    useEffect(() => {
+        if (!isMapModalOpen) return;
+        const handler = (e: globalThis.KeyboardEvent) => {
+            if (e.key === 'Escape') setIsMapModalOpen(false);
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [isMapModalOpen]);
 
     useEffect(() => {
         // Fetch current building_id for multi-device safety
@@ -1881,6 +1925,8 @@ export default function Home() {
                     fetchHistory(undefined, buildingId);
                     fetchBuildingInfo(buildingId);
                     setMoveTrigger(prev => prev + 1);
+                    // Sidebar からの遷移はチャット閲覧目的なのでマップは閉じる
+                    setIsMapModalOpen(false);
                 }}
                 isOpen={isLeftOpen}
                 onOpen={() => setIsLeftOpen(true)}
@@ -1913,6 +1959,13 @@ export default function Home() {
                                 </span>
                             </button>
                         )}
+                        <button
+                            className={`${styles.iconBtn} ${isMapModalOpen ? styles.active : ''}`}
+                            onClick={() => setIsMapModalOpen(v => !v)}
+                            title={isMapModalOpen ? '街マップを閉じる' : '街マップを開く'}
+                        >
+                            <MapIcon size={20} />
+                        </button>
                         <button
                             className={styles.iconBtn}
                             onClick={() => setIsPeopleModalOpen(true)}
@@ -2367,6 +2420,19 @@ export default function Home() {
                     </div>
                 </div>
             </main>
+
+            {isMapModalOpen && (
+                <ModalOverlay onClose={() => setIsMapModalOpen(false)}>
+                    <div className={cityMapStyles.modalShell}>
+                        <CityMap
+                            currentBuildingId={currentBuildingId}
+                            onSelectBuilding={handleSelectBuildingFromMap}
+                            refreshTrigger={moveTrigger}
+                            onClose={() => setIsMapModalOpen(false)}
+                        />
+                    </div>
+                </ModalOverlay>
+            )}
 
             <RightSidebar
                 isOpen={isInfoOpen}

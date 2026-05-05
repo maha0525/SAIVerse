@@ -169,6 +169,95 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         "items": items_list
     }
 
+class CityMapBuilding(BaseModel):
+    id: str
+    name: str
+    image_path: Optional[str] = None
+    map_x: Optional[float] = None
+    map_y: Optional[float] = None
+    occupants: List[OccupantInfo]
+
+
+class CityMapResponse(BaseModel):
+    city_id: Optional[int] = None
+    user_current_building_id: Optional[str] = None
+    map_background_image: Optional[str] = None
+    buildings: List[CityMapBuilding]
+
+
+@router.get("/city-map", response_model=CityMapResponse)
+def get_city_map(manager = Depends(get_manager)):
+    """Return the whole city in one shot: every Building plus its current occupants.
+
+    展示用のマップビューが、Building ごとに /details を叩かずに 1 回でツリー全体を
+    取得できるよう用意した軽量エンドポイント。アイテム情報は含めない (描画に不要)。
+    """
+    # Building の IMAGE_PATH/MAP_X/MAP_Y と City の MAP_BACKGROUND_IMAGE を一括取得 (N+1 回避)
+    image_map: dict = {}
+    pos_map: dict = {}
+    map_background: Optional[str] = None
+    try:
+        from database.models import Building as BuildingModel, City as CityModel
+        session = manager.SessionLocal()
+        try:
+            rows = session.query(
+                BuildingModel.BUILDINGID,
+                BuildingModel.IMAGE_PATH,
+                BuildingModel.MAP_X,
+                BuildingModel.MAP_Y,
+            ).all()
+            for bid, img, mx, my in rows:
+                if img:
+                    image_map[bid] = img
+                if mx is not None and my is not None:
+                    pos_map[bid] = (mx, my)
+            city_id = getattr(manager, "city_id", None)
+            if city_id is not None:
+                city_row = session.query(
+                    CityModel.MAP_BACKGROUND_IMAGE
+                ).filter(CityModel.CITYID == city_id).first()
+                if city_row and city_row[0]:
+                    map_background = city_row[0]
+        finally:
+            session.close()
+    except Exception as e:
+        LOGGER.warning("Failed to fetch building images for city-map: %s", e, exc_info=True)
+
+    buildings_payload: List[dict] = []
+
+    sorted_buildings = sorted(manager.buildings, key=lambda b: b.name)
+    for building in sorted_buildings:
+        bid = building.building_id
+        occupants_list: List[dict] = []
+        occupant_ids = manager.occupancy_manager.occupants.get(bid, []) or []
+        for oid in sorted(occupant_ids):
+            persona = manager.personas.get(oid)
+            if not persona:
+                continue
+            avatar = avatar_path_to_url(persona.avatar_image)
+            occupants_list.append({
+                "id": oid,
+                "name": persona.persona_name,
+                "avatar": avatar,
+            })
+        pos = pos_map.get(bid)
+        buildings_payload.append({
+            "id": bid,
+            "name": building.name,
+            "image_path": image_map.get(bid),
+            "map_x": pos[0] if pos else None,
+            "map_y": pos[1] if pos else None,
+            "occupants": occupants_list,
+        })
+
+    return {
+        "city_id": getattr(manager, "city_id", None),
+        "user_current_building_id": manager.state.user_current_building_id,
+        "map_background_image": map_background,
+        "buildings": buildings_payload,
+    }
+
+
 @router.get("/item/{item_id}/bag-contents")
 def get_bag_contents(item_id: str, manager = Depends(get_manager)):
     """Get the contents of a bag item."""

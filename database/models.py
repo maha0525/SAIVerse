@@ -74,6 +74,9 @@ class Building(Base):
     AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
     IMAGE_PATH = Column(String(512), nullable=True)  # Building interior image for LLM visual context
     EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["body_control.txt", "other.txt"]
+    # 街マップ上の絶対座標 (world 座標系、px相当)。NULL なら擬似配置にフォールバック。
+    MAP_X = Column(Float, nullable=True)
+    MAP_Y = Column(Float, nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 
@@ -88,6 +91,8 @@ class City(Base):
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)
     HOST_AVATAR_IMAGE = Column(String(255))
+    # 街マップビューの背景画像 (City単位で1枚)。NULL なら星空グラデのみ。
+    MAP_BACKGROUND_IMAGE = Column(String(512), nullable=True)
     # Last SAIVerse version this city was successfully running on. NULL means
     # the city predates the version-aware system (treat as v0.3.0 or earlier).
     LAST_KNOWN_VERSION = Column(String(64), nullable=True)

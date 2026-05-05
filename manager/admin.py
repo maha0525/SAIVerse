@@ -116,6 +116,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         timezone_name: str,
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
+        map_background_image: Optional[str] = None,
     ) -> str:
         name_error = self._validate_city_name(name)
         if name_error:
@@ -152,6 +153,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     logging.error("Failed to process host avatar upload: %s", exc, exc_info=True)
                     return f"Error: Failed to process host avatar upload: {exc}"
             city.HOST_AVATAR_IMAGE = avatar_value
+            # 街マップ背景画像 (空文字は NULL として保存)
+            city.MAP_BACKGROUND_IMAGE = (map_background_image or "").strip() or None
             db.commit()
 
             if city.CITYID == self.state.city_id:

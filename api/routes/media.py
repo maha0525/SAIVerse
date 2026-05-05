@@ -6,7 +6,7 @@ import shutil
 import mimetypes
 
 LOGGER = logging.getLogger(__name__)
-from saiverse.media_utils import resize_image_if_needed, resize_image_for_llm_context, _ensure_image_dir, _ensure_document_dir, IMAGE_URI_PREFIX, DOCUMENT_URI_PREFIX
+from saiverse.media_utils import resize_image_if_needed, resize_image_for_llm_context, convert_image_to_webp, _ensure_image_dir, _ensure_document_dir, IMAGE_URI_PREFIX, DOCUMENT_URI_PREFIX
 
 router = APIRouter()
 
@@ -54,6 +54,48 @@ async def upload_image(file: UploadFile = File(...)):
     except Exception as e:
         LOGGER.error("Upload failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@router.post("/upload-hires")
+async def upload_image_hires(file: UploadFile = File(...)):
+    """
+    Upload an image without LLM-oriented downscaling.
+    Only converts to WebP (lossless-ish, q=90) to keep file size reasonable
+    while preserving the original resolution. Intended for assets that are
+    *displayed* at full size (City map background, future wallpapers, etc.)
+    Returns: {"url": "/api/media/images/..."}
+    """
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        content = await file.read()
+
+        converted, mime_type = convert_image_to_webp(content, file.content_type, quality=90)
+
+        dest_dir = _ensure_image_dir()
+
+        ext = mimetypes.guess_extension(mime_type) or ".webp"
+        if ext == ".jpe":
+            ext = ".jpg"
+
+        from datetime import datetime
+        from uuid import uuid4
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{ext}"
+        dest_path = dest_dir / filename
+
+        dest_path.write_bytes(converted)
+
+        return {
+            "url": f"/api/media/images/{filename}",
+            "filename": filename,
+            "type": "image",
+            "relative_path": f"image/{filename}"
+        }
+
+    except Exception as e:
+        LOGGER.error("Hi-res upload failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
 
 @router.post("/upload-document")
 async def upload_document(file: UploadFile = File(...)):

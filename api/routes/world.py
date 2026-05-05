@@ -42,6 +42,7 @@ class CityUpdate(BaseModel):
     api_port: int
     timezone: str
     host_avatar_path: Optional[str] = None
+    map_background_image: Optional[str] = None
 
 class BuildingCreate(BaseModel):
     name: str
@@ -61,6 +62,20 @@ class BuildingUpdate(BaseModel):
     auto_interval: int
     image_path: Optional[str] = None  # Building interior image for LLM visual context
     extra_prompt_files: Optional[List[str]] = None  # Additional prompt files for this building
+
+
+class BuildingPosition(BaseModel):
+    building_id: str
+    x: float
+    y: float
+
+
+class BuildingPositionsUpdate(BaseModel):
+    positions: List[BuildingPosition]
+
+
+class CityMapBackgroundUpdate(BaseModel):
+    map_background_image: Optional[str] = None
 
 class AICreate(BaseModel):
     name: str
@@ -130,13 +145,66 @@ def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager
 
 @router.put("/cities/{city_id}")
 def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None))
+    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image))
+
+@router.patch("/cities/{city_id}/map-background")
+def update_city_map_background(city_id: int, req: CityMapBackgroundUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """街マップ画面から背景画像だけを軽量に更新する PATCH エンドポイント。
+
+    PUT /cities/{id} は全フィールド要求のため、UI 側で1項目だけ変更したい
+    用途には不便。マップ編集モードの即時反映に使う。
+    """
+    from database.models import City as CityModel
+    session = manager.SessionLocal()
+    try:
+        city = session.query(CityModel).filter(CityModel.CITYID == city_id).first()
+        if not city:
+            raise HTTPException(status_code=404, detail="City not found")
+        city.MAP_BACKGROUND_IMAGE = (req.map_background_image or "").strip() or None
+        session.commit()
+        return {"map_background_image": city.MAP_BACKGROUND_IMAGE}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 
 @router.delete("/cities/{city_id}")
 def delete_city(city_id: int, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.delete_city(city_id))
 
 # Building
+
+@router.put("/buildings/positions")
+def update_building_positions(req: BuildingPositionsUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """街マップ編集モード用: 複数 Building の MAP_X/MAP_Y を一括更新する。
+
+    描画専用の座標カラムなので manager の in-memory state は触らず、
+    DB だけ更新すれば次回 city-map fetch で反映される。
+    """
+    from database.models import Building as BuildingModel
+    session = manager.SessionLocal()
+    try:
+        updated = 0
+        for p in req.positions:
+            building = session.query(BuildingModel).filter(BuildingModel.BUILDINGID == p.building_id).first()
+            if not building:
+                continue
+            building.MAP_X = p.x
+            building.MAP_Y = p.y
+            updated += 1
+        session.commit()
+        return {"updated": updated}
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+
 @router.post("/buildings")
 def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.create_building(b.name, b.description, b.capacity, b.system_instruction, b.city_id, b.building_id))

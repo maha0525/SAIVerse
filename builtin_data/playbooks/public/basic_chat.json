@@ -1,14 +1,14 @@
 {
     "name": "basic_chat",
-    "display_name": "通常の会話",
-    "description": "No-op for simple conversations handled by meta layer",
+    "display_name": "通常の会話 (deprecated)",
+    "description": "Deprecated. Phase 3 移行で track_user_conversation に置き換えられた no-op Playbook。動作確認後 (handoff_2026-05-01 §[5]) に meta_user / meta_user_manual / sub_router_user と一緒に削除予定。",
     "input_schema": [
         {
             "name": "input",
             "description": "User input"
         }
     ],
-    "router_callable": true,
+    "router_callable": false,
     "nodes": [
         {
             "id": "noop",

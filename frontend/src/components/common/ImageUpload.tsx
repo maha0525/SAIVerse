@@ -9,6 +9,9 @@ interface ImageUploadProps {
     width?: number;
     height?: number;
     circle?: boolean;
+    /** アップロード先 endpoint。デフォルトは LLM 用の圧縮あり (/api/media/upload)。
+     *  大きく表示される背景画像等は 'hires' を指定するとリサイズされず WebP 変換のみ行われる。 */
+    uploadEndpoint?: 'default' | 'hires';
 }
 
 export default function ImageUpload({
@@ -18,7 +21,8 @@ export default function ImageUpload({
     className = "",
     width = 96,
     height = 96,
-    circle = false
+    circle = false,
+    uploadEndpoint = 'default'
 }: ImageUploadProps) {
     const [isUploading, setIsUploading] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
@@ -37,7 +41,8 @@ export default function ImageUpload({
         formData.append('file', file);
 
         try {
-            const res = await fetch('/api/media/upload', {
+            const url = uploadEndpoint === 'hires' ? '/api/media/upload-hires' : '/api/media/upload';
+            const res = await fetch(url, {
                 method: 'POST',
                 body: formData
             });

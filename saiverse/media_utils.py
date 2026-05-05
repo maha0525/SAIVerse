@@ -436,6 +436,38 @@ def path_to_data_url(path: Path, mime_type: str) -> Optional[str]:
     return _cached_path_to_data_url(str(path), mime_type, stat.st_mtime)
 
 
+def convert_image_to_webp(data: bytes, mime_type: str, quality: int = 90) -> Tuple[bytes, str]:
+    """画像を WebP に変換する (解像度はそのまま、エンコードのみ変更)。
+
+    City 背景画像のように「大きく表示されるためリサイズ劣化を避けたいが、
+    ディスク/転送サイズは抑えたい」用途向け。アルファチャンネルがあれば保持する。
+    既に WebP の場合や PIL が無い場合は何もせず返す。
+    """
+    if Image is None:
+        return data, mime_type
+    if mime_type == "image/webp":
+        return data, mime_type
+    try:
+        img = Image.open(BytesIO(data))
+        # P モード (パレット) は WebP 出力時に透過が失われるので RGBA に持ち上げる。
+        # それ以外でアルファ持ちなら RGBA、不透明系は RGB に揃える。
+        if img.mode == "P":
+            img = img.convert("RGBA")
+        elif img.mode not in ("RGB", "RGBA", "LA"):
+            img = img.convert("RGB")
+        buf = BytesIO()
+        img.save(buf, format="WEBP", quality=quality, method=6)
+        result = buf.getvalue()
+        LOGGER.info(
+            "Converted image to WebP: %s (%d bytes) -> webp (%d bytes), q=%d",
+            mime_type, len(data), len(result), quality,
+        )
+        return result, "image/webp"
+    except Exception:
+        LOGGER.exception("Failed to convert to WebP; using original")
+        return data, mime_type
+
+
 def resize_image_if_needed(data: bytes, mime_type: str, max_bytes: int) -> Tuple[bytes, str]:
     """
     Resize an image if it exceeds max_bytes when base64-encoded.

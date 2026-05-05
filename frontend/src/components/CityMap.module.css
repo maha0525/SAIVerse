@@ -1,0 +1,606 @@
+.modalShell {
+    width: min(95vw, 1600px);
+    height: min(90vh, 1100px);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow:
+        0 24px 80px rgba(0, 0, 0, 0.75),
+        0 0 0 1px rgba(180, 200, 255, 0.18) inset;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    animation: mapPopIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes mapPopIn {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.closeBtn {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(20, 24, 60, 0.7);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #e6e8ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.closeBtn:hover {
+    background: rgba(60, 80, 160, 0.85);
+    border-color: rgba(255, 220, 140, 0.5);
+    transform: scale(1.05);
+}
+
+.editToggleBtn {
+    position: absolute;
+    top: 12px;
+    right: 56px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(20, 24, 60, 0.7);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #e6e8ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.editToggleBtn:hover {
+    background: rgba(80, 60, 120, 0.85);
+    border-color: rgba(220, 180, 255, 0.55);
+    transform: scale(1.05);
+}
+
+.editBar {
+    display: flex !important;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1.5rem !important;
+    background: linear-gradient(180deg, rgba(70, 50, 110, 0.7) 0%, rgba(40, 30, 80, 0.5) 100%);
+    border-bottom: 1px solid rgba(220, 180, 255, 0.25);
+    text-align: left !important;
+}
+
+.editLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #e9d8ff;
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+}
+
+.editActions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.editCancelBtn,
+.editSaveBtn {
+    padding: 0.4rem 0.9rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.editCancelBtn {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #cfd2e8;
+}
+
+.editCancelBtn:hover:not(:disabled) {
+    background: rgba(60, 60, 80, 0.5);
+}
+
+.editSaveBtn {
+    background: linear-gradient(135deg, rgba(120, 80, 220, 0.8), rgba(80, 60, 200, 0.85));
+    border: 1px solid rgba(220, 200, 255, 0.5);
+    color: #ffffff;
+    font-weight: 500;
+}
+
+.editSaveBtn:hover:not(:disabled) {
+    background: linear-gradient(135deg, rgba(140, 100, 240, 0.9), rgba(100, 80, 220, 0.95));
+    border-color: rgba(255, 220, 255, 0.7);
+}
+
+.editCancelBtn:disabled,
+.editSaveBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 背景画像変更ボタン (キャンセルと同系統) */
+.editBgBtn {
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(180, 200, 255, 0.25);
+    color: #cfd2e8;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.editBgBtn:hover:not(:disabled) {
+    background: rgba(60, 60, 100, 0.55);
+    border-color: rgba(220, 200, 255, 0.45);
+}
+
+.editBgBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 現在の背景サムネ */
+.bgThumbWrap {
+    position: relative;
+    width: 48px;
+    height: 28px;
+    border-radius: 4px;
+    overflow: visible;
+    border: 1px solid rgba(180, 200, 255, 0.3);
+    flex-shrink: 0;
+}
+
+.bgThumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 3px;
+    display: block;
+}
+
+.bgThumbClear {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(80, 30, 30, 0.92);
+    border: 1px solid rgba(255, 180, 180, 0.5);
+    color: #ffd0d0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+}
+
+.bgThumbWrap:hover .bgThumbClear {
+    display: inline-flex;
+}
+
+.bgThumbClear:hover {
+    background: rgba(150, 50, 50, 1);
+    color: #ffffff;
+}
+
+.spin {
+    animation: cm-spin 1s linear infinite;
+}
+
+@keyframes cm-spin {
+    to { transform: rotate(360deg); }
+}
+
+.container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background:
+        radial-gradient(ellipse at 20% 10%, rgba(120, 80, 220, 0.25) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 30%, rgba(60, 120, 220, 0.20) 0%, transparent 55%),
+        radial-gradient(ellipse at 50% 90%, rgba(200, 120, 220, 0.18) 0%, transparent 60%),
+        linear-gradient(180deg, #0a0a1f 0%, #0d1130 50%, #050614 100%);
+    color: #e6e8ff;
+}
+
+.starfield {
+    position: absolute;
+    inset: 0;
+    background-image:
+        radial-gradient(1px 1px at 12% 18%, rgba(255, 255, 255, 0.85), transparent 60%),
+        radial-gradient(1px 1px at 28% 72%, rgba(255, 255, 255, 0.75), transparent 60%),
+        radial-gradient(1px 1px at 47% 38%, rgba(255, 255, 255, 0.85), transparent 60%),
+        radial-gradient(1px 1px at 63% 14%, rgba(255, 255, 255, 0.65), transparent 60%),
+        radial-gradient(1px 1px at 81% 52%, rgba(255, 255, 255, 0.85), transparent 60%),
+        radial-gradient(1px 1px at 92% 84%, rgba(255, 255, 255, 0.6), transparent 60%),
+        radial-gradient(1.5px 1.5px at 22% 82%, rgba(180, 200, 255, 0.7), transparent 60%),
+        radial-gradient(1.5px 1.5px at 75% 26%, rgba(180, 200, 255, 0.7), transparent 60%),
+        radial-gradient(1px 1px at 38% 60%, rgba(255, 255, 255, 0.55), transparent 60%),
+        radial-gradient(1px 1px at 55% 88%, rgba(255, 255, 255, 0.55), transparent 60%);
+    pointer-events: none;
+    animation: twinkle 6s ease-in-out infinite;
+}
+
+@keyframes twinkle {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.55; }
+}
+
+.titleBar {
+    position: relative;
+    padding: 1.5rem 2rem 0.5rem;
+    text-align: center;
+    z-index: 2;
+}
+
+.title {
+    font-size: 1.4rem;
+    letter-spacing: 0.15em;
+    color: #d8dcff;
+    margin: 0;
+    font-weight: 500;
+    text-shadow: 0 0 18px rgba(140, 160, 255, 0.45);
+}
+
+.subtitle {
+    margin-top: 0.25rem;
+    font-size: 0.8rem;
+    opacity: 0.55;
+    letter-spacing: 0.08em;
+}
+
+/* ビューポート: モーダル内のスクロール領域。世界は overflow:hidden で切り抜かれる。
+   ドラッグでパン中は cursor:grabbing、静止時は cursor:grab。 */
+.viewport {
+    position: relative;
+    flex: 1 1 auto;
+    width: 100%;
+    overflow: hidden;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    z-index: 2;
+}
+
+.viewport.dragging {
+    cursor: grabbing;
+}
+
+/* ワールド層: transform で pan/zoom を適用される実体。サイズは固定で、内部に
+   建物セルが絶対配置される。transform-origin:0 0 でカーソル中心ズーム計算が単純化。 */
+.world {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 3200px;
+    height: 2200px;
+    transform-origin: 0 0;
+    will-change: transform;
+}
+
+/* 街マップ背景画像: world のフル領域に object-fit:cover で敷く。
+   セルや UI を引き立てるため opacity を落として彩度も少し下げる。
+   建物セルは絶対配置で自然に背景より上、worldBgOverlay は背景の上・セルの下に挟まる。 */
+.worldBg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+    opacity: 0.65;
+    filter: saturate(0.85);
+}
+
+.worldBgOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        180deg,
+        rgba(8, 10, 28, 0.35) 0%,
+        rgba(8, 10, 28, 0.5) 60%,
+        rgba(8, 10, 28, 0.65) 100%
+    );
+    pointer-events: none;
+    z-index: 0;
+}
+
+.buildingCell {
+    position: absolute;
+    width: 200px;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1rem 0.75rem 0.75rem;
+    border-radius: 14px;
+    background: rgba(20, 24, 60, 0.45);
+    border: 1px solid rgba(120, 140, 220, 0.22);
+    backdrop-filter: blur(2px);
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+    /* overflow:hidden を外したのは、ズームアウト時に子要素を逆スケーリングで
+       拡大するとセルからはみ出るため。cellBg は cellBgWrapper 側でクリップ済み。 */
+}
+
+/* 内装画像があるセル: 画像をセル全面に敷き、テキストは前面に */
+.buildingCell.withImage {
+    padding-top: 0.6rem;
+    justify-content: flex-end;
+}
+
+.cellBgWrapper {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    overflow: hidden;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.cellBg {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    opacity: 0.55;
+    transition: opacity 0.25s ease, transform 0.4s ease;
+}
+
+.cellBgOverlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        180deg,
+        rgba(10, 14, 40, 0.25) 0%,
+        rgba(10, 14, 40, 0.45) 55%,
+        rgba(10, 14, 40, 0.88) 100%
+    );
+    pointer-events: none;
+}
+
+.buildingCell.withImage:hover .cellBg {
+    opacity: 0.72;
+    transform: scale(1.06);
+}
+
+/* 前面コンテンツが背景画像より上に来るよう z-index で保証 */
+.buildingCell > .buildingName,
+.buildingCell > .occupantStrip,
+.buildingCell > .empty,
+.buildingCell > .houseIcon {
+    position: relative;
+    z-index: 1;
+}
+
+/* 現在地バッジは最前面 */
+.buildingCell.current::after {
+    z-index: 2;
+}
+
+.buildingCell:hover {
+    transform: translateY(-4px);
+    background: rgba(36, 42, 90, 0.55);
+    border-color: rgba(180, 200, 255, 0.55);
+    box-shadow: 0 10px 30px rgba(80, 100, 220, 0.35), 0 0 0 1px rgba(180, 200, 255, 0.15) inset;
+}
+
+/* 編集モード時: ドラッグ可能であることを cursor で示す。
+   hover アニメは抑制して位置感覚を邪魔しないようにする。 */
+.buildingCell.editing {
+    cursor: move;
+}
+
+.buildingCell.editing:hover {
+    transform: none;
+    box-shadow: 0 0 0 2px rgba(220, 180, 255, 0.55), 0 6px 20px rgba(120, 80, 220, 0.35);
+    border-color: rgba(220, 180, 255, 0.55);
+}
+
+/* 編集中に動かしたセルは色味を変えて変更分とわかるように */
+.buildingCell.moved {
+    box-shadow: 0 0 0 2px rgba(180, 240, 200, 0.7), 0 6px 20px rgba(80, 200, 140, 0.35);
+    border-color: rgba(180, 240, 200, 0.7);
+}
+
+.buildingCell.current {
+    border-color: rgba(255, 200, 120, 0.7);
+    box-shadow:
+        0 0 24px rgba(255, 180, 80, 0.35),
+        0 0 0 1px rgba(255, 200, 120, 0.45) inset;
+    background: rgba(50, 38, 70, 0.55);
+}
+
+.buildingCell.current::after {
+    content: "現在地";
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(255, 180, 80, 0.18);
+    color: #ffd49e;
+    border: 1px solid rgba(255, 180, 80, 0.55);
+}
+
+.houseIcon {
+    /* --inv-scale はズームアウト時のみ >1。文字や枠のサイズを実寸で拡大して
+       セルが縮んでも見やすくする。HomeIcon (svg) は React 側で動的に size 指定。 */
+    width: calc(64px * var(--inv-scale, 1));
+    height: calc(64px * var(--inv-scale, 1));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(140, 160, 255, 0.25), rgba(60, 80, 200, 0.35));
+    color: #e8ecff;
+    box-shadow: inset 0 0 12px rgba(180, 200, 255, 0.25), 0 4px 16px rgba(80, 100, 220, 0.25);
+    margin-bottom: 0.5rem;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    overflow: hidden;
+}
+
+.buildingCell:hover .houseIcon {
+    transform: scale(1.05);
+    box-shadow: inset 0 0 14px rgba(180, 200, 255, 0.35), 0 6px 20px rgba(80, 100, 220, 0.35);
+}
+
+.buildingCell.current .houseIcon {
+    background: linear-gradient(135deg, rgba(255, 200, 120, 0.35), rgba(220, 130, 80, 0.35));
+    box-shadow: inset 0 0 14px rgba(255, 220, 180, 0.35), 0 4px 20px rgba(255, 160, 80, 0.35);
+}
+
+.buildingName {
+    font-size: calc(0.95rem * var(--inv-scale, 1));
+    font-weight: 500;
+    color: #f0f2ff;
+    text-align: center;
+    margin: 0 0 0.6rem;
+    line-height: 1.3;
+    word-break: break-word;
+}
+
+/* 内装画像背景の上では名前にテキストシャドウを付けて可読性確保 */
+.buildingCell.withImage .buildingName {
+    margin-top: auto;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85), 0 0 4px rgba(0, 0, 0, 0.6);
+    font-weight: 600;
+}
+
+.occupantStrip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: calc(6px * var(--inv-scale, 1));
+    margin-top: auto;
+    min-height: calc(44px * var(--inv-scale, 1));
+    align-items: flex-end;
+}
+
+.occupant {
+    position: relative;
+    width: calc(36px * var(--inv-scale, 1));
+    height: calc(36px * var(--inv-scale, 1));
+    border-radius: 50%;
+    overflow: hidden;
+    border: 2px solid rgba(180, 200, 255, 0.5);
+    background: rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.occupant:hover {
+    transform: scale(1.18);
+    border-color: rgba(255, 220, 140, 0.9);
+    box-shadow: 0 0 12px rgba(255, 200, 120, 0.6);
+    z-index: 3;
+}
+
+.occupant img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.occupantOverflow {
+    width: calc(36px * var(--inv-scale, 1));
+    height: calc(36px * var(--inv-scale, 1));
+    border-radius: 50%;
+    background: rgba(80, 100, 180, 0.55);
+    color: #e6e8ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(0.75rem * var(--inv-scale, 1));
+    font-weight: 500;
+    border: 2px solid rgba(180, 200, 255, 0.5);
+}
+
+.empty {
+    font-size: calc(0.7rem * var(--inv-scale, 1));
+    opacity: 0.45;
+    margin-top: auto;
+    padding: 0.4rem 0;
+    letter-spacing: 0.05em;
+}
+
+.tooltip {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(20, 24, 60, 0.95);
+    color: #f0f2ff;
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    border: 1px solid rgba(180, 200, 255, 0.35);
+    z-index: 4;
+}
+
+.loading {
+    text-align: center;
+    padding: 3rem 1rem;
+    opacity: 0.6;
+    font-size: 0.85rem;
+}
+
+.errorMsg {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: #ffb0b0;
+}
+
+@media (max-width: 768px) {
+    .grid {
+        gap: 1rem 0.75rem;
+        padding: 1rem;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    }
+    .buildingCell {
+        min-height: 150px;
+        padding: 0.75rem 0.5rem 0.5rem;
+    }
+    .houseIcon {
+        width: 52px;
+        height: 52px;
+    }
+    .occupant, .occupantOverflow {
+        width: 30px;
+        height: 30px;
+    }
+    .titleBar {
+        padding: 1rem 1rem 0.25rem;
+    }
+}

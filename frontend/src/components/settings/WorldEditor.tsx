@@ -21,6 +21,7 @@ interface City {
     API_PORT: number;
     START_IN_ONLINE_MODE: boolean;
     TIMEZONE: string;
+    MAP_BACKGROUND_IMAGE?: string | null;
 }
 
 interface Building {
@@ -213,7 +214,7 @@ export default function WorldEditor() {
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
         setSelectedCity(city);
-        setFormData({ name: city.CITYNAME, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE });
+        setFormData({ name: city.CITYNAME, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
     };
     const handleCreateCity = async () => { if (await apiCall('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); setFormData({}); } };
     const handleUpdateCity = async () => { if (await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { loadCities(); } };
@@ -389,6 +390,14 @@ export default function WorldEditor() {
                                 <Field label="API ポート"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
                             </div>
                             <Field label="タイムゾーン"><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
+                            {selectedCity && <Field label="街マップの背景画像">
+                                <ImageUpload
+                                    value={formData.map_background_image || ''}
+                                    onChange={(url: string) => setFormData({ ...formData, map_background_image: url })}
+                                    uploadEndpoint="hires"
+                                />
+                                <small style={{ color: '#666', fontSize: '0.8rem' }}>City Map モーダルで全Buildingの背景に敷かれる1枚絵（解像度はそのまま、WebPに変換のみ）</small>
+                            </Field>}
                             {selectedCity && <label><input type="checkbox" checked={formData.online_mode || false} onChange={(e: any) => setFormData({ ...formData, online_mode: e.target.checked })} /> オンラインモードで起動</label>}
                             {renderFormActions(selectedCity, handleCreateCity, handleUpdateCity, handleDeleteCity)}
                         </div>

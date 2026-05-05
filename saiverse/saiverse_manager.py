@@ -1356,6 +1356,7 @@ class SAIVerseManager(
         timezone_name: str,
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
+        map_background_image: Optional[str] = None,
     ) -> str:
         """ワールドエディタからCityの設定を更新する"""
         return self.admin.update_city(
@@ -1368,6 +1369,7 @@ class SAIVerseManager(
             timezone_name,
             host_avatar_path,
             host_avatar_upload,
+            map_background_image,
         )
 
     def get_user_profile(self) -> Tuple[str, str]:

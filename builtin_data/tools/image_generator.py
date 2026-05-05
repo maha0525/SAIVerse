@@ -33,16 +33,52 @@ logger = logging.getLogger(__name__)
 ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"]
 QualityType = Literal["low", "medium", "high", "auto"]
+SizeType = Literal[
+    "auto",
+    "1024x1024",
+    "1536x1024",
+    "1024x1536",
+    "2048x2048",
+    "2048x1152",
+    "1152x2048",
+    "3840x2160",
+    "2160x3840",
+]
 
 
 def _aspect_ratio_to_openai_size(aspect_ratio: str) -> str:
-    """Convert aspect ratio to OpenAI size format."""
+    """Convert aspect ratio to OpenAI gpt-image size (fallback when size='auto').
+
+    All returned values satisfy gpt-image-2 / gpt-image-1.5 constraints:
+    - max edge <= 3840
+    - both edges multiples of 16
+    - aspect ratio <= 3:1
+    - total pixels 655,360 - 8,294,400
+
+    Aspect ratios exceeding 3:1 (1:4, 4:1, 1:8, 8:1) are clamped to the
+    nearest valid orientation (3:2 / 2:3) with a warning log.
+    """
+    extreme = {"1:4", "4:1", "1:8", "8:1"}
+    if aspect_ratio in extreme:
+        clamped = "1024x1536" if aspect_ratio.startswith("1:") else "1536x1024"
+        logger.warning(
+            "[image_generator] aspect_ratio=%s exceeds OpenAI 3:1 limit, "
+            "clamping to %s",
+            aspect_ratio, clamped,
+        )
+        return clamped
+
     mapping = {
         "1:1": "1024x1024",
-        "16:9": "1536x1024",
+        "16:9": "1536x1024",   # close to 16:9 within constraints (true 16:9 at 1536 is 864, below min pixels)
         "9:16": "1024x1536",
-        "4:3": "1536x1024",  # Use landscape for 4:3
-        "3:4": "1024x1536",  # Use portrait for 3:4
+        "4:3": "1536x1152",    # exact 4:3
+        "3:4": "1152x1536",    # exact 3:4
+        "2:3": "1024x1536",    # exact 2:3
+        "3:2": "1536x1024",    # exact 3:2
+        "4:5": "1024x1280",    # exact 4:5
+        "5:4": "1280x1024",    # exact 5:4
+        "21:9": "3072x1344",   # ~21:9 (2.286), within max edge 3840
     }
     return mapping.get(aspect_ratio, "1024x1024")
 
@@ -209,6 +245,7 @@ def _generate_with_gpt_image_1_5(
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
 ) -> Tuple[bytes, str]:
     """Generate image using OpenAI GPT Image 1.5."""
     from openai import OpenAI
@@ -218,14 +255,17 @@ def _generate_with_gpt_image_1_5(
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
 
     client = OpenAI(api_key=api_key)
-    size = _aspect_ratio_to_openai_size(aspect_ratio)
+    if size and size != "auto":
+        effective_size = size
+    else:
+        effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
     effective_quality = quality if quality != "auto" else "high"
 
     if input_image_paths:
         # Use images.edit for input image processing
         logger.info(
             f"[gpt_image] Editing with {len(input_image_paths)} input images, "
-            f"size={size}, quality={effective_quality}"
+            f"size={effective_size} (requested={size}), quality={effective_quality}"
         )
 
         # Prepare input images as file-like objects
@@ -239,7 +279,7 @@ def _generate_with_gpt_image_1_5(
                 model="gpt-image-1.5",
                 image=image_files if len(image_files) > 1 else image_files[0],
                 prompt=prompt,
-                size=size,
+                size=effective_size,
                 quality=effective_quality,
                 n=1,
             )
@@ -248,12 +288,15 @@ def _generate_with_gpt_image_1_5(
                 f.close()
     else:
         # Standard generation without input images
-        logger.info(f"[gpt_image] Generating with size={size}, quality={effective_quality}")
+        logger.info(
+            f"[gpt_image] Generating with size={effective_size} (requested={size}), "
+            f"quality={effective_quality}"
+        )
 
         result = client.images.generate(
             model="gpt-image-1.5",
             prompt=prompt,
-            size=size,
+            size=effective_size,
             quality=effective_quality,
             n=1,
         )
@@ -270,6 +313,7 @@ def _generate_with_gpt_image_2(
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
 ) -> Tuple[bytes, str]:
     """Generate image using OpenAI GPT Image 2."""
     from openai import OpenAI
@@ -279,14 +323,17 @@ def _generate_with_gpt_image_2(
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
 
     client = OpenAI(api_key=api_key)
-    size = _aspect_ratio_to_openai_size(aspect_ratio)
+    if size and size != "auto":
+        effective_size = size
+    else:
+        effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
     effective_quality = quality if quality != "auto" else "high"
 
     if input_image_paths:
         # Use images.edit for input image processing
         logger.info(
             f"[gpt_image] Editing with {len(input_image_paths)} input images, "
-            f"size={size}, quality={effective_quality}"
+            f"size={effective_size} (requested={size}), quality={effective_quality}"
         )
 
         # Prepare input images as file-like objects
@@ -300,7 +347,7 @@ def _generate_with_gpt_image_2(
                 model="gpt-image-2",
                 image=image_files if len(image_files) > 1 else image_files[0],
                 prompt=prompt,
-                size=size,
+                size=effective_size,
                 quality=effective_quality,
                 n=1,
             )
@@ -309,12 +356,15 @@ def _generate_with_gpt_image_2(
                 f.close()
     else:
         # Standard generation without input images
-        logger.info(f"[gpt_image] Generating with size={size}, quality={effective_quality}")
+        logger.info(
+            f"[gpt_image] Generating with size={effective_size} (requested={size}), "
+            f"quality={effective_quality}"
+        )
 
         result = client.images.generate(
             model="gpt-image-2",
             prompt=prompt,
-            size=size,
+            size=effective_size,
             quality=effective_quality,
             n=1,
         )
@@ -463,6 +513,7 @@ def generate_image(
     model: ModelType = "nano_banana_2",
     aspect_ratio: AspectRatioType = "1:1",
     quality: QualityType = "high",
+    size: SizeType = "auto",
     title: Optional[str] = None,
     input_images: Optional[List[str]] = None,
 ) -> Tuple[str, ToolResult, Optional[str], Optional[dict]]:
@@ -477,6 +528,9 @@ def generate_image(
             - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         quality: Image quality level ("low", "medium", "high", "auto")
+        size: Output image size in pixels (gpt_image_* only). "auto" uses
+            aspect_ratio + quality to pick a size. Specific values like
+            "2048x2048" override aspect_ratio. Ignored for non-OpenAI models.
         title: Optional title for the generated image item
         input_images: Optional list of image URIs to use as reference/input.
             Supported URI formats:
@@ -499,6 +553,8 @@ def generate_image(
         quality = "high"
     if not model:
         model = "nano_banana_2"
+    if not size:
+        size = "auto"
 
     # Check model availability and fallback if needed
     fallback_note = ""
@@ -555,9 +611,16 @@ def generate_image(
     for attempt_model in fallback_chain:
         logger.info(
             f"[image_generator] Trying model={attempt_model}, "
-            f"aspect_ratio={aspect_ratio}, quality={quality}, "
+            f"aspect_ratio={aspect_ratio}, quality={quality}, size={size}, "
             f"input_images={len(input_image_paths)}"
         )
+        # Warn if size override is set on a model that ignores it
+        if size != "auto" and attempt_model not in ("gpt_image_1_5", "gpt_image_2"):
+            logger.warning(
+                "[image_generator] size=%s is OpenAI-specific and will be "
+                "ignored by model=%s (using aspect_ratio instead)",
+                size, attempt_model,
+            )
         try:
             if attempt_model == "nano_banana_2":
                 image_data, mime = _generate_with_nano_banana_2(
@@ -569,11 +632,11 @@ def generate_image(
                 )
             elif attempt_model == "gpt_image_2":
                 image_data, mime = _generate_with_gpt_image_2(
-                    prompt, aspect_ratio, quality, input_image_paths
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
                 )
             elif attempt_model == "gpt_image_1_5":
                 image_data, mime = _generate_with_gpt_image_1_5(
-                    prompt, aspect_ratio, quality, input_image_paths
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
                 )
             elif attempt_model == "grok_imagine":
                 image_data, mime = _generate_with_grok_imagine(
@@ -708,6 +771,27 @@ def schema() -> ToolSchema:
                     "enum": ["low", "medium", "high", "auto"],
                     "description": "Image quality level",
                     "default": "high"
+                },
+                "size": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "1024x1024",
+                        "1536x1024",
+                        "1024x1536",
+                        "2048x2048",
+                        "2048x1152",
+                        "1152x2048",
+                        "3840x2160",
+                        "2160x3840"
+                    ],
+                    "description": (
+                        "Output pixel size for OpenAI gpt_image_* models only. "
+                        "'auto' picks a size from aspect_ratio. Specific values "
+                        "(e.g. '2048x2048') override aspect_ratio. Ignored for "
+                        "Gemini and Grok models."
+                    ),
+                    "default": "auto"
                 },
                 "title": {
                     "type": "string",
