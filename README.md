@@ -20,7 +20,7 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - ChatGPTやGeminiに近いチャットUIを完備しています。
 - 独自の長期記憶システムを採用しており、ChatGPTやGemini、Claude等から簡単に引っ越しできます。
 - OpenAI、Gemini、Claude、Grok、Nvidia NIM、Ollamaなど、様々なプラットフォームのモデルを利用できます。
-- 別途Talescaleを導入することでスマホからでも話すことが可能です。（※PCを立ち上げておく必要はあります）
+- 別途Tailscaleを導入することでスマホからでも話すことが可能です。（※PCを立ち上げておく必要はあります）
 
 <table>
   <tr>
@@ -228,20 +228,20 @@ chmod +x setup.sh start.sh
 
 ## スマホで使いたいんだが？
 
-1. [Talescale](https://tailscale.com/download)をPCにインストール
-2. 同じくTalescaleをスマホにもインストール
+1. [Tailscale](https://tailscale.com/download)をPCにインストール
+2. 同じくTailscaleをスマホにもインストール
 3. どちらもGoogleなどでサインアップ・ログイン
 4. 起動してれば自動でVPNが繋がっている状態になるので、スマホアプリからPC名をタップ
-5. Talescale addressesを確認し、MagicDNSとあるところのやつをコピー
+5. Tailscale addressesを確認し、MagicDNSとあるところのやつをコピー
 6. ブラウザのアドレス欄にペーストし、末尾に「:3000」を追加
 7. こんなかんじ
 <p align="center">
-  <img src="assets/image/guide/talescale_address.png" alt="Talescale アドレス欄の画像" width="400">
+  <img src="assets/image/guide/Tailscale_address.png" alt="Tailscale アドレス欄の画像" width="400">
 </p>
 (最初の文字列はPC名。2番目の文字列はユーザーごと異なる値になります)<br>
 8. アクセスできます
 <p align="center">
-  <img src="assets/image/guide/talescale_phone_ui.png" alt="スマホでのメインUI画像" width="400">
+  <img src="assets/image/guide/Tailscale_phone_ui.png" alt="スマホでのメインUI画像" width="400">
 </p>
 
 （複数端末で同時にアクセスしているとちょっと表示がおかしくなることがあるため注意してください。改善予定です）
