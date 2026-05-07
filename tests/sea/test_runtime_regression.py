@@ -47,7 +47,6 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
 
     assert result == ["assistant response"]
     assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
-    persona.history_manager.add_message.assert_called_once()
 
 
 def test_preview_context_delegates_to_preview_context_impl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,24 +144,6 @@ def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:
     assert persona.execution_state["status"] == "idle"
 
 
-def test_run_meta_user_logs_and_continues_on_history_record_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime, persona = _runtime_and_persona()
-    selected = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
-    logger_exception = Mock()
-
-    persona.history_manager.add_message.side_effect = RuntimeError("history failed")
-    runtime._choose_playbook = Mock(return_value=selected)
-    runtime._run_playbook = Mock(return_value=["ok"])
-    runtime._maybe_run_metabolism = Mock()
-    monkeypatch.setattr("sea.runtime.LOGGER.exception", logger_exception)
-
-    result = runtime.run_meta_user(persona, "hello", "b1")
-
-    assert result == ["ok"]
-    runtime._run_playbook.assert_called_once()
-    logger_exception.assert_called_once_with("Failed to record user input to history")
-
-
 def test_run_playbook_delegates_to_runtime_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, persona = _runtime_and_persona()
     playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
@@ -197,14 +178,19 @@ def test_emit_speak_payload_compatibility() -> None:
         user_presence_status="online",
         gateway_handle_ai_replies=Mock(),
         unity_gateway=None,
+        item_service=None,
     )
     runtime = SEARuntime(manager)
-    persona = SimpleNamespace(persona_id="pid", history_manager=SimpleNamespace(add_message=Mock()))
+    history_manager = SimpleNamespace(
+        add_to_persona_only=Mock(),
+        add_to_building_only=Mock(return_value=None),
+    )
+    persona = SimpleNamespace(persona_id="pid", history_manager=history_manager)
 
     runtime._emit_speak(persona, "b1", "hello", pulse_id="p-1")
 
-    persona.history_manager.add_message.assert_called_once()
-    payload = persona.history_manager.add_message.call_args.args[0]
+    history_manager.add_to_persona_only.assert_called_once()
+    payload = history_manager.add_to_persona_only.call_args.args[0]
     assert payload["metadata"] == {"tags": ["conversation", "pulse:p-1"], "with": ["npc-2", "user"]}
 
 

@@ -22,6 +22,12 @@ class _FakeQuery:
             return SimpleNamespace(SELECTED_META_PLAYBOOK=None)
         return None
 
+    def all(self):
+        model_name = getattr(self._model, "__name__", "")
+        if model_name == "Playbook" and self._playbook_exists:
+            return [SimpleNamespace(name="deep_research")]
+        return []
+
 
 class _FakeSession:
     def __init__(self, playbook_exists: bool = True) -> None:
@@ -47,7 +53,11 @@ class _FakeSession:
 
 class _FakeManager:
     def __init__(self) -> None:
-        self.state = SimpleNamespace(current_playbook=None, playbook_params={})
+        self.state = SimpleNamespace(
+            current_playbook=None,
+            playbook_args={},
+            developer_mode=False,
+        )
 
 
 def _patch_session_local(monkeypatch: pytest.MonkeyPatch, *, playbook_exists: bool) -> None:
@@ -68,7 +78,7 @@ def test_set_playbook_meta_user_manual_rejects_unknown_selected_playbook(monkeyp
         config.set_playbook(
             config.PlaybookOverrideRequest(
                 playbook="meta_user_manual",
-                playbook_params={"selected_playbook": "表示ラベル"},
+                args={"selected_playbook": "表示ラベル"},
             ),
             manager=manager,
         )
@@ -84,7 +94,7 @@ def test_set_playbook_meta_user_manual_allows_empty_selected_playbook(monkeypatc
     resp = config.set_playbook(
         config.PlaybookOverrideRequest(
             playbook="meta_user_manual",
-            playbook_params={"selected_playbook": ""},
+            args={"selected_playbook": ""},
         ),
         manager=manager,
     )
@@ -100,10 +110,10 @@ def test_set_playbook_meta_user_manual_accepts_existing_selected_playbook(monkey
     resp = config.set_playbook(
         config.PlaybookOverrideRequest(
             playbook="meta_user_manual",
-            playbook_params={"selected_playbook": "deep_research"},
+            args={"selected_playbook": "deep_research"},
         ),
         manager=manager,
     )
 
     assert resp["success"] is True
-    assert resp["playbook_params"]["selected_playbook"] == "deep_research"
+    assert resp["args"]["selected_playbook"] == "deep_research"

@@ -1122,10 +1122,12 @@ class TestLLMClients(unittest.TestCase):
         mock_response.raise_for_status.return_value = None
 
         # ストリーム応答のモック
+        # Ollama /api/chat はネイティブ JSON-line 形式 (SSE ではない)。
+        # 各行は {"message": {"content": "..."}, "done": false} で、最後に {"done": true}。
         def iter_lines_mock():
-            yield b'data: {"choices":[{"delta":{"content":"Stream "}}]}' + b'\n'
-            yield b'data: {"choices":[{"delta":{"content":"test"}}]}' + b'\n'
-            yield b'data: [DONE]' + b'\n'
+            yield b'{"message":{"content":"Stream ","thinking":""},"done":false}'
+            yield b'{"message":{"content":"test","thinking":""},"done":false}'
+            yield b'{"done":true,"done_reason":"stop"}'
         mock_response.iter_lines.return_value = iter_lines_mock()
         mock_post.return_value = mock_response
 
@@ -1136,7 +1138,8 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(list(response_generator), ["Stream ", "test"])
         mock_post.assert_called_once()
         args, kwargs = mock_post.call_args
-        self.assertEqual(args[0], client.url)
+        # 通常のストリーミングは /api/chat (native) を優先利用する
+        self.assertEqual(args[0], client.chat_url)
         payload = kwargs["json"]
         self.assertEqual(payload["model"], client.model)
         self.assertEqual(payload["messages"], messages)

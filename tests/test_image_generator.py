@@ -42,10 +42,11 @@ class TestImageGenerator(unittest.TestCase):
         temp_path.unlink(missing_ok=True)
 
     @patch.object(_mod, '_generate_with_grok_imagine', side_effect=RuntimeError("No key"))
-    @patch.object(_mod, '_generate_with_gpt_image', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_gpt_image_1_5', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_gpt_image_2', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_nano_banana_pro', side_effect=RuntimeError("No candidates"))
     @patch.object(_mod, '_generate_with_nano_banana_2', side_effect=RuntimeError("No candidates"))
-    def test_generate_image_error_returns_error_text(self, mock_nb2, mock_nbp, mock_gpt, mock_grok):
+    def test_generate_image_error_returns_error_text(self, mock_nb2, mock_nbp, mock_gpt2, mock_gpt15, mock_grok):
         # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
