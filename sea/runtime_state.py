@@ -187,36 +187,6 @@ def extract_structured_json(text: str) -> Optional[Dict[str, Any]]:
     return parsed
 
 
-def update_router_selection(state: Dict[str, Any], text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
-    selection = parsed or {}
-    playbook_value = selection.get("playbook") if isinstance(selection, dict) else None
-    if not playbook_value:
-        playbook_value = selection.get("playbook_name") if isinstance(selection, dict) else None
-
-    available_names: list[str] = []
-    try:
-        avail_raw = state.get("available_playbooks")
-        avail_list = json.loads(avail_raw) if isinstance(avail_raw, str) else avail_raw
-        if isinstance(avail_list, list):
-            for pb in avail_list:
-                pb_name = pb.get("name") if isinstance(pb, dict) else None
-                if isinstance(pb_name, str) and pb_name:
-                    available_names.append(pb_name)
-    except Exception:
-        LOGGER.warning("Failed to parse available_playbooks from state", exc_info=True)
-
-    if not playbook_value:
-        stripped = str(text).strip()
-        playbook_value = stripped.split()[0] if stripped else "basic_chat"
-
-    if available_names and playbook_value not in available_names:
-        playbook_value = "basic_chat"
-
-    state["selected_playbook"] = playbook_value or "basic_chat"
-    args_obj = selection.get("args") if isinstance(selection, dict) else None
-    state["selected_args"] = args_obj if isinstance(args_obj, dict) else {"input": state.get("input")}
-
-
 def resolve_set_value(value_template: Any, state: Dict[str, Any]) -> Any:
     if isinstance(value_template, (int, float, bool, type(None))):
         return value_template

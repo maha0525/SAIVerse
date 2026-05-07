@@ -37,8 +37,10 @@ def inject_persona_event(
     Args:
         persona_id: Target persona ID.
         event_description: Human-readable description (becomes user_input).
-        meta_playbook: Meta playbook to use (default: "meta_user").
-        args_json: JSON string of playbook args (incl. selected_playbook).
+        meta_playbook: Meta playbook to use (default: "track_user_conversation").
+        args_json: JSON string of playbook args. ``selected_playbook`` 指定は
+            現在無効 (Phase 3 B 残件で pre_spells 経路に置き換え予定;
+            handoff_2026-05-08 作業 2)。
         event_type: Event type tag for persona_event_log.
         _manager: SAIVerseManager reference (injected by PhenomenonManager).
     """
@@ -128,18 +130,17 @@ def inject_persona_event(
 {event_description}
 </system>"""
 
-    # When playbook_args has selected_playbook, use meta_user_manual
-    # which skips the LLM router and goes directly to exec(selected_playbook).
-    # The trigger args (trigger_tweet_id, etc.) are forwarded to the sub-playbook
-    # via the _args mechanism in the runtime.
+    # selected_playbook 指定経路は Phase 3 移行に伴い一時無効化 (旧 meta_user_manual
+    # 経路を削除したため)。Phase 3 B 残件 (handoff_2026-05-08 作業 2) で
+    # pre_spells 経由に復活予定。それまではログ警告して通常経路で処理する。
     if playbook_args and "selected_playbook" in playbook_args:
-        effective_playbook = "meta_user_manual"
-        LOGGER.info(
-            "[inject_persona_event] Using meta_user_manual with selected_playbook='%s'",
+        LOGGER.warning(
+            "[inject_persona_event] selected_playbook in args is currently ignored "
+            "(meta_user_manual route removed; pre_spells restoration pending in "
+            "Phase 3 B). selected_playbook='%s'",
             playbook_args["selected_playbook"],
         )
-    else:
-        effective_playbook = meta_playbook or "meta_user"
+    effective_playbook = meta_playbook or "track_user_conversation"
 
     try:
         pulse_controller.submit_schedule(
@@ -181,7 +182,7 @@ def schema() -> PhenomenonSchema:
                 },
                 "meta_playbook": {
                     "type": "string",
-                    "description": "使用するメタPlaybook名（デフォルト: meta_user）",
+                    "description": "使用するメタPlaybook名（デフォルト: track_user_conversation）",
                 },
                 "args_json": {
                     "type": "string",

@@ -62,10 +62,7 @@
     }
   ],
   "playbooks": [
-    "basic_chat",
-    "meta_user",
-    "meta_auto",
-    "sub_router_user",
+    "track_user_conversation",
     "sub_speak",
     "meta_simple_speak",
     "meta_exec_speak"

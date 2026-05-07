@@ -65,6 +65,15 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Optional JSON schema to enforce structured output."
     )
+    response_schema_source: Optional[str] = Field(
+        default=None,
+        description="Dynamic source for response_schema, resolved at node execution. "
+                    "Currently supports 'spell:<spell_name>' which loads the input schema "
+                    "of a registered Spell from SPELL_TOOL_SCHEMAS. The source string "
+                    "supports template substitution ({state_var}). Used together with "
+                    "spell_args_decider for pre_spells dynamic argument generation. "
+                    "Ignored if response_schema is also specified."
+    )
     output_key: Optional[str] = Field(
         default=None,
         description="Key name to store structured output for later nodes. Defaults to node id."

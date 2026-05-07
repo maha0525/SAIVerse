@@ -186,43 +186,18 @@ class RuntimeEngine:
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             selected_playbook = state.get(playbook_source)
-            sub_name = selected_playbook or state.get("last") or "basic_chat"
+            sub_name = selected_playbook or state.get("last") or ""
             clean_name = str(sub_name).strip()
-            selected_playbook_missing = (
-                playbook.name == "meta_user_manual"
-                and playbook_source == "selected_playbook"
-                and bool(selected_playbook)
-            )
 
-            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id)
+            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id) if clean_name else None
             if sub_pb is None:
-                if selected_playbook_missing:
-                    error_msg = f"指定されたツールID '{clean_name}' は存在しません。"
-                    state["last"] = error_msg
-                    state["_exec_error"] = True
-                    state["_exec_error_detail"] = f"Selected playbook not found: {clean_name}"
-                    log_sea_trace(playbook.name, node_id, "EXEC", f"→ {state['_exec_error_detail']}")
-                    if event_callback:
-                        event_callback({
-                            "type": "warning",
-                            "content": error_msg,
-                            "playbook": playbook.name,
-                            "node": node_id,
-                        })
-                    if outputs is not None:
-                        outputs.append(error_msg)
-                    return state
-
-                if clean_name == "basic_chat":
-                    sub_pb = self.runtime._basic_chat_playbook()
-                else:
-                    error_msg = f"Sub-playbook not found: {clean_name}"
-                    state["last"] = error_msg
-                    state["_exec_error"] = True
-                    state["_exec_error_detail"] = error_msg
-                    if outputs is not None:
-                        outputs.append(error_msg)
-                    return state
+                error_msg = f"Sub-playbook not found: {clean_name or '<empty>'}"
+                state["last"] = error_msg
+                state["_exec_error"] = True
+                state["_exec_error_detail"] = error_msg
+                if outputs is not None:
+                    outputs.append(error_msg)
+                return state
 
             # Build child args: static args (template) + dynamic args_source (overrides)
             child_args = {}
@@ -251,52 +226,51 @@ class RuntimeEngine:
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
             # ── Playbook permission check ──
-            if clean_name != "basic_chat":
-                city_id = getattr(self.manager, "city_id", None)
-                if city_id is not None:
-                    perm = self.runtime._get_playbook_permission(city_id, clean_name)
-                    log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name} → {perm}")
+            city_id = getattr(self.manager, "city_id", None)
+            if city_id is not None:
+                perm = self.runtime._get_playbook_permission(city_id, clean_name)
+                log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name} → {perm}")
 
-                    if perm == "blocked":
-                        denial_msg = f"Playbook '{clean_name}' is not available (permission: {perm})"
+                if perm == "blocked":
+                    denial_msg = f"Playbook '{clean_name}' is not available (permission: {perm})"
+                    self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
+                    return state
+
+                if perm == "ask_every_time":
+                    if auto_mode:
+                        denial_msg = f"Playbook '{clean_name}' requires user permission but running in auto mode. Skipped."
                         self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
                         return state
 
-                    if perm == "ask_every_time":
-                        if auto_mode:
-                            denial_msg = f"Playbook '{clean_name}' requires user permission but running in auto mode. Skipped."
+                    # Schedule pulses (external events, timed schedules) have no
+                    # frontend connection for interactive dialogs.  The user's
+                    # act of configuring the automation serves as pre-approval.
+                    pulse_type = state.get("_pulse_type")
+                    if pulse_type == "schedule":
+                        log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
+                        # Fall through to execution
+                    else:
+                        response = self.runtime._request_playbook_permission(clean_name, persona, event_callback)
+
+                        if response in ("deny", "timeout"):
+                            denial_msg = (
+                                f"User denied execution of playbook '{clean_name}'. Please respond without using this tool."
+                                if response == "deny"
+                                else f"Permission request for playbook '{clean_name}' timed out. Please respond without using this tool."
+                            )
                             self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
                             return state
 
-                        # Schedule pulses (external events, timed schedules) have no
-                        # frontend connection for interactive dialogs.  The user's
-                        # act of configuring the automation serves as pre-approval.
-                        pulse_type = state.get("_pulse_type")
-                        if pulse_type == "schedule":
-                            log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
-                            # Fall through to execution
-                        else:
-                            response = self.runtime._request_playbook_permission(clean_name, persona, event_callback)
+                        if response == "always_allow":
+                            self.runtime._set_playbook_permission(city_id, clean_name, "auto_allow")
 
-                            if response in ("deny", "timeout"):
-                                denial_msg = (
-                                    f"User denied execution of playbook '{clean_name}'. Please respond without using this tool."
-                                    if response == "deny"
-                                    else f"Permission request for playbook '{clean_name}' timed out. Please respond without using this tool."
-                                )
-                                self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                                return state
+                        if response == "never_use":
+                            denial_msg = f"User disabled playbook '{clean_name}'. This playbook will not be available in future. Please respond without using this tool."
+                            self.runtime._set_playbook_permission(city_id, clean_name, "user_only")
+                            self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
+                            return state
 
-                            if response == "always_allow":
-                                self.runtime._set_playbook_permission(city_id, clean_name, "auto_allow")
-
-                            if response == "never_use":
-                                denial_msg = f"User disabled playbook '{clean_name}'. This playbook will not be available in future. Please respond without using this tool."
-                                self.runtime._set_playbook_permission(city_id, clean_name, "user_only")
-                                self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
-                                return state
-
-                    # perm == "auto_allow" or allowed via dialog → continue
+                # perm == "auto_allow" or allowed via dialog → continue
 
             # Determine execution mode
             execution = getattr(node_def, "execution", "inline") or "inline"

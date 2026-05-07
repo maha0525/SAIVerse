@@ -42,6 +42,16 @@ _SPELL_PATTERN = re.compile(
     r"^/spell\s+name='([^']+)'\s+args=(.+)$",
     re.MULTILINE,
 )
+# Args-omitted form (no explicit ``args=``): ``/spell name='X'``
+# Indicates "execute this Spell, but the args are not yet known". Used by the
+# pre_spells dynamic-args path: schedule_manager / inject_persona_event etc.
+# enqueue this form when the user (or schedule definition) only specified the
+# Spell name; _execute_pre_spells then routes through ``spell_args_decider``
+# Playbook to fill in the args at runtime.
+_SPELL_PATTERN_NO_ARGS = re.compile(
+    r"^/spell\s+name='([^']+)'\s*$",
+    re.MULTILINE,
+)
 # Fuzzy form: /spell tool_name key='value' key2='value2' ...
 _SPELL_PATTERN_FUZZY = re.compile(
     r"^/spell\s+(\w+)\s+(.+)$",
@@ -52,6 +62,41 @@ _KV_PATTERN = re.compile(
     r"(\w+)="
     r"(?:'([^']*)'|\"([^\"]*)\"|(\{[^}]*\})|([\w\-./]+))"
 )
+
+
+def _resolve_response_schema_source(source: str) -> Optional[Dict[str, Any]]:
+    """Resolve a response_schema_source string into a JSON schema dict.
+
+    Supported forms:
+    - ``spell:<spell_name>`` — loads ``SPELL_TOOL_SCHEMAS[<spell_name>].parameters``
+      (the Spell's input JSON Schema). Used by spell_args_decider Playbook to
+      drive structured output for dynamic Spell argument generation.
+
+    Returns None if the source cannot be resolved.
+    """
+    if not isinstance(source, str) or not source.strip():
+        return None
+    if source.startswith("spell:"):
+        spell_name = source[len("spell:"):].strip()
+        if not spell_name:
+            return None
+        schema = SPELL_TOOL_SCHEMAS.get(spell_name)
+        if schema is None:
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'spell:%s' references unknown spell",
+                spell_name,
+            )
+            return None
+        params = getattr(schema, "parameters", None)
+        if not isinstance(params, dict):
+            LOGGER.warning(
+                "[sea][llm] Spell '%s' has no usable parameters schema (got %r)",
+                spell_name, type(params).__name__,
+            )
+            return None
+        return params
+    LOGGER.warning("[sea][llm] Unrecognized response_schema_source form: %r", source)
+    return None
 
 
 def _parse_spell_args(args_raw: str, *, silent: bool = False) -> Optional[dict]:
@@ -658,6 +703,73 @@ async def _run_spell_loop(
         return text, details_blocks, loop_count
 
 
+async def _decide_spell_args_via_playbook(
+    spell_name: str,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    outer_state: dict,
+    event_callback: Optional[Callable],
+) -> Optional[Dict[str, Any]]:
+    """Run ``spell_args_decider`` Playbook (sub_line) to obtain args for a Spell.
+
+    The Playbook reads parent line messages (via the snapshot pipeline added in
+    v0.25) so the persona's cognition includes the ongoing context. The Playbook
+    must include ``args`` in its ``output_schema`` and the inner LLM node should
+    use ``response_schema_source: "spell:{spell_name}"`` + ``output_key: "args"``
+    to surface the structured output through the sub-line → parent_state path.
+
+    Returns the args dict, or None if the Playbook is missing / produced no args.
+    """
+    pb = runtime._load_playbook_for("spell_args_decider", persona, building_id)
+    if pb is None:
+        LOGGER.warning(
+            "[sea][pre_spells] spell_args_decider Playbook not found; cannot decide "
+            "args for '%s'. Install builtin_data/playbooks/public/spell_args_decider.json.",
+            spell_name,
+        )
+        return None
+
+    # Build a fresh parent_state for the decider, snapshotting what the sub-line
+    # needs from the caller (mirrors run_playbook Spell pattern). The decider's
+    # output_schema entries (`args`) are written back into this dict on completion.
+    decider_parent_state: Dict[str, Any] = {
+        "_messages": list(outer_state.get("_messages") or []),
+        "_pulse_context": outer_state.get("_pulse_context"),
+        "_pulse_id": outer_state.get("_pulse_id"),
+    }
+
+    try:
+        await asyncio.to_thread(
+            runtime._run_playbook,
+            pb, persona, building_id,
+            None,  # user_input — decider reads spell_name via initial_params
+            False,  # auto_mode
+            record_history=True,
+            parent_state=decider_parent_state,
+            event_callback=event_callback,
+            initial_params={"spell_name": spell_name},
+            line="sub",
+            isolate_pulse_context=False,
+        )
+    except Exception:
+        LOGGER.exception(
+            "[sea][pre_spells] spell_args_decider raised for '%s'", spell_name,
+        )
+        return None
+
+    args = decider_parent_state.get("args")
+    if not isinstance(args, dict):
+        LOGGER.warning(
+            "[sea][pre_spells] spell_args_decider produced no 'args' dict for '%s' "
+            "(got %r). Ensure the Playbook's output_schema includes 'args' and the "
+            "inner LLM node uses output_key='args'.",
+            spell_name, type(args).__name__,
+        )
+        return None
+    return dict(args)
+
+
 async def _execute_pre_spells(
     pre_spells: List[str],
     runtime: Any,
@@ -670,13 +782,24 @@ async def _execute_pre_spells(
     """Execute UI-requested spells before the first LLM call of a Pulse.
 
     Triggered by the chat API when the user manually selects a Playbook in
-    the UI ("ツール指定" mode, the replacement for the deprecated
-    ``meta_user_manual`` Playbook). Each entry in ``pre_spells`` is a Spell
-    invocation string (e.g. ``/run_playbook(name="memory_research")``).
+    the UI ("ツール指定" mode), and by schedule_manager when a schedule
+    specifies a Spell to run. Each entry in ``pre_spells`` is a Spell
+    invocation string in one of two forms:
+
+    - ``/spell name='X' args={...}`` — fully specified args (executed as-is)
+    - ``/spell name='X'`` — args omitted; resolved at runtime by invoking
+      the ``spell_args_decider`` Playbook so the persona's own cognition
+      decides the args (mirrors the Spell loop pattern where the persona
+      writes the args in their utterance).
 
     Behavior:
-    - Parse each entry via ``_parse_spell_lines``; unknown / unparseable
-      entries log a warning and are skipped.
+    - Parse each entry via ``_parse_spell_lines`` first; if that fails, try
+      the no-args form via ``_SPELL_PATTERN_NO_ARGS``. Unknown spells / un-
+      parseable entries log a warning and are skipped.
+    - For no-args entries, run ``spell_args_decider`` Playbook (sub_line)
+      to obtain the args. The Playbook reads parent line messages via the
+      snapshot pipeline (v0.25) so the persona can decide args from their
+      ongoing context.
     - Execute valid spells in parallel via ``_run_spell_tool_async``, the
       same path used by the regular spell loop.
     - Append a single ``<system>``-tagged user message to
@@ -698,20 +821,55 @@ async def _execute_pre_spells(
         LOGGER.warning("[sea][pre_spells] state['_messages'] is missing; skipping")
         return
 
-    valid_specs: List[Tuple[str, dict, str]] = []
+    # Phase 1: parse entries, splitting into "args known" and "args needed"
+    # buckets. The latter triggers spell_args_decider before execution.
+    fully_specified: List[Tuple[str, dict, str]] = []
+    needs_decision: List[str] = []  # spell names whose args must be decided
     for entry in pre_spells:
         if not isinstance(entry, str) or not entry.strip():
             continue
         parsed = _parse_spell_lines(entry)
-        if not parsed:
-            LOGGER.warning("[sea][pre_spells] Could not parse spell entry: %r", entry)
+        if parsed:
+            for name, args, _, normalized in parsed:
+                if name not in SPELL_TOOL_NAMES:
+                    LOGGER.warning("[sea][pre_spells] Unknown spell '%s', skipping", name)
+                    continue
+                fully_specified.append((name, args, normalized))
             continue
-        for name, args, _, normalized in parsed:
-            if name not in SPELL_TOOL_NAMES:
-                LOGGER.warning("[sea][pre_spells] Unknown spell '%s', skipping", name)
+        # Try args-omitted form
+        m = _SPELL_PATTERN_NO_ARGS.search(entry)
+        if m:
+            spell_name = m.group(1)
+            if spell_name not in SPELL_TOOL_NAMES:
+                LOGGER.warning("[sea][pre_spells] Unknown spell '%s' (no-args form), skipping", spell_name)
                 continue
-            valid_specs.append((name, args, normalized))
+            needs_decision.append(spell_name)
+            continue
+        LOGGER.warning("[sea][pre_spells] Could not parse spell entry: %r", entry)
 
+    # Phase 2: resolve args for entries that need decision via spell_args_decider
+    decided: List[Tuple[str, dict, str]] = []
+    for spell_name in needs_decision:
+        try:
+            args = await _decide_spell_args_via_playbook(
+                spell_name, runtime, persona, building_id, state, event_callback,
+            )
+        except Exception:
+            LOGGER.exception(
+                "[sea][pre_spells] spell_args_decider failed for '%s'; skipping",
+                spell_name,
+            )
+            continue
+        if args is None:
+            LOGGER.warning(
+                "[sea][pre_spells] spell_args_decider returned no args for '%s'; skipping",
+                spell_name,
+            )
+            continue
+        normalized = _normalize_spell_line(spell_name, args)
+        decided.append((spell_name, args, normalized))
+
+    valid_specs: List[Tuple[str, dict, str]] = fully_specified + decided
     if not valid_specs:
         return
 
@@ -790,10 +948,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             cancellation_token.raise_if_cancelled()
 
         # ── Pre-spells: execute UI-requested spells before the first LLM call ──
-        # Set by the chat API for "ツール指定" mode (replaces deprecated
-        # meta_user_manual). Runs at most once per Pulse, gated by
-        # state["_pre_spells_executed"]. Result messages flow into state["_messages"]
-        # via the normal spell-loop machinery, so the first LLM round sees them.
+        # Set by the chat API for "ツール指定" mode. Runs at most once per Pulse,
+        # gated by state["_pre_spells_executed"]. Result messages flow into
+        # state["_messages"] via the normal spell-loop machinery, so the first
+        # LLM round sees them.
         _pre_spells = state.get("_pre_spells")
         if _pre_spells and not state.get("_pre_spells_executed"):
             state["_pre_spells_executed"] = True
@@ -808,13 +966,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         node_id = getattr(node_def, "id", "llm")
         if event_callback:
             event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-        # Merge state into variables for template formatting
-        if playbook.name == 'sub_router_user':
-            action_dbg = getattr(node_def, 'action', None)
-            LOGGER.debug('[sea][router-debug] action=%s model_type=%s avail_len=%s',
-                         (action_dbg[:120] + '...') if isinstance(action_dbg, str) and len(action_dbg) > 120 else action_dbg,
-                         getattr(node_def, 'model_type', None),
-                         len(str(state.get('available_playbooks'))) if state.get('available_playbooks') is not None else None)
 
         # Build variables for template formatting
         # System variables (_ prefix) are excluded — only playbook variables are exposed to templates
@@ -909,6 +1060,29 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
             # Dynamically add enum to response_schema if available_playbooks exists
             response_schema = getattr(node_def, "response_schema", None)
+
+            # Resolve response_schema_source if response_schema is not explicitly set.
+            # Supports 'spell:<name>' to load a registered Spell's input schema from
+            # SPELL_TOOL_SCHEMAS. Template variables ({state_var}) are expanded first.
+            if response_schema is None:
+                schema_source = getattr(node_def, "response_schema_source", None)
+                if schema_source:
+                    try:
+                        resolved_source = _format(schema_source, variables)
+                    except Exception:
+                        LOGGER.warning(
+                            "[sea][llm] Failed to expand response_schema_source template %r",
+                            schema_source, exc_info=True,
+                        )
+                        resolved_source = schema_source
+                    response_schema = _resolve_response_schema_source(resolved_source)
+                    if response_schema is None:
+                        LOGGER.warning(
+                            "[sea][llm] response_schema_source %r resolved to None; "
+                            "node %s will run without structured output",
+                            resolved_source, getattr(node_def, "id", "?"),
+                        )
+
             if response_schema and "available_playbooks" in state:
                 response_schema = runtime._add_playbook_enum(response_schema, state.get("available_playbooks"))
 

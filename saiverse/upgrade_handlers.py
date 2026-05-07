@@ -149,6 +149,170 @@ def _insert_upgrade_notification(persona_id: str) -> None:
         )
 
 
+# ---- v0.3.0.dev1: 削除済み Playbook 名のスケジュール書き換え ----
+
+# Phase 3 移行 (handoff_2026-05-08) で削除した meta_* / sub_router_user / basic_chat
+# Playbook の名前。persona_schedule.META_PLAYBOOK にこれらが残っていると Pulse 起動時に
+# Playbook not found で実行エラーになるため、起動時に track_user_conversation へ
+# 巻き取る。
+_DEPRECATED_PLAYBOOK_NAMES_V0_3_0_DEV1 = {
+    "meta_user",
+    "meta_user_manual",
+    "basic_chat",
+    "sub_router_user",
+}
+
+_LEGACY_PLAYBOOK_REPLACEMENT = "track_user_conversation"
+
+
+def _v0_3_0_dev1_legacy_schedule_playbook_names(*, session: "Session", ai: "AI") -> None:
+    """v0.3.0.dev1 で削除した meta_user / meta_user_manual / basic_chat / sub_router_user を
+    persona_schedule.META_PLAYBOOK から track_user_conversation に書き換える。
+
+    背景: Phase 3 で旧 meta_* Playbook を削除したため、既存スケジュールに古い名前が
+    残っていると実行時に Playbook not found エラーになる (PersonaSchedule.META_PLAYBOOK
+    は NOT NULL)。本ハンドラで AI 単位に自分のスケジュールを安全な値に巻き取る。
+
+    UserSettings.SELECTED_META_PLAYBOOK は frontend (ToolModeSelector / page.tsx) が
+    legacy 値を auto モードに collapse しているため実害がなく、本ハンドラでは触らない。
+
+    冪等性: 削除済み名前を track_user_conversation に置換するだけ。すでに正常値が
+    入っていれば触らない。何度走らせても同じ状態に収束する。
+
+    副作用の局所化: filter で PERSONA_ID を絞るので、自ペルソナのスケジュールしか
+    触らない (Intent 規約「副作用は局所化」の遵守)。
+    """
+    from database.models import PersonaSchedule
+
+    persona_id = ai.AIID
+    rows = (
+        session.query(PersonaSchedule)
+        .filter(
+            PersonaSchedule.PERSONA_ID == persona_id,
+            PersonaSchedule.META_PLAYBOOK.in_(_DEPRECATED_PLAYBOOK_NAMES_V0_3_0_DEV1),
+        )
+        .all()
+    )
+
+    if not rows:
+        LOGGER.debug(
+            "[handler:v0_3_0_dev1_legacy_schedule_playbook_names] persona=%s: "
+            "no schedules with deprecated playbook names",
+            persona_id,
+        )
+        return
+
+    for row in rows:
+        old_name = row.META_PLAYBOOK
+        row.META_PLAYBOOK = _LEGACY_PLAYBOOK_REPLACEMENT
+        LOGGER.info(
+            "[handler:v0_3_0_dev1_legacy_schedule_playbook_names] persona=%s "
+            "schedule_id=%s: %s -> %s",
+            persona_id, row.SCHEDULE_ID, old_name, _LEGACY_PLAYBOOK_REPLACEMENT,
+        )
+
+    LOGGER.info(
+        "[handler:v0_3_0_dev1_legacy_schedule_playbook_names] persona=%s: "
+        "rewrote %d schedule(s) to %s",
+        persona_id, len(rows), _LEGACY_PLAYBOOK_REPLACEMENT,
+    )
+
+
+# ---- v0.3.0.dev2: 旧 selected_playbook を pre_spells に変換 ----
+
+
+def _v0_3_0_dev2_legacy_schedule_selected_playbook(*, session: "Session", ai: "AI") -> None:
+    """旧 ``PLAYBOOK_PARAMS.selected_playbook`` を ``pre_spells`` 経路に変換する。
+
+    背景: Phase 3 移行で ``meta_user_manual`` Playbook が削除された結果、
+    旧スケジュールに残っている ``PLAYBOOK_PARAMS={"selected_playbook": "X"}``
+    は実行時に解釈されない (旧 ``meta_user_manual`` の exec ノードでのみ使われ
+    ていた)。Phase 3 B (handoff_2026-05-08) で ``pre_spells`` 機構が引数あり
+    Spell の動的引数決定 (= ``spell_args_decider`` 経由) に対応したので、
+    旧 ``selected_playbook`` を ``pre_spells: ["/spell name='X'"]`` (引数省略形)
+    に書き換えれば、スケジュール起動時に Spell が自然に呼ばれる。
+
+    変換規則:
+    - ``PLAYBOOK_PARAMS.selected_playbook`` が文字列なら、``pre_spells`` リスト
+      に ``"/spell name='<value>'"`` を追加 (既存の ``pre_spells`` があれば末尾追加)
+    - ``selected_playbook`` キー自体は削除
+    - ``selected_playbook`` が空文字 / 非文字列の場合はキーだけ削除 (no-op)
+
+    冪等性: ``selected_playbook`` キーが無いレコードは触らない。何度走らせても
+    同じ状態に収束する。
+
+    副作用の局所化: ``PERSONA_ID`` で絞るので自ペルソナのスケジュールしか触らない。
+    """
+    from database.models import PersonaSchedule
+
+    persona_id = ai.AIID
+    rows = (
+        session.query(PersonaSchedule)
+        .filter(
+            PersonaSchedule.PERSONA_ID == persona_id,
+            PersonaSchedule.PLAYBOOK_PARAMS.isnot(None),
+        )
+        .all()
+    )
+
+    converted = 0
+    for row in rows:
+        params_raw = row.PLAYBOOK_PARAMS
+        if not params_raw:
+            continue
+        try:
+            params = json.loads(params_raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            LOGGER.warning(
+                "[handler:v0_3_0_dev2_legacy_schedule_selected_playbook] persona=%s "
+                "schedule_id=%s: malformed PLAYBOOK_PARAMS, skipping: %s",
+                persona_id, row.SCHEDULE_ID, exc,
+            )
+            continue
+        if not isinstance(params, dict):
+            continue
+        if "selected_playbook" not in params:
+            continue
+
+        selected = params.pop("selected_playbook")
+        if isinstance(selected, str) and selected.strip():
+            spell_entry = f"/spell name='{selected.strip()}'"
+            existing_pre_spells = params.get("pre_spells")
+            if isinstance(existing_pre_spells, list):
+                existing_pre_spells.append(spell_entry)
+            else:
+                params["pre_spells"] = [spell_entry]
+            LOGGER.info(
+                "[handler:v0_3_0_dev2_legacy_schedule_selected_playbook] persona=%s "
+                "schedule_id=%s: selected_playbook=%r -> pre_spells append %r",
+                persona_id, row.SCHEDULE_ID, selected, spell_entry,
+            )
+        else:
+            LOGGER.info(
+                "[handler:v0_3_0_dev2_legacy_schedule_selected_playbook] persona=%s "
+                "schedule_id=%s: dropping empty/invalid selected_playbook=%r",
+                persona_id, row.SCHEDULE_ID, selected,
+            )
+
+        # Re-serialize. Empty dict → store empty JSON object so the column stays
+        # parseable (vs None which suppresses params entirely).
+        row.PLAYBOOK_PARAMS = json.dumps(params, ensure_ascii=False) if params else None
+        converted += 1
+
+    if converted:
+        LOGGER.info(
+            "[handler:v0_3_0_dev2_legacy_schedule_selected_playbook] persona=%s: "
+            "rewrote selected_playbook -> pre_spells in %d schedule(s)",
+            persona_id, converted,
+        )
+    else:
+        LOGGER.debug(
+            "[handler:v0_3_0_dev2_legacy_schedule_selected_playbook] persona=%s: "
+            "no schedules with selected_playbook in PLAYBOOK_PARAMS",
+            persona_id,
+        )
+
+
 # ---- ハンドラ登録リスト ----
 
 # 各ハンドラは to_version の昇順に書くと読みやすい（実行順は upgrade.py 側で
@@ -166,6 +330,32 @@ HANDLERS: List[UpgradeHandler] = [
             "Reset dynamic_state captured_at for all PersonaBuildingState rows "
             "and clear legacy memopedia_pages snapshot. Notify the persona via "
             "SAIMemory."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev1_legacy_schedule_playbook_names",
+        scope="ai",
+        from_version="0.3.0.dev0",
+        to_version="0.3.0.dev1",
+        run=_v0_3_0_dev1_legacy_schedule_playbook_names,
+        description=(
+            "Rewrite deprecated meta_user / meta_user_manual / basic_chat / "
+            "sub_router_user references in persona_schedule.META_PLAYBOOK to "
+            "track_user_conversation, so existing schedules don't error out "
+            "after the Phase 3 playbook removal."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev2_legacy_schedule_selected_playbook",
+        scope="ai",
+        from_version="0.3.0.dev1",
+        to_version="0.3.0.dev2",
+        run=_v0_3_0_dev2_legacy_schedule_selected_playbook,
+        description=(
+            "Convert legacy PLAYBOOK_PARAMS.selected_playbook (orphaned by "
+            "meta_user_manual removal) to the new pre_spells format "
+            "(/spell name='X'). The runtime resolves the missing args via "
+            "spell_args_decider Playbook at execution time."
         ),
     ),
 ]

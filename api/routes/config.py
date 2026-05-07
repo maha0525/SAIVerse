@@ -552,11 +552,11 @@ def set_announcements_monitor(req: MonitoringToggleRequest, manager=Depends(get_
 
 
 def _validate_playbook_override(req: "PlaybookOverrideRequest", manager: Any) -> None:
-    # Validate the chosen sub-Playbook for "ツール指定" mode (new: `tool_selected`
-    # sentinel) and the legacy `meta_user_manual` route. In both cases the user
-    # has picked a Playbook to run, and we want to confirm it exists and is
-    # router_callable before persisting the choice.
-    if req.playbook not in ("tool_selected", "meta_user_manual"):
+    # Validate the chosen sub-Playbook for "ツール指定" mode (`tool_selected`
+    # sentinel). The user has picked a Playbook to run via pre_spells, and we
+    # want to confirm it exists and is router_callable before persisting the
+    # choice.
+    if req.playbook != "tool_selected":
         return
 
     selected_playbook = (req.args or {}).get("selected_playbook")
@@ -597,7 +597,7 @@ def get_current_playbook(manager = Depends(get_manager)):
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     """Set playbook override and args."""
-    if req.playbook in ("tool_selected", "meta_user_manual") and req.args and "selected_playbook" in req.args:
+    if req.playbook == "tool_selected" and req.args and "selected_playbook" in req.args:
         selected_playbook = req.args.get("selected_playbook")
         if selected_playbook:
             from database.session import SessionLocal

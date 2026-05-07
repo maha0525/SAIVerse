@@ -256,13 +256,27 @@ class ScheduleManager:
         persona_id = schedule.PERSONA_ID
         meta_playbook = schedule.META_PLAYBOOK
 
-        # Parse args from DB column PLAYBOOK_PARAMS
-        schedule_args = None
+        # Parse args from DB column PLAYBOOK_PARAMS. PLAYBOOK_PARAMS may carry
+        # ``pre_spells`` (list[str] of /spell ... entries) in addition to the
+        # legacy positional args; the former is split out and forwarded to
+        # PulseController as a separate pre_spells argument so the Pulse runs
+        # those Spells before the first LLM call.
+        schedule_args: Optional[Dict[str, Any]] = None
+        pre_spells: Optional[List[str]] = None
         if schedule.PLAYBOOK_PARAMS:
             try:
-                schedule_args = json.loads(schedule.PLAYBOOK_PARAMS)
+                parsed_params = json.loads(schedule.PLAYBOOK_PARAMS)
             except Exception as e:
                 LOGGER.warning("[ScheduleManager] Failed to parse PLAYBOOK_PARAMS for schedule %d: %s", schedule.SCHEDULE_ID, e)
+                parsed_params = None
+            if isinstance(parsed_params, dict):
+                raw_pre_spells = parsed_params.get("pre_spells")
+                if isinstance(raw_pre_spells, list):
+                    pre_spells = [s for s in raw_pre_spells if isinstance(s, str) and s.strip()]
+                # Remaining keys go to schedule_args (= initial Playbook params).
+                # ``pre_spells`` is a runtime hook, not a Playbook input parameter,
+                # so strip it out before passing as args.
+                schedule_args = {k: v for k, v in parsed_params.items() if k != "pre_spells"} or None
 
         LOGGER.info(
             "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s, args=%s)",
@@ -304,6 +318,7 @@ class ScheduleManager:
                 metadata={"schedule_id": schedule.SCHEDULE_ID, "schedule_type": schedule.SCHEDULE_TYPE},
                 meta_playbook=meta_playbook,
                 args=schedule_args,
+                pre_spells=pre_spells,
             )
             LOGGER.info("[ScheduleManager] Schedule submitted to PulseController")
 

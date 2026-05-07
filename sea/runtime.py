@@ -41,7 +41,6 @@ from sea.runtime_state import (
     resolve_set_value,
     resolve_state_value,
     store_structured_result,
-    update_router_selection,
 )
 
 from .runtime_emitters import RuntimeEmitters
@@ -625,9 +624,6 @@ class SEARuntime:
 
     def _extract_structured_json(self, text: str) -> Optional[Dict[str, Any]]:
         return extract_structured_json(text)
-
-    def _update_router_selection(self, state: Dict[str, Any], text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
-        update_router_selection(state, text, parsed)
 
     def _lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
         return self._runtime_engine.lg_tool_node(node_def, persona, playbook, event_callback, auto_mode=auto_mode)
@@ -2118,20 +2114,15 @@ class SEARuntime:
         対ユーザー会話の Pulse は UserConversationTrackHandler が事前に
         対ユーザー Track を running 化 + Track コンテキストを注入してから
         メインラインを起動するため、Playbook は `track_user_conversation`
-        (Phase 3 の 1-LLM + Spell 構成) を使う。旧 `meta_user` は Phase 3
-        移行で廃止予定 (handoff_2026-05-01 §[5])。
+        (Phase 3 の 1-LLM + Spell 構成) を使う。
 
-        フォールバック先の `basic_chat` も旧 `meta_user` の "no-op で meta
-        layer に委譲" 用に作られた pass ノード 1 個の Playbook で、新構成
-        だと選んでも無音になるため候補から外している。最終フォールバック
-        として残っている `_basic_chat_playbook()` (in-memory) は、絶対に
-        ここに到達しないことを期待した保険。
+        最終フォールバックの `_basic_chat_playbook()` (in-memory) は、
+        `track_user_conversation` が DB / disk のどちらにも存在しない
+        異常系での保険として残置 (絶対にここに到達しないことを期待)。
         """
-        candidates = ["track_user_conversation"]
-        for name in candidates:
-            pb = self._load_playbook_for(name, persona, building_id)
-            if pb:
-                return pb
+        pb = self._load_playbook_for("track_user_conversation", persona, building_id)
+        if pb:
+            return pb
         return self._basic_chat_playbook()
 
     def _basic_chat_playbook(self) -> PlaybookSchema:

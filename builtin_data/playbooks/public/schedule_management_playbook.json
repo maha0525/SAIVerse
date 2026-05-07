@@ -70,7 +70,7 @@
     {
       "id": "prepare_add",
       "type": "llm",
-      "action": "schedule_addツールの引数を決定してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「meta_user」を指定してください。\n- 特定のPlaybookを直接実行したい場合は「meta_user_manual」を指定し、argsでselected_playbookを設定してください。\n  例: meta_playbook=\"meta_user_manual\", args={\"selected_playbook\": \"send_email_to_user\"}\n\n### 現在の日時：\nリアルタイム情報（会話コンテキスト内）に記載されている現在時刻を参照してください。\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
+      "action": "schedule_addツールの引数を決定してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「track_user_conversation」を指定してください。\n- 特定のPlaybookを直接実行する経路は現在整備中（pre_spells 経由に置き換え予定）。当面は track_user_conversation を指定し、description に意図を書いてください。\n\n### 現在の日時：\nリアルタイム情報（会話コンテキスト内）に記載されている現在時刻を参照してください。\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
       "next": "record_add_params",
       "response_schema": {
         "type": "object",
@@ -86,17 +86,11 @@
           },
           "meta_playbook": {
             "type": "string",
-            "description": "実行するメタプレイブック名（通常は meta_user、特定のPlaybook指定時は meta_user_manual）"
+            "description": "実行するメタプレイブック名（通常は track_user_conversation）"
           },
           "args": {
             "type": "object",
-            "description": "Playbook引数。meta_user_manual使用時にselected_playbookで実行するサブPlaybookを指定",
-            "properties": {
-              "selected_playbook": {
-                "type": "string",
-                "description": "meta_user_manual使用時に実行するサブPlaybook名（例: send_email_to_user）"
-              }
-            }
+            "description": "Playbook引数。pre_spells 経路は整備中のため、現時点では空または最小限のメタデータのみ"
           },
           "description": {
             "type": "string",

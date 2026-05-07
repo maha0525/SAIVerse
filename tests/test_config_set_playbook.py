@@ -70,14 +70,14 @@ def _patch_session_local(monkeypatch: pytest.MonkeyPatch, *, playbook_exists: bo
     )
 
 
-def test_set_playbook_meta_user_manual_rejects_unknown_selected_playbook(monkeypatch: pytest.MonkeyPatch):
+def test_set_playbook_tool_selected_rejects_unknown_selected_playbook(monkeypatch: pytest.MonkeyPatch):
     _patch_session_local(monkeypatch, playbook_exists=False)
     manager = _FakeManager()
 
     with pytest.raises(HTTPException) as exc_info:
         config.set_playbook(
             config.PlaybookOverrideRequest(
-                playbook="meta_user_manual",
+                playbook="tool_selected",
                 args={"selected_playbook": "表示ラベル"},
             ),
             manager=manager,
@@ -87,29 +87,29 @@ def test_set_playbook_meta_user_manual_rejects_unknown_selected_playbook(monkeyp
     assert "Playbook ID" in exc_info.value.detail
 
 
-def test_set_playbook_meta_user_manual_allows_empty_selected_playbook(monkeypatch: pytest.MonkeyPatch):
+def test_set_playbook_tool_selected_allows_empty_selected_playbook(monkeypatch: pytest.MonkeyPatch):
     _patch_session_local(monkeypatch, playbook_exists=False)
     manager = _FakeManager()
 
     resp = config.set_playbook(
         config.PlaybookOverrideRequest(
-            playbook="meta_user_manual",
+            playbook="tool_selected",
             args={"selected_playbook": ""},
         ),
         manager=manager,
     )
 
     assert resp["success"] is True
-    assert resp["playbook"] == "meta_user_manual"
+    assert resp["playbook"] == "tool_selected"
 
 
-def test_set_playbook_meta_user_manual_accepts_existing_selected_playbook(monkeypatch: pytest.MonkeyPatch):
+def test_set_playbook_tool_selected_accepts_existing_selected_playbook(monkeypatch: pytest.MonkeyPatch):
     _patch_session_local(monkeypatch, playbook_exists=True)
     manager = _FakeManager()
 
     resp = config.set_playbook(
         config.PlaybookOverrideRequest(
-            playbook="meta_user_manual",
+            playbook="tool_selected",
             args={"selected_playbook": "deep_research"},
         ),
         manager=manager,

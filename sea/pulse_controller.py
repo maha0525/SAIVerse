@@ -465,8 +465,15 @@ class PulseController:
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None,
+        pre_spells: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
-        """Submit a scheduled execution request."""
+        """Submit a scheduled execution request.
+
+        ``pre_spells`` is forwarded to the Pulse so the schedule can request
+        Spells (with or without args) to execute before the first LLM call.
+        Args-omitted form (``/spell name='X'``) routes through spell_args_decider
+        for dynamic argument generation. Phase 3 B (handoff_2026-05-08).
+        """
         request = ExecutionRequest(
             type="schedule",
             persona_id=persona_id,
@@ -475,6 +482,7 @@ class PulseController:
             metadata=metadata,
             meta_playbook=meta_playbook,
             args=args,
+            pre_spells=pre_spells,
         )
         return self.submit(request)
     

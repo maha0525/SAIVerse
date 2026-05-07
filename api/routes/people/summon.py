@@ -39,15 +39,18 @@ def get_summonable_personas(building_id: Optional[str] = None, manager = Depends
 
 @router.get("/meta_playbooks", response_model=List[str])
 def list_meta_playbooks(manager = Depends(get_manager)):
-    """List user-selectable meta playbooks."""
+    """List user-selectable meta playbooks for schedule / summon dialogs.
+
+    Phase 3 移行で Pulse-root として走る Playbook の主流が ``meta_*`` (旧
+    ``meta_user`` / ``meta_user_manual``) から ``track_*`` (``track_user_conversation``
+    等) に移ったため、name prefix での絞り込みは廃止。``user_selectable=true``
+    フラグのみを判定軸にする。
+    """
     session = manager.SessionLocal()
     try:
         playbooks = (
             session.query(PlaybookModel)
-            .filter(
-                PlaybookModel.user_selectable == True,
-                PlaybookModel.name.like("meta_%"),
-            )
+            .filter(PlaybookModel.user_selectable == True)
             .all()
         )
         return sorted([pb.name for pb in playbooks])

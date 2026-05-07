@@ -61,9 +61,9 @@ export default function ToolModeSelector({
     const containerRef = useRef<HTMLDivElement>(null);
     const subContainerRef = useRef<HTMLDivElement>(null);
 
-    // Treat anything other than the sentinel as "auto" — legacy values
-    // (meta_user / meta_user_manual / meta_simple_speak) persisted on the
-    // server are silently mapped here so the UI doesn't get stuck.
+    // Treat anything other than the sentinel as "auto" — legacy pre-Phase 3
+    // values (meta_user / meta_user_manual / meta_simple_speak) persisted on
+    // the server are silently mapped here so the UI doesn't get stuck.
     const normalizedMode: string | null =
         selectedPlaybook === TOOL_MODE_SELECTED ? TOOL_MODE_SELECTED : null;
 

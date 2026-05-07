@@ -823,10 +823,10 @@ export default function Home() {
         fetchHistory();
         fetchBuildingInfo();
         // Fetch saved playbook setting and params from server.
-        // Legacy values (meta_user / meta_user_manual / meta_simple_speak,
-        // and the old track_user_conversation explicit selection) are
-        // collapsed to "auto" because the new 2-mode UI only recognises
-        // null and the TOOL_MODE_SELECTED sentinel.
+        // Legacy values from the pre-Phase 3 era (meta_user / meta_user_manual /
+        // meta_simple_speak, and the old track_user_conversation explicit
+        // selection) are collapsed to "auto" because the new 2-mode UI only
+        // recognises null and the TOOL_MODE_SELECTED sentinel.
         fetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
