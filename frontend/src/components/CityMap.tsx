@@ -19,6 +19,7 @@ interface Occupant {
 interface CityMapBuilding {
     id: string;
     name: string;
+    description?: string | null;
     image_path?: string | null;
     map_x?: number | null;
     map_y?: number | null;
@@ -45,6 +46,8 @@ interface CityMapProps {
 
 const POLL_INTERVAL_MS = 7000;
 const MAX_VISIBLE_OCCUPANTS = 6;
+// ミニマル時はアイコンが大きく場所を取るので少なめ
+const MAX_VISIBLE_OCCUPANTS_MINIMAL = 4;
 
 // world サイズ。BuildingCell 200×~220 の擬似グリッドが余裕で収まる広さ。
 const WORLD_WIDTH = 3200;
@@ -52,6 +55,8 @@ const WORLD_HEIGHT = 2200;
 const MIN_SCALE = 0.3;
 const MAX_SCALE = 2.5;
 const DRAG_THRESHOLD_PX = 4;
+// scale がこの値以上ならリッチ表示 (枠+内装+description)、未満ならミニマル表示 (アイコン+ラベルのみ)
+const RICH_MODE_SCALE_THRESHOLD = 1.2;
 
 interface ViewState {
     x: number;
@@ -145,6 +150,13 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         dragged: false,
     });
 
+    // pointer/touch handler は useEffect 内の closure に固定されるため、最新の
+    // isEditMode と building → 座標 マップを ref 経由で読めるようにする。
+    const latestRef = useRef<{
+        isEditMode: boolean;
+        positionsMap: Map<string, { x: number; y: number }>;
+    }>({ isEditMode: false, positionsMap: new Map() });
+
     // 背景画像変更
     const bgFileInputRef = useRef<HTMLInputElement | null>(null);
     const [isBgUploading, setIsBgUploading] = useState(false);
@@ -216,9 +228,116 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         return () => vp.removeEventListener('wheel', onWheel);
     }, [updateView]);
 
-    // ドラッグでパン or セル移動: window 全体に mousemove/mouseup を張って viewport 外へ抜けても追従
+    // ── Pointer events で mouse/touch/pen を統一処理 ──
+    // 1本指: 背景パン or 編集モード時のセル個別ドラッグ
+    // 2本指: ピンチズーム (1本指側はキャンセル)
+    // pointermove/up は viewport 外でも追従するよう window に貼る (mouse と同じ流儀)。
+    //
+    // 同時に viewport の native touchstart/touchmove を capture phase で
+    // stopImmediatePropagation し、Sidebar.tsx の window touchstart listener と
+    // page.tsx の RightSidebar swipe ハンドラへの伝播を遮断する。
+    // preventDefault は tap → click を潰さないよう使わない。標準ジェスチャ抑制は
+    // CSS の touch-action: none に任せる。
     useEffect(() => {
-        const onMove = (e: MouseEvent) => {
+        const vp = viewportRef.current;
+        if (!vp) return;
+
+        // pointerId → 最新クライアント座標
+        const pointers = new Map<number, { x: number; y: number }>();
+
+        // pointers.size === 2 の間だけ有効になるピンチ状態
+        let pinchState: {
+            startDistance: number;
+            startView: ViewState;
+            // ピンチ中心の viewport ローカル座標 (rect.left/top を引いた値)
+            startCenterLocal: { x: number; y: number };
+        } | null = null;
+
+        const onPointerDown = (e: PointerEvent) => {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+            pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+            if (pointers.size === 2) {
+                // 2本目: ピンチ開始。1本指側のパン/セルドラッグは破棄
+                const pts = Array.from(pointers.values());
+                const dx = pts[0].x - pts[1].x;
+                const dy = pts[0].y - pts[1].y;
+                const distance = Math.hypot(dx, dy) || 1;
+                const cx = (pts[0].x + pts[1].x) / 2;
+                const cy = (pts[0].y + pts[1].y) / 2;
+                const rect = vp.getBoundingClientRect();
+                pinchState = {
+                    startDistance: distance,
+                    startView: { ...viewRef.current },
+                    startCenterLocal: { x: cx - rect.left, y: cy - rect.top },
+                };
+                dragRef.current.active = false;
+                cellDragRef.current.active = false;
+                setIsDragging(false);
+                return;
+            }
+
+            if (pointers.size !== 1) return;
+
+            // 1本目: 編集モード && セル上ならセルドラッグ、それ以外は背景パン
+            const target = e.target as HTMLElement | null;
+            const cellEl = target?.closest<HTMLElement>('[data-building-cell-id]') ?? null;
+            const buildingId = cellEl?.dataset.buildingCellId ?? null;
+            const { isEditMode: editing, positionsMap } = latestRef.current;
+
+            if (editing && buildingId) {
+                const pos = positionsMap.get(buildingId);
+                if (pos) {
+                    cellDragRef.current = {
+                        active: true,
+                        buildingId,
+                        startClientX: e.clientX,
+                        startClientY: e.clientY,
+                        startCellX: pos.x,
+                        startCellY: pos.y,
+                        startScale: viewRef.current.scale,
+                        dragged: false,
+                    };
+                    return;
+                }
+            }
+
+            dragRef.current = {
+                active: true,
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                startView: { ...viewRef.current },
+                dragged: false,
+            };
+        };
+
+        const onPointerMove = (e: PointerEvent) => {
+            const tracked = pointers.get(e.pointerId);
+            if (!tracked) return;
+            tracked.x = e.clientX;
+            tracked.y = e.clientY;
+
+            // ピンチ
+            if (pinchState && pointers.size >= 2) {
+                const pts = Array.from(pointers.values());
+                const dx = pts[0].x - pts[1].x;
+                const dy = pts[0].y - pts[1].y;
+                const distance = Math.hypot(dx, dy) || 1;
+                const newScaleRaw = pinchState.startView.scale * (distance / pinchState.startDistance);
+                const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScaleRaw));
+                const ratio = newScale / pinchState.startView.scale;
+                const cx = pinchState.startCenterLocal.x;
+                const cy = pinchState.startCenterLocal.y;
+                updateView({
+                    x: cx - (cx - pinchState.startView.x) * ratio,
+                    y: cy - (cy - pinchState.startView.y) * ratio,
+                    scale: newScale,
+                });
+                return;
+            }
+
+            // セル個別ドラッグ
             const cell = cellDragRef.current;
             if (cell.active) {
                 const dxRaw = e.clientX - cell.startClientX;
@@ -227,7 +346,6 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                     cell.dragged = true;
                 }
                 if (cell.dragged) {
-                    // クライアント座標 → world 座標は scale で除算
                     const dx = dxRaw / cell.startScale;
                     const dy = dyRaw / cell.startScale;
                     setEditedPositions(prev => ({
@@ -241,6 +359,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                 return;
             }
 
+            // 背景パン
             const drag = dragRef.current;
             if (!drag.active) return;
             const dx = e.clientX - drag.startClientX;
@@ -257,7 +376,20 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                 });
             }
         };
-        const onUp = () => {
+
+        const onPointerUp = (e: PointerEvent) => {
+            pointers.delete(e.pointerId);
+
+            if (pinchState && pointers.size < 2) {
+                // ピンチ終了。残り1本指でパンを継続させると視覚的にジャンプするので
+                // 残ったポインタも破棄して何もせず終わる。
+                pinchState = null;
+                pointers.clear();
+                return;
+            }
+
+            if (pointers.size > 0) return;
+
             const cell = cellDragRef.current;
             if (cell.active) {
                 cell.active = false;
@@ -265,32 +397,37 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                 setTimeout(() => { cell.dragged = false; }, 0);
                 return;
             }
+
             const drag = dragRef.current;
-            if (!drag.active) return;
-            drag.active = false;
-            setIsDragging(false);
-            setTimeout(() => {
-                drag.dragged = false;
-            }, 0);
+            if (drag.active) {
+                drag.active = false;
+                setIsDragging(false);
+                setTimeout(() => { drag.dragged = false; }, 0);
+            }
         };
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
+
+        const onTouchBlock = (e: TouchEvent) => {
+            // capture phase で先に握って window/document までバブルさせない。
+            // preventDefault は呼ばない (tap → click を潰さないため)。
+            e.stopImmediatePropagation();
+        };
+
+        vp.addEventListener('pointerdown', onPointerDown);
+        window.addEventListener('pointermove', onPointerMove);
+        window.addEventListener('pointerup', onPointerUp);
+        window.addEventListener('pointercancel', onPointerUp);
+        vp.addEventListener('touchstart', onTouchBlock, { passive: false, capture: true });
+        vp.addEventListener('touchmove', onTouchBlock, { passive: false, capture: true });
+
         return () => {
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onUp);
+            vp.removeEventListener('pointerdown', onPointerDown);
+            window.removeEventListener('pointermove', onPointerMove);
+            window.removeEventListener('pointerup', onPointerUp);
+            window.removeEventListener('pointercancel', onPointerUp);
+            vp.removeEventListener('touchstart', onTouchBlock, { capture: true } as EventListenerOptions);
+            vp.removeEventListener('touchmove', onTouchBlock, { capture: true } as EventListenerOptions);
         };
     }, [updateView]);
-
-    const handleViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-        if (e.button !== 0) return; // 左クリックのみ
-        dragRef.current = {
-            active: true,
-            startClientX: e.clientX,
-            startClientY: e.clientY,
-            startView: { ...viewRef.current },
-            dragged: false,
-        };
-    };
 
     // 効果的な座標 = 編集中の値 > DBの値 > 擬似座標
     const resolvePosition = useCallback((b: CityMapBuilding, idx: number, total: number): { x: number; y: number } => {
@@ -300,22 +437,16 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         return pseudoBuildingPosition(b.id, idx, total);
     }, [editedPositions]);
 
-    // セルの onMouseDown: 編集モード時のみ個別ドラッグを起動 (パンへのバブルは止める)
-    const handleCellMouseDown = (e: React.MouseEvent, b: CityMapBuilding, currentPos: { x: number; y: number }) => {
-        if (!isEditMode) return;
-        if (e.button !== 0) return;
-        e.stopPropagation();
-        cellDragRef.current = {
-            active: true,
-            buildingId: b.id,
-            startClientX: e.clientX,
-            startClientY: e.clientY,
-            startCellX: currentPos.x,
-            startCellY: currentPos.y,
-            startScale: viewRef.current.scale,
-            dragged: false,
-        };
-    };
+    // pointer handler が closure 経由で最新の isEditMode と building→座標 マップを
+    // 参照できるよう、毎レンダ後に ref を更新する。
+    const buildings = data?.buildings ?? [];
+    useEffect(() => {
+        const map = new Map<string, { x: number; y: number }>();
+        buildings.forEach((b, idx) => {
+            map.set(b.id, resolvePosition(b, idx, buildings.length));
+        });
+        latestRef.current = { isEditMode, positionsMap: map };
+    });
 
     const editedCount = Object.keys(editedPositions).length;
 
@@ -453,32 +584,37 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         applyOpen();
     };
 
-    const buildings = data?.buildings ?? [];
     const userBuildingId = currentBuildingId ?? data?.user_current_building_id ?? null;
     // ズームアウト時のみ 1 超えになり、子要素のサイズ補正に使う (上限 2.0)
     const inverseScale = Math.min(2.0, Math.max(1, 1 / view.scale));
+    // ある程度ズームインしたらリッチ表示 (内装画像+description)
+    const isRichMode = view.scale >= RICH_MODE_SCALE_THRESHOLD;
 
     return (
         <div className={styles.container}>
             <div className={styles.starfield} />
-            {onClose && (
-                <button
-                    className={styles.closeBtn}
-                    onClick={onClose}
-                    aria-label="街マップを閉じる"
-                    title="閉じる (Esc)"
-                >
-                    <X size={18} />
-                </button>
-            )}
-            {!isEditMode && (
-                <button
-                    className={styles.editToggleBtn}
-                    onClick={() => setIsEditMode(true)}
-                    title="配置を編集する"
-                >
-                    <Edit3 size={16} />
-                </button>
+            {(onClose || !isEditMode) && (
+                <div className={styles.headerControls}>
+                    {onClose && (
+                        <button
+                            className={styles.closeBtn}
+                            onClick={onClose}
+                            aria-label="街マップを閉じる"
+                            title="閉じる (Esc)"
+                        >
+                            <X size={18} />
+                        </button>
+                    )}
+                    {!isEditMode && (
+                        <button
+                            className={styles.editToggleBtn}
+                            onClick={() => setIsEditMode(true)}
+                            title="配置を編集する"
+                        >
+                            <Edit3 size={16} />
+                        </button>
+                    )}
+                </div>
             )}
             {isEditMode ? (
                 <div className={`${styles.titleBar} ${styles.editBar}`}>
@@ -549,7 +685,6 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             <div
                 ref={viewportRef}
                 className={`${styles.viewport} ${isDragging ? styles.dragging : ''}`}
-                onMouseDown={handleViewportMouseDown}
             >
                 <div
                     className={styles.world}
@@ -575,18 +710,21 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                     {buildings.map((b, idx) => {
                         const isCurrent = b.id === userBuildingId;
                         const hasImage = !!b.image_path && !imageFailed.has(b.id);
-                        const visible = b.occupants.slice(0, MAX_VISIBLE_OCCUPANTS);
+                        const maxVisible = isRichMode ? MAX_VISIBLE_OCCUPANTS : MAX_VISIBLE_OCCUPANTS_MINIMAL;
+                        const visible = b.occupants.slice(0, maxVisible);
                         const overflow = b.occupants.length - visible.length;
                         const pos = resolvePosition(b, idx, buildings.length);
                         const isMoved = !!editedPositions[b.id];
+                        // ミニマルモード時は内装画像も枠も出さない (アイコン+ラベルのみ)
+                        const showRichBg = isRichMode && hasImage;
+                        const showHouseIcon = !showRichBg;
                         return (
                             <div
                                 key={b.id}
-                                className={`${styles.buildingCell} ${isCurrent ? styles.current : ''} ${hasImage ? styles.withImage : ''} ${isEditMode ? styles.editing : ''} ${isMoved ? styles.moved : ''}`}
+                                data-building-cell-id={b.id}
+                                className={`${styles.buildingCell} ${isRichMode ? styles.rich : styles.minimal} ${isCurrent ? styles.current : ''} ${showRichBg ? styles.withImage : ''} ${isEditMode ? styles.editing : ''} ${isMoved ? styles.moved : ''}`}
                                 style={{ left: pos.x, top: pos.y }}
-                                onMouseDown={(e) => handleCellMouseDown(e, b, pos)}
                                 onClick={() => {
-                                    // 編集モード中・パン後・セル移動後は click を抑制
                                     if (isEditMode) return;
                                     if (dragRef.current.dragged) return;
                                     if (cellDragRef.current.dragged) return;
@@ -601,7 +739,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                     }
                                 }}
                             >
-                                {hasImage && (
+                                {showRichBg && (
                                     <div className={styles.cellBgWrapper}>
                                         <img
                                             className={styles.cellBg}
@@ -620,15 +758,18 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                         <div className={styles.cellBgOverlay} />
                                     </div>
                                 )}
-                                {!hasImage && (
+                                {showHouseIcon && (
                                     <div className={styles.houseIcon}>
                                         <HomeIcon size={Math.round(32 * inverseScale)} />
                                     </div>
                                 )}
                                 <div className={styles.buildingName}>{b.name}</div>
+                                {isRichMode && b.description && (
+                                    <div className={styles.buildingDescription}>{b.description}</div>
+                                )}
 
                                 {b.occupants.length === 0 ? (
-                                    <div className={styles.empty}>無人</div>
+                                    isRichMode && <div className={styles.empty}>無人</div>
                                 ) : (
                                     <div className={styles.occupantStrip}>
                                         {visible.map(occ => (

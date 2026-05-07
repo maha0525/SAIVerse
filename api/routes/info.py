@@ -172,6 +172,7 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
 class CityMapBuilding(BaseModel):
     id: str
     name: str
+    description: Optional[str] = None
     image_path: Optional[str] = None
     map_x: Optional[float] = None
     map_y: Optional[float] = None
@@ -244,6 +245,7 @@ def get_city_map(manager = Depends(get_manager)):
         buildings_payload.append({
             "id": bid,
             "name": building.name,
+            "description": getattr(building, "description", None) or None,
             "image_path": image_map.get(bid),
             "map_x": pos[0] if pos else None,
             "map_y": pos[1] if pos else None,

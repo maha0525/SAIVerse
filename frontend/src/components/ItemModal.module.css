@@ -718,3 +718,33 @@
 :global([data-theme="light"]) .loading {
     color: #64748b;
 }
+
+:global([data-theme="light"]) .bagCard {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .bagCard:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
+:global([data-theme="light"]) .bagCardIcon {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .bagCardName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .bagCardCount {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .bagCardDesc {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .bagEmpty {
+    color: #94a3b8;
+}
