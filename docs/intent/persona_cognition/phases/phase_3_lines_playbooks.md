@@ -1,7 +1,7 @@
 # Phase 3 — ライン仕様 + Track 種別 Playbook
 
 **親**: [../README.md](../README.md)
-**ステータス**: 🟡 約 60%
+**ステータス**: 🟡 約 95%
 **旧称**: Phase C-2 (line / context_profile DEPRECATED) + Phase 1.2 (meta_judgment 経路) + Phase 1.4 (DEPRECATED 宣言)
 
 ---
@@ -69,10 +69,15 @@
 | `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template: Optional[str]` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる。`generate_image_playbook.json` で実例追加。実機検証 OK (v0.25, 2026-05-01) |
 | Spell 結果の media を親 LLM ラウンドに attachment 転送 | ✅ | spell 戻り値を `Tuple[str, Optional[Dict]]` に拡張 (str 戻り値も互換)。spell loop が全 spell の `metadata.media` を集約し、次の LLM ラウンドの user message の `metadata.media` に lift。`run_playbook` が `parent_state["metadata"].media` を転送。複数 spell × 複数 media 合算対応。`generate_image_playbook.json` の `report_template` に Markdown リンク (`saiverse://item/<id>/content`) リマインドも追記 (v0.26, 2026-05-01) |
 | line_id の親子関係 + cancellation 伝搬 | 🟡 | parent_state 経由で `_pulse_context` 共有。cancellation 伝搬は実機検証で確認予定 |
-| Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 (実機検証と一体) |
-| `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 (現状: 18 件 true、25 件 false) |
-| `track_user_conversation` を 1-LLM + Spell 構成に書き換え | 🔲 | meta_user / sub_router_user の統合廃止と一体、実機検証必須 |
-| **UI からの Playbook 起動 (pre_spells 機構)** | 🔲 | 旧 `meta_user_manual` の代替。`/api/chat` に `pre_spells` 引数 + Spell loop 入口で LLM 介さず機械実行 + ToolModeSelector の動的列挙化。intent doc [../nested_subline_spell.md](../nested_subline_spell.md) §13 (v0.2) |
+| Playbook 一覧のシステムプロンプト注入 | ✅ | `sea/runtime_context.py:118-152` で `## 利用可能な能力` セクションを bullet list 形式で組み立て、`router_callable=true` な Playbook を列挙。`ContextRequirements.available_playbooks` で活性化、`conversation` プロファイルで自動有効 |
+| `router_callable` 運用整理 | ✅ | 削除予定だった `meta_user` / `meta_user_manual` / `basic_chat` が消えたので残るのは妥当な分布のみ (v0.28、2026-05-08) |
+| `track_user_conversation` を 1-LLM + Spell 構成に書き換え | ✅ | `track_user_conversation.json` は `main_line_response` (LLM 1) + `process_body` (control_body ツール) 構成。Spell 実行ループは LLM ノード内で runtime が回す設計のため、Playbook 定義側で `/run_playbook` を明示する必要なし |
+| **UI からの Playbook 起動 (pre_spells 機構)** | ✅ | コア機構 + 引数あり Spell 対応 + スケジュール経路適用が完了 (v0.28、2026-05-08)。`/spell name='X'` 引数省略形は `spell_args_decider` Playbook で動的引数生成。`PersonaSchedule.PLAYBOOK_PARAMS.pre_spells` から `submit_schedule(pre_spells=...)` に流れる経路完成 |
+| **`meta_user` / `sub_router_user` / `meta_user_manual` / `basic_chat` の deprecated 化 → 削除** | ✅ | Playbook ファイル + DB レコード + コード残骸 (`update_router_selection` 関数 / `runtime_engine.py` 特別処理 / `runtime_llm.py:812` デバッグログ条件 / `inject_persona_event.py` / `schedule_management_playbook.json` 内 LLM プロンプト等) 全削除 + マイグレーションハンドラで既存スケジュール書き換え (v0.28、2026-05-08) |
+| **スケジュール起動経路の `pre_spells` 化** | ✅ | `submit_schedule(pre_spells=...)` 引数追加 + `_execute_schedule` で `PLAYBOOK_PARAMS.pre_spells` 抽出 + `v0_3_0_dev2_legacy_schedule_selected_playbook` ハンドラで旧 `selected_playbook` を `pre_spells=["/spell name='X'"]` に変換 (v0.28、2026-05-08)。残: スケジュール作成 UI で `pre_spells` を指定する UX |
+| end-to-end 動作検証 (Spell loop / `/run_playbook` 1 段 / 入れ子) | 🟡 | track_user_conversation 通常会話 OK (2026-05-08 まはー報告)。スケジュール経路の検証は次セッション以降 |
+| **`response_schema_source` (`spell:<name>` 動的解決)** | ✅ | `LLMNodeDef.response_schema_source` フィールド + `_resolve_response_schema_source` ヘルパで `SPELL_TOOL_SCHEMAS[name].parameters` 解決 (v0.28、2026-05-08) |
+| **`spell_args_decider` Playbook (引数決定の汎用部品)** | ✅ | pre_spells 経路で引数省略形が来たとき sub_line で起動。親ライン messages 継承 (v0.25 snapshot 経路) でペルソナ認知から自然に引数決定 (v0.28、2026-05-08) |
 
 **動機**: 従来 `meta_user` で router → 通常発話と 2 回 LLM を呼んでいた構造を、スペルで Playbook を呼べる通常発話ノード一個に統一する。判断と発話の合体。
 

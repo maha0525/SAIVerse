@@ -2,6 +2,9 @@
 
 **親**: [README.md](README.md)
 **前回 handoff (ロードマップ)**: [handoff_2026-05-01.md](handoff_2026-05-01.md)
+**後継 handoff**: [handoff_2026-05-08.md](handoff_2026-05-08.md) — 段階 4-A 〜 4-C + Spell コア + pre_spells コアまで完了した時点での残件
+
+> **状態 (2026-05-08 更新)**: 段階 4-A (v0.21) / 4-B (v0.22) / 4-C (v0.23) と `/run_playbook` Spell コア (v0.24-v0.26) は完了済。本ドキュメントの「段階 4-A〜4-C」「Spell 実装の最初の一歩」は既に着手・完遂された。残件 (段階 4-D / `meta_user` 系削除 / スケジュール経路の `pre_spells` 適用 / end-to-end 検証) は後継 handoff [handoff_2026-05-08.md](handoff_2026-05-08.md) を参照。
 
 このドキュメントは **次セッションで実装に着手する人** 向け。設計判断の根拠は intent doc 群に集約済みなので、本 handoff は「最初の 30 分で何をするか」「触るファイル」「検証方法」「ハマりどころ」だけを書く。
 

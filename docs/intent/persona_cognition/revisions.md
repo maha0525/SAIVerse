@@ -10,6 +10,139 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.28 (2026-05-08) — Phase 3 A 残件 + B 完了 (meta_user 系削除 + pre_spells 引数あり対応)
+
+handoff_2026-05-08.md で計画した作業 1 / 1.5 / 2 を一括実装。Phase 3 の主要構造刷新が完遂し、旧 meta_user 系 Playbook が完全に消えた。
+
+**作業 1 — `meta_user` / `sub_router_user` / `meta_user_manual` / `basic_chat` の削除**:
+
+- `builtin_data/playbooks/public/` から 4 Playbook ファイル削除
+- DB 自動 prune (`scripts/import_all_playbooks.py --force` で起動時に実施)
+- コード残骸整理:
+  - `sea/runtime_state.py`: `update_router_selection` 関数を完全削除 (旧 `sub_router_user` 専用)
+  - `sea/runtime.py`: 上記の import / `_update_router_selection` メソッド / `_choose_playbook` の docstring から旧言及削除
+  - `sea/runtime_llm.py:812`: `if playbook.name == 'sub_router_user'` のデバッグログ条件削除、docstring 整理
+  - `sea/runtime_engine.py`: `lg_exec_node` から `meta_user_manual` 特別処理 + `basic_chat` フォールバック + permission check ガードを全削除
+  - `api/routes/config.py`: `("tool_selected", "meta_user_manual")` を `tool_selected` 一本化 (2 箇所)
+  - `builtin_data/phenomena/inject_persona_event.py`: デフォルト `track_user_conversation` 化、`selected_playbook` 経路は WARNING ログ + 通常経路で処理
+  - `builtin_data/playbooks/public/schedule_management_playbook.json`: LLM プロンプト内の `meta_user`/`meta_user_manual` 言及を `track_user_conversation` に書き換え
+  - `frontend/src/app/page.tsx` / `frontend/src/components/ToolModeSelector.tsx`: legacy 値コメントを「pre-Phase 3」と明示
+- テスト修正:
+  - `tests/sea/test_runtime_state.py`: `update_router_selection` テスト + import 削除
+  - `tests/sea/test_runtime_engine.py`: `meta_user_manual` 関連 4 テストを `tool_selected` ベースに整理 (warning emit テストは削除)
+  - `tests/test_config_set_playbook.py`: `meta_user_manual` → `tool_selected` 全置換 + 関数名リネーム
+  - `test_fixtures/test_api.py` / `test_fixtures/definitions/test_data.json`: `EXPECTED_PLAYBOOKS` を実態反映 (`track_user_conversation`, `sub_speak`, `meta_exec_speak`)
+- マイグレーション: `v0_3_0_dev1_legacy_schedule_playbook_names` (AI scope) を `saiverse/upgrade_handlers.py` に追加。`persona_schedule.META_PLAYBOOK` から削除済み Playbook 名を `track_user_conversation` に書き換え
+- VERSION: `0.3.0.dev0` → `0.3.0.dev1`
+- テスト追加: `tests/test_upgrade_handlers_legacy_schedule.py` 7 件
+
+**作業 1.5 — `/api/people/meta_playbooks` UI フィルタ修正**:
+
+- 原因: `api/routes/people/summon.py:49` の `PlaybookModel.name.like("meta_%")` フィルタが旧 `meta_user`/`meta_user_manual` 時代の遺物で、`track_user_conversation` (新時代の主流) を除外していた
+- 修正: `name.like("meta_%")` を削除し、`user_selectable=true` フラグのみで判定する形に統一
+- 結果: スケジュール編集 UI の Meta Playbook 選択肢が `meta_simple_speak` のみ → `meta_simple_speak`, `track_autonomous`, `track_user_conversation` の 3 件に拡大
+
+**作業 2 — pre_spells を引数あり Spell 対応 + スケジュール経路適用**:
+
+設計上の重要判断 (本セッション中盤の対話で確定):
+
+- 旧 `meta_user_manual` 経路 (`PLAYBOOK_PARAMS.selected_playbook=X`) を新仕様で復活させる方法を検討
+- 5 案 (`spell_call` 新ノード) は **2 LLM 構造への先祖返り + 新経路追加で Phase 3 の哲学から外れる** ため不採用
+- 代わりに **pre_spells を完全な姿 (どんな Spell でも実行可) に拡張**:
+  - pre_spells の責務は「Spell 実行」のまま、関数内 LLM コールはやらない
+  - 引数決定は外部 Playbook (`spell_args_decider`) に委譲
+- 認知モデル整合: `spell_args_decider` は `{context}` 文字列を受け取らず、親ライン (メインライン) の messages を v0.25 snapshot 経路で継承。ペルソナは自分の認知から自然に引数決定 (Spell loop と同じ流れ)
+- 経路は `pre_spells` 1 本に統一 (Spell loop / pre_spells / メインライン LLM ノードの三位一体構造を維持)
+
+実装:
+
+- `LLMNodeDef.response_schema_source` フィールド追加 (`sea/playbook_models.py`)
+- `_resolve_response_schema_source` ヘルパ (`sea/runtime_llm.py`): `spell:<name>` → `SPELL_TOOL_SCHEMAS[name].parameters` 解決
+- `lg_llm_node` で `response_schema_source` を template 展開 (`{state_var}` 解決) → schema 動的注入
+- `_decide_spell_args_via_playbook` ヘルパ: `spell_args_decider` Playbook を sub_line で起動 → `parent_state["args"]` から取得
+- `_SPELL_PATTERN_NO_ARGS` 追加: `^/spell\s+name='([^']+)'\s*$` (引数省略形)
+- `_execute_pre_spells` 拡張: 引数あり / 引数なし両対応、引数なしは `_decide_spell_args_via_playbook` 経由で動的生成
+- `builtin_data/playbooks/public/spell_args_decider.json` 新規: 1 LLM ノード (`response_schema_source: "spell:{spell_name}"`, `output_key: "args"`, `output_schema: ["args"]`)
+- `submit_schedule` に `pre_spells: Optional[List[str]]` 引数追加 (`sea/pulse_controller.py`)
+- `_execute_schedule` で `PLAYBOOK_PARAMS.pre_spells` を抽出して `submit_schedule(pre_spells=...)` に渡す。`pre_spells` キーは Playbook input_schema には流さない (runtime hook として分離)
+- マイグレーションハンドラ `v0_3_0_dev2_legacy_schedule_selected_playbook` (AI scope, `0.3.0.dev1` → `0.3.0.dev2`) で旧 `PLAYBOOK_PARAMS.selected_playbook=X` を `pre_spells=["/spell name='X'"]` に変換 (既存 `pre_spells` があれば末尾追加、空文字は削除のみ)
+- VERSION: `0.3.0.dev1` → `0.3.0.dev2`
+
+**テスト追加**:
+
+- `tests/test_response_schema_source.py` 6 件 (spell:解決、未知/空、不正形式)
+- `tests/test_pre_spells_dynamic_args.py` 8 件 (no_args パターン、decider 呼出、混在エントリ)
+- `tests/test_upgrade_handlers_legacy_selected_playbook.py` 9 件 (変換、追加、空、null、冪等、他ペルソナ非干渉、HANDLERS 登録)
+- 計 23 件追加。全パス
+- tests/ 全体: 759 件パス (既知 flaky `test_gemini_client_generate_stream` 1 件は単独実行で確認 OK)
+
+**起動時の動作 (既存ユーザー視点)**:
+
+`update.bat` で `0.3.0.dev2` に更新 → `main.py` 起動時:
+
+1. `v0_3_0_dynamic_state_reset` (dev0): 既走 → no-op
+2. `v0_3_0_dev1_legacy_schedule_playbook_names` (dev1): 旧 `META_PLAYBOOK` を `track_user_conversation` に
+3. `v0_3_0_dev2_legacy_schedule_selected_playbook` (dev2): 旧 `selected_playbook` を `pre_spells` 形式に変換
+
+スケジュール起動時:
+
+1. `META_PLAYBOOK="track_user_conversation"`
+2. `PLAYBOOK_PARAMS.pre_spells=["/spell name='send_email_to_user'"]` を抽出
+3. `_execute_pre_spells` が `spell_args_decider` Playbook で引数を動的生成 → Spell 実行
+4. 結果が `state["_messages"]` に注入
+5. メインライン LLM が結果を踏まえて発話
+
+旧 `meta_user_manual` 経路と同等以上の挙動を、`pre_spells` 1 本の経路で実現。
+
+**実機検証 (2026-05-08 まはー報告)**:
+
+- 起動時マイグレーション動作確認
+- track_user_conversation での通常会話 OK
+- スケジュール経路の動作確認は次セッション以降
+
+**残課題 (本実装スコープ外)**:
+
+- スケジュール作成 UI で `pre_spells` を指定できる UX 改修 (現状はバックエンド経路のみ整備、手動 SQL or PLAYBOOK_PARAMS 直接編集が必要)
+- 段階 4-D: 旧 DEPRECATED コード完全削除 (`include_internal` / `pulse:{uuid}` タグ併行記録 / `LLMNodeDef.context_profile` / `LLMNodeDef.model_type` / `exclude_pulse_id`)
+
+### v0.27 (2026-05-08) — Phase 3 A 残件の実態確認 + handoff 整理 (実装変更なし)
+
+セッション開始時のキャッチアップで、Phase 3 A (`/run_playbook` Spell 段階移行) の進捗を一次ソース (コード) と突き合わせて確認した結果、handoff_phase3_impl.md / 旧 README の進捗表に記載されていた「未着手」項目が実は既に完了済だったため、ドキュメントを実態に合わせて更新した。コード変更なし、ドキュメント整理のみ。
+
+**コード調査で確定した実装状況**:
+
+| 項目 | 旧 README 記載 | 実際の状態 | 確認場所 |
+|---|---|---|---|
+| システムプロンプト Playbook 一覧注入 | 🔲 未着手 | ✅ 完了 | `sea/runtime_context.py:118-152` で `## 利用可能な能力` セクション、`router_callable=true` を bullet list 化、`ContextRequirements.available_playbooks` フラグで活性化 |
+| `track_user_conversation` を 1-LLM + Spell 構成に | 🔲 未着手 | ✅ 完了 | `track_user_conversation.json`: `main_line_response` (LLM 1) + `process_body` (control_body ツール) 構成。Spell 実行ループは LLM ノード内で runtime が回す |
+| UI からの Playbook 起動 (pre_spells) | 🔲 未着手 | 🟡 コア完成 / Schedule 経路未対応 | `api/routes/chat.py:322` (ChatRequest)、`sea/runtime_llm.py:661-776` (`_execute_pre_spells`)、`pulse_controller.py` で `ExecutionRequest.pre_spells` 伝播、`api/routes/config.py:155-157` で `router_callable=true` 一覧を UI に返却 |
+| `meta_user` / `sub_router_user` の本番経路使用 | 既存 | 既に未使用 (削除可能) | `_choose_playbook` は `track_user_conversation` のみ候補 (`runtime.py:2130`)。`run_meta_user` メソッドは `meta_user` Playbook に依存しない汎用 Pulse エントリ。`meta_layer.run_meta_user(meta_playbook="meta_judgment")` のように Playbook 名を引数で渡す経路 |
+
+**`router_callable` 分布** (38 件中):
+
+- `router_callable: true` (12 件): `building_move`, `create_building`, `deep_research`, `document_create`, `document_search`, `generate_image`, `generate_image_local`, `item_action`, `memopedia_note`, `memory_research`, `novel_writing`, `schedule_management`
+- `router_callable: false` (18 件): `autonomy_creation`, `autonomy_memory_organization`, `autonomy_web_research`, `basic_chat` (deprecated), `meta_autonomy_decision`, `meta_exec_speak`, `meta_judgment`, `meta_simple_speak`, `meta_user` (deprecated), `meta_user_manual` (deprecated), `research_task`, `source_chronicle`, `source_document`, `source_memopedia`, `source_messagelog`, `source_pdf`, `source_web`, `sub_router_user` (deprecated), `sub_speak`, `sub_think_meta`, `track_*` (5 件)
+
+**残件の整理 (handoff_2026-05-08.md に集約)**:
+
+1. **作業 1**: `meta_user` / `sub_router_user` / `meta_user_manual` / `basic_chat` の削除 — 4 つの Playbook ファイル削除 + DB prune + コード残骸整理 (`sea/runtime_llm.py:812` のデバッグ条件、test_data.json、docstring)
+2. **作業 2**: スケジュール起動経路への `pre_spells` 適用 — `saiverse/schedule_manager.py` の `_execute_schedule` で `PLAYBOOK_PARAMS` から `pre_spells` を抽出 → `submit_schedule` → `ExecutionRequest.pre_spells` に流す。frontend のスケジュール作成 UI 拡張も
+3. **作業 3**: 段階 4-D 旧 DEPRECATED コード削除 (作業 1, 2 完了後) — `include_internal` / `pulse:{uuid}` タグ併行記録 / `LLMNodeDef.context_profile` / `LLMNodeDef.model_type` (+ `model_type=lightweight` 23 ノード) / `exclude_pulse_id`
+
+**設計判断 (本セッションで確定)**:
+
+- **`run_meta_user()` メソッド名はリネームしない**: 紛らわしい名称だが、`meta_user` Playbook 削除と同時にメソッドリネームすると影響範囲が大きい (`pulse_controller`, `meta_layer`, `runtime_context` 全部から呼ばれる)。リネーム (例: `run_pulse` / `run_meta_pulse`) は別タスクで実施。`meta_user` 削除と同時には docstring 更新のみで済ませる
+- **`_basic_chat_playbook()` (in-memory) は残す**: `basic_chat.json` ファイルを削除しても、コード上の最終フォールバック (`runtime.py:2137`) は残置。絶対に到達しない保険として機能
+
+**ドキュメント変更**:
+
+- [README.md](README.md) — Phase 3 進捗 60% → 80% に更新、進捗表のステップ別状態を実態反映、関連ドキュメントに新 handoff 追加
+- [phases/phase_3_lines_playbooks.md](phases/phase_3_lines_playbooks.md) — Spell 機構タスク表 (システムプロンプト注入 / `track_user_conversation` 構成 / pre_spells コア) を ✅ に更新、残件を `meta_user` 系削除 + スケジュール経路適用 + end-to-end 検証に分割
+- [handoff_phase3_impl.md](handoff_phase3_impl.md) — ヘッダに完了済ステータス追記、後継 handoff へのポインタ追加
+- [handoff_2026-05-08.md](handoff_2026-05-08.md) — 新規作成、A 残件の実装着手用 handoff
+
+**次セッション**: handoff_2026-05-08.md の作業 1 から着手。
+
 ### v0.26 (2026-05-01) — Spell 結果に media attachment を載せる経路 + UI リマインド
 
 `/run_playbook` Spell 経由で起動したサブ Playbook (主に `generate_image`) の生成物 (画像等) が、親メインラインの「次の LLM ラウンド」で attachment として届かない問題への対応。v0.25 の実機検証で「ペルソナが画像を見るには item_view スペルを別途呼ぶ必要がある」という UX 制約が見えたため独立改修。

@@ -59,8 +59,9 @@ docs/intent/persona_cognition/
 [Phase 2] Track / MetaLayer / Handler 基盤   ✅ ほぼ完了
    action_tracks / notes / track_handlers / track_* ツール群
    ↓
-[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 60%
+[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 95%
    line: main/sub フィールド + 各 Track 種別の Playbook 整備 + 入れ子サブライン Spell 機構
+   残: 段階 4-D (DEPRECATED コード完全削除) / スケジュール pre_spells 指定 UI / end-to-end 検証
    ↓
 [Phase 4] Pulse 階層 + Scheduler + メタ定期判断  🟡 約 60%
    AutonomyManager (定期 tick タイマー) / SubLineScheduler / on_periodic_tick / 失敗時リカバリ
@@ -142,7 +143,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 ---
 
-### Phase 3 — ライン仕様 + Track 種別 Playbook (🟡 約 60%)
+### Phase 3 — ライン仕様 + Track 種別 Playbook (🟡 約 95%)
 
 旧 `context_profile` / `model_type` を `line: "main"|"sub"` 指定に集約。Track 種別ごとの専用 Playbook を整備。
 
@@ -162,14 +163,22 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
 | `exclude_pulse_id` 廃止 | 🔲 | 旧仕様コードは現存 | C-2 残件 |
 | Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
-| **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | 🟡 | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + **4-C 完了** (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23、2026-05-01)。残: 4-D (`/run_playbook` Spell 実装後) | Phase 3 新規 |
-| 入れ子サブライン Spell (`/run_playbook` + 深さ 4 階層 + `report_to_parent`) | 🟡 | コア機構実装完了 (`builtin_data/tools/run_playbook.py` + 単体テスト 10 件、v0.24, 2026-05-01)。残: system prompt の Playbook 一覧注入、router_callable 運用整理、track_user_conversation の Spell 構成書き換え (実機検証必須) | Phase 3 新規 |
-| UI からの Playbook 起動 (pre_spells 機構) | 🔲 | 旧 `meta_user_manual` の代替。Spell loop 入口で LLM 介さず Spell を機械実行する経路 + `/api/chat` に `pre_spells` 引数 + ToolModeSelector の動的列挙化。intent doc [nested_subline_spell.md](nested_subline_spell.md) §13 (v0.2) | Phase 3 新規 |
+| **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | 🟡 | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + **4-C 完了** (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23、2026-05-01)。残: 4-D (旧 DEPRECATED コード完全削除、`meta_user` 系削除完了済 v0.28 なので着手可能) | Phase 3 新規 |
+| 入れ子サブライン Spell (`/run_playbook` + 深さ 4 階層 + `report_to_parent`) | ✅ | コア機構 + システムプロンプト注入 + `track_user_conversation` 1-LLM 構成 + `meta_user` 系削除完了 (v0.24-v0.28) | Phase 3 新規 |
+| Playbook 一覧のシステムプロンプト注入 (`available_playbooks` セクション) | ✅ | `sea/runtime_context.py:118-152` で `## 利用可能な能力` セクション、`router_callable=true` を bullet list 化 | Phase 3 新規 |
+| `track_user_conversation` を 1-LLM + Spell 構成に書き換え | ✅ | `track_user_conversation.json` は `main_line_response` (LLM 1) + `process_body` (control_body ツール) 構成 | Phase 3 新規 |
+| UI からの Playbook 起動 (pre_spells 機構) + 引数あり対応 | ✅ | コア機構 + 引数省略形 `/spell name='X'` 対応 + `spell_args_decider` Playbook 経由の動的引数生成 + スケジュール経路適用 (v0.28、2026-05-08)。残: スケジュール作成 UI で pre_spells 指定する UX |
+| `meta_user` / `sub_router_user` / `meta_user_manual` / `basic_chat` 削除 | ✅ | Playbook ファイル + DB レコード + コード残骸 (`update_router_selection` / `runtime_engine.py` 特別処理 / `inject_persona_event.py` 等) 全削除 + マイグレーション (`v0_3_0_dev1_legacy_schedule_playbook_names`、VERSION 0.3.0.dev1) で既存スケジュール書き換え (v0.28、2026-05-08) | Phase 3 新規 |
+| `meta_playbooks` UI フィルタ修正 (`name.like("meta_%")` 廃止) | ✅ | `api/routes/people/summon.py` で `user_selectable=true` のみ判定。`track_user_conversation` がスケジュール編集 UI に出るように (v0.28、2026-05-08) | Phase 3 新規 |
+| `LLMNodeDef.response_schema_source` (`spell:<name>` 動的解決) | ✅ | template 展開 + `SPELL_TOOL_SCHEMAS[name].parameters` 解決 (v0.28、2026-05-08) | Phase 3 新規 |
+| `spell_args_decider` Playbook (引数決定の汎用部品) | ✅ | pre_spells 経路で引数省略形 → sub_line で起動 → 親ライン messages 継承でペルソナ認知から自然に引数決定 (v0.28、2026-05-08) | Phase 3 新規 |
+| 既存スケジュール `selected_playbook` のマイグレーション | ✅ | `v0_3_0_dev2_legacy_schedule_selected_playbook` ハンドラで `selected_playbook=X` を `pre_spells=["/spell name='X'"]` に変換 (VERSION 0.3.0.dev2、2026-05-08) | Phase 3 新規 |
 | 親 LLM messages のサブライン流入 (snapshot 経路) | ✅ | `tools/context.py` に `_LLM_MESSAGES` ContextVar + `persona_context(llm_messages=...)` 引数追加。spell loop が呼び出し時に snapshot 渡し、`run_playbook` が `parent_state["_messages"]` に展開。入れ子も自動で正しく動く (context manager の入れ子 reset)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
 | `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる (例: `generate_image_playbook.json`)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
 | Spell 結果の media を親 LLM ラウンドに attachment 転送 | ✅ | spell 戻り値を `Tuple[str, Optional[Dict]]` に拡張 (既存 str 戻り値は互換)。spell loop が全 spell の `metadata.media` を集約し次の LLM ラウンドの user message に lift。`run_playbook` が `parent_state["metadata"].media` を転送。`generate_image_playbook.json` の report に Markdown リンクリマインド追記 (v0.26, 2026-05-01) | Phase 3 新規 |
 | 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` は Y 案で 4-D 持ち越し (v0.23, 2026-05-01) | C-2 残件 |
-| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | 🔲 | 段階 4-D、`/run_playbook` Spell 実装後 | C-2 残件 |
+| end-to-end 動作検証 (Spell loop / `/run_playbook` 1 段 / 入れ子) | 🔲 | `meta_user` 系削除後に通しで実機検証 | Phase 3 新規 |
+| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | 🔲 | 段階 4-D、`meta_user` 系削除 + end-to-end 検証後 | C-2 残件 |
 
 **詳細**: `phases/phase_3_lines_playbooks.md`
 
@@ -272,8 +281,9 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 
 ## 関連ドキュメント
 
+- [handoff_2026-05-08.md](handoff_2026-05-08.md) — **最新 handoff**: Phase 3 A 残件 (`meta_user` 系削除 + スケジュール `pre_spells` 適用)
 - [handoff_2026-05-01.md](handoff_2026-05-01.md) — Phase 3 全体ロードマップ handoff
-- [handoff_phase3_impl.md](handoff_phase3_impl.md) — **実装着手用** handoff (line vs タグ整理 + `/run_playbook` Spell 実装)
+- [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-C + Spell コア着手時の handoff (完了済、4-D 作業に再利用)
 - [handoff_2026-04-30.md](handoff_2026-04-30.md) — Phase 2 / 2.5 / 2.6 完了時 handoff
 - [nested_subline_spell.md](nested_subline_spell.md) — Phase 3 の `/run_playbook` Spell 機構 Intent (v0.1, 2026-05-01 起草)
 - [line_tag_responsibility.md](line_tag_responsibility.md) — line と memorize タグの責務分離 Intent (v0.1, 2026-05-01 起草)
