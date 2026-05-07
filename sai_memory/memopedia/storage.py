@@ -112,6 +112,12 @@ class PageEditHistory:
     ref_end_message_id: Optional[str]
     edit_type: str  # 'create', 'update', 'append', 'delete'
     edit_source: Optional[str]  # 'ai_conversation', 'manual', 'api', etc.
+    # Snapshot of the page state BEFORE this edit was applied. Required for
+    # reliable rollback. NULL for legacy entries recorded before v0.3.0 — those
+    # cannot be rolled back (rollback_page returns an error for such entries).
+    before_title: Optional[str] = None
+    before_summary: Optional[str] = None
+    before_content: Optional[str] = None
 
 
 def init_memopedia_tables(conn: sqlite3.Connection) -> None:
@@ -223,6 +229,15 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_memopedia_edit_history_page ON memopedia_page_edit_history(page_id)"
     )
+
+    # Migration: add before-snapshot columns for reliable rollback (v0.3.0+).
+    # Pre-existing rows have NULL in these columns and are not rollback-capable.
+    try:
+        conn.execute("SELECT before_title FROM memopedia_page_edit_history LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_page_edit_history ADD COLUMN before_title TEXT")
+        conn.execute("ALTER TABLE memopedia_page_edit_history ADD COLUMN before_summary TEXT")
+        conn.execute("ALTER TABLE memopedia_page_edit_history ADD COLUMN before_content TEXT")
 
     # Embeddings for Memopedia pages (used by unified recall)
     conn.execute(
@@ -812,66 +827,41 @@ def record_page_edit(
     ref_start_message_id: Optional[str] = None,
     ref_end_message_id: Optional[str] = None,
     edit_source: Optional[str] = None,
+    before_title: Optional[str] = None,
+    before_summary: Optional[str] = None,
+    before_content: Optional[str] = None,
 ) -> str:
-    """Record an edit history entry for a page."""
+    """Record an edit history entry for a page.
+
+    The before_* arguments capture the page state immediately before this
+    edit. They are used by rollback_page to restore the page reliably. For
+    'create' edits the before state is empty strings (the page didn't exist).
+    """
     edit_id = str(uuid.uuid4())
     now = int(time.time())
     conn.execute(
         """
         INSERT INTO memopedia_page_edit_history
-        (id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id,
+         edit_type, edit_source, before_title, before_summary, before_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (edit_id, page_id, now, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source),
+        (
+            edit_id, page_id, now, diff_text, ref_start_message_id, ref_end_message_id,
+            edit_type, edit_source, before_title, before_summary, before_content,
+        ),
     )
     conn.commit()
     return edit_id
 
 
-def get_page_edit_history(
-    conn: sqlite3.Connection,
-    page_id: str,
-    limit: int = 50,
-) -> List[PageEditHistory]:
-    """Get the edit history for a page, ordered by most recent first."""
-    cur = conn.execute(
-        """
-        SELECT id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source
-        FROM memopedia_page_edit_history
-        WHERE page_id = ?
-        ORDER BY edited_at DESC
-        LIMIT ?
-        """,
-        (page_id, limit),
-    )
-    return [
-        PageEditHistory(
-            id=row[0],
-            page_id=row[1],
-            edited_at=row[2],
-            diff_text=row[3],
-            ref_start_message_id=row[4],
-            ref_end_message_id=row[5],
-            edit_type=row[6],
-            edit_source=row[7],
-        )
-        for row in cur.fetchall()
-    ]
+_EDIT_HISTORY_COLUMNS = (
+    "id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, "
+    "edit_type, edit_source, before_title, before_summary, before_content"
+)
 
 
-def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditHistory]:
-    """Get a single edit history entry by ID."""
-    cur = conn.execute(
-        """
-        SELECT id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source
-        FROM memopedia_page_edit_history
-        WHERE id = ?
-        """,
-        (edit_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
+def _row_to_edit_history(row) -> PageEditHistory:
     return PageEditHistory(
         id=row[0],
         page_id=row[1],
@@ -881,7 +871,45 @@ def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditH
         ref_end_message_id=row[5],
         edit_type=row[6],
         edit_source=row[7],
+        before_title=row[8],
+        before_summary=row[9],
+        before_content=row[10],
     )
+
+
+def get_page_edit_history(
+    conn: sqlite3.Connection,
+    page_id: str,
+    limit: int = 50,
+) -> List[PageEditHistory]:
+    """Get the edit history for a page, ordered by most recent first."""
+    cur = conn.execute(
+        f"""
+        SELECT {_EDIT_HISTORY_COLUMNS}
+        FROM memopedia_page_edit_history
+        WHERE page_id = ?
+        ORDER BY edited_at DESC
+        LIMIT ?
+        """,
+        (page_id, limit),
+    )
+    return [_row_to_edit_history(row) for row in cur.fetchall()]
+
+
+def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditHistory]:
+    """Get a single edit history entry by ID."""
+    cur = conn.execute(
+        f"""
+        SELECT {_EDIT_HISTORY_COLUMNS}
+        FROM memopedia_page_edit_history
+        WHERE id = ?
+        """,
+        (edit_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return _row_to_edit_history(row)
 
 
 # ----- Trunk operations -----
