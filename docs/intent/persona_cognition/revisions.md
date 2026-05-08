@@ -10,6 +10,100 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.29 (2026-05-08) — スケジュール / チャット UI で Spell + Playbook 両方選択可能に
+
+v0.28 で完成した pre_spells 引数あり対応 (バックエンド側) を、UI 経路でも操作できる
+ようにする UI 改修。スケジュールでもチャット UI でも、`/spell name='run_playbook'
+args={"name": "X"}` (Playbook 起動) と `/spell name='Y'` (Spell 起動) を混ぜて
+pre_spells に流せる UX を整備した。
+
+**バグ修正**:
+
+- `frontend/src/app/page.tsx:1304-1306` で「ツール指定」モードの送信時に
+  `/run_playbook(name="X")` 形式 (関数呼び出し風) を pre_spells として送って
+  いたが、バックエンドの `_SPELL_PATTERN` (`^/spell\s+name='([^']+)'\s+args=...`) /
+  `_SPELL_PATTERN_NO_ARGS` (`^/spell\s+name='([^']+)'\s*$`) のどちらでも
+  パースできず実行されない状態だった (作業 1 で形式統一した時に壊れた)。
+- `/spell name='run_playbook' args={"name": "X"}` 形式に修正。
+
+**新機能 (両 UI 共通の機構)**:
+
+- `/api/people/spells` エンドポイント新規追加 (`api/routes/people/summon.py`):
+  利用可能な Spell 一覧 (`name` / `display_name` / `description`) を返す。
+  `persona_id` クエリパラメータ指定で `availability_check` (ToolSchema 属性) +
+  MCP per-persona フィルタを適用。`spell_visible=False` の Spell は除外。
+- 共通ユーティリティ `frontend/src/lib/preSpells.ts` 新規:
+  - `parsePreSpellsForUI(entries)`: pre_spells エントリ列を
+    `{playbookName: string | null, spellNames: string[]}` に分解
+  - `buildPreSpellsFromUI(playbookName, spellNames)`: 逆方向の組み立て
+  - `run_playbook` (確定値 args) と他 Spell (引数省略形) を区別して扱い、
+    UI 状態 ↔ pre_spells エントリ列の双方向変換を一元化
+
+**ScheduleModal 拡張**:
+
+- 「実行する Playbook」セクション新規追加 (ドロップダウン形式)
+  - `/api/config/playbooks?router_callable=true` から候補取得
+  - 「（指定しない）」を含めて単一選択、未選択 OK
+- 「使用するスペル」セクション (v0.28 で追加済) と独立して扱える
+  - `run_playbook` は Spell リストから除外 (Playbook ドロップダウンが担当)
+- スケジュール一覧の「パラメータ」列で `Playbook: X / Spells: Y, Z` の形で表示
+
+**ToolModeSelector 拡張**:
+
+- 「ツール指定」モード時、Playbook ドロップダウンの隣に Spell 複数選択ボタンを
+  新規追加
+- ボタン表示: `スペル併用なし` / `スペル: N 個`
+- ドロップダウンはチェックボックス形式で複数選択
+  - `run_playbook` は除外
+  - description が title 属性に入って tooltip 表示
+- 選択値は `playbookArgs.selected_spells: string[]` に保存、サーバー同期は
+  既存 `syncToServer` 経由
+
+**page.tsx 拡張**:
+
+- 送信時に `currentPlaybookArgs.selected_playbook` (Playbook 1 つ) +
+  `currentPlaybookArgs.selected_spells` (Spell 複数) の両方を
+  `buildPreSpellsFromUI` で pre_spells エントリ列に変換
+
+**データフロー (新仕様、両 UI 共通)**:
+
+```
+UI: Playbook 選択 (1 つ or 未選択) + Spell 選択 (複数 or 0 件)
+  ↓ buildPreSpellsFromUI
+pre_spells エントリ列:
+  - "/spell name='run_playbook' args={\"name\": \"<playbook>\"}" (Playbook 選択時のみ)
+  - "/spell name='<spell_name>'" * N (Spell 選択分)
+  ↓ POST /api/chat/send (or schedule.PLAYBOOK_PARAMS.pre_spells)
+バックエンド _execute_pre_spells:
+  - run_playbook entry: 確定値 args で run_playbook Spell 実行 → サブライン Playbook 起動
+  - args 省略形 entry: spell_args_decider Playbook で動的引数生成 → Spell 実行
+  ↓
+すべての結果が state["_messages"] に注入 → メインライン LLM が踏まえて発話
+```
+
+**実装ファイル**:
+
+- `api/routes/people/summon.py`: `/api/people/spells` エンドポイント追加
+- `frontend/src/lib/preSpells.ts`: 共通ユーティリティ新規
+- `frontend/src/components/ScheduleModal.tsx`: 「実行する Playbook」追加 + 共通
+  ユーティリティへ置換 + 表示改善
+- `frontend/src/components/ToolModeSelector.tsx`: Spell 複数選択 UI 追加
+- `frontend/src/app/page.tsx`: 送信ロジックを `buildPreSpellsFromUI` 経由に統一 +
+  バグ修正
+
+**検証**:
+
+- ruff: 通過
+- frontend TypeScript: 通過 (`npx tsc --noEmit` エラーなし)
+- 実機検証 (まはー報告 2026-05-08):
+  - スケジュール UI で Spell 単独実行 (メール送信) → OK
+  - チャット UI のツール指定モードで Playbook 起動 → 復活確認
+  - 両 UI で Playbook + Spell 併用ケース → OK
+
+**残課題**:
+
+- なし (本セッションの当初目標は完遂)
+
 ### v0.28 (2026-05-08) — Phase 3 A 残件 + B 完了 (meta_user 系削除 + pre_spells 引数あり対応)
 
 handoff_2026-05-08.md で計画した作業 1 / 1.5 / 2 を一括実装。Phase 3 の主要構造刷新が完遂し、旧 meta_user 系 Playbook が完全に消えた。
