@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Calendar, Play, Clock, Repeat, Trash2, Power, Plus, Edit2 } from 'lucide-react';
 import styles from './ScheduleModal.module.css';
 import ModalOverlay from './common/ModalOverlay';
+import { parsePreSpellsForUI, buildPreSpellsFromUI } from '@/lib/preSpells';
 
 interface PlaybookParamOption {
     value: string;
@@ -19,6 +20,17 @@ interface PlaybookParam {
     user_configurable: boolean;
     ui_widget?: string;
     resolved_options?: PlaybookParamOption[];
+}
+
+interface SpellInfo {
+    name: string;
+    display_name: string;
+    description: string;
+}
+
+interface RouterCallablePlaybook {
+    id: string;
+    name: string;
 }
 
 interface ScheduleItem {
@@ -71,10 +83,21 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     const [formPlaybookArgs, setFormPlaybookArgs] = useState<Record<string, any>>({});
     const [playbookParamSpecs, setPlaybookParamSpecs] = useState<PlaybookParam[]>([]);
 
+    // Pre-spells (UI-selectable Spells executed before the first LLM call)
+    const [availableSpells, setAvailableSpells] = useState<SpellInfo[]>([]);
+    const [formSelectedSpells, setFormSelectedSpells] = useState<string[]>([]);
+
+    // Router-callable Playbooks (for the optional "実行する Playbook" dropdown,
+    // which corresponds to /spell name='run_playbook' args={"name": ...} entries)
+    const [routerCallablePlaybooks, setRouterCallablePlaybooks] = useState<RouterCallablePlaybook[]>([]);
+    const [formSelectedRunPlaybook, setFormSelectedRunPlaybook] = useState<string>('');
+
     useEffect(() => {
         if (isOpen) {
             loadSchedules();
             loadPlaybooks();
+            loadSpells();
+            loadRouterCallablePlaybooks();
         }
     }, [isOpen, personaId]);
 
@@ -115,6 +138,40 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         }
     };
 
+    const loadSpells = async () => {
+        try {
+            const res = await fetch(`/api/people/spells?persona_id=${encodeURIComponent(personaId)}`);
+            if (res.ok) {
+                const data = await res.json();
+                // run_playbook は「実行する Playbook」ドロップダウンの専用経路で扱うので
+                // チェックボックスリストからは除外する
+                const filtered = Array.isArray(data)
+                    ? data.filter((s: SpellInfo) => s.name !== 'run_playbook')
+                    : [];
+                setAvailableSpells(filtered);
+            }
+        } catch (e) {
+            console.error('Failed to load spells', e);
+        }
+    };
+
+    const loadRouterCallablePlaybooks = async () => {
+        try {
+            const res = await fetch('/api/config/playbooks?router_callable=true');
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data)) {
+                    setRouterCallablePlaybooks(data.map((p: any) => ({
+                        id: p.id,
+                        name: p.name || p.id,
+                    })));
+                }
+            }
+        } catch (e) {
+            console.error('Failed to load router-callable playbooks', e);
+        }
+    };
+
     const fetchPlaybookParams = async (playbookName: string) => {
         try {
             const res = await fetch(`/api/config/playbooks/${encodeURIComponent(playbookName)}/params`);
@@ -143,6 +200,8 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         setFormInterval(600);
         setFormPlaybookArgs({});
         setPlaybookParamSpecs([]);
+        setFormSelectedSpells([]);
+        setFormSelectedRunPlaybook('');
     };
 
     const handleEdit = async (s: ScheduleItem) => {
@@ -155,7 +214,16 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         setFormDays(s.days_of_week || []);
         setFormTime(s.time_of_day || '09:00');
         setFormInterval(s.interval_seconds || 600);
-        setFormPlaybookArgs(s.args || {});
+
+        // pre_spells 経路と Playbook 引数経路を分離。pre_spells には
+        // run_playbook (Playbook 起動) と他の Spell が混在するので、UI 状態に
+        // 分解して別々のフォームフィールドに復元する。
+        const rawArgs = s.args || {};
+        const { pre_spells: rawPreSpells, ...playbookArgs } = rawArgs;
+        setFormPlaybookArgs(playbookArgs);
+        const parsed = parsePreSpellsForUI(rawPreSpells as string[] | undefined);
+        setFormSelectedRunPlaybook(parsed.playbookName || '');
+        setFormSelectedSpells(parsed.spellNames);
 
         // Convert UTC datetime to local format for oneshot
         if (s.scheduled_datetime) {
@@ -183,13 +251,25 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     };
 
     const handleSave = async () => {
+        // 「実行する Playbook」 + 「使用する Spell」 を pre_spells エントリ列に
+        // 変換し、Playbook 引数と合体させて args として送信する。バックエンドの
+        // _execute_schedule が pre_spells キーを抽出して submit_schedule に流す。
+        const combinedArgs: Record<string, any> = { ...formPlaybookArgs };
+        const preSpellsBuilt = buildPreSpellsFromUI(
+            formSelectedRunPlaybook || null,
+            formSelectedSpells,
+        );
+        if (preSpellsBuilt.length > 0) {
+            combinedArgs.pre_spells = preSpellsBuilt;
+        }
+
         const payload: any = {
             schedule_type: formType,
             meta_playbook: formPlaybook,
             description: formDesc,
             priority: formPriority,
             enabled: formEnabled,
-            args: Object.keys(formPlaybookArgs).length > 0 ? formPlaybookArgs : null
+            args: Object.keys(combinedArgs).length > 0 ? combinedArgs : null
         };
 
         if (formType === 'periodic') {
@@ -257,9 +337,26 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const formatPlaybookArgs = (params: Record<string, any> | null) => {
         if (!params || Object.keys(params).length === 0) return '-';
-        return Object.entries(params)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(', ');
+        const parts: string[] = [];
+
+        // pre_spells を Playbook 起動 / Spell 起動に分解して表示
+        if (Array.isArray(params.pre_spells) && params.pre_spells.length > 0) {
+            const parsed = parsePreSpellsForUI(params.pre_spells);
+            if (parsed.playbookName) {
+                parts.push(`Playbook: ${parsed.playbookName}`);
+            }
+            if (parsed.spellNames.length > 0) {
+                parts.push(`Spells: ${parsed.spellNames.join(', ')}`);
+            }
+        }
+
+        // その他の Playbook 引数 (pre_spells 以外)
+        for (const [k, v] of Object.entries(params)) {
+            if (k === 'pre_spells') continue;
+            parts.push(`${k}: ${v}`);
+        }
+
+        return parts.length > 0 ? parts.join(' / ') : '-';
     };
 
     if (!isOpen) return null;
@@ -435,6 +532,70 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                     </div>
                                 </div>
                             )}
+
+                            {/* Run-playbook (optional) */}
+                            <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
+                                <label className={styles.label}>
+                                    実行する Playbook
+                                    <span style={{ fontSize: '0.8em', color: '#888', marginLeft: '8px' }}>
+                                        （指定すると Pulse 開始前に run_playbook で起動。引数はその Playbook 内で決定）
+                                    </span>
+                                </label>
+                                <select
+                                    className={styles.select}
+                                    value={formSelectedRunPlaybook}
+                                    onChange={e => setFormSelectedRunPlaybook(e.target.value)}
+                                >
+                                    <option value="">（指定しない）</option>
+                                    {routerCallablePlaybooks.map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {/* Pre-spells (UI-selectable) */}
+                            <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
+                                <label className={styles.label}>
+                                    使用するスペル
+                                    <span style={{ fontSize: '0.8em', color: '#888', marginLeft: '8px' }}>
+                                        （選択すると Pulse 開始前に実行されます。引数はペルソナが状況から決定）
+                                    </span>
+                                </label>
+                                {availableSpells.length === 0 ? (
+                                    <div style={{ fontSize: '0.85em', color: '#888' }}>
+                                        利用可能なスペルがありません
+                                    </div>
+                                ) : (
+                                    <div className={styles.checkboxGroup} style={{ flexWrap: 'wrap' }}>
+                                        {availableSpells.map(spell => (
+                                            <label
+                                                key={spell.name}
+                                                className={styles.checkboxLabel}
+                                                title={spell.description}
+                                                style={{ minWidth: '200px' }}
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={formSelectedSpells.includes(spell.name)}
+                                                    onChange={e => {
+                                                        if (e.target.checked) {
+                                                            setFormSelectedSpells([...formSelectedSpells, spell.name]);
+                                                        } else {
+                                                            setFormSelectedSpells(formSelectedSpells.filter(n => n !== spell.name));
+                                                        }
+                                                    }}
+                                                />
+                                                <span style={{ fontSize: '0.9em' }}>
+                                                    {spell.display_name}
+                                                    <span style={{ color: '#888', marginLeft: '4px', fontSize: '0.85em' }}>
+                                                        ({spell.name})
+                                                    </span>
+                                                </span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
 
                             {formType === 'periodic' && (
                                 <>

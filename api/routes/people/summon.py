@@ -37,6 +37,47 @@ def get_summonable_personas(building_id: Optional[str] = None, manager = Depends
         
     return sorted(results, key=lambda x: x.name)
 
+@router.get("/spells")
+def list_available_spells(persona_id: Optional[str] = None, manager = Depends(get_manager)):
+    """List Spells available for schedule / pre_spells UI selection.
+
+    Returns a list of ``{name, display_name, description}`` for every Spell
+    registered in ``SPELL_TOOL_SCHEMAS`` with ``spell_visible=True``. When
+    ``persona_id`` is provided, applies per-persona availability filters
+    (``availability_check`` callable + MCP per-persona gating) so only Spells
+    actually invokable for that persona are returned.
+    """
+    from tools import SPELL_TOOL_SCHEMAS
+
+    try:
+        from tools.mcp_client import get_mcp_manager
+        mcp_mgr = get_mcp_manager()
+    except Exception:
+        mcp_mgr = None
+
+    results = []
+    for name, schema in SPELL_TOOL_SCHEMAS.items():
+        if not getattr(schema, "spell_visible", True):
+            continue
+        if mcp_mgr is not None and persona_id is not None:
+            if not mcp_mgr.is_tool_available_for_persona(name, persona_id):
+                continue
+        availability_check = getattr(schema, "availability_check", None)
+        if availability_check is not None:
+            try:
+                if not availability_check(persona_id):
+                    continue
+            except Exception:
+                continue
+        results.append({
+            "name": name,
+            "display_name": getattr(schema, "spell_display_name", "") or name,
+            "description": schema.description or "",
+        })
+    results.sort(key=lambda x: x["name"])
+    return results
+
+
 @router.get("/meta_playbooks", response_model=List[str])
 def list_meta_playbooks(manager = Depends(get_manager)):
     """List user-selectable meta playbooks for schedule / summon dialogs.

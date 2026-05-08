@@ -10,6 +10,7 @@ import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
 import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
+import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import RightSidebar from '@/components/RightSidebar';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
@@ -1294,16 +1295,23 @@ export default function Home() {
         // Reset playbook args after sending
         setPlaybookArgs({});
 
-        // ツール指定モードの場合は selected_playbook を pre_spells に変換し、
-        // meta_playbook と args は送らない (UI センチネルはサーバー側に存在しない
-        // Playbook 名なので、そのまま渡すと "playbook not found" になる)。
+        // ツール指定モードの場合は UI 状態 (Playbook 1 つ + Spell 複数) を
+        // pre_spells エントリ列に変換して送る。meta_playbook と args は送らない
+        // (UI センチネルはサーバー側に存在しない Playbook 名なので、そのまま渡すと
+        // "playbook not found" になる)。pre_spells のフォーマットは
+        // バックエンドの _SPELL_PATTERN / _SPELL_PATTERN_NO_ARGS と互換
+        // (sea/runtime_llm.py)。
         const isToolSelectedMode = currentPlaybook === TOOL_MODE_SELECTED;
         const selectedToolName = isToolSelectedMode
             ? (currentPlaybookArgs?.selected_playbook || null)
             : null;
-        const preSpells = selectedToolName
-            ? [`/run_playbook(name="${selectedToolName}")`]
-            : undefined;
+        const selectedSpellNames: string[] = isToolSelectedMode && Array.isArray(currentPlaybookArgs?.selected_spells)
+            ? (currentPlaybookArgs.selected_spells as string[])
+            : [];
+        const preSpellsBuilt = isToolSelectedMode
+            ? buildPreSpellsFromUI(selectedToolName, selectedSpellNames)
+            : [];
+        const preSpells = preSpellsBuilt.length > 0 ? preSpellsBuilt : undefined;
         const sendMetaPlaybook = isToolSelectedMode ? undefined : (currentPlaybook || undefined);
         const sendArgs = !isToolSelectedMode && Object.keys(currentPlaybookArgs).length > 0
             ? currentPlaybookArgs

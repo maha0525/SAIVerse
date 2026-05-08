@@ -40,6 +40,12 @@ interface SubPlaybookOption {
     label: string;
 }
 
+interface SpellOption {
+    name: string;
+    display_name: string;
+    description: string;
+}
+
 interface ToolModeSelectorProps {
     selectedPlaybook: string | null;
     onPlaybookChange: (id: string | null) => void;
@@ -58,8 +64,14 @@ export default function ToolModeSelector({
     const [subPlaybooks, setSubPlaybooks] = useState<SubPlaybookOption[]>([]);
     const [subPlaybooksLoaded, setSubPlaybooksLoaded] = useState(false);
 
+    // Spell multi-select
+    const [isSpellsOpen, setIsSpellsOpen] = useState(false);
+    const [availableSpells, setAvailableSpells] = useState<SpellOption[]>([]);
+    const [spellsLoaded, setSpellsLoaded] = useState(false);
+
     const containerRef = useRef<HTMLDivElement>(null);
     const subContainerRef = useRef<HTMLDivElement>(null);
+    const spellsContainerRef = useRef<HTMLDivElement>(null);
 
     // Treat anything other than the sentinel as "auto" — legacy pre-Phase 3
     // values (meta_user / meta_user_manual / meta_simple_speak) persisted on
@@ -117,6 +129,43 @@ export default function ToolModeSelector({
         }
     }, [normalizedMode, fetchSubPlaybooks]);
 
+    // Pull the list of available Spells (excluding run_playbook, which is
+    // covered by the Playbook dropdown above).
+    const fetchSpells = useCallback(async () => {
+        if (spellsLoaded) return;
+        try {
+            const res = await fetch('/api/people/spells');
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data)) {
+                    setAvailableSpells(
+                        data.filter((s: SpellOption) => s.name !== 'run_playbook')
+                    );
+                }
+            }
+        } catch (e) {
+            console.error('Failed to fetch spells', e);
+        }
+        setSpellsLoaded(true);
+    }, [spellsLoaded]);
+
+    useEffect(() => {
+        if (normalizedMode === TOOL_MODE_SELECTED) {
+            fetchSpells();
+        }
+    }, [normalizedMode, fetchSpells]);
+
+    useEffect(() => {
+        if (!isSpellsOpen) return;
+        const handler = (e: MouseEvent) => {
+            if (spellsContainerRef.current && !spellsContainerRef.current.contains(e.target as Node)) {
+                setIsSpellsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [isSpellsOpen]);
+
     const syncToServer = async (playbookId: string | null, params: Record<string, any>) => {
         try {
             await fetch('/api/config/playbook', {
@@ -152,6 +201,21 @@ export default function ToolModeSelector({
     const selectedSubLabel = selectedSubPlaybook
         ? subPlaybooks.find(s => s.value === selectedSubPlaybook)?.label || selectedSubPlaybook
         : null;
+
+    // Selected Spell list (multi-select). Stored as string[] in playbookArgs.selected_spells
+    // so page.tsx can convert it to pre_spells via buildPreSpellsFromUI on send.
+    const selectedSpellNames: string[] = Array.isArray(playbookArgs?.selected_spells)
+        ? (playbookArgs.selected_spells as string[])
+        : [];
+
+    const toggleSpell = (name: string) => {
+        const next = selectedSpellNames.includes(name)
+            ? selectedSpellNames.filter(n => n !== name)
+            : [...selectedSpellNames, name];
+        const newParams = { ...playbookArgs, selected_spells: next };
+        onPlaybookArgsChange(newParams);
+        syncToServer(selectedPlaybook, newParams);
+    };
 
     return (
         <div className={styles.container}>
@@ -221,6 +285,51 @@ export default function ToolModeSelector({
                                     {opt.label}
                                 </button>
                             ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {normalizedMode === TOOL_MODE_SELECTED && (
+                <div ref={spellsContainerRef} style={{ position: 'relative' }}>
+                    <button
+                        className={styles.subPlaybookBtn}
+                        onClick={() => setIsSpellsOpen(!isSpellsOpen)}
+                        title="併用するスペルを選択（複数可）"
+                    >
+                        <span>
+                            {selectedSpellNames.length === 0
+                                ? 'スペル併用なし'
+                                : `スペル: ${selectedSpellNames.length} 個`}
+                        </span>
+                        <ChevronDown size={12} style={{ opacity: 0.5 }} />
+                    </button>
+
+                    {isSpellsOpen && (
+                        <div className={styles.subPopover}>
+                            {availableSpells.length === 0 ? (
+                                <div className={styles.subOption} style={{ color: '#888', cursor: 'default' }}>
+                                    （利用可能なスペルがありません）
+                                </div>
+                            ) : (
+                                availableSpells.map(spell => {
+                                    const checked = selectedSpellNames.includes(spell.name);
+                                    return (
+                                        <button
+                                            key={spell.name}
+                                            className={`${styles.subOption} ${checked ? styles.subOptionSelected : ''}`}
+                                            onClick={() => toggleSpell(spell.name)}
+                                            title={spell.description}
+                                        >
+                                            <span style={{ marginRight: '6px' }}>{checked ? '✓' : '　'}</span>
+                                            {spell.display_name || spell.name}
+                                            <span style={{ color: '#888', marginLeft: '4px', fontSize: '0.85em' }}>
+                                                ({spell.name})
+                                            </span>
+                                        </button>
+                                    );
+                                })
+                            )}
                         </div>
                     )}
                 </div>
