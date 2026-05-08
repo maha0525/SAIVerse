@@ -7,17 +7,21 @@ from database.models import ThinkingRequest, VisitingAI
 
 
 class DatabasePollingMixin:
-    """Background database polling helpers for SAIVerseManager."""
+    """Background database polling helpers for SAIVerseManager.
 
-    def _db_polling_loop(self):
-        while not self.db_polling_stop_event.wait(3):
-            try:
-                self._check_for_visitors()
-                self._process_thinking_requests()
-                self._check_dispatch_status()
-                self.run_scheduled_prompts()
-            except Exception as exc:
-                logging.error("Error in DB polling loop: %s", exc, exc_info=True)
+    Phase 4-e: 旧 ``_db_polling_loop`` (固定 3 秒 sleep ループ) は廃止。
+    EventScheduler.schedule_periodic 経由で ``_db_polling_tick`` を呼ぶ。
+    """
+
+    def _db_polling_tick(self):
+        """1 回分の DB ポーリング処理。EventScheduler.schedule_periodic から呼ばれる。"""
+        try:
+            self._check_for_visitors()
+            self._process_thinking_requests()
+            self._check_dispatch_status()
+            self.run_scheduled_prompts()
+        except Exception as exc:
+            logging.error("Error in DB polling tick: %s", exc, exc_info=True)
 
     def _process_thinking_requests(self):
         db = self.SessionLocal()

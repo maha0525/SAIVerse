@@ -60,6 +60,10 @@ class AI(Base):
     # Last SAIVerse version this persona was successfully running on. NULL means
     # the persona predates the version-aware system (treat as v0.3.0 or earlier).
     LAST_KNOWN_VERSION = Column(String(64), nullable=True)
+    # Phase 4-e: Per-persona meta-judgment Pulse configuration (JSON).
+    # Keys: cache_threshold_ratio (float 0-1), max_retries (int), retry_backoff_seconds (int).
+    # NULL means use built-in defaults (see saiverse/meta_layer.py:_load_judgment_config).
+    META_JUDGMENT_CONFIG = Column(Text, nullable=True)
 
 class Building(Base):
     __tablename__ = "building"

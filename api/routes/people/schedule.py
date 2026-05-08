@@ -115,12 +115,19 @@ def create_schedule(
 
         session.add(new_schedule)
         session.commit()
-        return {"success": True, "schedule_id": new_schedule.SCHEDULE_ID}
+        new_schedule_id = new_schedule.SCHEDULE_ID
     except Exception as e:
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+    # Phase 4-e: 作成直後に EventScheduler に push (有効なら)
+    try:
+        manager.schedule_manager.register_schedule(new_schedule_id)
+    except Exception:
+        _log.exception("Failed to register schedule %d on EventScheduler", new_schedule_id)
+    return {"success": True, "schedule_id": new_schedule_id}
 
 @router.post("/{persona_id}/schedules/{schedule_id}/toggle")
 def toggle_schedule(
@@ -140,9 +147,19 @@ def toggle_schedule(
         
         schedule.ENABLED = not schedule.ENABLED
         session.commit()
-        return {"success": True, "enabled": schedule.ENABLED}
+        new_enabled = schedule.ENABLED
     finally:
         session.close()
+
+    # Phase 4-e: トグル結果に応じて EventScheduler を更新
+    try:
+        if new_enabled:
+            manager.schedule_manager.register_schedule(schedule_id)
+        else:
+            manager.schedule_manager.unregister_schedule(schedule_id)
+    except Exception:
+        _log.exception("Failed to update EventScheduler for schedule %d", schedule_id)
+    return {"success": True, "enabled": new_enabled}
 
 @router.put("/{persona_id}/schedules/{schedule_id}")
 def update_schedule(
@@ -213,7 +230,6 @@ def update_schedule(
             schedule.COMPLETED = False
 
         session.commit()
-        return {"success": True, "schedule_id": schedule.SCHEDULE_ID}
     except HTTPException:
         raise
     except Exception as e:
@@ -221,6 +237,13 @@ def update_schedule(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+    # Phase 4-e: 更新内容で次回発火時刻が変わった可能性があるので再 register
+    try:
+        manager.schedule_manager.register_schedule(schedule_id)
+    except Exception:
+        _log.exception("Failed to re-register schedule %d on EventScheduler", schedule_id)
+    return {"success": True, "schedule_id": schedule_id}
 
 @router.delete("/{persona_id}/schedules/{schedule_id}")
 def delete_schedule(
@@ -240,6 +263,12 @@ def delete_schedule(
 
         session.delete(schedule)
         session.commit()
-        return {"success": True}
     finally:
         session.close()
+
+    # Phase 4-e: 削除と同時に EventScheduler の予約も cancel
+    try:
+        manager.schedule_manager.unregister_schedule(schedule_id)
+    except Exception:
+        _log.exception("Failed to unregister schedule %d from EventScheduler", schedule_id)
+    return {"success": True}

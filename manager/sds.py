@@ -65,22 +65,46 @@ class SDSMixin:
     _SDS_BASE_INTERVAL = 30      # Normal polling interval (seconds)
     _SDS_MAX_INTERVAL = 300      # Max backoff interval (5 minutes)
     _SDS_BACKOFF_FACTOR = 2      # Exponential backoff multiplier
+    _SDS_SCHEDULER_KEY = "sds_heartbeat"
 
-    def _sds_background_loop(self):
-        interval = self._SDS_BASE_INTERVAL
-        consecutive_failures = 0
-        while not self.sds_stop_event.wait(interval):
+    def _sds_tick_and_reschedule(self):
+        """1 回分の SDS heartbeat + 動的 backoff で次回再 schedule。
+
+        Phase 4-e で旧 ``_sds_background_loop`` (固定 sleep ループ) を廃止。
+        失敗時の指数 backoff は callback 内で次回 fire_at を変えて表現する。
+        ``schedule_periodic`` だと固定 interval しか持てないので、ここは
+        ``schedule()`` を毎回呼ぶ手動再 register 方式を採用。
+        """
+        from datetime import datetime, timedelta
+        try:
             success = self._send_heartbeat()
             self._update_cities_from_sds()
             if success:
-                consecutive_failures = 0
+                self._sds_consecutive_failures = 0
                 interval = self._SDS_BASE_INTERVAL
             else:
-                consecutive_failures += 1
+                self._sds_consecutive_failures = getattr(self, "_sds_consecutive_failures", 0) + 1
                 interval = min(
-                    self._SDS_BASE_INTERVAL * (self._SDS_BACKOFF_FACTOR ** consecutive_failures),
+                    self._SDS_BASE_INTERVAL * (self._SDS_BACKOFF_FACTOR ** self._sds_consecutive_failures),
                     self._SDS_MAX_INTERVAL,
                 )
+        except Exception:
+            logging.exception("Error in SDS tick")
+            self._sds_consecutive_failures = getattr(self, "_sds_consecutive_failures", 0) + 1
+            interval = min(
+                self._SDS_BASE_INTERVAL * (self._SDS_BACKOFF_FACTOR ** self._sds_consecutive_failures),
+                self._SDS_MAX_INTERVAL,
+            )
+
+        # 次回を schedule (停止時は呼ばれない: stop で cancel される)
+        scheduler = getattr(self, "event_scheduler", None)
+        if scheduler is None or getattr(self, "sds_stop_event", None) is None or self.sds_stop_event.is_set():
+            return
+        scheduler.schedule(
+            fire_at=datetime.now() + timedelta(seconds=interval),
+            callback=self._sds_tick_and_reschedule,
+            key=self._SDS_SCHEDULER_KEY,
+        )
 
     def _register_with_sds(self):
         register_url = f"{self.sds_url}/register"

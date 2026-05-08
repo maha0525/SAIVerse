@@ -82,8 +82,16 @@ class TrackManager:
     分離が必要になった場合は呼び出し側でロックを追加する。
     """
 
-    def __init__(self, session_factory: Callable[[], Session]):
+    def __init__(
+        self,
+        session_factory: Callable[[], Session],
+        event_scheduler: Optional[Any] = None,
+    ):
         self.SessionLocal = session_factory
+        # Phase 4-e: waiting Track の timeout 通知を EventScheduler に push する用。
+        # None の場合 (tools 等の独立インスタンス) は timeout 通知が機能しない。
+        # 将来 tools からも wait() を呼ぶようになったら別途 manager 注入経路を整える。
+        self.event_scheduler = event_scheduler
         # alert 状態への遷移を購読する observer 群。
         # signature: (persona_id: str, track_id: str, context: dict) -> None
         # MetaLayer はここに登録される。TrackManager は観察対象を増やす責務を持たないため、
@@ -432,8 +440,92 @@ class TrackManager:
             raise
         finally:
             db.close()
+        # Phase 4-e: timeout 到達を EventScheduler に予約する。timeout=None の場合は
+        # 予約しない (無期限待機)。既存予約は同 key で上書きされる (例: 同じ Track が
+        # 連続して wait に入った場合)。
+        self._schedule_waiting_timeout(track)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
+
+    # ------------------------------------------------------------------
+    # Phase 4-e: waiting timeout の EventScheduler 連携
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _waiting_timeout_key(track_id: str) -> str:
+        return f"wait_timeout:{track_id}"
+
+    def _schedule_waiting_timeout(self, track: ActionTrack) -> None:
+        """waiting Track の timeout 到達時刻を EventScheduler に push する。
+
+        Intent A v0.x §"タイムアウト" に従い、到達時は **自動遷移せず** メタ
+        レイヤーへ通知 (alert 経路) する。ペルソナが ``track_resume_from_wait``
+        等で判断する。
+        """
+        if self.event_scheduler is None or track.waiting_timeout_at is None:
+            return
+        track_id = track.track_id
+        persona_id = track.persona_id
+        waiting_for_snapshot = track.waiting_for  # callback では再 fetch するが、ログ用に保持
+
+        def _on_timeout(tid: str = track_id, pid: str = persona_id, snap: Optional[str] = waiting_for_snapshot) -> None:
+            self._handle_waiting_timeout(tid, pid, snap)
+
+        self.event_scheduler.schedule(
+            fire_at=track.waiting_timeout_at,
+            callback=_on_timeout,
+            key=self._waiting_timeout_key(track_id),
+        )
+        logging.debug(
+            "[track] scheduled waiting timeout: track=%s fire_at=%s",
+            track_id, track.waiting_timeout_at.isoformat(timespec="seconds"),
+        )
+
+    def _cancel_waiting_timeout(self, track_id: str) -> None:
+        """waiting timeout の予約をキャンセル。waiting 解除/abort 等で呼ぶ。"""
+        if self.event_scheduler is None:
+            return
+        self.event_scheduler.cancel(self._waiting_timeout_key(track_id))
+
+    def _handle_waiting_timeout(
+        self, track_id: str, persona_id: str, waiting_for: Optional[str]
+    ) -> None:
+        """EventScheduler から呼ばれる timeout callback。
+
+        Track が現在も waiting 状態かを再確認してから、alert observer に通知する。
+        既に waiting 解除されていれば何もしない。
+        """
+        # 状態再確認 (race 回避)
+        try:
+            current = self.get(track_id)
+        except TrackNotFoundError:
+            logging.debug("[track] waiting timeout: track %s not found (deleted?)", track_id)
+            return
+
+        if current.status != STATUS_WAITING:
+            logging.debug(
+                "[track] waiting timeout fired but status=%s (no longer waiting): track=%s",
+                current.status, track_id,
+            )
+            return
+
+        logging.info(
+            "[track] waiting timeout reached: track=%s persona=%s waiting_for=%s",
+            track_id, persona_id, waiting_for,
+        )
+        # メタレイヤー通知。Intent: 自動遷移せず判断を仰ぐ。
+        self._notify_alert(
+            persona_id,
+            track_id,
+            context={
+                "trigger": "waiting_timeout",
+                "waiting_for": waiting_for,
+                "waiting_timeout_at": (
+                    current.waiting_timeout_at.isoformat()
+                    if current.waiting_timeout_at else None
+                ),
+            },
+        )
 
     def resume_from_wait(
         self, track_id: str, mode: str, *, pulse_id: Optional[str] = None
@@ -490,6 +582,8 @@ class TrackManager:
             raise
         finally:
             db.close()
+        # Phase 4-e: waiting timeout 予約をキャンセル
+        self._cancel_waiting_timeout(track_id)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
 
@@ -546,6 +640,8 @@ class TrackManager:
             raise
         finally:
             db.close()
+        # Phase 4-e: waiting timeout 予約をキャンセル (waiting でなくても無害)
+        self._cancel_waiting_timeout(track_id)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
 
@@ -731,6 +827,9 @@ class TrackManager:
             raise
         finally:
             db.close()
+        # Phase 4-e: waiting フィールドをクリアした時は EventScheduler の予約も外す
+        if clear_waiting_fields:
+            self._cancel_waiting_timeout(track_id)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
 

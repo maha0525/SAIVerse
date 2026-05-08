@@ -120,6 +120,161 @@ class MetaLayer:
             return lock
 
     # ------------------------------------------------------------------
+    # Phase 4-e: Per-persona meta-judgment Pulse configuration
+    # ------------------------------------------------------------------
+
+    # AI.META_JUDGMENT_CONFIG の既定値。NULL カラム / 不正 JSON / キー欠落の
+    # フォールバック先。将来 Pattern A/B/C 推定でモデル種別ごとに分岐させる
+    # 余地を残し、ここでは v0.3.0 ベースラインの単一既定として置く。
+    _DEFAULT_JUDGMENT_CONFIG: Dict[str, Any] = {
+        "cache_threshold_ratio": 0.3,     # キャッシュ TTL 残り 30% で前倒し tick 発火
+        "max_retries": 1,                 # Pulse 失敗時の即時リトライ最大回数
+        "retry_backoff_seconds": 5,       # リトライ間の待機秒数
+        "periodic_interval_minutes": 50,  # メタ判断 Pulse の自動発話間隔 (旧 AutonomyManager.interval_minutes)
+        "keep_cache_alive": True,         # True: cache TTL 接近で前倒し fire / False: TTL 無視 (低頻度ペルソナ向け)
+    }
+
+    def _load_judgment_config(self, persona: Any) -> Dict[str, Any]:
+        """ペルソナの META_JUDGMENT_CONFIG を読み、既定値で穴埋めして返す。
+
+        AI.META_JUDGMENT_CONFIG (Text/JSON) を毎回 DB から読み出し、
+        ``_DEFAULT_JUDGMENT_CONFIG`` にマージする。NULL / 不正 JSON / 型不一致
+        は警告ログを残しつつ既定値で穴埋めする。
+
+        UI 編集を即時反映させたいため、結果のキャッシュは行わない (CHRONICLE
+        系の参照頻度と同程度なので影響は軽微)。tick ループ内で頻繁に呼ばれる
+        ようになった場合のみキャッシュ化を検討する。
+        """
+        config = dict(self._DEFAULT_JUDGMENT_CONFIG)
+
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return config
+
+        raw: Optional[str] = None
+        try:
+            from database.models import AI
+            db = self.manager.SessionLocal()
+            try:
+                ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+                raw = ai_row.META_JUDGMENT_CONFIG if ai_row else None
+            finally:
+                db.close()
+        except Exception:
+            logging.warning(
+                "[meta-layer] Failed to read META_JUDGMENT_CONFIG for %s; using defaults",
+                persona_id, exc_info=True,
+            )
+            return config
+
+        if not raw:
+            return config
+
+        try:
+            override = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(override, dict):
+                raise ValueError(f"expected dict, got {type(override).__name__}")
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            logging.warning(
+                "[meta-layer] Invalid META_JUDGMENT_CONFIG JSON for %s: %s; using defaults",
+                persona_id, exc,
+            )
+            return config
+
+        for key, default in self._DEFAULT_JUDGMENT_CONFIG.items():
+            if key not in override:
+                continue
+            value = override[key]
+            # bool は int の subclass なので明示除外。default が int/float のときに
+            # bool が紛れ込むのを防ぐ。
+            if isinstance(default, bool):
+                expected_types: Tuple[type, ...] = (bool,)
+            elif isinstance(default, int) and not isinstance(default, bool):
+                expected_types = (int,)
+            elif isinstance(default, float):
+                expected_types = (int, float)  # int → float 昇格は許容
+            else:
+                expected_types = (type(default),)
+            if isinstance(value, expected_types) and not (
+                not isinstance(default, bool) and isinstance(value, bool)
+            ):
+                config[key] = float(value) if isinstance(default, float) else value
+            else:
+                logging.warning(
+                    "[meta-layer] META_JUDGMENT_CONFIG.%s wrong type for %s "
+                    "(expected %s, got %s); using default %r",
+                    key, persona_id,
+                    "/".join(t.__name__ for t in expected_types),
+                    type(value).__name__, default,
+                )
+
+        return config
+
+    # ------------------------------------------------------------------
+    # Phase 4-e: should_fire — 集約判定 API (EventScheduler から呼ばれる)
+    # ------------------------------------------------------------------
+
+    def should_fire(
+        self,
+        persona_id: str,
+        trigger_kind: str,
+    ) -> Optional[Dict[str, Any]]:
+        """指定ペルソナにメタ判断 Pulse を発火すべきかを再評価する。
+
+        EventScheduler の callback (TTL 接近 / interval 経過 / Active 化など) から
+        呼ばれる。callback が schedule された時点と発火時点で状態が変わっている
+        可能性があるため、発火直前にここで再評価する。
+
+        Args:
+            persona_id: 対象ペルソナ ID。
+            trigger_kind: 発火源を表す文字列 ("ttl" / "interval" / "active" /
+                "schedule" / "alert_recovery" など)。返り値の trigger context に
+                埋め込む。
+
+        Returns:
+            発火すべきなら trigger context dict、不要なら None。
+
+        判定ルール (intent A v0.9 / v0.10 を踏襲):
+        1. ペルソナが見つからない / ACTIVITY_STATE != Active → None
+        2. 現在 running の Track の Handler が ``post_complete_behavior=='wait_response'``
+           → None (相手の応答待ち中はメタ判断を割り込ませない)
+        3. 上記をクリアしたら ``{"trigger": trigger_kind}`` を返す
+
+        判定はあくまで「発火していい状況か」のチェック。「発火すべきタイミングか」
+        (TTL 残り計算、interval 経過判定など) は schedule する側が事前に行う。
+        ここで二重に時刻を計算しない (judgment 完了直後の状態が反映されない race
+        があるため)。
+        """
+        persona = self._lookup_persona(persona_id)
+        if persona is None:
+            logging.debug(
+                "[meta-layer] should_fire: persona not found: %s (trigger=%s)",
+                persona_id, trigger_kind,
+            )
+            return None
+
+        activity_state = getattr(persona, "activity_state", "Idle")
+        if activity_state != "Active":
+            logging.debug(
+                "[meta-layer] should_fire: skipped (activity_state=%s != Active): persona=%s trigger=%s",
+                activity_state, persona_id, trigger_kind,
+            )
+            return None
+
+        running_track = self._get_running_track(persona_id)
+        if running_track is not None:
+            handler = self._get_handler_for_track(running_track)
+            behavior = getattr(handler, "post_complete_behavior", None) if handler else None
+            if behavior == "wait_response":
+                logging.debug(
+                    "[meta-layer] should_fire: skipped (running Track wait_response): persona=%s track=%s trigger=%s",
+                    persona_id, getattr(running_track, "track_id", "?"), trigger_kind,
+                )
+                return None
+
+        return {"trigger": trigger_kind}
+
+    # ------------------------------------------------------------------
     # alert observer エントリ
     # ------------------------------------------------------------------
 
@@ -343,40 +498,84 @@ class MetaLayer:
             "recent_judgments": recent_judgments_block,
         }
 
-        captured_errors: List[Dict[str, Any]] = []
-
-        def _capture_event(ev: Dict[str, Any]) -> None:
-            if isinstance(ev, dict) and ev.get("type") == "error":
-                captured_errors.append(ev)
-
+        # Phase 4-e: ペルソナ別 retry 設定
+        judgment_config = self._load_judgment_config(persona)
         try:
-            runtime.run_meta_user(
-                persona,
-                user_input=None,
-                building_id=building_id,
-                meta_playbook="meta_judgment",
-                args=args,
-                event_callback=_capture_event,
-                pulse_type="meta_judgment",
-            )
-        except Exception:
-            logging.exception(
-                "[meta-layer] meta_judgment Playbook failed: persona=%s alert_track=%s",
-                persona.persona_id, alert_track_id,
-            )
-            return
+            max_retries = max(0, int(judgment_config.get("max_retries", 1)))
+        except (TypeError, ValueError):
+            max_retries = 1
+        try:
+            retry_backoff_seconds = max(0, int(judgment_config.get("retry_backoff_seconds", 5)))
+        except (TypeError, ValueError):
+            retry_backoff_seconds = 5
 
-        if captured_errors:
-            for err in captured_errors:
-                logging.error(
-                    "[meta-layer] meta_judgment Playbook emitted error: persona=%s alert_track=%s error=%s",
-                    persona.persona_id, alert_track_id, err,
+        # 試行回数 = max_retries + 1 (max_retries=0 ならリトライなしで 1 回だけ)
+        last_failure_reason: Optional[str] = None
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                logging.info(
+                    "[meta-layer] meta_judgment retry attempt %d/%d after %ds backoff: persona=%s alert_track=%s",
+                    attempt, max_retries, retry_backoff_seconds,
+                    persona.persona_id, alert_track_id,
                 )
+                # per-persona Lock を保持したまま sleep する。並行 alert/tick は
+                # その間 wait される (Lock acquired after %.1fs wait のログで観測可能)。
+                time.sleep(retry_backoff_seconds)
+
+            captured_errors: List[Dict[str, Any]] = []
+
+            def _capture_event(
+                ev: Dict[str, Any],
+                _errors: List[Dict[str, Any]] = captured_errors,
+            ) -> None:
+                if isinstance(ev, dict) and ev.get("type") == "error":
+                    _errors.append(ev)
+
+            try:
+                runtime.run_meta_user(
+                    persona,
+                    user_input=None,
+                    building_id=building_id,
+                    meta_playbook="meta_judgment",
+                    args=args,
+                    event_callback=_capture_event,
+                    pulse_type="meta_judgment",
+                )
+            except Exception as exc:
+                last_failure_reason = f"runtime exception: {exc!r}"
+                logging.warning(
+                    "[meta-layer] meta_judgment Playbook raised on attempt %d/%d: "
+                    "persona=%s alert_track=%s error=%r",
+                    attempt + 1, max_retries + 1,
+                    persona.persona_id, alert_track_id, exc,
+                )
+                continue
+
+            if captured_errors:
+                last_failure_reason = f"playbook errors: {captured_errors}"
+                for err in captured_errors:
+                    logging.warning(
+                        "[meta-layer] meta_judgment Playbook emitted error on attempt %d/%d: "
+                        "persona=%s alert_track=%s error=%s",
+                        attempt + 1, max_retries + 1,
+                        persona.persona_id, alert_track_id, err,
+                    )
+                continue
+
+            # 成功
+            logging.info(
+                "[meta-layer] meta_judgment Playbook completed: persona=%s alert_track=%s attempts=%d",
+                persona.persona_id, alert_track_id, attempt + 1,
+            )
             return
 
-        logging.info(
-            "[meta-layer] meta_judgment Playbook completed: persona=%s alert_track=%s",
-            persona.persona_id, alert_track_id,
+        # 全リトライ枯渇
+        logging.warning(
+            "[meta-layer] meta_judgment Playbook exhausted retries (%d attempts): "
+            "persona=%s alert_track=%s last_error=%s. Next judgment will be triggered "
+            "by EventScheduler (cache TTL or interval).",
+            max_retries + 1,
+            persona.persona_id, alert_track_id, last_failure_reason,
         )
 
     # ------------------------------------------------------------------

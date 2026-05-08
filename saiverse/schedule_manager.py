@@ -1,9 +1,29 @@
+"""ScheduleManager — push 駆動のペルソナスケジューラ (Phase 4-e)。
+
+ペルソナの定期 / 一回 / 恒常スケジュール (PersonaSchedule テーブル) を
+EventScheduler 経由で発火する。
+
+旧実装 (60 秒固定ポーリング) は v0.3.0 dev で完全廃止。各スケジュールごとに
+次回発火時刻を計算して EventScheduler.schedule() に push する形に置き換えた。
+
+ライフサイクル:
+- ``start()``: DB から有効スケジュールを全件読み出し、各々を EventScheduler
+  に register する
+- ``stop()``: 登録済み全予約を EventScheduler から cancel する
+- ``register_schedule(schedule_id)``: 1 件のスケジュールを (再)登録。
+  作成・更新・トグル ON 時に API 層から呼ばれる
+- ``unregister_schedule(schedule_id)``: 1 件の予約をキャンセル。
+  削除・トグル OFF 時に API 層から呼ばれる
+
+発火後は callback 内で:
+  1. メタプレイブックを PulseController に投げる
+  2. 完了状態 (oneshot の COMPLETED, interval の LAST_EXECUTED_AT) を更新
+  3. 次回発火時刻を計算して EventScheduler に再 register
+"""
 import json
 import logging
-import threading
-import time
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
@@ -14,188 +34,334 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
+def _schedule_key(schedule_id: int) -> str:
+    """EventScheduler に渡す key (schedule_id 単位で一意)。"""
+    return f"persona_schedule:{schedule_id}"
+
+
 class ScheduleManager:
-    """
-    ペルソナのスケジュールを管理し、定期的にチェックして実行するクラス。
-    """
+    """ペルソナスケジュールを EventScheduler 経由で発火する管理クラス。"""
 
-    def __init__(self, saiverse_manager: "SAIVerseManager", check_interval: int = 60):
-        """
-        :param saiverse_manager: SAIVerseManagerインスタンス
-        :param check_interval: スケジュールチェック間隔（秒）
-        """
+    def __init__(self, saiverse_manager: "SAIVerseManager"):
         self.manager = saiverse_manager
-        self.check_interval = check_interval
-        self._thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
-        self._last_check_times: Dict[int, datetime] = {}  # schedule_id -> last check time
-        LOGGER.info("[ScheduleManager] Initialized with check interval: %d seconds", check_interval)
+        self._registered_ids: Set[int] = set()
+        # 互換性のため属性は残すが、未使用 (旧 _schedule_loop で使われていた)
+        self._stop_event = None
+        LOGGER.info("[ScheduleManager] Initialized (push-driven via EventScheduler)")
 
-    def start(self):
-        """スケジュールチェックループをバックグラウンドで開始"""
-        if self._thread and self._thread.is_alive():
-            LOGGER.warning("[ScheduleManager] Thread is already running.")
-            return
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._schedule_loop, daemon=True)
-        self._thread.start()
-        LOGGER.info("[ScheduleManager] Started background schedule checker thread (check_interval=%ds).", self.check_interval)
-        # スレッドが実際に起動したか少し待って確認
-        time.sleep(0.1)
-        if self._thread.is_alive():
-            LOGGER.info("[ScheduleManager] Thread is confirmed alive.")
-        else:
-            LOGGER.error("[ScheduleManager] Thread failed to start!")
+    def start(self) -> None:
+        """全有効スケジュールを EventScheduler に register する。
 
-    def stop(self):
-        """スケジュールチェックループを停止"""
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-        LOGGER.info("[ScheduleManager] Stopped schedule checker thread.")
-
-    def _schedule_loop(self):
-        """定期的にスケジュールをチェックして実行するメインループ"""
-        LOGGER.info("[ScheduleManager] Schedule loop started")
-        while not self._stop_event.is_set():
-            self._stop_event.wait(self.check_interval)
-            if self._stop_event.is_set():
-                break
-
-            try:
-                LOGGER.debug("[ScheduleManager] Checking schedules...")
-                self._check_and_execute_schedules()
-            except Exception as e:
-                LOGGER.error("[ScheduleManager] Error in schedule loop: %s", e, exc_info=True)
-        LOGGER.info("[ScheduleManager] Schedule loop ended")
-
-    def _check_and_execute_schedules(self):
-        """全スケジュールをチェックし、発火条件を満たすものを実行"""
+        EventScheduler は本メソッド呼び出し時点で start していなくても問題ない
+        (schedule() は heap に積むだけで dispatch スレッド起動は別工程)。
+        """
         session = self.manager.SessionLocal()
         try:
-            # 有効なスケジュールを優先度順に取得
             schedules = (
                 session.query(PersonaSchedule)
-                .filter(PersonaSchedule.ENABLED == True)
-                .order_by(PersonaSchedule.PRIORITY.desc(), PersonaSchedule.SCHEDULE_ID.desc())
+                .filter(PersonaSchedule.ENABLED == True)  # noqa: E712
                 .all()
             )
-
-            LOGGER.debug("[ScheduleManager] Found %d enabled schedules", len(schedules))
-
+            registered_count = 0
             for schedule in schedules:
                 try:
-                    should_run = self._should_execute(schedule, session)
-                    LOGGER.debug(
-                        "[ScheduleManager] Schedule %d (type=%s, persona=%s): should_execute=%s",
+                    if self._do_register(schedule, session):
+                        registered_count += 1
+                except Exception:
+                    LOGGER.exception(
+                        "[ScheduleManager] Failed to register schedule %d at startup",
                         schedule.SCHEDULE_ID,
-                        schedule.SCHEDULE_TYPE,
-                        schedule.PERSONA_ID,
-                        should_run,
                     )
-                    if should_run:
-                        self._execute_schedule(schedule, session)
-                except Exception as e:
-                    LOGGER.error(
-                        "[ScheduleManager] Error checking schedule %d: %s",
-                        schedule.SCHEDULE_ID,
-                        e,
-                        exc_info=True,
-                    )
+            LOGGER.info(
+                "[ScheduleManager] Started: registered %d/%d enabled schedules",
+                registered_count, len(schedules),
+            )
         finally:
             session.close()
 
-    def _should_execute(self, schedule: PersonaSchedule, session) -> bool:
-        """スケジュールを実行すべきかを判定"""
-        schedule_id = schedule.SCHEDULE_ID
-        schedule_type = schedule.SCHEDULE_TYPE
-        now = datetime.now(timezone.utc)
+    def stop(self) -> None:
+        """登録済み全予約を EventScheduler から cancel する。"""
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            self._registered_ids.clear()
+            return
 
-        # ペルソナのタイムゾーンを取得
-        persona_tz = self._get_persona_timezone(schedule.PERSONA_ID, session)
-        local_now = now.astimezone(persona_tz)
+        for schedule_id in list(self._registered_ids):
+            try:
+                scheduler.cancel(_schedule_key(schedule_id))
+            except Exception:
+                LOGGER.exception(
+                    "[ScheduleManager] Failed to cancel schedule %d on stop",
+                    schedule_id,
+                )
+        self._registered_ids.clear()
+        LOGGER.info("[ScheduleManager] Stopped")
+
+    # ------------------------------------------------------------------
+    # Public API: 個別スケジュールの register / unregister
+    # ------------------------------------------------------------------
+
+    def register_schedule(self, schedule_id: int) -> bool:
+        """1 件のスケジュールを (再)登録する。既存予約は上書きされる。
+
+        作成・更新・トグル ON 時に API ルートから呼ばれる。スケジュールが
+        無効化されていたり、次回発火時刻が計算できない (oneshot 完了済 等)
+        場合は EventScheduler から cancel するだけで終わる。
+
+        Returns:
+            登録できたら True、cancel のみだった or 失敗なら False。
+        """
+        session = self.manager.SessionLocal()
+        try:
+            schedule = session.query(PersonaSchedule).filter(
+                PersonaSchedule.SCHEDULE_ID == schedule_id
+            ).first()
+            if schedule is None:
+                # 削除されたケース: cancel のみ
+                self._do_cancel(schedule_id)
+                return False
+            return self._do_register(schedule, session)
+        finally:
+            session.close()
+
+    def unregister_schedule(self, schedule_id: int) -> None:
+        """1 件の予約をキャンセル。削除・トグル OFF 時に API 層から呼ばれる。"""
+        self._do_cancel(schedule_id)
+
+    # ------------------------------------------------------------------
+    # 内部: register / cancel
+    # ------------------------------------------------------------------
+
+    def _do_register(self, schedule: PersonaSchedule, session) -> bool:
+        """schedule オブジェクトを EventScheduler に push する。
+
+        ENABLED でない / 次回時刻計算不能 の場合は cancel のみ行って False。
+        """
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            LOGGER.warning(
+                "[ScheduleManager] event_scheduler not available; cannot register schedule %d",
+                schedule.SCHEDULE_ID,
+            )
+            return False
+
+        if not schedule.ENABLED:
+            self._do_cancel(schedule.SCHEDULE_ID)
+            return False
+
+        next_fire = self._compute_next_fire_at(schedule, session)
+        if next_fire is None:
+            LOGGER.debug(
+                "[ScheduleManager] Schedule %d has no next fire time (completed / invalid); cancelling",
+                schedule.SCHEDULE_ID,
+            )
+            self._do_cancel(schedule.SCHEDULE_ID)
+            return False
+
+        schedule_id = schedule.SCHEDULE_ID
+        # callback は schedule_id だけを captureして、発火時に DB から最新状態を読む。
+        # schedule オブジェクト自体を closure に閉じ込めると ORM session の寿命とずれる。
+        scheduler.schedule(
+            fire_at=next_fire,
+            callback=lambda sid=schedule_id: self._handle_fire(sid),
+            key=_schedule_key(schedule_id),
+        )
+        self._registered_ids.add(schedule_id)
+        LOGGER.debug(
+            "[ScheduleManager] Registered schedule %d (type=%s, persona=%s, fire_at=%s)",
+            schedule_id, schedule.SCHEDULE_TYPE, schedule.PERSONA_ID, next_fire.isoformat(),
+        )
+        return True
+
+    def _do_cancel(self, schedule_id: int) -> None:
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            return
+        scheduler.cancel(_schedule_key(schedule_id))
+        self._registered_ids.discard(schedule_id)
+
+    # ------------------------------------------------------------------
+    # 次回発火時刻の計算 (UTC で返す)
+    # ------------------------------------------------------------------
+
+    def _compute_next_fire_at(self, schedule: PersonaSchedule, session) -> Optional[datetime]:
+        """schedule の次回発火時刻 (naive local datetime) を計算する。
+
+        EventScheduler は naive datetime (ローカルタイム) を受けるので、
+        計算は UTC で行うが返り値は ``datetime.now()`` と同じ naive ローカル時刻に
+        変換する。
+        """
+        now_utc = datetime.now(timezone.utc)
+        schedule_type = schedule.SCHEDULE_TYPE
 
         if schedule_type == "periodic":
-            return self._should_execute_periodic(schedule, local_now, schedule_id)
+            tz = self._get_persona_timezone(schedule.PERSONA_ID, session)
+            return self._next_periodic_fire(schedule, now_utc, tz)
         elif schedule_type == "oneshot":
-            return self._should_execute_oneshot(schedule, now)
+            return self._next_oneshot_fire(schedule, now_utc)
         elif schedule_type == "interval":
-            return self._should_execute_interval(schedule, now)
+            return self._next_interval_fire(schedule, now_utc)
         else:
             LOGGER.warning("[ScheduleManager] Unknown schedule type: %s", schedule_type)
-            return False
+            return None
 
-    def _should_execute_periodic(self, schedule: PersonaSchedule, local_now: datetime, schedule_id: int) -> bool:
-        """定期スケジュールの発火判定"""
-        # 曜日チェック
+    def _next_periodic_fire(
+        self, schedule: PersonaSchedule, now_utc: datetime, tz: ZoneInfo
+    ) -> Optional[datetime]:
+        """定期スケジュール (曜日 + 時刻指定) の次回発火時刻。
+
+        ペルソナのタイムゾーンで「指定曜日リスト + TIME_OF_DAY」の
+        最も近い未来の発火時刻を計算する。
+        """
+        if not schedule.TIME_OF_DAY:
+            return None
+
+        try:
+            hour_str, minute_str = schedule.TIME_OF_DAY.split(":")
+            target_hour = int(hour_str)
+            target_minute = int(minute_str)
+        except (ValueError, AttributeError):
+            LOGGER.warning(
+                "[ScheduleManager] Invalid TIME_OF_DAY for schedule %d: %r",
+                schedule.SCHEDULE_ID, schedule.TIME_OF_DAY,
+            )
+            return None
+
         if schedule.DAYS_OF_WEEK:
             try:
-                days = json.loads(schedule.DAYS_OF_WEEK)
-                if local_now.weekday() not in days:
-                    return False
+                allowed_days = set(json.loads(schedule.DAYS_OF_WEEK))
             except Exception:
-                LOGGER.warning("[ScheduleManager] Failed to parse DAYS_OF_WEEK for schedule %d", schedule_id)
-                return False
+                LOGGER.warning(
+                    "[ScheduleManager] Failed to parse DAYS_OF_WEEK for schedule %d",
+                    schedule.SCHEDULE_ID, exc_info=True,
+                )
+                return None
+            if not allowed_days:
+                return None
+        else:
+            allowed_days = set(range(7))  # 曜日指定なし = 毎日
 
-        # 時刻チェック
-        if not schedule.TIME_OF_DAY:
-            return False
-
-        target_time = schedule.TIME_OF_DAY
-        current_time = local_now.strftime("%H:%M")
-
-        # 前回のチェック時刻を取得
-        last_check = self._last_check_times.get(schedule_id)
-        self._last_check_times[schedule_id] = local_now
-
-        # 現在時刻が目標時刻と一致し、かつ前回チェックから一定時間経過している場合に実行
-        if current_time == target_time:
-            if last_check is None or (local_now - last_check).total_seconds() >= 60:
-                return True
-
-        return False
-
-    def _should_execute_oneshot(self, schedule: PersonaSchedule, now: datetime) -> bool:
-        """単発スケジュールの発火判定"""
-        if schedule.COMPLETED:
-            LOGGER.debug("[ScheduleManager] Schedule %d already completed", schedule.SCHEDULE_ID)
-            return False
-
-        if not schedule.SCHEDULED_DATETIME:
-            LOGGER.warning("[ScheduleManager] Schedule %d has no SCHEDULED_DATETIME", schedule.SCHEDULE_ID)
-            return False
-
-        # スケジュール時刻を過ぎているかチェック
-        scheduled_time = schedule.SCHEDULED_DATETIME
-        if scheduled_time.tzinfo is None:
-            scheduled_time = scheduled_time.replace(tzinfo=timezone.utc)
-
-        should_execute = now >= scheduled_time
-        LOGGER.debug(
-            "[ScheduleManager] Oneshot schedule %d: now=%s, scheduled=%s, should_execute=%s",
-            schedule.SCHEDULE_ID,
-            now.isoformat(),
-            scheduled_time.isoformat(),
-            should_execute,
+        local_now = now_utc.astimezone(tz)
+        # 今日の発火候補
+        today_candidate = local_now.replace(
+            hour=target_hour, minute=target_minute, second=0, microsecond=0
         )
-        return should_execute
 
-    def _should_execute_interval(self, schedule: PersonaSchedule, now: datetime) -> bool:
-        """恒常スケジュールの発火判定"""
-        if not schedule.INTERVAL_SECONDS:
-            return False
+        # 今日が許可曜日 + 候補時刻が未来 → 今日
+        if local_now.weekday() in allowed_days and today_candidate > local_now:
+            return self._to_naive_local(today_candidate)
 
-        last_executed = schedule.LAST_EXECUTED_AT
-        if last_executed is None:
-            # 初回実行
-            return True
+        # それ以外 → 1〜7 日先で最初に見つかる許可曜日
+        for delta in range(1, 8):
+            candidate = today_candidate + timedelta(days=delta)
+            if candidate.weekday() in allowed_days:
+                return self._to_naive_local(candidate)
 
-        if last_executed.tzinfo is None:
-            last_executed = last_executed.replace(tzinfo=timezone.utc)
+        return None
 
-        elapsed = (now - last_executed).total_seconds()
-        return elapsed >= schedule.INTERVAL_SECONDS
+    def _next_oneshot_fire(
+        self, schedule: PersonaSchedule, now_utc: datetime
+    ) -> Optional[datetime]:
+        if schedule.COMPLETED:
+            return None
+        if not schedule.SCHEDULED_DATETIME:
+            return None
+
+        scheduled = schedule.SCHEDULED_DATETIME
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.replace(tzinfo=timezone.utc)
+        # 過去時刻でも push (EventScheduler が即発火する)
+        return self._to_naive_local(scheduled)
+
+    def _next_interval_fire(
+        self, schedule: PersonaSchedule, now_utc: datetime
+    ) -> Optional[datetime]:
+        if not schedule.INTERVAL_SECONDS or schedule.INTERVAL_SECONDS <= 0:
+            return None
+        last = schedule.LAST_EXECUTED_AT
+        if last is None:
+            return self._to_naive_local(now_utc)  # 初回即実行
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return self._to_naive_local(last + timedelta(seconds=schedule.INTERVAL_SECONDS))
+
+    @staticmethod
+    def _to_naive_local(dt: datetime) -> datetime:
+        """UTC-aware datetime をシステムローカルの naive datetime に変換する。
+
+        EventScheduler は ``fire_at.timestamp()`` で扱うので、aware/naive どちらでも
+        OK だが、内部で扱うフォーマットを naive local に揃える (datetime.now() と
+        引き算したい場面用)。
+        """
+        if dt.tzinfo is None:
+            return dt
+        return dt.astimezone().replace(tzinfo=None)
+
+    def _get_persona_timezone(self, persona_id: str, session) -> ZoneInfo:
+        try:
+            persona_model = session.query(AIModel).filter(AIModel.AIID == persona_id).first()
+            if not persona_model:
+                return ZoneInfo("UTC")
+            city_model = session.query(CityModel).filter(
+                CityModel.CITYID == persona_model.HOME_CITYID
+            ).first()
+            if not city_model or not city_model.TIMEZONE:
+                return ZoneInfo("UTC")
+            return ZoneInfo(city_model.TIMEZONE)
+        except Exception:
+            LOGGER.warning(
+                "[ScheduleManager] Failed to get timezone for persona %s",
+                persona_id, exc_info=True,
+            )
+            return ZoneInfo("UTC")
+
+    # ------------------------------------------------------------------
+    # 発火: callback 本体 (EventScheduler から呼ばれる)
+    # ------------------------------------------------------------------
+
+    def _handle_fire(self, schedule_id: int) -> None:
+        """EventScheduler から呼ばれる発火 callback。
+
+        schedule_id だけを captureしているので、発火時に最新の DB 状態を
+        読み直して実行する。実行後は次回発火時刻を計算して再 register する。
+        """
+        session = self.manager.SessionLocal()
+        try:
+            schedule = session.query(PersonaSchedule).filter(
+                PersonaSchedule.SCHEDULE_ID == schedule_id
+            ).first()
+            if schedule is None:
+                LOGGER.warning(
+                    "[ScheduleManager] _handle_fire: schedule %d not found (deleted?)",
+                    schedule_id,
+                )
+                self._registered_ids.discard(schedule_id)
+                return
+
+            if not schedule.ENABLED:
+                LOGGER.debug(
+                    "[ScheduleManager] _handle_fire: schedule %d is disabled, skipping",
+                    schedule_id,
+                )
+                self._registered_ids.discard(schedule_id)
+                return
+
+            self._execute_schedule(schedule, session)
+            self._update_schedule_after_execution(schedule, session)
+
+            # 次回 register (oneshot 完了 / interval 継続 / periodic 次回)
+            self._do_register(schedule, session)
+
+        finally:
+            session.close()
+
+    # ------------------------------------------------------------------
+    # スケジュール実行 (旧実装からほぼそのまま引き継ぎ)
+    # ------------------------------------------------------------------
 
     def _generate_schedule_prompt(self, schedule: PersonaSchedule, session, persona_id: str) -> str:
         """スケジュール実行時のプロンプトを生成"""
@@ -203,10 +369,8 @@ class ScheduleManager:
         persona_tz = self._get_persona_timezone(persona_id, session)
         local_now = now.astimezone(persona_tz)
 
-        # スケジュールタイプに応じた実行日時の取得
         scheduled_time_str = ""
         if schedule.SCHEDULE_TYPE == "periodic":
-            # 定期スケジュールの場合、曜日と時刻を表示
             days_str = "毎日"
             if schedule.DAYS_OF_WEEK:
                 try:
@@ -214,20 +378,19 @@ class ScheduleManager:
                     day_names = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"]
                     days_str = ", ".join([day_names[d] for d in day_list if 0 <= d < 7])
                 except Exception:
-                    LOGGER.warning("Failed to parse DAYS_OF_WEEK for schedule prompt (schedule %d)", schedule.SCHEDULE_ID, exc_info=True)
+                    LOGGER.warning(
+                        "Failed to parse DAYS_OF_WEEK for schedule prompt (schedule %d)",
+                        schedule.SCHEDULE_ID, exc_info=True,
+                    )
             scheduled_time_str = f"{days_str} {schedule.TIME_OF_DAY or '??:??'}"
-
         elif schedule.SCHEDULE_TYPE == "oneshot":
-            # 単発スケジュールの場合、設定された日時を表示
             if schedule.SCHEDULED_DATETIME:
                 dt_utc = schedule.SCHEDULED_DATETIME
                 if dt_utc.tzinfo is None:
                     dt_utc = dt_utc.replace(tzinfo=timezone.utc)
                 dt_local = dt_utc.astimezone(persona_tz)
                 scheduled_time_str = dt_local.strftime("%Y年%m月%d日 %H:%M")
-
         elif schedule.SCHEDULE_TYPE == "interval":
-            # 恒常スケジュールの場合、インターバルを表示
             interval_sec = schedule.INTERVAL_SECONDS or 0
             if interval_sec >= 3600:
                 hours = interval_sec // 3600
@@ -238,7 +401,6 @@ class ScheduleManager:
             else:
                 scheduled_time_str = f"{interval_sec}秒ごと"
 
-        # プロンプトを生成
         prompt = f"""<system>
 スケジュールの実行時刻です。
 
@@ -247,70 +409,48 @@ class ScheduleManager:
 スケジュール設定: {scheduled_time_str}
 スケジュールの説明: {schedule.DESCRIPTION or "（説明なし）"}
 </system>"""
-
-        LOGGER.debug("[ScheduleManager] Generated prompt: %s", prompt)
         return prompt
 
-    def _execute_schedule(self, schedule: PersonaSchedule, session):
-        """スケジュールを実行"""
+    def _execute_schedule(self, schedule: PersonaSchedule, session) -> None:
+        """スケジュールを実行 (PulseController.submit_schedule)。"""
         persona_id = schedule.PERSONA_ID
         meta_playbook = schedule.META_PLAYBOOK
 
-        # Parse args from DB column PLAYBOOK_PARAMS. PLAYBOOK_PARAMS may carry
-        # ``pre_spells`` (list[str] of /spell ... entries) in addition to the
-        # legacy positional args; the former is split out and forwarded to
-        # PulseController as a separate pre_spells argument so the Pulse runs
-        # those Spells before the first LLM call.
         schedule_args: Optional[Dict[str, Any]] = None
         pre_spells: Optional[List[str]] = None
         if schedule.PLAYBOOK_PARAMS:
             try:
                 parsed_params = json.loads(schedule.PLAYBOOK_PARAMS)
             except Exception as e:
-                LOGGER.warning("[ScheduleManager] Failed to parse PLAYBOOK_PARAMS for schedule %d: %s", schedule.SCHEDULE_ID, e)
+                LOGGER.warning(
+                    "[ScheduleManager] Failed to parse PLAYBOOK_PARAMS for schedule %d: %s",
+                    schedule.SCHEDULE_ID, e,
+                )
                 parsed_params = None
             if isinstance(parsed_params, dict):
                 raw_pre_spells = parsed_params.get("pre_spells")
                 if isinstance(raw_pre_spells, list):
                     pre_spells = [s for s in raw_pre_spells if isinstance(s, str) and s.strip()]
-                # Remaining keys go to schedule_args (= initial Playbook params).
-                # ``pre_spells`` is a runtime hook, not a Playbook input parameter,
-                # so strip it out before passing as args.
                 schedule_args = {k: v for k, v in parsed_params.items() if k != "pre_spells"} or None
 
         LOGGER.info(
-            "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s, args=%s)",
-            schedule.SCHEDULE_ID,
-            persona_id,
-            schedule.SCHEDULE_TYPE,
-            meta_playbook,
-            schedule_args,
+            "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s)",
+            schedule.SCHEDULE_ID, persona_id, schedule.SCHEDULE_TYPE, meta_playbook,
         )
 
-        # ペルソナを取得
         persona = self.manager.all_personas.get(persona_id)
         if not persona:
             LOGGER.warning("[ScheduleManager] Persona %s not found in all_personas", persona_id)
             return
 
-        # ペルソナの現在地を取得
         building_id = getattr(persona, "current_building_id", None)
         if not building_id:
             LOGGER.warning("[ScheduleManager] Persona %s has no current_building_id", persona_id)
             return
 
-        # スケジュール実行用のプロンプトを生成
         user_input = self._generate_schedule_prompt(schedule, session, persona_id)
 
-        # メタプレイブックを実行（PulseController経由）
         try:
-            LOGGER.info(
-                "[ScheduleManager] Submitting schedule via PulseController: playbook=%s, building=%s, prompt_length=%d, args=%s",
-                meta_playbook,
-                building_id,
-                len(user_input),
-                schedule_args,
-            )
             self.manager.pulse_controller.submit_schedule(
                 persona_id=persona_id,
                 building_id=building_id,
@@ -320,54 +460,29 @@ class ScheduleManager:
                 args=schedule_args,
                 pre_spells=pre_spells,
             )
-            LOGGER.info("[ScheduleManager] Schedule submitted to PulseController")
+            LOGGER.info("[ScheduleManager] Schedule %d submitted to PulseController", schedule.SCHEDULE_ID)
 
-            # Building履歴をディスクに保存（in-memory → log.json）
             self.manager._save_modified_buildings()
             persona._save_session_metadata()
-            LOGGER.debug("[ScheduleManager] Building histories and session metadata saved after schedule execution")
 
-            # 実行後の状態更新
-            self._update_schedule_after_execution(schedule, session)
-
-        except Exception as e:
-            LOGGER.error(
-                "[ScheduleManager] Failed to execute schedule %d: %s",
-                schedule.SCHEDULE_ID,
-                e,
-                exc_info=True,
+        except Exception:
+            LOGGER.exception(
+                "[ScheduleManager] Failed to execute schedule %d", schedule.SCHEDULE_ID,
             )
 
-    def _update_schedule_after_execution(self, schedule: PersonaSchedule, session):
-        """スケジュール実行後の状態を更新"""
+    def _update_schedule_after_execution(self, schedule: PersonaSchedule, session) -> None:
+        """スケジュール実行後の状態を更新。"""
         now = datetime.now(timezone.utc)
 
         if schedule.SCHEDULE_TYPE == "oneshot":
-            # 単発スケジュールは完了フラグを立てる
             schedule.COMPLETED = True
             session.commit()
             LOGGER.info("[ScheduleManager] Oneshot schedule %d marked as completed", schedule.SCHEDULE_ID)
-
         elif schedule.SCHEDULE_TYPE == "interval":
-            # 恒常スケジュールは最終実行時刻を更新
             schedule.LAST_EXECUTED_AT = now
             session.commit()
-            LOGGER.info("[ScheduleManager] Interval schedule %d updated LAST_EXECUTED_AT", schedule.SCHEDULE_ID)
-
-    def _get_persona_timezone(self, persona_id: str, session) -> ZoneInfo:
-        """ペルソナのホームCityのタイムゾーンを取得"""
-        try:
-            persona_model = session.query(AIModel).filter(AIModel.AIID == persona_id).first()
-            if not persona_model:
-                LOGGER.warning("[ScheduleManager] Persona %s not found in database", persona_id)
-                return ZoneInfo("UTC")
-
-            city_model = session.query(CityModel).filter(CityModel.CITYID == persona_model.HOME_CITYID).first()
-            if not city_model or not city_model.TIMEZONE:
-                LOGGER.warning("[ScheduleManager] City timezone not found for persona %s", persona_id)
-                return ZoneInfo("UTC")
-
-            return ZoneInfo(city_model.TIMEZONE)
-        except Exception as e:
-            LOGGER.warning("[ScheduleManager] Failed to get timezone for persona %s: %s", persona_id, e)
-            return ZoneInfo("UTC")
+            LOGGER.info(
+                "[ScheduleManager] Interval schedule %d updated LAST_EXECUTED_AT",
+                schedule.SCHEDULE_ID,
+            )
+        # periodic は LAST_EXECUTED_AT を持たない (次回発火は曜日+時刻で機械的に計算)

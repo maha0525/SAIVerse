@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
+import json
 import logging
 from api.deps import get_manager, avatar_path_to_url
 from database.models import AI, UserAiLink
-from .models import AIConfigResponse, UpdateAIConfigRequest
+from .models import AIConfigResponse, MetaJudgmentConfig, UpdateAIConfigRequest
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +25,20 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
     finally:
         session.close()
 
+    # Phase 4-e: META_JUDGMENT_CONFIG (Text/JSON) → MetaJudgmentConfig
+    meta_cfg_raw = details.get("META_JUDGMENT_CONFIG")
+    meta_cfg_obj: Optional[MetaJudgmentConfig] = None
+    if meta_cfg_raw:
+        try:
+            parsed = json.loads(meta_cfg_raw) if isinstance(meta_cfg_raw, str) else meta_cfg_raw
+            if isinstance(parsed, dict):
+                meta_cfg_obj = MetaJudgmentConfig(**parsed)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            LOGGER.warning(
+                "Invalid META_JUDGMENT_CONFIG JSON for %s: %s; returning None",
+                persona_id, exc,
+            )
+
     return AIConfigResponse(
         name=details["AINAME"],
         description=details["DESCRIPTION"] or "",
@@ -38,6 +53,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         appearance_image_path=avatar_path_to_url(details.get("APPEARANCE_IMAGE_PATH")),
         home_city_id=details["HOME_CITYID"],
         linked_user_id=linked_user_id,
+        meta_judgment_config=meta_cfg_obj,
     )
 
 @router.patch("/{persona_id}/config")
@@ -67,6 +83,13 @@ def update_persona_config(
     new_desc = new_desc or ""
     new_prompt = new_prompt or ""
     
+    # Phase 4-e: meta_judgment_config を dict 化して manager に渡す
+    meta_cfg_dict = None
+    if req.meta_judgment_config is not None:
+        # exclude_none=True で未指定キーを落とし、META_JUDGMENT_CONFIG には
+        # 明示的に与えられた項目だけを保存する。MetaLayer 側で既定値とマージされる。
+        meta_cfg_dict = req.meta_judgment_config.model_dump(exclude_none=True)
+
     result = manager.update_ai(
         ai_id=persona_id,
         name=current["AINAME"], # Name update not supported here for safety/complexity
@@ -82,6 +105,7 @@ def update_persona_config(
         chronicle_enabled=req.chronicle_enabled,
         memory_weave_context=req.memory_weave_context,
         spell_enabled=req.spell_enabled,
+        meta_judgment_config=meta_cfg_dict,
     )
 
     if result.startswith("Error:"):

@@ -66,6 +66,9 @@ class FakeManager:
         self.note_manager = note_manager
         self.personas = personas
         self.SessionLocal = None  # MetaLayer は使わないが念のため
+        # Phase 4-e: Playbook path のテスト用 (retry 検証等)。
+        # 通常 legacy path テストでは触らない。
+        self.sea_runtime = None
 
 
 @pytest.fixture
@@ -727,3 +730,152 @@ def test_locks_are_independent_per_persona(tm, nm, session_factory, monkeypatch)
 
     # 別ペルソナなので並行実行が観測されている
     assert parallel_seen, "別ペルソナ同士は並行できるはず"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4-e: _run_judgment_via_playbook の retry 挙動
+# ---------------------------------------------------------------------------
+
+
+class _FakeRuntime:
+    """sea_runtime.run_meta_user の最小スタブ。
+
+    side_effect が callable ならそれを使う、リストなら順次取り出す。
+    """
+
+    def __init__(self, side_effects=None):
+        self.side_effects = side_effects or []
+        self.calls = 0
+
+    def run_meta_user(self, persona, **kwargs):
+        self.calls += 1
+        if self.side_effects:
+            effect = self.side_effects.pop(0)
+            if isinstance(effect, BaseException):
+                raise effect
+            if callable(effect):
+                effect(persona, **kwargs)
+
+
+def _make_playbook_meta(tm, nm, db_persona, runtime, judgment_config_override=None):
+    """Playbook path テスト用の MetaLayer を組み立てる。"""
+    persona = FakePersona(db_persona, FakeLLMClient([]))
+    persona.current_building_id = "test_building"
+    persona.persona_id = db_persona
+    manager = FakeManager(tm, nm, {db_persona: persona})
+    manager.sea_runtime = runtime
+    meta = MetaLayer(manager)
+    if judgment_config_override is not None:
+        meta._load_judgment_config = lambda _p: judgment_config_override
+    # 過去判断ログは空でいい (DB 読みを回避)
+    meta._build_recent_judgments_block = lambda _pid: ""
+    return meta, persona
+
+
+def test_playbook_retries_on_runtime_exception(tm, nm, db_persona):
+    """run_meta_user が例外を投げた場合、max_retries 回まで再試行する。"""
+    runtime = _FakeRuntime(side_effects=[
+        RuntimeError("boom #1"),
+        RuntimeError("boom #2"),
+        None,  # 3 回目で成功
+    ])
+    meta, persona = _make_playbook_meta(
+        tm, nm, db_persona, runtime,
+        judgment_config_override={
+            "max_retries": 2,
+            "retry_backoff_seconds": 0,
+            "cache_threshold_ratio": 0.3,
+            "periodic_interval_minutes": 50,
+        },
+    )
+    meta._run_judgment_via_playbook(persona, "track_x", {"trigger": "test"})
+    assert runtime.calls == 3, "1 回失敗 + retry 1 失敗 + retry 2 成功 = 3 回"
+
+
+def test_playbook_no_retry_when_max_retries_zero(tm, nm, db_persona):
+    """max_retries=0 ならリトライなしで 1 回だけ呼ばれる (失敗してもそのまま諦める)。"""
+    runtime = _FakeRuntime(side_effects=[RuntimeError("boom")])
+    meta, persona = _make_playbook_meta(
+        tm, nm, db_persona, runtime,
+        judgment_config_override={
+            "max_retries": 0,
+            "retry_backoff_seconds": 0,
+            "cache_threshold_ratio": 0.3,
+            "periodic_interval_minutes": 50,
+        },
+    )
+    meta._run_judgment_via_playbook(persona, "track_x", {"trigger": "test"})
+    assert runtime.calls == 1
+
+
+def test_playbook_exhausts_retries_and_logs_warning(tm, nm, db_persona, caplog):
+    """全試行失敗時は WARN ログ + 例外を呼び出し元に投げない (次回 tick に委ねる)。"""
+    runtime = _FakeRuntime(side_effects=[
+        RuntimeError("boom #1"),
+        RuntimeError("boom #2"),
+        RuntimeError("boom #3"),
+    ])
+    meta, persona = _make_playbook_meta(
+        tm, nm, db_persona, runtime,
+        judgment_config_override={
+            "max_retries": 2,
+            "retry_backoff_seconds": 0,
+            "cache_threshold_ratio": 0.3,
+            "periodic_interval_minutes": 50,
+        },
+    )
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING):
+        meta._run_judgment_via_playbook(persona, "track_x", {"trigger": "test"})
+    assert runtime.calls == 3
+    # 最終枯渇ログが出ている
+    exhausted_msgs = [
+        r for r in caplog.records
+        if "exhausted retries" in r.getMessage()
+    ]
+    assert len(exhausted_msgs) == 1
+
+
+def test_playbook_retries_on_captured_error_event(tm, nm, db_persona):
+    """event_callback が error event を受信した場合も retry 対象。"""
+    error_event = {"type": "error", "content": "playbook internal error"}
+
+    call_count = [0]
+
+    def emit_error(persona, **kwargs):
+        cb = kwargs.get("event_callback")
+        if cb is not None:
+            cb(error_event)
+        call_count[0] += 1
+
+    def succeed(persona, **kwargs):
+        call_count[0] += 1
+
+    runtime = _FakeRuntime(side_effects=[emit_error, succeed])
+    meta, persona = _make_playbook_meta(
+        tm, nm, db_persona, runtime,
+        judgment_config_override={
+            "max_retries": 1,
+            "retry_backoff_seconds": 0,
+            "cache_threshold_ratio": 0.3,
+            "periodic_interval_minutes": 50,
+        },
+    )
+    meta._run_judgment_via_playbook(persona, "track_x", {"trigger": "test"})
+    assert call_count[0] == 2, "1 回目 error event → retry → 2 回目成功"
+
+
+def test_playbook_uses_default_config_when_load_fails(tm, nm, db_persona):
+    """_load_judgment_config が壊れた値を返しても、defensive parsing で動作する。"""
+    runtime = _FakeRuntime(side_effects=[None])
+    meta, persona = _make_playbook_meta(
+        tm, nm, db_persona, runtime,
+        judgment_config_override={
+            # 不正値 (string) を渡しても except でデフォルト fallback されること
+            "max_retries": "invalid",
+            "retry_backoff_seconds": None,
+        },
+    )
+    # 例外なく実行できる
+    meta._run_judgment_via_playbook(persona, "track_x", {"trigger": "test"})
+    assert runtime.calls == 1

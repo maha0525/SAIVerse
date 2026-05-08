@@ -724,6 +724,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
+                "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
             }
         finally:
             db.close()
@@ -766,6 +767,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
+        meta_judgment_config: Optional[Dict[str, Any]] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -873,6 +875,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Spell system toggle
             if spell_enabled is not None:
                 ai.SPELL_ENABLED = spell_enabled
+            # Update Meta-Judgment Pulse configuration (Phase 4-e)
+            if meta_judgment_config is not None:
+                if isinstance(meta_judgment_config, dict) and meta_judgment_config:
+                    ai.META_JUDGMENT_CONFIG = json.dumps(meta_judgment_config, ensure_ascii=False)
+                else:
+                    # 空 dict / None / その他は NULL に倒して既定値運用に戻す
+                    ai.META_JUDGMENT_CONFIG = None
             db.commit()
 
             llm_warnings = []

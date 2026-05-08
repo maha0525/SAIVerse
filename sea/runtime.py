@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1535,6 +1535,154 @@ class SEARuntime:
             "updated_at": datetime.now().isoformat(),
         }
         self._save_anchors(persona, anchors)
+
+    def _touch_anchor_after_llm_call(self, persona, usage) -> None:
+        """LLM 呼び出し成功後に METABOLISM_ANCHORS の updated_at を touch する (Phase 4-e)。
+
+        旧実装は ``runtime_context.py`` の prepare_context 内で touch していたが、
+        その方式だと「context 組成は走ったが LLM 呼び出しが失敗した」ケースで
+        updated_at が前進してしまい、次回 ``_resolve_metabolism_anchor`` が「TTL 内」
+        と誤判定して、実際には切れているキャッシュに対して長大コンテキストを
+        送り直す不整合を招いていた。
+
+        この関数は LLM 呼び出しが成功してレスポンス usage が確定した時点で呼ぶ:
+
+        - explicit cache モデル (Anthropic 等): ``cache_read > 0 OR cache_write > 0``
+          のときだけ touch。両方 0 なら「実際には cache が触られていない」ので
+          touch しない (= 次回 prepare_context で TTL 切れ判定 → Case 3 fallback)。
+        - implicit / no cache モデル (Gemini implicit cache, Ollama 等): 呼び出し
+          成功 = touch。プロバイダ側で cache 状態を直接観測できないため、
+          ``_get_anchor_validity_seconds`` が返す既定値 (1200s) を起点として扱う。
+        """
+        if persona is None or usage is None:
+            return
+        history_mgr = getattr(persona, "history_manager", None)
+        anchor_id = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
+        if not anchor_id:
+            return
+        persona_model = getattr(persona, "model", None)
+        if not persona_model:
+            return
+
+        try:
+            from saiverse.model_configs import get_cache_config
+            cache_config = get_cache_config(persona_model)
+            cache_type = (cache_config or {}).get("type", "implicit")
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] Failed to resolve cache type for %s; assuming implicit",
+                persona_model, exc_info=True,
+            )
+            cache_type = "implicit"
+
+        if cache_type == "explicit":
+            cache_read = getattr(usage, "cached_tokens", 0) or 0
+            cache_write = getattr(usage, "cache_write_tokens", 0) or 0
+            if cache_read == 0 and cache_write == 0:
+                LOGGER.warning(
+                    "[metabolism] anchor touch skipped (explicit cache miss): "
+                    "persona=%s model=%s anchor=%s — cache breakpoint may be misconfigured "
+                    "or TTL already expired before this call",
+                    getattr(persona, "persona_id", "?"), persona_model, anchor_id,
+                )
+                return
+
+        self._update_anchor_for_model(persona, persona_model, anchor_id)
+        LOGGER.debug(
+            "[metabolism] anchor touched after LLM success: persona=%s model=%s anchor=%s cache_type=%s",
+            getattr(persona, "persona_id", "?"), persona_model, anchor_id, cache_type,
+        )
+
+        # Phase 4-e: touch した時刻を起点に「TTL 接近で前倒し meta_judgment Pulse」
+        # を EventScheduler に予約する。同じペルソナ・モデルで再 touch されると
+        # 古い予約は cancel される (key 上書き)。失敗時は touch されないので
+        # 予約も更新されず、自然と TTL 切れ判定経路に乗る。
+        try:
+            self._schedule_cache_ttl_pulse(persona, persona_model, cache_type)
+        except Exception:
+            LOGGER.exception(
+                "[metabolism] Failed to schedule cache TTL pulse for persona=%s model=%s",
+                getattr(persona, "persona_id", "?"), persona_model,
+            )
+
+    def _schedule_cache_ttl_pulse(self, persona, model_key: str, cache_type: str) -> None:
+        """anchor touch 直後に「TTL 接近で前倒し fire」を EventScheduler に予約する。
+
+        計算: ``fire_at = now + cache_ttl_seconds * (1 - cache_threshold_ratio)``
+        (キャッシュ寿命のうち threshold_ratio 分が残ったタイミング)。
+        cache_threshold_ratio はペルソナの ``META_JUDGMENT_CONFIG`` から取得。
+
+        callback 内では ``MetaLayer.should_fire(persona_id, "ttl")`` で再評価し、
+        True なら ``on_periodic_tick`` を発火する。schedule した時刻と発火時刻
+        の間にユーザー対話が入って TTL 起点が更新された場合、再 touch で予約が
+        上書きされるため、古い予約は自然に消える。
+
+        ``cache_type == 'explicit'`` のみ予約対象 (implicit cache モデルは
+        TTL 概念が曖昧なので、interval 経過のみで動作させる)。
+
+        ``META_JUDGMENT_CONFIG.keep_cache_alive == False`` の場合は予約しない
+        (低頻度ペルソナ向け: 24 時間間隔等で cache 切れ覚悟の運用)。
+        """
+        if cache_type != "explicit":
+            return
+
+        manager = self.manager
+        scheduler = getattr(manager, "event_scheduler", None) if manager else None
+        meta_layer = getattr(manager, "meta_layer", None) if manager else None
+        if scheduler is None or meta_layer is None:
+            return
+
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+
+        # cache_ttl_seconds を取得
+        ttl_seconds = self._get_anchor_validity_seconds(model_key)
+        if ttl_seconds <= 0:
+            return
+
+        # ペルソナの judgment config から cache 関連の設定を取得
+        try:
+            judgment_config = meta_layer._load_judgment_config(persona)
+            keep_cache_alive = bool(judgment_config.get("keep_cache_alive", True))
+            threshold_ratio = float(judgment_config.get("cache_threshold_ratio", 0.3))
+        except Exception:
+            keep_cache_alive = True
+            threshold_ratio = 0.3
+
+        # keep_cache_alive=False のペルソナは TTL 接近の前倒しを行わない。
+        # 念のため既存予約があれば cancel する (設定変更で OFF になったケース対応)。
+        if not keep_cache_alive:
+            scheduler.cancel(f"ttl:{persona_id}")
+            LOGGER.debug(
+                "[metabolism] cache TTL pulse skipped (keep_cache_alive=False): persona=%s model=%s",
+                persona_id, model_key,
+            )
+            return
+
+        # threshold_ratio が範囲外なら既定値で防御
+        if not (0.0 < threshold_ratio < 1.0):
+            threshold_ratio = 0.3
+
+        wait_seconds = ttl_seconds * (1.0 - threshold_ratio)
+        fire_at = datetime.now() + timedelta(seconds=wait_seconds)
+        key = f"ttl:{persona_id}"
+
+        def _fire_callback() -> None:
+            ctx = meta_layer.should_fire(persona_id, "cache_ttl_approaching")
+            if ctx is None:
+                LOGGER.debug(
+                    "[metabolism] TTL pulse skipped (should_fire returned None): persona=%s",
+                    persona_id,
+                )
+                return
+            meta_layer.on_periodic_tick(persona_id, context=ctx)
+
+        scheduler.schedule(fire_at=fire_at, callback=_fire_callback, key=key)
+        LOGGER.debug(
+            "[metabolism] scheduled cache TTL pulse: persona=%s model=%s in %.0fs (ttl=%ds, threshold=%.2f)",
+            persona_id, model_key, wait_seconds, ttl_seconds, threshold_ratio,
+        )
 
     def _maybe_run_metabolism(
         self,

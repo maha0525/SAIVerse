@@ -429,10 +429,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                     "[sea][prepare-context] Anchor-based retrieval (%s): %d messages from anchor %s",
                                     resolution, len(recent), anchor_id,
                                 )
-                                # Persist anchor for current model (touch updated_at)
-                                persona_model = getattr(persona, "model", None)
-                                if persona_model:
-                                    runtime._update_anchor_for_model(persona, persona_model, anchor_id)
+                                # Phase 4-e: anchor の updated_at touch は LLM 呼び出し成功後
+                                # (`runtime_llm.py` の usage 確認位置) で行う。ここで先行 touch
+                                # すると、LLM 失敗時に「実際は cache 切れてるのに TTL 内」と
+                                # 誤判定して次回も長大コンテキストを送る不整合になるため。
                         else:
                             # Case 3: no valid anchor — minimal load + Chronicle generation
                             memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
@@ -570,16 +570,17 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             exclude_pulse_id=exclude_pulse_id,
                         )
 
-                    # Set metabolism anchor on first count-based retrieval and persist (skip in preview)
+                    # Set metabolism anchor on first count-based retrieval (skip in preview).
+                    # Phase 4-e: DB への永続化 (updated_at 書き込み) は LLM 呼び出し成功後に行う。
+                    # ここで anchor を立てたまま LLM 失敗 → DB 未書き込み → 次回も Case 3 fallback
+                    # → minimal load、という挙動になる。新規 anchor が永続化されないこと自体は
+                    # Case 3 を毎回繰り返すだけで致命的ではない (まはー確認済 2026-05-08)。
                     metabolism_enabled_for_anchor = getattr(runtime.manager, "metabolism_enabled", False) if runtime.manager else False
                     if metabolism_enabled_for_anchor and recent and not preview_only:
                         oldest_id = recent[0].get("id")
                         if oldest_id:
                             history_mgr.metabolism_anchor_message_id = oldest_id
-                            persona_model = getattr(persona, "model", None)
-                            if persona_model:
-                                runtime._update_anchor_for_model(persona, persona_model, oldest_id)
-                            LOGGER.debug("[sea][prepare-context] Set metabolism anchor to %s (persisted)", oldest_id)
+                            LOGGER.debug("[sea][prepare-context] Set metabolism anchor (in-memory) to %s; DB persist deferred to post-LLM-success", oldest_id)
 
                 LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                 # Enrich messages with attachment context

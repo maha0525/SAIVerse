@@ -1,8 +1,8 @@
 """Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構").
 
-Track 自身が条件超過で ``set_alert`` を発火する仕組みを駆動するバックグラウンド
-スレッド。intent では Handler 側に ``tick(persona_id)`` を持たせる方針が示されて
-いるため、ここでは:
+Track 自身が条件超過で ``set_alert`` を発火する仕組みを駆動する周期処理。
+intent では Handler 側に ``tick(persona_id)`` を持たせる方針が示されているため、
+ここでは:
 
 1. 各 Track Handler に ``tick(persona_id)`` があれば呼ぶ (将来の身体的欲求 /
    スケジュール / 知覚起因 Handler の拡張点)。
@@ -11,8 +11,8 @@ Track 自身が条件超過で ``set_alert`` を発火する仕組みを駆動�
    ``track_manager.set_alert`` を発火し、context に トリガ種別 + 値を載せる。
 
 頻度は ``SAIVERSE_INTERNAL_ALERT_INTERVAL_SECONDS`` (デフォルト 60 秒) で
-制御。intent 通り、身体的欲求は 1 分、知覚起因は 5 分のような種別ごとの
-頻度差は将来の Handler 単位の細分化で対応する (現状は単一頻度)。
+制御。Phase 4-e で **EventScheduler.schedule_periodic 経由の push 駆動** に再構成
+された (旧: 専用 background thread + ``_stop_event.wait`` ループ)。
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
 from typing import Any, Iterable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,6 +28,9 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SECONDS = 60
+
+# EventScheduler に登録する key (グローバルに 1 個)
+_SCHEDULER_KEY = "internal_alert_poll"
 
 # パラメータ閾値超過 alert を発火する対象 Track 状態。
 # completed/aborted/forgotten 等は対象外。
@@ -43,7 +45,7 @@ _HANDLER_ATTRS = (
 
 
 class InternalAlertPoller:
-    """Background thread that polls Track parameters and fires internal alerts."""
+    """EventScheduler 経由で Track パラメータを周期判定する。"""
 
     def __init__(self, manager: "SAIVerseManager", interval_seconds: Optional[int] = None):
         self.manager = manager
@@ -61,43 +63,53 @@ class InternalAlertPoller:
             else:
                 interval_seconds = DEFAULT_INTERVAL_SECONDS
         self.interval_seconds = interval_seconds
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._started = False
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if self._started:
             LOGGER.debug("[internal-alert-poller] Already running")
             return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._loop,
-            name="internal-alert-poller",
-            daemon=True,
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            LOGGER.warning(
+                "[internal-alert-poller] event_scheduler not available; cannot start",
+            )
+            return
+        scheduler.schedule_periodic(
+            interval_seconds=self.interval_seconds,
+            callback=self._safe_tick,
+            key=_SCHEDULER_KEY,
+            first_fire_immediate=False,  # 起動直後は他の初期化と競合しないよう interval 待つ
         )
-        self._thread.start()
+        self._started = True
         LOGGER.info(
-            "[internal-alert-poller] Started (interval=%d sec)", self.interval_seconds,
+            "[internal-alert-poller] Started (interval=%d sec, push-driven)",
+            self.interval_seconds,
         )
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=10)
+        if not self._started:
+            return
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is not None:
+            scheduler.cancel(_SCHEDULER_KEY)
+        self._started = False
         LOGGER.info("[internal-alert-poller] Stopped")
 
     # ------------------------------------------------------------------
-    # Internal loop
+    # Tick body
     # ------------------------------------------------------------------
 
-    def _loop(self) -> None:
-        # 起動時即発火しない (他の起動処理と競合しないよう interval 待ってから)
-        self._stop_event.wait(self.interval_seconds)
-        while not self._stop_event.is_set():
-            try:
-                self._tick_once()
-            except Exception:
-                LOGGER.exception("[internal-alert-poller] tick failed")
-            self._stop_event.wait(self.interval_seconds)
+    def _safe_tick(self) -> None:
+        """schedule_periodic の callback。例外で周期処理が止まらないよう吸収する。
+
+        ``schedule_periodic`` は callback が例外を投げた瞬間に周期処理を停止する
+        仕様 (無限ログ汚染防止) なので、ここで全例外を catch して周期を維持する。
+        """
+        try:
+            self._tick_once()
+        except Exception:
+            LOGGER.exception("[internal-alert-poller] tick failed")
 
     def _tick_once(self) -> None:
         personas = list(getattr(self.manager, "personas", {}).keys())

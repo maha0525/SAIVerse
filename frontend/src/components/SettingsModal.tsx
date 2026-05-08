@@ -10,6 +10,17 @@ interface SettingsModalProps {
     personaId: string;
 }
 
+interface MetaJudgmentConfig {
+    cache_threshold_ratio: number | null;
+    max_retries: number | null;
+    retry_backoff_seconds: number | null;
+    periodic_interval_minutes: number | null;
+    keep_cache_alive: boolean | null;
+}
+
+// 'default' = 設定なし (built-in default を使う)、'on'/'off' = 明示的な値
+type TriState = 'default' | 'on' | 'off';
+
 interface AIConfig {
     name: string;
     description: string;
@@ -22,7 +33,21 @@ interface AIConfig {
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
     linked_user_id: number | null;  // First linked user ID
+    meta_judgment_config: MetaJudgmentConfig | null;  // Phase 4-e
 }
+
+// Built-in defaults — must stay in sync with saiverse/meta_layer.py:_DEFAULT_JUDGMENT_CONFIG
+const META_JUDGMENT_DEFAULTS = {
+    cache_threshold_ratio: 0.3,
+    max_retries: 1,
+    retry_backoff_seconds: 5,
+    periodic_interval_minutes: 50,
+    keep_cache_alive: true,
+};
+
+// 自動発話間隔がこれを超えていてかつ keep_cache_alive が ON だと、cache 維持で
+// 高頻度に LLM が走るためコスト警告を出す
+const KEEP_CACHE_ALIVE_WARNING_INTERVAL_MINUTES = 60;
 
 interface ChronicleCostEstimate {
     total_messages: number;
@@ -95,6 +120,13 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [spellEnabled, setSpellEnabled] = useState(false);
+    // Phase 4-e: empty string = use built-in default (NULL in DB)
+    const [metaCacheThresholdRatio, setMetaCacheThresholdRatio] = useState<string>('');
+    const [metaMaxRetries, setMetaMaxRetries] = useState<string>('');
+    const [metaRetryBackoffSeconds, setMetaRetryBackoffSeconds] = useState<string>('');
+    // 自動発話間隔は「自律行動マネージャー」の interval 入力に統合済 (Phase 4-e)。
+    // META_JUDGMENT_CONFIG.periodic_interval_minutes は autonomy API 経由で永続化される。
+    const [metaKeepCacheAlive, setMetaKeepCacheAlive] = useState<TriState>('default');
     const [costEstimate, setCostEstimate] = useState<ChronicleCostEstimate | null>(null);
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
@@ -186,6 +218,21 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setSpellEnabled(data.spell_enabled ?? false);
+                // Phase 4-e: NULL → empty string で「既定値を使う」を表現
+                const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
+                setMetaCacheThresholdRatio(
+                    mjc?.cache_threshold_ratio != null ? String(mjc.cache_threshold_ratio) : ''
+                );
+                setMetaMaxRetries(
+                    mjc?.max_retries != null ? String(mjc.max_retries) : ''
+                );
+                setMetaRetryBackoffSeconds(
+                    mjc?.retry_backoff_seconds != null ? String(mjc.retry_backoff_seconds) : ''
+                );
+                setMetaKeepCacheAlive(
+                    mjc?.keep_cache_alive == null ? 'default' :
+                        (mjc.keep_cache_alive ? 'on' : 'off')
+                );
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
                 setLinkedUserId(data.linked_user_id ? String(data.linked_user_id) : '');
@@ -277,7 +324,24 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     spell_enabled: spellEnabled,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null,
-                    linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0  // 0 = clear link
+                    linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0,  // 0 = clear link
+                    // Phase 4-e: 各値が空文字列なら null = 既定値使用。
+                    // 全項目空なら meta_judgment_config 全体を null で送り、DB 側を NULL に戻す。
+                    meta_judgment_config: (() => {
+                        const ratio = metaCacheThresholdRatio.trim();
+                        const retries = metaMaxRetries.trim();
+                        const backoff = metaRetryBackoffSeconds.trim();
+                        const keepCache = metaKeepCacheAlive;
+                        if (!ratio && !retries && !backoff && keepCache === 'default') {
+                            return null;
+                        }
+                        const obj: Record<string, number | boolean> = {};
+                        if (ratio) obj.cache_threshold_ratio = parseFloat(ratio);
+                        if (retries) obj.max_retries = parseInt(retries);
+                        if (backoff) obj.retry_backoff_seconds = parseInt(backoff);
+                        if (keepCache !== 'default') obj.keep_cache_alive = (keepCache === 'on');
+                        return obj;
+                    })()
                 })
             });
 
@@ -528,6 +592,103 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         </div>
                                     )}
                                 </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>メタ判断 Pulse 設定</label>
+                                {(() => {
+                                    // 実効値の解決 (default なら built-in default)
+                                    const effectiveKeepCache = metaKeepCacheAlive === 'default'
+                                        ? META_JUDGMENT_DEFAULTS.keep_cache_alive
+                                        : metaKeepCacheAlive === 'on';
+                                    // 自動発話間隔は自律行動マネージャー UI で編集する (autonomyInterval が source of truth)
+                                    const intervalNum = autonomyInterval;
+                                    const showCostWarning = effectiveKeepCache &&
+                                        intervalNum > KEEP_CACHE_ALIVE_WARNING_INTERVAL_MINUTES;
+                                    return (
+                                        <>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                    <span style={{ minWidth: '160px' }}>失敗時リトライ回数</span>
+                                                    <input
+                                                        type="number"
+                                                        step="1"
+                                                        min="0"
+                                                        placeholder={String(META_JUDGMENT_DEFAULTS.max_retries)}
+                                                        value={metaMaxRetries}
+                                                        onChange={(e) => setMetaMaxRetries(e.target.value)}
+                                                        style={{ width: '7rem' }}
+                                                    />
+                                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                                        (既定: {META_JUDGMENT_DEFAULTS.max_retries})
+                                                    </span>
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                    <span style={{ minWidth: '160px' }}>リトライ待機秒数</span>
+                                                    <input
+                                                        type="number"
+                                                        step="1"
+                                                        min="0"
+                                                        placeholder={String(META_JUDGMENT_DEFAULTS.retry_backoff_seconds)}
+                                                        value={metaRetryBackoffSeconds}
+                                                        onChange={(e) => setMetaRetryBackoffSeconds(e.target.value)}
+                                                        style={{ width: '7rem' }}
+                                                    />
+                                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                                        (既定: {META_JUDGMENT_DEFAULTS.retry_backoff_seconds}秒)
+                                                    </span>
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                    <span style={{ minWidth: '160px' }}>キャッシュ維持</span>
+                                                    <select
+                                                        className={styles.select}
+                                                        value={metaKeepCacheAlive}
+                                                        onChange={(e) => setMetaKeepCacheAlive(e.target.value as TriState)}
+                                                        style={{ width: '14rem' }}
+                                                    >
+                                                        <option value="default">既定 ({META_JUDGMENT_DEFAULTS.keep_cache_alive ? 'ON' : 'OFF'})</option>
+                                                        <option value="on">ON (TTL 接近で前倒し)</option>
+                                                        <option value="off">OFF (TTL 無視 / 低頻度向け)</option>
+                                                    </select>
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                    <span style={{ minWidth: '160px' }}>キャッシュ閾値 (0.0–1.0)</span>
+                                                    <input
+                                                        type="number"
+                                                        step="0.05"
+                                                        min="0"
+                                                        max="1"
+                                                        placeholder={String(META_JUDGMENT_DEFAULTS.cache_threshold_ratio)}
+                                                        value={metaCacheThresholdRatio}
+                                                        onChange={(e) => setMetaCacheThresholdRatio(e.target.value)}
+                                                        style={{ width: '7rem' }}
+                                                        disabled={!effectiveKeepCache}
+                                                        title={effectiveKeepCache ? '' : 'キャッシュ維持が OFF のため無効'}
+                                                    />
+                                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                                        (既定: {META_JUDGMENT_DEFAULTS.cache_threshold_ratio})
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className={styles.description}>
+                                                メインモデルのキャッシュ TTL 残り割合が「キャッシュ閾値」を下回ると、メタ判断 Pulse を前倒しで発火します。Pulse が失敗した場合は「失敗時リトライ回数」の上限まで「リトライ待機秒数」を空けて再試行します。「キャッシュ維持」を OFF にすると TTL 接近時の前倒しを行わず、自律行動マネージャーの「間隔」ぴったりに走ります (24 時間間隔等の低頻度ペルソナ向け)。空欄の項目は既定値が適用されます。
+                                            </div>
+                                            {showCostWarning && (
+                                                <div style={{
+                                                    marginTop: '0.5rem',
+                                                    padding: '0.5rem 0.75rem',
+                                                    background: 'rgba(255, 200, 0, 0.12)',
+                                                    border: '1px solid rgba(255, 200, 0, 0.4)',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.85em',
+                                                    color: '#bf8700',
+                                                }}>
+                                                    ⚠ 自律行動マネージャーの間隔が長く ({intervalNum}分) かつキャッシュ維持が ON のため、TTL ベースで頻繁にメタ判断が走り API コストが増える可能性があります。低頻度運用が目的なら「キャッシュ維持」を OFF にしてください。
+                                                </div>
+                                            )}
+                                        </>
+                                    );
+                                })()}
                             </div>
 
                             <div className={styles.fieldGroup}>

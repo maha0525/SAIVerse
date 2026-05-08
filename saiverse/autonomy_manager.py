@@ -1,17 +1,17 @@
-"""Autonomous behavior manager for individual personas.
+"""Autonomous behavior manager for individual personas (Phase 4-e: push 駆動)。
 
-Phase C-2 統合 (intent A v0.14 / intent B v0.7) 後の責務:
-  ペルソナごとの定期 tick タイマーとして動作し、間隔経過のたびに
-  ``MetaLayer.on_periodic_tick(persona_id)`` を発火する。
-  判断ロジック本体 (旧 Decision / Execution) は MetaLayer の
-  ``meta_judgment`` Playbook に委譲済み。
+Phase 4-e で **EventScheduler 駆動の薄いラッパー** に再構成された。
 
-旧版 (Phase C-1 以前) は ``Decision (heavy) → Execution (light)`` の
-2段サイクルを内部で抱え、Stelis スレッドや PulseController callback の
-登録も行っていたが、不変条件 11 ("メタ判断 = ペルソナ自身の思考の流れ")
-を厳密に守るため、判断は Playbook 経由に統一した。Stelis 管理 /
-ユーザー割り込み連携は MetaLayer 側の alert observer に集約され、
-このクラスは純粋なタイマーとなった。
+- 旧実装 (Phase C-2): per-persona の sleep ループ thread が ``interval_minutes``
+  ごとに ``MetaLayer.on_periodic_tick`` を発火していた
+- 新実装 (Phase 4-e): EventScheduler に「次回発火時刻」を push する。fire 時に
+  callback で ``MetaLayer.on_periodic_tick`` を呼び、完了後に次回を再 push する
+
+API 互換性 (``start`` / ``stop`` / ``set_interval`` / ``get_status`` / ``set_models``)
+は維持する。``/people/{id}/autonomy`` API ルートと既存テストはそのまま動く。
+
+将来的に ``/people/{id}/autonomy`` API そのものを ``META_JUDGMENT_CONFIG`` 経由
+に統合する想定だが、Phase 4-e では UI 互換性維持のためインターフェースは据え置き。
 """
 
 from __future__ import annotations
@@ -22,12 +22,13 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from saiverse.saiverse_manager import SAIVerseManager
-    from persona.core import PersonaCore
+    from persona.core import PersonaCore  # noqa: F401
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,11 +49,7 @@ class AutonomyState(str, Enum):
 
 @dataclass
 class CycleReport:
-    """Report from a completed periodic tick.
-
-    Phase C-2 移行で旧 Decision/Execution の playbook/intent/output 情報は
-    持たない。シンプルな実行記録のみ。
-    """
+    """Report from a completed periodic tick."""
     cycle_id: str
     started_at: float = 0.0
     completed_at: float = 0.0
@@ -60,14 +57,13 @@ class CycleReport:
     error: Optional[str] = None
 
 
-class AutonomyManager:
-    """Manages the periodic meta-layer tick loop for a single persona.
+def _autonomy_key(persona_id: str) -> str:
+    """EventScheduler に渡す key (persona_id 単位で一意)。"""
+    return f"autonomy:{persona_id}"
 
-    Phase C-2 後の Lifecycle:
-        1. start() → background loop 起動
-        2. Loop runs: MetaLayer.on_periodic_tick → wait → repeat
-        3. stop() → loop 停止
-    """
+
+class AutonomyManager:
+    """ペルソナの自動発話間隔タイマー (EventScheduler 駆動)。"""
 
     def __init__(
         self,
@@ -80,8 +76,10 @@ class AutonomyManager:
     ):
         self.persona_id = persona_id
         self.manager = manager
-        # Phase C-2: env override (intent A v0.13 §"Pulse サイクルの 7 つの制御点" #3).
-        # 引数 > env > module default の優先順位。env は秒単位なので分に変換する。
+        # 優先順: 引数 > META_JUDGMENT_CONFIG.periodic_interval_minutes (DB 永続値) >
+        # env (SAIVERSE_META_LAYER_INTERVAL_SECONDS) > module default
+        if interval_minutes is None:
+            interval_minutes = self._load_interval_from_judgment_config()
         if interval_minutes is None:
             env_seconds = os.environ.get("SAIVERSE_META_LAYER_INTERVAL_SECONDS")
             if env_seconds:
@@ -96,14 +94,11 @@ class AutonomyManager:
             else:
                 interval_minutes = DEFAULT_INTERVAL_MINUTES
         self.interval_minutes = interval_minutes
-        # Phase C-2 移行で Decision/Execution は MetaLayer の meta_judgment Playbook
-        # に委譲済み。これらの引数は API 互換性のためだけに残す (使われない)。
+        # 互換のため残す (Phase C-2 移行で no-op)
         self.decision_model = decision_model
         self.execution_model = execution_model
 
         self._state = AutonomyState.STOPPED
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
         self._current_cycle_id: Optional[str] = None
         self._last_report: Optional[CycleReport] = None
         self._lock = threading.Lock()
@@ -129,9 +124,10 @@ class AutonomyManager:
     # ------------------------------------------------------------------
 
     def start(self) -> bool:
-        """Start the periodic tick loop.
+        """Start the periodic tick. Returns True if started, False if already running.
 
-        Returns True if started successfully, False if already running.
+        旧実装と同じく **start 直後に最初の tick が即時走る** (Active 化と同時に
+        メタ判断を 1 回流す挙動を維持)。次回以降は ``interval_minutes`` 待機。
         """
         with self._lock:
             if self._state != AutonomyState.STOPPED:
@@ -140,37 +136,24 @@ class AutonomyManager:
                     self.persona_id, self._state,
                 )
                 return False
-
-            self._stop_event.clear()
             self._state = AutonomyState.RUNNING
-            self._thread = threading.Thread(
-                target=self._loop,
-                name=f"autonomy-{self.persona_id}",
-                daemon=True,
-            )
-            self._thread.start()
 
-            LOGGER.info(
-                "[Autonomy:%s] Started (interval=%.1f min)",
-                self.persona_id, self.interval_minutes,
-            )
-            return True
+        # 即時 fire (fire_at=now で EventScheduler に積む)
+        self._schedule_tick_at(datetime.now())
+        LOGGER.info(
+            "[Autonomy:%s] Started (interval=%.1f min, push-driven)",
+            self.persona_id, self.interval_minutes,
+        )
+        return True
 
     def stop(self) -> bool:
-        """Stop the periodic tick loop.
-
-        Returns True if stopped, False if not running.
-        """
+        """Stop the periodic tick. Returns True if stopped, False if not running."""
         with self._lock:
             if self._state == AutonomyState.STOPPED:
                 return False
-            self._stop_event.set()
             self._state = AutonomyState.STOPPED
 
-        # Wait for thread to finish (outside lock)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=10)
-
+        self._cancel_pending_tick()
         LOGGER.info("[Autonomy:%s] Stopped", self.persona_id)
         return True
 
@@ -179,12 +162,34 @@ class AutonomyManager:
     # ------------------------------------------------------------------
 
     def set_interval(self, minutes: float) -> None:
-        """Update the loop interval (takes effect next cycle)."""
-        self.interval_minutes = max(0.5, minutes)
+        """Update the loop interval (effective immediately if running).
+
+        Re-schedule policy:
+        - ``WAITING`` / ``RUNNING``: 既存予約を新 interval で上書きする (即時反映)
+        - ``DECIDING`` (tick 実行中): 再 schedule しない。tick 完了時の
+          ``_schedule_next_tick`` が ``self.interval_minutes`` の最新値を読むため、
+          新 interval は次回 tick で自動的に反映される
+        - ``STOPPED``: 再 schedule しない (start で初めて push される)
+        """
+        new_interval = max(0.5, minutes)
+        with self._lock:
+            if abs(self.interval_minutes - new_interval) < 1e-9:
+                return
+            self.interval_minutes = new_interval
+            # WAITING (次回待ち) と RUNNING (start 直後の一瞬) はどちらも
+            # 既存予約を上書きしたい。DECIDING (tick 中) は tick 完了時の
+            # _schedule_next_tick が新 interval を読むので何もしない。
+            should_reschedule = self._state in (
+                AutonomyState.RUNNING,
+                AutonomyState.WAITING,
+            )
+
         LOGGER.info(
-            "[Autonomy:%s] Interval set to %.1f min",
-            self.persona_id, self.interval_minutes,
+            "[Autonomy:%s] Interval set to %.1f min (reschedule=%s)",
+            self.persona_id, new_interval, should_reschedule,
         )
+        if should_reschedule:
+            self._schedule_next_tick()
 
     def set_models(
         self,
@@ -218,71 +223,120 @@ class AutonomyManager:
         }
 
     # ------------------------------------------------------------------
-    # Main loop
+    # EventScheduler 連携
     # ------------------------------------------------------------------
 
-    def _loop(self) -> None:
-        """Background loop: tick → wait → tick → ...
+    def _schedule_next_tick(self) -> None:
+        """Push the next tick (interval_minutes 後) to the EventScheduler."""
+        fire_at = datetime.now() + timedelta(seconds=self.interval_minutes * 60)
+        self._schedule_tick_at(fire_at)
 
-        Phase C-2 統合 (intent A v0.14 / intent B v0.7) 後の流れ:
-        1. ``MetaLayer.on_periodic_tick(persona_id)`` を発火
-           - 内部で ACTIVITY_STATE / post_complete_behavior による抑止判定
-           - Active かつ wait_response でなければ meta_judgment Playbook 実行
-        2. ``interval_minutes`` 待機 → 1 へ戻る
-        """
-        LOGGER.info(
-            "[Autonomy:%s] Periodic tick loop started (interval=%.1f min)",
-            self.persona_id, self.interval_minutes,
+    def _schedule_tick_at(self, fire_at: datetime) -> None:
+        """Push a tick at the given time to the EventScheduler (used by start + next)."""
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            LOGGER.warning(
+                "[Autonomy:%s] event_scheduler not available; cannot schedule tick",
+                self.persona_id,
+            )
+            return
+        scheduler.schedule(
+            fire_at=fire_at,
+            callback=self._handle_tick,
+            key=_autonomy_key(self.persona_id),
+        )
+        LOGGER.debug(
+            "[Autonomy:%s] Scheduled tick at %s",
+            self.persona_id, fire_at.isoformat(timespec="seconds"),
         )
 
-        while not self._stop_event.is_set():
-            cycle_id = str(uuid.uuid4())[:8]
-            self._current_cycle_id = cycle_id
-            report = CycleReport(cycle_id=cycle_id, started_at=time.time())
+    def _cancel_pending_tick(self) -> None:
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            return
+        scheduler.cancel(_autonomy_key(self.persona_id))
 
-            try:
-                self._state = AutonomyState.DECIDING
-                meta_layer = getattr(self.manager, "meta_layer", None)
-                if meta_layer is None:
-                    LOGGER.warning(
-                        "[Autonomy:%s] No meta_layer on manager; skipping tick %s",
-                        self.persona_id, cycle_id,
-                    )
-                    report.status = "error"
-                    report.error = "meta_layer unavailable"
-                else:
-                    meta_layer.on_periodic_tick(
-                        self.persona_id,
-                        context={"cycle_id": cycle_id, "interval_seconds": int(self.interval_minutes * 60)},
-                    )
-                    report.status = "completed"
-            except Exception as exc:
-                LOGGER.exception(
-                    "[Autonomy:%s] Periodic tick error: %s", self.persona_id, exc,
+    def _handle_tick(self) -> None:
+        """Fire callback: meta-layer の periodic tick を発火 + 次回再 push。"""
+        # stop されていたら何もしない
+        with self._lock:
+            if self._state == AutonomyState.STOPPED:
+                return
+            self._state = AutonomyState.DECIDING
+
+        cycle_id = str(uuid.uuid4())[:8]
+        self._current_cycle_id = cycle_id
+        report = CycleReport(cycle_id=cycle_id, started_at=time.time())
+
+        try:
+            meta_layer = getattr(self.manager, "meta_layer", None)
+            if meta_layer is None:
+                LOGGER.warning(
+                    "[Autonomy:%s] No meta_layer on manager; skipping tick %s",
+                    self.persona_id, cycle_id,
                 )
                 report.status = "error"
-                report.error = str(exc)
-
-            report.completed_at = time.time()
-            self._last_report = report
-            elapsed = report.completed_at - report.started_at
-            LOGGER.info(
-                "[Autonomy:%s] Tick %s: %s (%.1fs)",
-                self.persona_id, cycle_id, report.status, elapsed,
+                report.error = "meta_layer unavailable"
+            else:
+                meta_layer.on_periodic_tick(
+                    self.persona_id,
+                    context={
+                        "cycle_id": cycle_id,
+                        "interval_seconds": int(self.interval_minutes * 60),
+                    },
+                )
+                report.status = "completed"
+        except Exception as exc:
+            LOGGER.exception(
+                "[Autonomy:%s] Periodic tick error: %s", self.persona_id, exc,
             )
+            report.status = "error"
+            report.error = str(exc)
 
+        report.completed_at = time.time()
+        self._last_report = report
+        elapsed = report.completed_at - report.started_at
+        LOGGER.info(
+            "[Autonomy:%s] Tick %s: %s (%.1fs)",
+            self.persona_id, cycle_id, report.status, elapsed,
+        )
+
+        self._current_cycle_id = None
+
+        # 次回 push (stop 済みなら登録しない)
+        with self._lock:
+            if self._state == AutonomyState.STOPPED:
+                return
             self._state = AutonomyState.WAITING
-            self._current_cycle_id = None
-            wait_seconds = self.interval_minutes * 60
-            self._stop_event.wait(wait_seconds)
-
-        self._state = AutonomyState.STOPPED
-        LOGGER.info("[Autonomy:%s] Loop ended", self.persona_id)
+        self._schedule_next_tick()
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _get_persona(self) -> Optional["PersonaCore"]:
-        """Get the persona object from the manager."""
         return self.manager.all_personas.get(self.persona_id)
+
+    def _load_interval_from_judgment_config(self) -> Optional[float]:
+        """META_JUDGMENT_CONFIG.periodic_interval_minutes を読み出す (Phase 4-e)。
+
+        ペルソナ別の永続値を真実とする方針。MetaLayer 経由で安全にデフォルトと
+        マージされた値を取得する。読み出せなければ None を返してフォールバック
+        (env / module default) に委ねる。
+        """
+        persona = self._get_persona()
+        meta_layer = getattr(self.manager, "meta_layer", None)
+        if persona is None or meta_layer is None:
+            return None
+        try:
+            config = meta_layer._load_judgment_config(persona)
+            value = config.get("periodic_interval_minutes")
+            if value is None:
+                return None
+            return max(0.5, float(value))
+        except Exception:
+            LOGGER.warning(
+                "[Autonomy:%s] Failed to load periodic_interval_minutes from META_JUDGMENT_CONFIG",
+                self.persona_id, exc_info=True,
+            )
+            return None

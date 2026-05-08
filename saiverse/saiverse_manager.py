@@ -196,10 +196,18 @@ class SAIVerseManager(
         )
         logging.info("Initialized OccupancyManager.")
 
+        # Phase 4-e: EventScheduler を TrackManager より先に作成する。
+        # TrackManager の wait() で waiting_timeout_at の予約 push に使うため。
+        from saiverse.event_scheduler import EventScheduler
+        self.event_scheduler = EventScheduler()
+
         # --- Initialize cognitive-model managers (Phase B-5) ---
         # Track / Note の永続化を扱う純粋ロジックレイヤー。
         # Intent A v0.9 / Intent B v0.6 参照。
-        self.track_manager = TrackManager(session_factory=self.SessionLocal)
+        self.track_manager = TrackManager(
+            session_factory=self.SessionLocal,
+            event_scheduler=self.event_scheduler,
+        )
         self.note_manager = NoteManager(session_factory=self.SessionLocal)
         logging.info("Initialized cognitive-model managers (TrackManager, NoteManager).")
 
@@ -237,7 +245,7 @@ class SAIVerseManager(
             "Initialized cognitive-model runtime layers "
             "(MetaLayer registered as alert observer, "
             "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
-            "SubLineScheduler + InternalAlertPoller instantiated [will start at startup])."
+            "SubLineScheduler + InternalAlertPoller + EventScheduler instantiated [will start at startup])."
         )
 
         # --- Step 5: Load Dynamic States from DB ---
@@ -288,10 +296,13 @@ class SAIVerseManager(
                 self.conversation_managers[b_id] = manager
         logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
 
-        # スケジュールマネージャーを初期化して起動
-        self.schedule_manager = ScheduleManager(saiverse_manager=self, check_interval=60)
+        # スケジュールマネージャーを初期化 (Phase 4-e: push 駆動、ポーリング廃止)。
+        # start() は EventScheduler.start() より後 (startup 内) で呼ぶ必要が
+        # あったが、EventScheduler.schedule() は thread 起動前でも heap に積めるので
+        # ここで start しても問題ない (dispatch 開始は startup 内で行う)。
+        self.schedule_manager = ScheduleManager(saiverse_manager=self)
         self.schedule_manager.start()
-        logging.info("Initialized and started ScheduleManager with 60 second check interval.")
+        logging.info("Initialized ScheduleManager (push-driven, no polling).")
 
         # --- Initialize PhenomenonManager ---
         self.phenomenon_manager = PhenomenonManager(
@@ -324,6 +335,11 @@ class SAIVerseManager(
         # Phase C-2: Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構")
         self.internal_alert_poller.start()
 
+        # Phase 4-e: Start EventScheduler dispatcher loop. 以降、push される
+        # 予約 (TTL 接近 / interval / schedule / waiting timeout 等) はこの
+        # 1 個のスレッドで秒精度発火される。
+        self.event_scheduler.start()
+
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
         self.sds_session = requests.Session()
@@ -336,10 +352,15 @@ class SAIVerseManager(
             self._load_cities_from_db() # Load local config as a fallback first
             self._register_with_sds()
             self._update_cities_from_sds()
-            
-            # Start background thread for SDS communication
-            self.sds_thread = threading.Thread(target=self._sds_background_loop, daemon=True)
-            self.sds_thread.start()
+
+            # Phase 4-e: SDS heartbeat を EventScheduler に push (旧: 専用 thread)
+            from datetime import datetime, timedelta
+            self._sds_consecutive_failures = 0
+            self.event_scheduler.schedule(
+                fire_at=datetime.now() + timedelta(seconds=self._SDS_BASE_INTERVAL),
+                callback=self._sds_tick_and_reschedule,
+                key=self._SDS_SCHEDULER_KEY,
+            )
         else:
             logging.info("Starting in Offline Mode as per DB setting.")
             self.sds_status = "Offline (Startup Setting)"
@@ -383,12 +404,16 @@ class SAIVerseManager(
         self.world_items = self.item_service.world_items
         self.item_registry = self.items  # Alias for UI compatibility
 
-        # Start background thread for DB polling (after runtime is ready)
+        # Phase 4-e: DB polling を EventScheduler に push (旧: 専用 thread + 3s sleep ループ)。
+        # ``self.db_polling_stop_event`` は外部 (例: shutdown 経路) からの停止フラグ
+        # 互換のため残す。EventScheduler 側は schedule_periodic で処理。
         self.db_polling_stop_event = threading.Event()
-        self.db_polling_thread = threading.Thread(
-            target=self._db_polling_loop, daemon=True
+        self.event_scheduler.schedule_periodic(
+            interval_seconds=3,
+            callback=self._db_polling_tick,
+            key="db_polling",
+            first_fire_immediate=True,
         )
-        self.db_polling_thread.start()
 
         # Auto-start autonomous conversation managers for personas with mode=auto
         logging.info("Auto-starting autonomous conversation managers...")
@@ -807,17 +832,18 @@ class SAIVerseManager(
             logging.info("Setting user to offline as part of shutdown.")
             self.set_user_login_status(self.user_id, False)
 
-        # Stop the SDS background thread
-        if self.sds_thread and self.sds_thread.is_alive():
-            self.sds_stop_event.set()
-            self.sds_thread.join(timeout=5)
-        logging.info("SDS communication thread stopped.")
-
-        # Stop the DB polling thread
+        # Phase 4-e: SDS heartbeat / DB polling は EventScheduler に集約済み。
+        # 個別 thread はもう存在しないので、cancel するだけで良い。
+        # EventScheduler 自体の stop は shutdown 末尾の event_scheduler.stop() で行う。
+        self.sds_stop_event.set()
+        if hasattr(self, "event_scheduler") and self.event_scheduler is not None:
+            try:
+                self.event_scheduler.cancel(self._SDS_SCHEDULER_KEY)
+                self.event_scheduler.cancel("db_polling")
+            except Exception:
+                logging.exception("Failed to cancel SDS / DB polling on shutdown")
         self.db_polling_stop_event.set()
-        if hasattr(self, 'db_polling_thread') and self.db_polling_thread.is_alive():
-            self.db_polling_thread.join(timeout=5)
-        logging.info("DB polling thread stopped.")
+        logging.info("SDS / DB polling event-scheduler entries cancelled.")
 
         # Stop all conversation managers
         for manager in self.conversation_managers.values():
@@ -845,6 +871,13 @@ class SAIVerseManager(
                 self.subline_scheduler.stop()
             except Exception:
                 logging.exception("Failed to stop SubLineScheduler")
+
+        # Phase 4-e: Stop EventScheduler. pending callback は破棄される。
+        if hasattr(self, "event_scheduler") and self.event_scheduler:
+            try:
+                self.event_scheduler.stop()
+            except Exception:
+                logging.exception("Failed to stop EventScheduler")
 
         # Stop phenomenon manager
         if hasattr(self, "phenomenon_manager") and self.phenomenon_manager:
@@ -1498,6 +1531,7 @@ class SAIVerseManager(
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
+        meta_judgment_config: Optional[Dict[str, Any]] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -1515,6 +1549,7 @@ class SAIVerseManager(
             chronicle_enabled=chronicle_enabled,
             memory_weave_context=memory_weave_context,
             spell_enabled=spell_enabled,
+            meta_judgment_config=meta_judgment_config,
         )
 
     def delete_ai(self, ai_id: str) -> str:

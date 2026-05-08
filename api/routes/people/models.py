@@ -112,6 +112,18 @@ class MemoryRecallDebugResponse(BaseModel):
 # Configuration Models
 # -----------------------------------------------------------------------------
 
+class MetaJudgmentConfig(BaseModel):
+    """Phase 4-e: Per-persona meta-judgment Pulse parameters.
+
+    All fields optional — missing keys fall back to MetaLayer's built-in defaults.
+    """
+    cache_threshold_ratio: Optional[float] = None    # 0.0–1.0, default 0.3
+    max_retries: Optional[int] = None                # default 1
+    retry_backoff_seconds: Optional[int] = None      # default 5
+    periodic_interval_minutes: Optional[int] = None  # default 50 (メタ判断自動発話間隔)
+    keep_cache_alive: Optional[bool] = None          # default True (TTL 接近で前倒し fire)
+
+
 class AIConfigResponse(BaseModel):
     name: str
     description: str
@@ -126,6 +138,7 @@ class AIConfigResponse(BaseModel):
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
     linked_user_id: Optional[int] = None  # First linked user ID
+    meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -139,6 +152,7 @@ class UpdateAIConfigRequest(BaseModel):
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
+    meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
 
 
 # -----------------------------------------------------------------------------
