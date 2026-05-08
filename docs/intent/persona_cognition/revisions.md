@@ -10,6 +10,151 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.30 (2026-05-08) — Phase 4-e: anchor touch 修正 + EventScheduler 集約 + メタ判断 Pulse 失敗時挙動
+
+Phase 4-e (`phases/phase_4_pulse_scheduler.md` の 4-e サブフェーズ) を完了させる
+大規模リファクタ。当初は「メタ判断 Pulse の失敗時リカバリ」だけのつもりだったが、
+キャッシュ管理・スケジューラ全体・ペルソナ別パラメータ化まで一気に再構成した。
+
+#### 1. anchor touch を LLM 呼び出し成功後に移動 (Metabolism バグ修正)
+
+**旧**: `sea/runtime_context.py:432-435` (P1) と `:579-581` (P2) で、context 組成
+時点で `_update_anchor_for_model` を呼んで `METABOLISM_ANCHORS.updated_at` を
+touch していた。
+
+**問題**: 「context 組成は走ったが LLM 呼び出しが失敗した」ケースで updated_at
+が前進してしまい、次回 `_resolve_metabolism_anchor` が「TTL 内」と誤判定して、
+**実際には切れているキャッシュに対して長大コンテキストを送り直す不整合**を招い
+ていた。
+
+**新**: P1/P2 の `_update_anchor_for_model` 呼び出しを削除。代わりに
+`sea/runtime.py:_touch_anchor_after_llm_call(persona, usage)` を新設し、
+`runtime_llm.py` の各 `usage = llm_client.consume_usage()` 直後 (5 箇所) で
+呼ぶ。explicit cache モデル (Anthropic 等) は `cache_read > 0 OR cache_write > 0`
+の時だけ touch、両方 0 なら WARN ログを出して touch しない (cache breakpoint
+設定ミスや TTL 切れの兆候として観測可能に)。
+
+副作用として、Case 3 fallback 経路で新規 anchor 立てた直後に LLM 失敗した場合、
+DB に anchor が永続化されず次回も Case 3 を踏むことになるが、minimal load の
+挙動は同じなので致命的でない。
+
+#### 2. `META_JUDGMENT_CONFIG` カラム新設 (ペルソナ別 Pulse パラメータ)
+
+`AI.META_JUDGMENT_CONFIG` (Text/JSON, nullable) カラムを追加。ペルソナごとに
+メタ判断 Pulse の挙動を細かく制御できるようにする:
+
+```json
+{
+  "cache_threshold_ratio": 0.3,        // TTL 残り割合の閾値
+  "max_retries": 1,                    // Pulse 失敗時の即時リトライ回数
+  "retry_backoff_seconds": 5,          // リトライ間の待機秒数
+  "periodic_interval_minutes": 50,     // メタ判断自動発話間隔
+  "keep_cache_alive": true             // TTL 接近で前倒し fire するか (低頻度ペルソナ向けに OFF 可能)
+}
+```
+
+DB 側は NULL のまま運用 (= built-in default を使う)、UI で明示的に指定された
+キーだけ JSON に書き込む。デフォルトは `MetaLayer._DEFAULT_JUDGMENT_CONFIG` で
+管理し、不正 JSON / 型不一致は WARN ログ + デフォルト fallback で吸収する。
+
+UI: `SettingsModal` の自律行動マネージャー直下に「メタ判断 Pulse 設定」セクション
+を新設。各数値項目は空欄=既定値で、`(既定: X)` の副表示を入力欄の右に配置して
+意図を明示。`keep_cache_alive` は tri-state select (既定 / ON / OFF) で表現し、
+OFF の時はキャッシュ閾値 input を `disabled` 化する。
+
+#### 3. EventScheduler 新設 + コア側ポーリング全廃
+
+`saiverse/event_scheduler.py` を新設。min-heap + `Condition.wait_until` による
+時刻指定ディスパッチャ。同 key 上書きは lazy deletion (cancelled フラグ) で実現。
+`schedule(fire_at, callback, key)` / `cancel(key)` / `schedule_periodic(...)` API。
+
+**集約対象 (旧: 専用 thread + sleep ループ → 新: EventScheduler に push)**:
+
+| 旧コンポーネント | 新形態 |
+|---|---|
+| `ScheduleManager._schedule_loop` (60s ポーリング) | API 経由の作成/更新/削除/トグルから直接 push、`_handle_fire` で実行 + 次回再 push |
+| `AutonomyManager` per-persona sleep ループ | `_handle_tick` を `_schedule_next_tick` (EventScheduler) で繋ぐ。API シグネチャ維持 |
+| `InternalAlertPoller` 専用 thread | `schedule_periodic` 経由 (例外で停止しないよう `_safe_tick` で吸収) |
+| `_db_polling_loop` (3s ポーリング) | `schedule_periodic(interval_seconds=3, ...)` |
+| `_sds_background_loop` (動的 backoff) | `_sds_tick_and_reschedule` で callback 内手動再 schedule |
+
+これでコア側 background thread は EventScheduler の dispatch thread 1 本に集約。
+ペルソナ別メタ判断は anchor touch 直後に `_schedule_cache_ttl_pulse` で TTL 接近
+時刻を予約 (key=`ttl:<persona_id>`)、ユーザー対話のたびに再 touch で予約上書き
+されるので「対話継続中は前倒し fire しない、TTL 残り少なくなったら自動的に
+メタ判断が走る」挙動が得られる。
+
+**残ったポーリング (性質上必須)**:
+- `db_polling` (inter-city DB 確認): 別プロセスが DB に書く瞬間を検知できない
+- `internal_alert_poll` (時間ドリフト型パラメータ): 時間経過で増える値の閾値
+- `sds_heartbeat`: outbound、push 不可
+
+これらは EventScheduler に乗せて集約された (= dispatcher が 1 本) が、本質的な
+ポーリングはまだ残っている。完全 push 化は将来の別タスク (`docs/issues/`)。
+
+addon (X 監視等) のポーリング統合は Phase 4-e のスコープ外:
+[`docs/issues/addon_event_scheduler_integration.md`](../../issues/addon_event_scheduler_integration.md)
+として切り出した。
+
+#### 4. waiting Track timeout を EventScheduler に push
+
+`TrackManager.wait()` で `waiting_timeout_at` をセットするタイミングで
+EventScheduler に予約 push (key=`wait_timeout:<track_id>`)。timeout 到達時は
+`_handle_waiting_timeout` で再 fetch → `waiting` 状態のままなら
+`_notify_alert(persona_id, track_id, context={"trigger": "waiting_timeout", ...})`
+を発火。intent 通り **自動遷移しない** (メタ判断に委ねる)。
+
+waiting 解除/abort/pause 経路で予約を cancel (`_cancel_waiting_timeout`)。
+TrackManager は `event_scheduler` を Optional な `__init__` 引数で受け取り、
+None の場合 (tools 等の独立インスタンス) は timeout 通知が機能しない (旧仕様
+互換)。tools から `wait()` を呼ぶ需要は現状ない (`track_wait` ツール自体未実装)。
+
+#### 5. メタ判断 Pulse 失敗時の retry ループ
+
+`MetaLayer._run_judgment_via_playbook` に `for attempt in range(max_retries + 1):`
+ループを追加。`META_JUDGMENT_CONFIG.max_retries` + `retry_backoff_seconds` から
+取得した値で:
+
+- 各試行で `runtime.run_meta_user(...)` を呼ぶ
+- 例外 → リトライ対象 (WARN ログ + `last_failure_reason` 記録)
+- `event_callback` が `error` event を捕捉 → リトライ対象
+- 成功 → 即 return
+
+リトライ前は `time.sleep(retry_backoff_seconds)` で per-persona Lock を保持した
+まま wait (並行 alert/tick は既存の Lock 機構で wait される)。全試行枯渇 → WARN
+ログ "exhausted retries" + 諦める。次の判断は EventScheduler が cache TTL 接近 /
+interval 経過で自動的に push する前提。
+
+#### 6. 自動発話間隔の二重管理を解消
+
+旧実装では:
+- 自律行動マネージャー UI の `間隔` (`AutonomyManager.interval_minutes`、実行時値)
+- メタ判断 Pulse 設定 の `自動発話間隔` (`META_JUDGMENT_CONFIG.periodic_interval_minutes`、永続値)
+
+の 2 つが独立していて、しかも前者は **DB 永続化されておらず再起動で 50 分に
+リセット**されるバグがあった。
+
+統合: `META_JUDGMENT_CONFIG.periodic_interval_minutes` を真実とし、
+- `AutonomyManager.__init__` の引数優先順を「引数 > META_JUDGMENT_CONFIG > env > module default」に変更
+- `/api/people/{id}/autonomy/start` と `update_autonomy_config` で interval が来た時、`AutonomyManager.set_interval()` を呼ぶと同時に `META_JUDGMENT_CONFIG.periodic_interval_minutes` を DB 永続化
+- メタ判断 Pulse 設定 UI から「自動発話間隔」を削除
+
+これで自律行動マネージャー UI の `間隔` が真実の入口になり、再起動後も値が保持
+される (旧バグ修正)。`set_interval` の `should_reschedule` 判定も `state in
+(RUNNING, WAITING)` に修正済 (旧 `RUNNING` のみで判定すると WAITING 中の即時
+反映が効かなかったバグ)。
+
+#### 関連 issue / 副産物
+
+- [`docs/issues/uvicorn_traceback_not_in_logs.md`](../../issues/uvicorn_traceback_not_in_logs.md)
+  500 エラーのデバッグ中に発覚: uvicorn の `Exception in ASGI application` Traceback
+  が `backend.log` に載らずターミナル stderr 直行してた。Phase 4-e 中の
+  `update_ai` フォワードメソッド漏れ事故を契機に起票。
+- [`docs/issues/addon_event_scheduler_integration.md`](../../issues/addon_event_scheduler_integration.md)
+  X 監視等の addon ポーリング統合は別タスクに切り出し。
+
+---
+
 ### v0.29 (2026-05-08) — スケジュール / チャット UI で Spell + Playbook 両方選択可能に
 
 v0.28 で完成した pre_spells 引数あり対応 (バックエンド側) を、UI 経路でも操作できる

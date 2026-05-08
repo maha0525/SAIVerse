@@ -63,8 +63,8 @@ docs/intent/persona_cognition/
    line: main/sub フィールド + 各 Track 種別の Playbook 整備 + 入れ子サブライン Spell 機構
    残: 段階 4-D (DEPRECATED コード完全削除) / スケジュール pre_spells 指定 UI / end-to-end 検証
    ↓
-[Phase 4] Pulse 階層 + Scheduler + メタ定期判断  🟡 約 60%
-   AutonomyManager (定期 tick タイマー) / SubLineScheduler / on_periodic_tick / 失敗時リカバリ
+[Phase 4] Pulse 階層 + Scheduler + メタ定期判断  ✅ 完了 (v0.30, 2026-05-08)
+   AutonomyManager + SubLineScheduler + EventScheduler に集約 / META_JUDGMENT_CONFIG / 失敗時 retry
    ↓
 [Phase 5] 自律稼働の本格化                🔲 未着手
    Handler tick / 内部 alert / Track パラメータ / Schedule 統合
@@ -184,7 +184,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 ---
 
-### Phase 4 — Pulse 階層 + Scheduler + メタ定期判断 (🟡 約 40%)
+### Phase 4 — Pulse 階層 + Scheduler + メタ定期判断 (✅ 完了 v0.30, 2026-05-08)
 
 メインライン Pulse / サブライン Pulse の 2 階層分離 + 各 Scheduler 実装 + メタレイヤーの定期実行入口。
 
@@ -193,20 +193,23 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | Handler に `pulse_completion_notice` / `post_complete_behavior` 属性 | ✅ | `track_handlers/social_track_handler.py:48`, `autonomous_track_handler.py:43` | C-3 |
 | Handler に `default_pulse_interval` / `default_max_consecutive_pulses` / `default_subline_pulse_interval` | ✅ | `autonomous_track_handler.py:44-46` | C-3 |
 | `SubLineScheduler` クラス | ✅ | `saiverse/pulse_scheduler.py:76-127` | C-3b |
-| `AutonomyManager` をメタレイヤー定期 tick タイマー化 (廃止ではなく再利用) | ✅ | `saiverse/autonomy_manager.py` (Phase C-2 で純粋タイマー化済み) | C-3c |
+| `AutonomyManager` をメタレイヤー定期 tick タイマー化 → EventScheduler 駆動に変更 | ✅ | `saiverse/autonomy_manager.py` (v0.30 で push 駆動化) | C-3c |
 | `MetaLayer.on_periodic_tick` (定期実行入口) | ✅ | `saiverse/meta_layer.py:192-` | C-3 |
 | `MetaLayer` の per-persona 直列化 Lock (`on_track_alert` / `on_periodic_tick`) | ✅ | `saiverse/meta_layer.py:__init__`, `_get_lock` (v0.16, 2026-04-30) | handoff Part 1 |
-| `meta_judgment_log` スキーマ v0.15 整合化 + 書き込み + 動的注入 | ✅ | `database/models.py`, `saiverse/meta_layer.py`, `sea/runtime_graph.py`, `sea/runtime_llm.py`, `sea/pulse_context.py` (v0.16, 2026-04-30) | handoff Part 2 |
-| SAIMemory `messages.pulse_id` カラム化 (Phase 2.5) | ✅ | `sai_memory/memory/storage.py`, `saiverse_memory/adapter.py`, `sea/runtime.py` (v0.17, 2026-05-01) | Phase 2.5 |
-| 自律先制と外部 alert のレース解消 (Phase 2.6) | ✅ | `saiverse/track_manager.py`, `saiverse/meta_layer.py`, `meta_judgment.json` (v0.18, 2026-05-01) | Phase 2.6 |
-| メタ判断 Pulse の失敗時リカバリ (LLM error / parse error / Lock 解放) | 🔲 | 未着手 | Phase 4 新規 |
-| `pause_for_user` / `resume_from_user` の alert 経路統合検証 | 🔲 | AutonomyManager 残作業 | Phase 4 新規 |
-| env `SAIVERSE_META_LAYER_INTERVAL_SECONDS` で interval 上書き | 🟡 | コード上 `DEFAULT_INTERVAL_MINUTES = 50` のみ、env 連動は未確認 | C-3 |
-| 「`MainLineScheduler` 相当が必要か」の精査 | 🔲 | AutonomyManager で十分か再判断 | Phase 4 新規 |
-| 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | 未着手 | C-3 |
-| 7 制御点の実装場所明確化 (action_tracks.metadata + 環境変数 + Handler 属性 + モデル設定) | 🔲 | 部分的に Handler 属性のみ実装、残りは未着手 | C-3 |
+| `meta_judgment_log` スキーマ v0.15 整合化 + 書き込み + 動的注入 | ✅ | (v0.16, 2026-04-30) | handoff Part 2 |
+| SAIMemory `messages.pulse_id` カラム化 (Phase 2.5) | ✅ | (v0.17, 2026-05-01) | Phase 2.5 |
+| 自律先制と外部 alert のレース解消 (Phase 2.6) | ✅ | (v0.18, 2026-05-01) | Phase 2.6 |
+| **anchor touch を LLM 呼び出し成功後に移動** (Metabolism バグ修正) | ✅ | `sea/runtime.py:_touch_anchor_after_llm_call` (v0.30) | Phase 4-e |
+| **`META_JUDGMENT_CONFIG` カラム新設** (ペルソナ別 Pulse パラメータ) | ✅ | `database/models.py`, `saiverse/meta_layer.py`, `frontend/SettingsModal.tsx` (v0.30) | Phase 4-e |
+| **`EventScheduler` 新設 + コア側ポーリング全廃** | ✅ | `saiverse/event_scheduler.py`, ScheduleManager / AutonomyManager / InternalAlertPoller / DB polling / SDS heartbeat 全部統合 (v0.30) | Phase 4-e |
+| **waiting Track timeout を EventScheduler に push** | ✅ | `saiverse/track_manager.py:_schedule_waiting_timeout` (v0.30) | Phase 4-e |
+| **メタ判断 Pulse 失敗時の retry ループ** (max_retries / retry_backoff_seconds) | ✅ | `saiverse/meta_layer.py:_run_judgment_via_playbook` (v0.30) | Phase 4-e |
+| **自動発話間隔の二重管理を解消** (META_JUDGMENT_CONFIG が真実、API 経由で永続化) | ✅ | `saiverse/autonomy_manager.py`, `api/routes/people/autonomy.py` (v0.30) | Phase 4-e |
+| `keep_cache_alive` フラグ (低頻度ペルソナ向けに TTL 前倒し OFF) | ✅ | UI: SettingsModal の tri-state select + コスト警告 (v0.30) | Phase 4-e |
+| 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | UI 編集で代替済 (Pattern 自動推定は将来対応) | C-3 |
+| 7 制御点の実装場所明確化 | 🟡 | (3)(4)(5)(7) は v0.30 で確定、(1)(2)(6) は Track metadata の API 整備が残 | C-3 |
 
-**詳細**: `phases/phase_4_pulse_scheduler.md`
+**詳細**: `phases/phase_4_pulse_scheduler.md`、`revisions.md` v0.30
 
 ---
 
