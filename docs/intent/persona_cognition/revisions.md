@@ -10,6 +10,59 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.34 (2026-05-09) — wait_response Track 自動 pause タイマー + Track 最終メッセージ時間の可視化
+
+[`handoff_2026-05-09.md`](handoff_2026-05-09.md) を起点にした 2 件の運用改善。Track Chronicle (v0.32) + ユーザー会話 Track 親保持機構 (v0.33) の commit 後に動作確認していて発覚した「自律稼働中に何らかの拍子でユーザー会話 Track が active 化したまま長期 idle に陥り、メタ判断 Pulse が `post_complete_behavior=='wait_response'` 抑止で止まり続ける」症状への対処。
+
+#### 背景
+
+`MetaLayer.should_fire` / `on_periodic_tick` は対話 UX 保護 (= ユーザー応答中にメタ判断で別 Track に勝手に切り替える事故を防ぐ) のため、running Track の Handler が `wait_response` ならメタ判断を skip する。設計判断としては正しいが、長期 idle 時の脱出経路が無いため、ペルソナが自分で `track_activate` した user_conversation Track が応答無しのまま放置されると、自律稼働がそのまま停止する。
+
+加えて副次的に、過去のメタ判断ログ独白 ("Track は running 状態で安定している" 等) を「現在の事実」として誤認する症状も観察された。Track ごとの最終メッセージ時間の客観情報がメタ判断 prompt に出ていないことが要因の 1 つ。
+
+#### 1. wait_response Track の自動 pause タイマー
+
+「`post_complete_behavior=='wait_response'` 全般」を対象に、N 分 idle で自動 pending 落とし + メタ判断 Pulse 発火する機構を追加。
+
+- ペルソナ別設定 `AI.USER_CONV_TIMEOUT_MINUTES` (Integer, NULL=既定値 30 分)。軽量モデルと重量級モデルで「自然な対話の間」が違うため環境変数ではなくペルソナ別。
+- TrackManager に `wait_response_timeout_provider` (= `track -> (minutes, last_msg_time)?`) と `wait_response_timeout_callback` (= `(persona_id, track_id) -> None`) を注入し、SAIVerseManager が両者を実装。Handler 解決 / AI 行参照 / SAIMemory 参照は SAIVerseManager 側のみ、TrackManager は EventScheduler への push と再評価ロジックだけを持つ。
+- タイマー基準時刻 = SAIMemory の `MAX(messages.created_at) WHERE origin_track_id=...` (= Track 紐付きメッセージの最新)。メッセージ無しの新規 Track は `datetime.now()` にフォールバック (= activate 直後の即時タイムアウト事故を防ぐ)。
+- 発火時に再評価 (Track 状態 + idle 時間) → 条件未達なら残り時間で再 push、条件成立なら `pause` → callback。callback は `MetaLayer.on_periodic_tick(trigger='wait_response_timeout')` を発火 + AutonomyManager の次回 tick を `now + interval` に押し戻す (二重発火回避)。
+- 状態遷移時のキャンセル: pause / wait / complete / abort / activate 経由の自動 pending 押し出し でタイマー解除。set_alert は running → no-op なので解除不要。
+
+#### 2. Track 最終メッセージ時間の可視化
+
+メタ判断 prompt 内の Track 一覧 + UI Tracks Viewer に「最終メッセージから N 時間経過」の客観情報を注入。過去独白を真実と誤認する症状の対症療法。
+
+- `SAIMemoryAdapter.get_track_last_message_time(track_id)` / `get_track_last_message_times([track_ids])` を追加 (origin_track_id でフィルタ + MAX(created_at))。
+- API: `/api/people/{id}/tracks` レスポンスの `TrackItem` に `last_message_at` フィールド追加。N+1 回避のため bulk 取得経路で実装。
+- UI: TracksViewer のヘッダ時刻表示を `last_active_at` から `last_message_at` の相対表記に変更 (絶対時刻は title 属性で hover 表示)。詳細展開時は両方を絶対 + 相対併記。
+- メタ判断 prompt: `track_list` ツール出力 (= `meta_judgment.json` の `fetch_tracks` ノード) に `last_message_at` (ISO) + `last_message_relative` (例: "3時間前") を追加。判断側の prompt 改善 (「過去ログより現在の Track 状態を信頼せよ」明示) は本改訂のスコープ外。
+
+#### 設計判断
+
+- ペルソナがメタ判断 spell で user_conversation Track を `track_activate` する経路は塞がない (= 「自分から話しかける」未来拡張のため)。あくまで **activate された後の脱出経路** を作る方針。
+- タイムアウト発火時の挙動は **pending 落とし + メタ判断発火**。単に pending に落とすだけだと自律稼働再開のトリガが無い。タイムアウト = 「今この Track が終わったので次を判断すべき」という能動的状態変化、と解釈。
+- 対象 Track は wait_response 全般 (Track 種別ハードコードでなく属性ベース)。将来の他応答待ち型 Track も自動カバー。
+
+#### 実装
+
+- 新規/拡張:
+  - `database/models.py:AI` に `USER_CONV_TIMEOUT_MINUTES` カラム追加 (migrate.py の auto-detect 経路で migration 自動)
+  - `saiverse_memory/adapter.py` に `get_track_last_message_time` / `get_track_last_message_times` 追加
+  - `saiverse/track_manager.py` に `_wait_response_timeout_*` 一連 + provider/callback 注入経路追加
+  - `saiverse/saiverse_manager.py` に `_wait_response_timeout_provider` / `_wait_response_timeout_callback` を実装し TrackManager に注入
+  - `saiverse/autonomy_manager.py` に `defer_next_tick` (out-of-band trigger 後の重複発火回避) 追加
+- 変更:
+  - `api/routes/people/tracks.py` / `models.py` で `last_message_at` を bulk 取得経路で配信
+  - `frontend/src/components/memory/TracksViewer.tsx` で表示行追加 + 相対時刻ヘルパ
+  - `builtin_data/tools/track_list.py` で出力 JSON に `last_message_at` / `last_message_relative` 追加
+  - `frontend/src/components/SettingsModal.tsx` に「応答待ち Track 自動 pause 閾値」入力 UI 追加
+  - `manager/admin.py` / `saiverse/saiverse_manager.py` の `update_ai` シグネチャに `user_conv_timeout_minutes` 追加 (0/負値 → NULL = 既定値運用に倒す)
+- テスト: `tests/test_track_manager.py` に wait_response timeout 用ケース 6 件追加 (schedule / no-op / cancel-on-pause / cancel-on-other-activate / fire+callback / re-schedule-when-not-idle-enough)
+
+---
+
 ### v0.33 (2026-05-09) — ユーザー会話 Track の親スレッド保持機構を追加
 
 Track Chronicle の実装着手後、運用観点でまはー (ユーザー) が指摘した重大課題への対応。Track Chronicle 全 Track 一律適用だと、ユーザー会話 Track の「対話の温度感」が作業遂行型サマリで失われる + 自律稼働で長く動いた後にユーザー会話に戻った時に**生メッセージが 1 件もコンテキストに無い**状況が発生し得る → SAIVerse の中心需要 (人格の安定性) に対して致命的。

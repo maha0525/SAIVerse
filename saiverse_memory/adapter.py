@@ -8,7 +8,7 @@ import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from sai_memory.config import Settings, load_settings
 from sai_memory.memory.chunking import chunk_text
@@ -1666,6 +1666,85 @@ class SAIMemoryAdapter:
         except Exception as exc:
             LOGGER.warning("Failed to list active Stelis threads: %s", exc)
             return []
+
+    def get_track_last_message_time(self, track_id: str) -> Optional[datetime]:
+        """Return ``MAX(messages.created_at)`` for the given ``origin_track_id``.
+
+        Used by:
+        - Track viewer UI: show how long ago each Track had any activity.
+        - Meta-judgment prompt: inject "this Track was last active N hours ago"
+          into the Track list shown to the persona, so past meta-judgment monologue
+          (which may claim "Track X is running steadily") cannot drown out the
+          current factual state.
+        - wait_response auto-pause timer: base the timeout on the latest
+          message rather than ``last_active_at`` (the latter doesn't get
+          touched while a wait_response Track is idle).
+
+        Returns ``None`` if the adapter is not ready, or no message references
+        this track_id, or the most recent message is missing ``created_at``.
+        """
+        if not self._ready or not track_id:
+            return None
+        try:
+            with self._db_lock:
+                row = self.conn.execute(
+                    "SELECT MAX(created_at) FROM messages WHERE origin_track_id = ?",
+                    (track_id,),
+                ).fetchone()
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to query last message time for track %s: %s",
+                track_id, exc,
+            )
+            return None
+        if not row or row[0] is None:
+            return None
+        try:
+            return datetime.fromtimestamp(int(row[0]))
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def get_track_last_message_times(
+        self, track_ids: Iterable[str]
+    ) -> Dict[str, datetime]:
+        """Bulk variant of :meth:`get_track_last_message_time`.
+
+        Skips ``None`` / empty track_ids and returns only entries that have at
+        least one message. Used by the Tracks API to avoid an N+1 query when
+        rendering the viewer.
+        """
+        ids = [tid for tid in (track_ids or []) if tid]
+        if not self._ready or not ids:
+            return {}
+        # SQLite has a parameter limit (~999); chunk just in case the caller
+        # passes a huge list (e.g. include_forgotten=True with old data).
+        result: Dict[str, datetime] = {}
+        chunk_size = 500
+        try:
+            with self._db_lock:
+                for start in range(0, len(ids), chunk_size):
+                    batch = ids[start:start + chunk_size]
+                    placeholders = ",".join("?" * len(batch))
+                    rows = self.conn.execute(
+                        f"SELECT origin_track_id, MAX(created_at) "
+                        f"FROM messages WHERE origin_track_id IN ({placeholders}) "
+                        f"GROUP BY origin_track_id",
+                        batch,
+                    ).fetchall()
+                    for tid, ts in rows:
+                        if tid is None or ts is None:
+                            continue
+                        try:
+                            result[tid] = datetime.fromtimestamp(int(ts))
+                        except (TypeError, ValueError, OSError):
+                            continue
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to query last message times for %d tracks: %s",
+                len(ids), exc,
+            )
+            return result
+        return result
 
     def get_messages_with_persona_in_audience(
         self,

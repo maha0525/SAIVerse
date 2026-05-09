@@ -139,6 +139,7 @@ class AIConfigResponse(BaseModel):
     home_city_id: int
     linked_user_id: Optional[int] = None  # First linked user ID
     meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
+    user_conv_timeout_minutes: Optional[int] = None  # 2026-05-09 wait_response auto-pause
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -153,6 +154,10 @@ class UpdateAIConfigRequest(BaseModel):
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
     meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
+    # 2026-05-09: wait_response Track auto-pause timeout (minutes).
+    #   None = no change, 0 (or any non-positive) = clear to default (= 30 min),
+    #   positive int = override.
+    user_conv_timeout_minutes: Optional[int] = None
 
 
 # -----------------------------------------------------------------------------
@@ -575,6 +580,7 @@ class TrackItem(BaseModel):
     intent: Optional[str] = None
     track_metadata: Optional[dict] = None  # parsed JSON, None if not set
     last_active_at: Optional[float] = None
+    last_message_at: Optional[float] = None  # MAX(messages.created_at) WHERE origin_track_id=track_id
     waiting_for: Optional[str] = None
     waiting_timeout_at: Optional[float] = None
     created_at: Optional[float] = None

@@ -345,6 +345,189 @@ def test_waiting_timeout_no_fire_after_resume(session_factory, persona):
         scheduler.stop()
 
 
+def test_wait_response_timeout_schedules_on_activate(session_factory, persona):
+    """activate() で provider が wait_response を返したらタイマー予約が入る。"""
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        # provider: 60 分 + last_msg=None (= 即時タイムアウト無し、now+60min)
+        provider_calls = []
+        def provider(track):
+            provider_calls.append(track.track_id)
+            return (60, None)
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.activate(t)
+        assert provider_calls == [t]
+        assert scheduler.has_key(f"wait_response_timeout:{t}")
+    finally:
+        scheduler.stop()
+
+
+def test_wait_response_timeout_provider_returns_none_skips(session_factory, persona):
+    """provider が None を返したらタイマー予約しない (= wait_response 対象外 Track)。"""
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        def provider(track):
+            return None  # 対象外
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        t = tm_with_sched.create(persona, "autonomous")
+        tm_with_sched.activate(t)
+        assert not scheduler.has_key(f"wait_response_timeout:{t}")
+    finally:
+        scheduler.stop()
+
+
+def test_wait_response_timeout_canceled_on_pause(session_factory, persona):
+    """pause で wait_response タイマーが解除される (= レース防止)。"""
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        def provider(track):
+            return (60, None)
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.activate(t)
+        assert scheduler.has_key(f"wait_response_timeout:{t}")
+        tm_with_sched.pause(t)
+        assert not scheduler.has_key(f"wait_response_timeout:{t}")
+    finally:
+        scheduler.stop()
+
+
+def test_wait_response_timeout_canceled_on_other_activate(session_factory, persona):
+    """別 Track の activate で押し出された Track の wait_response タイマーも解除される。"""
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        def provider(track):
+            # user_conversation だけ wait_response 対象に
+            if track.track_type == "user_conversation":
+                return (60, None)
+            return None
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        t1 = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        t2 = tm_with_sched.create(persona, "autonomous")
+        tm_with_sched.activate(t1)
+        assert scheduler.has_key(f"wait_response_timeout:{t1}")
+        # t2 を activate → t1 が pending に押し出される + タイマー解除
+        tm_with_sched.activate(t2)
+        assert not scheduler.has_key(f"wait_response_timeout:{t1}")
+    finally:
+        scheduler.stop()
+
+
+def test_wait_response_timeout_fires_pause_and_callback(session_factory, persona):
+    """タイムアウト発火で Track が pending に落ち、callback が呼ばれる。"""
+    import time as _time
+    from saiverse.event_scheduler import EventScheduler
+
+    scheduler = EventScheduler()
+    scheduler.start()
+    callback_calls = []
+
+    def callback(persona_id, track_id):
+        callback_calls.append((persona_id, track_id))
+
+    def provider(track):
+        # 0 分 + last_msg=None → 即時 fire (now + 0)。再評価時の idle_for も
+        # base_time=None で skip されるため pause まで進む。
+        return (0, None)
+
+    # provider が "0 分" を返すと _schedule_wait_response_timeout 側で minutes<=0
+    # で early return するので、テスト用に provider を 0.001 にして即時発火させる
+    def provider_fast(track):
+        from datetime import datetime as _dt, timedelta as _td
+        # base_time を 1 秒前にして、minutes=0 でなく 1 で fire_at = now-1s+1min
+        # → ほぼ即時 fire。再評価で idle_for >= 1 min を満たさないので timer は
+        # 再スケジュールされる... これだとループしてしまう。
+        # 方針変更: base_time=1分以上前 + minutes=1 → idle_for >= 1min OK → fire成立
+        return (1, _dt.now() - _td(minutes=2))
+
+    try:
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider_fast,
+            wait_response_timeout_callback=callback,
+        )
+        t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.activate(t)
+        # callback 実行を待つ
+        deadline = _time.time() + 3.0
+        while _time.time() < deadline and not callback_calls:
+            _time.sleep(0.05)
+        assert callback_calls == [(persona, t)]
+        # Track は pending に落ちている
+        assert tm_with_sched.get(t).status == STATUS_PENDING
+    finally:
+        scheduler.stop()
+
+
+def test_wait_response_timeout_reschedules_when_not_idle_enough(session_factory, persona):
+    """idle 期間が閾値に満たないと再スケジュールされ、callback は呼ばれない。"""
+    import time as _time
+    from saiverse.event_scheduler import EventScheduler
+
+    scheduler = EventScheduler()
+    scheduler.start()
+    callback_calls = []
+
+    def callback(persona_id, track_id):
+        callback_calls.append((persona_id, track_id))
+
+    # base_time=直前 + minutes=60 → fire_at は約 60 分後 → そもそも fire しない。
+    # ただし発火直後に時間が極短いまま再呼び出しされる事故を再現するため、
+    # minutes=1 + base_time が発火時に「ちょうど 1 分前」になるよう操作する。
+    # 簡略化: provider は base_time=now() を毎回返し、minutes=1 で fire_at=now+1min。
+    # 1.5 秒待っても callback は来ない (まだ 1 分経っていない)。
+    from datetime import datetime as _dt
+    def provider(track):
+        return (1, _dt.now())
+
+    try:
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+            wait_response_timeout_callback=callback,
+        )
+        t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.activate(t)
+        _time.sleep(1.0)
+        # 1 秒では 1 分閾値に達していない → callback 未呼び出し
+        assert callback_calls == []
+        # Track は依然 running
+        assert tm_with_sched.get(t).status == STATUS_RUNNING
+    finally:
+        scheduler.stop()
+
+
 def test_resume_from_wait_invalid_mode(tm, persona):
     t = tm.create(persona, "autonomous")
     tm.activate(t)

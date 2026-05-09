@@ -42,7 +42,10 @@ def _parse_metadata(raw: Optional[str]) -> Optional[dict]:
         return None
 
 
-def _to_item(row: ActionTrack) -> TrackItem:
+def _to_item(
+    row: ActionTrack,
+    last_message_at: Optional[float] = None,
+) -> TrackItem:
     return TrackItem(
         track_id=row.track_id,
         persona_id=row.persona_id,
@@ -55,12 +58,46 @@ def _to_item(row: ActionTrack) -> TrackItem:
         intent=row.intent,
         track_metadata=_parse_metadata(row.track_metadata),
         last_active_at=_epoch(row.last_active_at),
+        last_message_at=last_message_at,
         waiting_for=row.waiting_for,
         waiting_timeout_at=_epoch(row.waiting_timeout_at),
         created_at=_epoch(row.created_at),
         completed_at=_epoch(row.completed_at),
         aborted_at=_epoch(row.aborted_at),
     )
+
+
+def _resolve_persona_memory(manager, persona_id: str):
+    """Return the persona's SAIMemoryAdapter if loaded, else None.
+
+    Returns None for personas that are not currently loaded (e.g. dispatched
+    away, or referenced via a Track row that survived the persona being
+    deleted) — the API still returns the Track list, just without the
+    last_message_at field.
+    """
+    personas = getattr(manager, "personas", None) or {}
+    persona = personas.get(persona_id)
+    if persona is None:
+        return None
+    return getattr(persona, "sai_memory", None)
+
+
+def _bulk_last_message_times(manager, persona_id: str, track_ids):
+    adapter = _resolve_persona_memory(manager, persona_id)
+    if adapter is None:
+        return {}
+    try:
+        return adapter.get_track_last_message_times(track_ids)
+    except Exception:
+        # Adapter may exist but be in a degraded state. Returning empty falls
+        # back to "no last_message_at known" rather than failing the whole
+        # tracks listing.
+        import logging
+        logging.exception(
+            "[tracks] failed to bulk-fetch last_message_times persona=%s",
+            persona_id,
+        )
+        return {}
 
 
 _VALID_STATUSES = {
@@ -116,7 +153,19 @@ def get_tracks(
         breakdown_rows = breakdown_query.all()
         counter = Counter(r.status for r in breakdown_rows)
 
-        items: List[TrackItem] = [_to_item(r) for r in rows]
+        last_message_map = _bulk_last_message_times(
+            manager, persona_id, [r.track_id for r in rows]
+        )
+        items: List[TrackItem] = [
+            _to_item(
+                r,
+                last_message_at=(
+                    last_message_map[r.track_id].timestamp()
+                    if r.track_id in last_message_map else None
+                ),
+            )
+            for r in rows
+        ]
         status_counts = [
             TracksStatusCount(status=s, count=counter.get(s, 0))
             for s in (
@@ -164,4 +213,13 @@ def pause_track(
         raise HTTPException(status_code=409, detail=str(e))
     except PersistentTrackError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return _to_item(track)
+    adapter = _resolve_persona_memory(manager, persona_id)
+    last_at: Optional[float] = None
+    if adapter is not None:
+        try:
+            dt = adapter.get_track_last_message_time(track_id)
+            if dt is not None:
+                last_at = dt.timestamp()
+        except Exception:
+            pass
+    return _to_item(track, last_message_at=last_at)

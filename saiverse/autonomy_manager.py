@@ -191,6 +191,27 @@ class AutonomyManager:
         if should_reschedule:
             self._schedule_next_tick()
 
+    def defer_next_tick(self) -> None:
+        """Push the next periodic tick to ``now + interval``.
+
+        Called after an out-of-band judgment (e.g. wait_response timeout) to
+        avoid a duplicate fire shortly after the manual trigger. No-op when
+        STOPPED (autonomy not active) or DECIDING (tick currently running —
+        its completion will reschedule freshly via ``_schedule_next_tick``).
+        """
+        with self._lock:
+            should_reschedule = self._state in (
+                AutonomyState.RUNNING,
+                AutonomyState.WAITING,
+            )
+        if not should_reschedule:
+            return
+        self._schedule_next_tick()
+        LOGGER.debug(
+            "[Autonomy:%s] Next tick deferred to now+%.1fmin (out-of-band trigger)",
+            self.persona_id, self.interval_minutes,
+        )
+
     def set_models(
         self,
         decision_model: Optional[str] = None,

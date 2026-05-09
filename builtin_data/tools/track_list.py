@@ -2,14 +2,68 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 from database.session import SessionLocal
 from saiverse.track_manager import TrackManager
-from tools.context import get_active_persona_id
+from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolResult, ToolSchema
 
 _track_manager = TrackManager(session_factory=SessionLocal)
+
+
+def _format_relative(dt: Optional[datetime]) -> Optional[str]:
+    """Return a coarse "N時間前" / "N分前" string for the given datetime.
+
+    Used in the meta-judgment Track listing so the persona can see how stale
+    each Track is at a glance — past monologues claiming "Track X is running
+    steadily" cannot drown out the actual elapsed time when this is on the
+    page.
+    """
+    if dt is None:
+        return None
+    diff_sec = int((datetime.now() - dt).total_seconds())
+    if diff_sec < 0:
+        return "未来"
+    if diff_sec < 60:
+        return f"{diff_sec}秒前"
+    minutes = diff_sec // 60
+    if minutes < 60:
+        return f"{minutes}分前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}時間前"
+    days = hours // 24
+    if days < 30:
+        return f"{days}日前"
+    months = days // 30
+    if months < 12:
+        return f"{months}ヶ月前"
+    years = days // 365
+    return f"{years}年前"
+
+
+def _resolve_last_message_times(persona_id: str, track_ids: List[str]) -> dict:
+    """Look up MAX(messages.created_at) per track via the persona's SAIMemory.
+
+    Returns an empty dict when the manager / persona / adapter is unavailable
+    (e.g. tool exercised from CLI without a running manager) — the listing
+    still works, just without the last_message_at field.
+    """
+    manager = get_active_manager()
+    if manager is None or not track_ids:
+        return {}
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    if persona is None:
+        return {}
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None:
+        return {}
+    try:
+        return adapter.get_track_last_message_times(track_ids)
+    except Exception:
+        return {}
 
 
 def track_list(
@@ -27,8 +81,13 @@ def track_list(
         statuses=statuses,
         include_forgotten=include_forgotten,
     )
-    payload = [
-        {
+    last_msg_times = _resolve_last_message_times(
+        persona_id, [t.track_id for t in tracks]
+    )
+    payload = []
+    for t in tracks:
+        last_dt = last_msg_times.get(t.track_id)
+        payload.append({
             "track_id": t.track_id,
             "title": t.title,
             "track_type": t.track_type,
@@ -37,9 +96,9 @@ def track_list(
             "is_forgotten": t.is_forgotten,
             "intent": t.intent,
             "last_active_at": t.last_active_at.isoformat() if t.last_active_at else None,
-        }
-        for t in tracks
-    ]
+            "last_message_at": last_dt.isoformat() if last_dt else None,
+            "last_message_relative": _format_relative(last_dt),
+        })
     snippet = ToolResult(history_snippet=json.dumps(payload, ensure_ascii=False))
     if not tracks:
         return "No tracks found.", snippet, None

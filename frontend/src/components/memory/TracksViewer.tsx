@@ -15,6 +15,7 @@ interface TrackItem {
     intent: string | null;
     track_metadata: Record<string, unknown> | null;
     last_active_at: number | null;
+    last_message_at: number | null;
     waiting_for: string | null;
     waiting_timeout_at: number | null;
     created_at: number | null;
@@ -55,6 +56,28 @@ function formatTimestamp(epoch: number | null | undefined): string {
     } catch {
         return String(epoch);
     }
+}
+
+function formatRelative(epoch: number | null | undefined): string {
+    if (epoch === null || epoch === undefined) return '';
+    const diffSec = Math.floor(Date.now() / 1000 - epoch);
+    if (diffSec < 0) return '未来';
+    if (diffSec < 60) return `${diffSec}秒前`;
+    const min = Math.floor(diffSec / 60);
+    if (min < 60) return `${min}分前`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}時間前`;
+    const day = Math.floor(hr / 24);
+    if (day < 30) return `${day}日前`;
+    const month = Math.floor(day / 30);
+    if (month < 12) return `${month}ヶ月前`;
+    const year = Math.floor(day / 365);
+    return `${year}年前`;
+}
+
+function formatTimestampWithRelative(epoch: number | null | undefined): string {
+    if (epoch === null || epoch === undefined) return '—';
+    return `${formatTimestamp(epoch)} (${formatRelative(epoch)})`;
 }
 
 function shortId(id: string): string {
@@ -257,8 +280,19 @@ function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCar
                     {track.title || '(無題)'}
                 </span>
                 <span className={slStyles.trackId}>{shortId(track.track_id)}</span>
-                <span className={slStyles.trackTime}>
-                    {track.last_active_at ? formatTimestamp(track.last_active_at) : '—'}
+                <span
+                    className={slStyles.trackTime}
+                    title={
+                        track.last_message_at
+                            ? `最終メッセージ: ${formatTimestamp(track.last_message_at)}`
+                            : (track.last_active_at
+                                ? `最終アクティブ: ${formatTimestamp(track.last_active_at)}`
+                                : undefined)
+                    }
+                >
+                    {track.last_message_at
+                        ? formatRelative(track.last_message_at)
+                        : (track.last_active_at ? formatRelative(track.last_active_at) : '—')}
                 </span>
                 <span className={slStyles.expandIcon}>
                     {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
@@ -274,6 +308,16 @@ function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCar
                         <DetailRow
                             label="waiting_for"
                             value={`${track.waiting_for}${track.waiting_timeout_at ? ` (timeout: ${formatTimestamp(track.waiting_timeout_at)})` : ''}`}
+                        />
+                    )}
+                    <DetailRow
+                        label="last_message_at"
+                        value={formatTimestampWithRelative(track.last_message_at)}
+                    />
+                    {track.last_active_at && (
+                        <DetailRow
+                            label="last_active_at"
+                            value={formatTimestampWithRelative(track.last_active_at)}
                         />
                     )}
                     {track.created_at && (

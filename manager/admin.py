@@ -725,6 +725,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
+                "USER_CONV_TIMEOUT_MINUTES": ai.USER_CONV_TIMEOUT_MINUTES,
             }
         finally:
             db.close()
@@ -768,6 +769,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
+        user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -882,6 +884,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 else:
                     # 空 dict / None / その他は NULL に倒して既定値運用に戻す
                     ai.META_JUDGMENT_CONFIG = None
+            # 2026-05-09: wait_response Track の自動 pause タイマー閾値 (分)。
+            # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 30 分) に戻す。
+            if user_conv_timeout_minutes is not None:
+                if user_conv_timeout_minutes > 0:
+                    ai.USER_CONV_TIMEOUT_MINUTES = int(user_conv_timeout_minutes)
+                else:
+                    ai.USER_CONV_TIMEOUT_MINUTES = None
             db.commit()
 
             llm_warnings = []

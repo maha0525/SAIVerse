@@ -23,7 +23,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -86,12 +86,33 @@ class TrackManager:
         self,
         session_factory: Callable[[], Session],
         event_scheduler: Optional[Any] = None,
+        wait_response_timeout_provider: Optional[
+            Callable[[Any], Optional[Tuple[int, Optional[datetime]]]]
+        ] = None,
+        wait_response_timeout_callback: Optional[
+            Callable[[str, str], None]
+        ] = None,
     ):
         self.SessionLocal = session_factory
         # Phase 4-e: waiting Track の timeout 通知を EventScheduler に push する用。
         # None の場合 (tools 等の独立インスタンス) は timeout 通知が機能しない。
         # 将来 tools からも wait() を呼ぶようになったら別途 manager 注入経路を整える。
         self.event_scheduler = event_scheduler
+        # 2026-05-09: post_complete_behavior='wait_response' な Track が活性化したまま
+        # 長期 idle になり、メタ判断が抑止されて自律稼働が止まる症状の脱出経路
+        # (docs/intent/persona_cognition/handoff_2026-05-09.md §4)。
+        # provider: ``track -> (timeout_minutes, base_time) or None``
+        #   - None を返したら Track はタイムアウト対象外 (= wait_response でない、
+        #     ペルソナがロードされていない、等)。
+        #   - base_time は最終メッセージの created_at 想定。NULL ならスケジュール側で
+        #     ``datetime.now()`` にフォールバックする (= ペルソナが activate した
+        #     直後の Track が即タイムアウトする事故を回避)。
+        # callback: タイムアウト発火 + pause 完了後に呼ばれる。
+        #   - 用途: メタ判断 Pulse の起動 (MetaLayer.on_periodic_tick) と
+        #     AutonomyManager の interval 再開要求。
+        # どちらも None の場合はタイマー機構が完全に無効化される (テスト容易性)。
+        self.wait_response_timeout_provider = wait_response_timeout_provider
+        self.wait_response_timeout_callback = wait_response_timeout_callback
         # alert 状態への遷移を購読する observer 群。
         # signature: (persona_id: str, track_id: str, context: dict) -> None
         # MetaLayer はここに登録される。TrackManager は観察対象を増やす責務を持たないため、
@@ -342,8 +363,10 @@ class TrackManager:
                     ActionTrack.track_id != track_id,
                 )
             )
+            displaced_track_ids: List[str] = []
             for existing in running_q.all():
                 existing.status = STATUS_PENDING
+                displaced_track_ids.append(existing.track_id)
                 logging.info(
                     "[track] auto-pause %s (was running) for activation of %s",
                     existing.track_id, track_id,
@@ -366,6 +389,13 @@ class TrackManager:
             raise
         finally:
             db.close()
+        # 押し出された Track の wait_response タイマーを解除する。activate 経由の
+        # auto-pause は _set_status を通らないので、ここで明示的に解除しないと
+        # 旧 running 用のタイマーが残り続けて誤発火する。
+        for displaced_id in displaced_track_ids:
+            self._cancel_wait_response_timeout(displaced_id)
+        # 新たに running になった Track が wait_response 型なら自動 pause タイマーを予約。
+        self._schedule_wait_response_timeout(track)
         # Notify status change observers (commit/close 完了後、別 session 不要なため)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
@@ -381,13 +411,15 @@ class TrackManager:
         対応せず無視できてしまう。alert の解消は実際に対応 (activate / wait /
         complete / abort) を取った時のみ許される。
         """
-        return self._set_status(
+        result = self._set_status(
             track_id,
             new_status=STATUS_PENDING,
             allowed_from={STATUS_RUNNING},
             log_label="paused",
             pulse_id=pulse_id,
         )
+        self._cancel_wait_response_timeout(track_id)
+        return result
 
     def wait(
         self,
@@ -435,6 +467,8 @@ class TrackManager:
         # 予約しない (無期限待機)。既存予約は同 key で上書きされる (例: 同じ Track が
         # 連続して wait に入った場合)。
         self._schedule_waiting_timeout(track)
+        # running → waiting なら wait_response タイマーは不要 → 解除
+        self._cancel_wait_response_timeout(track_id)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
 
@@ -445,6 +479,165 @@ class TrackManager:
     @staticmethod
     def _waiting_timeout_key(track_id: str) -> str:
         return f"wait_timeout:{track_id}"
+
+    @staticmethod
+    def _wait_response_timeout_key(track_id: str) -> str:
+        return f"wait_response_timeout:{track_id}"
+
+    def _schedule_wait_response_timeout(self, track: Any) -> None:
+        """running になった Track が wait_response 型なら自動 pause タイマーを予約する。
+
+        ``wait_response_timeout_provider`` で「対象か / タイマー基準は」を SAIVerseManager
+        に委ねる。本メソッドはスケジューリングのみを行う。
+
+        基準時刻 (base_time) は最終メッセージの created_at を想定する。これにより:
+        - 直近メッセージがあった Track: 直近 + N 分後に発火
+        - 古いメッセージしか無い Track: base + N 分が過去 → EventScheduler が即発火対象に
+        - メッセージが無い Track: base_time=None → ``now`` にフォールバックし、
+          activate 直後の即時タイムアウトを避ける
+
+        基底時刻が過去でタイマーがすぐに発火する場合は、_handle_wait_response_timeout
+        側で再評価し、本当に N 分経過していれば pause + メタ判断発火に進む。
+        """
+        if (
+            self.event_scheduler is None
+            or self.wait_response_timeout_provider is None
+            or track is None
+        ):
+            return
+        try:
+            result = self.wait_response_timeout_provider(track)
+        except Exception:
+            logging.exception(
+                "[track] wait_response_timeout_provider raised for %s",
+                getattr(track, "track_id", "?"),
+            )
+            return
+        if result is None:
+            return
+        minutes, base_time = result
+        if not minutes or minutes <= 0:
+            return
+        base = base_time or datetime.now()
+        fire_at = base + timedelta(minutes=int(minutes))
+        track_id = track.track_id
+        persona_id = track.persona_id
+
+        def _on_timeout(tid: str = track_id, pid: str = persona_id) -> None:
+            self._handle_wait_response_timeout(tid, pid)
+
+        self.event_scheduler.schedule(
+            fire_at=fire_at,
+            callback=_on_timeout,
+            key=self._wait_response_timeout_key(track_id),
+        )
+        logging.info(
+            "[track] scheduled wait_response timeout: track=%s persona=%s "
+            "base=%s timeout_min=%s fire_at=%s",
+            track_id, persona_id,
+            base.isoformat(timespec="seconds"),
+            minutes,
+            fire_at.isoformat(timespec="seconds"),
+        )
+
+    def _cancel_wait_response_timeout(self, track_id: str) -> None:
+        """wait_response タイマーをキャンセル (pause/abort/complete/wait/alert/活性置換 等で呼ぶ)。"""
+        if self.event_scheduler is None:
+            return
+        self.event_scheduler.cancel(self._wait_response_timeout_key(track_id))
+
+    def _handle_wait_response_timeout(self, track_id: str, persona_id: str) -> None:
+        """EventScheduler から呼ばれる wait_response timeout callback。
+
+        race 回避のため発火時にもう一度 provider を呼んで状態を再評価する:
+        - Track が既に running でなければ: 何もしない (ユーザー発話等で抜けた)
+        - provider が None を返す (= もう wait_response 対象でない): 何もしない
+        - 最終メッセージから N 分未満しか経過していない: 再スケジュール
+        - 上記をクリアしたら: pause → callback (メタ判断発火 / autonomy 再開)
+        """
+        try:
+            current = self.get(track_id)
+        except TrackNotFoundError:
+            logging.debug(
+                "[track] wait_response timeout: track %s not found (deleted?)",
+                track_id,
+            )
+            return
+
+        if current.status != STATUS_RUNNING:
+            logging.debug(
+                "[track] wait_response timeout fired but status=%s (no longer running): track=%s",
+                current.status, track_id,
+            )
+            return
+
+        if self.wait_response_timeout_provider is None:
+            return
+        try:
+            result = self.wait_response_timeout_provider(current)
+        except Exception:
+            logging.exception(
+                "[track] wait_response_timeout_provider raised on fire for %s",
+                track_id,
+            )
+            return
+        if result is None:
+            # ペルソナ unloaded 等で対象外になった
+            logging.debug(
+                "[track] wait_response timeout fired but provider returned None: track=%s",
+                track_id,
+            )
+            return
+        minutes, base_time = result
+        if not minutes or minutes <= 0:
+            return
+
+        now = datetime.now()
+        if base_time is not None:
+            idle_for = now - base_time
+            if idle_for < timedelta(minutes=int(minutes)):
+                # まだ閾値に達していない → 残り時間で再予約
+                remaining = timedelta(minutes=int(minutes)) - idle_for
+                fire_at = now + remaining
+                track_id_local = track_id
+                persona_id_local = persona_id
+
+                def _on_retry(tid: str = track_id_local, pid: str = persona_id_local) -> None:
+                    self._handle_wait_response_timeout(tid, pid)
+
+                self.event_scheduler.schedule(
+                    fire_at=fire_at,
+                    callback=_on_retry,
+                    key=self._wait_response_timeout_key(track_id),
+                )
+                logging.debug(
+                    "[track] wait_response timeout re-scheduled (idle=%ss < threshold=%dmin): track=%s",
+                    int(idle_for.total_seconds()), minutes, track_id,
+                )
+                return
+
+        # 条件成立 → pause + callback
+        logging.info(
+            "[track] wait_response timeout reached: track=%s persona=%s timeout_min=%s",
+            track_id, persona_id, minutes,
+        )
+        try:
+            self.pause(track_id)
+        except (InvalidTrackStateError, TrackNotFoundError) as exc:
+            logging.warning(
+                "[track] wait_response timeout pause failed: track=%s err=%s",
+                track_id, exc,
+            )
+            return
+
+        if self.wait_response_timeout_callback is not None:
+            try:
+                self.wait_response_timeout_callback(persona_id, track_id)
+            except Exception:
+                logging.exception(
+                    "[track] wait_response_timeout_callback raised: persona=%s track=%s",
+                    persona_id, track_id,
+                )
 
     def _schedule_waiting_timeout(self, track: ActionTrack) -> None:
         """waiting Track の timeout 到達時刻を EventScheduler に push する。
@@ -602,6 +795,7 @@ class TrackManager:
             raise
         finally:
             db.close()
+        self._cancel_wait_response_timeout(track_id)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
 
@@ -633,6 +827,7 @@ class TrackManager:
             db.close()
         # Phase 4-e: waiting timeout 予約をキャンセル (waiting でなくても無害)
         self._cancel_waiting_timeout(track_id)
+        self._cancel_wait_response_timeout(track_id)
         self._notify_status_change(track.persona_id, pulse_id)
         return track
 

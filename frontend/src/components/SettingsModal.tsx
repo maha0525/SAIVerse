@@ -34,6 +34,7 @@ interface AIConfig {
     appearance_image_path: string | null;  // Visual context appearance image
     linked_user_id: number | null;  // First linked user ID
     meta_judgment_config: MetaJudgmentConfig | null;  // Phase 4-e
+    user_conv_timeout_minutes: number | null;  // 2026-05-09 wait_response auto-pause
 }
 
 // Built-in defaults — must stay in sync with saiverse/meta_layer.py:_DEFAULT_JUDGMENT_CONFIG
@@ -127,6 +128,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     // 自動発話間隔は「自律行動マネージャー」の interval 入力に統合済 (Phase 4-e)。
     // META_JUDGMENT_CONFIG.periodic_interval_minutes は autonomy API 経由で永続化される。
     const [metaKeepCacheAlive, setMetaKeepCacheAlive] = useState<TriState>('default');
+    // 2026-05-09: ユーザー会話 Track の wait_response 自動 pause 閾値 (分)。
+    // 空文字列 = 既定値 (30 分) を使う (DB は NULL)。
+    const [userConvTimeoutMinutes, setUserConvTimeoutMinutes] = useState<string>('');
     const [costEstimate, setCostEstimate] = useState<ChronicleCostEstimate | null>(null);
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
@@ -232,6 +236,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setMetaKeepCacheAlive(
                     mjc?.keep_cache_alive == null ? 'default' :
                         (mjc.keep_cache_alive ? 'on' : 'off')
+                );
+                setUserConvTimeoutMinutes(
+                    data.user_conv_timeout_minutes != null
+                        ? String(data.user_conv_timeout_minutes)
+                        : ''
                 );
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
@@ -341,6 +350,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                         if (backoff) obj.retry_backoff_seconds = parseInt(backoff);
                         if (keepCache !== 'default') obj.keep_cache_alive = (keepCache === 'on');
                         return obj;
+                    })(),
+                    // 2026-05-09: 空文字列 = 既定値 (= 0 を送って NULL に倒す)、
+                    // それ以外は parseInt 結果。NaN は 0 扱いで既定値復帰。
+                    user_conv_timeout_minutes: (() => {
+                        const trimmed = userConvTimeoutMinutes.trim();
+                        if (!trimmed) return 0;
+                        const parsed = parseInt(trimmed);
+                        return Number.isNaN(parsed) ? 0 : parsed;
                     })()
                 })
             });
@@ -689,6 +706,28 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         </>
                                     );
                                 })()}
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>応答待ち Track 自動 pause 閾値</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        min="0"
+                                        placeholder="30"
+                                        value={userConvTimeoutMinutes}
+                                        onChange={(e) => setUserConvTimeoutMinutes(e.target.value)}
+                                        style={{ width: '7rem' }}
+                                    />
+                                    <span>分</span>
+                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                        (既定: 30 分 / 0 で既定に戻す)
+                                    </span>
+                                </div>
+                                <div className={styles.description}>
+                                    対ユーザー会話 Track のような応答待ち型 Track が、最終メッセージからこの分数以上 idle になると自動的に pending に落とし、メタ判断 Pulse を発火します。長期 idle で自律稼働が止まる事故の脱出経路として動作します。軽量モデルなら短く (10〜15 分)、重量級モデルや人間の応答間隔が長い運用なら長く (60 分以上) 設定してください。
+                                </div>
                             </div>
 
                             <div className={styles.fieldGroup}>

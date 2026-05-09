@@ -207,6 +207,8 @@ class SAIVerseManager(
         self.track_manager = TrackManager(
             session_factory=self.SessionLocal,
             event_scheduler=self.event_scheduler,
+            wait_response_timeout_provider=self._wait_response_timeout_provider,
+            wait_response_timeout_callback=self._wait_response_timeout_callback,
         )
         self.note_manager = NoteManager(session_factory=self.SessionLocal)
         logging.info("Initialized cognitive-model managers (TrackManager, NoteManager).")
@@ -1162,6 +1164,126 @@ class SAIVerseManager(
                 )
 
     # ------------------------------------------------------------------
+    # wait_response Track の自動 pause タイマー (handoff_2026-05-09.md §4)
+    # ------------------------------------------------------------------
+
+    _DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES = 30
+
+    def _wait_response_timeout_provider(self, track):
+        """TrackManager.activate() から呼ばれる timeout 設定 provider。
+
+        Returns:
+            (timeout_minutes, last_message_time) — 対象 Track が
+                ``post_complete_behavior=='wait_response'`` の場合
+            None — Handler 不明 / wait_response 以外 / ペルソナ unloaded 等
+
+        ``last_message_time`` は SAIMemory の ``MAX(messages.created_at) WHERE
+        origin_track_id=...`` から取る (Track 紐付きメッセージの最新)。
+        メッセージが無ければ None で返し、TrackManager 側が ``datetime.now()``
+        にフォールバックする (= activate 直後の即時タイムアウトを防ぐ)。
+        """
+        try:
+            from sea.pulse_root_context import get_handler_for_track
+            handler = get_handler_for_track(self, track)
+            if handler is None:
+                return None
+            behavior = getattr(handler, "post_complete_behavior", None)
+            if behavior != "wait_response":
+                return None
+
+            persona_id = track.persona_id
+            persona = self.personas.get(persona_id)
+            if persona is None:
+                return None
+
+            # AI.USER_CONV_TIMEOUT_MINUTES (NULL=デフォルト) を読み出す
+            timeout_minutes = self._DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES
+            try:
+                from database.models import AI
+                db = self.SessionLocal()
+                try:
+                    ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+                    if ai_row is not None and ai_row.USER_CONV_TIMEOUT_MINUTES is not None:
+                        timeout_minutes = int(ai_row.USER_CONV_TIMEOUT_MINUTES)
+                finally:
+                    db.close()
+            except Exception:
+                logging.warning(
+                    "[wait_response_timeout] Failed to read USER_CONV_TIMEOUT_MINUTES "
+                    "for %s; using default %d",
+                    persona_id, self._DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES,
+                    exc_info=True,
+                )
+
+            if timeout_minutes <= 0:
+                return None  # 0 / 負値 = タイマー無効化
+
+            last_msg_time = None
+            adapter = getattr(persona, "sai_memory", None)
+            if adapter is not None:
+                try:
+                    last_msg_time = adapter.get_track_last_message_time(track.track_id)
+                except Exception:
+                    logging.warning(
+                        "[wait_response_timeout] Failed to read last_message_time "
+                        "for track=%s persona=%s",
+                        track.track_id, persona_id,
+                        exc_info=True,
+                    )
+            return (timeout_minutes, last_msg_time)
+        except Exception:
+            logging.exception(
+                "[wait_response_timeout] provider unexpectedly failed for track=%s",
+                getattr(track, "track_id", "?"),
+            )
+            return None
+
+    def _wait_response_timeout_callback(self, persona_id: str, track_id: str) -> None:
+        """TrackManager から呼ばれる timeout 発火後 callback。
+
+        ``TrackManager._handle_wait_response_timeout`` がペルソナの Track を既に
+        pending に落とした後に呼ばれる。本メソッドの責務は:
+
+        1. ``MetaLayer.on_periodic_tick`` を ``trigger=wait_response_timeout``
+           context で発火 → ペルソナに「次に何をするか」決めさせる
+        2. AutonomyManager の次回 tick を ``now + interval`` に押し戻す
+           (= 直後に AutonomyManager の自動 tick が重なって二重発火しないように)
+        """
+        try:
+            meta_layer = getattr(self, "meta_layer", None)
+            if meta_layer is None:
+                logging.warning(
+                    "[wait_response_timeout] meta_layer not initialized; "
+                    "cannot fire judgment for persona=%s track=%s",
+                    persona_id, track_id,
+                )
+            else:
+                meta_layer.on_periodic_tick(
+                    persona_id,
+                    context={
+                        "trigger": "wait_response_timeout",
+                        "track_id": track_id,
+                    },
+                )
+        except Exception:
+            logging.exception(
+                "[wait_response_timeout] meta-judgment fire failed: persona=%s track=%s",
+                persona_id, track_id,
+            )
+
+        # AutonomyManager の次回 tick を押し戻す (存在すれば)
+        try:
+            autonomy_managers = getattr(self, "_autonomy_managers", None) or {}
+            am = autonomy_managers.get(persona_id)
+            if am is not None:
+                am.defer_next_tick()
+        except Exception:
+            logging.exception(
+                "[wait_response_timeout] defer_next_tick failed: persona=%s",
+                persona_id,
+            )
+
+    # ------------------------------------------------------------------
     # メタ判断ターン scope 昇格 hook (Intent A v0.14 [B] 移動)
     # ------------------------------------------------------------------
 
@@ -1637,6 +1759,7 @@ class SAIVerseManager(
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
+        user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -1655,6 +1778,7 @@ class SAIVerseManager(
             memory_weave_context=memory_weave_context,
             spell_enabled=spell_enabled,
             meta_judgment_config=meta_judgment_config,
+            user_conv_timeout_minutes=user_conv_timeout_minutes,
         )
 
     def delete_ai(self, ai_id: str) -> str:

@@ -54,6 +54,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         home_city_id=details["HOME_CITYID"],
         linked_user_id=linked_user_id,
         meta_judgment_config=meta_cfg_obj,
+        user_conv_timeout_minutes=details.get("USER_CONV_TIMEOUT_MINUTES"),
     )
 
 @router.patch("/{persona_id}/config")
@@ -106,6 +107,7 @@ def update_persona_config(
         memory_weave_context=req.memory_weave_context,
         spell_enabled=req.spell_enabled,
         meta_judgment_config=meta_cfg_dict,
+        user_conv_timeout_minutes=req.user_conv_timeout_minutes,
     )
 
     if result.startswith("Error:"):

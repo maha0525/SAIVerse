@@ -64,6 +64,11 @@ class AI(Base):
     # Keys: cache_threshold_ratio (float 0-1), max_retries (int), retry_backoff_seconds (int).
     # NULL means use built-in defaults (see saiverse/meta_layer.py:_load_judgment_config).
     META_JUDGMENT_CONFIG = Column(Text, nullable=True)
+    # 2026-05-09: post_complete_behavior='wait_response' Track の自動 pause タイマー閾値 (分)。
+    # ユーザー会話 Track の長期 idle で自律稼働が止まる症状の脱出経路として導入
+    # (docs/intent/persona_cognition/handoff_2026-05-09.md §4)。NULL なら既定値 30 分。
+    # 軽量モデルと重量級モデルで「自然な対話の間」が違うためペルソナ別に持つ。
+    USER_CONV_TIMEOUT_MINUTES = Column(Integer, nullable=True)
 
 class Building(Base):
     __tablename__ = "building"
