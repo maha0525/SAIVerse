@@ -314,6 +314,8 @@ class Message:
     line_id: Optional[str] = None
     scope: Optional[str] = None
     pulse_id: Optional[str] = None
+    # v0.32 (2026-05-09): Track Chronicle / ユーザー会話 Track 親保持機構で利用。
+    origin_track_id: Optional[str] = None
 
 
 def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
@@ -335,7 +337,8 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
 
 # Column suffix for SELECTs that want line metadata. Append after the 7 base
 # columns (id, thread_id, role, content, resource_id, created_at, metadata).
-_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id"
+# v0.32 (2026-05-09): origin_track_id を末尾に追加。
+_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id"
 
 
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
@@ -351,6 +354,7 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
         line_id=row[8] if len(row) > 8 else None,
         scope=row[9] if len(row) > 9 else None,
         pulse_id=row[10] if len(row) > 10 else None,
+        origin_track_id=row[11] if len(row) > 11 else None,
     )
 
 

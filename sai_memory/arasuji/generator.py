@@ -140,6 +140,10 @@ def generate_level1_arasuji(
     debug_log_path: Optional[Path] = None,
     persona_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    origin_track_id: Optional[str] = None,
+    is_incomplete: bool = False,
+    track_title: Optional[str] = None,
+    track_intent: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -150,6 +154,10 @@ def generate_level1_arasuji(
         dry_run: If True, don't save to database
         include_timestamp: If False, omit timestamps from prompt (useful when dates are unreliable)
         memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
+        origin_track_id: Track Chronicle 用 (v0.32)。set すると Track 紐付き entry として保存される。
+                         set のとき抽出プロンプトを Track 目的駆動に切り替える
+        is_incomplete: バッチサイズ未満で作る一時 Lv1 のフラグ (Track Chronicle 用)
+        track_title / track_intent: Track Chronicle 抽出時にプロンプトに入れる Track 識別情報
 
     Returns:
         Created ArasujiEntry or None on failure
@@ -166,8 +174,8 @@ def generate_level1_arasuji(
     if start_time and end_time:
         from sai_memory.arasuji.context import get_episode_context_for_timerange
         context = get_episode_context_for_timerange(
-            conn, 
-            start_time=start_time, 
+            conn,
+            start_time=start_time,
             end_time=end_time,
             max_entries=20
         )
@@ -179,11 +187,30 @@ def generate_level1_arasuji(
     if not conversation.strip():
         return None
 
-    # Build prompt
-    prompt_parts = [
-        "あなたは記憶の記録者です。以下の会話から、出来事のあらすじを書いてください。",
-        "",
-    ]
+    # Build prompt — Track Chronicle と General Chronicle で抽出視点が異なる (v0.32)。
+    # General: 出来事のあらすじ。Track: Track 目的駆動の作業遂行情報抽出。
+    is_track_chronicle = origin_track_id is not None
+
+    if is_track_chronicle:
+        title_str = track_title or "(無題)"
+        intent_str = (track_intent or "").strip()
+        prompt_parts = [
+            "あなたはペルソナ自身の記憶整理の頭脳です。"
+            f"以下は、トラック「{title_str}」での作業履歴の一部です。",
+            "このトラックの目的に沿って、後で再開した時に作業を続けるために必要な情報を抽出してください。",
+            "",
+        ]
+        if intent_str:
+            prompt_parts.extend([
+                "## このトラックの意図",
+                intent_str,
+                "",
+            ])
+    else:
+        prompt_parts = [
+            "あなたは記憶の記録者です。以下の会話から、出来事のあらすじを書いてください。",
+            "",
+        ]
 
     if context:
         prompt_parts.extend([
@@ -199,21 +226,38 @@ def generate_level1_arasuji(
             "",
         ])
 
-    prompt_parts.extend([
-        "## 今回記録する会話",
-        conversation,
-        "",
-        "## 指示",
-        "- 3〜5文程度で、何が起きたか、誰と何を話したかを要約",
-        "- 時系列の流れがわかるように書く",
-        "- 固有名詞や重要な詳細は保持する",
-        "- 感情や雰囲気も含める",
-        "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
-        "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
-        "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
-        "",
-        "あらすじを日本語で書いてください。",
-    ])
+    if is_track_chronicle:
+        prompt_parts.extend([
+            "## 今回まとめる範囲のメッセージ",
+            conversation,
+            "",
+            "## 指示",
+            "- このトラックでの「作業遂行情報」を簡潔に抽出する",
+            "- 含めるべき要素: 計画 / 完了済みの作業 / 進行中の課題 / 待ち事項・未解決の問い / 結論・決定",
+            "- このトラックの目的と無関係な雑談・脱線は省略する",
+            "- 固有名詞・参照中のリソース・重要な数値は保持する",
+            "- 段落構成は自由 (箇条書きでもよい)。長くなりすぎず、5〜10 文程度を目安",
+            "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
+            "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
+            "",
+            "作業遂行情報を日本語で書いてください。",
+        ])
+    else:
+        prompt_parts.extend([
+            "## 今回記録する会話",
+            conversation,
+            "",
+            "## 指示",
+            "- 3〜5文程度で、何が起きたか、誰と何を話したかを要約",
+            "- 時系列の流れがわかるように書く",
+            "- 固有名詞や重要な詳細は保持する",
+            "- 感情や雰囲気も含める",
+            "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
+            "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
+            "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
+            "",
+            "あらすじを日本語で書いてください。",
+        ])
 
     prompt = "\n".join(prompt_parts)
 
@@ -271,6 +315,8 @@ def generate_level1_arasuji(
             parent_id=None,
             is_consolidated=False,
             created_at=0,
+            origin_track_id=origin_track_id,
+            is_incomplete=is_incomplete,
         )
 
     # --- DB save with retry (LLM result is already obtained, no re-call) ---
@@ -287,8 +333,13 @@ def generate_level1_arasuji(
                 source_count=len(messages),
                 message_count=len(messages),
                 thread_id=thread_id,
+                origin_track_id=origin_track_id,
+                is_incomplete=is_incomplete,
             )
-            LOGGER.info(f"Created level-1 arasuji: {content}")
+            LOGGER.info(
+                "Created level-1 arasuji: track=%s incomplete=%s content=%s",
+                origin_track_id or "(general)", is_incomplete, content[:60],
+            )
             return entry
         except Exception as e:
             LOGGER.warning(
@@ -316,6 +367,7 @@ def generate_consolidated_arasuji(
     include_timestamp: bool = True,
     persona_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    origin_track_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a consolidated arasuji from lower-level entries.
 
@@ -440,6 +492,7 @@ def generate_consolidated_arasuji(
             parent_id=None,
             is_consolidated=False,
             created_at=0,
+            origin_track_id=origin_track_id,
         )
 
     # --- DB save with retry (LLM result is already obtained, no re-call) ---
@@ -457,6 +510,7 @@ def generate_consolidated_arasuji(
                 source_count=len(entries),
                 message_count=total_messages,
                 thread_id=thread_id,
+                origin_track_id=origin_track_id,
             )
             break
         except Exception as e:
@@ -515,6 +569,7 @@ def maybe_consolidate(
     include_timestamp: bool = True,
     persona_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    origin_track_id: Optional[str] = None,
 ) -> List[ArasujiEntry]:
     """Check if consolidation is needed at a level and perform it recursively.
 
@@ -524,14 +579,27 @@ def maybe_consolidate(
         level: Level to check for consolidation
         consolidation_size: Number of entries to consolidate
         dry_run: If True, don't save to database
+        origin_track_id: Track Chronicle 用 (v0.32)。set すると当該 Track 内の
+            正規 (incomplete でない) entry のみが consolidation 対象になる。NULL なら
+            General Chronicle として全体から取る (= 既存挙動と同等)
 
     Returns:
         List of newly created consolidated entries
     """
     created: List[ArasujiEntry] = []
 
-    # Get unconsolidated entries at this level
-    pending = get_unconsolidated_entries(conn, level)
+    # 取得対象を General/Track で分岐 (v0.32)
+    if origin_track_id is not None:
+        from sai_memory.arasuji.storage import get_track_entries
+        pending = get_track_entries(
+            conn,
+            origin_track_id,
+            level=level,
+            only_unconsolidated=True,
+            include_incomplete=False,  # incomplete Lv1 は consolidate 対象外
+        )
+    else:
+        pending = get_unconsolidated_entries(conn, level)
 
     while len(pending) >= consolidation_size:
         # Take the first consolidation_size entries
@@ -548,6 +616,7 @@ def maybe_consolidate(
             include_timestamp=include_timestamp,
             persona_id=persona_id,
             thread_id=thread_id,
+            origin_track_id=origin_track_id,
         )
 
         if entry:
@@ -563,6 +632,7 @@ def maybe_consolidate(
                 include_timestamp=include_timestamp,
                 persona_id=persona_id,
                 thread_id=thread_id,
+                origin_track_id=origin_track_id,
             )
             created.extend(higher)
         else:
@@ -852,6 +922,10 @@ class ArasujiGenerator:
         include_timestamp: bool = True,
         memopedia_context: Optional[str] = None,
         persona_id: Optional[str] = None,
+        origin_track_id: Optional[str] = None,
+        track_title: Optional[str] = None,
+        track_intent: Optional[str] = None,
+        allow_incomplete: bool = False,
     ):
         """Initialize the generator.
 
@@ -863,6 +937,9 @@ class ArasujiGenerator:
             include_timestamp: If False, omit timestamps from prompts (useful when dates are unreliable)
             memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
             persona_id: Optional persona ID for usage tracking
+            origin_track_id: Track Chronicle 用 (v0.32, 2026-05-09)。set すると Track 紐付き entry として保存される
+            track_title / track_intent: Track Chronicle 抽出時にプロンプトに入れる Track 識別情報
+            allow_incomplete: バッチサイズ未満の最終バッチも処理する (Track Chronicle 用、incomplete Lv1 として保存)
         """
         self.client = client
         self.conn = conn
@@ -872,6 +949,10 @@ class ArasujiGenerator:
         self.memopedia_context = memopedia_context
         self.persona_id = persona_id
         self.thread_id: Optional[str] = None  # Set to associate entries with a specific thread
+        self.origin_track_id = origin_track_id
+        self.track_title = track_title
+        self.track_intent = track_intent
+        self.allow_incomplete = allow_incomplete
         self.debug_log_path = None  # Can be set externally
 
     def generate_from_messages(
@@ -919,15 +1000,21 @@ class ArasujiGenerator:
 
             batch = messages[i:i + self.batch_size]
 
-            # Skip incomplete batches (less than batch_size messages)
-            if len(batch) < self.batch_size:
+            # 通常バッチサイズ未満はスキップ。Track Chronicle (allow_incomplete=True) では
+            # incomplete Lv1 として保存する (v0.32, 2026-05-09)
+            is_incomplete_batch = len(batch) < self.batch_size
+            if is_incomplete_batch and not self.allow_incomplete:
                 LOGGER.info(f"Skipping incomplete batch: {len(batch)} < {self.batch_size}")
                 continue
 
             if progress_callback:
                 progress_callback(i, total)
 
-            LOGGER.info(f"Processing messages {i+1}-{i+len(batch)} of {total}")
+            LOGGER.info(
+                "Processing messages %d-%d of %d (track=%s, incomplete=%s)",
+                i + 1, i + len(batch), total,
+                self.origin_track_id or "(general)", is_incomplete_batch,
+            )
 
             # Generate level-1 arasuji (retries are handled inside each LLM client)
             try:
@@ -941,6 +1028,10 @@ class ArasujiGenerator:
                     debug_log_path=self.debug_log_path,
                     persona_id=self.persona_id,
                     thread_id=self.thread_id,
+                    origin_track_id=self.origin_track_id,
+                    is_incomplete=is_incomplete_batch,
+                    track_title=self.track_title,
+                    track_intent=self.track_intent,
                 )
             except LLMError as e:
                 # Add batch context to user_message and re-raise
@@ -1043,6 +1134,7 @@ class ArasujiGenerator:
                     include_timestamp=self.include_timestamp,
                     persona_id=self.persona_id,
                     thread_id=self.thread_id,
+                    origin_track_id=self.origin_track_id,
                 )
                 # Track Level-2 entries created in this run
                 for c in consolidated:
@@ -1092,12 +1184,35 @@ class ArasujiGenerator:
         Returns:
             Tuple of (level1_entries, consolidated_entries)
         """
-        # 1. Determine already-processed message IDs from level-1 source_ids
-        cur = self.conn.execute(
-            "SELECT DISTINCT json_each.value "
-            "FROM arasuji_entries, json_each(source_ids_json) "
-            "WHERE level = 1"
-        )
+        # 0. Track Chronicle 限定: 既存の incomplete Lv1 を削除する (v0.32, 2026-05-09)。
+        # 削除すると、それらの source_ids は「未処理」扱いに戻る → 累積メッセージで
+        # 再バッチ化され、20 件揃えば正規 Lv1、未満ならまた incomplete Lv1 として再保存。
+        if self.origin_track_id is not None and not dry_run:
+            from sai_memory.arasuji.storage import delete_incomplete_entries
+            deleted = delete_incomplete_entries(self.conn, self.origin_track_id)
+            if deleted:
+                LOGGER.info(
+                    "Deleted %d incomplete Lv1 entries for track=%s before regeneration",
+                    deleted, self.origin_track_id,
+                )
+
+        # 1. Determine already-processed message IDs from level-1 source_ids.
+        # Track Chronicle (origin_track_id set) では当該 Track の正規 Lv1 のみを
+        # 「処理済み」とみなす。incomplete Lv1 はこの時点で削除済みなので結果同じだが
+        # フィルタは明示的に書く (v0.32, 2026-05-09)
+        if self.origin_track_id is not None:
+            cur = self.conn.execute(
+                "SELECT DISTINCT json_each.value "
+                "FROM arasuji_entries, json_each(source_ids_json) "
+                "WHERE level = 1 AND origin_track_id = ? AND is_incomplete = 0",
+                (self.origin_track_id,),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT DISTINCT json_each.value "
+                "FROM arasuji_entries, json_each(source_ids_json) "
+                "WHERE level = 1"
+            )
         processed_ids = {row[0] for row in cur.fetchall()}
 
         # 2. Group unprocessed messages into contiguous runs
@@ -1113,17 +1228,23 @@ class ArasujiGenerator:
         if current_run:
             runs.append(current_run)
 
-        # 3. Filter qualifying runs (>= batch_size)
-        qualifying_runs = [r for r in runs if len(r) >= self.batch_size]
+        # 3. Filter qualifying runs.
+        # General: >= batch_size のみ。Track (allow_incomplete=True): すべての run
+        # (1 件以上の不完全な run も処理対象、incomplete Lv1 として保存される)
+        if self.allow_incomplete:
+            qualifying_runs = [r for r in runs if r]
+        else:
+            qualifying_runs = [r for r in runs if len(r) >= self.batch_size]
         total_unprocessed = sum(len(r) for r in runs)
         total_qualifying = sum(len(r) for r in qualifying_runs)
         isolated_count = total_unprocessed - total_qualifying
 
         LOGGER.info(
             "Chronicle: %d processed, %d unprocessed in %d runs "
-            "(%d qualifying with %d msgs, %d isolated skipped)",
+            "(%d qualifying with %d msgs, %d isolated skipped, track=%s, allow_incomplete=%s)",
             len(processed_ids), total_unprocessed, len(runs),
             len(qualifying_runs), total_qualifying, isolated_count,
+            self.origin_track_id or "(general)", self.allow_incomplete,
         )
 
         # 4. Apply max_messages limit

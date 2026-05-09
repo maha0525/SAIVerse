@@ -42,11 +42,11 @@
 
   [B] 移動: 別 Track Y に切り替え
       → 独白の中で `/spell track_pause`, `/spell track_activate`, `/spell track_create` 等を発動
-      → 中断する Track A のサマリを生成 (履歴が一定以上長い場合、軽量モデルで作成)、A.pause_summary に保存
       → 分岐ターンを **そのまま残す** (Track 移動の来歴として、メインキャッシュに乗り続ける) — Pulse 完了時の Track 状態遷移 hook が `scope` を `'discardable'` → `'committed'` に昇格する仕掛け
-      → 移動先 Track Y の再開コンテキスト (Y.pause_summary + 末尾メッセージ + Note 差分) を Y のサブキャッシュ側で構築
+      → 続けて、`_promote_meta_judgment_in_pulse` の延長で Y の Track Chronicle (DB 既存分) を独立メッセージとして history 末尾近くに INSERT (Track Chronicle Intent doc 参照)
       → 以降のメインライン応答は Track Y のものとして処理
       → 分岐ターンは [1] メタ判断ログ領域にも保存
+      → A 側の必要情報維持は次回 Metabolism 時の Track Chronicle 生成で行われる (詳細は track_chronicle.md)
 ```
 
 ### scope=discardable の趣旨 (= Track 文脈純度の保護)
@@ -394,118 +394,61 @@ Track 種別ごとに「Pulse 完了後どう振る舞うか」のデフォル�
 | 起動経路 | 説明 |
 |---------|------|
 | 即時起動型 | 作成 = activate (or alert で即起動) |
-| イベント駆動型 | 最初から waiting、外部イベントで起動 |
-
-ターン単位で挙動を切り替えたい場面は、既存の `track_wait` スペルでペルソナが明示的に応答待ち状態へ移行できる。
+| イベント駆動型 | 既存だが非アクティブ (pending / unstarted) で待機、外部イベントで alert 化して起動 |
 
 メタレイヤー定期実行が来た時、現 running Track の Handler の `post_complete_behavior` を見て:
 
 - `wait_response`: 抑止 (ユーザー応答待ちなので発火しない)
 - `meta_judge`: 通常判断 (続行か切り替えか判断)
 
+注: 旧仕様の `STATUS_WAITING` / `track_wait` スペルは Phase 3 で廃止予定 ([phase_3_lines_playbooks.md の「待ち機構の整理」](phases/phase_3_lines_playbooks.md))。「待ち」は Track 状態でなく行動の性質として扱い、結果到達はツール側からのイベントメッセージで処理する。
+
 ---
 
 ## Track の中断と再開
 
-### 中断時サマリ作成
+Track 内必要情報の維持と再開時の文脈呼び戻しは、**Track Chronicle** (Track 内必要情報の維持機構) が担う。詳細仕様・キャッシュ挙動の具体例・実装計画はすべて [`track_chronicle.md`](track_chronicle.md) (Intent doc, v0.1, 2026-05-09 起草) に集約。本セクションは Track の中断・再開のメカニクスとして関連する範囲のみ要点をまとめる。
 
-B フロー時の効率を確保するため、**中断する側で事前にサマリを作る**。
+### 概略
 
-理由: 中断時はその Track のコンテキストがまだ温まっている。その場で軽量モデルにサマリを作らせるのが最も安い。再開時にゼロから組み立てるよりずっと効率的。
+書き込みと読み込みが分離していて、それぞれ次のように動く:
 
-仕組み:
-
-- Track を中断する直前、履歴の長さをチェック
-- 一定以上長ければ (暫定: 7 メッセージ以上)、軽量モデルが「現在の状態 + 進行中の意図 + 重要な決定事項」のサマリを作成
-- サマリは `action_tracks.pause_summary` に保存
-- 履歴が短い場合 (暫定: 6 メッセージ以下) はサマリ不要、再開時は末尾メッセージのみで十分
-
-サマリのフォーマット (自然言語要約 + 構造化メタ情報の混合):
-
-```
-## この Track の状況
-
-[自然言語による要約 1〜3 段落]
-
-### 進行中の意図
-[この Track で達成しようとしていること]
-
-### 重要な決定事項・進捗
-- ...
-
-### 関係エンティティ
-- 人物: ...
-- アイテム: ...
-- 参照中の Memopedia: ...
-```
-
-### 再開時のコンテキスト構築
-
-メタレイヤーが Track Y への切り替えを決めた時、軽量モデル側のコンテキストとして再開ビューを構築:
-
-```
-[システムプロンプト等の先頭部分 (変更しない、キャッシュ温存)]
-
-...
-
-[再開コンテキスト挿入領域]
-
-## トラック「Y」の再開
-
-### 前回までのサマリ
-{Y.pause_summary}
-
-### 直前のやりとり (末尾 N メッセージ)
-- [user] ...
-- [assistant] ...
-- ...
-
-### 開いている Note の差分 (中断時から変化があれば)
-- Note「対エイド」: [追記された内容の要約 or 直近のメッセージ]
-- Note「Project N.E.K.O.」: [追記された内容の要約]
-
-### この Track を今再開する。
-```
-
-特性:
-
-- **挿入位置**: コンテキスト末尾 (不変条件 7 のキャッシュ親和性に沿う)
-- **構築者**: 軽量モデル (不変条件 8 の使い分け)
-- **Note 差分の挿入**: Y を中断した時点の Note 状態と現在の Note 状態の差分を、event entry として整形して含める
-- **追加情報取得**: ペルソナが「サマリだけでは足りない」と判断した場合、明示的にツール呼び出しで取得 (memory_recall / note_read 等)
+- **書き込み**: Metabolism 時に押し出し対象を Track ごとに分けて Chronicle DB (`arasuji_entries` の `origin_track_id` 紐付き) に entry 追加。「中断時に専用サマリを作る」という挙動はない (= 旧 `pause_summary` 機構は廃止、Track Chronicle で置換)
+- **読み込み (head 配置)**: アクティブ Track の Chronicle を Memory Weave context として head に載せる。Metabolism のたびに head が新アクティブ Track のものに入れ替わる
+- **読み込み (history 末尾近く挿入)**: Track 切り替え時、メタ判断独白の committed 昇格直後に切り替え先 Track の Chronicle を独立メッセージ (role='user' + `<system>` ラップ) として history 末尾近くに INSERT
+- **時刻アンカー**: Metabolism 時、最古残存メッセージ直前に揮発で時刻メタを 1 件挿入
 
 ### Note と再開フローの関係
 
-Track を再開する時、起源 Track の認識回復が**主**であり、他 Track からの情報を素のメッセージとして混ぜることはしない。これは「家事 Track 中の SAIVerse 開発アイディア」のような場合に、家事 Track の作業履歴に SAIVerse 開発の話が混入するのを防ぐため。
+Track を再開する時、起源 Track の認識回復が**主**であり、他 Track からの情報を素のメッセージとして混ぜることはしない (家事 Track 中の SAIVerse 開発アイディアが家事 Track の作業履歴に混入するのを防ぐ)。
 
 その代わり:
 
 - **Track 開始 / 再開時に開いた Note の最新状態**を読み込む
-- **再開時は中断時の Note 状態との差分**を event entry (system タグ付き user メッセージ) として挿入
 - 別 Track での発見・更新が、Note を開いている全 Track に自然に伝わる
 
 これにより:
 
 1. **会話の終了 vs 中断**が明確に分かれる:
-   - 中断: pause_summary + 末尾メッセージで再開、起源 Track の続き
+   - 中断: 戻ったときに Track Chronicle で文脈が呼び戻される
    - 終了: Track は close、Note は残る → 「前にこんな話した」を覚えた状態で新規 Track 開始
 2. **複数 Track 間での情報共有**が Note 経由で自然に発生
 3. **3 人会話問題の解決**: 3 人会話のメッセージは「対 A Note」「対 B Note」両方に書き込まれる。後で 1 対 1 で話す時はその Note を開けばよい
 
 ### 既存ペルソナ再会機能との対称性
 
-ペルソナ再会機能は「**中断準備が存在しないケースの特殊形**」として位置づけられる:
+ペルソナ再会機能は「Track 観点では特殊形」として位置づけられる:
 
-| 状況 | 中断準備 | 再開時の動き |
-|------|---------|-------------|
-| 通常の Track 中断・再開 | あり (中断時に作る pause_summary) | サマリ + 末尾メッセージで再開 |
-| ペルソナ再会 (既存実装) | なし (過去会話を持つだけで線として中断管理されてない) | 過去会話 + Memopedia から都度組み立て |
+| 状況 | 必要情報の供給源 | 再開時の動き |
+|------|---------------|-------------|
+| 通常の Track 中断・再開 | Track Chronicle (Metabolism 時に自動生成) | head 入れ替え + 切り替え時 history 末尾挿入で文脈復元 |
+| ペルソナ再会 (既存実装) | Track 紐付けなしの過去会話履歴のみ | 過去会話 + Memopedia から都度組み立て |
 
 新基盤では:
 
 - 過去にペルソナ X と話した記録があれば、X 専用の Track を暗黙的に存在するものとして扱う
-- 再会時はその Track の再アクティブ化 (中断準備なし版) として、既存の Memopedia / 過去会話取得ロジックが走る
-- 以降の会話は Track として管理され、次回中断時には pause_summary が作られる
+- 再会時はその Track の再アクティブ化として、既存の Memopedia / 過去会話取得ロジックが走る
+- 以降の会話は Track として管理され、Metabolism のたびに Track Chronicle が積まれていく
 
 Phase 5 でこの汎用化を実装する。
 
@@ -721,70 +664,41 @@ audience を厳格に解釈することで自然にループを防げる:
 
 ---
 
-## 応答待ちの仕組み
+## 応答待ち (時間差ツール基盤)
 
-応答待ち (`waiting` 状態) の Track は、外部応答 (ユーザー、他ペルソナ、Kitchen 完了通知、X リプライ等) を待っている状態。
+「待ち」は Track の特殊状態ではなく、**結果が時間差で返ってくる行動の性質**として扱う。整理経緯は [revisions.md](revisions.md) v0.31 (2026-05-09)、廃止作業は [phase_3_lines_playbooks.md の「待ち機構の整理」](phases/phase_3_lines_playbooks.md)、汎用基盤は [phase_5_autonomy.md の「時間差ツール基盤」](phases/phase_5_autonomy.md)。
 
-### 監視方法
+### 基本モデル
 
-**SAIVerse 側で自動ポーリング**し、変化があった時にメタレイヤーへイベント通知する:
+行動者 (ペルソナ) は「これは時間差で結果が返る行動だ」と予定調和的に認識して呼ぶ。途中で突然待ちが入るわけではない。
 
-- ポーリングの責務: SAIVerseManager (または専用の WaitingMonitor) が `action_tracks` の `waiting` 状態の Track を定期的にチェック
-- 通知経路: 既存の `inject_persona_event` を活用、`PersonaEventLog` 経由でメタレイヤーへ
-- ペルソナ側にポーリングのコードは持たない
-
-検知対象:
-
-- `waiting_for` で指定された外部応答が到達したか
-- `waiting_timeout_at` が過ぎていないか
-- `waiting_for` の対象が「もう発生しない」と判明したか
-
-### `waiting_for` フィールドの規約
-
-JSON 構造化:
-
-```json
-{
-  "type": "user_response" | "persona_response" | "kitchen_completion" | "external_event" | ...,
-  "channel": "ui" | "discord" | "x" | "elyth" | ...,
-  "target": "persona_id" | "user_id" | "cooking_id" | ...,
-  "elicitation_request_id": "..."
-}
-```
-
-応答到達検知のロジックは `type` ごとに別実装する (拡張ポイント)。
-
-### 多重応答待ちの優先順位
-
-複数の `waiting` Track があり、複数応答が同時に到達した場合:
-
-- **新しい Track 優先**。理由: 細かいタスクから片付ける方がスムーズ
-- 「新しい」の基準は `last_active_at` または Track 作成時刻
-
-ただし優先順位はメタレイヤーが最終判断する。SAIVerse 側は「応答が来た」イベントを通知するのみ。
-
-### タイムアウト
-
-`track_wait(track_id, waiting_for, timeout=...)` で設定可能。`timeout=None` は無期限。
-
-タイムアウト到達時:
-
-- 自動で `abort` や `pending` に遷移**しない**
-- メタレイヤーへタイムアウトイベントを通知し、判断を仰ぐ
-- メタレイヤーが `track_resume_from_wait(track_id, "abort")` 等を選択する
+- **行動の実行**: ツール / Spell / Playbook ノードを通常通り起動。識別子 (call_id 等) が発行される
+- **Track の中断は別問題**: 「結果が時間差で来る」ことと「Track を中断する」ことは独立。3 つ同時に投げて Track を続けることもある。中断するかどうかはメタ判断者の領域
+- **結果到達はイベントメッセージ**: ツール側が結果を Track に対するイベントメッセージとして配送
+  - Track が active なら次 Pulse で通常の messages として参照される
+  - Track が inactive なら Alert として通知され、メタ判断者が Track 切り替えを判断する
+- **timeout も結果の一形態**: 「結果が来なかった」事象もイベントメッセージとして配送される。Track 状態としての特殊扱いはない
 
 ### 応用範囲
 
-| 応用 | `waiting_for.type` | 監視・検知 |
-|------|-------------------|-----------|
-| ユーザーへの返答待ち (通常会話) | `user_response` | UI からのメッセージ送信検知 |
-| 他ペルソナへの応答待ち | `persona_response` | 相手ペルソナの発言検知 |
-| MCP Elicitation | `mcp_elicitation` | MCP サーバーからの応答受信 |
-| Kitchen 長時間処理完了 | `kitchen_completion` | Kitchen の cooking ステータス監視 |
-| X / Mastodon リプライ待ち | `external_event` (channel=x) | 外部 API ポーリング |
-| スケジュール時刻到来 | `scheduled_time` | 時刻監視 |
+| 応用 | 扱い |
+|------|------|
+| ユーザーへの返答待ち (通常会話) | UI からの送信が Track にイベント配送、active なら次 Pulse で参照 |
+| 他ペルソナへの応答待ち | 相手ペルソナの発話が Track のイベントとして到達 |
+| MCP Elicitation | MCP サーバーの応答がツールの結果として返り、Track にイベント配送 |
+| Kitchen 長時間処理完了 | cooking_id ベースで完了がイベント配送 |
+| X / Mastodon リプライ待ち | 外部 API ポーリング結果がイベントとして到達 |
+| スケジュール時刻到来 | `ScheduledHandler` が時刻判定して alert (時間差ツール基盤と境界線整理は Phase 5) |
 
-すべて同じ `waiting` 状態の Track として扱われ、メタレイヤーが統一的に管理する。
+すべて同じ「時間差で結果が返る行動」として扱われる。Track 種別ごとの特殊処理は不要、メタ判断者は Alert か Track 内メッセージの形で結果を受け取って判断する。
+
+### 多重起動
+
+「3 つ同時に重い仕事を投げる」のような並列起動が成立する。
+
+- 各起動が独立した call_id を持ち、結果は順不同で到達可能
+- Track は active のまま続けて良いし、別 Track に移っても良い (メタ判断)
+- 結果の解釈順序は Track 内に届いたメッセージ順 (= 到達時刻順) で自然に処理される
 
 ---
 

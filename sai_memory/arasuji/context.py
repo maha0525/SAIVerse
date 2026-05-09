@@ -39,14 +39,32 @@ def _format_timestamp(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def _get_all_arasuji_sorted(conn: sqlite3.Connection) -> List[ArasujiEntry]:
-    """Get all arasuji entries sorted by end_time descending (newest first)."""
-    max_level = get_max_level(conn)
-    all_entries: List[ArasujiEntry] = []
+def _get_all_arasuji_sorted(
+    conn: sqlite3.Connection,
+    *,
+    origin_track_id: Optional[str] = None,
+) -> List[ArasujiEntry]:
+    """Get all arasuji entries sorted by end_time descending (newest first).
 
-    for level in range(1, max_level + 1):
-        entries = get_entries_by_level(conn, level, order_by_time=True)
-        all_entries.extend(entries)
+    Args:
+        origin_track_id: Track Chronicle 用 (v0.32, 2026-05-09)。set すると
+            該当 Track の entry のみ。NULL なら General Chronicle (origin_track_id IS NULL) のみ。
+    """
+    if origin_track_id is not None:
+        from sai_memory.arasuji.storage import get_track_entries
+        # Track Chronicle: 当該 Track の全 level、incomplete 含む
+        all_entries = get_track_entries(
+            conn, origin_track_id, level=None, only_unconsolidated=False, include_incomplete=True
+        )
+    else:
+        # General Chronicle: origin_track_id IS NULL の entry のみ。
+        # Track Chronicle が混在しないようにフィルタ (v0.32)
+        max_level = get_max_level(conn)
+        all_entries: List[ArasujiEntry] = []
+        for level in range(1, max_level + 1):
+            entries = get_entries_by_level(conn, level, order_by_time=True)
+            # Track 紐付き entry を除外
+            all_entries.extend([e for e in entries if e.origin_track_id is None])
 
     # Sort by end_time descending (newest first)
     all_entries.sort(key=lambda e: e.end_time or 0, reverse=True)
@@ -115,6 +133,7 @@ def get_episode_context(
     *,
     max_entries: int = 100,
     include_raw_messages: bool = True,
+    origin_track_id: Optional[str] = None,
 ) -> List[ContextEntry]:
     """Get episode context using the reverse level promotion algorithm.
 
@@ -143,8 +162,8 @@ def get_episode_context(
     current_level = 0  # Start at level 0 (raw messages)
     level_counts: Dict[int, int] = {}  # Track how many entries read per level
 
-    # Get all arasuji sorted by end_time descending
-    all_arasuji = _get_all_arasuji_sorted(conn)
+    # Get all arasuji sorted by end_time descending (Track filter applied if set)
+    all_arasuji = _get_all_arasuji_sorted(conn, origin_track_id=origin_track_id)
 
     if not all_arasuji:
         # No arasuji yet, return empty

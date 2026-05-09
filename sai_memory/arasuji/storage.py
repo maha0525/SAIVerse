@@ -25,6 +25,10 @@ class ArasujiEntry:
     parent_id: Optional[str]  # parent arasuji ID if consolidated
     is_consolidated: bool
     created_at: int
+    # Track Chronicle (v0.32, 2026-05-09): NULL = General Chronicle (Track 横断), set = Track Chronicle (origin_track_id 紐付き)
+    origin_track_id: Optional[str] = None
+    # incomplete Lv1 (Track Chronicle, v0.32): バッチサイズ未満で作られた一時 Lv1。後で 20 件揃った時に削除して正規 Lv1 に作り直される
+    is_incomplete: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -39,6 +43,8 @@ class ArasujiEntry:
             "parent_id": self.parent_id,
             "is_consolidated": self.is_consolidated,
             "created_at": self.created_at,
+            "origin_track_id": self.origin_track_id,
+            "is_incomplete": self.is_incomplete,
         }
 
 
@@ -91,6 +97,18 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
     _ensure_arasuji_column(conn, "arasuji_entries", "thread_id", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_thread ON arasuji_entries(thread_id)")
 
+    # Migration (v0.32, 2026-05-09): Track Chronicle のための列追加
+    # - origin_track_id: NULL = General Chronicle (Track 横断), set = Track Chronicle (Track 紐付き)
+    # - is_incomplete: バッチサイズ未満で作られた一時 Lv1。後で 20 件揃ったら削除して正規 Lv1 に再生成
+    # 詳細は docs/intent/persona_cognition/track_chronicle.md
+    _ensure_arasuji_column(conn, "arasuji_entries", "origin_track_id", "TEXT")
+    _ensure_arasuji_column(conn, "arasuji_entries", "is_incomplete", "INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_track ON arasuji_entries(origin_track_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_arasuji_track_level_time "
+        "ON arasuji_entries(origin_track_id, level, end_time DESC)"
+    )
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS arasuji_progress (
@@ -115,6 +133,15 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Standard SELECT 句。すべての SELECT で同じ並びを保つことで _row_to_entry が動く。
+# (v0.32, 2026-05-09) 末尾に origin_track_id, is_incomplete を追加。
+_ENTRY_COLUMNS = (
+    "id, level, content, source_ids_json, start_time, end_time, "
+    "source_count, message_count, parent_id, is_consolidated, created_at, "
+    "origin_track_id, is_incomplete"
+)
+
+
 def _row_to_entry(row: Tuple[Any, ...]) -> ArasujiEntry:
     """Convert a database row to an ArasujiEntry object."""
     source_ids_json = row[3]
@@ -122,6 +149,11 @@ def _row_to_entry(row: Tuple[Any, ...]) -> ArasujiEntry:
         source_ids = json.loads(source_ids_json) if source_ids_json else []
     except (json.JSONDecodeError, TypeError):
         source_ids = []
+
+    # 末尾の origin_track_id / is_incomplete は migration 適用前の DB では存在しない可能性あり。
+    # 行長で判定して fallback。
+    origin_track_id = row[11] if len(row) > 11 else None
+    is_incomplete = bool(row[12]) if len(row) > 12 else False
 
     return ArasujiEntry(
         id=row[0],
@@ -135,6 +167,8 @@ def _row_to_entry(row: Tuple[Any, ...]) -> ArasujiEntry:
         parent_id=row[8],
         is_consolidated=bool(row[9]),
         created_at=int(row[10]),
+        origin_track_id=origin_track_id,
+        is_incomplete=is_incomplete,
     )
 
 
@@ -153,12 +187,18 @@ def create_entry(
     message_count: int,
     entry_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    origin_track_id: Optional[str] = None,
+    is_incomplete: bool = False,
 ) -> ArasujiEntry:
     """Create a new arasuji entry.
 
     Args:
         thread_id: If set, associates this entry with a specific thread
                    (e.g., Stelis thread). NULL = main thread.
+        origin_track_id: Track Chronicle 用 (v0.32, 2026-05-09)。set すると Track 紐付き。
+                         NULL = General Chronicle (Track 横断)。
+        is_incomplete: バッチサイズ未満で作られた一時 Lv1 (Track Chronicle 用)。
+                       後で 20 件揃った時に削除して正規 Lv1 に作り直される。
     """
     eid = entry_id or str(uuid.uuid4())
     now = int(time.time())
@@ -167,9 +207,9 @@ def create_entry(
         INSERT INTO arasuji_entries (
             id, level, content, source_ids_json, start_time, end_time,
             source_count, message_count, parent_id, is_consolidated, created_at,
-            thread_id
+            thread_id, origin_track_id, is_incomplete
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
         """,
         (
             eid,
@@ -182,6 +222,8 @@ def create_entry(
             message_count,
             now,
             thread_id,
+            origin_track_id,
+            1 if is_incomplete else 0,
         ),
     )
     conn.commit()
@@ -197,6 +239,8 @@ def create_entry(
         parent_id=None,
         is_consolidated=False,
         created_at=now,
+        origin_track_id=origin_track_id,
+        is_incomplete=is_incomplete,
     )
 
 
@@ -205,7 +249,8 @@ def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE id = ?
         """,
@@ -220,7 +265,8 @@ def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]
         cur = conn.execute(
             """
             SELECT id, level, content, source_ids_json, start_time, end_time,
-                   source_count, message_count, parent_id, is_consolidated, created_at
+                   source_count, message_count, parent_id, is_consolidated, created_at,
+                   origin_track_id, is_incomplete
             FROM arasuji_entries
             WHERE id LIKE ?
             LIMIT 1
@@ -243,7 +289,8 @@ def get_entries_by_level(
     """Get all arasuji entries at a specific level."""
     query = """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE level = ?
     """
@@ -267,7 +314,8 @@ def get_unconsolidated_entries(
     """Get unconsolidated entries at a specific level, ordered by time."""
     query = """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE level = ? AND is_consolidated = 0
         ORDER BY end_time ASC
@@ -338,7 +386,8 @@ def get_all_entries_ordered(
     """Get all entries ordered by end_time descending (newest first)."""
     query = """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         ORDER BY end_time DESC
     """
@@ -381,6 +430,73 @@ def get_max_level(conn: sqlite3.Connection) -> int:
     cur = conn.execute("SELECT MAX(level) FROM arasuji_entries")
     row = cur.fetchone()
     return row[0] if row and row[0] is not None else 0
+
+
+# ----- Track Chronicle helpers (v0.32, 2026-05-09) -----
+
+
+def get_track_entries(
+    conn: sqlite3.Connection,
+    origin_track_id: str,
+    *,
+    level: Optional[int] = None,
+    only_unconsolidated: bool = False,
+    include_incomplete: bool = True,
+) -> List[ArasujiEntry]:
+    """Get Track Chronicle entries for a specific Track.
+
+    Args:
+        origin_track_id: 対象 Track の ID
+        level: フィルタする level (None = 全 level)
+        only_unconsolidated: 上位 level に統合されていないものだけ取得
+        include_incomplete: incomplete Lv1 も含めるか (False で正規 Lv1 のみ)
+    """
+    query = (
+        f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries WHERE origin_track_id = ?"
+    )
+    params: List[Any] = [origin_track_id]
+    if level is not None:
+        query += " AND level = ?"
+        params.append(level)
+    if only_unconsolidated:
+        query += " AND is_consolidated = 0"
+    if not include_incomplete:
+        query += " AND is_incomplete = 0"
+    query += " ORDER BY end_time ASC"
+    cur = conn.execute(query, params)
+    return [_row_to_entry(row) for row in cur.fetchall()]
+
+
+def get_incomplete_entries(
+    conn: sqlite3.Connection,
+    origin_track_id: str,
+) -> List[ArasujiEntry]:
+    """Get incomplete Lv1 entries for a Track (for re-generation check)."""
+    cur = conn.execute(
+        f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries "
+        f"WHERE origin_track_id = ? AND level = 1 AND is_incomplete = 1 "
+        f"ORDER BY end_time ASC",
+        (origin_track_id,),
+    )
+    return [_row_to_entry(row) for row in cur.fetchall()]
+
+
+def delete_incomplete_entries(
+    conn: sqlite3.Connection,
+    origin_track_id: str,
+) -> int:
+    """Delete all incomplete Lv1 entries for a Track. Used when regenerating
+    proper Lv1 from accumulated messages.
+
+    Returns the number of deleted entries.
+    """
+    cur = conn.execute(
+        "DELETE FROM arasuji_entries "
+        "WHERE origin_track_id = ? AND level = 1 AND is_incomplete = 1",
+        (origin_track_id,),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
@@ -566,7 +682,8 @@ def get_entries_by_thread(
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE thread_id = ?
         ORDER BY end_time DESC
@@ -709,7 +826,8 @@ def get_entries_ending_before(
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE level = ? AND end_time < ?
         ORDER BY end_time DESC
@@ -729,7 +847,8 @@ def get_latest_entry_at_level(
     """Get the latest (most recent) entry at a specific level."""
     query = """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE level = ?
     """
@@ -747,7 +866,8 @@ def get_children(conn: sqlite3.Connection, parent_id: str) -> List[ArasujiEntry]
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE parent_id = ?
         ORDER BY end_time ASC
@@ -822,7 +942,8 @@ def find_covering_entry(
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE level = ? AND start_time <= ? AND end_time > ?
         ORDER BY start_time ASC
@@ -887,7 +1008,8 @@ def search_entries(
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     sql = f"""
         SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at
+               source_count, message_count, parent_id, is_consolidated, created_at,
+               origin_track_id, is_incomplete
         FROM arasuji_entries
         WHERE {where_clause}
         ORDER BY end_time DESC

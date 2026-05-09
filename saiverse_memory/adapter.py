@@ -1091,6 +1091,9 @@ class SAIMemoryAdapter:
             payload["scope"] = msg.scope
         if msg.pulse_id is not None:
             payload["pulse_id"] = msg.pulse_id
+        # v0.32 (2026-05-09): Track Chronicle / ユーザー会話 Track 親保持機構で利用。
+        if getattr(msg, "origin_track_id", None) is not None:
+            payload["origin_track_id"] = msg.origin_track_id
         return payload
 
     def _active_persona_suffix(self) -> Optional[str]:

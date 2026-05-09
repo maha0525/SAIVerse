@@ -450,6 +450,14 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                         event_callback=event_callback,
                                         cancellation_token=cancellation_token,
                                     )
+                                    # Track Chronicle (v0.32, 2026-05-09): General と並行で走らせる
+                                    try:
+                                        runtime._generate_track_chronicle(persona)
+                                    except Exception as exc:
+                                        LOGGER.warning(
+                                            "[metabolism] Track Chronicle generation on anchor expiry failed: %s",
+                                            exc,
+                                        )
                                     # Pre-response metabolism で発生した Memopedia 変化を即座に
                                     # event_message として SAIMemory に挿入する。これがないと、
                                     # 続く履歴取得で event_message が拾えず、AI 応答コンテキストに
@@ -585,6 +593,86 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                 # Enrich messages with attachment context
                 enriched_recent = runtime._enrich_history_with_attachments(recent)
+
+                # ユーザー会話 Track 親保持機構 (v0.32, 2026-05-09)
+                # オーナーユーザーとの会話メッセージを history 内既存数で不足する分だけ
+                # 上部に補完する。Metabolism やコンテキスト圧縮で生メッセージが消えても
+                # 親スレッドとして必ず一定数を確保する。詳細:
+                # docs/intent/persona_cognition/track_chronicle.md (Stelis 親子モデル流用)
+                supplementary_msgs: List[Dict[str, Any]] = []
+                supplementary_oldest_ts: Optional[int] = None
+                try:
+                    from saiverse.user_conversation_preserver import (
+                        get_owner_user_conversation_track_id,
+                        get_supplementary_user_conversation_messages,
+                    )
+                    persona_id_for_owner = getattr(persona, "persona_id", None)
+                    if persona_id_for_owner:
+                        owner_track_id = get_owner_user_conversation_track_id(
+                            persona_id_for_owner, runtime.manager
+                        )
+                        if owner_track_id:
+                            sai_mem = getattr(persona, "sai_memory", None)
+                            supplementary_msgs, supplementary_oldest_ts = (
+                                get_supplementary_user_conversation_messages(
+                                    sai_mem, owner_track_id, enriched_recent,
+                                )
+                            )
+                except Exception:
+                    LOGGER.debug(
+                        "[sea][prepare-context] User-conversation supplement failed",
+                        exc_info=True,
+                    )
+
+                # 時刻アンカー① (v0.32): 上部補完メッセージの直前。
+                # 「以下、YYYY-MM-DD HH:MM:SS 以降のユーザーとの会話です」
+                if supplementary_msgs:
+                    if supplementary_oldest_ts:
+                        try:
+                            from datetime import datetime as _dt
+                            ts_str = _dt.fromtimestamp(int(supplementary_oldest_ts)).strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
+                            messages.append({
+                                "role": "user",
+                                "content": f"<system>以下、{ts_str} 以降のユーザーとの会話です</system>",
+                            })
+                            LOGGER.debug(
+                                "[sea][prepare-context] Inserted timestamp anchor①: %s",
+                                ts_str,
+                            )
+                        except (TypeError, ValueError, OSError):
+                            pass
+                    messages.extend(supplementary_msgs)
+
+                # 時刻アンカー② (v0.32, 2026-05-09): history 内の最古残存メッセージの直前に
+                # 「以下、YYYY-MM-DD HH:MM:SS 以降のやり取りです」を揮発挿入する。
+                # メッセージそのものに時刻メタを付ける副作用 (ペルソナが時刻を真似する) を
+                # 避けるため、Metabolism 起点に 1 か所だけ。詳細は
+                # docs/intent/persona_cognition/track_chronicle.md §7
+                if enriched_recent:
+                    oldest_msg = enriched_recent[0]
+                    oldest_ts = oldest_msg.get("created_at") or oldest_msg.get("timestamp")
+                    if oldest_ts:
+                        try:
+                            from datetime import datetime as _dt
+                            ts_int = int(oldest_ts)
+                            ts_str = _dt.fromtimestamp(ts_int).strftime("%Y-%m-%d %H:%M:%S")
+                            anchor_msg = {
+                                "role": "user",
+                                "content": f"<system>以下、{ts_str} 以降のやり取りです</system>",
+                            }
+                            messages.append(anchor_msg)
+                            LOGGER.debug(
+                                "[sea][prepare-context] Inserted timestamp anchor②: %s",
+                                ts_str,
+                            )
+                        except (TypeError, ValueError, OSError):
+                            LOGGER.debug(
+                                "[sea][prepare-context] Skipping timestamp anchor② (invalid ts=%r)",
+                                oldest_ts,
+                            )
+
                 messages.extend(enriched_recent)
             except Exception as exc:
                 LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)

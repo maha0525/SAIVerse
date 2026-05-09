@@ -1,7 +1,7 @@
 # Phase 3 — ライン仕様 + Track 種別 Playbook
 
 **親**: [../README.md](../README.md)
-**ステータス**: 🟡 約 95%
+**ステータス**: 🟡 約 80% (2026-05-09 改訂で Track Chronicle 本体実装 / 待ち整理タスクを追加)
 **旧称**: Phase C-2 (line / context_profile DEPRECATED) + Phase 1.2 (meta_judgment 経路) + Phase 1.4 (DEPRECATED 宣言)
 
 ---
@@ -35,7 +35,7 @@
 | `track_autonomous.json` | ✅ | `builtin_data/playbooks/public/` |
 | `track_social.json` | 🔲 | 未着手 (Track ライフサイクル補完が前提、Phase 5 タスク参照) |
 | `track_external.json` | 🔲 | 未着手 |
-| `track_waiting.json` | 🔲 | 未着手 |
+| ~~`track_waiting.json`~~ | ❌ | **廃止**: 「待ち」は Track 状態でなく行動の性質。下の「待ち機構の整理」参照 |
 
 ### line vs タグの責務分離整理 (Phase 3 新規)
 
@@ -144,17 +144,68 @@
 
 - 外部チャネルごとの送信ロジック (Discord webhook / X API / SAIVerse 間 dispatch 等) はツールに分離
 - Playbook はメッセージ生成と送信タイミングの判断のみ担う
-- `waiting` 状態への遷移トリガ (応答待ち) を含む
+- 外部応答は「時間差で結果が返ってくるツール」の汎用基盤 (Phase 5) で受ける。Track の状態遷移としての `waiting` 概念は持たない
 
-### `track_waiting.json` Playbook
+### Track Chronicle 本体実装 (Phase 3 新規、2026-05-09 追加 / v0.32 で再設計)
 
-待機 Track の起動時 (応答到達後の処理)。
+Track 内で Metabolism によりコンテキストから押し出された必要情報を、Track 目的に沿って圧縮保存し、再アクセス時にコンテキストへ呼び戻す機構。**v0.31 で「`pause_summary` 書き込み側実装」とされていた項目は、本機構として再設計された** (= `pause_summary` は完全廃止、Track Chronicle で置換)。
 
-**設計の出発点**:
+設計の核と実装計画は **[`../track_chronicle.md`](../track_chronicle.md) (Intent doc, v0.1, 2026-05-09 起草) に集約**。整理経緯は [../revisions.md](../revisions.md) v0.32 (2026-05-09) 参照。
 
-- `waiting_for` の type に応じて応答内容を解釈
-- メインライン Pulse として起動し、応答内容を踏まえた次のアクションを判断
-- MCP Elicitation 等の構造化応答にも対応
+**v0.32 で確定した骨子**:
+
+- 書き込み: Metabolism 連動。押し出し対象を `origin_track_id` で Track ごとに分けて Chronicle DB (`arasuji_entries`) に entry 追加。バッチサイズ未満は `incomplete: true` フラグ付き、後で 20 件揃ったら正規 Lv1 に再生成。1000 字未満ならスキップ。新規関数 `_generate_track_chronicle` として独立経路で実装
+- 読み込み (head): アクティブ Track の Chronicle 一式を `get_episode_context` (origin_track_id フィルタ版) で取得し、Memory Weave context として head 配置。Metabolism のたびに head が新アクティブ Track のものに入れ替わる
+- 読み込み (history 末尾近く): Track 切り替え時、`_promote_meta_judgment_in_pulse` の延長でメタ判断独白の committed 昇格直後に切り替え先 Track の Chronicle を独立メッセージ (role='user' + `<system>` ラップ) として INSERT
+- 時刻アンカー: Metabolism 時、最古残存メッセージ直前に揮発挿入 (`<system>以下、YYYY-MM-DD HH:MM:SS 以降のやり取りです</system>`)
+- 撤去対象: `prepare_pulse_root_context` / `build_fixed_section` / `build_dynamic_section` / `pause_summary` 関連 (DB / API / Frontend) を一括撤去
+
+**実装順序の目安** ([`../track_chronicle.md`](../track_chronicle.md) §9 参照):
+
+1. `arasuji_entries` に `origin_track_id` カラム追加 (migration)
+2. `ArasujiGenerator` の Track 用拡張 (入力フィルタ + 抽出プロンプト差し替え)
+3. `_generate_track_chronicle` 新設 + Metabolism 連動
+4. `get_memory_weave_context` の Track Chronicle セクション追加 (head 配置)
+5. `_promote_meta_judgment_in_pulse` 延長 (切り替え時挿入)
+6. 時刻アンカー揮発挿入
+7. 1000 字未満生メッセージ取得経路
+8. dead code 撤去 (上記)
+
+**General Chronicle 側の課題** (本機構と独立に処理):
+
+- 生成 trigger を Metabolism 押し出し対象判定に変更 → [`../../../issues/general_chronicle_metabolism_trigger.md`](../../../issues/general_chronicle_metabolism_trigger.md)
+- 自律稼働中に Chronicle が生成されない問題 → [`../../../issues/general_chronicle_user_pulse_only.md`](../../../issues/general_chronicle_user_pulse_only.md)
+
+### 待ち機構の整理 (Phase 3 新規、2026-05-09 追加)
+
+「待ち」を Track の特殊状態として扱うのではなく、**結果が時間差で返ってくる行動の性質**として整理する。整理の経緯と結論は [../revisions.md](../revisions.md) v0.31 (2026-05-09) 参照。
+
+**整理の核**:
+
+- 「待ち」は Track 種別ではなく、行動 (ツール / Spell / Playbook ノード) の性質
+- 行動者は予定調和的に「これは結果が時間差で返る」と認識して実行する
+- Track の中断は「待ち」とは独立。メタ判断者がその時 Track を続けるか別 Track に移るかを決める
+- 結果到達は Track 内のイベントメッセージとして処理される (Track 不在なら Alert)
+- 時間差ツール基盤の本実装は Phase 5 ([phase_5_autonomy.md](phase_5_autonomy.md))
+
+**Phase 3 で行う廃止作業**:
+
+| 項目 | 状態 | 廃止理由 |
+|------|------|---------|
+| `track_waiting.json` Playbook | 🔲 削除 | Track 種別ではなく「待ち」を独立 Playbook 化していた誤設計 |
+| `STATUS_WAITING` (`saiverse/track_manager.py`) | 🔲 削除 | 状態として独立する必要なし。pending と区別する根拠がなくなる |
+| `track.waiting_for` カラム + 関連 API | 🔲 削除 | 「何を待っているか」はツール / Spell の引数 + 結果イベントで自己記述する |
+| `track.waiting_timeout_at` カラム + EventScheduler 予約 | 🔲 削除 | timeout もツール側責務 (= 「結果不到達」イベントの一形態) |
+| `TrackManager.wait()` / `resume_from_wait()` メソッド | 🔲 削除 | 状態廃止に伴う |
+| Phase 4-e で実装した `_schedule_waiting_timeout` / `_handle_waiting_timeout` | 🔲 削除 | 時間差ツール基盤に移行 |
+| `04_handlers.md` の `post_complete_behavior` 表から「waiting」削除 | 🔲 | 「Track 種別」として誤って記述されていた |
+
+**移行注意**:
+
+- 既存ペルソナの動作中 Track に `STATUS_WAITING` が残る場合、マイグレーション (`scripts/migrate_*`) で `pending` 等に変換
+- Phase 4-e の revisions v0.30 で実装した待機 timeout 機構は、本廃止と相殺になる。revisions v0.31 で経緯を記録
+
+**Phase 5 への接続**: 時間差ツールの汎用基盤 (起動 / 結果配送 / Track 不在時 Alert / timeout イベント) は Phase 5 で整備する。Phase 3 の段階では旧機構を廃止するところまで。
 
 ### `report_template` (機械的レポート生成、2026-05-01 実装済)
 
@@ -249,9 +300,12 @@ def validate_child_playbook(playbook: PlaybookSchema) -> None:
 - [x] `SubPlayNodeDef.line` フィールドが受け入れられ、`line: "sub"` で子ラインが分岐実行される
 - [x] 子ラインの `report_to_parent` が親メッセージに append される
 - [ ] `can_run_as_child=true` Playbook が `report_to_parent` を欠いていたらロード時例外
-- [ ] 全 Track 種別 (user_conversation / social / autonomous / external / waiting) の Playbook が揃う
+- [ ] 必要な Track 種別 Playbook (user_conversation / social / autonomous / external) が揃う
 - [ ] 既存 Playbook が `migrate_playbooks_to_lines.py` で全て翻訳済み
 - [ ] `context_profile` / `model_type` / `exclude_pulse_id` 関連コードが削除された
+- [ ] Track Chronicle 本体が動作: Metabolism 連動の `_generate_track_chronicle` で Track 別生成 / head 入れ替え / 切り替え時 history 末尾近く挿入 / 時刻アンカー (詳細 [`../track_chronicle.md`](../track_chronicle.md))
+- [ ] dead code 撤去完了: `prepare_pulse_root_context` / `build_fixed_section` / `build_dynamic_section` / `pause_summary` 関連 (DB / API / Frontend)
+- [ ] `track_waiting.json` / `STATUS_WAITING` / `waiting_for` / `waiting_timeout_at` 関連機構が完全に削除されている
 
 ---
 

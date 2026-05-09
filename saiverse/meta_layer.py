@@ -25,9 +25,11 @@ Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path**
 責務外:
 - メインライン応答 (発話生成) の起動。これは呼び出し元 (Handler) が責任を持つ
 - Track の作成 / 状態遷移ロジック (TrackManager / dispatch ツールに委譲)
-- 中断時 pause_summary 作成 / 再開コンテキスト構築 (Phase 1.3 後段 / Phase 2)
+- Track 内必要情報の維持・再開コンテキスト構築は Track Chronicle 機構が担う
+  (Metabolism 連動、`sea/runtime.py:_generate_track_chronicle` + `_promote_meta_judgment_in_pulse`
+  の延長で切り替え時挿入。詳細: docs/intent/persona_cognition/track_chronicle.md)
 
-詳細: docs/intent/persona_cognitive_model.md, docs/intent/persona_action_tracks.md
+詳細: docs/intent/persona_cognition/ (Intent doc 群)
 """
 from __future__ import annotations
 

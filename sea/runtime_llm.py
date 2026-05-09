@@ -1050,9 +1050,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 #
                 # 「直すべき」ではなく「対策済み」。 system role に変えると
                 # Gemini 互換が壊れる。同様の <system>…</system> 投入箇所が
-                # sea/runtime.py / sea/pulse_root_context.py /
-                # sea/pulse_context.py / sea/runtime_nodes.py 等にもあるが、
-                # 全て同じ理由でこの形になっている。
+                # sea/runtime.py / sea/pulse_context.py / sea/runtime_nodes.py 等
+                # にもあるが、全て同じ理由でこの形になっている。
                 # ============================================================
                 if not prompt.lstrip().startswith("<system>"):
                     prompt = f"<system>{prompt}</system>"

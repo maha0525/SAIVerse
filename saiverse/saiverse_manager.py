@@ -1220,6 +1220,19 @@ class SAIVerseManager(
                         "to 'committed' (pulse_id=%s persona=%s)",
                         cur.rowcount, pulse_id, persona_id,
                     )
+                    # Track Chronicle (v0.32, 2026-05-09): 昇格が発生した = 当該 Pulse で
+                    # Track 切り替えが起きた、と判断して切り替え先 Track の Chronicle を
+                    # 独立メッセージとして history 末尾近くに INSERT する。
+                    # 詳細は docs/intent/persona_cognition/track_chronicle.md
+                    try:
+                        self._insert_track_chronicle_on_switch(
+                            conn, persona_id, pulse_id, db_path,
+                        )
+                    except Exception:
+                        logging.exception(
+                            "[track-chronicle-insert] Failed (pulse_id=%s persona=%s)",
+                            pulse_id, persona_id,
+                        )
                 conn.commit()
             finally:
                 conn.close()
@@ -1228,6 +1241,98 @@ class SAIVerseManager(
                 "[meta-judgment-promote] Failed to promote (pulse_id=%s persona=%s)",
                 pulse_id, persona_id,
             )
+
+    def _insert_track_chronicle_on_switch(
+        self,
+        conn,
+        persona_id: str,
+        pulse_id: str,
+        db_path,
+    ) -> None:
+        """Track 切り替え時に切り替え先 Track の Chronicle を history 末尾近くに挿入する。
+
+        v0.32 (2026-05-09): _promote_meta_judgment_in_pulse の延長で呼ばれる。
+        メタ判断独白が committed 昇格された直後 = Track 切り替えが発生したタイミング。
+
+        冪等性: 同 pulse_id + 同 track_id で既に Track Chronicle メッセージがあれば skip。
+        """
+        import json as _json
+        import time as _time
+        import uuid as _uuid
+        # 切り替え先 Track = 現在の running track
+        track = self.track_manager.get_running(persona_id)
+        if track is None:
+            return
+        track_id = getattr(track, "track_id", None)
+        if not track_id:
+            return
+
+        # ユーザー会話 Track は親スレッド保持機構が生メッセージで文脈を担保するため、
+        # Track Chronicle 切り替え時挿入はスキップ (v0.32, 2026-05-09)
+        if getattr(track, "track_type", None) == "user_conversation":
+            logging.debug(
+                "[track-chronicle-insert] Skipping user_conversation track=%s",
+                track_id,
+            )
+            return
+
+        # 冪等性チェック: 同 pulse_id + 同 origin_track_id で既に挿入済みなら skip
+        cur = conn.execute(
+            "SELECT id FROM messages "
+            "WHERE pulse_id = ? AND origin_track_id = ? "
+            "AND line_role = 'main_line' AND scope = 'committed' "
+            "AND content LIKE '<system>%トラック「%作業履歴%</system>' "
+            "LIMIT 1",
+            (pulse_id, track_id),
+        )
+        if cur.fetchone() is not None:
+            logging.debug(
+                "[track-chronicle-insert] already inserted for pulse=%s track=%s, skip",
+                pulse_id, track_id,
+            )
+            return
+
+        # Track Chronicle テキスト取得
+        from sai_memory.arasuji.context import get_episode_context, format_episode_context
+        episode = get_episode_context(conn, max_entries=50, origin_track_id=track_id)
+        if not episode:
+            logging.debug(
+                "[track-chronicle-insert] no chronicle entries for track=%s, skip",
+                track_id,
+            )
+            return
+        formatted = format_episode_context(episode, include_level_info=True)
+        title = getattr(track, "title", None) or "(無題)"
+        content = (
+            f"<system>\n## トラック「{title}」での作業履歴\n\n{formatted}\n</system>"
+        )
+
+        # SAIMemory messages テーブルに INSERT (Track 切り替え通知メッセージとして)
+        msg_id = str(_uuid.uuid4())
+        now = int(_time.time())
+        # 該当ペルソナのデフォルト thread_id を採用 (= persona の messagelog 既定)
+        # 簡略化のため NULL で挿入。SAIMemoryAdapter.log_message と互換。
+        metadata = {"tags": ["track_chronicle_insert"]}
+        conn.execute(
+            "INSERT INTO messages "
+            "(id, thread_id, role, content, resource_id, created_at, metadata, "
+            "origin_track_id, line_role, line_id, scope, pulse_id) "
+            "VALUES (?, NULL, ?, ?, NULL, ?, ?, ?, 'main_line', NULL, 'committed', ?)",
+            (
+                msg_id,
+                "user",
+                content,
+                now,
+                _json.dumps(metadata, ensure_ascii=False),
+                track_id,
+                pulse_id,
+            ),
+        )
+        logging.info(
+            "[track-chronicle-insert] inserted Track Chronicle message: "
+            "pulse=%s track=%s title=%s chars=%d",
+            pulse_id, track_id, title, len(content),
+        )
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""

@@ -54,8 +54,6 @@ def _to_item(row: ActionTrack) -> TrackItem:
         is_forgotten=bool(row.is_forgotten),
         intent=row.intent,
         track_metadata=_parse_metadata(row.track_metadata),
-        pause_summary=row.pause_summary,
-        pause_summary_updated_at=_epoch(row.pause_summary_updated_at),
         last_active_at=_epoch(row.last_active_at),
         waiting_for=row.waiting_for,
         waiting_timeout_at=_epoch(row.waiting_timeout_at),

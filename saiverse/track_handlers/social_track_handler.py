@@ -61,7 +61,8 @@ class SocialTrackHandler:
         "- Pulse 完了後の挙動: 相手の応答を待つ。次のイベント (他ペルソナの発話) が来るまで他のことを考えなくて良い。"
     )
 
-    # Phase 1.1: prepare_pulse_root_context 用の Track 種別固有の context 指針。
+    # Track 種別固有の context 指針。将来 Track Chronicle 周辺の context 注入候補。
+    # NOTE: 旧 prepare_pulse_root_context は v0.32 (2026-05-09) で削除済み。属性は残置。
     track_specific_guidance: str = (
         "## Track 種別固有の指針 (交流 Track)\n"
         "- output_target=building:current のため、現在地を移動すれば配信先も変わる。\n"

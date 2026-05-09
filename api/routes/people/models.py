@@ -574,8 +574,6 @@ class TrackItem(BaseModel):
     is_forgotten: bool
     intent: Optional[str] = None
     track_metadata: Optional[dict] = None  # parsed JSON, None if not set
-    pause_summary: Optional[str] = None
-    pause_summary_updated_at: Optional[float] = None  # unix epoch
     last_active_at: Optional[float] = None
     waiting_for: Optional[str] = None
     waiting_timeout_at: Optional[float] = None

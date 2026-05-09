@@ -425,8 +425,11 @@ class ActionTrack(Base):
     intent = Column(Text, nullable=True)
     track_metadata = Column(Text, nullable=True)
     # JSON: target identifiers (user_id, persona_id), external refs, etc.
-    pause_summary = Column(Text, nullable=True)
-    pause_summary_updated_at = Column(DateTime, nullable=True)
+    # NOTE: pause_summary / pause_summary_updated_at カラムは v0.32 (2026-05-09) で
+    # Track Chronicle 機構に置き換えられたため ORM 定義から外した。既存 DB に残るカラムは
+    # 無害 (= 書き込まれないし読み出されない)。完全削除には別途 migration が必要だが、
+    # 安全側の判断で現状は未使用カラムとして残置。
+    # 詳細: docs/intent/persona_cognition/track_chronicle.md §8
     last_active_at = Column(DateTime, nullable=True)
     waiting_for = Column(Text, nullable=True)
     # JSON: {"type": "user_response" | "persona_response" | "kitchen_completion" | ...}

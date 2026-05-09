@@ -14,8 +14,6 @@ interface TrackItem {
     is_forgotten: boolean;
     intent: string | null;
     track_metadata: Record<string, unknown> | null;
-    pause_summary: string | null;
-    pause_summary_updated_at: number | null;
     last_active_at: number | null;
     waiting_for: string | null;
     waiting_timeout_at: number | null;
@@ -272,13 +270,6 @@ function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCar
                     <DetailRow label="track_id" value={track.track_id} />
                     <DetailRow label="output_target" value={track.output_target} />
                     {track.intent && <DetailRow label="intent" value={track.intent} pre />}
-                    {track.pause_summary && (
-                        <DetailRow
-                            label="pause_summary"
-                            value={`${track.pause_summary} (updated: ${formatTimestamp(track.pause_summary_updated_at)})`}
-                            pre
-                        />
-                    )}
                     {track.waiting_for && (
                         <DetailRow
                             label="waiting_for"

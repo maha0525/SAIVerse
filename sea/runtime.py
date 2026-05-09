@@ -1749,6 +1749,16 @@ class SEARuntime:
             except Exception as exc:
                 LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
 
+        # 2.5. Track Chronicle generation (v0.32, 2026-05-09)。
+        # General Chronicle と独立に走る。pulse_type 制限なし、確認 dialog 不要、
+        # バッチ未満許容 (incomplete Lv1)、1000 字未満ならスキップ。
+        # 詳細は docs/intent/persona_cognition/track_chronicle.md
+        if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
+            try:
+                self._generate_track_chronicle(persona)
+            except Exception as exc:
+                LOGGER.warning("[metabolism] Track Chronicle generation failed: %s", exc)
+
         # 3. Update anchor to new window start
         new_anchor_id = current_messages[evict_count].get("id")
         if new_anchor_id:
@@ -2078,6 +2088,165 @@ class SEARuntime:
                 "status": "completed",
                 "content": f"Chronicle生成完了: {len(level1)}件のエントリを作成しました。",
             })
+
+    def _generate_track_chronicle(self, persona) -> None:
+        """Track Chronicle 生成 (v0.32, 2026-05-09)。
+
+        General Chronicle (_generate_chronicle) と独立に走る。設計上の特徴:
+
+        - **pulse_type 制限なし**: 自律稼働 / メタ判断 / スケジュール pulse でも走る
+        - **ユーザー確認 dialog 不要**: ペルソナの自律的な記憶整理として、自動承認
+        - **バッチ未満許容**: ArasujiGenerator(allow_incomplete=True) で incomplete Lv1
+          として保存。次回 20 件揃った時点で削除して正規 Lv1 に再生成 (Generator 側
+          が自動)
+        - **Track ごとに 1000 字未満ならスキップ**: 短すぎる範囲は要約しても情報量が
+          変わらないため、Chronicle 化せず読み込み側で生メッセージ取得経路に任せる
+        - **Track 別に独立処理**: 押し出し対象に複数 Track のメッセージが混在していて
+          も、origin_track_id でグループ化して各 Track ごとに ArasujiGenerator を回す
+
+        詳細は docs/intent/persona_cognition/track_chronicle.md
+        """
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
+        from sai_memory.memory.storage import Message
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        from saiverse.model_configs import find_model_config
+        from llm_clients.factory import get_llm_client
+
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            LOGGER.warning("[metabolism][track] SAIMemory not available for Track Chronicle")
+            return
+
+        # LLM client (軽量モデル)
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        model_id, model_config = find_model_config(model_name)
+        if not model_config:
+            LOGGER.warning("[metabolism][track] Model '%s' not found for Track Chronicle", model_name)
+            return
+        provider = model_config.get("provider")
+        context_length = model_config.get("context_length", 128000)
+        client = get_llm_client(model_id, provider, context_length, config=model_config)
+
+        init_arasuji_tables(adapter.conn)
+
+        # 全メッセージを取得 (handy_tool/spell/event_message タグ除外)
+        # origin_track_id IS NULL のメッセージは Track Chronicle 対象外
+        import json as _json
+        cur = adapter.conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata, origin_track_id "
+            "FROM messages "
+            "WHERE origin_track_id IS NOT NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell', 'event_message')"
+            ") "
+            "ORDER BY created_at ASC"
+        )
+        all_rows = cur.fetchall()
+        if not all_rows:
+            LOGGER.debug("[metabolism][track] No track-tagged messages to process")
+            return
+
+        # origin_track_id でグループ化
+        from collections import defaultdict
+        by_track: Dict[str, List[Message]] = defaultdict(list)
+        for row in all_rows:
+            msg_id, tid, role, content, resource_id, created_at, metadata_raw, otid = row
+            metadata = None
+            if metadata_raw:
+                try:
+                    metadata = _json.loads(metadata_raw)
+                except Exception:
+                    pass
+            by_track[otid].append(Message(
+                id=msg_id, thread_id=tid, role=role, content=content,
+                resource_id=resource_id, created_at=int(created_at),
+                metadata=metadata,
+            ))
+
+        # 既処理メッセージ ID を Track 別に取得 (incomplete Lv1 は処理済みに含めない、
+        # ArasujiGenerator 側で再生成のため削除されるが念のためここでも合わせる)
+        cur = adapter.conn.execute(
+            "SELECT origin_track_id, json_each.value "
+            "FROM arasuji_entries, json_each(source_ids_json) "
+            "WHERE level = 1 AND origin_track_id IS NOT NULL AND is_incomplete = 0"
+        )
+        processed_by_track: Dict[str, set] = defaultdict(set)
+        for row in cur.fetchall():
+            processed_by_track[row[0]].add(row[1])
+
+        # 各 Track ごとに処理
+        track_manager = getattr(self.manager, "track_manager", None)
+        persona_id = getattr(persona, "persona_id", None)
+        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
+        # 1000 字未満スキップ閾値
+        min_chars_threshold = 1000
+
+        total_tracks_processed = 0
+        total_lv1_created = 0
+        for track_id, msgs in by_track.items():
+            unprocessed = [m for m in msgs if m.id not in processed_by_track.get(track_id, set())]
+            if not unprocessed:
+                continue
+            unprocessed_chars = sum(len(m.content or "") for m in unprocessed)
+            if unprocessed_chars < min_chars_threshold:
+                LOGGER.info(
+                    "[metabolism][track] Skipping track=%s: unprocessed=%d msgs, %d chars < %d threshold",
+                    track_id, len(unprocessed), unprocessed_chars, min_chars_threshold,
+                )
+                continue
+
+            # Track の title / intent 取得
+            track_title: Optional[str] = None
+            track_intent: Optional[str] = None
+            track_type_value: Optional[str] = None
+            if track_manager is not None:
+                try:
+                    track = track_manager.get(track_id)
+                    track_title = getattr(track, "title", None)
+                    track_intent = getattr(track, "intent", None)
+                    track_type_value = getattr(track, "track_type", None)
+                except Exception:
+                    LOGGER.debug("[metabolism][track] Could not fetch track meta for %s", track_id)
+
+            # ユーザー会話 Track はスキップ (v0.32, 2026-05-09)。
+            # 親スレッド保持機構が生メッセージで文脈を担保するため、Track Chronicle 化は不要。
+            # 詳細: docs/intent/persona_cognition/track_chronicle.md §11
+            if track_type_value == "user_conversation":
+                LOGGER.debug(
+                    "[metabolism][track] Skipping user_conversation track=%s (preserved by parent-thread mechanism)",
+                    track_id,
+                )
+                continue
+
+            generator = ArasujiGenerator(
+                client, adapter.conn,
+                batch_size=batch_size,
+                consolidation_size=10,
+                persona_id=persona_id,
+                origin_track_id=track_id,
+                track_title=track_title,
+                track_intent=track_intent,
+                allow_incomplete=True,
+            )
+
+            try:
+                level1, consolidated = generator.generate_unprocessed(msgs)
+                LOGGER.info(
+                    "[metabolism][track] track=%s done: %d level1, %d consolidated",
+                    track_id, len(level1), len(consolidated),
+                )
+                total_tracks_processed += 1
+                total_lv1_created += len(level1)
+            except Exception:
+                LOGGER.exception(
+                    "[metabolism][track] generate_unprocessed failed for track=%s", track_id,
+                )
+
+        LOGGER.info(
+            "[metabolism][track] Track Chronicle complete: %d tracks processed, %d lv1 entries",
+            total_tracks_processed, total_lv1_created,
+        )
 
     # ---------------- context preparation -----------------
 

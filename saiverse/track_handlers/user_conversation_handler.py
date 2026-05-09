@@ -86,8 +86,9 @@ class UserConversationTrackHandler:
     # → 起点メインライン Pulse として動作し、メインキャッシュに会話履歴が積まれる。
     default_entry_line_role: str = "main_line"
 
-    # Phase 1.1: prepare_pulse_root_context 用の Track 種別固有の context 指針。
+    # Track 種別固有の context 指針。将来 Track Chronicle 周辺の context 注入候補。
     # 「相手の発話は審判ではなく対話の一部」を明示し、応答待ち姿勢を補強する。
+    # NOTE: 旧 prepare_pulse_root_context は v0.32 (2026-05-09) で削除済み。属性は残置。
     track_specific_guidance: str = (
         "## Track 種別固有の指針 (対ユーザー会話)\n"
         "- 相手の発話は審判ではなく対話の一部として受け取る。\n"

@@ -58,8 +58,9 @@ class AutonomousTrackHandler:
         "  作業が一段落したと感じたら track_complete で完了、別の作業に移りたければ track_pause で一時停止できる。"
     )
 
-    # Phase 1.1: prepare_pulse_root_context 用の Track 種別固有の context 指針。
+    # Track 種別固有の context 指針。将来 Track Chronicle 周辺の context 注入候補。
     # 自律 Track はサブライン起点 + 連続実行型なので、メタ判断との切り分けが重要。
+    # NOTE: 旧 prepare_pulse_root_context は v0.32 (2026-05-09) で削除済み。属性は残置。
     track_specific_guidance: str = (
         "## Track 種別固有の指針 (自律 Track)\n"
         "- 起点ラインは軽量モデル (sub_line)。重量級判断が必要なら子ラインで呼ぶ。\n"

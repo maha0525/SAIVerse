@@ -79,6 +79,41 @@
 
 **着手タイミング**: `track_social.json` 設計と一体で進める。社交 Track が現実的に運用される時に必ず踏むケースを先に詰める。
 
+### 時間差ツール基盤 (Phase 3 から移送、2026-05-09 追加)
+
+「待ち」を Track 状態でなく**結果が時間差で返ってくる行動の性質**として整理した結果、その汎用基盤を Phase 5 で整備する (整理経緯は [../revisions.md](../revisions.md) v0.31 (2026-05-09)、Phase 3 の廃止作業は [phase_3_lines_playbooks.md](phase_3_lines_playbooks.md) の「待ち機構の整理」セクション参照)。
+
+**汎用基盤の責務**:
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| 起動時の識別子発行 (call_id 的な ID) | 🔲 | 結果イベント側で参照可能にする |
+| ツール側で時間差処理 (バックグラウンド or 外部 API ポーリング) | 🔲 | 個別ツールの責務、基盤は I/F のみ提供 |
+| 完了時に Track にイベントメッセージとして配送 | 🔲 | `inject_persona_event` 等の既存経路を活用検討 |
+| Track が active なら次 Pulse で参照 (= 通常の messages として見える) | 🔲 | `origin_track_id` カラムへの正しい記録が前提 |
+| Track が inactive なら Alert として通知 | 🔲 | 既存 alert observer 経路と統合 |
+| timeout 自体もイベントメッセージ化 (「結果が来なかった」も結果の一形態) | 🔲 | EventScheduler 予約はツール側に持たせる |
+| 並列起動 (3 つ同時投げ等) のサポート | 🔲 | call_id で識別、結果は順不同で到達可能 |
+
+**個別ツールの実装例 (Phase 5 内 / Phase 5 外で別タスク)**:
+
+- Kitchen 完了通知 (cooking_id ベース)
+- MCP Elicitation 応答受信
+- 別都市ペルソナへの dispatch 結果
+- X / Mastodon リプライ受信 (外部 API ポーリング)
+- ユーザーへの問いかけ後の応答受信 (UI からの送信)
+
+これらは個別の知識を持つので、汎用基盤の上に各ツールが乗る形。
+
+**設計上の留意点**:
+
+- ペルソナは「これは時間差で結果が返る行動だ」と予定調和的に認識して呼ぶ。途中で突然待ちが入るわけではない
+- Track の中断は「待ち発生」と独立。メタ判断者がその時 Track を続けるか別 Track に移るかを決める
+- 結果到達は Track 内のイベントメッセージ。Track 状態としての特殊扱いはない
+- 結果イベントメッセージが `origin_track_id` 紐付きで messages に記録されることで、次の Metabolism で **Track Chronicle 化される** (= 長期 Track でも結果到達の経緯が必要情報として呼び戻せる、詳細は [`../track_chronicle.md`](../track_chronicle.md))
+
+**ScheduleManager との関係**: スケジュール時刻到来も「時間差で結果が返る行動」の一形態。Phase 5 の `ScheduledHandler` (上記既存タスク) と本基盤の境界線を実装時に整理する。
+
 ### Track 忘却の自動化 (新規)
 
 不変条件 5「古い Track の忘却」を担保する仕組みが現状空欄。`SAIVERSE_TRACK_MAX_DORMANT_COUNT` / `SAIVERSE_TRACK_FORGET_AFTER_DAYS` (`03_data_model.md:457-458`) は暫定値として定義済みだが、自動 dormant → forgotten の遷移ロジックがどこにも実装されていない。
@@ -192,6 +227,7 @@ pending Track:
 - [ ] SomaticHandler / ScheduledHandler / PerceptualHandler のうち少なくとも 1 つが運用ペルソナで動作確認済み
 - [ ] ScheduleManager と並走して、Track 経由のスケジュール起因 alert が動く
 - [ ] ペルソナ再会機能が SocialTrackHandler 経由で動き、既存の `recall_conversation_with` が deprecated になる
+- [ ] 時間差ツール基盤が動作し、少なくとも 1 つの個別ツール (Kitchen 完了 / MCP Elicitation / dispatch 等) が基盤上で結果配送できる
 
 ---
 

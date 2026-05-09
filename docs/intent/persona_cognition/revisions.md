@@ -10,6 +10,255 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.33 (2026-05-09) — ユーザー会話 Track の親スレッド保持機構を追加
+
+Track Chronicle の実装着手後、運用観点でまはー (ユーザー) が指摘した重大課題への対応。Track Chronicle 全 Track 一律適用だと、ユーザー会話 Track の「対話の温度感」が作業遂行型サマリで失われる + 自律稼働で長く動いた後にユーザー会話に戻った時に**生メッセージが 1 件もコンテキストに無い**状況が発生し得る → SAIVerse の中心需要 (人格の安定性) に対して致命的。
+
+#### 本質の整理
+
+Stelis 親子スレッドのメタファーを流用:
+
+- **ユーザー会話 Track = 親スレッド** (常時保持、生メッセージで温度感を伝える)
+- **その他 Track = 子 Stelis スレッド** (メインラインで入れ替わる)
+
+「Track Chronicle で補う」「Track 全 Chronicle を head に列挙」「アクティブ以外スキップ」のいずれの案でも届かない問題で、**生メッセージを常に一定数保持し続ける独立機構**が必要と確認。
+
+#### 不足分補完方式 (重複回避)
+
+「常に N 件保持」ではなく **「メインラインに既に居る数を数えて不足分だけ補完」** 方式を採用:
+
+- Metabolism 後の history 内のオーナー Track メッセージ数 = existing_count
+- 不足 (target_count - existing_count) > 0 のときだけ、history 最古より過去のメッセージを needed 件取得して上部補完
+- アクティブが user_conversation のときは history 内に十分あるので補完省略 (= 重複回避)
+- 自律稼働中はオーナー Track メッセージが history に居ないので、最低 target_count 件補完される
+
+#### オーナーユーザー会話 Track の特定
+
+リンクユーザー (UserAiLink) で persona に紐付くユーザーの user_conversation Track を採用。リンク未設定なら最古の user_conversation Track を自動的にオーナー扱い。
+
+#### コンテキスト構成 (改訂)
+
+```
+[head]
+  system prompt
+  Memory Weave (General Chronicle / Memopedia / Track Chronicle (アクティブ ≠ user_conv のとき))
+  visual context
+
+[親スレッド保持セクション (アクティブが user_conv 以外のとき)]
+  時刻アンカー①  <system>以下、{ts} 以降のユーザーとの会話です</system>
+  オーナー Track の不足分補完メッセージ
+
+[メインライン履歴]
+  時刻アンカー②  <system>以下、{ts} 以降のやり取りです</system>
+  history (line_role=main_line, scope=committed)
+
+[末尾]
+  realtime info
+```
+
+#### ユーザー会話 Track Chronicle 化のスキップ
+
+親保持機構があるため、ユーザー会話 Track は Track Chronicle 対象外。3 箇所の判定追加:
+
+- `_generate_track_chronicle` ループ内で `track_type='user_conversation'` をスキップ
+- `_get_track_chronicle_context` で active が user_conversation なら "" 返す
+- `_insert_track_chronicle_on_switch` で切り替え先が user_conversation なら早期 return
+
+#### パラメータ
+
+- `SAIVERSE_USER_CONV_PRESERVE_COUNT` (環境変数、デフォルト 20、ペルソナ別設定なし)
+
+#### 実装
+
+- 新規: `saiverse/user_conversation_preserver.py` — オーナー Track 特定 + 不足分補完取得
+- 既存: `sea/runtime_context.py` の `prepare_context` 内で history 取得後に補完 + 時刻アンカー①/② 挿入
+- 関連: messages テーブルの payload に `origin_track_id` を含めるよう `Message` dataclass + `_LINE_METADATA_COLUMNS` + `_payload_from_message_locked` を更新
+
+#### Intent doc 反映
+
+[`track_chronicle.md`](track_chronicle.md) §11 (新規) に「ユーザー会話 Track の親スレッド保持機構」セクションを追加。実装ガイドとしての完結性を担保。
+
+---
+
+### v0.32 (2026-05-09) — Track Chronicle Intent doc 起草 (pause_summary 完全廃止 + 中断・再開機構の本体化)
+
+v0.31 で「pause_summary 書き込み側を Phase 3 に乗せる」とした書き込み機構について、設計を詰める対話の中で本質が大きく拡張された。結論として **pause_summary は完全廃止**し、**Track Chronicle** (Track 内必要情報の維持機構) として再設計する。Intent doc を独立ファイル [`track_chronicle.md`](track_chronicle.md) として起草。
+
+#### 拡張の発端
+
+書き込みの本質を「中断 → 再開時のサマリ書き込み」に閉じて捉えていたが、まはー (ユーザー) との対話で次のように再整理された:
+
+- 書き込みの本質: Metabolism で押し出された内容から必要情報を圧縮保存する
+- 読み込みの本質: 現コンテキストに含まれていない必要情報を洗い出してコンテキストに含める
+- Track の役割: 「Track 内に居る間は Track 内の過去全情報にアクセスできる」必要情報の基準線
+
+「中断 → 再開」はこのカバー範囲の 1 ケースに過ぎない。同 Track 内で長時間作業して Metabolism が起きた場合、別 Track にしばらく行って戻ってきた場合、すべて同じ機構で必要情報が呼び戻される。
+
+#### 既存実装の現状確認 (重大発見)
+
+設計議論中の精査で、以下が dead code として現役ランタイムに統合されていないと判明:
+
+- `sea/pulse_root_context.py` の `prepare_pulse_root_context` / `build_fixed_section` / `build_dynamic_section` は Phase 1.1 で実装されたが**呼び出し元が無い**
+- 結果、`build_dynamic_section` 内で参照される `pause_summary` は**そもそも読み出されていなかった**
+- 書き手も無く、読み手も無く、宙ぶらりんで残っていた
+
+これらの dead code は撤去対象。Track Chronicle の実装は legacy `prepare_context` (`runtime_context.py`) 側に統合する。
+
+#### 新設される設計の核
+
+[`track_chronicle.md`](track_chronicle.md) の §3 全体像参照。要約:
+
+1. **書き込み**: Metabolism 連動。押し出し対象を `origin_track_id` で Track ごとに分けて Chronicle DB (`arasuji_entries` に origin_track_id カラム新設) に entry 追加。バッチサイズ未満は `incomplete: true` フラグ付きで保存し、後で 20 件揃ったら正規 Lv1 に再生成。1000 字未満ならスキップ (読み込み時に SAIMemory から生メッセージ直接取得)。生成は新規関数 `_generate_track_chronicle` として独立経路 (既存 `_generate_chronicle` の制約 = user pulse 限定 / バッチ未満スキップ等を受けない)
+2. **読み込み (head)**: アクティブ Track の Chronicle 一式を `get_episode_context` (origin_track_id フィルタ版) で取得し、Memory Weave context として head 配置。Metabolism のたびに head が新アクティブ Track のものに入れ替わる
+3. **読み込み (history 末尾近く)**: Track 切り替え時、`_promote_meta_judgment_in_pulse` (`saiverse/saiverse_manager.py:1168`) の延長で、メタ判断独白の committed 昇格直後に切り替え先 Track の Chronicle を独立メッセージ (role='user' + `<system>` ラップ) として INSERT
+4. **時刻アンカー**: Metabolism 時、最古残存メッセージ直前に揮発挿入。書式: `<system>以下、YYYY-MM-DD HH:MM:SS 以降のやり取りです</system>`
+5. **キャッシュ挙動**: head は Metabolism 時のみ入れ替え、Track 切り替え時は head 不変。詳細は [`track_chronicle.md`](track_chronicle.md) §6 の t1〜t3.5 具体例参照
+
+#### General Chronicle との関係
+
+Track Chronicle と General Chronicle は**独立に走る**。両者は対象範囲も抽出視点も異なるため、同じメッセージから両方が生成されても問題ない (重複 OK)。General Chronicle 側に残る課題:
+
+- 生成 trigger を Metabolism 押し出し対象判定に変更 → [`docs/issues/general_chronicle_metabolism_trigger.md`](../../issues/general_chronicle_metabolism_trigger.md)
+- 自律稼働中に Chronicle が生成されない問題 → [`docs/issues/general_chronicle_user_pulse_only.md`](../../issues/general_chronicle_user_pulse_only.md)
+
+これらは Track Chronicle で結果的に Track 単位の必要情報維持は救えるが、General 側の網羅性は別問題として issue 化済み。
+
+#### v0.31 との差分
+
+v0.31 で「Phase 3 の Track 中断・再開機構: `pause_summary` 書き込み側実装」「Phase 5 の時間差ツール基盤」と切り分けたが、書き込み側の本質拡張に伴い前者は **Track Chronicle 本体実装** に置き換わる。後者 (Phase 5 時間差ツール) は変更なし。
+
+#### 廃止 / 撤去対象 (v0.32 で確定)
+
+- `action_tracks.pause_summary` / `pause_summary_updated_at` カラム
+- `prepare_pulse_root_context` / `build_fixed_section` / `build_dynamic_section` / `is_first_pulse` / `mark_cache_built` / `reset_cache_built` (dead code)
+- `pause_summary` の API 露出 (`api/routes/people/tracks.py:57-58`, `models.py`)
+- `pause_summary` の Frontend 表示 (`frontend/src/components/memory/TracksViewer.tsx`)
+- `meta_layer.py:28` の「責務外」コメント (v0.31 で残されていたもの、書き込み責務確定により不要)
+
+#### Phase 配置への反映
+
+- Phase 3 進捗表に Track Chronicle 実装の項目を新設 (中断・再開機構の本体)
+- README ドキュメント構造に [`track_chronicle.md`](track_chronicle.md) を追加
+- v0.31 で Phase 3 に乗せた「Track 中断・再開機構」の項目は Track Chronicle 本体化に書き換え
+
+---
+
+### v0.31 (2026-05-09) — 「待ち」を行動の性質として再整理 + pause_summary を Phase 3 に乗せる
+
+Phase 3 の積み残し (`track_waiting.json` 等) の着手を起点に、まはー (ユーザー)
+との対話で「待ち」の本質を整理し直した結果、認知モデル上の位置づけが大きく
+変わった。本改訂はその再整理を確定させる。
+
+#### 整理の発端
+
+`track_waiting.json` の着手検討時、「誰がどうやってこの Playbook を使うと決め
+るのか」「なぜ `track_autonomous` では駄目なのか」という根本疑問が出た。深掘り
+した結果、「待ち」は Track 種別でも特殊状態でもなく、**結果が時間差で返って
+くる行動の性質**であることが明確になった。
+
+具体的にいうと:
+
+- ペルソナは「これは時間差で結果が返る行動だ」と予定調和的に認識して呼ぶ
+  (途中で突然待ちが入るわけではない)
+- 行動 = ツール / Spell / Playbook ノード。これらに「結果が時間差で返る」性質
+  がある
+- Track の中断は「待ち発生」と独立した別問題。3 つ同時に重い仕事を投げて Track
+  を続けることもある。中断するかどうかはメタ判断者の領域
+- 結果到達は Track 内のイベントメッセージ。Track が active なら次 Pulse で
+  通常の messages として参照され、inactive なら Alert として通知される
+- timeout も「結果が来なかった」事象としてイベントメッセージ化される
+
+つまり認知モデル上「待ち」を独立した概念として扱う必要がない。既存の Track /
+Alert / メタ判断の枠組みで全部成立する。
+
+#### 廃止される旧仕様 (Phase 3)
+
+| 項目 | 廃止理由 |
+|------|---------|
+| `track_waiting.json` Playbook | Track 種別ではなく「待ち」を独立 Playbook 化していた誤設計 |
+| `STATUS_WAITING` (`saiverse/track_manager.py`) | 状態として独立する根拠がなくなる (pending と区別不要) |
+| `track.waiting_for` カラム + 関連 API | 「何を待っているか」はツール / Spell の引数 + 結果イベントで自己記述する |
+| `track.waiting_timeout_at` カラム + EventScheduler 予約 | timeout もツール側責務 (= 結果不到達イベント) |
+| `TrackManager.wait()` / `resume_from_wait()` メソッド | 状態廃止に伴う |
+| Phase 4-e (v0.30) で実装した `_schedule_waiting_timeout` / `_handle_waiting_timeout` | 時間差ツール基盤に移行。本改訂で相殺 |
+| `04_handlers.md` の `post_complete_behavior` 表で「waiting」を Track 種別として記述していた箇所 | 概念的に誤りだった |
+| `track_type='waiting'` の選択肢 | 同上 |
+
+#### 新設される作業 (Phase 3)
+
+「Track 中断・再開機構」を Phase 3 タスクに昇格。コードベース調査の結果、
+読み込み側 (`sea/pulse_root_context.py:271-273` の `build_dynamic_section`) と
+DB スキーマ (`action_tracks.pause_summary` / `pause_summary_updated_at`)、
+API 露出 (`api/routes/people/tracks.py:57-58`) は実装済みだが、**書き込み側
+(中断時に軽量モデルでサマリ生成) が未実装**で、Phase 計画上も浮いていた。
+
+`saiverse/meta_layer.py:28` には「中断時 pause_summary 作成 / 再開コンテキスト
+構築 (Phase 1.3 後段 / Phase 2)」と責務外として書かれていたが、Phase 1 / 2 の
+ドキュメントには着手記録がない。Phase 3 のスコープ (Track 種別 Playbook 起動
+時の Pulse 開始プロンプト構成) にきれいに収まるため、Phase 3 で改めて明示
+タスク化した。
+
+| 項目 | 担当 Phase | 状態 |
+|------|-----------|------|
+| 中断時 pause_summary 生成 (軽量モデル) | Phase 3 | 🔲 未実装 |
+| Note 差分の挿入経路 (`build_dynamic_section` 拡張) | Phase 3 | 🔲 未実装 |
+
+#### 新設される作業 (Phase 5)
+
+「時間差ツール基盤」を Phase 5 タスクに新設。`waiting` 機構の代わりとして
+時間差で結果が返ってくるツールの汎用基盤を整備する。
+
+| 項目 | 担当 Phase | 状態 |
+|------|-----------|------|
+| 起動時の識別子発行 (call_id 等) | Phase 5 | 🔲 |
+| 完了時に Track にイベントメッセージとして配送 (Track 不在なら Alert) | Phase 5 | 🔲 |
+| timeout 自体もイベントメッセージ化 | Phase 5 | 🔲 |
+| 並列起動 (3 つ同時投げ等) サポート | Phase 5 | 🔲 |
+| 個別ツール (Kitchen / MCP / dispatch / X 等) の汎用基盤への移植 | 別タスク | 🔲 |
+
+#### 文書側の改訂
+
+- `phase_3_lines_playbooks.md`: ステータス 95% → 85%。Track 種別 Playbook 表
+  から `track_waiting.json` を打ち消し線で削除。新セクション「Track 中断・
+  再開機構」「待ち機構の整理」を追加。完了判定基準にも反映
+- `phase_5_autonomy.md`: 「時間差ツール基盤」セクション追加。完了判定基準にも反映
+- `02_mechanics.md`:
+  - 「軸 2: 起動経路」表の「最初から waiting、外部イベントで起動」を「既存だが
+    非アクティブで待機、外部イベントで alert 化」に書き換え
+  - `track_wait` スペル言及を削除し Phase 3 廃止予定の注記を追加
+  - 「応答待ちの仕組み」章を「応答待ち (時間差ツール基盤)」に改題し全面改稿
+    (旧 `waiting_for` 規約 / 多重応答待ち優先順位 / タイムアウト節は廃止して
+    新モデルに統一)
+- `04_handlers.md`:
+  - `post_complete_behavior` 表の `wait_response` 行から「waiting」を削除し
+    注記を追加
+  - Track 種別 Playbook 一覧から `track_waiting.json` を打ち消し線で削除
+- `03_data_model.md`:
+  - `action_tracks` スキーマで `waiting_for` / `waiting_timeout_at` を
+    Phase 3 削除予定としてコメントアウト + 注記
+  - `idx_action_tracks_waiting_timeout` インデックスを削除予定マーク
+  - `track_type` の列挙から `waiting` を除外 + 注記
+  - 状態遷移図から `waiting` 経路を削除 + 注記
+  - 主要遷移トリガー表から `track_wait` / `track_resume_from_wait` 行を削除
+  - メタレイヤーのトラック管理ツール群表で同 2 ツールを打ち消し線
+  - alert への遷移トリガーから「関連 waiting Track」表現を「関連 Track
+    (時間差ツール基盤経由、Phase 5)」に修正、「時間差ツールの結果到達 /
+    timeout (Phase 5)」行を新規追加
+- `01_concepts.md`:
+  - Track 状態リストから `waiting` を削除 + Phase 3 削除予定注記
+  - alert 解消ルール表から `waiting` (`wait`) 遷移先を削除 + 注記
+
+#### Phase 4-e との関係
+
+Phase 4-e (v0.30、2026-05-08) で waiting timeout の EventScheduler 化を実装した
+直後に本廃止が決まった形。Phase 4-e の実装は時間差ツール基盤に再構成される
+方向性なので、丸ごと無駄になるわけではない (push 駆動の予約機構 / fire 後の
+alert 通知パターンは活用できる)。
+
+ただし `_schedule_waiting_timeout` / `_handle_waiting_timeout` のような
+「Track の `waiting_timeout_at` カラムに紐付く」コードは廃止対象。Phase 3 廃止
+作業の中で取り扱う。
+
 ### v0.30 (2026-05-08) — Phase 4-e: anchor touch 修正 + EventScheduler 集約 + メタ判断 Pulse 失敗時挙動
 
 Phase 4-e (`phases/phase_4_pulse_scheduler.md` の 4-e サブフェーズ) を完了させる

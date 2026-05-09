@@ -2,7 +2,7 @@
 
 **ステータス**: 整理中 (旧 `persona_cognitive_model.md` v0.14 + `persona_action_tracks.md` v0.11 を再構造化中)
 **親 Intent**: なし (本セットが上位概念)
-**最終更新**: 2026-05-01
+**最終更新**: 2026-05-09
 
 ---
 
@@ -25,6 +25,9 @@ docs/intent/persona_cognition/
 ├── 02_mechanics.md        ← メタ判断 A/B フロー、Pulse 階層、再開コンテキスト
 ├── 03_data_model.md       ← テーブルスキーマ、マイグレーション
 ├── 04_handlers.md         ← Track 種別ごとの Handler / Playbook 設計方針
+├── track_chronicle.md     ← Track 内必要情報の維持機構 (中断・再開機構の本体、v0.32〜)
+├── nested_subline_spell.md ← 入れ子サブライン Spell 機構
+├── line_tag_responsibility.md ← line と memorize タグの責務分離
 ├── phases/
 │   ├── phase_1_base.md            ← 基盤刷新 (handoff 解消 + データモデル拡張)
 │   ├── phase_2_track_metalayer.md ← Track / MetaLayer / Handler 基盤
@@ -32,7 +35,7 @@ docs/intent/persona_cognition/
 │   ├── phase_4_pulse_scheduler.md ← Pulse 階層 + Scheduler + メタ定期判断
 │   ├── phase_5_autonomy.md        ← 自律稼働の本格化
 │   └── phase_6_extensions.md      ← 拡張機構 (Stelis 統合・モニタリング等)
-└── revisions.md           ← v0.1〜v0.14 の改訂履歴 (差分情報の集約所)
+└── revisions.md           ← v0.1〜v0.32 の改訂履歴 (差分情報の集約所)
 ```
 
 ### どれを読めば何が分かるか
@@ -45,6 +48,7 @@ docs/intent/persona_cognition/
 | 新しい Track 種別を追加する時の Handler 書き方 | `04_handlers.md` |
 | 「今どこまで実装済みで、次に何をやるか」 | このファイル下の **進捗表** + `phases/*.md` |
 | 「v0.X でなぜこの仕様に変わったか」 | `revisions.md` |
+| Track Chronicle (中断・再開機構の本体) の設計 | `track_chronicle.md` |
 
 ---
 
@@ -59,15 +63,15 @@ docs/intent/persona_cognition/
 [Phase 2] Track / MetaLayer / Handler 基盤   ✅ ほぼ完了
    action_tracks / notes / track_handlers / track_* ツール群
    ↓
-[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 95%
+[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 80%
    line: main/sub フィールド + 各 Track 種別の Playbook 整備 + 入れ子サブライン Spell 機構
-   残: 段階 4-D (DEPRECATED コード完全削除) / スケジュール pre_spells 指定 UI / end-to-end 検証
+   残: 段階 4-D (DEPRECATED コード完全削除) / Track Chronicle 本体実装 / 「待ち」Track 廃止作業 / pause_summary 関連撤去 / スケジュール pre_spells 指定 UI / end-to-end 検証
    ↓
 [Phase 4] Pulse 階層 + Scheduler + メタ定期判断  ✅ 完了 (v0.30, 2026-05-08)
    AutonomyManager + SubLineScheduler + EventScheduler に集約 / META_JUDGMENT_CONFIG / 失敗時 retry
    ↓
 [Phase 5] 自律稼働の本格化                🔲 未着手
-   Handler tick / 内部 alert / Track パラメータ / Schedule 統合
+   Handler tick / 内部 alert / Track パラメータ / Schedule 統合 / 時間差ツール基盤
    ↓
 [Phase 6] 拡張機構                       🔲 構想
    Stelis 統合 / モニタリングライン / 創発 Track / Note 同期
@@ -143,9 +147,13 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 ---
 
-### Phase 3 — ライン仕様 + Track 種別 Playbook (🟡 約 95%)
+### Phase 3 — ライン仕様 + Track 種別 Playbook (🟡 約 80%)
 
 旧 `context_profile` / `model_type` を `line: "main"|"sub"` 指定に集約。Track 種別ごとの専用 Playbook を整備。
+
+> 2026-05-09 (v0.31): 「待ち」Track の整理に伴い、`track_waiting.json` の整備は廃止 (Track 状態 / 種別から `waiting` を抜く作業に転換)。時間差ツール基盤は Phase 5 に移送。詳細は `revisions.md` v0.31 (2026-05-09)。
+>
+> 2026-05-09 (v0.32): v0.31 で「pause_summary 書き込み側実装」とした項目について、書き込み側設計の本質拡張に伴い **`pause_summary` を完全廃止** し **Track Chronicle** (Track 内必要情報の維持機構) に置き換えることが確定。Intent doc は [`../track_chronicle.md`](../track_chronicle.md)、整理経緯は `revisions.md` v0.32 (2026-05-09) 参照。
 
 | 項目 | 状態 | 実装場所 / 備考 | 旧称 |
 |------|------|----------------|------|
@@ -159,7 +167,10 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `LLMNodeDef.model_type` DEPRECATED 化 | ✅ | `sea/playbook_models.py:57-62` | Phase 1.4 |
 | `track_social.json` Playbook | 🔲 | 未着手 | C-2 残件 |
 | `track_external.json` Playbook | 🔲 | 未着手 | C-2 残件 |
-| `track_waiting.json` Playbook | 🔲 | 未着手 | C-2 残件 |
+| ~~`track_waiting.json` Playbook~~ | ⛔ 廃止 | 「待ち」を Track 状態として持たない方針に変更 (v0.31, 2026-05-09)。`track_type='waiting'` / `status='waiting'` / `track_wait` / `track_resume_from_wait` ツール / `_schedule_waiting_timeout` 等を Phase 3 で削除する | C-2 残件 |
+| **「待ち」Track 廃止作業** (Track 状態 / 種別 / ツール / TrackManager コードから `waiting` を完全除去) | 🔲 | `saiverse/track_manager.py:401-588` の wait/timeout/resume_from_wait + `builtin_data/tools/track_wait.py` / `track_resume_from_wait.py` + `database/models.py:action_tracks` の `waiting_for` / `waiting_timeout_at` カラム。詳細は `revisions.md` v0.31 | Phase 3 新規 (v0.31) |
+| **Track Chronicle 本体実装** (中断・再開機構の本体、pause_summary を完全廃止して置き換え) | 🟢 一巡完了 | Intent doc: [`../track_chronicle.md`](../track_chronicle.md)。書き込み (`_generate_track_chronicle` 新設、Metabolism 連動、Track 別生成、incomplete Lv1 + 再生成、1000 字未満スキップ) / 読み込み (head 入れ替え + 切り替え時 history 末尾近く挿入) / 時刻アンカー / dead code 撤去を含む。詳細は `revisions.md` v0.32 / v0.33、Intent doc §9 / §11 |
+| **ユーザー会話 Track 親スレッド保持機構** (生メッセージで対話温度を担保、Stelis 親子モデル流用) | 🟢 一巡完了 | `saiverse/user_conversation_preserver.py` + `sea/runtime_context.py` 連携。リンクユーザーのオーナー Track 特定 + 不足分補完。`SAIVERSE_USER_CONV_PRESERVE_COUNT` (デフォルト 20) で調整可。詳細は `revisions.md` v0.33、Intent doc §11 | Phase 3 新規 (v0.33) |
 | `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
 | `exclude_pulse_id` 廃止 | 🔲 | 旧仕様コードは現存 | C-2 残件 |
 | Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
@@ -230,6 +241,7 @@ Handler tick による内部 alert + Track パラメータ機構 + ScheduleManag
 | ペルソナ再会機能の汎用化 (Person Note 自動開封 + alert 化に統合) | 🔲 | C-1 後半相当 |
 | **Track ライフサイクル補完** (ペルソナ削除 / Building 移動 / 複数アカウント合流時の挙動) | 🔲 | Phase 5 新規 (track_social 着手前提) |
 | **Track 忘却の自動化** (dormant → forgotten 遷移 / `MAX_DORMANT_COUNT` 超過時の優先 forget) | 🔲 | Phase 5 新規 (不変条件 5 担保) |
+| **時間差ツール基盤** (call_id 採番 / イベントメッセージ配送 / 不在 Track への alert 通知 / タイムアウトはツール側責務) | 🔲 | Phase 5 新規 (v0.31, Phase 3 から移送)。Kitchen / MCP Progress / dispatch_persona / X 投稿等の個別ツール実装はサブタスク化。詳細は `revisions.md` v0.31 |
 
 **詳細**: `phases/phase_5_autonomy.md`
 
@@ -288,6 +300,7 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 - [handoff_2026-05-01.md](handoff_2026-05-01.md) — Phase 3 全体ロードマップ handoff
 - [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-C + Spell コア着手時の handoff (完了済、4-D 作業に再利用)
 - [handoff_2026-04-30.md](handoff_2026-04-30.md) — Phase 2 / 2.5 / 2.6 完了時 handoff
+- [track_chronicle.md](track_chronicle.md) — Track 内必要情報の維持機構 (中断・再開機構の本体、Phase 3 の本体実装) Intent (v0.1, 2026-05-09 起草)
 - [nested_subline_spell.md](nested_subline_spell.md) — Phase 3 の `/run_playbook` Spell 機構 Intent (v0.1, 2026-05-01 起草)
 - [line_tag_responsibility.md](line_tag_responsibility.md) — line と memorize タグの責務分離 Intent (v0.1, 2026-05-01 起草)
 - `unified_memory_architecture.md` v3 — v0.3.0 中心軸 (pulse_logs / Chronicle / Memopedia / 自律稼働バイオリズム)
