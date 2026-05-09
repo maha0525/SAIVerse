@@ -63,9 +63,9 @@ docs/intent/persona_cognition/
 [Phase 2] Track / MetaLayer / Handler 基盤   ✅ ほぼ完了
    action_tracks / notes / track_handlers / track_* ツール群
    ↓
-[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 80%
+[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 90%
    line: main/sub フィールド + 各 Track 種別の Playbook 整備 + 入れ子サブライン Spell 機構
-   残: 段階 4-D (DEPRECATED コード完全削除) / Track Chronicle 本体実装 / 「待ち」Track 廃止作業 / pause_summary 関連撤去 / スケジュール pre_spells 指定 UI / end-to-end 検証
+   残: 「待ち」Track 廃止作業 / pause_summary 関連撤去 / スケジュール pre_spells 指定 UI / end-to-end 検証
    ↓
 [Phase 4] Pulse 階層 + Scheduler + メタ定期判断  ✅ 完了 (v0.30, 2026-05-08)
    AutonomyManager + SubLineScheduler + EventScheduler に集約 / META_JUDGMENT_CONFIG / 失敗時 retry
@@ -117,7 +117,7 @@ handoff 3 経路問題の解消 + 7 層ストレージモデルを支えるデ�
 | 1-4 | Spell loop の `tags=["conversation"]` 固定廃止 | ✅ | `sea/runtime_llm.py:434-465` | P0-4 |
 | 1-5 | `speak: false` 時に `_emit_say` skip | ✅ | `sea/runtime_llm.py:977-983` | P0-5 |
 | 1-6 | action 文ペア保存 (`paired_action_text` 利用) | ✅ | `sea/runtime_llm.py:1733-1766` | P0-6 |
-| 1-7 | `include_internal` フィルタを line_role / scope ベースへ移行 | ✅ | (Phase 1.4 で DEPRECATED 化済み、削除は Phase 3 完了後) | P0-7 |
+| 1-7 | `include_internal` フィルタを line_role / scope ベースへ移行 | ✅ | line_role / scope ベースに完全移行 (段階 4-D で `ContextRequirements.include_internal` フィールド削除済 v0.35, 2026-05-09) | P0-7 |
 | 1-8 | scope 昇格 SQL UPDATE 機構 (`discardable` → `committed`) | ✅ | (Phase 1.3 マージ済み) | Phase 1.3 |
 
 **詳細**: `phases/phase_1_base.md`
@@ -147,13 +147,15 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 ---
 
-### Phase 3 — ライン仕様 + Track 種別 Playbook (🟡 約 80%)
+### Phase 3 — ライン仕様 + Track 種別 Playbook (🟡 約 90%)
 
 旧 `context_profile` / `model_type` を `line: "main"|"sub"` 指定に集約。Track 種別ごとの専用 Playbook を整備。
 
 > 2026-05-09 (v0.31): 「待ち」Track の整理に伴い、`track_waiting.json` の整備は廃止 (Track 状態 / 種別から `waiting` を抜く作業に転換)。時間差ツール基盤は Phase 5 に移送。詳細は `revisions.md` v0.31 (2026-05-09)。
 >
 > 2026-05-09 (v0.32): v0.31 で「pause_summary 書き込み側実装」とした項目について、書き込み側設計の本質拡張に伴い **`pause_summary` を完全廃止** し **Track Chronicle** (Track 内必要情報の維持機構) に置き換えることが確定。Intent doc は [`../track_chronicle.md`](../track_chronicle.md)、整理経緯は `revisions.md` v0.32 (2026-05-09) 参照。
+>
+> 2026-05-09 (v0.35): **段階 4-D 完了**。`context_profile` / `model_type` / `CONTEXT_PROFILES` / `include_internal` / `exclude_pulse_id` / `pulse:{uuid}` タグ併行記録 を全層から削除し、最新仕様 (line ベース + state["_messages"] 単一経路) に統合。tool ノードが結果を `state["_messages"]` に append しないバグ (= meta_judgment の judge ノードが track_list 出力を読めない) を併せて修正。`model_type=lightweight` ノード単位混在の Playbook 10 件 (source_*, deep_research, memopedia_write, research_task, memory_research) は archive/ 退避 (再構築方針)。詳細は `revisions.md` v0.35 / `docs/issues/phase3_4d_dead_code_removal.md`。
 
 | 項目 | 状態 | 実装場所 / 備考 | 旧称 |
 |------|------|----------------|------|
@@ -163,8 +165,8 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `meta_judgment_dispatch.py` 経由パス | ✅ | (Phase 1.2 マージ済み) | Phase 1.2 |
 | `track_user_conversation.json` Playbook | ✅ | `builtin_data/playbooks/public/` | C-2 |
 | `track_autonomous.json` Playbook | ✅ | `builtin_data/playbooks/public/` | C-2 |
-| `LLMNodeDef.context_profile` DEPRECATED 化 | ✅ | `sea/playbook_models.py:48-55` | Phase 1.4 |
-| `LLMNodeDef.model_type` DEPRECATED 化 | ✅ | `sea/playbook_models.py:57-62` | Phase 1.4 |
+| `LLMNodeDef.context_profile` DEPRECATED 化 → 削除 | ✅ | 段階 4-D で完全削除 (v0.35, 2026-05-09)。最新仕様は `state["_messages"]` 単一経路 | Phase 1.4 |
+| `LLMNodeDef.model_type` DEPRECATED 化 → 削除 | ✅ | 段階 4-D で完全削除 (v0.35, 2026-05-09)。`SubPlayNodeDef.line='sub'` 一括指定が代替 | Phase 1.4 |
 | `track_social.json` Playbook | 🔲 | 未着手 | C-2 残件 |
 | `track_external.json` Playbook | 🔲 | 未着手 | C-2 残件 |
 | ~~`track_waiting.json` Playbook~~ | ⛔ 廃止 | 「待ち」を Track 状態として持たない方針に変更 (v0.31, 2026-05-09)。`track_type='waiting'` / `status='waiting'` / `track_wait` / `track_resume_from_wait` ツール / `_schedule_waiting_timeout` 等を Phase 3 で削除する | C-2 残件 |
@@ -172,9 +174,9 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | **Track Chronicle 本体実装** (中断・再開機構の本体、pause_summary を完全廃止して置き換え) | 🟢 一巡完了 | Intent doc: [`../track_chronicle.md`](../track_chronicle.md)。書き込み (`_generate_track_chronicle` 新設、Metabolism 連動、Track 別生成、incomplete Lv1 + 再生成、1000 字未満スキップ) / 読み込み (head 入れ替え + 切り替え時 history 末尾近く挿入) / 時刻アンカー / dead code 撤去を含む。詳細は `revisions.md` v0.32 / v0.33、Intent doc §9 / §11 |
 | **ユーザー会話 Track 親スレッド保持機構** (生メッセージで対話温度を担保、Stelis 親子モデル流用) | 🟢 一巡完了 | `saiverse/user_conversation_preserver.py` + `sea/runtime_context.py` 連携。リンクユーザーのオーナー Track 特定 + 不足分補完。`SAIVERSE_USER_CONV_PRESERVE_COUNT` (デフォルト 20) で調整可。詳細は `revisions.md` v0.33、Intent doc §11 | Phase 3 新規 (v0.33) |
 | `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
-| `exclude_pulse_id` 廃止 | 🔲 | 旧仕様コードは現存 | C-2 残件 |
+| `exclude_pulse_id` 廃止 | ✅ | 段階 4-D で 4 層 (adapter / history_manager / runtime_context / runtime) 全削除 (v0.35, 2026-05-09) | C-2 残件 |
 | Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
-| **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | 🟡 | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + **4-C 完了** (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23、2026-05-01)。残: 4-D (旧 DEPRECATED コード完全削除、`meta_user` 系削除完了済 v0.28 なので着手可能) | Phase 3 新規 |
+| **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | ✅ | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + 4-C (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23) + **4-D 完了** (旧 DEPRECATED コード全削除、v0.35, 2026-05-09) | Phase 3 新規 |
 | 入れ子サブライン Spell (`/run_playbook` + 深さ 4 階層 + `report_to_parent`) | ✅ | コア機構 + システムプロンプト注入 + `track_user_conversation` 1-LLM 構成 + `meta_user` 系削除完了 (v0.24-v0.28) | Phase 3 新規 |
 | Playbook 一覧のシステムプロンプト注入 (`available_playbooks` セクション) | ✅ | `sea/runtime_context.py:118-152` で `## 利用可能な能力` セクション、`router_callable=true` を bullet list 化 | Phase 3 新規 |
 | `track_user_conversation` を 1-LLM + Spell 構成に書き換え | ✅ | `track_user_conversation.json` は `main_line_response` (LLM 1) + `process_body` (control_body ツール) 構成 | Phase 3 新規 |
@@ -187,9 +189,10 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | 親 LLM messages のサブライン流入 (snapshot 経路) | ✅ | `tools/context.py` に `_LLM_MESSAGES` ContextVar + `persona_context(llm_messages=...)` 引数追加。spell loop が呼び出し時に snapshot 渡し、`run_playbook` が `parent_state["_messages"]` に展開。入れ子も自動で正しく動く (context manager の入れ子 reset)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
 | `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる (例: `generate_image_playbook.json`)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
 | Spell 結果の media を親 LLM ラウンドに attachment 転送 | ✅ | spell 戻り値を `Tuple[str, Optional[Dict]]` に拡張 (既存 str 戻り値は互換)。spell loop が全 spell の `metadata.media` を集約し次の LLM ラウンドの user message に lift。`run_playbook` が `parent_state["metadata"].media` を転送。`generate_image_playbook.json` の report に Markdown リンクリマインド追記 (v0.26, 2026-05-01) | Phase 3 新規 |
-| 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` は Y 案で 4-D 持ち越し (v0.23, 2026-05-01) | C-2 残件 |
+| 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` ノード単位混在の Playbook 10 件は archive/ 退避 (v0.35, 2026-05-09) | C-2 残件 |
 | end-to-end 動作検証 (Spell loop / `/run_playbook` 1 段 / 入れ子) | 🔲 | `meta_user` 系削除後に通しで実機検証 | Phase 3 新規 |
-| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | 🔲 | 段階 4-D、`meta_user` 系削除 + end-to-end 検証後 | C-2 残件 |
+| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | ✅ | 段階 4-D 完了 (v0.35, 2026-05-09)。詳細は `docs/issues/phase3_4d_dead_code_removal.md` | C-2 残件 |
+| **メタ判断 Pulse の tool 結果到達バグ修正** (`lg_tool_node` で `state["_messages"]` への append 漏れ) | ✅ | `sea/runtime_engine.py:lg_tool_node` の tool 実行成功 / 失敗の両ブロックに append 経路追加。これで `meta_judgment.json` の judge ノードが `track_list` 出力 (`last_message_relative` 等) を実際に読める (v0.35, 2026-05-09) | Phase 3 新規 |
 
 **詳細**: `phases/phase_3_lines_playbooks.md`
 
@@ -296,9 +299,11 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 
 ## 関連ドキュメント
 
-- [handoff_2026-05-08.md](handoff_2026-05-08.md) — **最新 handoff**: Phase 3 A 残件 (`meta_user` 系削除 + スケジュール `pre_spells` 適用)
+- [handoff_2026-05-09.md](handoff_2026-05-09.md) — **最新 handoff**: 自律稼働中の長期 idle 脱出機構 (wait_response Track 自動 pause タイマー + Track 最終メッセージ時間の可視化)
+- [handoff_2026-05-08.md](handoff_2026-05-08.md) — Phase 3 A 残件 (`meta_user` 系削除 + スケジュール `pre_spells` 適用)
 - [handoff_2026-05-01.md](handoff_2026-05-01.md) — Phase 3 全体ロードマップ handoff
-- [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-C + Spell コア着手時の handoff (完了済、4-D 作業に再利用)
+- [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-D + Spell コア実装時の handoff (4-D も 2026-05-09 完了)
+- `docs/issues/phase3_4d_dead_code_removal.md` — 段階 4-D 完了ログ
 - [handoff_2026-04-30.md](handoff_2026-04-30.md) — Phase 2 / 2.5 / 2.6 完了時 handoff
 - [track_chronicle.md](track_chronicle.md) — Track 内必要情報の維持機構 (中断・再開機構の本体、Phase 3 の本体実装) Intent (v0.1, 2026-05-09 起草)
 - [nested_subline_spell.md](nested_subline_spell.md) — Phase 3 の `/run_playbook` Spell 機構 Intent (v0.1, 2026-05-01 起草)
