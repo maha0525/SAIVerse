@@ -54,32 +54,6 @@ def _get_default_lightweight_model() -> str:
     return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
 
-# Phase 1.4 (Intent A v0.14, Intent B v0.11): 旧仕様 (LLMNodeDef.context_profile /
-# model_type) は line 仕様に統合される過程の deprecated フィールド。完全削除前に
-# Playbook 移行を促す警告を出す。同じノード id について警告は 1 回のみ。
-_LEGACY_FIELD_WARNED_NODES: set = set()
-
-
-def _warn_once_legacy_field(
-    node_id: str,
-    context_profile: Optional[str],
-    model_type: Optional[str],
-) -> None:
-    if node_id in _LEGACY_FIELD_WARNED_NODES:
-        return
-    _LEGACY_FIELD_WARNED_NODES.add(node_id)
-    parts = []
-    if context_profile:
-        parts.append(f"context_profile={context_profile!r}")
-    if model_type:
-        parts.append(f"model_type={model_type!r}")
-    LOGGER.warning(
-        "[sea] Playbook node '%s' uses deprecated field(s): %s. "
-        "Migrate to the line-based spec (SubPlayNodeDef.line='main'/'sub'). "
-        "See docs/intent/persona_action_tracks.md §'旧仕様の廃止計画'.",
-        node_id, ", ".join(parts) or "(none)",
-    )
-
 
 
 class SEARuntime:
@@ -381,41 +355,13 @@ class SEARuntime:
                    set by run_playbook (Phase C-2a, Intent B v0.9).
         """
         # サブライン強制フラグ (line='sub' で起動された Playbook は軽量モデルを使う)
+        # Phase 3 段階 4-D (2026-05-09): 旧 context_profile / model_type は削除済み。
+        # モデル種別は親 SubPlayNodeDef.line で決まり、ここでは _force_lightweight_model
+        # フラグだけが軽量化の判断材料。
         force_lightweight = bool(state and state.get("_force_lightweight_model"))
+        model_type = "lightweight" if force_lightweight else "normal"
 
-        # Phase 1.4 (Intent A v0.14, Intent B v0.11): context_profile / model_type
-        # は line 仕様に統合されつつあり deprecated。ノードに残っているうちは尊重
-        # するが、警告を 1 回だけ出して移行を促す。完全削除は Phase 1.4c (旧仕様
-        # 削除タイミング) で行う。
-        # 注: model_type のデフォルトは "normal" (= 何も設定していないのと等価) なので、
-        # 警告は context_profile が指定されているか、model_type が "normal" 以外
-        # (実質的に "lightweight") の場合のみ発火させる。
-        _profile_name = getattr(node_def, "context_profile", None)
-        _explicit_model_type = getattr(node_def, "model_type", None)
-        _is_legacy_used = bool(_profile_name) or (
-            _explicit_model_type and _explicit_model_type != "normal"
-        )
-        if _is_legacy_used:
-            _node_id = getattr(node_def, "id", "?")
-            _warn_once_legacy_field(_node_id, _profile_name, _explicit_model_type)
-
-        # Determine model_type: context_profile takes precedence over explicit model_type
-        if _profile_name:
-            from sea.playbook_models import CONTEXT_PROFILES
-            _profile = CONTEXT_PROFILES.get(_profile_name)
-            model_type = _profile["model_type"] if _profile else (_explicit_model_type or "normal")
-        else:
-            model_type = _explicit_model_type or "normal"
-
-        # サブライン強制: ノード定義の model_type を上書き
-        if force_lightweight and model_type != "lightweight":
-            LOGGER.info(
-                "[sea] line='sub' override: forcing lightweight model (was %s) for node_id=%s",
-                model_type, getattr(node_def, "id", "unknown"),
-            )
-            model_type = "lightweight"
-
-        LOGGER.info("[sea] Node model_type: %s (node_id=%s, profile=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), _profile_name or "none", force_lightweight)
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
 
         # First, select base client based on model_type
         if model_type == "lightweight":
@@ -1289,17 +1235,14 @@ class SEARuntime:
                     message["scope"] = scope
                 if paired_action_text is not None:
                     message["paired_action_text"] = paired_action_text
-                # Phase 2.5 (2026-05-01): pulse_id を専用カラムに渡す。同時に
-                # 下の clean_tags で "pulse:{uuid}" タグも追加し続ける (移行期間中の
-                # 互換性確保)。タグ依存の読み出し経路が全部カラム参照に移行したら
-                # タグ書き込みは廃止可能。
+                # Phase 2.5 (2026-05-01): pulse_id を専用カラムに書く。
+                # Phase 3 段階 4-D (2026-05-09): `pulse:{uuid}` タグの併行記録を廃止。
+                # 既存データの読み出しは saiverse_memory/adapter.py の legacy_pulse_tag
+                # で互換維持。
                 if pulse_id:
                     message["pulse_id"] = pulse_id
 
                 clean_tags = [str(tag) for tag in (tags or []) if tag]
-                # Add pulse:uuid tag
-                if pulse_id:
-                    clean_tags.append(f"pulse:{pulse_id}")
                 # Add playbook:name tag for automatic classification
                 if playbook_name:
                     clean_tags.append(f"playbook:{playbook_name}")
@@ -2250,7 +2193,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, exclude_pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -2258,7 +2201,6 @@ class SEARuntime:
             user_input,
             requirements=requirements,
             pulse_id=pulse_id,
-            exclude_pulse_id=exclude_pulse_id,
             warnings=warnings,
             preview_only=preview_only,
             event_callback=event_callback,

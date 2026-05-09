@@ -15,7 +15,7 @@ from tools import SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 
 LOGGER = logging.getLogger(__name__)
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, exclude_pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
     from sea.playbook_models import ContextRequirements
 
     # Use provided requirements or default to full context
@@ -388,12 +388,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 #     (MetaLayer._build_recent_judgments_block) で動的注入される
                 #     ので、ここでは載せない
                 #
-                # ``include_internal`` は段階 4-C で Playbook 側の
-                # memorize.tags が整理されるまで暫定的に sub_line を許可する
-                # フォールバック。完全廃止は段階 4-D。
+                # 段階 4-D (2026-05-09): 旧 ``include_internal`` フォールバックを
+                # 削除。サブラインメッセージへのアクセスは sub_line が起動する
+                # 専用 Playbook 内で完結する設計に統合済み。
                 required_line_roles = ["main_line"]
-                if reqs.include_internal:
-                    required_line_roles.append("sub_line")
                 required_scopes = ["committed"]
 
                 # Parse history_depth format
@@ -419,7 +417,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 required_line_roles=required_line_roles,
                                 required_scopes=required_scopes,
                                 pulse_id=pulse_id,
-                                exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -495,7 +492,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 required_line_roles=required_line_roles,
                                 required_scopes=required_scopes,
                                 pulse_id=pulse_id,
-                                exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -550,7 +546,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             required_line_roles=required_line_roles,
                             required_scopes=required_scopes,
                             pulse_id=pulse_id,
-                            exclude_pulse_id=exclude_pulse_id,
                         )
                     elif reqs.history_balanced:
                         # Get conversation partners for balanced retrieval
@@ -567,7 +562,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             required_line_roles=required_line_roles,
                             required_scopes=required_scopes,
                             pulse_id=pulse_id,
-                            exclude_pulse_id=exclude_pulse_id,
                         )
                     else:
                         recent = history_mgr.get_recent_history(
@@ -575,7 +569,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             required_line_roles=required_line_roles,
                             required_scopes=required_scopes,
                             pulse_id=pulse_id,
-                            exclude_pulse_id=exclude_pulse_id,
                         )
 
                     # Set metabolism anchor on first count-based retrieval (skip in preview).
@@ -874,10 +867,22 @@ def preview_context(
         playbook = runtime._choose_playbook(kind="user", persona=persona, building_id=building_id)
 
     # Build context messages (without recording user message to history)
-    # Use "conversation" profile requirements to match what sub_speak actually sees,
-    # not the meta-playbook's own context_requirements (which may lack memory_weave etc.)
-    from sea.playbook_models import CONTEXT_PROFILES
-    preview_requirements = CONTEXT_PROFILES["conversation"]["requirements"]
+    # Use full context preset to match what sub_speak actually sees, not the
+    # meta-playbook's own context_requirements (which may lack memory_weave etc.)
+    # Phase 3 段階 4-D (2026-05-09): 旧 CONTEXT_PROFILES 削除に伴いインライン化。
+    from sea.playbook_models import ContextRequirements
+    preview_requirements = ContextRequirements(
+        history_depth="full",
+        history_balanced=False,
+        system_prompt=True,
+        memory_weave=True,
+        working_memory=True,
+        inventory=True,
+        building_items=True,
+        available_playbooks=True,
+        visual_context=True,
+        realtime_context=True,
+    )
     context_warnings: List[Dict[str, Any]] = []
     messages = runtime._prepare_context(
         persona, building_id, user_input=None,

@@ -10,6 +10,42 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.35 (2026-05-09) — メタ判断 Pulse の tool 結果到達バグ修正 + Phase 3 段階 4-D 完了
+
+v0.34 の動作観察で、メタ判断 Pulse の `judge` ノードが `fetch_tracks` (= track_list ツール) の結果を一切受け取れていない構造的バグが発覚。tool ノードが `state["_messages"]` を更新せず PulseContext のみ更新していたため、`context_profile` を持たない LLM ノードでは tool 結果が見えなかった。同種バグは subplay 経路で 2026-04-28 に既に修正済み (tool ノードは取り残されていた)。
+
+並行して、Phase 3 段階 4-D で先送りされていた旧 DEPRECATED コード削除を完了。
+
+#### 1. tool 結果到達バグの修正
+
+- `sea/runtime_engine.py:lg_tool_node` の tool 実行成功 / 失敗ブロックの両方で、`state["_messages"]` に `<system>tool '{tool_name}' result:\n{result_str}</system>` 形式の user メッセージを append する経路を追加。subplay の `report_to_parent` 修正 (`sea/runtime_nodes.py:229-263`) と同じパターン。
+- これにより、`meta_judgment.json` の `judge` ノードが `last_message_relative` 等を含む Track 一覧 JSON を実際に読めるようになる。
+
+#### 2. Phase 3 段階 4-D 完了
+
+「`context_profile` は旧仕様」とまはー指摘 → 段階 4-D の完遂に移行。実装範囲は [`docs/issues/phase3_4d_dead_code_removal.md`](../../issues/phase3_4d_dead_code_removal.md) のログ参照。要点:
+
+- **削除**: `LLMNodeDef.context_profile` / `LLMNodeDef.model_type` / `CONTEXT_PROFILES` / `ContextRequirements.include_internal` / `exclude_pulse_id` 全層 (4 関数) / `pulse:{uuid}` タグ併行記録 / `_warn_once_legacy_field`。
+- **集約**: `runtime_llm.py:lg_llm_node` の base_msgs は `state["_messages"]` のみを source of truth に。`runtime.py:_select_llm_client` は `_force_lightweight_model` フラグのみで判断。
+- **残置**: `_FULL_CONTEXT_REQUIREMENTS` は Playbook 既定値として `runtime_runner.py` で実用継続。`get_history` ツールの `include_internal` 引数は別物 (= ツール仕様、search/recall 互換) のため残置。
+- **Playbook 整理**: ノード単位混在/部分指定の 8 件 (Pattern A: source_web/pdf/messagelog/memopedia/document/chronicle、Pattern C: deep_research_playbook/memopedia_write_playbook) + research オーケストレーター 2 件 (research_task / memory_research) を `builtin_data/playbooks/archive/` に移動。**必要時に作り直す方針** (Spell で代替できる + 自律行動として最適化したい意図)。
+- **残置 Playbook**: `autonomy_creation` / `autonomy_memory_organization` / `autonomy_web_research` の 3 件 (全 LLM ノードが lightweight)。Pydantic extra='ignore' で `model_type` フィールドは無視されるため触らず、将来の自律行動再構築時に整理する。
+- **テスト**: 785 件全 pass。ruff clean。
+
+#### 設計判断
+
+- **ノード単位の軽量モデル指定は新仕様に組み込まない**: 旧 `model_type` 相当のフィールドを `use_lightweight: bool` 等で復活させる選択肢もあったが、Pattern A/C の混在は Playbook 設計として「キャッシュを考えない非効率」だった。再構築時には `SubPlayNodeDef.line` の一括指定で代替するか、Spell ベースで分解する方が自然。
+- **メタ判断 prompt の改修は依然必要**: 本改訂は tool 結果が判断側に「物理的に届く」基盤の修正。`last_message_relative` の客観情報があっても判断側が読まない症状 (= 過去独白を真実と誤認) への対症療法は別途必要 (handoff_2026-05-09 §5 注意点参照)。
+- **「context_profile は旧版」を半年放置していた負債**: まはー指摘で「古い話を引きずる」リスクが顕在化。今後同種の旧仕様コードは残さない方針。
+
+#### 関連リソース
+
+- [`handoff_2026-05-09.md`](handoff_2026-05-09.md) — 元起点の handoff
+- [`docs/issues/phase3_4d_dead_code_removal.md`](../../issues/phase3_4d_dead_code_removal.md) — 4-D 削除内訳のログ
+- v0.34 (本ファイル) — wait_response timeout / Track 最終メッセージ時間可視化
+
+---
+
 ### v0.34 (2026-05-09) — wait_response Track 自動 pause タイマー + Track 最終メッセージ時間の可視化
 
 [`handoff_2026-05-09.md`](handoff_2026-05-09.md) を起点にした 2 件の運用改善。Track Chronicle (v0.32) + ユーザー会話 Track 親保持機構 (v0.33) の commit 後に動作確認していて発覚した「自律稼働中に何らかの拍子でユーザー会話 Track が active 化したまま長期 idle に陥り、メタ判断 Pulse が `post_complete_behavior=='wait_response'` 抑止で止まり続ける」症状への対処。

@@ -138,6 +138,21 @@ class RuntimeEngine:
                         node_id=node_id, playbook_name=playbook.name,
                         tool_name=tool_name,
                         important=getattr(node_def, "important", False) or False))
+
+                # Append to in-memory messages so subsequent LLM nodes in the
+                # same Pulse can see the tool result. PulseContext alone is not
+                # enough because LLM nodes that read state["_messages"] directly
+                # (= the path that becomes the only path once context_profile is
+                # removed in Phase 3 段階 4-D) would otherwise miss the result.
+                # Pattern matches lg_subplay_node's report_to_parent fix
+                # (sea/runtime_nodes.py:229-263, まはー指摘 2026-04-28). Wrapped
+                # as user role + <system> tag for cross-provider compatibility
+                # (Gemini rejects mid-stream system role; see sea/runtime_llm.py
+                # の同一書式コメント).
+                formatted = f"<system>tool '{tool_name}' result:\n{result_str}</system>"
+                if state.get("_messages") is None:
+                    state["_messages"] = []
+                state["_messages"].append({"role": "user", "content": formatted})
             except Exception as exc:
                 error_msg = f"Tool error: {exc}"
                 state["last"] = error_msg
@@ -157,6 +172,13 @@ class RuntimeEngine:
                         role="tool", content=f"Tool error: {exc}",
                         node_id=node_id, playbook_name=playbook.name,
                         tool_name=tool_name))
+                # Also surface the error to in-memory messages so subsequent
+                # LLM nodes can react (e.g. retry / abort / report). Same
+                # rationale as the success path.
+                formatted = f"<system>tool '{tool_name}' error:\n{error_msg}</system>"
+                if state.get("_messages") is None:
+                    state["_messages"] = []
+                state["_messages"].append({"role": "user", "content": formatted})
             return state
 
         return node

@@ -81,7 +81,7 @@ class ExecutionRequest:
     meta_playbook: Optional[str] = None
     args: Optional[Dict[str, Any]] = None  # Arguments for meta playbook
     # UI-triggered pre-spells executed before the first LLM call. Each entry is
-    # a Spell invocation string (e.g. '/run_playbook(name="memory_research")').
+    # a Spell invocation string (e.g. '/run_playbook(name="generate_image_playbook")').
     # See docs/intent/persona_cognition/nested_subline_spell.md §13.
     pre_spells: Optional[List[str]] = None
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None

@@ -45,22 +45,6 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
-    context_profile: Optional[str] = Field(
-        default=None,
-        description="DEPRECATED (Phase 1.4, Intent A v0.14 / Intent B v0.11). "
-                    "Migrate to the line-based spec (start child playbook with SubPlayNodeDef.line='main'/'sub'). "
-                    "Will be removed once all Playbooks are translated. "
-                    "Legacy values: 'conversation' (normal model, full context), 'router' "
-                    "(lightweight, full context), 'worker' (normal, isolated), 'worker_light' "
-                    "(lightweight, isolated)."
-    )
-    model_type: Optional[str] = Field(
-        default="normal",
-        description="DEPRECATED (Phase 1.4, Intent A v0.14 / Intent B v0.11). "
-                    "The line spec (parent's line='sub' for lightweight) replaces this field. "
-                    "Legacy values: 'normal' (default) or 'lightweight'. "
-                    "Ignored when context_profile is set (profile determines model)."
-    )
     response_schema: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Optional JSON schema to enforce structured output."
@@ -503,10 +487,6 @@ class ContextRequirements(BaseModel):
         default=False,
         description="If True, balance history across conversation partners (user + other personas)"
     )
-    include_internal: bool = Field(
-        default=False,
-        description="If True, include internal thoughts (internal tag) in history. Useful for autonomous mode."
-    )
     inventory: bool = Field(default=True, description="Include persona inventory in system prompt")
     building_items: bool = Field(default=True, description="Include building items in system prompt")
     system_prompt: bool = Field(default=True, description="Include persona and building system prompts")
@@ -521,16 +501,13 @@ class ContextRequirements(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
-# Context Profiles — predefined combinations of model_type + context settings
-# ---------------------------------------------------------------------------
-# conversation / router share the same context (only model_type differs).
-# worker / worker_light are fully isolated (no history, no system prompt).
-
+# Default ContextRequirements used when a Playbook does not specify
+# `context_requirements` (= "speak with the full persona context"). All MainLine
+# Playbooks rely on this default. Worker-style Playbooks that need an isolated
+# context should set their own `context_requirements` explicitly.
 _FULL_CONTEXT_REQUIREMENTS = ContextRequirements(
     history_depth="full",
     history_balanced=False,
-    include_internal=False,
     system_prompt=True,
     memory_weave=True,
     working_memory=True,
@@ -540,39 +517,6 @@ _FULL_CONTEXT_REQUIREMENTS = ContextRequirements(
     visual_context=True,
     realtime_context=True,
 )
-
-_ISOLATED_CONTEXT_REQUIREMENTS = ContextRequirements(
-    history_depth=0,
-    history_balanced=False,
-    include_internal=False,
-    system_prompt=False,
-    memory_weave=False,
-    working_memory=False,
-    inventory=False,
-    building_items=False,
-    available_playbooks=False,
-    visual_context=False,
-    realtime_context=False,
-)
-
-CONTEXT_PROFILES: Dict[str, Dict[str, Any]] = {
-    "conversation": {
-        "model_type": "normal",
-        "requirements": _FULL_CONTEXT_REQUIREMENTS,
-    },
-    "router": {
-        "model_type": "lightweight",
-        "requirements": _FULL_CONTEXT_REQUIREMENTS,
-    },
-    "worker": {
-        "model_type": "normal",
-        "requirements": _ISOLATED_CONTEXT_REQUIREMENTS,
-    },
-    "worker_light": {
-        "model_type": "lightweight",
-        "requirements": _ISOLATED_CONTEXT_REQUIREMENTS,
-    },
-}
 
 
 class PlaybookSchema(BaseModel):

@@ -1,6 +1,6 @@
 # Issue: Phase 3 段階 4-D — 旧 DEPRECATED コード完全削除
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 完了 (2026-05-09)
 **優先度**: medium
 **作成日**: 2026-05-08
 **関連**: [docs/intent/persona_cognition/handoff_phase3_impl.md](../intent/persona_cognition/handoff_phase3_impl.md) §段階 4-D, [docs/intent/persona_cognition/line_tag_responsibility.md](../intent/persona_cognition/line_tag_responsibility.md)
@@ -47,3 +47,14 @@ handoff_phase3_impl.md §段階 4-D に従う:
 ## ログ
 
 - 2026-05-08: issue 起票。Phase 3 主要刷新 (v0.28) と UI 整備 (v0.29) が完了して着手可能になった。
+- 2026-05-09: 完了。実装範囲は revisions v0.34 (= 同日のメタ判断 tool 結果不可視バグ修正と一括) を参照。
+  削除内訳:
+  - `pulse:{uuid}` タグ併行記録 (`sea/runtime.py` / `sea/runtime_emitters.py` の 3 経路) を停止し、`messages.pulse_id` カラム書き込みのみに集約。読み出し互換 (legacy_pulse_tag) は維持。
+  - `LLMNodeDef.context_profile` / `LLMNodeDef.model_type` / `CONTEXT_PROFILES` を完全削除。`_warn_once_legacy_field` も削除。`_FULL_CONTEXT_REQUIREMENTS` は `runtime_runner.py` の Playbook 既定値として実用継続のため残置。
+  - `runtime_llm.py:lg_llm_node` の base_msgs 構築から context_profile 経路 (1) を削除し、`state["_messages"]` のみを参照する経路に集約。
+  - `runtime.py:_select_llm_client` を `force_lightweight` フラグのみで判断するよう簡素化。
+  - `ContextRequirements.include_internal` フィールドと `runtime_context.py:391-396` のフォールバックを削除。
+  - `exclude_pulse_id` 引数を 4 層 (saiverse_memory adapter / persona history_manager / runtime_context / runtime) と `_payload_passes_context_filter` から削除。関連テストも整理。
+  - `model_type=lightweight` 23 ノード問題: ノード単位の混在/部分指定パターンは新仕様 (line='main'/'sub' 一括) と整合せず、Y 案で持ち越されていた。まはー指示で関連 Playbook 9 件 + research オーケストレーター `memory_research` を `archive/` 移動 (= 必要時に作り直す方針)。残りの `autonomy_creation` / `autonomy_memory_organization` / `autonomy_web_research` は休眠状態のため触らず (Pydantic extra='ignore' で `model_type` フィールドは無害化される)。
+  - `playbook_dry_run.py` の context_profile 依存ロジック (cached_profiles / intermediate_msg_sources / NO_CONTEXT_PROFILE / REDUNDANT_INPUT / REDUNDANT_INTERMEDIATE / STALE_MEMORIZE / PROFILE_REUSE) を削除。
+  - 全 785 テスト pass、ruff clean。

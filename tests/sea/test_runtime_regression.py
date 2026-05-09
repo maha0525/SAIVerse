@@ -191,7 +191,9 @@ def test_emit_speak_payload_compatibility() -> None:
 
     history_manager.add_to_persona_only.assert_called_once()
     payload = history_manager.add_to_persona_only.call_args.args[0]
-    assert payload["metadata"] == {"tags": ["conversation", "pulse:p-1"], "with": ["npc-2", "user"]}
+    # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラム書き込み + タグ併行記録廃止
+    assert payload["metadata"] == {"tags": ["conversation"], "with": ["npc-2", "user"]}
+    assert payload["pulse_id"] == "p-1"
 
 
 def test_emit_say_payload_compatibility() -> None:
@@ -210,7 +212,9 @@ def test_emit_say_payload_compatibility() -> None:
 
     history_manager.add_to_building_only.assert_called_once()
     payload = history_manager.add_to_building_only.call_args.args[1]
-    assert payload["metadata"] == {"tags": ["pulse:p-1", "media"], "image": "x.png", "with": ["npc-2", "user"]}
+    # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラム書き込み + タグ併行記録廃止
+    assert payload["metadata"] == {"tags": ["media"], "image": "x.png", "with": ["npc-2", "user"]}
+    assert payload["pulse_id"] == "p-1"
 
 
 def test_lg_tool_call_node_reflects_result_in_state(monkeypatch: pytest.MonkeyPatch) -> None:

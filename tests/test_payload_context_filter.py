@@ -4,9 +4,9 @@
 (history 系 4 関数: recent_persona_messages / _by_count / _balanced /
 persona_messages_from_anchor) で共通利用される。仕様:
 
-- Pulse-scoped overrides (line/scope より優先):
-  - exclude_pulse_id 一致 → 強制除外
+- Pulse-scoped override (line/scope より優先):
   - pulse_id 一致 → 強制包含 (line/scope/tag フィルタを無視)
+  - 段階 4-D (2026-05-09) で旧 ``exclude_pulse_id`` は廃止。
 - Line-role / scope フィルタ (preferred):
   - required_line_roles 指定時、payload の line_role がリストに含まれること
   - required_scopes 指定時、payload の scope がリストに含まれること
@@ -79,7 +79,9 @@ def test_line_role_null_rejected_when_main_line_not_required():
 
 
 def test_line_role_multi_value_filter():
-    """include_internal=True 暫定挙動: ['main_line', 'sub_line'] で sub_line も通す。"""
+    """複数 line_role 指定: 全部許容。Phase 3 段階 4-D で include_internal は廃止
+    されたが、required_line_roles に複数値を渡せる API 自体は残存 (将来的な
+    サブライン共有経路 / 検索用途で使う可能性のため)。"""
     payload = {"line_role": "sub_line", "scope": "committed"}
     assert _payload_passes_context_filter(
         payload, required_line_roles=["main_line", "sub_line"]
@@ -191,47 +193,6 @@ def test_pulse_id_match_via_legacy_pulse_tag():
         required_line_roles=["main_line"],
         pulse_id="legacy-uuid",
     ) is True
-
-
-# ---------------------------------------------------------------------------
-# 5. exclude_pulse_id (= 強制除外、最強)
-# ---------------------------------------------------------------------------
-
-def test_exclude_pulse_id_match_overrides_everything():
-    payload = {
-        "line_role": "main_line",
-        "scope": "committed",
-        "pulse_id": "p_other",
-    }
-    assert _payload_passes_context_filter(
-        payload,
-        required_line_roles=["main_line"],
-        required_scopes=["committed"],
-        exclude_pulse_id="p_other",
-    ) is False
-
-
-def test_exclude_pulse_id_wins_over_include_pulse_id():
-    """同じ pulse_id を pulse_id と exclude_pulse_id 両方に渡された時、
-    exclude が勝つ (除外)。実用上は起きないが、優先順位の保険。"""
-    payload = {"line_role": "main_line", "scope": "committed", "pulse_id": "p1"}
-    assert _payload_passes_context_filter(
-        payload,
-        pulse_id="p1",
-        exclude_pulse_id="p1",
-    ) is False
-
-
-def test_exclude_pulse_id_via_legacy_tag():
-    payload = {
-        "line_role": "main_line",
-        "scope": "committed",
-        "metadata": {"tags": ["pulse:legacy-pp"]},
-    }
-    assert _payload_passes_context_filter(
-        payload,
-        exclude_pulse_id="legacy-pp",
-    ) is False
 
 
 # ---------------------------------------------------------------------------

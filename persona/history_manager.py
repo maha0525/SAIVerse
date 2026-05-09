@@ -318,7 +318,6 @@ class HistoryManager:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a character limit.
 
@@ -341,7 +340,6 @@ class HistoryManager:
                     required_line_roles=required_line_roles,
                     required_scopes=required_scopes,
                     pulse_id=pulse_id,
-                    exclude_pulse_id=exclude_pulse_id,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d persona messages for %s",
@@ -371,7 +369,6 @@ class HistoryManager:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a message count limit."""
         if self.memory_adapter is not None:
@@ -389,7 +386,6 @@ class HistoryManager:
                     required_line_roles=required_line_roles,
                     required_scopes=required_scopes,
                     pulse_id=pulse_id,
-                    exclude_pulse_id=exclude_pulse_id,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d persona messages for %s",
@@ -414,7 +410,6 @@ class HistoryManager:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves messages from anchor onwards (for metabolism anchor-based retrieval)."""
         if self.memory_adapter is not None:
@@ -432,7 +427,6 @@ class HistoryManager:
                     required_line_roles=required_line_roles,
                     required_scopes=required_scopes,
                     pulse_id=pulse_id,
-                    exclude_pulse_id=exclude_pulse_id,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d messages from anchor for %s",
@@ -462,7 +456,6 @@ class HistoryManager:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves recent messages balanced across conversation partners.
 
@@ -473,7 +466,6 @@ class HistoryManager:
             required_line_roles: Line-role filter for context construction
             required_scopes: Scope filter for context construction
             pulse_id: Always include messages with this pulse ID
-            exclude_pulse_id: Exclude messages with this pulse ID
 
         Returns:
             List of messages balanced across participants
@@ -492,7 +484,6 @@ class HistoryManager:
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
                 pulse_id=pulse_id,
-                exclude_pulse_id=exclude_pulse_id,
             )
             LOGGER.debug(
                 "SAIMemory returned %d balanced messages for %s",
@@ -508,7 +499,6 @@ class HistoryManager:
             required_line_roles=required_line_roles,
             required_scopes=required_scopes,
             pulse_id=pulse_id,
-            exclude_pulse_id=exclude_pulse_id,
         )
 
     def get_last_user_message(self) -> Optional[str]:

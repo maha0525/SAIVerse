@@ -23,10 +23,12 @@ class RuntimeEmitters:
         extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # pulse_id は messages.pulse_id 専用カラムに直接書く (Phase 2.5, 2026-05-01)。
+        # `pulse:{uuid}` タグへの併行記録は Phase 3 段階 4-D で廃止 (2026-05-09)。
+        if pulse_id:
+            msg["pulse_id"] = pulse_id
         # Build metadata with tags and conversation partners
         metadata: Dict[str, Any] = {"tags": ["conversation"]}
-        if pulse_id:
-            metadata["tags"].append(f"pulse:{pulse_id}")
         # Merge extra metadata (reasoning, reasoning_details, etc.)
         if isinstance(extra_metadata, dict):
             for key, value in extra_metadata.items():
@@ -125,9 +127,10 @@ class RuntimeEmitters:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
-        msg_metadata: Dict[str, Any] = {}
+        # Phase 3 段階 4-D (2026-05-09): pulse_id は専用カラムへ。タグ併行記録廃止。
         if pulse_id:
-            msg_metadata["tags"] = [f"pulse:{pulse_id}"]
+            msg["pulse_id"] = pulse_id
+        msg_metadata: Dict[str, Any] = {}
         if isinstance(metadata, dict):
             for key, value in metadata.items():
                 if key == "tags":
@@ -223,7 +226,10 @@ class RuntimeEmitters:
                     {
                         "role": "assistant",
                         "content": text,
-                        "metadata": {"tags": ["internal", f"pulse:{pulse_id}"]},
+                        "metadata": {"tags": ["internal"]},
+                        # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラムへ。
+                        # 旧 `pulse:{uuid}` タグの併行記録は廃止。
+                        "pulse_id": pulse_id,
                         "persona_id": persona.persona_id,
                     }
                 )

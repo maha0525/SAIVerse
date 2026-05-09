@@ -380,7 +380,6 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         if not self._ready:
             return []
@@ -402,7 +401,6 @@ class SAIMemoryAdapter:
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
                 pulse_id=pulse_id,
-                exclude_pulse_id=exclude_pulse_id,
             ):
                 continue
             text = payload.get("content", "") or ""
@@ -420,7 +418,6 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get recent persona messages limited by message count instead of characters."""
         if not self._ready:
@@ -442,7 +439,6 @@ class SAIMemoryAdapter:
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
                 pulse_id=pulse_id,
-                exclude_pulse_id=exclude_pulse_id,
             ):
                 continue
             selected.insert(0, payload)
@@ -458,7 +454,6 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get persona messages from anchor message onwards.
 
@@ -486,7 +481,6 @@ class SAIMemoryAdapter:
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
                 pulse_id=pulse_id,
-                exclude_pulse_id=exclude_pulse_id,
             ):
                 continue
             selected.append(payload)
@@ -502,7 +496,6 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
-        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get recent messages balanced across conversation partners.
 
@@ -516,10 +509,6 @@ class SAIMemoryAdapter:
             required_line_roles: Line-role filter (e.g. ['main_line']) — preferred for context construction
             required_scopes: Scope filter (e.g. ['committed']) — preferred for context construction
             pulse_id: Always include messages with this pulse ID
-            exclude_pulse_id: Exclude messages with this pulse ID
-
-        Returns:
-            List of messages, sorted by timestamp, balanced across participants
         """
         if not self._ready or not participant_ids:
             return []
@@ -545,7 +534,6 @@ class SAIMemoryAdapter:
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
                 pulse_id=pulse_id,
-                exclude_pulse_id=exclude_pulse_id,
             ):
                 continue
 
@@ -1899,13 +1887,11 @@ def _payload_passes_context_filter(
     required_line_roles: Optional[List[str]] = None,
     required_scopes: Optional[List[str]] = None,
     pulse_id: Optional[str] = None,
-    exclude_pulse_id: Optional[str] = None,
 ) -> bool:
     """Decide if a payload should be included in context construction.
 
     Filtering is line-based first (line_role / scope), with legacy tags as a
     fallback for messages predating Phase 1. Pulse-scoped overrides:
-    - exclude_pulse_id always wins (excluded)
     - matching pulse_id always wins (included, bypasses line/scope/tag filters)
 
     Legacy compatibility:
@@ -1913,6 +1899,10 @@ def _payload_passes_context_filter(
     - scope IS NULL is treated as 'committed' (pre-Phase-1 rows)
     - For tag fallback, legacy entries without any tags are included unless the
       caller explicitly requires the 'conversation' tag.
+
+    Phase 3 段階 4-D (2026-05-09): 旧 ``exclude_pulse_id`` 引数削除。
+    context_profile 経路の廃止に伴い、自分自身の Pulse メッセージを除外する
+    ユースケース (= state["_messages"] の重複防止) は state ベースで担保される。
     """
     payload_pulse_id = payload.get("pulse_id")
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
@@ -1920,15 +1910,8 @@ def _payload_passes_context_filter(
     tags = [str(t) for t in raw_tags if t] if isinstance(raw_tags, list) else []
 
     legacy_pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
-    legacy_exclude_pulse_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
-    # Pulse-based overrides (precede line/scope/tag filtering)
-    if exclude_pulse_id:
-        if payload_pulse_id == exclude_pulse_id:
-            return False
-        if legacy_exclude_pulse_tag and legacy_exclude_pulse_tag in tags:
-            return False
-
+    # Pulse-based override (precedes line/scope/tag filtering)
     if pulse_id:
         if payload_pulse_id == pulse_id:
             return True
