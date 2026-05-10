@@ -2118,6 +2118,19 @@ class SEARuntime:
         for row in cur.fetchall():
             processed_by_track[row[0]].add(row[1])
 
+        # 既存 incomplete Lv1 の end_time を Track 別に取得 (新規メッセージなし判定用)。
+        # 起動直後の anchor TTL 切れ pre-response 経路で本関数が再呼び出しされたとき、
+        # Track にメッセージが追加されていなければ delete & regen は同じ内容を作り直す
+        # だけで LLM 呼び出しが完全に無駄になる。incomplete Lv1 の end_time 以降に新規
+        # メッセージがない Track はここでスキップする。
+        cur = adapter.conn.execute(
+            "SELECT origin_track_id, MAX(end_time) "
+            "FROM arasuji_entries "
+            "WHERE level = 1 AND origin_track_id IS NOT NULL AND is_incomplete = 1 "
+            "GROUP BY origin_track_id"
+        )
+        incomplete_end_by_track: Dict[str, int] = {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+
         # 各 Track ごとに処理
         track_manager = getattr(self.manager, "track_manager", None)
         persona_id = getattr(persona, "persona_id", None)
@@ -2131,6 +2144,20 @@ class SEARuntime:
             unprocessed = [m for m in msgs if m.id not in processed_by_track.get(track_id, set())]
             if not unprocessed:
                 continue
+
+            # 既存 incomplete Lv1 のカバー範囲を超える新規メッセージがあるか判定。
+            # なければ delete & regen を回避 (同じ内容を作り直す LLM 呼び出しの無駄を防ぐ)。
+            incomplete_end = incomplete_end_by_track.get(track_id)
+            if incomplete_end is not None:
+                latest_unprocessed = max(m.created_at for m in unprocessed)
+                if latest_unprocessed <= incomplete_end:
+                    LOGGER.info(
+                        "[metabolism][track] Skipping track=%s: no new messages since incomplete Lv1 "
+                        "(incomplete_end=%s, latest_unprocessed=%s, %d msgs)",
+                        track_id, incomplete_end, latest_unprocessed, len(unprocessed),
+                    )
+                    continue
+
             unprocessed_chars = sum(len(m.content or "") for m in unprocessed)
             if unprocessed_chars < min_chars_threshold:
                 LOGGER.info(
