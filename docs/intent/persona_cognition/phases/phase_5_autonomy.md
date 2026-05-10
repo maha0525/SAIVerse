@@ -39,6 +39,9 @@
 | メタレイヤー判断プロンプトに parameters を含める処理 | 🔲 |
 | `track_parameter_set` ツール (ペルソナ自身による明示更新) | 🔲 |
 | パラメータ更新の経路 3 種 (tick / 外部イベント / ツール) の整備 | 🔲 |
+| **7 制御点 (1) Pulse 間隔の Track metadata 経由 API** (Handler.default_pulse_interval を上書きする `metadata.pulse_interval_seconds` を読む経路) — Phase 4 から移送 (2026-05-10) | 🔲 |
+| **7 制御点 (2) 連続実行回数上限の Track metadata 経由 API** (`metadata.max_consecutive_pulses`) — Phase 4 から移送 (2026-05-10) | 🔲 |
+| **7 制御点 (6) Pulse 完了後挙動の Track metadata 経由 API** (Handler.post_complete_behavior を上書きする `metadata.post_complete_behavior`) — Phase 4 から移送 (2026-05-10) | 🔲 |
 
 ### Phase 5 の新 Handler
 
@@ -66,9 +69,9 @@
 | 既存 `recall_conversation_with` の段階的廃止 | 🔲 |
 | 移行期間中の既存実装と新実装の共存 | 🔲 |
 
-### Track ライフサイクル補完 (新規)
+### Track ライフサイクル補完 + track_social/external Playbook 運用化 (新規)
 
-`track_social.json` 着手の前提として整理が必要。永続 Track と単発 Track の生成・終了・再開条件は定義済みだが、以下が空欄:
+`track_social.json` / `track_external.json` の Playbook 雛形は Phase 3 段階で `builtin_data/playbooks/public/` に既に存在するが、Handler 側の運用 (Pulse 経路 / イベント受け口) は未着手。Phase 3 から本フェーズに移送 (2026-05-10、Track ライフサイクル補完と一体で進める方針)。永続 Track と単発 Track の生成・終了・再開条件は定義済みだが、以下が空欄:
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
@@ -76,6 +79,8 @@
 | Building 移動時の social Track 継続条件 | 🔲 | 別 Building に移動した相手との social Track は dormant にすべきか保持か |
 | ユーザーが複数アカウントで合流した場合 | 🔲 | 同一ユーザーが別 Building 経由で再合流するケースの user_conversation Track 統合可否 |
 | Building 削除時の Track 影響 | 🔲 | Building scope の Track が無いか確認、あれば移行ロジック |
+| `track_social.json` Playbook 運用化 | 🔲 | Phase 3 の Playbook 雛形を Handler のイベント受け口 (Phase 5 範疇の他ペルソナ発話受信経路) と接続。pulse_dispatch.md §5 の `on_track_activated` hook で main_line Pulse を起動する設計 (`UserConversationTrackHandler` と同パターン) |
+| `track_external.json` Playbook 運用化 | 🔲 | 外部チャネル統合 (X / Discord / Elyth 等) と一体。`PerceptualHandler` 雛形の延長 |
 
 **着手タイミング**: `track_social.json` 設計と一体で進める。社交 Track が現実的に運用される時に必ず踏むケースを先に詰める。
 

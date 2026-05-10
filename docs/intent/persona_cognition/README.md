@@ -63,12 +63,13 @@ docs/intent/persona_cognition/
 [Phase 2] Track / MetaLayer / Handler 基盤   ✅ ほぼ完了
    action_tracks / notes / track_handlers / track_* ツール群
    ↓
-[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 90%
+[Phase 3] ライン仕様 + Track 種別 Playbook   🟡 約 95%
    line: main/sub フィールド + 各 Track 種別の Playbook 整備 + 入れ子サブライン Spell 機構
-   残: 「待ち」Track 廃止作業 / pause_summary 関連撤去 / スケジュール pre_spells 指定 UI / end-to-end 検証
+   残: 「待ち」Track 廃止作業 (handoff_waiting_track_removal) / report_to_parent 厳密化 (handoff_report_to_parent_validation)
+   (track_social/external の運用化と 7制御点 (1)(2)(6) は Phase 5 へ移送)
    ↓
-[Phase 4] Pulse 階層 + Scheduler + メタ定期判断  ✅ 完了 (v0.30, 2026-05-08)
-   AutonomyManager + SubLineScheduler + EventScheduler に集約 / META_JUDGMENT_CONFIG / 失敗時 retry
+[Phase 4] Pulse 階層 + Scheduler + メタ定期判断  ✅ 完了 (v0.30 + v2 メタ判断, 2026-05-10)
+   AutonomyManager + SubLineScheduler + EventScheduler に集約 / META_JUDGMENT_CONFIG / 失敗時 retry / メタ判断 v2 (構造化出力)
    ↓
 [Phase 5] 自律稼働の本格化                🔲 未着手
    Handler tick / 内部 alert / Track パラメータ / Schedule 統合 / 時間差ツール基盤
@@ -167,13 +168,13 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `track_autonomous.json` Playbook | ✅ | `builtin_data/playbooks/public/` | C-2 |
 | `LLMNodeDef.context_profile` DEPRECATED 化 → 削除 | ✅ | 段階 4-D で完全削除 (v0.35, 2026-05-09)。最新仕様は `state["_messages"]` 単一経路 | Phase 1.4 |
 | `LLMNodeDef.model_type` DEPRECATED 化 → 削除 | ✅ | 段階 4-D で完全削除 (v0.35, 2026-05-09)。`SubPlayNodeDef.line='sub'` 一括指定が代替 | Phase 1.4 |
-| `track_social.json` Playbook | 🔲 | 未着手 | C-2 残件 |
-| `track_external.json` Playbook | 🔲 | 未着手 | C-2 残件 |
-| ~~`track_waiting.json` Playbook~~ | ⛔ 廃止 | 「待ち」を Track 状態として持たない方針に変更 (v0.31, 2026-05-09)。`track_type='waiting'` / `status='waiting'` / `track_wait` / `track_resume_from_wait` ツール / `_schedule_waiting_timeout` 等を Phase 3 で削除する | C-2 残件 |
-| **「待ち」Track 廃止作業** (Track 状態 / 種別 / ツール / TrackManager コードから `waiting` を完全除去) | 🔲 | `saiverse/track_manager.py:401-588` の wait/timeout/resume_from_wait + `builtin_data/tools/track_wait.py` / `track_resume_from_wait.py` + `database/models.py:action_tracks` の `waiting_for` / `waiting_timeout_at` カラム。詳細は `revisions.md` v0.31 | Phase 3 新規 (v0.31) |
+| ~~`track_social.json` Playbook~~ | → Phase 5 | Playbook 雛形は存在 (`builtin_data/playbooks/public/track_social.json`) だが、Track ライフサイクル補完と一体で進める方針 (Phase 5 §「Track ライフサイクル補完」) | C-2 残件 |
+| ~~`track_external.json` Playbook~~ | → Phase 5 | Playbook 雛形は存在 (`builtin_data/playbooks/public/track_external.json`) だが、外部チャネル統合 (X / Discord / Elyth) と一体で進める方針 (Phase 5 範疇) | C-2 残件 |
+| ~~`track_waiting.json` Playbook~~ | ⛔ 廃止 | 「待ち」を Track 状態として持たない方針に変更 (v0.31, 2026-05-09)。下記「待ち」Track 廃止作業に統合 | C-2 残件 |
+| **「待ち」Track 廃止作業** (Track 状態 / 種別 / ツール / TrackManager コードから `waiting` を完全除去) | 🔲 別 handoff | 詳細・作業手順は [handoff_waiting_track_removal.md](handoff_waiting_track_removal.md) に集約。本 README ではトラッキングのみ | Phase 3 新規 (v0.31) |
 | **Track Chronicle 本体実装** (中断・再開機構の本体、pause_summary を完全廃止して置き換え) | 🟢 一巡完了 | Intent doc: [`../track_chronicle.md`](../track_chronicle.md)。書き込み (`_generate_track_chronicle` 新設、Metabolism 連動、Track 別生成、incomplete Lv1 + 再生成、1000 字未満スキップ) / 読み込み (head 入れ替え + 切り替え時 history 末尾近く挿入) / 時刻アンカー / dead code 撤去を含む。詳細は `revisions.md` v0.32 / v0.33、Intent doc §9 / §11 |
 | **ユーザー会話 Track 親スレッド保持機構** (生メッセージで対話温度を担保、Stelis 親子モデル流用) | 🟢 一巡完了 | `saiverse/user_conversation_preserver.py` + `sea/runtime_context.py` 連携。リンクユーザーのオーナー Track 特定 + 不足分補完。`SAIVERSE_USER_CONV_PRESERVE_COUNT` (デフォルト 20) で調整可。詳細は `revisions.md` v0.33、Intent doc §11 | Phase 3 新規 (v0.33) |
-| `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
+| `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 別 handoff | 詳細・作業手順は [handoff_report_to_parent_validation.md](handoff_report_to_parent_validation.md) に集約。現状は警告ログのみ、厳密化未着手 | C-2 残件 |
 | `exclude_pulse_id` 廃止 | ✅ | 段階 4-D で 4 層 (adapter / history_manager / runtime_context / runtime) 全削除 (v0.35, 2026-05-09) | C-2 残件 |
 | Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
 | **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | ✅ | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + 4-C (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23) + **4-D 完了** (旧 DEPRECATED コード全削除、v0.35, 2026-05-09) | Phase 3 新規 |
@@ -190,7 +191,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる (例: `generate_image_playbook.json`)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
 | Spell 結果の media を親 LLM ラウンドに attachment 転送 | ✅ | spell 戻り値を `Tuple[str, Optional[Dict]]` に拡張 (既存 str 戻り値は互換)。spell loop が全 spell の `metadata.media` を集約し次の LLM ラウンドの user message に lift。`run_playbook` が `parent_state["metadata"].media` を転送。`generate_image_playbook.json` の report に Markdown リンクリマインド追記 (v0.26, 2026-05-01) | Phase 3 新規 |
 | 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` ノード単位混在の Playbook 10 件は archive/ 退避 (v0.35, 2026-05-09) | C-2 残件 |
-| end-to-end 動作検証 (Spell loop / `/run_playbook` 1 段 / 入れ子) | 🔲 | `meta_user` 系削除後に通しで実機検証 | Phase 3 新規 |
+| end-to-end 動作検証 (Spell loop / `/run_playbook` 1 段 / 入れ子) | ✅ | 運用で問題出ていないため完了とみなす (2026-05-10) | Phase 3 新規 |
 | `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | ✅ | 段階 4-D 完了 (v0.35, 2026-05-09)。詳細は `docs/issues/phase3_4d_dead_code_removal.md` | C-2 残件 |
 | **メタ判断 Pulse の tool 結果到達バグ修正** (`lg_tool_node` で `state["_messages"]` への append 漏れ) | ✅ | `sea/runtime_engine.py:lg_tool_node` の tool 実行成功 / 失敗の両ブロックに append 経路追加。これで `meta_judgment.json` の judge ノードが `track_list` 出力 (`last_message_relative` 等) を実際に読める (v0.35, 2026-05-09) | Phase 3 新規 |
 
@@ -198,7 +199,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 
 ---
 
-### Phase 4 — Pulse 階層 + Scheduler + メタ定期判断 (✅ 完了 v0.30, 2026-05-08)
+### Phase 4 — Pulse 階層 + Scheduler + メタ定期判断 (✅ 完了 v0.30 + v2 メタ判断, 2026-05-10)
 
 メインライン Pulse / サブライン Pulse の 2 階層分離 + 各 Scheduler 実装 + メタレイヤーの定期実行入口。
 
@@ -220,9 +221,9 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | **メタ判断 Pulse 失敗時の retry ループ** (max_retries / retry_backoff_seconds) | ✅ | `saiverse/meta_layer.py:_run_judgment_via_playbook` (v0.30) | Phase 4-e |
 | **自動発話間隔の二重管理を解消** (META_JUDGMENT_CONFIG が真実、API 経由で永続化) | ✅ | `saiverse/autonomy_manager.py`, `api/routes/people/autonomy.py` (v0.30) | Phase 4-e |
 | `keep_cache_alive` フラグ (低頻度ペルソナ向けに TTL 前倒し OFF) | ✅ | UI: SettingsModal の tri-state select + コスト警告 (v0.30) | Phase 4-e |
-| 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | UI 編集で代替済 (Pattern 自動推定は将来対応) | C-3 |
-| 7 制御点の実装場所明確化 | 🟡 | (3)(4)(5)(7) は v0.30 で確定、(1)(2)(6) は Track metadata の API 整備が残 | C-3 |
-| **メタ判断 v2 (構造化出力ベース)**: 状況 A〜E 分類 → Playbook 4 分割 → 動的 response_schema (anyOf field-level discriminator) → finalize ツールで JSON → monologue + /spell 行に整形 + SAIMemory 書き込み | 🟡 実装一巡 + 関連バグ 2 件修正済、実機検証 2 回目待ち | `saiverse/meta_layer.py` (`_classify_situation` / `_build_response_schema`), `builtin_data/tools/meta_judgment_finalize.py`, `builtin_data/playbooks/public/meta_judgment_{alert,running,idle_pending,idle_empty}.json`, `sea/runtime_llm.py` (`response_schema_source: "arg:<key>"` 機構). 詳細: [meta_judgment_structured.md](meta_judgment_structured.md) | Phase 4 新規 (v2, 2026-05-10) |
+| ~~環境別デフォルト値の自動推定 (Pattern A/B/C)~~ | → 削除 | ペルソナ別 `META_JUDGMENT_CONFIG` の UI 編集で代替済。Pattern 自動推定機構は不要と判断 (Phase 4 完了マーク、2026-05-10) | C-3 |
+| 7 制御点の実装場所明確化 | ✅ 部分 + → Phase 5 | (3)(4)(5)(7) は v0.30 で確定済。(1) Pulse 間隔 / (2) 連続実行回数上限 / (6) 完了後挙動 は Track metadata の API 整備が必要なので Phase 5 (Track パラメータ機構) に移送 | C-3 |
+| **メタ判断 v2 (構造化出力ベース)**: 状況 A〜E 分類 → Playbook 4 分割 → 動的 response_schema (anyOf field-level discriminator) → finalize ツールで JSON → monologue + /spell 行に整形 + SAIMemory 書き込み | ✅ | 実装一巡 + 関連バグ 2 件修正済 + 実機検証済 (2026-05-10)。`saiverse/meta_layer.py` (`_classify_situation` / `_build_response_schema`), `builtin_data/tools/meta_judgment_finalize.py`, `builtin_data/playbooks/public/meta_judgment_{alert,running,idle_pending,idle_empty}.json`, `sea/runtime_llm.py` (`response_schema_source: "arg:<key>"` 機構). 詳細: [meta_judgment_structured.md](meta_judgment_structured.md) | Phase 4 新規 (v2, 2026-05-10) |
 | **wait_response_timeout 即発火ループ修正**: `base_time` が過去のときも `now()` フォールバックする (= activate 時刻基準の N 分猶予) | ✅ 2026-05-10 | `saiverse/track_manager.py:_schedule_wait_response_timeout`. メタ判断 v2 で構造化出力が Track 操作を強制するようになって顕在化した既存設計の欠陥 | Phase 4 新規 (v2 関連, 2026-05-10) |
 | **7層ストレージタブの削除UI**: 各エントリのチェックボックス + 単独削除 + 一括削除 (主目的: 旧仕様で蓄積された汚染メタ判断ログの除去) | ✅ 2026-05-10 | `frontend/src/components/memory/StorageLayersViewer.tsx`, `api/routes/people/storage_layers.py` (`meta-judgment` / `track-logs` の DELETE + bulk-delete 追加) | Phase 4 関連 (v2 準備, 2026-05-10) |
 
@@ -302,7 +303,9 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 
 ## 関連ドキュメント
 
-- [handoff_2026-05-10.md](handoff_2026-05-10.md) — **最新 handoff** (✅ 対応完了 commit 5d567a7): メインライン応答の `origin_track_id` NULL 回帰バグ修正 (pending/alert 状態の Track でも Handler 経路で track_id を持ち回す経路を追加)
+- [handoff_waiting_track_removal.md](handoff_waiting_track_removal.md) — 🔲 未着手 (別セッション対応予定): 「待ち」Track 機構廃止作業 (revisions.md v0.31 方針)
+- [handoff_report_to_parent_validation.md](handoff_report_to_parent_validation.md) — 🔲 未着手 (別セッション対応予定): `can_run_as_child=true` の Playbook で `report_to_parent` 必須バリデーション
+- [handoff_2026-05-10.md](handoff_2026-05-10.md) — ✅ 対応完了 commit 5d567a7: メインライン応答の `origin_track_id` NULL 回帰バグ修正 (pending/alert 状態の Track でも Handler 経路で track_id を持ち回す経路を追加)
 - [handoff_2026-05-09.md](handoff_2026-05-09.md) — 自律稼働中の長期 idle 脱出機構 (wait_response Track 自動 pause タイマー + Track 最終メッセージ時間の可視化)
 - [handoff_2026-05-08.md](handoff_2026-05-08.md) — Phase 3 A 残件 (`meta_user` 系削除 + スケジュール `pre_spells` 適用)
 - [handoff_2026-05-01.md](handoff_2026-05-01.md) — Phase 3 全体ロードマップ handoff
