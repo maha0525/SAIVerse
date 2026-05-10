@@ -287,7 +287,7 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
     elif hasattr(manager, 'items'):
         items_map = manager.items
     
-    LOGGER.debug("Requesting item_id: %s, available keys: %s", item_id, list(items_map.keys()))
+    LOGGER.debug("Requesting item_id: %s (items_map size: %d)", item_id, len(items_map))
     
     if item_id not in items_map:
         # Fallback to registry if needed (for admin/seed items not yet in memory?)

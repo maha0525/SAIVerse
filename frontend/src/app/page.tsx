@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback } from 'react';
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback, useMemo, ReactNode } from 'react';
+import ReactMarkdown, { defaultUrlTransform, Components } from 'react-markdown';
+import type { PluggableList } from 'unified';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -81,6 +82,13 @@ function resolveSaiverseImageSrc(src: string): string {
     }
     return src;
 }
+
+// Stable module-level constants — passing fresh arrays/functions to ReactMarkdown each render
+// causes it to remount its rendered tree, which makes <img> tags re-fetch on every keystroke.
+const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkBreaks];
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema]];
+const markdownUrlTransform = (url: string) =>
+    url.startsWith('saiverse://') ? url : defaultUrlTransform(url);
 
 interface MessageImage {
     url: string;
@@ -262,6 +270,26 @@ export default function Home() {
             setLinkItemModalItem({ id: itemId, name: itemId, type: 'document' });
         }
     }, []);
+
+    // Stable components map for ReactMarkdown — reconstructing this on every render
+    // remounts <img> tags and re-fetches their src on every keystroke.
+    const markdownComponents = useMemo<Components>(() => ({
+        a: ({ href, children }) => (
+            <SaiverseLink href={href} children={children as ReactNode} onOpenItem={handleOpenItemFromLink} />
+        ),
+        img: ({ src, alt }) => {
+            const resolved = typeof src === 'string' ? resolveSaiverseImageSrc(src) : src;
+            // eslint-disable-next-line @next/next/no-img-element
+            return (
+                <img
+                    src={resolved as string}
+                    alt={alt || ''}
+                    className={styles.markdownImage}
+                    onClick={() => typeof resolved === 'string' && window.open(resolved, '_blank')}
+                />
+            );
+        },
+    }), [handleOpenItemFromLink]);
 
     // Copy message content to clipboard
     const handleCopyMessage = useCallback(async (messageId: string, content: string) => {
@@ -2191,24 +2219,10 @@ export default function Home() {
                                                 </details>
                                             )}
                                             <ReactMarkdown
-                                                remarkPlugins={[remarkGfm, remarkBreaks]}
-                                                rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
-                                                urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
-                                                components={{
-                                                    a: ({ href, children }) => <SaiverseLink href={href} children={children} onOpenItem={handleOpenItemFromLink} />,
-                                                    img: ({ src, alt }) => {
-                                                        const resolved = typeof src === 'string' ? resolveSaiverseImageSrc(src) : src;
-                                                        // eslint-disable-next-line @next/next/no-img-element
-                                                        return (
-                                                            <img
-                                                                src={resolved as string}
-                                                                alt={alt || ''}
-                                                                className={styles.markdownImage}
-                                                                onClick={() => typeof resolved === 'string' && window.open(resolved, '_blank')}
-                                                            />
-                                                        );
-                                                    },
-                                                }}
+                                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                                                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                                                urlTransform={markdownUrlTransform}
+                                                components={markdownComponents}
                                             >{stripUserOnlyTags(msg.content)}</ReactMarkdown>
                                         </>
                                     )}
