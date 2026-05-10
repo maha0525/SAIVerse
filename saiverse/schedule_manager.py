@@ -451,7 +451,8 @@ class ScheduleManager:
         user_input = self._generate_schedule_prompt(schedule, session, persona_id)
 
         try:
-            self.manager.pulse_controller.submit_schedule(
+            # pulse_dispatch.md §7: PulseDispatcher 経由で起動
+            self.manager.pulse_dispatcher.dispatch_schedule_fire(
                 persona_id=persona_id,
                 building_id=building_id,
                 user_input=user_input,
@@ -460,7 +461,7 @@ class ScheduleManager:
                 args=schedule_args,
                 pre_spells=pre_spells,
             )
-            LOGGER.info("[ScheduleManager] Schedule %d submitted to PulseController", schedule.SCHEDULE_ID)
+            LOGGER.info("[ScheduleManager] Schedule %d submitted via PulseDispatcher", schedule.SCHEDULE_ID)
 
             self.manager._save_modified_buildings()
             persona._save_session_metadata()

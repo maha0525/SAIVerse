@@ -290,16 +290,17 @@ class AutonomyManager:
         report = CycleReport(cycle_id=cycle_id, started_at=time.time())
 
         try:
-            meta_layer = getattr(self.manager, "meta_layer", None)
-            if meta_layer is None:
+            # pulse_dispatch.md §7: PulseDispatcher 経由で起動
+            dispatcher = getattr(self.manager, "pulse_dispatcher", None)
+            if dispatcher is None:
                 LOGGER.warning(
-                    "[Autonomy:%s] No meta_layer on manager; skipping tick %s",
+                    "[Autonomy:%s] No pulse_dispatcher on manager; skipping tick %s",
                     self.persona_id, cycle_id,
                 )
                 report.status = "error"
-                report.error = "meta_layer unavailable"
+                report.error = "pulse_dispatcher unavailable"
             else:
-                meta_layer.on_periodic_tick(
+                dispatcher.dispatch_autonomy_tick(
                     self.persona_id,
                     context={
                         "cycle_id": cycle_id,

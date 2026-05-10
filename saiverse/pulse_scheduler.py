@@ -258,20 +258,33 @@ class SubLineScheduler:
             persona_id, track.track_id, playbook_name,
         )
 
-        try:
-            self.manager.run_sea_auto(
-                persona,
-                building_id,
-                occupants=[],  # auto pulse では使われない
-                meta_playbook=playbook_name,
-                args={"track_id": track.track_id},
+        # pulse_dispatch.md §7: PulseDispatcher 経由で起動
+        dispatcher = getattr(self.manager, "pulse_dispatcher", None)
+        if dispatcher is None:
+            logging.warning(
+                "[subline-scheduler] pulse_dispatcher unavailable; falling back to run_sea_auto direct call",
             )
-        except Exception:
-            logging.exception(
-                "[subline-scheduler] Failed to trigger subline pulse for track=%s",
-                track.track_id,
+            try:
+                self.manager.run_sea_auto(
+                    persona,
+                    building_id,
+                    occupants=[],
+                    meta_playbook=playbook_name,
+                    args={"track_id": track.track_id},
+                )
+            except Exception:
+                logging.exception(
+                    "[subline-scheduler] Failed to trigger subline pulse for track=%s",
+                    track.track_id,
+                )
+                return
+        else:
+            dispatcher.dispatch_subline_poll(
+                persona_id=persona_id,
+                persona=persona,
+                track=track,
+                playbook_name=playbook_name,
             )
-            return
 
         # Pulse メタデータ更新 (Track metadata に書き込む)
         self._update_pulse_metadata(track)

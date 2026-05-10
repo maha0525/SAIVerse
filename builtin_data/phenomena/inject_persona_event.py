@@ -69,13 +69,13 @@ def inject_persona_event(
             persona_id, exc_info=True,
         )
 
-    # --- 2. Submit to PulseController ---
-    pulse_controller = getattr(_manager, "pulse_controller", None)
-    if pulse_controller is None:
+    # --- 2. Submit via PulseDispatcher (pulse_dispatch.md §7) ---
+    dispatcher = getattr(_manager, "pulse_dispatcher", None)
+    if dispatcher is None:
         LOGGER.error(
-            "[inject_persona_event] No pulse_controller on manager — cannot trigger playbook"
+            "[inject_persona_event] No pulse_dispatcher on manager — cannot trigger playbook"
         )
-        return "error: no pulse_controller"
+        return "error: no pulse_dispatcher"
 
     # Resolve persona's current building
     persona = _manager.all_personas.get(persona_id)
@@ -143,7 +143,7 @@ def inject_persona_event(
     effective_playbook = meta_playbook or "track_user_conversation"
 
     try:
-        pulse_controller.submit_schedule(
+        dispatcher.dispatch_phenomenon_event(
             persona_id=persona_id,
             building_id=building_id,
             user_input=user_input,
@@ -152,13 +152,13 @@ def inject_persona_event(
             args=playbook_args,
         )
         LOGGER.info(
-            "[inject_persona_event] Submitted to PulseController: persona=%s, playbook=%s, args=%s",
+            "[inject_persona_event] Dispatched via PulseDispatcher: persona=%s, playbook=%s, args=%s",
             persona_id, effective_playbook, playbook_args,
         )
         return "ok"
     except Exception:
         LOGGER.error(
-            "[inject_persona_event] Failed to submit to PulseController",
+            "[inject_persona_event] Failed to dispatch phenomenon event",
             exc_info=True,
         )
         return "error: pulse submission failed"

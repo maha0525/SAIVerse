@@ -54,7 +54,12 @@ def tm(session_factory):
 
 @pytest.fixture
 def manager_stub(tm, db_persona):
-    """SubLineScheduler が必要とする最小限の SAIVerseManager スタブ。"""
+    """SubLineScheduler が必要とする最小限の SAIVerseManager スタブ。
+
+    pulse_dispatch.md §7 で SubLineScheduler は ``pulse_dispatcher.dispatch_subline_poll``
+    経由に切り替わったので、テストでは ``mgr.pulse_dispatcher.dispatch_subline_poll``
+    の呼び出しを検証する。
+    """
     persona = SimpleNamespace(
         persona_id=db_persona,
         current_building_id="building_1",
@@ -63,6 +68,7 @@ def manager_stub(tm, db_persona):
     mgr.personas = {db_persona: persona}
     mgr.track_manager = tm
     mgr.run_sea_auto = MagicMock()
+    mgr.pulse_dispatcher = MagicMock()
     return mgr
 
 
@@ -163,19 +169,20 @@ def test_unlimited_max_consecutive_always_passes(scheduler, tm, db_persona):
 # _trigger_pulse + _tick_persona
 # ---------------------------------------------------------------------------
 
-def test_tick_triggers_run_sea_auto_for_autonomous_track(
+def test_tick_triggers_subline_poll_for_autonomous_track(
     scheduler, manager_stub, tm, db_persona
 ):
-    """tick で running な autonomous Track があれば run_sea_auto が呼ばれる。"""
+    """tick で running な autonomous Track があれば PulseDispatcher 経由で起動される。"""
     track_id = tm.create(db_persona, "autonomous", title="記憶整理")
     tm.activate(track_id)
 
     scheduler._tick()
 
-    manager_stub.run_sea_auto.assert_called_once()
-    call_kwargs = manager_stub.run_sea_auto.call_args.kwargs
-    assert call_kwargs["meta_playbook"] == "track_autonomous"
-    assert call_kwargs["args"]["track_id"] == track_id
+    dispatcher = manager_stub.pulse_dispatcher
+    dispatcher.dispatch_subline_poll.assert_called_once()
+    call_kwargs = dispatcher.dispatch_subline_poll.call_args.kwargs
+    assert call_kwargs["playbook_name"] == "track_autonomous"
+    assert call_kwargs["track"].track_id == track_id
 
 
 def test_tick_does_not_trigger_for_user_conversation_track(
@@ -189,7 +196,7 @@ def test_tick_does_not_trigger_for_user_conversation_track(
 
     scheduler._tick()
 
-    manager_stub.run_sea_auto.assert_not_called()
+    manager_stub.pulse_dispatcher.dispatch_subline_poll.assert_not_called()
 
 
 def test_tick_does_not_trigger_for_unstarted_track(
@@ -200,7 +207,7 @@ def test_tick_does_not_trigger_for_unstarted_track(
 
     scheduler._tick()
 
-    manager_stub.run_sea_auto.assert_not_called()
+    manager_stub.pulse_dispatcher.dispatch_subline_poll.assert_not_called()
 
 
 def test_tick_updates_metadata_after_trigger(
@@ -244,14 +251,18 @@ def test_tick_increments_consecutive_count(
 
 
 def test_tick_skips_persona_without_building(scheduler, manager_stub, tm, db_persona):
-    """current_building_id が無いペルソナはスキップ (Pulse 起動しない)。"""
+    """current_building_id が無いペルソナはスキップ (Pulse 起動しない)。
+
+    SubLineScheduler 側で building_id 不在チェックがあって早期 return する
+    (= dispatcher は呼ばれない)。
+    """
     manager_stub.personas[db_persona].current_building_id = None
     track_id = tm.create(db_persona, "autonomous")
     tm.activate(track_id)
 
     scheduler._tick()
 
-    manager_stub.run_sea_auto.assert_not_called()
+    manager_stub.pulse_dispatcher.dispatch_subline_poll.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

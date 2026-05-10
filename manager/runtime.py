@@ -432,20 +432,14 @@ class RuntimeService(
                     origin_track_id=track_id,
                 )
 
-            try:
-                self.manager.user_conversation_handler.on_user_utterance(
-                    persona_id=captured_persona.persona_id,
-                    user_id=user_id_str,
-                    event=user_entry,
-                    invoke_main_line=_invoke_main_line,
-                )
-            except Exception:
-                logging.exception(
-                    "[runtime] user_conversation_handler failed for persona=%s; falling back to direct main-line",
-                    captured_persona.persona_id,
-                )
-                # フォールバック: Handler が落ちてもユーザー応答は守る
-                _invoke_main_line()
+            # pulse_dispatch.md §7: PulseDispatcher 経由で起動 (例外時の
+            # フォールバックは Dispatcher が担う)
+            self.manager.pulse_dispatcher.dispatch_user_utterance(
+                persona_id=captured_persona.persona_id,
+                user_id=user_id_str,
+                event=user_entry,
+                invoke_main_line=_invoke_main_line,
+            )
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
         self._save_modified_buildings()
@@ -541,8 +535,10 @@ class RuntimeService(
                         response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
                         break
 
-                    # 対ユーザー Track のイベント受け口 (Phase C-1)
-                    # Handler が Track 状態判定 / alert 遷移 (→ MetaLayer) → invoke_main_line で SEA 起動
+                    # 対ユーザー Track のイベント受け口 (Phase C-1)。
+                    # pulse_dispatch.md §7 で PulseDispatcher 経由に統一済。
+                    # Track 状態判定 / alert 遷移 → on_track_activated hook で
+                    # main_line Pulse 起動の経路は Handler 内部で行う。
                     captured_persona = persona
 
                     def _invoke_main_line(track_id: Optional[str] = None, p=captured_persona):
@@ -556,19 +552,12 @@ class RuntimeService(
                             origin_track_id=track_id,
                         )
 
-                    try:
-                        self.manager.user_conversation_handler.on_user_utterance(
-                            persona_id=captured_persona.persona_id,
-                            user_id=user_id_str,
-                            event=user_entry,
-                            invoke_main_line=_invoke_main_line,
-                        )
-                    except Exception:
-                        logging.exception(
-                            "[runtime] user_conversation_handler failed for persona=%s; falling back to direct main-line",
-                            captured_persona.persona_id,
-                        )
-                        _invoke_main_line()
+                    self.manager.pulse_dispatcher.dispatch_user_utterance(
+                        persona_id=captured_persona.persona_id,
+                        user_id=user_id_str,
+                        event=user_entry,
+                        invoke_main_line=_invoke_main_line,
+                    )
                     # Check stop event after each persona completes
                     if stop_event.is_set():
                         logging.info("[runtime] Stop event detected after persona %s; breaking loop", persona.persona_id)

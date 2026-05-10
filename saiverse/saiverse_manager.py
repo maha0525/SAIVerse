@@ -29,6 +29,7 @@ from .integration_manager import IntegrationManager
 from .track_manager import TrackManager
 from .note_manager import NoteManager
 from .meta_layer import MetaLayer
+from .pulse_dispatcher import PulseDispatcher
 from .pulse_scheduler import SubLineScheduler, is_subline_scheduler_enabled
 from .track_handlers import (
     AutonomousTrackHandler,
@@ -250,6 +251,11 @@ class SAIVerseManager(
         self.track_manager.add_track_activated_observer(
             self.autonomous_track_handler.on_track_activated
         )
+        # pulse_dispatch.md §7: ペルソナを動かす全イベントの一元的なディスパッチャ。
+        # 各起点コード (manager/runtime, SubLineScheduler, ScheduleManager,
+        # AutonomyManager, phenomena 系) は self.pulse_dispatcher 経由でイベントを
+        # 発火させる。経路選択 (直接 / 熟慮) と実行先の振り分けはここで担う。
+        self.pulse_dispatcher = PulseDispatcher(self)
         # Phase C-3b: SubLineScheduler を生成 (start は startup 内で行う)。
         # これにより running な連続実行型 Track のサブライン Pulse が定期的に
         # 起動される (Intent A v0.13 / Intent B v0.10)。
