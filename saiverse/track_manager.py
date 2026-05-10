@@ -125,6 +125,13 @@ class TrackManager:
         # 「[B] 移動: 分岐ターンをそのまま残す」)。
         # set_alert は alert 観察ルートが別にあるためこの hook では発火しない。
         self._status_change_observers: List[Callable[[str, Optional[str]], None]] = []
+        # Track activate (= running 遷移) を購読する observer 群。
+        # signature: (persona_id: str, track: ActionTrack, pulse_id: Optional[str]) -> None
+        # 用途: pulse_dispatch.md §5 で定義した on_track_activated hook。
+        # Handler 側で _inject_track_context や Pulse 起動を担う統一経路。
+        # `_status_change_observers` とは別軸で、activate 時のみ発火する
+        # (pause / complete / abort 等では発火しない)。
+        self._track_activated_observers: List[Callable[[str, Any, Optional[str]], None]] = []
 
     # ------------------------------------------------------------------
     # Observer
@@ -204,6 +211,48 @@ class TrackManager:
                 logging.exception(
                     "[track] status_change observer raised: cb=%r persona=%s pulse=%s",
                     cb, persona_id, pulse_id,
+                )
+
+    def add_track_activated_observer(
+        self, callback: Callable[[str, Any, Optional[str]], None]
+    ) -> None:
+        """Track の activate (= running 遷移) を購読する callback を登録する。
+
+        callback signature: (persona_id, track, pulse_id) -> None
+        ``track`` は遷移後の ``ActionTrack`` (detached, 読み取り専用想定)。
+        ``pulse_id`` は呼び出し元の Pulse ID (Pulse 外なら None)。
+
+        pulse_dispatch.md §5 で定義した on_track_activated hook の登録口。
+        Handler 側で track_type をフィルタして自分の責務範囲を判定する
+        (TrackManager は種別判定の責務を持たない)。
+
+        observer の例外は外に伝播させない (1 つの observer の障害で他の
+        observer や状態遷移処理を巻き込まないため)。
+        """
+        if callback in self._track_activated_observers:
+            return
+        self._track_activated_observers.append(callback)
+
+    def remove_track_activated_observer(
+        self, callback: Callable[[str, Any, Optional[str]], None]
+    ) -> None:
+        """登録済みの track_activated observer を解除する。未登録なら何もしない。"""
+        try:
+            self._track_activated_observers.remove(callback)
+        except ValueError:
+            pass
+
+    def _notify_track_activated(
+        self, persona_id: str, track: Any, pulse_id: Optional[str]
+    ) -> None:
+        """Track の activate を全 observer に通知する。各 observer の例外は握り潰さず WARN ログ。"""
+        for cb in list(self._track_activated_observers):
+            try:
+                cb(persona_id, track, pulse_id)
+            except Exception:
+                logging.exception(
+                    "[track] track_activated observer raised: cb=%r persona=%s track=%s",
+                    cb, persona_id, getattr(track, "track_id", None),
                 )
 
     # ------------------------------------------------------------------
@@ -398,6 +447,9 @@ class TrackManager:
         self._schedule_wait_response_timeout(track)
         # Notify status change observers (commit/close 完了後、別 session 不要なため)
         self._notify_status_change(track.persona_id, pulse_id)
+        # Notify track_activated observers (pulse_dispatch.md §5)
+        # Handler 側が _inject_track_context や Pulse 起動を担う統一経路。
+        self._notify_track_activated(track.persona_id, track, pulse_id)
         return track
 
     def pause(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:

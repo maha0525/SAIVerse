@@ -236,6 +236,41 @@ class UserConversationTrackHandler:
         return personas.get(persona_id)
 
     # ------------------------------------------------------------------
+    # Track 状態遷移フック (pulse_dispatch.md §5)
+    # ------------------------------------------------------------------
+
+    def on_track_activated(
+        self,
+        persona_id: str,
+        track: ActionTrack,
+        pulse_id: Optional[str] = None,
+    ) -> None:
+        """Track が activate (= running 遷移) されたときに呼ばれる hook。
+
+        TrackManager.activate 末尾で全 track_activated observer に通知される。
+        本 Handler は user_conversation 種別の Track のみ反応する。
+
+        責務 (pulse_dispatch.md §5.2 + 段階 2):
+        - Track 切替通知の SAIMemory 注入 (``_inject_track_context``)
+        - 段階 3 で main_line Pulse 起動も担当する予定
+
+        ``pulse_id`` は activate を起こした Pulse の ID (Pulse 外なら None)。
+        deferred apply 経路で渡されてくる元のメタ判断 Pulse の id。
+        """
+        if track.track_type != "user_conversation":
+            # 他種別の Track には反応しない (種別固有の振る舞いは各 Handler が担う)
+            return
+        logging.info(
+            "[user-conv-handler] on_track_activated: track=%s persona=%s pulse=%s",
+            track.track_id, persona_id, pulse_id,
+        )
+        # Track 切替通知を SAIMemory に注入する。これにより:
+        # - ケース1 (ユーザー発話 → alert → metalayer → activate)
+        # - ケース2 (自律 tick → metalayer → activate)
+        # の両方で同じ経路で通知が出る (pulse_dispatch.md §5.3)
+        self._inject_track_context(persona_id, track)
+
+    # ------------------------------------------------------------------
     # Pulse 完了フック (v0.10)
     # ------------------------------------------------------------------
 
@@ -271,33 +306,28 @@ class UserConversationTrackHandler:
 
         対ユーザー Track を取得 (なければ作成 + activate) し、その状態で分岐:
 
-        - 新規作成された (= running 即遷移): Track コンテキスト注入 + メインライン起動
-        - 既存 running (連続会話): メタレイヤー介入なし、注入もなし、メインライン起動のみ
+        - running (新規作成 or 既存 running): Track 切替通知は不要 (新規作成時は
+          ``on_track_activated`` hook が走って通知される)。直接メインライン起動。
         - それ以外 (pending / waiting / alert / unstarted):
           alert に遷移 → alert observer (MetaLayer) が同期実行され Track 切替判断
-          → MetaLayer が activate して running に遷移していれば Track コンテキスト注入
+          → MetaLayer が activate して running に遷移していれば
+          ``on_track_activated`` hook 経由で Track 切替通知が SAIMemory に注入される
           → メインライン起動
 
-        Track コンテキスト注入は **「running への遷移」が発生したタイミングのみ** 行う
-        ことで:
-        - キャッシュの末尾追加だけになり Track 切替してもキャッシュは継続温まり続ける
-        - ペルソナは「Track 切替を会話の流れの中で受け取った」と自然に認識できる
-        - 連続会話では何も追加しない (肥大化しない)
+        Track 切替通知 (``_inject_track_context``) は ``on_track_activated`` hook
+        経由に統一された (pulse_dispatch.md §5、段階 2)。本メソッドからは直接
+        呼ばない。これによりケース1 (ユーザー発話起因) と ケース2 (自律 tick 起因)
+        の両方で同じ経路で通知が出る。
         """
         track, was_newly_created = self.get_or_create_track(persona_id, user_id)
 
-        if was_newly_created:
-            # 新規作成 → 既に running、初回 Track コンテキスト注入
+        if was_newly_created or track.status == STATUS_RUNNING:
+            # running 中 (新規作成 or 既存) はメインライン応答に直行。
+            # 新規作成時の Track 切替通知は activate 時に on_track_activated hook
+            # が走って既に注入済み。
             logging.debug(
-                "[user-conv-handler] Track %s newly created, injecting track context",
-                track.track_id,
-            )
-            self._inject_track_context(persona_id, track)
-        elif track.status == STATUS_RUNNING:
-            # 既存 running → セッション継続、注入不要
-            logging.debug(
-                "[user-conv-handler] Track %s is running; direct main-line response",
-                track.track_id,
+                "[user-conv-handler] Track %s is running (newly_created=%s); direct main-line response",
+                track.track_id, was_newly_created,
             )
         else:
             logging.info(
@@ -309,28 +339,23 @@ class UserConversationTrackHandler:
                 "user_id": user_id,
                 "event": event,
             }
-            # set_alert は内部で alert observer (MetaLayer) を同期呼び出しする
+            # set_alert は内部で alert observer (MetaLayer) を同期呼び出しする。
+            # MetaLayer がメタ判断 Pulse を実行し、結果 activate されれば
+            # TrackManager.activate 末尾で on_track_activated hook が走り、
+            # その中で Track 切替通知が SAIMemory に注入される。
             self.track_manager.set_alert(track.track_id, context=ctx)
 
-            # MetaLayer 経由で Track が activate されて running になっていれば
-            # コンテキスト注入を行う (running への遷移発生)
+            # 観察ログのみ (注入処理は hook 任せ)
             updated = self.track_manager.get(track.track_id)
-            if updated.status == STATUS_RUNNING:
-                logging.info(
-                    "[user-conv-handler] Track %s transitioned to running via metalayer; "
-                    "injecting track context",
-                    track.track_id,
-                )
-                self._inject_track_context(persona_id, updated)
-            else:
-                logging.info(
-                    "[user-conv-handler] Track %s did not transition to running "
-                    "(status=%s); no track context injection",
-                    track.track_id, updated.status,
-                )
+            logging.info(
+                "[user-conv-handler] Post-metalayer status=%s for track %s",
+                updated.status, track.track_id,
+            )
 
         # メインライン応答は分岐によらず必ず起動する。
         # Track id を渡して SEA 側の Pulse-root を Track-bound にする
         # (pending/alert のままでもメッセージが Track 文脈で永続化される、
         # handoff_2026-05-10)。
+        # NOTE (pulse_dispatch.md §9.3 段階 3): この invoke_main_line ハードコードは
+        # 将来 on_track_activated hook 経由に統一する予定。
         invoke_main_line(track.track_id)

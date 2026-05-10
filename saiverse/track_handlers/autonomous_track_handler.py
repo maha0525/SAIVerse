@@ -19,7 +19,7 @@ Intent A v0.13 / Intent B v0.10 における「自律 Track」(一時 Track) の
 from __future__ import annotations
 
 import logging
-from typing import Any, List
+from typing import Any, List, Optional
 
 from database.models import ActionTrack
 
@@ -86,6 +86,30 @@ class AutonomousTrackHandler:
 
     def __init__(self, track_manager: TrackManager):
         self.track_manager = track_manager
+
+    # ------------------------------------------------------------------
+    # Track 状態遷移フック (pulse_dispatch.md §5)
+    # ------------------------------------------------------------------
+
+    def on_track_activated(
+        self,
+        persona_id: str,
+        track: ActionTrack,
+        pulse_id: Optional[str] = None,
+    ) -> None:
+        """Track が activate されたときに呼ばれる hook。
+
+        現状は no-op。autonomous Track の連続 Pulse は SubLineScheduler の
+        5 秒 poll で拾われる設計なので、activate hook では何もしない。
+        将来的に Track Chronicle の即時注入や初回 Pulse の即時起動を担う
+        余地がある (pulse_dispatch.md §10.2)。
+        """
+        if track.track_type != AUTONOMOUS_TRACK_TYPE:
+            return
+        logging.debug(
+            "[autonomous-handler] on_track_activated: track=%s persona=%s pulse=%s (no-op, SubLineScheduler が拾う)",
+            track.track_id, persona_id, pulse_id,
+        )
 
     # ------------------------------------------------------------------
     # Track 検索

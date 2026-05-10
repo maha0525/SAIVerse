@@ -74,6 +74,29 @@ class SocialTrackHandler:
         self.track_manager = track_manager
 
     # ------------------------------------------------------------------
+    # Track 状態遷移フック (pulse_dispatch.md §5)
+    # ------------------------------------------------------------------
+
+    def on_track_activated(
+        self,
+        persona_id: str,
+        track: ActionTrack,
+        pulse_id: Optional[str] = None,
+    ) -> None:
+        """Track が activate されたときに呼ばれる hook。
+
+        現状は no-op (社交 Track 用の Track 切替通知 / Pulse 起動の
+        実装は未着手)。pulse_dispatch.md §5 の枠組みに従い hook 経路だけ
+        確保する。
+        """
+        if track.track_type != SOCIAL_TRACK_TYPE:
+            return
+        logging.debug(
+            "[social-handler] on_track_activated: track=%s persona=%s pulse=%s (no-op)",
+            track.track_id, persona_id, pulse_id,
+        )
+
+    # ------------------------------------------------------------------
     # Pulse 完了フック (v0.10)
     # ------------------------------------------------------------------
 

@@ -235,6 +235,21 @@ class SAIVerseManager(
         self.autonomous_track_handler = AutonomousTrackHandler(
             track_manager=self.track_manager,
         )
+        # pulse_dispatch.md §5: Track activate (= running 遷移) 時に各 Handler の
+        # on_track_activated hook を発火する。Handler 側で track_type をフィルタ
+        # して自分の責務範囲を判定する (TrackManager は種別判定の責務を持たない)。
+        # ケース1 (ユーザー発話 → alert → metalayer → activate) と ケース2
+        # (自律 tick → metalayer → activate) の両方で同じ経路で Track 切替通知が
+        # 出るようになる。
+        self.track_manager.add_track_activated_observer(
+            self.user_conversation_handler.on_track_activated
+        )
+        self.track_manager.add_track_activated_observer(
+            self.social_track_handler.on_track_activated
+        )
+        self.track_manager.add_track_activated_observer(
+            self.autonomous_track_handler.on_track_activated
+        )
         # Phase C-3b: SubLineScheduler を生成 (start は startup 内で行う)。
         # これにより running な連続実行型 Track のサブライン Pulse が定期的に
         # 起動される (Intent A v0.13 / Intent B v0.10)。

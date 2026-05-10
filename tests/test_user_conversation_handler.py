@@ -66,7 +66,13 @@ def manager_stub(persona):
 @pytest.fixture
 def handler(tm, manager_stub):
     mgr, _hm = manager_stub
-    return UserConversationTrackHandler(track_manager=tm, manager=mgr)
+    h = UserConversationTrackHandler(track_manager=tm, manager=mgr)
+    # pulse_dispatch.md §5: SAIVerseManager と同じパターンで
+    # track_activated observer に登録する。これがないと
+    # _inject_track_context (= Track 切替通知の SAIMemory 注入) が
+    # 走らないので、新仕様のテストが期待通り動かない。
+    tm.add_track_activated_observer(h.on_track_activated)
+    return h
 
 
 # ---------------------------------------------------------------------------
