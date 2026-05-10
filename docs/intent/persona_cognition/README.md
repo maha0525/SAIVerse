@@ -302,7 +302,8 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 
 ## 関連ドキュメント
 
-- [handoff_2026-05-09.md](handoff_2026-05-09.md) — **最新 handoff**: 自律稼働中の長期 idle 脱出機構 (wait_response Track 自動 pause タイマー + Track 最終メッセージ時間の可視化)
+- [handoff_2026-05-10.md](handoff_2026-05-10.md) — **最新 handoff** (✅ 対応完了 commit 5d567a7): メインライン応答の `origin_track_id` NULL 回帰バグ修正 (pending/alert 状態の Track でも Handler 経路で track_id を持ち回す経路を追加)
+- [handoff_2026-05-09.md](handoff_2026-05-09.md) — 自律稼働中の長期 idle 脱出機構 (wait_response Track 自動 pause タイマー + Track 最終メッセージ時間の可視化)
 - [handoff_2026-05-08.md](handoff_2026-05-08.md) — Phase 3 A 残件 (`meta_user` 系削除 + スケジュール `pre_spells` 適用)
 - [handoff_2026-05-01.md](handoff_2026-05-01.md) — Phase 3 全体ロードマップ handoff
 - [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-D + Spell コア実装時の handoff (4-D も 2026-05-09 完了)
