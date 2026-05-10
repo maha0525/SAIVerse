@@ -309,7 +309,7 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 - [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-D + Spell コア実装時の handoff (4-D も 2026-05-09 完了)
 - `docs/issues/phase3_4d_dead_code_removal.md` — 段階 4-D 完了ログ
 - [handoff_2026-04-30.md](handoff_2026-04-30.md) — Phase 2 / 2.5 / 2.6 完了時 handoff
-- [pulse_dispatch.md](pulse_dispatch.md) — Pulse 起動経路ディスパッチ Intent (v0.2 確定, 2026-05-10): 直接経路 / 熟慮経路 / メタ判断並列レーンの 3 構造、`on_track_activated` hook 導入、PulseController 改修、alert 発生経路網羅
+- [pulse_dispatch.md](pulse_dispatch.md) — Pulse 起動経路ディスパッチ Intent (v0.3 実装一巡完了, 2026-05-10): 直接経路 / 熟慮経路 / メタ判断並列レーンの 3 構造、`on_track_activated` hook 導入、PulseController 改修、alert 発生経路網羅。段階 1〜5 実装完了 (ケース 4 実機検証済 / ケース 5・6 は自律稼働観察中)、段階 6 (alert 経路運用化 β/γ/δ/ε) は Phase 5 範疇
 - [meta_judgment_structured.md](meta_judgment_structured.md) — メタ判断 v2 (構造化出力ベース) Intent (v0.3, 2026-05-10 実機検証 1 回目 + 関連バグ 2 件修正済、`02_mechanics.md` §「メタレイヤーの実行サイクル」の置き換え予定)
 - [track_chronicle.md](track_chronicle.md) — Track 内必要情報の維持機構 (中断・再開機構の本体、Phase 3 の本体実装) Intent (v0.1, 2026-05-09 起草)
 - [nested_subline_spell.md](nested_subline_spell.md) — Phase 3 の `/run_playbook` Spell 機構 Intent (v0.1, 2026-05-01 起草)

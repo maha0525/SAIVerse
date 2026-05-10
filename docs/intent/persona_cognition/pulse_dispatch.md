@@ -1,7 +1,7 @@
 # Intent: Pulse 起動経路ディスパッチ
 
 **親**: [README.md](README.md)
-**ステータス**: v0.2 確定 (2026-05-10、まはーレビュー反映後)
+**ステータス**: v0.3 実装一巡完了 (2026-05-10、段階 1〜5 完了 / ケース 4 実機検証済 / ケース 5・6 は自律稼働中の発見ベースで観察中)
 **関連 Intent**: [meta_judgment_structured.md](meta_judgment_structured.md), [track_chronicle.md](track_chronicle.md), [02_mechanics.md](02_mechanics.md), [04_handlers.md](04_handlers.md)
 **関連 handoff**: [handoff_2026-05-10.md](handoff_2026-05-10.md) (origin_track_id 経路修正の過程で本 Intent の必要性が顕在化)
 
@@ -313,38 +313,41 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 
 ## 9. 既存実装からの移行ステップ
 
-### 9.1 段階 1: hook 機構の導入
+### 9.1 段階 1: hook 機構の導入 (✅ 完了 commit `ee38637`)
 
 - `TrackManager.activate` 末尾に `on_track_activated` hook 発火を追加
 - `track_handlers/__init__.py` に Handler 共通の `on_track_activated` インターフェース定義
 - 各 Handler クラスに `on_track_activated(persona_id, track, pulse_id)` を実装
 
-### 9.2 段階 2: `_inject_track_context` 統一
+### 9.2 段階 2: `_inject_track_context` 統一 (✅ 完了 commit `ee38637`)
 
 - `UserConversationTrackHandler.on_user_utterance` 内の `_inject_track_context` 呼び出しを削除
 - `UserConversationTrackHandler.on_track_activated` 内に移動
 - `on_user_utterance` の構造を「set_alert → on_track_alert (MetaLayer 経由) → 戻る」に整理 (Track 切替通知は hook 任せ)
 
-### 9.3 段階 3: `invoke_main_line` ハードコード廃止
+### 9.3 段階 3: `invoke_main_line` ハードコード廃止 (✅ 完了 commit `496ef15`)
 
 - ケース1 (1b) の `invoke_main_line()` ハードコードを削除
 - 代わりに `UserConversationTrackHandler.on_track_activated` 内で main_line Pulse を起動
 - 注意: 「activate しなかった場合に応答が無い」運用問題の発生有無を観察。多発したら 1b を直接経路に変更する。
 
-### 9.4 段階 4: ディスパッチャ層の導入
+### 9.4 段階 4: ディスパッチャ層の導入 (✅ 完了 commit `8c34933`)
 
-- `saiverse/pulse_dispatcher.py` (または PulseController 拡張) を新規作成
-- 各起点コード (`manager/runtime.py:handle_user_input_stream`, `SubLineScheduler._tick`, `ScheduleManager._fire_schedule`, `inject_persona_event` 等) からディスパッチャ経由に切り替え
+- `saiverse/pulse_dispatcher.py` を新規作成 (案 X 採用)
+- 各起点コード (`manager/runtime.py:handle_user_input_stream`, `SubLineScheduler._tick`, `ScheduleManager._fire_schedule`, `inject_persona_event`, `AutonomyManager._handle_tick`) からディスパッチャ経由に切り替え
 - 段階 1〜3 で統一された Handler hook と組み合わせて経路選択
 
-### 9.5 段階 5: メタ判断並列レーンの実装
+### 9.5 段階 5: メタ判断並列レーンの実装 (✅ 完了 commit `b36dd12`)
 
-- `PulseController` に `submit_meta_judgment` (or META_JUDGMENT priority) を追加
-- `_should_interrupt` 改修
-- `MetaLayer.on_track_alert` / `on_periodic_tick` から PulseController 経由でメタ判断起動
-- メタ判断結果に応じた進行中 Pulse の cancellation 経路を追加
+- `PulseController` に `submit_meta_judgment` + メタ判断専用レーン (`_current_meta`) を追加
+- `submit()` で type=meta_judgment は priority 体系外で並列実行
+- `MetaLayer._run_judgment_via_playbook` から `pulse_controller.submit_meta_judgment` 経由に切り替え (旧: `runtime.run_meta_user` 直叩き)
+- `_status_change_observers` の signature を `(persona_id, track_id, pulse_id)` に拡張
+- `PulseController.on_track_status_change` を追加 (current pulse の origin_track_id と一致する Track の状態変化で `cancellation_token.cancel()`)
+- ケース 4 (自律経路) は実機検証済 (2026-05-10、ログで `on_track_activated` → `Starting main_line pulse` の連鎖を確認)
+- ケース 5 (並列) / ケース 6 (cancel) は自律稼働中の発見ベースで観察中。Phase 5 の alert 発生経路運用化 (β/γ/δ/ε) が積み上がるにつれて発火頻度が上がる想定
 
-### 9.6 段階 6: alert 発生経路の運用化 (Phase 5 と協調)
+### 9.6 段階 6: alert 発生経路の運用化 (🔲 Phase 5 と協調)
 
 - InternalAlertPoller の運用化 (Track にパラメータ閾値を設定して β/γ を実用化)
 - 時間差ツール (δ) と Track alert 化スケジュール (ε) を実装
