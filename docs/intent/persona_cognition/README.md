@@ -222,8 +222,11 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `keep_cache_alive` フラグ (低頻度ペルソナ向けに TTL 前倒し OFF) | ✅ | UI: SettingsModal の tri-state select + コスト警告 (v0.30) | Phase 4-e |
 | 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | UI 編集で代替済 (Pattern 自動推定は将来対応) | C-3 |
 | 7 制御点の実装場所明確化 | 🟡 | (3)(4)(5)(7) は v0.30 で確定、(1)(2)(6) は Track metadata の API 整備が残 | C-3 |
+| **メタ判断 v2 (構造化出力ベース)**: 状況 A〜E 分類 → Playbook 4 分割 → 動的 response_schema (anyOf field-level discriminator) → finalize ツールで JSON → monologue + /spell 行に整形 + SAIMemory 書き込み | 🟡 実装一巡 + 関連バグ 2 件修正済、実機検証 2 回目待ち | `saiverse/meta_layer.py` (`_classify_situation` / `_build_response_schema`), `builtin_data/tools/meta_judgment_finalize.py`, `builtin_data/playbooks/public/meta_judgment_{alert,running,idle_pending,idle_empty}.json`, `sea/runtime_llm.py` (`response_schema_source: "arg:<key>"` 機構). 詳細: [meta_judgment_structured.md](meta_judgment_structured.md) | Phase 4 新規 (v2, 2026-05-10) |
+| **wait_response_timeout 即発火ループ修正**: `base_time` が過去のときも `now()` フォールバックする (= activate 時刻基準の N 分猶予) | ✅ 2026-05-10 | `saiverse/track_manager.py:_schedule_wait_response_timeout`. メタ判断 v2 で構造化出力が Track 操作を強制するようになって顕在化した既存設計の欠陥 | Phase 4 新規 (v2 関連, 2026-05-10) |
+| **7層ストレージタブの削除UI**: 各エントリのチェックボックス + 単独削除 + 一括削除 (主目的: 旧仕様で蓄積された汚染メタ判断ログの除去) | ✅ 2026-05-10 | `frontend/src/components/memory/StorageLayersViewer.tsx`, `api/routes/people/storage_layers.py` (`meta-judgment` / `track-logs` の DELETE + bulk-delete 追加) | Phase 4 関連 (v2 準備, 2026-05-10) |
 
-**詳細**: `phases/phase_4_pulse_scheduler.md`、`revisions.md` v0.30
+**詳細**: `phases/phase_4_pulse_scheduler.md`、`revisions.md` v0.30、[meta_judgment_structured.md](meta_judgment_structured.md) (v2 詳細)
 
 ---
 
@@ -305,6 +308,7 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 - [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-D + Spell コア実装時の handoff (4-D も 2026-05-09 完了)
 - `docs/issues/phase3_4d_dead_code_removal.md` — 段階 4-D 完了ログ
 - [handoff_2026-04-30.md](handoff_2026-04-30.md) — Phase 2 / 2.5 / 2.6 完了時 handoff
+- [meta_judgment_structured.md](meta_judgment_structured.md) — メタ判断 v2 (構造化出力ベース) Intent (v0.3, 2026-05-10 実機検証 1 回目 + 関連バグ 2 件修正済、`02_mechanics.md` §「メタレイヤーの実行サイクル」の置き換え予定)
 - [track_chronicle.md](track_chronicle.md) — Track 内必要情報の維持機構 (中断・再開機構の本体、Phase 3 の本体実装) Intent (v0.1, 2026-05-09 起草)
 - [nested_subline_spell.md](nested_subline_spell.md) — Phase 3 の `/run_playbook` Spell 機構 Intent (v0.1, 2026-05-01 起草)
 - [line_tag_responsibility.md](line_tag_responsibility.md) — line と memorize タグの責務分離 Intent (v0.1, 2026-05-01 起草)

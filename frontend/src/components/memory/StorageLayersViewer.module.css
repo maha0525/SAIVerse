@@ -218,13 +218,116 @@
     gap: 6px;
     padding: 8px 10px;
     background: var(--surface-secondary, #1f2937);
-    cursor: pointer;
     border-bottom: 1px solid var(--border-subtle, #374151);
+}
+
+.entryHeaderMain {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     flex-wrap: wrap;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.entryHeaderMain:hover {
+    color: var(--text-default, #e5e7eb);
 }
 
 .entryHeader:hover {
     background: var(--surface-hover, #2a3441);
+}
+
+.entryCheckbox {
+    cursor: pointer;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: #2563eb;
+}
+
+.entryDeleteBtn {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted, #9ca3af);
+    border-radius: 4px;
+    padding: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.entryDeleteBtn:hover:not(:disabled) {
+    background: rgba(220, 38, 38, 0.15);
+    color: #fca5a5;
+    border-color: #b91c1c;
+}
+
+.entryDeleteBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ---- Bulk delete bar (in itemsHeader when something is selected) ---- */
+.bulkDeleteBar {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    background: rgba(220, 38, 38, 0.12);
+    border: 1px solid #b91c1c;
+    border-radius: 4px;
+    color: #fca5a5;
+    font-size: 0.75rem;
+    margin-left: auto;
+}
+
+.bulkDeleteBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #b91c1c;
+    border: none;
+    color: #fff;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.bulkDeleteBtn:hover:not(:disabled) {
+    background: #dc2626;
+}
+
+.bulkDeleteBtn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.clearSelectionBtn {
+    background: transparent;
+    border: 1px solid var(--border-subtle, #374151);
+    color: var(--text-muted, #9ca3af);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.clearSelectionBtn:hover:not(:disabled) {
+    background: var(--surface-hover, #2a3441);
+}
+
+.clearSelectionBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .layerBadge {

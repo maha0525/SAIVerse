@@ -15,7 +15,8 @@ Phase 0 で導入した 7 層ストレージモデルの中身を UI から覗�
 """
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from api.deps import get_manager
 from database.models import ActionTrack, MetaJudgmentLog, TrackLocalLog
@@ -28,6 +29,15 @@ from .models import (
 from .utils import get_adapter
 
 router = APIRouter()
+
+
+class _BulkDeleteIdsRequest(BaseModel):
+    ids: List[str]
+
+
+class _BulkDeleteResponse(BaseModel):
+    deleted: int
+    requested: int
 
 
 _LAYER_LABELS = {
@@ -400,3 +410,156 @@ def get_storage_layers(
         )
     finally:
         db_session.close()
+
+
+# ---------------------------------------------------------------------------
+# DELETE endpoints (Phase 4 of meta_judgment v2 implementation, 2026-05-10):
+# 7-layer storage の汚染ログ除去 + 個別レコードの削除を UI から行うための
+# エンドポイント群。各層ごとに削除先テーブルが異なるため別ルートを切る。
+# - meta_judgment_log: judgment_id (UUID) で削除、persona_id 直接照合
+# - track_local_log: log_id (UUID) で削除、track_id 経由で persona 所有を検証
+# - SAIMemory messages (main_cache / sub_cache): 既存 DELETE /messages/{id}
+#   エンドポイントを利用 (api/routes/people/memory.py)
+# ---------------------------------------------------------------------------
+
+
+@router.delete(
+    "/{persona_id}/meta-judgment/{judgment_id}",
+    response_model=dict,
+)
+def delete_meta_judgment_log(
+    persona_id: str,
+    judgment_id: str,
+    manager=Depends(get_manager),
+):
+    """Delete a single meta_judgment_log row owned by ``persona_id``.
+
+    汚染ログ (旧仕様で蓄積された応答調独白) の除去用。所有チェックは
+    persona_id 直接照合 (テーブルにカラムあり)。
+    """
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(MetaJudgmentLog)
+            .filter(
+                MetaJudgmentLog.judgment_id == judgment_id,
+                MetaJudgmentLog.persona_id == persona_id,
+            )
+            .first()
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"meta_judgment_log {judgment_id} not found for persona {persona_id}",
+            )
+        db.delete(row)
+        db.commit()
+        return {"deleted": True, "judgment_id": judgment_id}
+    finally:
+        db.close()
+
+
+@router.post(
+    "/{persona_id}/meta-judgment/bulk-delete",
+    response_model=_BulkDeleteResponse,
+)
+def bulk_delete_meta_judgment_logs(
+    persona_id: str,
+    body: _BulkDeleteIdsRequest = Body(...),
+    manager=Depends(get_manager),
+):
+    """Delete multiple meta_judgment_log rows in one request.
+
+    所有チェック: persona_id 一致のものだけ消す (他ペルソナの ID が混じって
+    いても無視される — 個別 404 にしない)。
+    """
+    if not body.ids:
+        return _BulkDeleteResponse(deleted=0, requested=0)
+    db = manager.SessionLocal()
+    try:
+        deleted = (
+            db.query(MetaJudgmentLog)
+            .filter(
+                MetaJudgmentLog.judgment_id.in_(body.ids),
+                MetaJudgmentLog.persona_id == persona_id,
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return _BulkDeleteResponse(deleted=int(deleted), requested=len(body.ids))
+    finally:
+        db.close()
+
+
+@router.delete(
+    "/{persona_id}/track-logs/{log_id}",
+    response_model=dict,
+)
+def delete_track_local_log(
+    persona_id: str,
+    log_id: str,
+    manager=Depends(get_manager),
+):
+    """Delete a single track_local_log row.
+
+    所有チェック: 当該 log の track_id が persona の Track かどうかを
+    ActionTrack 経由で検証 (track_local_log には persona_id 直接カラムなし)。
+    """
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(TrackLocalLog)
+            .join(ActionTrack, ActionTrack.track_id == TrackLocalLog.track_id)
+            .filter(
+                TrackLocalLog.log_id == log_id,
+                ActionTrack.persona_id == persona_id,
+            )
+            .first()
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"track_local_log {log_id} not found for persona {persona_id}",
+            )
+        db.delete(row)
+        db.commit()
+        return {"deleted": True, "log_id": log_id}
+    finally:
+        db.close()
+
+
+@router.post(
+    "/{persona_id}/track-logs/bulk-delete",
+    response_model=_BulkDeleteResponse,
+)
+def bulk_delete_track_local_logs(
+    persona_id: str,
+    body: _BulkDeleteIdsRequest = Body(...),
+    manager=Depends(get_manager),
+):
+    """Delete multiple track_local_log rows owned by persona's tracks."""
+    if not body.ids:
+        return _BulkDeleteResponse(deleted=0, requested=0)
+    db = manager.SessionLocal()
+    try:
+        # persona の Track 一覧をまず取って、その中で log_id が一致するもののみ削除。
+        persona_track_ids = [
+            t.track_id
+            for t in db.query(ActionTrack.track_id)
+            .filter(ActionTrack.persona_id == persona_id)
+            .all()
+        ]
+        if not persona_track_ids:
+            return _BulkDeleteResponse(deleted=0, requested=len(body.ids))
+        deleted = (
+            db.query(TrackLocalLog)
+            .filter(
+                TrackLocalLog.log_id.in_(body.ids),
+                TrackLocalLog.track_id.in_(persona_track_ids),
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return _BulkDeleteResponse(deleted=int(deleted), requested=len(body.ids))
+    finally:
+        db.close()

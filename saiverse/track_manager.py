@@ -492,12 +492,16 @@ class TrackManager:
 
         基準時刻 (base_time) は最終メッセージの created_at を想定する。これにより:
         - 直近メッセージがあった Track: 直近 + N 分後に発火
-        - 古いメッセージしか無い Track: base + N 分が過去 → EventScheduler が即発火対象に
-        - メッセージが無い Track: base_time=None → ``now`` にフォールバックし、
-          activate 直後の即時タイムアウトを避ける
+        - メッセージが無い Track: base_time=None → ``now`` にフォールバック
+        - **base_time が現在時刻より過去**: activate 時点が事実上の「ユーザー宛て呼びかけ」
+          開始なので、``now`` を基準にしてフレッシュな N 分の猶予を与える
+          (2026-05-10 修正)。これがないと、長期 idle Track をペルソナが
+          自律 activate するたびに「即タイムアウト → 即 pause → メタ判断 → 再 activate」
+          のタイトループが起きる (メタ判断 v2 で構造化出力が Track 操作を強制する
+          ようになったことで顕在化した既存設計の欠陥)。
 
-        基底時刻が過去でタイマーがすぐに発火する場合は、_handle_wait_response_timeout
-        側で再評価し、本当に N 分経過していれば pause + メタ判断発火に進む。
+        基底時刻が条件未達の場合の race は、_handle_wait_response_timeout 側で
+        provider を再呼び出しして idle_for を見て再評価する。
         """
         if (
             self.event_scheduler is None
@@ -518,7 +522,15 @@ class TrackManager:
         minutes, base_time = result
         if not minutes or minutes <= 0:
             return
-        base = base_time or datetime.now()
+        now = datetime.now()
+        # base_time が None / 過去のときは activate 時刻 (now) を基準にする。
+        # 過去の最終メッセージ時刻をそのまま使うと、長期 idle 状態の Track を
+        # 自律 activate した瞬間に「過去 + 30分 = まだ過去」で EventScheduler が
+        # 即発火してしまい、メタ判断ループに陥る (上記 docstring 参照)。
+        if base_time is None or base_time < now:
+            base = now
+        else:
+            base = base_time
         fire_at = base + timedelta(minutes=int(minutes))
         track_id = track.track_id
         persona_id = track.persona_id

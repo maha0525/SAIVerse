@@ -64,13 +64,22 @@ _KV_PATTERN = re.compile(
 )
 
 
-def _resolve_response_schema_source(source: str) -> Optional[Dict[str, Any]]:
+def _resolve_response_schema_source(
+    source: str, variables: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
     """Resolve a response_schema_source string into a JSON schema dict.
 
     Supported forms:
     - ``spell:<spell_name>`` — loads ``SPELL_TOOL_SCHEMAS[<spell_name>].parameters``
       (the Spell's input JSON Schema). Used by spell_args_decider Playbook to
       drive structured output for dynamic Spell argument generation.
+    - ``arg:<key>`` — reads ``variables[<key>]`` and uses it directly as the schema.
+      The value should be a JSON Schema dict (or a JSON string that parses to one).
+      Used by callers that need to inject *dynamic* enum lists or other
+      situation-specific schema details that cannot be expressed statically in
+      the Playbook JSON. Example: meta_judgment v2 builds the schema in
+      Python with the current alert / pending track IDs as enum values, then
+      passes it via Playbook input args.
 
     Returns None if the source cannot be resolved.
     """
@@ -95,6 +104,47 @@ def _resolve_response_schema_source(source: str) -> Optional[Dict[str, Any]]:
             )
             return None
         return params
+    if source.startswith("arg:"):
+        key = source[len("arg:"):].strip()
+        if not key:
+            LOGGER.warning("[sea][llm] response_schema_source 'arg:' is missing key")
+            return None
+        if not isinstance(variables, dict):
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'arg:%s' but no variables provided",
+                key,
+            )
+            return None
+        value = variables.get(key)
+        if value is None:
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'arg:%s' resolved to None",
+                key,
+            )
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                LOGGER.warning(
+                    "[sea][llm] response_schema_source 'arg:%s' value is a string but not valid JSON",
+                    key,
+                )
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+            LOGGER.warning(
+                "[sea][llm] response_schema_source 'arg:%s' parsed JSON is not an object",
+                key,
+            )
+            return None
+        LOGGER.warning(
+            "[sea][llm] response_schema_source 'arg:%s' has unexpected type %r",
+            key, type(value).__name__,
+        )
+        return None
     LOGGER.warning("[sea][llm] Unrecognized response_schema_source form: %r", source)
     return None
 
@@ -1051,7 +1101,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             schema_source, exc_info=True,
                         )
                         resolved_source = schema_source
-                    response_schema = _resolve_response_schema_source(resolved_source)
+                    response_schema = _resolve_response_schema_source(
+                        resolved_source, variables=variables
+                    )
                     if response_schema is None:
                         LOGGER.warning(
                             "[sea][llm] response_schema_source %r resolved to None; "

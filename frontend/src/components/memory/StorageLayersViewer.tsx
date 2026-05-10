@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
-import { Loader2, Layers, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
+import { Loader2, Layers, ChevronDown, ChevronUp, RefreshCw, Trash2 } from 'lucide-react';
 import slStyles from './StorageLayersViewer.module.css';
 
 interface StorageLayerStat {
@@ -96,6 +96,8 @@ export default function StorageLayersViewer({ personaId }: Props) {
     const [limit, setLimit] = useState<number>(50);
 
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
+    const [selected, setSelected] = useState<Set<string>>(new Set());
+    const [isDeleting, setIsDeleting] = useState(false);
 
     const load = useCallback(async () => {
         setIsLoading(true);
@@ -130,6 +132,118 @@ export default function StorageLayersViewer({ personaId }: Props) {
             else next.add(id);
             return next;
         });
+    };
+
+    const toggleSelected = (id: string) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    // 層ごとに対応する DELETE エンドポイント。messages 系は既存 API を流用、
+    // meta_judgment / track_local は本セッションで追加した DELETE / bulk-delete を使う。
+    const deleteEntryUrl = (entry: StorageLayerEntry): string | null => {
+        if (entry.layer === 'meta_judgment') {
+            return `/api/people/${personaId}/meta-judgment/${entry.entry_id}`;
+        }
+        if (entry.layer === 'main_cache' || entry.layer === 'sub_cache') {
+            return `/api/people/${personaId}/messages/${entry.entry_id}`;
+        }
+        if (entry.layer === 'track_local') {
+            return `/api/people/${personaId}/track-logs/${entry.entry_id}`;
+        }
+        return null;
+    };
+
+    const handleDeleteSingle = async (entry: StorageLayerEntry) => {
+        const url = deleteEntryUrl(entry);
+        if (!url) {
+            alert(`この層 (${entry.layer}) は削除に対応していません`);
+            return;
+        }
+        if (!confirm('このエントリを削除しますか？この操作は取り消せません。')) return;
+        setIsDeleting(true);
+        try {
+            const res = await fetch(url, { method: 'DELETE' });
+            if (!res.ok) {
+                alert(`削除に失敗しました: HTTP ${res.status}`);
+                return;
+            }
+            // 選択状態からも除外
+            const key = `${entry.layer}:${entry.entry_id}`;
+            setSelected(prev => {
+                const next = new Set(prev);
+                next.delete(key);
+                return next;
+            });
+            await load();
+        } finally {
+            setIsDeleting(false);
+        }
+    };
+
+    const handleDeleteSelected = async () => {
+        if (selected.size === 0) return;
+        if (!confirm(`選択した ${selected.size} 件のエントリを削除しますか？この操作は取り消せません。`)) return;
+        setIsDeleting(true);
+        try {
+            // 層ごとにグルーピングして bulk-delete を投げる (messages 系は個別 DELETE 並列)。
+            const byLayer: Record<string, string[]> = {};
+            for (const key of Array.from(selected)) {
+                // key = "layer:entry_id" だが entry_id にも ":" が含まれうる (SAIMemory thread_id 形式)
+                const colonIdx = key.indexOf(':');
+                if (colonIdx < 0) continue;
+                const layer = key.slice(0, colonIdx);
+                const entryId = key.slice(colonIdx + 1);
+                if (!byLayer[layer]) byLayer[layer] = [];
+                byLayer[layer].push(entryId);
+            }
+
+            const promises: Promise<Response>[] = [];
+            for (const [layer, ids] of Object.entries(byLayer)) {
+                if (layer === 'meta_judgment') {
+                    promises.push(fetch(
+                        `/api/people/${personaId}/meta-judgment/bulk-delete`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ids }),
+                        }
+                    ));
+                } else if (layer === 'track_local') {
+                    promises.push(fetch(
+                        `/api/people/${personaId}/track-logs/bulk-delete`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ids }),
+                        }
+                    ));
+                } else if (layer === 'main_cache' || layer === 'sub_cache') {
+                    // SAIMemory messages は単独 DELETE のみ。並列実行。
+                    for (const id of ids) {
+                        promises.push(fetch(
+                            `/api/people/${personaId}/messages/${id}`,
+                            { method: 'DELETE' }
+                        ));
+                    }
+                }
+                // saimemory_core / nested_temp / archive は削除非対応 (UI で見えない)
+            }
+
+            const results = await Promise.allSettled(promises);
+            const failed = results.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.ok)).length;
+            if (failed > 0) {
+                alert(`${failed} 件の削除リクエストが失敗しました`);
+            }
+            setSelected(new Set());
+            await load();
+        } finally {
+            setIsDeleting(false);
+        }
     };
 
     return (
@@ -230,6 +344,29 @@ export default function StorageLayersViewer({ personaId }: Props) {
                                     一部の層で limit 超過、絞り込みを推奨
                                 </span>
                             )}
+                            {selected.size > 0 && (
+                                <span className={slStyles.bulkDeleteBar}>
+                                    <span>{selected.size} 件選択中</span>
+                                    <button
+                                        className={slStyles.bulkDeleteBtn}
+                                        onClick={handleDeleteSelected}
+                                        disabled={isDeleting}
+                                        title="選択したエントリをすべて削除"
+                                    >
+                                        {isDeleting
+                                            ? <Loader2 size={14} className={slStyles.spin} />
+                                            : <Trash2 size={14} />}
+                                        選択削除
+                                    </button>
+                                    <button
+                                        className={slStyles.clearSelectionBtn}
+                                        onClick={() => setSelected(new Set())}
+                                        disabled={isDeleting}
+                                    >
+                                        選択解除
+                                    </button>
+                                </span>
+                            )}
                         </div>
                         {data.items.length === 0 && (
                             <div className={slStyles.emptyBox}>
@@ -237,14 +374,22 @@ export default function StorageLayersViewer({ personaId }: Props) {
                             </div>
                         )}
                         <div className={slStyles.itemsList}>
-                            {data.items.map(item => (
-                                <EntryCard
-                                    key={`${item.layer}:${item.entry_id}`}
-                                    entry={item}
-                                    expanded={expanded.has(`${item.layer}:${item.entry_id}`)}
-                                    onToggle={() => toggleExpand(`${item.layer}:${item.entry_id}`)}
-                                />
-                            ))}
+                            {data.items.map(item => {
+                                const key = `${item.layer}:${item.entry_id}`;
+                                return (
+                                    <EntryCard
+                                        key={key}
+                                        entry={item}
+                                        expanded={expanded.has(key)}
+                                        onToggle={() => toggleExpand(key)}
+                                        selected={selected.has(key)}
+                                        onToggleSelected={() => toggleSelected(key)}
+                                        onDelete={() => handleDeleteSingle(item)}
+                                        deletable={deleteEntryUrl(item) !== null}
+                                        deleting={isDeleting}
+                                    />
+                                );
+                            })}
                         </div>
                     </>
                 )}
@@ -257,32 +402,63 @@ interface EntryCardProps {
     entry: StorageLayerEntry;
     expanded: boolean;
     onToggle: () => void;
+    selected: boolean;
+    onToggleSelected: () => void;
+    onDelete: () => void;
+    deletable: boolean;
+    deleting: boolean;
 }
 
-function EntryCard({ entry, expanded, onToggle }: EntryCardProps) {
+function EntryCard({
+    entry, expanded, onToggle,
+    selected, onToggleSelected, onDelete, deletable, deleting,
+}: EntryCardProps) {
     const layerBadgeClass = `${slStyles.layerBadge} ${slStyles[`layer_${entry.layer}`] || ''}`;
     const time = formatTimestamp(entry.created_at);
 
     return (
         <div className={slStyles.entryCard}>
-            <div className={slStyles.entryHeader} onClick={onToggle}>
-                <span className={layerBadgeClass}>{entry.layer}</span>
-                {entry.role && <span className={slStyles.roleBadge}>{entry.role}</span>}
-                {entry.scope && entry.scope !== 'committed' && (
-                    <span className={`${slStyles.scopeBadge} ${slStyles[`scope_${entry.scope}`] || ''}`}>
-                        {entry.scope}
+            <div className={slStyles.entryHeader}>
+                {deletable && (
+                    <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) => { e.stopPropagation(); onToggleSelected(); }}
+                        onClick={(e) => e.stopPropagation()}
+                        className={slStyles.entryCheckbox}
+                        disabled={deleting}
+                        title="一括削除のために選択"
+                    />
+                )}
+                <div className={slStyles.entryHeaderMain} onClick={onToggle}>
+                    <span className={layerBadgeClass}>{entry.layer}</span>
+                    {entry.role && <span className={slStyles.roleBadge}>{entry.role}</span>}
+                    {entry.scope && entry.scope !== 'committed' && (
+                        <span className={`${slStyles.scopeBadge} ${slStyles[`scope_${entry.scope}`] || ''}`}>
+                            {entry.scope}
+                        </span>
+                    )}
+                    {entry.committed_to_main_cache && (
+                        <span className={slStyles.actionBadge}>switch</span>
+                    )}
+                    {entry.log_kind && (
+                        <span className={slStyles.logKindBadge}>{entry.log_kind}</span>
+                    )}
+                    <span className={slStyles.entryTime}>{time}</span>
+                    <span className={slStyles.expandIcon}>
+                        {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     </span>
+                </div>
+                {deletable && (
+                    <button
+                        className={slStyles.entryDeleteBtn}
+                        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                        disabled={deleting}
+                        title="このエントリを削除"
+                    >
+                        <Trash2 size={14} />
+                    </button>
                 )}
-                {entry.committed_to_main_cache && (
-                    <span className={slStyles.actionBadge}>switch</span>
-                )}
-                {entry.log_kind && (
-                    <span className={slStyles.logKindBadge}>{entry.log_kind}</span>
-                )}
-                <span className={slStyles.entryTime}>{time}</span>
-                <span className={slStyles.expandIcon}>
-                    {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                </span>
             </div>
 
             <div className={slStyles.entryPreview}>

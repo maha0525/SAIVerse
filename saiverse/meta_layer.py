@@ -35,9 +35,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -292,9 +292,23 @@ class MetaLayer:
         Phase 1.2: ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` が真なら ``meta_judgment``
         Playbook 経由で判断する。それ以外は legacy direct-LLM スペル loop。
 
+        メタ判断 v2 (intent: meta_judgment_structured.md): 状況 A
+        (preempt_collision、context.target_already_running == True) は
+        ここで早期 return する。状態遷移は no-op、メインライン側で応答処理が
+        独立に走るため、判断 Pulse を呼ぶ意味がない (汚染源を残すだけ)。
+
         per-persona Lock で直列化する (`__init__` 参照)。同ペルソナの判断 Pulse
         が走行中なら完了まで wait する。
         """
+        # メタ判断 v2 状況 A: 自律先制と外部 alert の衝突 → 発火させない
+        if context.get("target_already_running"):
+            logging.info(
+                "[meta-layer] Skipping judgment: preempt_collision (target_already_running=True): "
+                "persona=%s track=%s",
+                persona_id, alert_track_id,
+            )
+            return
+
         lock = self._get_lock(persona_id)
         wait_started = time.monotonic()
         with lock:
@@ -312,35 +326,16 @@ class MetaLayer:
                         persona_id, alert_track_id,
                     )
                     return
-                use_playbook = self._use_playbook_path()
                 logging.info(
-                    "[meta-layer] Judgment starting: persona=%s alert_track=%s trigger=%s path=%s",
+                    "[meta-layer] Judgment starting: persona=%s alert_track=%s trigger=%s",
                     persona_id, alert_track_id, context.get("trigger"),
-                    "playbook" if use_playbook else "legacy",
                 )
-                if use_playbook:
-                    self._run_judgment_via_playbook(persona, alert_track_id, context)
-                else:
-                    self._run_judgment(persona, alert_track_id, context)
+                self._run_judgment_via_playbook(persona, alert_track_id, context)
             except Exception:
                 logging.exception(
                     "[meta-layer] Judgment failed: persona=%s track=%s",
                     persona_id, alert_track_id,
                 )
-
-    @staticmethod
-    def _use_playbook_path() -> bool:
-        """Read the ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` env flag.
-
-        Phase C-2 完成 (2026-04-30) で Playbook 経路を既定に昇格。
-        legacy direct-LLM スペル loop は緊急避難用に残し、明示的に
-        ``SAIVERSE_META_LAYER_USE_PLAYBOOK=0/false/no/off`` を指定したときだけ
-        切り替わる。
-        """
-        raw = os.environ.get("SAIVERSE_META_LAYER_USE_PLAYBOOK", "").strip().lower()
-        if raw in ("0", "false", "no", "off"):
-            return False
-        return True
 
     # ------------------------------------------------------------------
     # Phase C-2: 定期 tick エントリ (intent A v0.10 / intent B v0.7 §"メタレイヤーの定期実行入口")
@@ -405,18 +400,12 @@ class MetaLayer:
                 if context:
                     merged_context.update(context)
 
-                use_playbook = self._use_playbook_path()
                 logging.info(
-                    "[meta-layer] Periodic tick starting: persona=%s path=%s context=%s",
-                    persona_id,
-                    "playbook" if use_playbook else "legacy",
-                    merged_context.get("trigger"),
+                    "[meta-layer] Periodic tick starting: persona=%s context=%s",
+                    persona_id, merged_context.get("trigger"),
                 )
                 # alert_track_id="" は intent B 通り (定期 tick の場合は空文字列も可)
-                if use_playbook:
-                    self._run_judgment_via_playbook(persona, "", merged_context)
-                else:
-                    self._run_judgment(persona, "", merged_context)
+                self._run_judgment_via_playbook(persona, "", merged_context)
             except Exception:
                 logging.exception(
                     "[meta-layer] Periodic tick failed: persona=%s", persona_id,
@@ -451,18 +440,29 @@ class MetaLayer:
     # Phase 1.2: Playbook-based judgment dispatch
     # ------------------------------------------------------------------
 
+    # メタ判断 v2 状況 → Playbook 名のマッピング
+    _SITUATION_PLAYBOOK_MAP = {
+        "alert_present": "meta_judgment_alert",
+        "running_active": "meta_judgment_running",
+        "idle_with_pending": "meta_judgment_idle_pending",
+        "idle_no_pending": "meta_judgment_idle_empty",
+    }
+
     def _run_judgment_via_playbook(
         self,
         persona: Any,
         alert_track_id: str,
         context: Dict[str, Any],
     ) -> None:
-        """Dispatch to the ``meta_judgment`` Playbook through the runtime.
+        """Dispatch to the situation-specific meta_judgment v2 Playbook.
 
-        Resolves the persona's current building (needed by run_meta_user's
-        pulse-root pipeline) and delegates. The Playbook itself records its
-        LLM turn as ``scope='discardable'`` and the dispatch tool promotes
-        the row to ``'committed'`` when the action is ``switch`` (Phase 1.3).
+        メタ判断 v2 (intent: meta_judgment_structured.md):
+        - `_classify_situation` で状況 (B/C/D/E) を判定
+        - 状況に応じた専用 Playbook を選択
+        - response_schema を Python で動的に組み立て (enum 候補に track ID を埋め込む)
+        - args に situation_text + response_schema + 補助情報を詰めて runtime に投げる
+        - Playbook 内の judge ノードが構造化出力を生成 → finalize ツールが
+          Spell 整形・実行・SAIMemory 書き込みを行う
         """
         runtime = getattr(self.manager, "sea_runtime", None)
         if runtime is None:
@@ -481,6 +481,49 @@ class MetaLayer:
             )
             return
 
+        # Race 防護: Playbook 起動直前にもう一度状況分類する (intent v2 §9)。
+        # callback が schedule された時点と発火時点の間に Track 状態が変わって
+        # いれば、ここで別の Playbook に切り替えるか、A 相当なら return する。
+        sit = self._classify_situation(persona.persona_id, context or {})
+        kind = sit["kind"]
+
+        if kind == "preempt_collision":
+            logging.info(
+                "[meta-layer] Skipping judgment at dispatch (preempt_collision detected): "
+                "persona=%s",
+                persona.persona_id,
+            )
+            return
+
+        playbook_name = self._SITUATION_PLAYBOOK_MAP.get(kind)
+        if playbook_name is None:
+            logging.warning(
+                "[meta-layer] Unknown situation kind=%r; cannot dispatch Playbook (persona=%s)",
+                kind, persona.persona_id,
+            )
+            return
+
+        # Race 防護: enum 候補が空のケース (intent v2 §9)。
+        # alert があったが起動直前に消えた、pending があったが消えた等。
+        if kind == "alert_present" and not sit["alert"]:
+            logging.warning(
+                "[meta-layer] alert_present situation but no alert tracks at dispatch; aborting (persona=%s)",
+                persona.persona_id,
+            )
+            return
+        if kind == "running_active" and not sit["running"]:
+            logging.warning(
+                "[meta-layer] running_active situation but no running track at dispatch; aborting (persona=%s)",
+                persona.persona_id,
+            )
+            return
+        if kind == "idle_with_pending" and not sit["pending_or_unstarted"]:
+            logging.warning(
+                "[meta-layer] idle_with_pending but no pending tracks at dispatch; aborting (persona=%s)",
+                persona.persona_id,
+            )
+            return
+
         # Serialize trigger context to JSON so the Playbook input_schema can
         # consume it as a single string. Drop non-serializable bits defensively.
         try:
@@ -494,10 +537,28 @@ class MetaLayer:
         # 過去 N 件の判断ログを注入 (Phase 2)。空文字列ならプロンプトでも空に展開される。
         recent_judgments_block = self._build_recent_judgments_block(persona.persona_id)
 
-        args = {
-            "alert_track_id": alert_track_id or "",
+        # 状況テキスト (Track 状態と trigger を踏まえた状況提示 + Track 一覧)。
+        # 判断材料として judge プロンプトに展開される。
+        situation_text = self._build_situation_text(
+            persona.persona_id, alert_track_id or "", context or {}
+        )
+
+        # 動的 response_schema (kind と現状の候補 ID 一覧から組み立て)。
+        response_schema = self._build_response_schema(kind, sit)
+
+        running_track_id = (
+            sit["running"][0].track_id if sit["running"] else ""
+        )
+        trigger_type = str((context or {}).get("trigger") or "")
+
+        args: Dict[str, Any] = {
+            "situation_text": situation_text,
             "trigger_context": trigger_context_json,
             "recent_judgments": recent_judgments_block,
+            "response_schema": response_schema,
+            "running_track_id": running_track_id,
+            "trigger_type": trigger_type,
+            "track_at_judgment_id": alert_track_id or "",
         }
 
         # Phase 4-e: ペルソナ別 retry 設定
@@ -538,7 +599,7 @@ class MetaLayer:
                     persona,
                     user_input=None,
                     building_id=building_id,
-                    meta_playbook="meta_judgment",
+                    meta_playbook=playbook_name,
                     args=args,
                     event_callback=_capture_event,
                     pulse_type="meta_judgment",
@@ -788,20 +849,37 @@ class MetaLayer:
             thought = (r.judgment_thought or "").strip().replace("\n", " ")
             if len(thought) > 200:
                 thought = thought[:200] + "…"
-            spells_summary = ""
+            committed_marker = " [committed]" if r.committed_to_main_cache else " [discardable]"
+            ts = r.judged_at.isoformat() if r.judged_at else "?"
+            header = f"- {ts} ({r.trigger_type}){committed_marker}"
+            lines.append(header)
+            lines.append(f"  独白: {thought}" if thought else "  独白: (空)")
+
+            # メタ判断 v2: 行動 (発動した /spell 行) を併記する。
+            # Few-shot として「行動を伴う判断」が示される形にすることで
+            # 独白だけで満足する旧仕様の汚染ループを断つ (intent v2 §1-1)。
+            spell_lines: List[str] = []
             if r.spells_emitted:
                 try:
                     spells = json.loads(r.spells_emitted)
-                    if isinstance(spells, list) and spells:
-                        names = [s.get("name", "?") for s in spells if isinstance(s, dict)]
-                        spells_summary = f" | spells={','.join(names)}"
+                    if isinstance(spells, list):
+                        for s in spells:
+                            if not isinstance(s, dict):
+                                continue
+                            name = s.get("name", "?")
+                            args_dict = s.get("args") or {}
+                            args_str = " ".join(
+                                f"{k}='{v}'" for k, v in args_dict.items()
+                            )
+                            spell_lines.append(
+                                f"/spell {name} {args_str}".strip()
+                            )
                 except (ValueError, TypeError):
                     pass
-            committed_marker = " [switch]" if r.committed_to_main_cache else ""
-            lines.append(
-                f"- {r.judged_at.isoformat() if r.judged_at else '?'} "
-                f"({r.trigger_type}){committed_marker}{spells_summary}\n  独白: {thought}"
-            )
+            if spell_lines:
+                lines.append(f"  発動: {'; '.join(spell_lines)}")
+            else:
+                lines.append("  発動: なし")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -1019,94 +1097,437 @@ class MetaLayer:
             lines.append(f"- {name}: {desc[:200]}")
         return "\n".join(lines)
 
-    def _build_state_message(
-        self, persona_id: str, alert_track_id: str, context: Dict[str, Any]
-    ) -> str:
-        """現状 (Track 一覧 + 新着イベント) を user メッセージとして組み立てる。"""
+    # ------------------------------------------------------------------
+    # 状況分類 + 状況テキスト構築 (Playbook path / legacy path 共通)
+    # ------------------------------------------------------------------
+
+    # Pending 候補リストに載せる最大件数 (idle_with_pending 状況)
+    _PENDING_CANDIDATES_MAX = 5
+
+    def _classify_situation(
+        self, persona_id: str, context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Track 状態と trigger context から状況を5パターンに分類する。
+
+        分類 (優先順):
+          A. preempt_collision    -- 先制起動と外部イベントの衝突
+          B. alert_present        -- alert 状態の Track あり
+          C. running_active       -- alert なし、running 中
+          D. idle_with_pending    -- アクティブなし、pending/unstarted あり
+          E. idle_no_pending      -- 上記すべて該当なし
+        """
         tracks = self.track_manager.list_for_persona(
             persona_id, statuses=LIVE_STATUSES
         )
         running = [t for t in tracks if t.status == STATUS_RUNNING]
-        alert_tracks = [t for t in tracks if t.status == STATUS_ALERT]
-        pending = [t for t in tracks if t.status == STATUS_PENDING]
+        alert = [t for t in tracks if t.status == STATUS_ALERT]
         waiting = [t for t in tracks if t.status == STATUS_WAITING]
-        unstarted = [t for t in tracks if t.status == STATUS_UNSTARTED]
+        pending_or_unstarted = [
+            t for t in tracks if t.status in (STATUS_PENDING, STATUS_UNSTARTED)
+        ]
 
-        lines: List[str] = ["[現状]"]
-        lines.append("\nrunning Track:")
-        if running:
-            for t in running:
-                lines.append(self._format_track(t))
+        target_already_running = bool(context.get("target_already_running"))
+
+        if target_already_running:
+            kind = "preempt_collision"
+        elif alert:
+            kind = "alert_present"
+        elif running:
+            kind = "running_active"
+        elif pending_or_unstarted:
+            kind = "idle_with_pending"
         else:
-            lines.append("  (なし)")
+            kind = "idle_no_pending"
 
-        lines.append("\nalert Track (今回のトリガー対象を含む):")
-        if alert_tracks:
-            for t in alert_tracks:
-                marker = " ★今回のトリガー" if t.track_id == alert_track_id else ""
-                lines.append(self._format_track(t) + marker)
-        else:
-            lines.append("  (なし)")
+        return {
+            "kind": kind,
+            "tracks": tracks,
+            "running": running,
+            "alert": alert,
+            "pending_or_unstarted": pending_or_unstarted,
+            "waiting": waiting,
+            "target_already_running": target_already_running,
+            "target_track_title": context.get("target_track_title"),
+        }
 
-        if pending:
-            lines.append("\npending Track:")
-            for t in pending:
-                lines.append(self._format_track(t))
-        if waiting:
-            lines.append("\nwaiting Track:")
-            for t in waiting:
-                lines.append(
-                    self._format_track(t) + f"  (waiting_for={t.waiting_for})"
-                )
-        if unstarted:
-            lines.append("\nunstarted Track:")
-            for t in unstarted:
-                lines.append(self._format_track(t))
+    def _build_response_schema(
+        self, kind: str, sit: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """状況に応じた response_schema (JSON Schema dict) を組み立てる。
 
-        # 新着イベント
-        lines.append("\n[新着イベント]")
-        trigger = context.get("trigger", "(unknown)")
-        lines.append(f"trigger={trigger}")
-        if "user_id" in context:
-            lines.append(f"user_id={context['user_id']}")
-        event_obj = context.get("event")
-        if isinstance(event_obj, dict):
-            content = event_obj.get("content")
-            if content:
-                lines.append(f"event_content: {content}")
+        メタ判断 v2 (intent: meta_judgment_structured.md §5) で各 Playbook の
+        judge ノードが ``response_schema_source: "arg:response_schema"`` で
+        受け取る動的スキーマ。enum 候補は現在の Track 状態から動的に決まる。
 
-        # Phase 2.6: 自律先制と外部 alert のレース対応 (intent A v0.18)。
-        # 既 running の Track に対して set_alert が来たケースを自然言語で示す。
-        # (set_alert が no-op パスでも observer 通知するようになったため、
-        # メタ判断者がこの状況を識別できるようにする)
-        if context.get("target_already_running"):
-            target_title = context.get("target_track_title") or "(無題)"
-            lines.append("")
-            lines.append(
-                f"※ 対象 Track「{target_title}」は既に running 状態 "
-                "(直前のメタ判断などで先制起動済み)。"
-            )
-            lines.append(
-                "  状態遷移は発生しなかったが、外部からのイベントが Track に届いた。"
-            )
-            lines.append(
-                "  メインライン側で応答処理が自然に走るため、"
-                "通常は track_activate / track_pause を発動せず継続判断で良い。"
-            )
+        anyOf field-level discriminator パターン (D 状況) は OpenAI strict /
+        Anthropic / Gemini で動作可能。xAI / Ollama / llama_cpp は別途対応中
+        (docs/issues/llm_provider_anyof_support.md)。
 
-        lines.append(
-            "\n上記を踏まえて、Track をどう扱うか判断してください。"
+        ``additionalProperties`` は出さない: Gemini API が
+        ``generation_config.response_schema`` 内で ``additional_properties``
+        フィールドを認識せず INVALID_ARGUMENT になる (CLAUDE.md / memory に
+        既出の制約)。OpenAI strict / Anthropic は各プロバイダ側のスキーマ
+        正規化ヘルパ (``schema_utils.normalize_schema_for_strict_json_output`` /
+        ``anthropic_request_builder._prepare_schema_for_native_output``) が
+        必要時に自動補完するので問題ない。
+
+        kind が未知 / Playbook 不要なら None を返す。
+        """
+        if kind == "alert_present":
+            alert_ids = [t.track_id for t in sit["alert"]]
+            if not alert_ids:
+                return None
+            return {
+                "type": "object",
+                "properties": {
+                    "monologue": {"type": "string"},
+                    "activate_track_id": {
+                        "type": "string",
+                        "enum": alert_ids,
+                    },
+                },
+                "required": ["monologue", "activate_track_id"],
+            }
+
+        if kind == "running_active":
+            return {
+                "type": "object",
+                "properties": {
+                    "monologue": {"type": "string"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["continue", "pause", "complete", "abort"],
+                    },
+                },
+                "required": ["monologue", "action"],
+            }
+
+        if kind == "idle_with_pending":
+            pending_ids = [t.track_id for t in sit["pending_or_unstarted"]]
+            if not pending_ids:
+                # 候補なしのときは create のみに退化 (E 相当)
+                return self._build_response_schema("idle_no_pending", sit)
+            return {
+                "type": "object",
+                "properties": {
+                    "monologue": {"type": "string"},
+                    "decision": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "const": "activate"},
+                                    "track_id": {
+                                        "type": "string",
+                                        "enum": pending_ids,
+                                    },
+                                },
+                                "required": ["type", "track_id"],
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "const": "create"},
+                                    "title": {"type": "string"},
+                                    "track_type": {
+                                        "type": "string",
+                                        "enum": ["autonomous"],
+                                    },
+                                    "intent": {"type": "string"},
+                                },
+                                "required": [
+                                    "type", "title", "track_type", "intent",
+                                ],
+                            },
+                        ]
+                    },
+                },
+                "required": ["monologue", "decision"],
+            }
+
+        if kind == "idle_no_pending":
+            return {
+                "type": "object",
+                "properties": {
+                    "monologue": {"type": "string"},
+                    "create": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "track_type": {
+                                "type": "string",
+                                "enum": ["autonomous"],
+                            },
+                            "intent": {"type": "string"},
+                        },
+                        "required": ["title", "track_type", "intent"],
+                    },
+                },
+                "required": ["monologue", "create"],
+            }
+
+        return None
+
+    def _build_situation_text(
+        self, persona_id: str, alert_track_id: str, context: Dict[str, Any]
+    ) -> str:
+        """状況に応じた [状況] ブロック + [現在の Track 一覧] を組み立てる。
+
+        Playbook path / legacy path の両方から呼ばれる、メタ判断 LLM への
+        共通の状況提示テキスト。
+
+        スペル発動形式の説明や全選択肢の列挙は素体システムプロンプトに任せ、
+        ここでは「いま何が起きていて、どの操作が候補か」だけを敬語で情報提供する。
+        """
+        sit = self._classify_situation(persona_id, context)
+        last_msg_times = self._resolve_last_message_times(
+            persona_id, [t.track_id for t in sit["tracks"]]
         )
+
+        kind = sit["kind"]
+        if kind == "preempt_collision":
+            situation_block = self._situation_preempt_collision(sit)
+        elif kind == "alert_present":
+            situation_block = self._situation_alert_present(sit, alert_track_id)
+        elif kind == "running_active":
+            situation_block = self._situation_running_active(sit)
+        elif kind == "idle_with_pending":
+            situation_block = self._situation_idle_with_pending(sit)
+        else:
+            situation_block = self._situation_idle_no_pending()
+
+        track_listing = self._build_track_listing(sit["tracks"], last_msg_times)
+        return f"{situation_block}\n\n{track_listing}"
+
+    # --- 各状況のテキスト ----------------------------------------------------
+
+    def _situation_preempt_collision(self, sit: Dict[str, Any]) -> str:
+        title = sit.get("target_track_title") or "(無題)"
+        return (
+            "[状況]\n"
+            f"Track「{title}」は直前のメタ判断で先制起動済みで、外部イベントが\n"
+            "後から届いたケースです。状態遷移は no-op になっています。\n"
+            "追加のスペルを発動しなくても、メインライン側で応答処理が走ります。"
+        )
+
+    def _situation_alert_present(
+        self, sit: Dict[str, Any], alert_track_id: str
+    ) -> str:
+        alerts: List[Any] = list(sit["alert"])
+        # primary: 今回のトリガー (alert_track_id) を最優先、なければ最古の alert
+        primary: Optional[Any] = None
+        if alert_track_id:
+            for t in alerts:
+                if t.track_id == alert_track_id:
+                    primary = t
+                    break
+        if primary is None:
+            alerts_sorted = sorted(
+                alerts, key=lambda t: (t.last_active_at or datetime.min)
+            )
+            primary = alerts_sorted[0] if alerts_sorted else None
+        if primary is None:
+            # 起こらないはずだが防御的に
+            return "[状況]\nalert 状態の Track が検出されましたが、詳細を取得できませんでした。"
+
+        running_track = sit["running"][0] if sit["running"] else None
+        title = primary.title or "(無題)"
+        lines = [
+            "[状況]",
+            f"Track「{title}」が alert 状態です。alert はこの Track への対応が",
+            "必要なシグナルで、起動するまで alert のままになります。",
+            "",
+            f"操作例: /spell track_activate track_id='{primary.track_id}'",
+        ]
+        if running_track is not None:
+            lines.append(
+                "  （現在 running の Track があれば自動で pending に切り替わります）"
+            )
+
+        others = [t for t in alerts if t.track_id != primary.track_id]
+        if others:
+            lines.append("")
+            lines.append("他にも alert 状態の Track があります:")
+            for t in others:
+                lines.append(
+                    f"  - 「{t.title or '(無題)'}」 → "
+                    f"/spell track_activate track_id='{t.track_id}'"
+                )
         return "\n".join(lines)
 
-    def _format_track(self, track: Any) -> str:
-        title = track.title or "(無題)"
-        intent = track.intent or ""
-        intent_part = f" intent={intent[:60]}" if intent else ""
+    def _situation_running_active(self, sit: Dict[str, Any]) -> str:
+        primary = sit["running"][0]
+        title = primary.title or "(無題)"
         return (
-            f"  - id={track.track_id} title={title!r} type={track.track_type}"
-            f" persistent={bool(track.is_persistent)}{intent_part}"
+            "[状況]\n"
+            f"Track「{title}」が running 中です。\n"
+            "\n"
+            "継続: スペル不要\n"
+            f"保留: /spell track_pause track_id='{primary.track_id}'\n"
+            f"完了: /spell track_complete track_id='{primary.track_id}'\n"
+            f"中止: /spell track_abort track_id='{primary.track_id}'"
         )
+
+    def _situation_idle_with_pending(self, sit: Dict[str, Any]) -> str:
+        # last_active_at の降順 (最近 active だったもの優先) で上位を提示
+        candidates = sorted(
+            sit["pending_or_unstarted"],
+            key=lambda t: (t.last_active_at or datetime.min),
+            reverse=True,
+        )[: self._PENDING_CANDIDATES_MAX]
+
+        lines = [
+            "[状況]",
+            "アクティブな Track がありません。何も操作しない場合、",
+            "次の判断機会まで待機が続きます。",
+            "",
+            "Pending の Track:",
+        ]
+        for t in candidates:
+            intent = (t.intent or "").strip()
+            if len(intent) > 80:
+                intent = intent[:80] + "…"
+            intent_part = f"（intent: {intent}）" if intent else ""
+            lines.append(
+                f"- 「{t.title or '(無題)'}」{intent_part} → "
+                f"/spell track_activate track_id='{t.track_id}'"
+            )
+        lines.extend([
+            "",
+            "新しい Track を始める場合:",
+            "  /spell track_create title='...' track_type='autonomous' intent='...'",
+        ])
+        return "\n".join(lines)
+
+    def _situation_idle_no_pending(self) -> str:
+        return (
+            "[状況]\n"
+            "アクティブな Track も Pending の Track もありません。\n"
+            "何も操作しない場合、次の判断機会まで待機が続きます。\n"
+            "\n"
+            "新しい Track を始める場合:\n"
+            "  /spell track_create title='...' track_type='autonomous' intent='...'"
+        )
+
+    # --- Track 一覧の整形 ----------------------------------------------------
+
+    def _build_track_listing(
+        self, tracks: List[Any], last_msg_times: Dict[str, Any]
+    ) -> str:
+        """[現在の Track 一覧] セクションを整形テキストで作る (JSON ではない)。
+
+        track_list ツールの生 JSON 出力は重量級モデルのメインキャッシュに混入する
+        副作用がある (Intent A v0.9 不変条件 11) ため、メタ判断では自然言語の
+        整形テキストとして同じ情報を渡す。
+        """
+        order = [
+            STATUS_RUNNING,
+            STATUS_ALERT,
+            STATUS_PENDING,
+            STATUS_WAITING,
+            STATUS_UNSTARTED,
+        ]
+        by_status: Dict[str, List[Any]] = {s: [] for s in order}
+        for t in tracks:
+            if t.status in by_status:
+                by_status[t.status].append(t)
+
+        lines = ["[現在の Track 一覧]"]
+        any_present = False
+        for status in order:
+            bucket = by_status.get(status) or []
+            if not bucket:
+                continue
+            any_present = True
+            lines.append(f"{status}:")
+            for t in bucket:
+                lines.append(
+                    self._format_track_for_situation(
+                        t, last_msg_times.get(t.track_id)
+                    )
+                )
+        if not any_present:
+            lines.append("  (Track はありません)")
+        return "\n".join(lines)
+
+    def _format_track_for_situation(
+        self, track: Any, last_msg_time: Optional[datetime]
+    ) -> str:
+        """Track 1 件を 1 行に整形 (title, id 短縮, type, intent, 最終メッセージ相対)。"""
+        title = track.title or "(無題)"
+        intent = (track.intent or "").strip()
+        intent_part = ""
+        if intent:
+            if len(intent) > 60:
+                intent = intent[:60] + "…"
+            intent_part = f", intent: {intent}"
+        last_part = ""
+        if last_msg_time is not None:
+            last_part = f" / 最終: {self._format_relative(last_msg_time)}"
+        return (
+            f"  - 「{title}」 (id={track.track_id[:8]}…, "
+            f"{track.track_type}{intent_part}){last_part}"
+        )
+
+    def _format_relative(self, dt: Optional[datetime]) -> str:
+        """大まかな相対時刻を返す (track_list._format_relative と同等)。"""
+        if dt is None:
+            return "?"
+        diff_sec = int((datetime.now() - dt).total_seconds())
+        if diff_sec < 0:
+            return "未来"
+        if diff_sec < 60:
+            return f"{diff_sec}秒前"
+        minutes = diff_sec // 60
+        if minutes < 60:
+            return f"{minutes}分前"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}時間前"
+        days = hours // 24
+        if days < 30:
+            return f"{days}日前"
+        months = days // 30
+        if months < 12:
+            return f"{months}ヶ月前"
+        years = days // 365
+        return f"{years}年前"
+
+    def _resolve_last_message_times(
+        self, persona_id: str, track_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Track ごとの最終メッセージ時刻を SAIMemory から取得する。
+
+        track_list ツールと同じ仕組み。manager / persona / adapter のいずれかが
+        欠けていれば空 dict を返す (静かに失敗、警告ログのみ)。
+        """
+        if not track_ids:
+            return {}
+        persona = self._lookup_persona(persona_id)
+        if persona is None:
+            return {}
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is None:
+            return {}
+        try:
+            return adapter.get_track_last_message_times(track_ids) or {}
+        except Exception:
+            logging.warning(
+                "[meta-layer] Failed to fetch last_message_times persona=%s",
+                persona_id,
+                exc_info=True,
+            )
+            return {}
+
+    # ------------------------------------------------------------------
+    # legacy path 用エントリ (Playbook path も同じ situation_text を使う)
+    # ------------------------------------------------------------------
+
+    def _build_state_message(
+        self, persona_id: str, alert_track_id: str, context: Dict[str, Any]
+    ) -> str:
+        """legacy path 用の現状メッセージ。新しい situation_text を返す。"""
+        return self._build_situation_text(persona_id, alert_track_id, context)
 
     # ------------------------------------------------------------------
     # ヘルパ
