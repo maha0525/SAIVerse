@@ -757,6 +757,34 @@ class _FakeRuntime:
                 effect(persona, **kwargs)
 
 
+class _FakePulseController:
+    """pulse_dispatch.md §6.3 案 A 対応: MetaLayer は pulse_controller.submit_meta_judgment 経由で
+    runtime.run_meta_user を呼ぶ。テストでは Fake が submit_meta_judgment をそのまま runtime に転送する。
+    """
+
+    def __init__(self, runtime, persona):
+        self.runtime = runtime
+        self.persona = persona
+
+    def submit_meta_judgment(
+        self,
+        persona_id,
+        building_id,
+        meta_playbook,
+        args=None,
+        event_callback=None,
+    ):
+        self.runtime.run_meta_user(
+            self.persona,
+            user_input=None,
+            building_id=building_id,
+            meta_playbook=meta_playbook,
+            args=args,
+            event_callback=event_callback,
+            pulse_type="meta_judgment",
+        )
+
+
 def _make_playbook_meta(tm, nm, db_persona, runtime, judgment_config_override=None):
     """Playbook path テスト用の MetaLayer を組み立てる。"""
     persona = FakePersona(db_persona, FakeLLMClient([]))
@@ -764,6 +792,8 @@ def _make_playbook_meta(tm, nm, db_persona, runtime, judgment_config_override=No
     persona.persona_id = db_persona
     manager = FakeManager(tm, nm, {db_persona: persona})
     manager.sea_runtime = runtime
+    # pulse_dispatch.md §6.3: MetaLayer は pulse_controller 経由で起動する
+    manager.pulse_controller = _FakePulseController(runtime, persona)
     meta = MetaLayer(manager)
     if judgment_config_override is not None:
         meta._load_judgment_config = lambda _p: judgment_config_override

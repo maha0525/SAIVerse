@@ -119,12 +119,15 @@ class TrackManager:
         # 「どんな種別の Track の alert に反応するか」のフィルタは observer 側で判断する。
         self._alert_observers: List[Callable[[str, str, dict], None]] = []
         # 状態遷移 (alert 以外) を購読する observer 群。
-        # signature: (persona_id: str, pulse_id: Optional[str]) -> None
-        # 用途: メタ判断ターン (line_role='meta_judgment', scope='discardable')
-        # を Track 切替起点で 'committed' に昇格する hook 等 (Intent A v0.14
-        # 「[B] 移動: 分岐ターンをそのまま残す」)。
+        # signature: (persona_id: str, track_id: str, pulse_id: Optional[str]) -> None
+        # 用途:
+        # - メタ判断ターン (line_role='meta_judgment', scope='discardable') を
+        #   Track 切替起点で 'committed' に昇格する hook (Intent A v0.14
+        #   「[B] 移動: 分岐ターンをそのまま残す」)
+        # - PulseController が current pulse の origin_track_id と一致する状態
+        #   変化を観測したら cancellation_token.cancel() を発動 (pulse_dispatch.md §6.2)
         # set_alert は alert 観察ルートが別にあるためこの hook では発火しない。
-        self._status_change_observers: List[Callable[[str, Optional[str]], None]] = []
+        self._status_change_observers: List[Callable[[str, str, Optional[str]], None]] = []
         # Track activate (= running 遷移) を購読する observer 群。
         # signature: (persona_id: str, track: ActionTrack, pulse_id: Optional[str]) -> None
         # 用途: pulse_dispatch.md §5 で定義した on_track_activated hook。
@@ -176,23 +179,27 @@ class TrackManager:
                 )
 
     def add_status_change_observer(
-        self, callback: Callable[[str, Optional[str]], None]
+        self, callback: Callable[[str, str, Optional[str]], None]
     ) -> None:
         """alert 以外の状態遷移 (activate/pause/wait/complete/abort/resume) を購読する。
 
-        callback signature: (persona_id, pulse_id) -> None
+        callback signature: (persona_id, track_id, pulse_id) -> None
         pulse_id は当該遷移を起こした Pulse の ID。Pulse 外で呼ばれた場合 (CLI /
         テスト) は None。observer 側は None ならスキップして良い。
 
-        SAIVerseManager 起動時に「メタ判断ターン昇格 hook」を登録するために
-        使う (Intent A v0.14 [B] 移動)。observer の例外は握り潰さず WARN ログ。
+        SAIVerseManager 起動時に以下を登録する:
+        - `_promote_meta_judgment_in_pulse` — Intent A v0.14 [B] 移動の hook
+        - `PulseController._on_track_status_change` — pulse_dispatch.md §6.2 の
+          current pulse cancel 経路
+
+        observer の例外は握り潰さず WARN ログ。
         """
         if callback in self._status_change_observers:
             return
         self._status_change_observers.append(callback)
 
     def remove_status_change_observer(
-        self, callback: Callable[[str, Optional[str]], None]
+        self, callback: Callable[[str, str, Optional[str]], None]
     ) -> None:
         """登録済みの status_change observer を解除する。未登録なら何もしない。"""
         try:
@@ -201,16 +208,16 @@ class TrackManager:
             pass
 
     def _notify_status_change(
-        self, persona_id: str, pulse_id: Optional[str]
+        self, persona_id: str, track_id: str, pulse_id: Optional[str]
     ) -> None:
         """状態遷移 (alert 以外) を全 observer に通知する。"""
         for cb in list(self._status_change_observers):
             try:
-                cb(persona_id, pulse_id)
+                cb(persona_id, track_id, pulse_id)
             except Exception:
                 logging.exception(
-                    "[track] status_change observer raised: cb=%r persona=%s pulse=%s",
-                    cb, persona_id, pulse_id,
+                    "[track] status_change observer raised: cb=%r persona=%s track=%s pulse=%s",
+                    cb, persona_id, track_id, pulse_id,
                 )
 
     def add_track_activated_observer(
@@ -445,8 +452,14 @@ class TrackManager:
             self._cancel_wait_response_timeout(displaced_id)
         # 新たに running になった Track が wait_response 型なら自動 pause タイマーを予約。
         self._schedule_wait_response_timeout(track)
-        # Notify status change observers (commit/close 完了後、別 session 不要なため)
-        self._notify_status_change(track.persona_id, pulse_id)
+        # 押し出された Track にも status_change を通知 (pulse_dispatch.md §6.2:
+        # 進行中 Pulse の cancel 経路。押し出された Track の Pulse は意味を失うので
+        # PulseController の observer が cancel する)。
+        for displaced_id in displaced_track_ids:
+            self._notify_status_change(track.persona_id, displaced_id, pulse_id)
+        # Notify status change observers for the activated track itself
+        # (commit/close 完了後、別 session 不要なため)
+        self._notify_status_change(track.persona_id, track_id, pulse_id)
         # Notify track_activated observers (pulse_dispatch.md §5)
         # Handler 側が _inject_track_context や Pulse 起動を担う統一経路。
         self._notify_track_activated(track.persona_id, track, pulse_id)
@@ -521,7 +534,7 @@ class TrackManager:
         self._schedule_waiting_timeout(track)
         # running → waiting なら wait_response タイマーは不要 → 解除
         self._cancel_wait_response_timeout(track_id)
-        self._notify_status_change(track.persona_id, pulse_id)
+        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     # ------------------------------------------------------------------
@@ -832,7 +845,7 @@ class TrackManager:
             db.close()
         # Phase 4-e: waiting timeout 予約をキャンセル
         self._cancel_waiting_timeout(track_id)
-        self._notify_status_change(track.persona_id, pulse_id)
+        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     def complete(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
@@ -860,7 +873,7 @@ class TrackManager:
         finally:
             db.close()
         self._cancel_wait_response_timeout(track_id)
-        self._notify_status_change(track.persona_id, pulse_id)
+        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     def abort(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
@@ -892,7 +905,7 @@ class TrackManager:
         # Phase 4-e: waiting timeout 予約をキャンセル (waiting でなくても無害)
         self._cancel_waiting_timeout(track_id)
         self._cancel_wait_response_timeout(track_id)
-        self._notify_status_change(track.persona_id, pulse_id)
+        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     def set_alert(
@@ -1080,7 +1093,7 @@ class TrackManager:
         # Phase 4-e: waiting フィールドをクリアした時は EventScheduler の予約も外す
         if clear_waiting_fields:
             self._cancel_waiting_timeout(track_id)
-        self._notify_status_change(track.persona_id, pulse_id)
+        self._notify_status_change(track.persona_id, track_id, pulse_id)
         return track
 
     def _set_forgotten(self, track_id: str, value: bool) -> ActionTrack:

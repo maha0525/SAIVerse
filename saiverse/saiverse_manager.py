@@ -411,6 +411,13 @@ class SAIVerseManager(
         # Pulse controller for managing concurrent playbook executions
         self.pulse_controller: PulseController = PulseController(self.sea_runtime)
 
+        # pulse_dispatch.md §6.2: Track 状態変化で current pulse を cancel する経路。
+        # メタ判断結果として Track が pending に押し出された場合、その Track 起点の
+        # 進行中 Pulse は意味を失うので cancellation_token.cancel() で止める。
+        self.track_manager.add_status_change_observer(
+            self.pulse_controller.on_track_status_change
+        )
+
         # Stop event registry for user-initiated generation cancellation
         self._active_stop_events: Dict[str, threading.Event] = {}
 
@@ -1316,7 +1323,7 @@ class SAIVerseManager(
     # ------------------------------------------------------------------
 
     def _promote_meta_judgment_in_pulse(
-        self, persona_id: str, pulse_id: Optional[str]
+        self, persona_id: str, track_id: str, pulse_id: Optional[str]
     ) -> None:
         """TrackManager の状態遷移 hook で呼ばれる。
 
@@ -1325,6 +1332,10 @@ class SAIVerseManager(
         方式のメタ判断でも Intent A v0.14 [B] 移動の「分岐ターンをそのまま残す」
         を実現する (Track 切替 = メタ判断の確定 → 移動先 Track の冒頭来歴として
         メインキャッシュに残るべき)。
+
+        ``track_id`` は状態変化が起きた Track の id (signature 拡張、本処理では
+        未使用だが PulseController._on_track_status_change 等の他 observer は
+        利用する: pulse_dispatch.md §6.2)。
 
         - ``pulse_id`` が None (CLI / テスト) の場合は何もしない (該当 Pulse 不在)。
         - ペルソナがメモリにロードされていない場合も skip。

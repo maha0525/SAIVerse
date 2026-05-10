@@ -464,10 +464,12 @@ class MetaLayer:
         - Playbook 内の judge ノードが構造化出力を生成 → finalize ツールが
           Spell 整形・実行・SAIMemory 書き込みを行う
         """
-        runtime = getattr(self.manager, "sea_runtime", None)
-        if runtime is None:
+        # pulse_dispatch.md §6.3 案 A: メタ判断は PulseController 経由で
+        # 並列レーンとして起動する (旧: runtime.run_meta_user 直叩き)。
+        pulse_controller = getattr(self.manager, "pulse_controller", None)
+        if pulse_controller is None:
             logging.warning(
-                "[meta-layer] No sea_runtime on manager — cannot run meta_judgment Playbook; "
+                "[meta-layer] No pulse_controller on manager — cannot run meta_judgment Playbook; "
                 "falling back to legacy path"
             )
             self._run_judgment(persona, alert_track_id, context)
@@ -595,14 +597,13 @@ class MetaLayer:
                     _errors.append(ev)
 
             try:
-                runtime.run_meta_user(
-                    persona,
-                    user_input=None,
+                # pulse_dispatch.md §6.3 案 A: PulseController 経由で並列レーン起動
+                pulse_controller.submit_meta_judgment(
+                    persona_id=persona.persona_id,
                     building_id=building_id,
                     meta_playbook=playbook_name,
                     args=args,
                     event_callback=_capture_event,
-                    pulse_type="meta_judgment",
                 )
             except Exception as exc:
                 last_failure_reason = f"runtime exception: {exc!r}"

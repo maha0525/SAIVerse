@@ -67,6 +67,17 @@ EXECUTION_TYPES: Dict[str, ExecutionType] = {
         same_priority_policy="first",
         on_blocked="skip",
     ),
+    # pulse_dispatch.md §4.3 / §6: メタ判断は priority 体系外の並列レーン。
+    # 他 Pulse と並列で動き、中断対象にならず、他 Pulse を中断もしない。
+    # 同一ペルソナ内の直列化は MetaLayer の per-persona Lock が担う。
+    # priority / same_priority_policy / on_blocked のフィールドはダミー値
+    # (submit() が type=meta_judgment を別レーンで処理するため未使用)。
+    "meta_judgment": ExecutionType(
+        name="meta_judgment",
+        priority=Priority.USER,  # ダミー (並列レーンで管理外)
+        same_priority_policy="first",
+        on_blocked="skip",
+    ),
 }
 
 
@@ -128,9 +139,16 @@ class PulseController:
         self.sea_runtime = sea_runtime
 
         # Per-persona state
+        # メインレーン (USER/SCHEDULE/AUTO/autonomy): priority 体系で管理、
+        # 同一ペルソナで同時に 1 本のみ
         self._current: Dict[str, ExecutionRequest] = {}  # persona_id -> running request
         self._queues: Dict[str, List[ExecutionRequest]] = {}  # persona_id -> pending queue
         self._locks: Dict[str, threading.RLock] = {}  # persona_id -> lock
+        # メタ判断レーン (META_JUDGMENT): pulse_dispatch.md §4.3 / §6 の並列レーン。
+        # メインレーンと並列で動き、中断対象外 / 他を中断しない。
+        # 同一ペルソナ内の直列化は MetaLayer の per-persona Lock に委ねる
+        # (PulseController レベルでは並列性を保証するだけ)。
+        self._current_meta: Dict[str, ExecutionRequest] = {}
 
         # Interrupt callbacks: called when auto execution is interrupted by user
         # Signature: callback(persona_id: str, interrupted_by: str) -> None
@@ -163,14 +181,19 @@ class PulseController:
     
     def submit(self, request: ExecutionRequest) -> Optional[List[str]]:
         """Submit an execution request for processing.
-        
+
         Returns:
             List of output strings if executed, None if skipped
-            
+
         Note: Lock is held only during state checks and updates, NOT during
         actual LLM execution. This allows higher priority requests to send
         cancellation signals immediately.
         """
+        # pulse_dispatch.md §4.3 / §6: メタ判断は並列レーンで処理する。
+        # priority 体系をスキップして他 Pulse と独立に走る。
+        if request.type == "meta_judgment":
+            return self._submit_meta_lane(request)
+
         persona_id = request.persona_id
         lock = self._get_lock(persona_id)
         
@@ -443,6 +466,110 @@ class PulseController:
         return occupants.get(building_id, [])
     
     # Convenience methods for callers
+    # ------------------------------------------------------------------
+    # メタ判断並列レーン (pulse_dispatch.md §4.3 / §6)
+    # ------------------------------------------------------------------
+
+    def _submit_meta_lane(self, request: ExecutionRequest) -> Optional[List[str]]:
+        """メタ判断レーン: priority 体系外の並列実行。
+
+        メインレーンと独立に走り、中断対象外 / 他 Pulse を中断もしない。
+        同一ペルソナの直列化は MetaLayer の per-persona Lock が担う前提で、
+        ここでは並列性 (= メインレーンを止めない) を保証するだけ。
+        """
+        persona_id = request.persona_id
+        # 念のため簡易な多重防御 (MetaLayer Lock とは独立)。先行メタ判断が
+        # 動いているのに重ねて submit が来たら警告を出す。
+        if self._current_meta.get(persona_id) is not None:
+            LOGGER.warning(
+                "[PulseController] Meta-judgment already running for persona %s; "
+                "MetaLayer Lock should serialize but observed concurrent submit",
+                persona_id,
+            )
+        self._current_meta[persona_id] = request
+
+        try:
+            return self._do_execute(request)
+        except ExecutionCancelledException as e:
+            LOGGER.info(
+                "[PulseController] Meta-judgment cancelled for persona %s, interrupted_by=%s",
+                persona_id, e.interrupted_by,
+            )
+            return []
+        except LLMError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "[PulseController] Meta-judgment error for persona %s",
+                persona_id,
+            )
+            return []
+        finally:
+            if self._current_meta.get(persona_id) is request:
+                del self._current_meta[persona_id]
+
+    def submit_meta_judgment(
+        self,
+        persona_id: str,
+        building_id: str,
+        meta_playbook: str,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Optional[List[str]]:
+        """メタ判断 Pulse を並列レーンで起動する。
+
+        priority 体系の外側で動くので、メインレーンの Pulse を中断しない。
+        MetaLayer から呼ばれる前提 (pulse_dispatch.md §6.3 案 A: PulseController
+        経由で統一)。
+        """
+        request = ExecutionRequest(
+            type="meta_judgment",
+            persona_id=persona_id,
+            building_id=building_id,
+            user_input=None,
+            meta_playbook=meta_playbook,
+            args=args,
+            event_callback=event_callback,
+        )
+        return self.submit(request)
+
+    # ------------------------------------------------------------------
+    # Track 状態変化 → current pulse cancel 経路 (pulse_dispatch.md §6.2)
+    # ------------------------------------------------------------------
+
+    def on_track_status_change(
+        self,
+        persona_id: str,
+        track_id: str,
+        pulse_id: Optional[str],
+    ) -> None:
+        """TrackManager.add_status_change_observer 経由で呼ばれる。
+
+        メタ判断結果による Track 状態変化 (例: 自律 Track が pending に押し
+        出される) を受けて、その Track 起点の進行中 Pulse (メインレーン) を
+        ``cancellation_token.cancel()`` で止める。
+
+        メタ判断レーン (_current_meta) は対象外: メタ判断 Pulse 自身が起こした
+        状態変化で自分を cancel する事故を避けるため。
+        """
+        current = self._current.get(persona_id)
+        if current is None:
+            return
+        if current.origin_track_id != track_id:
+            return
+        if current.cancellation_token.is_cancelled():
+            return
+        LOGGER.info(
+            "[PulseController] Track %s status changed; cancelling current pulse "
+            "(persona=%s pulse_id=%s type=%s)",
+            track_id, persona_id, current.pulse_id, current.type,
+        )
+        current.cancellation_token.cancel(interrupted_by="track_status_change")
+
+    # ------------------------------------------------------------------
+    # Convenience methods for callers
+    # ------------------------------------------------------------------
+
     def submit_user(
         self,
         persona_id: str,
