@@ -35,7 +35,8 @@ from ..track_manager import (
 
 
 # メインライン応答を起動するための closure シグネチャ。
-MainLineInvoker = Callable[[], Any]
+# 引数: 起点 Track の id (None なら SEA 側で get_running フォールバック)
+MainLineInvoker = Callable[[Optional[str]], Any]
 
 
 class UserConversationTrackHandler:
@@ -211,11 +212,14 @@ class UserConversationTrackHandler:
                     persona_id,
                 )
                 return
-            history_manager.add_to_persona_only({
-                "role": "user",
-                "content": formatted,
-                "metadata": {"tags": ["conversation", "track_context"]},
-            })
+            history_manager.add_to_persona_only(
+                {
+                    "role": "user",
+                    "content": formatted,
+                    "metadata": {"tags": ["conversation", "track_context"]},
+                },
+                origin_track_id=track.track_id,
+            )
             logging.info(
                 "[user-conv-handler] Injected track context for track=%s persona=%s "
                 "(SAIMemory user message, tags=conversation+track_context)",
@@ -325,5 +329,8 @@ class UserConversationTrackHandler:
                     track.track_id, updated.status,
                 )
 
-        # メインライン応答は分岐によらず必ず起動する
-        invoke_main_line()
+        # メインライン応答は分岐によらず必ず起動する。
+        # Track id を渡して SEA 側の Pulse-root を Track-bound にする
+        # (pending/alert のままでもメッセージが Track 文脈で永続化される、
+        # handoff_2026-05-10)。
+        invoke_main_line(track.track_id)

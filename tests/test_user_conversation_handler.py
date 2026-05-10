@@ -134,7 +134,7 @@ def test_running_track_invokes_main_line_without_alert(handler, tm, persona, man
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "おはよう"},
-        invoke_main_line=lambda: invoked.append(True),
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
     assert invoked == [True]
     # alert observer は呼ばれない (Track が新規 running なので)
@@ -163,7 +163,7 @@ def test_subsequent_utterance_on_running_track_no_inject_no_alert(handler, tm, p
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "二回目"},
-        invoke_main_line=lambda: invoked.append(True),
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
     assert invoked == [True]
     assert alert_observer_calls == []
@@ -192,7 +192,7 @@ def test_pending_track_triggers_alert_then_main_line(handler, tm, persona, manag
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "話しかけた"},
-        invoke_main_line=lambda: invoked.append(True),
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
     assert len(alert_observer_calls) == 1
     assert invoked == [True]
@@ -221,7 +221,7 @@ def test_pending_track_with_metalayer_activating_injects_track_context(
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "話しかけた"},
-        invoke_main_line=lambda: None,
+        invoke_main_line=lambda *_a, **_kw: None,
     )
     # MetaLayer が activate したので running になっている
     assert tm.get(track.track_id).status == STATUS_RUNNING
@@ -245,7 +245,7 @@ def test_main_line_invoked_even_if_alert_observer_raises(handler, tm, persona, m
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "x"},
-        invoke_main_line=lambda: invoked.append(True),
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
     assert invoked == [True]
 
@@ -260,7 +260,7 @@ def test_alert_status_after_handler_pending_path(handler, tm, persona, manager_s
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "x"},
-        invoke_main_line=lambda: None,
+        invoke_main_line=lambda *_a, **_kw: None,
     )
     assert tm.get(track.track_id).status == STATUS_ALERT
 
@@ -277,6 +277,6 @@ def test_handler_works_without_manager_just_skips_inject(tm, persona):
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "hi"},
-        invoke_main_line=lambda: invoked.append(True),
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
     assert invoked == [True]

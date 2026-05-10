@@ -60,9 +60,12 @@ class RuntimeEmitters:
                 heard_by_list = list(occupants)
                 if persona.persona_id not in heard_by_list:
                     heard_by_list.append(persona.persona_id)
+                # Pulse-bound origin_track_id (set by run_meta_user). Falls back
+                # to None when emit is invoked outside a Pulse (defensive).
+                pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
                 # SAIMemory: 生のテキスト（<in_heart>タグ・スロット参照含む）を保存
                 # ペルソナが「b:3と書いた」という記憶をそのまま残す
-                persona.history_manager.add_to_persona_only(msg)
+                persona.history_manager.add_to_persona_only(msg, origin_track_id=pulse_track_id)
                 # building_histories / gateway: <in_heart>除去 + スロット参照をUUIDに解決
                 building_content = strip_in_heart(text)
                 item_service = getattr(self.runtime.manager, "item_service", None)
@@ -77,7 +80,8 @@ class RuntimeEmitters:
                 building_content_for_hook = strip_user_only(building_content)
                 building_msg_dict = {**msg, "content": building_content}
                 building_msg = persona.history_manager.add_to_building_only(
-                    building_id, building_msg_dict, heard_by=heard_by_list
+                    building_id, building_msg_dict, heard_by=heard_by_list,
+                    origin_track_id=pulse_track_id,
                 )
                 # BuildingHistory保存完了直後にmessage_idを確定させる。
                 # これにより後続のアドオンツール（TTSなど）が get_active_message_id() で
@@ -174,8 +178,11 @@ class RuntimeEmitters:
             # building_content 自体は UI / 履歴用に <user_only> ラップを保持する。
             building_content_for_hook = strip_user_only(building_content)
             building_msg_for_hist = {**msg, "content": building_content}
+            # Pulse-bound origin_track_id (set by run_meta_user)
+            pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
             building_msg = persona.history_manager.add_to_building_only(
-                building_id, building_msg_for_hist, heard_by=heard_by_list
+                building_id, building_msg_for_hist, heard_by=heard_by_list,
+                origin_track_id=pulse_track_id,
             )
             # BuildingHistory 保存完了直後に message_id を ContextVar に確定させる。
             # 後続のアドオンツール (TTS 等) が get_active_message_id() で正しい ID を
@@ -222,17 +229,22 @@ class RuntimeEmitters:
         adapter = getattr(persona, "sai_memory", None)
         try:
             if adapter and adapter.is_ready():
-                adapter.append_persona_message(
-                    {
-                        "role": "assistant",
-                        "content": text,
-                        "metadata": {"tags": ["internal"]},
-                        # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラムへ。
-                        # 旧 `pulse:{uuid}` タグの併行記録は廃止。
-                        "pulse_id": pulse_id,
-                        "persona_id": persona.persona_id,
-                    }
-                )
+                # Pulse-bound origin_track_id (set by run_meta_user). emit_think
+                # writes through append_persona_message directly so we attach the
+                # key to the dict here (handoff_2026-05-10).
+                pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
+                msg: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": text,
+                    "metadata": {"tags": ["internal"]},
+                    # Phase 3 段階 4-D (2026-05-09): pulse_id 専用カラムへ。
+                    # 旧 `pulse:{uuid}` タグの併行記録は廃止。
+                    "pulse_id": pulse_id,
+                    "persona_id": persona.persona_id,
+                }
+                if pulse_track_id is not None:
+                    msg["origin_track_id"] = pulse_track_id
+                adapter.append_persona_message(msg)
         except Exception:
             LOGGER.warning("think message not stored", exc_info=True)
 

@@ -59,6 +59,20 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
     # Get id_to_name_map for speaker name resolution
     id_to_name_map = getattr(persona, "id_to_name_map", {})
 
+    # Resolve origin_track_id from the persona's currently-running Track so the
+    # ingested messages can be persisted with the correct Track scope. Tool-path
+    # callers come in mid-Pulse, so a running Track is normally present; if not
+    # we leave it None (matches pre-fix behavior).
+    origin_track_id: Optional[str] = None
+    try:
+        track_manager = getattr(manager, "track_manager", None)
+        if track_manager is not None:
+            running = track_manager.get_running(persona_id)
+            if running is not None:
+                origin_track_id = running.track_id
+    except Exception:
+        LOGGER.debug("get_building_messages: failed to resolve running track", exc_info=True)
+
     # Find new messages
     new_msgs: List[Dict[str, Any]] = []
     max_seen_seq = last_cursor
@@ -136,7 +150,7 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
 
-                history_manager.add_to_persona_only(entry)
+                history_manager.add_to_persona_only(entry, origin_track_id=origin_track_id)
                 _mark_ingested(m, persona_id)
                 perceived_count += 1
                 speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
@@ -195,6 +209,8 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                 ts_value = m.get("timestamp")
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
+                # host event は世界の変化通知 = Track 横断のメタログ扱いで
+                # origin_track_id は付けない (handoff_2026-05-10)。
                 history_manager.add_to_persona_only(entry)
                 _mark_ingested(m, persona_id)
                 perceived_count += 1
@@ -218,7 +234,7 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
 
-                history_manager.add_to_persona_only(entry)
+                history_manager.add_to_persona_only(entry, origin_track_id=origin_track_id)
                 _mark_ingested(m, persona_id)
                 perceived_count += 1
                 speaker_counts["ユーザー"] = speaker_counts.get("ユーザー", 0) + 1
@@ -245,11 +261,21 @@ def _mark_ingested(msg: Dict[str, Any], persona_id: str) -> None:
         LOGGER.warning("Failed to mark message as ingested by %s", persona_id, exc_info=True)
 
 
-def auto_ingest_building_messages(persona: Any, manager: Any) -> int:
+def auto_ingest_building_messages(
+    persona: Any,
+    manager: Any,
+    *,
+    origin_track_id: Optional[str] = None,
+) -> int:
     """Automatically ingest new building messages at pulse start.
 
     Mirrors get_building_messages() but takes persona/manager directly
     instead of using tool context vars. Called automatically before each pulse.
+
+    ``origin_track_id`` is forwarded to ``add_to_persona_only`` so the ingested
+    user/assistant/host messages persist with the correct Track scope in
+    SAIMemory (handoff_2026-05-10). The caller (``run_meta_user``) supplies
+    this from the Pulse-bound Track.
 
     Returns the number of messages ingested.
     """
@@ -345,7 +371,7 @@ def auto_ingest_building_messages(persona: Any, manager: Any) -> int:
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
 
-                history_manager.add_to_persona_only(entry)
+                history_manager.add_to_persona_only(entry, origin_track_id=origin_track_id)
                 _mark_ingested(m, persona_id)
                 ingested_count += 1
                 dirty = True
@@ -383,6 +409,8 @@ def auto_ingest_building_messages(persona: Any, manager: Any) -> int:
                 ts_value = m.get("timestamp")
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
+                # host event は世界の変化通知 = Track 横断のメタログ扱いで
+                # origin_track_id は付けない (handoff_2026-05-10)。
                 history_manager.add_to_persona_only(entry)
                 _mark_ingested(m, persona_id)
                 ingested_count += 1
@@ -397,7 +425,7 @@ def auto_ingest_building_messages(persona: Any, manager: Any) -> int:
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
 
-                history_manager.add_to_persona_only(entry)
+                history_manager.add_to_persona_only(entry, origin_track_id=origin_track_id)
                 _mark_ingested(m, persona_id)
                 ingested_count += 1
                 dirty = True

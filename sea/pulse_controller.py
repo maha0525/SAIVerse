@@ -85,6 +85,12 @@ class ExecutionRequest:
     # See docs/intent/persona_cognition/nested_subline_spell.md §13.
     pre_spells: Optional[List[str]] = None
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    # Track id this Pulse is bound to. Set by the Handler that triggered the
+    # Pulse (e.g. UserConversationTrackHandler.on_user_utterance picks the
+    # matching user_conversation Track even when its status is alert/pending,
+    # so messages persist with origin_track_id even when no Track is running).
+    # See docs/intent/persona_cognition/handoff_2026-05-10.md.
+    origin_track_id: Optional[str] = None
     pulse_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
     
@@ -259,6 +265,7 @@ class PulseController:
             metadata=request.metadata,
             meta_playbook=request.meta_playbook,
             event_callback=request.event_callback,
+            origin_track_id=request.origin_track_id,
             is_resumption=True,
             original_prompt=request.user_input,
         )
@@ -351,6 +358,7 @@ class PulseController:
             cancellation_token=request.cancellation_token,
             pulse_type=request.type,
             pre_spells=request.pre_spells,
+            origin_track_id=request.origin_track_id,
         )
     
     def _build_resumption_prompt(self, request: ExecutionRequest) -> str:
@@ -384,7 +392,10 @@ class PulseController:
                     "will_resume": will_resume,
                 },
             }
-            persona.history_manager.add_message(msg, request.building_id, heard_by=None)
+            persona.history_manager.add_message(
+                msg, request.building_id, heard_by=None,
+                origin_track_id=request.origin_track_id,
+            )
         except Exception:
             LOGGER.exception("[PulseController] Failed to record interruption message")
     
@@ -442,6 +453,7 @@ class PulseController:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         pre_spells: Optional[List[str]] = None,
+        origin_track_id: Optional[str] = None,
     ) -> Optional[List[str]]:
         """Submit a user input request."""
         request = ExecutionRequest(
@@ -454,6 +466,7 @@ class PulseController:
             args=args,
             pre_spells=pre_spells,
             event_callback=event_callback,
+            origin_track_id=origin_track_id,
         )
         return self.submit(request)
     

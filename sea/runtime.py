@@ -87,8 +87,15 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
         pre_spells: Optional[List[str]] = None,
+        origin_track_id: Optional[str] = None,
     ) -> List[str]:
-        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI.
+
+        ``origin_track_id`` 指定時はその Track の文脈で Pulse を走らせる。
+        Handler 起動経路 (例: UserConversationTrackHandler) が、pending/alert
+        状態の Track でも文脈を保持するために渡してくる。
+        未指定時は ``_resolve_pulse_root_line`` が ``get_running`` で取りに行く。
+        """
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
@@ -96,7 +103,18 @@ class SEARuntime:
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
 
-        # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入
+        # Resolve Pulse-root track_id up-front so downstream injectors
+        # (DynamicState event message, building auto-ingest, emit_*) can all
+        # tag their writes with the Track scope. Caller-supplied origin_track_id
+        # wins; otherwise falls back to ``get_running``. Same resolver as the
+        # one used for push_line below.
+        _root_role, _root_track_id = self._resolve_pulse_root_line(
+            persona, override_track_id=origin_track_id,
+        )
+
+        # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入。
+        # event_message は世界の変化通知 = Track 横断のメタログなので
+        # origin_track_id は付けない (handoff_2026-05-10)。
         try:
             from saiverse.dynamic_state import DynamicStateManager
             DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
@@ -107,7 +125,7 @@ class SEARuntime:
         # （ユーザーメッセージは manager が事前に building_histories へ追加済み）
         try:
             from builtin_data.tools.get_building_messages import auto_ingest_building_messages
-            auto_ingest_building_messages(persona, self.manager)
+            auto_ingest_building_messages(persona, self.manager, origin_track_id=_root_track_id)
         except Exception:
             LOGGER.exception("[auto_ingest] Failed in run_meta_user")
 
@@ -142,19 +160,25 @@ class SEARuntime:
         effective_args = dict(args or {})
         if user_input and "input" not in effective_args:
             effective_args["input"] = user_input
-        # Resolve Pulse-root entry-line from the persona's currently-running Track
-        # (Intent A v0.14, Intent B v0.11). Same-Persona invariant 1 guarantees
-        # at most one running Track, so this maps unambiguously.
-        _root_role, _root_track_id = self._resolve_pulse_root_line(persona)
-        result = self._run_playbook(
-            playbook, persona, building_id, user_input,
-            auto_mode=False, record_history=True, event_callback=event_callback,
-            cancellation_token=cancellation_token, pulse_type=pulse_type,
-            initial_params=effective_args if effective_args else None,
-            pulse_line_role=_root_role,
-            pulse_line_track_id=_root_track_id,
-            pre_spells=pre_spells,
-        )
+        # ``_root_role`` / ``_root_track_id`` were resolved up-front (above the
+        # injector calls). Pulse 中に emit_speak/emit_say/emit_think などの
+        # emitter 経路から書き込まれるメッセージにも origin_track_id を付与する
+        # ため、persona に一時保持する。emitters 側はここから読む。
+        # run_meta_user 終了時に finally でクリアする (handoff_2026-05-10)。
+        prev_pulse_track = getattr(persona, "_current_pulse_origin_track_id", None)
+        persona._current_pulse_origin_track_id = _root_track_id
+        try:
+            result = self._run_playbook(
+                playbook, persona, building_id, user_input,
+                auto_mode=False, record_history=True, event_callback=event_callback,
+                cancellation_token=cancellation_token, pulse_type=pulse_type,
+                initial_params=effective_args if effective_args else None,
+                pulse_line_role=_root_role,
+                pulse_line_track_id=_root_track_id,
+                pre_spells=pre_spells,
+            )
+        finally:
+            persona._current_pulse_origin_track_id = prev_pulse_track
 
         # Post-response metabolism check
         bh_before = len(self.manager.building_histories.get(building_id, []))
@@ -172,26 +196,47 @@ class SEARuntime:
         return result
 
     # ---------------- helpers -----------------
-    def _resolve_pulse_root_line(self, persona: Any) -> Tuple[Optional[str], Optional[str]]:
+    def _resolve_pulse_root_line(
+        self,
+        persona: Any,
+        *,
+        override_track_id: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
         """Resolve (entry_line_role, track_id) for the persona's current Pulse root.
 
-        Reads the running Track via TrackManager.get_running (Intent A invariant
-        1: at most one running Track per persona) and looks up its
-        entry_line_role from track_metadata. Returns (None, None) when there's
-        no TrackManager wired up, no persona_id, no running Track, or the
-        lookup fails — the runtime falls back to "no push_line" in that case
-        (line_role stays NULL on stored messages, which matches pre-v0.11
-        behavior).
+        Resolution order:
+        1. ``override_track_id`` if supplied — Handler-driven path. The Track
+           may be in any status (running / alert / pending), but we still
+           anchor messages to it so SAIMemory queries can find them
+           (handoff_2026-05-10).
+        2. ``track_manager.get_running`` — legacy Same-Persona invariant 1
+           path: at most one running Track per persona.
+
+        Returns (None, None) when neither resolves — runtime then skips
+        ``push_line`` and stored messages get NULL line_role/origin_track_id
+        (pre-v0.11 behavior).
         """
         try:
             track_manager = getattr(self.manager, "track_manager", None)
             if track_manager is None:
                 return None, None
+            if override_track_id:
+                role = track_manager.get_entry_line_role(override_track_id)
+                LOGGER.debug(
+                    "[runtime] _resolve_pulse_root_line override: track_id=%s role=%s",
+                    override_track_id, role,
+                )
+                return role, override_track_id
             persona_id = getattr(persona, "persona_id", None)
             if not persona_id:
                 return None, None
             running = track_manager.get_running(persona_id)
             if running is None:
+                LOGGER.debug(
+                    "[runtime] _resolve_pulse_root_line: no running Track for persona=%s "
+                    "(messages will be stored with NULL origin_track_id)",
+                    persona_id,
+                )
                 return None, None
             role = track_manager.get_entry_line_role(running.track_id)
             return role, running.track_id

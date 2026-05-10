@@ -518,8 +518,14 @@ class SAIVerseManager(
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None) -> List[str]:
-        """Run user input via PulseController."""
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None, origin_track_id: Optional[str] = None) -> List[str]:
+        """Run user input via PulseController.
+
+        ``origin_track_id`` 指定時はその Track 文脈の Pulse として走る。
+        UserConversationTrackHandler が pending/alert 状態の Track でも文脈を
+        保持できるよう、Handler 起動経路から渡される。未指定時は SEA runtime が
+        ``get_running`` フォールバックで解決する。
+        """
         try:
             result = self.pulse_controller.submit_user(
                 persona_id=persona.persona_id,
@@ -530,6 +536,7 @@ class SAIVerseManager(
                 args=args,
                 event_callback=event_callback,
                 pre_spells=pre_spells,
+                origin_track_id=origin_track_id,
             )
             return result if result else []
         except LLMError:

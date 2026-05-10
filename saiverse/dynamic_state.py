@@ -413,6 +413,11 @@ class DynamicStateManager:
     def maybe_inject_event_messages(persona: Any, manager: Any) -> bool:
         """C ≠ B なら会話履歴にイベントメッセージを挿入し、Bを更新する。
 
+        event_message は世界の変化通知 (誰の Pulse 中に届くかは偶然) であり
+        本質的に Track 横断のメタログ。``origin_track_id`` は **意図的に NULL**
+        のまま書く。Track 紐付けはしない (handoff_2026-05-10、
+        メタ判断系 line_role=meta_judgment と同じ扱い)。
+
         Returns:
             True if an event message was injected.
         """
@@ -457,13 +462,14 @@ class DynamicStateManager:
                 persona_id, building_id, len(changes),
             )
 
-            message = {
+            message: Dict[str, Any] = {
                 "role": "user",
                 "content": f"<system>{msg_text}</system>",
                 "metadata": {
                     "tags": ["internal", "event_message"],
                 },
             }
+            # origin_track_id は意図的に付けない (Track 横断のメタログ扱い)
             sai_mem.append_persona_message(message)
 
             DynamicStateManager.save_last_notified(persona_id, building_id, c, db)

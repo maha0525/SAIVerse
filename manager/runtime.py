@@ -426,8 +426,11 @@ class RuntimeService(
         for persona in responding_personas:
             captured_persona = persona
 
-            def _invoke_main_line(p=captured_persona):
-                self.manager.run_sea_user(p, building_id, message)
+            def _invoke_main_line(track_id: Optional[str] = None, p=captured_persona):
+                self.manager.run_sea_user(
+                    p, building_id, message,
+                    origin_track_id=track_id,
+                )
 
             try:
                 self.manager.user_conversation_handler.on_user_utterance(
@@ -542,7 +545,7 @@ class RuntimeService(
                     # Handler が Track 状態判定 / alert 遷移 (→ MetaLayer) → invoke_main_line で SEA 起動
                     captured_persona = persona
 
-                    def _invoke_main_line(p=captured_persona):
+                    def _invoke_main_line(track_id: Optional[str] = None, p=captured_persona):
                         self.manager.run_sea_user(
                             p, building_id, message,
                             metadata=metadata,
@@ -550,6 +553,7 @@ class RuntimeService(
                             args=args,
                             event_callback=_enrich_event,
                             pre_spells=pre_spells,
+                            origin_track_id=track_id,
                         )
 
                     try:

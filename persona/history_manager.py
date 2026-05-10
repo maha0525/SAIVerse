@@ -107,13 +107,26 @@ class HistoryManager:
         data.extend(msgs)
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    def _prepare_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        """Ensures a message has a timestamp and persona_id if applicable."""
+    def _prepare_message(
+        self,
+        msg: Dict[str, Any],
+        *,
+        origin_track_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Ensures a message has a timestamp and persona_id if applicable.
+
+        ``origin_track_id`` is forwarded to SAIMemory's ``messages.origin_track_id``
+        column via ``_sync_to_memory`` → ``append_persona_message`` (which reads
+        the key from the message dict). Explicit msg-level key wins; the argument
+        only fills in when not pre-set.
+        """
         new_msg = msg.copy()
         if "timestamp" not in new_msg:
             new_msg["timestamp"] = datetime.now().isoformat()
         if new_msg.get("role") == "assistant" and "persona_id" not in new_msg:
             new_msg["persona_id"] = self.persona_id
+        if origin_track_id is not None and "origin_track_id" not in new_msg:
+            new_msg["origin_track_id"] = origin_track_id
         metadata = new_msg.get("metadata")
         if metadata is not None:
             if isinstance(metadata, dict):
@@ -244,13 +257,18 @@ class HistoryManager:
         building_id: str,
         *,
         heard_by: Optional[List[str]] = None,
+        origin_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Adds a message to both persona and building history.
 
         Returns the saved building message dict (including confirmed message_id).
         Callers can use the returned message_id to associate addon metadata.
+
+        ``origin_track_id``: Track ID this message belongs to. Forwarded to
+        ``messages.origin_track_id`` column in SAIMemory so Track-scoped queries
+        (Track Chronicle, last-message timestamp, history filters) can find it.
         """
-        prepared_msg = self._prepare_message(msg)
+        prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
 
         # Add audience metadata for SAIMemory
         if heard_by:
@@ -288,6 +306,7 @@ class HistoryManager:
         msg: Dict[str, str],
         *,
         heard_by: Optional[List[str]] = None,
+        origin_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Adds a message only to a specific building's history.
 
@@ -295,7 +314,7 @@ class HistoryManager:
         Returns the saved building message dict (including confirmed message_id) so
         callers can associate addon metadata (same contract as add_message).
         """
-        prepared_msg = self._prepare_message(msg)
+        prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
         hist = self.building_histories.setdefault(building_id, [])
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
@@ -303,9 +322,14 @@ class HistoryManager:
         self._mark_modified(building_id)
         return building_msg
 
-    def add_to_persona_only(self, msg: Dict[str, str]) -> None:
+    def add_to_persona_only(
+        self,
+        msg: Dict[str, str],
+        *,
+        origin_track_id: Optional[str] = None,
+    ) -> None:
         """Adds a message only to the persona's main history."""
-        prepared_msg = self._prepare_message(msg)
+        prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
         self.messages.append(prepared_msg)
         self._ensure_size_limit(self.messages, self.persona_log_path)
         self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
