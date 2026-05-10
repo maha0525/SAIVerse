@@ -54,10 +54,16 @@ def tm(session_factory):
 
 @pytest.fixture
 def manager_stub(persona):
-    """history_manager.add_to_persona_only を mock した最小限の manager スタブ。"""
+    """history_manager.add_to_persona_only と manager.run_sea_user を mock した最小限の manager スタブ。
+
+    pulse_dispatch.md §9.3 段階 3 で on_track_activated hook 経由の main_line
+    Pulse 起動を導入したため、テストでは ``mgr.run_sea_user`` の呼び出し回数を
+    検証することで Pulse 起動の有無を確認する。
+    """
     history_manager = MagicMock()
     persona_obj = MagicMock()
     persona_obj.history_manager = history_manager
+    persona_obj.current_building_id = "test_building"
     mgr = MagicMock()
     mgr.personas = {persona: persona_obj}
     return mgr, history_manager
@@ -126,9 +132,10 @@ def test_build_track_context_includes_required_sections(handler, tm, persona):
 # on_user_utterance: running 経路
 # ---------------------------------------------------------------------------
 
-def test_running_track_invokes_main_line_without_alert(handler, tm, persona, manager_stub):
-    """初回会話: Track 作成 → running → main line 直接 + Track コンテキスト初回注入。"""
-    _mgr, history_manager = manager_stub
+def test_first_utterance_creates_track_and_starts_pulse_via_hook(handler, tm, persona, manager_stub):
+    """初回会話: Track 作成 → activate → on_track_activated hook 経由で
+    Track コンテキスト注入 + main_line Pulse 起動 (invoke_main_line は呼ばれない)。"""
+    mgr, history_manager = manager_stub
 
     alert_observer_calls = []
     tm.add_alert_observer(
@@ -142,22 +149,27 @@ def test_running_track_invokes_main_line_without_alert(handler, tm, persona, man
         event={"role": "user", "content": "おはよう"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
-    assert invoked == [True]
+    # 新規作成時は hook 経由なので invoke_main_line ハードコードは呼ばれない
+    assert invoked == []
     # alert observer は呼ばれない (Track が新規 running なので)
     assert alert_observer_calls == []
-    # 新規作成時は Track コンテキスト注入が行われる
+    # hook 内で Track コンテキスト注入が行われる
     history_manager.add_to_persona_only.assert_called_once()
     args, _kwargs = history_manager.add_to_persona_only.call_args
     assert args[0]["role"] == "user"
     assert "Track 切替通知" in args[0]["content"]
     assert "<system>" in args[0]["content"]
+    # hook 内で main_line Pulse が起動される
+    mgr.run_sea_user.assert_called_once()
 
 
-def test_subsequent_utterance_on_running_track_no_inject_no_alert(handler, tm, persona, manager_stub):
-    """既存 running Track への発話: Track コンテキスト注入なし、alert なし。"""
-    _mgr, history_manager = manager_stub
-    handler.get_or_create_track(persona, "1")  # 1 回目で running になる
+def test_subsequent_utterance_on_running_track_uses_invoke_main_line(handler, tm, persona, manager_stub):
+    """既存 running Track への発話: 直接経路 (1-A) で invoke_main_line を呼ぶ。
+    hook は走らない (activate が起きないので)、注入なし。"""
+    mgr, history_manager = manager_stub
+    handler.get_or_create_track(persona, "1")  # 1 回目で running 化 + hook 経由 Pulse 起動
     history_manager.reset_mock()  # 1 回目の注入呼び出しをクリア
+    mgr.run_sea_user.reset_mock()  # 1 回目の hook 経由 Pulse 起動をクリア
 
     alert_observer_calls = []
     tm.add_alert_observer(
@@ -171,22 +183,27 @@ def test_subsequent_utterance_on_running_track_no_inject_no_alert(handler, tm, p
         event={"role": "user", "content": "二回目"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
+    # 既存 running の場合は直接経路で invoke_main_line が呼ばれる
     assert invoked == [True]
     assert alert_observer_calls == []
-    # 既存 running セッション継続なので注入なし
+    # 既存 running セッション継続なので注入なし、hook 経由 Pulse 起動もなし
     history_manager.add_to_persona_only.assert_not_called()
+    mgr.run_sea_user.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
 # on_user_utterance: alert 経路
 # ---------------------------------------------------------------------------
 
-def test_pending_track_triggers_alert_then_main_line(handler, tm, persona, manager_stub):
-    """Track が pending → alert 遷移 + main line 起動 (MetaLayer は activate しない想定)。"""
-    _mgr, history_manager = manager_stub
+def test_pending_track_triggers_alert_no_response_when_not_activated(handler, tm, persona, manager_stub):
+    """Track が pending → alert 遷移後 MetaLayer が activate しない場合、
+    新仕様 (pulse_dispatch.md §4.2) では応答しない。
+    invoke_main_line のハードコード起動は廃止された (§9.3 段階 3)。"""
+    mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)  # running -> pending
     history_manager.reset_mock()  # 初回注入をクリア
+    mgr.run_sea_user.reset_mock()  # 初回 hook 経由 Pulse 起動をクリア
 
     alert_observer_calls = []
     tm.add_alert_observer(
@@ -201,21 +218,25 @@ def test_pending_track_triggers_alert_then_main_line(handler, tm, persona, manag
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
     assert len(alert_observer_calls) == 1
-    assert invoked == [True]
+    # 熟慮経路: invoke_main_line ハードコード廃止 + activate されていないので応答なし
+    assert invoked == []
+    assert mgr.run_sea_user.call_count == 0
     # MetaLayer (= alert observer) が activate しないので Track は alert のまま
-    # → running への遷移なし → コンテキスト注入なし
+    # → running への遷移なし → hook 走らず、コンテキスト注入もなし
     assert tm.get(track.track_id).status == STATUS_ALERT
     history_manager.add_to_persona_only.assert_not_called()
 
 
-def test_pending_track_with_metalayer_activating_injects_track_context(
+def test_pending_track_with_metalayer_activating_starts_pulse_via_hook(
     handler, tm, persona, manager_stub
 ):
-    """pending → MetaLayer が activate して running になれば Track コンテキスト注入される。"""
-    _mgr, history_manager = manager_stub
+    """pending → MetaLayer が activate して running になれば、on_track_activated hook 経由で
+    Track コンテキスト注入 + main_line Pulse 起動が行われる (新仕様 §9.3 段階 3)。"""
+    mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
     history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
 
     # MetaLayer の代わりに、alert observer で activate を行う
     def mock_metalayer(pid, tid, ctx):
@@ -231,15 +252,18 @@ def test_pending_track_with_metalayer_activating_injects_track_context(
     )
     # MetaLayer が activate したので running になっている
     assert tm.get(track.track_id).status == STATUS_RUNNING
-    # → Track コンテキスト注入が行われる
+    # → hook 経由で Track コンテキスト注入と main_line Pulse 起動が行われる
     history_manager.add_to_persona_only.assert_called_once()
+    mgr.run_sea_user.assert_called_once()
 
 
-def test_main_line_invoked_even_if_alert_observer_raises(handler, tm, persona, manager_stub):
-    """alert observer が例外を出しても main line は起動される。"""
-    _mgr, _hm = manager_stub
+def test_alert_observer_raise_does_not_propagate(handler, tm, persona, manager_stub):
+    """alert observer が例外を出しても on_user_utterance は例外を伝播しない。
+    新仕様では activate されないので Pulse 起動もしないが、エラーで落ちないことを確認。"""
+    mgr, _hm = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
+    mgr.run_sea_user.reset_mock()
 
     def bad_observer(*args):
         raise RuntimeError("boom")
@@ -247,13 +271,16 @@ def test_main_line_invoked_even_if_alert_observer_raises(handler, tm, persona, m
     tm.add_alert_observer(bad_observer)
 
     invoked = []
+    # 例外伝播しないこと
     handler.on_user_utterance(
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "x"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
-    assert invoked == [True]
+    # activate されないので invoke_main_line も hook も呼ばれない
+    assert invoked == []
+    assert mgr.run_sea_user.call_count == 0
 
 
 def test_alert_status_after_handler_pending_path(handler, tm, persona, manager_stub):
@@ -275,14 +302,19 @@ def test_alert_status_after_handler_pending_path(handler, tm, persona, manager_s
 # manager 未指定でも動く (テスト容易性 / 後方互換性のため)
 # ---------------------------------------------------------------------------
 
-def test_handler_works_without_manager_just_skips_inject(tm, persona):
-    """manager=None でもエラーにならず、注入だけスキップされる。"""
+def test_handler_works_without_manager_just_skips(tm, persona):
+    """manager=None でもエラーにならない。新仕様では hook 経由の起動もスキップされる
+    (manager 無しなので Pulse 起動経路は機能しないが例外で落ちない)。"""
     h = UserConversationTrackHandler(track_manager=tm, manager=None)
+    tm.add_track_activated_observer(h.on_track_activated)
     invoked = []
+    # 例外伝播しないことが重要
     h.on_user_utterance(
         persona_id=persona,
         user_id="1",
         event={"role": "user", "content": "hi"},
         invoke_main_line=lambda *_a, **_kw: invoked.append(True),
     )
-    assert invoked == [True]
+    # manager=None かつ新規作成 → hook は走るが _start_main_line_pulse / _inject_track_context が
+    # WARN 出してスキップ。invoke_main_line も新仕様では was_newly_created=True 時には呼ばれない。
+    assert invoked == []

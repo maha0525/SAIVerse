@@ -250,9 +250,10 @@ class UserConversationTrackHandler:
         TrackManager.activate 末尾で全 track_activated observer に通知される。
         本 Handler は user_conversation 種別の Track のみ反応する。
 
-        責務 (pulse_dispatch.md §5.2 + 段階 2):
+        責務 (pulse_dispatch.md §5.2 + 段階 2 + 段階 3):
         - Track 切替通知の SAIMemory 注入 (``_inject_track_context``)
-        - 段階 3 で main_line Pulse 起動も担当する予定
+        - main_line Pulse 起動 (空 ``user_input``、building_histories 経由で
+          ユーザー発話は ``auto_ingest_building_messages`` に取り込まれる)
 
         ``pulse_id`` は activate を起こした Pulse の ID (Pulse 外なら None)。
         deferred apply 経路で渡されてくる元のメタ判断 Pulse の id。
@@ -269,6 +270,63 @@ class UserConversationTrackHandler:
         # - ケース2 (自律 tick → metalayer → activate)
         # の両方で同じ経路で通知が出る (pulse_dispatch.md §5.3)
         self._inject_track_context(persona_id, track)
+
+        # main_line Pulse を起動する (pulse_dispatch.md §9.3 段階 3)。
+        # ユーザー発話メッセージは別経路 (building_histories →
+        # auto_ingest_building_messages) で取り込まれるため、user_input は
+        # 空文字列で OK。track_user_conversation Playbook は {input} を
+        # 参照しないので問題なし。
+        self._start_main_line_pulse(persona_id, track)
+
+    def _start_main_line_pulse(self, persona_id: str, track: ActionTrack) -> None:
+        """activate された user_conversation Track 用に main_line Pulse を起動する。
+
+        manager / persona / building_id が揃わないと起動できないので、
+        欠けていれば WARN ログを出してスキップする (起動経路の堅牢性のため)。
+        """
+        if self.manager is None:
+            logging.warning(
+                "[user-conv-handler] Cannot start main_line pulse: manager is None (track=%s)",
+                track.track_id,
+            )
+            return
+        persona = self._lookup_persona(persona_id)
+        if persona is None:
+            logging.warning(
+                "[user-conv-handler] Cannot start main_line pulse: persona not found (%s, track=%s)",
+                persona_id, track.track_id,
+            )
+            return
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            logging.warning(
+                "[user-conv-handler] Cannot start main_line pulse: persona %s has no current_building_id (track=%s)",
+                persona_id, track.track_id,
+            )
+            return
+        run_sea_user = getattr(self.manager, "run_sea_user", None)
+        if run_sea_user is None:
+            logging.warning(
+                "[user-conv-handler] Cannot start main_line pulse: manager.run_sea_user not available (track=%s)",
+                track.track_id,
+            )
+            return
+        try:
+            logging.info(
+                "[user-conv-handler] Starting main_line pulse: persona=%s building=%s track=%s",
+                persona_id, building_id, track.track_id,
+            )
+            run_sea_user(
+                persona,
+                building_id,
+                "",  # user_input: 空文字列 (auto_ingest が building_histories から取り込む)
+                origin_track_id=track.track_id,
+            )
+        except Exception:
+            logging.exception(
+                "[user-conv-handler] main_line pulse start failed: persona=%s track=%s",
+                persona_id, track.track_id,
+            )
 
     # ------------------------------------------------------------------
     # Pulse 完了フック (v0.10)
@@ -321,17 +379,31 @@ class UserConversationTrackHandler:
         """
         track, was_newly_created = self.get_or_create_track(persona_id, user_id)
 
-        if was_newly_created or track.status == STATUS_RUNNING:
-            # running 中 (新規作成 or 既存) はメインライン応答に直行。
-            # 新規作成時の Track 切替通知は activate 時に on_track_activated hook
-            # が走って既に注入済み。
+        if was_newly_created:
+            # 直接経路 (1-A 新規作成): get_or_create_track 内の activate で
+            # on_track_activated hook が発火し、main_line Pulse はそこで起動
+            # される (Track 切替通知の注入も hook 内)。重複起動を避けるため
+            # ここでは invoke_main_line を呼ばない。
             logging.debug(
-                "[user-conv-handler] Track %s is running (newly_created=%s); direct main-line response",
-                track.track_id, was_newly_created,
+                "[user-conv-handler] Track %s newly created; main_line started via on_track_activated hook",
+                track.track_id,
             )
+        elif track.status == STATUS_RUNNING:
+            # 直接経路 (1-A 既存 running): activate は走らないので hook は発火
+            # しない。invoke_main_line で直接 main_line Pulse を起動する。
+            logging.debug(
+                "[user-conv-handler] Track %s is running; direct main-line response",
+                track.track_id,
+            )
+            invoke_main_line(track.track_id)
         else:
+            # 熟慮経路 (1-B): set_alert → MetaLayer → activate されれば
+            # on_track_activated hook 経由で main_line Pulse が起動する。
+            # activate されなかった場合 (メタ判断が現状維持を選んだ等) は
+            # 応答しない (pulse_dispatch.md §4.2、まはー判断 Q2)。
+            # invoke_main_line のハードコード起動は廃止 (§9.3 段階 3)。
             logging.info(
-                "[user-conv-handler] Track %s status=%s; raising alert for metalayer",
+                "[user-conv-handler] Track %s status=%s; raising alert for metalayer (no direct invoke_main_line)",
                 track.track_id, track.status,
             )
             ctx = {
@@ -342,20 +414,12 @@ class UserConversationTrackHandler:
             # set_alert は内部で alert observer (MetaLayer) を同期呼び出しする。
             # MetaLayer がメタ判断 Pulse を実行し、結果 activate されれば
             # TrackManager.activate 末尾で on_track_activated hook が走り、
-            # その中で Track 切替通知が SAIMemory に注入される。
+            # その中で Track 切替通知の注入と main_line Pulse 起動が行われる。
             self.track_manager.set_alert(track.track_id, context=ctx)
 
-            # 観察ログのみ (注入処理は hook 任せ)
             updated = self.track_manager.get(track.track_id)
             logging.info(
-                "[user-conv-handler] Post-metalayer status=%s for track %s",
+                "[user-conv-handler] Post-metalayer status=%s for track %s "
+                "(activate されていれば on_track_activated hook が main_line Pulse を起動)",
                 updated.status, track.track_id,
             )
-
-        # メインライン応答は分岐によらず必ず起動する。
-        # Track id を渡して SEA 側の Pulse-root を Track-bound にする
-        # (pending/alert のままでもメッセージが Track 文脈で永続化される、
-        # handoff_2026-05-10)。
-        # NOTE (pulse_dispatch.md §9.3 段階 3): この invoke_main_line ハードコードは
-        # 将来 on_track_activated hook 経由に統一する予定。
-        invoke_main_line(track.track_id)
