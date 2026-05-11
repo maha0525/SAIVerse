@@ -8,7 +8,9 @@
       "description": "User request about item interaction"
     }
   ],
+  "report_template": "アイテム「{params.item_name}」に対する操作 ({params.action}) を実行しました。",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "decide_action",

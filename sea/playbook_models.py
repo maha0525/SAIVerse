@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union, Set
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Literal
 
 
@@ -549,6 +549,17 @@ class PlaybookSchema(BaseModel):
         default=False,
         description="If true, this playbook can be called from the router in meta playbooks."
     )
+    can_run_as_child: bool = Field(
+        default=False,
+        description=(
+            "True if this Playbook can be invoked as a child sub-playbook "
+            "(via subplay node with line='sub' or /run_playbook spell). "
+            "When True, the Playbook must produce report_to_parent — either via "
+            "report_template or via an LLM node whose response_schema includes "
+            "'report_to_parent' in properties. Enforced by a load-time validator "
+            "(see _check_report_to_parent_contract)."
+        ),
+    )
     required_credentials: Optional[List[str]] = Field(
         default=None,
         description="List of credential types required for this playbook (e.g., ['x'], ['email']). "
@@ -567,6 +578,40 @@ class PlaybookSchema(BaseModel):
 
     def node_map(self):
         return {n.id: n for n in self.nodes}
+
+    @model_validator(mode="after")
+    def _check_report_to_parent_contract(self) -> "PlaybookSchema":
+        """Enforce: ``can_run_as_child=true`` Playbooks must emit ``report_to_parent``.
+
+        A child Playbook (called via subplay node with ``line='sub'`` or
+        ``/run_playbook`` spell) must produce ``report_to_parent`` so the
+        parent line can integrate the result. Two recognized mechanisms:
+
+        1. ``report_template`` set on the PlaybookSchema (mechanical rendering)
+        2. Any LLM node whose ``response_schema`` includes ``report_to_parent``
+           in its ``properties`` (LLM-generated structured output)
+
+        Other paths (e.g. setting ``state['report_to_parent']`` directly inside
+        a tool node) can't be detected statically; if a Playbook author needs
+        such a path, they should still attach a ``report_template`` to satisfy
+        this check.
+        """
+        if not self.can_run_as_child:
+            return self
+        if self.report_template:
+            return self
+        for node in self.nodes:
+            if not isinstance(node, LLMNodeDef):
+                continue
+            schema = node.response_schema or {}
+            properties = schema.get("properties") if isinstance(schema, dict) else None
+            if isinstance(properties, dict) and "report_to_parent" in properties:
+                return self
+        raise ValueError(
+            f"Playbook '{self.name}' has can_run_as_child=true but produces no "
+            f"report_to_parent. Add a `report_template` to the playbook, or include "
+            f"'report_to_parent' in an LLM node's response_schema.properties."
+        )
 
 
 class PlaybookValidationError(ValueError):

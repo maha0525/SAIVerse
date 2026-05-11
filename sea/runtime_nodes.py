@@ -293,9 +293,17 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                 # 親 state に残ると次のサブ Playbook 呼び出しでも誤解されるためクリア
                 state.pop("report_to_parent", None)
             else:
+                # Load-time PlaybookSchema validator (can_run_as_child check) already
+                # rejects sub Playbooks that have no report_to_parent path, so reaching
+                # this branch means the contract was satisfied statically but the LLM /
+                # tool nodes failed to populate state['report_to_parent'] at runtime
+                # (e.g. the LLM ignored response_schema, report_template referenced
+                # variables that never got set). The parent line continues without a
+                # sub-report; the warning is left in place as a runtime backstop.
                 LOGGER.warning(
-                    "[sea][subplay] line='sub' for '%s' but no 'report_to_parent' in output. "
-                    "Sub-line playbooks should include 'report_to_parent' in output_schema.",
+                    "[sea][subplay] line='sub' for '%s' completed without "
+                    "state['report_to_parent'] despite a static contract. Likely cause: "
+                    "an LLM/tool node failed to populate the expected field at runtime.",
                     sub_name,
                 )
         return state

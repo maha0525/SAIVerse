@@ -1,7 +1,7 @@
 # Handoff: `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用)
 
 **親**: [README.md](README.md)
-**ステータス**: 🔲 未着手 (現状: 警告ログのみ)
+**ステータス**: ✅ 完了 (2026-05-11)
 **経緯**: [02_mechanics.md](02_mechanics.md) §「sub line Playbook の output_schema」 + [revisions.md](revisions.md) line 811
 **関連**: [phase_3_lines_playbooks.md](phases/phase_3_lines_playbooks.md) line 230 周辺 (実装ステップ詳述)
 

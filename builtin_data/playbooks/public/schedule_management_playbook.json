@@ -8,7 +8,9 @@
       "description": "スケジュール管理のリクエスト（例: スケジュールを追加して、明日の朝9時にリマインドしてほしい）"
     }
   ],
+  "report_template": "スケジュール操作 ({action_decision.action}) を完了しました。詳細は記録済みのツール出力を参照。",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "list_schedules",

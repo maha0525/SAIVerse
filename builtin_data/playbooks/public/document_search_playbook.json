@@ -8,7 +8,9 @@
       "description": "User request about document search or read"
     }
   ],
+  "report_template": "ドキュメント操作 (action={params.action}, item_id={params.item_id}) を実行しました。詳細は記録済みのツール出力を参照。",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "analyze_request",

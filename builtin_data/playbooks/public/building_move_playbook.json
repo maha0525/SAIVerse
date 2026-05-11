@@ -8,7 +8,9 @@
       "description": "Optional note or hint about where to go"
     }
   ],
+  "report_template": "Building 移動 (建物 ID: {move_choice.building_id}) を実行しました。\n\n{move_result}",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "list_buildings",

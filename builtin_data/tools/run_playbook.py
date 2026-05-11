@@ -159,14 +159,18 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
 
     report = parent_state.get("report_to_parent")
     if not report:
+        # Load-time PlaybookSchema validator enforces the report contract for
+        # can_run_as_child=true Playbooks, so this branch means runtime nodes
+        # failed to populate state['report_to_parent'] even though a static
+        # path exists.
         LOGGER.warning(
-            "[run_playbook] Sub-line '%s' completed without report_to_parent. "
-            "Ensure the playbook's output_schema includes 'report_to_parent'.",
+            "[run_playbook] Sub-line '%s' completed without state['report_to_parent'] "
+            "despite a static contract. Likely cause: an LLM/tool node failed to "
+            "populate the expected field at runtime.",
             name,
         )
         return (
-            f"[run_playbook] Playbook '{name}' completed but produced no report_to_parent. "
-            f"(Hint: include 'report_to_parent' in the playbook's output_schema.)"
+            f"[run_playbook] Playbook '{name}' completed but produced no report_to_parent."
         )
 
     # Forward sub-playbook media (image / file / etc.) to the parent line so

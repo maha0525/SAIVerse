@@ -8,7 +8,9 @@
       "description": "書き込み指示（例: 「今の話をメモペディアに書き留めて」「saiverse://self/memopedia/page/xxx に追記して」）"
     }
   ],
+  "report_template": "Memopedia 書き込み完了。\nタイトル: {note.title}\n結果: {write_result}",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "init",

@@ -8,7 +8,9 @@
       "description": "Request to create a document"
     }
   ],
+  "report_template": "ドキュメント「{document_data.name}」を作成しました。\n\n説明: {document_data.description}",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "generate_content",

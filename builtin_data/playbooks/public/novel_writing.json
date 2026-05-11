@@ -12,7 +12,9 @@
     "novel_title",
     "document_result"
   ],
+  "report_template": "小説「{novel_title}」の執筆が完了しました。\n\n{document_result}\n\n## あとがき\n{reflection_text}",
   "router_callable": true,
+  "can_run_as_child": true,
   "user_selectable": false,
   "start_node": "stelis_start",
   "nodes": [

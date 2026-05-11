@@ -8,7 +8,9 @@
       "description": "User request describing the building they want to create"
     }
   ],
+  "report_template": "Building「{building_plan.name}」の作成処理が完了しました。\n\n説明: {building_plan.description}",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "plan_building",

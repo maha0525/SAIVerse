@@ -14,7 +14,9 @@
     "snippet",
     "text"
   ],
+  "report_template": "ローカル画像「{gen_params.title}」の生成が完了しました。\n\n{text}",
   "router_callable": true,
+  "can_run_as_child": true,
   "nodes": [
     {
       "id": "decide_prompt",
