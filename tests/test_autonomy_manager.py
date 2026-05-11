@@ -3,7 +3,9 @@
 旧 Decision/Execution/Stelis/PulseController-callback 連携は MetaLayer 経由に
 統合されたため、このクラス自体の責務は「ペルソナごとの定期 tick タイマー」だけ。
 さらに Phase 4-e で sleep ループ thread は廃止され、EventScheduler に push する
-形に再構成された。テストでは本物の EventScheduler を mock manager に持たせる。
+形に再構成された。Phase 4 (pulse_dispatch §9.4) で tick 発火経路は MetaLayer の
+``on_periodic_tick`` 直叩きから ``PulseDispatcher.dispatch_autonomy_tick`` 経由に
+切り替わっている。テストでは本物の EventScheduler を mock manager に持たせる。
 """
 
 import time
@@ -18,10 +20,13 @@ from saiverse.event_scheduler import EventScheduler
 
 
 def _make_manager_mock():
-    """Create a mock SAIVerseManager with a meta_layer + 本物の EventScheduler。"""
+    """Create a mock SAIVerseManager with pulse_dispatcher + 本物の EventScheduler。"""
     manager = MagicMock()
+    # pulse_dispatcher が tick 発火先 (pulse_dispatch §9.4)。
+    manager.pulse_dispatcher = MagicMock()
+    manager.pulse_dispatcher.dispatch_autonomy_tick = MagicMock()
+    # meta_layer は AutonomyManager._load_judgment_config 用に残す。
     manager.meta_layer = MagicMock()
-    manager.meta_layer.on_periodic_tick = MagicMock()
     manager.event_scheduler = EventScheduler()
     manager.event_scheduler.start()
 
@@ -160,7 +165,7 @@ class TestSetIntervalReschedule(_BaseAutonomyTest):
             evt_started.set()
             evt_finish.wait(timeout=2.0)
 
-        self.manager.meta_layer.on_periodic_tick.side_effect = slow_tick
+        self.manager.pulse_dispatcher.dispatch_autonomy_tick.side_effect = slow_tick
 
         am = AutonomyManager("test_persona", self.manager, interval_minutes=50.0)
         am.start()
@@ -185,16 +190,18 @@ class TestSetIntervalReschedule(_BaseAutonomyTest):
 
 class TestPeriodicTick(_BaseAutonomyTest):
 
-    def test_loop_invokes_meta_layer_on_periodic_tick(self):
-        """Tick loop calls MetaLayer.on_periodic_tick(persona_id, context=...) ."""
+    def test_loop_invokes_pulse_dispatcher_on_periodic_tick(self):
+        """Tick loop calls PulseDispatcher.dispatch_autonomy_tick(persona_id, context=...) ."""
         am = AutonomyManager("test_persona", self.manager, interval_minutes=0.01)
         am.start()
         try:
             time.sleep(0.2)
             self.assertGreaterEqual(
-                self.manager.meta_layer.on_periodic_tick.call_count, 1
+                self.manager.pulse_dispatcher.dispatch_autonomy_tick.call_count, 1
             )
-            args, kwargs = self.manager.meta_layer.on_periodic_tick.call_args
+            args, kwargs = (
+                self.manager.pulse_dispatcher.dispatch_autonomy_tick.call_args
+            )
             self.assertEqual(args[0], "test_persona")
             ctx = kwargs.get("context") or (args[1] if len(args) > 1 else None)
             self.assertIsInstance(ctx, dict)
@@ -213,8 +220,8 @@ class TestPeriodicTick(_BaseAutonomyTest):
         finally:
             am.stop()
 
-    def test_loop_records_error_when_meta_layer_missing(self):
-        self.manager.meta_layer = None
+    def test_loop_records_error_when_pulse_dispatcher_missing(self):
+        self.manager.pulse_dispatcher = None
         am = AutonomyManager("test_persona", self.manager, interval_minutes=0.01)
         am.start()
         try:
@@ -225,7 +232,9 @@ class TestPeriodicTick(_BaseAutonomyTest):
             am.stop()
 
     def test_loop_records_error_when_tick_raises(self):
-        self.manager.meta_layer.on_periodic_tick.side_effect = RuntimeError("boom")
+        self.manager.pulse_dispatcher.dispatch_autonomy_tick.side_effect = RuntimeError(
+            "boom"
+        )
         am = AutonomyManager("test_persona", self.manager, interval_minutes=0.01)
         am.start()
         try:

@@ -128,7 +128,7 @@ def test_promotes_matching_pulse_id_only(manager_with_persona):
         ],
     )
 
-    manager._promote_meta_judgment_in_pulse("alice", target_pulse)
+    manager._promote_meta_judgment_in_pulse("alice", None, target_pulse)
 
     rows = _read_scopes(db_path)
     assert rows[0] == ("judge turn (target)", "committed")  # 昇格された
@@ -152,7 +152,7 @@ def test_no_matching_rows_does_not_raise(manager_with_persona):
         ],
     )
 
-    manager._promote_meta_judgment_in_pulse("alice", "pulse-not-present")
+    manager._promote_meta_judgment_in_pulse("alice", None, "pulse-not-present")
     # 何も書き換わらない
     assert _read_scopes(db_path) == [("main line", "committed")]
 
@@ -171,7 +171,7 @@ def test_pulse_id_none_is_noop(manager_with_persona):
             },
         ],
     )
-    manager._promote_meta_judgment_in_pulse("alice", None)
+    manager._promote_meta_judgment_in_pulse("alice", None, None)
     # 何も書き換わらない
     assert _read_scopes(db_path) == [("judge", "discardable")]
 
@@ -190,7 +190,7 @@ def test_unknown_persona_is_noop(manager_with_persona):
             },
         ],
     )
-    manager._promote_meta_judgment_in_pulse("unknown_persona", "p1")
+    manager._promote_meta_judgment_in_pulse("unknown_persona", None, "p1")
     assert _read_scopes(db_path) == [("judge", "discardable")]
 
 
@@ -215,7 +215,7 @@ def test_pulse_id_null_row_is_skipped(manager_with_persona):
             },
         ],
     )
-    manager._promote_meta_judgment_in_pulse("alice", target)
+    manager._promote_meta_judgment_in_pulse("alice", None, target)
     rows = _read_scopes(db_path)
     assert rows[0] == ("no pulse_id row", "discardable")
     assert rows[1] == ("tagged target", "committed")

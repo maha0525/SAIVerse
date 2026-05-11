@@ -251,7 +251,8 @@ def test_state_message_includes_alert_marker(tm, nm, db_persona):
 
     user_msg = llm.calls[0]["messages"][1]["content"]
     assert "対 user1" in user_msg
-    assert "★今回のトリガー" in user_msg
+    # メタ判断 v2 状況分類で alert_present として描画される
+    assert "alert 状態" in user_msg
 
 
 # ---------------------------------------------------------------------------
@@ -429,9 +430,10 @@ def test_state_message_explains_target_already_running(tm, nm, db_persona):
             "target_track_title": "対 user1",
         },
     )
-    assert "既に running 状態" in msg
+    # メタ判断 v2 状況分類で preempt_collision として描画される
+    assert "先制起動済み" in msg
     assert "対 user1" in msg
-    assert "継続判断" in msg
+    assert "メインライン側で応答処理" in msg
 
 
 def test_state_message_omits_race_block_when_not_already_running(tm, nm, db_persona):
@@ -620,9 +622,9 @@ def test_recent_judgments_block_renders_chronologically(
     user_pos = block.find("user_utterance")
     periodic_pos = block.find("periodic_tick")
     assert 0 < alert_pos < user_pos < periodic_pos
-    # switch マーカーが committed=True の行に出る
-    assert "[switch]" in block
-    assert "spells=track_pause" in block
+    # committed=True の行に [committed] マーカー、スペル行は /spell 形式で出る
+    assert "[committed]" in block
+    assert "/spell track_pause" in block
 
 
 def test_recent_judgments_empty_when_no_history(
