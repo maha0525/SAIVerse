@@ -420,12 +420,12 @@ class ActionTrack(Base):
     persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
     title = Column(String(255), nullable=True)
     track_type = Column(String(64), nullable=False)
-    # user_conversation / social / autonomous / waiting / external / ...
+    # user_conversation / social / autonomous / external / ...
     is_persistent = Column(Boolean, default=False, nullable=False)
     # Output target: 'none' / 'building:current' / 'external:<channel>:<address>'
     output_target = Column(String(255), default='none', nullable=False)
     status = Column(String(32), default='unstarted', nullable=False)
-    # running / alert / pending / waiting / unstarted / completed / aborted
+    # running / alert / pending / unstarted / completed / aborted
     is_forgotten = Column(Boolean, default=False, nullable=False)
     intent = Column(Text, nullable=True)
     track_metadata = Column(Text, nullable=True)
@@ -436,16 +436,18 @@ class ActionTrack(Base):
     # 安全側の判断で現状は未使用カラムとして残置。
     # 詳細: docs/intent/persona_cognition/track_chronicle.md §8
     last_active_at = Column(DateTime, nullable=True)
-    waiting_for = Column(Text, nullable=True)
-    # JSON: {"type": "user_response" | "persona_response" | "kitchen_completion" | ...}
-    waiting_timeout_at = Column(DateTime, nullable=True)  # NULL = no timeout
+    # NOTE: waiting_for / waiting_timeout_at カラムは v0.31 (2026-05-09) で「待ち
+    # Track」機構の廃止に伴い ORM 定義から外した。Phase 5 の時間差ツール基盤が
+    # 同等機能 (= 何かを待つ Pulse の中断 → 完了通知時に再開) を提供する。
+    # 既存 DB は database/migrate.py の post-migration で `status='waiting'` を
+    # 'pending' に降ろし、カラムはスキーマ差分でドロップされる。
+    # 詳細: docs/intent/persona_cognition/handoff_waiting_track_removal.md
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     completed_at = Column(DateTime, nullable=True)  # always NULL for is_persistent=true
     aborted_at = Column(DateTime, nullable=True)    # always NULL for is_persistent=true
     __table_args__ = (
         Index("idx_action_track_persona_status", "persona_id", "status", "is_forgotten"),
         Index("idx_action_track_last_active", "persona_id", "last_active_at"),
-        Index("idx_action_track_waiting_timeout", "waiting_timeout_at"),
         Index("idx_action_track_persistent", "persona_id", "is_persistent", "track_type"),
     )
 

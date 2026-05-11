@@ -59,8 +59,6 @@ def _to_item(
         track_metadata=_parse_metadata(row.track_metadata),
         last_active_at=_epoch(row.last_active_at),
         last_message_at=last_message_at,
-        waiting_for=row.waiting_for,
-        waiting_timeout_at=_epoch(row.waiting_timeout_at),
         created_at=_epoch(row.created_at),
         completed_at=_epoch(row.completed_at),
         aborted_at=_epoch(row.aborted_at),
@@ -101,7 +99,7 @@ def _bulk_last_message_times(manager, persona_id: str, track_ids):
 
 
 _VALID_STATUSES = {
-    "running", "alert", "pending", "waiting",
+    "running", "alert", "pending",
     "unstarted", "completed", "aborted",
 }
 
@@ -111,7 +109,7 @@ def get_tracks(
     persona_id: str,
     status: Optional[str] = Query(
         None,
-        description="ステータスでフィルタ (running/alert/pending/waiting/unstarted/completed/aborted)。"
+        description="ステータスでフィルタ (running/alert/pending/unstarted/completed/aborted)。"
                     "未指定なら全ステータス。",
     ),
     include_forgotten: bool = Query(
@@ -169,7 +167,7 @@ def get_tracks(
         status_counts = [
             TracksStatusCount(status=s, count=counter.get(s, 0))
             for s in (
-                "running", "alert", "pending", "waiting",
+                "running", "alert", "pending",
                 "unstarted", "completed", "aborted",
             )
         ]

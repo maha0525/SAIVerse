@@ -16,8 +16,6 @@ interface TrackItem {
     track_metadata: Record<string, unknown> | null;
     last_active_at: number | null;
     last_message_at: number | null;
-    waiting_for: string | null;
-    waiting_timeout_at: number | null;
     created_at: number | null;
     completed_at: number | null;
     aborted_at: number | null;
@@ -43,7 +41,6 @@ const STATUS_FILTER_OPTIONS = [
     { value: 'running', label: 'running' },
     { value: 'alert', label: 'alert' },
     { value: 'pending', label: 'pending' },
-    { value: 'waiting', label: 'waiting' },
     { value: 'unstarted', label: 'unstarted' },
     { value: 'completed', label: 'completed' },
     { value: 'aborted', label: 'aborted' },
@@ -304,12 +301,6 @@ function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCar
                     <DetailRow label="track_id" value={track.track_id} />
                     <DetailRow label="output_target" value={track.output_target} />
                     {track.intent && <DetailRow label="intent" value={track.intent} pre />}
-                    {track.waiting_for && (
-                        <DetailRow
-                            label="waiting_for"
-                            value={`${track.waiting_for}${track.waiting_timeout_at ? ` (timeout: ${formatTimestamp(track.waiting_timeout_at)})` : ''}`}
-                        />
-                    )}
                     <DetailRow
                         label="last_message_at"
                         value={formatTimestampWithRelative(track.last_message_at)}

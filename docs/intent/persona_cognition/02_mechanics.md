@@ -33,7 +33,7 @@
   - 末尾に「メタ判断用プロンプト」を追加して LLM 呼び出し
   - プロンプト構成:
     * 末尾メッセージ (Track A の直近状態)
-    * pending / waiting / unstarted の Track 一覧
+    * pending / unstarted の Track 一覧
     * 開いている Note 一覧
     * 直近の外部イベント
     * 過去のメタ判断ログから参考情報を動的注入 ([1] メタ判断ログ領域から)
@@ -179,7 +179,7 @@ v0.12〜v0.13 で構造化出力 + 4 値 enum (`continue`/`switch`/`wait`/`close
 「running Track が無い / 外部 alert が無い」状態でも、メタレイヤー定期実行が来た時に判断する。アイドル時の判断 (新規 Track 創設、pending Track 再開、何もしないで待つ) は専用入口を持たず、**通常の判断ロジックの中で「現状を見て決める」一部として扱う**。
 
 理由:
-- メタレイヤーの判断プロンプトには既に「現在 running / pending / waiting / unstarted の Track 一覧」が含まれる
+- メタレイヤーの判断プロンプトには既に「現在 running / pending / unstarted の Track 一覧」が含まれる
 - running が無いという状況も普通に判断材料の 1 つ
 - 専用入口を増やすと責務分散が起き、状況に応じた重み付けが難しくなる
 
@@ -198,7 +198,7 @@ v0.12〜v0.13 で構造化出力 + 4 値 enum (`continue`/`switch`/`wait`/`close
 
 - 既 running の Track への `set_alert`: 状態遷移は no-op のまま (仕様通り) だが、observer 通知は走らせる。context に `target_already_running=True` フラグを乗せて、メタ判断者が「自律先制 + 外部イベントの衝突」を識別できるようにする
 - 既 alert の Track への `set_alert`: 重複通知を避けるため observer 通知しない (これは従来通り)
-- 通常の状態遷移 (`pending/waiting/unstarted → alert`): 従来通り通知。context に `target_track_title` / `target_track_type` も追加して、メタ判断者がトラック識別を JSON UUID 経由でなく自然言語で行えるようにする
+- 通常の状態遷移 (`pending/unstarted → alert`): 従来通り通知。context に `target_track_title` / `target_track_type` も追加して、メタ判断者がトラック識別を JSON UUID 経由でなく自然言語で行えるようにする
 
 **メタ判断者の認識**:
 
@@ -354,7 +354,7 @@ default_subline_pulse_interval = 0
 軽量モデル側キャッシュの初回構築タイミング:
 
 1. Track が unstarted → running になった最初の Pulse
-2. Track が pending/waiting → running に戻った Pulse (キャッシュが切れていた場合)
+2. Track が pending → running に戻った Pulse (キャッシュが切れていた場合)
 3. キャッシュ TTL 経過後の最初の Pulse
 
 このタイミングでのみ固定情報をコンテキスト先頭に積む。それ以降は動的情報のみ末尾追加。Track の状態に「軽量キャッシュ最終構築時刻」(`action_tracks.metadata.cache_built_at`) を持たせる。
@@ -414,7 +414,7 @@ Track 種別ごとに「Pulse 完了後どう振る舞うか」のデフォル�
 - `wait_response`: 抑止 (ユーザー応答待ちなので発火しない)
 - `meta_judge`: 通常判断 (続行か切り替えか判断)
 
-注: 旧仕様の `STATUS_WAITING` / `track_wait` スペルは Phase 3 で廃止予定 ([phase_3_lines_playbooks.md の「待ち機構の整理」](phases/phase_3_lines_playbooks.md))。「待ち」は Track 状態でなく行動の性質として扱い、結果到達はツール側からのイベントメッセージで処理する。
+「待ち」は Track 状態でなく行動の性質として扱う。結果到達はツール側からのイベントメッセージで処理する (Phase 5 の時間差ツール基盤)。詳細: [revisions.md](revisions.md) v0.31。
 
 ---
 

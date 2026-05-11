@@ -46,20 +46,16 @@ CREATE TABLE action_tracks (
     pause_summary TEXT,                         -- 中断時に作成されたサマリ (最新)
     pause_summary_updated_at TIMESTAMP,
     last_active_at TIMESTAMP,
-    -- ⚠ Phase 3 で削除予定 (2026-05-09): 「待ち」は Track 状態でなく行動の性質として扱うため。
-    -- waiting_for TEXT,                        -- 旧仕様: waiting 状態の待ち相手 (JSON)
-    -- waiting_timeout_at TIMESTAMP,            -- 旧仕様: waiting のタイムアウト時刻
+    -- 旧 `waiting_for` / `waiting_timeout_at` カラムは v0.31 (2026-05-09) で廃止。
+    -- 「待ち」は Track 状態として持たない設計に変更。詳細: revisions.md v0.31 / handoff_waiting_track_removal.md。
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,                     -- completed 遷移時刻 (永続 Track では NULL)
     aborted_at TIMESTAMP                        -- aborted 遷移時刻 (永続 Track では NULL)
 );
 CREATE INDEX idx_action_tracks_persona ON action_tracks(persona_id, status, is_forgotten);
 CREATE INDEX idx_action_tracks_last_active ON action_tracks(persona_id, last_active_at DESC);
--- ⚠ Phase 3 で削除予定: idx_action_tracks_waiting_timeout (status='waiting' 廃止のため)
 CREATE INDEX idx_action_tracks_persistent ON action_tracks(persona_id, is_persistent, track_type);
 ```
-
-**Phase 3 廃止予定** (2026-05-09): `waiting_for` / `waiting_timeout_at` カラム + `idx_action_tracks_waiting_timeout` + `status='waiting'` + `track_type='waiting'`。詳細は [phases/phase_3_lines_playbooks.md の「待ち機構の整理」](phases/phase_3_lines_playbooks.md)。
 
 `metadata` JSON 内の典型項目 (Phase 5 で本格運用):
 
@@ -332,9 +328,8 @@ ALTER TABLE AI ADD COLUMN current_active_track_id TEXT;
 
    is_forgotten フラグは任意状態と両立、forget/recall ツールで切り替え
 
-   ※ 旧 waiting 状態経路 (running ──wait_for──► waiting ──response/timeout──►)
-     は Phase 3 で廃止予定。「待ち」は Track 状態でなく時間差ツールの結果配送
-     として処理される (詳細: phases/phase_3_lines_playbooks.md)
+   ※ 「待ち」は Track 状態として持たない (v0.31, 2026-05-09)。時間差ツールの
+     結果配送として処理される (詳細: revisions.md v0.31 / phases/phase_5_autonomy.md)
 ```
 
 **主要遷移トリガー**:
@@ -348,8 +343,6 @@ ALTER TABLE AI ADD COLUMN current_active_track_id TEXT;
 | 任意 → `aborted` | `track_abort` |
 | `is_forgotten` ON/OFF | `track_forget` / `track_recall` |
 | 時間差ツールの結果到達 (応答 / timeout 共通) | ツール側がイベントメッセージとして Track に配送、Track 不在なら alert |
-
-⚠ 旧仕様の `waiting` 関連遷移 (`track_wait` / `track_resume_from_wait`) は Phase 3 で削除予定。
 
 **`alert` への遷移トリガー** (SAIVerse 側で自動発生):
 
@@ -384,7 +377,7 @@ ALTER TABLE AI ADD COLUMN current_active_track_id TEXT;
 | `autonomous` | プロジェクト遂行、記憶整理、創作等の自律行動 | `none` (基本独白) |
 | `external` | 外部 SAIVerse / Discord 等への通信 | `external:<channel>:<address>` |
 
-⚠ 旧仕様の `waiting` track_type は Phase 3 で削除予定 (2026-05-09)。「外部応答待ち」は時間差ツール基盤 (Phase 5) で起動元 Track にイベントメッセージとして配送する。
+「外部応答待ち」は専用 track_type を持たない。時間差ツール基盤 (Phase 5) で起動元 Track にイベントメッセージとして配送する (v0.31, 2026-05-09)。
 
 ### 「対ペルソナ会話 Track」を持たない理由
 
@@ -406,8 +399,6 @@ ALTER TABLE AI ADD COLUMN current_active_track_id TEXT;
 | `track_create(title, type, intent, metadata?)` | 新規 Track 作成 | (new) → `unstarted` |
 | `track_activate(track_id)` | アクティブ化 (既存 `running` があれば自動で `pending` に) | `unstarted`/`pending` → `running` |
 | `track_pause(track_id?)` | 後回し (省略時は現 `running`) | `running` → `pending` |
-| ~~`track_wait(track_id, waiting_for, timeout?)`~~ | **Phase 3 で削除予定** (2026-05-09) | `running` → `waiting` (廃止) |
-| ~~`track_resume_from_wait(track_id, mode)`~~ | **Phase 3 で削除予定** (2026-05-09) | `waiting` → ... (廃止) |
 | `track_complete(track_id?)` | 完了 | `running` → `completed` |
 | `track_abort(track_id)` | 中止 | (任意) → `aborted` |
 | `track_forget(track_id)` | 忘却フラグ ON | + `is_forgotten=TRUE` |

@@ -59,7 +59,9 @@ NULL 運用 = built-in default、`MetaLayer._DEFAULT_JUDGMENT_CONFIG` で管理�
 
 `anchor touch` 直後に `_schedule_cache_ttl_pulse` で TTL 接近時刻を予約 (key=`ttl:<persona_id>`)。再 touch で予約上書きされるので「対話継続中は前倒し fire しない、TTL 残り少なくなったら自動的にメタ判断が走る」挙動。`keep_cache_alive=False` のペルソナはこの予約をスキップ + 既存予約を cancel する。
 
-### 4. waiting Track timeout の push 化
+### 4. waiting Track timeout の push 化 (v0.31 で廃止)
+
+> ⚠ v0.31 (2026-05-09) で waiting 機構ごと廃止された。本節は歴史的経緯として残置。詳細: [revisions.md](../revisions.md) v0.31 / [handoff_waiting_track_removal.md](../handoff_waiting_track_removal.md)。
 
 `TrackManager.wait()` で `waiting_timeout_at` を EventScheduler に予約 push (key=`wait_timeout:<track_id>`)。timeout 到達時は `_handle_waiting_timeout` で再 fetch → waiting のままなら `_notify_alert(persona_id, track_id, context={"trigger": "waiting_timeout", ...})` を発火。intent 通り **自動遷移しない**、メタレイヤーへ判断を委ねる。waiting 解除/abort/pause 経路で予約 cancel。
 

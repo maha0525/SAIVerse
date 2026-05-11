@@ -158,6 +158,15 @@ def migrate_database_in_place(db_path: str):
         # Post-migration: assign slot numbers to existing items (in order of CREATED_AT)
         _assign_initial_slot_numbers(target_engine)
 
+        # Post-migration: demote legacy STATUS_WAITING Tracks to 'pending'.
+        # waiting_for / waiting_timeout_at columns are dropped by the schema
+        # copy phase above (they no longer exist in the new schema), but the
+        # status string is preserved as-is. Surface those Tracks as pending so
+        # the persona can re-evaluate them via meta judgment instead of being
+        # stuck in a now-undefined state. See
+        # docs/intent/persona_cognition/handoff_waiting_track_removal.md.
+        _demote_legacy_waiting_tracks(target_engine)
+
     except Exception as e:
         logging.error(f"マイグレーション中にエラーが発生しました: {e}", exc_info=True)
         logging.info("ロールバックを試みます...")
@@ -224,6 +233,31 @@ def _migrate_interaction_mode_to_activity_state(source_engine, target_engine) ->
         )
     except Exception as exc:
         logging.warning("INTERACTION_MODE -> ACTIVITY_STATE 変換に失敗しました: %s", exc, exc_info=True)
+
+
+def _demote_legacy_waiting_tracks(engine) -> None:
+    """Convert legacy `status='waiting'` ActionTracks to 'pending'.
+
+    The 'waiting' status was retired in v0.31 (2026-05-09) when the
+    Phase 5 deferred-tool infrastructure took over the role of "block
+    a Pulse until an external event arrives". Old DBs may still hold
+    Tracks in this state; pending preserves the persona's intent while
+    letting the meta layer pick them up normally.
+    """
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text("UPDATE action_tracks SET status = 'pending' WHERE status = 'waiting'")
+            )
+            if result.rowcount:
+                logging.info(
+                    "legacy waiting Track を %d 件 'pending' に降ろしました。",
+                    result.rowcount,
+                )
+    except Exception as exc:
+        logging.warning(
+            "legacy waiting Track の降ろし処理に失敗しました（スキップ）: %s", exc,
+        )
 
 
 def _assign_initial_slot_numbers(engine) -> None:

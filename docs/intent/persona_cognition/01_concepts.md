@@ -107,7 +107,7 @@ Track には「ペルソナの核として永続するもの」と「目的に�
 | `completed` | 完了 | **不可** (永続 Track は完了しない) |
 | `aborted` | 中止 | **不可** (永続 Track は中止しない) |
 
-⚠ 旧仕様の `waiting` 状態は Phase 3 で削除予定 (2026-05-09)。「外部応答待ち」は Track の状態でなく、時間差ツール基盤 (Phase 5) の結果配送として処理する。詳細は [phases/phase_3_lines_playbooks.md の「待ち機構の整理」](phases/phase_3_lines_playbooks.md)。
+「外部応答待ち」は Track の状態として持たない。時間差で結果が返る行動 (Kitchen, dispatch, X 投稿等) は時間差ツール基盤 (Phase 5) が結果到達時にイベントメッセージとして配送する。旧 `waiting` 状態の経緯は [revisions.md](revisions.md) v0.31 / [handoff_waiting_track_removal.md](handoff_waiting_track_removal.md) 参照。
 
 直交フラグ:
 
@@ -117,7 +117,7 @@ Track には「ペルソナの核として永続するもの」と「目的に�
 
 ### Alert 状態
 
-`pending` と `running`/`waiting` の中間的な位置づけ。**可及的速やかな対応が必要**を示す。
+`pending` と `running` の中間的な位置づけ。**可及的速やかな対応が必要**を示す。
 
 `alert` への遷移トリガー:
 - ユーザー発言で対ユーザー Track が `alert` に
@@ -134,7 +134,7 @@ Track には「ペルソナの核として永続するもの」と「目的に�
 | `running` (`activate`) | 対応する: その Track をアクティブ化して進める |
 | `aborted` (`abort`) | やらないと決める (一時 Track のみ。永続 Track は不可) |
 
-⚠ 旧仕様の「`waiting` (`wait`) — 対応中だが外部応答待ち」は Phase 3 で削除予定。時間差で結果が返る行動を取った場合も、Track 自体は `running` のままでよく、結果は到達時にイベントメッセージとして処理される (中断するかどうかはメタ判断者が独立に決める)。
+時間差で結果が返る行動を取った場合も、Track 自体は `running` のままでよい。結果は到達時にイベントメッセージとして処理される (中断するかどうかはメタ判断者が独立に決める)。
 
 **`alert` → `pending` の遷移は禁止**: pending に戻すと「対応せず後回しにする」ことになり、`alert` の存在意義 (= 即応すべき) を破壊する。実装上の比喩: 目覚ましアラームを止めて寝続ける。`pause` メソッドの `allowed_from` は `{running}` のみで、`alert` は含まない (saiverse/track_manager.py)。
 

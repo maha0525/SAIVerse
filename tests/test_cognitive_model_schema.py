@@ -190,13 +190,12 @@ def test_track_open_note_link(session, persona):
 
 
 def test_action_track_indexes(session):
-    """All four indexes on action_track are created."""
+    """All indexes on action_track are created."""
     inspector = inspect(session.bind)
     indexes = {idx["name"] for idx in inspector.get_indexes("action_track")}
     expected = {
         "idx_action_track_persona_status",
         "idx_action_track_last_active",
-        "idx_action_track_waiting_timeout",
         "idx_action_track_persistent",
     }
     assert expected.issubset(indexes)

@@ -5,6 +5,8 @@
 **改訂**: 2026-04-25 v0.1 → v0.2 → v0.3 → v0.4 → v0.5 → v0.6 → 2026-04-28 v0.7 → v0.8 → v0.9 → v0.10 → 2026-04-29 v0.11
 **前提**: `persona_cognitive_model.md` v0.14（ライン 3 軸独立 + 7 層ストレージモデル + メタ判断分岐フロー）
 
+> ⚠ **`waiting` 状態に関する記述は廃止 (2026-05-11)**: 本ドキュメント全体に登場する `status='waiting'` / `track_wait` / `track_resume_from_wait` / `waiting_for` / `waiting_timeout_at` 等の「待ち」Track 機構は v0.31 (2026-05-09) で廃止された。「待ち」は Track 状態として保持せず、Phase 5 の時間差ツール基盤が完了イベントとして配送する設計に変わっている。最新仕様は [persona_cognition/](persona_cognition/README.md) 配下を参照。詳細経緯: [persona_cognition/revisions.md](persona_cognition/revisions.md) v0.31 / [handoff_waiting_track_removal.md](persona_cognition/handoff_waiting_track_removal.md)。
+
 ## 重要な前提認識
 
 ### v0.2 で確認: 既存資産が想像以上に揃っている

@@ -192,13 +192,13 @@ Track 内で Metabolism によりコンテキストから押し出された必�
 
 | 項目 | 状態 | 廃止理由 |
 |------|------|---------|
-| `track_waiting.json` Playbook | 🔲 削除 | Track 種別ではなく「待ち」を独立 Playbook 化していた誤設計 |
-| `STATUS_WAITING` (`saiverse/track_manager.py`) | 🔲 削除 | 状態として独立する必要なし。pending と区別する根拠がなくなる |
-| `track.waiting_for` カラム + 関連 API | 🔲 削除 | 「何を待っているか」はツール / Spell の引数 + 結果イベントで自己記述する |
-| `track.waiting_timeout_at` カラム + EventScheduler 予約 | 🔲 削除 | timeout もツール側責務 (= 「結果不到達」イベントの一形態) |
-| `TrackManager.wait()` / `resume_from_wait()` メソッド | 🔲 削除 | 状態廃止に伴う |
-| Phase 4-e で実装した `_schedule_waiting_timeout` / `_handle_waiting_timeout` | 🔲 削除 | 時間差ツール基盤に移行 |
-| `04_handlers.md` の `post_complete_behavior` 表から「waiting」削除 | 🔲 | 「Track 種別」として誤って記述されていた |
+| `track_waiting.json` Playbook | ✅ 削除済 (2026-05-11) | Track 種別ではなく「待ち」を独立 Playbook 化していた誤設計 |
+| `STATUS_WAITING` (`saiverse/track_manager.py`) | ✅ 削除済 (2026-05-11) | 状態として独立する必要なし。pending と区別する根拠がなくなる |
+| `track.waiting_for` カラム + 関連 API | ✅ 削除済 (2026-05-11) | 「何を待っているか」はツール / Spell の引数 + 結果イベントで自己記述する |
+| `track.waiting_timeout_at` カラム + EventScheduler 予約 | ✅ 削除済 (2026-05-11) | timeout もツール側責務 (= 「結果不到達」イベントの一形態) |
+| `TrackManager.wait()` / `resume_from_wait()` メソッド | ✅ 削除済 (2026-05-11) | 状態廃止に伴う |
+| Phase 4-e で実装した `_schedule_waiting_timeout` / `_handle_waiting_timeout` | ✅ 削除済 (2026-05-11) | 時間差ツール基盤に移行 |
+| `04_handlers.md` の `post_complete_behavior` 表から「waiting」削除 | ✅ 削除済 (2026-05-11) | 「Track 種別」として誤って記述されていた |
 
 **移行注意**:
 
@@ -305,7 +305,7 @@ def validate_child_playbook(playbook: PlaybookSchema) -> None:
 - [ ] `context_profile` / `model_type` / `exclude_pulse_id` 関連コードが削除された
 - [ ] Track Chronicle 本体が動作: Metabolism 連動の `_generate_track_chronicle` で Track 別生成 / head 入れ替え / 切り替え時 history 末尾近く挿入 / 時刻アンカー (詳細 [`../track_chronicle.md`](../track_chronicle.md))
 - [ ] dead code 撤去完了: `prepare_pulse_root_context` / `build_fixed_section` / `build_dynamic_section` / `pause_summary` 関連 (DB / API / Frontend)
-- [ ] `track_waiting.json` / `STATUS_WAITING` / `waiting_for` / `waiting_timeout_at` 関連機構が完全に削除されている
+- [x] `track_waiting.json` / `STATUS_WAITING` / `waiting_for` / `waiting_timeout_at` 関連機構が完全に削除されている (2026-05-11)
 
 ---
 

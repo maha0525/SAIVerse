@@ -34,7 +34,7 @@ _SCHEDULER_KEY = "internal_alert_poll"
 
 # パラメータ閾値超過 alert を発火する対象 Track 状態。
 # completed/aborted/forgotten 等は対象外。
-_ELIGIBLE_STATUSES = {"running", "pending", "waiting", "unstarted", "alert"}
+_ELIGIBLE_STATUSES = {"running", "pending", "unstarted", "alert"}
 
 # Handler 探索順 (sea/pulse_root_context.py の _HANDLER_ATTR_BY_TYPE と一致)
 _HANDLER_ATTRS = (

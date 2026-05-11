@@ -85,7 +85,7 @@ class AutonomousTrackHandler:
 | `wait_response` | 応答待ち型。次のイベントまで休む | user_conversation, social, external |
 | `meta_judge` | 連続実行型。一段落 → メタレイヤー判断 | autonomous, scheduled (Phase 5), somatic (Phase 5) |
 
-注: 旧版では `waiting` を Track 種別として誤って列挙していた。「待ち」は Track 状態でも種別でもなく、結果が時間差で返る行動の性質として扱う ([02_mechanics.md の「応答待ち (時間差ツール基盤)」](02_mechanics.md#応答待ち-時間差ツール基盤))。
+「待ち」は Track 状態でも種別でもなく、結果が時間差で返る行動の性質として扱う ([02_mechanics.md の「応答待ち (時間差ツール基盤)」](02_mechanics.md#応答待ち-時間差ツール基盤))。
 
 メタレイヤー定期実行が来た時、現 running Track の Handler の `post_complete_behavior` を見て:
 
@@ -212,7 +212,6 @@ SAIVerseManager の既存の background polling loop に Handler tick の呼び�
 | `meta_judgment.json` | メタ判断専用 | Phase 3 (実装済み、Phase 1.2 でマージ) |
 | `track_social.json` | 交流 Track 用 | Phase 3 (未着手) |
 | `track_external.json` | 外部通信 Track 用 | Phase 3 (未着手) |
-| ~~`track_waiting.json`~~ | ~~待機 Track の起動時~~ | **廃止** (Phase 3、2026-05-09)。「待ち」は Track 種別ではなく行動の性質。時間差ツール基盤 (Phase 5) で処理する |
 
 各 Playbook はメインライン (重量級) で:
 

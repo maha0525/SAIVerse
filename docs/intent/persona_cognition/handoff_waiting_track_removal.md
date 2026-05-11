@@ -1,7 +1,7 @@
 # Handoff: 「待ち」Track 廃止作業
 
 **親**: [README.md](README.md)
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 完了 (2026-05-11)
 **経緯**: [revisions.md](revisions.md) v0.31 (2026-05-09) で「待ちを Track 状態として持たない」方針に変更
 **関連**: [pulse_dispatch.md](pulse_dispatch.md) §8 (時間差ツール基盤、Phase 5 で代替提供予定)
 

@@ -198,7 +198,7 @@ class SAIVerseManager(
         logging.info("Initialized OccupancyManager.")
 
         # Phase 4-e: EventScheduler を TrackManager より先に作成する。
-        # TrackManager の wait() で waiting_timeout_at の予約 push に使うため。
+        # TrackManager の wait_response_timeout 予約 push 等に使うため。
         from saiverse.event_scheduler import EventScheduler
         self.event_scheduler = EventScheduler()
 
@@ -359,8 +359,8 @@ class SAIVerseManager(
         self.internal_alert_poller.start()
 
         # Phase 4-e: Start EventScheduler dispatcher loop. 以降、push される
-        # 予約 (TTL 接近 / interval / schedule / waiting timeout 等) はこの
-        # 1 個のスレッドで秒精度発火される。
+        # 予約 (TTL 接近 / interval / schedule / wait_response timeout 等) は
+        # この 1 個のスレッドで秒精度発火される。
         self.event_scheduler.start()
 
         # --- Step 7: Register with SDS and start background tasks ---

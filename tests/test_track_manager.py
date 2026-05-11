@@ -17,7 +17,6 @@ from saiverse.track_manager import (
     STATUS_PENDING,
     STATUS_RUNNING,
     STATUS_UNSTARTED,
-    STATUS_WAITING,
     TrackManager,
     TrackNotFoundError,
 )
@@ -28,8 +27,8 @@ def session_factory():
     """In-memory SQLite session factory.
 
     StaticPool + check_same_thread=False により、thread 跨ぎでも同一 :memory: DB
-    を共有できる (Phase 4-e の waiting timeout テストでは EventScheduler の
-    dispatch thread から DB アクセスがあるため)。
+    を共有できる (wait_response timeout 等の EventScheduler dispatch thread から
+    DB アクセスがあるため)。
     """
     engine = create_engine(
         "sqlite:///:memory:",
@@ -187,164 +186,6 @@ def test_pause_rejects_unstarted(tm, persona):
         tm.pause(t)
 
 
-def test_wait_sets_waiting_fields(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"type":"user_response"}', timeout_seconds=600)
-    track = tm.get(t)
-    assert track.status == STATUS_WAITING
-    assert track.waiting_for == '{"type":"user_response"}'
-    assert track.waiting_timeout_at is not None
-
-
-def test_wait_without_timeout_keeps_null(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"type":"user_response"}')
-    assert tm.get(t).waiting_timeout_at is None
-
-
-def test_resume_from_wait_activate(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}')
-    tm.resume_from_wait(t, "activate")
-    assert tm.get(t).status == STATUS_RUNNING
-
-
-def test_resume_from_wait_pause_clears_waiting_fields(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}', timeout_seconds=60)
-    tm.resume_from_wait(t, "pause")
-    track = tm.get(t)
-    assert track.status == STATUS_PENDING
-    assert track.waiting_for is None
-    assert track.waiting_timeout_at is None
-
-
-def test_resume_from_wait_abort(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}')
-    tm.resume_from_wait(t, "abort")
-    track = tm.get(t)
-    assert track.status == STATUS_ABORTED
-    assert track.aborted_at is not None
-
-
-def test_wait_with_event_scheduler_pushes_timeout(session_factory, persona):
-    """Phase 4-e: wait() で waiting_timeout_at が EventScheduler に push される。"""
-    from saiverse.event_scheduler import EventScheduler
-    scheduler = EventScheduler()
-    scheduler.start()
-    try:
-        tm_with_sched = TrackManager(
-            session_factory=session_factory, event_scheduler=scheduler,
-        )
-        t = tm_with_sched.create(persona, "autonomous")
-        tm_with_sched.activate(t)
-        tm_with_sched.wait(t, waiting_for='{"type":"user_response"}', timeout_seconds=600)
-        # EventScheduler に予約が登録されている
-        assert scheduler.has_key(f"wait_timeout:{t}")
-    finally:
-        scheduler.stop()
-
-
-def test_wait_no_event_scheduler_skips_push(tm, persona):
-    """event_scheduler=None なら wait() は push しない (互換性、tools 等のケース)。"""
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    # 例外なく wait できる
-    tm.wait(t, waiting_for='{"type":"user_response"}', timeout_seconds=60)
-    assert tm.get(t).status == STATUS_WAITING
-
-
-def test_resume_from_wait_cancels_timeout_schedule(session_factory, persona):
-    """resume_from_wait (pause/abort) で EventScheduler の予約がキャンセルされる。"""
-    from saiverse.event_scheduler import EventScheduler
-    scheduler = EventScheduler()
-    scheduler.start()
-    try:
-        tm_with_sched = TrackManager(
-            session_factory=session_factory, event_scheduler=scheduler,
-        )
-        t = tm_with_sched.create(persona, "autonomous")
-        tm_with_sched.activate(t)
-        tm_with_sched.wait(t, waiting_for='{"x":1}', timeout_seconds=60)
-        assert scheduler.has_key(f"wait_timeout:{t}")
-        tm_with_sched.resume_from_wait(t, "pause")
-        assert not scheduler.has_key(f"wait_timeout:{t}")
-    finally:
-        scheduler.stop()
-
-
-def test_waiting_timeout_fires_alert(session_factory, persona):
-    """timeout 到達時に alert observer が呼ばれる (Intent: 自動遷移せず通知)。"""
-    import time as _time
-    from datetime import datetime as _dt
-    from saiverse.event_scheduler import EventScheduler
-    scheduler = EventScheduler()
-    scheduler.start()
-    received = []
-
-    def observer(persona_id, track_id, context):
-        received.append((persona_id, track_id, context))
-
-    try:
-        tm_with_sched = TrackManager(
-            session_factory=session_factory, event_scheduler=scheduler,
-        )
-        tm_with_sched.add_alert_observer(observer)
-        t = tm_with_sched.create(persona, "autonomous")
-        tm_with_sched.activate(t)
-        # 0 秒タイムアウト → 即時 fire (datetime.now() がそのまま fire_at)
-        # ただし wait() の中で now+0 が計算されるため、fire は即時走る
-        tm_with_sched.wait(t, waiting_for='{"x":1}', timeout_seconds=0)
-        # callback 実行を待つ
-        deadline = _time.time() + 2.0
-        while _time.time() < deadline and not received:
-            _time.sleep(0.05)
-        assert len(received) == 1
-        pid, tid, ctx = received[0]
-        assert pid == persona
-        assert tid == t
-        assert ctx["trigger"] == "waiting_timeout"
-        assert ctx["waiting_for"] == '{"x":1}'
-        # Track 状態は依然 waiting (Intent: 自動遷移しない、メタ判断に委ねる)
-        assert tm_with_sched.get(t).status == STATUS_WAITING
-    finally:
-        scheduler.stop()
-
-
-def test_waiting_timeout_no_fire_after_resume(session_factory, persona):
-    """waiting 解除後に timeout が fire されても alert 通知が走らない。"""
-    import time as _time
-    from saiverse.event_scheduler import EventScheduler
-    scheduler = EventScheduler()
-    scheduler.start()
-    received = []
-
-    def observer(persona_id, track_id, context):
-        received.append((persona_id, track_id, context))
-
-    try:
-        tm_with_sched = TrackManager(
-            session_factory=session_factory, event_scheduler=scheduler,
-        )
-        tm_with_sched.add_alert_observer(observer)
-        t = tm_with_sched.create(persona, "autonomous")
-        tm_with_sched.activate(t)
-        # 1 秒タイムアウトで予約 → 直後に解除 (dispatch thread が起きる前に cancel)
-        tm_with_sched.wait(t, waiting_for='{"x":1}', timeout_seconds=1)
-        tm_with_sched.resume_from_wait(t, "pause")
-        # 1.5 秒待っても alert は来ない (cancel されたため)
-        _time.sleep(1.5)
-        assert received == []
-    finally:
-        scheduler.stop()
-
-
 def test_wait_response_timeout_schedules_on_activate(session_factory, persona):
     """activate() で provider が wait_response を返したらタイマー予約が入る。"""
     from saiverse.event_scheduler import EventScheduler
@@ -443,8 +284,13 @@ def test_wait_response_timeout_canceled_on_other_activate(session_factory, perso
 
 
 def test_wait_response_timeout_fires_pause_and_callback(session_factory, persona):
-    """タイムアウト発火で Track が pending に落ち、callback が呼ばれる。"""
-    import time as _time
+    """タイムアウト発火で Track が pending に落ち、callback が呼ばれる。
+
+    activate 時の schedule は `base_time < now` フォールバック (2026-05-10) で
+    `now + minutes` にずらされるため即時 fire しない。代わりに `_handle_…` を
+    直接叩いて再評価ロジック (idle_for >= threshold) を通す。
+    """
+    from datetime import datetime as _dt, timedelta as _td
     from saiverse.event_scheduler import EventScheduler
 
     scheduler = EventScheduler()
@@ -454,34 +300,21 @@ def test_wait_response_timeout_fires_pause_and_callback(session_factory, persona
     def callback(persona_id, track_id):
         callback_calls.append((persona_id, track_id))
 
+    # base_time=2分前 + minutes=1 → 再評価時に idle_for >= 1min が成立 → pause + callback
     def provider(track):
-        # 0 分 + last_msg=None → 即時 fire (now + 0)。再評価時の idle_for も
-        # base_time=None で skip されるため pause まで進む。
-        return (0, None)
-
-    # provider が "0 分" を返すと _schedule_wait_response_timeout 側で minutes<=0
-    # で early return するので、テスト用に provider を 0.001 にして即時発火させる
-    def provider_fast(track):
-        from datetime import datetime as _dt, timedelta as _td
-        # base_time を 1 秒前にして、minutes=0 でなく 1 で fire_at = now-1s+1min
-        # → ほぼ即時 fire。再評価で idle_for >= 1 min を満たさないので timer は
-        # 再スケジュールされる... これだとループしてしまう。
-        # 方針変更: base_time=1分以上前 + minutes=1 → idle_for >= 1min OK → fire成立
         return (1, _dt.now() - _td(minutes=2))
 
     try:
         tm_with_sched = TrackManager(
             session_factory=session_factory,
             event_scheduler=scheduler,
-            wait_response_timeout_provider=provider_fast,
+            wait_response_timeout_provider=provider,
             wait_response_timeout_callback=callback,
         )
         t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
         tm_with_sched.activate(t)
-        # callback 実行を待つ
-        deadline = _time.time() + 3.0
-        while _time.time() < deadline and not callback_calls:
-            _time.sleep(0.05)
+        # 再評価ルートを直接走らせる (schedule 側は now+1min まで動かない)
+        tm_with_sched._handle_wait_response_timeout(t, persona)
         assert callback_calls == [(persona, t)]
         # Track は pending に落ちている
         assert tm_with_sched.get(t).status == STATUS_PENDING
@@ -528,21 +361,6 @@ def test_wait_response_timeout_reschedules_when_not_idle_enough(session_factory,
         scheduler.stop()
 
 
-def test_resume_from_wait_invalid_mode(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}')
-    with pytest.raises(ValueError):
-        tm.resume_from_wait(t, "explode")
-
-
-def test_resume_from_wait_requires_waiting_status(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)  # running, not waiting
-    with pytest.raises(InvalidTrackStateError):
-        tm.resume_from_wait(t, "activate")
-
-
 def test_complete_sets_timestamp(tm, persona):
     t = tm.create(persona, "autonomous")
     tm.activate(t)
@@ -564,17 +382,6 @@ def test_abort_from_pending(tm, persona):
     tm.pause(t)
     tm.abort(t)
     assert tm.get(t).status == STATUS_ABORTED
-
-
-def test_abort_clears_waiting_fields(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}', timeout_seconds=60)
-    tm.abort(t)
-    track = tm.get(t)
-    assert track.status == STATUS_ABORTED
-    assert track.waiting_for is None
-    assert track.waiting_timeout_at is None
 
 
 def test_abort_rejects_already_terminal(tm, persona):
@@ -627,26 +434,11 @@ def test_persistent_track_cannot_abort(tm, persona):
         tm.abort(t)
 
 
-def test_persistent_track_cannot_abort_from_wait(tm, persona):
-    t = tm.create(persona, "social", is_persistent=True)
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}')
-    with pytest.raises(PersistentTrackError):
-        tm.resume_from_wait(t, "abort")
-
-
 def test_persistent_track_can_pause(tm, persona):
     t = tm.create(persona, "social", is_persistent=True)
     tm.activate(t)
     tm.pause(t)
     assert tm.get(t).status == STATUS_PENDING
-
-
-def test_persistent_track_can_wait(tm, persona):
-    t = tm.create(persona, "social", is_persistent=True)
-    tm.activate(t)
-    tm.wait(t, waiting_for='{"x":1}')
-    assert tm.get(t).status == STATUS_WAITING
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +470,6 @@ def test_operations_on_unknown_track_raise(tm):
     for op_name, args in [
         ("activate", ("nope",)),
         ("pause", ("nope",)),
-        ("wait", ("nope", '{"x":1}')),
         ("complete", ("nope",)),
         ("abort", ("nope",)),
         ("set_alert", ("nope",)),
@@ -688,13 +479,6 @@ def test_operations_on_unknown_track_raise(tm):
         op = getattr(tm, op_name)
         with pytest.raises(TrackNotFoundError):
             op(*args)
-
-
-def test_wait_requires_waiting_for(tm, persona):
-    t = tm.create(persona, "autonomous")
-    tm.activate(t)
-    with pytest.raises(ValueError):
-        tm.wait(t, waiting_for="")
 
 
 # ---------------------------------------------------------------------------

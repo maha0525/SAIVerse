@@ -47,7 +47,6 @@ from .track_manager import (
     STATUS_PENDING,
     STATUS_RUNNING,
     STATUS_UNSTARTED,
-    STATUS_WAITING,
     TrackManager,
 )
 
@@ -1122,7 +1121,6 @@ class MetaLayer:
         )
         running = [t for t in tracks if t.status == STATUS_RUNNING]
         alert = [t for t in tracks if t.status == STATUS_ALERT]
-        waiting = [t for t in tracks if t.status == STATUS_WAITING]
         pending_or_unstarted = [
             t for t in tracks if t.status in (STATUS_PENDING, STATUS_UNSTARTED)
         ]
@@ -1146,7 +1144,6 @@ class MetaLayer:
             "running": running,
             "alert": alert,
             "pending_or_unstarted": pending_or_unstarted,
-            "waiting": waiting,
             "target_already_running": target_already_running,
             "target_track_title": context.get("target_track_title"),
         }
@@ -1425,7 +1422,6 @@ class MetaLayer:
             STATUS_RUNNING,
             STATUS_ALERT,
             STATUS_PENDING,
-            STATUS_WAITING,
             STATUS_UNSTARTED,
         ]
         by_status: Dict[str, List[Any]] = {s: [] for s in order}

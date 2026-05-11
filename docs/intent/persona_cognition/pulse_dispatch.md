@@ -59,7 +59,7 @@
 | # | トリガー | 状態 | 経路 | 起動 Pulse | 現状 |
 |---|---|---|---|---|---|
 | 1a | ユーザー発話 | user_conversation Track が running | **直接** | main_line | 動いてる (`invoke_main_line` 直叩き) |
-| 1b | ユーザー発話 | user_conversation Track が pending/alert/waiting/unstarted | **熟慮** | meta_judgment → main_line | 動いてる (`invoke_main_line` ハードコードで強制) |
+| 1b | ユーザー発話 | user_conversation Track が pending/alert/unstarted | **熟慮** | meta_judgment → main_line | 動いてる (`invoke_main_line` ハードコードで強制) |
 | 2a | SubLineScheduler 5秒 poll | autonomous Track が running | **直接** | sub_line | 動いてる |
 | 2b | AutonomyManager push tick | persona idle / interval 到来 | **熟慮** | meta_judgment → (activate あれば) main_line | メタ判断は走るが activate 後の Pulse 起動が未実装 |
 | 3 | スケジュール時刻到来 | 任意 | **直接** | (スケジュール定義による) | 動いてる、ただし Track 紐付けは未対応 |
@@ -273,7 +273,7 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 ```python
 # event_kind, track_status → path
 ("user_utterance", "running") → DIRECT (submit_user with main_line)
-("user_utterance", "pending"|"alert"|"waiting"|"unstarted") → REFLECTIVE (set_alert → MetaLayer)
+("user_utterance", "pending"|"alert"|"unstarted") → REFLECTIVE (set_alert → MetaLayer)
 ("subline_poll", "running" + autonomous) → DIRECT (submit_auto with sub_line)
 ("autonomy_tick", any) → REFLECTIVE (on_periodic_tick)
 ("schedule_fire", any) → DIRECT (submit_schedule, スケジュール定義の Pulse 種別)

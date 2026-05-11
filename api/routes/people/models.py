@@ -575,14 +575,12 @@ class TrackItem(BaseModel):
     track_type: str
     is_persistent: bool
     output_target: str
-    status: str  # running / alert / pending / waiting / unstarted / completed / aborted
+    status: str  # running / alert / pending / unstarted / completed / aborted
     is_forgotten: bool
     intent: Optional[str] = None
     track_metadata: Optional[dict] = None  # parsed JSON, None if not set
     last_active_at: Optional[float] = None
     last_message_at: Optional[float] = None  # MAX(messages.created_at) WHERE origin_track_id=track_id
-    waiting_for: Optional[str] = None
-    waiting_timeout_at: Optional[float] = None
     created_at: Optional[float] = None
     completed_at: Optional[float] = None
     aborted_at: Optional[float] = None
