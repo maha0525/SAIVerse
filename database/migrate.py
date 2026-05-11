@@ -247,7 +247,7 @@ def _demote_legacy_waiting_tracks(engine) -> None:
     try:
         with engine.begin() as conn:
             result = conn.execute(
-                text("UPDATE action_tracks SET status = 'pending' WHERE status = 'waiting'")
+                text("UPDATE action_track SET status = 'pending' WHERE status = 'waiting'")
             )
             if result.rowcount:
                 logging.info(
