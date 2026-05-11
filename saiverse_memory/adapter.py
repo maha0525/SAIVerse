@@ -643,7 +643,11 @@ class SAIMemoryAdapter:
             return 0
         try:
             with self._db_lock:
-                cur = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=?", (thread_id,))  # type: ignore[attr-defined]
+                cur = self.conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE thread_id=? "
+                    "AND (scope IS NULL OR scope != 'discardable')",
+                    (thread_id,),
+                )  # type: ignore[attr-defined]
                 row = cur.fetchone()
                 return int(row[0]) if row else 0
         except Exception as exc:
