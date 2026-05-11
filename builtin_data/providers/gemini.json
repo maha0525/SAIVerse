@@ -1,0 +1,7 @@
+{
+  "id": "gemini",
+  "display_name": "Google Gemini",
+  "protocol": "gemini_native",
+  "api_key_env": "GEMINI_API_KEY",
+  "api_key_env_alternates": ["GEMINI_FREE_API_KEY"]
+}

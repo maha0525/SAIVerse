@@ -28,6 +28,7 @@ class LlamaCacheManager:
         base = base_url.rstrip("/")
         self._base_url = base[:-3] if base.endswith("/v1") else base
         self._slot_save_path = Path(slot_save_path).expanduser()
+        self._slot_save_path.mkdir(parents=True, exist_ok=True)
         self._parallel = parallel
         self._slot_queue: queue.Queue[int] = queue.Queue()
         for i in range(parallel):
@@ -100,7 +101,6 @@ class LlamaCacheManager:
             logger.warning("[llama_cache] Restore failed for slot %d (%s): %s", slot, persona_id, exc)
 
     def save(self, slot: int, persona_id: str) -> None:
-        self._slot_save_path.mkdir(parents=True, exist_ok=True)
         url = f"{self._base_url}/slots/{slot}?action=save"
         filename = self.cache_filename(persona_id)
         try:

@@ -1,0 +1,5 @@
+{
+  "id": "llama_cpp",
+  "display_name": "llama.cpp (in-process)",
+  "protocol": "llama_cpp_native"
+}

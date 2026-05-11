@@ -10,6 +10,80 @@ LOGGER = logging.getLogger(__name__)
 LEGACY_MODELS_DIR = Path("models")
 
 
+# Map provider protocol to the legacy 'provider' field name used by factory.py.
+# This lets provider_ref resolution emit a config that the existing factory
+# code can consume without changes.
+_PROTOCOL_TO_LEGACY_PROVIDER = {
+    "openai_compat": "openai",
+    "ollama_compat": "ollama",
+    "anthropic_native": "anthropic",
+    "gemini_native": "gemini",
+    "xai_native": "xai",
+    "llama_cpp_native": "llama_cpp",
+    "nvidia_nim": "nvidia_nim",
+    "openai_codex": "openai_codex",
+}
+
+# Fields on the model config that can be inherited from the provider when
+# unset on the model. Tuple is (model_field, provider_field).
+_INHERITABLE_FIELDS = [
+    ("base_url", "base_url"),
+    ("api_key_env", "api_key_env"),
+    ("convert_system_to_user", "default_convert_system_to_user"),
+    ("max_image_bytes", "default_max_image_bytes"),
+    ("supports_images", "default_supports_images"),
+    ("request_kwargs", "default_request_kwargs"),
+]
+
+
+def _resolve_provider_ref(config: Dict) -> Dict:
+    """If config has provider_ref, inherit fields from the referenced provider.
+
+    Direct fields on the model config always take priority. Provider fields
+    are used only when the corresponding model field is missing or None.
+
+    If provider_ref points to an unknown provider, logs a warning and returns
+    the original config (factory.py will fail later if required fields are
+    missing — this surfaces broken refs at runtime rather than hiding them).
+
+    Returns:
+        Resolved config dict (a shallow copy if changes were made, otherwise
+        the original dict).
+    """
+    provider_ref = config.get("provider_ref")
+    if not provider_ref:
+        return config
+
+    # Lazy import to avoid circular dependency with provider_configs
+    from .provider_configs import get_provider
+
+    provider = get_provider(provider_ref)
+    if provider is None:
+        LOGGER.warning(
+            "Model references unknown provider_ref=%r; "
+            "config will be used as-is (factory may fail if required fields are missing)",
+            provider_ref,
+        )
+        return config
+
+    resolved = dict(config)
+
+    # Map protocol -> legacy provider field for factory.py compatibility
+    protocol = provider.get("protocol")
+    if protocol:
+        if "protocol" not in resolved:
+            resolved["protocol"] = protocol
+        if "provider" not in resolved:
+            resolved["provider"] = _PROTOCOL_TO_LEGACY_PROVIDER.get(protocol, protocol)
+
+    # Inherit provider defaults for fields not set on the model
+    for model_field, provider_field in _INHERITABLE_FIELDS:
+        if resolved.get(model_field) is None and provider_field in provider:
+            resolved[model_field] = provider[provider_field]
+
+    return resolved
+
+
 def load_configs() -> Dict[str, Dict]:
     """Load model configurations from user_data and builtin_data directories.
     
@@ -27,22 +101,22 @@ def load_configs() -> Dict[str, Dict]:
     for config_file in iter_files(MODELS_DIR, "*.json"):
         try:
             config_data = json.loads(config_file.read_text(encoding="utf-8"))
-            
+
             # Extract model ID from config (required field for API calls)
             model_id = config_data.get("model")
             if not model_id:
                 LOGGER.warning("Model config %s missing 'model' field, skipping", config_file.name)
                 continue
-            
+
             # Use filename (without extension) as config key
             config_key = config_file.stem
             if config_key not in seen_keys:
-                configs[config_key] = config_data
+                configs[config_key] = _resolve_provider_ref(config_data)
                 seen_keys.add(config_key)
                 LOGGER.debug("Loaded model config: %s (model=%s) from %s", config_key, model_id, config_file)
         except Exception as exc:
             LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
-    
+
     # Fallback to legacy models/ directory if no configs loaded yet
     if not configs and LEGACY_MODELS_DIR.exists() and LEGACY_MODELS_DIR.is_dir():
         for config_file in sorted(LEGACY_MODELS_DIR.glob("*.json")):
@@ -53,7 +127,7 @@ def load_configs() -> Dict[str, Dict]:
                     continue
                 config_key = config_file.stem
                 if config_key not in seen_keys:
-                    configs[config_key] = config_data
+                    configs[config_key] = _resolve_provider_ref(config_data)
                     seen_keys.add(config_key)
             except Exception as exc:
                 LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
@@ -85,6 +159,17 @@ def get_model_provider(model: str) -> str:
             f"Check that a matching JSON file exists in builtin_data/models/ or user_data/models/."
         )
     return config.get("provider", "ollama")
+
+
+def get_provider_for_model(model: str) -> str | None:
+    """Get the effective provider id for a model.
+
+    Returns provider_ref if set, otherwise the legacy 'provider' field value.
+    Returns None if neither is configured. Used by the UI to display which
+    provider a model belongs to.
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    return config.get("provider_ref") or config.get("provider")
 
 
 def get_context_length(model: str) -> int:

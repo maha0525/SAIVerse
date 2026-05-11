@@ -1416,3 +1416,35 @@
 :global([data-theme="light"]) .utilityResultItem { background: #f3f4f6; }
 :global([data-theme="light"]) .resultName { color: #111827; }
 :global([data-theme="light"]) .resultDesc  { color: #6b7280; }
+
+/* Model management subtabs */
+.subTabRow {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color, #ddd);
+}
+
+.subTab {
+    padding: 8px 16px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    border-bottom: 2px solid transparent;
+    font-size: 0.9rem;
+    font-weight: normal;
+}
+
+.subTab:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.subTabActive {
+    border-bottom-color: var(--primary, #4a7eb5);
+    font-weight: 500;
+}
+
+:global([data-theme="dark"]) .subTab:hover {
+    background: rgba(255, 255, 255, 0.06);
+}

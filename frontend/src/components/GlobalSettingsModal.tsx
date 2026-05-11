@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
+import ProviderManagementPanel from './settings/ProviderManagementPanel';
+import ModelManagementPanel from './settings/ModelManagementPanel';
 import ModalOverlay from './common/ModalOverlay';
 
 interface GlobalSettingsModalProps {
@@ -50,7 +52,8 @@ interface PlaybookPermEntry {
     permission_level: string;
 }
 
-type TabId = 'env' | 'world' | 'db' | 'models' | 'playbooks' | 'about' | 'utilities';
+type TabId = 'env' | 'world' | 'db' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
+type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<TabId>('env');
@@ -94,6 +97,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Playbook Permissions
     const [playbookPerms, setPlaybookPerms] = useState<PlaybookPermEntry[]>([]);
     const [playbookPermsLoading, setPlaybookPermsLoading] = useState(false);
+
+    // Model management subtab (providers / models)
+    const [modelMgmtSubTab, setModelMgmtSubTab] = useState<ModelMgmtSubTab>('providers');
 
     // Utilities — backfill item descriptions
     interface BackfillResult { item_id: string; item_name: string; status: string; reason?: string | null; description?: string | null; }
@@ -522,6 +528,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             <Cpu size={18} /> モデルロール
                         </div>
                         <div
+                            className={`${styles.navItem} ${activeTab === 'modelMgmt' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('modelMgmt')}
+                        >
+                            <Boxes size={18} /> モデル管理
+                        </div>
+                        <div
                             className={`${styles.navItem} ${activeTab === 'playbooks' ? styles.active : ''}`}
                             onClick={() => setActiveTab('playbooks')}
                         >
@@ -825,6 +837,27 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         </div>
                                     </>
                                 )}
+                            </div>
+                        )}
+
+                        {activeTab === 'modelMgmt' && (
+                            <div>
+                                <div className={styles.subTabRow}>
+                                    <button
+                                        className={`${styles.subTab} ${modelMgmtSubTab === 'providers' ? styles.subTabActive : ''}`}
+                                        onClick={() => setModelMgmtSubTab('providers')}
+                                    >
+                                        プロバイダ
+                                    </button>
+                                    <button
+                                        className={`${styles.subTab} ${modelMgmtSubTab === 'models' ? styles.subTabActive : ''}`}
+                                        onClick={() => setModelMgmtSubTab('models')}
+                                    >
+                                        モデル
+                                    </button>
+                                </div>
+                                {modelMgmtSubTab === 'providers' && <ProviderManagementPanel />}
+                                {modelMgmtSubTab === 'models' && <ModelManagementPanel />}
                             </div>
                         )}
 

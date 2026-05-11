@@ -50,6 +50,7 @@ TOOLS_DIR = "tools"
 PHENOMENA_DIR = "phenomena"
 PLAYBOOKS_DIR = "playbooks"
 MODELS_DIR = "models"
+PROVIDERS_DIR = "providers"
 DATABASE_DIR = "database"
 PROMPTS_DIR = "prompts"
 ICONS_DIR = "icons"
@@ -320,7 +321,7 @@ def get_user_database_dir() -> Path:
 
 def ensure_user_data_dirs() -> None:
     """Ensure all user_data subdirectories exist."""
-    for subdir in [TOOLS_DIR, PHENOMENA_DIR, PLAYBOOKS_DIR, MODELS_DIR, DATABASE_DIR, PROMPTS_DIR, ICONS_DIR]:
+    for subdir in [TOOLS_DIR, PHENOMENA_DIR, PLAYBOOKS_DIR, MODELS_DIR, PROVIDERS_DIR, DATABASE_DIR, PROMPTS_DIR, ICONS_DIR]:
         (USER_DATA_DIR / subdir).mkdir(parents=True, exist_ok=True)
 
 
@@ -438,6 +439,7 @@ __all__ = [
     "PHENOMENA_DIR",
     "PLAYBOOKS_DIR",
     "MODELS_DIR",
+    "PROVIDERS_DIR",
     "DATABASE_DIR",
     "PROMPTS_DIR",
     "ICONS_DIR",

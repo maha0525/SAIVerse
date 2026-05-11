@@ -1028,3 +1028,273 @@ def set_favorite_models(req: FavoriteModelsRequest):
         raise HTTPException(status_code=500, detail="Failed to save favorite models")
     finally:
         db.close()
+
+
+# ── Model file CRUD (user_data overrides) ────────────────────────
+#
+# Editing a builtin model is implemented as "create a user_data file with the
+# same key". On next reload, the user_data version wins. Reset = delete the
+# user_data file. Builtin files are never modified.
+
+import re as _re
+
+_SAFE_MODEL_KEY = _re.compile(r"^[a-zA-Z0-9_.\-]+$")
+
+
+def _model_user_path(key: str) -> Path:
+    from saiverse.data_paths import USER_DATA_DIR, MODELS_DIR
+    return USER_DATA_DIR / MODELS_DIR / f"{key}.json"
+
+
+def _model_builtin_path(key: str) -> Path:
+    from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR
+    return BUILTIN_DATA_DIR / MODELS_DIR / f"{key}.json"
+
+
+def _validate_model_key(key: str) -> None:
+    if not key or not _SAFE_MODEL_KEY.match(key):
+        raise HTTPException(status_code=400, detail=f"Invalid model key: {key!r}")
+
+
+def _strip_runtime_fields(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove fields that are auto-injected at load time and shouldn't persist."""
+    return {k: v for k, v in config.items() if k != "builtin"}
+
+
+class ModelFileCreateRequest(BaseModel):
+    key: str  # filename stem (no extension)
+    config: Dict[str, Any]
+
+
+class ModelFileUpdateRequest(BaseModel):
+    config: Dict[str, Any]
+
+
+class ModelFileCloneRequest(BaseModel):
+    new_key: str
+    display_name: Optional[str] = None
+
+
+class SaveModelFromChatRequest(BaseModel):
+    """Save the current chat UI parameter values as a model JSON.
+
+    Behavior:
+      - target_key = source_model and overwrite=False: 409 if user_data file
+        exists; if only builtin exists, creates user_data override (no overwrite needed)
+      - target_key != source_model: always creates a new user_data file (saves as new model)
+      - overwrite=True: allowed to overwrite an existing user_data file with the same target_key
+    """
+    source_model: str  # model key whose config serves as the template
+    target_key: str    # destination filename stem (may equal source_model)
+    display_name: str
+    parameters: Dict[str, Any] = {}
+    cache_enabled: Optional[bool] = None
+    cache_ttl: Optional[str] = None
+    max_history_messages: Optional[int] = None
+    max_image_embeds: Optional[int] = None
+    overwrite: bool = False
+
+
+@router.get("/models/{key}")
+def get_model_file(key: str):
+    """Get the resolved config for a model (provider_ref already inherited)."""
+    _validate_model_key(key)
+    from saiverse.model_configs import MODEL_CONFIGS
+    if key not in MODEL_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+    cfg = dict(MODEL_CONFIGS[key])
+    # Determine source for UI badge
+    user_path = _model_user_path(key)
+    if user_path.exists():
+        source = "user_data"
+    elif _model_builtin_path(key).exists():
+        source = "builtin"
+    else:
+        source = "expansion"
+    return {"key": key, "config": cfg, "source": source}
+
+
+@router.post("/models", status_code=201)
+def create_model_file(req: ModelFileCreateRequest):
+    """Create a new model JSON file in user_data."""
+    _validate_model_key(req.key)
+    if "model" not in req.config:
+        raise HTTPException(status_code=400, detail="config must include 'model' field")
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    user_path = _model_user_path(req.key)
+    if req.key in MODEL_CONFIGS or user_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model '{req.key}' already exists. Use PUT to update.",
+        )
+
+    payload = _strip_runtime_fields(req.config)
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    user_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {"key": req.key, "path": str(user_path), "source": "user_data"}
+
+
+@router.put("/models/{key}")
+def update_model_file(key: str, req: ModelFileUpdateRequest):
+    """Update a model. Builtin/expansion models get an automatic user_data copy.
+
+    On reload the user_data file takes priority, so the builtin remains
+    untouched but is shadowed.
+    """
+    _validate_model_key(key)
+    if "model" not in req.config:
+        raise HTTPException(status_code=400, detail="config must include 'model' field")
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    if key not in MODEL_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+
+    payload = _strip_runtime_fields(req.config)
+    user_path = _model_user_path(key)
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    was_user_data = user_path.exists()
+    user_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {
+        "key": key,
+        "path": str(user_path),
+        "source": "user_data",
+        "created_override": not was_user_data,
+    }
+
+
+@router.delete("/models/{key}", status_code=204)
+def delete_model_file(key: str):
+    """Delete a user_data model file. Builtin models are read-only.
+
+    If a user_data override exists for a builtin, deletion restores the
+    builtin on next reload (the override is removed, not the builtin itself).
+    """
+    _validate_model_key(key)
+    user_path = _model_user_path(key)
+    if not user_path.exists():
+        if _model_builtin_path(key).exists():
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Cannot delete builtin model {key!r}. "
+                    f"Builtin models are read-only. To override, edit instead."
+                ),
+            )
+        raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+
+    user_path.unlink()
+    from saiverse.model_configs import reload_configs
+    reload_configs()
+    return None
+
+
+@router.post("/models/{key}/clone")
+def clone_model_file(key: str, req: ModelFileCloneRequest):
+    """Clone an existing model under a new key (always to user_data)."""
+    _validate_model_key(key)
+    _validate_model_key(req.new_key)
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    if key not in MODEL_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Source model not found: {key}")
+    if req.new_key in MODEL_CONFIGS or _model_user_path(req.new_key).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Target model '{req.new_key}' already exists",
+        )
+
+    cloned = _strip_runtime_fields(MODEL_CONFIGS[key])
+    if req.display_name:
+        cloned["display_name"] = req.display_name
+
+    target = _model_user_path(req.new_key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(cloned, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {"key": req.new_key, "path": str(target), "source": "user_data"}
+
+
+@router.post("/models/save-from-chat")
+def save_model_from_chat(req: SaveModelFromChatRequest):
+    """Save current chat UI settings as a model JSON file.
+
+    Uses the source model as the base template, then overlays the user's
+    parameter values + cache settings + history settings, then writes to
+    user_data/models/<target_key>.json.
+    """
+    _validate_model_key(req.target_key)
+
+    from saiverse.model_configs import MODEL_CONFIGS, reload_configs
+
+    if req.source_model not in MODEL_CONFIGS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source model not found: {req.source_model}",
+        )
+
+    target_path = _model_user_path(req.target_key)
+    if target_path.exists() and not req.overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Target model '{req.target_key}' already exists in user_data. "
+                f"Set overwrite=true to replace it."
+            ),
+        )
+
+    new_config = _strip_runtime_fields(MODEL_CONFIGS[req.source_model])
+    new_config["display_name"] = req.display_name
+
+    # Inject parameter values into the parameters spec (each spec entry's "default")
+    if req.parameters and isinstance(new_config.get("parameters"), dict):
+        params_spec = new_config["parameters"]
+        updated_params = {}
+        for pname, spec in params_spec.items():
+            spec_copy = dict(spec) if isinstance(spec, dict) else spec
+            if pname in req.parameters and isinstance(spec_copy, dict):
+                spec_copy["default"] = req.parameters[pname]
+            updated_params[pname] = spec_copy
+        new_config["parameters"] = updated_params
+
+    # Cache settings
+    if req.cache_enabled is not None or req.cache_ttl is not None:
+        cache_cfg = dict(new_config.get("cache") or {})
+        if req.cache_enabled is not None:
+            cache_cfg["default_enabled"] = req.cache_enabled
+        if req.cache_ttl is not None:
+            cache_cfg["default_ttl"] = req.cache_ttl
+        new_config["cache"] = cache_cfg
+
+    # History / image embed settings as top-level fields
+    if req.max_history_messages is not None:
+        new_config["default_max_history_messages"] = req.max_history_messages
+    if req.max_image_embeds is not None:
+        new_config["max_image_embeds"] = req.max_image_embeds
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        json.dumps(new_config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reload_configs()
+    return {
+        "key": req.target_key,
+        "path": str(target_path),
+        "source": "user_data",
+        "overwrote_existing": req.overwrite and target_path.exists(),
+    }

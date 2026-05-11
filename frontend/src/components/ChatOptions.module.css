@@ -200,9 +200,45 @@
     padding: 1rem 1.5rem;
     border-top: 1px solid rgba(0, 0, 0, 0.1);
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
     gap: 0.8rem;
     background: rgba(0, 0, 0, 0.02);
+    flex-wrap: wrap;
+}
+
+.footerLeft {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.footerRight {
+    display: flex;
+    gap: 0.6rem;
+    margin-left: auto;
+}
+
+.linkBtn {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--primary, #4a7eb5);
+    padding: 0.45rem 0.7rem;
+    border-radius: 0.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    text-decoration: underline;
+}
+
+.linkBtn:hover:not(:disabled) {
+    background: rgba(74, 126, 181, 0.08);
+    text-decoration: none;
+}
+
+.linkBtn:disabled {
+    color: #999;
+    cursor: not-allowed;
+    text-decoration: none;
 }
 
 .saveBtn {

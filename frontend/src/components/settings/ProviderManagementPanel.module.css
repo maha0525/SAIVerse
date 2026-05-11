@@ -1,0 +1,173 @@
+.container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-color, #ddd);
+}
+
+.header h3 {
+    margin: 0;
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+}
+
+.btnPrimary {
+    padding: 6px 12px;
+    background: var(--primary, #4a7eb5);
+    color: var(--primary-foreground, #ffffff);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btnSecondary {
+    padding: 6px 12px;
+    background: var(--bg-secondary, #fafafa);
+    color: inherit;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--bg-secondary, #fafafa);
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 6px;
+}
+
+.rowLeft {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+}
+
+.rowName {
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.rowSub {
+    font-size: 0.78rem;
+    color: var(--text-secondary, #777);
+    word-break: break-all;
+}
+
+.rowActions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    background: #e0e7ff;
+    color: #3730a3;
+}
+
+.badgeUser {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.badgeKeyOk {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.badgeKeyMissing {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.iconBtn {
+    background: none;
+    border: 1px solid var(--border-color, #ccc);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+}
+
+.iconBtn:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.iconBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.deleteBtn {
+    color: #c53030;
+}
+
+.empty {
+    padding: 1rem;
+    text-align: center;
+    color: var(--text-secondary, #777);
+}
+
+/* Dark mode badge overrides — pastel light backgrounds become unreadable on dark */
+:global([data-theme="dark"]) .badge {
+    background: #312e81;
+    color: #c7d2fe;
+}
+
+:global([data-theme="dark"]) .badgeUser {
+    background: #064e3b;
+    color: #a7f3d0;
+}
+
+:global([data-theme="dark"]) .badgeKeyOk {
+    background: #064e3b;
+    color: #a7f3d0;
+}
+
+:global([data-theme="dark"]) .badgeKeyMissing {
+    background: #7f1d1d;
+    color: #fecaca;
+}
+
+:global([data-theme="dark"]) .deleteBtn {
+    color: #fca5a5;
+}

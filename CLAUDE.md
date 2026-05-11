@@ -256,14 +256,59 @@ python scripts/migrate_to_user_data.py             # Execute
 - Per-persona `tasks.db` in `~/.saiverse/personas/<id>/`
 - Stores tasks, steps, and history for task management tools
 
-## Model Configuration
+## Model & Provider Configuration
 
-**Model Configuration** (`models/` directory, `saiverse/model_configs.py`)
-- Model configurations are stored as individual JSON files in `models/` directory
-- Each file represents one model with its provider, context length, and parameters
-- Legacy `models.json` is supported as fallback for backward compatibility
+Models and providers are stored as individual JSON files. The 3-layer priority
+applies to both: `~/.saiverse/user_data/{providers,models}/` (highest) >
+`expansion_data/<addon>/{providers,models}/` > `builtin_data/{providers,models}/`.
 
-**Model Config Structure**:
+See `docs/intent/model_provider_management.md` for the full design.
+See `docs/custom_providers.md` for end-user setup of Kimi / LM Studio /
+llama.cpp server etc.
+
+### Providers
+
+Providers describe how to connect to an LLM backend (protocol, base URL,
+API key environment variable). Defined in `builtin_data/providers/*.json`
+and `~/.saiverse/user_data/providers/*.json`.
+
+**Example** (custom OpenAI-compatible provider):
+```json
+{
+  "id": "lmstudio",
+  "display_name": "LM Studio (local)",
+  "protocol": "openai_compat",
+  "base_url": "http://localhost:1234/v1",
+  "api_key_env": "LMSTUDIO_API_KEY"
+}
+```
+
+**Protocols**:
+- `openai_compat` — OpenAI-compatible API (LM Studio, llama.cpp server, Kimi, etc.)
+- `ollama_compat` — Ollama-compatible API
+- `anthropic_native`, `gemini_native`, `xai_native`, `llama_cpp_native`,
+  `nvidia_nim`, `openai_codex` — builtin only (require code support in `llm_clients/`)
+
+UI from "モデル管理 > プロバイダ" tab can create only `openai_compat` and
+`ollama_compat` providers. Other protocols are builtin-only.
+
+### Models
+
+Models reference a provider via `provider_ref` (recommended) or carry the
+provider's connection info inline in the legacy `provider` + `base_url` form.
+
+**Example** (using provider_ref — preferred):
+```json
+{
+  "model": "qwen2.5-72b-instruct",
+  "display_name": "Qwen 2.5 72B (LM Studio)",
+  "provider_ref": "lmstudio",
+  "context_length": 32768,
+  "parameters": { "temperature": { "type": "slider", "min": 0, "max": 2, "default": 0.7 } }
+}
+```
+
+**Example** (legacy direct fields — still supported for backwards compat):
 ```json
 {
   "model": "mistralai/mistral-large-3-675b-instruct-2512",
@@ -271,26 +316,47 @@ python scripts/migrate_to_user_data.py             # Execute
   "provider": "openai",
   "context_length": 128000,
   "base_url": "https://integrate.api.nvidia.com/v1",
-  "api_key_env": "NVIDIA_API_KEY",
-  "convert_system_to_user": true,
-  "structured_output_backend": "xgrammar",
-  "parameters": { ... }
+  "api_key_env": "NVIDIA_API_KEY"
 }
 ```
 
-**Key Fields**:
-- `model`: The actual model ID used in API calls (required)
-- `display_name`: Human-readable name shown in UI dropdowns (optional, defaults to model ID)
-- `provider`: LLM provider (`openai`, `anthropic`, `gemini`, `ollama`)
-- `convert_system_to_user`: Wrap system messages in `<system>` tags for compatibility (Nvidia NIM, etc.)
-- `structured_output_backend`: Backend for structured output (`xgrammar`, `outlines` for Nvidia NIM)
-- `parameters`: UI-configurable parameters (temperature, top_p, max_tokens, etc.)
+**Resolution order** (`saiverse/model_configs.py:_resolve_provider_ref`):
+1. Direct fields on the model JSON (`base_url`, `api_key_env`, etc.) win
+2. If `provider_ref` is set, missing fields are inherited from the provider
+3. If neither, the legacy `provider` field is used as-is
 
-**Adding a New Model**:
-1. Create a JSON file in `models/` (e.g., `models/my-model.json`)
-2. Define `model`, `display_name`, `provider`, and other required fields
-3. Restart the application to load the new config
-4. Model will appear in all model selection dropdowns
+**Key model fields**:
+- `model`: API model ID used in calls (required)
+- `display_name`: Shown in UI dropdowns
+- `provider_ref` / `provider`: Provider identifier (use `provider_ref` for new models)
+- `context_length`: Context window size
+- `convert_system_to_user`: Wrap system messages in `<system>` tags (Nvidia NIM, etc.)
+- `structured_output_backend`: `xgrammar` or `outlines` (Nvidia NIM)
+- `parameters`: UI-configurable parameters spec
+- `cache`: Cache settings (Anthropic explicit / Gemini-OpenAI implicit)
+- `pricing`: Cost calculation rates
+
+### Adding a New Model or Provider
+
+**Recommended (UI)**: グローバル設定 > "モデル管理" タブから:
+- プロバイダタブ: 新規追加 → プロトコル選択 → base_url / api_key_env 入力 → 接続テスト
+- モデルタブ: 新規追加 → JSON で全フィールド編集 → 保存
+
+**Manual (file)**: Place JSON files directly under
+`~/.saiverse/user_data/{providers,models}/`. Builtin files in `builtin_data/`
+should not be edited directly — UI editing creates a user_data override on
+top of the builtin instead.
+
+**Reload**: After file edits, call `POST /api/config/reload-models` and
+`POST /api/providers/reload`, or restart the application.
+
+**Editing builtin via UI**: Saving a builtin model/provider from the UI creates
+a user_data override (the builtin is never modified). Removing the user_data
+file via "削除" restores the builtin.
+
+**Saving from chat**: ChatOptions has "別名で保存" (save as new model) and
+"上書き保存" (overwrite). For builtin models, "上書き保存" creates a user_data
+override; the builtin file is preserved.
 
 **Migration Script**:
 - `scripts/migrate_models_to_directory.py`: Migrates legacy `models.json` to `models/` directory structure

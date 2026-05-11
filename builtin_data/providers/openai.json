@@ -1,0 +1,8 @@
+{
+  "id": "openai",
+  "display_name": "OpenAI",
+  "protocol": "openai_compat",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "OPENAI_API_KEY",
+  "default_max_image_bytes": 5242880
+}

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
+import ModelEditorModal from './settings/ModelEditorModal';
 
 interface RateLimitInfo {
     rpd: number;
@@ -67,6 +68,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     const [modelParamsOpen, setModelParamsOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [favoriteModels, setFavoriteModels] = useState<string[]>([]);
+    const [editorOpen, setEditorOpen] = useState(false);
+    const [savingAs, setSavingAs] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
@@ -385,6 +388,73 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
+    const buildSaveFromChatPayload = (targetKey: string, displayName: string, overwrite: boolean) => ({
+        source_model: currentModel,
+        target_key: targetKey,
+        display_name: displayName,
+        parameters: params,
+        cache_enabled: cacheConfig.supported ? cacheConfig.enabled : null,
+        cache_ttl: cacheConfig.supported ? cacheConfig.ttl : null,
+        max_history_messages: maxHistoryMessages,
+        max_image_embeds: maxImageEmbeds,
+        overwrite,
+    });
+
+    const handleSaveAs = async () => {
+        if (!currentModel) return;
+        const newKey = window.prompt('新しいモデルキー (ファイル名) を入力:', `${currentModel}-tweaked`);
+        if (!newKey) return;
+        const currentDisplay = models.find(m => m.id === currentModel)?.name || currentModel;
+        const newDisplay = window.prompt('表示名を入力:', `${currentDisplay} (custom)`);
+        if (!newDisplay) return;
+
+        setSavingAs(true);
+        try {
+            const res = await fetch('/api/config/models/save-from-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildSaveFromChatPayload(newKey, newDisplay, false)),
+            });
+            if (!res.ok) {
+                alert(`保存に失敗しました: ${await res.text()}`);
+                return;
+            }
+            // Refresh model list so the new model appears in the dropdown
+            const modelsRes = await fetch('/api/config/models');
+            if (modelsRes.ok) setModels(await modelsRes.json());
+            alert('新しいモデルとして保存しました');
+        } catch (e) {
+            alert(`保存に失敗しました: ${e}`);
+        } finally {
+            setSavingAs(false);
+        }
+    };
+
+    const handleOverwrite = async () => {
+        if (!currentModel) return;
+        const modelInfo = models.find(m => m.id === currentModel);
+        const displayName = modelInfo?.name || currentModel;
+        if (!window.confirm(`現在の設定を「${displayName}」に上書き保存しますか？\n\n※ builtin/expansion モデルの場合は user_data に上書きコピーが作成されます (元のファイルは変更されません)。`)) return;
+
+        setSavingAs(true);
+        try {
+            const res = await fetch('/api/config/models/save-from-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildSaveFromChatPayload(currentModel, displayName, true)),
+            });
+            if (!res.ok) {
+                alert(`上書き保存に失敗しました: ${await res.text()}`);
+                return;
+            }
+            alert('上書き保存しました');
+        } catch (e) {
+            alert(`上書き保存に失敗しました: ${e}`);
+        } finally {
+            setSavingAs(false);
+        }
+    };
+
     if (!isOpen) return null;
 
     return (
@@ -647,10 +717,49 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>閉じる</button>
-                    <button className={styles.saveBtn} onClick={saveParams}>設定を適用</button>
+                    <div className={styles.footerLeft}>
+                        <button
+                            className={styles.linkBtn}
+                            onClick={() => setEditorOpen(true)}
+                            disabled={!currentModel}
+                            title="モデルファイル全体を JSON で編集"
+                        >
+                            詳細編集...
+                        </button>
+                        <button
+                            className={styles.linkBtn}
+                            onClick={handleSaveAs}
+                            disabled={!currentModel || savingAs}
+                            title="現在の設定を新しいモデルとして保存"
+                        >
+                            別名で保存...
+                        </button>
+                        <button
+                            className={styles.linkBtn}
+                            onClick={handleOverwrite}
+                            disabled={!currentModel || savingAs}
+                            title="現在の設定をこのモデルに上書き保存"
+                        >
+                            上書き保存
+                        </button>
+                    </div>
+                    <div className={styles.footerRight}>
+                        <button className={styles.cancelBtn} onClick={onClose}>閉じる</button>
+                        <button className={styles.saveBtn} onClick={saveParams}>設定を適用</button>
+                    </div>
                 </div>
             </div>
+
+            <ModelEditorModal
+                isOpen={editorOpen}
+                mode="edit"
+                modelKey={currentModel || undefined}
+                onClose={() => setEditorOpen(false)}
+                onSaved={() => {
+                    // Reload everything since the model file changed
+                    fetchData();
+                }}
+            />
         </div>
     );
 }

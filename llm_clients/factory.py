@@ -17,6 +17,35 @@ from .xai import XAIClient
 from .base import LLMClient
 
 
+# Map legacy 'provider' field values to the new 'protocol' field. Used when
+# a model config predates the provider/protocol split (no explicit protocol).
+_LEGACY_PROVIDER_TO_PROTOCOL = {
+    "openai": "openai_compat",
+    "ollama": "ollama_compat",
+    "anthropic": "anthropic_native",
+    "gemini": "gemini_native",
+    "xai": "xai_native",
+    "llama_cpp": "llama_cpp_native",
+    "nvidia_nim": "nvidia_nim",
+    "openai_codex": "openai_codex",
+}
+
+
+def _resolve_protocol(provider: str, config: Dict | None) -> str:
+    """Pick the protocol to dispatch on.
+
+    Priority:
+        1. config['protocol'] if explicitly set (new schema)
+        2. Map legacy provider name to protocol
+        3. Fall back to provider as-is (unknown providers raise downstream)
+    """
+    if isinstance(config, dict):
+        explicit = config.get("protocol")
+        if isinstance(explicit, str) and explicit:
+            return explicit
+    return _LEGACY_PROVIDER_TO_PROTOCOL.get(provider, provider)
+
+
 def _supports_images(provider: str, config: Dict | None) -> bool:
     if isinstance(config, dict) and "supports_images" in config:
         return bool(config["supports_images"])
@@ -49,8 +78,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             logging.debug("Using API model name '%s' (config key: '%s')", api_model, model)
     
     supports_images = _supports_images(provider, config if isinstance(config, dict) else None)
+    protocol = _resolve_protocol(provider, config if isinstance(config, dict) else None)
+    logging.debug("[factory] resolved protocol=%s for model=%s (provider=%s)", protocol, model, provider)
     client: LLMClient
-    if provider == "openai":
+    if protocol == "openai_compat":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
             base_url = config.get("base_url")
@@ -123,7 +154,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
                 "[factory] LlamaCachedClient enabled: slot_save_path=%s, parallel=%d",
                 slot_save_path, parallel,
             )
-    elif provider == "nvidia_nim":
+    elif protocol == "nvidia_nim":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
             base_url = config.get("base_url")
@@ -156,12 +187,12 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = NvidiaNIMClient(api_model, supports_images=supports_images, **extra_kwargs)
-    elif provider == "anthropic":
+    elif protocol == "anthropic_native":
         client = AnthropicClient(api_model, config=config, supports_images=supports_images)
-    elif provider == "gemini":
+    elif protocol == "gemini_native":
         logging.info("[factory] Creating GeminiClient with api_model='%s'", api_model)
         client = GeminiClient(api_model, config=config, supports_images=supports_images)
-    elif provider == "llama_cpp":
+    elif protocol == "llama_cpp_native":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
             # model_path is required for llama.cpp
@@ -179,7 +210,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating llama.cpp client for model path '%s' with kwargs: %s", model_path, extra_kwargs)
         client = LlamaCppClient(model_path, context_length, supports_images=supports_images, **extra_kwargs)
-    elif provider == "xai":
+    elif protocol == "xai_native":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
             api_key_env = config.get("api_key_env")
@@ -195,7 +226,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating xAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = XAIClient(api_model, supports_images=supports_images, **extra_kwargs)
-    elif provider == "ollama":
+    elif protocol == "ollama_compat":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
             base_url = config.get("base_url")
@@ -208,7 +239,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating Ollama client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OllamaClient(api_model, context_length, supports_images=supports_images, **extra_kwargs)
-    elif provider == "openai_codex":
+    elif protocol == "openai_codex":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
             timeout = config.get("timeout")
@@ -219,8 +250,9 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         client = OpenAICodexClient(api_model, supports_images=supports_images, **extra_kwargs)
     else:
         raise ValueError(
-            f"Unknown provider '{provider}' for model '{model}'. "
-            f"Valid providers: openai, openai_codex, nvidia_nim, anthropic, gemini, xai, llama_cpp, ollama"
+            f"Unknown protocol '{protocol}' (resolved from provider='{provider}') for model '{model}'. "
+            f"Valid protocols: openai_compat, openai_codex, nvidia_nim, anthropic_native, "
+            f"gemini_native, xai_native, llama_cpp_native, ollama_compat"
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)
