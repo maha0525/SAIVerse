@@ -2389,4 +2389,25 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # No special handling needed here anymore
         return state
 
-    return node
+    # Wrap node in persona_context so LLM clients can read the active
+    # persona via tools.context.get_active_persona_id().
+    # Without this wrap, only spell/tool execution paths set the context
+    # (see _execute_handy_tool_inline / _run_spell_tool_async), and the
+    # LLM call itself runs with persona_id == None — which causes e.g.
+    # LlamaCachedClient to collapse every persona's slot cache into a
+    # single "unknown__<model>.bin" file.
+    async def node_with_persona_context(state: dict):
+        from pathlib import Path
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return await node(state)
+        persona_log_path = getattr(persona, "persona_log_path", None)
+        persona_dir = persona_log_path.parent if persona_log_path else Path.cwd()
+        manager_ref = getattr(persona, "manager_ref", None)
+        with persona_context(
+            persona_id, persona_dir, manager_ref,
+            playbook_name=playbook.name,
+        ):
+            return await node(state)
+
+    return node_with_persona_context
