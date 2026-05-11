@@ -227,6 +227,29 @@ issue #19466 で kaetemi が提案した `llama_state_seq_save_file_chunk_*` 系
 
 今回の fork 実装では **採用しない** (スコープ過大、upstream 追従性も悪化)。
 
+### 8-7. Hybrid / Recurrent attention モデルでは KV cache 再利用が効かない (llama.cpp 本体の制約)
+
+llama.cpp の `llama_state_seq_save_file` / `load_file` は **recurrent memory** (Gated DeltaNet, Mamba 系, RWKV 系などの hybrid/recurrent attention 構造) を完全には保存・復元できない。具体例:
+
+- **Qwen3.6-35B-A3B** (`10 × (3 × Gated DeltaNet → MoE) → 1 × (Gated Attention → MoE)` のハイブリッド構造)
+- 同種の hybrid/recurrent attention モデル全般
+
+これらのモデルで本 fork を使った場合:
+- restore リクエスト自体は **成功** し、`.bin` + `.bin.mtmd` の両方とも正しく読み込まれる
+- しかし推論時に llama-server 側で `forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory)` と判定され、結局 cold start と同じ時間がかかる
+
+これは **llama.cpp 本体の制約** であり、本 fork のスコープ外。本 fork は upstream の cache save/load 機能をマルチモーダル対応に拡張するだけで、recurrent state の不完全な保存問題は解決しない。
+
+**実用上の判断**:
+- 通常 attention モデル (Gemma, Llama, Qwen2.5-VL 等) では本 fork の恩恵が得られる (45x speedup を Gemma 4 で実測)
+- hybrid/recurrent モデルでは cache restore が効かないので、本 fork を使う実利は薄い
+
+検証実績 (2026-05-11):
+- ✅ Gemma 4 E4B-it (NORMAL pos_type, 通常 attention): 9127ms → 204ms (~45x)
+- ⚠️ Qwen 3.6-35B-A3B (hybrid attention): restore 自体は成功するが full re-processing 強制
+
+参考: ggml-org/llama.cpp PR #13194 ("kv-cache: add SWA support") のコメント欄。
+
 ## 9. テスト戦略
 
 ### 9.1 ユニットテスト (`tools/server/tests/unit/`)
