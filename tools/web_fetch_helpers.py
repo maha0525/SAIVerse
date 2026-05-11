@@ -9,6 +9,7 @@ read_url_outline / read_url_section から共通利用する低レベル処理�
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import re
@@ -29,6 +30,20 @@ USER_AGENT = (
 )
 
 HEADING_TAGS: Tuple[str, ...] = ("h1", "h2", "h3", "h4")
+
+# 見出しマッチ用の正規化: 英数字以外（空白・句読点・記号）を全除去して小文字化。
+# 「6. Future directions」と「6Future directions」のような表記揺れを吸収する。
+_HEADING_NORMALIZE_RE = re.compile(r"[^\w]+", re.UNICODE)
+# difflib 類似度マッチの閾値。0.6 は SequenceMatcher.ratio の典型的な「やや緩め」設定。
+# (正規化後比較で取りこぼした「Future direction」vs「Future directions」のような軽微ズレを拾う)
+_HEADING_FUZZY_CUTOFF = 0.6
+
+
+def _normalize_for_match(s: str) -> str:
+    """見出しマッチ用に正規化: 英数字以外を全除去 + 小文字化."""
+    if not s:
+        return ""
+    return _HEADING_NORMALIZE_RE.sub("", s.lower())
 
 
 class FetchError(Exception):
@@ -195,18 +210,59 @@ def extract_section_by_heading(
     if not query:
         return None
     q = query.lower()
+    q_norm = _normalize_for_match(query)
     matched: Optional[Tag] = None
+
+    # 全見出し候補をまず収集（後の fallback で再走しないため）
+    candidates: List[Tuple[Tag, str, str]] = []  # (tag, raw_text, normalized)
     for h in main_soup.find_all(HEADING_TAGS):
         text = h.get_text(strip=True)
+        if not text:
+            continue
+        candidates.append((h, text, _normalize_for_match(text)))
+
+    # 1段目: 厳密な小文字サブストリング一致
+    for h, text, _ in candidates:
         if q in text.lower():
             matched = h
             LOGGER.info(
-                "extract_section heading_matched query=%r heading=%r",
+                "extract_section heading_matched (substring) query=%r heading=%r",
                 query, text,
             )
             break
+
+    # 2段目: 記号・空白除去後のサブストリング一致
+    # 「6. Future directions」vs「6Future directions」のような表記揺れを吸収
+    if not matched and q_norm:
+        for h, text, text_norm in candidates:
+            if text_norm and q_norm in text_norm:
+                matched = h
+                LOGGER.info(
+                    "extract_section heading_matched (normalized) query=%r heading=%r q_norm=%r text_norm=%r",
+                    query, text, q_norm, text_norm,
+                )
+                break
+
+    # 3段目: difflib による類似度マッチ（軽微なtypoや単複違いを吸収）
+    if not matched and q_norm and candidates:
+        norm_texts = [text_norm for _, _, text_norm in candidates if text_norm]
+        close = difflib.get_close_matches(q_norm, norm_texts, n=1, cutoff=_HEADING_FUZZY_CUTOFF)
+        if close:
+            best_norm = close[0]
+            for h, text, text_norm in candidates:
+                if text_norm == best_norm:
+                    matched = h
+                    LOGGER.info(
+                        "extract_section heading_matched (fuzzy) query=%r heading=%r cutoff=%s",
+                        query, text, _HEADING_FUZZY_CUTOFF,
+                    )
+                    break
+
     if not matched:
-        LOGGER.info("extract_section no_heading_match query=%r", query)
+        LOGGER.info(
+            "extract_section no_heading_match query=%r q_norm=%r candidates=%d",
+            query, q_norm, len(candidates),
+        )
         return None
 
     matched_level = int(matched.name[1])
