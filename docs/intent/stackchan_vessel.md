@@ -1,6 +1,6 @@
 # Intent: スタックチャン Vessel 統合（saiverse-stackchan-addon）
 
-**ステータス**: ドラフト v0.3（2026-05-12 改訂、まはー宿題回答反映 / 実装着手準備完了）
+**ステータス**: v0.4（2026-05-12 改訂、Phase 1 + Phase 2 実装完了反映）
 
 ## これは何か
 
@@ -132,6 +132,47 @@ Stack-chan 公式（ししかわ氏主導）リポジトリと、依存する Av
 ### 9. ユーザー導入はブラウザのみで完結する
 
 ファームウェア書き込みに専用 IDE・ドライバインストール・コマンドライン操作を要求してはならない。Web Serial API（esptool-js）を用いてブラウザから `.bin` を直接フラッシュし、AP モードで Wi-Fi・接続トークン設定が完結する形にする。SAIVerse のユーザー層は AITuber 運用者・創作者中心であり、組み込み開発の経験を前提にできない。
+
+### 10. 音声出力経路は PCM 直送、device 側で decoder を持たない
+
+Phase 2 実装中に判明: MP3 経路 (libhelix で decode) は frame sync 失敗で「**再生中に音声が途切れて次のフレームが始まる**」現象を再現性高く起こす。chunk drop や frame boundary 不整合で sync を失う一方、voice-tts 本体の sounddevice 経路はそもそも **PCM を blocking write** で再生していて MP3 ラウンドトリップを通っていない。
+
+したがって vessel への音声送信も **PCM 直送**を採用する。voice-tts は `audio_stream` に MP3 経路と並列で **PCM 経路** (`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm`) を持ち、stackchan_addon の bridge はそちらを購読する。device 側は MP3 decoder を持たず、PCM bytes をそのまま I2S に流す。
+
+帯域は MP3 (128 kbps) → PCM (512 kbps) で 4 倍になるが Wi-Fi 環境なら余裕。代わりに decode 負荷ゼロ、frame sync 失敗ゼロ、設計シンプル化、という利得が大きい。
+
+### 11. broadcast model における consumer 側 pacing 責務
+
+`audio_stream` は queue-based broadcast (= MP3/PCM 両経路ともに「即時 push、複数 subscriber が独立に pop」) を採用している。これは複数 consumer (HTTP /stream + Stack-chan + 将来の別 vessel) が独立に動ける拡張性を持つ一方、**voice-tts 本体の sounddevice 経路の「blocking write による natural pacing」とは構造的に異なる**。
+
+したがって queue から取り出した chunks を device に流す consumer (bridge) は、**再生速度に合わせた pacing を自分の責任で実装する**必要がある:
+
+- sample_rate × channels × 2 bytes/sec で「これまで送った音声の累積秒数」を計算
+- "lead_time" (例: 200ms 分) を超えて先送りしていたら超過分を sleep
+- pacing は **sub chunk 単位** で行う (chunk 単位だと、TTS engine が 1 chunk = 数秒分の PCM を出した時に burst 送信になる)
+
+これを怠ると device 側 ring buffer が overflow して chunk drop が起き、音声に断片的な途切れが入る。
+
+### 12. ESP32 側 ring buffer / playRaw の制約
+
+device 側ファームの音声再生経路には以下の制約があり、無視すると音質劣化に直結する:
+
+- **WebSocketsClient (links2004/WebSockets) のデフォルト max frame size は 15 KB** (`WEBSOCKETS_MAX_DATA_SIZE`)。これを超える binary frame を受信すると **silent disconnect** する (WStype_ERROR すら出ない)。送信側で 8 KB 等に分割する必要がある
+- **M5.Speaker.playRaw は data を内部コピーせず、ポインタだけ保存する** (Speaker_Class.cpp:1029、hpp の `@attention` 明示)。受信した PCM を直接 playRaw に渡すと、ring buffer の循環で同じアドレスが上書きされて再生中の音が壊れる → 自前の **rotation buffer (4 個程度)** にコピーしてから渡す
+- **xRingbufferReceive (BYTEBUF) は連続して取れる byte 列をすべてまとめて返す**。bridge が 8 KB ずつ送っても、device 側 ringbuf に複数連続して溜まっていれば 1 receive で 16 KB / 32 KB が取れる。rotation buffer 1 個のサイズは ring buffer 全体と同じサイズ (= 1 receive 分を全部保持できるサイズ) にする。**小さく取ると超過分を truncate して破棄するしかなく、音の一部が消し飛ぶ**
+
+### 13. WebSocket session 管理は identity-aware
+
+TCP half-open (Wi-Fi / NAT 経路で TCP RST が届かない) で「device は接続継続と認識、サーバは close 判定」の状態が成立しうる。`enableHeartbeat` を入れても library 実装差で穴が残る。
+
+このとき、新しい WS 接続が来て session を上書き登録すると、**古い task が後で WebSocketDisconnect を検知して `finally: unregister(vessel_id)` を呼んだ時に、新 session を誤削除する**。結果「session 登録なし + WS は alive」のゾンビ状態になり、`persona_speak` hook が「vessel いない」と判定して発話が skip される。
+
+対策:
+- `register_session(session)` は上書きされた古い session を return する
+- 新 task は古い session を受け取ったら、その WS を強制 close (TCP half-open task を起こす)
+- `unregister_session(vessel_id, session)` は引数の session が現在登録されている session と一致するときだけ削除する (identity check)
+
+この pattern は他の物理 vessel / WS pub/sub アドオンでも再発する性質のため、将来的に汎用基盤化候補 (`docs/issues/websocket_session_registry.md` 参照)。
 
 ## 設計
 
@@ -313,13 +354,15 @@ STT バックエンド選択は `addon.json` の `params_schema` で UI から�
 
 ### E. 音声出力（TTS 経路）
 
-#### E-1. 案D 採用: voice-tts の audio_stream に subscriber として相乗り
+#### E-1. 採用: voice-tts の audio_stream に PCM 経路を追加し、subscriber として相乗り
 
-voice-tts 0.5.0 の `audio_stream.py` は **pub/sub アーキテクチャ**で実装されている（`subscribe(msg_id) → Queue`, `push_pcm(msg_id, pcm)`, `close(msg_id)`）。ブラウザ向け MP3 progressive 配信のために作られたものだが、**Stack-chan device も同じ subscriber 経路に相乗りできる**。
+voice-tts の `audio_stream.py` は **pub/sub アーキテクチャ**で実装されている。元々はブラウザ向け MP3 progressive 配信のために作られたが、Phase 2 実装中に **PCM 経路を並列で追加**した (`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm`)。stackchan_addon は PCM 経路を購読する。
 
-これにより voice-tts 本体への侵襲は最小化される:
-- **理想**: voice-tts に一切変更を加えず、stackchan_addon が `tools._loaded.speak.audio_stream.subscribe()` を import して使う
-- **次善**: voice-tts 側に「PCM 直送経路を追加する」軽量な拡張を入れる（ESP32-S3 上で MP3 デコード負荷を避けたい場合）
+経緯: 当初の v0.3 では「MP3 のまま流す、PCM 直送は将来課題」としていたが、Phase 2 実機検証で MP3 経路の libhelix decoder で frame sync 失敗が頻発し、音声が途切れる現象を解決できなかった。voice-tts 本体の再生経路 (sounddevice) はそもそも PCM blocking write なので、vessel 側も PCM 直送に揃えた方が **本体経路と構造的に整合する**。
+
+voice-tts 本体への変更は最小:
+- `audio_stream.py` に PCM broadcast 経路を追加 (MP3 経路と完全独立、依存なし)
+- `playback_worker.py` で MP3 と PCM 両方に並行 push (1 行追加レベル)
 
 #### E-2. データフロー
 
@@ -332,23 +375,30 @@ voice-tts 0.5.0 の `audio_stream.py` は **pub/sub アーキテクチャ**で�
   ↓ enqueue_tts(text, persona_id, message_id)
 [voice-tts] _TTSWorker background thread
   ↓ engine.synthesize_stream() で各チャンク yield
-  ↓ ┌─ sd.OutputStream.write(chunk)  ← server_side_playback (opt-in)
-    ├─ audio_stream.push_pcm(msg_id, chunk)  ← MP3 pub/sub
+  ↓ ┌─ sd.OutputStream.write(chunk)              ← 本体 PC スピーカー再生 (opt-in)
+    ├─ audio_stream.push_chunk(msg_id, pcm)      ← MP3 経路 (HTTP/WS 配信、ブラウザ向け)
+    ├─ audio_stream.push_pcm_chunk(msg_id, pcm)  ← PCM 経路 (vessel 向け、新規追加)
     └─ collect for wav save
-  ↓ audio_stream.push_complete() で終端通知
+  ↓ audio_stream.close_stream / close_pcm_stream で終端通知
 
 [stackchan_addon] speak_hook.on_persona_speak() 並行起動:
   ↓ 該当ペルソナが現在 Vessel Building 内かチェック
   ↓ 居れば audio_stream_bridge.start_streaming(msg_id, vessel)
 [stackchan_addon] audio_stream_bridge:
-  ↓ audio_stream.subscribe(msg_id) で Queue 取得
-  ↓ Queue から MP3 フレーム or PCM チャンクを pop
-  ↓ WebSocket バイナリフレームで vessel device に送信
-  ↓ 終端 sentinel (None) を受けたら audio_end メッセージ送信、終了
+  ↓ audio_stream.subscribe_pcm(msg_id) で Queue 取得 (subscribe-before-open 対応)
+  ↓ 最初の chunk 到達時に get_pcm_stream_info() で sample_rate/channels を取得
+  ↓ device に audio_start {sample_rate, channels, format=pcm_s16le} 送信
+  ↓ Queue から PCM bytes を pop:
+      └─ 8 KB ずつに分割 (ESP32 WebSocketsClient の 15 KB 制限対策)
+      └─ sub chunk 単位で pacing (sample_rate × 2 bytes/sec、lead_time 200ms)
+      └─ WebSocket バイナリフレームで送信
+  ↓ 終端 sentinel (None) を受けたら audio_end 送信、終了
 [device]
-  ↓ バイナリフレームを受信
-  ↓ MP3 decoder (helix-mp3 等) で PCM 化 → I2S スピーカー再生
-  ↓ or PCM 直送なら decode 不要、そのまま I2S
+  ↓ WStype_BIN を受信 → FreeRTOS ring buffer に push
+  ↓ Core 0 の audioPlaybackTask が ring buffer から取り出し
+  ↓ rotation buffer (4 個 × 32 KB) に memcpy
+  ↓ M5.Speaker.playRaw(dst, sample_count, sample_rate, stereo, 1, 0)
+  ↓ I2S DMA で物理スピーカーへ
 ```
 
 #### E-3. server_hook の二重発火回避
@@ -376,14 +426,15 @@ def on_persona_speak(persona_id, building_id, message_id, **kwargs):
     audio_stream_bridge.start_streaming(message_id, vessel)
 ```
 
-#### E-4. MP3 vs PCM 直送の選択
+#### E-4. PCM 直送採用 (v0.4 で確定)
 
-voice-tts の `audio_stream` は現状 MP3 progressive 出力。Stack-chan device 側で MP3 デコードが現実的かは ESP32-S3 のリソース次第:
+v0.3 までは「Phase 2 は MP3 のまま流す、PCM 直送は将来課題」と書いていたが、Phase 2 実機検証で MP3 経路に解決困難な問題が複数判明したため **PCM 直送に切り替えた**:
 
-- **CoreS3 で MP3 デコード可能か**: helix-mp3 や libmad の ESP32 ポートで実績あり、CPU 数十%程度の負荷。8MB PSRAM の余裕も大きい。実用範囲
-- **PCM 直送のほうが楽な理由**: デコード不要、シンプル。ただし帯域消費が増える（MP3 32kbps vs PCM 256kbps）。Wi-Fi 環境ならどちらも実用範囲
+1. **libhelix の frame sync 失敗**: chunk drop や frame boundary 不整合で同期を失い、「途中で切れて次が始まる」現象が頻発。lead_time / pacing を入れても完全には解消しなかった
+2. **PCM コピー漏れによるガビガビ音**: libhelix の callback で返される `pcm_buffer` は decoder の内部 buffer 参照で、次の frame で上書きされる。一方 `M5.Speaker.playRaw` は data をコピーせず保存。両者の組み合わせで「波形が次のフレームに置き換わる」状態が発生 (rotation buffer で対応したが、根本的に decoder を挟むこと自体が複雑度を増やしていた)
+3. **本体経路との不整合**: voice-tts 本体は PCM を sounddevice に blocking write していて、そもそも MP3 経路は外部配信用 (HTTP /stream) でしかない。vessel が MP3 経路に相乗りすると、device 側で本体経路にない MP3 → PCM 復元を行うことになり、設計の対称性が崩れる
 
-Phase 1 では **MP3 のまま流す** を第一選択にし、実機検証で遅延・負荷が問題になったら voice-tts 側に PCM 直送経路を追加する余地を残す。
+PCM 直送に切り替えてからは、frame sync 失敗の罠が経路ごと消え、pacing と rotation buffer の sizing を詰めれば連続再生が成立した。帯域は 32 kHz mono で 64 KB/s = 512 kbps、Wi-Fi 環境で問題なし。
 
 ### F. タッチ知覚（なでなで）
 
@@ -603,6 +654,33 @@ AddonManager に Stack-chan アドオン専用パネル:
 
 metadata で `"source": "stackchan_voice"` を付与することで、ペルソナがその発言の由来（物理マイク経由）を認識できる余地は残す。
 
+### なぜ Phase 2 で MP3 経路から PCM 直送に切り替えたか
+
+v0.3 までは「MP3 のまま流して、device で libhelix decode」を採用していたが、Phase 2 実機検証で:
+
+- libhelix の frame sync 失敗 → 音声が途切れて次のフレームに飛ぶ現象が再現性高く発生
+- ESP32 の playRaw + libhelix 内部 buffer の data 寿命管理の罠 → 「喉が枯れた」ガビガビ音
+- 加えて、voice-tts 本体は **PCM を sounddevice に blocking write** している = MP3 経路は外部配信用 (HTTP /stream) でしかなく、vessel もそれに相乗りすると本体経路と構造的に不対称
+
+これらを総合して、vessel も **PCM 直送に揃える** ことにした。voice-tts の `audio_stream` に PCM 経路 (`push_pcm_chunk` / `subscribe_pcm`) を追加し、MP3 経路と並列で broadcast する。device 側は decoder を持たず、ring buffer → rotation buffer → `M5.Speaker.playRaw` の最短経路。
+
+帯域は 4 倍 (128 kbps → 512 kbps) に増えるが Wi-Fi で余裕。代わりに decoder 依存と frame sync 失敗の罠が経路ごと消える。
+
+### なぜ broadcast model で consumer 側に pacing 責務を持たせるか
+
+voice-tts 本体の sounddevice 経路は OutputStream.write が **library レベルで blocking** している。書き込み先の DMA buffer が空くまで write が return しないので、合成スピードが OutputStream 側の natural pacing で律速される。
+
+一方、新 PCM 経路は queue-based broadcast を採用した: `push_pcm_chunk` は queue に積むだけ、consumer は自分の pace で pop する。理由は **複数 consumer の独立性**:
+- HTTP /stream (ブラウザ向け、自分の pace で読む)
+- Stack-chan (network 経由、Wi-Fi 帯域に合わせる)
+- 将来の別 vessel (低速デバイスもあり得る)
+
+これらが同じ stream を独立に購読できるためには、push 側は consumer の状態を見ずに即時 broadcast するのが正解。代わりに **各 consumer が自分の処理速度に合わせて pacing する責務を持つ**。
+
+stackchan_addon の bridge では: sample_rate × 2 bytes/sec で再生速度を算出 → 「これまで送った累積秒数」と「実経過時間」の差が lead_time (200ms) を超えたら sleep。pacing は **sub chunk (8 KB) 単位** で行う (chunk 単位だと TTS engine の generator 単位が数秒分の場合に burst が発生する)。
+
+この pacing 設計を初手で詰めなかったのが Phase 2 実装の主要な反省点。voice-tts の sounddevice 経路の「blocking」性を broadcast model に移し替える時に、その責務がどこに行くかを早めに考えるべきだった。
+
 ### なぜ TTS 出力で voice-tts の audio_stream に相乗りするか（案D を採用）
 
 検討した4案:
@@ -709,7 +787,11 @@ Web Serial API は Chrome / Edge ブラウザだけで動き、ドライバイ�
 - IMU 連動（抱き上げ検知、姿勢検知）
 - 複数 Vessel 対応の本格化（Vessel テーブル切り出し）
 - 別機種対応（眼鏡型、別ロボット）
-- voice-tts の TTS 統合（共通中継レイヤ化、PCM 直送経路追加）
+- 物理 Vessel SDK 共通基盤化（`docs/issues/websocket_session_registry.md` 参照、2 例目が出てから着手）
+- Stack-chan シリアルログを SAIVerse logs/ に統合（`docs/issues/stackchan_serial_log_integration.md` 参照）
+
+**完了済み (v0.4 で実装):**
+- voice-tts の PCM 直送経路追加 (`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm`)
 
 ## 検証観点
 
@@ -721,12 +803,15 @@ Web Serial API は Chrome / Edge ブラウザだけで動き、ドライバイ�
 - スタックチャンを電源 OFF → 再投入 → 自動再接続
 - アドオン `api_routes.py` の `@router.websocket()` のマウント挙動を確認。**そのまま動けば本体改修ゼロ**、動かなければ汎用的な最小改修（addon_loader / addon_deps）を本体に入れる方針で対応
 
-**Phase 2**:
-- ペルソナ発話 → Vessel Building 内なら物理スピーカーから音声
+**Phase 2** (PCM 直送、v0.4 で更新):
+- ペルソナ発話 → Vessel Building 内なら物理スピーカーから声が出る、文章として連続している (途切れ、フレーム飛びがない)
 - 同じペルソナが Vessel Building から出る → 以降の発話は物理スピーカーから出ない
 - ペルソナ A が Vessel Building にいる時に、別 Building の ペルソナ B が発話 → B の音声は鳴らない（=他ペルソナの発話が漏れない）
-- voice-tts の `server_side_playback` を ON にしたまま Stack-chan を使う → PC スピーカーと物理スピーカーから同時に音が出る（=並列発話、棲み分け確認）
-- voice-tts の audio_stream subscribe からチャンク受信が安定する（複数発話連続でメモリリークしない）
+- voice-tts の `server_side_playback` を ON にしたまま Stack-chan を使う → PC スピーカーと物理スピーカーから同時に音が出る（並列発話、PCM 経路と MP3 経路の棲み分け確認）
+- backend.log で `audio_stream_bridge: ws send failed` が出ない (= session 管理 bug 再発なし)
+- serial log で `[ws] ring buffer send timeout ... bytes dropped` が出ない (= pacing が効いて drop ゼロ)
+- serial log で `[audio] chunk too large: ... truncate` が出ない (= rotation buffer が ring buffer を全部受けられる)
+- 連続発話 (10 回以上連続) でメモリリーク・session ゾンビ・接続切れが発生しない
 
 **Phase 3**:
 - "Hi, stack-chan" でウェイクワード起動 → 質問 → ペルソナが応答
@@ -774,9 +859,9 @@ Vessel ごとの能力（マイク有無、カメラ有無、サーボ自由度�
 
 Stack-chan の Avatar、別機種の表情パラメータ、UI 上のアイコン表情、すべてを統一的に駆動する感情 → 表情マッピングレイヤ。
 
-### 5. voice-tts の PCM 直送経路（必要なら）
+### 5. ~~voice-tts の PCM 直送経路~~（v0.4 で実装完了）
 
-ESP32-S3 上の MP3 デコード負荷が実機で問題になった場合、voice-tts に「指定 subscriber には PCM のまま push する」経路を追加する。voice-tts 0.x.x の小規模拡張で済む見込み。
+→ Phase 2 で実装済み。`audio_stream.py` に PCM broadcast 経路を追加、`playback_worker.py` で MP3 と並行 push。詳細は本書 E 節参照。
 
 ## 関連ドキュメント
 
@@ -787,6 +872,8 @@ ESP32-S3 上の MP3 デコード負荷が実機で問題になった場合、voi
 - `docs/intent/external_event_integration.md` — 外部イベント注入の汎用基盤（本書では採用しなかったが、将来参考）
 - `docs/intent/persona_cognitive_model.md` — Track / Note、ペルソナの認知モデル
 - `expansion_data/saiverse-voice-tts/ARCHITECTURE.md` — voice-tts の `audio_stream` pub/sub 詳細、本書 E 節の根拠
+- `docs/issues/websocket_session_registry.md` — 物理 Vessel SDK 共通基盤化案件 (WS セッション管理 + ストリーミング音声)
+- `docs/issues/stackchan_serial_log_integration.md` — Stack-chan シリアルログを SAIVerse logs/ に統合する案件
 - Stack-chan 関連:
   - `https://github.com/stack-chan/stack-chan` (Apache 2.0, ししかわ氏主導)
   - `https://github.com/m5stack/StackChan` (M5Stack 公式)
@@ -813,6 +900,16 @@ ESP32-S3 上の MP3 デコード負荷が実機で問題になった場合、voi
 - **ペアリング UX**: QR コード表示 + 手入力フォーム併用（QR が読めない環境での代替手段確保）
 - **複数 Vessel 対応**: Phase 1 は 1 台前提で UI を作る。データモデル（`vessels.db` スキーマ、`PHYSICAL_VESSEL_ID` 等）は最初から複数対応にして、2 台目以降は将来 Phase で UI 拡張のみで対応可能にする
 
+### v0.3 → v0.4 で確定 (Phase 2 実装中)
+
+- **MP3 → PCM 直送に切り替え**: v0.3 の「Phase 2 は MP3 のまま流す」を撤回。libhelix の frame sync 失敗 + playRaw の data 寿命管理の罠 + 本体経路 (sounddevice = PCM blocking write) との不対称、3 つの理由で PCM 直送に揃えた。voice-tts に PCM 経路 (`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm`) を追加、device 側は decoder を持たず `playRaw` 直結
+- **broadcast model の pacing 責務は consumer 側**: voice-tts 本体の sounddevice の natural pacing (blocking write) を queue-based broadcast model に置き換えたため、bridge 側で `sample_rate × 2 bytes/sec` の pacing を実装。**sub chunk 単位** で行う (chunk 単位だと TTS engine の generator 単位が大きい時に burst が出る)
+- **WS frame 8 KB 分割**: ESP32 WebSocketsClient のデフォルト `WEBSOCKETS_MAX_DATA_SIZE = 15 KB` を超えると silent disconnect する。bridge 側で安全マージン込みの 8 KB に分割
+- **PCM rotation buffer (4 個 × 32 KB) 必須**: `M5.Speaker.playRaw` が data を内部コピーしない + `xRingbufferReceive` が ring buffer 全体をまとめて返す挙動から、rotation buffer のサイズは ring buffer 全体と同じ (32 KB) にする必要がある。小さくすると `chunk too large, truncate` で音が消し飛ぶ
+- **WebSocket session の identity-aware unregister**: TCP half-open で古い task が新 session を誤削除するのを防ぐ。`register_session` は上書きされた古い session を return、新 task は古い WS を強制 close、`unregister_session(vessel_id, session)` は identity check 付き
+- **シリアルログのキャプチャ**: 当面は `temp/stackchan_serial_capture.py` で `~/.saiverse/user_data/logs/<最新>/stackchan_serial.log` に書き出す。SAIVerse のセッションログとして本格統合するのは別 issue (`docs/issues/stackchan_serial_log_integration.md`) で対応
+- **物理 Vessel SDK 共通基盤化**: 2 例目 (別 vessel addon、Discord Gateway 等) が出たら本格着手 (`docs/issues/websocket_session_registry.md`)
+
 ### 実装フェーズ前にまはーへ確認すべき残課題
 
-なし（実装着手準備完了）。Phase 1 着手時に実機検証で明らかになる範囲のリスク（WS マウント挙動、本体改修必要性）は許容範囲として確認済み。
+なし。Phase 2 完了、Phase 3 以降は本書の Phase 別スコープに従って着手する。
