@@ -7,7 +7,10 @@
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "predev": "node scripts/sync-addon-panels.mjs",
+    "prebuild": "node scripts/sync-addon-panels.mjs",
+    "sync:addon-panels": "node scripts/sync-addon-panels.mjs"
   },
   "keywords": [],
   "author": "",

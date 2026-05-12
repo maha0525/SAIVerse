@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2, Plus } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
 import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
+import { ADDON_PANELS } from '../addon-panels.generated';
 import styles from './AddonManagerModal.module.css';
 
 // ---------------------------------------------------------------------------
@@ -792,6 +793,24 @@ function AddonCard({
                 <div className={styles.addonCardBody}>
                     <ParamsSection addon={addon} personas={personas} />
                     <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
+                    {(() => {
+                        const AddonPanel = ADDON_PANELS[addon.addon_name];
+                        if (!AddonPanel) return null;
+                        return (
+                            <Suspense fallback={<p className={styles.loadingText}>Loading panel...</p>}>
+                                <AddonPanel
+                                    addon={{
+                                        addon_name: addon.addon_name,
+                                        display_name: addon.display_name,
+                                        version: addon.version,
+                                        description: addon.description,
+                                    }}
+                                    personas={personas}
+                                    addonApiBase={`/api/addon/${addon.addon_name}`}
+                                />
+                            </Suspense>
+                        );
+                    })()}
                 </div>
             )}
             {expanded && !addon.is_enabled && (
