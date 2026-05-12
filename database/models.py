@@ -86,6 +86,11 @@ class Building(Base):
     # 街マップ上の絶対座標 (world 座標系、px相当)。NULL なら擬似配置にフォールバック。
     MAP_X = Column(Float, nullable=True)
     MAP_Y = Column(Float, nullable=True)
+    # 物理機体 (Stack-chan 等) に紐付く Vessel Building の識別子。NULL なら通常 Building、
+    # 非NULL なら身体メタファーの Vessel Building として扱う (capacity=1 と組み合わせて
+    # 「ペルソナが物理身体に降りている状態」を表現)。識別子の発番・解釈はアドオン側で行う。
+    # 詳細: docs/intent/stackchan_vessel.md
+    PHYSICAL_VESSEL_ID = Column(String(64), nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 
