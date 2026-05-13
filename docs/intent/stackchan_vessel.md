@@ -6,20 +6,28 @@
 
 v0.4 までは「SAIVerse-stackchan-addon 専用ファーム + 自前 WebSocket gateway」で経路を完結させていた。Phase 2-D で voice-tts → 自前ファーム → 物理スピーカーまでの音声経路は動いていたが、Phase 4-5（タッチ / モーター / カメラ / 画面 / アバター）に進む段階で気づいたのは、**stackchan-mcp が既に同等機能を実装済み**であり、我々がそれをゼロから再実装する必要がそもそもない、ということ。
 
-唯一 stackchan-mcp が SAIVerse の要件を満たせない領域は TTS（VOICEVOX 対応のみ、voice-tts ベースの GPT-SoVITS / ペルソナごとの参照音声とは互換性なし）。この欠けを埋める経路は Phase 2 の自前ファーム実装で既に完成しており、bridge の **宛先**だけを「自前 WS frame 直送」から「stackchan-mcp gateway の `send_pcm_stream`」に切り替えれば移植が成立する。つまり Phase 2 の実装が乗り換えで無駄になるのではなく、**移植先が続く**。
+唯一 stackchan-mcp が SAIVerse の要件を満たせない領域は TTS（VOICEVOX 対応のみ、voice-tts ベースの GPT-SoVITS / ペルソナごとの参照音声とは互換性なし）。この欠けを埋めるための経路は Phase 2 の自前ファーム実装で既に確立しており、bridge の **宛先**だけを「自前 WS frame 直送」から「stackchan-mcp gateway の HTTP PCM endpoint」に切り替えれば移植が成立する。つまり Phase 2 の実装が乗り換えで無駄になるのではなく、**移植先が続く**。
 
 この判断のもと、**kisaragi-mochi/stackchan-mcp（xiaozhi-esp32 ベース）のエコシステムに乗り換える** ことを決めた。
+
+**統合方式の確定 (v0.5 初稿から再改訂)**: 初稿では「stackchan-mcp gateway を SAIVerse プロセス内に `import` + `start` する」「stackchan-mcp の MCP tools を SAIVerse の native tool として thin wrap する」設計だったが、これは SAIVerse が既に持つ MCP client 機構（`tools/mcp_client.py` + `mcp_servers.json` の `spell_tools` ベース可視性制御）を活用できておらず、再考の結果以下に変更した:
+
+- **gateway 起動**: subprocess として起動。`expansion_data/saiverse-stackchan-addon/mcp_servers.json` に `command: "stackchan-mcp"` + `args` + `env` を書けば SAIVerse の MCP client が自動的に subprocess 起動 + stdio で接続 + tool 登録を行う（Elyth と同じ枠組み）
+- **ツール呼び出し**: SAIVerse の MCP client 経路。ペルソナの playbook 内で `stackchan__move_head(...)` 等として呼び出し可能、`spell_tools` で各 tool の visible / display_name を制御
+- **voice-tts → device の音声経路**: subprocess 境界を跨ぐため、stackchan-mcp 側に新規 HTTP PCM 受入 endpoint (`POST /pcm`、既存 HTTP capture server port 8766 に追加) を PR で足す。voice-tts の `subscribe_pcm` から取れる PCM iterator を chunked transfer encoding で HTTP POST、認証は `Authorization: Bearer ${STACKCHAN_PCM_TOKEN}`（既存 `VISION_TOKEN` の前例に倣う）
+
+これにより、初稿で書いていた `gateway_runner.py`（in-process gateway 管理層）+ `tools/stackchan_*.py`（native wrap 13 個）は **不要**になる。アドオン側のフットプリントは更に小さくなり、本体改修は `Building.PHYSICAL_VESSEL_ID` カラム追加（v0.4 で実施済み）+ Phase 4' で本体 MCP client への汎用拡張（Building 単位 visibility）に限定される。
 
 主要な変更:
 
 1. **自前ファームを廃止**。device 側は stackchan-mcp ファーム（xiaozhi-esp32 v2.2.6 base + stackchan board config）に置き換える。
 2. **音声経路の構造変更**:
-   - 自前: voice-tts → audio_stream_bridge → 自前ファーム → playRaw（PCM 直送）
-   - 新規: voice-tts → SAIVerse 内 stackchan-mcp gateway（PCM 受入機構を upstream PR で追加） → Opus encode → device の audio_service
-3. **gateway の起動方式**: stackchan-mcp の Python パッケージを SAIVerse プロセス内で `from stackchan_mcp.gateway import get_gateway` の形で import + 起動。subprocess じゃなく同一プロセス。これによって voice-tts の `subscribe_pcm` を `send_pcm_stream` に直接渡せる。
-4. **認証モデルの変更**: 自前ファームでは `{vessel_id, device_token}` の hello メッセージで認証していたが、stackchan-mcp は `Authorization: Bearer <token>` のみ。SAIVerse-stackchan-addon 側で `token_hash → bound_building_id, bound_persona_id` の対応テーブル（vessels.db スキーマ改修）を持つ。
-5. **不変条件 #10〜#13 の無効化**: 自前ファーム特有の制約（PCM 直送、broadcast model の consumer 側 pacing、WebSocket 15 KB silent disconnect、ESP32 playRaw の data 寿命管理、identity-aware WS session unregister）は stackchan-mcp 経路では発生しないか、stackchan-mcp 側で既に解決済み。
-6. **MCP tools の取り扱い**: stackchan-mcp が既に持つ `move_head` / `take_photo` / `get_touch_state` / `set_avatar` / `set_led` 等を、SAIVerse-stackchan-addon の native tool として thin wrap する。Phase 4-5 で当初想定していた「自前ファームに touch / motor / camera / display / avatar を移植する」作業はゼロになる。
+   - 自前: voice-tts → audio_stream_bridge → 自前ファーム → playRaw（device に PCM 直送）
+   - 新規: voice-tts → addon の speak_hook → HTTP PCM POST（chunked transfer） → stackchan-mcp gateway（subprocess）→ Opus encode → device の audio_service
+3. **gateway の起動方式**: stackchan-mcp gateway は **subprocess として SAIVerse の MCP client が起動**する。`expansion_data/saiverse-stackchan-addon/mcp_servers.json` に `command: "stackchan-mcp"` + `env` を書けば自動的に起動 + stdio 接続 + tool 登録される（Elyth と同じ枠組み）。
+4. **認証モデルの変更**: 自前ファームでは `{vessel_id, device_token}` の hello メッセージで認証していたが、stackchan-mcp は `Authorization: Bearer <token>` のみ。SAIVerse-stackchan-addon 側で `token_hash → bound_building_id, bound_persona_id` の対応テーブル（vessels.db スキーマ改修）を持つ。voice-tts → gateway の HTTP PCM POST には別 token `STACKCHAN_PCM_TOKEN`（既存 `VISION_TOKEN` の前例に倣う）を新設。
+5. **不変条件 #10〜#13 の無効化**: 自前ファーム特有の制約（device 直送 PCM、broadcast model の consumer 側 pacing、WebSocket 15 KB silent disconnect、ESP32 playRaw の data 寿命管理、identity-aware WS session unregister）は stackchan-mcp 経路では発生しないか、stackchan-mcp 側で既に解決済み。
+6. **MCP tools の取り扱い**: stackchan-mcp が提供する `move_head` / `take_photo` / `get_touch_state` / `set_avatar` / `set_led` 等を **SAIVerse 本体の MCP client が直接呼び出す**。`mcp_servers.json` の `spell_tools` で visible / display_name 制御。native wrap は作らない。Phase 4-5 で当初想定していた「自前ファームに touch / motor / camera / display / avatar を移植する」作業はゼロになる。
 
 路線変更の判断軸は本書「設計判断の理由」節の「なぜ自前ファームを廃止して stackchan-mcp に乗り換えるか」に記録する。
 
@@ -32,7 +40,7 @@ SAIVerse のペルソナを物理デバイス **Stack-chan**（M5Stack 製 "Stac
 実装の中核は **kisaragi-mochi/stackchan-mcp**（MIT、GPL-3.0 ハイブリッド）に乗ること:
 
 - **device ファーム**: stackchan-mcp のリリース済み firmware（xiaozhi-esp32 v2.2.6 base + stackchan board config、ESP32-S3 用）をそのまま使う。書き込みは esptool 経由で SAIVerse 側から実行。
-- **gateway**: stackchan-mcp の Python パッケージを SAIVerse プロセス内で import + 起動。WebSocket server（device ↔ gateway）と HTTP capture server（device → gateway、画像 POST）を SAIVerse の lifecycle と同期して立ち上げる。
+- **gateway**: stackchan-mcp gateway は subprocess として SAIVerse の MCP client が起動。`mcp_servers.json` 設定で自動マウント、stdio 接続、tool 登録までが本体側で処理される。gateway は WebSocket server（device ↔ gateway）と HTTP capture server（device → gateway、画像 POST）をその subprocess 内で listen する。
 - **PCM 受入機構**: stackchan-mcp 本家に upstream PR を出して `send_pcm_audio(gateway, pcm)` と `send_pcm_stream(gateway, pcm_chunks)` を追加（PR 完了次第本家 merge、それまでは我々の fork を使う）。voice-tts の `subscribe_pcm` を `send_pcm_stream` に直接渡して逐次再生する。
 
 本体への改修は Phase 1' 着手時点では `Building.PHYSICAL_VESSEL_ID` カラム追加 1 個のみ（v0.4 で実施済み）。Phase 4' でペルソナ認知側の改修（移動メッセージ拡張 + スペル/Playbook の Building 単位切り替え）を追加で入れる。詳細は本書「設計 A-3. Phase 4' で追加する本体改修」節。アドオン全体のフットプリントは自前ファーム + 自前 gateway 廃止により大幅に小さくなる。
@@ -156,7 +164,7 @@ Phase 2 で確立した経路 (`voice-tts.audio_stream` の PCM broadcast 経路
 
 - Phase 4-5 で計画していた自前移植 ≒ ゼロ（stackchan-mcp で既存）
 - TTS 経路の移植 ≒ Phase 2 の成果物の宛先切り替えのみ
-- 我々の責任範囲 ≒ vessel_manager + speak_hook + native tool wrap + gateway_runner（薄い接続層のみ）
+- 我々の責任範囲 ≒ `mcp_servers.json` + `vessel_manager` + `speak_hook`（薄い接続層のみ、subprocess 管理と tool wrap は本体 MCP client 任せ）
 
 代わりに、Phase 1 の `send_pcm_audio` / `send_pcm_stream` PR が voice-tts コミュニティへの還元になり、stackchan-mcp ユーザー全体に「ペルソナごとの参照音声で stackchan を喋らせる」選択肢を提供できる。
 
@@ -185,17 +193,25 @@ v0.4 から **変更なし**。物理機体は 1 台しかなく、複数ペル�
 
 v0.4 から **変更なし**。Wi-Fi 断・電源 OFF 等で device が切れても、ペルソナは Vessel Building 内に留まり、会話・記憶・思考は継続する。物理ツール呼び出しは "device offline" エラーで失敗し、ペルソナは代替行動を選べる。
 
-### 4. stackchan-mcp gateway は SAIVerse プロセス内で起動する
+### 4. stackchan-mcp gateway は subprocess として SAIVerse の MCP client が起動する
 
 v0.4 の「WebSocket 経路はアドオン内で完結する」を **更新**。
 
-stackchan-mcp の Python パッケージ（`stackchan_mcp.gateway`）を SAIVerse プロセスで `import` + `await gateway.start()` で起動する。subprocess で別プロセス起動はしない。理由:
+stackchan-mcp gateway は **subprocess** として SAIVerse プロセスから分離して起動する。具体的には:
 
-- voice-tts の `subscribe_pcm` で取れる PCM iterator を、同一プロセス内で `send_pcm_stream` に直接渡せる（プロセス境界を跨ぐ IPC を避ける）。
-- gateway lifecycle が SAIVerse lifecycle と一致する（起動・停止・障害時の整合性が取れる）。
-- 環境変数（`STACKCHAN_TOKEN`, `HOST`, `WS_PORT`, `CAPTURE_PORT`, `VISION_HOST`）は SAIVerse 側で addon config 経由で設定する。
+- `expansion_data/saiverse-stackchan-addon/mcp_servers.json` に `command: "stackchan-mcp"` + `args` + `env` を書く
+- SAIVerse 起動時、本体の MCP client (`tools/mcp_client.py`) が `mcp_servers.json` を読んで自動的に subprocess 起動 + stdio で接続 + tool 登録（既存 Elyth addon と同じ枠組み）
+- subprocess の lifecycle 管理（起動・停止・死活監視）は本体 MCP client が担当、addon 側で `gateway_runner.py` 的な管理層は **不要**
+- 環境変数（`STACKCHAN_TOKEN`、`STACKCHAN_PCM_TOKEN`、`HOST`、`WS_PORT`、`CAPTURE_PORT`、`VISION_HOST` 等）は `mcp_servers.json` の `env` フィールドに `${addon.X.Y}` placeholder で埋め込む
 
-stdio MCP server（stackchan-mcp が標準で同居させているもの）は SAIVerse 経路では不要（= SAIVerse は MCP client じゃなく直接 Python module を呼ぶ）。gateway の `start()` 呼び出し時に stdio MCP server を起動するかしないかを切り替えるオプションがなければ、PR で追加する。
+理由:
+
+- stackchan-mcp の標準起動方法（`python -m stackchan_mcp` / `stackchan-mcp` CLI）に従える。upstream の前提と整合
+- MCP transport は stdio で動かせる（同一プロセス内 import なら stdio が標準入出力と衝突する問題を回避）
+- プロセス分離で安定性が高い（gateway クラッシュが SAIVerse 本体に波及しない）
+- SAIVerse の既存 MCP integration 機構（subprocess 管理 + `spell_tools` ベース可視性制御 + env placeholder resolve）を活用できる
+
+voice-tts → device の音声経路は subprocess 境界を跨ぐため、別経路を用意する（不変条件 #5 参照）。
 
 ### 5. 音声・触覚・視覚の入出力は既存の経路に合流する
 
@@ -203,9 +219,9 @@ v0.4 から **基本維持**、経路の中身だけ更新:
 
 - **音声入力 (STT 後テキスト)** → `manager.handle_user_input_stream(text, building_id=vessel_building_id, metadata={"source": "stackchan_voice"})`。stackchan-mcp の `listen()` MCP tool が STT を内部で実行するので、その結果を SAIVerse 側で受け取って `handle_user_input_stream` に流す。
 - **タッチ入力 (なでなで)** → `manager.add_building_event(building_id, {"role": "host", "content": "...", "metadata": {...}}, heard_by=[...])`。stackchan-mcp の `get_touch_state()` MCP tool で取得、または gateway 側 hook で push 通知（要検証）。
-- **音声出力 (TTS)** → voice-tts の `subscribe_pcm(msg_id)` で PCM iterator を取得、SAIVerse プロセス内の gateway に `send_pcm_stream(gateway, pcm_chunks)` で渡す。gateway が Opus encode + WebSocket 配信 + tts.start/stop ステート管理を担当。
-- **カメラ画像** → 既存の `multimodal_input_pipeline` の MediaBuffer 経路。stackchan-mcp の `take_photo()` MCP tool が HTTP capture endpoint で画像を受信、SAIVerse 側で MediaBuffer に流す。
-- **サーボ・画面・LED** → stackchan-mcp の native MCP tool（`move_head` / `set_brightness` / `set_led` 等）を SAIVerse の native tool として thin wrap。
+- **音声出力 (TTS)** → voice-tts の `subscribe_pcm(msg_id)` で PCM iterator を取得、stackchan-mcp gateway の HTTP PCM 受入 endpoint (`POST /pcm`、port 8766 の既存 HTTP capture server に追加、上流 PR 必要) に **chunked transfer encoding** で送信。subprocess の gateway が受け取った PCM を Opus encode + WebSocket 配信 + tts.start/stop ステート管理（Phase 1 で実装済みの `send_pcm_stream` 経由）。認証は `Authorization: Bearer ${STACKCHAN_PCM_TOKEN}`（`VISION_TOKEN` の前例に倣う）。
+- **カメラ画像** → 既存の `multimodal_input_pipeline` の MediaBuffer 経路。stackchan-mcp の `take_photo()` MCP tool（SAIVerse の MCP client 経由で呼び出し）が HTTP capture endpoint で画像を受信、結果ファイルパスを SAIVerse 側で MediaBuffer に流す。
+- **サーボ・画面・LED・タッチ** → stackchan-mcp の MCP tool（`move_head` / `set_brightness` / `set_led` / `get_touch_state` 等）を SAIVerse の MCP client が直接呼び出す。`mcp_servers.json` の `spell_tools` で各 tool の visible / display_name 制御。native wrap (thin wrap class) は **作らない**。
 
 新しいデータパスを生やすたびに本体が拡張されるのを避ける、という設計原則は維持。
 
@@ -247,7 +263,7 @@ CREATE TABLE vessels (
 v0.4 の「ライセンスはアドオン側で Apache 2.0 を踏襲し、本体には伝播させない」を **更新**:
 
 - **SAIVerse 本体**: ライセンス変更なし。stackchan-mcp gateway を import する Python コードは「使用」であって「派生」じゃない（プロセス分離されてないが、MIT は派生にも著作権表示要求のみ）。
-- **stackchan-mcp gateway（MIT）**: 我々が SAIVerse プロセスで import + 起動する。MIT のライセンス文と著作権表示をアドオン同梱の NOTICE に含める。
+- **stackchan-mcp gateway（MIT）**: addon の依存として `stackchan-mcp` を `pip install` で取得、SAIVerse プロセスとは別の subprocess として起動される。MIT のライセンス文と著作権表示をアドオン同梱の NOTICE に含める。
 - **stackchan-mcp ファーム（GPL-3.0）**: device に焼く firmware バイナリは GPL-3.0。ユーザーへの配布時はソース提供義務がある（GPL-3.0 §6）。SAIVerse-stackchan-addon は **firmware バイナリを再配布しない**（= GitHub Releases に置かない）、ユーザーが stackchan-mcp の upstream release から直接ダウンロードする運用にすることで、GPL 義務をユーザー自身に直接到達させる形にする。
 - **アドオン側コード**: MIT または Apache 2.0。stackchan-mcp gateway を呼ぶ Python ブリッジは独立した著作物として MIT 配布可能。
 
@@ -339,38 +355,34 @@ Vessel Building 作成時のテンプレート (= addon の setup script で初�
 
 見積もり: 軽。テンプレート整備 + addon setup の数行追加。
 
-**A-3-c. スペル or Playbook の Building 単位切り替え**
+**A-3-c. `spell_tools` の Building 単位 visibility 拡張**
 
-ペルソナが Vessel Building 外で物理身体ツールを呼び出せないようにする制御。`sea/runtime.py` の `_choose_playbook(kind, persona, building_id)` というインタフェースは存在するが、現状 Building 単位で実切替が active に機能しているか不明（要調査）。
+ペルソナが Vessel Building 外で物理身体ツールを呼び出せないようにする制御。**SAIVerse の MCP client には既に `spell_tools` 機構があり**（`tools/mcp_client.py` の `_normalize_spell_config` + `_tool_schema_from_mcp`、`mcp_servers.json` 内で各 tool の `visible: true/false` / `display_name` を設定）、tool 単位の可視性制御は active。
 
-選択肢:
+ただし現状の `spell_tools` の visible は global / per_persona フラグのみで、**Building 単位の切り替えはサポートされてない**。Phase 4' で本体 MCP client に Building 単位条件を追加する:
 
-- **a. スペル機構を拡張**: Building ごとに使えるスペル set を切り替える
-- **b. Playbook を Building 単位に分岐**: 既存 `_choose_playbook(building_id)` を活用、Vessel Building 専用 Playbook を作る
-- **c. 両者ハイブリッド**: スペルでツール可視性、Playbook で大局的な振る舞いを制御
+- `mcp_servers.json` の `spell_tools` エントリに `building_ids: ["vessel_building_id_X"]` フィールド追加（オプション、未指定なら全 Building で visible）
+- `tools/mcp_client.py` の `is_tool_available_for_persona(tool_name, persona_id)` を `is_tool_available_for_persona_and_building(tool_name, persona_id, building_id)` 等に拡張、`building_ids` フィルタを適用
+- ペルソナの playbook で tool 一覧を生成する箇所で、現在の `building_id` を渡して filter する経路を整備
 
-設計判断は Phase 4' 着手前にまはーと擦り合わせる（= `BuildingToolLink` 廃止前提で、現状機能している経路を実機で確認してから判断）。
+これは **SAIVerse 本体側の MCP client への汎用拡張**（= addon 個別じゃなく、他の MCP server でも「特定の Building でだけ使えるツール」を表現可能になる）。Stack-chan 固有じゃない汎用機能として正当化される範囲。
 
-見積もり: **範囲不明**。既存実態確認 → 設計判断 → 実装 + 既存 Playbook 群への影響評価で、Phase 4' の本体改修としては最大の重さ。
+見積もり: 中程度。`spell_tools` schema 拡張 + `is_tool_available_*` の signature 変更 + 呼び出し側 (playbook 内の tool 一覧生成) の callsite 修正。範囲は限定的だが、callsite を漏らさず修正する必要がある。
+
+(v0.5 初稿で「範囲不明」と書いたが、調査の結果 `spell_tools` 機構が既存で、これを拡張するだけと判明したため見積もり訂正。)
 
 ### B. アドオン構造
 
-stackchan-mcp 採用版:
+stackchan-mcp 採用版（v0.5 再改訂、MCP client 経路ベース）:
 
 ```
 saiverse-stackchan-addon/  （別リポジトリ、expansion_data/ にクローン配置）
 ├── addon.json                      ← server_hooks (persona_speak), params_schema, ui_extensions
 ├── api_routes.py                   ← ペアリング HTTP API（vessel 一覧、token 発行）
-├── speak_hook.py                   ← persona_speak フックで voice-tts.subscribe_pcm → gateway.send_pcm_stream を起動
-├── gateway_runner.py               ← stackchan-mcp の gateway を SAIVerse プロセス内で起動・停止する管理層
+├── mcp_servers.json                ← stackchan-mcp gateway を subprocess 起動する設定 + spell_tools
+├── speak_hook.py                   ← persona_speak フックで voice-tts.subscribe_pcm → HTTP PCM POST
 ├── vessel_manager.py               ← Bearer Token ↔ vessel/building 紐付けの管理（vessels.db アクセス）
-├── tools/                          ← stackchan-mcp の MCP tool を SAIVerse native tool として thin wrap
-│   ├── stackchan_move_head.py
-│   ├── stackchan_take_photo.py
-│   ├── stackchan_set_avatar.py
-│   ├── stackchan_set_led.py
-│   ├── stackchan_get_touch_state.py
-│   └── stackchan_set_brightness.py
+├── pyproject.toml                  ← addon 依存に stackchan-mcp を含める (= pip install で gateway バイナリを取得)
 ├── storage/                        ← アドオン専用 SQLite
 │   └── vessels.db                  ← ~/.saiverse/addons/saiverse-stackchan-addon/ に配置
 ├── archive/                        ← v0.4 までの自前ファーム + 自前 gateway 資産
@@ -381,13 +393,71 @@ saiverse-stackchan-addon/  （別リポジトリ、expansion_data/ にクロー�
 └── NOTICE                          ← 依存ライブラリの著作権表記（stackchan-mcp MIT 部分を含む）
 ```
 
-廃止されたファイル（v0.4 → v0.5）:
+v0.5 初稿から **追加で廃止**された要素:
+
+- `gateway_runner.py`（in-process gateway 管理層） → **不要**、subprocess 管理は SAIVerse 本体 MCP client が担当
+- `tools/stackchan_*.py`（native tool wrap 13 個） → **不要**、stackchan-mcp の MCP tools は SAIVerse 本体 MCP client が直接呼び出す。`mcp_servers.json` の `spell_tools` で visible / display_name 制御
+
+v0.4 → v0.5 で廃止された要素:
 
 - `firmware/`（自前ファーム） → `archive/firmware/` に移動
-- `audio_stream_bridge.py`（PCM 直送ブリッジ） → `archive/` に移動、speak_hook.py に統合された薄い起動コードに置き換え
+- `audio_stream_bridge.py`（自前 PCM 直送ブリッジ） → `archive/` に移動、`speak_hook.py` に HTTP POST 起動コードへ置き換え
 - `audio_input_pipeline.py`（自前 STT 経路） → 不要、stackchan-mcp の `listen()` MCP tool 経由に変更
 - `touch_handler.py`（自前タッチ受信） → 不要、stackchan-mcp の `get_touch_state` 経由 + gateway hook に変更
 - `setup_ui/`（Web Serial フラッシュ静的 HTML） → 不要、SAIVerse の CLI で esptool 実行に置き換え
+
+`mcp_servers.json` の例（既存 `expansion_data/saiverse-elyth-addon/mcp_servers.json` と同じ枠組み、Phase 1' で作成）:
+
+```json
+{
+  "mcpServers": {
+    "stackchan": {
+      "command": "stackchan-mcp",
+      "args": [],
+      "env": {
+        "STACKCHAN_TOKEN": "${addon.saiverse-stackchan-addon.master_token}",
+        "STACKCHAN_PCM_TOKEN": "${addon.saiverse-stackchan-addon.pcm_token}",
+        "HOST": "0.0.0.0",
+        "WS_PORT": "8765",
+        "CAPTURE_PORT": "8766",
+        "VISION_HOST": "${addon.saiverse-stackchan-addon.vision_host}"
+      },
+      "scope": "global",
+      "timeout": 30,
+      "spell_tools": [
+        {"name": "move_head", "display_name": "首を動かす", "visible": true},
+        {"name": "take_photo", "display_name": "写真を撮る", "visible": true},
+        {"name": "set_avatar", "display_name": "表情を変える", "visible": true},
+        {"name": "set_mouth", "display_name": "口形状を設定", "visible": true},
+        {"name": "set_mouth_sequence", "display_name": "口パクシーケンス", "visible": true},
+        {"name": "set_blink", "display_name": "まばたき制御", "visible": true},
+        {"name": "set_led", "display_name": "LED を変える", "visible": true},
+        {"name": "set_all_leds", "display_name": "全 LED を変える", "visible": true},
+        {"name": "set_leds", "display_name": "複数 LED を変える", "visible": true},
+        {"name": "clear_leds", "display_name": "LED 消灯", "visible": true},
+        {"name": "set_brightness", "display_name": "画面輝度", "visible": true},
+        {"name": "set_volume", "display_name": "音量設定", "visible": true},
+        {"name": "get_touch_state", "display_name": "タッチ状態取得", "visible": true},
+        {"name": "get_head_angles", "display_name": "首の角度取得", "visible": true},
+        {"name": "get_device_info", "display_name": "デバイス情報", "visible": true},
+        {"name": "get_status", "display_name": "接続状態", "visible": false},
+        {"name": "say", "visible": false},
+        {"name": "listen", "visible": false},
+        {"name": "gpio_test", "visible": false},
+        {"name": "uart_diag", "visible": false},
+        {"name": "check_vm_en", "visible": false}
+      ]
+    }
+  }
+}
+```
+
+`say` と `listen` を `visible: false` にしている理由:
+
+- `say`: voice-tts ベースの音声に置き換える（不変条件 #5 参照、HTTP PCM 経由）
+- `listen`: STT 経路は Phase 3' で別途設計（直接 MCP tool 呼び出しじゃなく `handle_user_input_stream` 経由）
+
+Phase 4' で Building 単位 visibility が実装されたら、`spell_tools` 各エントリに `"building_ids": ["<vessel_building_id>"]` を追加して Vessel Building 内でのみ visible にする。
 
 ### C. データフロー
 
@@ -407,9 +477,21 @@ saiverse-stackchan-addon/  （別リポジトリ、expansion_data/ にクロー�
 [saiverse-stackchan-addon] speak_hook.on_persona_speak() 並行起動:
   ↓ 該当ペルソナが現在 Vessel Building 内かチェック
   ↓ vessel_manager.get_active_vessel_for_persona(persona_id, building_id)
-  ↓ vessel が居れば gateway.send_pcm_stream(pcm_iterator) を呼ぶ
-  ↓ pcm_iterator は audio_stream.subscribe_pcm(msg_id) から作る AsyncIterator
-[stackchan-mcp gateway] send_pcm_stream:
+  ↓ vessel が居れば、audio_stream.subscribe_pcm(msg_id) で PCM Queue 取得
+  ↓ HTTP POST: http://127.0.0.1:8766/pcm
+  ↓   Authorization: Bearer ${STACKCHAN_PCM_TOKEN}
+  ↓   Content-Type: application/octet-stream
+  ↓   X-Sample-Rate: 32000
+  ↓   X-Channels: 1
+  ↓   X-Message-Id: <msg_id>
+  ↓   Transfer-Encoding: chunked
+  ↓   body: PCM bytes を Queue から逐次 yield して chunked 送信
+  ↓
+[stackchan-mcp gateway (subprocess)] HTTP PCM endpoint:
+  ↓ Bearer token 検証
+  ↓ body を chunked で読みながら AsyncIterator として保持
+  ↓ send_pcm_stream(gateway, pcm_iterator, source_rate=32000) を呼ぶ
+[stackchan-mcp gateway] send_pcm_stream (Phase 1 で実装済み):
   ↓ chunk ごとに resample (32 kHz → 16 kHz) + Opus encode (60ms フレーム)
   ↓ TTS lock 取得 → send_tts_state("start") → 50ms sleep
   ↓ 各 Opus フレームを 60ms 間隔で送信
@@ -440,65 +522,39 @@ stackchan-mcp 側に「STT 結果を gateway 内部で MCP client に返すん�
 
 #### C-3. タッチ・カメラ・サーボ・LED
 
-stackchan-mcp が既に提供する MCP tools をそのまま使う。SAIVerse-stackchan-addon の `tools/` 配下に各 thin wrap を置く:
+stackchan-mcp が提供する MCP tools を **SAIVerse 本体の MCP client が直接呼び出す**。`mcp_servers.json` に `command: "stackchan-mcp"` + `spell_tools` 設定を書けば、SAIVerse 起動時に subprocess 起動 + tool 自動登録される（Elyth と同じ枠組み）。
 
-```python
-# tools/stackchan_move_head.py
-def stackchan_move_head(yaw: float, pitch: float, speed: float = 1.0):
-    """スタックチャンの首を指定角度に向ける"""
-    vessel = vessel_manager.get_active_vessel_from_context()
-    if vessel is None:
-        return "現在この身体は使えません（Vessel Building に居ません）"
-    if not vessel.is_connected():
-        return "デバイスが切断中です"
-    # gateway の MCP handler を直接呼ぶ (subprocess じゃないので import 経由)
-    from stackchan_mcp.handlers.robot import move_head as _move_head
-    result = _move_head({"yaw": yaw, "pitch": pitch, "speed": speed})
-    return f"{yaw:+.1f}°, {pitch:+.1f}° に向きました"
+ペルソナの playbook 内では namespaced 名で呼び出し:
+
+```
+stackchan__move_head({"yaw": 30, "pitch": -5})
+stackchan__take_photo({"question": "What do you see?"})
+stackchan__set_avatar({"face": "happy"})
+stackchan__set_led({"index": 0, "r": 255, "g": 0, "b": 0})
 ```
 
-タッチ知覚は **gateway 側で hook が要る**（= device からの push 通知を SAIVerse 側に転送する経路）。これも stackchan-mcp の現状実装によっては PR が必要（Phase 4 着手前に検証）。
+native wrap (= addon 側 `tools/stackchan_*.py`) は **作らない**。Vessel チェック / 切断ハンドリングは Phase 4' の本体改修 A-3-c (`spell_tools` の Building 単位 visibility) で対応する。それまでは「Vessel Building 外でもツールが見える / 呼べる」状態だが、Phase 4' で `building_ids` フィルタを足すことで物理身体ツールが Vessel Building 内でのみ visible になる。
 
-### D. gateway 起動・停止のライフサイクル
+タッチ知覚は別経路。`get_touch_state` MCP tool は polling 型なので、device からの push 通知（= "撫でられた瞬間に SAIVerse 側に通知") を扱うには gateway 側に push hook を追加する必要がある（Phase 5' 着手前に検証、必要なら upstream PR）。
 
-`gateway_runner.py` の責務:
+### D. gateway のライフサイクル
 
-```python
-# gateway_runner.py（概念コード）
-from stackchan_mcp.gateway import get_gateway
-import os
+stackchan-mcp gateway は SAIVerse 本体の MCP client が subprocess として起動・停止を管理する（`tools/mcp_client.py` の `MCPServerConnection` 経由、`stdio_client(server_params)` で起動）。addon 側に gateway 管理層は **不要**:
 
-_gateway = None
+- **起動**: SAIVerse 起動時、`tools/mcp_client.py` が `mcp_servers.json` を読んで stackchan の `command: "stackchan-mcp"` + `args` + `env` を実行
+- **接続**: stdio で接続、`list_tools` で 21 ツールを取得、`spell_tools` 設定で 15 個を visible 化
+- **死活監視**: 既存 MCP client の機構（接続失敗時の backoff、`_failed_instances` 管理）が機能する
+- **停止**: SAIVerse shutdown 時に MCP client が subprocess を terminate
 
-async def start_gateway(addon_config):
-    global _gateway
-    # 環境変数を addon config から設定
-    os.environ.setdefault("STACKCHAN_TOKEN", addon_config.get("gateway_master_token"))
-    os.environ.setdefault("HOST", addon_config.get("gateway_host", "0.0.0.0"))
-    os.environ.setdefault("WS_PORT", str(addon_config.get("gateway_ws_port", 8765)))
-    os.environ.setdefault("CAPTURE_PORT", str(addon_config.get("gateway_capture_port", 8766)))
-    os.environ.setdefault("VISION_HOST", addon_config.get("vision_host"))
+addon 側がやるべきこと:
+- `mcp_servers.json` を addon ディレクトリに配置する（= 起動時に自動マウントされる）
+- 環境変数 (`STACKCHAN_TOKEN` 等) は `env` の `${addon.X.Y}` placeholder で AddonConfig から resolve
 
-    _gateway = get_gateway()
-    await _gateway.start()
+**認証の二段階構造**:
 
-async def stop_gateway():
-    if _gateway is not None:
-        await _gateway.stop()
-
-def get_gateway_instance():
-    return _gateway
-```
-
-addon 起動時に `start_gateway` を呼ぶ（= SAIVerse 起動時に addon_loader が呼ぶフック経由）、shutdown 時に `stop_gateway` を呼ぶ。
-
-`STACKCHAN_TOKEN`（gateway 側の master token）と、individual な `vessels.db` の token 管理の関係は要設計:
-
-- 案 a: gateway は token validation を skip、addon 側で `vessels.db` 照合する
-- 案 b: gateway に複数 token を許可するパッチを当てる（PR で対応）
-- 案 c: 全 vessel に共通の master token を配り、vessel_id は別チャネルで通知
-
-案 b がクリーンだが PR コストある。案 a が現実的（= gateway の単一 token validation を SAIVerse 側で multi-token validation に置き換え、これも PR or override 経由）。Phase 着手前に方針決め。
+- **gateway ↔ device 認証**: stackchan-mcp の `STACKCHAN_TOKEN`（WebSocket 接続時の Bearer）。Phase 1' は **single vessel 前提**で master token 1 個を配る。複数 vessel 対応は将来 PR (= stackchan-mcp 側で multi-token 検証を実装)
+- **SAIVerse → gateway 認証 (HTTP PCM endpoint)**: 新規 `STACKCHAN_PCM_TOKEN`（`VISION_TOKEN` の前例に倣う、上流 PR で追加）。voice-tts → HTTP POST の Bearer に使う
+- **addon 内の vessel 紐付け**: `vessels.db` の `token_hash → vessel_id → bound_building_id` 対応は addon 内で管理（不変条件 #7）。gateway の token 認証通過後、addon 側で device の `vessel_id` を解決
 
 ### E. 認証・ペアリングフロー
 
@@ -568,51 +624,33 @@ stackchan-mcp 側の touch event push 通知が現状ない場合は、`get_touc
 
 ### G. サーボ・カメラ・画面・LED（ツール経由）
 
-stackchan-mcp の MCP tools を SAIVerse native tool として thin wrap:
+stackchan-mcp の MCP tools は SAIVerse 本体の MCP client が直接呼び出す（native wrap は作らない）。`mcp_servers.json` に `command: "stackchan-mcp"` + `spell_tools` 配列を書けば、SAIVerse 起動時に subprocess + stdio で接続 + tool 自動登録が行われ、ペルソナの playbook 内で namespaced 名（`stackchan__<tool_name>`）で呼び出し可能になる。
 
-| SAIVerse tool 名 | stackchan-mcp tool 名 | 用途 |
+`spell_tools` で visible = true にする 15 個（実 wrap 対象、診断系 / `say` / `listen` / `get_status` の 6 個は visible = false）:
+
+| MCP tool 名 (= namespaced で `stackchan__<name>`) | 用途 | visible |
 |---|---|---|
-| `stackchan_move_head` | `move_head` | サーボ pan/tilt |
-| `stackchan_take_photo` | `take_photo` | カメラ撮影 → MediaBuffer |
-| `stackchan_get_touch_state` | `get_touch_state` | タッチ状態取得 |
-| `stackchan_set_avatar` | `set_avatar` | アバター表情切替 |
-| `stackchan_set_blink` | `set_blink` | まばたき |
-| `stackchan_set_mouth` | `set_mouth` | 口の開閉 |
-| `stackchan_set_led` | `set_led` | 単一 LED 制御 |
-| `stackchan_set_all_leds` | `set_all_leds` | 全 LED 一括 |
-| `stackchan_set_leds` | `set_leds` | 複数 LED |
-| `stackchan_clear_leds` | `clear_leds` | LED 消灯 |
-| `stackchan_set_brightness` | `set_brightness` | 画面輝度 |
-| `stackchan_set_volume` | `set_volume` | スピーカー音量 |
-| `stackchan_get_device_info` | `get_device_info` | デバイス情報 |
+| `move_head` | サーボ pan/tilt | true |
+| `take_photo` | カメラ撮影（gateway → HTTP capture endpoint で画像受信、結果は file path で返る） | true |
+| `get_touch_state` | タッチ状態取得（polling 型） | true |
+| `set_avatar` | アバター表情切替（idle/happy/thinking/sad/surprised/embarrassed/off） | true |
+| `set_blink` | まばたき有効/無効 | true |
+| `set_mouth` | 口形状（closed/half/open/e/u） | true |
+| `set_mouth_sequence` | 口パクシーケンス（lip-sync 用） | true |
+| `set_led` | 単一 LED 制御 | true |
+| `set_all_leds` | 全 LED 一括 | true |
+| `set_leds` | 複数 LED 個別 | true |
+| `clear_leds` | LED 消灯 | true |
+| `set_brightness` | 画面輝度 | true |
+| `set_volume` | スピーカー音量 | true |
+| `get_head_angles` | 首角度取得 | true |
+| `get_device_info` | デバイス情報（バッテリー / 音量 / 輝度 / ネットワーク） | true |
+| `say` | TTS 発話 | **false**（voice-tts に置き換え） |
+| `listen` | STT | **false**（Phase 3' で別経路設計） |
+| `get_status` | gateway 接続状態 | **false**（管理者向け） |
+| `gpio_test` / `uart_diag` / `check_vm_en` | サーボ診断系 | **false**（管理者向け） |
 
-各 wrap は ~20 行程度のコード（vessel チェック + gateway 関数呼び出し + 結果文字列化）。
-
-カメラ撮影は `multimodal_input_pipeline` の MediaBuffer 経路に乗せる:
-
-```python
-# tools/stackchan_take_photo.py（概念）
-def stackchan_take_photo(question: str = ""):
-    vessel = vessel_manager.get_active_vessel_from_context()
-    if vessel is None or not vessel.is_connected():
-        return ToolResult("カメラが使えません")
-
-    from stackchan_mcp.handlers.camera import take_photo as _take_photo
-    image_path = _take_photo({"question": question})  # gateway が device に撮影要求 + 画像受信
-    with open(image_path, "rb") as f:
-        image_bytes = f.read()
-
-    return ToolResult(
-        text=f"撮影しました{f' ({question})' if question else ''}",
-        media=[{
-            "kind": "image",
-            "data": image_bytes,
-            "mime_type": "image/jpeg",
-            "disposition": "ephemeral",
-            "alt_text": "Stack-chan のカメラで撮影された画像",
-        }]
-    )
-```
+カメラ撮影 (`take_photo`) の MediaBuffer 連携は、tool の返り値（画像 file path）を SAIVerse 側の `multimodal_input_pipeline` に流す薄いラッパー (= MCP tool 後処理 hook) で対応する。これは SAIVerse 本体側の MCP client への汎用機能拡張として、addon 側じゃなく本体側で受け取るのが自然。Phase 4' で扱う。
 
 ### H. Avatar 連動（Phase 5 で対応、口パクは Phase 6）
 
@@ -677,37 +715,58 @@ v0.4 まで自前ファームを進めていた経緯と、その作業が無駄
 - voice-tts の PCM broadcast 経路追加（`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm`）は **乗り換え後も継続して使う**（= stackchan-mcp gateway の `send_pcm_stream` の入力になる）。これは voice-tts 自体の機能拡張として残るので、無駄にならない。
 - voice-tts PR #3（subscribe-before-open + PCM broadcast）も乗り換え後に活きる。
 
-### なぜ stackchan-mcp gateway を SAIVerse プロセス内で起動するか
+### なぜ stackchan-mcp gateway を subprocess として起動するか
+
+v0.5 初稿では「SAIVerse プロセス内で `import + start`」を採用していたが、再改訂で **subprocess（本体 MCP client による起動）** に変更した。
+
+検討した 4 つの組み合わせ:
+
+| 案 | ツール経路 | gateway 境界 | 結論 |
+|---|---|---|---|
+| (1α) | MCP client | subprocess | **採用** |
+| (1β) | MCP client | in-process | MCP transport を stdio 以外で実現する必要、複雑 → 除外 |
+| (2β) = 初稿 | native wrap | in-process | SAIVerse の MCP client 機構を活用しない、勿体ない → 撤回 |
+| (2α) | native wrap | subprocess | voice-tts PCM 跨ぎ + MCP client 機構活用しないの両損 → 除外 |
+
+(1α) 採用理由:
+
+- **upstream の前提に合致**: stackchan-mcp は標準で「`python -m stackchan_mcp` 起動 + stdio MCP server + WS gateway」設計。subprocess + stdio で叩くのが想定された使い方
+- **MCP transport が stdio で動かせる**: 既存 SAIVerse MCP client (`tools/mcp_client.py` の `stdio_client`) がそのまま使える、複雑な工夫不要
+- **プロセス分離による安定性**: gateway クラッシュが SAIVerse 本体に波及しない
+- **SAIVerse の既存 MCP integration 機構を活用**: subprocess 管理、`spell_tools` ベース可視性制御、env placeholder resolve、すべて既存資産
+
+(1β) を選ばなかった理由:
+
+- 同一プロセス内で stdio MCP server を起動すると、SAIVerse 自身の標準入出力と衝突する
+- 代替 transport（in-process pipe / SSE 等）は MCP Python SDK の標準サポート外、自前実装が必要
+- voice-tts PCM の in-process 渡しのために MCP transport を発明するのは本末転倒
+
+(1α) の代償:
+
+- voice-tts → gateway の PCM 経路は subprocess 境界を跨ぐ。stackchan-mcp 側に HTTP PCM 受入 endpoint を上流 PR で追加することで解決（不変条件 #5 参照、PR3 として投稿予定）
+- subprocess 管理は既存 SAIVerse MCP client が担当、addon 側で自前管理する必要はない
+
+### なぜ MCP tools を SAIVerse の MCP client 経路で呼び出すか
+
+v0.5 初稿では「native tool として thin wrap する」を採用していたが、再改訂で **MCP client 経路（subprocess + stdio）** に変更した。
 
 候補:
 
-- 案 A: subprocess で別プロセス起動、SAIVerse は MCP client として stdio で叩く
-- 案 B: SAIVerse プロセス内で `import + start()`（採用）
+- 案 A: 本体 MCP client が stackchan-mcp の MCP server に stdio で接続、`spell_tools` ベースで visible 制御（採用）
+- 案 B: native tool として thin wrap（初稿、撤回）
 
-採用理由（B）:
+採用理由（A）:
 
-- voice-tts の `subscribe_pcm` で取れる Queue/AsyncIterator を `send_pcm_stream` に直接渡せる。プロセス境界を跨ぐ IPC を避ける。
-- gateway lifecycle が SAIVerse lifecycle と一致。起動・停止・障害時の整合性が取れる。
-- MCP tools を SAIVerse の native tool として `from stackchan_mcp.handlers.X import Y` で直接 import 可能。MCP client を経由する必要がない。
-- 環境変数（`STACKCHAN_TOKEN`, etc）の管理が一元化される。
+- **SAIVerse の MCP client 機構が既に存在し、`spell_tools` で visible/display_name 制御が active**（Elyth addon で実機動作中、`tools/mcp_client.py:_normalize_spell_config` + `_tool_schema_from_mcp`）
+- addon 側のコード量がゼロ近く（= `mcp_servers.json` を書くだけ、native wrap 13 個分のファイル不要）
+- 将来 stackchan-mcp 側で MCP tool が追加されても `mcp_servers.json` の `spell_tools` に行を足すだけで対応可能、native wrap みたいに対応コードを書く必要がない
+- 「addon 個別の事情で本体に改修入れない、汎用機能として本体 MCP client を改修する」原則と整合（Phase 4' の A-3-c は本体 MCP client の Building 単位 visibility 拡張、これは他 addon でも使える）
 
-案 A の欠点:
+案 B を撤回した理由:
 
-- subprocess 起動・停止のロジックを SAIVerse 側に持つ必要がある（platform 依存、子プロセス死活管理、stderr 取り込み）。
-- voice-tts の PCM を MCP 経由で渡すのは不向き（= MCP は tool 呼び出しの単発 RPC、stream pcm 用じゃない）。HTTP / WebSocket で別途経路を作る必要が出る。
-
-### なぜ MCP tools を SAIVerse native tool として thin wrap するか
-
-候補:
-
-- 案 A: SAIVerse のペルソナが MCP client として stackchan-mcp の MCP server を叩く
-- 案 B: SAIVerse native tool として thin wrap（採用）
-
-採用理由（B）:
-
-- SAIVerse の既存ツール基盤（LangGraph playbook 内のツール呼び出し）に統一できる。`BuildingToolLink` で Vessel Building に紐付ければ、ペルソナがそのまま使える。
-- MCP client は SAIVerse 内に既にあるが、Tools 機能限定で対応の幅が狭い（`project_mcp_protocol_coverage.md` 参照）。今後 Resources / Sampling 等への拡張余地が出るまで、native tool wrap の方が制約が少ない。
-- thin wrap のコードはツール 1 つあたり 20 行程度。コスト軽い。
+- SAIVerse の MCP client 機構を活用しない設計は、既存資産の重複実装を生む
+- 「将来 Resources / Sampling 等への拡張余地」を理由に native wrap を選んだのは、現状の Tools 機能だけで stackchan-mcp の利用要件をカバーできるという事実と整合しなかった
+- `BuildingToolLink` を Vessel Building に紐付ける前提だったが、`BuildingToolLink` は数ヶ月触られておらず active かどうか不明（実態として機能してない可能性）。代わりに `spell_tools` の Building 単位拡張で対応する
 
 ### なぜ Bearer Token ベースの認証にするか（vessel_id を hello で送る形にしない）
 
@@ -759,9 +818,9 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 
 ### Phase 1' — gateway 起動と PCM 経路確立（v0.5 着手）
 
-1. **upstream PR**: stackchan-mcp に `send_pcm_audio(bytes)` と `send_pcm_stream(async_iter)` を追加（手元 fork で実装済み、PR 整形して投稿）
-2. **アドオン**: `gateway_runner.py` で SAIVerse プロセス内で gateway 起動・停止
-3. **アドオン**: `speak_hook.py` で `voice-tts.subscribe_pcm → gateway.send_pcm_stream` の経路を実装
+1. **手元 fork で PR 3 つを実装** (= `send_pcm_audio` + `send_pcm_stream` は Phase 1 完了、加えて **PR3: HTTP PCM 受入 endpoint** = `POST /pcm` を既存 HTTP capture server に追加、`STACKCHAN_PCM_TOKEN` 認証 + chunked transfer 対応)。PR 投稿は Phase 1'〜4' の実機検証後、Phase 5' で
+2. **アドオン**: `mcp_servers.json` 作成 (= Elyth と同じ枠組み、`command: "stackchan-mcp"` + `env` + `spell_tools` 配列で 15 個 visible / 6 個 visible=false)
+3. **アドオン**: `speak_hook.py` で persona_speak fired → `voice-tts.subscribe_pcm` → HTTP POST (chunked) で stackchan-mcp gateway の `/pcm` endpoint に送信
 4. **アドオン**: `vessel_manager.py` で `vessels.db` の token-based テーブル管理
 5. **検証**: ファーム書き込み → AP 設定 → device 接続 → voice-tts 発話 → device スピーカーから音が出る
 
@@ -779,24 +838,32 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 12. **アドオン**: `stt_relay.py` で `listen()` 結果を `handle_user_input_stream` に流す
 13. **検証**: "Hi, stack-chan" → ペルソナが音声で応答
 
-### Phase 4' — ネイティブツール群
+### Phase 4' — 本体改修（visibility 制御）+ tool 一覧の最終確定
 
-**ツール選別** (現時点候補、Phase 4' 着手時にまはー判断で最終確定):
+**Phase 4' で扱うこと**:
+
+- ツール定義の追加は **Phase 1' で `mcp_servers.json` を書いた時点で完了**（spell_tools 配列で 15 個 visible / 6 個 visible=false）
+- Phase 4' は **本体改修 (A-3-a/b/c)** が主スコープ、加えて実機検証中に新規発見されたツール（or 不要と判明したツール）の `mcp_servers.json` 調整
+
+**ツール選別** (現時点候補、実機検証中に最終確定):
 
 stackchan-mcp の 21 ツールから:
 
-- **wrap 対象 (13 個)**: get_status, get_device_info, take_photo, set_volume, listen, set_brightness, set_avatar, set_mouth, set_mouth_sequence, set_blink, move_head, get_head_angles, get_touch_state, set_led, set_all_leds, set_leds, clear_leds
-- **除外 (4 個)**: say（voice-tts に置き換え）, gpio_test / uart_diag / check_vm_en（診断系、管理者向け、ペルソナには見せない）
-- **継続洗い出し**: 上記以外に SAIVerse の認知モデル上有用なツールがあるか、実機検証中に追加判断
+- **visible (15 個)**: move_head, take_photo, set_avatar, set_mouth, set_mouth_sequence, set_blink, set_led, set_all_leds, set_leds, clear_leds, set_brightness, set_volume, get_touch_state, get_head_angles, get_device_info
+- **visible=false (6 個)**: get_status（管理者向け）, say（voice-tts に置き換え）, listen（Phase 3' で別経路）, gpio_test / uart_diag / check_vm_en（診断系、管理者向け）
+- **継続洗い出し**: SAIVerse の認知モデル上有用な追加ツールがあるか実機検証で確認、必要なら `mcp_servers.json` の `spell_tools` を追加・調整
 
-**実装ステップ**:
+**本体改修ステップ**:
 
-14. **アドオン**: `tools/stackchan_*.py` で 13 個の thin wrap 実装（vessel チェック + gateway 関数呼び出し + 結果文字列化、各 ~20 行）
-15. **本体改修 A-3-a**: `OccupancyManager.move_entity` の `enter_metadata` に `building_info` 追加 + `auto_ingest` 側の受け取り経路
-16. **本体改修 A-3-b**: Vessel Building 用 `SYSTEM_PROMPT` テンプレート整備 + addon setup での初期流し込み
-17. **設計判断**: スペル vs Playbook（or ハイブリッド）の選択 + `BuildingToolLink` の廃止前提で代替経路設計（まはーと擦り合わせ）
-18. **本体改修 A-3-c**: 設計判断に基づいて Building 単位のツール可視性制御を実装
-19. **検証**: Vessel Building 内でペルソナがツール呼び出し成立、Vessel Building 外ではツールが見えない、移動時に Building 情報が `enter_metadata` 経由でペルソナに届く
+14. **A-3-a**: `OccupancyManager.move_entity` の `enter_metadata` に `building_info` 追加 + `auto_ingest` 側の受け取り経路
+15. **A-3-b**: Vessel Building 用 `SYSTEM_PROMPT` テンプレート整備 + addon setup での初期流し込み
+16. **A-3-c**: SAIVerse 本体 MCP client (`tools/mcp_client.py`) に Building 単位 visibility 拡張
+    - `spell_tools` schema に `building_ids: ["<vessel_building_id>"]` フィールド追加（オプション、未指定なら全 Building で visible）
+    - `is_tool_available_for_persona` → `is_tool_available_for_persona_and_building` 等に拡張、`building_ids` フィルタを適用
+    - playbook 内 tool 一覧生成箇所で `building_id` を渡す経路整備
+17. **アドオン**: `mcp_servers.json` の `spell_tools` 各エントリに `building_ids: ["<vessel_building_id>"]` を追加して Vessel Building 内のみ visible に
+18. **アドオン**: `multimodal_input_pipeline` 連携 (= `take_photo` の返り値 file path を MediaBuffer に流す薄いラッパー、本体側 MCP client への汎用機能拡張として実装)
+19. **検証**: Vessel Building 内でペルソナがツール呼び出し成立、Vessel Building 外ではツールが visible にならない、移動時に Building 情報が `enter_metadata` 経由でペルソナに届く
 
 ### Phase 5' — タッチ知覚
 
@@ -809,6 +876,17 @@ stackchan-mcp の 21 ツールから:
 20. **アドオン**: 感情パラメータ → `set_avatar` マッピング
 21. **アドオン**: TTS エンベロープ → `set_mouth` 高頻度駆動
 22. **検証**: 発話中に口が動く、感情に応じて表情変化
+
+### Phase X' — 上流 PR 投稿（Phase 1'〜4' の実機検証後）
+
+stackchan-mcp 本家へ PR 3 つを投稿。Phase 1'〜4' で手元 fork の動作妥当性を実機検証してから提出する（= PR 投げて実際には使いませんでした、になるのを避ける）。
+
+23. **PR1 整形 + 投稿**: `send_pcm_audio(gateway, pcm)` の切り出し（Phase 1 で実装済み、commit `5df0460`）。`feature/external-pcm-stream` から PR1 用に分離した branch に整形
+24. **PR2 整形 + 投稿**: `send_pcm_stream(gateway, pcm_chunks)` の追加（Phase 1 で実装済み、commit `e5a83fa`）。PR1 が merge された後に提出（積み上げ）
+25. **PR3 整形 + 投稿**: HTTP PCM 受入 endpoint (`POST /pcm` を既存 HTTP capture server port 8766 に追加、`STACKCHAN_PCM_TOKEN` 認証、chunked transfer encoding 対応)。PR1/PR2 とは独立に進行可能
+26. **必要なら PR4**: gateway を stdio MCP server 抜きで起動するオプション、Phase 1'〜4' の実機検証で問題が出た場合のみ
+27. **必要なら PR5**: STT 結果の external hook (Phase 3' でウェイクワード起動経路を作る際、gateway 側 push hook が無ければ追加)
+28. **必要なら PR6**: touch event push hook (Phase 5' で polling じゃ要件満たさない場合)
 
 ### 将来 Phase（範囲外）
 
@@ -827,7 +905,8 @@ stackchan-mcp の 21 ツールから:
 
 ### Phase 1' (gateway 起動 + PCM 経路)
 
-- SAIVerse 起動時に gateway が WS port 8765 + HTTP capture port 8766 を listen 開始
+- SAIVerse 起動時に本体 MCP client が `mcp_servers.json` を読んで stackchan-mcp gateway を subprocess 起動、gateway が WS port 8765 + HTTP capture port 8766 (PCM endpoint 含む) を listen 開始
+- speak_hook が voice-tts.subscribe_pcm から PCM 取得 → HTTP POST (chunked transfer) で gateway の /pcm endpoint に送信、`STACKCHAN_PCM_TOKEN` 認証通過
 - voice-tts で発話 → Vessel Building 内なら物理スピーカーから声が出る、文章として連続している（途切れなし）
 - 同じペルソナが Vessel Building から出る → 以降の発話は物理スピーカーから出ない
 - ペルソナ A が Vessel Building にいる時に、別 Building のペルソナ B が発話 → B の音声は鳴らない
@@ -879,7 +958,7 @@ v0.4 から **基本維持**、stackchan-mcp 採用を踏まえて若干更新:
 
 ### 2. 共通 device gateway
 
-stackchan-mcp は xiaozhi-esp32 ベースで汎用 device gateway として既に機能している。SAIVerse 内で「stackchan-mcp 以外の vessel」が出てきた時は、stackchan-mcp と同等の Python module を SAIVerse プロセス内で起動するパターンを踏襲する。
+stackchan-mcp は xiaozhi-esp32 ベースで汎用 device gateway として既に機能している。SAIVerse 内で「stackchan-mcp 以外の vessel」が出てきた時は、stackchan-mcp と同様に `mcp_servers.json` で subprocess 起動 + stdio MCP 経由でツール公開、というパターンを踏襲する。
 
 ### 3. Vessel 能力宣言（capabilities）
 
@@ -891,7 +970,7 @@ stackchan-mcp の `set_avatar` を基盤にしつつ、別機種が出てきた�
 
 ### 5. voice-tts の PCM broadcast 経路（v0.4 で実装完了、v0.5 でも継続利用）
 
-`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm` は v0.4 で実装。v0.5 では `subscribe_pcm` の出力を stackchan-mcp gateway の `send_pcm_stream` に流す形で継続利用。voice-tts 自体の機能は変わらず、流通先が gateway に変わるだけ。
+`open_pcm_stream` / `push_pcm_chunk` / `subscribe_pcm` は v0.4 で実装。v0.5 では `subscribe_pcm` の出力を addon の speak_hook が取り出し、HTTP POST (chunked transfer) で stackchan-mcp gateway の `/pcm` endpoint に送る形で継続利用。voice-tts 自体の機能は変わらず、流通先が `audio_stream_bridge` → `HTTP POST → gateway` に変わるだけ。
 
 ### 6. stackchan-mcp upstream PR 群
 
@@ -955,14 +1034,30 @@ stackchan-mcp の `set_avatar` を基盤にしつつ、別機種が出てきた�
 ### v0.4 → v0.5 で確定（路線変更）
 
 - **自前ファーム廃止、stackchan-mcp 採用**: stackchan-mcp が既に実装している機能を自前で再実装する必要がない、唯一の欠け（TTS）は Phase 2 で完成した経路の宛先切り替えで埋まる、将来にわたって作業量が最短、の判断軸で乗り換え決定。決定日 2026-05-13
-- **gateway 起動方式**: SAIVerse プロセス内で `from stackchan_mcp.gateway import get_gateway` の形で import + 起動。subprocess じゃない
-- **audio 経路**: voice-tts → SAIVerse 内 gateway → Opus encode → device の音声経路。**device への** PCM 直送（自前ファーム時代の経路）は廃止、**gateway への** PCM 直送経路（Phase 1 で stackchan-mcp に追加した `send_pcm_audio` / `send_pcm_stream` の PR）に置き換え
-- **認証**: Bearer Token ベース。SAIVerse-stackchan-addon 側で `token_hash → vessel_id → bound_building_id` の対応テーブル（`vessels.db` スキーマ改修）
-- **MCP tools**: stackchan-mcp が既に提供する `move_head` / `take_photo` / `set_avatar` / `set_led` 等を SAIVerse の native tool として thin wrap。Phase 4-5 で当初想定していた移植作業はゼロに
+- **audio 経路の構造**: voice-tts → addon の speak_hook → HTTP PCM POST → stackchan-mcp gateway → Opus encode → device。**device への** PCM 直送（自前ファーム時代の経路）は廃止、**gateway への** PCM 直送経路（Phase 1 で stackchan-mcp に追加した `send_pcm_audio` / `send_pcm_stream` + PR3 で追加する HTTP PCM endpoint）に置き換え
+- **認証**: Bearer Token ベース。SAIVerse-stackchan-addon 側で `token_hash → vessel_id → bound_building_id` の対応テーブル（`vessels.db` スキーマ改修）。HTTP PCM 経路は別 token `STACKCHAN_PCM_TOKEN`（`VISION_TOKEN` の前例に倣う）
 - **ファーム書き込み**: esptool 経由（SAIVerse の CLI / UI で自動化）。Web Serial フラッシュは廃止
 - **不変条件 #10〜#13 (v0.4)**: 自前ファーム特有の制約として無効化。本書「廃止された不変条件」節で記録
-- **stackchan-mcp upstream PR**: PR1 (`send_pcm_audio`) + PR2 (`send_pcm_stream`) を手元 fork で実装、Phase 1' 完了後に整形して投稿
 - **archive 化**: `expansion_data/saiverse-stackchan-addon/firmware/` と `audio_stream_bridge.py` 等を archive へ移動
+
+### v0.5 初稿 → v0.5 再改訂で確定（統合方式変更、2026-05-13 同日）
+
+v0.5 初稿の以下 2 点を撤回・再決定:
+
+- **gateway 起動方式**: 初稿「SAIVerse プロセス内で `import + start`」→ 再改訂「**subprocess として SAIVerse 本体の MCP client が起動**」(`expansion_data/saiverse-stackchan-addon/mcp_servers.json` を Elyth と同じ枠組みで配置)
+- **MCP tools 取り扱い**: 初稿「SAIVerse-stackchan-addon の native tool として thin wrap」→ 再改訂「**SAIVerse 本体 MCP client が直接呼び出す**」（`spell_tools` で visible 制御）
+
+理由:
+
+- 初稿は「SAIVerse は MCP client じゃない」という誤認識のうえで `import + start` を選んでいた。実際は SAIVerse は MCP client 機構を実装一巡完了 (Elyth で実機検証中) で、これを活用する設計が筋
+- in-process import は MCP transport (stdio) を SAIVerse の標準入出力と衝突させる問題があり、技術的に複雑
+- subprocess 起動なら upstream の標準起動方法に従える、SAIVerse の既存 MCP integration 機構をそのまま活用できる
+
+派生する追加:
+
+- **upstream PR3 (HTTP PCM 受入 endpoint)**: subprocess 化で voice-tts → gateway の PCM 経路が in-process で渡せなくなる代わりに、HTTP POST (chunked transfer) で渡す。stackchan-mcp 側に endpoint を新設する PR を Phase 5' で投稿
+- **本体 MCP client 改修 (A-3-c)**: Building 単位 visibility 制御を本体 MCP client に汎用機能として追加。addon 個別じゃなく他の MCP server でも「特定 Building でだけ使えるツール」を表現可能になる
+- **不要になった項目**: `gateway_runner.py`（in-process 管理層）、`tools/stackchan_*.py`（native wrap 13 個）
 
 ### 実装フェーズ前にまはーへ確認すべき残課題
 
