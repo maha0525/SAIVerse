@@ -476,8 +476,20 @@ Phase 4' で Building 単位 visibility が実装されたら、`spell_tools` �
   ↓
 [saiverse-stackchan-addon] speak_hook.on_persona_speak() 並行起動:
   ↓ 該当ペルソナが現在 Vessel Building 内かチェック
-  ↓ vessel_manager.get_active_vessel_for_persona(persona_id, building_id)
+  ↓ vessel_manager.get_vessel_for_persona(persona_id, building_id)
+  ↓   ── persona-specific bind を優先、なければ building-only bind
+  ↓      (= bound_persona_id IS NULL) を fallback で返す。Vessel Building は
+  ↓      capacity=1 なので「Building に居る persona = vessel の使い手」と
+  ↓      自然に解決される
   ↓ vessel が居れば、audio_stream.subscribe_pcm(msg_id) で PCM Queue 取得
+  ↓ ── 最初の chunk が来るまで HTTP POST を開始しない (= _wait_first_chunk)。
+  ↓    voice-tts (GPT-SoVITS) は GPU model load 中だと first chunk 生成に
+  ↓    10〜20 秒かかる。POST を先に開いて idle にすると device 側で
+  ↓    「もう音が来ない」と判定されて speaking → listening に戻ってしまう
+  ↓    (= Phase 1' 検証で観測: state 遷移 18 秒で listening、結果として
+  ↓    発話の冒頭だけ届いて以降沈黙)。最初の chunk が来てから POST を開始
+  ↓    すれば以降 voice-tts の連続生成 cadence (= realtime ≒ 64 KB/s) に
+  ↓    乗って chunk が流れる
   ↓ HTTP POST: http://127.0.0.1:8766/pcm
   ↓   Authorization: Bearer ${STACKCHAN_PCM_TOKEN}
   ↓   Content-Type: application/octet-stream
@@ -485,7 +497,7 @@ Phase 4' で Building 単位 visibility が実装されたら、`spell_tools` �
   ↓   X-Channels: 1
   ↓   X-Message-Id: <msg_id>
   ↓   Transfer-Encoding: chunked
-  ↓   body: PCM bytes を Queue から逐次 yield して chunked 送信
+  ↓   body: 先取りした最初の chunk + 続きを Queue から逐次 yield して chunked 送信
   ↓
 [stackchan-mcp gateway (subprocess)] HTTP PCM endpoint:
   ↓ Bearer token 検証
@@ -816,13 +828,24 @@ stackchan-mcp の gateway が既に WS server を持つ。自前で同等品を�
 
 Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は完了済み（archive 扱い）として、v0.5 以降を Phase 1' から振り直す。
 
-### Phase 1' — gateway 起動と PCM 経路確立（v0.5 着手）
+### Phase 1' — gateway 起動と PCM 経路確立（v0.5 着手、**2026-05-13 完了**）
 
-1. **手元 fork で PR 3 つを実装** (= `send_pcm_audio` + `send_pcm_stream` は Phase 1 完了、加えて **PR3: HTTP PCM 受入 endpoint** = `POST /pcm` を既存 HTTP capture server に追加、`STACKCHAN_PCM_TOKEN` 認証 + chunked transfer 対応)。PR 投稿は Phase 1'〜4' の実機検証後、Phase 5' で
-2. **アドオン**: `mcp_servers.json` 作成 (= Elyth と同じ枠組み、`command: "stackchan-mcp"` + `env` + `spell_tools` 配列で 15 個 visible / 6 個 visible=false)
-3. **アドオン**: `speak_hook.py` で persona_speak fired → `voice-tts.subscribe_pcm` → HTTP POST (chunked) で stackchan-mcp gateway の `/pcm` endpoint に送信
-4. **アドオン**: `vessel_manager.py` で `vessels.db` の token-based テーブル管理
-5. **検証**: ファーム書き込み → AP 設定 → device 接続 → voice-tts 発話 → device スピーカーから音が出る
+1. ✅ **手元 fork で PR を実装** (= 計 9 commit / 7 PR 相当、Phase 1' 中に当初想定の 3 PR を超えて 7 PR まで膨らんだ):
+   - PR1〜PR3: `send_pcm_audio` / `send_pcm_stream` / `POST /pcm` endpoint (= 想定通り)
+   - **PR4** (= Phase 1' 中に新規発見): xiaozhi-cloud OTA `CheckVersion()` 撤去 — NVS websocket.url が boot 時に server から上書きされる副作用を遮断
+   - **PR5** (= Phase 1' 中に新規発見): Windows 用 `libopus.dll` を gateway wheel に同梱 + `os.add_dll_directory()` + `PATH` prepend (= `ctypes.util.find_library` 経路救済)
+   - **PR6** (= Phase 1' 中に新規発見): `intentional_close_` flag bug fix + 起動時 OpenAudioChannel + 失敗時 ScheduleReconnect (= NVS flag `websocket.persistent` opt-in)。「voice session 中だけ繋ぐ」設計を「server-driven push を許可する」モードに拡張
+   - **PR7** (= Phase 1' 中に新規発見): `client_max_size=0` で aiohttp の 1 MiB body cap を撤去 (= 長時間 chunked transfer が途中で切られる現象を解消)
+   - PR 投稿戦略の整理は [`docs/issues/stackchan_mcp_upstream_pr_strategy.md`](../issues/stackchan_mcp_upstream_pr_strategy.md) 参照、投稿自体は Phase X' で
+2. ✅ **アドオン**: `mcp_servers.json` 作成 (= Elyth と同じ枠組み、`command: "uvx"` で fork branch を指定、`env` で AddonConfig placeholder を解決、`spell_tools` 配列で 15 個 visible / 6 個 visible=false)
+   - 補助: `--with opuslib` を args に追加し、`uvx` が `[tts]` extra を取り損ねるパターンでも opuslib を確実に install
+3. ✅ **アドオン**: `speak_hook.py` で persona_speak fired → `voice-tts.subscribe_pcm` → **最初の chunk を queue で待ってから** HTTP POST (chunked) で stackchan-mcp gateway の `/pcm` endpoint に送信
+4. ✅ **アドオン**: `vessel_manager.py` で `vessels.db` の token-based テーブル管理。`get_vessel_for_persona` は persona-specific bind を優先しつつ、`bound_persona_id IS NULL` の building-only bind を fallback で返す (Vessel Building capacity=1 セマンティクスに整合)
+5. ✅ **検証**: ファーム書き込み → AP 設定 (常時接続モード ON) → device 接続 → voice-tts 発話 → device スピーカーから完走 (= 100 秒・200 秒の長文を 2 回連続 status 200 OK で完走、GPU load 中 / load 後の両条件で確認)
+
+**Phase 1' 中に未解明のまま残った観測 (= 別 issue 化候補)**:
+
+- 一度だけ「発話の末尾 10 秒程度が取りこぼされる」現象を観測 (= 2026-05-13 20:25 頃の発話)。後続の 2 連続発話 (GPU load 中 / load 後) では再現せず完走したため「偶発」評価。再発時に分析できるよう、speak_hook に投入 cadence の DEBUG ログを残してある (`iter yield #N` / `None sentinel received` / `POST returned status=N`)
 
 ### Phase 2' — 認証・ペアリング UX
 
@@ -877,16 +900,29 @@ stackchan-mcp の 21 ツールから:
 21. **アドオン**: TTS エンベロープ → `set_mouth` 高頻度駆動
 22. **検証**: 発話中に口が動く、感情に応じて表情変化
 
-### Phase X' — 上流 PR 投稿（Phase 1'〜4' の実機検証後）
+### Phase X' — 上流 PR 投稿（Phase 1'〜6' の実機検証後）
 
-stackchan-mcp 本家へ PR 3 つを投稿。Phase 1'〜4' で手元 fork の動作妥当性を実機検証してから提出する（= PR 投げて実際には使いませんでした、になるのを避ける）。
+stackchan-mcp 本家へ **計 7 PR** を投稿。Phase 1' 中に当初想定の 3 PR を超えて拡張された (= 検証中に発見した必須修正 4 件 = PR4-PR7 を追加)。**ブランチ分割の具体手順 + 依存グラフ + 各 PR の注意点は [`docs/issues/stackchan_mcp_upstream_pr_strategy.md`](../issues/stackchan_mcp_upstream_pr_strategy.md) を参照**。
 
-23. **PR1 整形 + 投稿**: `send_pcm_audio(gateway, pcm)` の切り出し（Phase 1 で実装済み、commit `5df0460`）。`feature/external-pcm-stream` から PR1 用に分離した branch に整形
-24. **PR2 整形 + 投稿**: `send_pcm_stream(gateway, pcm_chunks)` の追加（Phase 1 で実装済み、commit `e5a83fa`）。PR1 が merge された後に提出（積み上げ）
-25. **PR3 整形 + 投稿**: HTTP PCM 受入 endpoint (`POST /pcm` を既存 HTTP capture server port 8766 に追加、`STACKCHAN_PCM_TOKEN` 認証、chunked transfer encoding 対応)。PR1/PR2 とは独立に進行可能
-26. **必要なら PR4**: gateway を stdio MCP server 抜きで起動するオプション、Phase 1'〜4' の実機検証で問題が出た場合のみ
-27. **必要なら PR5**: STT 結果の external hook (Phase 3' でウェイクワード起動経路を作る際、gateway 側 push hook が無ければ追加)
-28. **必要なら PR6**: touch event push hook (Phase 5' で polling じゃ要件満たさない場合)
+サマリ (= 詳細はハンドオフ doc に書いた):
+
+- **Series A (= 4 PR、Stacked)**: PR #A1 `send_pcm_audio` 抽出 → PR #A2 `send_pcm_stream` → PR #A3 `POST /pcm` endpoint → PR #A4 `client_max_size=0`
+- **PR #B (= 独立)**: xiaozhi-cloud OTA `CheckVersion()` 撤去
+- **PR #C (= 独立)**: Windows 用 `libopus.dll` 同梱 + DLL search path 設定
+- **PR #D (= 独立)**: opt-in persistent WS connection + `intentional_close_` bug fix
+
+Phase X' 着手の前提:
+
+- Phase 1'〜6' で手元 fork の動作妥当性を実機検証してから提出 (= PR 投げて実際には使いませんでした、になるのを避ける)
+- 各 PR の review-cycle に 1-2 週間想定、全体 1-3 ヶ月程度を見込む
+- maintainer (kisaragi-mochi) の判断で受け入れ拒否された PR は手元 fork で運用継続 (= memory `feedback_user_experience_first.md` の精神に整合)
+
+23. **Series A 投稿** (= PR #A1〜A4、Stacked 順次)
+24. **PR #B 投稿** (= xiaozhi OTA 切離し、独立)
+25. **PR #C 投稿** (= libopus bundle、独立。CI build pipeline 整備も併走で提案推奨)
+26. **PR #D 投稿** (= persistent WS opt-in + bug fix、独立)
+27. **(必要なら)** STT 結果の external hook (Phase 3' でウェイクワード起動経路を作る際、gateway 側 push hook が無ければ追加)
+28. **(必要なら)** touch event push hook (Phase 5' で polling じゃ要件満たさない場合)
 
 ### 将来 Phase（範囲外）
 
@@ -1059,6 +1095,30 @@ v0.5 初稿の以下 2 点を撤回・再決定:
 - **本体 MCP client 改修 (A-3-c)**: Building 単位 visibility 制御を本体 MCP client に汎用機能として追加。addon 個別じゃなく他の MCP server でも「特定 Building でだけ使えるツール」を表現可能になる
 - **不要になった項目**: `gateway_runner.py`（in-process 管理層）、`tools/stackchan_*.py`（native wrap 13 個）
 
-### 実装フェーズ前にまはーへ確認すべき残課題
+### v0.5 → v0.6 で確定（Phase 1' 完了、2026-05-13）
 
-- なし。v0.5 起草完了、まはーレビュー後に Phase 1' 着手。
+Phase 1' を実機検証込みで完走。当初の想定 (= PR 3 件) から実装範囲が拡大して **計 7 PR + addon 側 3 修正**で完了。
+
+**新規発見された必須修正** (= Phase 1' 検証中に判明、当初想定の Phase 1' スコープ外だったが、実機動作の前提条件):
+
+- **PR4 (xiaozhi OTA skip)**: NVS の `websocket.url` が boot 時に xiaozhi OTA server から書き戻される副作用を遮断。stackchan-mcp 設計の「OTA-config code path is disabled by design」コメントは実装上は嘘で、消費側 (application.cc) は止めてるが副作用 (ota.cc の NVS write) は残ってた
+- **PR5 (libopus bundle)**: Windows ユーザーが `pip install stackchan-mcp[tts]` で詰まる致命罠を addon-side じゃなく upstream で恒久対処 (= addon が gateway の不完全性を補う構図を避ける、memory `feedback_user_experience_first.md` の判断軸)
+- **PR6 (persistent WS opt-in)**: stackchan-mcp の「voice session driven」設計に「server-driven push」モードを追加。SAIVerse の persona 主導発話に必須、他の用途 (= 来客通知音、event 駆動 audio 等) にも恩恵
+- **PR7 (`client_max_size=0`)**: aiohttp default 1 MiB cap で長時間 chunked transfer が途中切られる致命問題を解消
+
+**新規発見された addon 側の必須修正**:
+
+- `vessel_manager.get_vessel_for_persona` に NULL fallback 追加 (= Vessel Building capacity=1 セマンティクスと整合させる building-only bind)
+- `speak_hook` に `_wait_first_chunk` ロジック追加 (= voice-tts の GPU model load 中の TTS first chunk 遅延で device が speaking → listening に勝手に戻る問題を解消)
+- `mcp_servers.json` に `--with opuslib` 追加 (= uvx が `[tts]` extra を取り損ねるパターンへの保険)
+
+**確定した動作**:
+
+- ✅ persona 主導発話 (= voice-session 外、SAIVerse 内で AI 返答した瞬間に device speaker から音) が成立
+- ✅ 100 秒 / 200 秒の長文 2 回連続完走、GPU load 中 / load 後の両条件で安定
+- ✅ device WS は起動時から persistent モードで接続維持 (= NVS opt-in)
+- ✅ Windows ユーザーは `[tts]` extra で完結 (= 手動 libopus install 不要)
+
+**残った未解明事項** (= Phase 5'〜X' での再観察対象):
+
+- 一度だけ観測された「発話末尾の取りこぼし」(= 2026-05-13 20:25 頃)。再現せず偶発と評価したが、再発時に分析できるよう speak_hook に投入 cadence の DEBUG ログを残してある
