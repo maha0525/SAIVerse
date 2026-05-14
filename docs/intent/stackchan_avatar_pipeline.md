@@ -1,6 +1,6 @@
 # Intent: Stack-chan Avatar Pipeline（Phase 4.5）
 
-**ステータス**: v0.1 ドラフト（2026-05-14 起草）
+**ステータス**: v0.1 ドラフト（2026-05-14 起草、 同日 Phase 4.5-a/b の skeleton 実機疎通確認まで完了）
 
 **関連**: `docs/intent/stackchan_vessel.md` の Phase 4.5 として詳細化。stackchan_vessel.md §H「Avatar 連動」と Phase 5/6 の前提を再構成する。
 
@@ -459,3 +459,121 @@ Vessel ごとに描画特性が大きく違う:
 - `docs/intent/llama_cpp_multimodal_slot_save_fork.md` — fork 運用の前例、同じパターンで stackchan-mcp fork も運用する
 - `docs/intent/multimodal_input_pipeline.md` — MediaBuffer 経路、take_photo の戻り値はこちら経由
 - `docs/intent/persona_cognitive_model.md` — Vessel = 身体メタファー、ペルソナ別 avatar の動機
+
+## 進捗 (2026-05-14)
+
+### 完了 (Phase 4.5-a/b の skeleton + end-to-end 疎通確認)
+
+実機動作確認できた要素:
+
+- AvatarSet 動的セット転送機構 (HTTP fetch + SHA256 + PSRAM Load)
+- load_avatar_set MCP tool (gateway 側)
+- face 切り替え (layered mode、 14 シンボルのうち face × 6 のみ AvatarSet 経由)
+- end-to-end: SAIVerse spell → gateway HTTP staging → ESP32 が `avatar_set_fetch` WS notify を受けて HTTP GET → SHA256 検証 → AvatarSet::Load (PSRAM 確保) → avatar_set_loaded WS で応答 → LCD に新画像が描画される
+
+主要 commit:
+
+- `stackchan-mcp` (fork: maha0525/stackchan-mcp)
+  - `feature/dynamic-avatar-set` (= PR-A/B 出す予定): `2dcfe5a` (AvatarSet + Fetcher scaffold) → `3bd241c` (WS handler) → `e6ff313` (gateway load_avatar_set tool) → `98f34b0` (CI trigger for feature/**+dev/**+dispatch) → `d9a402c` (SendText public) → `a42fe0b` (`%zu` → `%u` fix)
+  - `dev/integration` (= PCM stream + avatar 統合、 実機テスト用、 SAIVerse の mcp_servers.json が参照中): 上記を順次 merge 済み
+- `SAIVerse` 本体 (`feature/memory-notes-and-organize` ブランチ、 ローカル commit のみ): `37b455c` (intent doc 起草) → `6c89235` (intent doc HTTP fetch refine) → `547ffab` (mcp_client.py で subprocess stderr を session log dir に forward)
+- `saiverse-stackchan-addon` (= addon repo): `449679a` (Phase 4' A-3-c building_ids 反映 + Phase 4.5 動作確認準備、 mcp_servers.json で git ref を `@dev/integration` に切替 + `scripts/generate_test_avatar_set.py` 追加)
+
+### 次セッション残作業 (Phase 4.5-a の残り)
+
+依存関係: (1) → (3)、 (2) は独立
+
+1. **eyes / mouth の AvatarSet 統合** — 現状 face だけが AvatarSet 経由、 eyes / mouth は static 1×1 placeholder の fallback 経路のまま。 `set_eyes` / `set_mouth` / `set_mouth_sequence` ハンドラと、 blink state machine の image lookup を AvatarSet::GetEyes / GetMouth 経由に切り替える
+2. **in-progress 中の表情切替保留機構** (intent doc 不変条件 #6) — Fetcher が走っている最中の `SetAvatarExpression` 呼び出しを pending として保持、 Load 完了後に最後の状態だけ apply。 現状は worker task と LVGL task で race の窓があるが、 実装的に Mutex か pending state にする
+3. **matrix mode 対応** — `AvatarImageFor` を `(face, eyes, mouth)` 3 軸 lookup に拡張。 これは (1) と密接 (= matrix モードでは face/eyes/mouth を組み合わせた 1 枚を引く)
+
+その先 (= Phase 4.5-c/d/e):
+
+- 4.5-c: addon storage で avatar セット永続化 + 憑依時自動ロード
+- 4.5-d: addon 管理 UI に段階的画像生成フロー (Step 1: 5 種差分 + レビュー → Step 2: matrix 84 枚 or layered 8 パーツ)
+- 4.5-e: upstream PR-A (動的セット転送機構) / PR-B (matrix mode) 提出 + 如月もちさんにデフォルト art 依頼
+
+### 次セッション向け操作 cheatsheet
+
+#### Stack-chan firmware build + flash (= 修正サイクル)
+
+ローカル ESP-IDF (推奨、 incremental ビルドで数十秒):
+
+```powershell
+# PowerShell tool 経由で実行 (= MSys/MinGW Bash は ESP-IDF 非サポート)
+$env:IDF_TOOLS_PATH = "C:\Espressif"
+. C:\Espressif\frameworks\esp-idf-v5.5.4\export.ps1 | Out-Null
+Set-Location C:\Users\shuhe\workspace\SAIVerse\temp\stackchan-mcp\firmware
+idf.py build               # incremental (変更ファイルのみ再 compile)
+idf.py -p COM3 app-flash   # app partition のみ (NVS 保持 = WiFi 設定そのまま)
+```
+
+注意点:
+
+- **`idf.py app-flash` を使う** — NVS partition を保持するので WiFi/トークン再設定不要。 `esptool write_flash 0x0 merged-binary.bin` は NVS まで上書きする (= captive portal で再設定が必要、 開発サイクルでは避ける)
+- `temp/stackchan-mcp/firmware/sdkconfig.defaults.local` に `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` 設定済み (= panic backtrace が addr2line で clean に解析できる)
+- ビルド成果物: `temp/stackchan-mcp/firmware/build/xiaozhi.elf` (= addr2line 用)、 `build/merged-binary.bin` (= 初回 flash 用、 NVS 消える)
+- 過去履歴: feedback_esp32_merged_flash_wipes_nvs.md / feedback_esp_idf_nano_printf_no_zu.md
+
+CI 経由 (= ローカル使えない場合の fallback、 ~6 min):
+
+```bash
+gh run list --repo maha0525/stackchan-mcp --branch <branch> --limit 3
+gh run download <run_id> --repo maha0525/stackchan-mcp -D /tmp/fw_avatar  # run_in_background=true 推奨
+```
+
+#### Serial output capture
+
+stack-chan の COM3 出力を session log dir に流す常駐スクリプト:
+
+```bash
+/c/Users/shuhe/workspace/SAIVerse/.venv/Scripts/python.exe \
+  /c/Users/shuhe/workspace/SAIVerse/temp/stackchan_serial_capture.py
+# run_in_background=true で起動。 出力先: ~/.saiverse/user_data/logs/<最新>/stackchan_serial.log
+```
+
+flash 前に必ず kill して COM3 解放:
+
+```powershell
+Get-WmiObject Win32_Process -Filter "name='python.exe'" |
+  Where-Object { $_.CommandLine -like "*stackchan_serial_capture*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+#### Panic 解析手順 (= ESP32 crash 再現時)
+
+1. serial log で `Guru Meditation Error` を grep
+2. `Backtrace: 0x... 0x... ...` の address を取って addr2line で symbol 解析:
+
+```bash
+/c/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20260121/xtensa-esp-elf/bin/xtensa-esp-elf-addr2line.exe \
+  -e /c/Users/shuhe/workspace/SAIVerse/temp/stackchan-mcp/firmware/build/xiaozhi.elf \
+  -f -p 0x<addr1> 0x<addr2> ...
+```
+
+注意: **debug build じゃないと addr2line は混乱する** (= release `-Os` で aggressive inline され symbol が beste-effort で誤割り当て)。 sdkconfig.defaults.local の `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` で OK。
+
+#### SAIVerse の subprocess log 確認
+
+`tools/mcp_client.py` 改修 (547ffab) で、 stackchan-mcp gateway の log (= `Gateway started: WS on 0.0.0.0:18765`、 `ESP32 ready: ...` 等) が以下のファイルに流れる:
+
+```
+~/.saiverse/user_data/logs/<session>/mcp_subprocess_saiverse-stackchan-addon__stackchan.log
+```
+
+#### 環境構成のメモ
+
+- AddonConfig (saiverse.db の `addon_config` テーブル) 値: `gateway_ws_port=18765`、 `gateway_capture_port=8766`、 `vision_host=192.168.0.127`、 `master_token` / `pcm_token` 既設定、 `vessel_building_id=stackchan_room`
+- mcp_servers.json (addon repo) は git ref を `@dev/integration` 指定中。 PR-A/B が upstream merge されたら upstream tag に戻す
+- ESP32 device: MAC `44:1b:f6:df:58:e0`、 COM3 で接続中、 WiFi + WS URL `ws://192.168.0.127:18765` + Authorization Token (= master_token) で captive portal 設定済み。 NVS 保持で再設定不要
+
+#### 重要な memory 参照
+
+特に Phase 4.5 関連で踏んだ罠 (全部 memory 化済み):
+
+- `feedback_esp_idf_nano_printf_no_zu.md` — ESP-IDF nano-printf の `%zu` バグ
+- `feedback_esp32_merged_flash_wipes_nvs.md` — flash 戦略 (`idf.py app-flash` vs `esptool write_flash`)
+- `feedback_check_fork_specific_changes.md` — fork で新 branch を upstream/main から派生するとき fork-only 改変が落ちる
+- `feedback_artifact_source_branch.md` — 実機 flash 用 artifact は dev/integration から (feature/* は upstream PR 用)
+- `feedback_mcp_servers_spell_tools_required.md` — addon に新 MCP tool を gateway 側に追加するなら mcp_servers.json の `spell_tools` にも entry をセットで追加
+- `feedback_bash_tool_internal_error_on_conflict.md` — Bash tool の `H.replace` 内部 error は出力で発生 (コンフリクト marker や HEREDOC の特殊文字)。 出力リダイレクト or `-F file` で回避
