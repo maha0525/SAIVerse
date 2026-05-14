@@ -212,28 +212,36 @@ format に関しては firmware は **raw RGB565 のみ** をサポートする�
 ```python
 @tool
 async def load_avatar_set(
+    archive_path: str,          # gateway-local path to a raw RGB565 file
     mode: str,                  # "layered" or "matrix"
-    image_data: bytes,          # raw RGB565 payload (gateway 側で PNG → RGB565 変換済み)
-    set_name: str | None = None,
+    timeout: float = 60.0,
 ) -> dict:
     """avatar セットを ESP32 にロードする。
-    
-    1. payload を gateway HTTP server に staging (one-time URL + bearer token)
-    2. ESP32 に WS で fetch 指示を送信 (type=avatar_set_fetch)
-    3. ESP32 が HTTP GET で取得 → SHA256 検証 → AvatarSet::Load
-    4. ESP32 から WS 完了通知 (type=avatar_set_loaded) を待つ
-    5. 結果を返す
-    
+
+    1. archive_path のファイルを raw RGB565 として読み、サイズと mode を検証
+    2. payload を gateway HTTP server に staging (one-time URL + bearer token + SHA256)
+    3. ESP32 に WS で fetch 指示を送信 (type=avatar_set_fetch)
+    4. ESP32 が HTTP GET で取得 → SHA256 検証 → AvatarSet::Load
+    5. ESP32 から WS 完了通知 (type=avatar_set_loaded) を待つ
+    6. 結果を返す
+
     Returns:
-        {"ok": bool, "loaded": str (set checksum), "bytes_transferred": int,
+        {"ok": bool, "checksum": str, "bytes_transferred": int,
          "error": str | None}
     """
 ```
 
-- `image_data` は呼び出し側 (= addon) で raw RGB565 に変換済み (PNG → RGB565 は `convert_avatars.py` のロジックを gateway 側で再利用)
-- size 検証 (`mode=layered` なら 537,600 bytes、`mode=matrix` なら 3,456,000 bytes)
+引数を bytes ではなくファイルパスで受ける理由:
+
+- MCP の I/O は JSON ベースで、 大きな bytes は base64 等で膨らむ。 数 MB の RGB565 を base64 化すると ~33% 増 (matrix で ~4.4 MB) で MCP transport の負荷が無視できない
+- gateway は subprocess として addon と同居するので、 ローカルファイルシステム経由がもっとも素直 (= addon が tempfile に書き出して archive_path を渡す)
+- gateway 側で `convert_avatars.py` 同等の PNG → RGB565 変換を **行わない** 方針 (= addon 側で完了させる)。 これにより stackchan-mcp 本流に Pillow 等の重い依存を持ち込まずに済み、 upstream PR の受け入れ性が高まる
+
+挙動:
+
+- size 検証 (`mode=layered` なら 537,600 bytes、`mode=matrix` なら 3,456,000 bytes)。 不一致なら fetch せずエラー
 - SHA256 を計算して staging
-- 既存 set と checksum 一致なら fetch スキップして即 ok を返す (= 冪等性、不変条件 #5)
+- 既存 set と checksum 一致なら fetch スキップして即 ok を返す (= 冪等性、 不変条件 #5)。 ※ 現状の skeleton 実装はこの最適化を含まず、 都度 fetch する。 follow-up で対応
 
 #### C-2. HTTP staging endpoint
 
