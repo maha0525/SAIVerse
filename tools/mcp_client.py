@@ -27,6 +27,7 @@ import threading
 import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from tools.core import ToolSchema
@@ -36,7 +37,7 @@ from tools.core import ToolSchema
 # while inserting its own tools/ dir onto sys.path), causing
 # ModuleNotFoundError in the middle of a spell call. See
 # memory/project_tts_import_pollution.md.
-from tools.context import get_active_persona_id
+from tools.context import get_active_manager, get_active_persona_id
 
 LOGGER = logging.getLogger(__name__)
 
@@ -214,6 +215,12 @@ def _tool_schema_from_mcp(
     spell_options = spell_config.get(tool_name, {})
     display_name = spell_options.get("display_name") or spell_options.get("spell_display_name") or ""
     spell_visible = spell_options.get("visible", True)
+    raw_building_ids = spell_options.get("building_ids")
+    building_ids: Optional[List[str]] = None
+    if isinstance(raw_building_ids, list):
+        building_ids = [str(bid) for bid in raw_building_ids if bid]
+        if not building_ids:
+            building_ids = None
 
     return ToolSchema(
         name=namespaced_name,
@@ -223,6 +230,7 @@ def _tool_schema_from_mcp(
         spell=tool_name in spell_config,
         spell_display_name=str(display_name) if display_name else "",
         spell_visible=bool(spell_visible),
+        building_ids=building_ids,
     )
 
 
@@ -303,6 +311,38 @@ class MCPServerConnection:
             await self.disconnect()
             raise
 
+    def _open_subprocess_errlog(self):
+        """Open a per-session, per-server log file for subprocess stderr.
+
+        Resolves the session log directory from the root logger's FileHandler
+        (= the same dir backend.log lives in) so the new file co-locates with
+        the rest of the SAIVerse session output. Falls back to the system temp
+        dir if no FileHandler is configured (e.g. test runs).
+
+        The handle is registered with the exit_stack so it closes when the
+        MCPServerConnection is torn down. ``line buffered`` so the subprocess
+        log shows up promptly without explicit flush.
+        """
+        import logging
+        import tempfile
+
+        log_dir: Optional[Path] = None
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.FileHandler):
+                log_dir = Path(handler.baseFilename).parent
+                break
+
+        if log_dir is None:
+            log_dir = Path(tempfile.gettempdir())
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sanitize server_name for filesystem
+        safe_name = self.server_name.replace("/", "_").replace("\\", "_")
+        path = log_dir / f"mcp_subprocess_{safe_name}.log"
+        handle = open(path, "a", encoding="utf-8", buffering=1)
+        self._exit_stack.callback(handle.close)  # type: ignore[union-attr]
+        return handle
+
     async def _connect_stdio(self) -> None:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -312,8 +352,25 @@ class MCPServerConnection:
             args=self.config.get("args", []),
             env=self.config.get("env"),
         )
+
+        # Capture subprocess stderr to a per-session log file. mcp SDK's
+        # stdio_client defaults errlog to sys.stderr which only goes to
+        # the parent console (= SAIVerse runner), so subprocess-internal
+        # logs ("Gateway started", "ESP32 hello", env diagnostics, etc.)
+        # are invisible to anyone reading backend.log. We forward to a
+        # sibling file in the same session log dir.
+        errlog_handle = self._open_subprocess_errlog()
+
+        LOGGER.info(
+            "MCP subprocess starting: server=%s command=%s args=%s env=%s errlog=%s",
+            self.server_name,
+            server_params.command,
+            server_params.args,
+            server_params.env,
+            getattr(errlog_handle, "name", "<unknown>"),
+        )
         read_stream, write_stream = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
-            stdio_client(server_params)
+            stdio_client(server_params, errlog=errlog_handle)
         )
         self.session = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
             ClientSession(read_stream, write_stream)
@@ -710,6 +767,7 @@ class MCPClientManager:
         self,
         tool_name: str,
         persona_id: Optional[str],
+        building_id: Optional[str] = None,
     ) -> bool:
         """Whether the registered tool can actually be invoked for this persona.
 
@@ -721,6 +779,13 @@ class MCPClientManager:
         unresolved (missing api_key etc). This is used to hide tools from
         the persona-specific spell list so the LLM does not try to call
         tools that would immediately fail with ``missing_config``.
+
+        ``building_ids`` filter (Phase 4' / A-3-c): when a tool's
+        ``spell_tools`` entry lists ``building_ids`` and ``building_id`` is
+        provided, only allow the tool when ``building_id`` is in that list.
+        Passing ``building_id=None`` skips the filter (= callers without
+        building context, e.g. UI summon listing, see all otherwise-visible
+        tools). Detail: docs/intent/stackchan_vessel.md A-3-c.
 
         Policy notes:
           * ``scope=global`` servers resolve without persona context.
@@ -734,6 +799,15 @@ class MCPClientManager:
         meta_info = self._registered_tools.get(tool_name)
         if not meta_info:
             return True
+
+        # building_ids フィルタ: building_id を渡された場合のみ評価。
+        # building_id が None なら filter をスキップ (= UI 列挙等の
+        # 「現在地が決まらない」呼び出しは visible にする)。
+        building_ids = meta_info.get("building_ids")
+        if building_ids and building_id is not None:
+            if building_id not in building_ids:
+                return False
+
         qualified = meta_info.get("qualified_server_name")
         if not qualified:
             return True
@@ -821,6 +895,7 @@ class MCPClientManager:
                     "description": schema.description,
                     "spell": schema.spell,
                     "spell_display_name": schema.spell_display_name,
+                    "building_ids": schema.building_ids,
                     "source_path": connection.config.get("_source_path"),
                     "addon_name": connection.config.get("_addon_name"),
                     "first_registered_from_instance": instance_key,
@@ -1116,6 +1191,40 @@ def _make_mcp_tool_wrapper(
     per-persona instance.
     """
     async def _mcp_tool_wrapper(**kwargs: Any) -> str:
+        # Phase 4 (cached_head_architecture): Building 単位 visibility の execute-time gate.
+        # 該当ツールに building_ids 制約があり、ペルソナの現在地がそのリストに
+        # 含まれていない場合は実行を拒否する。Spell 一覧の cache 安定性 (= 移動しても
+        # head が変わらない設計) のため、ペルソナは古い building の Spell 一覧を
+        # 見続けて誤って呼ぶことがあり得る。その安全網として機能する。
+        # 詳細: docs/intent/cached_head_architecture.md §7 Phase 4
+        namespaced_name = f"{qualified_name}__{tool_name}"
+        meta_info = manager._registered_tools.get(namespaced_name) or {}
+        building_ids = meta_info.get("building_ids")
+        if building_ids:
+            persona_id_for_gate = get_active_persona_id()
+            active_manager = get_active_manager()
+            current_building_id: Optional[str] = None
+            if active_manager is not None and persona_id_for_gate:
+                persona_obj = (
+                    getattr(active_manager, "all_personas", {}).get(persona_id_for_gate)
+                    or getattr(active_manager, "personas", {}).get(persona_id_for_gate)
+                )
+                current_building_id = (
+                    getattr(persona_obj, "current_building_id", None)
+                    if persona_obj is not None else None
+                )
+            if current_building_id is None or current_building_id not in building_ids:
+                LOGGER.info(
+                    "MCP tool execute-time gate: blocked %s persona=%s building=%s allowed=%s",
+                    namespaced_name, persona_id_for_gate, current_building_id,
+                    sorted(str(b) for b in building_ids),
+                )
+                return (
+                    f"Error: ツール '{namespaced_name}' は現在の Building "
+                    f"({current_building_id or '不明'}) からは実行できません。"
+                    f"許可されている Building: {', '.join(str(b) for b in building_ids)}"
+                )
+
         if scope == "per_persona":
             persona_id = get_active_persona_id()
             if not persona_id:
