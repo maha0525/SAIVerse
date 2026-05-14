@@ -462,36 +462,40 @@ Vessel ごとに描画特性が大きく違う:
 
 ## 進捗 (2026-05-14)
 
-### 完了 (Phase 4.5-a/b の skeleton + end-to-end 疎通確認)
+### 完了
 
-実機動作確認できた要素:
+**Phase 4.5-a (firmware 拡張) — 全工程完了** (= 当初予定の Phase 4.5-a を全て満たす状態):
 
 - AvatarSet 動的セット転送機構 (HTTP fetch + SHA256 + PSRAM Load)
-- load_avatar_set MCP tool (gateway 側)
-- face 切り替え (layered mode、 14 シンボルのうち face × 6 のみ AvatarSet 経由)
+- 全 3 軸 (face / eyes / mouth) を AvatarSet 経由で lookup、 layered mode は upstream Phase 2 と同じ「単一画像表示」、 matrix mode は GetMatrix で合成画像を一発描画
+- 表情/口/瞬きの状態を index ベースで追跡 (`current_face_index_` / `current_eyes_index_` / `current_mouth_index_`)、 active_layer_ で「今表示中のレイヤ」を選択
+- 不変条件 #6 (fetch 中の保留機構): `avatar_fetch_in_progress_` フラグ + `PendingAvatarState` で、 fetch 中の `set_avatar` / `set_avatar("off")` / `set_mouth` / `set_blink` を pending に記録、 完了後に最後の意図だけ apply。 並行 fetch は `error="fetch_in_progress"` で拒否
+- autonomous animation (blink / TTS lipsync / mouth_seq) は fetch 入口で全部 quiesce、 完了後に `ApplyPendingAvatarAfterFetch` 経由で blink_desired_ を見て自然再開
+
+**Phase 4.5-b (gateway 拡張) — skeleton 完了 + 実機疎通済み**: load_avatar_set MCP tool が SAIVerse spell → ESP32 LCD まで通った。 冪等性 (checksum 一致時の fetch スキップ) は未実装、 follow-up
+
+実機動作確認できた要素 (2026-05-14 13:00 頃):
+
 - end-to-end: SAIVerse spell → gateway HTTP staging → ESP32 が `avatar_set_fetch` WS notify を受けて HTTP GET → SHA256 検証 → AvatarSet::Load (PSRAM 確保) → avatar_set_loaded WS で応答 → LCD に新画像が描画される
+- 初回 idle face (白背景) 表示 → `load_avatar_set` で happy セット転送 → 黄色背景の "face/happy" 画像に切替
 
 主要 commit:
 
 - `stackchan-mcp` (fork: maha0525/stackchan-mcp)
-  - `feature/dynamic-avatar-set` (= PR-A/B 出す予定): `2dcfe5a` (AvatarSet + Fetcher scaffold) → `3bd241c` (WS handler) → `e6ff313` (gateway load_avatar_set tool) → `98f34b0` (CI trigger for feature/**+dev/**+dispatch) → `d9a402c` (SendText public) → `a42fe0b` (`%zu` → `%u` fix)
-  - `dev/integration` (= PCM stream + avatar 統合、 実機テスト用、 SAIVerse の mcp_servers.json が参照中): 上記を順次 merge 済み
-- `SAIVerse` 本体 (`feature/memory-notes-and-organize` ブランチ、 ローカル commit のみ): `37b455c` (intent doc 起草) → `6c89235` (intent doc HTTP fetch refine) → `547ffab` (mcp_client.py で subprocess stderr を session log dir に forward)
+  - `feature/dynamic-avatar-set` (= PR-A/B 出す予定): `2dcfe5a` (AvatarSet + Fetcher scaffold) → `3bd241c` (WS handler) → `e6ff313` (gateway load_avatar_set tool) → `98f34b0` (CI trigger for feature/**+dev/**+dispatch) → `d9a402c` (SendText public) → `a42fe0b` (`%zu` → `%u` fix) → **`f3a988b` (face/eyes/mouth 統合 + matrix mode)** → **`5cd11a6` (fetch 中の表情切替保留機構)**
+  - `dev/integration` (= PCM stream + avatar 統合、 実機テスト用、 SAIVerse の mcp_servers.json が参照中): 上記を順次 merge 済み (最新 = `4973f69` merge)
+- `SAIVerse` 本体 (`feature/memory-notes-and-organize` ブランチ、 ローカル commit のみ): `37b455c` (intent doc 起草) → `6c89235` (intent doc HTTP fetch refine) → `547ffab` (mcp_client.py で subprocess stderr を session log dir に forward) → `f7fe3cd` (進捗反映 + ハンドオフ)
 - `saiverse-stackchan-addon` (= addon repo): `449679a` (Phase 4' A-3-c building_ids 反映 + Phase 4.5 動作確認準備、 mcp_servers.json で git ref を `@dev/integration` に切替 + `scripts/generate_test_avatar_set.py` 追加)
 
-### 次セッション残作業 (Phase 4.5-a の残り)
+### 残作業 — Phase 4.5-c/d/e
 
-依存関係: (1) → (3)、 (2) は独立
+- **4.5-c**: addon storage で avatar セット永続化 + 憑依時自動ロード
+- **4.5-d**: addon 管理 UI に段階的画像生成フロー (Step 1: 5 種差分 + レビュー → Step 2: matrix 84 枚 or layered 8 パーツ)
+- **4.5-e**: upstream PR-A (動的セット転送機構) / PR-B (matrix mode) 提出 + 如月もちさんにデフォルト art 依頼
 
-1. **eyes / mouth の AvatarSet 統合** — 現状 face だけが AvatarSet 経由、 eyes / mouth は static 1×1 placeholder の fallback 経路のまま。 `set_eyes` / `set_mouth` / `set_mouth_sequence` ハンドラと、 blink state machine の image lookup を AvatarSet::GetEyes / GetMouth 経由に切り替える
-2. **in-progress 中の表情切替保留機構** (intent doc 不変条件 #6) — Fetcher が走っている最中の `SetAvatarExpression` 呼び出しを pending として保持、 Load 完了後に最後の状態だけ apply。 現状は worker task と LVGL task で race の窓があるが、 実装的に Mutex か pending state にする
-3. **matrix mode 対応** — `AvatarImageFor` を `(face, eyes, mouth)` 3 軸 lookup に拡張。 これは (1) と密接 (= matrix モードでは face/eyes/mouth を組み合わせた 1 枚を引く)
+### Phase 4.5-a 完了後の Push 状況 (= 次セッション初手の判断材料)
 
-その先 (= Phase 4.5-c/d/e):
-
-- 4.5-c: addon storage で avatar セット永続化 + 憑依時自動ロード
-- 4.5-d: addon 管理 UI に段階的画像生成フロー (Step 1: 5 種差分 + レビュー → Step 2: matrix 84 枚 or layered 8 パーツ)
-- 4.5-e: upstream PR-A (動的セット転送機構) / PR-B (matrix mode) 提出 + 如月もちさんにデフォルト art 依頼
+`stackchan-mcp` fork の `feature/dynamic-avatar-set` と `dev/integration` はローカル commit のみで origin に未 push。 push トリガで CI が走る (`build.yml` の feature/**/dev/** trigger)。 ローカル ESP-IDF で `idf.py build && idf.py app-flash` する分には push 不要。 PR-A/B 提出フェーズ (4.5-e) で push が必須になる。
 
 ### 次セッション向け操作 cheatsheet
 
