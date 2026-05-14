@@ -196,11 +196,21 @@ class OccupancyManager:
                 except Exception:
                     logging.exception("[dynamic_state] on_building_entered failed for %s -> %s", entity_id, to_id)
 
-                # Addon hook: ペルソナの建物入室を addon に通知する。
+                # Addon hooks: ペルソナの建物移動を addon に通知する。
                 # Vessel Building に紐付くアドオンが avatar セット等の物理リソースを
-                # 切り替えるためのフックポイント。詳細: docs/intent/stackchan_avatar_pipeline.md
+                # 切り替え / 退室時に身体を非表示にするためのフックポイント。
+                # 詳細: docs/intent/stackchan_avatar_pipeline.md
                 try:
                     from saiverse.addon_hooks import dispatch_hook
+                    # 退室イベントを先に発火 (= addon が「ペルソナ A が出た」
+                    # を処理した後に「ペルソナ B が入った」を処理できるよう)。
+                    dispatch_hook(
+                        "persona_exited_building",
+                        persona_id=entity_id,
+                        building_id=from_id,
+                        from_building_id=from_id,
+                        to_building_id=to_id,
+                    )
                     dispatch_hook(
                         "persona_entered_building",
                         persona_id=entity_id,
@@ -209,7 +219,7 @@ class OccupancyManager:
                     )
                 except Exception:
                     logging.exception(
-                        "[addon_hooks] persona_entered_building dispatch failed "
+                        "[addon_hooks] persona move hook dispatch failed "
                         "for %s -> %s", entity_id, to_id,
                     )
 
