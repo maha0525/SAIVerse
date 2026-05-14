@@ -50,7 +50,13 @@ from typing import Any, Callable, Dict, List
 LOGGER = logging.getLogger(__name__)
 
 # Phase 1 で許可するイベント名。新規イベント追加時はここに登録する。
-KNOWN_EVENTS: frozenset = frozenset({"persona_speak"})
+#
+# - ``persona_speak``: ペルソナ発話時。 voice-tts / stackchan vessel など、
+#   発話を物理出力に橋渡しするアドオン向け。
+# - ``persona_entered_building``: ペルソナが建物に入室した時 (= AI 移動)。
+#   Vessel Building に憑依したタイミングで avatar セットを動的ロードする等。
+#   payload: ``persona_id``, ``building_id``, ``from_building_id``。
+KNOWN_EVENTS: frozenset = frozenset({"persona_speak", "persona_entered_building"})
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="addon-hook")
 _handlers: Dict[str, List[Callable[..., Any]]] = {}

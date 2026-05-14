@@ -138,6 +138,11 @@ class OccupancyManager:
                     "to_building_id": to_id,
                     "event_key": event_key,
                     "recalled_by": [],
+                    # auto_ingest 側がペルソナの context に Building 情報を流し込むための
+                    # ペイロード。visual_context のキャッシュに頼らず、移動の瞬間に
+                    # SYSTEM_PROMPT や physical_vessel_id を episodic memory へ
+                    # 直接届ける経路。詳細: docs/intent/stackchan_vessel.md A-3-a
+                    "building_info": self._build_building_info(to_id),
                 }
             }
             left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
@@ -191,6 +196,23 @@ class OccupancyManager:
                 except Exception:
                     logging.exception("[dynamic_state] on_building_entered failed for %s -> %s", entity_id, to_id)
 
+                # Addon hook: ペルソナの建物入室を addon に通知する。
+                # Vessel Building に紐付くアドオンが avatar セット等の物理リソースを
+                # 切り替えるためのフックポイント。詳細: docs/intent/stackchan_avatar_pipeline.md
+                try:
+                    from saiverse.addon_hooks import dispatch_hook
+                    dispatch_hook(
+                        "persona_entered_building",
+                        persona_id=entity_id,
+                        building_id=to_id,
+                        from_building_id=from_id,
+                    )
+                except Exception:
+                    logging.exception(
+                        "[addon_hooks] persona_entered_building dispatch failed "
+                        "for %s -> %s", entity_id, to_id,
+                    )
+
             return True, None
         except Exception as e:
             if manage_session_locally: db.rollback()
@@ -201,3 +223,21 @@ class OccupancyManager:
 
     def _is_user(self, entity_id: str) -> bool:
         return entity_id == self.user_entity_id
+
+    def _build_building_info(self, building_id: str) -> Dict[str, Any]:
+        """auto_ingest がペルソナの context へ流し込むための Building 情報を組み立てる。
+
+        ``available_tools`` は A-3-c (mcp_client の Building 単位 visibility) 実装後に
+        spell_tools 経由で填まる想定。それまでは空リスト。
+
+        詳細: docs/intent/stackchan_vessel.md A-3-a
+        """
+        building = self.building_map.get(building_id)
+        if building is None:
+            return {}
+        return {
+            "name": getattr(building, "name", "") or building_id,
+            "system_prompt": getattr(building, "base_system_instruction", "") or "",
+            "physical_vessel_id": getattr(building, "physical_vessel_id", None),
+            "available_tools": [],
+        }

@@ -487,9 +487,20 @@ Vessel ごとに描画特性が大きく違う:
 - `SAIVerse` 本体 (`feature/memory-notes-and-organize` ブランチ、 ローカル commit のみ): `37b455c` (intent doc 起草) → `6c89235` (intent doc HTTP fetch refine) → `547ffab` (mcp_client.py で subprocess stderr を session log dir に forward) → `f7fe3cd` (進捗反映 + ハンドオフ)
 - `saiverse-stackchan-addon` (= addon repo): `449679a` (Phase 4' A-3-c building_ids 反映 + Phase 4.5 動作確認準備、 mcp_servers.json で git ref を `@dev/integration` に切替 + `scripts/generate_test_avatar_set.py` 追加)
 
-### 残作業 — Phase 4.5-c/d/e
+### Phase 4.5-c 完了 (= addon storage + 憑依時自動ロード)
 
-- **4.5-c**: addon storage で avatar セット永続化 + 憑依時自動ロード
+実装した要素:
+
+- 本体 `OccupancyManager.move_entity` から AI 移動成功時に `persona_entered_building` server_hook を dispatch (= `addon_hooks.KNOWN_EVENTS` に追加)
+- addon に `avatar_loader.py` 追加。 ハンドラ `on_persona_entered_building` が:
+  - AddonConfig の `vessel_building_id` と入室先 building_id を照合、 Vessel Building 以外は早期 return
+  - addon storage `avatar_sets/<persona_id>/<set_name>/{avatar.bin, manifest.json}` を解決
+  - 直前と同 checksum なら skip (in-memory cache、 SAIVerse 再起動でリセット)
+  - 本体 MCP client の `saiverse-stackchan-addon__stackchan` インスタンスに `call_tool("load_avatar_set", ...)` を投げる (= ThreadPoolExecutor の worker thread から `asyncio.run_coroutine_threadsafe` で MCP loop に bridge)
+- multi-persona テスト用の seeding スクリプト `scripts/seed_persona_avatar_set.py` を追加 (= `--tint-hue` で persona ごとに HSV 回転して視覚的に区別、 manifest 自動生成)
+
+### 残作業 — Phase 4.5-d/e
+
 - **4.5-d**: addon 管理 UI に段階的画像生成フロー (Step 1: 5 種差分 + レビュー → Step 2: matrix 84 枚 or layered 8 パーツ)
 - **4.5-e**: upstream PR-A (動的セット転送機構) / PR-B (matrix mode) 提出 + 如月もちさんにデフォルト art 依頼
 
