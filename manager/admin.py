@@ -584,11 +584,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
             db.add(new_item)
             if normalized_kind != "world":
+                slot_num = self.manager.item_service._assign_slot(
+                    db, normalized_kind, owner_id
+                )
                 db.add(
                     ItemLocationModel(
                         ITEM_ID=item_id,
                         OWNER_KIND=normalized_kind,
                         OWNER_ID=owner_id,
+                        SLOT_NUMBER=slot_num,
                     )
                 )
             db.commit()
@@ -658,14 +662,27 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     db.delete(location)
             else:
                 if location:
-                    location.OWNER_KIND = normalized_kind
-                    location.OWNER_ID = owner_id
+                    owner_changed = (
+                        location.OWNER_KIND != normalized_kind
+                        or location.OWNER_ID != owner_id
+                    )
+                    if owner_changed:
+                        slot_num = self.manager.item_service._assign_slot(
+                            db, normalized_kind, owner_id
+                        )
+                        location.OWNER_KIND = normalized_kind
+                        location.OWNER_ID = owner_id
+                        location.SLOT_NUMBER = slot_num
                 else:
+                    slot_num = self.manager.item_service._assign_slot(
+                        db, normalized_kind, owner_id
+                    )
                     db.add(
                         ItemLocationModel(
                             ITEM_ID=item_id,
                             OWNER_KIND=normalized_kind,
                             OWNER_ID=owner_id,
+                            SLOT_NUMBER=slot_num,
                         )
                     )
             db.commit()
