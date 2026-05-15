@@ -98,11 +98,6 @@ def _find_next_sentence_boundary(
     return -1
 
 
-def _is_pipeline_streaming_enabled() -> bool:
-    """LLM → TTS Pipeline Streaming (= 文区切り sub-speak 連発) を有効にするか
-    の env flag。 default OFF (= 旧 Phase 1 bubble1 早期 emit 経路で動く)。
-    """
-    return os.getenv("SAIVERSE_LLM_TTS_PIPELINE", "0").lower() in ("1", "true", "yes", "on")
 
 
 def _resolve_response_schema_source(
@@ -1846,10 +1841,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     text = ""
                     cancelled_during_stream = False
 
-                    # Pipeline Streaming (Phase 2-C): 文区切りごとに sub-speak を
-                    # 発火して voice-tts の合成を LLM streaming と並行で走らせる。
-                    # default OFF。 OFF の時は従来の Phase 1 (bubble1 早期 emit)
-                    # 経路で動く。
+                    # Pipeline Streaming: LLM streaming と並行で voice-tts に
+                    # 文区切りごとに sub-speak を投げる経路。 ストリーミング応答
+                    # を返す経路では常にこの方式を使う (旧 Phase 1 bubble1 早期
+                    # emit は撤去済)。
                     #
                     # 仕組み:
                     # - 開始時に _emit_speak_start で placeholder + msg_id 発番
@@ -1860,24 +1855,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # - spell loop 完了後 (or 通常完了後) に _emit_speak_finalize
                     #   で placeholder を確定 + final hook 発火。 final_voice_text
                     #   は 「last sub-speak 以降の残テキスト」 を strip_user_only
-                    #   済の形で渡す (= 案 A、 重複合成を回避)
-                    pipeline_streaming = _is_pipeline_streaming_enabled() and event_callback is not None
-                    pipeline_msg_id: Optional[str] = None
+                    #   済の形で渡す (= 重複合成を回避)
+                    pipeline_msg_id: Optional[str] = runtime._emit_speak_start(
+                        persona,
+                        runtime._effective_building_id(persona, building_id),
+                        pulse_id=state.get("_pulse_id"),
+                    )
+                    if not pipeline_msg_id:
+                        LOGGER.error(
+                            "[sea][pipeline] _emit_speak_start failed; "
+                            "downstream finalize will be skipped — placeholder leak risk",
+                        )
                     pipeline_sub_seq = 0
                     pipeline_last_emit_pos = 0
                     pipeline_spell_detected = False
-                    if pipeline_streaming:
-                        pipeline_msg_id = runtime._emit_speak_start(
-                            persona,
-                            runtime._effective_building_id(persona, building_id),
-                            pulse_id=state.get("_pulse_id"),
-                        )
-                        if not pipeline_msg_id:
-                            LOGGER.warning(
-                                "[sea][pipeline] _emit_speak_start failed; "
-                                "falling back to non-pipeline streaming for this turn",
-                            )
-                            pipeline_streaming = False
 
                     for stream_attempt in range(max_stream_retries):
                         text_chunks = []
@@ -1916,11 +1907,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 })
 
                                 # Pipeline Streaming: 文区切り検出 → sub-speak emit
-                                if (
-                                    pipeline_streaming
-                                    and pipeline_msg_id
-                                    and not pipeline_spell_detected
-                                ):
+                                if pipeline_msg_id and not pipeline_spell_detected:
                                     _ps_buffer = "".join(text_chunks)
                                     # 1) 既にバッファ末尾まで spell 行が出てきたか確認
                                     _ps_tail = _ps_buffer[pipeline_last_emit_pos:]
@@ -2008,15 +1995,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             max_stream_retries
                         )
 
-                    # Phase 2-D (cancellation cleanup): Pipeline Streaming で
-                    # placeholder を発番済みのまま cancellation で抜けた場合、
-                    # voice-tts 側 audio_stream が close されず、 building
-                    # history の _streaming_placeholder=True も残り続ける。
-                    # ここで finalize して 「partial で確定 + voice-tts に
-                    # is_final=True を送って stream close + wav 保存」 を
-                    # 強制する。 下流の spell loop / emit 経路は二重 finalize
-                    # しないよう pipeline_streaming/msg_id を倒しておく。
-                    if cancelled_during_stream and pipeline_streaming and pipeline_msg_id:
+                    # Cancellation cleanup: placeholder を発番済みのまま
+                    # cancellation で抜けた場合、 voice-tts 側 audio_stream が
+                    # close されず、 building history の _streaming_placeholder
+                    # も残り続ける。 ここで finalize して 「partial で確定 +
+                    # voice-tts に is_final=True を送って stream close + wav
+                    # 保存」 を強制する。 下流の spell loop / emit 経路は二重
+                    # finalize しないよう pipeline_msg_id を倒しておく。
+                    if cancelled_during_stream and pipeline_msg_id:
                         from saiverse.content_tags import strip_in_heart, strip_user_only
                         _cancel_eff_bid = runtime._effective_building_id(persona, building_id)
                         _cancel_remainder_raw = text[pipeline_last_emit_pos:] if text else ""
@@ -2046,7 +2032,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             pipeline_msg_id, pipeline_sub_seq,
                             len(text or ""), len(_cancel_remainder_voice),
                         )
-                        pipeline_streaming = False
                         pipeline_msg_id = None
 
                     # Record usage (even if cancelled — tokens were consumed)
@@ -2095,23 +2080,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     reasoning_details = llm_client.consume_reasoning_details()
 
                     # ── Spell loop (parallel execution per round) ──
-                    # Pipeline Streaming が ON の時は Phase 1 早期 emit を skip
-                    # (= sub-speak が同じ役目を担う。 Phase 2-C で Phase 1 経路
-                    # は superseded された)。
-                    if pipeline_streaming:
-                        _bubble1_emitted_early_ns = ""
-                    else:
-                        _bubble1_emitted_early_ns = _emit_bubble1_early(
-                            runtime=runtime,
-                            persona=persona,
-                            building_id=building_id,
-                            text=text,
-                            speak_flag=getattr(node_def, "speak", True),
-                            pulse_id=state.get("_pulse_id"),
-                            event_callback=event_callback,
-                            node_id=getattr(node_def, "id", "llm"),
-                            send_streaming_discard=True,
-                        )
+                    # Pipeline Streaming で sub-speak が音声合成のウォームアップを
+                    # 担うので、 旧 Phase 1 (= spell loop 開始前の bubble1 早期
+                    # emit) は不要。 完全撤去済。
                     text, _spell_loop_count_ns = await _run_spell_loop(
                         text=text,
                         spell_enabled=_spell_enabled,
@@ -2139,10 +2110,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "[sea][spell] speak=false node — skipping Normal-stream _emit_say "
                                 "(handoff route B); records remain in line storage layer only"
                             )
-                            # Pipeline Streaming で speak=false の場合、 placeholder
-                            # を放置すると _streaming_placeholder=True で残り続ける
-                            # ので、 voice-tts に空文字で finalize して close する。
-                            if pipeline_streaming and pipeline_msg_id:
+                            # speak=false の場合でも placeholder を放置すると
+                            # _streaming_placeholder=True で残り続けるので、
+                            # voice-tts に空文字で finalize して close する。
+                            if pipeline_msg_id:
                                 pipeline_sub_seq += 1
                                 runtime._emit_speak_finalize(
                                     persona,
@@ -2167,42 +2138,42 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if accumulator:
                                 _spell_msg_meta_ns["llm_usage_total"] = dict(accumulator)
 
-                            if pipeline_streaming and pipeline_msg_id:
-                                # Pipeline Streaming finalize path: placeholder を
-                                # 全文 (= text、 merged form) で確定。 voice-tts hook
-                                # には 「sub-speak 済の prefix を除いた残テキスト」
-                                # を strip_user_only 済の形で渡す (= 案 A、 重複合成
-                                # 回避)。 sub-speak で送った prefix は streaming
-                                # 中の生 text の prefix と一致する (= _run_spell_loop
-                                # は merged_parts の先頭に text_before を置く)。
-                                from saiverse.content_tags import strip_in_heart, strip_user_only
-                                _ps_streamed_prefix = "".join(text_chunks)[:pipeline_last_emit_pos]
-                                if text.startswith(_ps_streamed_prefix):
-                                    _ps_remainder_raw = text[pipeline_last_emit_pos:]
-                                else:
-                                    # Defensive: merged form が streamed prefix で
-                                    # 始まらない場合 (= 仮定外、 spell loop が text
-                                    # を加工した) は全文を remainder にする。
-                                    LOGGER.warning(
-                                        "[sea][pipeline] merged text does not start with streamed prefix; "
-                                        "voice may double-synthesize sub-speak'd portion",
-                                    )
-                                    _ps_remainder_raw = text
-                                _ps_remainder_voice = strip_user_only(strip_in_heart(_ps_remainder_raw)).strip()
+                            # Pipeline Streaming finalize: placeholder を全文 (= text、
+                            # merged form) で確定。 voice-tts hook には 「sub-speak
+                            # 済の prefix を除いた残テキスト」 を strip_user_only 済の
+                            # 形で渡す (= 重複合成回避)。 sub-speak で送った prefix は
+                            # streaming 中の生 text の prefix と一致する
+                            # (= _run_spell_loop は merged_parts の先頭に text_before
+                            # を置く)。
+                            from saiverse.content_tags import strip_in_heart, strip_user_only
+                            _ps_streamed_prefix = "".join(text_chunks)[:pipeline_last_emit_pos]
+                            if text.startswith(_ps_streamed_prefix):
+                                _ps_remainder_raw = text[pipeline_last_emit_pos:]
+                            else:
+                                # Defensive: merged form が streamed prefix で
+                                # 始まらない場合 (= 仮定外、 spell loop が text
+                                # を加工した) は全文を remainder にする。
+                                LOGGER.warning(
+                                    "[sea][pipeline] merged text does not start with streamed prefix; "
+                                    "voice may double-synthesize sub-speak'd portion",
+                                )
+                                _ps_remainder_raw = text
+                            _ps_remainder_voice = strip_user_only(strip_in_heart(_ps_remainder_raw)).strip()
 
-                                if event_callback:
-                                    _say_event_ns: Dict[str, Any] = {
-                                        "type": "say",
-                                        "content": text,
-                                        "persona_id": getattr(persona, "persona_id", None),
-                                        "pulse_id": pulse_id,
-                                    }
-                                    if _spell_at_ns:
-                                        _say_event_ns["activity_trace"] = list(_spell_at_ns)
-                                    if _spell_msg_meta_ns:
-                                        _say_event_ns["metadata"] = _spell_msg_meta_ns
-                                    event_callback(_say_event_ns)
+                            if event_callback:
+                                _say_event_ns: Dict[str, Any] = {
+                                    "type": "say",
+                                    "content": text,
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                    "pulse_id": pulse_id,
+                                }
+                                if _spell_at_ns:
+                                    _say_event_ns["activity_trace"] = list(_spell_at_ns)
+                                if _spell_msg_meta_ns:
+                                    _say_event_ns["metadata"] = _spell_msg_meta_ns
+                                event_callback(_say_event_ns)
 
+                            if pipeline_msg_id:
                                 pipeline_sub_seq += 1
                                 runtime._emit_speak_finalize(
                                     persona, eff_bid, pipeline_msg_id, text,
@@ -2215,42 +2186,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 LOGGER.info(
                                     "[sea][pipeline] Normal-stream spell+finalize: msg=%s final_seq=%d remainder_voice_len=%d",
                                     pipeline_msg_id, pipeline_sub_seq, len(_ps_remainder_voice),
-                                )
-                            else:
-                                # Non-pipeline path (Phase 2-B-step3): single
-                                # _emit_say with the full merged text. text here
-                                # is already the merged form. If Phase 1 emitted
-                                # text_before early, slice the duplicate off.
-                                _spell_emit_text_ns = text
-                                if _bubble1_emitted_early_ns and _spell_emit_text_ns.startswith(_bubble1_emitted_early_ns):
-                                    _spell_emit_text_ns = _spell_emit_text_ns[len(_bubble1_emitted_early_ns):].lstrip("\n")
-                                else:
-                                    if event_callback:
-                                        event_callback({
-                                            "type": "streaming_discard",
-                                            "persona_id": getattr(persona, "persona_id", None),
-                                            "node_id": getattr(node_def, "id", "llm"),
-                                            "pulse_id": pulse_id,
-                                        })
-
-                                if event_callback:
-                                    _say_event_ns_legacy: Dict[str, Any] = {
-                                        "type": "say",
-                                        "content": _spell_emit_text_ns,
-                                        "persona_id": getattr(persona, "persona_id", None),
-                                        "pulse_id": pulse_id,
-                                    }
-                                    if _spell_at_ns:
-                                        _say_event_ns_legacy["activity_trace"] = list(_spell_at_ns)
-                                    if _spell_msg_meta_ns:
-                                        _say_event_ns_legacy["metadata"] = _spell_msg_meta_ns
-                                    event_callback(_say_event_ns_legacy)
-
-                                runtime._emit_say(persona, eff_bid, _spell_emit_text_ns, pulse_id=pulse_id,
-                                                  metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None)
-                                LOGGER.info(
-                                    "[sea][spell] Normal-stream: emitted merged spell text (len=%d, phase1_early=%s)",
-                                    len(_spell_emit_text_ns), bool(_bubble1_emitted_early_ns),
                                 )
                     else:
                         # No spells — normal completion path
@@ -2291,10 +2226,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
-                        if pipeline_streaming and pipeline_msg_id:
+                        if pipeline_msg_id:
                             # Pipeline Streaming: placeholder を text 全文で finalize。
                             # voice-tts hook には sub-speak 済 prefix を除いた残テキスト
-                            # を渡す (= 案 A、 重複合成回避)。
+                            # を渡す (= 重複合成回避)。
                             from saiverse.content_tags import strip_in_heart, strip_user_only
                             _ps_streamed_prefix_ns = "".join(text_chunks)[:pipeline_last_emit_pos]
                             if text.startswith(_ps_streamed_prefix_ns):
@@ -2321,9 +2256,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 pipeline_msg_id, pipeline_sub_seq, len(_ps_remainder_voice_ns),
                             )
                         else:
+                            # Defensive fallback: _emit_speak_start に失敗して
+                            # placeholder を作れなかったケース。 sub-speak は出てない
+                            # ので _emit_say で 1 回 emit し直す (= 履歴を失わない)。
+                            LOGGER.warning(
+                                "[sea][pipeline] no placeholder msg_id — falling back to _emit_say",
+                            )
                             _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
-                            # 後続ツールが新しい persona_context 配下でも
-                            # 最新の message_id を参照できるよう state に残す。
                             if isinstance(_last_bmsg, dict):
                                 _last_mid = _last_bmsg.get("message_id")
                                 if _last_mid:
