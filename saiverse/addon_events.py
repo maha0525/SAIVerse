@@ -74,9 +74,11 @@ def emit_addon_event(
     if data:
         payload["data"] = data
 
+    # DIAG: data 中身も出す (Phase 2 検証で pulse_id が payload に乗ってるかの
+    # 切り分け用、 確認後 撤去 or DEBUG 化)。
     LOGGER.debug(
-        "addon_events: emit addon=%s event=%s message_id=%s subscribers=%d",
-        addon, event, message_id, len(_subscribers),
+        "addon_events: emit addon=%s event=%s message_id=%s data=%s subscribers=%d",
+        addon, event, message_id, data, len(_subscribers),
     )
 
     if not _subscribers:
