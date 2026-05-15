@@ -120,9 +120,23 @@ type QueueItem = {
     pulseId?: string;
     /** ログ識別 + Phase 2 で個別 item を指す key */
     messageId?: string;
+    /** 再生開始時刻 (= startNext で audio.play() を呼んだ moment)、 ended/error 時の実再生時間計算用 */
+    playStartedAt?: number;
     resolve: () => void;
     reject: (err: Error) => void;
 };
+
+// ---------- DIAG: Phase 1 検証用詳細ログ (= 確認後撤去 or DEBUG 化) ----
+function diag(msg: string, extra?: Record<string, unknown>): void {
+    if (extra) {
+        console.log(`[play_audio:diag] ${msg}`, extra);
+    } else {
+        console.log(`[play_audio:diag] ${msg}`);
+    }
+}
+function shortMsg(id?: string): string {
+    return id ? id.slice(0, 8) : "?";
+}
 
 const playbackQueue: QueueItem[] = [];
 let currentItem: QueueItem | null = null;
@@ -142,11 +156,26 @@ function attachAudioListeners(audio: HTMLAudioElement): void {
 }
 
 function onCurrentEnded(): void {
+    const audio = sharedAudio;
     if (currentItem === null) {
         // unlock 用 silent WAV 等、 queue 外の再生終了。 何もしない。
+        diag("ended fired but currentItem=null (= silent WAV unlock or stale)", {
+            duration: audio?.duration,
+            currentTime: audio?.currentTime,
+        });
         return;
     }
     const item = currentItem;
+    const elapsed =
+        item.playStartedAt !== undefined
+            ? (performance.now() - item.playStartedAt) / 1000
+            : undefined;
+    diag(`ended fired msg=${shortMsg(item.messageId)}`, {
+        audioDuration: audio?.duration,
+        audioCurrentTime: audio?.currentTime,
+        elapsedSinceStart: elapsed,
+        queueLength: playbackQueue.length,
+    });
     currentItem = null;
     clearWatchdog();
     item.resolve();
@@ -154,8 +183,21 @@ function onCurrentEnded(): void {
 }
 
 function onCurrentError(_ev: Event): void {
-    if (currentItem === null) return;
+    const audio = sharedAudio;
+    if (currentItem === null) {
+        diag("error fired but currentItem=null", {
+            errorCode: audio?.error?.code,
+            errorMessage: audio?.error?.message,
+        });
+        return;
+    }
     const item = currentItem;
+    diag(`error fired msg=${shortMsg(item.messageId)}`, {
+        errorCode: audio?.error?.code,
+        errorMessage: audio?.error?.message,
+        audioDuration: audio?.duration,
+        audioCurrentTime: audio?.currentTime,
+    });
     currentItem = null;
     clearWatchdog();
 
@@ -199,11 +241,18 @@ function clearWatchdog(): void {
 function onWatchdogFire(): void {
     if (currentItem === null) return;
     const item = currentItem;
+    const audio = sharedAudio;
     currentItem = null;
     watchdogTimer = null;
     console.warn(
         `[play_audio] watchdog fired (${WATCHDOG_TIMEOUT_MS / 1000}s); ` +
         `force-advancing queue (msg=${item.messageId ?? "?"})`,
+        {
+            audioDuration: audio?.duration,
+            audioCurrentTime: audio?.currentTime,
+            audioPaused: audio?.paused,
+            audioReadyState: audio?.readyState,
+        },
     );
     // 呼び出し側の executor promise は reject ではなく resolve する
     // (= ユーザー視点では「再生できなかった」 ではなく「終わった扱い」 で次に
@@ -215,17 +264,34 @@ function onWatchdogFire(): void {
 }
 
 async function startNext(): Promise<void> {
-    if (currentItem !== null) return; // 既に再生中 → ended で進む
+    if (currentItem !== null) {
+        diag(`startNext called but currentItem exists msg=${shortMsg(currentItem.messageId)}`, {
+            queueLength: playbackQueue.length,
+        });
+        return;
+    }
     const next = playbackQueue.shift();
-    if (!next) return;
+    if (!next) {
+        diag("startNext called with empty queue");
+        return;
+    }
     currentItem = next;
     armWatchdog();
 
     const audio = getSharedAudio();
+    diag(`startNext setting src msg=${shortMsg(next.messageId)} url=${next.url}`, {
+        prevSrc: audio.src,
+        queueLength: playbackQueue.length,
+    });
     audio.src = next.url;
+    next.playStartedAt = performance.now();
     try {
         await audio.play();
         // play() resolved = 再生開始成功。 完了は ended event で検出する。
+        diag(`audio.play() resolved msg=${shortMsg(next.messageId)}`, {
+            audioDuration: audio.duration,
+            audioReadyState: audio.readyState,
+        });
     } catch (err) {
         // play() reject 時は currentItem がまだ next を指している (Phase 1 では
         // 並行操作なし)。 fallback URL があれば試す、 無ければ即 reject + 次。
@@ -303,6 +369,11 @@ export const playAudioExecutor: ClientActionExecutor = async (ctx) => {
             reject,
         };
         playbackQueue.push(item);
+        diag(`enqueue msg=${shortMsg(item.messageId)} url=${firstUrl}`, {
+            currentItemMsg: currentItem ? shortMsg(currentItem.messageId) : null,
+            queueLengthAfter: playbackQueue.length,
+            pulseId: pulseId ?? null,
+        });
         // 再生中でなければすぐ開始。 再生中なら ended 後に startNext が呼ばれる。
         void startNext();
     });
