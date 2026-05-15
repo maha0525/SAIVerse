@@ -777,6 +777,7 @@ async def _consume_pipeline_stream(
                 })
 
             if pipeline_msg_id and not spell_detected:
+                from saiverse.content_tags import strip_in_heart, strip_user_only
                 _buf = "".join(text_chunks)
                 _tail = _buf[last_emit_pos:]
                 _spell_match = _SPELL_PATTERN.search(_tail)
@@ -794,7 +795,14 @@ async def _consume_pipeline_stream(
                             sub_seq,
                             pulse_id=state.get("_pulse_id"),
                         )
-                        voiced_text_added += _pre_spell_stripped
+                        # voiced_text_added は finalize の remainder voice 計算
+                        # で full_voice (= strip_user_only(strip_in_heart(merged)))
+                        # と prefix 比較される。 raw sub_text を累積すると改行や
+                        # 空白の処理差で prefix match に失敗する (= 観測例: voiced_len=2387
+                        # vs full_len=2441 で startswith=False、 全文 fallback で voice
+                        # 重複合成)。 voice-tts に実際渡される形 (= strip_user_only +
+                        # strip_in_heart 済) で累積して比較ベースを揃える。
+                        voiced_text_added += strip_user_only(strip_in_heart(_pre_spell_stripped))
                     last_emit_pos += len(_pre_spell)
                     spell_detected = True
                 else:
@@ -813,7 +821,7 @@ async def _consume_pipeline_stream(
                                 sub_seq,
                                 pulse_id=state.get("_pulse_id"),
                             )
-                            voiced_text_added += _sub
+                            voiced_text_added += strip_user_only(strip_in_heart(_sub))
                         last_emit_pos = _boundary
     finally:
         if hasattr(stream_iter, "close"):
@@ -2344,6 +2352,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             )
 
                             if event_callback:
+                                # spell 入り応答ではストリーミング中の表示
+                                # (= raw text + 生の /spell 行が積み上がった
+                                # bubble) と完了後の整形済み bubble (= merged
+                                # text、 <user_only> wrap 済) で content が
+                                # 完全一致しないため、 frontend が新規 bubble
+                                # を追加してしまい 2 つ並ぶ。 ``streaming_discard``
+                                # を先に送って streaming bubble を捨ててから
+                                # ``say`` で整形済み 1 件だけを残す。
+                                event_callback({
+                                    "type": "streaming_discard",
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                    "node_id": getattr(node_def, "id", "llm"),
+                                    "pulse_id": pulse_id,
+                                })
                                 _say_event_ns: Dict[str, Any] = {
                                     "type": "say",
                                     "content": text,
