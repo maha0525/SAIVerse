@@ -217,4 +217,4 @@ runtime._emit_speak_finalize(
 - 2026-05-15 (後半): Phase 2-D 実装 (cancellation 検出時に placeholder を partial で finalize、 voice-tts audio_stream リーク防止)
 - 2026-05-15 (後半): Phase 2-E 実装 (`<details class="spellResult">` に summary を埋め込み、 CSS marker rotation rule 追加)
 - 2026-05-15 (後半): (1) 経路の旧 Phase 1 path + 環境変数 gate を全削除 (= 「旧 path を残して env で切り替え」 はカオス化招くという まはー指摘)。 ストリーミングを使えない (3)(4) 経路では Phase 1 を残置
-- 残実装: spell loop 内の 2 回目以降の LLM 呼び出しを streaming 化 (= 体感上 「spell 後の応答が一気に出る」 問題の解消)
+- 2026-05-15 (後半): chunk consume + sub-speak emit + spell 検出ロジックを `_consume_pipeline_stream` helper に切り出し。 `_run_spell_loop` に `pipeline_streaming_state` 引数を追加し、 spell 実行後の 2 回目以降の LLM 呼び出しも `generate_stream` + helper 経由に置き換え (= まはー指摘 「spell 後の応答が一気に出る」 問題の解消)。 finalize の remainder voice 計算を `[last_emit_pos:]` slice から voiced_text 累積方式に変更 (round 跨ぎで頑健)。 helper `_compute_pipeline_remainder_voice` 共通化
