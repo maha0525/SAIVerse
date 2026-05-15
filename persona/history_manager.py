@@ -327,12 +327,22 @@ class HistoryManager:
         msg: Dict[str, str],
         *,
         origin_track_id: Optional[str] = None,
+        sync_to_memory: bool = True,
     ) -> None:
-        """Adds a message only to the persona's main history."""
+        """Adds a message only to the persona's main history.
+
+        ``sync_to_memory`` (= 既定 True): 末尾で SAIMemory にも 1 件転写する
+        既定挙動。 ``False`` を渡すと SAIMemory への自動転写をスキップする。
+        Pipeline Streaming の ``emit_speak_finalize`` 経路で使う: スペル入り
+        応答ではラウンドごとの記録と最終発言の単独レコードを別経路で既に
+        SAIMemory に保存しているので、 ここで全文をさらに転写すると同 pulse
+        内に内容完全一致の巨大重複レコードが生まれる。 それを防ぐ。
+        """
         prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
         self.messages.append(prepared_msg)
         self._ensure_size_limit(self.messages, self.persona_log_path)
-        self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
+        if sync_to_memory:
+            self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
 
     def update_building_message(
         self,

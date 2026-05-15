@@ -424,8 +424,18 @@ class RuntimeEmitters:
             }
             if pulse_id:
                 persona_msg["pulse_id"] = pulse_id
+            # ``sync_to_memory=False``: SAIMemory への転写はスキップする。
+            # Pipeline Streaming の確定経路ではスペルループ内で 「各ラウンド
+            # の発言部分 + スペル起動行」 と 「スペル結果」 を既に SAIMemory
+            # に書いており、 最終発言の単独レコードは後段の memorize ノードが
+            # ``state["last"]`` を保存する経路で残る。 ここでさらに全文を
+            # SAIMemory に書き込むと、 同 pulse 内に内容完全一致の重複レコード
+            # が生まれる (= 旧コードでも起きなかった現象)。 これを防ぐため
+            # ペルソナ履歴 (log.json) と建物履歴 (= update_building_message
+            # 経由) には全文 1 件を残しつつ、 SAIMemory には書かない。
             persona.history_manager.add_to_persona_only(
                 persona_msg, origin_track_id=pulse_track_id,
+                sync_to_memory=False,
             )
 
             self.runtime.manager.gateway_handle_ai_replies(

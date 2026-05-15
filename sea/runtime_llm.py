@@ -836,21 +836,28 @@ async def _run_spell_loop(
     event_callback: Optional[Callable],
     node_def: Any = None,
     pipeline_streaming_state: Optional[dict] = None,
-) -> Tuple[str, int]:
+) -> Tuple[str, str, int]:
     """Execute the spell loop with parallel spell execution per LLM round.
 
     Each round: find ALL /spell lines → execute in parallel → re-invoke LLM once.
     Sequential rounds handle dependency chains (result of round N used in round N+1).
 
-    Returns ``(full_merged_text, loop_count)`` where ``full_merged_text`` is the
-    concatenation of every round's ``text_before`` + per-spell ``<user_only>``
-    blocks, with the final LLM continuation appended. When ``loop_count > 0``
-    this string is what the caller should pass to a single ``_emit_say`` (the
-    old bubble1/bubble2 dual emit is collapsed into this one record per
-    voice_tts_pipeline_streaming intent doc Phase 2-B-step3).
+    Returns ``(full_merged_text, final_continuation, loop_count)``:
 
-    When ``loop_count == 0`` (no spells parsed), ``full_merged_text`` is the
-    original ``text`` unchanged.
+    - ``full_merged_text``: 各ラウンドの ``text_before`` + 各 spell の
+      ``<user_only>`` ブロック を順次連結し、 最終ラウンドの continuation を
+      末尾に append した 1 string。 caller は 「1 応答 = 1 record」 として
+      ペルソナ履歴 / 建物履歴 / UI バブルに記録する用途で使う。
+    - ``final_continuation``: 最終ラウンド (= spell が含まれない LLM 応答)
+      の text のみ。 旧コード時代の 「spell loop 戻り値の text」 と等価で、
+      caller は ``state["last"]`` (= 後段の memorize ノードが SAIMemory に
+      保存する値) に入れる用途で使う。 これにより SAIMemory には
+      「最終発言のみのレコード」 が単独で残り、 巨大な統合 record の重複
+      を避ける。
+    - ``loop_count``: 実行されたラウンド数。
+
+    When ``loop_count == 0`` (no spells parsed), ``full_merged_text`` と
+    ``final_continuation`` はどちらも入力の ``text`` をそのまま返す。
 
     ``pipeline_streaming_state`` (= ストリーミング応答経路の Pipeline
     Streaming 用): 非 None なら spell 実行後の LLM 再呼び出しを
@@ -864,7 +871,7 @@ async def _run_spell_loop(
     from sea.pulse_context import PulseLogEntry
 
     if not spell_enabled or not text:
-        return text, 0
+        return text, text, 0
 
     loop_count = 0
     merged_parts: List[str] = []
@@ -1147,14 +1154,15 @@ async def _run_spell_loop(
                         loop_count, bool(_SPELL_PATTERN.search(text)))
 
         LOGGER.info("[sea][spell] Completed %d round(s)", loop_count)
+        final_continuation = text or ""
         if loop_count == 0:
             # No spells parsed — return the original text unchanged so the
             # caller's normal (non-spell) emit path stays correct.
-            return text, 0
+            return text, text, 0
         # Append the final LLM continuation (= text after the last retry).
-        if text:
-            merged_parts.append(text)
-        return "\n".join(merged_parts), loop_count
+        if final_continuation:
+            merged_parts.append(final_continuation)
+        return "\n".join(merged_parts), final_continuation, loop_count
     except Exception as exc:
         # Any unhandled error in the spell pipeline: log with traceback,
         # inject a system-visible error note for the next LLM turn, and
@@ -1173,11 +1181,12 @@ async def _run_spell_loop(
             messages.append({"role": "user", "content": f"<system>{error_note}</system>"})
         except Exception:
             LOGGER.debug("[sea][spell] failed to append error note to messages", exc_info=True)
+        final_continuation = text or ""
         if loop_count == 0:
-            return text, 0
-        if text:
-            merged_parts.append(text)
-        return "\n".join(merged_parts), loop_count
+            return text, text, 0
+        if final_continuation:
+            merged_parts.append(final_continuation)
+        return "\n".join(merged_parts), final_continuation, loop_count
 
 
 async def _decide_spell_args_via_playbook(
@@ -1873,7 +1882,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     node_id=getattr(node_def, "id", "llm"),
                     send_streaming_discard=False,
                 )
-                _spell_text, _spell_loop_count = await _run_spell_loop(
+                _spell_text, _spell_continuation, _spell_loop_count = await _run_spell_loop(
                     text=_pre_spell_text,
                     spell_enabled=_spell_enabled,
                     llm_client=llm_client,
@@ -2266,7 +2275,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "cancellation_token": cancellation_token,
                         }
 
-                    text, _spell_loop_count_ns = await _run_spell_loop(
+                    text, _continuation_ns, _spell_loop_count_ns = await _run_spell_loop(
                         text=text,
                         spell_enabled=_spell_enabled,
                         llm_client=llm_client,
@@ -2361,6 +2370,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "[sea][pipeline] Normal-stream spell+finalize: msg=%s final_seq=%d remainder_voice_len=%d",
                                     pipeline_msg_id, pipeline_sub_seq, len(_ps_remainder_voice),
                                 )
+
+                        # state["last"] が後段の memorize ノードで SAIMemory に
+                        # 保存される。 spell が走った時、 ここで text を merged
+                        # 全文のままにすると、 ペルソナ履歴経由で記録される 1
+                        # 件目と内容が完全一致する重複レコードが SAIMemory に
+                        # 残ってしまう。 最終発言部分だけ (= continuation) に
+                        # 置き換えて、 SAIMemory には 「最終発言のみのレコード」
+                        # が単独で残るようにする (= 旧コード相当)。
+                        text = _continuation_ns
                     else:
                         # No spells — normal completion path
                         # Resolve metadata_key for speak (e.g., media attachments from tool execution)
@@ -2591,7 +2609,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             node_id=getattr(node_def, "id", "llm"),
                             send_streaming_discard=False,
                         )
-                        text, _spell_loop_count_sync = await _run_spell_loop(
+                        text, _continuation_sync, _spell_loop_count_sync = await _run_spell_loop(
                             text=text,
                             spell_enabled=_spell_enabled,
                             llm_client=llm_client,
@@ -2607,6 +2625,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     else:
                         # text is dict (from structured output) - skip spell processing
                         LOGGER.debug("[sea][llm] text is dict (structured output), skipping spell processing")
+                        _continuation_sync = text if isinstance(text, str) else ""
                         _spell_loop_count_sync = 0
 
                     if _spell_loop_count_sync > 0 and isinstance(text, str):
