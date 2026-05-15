@@ -125,6 +125,86 @@
 - preempt 発動回数 / timeout 発動回数を log で確認
 - 想定外の hang / leak を early-detect
 
+## Stack-chan 流量制御 (= chunk push rate-limiting)
+
+Phase 1/2 とは独立した、 voice-tts ↔ subscriber 間の **pipe 流量** の話。
+2026-05-15 のセッション 131732 で観測した症状をきっかけに、 まはー の発案で
+追加した。
+
+### 観測された症状
+
+session 20260515_131732 の `stackchan_room:177` (eris 発話、 同 pulse の 2
+連発の 1 つ目) で:
+
+- POST 開始 13:53:08 → **84.6 秒後 (13:54:32) に client 側 `TimeoutError(timed out)` で死亡**
+- 続く 178 (同 pulse 2 連発の 2 つ目) も連鎖して 5.0 秒後に同型 TimeoutError
+- gateway 側 (stackchan-mcp) は 177 の `ConnectionResetError` を 13:54:42 まで
+  検出できず (= client timeout から +10s 遅れ)。 その間 `tts_lock` 残り、 178
+  の POST request body が読まれず client write timeout で死亡
+
+### 根本原因
+
+GPT-SoVITS の GPU 推論は realtime より速い (= 1 秒の音声を 0.5 秒で生成可)。
+voice-tts の chunk yield ループは合成完了次第 chunk を audio_stream に push する
+ので、 subscriber (= speak_hook の HTTP POST → gateway → ESP32) が realtime で
+しか消費できないと **buffer overflow → socket write block → write timeout**。
+
+### 設計: 高水位 / 低水位 + α 補正
+
+各 chunk push 直前に以下を計算:
+
+```
+total_sent_seconds = sum(chunk_seconds for chunk in collected)
+elapsed = now() - first_chunk_at
+actual_played ≈ elapsed - α    # α は subscriber 再生開始ラグ
+lead = total_sent_seconds - actual_played
+```
+
+`lead` が高水位 A を超えたら、 低水位 B まで戻すよう sleep:
+
+```
+if lead > A:
+    sleep(lead - B)
+```
+
+### 閾値の根拠 (Stack-chan 観測ベース)
+
+room:177 の chunk 別 lead 推移:
+
+| chunk# | elapsed | total_sent | lead |
+|---|---|---|---|
+| #20 | +5.92s | 2.48s | **−3.44s** (= 1st-pass 推論遅、 buffer 空っぽ) |
+| #40 | +24.33s | 32.06s | **+7.73s** |
+| #60 | +44.79s | 52.48s | **+7.69s** |
+| #80 | +61.18s | 70.87s | **+9.69s** |
+| #100 | +79.59s | 97.41s | **+17.82s** |
+| timeout | +84.61s | ? | **約 18s で死亡** |
+
+→ subscriber 全体 (gateway + ESP32 含む) の許容 buffer は **17 秒前後**。
+
+| 閾値 | 値 | 根拠 |
+|---|---|---|
+| **A (高水位)** | **8.0s** | 観測死亡値 17s に対して半分以下 = 安全マージン 2x |
+| **B (低水位)** | **3.0s** | #20 で -3.44s 観測 → realtime キャッチアップ遅れ吸収マージン |
+| **α (subscriber 再生済み補正)** | **1.0s** | speak_hook の `_wait_first_chunk` + gateway → ESP32 forward + ESP32 内 buffer の startup 推測値。 実観測より小さく見積もって安全側に振る |
+
+### 全 subscriber 統一値の理由
+
+stack-chan は subscriber 中で最も buffer 容量が小さい想定 (= ESP32 内蔵 RAM)。
+web UI (HTML5 audio) や他のクラウド連携 subscriber は通常もっと余裕がある
+ので、 stack-chan 基準の保守値で全環境統一しても副作用なし。 subscriber 種別
+ごとに閾値を分けるのは将来必要になったら検討 (= YAGNI)。
+
+### 経過
+
+- まはー の指摘 「N バイト push したら N バイト分の音声時間 sleep は雑、
+  生成時間 + sleep 時間 > 再生時間 で必ず追い越されない」 → 高水位/低水位
+  パターンに修正 (= 先行 buffer は維持しつつ過剰先行のみ抑制)
+- intent doc 設計時の経験則アプローチ (= sleep gate) は **subscriber 側の
+  ended timing を server で推定** が原理的不可能で却下されたが、 今回の流量
+  制御は **物理的な buffer 容量で決定論的** なので別の話 (= 経験定数なし、
+  観測データから算出)
+
 ## トレードオフと既知の限界
 
 - subscriber 間同期しない設計のため、 web UI と Stack-chan が瞬間的に異なる pulse を再生する状態は「仕様」 (= ユーザー側に違和感を与えない範囲という前提)
