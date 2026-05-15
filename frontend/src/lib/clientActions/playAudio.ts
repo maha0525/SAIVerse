@@ -175,12 +175,15 @@ function preemptCurrentPulse(reason: string): void {
     });
 }
 
-// ---------- DIAG: Phase 1 検証用詳細ログ (= 確認後撤去 or DEBUG 化) ----
+// ---------- 動作トレース用 debug log --------------------
+// queue 進行・preempt 発動・ended/error 等の挙動を追えるようにする。
+// console.debug なので Chrome DevTools の Console 「Default levels」 では
+// 表示されず、 Verbose / All levels にすると見える。
 function diag(msg: string, extra?: Record<string, unknown>): void {
     if (extra) {
-        console.log(`[play_audio:diag] ${msg}`, extra);
+        console.debug(`[play_audio] ${msg}`, extra);
     } else {
-        console.log(`[play_audio:diag] ${msg}`);
+        console.debug(`[play_audio] ${msg}`);
     }
 }
 function shortMsg(id?: string): string {
@@ -420,18 +423,9 @@ export const playAudioExecutor: ClientActionExecutor = async (ctx) => {
 
         // 別 pulse 着信 → 旧 pulse の queue + 現再生を即破棄してから
         // 新 item を queue に積む (= startNext でそのまま新 audio が再生開始)。
-        // DIAG: 判定軸を全部 log に出して切り分けに使う。 確認後撤去。
-        const currentPulseSnapshot = currentItem?.pulseId;
-        const willPreempt = shouldPreemptForNewPulse(pulseId);
-        diag(`preempt-check msg=${shortMsg(item.messageId)}`, {
-            newPulseId: pulseId ?? null,
-            currentPulseId: currentPulseSnapshot ?? null,
-            currentItemMsg: currentItem ? shortMsg(currentItem.messageId) : null,
-            willPreempt,
-        });
-        if (willPreempt) {
+        if (shouldPreemptForNewPulse(pulseId)) {
             preemptCurrentPulse(
-                `new pulse=${pulseId ?? "?"} differs from current=${currentPulseSnapshot ?? "?"}`,
+                `new pulse=${pulseId ?? "?"} differs from current=${currentItem?.pulseId ?? "?"}`,
             );
         }
 
