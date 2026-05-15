@@ -481,6 +481,90 @@ async def _run_spell_tool_async(
         return result_str, None
 
 
+def _emit_bubble1_early(
+    *,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    text: str,
+    speak_flag: Any,
+    pulse_id: Optional[str],
+    event_callback: Optional[Callable],
+    node_id: str,
+    send_streaming_discard: bool,
+) -> str:
+    """Spell loop 開始前に bubble1 を早期 emit して、 voice-tts の TTS 合成を
+    Spell 実行と並行で走らせる (Phase 1)。
+
+    Spell が無い、 unknown spell しか無い、 text_before が空、 ``speak`` が
+    False の場合は no-op で ``""`` を返す。 早期 emit した時はその text_before
+    を返し、 caller は後段の bubble1 emit を skip する判定に使う。
+
+    ``send_streaming_discard``: streaming mode のみ True にする (= UI に途中の
+    streaming chunk を破棄させて bubble1 を綺麗に再描画させるため)。 tool mode
+    と non-streaming mode は streaming chunk を出さないので False。
+
+    Why: ``<spell>`` を含む LLM 応答では、 bubble1 (= spell 前のテキスト)
+    の内容は LLM 出力時点で確定している。 これを ``_run_spell_loop`` の完了
+    後 (= spell 実行 数分後の可能性) まで待ってから emit していた旧設計だと、
+    persona_speak hook → voice-tts enqueue → TTS 合成 が全て spell 完了後に
+    なる。 早期 emit すれば spell 実行と TTS が並行し、 ユーザは spell 待ち
+    中も発言1 の音声を聞ける。
+    """
+    if speak_flag is False:
+        return ""
+    text_before = _extract_first_text_before(text)
+    if not text_before.strip():
+        return ""
+    if event_callback:
+        if send_streaming_discard:
+            event_callback({
+                "type": "streaming_discard",
+                "persona_id": getattr(persona, "persona_id", None),
+                "node_id": node_id,
+                "pulse_id": pulse_id,
+            })
+        event_callback({
+            "type": "say",
+            "content": text_before,
+            "persona_id": getattr(persona, "persona_id", None),
+            "pulse_id": pulse_id,
+        })
+    eff_bid = runtime._effective_building_id(persona, building_id)
+    runtime._emit_say(persona, eff_bid, text_before, pulse_id=pulse_id)
+    LOGGER.info(
+        "[sea][spell] bubble1 emitted early (len=%d) — TTS will run in "
+        "parallel with spell loop", len(text_before),
+    )
+    return text_before
+
+
+def _extract_first_text_before(text: str) -> str:
+    """``text`` の中から最初の有効 spell 行までの本文を返す。
+
+    Spell が無い (= 通常応答)、 または unknown spell しか無い場合は ``""``
+    を返す。 ``_run_spell_loop`` の最初のラウンドで計算される ``text_before``
+    と同じ値になるよう、 ``_parse_spell_lines`` + ``SPELL_TOOL_NAMES`` で
+    フィルタする手順を共有する。
+
+    Phase 1 (bubble1 早期 emit、 voice-tts Spell 待ち遅延対策) で caller が
+    spell loop 実行 **前** に bubble1 部分のテキストを取り出すために使う。
+    spell 実行は数分かかる場合があるため (= 画像生成等)、 spell 開始前に
+    bubble1 を emit すると persona_speak hook → voice-tts enqueue が即座に
+    走り、 ユーザは spell 待ち中も発言1 の音声を聞ける。
+    """
+    if not text:
+        return ""
+    all_parsed = _parse_spell_lines(text)
+    valid_spells = [
+        (name, args, m, norm) for name, args, m, norm in all_parsed
+        if name in SPELL_TOOL_NAMES
+    ]
+    if not valid_spells:
+        return ""
+    return text[:valid_spells[0][2].start()].rstrip()
+
+
 async def _run_spell_loop(
     text: str,
     spell_enabled: bool,
@@ -1436,8 +1520,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                            result.get("type"), "content" in result, "tool_name" in result)
 
                 # ── Spell loop (parallel execution per round) ──
+                _pre_spell_text = result.get("content", "") if result.get("type") == "text" else ""
+                _bubble1_emitted_early = _emit_bubble1_early(
+                    runtime=runtime,
+                    persona=persona,
+                    building_id=building_id,
+                    text=_pre_spell_text,
+                    speak_flag=getattr(node_def, "speak", True),
+                    pulse_id=state.get("_pulse_id"),
+                    event_callback=event_callback,
+                    node_id=getattr(node_def, "id", "llm"),
+                    send_streaming_discard=False,
+                )
                 _spell_text, _spell_details_blocks, _spell_loop_count = await _run_spell_loop(
-                    text=result.get("content", "") if result.get("type") == "text" else "",
+                    text=_pre_spell_text,
                     spell_enabled=_spell_enabled,
                     llm_client=llm_client,
                     runtime=runtime,
@@ -1469,8 +1565,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
                         # Bubble 1: text before the first spell (no metadata)
+                        # Phase 1 早期 emit ロジックで spell loop 開始前に既に
+                        # emit 済の場合は skip (= 二重 emit を避ける)
                         _first_text_before = _spell_details_blocks[0][0] if _spell_details_blocks else ""
-                        if _first_text_before.strip():
+                        if _first_text_before.strip() and not _bubble1_emitted_early:
                             if event_callback:
                                 event_callback({
                                     "type": "say",
@@ -1771,6 +1869,17 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     reasoning_details = llm_client.consume_reasoning_details()
 
                     # ── Spell loop (parallel execution per round) ──
+                    _bubble1_emitted_early_ns = _emit_bubble1_early(
+                        runtime=runtime,
+                        persona=persona,
+                        building_id=building_id,
+                        text=text,
+                        speak_flag=getattr(node_def, "speak", True),
+                        pulse_id=state.get("_pulse_id"),
+                        event_callback=event_callback,
+                        node_id=getattr(node_def, "id", "llm"),
+                        send_streaming_discard=True,
+                    )
                     text, _spell_details_blocks_ns, _spell_loop_count_ns = await _run_spell_loop(
                         text=text,
                         spell_enabled=_spell_enabled,
@@ -1803,23 +1912,27 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             eff_bid = runtime._effective_building_id(persona, building_id)
 
                             # Bubble 1: discard streamed content, re-emit just text_before clean
+                            # Phase 1 早期 emit ロジックで spell loop 開始前に既に
+                            # streaming_discard + say + _emit_say 済の場合は skip
+                            # (= 二重 emit / streaming_discard 二重発火を避ける)
                             _first_text_before_ns = _spell_details_blocks_ns[0][0] if _spell_details_blocks_ns else ""
-                            if event_callback:
-                                event_callback({
-                                    "type": "streaming_discard",
-                                    "persona_id": getattr(persona, "persona_id", None),
-                                    "node_id": getattr(node_def, "id", "llm"),
-                                    "pulse_id": pulse_id,
-                                })
-                            if _first_text_before_ns.strip():
+                            if not _bubble1_emitted_early_ns:
                                 if event_callback:
                                     event_callback({
-                                        "type": "say",
-                                        "content": _first_text_before_ns,
+                                        "type": "streaming_discard",
                                         "persona_id": getattr(persona, "persona_id", None),
+                                        "node_id": getattr(node_def, "id", "llm"),
                                         "pulse_id": pulse_id,
                                     })
-                                runtime._emit_say(persona, eff_bid, _first_text_before_ns, pulse_id=pulse_id)
+                                if _first_text_before_ns.strip():
+                                    if event_callback:
+                                        event_callback({
+                                            "type": "say",
+                                            "content": _first_text_before_ns,
+                                            "persona_id": getattr(persona, "persona_id", None),
+                                            "pulse_id": pulse_id,
+                                        })
+                                    runtime._emit_say(persona, eff_bid, _first_text_before_ns, pulse_id=pulse_id)
 
                             # Bubble 2: all details blocks + continuation (with metadata)
                             _bubble2_parts: list[str] = []
@@ -2048,8 +2161,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     reasoning_details = llm_client.consume_reasoning_details()
 
                     # ── Spell loop (parallel execution per round) ──
+                    _bubble1_emitted_early_sync = ""
                     if isinstance(text, str):
                         # Normal text mode - run spell processing
+                        _bubble1_emitted_early_sync = _emit_bubble1_early(
+                            runtime=runtime,
+                            persona=persona,
+                            building_id=building_id,
+                            text=text,
+                            speak_flag=speak_flag,
+                            pulse_id=state.get("_pulse_id"),
+                            event_callback=event_callback,
+                            node_id=getattr(node_def, "id", "llm"),
+                            send_streaming_discard=False,
+                        )
                         text, _spell_details_blocks_sync, _spell_loop_count_sync = await _run_spell_loop(
                             text=text,
                             spell_enabled=_spell_enabled,
@@ -2071,8 +2196,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                     if _spell_loop_count_sync > 0:
                         # Bubble 1: text_before of first spell (no metadata)
+                        # Phase 1 早期 emit 済の場合は skip (= 二重 emit を避ける)
                         _first_text_before_sync = _spell_details_blocks_sync[0][0] if _spell_details_blocks_sync else ""
-                        if _first_text_before_sync.strip() and speak_flag is True:
+                        if _first_text_before_sync.strip() and speak_flag is True and not _bubble1_emitted_early_sync:
                             pulse_id = state.get("_pulse_id")
                             eff_bid = runtime._effective_building_id(persona, building_id)
                             runtime._emit_say(persona, eff_bid, _first_text_before_sync, pulse_id=pulse_id)
