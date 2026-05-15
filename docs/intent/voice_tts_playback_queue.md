@@ -1,8 +1,25 @@
 # Intent: Voice-TTS Playback Queue / Pulse-Aware Preempt
 
-**ステータス**: 設計確定、 実装未着手 (2026-05-15 起草)
+**ステータス**: Phase 1 / Phase 2 / Stack-chan 流量制御 すべて実装完了 + 実機検証済 (2026-05-15)
 
 **関連**: `stackchan_avatar_pipeline.md` (= Stack-chan Vessel)、 `stackchan_vessel.md`、 `persona_cognitive_model.md` (= pulse 概念)
+
+## 実装サマリ
+
+| Phase | commit | ファイル |
+|---|---|---|
+| 1: voice-tts revert (sleep gate 撤去) | `abee140` (voice-tts) | `tools/speak/playback_worker.py` |
+| 1: stackchan speak_hook FIFO wait | `72d1ba2` (stackchan-addon) | `speak_hook.py` |
+| 1: frontend audio queue | `46849c4` (本体) | `frontend/src/lib/clientActions/playAudio.ts` |
+| 2: voice-tts audio_ready に pulse_id | `9de5557` (voice-tts) | `tools/speak/playback_worker.py` + `speak_hook.py` |
+| 2: frontend pulse_id 比較 preempt | `0c1a7af` (本体) | `frontend/src/lib/clientActions/playAudio.ts` |
+| 2: stackchan pulse_id 比較 preempt | `7f9af54` (stackchan-addon) | `speak_hook.py` |
+| 流量制御: chunk push 高水位/低水位 | `79bfdbf` (voice-tts) | `tools/speak/playback_worker.py` |
+
+実機検証 (session 20260515_154058 系) で:
+- 同 pulse 連発 (= web UI / Stack-chan 両方) で 1 つも切れずに順次再生
+- 別 pulse 着信時 (= 別ペルソナ応答) で旧再生即中断 + 新再生即時開始
+- Stack-chan 長尺発話で flow control が `lead=8.84s > 8.0s` 等で正常発動、 完走確認
 
 ## 背景
 

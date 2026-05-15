@@ -490,6 +490,9 @@ Phase 4' で Building 単位 visibility が実装されたら、`spell_tools` �
   ↓    発話の冒頭だけ届いて以降沈黙)。最初の chunk が来てから POST を開始
   ↓    すれば以降 voice-tts の連続生成 cadence (= realtime ≒ 64 KB/s) に
   ↓    乗って chunk が流れる
+  ↓ ── 同 vessel に既 POST がある場合の調整 (= 同 pulse FIFO wait /
+  ↓    別 pulse preempt) と voice-tts 側 chunk push の流量制御の詳細は
+  ↓    voice_tts_playback_queue.md (= subscriber 全体の queue 設計) 参照。
   ↓ HTTP POST: http://127.0.0.1:8766/pcm
   ↓   Authorization: Bearer ${STACKCHAN_PCM_TOKEN}
   ↓   Content-Type: application/octet-stream
@@ -854,6 +857,14 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 8. **アドオン**: QR コード生成 + 表示
 9. **アドオン**: `saiverse stackchan flash` CLI サブコマンド実装（esptool 自動書き込み）
 10. **検証**: 新品 Stack-chan → 開封 → SAIVerse UI 経由で書き込み → AP 設定 → 接続完了まで 30 分以内
+
+**Phase 4' / Phase 4 からの引き継ぎ事項** (2026-05-14 追記):
+
+- 現状、ペアリング情報 (`vessel_manager` の `vessels.db` の `bound_building_id`) と AddonConfig の `vessel_building_id` が **別ストレージで二重管理**になっている。同一の Vessel Building ID を 2 箇所に手動で揃える運用。
+- 二重管理の理由: `mcp_servers.json` の `spell_tools[*].building_ids` が `${addon.saiverse-stackchan-addon.vessel_building_id}` placeholder を参照しており、ここで参照されるのは AddonConfig 側 (= mcp_config の placeholder 解決経路は AddonConfig しか引かない)。ペアリングは別途 `vessel_manager.create_pairing(building_id, ...)` で `vessels.db` に保存される。
+- Phase 2' のペアリング UI でユーザーが Vessel Building を選んだら、**AddonConfig.vessel_building_id も自動で書き換える** 経路を入れること。具体的には `api_routes.py` のペアリング HTTP API ハンドラ内で `vessel_manager.create_pairing()` の後に `saiverse.addon_config.set_param("saiverse-stackchan-addon", "vessel_building_id", building_id)` 相当の処理を追加する。
+- もしくは設計を見直して AddonConfig.vessel_building_id を廃止し、`mcp_servers.json` の placeholder 解決経路 (`tools/mcp_config.py`) に `vessels.db` を直接参照する syntax (例: `${vessel_manager.<addon_name>.bound_building_id}`) を新設する手もある。後者の方が情報源が一本化されて綺麗だが、placeholder 解決層を改修する必要があるので工数は大きい。
+- 設定漏れ時の挙動: AddonConfig.vessel_building_id 未設定だと mcp_config が "missing_config" 判定して stackchan-mcp gateway 起動を拒否するため、**stackchan に紐付く機能 (TTS PCM 経路、物理身体ツール) が全部動かない** (= addon を入れた意味がない状態)。SAIVerse 本体や他 addon の動作には影響しない。Phase 2' のペアリング UI 完成前に新規ユーザーが addon を入れた場合の落とし穴になるので、UI 側に「ペアリング完了するまで AddonConfig.vessel_building_id にダミーでも入れてください」等の注意書きが必要 (= UI 完成と同時に解消される問題なので暫定対応)。
 
 ### Phase 3' — STT 経路
 
