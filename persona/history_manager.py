@@ -334,6 +334,58 @@ class HistoryManager:
         self._ensure_size_limit(self.messages, self.persona_log_path)
         self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
 
+    def update_building_message(
+        self,
+        building_id: str,
+        message_id: str,
+        *,
+        content: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """既存 building message の content / metadata を上書き / merge する。
+
+        Pipeline Streaming (= LLM streaming 中の文区切り sub-speak) で使う。
+        streaming 開始時に ``add_to_building_only`` で空 content の placeholder
+        を登録 → msg_id 発番 → 文 ごとに sub-speak hook 発火 (= TTS が並走) →
+        streaming 完了時に本関数で content を確定する、 という 2 段階フロー
+        を可能にするための最小 API。 詳細: docs/intent/voice_tts_pipeline_streaming.md
+
+        ``content``: 文字列なら content を全置換、 None なら触らない。
+        ``metadata``: dict なら既存 metadata に shallow merge (= 既存キーは
+        新値で上書き、 既存にあって新側に無いキーは保持)、 None なら触らない。
+
+        該当 message_id が見つからない場合は ``None`` を返す (= no-op、
+        warning をログに出す)。 見つかった場合は更新後の dict を返す。
+
+        Persona-only history と SAIMemory には触らない (= placeholder 期間中は
+        building 側だけに居て、 finalize 時に呼び出し側が persona / SAIMemory
+        に add する設計に合わせる)。
+        """
+        hist = self.building_histories.get(building_id)
+        if not hist:
+            LOGGER.warning(
+                "update_building_message: unknown building_id=%s msg_id=%s",
+                building_id, message_id,
+            )
+            return None
+        for msg in hist:
+            if msg.get("message_id") == message_id:
+                if content is not None:
+                    msg["content"] = content
+                if metadata is not None:
+                    existing = msg.setdefault("metadata", {})
+                    if isinstance(existing, dict):
+                        existing.update(metadata)
+                    else:
+                        msg["metadata"] = dict(metadata)
+                self._mark_modified(building_id)
+                return msg
+        LOGGER.warning(
+            "update_building_message: message_id=%s not found in building=%s",
+            message_id, building_id,
+        )
+        return None
+
     def get_recent_history(
         self,
         max_chars: int,
