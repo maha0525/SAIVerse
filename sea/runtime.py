@@ -1368,8 +1368,22 @@ class SEARuntime:
     def _emit_sub_speak(self, persona: Any, building_id: str, message_id: str, sub_text: str, sub_seq: int, pulse_id: Optional[str] = None) -> None:
         self._emitters.emit_sub_speak(persona, building_id, message_id, sub_text, sub_seq, pulse_id=pulse_id)
 
-    def _emit_speak_finalize(self, persona: Any, building_id: str, message_id: str, text: str, pulse_id: Optional[str] = None, extra_metadata: Optional[Dict[str, Any]] = None, final_sub_seq: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        return self._emitters.emit_speak_finalize(persona, building_id, message_id, text, pulse_id=pulse_id, extra_metadata=extra_metadata, final_sub_seq=final_sub_seq)
+    def _emit_speak_finalize(
+        self,
+        persona: Any,
+        building_id: str,
+        message_id: str,
+        text: str,
+        pulse_id: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+        final_sub_seq: Optional[int] = None,
+        final_voice_text: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return self._emitters.emit_speak_finalize(
+            persona, building_id, message_id, text,
+            pulse_id=pulse_id, extra_metadata=extra_metadata,
+            final_sub_seq=final_sub_seq, final_voice_text=final_voice_text,
+        )
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         self._emitters.emit_think(persona, pulse_id, text, record_history=record_history)

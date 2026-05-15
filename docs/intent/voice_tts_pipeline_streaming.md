@@ -1,6 +1,6 @@
 # Intent: LLM → TTS Pipeline Streaming + bubble1/bubble2 撤廃
 
-**ステータス**: 設計確定 (2026-05-15 まはー インタビュー 6 周経て大幅改訂)、 一部実装済 + 残実装は次セッション
+**ステータス**: 設計確定 (2026-05-15 まはー インタビュー 6 周経て大幅改訂)、 Phase 2-B-step3 + Phase 2-C 実装済 (2026-05-15 後半セッション)、 残実装 Phase 2-D / 2-E は別セッション
 
 **関連**: [`voice_tts_playback_queue.md`](voice_tts_playback_queue.md) (= subscriber 側 queue + Stack-chan 流量制御 + bubble1 早期 emit)、 [`addon_speak_hooks.md`](addon_speak_hooks.md) (= persona_speak hook 経路)、 [`stackchan_vessel.md`](stackchan_vessel.md)
 
@@ -134,28 +134,55 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 
 ### Phase 2-B-step2: emit_speak の 3 段階 API → **完了** (`5141649`)
 
-### Phase 2-B-step3 (= 残実装、 次セッション): spell loop の return + caller 統合
+### Phase 2-B-step3 (= 完了、 2026-05-15 後半セッション): spell loop の return + caller 統合
 
 - `_run_spell_loop` の return を `(full_merged_text, loop_count)` に変更:
   - `full_merged_text` = 各 round の `text_before + <user_only>...</user_only> ブロック` を順次連結した 1 string、 末尾に final continuation を append
-  - 既存 `details_blocks` 構造は内部処理用に保持、 戻り値からは外す
-- `_build_spell_details_html` の置換: spell 1 つにつき以下を生成する関数に変更
-  - `<user_only alt="{spell_name(args)}">/spell {spell_name}({args})\n<details class="spellResult">{result_html}</details></user_only>`
+  - 旧 `details_blocks` 戻り値は廃止 (= 呼び出し側で merged_text をそのまま渡せばよくなったため)
+- `_build_spell_details_html` を `_build_spell_user_only_block` に置換: spell 1 つにつき以下を生成
+  - `<user_only alt="{display_name}">\n/spell name='{tool_name}' args={...}\n<details class="spellResult">{escaped_result}</details></user_only>`
+  - `alt` は `SPELL_TOOL_SCHEMAS[name].spell_display_name` (= Japanese 表示名、 他ペルソナには `[display_name]` placeholder で見える)
+  - spell 起動行は `_normalize_spell_line` の canonical form (= assistant message context と一致)
 - `runtime_llm.py` の 3 caller (= tool / streaming / non-streaming) で:
   - 旧: `_emit_say(bubble1)` + `_emit_say(bubble2)` の 2 回呼び出し
   - 新: `_emit_say(full_merged_text)` の 1 回呼び出し
-- `wrap_spell_blocks` 関数: spell loop 内で既に `<user_only>` 込みで構築するので、 emit_say 内での再 wrap は no-op (or 廃止)。 ただし他経路 (= ペルソナが手書きで `<details class="spellBlock">` を出力する等) のために関数自体は残す方が安全
-- 既存 Phase 1 (`_emit_bubble1_early` / `_extract_first_text_before`) は次の Phase 2-C で superseded されるので、 ここでは保留 (= bubble1/bubble2 統合だけ先にやる)
+  - Phase 1 早期 emit が走った場合は merged_text 先頭の text_before を slice して二重 emit を回避 (Phase 2-C で Phase 1 撤去するまでの繋ぎ)
+- `wrap_spell_blocks` 関数は残す (= 他経路でペルソナが `<details class="spellBlock">` を手書きで出した場合の保険)。 新 merged_text は `<user_only>` 込みで構築されるので emit_say 内の `wrap_spell_blocks` は no-op になる
 
-### Phase 2-C (= 残実装、 次セッション): Pipeline Streaming の streaming loop 組み込み
+### Phase 2-C (= 完了、 2026-05-15 後半セッション): Pipeline Streaming の streaming loop 組み込み
 
-- `runtime_llm.py` の streaming loop に文区切り検出 + sub-speak emit を追加
-- LLM streaming 開始時に `_emit_speak_start(persona, building_id, pulse_id)` で placeholder + msg_id 発番
-- chunk 受信ループ内で句読点検出 → `_emit_sub_speak(persona, building_id, msg_id, sub_text, sub_seq)` 発火
-- spell loop が走る場合: spell 実行は並行で進む、 sub-speak は 1 回目 LLM streaming 中に発火済み、 spell 完了後に 2 回目 LLM streaming で続きの sub-speak 発火
-- streaming 完了 + spell loop 完了 後に `_emit_speak_finalize(persona, building_id, msg_id, full_merged_text, ..., final_sub_seq=N)` で全文確定 + 最終 hook 発火
-- 既存 Phase 1 (`_emit_bubble1_early` 経路) を撤去 (= sub-speak が役目を担う)
-- 機能フラグ `SAIVERSE_LLM_TTS_PIPELINE=1` で gate
+- `runtime_llm.py` の **normal mode streaming branch** (no-tools 経路) に文区切り検出 + sub-speak emit を組み込み。 tool mode streaming は未着手 (= 必要なら follow-up)
+- 機能フラグ `SAIVERSE_LLM_TTS_PIPELINE=1` で gate。 default OFF (= 旧 Phase 1 bubble1 早期 emit 経路で動く)
+- 開始時: `_emit_speak_start(persona, building_id, pulse_id)` で placeholder + msg_id 発番。 失敗時は non-pipeline path に fallback
+- chunk 受信ループ内:
+  - `_find_next_sentence_boundary` で句読点 (`。！？．!?` + 弱区切り `、，,;:` + 改行) を検出
+  - 文区切りごとに `_emit_sub_speak(persona, building_id, msg_id, sub_text, sub_seq=N)` 発火
+  - 最初の `/spell` 行が現れたら **sub-speak emit を停止** (`pipeline_spell_detected=True`)。 spell 行直前までを最後の pre-spell sub-speak として flush、 以降の text は spell loop → finalize 経由でまとめて送る (= spell 行を単独で voice-tts に渡さない)
+- spell loop は従来通り (= 内部で `llm_client.generate()` non-streaming、 retry も非ストリーミング)。 spell loop の retry を streaming 化する案は採用せず — sub-speak が果たすべき低遅延化は 「LLM 1 回目 streaming 中」 で既に達成済 (= 1st chunk 〜 spell 開始の数秒が即座に音声化される)
+- spell loop 完了後 (or 通常完了後) に `_emit_speak_finalize(persona, building_id, msg_id, text=full_merged_or_plain, final_sub_seq=next_seq, final_voice_text=remainder_voice)` で確定
+  - `final_voice_text`: 「sub-speak で既に発話済みの prefix を除いた残テキスト」 を `strip_user_only(strip_in_heart(...))` 済の形で渡す → voice-tts は remainder だけを合成 (= 案 A、 重複合成回避)
+  - remainder = `text[pipeline_last_emit_pos:]`。 streamed prefix (`"".join(text_chunks)[:pipeline_last_emit_pos]`) が merged text の prefix と一致する場合に slice 成立。 仮定が破れた場合は full text を remainder にして警告 log
+- Phase 1 (`_emit_bubble1_early`) は pipeline_streaming=True の時 skip (= sub-speak が役目)
+- speak: false node + pipeline ON の場合: placeholder を `final_voice_text=""` で finalize して voice-tts に 「合成テキスト無し → stream close」 を指示し、 placeholder の `_streaming_placeholder=True` を残さない
+- 504 (DEADLINE_EXCEEDED) 中断 + pipeline ON: partial を finalize で確定、 続く re-speak 経路は従来の `_emit_say` (= 別 message_id) で続行
+
+### Phase 2-C 案 A: `emit_speak_finalize` の `final_voice_text` パラメタ (2026-05-15)
+
+voice-tts は `enqueue_tts(text)` の `text` をそのまま GPT-SoVITS に流すので、 finalize hook が「全文」 を `text_for_voice` に渡すと sub-speak 済の prefix が **重複合成** される。 解決策として `emit_speak_finalize` に optional `final_voice_text` を追加し、 caller (= sea/runtime_llm.py) が remainder を計算して渡す:
+
+```python
+runtime._emit_speak_finalize(
+    persona, building_id, msg_id, text=full_merged,
+    pulse_id=pulse_id,
+    extra_metadata=...,
+    final_sub_seq=next_seq,
+    final_voice_text=stripped_remainder,  # "last sub-speak 以降の残テキスト"
+)
+```
+
+`final_voice_text=None` (default) なら従来通り全文から `strip_user_only(strip_in_heart(...))` で derive (= sub-speak 未使用時の互換動作)。 空文字 `""` を渡せば「合成すべきテキスト無し」を表す (= speak=false で placeholder を綺麗に close する用)。
+
+検討した代案: 案 B は `_emit_speak_finalize` 自体の hook 発火責務を caller 側に移し caller が直前に `_emit_sub_speak(is_final=True)` を出す形。 hook contract がより複雑になるため案 A を採用 (= 最少差分、 caller が text 差分を持つのは責務として自然、 hook API 構造を維持)。
 
 ### Phase 2-D (= 残実装、 次セッション): 中断時 close_stream
 
@@ -177,6 +204,8 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 ## 関連経過
 
 - 2026-05-15 (前): voice_tts_playback_queue.md の Phase 1/2/流量制御 + bubble1 早期 emit 実装完了
-- 2026-05-15 (本セッション): Pipeline Streaming intent doc 起草 → まはー インタビューを 6 周回って 「bubble1/bubble2 撤廃 + 1 message 統合 + `<user_only>` 維持」 まで設計確定
-- 2026-05-15 (本セッション): 下層 building block 3 commit 済 (= `613be6f` voice-tts、 `49299e2` history_manager、 `5141649` emit_speak 3 段階 API)
-- 2026-05-15 (本セッション): 残実装 (= spell loop return 変更、 caller 統合、 streaming loop sub-speak 組み込み、 中断時 close、 UI rendering 改修) は次セッションへハンドオフ
+- 2026-05-15 (前半): Pipeline Streaming intent doc 起草 → まはー インタビューを 6 周回って 「bubble1/bubble2 撤廃 + 1 message 統合 + `<user_only>` 維持」 まで設計確定
+- 2026-05-15 (前半): 下層 building block 3 commit 済 (= `613be6f` voice-tts、 `49299e2` history_manager、 `5141649` emit_speak 3 段階 API)
+- 2026-05-15 (後半): Phase 2-B-step3 実装 (spell loop return 変更 + `_build_spell_user_only_block` 置換 + 3 caller の `_emit_say` 1 回統合)
+- 2026-05-15 (後半): Phase 2-C 実装 (normal streaming branch に `_emit_speak_start` + sub-speak + `_emit_speak_finalize` 組み込み、 `final_voice_text` 案 A 採用、 `SAIVERSE_LLM_TTS_PIPELINE=1` gate)
+- 残実装: Phase 2-D (中断時 close_stream)、 Phase 2-E (UI rendering `<details class="spellResult">`)、 tool mode streaming への Pipeline Streaming 適用 (= follow-up)

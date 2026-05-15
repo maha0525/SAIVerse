@@ -339,6 +339,7 @@ class RuntimeEmitters:
         pulse_id: Optional[str] = None,
         extra_metadata: Optional[Dict[str, Any]] = None,
         final_sub_seq: Optional[int] = None,
+        final_voice_text: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """emit_speak_start で発番した placeholder の content を確定する。
 
@@ -355,6 +356,16 @@ class RuntimeEmitters:
         使ってない場合 (= 文区切りせず全文 1 回で finalize) は ``None`` で OK
         で、 voice-tts は sub_seq=None で従来通りの 「1 message=1 job」 動作
         になる。
+
+        ``final_voice_text``: voice-tts hook の ``text_for_voice`` に渡す
+        テキスト。 None なら ``text`` (= 全文) から
+        ``strip_user_only(strip_in_heart(...))`` で derive する従来挙動。
+        Pipeline Streaming で sub-speak 経路を使った場合は、 既に sub-speak
+        済の文を再合成しないため、 caller が 「last sub-speak 以降の残テキスト」
+        を ``strip_user_only`` 済の形で渡す (= voice_tts_pipeline_streaming
+        intent doc Phase 2-C 案 A)。 空文字 ``""`` を渡せば finalize hook で
+        voice-tts は 「合成すべきテキスト無し → stream close + wav 保存のみ」
+        で完結する。
         """
         metadata: Dict[str, Any] = {"tags": ["conversation"]}
         if isinstance(extra_metadata, dict):
@@ -427,15 +438,24 @@ class RuntimeEmitters:
 
         try:
             from saiverse.addon_hooks import dispatch_hook
-            if text_for_voice is None:
+            # Pipeline Streaming (案 A): caller が指定した ``final_voice_text``
+            # が最優先 (= sub-speak 経路で既に発話済みの prefix を再合成しない
+            # ため、 caller が remainder を渡す)。 None なら従来通り全文から
+            # derive する。 ``text_for_voice`` 計算結果 (building_content 経由)
+            # も None の時は full-text fallback として使う。
+            if final_voice_text is not None:
+                hook_text_for_voice = final_voice_text
+            elif text_for_voice is not None:
+                hook_text_for_voice = text_for_voice
+            else:
                 from saiverse.content_tags import strip_in_heart, strip_user_only
-                text_for_voice = strip_user_only(strip_in_heart(text))
+                hook_text_for_voice = strip_user_only(strip_in_heart(text))
             dispatch_hook(
                 "persona_speak",
                 persona_id=persona.persona_id,
                 building_id=building_id,
                 text_raw=text,
-                text_for_voice=text_for_voice,
+                text_for_voice=hook_text_for_voice,
                 message_id=message_id,
                 pulse_id=pulse_id,
                 source="speak",
