@@ -223,6 +223,233 @@ class RuntimeEmitters:
                 LOGGER.warning("persona_speak hook dispatch failed", exc_info=True)
         return building_msg
 
+    # ---------- Pipeline Streaming (Phase 2-β) -------------------------
+    # emit_speak の 2 段階 API。 LLM streaming 開始時に placeholder を登録 →
+    # 文区切りごとに sub-speak hook 発火 (= TTS 側で並走合成) → streaming
+    # 完了で finalize して全文記録 + 最終 hook 発火、 という 3-step フロー
+    # を組むためのビルディングブロック。 詳細:
+    # docs/intent/voice_tts_pipeline_streaming.md
+
+    def emit_speak_start(
+        self,
+        persona: Any,
+        building_id: str,
+        pulse_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Streaming 開始時に空 content の placeholder を building history に
+        登録し、 発番された message_id を返す。
+
+        sub-speak hook で voice-tts に渡す ``message_id`` を事前に確定させる
+        ためだけのコール。 persona-only history と SAIMemory には触らない
+        (= placeholder 期間中は text が未確定なので、 ここで record すると
+        「空メッセージを発した」 履歴になる)。 確定処理は ``emit_speak_finalize``
+        側に集約する。
+
+        ``set_active_message_id`` で contextvar も更新するので、 後続のツール
+        呼び出しが get_active_message_id で同じ ID を取れる。
+        """
+        placeholder_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": "",
+            "persona_id": persona.persona_id,
+        }
+        if pulse_id:
+            placeholder_msg["pulse_id"] = pulse_id
+        placeholder_msg["metadata"] = {
+            "tags": ["conversation"],
+            "_streaming_placeholder": True,
+        }
+
+        occupants = self.runtime.manager.occupants.get(building_id, [])
+        heard_by = list(occupants)
+        if persona.persona_id not in heard_by:
+            heard_by.append(persona.persona_id)
+
+        pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
+
+        try:
+            building_msg = persona.history_manager.add_to_building_only(
+                building_id, placeholder_msg,
+                heard_by=heard_by, origin_track_id=pulse_track_id,
+            )
+        except Exception:
+            LOGGER.exception("emit_speak_start: failed to register placeholder")
+            return None
+
+        msg_id = building_msg.get("message_id") if building_msg else None
+        if msg_id:
+            from tools.context import set_active_message_id
+            set_active_message_id(str(msg_id))
+            LOGGER.debug(
+                "emit_speak_start: placeholder msg_id=%s persona=%s building=%s pulse=%s",
+                msg_id, persona.persona_id, building_id, pulse_id,
+            )
+        return str(msg_id) if msg_id else None
+
+    def emit_sub_speak(
+        self,
+        persona: Any,
+        building_id: str,
+        message_id: str,
+        sub_text: str,
+        sub_seq: int,
+        pulse_id: Optional[str] = None,
+    ) -> None:
+        """文区切り sub-text を voice-tts 等の subscriber に届ける hook 発火専用。
+
+        history への記録は finalize でまとめて行うので、 ここでは
+        ``persona_speak`` hook を ``sub_seq=N`` + ``is_final=False`` で発火
+        するだけ。 voice-tts addon は sub_seq の小さい順で同 message_id 内
+        の audio_stream に連結 push する (= Phase 2-α)。
+        """
+        if not sub_text:
+            return
+        try:
+            from saiverse.addon_hooks import dispatch_hook
+            from saiverse.content_tags import strip_in_heart, strip_user_only
+            text_for_voice = strip_user_only(strip_in_heart(sub_text))
+            if not text_for_voice:
+                return
+            dispatch_hook(
+                "persona_speak",
+                persona_id=persona.persona_id,
+                building_id=building_id,
+                text_raw=sub_text,
+                text_for_voice=text_for_voice,
+                message_id=message_id,
+                pulse_id=pulse_id,
+                source="speak",
+                metadata={},
+                sub_seq=sub_seq,
+                is_final=False,
+            )
+            LOGGER.debug(
+                "emit_sub_speak: msg=%s sub_seq=%d len=%d",
+                message_id, sub_seq, len(sub_text),
+            )
+        except Exception:
+            LOGGER.warning("persona_speak (sub_speak) hook dispatch failed", exc_info=True)
+
+    def emit_speak_finalize(
+        self,
+        persona: Any,
+        building_id: str,
+        message_id: str,
+        text: str,
+        pulse_id: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+        final_sub_seq: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """emit_speak_start で発番した placeholder の content を確定する。
+
+        - building history: update_building_message で content + metadata を
+          確定。 ``_streaming_placeholder`` フラグも False に倒す
+        - persona-only history: 全文を add (= placeholder 期間中は不在だった)
+        - SAIMemory: persona-only 経路の add で _sync_to_memory が走る
+        - gateway: ai_replies broadcast
+        - persona_speak hook: ``sub_seq=final_sub_seq`` + ``is_final=True``
+          で 1 回発火。 voice-tts はここで is_final=True を受け取って stream
+          を close + wav 保存する
+
+        ``final_sub_seq``: sub-speak 経路を使った場合は最終 sub-text の連番。
+        使ってない場合 (= 文区切りせず全文 1 回で finalize) は ``None`` で OK
+        で、 voice-tts は sub_seq=None で従来通りの 「1 message=1 job」 動作
+        になる。
+        """
+        metadata: Dict[str, Any] = {"tags": ["conversation"]}
+        if isinstance(extra_metadata, dict):
+            for key, value in extra_metadata.items():
+                if key == "tags":
+                    extra_tags = (
+                        [str(t) for t in value if t] if isinstance(value, list) else []
+                    )
+                    metadata["tags"].extend(extra_tags)
+                else:
+                    metadata[key] = value
+
+        occupants = self.runtime.manager.occupants.get(building_id, [])
+        partners = [oid for oid in occupants if oid != persona.persona_id]
+        presence = getattr(self.runtime.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            metadata["with"] = partners
+
+        building_msg: Optional[Dict[str, Any]] = None
+        text_for_voice: Optional[str] = None
+
+        try:
+            from saiverse.content_tags import (
+                resolve_item_slot_uris, strip_in_heart, strip_user_only,
+            )
+            building_content = strip_in_heart(text)
+            item_service = getattr(self.runtime.manager, "item_service", None)
+            if item_service:
+                building_content = resolve_item_slot_uris(
+                    building_content, item_service, persona.persona_id, building_id
+                )
+            text_for_voice = strip_user_only(building_content)
+
+            update_metadata = dict(metadata)
+            update_metadata["_streaming_placeholder"] = False
+            building_msg = persona.history_manager.update_building_message(
+                building_id, message_id,
+                content=building_content,
+                metadata=update_metadata,
+            )
+            if building_msg is None:
+                LOGGER.error(
+                    "emit_speak_finalize: placeholder msg_id=%s not found "
+                    "for building=%s — finalizing without history update",
+                    message_id, building_id,
+                )
+
+            pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
+            persona_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": text,
+                "persona_id": persona.persona_id,
+                "metadata": dict(metadata),
+            }
+            if pulse_id:
+                persona_msg["pulse_id"] = pulse_id
+            persona.history_manager.add_to_persona_only(
+                persona_msg, origin_track_id=pulse_track_id,
+            )
+
+            self.runtime.manager.gateway_handle_ai_replies(
+                building_id, persona, [building_content],
+            )
+        except Exception:
+            LOGGER.exception("emit_speak_finalize: failed to finalize placeholder")
+
+        self.notify_unity_speak(persona, text)
+
+        try:
+            from saiverse.addon_hooks import dispatch_hook
+            if text_for_voice is None:
+                from saiverse.content_tags import strip_in_heart, strip_user_only
+                text_for_voice = strip_user_only(strip_in_heart(text))
+            dispatch_hook(
+                "persona_speak",
+                persona_id=persona.persona_id,
+                building_id=building_id,
+                text_raw=text,
+                text_for_voice=text_for_voice,
+                message_id=message_id,
+                pulse_id=pulse_id,
+                source="speak",
+                metadata=dict(metadata),
+                sub_seq=final_sub_seq,
+                is_final=True,
+            )
+        except Exception:
+            LOGGER.warning(
+                "persona_speak (finalize) hook dispatch failed", exc_info=True,
+            )
+
+        return building_msg
+
     def emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         if not record_history:
             return
