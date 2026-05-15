@@ -420,9 +420,18 @@ export const playAudioExecutor: ClientActionExecutor = async (ctx) => {
 
         // 別 pulse 着信 → 旧 pulse の queue + 現再生を即破棄してから
         // 新 item を queue に積む (= startNext でそのまま新 audio が再生開始)。
-        if (shouldPreemptForNewPulse(pulseId)) {
+        // DIAG: 判定軸を全部 log に出して切り分けに使う。 確認後撤去。
+        const currentPulseSnapshot = currentItem?.pulseId;
+        const willPreempt = shouldPreemptForNewPulse(pulseId);
+        diag(`preempt-check msg=${shortMsg(item.messageId)}`, {
+            newPulseId: pulseId ?? null,
+            currentPulseId: currentPulseSnapshot ?? null,
+            currentItemMsg: currentItem ? shortMsg(currentItem.messageId) : null,
+            willPreempt,
+        });
+        if (willPreempt) {
             preemptCurrentPulse(
-                `new pulse=${pulseId ?? "?"} differs from current=${currentItem?.pulseId ?? "?"}`,
+                `new pulse=${pulseId ?? "?"} differs from current=${currentPulseSnapshot ?? "?"}`,
             );
         }
 
