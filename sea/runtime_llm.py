@@ -71,6 +71,23 @@ _KV_PATTERN = re.compile(
 _SENTENCE_BOUNDARY_CHARS = set("。！？．!?\n")
 # 弱い区切り (= 早く流したい時に追加で見る境界)。 強い区切りより優先度低い。
 _SENTENCE_BOUNDARY_SOFT_CHARS = set("、，,;:")
+# sub-text の中身が 「区切り文字 + 空白だけ」 のとき voice-tts (GPT-SoVITS) は
+# 「有効なテキストを入力してください」 で合成失敗する。 sub-speak emit 時に
+# 1 文字でも区切り・空白以外を含むかチェックして skip するために、 voice-able
+# でない文字集合を定義する。
+_SUB_TEXT_NON_VOICEABLE_CHARS = (
+    _SENTENCE_BOUNDARY_CHARS | _SENTENCE_BOUNDARY_SOFT_CHARS | set(" 　\t\r")
+)
+
+
+def _has_voiceable_content(text: str) -> bool:
+    """``text`` に句読点 + 空白以外の文字が 1 つでも含まれるかを返す。
+    voice-tts に渡しても合成可能な実体を持つかの判定に使う。
+    """
+    for ch in text:
+        if ch not in _SUB_TEXT_NON_VOICEABLE_CHARS:
+            return True
+    return False
 
 
 def _find_next_sentence_boundary(
@@ -767,7 +784,7 @@ async def _consume_pipeline_stream(
                     # spell 行直前までを最後の pre-spell sub-speak として flush
                     _pre_spell = _tail[: _spell_match.start()]
                     _pre_spell_stripped = _pre_spell.rstrip()
-                    if _pre_spell_stripped:
+                    if _has_voiceable_content(_pre_spell_stripped):
                         sub_seq += 1
                         runtime._emit_sub_speak(
                             persona,
@@ -786,7 +803,7 @@ async def _consume_pipeline_stream(
                         if _boundary < 0:
                             break
                         _sub = _buf[last_emit_pos:_boundary]
-                        if _sub.strip():
+                        if _has_voiceable_content(_sub):
                             sub_seq += 1
                             runtime._emit_sub_speak(
                                 persona,
@@ -1013,11 +1030,27 @@ async def _run_spell_loop(
             # sub-speak を発火する。 そうでない (= (2) Tool mode streaming や
             # (4) 全文一括経路から呼ばれた時) は従来通り generate() 単発で
             # 全文受信する。
+            #
+            # ``tools=[]`` を明示で渡す: Gemini の ``generate_stream`` は
+            # ``tools=None`` を 「デフォルト spell スキーマ集 (GEMINI_TOOLS_SPEC)
+            # を使う」 と解釈してしまい、 その中の 1 つに含まれる Gemini 未対応
+            # の type (例 "TUPLE") で 400 INVALID_ARGUMENT を起こす。 spell loop
+            # の retry は 「spell 結果を踏まえた継続発話」 なので tools 不要、
+            # 明示的に空リストで送る。
+            #
+            # retry 前に ``text = ""`` でリセット: helper / generate() で例外が
+            # 出ると ``retry_result`` の代入が走らず、 ``text`` は round 開始時
+            # の値 (= 初回応答全文、 spell 行込み) のまま except 節に流れる。
+            # その状態で except 節の ``if text: merged_parts.append(text)``
+            # が動くと、 spell 結果の後ろに初回応答全文がそのまま二重表示・二重
+            # 保存される。 ここで text を空にしておけば、 失敗時に空の append
+            # は skip される (= partial で停止)。
             LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
+            text = ""
             if pipeline_streaming_state is not None:
                 _retry_stream = llm_client.generate_stream(
                     messages,
-                    tools=None,
+                    tools=[],
                     temperature=runtime._default_temperature(persona),
                     **runtime._get_cache_kwargs(),
                 )
@@ -1037,8 +1070,6 @@ async def _run_spell_loop(
                 pipeline_streaming_state["voiced_text"] = (
                     pipeline_streaming_state.get("voiced_text", "") + _retry_voiced_added
                 )
-                # spell loop は内部で usage を consume するので、 generate_stream
-                # でも consume_usage が呼べる前提 (= 既存 LLM client 全社対応済)
                 retry_result = _retry_text
                 if _retry_cancelled:
                     LOGGER.info(
@@ -1049,7 +1080,7 @@ async def _run_spell_loop(
             else:
                 retry_result = llm_client.generate(
                     messages,
-                    tools=None,
+                    tools=[],
                     temperature=runtime._default_temperature(persona),
                     **runtime._get_cache_kwargs(),
                 )
