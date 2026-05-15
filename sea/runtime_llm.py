@@ -309,11 +309,17 @@ def _build_spell_user_only_block(
 ) -> str:
     """Build a ``<user_only>`` block carrying one spell invocation + result.
 
-    Structure (Phase 2-B-step3, voice_tts_pipeline_streaming intent doc):
+    Structure (Phase 2-B-step3 / 2-E, voice_tts_pipeline_streaming intent doc):
 
         <user_only alt="{display_name}">
         /spell name='{tool_name}' args={...}
-        <details class="spellResult">{escaped_result}</details>
+        <details class="spellResult">
+          <summary class="spellSummary">
+            <span class="spellIcon"><svg ...>star</svg></span>
+            <span>{display_name}</span>
+          </summary>
+          {escaped_result}
+        </details>
         </user_only>
 
     - ``alt`` flows into other-persona ingestion (``strip_for_other_persona``)
@@ -323,7 +329,10 @@ def _build_spell_user_only_block(
       assistant message persisted to context) — kept as raw text so the
       persona who emitted it can see exactly what they invoked.
     - Result is HTML-escaped and wrapped in ``<details class="spellResult">``
-      for the foldable UI display. Frontend renders this via Phase 2-E.
+      for the foldable UI display. The summary reuses the existing
+      ``.spellSummary`` / ``.spellIcon`` styling shared with legacy
+      ``<details class="spellBlock">`` records (= consistent purple disclosure
+      look between old and new records).
     - The whole block is stripped from voice/external paths by
       ``strip_user_only`` and replaced with placeholder by
       ``strip_for_other_persona``.
@@ -340,10 +349,26 @@ def _build_spell_user_only_block(
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
-    result_section = (
-        f'<details class="spellResult">{result_escaped}</details>'
-        if result_escaped else ""
+    display_name_escaped = (
+        (display_name or tool_name)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
+    if result_escaped:
+        result_section = (
+            f'<details class="spellResult">'
+            f'<summary class="spellSummary">'
+            f'<span class="spellIcon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z"/>'
+            f'</svg></span>'
+            f'<span>{display_name_escaped}</span>'
+            f'</summary>'
+            f'{result_escaped}'
+            f'</details>'
+        )
+    else:
+        result_section = ""
     return (
         f'<user_only alt="{alt_escaped}">\n'
         f'{spell_line}\n'
@@ -1982,6 +2007,47 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "Proceeding with empty response.",
                             max_stream_retries
                         )
+
+                    # Phase 2-D (cancellation cleanup): Pipeline Streaming で
+                    # placeholder を発番済みのまま cancellation で抜けた場合、
+                    # voice-tts 側 audio_stream が close されず、 building
+                    # history の _streaming_placeholder=True も残り続ける。
+                    # ここで finalize して 「partial で確定 + voice-tts に
+                    # is_final=True を送って stream close + wav 保存」 を
+                    # 強制する。 下流の spell loop / emit 経路は二重 finalize
+                    # しないよう pipeline_streaming/msg_id を倒しておく。
+                    if cancelled_during_stream and pipeline_streaming and pipeline_msg_id:
+                        from saiverse.content_tags import strip_in_heart, strip_user_only
+                        _cancel_eff_bid = runtime._effective_building_id(persona, building_id)
+                        _cancel_remainder_raw = text[pipeline_last_emit_pos:] if text else ""
+                        _cancel_remainder_voice = (
+                            strip_user_only(strip_in_heart(_cancel_remainder_raw)).strip()
+                            if _cancel_remainder_raw else ""
+                        )
+                        pipeline_sub_seq += 1
+                        try:
+                            runtime._emit_speak_finalize(
+                                persona, _cancel_eff_bid, pipeline_msg_id, text or "",
+                                pulse_id=state.get("_pulse_id"),
+                                extra_metadata=None,
+                                final_sub_seq=pipeline_sub_seq,
+                                final_voice_text=_cancel_remainder_voice,
+                            )
+                            state["_last_message_id"] = pipeline_msg_id
+                        except Exception:
+                            LOGGER.warning(
+                                "[sea][pipeline] cancellation finalize raised; "
+                                "placeholder may remain unconfirmed",
+                                exc_info=True,
+                            )
+                        LOGGER.info(
+                            "[sea][pipeline] Cancelled mid-stream: finalized placeholder "
+                            "msg=%s seq=%d partial_len=%d remainder_voice_len=%d",
+                            pipeline_msg_id, pipeline_sub_seq,
+                            len(text or ""), len(_cancel_remainder_voice),
+                        )
+                        pipeline_streaming = False
+                        pipeline_msg_id = None
 
                     # Record usage (even if cancelled — tokens were consumed)
                     usage = llm_client.consume_usage()

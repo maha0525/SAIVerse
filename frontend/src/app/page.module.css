@@ -1462,7 +1462,8 @@
     transition: transform 0.2s;
 }
 
-:global(.spellBlock[open] .spellSummary::after) {
+:global(.spellBlock[open] .spellSummary::after),
+:global(.spellResult[open] .spellSummary::after) {
     transform: rotate(180deg);
 }
 

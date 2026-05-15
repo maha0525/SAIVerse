@@ -1,6 +1,6 @@
 # Intent: LLM → TTS Pipeline Streaming + bubble1/bubble2 撤廃
 
-**ステータス**: 設計確定 (2026-05-15 まはー インタビュー 6 周経て大幅改訂)、 Phase 2-B-step3 + Phase 2-C 実装済 (2026-05-15 後半セッション)、 残実装 Phase 2-D / 2-E は別セッション
+**ステータス**: 設計確定 (2026-05-15 まはー インタビュー 6 周経て大幅改訂)、 Phase 2-B-step3 + Phase 2-C + Phase 2-D + Phase 2-E 実装済 (2026-05-15 後半セッション)、 実機テスト待ち
 
 **関連**: [`voice_tts_playback_queue.md`](voice_tts_playback_queue.md) (= subscriber 側 queue + Stack-chan 流量制御 + bubble1 早期 emit)、 [`addon_speak_hooks.md`](addon_speak_hooks.md) (= persona_speak hook 経路)、 [`stackchan_vessel.md`](stackchan_vessel.md)
 
@@ -184,15 +184,23 @@ runtime._emit_speak_finalize(
 
 検討した代案: 案 B は `_emit_speak_finalize` 自体の hook 発火責務を caller 側に移し caller が直前に `_emit_sub_speak(is_final=True)` を出す形。 hook contract がより複雑になるため案 A を採用 (= 最少差分、 caller が text 差分を持つのは責務として自然、 hook API 構造を維持)。
 
-### Phase 2-D (= 残実装、 次セッション): 中断時 close_stream
+### Phase 2-D (= 完了、 2026-05-15 後半セッション): 中断時 close_stream
 
-- LLM cancellation 時に sub_seq 連鎖を closeable な状態にする (= voice-tts 側 audio_stream リソースリーク防止)
-- 中断時に `_emit_speak_finalize` を呼ぶ or 専用 abort hook を発火する経路追加
+- normal mode streaming branch で `cancelled_during_stream` 検出時、 retry loop break 直後に `_emit_speak_finalize` を強制呼び出し:
+  - `text` = chunk loop で蓄積した partial を全文として placeholder に書き込み
+  - `final_voice_text` = `text[pipeline_last_emit_pos:]` を `strip_user_only(strip_in_heart(...))` した残りを voice-tts に渡す (= 既に sub-speak 済の prefix は二重合成しない)
+  - voice-tts は `is_final=True` を受け取って audio_stream を close + wav 保存
+- finalize 後は `pipeline_streaming = False` / `pipeline_msg_id = None` に倒して、 下流の spell loop / emit パスが placeholder を二重 finalize しないようにする
+- 専用 abort hook 経路は導入せず、 既存の finalize hook を 「partial で確定」 のセマンティクスで再利用 (= API surface を増やさない)
+- Tool-mode streaming は Phase 2-C 同様 Pipeline Streaming に組み込まれていないので 2-D 対応も不要
 
-### Phase 2-E (= 残実装、 次セッション): UI 側の spell 結果表示
+### Phase 2-E (= 完了、 2026-05-15 後半セッション): UI 側の spell 結果表示
 
-- ReactMarkdown / sanitizeSchema で `<details class="spellResult">` を rendering 対象に追加 (= 既存 `<details class="spellBlock">` 系の CSS を流用 or リネーム)
-- spell 起動行 (= `/spell foo(bar)`) は raw text として表示 (= 何もしない、 ただし markdown 的に code 化したいなら追加 styling)
+- `_build_spell_user_only_block` で `<details class="spellResult">` 内に `<summary class="spellSummary">` を埋める形に変更 (= 既存 `<details class="spellBlock">` の `<summary>` と同じ icon + display_name 構造)
+- `frontend/src/app/page.tsx` の `sanitizeSchema` は既に `details/summary/span/svg/path` の className を許可済 — 追加 schema 編集は不要
+- `frontend/src/app/page.module.css` の `:global(.spellBlock[open] .spellSummary::after)` rule に `:global(.spellResult[open] .spellSummary::after)` を併記 → 新 `<details class="spellResult">` でも marker rotation が動く
+- 既存 `.spellResult` CSS (= 旧 `<div class="spellResult">` 用の padding + 紫背景 + max-height スクロール) は そのまま残置。 新 `<details class="spellResult">` も outer container として同じ visual style が適用される
+- 過去 record (= 旧 `<details class="spellBlock">` 形式) の rendering は無変更で動作継続
 
 ## 既知のトレードオフ
 
@@ -206,6 +214,8 @@ runtime._emit_speak_finalize(
 - 2026-05-15 (前): voice_tts_playback_queue.md の Phase 1/2/流量制御 + bubble1 早期 emit 実装完了
 - 2026-05-15 (前半): Pipeline Streaming intent doc 起草 → まはー インタビューを 6 周回って 「bubble1/bubble2 撤廃 + 1 message 統合 + `<user_only>` 維持」 まで設計確定
 - 2026-05-15 (前半): 下層 building block 3 commit 済 (= `613be6f` voice-tts、 `49299e2` history_manager、 `5141649` emit_speak 3 段階 API)
-- 2026-05-15 (後半): Phase 2-B-step3 実装 (spell loop return 変更 + `_build_spell_user_only_block` 置換 + 3 caller の `_emit_say` 1 回統合)
-- 2026-05-15 (後半): Phase 2-C 実装 (normal streaming branch に `_emit_speak_start` + sub-speak + `_emit_speak_finalize` 組み込み、 `final_voice_text` 案 A 採用、 `SAIVERSE_LLM_TTS_PIPELINE=1` gate)
-- 残実装: Phase 2-D (中断時 close_stream)、 Phase 2-E (UI rendering `<details class="spellResult">`)、 tool mode streaming への Pipeline Streaming 適用 (= follow-up)
+- 2026-05-15 (後半): Phase 2-B-step3 実装 (spell loop return 変更 + `_build_spell_user_only_block` 置換 + 3 caller の `_emit_say` 1 回統合) → commit `956c738`
+- 2026-05-15 (後半): Phase 2-C 実装 (normal streaming branch に `_emit_speak_start` + sub-speak + `_emit_speak_finalize` 組み込み、 `final_voice_text` 案 A 採用、 `SAIVERSE_LLM_TTS_PIPELINE=1` gate) → commit `956c738`
+- 2026-05-15 (後半): Phase 2-D 実装 (cancellation 検出時に placeholder を partial で finalize、 voice-tts audio_stream リーク防止)
+- 2026-05-15 (後半): Phase 2-E 実装 (`<details class="spellResult">` に summary を埋め込み、 CSS marker rotation rule 追加)
+- 残実装: tool mode streaming への Pipeline Streaming 適用 (= follow-up、 必要に応じて)
