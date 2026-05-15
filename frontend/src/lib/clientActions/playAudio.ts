@@ -1,17 +1,19 @@
 /**
  * `play_audio` client action executor.
  *
- * Phase 1 (FIFO 順次再生):
- *   発火した audio_ready は **queue 末尾** に積まれ、 共有 ``<audio>`` 要素の
- *   ``ended`` イベントで次の item を順次再生する。 これにより 「同じ pulse
- *   から複数発話が連続発火しても 1 つも切れずに最後まで再生」 が成立する。
- *   旧来 (= Phase 0) は新発話が来るたびに src を上書きしていたため、 後発が
- *   前発を強制中断していた。
+ * Phase 1 (FIFO 順次再生) + Phase 2 (pulse_id ベース preempt):
+ *   発火した audio_ready は ``<audio>`` の ``ended`` イベントで順次再生される
+ *   queue で管理する。 ただし新着 audio_ready の ``pulse_id`` が現再生中の
+ *   item と **異なる** 場合は、 queue を全クリア + 現再生を即中断 + 新 audio
+ *   を即再生する (= 別 pulse の発話 = ユーザー新ターン等の割り込みを即時反映
+ *   するため)。
  *
- *   queue item は ``pulseId`` / ``messageId`` を保持する (Phase 2 prep)。
- *   Phase 2 で 「同 pulse → queue 末尾、 別 pulse → queue 全クリア + 現 audio
- *   を pause() で即中断 + 新 audio 即再生」 という pulse_id 比較分岐を追加
- *   する。 Phase 1 の現状ではどの item も同じ扱いで FIFO に並ぶ。
+ *   pulse_id 比較ロジック:
+ *     - 両方の pulse_id が定義済み + 異なる → preempt
+ *     - それ以外 (= 片方/両方 undefined、 または同じ) → FIFO 末尾積み
+ *
+ *   片方 undefined の保守的扱いは、 voice-tts 以外の addon (= pulse 概念を
+ *   持たない発話源) が play_audio を呼んでも誤って既存再生を切らないため。
  *
  * autoplay 対策 (iOS Safari / Android Chrome):
  *   モバイルブラウザは「ユーザージェスチャー起点でない audio.play()」を拒否する。
@@ -116,15 +118,62 @@ if (typeof window !== "undefined") {
 type QueueItem = {
     url: string;
     fallbackUrl?: string;
-    /** Phase 2 で同 pulse / 別 pulse 判定に使う。 Phase 1 では undefined のまま */
+    /** 同 pulse / 別 pulse 判定軸 (Phase 2)。 voice-tts 以外の発話源では undefined */
     pulseId?: string;
-    /** ログ識別 + Phase 2 で個別 item を指す key */
+    /** ログ識別 + 個別 item を指す key */
     messageId?: string;
     /** 再生開始時刻 (= startNext で audio.play() を呼んだ moment)、 ended/error 時の実再生時間計算用 */
     playStartedAt?: number;
     resolve: () => void;
     reject: (err: Error) => void;
 };
+
+/**
+ * 別 pulse 着信時に旧 queue を全クリアする (= ユーザー新ターン即時反映)。
+ *
+ * 引数 ``newPulseId`` と現 currentItem.pulseId を比較し、 両方が定義済み +
+ * 異なる場合に true を返して preempt 経路を発動する。 この関数自体は判定
+ * 専用で副作用を持たない (= 呼び出し側で実際の clear / pause を行う)。
+ */
+function shouldPreemptForNewPulse(newPulseId: string | undefined): boolean {
+    if (currentItem === null) return false;
+    if (newPulseId === undefined) return false;
+    if (currentItem.pulseId === undefined) return false;
+    return newPulseId !== currentItem.pulseId;
+}
+
+/**
+ * 別 pulse preempt: queue を全クリアし、 現再生 audio を即中断する。
+ *
+ * 旧 queue 内の item は ``resolve()`` で benign 扱い (= reject すると
+ * registry 側 runAndReport が on_failure_endpoint に POST してしまうが、
+ * 「別 pulse に置き換わった」 のは本来 失敗ではないため)。 旧 currentItem
+ * も同様に resolve。 audio element は ``pause()`` + ``src=""`` で完全停止
+ * させる (= ended イベントは発火させない)。
+ */
+function preemptCurrentPulse(reason: string): void {
+    const dropped = playbackQueue.splice(0);
+    for (const item of dropped) {
+        item.resolve();
+    }
+    if (currentItem !== null) {
+        currentItem.resolve();
+        currentItem = null;
+    }
+    clearWatchdog();
+    const audio = sharedAudio;
+    if (audio !== null) {
+        audio.pause();
+        // src="" で empty にすると ended は発火せず、 直後の startNext での
+        // src 差し替え時に Audio element の状態がリセットされた状態で開始
+        // できる。 emptied イベントは発火するが listener を付けていないので
+        // 副作用なし。
+        audio.src = "";
+    }
+    diag(`preempt fired (${reason})`, {
+        droppedCount: dropped.length,
+    });
+}
 
 // ---------- DIAG: Phase 1 検証用詳細ログ (= 確認後撤去 or DEBUG 化) ----
 function diag(msg: string, extra?: Record<string, unknown>): void {
@@ -347,15 +396,15 @@ export const playAudioExecutor: ClientActionExecutor = async (ctx) => {
         );
     }
 
-    // Phase 2 の preempt 判定軸用に pulse_id を event payload から拾う。
-    // Phase 1 段階では server 側 (= voice-tts の audio_ready emit) がまだ
-    // pulse_id を載せていないので undefined のままになる。 Phase 2 で server
-    // 側 emit_addon_event payload に pulse_id を足したらここが意味を持つ。
+    // pulse_id は audio_ready event payload から拾う (= voice-tts addon が
+    // Phase 2 で payload に追加した値)。 voice-tts 以外の発話源 (= 将来別
+    // addon が play_audio を使うケース) では undefined のまま、 その場合は
+    // FIFO に倒れる (= 既存再生を切らない保守動作)。
     const pulseId = event.data?.pulse_id as string | undefined;
 
-    // executor の Promise は queue item が完了 (= ended / error / watchdog)
-    // した時点で settle する。 これで registry 側の runAndReport が
-    // on_failure_endpoint POST を撃つタイミングが queue 完了基準で揃う。
+    // executor の Promise は queue item が完了 (= ended / error / watchdog /
+    // preempt) した時点で settle する。 preempt 経路でも resolve() を呼ぶ
+    // (= 別 pulse に置き換わったのは本来失敗ではないため)。
     return new Promise<void>((resolve, reject) => {
         const item: QueueItem = {
             url: firstUrl,
@@ -368,6 +417,15 @@ export const playAudioExecutor: ClientActionExecutor = async (ctx) => {
             resolve,
             reject,
         };
+
+        // 別 pulse 着信 → 旧 pulse の queue + 現再生を即破棄してから
+        // 新 item を queue に積む (= startNext でそのまま新 audio が再生開始)。
+        if (shouldPreemptForNewPulse(pulseId)) {
+            preemptCurrentPulse(
+                `new pulse=${pulseId ?? "?"} differs from current=${currentItem?.pulseId ?? "?"}`,
+            );
+        }
+
         playbackQueue.push(item);
         diag(`enqueue msg=${shortMsg(item.messageId)} url=${firstUrl}`, {
             currentItemMsg: currentItem ? shortMsg(currentItem.messageId) : null,
