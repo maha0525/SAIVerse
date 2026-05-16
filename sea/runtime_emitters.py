@@ -109,6 +109,7 @@ class RuntimeEmitters:
                 )
                 dispatch_hook(
                     "persona_speak",
+                    order_key=msg_id_for_hook,
                     persona_id=persona.persona_id,
                     building_id=building_id,
                     text_raw=text,
@@ -210,6 +211,7 @@ class RuntimeEmitters:
                 )
                 dispatch_hook(
                     "persona_speak",
+                    order_key=msg_id_for_hook,
                     persona_id=persona.persona_id,
                     building_id=building_id,
                     text_raw=text,
@@ -312,6 +314,7 @@ class RuntimeEmitters:
                 return
             dispatch_hook(
                 "persona_speak",
+                order_key=message_id,
                 persona_id=persona.persona_id,
                 building_id=building_id,
                 text_raw=sub_text,
@@ -462,6 +465,7 @@ class RuntimeEmitters:
                 hook_text_for_voice = strip_user_only(strip_in_heart(text))
             dispatch_hook(
                 "persona_speak",
+                order_key=message_id,
                 persona_id=persona.persona_id,
                 building_id=building_id,
                 text_raw=text,

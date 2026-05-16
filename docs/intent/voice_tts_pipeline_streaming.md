@@ -121,7 +121,7 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
 ## 不変条件
 
 1. **メッセージは単一**: 1 LLM call の応答は SAIMemory / building history / persona history / UI に **1 record として記録される**
-2. **sub_seq の順序保証**: emit 側 (sea runtime) が連番発番、 voice-tts 側が enqueue 順で処理 (= queue は FIFO)、 audio_stream は単一 message_id で連続 push される
+2. **sub_seq の順序保証**: emit 側 (sea runtime) が連番発番、 hook dispatch が `order_key=message_id` で同 message_id を直列化 (= `addon_hooks.dispatch_hook` の `order_key` 機構)、 voice-tts 側が enqueue 順で処理 (= queue は FIFO)、 audio_stream は単一 message_id で連続 push される。 hook 経路を直列化しない場合、 ThreadPoolExecutor が並列ピックアップして `enqueue_tts` への着順が崩れる (= 2026-05-16 観測のチャンク並び替え事故)。 emit 側の連番発番だけでは不十分
 3. **既存 streaming_chunk / streaming_complete event は変更なし**: UI 表現の経路は touch しない
 4. **`<user_only>` 機構は維持**: spell 詳細を他ペルソナ・音声から守る目的の機構はそのまま
 5. **ストリーミング応答経路では常時 Pipeline Streaming**: (1) ストリーミングで普通の応答 経路は旧 Phase 1 を撤去し Pipeline Streaming に一本化。 機能フラグ gate は無い (= 「旧 path を残して env で切り替え」 はリポジトリのカオス化を招くため [[feedback-no-dead-code-via-flags]] に従って削除)。 ストリーミングを使えない経路 ((3) 全文一括で普通の応答 / (4) 全文一括で function calling) では 「spell 実行前に bubble1 を先に emit する」 旧経路 (`_emit_bubble1_early`) を残す (= 物理的に sub-speak できないため)。 (2) ストリーミングで function calling は SAIVerse の主流から外れる経路 (CLAUDE.md で Playbook の function calling 利用を非推奨) なので Phase 1 のまま残置
@@ -158,15 +158,17 @@ LLM streaming chunk 受信ループで、 句読点 (= `。、！？，；：` �
   - `_find_next_sentence_boundary` で句読点 (`。！？．!?` + 弱区切り `、，,;:` + 改行) を検出
   - 文区切りごとに `_emit_sub_speak(persona, building_id, msg_id, sub_text, sub_seq=N)` 発火
   - 最初の `/spell` 行が現れたら **sub-speak emit を停止** (`pipeline_spell_detected=True`)。 spell 行直前までを最後の pre-spell sub-speak として flush、 以降の text は spell loop → finalize 経由でまとめて送る (= spell 行を単独で voice-tts に渡さない)
-- spell loop 完了後 (or 通常完了後) に `_emit_speak_finalize(persona, building_id, msg_id, text=full_merged_or_plain, final_sub_seq=next_seq, final_voice_text=remainder_voice)` で確定
-  - `final_voice_text`: 「sub-speak で既に発話済みの prefix を除いた残テキスト」 を `strip_user_only(strip_in_heart(...))` 済の形で渡す → voice-tts は remainder だけを合成 (= 案 A、 重複合成回避)
-  - remainder = `text[pipeline_last_emit_pos:]`。 streamed prefix (`"".join(text_chunks)[:pipeline_last_emit_pos]`) が merged text の prefix と一致する場合に slice 成立。 仮定が破れた場合は full text を remainder にして警告 log
-- speak: false node の場合: placeholder を `final_voice_text=""` で finalize して voice-tts に 「合成テキスト無し → stream close」 を指示し、 placeholder の `_streaming_placeholder=True` を残さない
+- chunk 受信ループ終了時: `last_emit_pos < len(text)` の residual (= 文区切りに達してない最後の chunk) を最後の sub-speak として flush。 spell 行検出後の残り (= `/spell` 以降) は spell loop で `<user_only>` wrap される対象なので flush しない
+- spell loop 完了後 (or 通常完了後) に `_emit_speak_finalize(persona, building_id, msg_id, text=full_merged_or_plain, final_sub_seq=next_seq, final_voice_text="")` で確定
+  - `final_voice_text=""` 固定: voice-tts は sub-speak 経由で全テキストを既に受け取っているので、 finalize hook では 「stream close + wav 保存」 のみ依頼する。 残テキストの送信を最終処理に残さない設計 (= 2026-05-16 改修。 旧設計では `_compute_pipeline_remainder_voice` で 全文 vs 既送 の文字列比較をしていたが、 whitespace 差や `<user_only>` 除去後の改行差で prefix 一致が崩れ、 fallback で全文 fallback → voice-tts 二重合成を起こしていた)
+- speak: false node の場合: 同じく `final_voice_text=""` で finalize して placeholder の `_streaming_placeholder=True` を残さない
 - 504 (DEADLINE_EXCEEDED) 中断: partial を finalize で確定、 続く re-speak 経路は `_emit_say` (= 別 message_id) で続行
 
-### Phase 2-C 案 A: `emit_speak_finalize` の `final_voice_text` パラメタ (2026-05-15)
+### Phase 2-C 残テキスト送信設計の変遷 (2026-05-15 → 2026-05-16)
 
-voice-tts は `enqueue_tts(text)` の `text` をそのまま GPT-SoVITS に流すので、 finalize hook が「全文」 を `text_for_voice` に渡すと sub-speak 済の prefix が **重複合成** される。 解決策として `emit_speak_finalize` に optional `final_voice_text` を追加し、 caller (= sea/runtime_llm.py) が remainder を計算して渡す:
+**最終形 (2026-05-16): sub-speak で全テキスト送信、 finalize は close のみ**
+
+`_consume_pipeline_stream` が stream 終端で residual も sub-speak として flush するので、 voice-tts は sub-speak 経路だけで全テキストを受け取る。 `emit_speak_finalize` は `final_voice_text=""` 固定で voice-tts に 「stream close + wav 保存」 のみ依頼する。
 
 ```python
 runtime._emit_speak_finalize(
@@ -174,19 +176,19 @@ runtime._emit_speak_finalize(
     pulse_id=pulse_id,
     extra_metadata=...,
     final_sub_seq=next_seq,
-    final_voice_text=stripped_remainder,  # "last sub-speak 以降の残テキスト"
+    final_voice_text="",  # 常に空、 残テキスト計算は不要
 )
 ```
 
-`final_voice_text=None` (default) なら従来通り全文から `strip_user_only(strip_in_heart(...))` で derive (= sub-speak 未使用時の互換動作)。 空文字 `""` を渡せば「合成すべきテキスト無し」を表す (= speak=false で placeholder を綺麗に close する用)。
+`final_voice_text=None` (default) は従来互換 (= sub-speak 未使用時、 全文から `strip_user_only(strip_in_heart(...))` で derive)。 Pipeline Streaming 経路はすべて空文字を渡す。 voice-tts addon 側は `text_for_voice="" + is_final=True` を 「stream close 専用 signal」 として扱う (= `speak_hook.py` の短絡条件から `text_for_voice` 必須を外し、 `playback_worker._process` 冒頭で finalize-only job を判定して `_finalize_message_state` に直接流す経路を追加)。
 
-検討した代案: 案 B は `_emit_speak_finalize` 自体の hook 発火責務を caller 側に移し caller が直前に `_emit_sub_speak(is_final=True)` を出す形。 hook contract がより複雑になるため案 A を採用 (= 最少差分、 caller が text 差分を持つのは責務として自然、 hook API 構造を維持)。
+**旧形 (2026-05-15、 廃止)**: `_compute_pipeline_remainder_voice` で 「全文 - 既送 = 残り」 を計算して finalize で voice-tts に渡す案 A。 全文 vs 既送 の文字列比較が `<user_only>` 除去後の改行差や fragment ごとの `.strip()` 仕様で破れ、 prefix 不一致 → fallback で全文 → voice-tts 二重合成、 という事故を起こした (2026-05-16 実機観測)。 まはー 指摘 「残テキストもsub-speakで送ってから最終処理に入るべきで、 最終処理で音声生成をそもそも呼ばなければ問題起きない」 を受けて最終形に変更。
 
 ### Phase 2-D (= 完了、 2026-05-15 後半セッション): 中断時 close_stream
 
 - normal mode streaming branch で `cancelled_during_stream` 検出時、 retry loop break 直後に `_emit_speak_finalize` を強制呼び出し:
   - `text` = chunk loop で蓄積した partial を全文として placeholder に書き込み
-  - `final_voice_text` = `text[pipeline_last_emit_pos:]` を `strip_user_only(strip_in_heart(...))` した残りを voice-tts に渡す (= 既に sub-speak 済の prefix は二重合成しない)
+  - `final_voice_text=""` (2026-05-16 改修以降): residual は `_consume_pipeline_stream` 終端の flush で既に sub-speak されているので、 finalize は close のみ
   - voice-tts は `is_final=True` を受け取って audio_stream を close + wav 保存
 - finalize 後は `pipeline_streaming = False` / `pipeline_msg_id = None` に倒して、 下流の spell loop / emit パスが placeholder を二重 finalize しないようにする
 - 専用 abort hook 経路は導入せず、 既存の finalize hook を 「partial で確定」 のセマンティクスで再利用 (= API surface を増やさない)
@@ -218,3 +220,5 @@ runtime._emit_speak_finalize(
 - 2026-05-15 (後半): Phase 2-E 実装 (`<details class="spellResult">` に summary を埋め込み、 CSS marker rotation rule 追加)
 - 2026-05-15 (後半): (1) 経路の旧 Phase 1 path + 環境変数 gate を全削除 (= 「旧 path を残して env で切り替え」 はカオス化招くという まはー指摘)。 ストリーミングを使えない (3)(4) 経路では Phase 1 を残置
 - 2026-05-15 (後半): chunk consume + sub-speak emit + spell 検出ロジックを `_consume_pipeline_stream` helper に切り出し。 `_run_spell_loop` に `pipeline_streaming_state` 引数を追加し、 spell 実行後の 2 回目以降の LLM 呼び出しも `generate_stream` + helper 経由に置き換え (= まはー指摘 「spell 後の応答が一気に出る」 問題の解消)。 finalize の remainder voice 計算を `[last_emit_pos:]` slice から voiced_text 累積方式に変更 (round 跨ぎで頑健)。 helper `_compute_pipeline_remainder_voice` 共通化
+- 2026-05-16: **残テキスト送信設計を撤廃** (= まはー指摘 「最終処理で音声生成を呼ばなければ問題起きない」)。 `_consume_pipeline_stream` が stream 終端の residual も sub-speak で flush するように変更し、 全 finalize 経路で `final_voice_text=""` 固定に。 `_compute_pipeline_remainder_voice` / `pipeline_voiced_text` / `voiced_text_added` を全削除。 voice-tts addon 側は `text_for_voice="" + is_final=True` を 「stream close 専用 signal」 として扱う経路を追加 (`speak_hook.py` 短絡条件緩和 + `playback_worker._process` 冒頭の finalize-only 判定)
+- 2026-05-16: **不変条件 2 (sub_seq 順序保証) の中継層対応**: `addon_hooks.dispatch_hook` に `order_key` 引数を追加し、 同 message_id の dispatch を per-handler で FIFO 直列化 (= Future chain 機構)。 実機で 「emit 順 1,2,3 → enqueue 順 1,3,2」 と並び替えが起きてチャンクが入れ替わる事故が発生 (= ThreadPoolExecutor の並列 pick-up が原因)。 emit 側 (`runtime_emitters.py`) の 4 dispatch_hook 呼び出しすべてに `order_key=message_id` を渡す。 単体テスト 4 件追加

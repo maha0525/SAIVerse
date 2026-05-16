@@ -97,6 +97,8 @@ Unity Gateway 通知も本来この hook 機構で表現できる (unity-gateway
 
 複数ハンドラ宣言可 (配列)。複数アドオンが同一イベントを購読しても順序保証はしない (並列実行扱い)。
 
+ただし発火側 (本体) が `dispatch_hook(event, order_key=K, ...)` で `order_key` を指定した場合、 同じ `K` の dispatch は同一ハンドラに対して提出順で直列実行される (= per-handler の FIFO chain)。 異なる `order_key` の dispatch は独立に並列。 Pipeline Streaming の sub_seq 順序保証で `order_key=message_id` を使う (= 同 message_id への sub-speak hook を着順で voice-tts addon に届ける)。 詳細は `voice_tts_pipeline_streaming.md` 不変条件 2 を参照。
+
 ### B. イベントペイロード
 
 ```python
@@ -259,6 +261,14 @@ Phase 1 のスコープを絞るためアドオン側責務とする。実装が
 ### なぜ複数ハンドラの実行順序を保証しないか
 
 順序保証すると ThreadPoolExecutor で並列実行できなくなり、隔離設計の利点が半減する。発話 hook は本質的に **副作用通知** であり、ハンドラ間に依存関係がある設計はそもそも避けるべき。順序が必要なシナリオ (例: ログを取った後に外部送信) は 1 つのハンドラ内で順次実行する。
+
+### `order_key` で同一識別子の dispatch を直列化する (2026-05-16 追加)
+
+ハンドラ間の順序は依然保証しないが、 **同じ識別子に紐づく連続 dispatch を同一ハンドラへ FIFO で届ける** ニーズが Pipeline Streaming で発生した。 voice-tts addon の `enqueue_tts` が sub_seq 順に呼ばれないと音声チャンクが入れ替わって再生される (= 2026-05-16 実機事故、 「emit 順 1,2,3 → enqueue 順 1,3,2」)。
+
+`dispatch_hook(..., order_key=K)` を指定すると、 `(event, K, handler)` ごとに 1 つの Future chain を維持し、 直前 dispatch の完了を待ってから次の dispatch のハンドラ呼び出しを走らせる。 異なる `K` の chain は独立 (= 他 message をブロックしない)。 ハンドラ間も依然並行。 完了済 Future は chain dict から自動削除して leak しない。 ハンドラ例外は chain を切らずに次に進む (= 1 つの dispatch 失敗で後続の発話が消えると困る)。
+
+「順序が必要」 という general 要件と 「並列性を守る」 という設計方針の折衷で、 オプトイン (`order_key` 指定時のみ) 機構として導入。 default の `order_key=None` は従来の完全並列挙動。
 
 ## スコープ
 

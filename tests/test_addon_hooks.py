@@ -152,6 +152,133 @@ class AddonHooksTests(unittest.TestCase):
     # 不明イベント
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # order_key (Pipeline Streaming sub_seq 順序保証用)
+    # ------------------------------------------------------------------
+
+    def test_order_key_preserves_dispatch_order_within_key(self) -> None:
+        """同じ order_key の dispatch は提出順に直列実行される。
+
+        sub_seq 順序保証 (= voice_tts_pipeline_streaming intent doc 不変条件 2)
+        の根本機構。 ThreadPoolExecutor の並列 pick-up で順序が崩れると、
+        voice-tts addon の `enqueue_tts` が逆順に呼ばれて発話が入れ替わる
+        (2026-05-16 観測のチャンク並び替え事故の原因)。
+        """
+        observed_order: List[int] = []
+        observed_lock = threading.Lock()
+        all_done = threading.Event()
+        n = 20
+
+        def handler(*, seq: int, **_p: Any) -> None:
+            # 早く来た方が必ず先に append するため、 sleep で latency を
+            # ばらつかせて 「FIFO 直列」 を信頼できる形で検証する。 並列
+            # ピックアップだと seq=0 が一番遅く完了する状況を作る。
+            time.sleep(0.005 * (n - seq))
+            with observed_lock:
+                observed_order.append(seq)
+                if len(observed_order) >= n:
+                    all_done.set()
+
+        addon_hooks.register_hook("persona_speak", handler)
+
+        for i in range(n):
+            addon_hooks.dispatch_hook(
+                "persona_speak",
+                order_key="msg-1",
+                seq=i,
+            )
+
+        self.assertTrue(all_done.wait(timeout=10.0))
+        self.assertEqual(observed_order, list(range(n)))
+
+    def test_order_key_different_keys_run_in_parallel(self) -> None:
+        """異なる order_key の dispatch は互いをブロックしない。"""
+        start_lock = threading.Lock()
+        started: List[str] = []
+        release = threading.Event()
+
+        def handler(*, key_label: str, **_p: Any) -> None:
+            with start_lock:
+                started.append(key_label)
+            release.wait(timeout=2.0)
+
+        addon_hooks.register_hook("persona_speak", handler)
+
+        addon_hooks.dispatch_hook("persona_speak", order_key="a", key_label="a")
+        addon_hooks.dispatch_hook("persona_speak", order_key="b", key_label="b")
+
+        # a と b は別 key なので並行して start に到達する
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 2.0:
+            with start_lock:
+                if len(started) >= 2:
+                    break
+            time.sleep(0.01)
+
+        with start_lock:
+            self.assertEqual(sorted(started), ["a", "b"])
+
+        release.set()
+
+    def test_order_key_per_handler_chain(self) -> None:
+        """同じ order_key + 複数ハンドラ: ハンドラごとに FIFO 直列、 ハンドラ
+        間は独立に並行。"""
+        observed: List[tuple] = []
+        observed_lock = threading.Lock()
+        all_done = threading.Event()
+        n = 10
+
+        def make_handler(label: str):
+            def _h(*, seq: int, **_p: Any) -> None:
+                time.sleep(0.003 * (n - seq))
+                with observed_lock:
+                    observed.append((label, seq))
+                    if len(observed) >= n * 2:
+                        all_done.set()
+            return _h
+
+        h_a = make_handler("a")
+        h_b = make_handler("b")
+        addon_hooks.register_hook("persona_speak", h_a)
+        addon_hooks.register_hook("persona_speak", h_b)
+
+        for i in range(n):
+            addon_hooks.dispatch_hook("persona_speak", order_key="m1", seq=i)
+
+        self.assertTrue(all_done.wait(timeout=10.0))
+
+        a_seqs = [seq for label, seq in observed if label == "a"]
+        b_seqs = [seq for label, seq in observed if label == "b"]
+        self.assertEqual(a_seqs, list(range(n)))
+        self.assertEqual(b_seqs, list(range(n)))
+
+    def test_order_key_handler_exception_does_not_stop_chain(self) -> None:
+        """直列 chain の途中で例外が出ても、 後続 dispatch は実行される。"""
+        observed: List[int] = []
+        observed_lock = threading.Lock()
+        all_done = threading.Event()
+
+        def handler(*, seq: int, **_p: Any) -> None:
+            if seq == 1:
+                raise RuntimeError("intentional")
+            with observed_lock:
+                observed.append(seq)
+                if len(observed) >= 4:
+                    all_done.set()
+
+        addon_hooks.register_hook("persona_speak", handler)
+
+        for i in range(5):
+            addon_hooks.dispatch_hook("persona_speak", order_key="m1", seq=i)
+
+        self.assertTrue(all_done.wait(timeout=5.0))
+        # seq=1 は例外で skip、 残り 4 件は順序保たれる
+        self.assertEqual(observed, [0, 2, 3, 4])
+
+    # ------------------------------------------------------------------
+    # 不明イベント
+    # ------------------------------------------------------------------
+
     def test_unknown_event_still_registers(self) -> None:
         """KNOWN_EVENTS 外のイベント名でも (warning 付きで) 登録できる。"""
         called = threading.Event()
