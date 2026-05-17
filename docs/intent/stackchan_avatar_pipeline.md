@@ -318,32 +318,167 @@ saiverse-stackchan-addon に以下を実装:
 - `OccupancyManager.on_persona_entered(building_id, persona_id)` フックで avatar セット選択
 - Vessel Building の `physical_vessel_id` がセットされていて、当該ペルソナに avatar セットが定義されていれば load
 
-#### D-3. mode 選択 + 画像生成 UI
+#### D-3. UI 構造
 
-addon 管理画面に「ペルソナ avatar 設定」セクションを追加:
+addon の `ui/Panel.tsx` (= AddonManagerModal の AddonCard 内に動的読み込みされる管理画面) に「Avatar 制作」 ボタンを追加。 押すと専用 modal が開き、 modal 内で 6 段階の段階順 UI (= 段階バー + 戻る/進む) を進める。 Panel の既存セクション (= Stack-chan ペアリング管理) とは分離し、 Panel 本体の巨大化を避ける。
 
-- ペルソナ選択
-- mode 選択 (layered / matrix)
-- 画像生成 backend 選択 (`image_generator` の対応 backend から)
-- 元顔画像アップロード (= idle face として扱う) or 既存セットからインポート
-- **Step 1 生成ボタン** → 表情差分 5 種 (happy/thinking/sad/surprised/embarrassed) を生成
-- **Step 1 レビュー画面** → 5 種 + idle 計 6 表情のプレビューを並べて表示、OK (続行) / NG (キャンセル) ボタン
-- **Step 2 生成ボタン (OK 後に活性化)** → mode に応じて本生成
-  - matrix: 残り 84 枚 (90 - 6) を一括生成、進捗バー必須
-  - layered: 残り 8 パーツ (eyes 3 + mouth 5) を生成
-- 全枚プレビュー (デバイスを使わずブラウザ上で確認)
-- 「Stack-chan に転送」ボタン → load_avatar_set 呼び出し
+modal 内 UI 構成:
 
-#### D-4. 画像生成パイプライン詳細
+- **ヘッダ**: ペルソナ選択 + セット名入力 + mode 選択 (layered / matrix) + 共通プロンプト編集 (= セット単位、 D-5 参照)
+- **段階バー**: ① 元顔 / ② 表情差分 5 種 / ③ 目・口差分 / ④ トリミング / ⑤ リサイズ + 変換 / ⑥ 転送。 段階間は「戻る」 「次へ」 で移動、 完了済み段階はクリックで再訪可能
+- **段階本体**: 段階ごとに「生成 / アップロード / 既存ファイル利用」 をラジオで選択、 入力欄が切り替わる
+- **連続実行ボタン**: ④⑤⑥ は途中で人間判断が要らないので「最後まで実行」 ボタンで自動チェーン
+- **zip / フォルダ直接投入**: 段階バーで「④から開始」 を選んで zip / フォルダパスを指定。 中身を WIP の `04_trimmed/` 相当に展開してから ④ 以降を実行 (= D-7 参照)
+- **バリエーション一覧**: modal 内に「保存済みセット」 タブを置き、 ペルソナの全セット (= 衣装違い / 髪型違い) を並べる。 各セットを「開く / 削除 / WIP のみ削除 / アクティブにする」 できる (= D-8 参照)
 
-- backend: SAIVerse の `image_generator` ツールが対応する backend を選択 (具体的なモデル ID は `builtin_data/tools/image_generator.py` の `ModelType` に従う)
-- 入力: 元顔画像 + 表情指示プロンプト
-- 生成戦略:
-  - **Step 1**: 元顔から表情差分 5 種を画像編集生成 (= happy/thinking/sad/surprised/embarrassed)
-  - **Step 2 (matrix mode)**: 6 表情それぞれから eyes 3 × mouth 5 = 15 通りを派生生成 (合計 90 枚、idle base + 5 差分 base × 15 = 6 × 15)。並列度を制御しながら生成
-  - **Step 2 (layered mode)**: 元顔 (= idle base) から eyes 3 / mouth 5 のパーツを生成 (合計 8 パーツ)
-- 失敗した枚は再生成プロンプトを微調整して retry
-- 内部 API は「1 枚ずつ再生成」できるエンドポイントを持つ (= 将来の「気に入らない表情だけ差し替え」UI 拡張用)。最初のリリースでは UI 上は Step 1 全体の OK/NG のみ露出
+#### D-4. 各段階の仕様
+
+**① 元顔生成** (= idle face base):
+
+- 入力経路: (a) 生成: 自由文プロンプト + オプションで参照画像 / (b) 任意画像アップロード / (c) 既存セットから流用
+- 生成プロンプトは「共通プロンプト + 段階別追加自由文 (例: 『正面顔、 中立表情、 明るい背景』)」 を連結して image_generator backend に渡す
+- 出力: 1 枚の PNG、 WIP `01_face/face.png` に保存
+- 並列度: 1 (= 1 枚のみ)
+
+**② 表情差分 5 種生成** (= happy / thinking / sad / surprised / embarrassed):
+
+- 入力経路: (a) 生成: ①の元顔を参照画像に、 表情ごとの追加自由文を上乗せ / (b) 任意画像 5 枚アップロード / (c) 既存セット流用
+- 生成プロンプトは「共通プロンプト + 表情別追加自由文 (= ユーザー編集可能、 初期値はテンプレ提供)」 を image_generator の `input_images=[01_face/face.png]` と組み合わせ
+- 出力: 5 枚の PNG、 WIP `02_expressions/{happy,thinking,sad,surprised,embarrassed}.png` に保存
+- 並列度: 5 (= 同時並列、 rate limit に応じて調整可能)
+- **単発再生成 UI**: 5 枚プレビューに各画像の「再生成」 ボタン、 押すと該当 1 枚を追加自由文編集して再生成
+- **完了判定**: 5 枚すべてユーザー確認済みで「③へ進む」 が活性化 (= ②で固めてから ③ に進むことを保証、 ②画像を base にする ③ の派生生成が無駄にならない依存方向の保護)
+
+**③ 目・口差分生成** (matrix mode = 84 枚、 layered mode = 8 パーツ):
+
+matrix mode の場合:
+
+- 入力: ②の各表情画像 6 枚 (idle 含む) を base に、 目 3 種 (open / half / closed) × 口 5 種 (closed / half / open / e / u) の組み合わせ 15 通りを派生生成
+- 各表情 base × 15 = 90 枚、 base 自身 (eyes=open, mouth=closed) は ②の表情画像と同じなので 14 枚 × 6 = 84 枚を新規生成
+- 生成プロンプト: 「共通プロンプト + 表情別追加自由文 + 目状態 + 口状態」、 image_generator の `input_images=[表情 base]` で参照
+- **口の半開き 2 段戦略**:
+  1. 1 段目 (default): プロンプトに「わずかに唇と唇が離れている、 閉じ画像と開き画像の中間補完として使える画像」 と明示
+  2. 厳しければ 2 段目 (fallback): 開き画像 (mouth=open) を先に生成しておき、 半開き生成時に閉じ画像 + 開き画像の両方を `input_images` に渡す
+- 並列度: 5-10 (= rate limit と cost を考慮、 設定可能)
+- 出力: WIP `03_matrix/{face}_{eyes}_{mouth}.png` に 84 枚保存
+
+layered mode の場合:
+
+- 入力: ①の元顔を base に、 目 3 種 + 口 5 種 = 8 パーツを生成
+- 出力: WIP `03_layered/{eyes_<state>, mouth_<shape>}.png` の 8 枚 (face 6 枚は ②から流用)
+
+**単発再生成 UI**: 90 枚 (matrix) / 14 枚 (layered) のプレビューに各画像の「再生成」 ボタン (= D-6 参照)
+
+**④ 一括トリミング**:
+
+- WIP `02_expressions/` + `03_matrix/` (または `03_layered/`) の全画像に対して、 共通のトリミング範囲を適用
+- UI: 1 枚をプレビューに表示、 範囲を矩形指定 (= 中央 4:3 = 160:120 比率のプリセット + 微調整スライダ)
+- 適用: 全画像に同じ範囲を一律適用 (= 表情遷移で顔がズレないため、 1 枚ずつ微調整は提供しない)
+- 出力: WIP `04_trimmed/` に同名で保存
+- zip 直接投入経路: 外部から提供された画像 zip / フォルダを `04_trimmed/` の場所に展開すれば、 ⑤⑥ から開始可能 (= D-7 参照)
+
+**⑤ リサイズ + RGB565 変換**:
+
+- WIP `04_trimmed/` の全画像を 160×120 にリサイズ + RGB565 little-endian raw bytes に変換 (= 既存 `firmware/scripts/avatar_convert/convert_avatars.py` のロジックを addon backend に取り込む)
+- 1 枚あたり 160 × 120 × 2 bytes = 38,400 bytes
+- 連結: matrix mode は 90 枚を `face_index * 15 + eyes_index * 5 + mouth_index` 順で連結 (= firmware 側 `AvatarSet::GetMatrix` の lookup と一致)、 layered mode は face 6 + eyes 3 + mouth 5 を所定順で連結
+- 出力: `<set_dir>/avatar.bin` (= 確定品、 既存 schema)、 `<set_dir>/manifest.json` を同時生成 (= `{"mode": ..., "checksum": "sha256:..."}` + 任意 tag フィールド = D-8 参照)
+- WIP は ⑤後も保持 (= 削除しない、 再変換 / 後段失敗時の再実行 / 衣装違いセット派生の base として活用)
+
+**⑥ Stack-chan 転送**:
+
+- 既存 `avatar_loader.py` の `_call_load_avatar_set(archive_path=<set_dir>/avatar.bin, mode=<manifest.mode>)` を流用
+- 結果が ok なら完了、 エラー時は modal にエラー表示
+
+#### D-5. 共通プロンプト構造
+
+セット単位で「共通プロンプト」 を 1 個保持し、 各段階 / 各画像の生成プロンプトはこれに「段階別追加自由文」 を連結する二層構造。
+
+理由:
+
+- ペルソナの基本キャラ性 (= 顔立ち / 髪色 / 服装) はセット内全画像で共通させたい (= 表情切替時の見た目一貫性を保つ)
+- 衣装違い / 髪型違いで別セットを作る場合、 共通プロンプトはセットごとに変えられる (例: 「赤い着物」 / 「ショートヘア」)
+
+保存先: `wip/metadata.json` 内に `common_prompt` + 各段階の `extra_prompts: {stage_id: {target: extra_text}}` を持つ。 ユーザー編集可能。
+
+初期値テンプレ (= addon 同梱):
+
+- 共通プロンプト: ペルソナの DEFAULT_PROMPT (= persona 設定の見た目記述部分) を抽出した雛形
+- 各表情の追加自由文: 表情別テンプレ (例: happy = "smiling, eyes slightly narrowed, corners of mouth raised")
+- 目・口の追加自由文: 状態別テンプレ (例: mouth_half = "lips slightly parted, halfway between closed and open ...")
+
+#### D-6. 単発再生成
+
+② 段階完了時 (= 5 枚揃った時) と ③ 段階完了時 (= 84 枚 / 8 パーツ揃った時、 ④ 前) の 2 段階で発火。 各画像プレビューに「再生成」 ボタン、 押すと:
+
+- 該当画像の追加自由文を編集可能な小 modal が出る (= 共通プロンプトは編集対象外、 追加自由文だけ変える)
+- 「再生成実行」 で image_generator 単発呼び出し → 完了後にプレビューを差し替え
+
+②で再生成して固めてから ③ に進む設計により、 ② の画像を base にする ③ の生成が無駄にならない。 ③ の単発再生成は ④ に進む前にやれば、 ④⑤⑥ のチェーンが古い画像基準で進むのを防げる。
+
+#### D-7. WIP 永続化
+
+addon storage の構造:
+
+```
+~/.saiverse/addons/saiverse-stackchan-addon/avatar_sets/
+└── <persona_id>/
+    └── <set_name>/
+        ├── manifest.json          ← 確定品 (load_avatar_set 用、 既存 schema)
+        ├── avatar.bin             ← 確定品 (RGB565 raw 連結、 既存 schema)
+        └── wip/
+            ├── metadata.json      ← 進捗状態 + 共通プロンプト + 各段階の追加自由文
+            ├── 01_face/face.png
+            ├── 02_expressions/{happy,thinking,sad,surprised,embarrassed}.png
+            ├── 03_matrix/{face}_{eyes}_{mouth}.png         (matrix mode)
+            │   または 03_layered/{eyes_<s>, mouth_<m>}.png  (layered mode)
+            └── 04_trimmed/{③ と同構造}
+```
+
+`wip/metadata.json` の内容例:
+
+```json
+{
+  "version": 1,
+  "mode": "matrix",
+  "common_prompt": "...",
+  "extra_prompts": {
+    "01_face": {"face": "..."},
+    "02_expressions": {"happy": "...", "thinking": "...", "sad": "...", "surprised": "...", "embarrassed": "..."},
+    "03_matrix": {"happy_open_closed": "...", "happy_open_half": "...", "...": "..."}
+  },
+  "trim_rect": {"x": 0, "y": 0, "width": 1024, "height": 768},
+  "completed_stages": ["01_face", "02_expressions"],
+  "current_stage": "03_matrix"
+}
+```
+
+- 中断時 (= modal を閉じた / セッション切れ) でも `wip/` を読めば再開可能
+- ⑤ で確定品を書き出した後も `wip/` を保持 (= ④ や ⑤⑥ の再実行 / 後で衣装違いを派生したい時の base として活用)
+- WIP の削除はバリエーション一覧 UI 側に「WIP のみ削除」 「セットごと削除」 ボタンを置く
+- ユーザー命名 + 削除 UI で容量管理してもらう前提 (= 中間 PNG × 90 枚 × バリエ数 = 数十 MB / セット 程度の規模)
+
+#### D-8. 複数バリエーション保持 + 拡張余地
+
+セット名 (= `<set_name>`) をユーザー命名で複数並列保持。 既存 `avatar_loader.py` の `find_persona_set` は既に `set_name` 引数を受け取る構造になっているが、 `on_persona_entered_building` ハンドラは `DEFAULT_SET_NAME="default"` 固定で呼んでいる。 複数バリエーション対応には:
+
+- AddonConfig もしくは avatar_sets 配下に「ペルソナ別アクティブセット名」 を保持する仕組みを追加 (例: `<persona_id>/_active.json = {"set_name": "..."}`、 もしくは AddonConfig の `active_avatar_sets: {persona_id: set_name}`)
+- `on_persona_entered_building` がアクティブセット名を引いて `find_persona_set(persona_id, active_set_name)` を呼ぶ
+- バリエーション一覧 UI から「このセットをアクティブにする」 ボタンで切り替え
+
+manifest.json に自由 tag フィールドを追加 (= 拡張余地):
+
+```json
+{
+  "mode": "matrix",
+  "checksum": "sha256:...",
+  "tags": ["yukata", "long-hair", "blushing"]
+}
+```
+
+- tags はユーザー命名の自由文字列リスト
+- 将来「ペルソナの State (= 気分 / 状況 / 服装) に応じて動的にセット選択」 機能を追加する時、 tags を condition として使う想定
+- Phase 4.5-d 射程外、 schema に余地だけ残す
 
 ### E. upstream PR ストーリー + デフォルト art の依頼
 
@@ -398,13 +533,53 @@ stackchan-mcp 本流への PR を 2 段階に分けて出す:
 
 ### Phase 4.5-d: 画像生成 UI (段階的生成フロー)
 
-- addon 管理画面に avatar 設定セクションを追加
-- Step 1: 表情差分 5 種生成 + プレビュー + OK/NG レビュー
-- Step 2: OK 後に matrix 90 枚 / layered 14 個の本生成
-- プレビュー (全枚分)
-- 「Stack-chan に転送」ボタン
-- 1 枚ずつ再生成 API は内部実装、UI 露出は将来拡張で
-- 実機検証: 元顔 1 枚から Step 1 を回して OK 判断 → Step 2 で matrix mode セットを生成 → ESP32 に転送 → 表情切替できること
+実装を 5 ステップに分割。 各ステップ完了時点で実機検証可能な単位にする。
+
+**4.5-d-1: addon backend (WIP 永続化 + REST API)**
+
+- `expansion_data/saiverse-stackchan-addon/avatar_pipeline.py` を新規追加
+- WIP storage schema 実装 (= D-7、 `<set_dir>/wip/metadata.json` + 各段階のファイル配置)
+- REST API endpoint:
+  - `GET /avatar_sets/<persona_id>` (バリエーション一覧)
+  - `POST /avatar_sets/<persona_id>/<set_name>` (新規セット作成)
+  - `GET /avatar_sets/<persona_id>/<set_name>` (WIP 含む状態取得)
+  - `DELETE /avatar_sets/<persona_id>/<set_name>` (セット削除、 query で WIP のみ削除指定可)
+  - `POST /avatar_sets/<persona_id>/<set_name>/stages/<stage_id>` (段階別実行)
+  - `POST /avatar_sets/<persona_id>/<set_name>/stages/<stage_id>/regenerate` (単発再生成)
+  - `POST /avatar_sets/<persona_id>/active` (アクティブセット切替)
+- 検証: API 単体で WIP の生成 / 取得 / 削除がラウンドトリップで成立
+
+**4.5-d-2: 段階 ①②③ の画像生成**
+
+- avatar_pipeline.py に各段階の生成関数を実装 (= 共通プロンプト + 段階別追加自由文の連結ロジック)
+- image_generator backend の並列呼び出し (= `asyncio.gather` + `Semaphore` で並列度制御、 設定可能)
+- 単発再生成 API
+- 口の半開き 2 段戦略 (= default プロンプト → fallback で開き画像参照)
+- 初期値テンプレ (= 共通プロンプト雛形 + 表情別 / 状態別の追加自由文テンプレ) を addon 同梱
+- 検証: ペルソナ 1 体に対して ①→②→③ を end-to-end で実行、 90 枚 (matrix) または 14 個 (layered) が WIP に揃うこと
+
+**4.5-d-3: 段階 ④⑤⑥ (トリミング / 変換 / 転送)**
+
+- ④ 一括トリミング (= Pillow で範囲指定 crop、 全画像一律)
+- ⑤ リサイズ + RGB565 変換 (= 既存 `convert_avatars.py` ロジック取り込み、 avatar.bin 連結 + manifest.json 生成 + sha256 計算)
+- ⑥ load_avatar_set 呼び出し (= 既存 `avatar_loader.py` の `_call_load_avatar_set` を流用)
+- 検証: 4.5-d-2 で揃えた WIP から ④→⑤→⑥ を実行、 ESP32 LCD に独自顔が表示されること
+
+**4.5-d-4: UI 統合 (Panel から専用 modal)**
+
+- `ui/Panel.tsx` に「Avatar 制作」 ボタン追加
+- 新規 `ui/AvatarPipelineModal.tsx` (= 段階バー + 戻る/進む + 各段階の入力 UI + プレビュー + 単発再生成 UI + 「最後まで実行」 ボタン)
+- 共通プロンプト編集 UI + 各段階の追加自由文編集 UI
+- バリエーション一覧 タブ (= ペルソナの全セット表示 + 開く / 削除 / WIP のみ削除 / アクティブにする)
+- 検証: UI から操作のみで 4.5-d-2 / 4.5-d-3 のフローが完走できること
+
+**4.5-d-5: zip 直接投入 + アクティブセット切替**
+
+- zip / フォルダパス指定で `04_trimmed/` に展開する経路 (= 「④から開始」)
+- 展開時の構造バリデーション (= 必要枚数 + ファイル名規約)
+- `avatar_loader.py` 側にアクティブセット名引きロジック追加 (= D-8 参照、 `_active.json` または AddonConfig 経由)
+- バリエーション一覧 UI からアクティブ切替 + ペルソナ憑依時に切替後セットがロードされる連動確認
+- 検証: 同ペルソナに 2 バリエーション作成 → アクティブ切替 → Vessel 入室で別の顔が表示されること。 加えて完成画像 zip を ④ から投入 → ⑥ まで通って LCD 表示できること
 
 ### Phase 4.5-e: upstream PR + デフォルト art 依頼
 
@@ -414,6 +589,111 @@ stackchan-mcp 本流への PR を 2 段階に分けて出す:
 - merge を待つ間は SAIVerse fork (`temp/stackchan-mcp`) を `mcp_servers.json` で参照
 
 完了後、Phase 5 (Avatar 感情連動) と Phase 6 (口パク) の前提が成立する。
+
+## Phase 4.5-d 実装の確定仕様 (2026-05-17 追補)
+
+Phase 4.5-d-1 〜 4.5-d-5 の実装を進める過程で、 まはー の実機検証で確定 / 改訂した事項を以下に集約する。 元の D-3 〜 D-8 / Phase 分割の方針は維持しつつ、 細部はここで明示する。
+
+### A. デフォルト backend = `gpt_image_2` quality `low`
+
+実機検証で gpt-image-2 が `quality="low"` でも目パチ口パク用途で十分な品質、 1 枚 約 ¥2、 SAIVerse ユーザーは OpenAI key 持ってる前提が多いと判断。 default は `image_model="gpt_image_2"` / `image_quality="low"` で確定。 Debug フラグで `nano_banana_2` / `pro` / `gpt_image_1_5` / `grok_imagine` に切替可能。
+
+### B. ③ プロンプト構築の最終仕様
+
+複数の事故 (= 2 枚並び生成 / アクセサリが勝手に追加 / happy で half が open より開く / 目閉じが意図せず発生) を経て、 ③ のプロンプト構築は以下に確定:
+
+1. **`constraint` 文 (= 必ず prepend、 `metadata.extra_prompts["03_constraint"]["all"]` で上書き可)**:
+
+   > 参照画像をもとに、 瞬き・口パクアニメーションをさせるための差分画像制作である。 構図・ポーズ・表す感情・服装などは一切変えないこと。 さらに、 目と口のうち以下に指定がある側のみを指定に合わせて変更し、 指定がない側 (目または口) は参照画像から完全にそのままにすること。
+
+   「表す感情」 を維持要素に追加 (= ②長文表情テンプレと「mouth open」 が矛盾する事故防止)、 「指定がない側は参照画像から完全にそのまま」 を明示 (= eyes=open 等で目プロンプト省略時に AI が目を変えてしまう事故防止)。
+
+2. **common_prompt は ③ で default OFF** (= `metadata.apply_common_prompt_to_stage3 = False`)。 ③ は目・口差分だけが目的、 共通プロンプトの外見記述 (アクセサリ等) が差分で勝手に追加される事故を防ぐ。 Debug toggle で ON 可能。
+
+3. **face 記述は端的化** (= `_stage3_face_label(face)`: `"sad expression"` / `"happy expression"` 等、 idle は `"neutral expression"`)。 ②の長文テンプレ (= 「Sad expression, downcast eyes, slight frown, lips drawn together」 等) は ③ に持ち込まない。
+
+4. **eyes=open / mouth=closed のセル → 該当プロンプト省略**。 参照画像と同じ状態に「触る指示」 を一切渡さない。
+
+5. **eyes != "open" のセルに `eye_modify_hint` (= default テンプレ「参照画像はこの表情における目の最大開き状態である。 そこから目の開きを減少させて指定の状態にすること」) を追加**。 happy 等で half が open より開く事故を防ぐ。
+
+6. **layered の eyes=open / mouth=closed は generate せず ① face.png を copy で対応** (= matrix の base copy と同じ発想)。
+
+### C. ②③ の単発実行 + face_filter + skip_existing
+
+- `params.only_target` で 1 target だけ生成 (= ②②③ 共通、 まはー が「単発で試す」 用途)
+- `params.face_filter` で同 face の 14 件だけ生成 (= matrix 専用、 内部実行単位)
+- `params.skip_existing` で既存 PNG はタスクから除外 (= 失敗後の resume、 金ドブ回避)
+- ②③ の base copy (= matrix の `<face>_open_closed`、 layered の `eyes_open` / `mouth_closed`) は generate せず ①face / ②expression を copy
+
+### D. アニメーションプレビュー (= modal トップに常設)
+
+「現状ひとつずつ見てレビュー」 では破綻 frame が分からない問題への対応。 modal トップに `AnimationPreviewSection` を配置:
+- **表情 select** (= 6 face)
+- **目 mode**: 瞬き ON (= open → half → closed → half → open ループ、 自然な間隔 1.5-4 秒、 各 frame 60-100ms) / 常時 open / 常時 half / 常時 closed
+- **口 mode**: 口パク (= open/half/closed ランダム 80-200ms) / 常時 closed / 全ランダム (= e/u 含む 5 種、 wild 検証用)
+- **速度** slider 0.25x - 3.0x
+- **source 優先順位**: `04_trimmed` (= ④完了済み) > `03_matrix` / `03_layered`
+- matrix mode: 1 img の src 切替、 layered mode: face/eyes/mouth の 3 layer overlay (= firmware と同じ重ね方)
+
+### E. ④ トリミング: 視覚的 rect editor + variant 単位
+
+- **`TrimRectVisualEditor`** (= 新規 component): 参照画像 + 半透明シアン rect overlay + 8 ハンドル drag/resize + 4:3 アス比固定 toggle
+- drag 中は内部 state、 mouseup で 1 回 commit (= 60Hz HTTP 連射防止 + アス比維持 clamp で画像端で「アス比維持したまま伸び止まる」)
+- **trim_rect_overrides の key 意味**:
+  - matrix: face name (例: `happy`、 同 face の 15 セルは同 rect で十分)
+  - layered: target name (例: `eyes_open`、 14 個別)
+- `VariantOverridesSection` で 6 face (matrix) / 14 target (layered) を一覧表示、 各 row 折り畳み式
+- ④ trim 時の `params.face_filter` で同 face の 14-15 セルだけ trim 可能 (= 単発調整サイクルを短くする)
+
+### F. ⑥ 自動転送 (= 手動 ⑥ 撤去)
+
+`finalize_avatar_set` の最後で「該当ペルソナが Vessel Building 内にいるか」 を `avatar_loader.is_persona_in_vessel(persona_id)` で判定 → True なら内部で `transfer_avatar_set` を呼ぶ。 in-vessel 状態は `on_persona_entered_building` / `on_persona_exited_building` hook で in-memory に記録。
+
+- Vessel 内ペルソナ: ⑤ 確定で即時転送 (= LCD 反映が即時)
+- Vessel 外ペルソナ: 次回入室時に Phase 4.5-c の自動 load で転送
+
+手動 ⑥ ボタンは UI から撤去。 backend `transfer_avatar_set` 関数と `POST /transfer` endpoint は残してある (= 将来「device プレビュー」 機能と組み合わせて再活用予定)。
+
+段階構成は実質 ① → ② → ③ → ④ → ⑤ の 5 段階に変更。 frontend「④⑤ 連続実行」 ボタンで ④ trim + ⑤ finalize + (auto) ⑥ transfer まで一気通貫。
+
+### G. 502 timeout 回避 (= per-target parallel chain)
+
+旧「face 単位 batch」 方式 (= face_filter で 14 件まとめて 1 リクエスト) は 1 リクエスト 5-7 分で Next.js dev server の rewrite proxy timeout に当たり 502 を返す問題があった。 backend は実行を続行するが frontend は「終わった」 と認識。
+
+修正: 「全件実行」 と「強制再生成」 chain を **per-target parallel chunk** に変更:
+- 各 target を `regenerate_target` endpoint で 1 件ずつ generate (= 1 リクエスト 25-30 秒、 proxy timeout 圏外)
+- 並列度 = `metadata.parallelism` (= default 5)、 chunk 並列で Promise.all、 1 件失敗が他に影響しない
+- 84 件 ÷ 並列 5 ≈ 17 batch × 30 秒 = 約 9 分で完走
+- 進捗を target 単位で「完了 N/total、 失敗 M (例: target1, target2)」 表示
+- chain 中は 5 秒間隔で `fetchInfo()` polling (= 各 target 完了が preview に反映)
+- 「強制再生成」 は **face checkbox UI** で対象 face を選んで実行可能 (= 「idle は既に確定したので skip」 用、 まはー要望)
+
+### H. OpenAI billing 例外を 402 で扱い chain 即停止
+
+`openai.BadRequestError` で `code=billing_hard_limit_reached` / `insufficient_quota` / `rate_limit_exceeded` を検出した時は HTTPException 402 (= Payment Required) で返し、 frontend chain が即停止 + dialog 表示。 残り task で同 error 繰り返す無駄を防ぐ。
+
+billing overview URL は `https://platform.openai.com/settings/organization/billing/overview` (= 残高確認 + チャージ + limit 設定が 1 ページで完結、 残高切れ ≠ limit 設定到達のどちらでも対応可)。
+
+### I. ロギング基準 (= memory「ロギングは実装時点で」 を守る)
+
+実装中に「再現してログ追加」 で手戻りが多発したため、 以下を全 endpoint / 全パイプラインで徹底:
+
+- **`_generate_one` 呼び出し前**: model / aspect / quality / refs / prompt 全文を INFO ログ
+- **`_generate_one` 例外時**: OpenAI SDK の `status_code` / `code` / `type` / `body` / `response.text` を抽出して ERROR ログ + stack trace
+- **api_routes 全 endpoint**: 受信時 INFO (= persona / set / stage / target / params)、 既存 catch (`ValueError` / `FileNotFoundError` / `NotImplementedError`) に WARNING / EXCEPTION 追加、 末尾に generic `except Exception: _unhandled(op, exc)` で詳細 ERROR ログ + 500 + detail 返却
+- **`_unhandled()` 共通ヘルパ**: 例外型 / status / code / body / response_text を抽出、 billing 系は 402 で chain abort
+
+### J. cache buster (= サムネ更新)
+
+`AvatarPipelineManager.touch_updated_at(persona_id, set_name)` を追加。 `execute_stage` / `regenerate_target` の `try/finally` の finally 節で touch (= 失敗時にも touch、 「失敗後再表示で古画像が browser cache される」 事故防止)。 frontend は `?t=${metadata.updated_at}` で cache buster URL を組み立てる。
+
+### K. 単発ボタンに inline spinner
+
+modal 上部の busy バーは grid を下方 scroll 中だと視界に入らないので、 各 cell の「再生成」 / 「単発 trim」 等の単発ボタンを `AsyncButton` component で wrap。 click 中はボタン自体が「生成中...」 / 「trim 中...」 + disabled + 緑 highlight に。 押した本人のボタンで即 feedback。
+
+### L. 全件実行 chain の backend lock (= 並列 cost 倍増防止)
+
+`AvatarPipelineManager._set_exec_locks: dict[(persona_id, set_name), Lock]` で同 persona+set の `execute_stage` 並列実行を順次化。 chain 中に proxy timeout で frontend が再送した場合も backend で 1 face ずつ処理される (= OpenAI cost 倍増 + base copy 競合事故の防止)。 `regenerate_target` には適用しない (= per-target chain で並列度 5 を生かすため)。
 
 ## 設計判断の理由
 
@@ -499,10 +779,23 @@ Vessel ごとに描画特性が大きく違う:
   - 本体 MCP client の `saiverse-stackchan-addon__stackchan` インスタンスに `call_tool("load_avatar_set", ...)` を投げる (= ThreadPoolExecutor の worker thread から `asyncio.run_coroutine_threadsafe` で MCP loop に bridge)
 - multi-persona テスト用の seeding スクリプト `scripts/seed_persona_avatar_set.py` を追加 (= `--tint-hue` で persona ごとに HSV 回転して視覚的に区別、 manifest 自動生成)
 
-### 残作業 — Phase 4.5-d/e
+### Phase 4.5-d 完了 (2026-05-17)
 
-- **4.5-d**: addon 管理 UI に段階的画像生成フロー (Step 1: 5 種差分 + レビュー → Step 2: matrix 84 枚 or layered 8 パーツ)
+`expansion_data/saiverse-stackchan-addon/` に下記を実装、 frontend 統合 + 実機検証で `air_city_a` ペルソナの avatar セット (matrix mode、 gpt_image_2 low) end-to-end 動作確認:
+
+- `avatar_pipeline.py` (storage + state machine) / `avatar_generator.py` (① ② ③ 生成) / `avatar_finalizer.py` (④ trim / ⑤ finalize / ⑥ transfer / zip import / ① upload / 参照画像管理) / `api_routes.py` (全 endpoint + bootstrap)
+- `ui/AvatarPipelineModal.tsx` (= 段階バー Wizard + アニメプレビュー + 視覚的 trim editor + variant overrides + face checkbox + AsyncButton + Lightbox)
+- 118 件 unittest pass、 ruff pass、 frontend tsc pass
+
+最終仕様の詳細は「Phase 4.5-d 実装の確定仕様 (2026-05-17 追補)」 章 A〜L 参照。 段階構成は実質 ① 〜 ⑤ (= ⑥ 自動転送に統合)、 60Hz HTTP 連射 bug / 502 timeout / billing 切れ / サムネ cache / dead code 等を実機検証で順次解消。
+
+### 残作業 — Phase 4.5-e
+
 - **4.5-e**: upstream PR-A (動的セット転送機構) / PR-B (matrix mode) 提出 + 如月もちさんにデフォルト art 依頼
+
+### 次フェーズ候補 (= まはー検証 2026-05-17 で言及あり)
+
+- **device 上での見え方プレビュー機能**: ③ アニメーションプレビューを Stack-chan device 側でも動かす (= 「Vessel に居なくても device で表示確認」 機能、 backend `transfer_avatar_set` endpoint を再活用予定)
 
 ### Phase 4.5-a 完了後の Push 状況 (= 次セッション初手の判断材料)
 
