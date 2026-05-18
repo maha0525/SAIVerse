@@ -177,16 +177,15 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                 metadata_obj = m.get("metadata") or {}
                 event_obj = metadata_obj.get("event") or {}
                 # Filter rules:
-                #  - Other-entity occupancy events: dynamic_state surfaces these
-                #    as state-change notifications on actual presence transitions.
-                #  - User-related events (logout/login etc): ditto, presence is
-                #    tracked via dynamic_state's occupant detection.
+                #  - Occupancy events (自分 / 他者問わず): head_pipeline の
+                #    BuildingSection / BuildingOccupantsSection が diff 通知を
+                #    出す。auto_ingest はこの経路を撤去 (= 旧 A-3-a の rich format
+                #    も pipeline 側に統合済み)。
+                #  - User-related events (logout/login etc): presence は
+                #    BuildingOccupantsSection の diff で扱う。
                 #  - Legacy logout/login messages without metadata: filter by
                 #    content match for backward compat.
-                if (
-                    event_obj.get("type") == "occupancy"
-                    and event_obj.get("entity_id") != persona_id
-                ):
+                if event_obj.get("type") == "occupancy":
                     _mark_ingested(m, persona_id)
                     continue
                 if event_obj.get("entity_type") == "user":
@@ -195,15 +194,16 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                 if "オフラインになりました" in content or "オンラインになりました" in content:
                     _mark_ingested(m, persona_id)
                     continue
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                building_name = getattr(building_obj, "name", building_id) if building_obj else building_id
                 import re
                 cleaned = re.sub(r"<[^>]+>", "", content).strip()
                 if not cleaned:
                     continue
-                building_obj = getattr(persona, "buildings", {}).get(building_id)
-                building_name = getattr(building_obj, "name", building_id) if building_obj else building_id
+                formatted = f"<system>[{building_name}] {cleaned}</system>"
                 entry = {
                     "role": "user",
-                    "content": f"<system>[{building_name}] {cleaned}</system>",
+                    "content": formatted,
                     "metadata": {"tags": ["internal", "event_message"]},
                 }
                 ts_value = m.get("timestamp")
@@ -380,10 +380,10 @@ def auto_ingest_building_messages(
                 # Mirrors filter rules from get_building_messages() above.
                 metadata_obj = m.get("metadata") or {}
                 event_obj = metadata_obj.get("event") or {}
-                if (
-                    event_obj.get("type") == "occupancy"
-                    and event_obj.get("entity_id") != persona_id
-                ):
+                # Occupancy events は head_pipeline の Section diff が通知を担当する
+                # ので auto_ingest 経路では一律スキップ (= 旧 A-3-a の rich format も
+                # pipeline 側に統合済み)。
+                if event_obj.get("type") == "occupancy":
                     _mark_ingested(m, persona_id)
                     dirty = True
                     continue
@@ -395,15 +395,16 @@ def auto_ingest_building_messages(
                     _mark_ingested(m, persona_id)
                     dirty = True
                     continue
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                building_name = getattr(building_obj, "name", building_id) if building_obj else building_id
                 import re
                 cleaned = re.sub(r"<[^>]+>", "", content).strip()
                 if not cleaned:
                     continue
-                building_obj = getattr(persona, "buildings", {}).get(building_id)
-                building_name = getattr(building_obj, "name", building_id) if building_obj else building_id
+                formatted = f"<system>[{building_name}] {cleaned}</system>"
                 entry = {
                     "role": "user",
-                    "content": f"<system>[{building_name}] {cleaned}</system>",
+                    "content": formatted,
                     "metadata": {"tags": ["internal", "event_message"]},
                 }
                 ts_value = m.get("timestamp")

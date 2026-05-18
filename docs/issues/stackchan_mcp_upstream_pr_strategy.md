@@ -3,7 +3,8 @@
 **ステータス**: 🔲 未着手 (= Phase X' 着手前のハンドオフ)
 **優先度**: medium
 **作成日**: 2026-05-13
-**関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`maha0525/stackchan-mcp` fork branch `feature/external-pcm-stream`
+**最終更新**: 2026-05-15 (Series E = 動的 avatar セット転送 PR を追補節として追加)
+**関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
 
 ## 背景
 
@@ -54,7 +55,9 @@ PR6a → PR6 (persistent connection + bug fix) ── 6a/6b は密接なので 1
 | **PR #C** | fix(gateway): bundle libopus.dll for Windows + DLL search path setup | upstream `main` | — |
 | **PR #D** | feat(firmware): opt-in persistent WS connection + reconnect bug fix | upstream `main` | — |
 
-= **計 7 PR**。Series A の 4 PR は順次積み上げ、B/C/D は独立並列で出せる。
+= **計 7 PR** (Phase 1' 由来、音声経路 + OTA + libopus + persistent WS)。Series A の 4 PR は順次積み上げ、B/C/D は独立並列で出せる。
+
+これに加え、Phase 4.5-e で **Series E (PR-E1 / PR-E2)** が動的 avatar セット転送機構として投稿予定。本書末尾「追補: Series E」節を参照。
 
 ## ブランチ分割手順
 
@@ -156,9 +159,98 @@ PR ごとに maintainer とディスカッションが入る前提で、各 PR r
 - **テスト追加の範囲**: A2/A3 で test を増やすコミットは別 commit にして PR に追加する (= 既存 commit のままだと test が無いのが目立つ)
 - **`SOURCES.md` の更新**: PR #C 提出前に「CI build に置き換え予定」を補強する記述を入れておくと merge しやすい
 
+## 追補: Series E — 動的 avatar セット転送機構 (Phase 4.5-e、2026-05-15 追記)
+
+Phase 4.5 で新規に立てた intent doc (`docs/intent/stackchan_avatar_pipeline.md`) の作業ブランチ `feature/dynamic-avatar-set` から、upstream に **2 PR** を投稿する。Series A〜D とは別系統 (= avatar 描画基盤の拡張) で、依存関係も独立。
+
+### PR-E1 / PR-E2 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-E1** | feat(avatar): dynamic avatar set transfer (layered mode) — firmware に `AvatarSet` クラス + HTTP fetcher、gateway に `load_avatar_set` MCP tool + capture_server endpoint を追加 | upstream `main` | — |
+| **PR-E2** | feat(avatar): matrix mode (90 枚) support — mode 切替対応、matrix mode 描画ロジック | PR-E1 | PR-E1 merge 後または並行 |
+
+詳細な commit 構成は `feature/dynamic-avatar-set` の `git log upstream/main..feature/dynamic-avatar-set` を参照 (現状 9 commit、`scaffold` → `WS handler` → `MCP tool` → `unify face/eyes/mouth` → `defer expression during fetch` 等)。本書 Phase X' 投稿時に commit を論理単位で再整理する。
+
+### 非破壊保証 — 既存の `avatar_images.local.cc` 経路はそのまま動く
+
+upstream の既存 avatar 焼き込み機構 (`avatar_images.{cc,h}` placeholder + `avatar_images.local.{cc,h}` の CMake `STACKCHAN_LOCAL_AVATAR_CC` 差し替え + `firmware/scripts/avatar_convert/convert_avatars.py` の PNG → RGB565 変換、`7c084cd "Support gitignored local avatar overrides"`) は **PR-E1 / PR-E2 で一切変更しない**。
+
+確認済み事実 (2026-05-15):
+
+- `git diff upstream/main..feature/dynamic-avatar-set --stat` で `CMakeLists.txt` / `avatar_images.cc` / `avatar_images.h` / `convert_avatars.py` のいずれも変更なし
+- `firmware/main/boards/stackchan/stackchan.cc:1563-1605` の `FaceImageForIndex` / `EyesImageForIndex` / `MouthImageForIndex` は **AvatarSet がロード済み (= `is_loaded() && mode == kLayered`) かつ該当 face/eyes/mouth が AvatarSet 内にあるときだけ AvatarSet を返し、それ以外は `avatar_images.h` の static const table (`avatar_idle` 等) にフォールスルー**。ユーザーが `avatar_images.local.cc` で実 art を焼いていれば、リンク時に local 側が拾われて自動的に static 経路で実 art が描画される
+
+つまり upstream の現行ユーザー (= 静的 art 派、`~/.stackchan/avatar/` に PNG を置いて `convert_avatars.py` でビルド時焼き込み) は、PR-E1/E2 が merge されても **`load_avatar_set` MCP tool を呼ばなければ現状維持で動く**。動的 AvatarSet は「層 3」として上に被さる追加の選択肢で、既存の「層 1: placeholder」「層 2: local static override」を温存する。
+
+### PR description に貼るべき 3 層モデル表
+
+PR-E1 本文で reviewer の初手懸念 (= 既存 local override 機構との競合) を解消するため、`stackchan_avatar_pipeline.md` §B-0 の 3 層モデル表をそのまま転載する:
+
+| 層 | 何 | 何のため | 既存維持 |
+|---|---|---|---|
+| 1. placeholder | `avatar_images.cc` の 1×1 黒ピクセル | 起動時の保険、AvatarSet 未ロード時の表示 | はい |
+| 2. local static override | `avatar_images.local.{cc,h}` (CMake で差し替え) | 静的 art を焼きたいユーザー向け、firmware 焼き直し前提 | はい (本 PR で非破壊) |
+| 3. dynamic avatar set | 新規 `AvatarSet` クラス + HTTP fetcher | 動的にロードされる PSRAM 上の art セット、ペルソナ別 / multi-character 対応 | (本 PR で新規追加) |
+
+加えて以下の一文を入れると review コストが減る:
+
+> Existing users of the `avatar_images.local.cc` flow are unaffected: if `load_avatar_set` is never called, `FaceImageForIndex` / `EyesImageForIndex` / `MouthImageForIndex` fall through to the existing static const tables exactly as before.
+
+### デフォルト art は upstream メンテナへ依頼
+
+`avatar_images.cc` placeholder TODO (= `Replace with real 160×120 RGB565 art before shipping to production.`) の解決は **PR では送らない**。デフォルト ｽﾀｯｸﾁｬﾝキャラの art は stackchan-mcp の「顔」になるリソースで、デザイン判断は upstream メンテナ (如月もちさん) が握るべき領域。我々は形式 (layered mode の manifest schema) だけを PR-E1/E2 で整え、「PR-E1/E2 で導入される avatar セット形式に沿ったデフォルト art を作っていただければ placeholder TODO が解決します」と issue/discussion で伝える。
+
+### 投稿条件
+
+- Phase 4.5-a (firmware 拡張) / 4.5-b (gateway MCP tool) / 4.5-c (addon storage + 永続化) / 4.5-d (画像生成 UI) の実機検証完了後
+- Phase X' (= 既存 Series A〜D) と並行投稿可能。依存なし
+
+### Series E 用ブランチ分割手順 (Phase 4.5-e 着手時の参考)
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+# PR-E1 = layered mode のみで dynamic transfer 機構を切り出す
+git switch -c pr-e1-dynamic-avatar-set-layered upstream/main
+# feature/dynamic-avatar-set から layered mode に必要な commit を cherry-pick
+# (matrix mode 追加分 = f3a988b "unify face/eyes/mouth via AvatarSet, add matrix mode rendering" は除外)
+git cherry-pick 2dcfe5a    # scaffold AvatarSet + HTTP fetcher
+git cherry-pick 3bd241c    # wire avatar_set_fetch WS handler + completion notify
+git cherry-pick e6ff313    # gateway: load_avatar_set MCP tool + WS fetch protocol
+git cherry-pick d9a402c    # fix: expose Protocol::SendText as public for board-initiated WS notify
+git cherry-pick a42fe0b    # fix: replace %zu with %u in ESP_LOG (nano-printf compat)
+git cherry-pick 5cd11a6    # defer expression changes during avatar set fetch
+git push origin pr-e1-dynamic-avatar-set-layered
+
+# PR-E2 = matrix mode 追加 (PR-E1 base、Stacked)
+git switch -c pr-e2-matrix-mode pr-e1-dynamic-avatar-set-layered
+git cherry-pick f3a988b    # unify face/eyes/mouth via AvatarSet, add matrix mode rendering
+git push origin pr-e2-matrix-mode
+```
+
+CI/build 系の commit (`98f34b0 ci(fork): trigger Build on feature/** + dev/** + workflow_dispatch`、`b4bcdc3 chore(ci): trigger build with default branch updated`) は fork-only の dev infrastructure なので upstream PR には含めない (= Series A〜D と同じ扱い)。
+
+cherry-pick の順序や境界は Phase 4.5-e 着手時の実装状況で再点検する (= ここに書いた commit hash は 2026-05-15 時点)。
+
+### PR-E1 の注意点
+
+- avatar セット転送経路は **HTTP fetch** (既存 capture_server を流用)。既存音声 WS への影響をゼロにする設計判断は intent doc §C で根拠化済み
+- firmware は **raw RGB565 のみ** サポート (CONFIG_LV_USE_PNG が unset、OTA partition 圧迫回避)。PNG → RGB565 変換は addon 側で完了させ、gateway には Pillow 等の重い依存を持ち込まない
+- 不変条件 #6 (= avatar セット転送中の表情切替コマンドは転送完了まで defer) は実装済み (`5cd11a6 defer expression changes during avatar set fetch`)、PR description でこの設計判断を明示
+
+### PR-E2 の注意点
+
+- matrix mode (90 枚) は PSRAM 3.3 MB を消費。8 MB PSRAM の使用上限 5 MB 内で xiaozhi-esp32 base の他用途と共存可能、を実機ログで示す
+- mode 切替は avatar セット単位 (= ペルソナ憑依時にセットごと差し替え)、ロード中 mode 変更不可、を doc で明示
+
 ## 参考
 
-- 手元 fork のブランチ: `feature/external-pcm-stream` (= 9 commit が直線、Phase 1' 検証経路として活用中)
-- addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@feature/external-pcm-stream#subdirectory=gateway`
+- 手元 fork のブランチ:
+  - `feature/external-pcm-stream` (= 9 commit が直線、Phase 1' 検証経路として活用中、Series A〜D の出所)
+  - `feature/dynamic-avatar-set` (= 9 commit、Phase 4.5 検証経路として活用中、Series E の出所)
+- addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (現状 `feature/external-pcm-stream`、Phase 4.5 統合時に `dev/integration` に切替)
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
+- `docs/intent/stackchan_avatar_pipeline.md` §B-0 (= 3 層モデル) / §E (= upstream PR ストーリー)

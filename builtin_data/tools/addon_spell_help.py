@@ -41,7 +41,7 @@ def schema() -> ToolSchema:
 
 def addon_spell_help(addon: str = "") -> str:
     from tools import SPELL_TOOL_SCHEMAS
-    from tools.context import get_active_persona_id
+    from tools.context import get_active_persona_id, get_active_manager
     from tools.fuzzy import resolve_fuzzy
 
     try:
@@ -51,6 +51,18 @@ def addon_spell_help(addon: str = "") -> str:
         mcp_mgr = None
 
     persona_id = get_active_persona_id()
+    # 現在地に紐付く Building 単位 visibility (Phase 4' / A-3-c)。
+    # active manager 経由でペルソナの current_building_id を解決し、
+    # Vessel Building 外の物理身体ツール等が一覧に出ないようにする。
+    building_id: str | None = None
+    try:
+        manager = get_active_manager()
+        if manager is not None and persona_id is not None:
+            persona = manager.all_personas.get(persona_id)
+            if persona is not None:
+                building_id = getattr(persona, "current_building_id", None)
+    except Exception:
+        building_id = None
 
     # 全スペルから addon_key 候補を抽出（表示・非表示両方）。
     # ファジーマッチの候補一覧と「利用可能なアドオン」リストの両方に使う。
@@ -83,7 +95,9 @@ def addon_spell_help(addon: str = "") -> str:
     for name, s in SPELL_TOOL_SCHEMAS.items():
         if getattr(s, "spell_visible", True):
             continue
-        if mcp_mgr is not None and not mcp_mgr.is_tool_available_for_persona(name, persona_id):
+        if mcp_mgr is not None and not mcp_mgr.is_tool_available_for_persona(
+            name, persona_id, building_id
+        ):
             continue
         # Honor availability_check (used by native tools that gate on
         # per-persona connection state).
