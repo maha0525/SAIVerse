@@ -89,3 +89,11 @@ backend.log の決定的な行:
   - **追加修正**: `_last_loaded: dict[str, str]` を `_device_current_checksum: Optional[str]` に置換。 device が現在保持してる 1 つの checksum のみを覚える。 `is_load_required(persona_id, checksum)` は `_device_current_checksum != checksum` で判定 (persona 別比較は不要)、 `mark_loaded(persona_id, checksum)` は上書き挙動、 `clear_cache` は `None` に戻すのみ。 `persona_id` 引数は API 互換のため残すが内部判定で使わない (`del persona_id`)
   - これで session_id 変化検知 (= reboot) + device 1 set モデル (= 同一 session 内の swap) の両方が正しく invalidate される
 - 実機検証: firmware build + flash 済 (= app partition only、 NVS / coredump partition 保持)、 SAIVerse 再起動後の swap 動作を確認予定
+- 2026-05-19 (続き): エア → エリス → エア 再入室で「2 度目のエア入室時に LCD がエリスのまま」を確認、 上記データ構造変更で解決を確認 (3 度目のエア入室で正しく transfer 走り LCD がエアに切替)。
+- 2026-05-19: **能動的 state 同期機構を追加実装**。 入室時の lazy check では拾えないシナリオ (= SAIVerse 起動中の device 単独 reboot / device blank + vessel 入室済 SAIVerse 起動) に対応する daemon thread を ``avatar_loader.py`` 末尾に追加。
+  - module ロード時に thread 起動 (= daemon、 SAIVerse 停止で自動終了)
+  - 起動 8 秒後に **初期 reconcile**: ``BuildingOccupancyLog`` の ``EXIT_TIMESTAMP IS NULL`` で「現在 vessel に居る persona」を取得し、 ``on_persona_entered_building`` を直接呼んで avatar transfer 経路に乗せる
+  - 以降 30 秒間隔で **session_id polling**: ``get_device_status`` 経由で ``boot_session_id`` 取得、 ``reconcile_session`` に ``on_invalidate`` callback を渡して、 変化検知時のみ vessel 居住者の avatar を再 transfer
+  - ``reconcile_session`` に ``on_invalidate: Optional[Callable]`` 引数を追加 (既存呼び出しは callback なしで挙動不変)
+  - 古い firmware (= boot_session_id フィールド未対応) は ``_fetch_device_session_id`` が None を返すので polling 経路は noop で進む、 既存挙動を破壊しない
+  - 実機検証: SAIVerse 再起動して 8 秒後に initial reconcile ログ + avatar load が走ること、 device 物理 reboot 後 30 秒以内に reboot 検知 + 再 transfer が走ることを確認予定
