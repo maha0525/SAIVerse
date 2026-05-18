@@ -222,6 +222,7 @@ git cherry-pick e6ff313    # gateway: load_avatar_set MCP tool + WS fetch protoc
 git cherry-pick d9a402c    # fix: expose Protocol::SendText as public for board-initiated WS notify
 git cherry-pick a42fe0b    # fix: replace %zu with %u in ESP_LOG (nano-printf compat)
 git cherry-pick 5cd11a6    # defer expression changes during avatar set fetch
+git cherry-pick 740d786    # refactor: AvatarSet ownership-transfer (PSRAM peak 9.9 → 3.3 MB)
 git push origin pr-e1-dynamic-avatar-set-layered
 
 # PR-E2 = matrix mode 追加 (PR-E1 base、Stacked)
@@ -239,6 +240,7 @@ cherry-pick の順序や境界は Phase 4.5-e 着手時の実装状況で再点�
 - avatar セット転送経路は **HTTP fetch** (既存 capture_server を流用)。既存音声 WS への影響をゼロにする設計判断は intent doc §C で根拠化済み
 - firmware は **raw RGB565 のみ** サポート (CONFIG_LV_USE_PNG が unset、OTA partition 圧迫回避)。PNG → RGB565 変換は addon 側で完了させ、gateway には Pillow 等の重い依存を持ち込まない
 - 不変条件 #6 (= avatar セット転送中の表情切替コマンドは転送完了まで defer) は実装済み (`5cd11a6 defer expression changes during avatar set fetch`)、PR description でこの設計判断を明示
+- 2026-05-18 追加 commit `740d786` で `AvatarSet::Load` (memcpy 版) を `AdoptOwnedBuffer` (所有権譲渡版) に置き換え。 Fetcher の staging buffer を AvatarSet に直接渡すことで内部 memcpy を廃止、 PSRAM peak が (旧 buffer + 新 staging) のみに収まる。 元の `avatar_set_fetcher.cc:73-81` の follow-up TODO 解消、 matrix mode (= PR-E2) で実機発覚した `Load: PSRAM allocation failed (size=3456000)` を解決 (詳細: `docs/issues/stackchan_avatar_psram_peak.md`)
 
 ### PR-E2 の注意点
 
@@ -329,11 +331,80 @@ git push origin pr-f-device-driven-audio-capture
 
 cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
 
+## 追補: PR-G — coredump-to-flash for esp32s3 (Phase 3' デバッグ基盤、 2026-05-18 追記)
+
+stack-chan 系の reset 真因 (= watchdog / panic / stack overflow / brownout) を実機再現後に特定するため、 ESP-IDF の coredump partition を有効化した。 Series A〜F とは独立、 依存なし。
+
+### PR-G 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-G** | feat(firmware/esp32s3): enable coredump-to-flash for panic backtrace retention | upstream `main` | — |
+
+ブランチ: `feature/coredump-partition` (= 1 commit、 2026-05-18 時点で fork に push 済み、 `dev/integration` へ merge 済み)。
+
+### 投稿条件
+
+- Phase 3' の stroke 再現実験で coredump 機能が動作確認できた後 (= 任意の reset 後 `idf.py coredump-info -p <PORT>` で panic backtrace + register state が取れることを実機で確認)
+- Series A〜F と並行投稿可能。 依存なし
+
+### PR description ドラフト
+
+> **What**
+>
+> Add a 64KB `coredump` partition to the v2/16m.csv layout (16MB ESP32-S3 flash) and enable `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH` in `sdkconfig.defaults.esp32s3`. After a watchdog / panic / stack overflow / brownout the firmware writes a backtrace + register dump to the new partition which survives reboot. `idf.py coredump-info -p <PORT>` retrieves the saved dump for offline analysis.
+>
+> **Why**
+>
+> The ESP32-S3 USB CDC peripheral re-enumerates on reset, which causes the host's serial-port reader to lose the boot sequence and any panic backtrace printed during the abort. Without a coredump partition, intermittent resets are hard to root-cause: the device reboots, the host loses sight of the `<panic>` output, and only the post-reboot logs remain. Persisting the dump to flash is the standard ESP-IDF workaround.
+>
+> **How**
+>
+> 1. `partitions/v2/16m.csv`: shrink the `assets` partition from 8M to 0x7F0000 (= 8M − 64K) and append `coredump,data,coredump,0xFF0000,0x10000,` at the end of flash. No existing partition offsets change.
+> 2. `sdkconfig.defaults.esp32s3`: enable `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH` + ELF/CRC32 options. ESP32-C3 / ESP32-P4 etc. are unaffected because the configuration is chip-specific.
+> 3. `partitions/v2/README.md`: document the new partition under "16MB Flash Devices (Standard)" and add a "Coredump Retrieval" section.
+>
+> **Compatibility**
+>
+> - **No existing partition offsets change**: NVS, OTA partitions, and the app stay at the same flash addresses, so `idf.py partition-table-flash` + `idf.py app-flash` preserves WiFi credentials and previously-cached state across the partition table upgrade. Merged-binary flashing is **not** required.
+> - **Assets size reduction is negligible**: actual asset usage on stack-chan is ~1.5MB so the new 8128KB `assets` partition has ~6.5MB headroom.
+> - **Other chip families unaffected**: coredump sdkconfig entries are gated to esp32s3.
+>
+> **Tests**
+>
+> - Manual: trigger an abort on hardware, reboot, verify `idf.py coredump-info -p <PORT>` reproduces the backtrace + register state with source-line mappings.
+>
+> **Out of scope**
+>
+> - Higher-tier dumping (full task list, FreeRTOS state) — this PR covers the minimal ELF panic dump. Larger scopes require partition size > 64K and are deferred until the basic dump proves insufficient in practice.
+
+### PR-G の注意点
+
+- `assets` partition の縮小 (8M → 8M − 64K) を含むので、 reviewer に「実 asset 使用量 ~1.5MB」 という実測根拠を PR description で示すこと。 16MB v2 layout はディスク余裕が大きいので影響なし
+- 受け入れ拒否されたら、 16m.csv を別ファイル (= `16m_with_coredump.csv` 等) に分離して `sdkconfig.defaults.esp32s3` で上書きするバリアント PR に再構成する余地あり
+
+### Series G 用ブランチ分割手順
+
+PR-G は単一 PR で、 分割不要 (= 1 commit が論理単位として整理済み):
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+git switch -c pr-g-coredump-partition upstream/main
+git cherry-pick 079e0c2    # feat(firmware/esp32s3): enable coredump-to-flash for panic backtrace retention
+git push origin pr-g-coredump-partition
+```
+
+cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
+
 ## 参考
 
 - 手元 fork のブランチ:
   - `feature/external-pcm-stream` (= 9 commit が直線、Phase 1' 検証経路として活用中、Series A〜D の出所)
-  - `feature/dynamic-avatar-set` (= 9 commit、Phase 4.5 検証経路として活用中、Series E の出所)
+  - `feature/dynamic-avatar-set` (= 10 commit、Phase 4.5 検証経路として活用中、Series E の出所、 2026-05-18 に `740d786` PSRAM peak fix 追加)
+  - `feature/device-driven-audio-capture-with-hook` (= 4 commit、Phase 3' 検証経路、 Series F の出所)
+  - `feature/coredump-partition` (= 1 commit、Phase 3' デバッグ基盤、 Series G の出所、 2026-05-18 追加)
 - addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (現状 `feature/external-pcm-stream`、Phase 4.5 統合時に `dev/integration` に切替)
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
