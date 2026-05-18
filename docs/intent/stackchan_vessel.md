@@ -1,6 +1,6 @@
 # Intent: スタックチャン Vessel 統合（saiverse-stackchan-addon）
 
-**ステータス**: v0.5（2026-05-13 改訂、stackchan-mcp 採用への路線変更を反映）
+**ステータス**: v0.7（2026-05-18 改訂、Phase 3' を Gemini inline 音声認識経路に転換）
 
 ## v0.4 → v0.5 の主要変更（路線変更）
 
@@ -62,7 +62,7 @@ v0.4 から **変更なし**。stackchan-mcp に乗り換えても認知モデ�
 | Vessel Building 全体 | `Building` レコード（`PHYSICAL_VESSEL_ID` あり） | 身体 |
 | Vessel Building 内のペルソナ | OccupancyManager の occupant | 脳・魂（=身体に降りている主体） |
 | マイク（PDM × 2） | デバイス入力 | 耳 |
-| STT（gateway 側 Whisper 等） | テキスト変換 | 聴覚野 |
+| 音声理解（Gemini inline 認識） | プロンプト添付 → LLM が直接理解 | 聴覚野 |
 | Building 内のユーザー発言 | チャットメッセージ（role=user） | 聴覚知覚（=身体内で起きた音響事象） |
 | スピーカー（I2S） | デバイス出力 | 口 |
 | TTS（voice-tts エンジン） | 音声合成 | 発声 |
@@ -77,7 +77,7 @@ v0.4 から **変更なし**。stackchan-mcp に乗り換えても認知モデ�
 
 このマッピングが綺麗に一対一になることで、設計判断の多くが認知モデルから自動的に導かれる:
 
-- **聴覚知覚 = Building 内ユーザー発言**: STT 結果は通常のユーザー発言として `handle_user_input_stream` 経由で注入する（外部イベントとして扱わない）。ペルソナ視点では「同じ部屋で人が話しかけてきた」=通常会話。
+- **聴覚知覚 = Building 内ユーザー発言**: ｽﾀｯｸﾁｬﾝ device から受け取った Opus 音声ファイルは、通常のユーザー発言として `handle_user_input_stream` 経由で `metadata.media[]` 付きで注入する（外部イベントとして扱わない）。Gemini ペルソナは inline_data で「音」を直接理解して返答。ペルソナ視点では「同じ部屋で人が話しかけてきた」=通常会話。
 - **発声 = ペルソナ発話**: 通常の Building 発言経路に乗り、`persona_speak` server_hook 経由で voice-tts が拾って、その PCM を gateway 経由で device に流す。
 - **触覚 = Building 内 host メッセージ**: タッチイベントは Building の host メッセージとして注入し、ペルソナの SAIMemory に通常履歴と並んで残る。
 - **視覚 = MediaBuffer attachment**: カメラ画像は `multimodal_input_pipeline` の既存経路に乗る。
@@ -88,9 +88,9 @@ v0.4 から **変更なし**。stackchan-mcp に乗り換えても認知モデ�
 ## これは何でないか
 
 - **Vessel 共通仕様の一般化ではない**。最初は Stack-chan 1 機種に特化した実装にし、Vessel 抽象を慎重に育てる。複数 Vessel タイプを最初から想定したテーブル設計や抽象化はしない（早すぎる抽象化の回避）。
-- **新しい音声会話モデルの設計ではない**。STT / TTS は voice-tts と stackchan-mcp gateway の組み合わせで成立させる。OpenAI Realtime / Gemini Live への対応は将来課題。
+- **新しい音声会話モデルの設計ではない**。音声理解は Gemini inline 認識（v0.7 で転換、§ なぜ Gemini inline 認識経路に転換したか 参照）、TTS は voice-tts と stackchan-mcp gateway の組み合わせで成立させる。OpenAI Realtime / Gemini Live への対応は将来課題。
 - **新しいツール基盤の設計ではない**。stackchan-mcp が既に提供する MCP tools を thin wrap して SAIVerse の native tool にする。Phase 4-5 で「自前ファームに各機能を移植する」作業は発生しない。
-- **新しい入出力経路の追加ではない**。STT は `manager.handle_user_input_stream`、TTS は voice-tts + gateway の `send_pcm_stream`、タッチは `manager.add_building_event`、カメラは `multimodal_input_pipeline` MediaBuffer、すべて既存経路への合流で済ませる。
+- **新しい入出力経路の追加ではない**。音声入力は `/upload-audio` のユーザー添付経路（v1.0, 2026-05-18 実装済み）に合流して `manager.handle_user_input_stream`、TTS は voice-tts + gateway の `send_pcm_stream`、タッチは `manager.add_building_event`、カメラは `multimodal_input_pipeline` MediaBuffer、すべて既存経路への合流で済ませる。
 - **Avatar の表情・口パクの完成形ではない**。Phase 5 段階ではアイコン静止表示 + stackchan-mcp の `set_avatar` 基本機能まで、口パクの精密同期は将来 Phase。
 - **本体のライセンス変更ではない**。
   - SAIVerse 本体: 現行ライセンス（変更なし）
@@ -217,7 +217,7 @@ voice-tts → device の音声経路は subprocess 境界を跨ぐため、別�
 
 v0.4 から **基本維持**、経路の中身だけ更新:
 
-- **音声入力 (STT 後テキスト)** → `manager.handle_user_input_stream(text, building_id=vessel_building_id, metadata={"source": "stackchan_voice"})`。stackchan-mcp の `listen()` MCP tool が STT を内部で実行するので、その結果を SAIVerse 側で受け取って `handle_user_input_stream` に流す。
+- **音声入力 (Gemini inline 認識)** → `manager.handle_user_input_stream(text=None, building_id=vessel_building_id, metadata={"source": "stackchan_voice", "vessel_id": "...", "media": [{"type": "audio", "uri": "saiverse://audio/...", "mime_type": "audio/ogg"}]})`。stackchan-mcp gateway 側で発話区切りを検出して Ogg/Opus ファイル化、addon の HTTP hook に POST → addon が `~/.saiverse/audio/` に保存して `handle_user_input_stream` に流す。Gemini ペルソナは inline_data で音を直接理解。非Gemini ペルソナ向け書き起こし経路は将来 Phase で別途。
 - **タッチ入力 (なでなで)** → `manager.add_building_event(building_id, {"role": "host", "content": "...", "metadata": {...}}, heard_by=[...])`。stackchan-mcp の `get_touch_state()` MCP tool で取得、または gateway 側 hook で push 通知（要検証）。
 - **音声出力 (TTS)** → voice-tts の `subscribe_pcm(msg_id)` で PCM iterator を取得、stackchan-mcp gateway の HTTP PCM 受入 endpoint (`POST /pcm`、port 8766 の既存 HTTP capture server に追加、上流 PR 必要) に **chunked transfer encoding** で送信。subprocess の gateway が受け取った PCM を Opus encode + WebSocket 配信 + tts.start/stop ステート管理（Phase 1 で実装済みの `send_pcm_stream` 経由）。認証は `Authorization: Bearer ${STACKCHAN_PCM_TOKEN}`（`VISION_TOKEN` の前例に倣う）。
 - **カメラ画像** → 既存の `multimodal_input_pipeline` の MediaBuffer 経路。stackchan-mcp の `take_photo()` MCP tool（SAIVerse の MCP client 経由で呼び出し）が HTTP capture endpoint で画像を受信、結果ファイルパスを SAIVerse 側で MediaBuffer に流す。
@@ -225,9 +225,9 @@ v0.4 から **基本維持**、経路の中身だけ更新:
 
 新しいデータパスを生やすたびに本体が拡張されるのを避ける、という設計原則は維持。
 
-### 6. STT 結果は metadata で由来を明示する
+### 6. 音声入力は metadata で由来を明示する
 
-v0.4 から **変更なし**。`handle_user_input_stream` に渡す `metadata` に `{"source": "stackchan_voice", "vessel_id": "..."}` を含める。ペルソナ側はこの metadata からその発言が物理マイク経由であることを認識でき、応答の文体・反応を調整する余地を残す。
+v0.7 で `metadata.media[]` に音声ファイル参照を追加する形に拡張。`handle_user_input_stream` に渡す `metadata` に `{"source": "stackchan_voice", "vessel_id": "...", "media": [{"type": "audio", ...}]}` を含める。ペルソナ側はこの metadata からその発言が物理マイク経由であることを認識でき、応答の文体・反応を調整する余地を残す。
 
 ### 7. 認証情報は Bearer Token ベース + アドオン専用ストレージで管理する
 
@@ -402,7 +402,7 @@ v0.4 → v0.5 で廃止された要素:
 
 - `firmware/`（自前ファーム） → `archive/firmware/` に移動
 - `audio_stream_bridge.py`（自前 PCM 直送ブリッジ） → `archive/` に移動、`speak_hook.py` に HTTP POST 起動コードへ置き換え
-- `audio_input_pipeline.py`（自前 STT 経路） → 不要、stackchan-mcp の `listen()` MCP tool 経由に変更
+- `audio_input_pipeline.py`（自前 STT 経路） → 不要、v0.7 で stackchan-mcp gateway → addon HTTP hook → `handle_user_input_stream` 経由（Gemini inline 認識）に変更
 - `touch_handler.py`（自前タッチ受信） → 不要、stackchan-mcp の `get_touch_state` 経由 + gateway hook に変更
 - `setup_ui/`（Web Serial フラッシュ静的 HTML） → 不要、SAIVerse の CLI で esptool 実行に置き換え
 
@@ -455,7 +455,7 @@ v0.4 → v0.5 で廃止された要素:
 `say` と `listen` を `visible: false` にしている理由:
 
 - `say`: voice-tts ベースの音声に置き換える（不変条件 #5 参照、HTTP PCM 経由）
-- `listen`: STT 経路は Phase 3' で別途設計（直接 MCP tool 呼び出しじゃなく `handle_user_input_stream` 経由）
+- `listen`: 音声入力経路は Phase 3' で別途設計（v0.7 で Gemini inline 認識に転換、stackchan-mcp の `listen()` MCP tool は使用しない）
 
 Phase 4' で Building 単位 visibility が実装されたら、`spell_tools` 各エントリに `"building_ids": ["<vessel_building_id>"]` を追加して Vessel Building 内でのみ visible にする。
 
@@ -516,24 +516,37 @@ Phase 4' で Building 単位 visibility が実装されたら、`spell_tools` �
   ↓ xiaozhi-esp32 audio_service が Opus decode → I2S スピーカー
 ```
 
-#### C-2. STT 入力経路
+#### C-2. 音声入力経路（v0.7 — Gemini inline 認識）
 
-stackchan-mcp は v1.3.0 で `listen()` MCP tool を持つ（gateway 側 Whisper、AudioCodec で device PCM 受信 → STT）。SAIVerse からの呼び出し:
+ｽﾀｯｸﾁｬﾝ device → gateway → SAIVerse addon → Gemini ペルソナの順で音声ファイルを届ける。stackchan-mcp gateway 内部 Whisper STT は経由しない（転換理由は § なぜ Gemini inline 認識経路に転換したか）。
 
 ```
-[Stack-chan device] ウェイクワード検出
-  ↓ device → gateway: listen.start 要求
-  ↓ gateway: audio_stream.start_recording()
-  ↓ device: PCM Opus フレーム送信
-  ↓ device: listen.stop 要求 (無音検知)
-  ↓ gateway: audio_stream.stop_recording() → STT
-  ↓ gateway: 結果テキストを SAIVerse 側に通知 (= speak_hook 的な hook が要る、PR 検討)
-[saiverse-stackchan-addon] stt_relay:
-  ↓ manager.handle_user_input_stream(text, building_id=vessel.bound_building_id, metadata={"source": "stackchan_voice", "vessel_id": vessel.vessel_id})
-  ↓ 既存経路: Building 履歴記録 → ペルソナの auto_ingest → 応答生成
+[Stack-chan device] ウェイクワード検出 or LCD 画面短タップ (< 500ms)
+  ↓ device: Application::ToggleChatState() → 録音開始
+  ↓ device → gateway: PCM Opus フレーム送信
+  ↓ device: listen.stop 要求 (発話区切り = 無音検知)
+[stackchan-mcp gateway]
+  ↓ 発話区切り後、Ogg/Opus コンテナ化
+  ↓ 外部 hook POST (addon が起動時に hook URL 登録、認証 token 付き)
+[saiverse-stackchan-addon] audio_input_relay.py:
+  ↓ POST 受信、認証検証
+  ↓ ~/.saiverse/audio/<timestamp>_<uuid>.ogg にファイル保存
+  ↓ vessel_id → bound_building_id 解決
+  ↓ manager.handle_user_input_stream(
+       text=None,
+       building_id=vessel.bound_building_id,
+       metadata={
+           "source": "stackchan_voice",
+           "vessel_id": vessel.vessel_id,
+           "media": [{"type": "audio", "uri": "saiverse://audio/...", "mime_type": "audio/ogg"}]
+       }
+     )
+[SAIVerse 本体] 既存メディア経路（v1.0 ユーザー添付音声経路、2026-05-18 実装済み）に合流:
+  ↓ metadata.media[] → iter_audio_media → Gemini inline_data として送信
+[Gemini ペルソナ] 音を直接理解して返答
 ```
 
-stackchan-mcp 側に「STT 結果を gateway 内部で MCP client に返すんじゃなく、外部 hook に渡す」仕組みが現状ない可能性があり、必要なら PR で追加する（Phase 3 着手前に検証）。
+stackchan-mcp gateway 側に「STT せず Ogg/Opus を外部 hook に push するモード」を実装する PR が必要（= 新規 `listen_raw()` MCP tool か、既存 `listen()` に `transcribe: false` オプション追加）。Phase 3' 着手時に PR スケッチを上げて手元 fork で動作確認、検証後 upstream へ提出。
 
 #### C-3. タッチ・カメラ・サーボ・LED
 
@@ -661,7 +674,7 @@ stackchan-mcp の MCP tools は SAIVerse 本体の MCP client が直接呼び出
 | `get_head_angles` | 首角度取得 | true |
 | `get_device_info` | デバイス情報（バッテリー / 音量 / 輝度 / ネットワーク） | true |
 | `say` | TTS 発話 | **false**（voice-tts に置き換え） |
-| `listen` | STT | **false**（Phase 3' で別経路設計） |
+| `listen` | STT | **false**（v0.7 で Gemini inline 認識に転換、本 tool は使用しない） |
 | `get_status` | gateway 接続状態 | **false**（管理者向け） |
 | `gpio_test` / `uart_diag` / `check_vm_en` | サーボ診断系 | **false**（管理者向け） |
 
@@ -792,20 +805,16 @@ stackchan-mcp プロトコルが既に Bearer Token ベース。これを変え�
 
 一方、SAIVerse 側で `token_hash → vessel_id → bound_building_id` のテーブルを持つのはコストが軽い（= 我々のアドオン内に SQLite テーブル 1 つ追加）。プロトコルレベルでの vessel_id 概念がなくても、認証層の対応テーブルで論理的な vessel_id を維持できる。
 
-### なぜ STT は stackchan-mcp の `listen()` MCP tool 経由にするか
+### なぜ Gemini inline 認識経路に転換したか（v0.7）
 
-stackchan-mcp は v1.3.0 で gateway 側 Whisper を持つ。これに乗ることで:
+v0.6 までは「stackchan-mcp gateway 内部 Whisper で STT → テキストを SAIVerse に返す」設計だった。v0.7 で以下の理由により Gemini inline 認識（= 音声ファイルそのものを Gemini ペルソナの `inline_data` として渡す）に転換:
 
-- STT エンジンの選択・差し替え（faster-whisper / openai whisper API）が gateway 側で完結
-- device 側 PCM 集約・無音検知も gateway 側
-- 我々の `audio_input_pipeline.py`（自前 STT 経路）が不要に
+1. **文脈なし STT の精度限界**: ペルソナ名・ユーザー名・SAIVerse 固有用語など、Whisper 学習データに含まれない固有名詞が高頻度で誤認識される（= 別案件ナチュレの実証で足踏みした既知パターン）。
+2. **Gemini の音声理解能力**: 1 秒 = 32 token、9.5 時間まで対応。SAIVerse の対話シナリオでは精度・コスト・遅延すべての面で gateway 側 Whisper を上回る。
+3. **既存基盤の流用**: ユーザー添付音声経路（v1.0, 2026-05-18 実装済み）で `/upload-audio` + `metadata.media[]` + Gemini `inline_data` の出口が既に揃っており、入口側（= gateway → SAIVerse の音声ファイル push）を追加すれば足りる。
+4. **責務の分離**: gateway 側に STT エンジン（Whisper）を持たせる必要がなくなり、device + gateway はマイク信号の集約と Opus 圧縮配信に専念できる。
 
-ただし、gateway 側の `listen()` は MCP client への返り値として STT 結果を返す設計。SAIVerse 側（=  MCP client じゃなく direct caller）は別の取得経路が必要。具体的には:
-
-- a. `listen()` を Python 関数として import して呼ぶ（= 同期 / await で結果取得）
-- b. gateway に STT 結果 push hook を追加する PR
-
-案 a が現実的（= MCP layer をスキップして handler を直接呼ぶ）。実装で確認。
+非Gemini モデル（Claude / OpenAI 等）を Vessel ペルソナのデフォルトにしたい場合の書き起こし経路は将来 Phase で別途設計する。既存の `ensure_audio_summary`（ファイル単位キャッシュ、コンテキスト非依存）には触らず、ペルソナ単位のコンテキスト付き書き起こし経路を独立して立てる方針。
 
 ### なぜ Web Serial フラッシュにこだわらないか（v0.4 から変更）
 
@@ -866,11 +875,15 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 - もしくは設計を見直して AddonConfig.vessel_building_id を廃止し、`mcp_servers.json` の placeholder 解決経路 (`tools/mcp_config.py`) に `vessels.db` を直接参照する syntax (例: `${vessel_manager.<addon_name>.bound_building_id}`) を新設する手もある。後者の方が情報源が一本化されて綺麗だが、placeholder 解決層を改修する必要があるので工数は大きい。
 - 設定漏れ時の挙動: AddonConfig.vessel_building_id 未設定だと mcp_config が "missing_config" 判定して stackchan-mcp gateway 起動を拒否するため、**stackchan に紐付く機能 (TTS PCM 経路、物理身体ツール) が全部動かない** (= addon を入れた意味がない状態)。SAIVerse 本体や他 addon の動作には影響しない。Phase 2' のペアリング UI 完成前に新規ユーザーが addon を入れた場合の落とし穴になるので、UI 側に「ペアリング完了するまで AddonConfig.vessel_building_id にダミーでも入れてください」等の注意書きが必要 (= UI 完成と同時に解消される問題なので暫定対応)。
 
-### Phase 3' — STT 経路
+### Phase 3' — 音声入力経路（Gemini inline 認識）
 
-11. **gateway 側調査**: stackchan-mcp の `listen()` を direct Python 経由で呼ぶ実装（必要なら PR）
-12. **アドオン**: `stt_relay.py` で `listen()` 結果を `handle_user_input_stream` に流す
-13. **検証**: "Hi, stack-chan" → ペルソナが音声で応答
+ｽﾀｯｸﾁｬﾝ device の発話区切り後の Opus 音声を SAIVerse へ届けて、Gemini ペルソナが `inline_data` で直接理解して返答する経路。詳細は § C-2 参照、転換理由は § なぜ Gemini inline 認識経路に転換したか。stackchan-mcp gateway 内部 Whisper は経由しない。
+
+11. **gateway 側 PR**: stackchan-mcp に「STT せず Ogg/Opus を外部 hook に push するモード」を追加（= 新規 `listen_raw()` MCP tool か、既存 `listen()` に `transcribe: false` オプション追加）。手元 fork で動作確認後 upstream PR 投稿。
+12. **アドオン**: `audio_input_relay.py` 新規 — gateway からの音声 POST 受信、`~/.saiverse/audio/` にファイル保存、`vessel_id` → `bound_building_id` 解決、`manager.handle_user_input_stream` に `metadata.media[]` 付きで注入。
+13. **検証**: LCD 画面短タップ（< 500ms）で listen 起動 → 発話 → Gemini ペルソナが音声内容を理解して返答。固有名詞（まはー / エア等）が正しく認識されることを確認。ウェイクワード（"你好小智" 等 sdkconfig で有効なもの）でも同等の起動が可能。
+
+非Gemini ペルソナ向け書き起こし経路は将来 Phase で別途設計（§「将来 Phase（範囲外）」参照）。
 
 ### Phase 4' — 本体改修（visibility 制御）+ tool 一覧の最終確定
 
@@ -884,7 +897,7 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 stackchan-mcp の 21 ツールから:
 
 - **visible (15 個)**: move_head, take_photo, set_avatar, set_mouth, set_mouth_sequence, set_blink, set_led, set_all_leds, set_leds, clear_leds, set_brightness, set_volume, get_touch_state, get_head_angles, get_device_info
-- **visible=false (6 個)**: get_status（管理者向け）, say（voice-tts に置き換え）, listen（Phase 3' で別経路）, gpio_test / uart_diag / check_vm_en（診断系、管理者向け）
+- **visible=false (6 個)**: get_status（管理者向け）, say（voice-tts に置き換え）, listen（v0.7 で Gemini inline 認識に転換、使用しない）, gpio_test / uart_diag / check_vm_en（診断系、管理者向け）
 - **継続洗い出し**: SAIVerse の認知モデル上有用な追加ツールがあるか実機検証で確認、必要なら `mcp_servers.json` の `spell_tools` を追加・調整
 
 **本体改修ステップ**:
@@ -932,12 +945,13 @@ Phase X' 着手の前提:
 24. **PR #B 投稿** (= xiaozhi OTA 切離し、独立)
 25. **PR #C 投稿** (= libopus bundle、独立。CI build pipeline 整備も併走で提案推奨)
 26. **PR #D 投稿** (= persistent WS opt-in + bug fix、独立)
-27. **(必要なら)** STT 結果の external hook (Phase 3' でウェイクワード起動経路を作る際、gateway 側 push hook が無ければ追加)
+27. **(Phase 3' で必須)** Ogg/Opus 音声ファイルの external push hook（= v0.7 で Gemini inline 認識経路に転換、gateway 側で「STT せず音声を push するモード」が必要。新規 `listen_raw()` MCP tool か `listen()` の `transcribe: false` オプション追加）
 28. **(必要なら)** touch event push hook (Phase 5' で polling じゃ要件満たさない場合)
 
 ### 将来 Phase（範囲外）
 
-- カスタムウェイクワード
+- 非Gemini ペルソナ向け書き起こし経路（= Vessel Building に Claude / OpenAI ペルソナを置きたい需要が出たら、ペルソナの会話文脈を含めた `persona_audio_transcribe` 経路を別 Intent Doc で設計。既存 `ensure_audio_summary` キャッシュ経路は touch しない）
+- カスタムウェイクワード（= Espressif の Wake Word Customization 経由で "エア" 等ペルソナ名トリガーのモデル発注）
 - 歩行（外付け車輪モジュール対応）
 - IMU 連動
 - 複数 Vessel 対応の本格化（Vessel テーブル切り出し）
@@ -965,11 +979,14 @@ Phase X' 着手の前提:
 - Wi-Fi 断 → 復帰 → 自動再接続（同じ vessel record と紐付け）
 - ペアリング解除 → vessels.db からレコード削除 → device 再接続 → "vessel not registered" エラー
 
-### Phase 3' (STT)
+### Phase 3' (音声入力 — Gemini inline 認識)
 
-- "Hi, stack-chan" → 質問 → ペルソナが応答
-- Vessel に誰も居ない時のウェイクワード → 何も起きない（または "誰もいません" 応答）
-- STT 失敗（雑音、無言）→ ユーザーに「聞き取れませんでした」相当のフィードバック
+- **タッチ起動**: LCD 画面短タップ（< 500ms）→ listen 開始 → 発話 → Gemini ペルソナが音声内容を理解して返答（= ウェイクワード発音不要、実機テストの基本経路）
+- **ウェイクワード起動**: sdkconfig で有効なウェイクワード（現状デフォルトは "你好小智"）→ listen 開始 → 発話 → ペルソナが応答（= 発音できる場合の確認用、optional）
+- **固有名詞認識**: ｽﾀｯｸﾁｬﾝ経由で「まはー」「エア」等の固有名詞を含む発話 → ペルソナが正しく解釈して返答（= Gemini inline 認識のキー価値検証、Whisper STT では落ちていたケース）
+- **Vessel に誰も居ない時**: 音声受信しても何も起きない（= addon 側で occupant 不在を検出して破棄、ファイル保存しない）
+- **非Gemini ペルソナが Vessel にいる場合**: 警告ログ出力、ペルソナには無音扱い（将来 Phase で対応予定）
+- **連続発話**: 短い間隔で連続発話（= 5 回程度）で gateway / addon にメモリリーク・session ゾンビ・接続切れがない
 
 ### Phase 4' (ネイティブツール)
 
@@ -1026,7 +1043,7 @@ stackchan-mcp の `set_avatar` を基盤にしつつ、別機種が出てきた�
 - PR1: `send_pcm_audio(gateway, pcm)` 切り出し（手元 fork で動作確認済み、2026-05-13）
 - PR2: `send_pcm_stream(gateway, pcm_chunks)` 追加（手元 fork で動作確認済み、2026-05-13）
 - 将来 PR: gateway を stdio MCP server 抜きで起動するオプション（必要なら）
-- 将来 PR: STT 結果の external hook（必要なら）
+- Phase 3' で必須 PR: Ogg/Opus 音声ファイルの external push hook（= v0.7 で Gemini inline 認識経路に転換、新規 `listen_raw()` MCP tool か `listen()` の `transcribe: false` オプション追加）
 - 将来 PR: touch event の external push hook（必要なら）
 - 将来 PR: multi-token authentication（必要なら）
 
@@ -1056,15 +1073,15 @@ stackchan-mcp の `set_avatar` を基盤にしつつ、別機種が出てきた�
 - **TTS 統合方針**: 案 D（voice-tts `audio_stream.subscribe` 相乗り）採用
 - **Vessel Building の UI 表示**: 通常 Building と並べる（特別な区画にしない）
 - **本体改修要否**: `Building.PHYSICAL_VESSEL_ID` カラム追加 1 個を主、WebSocket 周りで必要なら汎用最小改修を許容
-- **認知モデル**: Building = 身体 / ペルソナ = 脳・魂 / マイク = 耳 / STT = 聴覚野 / スピーカー = 口 / TTS = 発声 / カメラ = 目 / サーボ = 姿勢 / タッチ = 触覚 のメタファーで統一
-- **STT 経路**: `manager.handle_user_input_stream` 経由でユーザー発言として注入
+- **認知モデル**: Building = 身体 / ペルソナ = 脳・魂 / マイク = 耳 / 音声理解 (Gemini inline、v0.7 で転換) = 聴覚野 / スピーカー = 口 / TTS = 発声 / カメラ = 目 / サーボ = 姿勢 / タッチ = 触覚 のメタファーで統一
+- **音声入力経路**: `manager.handle_user_input_stream` 経由でユーザー発言として注入（v0.7 で `metadata.media[]` 経由の音声ファイル添付に拡張）
 
 ### v0.2 → v0.3 で確定
 
 - **MP3 vs PCM 直送**: Phase 2 は MP3 のまま流す（後に v0.4 で PCM 直送に変更、v0.5 でさらに Opus encode に変更）
 - **WebSocket 自動マウント**: アドオン `api_routes.py` の `@router.websocket()` が動くか Phase 1 で実機検証（v0.5 で gateway が WS server を持つ形になり、自動マウント検証は不要に）
-- **STT 初期バックエンド**: OpenAI Whisper API（v0.5 では stackchan-mcp gateway 側 Whisper に変更）
-- **ウェイクワード**: 固定（"Hi, stack-chan" 等の既製ワード）。カスタムウェイクワードは将来 Phase
+- **STT 初期バックエンド**: OpenAI Whisper API → v0.5 で stackchan-mcp gateway 側 Whisper に変更 → **v0.7 で Gemini inline 認識に転換（= STT を経由せず音声ファイルを Gemini ペルソナに直接渡す）**
+- **ウェイクワード**: sdkconfig で有効なもの（現状デフォルトは ESP-SR の `WN9_NIHAOXIAOZHI`、= "你好小智"）+ LCD 画面短タップ起動の併用。発音できないユーザーはタッチ経路を使う。カスタムウェイクワード（ペルソナ名等）は将来 Phase
 - **ペアリング UX**: QR コード表示 + 手入力フォーム併用
 - **複数 Vessel 対応**: Phase 1 は 1 台前提、データモデルは複数対応
 
@@ -1133,3 +1150,30 @@ Phase 1' を実機検証込みで完走。当初の想定 (= PR 3 件) から実
 **残った未解明事項** (= Phase 5'〜X' での再観察対象):
 
 - 一度だけ観測された「発話末尾の取りこぼし」(= 2026-05-13 20:25 頃)。再現せず偶発と評価したが、再発時に分析できるよう speak_hook に投入 cadence の DEBUG ログを残してある
+
+### v0.6 → v0.7 で確定（Phase 3' 設計転換、2026-05-18）
+
+Phase 3' の音声入力経路を **stackchan-mcp gateway 内部 Whisper STT 経由から Gemini inline 認識経路に転換**。
+
+**転換の判断軸**:
+
+- 文脈なし STT は固有名詞（ペルソナ名・ユーザー名・SAIVerse 固有用語）を高頻度で誤認識する（= 別案件ナチュレの実証で足踏みした既知パターン）
+- 2026-05-18 に SAIVerse 本体でユーザー添付音声・動画経路（v1.0、`/upload-audio` + `metadata.media[]` + Gemini `inline_data`）が実装完了し、Vessel 経由音声もこの基盤に乗せれば追加実装が最小
+- Gemini 音声理解能力（1 秒 = 32 token、9.5 時間まで対応）は SAIVerse の対話シナリオで精度・コスト・遅延すべて gateway Whisper を上回る
+
+**設計の主要変更点**:
+
+- **音声入力経路（§ C-2）**: ｽﾀｯｸﾁｬﾝ device → gateway → addon HTTP hook → `~/.saiverse/audio/` に保存 → `manager.handle_user_input_stream` に `metadata.media[]` 付きで注入 → Gemini ペルソナが `inline_data` で「音」を直接理解。Whisper STT を経由しない。
+- **メタファー表**: `STT (gateway 側 Whisper)` を `音声理解 (Gemini inline 認識)` に書き換え。認知モデル（マイク=耳、聴覚野=音声理解、…）の頑健性は維持。
+- **不変条件 §6**: `STT 結果は metadata で由来を明示する` を `音声入力は metadata で由来を明示する` に改題。`metadata.media[]` を含む形に拡張。
+- **listen MCP tool**: `visible: false` を維持。理由を「Phase 3' で別経路設計」から「v0.7 で Gemini inline 認識に転換、本 tool は使用しない」に変更。
+- **将来 Phase**: 非Gemini ペルソナ向け書き起こし経路（= Vessel に Claude / OpenAI ペルソナを置きたい需要が出た際の `persona_audio_transcribe`）を将来 Phase リストに追加。既存 `ensure_audio_summary` キャッシュ経路は touch しない方針。
+- **ウェイクワード**: 確定事項を更新。sdkconfig デフォルトは ESP-SR の `WN9_NIHAOXIAOZHI`（= "你好小智"）。発音できないユーザーは LCD 画面短タップ（< 500ms、`Application::ToggleChatState()` 起動）で listen を発火可能（= stackchan board の `Ft6336TouchPoll` で実装済み、`firmware/main/boards/stackchan/stackchan.cc:871-878`）。カスタムウェイクワード（ペルソナ名等）は将来 Phase。
+
+**新規必要となる上流 PR**:
+
+- stackchan-mcp gateway に「STT せず Ogg/Opus を外部 hook に push するモード」（= 新規 `listen_raw()` MCP tool か、既存 `listen()` に `transcribe: false` オプション追加）。Phase 3' 着手時に手元 fork で動作確認 → upstream PR 提出。
+
+**追加するアドオン実装**:
+
+- `audio_input_relay.py` 新規（旧設計の `stt_relay.py` から命名変更、STT を経由しないため）
