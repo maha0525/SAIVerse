@@ -1,8 +1,9 @@
 # Issue: stackchan firmware: Avatar set Load の PSRAM peak でロード失敗
 
-**ステータス**: 🟡 実装完了 (実機検証待ち、 stackchan-mcp fork `dev/integration` に merge 済)
+**ステータス**: ✅ 実機検証済 (PSRAM peak 解消 + stroke reset 副次解消)
 **優先度**: medium
 **作成日**: 2026-05-18
+**解決日**: 2026-05-19
 **関連**:
 - firmware: `firmware/main/boards/stackchan/avatar_set_fetcher.cc:73-83` (既知 TODO コメント)
 - firmware: `firmware/main/boards/stackchan/stackchan.cc` (AvatarSet::Load 実装)
@@ -114,4 +115,9 @@ SAIVerse 側 `avatar_loader.py` で発覚した別バグを同時調査中に修
 ## ログ
 
 - 2026-05-18: stackchan 連携の調査 (= 23:23 stuck 再現実験) 中に発見、Issue 化。stackchan-mcp 側で PR を別セッションで対応予定
-- 2026-05-18: stackchan-mcp fork に修正 commit (`740d786` on `feature/dynamic-avatar-set`)。 採用案は **案 A + ownership-transfer** = `AvatarSet::Load(const uint8_t*, size_t)` (memcpy 版) を `AdoptOwnedBuffer(uint8_t*, size_t)` (所有権譲渡版) に置き換え、 Fetcher の staging buffer を AvatarSet が直接受け取る形に。 peak が 9.9 MB → 3.3 MB に削減 (旧 buffer は新 buffer 検証後に解放、 失敗時は旧維持で暗転なし)。 `dev/integration` に merge 済 (commit `376d827`)、 build artifact 生成済、 実機検証待ち。 upstream PR は Phase X' で PR-E1 cherry-pick リストに追加 (`docs/issues/stackchan_mcp_upstream_pr_strategy.md` 参照)
+- 2026-05-18: stackchan-mcp fork に修正 commit (`740d786` on `feature/dynamic-avatar-set`)。 採用案は **案 A + ownership-transfer** = `AvatarSet::Load(const uint8_t*, size_t)` (memcpy 版) を `AdoptOwnedBuffer(uint8_t*, size_t)` (所有権譲渡版) に置き換え、 Fetcher の staging buffer を AvatarSet が直接受け取る形に。 peak が 9.9 MB → 3.3 MB に削減 (旧 buffer は新 buffer 検証後に解放、 失敗時は旧維持で暗転なし)。 `dev/integration` に merge 済 (commit `376d827`)、 build artifact 生成済、 実機検証待ち
+- 2026-05-19: 実機 flash + 検証完了。
+  - **新ログ** `AvatarSet: Avatar set adopted: mode=1, bytes=3456000` を確認 (= ownership-transfer 経路稼働)
+  - エア → エリスの swap で **`PSRAM allocation failed` が出ず**、エリス avatar が暗転なく LCD に表示 → **PSRAM peak issue 解決確認**
+  - **副次効果**: 旧 firmware で再現していた「stroke 後 ~2.5 秒で device 自動 reset」(= 23:23 / 21:50 stuck の真因) が、新 firmware では **5 回連続 stroke 試行 (= 0.4 秒 - 11.4 秒 hold の幅) で 0 回発生**。推定根拠: stroke reaction window 中の memory pressure 起因 race が、peak 削減で踏みにくくなった。完全証明ではないが強い傍証
+  - coredump 機能は reset 起きないので未実証 (= 保険として設定残置、今後 reset 起きた時に活用)。 upstream PR は Phase X' で PR-E1 cherry-pick リストに追加 (`docs/issues/stackchan_mcp_upstream_pr_strategy.md` 参照)
