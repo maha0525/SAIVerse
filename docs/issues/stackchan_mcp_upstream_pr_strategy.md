@@ -245,6 +245,90 @@ cherry-pick の順序や境界は Phase 4.5-e 着手時の実装状況で再点�
 - matrix mode (90 枚) は PSRAM 3.3 MB を消費。8 MB PSRAM の使用上限 5 MB 内で xiaozhi-esp32 base の他用途と共存可能、を実機ログで示す
 - mode 切替は avatar セット単位 (= ペルソナ憑依時にセットごと差し替え)、ロード中 mode 変更不可、を doc で明示
 
+## 追補: PR-F — device-driven listen audio capture forwarding (Phase 3' 対応、2026-05-18 追記)
+
+Phase 3' で実装した device-driven listen 音声経路 (詳細設計は `docs/intent/stackchan_vessel.md` v0.7 §C-2 / §G) の upstream PR。Series A〜E とは独立、依存なし。
+
+### PR-F 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-F** | feat(audio): forward device-driven listen captures to an external HTTP hook | upstream `main` | — |
+
+ブランチ: `feature/device-driven-audio-capture-with-hook` (= 4 commit、2026-05-18 時点で fork に push 済み、`dev/integration` へ merge 済み)。
+
+### 投稿条件
+
+- Phase 3' の実機検証完了後 (= 「LCD タッチ起動 → Gemini ペルソナが固有名詞を含む発話を理解して返答」 が確認できた段階)
+- Series A〜E と並行投稿可能。 依存なし
+
+### PR description ドラフト
+
+reviewer (= kisaragi-mochi) 向け。 受け入れの分岐ポイント (= server-driven listening モデルとの哲学的整合) を明示する:
+
+> **What**
+>
+> Forward device-initiated listen captures (wake word, button press, LCD touch — any path that calls `Application::ToggleChatState` / `WakeWordInvoke` / `StartListening` on the firmware) to an externally configured HTTP hook as an Ogg/Opus payload.
+>
+> **Why**
+>
+> stackchan-mcp's primary listen model today is MCP-client-driven (the `listen()` tool): the LLM agent decides when to open the device's microphone and the gateway transcribes the resulting Opus stream through a registered STT engine. This works well for "AI agent initiates listening" workflows.
+>
+> The device-side firmware, inherited from xiaozhi-esp32, also has a reverse path: when a wake word fires, a button is pressed, or (board-dependent) the LCD is tapped, the firmware sends `{"type":"listen","state":"start"}` to the gateway and starts streaming Opus frames. The gateway currently ignores these inbound listen messages, so the frames are dropped at `audio_stream.handle_audio_frame`'s "no active recording slot" branch. The behaviour is documented in the existing comment:
+>
+> > the device may emit audio on its own (e.g. after an autonomous wake-word detection) and the gateway has no STT pipeline running for those frames yet.
+>
+> This PR fills that gap for the case where the gateway operator wants to forward those frames to a downstream service — a non-Whisper recognizer, a recorder, or (our use case) a Gemini-powered persona that consumes audio as `inline_data`. It does so without changing the MCP-driven default: the device-driven capture path is enabled only when `STACKCHAN_AUDIO_HOOK_URL` is set.
+>
+> **How**
+>
+> 1. **Inbound listen handler** (`esp32_client._handler`): when `STACKCHAN_AUDIO_HOOK_URL` is configured AND no MCP-driven `listen()` is already capturing, open the shared `audio_stream` recording slot on `state="start"` and close it on `state="stop"`. Without the hook URL, the device-driven branch logs at debug and returns immediately — current behaviour preserved.
+> 2. **Ogg/Opus packing** (`audio_input_hook.pack_opus_frames_to_ogg`): pure-Python RFC 7845 + RFC 3533. No new runtime dependencies — the existing `opuslib` is for codec, not container, and we intentionally avoid pulling in `pyogg` for a 200-line wrapper.
+> 3. **HTTP push** (`audio_input_hook.push_audio_capture`): aiohttp POST with `Content-Type: audio/ogg`, `Authorization: Bearer <STACKCHAN_AUDIO_HOOK_TOKEN>` (falls back to `STACKCHAN_TOKEN`), and `X-StackChan-Session: <gateway session id>`. Fire-and-forget; failures are logged at WARNING and do not propagate.
+> 4. **Disconnect cleanup**: connection close mid-capture drops the partial buffer (mirrors the existing session-mismatch discard logic in `audio_stream.handle_audio_frame`).
+>
+> **Compatibility**
+>
+> - **Default OFF / opt-in**: `STACKCHAN_AUDIO_HOOK_URL` unset → inbound listen messages are still logged at debug and discarded, matching today's behaviour.
+> - **No conflict with MCP-driven `listen()`**: if an MCP `listen()` has already opened the recording slot, the device-driven branch defers (existing slot is honoured). The shared `audio_stream` module-level singleton remains the single capture buffer.
+> - **No new runtime dependencies**.
+>
+> **Tests**
+>
+> - `tests/test_audio_input_hook.py` (new, 9 cases): Ogg page structure (BOS / OpusTags / EOS, granule monotonicity, multi-page layout), CRC round-trip (parse, zero, recompute, compare), HTTP push success / empty / 5xx.
+> - `tests/test_esp32_client.py` (extended, 3 new cases): device-driven listen → frame → stop → hook fire; hook URL absent → no recording slot; disconnect mid-capture → partial buffer discarded, no hook.
+> - All 264 pre-existing tests continue to pass.
+>
+> **Out of scope**
+>
+> - Audio recognition itself — this PR ships frames out the door; recognition is the receiver's responsibility.
+> - Multiple concurrent hooks / topic routing. One configured URL gets every device-driven capture.
+
+### PR-F の注意点
+
+- 設計範囲を **拡張する** タイプの PR (= 「stackchan-mcp は意図的に server-driven listening を採用」 という maintainer の方針への追加提案)。 PR-B (xiaozhi OTA skip) と同程度かそれ以上に description を厚めに書く必要あり
+- 既存 server-driven 経路を壊さないこと (= default OFF、 既存 `listen()` ツールとの排他は recording slot 共有で自然解決) を明示するのが受け入れの分岐ポイント
+- 受け入れ拒否の場合: 手元 fork で運用継続。 SAIVerse 側 addon の `mcp_servers.json` は `dev/integration` を指したまま (= Series A〜D / E と同じ運用)
+- 関連 Issue: #8 (Phase 4: Opus audio stream、 phase-4-audio + help wanted)、 #91 (= 既に Closed の MCP-driven listen() 実装)、 #169 (= persistent WS + logical audio state 分離、 我々の PR とは別軸だが将来 integration の余地あり)
+
+### Series F 用ブランチ分割手順
+
+PR-F は単一 PR で、 分割不要 (= 4 commit がすでに論理単位で整理済み):
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+git switch -c pr-f-device-driven-audio-capture upstream/main
+git cherry-pick 557c49f    # feat(audio): add audio_input_hook for device-driven listen capture push
+git cherry-pick 9a7dae5    # feat(esp32_client): handle inbound listen messages for device-driven capture
+git cherry-pick c7338a2    # feat(gateway): wire STACKCHAN_AUDIO_HOOK_URL/TOKEN env into ESP32Manager
+git cherry-pick 18f0562    # test(audio): cover device-driven listen capture path
+git push origin pr-f-device-driven-audio-capture
+```
+
+cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
+
 ## 参考
 
 - 手元 fork のブランチ:
