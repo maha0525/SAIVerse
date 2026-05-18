@@ -33,15 +33,72 @@ except ImportError:
 class LLMClient:
     """Base class for LLM clients."""
 
-    def __init__(self, supports_images: bool = False) -> None:
+    def __init__(
+        self,
+        supports_images: bool = False,
+        supports_audio: bool = False,
+        supports_video: bool = False,
+    ) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
         self._latest_reasoning_details: Any = None
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
         self._latest_usage: Optional[UsageInfo] = None
         self.supports_images = supports_images
+        self.supports_audio = supports_audio
+        self.supports_video = supports_video
         self.model: str = ""  # Set by subclasses (API model name)
         self.config_key: str = ""  # Config file key for pricing lookup
+
+    def _inject_unsupported_media_summaries(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """If this client lacks supports_audio / supports_video, append summary
+        text notes for any audio/video media in message metadata.
+
+        Returns a new message list with text content modified for affected messages.
+        For Gemini (which natively handles audio/video), this is a no-op.
+        """
+        if self.supports_audio and self.supports_video:
+            return messages
+
+        from .utils import inject_audio_video_summaries
+        from saiverse.media_utils import iter_audio_media, iter_video_media
+
+        new_msgs: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                new_msgs.append(msg)
+                continue
+            metadata = msg.get("metadata")
+            if not isinstance(metadata, dict):
+                new_msgs.append(msg)
+                continue
+
+            audio_items = iter_audio_media(metadata) if not self.supports_audio else []
+            video_items = iter_video_media(metadata) if not self.supports_video else []
+            if not audio_items and not video_items:
+                new_msgs.append(msg)
+                continue
+
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                # Complex content (e.g. tool_calls); skip injection rather than risk
+                # breaking the structure.
+                new_msgs.append(msg)
+                continue
+
+            skip_audio = bool(metadata.get("__skip_audio_summary__"))
+            skip_video = bool(metadata.get("__skip_video_summary__"))
+            filtered_media = list(audio_items) + list(video_items)
+            new_text = inject_audio_video_summaries(
+                {"media": filtered_media}, content,
+                skip_audio=skip_audio, skip_video=skip_video,
+            )
+            new_msg = dict(msg)
+            new_msg["content"] = new_text
+            new_msgs.append(new_msg)
+        return new_msgs
 
     def generate(
         self,

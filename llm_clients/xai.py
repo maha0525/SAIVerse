@@ -363,6 +363,7 @@ class XAIClient(LLMClient):
             str: Text response when tools is None or empty
             Dict: Tool detection result when tools is provided
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
         snippets: List[str] = list(history_snippets or [])
@@ -527,6 +528,7 @@ class XAIClient(LLMClient):
         Yields text fragments and ``{"type": "thinking", ...}`` dicts for
         reasoning content.
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = list(history_snippets or [])

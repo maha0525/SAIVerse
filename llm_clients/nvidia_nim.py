@@ -209,6 +209,7 @@ class NvidiaNIMClient(OpenAIClient):
 
         For structured output, uses guided_json in extra_body instead of response_format.
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
         from tools.core import parse_tool_result
         from .openai_message_preparer import prepare_openai_messages

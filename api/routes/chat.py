@@ -41,6 +41,10 @@ class ChatMessage(BaseModel):
     avatar: Optional[str] = None
     persona_id: Optional[str] = None  # assistant メッセージで発話ペルソナを識別 (アドオン bubble button の context 等で使用)
     images: Optional[List[ChatMessageImage]] = None
+    # Same shape (url + mime_type) but separated by media type so the frontend
+    # can pick the right player (img / audio / video) without misclassifying.
+    audios: Optional[List[ChatMessageImage]] = None
+    videos: Optional[List[ChatMessageImage]] = None
     reasoning: Optional[str] = None
     activity_trace: Optional[List[dict]] = None
     llm_usage: Optional[ChatMessageLLMUsage] = None
@@ -212,29 +216,68 @@ def get_chat_history(
             sender = "System"
             avatar = "/api/static/builtin_icons/host.png"
             
-        # Extract images from metadata
-        # Support both 'images' (user upload) and 'media' (tool-generated) keys
+        # Extract media from metadata
+        # - "images" (legacy, user upload): image-only entries
+        # - "media" (unified, audio/video and possibly mixed): type-tagged entries
         images_list = None
+        audios_list = None
+        videos_list = None
         metadata = msg.get("metadata", {})
         if metadata and ("images" in metadata or "media" in metadata):
-            images_list = []
-            media_items = metadata.get("images") or metadata.get("media") or []
-            for img in media_items:
-                # Convert path to URL
-                # Tool-generated images may use 'uri' instead of 'path'
-                img_path = img.get("path") or ""
-                if not img_path:
-                    # Try to extract from uri (saiverse://image/filename.jpg)
-                    uri = img.get("uri", "")
+            images_buf: List[ChatMessageImage] = []
+            audios_buf: List[ChatMessageImage] = []
+            videos_buf: List[ChatMessageImage] = []
+
+            def _classify_and_append(entry: Dict[str, Any], forced_type: Optional[str]) -> None:
+                """Resolve path → URL and route to the right buffer by media type."""
+                item_type = (forced_type or entry.get("type") or "").lower()
+                item_mime = (entry.get("mime_type") or "").lower()
+
+                # Resolve path from "path" or "uri"
+                img_path = entry.get("path") or ""
+                uri = entry.get("uri", "")
+                if not img_path and uri:
                     if uri.startswith("saiverse://image/"):
                         filename = uri.replace("saiverse://image/", "")
                         img_path = str(Path.home() / ".saiverse" / "image" / filename)
-                if img_path:
-                    # Serve via static endpoint
-                    images_list.append(ChatMessageImage(
-                        url=f"/api/static/uploads/{Path(img_path).name}",
-                        mime_type=img.get("mime_type")
+                    elif uri.startswith("saiverse://audio/"):
+                        filename = uri.replace("saiverse://audio/", "")
+                        img_path = str(Path.home() / ".saiverse" / "audio" / filename)
+                    elif uri.startswith("saiverse://video/"):
+                        filename = uri.replace("saiverse://video/", "")
+                        img_path = str(Path.home() / ".saiverse" / "video" / filename)
+                if not img_path:
+                    return
+
+                name = Path(img_path).name
+                # Pick serving endpoint per media type
+                if item_type == "audio" or item_mime.startswith("audio/"):
+                    audios_buf.append(ChatMessageImage(
+                        url=f"/api/media/audio/{name}",
+                        mime_type=entry.get("mime_type") or "audio/ogg",
                     ))
+                elif item_type == "video" or item_mime.startswith("video/"):
+                    videos_buf.append(ChatMessageImage(
+                        url=f"/api/media/video/{name}",
+                        mime_type=entry.get("mime_type") or "video/mp4",
+                    ))
+                else:
+                    # Default to image (legacy "images" entries and tool-generated images)
+                    images_buf.append(ChatMessageImage(
+                        url=f"/api/static/uploads/{name}",
+                        mime_type=entry.get("mime_type"),
+                    ))
+
+            # Legacy "images" key: every entry is an image
+            for img in metadata.get("images") or []:
+                _classify_and_append(img, forced_type="image")
+            # Unified "media" key: entries carry their own type
+            for img in metadata.get("media") or []:
+                _classify_and_append(img, forced_type=None)
+
+            images_list = images_buf or None
+            audios_list = audios_buf or None
+            videos_list = videos_buf or None
 
         # Extract LLM usage from metadata
         llm_usage_data = None
@@ -285,6 +328,8 @@ def get_chat_history(
             avatar=avatar,
             persona_id=msg.get("persona_id") if role == "assistant" else None,
             images=images_list,
+            audios=audios_list,
+            videos=videos_list,
             reasoning=reasoning_data,
             activity_trace=activity_trace_data,
             llm_usage=llm_usage_data,
@@ -496,6 +541,135 @@ def _store_document_attachment(
         "content_preview": content[:500] if len(content) > 500 else content
     }
 
+AUDIO_EXTENSIONS = {'wav', 'mp3', 'ogg', 'oga', 'opus', 'aac', 'flac', 'aiff', 'm4a'}
+VIDEO_EXTENSIONS = {'mp4', 'webm', 'mov', 'avi', 'mpeg', 'mpg', '3gp', 'mkv', 'flv', 'wmv'}
+
+
+def _store_audio_attachment(
+    data: bytes,
+    att: AttachmentData,
+    manager,
+    building_id: str,
+) -> Dict[str, Any]:
+    """Normalize audio with ffmpeg and create an audio Item.
+
+    Raises RuntimeError on ffmpeg unavailable or normalization failure (e.g. duration exceeded).
+    """
+    import tempfile
+    from saiverse.ffmpeg_runner import is_ffmpeg_available, normalize_audio
+
+    if not is_ffmpeg_available():
+        raise RuntimeError("ffmpeg is not available; audio attachment cannot be processed.")
+
+    suffix = Path(att.filename).suffix or ".bin"
+    tmp_input: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(data)
+            tmp_input = Path(tmp.name)
+
+        dest_dir = Path.home() / ".saiverse" / "audio"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.ogg"
+        dest_path = dest_dir / dest_name
+
+        success, error = normalize_audio(tmp_input, dest_path, max_duration=300.0)
+        if not success:
+            raise RuntimeError(f"Audio normalization failed: {error}")
+    finally:
+        if tmp_input is not None and tmp_input.exists():
+            try:
+                tmp_input.unlink()
+            except OSError:
+                logging.warning("Failed to remove temp audio file: %s", tmp_input)
+
+    # Create audio Item (is_open=True so it appears in visual_context)
+    item_id = None
+    try:
+        item_id = manager.create_audio_item_for_user(
+            name=att.filename,
+            description=f"User uploaded audio: {att.filename}",
+            file_path=str(dest_path),
+            building_id=building_id,
+            is_open=True,
+            creator_id="user",
+            source_context='{"source": "upload"}',
+        )
+    except Exception as e:
+        logging.warning("Failed to create audio item: %s", e, exc_info=True)
+
+    return {
+        "type": "audio",
+        "uri": f"saiverse://audio/{dest_name}",
+        "mime_type": "audio/ogg",
+        "source": "user_upload",
+        "path": str(dest_path),
+        "item_id": item_id,
+    }
+
+
+def _store_video_attachment(
+    data: bytes,
+    att: AttachmentData,
+    manager,
+    building_id: str,
+) -> Dict[str, Any]:
+    """Normalize video with ffmpeg and create a video Item.
+
+    Raises RuntimeError on ffmpeg unavailable or normalization failure.
+    """
+    import tempfile
+    from saiverse.ffmpeg_runner import is_ffmpeg_available, normalize_video
+
+    if not is_ffmpeg_available():
+        raise RuntimeError("ffmpeg is not available; video attachment cannot be processed.")
+
+    suffix = Path(att.filename).suffix or ".bin"
+    tmp_input: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(data)
+            tmp_input = Path(tmp.name)
+
+        dest_dir = Path.home() / ".saiverse" / "video"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.mp4"
+        dest_path = dest_dir / dest_name
+
+        success, error = normalize_video(tmp_input, dest_path, max_duration=90.0)
+        if not success:
+            raise RuntimeError(f"Video normalization failed: {error}")
+    finally:
+        if tmp_input is not None and tmp_input.exists():
+            try:
+                tmp_input.unlink()
+            except OSError:
+                logging.warning("Failed to remove temp video file: %s", tmp_input)
+
+    item_id = None
+    try:
+        item_id = manager.create_video_item_for_user(
+            name=att.filename,
+            description=f"User uploaded video: {att.filename}",
+            file_path=str(dest_path),
+            building_id=building_id,
+            is_open=True,
+            creator_id="user",
+            source_context='{"source": "upload"}',
+        )
+    except Exception as e:
+        logging.warning("Failed to create video item: %s", e, exc_info=True)
+
+    return {
+        "type": "video",
+        "uri": f"saiverse://video/{dest_name}",
+        "mime_type": "video/mp4",
+        "source": "user_upload",
+        "path": str(dest_path),
+        "item_id": item_id,
+    }
+
+
 def _store_uploaded_attachment_v2(
     att: AttachmentData,
     manager,
@@ -513,16 +687,28 @@ def _store_uploaded_attachment_v2(
             return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
         elif att.type == 'document':
             return _store_document_attachment(data, att, manager, building_id)
+        elif att.type == 'audio':
+            return _store_audio_attachment(data, att, manager, building_id)
+        elif att.type == 'video':
+            return _store_video_attachment(data, att, manager, building_id)
         else:
             # Unknown type: determine from extension
             ext = Path(att.filename).suffix.lower().lstrip('.')
             if ext in IMAGE_EXTENSIONS:
                 return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
+            elif ext in AUDIO_EXTENSIONS:
+                return _store_audio_attachment(data, att, manager, building_id)
+            elif ext in VIDEO_EXTENSIONS:
+                return _store_video_attachment(data, att, manager, building_id)
             elif ext in TEXT_EXTENSIONS:
                 return _store_document_attachment(data, att, manager, building_id)
             else:
                 # Default to image for compatibility
                 return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
+    except RuntimeError as e:
+        # User-facing error (e.g. duration exceeded, ffmpeg failed) — surface message
+        logging.warning("Attachment rejected: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logging.error(f"Failed to process attachment: {e}")
         return None
@@ -563,6 +749,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     if req.attachments:
         images = []
         documents = []
+        media_entries = []  # for audio/video, consumed by iter_audio_media / iter_video_media
         for att in req.attachments:
             result = _store_uploaded_attachment_v2(
                 att, manager, building_id,
@@ -587,10 +774,21 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                         "item_name": att.filename,  # For history context
                         "content_preview": result.get("content_preview")
                     })
+                elif result["type"] in ("audio", "video"):
+                    media_entries.append({
+                        "type": result["type"],
+                        "uri": result["uri"],
+                        "path": result["path"],
+                        "mime_type": result["mime_type"],
+                        "item_id": result.get("item_id"),
+                        "item_name": att.filename,
+                    })
         if images:
             metadata["images"] = images
         if documents:
             metadata["documents"] = documents
+        if media_entries:
+            metadata["media"] = media_entries
 
     # Handle legacy single attachment format (backwards compatibility)
     elif req.attachment:

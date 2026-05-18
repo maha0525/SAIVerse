@@ -122,6 +122,8 @@ interface Message {
     sender?: string;
     persona_id?: string; // assistant メッセージで発話ペルソナを識別 (アドオン bubble button context 等で使用)
     images?: MessageImage[];
+    audios?: MessageImage[];   // 音声添付。MessageImage と同じ {url, mime_type} 形式を流用
+    videos?: MessageImage[];   // 動画添付
     llm_usage?: MessageLLMUsage;
     llm_usage_total?: MessageLLMUsageTotal;
     // Error information
@@ -156,7 +158,7 @@ interface ActivityEntry {
 interface FileAttachment {
     base64: string;
     name: string;
-    type: 'image' | 'document' | 'unknown';
+    type: 'image' | 'document' | 'audio' | 'video' | 'unknown';
     mimeType: string;
 }
 
@@ -165,11 +167,19 @@ const TEXT_EXTENSIONS = new Set(['txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', '
     'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
     'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl', 'pdf']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+const AUDIO_EXTENSIONS = new Set(['wav', 'mp3', 'ogg', 'oga', 'opus', 'aac', 'flac', 'aiff', 'm4a']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'avi', 'mpeg', 'mpg', '3gp', 'mkv', 'flv', 'wmv']);
 
-function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'unknown' {
+function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'audio' | 'video' | 'unknown' {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
     if (IMAGE_EXTENSIONS.has(ext) || mimeType.startsWith('image/')) {
         return 'image';
+    }
+    if (AUDIO_EXTENSIONS.has(ext) || mimeType.startsWith('audio/')) {
+        return 'audio';
+    }
+    if (VIDEO_EXTENSIONS.has(ext) || mimeType.startsWith('video/')) {
+        return 'video';
     }
     if (TEXT_EXTENSIONS.has(ext) || mimeType.startsWith('text/')) {
         return 'document';
@@ -714,6 +724,8 @@ export default function Home() {
                             avatar: entry.msg.avatar || local.avatar,
                             sender: entry.msg.sender || local.sender,
                             images: entry.msg.images || local.images,
+                            audios: entry.msg.audios || local.audios,
+                            videos: entry.msg.videos || local.videos,
                             llm_usage: entry.msg.llm_usage || local.llm_usage,
                             llm_usage_total: entry.msg.llm_usage_total || local.llm_usage_total,
                             timestamp: entry.msg.timestamp || local.timestamp,
@@ -1310,6 +1322,12 @@ export default function Home() {
             images: attachments
                 .filter(a => a.type === 'image')
                 .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            audios: attachments
+                .filter(a => a.type === 'audio')
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            videos: attachments
+                .filter(a => a.type === 'video')
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
         };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
@@ -1859,7 +1877,12 @@ export default function Home() {
         setContextPreviewData(null);
 
         try {
-            const attachmentTypes = attachments.map(a => a.type === 'image' ? 'image' : 'document');
+            const attachmentTypes = attachments.map(a => {
+                if (a.type === 'image') return 'image';
+                if (a.type === 'audio') return 'audio';
+                if (a.type === 'video') return 'video';
+                return 'document';
+            });
             // ツール指定モードのセンチネルは meta_playbook として送らない
             // (サーバー側に該当 Playbook はなく、preview のコンテキスト計算は
             // どちらのモードでも default Playbook 基準で問題ない)。
@@ -2128,6 +2151,36 @@ export default function Home() {
                                             ))}
                                         </div>
                                     )}
+                                    {msg.audios && msg.audios.length > 0 && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', margin: '0.4rem 0' }}>
+                                            {msg.audios.map((a, idx) => (
+                                                <audio
+                                                    key={`a-${idx}`}
+                                                    controls
+                                                    preload="metadata"
+                                                    src={a.url}
+                                                    style={{ width: '100%', maxWidth: '420px' }}
+                                                >
+                                                    お使いのブラウザは audio タグをサポートしていません。
+                                                </audio>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {msg.videos && msg.videos.length > 0 && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', margin: '0.4rem 0' }}>
+                                            {msg.videos.map((v, idx) => (
+                                                <video
+                                                    key={`v-${idx}`}
+                                                    controls
+                                                    preload="metadata"
+                                                    src={v.url}
+                                                    style={{ width: '100%', maxWidth: '480px', borderRadius: '6px' }}
+                                                >
+                                                    お使いのブラウザは video タグをサポートしていません。
+                                                </video>
+                                            ))}
+                                        </div>
+                                    )}
                                     {msg.isError ? (
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
@@ -2352,7 +2405,12 @@ export default function Home() {
                                     gap: '0.5rem',
                                     color: '#333'
                                 }}>
-                                    <span>{att.type === 'image' ? '🖼' : '📄'} {att.name}</span>
+                                    <span>{
+                                        att.type === 'image' ? '🖼'
+                                        : att.type === 'audio' ? '🎵'
+                                        : att.type === 'video' ? '🎬'
+                                        : '📄'
+                                    } {att.name}</span>
                                     <button onClick={() => removeAttachment(idx)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
                                 </div>
                             ))}
@@ -2412,7 +2470,7 @@ export default function Home() {
                             style={{ display: 'none' }}
                             onChange={handleFileUpload}
                             multiple
-                            accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
+                            accept="image/*,audio/*,video/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
                         />
                         <textarea
                             ref={textareaRef}

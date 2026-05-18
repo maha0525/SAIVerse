@@ -494,6 +494,7 @@ class OpenAIClient(LLMClient):
                   - tool_name: Tool name (if type is "tool_call")
                   - tool_args: Tool arguments dict (if type is "tool_call")
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
         self._store_reasoning([])
@@ -818,6 +819,7 @@ class OpenAIClient(LLMClient):
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = list(history_snippets or [])

@@ -243,6 +243,16 @@ def model_supports_images(model: str) -> bool:
     return bool(config.get("supports_images"))
 
 
+def model_supports_audio(model: str) -> bool:
+    config = get_model_config(model)
+    return bool(config.get("supports_audio"))
+
+
+def model_supports_video(model: str) -> bool:
+    config = get_model_config(model)
+    return bool(config.get("supports_video"))
+
+
 def get_model_parameters(model: str) -> Dict[str, Dict[str, Any]]:
     config = get_model_config(model)
     params = config.get("parameters")

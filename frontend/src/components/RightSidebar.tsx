@@ -8,7 +8,9 @@ import {
     Eye,
     EyeOff,
     Settings,
-    Package
+    Package,
+    Music,
+    Video
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
@@ -39,7 +41,7 @@ interface Occupant {
 interface Item {
     id: string;
     name: string;
-    type: 'document' | 'picture' | 'bag' | 'other';
+    type: 'document' | 'picture' | 'bag' | 'audio' | 'video' | 'other';
     description?: string;
     is_open?: boolean;  // Whether item content is included in visual context
     contained_items?: Item[];  // For bag type: items inside this bag
@@ -337,6 +339,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                             <div className={styles.cardIcon}>
                                                 {item.type === 'picture' ? <ImageIcon size={20} />
                                                     : item.type === 'bag' ? <Package size={20} />
+                                                    : item.type === 'audio' ? <Music size={20} />
+                                                    : item.type === 'video' ? <Video size={20} />
                                                     : <File size={20} />}
                                             </div>
                                             <div className={styles.cardInfo}>
@@ -350,7 +354,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                                     <div className={styles.cardDesc}>{item.description}</div>
                                                 )}
                                             </div>
-                                            {(item.type === 'picture' || item.type === 'document' || item.type === 'bag') && (
+                                            {(item.type === 'picture' || item.type === 'document' || item.type === 'bag' || item.type === 'audio' || item.type === 'video') && (
                                                 <button
                                                     className={`${styles.toggleOpenBtn} ${item.is_open ? styles.isOpen : ''}`}
                                                     onClick={(e) => handleToggleOpen(e, item)}

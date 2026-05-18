@@ -73,7 +73,16 @@ class ItemService:
             candidate = home / rel
             if candidate.exists():
                 return candidate
-        
+
+        # Strategy 1c: audio/video subdirs (added for audio/video item support)
+        for sub in ('audio', 'video'):
+            if sub in parts:
+                idx = parts.index(sub)
+                rel = Path(*parts[idx:])
+                candidate = home / rel
+                if candidate.exists():
+                    return candidate
+
         # Strategy 2a: just filename in documents (fallback)
         candidate = home / "documents" / path.name
         if candidate.exists():
@@ -1011,6 +1020,127 @@ class ItemService:
 
         LOGGER.info(f"Created document item {item_id} from user upload in {building_id}")
         return item_id
+
+    def _create_media_item_for_user(
+        self,
+        item_type: str,
+        emoji: str,
+        name: str,
+        description: str,
+        file_path: str,
+        building_id: str,
+        is_open: bool = True,
+        creator_id: Optional[str] = None,
+        source_context: Optional[str] = None,
+    ) -> str:
+        """Shared implementation for audio/video item creation from user upload.
+
+        Mirrors create_document_item_for_user (default is_open=True so the media
+        appears in visual_context immediately). item_type is "audio" or "video".
+        """
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            try:
+                relative_path = str(file_path_obj.relative_to(self.manager.saiverse_home))
+            except ValueError:
+                relative_path = file_path
+        else:
+            relative_path = file_path
+
+        initial_state = {"is_open": is_open}
+
+        db = self.manager.SessionLocal()
+        try:
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE=item_type,
+                DESCRIPTION=description,
+                FILE_PATH=relative_path,
+                STATE_JSON=json.dumps(initial_state),
+                CREATOR_ID=creator_id,
+                SOURCE_CONTEXT=source_context,
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            slot_num = self._assign_slot(db, "building", building_id)
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"Failed to create {item_type} item: {exc}") from exc
+        finally:
+            db.close()
+
+        self.items[item_id] = {
+            "item_id": item_id,
+            "name": name,
+            "type": item_type,
+            "description": description,
+            "file_path": relative_path,
+            "state": initial_state,
+            "creator_id": creator_id,
+            "source_context": source_context,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+            "slot_number": slot_num,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self.refresh_building_system_instruction(building_id)
+
+        building_name = (
+            self.manager.building_map.get(building_id).name
+            if building_id in self.manager.building_map else building_id
+        )
+        kind_label = "audio" if item_type == "audio" else "video"
+        note = (
+            f'<div class="note-box">{emoji} User Upload:<br>'
+            f'<b>User uploaded {kind_label} "{name}" to {building_name}.</b></div>'
+        )
+        self.manager._append_building_history_note(building_id, note)
+
+        LOGGER.info(f"Created {item_type} item {item_id} from user upload in {building_id}")
+        return item_id
+
+    def create_audio_item_for_user(
+        self, name: str, description: str, file_path: str, building_id: str,
+        is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None,
+    ) -> str:
+        """Create an audio item from user upload. Defaults to is_open=True so the audio
+        appears in visual_context for the current LLM call."""
+        return self._create_media_item_for_user(
+            "audio", "🎵", name, description, file_path, building_id,
+            is_open=is_open, creator_id=creator_id, source_context=source_context,
+        )
+
+    def create_video_item_for_user(
+        self, name: str, description: str, file_path: str, building_id: str,
+        is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None,
+    ) -> str:
+        """Create a video item from user upload. Defaults to is_open=True so the video
+        appears in visual_context for the current LLM call."""
+        return self._create_media_item_for_user(
+            "video", "🎬", name, description, file_path, building_id,
+            is_open=is_open, creator_id=creator_id, source_context=source_context,
+        )
 
     # ========== Bag operations ==========
 

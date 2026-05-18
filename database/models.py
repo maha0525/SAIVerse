@@ -45,6 +45,8 @@ class AI(Base):
     LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_VISION_MODEL = Column(String(255), nullable=True)
     VISION_MODEL = Column(String(255), nullable=True)
+    AUDIO_MODEL = Column(String(255), nullable=True)  # Audio summary/understanding model (unset → env → builtin default)
+    VIDEO_MODEL = Column(String(255), nullable=True)  # Video summary/understanding model (unset → env → builtin default)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
@@ -383,6 +385,30 @@ class PersonaBuildingState(Base):
     BUILDING_ID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
     BASELINE_JSON = Column(Text, nullable=True)       # A: Metabolism/入室時のスナップショット
     LAST_NOTIFIED_JSON = Column(Text, nullable=True)  # B: 最後にLLMへ通知した状態
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class LineHeadSnapshot(Base):
+    """Cached Head Architecture: ライン単位の head snapshot 永続化。
+
+    1 行 = 1 ペルソナ × 1 ライン (line_id)。SECTIONS_JSON は全 Section の
+    snapshot を section.name -> serialized JSON の dict として保持する
+    (= Section ごとの serialize_snapshot 出力をまとめた構造)。
+
+    LAST_NOTIFIED_JSON は B 相当 (= 最後に末尾通知済みの各 Section snapshot)。
+    diff チェック時に SECTIONS_JSON とではなくこちらと比較する。
+
+    詳細: docs/intent/cached_head_architecture.md §3.3
+    """
+    __tablename__ = "line_head_snapshot"
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    LINE_ID = Column(String(255), primary_key=True)
+    LINE_ROLE = Column(String(32), nullable=False)
+    MODEL_KEY = Column(String(128), nullable=False)
+    SECTIONS_JSON = Column(Text, nullable=False)        # A: section.name -> serialized snapshot
+    LAST_NOTIFIED_JSON = Column(Text, nullable=False)   # B: 最後に通知済みの各 Section snapshot
+    SNAPSHOT_VERSION = Column(Integer, default=1, nullable=False)
+    CAPTURED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 

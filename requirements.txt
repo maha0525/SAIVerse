@@ -23,6 +23,9 @@ numpy>=1.26.0
 Pillow>=11.0.0
 markdownify>=0.12.0
 
+# Audio/Video processing (bundles ffmpeg binary per-platform via pip wheels)
+imageio-ffmpeg>=0.6.0
+
 # PDF processing
 pypdf>=4.0.0
 

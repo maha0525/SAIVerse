@@ -201,8 +201,19 @@ _install_gemini_stream_patch()
 
 from .gemini_utils import build_gemini_clients
 
-from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
-from saiverse.media_summary import ensure_image_summary
+from saiverse.media_utils import (
+    iter_image_media,
+    iter_audio_media,
+    iter_video_media,
+    load_image_bytes_for_llm,
+    load_audio_bytes_for_llm,
+    load_video_bytes_for_llm,
+)
+from saiverse.media_summary import (
+    ensure_image_summary,
+    ensure_audio_summary,
+    ensure_video_summary,
+)
 from tools import GEMINI_TOOLS_SPEC
 from saiverse.llm_router import route
 
@@ -279,9 +290,20 @@ class GeminiClient(LLMClient):
         model: str,
         config: Optional[Dict[str, Any]] | None = None,
         supports_images: bool = True,
+        supports_audio: Optional[bool] = None,
+        supports_video: Optional[bool] = None,
     ) -> None:
-        super().__init__(supports_images=supports_images)
         cfg = config or {}
+        # Resolve audio/video support from config (if not explicitly passed)
+        if supports_audio is None:
+            supports_audio = bool(cfg.get("supports_audio", False))
+        if supports_video is None:
+            supports_video = bool(cfg.get("supports_video", False))
+        super().__init__(
+            supports_images=supports_images,
+            supports_audio=supports_audio,
+            supports_video=supports_video,
+        )
         prefer_paid = cfg.get("prefer_paid", False)
         self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
         self.model = model
@@ -566,24 +588,44 @@ class GeminiClient(LLMClient):
         )
 
         attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+        audio_cache: Dict[int, List[Dict[str, Any]]] = {}
+        video_cache: Dict[int, List[Dict[str, Any]]] = {}
         # Track messages that are exempt from attachment limits (visual context)
         exempt_message_indices: Set[int] = set()
-        # Track messages where image summary generation should be skipped
+        # Track messages where summary generation should be skipped per media type
         # (e.g. summary generation requests themselves, to prevent infinite recursion)
         skip_summary_indices: Set[int] = set()
-        if self.supports_images:
-            for idx, message in enumerate(msgs):
-                if isinstance(message, dict):
-                    metadata = message.get("metadata")
-                    # Check for visual context marker - these are exempt from limits
-                    if isinstance(metadata, dict) and metadata.get("__visual_context__"):
-                        exempt_message_indices.add(idx)
-                    # Check for skip-image-summary marker (set by media_summary module)
-                    if isinstance(metadata, dict) and metadata.get("__skip_image_summary__"):
-                        skip_summary_indices.add(idx)
-                    media_items = iter_image_media(metadata)
-                    if media_items:
-                        attachment_cache[idx] = media_items
+        skip_audio_summary_indices: Set[int] = set()
+        skip_video_summary_indices: Set[int] = set()
+        for idx, message in enumerate(msgs):
+            if not isinstance(message, dict):
+                continue
+            metadata = message.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            # Check for visual context marker - these are exempt from limits
+            if metadata.get("__visual_context__"):
+                exempt_message_indices.add(idx)
+            # Per-media skip flags (set by media_summary module to avoid recursion)
+            if metadata.get("__skip_image_summary__"):
+                skip_summary_indices.add(idx)
+            if metadata.get("__skip_audio_summary__"):
+                skip_audio_summary_indices.add(idx)
+            if metadata.get("__skip_video_summary__"):
+                skip_video_summary_indices.add(idx)
+            # Image cache only populated when supports_images (existing behavior).
+            if self.supports_images:
+                media_items = iter_image_media(metadata)
+                if media_items:
+                    attachment_cache[idx] = media_items
+            # Audio / video are always cached; per-message loop decides whether to
+            # send inline_data (supports_*=True) or inject summary text (False).
+            audio_items = iter_audio_media(metadata)
+            if audio_items:
+                audio_cache[idx] = audio_items
+            video_items = iter_video_media(metadata)
+            if video_items:
+                video_cache[idx] = video_items
         allowed_attachment_keys: Optional[Set[Tuple[int, int]]] = None
         if max_image_embeds is not None and attachment_cache:
             ordered: List[Tuple[int, int]] = []
@@ -671,6 +713,11 @@ class GeminiClient(LLMClient):
             text_content = text
             g_role = "user" if role == "user" else "model"
             attachments = attachment_cache.get(idx, []) if self.supports_images else []
+            audio_attachments = audio_cache.get(idx, [])
+            video_attachments = video_cache.get(idx, [])
+            media_parts: List[types.Part] = []
+
+            # === Image processing ===
             if attachments and self.supports_images:
                 selected_attachments: List[Dict[str, Any]] = []
                 skipped_attachments: List[Dict[str, Any]] = []
@@ -694,7 +741,6 @@ class GeminiClient(LLMClient):
                     role,
                     len(skipped_attachments),
                 )
-                parts: List[types.Part] = []
                 if skipped_attachments:
                     for att_idx, attachment, summary_text in attachment_records:
                         if attachment not in skipped_attachments:
@@ -702,8 +748,6 @@ class GeminiClient(LLMClient):
                         summary = summary_text or "(要約を取得できませんでした)"
                         note = f"[画像参照のみ: {attachment['uri']}] {summary}"
                         text_content = f"{text_content}\n{note}" if text_content else note
-                if text_content:
-                    parts.append(types.Part(text=text_content))
                 for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
                         attachment["path"], attachment["mime_type"],
@@ -723,25 +767,86 @@ class GeminiClient(LLMClient):
                         len(data),
                         data[:8].hex(),
                     )
-                    parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
-                if not parts:
-                    parts.append(types.Part(text=""))
-                contents.append(types.Content(parts=parts, role=g_role))
-            else:
-                if attachments:
-                    logging.debug(
-                        "[gemini] image attachments present but not embedded (supports_images=%s)",
-                        self.supports_images,
+                    media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+            elif attachments:
+                # supports_images=False: inject image summaries as text only
+                logging.debug(
+                    "[gemini] image attachments present but not embedded (supports_images=%s)",
+                    self.supports_images,
+                )
+                for attachment in attachments:
+                    if idx in skip_summary_indices:
+                        summary = None
+                    else:
+                        summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
+                    summary_note = summary or "(要約を取得できませんでした)"
+                    note = f"[画像: {attachment['uri']}] {summary_note}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
+
+            # === Audio processing ===
+            if audio_attachments and self.supports_audio:
+                logging.debug(
+                    "[gemini] embedding %d audio attachment(s) for role=%s",
+                    len(audio_attachments), role,
+                )
+                for attachment in audio_attachments:
+                    data, effective_mime = load_audio_bytes_for_llm(
+                        attachment["path"], attachment["mime_type"],
                     )
-                    for attachment in attachments:
-                        if idx in skip_summary_indices:
-                            summary = None
-                        else:
-                            summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
-                        summary_note = summary or "(要約を取得できませんでした)"
-                        note = f"[画像: {attachment['uri']}] {summary_note}"
-                        text_content = f"{text_content}\n{note}" if text_content else note
-                contents.append(types.Content(parts=[types.Part(text=text_content)], role=g_role))
+                    if not data or not effective_mime:
+                        logging.warning(
+                            "Failed to load audio for Gemini payload: %s", attachment["uri"]
+                        )
+                        continue
+                    media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+            elif audio_attachments:
+                # supports_audio=False: inject audio summaries as text only
+                skip_audio_summary = idx in skip_audio_summary_indices
+                for attachment in audio_attachments:
+                    summary = (
+                        None if skip_audio_summary
+                        else ensure_audio_summary(attachment["path"], attachment["mime_type"])
+                    )
+                    summary_note = summary or "(要約を取得できませんでした)"
+                    note = f"[音声: {attachment['uri']}] {summary_note}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
+
+            # === Video processing ===
+            if video_attachments and self.supports_video:
+                logging.debug(
+                    "[gemini] embedding %d video attachment(s) for role=%s",
+                    len(video_attachments), role,
+                )
+                for attachment in video_attachments:
+                    data, effective_mime = load_video_bytes_for_llm(
+                        attachment["path"], attachment["mime_type"],
+                    )
+                    if not data or not effective_mime:
+                        logging.warning(
+                            "Failed to load video for Gemini payload: %s", attachment["uri"]
+                        )
+                        continue
+                    media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+            elif video_attachments:
+                # supports_video=False: inject video summaries as text only
+                skip_video_summary = idx in skip_video_summary_indices
+                for attachment in video_attachments:
+                    summary = (
+                        None if skip_video_summary
+                        else ensure_video_summary(attachment["path"], attachment["mime_type"])
+                    )
+                    summary_note = summary or "(要約を取得できませんでした)"
+                    note = f"[動画: {attachment['uri']}] {summary_note}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
+
+            # === Final assembly: text first, then media parts ===
+            final_parts: List[types.Part] = []
+            if text_content:
+                final_parts.append(types.Part(text=text_content))
+            final_parts.extend(media_parts)
+            if not final_parts:
+                final_parts.append(types.Part(text=""))
+            contents.append(types.Content(parts=final_parts, role=g_role))
 
         return "\n".join(system_lines), contents
 

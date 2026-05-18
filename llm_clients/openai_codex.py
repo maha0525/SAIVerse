@@ -946,6 +946,7 @@ class OpenAICodexClient(LLMClient):
 
         See class docstring for return-type matrix.
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         body = self._build_body(
             messages,
             temperature=temperature,
@@ -1032,6 +1033,7 @@ class OpenAICodexClient(LLMClient):
         should use `generate(...)` directly. We still yield raw text deltas so
         the streaming pipeline can render progress.
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         body = self._build_body(
             messages,
             temperature=temperature,

@@ -109,6 +109,26 @@ def _add_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None
     })
 
 
+def _add_audio_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None:
+    """Add an audio file to the media list with its MIME type."""
+    mime_type = mimetypes.guess_type(file_path)[0] or "audio/ogg"
+    media_list.append({
+        "path": file_path,
+        "mime_type": mime_type,
+        "type": "audio",
+    })
+
+
+def _add_video_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None:
+    """Add a video file to the media list with its MIME type."""
+    mime_type = mimetypes.guess_type(file_path)[0] or "video/mp4"
+    media_list.append({
+        "path": file_path,
+        "mime_type": mime_type,
+        "type": "video",
+    })
+
+
 def _render_bag_contents(
     contents: List[Dict[str, Any]],
     text_parts: List[str],
@@ -313,6 +333,46 @@ def _render_item(
                 except Exception as exc:
                     LOGGER.warning("get_visual_context: Failed to read document %s: %s", item_name, exc)
                     text_parts.append(description)
+            else:
+                text_parts.append(description)
+        else:
+            text_parts.append(description)
+        text_parts.append("")
+
+    elif item_type == "audio":
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[Audio] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
+
+        if is_open and file_path_str:
+            resolved = _resolve_item_file_path(manager, file_path_str)
+            if resolved and os.path.exists(resolved):
+                text_parts.append(f"saiverse://item/{item_id}/audio")
+                _add_audio_to_media_list(resolved, media_list)
+                LOGGER.debug("get_visual_context: Added open audio item: %s", item_name)
+                text_parts.append(description)
+            else:
+                text_parts.append(description)
+        else:
+            text_parts.append(description)
+        text_parts.append("")
+
+    elif item_type == "video":
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[Video] {item_name}")
+        text_parts.append(open_label)
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
+
+        if is_open and file_path_str:
+            resolved = _resolve_item_file_path(manager, file_path_str)
+            if resolved and os.path.exists(resolved):
+                text_parts.append(f"saiverse://item/{item_id}/video")
+                _add_video_to_media_list(resolved, media_list)
+                LOGGER.debug("get_visual_context: Added open video item: %s", item_name)
+                text_parts.append(description)
             else:
                 text_parts.append(description)
         else:

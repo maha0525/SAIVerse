@@ -346,20 +346,38 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
                 if candidate.exists():
                     LOGGER.debug("Recovered path (strategy 1b - image): %s", candidate)
                     path = candidate
-            
+
+            # Strategy 1c/1d: audio/video subdirs for media items
+            for sub in ('audio', 'video'):
+                if not path.exists() and sub in parts:
+                    idx = parts.index(sub)
+                    rel = Path(*parts[idx:])
+                    candidate = home / rel
+                    if candidate.exists():
+                        LOGGER.debug("Recovered path (strategy 1c - %s): %s", sub, candidate)
+                        path = candidate
+
             # Strategy 2a: just filename in documents (fallback)
             if not path.exists():
                 candidate = home / "documents" / path.name
                 if candidate.exists():
                     LOGGER.debug("Recovered path (strategy 2a - documents filename): %s", candidate)
                     path = candidate
-            
+
             # Strategy 2b: just filename in image (fallback for picture items)
             if not path.exists():
                 candidate = home / "image" / path.name
                 if candidate.exists():
                     LOGGER.debug("Recovered path (strategy 2b - image filename): %s", candidate)
                     path = candidate
+
+            # Strategy 2c/2d: just filename in audio/video
+            for sub in ('audio', 'video'):
+                if not path.exists():
+                    candidate = home / sub / path.name
+                    if candidate.exists():
+                        LOGGER.debug("Recovered path (strategy 2c - %s filename): %s", sub, candidate)
+                        path = candidate
     
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"File not found on server: {path}")
@@ -376,15 +394,23 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
         # If we return FileResponse, the frontend can display it.
         # But wait, frontend <img src> needs a URL.
         # If we return the file content here, it might be heavy.
-        # Better: return a URL that the frontend can use. 
+        # Better: return a URL that the frontend can use.
         # But we don't have a dynamic route for arbitrary file paths unless we mount them.
         # Previous app used /gradio_api/file=... which Gradio handled.
-        
+
         # SOLUTION: We can verify the path is within valid areas (assets?) or serve it via a stream endpoint.
         # For now, let's return the content as FileResponse so the browser displays it if visited?
         # NO, frontend needs to Embed it.
         # API: GET /api/info/item/{id}/image -> returns image bytes
         return FileResponse(path)
+
+    elif item_type == "audio":
+        # Serve the audio file directly. ItemModal uses this URL as <audio src=...>.
+        return FileResponse(path, media_type="audio/ogg")
+
+    elif item_type == "video":
+        # Serve the video file directly. ItemModal uses this URL as <video src=...>.
+        return FileResponse(path, media_type="video/mp4")
 
     else:
         return {"type": item_type, "message": "No content to display"}

@@ -542,6 +542,28 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, curren
                                 )
                             )}
                         </div>
+                    ) : item.type === 'audio' ? (
+                        <div className={styles.imageContainer}>
+                            <audio
+                                controls
+                                preload="metadata"
+                                src={`/api/info/item/${item.id}`}
+                                style={{ width: '100%' }}
+                            >
+                                お使いのブラウザは audio タグをサポートしていません。
+                            </audio>
+                        </div>
+                    ) : item.type === 'video' ? (
+                        <div className={styles.imageContainer}>
+                            <video
+                                controls
+                                preload="metadata"
+                                src={`/api/info/item/${item.id}`}
+                                style={{ width: '100%', maxHeight: '70vh' }}
+                            >
+                                お使いのブラウザは video タグをサポートしていません。
+                            </video>
+                        </div>
                     ) : item.type === 'bag' ? (
                         <div className={styles.bagContainer}>
                             {isLoadingBagContents && <div className={styles.loading}>読み込み中...</div>}

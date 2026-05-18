@@ -16,10 +16,20 @@ except ImportError:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 IMAGE_URI_PREFIX = "saiverse://image/"
 DOCUMENT_URI_PREFIX = "saiverse://document/"
-ITEM_IMAGE_URI_PREFIX = "saiverse://item/"
+AUDIO_URI_PREFIX = "saiverse://audio/"
+VIDEO_URI_PREFIX = "saiverse://video/"
+ITEM_IMAGE_URI_PREFIX = "saiverse://item/"  # also covers /audio, /video suffixes
 PERSONA_URI_PREFIX = "saiverse://persona/"
 BUILDING_URI_PREFIX = "saiverse://building/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+SUPPORTED_LLM_AUDIO_MIME = {
+    "audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff",
+    "audio/aac", "audio/ogg", "audio/flac",
+}
+SUPPORTED_LLM_VIDEO_MIME = {
+    "video/mp4", "video/mpeg", "video/quicktime", "video/avi",
+    "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
+}
 SUMMARY_SUFFIX = ".summary.txt"
 
 
@@ -33,6 +43,20 @@ def _ensure_image_dir() -> Path:
 def _ensure_document_dir() -> Path:
     from .data_paths import get_saiverse_home
     dest_dir = get_saiverse_home() / "documents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir
+
+
+def _ensure_audio_dir() -> Path:
+    from .data_paths import get_saiverse_home
+    dest_dir = get_saiverse_home() / "audio"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir
+
+
+def _ensure_video_dir() -> Path:
+    from .data_paths import get_saiverse_home
+    dest_dir = get_saiverse_home() / "video"
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir
 
@@ -51,6 +75,16 @@ def resolve_media_uri(uri: str) -> Optional[Path]:
         if not filename:
             return None
         return _ensure_document_dir() / filename
+    elif uri.startswith(AUDIO_URI_PREFIX):
+        filename = uri[len(AUDIO_URI_PREFIX):].strip()
+        if not filename:
+            return None
+        return _ensure_audio_dir() / filename
+    elif uri.startswith(VIDEO_URI_PREFIX):
+        filename = uri[len(VIDEO_URI_PREFIX):].strip()
+        if not filename:
+            return None
+        return _ensure_video_dir() / filename
     return None
 
 
@@ -94,6 +128,12 @@ def resolve_extended_media_uri(
         if remainder.endswith("/image"):
             item_id = remainder[:-6]  # Remove "/image"
             return _resolve_item_image(item_id, saiverse_home)
+        if remainder.endswith("/audio"):
+            item_id = remainder[:-6]  # Remove "/audio"
+            return _resolve_item_audio(item_id, saiverse_home)
+        if remainder.endswith("/video"):
+            item_id = remainder[:-6]  # Remove "/video"
+            return _resolve_item_video(item_id, saiverse_home)
 
     # saiverse://persona/<persona_id>/image or saiverse://persona/self/image
     if uri.startswith(PERSONA_URI_PREFIX):
@@ -166,6 +206,72 @@ def _resolve_item_image(item_id: str, saiverse_home: Path) -> Optional[Path]:
     except Exception as exc:
         LOGGER.warning("Failed to resolve item image for %s: %s", item_id, exc)
         return None
+
+
+def _resolve_item_typed_file(
+    item_id: str,
+    saiverse_home: Path,
+    expected_type: str,
+    subdir: str,
+) -> Optional[Path]:
+    """Generic helper to resolve an item's file path for a given type/subdir.
+
+    Used by _resolve_item_audio and _resolve_item_video; mirrors the recovery
+    strategy of _resolve_item_image (legacy WSL paths, subdir extraction, filename fallback).
+    """
+    try:
+        from database.session import SessionLocal
+        from database.models import Item
+
+        session = SessionLocal()
+        try:
+            item = session.query(Item).filter(Item.ITEM_ID == item_id).first()
+            if not item or not item.FILE_PATH:
+                LOGGER.debug("Item %s not found or has no file_path", item_id)
+                return None
+            if item.TYPE and item.TYPE.lower() != expected_type:
+                LOGGER.debug(
+                    "Item %s is not a %s type (type=%s)", item_id, expected_type, item.TYPE
+                )
+                return None
+
+            file_path = Path(item.FILE_PATH)
+            if not file_path.is_absolute():
+                file_path = saiverse_home / item.FILE_PATH
+
+            if file_path.exists():
+                return file_path
+
+            # Try recovery for legacy paths
+            if subdir in file_path.parts:
+                idx = file_path.parts.index(subdir)
+                rel = Path(*file_path.parts[idx:])
+                candidate = saiverse_home / rel
+                if candidate.exists():
+                    return candidate
+
+            # Fallback: just filename
+            candidate = saiverse_home / subdir / file_path.name
+            if candidate.exists():
+                return candidate
+
+            LOGGER.debug("Item %s file not found: %s", item_id, item.FILE_PATH)
+            return None
+        finally:
+            session.close()
+    except Exception as exc:
+        LOGGER.warning("Failed to resolve %s item for %s: %s", expected_type, item_id, exc)
+        return None
+
+
+def _resolve_item_audio(item_id: str, saiverse_home: Path) -> Optional[Path]:
+    """Resolve an audio item's file path from the database."""
+    return _resolve_item_typed_file(item_id, saiverse_home, "audio", "audio")
+
+
+def _resolve_item_video(item_id: str, saiverse_home: Path) -> Optional[Path]:
+    """Resolve a video item's file path from the database."""
+    return _resolve_item_typed_file(item_id, saiverse_home, "video", "video")
 
 
 def _resolve_persona_image(persona_id: str, saiverse_home: Path) -> Optional[Path]:
@@ -275,13 +381,23 @@ def _resolve_building_image(building_id: str, saiverse_home: Path) -> Optional[P
 
 
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
-    """Extract validated image descriptors from a metadata payload."""
+    """Extract validated image descriptors from a metadata payload.
+
+    The metadata may contain a "media" list with mixed type entries
+    (image/audio/video) or a legacy "images" list (image-only). When reading
+    from "media", entries whose `type` is not "image" (or whose mime_type does
+    not start with "image/") are filtered out — without this, audio/video
+    descriptors would be wrongly treated as images.
+    """
     results: List[Dict[str, Any]] = []
     if not isinstance(metadata, dict):
         return results
 
+    # First try the unified "media" list with type filtering
     media = metadata.get("media")
+    use_type_filter = isinstance(media, list)
     if not isinstance(media, list):
+        # Legacy "images" key: every entry is assumed to be an image
         media = metadata.get("images")
         if not isinstance(media, list):
             return results
@@ -289,13 +405,24 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
     for item in media:
         if not isinstance(item, dict):
             continue
-        
+
+        # When media comes from metadata["media"], it may carry mixed media
+        # types; keep only image entries based on `type` or mime prefix.
+        if use_type_filter:
+            item_type = (item.get("type") or "").lower()
+            item_mime = (item.get("mime_type") or "").lower()
+            if item_type:
+                if item_type != "image":
+                    continue
+            elif not item_mime.startswith("image/"):
+                continue
+
         # Try to resolve path from URI first
         uri = item.get("uri")
         path = None
         if uri:
             path = resolve_media_uri(uri)
-        
+
         # Fallback: use direct path field if URI resolution failed
         if path is None:
             direct_path = item.get("path")
@@ -304,11 +431,11 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
                     path = direct_path
                 else:
                     path = Path(direct_path)
-        
+
         if path is None or not path.exists():
             LOGGER.warning("Image URI %s could not be resolved or file missing (path=%s)", uri, path)
             continue
-        
+
         mime_type = item.get("mime_type") or mimetypes.guess_type(path)[0] or "image/png"
         results.append(
             {
@@ -603,6 +730,176 @@ def resize_image_for_llm_context(
     except Exception:
         LOGGER.exception("Failed to resize image for LLM context; using original")
         return data, mime_type
+
+
+def _iter_typed_media(
+    metadata: Any,
+    type_key: str,
+    mime_prefix: str,
+    fallback_mime: str,
+) -> List[Dict[str, Any]]:
+    """Internal helper for iter_audio_media / iter_video_media.
+
+    Selects media[] entries whose `type` field matches type_key, or whose
+    mime_type starts with mime_prefix when type is unspecified.
+    """
+    results: List[Dict[str, Any]] = []
+    if not isinstance(metadata, dict):
+        return results
+
+    media = metadata.get("media")
+    if not isinstance(media, list):
+        return results
+
+    for item in media:
+        if not isinstance(item, dict):
+            continue
+
+        # Filter by type or mime prefix
+        item_type = (item.get("type") or "").lower()
+        item_mime = (item.get("mime_type") or "").lower()
+        if item_type:
+            if item_type != type_key:
+                continue
+        else:
+            if not item_mime.startswith(mime_prefix):
+                continue
+
+        # Resolve path
+        uri = item.get("uri")
+        path = None
+        if uri:
+            path = resolve_media_uri(uri)
+        if path is None:
+            direct_path = item.get("path")
+            if direct_path:
+                path = direct_path if isinstance(direct_path, Path) else Path(direct_path)
+
+        if path is None or not path.exists():
+            LOGGER.warning(
+                "%s URI %s could not be resolved or file missing (path=%s)",
+                type_key, uri, path,
+            )
+            continue
+
+        mime_type = item.get("mime_type") or mimetypes.guess_type(str(path))[0] or fallback_mime
+        results.append(
+            {
+                "uri": uri or str(path),
+                "path": path,
+                "mime_type": mime_type,
+            }
+        )
+    return results
+
+
+def iter_audio_media(metadata: Any) -> List[Dict[str, Any]]:
+    """Extract validated audio descriptors from a metadata payload."""
+    return _iter_typed_media(
+        metadata,
+        type_key="audio",
+        mime_prefix="audio/",
+        fallback_mime="audio/ogg",
+    )
+
+
+def iter_video_media(metadata: Any) -> List[Dict[str, Any]]:
+    """Extract validated video descriptors from a metadata payload."""
+    return _iter_typed_media(
+        metadata,
+        type_key="video",
+        mime_prefix="video/",
+        fallback_mime="video/mp4",
+    )
+
+
+def load_audio_bytes_for_llm(
+    path: Path, mime_type: str
+) -> Tuple[Optional[bytes], Optional[str]]:
+    """Return (bytes, effective_mime) for audio LLM consumption.
+
+    Audio files are expected to already be normalized (opus 24kbps mono 16kHz ogg).
+    No format conversion is performed here; if the declared mime is unsupported,
+    the raw bytes are returned with a warning.
+    """
+    target_mime = (mime_type or "audio/ogg").lower()
+    try:
+        data = path.read_bytes()
+    except OSError:
+        LOGGER.exception("Failed to read audio for LLM: %s", path)
+        return None, None
+
+    if target_mime not in SUPPORTED_LLM_AUDIO_MIME:
+        LOGGER.warning("Using raw bytes for potentially unsupported audio mime '%s'", mime_type)
+
+    return data, target_mime
+
+
+def load_video_bytes_for_llm(
+    path: Path, mime_type: str
+) -> Tuple[Optional[bytes], Optional[str]]:
+    """Return (bytes, effective_mime) for video LLM consumption.
+
+    Video files are expected to already be normalized (480p+1FPS+opus mp4).
+    No format conversion is performed here.
+    """
+    target_mime = (mime_type or "video/mp4").lower()
+    try:
+        data = path.read_bytes()
+    except OSError:
+        LOGGER.exception("Failed to read video for LLM: %s", path)
+        return None, None
+
+    if target_mime not in SUPPORTED_LLM_VIDEO_MIME:
+        LOGGER.warning("Using raw bytes for potentially unsupported video mime '%s'", mime_type)
+
+    return data, target_mime
+
+
+def store_audio_bytes(
+    data: bytes, mime_type: str = "audio/ogg", *, source: str = "uploaded"
+) -> Tuple[Dict[str, str], Path]:
+    """Store binary audio data and return metadata and path."""
+    dest_dir = _ensure_audio_dir()
+    mime_type = (mime_type or "audio/ogg").lower()
+    ext = mimetypes.guess_extension(mime_type) or ".ogg"
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{ext}"
+    dest_path = dest_dir / filename
+    try:
+        dest_path.write_bytes(data)
+    except OSError:
+        LOGGER.exception("Failed to write audio file: %s", dest_path)
+        raise
+    metadata = {
+        "type": "audio",
+        "uri": f"{AUDIO_URI_PREFIX}{filename}",
+        "mime_type": mime_type,
+        "source": source,
+    }
+    return metadata, dest_path
+
+
+def store_video_bytes(
+    data: bytes, mime_type: str = "video/mp4", *, source: str = "uploaded"
+) -> Tuple[Dict[str, str], Path]:
+    """Store binary video data and return metadata and path."""
+    dest_dir = _ensure_video_dir()
+    mime_type = (mime_type or "video/mp4").lower()
+    ext = mimetypes.guess_extension(mime_type) or ".mp4"
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{ext}"
+    dest_path = dest_dir / filename
+    try:
+        dest_path.write_bytes(data)
+    except OSError:
+        LOGGER.exception("Failed to write video file: %s", dest_path)
+        raise
+    metadata = {
+        "type": "video",
+        "uri": f"{VIDEO_URI_PREFIX}{filename}",
+        "mime_type": mime_type,
+        "source": source,
+    }
+    return metadata, dest_path
 
 
 def load_image_bytes_for_llm(path: Path, mime_type: str, max_bytes: Optional[int] = None) -> Tuple[Optional[bytes], Optional[str]]:

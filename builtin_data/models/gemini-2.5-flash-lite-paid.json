@@ -7,6 +7,8 @@
   "default_max_history_messages": 80,
   "metabolism_keep_messages": 60,
   "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
   "prefer_paid": true,
   "pricing": {
     "input_per_1m_tokens": 0.1,

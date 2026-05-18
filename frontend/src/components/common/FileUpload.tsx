@@ -1,12 +1,16 @@
 import React, { useState, useRef } from 'react';
-import { Upload, Loader2, Image as ImageIcon, FileText, X } from 'lucide-react';
+import { Upload, Loader2, Image as ImageIcon, FileText, X, Music, Video } from 'lucide-react';
+
+type UploadedFileType = 'image' | 'document' | 'audio' | 'video';
 
 interface FileUploadProps {
     value: string | null;
-    onChange: (relativePath: string, type: 'image' | 'document') => void;
+    onChange: (relativePath: string, type: UploadedFileType) => void;
     onClear?: () => void;
     acceptImages?: boolean;
     acceptDocuments?: boolean;
+    acceptAudio?: boolean;
+    acceptVideo?: boolean;
     placeholder?: string;
     className?: string;
 }
@@ -17,12 +21,14 @@ export default function FileUpload({
     onClear,
     acceptImages = true,
     acceptDocuments = true,
+    acceptAudio = false,
+    acceptVideo = false,
     placeholder = "Select File",
     className = "",
 }: FileUploadProps) {
     const [isUploading, setIsUploading] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
-    const [uploadedType, setUploadedType] = useState<'image' | 'document' | null>(null);
+    const [uploadedType, setUploadedType] = useState<UploadedFileType | null>(null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const dragCounter = useRef(0);
@@ -31,6 +37,8 @@ export default function FileUpload({
     const acceptTypes: string[] = [];
     if (acceptImages) acceptTypes.push("image/*");
     if (acceptDocuments) acceptTypes.push("text/*", ".txt", ".md", ".json", ".xml");
+    if (acceptAudio) acceptTypes.push("audio/*");
+    if (acceptVideo) acceptTypes.push("video/*");
     const acceptString = acceptTypes.join(",");
 
     const handleClick = () => {
@@ -49,10 +57,10 @@ export default function FileUpload({
             });
             if (res.ok) {
                 const data = await res.json();
-                const fileType = data.type as 'image' | 'document';
+                const fileType = data.type as UploadedFileType;
                 setUploadedType(fileType);
 
-                if (fileType === 'image') {
+                if (fileType === 'image' || fileType === 'audio' || fileType === 'video') {
                     setPreviewUrl(data.url);
                 } else {
                     setPreviewUrl(null);
@@ -104,10 +112,18 @@ export default function FileUpload({
         if (onClear) onClear();
     };
 
-    // Determine if value looks like an image path
+    // Determine if value looks like a known media path
     const isImagePath = value && (
         value.startsWith('image/') ||
         value.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)
+    );
+    const isAudioPath = value && (
+        value.startsWith('audio/') ||
+        value.match(/\.(ogg|mp3|wav|aac|flac|aiff)$/i)
+    );
+    const isVideoPath = value && (
+        value.startsWith('video/') ||
+        value.match(/\.(mp4|webm|mov|avi|mpeg|mpg|3gp)$/i)
     );
 
     return (
@@ -145,7 +161,7 @@ export default function FileUpload({
 
             {value ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', width: '100%' }}>
-                    {isImagePath || previewUrl ? (
+                    {isImagePath || (uploadedType === 'image' && previewUrl) ? (
                         <img
                             src={previewUrl || `/api/media/images/${value.split('/').pop()}`}
                             alt="Preview"
@@ -158,6 +174,30 @@ export default function FileUpload({
                             }}
                             onError={(e) => { e.currentTarget.style.display = 'none'; }}
                         />
+                    ) : isAudioPath || uploadedType === 'audio' ? (
+                        <div style={{
+                            width: '60px',
+                            height: '60px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            backgroundColor: '#374151',
+                            borderRadius: '4px',
+                        }}>
+                            <Music size={24} color="#9ca3af" />
+                        </div>
+                    ) : isVideoPath || uploadedType === 'video' ? (
+                        <div style={{
+                            width: '60px',
+                            height: '60px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            backgroundColor: '#374151',
+                            borderRadius: '4px',
+                        }}>
+                            <Video size={24} color="#9ca3af" />
+                        </div>
                     ) : (
                         <div style={{
                             width: '60px',
@@ -205,16 +245,22 @@ export default function FileUpload({
                 </div>
             ) : (
                 <div style={{ color: '#9ca3af', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-                    {acceptImages && acceptDocuments ? (
-                        <Upload size={24} />
-                    ) : acceptImages ? (
-                        <ImageIcon size={24} />
-                    ) : (
-                        <FileText size={24} />
-                    )}
+                    {(() => {
+                        const acceptedCount = [acceptImages, acceptDocuments, acceptAudio, acceptVideo].filter(Boolean).length;
+                        if (acceptedCount > 1) return <Upload size={24} />;
+                        if (acceptImages) return <ImageIcon size={24} />;
+                        if (acceptAudio) return <Music size={24} />;
+                        if (acceptVideo) return <Video size={24} />;
+                        return <FileText size={24} />;
+                    })()}
                     <span style={{ fontSize: '12px' }}>{placeholder}</span>
                     <span style={{ fontSize: '10px', color: '#6b7280' }}>
-                        {acceptImages && acceptDocuments ? 'Image or Text' : acceptImages ? 'Image' : 'Text'}
+                        {[
+                            acceptImages && 'Image',
+                            acceptDocuments && 'Text',
+                            acceptAudio && 'Audio',
+                            acceptVideo && 'Video',
+                        ].filter(Boolean).join(' / ')}
                     </span>
                 </div>
             )}

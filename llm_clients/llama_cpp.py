@@ -149,6 +149,7 @@ class LlamaCppClient(LLMClient):
             str: Text response when tools is None or empty
             Dict: Tool detection result when tools is provided
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         self._ensure_model_loaded()
         tools_spec = tools or []
         use_tools = bool(tools_spec)
@@ -273,6 +274,7 @@ class LlamaCppClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         """Generate streaming response using llama.cpp."""
+        messages = self._inject_unsupported_media_summaries(messages)
         self._ensure_model_loaded()
 
         # For structured output, use non-streaming to get complete JSON

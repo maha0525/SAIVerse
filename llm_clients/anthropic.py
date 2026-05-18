@@ -315,6 +315,7 @@ class AnthropicClient(LLMClient):
             Dict: Structured response or tool call result
         """
         self._store_reasoning([])
+        messages = self._inject_unsupported_media_summaries(messages)
 
         build_result = build_request_params(
             messages=messages,
@@ -391,6 +392,7 @@ class AnthropicClient(LLMClient):
             Text chunks as they are generated
         """
         self._store_reasoning([])
+        messages = self._inject_unsupported_media_summaries(messages)
 
         # For structured output, use non-streaming generate
         if response_schema:

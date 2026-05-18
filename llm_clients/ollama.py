@@ -205,9 +205,10 @@ class OllamaClient(LLMClient):
             str: Text response when tools is None or empty
             Dict: Tool detection result when tools is provided
         """
+        messages = self._inject_unsupported_media_summaries(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
-        
+
         logging.info(
             "OllamaClient.generate invoked (model=%s use_tools=%s supports_schema=%s messages=%d)",
             self.model,
@@ -513,6 +514,7 @@ class OllamaClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Iterator[str]:
+        messages = self._inject_unsupported_media_summaries(messages)
         # For structured output, use non-streaming to get complete JSON
         # Priority: /api/chat (native, widely supported) -> /v1/chat/completions (fallback)
         if response_schema:

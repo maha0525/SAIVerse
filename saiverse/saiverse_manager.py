@@ -214,6 +214,26 @@ class SAIVerseManager(
         self.note_manager = NoteManager(session_factory=self.SessionLocal)
         logging.info("Initialized cognitive-model managers (TrackManager, NoteManager).")
 
+        # --- Initialize Cached Head Architecture (Phase 2-h) ---
+        # Section registry + pipeline + store の wiring。LLM context の head 部分を
+        # Section snapshot 経由で構築するための基盤。詳細:
+        # docs/intent/cached_head_architecture.md
+        from sea.head_pipeline import (
+            LineHeadSnapshotStore,
+            get_default_pipeline,
+            get_default_registry,
+        )
+        from sea.head_pipeline.sections import register_default_sections
+        _head_registry = get_default_registry()
+        if not _head_registry.all_sections():  # 再初期化時の重複登録を回避
+            register_default_sections(_head_registry)
+        get_default_pipeline().attach_store(
+            LineHeadSnapshotStore(
+                session_factory=self.SessionLocal, registry=_head_registry,
+            )
+        )
+        logging.info("Initialized Cached Head Architecture (registry + pipeline + store).")
+
         # --- Initialize cognitive-model runtime layers (Phase C-1) ---
         # MetaLayer は alert observer として TrackManager に登録される。
         # UserConversationTrackHandler はユーザー発話イベントの受け口として
@@ -616,6 +636,7 @@ class SAIVerseManager(
                     description=db_b.DESCRIPTION or "", # 探索結果で説明を表示するために追加
                     auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10,
                     extra_prompt_files=extra_prompts,
+                    physical_vessel_id=getattr(db_b, 'PHYSICAL_VESSEL_ID', None),
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -721,6 +742,14 @@ class SAIVerseManager(
     def create_document_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
         """Create a document item from user upload and place it in the specified building."""
         return self.item_service.create_document_item_for_user(name, description, file_path, building_id, is_open, creator_id=creator_id, source_context=source_context)
+
+    def create_audio_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
+        """Create an audio item from user upload and place it in the specified building."""
+        return self.item_service.create_audio_item_for_user(name, description, file_path, building_id, is_open=is_open, creator_id=creator_id, source_context=source_context)
+
+    def create_video_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
+        """Create a video item from user upload and place it in the specified building."""
+        return self.item_service.create_video_item_for_user(name, description, file_path, building_id, is_open=is_open, creator_id=creator_id, source_context=source_context)
 
     def move_item_for_persona(self, persona_id: str, item_ids: list, destination_kind: str, destination_id: str) -> str:
         """Move items to a destination (building, persona, or bag)."""
