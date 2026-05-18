@@ -23,352 +23,40 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
     messages: List[Dict[str, Any]] = []
 
-    # ---- system prompt ----
+    # ---- head: system prompt + Memory Weave + Visual Context ----
+    # Cached Head Architecture (Phase 2-h) で section pipeline 経由に統一済み。
+    # 旧 live state 直読み経路 (= section 群を毎回ここで組み立てる) は廃止。
+    # snapshot 不在時は ensure_snapshot 経由で初回 capture が自動で走る。
+    # 詳細: docs/intent/cached_head_architecture.md
+    enabled_sections: set[str] = set()
     if reqs.system_prompt:
-        system_sections: List[str] = []
-
-        # 1. Common prompt (world setting, framework explanation)
-        common_prompt_template = getattr(persona, "common_prompt", None)
-        LOGGER.debug("common_prompt_template is %s (type=%s)", common_prompt_template, type(common_prompt_template))
-        if common_prompt_template:
-            try:
-                # Get building info for variable expansion
-                building_obj = getattr(persona, "buildings", {}).get(building_id)
-                building_name = building_obj.name if building_obj else building_id
-                city_name = getattr(persona, "current_city_id", "unknown_city")
-
-                # Expand variables in common prompt using safe replace (avoid conflict with JSON examples)
-                common_text = common_prompt_template
-                replacements = {
-                    "{current_persona_name}": getattr(persona, "persona_name", "Unknown"),
-                    "{current_persona_id}": getattr(persona, "persona_id", "unknown_id"),
-                    "{current_building_name}": building_name,
-                    "{current_city_name}": city_name,
-                    "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
-                    "{current_building_system_instruction}": getattr(building_obj, "base_system_instruction" if reqs.visual_context else "system_instruction", "") if building_obj else "",
-                    "{linked_user_name}": getattr(persona, "linked_user_name", "the user"),
-                }
-                for placeholder, value in replacements.items():
-                    common_text = common_text.replace(placeholder, value)
-                system_sections.append(common_text.strip())
-            except Exception as exc:
-                LOGGER.error("Failed to format common prompt: %s", exc, exc_info=True)
-
-        # 2. "## あなたについて" section
-        persona_section_parts: List[str] = []
-        persona_sys = getattr(persona, "persona_system_instruction", "") or ""
-        if persona_sys:
-            persona_section_parts.append(persona_sys.strip())
-
-        # persona inventory -- skip when visual_context handles it
-        if reqs.inventory and not reqs.visual_context:
-            try:
-                inv_builder = getattr(persona, "_inventory_summary_lines", None)
-                inv_lines: List[str] = inv_builder() if callable(inv_builder) else []
-            except Exception:
-                inv_lines = []
-            if inv_lines:
-                persona_section_parts.append("### インベントリ\n" + "\n".join(inv_lines))
-
-        if persona_section_parts:
-            system_sections.append("## あなたについて\n" + "\n\n".join(persona_section_parts))
-
-        # 3. "## {building_name}" section (current location)
-        # Skip when visual_context handles building info and items
-        if not reqs.visual_context:
-            try:
-                building_obj = getattr(persona, "buildings", {}).get(building_id)
-                if building_obj:
-                    building_section_parts: List[str] = []
-
-                    # Building system instruction
-                    # NOTE: Datetime variables ({current_time}, etc.) are no longer expanded here.
-                    # Time information is now provided via Realtime Context at the end of messages
-                    # to improve LLM context caching efficiency.
-                    # Use base_system_instruction (without items) to avoid duplication
-                    # with the building_items block below.
-                    building_sys = getattr(building_obj, "base_system_instruction", None) or getattr(building_obj, "system_instruction", None)
-                    if building_sys:
-                        building_section_parts.append(str(building_sys).strip())
-
-                    # Building items
-                    if reqs.building_items:
-                        try:
-                            items_by_building = getattr(runtime.manager, "items_by_building", {}) or {}
-                            item_registry = getattr(runtime.manager, "item_registry", {}) or {}
-                            b_items = items_by_building.get(building_id, [])
-                            lines = []
-                            for iid in b_items:
-                                data = item_registry.get(iid, {})
-                                raw_name = data.get("name", "") or ""
-                                name = raw_name.strip() if raw_name.strip() else "(名前なし)"
-                                desc = (data.get("description") or "").strip() or "(説明なし)"
-                                lines.append(f"- [{iid}] {name}: {desc}")
-                            if lines:
-                                building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
-                        except Exception:
-                            LOGGER.warning("Failed to collect building items for %s", building_id, exc_info=True)
-
-                    if building_section_parts:
-                        building_name = getattr(building_obj, "name", building_id)
-                        system_sections.append(f"## {building_name} (ID: {building_id})\n" + "\n\n".join(building_section_parts))
-            except Exception:
-                LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
-
-        # 4. "## 利用可能な能力" section (available playbooks)
+        enabled_sections.update({
+            "common_prompt", "persona_self", "building", "spell_list",
+        })
         if reqs.available_playbooks:
-            try:
-                list_playbooks_func = TOOL_REGISTRY.get("list_available_playbooks")
-                if list_playbooks_func:
-                    # Get available playbooks JSON (tool returns string; accept old tuple form)
-                    playbooks_raw = list_playbooks_func(
-                        persona_id=getattr(persona, "persona_id", None),
-                        building_id=building_id
-                    )
-                    playbooks_json = playbooks_raw[0] if isinstance(playbooks_raw, tuple) else playbooks_raw
-                    if playbooks_json:
-                        import json
-                        playbooks_list = json.loads(playbooks_json)
-                        if playbooks_list:
-                            # bullet list 形式: `- **name**: description`
-                            # JSON ダンプより人間/LLM 双方に読みやすく、トークン消費も少ない。
-                            lines = [
-                                "## 利用可能な能力",
-                                "",
-                                "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:",
-                                "",
-                            ]
-                            for pb in playbooks_list:
-                                name = (pb.get("name") or "").strip()
-                                desc = (pb.get("description") or "").strip()
-                                if not name:
-                                    continue
-                                if desc:
-                                    lines.append(f"- **{name}**: {desc}")
-                                else:
-                                    lines.append(f"- **{name}**")
-                            system_sections.append("\n".join(lines))
-            except Exception as exc:
-                LOGGER.debug("Failed to add available playbooks section: %s", exc)
-
-        # 5. "## 現在の状況" section (working memory) — 廃止済み
-        # Dynamic State Sync に移行。イベントメッセージを会話履歴末尾に挿入する方式に変更。
-
-        # 6. Spell section
-        try:
-            spell_enabled = runtime._is_spell_enabled_for_persona(persona)
-            if spell_enabled:
-                if SPELL_TOOL_SCHEMAS:
-                    spell_lines = [
-                        "## スペル",
-                        "発言中にスペルを唱えると、情報を取得できます。スペルを唱えると、結果が返ってくるのでそれを踏まえて発言を続けてください。",
-                        "構造化出力（JSON応答）内ではスペルは使用できません。",
-                        "",
-                        "### 使い方",
-                        "/spell name='ツール名' args={'引数名': '値'}",
-                        "",
-                        "### 複数スペルの同時使用",
-                        "1回の発言に複数の /spell 行を書くと、すべて並列実行されます。結果はまとめて返ってきます。",
-                        "互いに独立したスペルは同じ発言にまとめて書いてください（LLM呼び出しが節約されます）。",
-                        "あるスペルの結果を次のスペルの引数に使いたい場合は、別の発言で順番に使用してください。",
-                        "",
-                        "### 利用可能なスペル",
-                    ]
-                    # Filter MCP-backed spells that are not invokable for
-                    # this persona (missing api_key etc). See
-                    # docs/intent/mcp_addon_integration.md §F for how
-                    # per_persona spells stay hidden until the required
-                    # AddonPersonaConfig values are filled in.
-                    try:
-                        from tools.mcp_client import get_mcp_manager
-                        _mcp_mgr = get_mcp_manager()
-                    except Exception:
-                        _mcp_mgr = None
-                    _persona_id_for_filter = getattr(persona, "persona_id", None)
-
-                    # Classify spells into built-in (no addon) vs addon-namespaced groups
-                    builtin_visible = []
-                    addon_groups = {}  # addon_name -> {"visible": [(name, schema)], "hidden_count": int}
-
-                    for sname, sschema in SPELL_TOOL_SCHEMAS.items():
-                        if _mcp_mgr is not None and not _mcp_mgr.is_tool_available_for_persona(
-                            sname, _persona_id_for_filter
-                        ):
-                            LOGGER.debug(
-                                "spell: hiding '%s' from persona=%s (required MCP config missing)",
-                                sname,
-                                _persona_id_for_filter,
-                            )
-                            continue
-                        # Native Python tools may declare an availability_check
-                        # callable that gates per-persona visibility (e.g. an
-                        # X tool that only shows up after the persona has
-                        # connected its X account via OAuth).
-                        availability_check = getattr(sschema, "availability_check", None)
-                        if availability_check is not None:
-                            try:
-                                if not availability_check(_persona_id_for_filter):
-                                    LOGGER.debug(
-                                        "spell: hiding '%s' from persona=%s (availability_check returned False)",
-                                        sname,
-                                        _persona_id_for_filter,
-                                    )
-                                    continue
-                            except Exception:
-                                LOGGER.warning(
-                                    "spell: availability_check for '%s' raised; hiding from persona=%s",
-                                    sname,
-                                    _persona_id_for_filter,
-                                    exc_info=True,
-                                )
-                                continue
-                        is_visible = getattr(sschema, "spell_visible", True)
-                        # アドオン所属判定: ToolSchema.addon_name (ネイティブツールが
-                        # ローダーで自動付与) を優先、無ければ `__` 命名規則 (MCP 互換)
-                        addon_key = getattr(sschema, "addon_name", None)
-                        if not addon_key and "__" in sname:
-                            addon_key = sname.split("__", 1)[0]
-                        if addon_key:
-                            group = addon_groups.setdefault(
-                                addon_key, {"visible": [], "hidden_count": 0}
-                            )
-                            if is_visible:
-                                group["visible"].append((sname, sschema))
-                            else:
-                                LOGGER.debug(
-                                    "spell: hiding '%s' from persona=%s (spell_visible=False)",
-                                    sname,
-                                    _persona_id_for_filter,
-                                )
-                                group["hidden_count"] += 1
-                        else:
-                            if is_visible:
-                                builtin_visible.append((sname, sschema))
-                            else:
-                                LOGGER.debug(
-                                    "spell: hiding built-in '%s' from persona=%s (spell_visible=False)",
-                                    sname,
-                                    _persona_id_for_filter,
-                                )
-
-                    def _render_spell_entry(lines, entry_name, entry_schema):
-                        display = entry_schema.spell_display_name or entry_name
-                        lines.append(f"- **{entry_name}** ({display}): {entry_schema.description}")
-                        props = entry_schema.parameters.get("properties", {})
-                        required_list = entry_schema.parameters.get("required", [])
-                        for pname, pdef in props.items():
-                            req_mark = "必須" if pname in required_list else "省略可"
-                            lines.append(
-                                f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): {pdef.get('description', '')}"
-                            )
-
-                    # Built-in spells (no addon prefix)
-                    for sname, sschema in builtin_visible:
-                        _render_spell_entry(spell_lines, sname, sschema)
-
-                    # Addon sections: header with overview + hidden count, then visible spells
-                    if addon_groups:
-                        import json as _json
-                        from saiverse.data_paths import EXPANSION_DATA_DIR as _EXP_DIR
-
-                        for addon_key, group in addon_groups.items():
-                            if not group["visible"] and group["hidden_count"] == 0:
-                                continue
-                            _manifest = {}
-                            try:
-                                _mp = _EXP_DIR / addon_key / "addon.json"
-                                with open(_mp, encoding="utf-8") as _f:
-                                    _manifest = _json.load(_f)
-                            except Exception:
-                                pass
-                            _display = _manifest.get("display_name") or addon_key
-                            _desc = _manifest.get("spell_description") or _manifest.get("description") or ""
-                            _hidden = group["hidden_count"]
-
-                            header = f"**{_display}**"
-                            if _display != addon_key:
-                                header += f" (`{addon_key}`)"
-                            if _desc:
-                                header += f" — {_desc}"
-                            if _hidden > 0:
-                                header += f"（追加スペル{_hidden}個あり、`addon_spell_help(addon=\"{addon_key}\")`で確認）"
-                            spell_lines.append("")
-                            spell_lines.append(header)
-
-                            for sname, sschema in group["visible"]:
-                                _render_spell_entry(spell_lines, sname, sschema)
-
-                    system_sections.append("\n".join(spell_lines))
-            else:
-                system_sections.append("## スペル\nスペルは現在使用できません。/spell コマンドを使用しないでください。")
-        except Exception as exc:
-            LOGGER.debug("Failed to add spell section: %s", exc)
-
-        # NOTE: Spatial context (Unity) has been moved to Realtime Context
-        # to improve LLM context caching efficiency.
-
-        system_text = "\n\n---\n\n".join([s for s in system_sections if s])
-        if system_text:
-            messages.append({"role": "system", "content": system_text})
-
-    # ---- Memory Weave context (Chronicle + Memopedia) ----
-    # Inserted between system prompt and visual context
-    _mw_persona_enabled = runtime._is_memory_weave_context_enabled(persona) if reqs.memory_weave else False
-    LOGGER.info("[sea][prepare-context] memory_weave=%s, persona_enabled=%s", reqs.memory_weave, _mw_persona_enabled)
-    if reqs.memory_weave and _mw_persona_enabled:
-        try:
-            from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
-            from tools.context import persona_context
-            persona_id = getattr(persona, "persona_id", None)
-
-            # Get persona_dir from sai_memory adapter (same pattern as working_memory)
-            sai_mem = getattr(persona, "sai_memory", None)
-            persona_dir_path = getattr(sai_mem, "persona_dir", None) if sai_mem else None
-            persona_dir = str(persona_dir_path) if persona_dir_path else None
-
-            LOGGER.info("[sea][prepare-context] Calling get_memory_weave_context for persona=%s dir=%s", persona_id, persona_dir)
-            with persona_context(persona_id, persona_dir, runtime.manager):
-                mw_messages = get_memory_weave_context(persona_id=persona_id, persona_dir=persona_dir)
-            LOGGER.info("[sea][prepare-context] get_memory_weave_context returned %d messages", len(mw_messages))
-            if mw_messages:
-                messages.extend(mw_messages)
-                LOGGER.debug("[sea][prepare-context] Added %d Memory Weave context messages", len(mw_messages))
-        except Exception as exc:
-            LOGGER.exception("[sea][prepare-context] Failed to get Memory Weave context: %s", exc)
-
-    # ---- visual context (Building / Persona images) ----
-    # Inserted right after system prompt but before conversation history.
-    # キャッシュ: Metabolismアンカーが変わっていなければ前回生成したものを再利用し、
-    # コンテキスト先頭部分のキャッシュヒット率を維持する。
+            enabled_sections.add("available_playbooks")
+    if reqs.memory_weave:
+        enabled_sections.add("memory_weave")
     if reqs.visual_context:
+        enabled_sections.add("visual_context")
+
+    if enabled_sections:
         try:
-            from builtin_data.tools.get_visual_context import get_visual_context
-            from tools.context import persona_context
-            persona_id = getattr(persona, "persona_id", None)
-            persona_dir = getattr(persona, "persona_dir", None)
-
-            # 現在のMetabolismアンカーを取得
-            history_mgr = getattr(persona, "history_manager", None)
-            current_anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
-
-            cached_msgs = getattr(persona, "_visual_context_cache", None)
-            cached_anchor = getattr(persona, "_visual_context_anchor", None)
-
-            if cached_msgs is not None and cached_anchor == current_anchor:
-                visual_messages = cached_msgs
-                LOGGER.debug("[sea][prepare-context] Using cached visual context (anchor=%s)", current_anchor)
-            else:
-                with persona_context(persona_id, persona_dir, runtime.manager):
-                    visual_messages = get_visual_context(building_id=building_id)
-                persona._visual_context_cache = visual_messages
-                persona._visual_context_anchor = current_anchor
-                LOGGER.debug("[sea][prepare-context] Generated fresh visual context (anchor=%s)", current_anchor)
-
-            if visual_messages:
-                messages.extend(visual_messages)
-                LOGGER.debug("[sea][prepare-context] Added %d visual context messages", len(visual_messages))
-        except Exception as exc:
-            LOGGER.debug("[sea][prepare-context] Failed to get visual context: %s", exc)
+            from sea.head_pipeline import render_head_messages
+            head_messages = render_head_messages(
+                persona, runtime.manager, building_id,
+                enabled_sections=enabled_sections,
+            )
+            if head_messages:
+                messages.extend(head_messages)
+                LOGGER.debug(
+                    "[sea][prepare-context] Added %d head messages via pipeline",
+                    len(head_messages),
+                )
+        except Exception:
+            LOGGER.exception(
+                "[sea][prepare-context] Failed to render head via cached_head_architecture",
+            )
 
     # ---- history ----
     history_depth = reqs.history_depth

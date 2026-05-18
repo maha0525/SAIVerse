@@ -6,7 +6,7 @@ tools.core  ― ベンダー非依存ツール実装 + メタスキーマ
 * parse_tool_result: ツール結果のパース関数
 """
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Tuple, Optional
+from typing import Any, Callable, Dict, List, Tuple, Optional
 
 
 @dataclass
@@ -31,6 +31,11 @@ class ToolSchema:
     # ツールはローダーが自動でセットする。MCP 由来のスペルは `<addon_name>__<spell>`
     # 命名規則が別ルートで判定される。明示的に None なら built-in 扱い。
     addon_name: Optional[str] = None
+    # 特定の Building 内でのみ visible にしたい時に Building ID を列挙する。
+    # 空 (None) なら全 Building で visible。MCP の ``spell_tools`` で
+    # ``building_ids: [...]`` を指定すると伝搬する (Phase 4' / A-3-c)。
+    # 詳細: docs/intent/stackchan_vessel.md A-3-c
+    building_ids: Optional[List[str]] = None
 
 
 @dataclass

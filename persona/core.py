@@ -169,9 +169,9 @@ class PersonaCore(
         self._lightweight_llm_client_initialized = False
         self._pending_parameter_overrides: Optional[Dict[str, Any]] = None
 
-        # Visual context cache — invalidated at Metabolism time or Building entry
-        self._visual_context_cache: Optional[List[Dict]] = None
-        self._visual_context_anchor: Optional[str] = None
+        # Visual context cache は Cached Head Architecture (Phase 2-h) で
+        # head_pipeline 側 (LineHeadSnapshot + VisualContextSection) に統合済み。
+        # persona 属性としては保持しない。詳細: docs/intent/cached_head_architecture.md
 
         self.emotion_module = EmotionControlModule()
         tz_label = (timezone_name or "UTC").strip() or "UTC"

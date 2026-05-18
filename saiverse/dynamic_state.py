@@ -1,577 +1,125 @@
-"""Dynamic State Sync — A/B/Cの3状態モデルによるBuilding状態管理。
+"""Dynamic State Sync — A/B/C 状態モデルによる Building 状態管理 (Phase 3 で head_pipeline へ統合)。
 
-A（ベースライン）は安定したコンテキスト先頭に配置され、Metabolismまで変化しない。
-B（最終通知済み状態）はイベントメッセージを注入するたびに更新される。
-C（現在状態）はin-memoryキャッシュからリアルタイムで計算される。
+このモジュールは旧 SAIVerse の `DynamicStateManager`。Building 内のアイテム/居住者/
+Memopedia/Chronicle の差分通知を担当していたが、Phase 3-e で実装本体が
+`sea.head_pipeline.sections` の 4 Section + `sea.head_pipeline.integration.inject_diff_notifications`
+に統合された。
 
-B ≠ C のときにイベントメッセージを会話履歴末尾に挿入し、LLMへの通知を行う。
+本ファイルは互換のための **facade** を提供する:
+  - `maybe_inject_event_messages` → head_pipeline 経由で diff 通知
+  - `on_building_entered` → BUILDING_ENTERED イベントを head_pipeline に dispatch
+  - `on_metabolism` → METABOLISM イベントを head_pipeline に dispatch
+
+旧 `PersonaBuildingState` テーブルは saiverse.upgrade_handlers が触る経路が残っている
+ため、モデル定義 (`database.models.PersonaBuildingState`) はしばらく残す。新しい
+read/write はすべて `line_head_snapshot` (LineHeadSnapshot テーブル) 側に流れる。
+
+詳細: docs/intent/cached_head_architecture.md / dynamic_state_sync.md
 """
 from __future__ import annotations
 
-import json
 import logging
-import time
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
-class OccupantEntry:
-    id: str
-    name: str
-    kind: str  # "persona" | "user"
-
-
-@dataclass
-class ItemEntry:
-    item_id: str
-    name: str
-    item_type: str
-    slot: str  # e.g. "b:3" or "i:2"
-
-
-@dataclass
-class MemopediaPageEntry:
-    page_id: str
-    title: str
-    created_at: int  # Unix timestamp（新規検出用）
-    updated_at: int  # Unix timestamp（更新検出用 / 論理削除時刻も兼ねる）
-    is_deleted: bool = False  # True なら削除済み（is_deleted=1）
-
-
-@dataclass
-class ChronicleEntryItem:
-    entry_id: str
-    level: int
-    created_at: int  # Unix timestamp
-
-
-@dataclass
-class BuildingStateSnapshot:
-    building_id: str
-    building_name: str
-    items: List[ItemEntry] = field(default_factory=list)
-    occupants: List[OccupantEntry] = field(default_factory=list)
-    memopedia_pages: List[MemopediaPageEntry] = field(default_factory=list)
-    chronicle_entries: List[ChronicleEntryItem] = field(default_factory=list)
-    captured_at: float = field(default_factory=time.time)
-
-    def to_json(self) -> str:
-        return json.dumps(
-            {
-                "building_id": self.building_id,
-                "building_name": self.building_name,
-                "items": [asdict(i) for i in self.items],
-                "occupants": [asdict(o) for o in self.occupants],
-                "memopedia_pages": [asdict(p) for p in self.memopedia_pages],
-                "chronicle_entries": [asdict(e) for e in self.chronicle_entries],
-                "captured_at": self.captured_at,
-            },
-            ensure_ascii=False,
-        )
-
-    @classmethod
-    def from_json(cls, data: str) -> "BuildingStateSnapshot":
-        d = json.loads(data)
-        return cls(
-            building_id=d["building_id"],
-            building_name=d["building_name"],
-            items=[ItemEntry(**i) for i in d.get("items", [])],
-            occupants=[OccupantEntry(**o) for o in d.get("occupants", [])],
-            memopedia_pages=[MemopediaPageEntry(**p) for p in d.get("memopedia_pages", [])],
-            chronicle_entries=[ChronicleEntryItem(**e) for e in d.get("chronicle_entries", [])],
-            captured_at=d.get("captured_at", 0.0),
-        )
-
-
-@dataclass
-class StateChange:
-    kind: str   # "item_added" | "item_removed" | "item_renamed" | "occupant_entered" | "occupant_left"
-    label: str  # 人間が読めるラベル（イベントメッセージに使用）
-
-
 class DynamicStateManager:
-    """Building状態のA/B/C管理とイベントメッセージ注入を行うシングルトン的マネージャー。"""
-
-    # ---- スナップショット構築 ----
-
-    @staticmethod
-    def capture_current_state(
-        persona: Any,
-        building_id: str,
-        manager: Any,
-        *,
-        memopedia_since: float,
-    ) -> BuildingStateSnapshot:
-        """現在のWorld状態（C）をin-memoryキャッシュから構築する。
-
-        Memopedia は数百〜数千件規模になりうるため、全件比較ではなく
-        `memopedia_since` 以降の変化分のみを取得する。
-        - baseline 用呼び出し: ``memopedia_since=time.time()`` を渡す（変化分は不要）
-        - diff 用呼び出し: 比較対象 B の ``captured_at`` を渡す
-        """
-        building_map = {b.building_id: b for b in manager.buildings}
-        building = building_map.get(building_id)
-        building_name = building.name if building else building_id
-
-        item_service = getattr(manager, "item_service", None)
-        items: List[ItemEntry] = []
-        if item_service:
-            building_item_ids = list(item_service.items_by_building.get(building_id, []))
-            for item_id in building_item_ids:
-                item_data = item_service.items.get(item_id)
-                if not item_data:
-                    continue
-                loc = item_service.item_locations.get(item_id, {})
-                slot_num = loc.get("slot_number")
-                slot = f"b:{slot_num}" if slot_num is not None else "b:?"
-                items.append(ItemEntry(
-                    item_id=item_id,
-                    name=item_data.get("name", ""),
-                    item_type=item_data.get("type", "object"),
-                    slot=slot,
-                ))
-
-            persona_id = getattr(persona, "persona_id", None)
-            if persona_id:
-                inv_item_ids = list(item_service.items_by_persona.get(persona_id, []))
-                for item_id in inv_item_ids:
-                    item_data = item_service.items.get(item_id)
-                    if not item_data:
-                        continue
-                    loc = item_service.item_locations.get(item_id, {})
-                    slot_num = loc.get("slot_number")
-                    slot = f"i:{slot_num}" if slot_num is not None else "i:?"
-                    items.append(ItemEntry(
-                        item_id=item_id,
-                        name=item_data.get("name", ""),
-                        item_type=item_data.get("type", "object"),
-                        slot=slot,
-                    ))
-
-        occupants: List[OccupantEntry] = []
-        raw_occupants = list(manager.occupants.get(building_id, []))
-        persona_id_self = getattr(persona, "persona_id", None)
-        persona_ids = set(getattr(manager, "personas", {}).keys())
-        id_to_name = getattr(manager, "id_to_name_map", {})
-        for oid in raw_occupants:
-            if oid == persona_id_self:
-                continue  # 自分自身は除外
-            name = id_to_name.get(str(oid), str(oid))
-            kind = "persona" if oid in persona_ids else "user"
-            occupants.append(OccupantEntry(id=oid, name=name, kind=kind))
-
-        sai_mem = getattr(persona, "sai_memory", None)
-        memopedia_pages = DynamicStateManager._capture_memopedia(sai_mem, since=memopedia_since)
-        chronicle_entries = DynamicStateManager._capture_chronicle(sai_mem)
-
-        return BuildingStateSnapshot(
-            building_id=building_id,
-            building_name=building_name,
-            items=items,
-            occupants=occupants,
-            memopedia_pages=memopedia_pages,
-            chronicle_entries=chronicle_entries,
-        )
-
-    # ---- DB操作 ----
-
-    @staticmethod
-    def get_baseline(persona_id: str, building_id: str, db: "Session") -> Optional[BuildingStateSnapshot]:
-        from database.models import PersonaBuildingState
-        row = db.query(PersonaBuildingState).filter_by(
-            PERSONA_ID=persona_id, BUILDING_ID=building_id
-        ).first()
-        if row and row.BASELINE_JSON:
-            try:
-                return BuildingStateSnapshot.from_json(row.BASELINE_JSON)
-            except Exception as exc:
-                LOGGER.warning("Failed to parse baseline JSON for %s/%s: %s", persona_id, building_id, exc)
-        return None
-
-    @staticmethod
-    def get_last_notified(persona_id: str, building_id: str, db: "Session") -> Optional[BuildingStateSnapshot]:
-        from database.models import PersonaBuildingState
-        row = db.query(PersonaBuildingState).filter_by(
-            PERSONA_ID=persona_id, BUILDING_ID=building_id
-        ).first()
-        if row and row.LAST_NOTIFIED_JSON:
-            try:
-                return BuildingStateSnapshot.from_json(row.LAST_NOTIFIED_JSON)
-            except Exception as exc:
-                LOGGER.warning("Failed to parse last_notified JSON for %s/%s: %s", persona_id, building_id, exc)
-        return None
-
-    @staticmethod
-    def _upsert_row(persona_id: str, building_id: str, db: "Session") -> Any:
-        from database.models import PersonaBuildingState
-        from datetime import datetime
-        row = db.query(PersonaBuildingState).filter_by(
-            PERSONA_ID=persona_id, BUILDING_ID=building_id
-        ).first()
-        if not row:
-            row = PersonaBuildingState(
-                PERSONA_ID=persona_id,
-                BUILDING_ID=building_id,
-                UPDATED_AT=datetime.now(),
-            )
-            db.add(row)
-        return row
-
-    @staticmethod
-    def save_baseline(persona_id: str, building_id: str, snapshot: BuildingStateSnapshot, db: "Session") -> None:
-        from datetime import datetime
-        try:
-            row = DynamicStateManager._upsert_row(persona_id, building_id, db)
-            row.BASELINE_JSON = snapshot.to_json()
-            row.LAST_NOTIFIED_JSON = snapshot.to_json()  # A更新時はBもリセット
-            row.UPDATED_AT = datetime.now()
-            db.commit()
-            LOGGER.debug("[dynamic_state] Saved baseline for %s/%s", persona_id, building_id)
-        except Exception as exc:
-            db.rollback()
-            LOGGER.error("[dynamic_state] Failed to save baseline: %s", exc, exc_info=True)
-
-    @staticmethod
-    def save_last_notified(persona_id: str, building_id: str, snapshot: BuildingStateSnapshot, db: "Session") -> None:
-        from datetime import datetime
-        try:
-            row = DynamicStateManager._upsert_row(persona_id, building_id, db)
-            row.LAST_NOTIFIED_JSON = snapshot.to_json()
-            row.UPDATED_AT = datetime.now()
-            db.commit()
-            LOGGER.debug("[dynamic_state] Saved last_notified for %s/%s", persona_id, building_id)
-        except Exception as exc:
-            db.rollback()
-            LOGGER.error("[dynamic_state] Failed to save last_notified: %s", exc, exc_info=True)
-
-    # ---- Memopedia / Chronicle スナップショット取得 ----
-
-    @staticmethod
-    def _capture_memopedia(sai_mem: Any, since: float) -> List[MemopediaPageEntry]:
-        """`since` 以降に変化（作成・更新・論理削除）した Memopedia ページのみを返す。
-
-        全件比較を避けるためタイムスタンプベース。LIMIT も is_deleted フィルタも掛けない
-        （論理削除も「変化」として返したいため）。`since=time.time()` を渡せば実質空。
-        """
-        if not sai_mem or not getattr(sai_mem, "conn", None):
-            return []
-        since_int = int(since)
-        try:
-            cur = sai_mem.conn.execute(
-                "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0) "
-                "FROM memopedia_pages "
-                "WHERE updated_at >= ? OR created_at >= ?",
-                (since_int, since_int),
-            )
-            entries = [
-                MemopediaPageEntry(
-                    page_id=row[0],
-                    title=row[1],
-                    created_at=int(row[2] or 0),
-                    updated_at=int(row[3] or 0),
-                    is_deleted=bool(row[4]),
-                )
-                for row in cur.fetchall()
-            ]
-            LOGGER.debug(
-                "[dynamic_state] _capture_memopedia since=%s -> %d changed pages",
-                since_int, len(entries),
-            )
-            return entries
-        except Exception as exc:
-            LOGGER.warning(
-                "[dynamic_state] Failed to capture memopedia changes since=%s: %s",
-                since_int, exc, exc_info=True,
-            )
-            return []
-
-    @staticmethod
-    def _capture_chronicle(sai_mem: Any) -> List[ChronicleEntryItem]:
-        """SAIMemoryのSQLiteからChronicleエントリ（最新50件）を取得する。"""
-        if not sai_mem or not getattr(sai_mem, "conn", None):
-            return []
-        try:
-            cur = sai_mem.conn.execute(
-                "SELECT id, level, created_at FROM arasuji_entries "
-                "ORDER BY created_at DESC LIMIT 50"
-            )
-            return [
-                ChronicleEntryItem(entry_id=row[0], level=int(row[1] or 1), created_at=int(row[2] or 0))
-                for row in cur.fetchall()
-            ]
-        except Exception as exc:
-            LOGGER.debug("[dynamic_state] Failed to capture chronicle: %s", exc)
-            return []
-
-    # ---- 差分計算 ----
-
-    @staticmethod
-    def compute_diff(b: BuildingStateSnapshot, c: BuildingStateSnapshot) -> List[StateChange]:
-        """B状態とC状態の差分を計算してStateChangeのリストを返す。"""
-        changes: List[StateChange] = []
-
-        # --- アイテム差分 ---
-        b_items = {e.item_id: e for e in b.items}
-        c_items = {e.item_id: e for e in c.items}
-
-        for item_id, c_item in c_items.items():
-            if item_id not in b_items:
-                changes.append(StateChange(
-                    kind="item_added",
-                    label=f"アイテム「{c_item.name}」({c_item.slot}) が追加されました",
-                ))
-            elif b_items[item_id].name != c_item.name:
-                changes.append(StateChange(
-                    kind="item_renamed",
-                    label=f"アイテム「{b_items[item_id].name}」が「{c_item.name}」に名前変更されました",
-                ))
-            elif b_items[item_id].slot != c_item.slot:
-                changes.append(StateChange(
-                    kind="item_moved",
-                    label=f"アイテム「{c_item.name}」が {b_items[item_id].slot} から {c_item.slot} へ移動されました",
-                ))
-
-        for item_id, b_item in b_items.items():
-            if item_id not in c_items:
-                changes.append(StateChange(
-                    kind="item_removed",
-                    label=f"アイテム「{b_item.name}」({b_item.slot}) が削除されました",
-                ))
-
-        # --- 入退室差分 ---
-        b_occ = {e.id: e for e in b.occupants}
-        c_occ = {e.id: e for e in c.occupants}
-
-        for oid, c_entry in c_occ.items():
-            if oid not in b_occ:
-                changes.append(StateChange(
-                    kind="occupant_entered",
-                    label=f"{c_entry.name} が入室しました",
-                ))
-
-        for oid, b_entry in b_occ.items():
-            if oid not in c_occ:
-                changes.append(StateChange(
-                    kind="occupant_left",
-                    label=f"{b_entry.name} が退室しました",
-                ))
-
-        # --- Memopedia差分 ---
-        # タイムスタンプベース判定。c.memopedia_pages には b.captured_at 以降に
-        # 変化したページのみが入っている前提。B 側のページリストは参照しない
-        # （= 全件比較しない）ので、ページ総数に依存せずスケールする。
-        # 削除イベントは soft delete（is_deleted=1 + updated_at 更新）で検知する。
-        cutoff = b.captured_at
-        for c_page in c.memopedia_pages:
-            if c_page.is_deleted and c_page.updated_at > cutoff:
-                changes.append(StateChange(
-                    kind="memopedia_deleted",
-                    label=f"Memopedia「{c_page.title}」が削除されました",
-                ))
-            elif c_page.created_at > cutoff:
-                changes.append(StateChange(
-                    kind="memopedia_created",
-                    label=f"Memopedia「{c_page.title}」が作成されました",
-                ))
-            elif c_page.updated_at > cutoff:
-                changes.append(StateChange(
-                    kind="memopedia_updated",
-                    label=f"Memopedia「{c_page.title}」が更新されました",
-                ))
-
-        # --- Chronicle差分 ---
-        # タイムスタンプ比較: b.captured_atより新しいcreated_atのエントリのみ通知
-        new_chr = [e for e in c.chronicle_entries if e.created_at > b.captured_at]
-        if new_chr:
-            by_level: Dict[int, int] = {}
-            for e in new_chr:
-                by_level[e.level] = by_level.get(e.level, 0) + 1
-            level_str = "、".join(f"Level {lv} × {cnt}件" for lv, cnt in sorted(by_level.items()))
-            changes.append(StateChange(
-                kind="chronicle_added",
-                label=f"Chronicleに新しいエントリが追加されました（{level_str}）",
-            ))
-
-        return changes
-
-    @staticmethod
-    def format_event_message(changes: List[StateChange]) -> str:
-        lines = ["[システム通知]"]
-        for ch in changes:
-            lines.append(f"- {ch.label}")
-        return "\n".join(lines)
-
-    # ---- メインエントリポイント ----
+    """Building 状態同期の facade (= head_pipeline への薄い委譲)。"""
 
     @staticmethod
     def maybe_inject_event_messages(persona: Any, manager: Any) -> bool:
-        """C ≠ B なら会話履歴にイベントメッセージを挿入し、Bを更新する。
+        """world 状態の差分を末尾通知として SAIMemory に注入する。
 
-        event_message は世界の変化通知 (誰の Pulse 中に届くかは偶然) であり
-        本質的に Track 横断のメタログ。``origin_track_id`` は **意図的に NULL**
-        のまま書く。Track 紐付けはしない (handoff_2026-05-10、
-        メタ判断系 line_role=meta_judgment と同じ扱い)。
+        Phase 3-e で実装が ``sea.head_pipeline.integration.inject_diff_notifications``
+        に統合された。本メソッドはその facade。
 
         Returns:
-            True if an event message was injected.
+            True if a notification message was injected.
         """
         persona_id = getattr(persona, "persona_id", None)
         building_id = getattr(persona, "current_building_id", None)
         if not persona_id or not building_id:
             return False
 
-        sai_mem = getattr(persona, "sai_memory", None)
-        if not sai_mem or not sai_mem.is_ready():
-            return False
-
-        session_factory = getattr(manager, "SessionLocal", None)
-        if not session_factory:
-            return False
-
-        db = session_factory()
         try:
-            b = DynamicStateManager.get_last_notified(persona_id, building_id, db)
-
-            if b is None:
-                # 初回: Bが未設定なのでCをBとAとして保存（イベントメッセージは不要）
-                # baseline 用 = Memopedia 変化分は不要なので future since で空リスト化
-                c_baseline = DynamicStateManager.capture_current_state(
-                    persona, building_id, manager, memopedia_since=time.time(),
-                )
-                DynamicStateManager.save_baseline(persona_id, building_id, c_baseline, db)
-                LOGGER.debug("[dynamic_state] Initial snapshot saved for %s/%s", persona_id, building_id)
-                return False
-
-            # diff 用 = B.captured_at 以降の Memopedia 変化分のみ取得
-            c = DynamicStateManager.capture_current_state(
-                persona, building_id, manager, memopedia_since=b.captured_at,
+            from sea.head_pipeline import inject_diff_notifications
+        except Exception:
+            LOGGER.warning(
+                "[dynamic_state] head_pipeline unavailable, skipping diff inject",
+                exc_info=True,
             )
-            changes = DynamicStateManager.compute_diff(b, c)
-            if not changes:
-                return False
-
-            msg_text = DynamicStateManager.format_event_message(changes)
-            LOGGER.info(
-                "[dynamic_state] Injecting event message for %s/%s (%d changes)",
-                persona_id, building_id, len(changes),
-            )
-
-            message: Dict[str, Any] = {
-                "role": "user",
-                "content": f"<system>{msg_text}</system>",
-                "metadata": {
-                    "tags": ["internal", "event_message"],
-                },
-            }
-            # origin_track_id は意図的に付けない (Track 横断のメタログ扱い)
-            sai_mem.append_persona_message(message)
-
-            DynamicStateManager.save_last_notified(persona_id, building_id, c, db)
-            return True
-
-        except Exception as exc:
-            LOGGER.error("[dynamic_state] maybe_inject_event_messages failed: %s", exc, exc_info=True)
             return False
-        finally:
-            db.close()
+
+        try:
+            return bool(inject_diff_notifications(persona, manager, building_id))
+        except Exception:
+            LOGGER.exception(
+                "[dynamic_state] maybe_inject_event_messages (via head_pipeline) failed for %s/%s",
+                persona_id, building_id,
+            )
+            return False
 
     @staticmethod
     def on_building_entered(persona: Any, building_id: str, manager: Any) -> None:
-        """ペルソナが新しいBuildingに入室したときの処理。
+        """ペルソナが新しい Building に入室したときの hook。
 
-        - 初訪問: 現在状態をAとして保存
-        - 再訪問: Aは既存のものを維持（last_known_state）、Bのみ現在状態で更新して到着イベントメッセージを生成
+        Phase 3-e: BUILDING_ENTERED イベントを head_pipeline に dispatch するだけ。
+        refresh_on_events に列挙した Section (building / visual_context /
+        building_items / building_occupants 等) の snapshot が再構築される。
         """
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id:
+        if not getattr(persona, "persona_id", None):
             return
-
-        session_factory = getattr(manager, "SessionLocal", None)
-        if not session_factory:
-            return
-
-        sai_mem = getattr(persona, "sai_memory", None)
-        if not sai_mem or not sai_mem.is_ready():
-            return
-
-        db = session_factory()
-        try:
-            existing_b = DynamicStateManager.get_last_notified(persona_id, building_id, db)
-            existing_a = DynamicStateManager.get_baseline(persona_id, building_id, db)
-
-            if existing_a is None:
-                # 初訪問: フルスナップショットとしてAとBを保存
-                # baseline 用 = Memopedia 変化分は不要なので future since で空リスト化
-                c = DynamicStateManager.capture_current_state(
-                    persona, building_id, manager, memopedia_since=time.time(),
-                )
-                DynamicStateManager.save_baseline(persona_id, building_id, c, db)
-                LOGGER.debug("[dynamic_state] First visit snapshot for %s/%s", persona_id, building_id)
-            else:
-                # 再訪問: Aは維持、BとCを比較して到着イベントメッセージを生成
-                b_for_diff = existing_b or existing_a
-                c = DynamicStateManager.capture_current_state(
-                    persona, building_id, manager, memopedia_since=b_for_diff.captured_at,
-                )
-                changes = DynamicStateManager.compute_diff(b_for_diff, c)
-                if changes:
-                    msg_text = DynamicStateManager.format_event_message(changes)
-                    message = {
-                        "role": "user",
-                        "content": f"<system>{msg_text}</system>",
-                        "metadata": {
-                            "tags": ["internal", "event_message"],
-                        },
-                    }
-                    sai_mem.append_persona_message(message)
-                    LOGGER.info(
-                        "[dynamic_state] Arrival event message for %s/%s (%d changes)",
-                        persona_id, building_id, len(changes),
-                    )
-
-                DynamicStateManager.save_last_notified(persona_id, building_id, c, db)
-
-            # ビジュアルコンテキストキャッシュを無効化
-            persona._visual_context_cache = None
-            persona._visual_context_anchor = None
-
-        except Exception as exc:
-            LOGGER.error("[dynamic_state] on_building_entered failed: %s", exc, exc_info=True)
-        finally:
-            db.close()
+        _dispatch_head_event(persona, manager, building_id, "building_entered")
 
     @staticmethod
     def on_metabolism(persona: Any, manager: Any) -> None:
-        """Metabolism発火時にAをフルスナップショットで更新し、Bをリセットする。"""
-        persona_id = getattr(persona, "persona_id", None)
+        """Metabolism 発火時の hook。
+
+        Phase 3-e: METABOLISM イベントを head_pipeline に dispatch。
+        全 Section の snapshot を再構築 + last_notified を A にリセット
+        (= 末尾通知の窓を最新でリスタート)。
+        """
         building_id = getattr(persona, "current_building_id", None)
-        if not persona_id or not building_id:
+        if not getattr(persona, "persona_id", None) or not building_id:
             return
+        _dispatch_head_event(persona, manager, building_id, "metabolism")
 
-        session_factory = getattr(manager, "SessionLocal", None)
-        if not session_factory:
-            return
 
-        db = session_factory()
-        try:
-            # baseline 更新 = Memopedia 変化分は不要
-            c = DynamicStateManager.capture_current_state(
-                persona, building_id, manager, memopedia_since=time.time(),
-            )
-            DynamicStateManager.save_baseline(persona_id, building_id, c, db)
-            LOGGER.info("[dynamic_state] Metabolism snapshot saved for %s/%s", persona_id, building_id)
+def _dispatch_head_event(
+    persona: Any, manager: Any, building_id: str, event_value: str,
+) -> None:
+    """Cached Head Architecture pipeline に world イベントを通知する。
 
-            # ビジュアルコンテキストキャッシュを無効化（次回パルスで再生成）
-            persona._visual_context_cache = None
-            persona._visual_context_anchor = None
+    pipeline が未初期化なら no-op (= startup 完了前のテスト経路では何もしない)。
+    Phase 2-h / 3-e で挿入された統合点。
+    詳細: docs/intent/cached_head_architecture.md
+    """
+    try:
+        from sea.head_pipeline import (
+            EventType,
+            build_line_head_input,
+            get_default_pipeline,
+        )
+    except Exception:
+        return
 
-        except Exception as exc:
-            LOGGER.error("[dynamic_state] on_metabolism failed: %s", exc, exc_info=True)
-        finally:
-            db.close()
+    pipeline = get_default_pipeline()
+    if not pipeline.registry.all_sections():
+        # default sections 未登録 (= 初期化前 / テスト経路) なら何もしない
+        return
+
+    try:
+        event = EventType(event_value)
+    except ValueError:
+        LOGGER.debug("dynamic_state: unknown head event %s", event_value)
+        return
+
+    ctx = build_line_head_input(persona, manager, building_id)
+    try:
+        pipeline.dispatch_event(ctx, event)
+    except Exception:
+        LOGGER.warning(
+            "dynamic_state: head pipeline dispatch_event failed event=%s",
+            event_value, exc_info=True,
+        )
