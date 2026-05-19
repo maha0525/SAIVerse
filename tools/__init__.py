@@ -222,22 +222,55 @@ def _autodiscover_tools() -> None:
             except Exception as e:
                 LOGGER.warning("Failed to load tool from %s: %s", py_file, e)
 
-        # 2. Subdirectories with schema.py (for git-cloned tool repos)
+        # 2. Subdirectories with schema.py (for git-cloned tool repos),
+        #    OR grouping subdirectories that contain .py tool files directly
+        #    (e.g. tools/units/env3.py for organizing Unit drivers).
+        #
+        # Disambiguation rules:
+        #   - <subdir>/schema.py exists           → 1 unit per dir (existing)
+        #   - <subdir>/__init__.py exists         → Python package / lib
+        #                                          modules (skip; helper code
+        #                                          imported by sibling tools)
+        #   - otherwise                           → grouping dir; load each
+        #                                          .py inside as a tool
         for subdir in tools_path.iterdir():
             if not subdir.is_dir() or subdir.name.startswith("_"):
                 continue
 
             schema_file = subdir / "schema.py"
-            if not schema_file.exists():
+            if schema_file.exists():
+                try:
+                    module = _load_module_from_path(f"tools._loaded.{subdir.name}", schema_file)
+                    if module and _register_tool(module, addon_name=addon_name):
+                        registered_names.add(subdir.name)
+                        LOGGER.debug("Registered tool from %s (addon=%s)", schema_file, addon_name)
+                except Exception as e:
+                    LOGGER.warning("Failed to load tool from %s: %s", schema_file, e)
                 continue
 
-            try:
-                module = _load_module_from_path(f"tools._loaded.{subdir.name}", schema_file)
-                if module and _register_tool(module, addon_name=addon_name):
-                    registered_names.add(subdir.name)
-                    LOGGER.debug("Registered tool from %s (addon=%s)", schema_file, addon_name)
-            except Exception as e:
-                LOGGER.warning("Failed to load tool from %s: %s", schema_file, e)
+            # No schema.py — check if this is a Python package (helper lib).
+            if (subdir / "__init__.py").exists():
+                continue
+
+            # Grouping subdirectory: each .py inside is an independent tool.
+            for modinfo in pkgutil.iter_modules([str(subdir)]):
+                if modinfo.name.startswith("_"):
+                    continue
+
+                py_file = subdir / f"{modinfo.name}.py"
+                if not py_file.exists():
+                    continue
+
+                try:
+                    # uniquify module name so e.g. tools/units/env3.py does
+                    # not collide with tools/env3.py if both ever exist.
+                    module_qualname = f"tools._loaded.{subdir.name}__{modinfo.name}"
+                    module = _load_module_from_path(module_qualname, py_file)
+                    if module and _register_tool(module, addon_name=addon_name):
+                        registered_names.add(modinfo.name)
+                        LOGGER.debug("Registered tool from %s (addon=%s)", py_file, addon_name)
+                except Exception as e:
+                    LOGGER.warning("Failed to load tool from %s: %s", py_file, e)
 
     LOGGER.info("Autodiscovered %d tools", len(TOOL_REGISTRY))
 
