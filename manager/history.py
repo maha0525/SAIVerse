@@ -81,6 +81,7 @@ class HistoryMixin:
     db_path: str
     quarantined_buildings: Dict[str, Dict[str, Any]]
     modified_buildings: set
+    SessionLocal: Any  # SQLAlchemy sessionmaker bound by SAIVerseManager init
 
     def _save_modified_buildings(self) -> None:
         """Save and drain ``self.modified_buildings``. Convenience wrapper.
@@ -147,6 +148,18 @@ class HistoryMixin:
 
         hist.append(enriched)
         self.modified_buildings.add(building_id)
+        # Phase 1 dual-write: mirror to building_messages table
+        # (docs/intent/building_memory_unified.md)
+        try:
+            from database.building_messages import insert_building_message
+            session_factory = getattr(self, "SessionLocal", None)
+            insert_building_message(session_factory, building_id, enriched)
+        except Exception:
+            LOGGER.warning(
+                "add_building_event: failed to mirror to DB (bid=%s seq=%s)",
+                building_id, enriched.get("seq"),
+                exc_info=True,
+            )
         return enriched
 
     def reset_persona_seq_counters_for_building(

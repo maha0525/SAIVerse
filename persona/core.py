@@ -139,6 +139,9 @@ class PersonaCore(
         _quar_dict = getattr(manager_ref, "quarantined_buildings", None) if manager_ref else None
 
         # Initialize managers that depend on loaded data
+        # Phase 1 dual-write: pass manager.SessionLocal so HistoryManager mirrors
+        # building log writes into the `building_messages` table.
+        _db_factory = getattr(manager_ref, "SessionLocal", None) if manager_ref else None
         self.history_manager = HistoryManager(
             persona_id=self.persona_id,
             persona_log_path=self.persona_log_path,
@@ -148,6 +151,7 @@ class PersonaCore(
             memory_adapter=self.sai_memory,
             modified_buildings=_mod_set,
             quarantined_buildings=_quar_dict,
+            db_session_factory=_db_factory,
         )
 
         # Configure pulse tracking based on loaded histories

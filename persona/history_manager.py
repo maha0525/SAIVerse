@@ -2,12 +2,13 @@ import copy
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING, Any
+from typing import Callable, Dict, List, Optional, TYPE_CHECKING, Any
 import re
 from datetime import datetime
 
 if TYPE_CHECKING:
     from saiverse_memory import SAIMemoryAdapter
+    from sqlalchemy.orm import Session
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class HistoryManager:
         memory_adapter: Optional["SAIMemoryAdapter"] = None,
         modified_buildings: Optional[set] = None,
         quarantined_buildings: Optional[Dict[str, Any]] = None,
+        db_session_factory: Optional[Callable[[], "Session"]] = None,
     ):
         self.persona_id = persona_id
         self.persona_log_path = persona_log_path
@@ -39,6 +41,12 @@ class HistoryManager:
         self._quarantined_buildings = quarantined_buildings if quarantined_buildings is not None else {}
         self._building_seq_counter: Dict[str, int] = {}
         self.metabolism_anchor_message_id: Optional[str] = None
+        # Phase 1 dual-write: SQLAlchemy session factory for the building_messages
+        # table mirror of cities/<bid>/log.json. None = skip DB write (used by tests
+        # / contexts where the main saiverse.db is unavailable). Failures here are
+        # logged at WARNING and never block the JSON write path.
+        # See docs/intent/building_memory_unified.md (Phase 1).
+        self._db_session_factory = db_session_factory
 
         self._normalise_building_histories()
 
@@ -251,6 +259,30 @@ class HistoryManager:
         except Exception:
             LOGGER.exception("Failed to sync message to SAIMemory")
 
+    # Phase 1 dual-write helpers (docs/intent/building_memory_unified.md)
+    def _insert_building_message_to_db(
+        self, building_id: str, building_msg: Dict[str, Any]
+    ) -> None:
+        from database.building_messages import insert_building_message
+        insert_building_message(self._db_session_factory, building_id, building_msg)
+
+    def _update_building_message_in_db(
+        self,
+        building_id: str,
+        message_id: str,
+        *,
+        content: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        from database.building_messages import update_building_message_in_db
+        update_building_message_in_db(
+            self._db_session_factory,
+            building_id,
+            message_id,
+            content=content,
+            metadata=metadata,
+        )
+
     def add_message(
         self,
         msg: Dict[str, str],
@@ -290,6 +322,7 @@ class HistoryManager:
         hist.append(building_msg)
         self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
         self._mark_modified(building_id)
+        self._insert_building_message_to_db(building_id, building_msg)
         return building_msg
 
     def _get_building_memory_path(self, building_id: str) -> Path:
@@ -320,6 +353,7 @@ class HistoryManager:
         hist.append(building_msg)
         self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
         self._mark_modified(building_id)
+        self._insert_building_message_to_db(building_id, building_msg)
         return building_msg
 
     def add_to_persona_only(
@@ -389,6 +423,9 @@ class HistoryManager:
                     else:
                         msg["metadata"] = dict(metadata)
                 self._mark_modified(building_id)
+                self._update_building_message_in_db(
+                    building_id, message_id, content=content, metadata=metadata
+                )
                 return msg
         LOGGER.warning(
             "update_building_message: message_id=%s not found in building=%s",

@@ -626,3 +626,35 @@ class TrackLocalLog(Base):
         Index("idx_track_local_log_kind", "track_id", "log_kind", "occurred_at"),
     )
 
+
+class BuildingMessage(Base):
+    """Building のチャットログ。`cities/<bid>/log.json` 置き換え先。
+
+    詳細: docs/intent/building_memory_unified.md
+    """
+    __tablename__ = "building_messages"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    building_id = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
+    seq = Column(Integer, nullable=False)
+    role = Column(String(32), nullable=False)  # 'user' | 'assistant' | 'host'
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=True)
+    content = Column(Text, nullable=False)
+    timestamp = Column(String(64), nullable=False)  # ISO format string (既存 JSON との互換維持)
+    heard_by = Column(Text, nullable=False, default='[]')   # JSON array
+    ingested_by = Column(Text, nullable=False, default='[]')  # JSON array
+    event_type = Column(String(32), nullable=True)  # 'occupancy' | 'world' | 'spawn' | NULL
+    event_data = Column(Text, nullable=True)        # JSON: entity_id, from/to_building_id, action 等
+    metadata_json = Column(Text, nullable=True)     # 残りメタデータ JSON (SQLAlchemy 予約語の `metadata` を避けて _json サフィックス)
+    message_id = Column(String(255), nullable=True)  # legacy `building_id:seq` 互換、後方互換のため保持
+    client_message_id = Column(String(64), nullable=True)  # クライアント生成 UUID (idempotency_key)。NULL は重複可
+    origin_track_id = Column(String(36), nullable=True)
+    pulse_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint('building_id', 'seq', name='uq_building_msg_bid_seq'),
+        UniqueConstraint('client_message_id', name='uq_building_msg_client_mid'),
+        Index('idx_building_msg_bid_seq', 'building_id', 'seq'),
+        Index('idx_building_msg_event', 'building_id', 'event_type'),
+        Index('idx_building_msg_client_mid', 'client_message_id'),
+    )
+
