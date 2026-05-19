@@ -28,7 +28,7 @@ import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from tools.core import ToolSchema
 # Bind get_active_persona_id at module-load time. Lazy-importing this inside
@@ -494,6 +494,10 @@ class MCPClientManager:
         self._registered_tools: Dict[str, Dict[str, Any]] = {}
         # instance_key -> failure record with backoff deadline
         self._failed_instances: Dict[str, Dict[str, Any]] = {}
+        # qualified_name -> subscribers waiting for this server to become ready
+        self._on_server_ready: Dict[str, List[Callable[[], None]]] = {}
+        # qualified_names currently ready (reset on disconnect, set on connect)
+        self._ready_servers: Set[str] = set()
 
     # -- Startup ---------------------------------------------------------
 
@@ -559,6 +563,7 @@ class MCPClientManager:
             )
             return None
         self._add_reference(instance_key, referrer)
+        self._fire_server_ready(qualified_name)
         return instance_key
 
     async def _discover_per_persona_tools(self, qualified_name: str) -> None:
@@ -1007,6 +1012,10 @@ class MCPClientManager:
         if not matching:
             return False
 
+        # Server is going down → drop ready flag so future on_server_ready
+        # subscribers won't fire immediately based on stale state.
+        self._ready_servers.discard(qualified_name)
+
         success = True
         for instance_key in matching:
             connection = self._connections.get(instance_key)
@@ -1025,7 +1034,52 @@ class MCPClientManager:
                     exc,
                 )
                 success = False
+        if success:
+            self._fire_server_ready(qualified_name)
         return success
+
+    # -- Server-ready event hook ----------------------------------------
+    # Lets addons (e.g. avatar_loader) trigger work the moment a server
+    # finishes connecting, instead of polling on a timer.
+
+    def on_server_ready(
+        self,
+        qualified_name: str,
+        callback: Callable[[], None],
+    ) -> None:
+        """Register a callback for when the given MCP server is ready.
+
+        If the server is already ready at registration time, the callback
+        fires immediately on the caller's thread. Otherwise it is queued and
+        fired on the MCP event loop thread once the server connects (or
+        reconnects via :py:meth:`reconnect_server`).
+
+        Callbacks should be lightweight and non-blocking — defer real work
+        to a worker thread inside the callback if needed.
+        """
+        if qualified_name in self._ready_servers:
+            try:
+                callback()
+            except Exception:
+                LOGGER.exception(
+                    "MCP: on_server_ready immediate callback raised for '%s'",
+                    qualified_name,
+                )
+            return
+        self._on_server_ready.setdefault(qualified_name, []).append(callback)
+
+    def _fire_server_ready(self, qualified_name: str) -> None:
+        """Mark a server ready and invoke any queued callbacks."""
+        self._ready_servers.add(qualified_name)
+        callbacks = self._on_server_ready.get(qualified_name) or []
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception:
+                LOGGER.exception(
+                    "MCP: on_server_ready callback raised for '%s'",
+                    qualified_name,
+                )
 
     async def manual_stop_instance(self, instance_key: str) -> bool:
         """Force-stop a specific instance, ignoring refcount.

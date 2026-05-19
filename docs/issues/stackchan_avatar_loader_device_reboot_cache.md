@@ -1,6 +1,6 @@
 # Issue: avatar_loader が device reboot を検知せず stale cache で skip transfer する
 
-**ステータス**: 🟡 実装完了 (実機検証待ち)
+**ステータス**: ✅ 実装 + 実機検証完了 (2026-05-19、 event driven 化 + burst window)
 **優先度**: medium
 **作成日**: 2026-05-18
 **関連**:
@@ -97,3 +97,11 @@ backend.log の決定的な行:
   - ``reconcile_session`` に ``on_invalidate: Optional[Callable]`` 引数を追加 (既存呼び出しは callback なしで挙動不変)
   - 古い firmware (= boot_session_id フィールド未対応) は ``_fetch_device_session_id`` が None を返すので polling 経路は noop で進む、 既存挙動を破壊しない
   - 実機検証: SAIVerse 再起動して 8 秒後に initial reconcile ログ + avatar load が走ること、 device 物理 reboot 後 30 秒以内に reboot 検知 + 再 transfer が走ることを確認予定
+- 2026-05-19: 初期 reconcile 観測で **8 秒固定 sleep + polling tick で待つ設計が遅すぎる** ことが判明。 実機ログ (`20260519_013421`) で「8 秒経過 → polling 1 回目で device 未接続 → 30 秒後の polling 2 回目で device ready 検知 → initial reconcile」となり、 SAIVerse 起動から avatar 表示まで ~46 秒。 まはー指摘「gateway subprocess の起動完了タイミングでやればいい」が正論なので **event driven 化** に切替。
+  - **本体 ``tools/mcp_client.py`` 側拡張**: ``MCPClientManager`` に ``on_server_ready(qualified_name, callback)`` / ``_fire_server_ready(qualified_name)`` / ``_ready_servers: Set[str]`` を追加。 ``_start_global_instance`` 成功時 + ``reconnect_server`` 成功時に fire。 既に ready な状態で register された callback は即 fire (= 後発 subscriber も取り逃さない)。
+  - **``avatar_loader.py`` 側変更**: ``_INITIAL_DELAY_SEC`` (= 8 秒固定 sleep) 廃止、 代わりに ``_device_ready_event: threading.Event`` を追加。 registrar thread で ``get_mcp_manager()`` 利用可能を待って ``on_server_ready`` 登録 → callback で event set → reconcile thread が event 受け取って initial reconcile 実行、 という流れ。
+  - **fallback**: hook 機構が壊れた / 本体が古くて hook 非対応 / gateway 起動失敗、 等の最終保険として ``_READY_EVENT_FALLBACK_SEC = 120`` 秒の上限 wait を入れる。 timeout 後は polling-only mode に降りるが session_id 取得失敗を許容するので無害。
+  - **polling の役割整理**: 起動時の急ぎは event 側担当、 polling は **device 単独 reboot 検知** (= シナリオ A) のみに専念。 30 秒間隔は維持。
+- 2026-05-19: 上記実装で **MCP server ready != device available** が判明。 gateway subprocess は数百 ms で起動するが、 ESP32 が WS server に接続完了するまで別途数秒〜十数秒 (= ESP32 boot + WiFi assoc + WS handshake) のラグがある。 server ready event 即時で session_id 取得すると "No ESP32 device connected" で失敗するため、 追加修正:
+  - **burst window 導入**: server ready event 後、 ``_INITIAL_BURST_SEC = 60`` 秒間は ``_INITIAL_BURST_INTERVAL_SEC = 2`` 秒間隔で session_id 取得を retry (= ESP32 接続を即時検出)、 window 経過後は通常 ``_POLL_INTERVAL_SEC = 30`` 秒間隔に落とす (= ESP32 永久未接続時の polling 負荷削減)。
+  - 実機検証済 (2026-05-19): SAIVerse 起動から数秒以内に initial reconcile + avatar transfer 完了を確認。
