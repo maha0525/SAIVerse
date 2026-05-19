@@ -83,6 +83,13 @@ function generateRegistry(panels) {
         "    personas: { id: string; name: string }[];",
         "    /** /api/addon/<addon_name> のプレフィックス */",
         "    addonApiBase: string;",
+        "    /**",
+        "     * Panel 内部で AddonConfig を書き換えた場合 (= 例: stackchan-addon",
+        "     * のペアリング操作で master_token を rotate) に呼ぶ callback。",
+        "     * 呼ぶと親 AddonManagerModal が /api/addon/ を再 fetch して",
+        "     * props.addon.params を最新値で再描画する。",
+        "     */",
+        "    onConfigChanged?: () => void | Promise<void>;",
         "}",
         "",
     ];

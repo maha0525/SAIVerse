@@ -579,6 +579,15 @@ function ParamsSection({
     personas: { id: string; name: string }[];
 }) {
     const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
+
+    // 外部から AddonConfig が更新された場合 (= addon panel 内で内部的に
+    // params を書き換えた、 例: stackchan-addon のペアリング操作で
+    // master_token を rotate) は、 親 (AddonManagerModal) が addon を再
+    // fetch して props.addon.params を新しい値で渡してくる。 ここで state
+    // を追従させないと UI 表示が古いまま (= まはー指摘の不整合)。
+    useEffect(() => {
+        setGlobalParams(addon.params ?? {});
+    }, [addon.params]);
     const [personaConfigs, setPersonaConfigs] = useState<PersonaPersonaConfig[]>([]);
     const [saving, setSaving] = useState(false);
     const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
@@ -741,10 +750,12 @@ function AddonCard({
     addon,
     personas,
     onToggleEnabled,
+    onConfigChanged,
 }: {
     addon: AddonInfo;
     personas: { id: string; name: string }[];
     onToggleEnabled: (addonName: string, enabled: boolean) => void;
+    onConfigChanged?: () => void | Promise<void>;
 }) {
     const [expanded, setExpanded] = useState(false);
 
@@ -807,6 +818,7 @@ function AddonCard({
                                     }}
                                     personas={personas}
                                     addonApiBase={`/api/addon/${addon.addon_name}`}
+                                    onConfigChanged={onConfigChanged}
                                 />
                             </Suspense>
                         );
@@ -831,6 +843,21 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
     const [personas, setPersonas] = useState<{ id: string; name: string }[]>([]);
     const [loading, setLoading] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
+
+    // addons のみ再 fetch。 addon panel 内で AddonConfig が内部的に書き
+    // 換わった (= stackchan-addon のペアリング操作で master_token rotate)
+    // 時に呼んで、 ParamsSection の表示を最新値に追従させる。
+    const refetchAddons = useCallback(async (): Promise<void> => {
+        try {
+            const r = await fetch('/api/addon/');
+            if (!r.ok) throw new Error(`/api/addon/ ${r.status} ${r.statusText}`);
+            const addonData = await r.json();
+            setAddons(Array.isArray(addonData) ? addonData : []);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error('[AddonManager] refetchAddons failed:', msg);
+        }
+    }, []);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -908,6 +935,7 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                             addon={addon}
                             personas={personas}
                             onToggleEnabled={handleToggleEnabled}
+                            onConfigChanged={refetchAddons}
                         />
                     ))}
                 </div>

@@ -1004,7 +1004,34 @@ class MCPClientManager:
     # -- Reconnect / manual stop ----------------------------------------
 
     async def reconnect_server(self, qualified_name: str) -> bool:
-        """Reconnect all instances of a given qualified server name."""
+        """Reconnect all instances of a given qualified server name.
+
+        Re-loads raw config from the source JSON and re-interpolates against
+        the current AddonConfig DB before each reconnect, so AddonConfig
+        mutations since the initial start get picked up by the restarted
+        subprocess env. Without this, an addon that rotates a token in
+        AddonConfig (e.g. stackchan-addon Phase 2' pairing rotates
+        ``master_token``) would need a full SAIVerse restart to push the
+        new env to the subprocess.
+
+        Crucially, ``_server_meta[name]["raw_config"]`` holds the
+        **already-interpolated** result from process-launch time (= old
+        values are baked in). Re-running ``resolve_config_placeholders`` on
+        it is a no-op because the ``${addon.X.Y}`` markers are gone. The
+        only way to pick up DB changes is to re-read the source
+        ``mcp_servers.json`` and re-interpolate from scratch.
+
+        OS process env is fixed at spawn time — there is no way to mutate
+        an already-running subprocess's env. The only path is kill +
+        respawn with a fresh env, which is what disconnect → connect does
+        for stdio transport.
+        """
+        from tools.mcp_config import (
+            _interpolate_value,
+            _load_config_file,
+            resolve_config_placeholders,
+        )
+
         matching = [
             key for key in self._connections
             if self._qualified_from_instance_key(key) == qualified_name
@@ -1016,11 +1043,72 @@ class MCPClientManager:
         # subscribers won't fire immediately based on stale state.
         self._ready_servers.discard(qualified_name)
 
+        meta = self._server_meta.get(qualified_name)
+
+        # Step 1: re-load raw config from source JSON + interpolate against
+        # current AddonConfig DB. Update _server_meta in-place so any
+        # subsequent operations also see the fresh values.
+        if meta and meta.get("source_path"):
+            try:
+                source_path = Path(meta["source_path"])
+                raw = _load_config_file(source_path)
+                old_cfg = meta.get("raw_config") or {}
+                original_name = old_cfg.get("_original_server_name")
+                # addon-prefixed の場合 raw のキーは original_name、 そう
+                # じゃない (user_data / builtin) 場合は qualified_name と
+                # 同名のはず
+                if original_name and original_name in raw:
+                    cfg = raw[original_name]
+                else:
+                    cfg = raw.get(qualified_name)
+                if cfg is not None:
+                    cfg_copy = _interpolate_value(cfg)
+                    cfg_copy["_source_path"] = str(source_path)
+                    addon_name = meta.get("addon_name")
+                    if addon_name:
+                        cfg_copy["_addon_name"] = addon_name
+                        cfg_copy["_original_server_name"] = (
+                            original_name or qualified_name
+                        )
+                    meta["raw_config"] = cfg_copy
+                    LOGGER.info(
+                        "MCP: re-loaded raw_config for '%s' from %s "
+                        "(picked up AddonConfig changes)",
+                        qualified_name, source_path,
+                    )
+            except Exception as exc:
+                LOGGER.warning(
+                    "MCP: failed to re-load raw_config for '%s' "
+                    "(will reconnect with cached values): %s",
+                    qualified_name, exc,
+                )
+
+        raw_config = meta.get("raw_config") if meta else None
+
         success = True
         for instance_key in matching:
             connection = self._connections.get(instance_key)
             if connection is None:
                 continue
+
+            # Resolve persona-specific placeholders on top of the freshly
+            # AddonConfig-interpolated raw_config. On failure fall through
+            # to reconnect with the existing config so we at least try a
+            # restart, rather than leaving the subprocess stale.
+            if raw_config is not None:
+                persona_id = self._persona_id_from_instance_key(instance_key)
+                try:
+                    connection.config = resolve_config_placeholders(
+                        raw_config, persona_id=persona_id,
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "MCP: placeholder re-resolution failed for '%s' "
+                        "before reconnect (will use cached config): %s",
+                        instance_key,
+                        exc,
+                    )
+
             await self._unregister_instance_tools(instance_key)
             try:
                 await connection.disconnect()
