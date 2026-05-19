@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
 
-**ステータス**: 🔲 未着手 (= Phase X' 着手前のハンドオフ)
+**ステータス**: 🟡 一部投稿済み (= PR-H #186 が 2026-05-19 に upstream 投稿、 残 Series A〜G は Phase X' で投稿予定)
 **優先度**: medium
 **作成日**: 2026-05-13
-**最終更新**: 2026-05-15 (Series E = 動的 avatar セット転送 PR を追補節として追加)
+**最終更新**: 2026-05-19 (PR-H = Wi-Fi first-attempt fix 投稿 + PR-I = touch driver false positive filter の枠予約)
 **関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
 
 ## 背景
@@ -150,7 +150,16 @@ Phase X' の前提条件:
 
 これら全部終わってから PR 整形 + 投稿に着手。理由: 上流に投げた後で「実は別の修正が必要」と分かると PR 修正が大変、かつ「実機で本当に有用だった」を示せた状態で PR を出す方が受け入れ確率高い。
 
-PR ごとに maintainer とディスカッションが入る前提で、各 PR review-cycle に 1-2 週間想定。全 PR merge には 1-3 ヶ月かかる可能性がある。
+PR ごとに maintainer とディスカッションが入る前提で、各 PR review-cycle に 1-2 週間想定、全 PR merge には 1-3 ヶ月かかる可能性がある。
+
+### 方針の例外 (2026-05-19 追記)
+
+「全 Phase 完了後にまとめて投稿」 は **当該 Phase 検証で副次的に発見した独立 bug** には適用しない。 具体例:
+
+- **PR-H** (= Wi-Fi captive portal 1 回目失敗 fix): Phase 2' (= ペアリング UX) の実機検証中に発見。 既存 Phase X' スコープ (= Series A〜G) と無関係、 修正は局所的、 検証も済んでいるため即時 PR 投稿が筋
+- 判断軸: (1) 既存 Series の commit と無関係 (= base が独立)、 (2) 修正範囲が局所、 (3) 実機 Before/After log が揃ってる、 の 3 つを満たすなら例外として即時投稿可
+
+「実機で本当に有用だった」 を示すための「Phase 全部終わってから」 制約は、 Series A〜G の **音声経路 / avatar / coredump 等の構造的変更** に対する制約で、 局所 bug fix を留め置く根拠にはならない。 後者は早く投稿するほど upstream ユーザー全員が恩恵を受ける。
 
 ## 残課題 (Phase X' 実施時に解決すべき)
 
@@ -398,6 +407,113 @@ git push origin pr-g-coredump-partition
 
 cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
 
+## 追補: PR-H — Wi-Fi captive portal 1 回目失敗 fix (Phase 2' 派生、 2026-05-19 投稿済み)
+
+Phase 2' (= ペアリング UX) の実機検証中に発見した bug への即時 PR。 § 投稿タイミング §「方針の例外」 節に従い、 Series A〜G と独立して先行投稿した **本 doc 上初の実投稿 PR**。
+
+### PR-H 概要
+
+| PR | URL | 状態 | base | 依存 |
+|---|---|---|---|---|
+| **PR #186** ([upstream link](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186)) | https://github.com/kisaragi-mochi/stackchan-mcp/pull/186 | 投稿済み (review 待ち、 2026-05-19) | upstream `main` (commit `b0e258f` 時点) | — |
+
+ブランチ: `feature/fix-wifi-first-attempt-comeback-timer` (= 1 commit `72fb370`、 fork に push 済み)。 対応 commit は dev/integration の `6b4fa53`。
+
+### 内容
+
+**Symptom**: captive portal の SSID/Password 入力 1 回目が必ず失敗、 同値で 2 回目入力で通る。
+
+**Root cause**: APSTA mode の CSA (Channel Switch Announcement) 直後の association 試行に対して AP が「Association Response status=30 (Refused Temporarily) + Comeback Time 1124 TUs (≈1.1s)」 を返す、 ESP-IDF wifi driver の `failure_retry_cnt` (= 即時 retry) は Comeback Time を尊重しないため全 refuse される。 2 回目試行 (8s 後) は AP state が settle して一発成功。
+
+**Fix**: `WifiConfigurationAp::ConnectToWifi` を上位層 retry loop で囲み、 失敗時に 3 秒 wait → 1 回 retry。 driver-internal `failure_retry_cnt` は default (1) のまま維持。
+
+### 投稿時の知見 (= 他 PR の参考に)
+
+PR description / commit message の構造で reviewer に効いた要素:
+
+- **Symptom** を先頭に置く: 「ユーザーが見える現象」 を最初に書く、 技術的詳細は後
+- **Root cause** に観測 log を引用: 「`Association refused temporarily, comeback time 1124 TUs`」 のような生 log を引用すると「推測じゃなく実測」 が伝わる
+- **Before/After log** を Code block で並置: 修正前と修正後の挙動を同じフォーマットで見せる、 reviewer が差分を 5 秒で把握できる
+- **Limitations** を明示: 「Buffalo router only で検証」 等の制約を隠さない、 受け入れ条件の交渉が楽になる
+- **Test plan の checkbox**: `[x]` で済んだ項目と `[ ]` で残った項目 (= 「他 router での検証は maintainer / community に委ねる」) を区別、 review コストが減る
+
+これらの構造は Series A〜G の PR description 作成時にも適用する。 特に PR-B (= xiaozhi OTA skip)、 PR-F (= device-driven audio capture)、 PR-G (= coredump-to-flash) のような「設計範囲を拡張する」 タイプの PR では Symptom / Root cause / Limitations の厚みが受け入れの分岐ポイント。
+
+### Series H 用ブランチ分割手順 (= 今回実施した手順、 他 PR でも踏襲)
+
+```bash
+cd temp/stackchan-mcp
+
+# 1. dev/integration に修正を commit (= 手元検証状態を保存)
+git switch dev/integration
+git add <修正ファイル>
+git commit -m "fix(...): ..."   # HEREDOC で詳細な本文も含める
+
+# 2. upstream/main を最新化
+git fetch upstream
+
+# 3. feature branch を upstream/main から派生
+git switch -c feature/fix-wifi-first-attempt-comeback-timer upstream/main
+
+# 4. dev/integration の commit を cherry-pick (= conflict 出たら手動 resolve)
+git cherry-pick 6b4fa53
+
+# 5. fork (origin) に push
+git push origin feature/fix-wifi-first-attempt-comeback-timer
+
+# 6. gh CLI で PR 作成 (= base は upstream main、 head は fork の feature branch)
+gh pr create --repo kisaragi-mochi/stackchan-mcp \
+  --base main \
+  --head maha0525:feature/fix-wifi-first-attempt-comeback-timer \
+  --title "..." \
+  --body "$(cat <<'EOF'
+... (Symptom / Root cause / Fix / Verification / Limitations / Test plan)
+EOF
+)"
+```
+
+cherry-pick で `Auto-merging firmware/components/78__esp-wifi-connect/wifi_configuration_ap.cc` が出ても conflict なしなら自動で merge される (= 今回はそのまま通った)。 conflict 出たら手動 resolve + `git cherry-pick --continue`。
+
+### 結果待ち
+
+review feedback / merge 結果は本書末尾の「参考」 セクションに追記、 もしくは PR が closed されたら状態を更新する。
+
+## 追補: PR-I — touch driver false positive filter + format bug fix (Phase 5' 関連、 調査中、 2026-05-19 枠予約)
+
+Phase 2' 検証中に副次発見した「触ってないのに STROKE event」 誤検知への対処。 詳細観測 + 仮説 + 解決案候補は `docs/issues/stackchan_touch_false_stroke_events.md` を参照。 Series A〜H と独立、 依存なし。
+
+### PR-I 概要
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-I** | fix(firmware/touch): raw threshold filter for false-positive STROKE events + `duration=lums` format bug | upstream `main` | — |
+
+ブランチ: **未作成** (= 調査 TODO 完了後に派生予定)、 該当 issue (`stackchan_touch_false_stroke_events.md`) の 5 項目を消化してから着手。
+
+### 投稿条件
+
+- `stackchan_touch_false_stroke_events.md` の調査 TODO 全項目消化 (= 特に raw 値の意味 + zone 判定機構の確認)
+- 解決案 (1) の threshold をローカル fork で実装 + 24 時間 capture で誤検知 0 件確認
+- Phase 5' (= タッチ知覚の本格実装) 着手前に投稿しておくと、 Phase 5' 検証で「ペルソナが触られたと誤認」 のノイズを減らせる
+
+### PR スコープ
+
+issue doc の解決案候補のうち:
+
+- **(1) raw 値 threshold filter** + **(2) `duration=lums` format bug 修正** → 1 PR にまとめる (= 関連箇所が近い、 raw 値判定とログ format は同じ関数内)
+- **(3) zone 判定機構の調査** → 調査結果次第で別 PR、 もしくは PR-I に含める
+
+### PR description ドラフト (= 着手時の参考)
+
+issue doc の「観測」 「6 event の log」 「観測差分」 セクションをそのまま PR description に転載できる構造。 PR-H で得た「Symptom / Root cause / Fix / Verification / Limitations / Test plan」 の 6 ブロック構造を踏襲する:
+
+- **Symptom**: 触ってない時に STROKE event が間欠的 (= 約 24 分間隔) に発火する
+- **Root cause**: raw 値の threshold 判定が存在せず、 sensor ノイズ起因の高 raw 値が STROKE 判定を通る
+- **Fix**: raw 値 threshold filter (= 0x800 〜 0xC00) を touch event 判定前に挿入
+- **Verification**: 24 時間 capture で誤検知 0 件、 正常な撫で event は全て検出される
+- **Limitations**: 観測は単一個体での結果、 個体差で threshold 調整が必要な可能性 (= configurable に)
+- **Test plan**: ローカル flash 後 24 時間 capture / 撫で 10 回 / 触らず 1 時間 etc.
+
 ## 参考
 
 - 手元 fork のブランチ:
@@ -405,6 +521,8 @@ cherry-pick の hash は 2026-05-18 時点。 PR 投稿時に再確認する。
   - `feature/dynamic-avatar-set` (= 10 commit、Phase 4.5 検証経路として活用中、Series E の出所、 2026-05-18 に `740d786` PSRAM peak fix 追加)
   - `feature/device-driven-audio-capture-with-hook` (= 4 commit、Phase 3' 検証経路、 Series F の出所)
   - `feature/coredump-partition` (= 1 commit、Phase 3' デバッグ基盤、 Series G の出所、 2026-05-18 追加)
+  - `feature/fix-wifi-first-attempt-comeback-timer` (= 1 commit、 Phase 2' 検証経路、 PR-H = #186 の出所、 2026-05-19 push 済み)
+  - (= PR-I 用ブランチ未作成、 issue 調査完了後に派生)
 - addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (現状 `feature/external-pcm-stream`、Phase 4.5 統合時に `dev/integration` に切替)
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)

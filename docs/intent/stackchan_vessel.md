@@ -1,6 +1,6 @@
 # Intent: スタックチャン Vessel 統合（saiverse-stackchan-addon）
 
-**ステータス**: v0.7（2026-05-18 改訂、Phase 3' を Gemini inline 音声認識経路に転換）
+**ステータス**: v0.8（2026-05-19 改訂、Phase 2' 認証・ペアリング UX を完了）
 
 ## v0.4 → v0.5 の主要変更（路線変更）
 
@@ -859,21 +859,25 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 
 - 一度だけ「発話の末尾 10 秒程度が取りこぼされる」現象を観測 (= 2026-05-13 20:25 頃の発話)。後続の 2 連続発話 (GPU load 中 / load 後) では再現せず完走したため「偶発」評価。再発時に分析できるよう、speak_hook に投入 cadence の DEBUG ログを残してある (`iter yield #N` / `None sentinel received` / `POST returned status=N`)
 
-### Phase 2' — 認証・ペアリング UX
+### Phase 2' — 認証・ペアリング UX（**2026-05-19 完了**）
 
-6. **アドオン**: `api_routes.py` でペアリング HTTP API（token 発行、vessel 一覧）
-7. **アドオン**: AddonManager UI にパネル追加（追加・削除・状態表示）
-8. **アドオン**: QR コード生成 + 表示
-9. **アドオン**: `saiverse stackchan flash` CLI サブコマンド実装（esptool 自動書き込み）
-10. **検証**: 新品 Stack-chan → 開封 → SAIVerse UI 経由で書き込み → AP 設定 → 接続完了まで 30 分以内
+6. ✅ **アドオン**: `api_routes.py` でペアリング HTTP API（`POST /pair` / `GET /vessels` / `DELETE /vessels/{id}` + ペアリング時に AddonConfig.master_token / vessel_building_id 自動更新）
+7. ✅ **アドオン**: AddonManager UI にパネル追加（`VesselPairingSection` = Building dropdown + 「スタックチャンを追加」 + token + Gateway URL 表示 + 「解除」 + connected status）
+8. ⏭ **QR コード生成 + 表示** — 省略（device 側に QR スキャナがない、 Phase 6 以降の候補。 当面はテキスト + コピーボタンで代替）
+9. ✅ **UI 経由 esptool flash** — 当初計画の `saiverse stackchan flash` CLI から **UI 経由 SSE 進捗 stream** に変更。 `POST /flash/erase-nvs` (NVS partition のみ erase = AP モード復帰) と `POST /flash/firmware` (merged-binary.bin 書き込み) + `GET /flash/ports` (COM port 自動検出、 ESP32-S3 VID 303A filter) + `GET /flash/firmware-info` (使用 path + mtime + size + source 分類)。 esptool は `shutil.which("esptool")` → fallback で `uvx esptool` (= uv は addon 前提として既に install 済み)
+10. ✅ **検証**: ペアリング解除 → NVS リセット → device の AP モード復帰 → captive portal で再設定 → 再ペアリング → device 自動再接続まで UI 内完結 (実機検証完了、 2026-05-19)
 
-**Phase 4' / Phase 4 からの引き継ぎ事項** (2026-05-14 追記):
+**Phase 2' 中に発見した汎用拡張** (= 本体側 / addon 横断で得た改修):
 
-- 現状、ペアリング情報 (`vessel_manager` の `vessels.db` の `bound_building_id`) と AddonConfig の `vessel_building_id` が **別ストレージで二重管理**になっている。同一の Vessel Building ID を 2 箇所に手動で揃える運用。
-- 二重管理の理由: `mcp_servers.json` の `spell_tools[*].building_ids` が `${addon.saiverse-stackchan-addon.vessel_building_id}` placeholder を参照しており、ここで参照されるのは AddonConfig 側 (= mcp_config の placeholder 解決経路は AddonConfig しか引かない)。ペアリングは別途 `vessel_manager.create_pairing(building_id, ...)` で `vessels.db` に保存される。
-- Phase 2' のペアリング UI でユーザーが Vessel Building を選んだら、**AddonConfig.vessel_building_id も自動で書き換える** 経路を入れること。具体的には `api_routes.py` のペアリング HTTP API ハンドラ内で `vessel_manager.create_pairing()` の後に `saiverse.addon_config.set_param("saiverse-stackchan-addon", "vessel_building_id", building_id)` 相当の処理を追加する。
-- もしくは設計を見直して AddonConfig.vessel_building_id を廃止し、`mcp_servers.json` の placeholder 解決経路 (`tools/mcp_config.py`) に `vessels.db` を直接参照する syntax (例: `${vessel_manager.<addon_name>.bound_building_id}`) を新設する手もある。後者の方が情報源が一本化されて綺麗だが、placeholder 解決層を改修する必要があるので工数は大きい。
-- 設定漏れ時の挙動: AddonConfig.vessel_building_id 未設定だと mcp_config が "missing_config" 判定して stackchan-mcp gateway 起動を拒否するため、**stackchan に紐付く機能 (TTS PCM 経路、物理身体ツール) が全部動かない** (= addon を入れた意味がない状態)。SAIVerse 本体や他 addon の動作には影響しない。Phase 2' のペアリング UI 完成前に新規ユーザーが addon を入れた場合の落とし穴になるので、UI 側に「ペアリング完了するまで AddonConfig.vessel_building_id にダミーでも入れてください」等の注意書きが必要 (= UI 完成と同時に解消される問題なので暫定対応)。
+- **本体 `tools/mcp_client.py` の `reconnect_server` 改修**: ペアリング操作で AddonConfig を内部更新しても、 既起動の MCP subprocess は古い env で動き続ける問題を解消。 `reconnect_server` 内で **source `mcp_servers.json` を再 load → `_interpolate_value` で AddonConfig 最新値で再 interpolate → `_server_meta["raw_config"]` を上書き → connection.config を resolve → disconnect/connect** の流れを実装。 注意: `_server_meta["raw_config"]` は起動時に解決済みなので、 そのまま再 resolve すると no-op (= source JSON 再 load が必須)。 他 addon が AddonConfig を rotate するシナリオ全般で活きる
+- **本体 `AddonManagerModal.tsx` + `sync-addon-panels.mjs` の `AddonPanelProps.onConfigChanged` 追加**: addon panel が内部的に AddonConfig を書き換えた時、 親 (AddonManagerModal) に通知して `/api/addon/` を再 fetch → `ParamsSection` の表示を最新値で再描画する経路。 `ParamsSection` 側にも `useEffect([addon.params])` で globalParams state の追従を追加。 他 addon (OAuth token 自動更新等) でも汎用に使える
+- **アドオン `api_routes.py` の `_firmware_resolve_path()` 3 段階 fallback**: AddonConfig.firmware_path → `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin` (= 開発者ローカルビルド) → `~/.saiverse/addons/saiverse-stackchan-addon/firmware/merged-binary.bin` (= 一般ユーザー DL 配置)。 GPL-3.0 firmware を addon に複製しない方針 (= §不変条件 8) と整合
+- **アドオン `PairResponse.gateway_ws_url`**: device に提示する Gateway URL を backend で AddonConfig (`vision_host` + `gateway_ws_port`) から組み立てて返す。 UI は表示するだけ (= port hardcode の不整合を回避)
+
+**解決済み 引き継ぎ事項** (Phase 1'/Phase 4 からの繰越):
+
+- ✅ **vessels.db と AddonConfig.vessel_building_id の二重管理**: Phase 2' のペアリング API (`POST /pair`) ハンドラ内で `_update_addon_config_after_pair()` を呼び、 `vessel_manager.create_pairing()` の直後に AddonConfig.master_token / vessel_building_id を自動書き換え。 二重管理は維持されるが、 UI 操作時の自動同期で実用上は単一情報源として機能する。 placeholder 解決層 (= `tools/mcp_config.py`) への改修は不要だった
+- 暫定対応として書いた「ペアリング完了前は AddonConfig.vessel_building_id にダミー値」 の UI 注意書きも不要に
 
 ### Phase 3' — 音声入力経路（Gemini inline 認識）
 
@@ -1177,3 +1181,39 @@ Phase 3' の音声入力経路を **stackchan-mcp gateway 内部 Whisper STT 経
 **追加するアドオン実装**:
 
 - `audio_input_relay.py` 新規（旧設計の `stt_relay.py` から命名変更、STT を経由しないため）
+
+### v0.7 → v0.8 で確定（Phase 2' 完了、2026-05-19）
+
+Phase 2' (= 認証・ペアリング UX) を実機検証込みで完走。 当初の想定 (= 5 step) から実装範囲が拡大して **計 6 step + 本体 2 箇所改修 + addon 大幅拡張** で完了。 詳細は §「スコープ」 §Phase 2' の完了マーク + 「Phase 2' 中に発見した汎用拡張」 節を参照。
+
+**完了した step (アドオン側)**:
+
+- **Step 1** ペアリング HTTP API (`POST /pair` / `GET /vessels` / `DELETE /vessels/{id}` + AddonConfig 自動更新)
+- **Step 2** UI パネル `VesselPairingSection` (Building dropdown + token 表示 + コピーボタン + 解除ボタン + connected status)
+- **Step 4** UI 経由 esptool flash (NVS erase + firmware 書き込み + SSE 進捗 + COM port 検出 + firmware path 解決)
+- **Step 6** AddonPanelProps の `onConfigChanged` 統合 (ペアリング後に親 AddonManagerModal が再 fetch)
+
+**完了した本体改修**:
+
+- **Step 5** `tools/mcp_client.py` の `reconnect_server`: source JSON 再 load + AddonConfig 最新値で再 interpolate → connection.config 更新 → subprocess 再起動。 他 addon が AddonConfig を rotate するシナリオ全般で活きる汎用改修
+- **Step 6** `frontend/src/components/AddonManagerModal.tsx` + `frontend/scripts/sync-addon-panels.mjs`: `AddonPanelProps.onConfigChanged?` 追加 + `ParamsSection` の `useEffect([addon.params])` 追従 + `refetchAddons` callback 経路。 他 addon (OAuth token 更新等) でも汎用に使える
+
+**設計判断の固定 (v0.8 で確定)**:
+
+- **GPL-3.0 firmware を addon に複製しない**: stackchan-mcp の ESP-IDF build 成果物 (= `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin`) を path 参照で使う、 addon storage には複製しない。 §I-1 で想定されていた `~/.saiverse/addons/.../firmware/` への配置経路は一般ユーザー向け fallback として残す
+- **`reconnect_server` の env 再 interpolate は source JSON 再 load が必須**: `_server_meta["raw_config"]` は起動時に解決済みの dict (= `${addon.X.Y}` マーカーは消えてる)、 そのまま `resolve_config_placeholders` を再呼び出ししても no-op。 source JSON から生 cfg を読み直して `_interpolate_value` を新たに走らせる
+- **Phase 1' single vessel 前提を維持**: `POST /pair` で既存 vessel があれば 409 を返す。 multi-token validation は upstream PR 待ち
+- **delete vessel で AddonConfig をクリアしない**: 再ペアリング時に上書きされる、 削除直後の入力欄が空になると UX 不便
+- **NVS partition のみ erase で AP モード復帰**: `esptool erase-region 0x9000 0x4000` (= partitions/v2/16m.csv) で firmware 保持のまま再設定 UI に戻れる。 stackchan board に SystemReset が組み込まれてないため、 物理ボタン長押し等の AP 復帰トリガは無く esptool 経由が唯一の手段
+
+**v0.8 で別 Phase に移送/省略した item**:
+
+- **Step 3** (= 自前 flash + UI ペアリング検証) は Step 4 (= UI 経由 esptool flash) の完成で UI 内完結する形に統合、 個別 step としては撤回
+- **Step 8 (intent doc 更新) / Step 9 (Wi-Fi 入力 1 回目失敗バグ調査)** は Phase 2' 後の引き継ぎ項目として継続
+- **QR コード生成 + 表示**: device 側に QR スキャナがない (= xiaozhi-esp32 / stackchan board firmware 標準には未実装) ため省略。 Phase 6 以降の候補。 当面はテキスト + 「コピー」 ボタンで代替
+- **`saiverse stackchan flash` CLI サブコマンド**: UI 経由 SSE 進捗 stream に統合 (= ターミナルを開かない UX が優先、 まはー判断 2026-05-19)
+
+**Phase 2' の運用上の罠 (= Phase 3' 着手前に把握しておく)**:
+
+- **ペアリング解除後の再ペアリング**: addon UI で「解除」 ボタンを押すだけでは device 側 NVS の古い token が残るため、 device は古い token で接続を試みて 401 reject になる。 解除後に **必ず NVS erase (= addon UI の「NVS リセット」 ボタン)** を実行して device を AP モードに戻す、 captive portal で新 token を入力する流れが正規 UX
+- **Wi-Fi 入力 1 回目失敗**: 実機検証中に発見、 stackchan-mcp ファーム (= xiaozhi-esp32 base) の captive portal で Wi-Fi SSID/Password を入力すると 1 回目は必ず失敗、 同値で 2 回目入力で通る挙動。 Step 9 で調査予定 (= 直せるなら upstream PR 候補)
