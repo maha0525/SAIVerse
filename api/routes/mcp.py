@@ -8,9 +8,11 @@ the existing reconnect-by-name.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -114,3 +116,73 @@ async def retry_failed_instance(
         }
     manager._clear_failure(instance_key)
     return {"success": True, "instance_key": instance_key}
+
+
+class ToolCallRequest(BaseModel):
+    server: str
+    tool_name: str
+    arguments: Dict[str, Any] = {}
+    persona_id: Optional[str] = None
+
+
+@router.post("/tool-call")
+async def call_mcp_tool(body: ToolCallRequest) -> Dict[str, Any]:
+    """Invoke an MCP tool directly (admin / debug).
+
+    Bypasses the persona-spell pipeline: looks up the running MCP server
+    instance by qualified server name, forwards the tool call, and returns
+    the raw result (parsed as JSON when the server returns a JSON string,
+    otherwise the string as-is).
+
+    Use for verifying tools that are not exposed as spells (e.g.
+    ``visible: false`` admin / diagnostic tools like
+    ``stackchan / gpio_test``, ``stackchan / self.i2c.scan``) without
+    routing through a persona.
+
+    Body:
+        server: qualified MCP server name (e.g. ``stackchan``).
+        tool_name: MCP tool name as registered by the server
+            (e.g. ``self.i2c.scan``).
+        arguments: tool argument object. Default: ``{}``.
+        persona_id: required only for ``per_persona``-scope servers;
+            omit for global-scope servers.
+
+    Response (success):
+        ``{"ok": true, "result": <parsed JSON or string>}``
+    Response (failure):
+        ``{"ok": false, "error": "..."}``
+    """
+    from tools.mcp_client import (
+        _make_instance_key,
+        get_mcp_manager,
+        run_on_mcp_loop,
+    )
+
+    manager = get_mcp_manager()
+    if manager is None:
+        return {"ok": False, "error": "MCP is not initialized"}
+
+    instance_key = _make_instance_key(body.server, body.persona_id)
+    connection = manager._connections.get(instance_key)
+    if connection is None:
+        return {
+            "ok": False,
+            "error": (
+                f"No active MCP server '{body.server}' "
+                f"(instance_key={instance_key}). "
+                f"Use GET /api/mcp/servers to list available instances."
+            ),
+        }
+
+    try:
+        raw = await run_on_mcp_loop(connection.call_tool(body.tool_name, body.arguments))
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    # MCP responses are strings; try to surface as JSON when possible so
+    # downstream curl / scripts get structured fields directly.
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return {"ok": True, "result": parsed}
+    except (json.JSONDecodeError, TypeError):
+        return {"ok": True, "result": raw}
