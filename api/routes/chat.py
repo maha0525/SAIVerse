@@ -99,11 +99,14 @@ def get_chat_history(
         return {"history": [], "has_more": False, "quarantined": True}
 
     raw_history = manager.get_building_history(current_bid)
-    
-    # Filter out non-displayable messages before pagination to ensure consistent counts
+
+    # Filter out empty messages but KEEP note-box host events (移動 / item pickup
+    # 等)。 intent §D-2: 「移動が乱発しなくなる新ルール (= C-1 閲覧モード) の
+    # 下では、 移動メッセージはノイズではなく時系列の意味ある情報になる」
+    # 控えめなスタイル (globals.css の .note-box) で会話メッセージと区別される。
     raw_history = [
         msg for msg in raw_history
-        if msg.get("content") and '<div class="note-box"' not in str(msg.get("content", ""))
+        if msg.get("content")
     ]
 
     logging.debug("[CHAT_HISTORY] Found history items (after filter): %d", len(raw_history))

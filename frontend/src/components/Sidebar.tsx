@@ -29,9 +29,13 @@ interface SidebarProps {
     onOpen: () => void;
     onClose: () => void;
     refreshTrigger?: boolean;
+    // C-1 閲覧モード: UI 上で閲覧中の building (= page.tsx の currentBuildingId)。
+    // status.current_building_id (= サーバの真の現在地) と分離して active hilight
+    // に使う。 両者が乖離している時が「閲覧モード」 (= 別建物を覗いている状態)。
+    viewingBuildingId?: string | null;
 }
 
-export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger }: SidebarProps) {
+export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger, viewingBuildingId }: SidebarProps) {
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [cityId, setCityId] = useState<number | null>(null);
@@ -155,43 +159,20 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
         };
     }, [onOpen]);
 
-    const handleMove = async (buildingId: string) => {
-        if (!status || status.current_building_id === buildingId) return;
-
-        try {
-            const res = await fetch('/api/user/move', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    target_building_id: buildingId,
-                    // B-1 CAS: クライアントが思っている現在地をサーバに伝える。
-                    // サーバ側が別の現在地を持っていれば 409 で返してくる。
-                    expected_from_building_id: status.current_building_id,
-                }),
-            });
-            if (res.status === 409) {
-                // CAS conflict: 他クライアントが先に動かしていた。
-                // ユーザーに知らせ、 status を再取得して UI を真の現在地に合わせる。
-                let conflictMsg = '他のクライアントが先に移動したため、 この移動は受け付けられませんでした。 最新状態に同期します。';
-                try {
-                    const data = await res.json();
-                    if (data?.detail?.message) conflictMsg = data.detail.message;
-                } catch { /* ignore JSON parse */ }
-                alert(conflictMsg);
-                refreshData();
-                return;
-            }
-            if (res.ok) {
-                const data = await res.json();
-                if (data.success) {
-                    refreshData();
-                    if (onMove) onMove(buildingId);
-                    onClose(); // Close sidebar on nav
-                }
-            }
-        } catch (err) {
-            console.error("Move error", err);
+    const handleMove = (buildingId: string) => {
+        // C-1 閲覧モード: サイドバーで建物をクリックしても /api/user/move は
+        // 呼ばない。 サーバ側の CURRENT_BUILDINGID は据え置きのまま、 UI 上の
+        // ビュー (= history / occupants / chat 表示) だけ切り替える。 実際の
+        // 入室は発言時に /api/chat/utter が atomic に行う (= C-2)。
+        // See: docs/intent/building_memory_unified.md §C
+        if (!status || status.current_building_id === buildingId) {
+            // 同じ建物のクリックは noop だが、 onClose で sidebar 自体は閉じる
+            if (onMove) onMove(buildingId);
+            onClose();
+            return;
         }
+        if (onMove) onMove(buildingId);
+        onClose();
     };
 
     const handleCreateBuilding = async () => {
@@ -335,7 +316,10 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                         return (
                             <div
                                 key={b.id}
-                                className={`${styles.buildingItem} ${status?.current_building_id === b.id ? styles.active : ''}`}
+                                // active hilight は 「閲覧中の building」 (= viewing)。
+                                // 「サーバ上の真の現在地」 は別途 D-1 マーカー (User
+                                // アイコン) で示す。 両者は閲覧モード中に乖離する。
+                                className={`${styles.buildingItem} ${(viewingBuildingId ?? status?.current_building_id) === b.id ? styles.active : ''}`}
                                 onClick={() => isQuarantined ? null : handleMove(b.id)}
                                 style={isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
                                 title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
@@ -344,6 +328,10 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                 {isQuarantined && (
                                     <AlertTriangle size={14} style={{ color: '#ff6666' }} />
                                 )}
+                                {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
+                                    閲覧モード中 (= viewing != server-current) は
+                                    active hilight と乖離して、 「自分は今そこではなく
+                                    別の場所に居る」 が一瞥で分かる。 */}
                                 {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
                             </div>
                         );

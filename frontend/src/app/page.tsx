@@ -425,6 +425,11 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+    // C-1 閲覧モード: currentBuildingId は 「UI 上で閲覧中の building」 になり、
+    // 「サーバ上の真の現在地」 とは乖離しうる (= サイドバークリックで viewing を
+    // 切り替えても、 サーバの CURRENT_BUILDINGID は発言時の /chat/utter まで
+    // 変わらない)。 expected_from CAS 用に server-side の現在地を ref で保持する。
+    const serverCurrentBuildingIdRef = useRef<string | null>(null);
     // City Map: 街全体をシンボルマップで俯瞰するモーダル。展示用にデフォルト ON で起動。
     const [isMapModalOpen, setIsMapModalOpen] = useState<boolean>(true);
 
@@ -866,6 +871,7 @@ export default function Home() {
                 if (data?.current_building_id) {
                     setCurrentBuildingId(data.current_building_id);
                     currentBuildingIdRef.current = data.current_building_id;
+                    serverCurrentBuildingIdRef.current = data.current_building_id;
                 }
                 if (data?.display_name) userDisplayNameRef.current = data.display_name;
                 if (data?.avatar) userAvatarRef.current = data.avatar;
@@ -1394,12 +1400,19 @@ export default function Home() {
         const clientMessageId = crypto.randomUUID();
 
         try {
-            const res = await fetch('/api/chat/send', {
+            // C-2: /chat/utter は発言契機入室。 target_building_id (= UI 上で
+            // 表示中の建物) がサーバの真の現在地と異なれば、 backend が atomic
+            // に move を実行してから発言処理に入る。 同建物発言なら move skip。
+            const res = await fetch('/api/chat/utter', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: userMsg.content,
-                    building_id: currentBuildingIdRef.current || undefined,
+                    target_building_id: currentBuildingIdRef.current,
+                    // B-1 CAS: クライアントが認識しているサーバの真の現在地。
+                    // サーバ側と一致しなければ 409 で他クライアントの先行 move
+                    // を検出できる。
+                    expected_from_building_id: serverCurrentBuildingIdRef.current,
                     attachments: currentAttachments.length > 0 ? currentAttachments.map(a => (
                         a.type === 'video' && a.uri
                             ? { uri: a.uri, filename: a.name, type: a.type, mime_type: a.mimeType }
@@ -1412,6 +1425,35 @@ export default function Home() {
                 })
             });
 
+            if (res.status === 409) {
+                // CAS conflict (= B-1): 他クライアントが先に動いていた。
+                // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
+                // を真の現在地に同期する。 メッセージ自体は再送が必要。
+                let conflictMsg = '他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。';
+                try {
+                    const data = await res.json();
+                    if (data?.detail?.message) conflictMsg = data.detail.message;
+                    if (data?.detail?.current_building_id) {
+                        serverCurrentBuildingIdRef.current = data.detail.current_building_id;
+                    }
+                } catch { /* ignore JSON parse */ }
+                alert(conflictMsg);
+                // status を再取得して UI と整合させる
+                try {
+                    const statusRes = await fetch('/api/user/status');
+                    if (statusRes.ok) {
+                        const statusData = await statusRes.json();
+                        if (statusData?.current_building_id) {
+                            serverCurrentBuildingIdRef.current = statusData.current_building_id;
+                        }
+                    }
+                } catch (statusErr) {
+                    console.error('Failed to refetch status after CAS conflict', statusErr);
+                }
+                setLoadingStatus(null);
+                return;
+            }
+
             if (!res.ok) {
                 let errorDetails = `Status: ${res.status} ${res.statusText}`;
                 try {
@@ -1420,6 +1462,12 @@ export default function Home() {
                 } catch (e) { console.error('Failed to read error response body:', e); }
                 throw new Error(`Failed to send message. ${errorDetails}`);
             }
+
+            // 楽観的更新: utter が成功した時点で、 サーバ側の真の現在地は
+            // target_building_id に移動済 (= utter が atomic に auto-move
+            // した)。 次回発言時の expected_from が古い値だと 409 になるので
+            // ここで先に同期しておく。
+            serverCurrentBuildingIdRef.current = currentBuildingIdRef.current;
 
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
@@ -2040,8 +2088,12 @@ export default function Home() {
             <SystemAlertBanner />
             <Sidebar
                 refreshTrigger={backendConnected}
+                viewingBuildingId={currentBuildingId}
                 onMove={(buildingId?: string) => {
                     if (!buildingId) return;
+                    // C-1 閲覧モード: サーバ側の CURRENT_BUILDINGID は変えず、
+                    // UI 上の表示建物だけ切り替える。 サーバへの move は
+                    // 発言時に /chat/utter が atomic に行う (= C-2)。
                     setCurrentBuildingId(buildingId);
                     currentBuildingIdRef.current = buildingId;
                     setMessages([]);
