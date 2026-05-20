@@ -125,6 +125,9 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     # しか引けず INDEX が貼れないため、専用カラム化。バックフィルは下記
     # _backfill_messages_pulse_id でタグから pulse_id を一回限り抽出する。
     _ensure_column(conn, "messages", "pulse_id", "TEXT")
+    # thought_signature: Gemini 3.x の thoughtSignature を保持してマルチターン
+    # 会話で品質低下を防ぐ。詳細は docs/intent/thought_signature_persistence.md
+    _ensure_column(conn, "messages", "thought_signature", "TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_track_line "
         "ON messages(origin_track_id, line_role, line_id)"
@@ -316,6 +319,10 @@ class Message:
     pulse_id: Optional[str] = None
     # v0.32 (2026-05-09): Track Chronicle / ユーザー会話 Track 親保持機構で利用。
     origin_track_id: Optional[str] = None
+    # 2026-05-20: Gemini 3.x の thoughtSignature (opaque な思考連続性トークン)。
+    # マルチターン会話で次ターンに echo して品質低下を防ぐ。
+    # 詳細は docs/intent/thought_signature_persistence.md
+    thought_signature: Optional[str] = None
 
 
 def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
@@ -338,7 +345,7 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
 # Column suffix for SELECTs that want line metadata. Append after the 7 base
 # columns (id, thread_id, role, content, resource_id, created_at, metadata).
 # v0.32 (2026-05-09): origin_track_id を末尾に追加。
-_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id"
+_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature"
 
 
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
@@ -355,6 +362,7 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
         scope=row[9] if len(row) > 9 else None,
         pulse_id=row[10] if len(row) > 10 else None,
         origin_track_id=row[11] if len(row) > 11 else None,
+        thought_signature=row[12] if len(row) > 12 else None,
     )
 
 
@@ -373,6 +381,7 @@ def add_message(
     scope: Optional[str] = None,
     paired_action_text: Optional[str] = None,
     pulse_id: Optional[str] = None,
+    thought_signature: Optional[str] = None,
 ) -> str:
     """Insert a message row.
 
@@ -397,18 +406,18 @@ def add_message(
     if scope is None:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, paired_action_text, pulse_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
-             origin_track_id, line_role, line_id, paired_action_text, pulse_id),
+             origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature),
         )
     else:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
-             origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id),
+             origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature),
         )
     conn.commit()
     return mid

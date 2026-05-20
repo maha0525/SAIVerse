@@ -842,7 +842,17 @@ class GeminiClient(LLMClient):
             # === Final assembly: text first, then media parts ===
             final_parts: List[types.Part] = []
             if text_content:
-                final_parts.append(types.Part(text=text_content))
+                text_part = types.Part(text=text_content)
+                # 2026-05-20: assistant role の text-only message に thought_signature
+                # があれば最初の text Part に乗せて echo する (Gemini 3.x 公式仕様:
+                # 最初のパートまたは function_call パートに付与)。tool_calls 経路は
+                # 上記 line 682-684 で別途 echo 済み。
+                # 詳細は docs/intent/thought_signature_persistence.md
+                if g_role == "model":
+                    _msg_thought_sig = message.get("thought_signature")
+                    if _msg_thought_sig:
+                        text_part.thought_signature = _msg_thought_sig
+                final_parts.append(text_part)
             final_parts.extend(media_parts)
             if not final_parts:
                 final_parts.append(types.Part(text=""))
@@ -917,6 +927,8 @@ class GeminiClient(LLMClient):
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
+        # 2026-05-20: 前回呼び出しの signature 残りを必ずクリア (retry や次ターン汚染防止)
+        self._store_thought_signature(None)
 
         active_client = self.client
         sys_msg, contents = self._convert_messages(messages)
@@ -1110,8 +1122,11 @@ class GeminiClient(LLMClient):
                             [a for a in dir(part) if not a.startswith("_")]
                         )
 
-                    text, reasoning_entries = self._separate_parts(all_parts)
+                    text, reasoning_entries, text_thought_sig = self._separate_parts(all_parts)
                     self._store_reasoning(reasoning_entries)
+                    # 2026-05-20: text part の thought_signature を保持。
+                    # 次ターンで echo するために SEA runtime が consume する。
+                    self._store_thought_signature(text_thought_sig)
 
                     if response_schema:
                         logging.info("[gemini] Structured output: text=%r, len=%d", text if text else "(empty)", len(text))
@@ -1215,6 +1230,10 @@ class GeminiClient(LLMClient):
                 function_call_part = None
 
                 _sync_thought_sig: Optional[str] = None
+                # 2026-05-20: text part (function_call 以外) の thought_signature。
+                # 公式 doc は text 空でも signature だけ乗るケースを認めるため、
+                # text の有無に関わらず最後の非 None 値を採用する。
+                _text_thought_sig: Optional[str] = None
                 for part in candidate.content.parts:
                     part_fcall = getattr(part, "function_call", None)
                     if part_fcall:
@@ -1223,8 +1242,13 @@ class GeminiClient(LLMClient):
                         if _ts:
                             _sync_thought_sig = _ts
                         continue
-                    
+
                     is_thought = is_truthy_flag(getattr(part, "thought", None))
+                    # thought=True (思考ブロック) 以外の text part から signature を取得。
+                    if not is_thought:
+                        _ts_text = getattr(part, "thought_signature", None)
+                        if _ts_text:
+                            _text_thought_sig = _ts_text
                     part_text = getattr(part, "text", None)
                     if not part_text:
                         continue
@@ -1299,8 +1323,16 @@ class GeminiClient(LLMClient):
                     )
                     continue
 
+                # 2026-05-20: text-only 応答の thought_signature を保持。
+                # 次ターンで Gemini に echo するため SEA runtime が consume する。
+                # tool_call 経路と一貫させて result dict にも乗せる (SEA runtime は
+                # result.get("thought_signature") で取得して state に保存する)。
+                self._store_thought_signature(_text_thought_sig)
                 logging.info("[gemini] Returning text response")
-                return {"type": "text", "content": text}
+                _text_result: Dict[str, Any] = {"type": "text", "content": text}
+                if _text_thought_sig:
+                    _text_result["thought_signature"] = _text_thought_sig
+                return _text_result
 
             except EmptyResponseError as e:
                 logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_retries, e)
@@ -1367,14 +1399,28 @@ class GeminiClient(LLMClient):
             user_message="何度も空の応答が返されました。しばらく待ってから再度お試しください。"
         )
 
-    def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
+    def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]], Optional[str]]:
+        """Separate text / reasoning / thought_signature from response parts.
+
+        2026-05-20: 戻り値に thought_signature を追加。Gemini 公式 doc は
+        「最終チャンクの空 text part に signature だけ乗る」ケースを認めるため、
+        text が空でも signature だけ抽出する。複数現れた場合は最後の非 None 値を採用。
+        詳細は docs/intent/thought_signature_persistence.md
+        """
         reasoning_entries: List[Dict[str, str]] = []
         text_segments: List[str] = []
+        latest_signature: Optional[str] = None
         counter = 1
         for part in parts or []:
             if part is None:
                 continue
             is_thought = is_truthy_flag(getattr(part, "thought", None))
+            # thought=True (= 思考ブロック) の part に signature が乗っていても、
+            # ペルソナの発話用ではないため text part 由来のみを採用する。
+            if not is_thought:
+                sig = getattr(part, "thought_signature", None)
+                if sig:
+                    latest_signature = sig
             text = getattr(part, "text", None)
             if not text:
                 continue
@@ -1383,7 +1429,7 @@ class GeminiClient(LLMClient):
                 counter += 1
             else:
                 text_segments.append(text)
-        return "".join(text_segments), reasoning_entries
+        return "".join(text_segments), reasoning_entries, latest_signature
 
     def generate_stream(
         self,
@@ -1412,6 +1458,8 @@ class GeminiClient(LLMClient):
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
+        # 2026-05-20: 前回呼び出しの signature 残りを必ずクリア (retry や次ターン汚染防止)
+        self._store_thought_signature(None)
         reasoning_chunks: List[str] = []
 
         # Clear any leftover SSE error from a previous call on this thread
@@ -1460,6 +1508,9 @@ class GeminiClient(LLMClient):
 
         fcall: Optional[types.FunctionCall] = None
         fcall_thought_signature: Optional[str] = None
+        # 2026-05-20: text part (function_call 以外) の thought_signature。
+        # ストリームに複数現れた場合は最後の非 None 値を採用。
+        text_thought_signature: Optional[str] = None
         prefix_yielded = False
         seen_stream_texts: Dict[int, str] = {}
         thought_seen: Dict[int, str] = {}
@@ -1541,6 +1592,13 @@ class GeminiClient(LLMClient):
                                 reasoning_chunks.append(text_val)
                                 thought_seen[candidate_index] = previous + text_val
                                 yield {"type": "thinking", "content": text_val}
+                    else:
+                        # 2026-05-20: text part (function_call なし thought なし) の signature 取得。
+                        # 公式 doc は「最終チャンクの空 text part に signature だけ乗る」
+                        # ケースを認めるため、text の有無に関わらず取得する。
+                        _ts_text = getattr(part, "thought_signature", None)
+                        if _ts_text:
+                            text_thought_signature = _ts_text
 
                 combined_text = "".join(
                     getattr(part, "text", None) or ""
@@ -1632,6 +1690,14 @@ class GeminiClient(LLMClient):
 
         # Store reasoning
         self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+        # 2026-05-20: text part の thought_signature を保持。tool_call 経由の
+        # signature は _td_base 経由で SEA runtime に伝わるため、ここでは text 用のみ。
+        # 後段の "if fcall is not None" 分岐内で None に上書きする (function_call
+        # detected 時は text 用 signature を保存しない方針)。
+        if fcall is None:
+            self._store_thought_signature(text_thought_signature)
+        else:
+            self._store_thought_signature(None)
 
         # Store tool detection result if function call was detected
         if fcall is not None:

@@ -44,6 +44,11 @@ class LLMClient:
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
         self._latest_usage: Optional[UsageInfo] = None
+        # 2026-05-20: Gemini 3.x の thoughtSignature (opaque な思考連続性トークン)。
+        # Gemini クライアントが応答解析時に格納し、SEA runtime が次ターン送信用に
+        # 取り出す。他 Provider は None のまま。
+        # 詳細は docs/intent/thought_signature_persistence.md
+        self._latest_thought_signature: Optional[str] = None
         self.supports_images = supports_images
         self.supports_audio = supports_audio
         self.supports_video = supports_video
@@ -153,6 +158,20 @@ class LLMClient:
         details = self._latest_reasoning_details
         self._latest_reasoning_details = None
         return details
+
+    def _store_thought_signature(self, value: Optional[str]) -> None:
+        """Store the thought signature from the latest response.
+
+        Currently used only by GeminiClient (Gemini 3.x). Other providers
+        leave this as None. See docs/intent/thought_signature_persistence.md
+        """
+        self._latest_thought_signature = value
+
+    def consume_thought_signature(self) -> Optional[str]:
+        """Retrieve and clear the latest thought signature."""
+        value = self._latest_thought_signature
+        self._latest_thought_signature = None
+        return value
 
     def _store_tool_detection(self, result: Dict[str, Any] | None) -> None:
         """Store tool detection result for later retrieval."""

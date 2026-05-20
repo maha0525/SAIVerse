@@ -1086,6 +1086,10 @@ class SAIMemoryAdapter:
         # v0.32 (2026-05-09): Track Chronicle / ユーザー会話 Track 親保持機構で利用。
         if getattr(msg, "origin_track_id", None) is not None:
             payload["origin_track_id"] = msg.origin_track_id
+        # 2026-05-20: Gemini 3.x の thoughtSignature をターン跨ぎで送り返すため、
+        # payload に乗せて LLM client (gemini.py) で復元する。
+        if getattr(msg, "thought_signature", None) is not None:
+            payload["thought_signature"] = msg.thought_signature
         return payload
 
     def _active_persona_suffix(self) -> Optional[str]:
@@ -1813,6 +1817,9 @@ class SAIMemoryAdapter:
             # Phase 2.5: pulse_id 専用カラム (旧 metadata.tags の "pulse:{uuid}" を置換)。
             # _store_memory が message dict にセットする。タグも当面併存。
             pulse_id_val = message.get("pulse_id")
+            # 2026-05-20: Gemini 3.x の thoughtSignature をターン跨ぎで保持する。
+            # 詳細は docs/intent/thought_signature_persistence.md
+            thought_signature = message.get("thought_signature")
             embedding_chunks = message.get("embedding_chunks")
             skip_embedding = False
             if embedding_chunks is not None:
@@ -1842,6 +1849,7 @@ class SAIMemoryAdapter:
                     scope=scope,
                     paired_action_text=paired_action_text,
                     pulse_id=pulse_id_val,
+                    thought_signature=thought_signature,
                 )
                 if (not skip_embedding) and content and content.strip() and self.embedder is not None:
                     chunks = chunk_text(

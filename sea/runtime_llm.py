@@ -2028,6 +2028,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         state["has_speak_content"] = True
 
                     text = result["content"]
+                    # 2026-05-20: Gemini 3.x の thoughtSignature を state に保存。
+                    # _assistant_msg 構築時に message トップレベルにセットされ、
+                    # SAIMemory permanence layer 経由で次ターンへ echo される。
+                    # 詳細は docs/intent/thought_signature_persistence.md
+                    state["_last_thought_signature"] = result.get("thought_signature")
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
             else:
@@ -2216,6 +2221,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         e.get("text", "") for e in reasoning_entries if e.get("text")
                     ) if reasoning_entries else ""
                     reasoning_details = llm_client.consume_reasoning_details()
+
+                    # 2026-05-20: Gemini 3.x の thoughtSignature を stream 完了後に保持。
+                    # ストリーム経路は最後の chunk まで読まないと signature が確定しない
+                    # ため、_consume_pipeline_stream の後で consume する。
+                    # 詳細は docs/intent/thought_signature_persistence.md
+                    state["_last_thought_signature"] = llm_client.consume_thought_signature()
 
                     # ── Spell loop (parallel execution per round) ──
                     # Pipeline Streaming で sub-speak が音声合成のウォームアップを
@@ -2734,7 +2745,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
                        state["_last_tool_call_id"], state.get("_last_tool_name"))
         else:
-            state["_messages"] = messages + [{"role": "assistant", "content": _msg_content}]
+            # 2026-05-20: text-only assistant message に thought_signature を乗せる。
+            # SAIMemory adapter._append_message が message.get("thought_signature")
+            # を読み取り、専用カラムへ永続化する。
+            _text_assistant_msg: Dict[str, Any] = {"role": "assistant", "content": _msg_content}
+            _text_thought_sig = state.get("_last_thought_signature")
+            if _text_thought_sig:
+                _text_assistant_msg["thought_signature"] = _text_thought_sig
+            state["_messages"] = messages + [_text_assistant_msg]
 
         # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
         _pulse_ctx = state.get("_pulse_context")
