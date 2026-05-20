@@ -900,6 +900,88 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---- Utter: 発言契機入室 (C-2) ----
+
+class UtterRequest(BaseModel):
+    """発言契機入室エンドポイント /chat/utter のリクエスト。
+
+    発言と入室を 1 トランザクションで扱う。 target_building_id がサーバ側の
+    current_building_id と異なれば、 まず move を実行してから通常の chat 経路
+    (= send_message 内部処理) に流す。 「閲覧モードから別建物へ発言したら
+    自動入室」 という UX を backend 側で保証する。
+
+    See: docs/intent/building_memory_unified.md §C-2
+    """
+    message: str
+    target_building_id: str  # 発言先 (= 必須、 現在地と違えば自動 move する)
+    # B-1 CAS: クライアントが知っている現在地。 サーバの current_building_id と
+    # 一致しなければ 409 (他クライアントが先に移動済み)。 後方互換のため Optional。
+    expected_from_building_id: Optional[str] = None
+    attachment: Optional[str] = None
+    attachments: Optional[List[AttachmentData]] = None
+    meta_playbook: Optional[str] = None
+    args: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    pre_spells: Optional[List[str]] = None
+    client_message_id: Optional[str] = None  # B-2 idempotency
+
+
+@router.post("/utter")
+def utter_message(req: UtterRequest, manager = Depends(get_manager)):
+    """発言契機入室。 必要なら自動 move を伴って chat を実行する。"""
+    current_bid = manager.state.user_current_building_id
+
+    # 1. 必要なら自動 move (atomic leave + enter)
+    if current_bid != req.target_building_id:
+        # B-1 CAS: クライアントが思っている現在地とサーバが違うなら 409
+        if (
+            req.expected_from_building_id is not None
+            and req.expected_from_building_id != current_bid
+        ):
+            logging.info(
+                "[USER_UTTER] CAS conflict: expected_from=%s server_current=%s — refusing",
+                req.expected_from_building_id, current_bid,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "cas_conflict",
+                    "message": "他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。",
+                    "current_building_id": current_bid,
+                },
+            )
+
+        # auto-move
+        logging.info(
+            "[USER_UTTER] Auto-move %s -> %s before utter",
+            current_bid, req.target_building_id,
+        )
+        success, msg = manager.move_user(req.target_building_id)
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "move_failed",
+                    "message": f"発言先への移動に失敗: {msg}",
+                    "current_building_id": manager.state.user_current_building_id,
+                },
+            )
+
+    # 2. 通常の chat 処理に委譲 (= send_message 関数を直接呼ぶ)
+    send_req = SendMessageRequest(
+        message=req.message,
+        building_id=req.target_building_id,
+        attachment=req.attachment,
+        attachments=req.attachments,
+        meta_playbook=req.meta_playbook,
+        args=req.args,
+        metadata=req.metadata,
+        pre_spells=req.pre_spells,
+        client_message_id=req.client_message_id,
+    )
+    return send_message(send_req, manager)
+
+
 # ---- Context Preview ----
 
 class PreviewRequest(BaseModel):
