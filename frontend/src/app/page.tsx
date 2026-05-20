@@ -1459,6 +1459,9 @@ export default function Home() {
             // した)。 次回発言時の expected_from が古い値だと 409 になるので
             // ここで先に同期しておく。
             serverCurrentBuildingIdRef.current = currentBuildingIdRef.current;
+            // Sidebar / RightSidebar の status / details を再 fetch させて
+            // D-1 マーカーや滞在ユーザー表示をサーバの新しい現在地に追従させる。
+            setMoveTrigger(prev => prev + 1);
 
             if (!res.body) throw new Error("No response body");
             const reader = res.body.getReader();
@@ -2080,6 +2083,7 @@ export default function Home() {
             <Sidebar
                 refreshTrigger={backendConnected}
                 viewingBuildingId={currentBuildingId}
+                serverMoveTrigger={moveTrigger}
                 onMove={(buildingId?: string) => {
                     if (!buildingId) return;
                     // C-1 閲覧モード: サーバ側の CURRENT_BUILDINGID は変えず、

@@ -33,9 +33,13 @@ interface SidebarProps {
     // status.current_building_id (= サーバの真の現在地) と分離して active hilight
     // に使う。 両者が乖離している時が「閲覧モード」 (= 別建物を覗いている状態)。
     viewingBuildingId?: string | null;
+    // サーバ側 CURRENT_BUILDINGID が変わったタイミングを通知するトリガー。
+    // /chat/utter の auto-move 成功時に page.tsx から increment される。
+    // 受け取った Sidebar は status を再 fetch して D-1 マーカー位置を更新する。
+    serverMoveTrigger?: number;
 }
 
-export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger, viewingBuildingId }: SidebarProps) {
+export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger, viewingBuildingId, serverMoveTrigger }: SidebarProps) {
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [cityId, setCityId] = useState<number | null>(null);
@@ -103,10 +107,11 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
         }
     };
 
-    // Fetch data on mount and when refreshTrigger changes (e.g. backend reconnect)
+    // Fetch data on mount, refreshTrigger change (e.g. backend reconnect), and
+    // serverMoveTrigger change (= /chat/utter で auto-move 後の D-1 マーカー追従)
     useEffect(() => {
         refreshData();
-    }, [refreshTrigger]);
+    }, [refreshTrigger, serverMoveTrigger]);
 
     // Global Touch Handlers for swipe-to-open (separate effect to avoid re-fetching on onOpen change)
     useEffect(() => {
