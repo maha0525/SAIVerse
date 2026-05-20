@@ -117,14 +117,20 @@ class OccupancyManager:
             to_building_name = self.building_map[to_id].name
             action_type = "AI Action" if entity_type == 'ai' else "User Action"
             event_key = f"occupancy:{entity_id}:{from_id}:{to_id}:{int(now.timestamp())}"
+            # entity_name / building_name も event に含める (intent §E 視点別
+            # レンダリング用)。 これで history_manager 側が manager_ref なし
+            # で entity_id == self.persona_id 判定 + 自然な文言生成できる。
             left_metadata = {
                 "event": {
                     "type": "occupancy",
                     "action": "leave",
                     "entity_id": entity_id,
+                    "entity_name": entity_name,
                     "entity_type": entity_type,
                     "from_building_id": from_id,
+                    "from_building_name": from_building_name,
                     "to_building_id": to_id,
+                    "to_building_name": to_building_name,
                     "event_key": event_key,
                 }
             }
@@ -133,9 +139,12 @@ class OccupancyManager:
                     "type": "occupancy",
                     "action": "enter",
                     "entity_id": entity_id,
+                    "entity_name": entity_name,
                     "entity_type": entity_type,
                     "from_building_id": from_id,
+                    "from_building_name": from_building_name,
                     "to_building_id": to_id,
+                    "to_building_name": to_building_name,
                     "event_key": event_key,
                     "recalled_by": [],
                     # auto_ingest 側がペルソナの context に Building 情報を流し込むための

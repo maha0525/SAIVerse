@@ -491,8 +491,50 @@ class HistoryManager:
                     return text
         return None
 
+    def _render_message_for_self(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """intent §E 視点別レンダリング: occupancy event で entity_id ==
+        self.persona_id なら content を一人称表現に rewrite する。 それ以外は
+        msg をそのまま返す。
+
+        フロントエンドが受け取る building_messages の content (= DB) は変えない
+        (= 三人称のまま、 後方互換)。 本関数は AI に渡される
+        building_recent_history 経路でのみ呼ぶ。 「自分が自分のことを三人称で
+        語る違和感」 を消すための rewrite。
+        """
+        metadata = msg.get("metadata") or {}
+        event = metadata.get("event") if isinstance(metadata, dict) else None
+        if not isinstance(event, dict):
+            return msg
+        if event.get("type") != "occupancy":
+            return msg
+        if str(event.get("entity_id") or "") != self.persona_id:
+            return msg
+        # ここまで来たら occupancy event で 「自分自身」 の移動
+        action = event.get("action", "")
+        from_name = event.get("from_building_name") or "別の場所"
+        to_name = event.get("to_building_name") or "別の場所"
+        if action == "enter":
+            new_content = (
+                f'<div class="note-box" data-entity-id="{self.persona_id}">'
+                f'🚶 自分:<br><b>{from_name}から{to_name}へ入室した</b></div>'
+            )
+        elif action == "leave":
+            new_content = (
+                f'<div class="note-box" data-entity-id="{self.persona_id}">'
+                f'🚶 自分:<br><b>{from_name}から{to_name}へ移動した</b></div>'
+            )
+        else:
+            return msg
+        rewritten = dict(msg)
+        rewritten["content"] = new_content
+        return rewritten
+
     def get_building_recent_history(self, building_id: str, max_chars: int) -> List[Dict[str, str]]:
-        """Retrieves recent messages from building DB up to a character limit."""
+        """Retrieves recent messages from building DB up to a character limit.
+
+        intent §E に従い、 自分自身の occupancy event は一人称に rewrite して
+        AI に渡す。 三人称 → 一人称の置き換えは _render_message_for_self で行う。
+        """
         from database.building_messages import fetch_building_messages
         # 全件取って末尾から char limit で削る (本格的な大量データでは要最適化)
         history = fetch_building_messages(self._db_session_factory, building_id)
@@ -504,7 +546,7 @@ class HistoryManager:
             count += len(plain_content)
             if count > max_chars:
                 break
-            selected.append(msg)
+            selected.append(self._render_message_for_self(msg))
         return list(reversed(selected))
 
     def get_building_history(self, building_id: str) -> List[Dict[str, Any]]:
