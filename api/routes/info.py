@@ -30,7 +30,8 @@ class BuildingDetailsResponse(BaseModel):
     name: str
     description: str = ""
     image_path: Optional[str] = None  # Building interior image for visual context
-    occupants: List[OccupantInfo]
+    occupants: List[OccupantInfo]  # AI personas only
+    users: List[OccupantInfo] = []  # Users present in the building (intent §D-3)
     items: List[ItemInfo]
 
 def _build_item_info(data: dict, manager: Any = None) -> dict:
@@ -85,8 +86,12 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
 
     building = manager.building_map[building_id]
     
-    # 1. Occupants
-    occupants_list = []
+    # 1. Occupants — AI と user を分離して返す (intent §D-3)。
+    # 既存の occupants 配列は AI personas のみ (= 後方互換)、 user は別配列
+    # users で返す。 これで frontend は両方を区別して描画できる。
+    occupants_list = []  # AI personas
+    users_list = []      # Users (separate, intent §D-3)
+    user_id_str = str(getattr(manager.state, "user_id", "1"))
     if building_id in manager.occupancy_manager.occupants:
         occupant_ids = manager.occupancy_manager.occupants[building_id]
         sorted_ids = sorted(occupant_ids) if occupant_ids else []
@@ -94,11 +99,20 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
             if oid in manager.personas:
                 persona = manager.personas[oid]
                 avatar = avatar_path_to_url(persona.avatar_image)
-                
+
                 occupants_list.append({
                     "id": oid,
                     "name": persona.persona_name,
                     "avatar": avatar
+                })
+            elif oid == user_id_str:
+                # SAIVerse は現状単一ユーザー (USERID=1) 想定なので
+                # manager.state から name/avatar を直接解決する。 将来
+                # multi-user 化時は DB クエリに切り替える。
+                users_list.append({
+                    "id": oid,
+                    "name": manager.state.user_display_name or "User",
+                    "avatar": manager.state.user_avatar_data or "/api/static/builtin_icons/user.png",
                 })
 
     # 2. Items
@@ -166,6 +180,7 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         "description": building.description or "",
         "image_path": building_image_path,
         "occupants": occupants_list,
+        "users": users_list,
         "items": items_list
     }
 

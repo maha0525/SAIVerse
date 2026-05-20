@@ -53,7 +53,8 @@ interface BuildingDetails {
     name: string;
     description: string;
     image_path?: string | null;  // Building interior image
-    occupants: Occupant[];
+    occupants: Occupant[];  // AI personas
+    users?: Occupant[];  // Users present in the building (intent §D-3)
     items: Item[];
 }
 
@@ -292,6 +293,34 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                             e.currentTarget.style.display = 'none';
                                         }}
                                     />
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Users (intent §D-3): AI とは別配列で表示。
+                            「自分も場のメンバー」 を視覚的に示すための独立セクション。
+                            ユーザーは modal なし (= プロフィール変更等は別経路)。 */}
+                        {details.users && details.users.length > 0 && (
+                            <div className={styles.section}>
+                                <h3 className={styles.heading}>
+                                    <Users size={16} /> 滞在ユーザー ({details.users.length})
+                                </h3>
+                                <div className={styles.occupantList}>
+                                    {details.users.map(u => (
+                                        <div
+                                            key={`user-${u.id}`}
+                                            className={styles.occupant}
+                                        >
+                                            <div className={styles.occupantAvatar}>
+                                                <img
+                                                    src={u.avatar || "/api/static/builtin_icons/user.png"}
+                                                    alt={u.name}
+                                                    onError={(e) => { e.currentTarget.src = "https://placehold.co/48x48?text=?"; }}
+                                                />
+                                            </div>
+                                            <span className={styles.occupantName}>{u.name}</span>
+                                        </div>
+                                    ))}
                                 </div>
                             </div>
                         )}
