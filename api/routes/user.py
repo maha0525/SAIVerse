@@ -19,10 +19,16 @@ class UserStatusResponse(BaseModel):
 
 class MoveRequest(BaseModel):
     target_building_id: str
+    # B-1 CAS: クライアントが知っている現在地。 サーバ側の current_building_id
+    # と一致しない場合は他クライアントが先に move 済みなので 409 を返す。
+    # 後方互換のため Optional (= 未指定なら CAS チェックなし、 旧挙動)。
+    # See: docs/intent/building_memory_unified.md §B-1
+    expected_from_building_id: Optional[str] = None
 
 class MoveResponse(BaseModel):
     success: bool
     message: Optional[str] = None
+    current_building_id: Optional[str] = None  # CAS 失敗時にサーバの真の現在地を返す
     
 class BuildingInfo(BaseModel):
     id: str
@@ -61,14 +67,41 @@ def get_user_status(manager = Depends(get_manager)):
 @router.post("/move", response_model=MoveResponse)
 def move_user(req: MoveRequest, manager = Depends(get_manager)):
     import logging
-    logging.debug("[USER_MOVE] Request to move to %s", req.target_building_id)
+    logging.debug(
+        "[USER_MOVE] Request to move to %s (expected_from=%s)",
+        req.target_building_id, req.expected_from_building_id,
+    )
+
+    # B-1 CAS: クライアントが思っている現在地とサーバの現在地が異なれば
+    # 他クライアントが先に move 済み。 409 で現在地を返して再同期させる。
+    current_bid = manager.state.user_current_building_id
+    if (
+        req.expected_from_building_id is not None
+        and req.expected_from_building_id != current_bid
+    ):
+        logging.info(
+            "[USER_MOVE] CAS conflict: expected_from=%s server_current=%s — refusing move",
+            req.expected_from_building_id, current_bid,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cas_conflict",
+                "message": "他のクライアントが先に移動したため、 この移動は受け付けませんでした。 最新状態に同期します。",
+                "current_building_id": current_bid,
+            },
+        )
 
     success, message = manager.move_user(req.target_building_id)
-    
-    logging.debug("[USER_MOVE] Result success=%s, msg=%s, current_bid=%s", 
+
+    logging.debug("[USER_MOVE] Result success=%s, msg=%s, current_bid=%s",
                  success, message, manager.user_current_building_id)
-        
-    return {"success": success, "message": message}
+
+    return {
+        "success": success,
+        "message": message,
+        "current_building_id": manager.state.user_current_building_id,
+    }
 
 @router.get("/buildings", response_model=BuildingsResponse)
 def get_buildings(manager = Depends(get_manager)):

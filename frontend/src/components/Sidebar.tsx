@@ -162,8 +162,25 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
             const res = await fetch('/api/user/move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_building_id: buildingId })
+                body: JSON.stringify({
+                    target_building_id: buildingId,
+                    // B-1 CAS: クライアントが思っている現在地をサーバに伝える。
+                    // サーバ側が別の現在地を持っていれば 409 で返してくる。
+                    expected_from_building_id: status.current_building_id,
+                }),
             });
+            if (res.status === 409) {
+                // CAS conflict: 他クライアントが先に動かしていた。
+                // ユーザーに知らせ、 status を再取得して UI を真の現在地に合わせる。
+                let conflictMsg = '他のクライアントが先に移動したため、 この移動は受け付けられませんでした。 最新状態に同期します。';
+                try {
+                    const data = await res.json();
+                    if (data?.detail?.message) conflictMsg = data.detail.message;
+                } catch { /* ignore JSON parse */ }
+                alert(conflictMsg);
+                refreshData();
+                return;
+            }
             if (res.ok) {
                 const data = await res.json();
                 if (data.success) {
