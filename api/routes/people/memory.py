@@ -69,7 +69,8 @@ def list_thread_messages(
                 role=m["role"],
                 content=m["content"],
                 created_at=m["created_at"],
-                metadata=m.get("metadata")
+                metadata=m.get("metadata"),
+                has_thought_signature=bool(m.get("thought_signature")),
             )
             for m in msgs
         ]

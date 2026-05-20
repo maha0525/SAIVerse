@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -21,6 +21,8 @@ interface MessageItem {
     content: string;
     created_at: number;
     metadata?: { tags?: string[]; reasoning?: string };
+    // Gemini 3.x の thoughtSignature が永続化されているか (bool フラグのみ、中身は非公開)
+    has_thought_signature?: boolean;
 }
 
 interface MemoryBrowserProps {
@@ -680,6 +682,16 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     <span className={`${styles.role} ${styles[msg.role.toLowerCase()] || ''}`}>
                                         {msg.role}
                                     </span>
+                                    {msg.has_thought_signature && (
+                                        <span
+                                            className={styles.thoughtSignatureIcon}
+                                            title="Thought signature あり"
+                                            role="img"
+                                            aria-label="Thought signature あり"
+                                        >
+                                            <Sparkles size={12} />
+                                        </span>
+                                    )}
                                     {msg.metadata?.tags && msg.metadata.tags.length > 0 && (
                                         <div className={styles.tagsContainer}>
                                             <Tag size={12} className={styles.tagIcon} />

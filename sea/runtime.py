@@ -1203,6 +1203,7 @@ class SEARuntime:
         origin_track_id: Optional[str] = None,
         scope: Optional[str] = None,
         paired_action_text: Optional[str] = None,
+        thought_signature: Optional[bytes] = None,
         return_message_id: bool = False,
     ) -> Any:
         """Store a message to SAIMemory. Returns True on success, False on failure.
@@ -1287,6 +1288,17 @@ class SEARuntime:
                 # で互換維持。
                 if pulse_id:
                     message["pulse_id"] = pulse_id
+                # 2026-05-20: Gemini 3.x の thoughtSignature をターン跨ぎ永続化する。
+                # bytes 型を SAIMemoryAdapter._append_message 経由で thought_signature
+                # 列に保存し、次ターン再構築時に _payload_from_message_locked が
+                # payload に含めて Gemini Client が Part に乗せ直す。
+                # 詳細は docs/intent/thought_signature_persistence.md
+                if thought_signature:
+                    message["thought_signature"] = thought_signature
+                    LOGGER.debug(
+                        "[_store_memory] persona=%s role=%s thought_signature attached (%d bytes)",
+                        getattr(persona, "persona_id", None), role, len(thought_signature),
+                    )
 
                 clean_tags = [str(tag) for tag in (tags or []) if tag]
                 # Add playbook:name tag for automatic classification

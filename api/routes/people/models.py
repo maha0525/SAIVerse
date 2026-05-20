@@ -39,6 +39,10 @@ class MessageItem(BaseModel):
     content: str
     created_at: Optional[float] = None
     metadata: Optional[dict] = None
+    # 2026-05-20: Gemini 3.x の thoughtSignature が永続化されているかを示すフラグ。
+    # bytes 中身そのものは公開せず、フロントで「signature あり」アイコン表示に使う。
+    # 詳細は docs/intent/thought_signature_persistence.md
+    has_thought_signature: bool = False
 
 class MessagesResponse(BaseModel):
     items: List[MessageItem]

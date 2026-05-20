@@ -1599,6 +1599,11 @@ class GeminiClient(LLMClient):
                         _ts_text = getattr(part, "thought_signature", None)
                         if _ts_text:
                             text_thought_signature = _ts_text
+                            logging.debug(
+                                "[gemini_stream][sig-trace] text part signature captured: %d bytes (chunk=%d)",
+                                len(_ts_text) if isinstance(_ts_text, (bytes, str)) else -1,
+                                chunk_count,
+                            )
 
                 combined_text = "".join(
                     getattr(part, "text", None) or ""
@@ -1696,8 +1701,14 @@ class GeminiClient(LLMClient):
         # detected 時は text 用 signature を保存しない方針)。
         if fcall is None:
             self._store_thought_signature(text_thought_signature)
+            logging.debug(
+                "[gemini_stream][sig-trace] stored thought_signature on stream end: %s (%d bytes)",
+                "present" if text_thought_signature else "None",
+                len(text_thought_signature) if isinstance(text_thought_signature, (bytes, str)) else 0,
+            )
         else:
             self._store_thought_signature(None)
+            logging.debug("[gemini_stream][sig-trace] fcall path; cleared thought_signature")
 
         # Store tool detection result if function call was detected
         if fcall is not None:

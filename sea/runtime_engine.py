@@ -441,6 +441,9 @@ class RuntimeEngine:
                 line_role=line_role, scope=scope,
                 pulse_context=pulse_context,
                 playbook_name=playbook.name,
+                # 2026-05-20: thought_signature 永続化 (MEMORIZE node 経由 / assistant 役のみ意味あり)。
+                # role != "assistant" の場合は state 値に関わらず無害 (signature 解釈は Gemini text Part のみ)。
+                thought_signature=state.get("_last_thought_signature") if role == "assistant" else None,
             ):
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
                 if event_callback:

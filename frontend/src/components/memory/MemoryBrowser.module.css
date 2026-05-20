@@ -370,6 +370,15 @@
     flex-shrink: 0;
 }
 
+/* Gemini 3.x thoughtSignature 保持マーク。tag より控えめに見せたいので opacity を下げる */
+.thoughtSignatureIcon {
+    color: #888;
+    opacity: 0.55;
+    flex-shrink: 0;
+    margin-left: 4px;
+    cursor: help;
+}
+
 .tag {
     font-size: 0.7rem;
     padding: 2px 6px;
@@ -1035,6 +1044,10 @@
 }
 
 :global([data-theme="light"]) .tagIcon {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .thoughtSignatureIcon {
     color: #94a3b8;
 }
 

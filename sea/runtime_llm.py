@@ -2227,6 +2227,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # ため、_consume_pipeline_stream の後で consume する。
                     # 詳細は docs/intent/thought_signature_persistence.md
                     state["_last_thought_signature"] = llm_client.consume_thought_signature()
+                    LOGGER.debug(
+                        "[sea][llm][sig-trace] stream path: state['_last_thought_signature'] set = %s (%d bytes)",
+                        "present" if state["_last_thought_signature"] else "None",
+                        len(state["_last_thought_signature"]) if isinstance(state["_last_thought_signature"], (bytes, str)) else 0,
+                    )
 
                     # ── Spell loop (parallel execution per round) ──
                     # Pipeline Streaming で sub-speak が音声合成のウォームアップを
@@ -2463,6 +2468,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 role="assistant",
                                 tags=["conversation"],
                                 pulse_id=state.get("_pulse_id"),
+                                # 2026-05-20: thought_signature 永続化 (stream 中断時の partial 経路)
+                                thought_signature=state.get("_last_thought_signature"),
                             )
 
                             # 3. Build continuation messages:
@@ -2854,6 +2861,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 if _mem_rd is not None:
                     _memorize_metadata["reasoning_details"] = _mem_rd
 
+                _memorize_sig = state.get("_last_thought_signature")
+                LOGGER.debug(
+                    "[sea][llm][sig-trace] memorize call: thought_signature = %s (%d bytes)",
+                    "present" if _memorize_sig else "None",
+                    len(_memorize_sig) if isinstance(_memorize_sig, (bytes, str)) else 0,
+                )
                 stored_message_id = runtime._store_memory(
                     persona,
                     content_to_save,
@@ -2866,6 +2879,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     paired_action_text=prompt,
                     scope=memorize_scope,
                     line_role=memorize_line_role,
+                    # 2026-05-20: Gemini 3.x の thoughtSignature を永続化。state には
+                    # gemini.py の text/stream 経路から伝搬済み (LLM ノード処理内)。
+                    thought_signature=_memorize_sig,
                     return_message_id=True,
                 )
                 if not stored_message_id:
@@ -2920,6 +2936,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 tags=["conversation"],
                 pulse_id=pulse_id,
                 playbook_name=playbook.name,
+                # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
+                thought_signature=state.get("_last_thought_signature"),
             ):
                 LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
