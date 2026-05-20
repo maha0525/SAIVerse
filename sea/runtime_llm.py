@@ -754,6 +754,13 @@ async def _consume_pipeline_stream(
                     "node_id": getattr(node_def, "id", "llm"),
                     "pulse_id": state.get("_pulse_id"),
                 })
+                LOGGER.debug(
+                    "[sea][llm][diag] streaming_chunk emitted: persona=%s pulse=%s pipeline_msg=%s len=%d",
+                    getattr(persona, "persona_id", None),
+                    state.get("_pulse_id"),
+                    pipeline_msg_id,
+                    len(chunk),
+                )
 
             if pipeline_msg_id and not spell_detected:
                 _buf = "".join(text_chunks)
@@ -2360,6 +2367,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
                             completion_event["metadata"] = _speak_base_metadata
                         event_callback(completion_event)
+                        LOGGER.debug(
+                            "[sea][llm][diag] streaming_complete emitted (no-spell path): persona=%s pulse=%s",
+                            getattr(persona, "persona_id", None),
+                            state.get("_pulse_id"),
+                        )
 
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("_pulse_id")
@@ -2870,6 +2882,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         "persona_name": getattr(persona, "persona_name", None),
                         "pulse_id": state.get("_pulse_id"),
                     })
+                    LOGGER.debug(
+                        "[sea][diag] activity emitted (llm-memorize, meta/sub guarded): name=%s playbook=%s persona=%s pulse=%s",
+                        node_label, pb_display,
+                        getattr(persona, "persona_id", None),
+                        state.get("_pulse_id"),
+                    )
 
         # Important flag: dual-write to messages (long-term memory) if not already memorized
         _is_important = getattr(node_def, "important", False)

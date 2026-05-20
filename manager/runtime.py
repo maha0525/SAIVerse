@@ -508,7 +508,17 @@ class RuntimeService(
                             avatar_path_to_url(p.avatar_image)
                             or "/api/static/builtin_icons/host.png"
                         )
+            if isinstance(event, dict):
+                logging.debug(
+                    "[sse][diag][enrich] type=%s persona=%s pulse=%s",
+                    event.get("type"), event.get("persona_id"), event.get("pulse_id"),
+                )
             response_queue.put(event)
+
+        # Register the SSE callback so on_track_activated 経由で起動される
+        # main_line pulse もこの SSE response_queue に events を流せる。
+        # finally 節で必ず削除する。
+        self.manager._active_sse_callbacks[building_id] = _enrich_event
 
         def backend_worker():
             try:
@@ -593,6 +603,11 @@ class RuntimeService(
                     item = response_queue.get(timeout=2.0)
                     if item is None:
                         break
+                    if isinstance(item, dict):
+                        logging.debug(
+                            "[sse][diag][yield] type=%s persona=%s pulse=%s",
+                            item.get("type"), item.get("persona_id"), item.get("pulse_id"),
+                        )
                     yield json.dumps(item, ensure_ascii=False) + "\n"
                     # cancelled イベント送信後はストリーム終了
                     if isinstance(item, dict) and item.get("type") == "cancelled":
@@ -608,6 +623,7 @@ class RuntimeService(
         finally:
             # Clean up stop event
             self.manager._active_stop_events.pop(building_id, None)
+            self.manager._active_sse_callbacks.pop(building_id, None)
 
             # Persist building histories and session metadata.
             # MUST be inside finally: this generator can be closed via

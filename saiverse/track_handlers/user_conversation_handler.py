@@ -312,14 +312,22 @@ class UserConversationTrackHandler:
             )
             return
         try:
+            # Pick up the active SSE event_callback (set by handle_user_input_stream).
+            # This routes streaming events back to the user's open SSE so the
+            # frontend can render the bubble. Without this, main_line pulses
+            # triggered via on_track_activated would emit events into a void
+            # (= wrapped_event_callback wraps None → silent no-op).
+            sse_callbacks = getattr(self.manager, "_active_sse_callbacks", None)
+            event_callback = sse_callbacks.get(building_id) if sse_callbacks else None
             logging.info(
-                "[user-conv-handler] Starting main_line pulse: persona=%s building=%s track=%s",
-                persona_id, building_id, track.track_id,
+                "[user-conv-handler] Starting main_line pulse: persona=%s building=%s track=%s event_callback=%s",
+                persona_id, building_id, track.track_id, event_callback is not None,
             )
             run_sea_user(
                 persona,
                 building_id,
                 "",  # user_input: 空文字列 (auto_ingest が building_histories から取り込む)
+                event_callback=event_callback,
                 origin_track_id=track.track_id,
             )
         except Exception:
