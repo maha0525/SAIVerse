@@ -451,14 +451,16 @@ class RuntimeService(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
         pre_spells: Optional[List[str]] = None,
+        client_message_id: Optional[str] = None,
     ) -> Iterator[str]:
         logging.debug(
-            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, args=%s, building_id=%s, pre_spells=%s)",
+            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, args=%s, building_id=%s, pre_spells=%s, client_message_id=%s)",
             bool(metadata),
             meta_playbook,
             bool(args),
             building_id,
             pre_spells,
+            client_message_id,
         )
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
@@ -529,6 +531,8 @@ class RuntimeService(
                     bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
                     if metadata:
                         bh_user_entry["metadata"] = dict(metadata)
+                    if client_message_id:
+                        bh_user_entry["client_message_id"] = client_message_id
                     try:
                         bm = responding_personas[0].history_manager.add_to_building_only(
                             canonical_bid, bh_user_entry, heard_by=all_pids

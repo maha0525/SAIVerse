@@ -1387,6 +1387,12 @@ export default function Home() {
             ? currentPlaybookArgs
             : undefined;
 
+        // B-2 idempotency: 送信操作 1 回につき 1 つの UUID を生成。
+        // fetch retry 等で同じ送信が複数回 backend に届いても、 backend は
+        // UNIQUE(client_message_id) で既存行を返すだけで二重 INSERT しない。
+        // See: docs/intent/building_memory_unified.md §B-2
+        const clientMessageId = crypto.randomUUID();
+
         try {
             const res = await fetch('/api/chat/send', {
                 method: 'POST',
@@ -1402,6 +1408,7 @@ export default function Home() {
                     meta_playbook: sendMetaPlaybook,
                     args: sendArgs,
                     pre_spells: preSpells,
+                    client_message_id: clientMessageId,
                 })
             });
 

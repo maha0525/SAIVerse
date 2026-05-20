@@ -374,6 +374,11 @@ class SendMessageRequest(BaseModel):
     # deprecated meta_user_manual route. See docs/intent/persona_cognition/
     # nested_subline_spell.md §13.
     pre_spells: Optional[List[str]] = None
+    # B-2 idempotency: クライアント生成 UUID。 同じ値で複数回送信されても、
+    # サーバは building_messages に 1 件しか insert しない (UNIQUE 制約 +
+    # 既存行返却)。 ネットワーク再送 / ユーザーの二重押し対策。
+    # See: docs/intent/building_memory_unified.md §B-2
+    client_message_id: Optional[str] = None
 
 def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
     """Decode and save base64 attachment."""
@@ -881,6 +886,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 args=req.args,
                 building_id=building_id,
                 pre_spells=req.pre_spells,
+                client_message_id=req.client_message_id,
             )
             
             for chunk in stream:

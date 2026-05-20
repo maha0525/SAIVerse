@@ -292,9 +292,26 @@ def insert_building_message(
     try:
         from database.models import BuildingMessage
         from sqlalchemy import func as sa_func
+        from sqlalchemy.exc import IntegrityError
         record = serialize_building_message(building_id, building_msg)
         db = session_factory()
         try:
+            # B-2 idempotency: 同じ client_message_id が既に存在すれば INSERT を試みず
+            # 既存行をそのまま返す。 これでネットワーク再送 / ユーザーの二重送信で
+            # 同一 UUID が来ても新規 row は作られない (= no-op、 既存 seq を返す)。
+            # See: docs/intent/building_memory_unified.md §B-2
+            cmid = record.get("client_message_id")
+            if cmid:
+                existing = db.query(BuildingMessage).filter_by(
+                    client_message_id=cmid
+                ).first()
+                if existing is not None:
+                    LOGGER.info(
+                        "insert_building_message: duplicate client_message_id=%s → returning existing seq=%d",
+                        cmid, existing.seq,
+                    )
+                    return deserialize_building_message(existing)
+
             max_seq = db.query(sa_func.coalesce(sa_func.max(BuildingMessage.seq), 0)).filter_by(
                 building_id=building_id
             ).scalar()
@@ -307,7 +324,24 @@ def insert_building_message(
             record["message_id"] = new_message_id
             obj = BuildingMessage(**record)
             db.add(obj)
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError:
+                # 並行 INSERT で同 client_message_id が同時に来た race ケース。
+                # rollback して再 SELECT、 もう一方が確定させた既存行を返す。
+                db.rollback()
+                if cmid:
+                    existing = db.query(BuildingMessage).filter_by(
+                        client_message_id=cmid
+                    ).first()
+                    if existing is not None:
+                        LOGGER.info(
+                            "insert_building_message: race-resolved duplicate cmid=%s → existing seq=%d",
+                            cmid, existing.seq,
+                        )
+                        return deserialize_building_message(existing)
+                # client_message_id 以外の UNIQUE 違反 (= seq race 等) は表に出す
+                raise
             return deserialize_building_message(obj)
         finally:
             db.close()

@@ -999,10 +999,12 @@ class SAIVerseManager(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
         pre_spells: Optional[List[str]] = None,
+        client_message_id: Optional[str] = None,
     ) -> Iterator[str]:
         yield from self.runtime.handle_user_input_stream(
             message, metadata=metadata, meta_playbook=meta_playbook,
             args=args, building_id=building_id, pre_spells=pre_spells,
+            client_message_id=client_message_id,
         )
 
     def cancel_active_generation(self) -> bool:
