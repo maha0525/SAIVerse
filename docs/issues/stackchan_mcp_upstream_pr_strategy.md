@@ -17,8 +17,8 @@ Phase 1' 完了時点で、fork (= `maha0525/stackchan-mcp`) の `feature/extern
 | # | commit | 内容 | 論理 PR | 依存 |
 |---|---|---|---|---|
 | 9 | `5e1042a` | `client_max_size=0` で aiohttp streaming body cap 撤去 | **PR7** | PR3 (= `POST /pcm` を導入してる) |
-| 8 | `93435a6` | persistent WS connection — NVS flag `websocket.persistent` opt-in (起動時 OpenAudioChannel + 失敗時 ScheduleReconnect) | **PR6b** | PR6a (= `intentional_close_` bug fix) |
-| 7 | `f8927b8` | `intentional_close_` flag を OpenAudioChannelInternal 失敗パスでクリア | **PR6a** | 独立 (pure bug fix) |
+| 8 | `93435a6` | persistent WS connection — NVS flag `websocket.persistent` opt-in (起動時 OpenAudioChannel + 失敗時 ScheduleReconnect) | ~~**PR6b**~~ (upstream #169/#197 で代替、 2026-05-20 取り下げ) | PR6a (= `intentional_close_` bug fix) |
+| 7 | `f8927b8` | `intentional_close_` flag を OpenAudioChannelInternal 失敗パスでクリア | ~~**PR6a**~~ (upstream #197 で同等修正、 2026-05-20 取り下げ) | 独立 (pure bug fix) |
 | 6 | `e23fa57` | `_libs/` を `os.environ["PATH"]` にも prepend (= `ctypes.util.find_library` 経路救済) | **PR5b** | PR5a (= 同梱した DLL を見せる仕上げ) |
 | 5 | `c7536f2` | Windows 用 `_libs/opus.dll` 同梱 + `os.add_dll_directory()` + hatchling `force-include` | **PR5a** | 独立 |
 | 4 | `71dc11e` | xiaozhi-cloud OTA `CheckVersion()` の呼び出し撤去 (= NVS websocket.url が上書きされない) | **PR4** | 独立 |

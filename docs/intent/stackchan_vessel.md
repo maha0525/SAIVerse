@@ -846,7 +846,7 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
    - PR1〜PR3: `send_pcm_audio` / `send_pcm_stream` / `POST /pcm` endpoint (= 想定通り)
    - **PR4** (= Phase 1' 中に新規発見): xiaozhi-cloud OTA `CheckVersion()` 撤去 — NVS websocket.url が boot 時に server から上書きされる副作用を遮断
    - **PR5** (= Phase 1' 中に新規発見): Windows 用 `libopus.dll` を gateway wheel に同梱 + `os.add_dll_directory()` + `PATH` prepend (= `ctypes.util.find_library` 経路救済)
-   - **PR6** (= Phase 1' 中に新規発見): `intentional_close_` flag bug fix + 起動時 OpenAudioChannel + 失敗時 ScheduleReconnect (= NVS flag `websocket.persistent` opt-in)。「voice session 中だけ繋ぐ」設計を「server-driven push を許可する」モードに拡張
+   - **PR6** (= Phase 1' 中に新規発見、 **2026-05-20 取り下げ**): `intentional_close_` flag bug fix + 起動時 OpenAudioChannel + 失敗時 ScheduleReconnect (= NVS flag `websocket.persistent` opt-in)。「voice session 中だけ繋ぐ」設計を「server-driven push を許可する」モードに拡張。 → upstream PR #169 / #197 で transport-level persistent connect + auto-reconnect + sleep policy が正式実装されたため fork 暫定実装は不要に。 `dev/integration` `1d3179f` (upstream merge) + 続く dead code 削除 commit で fork 側の NVS flag / UI checkbox / gate logic を撤去。 `application.cc::ActivationTask` での `OpenAudioChannel()` 呼び出しのみ残置 (= audio channel の boot 時 open は依然 fork 必要、 ただし opt-in 無しで常時実行)
    - **PR7** (= Phase 1' 中に新規発見): `client_max_size=0` で aiohttp の 1 MiB body cap を撤去 (= 長時間 chunked transfer が途中で切られる現象を解消)
    - PR 投稿戦略の整理は [`docs/issues/stackchan_mcp_upstream_pr_strategy.md`](../issues/stackchan_mcp_upstream_pr_strategy.md) 参照、投稿自体は Phase X' で
 2. ✅ **アドオン**: `mcp_servers.json` 作成 (= Elyth と同じ枠組み、`command: "uvx"` で fork branch を指定、`env` で AddonConfig placeholder を解決、`spell_tools` 配列で 15 個 visible / 6 個 visible=false)
