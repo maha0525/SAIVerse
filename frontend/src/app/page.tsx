@@ -816,34 +816,25 @@ export default function Home() {
         }
     };
 
-    // CityMap で家アイコンをクリックされたとき: サーバ側 move → ローカル state 更新 → モーダルを閉じてチャットへ
-    const handleSelectBuildingFromMap = async (buildingId: string) => {
+    // CityMap で家アイコンをクリックされたとき: 閲覧モードで建物を切り替える。
+    // C-1 (intent §C): サーバ側の CURRENT_BUILDINGID は据え置きのまま、 UI 上の
+    // 表示建物だけ切り替える (= 閲覧)。 実際の入室は発言時に /chat/utter が
+    // atomic に行う。
+    const handleSelectBuildingFromMap = (buildingId: string) => {
         if (!buildingId) return;
         if (currentBuildingId === buildingId) {
-            // 既にいる Building ならモーダルを閉じるだけ
+            // 既に表示中の Building ならモーダルを閉じるだけ
             setIsMapModalOpen(false);
             return;
         }
-        try {
-            const res = await fetch('/api/user/move', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_building_id: buildingId }),
-            });
-            if (!res.ok) return;
-            const data = await res.json();
-            if (!data.success) return;
-            setCurrentBuildingId(buildingId);
-            currentBuildingIdRef.current = buildingId;
-            setMessages([]);
-            setIsHistoryLoaded(false);
-            fetchHistory(undefined, buildingId);
-            fetchBuildingInfo(buildingId);
-            setMoveTrigger(prev => prev + 1);
-            setIsMapModalOpen(false);
-        } catch (err) {
-            console.error('Map move error', err);
-        }
+        setCurrentBuildingId(buildingId);
+        currentBuildingIdRef.current = buildingId;
+        setMessages([]);
+        setIsHistoryLoaded(false);
+        fetchHistory(undefined, buildingId);
+        fetchBuildingInfo(buildingId);
+        setMoveTrigger(prev => prev + 1);
+        setIsMapModalOpen(false);
     };
 
     // Esc キーでマップモーダルを閉じる
