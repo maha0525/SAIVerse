@@ -13,74 +13,41 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 class HistoryManager:
+    """ペルソナ視点の persona log (= self.messages / persona_log_path) と、
+    Building 共有ログ (= ``building_messages`` テーブル) の操作 API。
+
+    Phase 2+3 以降、 Building 側は DB が単一の source of truth。 旧来の
+    ``building_histories`` in-memory dict は廃止された。
+    See docs/intent/building_memory_unified.md
+    """
+
     def __init__(
         self,
         persona_id: str,
         persona_log_path: Path,
         building_memory_paths: Dict[str, Path],
         initial_persona_history: Optional[List[Dict[str, str]]] = None,
-        initial_building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         memory_adapter: Optional["SAIMemoryAdapter"] = None,
-        modified_buildings: Optional[set] = None,
         quarantined_buildings: Optional[Dict[str, Any]] = None,
         db_session_factory: Optional[Callable[[], "Session"]] = None,
     ):
         self.persona_id = persona_id
         self.persona_log_path = persona_log_path
+        # building_memory_paths は legacy log.json (archive) のパス参照のために残す。
+        # 書き込みには使わない。
         self.building_memory_paths = building_memory_paths
         self.messages = initial_persona_history if initial_persona_history is not None else []
-        self.building_histories = initial_building_histories if initial_building_histories is not None else {}
         self.memory_adapter = memory_adapter
-        # Reference to the manager-level modified_buildings set. When a building
-        # message is added/updated, we mark the building as modified so the
-        # next save call writes only changed buildings.
-        self._modified_buildings = modified_buildings if modified_buildings is not None else set()
-        # Reference to the manager-level quarantined_buildings dict. Used as a
-        # safety net to refuse mutations on quarantined buildings (the primary
-        # defense is at the movement layer, but defense-in-depth).
+        # 隔離フラグ参照 (= 防御的にしか使わないが互換のため保持)
         self._quarantined_buildings = quarantined_buildings if quarantined_buildings is not None else {}
-        self._building_seq_counter: Dict[str, int] = {}
         self.metabolism_anchor_message_id: Optional[str] = None
-        # Phase 1 dual-write: SQLAlchemy session factory for the building_messages
-        # table mirror of cities/<bid>/log.json. None = skip DB write (used by tests
-        # / contexts where the main saiverse.db is unavailable). Failures here are
-        # logged at WARNING and never block the JSON write path.
-        # See docs/intent/building_memory_unified.md (Phase 1).
+        # building_messages テーブルアクセス用 SessionLocal。 None なら no-op
+        # (= 既存 MagicMock テスト互換のフォールバック)。 本番では PersonaCore が必須で渡す。
         self._db_session_factory = db_session_factory
 
-        self._normalise_building_histories()
-
     def reset_seq_counter_for_building(self, building_id: str, value: int) -> None:
-        """Reset the in-memory seq counter for a building.
-
-        Called after restore (where ``value = max_seq + 1`` of the restored
-        data) to prevent new messages from getting low seq numbers that
-        collide with restored data — and from being skipped by personas
-        whose pulse_cursor sits above the restored max_seq.
-
-        Without this, a restore that brings back data with seq 1..170 would
-        leave the counter at its old value (often 1, especially after a
-        quarantine init), and the next ``add_to_building_only`` call would
-        compute ``next_candidate = max(1, hist[-1].seq+1)``. If ``hist[-1]``
-        is a host event without a seq field (e.g., from OccupancyManager
-        directly mutating the dict), ``hist[-1].seq`` defaults to 0, giving
-        new messages seq=1, 2, 3... — way below pulse_cursor.
-        """
-        self._building_seq_counter[building_id] = max(1, int(value))
-
-    def _mark_modified(self, building_id: str) -> None:
-        """Mark a building as having pending writes.
-
-        Refuses to mark quarantined buildings — the manager will skip them
-        at save time anyway, but marking would be misleading.
-        """
-        if building_id in self._quarantined_buildings:
-            LOGGER.warning(
-                "Refusing to record modification on quarantined building %s",
-                building_id,
-            )
-            return
-        self._modified_buildings.add(building_id)
+        """[Deprecated] DB が seq を管理するため no-op。 旧 caller 互換のため残存。"""
+        return
 
     def set_memory_adapter(self, adapter: Optional["SAIMemoryAdapter"]) -> None:
         self.memory_adapter = adapter
@@ -155,85 +122,21 @@ class HistoryManager:
             return None
         return event
 
-    def _normalise_building_histories(self) -> None:
-        for b_id, path in self.building_memory_paths.items():
-            hist = self.building_histories.setdefault(b_id, [])
-            max_seq = 0
-            for idx, msg in enumerate(hist):
-                seq_value = msg.get("seq")
-                seq: int
-                if isinstance(seq_value, int):
-                    seq = seq_value
-                else:
-                    try:
-                        seq = int(seq_value)
-                    except (TypeError, ValueError):
-                        LOGGER.debug("Failed to parse seq value %r, defaulting to %d", seq_value, idx + 1)
-                        seq = idx + 1
-                msg["seq"] = seq
-                if not msg.get("message_id"):
-                    msg["message_id"] = msg.get("id") or f"{b_id}:{seq}"
-                heard_raw = msg.get("heard_by")
-                if isinstance(heard_raw, list):
-                    heard_candidates = [str(p) for p in heard_raw if p]
-                elif heard_raw is None:
-                    heard_candidates = []
-                else:
-                    heard_candidates = [str(heard_raw)]
-                deduped: List[str] = []
-                for pid in heard_candidates:
-                    if pid not in deduped:
-                        deduped.append(pid)
-                msg["heard_by"] = sorted(deduped)
-                ingested_raw = msg.get("ingested_by")
-                if isinstance(ingested_raw, list):
-                    msg["ingested_by"] = sorted({str(pid) for pid in ingested_raw if pid})
-                else:
-                    msg["ingested_by"] = []
-                max_seq = max(max_seq, seq)
-            self._building_seq_counter[b_id] = max_seq + 1
-        for b_id in self.building_memory_paths.keys():
-            self._building_seq_counter.setdefault(b_id, 1)
-            self.building_histories.setdefault(b_id, [])
-
-    def _decorate_building_message(
+    def _prepare_for_insert(
         self,
-        building_id: str,
-        msg: Dict[str, str],
+        msg: Dict[str, Any],
         heard_by: Optional[List[str]],
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
+        """``insert_building_message`` に渡す前の正規化。 dual-write 時代の
+        ``_decorate_building_message`` の代替 (seq / message_id は DB 採番なので、
+        ここでは heard_by / ingested_by の正規化のみ)。
+        """
         enriched = msg.copy()
-        seq_value = enriched.get("seq")
-        # building_histories は全ペルソナ共有なので、実際の末尾 seq から次候補を導出する。
-        # ペルソナ固有カウンターだけを使うと他ペルソナのメッセージと seq が衝突する。
-        hist = self.building_histories.get(building_id)
-        if hist:
-            last_seq = int(hist[-1].get("seq", 0))
-            next_candidate = max(self._building_seq_counter.get(building_id, 1), last_seq + 1)
-        else:
-            next_candidate = self._building_seq_counter.get(building_id, 1)
-        if isinstance(seq_value, int):
-            seq = seq_value
-        else:
-            try:
-                seq = int(seq_value)
-            except (TypeError, ValueError):
-                LOGGER.debug("Failed to parse seq value %r, defaulting to %d", seq_value, next_candidate)
-                seq = next_candidate
-        if seq_value is None:
-            seq = next_candidate
-        if seq < 1:
-            seq = next_candidate
-        self._building_seq_counter[building_id] = max(next_candidate, seq + 1)
-        enriched["seq"] = seq
-        if not enriched.get("message_id"):
-            enriched["message_id"] = msg.get("id") or f"{building_id}:{seq}"
         heard_set = {str(pid) for pid in (heard_by or []) if pid}
         enriched["heard_by"] = sorted(heard_set)
         ingested_raw = enriched.get("ingested_by")
         if isinstance(ingested_raw, list):
-            ingested_set = {str(pid) for pid in ingested_raw if pid}
-            enriched["ingested_by"] = sorted(ingested_set)
+            enriched["ingested_by"] = sorted({str(pid) for pid in ingested_raw if pid})
         else:
             enriched["ingested_by"] = []
         return enriched
@@ -259,30 +162,6 @@ class HistoryManager:
         except Exception:
             LOGGER.exception("Failed to sync message to SAIMemory")
 
-    # Phase 1 dual-write helpers (docs/intent/building_memory_unified.md)
-    def _insert_building_message_to_db(
-        self, building_id: str, building_msg: Dict[str, Any]
-    ) -> None:
-        from database.building_messages import insert_building_message
-        insert_building_message(self._db_session_factory, building_id, building_msg)
-
-    def _update_building_message_in_db(
-        self,
-        building_id: str,
-        message_id: str,
-        *,
-        content: Optional[str],
-        metadata: Optional[Dict[str, Any]],
-    ) -> None:
-        from database.building_messages import update_building_message_in_db
-        update_building_message_in_db(
-            self._db_session_factory,
-            building_id,
-            message_id,
-            content=content,
-            metadata=metadata,
-        )
-
     def add_message(
         self,
         msg: Dict[str, str],
@@ -291,18 +170,16 @@ class HistoryManager:
         heard_by: Optional[List[str]] = None,
         origin_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Adds a message to both persona and building history.
+        """Adds a message to both persona log and building DB.
 
-        Returns the saved building message dict (including confirmed message_id).
-        Callers can use the returned message_id to associate addon metadata.
-
-        ``origin_track_id``: Track ID this message belongs to. Forwarded to
-        ``messages.origin_track_id`` column in SAIMemory so Track-scoped queries
-        (Track Chronicle, last-message timestamp, history filters) can find it.
+        Returns the saved building message dict (with DB-assigned seq / message_id).
         """
+        if building_id in self._quarantined_buildings:
+            LOGGER.warning(
+                "add_message: building %s is quarantined — refusing", building_id
+            )
+            return {}
         prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
-
-        # Add audience metadata for SAIMemory
         if heard_by:
             metadata = prepared_msg.setdefault("metadata", {})
             if isinstance(metadata, dict):
@@ -310,28 +187,15 @@ class HistoryManager:
                     "personas": [pid for pid in heard_by if not pid.startswith("user_")],
                     "users": [pid for pid in heard_by if pid.startswith("user_")]
                 }
-
-        # Add to persona history and trim by size
+        # Persona log + SAIMemory
         self.messages.append(prepared_msg)
         self._ensure_size_limit(self.messages, self.persona_log_path)
         self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
-
-        # Add to building history and trim
-        hist = self.building_histories.setdefault(building_id, [])
-        building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
-        hist.append(building_msg)
-        self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
-        self._mark_modified(building_id)
-        self._insert_building_message_to_db(building_id, building_msg)
-        return building_msg
-
-    def _get_building_memory_path(self, building_id: str) -> Path:
-        path = self.building_memory_paths.get(building_id)
-        if path is None:
-            raise ValueError(
-                f"Unknown building_id '{building_id}'. Expected one of: {sorted(self.building_memory_paths.keys())}"
-            )
-        return path
+        # Building DB (sole source of truth)
+        for_insert = self._prepare_for_insert(prepared_msg, heard_by)
+        from database.building_messages import insert_building_message
+        building_msg = insert_building_message(self._db_session_factory, building_id, for_insert)
+        return building_msg or for_insert
 
     def add_to_building_only(
         self,
@@ -341,20 +205,17 @@ class HistoryManager:
         heard_by: Optional[List[str]] = None,
         origin_track_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Adds a message only to a specific building's history.
-
-        building_id must be the canonical building ID present in building_memory_paths.
-        Returns the saved building message dict (including confirmed message_id) so
-        callers can associate addon metadata (same contract as add_message).
-        """
+        """Adds a message only to the building DB (skip persona log)."""
+        if building_id in self._quarantined_buildings:
+            LOGGER.warning(
+                "add_to_building_only: building %s is quarantined — refusing", building_id
+            )
+            return {}
         prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
-        hist = self.building_histories.setdefault(building_id, [])
-        building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
-        hist.append(building_msg)
-        self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
-        self._mark_modified(building_id)
-        self._insert_building_message_to_db(building_id, building_msg)
-        return building_msg
+        for_insert = self._prepare_for_insert(prepared_msg, heard_by)
+        from database.building_messages import insert_building_message
+        building_msg = insert_building_message(self._db_session_factory, building_id, for_insert)
+        return building_msg or for_insert
 
     def add_to_persona_only(
         self,
@@ -386,52 +247,37 @@ class HistoryManager:
         content: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """既存 building message の content / metadata を上書き / merge する。
+        """既存 building message の content / metadata を更新する (DB 単一)。
 
         Pipeline Streaming (= LLM streaming 中の文区切り sub-speak) で使う。
-        streaming 開始時に ``add_to_building_only`` で空 content の placeholder
-        を登録 → msg_id 発番 → 文 ごとに sub-speak hook 発火 (= TTS が並走) →
-        streaming 完了時に本関数で content を確定する、 という 2 段階フロー
-        を可能にするための最小 API。 詳細: docs/intent/voice_tts_pipeline_streaming.md
+        詳細: docs/intent/voice_tts_pipeline_streaming.md
 
-        ``content``: 文字列なら content を全置換、 None なら触らない。
-        ``metadata``: dict なら既存 metadata に shallow merge (= 既存キーは
-        新値で上書き、 既存にあって新側に無いキーは保持)、 None なら触らない。
-
-        該当 message_id が見つからない場合は ``None`` を返す (= no-op、
-        warning をログに出す)。 見つかった場合は更新後の dict を返す。
-
-        Persona-only history と SAIMemory には触らない (= placeholder 期間中は
-        building 側だけに居て、 finalize 時に呼び出し側が persona / SAIMemory
-        に add する設計に合わせる)。
+        Returns: 更新後の dict、 該当なしなら None。
         """
-        hist = self.building_histories.get(building_id)
-        if not hist:
-            LOGGER.warning(
-                "update_building_message: unknown building_id=%s msg_id=%s",
-                building_id, message_id,
-            )
-            return None
-        for msg in hist:
-            if msg.get("message_id") == message_id:
-                if content is not None:
-                    msg["content"] = content
-                if metadata is not None:
-                    existing = msg.setdefault("metadata", {})
-                    if isinstance(existing, dict):
-                        existing.update(metadata)
-                    else:
-                        msg["metadata"] = dict(metadata)
-                self._mark_modified(building_id)
-                self._update_building_message_in_db(
-                    building_id, message_id, content=content, metadata=metadata
-                )
-                return msg
-        LOGGER.warning(
-            "update_building_message: message_id=%s not found in building=%s",
-            message_id, building_id,
+        from database.building_messages import update_building_message_in_db, fetch_building_messages
+        update_building_message_in_db(
+            self._db_session_factory, building_id, message_id,
+            content=content, metadata=metadata,
         )
-        return None
+        # 確認のために更新後の行を返す
+        if self._db_session_factory is None:
+            return None
+        from database.models import BuildingMessage
+        db = self._db_session_factory()
+        try:
+            row = db.query(BuildingMessage).filter_by(
+                building_id=building_id, message_id=message_id
+            ).first()
+            if row is None:
+                LOGGER.debug(
+                    "update_building_message: message_id=%s not found in building=%s",
+                    message_id, building_id,
+                )
+                return None
+            from database.building_messages import deserialize_building_message
+            return deserialize_building_message(row)
+        finally:
+            db.close()
 
     def get_recent_history(
         self,
@@ -646,12 +492,13 @@ class HistoryManager:
         return None
 
     def get_building_recent_history(self, building_id: str, max_chars: int) -> List[Dict[str, str]]:
-        """Retrieves recent messages from a specific building's history up to a character limit."""
-        history = self.building_histories.get(building_id, [])
-        selected = []
+        """Retrieves recent messages from building DB up to a character limit."""
+        from database.building_messages import fetch_building_messages
+        # 全件取って末尾から char limit で削る (本格的な大量データでは要最適化)
+        history = fetch_building_messages(self._db_session_factory, building_id)
+        selected: List[Dict[str, Any]] = []
         count = 0
         for msg in reversed(history):
-            # HTMLタグを含む可能性があるため、簡易的に除去して文字数をカウント
             content = msg.get("content", "")
             plain_content = re.sub('<[^<]+?>', '', content)
             count += len(plain_content)
@@ -660,29 +507,27 @@ class HistoryManager:
             selected.append(msg)
         return list(reversed(selected))
 
+    def get_building_history(self, building_id: str) -> List[Dict[str, Any]]:
+        """Building 内全メッセージを seq 昇順で返す (DB クエリ)。"""
+        from database.building_messages import fetch_building_messages
+        return fetch_building_messages(self._db_session_factory, building_id)
+
     def get_recent_entrant_events(
         self,
         building_id: str,
         *,
         lookback_messages: int = 10,
     ) -> List[Dict[str, str]]:
-        """Get recent structured entrant events for AI personas.
-
-        Args:
-            building_id: Building to check
-            lookback_messages: Number of recent messages to check (default: 10)
-
-        Returns:
-            List of entrant event dicts in reverse chronological order.
-        """
-        history = self.building_histories.get(building_id, [])
+        """Get recent structured AI entrant events from building DB."""
+        from database.building_messages import fetch_building_messages
+        history = fetch_building_messages(
+            self._db_session_factory, building_id, limit=lookback_messages
+        )
         if not history:
             return []
-
         entrants: List[Dict[str, str]] = []
         seen: set = set()
-
-        for msg in reversed(history[-lookback_messages:]):
+        for msg in reversed(history):
             event = self._extract_occupancy_event(msg)
             if not event:
                 continue
@@ -698,24 +543,14 @@ class HistoryManager:
                 continue
             seen.add(event_key)
             entrants.append({"entity_id": entity_id, "event_key": event_key})
-
         return entrants
 
     def mark_entrant_event_recalled(self, building_id: str, event_key: str) -> bool:
-        """Mark a structured entrant event as already recalled for this persona."""
-        history = self.building_histories.get(building_id, [])
-        for msg in reversed(history):
-            event = self._extract_occupancy_event(msg)
-            if not event or event.get("event_key") != event_key:
-                continue
-            recalled_by = event.setdefault("recalled_by", [])
-            if not isinstance(recalled_by, list):
-                recalled_by = []
-                event["recalled_by"] = recalled_by
-            if self.persona_id not in recalled_by:
-                recalled_by.append(self.persona_id)
-            return True
-        return False
+        """Mark a structured entrant event as already recalled for this persona (DB)."""
+        from database.building_messages import mark_event_recalled
+        return mark_event_recalled(
+            self._db_session_factory, building_id, event_key, self.persona_id
+        )
 
     def should_recall_persona(
         self,
@@ -739,7 +574,8 @@ class HistoryManager:
                                     and no previous recall message found)
         """
         if building_id and event_key:
-            history = self.building_histories.get(building_id, [])
+            from database.building_messages import fetch_building_messages
+            history = fetch_building_messages(self._db_session_factory, building_id, limit=200)
             for msg in reversed(history):
                 event = self._extract_occupancy_event(msg)
                 if not event or event.get("event_key") != event_key:

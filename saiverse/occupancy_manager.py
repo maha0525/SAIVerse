@@ -173,13 +173,11 @@ class OccupancyManager:
                     heard_by=to_occupants,
                 )
             else:
-                # Fallback: legacy direct append (manager_ref absent — should not
-                # happen in production, but covered for robustness in tests).
-                self.building_histories.setdefault(from_id, []).append(
-                    {"role": "host", "content": left_message, "metadata": left_metadata}
-                )
-                self.building_histories.setdefault(to_id, []).append(
-                    {"role": "host", "content": entered_message, "metadata": enter_metadata}
+                # Fallback: manager_ref が無い場合 (= 主にテスト経路)。 Phase 2+3 以降は
+                # DB 経由でしか書けないので、 何もしない (テスト側で manager_ref 必須に)。
+                logging.warning(
+                    "occupancy event ignored: manager_ref unavailable for %s -> %s",
+                    from_id, to_id,
                 )
 
             logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")

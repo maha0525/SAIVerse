@@ -153,90 +153,14 @@ class InitializationMixin:
         self.user_avatar_data = self.default_avatar
 
     def _init_building_histories(self) -> None:
-        """Step 3: Load Conversation Histories.
+        """Step 3: Building 履歴の起動時初期化。
 
-        Treats 5 file states distinctly (NEVER conflate them):
-          1. **不在** (no file): new building. building_histories[b_id] = [].
-          2. **0バイト** (zero-byte): abnormal — write_text was interrupted.
-             Rescue + quarantine. Key NOT inserted.
-          3. **空配列** (``[]``): valid — building_histories[b_id] = [].
-          4. **正常配列**: valid — building_histories[b_id] = data.
-          5. **破損** (invalid JSON): abnormal. Rescue + quarantine. Key NOT inserted.
-
-        **Quarantine semantics**: a building in ``self.quarantined_buildings``
-        is treated as "no truth available". Save refuses to touch the file,
-        movement refuses entry. The UI shows the user options to restore from
-        backup / reset / handle manually. This guarantees that a corrupted file
-        is NEVER overwritten by the system — only by explicit user action.
-
-        For successfully loaded files, also performs a **startup backup snapshot**
-        (``log.json.backup_<timestamp>.bak``, rotated to keep last N) so users
-        always have a recent known-good state to restore from.
+        Phase 2+3 以降は DB が source of truth。 旧 log.json 5 状態判定 / quarantine
+        起動時バックアップは廃止し、 in-memory ``building_histories`` dict は legacy
+        caller 互換のため空 dict で初期化するのみ (= 実体は使われない)。
+        See docs/intent/building_memory_unified.md
         """
-        from datetime import datetime
-        from manager.history import (
-            create_log_backup_snapshot,
-            list_log_backups,
-        )
-
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        for b_id, path in self.building_memory_paths.items():
-            # State 1: 不在
-            if not path.exists():
-                self.building_histories[b_id] = []
-                continue
-
-            # State 2: 0バイト
-            if path.stat().st_size == 0:
-                self._quarantine_building(
-                    b_id, path, timestamp,
-                    reason="zero_byte",
-                    title_suffix="0バイト",
-                    message_extra="ファイルが空（0バイト）になっており、書き込みが途中で中断された痕跡です。",
-                )
-                continue
-
-            # States 3, 4, 5: try to parse
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                # State 5: 破損
-                self._quarantine_building(
-                    b_id, path, timestamp,
-                    reason="corrupted",
-                    title_suffix="破損",
-                    message_extra=f"JSONパース失敗: {exc}",
-                )
-                continue
-
-            if not isinstance(data, list):
-                # 構造異常（dictやnullなど）
-                self._quarantine_building(
-                    b_id, path, timestamp,
-                    reason="invalid_structure",
-                    title_suffix="構造異常",
-                    message_extra=f"配列でなく {type(data).__name__} が格納されていました。",
-                )
-                continue
-
-            # States 3, 4: valid load
-            self.building_histories[b_id] = data
-
-            # 起動成功時バックアップスナップショット
-            try:
-                create_log_backup_snapshot(path, timestamp)
-            except Exception:
-                LOGGER.warning(
-                    "Failed to create startup backup for %s", b_id, exc_info=True,
-                )
-            # 既存のバックアップ一覧をログ（隔離時の選択肢になるため）
-            backups = list_log_backups(path)
-            LOGGER.debug(
-                "Building %s loaded (%d msgs); %d backup(s) available",
-                b_id, len(data), len(backups),
-            )
 
     def _quarantine_building(
         self,

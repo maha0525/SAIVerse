@@ -304,7 +304,7 @@ class GatewayMixin:
         mapping = getattr(self, "gateway_mapping", None)
         if not runtime or not mapping:
             return
-        history = self.building_histories.get(building_id, [])
+        history = self.get_building_history(building_id)
         persona_history = [
             entry for entry in history if entry.get("persona_id") == visitor.persona_id
         ]
@@ -395,7 +395,13 @@ class GatewayMixin:
                 "Gateway entry refused: building %s is quarantined", building_id,
             )
             return
-        history = self.building_histories.setdefault(building_id, [])
-        history.append(entry)
-        self.modified_buildings.add(building_id)
-        self._save_modified_buildings()
+        # DB が source of truth (Phase 2+3)。 add_building_event 経由で seq / message_id
+        # を独立採番する。
+        try:
+            from database.building_messages import insert_building_message
+            insert_building_message(self.SessionLocal, building_id, entry)
+        except Exception:
+            logging.warning(
+                "_append_gateway_history: failed to insert (bid=%s)", building_id,
+                exc_info=True,
+            )

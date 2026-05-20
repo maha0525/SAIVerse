@@ -627,6 +627,24 @@ class TrackLocalLog(Base):
     )
 
 
+class PersonaPulseCursor(Base):
+    """ペルソナごとの (per-building) pulse_cursor / entry_marker の永続化。
+
+    旧 conscious_log.json の pulse_cursors / entry_markers を移管したテーブル。
+    cursor_seq: その building でペルソナが「ここまで処理した」 seq (新採番空間)
+    entry_marker_seq: ペルソナが当該 building に入った時の seq (= ここより前は
+      入室以前の出来事として無視する基準)
+
+    詳細: docs/intent/building_memory_unified.md
+    """
+    __tablename__ = "persona_pulse_cursor"
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    BUILDING_ID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
+    CURSOR_SEQ = Column(Integer, nullable=False, default=0)
+    ENTRY_MARKER_SEQ = Column(Integer, nullable=False, default=0)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class BuildingMessage(Base):
     """Building のチャットログ。`cities/<bid>/log.json` 置き換え先。
 
@@ -649,6 +667,12 @@ class BuildingMessage(Base):
     client_message_id = Column(String(64), nullable=True)  # クライアント生成 UUID (idempotency_key)。NULL は重複可
     origin_track_id = Column(String(36), nullable=True)
     pulse_id = Column(String(36), nullable=True)
+    # migration script (scripts/migrate_building_logs_to_db.py) で過去 log.json
+    # を取り込んだ際の元 seq / 元 message_id。 通常の dual-write 経路では NULL。
+    # 取り込み時に重複 seq が発生したケースを失わずに全件保存しつつ、 既存
+    # AddonMessageMetadata 等との接続を traceable に保つために使う。
+    legacy_seq = Column(Integer, nullable=True)
+    legacy_message_id = Column(String(255), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     __table_args__ = (
         UniqueConstraint('building_id', 'seq', name='uq_building_msg_bid_seq'),
@@ -656,5 +680,6 @@ class BuildingMessage(Base):
         Index('idx_building_msg_bid_seq', 'building_id', 'seq'),
         Index('idx_building_msg_event', 'building_id', 'event_type'),
         Index('idx_building_msg_client_mid', 'client_message_id'),
+        Index('idx_building_msg_legacy_mid', 'building_id', 'legacy_message_id'),
     )
 

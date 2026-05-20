@@ -115,6 +115,12 @@ class SAIVerseManager(
         # Buildings whose in-memory history was modified since last save.
         # Used to scope explicit save calls so we never iterate the full path map.
         self.modified_buildings: Set[str] = set()
+        # SSE event_callback registry keyed by building_id. Populated by
+        # handle_user_input_stream while a user SSE is open; consumed by
+        # on_track_activated hook so main_line pulses triggered via deferred
+        # track activation can route events back to the user's SSE.
+        # See: docs/intent/pulse_dispatch.md §9.3 (on_track_activated 経由起動)
+        self._active_sse_callbacks: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
         # --- Phase 1: Data Loading ---
         self._init_database(db_path)
@@ -796,16 +802,10 @@ class SAIVerseManager(
     def _append_building_history_note(self, building_id: str, content: str) -> None:
         if not building_id:
             return
-        history = self.building_histories.setdefault(building_id, [])
-        history.append({
-            "role": "host", 
-            "content": content,
-            "timestamp": datetime.now().isoformat()
-        })
-        try:
-            self._save_building_histories([building_id])
-        except Exception:
-            logging.debug("Failed to save building history for %s", building_id, exc_info=True)
+        self.add_building_event(
+            building_id,
+            {"role": "host", "content": content},
+        )
 
     def _explore_city(self, persona_id: str, target_city_id: str):
         self.runtime.explore_city(persona_id, target_city_id)
@@ -1557,8 +1557,12 @@ class SAIVerseManager(
         logging.info("All autonomous conversation managers have been stopped.")
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
-        """指定されたBuildingの生の会話ログを取得する"""
-        return self.building_histories.get(building_id, [])
+        """指定された Building の生の会話ログを取得する (DB クエリ)。
+
+        Phase 2+3 以降は building_messages テーブルが source of truth。
+        """
+        from database.building_messages import fetch_building_messages
+        return fetch_building_messages(getattr(self, "SessionLocal", None), building_id)
 
     def get_building_id(self, building_name: str, city_name: str) -> str:
         """指定されたCityとBuilding名からBuildingIDを生成する"""

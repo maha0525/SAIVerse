@@ -180,16 +180,17 @@ class SEARuntime:
         finally:
             persona._current_pulse_origin_track_id = prev_pulse_track
 
-        # Post-response metabolism check
-        bh_before = len(self.manager.building_histories.get(building_id, []))
+        # Post-response metabolism check (DB ベースで件数比較)
+        from database.building_messages import fetch_max_seq
+        bh_before = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         try:
             self._maybe_run_metabolism(persona, building_id, event_callback)
         except Exception:
             LOGGER.exception("[metabolism] Post-response metabolism failed")
-        bh_after = len(self.manager.building_histories.get(building_id, []))
+        bh_after = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         if bh_before != bh_after:
             LOGGER.warning(
-                "[metabolism] building_histories[%s] changed during metabolism: %d -> %d",
+                "[metabolism] building_messages[%s] max_seq changed during metabolism: %d -> %d",
                 building_id, bh_before, bh_after,
             )
 

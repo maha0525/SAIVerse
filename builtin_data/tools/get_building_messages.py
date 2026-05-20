@@ -46,9 +46,12 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
     if not history_manager:
         raise RuntimeError("Persona has no history_manager")
 
-    hist = history_manager.building_histories.get(building_id, [])
+    hist = history_manager.get_building_history(building_id)
     if not hist:
         return "新規メッセージはありません"
+    # _mark_ingested で DB UPDATE する時に building_id を引けるよう埋め込む
+    for _m in hist:
+        _m["_building_id"] = building_id
 
     # Get pulse cursors for tracking what we've seen
     pulse_cursors = getattr(persona, "pulse_cursors", {})
@@ -252,11 +255,24 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
 
 
 def _mark_ingested(msg: Dict[str, Any], persona_id: str) -> None:
-    """Mark a message as ingested by this persona."""
+    """Mark a message as ingested by this persona (DB single-source-of-truth)。
+
+    DB の ingested_by カラムを更新するのが主目的。 in-memory dict も整合のため更新
+    (= caller がこの dict を続けて参照することがあるため)。
+    """
     try:
+        # in-memory dict 側 (= caller の検査ロジック整合性のため)
         bucket = msg.setdefault("ingested_by", [])
         if isinstance(bucket, list) and persona_id not in bucket:
             bucket.append(persona_id)
+        # DB 側
+        manager = get_active_manager()
+        session_factory = getattr(manager, "SessionLocal", None) if manager else None
+        building_id = msg.get("_building_id") or msg.get("building_id")
+        message_id = msg.get("message_id")
+        if session_factory and building_id and message_id:
+            from database.building_messages import mark_ingested as db_mark_ingested
+            db_mark_ingested(session_factory, building_id, message_id, persona_id)
     except Exception:
         LOGGER.warning("Failed to mark message as ingested by %s", persona_id, exc_info=True)
 
@@ -288,9 +304,11 @@ def auto_ingest_building_messages(
     if not history_manager:
         return 0
 
-    hist = history_manager.building_histories.get(building_id, [])
+    hist = history_manager.get_building_history(building_id)
     if not hist:
         return 0
+    for _m in hist:
+        _m["_building_id"] = building_id
 
     pulse_cursors = getattr(persona, "pulse_cursors", None)
     if pulse_cursors is None:

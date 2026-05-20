@@ -132,24 +132,17 @@ class PersonaCore(
         # Initialise SAIMemory bridge for long-term recall/summary
         self.sai_memory: Optional[SAIMemoryAdapter] = initialise_memory_adapter(self)
 
-        # Pull manager-level state for building modification tracking and
-        # quarantine awareness so HistoryManager can mark modifications and
-        # refuse mutations on quarantined buildings.
-        _mod_set = getattr(manager_ref, "modified_buildings", None) if manager_ref else None
+        # Quarantine awareness (defense-in-depth)。
         _quar_dict = getattr(manager_ref, "quarantined_buildings", None) if manager_ref else None
-
-        # Initialize managers that depend on loaded data
-        # Phase 1 dual-write: pass manager.SessionLocal so HistoryManager mirrors
-        # building log writes into the `building_messages` table.
+        # Building Memory は DB が source of truth。 manager.SessionLocal を渡す。
         _db_factory = getattr(manager_ref, "SessionLocal", None) if manager_ref else None
+
         self.history_manager = HistoryManager(
             persona_id=self.persona_id,
             persona_log_path=self.persona_log_path,
             building_memory_paths=self.building_memory_paths,
             initial_persona_history=self.messages,
-            initial_building_histories=building_histories,
             memory_adapter=self.sai_memory,
-            modified_buildings=_mod_set,
             quarantined_buildings=_quar_dict,
             db_session_factory=_db_factory,
         )

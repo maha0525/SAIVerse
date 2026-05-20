@@ -98,7 +98,7 @@ def get_chat_history(
         logging.info("[CHAT_HISTORY] Building %s is quarantined; returning empty history with flag", current_bid)
         return {"history": [], "has_more": False, "quarantined": True}
 
-    raw_history = manager.building_histories.get(current_bid, [])
+    raw_history = manager.get_building_history(current_bid)
     
     # Filter out non-displayable messages before pagination to ensure consistent counts
     raw_history = [

@@ -357,8 +357,8 @@ class PersonaGenerationMixin:
         prev_emotion_state = copy.deepcopy(self.emotion)
         actual_user_message = user_message
         if user_message is None and system_prompt_extra is None:
-            history = self.history_manager.building_histories.get(
-                self.current_building_id, []
+            history = self.history_manager.get_building_history(
+                self.current_building_id
             )
             if not history or history[-1].get("role") != "user":
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
@@ -484,8 +484,8 @@ class PersonaGenerationMixin:
         prev_emotion_state = copy.deepcopy(self.emotion)
         actual_user_message = user_message
         if user_message is None and system_prompt_extra is None:
-            history = self.history_manager.building_histories.get(
-                self.current_building_id, []
+            history = self.history_manager.get_building_history(
+                self.current_building_id
             )
             if not history or history[-1].get("role") != "user":
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
@@ -648,17 +648,21 @@ class PersonaGenerationMixin:
 
     def _mark_building_user_ingested(self, content: str) -> None:
         try:
-            building_hist = self.history_manager.building_histories.get(self.current_building_id, [])
+            building_hist = self.history_manager.get_building_history(self.current_building_id)
             if not building_hist:
                 return
+            from database.building_messages import mark_ingested
             for msg in reversed(building_hist):
                 if msg.get("role") != "user":
                     continue
                 if (msg.get("content") or "") != content:
                     continue
-                bucket = msg.setdefault("ingested_by", [])
-                if isinstance(bucket, list) and self.persona_id not in bucket:
-                    bucket.append(self.persona_id)
+                mark_ingested(
+                    self.history_manager._db_session_factory,
+                    self.current_building_id,
+                    msg.get("message_id"),
+                    self.persona_id,
+                )
                 break
         except Exception:
             logging.debug(

@@ -66,25 +66,12 @@ def load_session_data(persona) -> None:
     else:
         persona.messages = []
 
-    if persona.conscious_log_path.exists():
-        try:
-            data = json.loads(persona.conscious_log_path.read_text(encoding="utf-8"))
-            persona.conscious_log = data.get("log", [])
-            raw_cursors = data.get("pulse_cursors")
-            if raw_cursors is None:
-                raw_cursors = data.get("pulse_indices", {})
-            persona._raw_pulse_cursor_data = raw_cursors if isinstance(raw_cursors, dict) else {}
-            fmt = data.get("pulse_cursor_format")
-            persona._raw_pulse_cursor_format = fmt if isinstance(fmt, str) else "count"
-        except json.JSONDecodeError:
-            logging.warning("Failed to load conscious log, starting empty")
-            persona.conscious_log = []
-            persona._raw_pulse_cursor_data = {}
-            persona._raw_pulse_cursor_format = "count"
-    else:
-        persona.conscious_log = []
-        persona._raw_pulse_cursor_data = {}
-        persona._raw_pulse_cursor_format = "count"
+    # Phase 2+3: conscious_log.json は廃止 (= log フィールドは事実上死んでいたため
+    # 移管せず、 pulse_cursors / entry_markers は persona_pulse_cursor テーブルから
+    # initialise_pulse_state が直接ロードする)。 旧 JSON が残っていても触らない。
+    persona.conscious_log = []
+    persona._raw_pulse_cursor_data = {}
+    persona._raw_pulse_cursor_format = "seq"
 
 
 def initialise_memory_adapter(persona) -> Optional[SAIMemoryAdapter]:

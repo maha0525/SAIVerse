@@ -171,23 +171,47 @@ class PersonaHistoryMixin:
     def get_building_history(
         self, building_id: str, raw: bool = False
     ) -> List[Dict[str, str]]:
-        return self.history_manager.building_histories.get(building_id, [])
+        return self.history_manager.get_building_history(building_id)
 
     def _save_conscious_log(self) -> None:
-        self.conscious_log_path.parent.mkdir(parents=True, exist_ok=True)
-        data_to_save = {
-            "log": self.conscious_log,
-            "pulse_cursors": self.pulse_cursors,
-            "pulse_cursor_format": "seq",
-            "pulse_indices": self.pulse_cursors,
-        }
-        self.conscious_log_path.write_text(
-            json.dumps(data_to_save, ensure_ascii=False), encoding="utf-8"
-        )
+        """Phase 2+3: pulse_cursors / entry_markers を persona_pulse_cursor テーブルへ保存。
+        旧 conscious_log.json への書き込みは廃止。
+        """
+        session_factory = getattr(self, "SessionLocal", None)
+        if session_factory is None:
+            return
+        from database.models import PersonaPulseCursor
+        try:
+            db = session_factory()
+            try:
+                # 全 building 一度に upsert (SQLite: REPLACE INTO 相当)
+                all_bids = set(self.pulse_cursors.keys()) | set(self.entry_markers.keys())
+                for bid in all_bids:
+                    row = db.query(PersonaPulseCursor).filter_by(
+                        PERSONA_ID=self.persona_id, BUILDING_ID=bid
+                    ).first()
+                    if row is None:
+                        row = PersonaPulseCursor(
+                            PERSONA_ID=self.persona_id,
+                            BUILDING_ID=bid,
+                            CURSOR_SEQ=int(self.pulse_cursors.get(bid, 0)),
+                            ENTRY_MARKER_SEQ=int(self.entry_markers.get(bid, 0)),
+                        )
+                        db.add(row)
+                    else:
+                        row.CURSOR_SEQ = int(self.pulse_cursors.get(bid, row.CURSOR_SEQ))
+                        row.ENTRY_MARKER_SEQ = int(self.entry_markers.get(bid, row.ENTRY_MARKER_SEQ))
+                db.commit()
+            finally:
+                db.close()
+        except Exception:
+            logging.warning(
+                "Failed to save pulse_cursor to DB for %s", self.persona_id, exc_info=True
+            )
 
     def _mark_entry(self, building_id: str) -> None:
         try:
-            hist = self.history_manager.building_histories.get(building_id, [])
+            hist = self.history_manager.get_building_history(building_id)
             last_seq = 0
             if hist:
                 try:

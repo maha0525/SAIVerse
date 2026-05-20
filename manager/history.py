@@ -84,16 +84,8 @@ class HistoryMixin:
     SessionLocal: Any  # SQLAlchemy sessionmaker bound by SAIVerseManager init
 
     def _save_modified_buildings(self) -> None:
-        """Save and drain ``self.modified_buildings``. Convenience wrapper.
-
-        Callers should use this after any operation that may have mutated
-        ``building_histories``. It is safe to call when nothing was modified.
-        """
-        if not self.modified_buildings:
-            return
-        pending = set(self.modified_buildings)
-        self.modified_buildings.clear()
-        self._save_building_histories(pending)
+        """[Deprecated] DB が source of truth のため no-op。 互換のため残存。"""
+        return
 
     def add_building_event(
         self,
@@ -101,22 +93,12 @@ class HistoryMixin:
         msg: Dict[str, Any],
         heard_by: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Add a building-level event (movement, system, etc.) with proper
-        seq / heard_by / message_id assignment.
+        """Add a building-level event (movement, system, etc.) to building DB.
 
         Used by OccupancyManager and other code paths that need to inject
-        events into ``building_histories`` outside of a specific persona's
-        HistoryManager. Without this, direct ``setdefault().append()`` calls
-        would produce messages without ``seq``, breaking subsequent
-        ``_decorate_building_message`` calls (whose ``hist[-1].get('seq', 0)``
-        lookup would return 0, assigning new persona messages absurdly low
-        seq numbers that fall below their pulse_cursor and get skipped).
-
-        Skips quarantined buildings entirely. Marks the building as modified
-        so the next save call writes it.
-
-        ``heard_by`` should be the list of entity IDs that "perceive" the
-        event — typically the post-event occupants of the building.
+        events outside of a specific persona's HistoryManager. DB が seq /
+        message_id を独立採番する (= 旧 building_histories 経由の seq 衝突問題は消えた)。
+        Skips quarantined buildings entirely.
         """
         if building_id in self.quarantined_buildings:
             LOGGER.warning(
@@ -125,60 +107,31 @@ class HistoryMixin:
             )
             return None
 
-        hist = self.building_histories.setdefault(building_id, [])
-        # Find the most recent valid seq in history (skip events that lack seq).
-        last_seq = 0
-        for m in reversed(hist):
-            s = m.get("seq")
-            if isinstance(s, int) and s > 0:
-                last_seq = s
-                break
-        new_seq = last_seq + 1
-
         enriched: Dict[str, Any] = dict(msg)
         if "timestamp" not in enriched:
             enriched["timestamp"] = datetime.now().isoformat()
-        enriched["seq"] = new_seq
-        if not enriched.get("message_id"):
-            enriched["message_id"] = enriched.get("id") or f"{building_id}:{new_seq}"
         heard_set = sorted({str(eid) for eid in (heard_by or []) if eid})
         enriched["heard_by"] = heard_set
         if "ingested_by" not in enriched:
             enriched["ingested_by"] = []
 
-        hist.append(enriched)
-        self.modified_buildings.add(building_id)
-        # Phase 1 dual-write: mirror to building_messages table
-        # (docs/intent/building_memory_unified.md)
         try:
             from database.building_messages import insert_building_message
             session_factory = getattr(self, "SessionLocal", None)
-            insert_building_message(session_factory, building_id, enriched)
+            saved = insert_building_message(session_factory, building_id, enriched)
+            return saved or enriched
         except Exception:
             LOGGER.warning(
-                "add_building_event: failed to mirror to DB (bid=%s seq=%s)",
-                building_id, enriched.get("seq"),
+                "add_building_event: failed to insert (bid=%s)", building_id,
                 exc_info=True,
             )
-        return enriched
+            return None
 
     def reset_persona_seq_counters_for_building(
         self, building_id: str, value: int
     ) -> None:
-        """Reset the seq counter on every persona's HistoryManager.
-
-        Call this after restoring a building's log so subsequent new messages
-        get seq numbers above the restored max_seq, avoiding collision with
-        existing seqs and ensuring personas (whose pulse_cursor was clamped
-        to max_seq) actually see the new messages.
-        """
-        personas = getattr(self, "personas", None)
-        if not personas:
-            return
-        for persona in personas.values():
-            hm = getattr(persona, "history_manager", None)
-            if hm and hasattr(hm, "reset_seq_counter_for_building"):
-                hm.reset_seq_counter_for_building(building_id, value)
+        """[Deprecated] DB が seq を管理するため no-op。 互換のため残存。"""
+        return
 
     def clamp_persona_cursors_for_building(
         self, building_id: str, max_seq: int
@@ -234,74 +187,14 @@ class HistoryMixin:
                     )
 
     def _save_building_histories(self, building_ids: Iterable[str]) -> None:
-        """Persist in-memory building histories to disk atomically.
-
-        **Required**: explicit ``building_ids`` iterable. The legacy
-        no-arg "save everything based on dict.get(b_id, [])" was a footgun:
-        it silently overwrote files with ``[]`` whenever the in-memory dict
-        was incomplete. Callers MUST pass the set of buildings whose
-        in-memory state they actually changed (typically tracked via
-        ``manager.modified_buildings``).
-
-        **Skips quarantined buildings** entirely — those are corrupted and
-        the user must explicitly resolve them. **Skips buildings whose key
-        is missing from ``building_histories``** — that means the data was
-        not loaded (vs. intentionally empty), and we never destroy disk
-        truth based on missing in-memory state.
-
-        Uses tempfile + fsync + os.replace for atomic durability: either
-        the old file remains intact, or the new content is fully written.
-
-        Note: backup snapshots are created in ``_init_building_histories``
-        on successful load (known-good state). Shutdown does NOT snapshot —
-        the most recent known-good state is the one from startup.
-        """
-        if not building_ids:
-            return
-
-        for b_id in building_ids:
-            if b_id not in self.building_memory_paths:
-                LOGGER.warning(
-                    "_save_building_histories: unknown building_id %s — skipping",
-                    b_id,
-                )
-                continue
-            if b_id in self.quarantined_buildings:
-                LOGGER.warning(
-                    "_save_building_histories: building %s is quarantined — refusing to write",
-                    b_id,
-                )
-                continue
-            if b_id not in self.building_histories:
-                # キー不在 = 未ロード or 隔離前の中間状態。ディスクの正本を絶対に触らない。
-                LOGGER.warning(
-                    "_save_building_histories: building %s missing from in-memory dict — refusing to write (would destroy disk truth)",
-                    b_id,
-                )
-                continue
-
-            path = self.building_memory_paths[b_id]
-            hist = self.building_histories[b_id]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = path.with_suffix(path.suffix + ".tmp")
-            try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(hist, f, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_path, path)
-            except Exception:
-                try:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                except OSError:
-                    pass
-                raise
-
+        """[Deprecated] DB が source of truth のため no-op。 互換のため残存。"""
+        return
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
-        """Return the raw conversation log for a given building."""
-        return self.building_histories.get(building_id, [])
+        """Return the conversation log for a given building (DB クエリ)。"""
+        from database.building_messages import fetch_building_messages
+        session_factory = getattr(self, "SessionLocal", None)
+        return fetch_building_messages(session_factory, building_id)
 
     # --- World Editor: Backup/Restore Methods ---
 

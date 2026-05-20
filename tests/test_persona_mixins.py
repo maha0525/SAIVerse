@@ -34,6 +34,9 @@ class DummyHistoryManager:
     def get_recent_history(self, _limit):
         return []
 
+    def get_building_history(self, building_id):
+        return self.building_histories.get(building_id, [])
+
     @property
     def building_names(self):
         return {}

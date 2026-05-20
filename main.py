@@ -313,6 +313,17 @@ def main():
         migrate_database_in_place(str(db_path))
         logging.info("Database migration completed.")
 
+    # Building Memory 関連テーブル (Phase 2+3) を軽量パスで揃える。
+    # needs_migration が拾うのは「カラム差分」 のみで「テーブル追加」 は素早く確実に
+    # 適用したいため、 ALTER 系の軽量シンク経路を別途実行する。
+    # See docs/intent/building_memory_unified.md
+    try:
+        from database.session import engine as _bm_engine
+        from database.schema_sync import ensure_building_memory_tables
+        ensure_building_memory_tables(_bm_engine)
+    except Exception:
+        logging.warning("Building Memory schema sync failed (will rely on needs_migration path)", exc_info=True)
+
     # Version-aware upgrade: run before SAIVerseManager initialization (= before personas
     # are loaded). Each City and AI compares its LAST_KNOWN_VERSION against the current
     # SAIVerse version and runs the necessary upgrade handlers. NULL version is treated
