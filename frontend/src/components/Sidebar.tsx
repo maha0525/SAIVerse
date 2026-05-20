@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell, Package, AlertTriangle } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
@@ -327,7 +327,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                 {isQuarantined && (
                                     <AlertTriangle size={14} style={{ color: '#ff6666' }} />
                                 )}
-                                {status?.current_building_id === b.id && <Navigation size={14} style={{ opacity: 0.8 }} />}
+                                {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
                             </div>
                         );
                     })}
