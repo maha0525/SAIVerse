@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
 
-**ステータス**: 🟡 一部投稿済み (= PR-H #186 が 2026-05-19 に upstream 投稿、 残 Series A〜G は Phase X' で投稿予定)
+**ステータス**: 🟡 一部マージ + 一部 review 中 (= PR-J/K #195/#196 が 2026-05-20 merged、 PR-H #186 は同日 follow-up commit 投稿で再 review 待ち、 残 Series A〜G は Phase X' で投稿予定)
 **優先度**: medium
 **作成日**: 2026-05-13
-**最終更新**: 2026-05-19 (PR-H = Wi-Fi first-attempt fix 投稿 + PR-I = touch driver false positive filter の枠予約)
+**最終更新**: 2026-05-20 (PR-J/K #195/#196 merged、 PR-H = review 1 round 着信 → follow-up commit 投稿、 78/esp-wifi-connect upstream sync は maintainer 引き受け)
 **関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
 
 ## 背景
@@ -415,9 +415,9 @@ Phase 2' (= ペアリング UX) の実機検証中に発見した bug への即�
 
 | PR | URL | 状態 | base | 依存 |
 |---|---|---|---|---|
-| **PR #186** ([upstream link](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186)) | https://github.com/kisaragi-mochi/stackchan-mcp/pull/186 | 投稿済み (review 待ち、 2026-05-19) | upstream `main` (commit `b0e258f` 時点) | — |
+| **PR #186** ([upstream link](https://github.com/kisaragi-mochi/stackchan-mcp/pull/186)) | https://github.com/kisaragi-mochi/stackchan-mcp/pull/186 | review 1 round → follow-up 投稿、 再 review 待ち (2026-05-20) | upstream `main` (投稿時 `b0e258f`、 投稿後 maintainer 側で `aa01e50` / `37560e9` の 2 回 main merge) | — |
 
-ブランチ: `feature/fix-wifi-first-attempt-comeback-timer` (= 1 commit `72fb370`、 fork に push 済み)。 対応 commit は dev/integration の `6b4fa53`。
+ブランチ: `feature/fix-wifi-first-attempt-comeback-timer` (= 2 commit: 本体 `72fb370` + follow-up `47f09ac`、 fork に push 済み)。 対応 commit は dev/integration の `6b4fa53`。
 
 ### 内容
 
@@ -474,9 +474,21 @@ EOF
 
 cherry-pick で `Auto-merging firmware/components/78__esp-wifi-connect/wifi_configuration_ap.cc` が出ても conflict なしなら自動で merge される (= 今回はそのまま通った)。 conflict 出たら手動 resolve + `git cherry-pick --continue`。
 
+### Review 対応履歴
+
+**2026-05-20**: kisaragi-mochi さんから review 着信、 内容は 2 点。
+
+1. **Timeout 分岐で in-flight connect を cancel してない (要修正)**: `xEventGroupWaitBits` の戻り方は 3 経路ある — ① `WIFI_CONNECTED_BIT` (= success)、 ② `WIFI_FAIL_BIT` (= `WIFI_EVENT_STA_DISCONNECTED` 発火済み、 driver は disconnected state)、 ③ timeout (= `bits == 0`、 driver が `connecting` state のまま)。 ESP-IDF v5.5.4 `esp_wifi.h` attention 3 (`esp_wifi_connect()`) に「connecting/scanning state で呼ぶと `ESP_ERR_WIFI_STATE` を返す」 と明記されており、 ③ のままでは slow / event 落ち AP で retry が空振りする可能性。
+
+   → follow-up commit `47f09ac` で対応: `bits == 0` のときだけ `esp_wifi_disconnect()` を呼ぶ + `ESP_LOGW` を timeout / disconnect-fail で区別。 ローカル build (ESP-IDF v5.5.4, M5Stack CoreS3 / stackchan target) は通過 (`idf.py build` exit=0、 `xiaozhi.bin` 生成確認)。 実機 timeout 経路は手元 Buffalo AP では再現できない (常に `WIFI_FAIL_BIT` 経由で返る) ため未検証、 PR comment にその旨を明記した。
+
+2. **Upstream sync (78/esp-wifi-connect) の mirror オファー**: 該当 component `firmware/components/78__esp-wifi-connect/` は [78/esp-wifi-connect](https://github.com/78/esp-wifi-connect) (xiaozhi-esp32 ecosystem) の vendor copy (ESP Component Manager 経由、 `~3.1.3`)。 kisaragi-mochi さんから「PR #186 merge 後に upstream PR を mirror する、 authoring credit はまはー (`--author` 設定 + PR description に `Originally contributed by @maha0525 in kisaragi-mochi/stackchan-mcp#186` を明記)」 と申し出。
+
+   → オファー受諾、 PR comment で返信済み。 78/esp-wifi-connect 側の PR は #186 merge 後に kisaragi-mochi さん経由で出る、 まはー側の追加作業なし (新規 fork / branch も不要)。
+
 ### 結果待ち
 
-review feedback / merge 結果は本書末尾の「参考」 セクションに追記、 もしくは PR が closed されたら状態を更新する。
+PR #186 の merge を待ち、 merge されたら本セクションに結果を追記。 78/esp-wifi-connect 側の mirror PR も追跡対象 (= kisaragi-mochi さんから link 通知が来たらここに記録)。
 
 ## 追補: PR-I — touch driver false positive filter + format bug fix (Phase 5' 関連、 調査中、 2026-05-19 枠予約)
 
@@ -514,7 +526,7 @@ issue doc の「観測」 「6 event の log」 「観測差分」 セクショ�
 - **Limitations**: 観測は単一個体での結果、 個体差で threshold 調整が必要な可能性 (= configurable に)
 - **Test plan**: ローカル flash 後 24 時間 capture / 撫で 10 回 / 触らず 1 時間 etc.
 
-## 追補: PR-J/K — kPropertyTypeArray + Port A I2C generic tools (拡張モジュール対応の第一弾、 2026-05-20 投稿済み)
+## 追補: PR-J/K — kPropertyTypeArray + Port A I2C generic tools (拡張モジュール対応の第一弾、 2026-05-20 投稿 → 同日 merged)
 
 `docs/intent/stackchan_extension_modules.md` の C 案 (= 汎用口 + 個別 Unit プリセット + addon ドライバの 3 段階) のうち、 **汎用口の upstream PR** を 2 段に分けて投稿した。 stackchan-mcp 本家への fork からの PR で、 dev/integration で実機検証済 (= ENV III 経由)。
 
@@ -522,8 +534,8 @@ issue doc の「観測」 「6 event の log」 「観測差分」 セクショ�
 
 | PR | URL | 状態 | base | 依存 |
 |---|---|---|---|---|
-| **PR #195** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/195> | review folded (2026-05-20)、 merge 待ち | upstream `main` | — |
-| **PR #196** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/196> | review folded (2026-05-20)、 merge 待ち | upstream `main` | PR #195 |
+| **PR #195** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/195> | **merged** (2026-05-20、 merge commit `c6f8a74`) | upstream `main` | — |
+| **PR #196** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/196> | **merged** (2026-05-20、 merge commit `3a3569f`) | upstream `main` | PR #195 |
 
 ブランチ:
 - `feature/mcp-property-array-type` (= PR #195) HEAD `7720940`
@@ -570,7 +582,7 @@ kisaragi-mochi さん review が **Conventional Comments 形式** (`Suggested` /
   - `feature/dynamic-avatar-set` (= 10 commit、Phase 4.5 検証経路として活用中、Series E の出所、 2026-05-18 に `740d786` PSRAM peak fix 追加)
   - `feature/device-driven-audio-capture-with-hook` (= 4 commit、Phase 3' 検証経路、 Series F の出所)
   - `feature/coredump-partition` (= 1 commit、Phase 3' デバッグ基盤、 Series G の出所、 2026-05-18 追加)
-  - `feature/fix-wifi-first-attempt-comeback-timer` (= 1 commit、 Phase 2' 検証経路、 PR-H = #186 の出所、 2026-05-19 push 済み)
+  - `feature/fix-wifi-first-attempt-comeback-timer` (= 2 commit: 本体 + 2026-05-20 follow-up `47f09ac`、 Phase 2' 検証経路、 PR-H = #186 の出所)
   - (= PR-I 用ブランチ未作成、 issue 調査完了後に派生)
 - addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (現状 `feature/external-pcm-stream`、Phase 4.5 統合時に `dev/integration` に切替)
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
