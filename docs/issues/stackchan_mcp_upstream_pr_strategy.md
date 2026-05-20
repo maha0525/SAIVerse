@@ -514,6 +514,55 @@ issue doc の「観測」 「6 event の log」 「観測差分」 セクショ�
 - **Limitations**: 観測は単一個体での結果、 個体差で threshold 調整が必要な可能性 (= configurable に)
 - **Test plan**: ローカル flash 後 24 時間 capture / 撫で 10 回 / 触らず 1 時間 etc.
 
+## 追補: PR-J/K — kPropertyTypeArray + Port A I2C generic tools (拡張モジュール対応の第一弾、 2026-05-20 投稿済み)
+
+`docs/intent/stackchan_extension_modules.md` の C 案 (= 汎用口 + 個別 Unit プリセット + addon ドライバの 3 段階) のうち、 **汎用口の upstream PR** を 2 段に分けて投稿した。 stackchan-mcp 本家への fork からの PR で、 dev/integration で実機検証済 (= ENV III 経由)。
+
+### PR-J/K 概要
+
+| PR | URL | 状態 | base | 依存 |
+|---|---|---|---|---|
+| **PR #195** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/195> | review folded (2026-05-20)、 merge 待ち | upstream `main` | — |
+| **PR #196** | <https://github.com/kisaragi-mochi/stackchan-mcp/pull/196> | review folded (2026-05-20)、 merge 待ち | upstream `main` | PR #195 |
+
+ブランチ:
+- `feature/mcp-property-array-type` (= PR #195) HEAD `7720940`
+- `feature/mcp-i2c-generic-tools` (= PR #196) HEAD `c808fa2`
+
+### 内容
+
+**PR #195**: `firmware/main/mcp_server.{h,cc}` に `kPropertyTypeArray` (`PropertyElementType` で Integer / String の要素型) を追加。 既存 Boolean / Integer / String 型と並列、 純粋追加で既存 tool へ影響ゼロ。 `maxItems` cap (= `set_max_items` setter で post-construct 設定) と template default-value constructor の `kPropertyTypeArray` reject も含む (= 後者は review fold-in、 future tool author trap 回避)。
+
+**PR #196**: `firmware/main/boards/stackchan/{config.h, stackchan.cc}` に Port A I2C bus init (= I2C controller 0、 GPIO 2 SDA / GPIO 1 SCL) を追加し、 4 つの MCP tool (`self.i2c.scan` / `read` / `write` / `write_read`) を expose。 internal-IC bus (= I2C controller 1、 GPIO 12/11) との物理 controller 分離で「security by construction」 (= PMU 等の internal IC は構造的に到達不可)。 review で指摘された addr range 0x08..0x77 制約 (= Recommended) と bytes / write_bytes の 256 cap (= Suggested) も fold-in。
+
+### 検証
+
+ENV III (SHT30 0x44 + QMP6988 0x70) を Port A 物理接続して動作確認 (詳細: `docs/issues/stackchan_mcp_i2c_generic_tools.md` §「検証シナリオ」)。
+
+- scan で 0x44 + 0x70 を検出、 internal IC は見えない
+- QMP6988 chip ID = 0x5C (= write_read pattern)
+- SHT30 温度 32.07°C / 湿度 46.58% (= write + 15 ms wait + read pattern。 single write_read だと measurement 中 0xFF sentinel)
+- QMP6988 気圧 1010.4 hPa (= calibration register parse + Q-format compensation 経路、 M5Unit-ENV C 実装の Python 移植 と同値)
+
+### Deferred items (= upstream issue 化)
+
+review で挙げられた `Suggested` 3 件のうち、 fold-in しなかった 2 件は upstream issue として記録 (= future contributor が拾える形に):
+
+| Issue | 内容 | 由来 | Defer 理由 |
+|---|---|---|---|
+| **#200** | integer-array Property が decimal JSON を `valueint` で int truncate | PR #195 review item 1 | 現状 I2C bytes 用途は整数のみ、 将来 angle / PWM / coord 系で発火 |
+| **#201** | `i2c.scan` が main MCP task を最大 ~22 s hold | PR #196 review item 2 | 設計改修 scope (timeout 調整 / partial result / off-task probe)、 correctness 修正 先行 |
+
+### Review への learning (= 今後の PR に活かす)
+
+kisaragi-mochi さん review が **Conventional Comments 形式** (`Suggested` / `Recommended for landing`) で、 fold-in vs defer の判断ラインが明確だった。 今後の Series A-G PR 投稿でも:
+
+- description / response で `Suggested` / `Recommended` の framing を使う (= reviewer / contributor の判断コスト低下)
+- defer する item は review への fold-in 返信で「intentionally deferred、 理由 X」 を明示
+- defer item は upstream issue 化して可視化 (= 「私が見落とした」 と「明示的に defer した」 を区別できる)
+
+を採用する。
+
 ## 参考
 
 - 手元 fork のブランチ:
