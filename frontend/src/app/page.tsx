@@ -156,10 +156,20 @@ interface ActivityEntry {
 
 // File attachment types for upload
 interface FileAttachment {
-    base64: string;
+    id: string;             // unique key for React + async state replace
     name: string;
     type: 'image' | 'document' | 'audio' | 'video' | 'unknown';
     mimeType: string;
+    // Inline base64 (image/audio/document). Empty for video — see below.
+    base64?: string;
+    // Video flow uploads via multipart to /api/media/upload-video to avoid
+    // base64 ballooning browser memory, then references the saved file by
+    // saiverse:// URI. previewUrl is a blob URL used for the optimistic in-
+    // message preview (released by the browser on tab unload).
+    uri?: string;           // saiverse://video/<filename>
+    previewUrl?: string;    // blob URL for inline <video> preview
+    uploading?: boolean;    // video multipart upload still in flight
+    error?: string;         // upload failure message (chip turns red)
 }
 
 // File type detection
@@ -1310,6 +1320,17 @@ export default function Home() {
 
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
+        // Block send while a video is still uploading, or if any attachment errored.
+        const pendingUpload = attachments.find(a => a.uploading);
+        if (pendingUpload) {
+            alert(`動画「${pendingUpload.name}」のアップロード中です。完了まで少し待って。`);
+            return;
+        }
+        const errored = attachments.find(a => a.error);
+        if (errored) {
+            alert(`添付「${errored.name}」のアップロードに失敗してる: ${errored.error}\n削除してから送って。`);
+            return;
+        }
         isProcessingRef.current = true;
 
         // Optimistic update
@@ -1320,14 +1341,17 @@ export default function Home() {
             sender: userDisplayNameRef.current || undefined,
             avatar: userAvatarRef.current || undefined,
             images: attachments
-                .filter(a => a.type === 'image')
+                .filter(a => a.type === 'image' && a.base64)
                 .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
             audios: attachments
-                .filter(a => a.type === 'audio')
+                .filter(a => a.type === 'audio' && a.base64)
                 .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+            // Video preview uses the blob URL (no base64 copy); it's only valid for
+            // this session, but the next history fetch replaces it with a real
+            // /api/media/video/<name> URL from the server.
             videos: attachments
-                .filter(a => a.type === 'video')
-                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+                .filter(a => a.type === 'video' && a.previewUrl)
+                .map(a => ({ url: a.previewUrl as string, mime_type: a.mimeType })),
         };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
@@ -1370,12 +1394,11 @@ export default function Home() {
                 body: JSON.stringify({
                     message: userMsg.content,
                     building_id: currentBuildingIdRef.current || undefined,
-                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => ({
-                        data: a.base64,
-                        filename: a.name,
-                        type: a.type,
-                        mime_type: a.mimeType
-                    })) : undefined,
+                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => (
+                        a.type === 'video' && a.uri
+                            ? { uri: a.uri, filename: a.name, type: a.type, mime_type: a.mimeType }
+                            : { data: a.base64, filename: a.name, type: a.type, mime_type: a.mimeType }
+                    )) : undefined,
                     meta_playbook: sendMetaPlaybook,
                     args: sendArgs,
                     pre_spells: preSpells,
@@ -1408,6 +1431,9 @@ export default function Home() {
                     if (!line.trim()) continue;
                     try {
                         const event = JSON.parse(line);
+                        if (event.type !== 'ping') {
+                            console.log('[SSE][diag]', event.type, 'persona=', event.persona_id, 'pulse=', event.pulse_id);
+                        }
 
                         if (event.type === 'status') {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
@@ -1815,38 +1841,86 @@ export default function Home() {
         }
     };
 
+    // Video files are uploaded via multipart so we never base64-encode the
+    // whole file in the browser. The endpoint normalizes via ffmpeg
+    // (1FPS 480p, 90s cap) and returns a saiverse://video/<filename> reference
+    // we can hand off to /api/chat/send by URI instead of by inline data.
+    const uploadVideoToServer = async (file: File): Promise<{ uri: string }> => {
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch('/api/media/upload-video', { method: 'POST', body: fd });
+        if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try {
+                const body = await res.json();
+                if (body?.detail) detail = body.detail;
+            } catch { /* response wasn't JSON */ }
+            throw new Error(detail);
+        }
+        const data = await res.json();
+        if (!data?.filename) throw new Error('Server did not return a video filename');
+        return { uri: `saiverse://video/${data.filename}` };
+    };
+
+    const addFile = (file: File) => {
+        const mimeType = file.type || 'application/octet-stream';
+        const fileType = getFileType(file.name, mimeType);
+        const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        if (fileType === 'video') {
+            // Inline preview uses a blob URL — keeps the file referenced by handle
+            // instead of duplicating bytes as base64 in memory.
+            const previewUrl = URL.createObjectURL(file);
+            setAttachments(prev => [...prev, {
+                id, name: file.name, type: fileType, mimeType,
+                previewUrl, uploading: true,
+            }]);
+            uploadVideoToServer(file).then(({ uri }) => {
+                setAttachments(prev => prev.map(a =>
+                    a.id === id ? { ...a, uri, uploading: false } : a
+                ));
+            }).catch(err => {
+                console.error('Video upload failed:', err);
+                setAttachments(prev => prev.map(a =>
+                    a.id === id ? { ...a, uploading: false, error: String(err?.message || err) } : a
+                ));
+            });
+            return;
+        }
+
+        // image / audio / document: keep the existing base64 path (small payloads)
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const base64 = reader.result as string;
+            setAttachments(prev => [...prev, {
+                id, name: file.name, type: fileType, mimeType, base64,
+            }]);
+        };
+        reader.readAsDataURL(file);
+    };
+
     const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files.length > 0) {
             const files = Array.from(e.target.files);
-
-            files.forEach(file => {
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    const base64 = reader.result as string;
-                    const mimeType = file.type || 'application/octet-stream';
-                    const fileType = getFileType(file.name, mimeType);
-
-                    setAttachments(prev => [...prev, {
-                        base64,
-                        name: file.name,
-                        type: fileType,
-                        mimeType
-                    }]);
-                };
-                reader.readAsDataURL(file);
-            });
-
+            files.forEach(addFile);
             // Reset input to allow selecting the same files again
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
 
     const removeAttachment = (index: number) => {
-        setAttachments(prev => prev.filter((_, i) => i !== index));
+        setAttachments(prev => {
+            const target = prev[index];
+            if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+            return prev.filter((_, i) => i !== index);
+        });
     };
 
     const clearAllAttachments = () => {
-        setAttachments([]);
+        setAttachments(prev => {
+            prev.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
+            return [];
+        });
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
@@ -1947,23 +2021,7 @@ export default function Home() {
 
         const files = Array.from(e.dataTransfer.files);
         if (files.length === 0) return;
-
-        files.forEach(file => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64 = reader.result as string;
-                const mimeType = file.type || 'application/octet-stream';
-                const fileType = getFileType(file.name, mimeType);
-
-                setAttachments(prev => [...prev, {
-                    base64,
-                    name: file.name,
-                    type: fileType,
-                    mimeType
-                }]);
-            };
-            reader.readAsDataURL(file);
-        });
+        files.forEach(addFile);
     };
 
     return (
@@ -2396,21 +2454,25 @@ export default function Home() {
                             pointerEvents: 'auto'
                         }}>
                             {attachments.map((att, idx) => (
-                                <div key={idx} style={{
+                                <div key={att.id} style={{
                                     padding: '0.25rem 0.5rem',
-                                    background: '#eee',
+                                    background: att.error ? '#fde2e2' : '#eee',
                                     borderRadius: '4px',
                                     display: 'inline-flex',
                                     alignItems: 'center',
                                     gap: '0.5rem',
-                                    color: '#333'
+                                    color: att.error ? '#b91c1c' : '#333'
                                 }}>
                                     <span>{
                                         att.type === 'image' ? '🖼'
                                         : att.type === 'audio' ? '🎵'
                                         : att.type === 'video' ? '🎬'
                                         : '📄'
-                                    } {att.name}</span>
+                                    } {att.name}{
+                                        att.uploading ? ' (アップロード中…)'
+                                        : att.error ? ` (失敗: ${att.error})`
+                                        : ''
+                                    }</span>
                                     <button onClick={() => removeAttachment(idx)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
                                 </div>
                             ))}

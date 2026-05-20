@@ -346,10 +346,19 @@ from datetime import datetime
 from pathlib import Path
 
 class AttachmentData(BaseModel):
-    """Attachment data from frontend."""
-    data: str  # Base64 encoded
+    """Attachment data from frontend.
+
+    Two delivery modes are supported:
+    - `data` (base64 data URL) for small files like images / documents / audio.
+    - `uri` (saiverse:// reference to a file already uploaded via
+      /api/media/upload-*) for large files like video, to avoid base64
+      ballooning browser memory.
+    Exactly one of `data` or `uri` must be set per attachment.
+    """
+    data: Optional[str] = None  # Base64 encoded data URL
+    uri: Optional[str] = None   # saiverse://video/<filename> etc.
     filename: str
-    type: str  # 'image' | 'document' | 'unknown'
+    type: str  # 'image' | 'document' | 'audio' | 'video' | 'unknown'
     mime_type: str
 
 class SendMessageRequest(BaseModel):
@@ -670,6 +679,52 @@ def _store_video_attachment(
     }
 
 
+def _register_uploaded_video_by_uri(
+    att: AttachmentData,
+    manager,
+    building_id: str,
+) -> Dict[str, Any]:
+    """Register a video that was already uploaded + normalized via /api/media/upload-video.
+
+    Frontend uploads large video files directly via multipart to avoid base64
+    in-memory ballooning, then references the saved file by saiverse:// URI here.
+    No re-decode / re-normalize; we just locate the existing file and create
+    the video Item.
+    """
+    if not att.uri or not att.uri.startswith("saiverse://video/"):
+        raise RuntimeError(f"Invalid video URI: {att.uri!r}")
+    filename = att.uri.replace("saiverse://video/", "", 1)
+    if not filename or "/" in filename or "\\" in filename:
+        raise RuntimeError(f"Invalid video filename in URI: {att.uri!r}")
+
+    dest_path = Path.home() / ".saiverse" / "video" / filename
+    if not dest_path.exists():
+        raise RuntimeError(f"Video file not found for URI {att.uri!r}")
+
+    item_id = None
+    try:
+        item_id = manager.create_video_item_for_user(
+            name=att.filename,
+            description=f"User uploaded video: {att.filename}",
+            file_path=str(dest_path),
+            building_id=building_id,
+            is_open=True,
+            creator_id="user",
+            source_context='{"source": "upload"}',
+        )
+    except Exception as e:
+        logging.warning("Failed to create video item: %s", e, exc_info=True)
+
+    return {
+        "type": "video",
+        "uri": att.uri,
+        "mime_type": "video/mp4",
+        "source": "user_upload",
+        "path": str(dest_path),
+        "item_id": item_id,
+    }
+
+
 def _store_uploaded_attachment_v2(
     att: AttachmentData,
     manager,
@@ -679,6 +734,16 @@ def _store_uploaded_attachment_v2(
 ) -> Optional[Dict[str, Any]]:
     """Process attachment and create appropriate Item type."""
     try:
+        # URI-mode: file already uploaded via /api/media/upload-video.
+        # Skip base64 decode entirely. Only video uses this path today.
+        if att.uri and not att.data:
+            if att.type == "video":
+                return _register_uploaded_video_by_uri(att, manager, building_id)
+            raise RuntimeError(f"URI-mode attachments not supported for type {att.type!r}")
+
+        if not att.data:
+            raise RuntimeError("Attachment requires either 'data' or 'uri'")
+
         # Decode base64
         header, encoded = att.data.split(",", 1) if "," in att.data else ("", att.data)
         data = base64.b64decode(encoded)
