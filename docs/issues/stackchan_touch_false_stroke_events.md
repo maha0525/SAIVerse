@@ -1,8 +1,9 @@
 # Issue: stackchan-mcp の touch driver が誤検知 STROKE event を間欠的に発火
 
-**ステータス**: 🔲 未着手 (= 調査 + upstream PR 候補)
-**優先度**: low-medium (= 機能的影響はあるが間欠的、 Phase 5' 着手時に本格対応)
+**ステータス**: 🔲 未着手 (= 調査 + upstream PR 候補) — **現在最頻発、 次の着手対象**
+**優先度**: 🚨 high (2026-05-21 再評価) — 当初は低-中 (Phase 5' 着手時想定) だったが、 頻度が増しているため最優先対応に変更
 **作成日**: 2026-05-19
+**再評価日**: 2026-05-21
 **関連**: `docs/intent/stackchan_vessel.md` §F (= タッチ知覚の設計、 Phase 5' で正式実装)、 `temp/stackchan-mcp/firmware/main/boards/stackchan/stackchan.cc` (= touch driver 実装)、 `docs/issues/stackchan_mcp_upstream_pr_strategy.md` (= 修正は upstream PR 候補)
 
 ## 観測
@@ -113,4 +114,15 @@ Phase 5' (= タッチ知覚の実装) 着手前に本 issue を解決してお�
 - `docs/intent/stackchan_vessel.md` §F (= タッチ知覚の設計、 Phase 5' 着手時)
 - `temp/stackchan-mcp/firmware/main/boards/stackchan/stackchan.cc` (= touch driver 実装)
 - `docs/issues/stackchan_mcp_upstream_pr_strategy.md` (= 修正は PR-I 候補)
+- `docs/issues/stackchan_avatar_psram_peak.md` (= 副次として stroke reset 抑制を観測していたが、 false stroke が頻発する限り stroke reset 解消の再評価が要る)
+- `docs/issues/stackchan_speech_interrupt.md` (= タッチ長押しで発話停止を実装したい。 false stroke を解消してからの順序)
 - memory `feedback_esp_idf_nano_printf_no_zu.md` (= ESP-IDF nano-printf format 制約、 類似現象の前例)
+- memory `project_esp32s3_usb_cdc_reset_capture.md` (= USB CDC re-enumerate の制約)
+
+## ログ
+
+- 2026-05-19: issue 起案 (= Phase 2' 検証中に間欠 false STROKE を 3 件観測、 raw 値の signature が見えてきた)
+- 2026-05-21: **頻度が増し、 最頻発の不具合に**。 触れていないのに STROKE event が連発する状態。 同時に PC 側から **USB デバイス接続解除の通知音** が鳴っており、 stroke event 発火 → device 側で USB-CDC re-enumerate (= 実質 reset / disconnect) が走っている疑い。
+  - false stroke 単独の問題ではなく、 false stroke を契機に device が落ちている可能性が高い → ペルソナ稼働中の vessel 体感が大きく劣化
+  - 優先度を low-medium → high に引き上げ、 次の着手対象に
+  - 着手順序: 本 issue → (副次解消の再評価 = avatar_psram_peak.md) → speech_interrupt.md のタッチ長押し追加

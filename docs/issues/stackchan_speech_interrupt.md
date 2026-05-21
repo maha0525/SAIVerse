@@ -59,6 +59,18 @@ ESP32 firmware 側 (= `temp/stackchan-mcp-firmware/`) にも対応 MCP method `s
 
 「デバイス操作」 セクションに「発話を止める」 ボタン (赤系強調) を追加。 押下で `POST /device/speech/stop` を叩く。
 
+### 5. firmware 側 — タッチ長押しによる物理停止 trigger
+
+addon 管理 UI のボタンは「PC を開いてる時」 にしか押せない。 ｽﾀｯｸﾁｬﾝ単体で動かしている時 (= 食卓に置いて会話、 等) でも止められるよう、 **firmware の touch driver で長押し検出時に発話停止 path を発火**:
+
+- `StackChanBoard` の touch event 判定ロジックに「~1.5 秒以上の hold」 を `LONG_PRESS` event として追加
+- 検出時に device 側で audio buffer を flush + (= 上記 (2) の `self.audio_speaker.stop` と同等) MCP 経由で `speech_interrupt_requested` notification を gateway に通知
+- gateway は notification を受けて voice-tts の停止 API も叩く (= 合成中のジョブも止める)
+
+これで PC が遠い / 触りたくない場面でも、 ｽﾀｯｸﾁｬﾝの頭を 1.5 秒触れば止まる。 上記 (1)〜(4) の経路と同じエンドポイントを叩く形で実装すれば冪等性も保たれる。
+
+**留意点**: 現在頻発している false STROKE event (= [`stackchan_touch_false_stroke_events.md`](stackchan_touch_false_stroke_events.md)) が解消されてからでないと、 勝手に発話停止が走るリスクあり。 false stroke 対応の後に着手する順序が望ましい。
+
 ## upstream PR 影響
 
 `stop_audio` MCP tool + firmware 側 `self.audio_speaker.stop` の追加は upstream PR 候補として `docs/issues/stackchan_mcp_upstream_pr_strategy.md` に Series F として追補する必要あり。 着手時点で同 doc を更新する。

@@ -1,7 +1,7 @@
 # Issue: Stack-chan シリアルログを SAIVerse logs/ に統合
 
-**ステータス**: 🔲 未着手
-**優先度**: medium (Phase 2 のトラブルシューティング体験に直結)
+**ステータス**: ⚠️ 保留 (= 実装難易度 + UX トレードオフ要検討)
+**優先度**: low (= 価値はあるが UX 副作用大、 当面は手動 capture で凌ぐ)
 **作成日**: 2026-05-12
 **関連**:
 - `expansion_data/saiverse-stackchan-addon/firmware/src/main.cpp` (`Serial.println` / `Serial.printf`)
@@ -67,3 +67,9 @@ SAIVerse のセッションログ dir (`~/.saiverse/user_data/logs/<YYYYMMDD_HHM
 ## ログ
 
 - 2026-05-12: issue 起案。Phase 2 統合デバッグでシリアルログ取り逃しが致命的に効いたので可視化。親 issue `websocket_session_registry.md` から切り出し。
+- 2026-05-21: **優先度を low に下げ、 保留に変更**。 これまでの実機運用で「capture の開始/終了で必ず device が再起動する」 (= USB CDC re-enumerate に伴う挙動) と判明。 SAIVerse 内に常駐 capture を組み込むと:
+  - SAIVerse 起動/停止のたびに device reboot → vessel 経路の利用体感が劇的に悪化
+  - capture 自動オン/オフを切り替えるたびに reboot → トラブル時の調査体験すら悪化する恐れ
+  - 価値は認めつつ、 UX 副作用が大きすぎて常駐化は当面見送る
+  - 当面は手動 capture (`temp/stackchan_serial_capture.py` 等) で凌ぐ
+  - 関連 memory: [`project_esp32s3_usb_cdc_reset_capture.md`](../../memory/project_esp32s3_usb_cdc_reset_capture.md) (= USB CDC re-enumerate の制約整理)

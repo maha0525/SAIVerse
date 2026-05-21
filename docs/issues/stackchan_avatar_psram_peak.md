@@ -1,9 +1,10 @@
 # Issue: stackchan firmware: Avatar set Load の PSRAM peak でロード失敗
 
-**ステータス**: ✅ 実機検証済 (PSRAM peak 解消 + stroke reset 副次解消)
+**ステータス**: ⚠️ PSRAM peak は解消、 ただし stroke reset 副次解消は **再発の疑い** (= touch false positive 経路と紐づき再評価要)
 **優先度**: medium
 **作成日**: 2026-05-18
-**解決日**: 2026-05-19
+**初期解決日**: 2026-05-19 (= PSRAM peak 確定解消)
+**再評価日**: 2026-05-21
 **関連**:
 - firmware: `firmware/main/boards/stackchan/avatar_set_fetcher.cc:73-83` (既知 TODO コメント)
 - firmware: `firmware/main/boards/stackchan/stackchan.cc` (AvatarSet::Load 実装)
@@ -121,3 +122,6 @@ SAIVerse 側 `avatar_loader.py` で発覚した別バグを同時調査中に修
   - エア → エリスの swap で **`PSRAM allocation failed` が出ず**、エリス avatar が暗転なく LCD に表示 → **PSRAM peak issue 解決確認**
   - **副次効果**: 旧 firmware で再現していた「stroke 後 ~2.5 秒で device 自動 reset」(= 23:23 / 21:50 stuck の真因) が、新 firmware では **5 回連続 stroke 試行 (= 0.4 秒 - 11.4 秒 hold の幅) で 0 回発生**。推定根拠: stroke reaction window 中の memory pressure 起因 race が、peak 削減で踏みにくくなった。完全証明ではないが強い傍証
   - coredump 機能は reset 起きないので未実証 (= 保険として設定残置、今後 reset 起きた時に活用)。 upstream PR は Phase X' で PR-E1 cherry-pick リストに追加 (`docs/issues/stackchan_mcp_upstream_pr_strategy.md` 参照)
+- 2026-05-21: **副次解消 (stroke reset 抑制) は再評価が必要**。 触れていないのに STROKE event が頻発する状態が続いており、 そのタイミングで PC から **USB デバイス接続解除の通知音** が聞こえる。 つまり stroke event 発火 → device 側で何らかの USB-CDC re-enumerate (= 実質 reset / disconnect) が走っている可能性。
+  - 関連: [`stackchan_touch_false_stroke_events.md`](stackchan_touch_false_stroke_events.md) (= 現在最頻発、 high 優先度)
+  - PSRAM peak 自体は確定解消だが、 「stroke を契機に device が落ちる」 経路はまだ残っているかもしれない。 false stroke 側を抑え込んでから、 stroke reset が完全消滅するかを再確認する
