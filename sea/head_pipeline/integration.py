@@ -16,7 +16,8 @@ Section 群と message role / metadata の対応はこの層で握る:
 from __future__ import annotations
 
 import logging
-from typing import Any
+import time
+from typing import Any, Optional
 
 from sea.head_pipeline.pipeline import HeadPipeline, get_default_pipeline
 from sea.head_pipeline.types import LineHeadInput, NotificationLabel, RenderedSection
@@ -62,15 +63,66 @@ def build_line_head_input(
         or getattr(persona, "DEFAULT_MODEL", None)
         or "default"
     )
+    model_key_str = str(model_key)
+
+    anchor_updated_at, cache_ttl_seconds = _resolve_anchor_ttl_state(
+        persona, manager, model_key_str,
+    )
+
     return LineHeadInput(
         persona_id=persona_id,
         line_id=line_id,
         line_role=line_role,
-        model_key=str(model_key),
+        model_key=model_key_str,
         current_building_id=building_id,
         persona=persona,
         manager=manager,
+        anchor_updated_at=anchor_updated_at,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
+
+
+def _resolve_anchor_ttl_state(
+    persona: Any, manager: Any, model_key: str,
+) -> tuple[Optional[float], Optional[int]]:
+    """``METABOLISM_ANCHORS[model_key].updated_at`` を epoch seconds として取得、
+    同 model の cache TTL (秒) と組で返す。
+
+    LLM 呼び出し成功後に ``_touch_anchor_after_llm_call`` が touch する updated_at が
+    prompt cache の真の起点 (= 最後の cache 書き込み時刻)。 これと TTL を ctx に
+    積むことで、 ``ensure_snapshot`` が「TTL 超えたら snapshot も再 capture」 を
+    判定できる。 anchor 不在 (初期状態 / load 失敗) / model 不明時は両方 None で返し、
+    判定スキップ = 従来挙動になる。
+    """
+    if not manager or not model_key:
+        return (None, None)
+    sea_runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    if sea_runtime is None:
+        return (None, None)
+
+    load_anchors = getattr(sea_runtime, "_load_anchors", None)
+    get_validity = getattr(sea_runtime, "_get_anchor_validity_seconds", None)
+    if load_anchors is None or get_validity is None:
+        return (None, None)
+
+    try:
+        anchors = load_anchors(persona) or {}
+        entry = anchors.get(model_key)
+        if not entry:
+            return (None, None)
+        updated_at_iso = entry.get("updated_at")
+        if not updated_at_iso:
+            return (None, None)
+        from datetime import datetime
+        updated_at_epoch = datetime.fromisoformat(updated_at_iso).timestamp()
+        validity = int(get_validity(model_key))
+        return (updated_at_epoch, validity)
+    except Exception:
+        LOGGER.warning(
+            "head_pipeline: failed to resolve anchor TTL state persona=%s model=%s",
+            getattr(persona, "persona_id", "?"), model_key, exc_info=True,
+        )
+        return (None, None)
 
 
 def inject_diff_notifications(
@@ -141,9 +193,21 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
     load_from_store が成功しても、登録済み Section のうち snapshot.sections に
     入っていないものがあれば (= 旧 schema 等で deserialize が失敗した) 自己修復で
     capture_all を走らせて欠損を埋める。
+
+    加えて、 ctx に anchor TTL 状態 (= ``anchor_updated_at`` + ``cache_ttl_seconds``)
+    が積まれていて TTL を超過していたら、 snapshot 全体を再 capture する。
+    prompt cache TTL が切れたタイミングでは「head 不変による cache hit」 の根拠が
+    消えるので、 cache hit を諦めて最新状態を反映する方が情報量で勝る。
     """
     if pipeline.has_snapshot(ctx.persona_id, ctx.line_id):
         snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.line_id)
+        if _is_anchor_ttl_expired(ctx):
+            LOGGER.info(
+                "head_pipeline: anchor TTL expired (in-memory snapshot), recapturing persona=%s line=%s",
+                ctx.persona_id, ctx.line_id,
+            )
+            pipeline.capture_all(ctx)
+            return
         expected_names = {s.name for s in pipeline.registry.all_sections()}
         actual_names = set((snapshot.sections if snapshot is not None else {}).keys())
         if expected_names - actual_names:
@@ -151,12 +215,32 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
         return
     if pipeline.load_from_store(ctx.persona_id, ctx.line_id):
         snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.line_id)
+        if _is_anchor_ttl_expired(ctx):
+            LOGGER.info(
+                "head_pipeline: anchor TTL expired (loaded snapshot), recapturing persona=%s line=%s",
+                ctx.persona_id, ctx.line_id,
+            )
+            pipeline.capture_all(ctx)
+            return
         expected_names = {s.name for s in pipeline.registry.all_sections()}
         actual_names = set((snapshot.sections if snapshot is not None else {}).keys())
         if expected_names - actual_names:
             pipeline.capture_all(ctx)
         return
     pipeline.capture_all(ctx)
+
+
+def _is_anchor_ttl_expired(ctx: LineHeadInput) -> bool:
+    """``anchor_updated_at + cache_ttl_seconds < now`` なら True。
+
+    どちらか None なら判定スキップ (False)。 anchor は LLM 呼び出し成功時にのみ
+    touch されるため、 anchor.updated_at が prompt cache 書き込みの真の起点。
+    判定で True を返した場合、 呼び出し側は snapshot を全 Section 再 capture する。
+    """
+    if ctx.anchor_updated_at is None or ctx.cache_ttl_seconds is None:
+        return False
+    elapsed = time.time() - ctx.anchor_updated_at
+    return elapsed > ctx.cache_ttl_seconds
 
 
 def render_head_messages(
