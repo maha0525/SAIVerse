@@ -1388,7 +1388,22 @@ export default function Home() {
         // fetch retry 等で同じ送信が複数回 backend に届いても、 backend は
         // UNIQUE(client_message_id) で既存行を返すだけで二重 INSERT しない。
         // See: docs/intent/building_memory_unified.md §B-2
-        const clientMessageId = crypto.randomUUID();
+        //
+        // 注: crypto.randomUUID() は Secure Context 限定なので、 Tailscale
+        // 経由スマホ等 (http://100.x.x.x:3000) では throw する。 そのケース
+        // では非 secure context でも使える getRandomValues で UUID v4 を
+        // 手組みするフォールバックに落ちる。
+        const clientMessageId = (() => {
+            if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                try { return crypto.randomUUID(); } catch { /* fall through */ }
+            }
+            const bytes = new Uint8Array(16);
+            crypto.getRandomValues(bytes);
+            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
+            const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+            return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        })();
 
         try {
             // C-2: /chat/utter は発言契機入室。 target_building_id (= UI 上で
