@@ -126,3 +126,77 @@ Phase 5' (= タッチ知覚の実装) 着手前に本 issue を解決してお�
   - false stroke 単独の問題ではなく、 false stroke を契機に device が落ちている可能性が高い → ペルソナ稼働中の vessel 体感が大きく劣化
   - 優先度を low-medium → high に引き上げ、 次の着手対象に
   - 着手順序: 本 issue → (副次解消の再評価 = avatar_psram_peak.md) → speech_interrupt.md のタッチ長押し追加
+
+- 2026-05-21 (夜、 新フォーマット log 観測): PR #206 (touch event log readability) merge 前提の修正済 firmware で log 取り直し。 約 5 時間で **false stroke 8 件** 観測 + 真正 touch 2 件 (= 19:00 前後の動作確認時のもの)。 シグネチャ判明:
+
+  | | start_raw | ch decode | duration | zone |
+  |---|---|---|---|---|
+  | 真正 TAP / STROKE (2 件) | 0x03 | **H**000 | 0.4 / 1.2 秒 | 100 |
+  | False STROKE (7 件 / 8 件) | 0x01 | **L**000 | **6.6 〜 11.7 秒** | 100 |
+  | False STROKE outlier (1 件、 20:52) | 0x03 | **H**000 | 6.0 秒 | 100 |
+
+  - **3 つの distinct 軸**: (1) **強度** — 真正は CH1 が H レベル、 false は 7/8 が L レベル、 (2) **zone** — false 全部 CH1 単独、 CH2/CH3 は一度も発火しない、 (3) **duration** — 真正は < 1.5 秒、 false は全部 ≥ 6 秒
+  - **仮説**: CH1 配線 / sensor の baseline drift。 環境因子 (温度・湿度・周囲電界) が baseline をしきい値の上に持ち上げて、 sensor が「触られてる」 と継続誤判定。 CH1 限定 + L レベル + 持続時間長、 が傍証
+  - **20:52 H outlier**: まはー作業中に作業者が触った可能性 (= まはー自己申告)、 もしくは静電放電 / 物理接触の一瞬 / 強い EMI バーストの別メカニズム
+
+- 2026-05-21 (夜、 修正方針確定): **案 A (= 強度フィルタ) で対応** に決定。
+  - 実装: `HandleStroke` / `HandleTap` の判定前に `press_start_output1_raw_` の全 zone レベルを精査し、 M (10) 以上の zone が一つも無ければ event 発火を抑止
+  - 8 件中 7 件を弾く、 真正は通過 (= H レベルから始まる)、 物理長押し UX の余地を残す
+  - **着手前の追加観測**: 真正 touch で「L 単独」 が一度も出ないことを確認したい (= 案 A の安全性検証)、 まはーが手動で何度か touch して採取中
+  - 残る 20:52 H outlier 級が継続して観測されたら案 B (duration フィルタ、 例 > 5 秒) を後続で追加検討
+
+- 2026-05-22 (深夜、 案 B 実装 → datasheet 入手 → 根本原因仮説 → 失敗): 大量の情報整理中なので次セッションへのハンドオフを兼ねて記録。
+
+  ### 経緯
+  1. **案 B (duration > 5s + L-only filter)** を `stackchan.cc` の falling-edge handler に実装、 加えて `Si12T::ResetReference(channel_mask)` メソッドを追加 (= 抑止時に該当 ch の baseline 強制再キャリブを kick する補助動作)。 build + flash 済、 数時間運用で false stroke ゼロ確認 (= 抑止 or 自然減のどちらかは不明)、 真正 touch H/M/L 全部正常発火を確認。
+  2. **datasheet (`C:\Users\shuhe\Downloads\Si12T_Datasheet_EN.pdf`、 Nanjing Zhongke Microelectronic Si12T rev 0.1 2023/11/13) を入手して精読**。 重大発見:
+     - chip vendor は **AD Semiconductor TSM12 ではなく Nanjing Zhongke Microelectronic 製 Si12T**。 register map は TSM12 系と似てるが別物
+     - §12.2.4 Ref_rst1 (0x0A) の reset value は **`0xFE` (= Ch1 bit のみ 0、 Ch2-Ch8 は 1)**
+     - §1 Introduction: 「the embedded power button function on channel 1」 = **Ch1 は意図的に「電源ボタン」 用に baseline auto-recalibration が default で OFF**
+     - bit description: "0 = not enable reference value reset, 1 = enable reference value reset"
+     - **これが false stroke が CH1 単独で発生する根本原因と整合**: Ch1 だけ baseline drift が自動補正されないため、 数十分かけて drift が累積し L しきい値 (0.85%) を超えて sustained false 「press」 になる
+  3. **「真の根本対処は Begin() で Ref_rst1 = 0xFF を書く」 と判断**。 まはーから「filter 不要、 偽陰性リスクを取らずに済む」 と同意得て filter を撤去 + `Si12T::Begin()` 末尾に `SafeWriteReg(REG_REF_RST, 0xFF)` を追加。 build + flash 実行。
+  4. **結果: タッチが完全に反応しなくなった**。 即時 revert を試みたが、 まはーから「原因分かってないのに戻すな」 と指摘されて中断。
+
+  ### 現状 (2026-05-22 セッション末)
+  - **device**: 壊れた版 (= Ref_rst write 入りの firmware) が flash されたまま、 touch 一切不可
+  - **working tree** (`dev/integration` branch): Ref_rst write は私が削除済 (uncommitted)。 ただし以下は残ったまま:
+    - `Si12T::ResetReference()` メソッド (= 将来の診断用 helper、 呼び出し元なし)
+    - falling-edge handler の filter は撤去済 (= 元の `HandleStroke(duration_ms)` 直叩きに戻ってる)
+    - `press_start_*` snapshot 機構 (= PR #206 で upstream にも投稿済の log readability 機能)
+  - **capture script**: 私の `Stop-Process` で kill 済の可能性、 要確認 (= 次セッションで `Get-WmiObject Win32_Process -Filter "name='python.exe'"` で stackchan_serial_capture を探す)
+
+  ### 仮説プール (= 次セッションで検証する)
+
+  **(A) TCAL / FTC タイミング問題 (最有力)**
+  - datasheet §9: 「The time of self-examination after reset」 = TCAL 120 ms (typical)
+  - datasheet §12.2.2: FTC[1:0] default 01 = 10 秒、 chip が aggressive キャリブモードな期間
+  - 現状の `Si12T::Begin()` は `SafeWriteReg(REG_CTRL, 0x03)` (= sleep wake) → 即座に `Output1 read` → 直後に `Ref_rst1 write 0xFF` を実行 (= 数 µs スパン)
+  - **120ms TCAL or 10s FTC の最中に Ref_rst1 を書くと chip 内部状態が破綻**、 全 channel の touch detect が機能しなくなる可能性
+  - 検証方法: write 前に `vTaskDelay(pdMS_TO_TICKS(200))` (= TCAL 後) を入れて再 build → flash で touch 復活 + false stroke 抑止確認
+
+  **(B) bit semantics 逆解釈 (弱い)**
+  - datasheet 記述: "0 = not enable, 1 = enable" は誤読の可能性
+  - ただし default が Ch2-Ch12 = 1 で **これらは normal に touch detect 動作中**、 矛盾するので弱い
+
+  **(C) 1 はワンショット信号で chip が内部 clear (弱い)**
+  - datasheet の "When Chx is set, the reference value for each channel will be updated" がワンショット意味
+  - ただし default 値が 1 なのは矛盾
+
+  **(D) I2C write の silent failure (要計測)**
+  - `esp_err_t` は OK 返してたが chip 側で書き込み拒否の可能性
+  - 検証: write 後に `SafeReadReg(REG_REF_RST, ...)` で読み戻し、 期待値と一致するか log で確認
+
+  ### 次セッション復帰手順 (推奨順序)
+
+  1. **device 復旧**: `cd temp/stackchan-mcp/firmware && idf.py flash` で現 working tree (= Ref_rst write なし版) を flash。 capture script を再起動するなら `~/miniconda3/envs/SAIVerse/python.exe /c/Users/shuhe/workspace/SAIVerse/temp/stackchan_serial_capture.py` を background で。 まはー側で touch 動作確認
+  2. **仮説 (A) 検証**: `Si12T::Begin()` の `SafeWriteReg(REG_CTRL, 0x03)` 直後に `vTaskDelay(pdMS_TO_TICKS(200));` 追加、 末尾に `SafeWriteReg(REG_REF_RST, 0xFF)` 再追加。 加えて write 直後に `SafeReadReg(REG_REF_RST, ...)` で読み戻して log。 build + flash → touch 動作確認 → false stroke 発生監視 (= 最低 1 時間)
+  3. (A) 失敗の場合: delay を 10500ms (= FTC 10 秒 + 余裕) に拡張して再試行
+  4. (A) (B) 両方失敗の場合: filter (= 案 B) を復活させて運用、 root cause 対処は諦める or 別ルート (= sensitivity register tune、 別チップ調査) を検討
+
+  ### 参考: working tree 内の関連ファイル
+  - `firmware/main/boards/stackchan/stackchan.cc` (= Si12T クラス、 PollTouchpad、 HandleStroke、 etc.)
+  - 該当 git branch: `dev/integration`
+  - upstream PR #206 (= log readability、 merge 待ち) で `press_start_*` snapshot は既に上流に行ってる
+  - Si12T datasheet: `C:\Users\shuhe\Downloads\Si12T_Datasheet_EN.pdf` (= まはー手元)
+  - 関連 issue: 本 issue + `docs/issues/stackchan_avatar_psram_peak.md` (= stroke reset 副次解消が false stroke 抑止次第)
