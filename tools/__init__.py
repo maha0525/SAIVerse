@@ -9,6 +9,7 @@ Supports both:
   - Subdirectories with schema.py file (for git-cloned tool repos)
 """
 import importlib.util
+import inspect
 import logging
 import os
 import pkgutil
@@ -28,8 +29,42 @@ SPELL_TOOL_NAMES: set[str] = set()  # Tools available as spells (invoked via /sp
 SPELL_TOOL_SCHEMAS: Dict[str, ToolSchema] = {}  # Spell tool schemas for system prompt generation
 
 
+def _wrap_with_building_gate(name: str, building_ids: List[str], func: Callable) -> Callable:
+    """Wrap a tool callable to enforce the ``building_ids`` execute-time gate.
+
+    Applied at registration time so native and MCP tools share the same gate
+    semantics. The gate consults the active persona's ``current_building_id``
+    via ``tools.context`` and returns an error string when the persona is
+    outside the allowed buildings. Detail: docs/intent/stackchan_vessel.md
+    A-3-c.
+    """
+    if inspect.iscoroutinefunction(func):
+        async def _async_gated(**kwargs: Any) -> Any:
+            from tools.mcp_client import check_building_gate
+            gate_error = check_building_gate(name, building_ids)
+            if gate_error is not None:
+                return gate_error
+            return await func(**kwargs)
+
+        _async_gated.__wrapped__ = func  # type: ignore[attr-defined]
+        return _async_gated
+
+    def _sync_gated(**kwargs: Any) -> Any:
+        from tools.mcp_client import check_building_gate
+        gate_error = check_building_gate(name, building_ids)
+        if gate_error is not None:
+            return gate_error
+        return func(**kwargs)
+
+    _sync_gated.__wrapped__ = func  # type: ignore[attr-defined]
+    return _sync_gated
+
+
 def _add_registered_tool(name: str, schema: ToolSchema, func: Callable) -> None:
     """Register a tool into all in-memory registries."""
+    schema_building_ids = getattr(schema, "building_ids", None)
+    if schema_building_ids:
+        func = _wrap_with_building_gate(name, list(schema_building_ids), func)
     TOOL_REGISTRY[name] = func
     OPENAI_TOOLS_SPEC.append(oa.to_openai(schema))
     GEMINI_TOOLS_SPEC.append(gm.to_gemini(schema))

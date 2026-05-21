@@ -42,6 +42,46 @@ from tools.context import get_active_manager, get_active_persona_id
 LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 120
+
+
+def check_building_gate(
+    tool_name: str,
+    building_ids: Optional[List[str]],
+) -> Optional[str]:
+    """Execute-time gate for ``building_ids``-restricted tools.
+
+    Returns an error message string when the active persona is outside the
+    allowed buildings; returns None when the tool may proceed. Shared by
+    native tools (wrapped in ``tools.__init__._add_registered_tool``) and
+    MCP tools (wrapped in ``_make_mcp_tool_wrapper``) so the gate semantics
+    live at a single point. Detail: docs/intent/stackchan_vessel.md A-3-c
+    """
+    if not building_ids:
+        return None
+    persona_id_for_gate = get_active_persona_id()
+    active_manager = get_active_manager()
+    current_building_id: Optional[str] = None
+    if active_manager is not None and persona_id_for_gate:
+        persona_obj = (
+            getattr(active_manager, "all_personas", {}).get(persona_id_for_gate)
+            or getattr(active_manager, "personas", {}).get(persona_id_for_gate)
+        )
+        current_building_id = (
+            getattr(persona_obj, "current_building_id", None)
+            if persona_obj is not None else None
+        )
+    if current_building_id is None or current_building_id not in building_ids:
+        LOGGER.info(
+            "tool execute-time gate: blocked %s persona=%s building=%s allowed=%s",
+            tool_name, persona_id_for_gate, current_building_id,
+            sorted(str(b) for b in building_ids),
+        )
+        return (
+            f"Error: ツール '{tool_name}' は現在の Building "
+            f"({current_building_id or '不明'}) からは実行できません。"
+            f"許可されている Building: {', '.join(str(b) for b in building_ids)}"
+        )
+    return None
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_thread: Optional[threading.Thread] = None
 
@@ -803,6 +843,18 @@ class MCPClientManager:
         """
         meta_info = self._registered_tools.get(tool_name)
         if not meta_info:
+            # Native (non-MCP) tool: consult SPELL_TOOL_SCHEMAS so the
+            # building_ids filter applies symmetrically. Without this,
+            # native tools that declare building_ids in their ToolSchema
+            # (e.g. saiverse-stackchan-addon's see / env3) bypass the
+            # Phase 4' / A-3-c visibility gate.
+            from tools import SPELL_TOOL_SCHEMAS
+
+            schema = SPELL_TOOL_SCHEMAS.get(tool_name)
+            if schema is not None and building_id is not None:
+                schema_building_ids = getattr(schema, "building_ids", None)
+                if schema_building_ids and building_id not in schema_building_ids:
+                    return False
             return True
 
         # building_ids フィルタ: building_id を渡された場合のみ評価。
@@ -1333,40 +1385,10 @@ def _make_mcp_tool_wrapper(
     per-persona instance.
     """
     async def _mcp_tool_wrapper(**kwargs: Any) -> str:
-        # Phase 4 (cached_head_architecture): Building 単位 visibility の execute-time gate.
-        # 該当ツールに building_ids 制約があり、ペルソナの現在地がそのリストに
-        # 含まれていない場合は実行を拒否する。Spell 一覧の cache 安定性 (= 移動しても
-        # head が変わらない設計) のため、ペルソナは古い building の Spell 一覧を
-        # 見続けて誤って呼ぶことがあり得る。その安全網として機能する。
-        # 詳細: docs/intent/cached_head_architecture.md §7 Phase 4
-        namespaced_name = f"{qualified_name}__{tool_name}"
-        meta_info = manager._registered_tools.get(namespaced_name) or {}
-        building_ids = meta_info.get("building_ids")
-        if building_ids:
-            persona_id_for_gate = get_active_persona_id()
-            active_manager = get_active_manager()
-            current_building_id: Optional[str] = None
-            if active_manager is not None and persona_id_for_gate:
-                persona_obj = (
-                    getattr(active_manager, "all_personas", {}).get(persona_id_for_gate)
-                    or getattr(active_manager, "personas", {}).get(persona_id_for_gate)
-                )
-                current_building_id = (
-                    getattr(persona_obj, "current_building_id", None)
-                    if persona_obj is not None else None
-                )
-            if current_building_id is None or current_building_id not in building_ids:
-                LOGGER.info(
-                    "MCP tool execute-time gate: blocked %s persona=%s building=%s allowed=%s",
-                    namespaced_name, persona_id_for_gate, current_building_id,
-                    sorted(str(b) for b in building_ids),
-                )
-                return (
-                    f"Error: ツール '{namespaced_name}' は現在の Building "
-                    f"({current_building_id or '不明'}) からは実行できません。"
-                    f"許可されている Building: {', '.join(str(b) for b in building_ids)}"
-                )
-
+        # building_ids の execute-time gate は ``tools.__init__._add_registered_tool``
+        # で施される共通ラッパーが担う (= native / MCP 両方で対称)。詳細は
+        # ``check_building_gate`` の docstring と
+        # docs/intent/cached_head_architecture.md §7 Phase 4 を参照。
         if scope == "per_persona":
             persona_id = get_active_persona_id()
             if not persona_id:
