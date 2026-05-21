@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
 
-**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A〜F + PR-B/C + Series E/L/M が 2026-05-21 一斉投稿済み = #207〜#217、 PR-G coredump のみ未送)
+**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A〜F + PR-B/C + Series E/L/M が 2026-05-21 一斉投稿済み = #207〜#217、 Codex / maintainer の review 対応も同日中に完了、 PR-G coredump のみ未送)
 **優先度**: medium
 **作成日**: 2026-05-13
-**最終更新**: 2026-05-21 (PR-A1〜A4 / PR-B / PR-C / PR-E1/E2 / PR-F / PR-I / PR-L/M を一斉投稿 = #206〜#217、 PR-D は upstream で吸収済 = 不要、 PR-G のみ未送)
+**最終更新**: 2026-05-21 (一斉投稿 → Codex auto-review → maintainer review → P1/P2 全件対応の連続作業)
 **関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
 
 ## 背景
@@ -160,6 +160,61 @@ PR ごとに maintainer とディスカッションが入る前提で、各 PR r
 - 判断軸: (1) 既存 Series の commit と無関係 (= base が独立)、 (2) 修正範囲が局所、 (3) 実機 Before/After log が揃ってる、 の 3 つを満たすなら例外として即時投稿可
 
 「実機で本当に有用だった」 を示すための「Phase 全部終わってから」 制約は、 Series A〜G の **音声経路 / avatar / coredump 等の構造的変更** に対する制約で、 局所 bug fix を留め置く根拠にはならない。 後者は早く投稿するほど upstream ユーザー全員が恩恵を受ける。
+
+## 2026-05-21 レビュー対応ラウンド
+
+12 PR (#206〜#217) 一斉投稿後、 Codex auto-review と maintainer
+(kisaragi-mochi) review を同日中に対応した記録。 各 PR の詳細セクション
+は本書末尾の追補節に残してあるが、 ラウンド全体の見通しはこの節で確認できる。
+
+### Codex auto-review
+
+P1 (= ship-blocker) 12 件 + P2 (= 改善望ましい) 6 件 を identify。
+全件対応済 (push 後 PR 内の commit history で追跡可能)。
+
+| PR | P1 | P2 | 主な修正内容 |
+|---|---|---|---|
+| #207 PR-L | 0 | 1 | popup flag latch fix (`StartListening()` → `HandleStartListeningEvent()`) |
+| #208 PR-M | 1 | 0 | `kDeviceStateAudioTesting` → `ToggleChatState()` 経路復元 |
+| #209 PR-F | 1 | 1 | disconnect cleanup の session scoping、 Ogg lacing >255 byte 対応 |
+| #210 PR-E1 | 3 | 0 | `SetMouthShape` build break、 capture_server auth-before-pop、 error checksum correlation |
+| #211 PR-E2 | 1 | 1 | matrix mode 用 `DeferAvatarMouthIfFetching` (= PR-E1 fix リベース時に取り込み)、 fetch_in_progress checksum |
+| #212 PR-A1 | 0 | 1 | `send_pcm_audio` で `source_rate <= 0` を `RuntimeError` で reject |
+| #213 PR-A2 | 2 | 0 | per-chunk resample で odd-byte ValueError + 累積 duration error → source-rate buffering で両方解消 |
+| #214 PR-A3 | 1 | 1 | (A2 連鎖)、 `X-Sample-Rate <= 0` を 400 reject |
+| #215 PR-A4 | 1 | 1 | (A2 連鎖)、 `/capture` per-route 8 MiB cap (= client_max_size 撤去の補い) |
+| #216 PR-B | 1 | 0 | `ota_->MarkCurrentVersionValid()` を `ActivationTask` で呼ぶ (= OTA rollback 確認、 cloud probe は skip 維持) |
+
+### Maintainer (kisaragi-mochi) review
+
+PR-I #206 / PR-L #207 / PR-C #217 にレビュー受信。
+
+- **#206 PR-I**: rebase + `[Unreleased]` entries 復元 + cooldown-rising-edge ブランチでも `press_start_*` capture (= 「cooldown 中 press → cooldown 後 release」 シナリオで前 touch の signature を出してしまうバグ修正)
+- **#207 PR-L**: rebase + `play_popup_on_listening_ = true` を `StartListening()` から `HandleStartListeningEvent()` の listening-transition 確定 branch に移動 (= main task 内に write 収束、 thin event setter contract 維持)、 PR body の「PR-M not yet opened」 を「#208 として open 済」 に更新
+- **#217 PR-C**: 全面リワーク。 git committed binary → CI built binary に方針転換。
+  - `gateway/LICENSE-THIRD-PARTY` 新設 + `pyproject.toml` `license-files` 追加 (= license metadata drift 解消)
+  - `opus.dll` を git から削除 + gitignore 追加、 `publish.yml` に `build-windows-wheel` job (vcpkg + opus install → SHA256 ログ → smoke test → wheel rename to `win_amd64`)
+  - `build.yml` に `gateway-windows-smoke` job (= per-PR で bundle 検証)
+  - `__init__.py` に arch gate + `_dll_dir_handle` module-global 保持
+  - PR body も「Revised after review」 セクションで変更点明示
+
+### CI 追加失敗 + 対応
+
+PR-F #209 で `ruff F401` (`tests/test_audio_input_hook.py` の `import asyncio` 未使用) → Ogg lacing regression テスト追加時に asyncio 使用箇所が消えて顕在化。 削除 commit `1b479d9` で対応。
+
+### 備考 / 学び
+
+- **Codex review 取得手順**: `gh api repos/<owner>/<repo>/pulls/<num>/reviews` + `pulls/<num>/comments` (inline) を `chatgpt-codex-connector[bot]` で filter。 詳細は memory `reference_codex_pr_review_fetch.md` 参照
+- **hatchling `artifacts` field**: gitignored ファイルを wheel に含める用途。 ファイル存在しない build (= 別 OS の CI runner) では glob match 0 件で自然 skip → 同一 pyproject で両 wheel 対応可能
+- **`os.add_dll_directory()` の handle 保持**: 返り値 (`_dll_dir_handle`) を module-global で保持しないと GC される。 PATH 経由の `find_library` は handle 不要だが、 modern resolver (`ctypes.CDLL`) 直接利用なら必要
+- **Series A1〜A4 連鎖修正**: stacked PR で base に修正入れたら `git rebase` で各上位 branch を base にリベース + force push。 中身が同じ patch は cherry-pick で auto-skip される
+- **CI Windows runner で vcpkg + opus**: `git clone microsoft/vcpkg --depth 1 && bootstrap-vcpkg.bat && vcpkg install opus:x64-windows` → `installed/x64-windows/bin/opus.dll` をコピー、 SHA256 ログ。 standard pattern
+
+### 残作業 (このラウンド外)
+
+- **PR-G** coredump: 実機検証未完で未送、 別ラウンドで投稿予定
+- **CHANGELOG TBD ラベル更新**: PR-A2/A3/A4 等で残ってる `[PR #TBD-X]` placeholder を実 PR # に置換 (= 些末、 review request 時にまとめて修正可)
+- **dev/integration の最新 sync**: P1/P2 fix を dev/integration へ取り込んだ branch (`dev/integration-p1-fixes`) は作成済だが、 P2 fix は反映してない。 全部取り込んだ整理は後日
 
 ## 残課題 (Phase X' 実施時に解決すべき)
 
