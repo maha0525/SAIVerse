@@ -1,6 +1,6 @@
 # Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
 
-**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A〜F + PR-B/C + Series E/L/M が 2026-05-21 一斉投稿済み = #207〜#217、 Codex / maintainer の review 対応も同日中に完了、 PR-G coredump のみ未送)
+**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A〜F + PR-B/C + Series E/L/M が 2026-05-21 一斉投稿済み = #207〜#217、 Codex / maintainer の review 対応も同日中に完了、 PR-G coredump + PR-N (= false-stroke suppression、 dev/integration で実機検証中) が未送)
 **優先度**: medium
 **作成日**: 2026-05-13
 **最終更新**: 2026-05-21 (一斉投稿 → Codex auto-review → maintainer review → P1/P2 全件対応の連続作業)
@@ -724,6 +724,52 @@ cherry-pick の境界 (特に `97cd6bd` の LED feedback 部分の救出 + ESP_L
 - **PR-L**: 1 行修正だが、 「`StartListening()` を board / API 経由から呼ぶケースがどれだけあるか」 を maintainer が知らない場合は description で具体例を挙げる (= stack-chan の LCD tap、 atk-dnesp32s3-box0 のボタン等、 既存 board 実装で `StartListening()` を呼んでる箇所が複数ある)
 - **PR-M**: stack-chan board 限定の変更だが、 description で「voice-assistant model vs single-shot Vessel model」 の設計判断を明示。 受け入れ拒否されたら fork 運用継続 (= memory `feedback_user_experience_first.md`)
 - **format fix (`%lld` → `%d` cast)**: nano-printf 制約は他 board / Application でも踏みやすい罠 (= memory `feedback_esp_idf_nano_printf_no_zu.md`、 PR-E1 series `a42fe0b` でも同種修正済み)。 PR-M に含めるが、 description で「ESP-IDF nano-printf compat」 を明示
+
+## 追補: PR-N — touch event false-stroke suppression (Phase 5' 関連、 2026-05-22 dev/integration で実機検証中)
+
+PR-I (= #206) で touch event log の可読性を上げた後、 新フォーマットで 約 5 時間の log を取り直して false stroke の **3 軸シグネチャ** が判明。 これを使って firmware 側で抑止する filter を実装した。 PR-I の原スコープに含まれていた「false positive filter」 を、 独立 PR として切り出した形。
+
+### 観測データ (2026-05-21 23:35〜2026-05-22 進行中)
+
+| 区分 | start_raw | duration |
+|---|---|---|
+| 真正 TAP / STROKE | H (0x03) または L (0x01) | 0.4 - 1.7 秒 |
+| False STROKE | **ほぼ常に L (0x01)** | **常に 6 秒以上** |
+
+→ **`L only AND duration > 5 秒`** で false / 真正を確実に判別可能。
+
+### 実装方針 (= dev/integration commit 未予定、 WIP)
+
+`stackchan.cc` の falling-edge classifier に2つ加える:
+
+1. **抑止 filter**: 上記条件を満たす STROKE は `HandleStroke` を呼ばず `ESP_LOGI(TAG, "touch event: SUPPRESSED ...")` のみ出力。 cooldown は通常通り設定 (= 直後の再発火防止)
+2. **Si12T REF_RST trigger**: 抑止時に該当 ch (= press_start_zones_ から導出した bit mask) を `REG_REF_RST (0x0A)` に書き込んで chip 内 baseline を強制再キャリブ。 sustained drift の根本解消を attempt。 datasheet 確認済 (= AD Semiconductor TSM12 family、 Arduino lib `GPTechinno/TSM12-Arduino-Library` をリファレンス)
+
+### threshold 選定根拠
+
+- 真正最長 (= 撫で 1.7 秒) と false 最短 (= 6 秒) で **4 秒以上の gap**
+- `IMPLAUSIBLE_PRESS_MS = 5000` でマージンを真正側に多く取る (= 偽陰性 0 優先)
+- `L only` 判定は `(press_start_output1_raw_ & 0xAA) == 0` で実装 (= 各 2-bit pair の上位 bit が立ってない = 全 channel が L 以下)
+
+### 投稿条件
+
+- dev/integration 上で 24h 以上の実機運用 → false stroke 完全消失 (もしくは大幅減) 確認
+- 真正 touch の誤抑止ゼロ確認 (= H/M レベル の touch が `SUPPRESSED` ログに出ないこと)
+- 真正 L stroke (= soft stroke、 < 5 秒) が引き続き正常に発火することの確認
+
+### PR description ドラフト (= 投稿時の出発点)
+
+- **What**: Filter out sustained low-level pseudo-presses on the Si12T head touch + force baseline recalibration via REF_RST when the filter fires
+- **Why**: Observation-driven analysis of 8 captured false strokes over ~5 hours showed they are distinct from real touches on 3 axes (all-L level / sustained > 6 sec / always CH1 alone). The pattern matches Si12T CH1 baseline drift into the L threshold band. The chip's slow auto-recalibration eventually clears it, but the spurious strokes in the meantime fire the device's servo wobble — which in turn caused USB-CDC re-enumerate noise on the host
+- **Risk minimization**: H-level strokes pass unchanged (real long-press UX preserved). L-level short strokes pass unchanged (soft touches verified). Only the precise drift signature is suppressed
+- **REF_RST**: Documented in the AD Semiconductor TSM12 datasheet (the chip behind the M5Stack-marketed "Si12T"); we issue it on just the channel that signalled to avoid disturbing the others. The Arduino reference library (linked) maps the chip's register layout clearly
+
+### PR-N の注意点
+
+- chip vendor は AD Semiconductor (韓国)、 datasheet 公式サイト (touchsemi.com) は SSL 証明書 expired で WebFetch 不可だが、 PDF 自体は LCSC / sekorm / datasheet4u 経由で取得可能。 PR description 内で datasheet リンクを示す時は安定した二次情報を使う
+- M5Stack の「Si12T」 表記は TSM12 系 pin-compat 互換チップの marketing 名。 register map は TSM12 と同じ前提で書く (= 既存 driver の comment もそうなってる)
+- description で `IMPLAUSIBLE_PRESS_MS = 5000` の根拠 (= 観測データの gap 分析) を提示。 maintainer から「5000 は magic number」 と指摘される余地はあるので、 logs から導出した数値であることを明示
+- 既存 `feedback_user_experience_first.md` の方針通り「ユーザーが詰まらない」 軸での修正
 
 ## 参考
 
