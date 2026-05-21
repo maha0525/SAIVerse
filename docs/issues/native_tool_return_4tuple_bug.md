@@ -1,8 +1,9 @@
 # Issue: native tool の 4-tuple 戻り値が SEA runtime で正しく展開されない
 
-**ステータス**: 🔲 未着手 (= 影響範囲確認 + 修正方針決定が要)
+**ステータス**: ✅ 修正実装済 (= 実機検証 (see.py multimodal) 待ち)
 **優先度**: medium (= 機能的影響あり、 ただし当面の workaround で運用可能)
 **作成日**: 2026-05-19
+**修正日**: 2026-05-21
 **関連**:
 - `tools/core.py` (= `parse_tool_result()` 正規 normalizer)
 - `sea/runtime_llm.py:_run_spell_tool_async` (= 4-tuple 未対応の bug 元)
@@ -128,3 +129,7 @@ env3 (本 issue 発見の契機) は str-return に倒して回避済 (2026-05-1
 ## ログ
 
 - 2026-05-19: env3 spell 実装中に発見。 当面 env3 は str-return で回避。 see.py 等の 4-tuple tool は壊れた状態のまま (= ペルソナの「画像見えた」 が本当に multimodal で届いてるか要再検証)。 本 issue 作成。
+- 2026-05-21: (B-1) で実装。 `sea/runtime_llm.py:_run_spell_tool_async` の normalize を `tools.core.parse_tool_result` 呼び出しに置換。 ただし `parse_tool_result` の 2-tuple branch が `(text, snippet)` 扱い (= chat 経路想定) で、 spell 経路の慣習 `(text, dict_metadata)` (`run_playbook` の forwarded_metadata 等) と非互換だったため、 `parse_tool_result` 自体も拡張 (2-tuple の 2nd 要素が dict なら metadata、 ToolResult なら snippet、 それ以外なら snippet として扱う)。
+  - 副次発見: snippet 経路は実質 dead path。 LLM クライアント側 (gemini/openai/nvidia_nim/xai) に `history_snippets` パラメータ受け口は存在するが、 渡している実コードが無い (= テスト test_llm_clients.py:551 のみ)。 SAIMemory に snippet を乗せる経路を実装する場合は別 issue 切り出しが筋。
+  - 回帰テスト: `tests/test_run_spell_tool_async_return_normalization.py` 追加 (7 ケース、 str / (str,dict) / (str,ToolResult,path) / 4-tuple / ToolResult-only / unknown tool / 例外)。
+  - 実機検証 (検証シナリオ 1: see.py で multimodal attachment が届くか) は Stack-chan 実機が要るので別途実施。

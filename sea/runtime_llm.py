@@ -29,6 +29,7 @@ from saiverse.usage_tracker import get_usage_tracker
 # the real SAIVerse ``tools`` package regardless of later sys.modules
 # manipulation. See memory/project_tts_import_pollution.md.
 from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
+from tools.core import parse_tool_result
 from tools.context import persona_context
 
 LOGGER = logging.getLogger(__name__)
@@ -513,16 +514,18 @@ async def _run_spell_tool_async(
 ) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Execute a single spell tool. Returns ``(result_string, metadata)``.
 
-    Tool return value handling:
-    - ``str`` (legacy spells): returned as ``(str(result), None)``
-    - ``(str, dict)`` tuple: returned as-is (the dict carries ``{"media": [...]}``
-      etc. and is later attached to the spell-result message so the LLM sees
-      images / files / other multimodal content). ``run_playbook`` uses this
-      form to forward sub-playbook media (image generation, etc.) up to the
-      parent line.
-    - ``(str, ...)`` tuples with non-dict 2nd element: 2nd element ignored,
-      treated as legacy str-only return.
-    - Anything else: ``(str(result), None)``.
+    Tool return values are normalized via ``tools.core.parse_tool_result``,
+    which accepts:
+    - ``str`` → ``(str, None, None, None)``
+    - ``(str, dict)`` → 2-tuple form, dict carries ``{"media": [...]}`` etc.
+    - ``(str, ToolResult|str|None, file_path)`` → 3-tuple form
+    - ``(str, ToolResult|str|None, file_path, dict)`` → 4-tuple form (see.py 等)
+    - ``ToolResult`` / ``dict`` → see ``parse_tool_result`` for details
+
+    spell 経路では現状 ``content`` と ``metadata`` のみ下流に渡す。 metadata
+    の ``media`` は spell-result message に attachment として乗り、 LLM が
+    画像 / ファイル等を multimodal で受け取る。 snippet と file_path は
+    受け取るだけで未使用 (別 Phase で SAIMemory 経路を設計予定)。
 
     Errors become ``(error_message, None)`` so the spell loop can continue
     and the persona's original utterance still reaches Building/SAIMemory.
@@ -563,16 +566,14 @@ async def _run_spell_tool_async(
             if inspect.isawaitable(raw_result):
                 raw_result = await raw_result
 
-        # Normalize to (text, metadata). Tools may return:
-        # - str → (str, None)
-        # - (str, dict) → as-is
-        # - other → (str(x), None)
-        if isinstance(raw_result, tuple) and len(raw_result) >= 2 and isinstance(raw_result[1], dict):
-            result_str = str(raw_result[0])
-            result_metadata: Optional[Dict[str, Any]] = raw_result[1]
-        else:
-            result_str = str(raw_result)
-            result_metadata = None
+        # Normalize via tools.core.parse_tool_result so 4-tuple returns
+        # ``(text, ToolResult, file_path, metadata)`` are unpacked correctly.
+        # spell 経路では現状 ``(content, metadata)`` のみ消費する。 snippet と
+        # file_path は受け取るだけで未使用 (chat 経路と同じ扱い)。
+        # SAIMemory への snippet 記録経路は別 Phase で設計予定。
+        # 詳細: docs/issues/native_tool_return_4tuple_bug.md
+        content, _snippet, _file_path, result_metadata = parse_tool_result(raw_result)
+        result_str = content
         LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
         return result_str, result_metadata
     except Exception as exc:

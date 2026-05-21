@@ -61,10 +61,20 @@ def parse_tool_result(res: Any) -> Tuple[str, Optional[str], Optional[str], Opti
     if isinstance(res, tuple):
         if len(res) == 2:
             content = str(res[0])
-            snip = res[1]
-            if isinstance(snip, ToolResult):
-                snip = snip.history_snippet
-            return content, snip, None, metadata
+            second = res[1]
+            # 2-tuple は 2 通りの慣習がある:
+            # - (text, metadata_dict): spell 経路の (str, dict) 形式
+            #   (run_playbook の forwarded_metadata、 image_generator 簡易形)。
+            #   dict は ``{"media": [...]}`` 等を LLM の multimodal attachment に
+            #   乗せるためのもの。
+            # - (text, snippet): chat 経路で snippet (= SAIMemory 行追記用) を返す形。
+            #   ToolResult ラップも snippet 扱い。
+            # 型で振り分ける。
+            if isinstance(second, dict):
+                return content, None, None, second
+            if isinstance(second, ToolResult):
+                return content, second.history_snippet, None, None
+            return content, second, None, None
         if len(res) >= 3:
             content = str(res[0])
             snip = res[1]
