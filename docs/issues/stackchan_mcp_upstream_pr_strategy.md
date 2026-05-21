@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
 
-**ステータス**: 🟡 一部マージ + 一部 review 中 (= PR-J/K #195/#196 が 2026-05-20 merged、 PR-H #186 は同日 follow-up commit 投稿で再 review 待ち、 残 Series A〜G は Phase X' で投稿予定)
+**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A〜F + PR-B/C + Series E/L/M が 2026-05-21 一斉投稿済み = #207〜#217、 PR-G coredump のみ未送)
 **優先度**: medium
 **作成日**: 2026-05-13
-**最終更新**: 2026-05-20 (PR-J/K #195/#196 merged、 PR-H = review 1 round 着信 → follow-up commit 投稿、 78/esp-wifi-connect upstream sync は maintainer 引き受け)
+**最終更新**: 2026-05-21 (PR-A1〜A4 / PR-B / PR-C / PR-E1/E2 / PR-F / PR-I / PR-L/M を一斉投稿 = #206〜#217、 PR-D は upstream で吸収済 = 不要、 PR-G のみ未送)
 **関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
 
 ## 背景
@@ -45,17 +45,17 @@ PR6a → PR6 (persistent connection + bug fix) ── 6a/6b は密接なので 1
 
 つまり最終的な PR 数:
 
-| PR | 内容 | base | 依存 |
-|---|---|---|---|
-| **PR #A1** | refactor(tts): extract `send_pcm_audio` from `synthesize_and_send` | upstream `main` | — |
-| **PR #A2** | feat(tts): `send_pcm_stream` for incremental PCM push | PR #A1 | PR #A1 が merge されてから提出 |
-| **PR #A3** | feat(capture_server): `POST /pcm` endpoint for external PCM input | PR #A2 | PR #A2 が merge されてから提出 |
-| **PR #A4** | fix(capture_server): disable aiohttp `client_max_size` cap | PR #A3 | PR #A3 が merge されてから提出 |
-| **PR #B** | fix(firmware): skip xiaozhi-cloud OTA check (NVS websocket.url 保護) | upstream `main` | — |
-| **PR #C** | fix(gateway): bundle libopus.dll for Windows + DLL search path setup | upstream `main` | — |
-| **PR #D** | feat(firmware): opt-in persistent WS connection + reconnect bug fix | upstream `main` | — |
+| PR | 内容 | base | 依存 | 状態 |
+|---|---|---|---|---|
+| **PR #A1** = [#212](https://github.com/kisaragi-mochi/stackchan-mcp/pull/212) | refactor(tts): extract `send_pcm_audio` from `synthesize_and_send` | upstream `main` | — | 投稿済 (2026-05-21) |
+| **PR #A2** = [#213](https://github.com/kisaragi-mochi/stackchan-mcp/pull/213) | feat(tts): `send_pcm_stream` for incremental PCM push | PR #A1 | PR #A1 と stacked | 投稿済 (2026-05-21) |
+| **PR #A3** = [#214](https://github.com/kisaragi-mochi/stackchan-mcp/pull/214) | feat(capture_server): `POST /pcm` endpoint for external PCM input | PR #A2 | PR #A2 と stacked | 投稿済 (2026-05-21) |
+| **PR #A4** = [#215](https://github.com/kisaragi-mochi/stackchan-mcp/pull/215) | fix(capture_server): disable aiohttp `client_max_size` cap | PR #A3 | PR #A3 と stacked | 投稿済 (2026-05-21) |
+| **PR #B** = [#216](https://github.com/kisaragi-mochi/stackchan-mcp/pull/216) | fix(firmware): skip xiaozhi-cloud OTA check (NVS websocket.url 保護) | upstream `main` | — | 投稿済 (2026-05-21) |
+| **PR #C** = [#217](https://github.com/kisaragi-mochi/stackchan-mcp/pull/217) | fix(gateway): bundle libopus.dll for Windows + DLL search path setup | upstream `main` | — | 投稿済 (2026-05-21) |
+| ~~PR #D~~ | ~~feat(firmware): opt-in persistent WS connection + reconnect bug fix~~ | — | — | **不要** (= upstream #169/#197 で吸収済、 dev/integration の `ab3423e` でも opt-in gate を撤去済) |
 
-= **計 7 PR** (Phase 1' 由来、音声経路 + OTA + libopus + persistent WS)。Series A の 4 PR は順次積み上げ、B/C/D は独立並列で出せる。
+= **計 6 PR** (Phase 1' 由来、 音声経路 + OTA + libopus)。Series A の 4 PR は stacked、 B/C は独立。 PR-D は upstream merge で目的達成済のため取り下げ。
 
 これに加え、Phase 4.5-e で **Series E (PR-E1 / PR-E2)** が動的 avatar セット転送機構として投稿予定。本書末尾「追補: Series E」節を参照。
 
@@ -168,7 +168,7 @@ PR ごとに maintainer とディスカッションが入る前提で、各 PR r
 - **テスト追加の範囲**: A2/A3 で test を増やすコミットは別 commit にして PR に追加する (= 既存 commit のままだと test が無いのが目立つ)
 - **`SOURCES.md` の更新**: PR #C 提出前に「CI build に置き換え予定」を補強する記述を入れておくと merge しやすい
 
-## 追補: Series E — 動的 avatar セット転送機構 (Phase 4.5-e、2026-05-15 追記)
+## 追補: Series E — 動的 avatar セット転送機構 (Phase 4.5-e、 2026-05-21 投稿: [#210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210) / [#211](https://github.com/kisaragi-mochi/stackchan-mcp/pull/211))
 
 Phase 4.5 で新規に立てた intent doc (`docs/intent/stackchan_avatar_pipeline.md`) の作業ブランチ `feature/dynamic-avatar-set` から、upstream に **2 PR** を投稿する。Series A〜D とは別系統 (= avatar 描画基盤の拡張) で、依存関係も独立。
 
@@ -176,8 +176,8 @@ Phase 4.5 で新規に立てた intent doc (`docs/intent/stackchan_avatar_pipeli
 
 | PR | 内容 | base | 依存 |
 |---|---|---|---|
-| **PR-E1** | feat(avatar): dynamic avatar set transfer (layered mode) — firmware に `AvatarSet` クラス + HTTP fetcher、gateway に `load_avatar_set` MCP tool + capture_server endpoint を追加 | upstream `main` | — |
-| **PR-E2** | feat(avatar): matrix mode (90 枚) support — mode 切替対応、matrix mode 描画ロジック | PR-E1 | PR-E1 merge 後または並行 |
+| **PR-E1** = [#210](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210) | feat(avatar): dynamic avatar set transfer (layered mode) — firmware に `AvatarSet` クラス + HTTP fetcher、gateway に `load_avatar_set` MCP tool + capture_server endpoint を追加 | upstream `main` | — |
+| **PR-E2** = [#211](https://github.com/kisaragi-mochi/stackchan-mcp/pull/211) | feat(avatar): matrix mode (90 枚) support — mode 切替対応、matrix mode 描画ロジック | PR-E1 | PR-E1 merge 後または並行 |
 
 詳細な commit 構成は `feature/dynamic-avatar-set` の `git log upstream/main..feature/dynamic-avatar-set` を参照 (現状 9 commit、`scaffold` → `WS handler` → `MCP tool` → `unify face/eyes/mouth` → `defer expression during fetch` 等)。本書 Phase X' 投稿時に commit を論理単位で再整理する。
 
@@ -256,7 +256,7 @@ cherry-pick の順序や境界は Phase 4.5-e 着手時の実装状況で再点�
 - matrix mode (90 枚) は PSRAM 3.3 MB を消費。8 MB PSRAM の使用上限 5 MB 内で xiaozhi-esp32 base の他用途と共存可能、を実機ログで示す
 - mode 切替は avatar セット単位 (= ペルソナ憑依時にセットごと差し替え)、ロード中 mode 変更不可、を doc で明示
 
-## 追補: PR-F — device-driven listen audio capture forwarding (Phase 3' 対応、2026-05-18 追記)
+## 追補: PR-F — device-driven listen audio capture forwarding (Phase 3' 対応、 2026-05-21 投稿: [#209](https://github.com/kisaragi-mochi/stackchan-mcp/pull/209))
 
 Phase 3' で実装した device-driven listen 音声経路 (詳細設計は `docs/intent/stackchan_vessel.md` v0.7 §C-2 / §G) の upstream PR。Series A〜E とは独立、依存なし。
 
@@ -264,7 +264,7 @@ Phase 3' で実装した device-driven listen 音声経路 (詳細設計は `doc
 
 | PR | 内容 | base | 依存 |
 |---|---|---|---|
-| **PR-F** | feat(audio): forward device-driven listen captures to an external HTTP hook | upstream `main` | — |
+| **PR-F** = [#209](https://github.com/kisaragi-mochi/stackchan-mcp/pull/209) | feat(audio): forward device-driven listen captures to an external HTTP hook | upstream `main` | — |
 
 ブランチ: `feature/device-driven-audio-capture-with-hook` (= 4 commit、2026-05-18 時点で fork に push 済み、`dev/integration` へ merge 済み)。
 
@@ -490,7 +490,7 @@ cherry-pick で `Auto-merging firmware/components/78__esp-wifi-connect/wifi_conf
 
 PR #186 の merge を待ち、 merge されたら本セクションに結果を追記。 78/esp-wifi-connect 側の mirror PR も追跡対象 (= kisaragi-mochi さんから link 通知が来たらここに記録)。
 
-## 追補: PR-I — touch driver false positive filter + format bug fix (Phase 5' 関連、 調査中、 2026-05-19 枠予約)
+## 追補: PR-I — touch event log readability (= 元の false positive filter スコープから縮減、 2026-05-21 投稿: [#206](https://github.com/kisaragi-mochi/stackchan-mcp/pull/206))
 
 Phase 2' 検証中に副次発見した「触ってないのに STROKE event」 誤検知への対処。 詳細観測 + 仮説 + 解決案候補は `docs/issues/stackchan_touch_false_stroke_events.md` を参照。 Series A〜H と独立、 依存なし。
 
@@ -575,6 +575,101 @@ kisaragi-mochi さん review が **Conventional Comments 形式** (`Suggested` /
 
 を採用する。
 
+## 追補: PR-L/M — Stack-chan touch-driven listen UX (Phase 3' Vessel 駆動、 2026-05-21 投稿: [#207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207) / [#208](https://github.com/kisaragi-mochi/stackchan-mcp/pull/208))
+
+Phase 3' (= device-driven audio capture push) の実機検証で、 タッチ操作 → 発話 → タッチ送信の Vessel UX を成立させるために stack-chan board と `Application` 周辺に複数の改修を入れた。 元の xiaozhi-esp32 は「voice assistant 連続会話モデル」 (= 発話後自動で listening 復帰、 タッチは server-driven listen の trigger) を前提にしていたが、 SAIVerse Vessel では「ユーザがタッチして話す → タッチで終了」 を明示的な単発操作として扱うため、 listen 起動 / 終了 / フィードバックの経路を組み替える必要があった。
+
+### dev/integration に積んだ commit (2026-05-19〜21)
+
+| # | commit | 内容 | 想定 PR | 備考 |
+|---|---|---|---|---|
+| 1 | `759508b` | listening 中の LCD タップを `Application::CloseAudioChannel()` (= 既定 ToggleChatState) ではなく `Application::StopListening()` に分岐させ、 gateway の audio_input_hook 経路 (PR-F 系) で buffer を flush できるようにする | **PR-M** | stack-chan board 限定 |
+| 2 | `97cd6bd` | PollTouchpad + `Application::ToggleChatState` / `StartListening` / `StopListening` / `HandleStateChangedEvent` に ESP_LOGI、 板上 RGB LED で touch state visual feedback (= 緑点灯 / 消灯) | **PR-M に部分救出** | 観測 log は PR に入れない、 LED feedback と SetAllRgbLeds helper だけ救出 |
+| 3 | `397d3bc` | PollTouchpad の listen 起動を `ToggleChatState()` から `StartListening()` に変更。 前者は `SetListeningMode(AutoStop)` を使うため tts.stop 後に device が自動で Listening 再復帰してしまい、 「タッチ駆動」 が破綻 (= 次のタッチが listen.stop = 即送信)。 後者は `HandleStartListeningEvent` で `SetListeningMode(ManualStop)` を強制する経路に乗り、 tts.stop 後は Idle に留まる | **PR-M** | stack-chan board 限定 (PollTouchpad のみ) |
+| 4 | `e13a544` | タッチ瞬時の `Application::PlaySound(OGG_POPUP)` 直接呼び出し (= 後に撤回、 #5 参照) + デバウンス (前回 release から 300ms 以内の press を ignore) + listening タイムアウト (30 秒滞在で auto StopListening) + format bug fix (`%lld` → `%d` cast、 nano-printf 互換) | **PR-M** | デバウンス / タイムアウトは stack-chan board 内、 format fix は副次的改善 |
+| 5 | `e5f62d4` | `Application::StartListening()` 内で `play_popup_on_listening_ = true` を立て、 `HandleStateChangedEvent` の `kDeviceStateListening` 分岐内 ResetDecoder 後 PlaySound 経路 (line 980 付近) に乗せる。 既存実装は WakeWord 経路でしか flag 化されていなかったので、 タッチ / API 経由の StartListening では音が鳴らなかった。 同時に board 側の `app.PlaySound(...)` 直接呼びを削除 (= ResetDecoder で playback queue クリアされて消える呼び出し) + `#include "assets/lang_config.h"` 撤去 | **PR-L (Application 部) + PR-M (board 部)** | application.cc 修正は他 board / API 利用者にも有益 |
+
+### PR 分割案
+
+| PR | 内容 | base | 依存 |
+|---|---|---|---|
+| **PR-L** = [#207](https://github.com/kisaragi-mochi/stackchan-mcp/pull/207) | feat(application): trigger popup-on-listening flag from `StartListening()` so non-wake-word listen activations also get the OGG_POPUP cue | upstream `main` | — |
+| **PR-M** = [#208](https://github.com/kisaragi-mochi/stackchan-mcp/pull/208) | feat(firmware/stackchan): touch-driven listen UX (StopListening on listening-state tap, StartListening for activation, RGB LED feedback, debounce, listening timeout, nano-printf format fix) | upstream `main` | PR-L が merge されると board 側の音フィードバックが自動的に効く (= Stacked にしないが PR-L 先行が望ましい) |
+
+**PR-L (Application 単体修正)**:
+
+- 変更ファイル: `firmware/main/application.cc` 1 ファイル
+- 1 行追加 (`play_popup_on_listening_ = true;` を `StartListening()` の冒頭に)
+- 既存 WakeWord 経路で flag が立っていた仕組みを、 タッチ起動 / Server-driven listen / API 経由 `app.StartListening()` 等すべての activation source で共通に効くように拡張
+- xiaozhi-esp32 ecosystem 全体に有用 — 「音声 cue が WakeWord のときだけ鳴る」 は不必要な特殊化
+- description: 「StartListening は WakeWord 以外 (= server-driven listen, board-level button / touch) からも呼ばれる public API。 popup cue がそのうち WakeWord ルートでしか鳴らないのは意図しない非対称性で、 ユーザ体感的にも 'listen が始まった' のフィードバックが消える」 を主張
+
+**PR-M (Stack-chan board のタッチ UX 統合)**:
+
+- 変更ファイル: `firmware/main/boards/stackchan/stackchan.cc` 1 ファイル (= board 限定)
+- 含む変更:
+  - PollTouchpad の listening 中タップを `StopListening()` に分岐 (#1)
+  - PollTouchpad の listen 起動を `StartListening()` に (= ManualStop 強制、 自動 listening 復帰回避、 #3)
+  - SetAllRgbLeds helper (= set_all_leds MCP tool と同じ I2C 経路を board 内で再利用、 #2/#4)
+  - タッチフィードバック: ToggleChatState 分岐 (= listen 起動) で緑点灯、 StopListening 分岐で消灯 (#4)
+  - デバウンス: 直前 release から 300ms 以内の press を無視 (#4)
+  - listening タイムアウト: state machine listening 突入のエッジ検出 + 30秒経過で auto-StopListening (#4)
+  - format fix: `%lld + ms` 連結が nano-printf で format ずれ → `%d` + `(int)cast` (#4)
+- description: 「stack-chan は LCD タッチパネル (FT6336) を主操作面とする board で、 voice assistant 連続会話モデル (= 発話後自動 listening 復帰) より 'タッチで開始 / タッチで終了' の single-shot model に振った方が UX が成立する。 他 board の挙動は変えない (= 修正は stack-chan board のみ)」 を主張
+
+### 観測 ESP_LOGI の扱い (= PR には入れない)
+
+`97cd6bd` で入れた以下の ESP_LOGI 群は **PR-L/M に含めない**:
+
+- `Application::ToggleChatState` / `StartListening` / `StopListening` の入口 ESP_LOGI
+- `Application::HandleStateChangedEvent` の `State changed -> N` ESP_LOGI
+- `StackChanBoard::PollTouchpad` の `FT6336 press / release / short tap -> ...` ESP_LOGI
+
+これらは Phase 3' 切り分け期間の観測用 instrumentation で、 upstream 利用者にはノイズになる。 PR 投稿時の対応:
+
+- 最終的に **撤去** (= 観測完了で目的達成、 出ない方が default)
+- または `ESP_LOGD` に降格 (= sdkconfig 経由で開発時のみ visible)
+
+判断軸: 撤去 = upstream の clean さを優先 / LOGD = 将来同種 bug 再現時に sdkconfig 切替で復帰できる利便性。 私の好みは **撤去 + bug 再現時に必要なら別 PR で再投入**。 ただし `Application::HandleStateChangedEvent` の state 遷移 log は xiaozhi-esp32 標準でも `ESP_LOGD` / `ESP_LOGI` 級の有用情報なので、 これだけ LOGI 残しを提案する余地あり。
+
+### 投稿条件
+
+- 当面 dev/integration で運用継続 (= まはー判断 2026-05-21、 「ひとまずこのまましばらく運用してみる」)
+- PR-F (= Series F device-driven audio capture forwarding) が merge された後に PR-L/M を投稿するのが自然 (= PR-L/M は PR-F のユースケース下で動く UX を整える PR)。 ただし PR-F 投稿前でも独立 merge 可能 (= 音 cue の対称化 = PR-L、 stack-chan board UX = PR-M はそれ自体で価値)
+- Series A〜H と並行投稿可能。 依存なし (PR-L → PR-M の論理依存はあるが、 PR-L 不在でも PR-M 単独で動く = 音 cue が鳴らないだけ)
+
+### PR-L/M 用ブランチ分割手順 (= 投稿時に確認、 hash は 2026-05-21 時点)
+
+```bash
+cd temp/stackchan-mcp
+git fetch upstream
+
+# PR-L = application.cc 単体
+git switch -c pr-l-startlistening-popup-flag upstream/main
+# e5f62d4 の application.cc 部分だけ cherry-pick (= board 側の修正は除く)
+# 手作業: 該当 hunk を git checkout -p で適用、 もしくは別 commit に分解してから cherry-pick
+git push origin pr-l-startlistening-popup-flag
+
+# PR-M = stack-chan board のタッチ UX 統合 (= #1, #3, #4, #5 の board 部分 + LED feedback 救出)
+# 観測 ESP_LOGI は cherry-pick 後に追加 commit で撤去 or LOGD 化
+git switch -c pr-m-stackchan-touch-driven-listen-ux upstream/main
+git cherry-pick 759508b    # touch listening -> StopListening
+# 397d3bc の board 部分 (StartListening 経路) は cherry-pick 後 conflict 出る可能性 = e13a544 と境界調整必要
+git cherry-pick 397d3bc
+git cherry-pick e13a544    # debounce + timeout + LED feedback + format fix
+# e5f62d4 の board 部分 (= app.PlaySound 直接呼び削除 + include 整理) を手作業で抽出
+# 観測 ESP_LOGI を撤去 or LOGD 化する commit を追加
+git push origin pr-m-stackchan-touch-driven-listen-ux
+```
+
+cherry-pick の境界 (特に `97cd6bd` の LED feedback 部分の救出 + ESP_LOGI 撤去) は投稿時に再整理する。 1 PR を綺麗にするため、 dev/integration 上の commit を rebase -i で squash + drop した派生ブランチを作る方が clean。
+
+### PR-L/M の注意点
+
+- **PR-L**: 1 行修正だが、 「`StartListening()` を board / API 経由から呼ぶケースがどれだけあるか」 を maintainer が知らない場合は description で具体例を挙げる (= stack-chan の LCD tap、 atk-dnesp32s3-box0 のボタン等、 既存 board 実装で `StartListening()` を呼んでる箇所が複数ある)
+- **PR-M**: stack-chan board 限定の変更だが、 description で「voice-assistant model vs single-shot Vessel model」 の設計判断を明示。 受け入れ拒否されたら fork 運用継続 (= memory `feedback_user_experience_first.md`)
+- **format fix (`%lld` → `%d` cast)**: nano-printf 制約は他 board / Application でも踏みやすい罠 (= memory `feedback_esp_idf_nano_printf_no_zu.md`、 PR-E1 series `a42fe0b` でも同種修正済み)。 PR-M に含めるが、 description で「ESP-IDF nano-printf compat」 を明示
+
 ## 参考
 
 - 手元 fork のブランチ:
@@ -584,6 +679,11 @@ kisaragi-mochi さん review が **Conventional Comments 形式** (`Suggested` /
   - `feature/coredump-partition` (= 1 commit、Phase 3' デバッグ基盤、 Series G の出所、 2026-05-18 追加)
   - `feature/fix-wifi-first-attempt-comeback-timer` (= 2 commit: 本体 + 2026-05-20 follow-up `47f09ac`、 Phase 2' 検証経路、 PR-H = #186 の出所)
   - (= PR-I 用ブランチ未作成、 issue 調査完了後に派生)
+  - `feature/stackchan-touch-stop-listening` (= 1 commit、 listening 中タップを StopListening に分岐、 Phase 3' UX、 PR-M の commit 出所、 2026-05-19 派生)
+  - `debug/stackchan-touch-poll-instrumentation` (= 1 commit、 fork-only 観測ブランチ、 PR には出さない、 LED feedback 部分は PR-M に救出、 2026-05-21 派生)
+  - `fix/stackchan-touch-uses-startlistening-not-toggle` (= 1 commit、 listen 起動を StartListening に変更で自動 listening 復帰回避、 PR-M の commit 出所、 2026-05-21 派生)
+  - `feature/stackchan-touch-feedback-and-bounds` (= 1 commit、 デバウンス + タイムアウト + LED feedback + format fix、 PR-M の commit 出所、 2026-05-21 派生)
+  - `fix/stackchan-touch-popup-sound` (= 1 commit、 StartListening 経由で popup-on-listening flag を立てる、 PR-L + PR-M の commit 出所、 2026-05-21 派生)
 - addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (現状 `feature/external-pcm-stream`、Phase 4.5 統合時に `dev/integration` に切替)
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
