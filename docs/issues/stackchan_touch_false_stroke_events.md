@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp の touch driver が誤検知 STROKE event を間欠的に発火
 
-**ステータス**: 🔲 未着手 (= 調査 + upstream PR 候補) — **現在最頻発、 次の着手対象**
-**優先度**: 🚨 high (2026-05-21 再評価) — 当初は低-中 (Phase 5' 着手時想定) だったが、 頻度が増しているため最優先対応に変更
+**ステータス**: 🟡 案 B filter 実装済、 長時間 monitor 中 (= 2026-05-22 案 B 採用確定)
+**優先度**: 🟢 medium (2026-05-22 再評価) — 案 B filter で false stroke が抑止される想定。 数時間〜数日の monitor 結果次第で issue close 判断
 **作成日**: 2026-05-19
-**再評価日**: 2026-05-21
+**再評価日**: 2026-05-22
 **関連**: `docs/intent/stackchan_vessel.md` §F (= タッチ知覚の設計、 Phase 5' で正式実装)、 `temp/stackchan-mcp/firmware/main/boards/stackchan/stackchan.cc` (= touch driver 実装)、 `docs/issues/stackchan_mcp_upstream_pr_strategy.md` (= 修正は upstream PR 候補)
 
 ## 観測
@@ -200,3 +200,100 @@ Phase 5' (= タッチ知覚の実装) 着手前に本 issue を解決してお�
   - upstream PR #206 (= log readability、 merge 待ち) で `press_start_*` snapshot は既に上流に行ってる
   - Si12T datasheet: `C:\Users\shuhe\Downloads\Si12T_Datasheet_EN.pdf` (= まはー手元)
   - 関連 issue: 本 issue + `docs/issues/stackchan_avatar_psram_peak.md` (= stroke reset 副次解消が false stroke 抑止次第)
+
+- 2026-05-22 (続き、 datasheet 再精読 → REF_RST 戦略撤回 → 案 B filter に回帰):
+
+  ### 経緯 (続き)
+  5. 仮説 (A) の検証として `vTaskDelay(pdMS_TO_TICKS(200))` + `SafeWriteReg(REG_REF_RST, 0xFF)` (= 1 byte write) を実装 → flash → touch 反応せず
+  6. 仮説 D (= byte 数 protocol mismatch) を疑い `ResetReference(0xFFFF)` (= 2 byte write) に切り替え → flash → 再び touch 反応せず
+  7. **まはー指摘** で datasheet を改めて精読、 前セッションのハンドオフ doc に **重大な誤読** が複数あったと判明:
+
+     **§12.1 (I2C register mapping)**:
+     ```
+     0Ah  Ref_rst1  reset = 0000 1111 = 0x0F  (= Ch1〜Ch4 enable、 Ch5〜Ch8 disable)
+     0Bh  Ref_rst2  reset = 1111 1110 = 0xFE  (= bits 0-3 が Ch9〜Ch12、 bits 4-7 は reserved)
+     ```
+     ハンドオフ doc が引用していた「Ref_rst1 reset value 0xFE、 Ch1 bit のみ 0」 は **誤り**。 実際は **Ch1 bit (bit 0) は default で 1 (= reference reset 有効)**。
+
+     **§12.2.4 (bit map)**:
+     ```
+     Ref_rst1 (0x0A):  Bit7=Ch8 Bit6=Ch7 Bit5=Ch6 Bit4=Ch5 Bit3=Ch4 Bit2=Ch3 Bit1=Ch2 Bit0=Ch1
+     Ref_rst2 (0x0B):  Bit7-4=reserved(0)  Bit3=Ch12 Bit2=Ch11 Bit1=Ch10 Bit0=Ch9
+     ```
+
+     **§10.4 (TS1_SEN0/1/2 implementation)**:
+     > if TS_SEN[2:0] = 011, the sensitivity of channel 1 is controlled by the register as well as other channels, but if not equal, the sensitivity should be fixed in the table below.
+
+     **§1 (Introduction)**:
+     > Si12T has two special functions: the embedded power button function on channel 1 can be applied to mobile.
+
+  ### 結論
+
+  - **Ch1 は元から auto-recalibrate 有効** なので、 REF_RST write 戦略は前提が偽。 「Ch1 が default 無効だから drift」 という仮説そのものが成立しない
+  - **`ResetReference(0xFFFF)` で touch 死亡した直接原因**: Ref_rst2 の bit 4-7 は reserved (0 固定)、 そこに 1 を書いて chip が undefined state に陥った可能性
+  - **Ch1 固有の drift しやすさの真因** は datasheet 上特定できず、 §1 / §10.4 から **Hardware ピン TS1_SEN0/1/2 configuration** が Ch1 sensitivity を I2C と独立に決めてる可能性高い (= stack-chan board の回路図 / 実装次第)
+
+  ### 採用方針
+
+  - REF_RST 関連の変更を全撤回 (= `Begin()` の vTaskDelay + ResetReference call + readback、 `ResetReference()` helper、 `REG_REF_RST` constant)
+  - 案 B filter (= 2026-05-21 夜に動作確認済の duration > 5s + L-only suppression) を falling-edge handler に再実装
+  - 偽陰性リスク: 5+ 秒で M / H に届かない極めて柔らかい撫でが silently 抑止される — UX 上は受容範囲
+  - 真因 (= TS1_SEN ピン configuration) の調査は別 issue 候補 (= 回路図確認、 sensitivity register tune、 別 chip 等)
+
+  ### 旧 (誤った) ハンドオフ doc 仮説プールについて
+
+  上記 (A) 〜 (D) の仮説プールは Ref_rst1 reset = 0xFE という誤読を前提にしていたため、 すべて **無効化**。 (A) (B) の delay 拡張・bit 解釈反転は datasheet 上根拠がない。 (C) の one-shot 解釈は datasheet 記述「When Chx is set, the reference value for each channel will be updated」 に整合するが、 reset value 解釈が違うため Ch1 trigger 不要。
+
+- 2026-05-22 (夜明け前、 case B filter flash → touch 反応せず → diagnostic heartbeat → register persistence 発覚 → 完全電源 OFF で復旧 + datasheet そのものの誤読も判明):
+
+  ### diagnostic firmware 観測
+
+  REF_RST 撤回 + filter 再実装版を flash したが touch 反応せず。 boot 直後の `Si12T: init OK` log は USB CDC re-enumerate 制約で取れず ([[project_esp32s3_usb_cdc_reset_capture]]) → `TouchPollTick` 内に 30 秒 periodic + raw 変化即時 trigger の heartbeat log を仕込んだ diagnostic 版を flash。 さらに heartbeat で CTRL / Ref_rst1 / Ref_rst2 register を 実機 read。
+
+  ### 観測値と意味
+
+  ```
+  ctrl=0x03   ← OK (Begin() で書いた値)
+  ref1=0xFF   ← !! 想定 default 0x0F (datasheet) と異なる
+  ref2=0x3F   ← !! 想定 default 0xFE (datasheet) と異なる
+  ```
+
+  `si12t_ok=1 last_raw=0x00 zones=000 ch=0000` で raw が完全 0x00 張り付き → I2C は生きてる、 touch 検知が register level で発火してない。 ref1 が 0xFF = 前回 `ResetReference(0xFFFF)` 書き込み値そのまま **persistent**。
+
+  ### 真因確定
+
+  **stack-chan の電源トポロジー**: ESP32-S3 と Si12T は AXP2101 power management + Li-ion バッテリーから給電。 USB 抜き差し / `idf.py app-flash` 後の hard reset / `idf.py monitor` reset 等の **「ESP32 reset」 は ESP32 chip のみ** をリセットする。 Si12T は給電継続で register 状態を保持。
+
+  **完全電源 OFF (= AXP2101 power button 長押し)** で初めて Si12T への給電が切れ、 register が真 default に戻った → 完全電源 OFF 後の実機観測:
+  ```
+  ref1=0xFE  ← (= 真の default、 datasheet の 0x0F とは異なる)
+  ref2=0x3F  ← (= 真の default、 datasheet の 0xFE とは異なる)
+  ```
+
+  この状態で touch 復活、 `touch event: STROKE start_raw=0x03 ch=H000 duration=798 ms` 等 正常発火。 filter (= 案 B) も H レベル press_start を「真正」 と判定して通過、 想定通り。
+
+  ### 結論 (真の真の)
+
+  **datasheet § 12.1 表の reset value 列はそもそも実機と一致しない** (= PDF 抽出行ズレ or 版差 or typo)。 datasheet 記載と実機観測が食い違うときは **実機を信頼する**。 加えて:
+
+  - Ch1 (Ref_rst1.bit 0) は **default で 0** (= reference value reset 無効)。 これを 1 に書くと **Ch1 を含む全 channel の touch 検知が完全停止** (= 全 ch の touch event が発火しない)
+  - 仮説: Ch1 は power button channel として slow long-press 検出のため baseline drift を許容する設計、 auto-recalibrate を強制すると touch 信号が新 baseline に吸収される
+  - §10.4 で TS1_SEN0/1/2 hardware pin が Ch1 sensitivity を I2C と独立に制御する記述とも整合
+
+  ### 採用方針 (確定)
+
+  - **`Begin()` には Ref_rst 系の書き込みは絶対追加しない** (= chip が長時間 silent state に陥る、 完全電源 OFF までリカバリ不可)
+  - **案 B filter** (= duration > 5s + L-only suppression) で false stroke を抑止する運用
+  - `Si12T::ReadRawReg()` helper (= 診断用) と `TouchPollTick` 内 heartbeat log は当面残して長時間 monitor、 false stroke 抑止の実効を確認した時点で撤去判断
+
+  ### 次に保留タスク
+
+  - 長時間 monitor (= 数時間〜数日) で案 B filter が false stroke を実際に抑止しているか + 真正 touch を弾いてないか確認
+  - 抑止有効なら heartbeat / `ReadRawReg()` diagnostic を撤去 (= production log noise 削減)
+  - Ch1 baseline drift の真因 (= TS1_SEN 配線 / sensitivity / hardware design) は **別 issue** に切り出すか保留判断
+
+  ### 関連 memory
+
+  - [[project_stackchan_power_topology]] — stack-chan 電源トポロジー、 register persistence
+  - [[project_si12t_register_quirks]] — Si12T datasheet vs 実機の差分、 Ch1 固有挙動
+  - [[feedback_datasheet_vs_observation]] — datasheet 記載は実機観測で裏取りする原則

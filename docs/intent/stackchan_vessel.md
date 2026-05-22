@@ -1217,3 +1217,38 @@ Phase 2' (= 認証・ペアリング UX) を実機検証込みで完走。 当�
 
 - **ペアリング解除後の再ペアリング**: addon UI で「解除」 ボタンを押すだけでは device 側 NVS の古い token が残るため、 device は古い token で接続を試みて 401 reject になる。 解除後に **必ず NVS erase (= addon UI の「NVS リセット」 ボタン)** を実行して device を AP モードに戻す、 captive portal で新 token を入力する流れが正規 UX
 - **Wi-Fi 入力 1 回目失敗**: 実機検証中に発見、 stackchan-mcp ファーム (= xiaozhi-esp32 base) の captive portal で Wi-Fi SSID/Password を入力すると 1 回目は必ず失敗、 同値で 2 回目入力で通る挙動。 Step 9 で調査予定 (= 直せるなら upstream PR 候補)
+
+### v0.8 → v0.9 で確定（Phase 3' 完了、2026-05-21）
+
+Phase 3' (= 音声入力経路 / Gemini inline 認識) を実機検証込みで完走。 当初の想定 (= step 11〜13 + 上流 PR 1 件) から実装範囲が拡大し、 タッチ UX 周りで firmware 側に **計 5 commit** の追加修正が必要になった。 詳細は `docs/issues/stackchan_mcp_upstream_pr_strategy.md` の追補「PR-L/M」 節を参照。
+
+**完了した step (アドオン側)**:
+
+- **Step 11** stackchan-mcp gateway に「device-driven listen 音声を外部 hook に POST するモード」 を fork 実装 (= `feature/device-driven-audio-capture-with-hook` の 4 commit、 PR-F として upstream 投稿予定)
+- **Step 12** `audio_input_relay.py` で gateway POST 受信 → `~/.saiverse/audio/` に保存 → `manager.handle_user_input_stream` に `metadata.media[]` 付きで注入
+- **Step 13** LCD 短タップ → 発話 → タッチで送信 → Gemini ペルソナが固有名詞含む発話を理解して応答、 実機で確認
+
+**Phase 3' で発見した firmware 改修事項 (= PR-L/M 経路)**:
+
+- **listening 中タップを CloseAudioChannel ではなく StopListening に分岐 (commit `759508b`)**: xiaozhi-esp32 既定の `Application::HandleToggleChatEvent` は listening 状態 2 回目タッチで `CloseAudioChannel()` (= WS 切断) を呼ぶ、 gateway 側で `aborted_mid_capture` として buffer 破棄。 device-driven audio capture push 経路 (= PR-F) に流れず音声が SAIVerse に届かないので、 stack-chan board の `PollTouchpad` で listening 中タップを `StopListening()` (= SendStopListening 経路) に分岐
+- **listen 起動を ToggleChatState から StartListening に変更 (commit `397d3bc`)**: 前者は `SetListeningMode(AutoStop)` を渡すため、 ペルソナ発話終了 (`tts.stop` 受信) の Schedule 内で device が自動的に Listening 再復帰 (`application.cc:565` = xiaozhi の連続会話モデル)。 結果「タッチして喋ろう」 が「listen.stop = 即送信」 として処理されてしまう。 `StartListening()` 経由は `HandleStartListeningEvent` で `SetListeningMode(ManualStop)` を強制するので、 tts.stop 後は Idle に留まり、 次のタッチで明示的に listen 開始する Vessel UX が成立する
+- **タッチ瞬時の OGG_POPUP 音 (commit `e5f62d4`)**: `Application::StartListening()` 内で `play_popup_on_listening_ = true` を立てて、 `HandleStateChangedEvent` の `kDeviceStateListening` 分岐内 ResetDecoder 後 PlaySound 経路に乗せる。 既存実装は WakeWord 経路でしか flag 化されていなかったので、 タッチ / API 経由の StartListening では音が鳴らなかった
+- **デバウンス / listening タイムアウト / LED feedback (commit `e13a544`)**: 直前 release から 300ms 以内の press を無視 (= 連打事故防止)、 listening 滞在 30 秒で auto-StopListening (= タッチ忘れ放置防止)、 タッチ確定で全 RGB LED 緑点灯 / 消灯 (= 体感フィードバック、 MCP set_led で上書き可能)。 加えて nano-printf 非対応の `%lld` を `%d + (int)cast` に format 修正
+
+**Phase 3' の運用上の罠**:
+
+- **タッチ後の音 cue は state 遷移完了を待つ**: PollTouchpad から直接 `app.PlaySound()` 呼び出しても、 直後の `EnableVoiceProcessing(true)` → `ResetDecoder()` で playback queue がクリアされて音が消える。 `play_popup_on_listening_` flag 経由 (= xiaozhi 標準の WakeWord 経路と同じ仕組み) でしか確実に鳴らせない
+- **LED は MCP `self.led.set_*` ツールで上書き可能**: ペルソナがツール経由で LED を操作するシーンでは、 タッチフィードバックの LED 緑点灯と衝突する。 当面は LED feedback を維持して試行運用、 将来的に画面オーバーレイ等の独立フィードバック経路を別 PR で追加検討
+
+**v0.9 で別 Phase に移送/省略した item**:
+
+- **画面オーバーレイ (= マイク icon 等)**: LED feedback が体感的に効いているので当面はそのまま、 LED とペルソナの set_led 衝突が実運用で問題化した時点で画面側に再検討
+- **デバッグ ESP_LOGI の最終整理**: 観測 instrumentation (= `97cd6bd` の PollTouchpad / Application 状態遷移 ログ) は upstream PR には入れない、 fork-only で運用継続。 観測完了で必要性が薄れたら撤去 or LOGD 化を別 PR で
+
+**Phase 3' の上流 PR**:
+
+- **PR-F** (= 既存): stackchan-mcp gateway に device-driven listen audio forwarding を追加 (= `feature/device-driven-audio-capture-with-hook` の 4 commit)
+- **PR-L** (= 新規 2026-05-21): `Application::StartListening()` で popup-on-listening flag を立てる (= WakeWord 以外の listen 起動でも音 cue を鳴らす、 xiaozhi-esp32 ecosystem 全体に有用)
+- **PR-M** (= 新規 2026-05-21): stack-chan board のタッチ UX 統合 (= StopListening 分岐 + StartListening 経路 + RGB LED feedback + デバウンス + タイムアウト + nano-printf format fix)
+
+PR 投稿は当面 dev/integration 運用継続、 実機で安定運用が確認できた段階で着手 (= まはー判断 2026-05-21、 「ひとまずこのまましばらく運用してみる」)。
