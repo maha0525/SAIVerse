@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: Phase 3 完了 (2026-05-22)、Phase 4 (既存アドオン v2 化 + 永続データ移行) 着手前
+**ステータス**: Phase 4 完了 (voice-tts 除く、2026-05-23)。voice-tts は Nature109 共有 repo の PR レビュー後に Phase 4-E として後追い対応予定
 
 ## これは何か
 
@@ -241,10 +241,23 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 - `AddonInstallProgressDialog.tsx`: SSE 進捗ダイアログ (ログ縦スクロール + プログレスバー + 完了/エラー/再起動推奨警告)
 - 実機検証: SAIVerse UI 上で Elyth の削除 → 再導入をカタログタブから完走、SSE 進捗表示も正常 ✅
 
-### Phase 4: 既存アドオンの整備
-- 4 アドオンすべての `addon.json` を v2 化
-- 各リポジトリに tag を打って registry にバージョン登録
-- まはーが README の「expansion_data で git clone」手順を「UI からカタログ導入」に書き換える
+### Phase 4: 既存アドオンの整備 ✅ (voice-tts 除く、2026-05-23 完了)
+- **4-A 永続データ migration 機構**: `saiverse/addon_migrations.py` に旧パス → 新規約パスの自動移行ロジック (rename / fallback copy / Windows read-only 対応)、 `ENABLED_ADDONS_FOR_STARTUP` 定数で voice-tts を除外、 main.py 起動初期で呼ぶ
+- **4-B Elyth v2 化**: addon.json に `manifest_version: 2` 追加 (setup 不要)、 v0.2.0 タグ + push 済み、 registry 掲載
+- **4-C X-addon v2 化**: 1 ヶ月放置の WIP (ポーリング本格実装 + spell 可視性 gate) を別 commit で先に整理、 v2 化は別 commit (`fb3306f`) + tag v0.2.0、 永続データ参照を `get_addon_data_dir` に変更、 push 済み、 registry 掲載
+- **4-D Stack-chan v2 化**: gateway は uvx 自動 fetch のため setup 不要、 firmware は GPL-3.0 で当面手動配置 (案 B)、 8 ファイルの永続データパス参照変更、 feature/migrate-to-stackchan-mcp を main に FF merge して v0.4.0 タグ + push 済み、 registry 掲載
+- **4-F registry public 化**: github.com/maha0525/saiverse-addon-registry を public で作成 + push、 raw.githubusercontent.com 経由で env override なしで fetch できることを実機確認 ✅
+- **インシデント (2026-05-23)**: Phase 4-D で stackchan のコード path 変更を push したが migration 起動時呼び出しを「voice-tts 完了後」 と遅延、 結果まはー の SAIVerse 再起動でアバター画像 / ペアリング情報が UI から不可視に。 手動コピーで復旧後、 `ENABLED_ADDONS_FOR_STARTUP` フィルタを設けて voice-tts 以外を起動時 migration 有効化 (`c362b1e`)。 教訓: 「コード path 変更と migration はセット commit」、 詳細は memory `feedback_code_path_migration_coupling.md`
+
+### Phase 4-E: voice-tts v2 化 (PR レビュー待ち)
+
+voice-tts repo は `origin = Nature109/saiverse-voice-tts` の共有 repo で、 現在 PR #4 (subscribe-before-open) がレビュー待ち。 v2 化は別 PR で出す方針:
+
+1. まはー: ナチュレに「manifest v2 化 PR を別途出す」連絡
+2. main 起点で `feature/manifest-v2` を切る
+3. addon.json v2 化 (manifest_version=2, setup_version, data_subdirs)、 `setup.bat` を `platform_script` step で登録 (skip_if_exists=`external/GPT-SoVITS`)、 永続データ参照を `get_addon_data_dir(...)/inputs/` と `get_addon_data_dir(...)/outputs/` に変更
+4. PR 提出 → ナチュレレビュー → マージ
+5. マージ後、 SAIVerse 本体の `ENABLED_ADDONS_FOR_STARTUP` に `saiverse-voice-tts` を追加、 registry.json に voice-tts エントリを追加
 
 ## まはー回答 (2026-05-22 一次レビュー)
 
