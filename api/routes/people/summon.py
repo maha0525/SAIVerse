@@ -101,24 +101,41 @@ def list_meta_playbooks(manager = Depends(get_manager)):
         session.close()
 
 @router.post("/summon/{persona_id}")
-def summon_persona(persona_id: str, manager = Depends(get_manager)):
-    """Summon a persona to the current location."""
-    if not manager.user_current_building_id:
-        raise HTTPException(status_code=400, detail="User location unknown")
-        
-    success, message = manager.summon_persona(persona_id)
+def summon_persona(
+    persona_id: str,
+    building_id: Optional[str] = None,
+    manager = Depends(get_manager),
+):
+    """Summon a persona to the target building.
+
+    C-1 閲覧モード以降、 frontend は viewing 中の building を ``building_id``
+    に渡す。 省略時はサーバ側の実滞在地 ``user_current_building_id`` にフォール
+    バックする。
+    """
+    target = building_id or manager.user_current_building_id
+    if not target:
+        raise HTTPException(status_code=400, detail="Target building unknown")
+
+    success, message = manager.summon_persona(persona_id, target)
     if not success:
         raise HTTPException(status_code=400, detail=message or "Summon failed")
-        
+
     return {"success": True, "message": f"Summoned {persona_id}"}
 
 @router.post("/dismiss/{persona_id}")
-def dismiss_persona(persona_id: str, manager = Depends(get_manager)):
-    """Dismiss a persona (send back to private room)."""
-    # RuntimeService.end_conversation returns a string message or starts with "Error:"
-    msg = manager.end_conversation(persona_id)
-    
+def dismiss_persona(
+    persona_id: str,
+    building_id: Optional[str] = None,
+    manager = Depends(get_manager),
+):
+    """Dismiss a persona (send back to private room).
+
+    C-1 閲覧モード以降、 frontend は viewing 中の building を ``building_id``
+    に渡す。 省略時はサーバ側の実滞在地にフォールバックする。
+    """
+    msg = manager.end_conversation(persona_id, building_id)
+
     if msg.startswith("Error"):
         raise HTTPException(status_code=400, detail=msg)
-    
+
     return {"success": True, "message": msg}

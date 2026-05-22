@@ -95,6 +95,9 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     const [data, setData] = useState<CityMapResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
+    // クリックした occupant がどの building cell にいたかを保持する。
+    // PersonaMenu の dismiss で「この部屋から帰ってもらう」 対象を特定するため。
+    const [selectedPersonaBuildingId, setSelectedPersonaBuildingId] = useState<string | null>(null);
 
     // モーダル制御 (RightSidebar と同様)
     const [activeModalPersonaId, setActiveModalPersonaId] = useState<string | null>(null);
@@ -783,12 +786,14 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                                     if (dragRef.current.dragged) return;
                                                     if (cellDragRef.current.dragged) return;
                                                     setSelectedPersona(occ);
+                                                    setSelectedPersonaBuildingId(b.id);
                                                 }}
                                                 onKeyDown={(e) => {
                                                     if (e.key === 'Enter' || e.key === ' ') {
                                                         e.preventDefault();
                                                         e.stopPropagation();
                                                         setSelectedPersona(occ);
+                                                        setSelectedPersonaBuildingId(b.id);
                                                     }
                                                 }}
                                                 role="button"
@@ -820,10 +825,14 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             {selectedPersona && (
                 <PersonaMenu
                     isOpen={!!selectedPersona}
-                    onClose={() => setSelectedPersona(null)}
+                    onClose={() => {
+                        setSelectedPersona(null);
+                        setSelectedPersonaBuildingId(null);
+                    }}
                     personaId={selectedPersona.id}
                     personaName={selectedPersona.name}
                     avatarUrl={selectedPersona.avatar || '/api/static/builtin_icons/host.png'}
+                    buildingId={selectedPersonaBuildingId}
                     onOpenMemory={() => openModal('memory')}
                     onOpenSchedule={() => openModal('schedule')}
                     onOpenTasks={() => openModal('tasks')}

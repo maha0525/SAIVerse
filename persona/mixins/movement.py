@@ -203,14 +203,6 @@ class PersonaMovementMixin:
         self.current_building_id = self.user_room_id
         self.auto_count = 0
         self._mark_entry(self.current_building_id)
-        self.history_manager.add_to_building_only(
-            self.user_room_id,
-            {
-                "role": "assistant",
-                "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
-            },
-            heard_by=self._occupants_snapshot(self.user_room_id),
-        )
         self._save_session_metadata()
         return self.run_auto_conversation(initial=True)
 

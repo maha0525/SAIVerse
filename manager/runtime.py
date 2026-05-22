@@ -280,15 +280,21 @@ class RuntimeService(
                 return candidate
         return building_id
 
-    def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
+    def summon_persona(
+        self, persona_id: str, target_building_id: Optional[str] = None
+    ) -> Tuple[bool, Optional[str]]:
         persona = self.personas.get(persona_id)
         if not persona:
             return False, "Persona not found."
 
-        # Move to user's CURRENT building, not just user_room_id
-        target_building_id = self.state.user_current_building_id
+        # C-1 閲覧モード以降、 frontend が viewing 中の building を渡してくる場合は
+        # それを優先する (= 「閲覧中の部屋を管理対象にする」)。 fallback として
+        # サーバ側の実滞在地 user_current_building_id を使う。
+        target_building_id = (
+            target_building_id or self.state.user_current_building_id
+        )
         if not target_building_id:
-            return False, "User's current building is unknown."
+            return False, "Target building is unknown."
 
         target_history_building_id = self._canonical_building_id(target_building_id)
         prev = persona.current_building_id
@@ -315,27 +321,25 @@ class RuntimeService(
         persona.current_building_id = target_building_id
         persona.auto_count = 0
         persona._mark_entry(target_building_id)
-        persona.history_manager.add_to_building_only(
-            target_history_building_id,
-            {
-                "role": "assistant",
-                "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が入室しました</b></div>',
-            },
-            heard_by=self._occupants_snapshot(target_building_id),
-        )
         persona._save_session_metadata()
         persona.run_auto_conversation(initial=True)
         return True, None
 
-    def end_conversation(self, persona_id: str) -> str:
+    def end_conversation(
+        self, persona_id: str, building_id: Optional[str] = None
+    ) -> str:
         persona = self.personas.get(persona_id)
         if not persona:
             return f"Error: Persona with ID '{persona_id}' not found."
 
-        # Check if persona is in the same building as the user (not just user_room_id)
-        current_user_building = self.state.user_current_building_id
+        # C-1 閲覧モード以降、 frontend が viewing 中の building を渡してくる場合は
+        # それを優先する (= 「閲覧中の部屋から persona を退室させる」)。 fallback と
+        # してサーバ側の実滞在地 user_current_building_id を使う。
+        current_user_building = (
+            building_id or self.state.user_current_building_id
+        )
         if not current_user_building:
-            return "Error: User's current building is unknown."
+            return "Error: Target building is unknown."
 
         if persona.current_building_id != current_user_building:
             return f"{persona.persona_name} is not in the current building."
@@ -353,15 +357,6 @@ class RuntimeService(
             return f"Error: Failed to move: {reason}"
 
         persona.current_building_id = private_room_id
-        history_building_id = self._canonical_building_id(current_user_building)
-        persona.history_manager.add_to_building_only(
-            history_building_id,
-            {
-                "role": "assistant",
-                "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が退室しました</b></div>',
-            },
-            heard_by=self._occupants_snapshot(current_user_building),
-        )
         persona._save_session_metadata()
         return f"Conversation with '{persona.persona_name}' ended."
 

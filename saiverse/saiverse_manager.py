@@ -1073,11 +1073,15 @@ class SAIVerseManager(
         finally:
             db.close()
 
-    def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
-        return self.runtime.summon_persona(persona_id)
+    def summon_persona(
+        self, persona_id: str, target_building_id: Optional[str] = None
+    ) -> Tuple[bool, Optional[str]]:
+        return self.runtime.summon_persona(persona_id, target_building_id)
 
-    def end_conversation(self, persona_id: str) -> str:
-        return self.runtime.end_conversation(persona_id)
+    def end_conversation(
+        self, persona_id: str, building_id: Optional[str] = None
+    ) -> str:
+        return self.runtime.end_conversation(persona_id, building_id)
 
     def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> None:
         """
