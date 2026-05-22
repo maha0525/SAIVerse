@@ -9,14 +9,23 @@ interface PersonaMenuProps {
     personaId: string;
     personaName: string;
     avatarUrl: string;
+    /** dismiss 操作で対象とする building (= この persona がいる部屋)。
+     * C-1 閲覧モード以降、 サーバ side の user_current_building_id だけに頼ると
+     * viewing 中の部屋で帰ってもらえなくなるため明示する。
+     */
+    buildingId?: string | null;
     onOpenMemory?: () => void;
     onOpenSchedule?: () => void;
     onOpenTasks?: () => void;
     onOpenSettings?: () => void;
     onOpenInventory?: () => void;
+    /** dismiss 成功直後に呼ばれる。 親 (RightSidebar → ChatPage) が
+     * 滞在ペルソナ表示を即時更新するための callback。 省略すると
+     * 10 秒ポーリングか building 切替まで古い表示のままになる。 */
+    onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
@@ -37,9 +46,13 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
 
         setLoading(true);
         try {
-            const res = await fetch(`/api/people/dismiss/${personaId}`, { method: 'POST' });
+            const url = buildingId
+                ? `/api/people/dismiss/${personaId}?building_id=${encodeURIComponent(buildingId)}`
+                : `/api/people/dismiss/${personaId}`;
+            const res = await fetch(url, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
+                onDismissed?.();
                 // Close menu
                 onClose();
             } else {

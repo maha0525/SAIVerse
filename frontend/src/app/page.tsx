@@ -2650,6 +2650,7 @@ export default function Home() {
                 onClose={() => setIsInfoOpen(false)}
                 refreshTrigger={moveTrigger}
                 currentBuildingId={currentBuildingId}
+                onPersonaChanged={() => setMoveTrigger(prev => prev + 1)}
             />
 
             <ChatOptions
@@ -2668,6 +2669,7 @@ export default function Home() {
                 isOpen={isPeopleModalOpen}
                 onClose={() => setIsPeopleModalOpen(false)}
                 currentBuildingId={currentBuildingId}
+                onChanged={() => setMoveTrigger(prev => prev + 1)}
             />
 
             <ItemModal

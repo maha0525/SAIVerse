@@ -23,9 +23,14 @@ interface PeopleModalProps {
      * マルチデバイス間で他クライアントの操作に details が汚染される (エリス上書き事故の遠因)。
      */
     currentBuildingId?: string | null;
+    /** summon / dismiss が成功した直後に呼ばれる。 親 (ChatPage) が
+     * moveTrigger を bump して RightSidebar / Sidebar の表示を即時更新するための callback。
+     * 省略するとモーダル内 fetchData() だけが走り、 サイドバー類は
+     * 10 秒ポーリングか building 切替まで古い表示のままになる。 */
+    onChanged?: () => void;
 }
 
-export default function PeopleModal({ isOpen, onClose, currentBuildingId }: PeopleModalProps) {
+export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChanged }: PeopleModalProps) {
     const [personas, setPersonas] = useState<Persona[]>([]);
     const [occupants, setOccupants] = useState<Occupant[]>([]);
     const [loading, setLoading] = useState(false);
@@ -50,7 +55,7 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId }: Peop
         setLoading(true);
         try {
             const [summonableRes, detailsRes] = await Promise.all([
-                fetch('/api/people/summonable'),
+                fetch(`/api/people/summonable?building_id=${encodeURIComponent(currentBuildingId)}`),
                 fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`)
             ]);
             if (summonableRes.ok) {
@@ -70,14 +75,20 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId }: Peop
     };
 
     const handleSummon = async (personaId: string, name: string) => {
+        if (!currentBuildingId) {
+            console.warn('[PeopleModal] handleSummon skipped: currentBuildingId not provided');
+            return;
+        }
         setSummoningId(personaId);
         try {
-            const res = await fetch(`/api/people/summon/${personaId}`, {
-                method: 'POST'
-            });
+            const res = await fetch(
+                `/api/people/summon/${personaId}?building_id=${encodeURIComponent(currentBuildingId)}`,
+                { method: 'POST' }
+            );
             if (res.ok) {
                 // Refresh data to update lists
                 fetchData();
+                onChanged?.();
             } else {
                 const err = await res.json();
                 alert(`召喚に失敗しました: ${err.detail}`);
@@ -91,16 +102,22 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId }: Peop
     };
 
     const handleDismiss = async (personaId: string, name: string) => {
+        if (!currentBuildingId) {
+            console.warn('[PeopleModal] handleDismiss skipped: currentBuildingId not provided');
+            return;
+        }
         if (!confirm(`${name}を自室に戻しますか？`)) return;
 
         setDismissingId(personaId);
         try {
-            const res = await fetch(`/api/people/dismiss/${personaId}`, {
-                method: 'POST'
-            });
+            const res = await fetch(
+                `/api/people/dismiss/${personaId}?building_id=${encodeURIComponent(currentBuildingId)}`,
+                { method: 'POST' }
+            );
             if (res.ok) {
                 // Refresh data to update lists
                 fetchData();
+                onChanged?.();
             } else {
                 const err = await res.json();
                 alert(`戻すのに失敗しました: ${err.detail}`);

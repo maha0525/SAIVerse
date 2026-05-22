@@ -30,6 +30,9 @@ interface RightSidebarProps {
      * マルチデバイスで他クライアントの操作に汚染される (2026-04-30 エリス上書き事故の遠因)。
      */
     currentBuildingId?: string | null;
+    /** PersonaMenu からの dismiss 等で滞在状況が変わったときに親 (ChatPage) へ通知し、
+     * moveTrigger 等を bump して Sidebar 側も同期させるための callback。 */
+    onPersonaChanged?: () => void;
 }
 
 interface Occupant {
@@ -58,7 +61,7 @@ interface BuildingDetails {
     items: Item[];
 }
 
-export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId }: RightSidebarProps) {
+export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged }: RightSidebarProps) {
     const [details, setDetails] = useState<BuildingDetails | null>(null);
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
@@ -425,11 +428,18 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         personaId={selectedPersona.id}
                         personaName={selectedPersona.name}
                         avatarUrl={selectedPersona.avatar || "/api/static/icons/host.png"}
+                        buildingId={details?.id ?? currentBuildingId ?? null}
                         onOpenMemory={() => openModal('memory')}
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenTasks={() => openModal('tasks')}
                         onOpenSettings={() => openModal('settings')}
                         onOpenInventory={() => openModal('inventory')}
+                        onDismissed={() => {
+                            // dismiss 成功 → details を即時 refetch して滞在ペルソナ表示を更新。
+                            // 親にも通知して Sidebar / 召喚可能リストなどを同期させる。
+                            fetchDetails();
+                            onPersonaChanged?.();
+                        }}
                     />
                 )}
 
