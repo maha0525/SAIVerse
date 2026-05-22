@@ -24,16 +24,26 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Optional
 
 from saiverse.data_paths import USER_DATA_DIR, get_saiverse_home
 
 LOGGER = logging.getLogger(__name__)
 
+# 起動時 migration の対象アドオン (= コード側が新規約パスを参照済みのもの)。
+# voice-tts は Nature109 共有 repo の PR レビュー待ちでコードが旧パス参照の
+# ままなので含めない。voice-tts の v2 化マージ後にここへ追加する。
+ENABLED_ADDONS_FOR_STARTUP: tuple[str, ...] = (
+    "saiverse-elyth-addon",
+    "saiverse-x-addon",
+    "saiverse-stackchan-addon",
+)
+
 
 @dataclass(frozen=True)
 class _MigrationEntry:
     """1 件の (old_path → new_path) 移行。"""
+    addon_id: str          # フィルタ用、どの addon に属する migration か
     label: str             # ログ用の人間可読ラベル
     old_path: Path
     new_path: Path
@@ -46,24 +56,28 @@ def _build_migrations() -> List[_MigrationEntry]:
     return [
         # stackchan: addons/saiverse-stackchan-addon/ を丸ごと移動
         _MigrationEntry(
+            addon_id="saiverse-stackchan-addon",
             label="stackchan-addon: ~/.saiverse/addons/ → user_data/addon_data/",
             old_path=home / "addons" / "saiverse-stackchan-addon",
             new_path=addon_data / "saiverse-stackchan-addon",
         ),
         # x-addon: addons/saiverse-x-addon/ を丸ごと移動
         _MigrationEntry(
+            addon_id="saiverse-x-addon",
             label="x-addon: ~/.saiverse/addons/ → user_data/addon_data/",
             old_path=home / "addons" / "saiverse-x-addon",
             new_path=addon_data / "saiverse-x-addon",
         ),
         # voice-tts inputs: user_data/addon_files/saiverse-voice-tts/ → addon_data/saiverse-voice-tts/inputs/
         _MigrationEntry(
+            addon_id="saiverse-voice-tts",
             label="voice-tts inputs: user_data/addon_files/ → addon_data/saiverse-voice-tts/inputs/",
             old_path=USER_DATA_DIR / "addon_files" / "saiverse-voice-tts",
             new_path=addon_data / "saiverse-voice-tts" / "inputs",
         ),
         # voice-tts outputs: user_data/voice/out/ → addon_data/saiverse-voice-tts/outputs/
         _MigrationEntry(
+            addon_id="saiverse-voice-tts",
             label="voice-tts outputs: user_data/voice/out/ → addon_data/saiverse-voice-tts/outputs/",
             old_path=USER_DATA_DIR / "voice" / "out",
             new_path=addon_data / "saiverse-voice-tts" / "outputs",
@@ -152,15 +166,27 @@ def _try_move(entry: _MigrationEntry) -> str:
             return f"failed: {e}"
 
 
-def migrate_addon_data_dirs() -> dict[str, str]:
-    """旧 → 新パスの移行を実行 (起動時 1 回呼ぶ)。
+def migrate_addon_data_dirs(
+    addon_ids: Optional[Iterable[str]] = None,
+) -> dict[str, str]:
+    """旧 → 新パスの移行を実行。
+
+    Args:
+        addon_ids: 対象 addon の id 集合 (省略時は全 addon)。
+                   起動時は ``ENABLED_ADDONS_FOR_STARTUP`` を渡すこと。
+                   voice-tts のコードが新規約に揃うまでは voice-tts を
+                   含めないこと (含めるとデータ移動後にコードから見えなく
+                   なる)。
 
     Returns:
         各 migration エントリの結果ステータス dict (label → status)。
         例: {"x-addon: ...": "moved", "voice-tts inputs: ...": "skipped (no source)"}
     """
+    targets = set(addon_ids) if addon_ids is not None else None
     results: dict[str, str] = {}
     for entry in _build_migrations():
+        if targets is not None and entry.addon_id not in targets:
+            continue
         results[entry.label] = _try_move(entry)
     moved_count = sum(1 for s in results.values() if s.startswith("moved"))
     skipped_count = sum(1 for s in results.values() if s.startswith("skipped"))
@@ -172,4 +198,4 @@ def migrate_addon_data_dirs() -> dict[str, str]:
     return results
 
 
-__all__ = ["migrate_addon_data_dirs"]
+__all__ = ["migrate_addon_data_dirs", "ENABLED_ADDONS_FOR_STARTUP"]

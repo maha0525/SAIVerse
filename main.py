@@ -27,6 +27,13 @@ _tqdm_for_patch.monitor_interval = 0
 from saiverse.data_paths import migrate_legacy_user_data
 migrate_legacy_user_data()
 
+# Migrate legacy per-addon persistent data dirs to the new addon_data/ layout.
+# voice-tts is intentionally excluded until its v2 PR lands (its code still
+# references the legacy paths on the Nature109 shared repo); see
+# saiverse/addon_migrations.py ENABLED_ADDONS_FOR_STARTUP.
+from saiverse.addon_migrations import migrate_addon_data_dirs, ENABLED_ADDONS_FOR_STARTUP
+migrate_addon_data_dirs(addon_ids=ENABLED_ADDONS_FOR_STARTUP)
+
 # Configure logging EARLY — before importing modules whose import chains
 # trigger side-effects with their own logging (e.g. saiverse_manager →
 # tools.core → tools/__init__.py の autodiscover). Without this, those
