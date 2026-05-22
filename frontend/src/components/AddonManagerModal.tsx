@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, Suspense } from 'react';
-import { X, Package, ChevronDown, ChevronRight, Trash2, Plus } from 'lucide-react';
+import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
 import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
 import { ADDON_PANELS } from '../addon-panels.generated';
+import AddonCatalogPanel from './AddonCatalogPanel';
 import styles from './AddonManagerModal.module.css';
 
 // ---------------------------------------------------------------------------
@@ -838,7 +839,10 @@ function AddonCard({
 // AddonManagerModal — main modal
 // ---------------------------------------------------------------------------
 
+type AddonManagerTab = 'installed' | 'catalog';
+
 export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModalProps) {
+    const [activeTab, setActiveTab] = useState<AddonManagerTab>('installed');
     const [addons, setAddons] = useState<AddonInfo[]>([]);
     const [personas, setPersonas] = useState<{ id: string; name: string }[]>([]);
     const [loading, setLoading] = useState(false);
@@ -909,35 +913,58 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                     </button>
                 </div>
 
+                <div className={styles.tabRow}>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'installed' ? styles.tabActive : ''}`}
+                        onClick={() => setActiveTab('installed')}
+                    >
+                        <Package size={14} /> 導入済み
+                    </button>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'catalog' ? styles.tabActive : ''}`}
+                        onClick={() => setActiveTab('catalog')}
+                    >
+                        <Store size={14} /> カタログ
+                    </button>
+                </div>
+
                 <div className={styles.content}>
-                    {!loading && !fetchError && (
-                        <MCPSection defaultCollapsed={true} />
+                    {activeTab === 'installed' && (
+                        <>
+                            {!loading && !fetchError && (
+                                <MCPSection defaultCollapsed={true} />
+                            )}
+                            {loading && <p className={styles.loadingText}>読み込み中...</p>}
+                            {!loading && fetchError && (
+                                <div className={styles.errorState}>
+                                    <p>読み込みに失敗しました</p>
+                                    <p className={styles.errorDetail}>{fetchError}</p>
+                                </div>
+                            )}
+                            {!loading && !fetchError && addons.length === 0 && (
+                                <div className={styles.emptyState}>
+                                    <Package size={40} className={styles.emptyIcon} />
+                                    <p>インストール済みのアドオンはありません</p>
+                                    <p className={styles.emptyHint}>
+                                        「カタログ」タブから導入できます
+                                    </p>
+                                </div>
+                            )}
+                            {!loading && addons.map((addon) => (
+                                <AddonCard
+                                    key={addon.addon_name}
+                                    addon={addon}
+                                    personas={personas}
+                                    onToggleEnabled={handleToggleEnabled}
+                                    onConfigChanged={refetchAddons}
+                                />
+                            ))}
+                        </>
                     )}
-                    {loading && <p className={styles.loadingText}>読み込み中...</p>}
-                    {!loading && fetchError && (
-                        <div className={styles.errorState}>
-                            <p>読み込みに失敗しました</p>
-                            <p className={styles.errorDetail}>{fetchError}</p>
-                        </div>
+
+                    {activeTab === 'catalog' && (
+                        <AddonCatalogPanel onInstalledChanged={refetchAddons} />
                     )}
-                    {!loading && !fetchError && addons.length === 0 && (
-                        <div className={styles.emptyState}>
-                            <Package size={40} className={styles.emptyIcon} />
-                            <p>インストール済みのアドオンはありません</p>
-                            <p className={styles.emptyHint}>
-                                expansion_data/ フォルダに addon.json を含むアドオンを配置してください
-                            </p>
-                        </div>
-                    )}
-                    {!loading && addons.map((addon) => (
-                        <AddonCard
-                            key={addon.addon_name}
-                            addon={addon}
-                            personas={personas}
-                            onToggleEnabled={handleToggleEnabled}
-                            onConfigChanged={refetchAddons}
-                        />
-                    ))}
                 </div>
             </div>
         </ModalOverlay>

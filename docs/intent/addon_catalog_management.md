@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: ドラフト v2 (まはー回答 1 周目反映済み、レビュー継続中)
+**ステータス**: Phase 3 完了 (2026-05-22)、Phase 4 (既存アドオン v2 化 + 永続データ移行) 着手前
 
 ## これは何か
 
@@ -214,23 +214,32 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 
 ## Phase 計画
 
-### Phase 1: manifest スキーマ確定 + voice-tts 適用
-- `addon.json` v2 スキーマ策定 (この Intent Doc + 各 type の Python 実装側仕様)
-- voice-tts の `addon.json` を v2 化、`setup.bat` を `platform_script` step として登録
-- 手動で「installer を CLI から叩いて voice-tts を導入できる」状態まで持っていく
-- アドオンローダ側の reload 経路 (実行時インストール対応) を調査・実装
+### Phase 1: manifest スキーマ確定 + Elyth で installer 基礎検証 ✅ (2026-05-22 完了)
+- `addon.json` v2 Pydantic スキーマ (`saiverse/addon_manifest.py`)
+- `get_addon_data_dir()` 共通ヘルパ (`saiverse/addon_paths.py`)
+- `addon_installer.py` 実装 (step executors / install / update / uninstall + Windows 対応 rmtree)
+- `scripts/addon_install.py` CLI 検証ツール
+- Elyth (https://github.com/maha0525/saiverse-elyth-addon, commit `897669b7`) を temp expansion_dir に install → uninstall の E2E 動作確認 ✅
+- 実機検証: 実 `expansion_data/saiverse-elyth-addon/` を CLI で uninstall → install して再導入、SAIVerse 起動後に Elyth が正常動作することをまはーが確認 ✅ (2026-05-22)
+- 既存 4 アドオン (Elyth / voice-tts / stackchan / x-addon) すべてが legacy v1 として validate を通過することを確認 (後方互換 OK) ✅
+- アドオンローダ調査: `register_addon_integrations` / `register_addon_server_hooks` per-addon API が既存。Phase 2 で installer から呼び出す統合作業を行う。FastAPI ルーター動的追加は不可なので、新規アドオンインストール時のみ「再起動推奨」表示する方針。
 
-### Phase 2: registry リポジトリ + バックエンド API
-- `saiverse-addon-registry` リポジトリをまはー管理下に作成
-- `registry.json` に既存 4 アドオン (voice-tts / elyth / stackchan / X) を登録
-- `api/routes/addon_catalog.py` を実装 (registry fetch / install / update / uninstall)
-- 進捗ストリーミングの実装 (SSE 推奨、既存パターンの調査要)
+### Phase 2: registry リポジトリ + バックエンド API ✅ (2026-05-22 完了)
+- `saiverse/addon_registry.py`: registry.json Pydantic スキーマ + fetch + memory cache (TTL 5 分、HTTP/local-file 両対応、offline fallback)
+- `api/routes/addon_catalog.py`: GET /registry / GET /installed / POST /install / POST /update / POST /uninstall (SSE 進捗 stream)
+- per-addon Lock で同時 install/update/uninstall を防止
+- 完了後に `register_addon_integrations` / `register_addon_server_hooks` を呼んで動的反映、`api_routes.py` を持つアドオンは `restart_required: true` を返す
+- `temp/saiverse-addon-registry/registry.json` + README.md を生成 (まはーが GitHub に push する想定の initial content、Elyth 1 件のみ)
+- `scripts/test_addon_catalog_api.py`: E2E 検証スクリプト
+- 実機検証: SAIVerse 起動中に Elyth uninstall → install を SSE 経由で実行、`installed` リストへの復帰まで確認 ✅ (2026-05-22)
+- **未完**: `saiverse-addon-registry` を GitHub に push (現状ローカルのみ、Phase 3 までに行う)
 
-### Phase 3: UI 実装
-- `AddonManagerModal` をタブ切替対応に再レイアウト
-- モーダルサイズ拡大
-- カタログタブのカードグリッド + 詳細パネル実装
-- 確認ダイアログ + 進捗表示
+### Phase 3: UI 実装 ✅ (2026-05-22 完了)
+- `AddonManagerModal.tsx`: 「導入済み」/「カタログ」のタブ切替を追加、モーダル幅 560 → 900px、タブ CSS (border-bottom underline、GlobalSettingsModal の subTab 踏襲)
+- `AddonCatalogPanel.tsx`: ProviderManagementPanel のデザインを踏襲した行リスト (カードグリッドではなく) + パステルバッジ (導入済み / 更新あり / GPU 必須 / disk_gb / category) + アクションボタン
+- `AddonActionConfirmDialog.tsx`: 導入/更新/削除の確認ダイアログ (commit SHA / setup 内容 / requires / 永続データ削除チェックボックス / 警告メッセージ)
+- `AddonInstallProgressDialog.tsx`: SSE 進捗ダイアログ (ログ縦スクロール + プログレスバー + 完了/エラー/再起動推奨警告)
+- 実機検証: SAIVerse UI 上で Elyth の削除 → 再導入をカタログタブから完走、SSE 進捗表示も正常 ✅
 
 ### Phase 4: 既存アドオンの整備
 - 4 アドオンすべての `addon.json` を v2 化
@@ -242,7 +251,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 1. **registry / アドオン両方 public**: 確定。raw.githubusercontent.com 経由 fetch、追加認証不要。
 2. **アドオン永続データ配置の統一**: この機会に整理して規約化する (詳細は次節「アドオン永続データ規約」)。
 3. **Phase 1 動作確認**: 5GB DL の voice-tts をいきなり試すのは事故時のリカバリコストが高すぎる。**もっと軽いアドオン (Elyth or X) で先に installer の一連動作を検証してから voice-tts に進む**。
-4. **アドオンローダの動的 reload**: 必須ではない (確認した範囲では `addon_loader.py` / `addon_external_loader.py` に明示的 reload 経路は見当たらないが、まはーの理解では動的反映されるはず → Phase 1 で実機検証する範囲に含める)。最悪「再起動要」のメッセージ表示で逃げる。
+4. **アドオンローダの動的 reload**: 必須ではない。Phase 1 調査結果として `saiverse/addon_loader.py` には per-addon の `register_addon_integrations(addon_name)` / `register_addon_server_hooks(addon_name)` / `unregister_addon_integrations(...)` が既に揃っている (一括 load 関数 `load_addon_*` の他に明示的な単体 register API がある)。installer から install 完了後にこれらを呼ぶことで動的反映できる見込み。Phase 2 (API 層実装時) に統合する。`load_addon_routers` 系の FastAPI ルーター登録は再起動が必要なので、最悪は「ルーター追加には再起動要」という UI メッセージで逃げる。
 
 ## アドオン永続データ規約 (新規策定)
 
@@ -312,70 +321,42 @@ Phase 4 (既存アドオン整備) で各アドオンを更新:
 
 各段階で問題が出たら manifest スキーマや installer 実装を修正し、それまでの段で再検証。
 
-## stackchan addon の setup 要件 (2026-05-22 調査)
+## stackchan addon の setup 要件 (2026-05-23 訂正: gateway 自動 fetch 経路の発見)
 
-stackchan addon は **2 種類の外部資産**を伴う、現状の addon 群で最も複雑なセットアップケース:
+### 実際の外部資産依存関係
 
-### 必要な外部資産
-
-| 資産 | 用途 | 取得元 | 現状の取得手段 |
+| 資産 | 用途 | 現状の取得経路 | addon installer 側の対応 |
 |---|---|---|---|
-| `stackchan-mcp` リポジトリ本体 | gateway (Python, uv で実行) を subprocess 起動 | https://github.com/maha0525/stackchan-mcp (推定) | 手動 git clone (= `temp/stackchan-mcp/`) |
-| `merged-binary.bin` (firmware) | ESP32-S3 への UI 書き込み | stackchan-mcp の GitHub Releases (想定) | **未自動化**: まはーは手元 ESP-IDF build を `temp/stackchan-mcp/firmware/build/` 経由で参照、一般ユーザーは手動 DL 想定 |
+| `stackchan-mcp` gateway | LCD/音声 I/O 等を MCP server として SAIVerse に提供 | mcp_servers.json で `uvx --from git+https://github.com/maha0525/stackchan-mcp.git@dev/integration#subdirectory=gateway` を pin、**SAIVerse 起動時に uvx が自動 fetch + cache**。ローカル clone は不要 | **不要**: addon 側は何もしなくて良い (uvx + mcp 経路が既に解決済み) |
+| `merged-binary.bin` (firmware) | ESP32-S3 device に flash する image | GPL-3.0 ライセンスのため addon repo 同梱不可。現状はまはー手元 ESP-IDF build を `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin` で参照 | **当面手動配置、後追いで GitHub Releases 化** |
 
-### 設計上の制約
+### 当初の誤認 (2026-05-22 → 5-23 訂正)
 
-- **firmware を addon リポジトリに同梱できない**: GPL-3.0 ライセンスのため。`api_routes.py:1353-1354` のコメントで明記。→ setup hook は必ず **upstream Releases からの DL** にする
-- **`stackchan-mcp` 本体も addon リポジトリに同梱しない**: 同様にライセンス分離 + サイズの観点。setup hook で git clone する
-- **3 段階 path 解決は既存実装を尊重**: `_firmware_resolve_path()` (api_routes.py:1345) の優先順位 (AddonConfig > local build > user_default) は維持。setup hook は (3) の `user_default` 配置だけ自動化する
+最初の Intent Doc では「stackchan-mcp 本体も addon の setup で `git_clone` する」と書いていたが、これは事実誤認。実際は mcp_servers.json の `uvx --from git+...` が gateway を自動取得するため、addon の setup section に gateway clone step は不要。
 
-### setup.steps (案)
+### firmware 配布の方針 (案 B → 後追いで A)
+
+| 案 | 配布手段 | 採否 |
+|---|---|---|
+| A | maha0525/stackchan-mcp の GitHub Releases に firmware を publish → addon.json に `download_file` step | **将来採用 (Phase 4-D')**: 新規ユーザー向け配布手段として整備 |
+| B | firmware は手動配置のまま、addon.json は `manifest_version: 2` 化のみ (setup section なし) | **当面採用 (Phase 4-D)**: まはー実機は既に flash 済み、新規ユーザー出現までの暫定 |
+| C | CI で自動 Releases 化 | 別タスク化、優先度低 |
+
+### Phase 4-D の setup.steps
 
 ```json
 {
-  "setup": {
-    "steps": [
-      {
-        "name": "Python 依存パッケージのインストール",
-        "type": "pip_install",
-        "requirements": "requirements.txt"
-      },
-      {
-        "name": "stackchan-mcp gateway のクローン",
-        "type": "git_clone",
-        "url": "https://github.com/maha0525/stackchan-mcp.git",
-        "commit": "<pin>",
-        "dest": "external/stackchan-mcp",
-        "skip_if_exists": "external/stackchan-mcp/.git"
-      },
-      {
-        "name": "ESP32 firmware (merged-binary.bin) のダウンロード",
-        "type": "download_file",
-        "url": "https://github.com/maha0525/stackchan-mcp/releases/download/v<X>/merged-binary.bin",
-        "sha256": "<expected>",
-        "dest_data": "firmware/merged-binary.bin",
-        "skip_if_exists": "firmware/merged-binary.bin"
-      }
-    ]
-  }
+  "manifest_version": 2,
+  "setup_version": 1
+  /* setup section なし — firmware は当面手動配置 */
 }
 ```
 
-`dest_data` は永続データ規約に従って `~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/firmware/merged-binary.bin` に展開される (= 既存 `_firmware_resolve_path()` の (3) と合致するよう addon 側の resolver も更新が必要)。
+`_firmware_resolve_path()` (`api_routes.py:1345`) の 3 段階解決の (3) `user_default` パスは Phase 4 中に新規約 `~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/firmware/merged-binary.bin` に揃える (永続データの統一規約に合わせるため)。
 
-### manifest allowlist への追加 type
+### Phase 1 検証順序の更新 (再訂正)
 
-stackchan のために以下を `setup.steps[].type` の allowlist に追加:
-- `git_clone`: URL + commit SHA pin + dest (addon ディレクトリ内 or `dest_data` で永続データディレクトリ内)
-- `download_file`: URL + SHA256 + dest_data (永続データディレクトリ内固定、addon ディレクトリ書き込みは禁止)
-
-両者とも commit SHA / SHA256 検証必須にして、上流改竄リスクを回避。
-
-### Phase 1 検証順序の更新
-
-stackchan を Elyth / X より後ろに置くのは正解 (firmware DL + gateway clone + ESP32 flash まで絡むので、installer の基礎部分が固まってから取り組むべき)。検証順序:
-
-1. Elyth → 2. X → 3. **stackchan の gateway clone 部分のみ** (firmware DL は skip 可能、まはーローカル build を引き続き使う) → 4. voice-tts (最大) → 5. stackchan の firmware Releases DL 経路 (Releases 整備とセット)
+1. Elyth (永続データなし) → 2. X-addon (poll_state / reply_log の永続データあり) → 3. **stackchan の v2 化 (setup なし + 永続データ移行のみ)** → 4. voice-tts (最大)。stackchan の firmware Releases DL 経路は Phase 4-D' として別途。
 
 ## 未確定事項 (二次レビュー待ち)
 

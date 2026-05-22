@@ -21,11 +21,12 @@ api_router.include_router(uri.router, prefix="/uri", tags=["uri"])
 api_router.include_router(system.router, prefix="/system", tags=["system"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
 
-from api.routes import addon, addon_events, oauth
+from api.routes import addon, addon_catalog, addon_events, oauth
 # addon_events(/events など固定パス)を addon(/{addon_name} キャッチオール)より
 # 先に登録する。逆順だと GET /api/addon/events が GET /api/addon/{addon_name} に
 # 飲まれて 404 "Addon not found" になる。
 api_router.include_router(addon_events.router, prefix="/addon", tags=["addon-events"])
 api_router.include_router(addon.router, prefix="/addon", tags=["addon"])
+api_router.include_router(addon_catalog.router, prefix="/addon-catalog", tags=["addon-catalog"])
 api_router.include_router(oauth.router, prefix="/oauth", tags=["oauth"])
 

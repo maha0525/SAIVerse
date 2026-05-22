@@ -1,7 +1,7 @@
 .modal {
     background: white;
     border-radius: 1rem;
-    width: 560px;
+    width: 900px;
     max-width: 95vw;
     max-height: 85vh;
     /* iOS Safari の 100vh はアドレスバー非表示時の値を含むため、アドレスバー
@@ -38,6 +38,42 @@
     margin: 0;
     font-size: 1.1rem;
     font-weight: 600;
+}
+
+/* タブ切替 (GlobalSettingsModal の subTab デザインを踏襲) */
+.tabRow {
+    display: flex;
+    gap: 4px;
+    padding: 0 1.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.tab {
+    padding: 10px 16px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    border-bottom: 2px solid transparent;
+    font-size: 0.9rem;
+    font-weight: normal;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tab:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.tabActive {
+    border-bottom-color: var(--primary, #4a7eb5);
+    font-weight: 500;
+}
+
+:global([data-theme="dark"]) .tab:hover {
+    background: rgba(255, 255, 255, 0.06);
 }
 
 .closeButton {
