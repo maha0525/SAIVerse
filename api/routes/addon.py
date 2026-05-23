@@ -207,6 +207,38 @@ def _get_addon_dir(addon_name: str) -> Path:
     return _get_expansion_data_dir() / addon_name
 
 
+async def _reconnect_addon_mcp(addon_name: str) -> None:
+    """Reconnect the addon's MCP servers so updated AddonConfig values
+    propagate into the subprocess env (which is fixed at spawn time).
+
+    Silently no-ops if the addon declares no MCP servers or if MCP isn't
+    initialized. Warns on per-server reconnect failures but does not raise,
+    so a transient MCP issue doesn't surface as a 5xx on a successful
+    config save.
+    """
+    try:
+        from tools.mcp_client import reconnect_addon_mcp_servers
+        results = await reconnect_addon_mcp_servers(addon_name)
+    except Exception as exc:
+        LOGGER.warning(
+            "addon: MCP reconnect raised for '%s': %s", addon_name, exc,
+        )
+        return
+    if not results:
+        return
+    failed = [name for name, ok in results.items() if not ok]
+    if failed:
+        LOGGER.warning(
+            "addon: MCP reconnect partial failure for '%s' (failed=%s, all=%s)",
+            addon_name, failed, list(results.keys()),
+        )
+    else:
+        LOGGER.info(
+            "addon: MCP reconnect ok for '%s' (servers=%s)",
+            addon_name, list(results.keys()),
+        )
+
+
 def _get_or_create_config(db, addon_name: str):
     from database.models import AddonConfig
     row = db.query(AddonConfig).filter(AddonConfig.addon_name == addon_name).first()
@@ -437,20 +469,28 @@ def get_addon_config(addon_name: str, _manager=Depends(get_manager)):
 
 
 @router.put("/{addon_name}/config")
-def update_addon_config(addon_name: str, body: UpdateParamsRequest, _manager=Depends(get_manager)):
-    """アドオンのグローバルパラメータを更新する。"""
+async def update_addon_config(addon_name: str, body: UpdateParamsRequest, _manager=Depends(get_manager)):
+    """アドオンのグローバルパラメータを更新する。
+
+    保存後、該当 addon が宣言する MCP server を reconnect して、新しい
+    ``${addon.X.Y}`` placeholder 値を subprocess の env に反映させる。
+    MCP subprocess は spawn 時の env 固定なので、 DB の値を変えても
+    kill + respawn しないと反映されない。
+    """
     db = _get_session()
     try:
         config = _get_or_create_config(db, addon_name)
         config.params_json = json.dumps(body.params, ensure_ascii=False)
         db.commit()
         LOGGER.info("addon: updated config for %s", addon_name)
-        return {"addon_name": addon_name, "params": body.params}
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+
+    await _reconnect_addon_mcp(addon_name)
+    return {"addon_name": addon_name, "params": body.params}
 
 
 @router.get("/{addon_name}/config/persona/{persona_id}")
@@ -479,7 +519,7 @@ def get_addon_persona_config(addon_name: str, persona_id: str, _manager=Depends(
 
 
 @router.put("/{addon_name}/config/persona/{persona_id}")
-def update_addon_persona_config(
+async def update_addon_persona_config(
     addon_name: str,
     persona_id: str,
     body: UpdateParamsRequest,
@@ -539,16 +579,18 @@ def update_addon_persona_config(
             "addon: merged persona config for %s/%s (keys=%s)",
             addon_name, persona_id, list(body.params.keys()),
         )
-        return {"addon_name": addon_name, "persona_id": persona_id, "params": merged}
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
 
+    await _reconnect_addon_mcp(addon_name)
+    return {"addon_name": addon_name, "persona_id": persona_id, "params": merged}
+
 
 @router.delete("/{addon_name}/config/persona/{persona_id}")
-def delete_addon_persona_config(
+async def delete_addon_persona_config(
     addon_name: str,
     persona_id: str,
     _manager=Depends(get_manager),
@@ -566,15 +608,19 @@ def delete_addon_persona_config(
             )
             .first()
         )
+        deleted = row is not None
         if row:
             db.delete(row)
             db.commit()
-        return {"addon_name": addon_name, "persona_id": persona_id, "deleted": True}
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+
+    if deleted:
+        await _reconnect_addon_mcp(addon_name)
+    return {"addon_name": addon_name, "persona_id": persona_id, "deleted": True}
 
 
 @router.get("/messages/{message_id}/metadata")

@@ -1597,6 +1597,40 @@ async def reconnect_mcp_server(server_name: str) -> bool:
     return await run_on_mcp_loop(manager.reconnect_server(server_name))
 
 
+async def reconnect_addon_mcp_servers(addon_name: str) -> Dict[str, bool]:
+    """Reconnect all MCP servers declared by the given addon.
+
+    Used by the addon config update API to push AddonConfig changes
+    (e.g. ``vision_host`` after a Wi-Fi switch, ``master_token`` after a
+    re-pairing) into the running subprocess env. MCP subprocesses pin
+    their env at spawn time, so the only way to apply DB changes is
+    kill + respawn via ``reconnect_server``.
+
+    Returns a ``{qualified_name: success}`` map. Empty dict if the addon
+    has no MCP servers or MCP isn't initialized.
+    """
+    manager = get_mcp_manager()
+    if manager is None:
+        return {}
+    server_names = [
+        qname
+        for qname, meta in manager._server_meta.items()
+        if meta.get("addon_name") == addon_name
+    ]
+    results: Dict[str, bool] = {}
+    for name in server_names:
+        try:
+            ok = await run_on_mcp_loop(manager.reconnect_server(name))
+            results[name] = ok
+        except Exception as exc:
+            LOGGER.warning(
+                "MCP: reconnect raised for addon '%s' server '%s': %s",
+                addon_name, name, exc,
+            )
+            results[name] = False
+    return results
+
+
 def _reload_addon_mcp_config(
     manager: MCPClientManager,
     addon_name: str,
