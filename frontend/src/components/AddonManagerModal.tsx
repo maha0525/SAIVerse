@@ -34,6 +34,11 @@ interface AddonParamSchema {
     // 大きな入力 UI (dict など) や上級者向け項目を普段は折り畳んでおきたい用途で使う。
     collapsible?: boolean;
     default_collapsed?: boolean;  // 初期状態 (collapsible=true 時のみ意味がある)。既定 true。
+    // 任意: true の項目は「詳細設定」 セクションにまとめて折り畳まれる。
+    // default や ${runtime.*} で自動解決される値、 通常触らない host/port/
+    // token などに付与する。 個別の collapsible とは別軸 (= グループ折り
+    // 畳み vs 個別行折り畳み)。
+    advanced?: boolean;
 }
 
 interface AddonInfo {
@@ -594,10 +599,13 @@ function ParamsSection({
     const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
 
     const configurableSchemas = addon.params_schema.filter((s) => !s.persona_configurable);
+    const basicSchemas = configurableSchemas.filter((s) => !s.advanced);
+    const advancedSchemas = configurableSchemas.filter((s) => s.advanced);
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
     const oauthFlows = addon.oauth_flows ?? [];
     const hasOAuthFlows = oauthFlows.length > 0;
     const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
+    const [showAdvanced, setShowAdvanced] = useState(false);
 
     // 保存（グローバル）
     const saveGlobal = useCallback(async (params: Record<string, unknown>) => {
@@ -672,11 +680,11 @@ function ParamsSection({
 
     return (
         <div className={styles.paramsSection}>
-            {/* Global params */}
+            {/* Global params: 通常設定 + 詳細設定 (折りたたみ) */}
             {configurableSchemas.length > 0 && (
                 <div className={styles.paramsGroup}>
                     <div className={styles.paramsGroupLabel}>デフォルト（全ペルソナ共通）</div>
-                    {configurableSchemas.map((schema) => (
+                    {basicSchemas.map((schema) => (
                         <ParamRow key={schema.key} schema={schema}>
                             <ParamControl
                                 schema={schema}
@@ -686,6 +694,32 @@ function ParamsSection({
                             />
                         </ParamRow>
                     ))}
+                    {advancedSchemas.length > 0 && (
+                        <div className={styles.advancedSection}>
+                            <button
+                                type="button"
+                                className={styles.advancedToggle}
+                                onClick={() => setShowAdvanced((v) => !v)}
+                                aria-expanded={showAdvanced}
+                            >
+                                {showAdvanced ? '▼' : '▶'} 詳細設定 ({advancedSchemas.length})
+                            </button>
+                            {showAdvanced && (
+                                <div className={styles.advancedBody}>
+                                    {advancedSchemas.map((schema) => (
+                                        <ParamRow key={schema.key} schema={schema}>
+                                            <ParamControl
+                                                schema={schema}
+                                                value={globalParams[schema.key]}
+                                                onChange={handleGlobalChange}
+                                                addonName={addon.addon_name}
+                                            />
+                                        </ParamRow>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
                     {saving && <span className={styles.savingHint}>保存中...</span>}
                 </div>
             )}

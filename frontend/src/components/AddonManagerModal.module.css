@@ -360,6 +360,38 @@
     margin-top: 0.25rem;
 }
 
+/* --- Advanced (詳細設定) folding section --- */
+
+.advancedSection {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border-color);
+}
+
+.advancedToggle {
+    background: transparent;
+    border: none;
+    padding: 0.3rem 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+}
+
+.advancedToggle:hover {
+    color: var(--text-primary);
+}
+
+.advancedBody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding-left: 0.5rem;
+    border-left: 2px solid var(--border-color);
+}
+
 /* --- Dropdown / Select --- */
 
 .select {

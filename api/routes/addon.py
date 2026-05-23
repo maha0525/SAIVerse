@@ -55,6 +55,11 @@ class AddonParamSchema(BaseModel):
     # 入力 UI を普段は折り畳んでおきたい場合に使う。
     collapsible: Optional[bool] = None
     default_collapsed: Optional[bool] = None  # collapsible=true 時の初期状態 (既定 true)
+    # true の項目は「詳細設定」 セクションにまとめて折り畳まれる。 default や
+    # ${runtime.*} で自動解決される値、 通常触らない host/port/token などに
+    # 付与する。 個別の collapsible とは別軸 (= グループ折り畳み vs 個別行
+    # 折り畳み)。
+    advanced: Optional[bool] = None
 
 
 class AddonUiBubbleButton(BaseModel):

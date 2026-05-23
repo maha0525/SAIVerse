@@ -68,6 +68,31 @@ def _resolve_addon_param(
     return str(value)
 
 
+def _resolve_runtime(key: str) -> Optional[str]:
+    """Resolve a ``runtime.<key>`` placeholder.
+
+    Runtime placeholders are values that SAIVerse computes on the fly at
+    placeholder-resolution time (= MCP subprocess spawn / reconnect),
+    instead of reading from DB / env. Used to avoid forcing users to
+    re-enter values that the host machine already knows (e.g. its own
+    LAN IP after a Wi-Fi switch).
+
+    Supported keys:
+      * ``lan_ip`` -- outward-facing IPv4 of this host (see saiverse.lan_ip)
+    """
+    if key == "lan_ip":
+        from saiverse.lan_ip import get_local_ip
+        ip = get_local_ip()
+        if ip is None:
+            LOGGER.warning(
+                "MCP config: ${runtime.lan_ip} could not be detected "
+                "(offline / sandbox?); placeholder left unresolved",
+            )
+        return ip
+    LOGGER.warning("MCP config: unknown runtime placeholder '${runtime.%s}'", key)
+    return None
+
+
 def _resolve_placeholder(
     placeholder: str,
     persona_id: Optional[str] = None,
@@ -78,6 +103,7 @@ def _resolve_placeholder(
       * ``env.VAR_NAME``                    -- OS environment variable (explicit form)
       * ``addon.<addon_name>.<key>``        -- AddonConfig (global) via get_params
       * ``persona.addon.<addon_name>.<key>`` -- AddonPersonaConfig via get_params
+      * ``runtime.<key>``                    -- runtime-computed value (e.g. lan_ip)
       * ``VAR_NAME``                         -- legacy OS environment variable form
     """
     parts = placeholder.split(".")
@@ -88,6 +114,9 @@ def _resolve_placeholder(
         if value is None:
             LOGGER.warning("MCP config: environment variable '%s' is not set", var_name)
         return value
+
+    if len(parts) == 2 and parts[0] == "runtime":
+        return _resolve_runtime(parts[1])
 
     if len(parts) == 3 and parts[0] == "addon":
         _, addon_name, key = parts
