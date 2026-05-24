@@ -160,7 +160,7 @@ class _FakeRuntime:
     def _load_anchors(self, persona):
         return self._anchors
 
-    def _get_anchor_validity_seconds(self, model_key):
+    def _get_anchor_validity_seconds(self, model_key, persona_id=None):
         return self._validity.get(model_key, 1200)
 
 
