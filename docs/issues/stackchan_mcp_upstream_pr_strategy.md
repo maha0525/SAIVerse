@@ -857,7 +857,8 @@ upstream/main (= 全 merged PR が入る: #225 / #210 / #217 / #212 / #223 / #20
   + PR-A3 系 (= #214 の素材、 POST /pcm endpoint + X-Sample-Rate validation + docs、 3 commits)
   + PR-A4 系 (= #215 の素材、 client_max_size cap + per-route 8 MiB cap + docs、 3 commits)
   + coredump partition (= PR-G の素材、 `079e0c2` → `af29ed9`、 stroke 時 USB CDC re-enumerate panic 調査用)
-  = **計 27 commits**
+  + boot_session_id 追加 (= `36f5209` → `5a44af0`、 GetDeviceStatusJson に boot 毎の UUID v4 を載せ host 側 avatar_loader が device reboot を検知できるようにする。 取り込み漏れ事後発見、 addon avatar_loader の WARNING ログで判明: `_fetch_device_session_id: no boot_session_id field`)
+  = **計 28 commits**
 ```
 
 `feature/fix-wifi-first-attempt-comeback-timer` の `47f09ac` (cancel in-flight connect on timeout) は cherry-pick 結果が空 = upstream #186 内で同等改修が入っているため skip。
