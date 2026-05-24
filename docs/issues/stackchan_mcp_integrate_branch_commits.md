@@ -13,10 +13,10 @@
 
 ```
 base: upstream/main (= d46e78b, 2026-05-24 16:00)
-  └─ fork-only 31 commits (= cherry-pick 27 + 独自 1 + a0cf456 等 3 = 計 31)
+  └─ fork-only 32 commits (= cherry-pick 28 + 独自 2 + a0cf456 等 2 = 計 32)
 ```
 
-- 全 commit 数: upstream/main 部分 + 31 commits の fork-only
+- 全 commit 数: upstream/main 部分 + 32 commits の fork-only
 - 直近 build / flash 状態: build clean (xiaozhi.bin 0x317c40 bytes, 21% free)、 COM3 へ app-flash 済 + partition-table-flash 済 (coredump partition 追加分)
 
 ## upstream/main 経由で取り込まれる重要 PR (= 直接 cherry-pick していない)
@@ -129,6 +129,12 @@ upstream/main を base にしたので、 これらは自動的に新ブラン�
 | 30 | `3f64a24` | (新規) | lift matrix-mode guard now that E2 rendering is in branch | **独自 commit** (= upstream `b2c2a6d` 「until PR #211」 guard を解除) | upstream PR は不要 (= PR-E2 merge 時に同様の解除が入る) | 独自 |
 | 31 | `38d7180` | `a0cf456` | restore PendingAvatarState declarations dropped during matrix-mode refactor | `pr-e2-matrix-mode` | PR-E2 #211 build fix | cherry-pick |
 
+### Group 11: opus.dll bundle (= fork-only な運用都合対応)
+
+| # | new SHA | source SHA | 内容 | 由来ブランチ | upstream PR 状態 | 取得方法 |
+|---|---|---|---|---|---|---|
+| 32 | `467641a` | (新規) | bundle opus.dll for git-URL uvx install runtime (= PR-C 設計は PyPI wheel に opus.dll を bundle するが、 mcp_servers.json は `uvx --from git+...` で fork を source build 経由で install するため _libs/opus.dll が来ない問題回避。 vcpkg-built opus.dll を SHA256 verified の上で `git add -f` で fork のみ tracked。 License: BSD-3-clause、 `gateway/LICENSE-THIRD-PARTY` で attribution 確保済) | **独自 commit** (= upstream PR-C の git tracked 禁止方針に逸脱、 fork のみで) | upstream PR は出さない (= PR-C 方針尊重) | 独自 |
+
 ## skip した commit (= 取り込まなくて済んだもの)
 
 調査の結果、 以下の commit は 「upstream/main に同等改修済み」 か 「依存先に既に含まれている」 ため cherry-pick 不要だった:
@@ -160,6 +166,7 @@ PR-E2 #211 がいずれ rebase + merge される時、 upstream maintainer 側�
 | `36f5209` boot_session_id | addon avatar_loader が device reboot 検知に必要なフィールド取得失敗 | backend.log `_fetch_device_session_id: no boot_session_id field` WARNING |
 | `079e0c2` coredump partition | panic backtrace を flash に保存できない (= stroke 時 USB 切れ調査が困難) | まはー の要求 (= 「stroke 時 USB 切れ調査用に必要」) |
 | `2b4b359` + `a0cf456` matrix mode rendering | matrix mode avatar set load が `matrix_mode_unsupported` で常に reject | backend.log `load FAILED ... matrix_mode_unsupported` WARNING |
+| `467641a` opus.dll bundle | send_pcm_stream の opuslib が opus.dll を見つけられず PCM POST 500 = stack-chan から声が出ない | gateway log `Exception: Could not find Opus library`、 まはー の指摘「声が出ない」 |
 
 **根本原因**: 「ある経路でリリースされた commit を整理する時、 そのブランチに直接含まれる independent な commits も同時に取り込まれていることを見落とした」。 例: pr-e2-matrix-mode ブランチには matrix mode commits だけでなく PR-E1 stack の commits も含まれており、 これらを一括 merge する経路で取り込みする想定だった改修が 個別 cherry-pick 戦略では抜け落ちる。
 

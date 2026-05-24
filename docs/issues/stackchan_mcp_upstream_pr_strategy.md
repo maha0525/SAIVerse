@@ -859,7 +859,8 @@ upstream/main (= 全 merged PR が入る: #225 / #210 / #217 / #212 / #223 / #20
   + coredump partition (= PR-G の素材、 `079e0c2` → `af29ed9`、 stroke 時 USB CDC re-enumerate panic 調査用)
   + boot_session_id 追加 (= `36f5209` → `5a44af0`、 GetDeviceStatusJson に boot 毎の UUID v4 を載せ host 側 avatar_loader が device reboot を検知できるようにする。 取り込み漏れ事後発見、 addon avatar_loader の WARNING ログで判明: `_fetch_device_session_id: no boot_session_id field`)
   + PR-E2 matrix mode rendering (= `2b4b359` → `11ae0cc` + `a0cf456` → `38d7180` PendingAvatarState 復活、 PR #211 OPEN 状態の本体 commit。 upstream `b2c2a6d` の "until PR #211" reject guard も解除する 独自 commit `3f64a24` を追加。 取り込み漏れ事後発見、 addon avatar_loader の `load FAILED ... matrix_mode_unsupported` で判明、 既存完成済み avatar set は全 matrix mode = layered だけだと動かない)
-  = **計 31 commits**
+  + opus.dll bundle fork-only (= `467641a` 独自 commit、 PR-C #217 が PyPI wheel に bundle する設計だが git URL 経由 uvx install では opus.dll が来ない問題回避、 vcpkg-built opus.dll を SHA256 verified で fork に commit。 ライセンス: BSD-3-clause、 LICENSE-THIRD-PARTY 同梱済。 send_pcm_stream の opuslib エラーで判明 = stack-chan から声が出ない症状)
+  = **計 32 commits**
 ```
 
 `feature/fix-wifi-first-attempt-comeback-timer` の `47f09ac` (cancel in-flight connect on timeout) は cherry-pick 結果が空 = upstream #186 内で同等改修が入っているため skip。
