@@ -2657,6 +2657,7 @@ export default function Home() {
                 isOpen={isOptionsOpen}
                 onClose={() => setIsOptionsOpen(false)}
                 currentModel={selectedModel}
+                buildingId={currentBuildingId}
                 onModelChange={(id, displayName, rateLimit) => {
                     setSelectedModel(id);
                     setSelectedModelDisplayName(displayName);

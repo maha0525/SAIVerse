@@ -376,17 +376,41 @@ class SEARuntime:
         if model and model not in accumulator["models_used"]:
             accumulator["models_used"].append(model)
 
-    def _get_cache_kwargs(self) -> Dict[str, Any]:
-        """Get cache settings from manager state for LLM client calls.
+    def _resolve_cache_ttl_str(self, persona_id: Optional[str] = None) -> str:
+        """Resolve the active cache TTL string ("5m"/"1h") for a persona.
+
+        解決は ``manager.resolve_persona_cache`` に集約 (per-persona override →
+        global 既定)。これが per-persona TTL の単一の解決点
+        (docs/intent/cache_lifecycle_control.md §5.4 の付け替え先)。
+        ``persona_id=None`` (= 旧呼び出し) は global を返す。
+        """
+        if self.manager and hasattr(self.manager, "resolve_persona_cache"):
+            return self.manager.resolve_persona_cache(persona_id)[1]
+        if self.manager and hasattr(self.manager, "state"):
+            return getattr(self.manager.state, "cache_ttl", "5m")
+        return "5m"
+
+    def _resolve_cache_enabled(self, persona_id: Optional[str] = None) -> bool:
+        """Resolve whether cache is enabled for a persona (per-persona → global)。"""
+        if self.manager and hasattr(self.manager, "resolve_persona_cache"):
+            return self.manager.resolve_persona_cache(persona_id)[0]
+        if self.manager and hasattr(self.manager, "state"):
+            return getattr(self.manager.state, "cache_enabled", True)
+        return True
+
+    def _get_cache_kwargs(self, persona_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get cache settings for LLM client calls.
 
         Returns:
             Dict with enable_cache and cache_ttl kwargs for Anthropic client.
             Non-Anthropic clients will ignore these kwargs.
+
+        ``persona_id`` を渡すと per-persona override (enabled/ttl、無ければ global) を使う。
         """
         if self.manager and hasattr(self.manager, "state"):
             return {
-                "enable_cache": getattr(self.manager.state, "cache_enabled", True),
-                "cache_ttl": getattr(self.manager.state, "cache_ttl", "5m"),
+                "enable_cache": self._resolve_cache_enabled(persona_id),
+                "cache_ttl": self._resolve_cache_ttl_str(persona_id),
             }
         return {"enable_cache": True, "cache_ttl": "5m"}
 
@@ -1468,10 +1492,10 @@ class SEARuntime:
         finally:
             db.close()
 
-    def _get_anchor_validity_seconds(self, model_key: str) -> int:
+    def _get_anchor_validity_seconds(self, model_key: str, persona_id: Optional[str] = None) -> int:
         """Get anchor validity duration in seconds based on model cache config.
 
-        - Anthropic (explicit cache): current manager.state.cache_ttl (300s or 3600s)
+        - Anthropic (explicit cache): per-persona TTL override or global manager.state.cache_ttl (300s or 3600s)
         - Others (implicit/no cache): 1200s (20 min)
         """
         try:
@@ -1479,9 +1503,7 @@ class SEARuntime:
             cache_config = get_cache_config(model_key)
             cache_type = cache_config.get("type", "implicit")
             if cache_type == "explicit":
-                current_ttl = "5m"
-                if self.manager and hasattr(self.manager, "state"):
-                    current_ttl = getattr(self.manager.state, "cache_ttl", "5m")
+                current_ttl = self._resolve_cache_ttl_str(persona_id)
                 return 300 if current_ttl == "5m" else 3600
         except Exception:
             LOGGER.warning("Failed to resolve cache TTL for model %s", model_key, exc_info=True)
@@ -1507,7 +1529,7 @@ class SEARuntime:
         if self_entry:
             try:
                 updated_at = datetime.fromisoformat(self_entry["updated_at"])
-                validity = self._get_anchor_validity_seconds(persona_model)
+                validity = self._get_anchor_validity_seconds(persona_model, getattr(persona, "persona_id", None))
                 age = (now - updated_at).total_seconds()
                 if age <= validity:
                     LOGGER.debug(
@@ -1531,7 +1553,7 @@ class SEARuntime:
                 continue  # already checked
             try:
                 updated_at = datetime.fromisoformat(entry["updated_at"])
-                validity = self._get_anchor_validity_seconds(model_key)
+                validity = self._get_anchor_validity_seconds(model_key, getattr(persona, "persona_id", None))
                 age = (now - updated_at).total_seconds()
                 if age <= validity:
                     if best_updated is None or updated_at > best_updated:
@@ -1662,8 +1684,8 @@ class SEARuntime:
         if not persona_id:
             return
 
-        # cache_ttl_seconds を取得
-        ttl_seconds = self._get_anchor_validity_seconds(model_key)
+        # cache_ttl_seconds を取得 (per-persona TTL override 対応)
+        ttl_seconds = self._get_anchor_validity_seconds(model_key, getattr(persona, "persona_id", None))
         if ttl_seconds <= 0:
             return
 

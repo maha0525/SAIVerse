@@ -1030,7 +1030,7 @@ async def _run_spell_loop(
                     messages,
                     tools=[],
                     temperature=runtime._default_temperature(persona),
-                    **runtime._get_cache_kwargs(),
+                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                 )
                 _retry_text, _retry_sub_seq, _retry_spell_detected, _retry_cancelled = await _consume_pipeline_stream(
                     _retry_stream,
@@ -1057,7 +1057,7 @@ async def _run_spell_loop(
                     messages,
                     tools=[],
                     temperature=runtime._default_temperature(persona),
-                    **runtime._get_cache_kwargs(),
+                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                 )
 
             retry_usage = llm_client.consume_usage()
@@ -1578,7 +1578,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             messages,
                             tools=tools_spec,
                             temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                         )
                         try:
                             for chunk in stream_iter:
@@ -1784,7 +1784,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         messages,
                         tools=tools_spec,
                         temperature=runtime._default_temperature(persona),
-                        **runtime._get_cache_kwargs(),
+                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                     )
 
                     # Consume reasoning (thinking) from tool-mode LLM call
@@ -2092,7 +2092,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             messages,
                             tools=[],
                             temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                         )
                         _initial_text, pipeline_sub_seq, _initial_spell_detected, _initial_cancelled = await _consume_pipeline_stream(
                             stream_iter,
@@ -2490,7 +2490,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     _cont_messages,
                                     tools=[],
                                     temperature=runtime._default_temperature(persona),
-                                    **runtime._get_cache_kwargs(),
+                                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                                 )
                                 for _cont_chunk in _cont_iter:
                                     if isinstance(_cont_chunk, dict):
@@ -2540,7 +2540,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         response_schema=response_schema,
-                        **runtime._get_cache_kwargs(),
+                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                     )
                     LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
 

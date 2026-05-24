@@ -418,6 +418,11 @@ class SAIVerseManager(
         self.gateway_mapping = ChannelMapping([])
         self._gateway_memory_transfers: Dict[str, Dict[str, Any]] = {}
         self._gateway_memory_active_persona: Dict[str, str] = {}
+        # Cache Lifecycle Phase 2: per-persona の cache override (in-memory, 非永続)。
+        # persona_id -> {"enabled": bool, "ttl": "5m"|"1h"}。未設定の persona は
+        # global manager.state (cache_enabled / cache_ttl) を既定として使う。
+        # docs/intent/cache_lifecycle_control.md §5.4 (global TTL の per-persona 付け替え)。
+        self._persona_cache_overrides: Dict[str, Dict[str, Any]] = {}
         gateway_enabled = os.getenv("SAIVERSE_GATEWAY_ENABLED", "0").lower() in {
             "1",
             "true",
@@ -531,6 +536,33 @@ class SAIVerseManager(
             self.phenomenon_manager.emit(event)
         except Exception as exc:
             logging.error("Failed to emit trigger %s: %s", trigger_type, exc, exc_info=True)
+
+    # Cache Lifecycle Phase 2: per-persona cache override ---------------------
+    def get_persona_cache_override(self, persona_id: str) -> Optional[Dict[str, Any]]:
+        """persona の cache override ``{"enabled", "ttl"}`` を返す。未設定なら None。"""
+        if not persona_id:
+            return None
+        return self._persona_cache_overrides.get(persona_id)
+
+    def set_persona_cache_override(self, persona_id: str, enabled: bool, ttl: str) -> None:
+        """persona の cache override を設定する (in-memory only、DB 非永続)。"""
+        if not persona_id:
+            return
+        self._persona_cache_overrides[persona_id] = {"enabled": bool(enabled), "ttl": ttl or "5m"}
+
+    def resolve_persona_cache(self, persona_id: Optional[str]) -> tuple[bool, str]:
+        """persona の実効 ``(enabled, ttl)`` を返す。
+
+        per-persona override があればそれを、無ければ global ``manager.state``
+        (cache_enabled / cache_ttl) を既定として使う。cache 設定解決の単一窓口。
+        """
+        override = self.get_persona_cache_override(persona_id) if persona_id else None
+        if override is not None:
+            return bool(override.get("enabled", True)), override.get("ttl") or "5m"
+        return (
+            getattr(self.state, "cache_enabled", True),
+            getattr(self.state, "cache_ttl", "5m"),
+        )
 
     # SEA integration helpers -------------------------------------------------
     def run_sea_auto(

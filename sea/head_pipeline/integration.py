@@ -115,7 +115,7 @@ def _resolve_anchor_ttl_state(
             return (None, None)
         from datetime import datetime
         updated_at_epoch = datetime.fromisoformat(updated_at_iso).timestamp()
-        validity = int(get_validity(model_key))
+        validity = int(get_validity(model_key, getattr(persona, "persona_id", None)))
         return (updated_at_epoch, validity)
     except Exception:
         LOGGER.warning(

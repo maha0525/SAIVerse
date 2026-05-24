@@ -37,14 +37,29 @@ interface CacheConfig {
     cache_type: string | null;
 }
 
+// Phase 1: read-only キャッシュタイマーの status (GET /api/people/{id}/cache-status)
+interface CacheStatus {
+    persona_id: string;
+    model: string | null;
+    supported: boolean;       // Anthropic explicit のみ true
+    cache_type: string | null;
+    active: boolean;          // cache が現在生きているか
+    anchor_updated_at: number | null;  // epoch seconds
+    ttl_seconds: number | null;
+    expires_at: number | null;         // epoch seconds
+    remaining_seconds: number;
+    cache_setting: string;             // Phase 2: 実効 cache 設定 ("off" | "5m" | "1h")
+}
+
 interface ChatOptionsProps {
     isOpen: boolean;
     onClose: () => void;
     currentModel: string;
     onModelChange: (model: string, displayName: string, rateLimit?: RateLimitInfo | null) => void;
+    buildingId?: string | null;  // キャッシュタイマーの persona switcher 用 (occupants 取得)
 }
 
-export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange }: ChatOptionsProps) {
+export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange, buildingId }: ChatOptionsProps) {
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [currentModel, setCurrentModel] = useState<string>('');
     const [params, setParams] = useState<Record<string, any>>({});
@@ -70,12 +85,77 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     const [favoriteModels, setFavoriteModels] = useState<string[]>([]);
     const [editorOpen, setEditorOpen] = useState(false);
     const [savingAs, setSavingAs] = useState(false);
+    // Cache timer (Phase 1): persona switcher + read-only status polling
+    const [cachePersonas, setCachePersonas] = useState<{ id: string; name: string }[]>([]);
+    const [selectedCachePersonaId, setSelectedCachePersonaId] = useState<string>('');
+    const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
+    const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
     useEffect(() => {
         if (isOpen) {
             fetchData();
         }
     }, [isOpen]);
+
+    // Cache timer: load building occupants (persona switcher source) on open
+    useEffect(() => {
+        if (!isOpen || !buildingId) {
+            setCachePersonas([]);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(buildingId)}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const occ = (data.occupants || []).map((o: { id: string; name: string }) => ({ id: o.id, name: o.name }));
+                if (cancelled) return;
+                setCachePersonas(occ);
+                setSelectedCachePersonaId(prev =>
+                    prev && occ.some((o: { id: string }) => o.id === prev) ? prev : (occ[0]?.id || '')
+                );
+            } catch (e) {
+                console.error('Failed to fetch building occupants for cache timer', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isOpen, buildingId]);
+
+    // Cache timer: poll cache-status for the selected persona every 2s
+    useEffect(() => {
+        if (!isOpen || !selectedCachePersonaId) {
+            setCacheStatus(null);
+            return;
+        }
+        let cancelled = false;
+        const poll = async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-status`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!cancelled) {
+                    // cacheStatus と nowMs を同時に同期。これをしないと、開いた瞬間は
+                    // マウント時の古い nowMs で残り時間が計算され、最初の 1s ティックまで
+                    // 変な値が表示される。poll は開いた直後に即実行されるので初回から正しくなる。
+                    setCacheStatus(data);
+                    setNowMs(Date.now());
+                }
+            } catch {
+                // network error: keep last known status, retry next tick
+            }
+        };
+        poll();
+        const id = setInterval(poll, 2000);
+        return () => { cancelled = true; clearInterval(id); };
+    }, [isOpen, selectedCachePersonaId]);
+
+    // Cache timer: 1s local ticker for smooth countdown between 2s polls
+    useEffect(() => {
+        if (!isOpen || !cacheStatus?.active || !cacheStatus.expires_at) return;
+        const id = setInterval(() => setNowMs(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, [isOpen, cacheStatus?.active, cacheStatus?.expires_at]);
 
     const fetchData = async () => {
         setLoading(true);
@@ -347,31 +427,19 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
-    const handleCacheEnabledChange = async (enabled: boolean) => {
-        const newConfig = { ...cacheConfig, enabled };
-        setCacheConfig(newConfig);
+    // Phase 2: per-persona cache 設定 ("off" | "5m" | "1h")
+    const handleCacheSettingChange = async (setting: string) => {
+        if (!selectedCachePersonaId) return;
+        // 楽観更新: セレクタを即反映。残り時間 (ttl_seconds/expires_at) は次の poll で更新される。
+        setCacheStatus(prev => (prev ? { ...prev, cache_setting: setting } : prev));
         try {
-            await fetch('/api/config/cache', {
+            await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/cache-config`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled })
+                body: JSON.stringify({ setting }),
             });
         } catch (e) {
-            console.error("Failed to update cache settings", e);
-        }
-    };
-
-    const handleCacheTtlChange = async (ttl: string) => {
-        const newConfig = { ...cacheConfig, ttl };
-        setCacheConfig(newConfig);
-        try {
-            await fetch('/api/config/cache', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ttl })
-            });
-        } catch (e) {
-            console.error("Failed to update cache TTL", e);
+            console.error('Failed to set per-persona cache setting', e);
         }
     };
 
@@ -455,6 +523,44 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
+    const renderCacheTimerBody = () => {
+        if (!cacheStatus) {
+            return <span className={styles.hint}>読み込み中...</span>;
+        }
+        if (!cacheStatus.supported) {
+            return <span className={styles.hint}>このモデルは明示的キャッシュに非対応です（タイマー対象外）。</span>;
+        }
+        if (cacheStatus.cache_setting === 'off') {
+            return <span className={styles.hint}>このペルソナはキャッシュ無効です。</span>;
+        }
+        if (!cacheStatus.active || !cacheStatus.expires_at || !cacheStatus.ttl_seconds) {
+            return <span className={styles.hint}>キャッシュは現在効いていません（次の発話で作成されます）。</span>;
+        }
+        const remainingSec = Math.max(0, Math.round((cacheStatus.expires_at * 1000 - nowMs) / 1000));
+        const pct = Math.max(0, Math.min(100, (remainingSec / cacheStatus.ttl_seconds) * 100));
+        let color = '#34d399';
+        if (pct < 15) color = '#f87171';
+        else if (pct < 40) color = '#fbbf24';
+        const mm = Math.floor(remainingSec / 60);
+        const ss = remainingSec % 60;
+        const timeText = `${mm}:${String(ss).padStart(2, '0')}`;
+        const isLive = remainingSec > 0;
+        return (
+            <>
+                <div className={styles.timerRow}>
+                    <span className={`${styles.timerStatusDot} ${isLive ? styles.timerActive : styles.timerInactive}`} />
+                    <div className={styles.timerBar}>
+                        <div className={styles.timerBarFill} style={{ width: `${pct}%`, background: color }} />
+                    </div>
+                    <span className={styles.timerText}>残り {timeText}</span>
+                </div>
+                <span className={styles.hint}>
+                    キャッシュ有効中。残り時間内に発話すると cache hit（格安）になります。
+                </span>
+            </>
+        );
+    };
+
     if (!isOpen) return null;
 
     return (
@@ -525,6 +631,43 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                     })()}
                                 </div>
                             </div>
+
+                            {cachePersonas.length > 0 && (
+                                <div className={styles.section}>
+                                    <div className={styles.formGroup}>
+                                        <label>キャッシュ（このペルソナ）</label>
+                                        {cachePersonas.length > 1 && (
+                                            <div className={styles.cacheTimerTabs}>
+                                                {cachePersonas.map(p => (
+                                                    <button
+                                                        key={p.id}
+                                                        type="button"
+                                                        className={`${styles.personaTab} ${p.id === selectedCachePersonaId ? styles.personaTabActive : ''}`}
+                                                        onClick={() => setSelectedCachePersonaId(p.id)}
+                                                    >
+                                                        {p.name}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {cacheStatus?.supported && (
+                                            <div className={styles.cacheTtlOverrideRow}>
+                                                <span className={styles.cacheTtlOverrideLabel}>キャッシュ</span>
+                                                <select
+                                                    className={styles.select}
+                                                    value={cacheStatus.cache_setting}
+                                                    onChange={(e) => handleCacheSettingChange(e.target.value)}
+                                                >
+                                                    <option value="off">オフ</option>
+                                                    <option value="5m">5分</option>
+                                                    <option value="1h">1時間（連続対話向け）</option>
+                                                </select>
+                                            </div>
+                                        )}
+                                        {renderCacheTimerBody()}
+                                    </div>
+                                </div>
+                            )}
 
                             <div className={styles.section}>
                                 <div
@@ -621,39 +764,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                                 LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄でデフォルト値（4枚）を使用。
                                             </span>
                                         </div>
-                                        {cacheConfig.supported && (
-                                            <>
-                                                <div className={styles.formGroup}>
-                                                    <label className={styles.checkboxLabel}>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={cacheConfig.enabled}
-                                                            onChange={(e) => handleCacheEnabledChange(e.target.checked)}
-                                                        />
-                                                        プロンプトキャッシュを有効化 (Anthropic)
-                                                    </label>
-                                                    <span className={styles.hint}>
-                                                        ON: プロンプトをキャッシュしてコスト削減（読取 0.1倍、書込 1.25倍〜2倍）。OFF: キャッシュなし（Anthropic APIは読取専用モード非対応）。
-                                                    </span>
-                                                </div>
-                                                {cacheConfig.enabled && cacheConfig.ttl_options.length > 0 && (
-                                                    <div className={styles.formGroup}>
-                                                        <label>キャッシュ TTL</label>
-                                                        <select
-                                                            className={styles.select}
-                                                            value={cacheConfig.ttl}
-                                                            onChange={(e) => handleCacheTtlChange(e.target.value)}
-                                                        >
-                                                            {cacheConfig.ttl_options.map(ttl => (
-                                                                <option key={ttl} value={ttl}>
-                                                                    {ttl === '5m' ? '5分（書込コスト 1.25倍）' : '1時間（書込コスト 2倍）'}
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                    </div>
-                                                )}
-                                            </>
-                                        )}
                                     </>
                                 )}
                             </div>
