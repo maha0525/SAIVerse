@@ -402,11 +402,11 @@ class PulseController:
             return
         
         will_resume = request.config.on_blocked == "wait"
-        content = f"(中断: {interrupted_by}からのリクエストを優先しました)"
-        
+        content = f"<system>(中断: {interrupted_by}からのリクエストを優先しました)</system>"
+
         try:
             msg = {
-                "role": "assistant",
+                "role": "user",
                 "content": content,
                 "metadata": {
                     "pulse_id": request.pulse_id,
