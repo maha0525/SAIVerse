@@ -310,7 +310,15 @@ class MCPServerConnection:
         self.session: Any = None
         self.tools: List[Any] = []
         self._connected = False
-        self._exit_stack: Optional[AsyncExitStack] = None
+        # 接続の async context (transport / ClientSession) は単一の長命
+        # 「所有タスク」(_owner_task) の中で開いて同じタスクの中で閉じる。
+        # anyio のキャンセルスコープはタスク束縛のため、別タスクから閉じると
+        # "exit cancel scope in a different task" を起こし、最悪 detached な
+        # async generator 片付けタスクが _deliver_cancellation で無限スピン
+        # して GIL を焼く (docs/issues/mcp_cancel_scope_spin_gil_starvation.md)。
+        self._owner_task: Optional[asyncio.Task] = None
+        self._shutdown_event: Optional[asyncio.Event] = None
+        self._ready_future: Optional[asyncio.Future] = None
 
     @property
     def connected(self) -> bool:
@@ -326,32 +334,73 @@ class MCPServerConnection:
         if self.connected:
             return
 
-        self._exit_stack = AsyncExitStack()
+        loop = asyncio.get_running_loop()
+        self._shutdown_event = asyncio.Event()
+        self._ready_future = loop.create_future()
+        # 接続の async context はこのタスクではなく専用の所有タスクの中で
+        # 開閉する。connect() は所有タスクが「接続完了」か「失敗」を通知
+        # するまで待つだけ (実害のある作業は所有タスク側でやる)。
+        self._owner_task = loop.create_task(self._run_connection())
+        await self._ready_future
+
+    async def _run_connection(self) -> None:
+        """所有タスク本体: transport/session を開き、shutdown 要求まで保持する。
+
+        ``async with`` の開始も終了もこの単一タスクの中で完結するため、anyio
+        のキャンセルスコープがクロスタスクで抜かれることがない
+        (docs/issues/mcp_cancel_scope_spin_gil_starvation.md)。
+        """
+        ready = self._ready_future
+        shutdown = self._shutdown_event
         try:
-            if self.transport_type == "stdio":
-                await self._connect_stdio()
-            elif self.transport_type == "sse":
-                await self._connect_sse()
+            async with AsyncExitStack() as stack:
+                if self.transport_type == "stdio":
+                    await self._connect_stdio(stack)
+                elif self.transport_type == "sse":
+                    await self._connect_sse(stack)
+                else:
+                    await self._connect_streamable_http(stack)
+
+                if self.session is None:
+                    raise RuntimeError("MCP session was not created")
+
+                init_result = await self.session.initialize()
+                self._connected = True
+                LOGGER.info(
+                    "MCP server '%s' initialized (protocol=%s, server=%s)",
+                    self.server_name,
+                    getattr(init_result, "protocolVersion", "unknown"),
+                    getattr(getattr(init_result, "serverInfo", None), "name", "unknown"),
+                )
+                await self._discover_tools()
+
+                if ready is not None and not ready.done():
+                    ready.set_result(None)
+
+                # shutdown 要求 (disconnect) が来るまで context を保持。
+                if shutdown is not None:
+                    await shutdown.wait()
+        except Exception as exc:
+            if ready is not None and not ready.done():
+                ready.set_exception(exc)
             else:
-                await self._connect_streamable_http()
+                LOGGER.warning(
+                    "MCP server '%s' connection task ended with error: %s",
+                    self.server_name, exc,
+                )
+        finally:
+            self._connected = False
+            self.tools = []
+            self.session = None
+            if ready is not None and not ready.done():
+                ready.set_exception(
+                    RuntimeError(
+                        f"MCP server '{self.server_name}' connection task "
+                        "ended before becoming ready"
+                    )
+                )
 
-            if self.session is None:
-                raise RuntimeError("MCP session was not created")
-
-            init_result = await self.session.initialize()
-            self._connected = True
-            LOGGER.info(
-                "MCP server '%s' initialized (protocol=%s, server=%s)",
-                self.server_name,
-                getattr(init_result, "protocolVersion", "unknown"),
-                getattr(getattr(init_result, "serverInfo", None), "name", "unknown"),
-            )
-            await self._discover_tools()
-        except Exception:
-            await self.disconnect()
-            raise
-
-    def _open_subprocess_errlog(self):
+    def _open_subprocess_errlog(self, stack: AsyncExitStack):
         """Open a per-session, per-server log file for subprocess stderr.
 
         Resolves the session log directory from the root logger's FileHandler
@@ -380,10 +429,10 @@ class MCPServerConnection:
         safe_name = self.server_name.replace("/", "_").replace("\\", "_")
         path = log_dir / f"mcp_subprocess_{safe_name}.log"
         handle = open(path, "a", encoding="utf-8", buffering=1)
-        self._exit_stack.callback(handle.close)  # type: ignore[union-attr]
+        stack.callback(handle.close)
         return handle
 
-    async def _connect_stdio(self) -> None:
+    async def _connect_stdio(self, stack: AsyncExitStack) -> None:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -399,7 +448,7 @@ class MCPServerConnection:
         # logs ("Gateway started", "ESP32 hello", env diagnostics, etc.)
         # are invisible to anyone reading backend.log. We forward to a
         # sibling file in the same session log dir.
-        errlog_handle = self._open_subprocess_errlog()
+        errlog_handle = self._open_subprocess_errlog(stack)
 
         LOGGER.info(
             "MCP subprocess starting: server=%s command=%s args=%s env=%s errlog=%s",
@@ -409,33 +458,33 @@ class MCPServerConnection:
             server_params.env,
             getattr(errlog_handle, "name", "<unknown>"),
         )
-        read_stream, write_stream = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
+        read_stream, write_stream = await stack.enter_async_context(
             stdio_client(server_params, errlog=errlog_handle)
         )
-        self.session = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
+        self.session = await stack.enter_async_context(
             ClientSession(read_stream, write_stream)
         )
 
-    async def _connect_sse(self) -> None:
+    async def _connect_sse(self, stack: AsyncExitStack) -> None:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
-        read_stream, write_stream = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
+        read_stream, write_stream = await stack.enter_async_context(
             sse_client(self.config["url"])
         )
-        self.session = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
+        self.session = await stack.enter_async_context(
             ClientSession(read_stream, write_stream)
         )
 
-    async def _connect_streamable_http(self) -> None:
+    async def _connect_streamable_http(self, stack: AsyncExitStack) -> None:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
-        transport = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
+        transport = await stack.enter_async_context(
             streamablehttp_client(self.config["url"])
         )
         read_stream, write_stream = transport[0], transport[1]
-        self.session = await self._exit_stack.enter_async_context(  # type: ignore[union-attr]
+        self.session = await stack.enter_async_context(
             ClientSession(read_stream, write_stream)
         )
 
@@ -483,12 +532,32 @@ class MCPServerConnection:
         self._connected = False
         self.tools = []
         self.session = None
-        if self._exit_stack is not None:
+
+        # 所有タスクに shutdown を合図し、所有タスク自身が (= context を開いた
+        # のと同じタスクが) async with を巻き戻すのを待つ。ここで直接 aclose
+        # しないことで「別タスクでキャンセルスコープを抜く」事象を構造的に排除する。
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()
+        task = self._owner_task
+        self._owner_task = None
+        if task is not None and not task.done():
             try:
-                await self._exit_stack.aclose()
+                # transport の __aexit__ が死んだ subprocess 等で詰まる可能性に
+                # 備えてタイムアウト。超過時は cancel する (cancel による巻き戻し
+                # も所有タスク内で走るのでクロスタスクにはならない)。
+                await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
+            except asyncio.TimeoutError:
+                LOGGER.warning(
+                    "MCP server '%s' owner task did not finish within 15s; cancelling.",
+                    self.server_name,
+                )
+                task.cancel()
             except Exception as exc:
-                LOGGER.debug("MCP server '%s' cleanup error: %s", self.server_name, exc)
-            self._exit_stack = None
+                LOGGER.debug(
+                    "MCP server '%s' owner task ended with: %s", self.server_name, exc,
+                )
+        self._shutdown_event = None
+        self._ready_future = None
 
 
 def _make_instance_key(qualified_server_name: str, persona_id: Optional[str]) -> str:
