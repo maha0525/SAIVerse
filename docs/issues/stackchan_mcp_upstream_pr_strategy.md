@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp upstream への PR 投稿戦略 (Phase X')
 
-**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A〜F + PR-B/C + Series E/L/M が 2026-05-21 一斉投稿済み = #207〜#217、 Codex / maintainer の review 対応も同日中に完了、 PR-G coredump + PR-N (= false-stroke suppression、 dev/integration で実機検証中) が未送)
+**ステータス**: 🟡 大半が review 中 (= PR-J/K #195/#196 + PR-H #186 が merged、 残 Series A/C/E/F/L/M が review 中 = #207〜#217、 **PR-B #216 は #119 と冗長と確認し 2026-05-23 クローズ**、 **PR-C #217 は in-PR request 全件対応済で ready-to-merge 待ち**、 **PR-E1 #210 は second-pass P2 2件 (matrix reject 実機検証済 + LVGL race lock) 対応済で Codex 再 review 待ち**、 PR-G coredump + PR-N (= false-stroke suppression、 dev/integration で実機検証中) が未送)
 **優先度**: medium
 **作成日**: 2026-05-13
-**最終更新**: 2026-05-21 (一斉投稿 → Codex auto-review → maintainer review → P1/P2 全件対応の連続作業)
+**最終更新**: 2026-05-25 (新統合ブランチ `integrate/all-fixes-2026-05-25` 作成 + addon mcp_servers.json 参照切替)
 **関連**: `docs/intent/stackchan_vessel.md` §「Phase X'」、`docs/intent/stackchan_avatar_pipeline.md` §E、`maha0525/stackchan-mcp` fork branches `feature/external-pcm-stream` / `feature/dynamic-avatar-set`
 
 ## 背景
@@ -51,11 +51,11 @@ PR6a → PR6 (persistent connection + bug fix) ── 6a/6b は密接なので 1
 | **PR #A2** = [#213](https://github.com/kisaragi-mochi/stackchan-mcp/pull/213) | feat(tts): `send_pcm_stream` for incremental PCM push | PR #A1 | PR #A1 と stacked | 投稿済 (2026-05-21) |
 | **PR #A3** = [#214](https://github.com/kisaragi-mochi/stackchan-mcp/pull/214) | feat(capture_server): `POST /pcm` endpoint for external PCM input | PR #A2 | PR #A2 と stacked | 投稿済 (2026-05-21) |
 | **PR #A4** = [#215](https://github.com/kisaragi-mochi/stackchan-mcp/pull/215) | fix(capture_server): disable aiohttp `client_max_size` cap | PR #A3 | PR #A3 と stacked | 投稿済 (2026-05-21) |
-| **PR #B** = [#216](https://github.com/kisaragi-mochi/stackchan-mcp/pull/216) | fix(firmware): skip xiaozhi-cloud OTA check (NVS websocket.url 保護) | upstream `main` | — | 投稿済 (2026-05-21) |
-| **PR #C** = [#217](https://github.com/kisaragi-mochi/stackchan-mcp/pull/217) | fix(gateway): bundle libopus.dll for Windows + DLL search path setup | upstream `main` | — | 投稿済 (2026-05-21) |
+| ~~PR #B~~ = [#216](https://github.com/kisaragi-mochi/stackchan-mcp/pull/216) | ~~fix(firmware): skip xiaozhi-cloud OTA check (NVS websocket.url 保護)~~ | — | — | **クローズ (2026-05-23)** — #119 (`CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG` default y) で URL 保護は解決済、 本 PR は冗長。 詳細は末尾「2026-05-23 続報」節 |
+| **PR #C** = [#217](https://github.com/kisaragi-mochi/stackchan-mcp/pull/217) | fix(gateway): bundle libopus.dll for Windows + DLL search path setup | upstream `main` | — | in-PR request 全件対応済、 ready-to-merge 待ち (2026-05-23) |
 | ~~PR #D~~ | ~~feat(firmware): opt-in persistent WS connection + reconnect bug fix~~ | — | — | **不要** (= upstream #169/#197 で吸収済、 dev/integration の `ab3423e` でも opt-in gate を撤去済) |
 
-= **計 6 PR** (Phase 1' 由来、 音声経路 + OTA + libopus)。Series A の 4 PR は stacked、 B/C は独立。 PR-D は upstream merge で目的達成済のため取り下げ。
+= **計 6 PR** (Phase 1' 由来、 音声経路 + OTA + libopus)。Series A の 4 PR は stacked、 B/C は独立。 PR-D は upstream merge で目的達成済のため取り下げ、 **PR-B (#216) は #119 と冗長のため 2026-05-23 クローズ** (= 実質 5 PR が生存)。
 
 これに加え、Phase 4.5-e で **Series E (PR-E1 / PR-E2)** が動的 avatar セット転送機構として投稿予定。本書末尾「追補: Series E」節を参照。
 
@@ -121,11 +121,11 @@ git push origin pr-d-persistent-ws-opt-in
 - A3 の `POST /pcm` endpoint は test 必須 (= aiohttp test client で 200/401/503 を網羅)
 - A4 の `client_max_size=0` は test しづらいが、PR description で「200-second long PCM upload で 1 MiB cap が阻む observed evidence」を Phase 1' のログから引用して根拠化
 
-### PR #B (xiaozhi OTA skip)
+### PR #B (xiaozhi OTA skip) — **クローズ済 (2026-05-23、 #119 と冗長)**
 
-- upstream maintainer (kisaragi-mochi) は xiaozhi-esp32 fork を強く意識した repo を持っているので、「xiaozhi-cloud と関係を断つ修正」は理由を厚めに書く必要あり
-- PR description で「stackchan-mcp は自前 gateway を持つ前提で、xiaozhi-cloud OTA endpoint への接続は NVS websocket.url を server 主導で書き換える副作用がある」「自前 gateway 設計と矛盾する」を明示
-- 受け入れ拒否される可能性が他の PR より高い (= xiaozhi 連携を残したい reviewer の意向次第)。拒否されたら手元 fork で運用継続が許容範囲 (= memory `feedback_user_experience_first.md`)
+- 当初の動機: 「stackchan-mcp は自前 gateway を持つ前提で、xiaozhi-cloud OTA endpoint への接続は NVS websocket.url を server 主導で書き換える副作用がある」「自前 gateway 設計と矛盾する」 = **NVS websocket.url の保護**
+- **クローズ理由**: maintainer が #119 (merged 2026-05-14、 `CONFIG_DISABLE_OTA_WEBSOCKET_CONFIG` default y) を提示。 #119 は `Ota::CheckVersion()` 内の websocket-section NVS write-back だけを gate し、 URL 保護という当 PR と同一の目的を既に達成していた。 本 PR の差分は「OTA round-trip 自体の撤去」 だが、 これは URL 保護の実装手段であって独立した目的ではなく、 かつ codex [P2] が指摘した「自前 OTA path も無効化する」 副作用を伴う。 → 当時の intent (= URL 保護) に照らし冗長と判断、 感謝コメント付きでクローズ
+- 学び: 投稿前に「同一問題の既存 upstream fix がないか」 を確認する。 #119 は #110 への fix として 5/14 に merged 済だった (= 本 PR 投稿 5/21 の 1 週間前)
 
 ### PR #C (libopus bundle)
 
@@ -215,6 +215,73 @@ PR-F #209 で `ruff F401` (`tests/test_audio_input_hook.py` の `import asyncio`
 - **PR-G** coredump: 実機検証未完で未送、 別ラウンドで投稿予定
 - **CHANGELOG TBD ラベル更新**: PR-A2/A3/A4 等で残ってる `[PR #TBD-X]` placeholder を実 PR # に置換 (= 些末、 review request 時にまとめて修正可)
 - **dev/integration の最新 sync**: P1/P2 fix を dev/integration へ取り込んだ branch (`dev/integration-p1-fixes`) は作成済だが、 P2 fix は反映してない。 全部取り込んだ整理は後日
+
+## 2026-05-23 続報 (PR-B クローズ + PR-C second-pass review 対応確認)
+
+5/21 一斉投稿ラウンドの後、 各 PR の maintainer review / コメントを精査した記録。
+
+### PR-B #216 → クローズ
+
+詳細は § PR #B 節に記載。 maintainer が #119 を提示 → 当時の intent (= URL 保護) は #119 で解決済と確認 → 感謝コメント付きでクローズ。
+
+### PR-C #217 → in-PR request 全件対応済、 ready-to-merge 待ち
+
+5/21 の round 1 (ship-blocker 4 件) は全面リワークで対応済 (§「2026-05-21 レビュー対応ラウンド」参照)。 その後の経緯:
+
+- **5/21 18:32 maintainer second-pass review**: round 1 の 4 件は「綺麗に対応された」 と確認。 追加で 5 件の finding。 うち release path に関わる 2 件を in-PR request、 残り 3 件は follow-up issue (#221 / #222) に切り出し。
+  - **[high] 1**: `build-windows-wheel` の vcpkg が unpinned + opus.dll SHA256 が log されるだけで verify されてない (= tag rerun で別バイナリを silently publish しうる)
+  - **[high] 2**: publish workflow の smoke test が `tts` extra なしで `opuslib` import → `uv sync --frozen` は opuslib を入れず、 release path のみ `ModuleNotFoundError` で失敗しうる (PR CI `build.yml` は `--extra tts` で通るため検知できない)
+- **5/23 まはー対応 (commit `fab324eb9`)**: in-PR request 2 件を対応。 diff で確認済:
+  - `VCPKG_PIN: "2026.04.27"` で vcpkg を release tag に pin、 `git clone --branch` で固定
+  - 「Verify opus.dll SHA256」 step 新設、 `EXPECTED_OPUS_DLL_SHA256` と比較し mismatch / 空で `exit 1`
+  - `uv sync --frozen` → `uv sync --frozen --extra tts`
+- **5/23 12:56 maintainer**: CHANGELOG コンフリクト (#212 merge 由来) を maintainer 側で rebase 解決。 Codex を rebased HEAD に再 review、 clean になれば `needs-review` → `ready-to-merge`。 **まはー側の追加作業なし**
+
+**運用上の留意**: `EXPECTED_OPUS_DLL_SHA256` は意図的に空 (= 未設定なら fail させて silent ship を防ぐ設計)。 release を tag する際に `workflow_dispatch` で実 hash を取得 → commit する運用。 merge 自体はブロックしない (publish.yml は release trigger、 PR CI には無影響)。
+
+### follow-up issue #221 / #222 → 様子見
+
+maintainer (kisaragi-mochi) が #217 から切り出して起票 (= author 本人)。 ただし assignee 空・コメント 0 で **実装の担い手は未割り当て**。 「向こうでやる」 とは明言していない。 いずれも merge blocker ではない (maintainer 明言: "neither carved-out item blocks merge")。
+
+- **#221**: win_amd64 retag 時の内部 WHEEL `Tag:` 不整合 (filename は win_amd64 だが `.dist-info/WHEEL` は `py3-none-any` のまま)。 pip install は今日も通るが license scanner / 厳格な packaging tool が誤判定・reject しうる。 修正は platform wheel 直接 build か WHEEL メタ書き換え + rezip、 加えて publish smoke test を最終 wheel の clean venv install に変更
+- **#222**: license 文面の polish 2 件。 (1) `gateway/LICENSE` primary に「Windows wheel は opus.dll を別ライセンスで同梱、 詳細は LICENSE-THIRD-PARTY 参照」 の注記追加、 (2) `LICENSE-THIRD-PARTY` に Xiph patent grant を verbatim 収録 (= wheel を offline self-contained に) もしくは「外部参照」 と正確に書き直し
+- **判断 (2026-05-23)**: いったん様子見。 merge blocker でない + 担い手未定のため、 maintainer が拾うか community contribution を待つ。 着手するなら #222 (= 自分が持ち込んだ opus.dll の license 後始末で筋が通る) が先、 #221 (= CI 機構の作り込み、 maintainer の packaging 方針に踏み込む面あり) は委ねる選択もあり
+
+## 2026-05-24 続報 (PR-E1 #210 second-pass P2 2件対応)
+
+#210 が maintainer 側で rebase された (origin/pr-e1 が CHANGELOG merge 込みで force-push、 ローカルを reset --hard で同期) 後、 rebased main 基準の Codex review で P2 2件が出た。 両方このPR内で fix。
+
+### [P2] matrix loads accepted but never rendered → 明示 reject (`b2c2a6d`)
+
+- **問題**: `OnAvatarSetFetch` が `mode="matrix"` を受理し AdoptOwnedBuffer 成功まで進むが、 display lookup (`AvatarImageFor`, stackchan.cc:3762) は kLayered のみ dynamic set を消費 → matrix は static `avatar_images` にフォールスルー = gateway に偽の成功シグナル
+- **方針**: maintainer 提示の選択肢 (a) kLayered-only。 matrix render は元々 PR-E2 (#211) 担当 (intent doc E-2)。 #210 では matrix を `matrix_mode_unsupported` エラーで明示 reject、 #211 がこの guard を外して matrix lookup を wire する
+- **実機検証済** (2026-05-24): COM3 に flash → SAIVerse UI から matrix avatar 送信。 `backend.log` で before/after 確認:
+  - flash 前 (00:46, eris matrix): `{"ok": true}` (= silent fall-back、 旧挙動)
+  - flash 後 (13:11, mira matrix): `{"ok": false, "error": "matrix_mode_unsupported", "bytes_transferred": 0}` (= 明示 reject)
+  - addon avatar_loader も `not marking as loaded, will retry on next vessel entry` と正しくハンドリング
+
+### [P2] avatar buffer swap races the LVGL display task → DisplayLockGuard (`ed06207`)
+
+- **問題**: `avatar_set_fetcher.cc:118` の `AdoptOwnedBuffer` を worker task が display lock なしで呼ぶ。 前 PSRAM buffer の free + lv_image_dsc_t descriptor 書き換え中、 LVGL display task が現 source を読むと race → hard-fault / frame 破損。 `OnAvatarSetFetch` の timer quiesce は新規 set_src write を止めるだけで display task の read は止めない
+- **修正**: `AdoptOwnedBuffer` を `DisplayLockGuard(Board::GetInstance().GetDisplay())` で囲む (既存 LVGL boundary lock パターン踏襲、 headless board 用 nullptr ガード付き)
+- **build-verified のみ**: 繰り返しロードの race は不在証明が本質的に困難 (= 非決定的、 同一 generate スクリプト出力は同 checksum で skip されうる)。 lock の正しさは「firmware の他の LVGL write が取るのと同じ lock を取る」 という設計担保。 実機での race 再現検証はしない判断
+
+### build / push / PR コメント
+
+- ローカル ESP-IDF v5.5.4 で stackchan target build clean (exit 0、 変更 2 ファイルがコンパイル通過、 自コード起因 warning ゼロ)
+- origin/pr-e1 へ fast-forward push (`b4543a7..ed06207`)
+- PR #210 に対応コメント投稿済 ([issuecomment-4527371059](https://github.com/kisaragi-mochi/stackchan-mcp/pull/210#issuecomment-4527371059))。 matrix reject は on-device verified、 lock は build-verified + review 担保と明記
+
+### 検証フローの知見 (将来の参考)
+
+- 実在の完成済み avatar set データ (`~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/avatar_sets/<persona>/default/`) は **全て matrix mode** (air/eris/mira/quon、 各 3,456,000 bytes)。 layered の完成データは無い
+- layered テストセットは `expansion_data/saiverse-stackchan-addon/scripts/generate_test_avatar_set.py --mode layered` で生成 (色分け + スロットラベル印字、 537,600 bytes)。 ただし決定的生成のため同一 checksum
+- gateway `load_avatar_set(archive_path, mode)` は size 検証 (layered 537,600 / matrix 3,456,000) 通過後 device に送信し reply を await (`gateway.py:134-187`)。 matrix reject は device 側で返る
+
+### #211 への波及
+
+- matrix reject を #210 に入れたため、 **#211 は reject branch を外して matrix lookup を wire する** (matrix render 実装は元々 #211 の役目、 純増は reject 解除のみ)
+- #210 push で #211 は cascade rebase が必要。 ただし #210 の Codex 再 review が片付く前にやると #210 が動くたび再 rebase になるため、 **#210 review 決着後に着手**するのが効率的。 PR コメントで「#210 が land したら #211 を rebase する」 と maintainer に伝達済
 
 ## 残課題 (Phase X' 実施時に解決すべき)
 
@@ -771,6 +838,73 @@ PR-I (= #206) で touch event log の可読性を上げた後、 新フォーマ
 - description で `IMPLAUSIBLE_PRESS_MS = 5000` の根拠 (= 観測データの gap 分析) を提示。 maintainer から「5000 は magic number」 と指摘される余地はあるので、 logs から導出した数値であることを明示
 - 既存 `feedback_user_experience_first.md` の方針通り「ユーザーが詰まらない」 軸での修正
 
+## 2026-05-25 続報 (新統合ブランチ `integrate/all-fixes-2026-05-25` 作成)
+
+Sonnet 4.6 セッションで作られた `integrate/all-fixes-2026-05-24` が **dev/integration-p1-fixes を基準にしていて、 dev/integration 側にしかなかった PR #225 (= keep idle after tts.stop) + Si12T align fix (`429b259`) を取りこぼしていた** ことが判明。 firmware 動作確認で「speaking モードが終わったら勝手に listening モードに戻る」 という巻き戻り症状が再発したのが発覚の契機。
+
+### 取り組み内容
+
+旧 integrate ブランチは捨てて、 **`upstream/main` (= d46e78b) 起点で fork-only 改修を順次 cherry-pick** する戦略で新ブランチを構築:
+
+```
+upstream/main (= 全 merged PR が入る: #225 / #210 / #217 / #212 / #223 / #207 / #206 / #219 / #205 / #186 / #196 / #195 / #203 / #202)
+  + Si12T align (= PR-N 候補、 `429b259` → `ecc0358`)
+  + touch 系 fork-only 4 commits (= PR-M #208 の素材、 stop-listening / poll instrumentation / StartListening tap / sound+debounce+timeout)
+  + keep ToggleChatState path (= PR-M #208 codex review fix)
+  + send_pcm_stream feature + fix + docs (= PR-A2 #213 の素材、 3 commits)
+  + PR-B 系 (= skip xiaozhi OTA + rollback preserve、 3 commits、 #216 CLOSED だが fork 側は維持必要)
+  + PR-F 系 8 commits (= #209 の素材、 audio_input_hook + esp32_client listen handler + gateway env wire + tests + docs + recording cleanup + opus lacing + asyncio import 削除)
+  + PR-A3 系 (= #214 の素材、 POST /pcm endpoint + X-Sample-Rate validation + docs、 3 commits)
+  + PR-A4 系 (= #215 の素材、 client_max_size cap + per-route 8 MiB cap + docs、 3 commits)
+  + coredump partition (= PR-G の素材、 `079e0c2` → `af29ed9`、 stroke 時 USB CDC re-enumerate panic 調査用)
+  = **計 27 commits**
+```
+
+`feature/fix-wifi-first-attempt-comeback-timer` の `47f09ac` (cancel in-flight connect on timeout) は cherry-pick 結果が空 = upstream #186 内で同等改修が入っているため skip。
+
+### conflict resolution の経験
+
+duplicate commit (= fork で先行 cherry-pick された PR が upstream に別 SHA で merge される) との conflict は 5 ファイルで発生:
+
+- `firmware/main/application.cc`: StartListening のコメント / ESP_LOGI を両方残す
+- `CHANGELOG.md`: HEAD (= upstream Unreleased entries) と各 PR-B / PR-F 側の追加 entry を両方残す
+- `gateway/stackchan_mcp/esp32_client.py`: HEAD の avatar_set_loaded 分岐と 39169a1 の listen 分岐を両方残す
+- `gateway/stackchan_mcp/capture_server.py`: avatar staging dataclass / handlers / create_capture_app の avatar route 追加と PR-A3 の /pcm handler + PR-A4 の CAPTURE_MAX_BYTES を統合
+- `gateway/stackchan_mcp/gateway.py`: audio_hook_url / audio_hook_token property と pcm_token property を両方残す + create_capture_app 呼び出しを統合
+
+戦略の学び: **dev/integration 全体を起点にして upstream merge する**経路は duplicate commit による 16 ファイル conflict を生むので不可。 **upstream/main 起点 + fork-only cherry-pick** の経路の方が conflict 数も少なく、 各 commit の責務もクリア。
+
+### addon 側更新
+
+`expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from` URL を `@dev/integration` → `@integrate/all-fixes-2026-05-25` に変更し、 fork repo (`maha0525/saiverse-stackchan-addon`) に push 済 (commit `b72441f`)。 SAIVerse 起動時に uvx が新ブランチを自動 fetch + cache し直す。
+
+### 未送 PR の取り扱い
+
+新ブランチに取り込まれた未送系 fork-only 改修:
+
+| 候補 PR | commit (新ブランチ) | upstream 投稿条件 |
+|---|---|---|
+| **PR-N** Si12T false-stroke suppression | `ecc0358` | dev/integration で 24h+ 実機運用 → false stroke 完全消失確認後 |
+| **PR-G** coredump-to-flash | `af29ed9` | Phase 3' stroke 再現実験で coredump 機能の動作確認後 (新ブランチで動作確認可能になった) |
+
+### flash 手順
+
+partition table が `coredump` partition 追加で変わっているので、 初回 flash は partition-table-flash + app-flash の 2 段 (NVS 保持) または merged flash (NVS 消える、 Vessel 再ペアリング必要)。
+
+```powershell
+. C:\Espressif\frameworks\esp-idf-v5.5.4\export.ps1
+Set-Location C:\Users\shuhe\workspace\SAIVerse\temp\stackchan-mcp\firmware
+
+# 推奨: NVS / WiFi 認証 保持
+idf.py -p COM3 partition-table-flash
+idf.py -p COM3 app-flash
+
+# stroke 時 USB 切れ調査:
+# 1. stroke 再現 → 端末 reset 後 USB 再接続
+# 2. idf.py -p COM3 coredump-info で backtrace 取得
+# 3. coredump 空なら panic 由来ではない = 純粋 USB CDC re-enumerate / electrical 問題
+```
+
 ## 参考
 
 - 手元 fork のブランチ:
@@ -785,7 +919,7 @@ PR-I (= #206) で touch event log の可読性を上げた後、 新フォーマ
   - `fix/stackchan-touch-uses-startlistening-not-toggle` (= 1 commit、 listen 起動を StartListening に変更で自動 listening 復帰回避、 PR-M の commit 出所、 2026-05-21 派生)
   - `feature/stackchan-touch-feedback-and-bounds` (= 1 commit、 デバウンス + タイムアウト + LED feedback + format fix、 PR-M の commit 出所、 2026-05-21 派生)
   - `fix/stackchan-touch-popup-sound` (= 1 commit、 StartListening 経由で popup-on-listening flag を立てる、 PR-L + PR-M の commit 出所、 2026-05-21 派生)
-- addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (現状 `feature/external-pcm-stream`、Phase 4.5 統合時に `dev/integration` に切替)
+- addon 側で参照: `expansion_data/saiverse-stackchan-addon/mcp_servers.json` の `--from git+https://github.com/maha0525/stackchan-mcp.git@<branch>#subdirectory=gateway` (2026-05-25 〜 `integrate/all-fixes-2026-05-25`、 以前は `dev/integration`)
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
 - `docs/intent/stackchan_avatar_pipeline.md` §B-0 (= 3 層モデル) / §E (= upstream PR ストーリー)
