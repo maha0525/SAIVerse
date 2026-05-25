@@ -148,29 +148,45 @@ def _make_anchor_writer(existing):
     return rt, saved
 
 
-def test_update_anchor_keeps_longer_ttl_while_alive():
-    """生存中の 1h キャッシュは 5m 書き込みで短縮されない (長い方を維持)。"""
-    existing = {"claude-x": {"anchor_id": "a1", "updated_at": datetime.now().isoformat(), "ttl_seconds": 3600}}
+def test_update_anchor_short_write_keeps_ttl_and_does_not_slide_window():
+    """生存中の 1h を 5m で書いても: ttl=3600 維持 + window(updated_at) はスライドしない (モデルB)。"""
+    t1 = (datetime.now() - timedelta(minutes=2)).isoformat()  # 2 分前に 1h 確立 (生存中)
+    existing = {"claude-x": {"anchor_id": "a1", "updated_at": t1, "ttl_seconds": 3600}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
     rt._update_anchor_for_model(persona, "claude-x", "a2", 300)  # 5m 書き込み
+    assert saved["claude-x"]["ttl_seconds"] == 3600       # 短縮しない
+    assert saved["claude-x"]["updated_at"] == t1          # window はスライドしない
+
+
+def test_update_anchor_same_ttl_refreshes_window():
+    """同じ TTL の書き込みは window を now にリフレッシュ (keep-awake / 通常更新)。"""
+    t1 = (datetime.now() - timedelta(minutes=2)).isoformat()
+    existing = {"claude-x": {"anchor_id": "a1", "updated_at": t1, "ttl_seconds": 3600}}
+    rt, saved = _make_anchor_writer(existing)
+    persona = SimpleNamespace(persona_id="air", model="claude-x")
+    rt._update_anchor_for_model(persona, "claude-x", "a2", 3600)  # 1h 書き込み
     assert saved["claude-x"]["ttl_seconds"] == 3600
+    assert saved["claude-x"]["updated_at"] != t1          # now にリフレッシュ
 
 
 def test_update_anchor_resets_ttl_after_expiry():
-    """完全失効後の書き込みは新しい TTL でリセット。"""
+    """完全失効後の書き込みは新しい TTL/now でリセット。"""
     old = (datetime.now() - timedelta(hours=2)).isoformat()
     existing = {"claude-x": {"anchor_id": "a1", "updated_at": old, "ttl_seconds": 3600}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
     rt._update_anchor_for_model(persona, "claude-x", "a2", 300)
     assert saved["claude-x"]["ttl_seconds"] == 300
+    assert saved["claude-x"]["updated_at"] != old         # 失効後はリセット
 
 
-def test_update_anchor_upgrades_to_longer_ttl_while_alive():
-    """生存中に長い TTL で書けば延長 (5m→1h)。"""
-    existing = {"claude-x": {"anchor_id": "a1", "updated_at": datetime.now().isoformat(), "ttl_seconds": 300}}
+def test_update_anchor_upgrades_to_longer_ttl_and_slides_window():
+    """生存中に長い TTL で書けば延長 (5m→1h) + window は now にスライド。"""
+    t1 = (datetime.now() - timedelta(minutes=2)).isoformat()
+    existing = {"claude-x": {"anchor_id": "a1", "updated_at": t1, "ttl_seconds": 300}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
     rt._update_anchor_for_model(persona, "claude-x", "a2", 3600)
     assert saved["claude-x"]["ttl_seconds"] == 3600
+    assert saved["claude-x"]["updated_at"] != t1

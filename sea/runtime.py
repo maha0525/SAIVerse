@@ -1588,25 +1588,35 @@ class SEARuntime:
         anchors = self._load_anchors(persona)
         now = datetime.now()
         effective_ttl = int(ttl_seconds) if ttl_seconds is not None else None
+        effective_updated = now
 
-        # Anthropic は「生きているキャッシュを短い TTL で書いても短縮しない」
-        # (2026-05-25 実機観測: 1h 書き込み後に 5m で書いても 1h 生存)。
-        # よって既存キャッシュが生存中なら長い方の TTL を維持する。完全失効後の
-        # 書き込みは新しい TTL でリセット。docs/intent/cache_lifecycle_control.md §5.2
+        # Anthropic 実機観測 (2026-05-25) に整合する更新規則 (モデルB):
+        # - 生存中のキャッシュは短い TTL の書き込みで「短縮されない」(max を維持)
+        # - 加えて、短い書き込みは expiry ウィンドウを **スライドさせない**。1h を
+        #   5m 書き込みで延命できると過大表示になるため (1h ウィンドウは「1h を
+        #   確立した時刻」起点で減り続ける)。
+        # - 同じか長い TTL の書き込みのときだけ updated_at を now にリフレッシュ
+        #   (= 使用でウィンドウが延びる、keep-awake の前提)。
+        # - 完全失効後の書き込みは新しい TTL/now でリセット。
+        # docs/intent/cache_lifecycle_control.md §5.2
         if effective_ttl is not None:
             prev = anchors.get(model_key)
             prev_ttl = (prev or {}).get("ttl_seconds")
             if prev and prev_ttl:
                 try:
                     prev_updated = datetime.fromisoformat(prev["updated_at"])
-                    if now < prev_updated + timedelta(seconds=int(prev_ttl)):
-                        effective_ttl = max(int(prev_ttl), effective_ttl)
+                    prev_ttl_int = int(prev_ttl)
+                    if now < prev_updated + timedelta(seconds=prev_ttl_int):  # 生存中
+                        effective_ttl = max(prev_ttl_int, effective_ttl)
+                        if int(ttl_seconds) < prev_ttl_int:
+                            # 短い書き込み: 短縮も延命もしない (起点を維持)
+                            effective_updated = prev_updated
                 except (KeyError, ValueError, TypeError):
                     pass
 
         entry = {
             "anchor_id": anchor_id,
-            "updated_at": now.isoformat(),
+            "updated_at": effective_updated.isoformat(),
         }
         if effective_ttl is not None:
             entry["ttl_seconds"] = effective_ttl
