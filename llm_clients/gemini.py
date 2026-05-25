@@ -1065,7 +1065,7 @@ class GeminiClient(LLMClient):
             "Gemini generate config model=%s use_tools=%s cfg=%s",
             self.model, use_tools, cfg_kwargs,
         )
-        logging.info(
+        logging.debug(
             "[gemini] SENDING %d contents msgs (~%d text chars) cached_content=%s",
             len(contents),
             sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
@@ -1899,7 +1899,7 @@ class GeminiClient(LLMClient):
             use_tools,
             cfg_kwargs,
         )
-        logging.info(
+        logging.debug(
             "[gemini] SENDING %d contents msgs (~%d text chars) cached_content=%s",
             len(contents),
             sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
