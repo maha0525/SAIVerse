@@ -1065,6 +1065,12 @@ class GeminiClient(LLMClient):
             "Gemini generate config model=%s use_tools=%s cfg=%s",
             self.model, use_tools, cfg_kwargs,
         )
+        logging.info(
+            "[gemini] SENDING %d contents msgs (~%d text chars) cached_content=%s",
+            len(contents),
+            sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
+            cfg_kwargs.get("cached_content"),
+        )
 
         max_retries = 3
         model_id = self.model
@@ -1892,6 +1898,12 @@ class GeminiClient(LLMClient):
             self.model,
             use_tools,
             cfg_kwargs,
+        )
+        logging.info(
+            "[gemini] SENDING %d contents msgs (~%d text chars) cached_content=%s",
+            len(contents),
+            sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
+            cfg_kwargs.get("cached_content"),
         )
         if use_tools:
             cfg_kwargs.setdefault("tool_config", tool_cfg)
