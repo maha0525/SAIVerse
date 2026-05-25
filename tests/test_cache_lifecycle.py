@@ -6,6 +6,7 @@ endpoint の薄いラッパを、実 LLM / DB なしで検証する。メソッ�
 
 対象: docs/intent/cache_lifecycle_control.md §5.4 / Phase 2
 """
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from api.routes.people.cache_status import _resolve_cache_setting
@@ -133,3 +134,43 @@ def test_anchor_entry_ttl_falls_back_when_no_stored():
     rt._get_anchor_validity_seconds = lambda model, persona_id=None: 1200
     assert rt._anchor_entry_ttl_seconds({}, "model", "air") == 1200
     assert rt._anchor_entry_ttl_seconds({"anchor_id": "x", "updated_at": "t"}, "model", "air") == 1200
+
+
+# ---- 書き込み時 TTL の更新規則 (生存中は短縮しない = Anthropic 実測) ----
+
+def _make_anchor_writer(existing):
+    """_load_anchors/_save_anchors を stub した rt で _update_anchor_for_model を束縛。"""
+    saved = {}
+    rt = SimpleNamespace()
+    rt._load_anchors = lambda persona: dict(existing)
+    rt._save_anchors = lambda persona, anchors: saved.update(anchors)
+    rt._update_anchor_for_model = SEARuntime._update_anchor_for_model.__get__(rt)
+    return rt, saved
+
+
+def test_update_anchor_keeps_longer_ttl_while_alive():
+    """生存中の 1h キャッシュは 5m 書き込みで短縮されない (長い方を維持)。"""
+    existing = {"claude-x": {"anchor_id": "a1", "updated_at": datetime.now().isoformat(), "ttl_seconds": 3600}}
+    rt, saved = _make_anchor_writer(existing)
+    persona = SimpleNamespace(persona_id="air", model="claude-x")
+    rt._update_anchor_for_model(persona, "claude-x", "a2", 300)  # 5m 書き込み
+    assert saved["claude-x"]["ttl_seconds"] == 3600
+
+
+def test_update_anchor_resets_ttl_after_expiry():
+    """完全失効後の書き込みは新しい TTL でリセット。"""
+    old = (datetime.now() - timedelta(hours=2)).isoformat()
+    existing = {"claude-x": {"anchor_id": "a1", "updated_at": old, "ttl_seconds": 3600}}
+    rt, saved = _make_anchor_writer(existing)
+    persona = SimpleNamespace(persona_id="air", model="claude-x")
+    rt._update_anchor_for_model(persona, "claude-x", "a2", 300)
+    assert saved["claude-x"]["ttl_seconds"] == 300
+
+
+def test_update_anchor_upgrades_to_longer_ttl_while_alive():
+    """生存中に長い TTL で書けば延長 (5m→1h)。"""
+    existing = {"claude-x": {"anchor_id": "a1", "updated_at": datetime.now().isoformat(), "ttl_seconds": 300}}
+    rt, saved = _make_anchor_writer(existing)
+    persona = SimpleNamespace(persona_id="air", model="claude-x")
+    rt._update_anchor_for_model(persona, "claude-x", "a2", 3600)
+    assert saved["claude-x"]["ttl_seconds"] == 3600
