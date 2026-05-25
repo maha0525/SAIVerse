@@ -342,47 +342,57 @@ class GeminiClient(LLMClient):
         self._last_stream_error = None
         return err
 
-    def _maybe_apply_explicit_cache(
+    def _resolve_explicit_cache(
         self,
-        cfg_kwargs: Dict[str, Any],
         sys_msg: str,
+        contents: list,
         enable_cache: bool,
         cache_ttl: Any,
-    ) -> None:
-        """explicit cache (gemini_explicit) が有効なら system_instruction を
-        キャッシュ化し、cfg_kwargs に ``cached_content`` を差し込む (Phase 3 / M1)。
+    ) -> Tuple[Optional[str], list]:
+        """explicit cache (gemini_explicit) を解決し ``(cache_name, 送信すべき contents)``
+        を返す (Phase 3 / B 戦略)。
 
-        - 対象は cache.type == "gemini_explicit" のモデルのみ。それ以外は no-op。
-        - cache を張れた場合、cached_content にリソース名を入れ、**system_instruction は
-          cfg から除去** (cache に含まれるため二重送信しない)。
-        - 張れない (トークン不足 / API エラー) 場合は no-op = system_instruction inline の
-          通常コールにフォールバック。
+        キャッシュ対象 = **system_instruction + contents の「最新入力を除く全部」**
+        (= contents[:-1])。リクエストは最新の1メッセージ (contents[-1:]) だけ送る。
+        毎ターン prefix が伸びるので毎回 create (Gemini の create は無料)、古い cache は
+        TTL / orphan cleanup (M2) で消える。
+
+        張れない (対象外モデル / env 未設定 / トークン不足 / API エラー) 場合は
+        ``(None, contents)`` を返し、system_instruction inline の通常コールにフォールバック。
         """
-        if not enable_cache or not sys_msg:
-            return
+        if not enable_cache:
+            return (None, contents)
         if (self._cache_config or {}).get("type") != "gemini_explicit":
-            return
+            return (None, contents)
         # M1 安全ゲート: 実験段階 (orphan cleanup / pulse 終了 delete 未実装) のため、
         # env で明示 opt-in したときだけ有効化する。M2-M4 完了後にこのゲートは外す。
         if os.getenv("SAIVERSE_GEMINI_EXPLICIT_CACHE", "").lower() not in ("1", "true", "yes", "on"):
-            return
+            return (None, contents)
+        # 最新入力以外にキャッシュできる中身が無い (履歴ゼロ) ならスキップ。
+        if not contents or len(contents) < 2:
+            return (None, contents)
+
+        cached_contents = contents[:-1]
+        tail = contents[-1:]
         try:
             from llm_clients.gemini_cache import get_gemini_cache_controller, parse_ttl_seconds
             min_tokens = int((self._cache_config or {}).get("min_tokens", 1024))
             ttl_seconds = parse_ttl_seconds(cache_ttl, default=300)
             name = get_gemini_cache_controller().ensure(
-                self.client, self.model, sys_msg, ttl_seconds, min_tokens=min_tokens,
+                self.client, self.model, sys_msg, ttl_seconds,
+                contents=cached_contents, min_tokens=min_tokens,
             )
         except Exception:
-            logging.warning("[gemini] explicit cache ensure failed; falling back to inline", exc_info=True)
-            return
+            logging.warning("[gemini] explicit cache resolve failed; inline fallback", exc_info=True)
+            return (None, contents)
+
         if name:
-            cfg_kwargs["cached_content"] = name
-            cfg_kwargs.pop("system_instruction", None)
             get_llm_logger().debug(
-                "[gemini] explicit cache active: %s (ttl=%s) — system_instruction omitted",
-                name, cache_ttl,
+                "[gemini] explicit cache active: %s (cached %d msgs, ttl=%s) — sending tail only",
+                name, len(cached_contents), cache_ttl,
             )
+            return (name, tail)
+        return (None, contents)
 
     def _build_thinking_config(self) -> Optional[types.ThinkingConfig]:
         """Build ThinkingConfig from current settings."""
@@ -1022,8 +1032,12 @@ class GeminiClient(LLMClient):
         if thinking_config is not None:
             cfg_kwargs["thinking_config"] = thinking_config
 
-        # Phase 3 / M1: explicit cache (gemini_explicit) なら head をキャッシュ化
-        self._maybe_apply_explicit_cache(cfg_kwargs, sys_msg, enable_cache, cache_ttl)
+        # Phase 3 / B: explicit cache (gemini_explicit) なら prefix をキャッシュ化し、
+        # 送信 contents を最新入力だけに絞る。
+        _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
+        if _cache_name:
+            cfg_kwargs["cached_content"] = _cache_name
+            cfg_kwargs.pop("system_instruction", None)
 
         get_llm_logger().debug(
             "Gemini generate config model=%s use_tools=%s cfg=%s",
@@ -1845,8 +1859,11 @@ class GeminiClient(LLMClient):
             if param in self._request_params:
                 cfg_kwargs[param] = self._request_params[param]
 
-        # Phase 3 / M1: explicit cache (gemini_explicit) なら head をキャッシュ化
-        self._maybe_apply_explicit_cache(cfg_kwargs, sys_msg, enable_cache, cache_ttl)
+        # Phase 3 / B: explicit cache なら prefix をキャッシュ化し送信 contents を最新入力だけに
+        _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
+        if _cache_name:
+            cfg_kwargs["cached_content"] = _cache_name
+            cfg_kwargs.pop("system_instruction", None)
 
         get_llm_logger().debug(
             "Gemini stream config model=%s use_tools=%s cfg=%s",

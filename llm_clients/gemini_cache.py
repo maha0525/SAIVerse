@@ -77,9 +77,49 @@ class GeminiCacheController:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _key(model: str, system_instruction: str) -> Tuple[str, str]:
-        digest = hashlib.sha256(system_instruction.encode("utf-8")).hexdigest()
+    def _content_signature(contents: Optional[list]) -> str:
+        """contents (types.Content の列) を決定的な文字列に直列化する (ハッシュ用)。
+
+        各メッセージの role とテキスト part を連結。非テキスト part (画像等) は
+        mime/サイズの marker で表現して内容変化を検出する。
+        """
+        if not contents:
+            return ""
+        lines = []
+        for c in contents:
+            role = getattr(c, "role", "") or ""
+            parts = getattr(c, "parts", None) or []
+            chunks = []
+            for p in parts:
+                text = getattr(p, "text", None)
+                if text:
+                    chunks.append(text)
+                    continue
+                inline = getattr(p, "inline_data", None)
+                if inline is not None:
+                    data = getattr(inline, "data", b"") or b""
+                    mime = getattr(inline, "mime_type", "") or ""
+                    chunks.append(f"<{mime}:{len(data)}>")
+            lines.append(role + "\x1f" + "\x1e".join(chunks))
+        return "\x1d".join(lines)
+
+    def _key(self, model: str, system_instruction: str, contents: Optional[list]) -> Tuple[str, str]:
+        raw = system_instruction + "\x1c" + self._content_signature(contents)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return (model, digest)
+
+    @staticmethod
+    def _approx_chars(system_instruction: str, contents: Optional[list]) -> int:
+        """sys + contents のおおよその文字数 (最小トークンガード用)。
+
+        1 token >= 1 char なので「文字数 < min_tokens」なら確実にトークン不足
+        (= create 失敗確定)。これで API を叩かずに弾ける (日本語でも誤って弾かない)。
+        """
+        total = len(system_instruction or "")
+        for c in (contents or []):
+            for p in (getattr(c, "parts", None) or []):
+                total += len(getattr(p, "text", "") or "")
+        return total
 
     def ensure(
         self,
@@ -88,16 +128,19 @@ class GeminiCacheController:
         system_instruction: str,
         ttl_seconds: int,
         *,
+        contents: Optional[list] = None,
         min_tokens: int = DEFAULT_MIN_TOKENS,
     ) -> Optional[str]:
-        """この head に対応する生きた cache の name を返す。無ければ作成。
+        """``system_instruction`` + ``contents`` (キャッシュ対象の prefix) に対応する
+        生きた cache の name を返す。無ければ作成。
 
+        ``contents`` が None/空なら system_instruction のみをキャッシュする。
         作成不能 (トークン不足 / API エラー) なら None を返し、呼び出し側は
-        explicit cache 無しの通常コール (system_instruction inline) にフォールバックする。
+        explicit cache 無しの通常コールにフォールバックする。
         """
-        if not client or not model or not system_instruction:
+        if not client or not model or (not system_instruction and not contents):
             return None
-        key = self._key(model, system_instruction)
+        key = self._key(model, system_instruction, contents)
         now = time.time()
 
         with self._lock:
@@ -105,30 +148,24 @@ class GeminiCacheController:
             if ent and ent.expire_at > now + _EXPIRY_SAFETY_MARGIN:
                 return ent.name
 
-        # 最小トークンガード: 下限未満は create が失敗するので事前に弾く。
-        try:
-            tc = client.models.count_tokens(model=model, contents=system_instruction)
-            total = getattr(tc, "total_tokens", 0) or 0
-            if total < min_tokens:
-                LOGGER.debug(
-                    "[gemini_cache] skip create (head %d < min %d tokens) model=%s",
-                    total, min_tokens, model,
-                )
-                return None
-        except Exception:
-            LOGGER.warning("[gemini_cache] count_tokens failed model=%s", model, exc_info=True)
+        # 最小トークンガード (文字数で安全側に判定、API コールなし)。
+        if self._approx_chars(system_instruction, contents) < min_tokens:
+            LOGGER.debug("[gemini_cache] skip create (prefix below min tokens) model=%s", model)
             return None
 
         try:
             from google.genai import types
-            digest = key[1]
+            cfg_kwargs: Dict[str, Any] = {
+                "display_name": f"{DISPLAY_NAME_PREFIX}{key[1][:24]}",
+                "ttl": f"{int(ttl_seconds)}s",
+            }
+            if system_instruction:
+                cfg_kwargs["system_instruction"] = system_instruction
+            if contents:
+                cfg_kwargs["contents"] = contents
             cache = client.caches.create(
                 model=model,
-                config=types.CreateCachedContentConfig(
-                    display_name=f"{DISPLAY_NAME_PREFIX}{digest[:24]}",
-                    system_instruction=system_instruction,
-                    ttl=f"{int(ttl_seconds)}s",
-                ),
+                config=types.CreateCachedContentConfig(**cfg_kwargs),
             )
         except Exception:
             LOGGER.warning("[gemini_cache] caches.create failed model=%s", model, exc_info=True)
@@ -146,20 +183,10 @@ class GeminiCacheController:
         with self._lock:
             self._entries[key] = entry
         LOGGER.info(
-            "[gemini_cache] created cache name=%s model=%s ttl=%ds",
-            name, model, int(ttl_seconds),
+            "[gemini_cache] created cache name=%s model=%s ttl=%ds cached_msgs=%d",
+            name, model, int(ttl_seconds), len(contents or []),
         )
         return name
-
-    def get_live_entry(self, model: str, system_instruction: str) -> Optional[_CacheEntry]:
-        """生きている cache entry を返す (timer/状態参照用、M3)。無ければ None。"""
-        key = self._key(model, system_instruction)
-        now = time.time()
-        with self._lock:
-            ent = self._entries.get(key)
-        if ent and ent.expire_at > now:
-            return ent
-        return None
 
 
 _DEFAULT_CONTROLLER: Optional[GeminiCacheController] = None

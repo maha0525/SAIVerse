@@ -65,3 +65,36 @@ def test_controller_create_failure_returns_none():
 
     name = ctrl.ensure(client, "gemini-2.5-flash", "HEAD " * 500, 300)
     assert name is None  # 失敗時は None (= inline フォールバック)
+
+
+def _content(role, text):
+    from google.genai import types
+    return types.Content(role=role, parts=[types.Part(text=text)])
+
+
+def test_controller_caches_contents_prefix():
+    """B 戦略: system_instruction + contents prefix をキャッシュ (create config に contents)。"""
+    ctrl = GeminiCacheController()
+    client = MagicMock()
+    client.caches.create.return_value.name = "cachedContents/p"
+    sys = "SYS " * 500
+    contents = [_content("user", "history A " * 200), _content("model", "reply " * 200)]
+    name = ctrl.ensure(client, "gemini-2.5-flash", sys, 300, contents=contents)
+    assert name == "cachedContents/p"
+    cfg = client.caches.create.call_args.kwargs["config"]
+    assert getattr(cfg, "contents", None)  # contents がキャッシュ対象に含まれる
+
+
+def test_controller_key_changes_with_contents():
+    """contents (履歴) が違えば別 cache、同じなら再利用。"""
+    ctrl = GeminiCacheController()
+    client = MagicMock()
+    client.caches.create.return_value.name = "cachedContents/x"
+    sys = "SYS " * 500
+    c1 = [_content("user", "AAA " * 200)]
+    c2 = [_content("user", "BBB " * 200)]
+    ctrl.ensure(client, "gemini-2.5-flash", sys, 300, contents=c1)
+    ctrl.ensure(client, "gemini-2.5-flash", sys, 300, contents=c2)
+    assert client.caches.create.call_count == 2  # 異なる prefix → 別 cache
+    ctrl.ensure(client, "gemini-2.5-flash", sys, 300, contents=c1)
+    assert client.caches.create.call_count == 2  # 同一 prefix は再利用
