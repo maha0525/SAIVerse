@@ -371,15 +371,18 @@ head が変わると cache hit しなくなるため、Metabolism dispatch で�
 - 解決ロジックは `manager.resolve_persona_cache(persona_id) -> (enabled, ttl)` に集約 (per-persona override → global)。runtime / cache-status endpoint が共にこれを参照
 - 注: `line_id` は "main" 固定のため現状は実質 per-persona。per-line は Phase 3+ (cached_head の line 配線と合流)
 
-### Phase 3: 3 モード抽象 + CacheLifecycleState + Gemini explicit cache
+### Phase 3: Gemini explicit cache (実機検証必須なので M1-M4 に分割)
 
-- **`CacheLifecycleState` 導入** (per `(persona_id, line_id)`、in-memory)。mode を保持
-- ChatOptions に「キャッシュモード」ラジオ追加 + `resolve_ttl_seconds` (§4.3)。Phase 2 の per-persona TTL override をこの mode 層の下敷きにする
-- `llm_clients/gemini.py` に caches.create / update / delete / list 経路を実装
-- `ICacheController` の Gemini 実装
-- `gemini-*.json` に cache 設定欄追加
-- orphan cleanup hook を startup に組み込み
-- UI の disable + tooltip ロジック (Anthropic: delete disable / Gemini: 全 enable)
+実機検証が必要なため小刻みに進める。Gemini の TTL 選択肢は Anthropic より細かく **オフ/5分/15分/30分/1時間** (storage 課金が時間比例なので中間値が有用)。
+
+- **M1 (✅ 実装済み 2026-05-25)**: 「Gemini で実際に cache hit する最小配線」
+  - `llm_clients/gemini_cache.py`: `GeminiCacheController` (create/reuse、`(model, sha256(system_instruction))` キー、最小トークンガード、in-memory)
+  - `gemini.py`: `generate`/`generate_stream` が `enable_cache`/`cache_ttl` を受け、explicit cache が張れたら `cached_content` を渡し **system_instruction を除去** (二重送信しない)。キャッシュ対象は head (= system_instruction)
+  - `gemini-2.5-flash.json` / `gemini-3.5-flash-paid.json` に cache 設定 (`type: "gemini_explicit"`, ttl_options, min_tokens=1024)
+  - **安全ゲート**: env `SAIVERSE_GEMINI_EXPLICIT_CACHE` で全体 opt-in (cleanup/pulse-delete 未実装のため。M2-M4 後に撤去)。検証は log の `cached_content_token_count > 0`
+- **M2**: head 変更 (metabolism) での明示 invalidate + 起動時 orphan cleanup (`caches.list` → `displayName` prefix `saiverse:` で delete)
+- **M3**: タイマー UI を Gemini 対応 (cache resource の `expire_time` で残り表示)、persona/line 紐付け、Gemini の細かい TTL 選択肢を UI に
+- **M4**: 標準モードの pulse 終了 delete (Phase 4 hook) + `CacheLifecycleState` / 3 モード抽象 + `ICacheController` 形式化 + UI の disable + tooltip
 
 ### Phase 4: pulse hook / Metabolism 統合
 
@@ -437,6 +440,7 @@ context が 1024 tokens に満たない場合、create が失敗する。標準�
 - v0.1 (2026-05-22): 起草。Gemini explicit cache の実測 (書き込み無料 / storage 課金 / extend 可能) を受けて、3 モード抽象 + キャッシュタイマー UI + provider 統一の設計を整理。既存 ChatOptions の cache toggle はマニュアルモードの実体として温存・統合。
 - v0.2 (2026-05-22): まはー指摘で抜本修正。「pulse」を「session」と取り違えていた、自動 extend / idle delete を勝手に追加していた等の前提崩しを是正。標準モードは pulse 単位 (pulse 終了 delete)、連続モードは pulse 跨ぎ + TTL 任せ自然消滅、extend/delete は手動制御のみ、と明確化。cache key は `(persona_id, line_id)` に揃え、cached_head_architecture と整合。
 - v0.3 (2026-05-24): 既存実装の現状調査を反映。(1) **provider で最適戦略が逆転する**核心を §1 に明文化 (Anthropic = 延命が得 / 無料 extend・storage 課金なし、Gemini = 即 delete が得 / storage 時間課金・無料 extend なし)、設計原則 P6 (戦略は provider 依存・UI は統一) を追加。(2) 自律側の既存機構 Phase 4-e (`_schedule_cache_ttl_pulse`、Anthropic 無料 extend を利用した keep-awake + サブライン管理フロー) を §8.4 に追記、Gemini 展開時の戦略差を未解決事項として明示。(3) 前提 `cached_head_architecture` が `sea/head_pipeline/` として実装済みであることを反映。(4) 用語精度修正 (`extended_cache_ttl` → 実装通り `cache_control` の `ttl`)。(5) key 粒度調査を反映: DB `line_head_snapshot` PK = `(PERSONA_ID, LINE_ID)` で doc §4.2 と一致、現状 `line_id="main"` 固定 (サブライン未配線)、1 ライン 1 モデルで provider/model は属性で足りる点を §4.2 に追記。`resolve_ttl_seconds()` 翻訳関数を §4.3 に明記。anchor(per-model) と state(per-line) の共存を §5.2 に追記。既存 global TTL (`manager.state.cache_ttl` → `_get_anchor_validity_seconds`) を per-line state に付け替える作業 (3 消費者 a/b/c) を §5.4 として新設。
+- v0.10 (2026-05-25): Phase 3 (Gemini explicit cache) に着手、実機検証必須のため M1-M4 に分割。**M1 実装**: `GeminiCacheController` (create/reuse、head=system_instruction をキャッシュ、min-token ガード) + `gemini.py` 統合 (cached_content を渡し system_instruction 除去) + gemini-2.5-flash/3.5-flash-paid に cache 設定 (`gemini_explicit`)。安全のため env `SAIVERSE_GEMINI_EXPLICIT_CACHE` で全体 opt-in (cleanup/pulse-delete 未実装のため)。Gemini TTL は オフ/5分/15分/30分/1時間。test +5 (controller)。§7 Phase 3 を M1-M4 に再構成。
 - v0.9 (2026-05-25): v0.8 だと 5m 書き込みのたびにタイマーが 1h にリセットされ (updated_at を毎回 now にしていた)、まはー指摘で「過大表示では」と判明。「短い書き込みが 1h キャッシュを now+1h に延命するか」は未確定 (実測は『5m では切れない』までしか証明していない)。タイマーは under-promise を優先すべき (生存と誤表示→ミスの不意打ちが最悪) ため**モデルB**を採用: 短い書き込み (新 < 既存) は window をスライドさせず起点維持、同じか長い書き込みのときだけ now にリフレッシュ。`_update_anchor_for_model` 更新、test 更新。
 - v0.8 (2026-05-25): 実機で Anthropic の重要挙動が判明 — **生きているキャッシュは短い TTL で書いても短縮されない** (1h→5m→5分超経過→5m でもヒット)。公式 docs は当該ケース未記載だが「使用でリフレッシュ」は明記。v0.7 の「最後の書き込み TTL を記録」だと逆に 5m 書き込みで 1h キャッシュを短く誤表示してしまうため、`_update_anchor_for_model` を **生存中なら `max(既存, 新)` 維持・失効後リセット** に変更。これで「設定で 5m に下げても生きてる 1h は 1h 表示」= 実態と一致。§5.2 更新、test +3。
 - v0.7 (2026-05-25): 実機テストで判明した遡及ズレを修正。5m→1h→5m と TTL を切り替えて書き込んだ後に設定を変えると、既存キャッシュの残り時間表示が**現行設定**で再計算され遡及的にズレていた。原因は「既存キャッシュの寿命」を `_get_anchor_validity_seconds` (現行設定) で評価していたこと。修正: 書き込み時の TTL を `METABOLISM_ANCHORS[model].ttl_seconds` に記録し、timer / head 再capture / metabolism anchor 判定は記録値を読む (`_anchor_entry_ttl_seconds`、旧 anchor は現行設定にフォールバック)。「既存キャッシュ寿命=書き込み時 TTL / 次の書き込み=現行設定」を分離。§5.2 / §5.4 更新。
