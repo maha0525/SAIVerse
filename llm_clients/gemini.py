@@ -387,7 +387,9 @@ class GeminiClient(LLMClient):
             return (None, contents)
 
         if name:
-            get_llm_logger().debug(
+            # backend.log に出す ([gemini_cache] created と同じ場所に揃える。
+            # get_llm_logger は llm_io.log 行きで created と別ファイルになり紛らわしいため)。
+            logging.info(
                 "[gemini] explicit cache active: %s (cached %d msgs, ttl=%s) — sending tail only",
                 name, len(cached_contents), cache_ttl,
             )
