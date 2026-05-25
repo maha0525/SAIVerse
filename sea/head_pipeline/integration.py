@@ -115,7 +115,10 @@ def _resolve_anchor_ttl_state(
             return (None, None)
         from datetime import datetime
         updated_at_epoch = datetime.fromisoformat(updated_at_iso).timestamp()
-        validity = int(get_validity(model_key, getattr(persona, "persona_id", None)))
+        # 書き込み時に記録した ttl_seconds を優先 (設定変更の遡及影響を防ぐ)。
+        # 旧 anchor (ttl_seconds 無し) は現行設定にフォールバック。
+        stored_ttl = entry.get("ttl_seconds")
+        validity = int(stored_ttl) if stored_ttl else int(get_validity(model_key, getattr(persona, "persona_id", None)))
         return (updated_at_epoch, validity)
     except Exception:
         LOGGER.warning(

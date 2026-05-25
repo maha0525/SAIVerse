@@ -154,7 +154,11 @@ def _resolve_anchor_state(
         if not updated_at_iso:
             return (None, None)
         updated_at_epoch = datetime.fromisoformat(updated_at_iso).timestamp()
-        validity = int(get_validity(model_key, getattr(persona, "persona_id", None)))
+        # 書き込み時に記録した ttl_seconds を優先する。これが無いと設定 (5m/1h) を
+        # 変えるたびに既存キャッシュの残り時間表示が遡及的に変わってしまう
+        # (まはー報告のバグ)。旧 anchor (ttl_seconds 無し) のみ現行設定にフォールバック。
+        stored_ttl = entry.get("ttl_seconds")
+        validity = int(stored_ttl) if stored_ttl else int(get_validity(model_key, getattr(persona, "persona_id", None)))
         return (updated_at_epoch, validity)
     except Exception:
         LOGGER.warning(

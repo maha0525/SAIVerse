@@ -1529,7 +1529,7 @@ class SEARuntime:
         if self_entry:
             try:
                 updated_at = datetime.fromisoformat(self_entry["updated_at"])
-                validity = self._get_anchor_validity_seconds(persona_model, getattr(persona, "persona_id", None))
+                validity = self._anchor_entry_ttl_seconds(self_entry, persona_model, getattr(persona, "persona_id", None))
                 age = (now - updated_at).total_seconds()
                 if age <= validity:
                     LOGGER.debug(
@@ -1553,7 +1553,7 @@ class SEARuntime:
                 continue  # already checked
             try:
                 updated_at = datetime.fromisoformat(entry["updated_at"])
-                validity = self._get_anchor_validity_seconds(model_key, getattr(persona, "persona_id", None))
+                validity = self._anchor_entry_ttl_seconds(entry, model_key, getattr(persona, "persona_id", None))
                 age = (now - updated_at).total_seconds()
                 if age <= validity:
                     if best_updated is None or updated_at > best_updated:
@@ -1573,16 +1573,41 @@ class SEARuntime:
         LOGGER.debug("[metabolism] No valid anchor found — will use minimal load")
         return (None, "minimal")
 
-    def _update_anchor_for_model(self, persona, model_key: str, anchor_id: str) -> None:
-        """Update the anchor for a specific model and persist to DB."""
+    def _update_anchor_for_model(
+        self, persona, model_key: str, anchor_id: str, ttl_seconds: Optional[int] = None,
+    ) -> None:
+        """Update the anchor for a specific model and persist to DB.
+
+        ``ttl_seconds`` は **この書き込み時点の cache TTL** (= 実際に焼いたキャッシュの
+        寿命)。記録しておくことで、後から設定 (5m/1h) を変えても、既に書き込み済みの
+        キャッシュの残り寿命は書き込み時 TTL で評価でき、設定変更による遡及的な表示
+        ズレを防ぐ (docs/intent/cache_lifecycle_control.md §5.4)。
+        """
         if not model_key or not anchor_id:
             return
         anchors = self._load_anchors(persona)
-        anchors[model_key] = {
+        entry = {
             "anchor_id": anchor_id,
             "updated_at": datetime.now().isoformat(),
         }
+        if ttl_seconds is not None:
+            entry["ttl_seconds"] = int(ttl_seconds)
+        anchors[model_key] = entry
         self._save_anchors(persona, anchors)
+
+    def _anchor_entry_ttl_seconds(
+        self, entry: Dict[str, Any], model_key: str, persona_id: Optional[str] = None,
+    ) -> int:
+        """既存 anchor entry の実効 TTL 秒。
+
+        書き込み時に記録した ``ttl_seconds`` を優先し、無ければ (旧 anchor) 現行設定
+        から算出する (後方互換)。これにより「既存キャッシュの残り寿命」は書き込み時
+        TTL で、「次の書き込みに使う TTL」は現行設定で、と分離される。
+        """
+        stored = entry.get("ttl_seconds")
+        if stored:
+            return int(stored)
+        return self._get_anchor_validity_seconds(model_key, persona_id)
 
     def _touch_anchor_after_llm_call(self, persona, usage) -> None:
         """LLM 呼び出し成功後に METABOLISM_ANCHORS の updated_at を touch する (Phase 4-e)。
@@ -1635,10 +1660,15 @@ class SEARuntime:
                 )
                 return
 
-        self._update_anchor_for_model(persona, persona_model, anchor_id)
+        # この書き込みで実際に使った TTL (= 現行設定) を anchor に記録する。
+        # 以後この cache の残り寿命はこの値で評価され、設定変更の影響を受けない。
+        write_ttl_seconds = self._get_anchor_validity_seconds(
+            persona_model, getattr(persona, "persona_id", None),
+        )
+        self._update_anchor_for_model(persona, persona_model, anchor_id, write_ttl_seconds)
         LOGGER.debug(
-            "[metabolism] anchor touched after LLM success: persona=%s model=%s anchor=%s cache_type=%s",
-            getattr(persona, "persona_id", "?"), persona_model, anchor_id, cache_type,
+            "[metabolism] anchor touched after LLM success: persona=%s model=%s anchor=%s cache_type=%s ttl=%ds",
+            getattr(persona, "persona_id", "?"), persona_model, anchor_id, cache_type, write_ttl_seconds,
         )
 
         # Phase 4-e: touch した時刻を起点に「TTL 接近で前倒し meta_judgment Pulse」

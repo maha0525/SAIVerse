@@ -277,7 +277,9 @@ backend の `/api/config/cache` endpoint と model JSON の cache 設定欄も�
 
 → Metabolism dispatch hook で `CacheLifecycleState.delete()` を呼ぶ。次回 LLM コール時に新 head で再 create。
 
-**anchor (per-model) と snapshot/CacheLifecycleState (per-line) の粒度差**: `AI.METABOLISM_ANCHORS` は `{model_key: {anchor_id, updated_at}}` の **per-model** 構造。一方 head snapshot と本機構の state は **per-line** (`(persona_id, line_id)`)。1 ライン 1 モデルで両者は両立する。`METABOLISM_ANCHORS[active_model].updated_at` は **prompt cache 書き込みの真の起点** (= 最後に anchor を touch した時刻) であり、`integration.py:_resolve_anchor_ttl_state` が既にこれを読んで head pipeline の TTL 判定に使っている。本機構の `created_at` / `expires_at` もこの anchor.updated_at を起点に揃えるべき (独自の時刻起点を持たない)。
+**anchor (per-model) と snapshot/CacheLifecycleState (per-line) の粒度差**: `AI.METABOLISM_ANCHORS` は `{model_key: {anchor_id, updated_at, ttl_seconds}}` の **per-model** 構造。一方 head snapshot と本機構の state は **per-line** (`(persona_id, line_id)`)。1 ライン 1 モデルで両者は両立する。`METABOLISM_ANCHORS[active_model].updated_at` は **prompt cache 書き込みの真の起点** (= 最後に anchor を touch した時刻) であり、`integration.py:_resolve_anchor_ttl_state` が既にこれを読んで head pipeline の TTL 判定に使っている。本機構の `created_at` / `expires_at` もこの anchor.updated_at を起点に揃えるべき (独自の時刻起点を持たない)。
+
+**書き込み時 TTL の記録 (重要)**: anchor entry には `updated_at` だけでなく **その書き込みで使った TTL = `ttl_seconds`** も記録する (`_update_anchor_for_model` / `_touch_anchor_after_llm_call`)。これがないと、既に焼いたキャッシュの残り寿命を**現行設定**の TTL で再計算してしまい、ユーザーが 5m/1h を切り替えるたびにタイマー表示・head 再capture・metabolism anchor 判定が遡及的にズレる (2026-05-25 実機で顕在化)。読み手 (`_anchor_entry_ttl_seconds` / `_resolve_anchor_ttl_state` / cache-status endpoint) は記録された `ttl_seconds` を優先し、無い旧 anchor のみ現行設定にフォールバックする。**「既存キャッシュの残り寿命 = 書き込み時 TTL」「次の書き込みに使う TTL = 現行設定」を分離する**のが原則。
 
 ### 5.3. model_configs.py / claude-*.json
 
@@ -296,6 +298,8 @@ Phase 2 の「モード → TTL 翻訳」は **greenfield の新規追加では�
 | c. Phase 4-e keep-awake pulse | TTL 接近で前倒し発話を予約 (自律側、§8.4) | `_schedule_cache_ttl_pulse` の `ttl_seconds` |
 
 **付け替え方針**: `_get_anchor_validity_seconds` が `manager.state.cache_ttl` を直読みしている箇所を、「該当ラインの `CacheLifecycleState` を取得 → `resolve_ttl_seconds()` で秒数化」に差し替える。これだけで a/b/c の 3 消費者すべてが per-line のモード由来 TTL を読むようになる (= 1 箇所の付け替えで波及する設計)。`_touch_anchor_after_llm_call` / anchor.updated_at の解釈 (= cache 書き込み起点) は不変、TTL の**出どころだけ**を変える。
+
+**重要な区別 (a vs b/c)**: 消費者 a (cache_control の ttl) は「**これから焼く**キャッシュの TTL」なので**現行設定**を使う。消費者 b/c (head 再capture / keep-awake) と timer は「**既に焼いた**キャッシュの残り寿命」なので、書き込み時に anchor へ記録した `ttl_seconds` を使う (§5.2)。`_get_anchor_validity_seconds` (= 現行設定) を既存キャッシュの寿命評価に流用すると遡及ズレが起きる。Phase 2 実装では b/c/timer を `_anchor_entry_ttl_seconds` (記録値優先 + 旧 anchor フォールバック) 経由に変更済み。
 
 ---
 
@@ -422,6 +426,7 @@ context が 1024 tokens に満たない場合、create が失敗する。標準�
 - v0.1 (2026-05-22): 起草。Gemini explicit cache の実測 (書き込み無料 / storage 課金 / extend 可能) を受けて、3 モード抽象 + キャッシュタイマー UI + provider 統一の設計を整理。既存 ChatOptions の cache toggle はマニュアルモードの実体として温存・統合。
 - v0.2 (2026-05-22): まはー指摘で抜本修正。「pulse」を「session」と取り違えていた、自動 extend / idle delete を勝手に追加していた等の前提崩しを是正。標準モードは pulse 単位 (pulse 終了 delete)、連続モードは pulse 跨ぎ + TTL 任せ自然消滅、extend/delete は手動制御のみ、と明確化。cache key は `(persona_id, line_id)` に揃え、cached_head_architecture と整合。
 - v0.3 (2026-05-24): 既存実装の現状調査を反映。(1) **provider で最適戦略が逆転する**核心を §1 に明文化 (Anthropic = 延命が得 / 無料 extend・storage 課金なし、Gemini = 即 delete が得 / storage 時間課金・無料 extend なし)、設計原則 P6 (戦略は provider 依存・UI は統一) を追加。(2) 自律側の既存機構 Phase 4-e (`_schedule_cache_ttl_pulse`、Anthropic 無料 extend を利用した keep-awake + サブライン管理フロー) を §8.4 に追記、Gemini 展開時の戦略差を未解決事項として明示。(3) 前提 `cached_head_architecture` が `sea/head_pipeline/` として実装済みであることを反映。(4) 用語精度修正 (`extended_cache_ttl` → 実装通り `cache_control` の `ttl`)。(5) key 粒度調査を反映: DB `line_head_snapshot` PK = `(PERSONA_ID, LINE_ID)` で doc §4.2 と一致、現状 `line_id="main"` 固定 (サブライン未配線)、1 ライン 1 モデルで provider/model は属性で足りる点を §4.2 に追記。`resolve_ttl_seconds()` 翻訳関数を §4.3 に明記。anchor(per-model) と state(per-line) の共存を §5.2 に追記。既存 global TTL (`manager.state.cache_ttl` → `_get_anchor_validity_seconds`) を per-line state に付け替える作業 (3 消費者 a/b/c) を §5.4 として新設。
+- v0.7 (2026-05-25): 実機テストで判明した遡及ズレを修正。5m→1h→5m と TTL を切り替えて書き込んだ後に設定を変えると、既存キャッシュの残り時間表示が**現行設定**で再計算され遡及的にズレていた。原因は「既存キャッシュの寿命」を `_get_anchor_validity_seconds` (現行設定) で評価していたこと。修正: 書き込み時の TTL を `METABOLISM_ANCHORS[model].ttl_seconds` に記録し、timer / head 再capture / metabolism anchor 判定は記録値を読む (`_anchor_entry_ttl_seconds`、旧 anchor は現行設定にフォールバック)。「既存キャッシュ寿命=書き込み時 TTL / 次の書き込み=現行設定」を分離。§5.2 / §5.4 更新。
 - v0.6 (2026-05-24): まはー指摘で Phase 2 UI を是正。当初 per-persona TTL セレクタを既存 global cache UI に**併設**したため「TTL を決める口が 2 箇所」になり混乱 (「グローバル既定」表記も不可解)。→ cache 設定を **per-persona 1 箇所** (「キャッシュ: オフ/5分/1時間」) に統合、「データ送信量の管理」の重複 cache UI を削除。backend は per-persona を `{enabled, ttl}` に拡張し解決を `manager.resolve_persona_cache` に集約。§7 Phase 2 を更新。
 - v0.5 (2026-05-24): Phase 1 (read-only タイマー UI) + Phase 2 (per-persona TTL 基盤 + §5.4 配線付け替え) 実装完了を反映。まはー判断で Phase 2 から 3 モード UI / `CacheLifecycleState` を外し Phase 3 へ移動 (Anthropic 単独ではモードが 5m/1h の言い換えに潰れ、behavioral 差は Gemini で出るため)。Phase 2 は `manager._persona_cache_ttl` override + `SEARuntime._resolve_cache_ttl_str` を単一解決点に、3 消費者 a/b/c を per-persona 化。UI はタイマーに per-persona TTL セレクタを追加。§7 Phase 2/3 を再構成。
 - v0.4 (2026-05-24): まはー指摘でタイマー UI の scope を是正。**累計ヒット / 節約額はタイマーに載せない** (即時性がない → Usage ページの領分、`/api/usage/*` + `LLMUsageLog` に既存)。タイマーは「効いてるか / 残り時間」のみ。これに伴い Phase 1 を read-only (anchor から算出、state なし) に縮小、`CacheLifecycleState` 導入は Phase 2 へ移動。Phase 1 では extend/delete ボタンも出さない (Anthropic では no-op)。§1 / P3 / §4.1 / §4.3 / §4.6 / §7 / §8.1 を更新。

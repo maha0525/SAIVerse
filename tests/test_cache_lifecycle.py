@@ -110,3 +110,26 @@ def test_get_cache_kwargs_per_persona():
     assert rt._get_cache_kwargs("nox") == {"enable_cache": True, "cache_ttl": "5m"}
     # persona_id=None は global 挙動 (後方互換)
     assert rt._get_cache_kwargs() == {"enable_cache": True, "cache_ttl": "5m"}
+
+
+# ---- 書き込み時 TTL の記録 (設定変更の遡及影響を防ぐ) ----
+
+def test_anchor_entry_ttl_prefers_stored_value():
+    """anchor に記録された ttl_seconds を優先 (= 書き込み時 TTL)。現行設定は見ない。"""
+    rt = SimpleNamespace()
+    rt._anchor_entry_ttl_seconds = SEARuntime._anchor_entry_ttl_seconds.__get__(rt)
+    # stored があるとき _get_anchor_validity_seconds (現行設定) は呼ばれてはいけない
+    rt._get_anchor_validity_seconds = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("stored ttl があるとき現行設定を見てはいけない")
+    )
+    assert rt._anchor_entry_ttl_seconds({"ttl_seconds": 3600}, "claude-x", "air") == 3600
+    assert rt._anchor_entry_ttl_seconds({"ttl_seconds": 300}, "claude-x", "air") == 300
+
+
+def test_anchor_entry_ttl_falls_back_when_no_stored():
+    """旧 anchor (ttl_seconds 無し) は現行設定にフォールバック (後方互換)。"""
+    rt = SimpleNamespace()
+    rt._anchor_entry_ttl_seconds = SEARuntime._anchor_entry_ttl_seconds.__get__(rt)
+    rt._get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    assert rt._anchor_entry_ttl_seconds({}, "model", "air") == 1200
+    assert rt._anchor_entry_ttl_seconds({"anchor_id": "x", "updated_at": "t"}, "model", "air") == 1200
