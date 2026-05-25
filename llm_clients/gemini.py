@@ -389,9 +389,29 @@ class GeminiClient(LLMClient):
         if name:
             # backend.log に出す ([gemini_cache] created と同じ場所に揃える。
             # get_llm_logger は llm_io.log 行きで created と別ファイルになり紛らわしいため)。
+            def _txt_chars(cs: list) -> int:
+                n = 0
+                for c in cs:
+                    for p in (getattr(c, "parts", None) or []):
+                        n += len(getattr(p, "text", "") or "")
+                return n
+
+            def _media_count(cs: list) -> int:
+                n = 0
+                for c in cs:
+                    for p in (getattr(c, "parts", None) or []):
+                        if getattr(p, "inline_data", None) is not None:
+                            n += 1
+                return n
+
+            # 計測ログ: 「キャッシュに入れる prefix」と「送る tail」のサイズを直接出す。
+            # response の cached_content_token_count / prompt_token_count と突き合わせれば、
+            # uncached の正体 (tail が大きい=正常 / cache が prefix を取りこぼし=partial) が分かる。
             logging.info(
-                "[gemini] explicit cache active: %s (cached %d msgs, ttl=%s) — sending tail only",
-                name, len(cached_contents), cache_ttl,
+                "[gemini] cache split: prefix=%d msgs (~%d text chars, %d media) | "
+                "tail=%d msgs (~%d text chars, %d media) | cache=%s ttl=%s",
+                len(cached_contents), _txt_chars(cached_contents), _media_count(cached_contents),
+                len(tail), _txt_chars(tail), _media_count(tail), name, cache_ttl,
             )
             return (name, tail)
         return (None, contents)
