@@ -1,5 +1,5 @@
 {
-  "model": "gemini-3.1-flash-lite-preview",
+  "model": "gemini-3.1-flash-lite",
   "system_prompt": "",
   "display_name": "Gemini 3.1 Flash-Lite(無料枠)",
   "provider": "gemini",

@@ -16,7 +16,7 @@ Examples:
     python scripts/build_memopedia.py air_city_a --limit 50 --dry-run
 
     # Use a specific model
-    python scripts/build_memopedia.py air_city_a --limit 100 --model gemini-3.1-flash-lite-preview
+    python scripts/build_memopedia.py air_city_a --limit 100 --model gemini-3.1-flash-lite
 """
 
 from __future__ import annotations
