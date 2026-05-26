@@ -45,11 +45,11 @@ class AutonomousTrackHandler:
     default_max_consecutive_pulses: int = -1  # 無制限 (メインキャッシュ TTL までは続行可)
     default_subline_pulse_interval: int = 0  # サブライン連続実行 (ローカル想定)
 
-    # v0.11 拡張: 起点ライン種別 (Intent A v0.14, Intent B v0.11)
-    # 自律 Track は連続的な Playbook 実行 (思索・記憶整理・創作等) なので、
-    # Pulse 1 サイクルあたりのコストを抑えるため軽量モデル (sub_line) を起点にする。
-    # 重量級モデルが必要な部分処理は子ラインとして必要時のみ呼び出す。
-    default_entry_line_role: str = "sub_line"
+    # v0.11→v0.32 変更: 起点ライン種別
+    # 自律 Track はペルソナの体験そのものであり、通常会話と同じ記憶空間
+    # (main_line) に記録されるべき。コスト抑制はモデル選択 (pulse_type=auto
+    # → 軽量モデル) で行い、line_role では分離しない。
+    default_entry_line_role: str = "main_line"
 
     pulse_completion_notice: str = (
         "あなたは自律 Track で作業中です。\n"
@@ -63,20 +63,22 @@ class AutonomousTrackHandler:
     # NOTE: 旧 prepare_pulse_root_context は v0.32 (2026-05-09) で削除済み。属性は残置。
     track_specific_guidance: str = (
         "## Track 種別固有の指針 (自律 Track)\n"
-        "- 起点ラインは軽量モデル (sub_line)。重量級判断が必要なら子ラインで呼ぶ。\n"
+        "- 自律 Track は軽量モデルで実行される。\n"
         "- Pulse 完了後はメタレイヤー判断に任せる。続行 / 切替 / 完了は無理に決めなくて良い。\n"
-        "- 一段落したら track_pause か track_complete でメインラインに合図できる。"
+        "- 一段落したら track_pause か track_complete で合図できる。"
     )
 
     available_spells_doc: str = (
         "[使用可能な Track 操作スペル (自律 Track)]\n"
         "発動形式は **行頭が `/spell ` で始まる**こと:\n"
         "  /spell <スペル名> key='value' key2=value2 ...\n"
-        "例: /spell track_complete track_id='...'\n"
+        "例: /spell track_complete track_id='t:3'\n"
+        "\n"
+        "Track ID は短縮形式 (t:1, t:2, ...) で指定してください。\n"
         "\n"
         "利用可能なスペル名:\n"
-        "- track_pause: 現在の Track を一時停止 (引数: track_id='...')\n"
-        "- track_complete: 現在の Track を完了 (引数: track_id='...')\n"
+        "- track_pause: 現在の Track を一時停止 (引数: track_id='t:N')\n"
+        "- track_complete: 現在の Track を完了 (引数: track_id='t:N')\n"
         "- track_create: 新しい Track を作成 (引数: track_type='...', title='...', intent='...', activate=True)\n"
         "- track_list: 現在の Track 一覧を確認 (引数なし)\n"
         "- note_open: Note を開く (引数: note_id='...')\n"
@@ -131,11 +133,11 @@ class AutonomousTrackHandler:
         自律 Track 種別の情報を入れる。
         """
         title = track.title or "(無題)"
-        track_id_short = track.track_id[:8] + "…"
+        sid = f"t:{track.short_id}" if track.short_id is not None else track.track_id[:8] + "…"
         intent = track.intent or "(意図未設定)"
         lines = [
             "## Track 切替通知 (自律 Track)",
-            f"あなたは Track 「{title}」 (id={track_id_short}, type=autonomous) に入りました。",
+            f"あなたは Track 「{title}」 (id={sid}, type=autonomous) に入りました。",
             f"intent: {intent}",
             "",
             self.pulse_completion_notice,

@@ -288,6 +288,9 @@ def migrate_database_in_place(db_path: str):
         # Post-migration: assign slot numbers to existing items (in order of CREATED_AT)
         _assign_initial_slot_numbers(target_engine)
 
+        # Post-migration: assign short_ids to existing Tracks that don't have one.
+        _backfill_track_short_ids(target_engine)
+
         # Post-migration: demote legacy STATUS_WAITING Tracks to 'pending'.
         # waiting_for / waiting_timeout_at columns are dropped by the schema
         # copy phase above (they no longer exist in the new schema), but the
@@ -388,6 +391,54 @@ def _demote_legacy_waiting_tracks(engine) -> None:
         logging.warning(
             "legacy waiting Track の降ろし処理に失敗しました（スキップ）: %s", exc,
         )
+
+
+def _backfill_track_short_ids(engine) -> None:
+    """既存 Track にペルソナ単位の short_id を作成日時順で割り当てる。"""
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                'SELECT track_id, persona_id, created_at '
+                'FROM action_track '
+                'WHERE short_id IS NULL '
+                'ORDER BY persona_id, created_at'
+            )).fetchall()
+
+            if not rows:
+                return
+
+            from collections import defaultdict
+            persona_max: dict = defaultdict(int)
+
+            existing = conn.execute(text(
+                'SELECT persona_id, MAX(short_id) '
+                'FROM action_track '
+                'WHERE short_id IS NOT NULL '
+                'GROUP BY persona_id'
+            )).fetchall()
+            for persona_id, max_sid in existing:
+                if max_sid is not None:
+                    persona_max[persona_id] = max_sid
+
+            for track_id, persona_id, _created_at in rows:
+                persona_max[persona_id] += 1
+                conn.execute(
+                    text('UPDATE action_track SET short_id = :sid WHERE track_id = :tid'),
+                    {"sid": persona_max[persona_id], "tid": track_id},
+                )
+
+            logging.info("short_id を %d 件の Track に割り当てました。", len(rows))
+    except Exception as e:
+        logging.warning("Track short_id バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_track_short_ids(db_path: str) -> None:
+    """追加系マイグレーション後に呼ぶ standalone エントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_track_short_ids(engine)
+    finally:
+        engine.dispose()
 
 
 def _assign_initial_slot_numbers(engine) -> None:

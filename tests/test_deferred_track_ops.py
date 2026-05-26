@@ -98,36 +98,42 @@ class SpellEnqueueWithPulseContextTests(unittest.TestCase):
         import importlib
         return importlib.import_module(module_name)
 
+    # Fake UUIDs for resolve_track_ref passthrough (must be 36 chars with 4 hyphens)
+    _UUID_X = "00000000-0000-0000-0000-00000000000x"
+    _UUID_Y = "00000000-0000-0000-0000-00000000000y"
+    _UUID_Z = "00000000-0000-0000-0000-00000000000z"
+    _UUID_W = "00000000-0000-0000-0000-00000000000w"
+
     def test_track_activate_enqueues(self):
         from builtin_data.tools.track_activate import track_activate
-        message, snippet, _ = track_activate("track_X")
+        message, snippet, _ = track_activate(self._UUID_X)
         self.assertIn("scheduled for end of Pulse", message)
         self.assertEqual(len(self.ctx.deferred_track_ops), 1)
         self.assertEqual(self.ctx.deferred_track_ops[0].op_type, "activate")
-        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, "track_X")
+        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, self._UUID_X)
         snippet_data = json.loads(snippet.history_snippet)
         self.assertEqual(snippet_data["queued"], "activate")
 
     def test_track_pause_enqueues(self):
         from builtin_data.tools.track_pause import track_pause
-        message, _, _ = track_pause("track_Y")
+        message, _, _ = track_pause(self._UUID_Y)
         self.assertIn("scheduled for end of Pulse", message)
         self.assertEqual(self.ctx.deferred_track_ops[0].op_type, "pause")
-        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, "track_Y")
+        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, self._UUID_Y)
 
     def test_track_complete_enqueues(self):
         from builtin_data.tools.track_complete import track_complete
-        message, _, _ = track_complete("track_Z")
+        message, _, _ = track_complete(self._UUID_Z)
         self.assertIn("scheduled for end of Pulse", message)
         self.assertEqual(self.ctx.deferred_track_ops[0].op_type, "complete")
-        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, "track_Z")
+        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, self._UUID_Z)
 
     def test_track_abort_enqueues(self):
         from builtin_data.tools.track_abort import track_abort
-        message, _, _ = track_abort("track_W")
+        message, _, _ = track_abort(self._UUID_W)
         self.assertIn("scheduled for end of Pulse", message)
         self.assertEqual(self.ctx.deferred_track_ops[0].op_type, "abort")
-        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, "track_W")
+        self.assertEqual(self.ctx.deferred_track_ops[0].track_id, self._UUID_W)
 
 
 class ApplyDeferredOpsTests(unittest.TestCase):
@@ -213,13 +219,13 @@ class EntryLineRoleTests(unittest.TestCase):
         from saiverse.track_handlers.social_track_handler import SocialTrackHandler
         from saiverse.track_handlers.user_conversation_handler import UserConversationTrackHandler
 
-        self.assertEqual(AutonomousTrackHandler.default_entry_line_role, "sub_line")
+        self.assertEqual(AutonomousTrackHandler.default_entry_line_role, "main_line")
         self.assertEqual(UserConversationTrackHandler.default_entry_line_role, "main_line")
         self.assertEqual(SocialTrackHandler.default_entry_line_role, "main_line")
 
     def test_resolve_default_entry_line_role(self):
         from _track_common import resolve_default_entry_line_role
-        self.assertEqual(resolve_default_entry_line_role("autonomous"), "sub_line")
+        self.assertEqual(resolve_default_entry_line_role("autonomous"), "main_line")
         self.assertEqual(resolve_default_entry_line_role("user_conversation"), "main_line")
         self.assertEqual(resolve_default_entry_line_role("social"), "main_line")
         # Unknown type → safe default (Intent A invariant 9: other-talk = heavyweight)

@@ -25,13 +25,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from database.models import ActionTrack
+
+_SHORT_REF_RE = re.compile(r"^[Tt]:(\d+)$")
 
 # --- 状態定数 ---
 STATUS_RUNNING = "running"
@@ -285,9 +289,11 @@ class TrackManager:
         track_id = str(uuid.uuid4())
         db = self.SessionLocal()
         try:
+            short_id = self._next_short_id(db, persona_id)
             track = ActionTrack(
                 track_id=track_id,
                 persona_id=persona_id,
+                short_id=short_id,
                 title=title,
                 track_type=track_type,
                 is_persistent=bool(is_persistent),
@@ -300,8 +306,8 @@ class TrackManager:
             db.add(track)
             db.commit()
             logging.info(
-                "[track] created %s persona=%s type=%s persistent=%s",
-                track_id, persona_id, track_type, is_persistent,
+                "[track] created %s (t:%d) persona=%s type=%s persistent=%s",
+                track_id, short_id, persona_id, track_type, is_persistent,
             )
             return track_id
         except Exception:
@@ -857,6 +863,56 @@ class TrackManager:
     # ------------------------------------------------------------------
     # 内部ヘルパ
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _next_short_id(db: Session, persona_id: str) -> int:
+        """ペルソナ内で次に使う short_id を返す (MAX + 1, 初回は 1)。"""
+        current_max = (
+            db.query(sa_func.max(ActionTrack.short_id))
+            .filter(ActionTrack.persona_id == persona_id)
+            .scalar()
+        )
+        return (current_max or 0) + 1
+
+    def resolve_track_ref(self, persona_id: str, ref: str) -> str:
+        """短縮参照 (t:N) または UUID を track_id に解決する。
+
+        - ``t:1`` / ``T:1`` → persona_id のTrack で short_id=1 の track_id を返す
+        - UUID 形式 (36文字, 4ハイフン) → そのまま返す
+        - それ以外 → TrackNotFoundError
+
+        Returns:
+            解決された track_id (UUID 文字列)
+        """
+        if not ref:
+            raise TrackNotFoundError("empty track reference")
+
+        m = _SHORT_REF_RE.match(ref.strip())
+        if m:
+            short_id = int(m.group(1))
+            db = self.SessionLocal()
+            try:
+                track = (
+                    db.query(ActionTrack)
+                    .filter_by(persona_id=persona_id, short_id=short_id)
+                    .first()
+                )
+                if track is None:
+                    raise TrackNotFoundError(
+                        f"track not found: t:{short_id} (persona={persona_id})"
+                    )
+                return track.track_id
+            finally:
+                db.close()
+
+        ref_stripped = ref.strip()
+        if len(ref_stripped) == 36 and ref_stripped.count("-") == 4:
+            return ref_stripped
+
+        raise TrackNotFoundError(
+            f"invalid track reference: {ref!r} "
+            f"(expected 't:N' or UUID format)"
+        )
 
     def _fetch_or_raise(self, db: Session, track_id: str) -> ActionTrack:
         track = db.query(ActionTrack).filter_by(track_id=track_id).first()

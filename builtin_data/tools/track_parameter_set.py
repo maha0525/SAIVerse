@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Tuple
 
+from _track_common import format_short_id, resolve_track_ref
 from database.session import SessionLocal
 from saiverse.track_manager import (
     InvalidTrackStateError,
@@ -44,6 +45,8 @@ def track_parameter_set(
             "Active persona context is not set. Use tools.context.persona_context()."
         )
 
+    track_id = resolve_track_ref(track_id, _track_manager)
+
     try:
         track = _track_manager.set_parameter(track_id, parameter_name, value)
     except TrackNotFoundError as exc:
@@ -73,10 +76,11 @@ def track_parameter_set(
             ensure_ascii=False,
         )
     )
+    sid = format_short_id(track)
     label = track.title or track.track_type
     return (
         f"Set {parameter_name}={parameters.get(parameter_name)} on track '{label}' "
-        f"({track.track_id[:8]}…).",
+        f"({sid}).",
         snippet,
         None,
     )
@@ -97,7 +101,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "track_id": {
                     "type": "string",
-                    "description": "Target Track id.",
+                    "description": "Track short ref (e.g. 't:1') or full UUID.",
                 },
                 "parameter_name": {
                     "type": "string",

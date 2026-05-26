@@ -64,9 +64,11 @@ class UserConversationTrackHandler:
         "  /spell <スペル名> key='value' key2=value2 ...\n"
         "例: /spell track_create track_type='autonomous' title='メモ整理' activate=True\n"
         "\n"
+        "Track ID は短縮形式 (t:1, t:2, ...) で指定してください。\n"
+        "\n"
         "利用可能なスペル名:\n"
-        "- track_pause: 現在の Track を一時停止 (引数: track_id='...')\n"
-        "- track_activate: 別の Track をアクティブ化 (引数: track_id='...')\n"
+        "- track_pause: 現在の Track を一時停止 (引数: track_id='t:N')\n"
+        "- track_activate: 別の Track をアクティブ化 (引数: track_id='t:N')\n"
         "- track_create: 新しい Track を作成 (引数: track_type='...', title='...', intent='...', activate=True)\n"
         "- track_list: 現在の Track 一覧を確認 (引数なし)\n"
         "- note_open: Note を開く (引数: note_id='...')\n"
@@ -169,10 +171,10 @@ class UserConversationTrackHandler:
         前提状況に入った」という会話の流れの中の system 通知として認識される。
         """
         title = track.title or "(無題)"
-        track_id_short = track.track_id[:8] + "…"
+        sid = f"t:{track.short_id}" if track.short_id is not None else track.track_id[:8] + "…"
         lines = [
             "## Track 切替通知",
-            f"あなたは Track 「{title}」 (id={track_id_short}, type={track.track_type}) に入りました。",
+            f"あなたは Track 「{title}」 (id={sid}, type={track.track_type}) に入りました。",
             "",
             self.pulse_completion_notice,
             "",

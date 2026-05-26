@@ -19,6 +19,7 @@ from _track_common import (
     get_pulse_context,
     resolve_default_entry_line_role,
 )
+from saiverse.track_manager import TrackNotFoundError
 from database.session import SessionLocal
 from saiverse.track_manager import TrackManager
 from tools.context import get_active_persona_id
@@ -68,6 +69,13 @@ def track_create(
     except ValueError as exc:
         raise RuntimeError(f"track_create failed: {exc}") from exc
 
+    # Resolve short_id for the newly created track
+    try:
+        created_track = _track_manager.get(track_id)
+        short_id_str = f"t:{created_track.short_id}" if created_track.short_id else track_id[:8] + "…"
+    except TrackNotFoundError:
+        short_id_str = track_id[:8] + "…"
+
     final_status = "unstarted"
     activate_error: Optional[str] = None
     activate_queued = False
@@ -83,7 +91,6 @@ def track_create(
         else:
             if activate_result.deferred:
                 activate_queued = True
-                # final_status stays 'unstarted'; runtime will set 'running' at flush
             elif activate_result.track is not None:
                 final_status = activate_result.track.status
 
@@ -91,6 +98,7 @@ def track_create(
         history_snippet=json.dumps(
             {
                 "track_id": track_id,
+                "short_id": short_id_str,
                 "track_type": track_type,
                 "title": title,
                 "is_persistent": is_persistent,
@@ -104,19 +112,18 @@ def track_create(
     label = title or track_type
     if activate_error:
         message = (
-            f"Created track '{label}' ({track_id[:8]}…, unstarted); "
+            f"Created track '{label}' ({short_id_str}, unstarted); "
             f"activate failed: {activate_error}."
         )
     elif activate_queued:
         message = (
-            f"Created track '{label}' ({track_id[:8]}…, unstarted). "
+            f"Created track '{label}' ({short_id_str}, unstarted). "
             f"Activate scheduled for end of Pulse. {DEFERRED_NOTICE}"
         )
     elif activate:
-        # Immediate activate path (no Pulse): preserved legacy behavior.
-        message = f"Created and activated track '{label}' ({track_id[:8]}…, running)."
+        message = f"Created and activated track '{label}' ({short_id_str}, running)."
     else:
-        message = f"Created track '{label}' ({track_id[:8]}…, unstarted)."
+        message = f"Created track '{label}' ({short_id_str}, unstarted)."
     return message, snippet, None
 
 

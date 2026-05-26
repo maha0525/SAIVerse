@@ -454,6 +454,7 @@ class ActionTrack(Base):
     __tablename__ = "action_track"
     track_id = Column(String(36), primary_key=True)  # UUID
     persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    short_id = Column(Integer, nullable=True)  # Per-persona sequential ID (t:1, t:2, ...)
     title = Column(String(255), nullable=True)
     track_type = Column(String(64), nullable=False)
     # user_conversation / social / autonomous / external / ...

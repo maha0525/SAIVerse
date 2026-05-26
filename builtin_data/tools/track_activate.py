@@ -15,7 +15,9 @@ from typing import Tuple
 from _track_common import (
     DEFERRED_NOTICE,
     apply_track_op,
+    format_short_id,
     get_pulse_context,
+    resolve_track_ref,
 )
 from database.session import SessionLocal
 from saiverse.track_manager import (
@@ -40,6 +42,8 @@ def track_activate(track_id: str) -> Tuple[str, ToolResult, None]:
         raise RuntimeError(
             "Active persona context is not set. Use tools.context.persona_context()."
         )
+
+    track_id = resolve_track_ref(track_id, _track_manager)
 
     try:
         result = apply_track_op(
@@ -66,14 +70,15 @@ def track_activate(track_id: str) -> Tuple[str, ToolResult, None]:
         )
 
     track = result.track
+    sid = format_short_id(track)
     snippet = ToolResult(
         history_snippet=json.dumps(
-            {"track_id": track.track_id, "status": track.status, "title": track.title},
+            {"track_id": track.track_id, "short_id": sid, "status": track.status, "title": track.title},
             ensure_ascii=False,
         )
     )
     label = track.title or track.track_type
-    return f"Activated track '{label}' ({track.track_id[:8]}…).", snippet, None
+    return f"Activated track '{label}' ({sid}).", snippet, None
 
 
 def schema() -> ToolSchema:
@@ -89,7 +94,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "track_id": {
                     "type": "string",
-                    "description": "Track ID to activate.",
+                    "description": "Track short ref (e.g. 't:1') or full UUID.",
                 },
             },
             "required": ["track_id"],

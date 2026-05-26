@@ -87,8 +87,9 @@ def track_list(
     payload = []
     for t in tracks:
         last_dt = last_msg_times.get(t.track_id)
+        short_id_str = f"t:{t.short_id}" if t.short_id is not None else None
         payload.append({
-            "track_id": t.track_id,
+            "short_id": short_id_str,
             "title": t.title,
             "track_type": t.track_type,
             "status": t.status,

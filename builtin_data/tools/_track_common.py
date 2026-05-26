@@ -92,6 +92,31 @@ DEFERRED_NOTICE = (
 )
 
 
+def resolve_track_ref(
+    ref: str,
+    track_manager: Any,
+) -> str:
+    """ツール共通: 短縮参照 (t:N) または UUID を track_id に解決する。
+
+    persona_id は contextvar (get_active_persona_id) から取得する。
+    """
+    from tools.context import get_active_persona_id
+
+    persona_id = get_active_persona_id()
+    if not persona_id:
+        raise RuntimeError(
+            "Active persona context is not set. Use tools.context.persona_context()."
+        )
+    return track_manager.resolve_track_ref(persona_id, ref)
+
+
+def format_short_id(track: Any) -> str:
+    """Track の表示用短縮 ID を返す (例: 't:3')。short_id 未設定なら UUID[:8]… にフォールバック。"""
+    if getattr(track, "short_id", None) is not None:
+        return f"t:{track.short_id}"
+    return track.track_id[:8] + "…"
+
+
 def get_pulse_context() -> Optional[Any]:
     """Return the active PulseContext, or None when running outside a Pulse.
 

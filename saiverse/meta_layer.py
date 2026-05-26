@@ -1462,8 +1462,9 @@ class MetaLayer:
         last_part = ""
         if last_msg_time is not None:
             last_part = f" / 最終: {self._format_relative(last_msg_time)}"
+        sid = f"t:{track.short_id}" if getattr(track, "short_id", None) is not None else track.track_id[:8] + "…"
         return (
-            f"  - 「{title}」 (id={track.track_id[:8]}…, "
+            f"  - 「{title}」 (id={sid}, "
             f"{track.track_type}{intent_part}){last_part}"
         )
 
