@@ -1848,6 +1848,8 @@ class SAIMemoryAdapter:
             # 2026-05-20: Gemini 3.x の thoughtSignature をターン跨ぎで保持する。
             # 詳細は docs/intent/thought_signature_persistence.md
             thought_signature = message.get("thought_signature")
+            spell_origin_id = message.get("spell_origin_id")
+            spell_seq = message.get("spell_seq")
             embedding_chunks = message.get("embedding_chunks")
             skip_embedding = False
             if embedding_chunks is not None:
@@ -1878,6 +1880,8 @@ class SAIMemoryAdapter:
                     paired_action_text=paired_action_text,
                     pulse_id=pulse_id_val,
                     thought_signature=thought_signature,
+                    spell_origin_id=spell_origin_id,
+                    spell_seq=spell_seq,
                 )
                 if (not skip_embedding) and content and content.strip() and self.embedder is not None:
                     chunks = chunk_text(

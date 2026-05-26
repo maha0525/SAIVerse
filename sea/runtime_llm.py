@@ -853,6 +853,7 @@ async def _run_spell_loop(
     event_callback: Optional[Callable],
     node_def: Any = None,
     pipeline_streaming_state: Optional[dict] = None,
+    action_text: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     """Execute the spell loop with parallel spell execution per LLM round.
 
@@ -891,6 +892,7 @@ async def _run_spell_loop(
 
     loop_count = 0
     merged_parts: List[str] = []
+    _spell_origin_id: Optional[str] = None
 
     # メタ判断 Pulse のとき、判断 LLM の独白 + 発動 spell + 結果を
     # PulseContext.meta_judgment_buffer に蓄積する (Phase 2 / handoff Part 2)。
@@ -951,11 +953,19 @@ async def _run_spell_loop(
                 node_memorize_tags = []
             assistant_tags = node_memorize_tags or ["conversation"]
             if assistant_content:
-                runtime._store_memory(
+                _is_first_round = (loop_count == 1)
+                _stored_id = runtime._store_memory(
                     persona, assistant_content, role="assistant",
                     tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
                     pulse_context=pulse_context,
+                    paired_action_text=action_text if _is_first_round else None,
+                    spell_origin_id=_spell_origin_id,
+                    spell_seq=loop_count,
+                    return_message_id=_is_first_round,
                 )
+                if _is_first_round and _stored_id:
+                    _spell_origin_id = _stored_id
+                    state["_spell_loop_origin_id"] = _spell_origin_id
 
             # Execute all spells in parallel.
             # ``messages`` is snapshotted into a contextvar via persona_context so
@@ -1036,6 +1046,8 @@ async def _run_spell_loop(
                     persona, combined_results, role="system",
                     tags=spell_tags, pulse_id=pulse_id, playbook_name=playbook.name,
                     pulse_context=pulse_context,
+                    spell_origin_id=_spell_origin_id,
+                    spell_seq=loop_count,
                 )
 
             # Record to activity trace
@@ -1918,6 +1930,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     playbook=playbook,
                     event_callback=event_callback,
                     node_def=node_def,
+                    action_text=prompt,
                 )
                 if _spell_loop_count > 0:
                     # result.content は後段 (≈L2069/2076) で state[text_key]/text に
@@ -2325,6 +2338,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         event_callback=event_callback,
                         node_def=node_def,
                         pipeline_streaming_state=_pipeline_spell_state,
+                        action_text=prompt,
                     )
 
                     if _pipeline_spell_state is not None:
@@ -2673,6 +2687,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             playbook=playbook,
                             event_callback=event_callback,
                             node_def=node_def,
+                            action_text=prompt,
                         )
                     else:
                         # text is dict (from structured output) - skip spell processing
@@ -2939,6 +2954,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     "present" if _memorize_sig else "None",
                     len(_memorize_sig) if isinstance(_memorize_sig, (bytes, str)) else 0,
                 )
+                _spell_origin = state.get("_spell_loop_origin_id")
+                _memorize_pat = None if _spell_origin else prompt
                 stored_message_id = runtime._store_memory(
                     persona,
                     content_to_save,
@@ -2948,20 +2965,22 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     metadata=_memorize_metadata if _memorize_metadata else None,
                     playbook_name=playbook.name,
                     pulse_context=pulse_context,
-                    paired_action_text=prompt,
+                    paired_action_text=_memorize_pat,
                     scope=memorize_scope,
                     line_role=memorize_line_role,
                     # 2026-05-20: Gemini 3.x の thoughtSignature を永続化。state には
                     # gemini.py の text/stream 経路から伝搬済み (LLM ノード処理内)。
                     thought_signature=_memorize_sig,
+                    spell_origin_id=_spell_origin,
                     return_message_id=True,
                 )
                 if not stored_message_id:
                     _memorize_ok = False
                 else:
                     LOGGER.debug(
-                        "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s",
-                        len(prompt) if prompt else 0, memorize_scope,
+                        "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
+                        len(_memorize_pat) if _memorize_pat else 0, memorize_scope,
+                        _spell_origin,
                     )
                     # メタ判断ターンの scope='discardable' → 'committed' 昇格は
                     # TrackManager の状態遷移 hook 経由で行う (saiverse_manager.py

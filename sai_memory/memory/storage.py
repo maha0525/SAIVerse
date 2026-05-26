@@ -128,6 +128,12 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     # thought_signature: Gemini 3.x の thoughtSignature を保持してマルチターン
     # 会話で品質低下を防ぐ。詳細は docs/intent/thought_signature_persistence.md
     _ensure_column(conn, "messages", "thought_signature", "TEXT")
+    # spell_origin_id: spell loop 内メッセージのグルーピングキー。
+    # spell loop の最初のラウンドで保存された judgment メッセージの id を指す。
+    # spell loop 外のメッセージおよび origin 自身は NULL。
+    _ensure_column(conn, "messages", "spell_origin_id", "TEXT")
+    # spell_seq: spell loop 内のラウンド番号 (1, 2, 3...)。
+    _ensure_column(conn, "messages", "spell_seq", "INTEGER")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_track_line "
         "ON messages(origin_track_id, line_role, line_id)"
@@ -327,6 +333,8 @@ class Message:
     # 応答についてのみ context に復元する (volatile は揮発)。
     # docs/issues/spell_judgment_recorded_after_subline.md 周辺の議論参照。
     paired_action_text: Optional[str] = None
+    spell_origin_id: Optional[str] = None
+    spell_seq: Optional[int] = None
 
 
 def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
@@ -349,7 +357,7 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
 # Column suffix for SELECTs that want line metadata. Append after the 7 base
 # columns (id, thread_id, role, content, resource_id, created_at, metadata).
 # v0.32 (2026-05-09): origin_track_id を末尾に追加。
-_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature, paired_action_text"
+_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature, paired_action_text, spell_origin_id, spell_seq"
 
 
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
@@ -368,6 +376,8 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
         origin_track_id=row[11] if len(row) > 11 else None,
         thought_signature=row[12] if len(row) > 12 else None,
         paired_action_text=row[13] if len(row) > 13 else None,
+        spell_origin_id=row[14] if len(row) > 14 else None,
+        spell_seq=int(row[15]) if len(row) > 15 and row[15] is not None else None,
     )
 
 
@@ -387,6 +397,8 @@ def add_message(
     paired_action_text: Optional[str] = None,
     pulse_id: Optional[str] = None,
     thought_signature: Optional[str] = None,
+    spell_origin_id: Optional[str] = None,
+    spell_seq: Optional[int] = None,
 ) -> str:
     """Insert a message row.
 
@@ -411,18 +423,22 @@ def add_message(
     if scope is None:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature, "
+            "spell_origin_id, spell_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
-             origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature),
+             origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature,
+             spell_origin_id, spell_seq),
         )
     else:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature, "
+            "spell_origin_id, spell_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
-             origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature),
+             origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature,
+             spell_origin_id, spell_seq),
         )
     conn.commit()
     return mid

@@ -6,6 +6,7 @@ pulse_logs テーブル (node 実行イベント) ではなく messages を軸�
 自律 sub_line Pulse を含む全 Pulse が messages.pulse_id に確実に記録されるため
 (pulse_logs への記録有無に依存しない)。
 """
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -14,6 +15,8 @@ from pydantic import BaseModel
 from api.deps import get_manager
 
 from .utils import get_adapter
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -26,6 +29,8 @@ class PulseTimelineMessage(BaseModel):
     line_role: Optional[str]
     scope: Optional[str]
     origin_track_id: Optional[str]
+    spell_origin_id: Optional[str]
+    spell_seq: Optional[int]
 
 
 class PulseTimelineItem(BaseModel):
@@ -58,6 +63,24 @@ class PulseDetailResponse(BaseModel):
     total: int
 
 
+_VALID_LINE_ROLES = {"main_line", "sub_line", "meta_judgment"}
+_VALID_SCOPES = {"committed", "volatile", "discardable"}
+
+
+class MessagePatchItem(BaseModel):
+    entry_id: str
+    line_role: Optional[str] = None
+    scope: Optional[str] = None
+
+
+class MessagePatchRequest(BaseModel):
+    updates: List[MessagePatchItem]
+
+
+class MessagePatchResponse(BaseModel):
+    updated: int
+
+
 def _thread_prefix(persona_id: str) -> str:
     # SAIMemory thread_id は persona_id をキーにする (e.g. 'air_city_a:__persona__')
     return f"{persona_id}:%"
@@ -85,7 +108,8 @@ _SUMMARY_SQL = """
 """
 
 _DETAIL_SQL = """
-    SELECT id, role, content, created_at, line_role, scope, origin_track_id, paired_action_text
+    SELECT id, role, content, created_at, line_role, scope, origin_track_id,
+           paired_action_text, spell_origin_id, spell_seq
     FROM messages
     WHERE thread_id LIKE ? AND pulse_id = ?
     ORDER BY created_at ASC
@@ -160,6 +184,8 @@ def get_pulse_detail(
             line_role=r[4],
             scope=r[5],
             origin_track_id=r[6],
+            spell_origin_id=r[8],
+            spell_seq=int(r[9]) if r[9] is not None else None,
         )
         for r in rows
     ]
@@ -180,3 +206,40 @@ def get_pulse_detail(
     return PulseDetailResponse(
         pulse_id=pulse_id, messages=messages, prompts=prompts, total=len(messages)
     )
+
+
+@router.patch("/{persona_id}/messages", response_model=MessagePatchResponse)
+def patch_messages(
+    persona_id: str,
+    body: MessagePatchRequest,
+    manager=Depends(get_manager),
+):
+    """SAIMemory messages の line_role / scope を一括更新する。"""
+    updated = 0
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            for item in body.updates:
+                sets: List[str] = []
+                vals: List[str] = []
+                if item.line_role is not None:
+                    if item.line_role not in _VALID_LINE_ROLES:
+                        continue
+                    sets.append("line_role = ?")
+                    vals.append(item.line_role)
+                if item.scope is not None:
+                    if item.scope not in _VALID_SCOPES:
+                        continue
+                    sets.append("scope = ?")
+                    vals.append(item.scope)
+                if not sets:
+                    continue
+                vals.append(item.entry_id)
+                sql = f"UPDATE messages SET {', '.join(sets)} WHERE id = ?"
+                cur = adapter.conn.execute(sql, vals)
+                updated += cur.rowcount
+            adapter.conn.commit()
+    LOGGER.info(
+        "[pulse-timeline] patch_messages: persona=%s, requested=%d, updated=%d",
+        persona_id, len(body.updates), updated,
+    )
+    return MessagePatchResponse(updated=updated)
