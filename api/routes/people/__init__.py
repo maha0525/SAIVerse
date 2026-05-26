@@ -7,7 +7,7 @@ from . import summon, memory, recall, config, autonomous
 from . import import_chatlog, reembed, memopedia, native_export_import
 from . import schedule, tasks, inventory, arasuji
 from . import pulse_logs, memory_notes, working_memory, autonomy
-from . import storage_layers, tracks, cache_status
+from . import storage_layers, tracks, cache_status, debug, pulse_timeline
 
 router = APIRouter()
 
@@ -57,3 +57,5 @@ router.include_router(autonomy.router, tags=["people"])
 router.include_router(storage_layers.router, tags=["people"])
 router.include_router(tracks.router, tags=["people"])
 router.include_router(cache_status.router, tags=["people"])
+router.include_router(debug.router, tags=["people"])
+router.include_router(pulse_timeline.router, tags=["people"])

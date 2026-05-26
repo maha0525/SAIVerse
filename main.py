@@ -313,12 +313,19 @@ def main():
     else:
         db_path = default_db_path()
 
-    # Auto-migrate database schema if needed (must run before backup to avoid file lock conflicts)
-    from database.migrate import needs_migration, migrate_database_in_place
+    # Auto-migrate database schema if needed (must run before backup to avoid file lock conflicts).
+    # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
+    # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
+    # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
-        migrate_database_in_place(str(db_path))
-        logging.info("Database migration completed.")
+        if try_additive_migration(str(db_path)):
+            logging.info("Additive schema migration completed (ALTER/CREATE, no file rewrite).")
+        else:
+            logging.info("Destructive schema change detected; falling back to full rewrite migration.")
+            migrate_database_in_place(str(db_path))
+            logging.info("Database migration completed.")
 
     # Building Memory 関連テーブル (Phase 2+3) を軽量パスで揃える。
     # needs_migration が拾うのは「カラム差分」 のみで「テーブル追加」 は素早く確実に

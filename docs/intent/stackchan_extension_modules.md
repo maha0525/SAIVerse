@@ -119,6 +119,46 @@ stackchan-mcp 本家に **汎用 I2C / UART / GPIO read/write tool** を追加�
 
 本家プリセット (レベル 1) と並列で成立する。 ユーザーは両方インストールしても矛盾しない (どちらか先に呼ばれた方が動く程度の話)。
 
+### D. I2C MUX (PaHUB) ハブ経由 Unit 対応 (2026-05-24 追加)
+
+Port A は 1 個の I2C bus なので、 物理的に複数 Unit を繋ぐにはユーザーが M5Stack の I2C hub (PaHUB / PaHUB 2) を挟む。 SAIVerse-stackchan-addon の Unit driver はハブ経由構成でも追加操作なしで動作する必要がある。
+
+#### 設計判断: 「全 channel open + lazy recovery」 戦略
+
+PaHUB / PaHUB 2 は TCA9548A I2C MUX を搭載した 6 channel ハブ。 制御 register に 0xFF を書くと全 channel が同時 open になり、 以降は trunk 側から直結構成と同じアドレスで各 channel 配下の Unit を叩ける (TI 公式: "Any individual SCn/SDn channel or combination of channels can be selected")。
+
+採用した方針:
+
+- **全 channel 同時 open**: 起動時に 0xFF を 1 回書けば以降の各 i2c 操作で channel select 不要。 1 個の Unit が 1 channel に繋がってる典型構成では trunk 側で address 衝突なし
+- **「起動時 1 回 init」 ではなく lazy recovery**: SAIVerse プロセスが起動しっぱなしでも、 Stack-chan 再起動 / ハブ付け替え / 電源瞬断で PaHUB は default の全 channel closed 状態に戻る。 「事前 init」 方式だと SAIVerse 側がそれを検知できず以降のセンサー操作が無応答になる
+- **エラー駆動回復**: 各 i2c 操作で 1 回目試行 → i2c-level error (= `ESP_ERR_*` で始まる error) が返ったら `hub.open_all_channels()` を 1 回呼んで → 2 回目試行 → そのまま結果返却。 通常運用 (= hub が open 状態を維持してる) では 1 回目で成功して余分な往復ゼロ
+- **直結時はリカバリ機構を skip**: `hub_type=none` なら recovery 経路自体スキップして既存挙動と等価 (= ハブ無関係なエラーで余分な i2c_write を走らせない)
+- **per-channel select は future work**: 同 channel に同 address Unit を複数並べる / 別 channel に同 address Unit を挿す要求が出てきた時に、 PaHub に `select_channel(ch)` を追加する。 現状は不要
+
+#### 守るべき不変条件
+
+##### D-1. ユーザーが手動でハブを初期化する必要がない
+
+物理デバイスのどの組み合わせ・順序で電源を入れ直しても、 SAIVerse 側 Unit tool を呼べばセンサー結果が返るか、 結線・アドレス本物の問題に起因する明示的エラーが返るかのいずれかになる。 「ハブを再 init する操作」 をユーザーに要求しない。
+
+##### D-2. ハブの存在は Unit driver から見て透過
+
+`tools/units/env3.py` 等の Unit driver は recovery helper 経由で i2c 操作を呼ぶだけで、 ハブ有無に応じた分岐を持たない。 ハブの種別が増えた時の影響範囲を Unit driver に広げない (= hub 抽象側だけで吸収する)。
+
+##### D-3. 物理 UI の表記とソフトウェア UI の表記は 1:1 対応
+
+ハブのアドレス選択は物理デバイスの A0 / A1 / A2 パッドで決まる。 SAIVerse の AddonConfig UI でもユーザーが見るラベルは A0 / A1 / A2 (toggle 3 個)、 ON/OFF 状態を物理デバイスと同じ表現で受ける。 16 進アドレスへの脳内変換を要求しない。
+
+##### D-4. firmware に介入しない
+
+ハブ対応は SAIVerse addon Python 側で完結させる。 stackchan-mcp 本家への upstream PR (= MUX-aware tool 追加等) はしない (本書「不変条件 2: 本家リポジトリへの介入は最小限」 と整合)。 既存の `self.i2c.write` / `self.i2c.read` / `self.i2c.write_read` (PR ② で追加済み) の組み合わせだけで成立させる。
+
+#### 実装位置
+
+- `expansion_data/saiverse-stackchan-addon/tools/hubs/pahub.py`: `PaHub` クラス (TCA9548A 系汎用ドライバ) + `get_pahub_from_params()` helper。 `__init__.py` の存在で SAIVerse の tool ローダーから helper lib として認識され (= tool 登録対象外)、 Unit driver 側から `from hubs.pahub import ...` で参照される
+- `expansion_data/saiverse-stackchan-addon/tools/units/env3.py`: `_execute_with_hub_recovery(operation, is_i2c_failure)` ヘルパー経由で SHT30 / QMP6988 を呼ぶ
+- `expansion_data/saiverse-stackchan-addon/addon.json`: `params_schema` に `hub_type` (dropdown: none / pahub) + `hub_addr_a0` / `hub_addr_a1` / `hub_addr_a2` (toggle 3 個) を追加、 全て `advanced: true` で「詳細設定」 セクションに折りたたみ
+
 ## 守るべき不変条件
 
 ### 1. ファーム改修なしで Unit 追加できる選択肢を必ず残す
@@ -227,3 +267,11 @@ AXERA-TECH (AX630C の SoC ベンダ Axera 公式) が Hugging Face に AX630C �
 - **PR ② スコープ拡張**: 当初「汎用 I2C tool 追加」 → 「**Port A bus init + 汎用 I2C tool**」 を 1 PR に統合 (board 固有改修)
 - **物理 bus 分離による safety**: 旧設計の protection list (案 C、 runtime check で internal IC への write block) は廃止、 Port A 専用 bus に切り替えることで internal IC を物理的に到達不可にする (案 C'、 security by construction)。 「不変条件で安全保証 ＞ runtime check で安全保証」 の判断
 - **board 単位での横展開戦略**: stackchan board のみ我々が PR を出し、 m5stack-core-s3 / atom-* / 他 100+ board は各 board メンテナーが見本として取り込む流れに任せる (= 本家への過剰介入を避ける不変条件 2 と整合)
+
+### 2026-05-24 確定 (D 案 追加)
+
+- **I2C MUX 対応 (PaHUB / PaHUB 2)**: SAIVerse addon Python 側で完結、 firmware 改修なし
+- **全 channel open + lazy recovery**: 起動時 init を採用せず、 各 i2c 操作で 1 回目試行 → ESP_ERR_* なら hub の全 channel open を試みて 2 回目試行、 の機構に倒す。 Stack-chan 再起動・ハブ付け替え・電源瞬断のいずれが起きてもユーザー操作不要で復帰する
+- **hub 抽象は `tools/hubs/pahub.py` に切り出し**: ENV III に閉じず、 将来追加される CardKB / IMU 等他 Unit でも共通利用できる粒度。 TCA9548A 系の特殊性は本クラス内に閉じ込め、 別形式 MUX (TCA9543A / PCA9544A 等) が必要になったら別ドライバを追加する形 (= MUX 一般抽象は作らない)
+- **UI は物理 A0/A1/A2 toggle**: 16 進アドレスでなく物理パッドの ON/OFF をそのまま受ける。 ハブ関連 4 項目 (hub_type + hub_addr_a0/a1/a2) は全部 `advanced: true` で「詳細設定」 セクションに折りたたみ、 ハブ非使用者には見えない
+- **per-channel select は future work**: 同 address Unit を別 channel に挿す要求が出てきた時に PaHub に `select_channel(ch)` を追加する

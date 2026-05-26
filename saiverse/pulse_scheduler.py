@@ -126,6 +126,10 @@ class SubLineScheduler:
         self._thread = None
         logging.info("[subline-scheduler] Stopped")
 
+    def is_running(self) -> bool:
+        """background thread が稼働中か (デバッグコントローラー用)。"""
+        return self._thread is not None and self._thread.is_alive()
+
     # ------------------------------------------------------------------
     # ループ本体
     # ------------------------------------------------------------------

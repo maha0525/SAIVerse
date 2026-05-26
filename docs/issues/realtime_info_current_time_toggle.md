@@ -1,9 +1,9 @@
-# Issue: リアルタイム情報の「現在時刻」をオン/オフ切替可能にする
+# Issue: リアルタイム情報をペルソナ単位でオン/オフ切替可能にする
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 実装完了 (2026-05-26)
 **優先度**: medium
 **作成日**: 2026-05-09
-**関連**: リアルタイム情報生成箇所 (要特定), 設定 UI
+**関連**: `sea/runtime.py:_build_realtime_context`, ペルソナ設定 UI (`SettingsModal.tsx`)
 
 ## 背景
 
@@ -34,11 +34,28 @@
 
 → 当面は案 A で十分。今後項目が増えるなら細かく分割。
 
+## 実装内容 (2026-05-26)
+
+起票時の案 (現在時刻だけオフ) ではなく、まはーの判断で **リアルタイム情報セクション
+丸ごとをペルソナ単位でオン/オフ** する形に決定。粒度を細かくせず、`SPELL_ENABLED` /
+`CHRONICLE_ENABLED` と同じ「ペルソナ単位 bool トグル」パターンに揃えた。
+
+- リアルタイム情報の組み立て箇所: `sea/runtime.py:_build_realtime_context`
+  - 構成項目: 現在時刻 / あなたの前回発言時刻 / 空間情報 (Unity gateway)
+  - 注入位置: 最後の user メッセージの直前 (`sea/runtime_context.py`、キャッシュを壊さない位置)
+- 追加した設定: `AI.REALTIME_INFO_ENABLED` (Boolean, default True, NOT NULL)
+  - DB: `database/models.py`。既存ペルソナは起動時マイグレーションで default True が入る
+  - runtime: `_is_realtime_info_enabled_for_persona` で DB 直読み判定 → `_build_realtime_context`
+    冒頭で OFF なら `None` を返してセクション自体を送らない (空セクション送信も自然に回避)
+  - API: `AIConfigResponse` / `UpdateAIConfigRequest` に `realtime_info_enabled`、
+    `config.py` で get/patch 配線、`admin.update_ai` / `saiverse_manager.update_ai` に引数追加
+  - UI: `SettingsModal.tsx` の「スペル」直後に「リアルタイム情報」トグルを追加
+
 ## 関連リソース
 
-- 要特定: リアルタイム情報を組み立てるコード
-- ユーザーフィードバック: 上記引用
+- ユーザーフィードバック: 上記引用 (夜になると Claude が時刻を気にして寝かせようとしてくる件)
 
 ## ログ
 
 - 2026-05-09: issue 起票。ユーザー要望を反映。
+- 2026-05-26: ペルソナ単位のセクション丸ごとトグルとして実装完了。粒度の決定はまはー。

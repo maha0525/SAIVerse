@@ -1,7 +1,7 @@
 # Issue: stackchan-mcp の touch driver が誤検知 STROKE event を間欠的に発火
 
-**ステータス**: 🟡 案 B filter 実装済、 長時間 monitor 中 (= 2026-05-22 案 B 採用確定)
-**優先度**: 🟢 medium (2026-05-22 再評価) — 案 B filter で false stroke が抑止される想定。 数時間〜数日の monitor 結果次第で issue close 判断
+**ステータス**: 🟡 公式同等 init 実装済、 長時間 monitor 中 (= 2026-05-22 夕方 採用)
+**優先度**: 🟢 medium (2026-05-22 再評価) — sensitivity LOW LEVEL_3 で false stroke 大幅減期待。 数時間〜数日の monitor 結果次第で issue close 判断。 案 B filter は撤去済 (= 不要になる想定)
 **作成日**: 2026-05-19
 **再評価日**: 2026-05-22
 **関連**: `docs/intent/stackchan_vessel.md` §F (= タッチ知覚の設計、 Phase 5' で正式実装)、 `temp/stackchan-mcp/firmware/main/boards/stackchan/stackchan.cc` (= touch driver 実装)、 `docs/issues/stackchan_mcp_upstream_pr_strategy.md` (= 修正は upstream PR 候補)
@@ -297,3 +297,86 @@ Phase 5' (= タッチ知覚の実装) 着手前に本 issue を解決してお�
   - [[project_stackchan_power_topology]] — stack-chan 電源トポロジー、 register persistence
   - [[project_si12t_register_quirks]] — Si12T datasheet vs 実機の差分、 Ch1 固有挙動
   - [[feedback_datasheet_vs_observation]] — datasheet 記載は実機観測で裏取りする原則
+
+- 2026-05-22 (夕方、 公式 stack-chan firmware の Si12T driver 読解 → 公式同等 init 実装 → false stroke 解消の手応え):
+
+  ### 経緯
+
+  まはー指摘で M5Stack 公式 stack-chan firmware (`https://github.com/m5stack/StackChan`) の `firmware/main/hal/drivers/Si12T/Si12T.cpp` + `hal_head_touch.cpp` を読解。 我々の実装と決定的に異なる点が複数判明:
+
+  | 項目 | 公式 (m5stack/StackChan) | 我々 (旧) | 影響 |
+  |---|---|---|---|
+  | **Sensitivity register** | **明示設定 0x33 (TYPE_LOW LEVEL_3)** | chip default 0xBB (TYPE_HIGH LEVEL_3) | **公式は意図的に低感度で false 抑止** |
+  | REF_RST1/2 (0x0A/0B) | 明示 0x00 (= calibration **enable**) | 触らず | 公式は **0=enable** と解釈 (= 我々 / datasheet 解釈と逆!) |
+  | CH_HOLD1/2 (0x0C/0D) | 明示 0x00 (= channel **enable**) | 触らず | 同上 |
+  | CAL_HOLD1/2 (0x0E/0F) | 明示 0x00 (= cal **enable**) | 触らず | 同上 |
+  | CTRL1 (0x08) | 明示 0x22 (Auto Mode, FTC=10s, ILC=M/H, Resp 4) | 触らず | 公式は ILC=M/H で L 弾き |
+  | CTRL2 (0x09) | **SRST kick** (0x0F → 0x07) | 0x03 直書きのみ | 公式は明示 reset で前回 state 完全 clear |
+  | Polling | 50ms | 100ms | 公式倍速 |
+  | Debounce | **なし** (= 1 sample で IDLE→TOUCHED) | 200ms press / 400ms release | 公式は低感度で debounce 不要、 我々は高感度だから後段の filter 必須だった |
+
+  ### 真因確定
+
+  **「Ref_rst の polarity を datasheet が誤って記載している」** が確定 (= 公式コメントが「0x00 で enable」 と書いてる、 datasheet の「1 = enable」 表記は誤り)。
+
+  我々が `ResetReference(0xFFFF)` を書いた = **全 channel reference calibration を disable** した = touch 完全死亡 = 想定通りの結果だった。 過去セッションの「Ch1 が default 無効だから drift」 解釈は datasheet 誤読の結果で、 真の原因は **default sensitivity (0xBB = HIGH LEVEL_3) が stack-chan 頭部 antenna routing には高すぎ** で baseline drift が surface していた。
+
+  ### 採用方針 (確定 - 2026-05-22 夕方)
+
+  - `Si12T::Begin()` を公式同等の初期化シーケンスに書き換え (SRST kick → CTRL2/CTRL1 → SEN1〜SEN6 = 0x33 → REF_RST / CH_HOLD / CAL_HOLD = 0x00 明示 → 読み戻し log)
+  - 既存の **案 B filter / heartbeat / ReadRawReg() diagnostic / SUPPRESSED log は全部撤去** (= 不要になる想定)
+  - `STROKE_MIN_MS` を 400 → 800 ms に引き上げ (= 低 sensitivity で chip 検出が遅れて duration が 400-700 ms 範囲に集中、 真正 tap が全部 STROKE 領域に流れる問題への対処)
+
+  ### 検証結果 (= 同セッション内、 短時間サンプル)
+
+  - 起動 init log: `Si12T: init OK: out1=0x00 ctrl2=0x07 ctrl1=0x22 sen1=0x33 ref1=0x00` で完璧に設定反映
+  - 真正 touch (= まはー が複数回触る): **複数 zone (= Ch1+Ch2、 Ch2+Ch3) + M/H レベル** で発火、 旧 firmware の Ch1 単独 L 病が消失
+  - TAP / STROKE 両方発火確認 (= STROKE_MIN_MS = 800 ms 調整の効果)
+  - 短時間体感では false stroke ゼロ (= 旧版は 5 時間で 8 件発生していた)
+
+  ### 残課題
+
+  - **boot 直後の首振り (= upstream issue #103)**: flash 後 hard reset の calibration window で false trigger が観測された。 sensitivity 関係なく発生する既知問題 (= upstream で OPEN)、 別途「boot 後 N 秒間 touch handler 抑止」 で対処予定
+  - **長時間 monitor で頻度確認**: 旧 firmware (= sensitivity 0xBB) との比較で false stroke 減少率を定量化
+  - **upstream への共有**: stackchan-mcp upstream に「公式同等 init で false stroke 大幅改善」 + datasheet 誤読の経緯を寄せたい (= 後続が同じ罠に落ちないため)
+  - 加えて upstream issue #2 (= tap detection drop) は sensitivity 上げ提案だが、 我々のケースとは逆方向 (= board の antenna routing が違う?)。 共存可能性を upstream で議論する価値あり
+
+  ### 関連リソース
+
+  - **公式 driver source**: `temp/m5stack-stackchan-official/firmware/main/hal/drivers/Si12T/Si12T.cpp` + `.h`
+  - **公式 head_touch source**: `temp/m5stack-stackchan-official/firmware/main/hal/hal_head_touch.cpp`
+  - **upstream stackchan-mcp 既存 issue**: #103 (boot calibration window false trigger), #2 (tap detection drops), #4 (anti-pat after extended stroking)
+
+- 2026-05-22 (夕方〜夜、 短時間 multi-zone L false stroke 観測 → L-only filter 復活):
+
+  ### 経緯
+
+  公式同等 init 適用後、 約 1 時間で false stroke 1 件観測:
+  ```
+  19:17:20 touch event: STROKE start_zones=101 start_raw=0x11 ch=L0L0 duration=900 ms
+  19:17:20 set_servo_torque (reason=reengagement)
+  ```
+
+  旧 firmware (= sensitivity 0xBB) の false stroke と比較:
+
+  | 項目 | 旧 (0xBB) | 新 (0x33) |
+  |---|---|---|
+  | 頻度 | 5 時間で 8 件 | 約 1 時間で 1 件 |
+  | 持続時間 | 8 秒〜2.5 分 | **0.9 秒** (= 100x 短縮) |
+  | zone | Ch1 単独中心 | Ch1+Ch3 (multi-zone) |
+  | level | L / M | **L のみ** |
+
+  sensitivity LOW 設定下では真正 touch の観測サンプル全て M / H レベル含む (= 0ML0、 0HH0、 MHL0、 0HM0 等)、 **L のみ = ノイズ起源** の判別軸が成立。
+
+  ### 採用 (= L-only filter 復活、 duration 条件外し)
+
+  falling-edge handler で press-start raw が全 ch L 以下 (= 各 ch level が L (01) 以下、 M (10) / H (11) 不在) なら duration 関係なく SUPPRESSED log + HandleStroke / HandleTap 抑止。
+
+  ### 偽陰性リスク
+
+  「軽すぎる真正 tap」 (= 信号弱すぎて M/H に届かない) が弾かれる可能性。 まはー が「何度か軽く撫でて全部 H 入ってる」 と確認、 実用上の偽陰性は無視できると判断。
+
+  ### 旧 案 B との違い
+
+  旧案 B: L-only **かつ** duration > 5s で suppress (= 短時間 false stroke を捉えられなかった)
+  新ロジック: L-only ならば duration 関係なく suppress (= 短時間 multi-zone L false stroke も握る)

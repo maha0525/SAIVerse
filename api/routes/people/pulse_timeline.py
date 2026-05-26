@@ -1,0 +1,182 @@
+"""Pulse タイムライン API: SAIMemory messages を pulse_id でグルーピングして
+自律 Track の動作を可視化する。
+
+設計: docs/intent/persona_cognition/debug_controller.md (可視化セクション)。
+pulse_logs テーブル (node 実行イベント) ではなく messages を軸にするのは、
+自律 sub_line Pulse を含む全 Pulse が messages.pulse_id に確実に記録されるため
+(pulse_logs への記録有無に依存しない)。
+"""
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
+
+from api.deps import get_manager
+
+from .utils import get_adapter
+
+router = APIRouter()
+
+
+class PulseTimelineMessage(BaseModel):
+    entry_id: str
+    role: str
+    content: str
+    created_at: Optional[float]
+    line_role: Optional[str]
+    scope: Optional[str]
+    origin_track_id: Optional[str]
+
+
+class PulseTimelineItem(BaseModel):
+    pulse_id: str
+    track_id: Optional[str]
+    track_title: Optional[str]
+    track_type: Optional[str]
+    track_seq: Optional[int]  # この Track 内で何番目の Pulse か (#N)
+    line_roles: List[str]
+    message_count: int
+    first_created_at: Optional[float]
+    last_created_at: Optional[float]
+
+
+class PulseTimelineResponse(BaseModel):
+    items: List[PulseTimelineItem]
+    total: int
+
+
+class PulsePromptEntry(BaseModel):
+    node_id: Optional[str]
+    content: str  # 送信 messages の JSON dump (Pulse 開始時の入力プロンプト)
+    created_at: Optional[float]
+
+
+class PulseDetailResponse(BaseModel):
+    pulse_id: str
+    messages: List[PulseTimelineMessage]
+    prompts: List[PulsePromptEntry]
+    total: int
+
+
+def _thread_prefix(persona_id: str) -> str:
+    # SAIMemory thread_id は persona_id をキーにする (e.g. 'air_city_a:__persona__')
+    return f"{persona_id}:%"
+
+
+# Track 内連番 (track_seq) は内側で全 Pulse 通しに計算してから外側で新しい順 LIMIT。
+# LIMIT を内側にかけると seq が範囲内連番になり「この Track で何回目か」が狂う。
+_SUMMARY_SQL = """
+    SELECT pulse_id, origin_track_id, first_ca, last_ca, cnt, roles, seq FROM (
+        SELECT pulse_id,
+               origin_track_id,
+               MIN(created_at) AS first_ca,
+               MAX(created_at) AS last_ca,
+               COUNT(*) AS cnt,
+               GROUP_CONCAT(DISTINCT line_role) AS roles,
+               ROW_NUMBER() OVER (
+                   PARTITION BY origin_track_id ORDER BY MIN(created_at)
+               ) AS seq
+        FROM messages
+        WHERE thread_id LIKE ? AND pulse_id IS NOT NULL
+        GROUP BY pulse_id
+    )
+    ORDER BY last_ca DESC
+    LIMIT ?
+"""
+
+_DETAIL_SQL = """
+    SELECT id, role, content, created_at, line_role, scope, origin_track_id, paired_action_text
+    FROM messages
+    WHERE thread_id LIKE ? AND pulse_id = ?
+    ORDER BY created_at ASC
+"""
+
+
+@router.get("/{persona_id}/pulse-timeline", response_model=PulseTimelineResponse)
+def get_pulse_timeline(
+    persona_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    manager=Depends(get_manager),
+):
+    """messages を pulse_id でグルーピングした Pulse サマリ一覧 (新しい順)。"""
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            cur = adapter.conn.execute(_SUMMARY_SQL, (_thread_prefix(persona_id), limit))
+            rows = cur.fetchall()
+
+    # track_id -> (title, type) を解決 (action_tracks は saiverse.db 側)
+    track_ids = {r[1] for r in rows if r[1]}
+    track_map: dict = {}
+    tm = getattr(manager, "track_manager", None)
+    if tm is not None:
+        for tid in track_ids:
+            try:
+                t = tm.get(tid)
+                track_map[tid] = (t.title, t.track_type)
+            except Exception:
+                track_map[tid] = (None, None)
+
+    items: List[PulseTimelineItem] = []
+    for r in rows:
+        pulse_id, track_id, first_ca, last_ca, cnt, roles, seq = r
+        title, ttype = track_map.get(track_id, (None, None))
+        items.append(
+            PulseTimelineItem(
+                pulse_id=pulse_id,
+                track_id=track_id,
+                track_title=title,
+                track_type=ttype,
+                track_seq=int(seq) if seq is not None else None,
+                line_roles=sorted((roles or "").split(",")) if roles else [],
+                message_count=int(cnt),
+                first_created_at=float(first_ca) if first_ca is not None else None,
+                last_created_at=float(last_ca) if last_ca is not None else None,
+            )
+        )
+    return PulseTimelineResponse(items=items, total=len(items))
+
+
+@router.get("/{persona_id}/pulse-timeline/{pulse_id}", response_model=PulseDetailResponse)
+def get_pulse_detail(
+    persona_id: str,
+    pulse_id: str,
+    manager=Depends(get_manager),
+):
+    """指定 Pulse の messages 全件 (discardable 含む、時系列順)。
+
+    discardable も返すのは、メタ判断の破棄分も可視化したいため (storage_layers
+    が discardable を除外するのと意図的に異なる)。
+    """
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            cur = adapter.conn.execute(_DETAIL_SQL, (_thread_prefix(persona_id), pulse_id))
+            rows = cur.fetchall()
+    messages = [
+        PulseTimelineMessage(
+            entry_id=r[0],
+            role=r[1],
+            content=r[2] or "",
+            created_at=float(r[3]) if r[3] is not None else None,
+            line_role=r[4],
+            scope=r[5],
+            origin_track_id=r[6],
+        )
+        for r in rows
+    ]
+    # 入力プロンプト = 各メッセージの paired_action_text (= その応答を引き出した
+    # action 指示)。送信物そのものなので messages テーブルの paired_action_text
+    # カラムから取る (pulse_logs への二重記録はしない)。
+    prompts: List[PulsePromptEntry] = []
+    for r in rows:
+        pat = r[7]
+        if pat:
+            prompts.append(
+                PulsePromptEntry(
+                    node_id=r[0],  # 紐づく応答メッセージの id
+                    content=pat,
+                    created_at=float(r[3]) if r[3] is not None else None,
+                )
+            )
+    return PulseDetailResponse(
+        pulse_id=pulse_id, messages=messages, prompts=prompts, total=len(messages)
+    )

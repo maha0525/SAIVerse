@@ -344,6 +344,7 @@ class MetaLayer:
         self,
         persona_id: str,
         context: Optional[Dict[str, Any]] = None,
+        force: bool = False,
     ) -> None:
         """定期実行で呼ばれる入口。alert と同じ判断ループを共有する。
 
@@ -376,7 +377,7 @@ class MetaLayer:
 
                 # ACTIVITY_STATE 抑止: Active のみ定期発火 (intent A v0.9 表)
                 activity_state = getattr(persona, "activity_state", "Idle")
-                if activity_state != "Active":
+                if activity_state != "Active" and not force:
                     logging.debug(
                         "[meta-layer] periodic tick skipped (activity_state=%s != Active): persona=%s",
                         activity_state, persona_id,
@@ -388,7 +389,7 @@ class MetaLayer:
                 if running_track is not None:
                     handler = self._get_handler_for_track(running_track)
                     behavior = getattr(handler, "post_complete_behavior", None) if handler else None
-                    if behavior == "wait_response":
+                    if behavior == "wait_response" and not force:
                         logging.debug(
                             "[meta-layer] periodic tick skipped (running Track wait_response): persona=%s track=%s",
                             persona_id, getattr(running_track, "track_id", "?"),

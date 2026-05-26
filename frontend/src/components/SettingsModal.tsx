@@ -3,6 +3,7 @@ import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
 import ModalOverlay from './common/ModalOverlay';
+import DebugPanel from './DebugPanel';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -30,6 +31,7 @@ interface AIConfig {
     activity_state: string;  // 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: boolean;
     memory_weave_context: boolean;
+    realtime_info_enabled: boolean;
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
     linked_user_id: number | null;  // First linked user ID
@@ -121,6 +123,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [spellEnabled, setSpellEnabled] = useState(false);
+    const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
     // Phase 4-e: empty string = use built-in default (NULL in DB)
     const [metaCacheThresholdRatio, setMetaCacheThresholdRatio] = useState<string>('');
     const [metaMaxRetries, setMetaMaxRetries] = useState<string>('');
@@ -222,6 +225,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setSpellEnabled(data.spell_enabled ?? false);
+                setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
                 // Phase 4-e: NULL → empty string で「既定値を使う」を表現
                 const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
                 setMetaCacheThresholdRatio(
@@ -331,6 +335,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     chronicle_enabled: chronicleEnabled,
                     memory_weave_context: memoryWeaveContext,
                     spell_enabled: spellEnabled,
+                    realtime_info_enabled: realtimeInfoEnabled,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0,  // 0 = clear link
@@ -611,6 +616,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                             </div>
 
+                            <DebugPanel personaId={personaId} />
+
                             <div className={styles.fieldGroup}>
                                 <label className={styles.label}>メタ判断 Pulse 設定</label>
                                 {(() => {
@@ -805,6 +812,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                                 <div className={styles.description}>
                                     発言中に /spell コマンドを使って、Memopediaやチャットログを直接参照できるようにします。ツール定義を使わないため、キャッシュ効率に影響しません。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>リアルタイム情報</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={realtimeInfoEnabled}
+                                            onChange={(e) => setRealtimeInfoEnabled(e.target.checked)}
+                                        />
+                                        <span>{realtimeInfoEnabled ? '有効' : '無効'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    発言の直前に現在時刻・前回発言時刻・空間情報などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。
                                 </div>
                             </div>
 

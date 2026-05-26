@@ -51,6 +51,11 @@ class AI(Base):
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     SPELL_ENABLED = Column(Boolean, default=False, nullable=False)  # Per-persona spell system toggle
+    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
+    # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的
+    # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
+    # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
+    REALTIME_INFO_ENABLED = Column(Boolean, default=True, nullable=False)
     METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
     # Cognitive model (Intent A v0.9 / Intent B v0.6): ACTIVITY_STATE 4-state
     # 'Stop' (機能停止) / 'Sleep' (寝てる、ユーザー発言で起きる) /

@@ -202,4 +202,6 @@ def schema() -> ToolSchema:
             "required": ["content"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="メモペディア書き込み",
     )

@@ -138,6 +138,7 @@ class AIConfigResponse(BaseModel):
     chronicle_enabled: bool = True
     memory_weave_context: bool = True
     spell_enabled: bool = False
+    realtime_info_enabled: bool = True
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
@@ -154,6 +155,7 @@ class UpdateAIConfigRequest(BaseModel):
     chronicle_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
     spell_enabled: Optional[bool] = None
+    realtime_info_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)

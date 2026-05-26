@@ -387,7 +387,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 all_rows = _fetch_all_messages(self.conn, thread_id)
-                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows]
+                payloads = self._expand_paired_action_payloads([self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows])
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages for %s: %s", thread_id, exc)
             return []
@@ -426,7 +426,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 all_rows = _fetch_all_messages(self.conn, thread_id)
-                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows]
+                payloads = self._expand_paired_action_payloads([self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows])
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages for %s: %s", thread_id, exc)
             return []
@@ -517,7 +517,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 all_rows = _fetch_all_messages(self.conn, thread_id)
-                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows]
+                payloads = self._expand_paired_action_payloads([self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows])
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages for balancing: %s", exc)
             return []
@@ -1090,7 +1090,35 @@ class SAIMemoryAdapter:
         # payload に乗せて LLM client (gemini.py) で復元する。
         if getattr(msg, "thought_signature", None) is not None:
             payload["thought_signature"] = msg.thought_signature
+        # action (paired_action_text) を context 復元用に乗せる。scope=committed
+        # (および legacy の None) のみ。volatile は揮発させる (乗せない)。
+        # 実際に「action → 応答」順へ展開するのは context 構築側
+        # (expand_paired_action_payloads)。docs/issues/spell_judgment_recorded_after_subline.md
+        if msg.scope != "volatile" and getattr(msg, "paired_action_text", None):
+            payload["paired_action_text"] = msg.paired_action_text
         return payload
+
+    def _expand_paired_action_payloads(self, payloads: List[dict]) -> List[dict]:
+        """committed 応答の paired_action_text を「action → 応答」順に展開する。
+
+        payload に paired_action_text があれば、その直前に action メッセージ
+        (role=user、内容は記録時に付与済みの ``<system>...</system>``) を挿入し、
+        応答側 payload からは paired_action_text キーを除く。これで「指示 → 応答」
+        の因果が context に復元される。volatile の action は
+        _payload_from_message_locked で乗らない (= 揮発) ので対象外。
+        """
+        expanded: List[dict] = []
+        for p in payloads:
+            action_text = p.get("paired_action_text")
+            if action_text:
+                expanded.append({
+                    "role": "user",
+                    "content": action_text,
+                    "created_at": p.get("created_at"),
+                })
+                p = {k: v for k, v in p.items() if k != "paired_action_text"}
+            expanded.append(p)
+        return expanded
 
     def _active_persona_suffix(self) -> Optional[str]:
         path = self.persona_dir / self._ACTIVE_STATE_FILENAME

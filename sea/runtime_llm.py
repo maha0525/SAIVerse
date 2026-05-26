@@ -3,10 +3,12 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import io
 import json
 import logging
 import os
 import re
+import tokenize
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -203,30 +205,73 @@ def _resolve_response_schema_source(
     return None
 
 
+def _normalize_json_literals(args_raw: str) -> str:
+    """bare な ``true`` / ``false`` / ``null`` を Python の ``True`` / ``False`` /
+    ``None`` に置換する (文字列リテラル内は touch しない)。
+
+    LLM / ユーザーが JSON 脳でシングルクォート dict + 小文字 bool を混ぜて書く
+    頻出ケース (例: ``{'activate': true}``) を救うための正規化。tokenize で
+    NAME トークンだけを対象にするので、``{'title': 'this is true'}`` のような
+    文字列値内の ``true`` は STRING トークンのため変換されない。
+    """
+    mapping = {"true": "True", "false": "False", "null": "None"}
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(args_raw).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return args_raw
+    changed = False
+    out = []
+    for tok in toks:
+        if tok.type == tokenize.NAME and tok.string in mapping:
+            out.append((tok.type, mapping[tok.string]))
+            changed = True
+        else:
+            out.append((tok.type, tok.string))
+    if not changed:
+        return args_raw
+    try:
+        return tokenize.untokenize(out)
+    except Exception:
+        return args_raw
+
+
 def _parse_spell_args(args_raw: str, *, silent: bool = False) -> Optional[dict]:
     """Parse spell args string (Python dict or JSON). Returns dict or None.
+
+    パース順: ``ast.literal_eval`` (Python リテラル) → ``json.loads`` (JSON)。
+    どちらも失敗した場合、bare な ``true`` / ``false`` / ``null`` を Python
+    リテラルに正規化してもう一度試す (``{'activate': true}`` のような Python
+    dict + JSON bool 混在を救う、_normalize_json_literals 参照)。
 
     When ``silent=True``, parse failures are downgraded to DEBUG (used by the
     fuzzy parser which routinely tries this strict path first and recovers via
     the KV pattern). Without ``silent``, failures are logged at WARNING since
     they indicate the LLM produced a canonical-form spell with malformed args.
     """
-    try:
-        result = ast.literal_eval(args_raw)
-    except (ValueError, SyntaxError):
+    candidates = [args_raw]
+    normalized = _normalize_json_literals(args_raw)
+    if normalized != args_raw:
+        candidates.append(normalized)
+
+    for candidate in candidates:
         try:
-            result = json.loads(args_raw)
-        except json.JSONDecodeError:
-            (LOGGER.debug if silent else LOGGER.warning)(
-                "[sea][spell] Failed to parse args: %s", args_raw
-            )
-            return None
-    if not isinstance(result, dict):
+            result = ast.literal_eval(candidate)
+        except (ValueError, SyntaxError):
+            try:
+                result = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(result, dict):
+            return result
         (LOGGER.debug if silent else LOGGER.warning)(
             "[sea][spell] Args is not a dict: %s", type(result)
         )
         return None
-    return result
+
+    (LOGGER.debug if silent else LOGGER.warning)(
+        "[sea][spell] Failed to parse args: %s", args_raw
+    )
+    return None
 
 
 def _parse_fuzzy_spell_args(args_raw: str) -> Optional[dict]:
@@ -890,6 +935,28 @@ async def _run_spell_loop(
             assistant_content = (text_before + "\n" + all_spell_lines_normalized).strip()
             messages.append({"role": "assistant", "content": assistant_content})
 
+            # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
+            # run_playbook 等の spell は子ラインを同期実行し、子ラインの各ノードが
+            # 先に _store_memory する。assistant_content を spell 実行後に記録すると、
+            # 起動判断が、それが起動した子ラインの出力より後の created_at になり、
+            # 因果と時系列が逆転する (docs/issues/spell_judgment_recorded_after_subline.md)。
+            # assistant_content は上で既に確定しているので先に記録し、spell 結果の
+            # combined_results だけを実行後にまとめて記録する。
+            pulse_id = state.get("_pulse_id")
+            pulse_context = state.get("_pulse_context")
+            memorize_cfg = getattr(node_def, "memorize", None) if node_def is not None else None
+            if isinstance(memorize_cfg, dict):
+                node_memorize_tags = list(memorize_cfg.get("tags") or [])
+            else:
+                node_memorize_tags = []
+            assistant_tags = node_memorize_tags or ["conversation"]
+            if assistant_content:
+                runtime._store_memory(
+                    persona, assistant_content, role="assistant",
+                    tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    pulse_context=pulse_context,
+                )
+
             # Execute all spells in parallel.
             # ``messages`` is snapshotted into a contextvar via persona_context so
             # spells like run_playbook can fork their sub-line from the parent
@@ -959,22 +1026,11 @@ async def _run_spell_loop(
             # - Tags now respect the LLM node's `memorize.tags` config when set;
             #   falling back to the legacy ["conversation"] default preserves
             #   prior behavior for nodes that don't declare memorize.
-            pulse_id = state.get("_pulse_id")
-            pulse_context = state.get("_pulse_context")
-            memorize_cfg = getattr(node_def, "memorize", None) if node_def is not None else None
-            if isinstance(memorize_cfg, dict):
-                node_memorize_tags = list(memorize_cfg.get("tags") or [])
-            else:
-                node_memorize_tags = []
-            assistant_tags = node_memorize_tags or ["conversation"]
+            # combined_results (spell 結果サマリ) は実行後でないと作れないので、
+            # judgment (上で spell 実行前に記録済み) の後に system role で記録する。
+            # pulse_id / pulse_context / node_memorize_tags は前倒しブロックで
+            # 定義済みのものを再利用する。
             spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
-
-            if assistant_content:
-                runtime._store_memory(
-                    persona, assistant_content, role="assistant",
-                    tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
-                    pulse_context=pulse_context,
-                )
             if combined_results:
                 runtime._store_memory(
                     persona, combined_results, role="system",
@@ -1864,7 +1920,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     node_def=node_def,
                 )
                 if _spell_loop_count > 0:
-                    result = {"type": "text", "content": _spell_text}
+                    # result.content は後段 (≈L2069/2076) で state[text_key]/text に
+                    # 入り SAIMemory に保存される。emit は下の _spell_emit_text
+                    # (merged HTML) を別途使うので、ここは plain な continuation を
+                    # 入れて <user_only>/spellResult の HTML タグ混入を防ぐ
+                    # (2413/2648 経路と対称、docs/issues/spell_html_leak_into_saimemory.md)。
+                    result = {"type": "text", "content": _spell_continuation}
 
                     # Intent A v0.14 / Intent B v0.11 (handoff route B):
                     # speak: false nodes are internal-processing nodes. They must
@@ -2679,6 +2740,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if msg_metadata:
                                 say_event["metadata"] = msg_metadata
                             event_callback(say_event)
+
+                    # streaming 経路 (≈L2413) と対称化: spell が走ったら、後段の
+                    # memorize / output_key に渡る text を continuation (plain) に
+                    # 置換する。merged 全文 (<user_only> + spellResult HTML 含む) を
+                    # そのまま SAIMemory に保存すると、Building 履歴と内容重複 + HTML
+                    # タグ混入になる (docs/issues/spell_html_leak_into_saimemory.md)。
+                    # _emit_say / say event には merged 全文 (HTML) を使い、ここで
+                    # state 行きだけを plain に戻す。
+                    if _spell_loop_count_sync > 0 and isinstance(_continuation_sync, str):
+                        text = _continuation_sync
 
                     # Store remaining reasoning for say/speak node (non-speak path)
                     if reasoning_text:

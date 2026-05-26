@@ -741,6 +741,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
+                "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
                 "USER_CONV_TIMEOUT_MINUTES": ai.USER_CONV_TIMEOUT_MINUTES,
             }
@@ -785,6 +786,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
+        realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
@@ -894,6 +896,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Spell system toggle
             if spell_enabled is not None:
                 ai.SPELL_ENABLED = spell_enabled
+            # Update realtime info injection toggle
+            if realtime_info_enabled is not None:
+                ai.REALTIME_INFO_ENABLED = realtime_info_enabled
             # Update Meta-Judgment Pulse configuration (Phase 4-e)
             if meta_judgment_config is not None:
                 if isinstance(meta_judgment_config, dict) and meta_judgment_config:

@@ -42,6 +42,127 @@ def needs_migration(db_path: str) -> bool:
         engine.dispose()
 
 
+def _schema_diff(db_path: str):
+    """現行スキーマと DB の差分を返す。
+
+    Returns:
+        (missing_by_table, extra_by_table, missing_tables)
+        - missing_by_table: {table_name: {col, ...}}  モデルにあって DB に無い列
+        - extra_by_table:   {table_name: {col, ...}}  DB にあってモデルに無い列
+        - missing_tables:   [Table, ...]              DB に存在しないテーブル
+    """
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        insp = inspect(engine)
+        missing_by_table: dict = {}
+        extra_by_table: dict = {}
+        missing_tables: list = []
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                missing_tables.append(table)
+                continue
+            db_cols = {c["name"] for c in insp.get_columns(table.name)}
+            model_cols = {c.name for c in table.columns}
+            missing = model_cols - db_cols
+            extra = db_cols - model_cols
+            if missing:
+                missing_by_table[table.name] = missing
+            if extra:
+                extra_by_table[table.name] = extra
+        return missing_by_table, extra_by_table, missing_tables
+    finally:
+        engine.dispose()
+
+
+def _render_default_sql(column) -> "str | None":
+    """列の Python 側 default を ALTER 文に埋める SQL リテラルへ変換する。
+
+    スカラー default のみ対応 (callable / SQL 式 default は None を返す)。
+    """
+    default = getattr(column, "default", None)
+    if default is None or not getattr(default, "is_scalar", False):
+        return None
+    val = default.arg
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, str):
+        escaped = val.replace("'", "''")
+        return f"'{escaped}'"
+    return None
+
+
+def try_additive_migration(db_path: str) -> bool:
+    """追加系 (新規テーブル / 新規列) のみのスキーマ差分を ALTER/CREATE で適用する。
+
+    全書換 (ファイル move) と違い、生きた DB に対して直接 ALTER TABLE ADD COLUMN /
+    CREATE TABLE を発行するため、 他コネクションがファイルを開いていても
+    (Windows の WinError 32 を踏まずに) 適用できる。 これがマイグレーションの大半
+    (列追加) を占めるので、 全書換より先にこちらを試す。
+
+    Returns:
+        True  — 追加系のみで差分を完全に解消した (= 全書換不要)
+        False — 列削除 / 型変更など破壊的差分があり全書換が必要、 または NOT NULL
+                かつ既定値が無く安全に ALTER 追加できない列がある。 この場合 DB は
+                一切変更しない (部分適用しない)。
+    """
+    missing_by_table, extra_by_table, missing_tables = _schema_diff(db_path)
+
+    # DB にあってモデルに無い列 = 削除/リネーム → 全書換が必要
+    if extra_by_table:
+        logging.info(
+            "全書換が必要な差分を検出 (削除/リネーム列): %s", extra_by_table
+        )
+        return False
+
+    if not missing_by_table and not missing_tables:
+        return True  # 差分なし (needs_migration と矛盾するが安全側)
+
+    # --- 事前検証: 全 ADD COLUMN が安全に発行できるか先に確認 (部分適用を防ぐ) ---
+    table_by_name = {t.name: t for t in Base.metadata.sorted_tables}
+    planned: list = []  # [(table_name, ddl), ...]
+    for table_name, cols in missing_by_table.items():
+        table = table_by_name[table_name]
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            dialect = engine.dialect
+            for col_name in cols:
+                column = table.columns[col_name]
+                col_type = column.type.compile(dialect=dialect)
+                ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{col_name}" {col_type}'
+                default_sql = _render_default_sql(column)
+                if not column.nullable:
+                    if default_sql is None:
+                        # NOT NULL かつ既定値なし → 既存行を埋められないので ALTER 不可
+                        logging.info(
+                            "列 %s.%s は NOT NULL だが既定値が無く ALTER 追加不可。全書換に切替",
+                            table_name, col_name,
+                        )
+                        return False
+                    ddl += f" NOT NULL DEFAULT {default_sql}"
+                elif default_sql is not None:
+                    ddl += f" DEFAULT {default_sql}"
+                planned.append((table_name, ddl))
+        finally:
+            engine.dispose()
+
+    # --- 適用 ---
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        for table in missing_tables:
+            table.create(bind=engine)
+            logging.info("テーブル %s を新規作成しました", table.name)
+        if planned:
+            with engine.begin() as conn:
+                for table_name, ddl in planned:
+                    conn.execute(text(ddl))
+                    logging.info("追加系マイグレーション: %s", ddl)
+        return True
+    finally:
+        engine.dispose()
+
+
 def migrate_database_in_place(db_path: str):
     """
     指定されたデータベースファイルをその場でマイグレーションします。
@@ -68,8 +189,17 @@ def migrate_database_in_place(db_path: str):
         shutil.move(db_path, backup_path)
         logging.info(f"データベースをバックアップしました: {backup_path}")
     except Exception as e:
-        logging.error(f"バックアップの作成に失敗しました: {e}")
-        return
+        # ここで黙って return すると、 呼び出し側 (main.py) は「migration completed」と
+        # 誤認してマイグレーション未適用の DB のまま起動を続行し、 後段の AI クエリが
+        # `no such column` で落ちる。 失敗を握り潰さず raise して起動を明示的に止める。
+        logging.error(
+            f"バックアップの作成に失敗しました (DB がロックされている可能性): {e}",
+            exc_info=True,
+        )
+        raise RuntimeError(
+            f"DB マイグレーションのバックアップに失敗しました: {db_path}。 "
+            "他プロセスが DB を開いていないか確認してください。"
+        ) from e
 
     # --- 2. Setup engines and create new schema ---
     source_engine = create_engine(f"sqlite:///{backup_path}")

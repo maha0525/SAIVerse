@@ -7,6 +7,7 @@ import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
 import ArasujiViewer from './memory/ArasujiViewer';
 import PulseLogsViewer from './memory/PulseLogsViewer';
+import PulseTimelineViewer from './memory/PulseTimelineViewer';
 import StorageLayersViewer from './memory/StorageLayersViewer';
 import TracksViewer from './memory/TracksViewer';
 import ModalOverlay from './common/ModalOverlay';
@@ -18,7 +19,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'arasuji' | 'memopedia' | 'storage_layers' | 'tracks' | 'pulse_logs' | 'import' | 'debug';
+type Tab = 'browser' | 'arasuji' | 'memopedia' | 'storage_layers' | 'tracks' | 'pulse_logs' | 'pulse_timeline' | 'import' | 'debug';
 
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -79,6 +80,13 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         Pulse Logs
                     </button>
                     <button
+                        className={`${styles.tab} ${activeTab === 'pulse_timeline' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('pulse_timeline')}
+                    >
+                        <Activity size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        Pulse タイムライン
+                    </button>
+                    <button
                         className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('import')}
                     >
@@ -101,6 +109,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {activeTab === 'storage_layers' && <StorageLayersViewer personaId={personaId} />}
                     {activeTab === 'tracks' && <TracksViewer personaId={personaId} />}
                     {activeTab === 'pulse_logs' && <PulseLogsViewer personaId={personaId} />}
+                    {activeTab === 'pulse_timeline' && <PulseTimelineViewer personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}
                 </div>

@@ -286,6 +286,10 @@ class SAIVerseManager(
         # これにより running な連続実行型 Track のサブライン Pulse が定期的に
         # 起動される (Intent A v0.13 / Intent B v0.10)。
         self.subline_scheduler = SubLineScheduler(self)
+        # デバッグコントローラー (debug_controller.md): 完全手動モード対象ペルソナ。
+        # このセットに入った persona は wait_response timeout を予約しない
+        # (_wait_response_timeout_provider が None を返す)。
+        self._debug_manual_mode_personas: set = set()
         # Phase C-2: 内部 alert ポーラ (intent B v0.7 §"内部 alert ポーラ機構")
         # Track パラメータの閾値超過 + Handler.tick() を定期駆動する。
         from saiverse.internal_alert_poller import InternalAlertPoller
@@ -1284,6 +1288,10 @@ class SAIVerseManager(
         メッセージが無ければ None で返し、TrackManager 側が ``datetime.now()``
         にフォールバックする (= activate 直後の即時タイムアウトを防ぐ)。
         """
+        # デバッグ完全手動モード: 対象ペルソナは wait_response timeout を予約しない
+        # (debug_controller.md)。None を返すと _schedule_wait_response_timeout が skip。
+        if getattr(track, "persona_id", None) in self._debug_manual_mode_personas:
+            return None
         try:
             from sea.pulse_root_context import get_handler_for_track
             handler = get_handler_for_track(self, track)
@@ -1868,6 +1876,7 @@ class SAIVerseManager(
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
+        realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
@@ -1887,6 +1896,7 @@ class SAIVerseManager(
             chronicle_enabled=chronicle_enabled,
             memory_weave_context=memory_weave_context,
             spell_enabled=spell_enabled,
+            realtime_info_enabled=realtime_info_enabled,
             meta_judgment_config=meta_judgment_config,
             user_conv_timeout_minutes=user_conv_timeout_minutes,
         )

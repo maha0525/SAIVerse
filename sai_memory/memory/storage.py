@@ -323,6 +323,10 @@ class Message:
     # マルチターン会話で次ターンに echo して品質低下を防ぐ。
     # 詳細は docs/intent/thought_signature_persistence.md
     thought_signature: Optional[str] = None
+    # action (LLM ノードへの入力指示)。応答とペアで保持し、scope=committed の
+    # 応答についてのみ context に復元する (volatile は揮発)。
+    # docs/issues/spell_judgment_recorded_after_subline.md 周辺の議論参照。
+    paired_action_text: Optional[str] = None
 
 
 def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
@@ -345,7 +349,7 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
 # Column suffix for SELECTs that want line metadata. Append after the 7 base
 # columns (id, thread_id, role, content, resource_id, created_at, metadata).
 # v0.32 (2026-05-09): origin_track_id を末尾に追加。
-_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature"
+_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature, paired_action_text"
 
 
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
@@ -363,6 +367,7 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
         pulse_id=row[10] if len(row) > 10 else None,
         origin_track_id=row[11] if len(row) > 11 else None,
         thought_signature=row[12] if len(row) > 12 else None,
+        paired_action_text=row[13] if len(row) > 13 else None,
     )
 
 

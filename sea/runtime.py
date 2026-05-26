@@ -1930,6 +1930,19 @@ class SEARuntime:
         finally:
             db.close()
 
+    def _is_realtime_info_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona realtime info injection toggle from DB."""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.REALTIME_INFO_ENABLED if ai else True
+        finally:
+            db.close()
+
     def _generate_chronicle(
         self,
         persona,
@@ -2479,6 +2492,15 @@ class SEARuntime:
             Message dict with role="user" and <system> wrapper, or None if no content.
         """
         from datetime import datetime
+
+        # Per-persona toggle: ペルソナ設定で OFF なら、リアルタイム情報セクション
+        # 自体を一切組み立てず送らない (現在時刻・前回発言時刻・空間情報すべて含む)。
+        if not self._is_realtime_info_enabled_for_persona(persona):
+            LOGGER.debug(
+                "[sea][realtime-context] Skipped: REALTIME_INFO_ENABLED is off for persona %s",
+                getattr(persona, "persona_id", None),
+            )
+            return None
 
         sections: List[str] = []
 
