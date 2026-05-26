@@ -88,6 +88,7 @@ scripts/limiter.toml
 *.patch
 
 # Frontend (Next.js)
+/.next/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
