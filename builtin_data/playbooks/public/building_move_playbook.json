@@ -40,9 +40,7 @@
       "memorize": {
         "tags": [
           "building_move"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "move"
     },
@@ -65,9 +63,7 @@
         "building_move",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "list_buildings"

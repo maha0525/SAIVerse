@@ -25,9 +25,7 @@
       "memorize": {
         "tags": [
           "autonomous_pulse"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_keys": [
         {

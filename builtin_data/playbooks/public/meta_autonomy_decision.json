@@ -86,9 +86,7 @@
       "memorize": {
         "tags": [
           "autonomy_decision"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": null
     }

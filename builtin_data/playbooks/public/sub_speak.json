@@ -19,10 +19,7 @@
       "action": null,
       "speak": true,
       "metadata_key": "metadata",
-      "memorize": {
-        "line_role": "main_line",
-        "scope": "committed"
-      },
+      "memorize": true,
       "output_keys": [
         {
           "text": "speak_content"

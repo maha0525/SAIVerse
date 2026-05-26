@@ -27,6 +27,8 @@ def compile_with_langgraph(
     isolate_pulse_context: bool = False,
     pulse_line_role: Optional[str] = None,
     pulse_line_track_id: Optional[str] = None,
+    pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
+    line: str = "main",
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
     parent = parent_state or {}
@@ -130,12 +132,31 @@ def compile_with_langgraph(
     # in their SAIMemory metadata (Intent A v0.14, Intent B v0.11). The pop runs in
     # the finally block alongside _flush_pulse_logs.
     _pushed_root_line = False
-    if parent_pulse_ctx is None and pulse_line_role:
-        pulse_ctx.push_line(role=pulse_line_role, track_id=pulse_line_track_id)
+    _pushed_sub_line = False
+    if parent_pulse_ctx is None and (pulse_line_aspect is not None or pulse_line_role):
+        # Pulse-root: アスペクト (v0.2 §10) を push。aspect があれば role/scope/
+        # model tier はそこから導出される。legacy 経路 (aspect=None) では role を直接使う。
+        pulse_ctx.push_line(
+            role=pulse_line_role or "main_line",
+            track_id=pulse_line_track_id,
+            aspect=pulse_line_aspect,
+        )
         _pushed_root_line = True
         LOGGER.debug(
-            "[runtime_graph] Pushed Pulse-root line: role=%s track_id=%s pulse_id=%s",
-            pulse_line_role, pulse_line_track_id, pulse_id,
+            "[runtime_graph] Pushed Pulse-root line: aspect=%s role=%s track_id=%s pulse_id=%s",
+            pulse_line_aspect, pulse_line_role, pulse_line_track_id, pulse_id,
+        )
+    elif parent_pulse_ctx is not None and line == "sub":
+        # サブライン (run_playbook スペル / spell_args_decider 等, §10.4): WORKER
+        # アスペクトの frame を push する。これでサブ Playbook のノードは何も宣言
+        # しなくても sub_line / volatile / 軽量 になり、書き忘れによる main_line
+        # 汚染が原理的に起きない。pop は finally で行う。
+        from sea.pulse_context import Aspect
+        _sub_frame = pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=pulse_line_track_id)
+        _pushed_sub_line = True
+        LOGGER.debug(
+            "[runtime_graph] Pushed sub-line (WORKER): line_id=%s parent=%s pulse_id=%s",
+            _sub_frame.line_id, _sub_frame.parent_id, pulse_id,
         )
 
     # Check spell toggle for this persona
@@ -231,13 +252,13 @@ def compile_with_langgraph(
         # below sees a clean stack — though current ops don't read line state
         # at apply time, keeping this order matches a reader's expectation
         # ("the Pulse is done, the line is closed, then we settle the books").
-        if _pushed_root_line:
+        if _pushed_root_line or _pushed_sub_line:
             try:
                 pulse_ctx.pop_line()
             except Exception:
                 LOGGER.exception(
-                    "[runtime_graph] Failed to pop Pulse-root line for pulse_id=%s",
-                    pulse_id,
+                    "[runtime_graph] Failed to pop %s line for pulse_id=%s",
+                    "Pulse-root" if _pushed_root_line else "sub", pulse_id,
                 )
 
         # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook).

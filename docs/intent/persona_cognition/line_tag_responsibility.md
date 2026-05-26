@@ -1,8 +1,10 @@
 # Intent: Line と Memorize タグの責務分離
 
 **親 Intent**: [README.md](README.md)
-**ステータス**: 起草中 (v0.1, 2026-05-01)
+**ステータス**: v0.1 実装済 (4-A/B/C 達成) → **v0.2 実装済 (2026-05-26, §10)、実機検証待ち**
 **位置付け**: Phase 3 残件 ([nested_subline_spell.md](nested_subline_spell.md) 実装の前提)
+
+> **読む順序**: §1〜9 は v0.1 (ノード単位で line_role/scope を明示) の記録。**現行設計は §10 (v0.2: アスペクト `aspect` による呼び出し時指定)** を参照。§2 の「指定単位」と §4-C は §10 で置換される。
 
 ---
 
@@ -254,6 +256,79 @@ Phase 3 残作業の依存グラフ:
 ```
 
 本整理は依存グラフの**起点**。これを先に固めないと後段がすべて二重制御の影響を受ける。
+
+---
+
+## 10. v0.2 改訂: アスペクト (aspect) による呼び出し時指定
+
+**ステータス**: 設計合意 (2026-05-26, まはー)。実装前。
+
+### 10.1 なぜ v0.1 を超える必要があるか
+
+v0.1 (§2, §4-C) は「Playbook ノード単位で `line_role` / `scope` を明示する」方針だった。実機投入後、2026-05-26 に二重の脆さが露見した:
+
+1. **サブ Playbook は `run_playbook` が frame を push しない** (pulse_ctx 共有、`runtime_graph.py:134` の push 条件 `parent_pulse_ctx is None` を満たさない)。よってサブ Playbook のノードは親 (Pulse-root = main_line) の frame を継承する。ノードが `line_role="sub_line"` を書き忘れると **main_line に漏れる**。
+2. **`scope` は frame から一切継承されない** (`_store_memory` は line_role/line_id/origin_track_id のみ自動解決、scope は明示引数のみ)。未指定の scope は常に SQL デフォルト `committed`。
+
+結果、`track_autonomous` の最終発言が volatile 固定だった件、`schedule_management` の memorize ノード5個が `line_role`/`scope` 未指定で main_line+committed に漏れる件が発生した。**`sub_line`/`volatile` の分類がノード作者の明示記述に依存し、書き忘れが即汚染になる**構造的脆さ。
+
+加えて §4-C で保留した `model_type=lightweight` は、現状 `_select_llm_client` が `_force_lightweight_model` (run_playbook の line='sub') と `_pulse_type=="auto"` の場当たり判定で代用しており、ライン属性と分離している。
+
+### 10.2 方針: 4分類を呼び出し時に1つ指定
+
+ノードに `line_role` / `scope` / `model_type` を書く代わりに、**ライン起動時に4分類のいずれか1つ (`aspect`) を指定**する。`line_role` / `scope` / `model` は分類から内部導出され、Playbook JSON にもユーザー/ペルソナの意識にも出ない。
+
+| `aspect` | line_role | scope | model | 代表的な起動元 |
+|---|---|---|---|---|
+| `CONVERSATION` (①) | `main_line` | `committed` | 標準 | `run_meta_user` (user / social / external track) |
+| `WORKER` (②) | `sub_line` | `volatile` | 軽量 | `run_playbook` スペル |
+| `AUTONOMOUS` (③) | `main_line` | `committed` | 軽量 | 自律 track の Pulse |
+| `META` (④) | `meta_judgment` | `discardable` (確定分は `committed` に昇格) | 標準 | `meta_layer` のメタ判断 |
+
+`line_role` だけでは ①③④ (全て `main_line`) を区別できないが、4分類なら区別できる。これが「scope を line_role に連動させる」案 (B) が成立しなかった理由 — **scope は line_role からではなく分類から導く**。
+
+> **命名 (確定 2026-05-26)**: **`aspect`**。「全て同じペルソナの言動だが、状態の異なる一側面」の意 (不変条件 2 単一主体の記憶と整合)。`line_role` と語幹がかぶらず混同しない。AOP の aspect とは語が衝突するが本コードベース文脈では実害なし (既存の `aspect` 使用は画像の aspect ratio のみで別ドメイン)。フレーム属性 = `aspect`、enum = `Aspect`。
+
+### 10.3 導出と継承の単一化
+
+- `LineFrame` が `aspect` を保持。`push_line(aspect=...)` でセット。
+- `current_line_metadata()` / `_store_memory` は frame の `aspect` から **`line_role` と `scope` を両方**導出する (v0.1 は line_role のみ継承、scope は未継承で committed 固定 = 10.1 のギャップの原因)。
+- model 選択 (`_select_llm_client`) も frame の `aspect` から tier を導出 (まはー決定 2026-05-26: モデルも分類が決める)。現状の `_force_lightweight_model` / `_pulse_type=="auto"` 判定を置換。
+
+### 10.4 `run_playbook` が WORKER frame を push (旧「A 案」の構造化)
+
+`run_playbook` スペルがサブライン実行時に `aspect=WORKER` の frame を push する。これでサブ Playbook のノードは何も宣言しなくても `sub_line`/`volatile`/軽量になる。書き忘れによる main_line 汚染が原理的に起きない (10.1-1 の解消)。
+
+**逃げ道 (override) は当面作らない** (まはー決定 2026-05-26)。アスペクトを唯一の供給源として固める。例外的に WORKER 以外で起動したい需要が出たら、後付けで `run_playbook` 引数による aspect 指定 / Playbook 側での aspect 強制を足す余地がある (YAGNI、今は実装しない)。
+
+### 10.5 ④ メタ判断の scope 変動はクラス挙動に内包
+
+メタ判断の「試行ターン `discardable` → 確定ターン `committed` 昇格」(不変条件 11) は **META クラスのランタイム挙動**として実装する (ノードに `scope=discardable` を書かない)。昇格ロジック (action=switch 時に discardable 行を committed へ UPDATE する既存経路, `runtime_llm.py` 周辺) を流用。
+
+### 10.6 Playbook JSON の変更 (4-C の逆移行)
+
+4-C でノードに入れた `line_role` / `scope` / `model_type` を**全ノードから削除**する。残すのは意味タグ (`creation`, `web_research` 等) と memorize の有無のみ。migration スクリプト (`migrate_playbooks_to_lines.py` の逆方向) で一括変換 → `import_all_playbooks.py --force` で DB 反映。
+
+### 10.7 §2 / §4-C との関係
+
+- §2「2軸独立」原則 (Line 軸 vs 意味タグ軸) は**維持**。変わるのは Line 軸の**指定単位**: ノード単位 → ライン起動単位 (分類)。
+- §4-C「ノードに line_role/scope を明示」は本改訂で**置換** (ノードから抜いて分類に集約)。
+- §7 不変条件への影響は**強化方向**: 分類が構造的に line/scope/model を保証するため、書き忘れによる不変条件破れ (不変条件 2 単一主体の記憶 / 11 メタ判断揮発) が消える。
+
+### 10.8 実装状況 (2026-05-26 実装完了)
+
+1. ✅ `Aspect` enum + 導出表 + `aspect_from_pulse_type` + `LineFrame.aspect` / `scope` / `model_tier` + `push_line(aspect=)` (`sea/pulse_context.py`)
+2. ✅ `current_line_metadata` が `scope` も返し、`_store_memory` (`sea/runtime.py`) が未指定時に frame から `line_role` + `scope` を両方導出
+3. ✅ `_select_llm_client` (`sea/runtime.py`) が active frame の `aspect.model_tier` から tier 判定 (aspect 無し legacy frame では従来フラグにフォールバック)
+4. ✅ push 点配線: `run_meta_user` が `pulse_type` → `aspect` を導出して `pulse_line_aspect` を `_run_playbook` → `run_playbook` (runner) → `compile_with_langgraph` まで伝搬。`compile_with_langgraph` (`sea/runtime_graph.py`) が Pulse-root はアスペクト push、`line=="sub"` のサブラインは `Aspect.WORKER` を push (finally で pop)
+5. ✅ Playbook JSON から `line_role` / `scope` / `model_type` を全削除 (`scripts/strip_playbook_line_fields.py`、20 Playbook) + DB 再 import
+6. ✅ 単体テスト `tests/test_aspect_derivation.py` (9 件) + 既存 121 件パス / 🔲 実機検証 (① 会話 / ② サブ / ③ 自律 / ④ メタ の4経路) はサーバー再起動後
+
+**実装メモ**:
+- 後方互換: `aspect=None` の legacy frame では `role` 直指定 / `scope` 未導出 (committed 既定) で従来動作。明示 `scope`/`line_role` 引数は引き続きアスペクト導出より優先 (meta_judgment_finalize の committed/discardable 判定等)。
+- サブライン WORKER frame の push で `run_playbook` の `_line_stack` 深さ制限 (`_MAX_LINE_STACK_DEPTH=4`) が実効化された (従来は frame が積まれず未機能だった)。
+- `track_autonomous` / `schedule_management` の個別バグ修正は本移行に吸収 (両 Playbook も field 削除済み、アスペクトから導出)。
+- **落とし穴 (修正済)**: field 剥がしで memorize が `{line_role, scope}` のみだったノード (tags なし) は `memorize: true` になる。`LLMNodeDef.memorize` の Pydantic 型が v0.1 では `Optional[Dict]` で bool 非対応だったため、`track_user_conversation` 等が DB ロードに失敗 → `basic_chat` フォールバック → 無発言のリグレッションを起こした。`memorize: Optional[Union[bool, Dict]]` に修正 (ランタイムは元々 True/dict 両対応)。回帰テスト `tests/test_aspect_derivation.py::TestMemorizeBoolAcceptance`。
 
 ---
 

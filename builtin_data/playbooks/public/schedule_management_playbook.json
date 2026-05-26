@@ -63,9 +63,7 @@
       "memorize": {
         "tags": [
           "schedule_management"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "action_decision"
     },
@@ -127,9 +125,7 @@
       "memorize": {
         "tags": [
           "schedule_management"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "add_params"
     },
@@ -191,9 +187,7 @@
       "memorize": {
         "tags": [
           "schedule_management"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "delete_params"
     },

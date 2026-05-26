@@ -111,6 +111,12 @@ class SEARuntime:
         _root_role, _root_track_id = self._resolve_pulse_root_line(
             persona, override_track_id=origin_track_id,
         )
+        # 認知モデル v0.2 (§10.2): Pulse-root のアスペクトを pulse_type から導出する。
+        # auto→AUTONOMOUS / meta_judgment→META / それ以外→CONVERSATION。これが
+        # line_role / scope / model tier の供給源となり、track の entry_line_role
+        # (legacy, main_line/sub_line) には依存しない。
+        from sea.pulse_context import aspect_from_pulse_type
+        _root_aspect = aspect_from_pulse_type(pulse_type)
 
         # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入。
         # event_message は世界の変化通知 = Track 横断のメタログなので
@@ -175,6 +181,7 @@ class SEARuntime:
                 initial_params=effective_args if effective_args else None,
                 pulse_line_role=_root_role,
                 pulse_line_track_id=_root_track_id,
+                pulse_line_aspect=_root_aspect,
                 pre_spells=pre_spells,
             )
         finally:
@@ -266,6 +273,7 @@ class SEARuntime:
         line: str = "main",
         pulse_line_role: Optional[str] = None,
         pulse_line_track_id: Optional[str] = None,
+        pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
         pre_spells: Optional[List[str]] = None,
     ) -> List[str]:
         return run_playbook(
@@ -285,6 +293,7 @@ class SEARuntime:
             line=line,
             pulse_line_role=pulse_line_role,
             pulse_line_track_id=pulse_line_track_id,
+            pulse_line_aspect=pulse_line_aspect,
             pre_spells=pre_spells,
         )
 
@@ -305,6 +314,8 @@ class SEARuntime:
         isolate_pulse_context: bool = False,
         pulse_line_role: Optional[str] = None,
         pulse_line_track_id: Optional[str] = None,
+        pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
+        line: str = "main",
     ) -> Optional[List[str]]:
         return compile_with_langgraph_impl(
             self,
@@ -322,6 +333,8 @@ class SEARuntime:
             isolate_pulse_context=isolate_pulse_context,
             pulse_line_role=pulse_line_role,
             pulse_line_track_id=pulse_line_track_id,
+            pulse_line_aspect=pulse_line_aspect,
+            line=line,
         )
 
     def _lg_llm_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -424,11 +437,28 @@ class SEARuntime:
             state: Current execution state. Used to detect line='sub' (force lightweight) flag
                    set by run_playbook (Phase C-2a, Intent B v0.9).
         """
-        # サブライン強制フラグ (line='sub' で起動された Playbook は軽量モデルを使う)
-        # Phase 3 段階 4-D (2026-05-09): 旧 context_profile / model_type は削除済み。
-        # モデル種別は親 SubPlayNodeDef.line で決まり、ここでは _force_lightweight_model
-        # フラグだけが軽量化の判断材料。
-        force_lightweight = bool(state and state.get("_force_lightweight_model"))
+        # 軽量モデル判定 (認知モデル v0.2 §10.3):
+        # active LineFrame のアスペクトから model tier を導出する。
+        # WORKER (run_playbook サブライン) / AUTONOMOUS (自律) → lightweight、
+        # CONVERSATION / META → standard。aspect の無い legacy frame では従来の
+        # _force_lightweight_model / pulse_type=='auto' フォールバックで判定する。
+        _aspect_tier: Optional[str] = None
+        if state:
+            _pc = state.get("_pulse_context")
+            if _pc is not None:
+                try:
+                    _cur = _pc.current_line()
+                except Exception:
+                    _cur = None
+                if _cur is not None:
+                    _aspect_tier = getattr(_cur, "model_tier", None)
+        if _aspect_tier is not None:
+            force_lightweight = (_aspect_tier == "lightweight")
+        else:
+            force_lightweight = bool(state and (
+                state.get("_force_lightweight_model")
+                or state.get("_pulse_type") == "auto"
+            ))
         model_type = "lightweight" if force_lightweight else "normal"
 
         LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
@@ -1228,6 +1258,8 @@ class SEARuntime:
         scope: Optional[str] = None,
         paired_action_text: Optional[str] = None,
         thought_signature: Optional[bytes] = None,
+        spell_origin_id: Optional[str] = None,
+        spell_seq: Optional[int] = None,
         return_message_id: bool = False,
     ) -> Any:
         """Store a message to SAIMemory. Returns True on success, False on failure.
@@ -1277,10 +1309,16 @@ class SEARuntime:
                 resolved_line_role = line_role
                 resolved_line_id = line_id
                 resolved_track_id = origin_track_id
+                # 認知モデル v0.2 (§10.3): scope も line_role 同様、明示指定が
+                # なければ active LineFrame のアスペクトから導出する。これにより
+                # サブライン (WORKER) の volatile / メタ判断 (META) の discardable が
+                # ノード指定なしで構造的に決まる (v0.1 では scope 未継承で committed 固定)。
+                resolved_scope = scope
                 if pulse_context is not None and (
                     resolved_line_role is None
                     or resolved_line_id is None
                     or resolved_track_id is None
+                    or resolved_scope is None
                 ):
                     try:
                         meta = pulse_context.current_line_metadata()
@@ -1292,6 +1330,8 @@ class SEARuntime:
                         resolved_line_id = meta.get("line_id")
                     if resolved_track_id is None:
                         resolved_track_id = meta.get("origin_track_id")
+                    if resolved_scope is None:
+                        resolved_scope = meta.get("scope")
 
                 message: Dict[str, Any] = {"role": role or "assistant", "content": text}
                 # Attach 7-layer metadata to the message dict so SAIMemoryAdapter
@@ -1302,8 +1342,8 @@ class SEARuntime:
                     message["line_id"] = resolved_line_id
                 if resolved_track_id is not None:
                     message["origin_track_id"] = resolved_track_id
-                if scope is not None:
-                    message["scope"] = scope
+                if resolved_scope is not None:
+                    message["scope"] = resolved_scope
                 if paired_action_text is not None:
                     message["paired_action_text"] = paired_action_text
                 # Phase 2.5 (2026-05-01): pulse_id を専用カラムに書く。
@@ -1319,6 +1359,10 @@ class SEARuntime:
                 # 詳細は docs/intent/thought_signature_persistence.md
                 if thought_signature:
                     message["thought_signature"] = thought_signature
+                if spell_origin_id is not None:
+                    message["spell_origin_id"] = spell_origin_id
+                if spell_seq is not None:
+                    message["spell_seq"] = spell_seq
                     LOGGER.debug(
                         "[_store_memory] persona=%s role=%s thought_signature attached (%d bytes)",
                         getattr(persona, "persona_id", None), role, len(thought_signature),

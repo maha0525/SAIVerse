@@ -23,7 +23,6 @@
     {
       "id": "first_prompt",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "あなたは自律的に創作活動を行います。\n\n## 創作テーマ\n{input}\n\n## 利用可能なツール\n### 執筆\n- **document_create**: 新しいドキュメントを作成\n- **document_read**: 既存ドキュメントを読み返す（行番号付き）\n- **document_edit**: ドキュメントを編集（全文置換 or 行範囲の部分置換）\n- **document_search**: キーワードでドキュメントを検索\n\n### 画像\n- **generate_image**: テキストプロンプトから画像を生成\n\n### 調査\n- **searxng_search**: Web検索で参考情報を取得\n- **read_url_content**: URLからページ内容を取得\n- **memopedia_search**: 自分の知識ベースを検索\n\n## 進め方\n- まず構想を練ってから作り始めましょう\n- ドキュメントを作成したら、読み返して推敲・編集してOKです\n- 満足できる出来になったら、ツールを使わずにテキストで感想を述べると終了します\n\nまず最初のアクションを選んでください。",
       "available_tools": [
         "document_create",
@@ -46,9 +45,7 @@
       "memorize": {
         "tags": [
           "creation"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "check_tool_call"
     },
@@ -80,9 +77,7 @@
         "creation",
         "tool_result"
       ],
-      "next": "increment",
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": "increment"
     },
     {
       "id": "increment",
@@ -107,7 +102,6 @@
     {
       "id": "continue_loop",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると作業を終了します。",
       "available_tools": [
         "document_create",
@@ -130,9 +124,7 @@
       "memorize": {
         "tags": [
           "creation"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "check_tool_call"
     },
@@ -145,9 +137,7 @@
         "creation",
         "completed"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "init"

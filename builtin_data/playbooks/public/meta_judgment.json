@@ -39,9 +39,7 @@
       "memorize": {
         "tags": [
           "meta_judgment"
-        ],
-        "scope": "discardable",
-        "line_role": "meta_judgment"
+        ]
       },
       "next": null
     }

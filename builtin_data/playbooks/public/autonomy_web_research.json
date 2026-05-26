@@ -23,7 +23,6 @@
     {
       "id": "first_prompt",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "あなたは自律的にWeb調査を行います。\n\n## 調査テーマ\n{input}\n\n## 利用可能なツール\n- **searxng_search**: キーワードでWeb検索（スニペット取得）\n- **read_url_content**: URLからページ全文を取得\n- **memopedia_get_tree**: 既存のMemopediaページ一覧を確認\n- **memopedia_save_page**: 調査結果をMemopediaページとして保存\n\n## 進め方\n1. まず検索で概要を掴む\n2. 有用そうなURLの詳細を読む\n3. 十分な情報が集まったら memopedia_save_page で知識を保存する\n\n## 終了方法\nツールを使わずにテキストだけ返すと調査は終了します。\n\nまず最初のアクションを選んでください。",
       "available_tools": [
         "searxng_search",
@@ -42,9 +41,7 @@
       "memorize": {
         "tags": [
           "web_research"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "check_tool_call"
     },
@@ -76,9 +73,7 @@
         "web_research",
         "tool_result"
       ],
-      "next": "increment",
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": "increment"
     },
     {
       "id": "increment",
@@ -103,7 +98,6 @@
     {
       "id": "continue_loop",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると調査を終了します。",
       "available_tools": [
         "searxng_search",
@@ -122,16 +116,13 @@
       "memorize": {
         "tags": [
           "web_research"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "check_tool_call"
     },
     {
       "id": "force_save",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "調査のループ上限に達しました。これまでに収集した情報をMemopediaページとして保存してください。memopedia_save_page を使ってください。",
       "available_tools": [
         "memopedia_save_page"
@@ -147,9 +138,7 @@
       "memorize": {
         "tags": [
           "web_research"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "force_save_check"
     },
@@ -181,9 +170,7 @@
         "web_research",
         "completed"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "init"

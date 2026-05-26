@@ -8,7 +8,9 @@
       "description": "引数を決めたい Spell の名前 (TOOL_REGISTRY に登録された Spell)"
     }
   ],
-  "output_schema": ["args"],
+  "output_schema": [
+    "args"
+  ],
   "router_callable": false,
   "user_selectable": false,
   "nodes": [
@@ -17,10 +19,7 @@
       "type": "llm",
       "action": "Spell '{spell_name}' を呼ぶことになりました。引数を決めてください。",
       "response_schema_source": "spell:{spell_name}",
-      "memorize": {
-        "line_role": "sub_line",
-        "scope": "volatile"
-      },
+      "memorize": true,
       "output_key": "args",
       "next": null
     }

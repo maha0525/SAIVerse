@@ -41,7 +41,6 @@
     {
       "id": "decide_topic",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "これまでの会話文脈から、Web リサーチで調べるべきトピックを1文で決定してください。\n\n直近の会話の流れから「何を知りたがっているのか」「どんな観点で調べてほしいのか」を読み取り、検索クエリの土台になる簡潔なトピック文を出してください。曖昧な場合は、会話で最も新しく言及された問いを優先してください。",
       "response_schema": {
         "type": "object",
@@ -64,9 +63,7 @@
         "tags": [
           "web_research",
           "topic_decision"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "set_topic"
     },
@@ -81,7 +78,6 @@
     {
       "id": "plan_query",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "調査トピック「{research_topic}」について次の検索クエリを生成してください。\n\n## これまでに収集した重要情報\n{findings}\n\n## 現在のサイクル\n{iteration} / {max_loops}\n\n## 指示\n- 初回はトピックの核に当たる検索を行ってください\n- 既に情報がある場合は、不足している観点を補うクエリにしてください\n- 言語ヒント: トピックに応じて日本語/英語を使い分けてください",
       "response_schema": {
         "type": "object",
@@ -108,9 +104,7 @@
       "memorize": {
         "tags": [
           "web_research"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "search"
     },
@@ -128,7 +122,6 @@
     {
       "id": "select_urls",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "直前の検索結果から、調査トピック「{research_topic}」に関連する有用なURLを最大3件、優先度順に選んでください。\n\n## 指示\n- 信頼できそうな情報源を優先\n- スニペットが直接トピックに答えていそうなものを優先\n- 既知情報源（前サイクルで採用した URL）と重複するものは避ける\n- 良いURLが3件未満なら、無理に3件選ばず2件や1件でもよい",
       "response_schema": {
         "type": "object",
@@ -153,9 +146,7 @@
       "memorize": {
         "tags": [
           "web_research"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "conditional_next": {
         "field": "url_choice.urls.length",
@@ -230,7 +221,6 @@
     {
       "id": "choose_all",
       "type": "llm",
-      "model_type": "lightweight",
       "action": "直前に最大3つのURLについて outline を取得しました（短いページなら全文、長いページなら見出し階層が返ってきています）。それぞれを調査トピック「{research_topic}」のためにどう扱うか判断してください。\n\n## 判断基準\n各URLについて以下のいずれかを選択:\n- skip: このURLは調査トピックに関係ない / 既知情報の重複 → 何もしない\n- use_outline: 既に取得した outline 部分（短いページの全文 or 見出し階層）に十分な情報がある → そのまま引用抽出へ\n- read_sections: 長文ページで特定の節を深く読む必要がある → section_queries に読みたい見出し名/キーワードを最大3件指定\n\nURLが取得されていない / outline が空の場合 (URL が3件未満で 2,3 が無い場合など) は action=\"skip\" を指定してください。\n\nurl_decisions は必ず 3 要素（URL 1, 2, 3 の順）で返してください。",
       "response_schema": {
         "type": "object",
@@ -274,9 +264,7 @@
       "memorize": {
         "tags": [
           "web_research"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "route_url_1"
     },
@@ -573,9 +561,7 @@
         "tags": [
           "web_research",
           "extract"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "accumulate"
     },
@@ -626,9 +612,7 @@
         "tags": [
           "web_research",
           "verdict"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "snapshot_verdict"
     },
@@ -685,8 +669,6 @@
         "web_research",
         "completed"
       ],
-      "line_role": "sub_line",
-      "scope": "volatile",
       "next": null
     }
   ],

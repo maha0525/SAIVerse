@@ -42,9 +42,7 @@
       "memorize": {
         "tags": [
           "document_create"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "create"
     },
@@ -68,9 +66,7 @@
         "document_create",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "generate_content"

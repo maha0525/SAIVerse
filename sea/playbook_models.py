@@ -78,10 +78,11 @@ class LLMNodeDef(BaseModel):
                     "Supported types: 'text', 'function_call', 'thought'. "
                     "Function calls are stored as nested keys: '<key>.name', '<key>.args.<arg_name>'."
     )
-    memorize: Optional[Dict[str, Any]] = Field(
+    memorize: Optional[Union[bool, Dict[str, Any]]] = Field(
         default=None,
         description="If specified, save prompt and response to SAIMemory. "
-                    "Example: {'tags': ['conversation']}. "
+                    "``True`` で既定タグ保存、dict で詳細指定 (例: {'tags': ['conversation']})。"
+                    "line_role / scope はアスペクト (§10) から導出されるため dict に書かない。"
                     "Tags will be applied to both user (prompt) and assistant (response) messages."
     )
     speak: Optional[bool] = Field(

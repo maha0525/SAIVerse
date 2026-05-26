@@ -16,9 +16,71 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger("saiverse.pulse_context")
+
+
+class Aspect(str, Enum):
+    """ペルソナの言動の「側面」 (認知モデル v0.2, line_tag_responsibility.md §10)。
+
+    全て同じペルソナの言動だが、状態の異なる一側面を表す。ライン起動時に1つ
+    指定され、``line_role`` / ``scope`` / モデル tier を**導出**する。Playbook
+    ノードはこれらを個別指定せず、起動元 (track handler / run_playbook /
+    meta_layer) が指定したアスペクトから構造的に決まる。
+
+    - ``CONVERSATION``: 通常会話 (対ユーザー / social / external)。main_line / committed / 標準
+    - ``WORKER``: run_playbook スペルのサブライン処理。sub_line / volatile / 軽量
+    - ``AUTONOMOUS``: 自律行動。main_line / committed / 軽量
+    - ``META``: メタ判断。meta_judgment / discardable (確定分は committed に昇格) / 標準
+    """
+
+    CONVERSATION = "conversation"
+    WORKER = "worker"
+    AUTONOMOUS = "autonomous"
+    META = "meta"
+
+    @property
+    def line_role(self) -> str:
+        """このアスペクトが記録される ``messages.line_role``。"""
+        return _ASPECT_DERIVATION[self][0]
+
+    @property
+    def scope(self) -> str:
+        """このアスペクトの ``messages.scope`` (永続性)。"""
+        return _ASPECT_DERIVATION[self][1]
+
+    @property
+    def model_tier(self) -> str:
+        """このアスペクトで使うモデル tier (``"standard"`` / ``"lightweight"``)。"""
+        return _ASPECT_DERIVATION[self][2]
+
+
+# Aspect → (line_role, scope, model_tier)。アスペクトは「呼び出し時に1つ指定」
+# される唯一の供給源で、ここから3軸を導出する (line_tag_responsibility.md §10.2)。
+_ASPECT_DERIVATION: Dict["Aspect", tuple] = {
+    Aspect.CONVERSATION: ("main_line", "committed", "standard"),
+    Aspect.WORKER: ("sub_line", "volatile", "lightweight"),
+    Aspect.AUTONOMOUS: ("main_line", "committed", "lightweight"),
+    Aspect.META: ("meta_judgment", "discardable", "standard"),
+}
+
+
+def aspect_from_pulse_type(pulse_type: Optional[str]) -> "Aspect":
+    """Pulse-root のアスペクトを ``pulse_type`` から導出する (§10.2)。
+
+    - ``"auto"`` → ``AUTONOMOUS`` (自律 Track の Pulse)
+    - ``"meta_judgment"`` → ``META`` (メタ判断ディスパッチ)
+    - それ以外 (``"user"`` / ``"schedule"`` / None) → ``CONVERSATION``
+
+    サブライン (run_playbook) は ``WORKER`` を別途 push するためここには含めない。
+    """
+    if pulse_type == "auto":
+        return Aspect.AUTONOMOUS
+    if pulse_type == "meta_judgment":
+        return Aspect.META
+    return Aspect.CONVERSATION
 
 
 @dataclass
@@ -84,6 +146,25 @@ class LineFrame:
     parent_id: Optional[str] = None
     track_id: Optional[str] = None
     created_at: int = field(default_factory=lambda: int(time.time()))
+    # 認知モデル v0.2 (§10): このラインのアスペクト。設定されていれば line_role /
+    # scope / model tier の唯一の供給源となり、role はアスペクトから導出される。
+    # None の場合は legacy 動作 (role を直接指定、scope は未導出で committed 既定)。
+    aspect: Optional[Aspect] = None
+
+    def __post_init__(self) -> None:
+        # アスペクトが設定されていれば line_role はそこから導出する (アスペクト優先)。
+        if self.aspect is not None:
+            self.role = self.aspect.line_role
+
+    @property
+    def scope(self) -> Optional[str]:
+        """アスペクト由来の scope。legacy frame (aspect=None) では None。"""
+        return self.aspect.scope if self.aspect is not None else None
+
+    @property
+    def model_tier(self) -> Optional[str]:
+        """アスペクト由来のモデル tier。legacy frame では None。"""
+        return self.aspect.model_tier if self.aspect is not None else None
 
     @property
     def is_root(self) -> bool:
@@ -170,17 +251,21 @@ class PulseContext:
         role: str = "main_line",
         track_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        aspect: Optional[Aspect] = None,
     ) -> LineFrame:
         """Open a new line frame and push it onto the stack.
 
         Args:
             role: Line role (``'main_line'`` / ``'sub_line'`` / ``'meta_judgment'``
-                / ``'nested'``). See ``LineFrame.role`` docstring for the mapping
-                to 7-layer storage.
+                / ``'nested'``). 認知モデル v0.2 以降は ``aspect`` を渡すのが既定で、
+                その場合 role はアスペクトから導出され本引数は無視される。``aspect``
+                を渡さない legacy 経路でのみ role が直接使われる。
             track_id: Active Track for the new line. If ``None``, inherits from
                 the current line on the stack.
             parent_id: Parent line ID. If ``None``, inferred from the topmost
                 frame on the stack (an empty stack yields a root line).
+            aspect: このラインのアスペクト (§10)。設定すると line_role / scope /
+                model tier がここから導出される。
 
         Returns:
             The newly pushed ``LineFrame``. Callers should record its ``line_id``
@@ -192,7 +277,7 @@ class PulseContext:
             parent_id = current.line_id
         if track_id is None and current is not None:
             track_id = current.track_id
-        frame = LineFrame(role=role, parent_id=parent_id, track_id=track_id)
+        frame = LineFrame(role=role, parent_id=parent_id, track_id=track_id, aspect=aspect)
         self._line_stack.append(frame)
         return frame
 
@@ -222,11 +307,14 @@ class PulseContext:
         """
         current = self.current_line()
         if current is None:
-            return {"line_role": None, "line_id": None, "origin_track_id": None}
+            return {"line_role": None, "line_id": None, "origin_track_id": None, "scope": None}
         return {
             "line_role": current.role,
             "line_id": current.line_id,
             "origin_track_id": current.track_id,
+            # アスペクト由来の scope (§10.3)。legacy frame では None で、
+            # _store_memory 側で SQL 既定 'committed' に落ちる。
+            "scope": current.scope,
         }
 
     # ------------------------------------------------------------------

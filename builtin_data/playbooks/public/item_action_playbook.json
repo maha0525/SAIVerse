@@ -54,9 +54,7 @@
       "memorize": {
         "tags": [
           "item_action"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "conditional_next": {
         "field": "params.action",
@@ -87,9 +85,7 @@
         "item_action",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     },
     {
       "id": "do_pickup",
@@ -110,9 +106,7 @@
         "item_action",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     },
     {
       "id": "do_place",
@@ -133,9 +127,7 @@
         "item_action",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     },
     {
       "id": "prepare_use",
@@ -176,9 +168,7 @@
         "item_action",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "decide_action"

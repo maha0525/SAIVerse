@@ -43,9 +43,7 @@
       "memorize": {
         "tags": [
           "generate_image_local"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "generate"
     },
@@ -82,9 +80,7 @@
         "playbook_result"
       ],
       "metadata_key": "metadata",
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "decide_prompt"

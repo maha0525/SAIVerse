@@ -55,9 +55,7 @@
       "memorize": {
         "tags": [
           "create_building"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "building_plan"
     },
@@ -116,9 +114,7 @@
       "tags": [
         "create_building"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "plan_building"

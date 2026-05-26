@@ -54,9 +54,7 @@
       "memorize": {
         "tags": [
           "document_search"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "conditional_next": {
         "field": "params.action",
@@ -88,9 +86,7 @@
         "document_search",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     },
     {
       "id": "do_read",
@@ -114,9 +110,7 @@
         "document_search",
         "playbook_result"
       ],
-      "next": null,
-      "line_role": "sub_line",
-      "scope": "volatile"
+      "next": null
     }
   ],
   "start_node": "analyze_request"

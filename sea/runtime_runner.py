@@ -109,6 +109,7 @@ def run_playbook(
     line: str = "main",
     pulse_line_role: Optional[str] = None,
     pulse_line_track_id: Optional[str] = None,
+    pulse_line_aspect: Optional[Any] = None,  # sea.pulse_context.Aspect
     pre_spells: Optional[List[str]] = None,
 ) -> List[str]:
     if cancellation_token:
@@ -220,6 +221,8 @@ def run_playbook(
         isolate_pulse_context=isolate_pulse_context,
         pulse_line_role=pulse_line_role,
         pulse_line_track_id=pulse_line_track_id,
+        pulse_line_aspect=pulse_line_aspect,
+        line=line,
     )
     if compiled_ok is None:
         LOGGER.error(

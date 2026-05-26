@@ -36,9 +36,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "draft"
     },
@@ -49,9 +47,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "next": "structure"
     },
@@ -62,9 +58,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "response_schema": {
         "type": "object",
@@ -130,9 +124,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "chapter_1_text",
       "next": "chapter_2"
@@ -144,9 +136,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "chapter_2_text",
       "next": "chapter_3"
@@ -158,9 +148,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "chapter_3_text",
       "next": "chapter_4"
@@ -172,9 +160,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "chapter_4_text",
       "next": "reflection"
@@ -186,9 +172,7 @@
       "memorize": {
         "tags": [
           "novel_writing"
-        ],
-        "line_role": "sub_line",
-        "scope": "volatile"
+        ]
       },
       "output_key": "reflection_text",
       "next": "compose_document"
@@ -227,9 +211,7 @@
       "role": "user",
       "tags": [
         "novel_writing"
-      ],
-      "line_role": "sub_line",
-      "scope": "volatile"
+      ]
     }
   ]
 }
