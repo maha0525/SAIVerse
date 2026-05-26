@@ -10,7 +10,7 @@ This script:
 
 Usage:
     python scripts/split_long_page.py --persona air --page <page_id>
-    python scripts/split_long_page.py --persona air --page <page_id> --model gemini-3.1-flash-lite
+    python scripts/split_long_page.py --persona air --page <page_id> --model gemini-3.1-flash-lite-preview
     python scripts/split_long_page.py --persona air --page <page_id> --dry-run
 """
 
