@@ -77,8 +77,41 @@ def _build_extraction_prompt(
         "- 場所: 固有名を持つ場所（例: 創造の祭壇）",
         "- イベント: 固有の出来事（例: ぽこあポケモン発売）",
         "",
-        "**エンティティではないもの**: 一般名詞や抽象概念（「AI技術」「友情」「プログラミング」等）。",
-        "固有名詞または固有の事象として特定できるものだけを対象としてください。",
+        "**エンティティではないもの**:",
+        "- 一般名詞や抽象概念",
+        "- Wikipediaや検索エンジンで調べれば誰でも分かるもの"
+        "（広く知られたサービス、技術用語、プログラミング言語、ツール名など）",
+        "- ファイル名、パス、CLIコマンド名",
+        "- IDやハッシュ値、ランダムな文字列、メールアドレス",
+        "- APIスコープ名、認証トークン、パスワード等の技術的な識別子",
+        "- その場限りのエラーメッセージやステータス",
+        "",
+        "**判定基準**: 「これは会話の当事者たちの間でだけ通じる固有の対象か？」",
+        "世間一般に知られている事物は、この人たちの個人的な知識ベースに記録する必要はありません。",
+        "当事者たちの関係性・創作・プロジェクトに固有の対象だけを記録してください。",
+        "",
+        "## 会話当事者についての注意",
+        "",
+        "会話の当事者（ペルソナ自身、ユーザー、頻繁に登場するAI）については、"
+        "**6ヶ月後でも変わらない恒久的な属性のみ**を記録してください。",
+        "",
+        "記録すべき（恒久的な属性）:",
+        "- 誕生日、好き嫌い、価値観、信念、性格的特徴",
+        "- 人間関係や関係性の定義",
+        "- 恒久的な習慣や癖",
+        "",
+        "記録すべきでない（行動記録・一時的な状態）:",
+        "- 「〜した」「〜を行った」「〜を試みた」「〜に成功した」のような行動の記録",
+        "- 「〜に直面している」「〜を感じている」のような一時的な状態",
+        "- 作業の詳細や手順",
+        "",
+        "悪い例（行動記録であり、Chronicleの仕事）:",
+        "- 「設定ファイルを編集して問題を解決した」",
+        "- 「長時間の作業により疲労を感じている」",
+        "",
+        "良い例（恒久的な属性）:",
+        "- 「几帳面な性格で、細部にこだわる傾向がある」",
+        "- 「物語の中に驚きや成長の要素があることを好む」",
         "",
     ]
 
@@ -278,23 +311,57 @@ def extract_entities(
     return entities
 
 
+def _append_notes_with_date_merge(
+    memopedia,
+    page_id: str,
+    date_str: str,
+    notes_lines: List[str],
+    edit_source: str = "entity_extractor",
+) -> None:
+    """Append notes to a page, merging into existing same-day header if present."""
+    from sai_memory.memopedia.storage import get_page, update_page as _update_page
+    page = get_page(memopedia.conn, page_id)
+    if page is None:
+        return
+
+    header = f"## {date_str}"
+    new_bullets = "\n".join(f"- {note}" for note in notes_lines)
+
+    content = page.content or ""
+    last_header_pos = content.rfind(header)
+
+    if last_header_pos != -1:
+        # Same-day header exists at the end area — append bullets after it
+        after_header = content[last_header_pos + len(header):]
+        merged = content[:last_header_pos + len(header)] + after_header.rstrip() + "\n" + new_bullets
+        _update_page(memopedia.conn, page_id, content=merged)
+    else:
+        notes_block = header + "\n" + new_bullets
+        memopedia.append_to_content(
+            page_id, notes_block,
+            edit_source=edit_source,
+        )
+
+
 def reflect_to_memopedia(
     entities: List[ExtractedEntity],
     memopedia,
     *,
     source_time: Optional[int] = None,
+    chronicle_entry_id: Optional[str] = None,
 ) -> List[EntityExtractionResult]:
-    """Reflect extracted entities into Memopedia pages.
+    """Reflect extracted entities into Memopedia pages and create Fragments.
 
     For each entity:
     - Search for existing page by title
-    - If found, append notes
-    - If not found, create a new page and write notes
+    - If found, append notes to content (with same-day merge) and create Fragments
+    - If not found, create a new page and create Fragments
 
     Args:
         entities: Extracted entities from extract_entities().
         memopedia: Memopedia instance.
         source_time: Timestamp for the date header in appended content.
+        chronicle_entry_id: ID of the Chronicle Lv-1 entry that triggered this extraction.
 
     Returns:
         List of results describing what was done.
@@ -306,19 +373,14 @@ def reflect_to_memopedia(
         if not entity.notes and not entity.summary:
             continue
 
-        # Format notes as bullet points under a date header
-        notes_lines = [f"- {note}" for note in entity.notes]
-        notes_block = f"## {date_str}\n" + "\n".join(notes_lines) if notes_lines else ""
-
         # Search for existing page
         page = memopedia.find_by_title(entity.name)
 
         if page:
-            # Append to existing page
-            if notes_block:
-                memopedia.append_to_content(
-                    page.id, notes_block,
-                    edit_source="entity_extractor",
+            # Append notes to existing page content (with same-day merge)
+            if entity.notes:
+                _append_notes_with_date_merge(
+                    memopedia, page.id, date_str, entity.notes,
                 )
             # Update summary to reflect latest understanding
             if entity.summary and entity.summary != page.summary:
@@ -327,19 +389,13 @@ def reflect_to_memopedia(
                     memopedia.conn, page.id,
                     summary=entity.summary,
                 )
-            results.append(EntityExtractionResult(
-                entity_name=entity.name,
-                page_id=page.id,
-                is_new_page=False,
-                notes_appended=len(entity.notes),
-            ))
-            LOGGER.info(
-                "Appended %d notes to existing page '%s' (%s)",
-                len(entity.notes), entity.name, page.id,
-            )
+            page_id = page.id
+            is_new = False
         else:
-            # Create new page with summary
+            # Create new page
             root_id = CATEGORY_ROOT_IDS.get(entity.category, CATEGORY_ROOT_IDS[DEFAULT_CATEGORY])
+            notes_lines = [f"- {note}" for note in entity.notes]
+            notes_block = f"## {date_str}\n" + "\n".join(notes_lines) if notes_lines else ""
             new_page = memopedia.create_page(
                 parent_id=root_id,
                 title=entity.name,
@@ -347,16 +403,29 @@ def reflect_to_memopedia(
                 content=notes_block,
                 edit_source="entity_extractor",
             )
-            results.append(EntityExtractionResult(
-                entity_name=entity.name,
-                page_id=new_page.id,
-                is_new_page=True,
-                notes_appended=len(entity.notes),
-            ))
-            LOGGER.info(
-                "Created new page '%s' [%s] with %d notes (%s)",
-                entity.name, entity.category, len(entity.notes), new_page.id,
+            page_id = new_page.id
+            is_new = True
+
+        # Create Fragments for each note
+        for note in entity.notes:
+            memopedia.create_fragment(
+                entity_id=page_id,
+                content=note,
+                chronicle_entry_id=chronicle_entry_id,
+                source_date=date_str,
             )
+
+        results.append(EntityExtractionResult(
+            entity_name=entity.name,
+            page_id=page_id,
+            is_new_page=is_new,
+            notes_appended=len(entity.notes),
+        ))
+        LOGGER.info(
+            "%s page '%s' (%s): %d fragments created",
+            "Created new" if is_new else "Updated",
+            entity.name, page_id, len(entity.notes),
+        )
 
     return results
 
@@ -368,6 +437,7 @@ def extract_and_reflect(
     *,
     episode_context: str = "",
     persona_id: Optional[str] = None,
+    chronicle_entry_id: Optional[str] = None,
 ) -> List[EntityExtractionResult]:
     """Extract entities from messages and reflect them to Memopedia in one call.
 
@@ -379,6 +449,7 @@ def extract_and_reflect(
         messages: Conversation messages to process.
         episode_context: Chronicle context for surrounding events.
         persona_id: Optional persona ID for usage tracking.
+        chronicle_entry_id: ID of the Chronicle Lv-1 entry for Fragment linkage.
 
     Returns:
         List of results describing what was created/updated.
@@ -404,6 +475,7 @@ def extract_and_reflect(
     return reflect_to_memopedia(
         entities, memopedia,
         source_time=int(source_time) if source_time else None,
+        chronicle_entry_id=chronicle_entry_id,
     )
 
 

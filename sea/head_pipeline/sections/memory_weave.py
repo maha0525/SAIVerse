@@ -72,10 +72,13 @@ class MemoryWeaveSection:
         persona_dir_path = getattr(sai_mem, "persona_dir", None) if sai_mem else None
         persona_dir = str(persona_dir_path) if persona_dir_path else None
 
+        index_limit = self._resolve_memopedia_index_limit(manager, ctx.persona_id)
+
         try:
             with persona_context(ctx.persona_id, persona_dir, manager):
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
+                    memopedia_index_limit=index_limit,
                 )
         except Exception:
             LOGGER.warning(
@@ -150,6 +153,22 @@ class MemoryWeaveSection:
         )
 
     # ---- 内部ヘルパー ----
+
+    def _resolve_memopedia_index_limit(self, manager, persona_id: str) -> int:
+        session_factory = getattr(manager, "SessionLocal", None)
+        if not session_factory:
+            return 100
+        db = session_factory()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            if ai and ai.MEMOPEDIA_INDEX_LIMIT is not None:
+                return int(ai.MEMOPEDIA_INDEX_LIMIT)
+            return 100
+        except Exception:
+            return 100
+        finally:
+            db.close()
 
     def _resolve_enabled(self, manager, persona_id: str) -> bool:
         session_factory = getattr(manager, "SessionLocal", None)

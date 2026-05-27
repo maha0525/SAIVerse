@@ -126,35 +126,9 @@ def fetch_messages(
         conn.close()
         return all_messages[offset:offset + limit]
 
-    # All threads: fetch globally sorted by created_at
-    # Exclude Stelis threads — sub-agent work logs are not the persona's own experiences
-    cur = conn.execute("""
-        SELECT id, thread_id, role, content, resource_id, created_at, metadata
-        FROM messages
-        WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-        ORDER BY created_at ASC
-        LIMIT ? OFFSET ?
-    """, (limit, offset))
-
-    messages: List[Message] = []
-    for row in cur.fetchall():
-        msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-        metadata = {}
-        if metadata_raw:
-            try:
-                import json
-                metadata = json.loads(metadata_raw)
-            except Exception:
-                LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
-        messages.append(Message(
-            id=msg_id,
-            thread_id=tid,
-            role=role,
-            content=content,
-            resource_id=resource_id,
-            created_at=created_at,
-            metadata=metadata,
-        ))
+    # All threads: use shared Chronicle message fetcher
+    from sai_memory.memory.storage import get_messages_for_chronicle
+    messages = get_messages_for_chronicle(conn, limit=limit, offset=offset)
 
     conn.close()
     return messages

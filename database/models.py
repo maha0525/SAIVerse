@@ -50,6 +50,7 @@ class AI(Base):
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
+    MEMOPEDIA_INDEX_LIMIT = Column(Integer, nullable=True)  # Max pages per category in Memory Weave index (NULL → default 100)
     SPELL_ENABLED = Column(Boolean, default=False, nullable=False)  # Per-persona spell system toggle
     # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的

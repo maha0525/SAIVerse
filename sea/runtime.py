@@ -2020,35 +2020,9 @@ class SEARuntime:
 
         init_arasuji_tables(adapter.conn)
 
-        # Fetch ALL messages across all threads (same as UI-triggered generation).
-        # Previously this only fetched from the default persona thread, missing
-        # messages logged on building-specific threads.
-        import json as _json
-        # Exclude handy_tool/spell/event_message tagged messages.
-        # handy_tool/spell: Memopedia/logの内容を含むため重複になる
-        # event_message: Dynamic State Syncの通知メッセージ。Chronicle編纂には不要
-        cur = adapter.conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            "FROM messages "
-            "WHERE NOT EXISTS ("
-            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell', 'event_message')"
-            ") "
-            "ORDER BY created_at ASC"
-        )
-        all_messages = []
-        for row in cur.fetchall():
-            msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-            metadata = None
-            if metadata_raw:
-                try:
-                    metadata = _json.loads(metadata_raw)
-                except Exception:
-                    pass
-            all_messages.append(Message(
-                id=msg_id, thread_id=tid, role=role, content=content,
-                resource_id=resource_id, created_at=int(created_at),
-                metadata=metadata,
-            ))
+        # Fetch ALL messages suitable for Chronicle (shared filter logic).
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        all_messages = get_messages_for_chronicle(adapter.conn)
 
         if not all_messages:
             return

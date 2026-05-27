@@ -13,6 +13,7 @@ interface MemopediaPage {
     is_trunk: boolean;
     is_important: boolean;
     updated_at?: number;
+    last_referenced_at?: number;
     children: MemopediaPage[];
 }
 
@@ -63,7 +64,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
     // Sort state
     type SortMode = 'tree' | 'updated';
-    const [sortMode, setSortMode] = useState<SortMode>('tree');
+    const [sortMode, setSortMode] = useState<SortMode>('updated');
 
     // History state
     const [showHistory, setShowHistory] = useState(false);
@@ -724,6 +725,22 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
     };
 
+    // Sort helper: most recently referenced/updated first
+    const pageFreshness = (p: MemopediaPage) => Math.max(p.last_referenced_at || 0, p.updated_at || 0);
+
+    // Sort pages within each category by freshness (for tree mode)
+    const sortedTree = useMemo(() => {
+        if (!tree) return null;
+        const sortPages = (pages: MemopediaPage[]) =>
+            [...pages].sort((a, b) => pageFreshness(b) - pageFreshness(a));
+        return {
+            people: sortPages(tree.people),
+            terms: sortPages(tree.terms),
+            plans: sortPages(tree.plans),
+            events: sortPages(tree.events),
+        };
+    }, [tree]);
+
     // Flatten all pages for "updated" sort mode
     const flatPages = useMemo(() => {
         if (!tree || sortMode !== 'updated') return [];
@@ -738,8 +755,9 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         tree.terms.forEach(collect);
         tree.plans.forEach(collect);
         tree.events.forEach(collect);
-        // Sort by updated_at descending (newest first)
-        pages.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+        // Sort by most recently referenced/updated (newest first)
+        const freshness = (p: MemopediaPage) => Math.max(p.last_referenced_at || 0, p.updated_at || 0);
+        pages.sort((a, b) => freshness(b) - freshness(a));
         return pages;
     }, [tree, sortMode]);
 
@@ -776,19 +794,19 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     </div>
                 </div>
                 <div className={styles.treeContainer}>
-                    {sortMode === 'tree' ? (
+                    {sortMode === 'tree' && sortedTree ? (
                         <>
                             <div className={styles.categoryTitle}>人物 / People</div>
-                            {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
+                            {sortedTree.people.map(p => <TreeItem key={p.id} page={p} />)}
 
                             <div className={styles.categoryTitle}>用語 / Terms</div>
-                            {tree.terms.map(p => <TreeItem key={p.id} page={p} />)}
+                            {sortedTree.terms.map(p => <TreeItem key={p.id} page={p} />)}
 
                             <div className={styles.categoryTitle}>計画 / Plans</div>
-                            {tree.plans.map(p => <TreeItem key={p.id} page={p} />)}
+                            {sortedTree.plans.map(p => <TreeItem key={p.id} page={p} />)}
 
                             <div className={styles.categoryTitle}>出来事 / Events</div>
-                            {tree.events.map(p => <TreeItem key={p.id} page={p} />)}
+                            {sortedTree.events.map(p => <TreeItem key={p.id} page={p} />)}
                         </>
                     ) : (
                         <>
@@ -801,7 +819,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 >
                                     <div className={styles.flatItemTitle}>{p.title}</div>
                                     <div className={styles.flatItemMeta}>
-                                        {p.updated_at ? new Date(p.updated_at * 1000).toLocaleString('ja-JP', {
+                                        {pageFreshness(p) ? new Date(pageFreshness(p) * 1000).toLocaleString('ja-JP', {
                                             month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
                                         }) : ''}
                                     </div>

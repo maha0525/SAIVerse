@@ -13,6 +13,7 @@ from sai_memory.memopedia.storage import (
     MemopediaPage,
     PageState,
     PageEditHistory,
+    MemopediaFragment,
     CATEGORY_PEOPLE,
     CATEGORY_TERMS,
     CATEGORY_PLANS,
@@ -41,6 +42,9 @@ from sai_memory.memopedia.storage import (
     get_unorganized_pages as storage_get_unorganized_pages,
     # Important flag
     set_important_flag,
+    # Fragment operations
+    create_fragment as storage_create_fragment,
+    get_fragments_for_entity,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -98,6 +102,7 @@ class Memopedia:
                 "content": page.content,  # Include content for vivid pages
                 "is_open": states.get(page.id, False),
                 "updated_at": page.updated_at,
+                "last_referenced_at": page.last_referenced_at,
                 "children": [_annotate(c) for c in page.children],
             }
             return result
@@ -1033,3 +1038,38 @@ class Memopedia:
             is_trunk=True,
             edit_source=edit_source,
         )
+
+    # ----- Fragment operations -----
+
+    def create_fragment(
+        self,
+        *,
+        entity_id: str,
+        content: str,
+        chronicle_entry_id: Optional[str] = None,
+        source_date: Optional[str] = None,
+    ) -> "MemopediaFragment":
+        """Create a new fragment linked to an entity page."""
+        with self._lock:
+            frag = storage_create_fragment(
+                self.conn,
+                entity_id=entity_id,
+                content=content,
+                chronicle_entry_id=chronicle_entry_id,
+                source_date=source_date,
+            )
+        self.touch_page(entity_id)
+        return frag
+
+    def get_fragments(
+        self,
+        entity_id: str,
+        *,
+        vividness_filter: Optional[List[str]] = None,
+    ) -> List["MemopediaFragment"]:
+        """Get fragments for an entity page."""
+        with self._lock:
+            return get_fragments_for_entity(
+                self.conn, entity_id,
+                vividness_filter=vividness_filter,
+            )

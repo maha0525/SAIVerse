@@ -19,6 +19,7 @@ def get_memory_weave_context(
     persona_id: Optional[str] = None,
     persona_dir: Optional[str] = None,
     max_chronicle_entries: int = 50,
+    memopedia_index_limit: int = 100,
 ) -> List[Dict[str, Any]]:
     """Build Memory Weave context messages containing Chronicle and Memopedia.
 
@@ -78,7 +79,7 @@ def get_memory_weave_context(
         )
 
         # 2. Get Memopedia context (semantic memory)
-        memopedia_text = _get_memopedia_context(conn)
+        memopedia_text = _get_memopedia_context(conn, index_limit=memopedia_index_limit)
         LOGGER.info("get_memory_weave_context: Memopedia text length=%d", len(memopedia_text))
         if not memopedia_text:
             LOGGER.warning("get_memory_weave_context: Memopedia context is empty")
@@ -285,24 +286,24 @@ def _get_track_unprocessed_messages_text(
     return "\n".join(lines)
 
 
-def _get_memopedia_context(conn: sqlite3.Connection) -> str:
+def _get_memopedia_context(
+    conn: sqlite3.Connection,
+    *,
+    index_limit: int = 100,
+) -> str:
     """Get Memopedia context (page titles, summaries, optionally content for vivid pages).
-    
-    Uses the unified get_tree_markdown() method for consistent formatting.
-    Keywords are excluded to reduce token usage.
+
+    Args:
+        conn: Database connection to memory.db
+        index_limit: Max pages per category to include (sorted by most recently
+                     referenced/updated). 0 = unlimited.
     """
     try:
         from sai_memory.memopedia import Memopedia, init_memopedia_tables
-        
-        # Initialize tables if needed
+
         init_memopedia_tables(conn)
         memopedia = Memopedia(conn)
-        
-        # Use the unified get_tree_markdown method
-        # - include_keywords=False for lighter context
-        # - show_markers=False since we don't need [OPEN]/[-] markers
-        # Note: This doesn't handle vividness, so we need custom logic for that
-        
+
         tree = memopedia.get_tree()
         LOGGER.info("_get_memopedia_context: tree keys=%s", list(tree.keys()))
         lines: List[str] = []
@@ -311,34 +312,31 @@ def _get_memopedia_context(conn: sqlite3.Connection) -> str:
             "people": "人物",
             "terms": "用語",
             "plans": "予定",
+            "events": "出来事",
         }
+
+        def _sort_key(page: Dict) -> int:
+            return max(
+                page.get("last_referenced_at") or 0,
+                page.get("updated_at") or 0,
+            )
 
         def _list_pages(pages: List[Dict], prefix: str = "") -> None:
             for page in pages:
-                # Skip root pages
                 if not page["id"].startswith("root_"):
                     vividness = page.get("vividness", "rough")
 
-                    # buried: Skip entirely
                     if vividness == "buried":
                         continue
-
-                    # faint: Page title only
                     elif vividness == "faint":
                         lines.append(f"{prefix}- {page['title']}")
-
-                    # rough: Title + summary (no keywords for lighter context)
                     elif vividness == "rough":
                         lines.append(f"{prefix}- {page['title']}: {page['summary']}")
-
-                    # vivid: Title + summary + full content (no keywords)
                     elif vividness == "vivid":
                         summary = page['summary']
                         lines.append(f"{prefix}- **{page['title']}**: {summary}")
-                        # Add content if available
                         content = page.get("content", "")
                         if content:
-                            # Indent content under the page title
                             for line in content.split("\n"):
                                 lines.append(f"{prefix}  {line}")
 
@@ -346,12 +344,17 @@ def _get_memopedia_context(conn: sqlite3.Connection) -> str:
                 if children:
                     _list_pages(children, prefix + "  ")
 
-        for category in ["people", "terms", "plans"]:
+        for category in ["people", "terms", "plans", "events"]:
             pages = tree.get(category, [])
             LOGGER.debug("_get_memopedia_context: category=%s, pages count=%d", category, len(pages))
             if pages:
+                # Sort by most recently referenced/updated, apply limit
+                non_root = [p for p in pages if not p["id"].startswith("root_")]
+                non_root.sort(key=_sort_key, reverse=True)
+                if index_limit > 0 and len(non_root) > index_limit:
+                    non_root = non_root[:index_limit]
                 lines.append(f"\n### {category_names[category]}")
-                _list_pages(pages)
+                _list_pages(non_root)
 
         LOGGER.info("_get_memopedia_context: Generated %d lines", len(lines))
         if not lines:

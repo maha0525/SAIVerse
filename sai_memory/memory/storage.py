@@ -1703,3 +1703,51 @@ def count_planned_groups(conn: sqlite3.Connection) -> int:
         "WHERE resolved = 0 AND group_label IS NOT NULL"
     )
     return cur.fetchone()[0]
+
+
+# Tags excluded from Chronicle generation. Messages with any of these tags
+# are not the persona's own experiences and should not be summarized.
+CHRONICLE_EXCLUDED_TAGS = ('handy_tool', 'spell', 'event_message')
+
+
+def get_messages_for_chronicle(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 0,
+    offset: int = 0,
+) -> List[Message]:
+    """Fetch messages suitable for Chronicle generation.
+
+    Applies standard exclusion filters:
+    - Stelis threads (sub-agent work logs)
+    - Messages tagged with handy_tool / spell / event_message
+
+    This is the single source of truth for "which messages go into Chronicle."
+    Both runtime.py (Metabolism) and build_arasuji_core.py (CLI/UI) should
+    use this function instead of writing their own queries.
+
+    Args:
+        conn: SAIMemory database connection.
+        limit: Max messages to return (0 = unlimited).
+        offset: Number of messages to skip from the beginning.
+    """
+    limit_clause = f"LIMIT {int(limit)} OFFSET {int(offset)}" if limit > 0 else ""
+    placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+
+    cur = conn.execute(
+        f"""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        FROM messages
+        WHERE thread_id NOT IN (
+            SELECT thread_id FROM stelis_threads
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM json_each(metadata, '$.tags')
+            WHERE json_each.value IN ({placeholders})
+        )
+        ORDER BY created_at ASC
+        {limit_clause}
+        """,
+        CHRONICLE_EXCLUDED_TAGS,
+    )
+    return [_row_to_message(row) for row in cur.fetchall()]

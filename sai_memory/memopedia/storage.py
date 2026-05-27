@@ -120,6 +120,19 @@ class PageEditHistory:
     before_content: Optional[str] = None
 
 
+@dataclass
+class MemopediaFragment:
+    """A single fragment of knowledge linked to an entity and optionally to a Chronicle entry."""
+
+    id: str
+    content: str
+    entity_id: str
+    chronicle_entry_id: Optional[str] = None
+    vividness: str = "vivid"
+    source_date: Optional[str] = None
+    created_at: int = 0
+
+
 def init_memopedia_tables(conn: sqlite3.Connection) -> None:
     """Initialize Memopedia tables and seed root pages if needed."""
     conn.execute(
@@ -246,6 +259,42 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
             page_id TEXT PRIMARY KEY,
             vector TEXT NOT NULL,
             FOREIGN KEY (page_id) REFERENCES memopedia_pages(id)
+        )
+        """
+    )
+
+    # Fragment tables for fine-grained knowledge linked to entity pages
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_fragments (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            chronicle_entry_id TEXT,
+            vividness TEXT DEFAULT 'vivid',
+            source_date TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (entity_id) REFERENCES memopedia_pages(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fragments_entity ON memopedia_fragments(entity_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fragments_chronicle ON memopedia_fragments(chronicle_entry_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fragments_vividness ON memopedia_fragments(vividness)"
+    )
+
+    # Embeddings for Memopedia fragments (used by unified recall)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_fragment_embeddings (
+            fragment_id TEXT PRIMARY KEY,
+            vector TEXT NOT NULL,
+            FOREIGN KEY (fragment_id) REFERENCES memopedia_fragments(id)
         )
         """
     )
@@ -1048,4 +1097,68 @@ def get_unorganized_pages(conn: sqlite3.Connection, category: str) -> List[Memop
         (root_id,),
     )
     return [_row_to_page(row) for row in cur.fetchall()]
+
+
+# ----- Fragment operations -----
+
+
+def create_fragment(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    content: str,
+    chronicle_entry_id: Optional[str] = None,
+    source_date: Optional[str] = None,
+) -> MemopediaFragment:
+    """Create a new fragment linked to an entity page."""
+    frag_id = str(uuid.uuid4())
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT INTO memopedia_fragments (id, content, entity_id, chronicle_entry_id, vividness, source_date, created_at)
+        VALUES (?, ?, ?, ?, 'vivid', ?, ?)
+        """,
+        (frag_id, content, entity_id, chronicle_entry_id, source_date, now),
+    )
+    conn.commit()
+    return MemopediaFragment(
+        id=frag_id,
+        content=content,
+        entity_id=entity_id,
+        chronicle_entry_id=chronicle_entry_id,
+        vividness="vivid",
+        source_date=source_date,
+        created_at=now,
+    )
+
+
+def get_fragments_for_entity(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    *,
+    vividness_filter: Optional[List[str]] = None,
+) -> List[MemopediaFragment]:
+    """Get all fragments for an entity, optionally filtered by vividness."""
+    if vividness_filter:
+        placeholders = ",".join("?" for _ in vividness_filter)
+        rows = conn.execute(
+            f"SELECT id, content, entity_id, chronicle_entry_id, vividness, source_date, created_at "
+            f"FROM memopedia_fragments WHERE entity_id = ? AND vividness IN ({placeholders}) "
+            f"ORDER BY created_at",
+            [entity_id] + vividness_filter,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, content, entity_id, chronicle_entry_id, vividness, source_date, created_at "
+            "FROM memopedia_fragments WHERE entity_id = ? ORDER BY created_at",
+            (entity_id,),
+        ).fetchall()
+    return [
+        MemopediaFragment(
+            id=r[0], content=r[1], entity_id=r[2],
+            chronicle_entry_id=r[3], vividness=r[4],
+            source_date=r[5], created_at=r[6],
+        )
+        for r in rows
+    ]
 
