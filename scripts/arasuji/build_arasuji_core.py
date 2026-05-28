@@ -49,14 +49,10 @@ from sai_memory.memory.storage import init_db, get_messages_paginated, Message
 from sai_memory.arasuji import init_arasuji_tables
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
-    count_entries_by_level,
-    count_unconsolidated_by_level,
     create_entry,
-    get_total_message_count,
     get_max_level,
     get_all_entries_ordered,
     clear_all_entries,
-    get_progress,
     update_progress,
     mark_consolidated,
 )
@@ -65,9 +61,7 @@ from sai_memory.arasuji.generator import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_CONSOLIDATION_SIZE,
     generate_level1_arasuji,
-    maybe_consolidate,
 )
-from sai_memory.arasuji.storage import has_overlapping_entries
 from sai_memory.arasuji.context import (
     get_episode_context,
     format_episode_context,
@@ -84,7 +78,6 @@ from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
 ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 ENV_BATCH_SIZE = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
 ENV_CONSOLIDATION_SIZE = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", str(DEFAULT_CONSOLIDATION_SIZE)))
-ENV_MAINTAIN_INTERVAL = int(os.getenv("MEMORY_WEAVE_MAINTAIN_INTERVAL", "0"))
 
 
 def get_persona_db_path(persona_id: str) -> Path:
@@ -345,9 +338,7 @@ def regenerate_entry_from_messages(
         New ArasujiEntry or None on failure
     """
     import os
-    from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
-    from sai_memory.arasuji.generator import generate_level1_arasuji
     
     # Get model from env if not specified
     if model_name is None:
@@ -384,95 +375,6 @@ def regenerate_entry_from_messages(
 
 
 
-def split_message_batches(messages: List[Message], batch_size: int) -> List[List[Message]]:
-    """Split messages into full batches only."""
-    return [messages[i:i + batch_size] for i in range(0, len(messages), batch_size) if len(messages[i:i + batch_size]) == batch_size]
-
-
-def generate_level1_batches(
-    generator: ArasujiGenerator,
-    batches: List[List[Message]],
-    *,
-    total_messages: int,
-    dry_run: bool,
-    batch_callback: Any = None,
-) -> tuple[List[ArasujiEntry], dict[str, int]]:
-    """Generate level-1 chronicle entries per batch."""
-    level1_entries: List[ArasujiEntry] = []
-    stats = {"processed_batches": 0, "skipped_batches": 0, "failed_batches": 0}
-
-    for idx, batch in enumerate(batches):
-        start_no = (idx * generator.batch_size) + 1
-        end_no = start_no + len(batch) - 1
-        stats["processed_batches"] += 1
-        LOGGER.info("[Lv1] Processing batch messages %s-%s / %s", start_no, end_no, total_messages)
-
-        batch_start = min(msg.created_at for msg in batch) if batch else None
-        batch_end = max(msg.created_at for msg in batch) if batch else None
-        if batch_start and batch_end and has_overlapping_entries(generator.conn, batch_start, batch_end, level=1):
-            stats["skipped_batches"] += 1
-            LOGGER.info("[Lv1] Skip existing batch range=%s-%s messages=%s-%s", batch_start, batch_end, start_no, end_no)
-            if batch_callback:
-                batch_callback(batch)
-            continue
-
-        try:
-            entry = generate_level1_arasuji(
-                generator.client,
-                generator.conn,
-                batch,
-                dry_run=dry_run,
-                include_timestamp=generator.include_timestamp,
-                memopedia_context=generator.memopedia_context,
-                debug_log_path=generator.debug_log_path,
-                persona_id=generator.persona_id,
-            )
-            if entry:
-                level1_entries.append(entry)
-        except Exception:
-            stats["failed_batches"] += 1
-            LOGGER.exception("[Lv1] Failed batch messages=%s-%s", start_no, end_no)
-
-        if batch_callback:
-            batch_callback(batch)
-
-    return level1_entries, stats
-
-
-def consolidate_levels(generator: ArasujiGenerator, *, dry_run: bool) -> tuple[List[ArasujiEntry], dict[str, int]]:
-    """Consolidate unconsolidated entries from level 1 upward."""
-    consolidated_entries: List[ArasujiEntry] = []
-    stats = {"consolidated_entries": 0, "failed_levels": 0, "levels_processed": 0}
-    level = 1
-
-    while count_unconsolidated_by_level(generator.conn, level) >= generator.consolidation_size:
-        stats["levels_processed"] += 1
-        try:
-            entries = maybe_consolidate(
-                generator.client,
-                generator.conn,
-                level=level,
-                consolidation_size=generator.consolidation_size,
-                dry_run=dry_run,
-                include_timestamp=generator.include_timestamp,
-                persona_id=generator.persona_id,
-            )
-            consolidated_entries.extend(entries)
-            stats["consolidated_entries"] += len(entries)
-        except Exception:
-            stats["failed_levels"] += 1
-            LOGGER.exception("[Consolidation] Failed level=%s parent_id=<auto>", level)
-        level += 1
-
-    return consolidated_entries, stats
-
-
-def log_processing_summary(total_messages: int, level1_entries: List[ArasujiEntry], consolidated_entries: List[ArasujiEntry], lv1_stats: dict[str, int], consolidate_stats: dict[str, int]) -> None:
-    """Emit mandatory processing summary logs."""
-    LOGGER.info("[Summary] target_messages=%s", total_messages)
-    LOGGER.info("[Summary] generated_level1=%s consolidated_generated=%s", len(level1_entries), len(consolidated_entries))
-    LOGGER.info("[Summary] processed_batches=%s skipped_batches=%s failed_batches=%s", lv1_stats["processed_batches"], lv1_stats["skipped_batches"], lv1_stats["failed_batches"])
-    LOGGER.info("[Summary] consolidated_entries=%s levels_processed=%s failed_levels=%s", consolidate_stats["consolidated_entries"], consolidate_stats["levels_processed"], consolidate_stats["failed_levels"])
 
 def run_cli() -> None:
     parser = argparse.ArgumentParser(
@@ -603,10 +505,6 @@ def run_cli() -> None:
         "--debug-log", type=str, metavar="FILE",
         help="Output prompts and LLM responses to a log file for debugging"
     )
-    parser.add_argument(
-        "--maintain-interval", type=int, metavar="N", default=ENV_MAINTAIN_INTERVAL,
-        help=f"Run maintain_memopedia every N messages processed (default: {ENV_MAINTAIN_INTERVAL}, env: MEMORY_WEAVE_MAINTAIN_INTERVAL)"
-    )
 
     args = parser.parse_args()
 
@@ -735,31 +633,13 @@ def run_cli() -> None:
         conn.close()
         sys.exit(0)
 
-    # Get Memopedia context for semantic memory (Memory Weave)
-    memopedia_context = None
-    try:
-        from sai_memory.memopedia import Memopedia, init_memopedia_tables
-
-        init_memopedia_tables(conn)
-        memopedia = Memopedia(conn)
-        memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
-        if memopedia_context and memopedia_context != "(まだページはありません)":
-            LOGGER.info(f"Using Memopedia context for semantic memory ({len(memopedia_context)} chars)")
-        else:
-            memopedia_context = None
-    except ImportError as e:
-        LOGGER.debug(f"Memopedia modules not available: {e}")
-    except Exception as e:
-        LOGGER.warning(f"Failed to get Memopedia context: {e}")
-
-    # Generate chronicle
+    # Generate chronicle using the unified pipeline (ArasujiGenerator.generate_unprocessed)
     generator = ArasujiGenerator(
         client,
         conn,
         batch_size=args.batch_size,
         consolidation_size=args.consolidation_size,
         include_timestamp=not args.no_timestamp,
-        memopedia_context=memopedia_context,
         persona_id=args.persona_id,
     )
 
@@ -773,89 +653,34 @@ def run_cli() -> None:
             pct = (processed / total) * 100
             LOGGER.info(f"Progress: {processed}/{total} ({pct:.1f}%)")
 
-    # Set up Memopedia batch callback if --with-memopedia is enabled (interleaved Memory Weave)
+    # Set up Memopedia batch callback if --with-memopedia is enabled
     batch_callback = None
-    memopedia_pages_total = 0
-    messages_since_maintain = 0
-
     if args.with_memopedia:
         try:
-            from sai_memory.memopedia import Memopedia, init_memopedia_tables
-            from scripts.build_memopedia import extract_knowledge
+            from sai_memory.memopedia import init_memopedia_tables
+            from sai_memory.memory.entity_extractor import make_batch_callback as make_entity_callback
 
-            # Initialize Memopedia tables
             init_memopedia_tables(conn)
-            memopedia = Memopedia(conn)
-            debug_log_path = Path(args.debug_log) if args.debug_log else None
-
-            def memopedia_batch_callback(batch_messages):
-                """Extract Memopedia pages for each batch (interleaved with Chronicle)."""
-                nonlocal memopedia_pages_total, messages_since_maintain
-
-                if not batch_messages:
-                    return
-
-                LOGGER.info(f"  [Memory Weave] Extracting Memopedia from batch ({len(batch_messages)} messages)...")
-
-                # Update Memopedia context for Generator (semantic memory gets updated per batch)
-                updated_memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
-                if updated_memopedia_context and updated_memopedia_context != "(まだページはありません)":
-                    generator.memopedia_context = updated_memopedia_context
-
-                try:
-                    pages = extract_knowledge(
-                        client,
-                        batch_messages,
-                        memopedia,
-                        batch_size=len(batch_messages),  # Process as single batch
-                        dry_run=args.dry_run,
-                        refine_writes=True,  # Use LLM to integrate content instead of simple append
-                        episode_context_conn=conn,
-                        debug_log_path=debug_log_path,
-                    )
-                    memopedia_pages_total += len(pages)
-                    LOGGER.info(f"  [Memory Weave] Extracted {len(pages)} pages (total: {memopedia_pages_total})")
-
-                    # Track messages for maintain_memopedia
-                    messages_since_maintain += len(batch_messages)
-
-                    # Run maintain_memopedia if interval is reached
-                    if args.maintain_interval > 0 and messages_since_maintain >= args.maintain_interval:
-                        LOGGER.info(f"  [Memory Weave] Running maintain_memopedia (interval: {args.maintain_interval})...")
-                        try:
-                            from scripts.maintain_memopedia import run_merge_similar, run_fix_markdown
-                            run_fix_markdown(memopedia, dry_run=args.dry_run)
-                            run_merge_similar(memopedia, client, dry_run=args.dry_run)
-                            messages_since_maintain = 0
-                            LOGGER.info("  [Memory Weave] Maintenance complete")
-                        except Exception as e:
-                            LOGGER.warning(f"  [Memory Weave] Maintenance failed: {e}")
-
-                except Exception as e:
-                    LOGGER.error(f"  [Memory Weave] Memopedia extraction failed: {e}")
-
-            batch_callback = memopedia_batch_callback
-            LOGGER.info("Memory Weave mode: Memopedia extraction will run per batch (interleaved)")
-
+            batch_callback = make_entity_callback(
+                client, conn,
+                persona_id=args.persona_id,
+            )
+            LOGGER.info("Memory Weave mode: entity extraction will run per batch (interleaved)")
         except ImportError as e:
-            LOGGER.error(f"Failed to import Memopedia modules: {e}")
-            LOGGER.error("Memopedia extraction disabled. Make sure sai_memory.memopedia is available.")
+            LOGGER.error(f"Failed to import entity extractor modules: {e}")
+            LOGGER.error("Memopedia extraction disabled.")
 
-    batches = split_message_batches(messages, args.batch_size)
-    level1_entries, lv1_stats = generate_level1_batches(
-        generator,
-        batches,
-        total_messages=len(messages),
+    level1_entries, consolidated_entries = generator.generate_unprocessed(
+        messages,
         dry_run=args.dry_run,
+        progress_callback=progress_callback,
         batch_callback=batch_callback,
     )
-    consolidated_entries, consolidate_stats = consolidate_levels(generator, dry_run=args.dry_run)
 
-    LOGGER.info(f"Generated {len(level1_entries)} level-1 chronicle")
-    LOGGER.info(f"Generated {len(consolidated_entries)} consolidated chronicle")
-    log_processing_summary(len(messages), level1_entries, consolidated_entries, lv1_stats, consolidate_stats)
-    if args.with_memopedia:
-        LOGGER.info(f"Generated {memopedia_pages_total} Memopedia pages (interleaved)")
+    LOGGER.info(
+        "[Summary] target_messages=%s generated_level1=%s consolidated=%s",
+        len(messages), len(level1_entries), len(consolidated_entries),
+    )
 
     # Update progress tracking
     if not args.dry_run and messages:

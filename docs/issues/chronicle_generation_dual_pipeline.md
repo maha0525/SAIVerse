@@ -1,5 +1,7 @@
 # Chronicle 生成パイプラインの二重実装
 
+## 状態: 解決済み (2026-05-28)
+
 ## 問題
 
 Chronicle 生成処理が2系統存在し、フィルタ条件やロジックの同期が取れていない。
@@ -10,65 +12,38 @@ Chronicle 生成処理が2系統存在し、フィルタ条件やロジックの
 
 さらに、メッセージ取得の先にある Chronicle 生成パイプライン自体が2系統に分かれていることが判明した。
 
-## 2系統の所在
+## 解決内容
 
-### 系統 A: runtime.py（Metabolism 経由）
+系統 B (CLI) の独自パイプラインを廃止し、系統 A と同じ `ArasujiGenerator.generate_unprocessed()` に統合した。
 
-```
-sea/runtime.py: _generate_chronicle()
-  → get_messages_for_chronicle()  ← 共通化済み
-  → ArasujiGenerator.generate_unprocessed()
-    - 既処理メッセージの判定（source_ids_json で processed_ids 算出）
-    - contiguous run 分割（処理済みメッセージで分断されたグループ判定）
-    - qualifying run フィルタ（batch_size 未満の孤立 run をスキップ）
-    - gap-fill 判定（既存 Lv-2 のカバー範囲内の Lv-1 を統合）
-    - incomplete entry 管理（Track Chronicle 用）
-    - batch_callback（Memopedia entity 抽出）
-```
+### 削除した独自実装
 
-### 系統 B: build_arasuji_core.py（CLI / UI 経由）
+- `split_message_batches()` — 単純な等分割（`generate_unprocessed()` の contiguous run 分割に統合）
+- `generate_level1_batches()` — 独自 Lv1 生成ループ（`generate_from_messages()` に統合）
+- `consolidate_levels()` — 独自統合ループ（`generate_from_messages()` 内の `maybe_consolidate()` に統合）
+- `log_processing_summary()` — 独自統計出力（簡潔なログに置換）
+- `--maintain-interval` — レガシー機能として削除
 
-```
-scripts/arasuji/build_arasuji_core.py: run_cli()
-  → fetch_messages() → get_messages_for_chronicle()  ← 共通化済み
-  → split_message_batches()  ← 独自実装、単純な等分割
-  → generate_level1_batches()  ← 独自実装、ArasujiGenerator の generate_from_messages 直呼び
-  → consolidate_levels()  ← 独自実装
-  → memopedia_batch_callback（旧 extract_knowledge 経由、entity_extractor ではない）
-```
+### 統合で得られた機能
 
-## 具体的な差異
+CLI / UI 経由の Chronicle 生成が runtime (Metabolism) と同じパイプラインを通るようになった:
 
-| 機能 | 系統 A (runtime) | 系統 B (build_arasuji_core) |
-|------|------|------|
-| メッセージ取得 | `get_messages_for_chronicle()` | `get_messages_for_chronicle()` |
-| 既処理判定 | `source_ids_json` で自動判定 | なし（offset/limit で手動制御） |
-| contiguous run 分割 | あり | なし（全メッセージを等分割） |
-| gap-fill | あり | なし |
-| incomplete entry | あり（Track Chronicle） | なし |
-| Memopedia 連携 | `entity_extractor.make_batch_callback` | 旧 `extract_knowledge`（別実装） |
-| バッチサイズ | env `MEMORY_WEAVE_BATCH_SIZE` | CLI 引数 `--batch-size` |
+- **既処理判定**: `source_ids_json` による正確なメッセージ単位の重複排除
+- **contiguous run 分割**: 処理済みメッセージで分断された「島」の個別処理
+- **gap-fill / dismantle**: 既存 Lv2 階層との整合性維持
+- **Memopedia 連携**: `entity_extractor.make_batch_callback` (Fragment ベース) に統一
+  - 旧 `extract_knowledge` (Page ベース) の呼び出しを廃止
 
-## 今回の応急処置
+### 維持した CLI 固有機能
 
-- メッセージ取得を `sai_memory.memory.storage.get_messages_for_chronicle()` に一元化
-- `CHRONICLE_EXCLUDED_TAGS` 定数でフィルタ条件を一箇所管理
-- 両系統から共通関数を呼ぶように修正済み
-
-## 必要な対応
-
-系統 B を系統 A の `generate_unprocessed()` に統合する。CLI / UI 経由でも同じパイプラインを通るようにする。
-
-### 注意点
-
-- 系統 B は `--offset` / `--limit` で範囲指定する機能がある。`generate_unprocessed()` にこのインターフェースがない
-- 系統 B の `--with-memopedia` は旧 `extract_knowledge` を使っており、現行の `entity_extractor` と別実装。これも統合対象
-- 系統 B の `--maintain-interval` による定期メンテナンス（merge_similar, fix_markdown）は系統 A にない
-- 系統 B はクエリの `LIMIT ? OFFSET ?` で範囲を絞るが、`get_messages_for_chronicle()` の共通化時にこの機能は維持済み
+- `--offset` / `--limit`: メッセージ取得段階で範囲を絞り、その範囲を `generate_unprocessed()` に渡す
+- `--no-timestamp`: `ArasujiGenerator(include_timestamp=False)` で渡す
+- `--debug-log`: `generator.debug_log_path` に設定
 
 ## 関連ファイル
 
 - `sai_memory/memory/storage.py` — `get_messages_for_chronicle()`, `CHRONICLE_EXCLUDED_TAGS`
-- `sea/runtime.py` — 系統 A の呼び出し元（`_generate_chronicle`）
-- `scripts/arasuji/build_arasuji_core.py` — 系統 B の全体
+- `sea/runtime.py` — runtime 側の呼び出し元（`_generate_chronicle`）
+- `scripts/arasuji/build_arasuji_core.py` — CLI 側（統合後）
 - `sai_memory/arasuji/generator.py` — `ArasujiGenerator`, `generate_unprocessed()`, `generate_from_messages()`
+- `sai_memory/memory/entity_extractor.py` — `make_batch_callback()` (Memopedia 連携の統一実装)

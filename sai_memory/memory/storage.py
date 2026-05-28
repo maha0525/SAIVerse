@@ -1709,6 +1709,12 @@ def count_planned_groups(conn: sqlite3.Connection) -> int:
 # are not the persona's own experiences and should not be summarized.
 CHRONICLE_EXCLUDED_TAGS = ('handy_tool', 'spell', 'event_message')
 
+# line_role values excluded from General Chronicle.
+# sub_line = lightweight model step execution (work logs)
+# meta_judgment = meta-layer decisions
+# nested = child line intermediate state (report_to_parent covers the parent)
+CHRONICLE_EXCLUDED_LINE_ROLES = ('sub_line', 'meta_judgment', 'nested')
+
 
 def get_messages_for_chronicle(
     conn: sqlite3.Connection,
@@ -1721,6 +1727,8 @@ def get_messages_for_chronicle(
     Applies standard exclusion filters:
     - Stelis threads (sub-agent work logs)
     - Messages tagged with handy_tool / spell / event_message
+    - Messages with line_role sub_line / meta_judgment / nested
+      (NULL line_role is allowed for pre-cognition-model messages)
 
     This is the single source of truth for "which messages go into Chronicle."
     Both runtime.py (Metabolism) and build_arasuji_core.py (CLI/UI) should
@@ -1732,7 +1740,8 @@ def get_messages_for_chronicle(
         offset: Number of messages to skip from the beginning.
     """
     limit_clause = f"LIMIT {int(limit)} OFFSET {int(offset)}" if limit > 0 else ""
-    placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
 
     cur = conn.execute(
         f"""
@@ -1743,11 +1752,12 @@ def get_messages_for_chronicle(
         )
         AND NOT EXISTS (
             SELECT 1 FROM json_each(metadata, '$.tags')
-            WHERE json_each.value IN ({placeholders})
+            WHERE json_each.value IN ({tag_placeholders})
         )
+        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
         ORDER BY created_at ASC
         {limit_clause}
         """,
-        CHRONICLE_EXCLUDED_TAGS,
+        CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES,
     )
     return [_row_to_message(row) for row in cur.fetchall()]
