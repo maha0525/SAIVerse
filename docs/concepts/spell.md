@@ -58,7 +58,7 @@ Tool を平文応答の中で `/spell <スペル名> key='value'` 構文で呼�
 
 - [Beat](beat.md) — Spell は Beat 内の平文から発動する
 - [Tool](tool.md) — Spell が呼ぶ実行単位
-- [Playbook](playbook.md) — `run_playbook` Spell（`/spell run_playbook`）でサブラインとして起動（接続点）
+- [Playbook](playbook.md) — `run_playbook` Spell でサブラインとして起動（接続点）
 - [Addon](addon.md) — MCP tool は `spell_tools[]` 経由で Spell 化される
 
 ## 参照

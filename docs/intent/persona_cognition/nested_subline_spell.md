@@ -29,23 +29,23 @@
 
 ### 統一後の構造
 
-**判断と発話を 1 ノードに合体する**。メインライン LLM は通常発話の中で `/run_playbook` Spell を呼んで Playbook を起動でき、結果 (report_to_parent) を踏まえて応答を続ける:
+**判断と発話を 1 ノードに合体する**。メインライン LLM は通常発話の中で `run_playbook` Spell を呼んで Playbook を起動でき、結果 (report_to_parent) を踏まえて応答を続ける:
 
 ```
 [track_user_conversation 等のメインライン Playbook]
   発話ノード (LLM)
     → 通常応答 (Spell 不使用) → 終了
     → /spell (即時ツール) → ツール実行
-    → /run_playbook(name="...") → サブライン Pulse 起動
+    → /spell run_playbook name='...' → サブライン Pulse 起動
         → サブライン Playbook 実行 (構造化 LLM 群)
         → 完了 → report_to_parent を生成 → 親メインラインに append
-    → 結果を踏まえて応答続行 / さらに /spell や /run_playbook 呼び出し可
+    → 結果を踏まえて応答続行 / さらに /spell や run_playbook 呼び出し可
 ```
 
 これにより:
 
 - ペルソナの意思決定 (どの Playbook を呼ぶか) が **メインライン LLM 自身の発話の流れ** に乗る
-- 軽い処理は Spell で 1 ターン完結、重い処理は `/run_playbook` でサブラインに投げる、という棲み分けが自然
+- 軽い処理は Spell で 1 ターン完結、重い処理は `run_playbook` でサブラインに投げる、という棲み分けが自然
 - LLM 呼び出し回数: 通常応答なら 1 回、Playbook を呼んでも 1 + (サブライン内の構造化呼び出し) 回で済む
 
 これが本機構の中心的な動機。
@@ -94,7 +94,7 @@
   ┌─ system prompt
   │    ├─ ペルソナ設定
   │    ├─ Spell スキーマ群 (item_view, searxng_search, ...)
-  │    ├─ /run_playbook Spell スキーマ
+  │    ├─ run_playbook Spell スキーマ
   │    └─ Playbook 一覧セクション (浅い階層)
   │         - memory_research: ChronicleやMemopediaを横断調査
   │         - deep_research: Web検索でレポート作成
@@ -102,9 +102,9 @@
   │
   ├─ 発話ノード (LLM, 重量級)
   │    出力例:
-  │      「メモ調べてくる /run_playbook(name="memory_research") 結果を踏まえて答えるね」
+  │      「メモ調べてくる /spell run_playbook name='memory_research' 結果を踏まえて答えるね」
   │
-  ├─ Spell parser が /run_playbook を検出
+  ├─ Spell parser が run_playbook を検出
   │    → サブライン Pulse 起動 (line_stack に push)
   │
   │  ┌─ [サブライン Pulse: memory_research]
@@ -113,7 +113,7 @@
   │  │      input: メインラインのコンテキスト要約
   │  │      output: { query, depth, context_refs, ... }
   │  │    ↓
-  │  │    各種ノード (tool / llm / sub_play / 別の /run_playbook も可)
+  │  │    各種ノード (tool / llm / sub_play / 別の run_playbook も可)
   │  │    ↓
   │  │    最終ノード: report_to_parent 生成
   │  │      "Memopedia の X / Chronicle の Y を見つけた。要約: ..."
@@ -123,21 +123,21 @@
   ├─ メインライン LLM が結果を踏まえて応答続行
   │    「なるほど、X と Y があったね。じゃあ ...」
   │
-  └─ 終了 / さらに /spell や /run_playbook 可
+  └─ 終了 / さらに /spell や run_playbook 可
 ```
 
 入れ子の場合:
 
 ```
-[メインライン] → /run_playbook(A)
-  [サブライン A (深さ 1)] → /run_playbook(B)
+[メインライン] → run_playbook(A)
+  [サブライン A (深さ 1)] → run_playbook(B)
     [サブライン B (深さ 2)] → 完了 → report_to_parent → A に append
   [サブライン A] 続行 → 完了 → report_to_parent → メインラインに append
 ```
 
 ---
 
-## 4. `/run_playbook` Spell 仕様
+## 4. `run_playbook` Spell 仕様
 
 ### スキーマ
 
@@ -174,7 +174,7 @@ def run_playbook(name: str) -> str:
 - ペルソナ設定
 - Spell スキーマ群
   - item_view, searxng_search, ...
-  - /run_playbook    ← 引数 name の値を決めるための情報は↓のセクションを参照
+  - run_playbook    ← 引数 name の値を決めるための情報は↓のセクションを参照
 - 利用可能な Playbook 一覧
   - memory_research: 過去の会話・知識を横断的に調査
   - deep_research: Web 検索を主体としたレポート作成
@@ -214,17 +214,17 @@ Playbook 数が増えた場合、以下の対応:
 ### 深さ制限
 
 - **上限: 4 階層**
-- メインライン = 深さ 0、最初の `/run_playbook` で 1、入れ子で 2、3、4
+- メインライン = 深さ 0、最初の `run_playbook` で 1、入れ子で 2、3、4
 - 深さ 5 以上の起動要求は ERROR ログを出して Spell 呼び出しをスキップ
 - 親に「深さ超過のため呼べなかった」旨を Spell 結果として返す
 
 ### 判定方法
 
-`PulseContext._line_stack` の深さで判定。`/run_playbook` Spell の実行時に現在の深さを取得し、上限超過なら起動せずエラー文字列を返す。
+`PulseContext._line_stack` の深さで判定。`run_playbook` Spell の実行時に現在の深さを取得し、上限超過なら起動せずエラー文字列を返す。
 
 ### 各サブライン内の Spell 使用
 
-サブライン Playbook の LLM ノードもメインラインと同じ Spell スキーマ群を持つ (`/run_playbook` 含む)。これにより:
+サブライン Playbook の LLM ノードもメインラインと同じ Spell スキーマ群を持つ (`run_playbook` 含む)。これにより:
 
 - サブライン内から別の Playbook を呼べる (深さが許す限り)
 - サブライン内で軽い Spell を直接呼べる (`memory_recall_unified` 等)
@@ -234,7 +234,7 @@ Playbook 数が増えた場合、以下の対応:
 ### 既存 `sub_play` ノードとの併用
 
 - **静的フロー** (Playbook グラフ内で必ずこの順序で sub Playbook を呼ぶ) → 既存 `sub_play` ノードを引き続き使う
-- **動的選択** (LLM が判断して呼ぶか決める) → `/run_playbook` Spell を使う
+- **動的選択** (LLM が判断して呼ぶか決める) → `run_playbook` Spell を使う
 - 両方が混在することは普通: Spell で呼ばれた Playbook が中で `sub_play` ノードを使うのは自然
 
 ---
@@ -293,7 +293,7 @@ Playbook 数が増えた場合、以下の対応:
 - **Line** (`line_role` / `line_id` / `scope`) が「次の Pulse のプロンプトに載るか・サブラインに閉じるか・このターン限りか」を決める
 - **タグ** (`metadata.tags`) は意味分類のみで、context 構築には**関与しない**
 
-`/run_playbook` 経由のサブラインも、上記責務分離の上に立つ。タグでサブライン的な揮発を表現する旧来のやり方 (`memorize.tags=["internal"]`) は本機構実装時点で廃止前提。
+`run_playbook` 経由のサブラインも、上記責務分離の上に立つ。タグでサブライン的な揮発を表現する旧来のやり方 (`memorize.tags=["internal"]`) は本機構実装時点で廃止前提。
 
 ### 基本ルール
 
@@ -321,7 +321,7 @@ Playbook 数が増えた場合、以下の対応:
 | サブライン内で確定した中間成果物 (次のサブライン Pulse でも使いたい) | `committed` |
 | メタ判断系の試行錯誤 (continue ならば消す) | `discardable` |
 
-`/run_playbook` 経由のサブラインは、原則 `volatile` で書く (Pulse 内で完結するため)。例外があれば Playbook 設計時に明示する。
+`run_playbook` 経由のサブラインは、原則 `volatile` で書く (Pulse 内で完結するため)。例外があれば Playbook 設計時に明示する。
 
 ---
 
@@ -329,7 +329,7 @@ Playbook 数が増えた場合、以下の対応:
 
 ### `router_callable` フラグ
 
-旧 `router_callable` フラグを流用 (名前は変更してもよい)。`/run_playbook` Spell が引数 `name` を受け取った時:
+旧 `router_callable` フラグを流用 (名前は変更してもよい)。`run_playbook` Spell が引数 `name` を受け取った時:
 
 1. DB から該当 Playbook をロード
 2. `router_callable=true` でなければエラー文字列を返す
@@ -365,7 +365,7 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 ### 構造化出力ノードとの相互作用
 
-- LLM ノードが `response_schema` を持つ場合、出力は JSON に固定される → Spell 構文 (`/spell_name(args)`) は出力されにくい
+- LLM ノードが `response_schema` を持つ場合、出力は JSON に固定される → Spell 構文 (`/spell <スペル名> key='value'`) は出力されにくい
 - 自由発話ノードは Spell 構文を出せる
 - → 「構造化出力なら Spell 不使用」「自由発話なら Spell 使える」が自然な棲み分けになる
 
@@ -379,7 +379,7 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 ### Playbook 名不正
 
-`/run_playbook(name="nonexistent")` のような呼び出し:
+`/spell run_playbook name='nonexistent'` のような呼び出し:
 
 - DB に該当 Playbook なし → エラー文字列を返す: `"Playbook 'nonexistent' not found. Available: ..."` (利用可能な Playbook を列挙)
 - メインラインは応答続行可能
@@ -425,7 +425,7 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 ### 段階移行ステップ
 
-1. ✅ **`/run_playbook` Spell 実装 + 深さ制限** (v0.24, 2026-05-01): `builtin_data/tools/run_playbook.py` 新規。Spell として登録。`pulse_ctx._line_stack` の長さで深さ判定 (上限 4 階層 = stack length 5)。テスト 10 件追加。
+1. ✅ **`run_playbook` Spell 実装 + 深さ制限** (v0.24, 2026-05-01): `builtin_data/tools/run_playbook.py` 新規。Spell として登録。`pulse_ctx._line_stack` の長さで深さ判定 (上限 4 階層 = stack length 5)。テスト 10 件追加。
 2. ✅ **`report_to_main` → `report_to_parent` リネーム** (v0.22, 2026-05-01): 段階 4-B と一体実施。コード全箇所と既存テストを更新。
 3. 🔲 **Playbook 一覧をシステムプロンプトに注入する機構**: prompt builder 改修。実機検証と一体で実施予定。
 4. 🔲 **`router_callable` の運用整理**: 既存 Playbook を見直して true/false を再設定 (現状 18 件 true / 25 件 false)。
@@ -441,11 +441,11 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 旧 `meta_user_manual.json` は「ユーザーが UI で選んだ Playbook を強制実行する」経路として、`auto_route` をスキップして `selected_playbook` を直接 `exec` する設計だった。これにより **メインライン LLM ラウンドは 1 回 + サブライン内コール** で旧 router 系より軽かった。
 
-新アーキ (本 intent doc 本体) は「メインライン LLM が発話の中で `/run_playbook` Spell を呼ぶ」を中心に据えるため、UI からの即時実行を「LLM への助言 (`<system>` タグ付き user メッセージ)」で表現すると:
+新アーキ (本 intent doc 本体) は「メインライン LLM が発話の中で `run_playbook` Spell を呼ぶ」を中心に据えるため、UI からの即時実行を「LLM への助言 (`<system>` タグ付き user メッセージ)」で表現すると:
 
 ```
-メインライン LLM 1 回目: "ユーザー要望を読んで /run_playbook を呼ぶ" を発話
-  → Spell loop が /run_playbook 検出 → サブライン実行 (N 回)
+メインライン LLM 1 回目: "ユーザー要望を読んで run_playbook を呼ぶ" を発話
+  → Spell loop が run_playbook 検出 → サブライン実行 (N 回)
   → メインライン LLM 2 回目: 結果を踏まえて応答
 ```
 
@@ -457,9 +457,9 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 ```
 [ユーザー送信 + UI 選択]
-  → track_user_conversation 起動 (pre_spells=["/run_playbook(name=memory_research)"])
+  → track_user_conversation 起動 (pre_spells=["/spell run_playbook name='memory_research'"])
   → Spell loop 入口: pre_spells を LLM 介さず実行
-    → /run_playbook(name=memory_research) → サブライン Pulse 起動
+    → /spell run_playbook name='memory_research' → サブライン Pulse 起動
       → サブライン Playbook 実行 (元から N 回)
       → report_to_parent が親 messages に append
   → メインライン LLM 1 回目: 既に結果が入った状態で応答生成 ← ここで終わり
@@ -470,23 +470,23 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 ### なぜこの形にするか
 
 - **既存 Spell loop の機構 (report_to_parent / media transport / line_role 自動分離) をそのまま流用できる**: 新規ランタイム経路は不要、`tools/run_playbook.py` を Spell loop の入口で直接呼べばいい
-- **「ペルソナが意思決定する」哲学を完全には壊さない**: Spell 結果がメインライン LLM に流入するという形は、LLM が自分で `/run_playbook` を呼んだ場合と同形。`<system>` タグ付き user メッセージで「ユーザー要望により実行しました」と添えれば、ペルソナから見ても文脈が自然に繋がる
+- **「ペルソナが意思決定する」哲学を完全には壊さない**: Spell 結果がメインライン LLM に流入するという形は、LLM が自分で `run_playbook` を呼んだ場合と同形。`<system>` タグ付き user メッセージで「ユーザー要望により実行しました」と添えれば、ペルソナから見ても文脈が自然に繋がる
 - **「強制実行」の哲学的歪みを最小化**: ペルソナ側の意思決定ノードはそのまま残り、結果を踏まえて応答する自由は保たれる。「LLM 判断をバイパスして機械的に実行」する範囲は Spell 1 回分だけ
 
 ### `pre_spells` の構文
 
-文字列リスト。各要素は Spell 構文と同じ形 (`/spell_name(arg1=value1, ...)` または `/spell_name`)。
+文字列リスト。各要素は Spell 構文と同じ形 (`/spell <スペル名> key='value'` または `/spell <スペル名>`)。
 
 ```json
 {
   "pre_spells": [
-    "/run_playbook(name=\"memory_research\")"
+    "/spell run_playbook name='memory_research'"
   ]
 }
 ```
 
 - 複数 Spell を並べた場合は **Spell loop の通常実行と同じ並列 / 直列規則**に従う (現状: 同ラウンドの spell を並列 `asyncio.gather`)
-- 解析失敗 (`/spell_name(...)` パース不可) は WARNING ログ + 該当エントリを skip。pulse は通常起動を続行
+- 解析失敗 (`/spell <スペル名> ...` パース不可) は WARNING ログ + 該当エントリを skip。pulse は通常起動を続行
 - 個々の Spell 実行失敗は通常の Spell loop と同じく、エラー文字列が user message として親 context に注入される
 
 ### `<system>` タグ付き user メッセージの併用
@@ -521,7 +521,7 @@ UI が `pre_spells` を送る時、合わせて user メッセージ側に文脈
 3. **UI 側**
    - `ToolModeSelector.tsx` の `TOOL_MODES` ハードコード列挙を撤去 (既存 TODO 解消)
    - `/api/config/playbooks?router_callable=true` で動的に Playbook 一覧を取得
-   - 選択時、chat 送信ペイロードに `pre_spells: ["/run_playbook(name=...)"]` を含める
+   - 選択時、chat 送信ペイロードに `pre_spells: ["/spell run_playbook name='...'"]` を含める
    - 「自動 (= pre_spells なし)」モードも残す (= 通常の track_user_conversation)
 4. **旧経路の廃止**
    - `meta_user_manual.json` Playbook を deprecated → 削除
@@ -532,13 +532,13 @@ UI が `pre_spells` を送る時、合わせて user メッセージ側に文脈
 | ケース | 挙動 |
 |---|---|
 | `pre_spells` 構文不正 | WARNING ログ、該当エントリ skip、pulse は通常起動 |
-| `/run_playbook(name="存在しない")` | 通常の Spell エラー経路 (エラー文字列が user message に注入)、メインライン LLM がそれを見て応答 |
+| `/spell run_playbook name='存在しない'` | 通常の Spell エラー経路 (エラー文字列が user message に注入)、メインライン LLM がそれを見て応答 |
 | `router_callable=false` の Playbook 指定 | 同上 (`run_playbook` Spell 内のチェックで弾かれる) |
 | 深さ超過 | メインライン起動時の pre_spells は深さ 0 → 1 への遷移なので、原理的に発生しない |
 
 ### Phase との位置付け
 
-Phase 3 の §12 段階移行ステップ 5-6 (`track_user_conversation` 書き換え + `meta_user` / `meta_user_manual` 廃止) と一体で実施。`/run_playbook` Spell 本体 (v0.24) が完成しているので、追加で必要なのは **Spell loop 入口の pre_spells 引数受け入れ** + **API / UI 配線**のみ。
+Phase 3 の §12 段階移行ステップ 5-6 (`track_user_conversation` 書き換え + `meta_user` / `meta_user_manual` 廃止) と一体で実施。`run_playbook` Spell 本体 (v0.24) が完成しているので、追加で必要なのは **Spell loop 入口の pre_spells 引数受け入れ** + **API / UI 配線**のみ。
 
 ---
 
@@ -548,7 +548,7 @@ Phase 3 の §12 段階移行ステップ 5-6 (`track_user_conversation` 書き�
 
 | Phase 3 タスク項目 | 本 intent doc 対応章 |
 |---|---|
-| `/run_playbook` Spell 仕様確定 | §4 |
+| `run_playbook` Spell 仕様確定 | §4 |
 | Spell loop → Playbook 起動の橋渡し runtime | §3, §6 |
 | 入れ子深さ制限 (上限 4 階層) | §6 |
 | `report_to_main` → `report_to_parent` リネームと伝搬経路 | §7 |

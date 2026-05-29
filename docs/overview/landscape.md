@@ -26,7 +26,7 @@ graph TD
     Pulse -->|実行| Playbook
     Playbook -->|発話ノードが生成| Beat
     Beat -->|発動| Spell
-    Spell -->|"/spell run_playbook"| Playbook
+    Spell -->|"run_playbook"| Playbook
     Spell -->|呼ぶ| Tool
 
     Session["Session (短期記憶)"]
@@ -222,7 +222,7 @@ graph TD
     Playbook -->|発話ノードが生成| Beat
     Beat -->|発動| Spell
     Spell -->|呼ぶ| Tool
-    Spell -->|"/spell run_playbook (サブライン)"| Playbook
+    Spell -->|"run_playbook (サブライン)"| Playbook
     Playbook -.->|report_to_parent| Beat
     Beat -->|積まれる| Session["Session (短期記憶 §6)"]
 ```
@@ -401,7 +401,7 @@ graph TD
 | Beat | 表示 | Building | 表示用が共有場に積まれる |
 | Beat | 積まれる | Session | 現 Pulse の出力が短期記憶へ |
 | Spell | 呼ぶ | Tool | 平文応答内で Tool 起動 |
-| Spell | `/spell run_playbook` | Playbook | ★接続点: 動的にサブライン起動 |
+| Spell | `run_playbook` で起動 | Playbook | ★接続点: 動的にサブライン起動 |
 | line | 階層化 | Pulse | main/sub で Pulse 階層を表現 |
 | aspect | 導出元 | line + scope + model | 4分類を導出 |
 | Phenomena | 起動 | Pulse | 外部イベントが新 Pulse を起動 |
