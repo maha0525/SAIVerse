@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.1 (2026-05-29 改訂 — 短期記憶 / 長期記憶の整理を反映)
+> **ステータス**: v1.2 (2026-05-29 改訂 — ユーザー視点 / Building = 共有メッセージ場を反映)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -28,10 +28,14 @@ graph TD
 
     Session["Session (短期記憶)"]
     LongTerm["長期記憶: SAIMemory / Chronicle / Memopedia"]
+    User((User))
     LongTerm -->|末尾を供給| Session
     head -->|含まれる| Session
-    Beat -->|積まれる| Session
-    Building -->|未読・システム通知| Session
+    Beat -->|自分の短期記憶へ| Session
+    Beat -->|発言が積まれる| Building
+    User -->|書き込む| Building
+    Building -->|チャットUIで見る| User
+    Building -->|未読・システム通知が流入| Session
     Session -->|判断材料| MetaJudgment
     Session -->|文脈| Beat
 
@@ -48,21 +52,29 @@ graph TD
 - **Playbook** — 行動の中心。Beat が生成され、Spell を介して Tool やサブライン Playbook に繋がる
 - **Session（短期記憶）** — 認知の中心。長期記憶の末尾・head・進行中の Beat・外界入力を集約し、**すべての LLM 判断（Meta-Judgment / Beat 生成）に供給する**
 
+**ユーザーとの接点**: これらの認知サイクルの外周に **User ⇄ Building** の感知ループがある。User はチャットUI（= Building）にメッセージを書き込み、ペルソナの Beat も Building に積まれる。Building は複数主体の**共有メッセージ場**であり、そこに居る全員（ユーザー・在室ペルソナ）が内容を各自の Session（短期記憶）に取り込む。つまり **Building = 公共の場 / Session = 各自の私的な短期記憶** という対比になる。
+
 各層の詳細は以下の章で、概念間の全関係は[補遺のリレーション表](#リレーション表全関係)で確認できる。
 
 ---
 
 ## 2. 世界の構成
 
-SAIVerse の世界は複数の層で構成される。最小の主体が **Persona**、それが活動する場所が **Building**、それらを束ねる運行インスタンスが **City**、世界に散在する物が **Item** である。
+SAIVerse の世界は複数の層で構成される。AI の主体が **Persona**、それと対話する人間が **User**、両者が発言を積む場が **Building**（チャットUI）、それらを束ねる運行インスタンスが **City**、世界に散在する物が **Item** である。
 
 ### Persona
 
 「自身が考え、選択し、行動する」AI 主体。コード上は `PersonaCore`（`persona/core.py`）、DB では `ai` テーブルに記録される。文字列 ID（`AIID`）で識別され、名前・アバター・システムプロンプトを持つ。常にいずれかの Building に所属し、現在位置は `current_building_id` で管理される。自律性は `ACTIVITY_STATE`（Stop / Sleep / Idle / Active の4段階）で外部に宣言される。
 
+### User
+
+SAIVerse を利用する人間（`User` テーブル、`CURRENT_CITYID` / `CURRENT_BUILDINGID` で現在地を保持）。チャットUI（= Building）にメッセージを書き込み、Building の内容を見る。ペルソナと並ぶ主体だが AI ではなく、**Building を介してペルソナと相互に感知し合う**。ペルソナにとってユーザーの発言は、Building 経由で Session（短期記憶 §6）に流入する外界入力の一つ。
+
 ### Building / City
 
-**Building** は会話・活動が生じる場（`Building` テーブル）。所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）、自動 pulse 間隔（`AUTO_INTERVAL_SEC`）を持つ。**City** は User が運営する一つの「世界」（`City` テーブル）。複数の Building を束ね、UI / API を公開するポート（`UI_PORT` / `API_PORT`）を持つ。City・Persona の双方がバージョン認識機構（`LAST_KNOWN_VERSION`）を持ち、アップデート時の状態移行を追跡する。
+**Building** は会話・活動が生じる場（`Building` テーブル）であり、**ユーザーから見えるチャットUI そのもの**。ペルソナの発言（Beat の表示用、§4）もユーザーの発言も、すべて Building に積まれることで、そこに居る他者（他ペルソナ・ユーザー）に感知される——いわば**複数主体の共有メッセージ場（共有黒板）**である。各 occupant は Building の未読メッセージを自分の Session（短期記憶）に読み込む。これにより Building（公共の場）と Session（各自の私的な短期記憶）が対をなす。Building は所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）、自動 pulse 間隔（`AUTO_INTERVAL_SEC`）を持つ。
+
+**City** は User が運営する一つの「世界」（`City` テーブル）。複数の Building を束ね、UI / API を公開するポート（`UI_PORT` / `API_PORT`）を持つ。City・Persona の双方がバージョン認識機構（`LAST_KNOWN_VERSION`）を持ち、アップデート時の状態移行を追跡する。
 
 ### Item
 
@@ -74,6 +86,9 @@ SAIVerse の世界は複数の層で構成される。最小の主体が **Perso
 graph LR
     City -->|束ねる| Building
     Building -->|居る| Persona
+    User((User)) -->|書き込む| Building
+    Persona -->|Beat を積む| Building
+    Building -->|チャットUI / 履歴| User
     Item -.->|"ItemLocation (多態)"| Building
     Item -.-> Persona
     Item -.-> world((world))
@@ -135,7 +150,7 @@ Beat は Pulse（認知サイクル）より小さく、message（記録単位�
 
 > ⚠️ **実装ギャップ（明示）**: Beat は概念として確立・命名されたが、**実装には型 / クラスとして存在しない**。実体は `sea/runtime_llm.py` の `_run_spell_loop` の戻り値 `full_merged_text`（ただの `str`）でしかない。名前が無いまま実装が育ったため、概念図で `Playbook → Spell` と中間が飛ばされる歪みを生んでいた。将来 `Beat` を型として導入するリファクタが必要（→ [issue](../issues/beat_concept_not_typed_in_implementation.md)）。
 
-Beat の構成: 発話ノード(LLM)の出力 + Spell loop 全 round の本文 + 各 Spell の `<user_only>` 結果ブロック + 最終 continuation の連結。Beat は記録先で2つに割れる: **表示用** = `full_merged_text`（Spell 結果込みの合成版、UI バブル / 建物履歴 / ペルソナ履歴）/ **長期記憶保存用** = `final_continuation`（最終発言のみ、重複回避）。生成された Beat は **Session（短期記憶、§6）にも積まれ**、次の Beat や Meta-Judgment の文脈になる。
+Beat の構成: 発話ノード(LLM)の出力 + Spell loop 全 round の本文 + 各 Spell の `<user_only>` 結果ブロック + 最終 continuation の連結。Beat は記録先で2つに割れる: **表示用** = `full_merged_text`（Spell 結果込みの合成版）/ **長期記憶保存用** = `final_continuation`（最終発言のみ、重複回避）。表示用の Beat は **Building（共有メッセージ場、§2）に積まれて**ユーザーや他ペルソナに感知され、同時に **自分の Session（短期記憶、§6）にも積まれ**て次の Beat や Meta-Judgment の文脈になる。
 
 ### Playbook / Spell / Tool
 
@@ -314,6 +329,9 @@ graph TD
 | From | → | To | 関係 |
 |---|---|---|---|
 | Persona | 居る | Building | ペルソナは建物内に存在 |
+| User | 書き込む | Building | ユーザーの発言が共有場に積まれる |
+| Building | チャットUIで見せる | User | ユーザーは Building を見る |
+| Beat | 積まれる | Building | ペルソナの発言（表示用）が共有場に積まれ他者に感知される |
 | Building | 属す | City | 建物は都市に属す |
 | Item | 在る | Building/Persona/world/bag | ItemLocation 多態で配置 |
 | Persona | 回す | Pulse | run_pulse で認知サイクル |
