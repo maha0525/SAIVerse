@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.4 (2026-05-29 改訂 — SAIMemory = 記憶 DB の容れ物として再整理 + Metabolism の発火元 Session を反映)
+> **ステータス**: v1.5 (2026-05-29 改訂 — 駆動の時間機構 SubLineScheduler / AutonomyManager と Handler の Pulse 挙動制御を反映)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -19,8 +19,9 @@ graph TD
     Persona -->|回す| Pulse
     PulseController -->|"起動 (優先度・割り込み)"| Pulse
     Building -->|発言を検知| PulseController
+    Schedulers["時間機構: SubLineScheduler 30s / AutonomyManager 50min"] -->|submit| PulseController
     MetaJudgment["Meta-Judgment"] -->|選ぶ| Track
-    Track -->|の中で| Pulse
+    Track -->|Handler が Pulse 挙動を規定| Pulse
     Pulse -->|内包| Beat
     Pulse -->|実行| Playbook
     Playbook -->|発話ノードが生成| Beat
@@ -112,11 +113,28 @@ graph LR
 
 ユーザー発話の経路は: **User が Building に書き込む → chat API → `SAIVerseManager.run_sea_user`（API とランタイムの仲介役）→ `PulseController.submit_user` → Pulse 起動**。つまり「ユーザー発言を検知して Pulse を発生させる主体」は **SAIVerseManager（受け口）+ PulseController（起動・優先度制御）** の2層である。この割り込み機構（ユーザーが話しかけたら自律行動を中断する）は、認知モデルの「割り込みと復帰」（→ [`roadmap_status.md`](roadmap_status.md) Phase 5 UC-2）の土台になっている。
 
+### 駆動の時間機構（誰がいつ Pulse を起こすか）
+
+PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。これらが `submit_*` で PulseController に Pulse を投げる:
+
+- **SubLineScheduler**（`pulse_scheduler.py`、30秒ポーリング）: running 状態の Track を拾って Pulse を回す。**自律 Track の「短時間で連続する Pulse」を駆動する主体**。自律 Track は連続実行型（下記 Handler）なので、メインキャッシュ TTL まで Pulse が連続する。実装済（`SAIVERSE_SUBLINE_SCHEDULER_ENABLED` で制御、既定有効）
+- **AutonomyManager**（`autonomy_manager.py`、既定50分間隔）: per-persona の self-rescheduling timer。periodic tick で `dispatch_autonomy_tick` → メタ判断 Pulse を起こす。**自律バイオリズムの大リズム**
+- **EventScheduler / InternalAlertPoller / Phenomena**: スケジュール実行・内部 alert ポーリング・外部イベントによる起動
+
+つまり自律稼働は2層のリズム: 大リズム（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → 小リズム（SubLineScheduler 30秒で running 自律 Track の Pulse を連続実行）。
+
 ### Track / Handler
 
 **Track**（通称「行動の線」、`action_tracks` テーブル）は進行中の作業文脈そのもの。対ユーザー会話・自律稼働・交流・外部通信などが各1本の Track として並存し、実行されるのは常にアクティブな1本のみ。休止中の Track は状態を保ったまま残り、判断により再開される。「永続 Track」（ユーザーごとの会話・交流）と「一時 Track」（プロジェクト・自律行動）の区別があり、永続 Track は完了・中止に遷移しない。
 
-**Handler** は Track 種別ごとの振る舞い（alert トリガー・Pulse リズム・許可 Playbook 等）を定義するパターン。新しい Track 種別の追加は対応する Handler を書くだけで済み、TrackManager 本体は変更しない。
+**Handler** は Track 種別ごとの振る舞いを定義するパターン（`track_handlers/`）。その中核が **`post_complete_behavior`**（Pulse 完了後にどうするか）で、これが Track 種別ごとの Pulse 挙動を決める:
+
+| Handler | `post_complete_behavior` | 挙動 |
+|---|---|---|
+| AutonomousTrackHandler | `meta_judge` | 完了後メタ判断 → 続行/切替/完了。**連続実行型**（`max_consecutive_pulses=-1`、TTL まで） |
+| UserConversationTrackHandler | `wait_response` | 完了後アイドル化、応答待ち（`max_consecutive_pulses=1`、**単発**） |
+
+これにより「自律 Track は連続、会話 Track は単発で応答待ち」という差が生まれる。SubLineScheduler はこの属性を見て Pulse を回すか止めるかを決める。新しい Track 種別の追加は対応する Handler を書くだけで済み、TrackManager 本体は変更しない。
 
 ### Meta-Judgment
 
@@ -135,16 +153,14 @@ Track 内の処理は複数の **line** に分かれ、3つの独立した軸で
 
 ```mermaid
 graph TD
-    User((User)) -->|発言| Building
-    Building -->|"SAIVerseManager 経由 (submit_user)"| PulseController
-    Schedule -->|submit_schedule| PulseController
+    User((User)) -->|"発言 (Building→SAIVerseManager→submit_user)"| PulseController
+    SubLineScheduler["SubLineScheduler (30s)"] -->|running Track を submit_auto| PulseController
+    AutonomyManager["AutonomyManager (50min)"] -->|tick で submit_meta_judgment| PulseController
     Phenomena -->|submit_auto| PulseController
     Session["Session (短期記憶 §6)"] -->|判断材料| MetaJudgment["Meta-Judgment"]
-    MetaJudgment -->|submit_meta_judgment| PulseController
+    MetaJudgment -->|選択| Track
     PulseController -->|"優先度 USER>SCHEDULE>AUTO + 割り込み"| Pulse
-    MetaJudgment -.->|選択| Track
-    Track -->|種別ごとの制御| Handler
-    Track -->|の中で連続実行| Pulse
+    Track -->|"Handler が Pulse 挙動を規定 (meta_judge=連続/wait_response=単発)"| Pulse
     Pulse -->|内包| Beat["Beat (§4)"]
     Pulse -->|複数の処理ライン| line
     aspect -->|導出| line
@@ -338,6 +354,7 @@ graph TD
 | **task** | `tasks.db` ベースのタスク管理。現状ほぼ死んでいる |
 | **working_memory** | `working_memory` テーブルは存在するが、ワーキングメモリ実装は死亡。短期記憶は §6 Session 概念へ |
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
+| **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換）。クラス削除は別タスク |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 
 ---
@@ -357,6 +374,9 @@ graph TD
 | Persona | 回す | Pulse | run_pulse で認知サイクル |
 | User発言/Schedule/Phenomena/Meta-Judgment | submit | PulseController | 4起動源が制御層に集約 |
 | Building | 発言を検知（SAIVerseManager 経由） | PulseController | ユーザー発言が `submit_user` へ |
+| SubLineScheduler | 30秒ポーリングで submit_auto | PulseController | running 自律 Track の Pulse を連続実行 |
+| AutonomyManager | 50分 tick で submit_meta_judgment | PulseController | 自律バイオリズムの大リズム |
+| Handler | `post_complete_behavior` で規定 | Pulse 挙動 | meta_judge=連続 / wait_response=単発 |
 | PulseController | 起動 | Pulse | 優先度（USER>SCHEDULE>AUTO）+ 割り込み制御で実行 |
 | Session | 判断材料 | Meta-Judgment | 短期記憶が判断の根拠 |
 | Meta-Judgment | 選ぶ | Track | どの Track を動かすか判断 |
@@ -396,6 +416,7 @@ graph TD
 | 長期記憶 DB（容れ物） | SAIMemory | per-persona `memory.db`。中身 = 生ログ / Chronicle / Memopedia |
 | 生ログ | Thread（⊃ Message） | `threads` / `messages` テーブル |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
+| 自律バイオリズム | AutonomyManager (50分) + SubLineScheduler (30秒) | 大リズム=メタ判断 tick / 小リズム=連続 Pulse |
 
 ### ドキュメント⇄実装の乖離（要追従）
 
