@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.3 (2026-05-29 改訂 — PulseController = Pulse 起動の制御層を反映)
+> **ステータス**: v1.4 (2026-05-29 改訂 — SAIMemory = 記憶 DB の容れ物として再整理 + Metabolism の発火元 Session を反映)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -29,7 +29,7 @@ graph TD
     Spell -->|呼ぶ| Tool
 
     Session["Session (短期記憶)"]
-    LongTerm["長期記憶: SAIMemory / Chronicle / Memopedia"]
+    LongTerm["長期記憶 SAIMemory: 生ログ / Chronicle / Memopedia"]
     User((User))
     LongTerm -->|末尾を供給| Session
     head -->|含まれる| Session
@@ -40,19 +40,19 @@ graph TD
     Building -->|未読・システム通知が流入| Session
     Session -->|判断材料| MetaJudgment
     Session -->|文脈| Beat
-
-    Pulse -->|記録| LongTerm
+    Session -->|継続不能で発火| Metabolism
     Metabolism -->|結晶化| LongTerm
-    Metabolism -->|更新| head
+    Metabolism -->|更新 → 新 Session| head
+    Pulse -->|記録| LongTerm
     Addon -->|提供| Tool
     Addon -->|提供| Playbook
 ```
 
 **4つのハブ概念**（線が集中する中心）:
 - **Pulse** — 駆動の中心。Track・Playbook・長期記憶・Session すべてに接続する
-- **長期記憶（SAIMemory）** — 記録の中心。Chronicle・Memopedia の源泉
+- **SAIMemory（長期記憶 DB）** — 記録の中心。生ログ・Chronicle・Memopedia を内包する容れ物
 - **Playbook** — 行動の中心。Beat が生成され、Spell を介して Tool やサブライン Playbook に繋がる
-- **Session（短期記憶）** — 認知の中心。長期記憶の末尾・head・進行中の Beat・外界入力を集約し、**すべての LLM 判断（Meta-Judgment / Beat 生成）に供給する**
+- **Session（短期記憶）** — 認知の中心。長期記憶の末尾・head・進行中の Beat・外界入力を集約し、**すべての LLM 判断（Meta-Judgment / Beat 生成）に供給する**。継続不能になると Metabolism を発火し、新 Session が始まる
 
 **ユーザーとの接点**: これらの認知サイクルの外周に **User ⇄ Building** の感知ループがある。User はチャットUI（= Building）にメッセージを書き込み、ペルソナの Beat も Building に積まれる。Building は複数主体の**共有メッセージ場**であり、そこに居る全員（ユーザー・在室ペルソナ）が内容を各自の Session（短期記憶）に取り込む。つまり **Building = 公共の場 / Session = 各自の私的な短期記憶** という対比になる。
 
@@ -205,15 +205,17 @@ graph TD
 
 ## 5. 長期記憶: 経験はどう蓄積されるか
 
-ペルソナの経験は長期記憶として層をなして蓄積される。生ログから始まり、時間軸で圧縮され、やがて知識へ結晶化する。**SAIMemory** が生ログ、**Chronicle** が時系列圧縮、**Memopedia** が知識グラフを担う。これらは「ペルソナが今見ているもの」=短期記憶（§6 Session）とは階層が異なり、必要に応じて短期記憶へ引き出される。
+ペルソナの長期記憶はすべて per-persona の SQLite DB **SAIMemory**（`memory.db`）に格納される。SAIMemory は記憶の**容れ物**であり、その中に「生ログ」「Chronicle」「Memopedia」が同居する。これらは短期記憶（§6 Session）とは階層が異なり、必要に応じて短期記憶へ引き出される。
 
-### SAIMemory（生ログ）
+> ⚠️ **注意**: SAIMemory は **DB（容れ物）の名前**であって、生ログそのものではない。生ログ・Chronicle・Memopedia・pulse_logs・memory_notes などはすべて SAIMemory の中身。
 
-ペルソナが経験したメッセージ・ツール呼び出し・思考は、per-persona の SQLite（`memory.db`）に時系列で記録される。`messages` テーブルが本体、Pulse 内の詳細は `pulse_logs` に記録される。重要なノード出力は両方に書く「二重書き込み」で確実に残る。タグ（conversation / internal / task / summary 等）で分類・検索される。
+### 生ログ（Thread / Message）
+
+ペルソナが経験したメッセージ・ツール結果・思考の時系列の連なり。個々の発言が **Message**（`messages` テーブル）、それを束ねる会話単位が **Thread**（`thread_id` / `get_or_create_thread`）。タグ（conversation / internal / task / summary 等）で分類・検索される。Pulse 内の詳細は `pulse_logs` テーブルに記録され、重要なノード出力は両方に書く「二重書き込み」で確実に残る。
 
 ### Chronicle（時系列圧縮 / Track 再開）
 
-蓄積されたメッセージは、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに「あらすじのあらすじ」（Lv2+）へ統合される（`arasuji_entries` テーブル）。加えて Track が中断・再開される際には `origin_track_id` 付きの Track 専用 Chronicle が生成され、その Track の目的に沿った情報が復帰時に呼び戻される。
+蓄積された Message は、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに「あらすじのあらすじ」（Lv2+）へ統合される（`arasuji_entries` テーブル）。加えて Track が中断・再開される際には `origin_track_id` 付きの Track 専用 Chronicle が生成され、その Track の目的に沿った情報が復帰時に呼び戻される。
 
 ### Memopedia（知識グラフ）
 
@@ -225,12 +227,15 @@ graph TD
 
 ```mermaid
 graph TD
-    Pulse -->|記録| SAIMemory["SAIMemory (生ログ)"]
-    Metabolism -->|"ArasujiGenerator (バッチ)"| Chronicle["Chronicle (圧縮)"]
-    Metabolism -->|"entity_extractor (batch_callback)"| Memopedia["Memopedia / Fragment (知識化)"]
-    SAIMemory --- Chronicle
-    SAIMemory --- Memopedia
-    SAIMemory -->|末尾を引き出し| Session["Session (短期記憶 §6)"]
+    subgraph SAIMemory["SAIMemory (memory.db = 容れ物)"]
+        ChatLog["生ログ: Thread ⊃ Message"]
+        Chronicle
+        Memopedia
+    end
+    Pulse -->|記録| ChatLog
+    Metabolism -->|"バッチ圧縮 (ArasujiGenerator)"| Chronicle
+    Metabolism -->|"知識化 (entity_extractor)"| Memopedia
+    ChatLog -->|末尾を引き出し| Session["Session (短期記憶 §6)"]
 ```
 
 ---
@@ -245,7 +250,7 @@ graph TD
 
 | 流入する情報 | 出どころ |
 |---|---|
-| チャットログの末尾 | SAIMemory（長期記憶 §5 から最近分を引き出し） |
+| 生ログの末尾 | Thread（長期記憶 §5）から最近の Message を引き出し |
 | head | キャッシュの効く安定領域（後述。head ⊂ Session） |
 | 現 Pulse 内の各 Beat | §4。Spell 結果込み（`memory_recall` で引いた長期記憶もここに乗る） |
 | Building の未読メッセージ | 外界からの新着入力 |
@@ -261,25 +266,26 @@ graph TD
 
 ### Metabolism（節目：短期リフレッシュ + 長期結晶化）
 
-節目を「作動」させるイベント。発火すると全 Section に `capture(live_state)` を走らせて **短期記憶（head snapshot）を再構築**しつつ、同時に **長期記憶への結晶化**（履歴圧縮・Chronicle 化・Fragment 生成 §5）を束ねて実行する。つまり Metabolism は**短期記憶と長期記憶をつなぐ節目**である。`_resolve_metabolism_anchor` が3段フォールバック（当該モデルの anchor → 別モデルの最新 → 最小ロード）で文脈取得を切り替える。**実装済**。
+**Session が継続不能になる**（cache TTL 切れ = Anchor 判定、context 過剰など）と発火する節目のイベント。発火すると全 Section に `capture(live_state)` を走らせて **短期記憶（head snapshot）を再構築**しつつ、同時に **長期記憶への結晶化**（履歴圧縮・Chronicle 化・Fragment 生成 §5）を束ねて実行し、**新しい Session を開始する**。つまり Metabolism は **Session を区切り直す節目**であり、同時に**短期記憶と長期記憶をつなぐ**。`_resolve_metabolism_anchor` が3段フォールバック（当該モデルの anchor → 別モデルの最新 → 最小ロード）で文脈取得を切り替える。**実装済**。
 
 ### Anchor（節目のマーカー）
 
-Metabolism の起点を指すマーカー。`METABOLISM_ANCHORS` は per-model dict として persona に紐付き、各 model ごとに `{anchor_id, updated_at, ttl_seconds}` を持つ。`updated_at` は prompt cache write 時刻で、LLM コール後に `_touch_anchor_after_llm_call` で touch される。`anchor_updated_at + ttl < now` で TTL 切れと判定され、True なら次の context 構築時に Metabolism が自動 trigger される。**実装済**。
+Metabolism の起点を指すマーカー。`METABOLISM_ANCHORS` は per-model dict として persona に紐付き、各 model ごとに `{anchor_id, updated_at, ttl_seconds}` を持つ。`updated_at` は prompt cache write 時刻で、LLM コール後に `_touch_anchor_after_llm_call` で touch される。`anchor_updated_at + ttl < now` で TTL 切れ（= Session 継続不能の予兆）と判定され、True なら次の context 構築時に Metabolism が自動 trigger される。**実装済**。
 
 ### ⚠️ 短期記憶 → 長期記憶の選別（要整理・リファクタ）
 
-短期記憶に流入する情報が、すべて長期記憶に残るべきとは限らない。特に**システム通知**（入室・アイテム増減など）は「その場で分かればいい」情報で、長期記憶にメッセージとして残す意義が薄い。現状は Chronicle 生成時にシステム通知を除外しているが、**そもそも長期記憶側に渡さない（入口で選別する）整理の方が綺麗**。要リファクタ（→ [issue](../issues/short_term_to_long_term_memory_filtering.md)）。
+短期記憶に流入する情報が、すべて長期記憶に残るべきとは限らない。特に**システム通知**（入室・アイテム増減など）は「その場で分かればいい」情報で、長期記憶にメッセージとして残す意義が薄い。現状は Chronicle 生成時にシステム通知を除外しているが、**そもそも長期記憶（生ログ）側に渡さない（入口で選別する）整理の方が綺麗**。要リファクタ（→ [issue](../issues/short_term_to_long_term_memory_filtering.md)）。
 
 ```mermaid
 graph TD
-    LongTerm["長期記憶 (§5)"] -->|末尾を引き出し| Session["Session (短期記憶)"]
+    LongTerm["長期記憶 §5 (生ログ Thread)"] -->|末尾を引き出し| Session["Session (短期記憶)"]
     head -->|含まれる| Session
     Beat["現Pulseの Beat (§4)"] -->|積まれる| Session
     World["Building 未読 / システム通知"] -->|流入| Session
     Session -->|判断材料・文脈| LLM["Pulse の全 LLM 判断 (Meta-Judgment / Beat 生成)"]
-    Anchor -->|TTL 切れで trigger| Metabolism
-    Metabolism -->|短期リフレッシュ| head
+    Session -->|継続不能で発火| Metabolism
+    Anchor -->|TTL 切れで判定| Metabolism
+    Metabolism -->|短期リフレッシュ → 新 Session| head
     Metabolism -->|"長期結晶化 (選別が要る)"| LongTerm
 ```
 
@@ -360,21 +366,22 @@ graph TD
 | Pulse | 実行 | Playbook | Pulse が Playbook グラフを回す |
 | Playbook(発話ノード) | 生成 | Beat | LLM 出力が1 Beat になる |
 | Beat | 発動 | Spell | Beat 内の平文が Spell を起動 |
-| Beat | 表示 | UI/建物履歴 | `full_merged_text`（Spell結果込み） |
+| Beat | 表示 | Building | 表示用が共有場に積まれる |
 | Beat | 積まれる | Session | 現 Pulse の出力が短期記憶へ |
 | Spell | 呼ぶ | Tool | 平文応答内で Tool 起動 |
 | Spell | `/run_playbook` | Playbook | ★接続点: 動的にサブライン起動 |
 | line | 階層化 | Pulse | main/sub で Pulse 階層を表現 |
 | aspect | 導出元 | line + scope + model | 4分類を導出 |
 | Phenomena | 起動 | Pulse | 外部イベントが新 Pulse を起動 |
-| Pulse | 記録 | SAIMemory(長期) | ログを長期記憶に追記 |
-| 長期記憶(SAIMemory) | 末尾を供給 | Session | 最近分が短期記憶へ |
-| head | 含まれる | Session | 短期記憶の安定部分（head ⊂ Session） |
-| Building(未読/通知) | 流入 | Session | 外界入力が短期記憶へ |
-| Session | 供給 | Pulse の全 LLM 判断 | 判断材料・文脈 |
-| Metabolism | 圧縮/知識化 | 長期記憶 | Chronicle 圧縮 + Fragment 生成（選別が要る） |
-| Metabolism | 更新 | head | 全 Section snapshot を再構築 |
-| Anchor | 印付け | head/Metabolism | TTL 切れで Metabolism を trigger |
+| SAIMemory | 内包 | 生ログ / Chronicle / Memopedia | DB（容れ物）が長期記憶3層を格納 |
+| Pulse | 記録 | 生ログ(Thread) | Message を `messages` に追記 |
+| 生ログ(Thread) | 末尾を供給 | Session | 最近の Message が短期記憶へ |
+| Chronicle | 圧縮元 | 生ログ(Thread) | Message を「あらすじ」へ圧縮 |
+| Memopedia | 抽出元 | 生ログ(Thread) | Message からエンティティ知識を Fragment 化 |
+| Session | 継続不能で発火 | Metabolism | Session が続けられなくなると節目が起きる |
+| Anchor | TTL 切れで判定 | Metabolism | cache 継続不能の予兆を検知 |
+| Metabolism | 短期リフレッシュ → 新 Session | head | 全 Section snapshot を再構築 |
+| Metabolism | 長期結晶化（選別が要る） | 長期記憶 | Chronicle 圧縮 + Fragment 生成 |
 | Addon | 提供 | Tool/Playbook/Phenomena | 拡張点を通じて結合 |
 | MCP | 登録 | Spell | MCP tool が spell_tools で Spell 化 |
 | SDS | 発見 | City | 都市レジストリ（冬眠中） |
@@ -386,7 +393,8 @@ graph TD
 | 行動の線 | Track | `action_tracks` テーブル |
 | メタレイヤー | Meta-Judgment Pulse | `meta_judgment.json` Playbook |
 | 短期記憶 / ワーキングメモリ | Session | 統一制御は未実装（起草中） |
-| 記憶（長期） | SAIMemory / Chronicle / Memopedia | per-persona `memory.db` |
+| 長期記憶 DB（容れ物） | SAIMemory | per-persona `memory.db`。中身 = 生ログ / Chronicle / Memopedia |
+| 生ログ | Thread（⊃ Message） | `threads` / `messages` テーブル |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
 
 ### ドキュメント⇄実装の乖離（要追従）
