@@ -1,6 +1,6 @@
 # SAIVerse 進捗マップ (Roadmap Status)
 
-> **ステータス**: v1.1 (2026-05-29 — Now セクション + 世界モデルの拡張を追加)
+> **ステータス**: v1.2 (2026-05-29 — ユーザー導入導線 (オンボーディング) を追加)
 > **位置づけ**: 「何が予定されていて、いまどこにいるか」を一望する。概念の関係を示す
 > [`landscape.md`](landscape.md) と対をなす、実装の現在地の地図。
 > **ステータス記法**: ✅ 完了 / 🟡 進行中 / 🔵 起草中 / 🔲 着手前 / 💤 冬眠
@@ -86,7 +86,17 @@
 
 ---
 
-## 6. 外部統合（構想・部分実装）
+## 6. ユーザー導入導線（オンボーディング）
+
+> 新規ユーザーが SAIVerse を導入・習熟するまでの導線。現状チュートリアルとマニュアルが手薄なのが課題。
+
+- 🟡 **チュートリアル** — `frontend/src/components/tutorial/`（PersonaWizard / StepPersonaChoice 等）。最低限のみ実装。**拡充が課題**
+- 🔲 **ユーザー向けマニュアル** — 利用者目線の概念解説（開発者向けリファレンス §10 とは別物）が存在しない。導入のハードルになっている
+- ✅ **ログインポート** — 過去の対話履歴を持ち込む導線。ChatGPT 公式エクスポート ZIP（`conversations.json`、分割ファイル対応）+ Chrome 拡張機能エクスポートをパースして SAIMemory にインポート（`tools/utilities/chatgpt_importer.py` / `api/routes/people/import_chatlog.py` / `MemoryImportForm.tsx`）。source 検出失敗時はヘッダー日付でタイムスタンプ補完
+
+---
+
+## 7. 外部統合（構想・部分実装）
 
 > 外部イベント統合の優先度や詳細は各 intent doc / memory を参照。
 
@@ -100,13 +110,13 @@
 
 ---
 
-## 7. 復活予定
+## 8. 復活予定
 
 - 💤 **SDS / multi-city**（Nature109 作。現状単一 City 運用のため停止中。将来 inter-city travel を復活させる際に再起動）
 
 ---
 
-## 8. 後回し課題 (docs/issues/)
+## 9. 後回し課題 (docs/issues/)
 
 未解決の課題は `docs/issues/*.md`、解決済みは `archive/` に移動（詳細は `docs/issues/README.md`）。現役 issue は `ls docs/issues/*.md` で確認する。
 
@@ -118,8 +128,10 @@
 
 ---
 
-## 9. 各概念のリファレンス文書化 (TODO Phase)
+## 10. 各概念のリファレンス文書化 (TODO Phase)
 
 地図完成後の次フェーズとして、各概念の解説ドキュメントを `docs/concepts/` 配下に整備する。
 現状、概念解説が intent doc と issue にしか存在しないため、独立したリファレンスが必要。
 （[`landscape.md`](landscape.md) の各章が、その種となる）
+
+> **2軸ある**: ここ（§10）は**開発者向け**の概念リファレンス。§6 のユーザー向けマニュアルは**利用者目線**で別物。両方とも未整備。

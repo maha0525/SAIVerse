@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.6 (2026-05-29 改訂 — 世界モデルの拡張 Fixture / Observer / Vessel と Social Track の現状を反映)
+> **ステータス**: v1.7 (2026-05-29 改訂 — 外部ログのインポート経路を §5 に追記)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -238,6 +238,8 @@ graph TD
 ### 生ログ（Thread / Message）
 
 ペルソナが経験したメッセージ・ツール結果・思考の時系列の連なり。個々の発言が **Message**（`messages` テーブル）、それを束ねる会話単位が **Thread**（`thread_id` / `get_or_create_thread`）。タグ（conversation / internal / task / summary 等）で分類・検索される。Pulse 内の詳細は `pulse_logs` テーブルに記録され、重要なノード出力は両方に書く「二重書き込み」で確実に残る。
+
+生ログへの入力は Pulse 記録だけではない。**外部ログのインポート**経路があり、ChatGPT 公式エクスポートや Chrome 拡張のエクスポートを SAIMemory に取り込める（新規ユーザーが過去の対話履歴を持ち込む導線 → [`roadmap_status.md`](roadmap_status.md) §6）。
 
 ### Chronicle（時系列圧縮 / Track 再開）
 
