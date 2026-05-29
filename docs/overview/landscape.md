@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.2 (2026-05-29 改訂 — ユーザー視点 / Building = 共有メッセージ場を反映)
+> **ステータス**: v1.3 (2026-05-29 改訂 — PulseController = Pulse 起動の制御層を反映)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -17,6 +17,8 @@ SAIVerse は、自律的に生き続ける AI ペルソナが住まう仮想世�
 ```mermaid
 graph TD
     Persona -->|回す| Pulse
+    PulseController -->|起動 (優先度・割り込み)| Pulse
+    Building -->|発言を検知| PulseController
     MetaJudgment["Meta-Judgment"] -->|選ぶ| Track
     Track -->|の中で| Pulse
     Pulse -->|内包| Beat
@@ -102,7 +104,13 @@ graph LR
 
 ### Pulse
 
-ペルソナの認知サイクル1回分（`run_pulse`）。アクティブな Track に対して思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源は4種類ある: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler）/ **Phenomena**（外部イベント、§4）/ **自律 Track**。
+ペルソナの認知サイクル1回分（`run_pulse`）。アクティブな Track に対して思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源は4種類ある: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler）/ **Phenomena**（外部イベント、§4）/ **自律 Track**。これらを集約・制御するのが下記の PulseController。
+
+### PulseController（Pulse 起動の制御層）
+
+4つの起動源は、すべて **PulseController**（`sea/pulse_controller.py`）に集約される（`submit_user` / `submit_schedule` / `submit_auto` / `submit_meta_judgment`）。PulseController は **優先度ベースのスケジューリング**（USER > SCHEDULE > AUTO）で Pulse 実行を捌き、高優先度の要求が来ると現在の実行を**割り込む**（キャンセル + 割り込みメッセージを記録 + 必要なら再キュー）。per-persona で同時1本（メタ判断レーンのみ並列）。
+
+ユーザー発話の経路は: **User が Building に書き込む → chat API → `SAIVerseManager.run_sea_user`（API とランタイムの仲介役）→ `PulseController.submit_user` → Pulse 起動**。つまり「ユーザー発言を検知して Pulse を発生させる主体」は **SAIVerseManager（受け口）+ PulseController（起動・優先度制御）** の2層である。この割り込み機構（ユーザーが話しかけたら自律行動を中断する）は、認知モデルの「割り込みと復帰」（→ [`roadmap_status.md`](roadmap_status.md) Phase 5 UC-2）の土台になっている。
 
 ### Track / Handler
 
@@ -127,8 +135,14 @@ Track 内の処理は複数の **line** に分かれ、3つの独立した軸で
 
 ```mermaid
 graph TD
+    User((User)) -->|発言| Building
+    Building -->|"SAIVerseManager 経由 (submit_user)"| PulseController
+    Schedule -->|submit_schedule| PulseController
+    Phenomena -->|submit_auto| PulseController
     Session["Session (短期記憶 §6)"] -->|判断材料| MetaJudgment["Meta-Judgment"]
-    MetaJudgment -->|選択| Track
+    MetaJudgment -->|submit_meta_judgment| PulseController
+    PulseController -->|"優先度 USER>SCHEDULE>AUTO + 割り込み"| Pulse
+    MetaJudgment -.->|選択| Track
     Track -->|種別ごとの制御| Handler
     Track -->|の中で連続実行| Pulse
     Pulse -->|内包| Beat["Beat (§4)"]
@@ -335,6 +349,9 @@ graph TD
 | Building | 属す | City | 建物は都市に属す |
 | Item | 在る | Building/Persona/world/bag | ItemLocation 多態で配置 |
 | Persona | 回す | Pulse | run_pulse で認知サイクル |
+| User発言/Schedule/Phenomena/Meta-Judgment | submit | PulseController | 4起動源が制御層に集約 |
+| Building | 発言を検知（SAIVerseManager 経由） | PulseController | ユーザー発言が `submit_user` へ |
+| PulseController | 起動 | Pulse | 優先度（USER>SCHEDULE>AUTO）+ 割り込み制御で実行 |
 | Session | 判断材料 | Meta-Judgment | 短期記憶が判断の根拠 |
 | Meta-Judgment | 選ぶ | Track | どの Track を動かすか判断 |
 | Track | の中で | Pulse | 1 Track 内で複数 Pulse が連続実行 |
@@ -370,6 +387,7 @@ graph TD
 | メタレイヤー | Meta-Judgment Pulse | `meta_judgment.json` Playbook |
 | 短期記憶 / ワーキングメモリ | Session | 統一制御は未実装（起草中） |
 | 記憶（長期） | SAIMemory / Chronicle / Memopedia | per-persona `memory.db` |
+| 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
 
 ### ドキュメント⇄実装の乖離（要追従）
 
