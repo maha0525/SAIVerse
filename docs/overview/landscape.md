@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.5 (2026-05-29 改訂 — 駆動の時間機構 SubLineScheduler / AutonomyManager と Handler の Pulse 挙動制御を反映)
+> **ステータス**: v1.6 (2026-05-29 改訂 — 世界モデルの拡張 Fixture / Observer / Vessel と Social Track の現状を反映)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -83,7 +83,15 @@ SAIVerse を利用する人間（`User` テーブル、`CURRENT_CITYID` / `CURRE
 
 持ち運べる物（`Item` テーブル）。「どこに在るか」は `ItemLocation` テーブルの多態で管理され、`OWNER_KIND` が `building` / `persona` / `world` / `bag` のいずれかを取る。同じ Item が異なる所有者に紐付くことで、建物に置かれているのか・ペルソナが手に持っているのかを表現する。`pickup` / `place` 操作で配置が更新される。
 
-対比概念として **Fixture**（建物に固定され持ち運べない設置物）が `observer.md` で構想されているが、**未実装**（テーブルは存在しない）。
+対比概念として **Fixture**（建物に固定され持ち運べない設置物）があり、下記の拡張中の存在論に連なる。
+
+### 拡張中の存在論: Fixture / Observer / Vessel
+
+世界モデルは Persona / Item に加えて拡張が進行中（詳細・進捗は [`roadmap_status.md`](roadmap_status.md) §5）:
+
+- **Fixture** — 持ち運べない固定設置物（リンゴの木・センサー・掲示板）。Building 直結で `pickup` 不可。世界の**第三の存在論**。`observer.md` v0.1、設計のみ・未実装
+- **Observer** — 定期実行能力を持つ Fixture。EventScheduler に相乗りして定期観測 → 時系列蓄積（`observer_metrics`）→ 閾値/変化で通知（SGP30 等のステートフルセンサー）。観測・通知だけ行い、判断はペルソナ側（pulse）の仕事
+- **Vessel** — ペルソナを物理デバイス（Stack-chan）の身体に「降ろす」。**Vessel Building にペルソナが居る間、その物理 I/O が身体感覚になる**（マイク=耳 / スピーカー=口 / カメラ=目 / タッチ=触覚）。本体フック `Building.PHYSICAL_VESSEL_ID`（実装済み）+ アドオン実装（`stackchan_vessel.md` v0.8）。本体の汎用 Vessel システムへの昇格が構想
 
 ```mermaid
 graph LR
@@ -126,6 +134,8 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 ### Track / Handler
 
 **Track**（通称「行動の線」、`action_tracks` テーブル）は進行中の作業文脈そのもの。対ユーザー会話・自律稼働・交流・外部通信などが各1本の Track として並存し、実行されるのは常にアクティブな1本のみ。休止中の Track は状態を保ったまま残り、判断により再開される。「永続 Track」（ユーザーごとの会話・交流）と「一時 Track」（プロジェクト・自律行動）の区別があり、永続 Track は完了・中止に遷移しない。
+
+> **ペルソナ間会話の現状**: 交流（Social）Track はペルソナ同士の会話の器で、`SocialTrackHandler` と自動作成はあるが、**「他ペルソナ発話イベントの受け口」（入口）が未実装**。そのためペルソナ間会話の機序はまだ成立しておらず、この地図でも描けていない（→ [`roadmap_status.md`](roadmap_status.md) §2）。
 
 **Handler** は Track 種別ごとの振る舞いを定義するパターン（`track_handlers/`）。その中核が **`post_complete_behavior`**（Pulse 完了後にどうするか）で、これが Track 種別ごとの Pulse 挙動を決める:
 
