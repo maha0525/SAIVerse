@@ -17,7 +17,7 @@ SAIVerse は、自律的に生き続ける AI ペルソナが住まう仮想世�
 ```mermaid
 graph TD
     Persona -->|回す| Pulse
-    PulseController -->|起動 (優先度・割り込み)| Pulse
+    PulseController -->|"起動 (優先度・割り込み)"| Pulse
     Building -->|発言を検知| PulseController
     MetaJudgment["Meta-Judgment"] -->|選ぶ| Track
     Track -->|の中で| Pulse
