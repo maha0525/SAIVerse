@@ -4,7 +4,7 @@
 
 ## 一言で
 
-Tool を平文応答の中で `/spell_name(key=value)` 構文で呼べるようにする仕組み。
+Tool を平文応答の中で `/spell <スペル名> key='value'` 構文で呼べるようにする仕組み。
 
 ## 役割
 
@@ -12,9 +12,15 @@ Tool を平文応答の中で `/spell_name(key=value)` 構文で呼べるよう�
 
 ## 仕組み
 
-ペルソナの [Beat](beat.md) 内の発話ノード（LLM）が平文中に `/spell_name(key=value)` を書く → `_run_spell_loop` が各 round で全 `/spell` 行を検出 → 並列実行 → 結果を `<user_only>` ブロックに包んで次の LLM round に渡す → spell が出なくなるまで繰り返す。結果は Beat に統合されて表示・記憶される。
+ペルソナの [Beat](beat.md) 内の発話ノード（LLM）が平文中に **`/spell ` で始まる行**を書く → `_run_spell_loop` が各 round で全 `/spell` 行を検出 → 並列実行 → 結果を `<user_only>` ブロックに包んで次の LLM round に渡す → spell が出なくなるまで繰り返す。結果は Beat に統合されて表示・記憶される。
 
-軽い処理は1往復の Spell で完結し、重い処理は `/run_playbook` Spell で [Playbook](playbook.md) をサブラインとして起動できる（Spell × Playbook の接続点）。
+構文には2形式がある（`_parse_spell_lines`）:
+- **正規形**: `/spell name='ツール名' args={...JSONオブジェクト...}`（`_normalize_spell_line` が生成する形。SAIMemory にはこの形で保存し、ペルソナが正しい構文を学習する）
+- **略式（fuzzy）**: `/spell ツール名 key='value' key2='value2'`（ペルソナが書きやすい形。パーサが正規形に正規化する）
+
+例: `/spell item_view item_id='it_3'` / `/spell track_complete track_id='t:3'`
+
+軽い処理は1往復の Spell で完結し、重い処理は `run_playbook` Spell（`/spell run_playbook name='memory_research'`）で [Playbook](playbook.md) をサブラインとして起動できる（Spell × Playbook の接続点）。
 
 ## ユーザーからの見え方（UI 接合点）
 
@@ -43,16 +49,16 @@ Tool を平文応答の中で `/spell_name(key=value)` 構文で呼べるよう�
 
 ## 実装
 
-- 主要ファイル: `sea/runtime_llm.py`（`_run_spell_loop` / `_parse_spell_lines` / `_run_spell_tool_async`）
+- 主要ファイル: `sea/runtime_llm.py`（`_run_spell_loop` / `_parse_spell_lines` / `_parse_spell_line` / `_normalize_spell_line` / `_run_spell_tool_async`）
 - Tool 登録: `tools/` registry。schema の `spell` / `spell_display_name` / `spell_visible` フィールド
-- 接続点: `builtin_data/tools/run_playbook.py`（`/run_playbook` Spell）
+- 接続点: `builtin_data/tools/run_playbook.py`（`run_playbook` Spell）
 - UI: `frontend/src/components/SpellConfirmDialog.tsx` / `ToolModeSelector.tsx`
 
 ## 関連概念
 
 - [Beat](beat.md) — Spell は Beat 内の平文から発動する
 - [Tool](tool.md) — Spell が呼ぶ実行単位
-- [Playbook](playbook.md) — `/run_playbook` Spell でサブラインとして起動（接続点）
+- [Playbook](playbook.md) — `run_playbook` Spell（`/spell run_playbook`）でサブラインとして起動（接続点）
 - [Addon](addon.md) — MCP tool は `spell_tools[]` 経由で Spell 化される
 
 ## 参照

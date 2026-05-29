@@ -26,7 +26,7 @@ graph TD
     Pulse -->|実行| Playbook
     Playbook -->|発話ノードが生成| Beat
     Beat -->|発動| Spell
-    Spell -->|"/run_playbook"| Playbook
+    Spell -->|"/spell run_playbook"| Playbook
     Spell -->|呼ぶ| Tool
 
     Session["Session (短期記憶)"]
@@ -194,20 +194,20 @@ Beat の構成: 発話ノード(LLM)の出力 + Spell loop 全 round の本文 +
 
 ### Playbook / Spell / Tool
 
-**Playbook** は LLM / tool / speak ノードのグラフで、条件分岐・反復が組める構造化フロー。**Tool** は実行単位（`tools/` registry の関数）。**Spell** は Playbook の発話ノードが平文中に書く `/spell_name(args)` 構文による Tool 呼び出し。
+**Playbook** は LLM / tool / speak ノードのグラフで、条件分岐・反復が組める構造化フロー。**Tool** は実行単位（`tools/` registry の関数）。**Spell** は Playbook の発話ノードが平文中に書く `/spell <スペル名> key='value'` 構文（正規形 `/spell name='...' args={...}`）による Tool 呼び出し。
 
 Spell の本質的目的は **ネイティブツールコールの撲滅**にある。ネイティブツールコールは必ずコンテキスト最上部に来るが、構造化応答ではそれが使えないため、平文応答と構造化応答でプロンプトキャッシュが必ずミスする。Spell 化すれば**平文応答と構造化応答でキャッシュを共用できる**。なお `memory_recall` などで能動的に引き出した長期記憶は、Spell 結果として Beat に取り込まれ、そのまま短期記憶に載る。
 
-### ★ Playbook × Spell の接続点（`/run_playbook` Spell）
+### ★ Playbook × Spell の接続点（`run_playbook` Spell）
 
-SAIVerse における超重要な交差点。メインライン LLM が発話の中で `/run_playbook(name="...")` を発行すると、指定 Playbook が **サブライン**として動的に起動される。
+SAIVerse における超重要な交差点。メインライン LLM が発話の中で `/spell run_playbook name='...'` を発行すると、指定 Playbook が **サブライン**として動的に起動される。
 
 - **引数は Playbook 名のみ**。具体引数は呼ばれた Playbook の最初の LLM ノードが構造化出力で決める（呼び出し側に引数組み立ての負担を負わせない）
 - **戻り値は `report_to_parent`**（文字列）。サブライン内の試行錯誤は `line_role="sub_line"` で記録され、親メインラインの context からは自動除外される（揮発するが長期記憶には残る）
-- **入れ子は最大4段**（`/run_playbook` の入れ子。`PulseContext._line_stack` 長で判定、5 段目の起動は拒否）
+- **入れ子は最大4段**（`run_playbook` の入れ子。`PulseContext._line_stack` 長で判定、5 段目の起動は拒否）
 - **`router_callable=true` の Playbook のみ**呼べる
 
-これにより「軽い処理は Spell で1ターン完結、重い処理は `/run_playbook` でサブラインに投げる」棲み分けが成立する。UI からの強制実行は `pre_spells` 機構（設計済・未実装）で同じ経路に乗せる。
+これにより「軽い処理は Spell で1ターン完結、重い処理は `run_playbook` でサブラインに投げる」棲み分けが成立する。UI からの強制実行は `pre_spells` 機構（設計済・未実装）で同じ経路に乗せる。
 
 ### Phenomena（世界側からのイベント入口）
 
@@ -222,7 +222,7 @@ graph TD
     Playbook -->|発話ノードが生成| Beat
     Beat -->|発動| Spell
     Spell -->|呼ぶ| Tool
-    Spell -->|"/run_playbook (サブライン)"| Playbook
+    Spell -->|"/spell run_playbook (サブライン)"| Playbook
     Playbook -.->|report_to_parent| Beat
     Beat -->|積まれる| Session["Session (短期記憶 §6)"]
 ```
@@ -401,7 +401,7 @@ graph TD
 | Beat | 表示 | Building | 表示用が共有場に積まれる |
 | Beat | 積まれる | Session | 現 Pulse の出力が短期記憶へ |
 | Spell | 呼ぶ | Tool | 平文応答内で Tool 起動 |
-| Spell | `/run_playbook` | Playbook | ★接続点: 動的にサブライン起動 |
+| Spell | `/spell run_playbook` | Playbook | ★接続点: 動的にサブライン起動 |
 | line | 階層化 | Pulse | main/sub で Pulse 階層を表現 |
 | aspect | 導出元 | line + scope + model | 4分類を導出 |
 | Phenomena | 起動 | Pulse | 外部イベントが新 Pulse を起動 |
