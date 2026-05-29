@@ -28,8 +28,9 @@
 - ✅ **Track** 実装・拡張中
 - ✅ **入れ子サブライン Spell**（`/run_playbook`、深さ4段、`report_to_parent`）実装済（v0.24）
 - ✅ **aspect** v0.2 実装済・実機検証待ち
-- 🔵 **session** 起草中（`docs/intent/session.md` v0.1）— 統一制御単位はコード未実装
+- 🔵 **session（= 短期記憶 / ワーキングメモリ）** 起草中（`docs/intent/session.md` v0.1）— 統一制御単位はコード未実装。Session は「節と節の間」という時間区間に留まらず、**ペルソナが今見ている短期記憶**（長期記憶の末尾・head・進行中 Beat・外界入力・システム通知の集約）であり、全 LLM 判断の入力ハブ
 - 🟡 **Metabolism / head / Anchor** 機構は Phase 1 実装済（`sea/head_pipeline/`）。Session 概念への統合は検討中
+- 🔲 **短期記憶 → 長期記憶の選別**（システム通知を長期記憶に渡さない入口選別 → [issue](../issues/short_term_to_long_term_memory_filtering.md)）
 - 🔲 **Beat の型導入**（概念は確立、実装に型なし → [issue](../issues/beat_concept_not_typed_in_implementation.md)）
 - 🔲 **Phase 5 土台**: A=tick/パラメータ/内部alert、B=時間差ツール、C=Social 運用化（UC-2 は C 軸）
 
@@ -83,7 +84,9 @@
 地図作成で起票したもの:
 - [Beat 概念が実装に型として存在しない](../issues/beat_concept_not_typed_in_implementation.md)
 
-掃除候補（[`landscape.md`](landscape.md) §9）: Blueprint（テーブル残存・未運用）/ Emotion（未活用）/ note_extractor（移行名残）/ Fixture（未実装）
+- [短期記憶 → 長期記憶の選別（システム通知を入口で止める）](../issues/short_term_to_long_term_memory_filtering.md)
+
+掃除候補（[`landscape.md`](landscape.md) §9）: Blueprint（テーブル残存・未運用）/ Emotion（未活用）/ task（ほぼ死亡）/ working_memory（実装死亡・Session へ）/ note_extractor（移行名残）/ Fixture（未実装）
 
 ---
 
