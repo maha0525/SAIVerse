@@ -642,7 +642,8 @@ Critical settings (see `.env.example`):
 - `docs/database_design.md`: table schemas and rationale
 - `docs/test_manual.md`: manual test scenarios
 - `docs/sea_integration_plan.md`: SEA framework integration roadmap
-- `docs/roadmap.md`: future features
+- `docs/overview/landscape.md`: 概念の俯瞰地図（何があってどう繋がるか）
+- `docs/overview/roadmap_status.md`: 進捗マップ（何が予定され、いまどこにいるか）
 - `docs/session_reflection_*.md`: lessons learned from development sessions (debugging approaches, etc.)
 - `README.md`: comprehensive setup and usage guide
 
