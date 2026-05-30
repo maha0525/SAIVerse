@@ -1089,3 +1089,57 @@
 :global([data-theme="light"]) .pageVividBuried {
     color: #cbd5e1;
 }
+
+/* Fragment section */
+.fragmentsSection {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid #334155;
+}
+
+.fragmentsTitle {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #94a3b8;
+    margin: 0 0 0.75rem 0;
+}
+
+.fragmentDateGroup {
+    margin-bottom: 0.75rem;
+}
+
+.fragmentDate {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 0.25rem;
+}
+
+.fragmentList {
+    margin: 0;
+    padding-left: 1.25rem;
+    list-style: disc;
+}
+
+.fragmentItem {
+    font-size: 0.9rem;
+    color: #e2e8f0;
+    line-height: 1.5;
+    margin-bottom: 0.15rem;
+}
+
+:global([data-theme="light"]) .fragmentsSection {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .fragmentsTitle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .fragmentDate {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .fragmentItem {
+    color: #1e293b;
+}

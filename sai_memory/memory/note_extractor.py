@@ -288,7 +288,7 @@ def make_batch_callback(
     Returns:
         A callback function compatible with ArasujiGenerator.generate_from_messages().
     """
-    def callback(batch_messages: List[Message]) -> None:
+    def callback(batch_messages: List[Message], chronicle_entry_id: Optional[str] = None) -> None:
         try:
             # Compute episode context for this batch's time range
             ep_ctx = ""

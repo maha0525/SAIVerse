@@ -35,6 +35,14 @@ interface EditHistoryEntry {
     edit_source: string | null;
 }
 
+interface MemopediaFragment {
+    id: string;
+    content: string;
+    source_date: string | null;
+    chronicle_entry_id: string | null;
+    created_at: number;
+}
+
 interface MemopediaViewerProps {
     personaId: string;
 }
@@ -56,6 +64,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [tree, setTree] = useState<TreeStructure | null>(null);
     const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
     const [pageContent, setPageContent] = useState<string>("");
+    const [pageFragments, setPageFragments] = useState<MemopediaFragment[]>([]);
     const [isLoadingPage, setIsLoadingPage] = useState(false);
     const [showList, setShowList] = useState(true);
 
@@ -156,10 +165,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             if (res.ok) {
                 const data = await res.json();
                 setPageContent(data.content);
+                setPageFragments(data.fragments || []);
             }
         } catch (error) {
             console.error("Failed to load page content", error);
             setPageContent("*Failed to load content*");
+            setPageFragments([]);
         } finally {
             setIsLoadingPage(false);
         }
@@ -1114,6 +1125,31 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         }}
                                     >{pageContent}</ReactMarkdown>
                                 </div>
+                                {pageFragments.length > 0 && (
+                                    <div className={styles.fragmentsSection}>
+                                        <h3 className={styles.fragmentsTitle}>Fragments ({pageFragments.length})</h3>
+                                        {(() => {
+                                            const grouped: Record<string, MemopediaFragment[]> = {};
+                                            for (const f of pageFragments) {
+                                                const key = f.source_date || "unknown";
+                                                if (!grouped[key]) grouped[key] = [];
+                                                grouped[key].push(f);
+                                            }
+                                            return Object.entries(grouped).map(([date, frags]) => (
+                                                <div key={date} className={styles.fragmentDateGroup}>
+                                                    <div className={styles.fragmentDate}>{date}</div>
+                                                    <ul className={styles.fragmentList}>
+                                                        {frags.map(f => (
+                                                            <li key={f.id} className={styles.fragmentItem}>
+                                                                {f.content}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            ));
+                                        })()}
+                                    </div>
+                                )}
                             </div>
                         )
                     ) : (

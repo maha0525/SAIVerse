@@ -46,12 +46,25 @@ def get_memopedia_tree(persona_id: str, manager = Depends(get_manager)):
 
 @router.get("/{persona_id}/memopedia/pages/{page_id}")
 def get_memopedia_page(persona_id: str, page_id: str, manager = Depends(get_manager)):
-    """Get a Memopedia page content as Markdown."""
+    """Get a Memopedia page content as Markdown, plus fragments."""
     with get_adapter(persona_id, manager) as adapter:
         try:
             memopedia = _get_memopedia(adapter)
             md = memopedia.get_page_markdown(page_id)
-            return {"content": md}
+            fragments = memopedia.get_fragments(page_id)
+            return {
+                "content": md,
+                "fragments": [
+                    {
+                        "id": f.id,
+                        "content": f.content,
+                        "source_date": f.source_date,
+                        "chronicle_entry_id": f.chronicle_entry_id,
+                        "created_at": f.created_at,
+                    }
+                    for f in fragments
+                ],
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
 

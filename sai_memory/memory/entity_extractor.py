@@ -311,37 +311,6 @@ def extract_entities(
     return entities
 
 
-def _append_notes_with_date_merge(
-    memopedia,
-    page_id: str,
-    date_str: str,
-    notes_lines: List[str],
-    edit_source: str = "entity_extractor",
-) -> None:
-    """Append notes to a page, merging into existing same-day header if present."""
-    from sai_memory.memopedia.storage import get_page, update_page as _update_page
-    page = get_page(memopedia.conn, page_id)
-    if page is None:
-        return
-
-    header = f"## {date_str}"
-    new_bullets = "\n".join(f"- {note}" for note in notes_lines)
-
-    content = page.content or ""
-    last_header_pos = content.rfind(header)
-
-    if last_header_pos != -1:
-        # Same-day header exists at the end area — append bullets after it
-        after_header = content[last_header_pos + len(header):]
-        merged = content[:last_header_pos + len(header)] + after_header.rstrip() + "\n" + new_bullets
-        _update_page(memopedia.conn, page_id, content=merged)
-    else:
-        notes_block = header + "\n" + new_bullets
-        memopedia.append_to_content(
-            page_id, notes_block,
-            edit_source=edit_source,
-        )
-
 
 def reflect_to_memopedia(
     entities: List[ExtractedEntity],
@@ -377,11 +346,6 @@ def reflect_to_memopedia(
         page = memopedia.find_by_title(entity.name)
 
         if page:
-            # Append notes to existing page content (with same-day merge)
-            if entity.notes:
-                _append_notes_with_date_merge(
-                    memopedia, page.id, date_str, entity.notes,
-                )
             # Update summary to reflect latest understanding
             if entity.summary and entity.summary != page.summary:
                 from sai_memory.memopedia.storage import update_page as _update_page
@@ -392,15 +356,13 @@ def reflect_to_memopedia(
             page_id = page.id
             is_new = False
         else:
-            # Create new page
+            # Create new page (content is manual-edit only; notes go to Fragments)
             root_id = CATEGORY_ROOT_IDS.get(entity.category, CATEGORY_ROOT_IDS[DEFAULT_CATEGORY])
-            notes_lines = [f"- {note}" for note in entity.notes]
-            notes_block = f"## {date_str}\n" + "\n".join(notes_lines) if notes_lines else ""
             new_page = memopedia.create_page(
                 parent_id=root_id,
                 title=entity.name,
                 summary=entity.summary,
-                content=notes_block,
+                content="",
                 edit_source="entity_extractor",
             )
             page_id = new_page.id
@@ -484,7 +446,7 @@ def make_batch_callback(
     conn: sqlite3.Connection,
     *,
     persona_id: Optional[str] = None,
-) -> Callable[[List[Message]], None]:
+) -> Callable[[List[Message], Optional[str]], None]:
     """Create a batch callback for Chronicle generation.
 
     Returns a callback that can be passed to ArasujiGenerator.generate_unprocessed()
@@ -497,14 +459,13 @@ def make_batch_callback(
         persona_id: Optional persona ID for usage tracking.
 
     Returns:
-        Callback function accepting a list of Message objects.
+        Callback function accepting (batch_messages, chronicle_entry_id).
     """
-    def callback(batch_messages: List[Message]) -> None:
+    def callback(batch_messages: List[Message], chronicle_entry_id: Optional[str] = None) -> None:
         if not batch_messages:
             return
 
         try:
-            # Get episode context for this batch's time range
             from sai_memory.arasuji.context import get_episode_context_for_timerange
             start_time = min(m.created_at for m in batch_messages)
             end_time = max(m.created_at for m in batch_messages)
@@ -521,6 +482,7 @@ def make_batch_callback(
                 client, conn, batch_messages,
                 episode_context=ep_ctx,
                 persona_id=persona_id,
+                chronicle_entry_id=chronicle_entry_id,
             )
 
             if results:
@@ -528,8 +490,10 @@ def make_batch_callback(
                 update_count = sum(1 for r in results if not r.is_new_page)
                 total_notes = sum(r.notes_appended for r in results)
                 LOGGER.info(
-                    "Entity extraction batch complete: %d entities (%d new, %d updated), %d notes total",
+                    "Entity extraction batch complete: %d entities (%d new, %d updated), "
+                    "%d notes total, chronicle_entry=%s",
                     len(results), new_count, update_count, total_notes,
+                    chronicle_entry_id[:12] if chronicle_entry_id else None,
                 )
         except Exception as exc:
             LOGGER.warning("Entity extraction batch callback failed: %s", exc, exc_info=True)

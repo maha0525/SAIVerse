@@ -736,6 +736,45 @@ def get_arasuji_messages(
     finally:
         conn.close()
 
+@router.get("/{persona_id}/arasuji/{entry_id}/fragments", tags=["Chronicle"])
+def get_arasuji_fragments(
+    persona_id: str,
+    entry_id: str,
+    manager = Depends(get_manager),
+):
+    """Get Memopedia fragments generated from a Chronicle entry."""
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT f.id, f.content, f.source_date, p.title AS page_title
+            FROM memopedia_fragments f
+            JOIN memopedia_pages p ON f.entity_id = p.id
+            WHERE f.chronicle_entry_id = ?
+            ORDER BY p.title, f.created_at
+            """,
+            (entry_id,),
+        ).fetchall()
+
+        fragments = [
+            {
+                "id": r[0],
+                "content": r[1],
+                "source_date": r[2],
+                "page_title": r[3],
+            }
+            for r in rows
+        ]
+        return {"fragments": fragments}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get fragments: {e}")
+    finally:
+        conn.close()
+
+
 @router.post("/{persona_id}/arasuji/messages-by-ids", response_model=List[SourceMessageItem], tags=["Chronicle"])
 def get_messages_by_ids(
     persona_id: str,
@@ -853,48 +892,18 @@ def _run_chronicle_generation(
         conn = init_db(str(db_path), check_same_thread=False)
         init_arasuji_tables(conn)
 
-        # Fetch all messages ordered by time (oldest first)
-        # Exclude Stelis threads — sub-agent work logs are not the persona's own experiences
+        # Fetch all messages suitable for Chronicle (shared filter logic)
         _update_job(job_id, message="Fetching messages...")
 
-        cur = conn.execute("""
-            SELECT id, thread_id, role, content, resource_id, created_at, metadata
-            FROM messages
-            WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-              AND NOT EXISTS (
-                SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell')
-              )
-            ORDER BY created_at ASC
-        """)
-
-        all_messages = []
-        for row in cur.fetchall():
-            msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-            metadata = {}
-            if metadata_raw:
-                try:
-                    metadata = json.loads(metadata_raw)
-                except Exception:
-                    LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
-            all_messages.append(Message(
-                id=msg_id,
-                thread_id=tid,
-                role=role,
-                content=content,
-                resource_id=resource_id,
-                created_at=created_at,
-                metadata=metadata,
-            ))
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        all_messages = get_messages_for_chronicle(conn)
 
         if not all_messages:
             _update_job(job_id, status="completed", progress=0, total=0, entries_created=0, message="No messages found")
             conn.close()
             return
 
-        # Log how many Stelis messages were excluded
-        stelis_count_row = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id IN (SELECT thread_id FROM stelis_threads)").fetchone()
-        stelis_excluded = stelis_count_row[0] if stelis_count_row else 0
-        LOGGER.info("[Chronicle Gen] Loaded %d messages (%d Stelis messages excluded)", len(all_messages), stelis_excluded)
+        LOGGER.info("[Chronicle Gen] Loaded %d messages (filtered by get_messages_for_chronicle)", len(all_messages))
 
         # Initialize LLM client
         _update_job(job_id, message="Initializing LLM client...")
@@ -951,7 +960,7 @@ def _run_chronicle_generation(
             try:
                 from scripts.build_memopedia import extract_knowledge
 
-                def memopedia_batch_callback(batch_messages):
+                def memopedia_batch_callback(batch_messages, chronicle_entry_id=None):
                     nonlocal memopedia_pages_total
                     if not batch_messages:
                         return
@@ -989,11 +998,11 @@ def _run_chronicle_generation(
             # Chain with existing batch_callback if present
             existing_callback = batch_callback
 
-            def combined_batch_callback(batch_messages):
+            def combined_batch_callback(batch_messages, chronicle_entry_id=None):
                 nonlocal entity_batches_total
                 if existing_callback:
-                    existing_callback(batch_messages)
-                entity_callback(batch_messages)
+                    existing_callback(batch_messages, chronicle_entry_id)
+                entity_callback(batch_messages, chronicle_entry_id)
                 entity_batches_total += 1
 
             batch_callback = combined_batch_callback

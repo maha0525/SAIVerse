@@ -2,7 +2,7 @@
 
 ## これは何か
 
-Memopedia のデータモデルを、現行の「ページにノートが縦積みされるフラット構造」から、**Fragment（知識の最小単位）を中心としたナレッジグラフ構造**に再設計する構想。Fragment はエンティティ（何について）と Chronicle（どの文脈で）の両方に紐づき、Chronicle の統合と連動した圧縮（忘却）と、embedding 検索による想起を実現する。
+Memopedia のデータモデルを、現行の「ページにノートが縦積みされるフラット構造」から、**Fragment（知識の最小単位）を中心としたナレッジグラフ構造**に再設計する構想。Fragment はエンティティ（何について）と Chronicle（どの文脈で）の両方に紐づき、embedding 検索による想起と文脈復元を実現する。
 
 Memopedia 固有の概念は Fragment とエンティティの2つだけ。時系列軸のグルーピング（テーマ）は Chronicle の統合階層がそのまま担うため、Memopedia 側に別途テーマノードを持たない。
 
@@ -38,32 +38,33 @@ Chronicle 生成時に会話からエンティティを抽出し、ページに�
 
 **④ 古い詳細情報の滞留**
 
-ChatbotUI 導入期の詳細（PostgreSQL の設定ファイル操作、Supabase マイグレーションの試行錯誤等）がページに残り続ける。現在は SAIVerse に完全移行済みで、これらの詳細を保持する必要はない。Chronicle が古い出来事を粗いあらすじに統合するのと同様の「圧縮」が Memopedia にも必要。
+ChatbotUI 導入期の詳細（PostgreSQL の設定ファイル操作、Supabase マイグレーションの試行錯誤等）がページに残り続ける。現在は SAIVerse に完全移行済みで、これらの詳細を保持する必要はない。ページインデックスから落とすことで**表面上は忘れたように見える**が、関連する話題が出れば Fragment 検索で再浮上する。
 
 ### 構造的な限界
 
-問題①②はプロンプト改善で軽減できるが、③④はデータモデル自体の限界に起因する。現行構造ではページ内の個々の記述（ノート）が独立した単位として扱われず、時系列との紐付けもない。「どのノートがどの時期のもので、今も必要か」を判断する手段がない。
+問題①②はプロンプト改善で軽減できるが、③④はデータモデル自体の限界に起因する。現行構造ではページ内の個々の記述（ノート）が独立した単位として扱われず、時系列との紐付けもない。Fragment 化により個々の記述が独立した検索可能な単位となり、④はページインデックスの忘却で対処する。
 
 ## 設計思想
 
-### Chronicle との対称性
+### Chronicle との連携
 
 Chronicle は時系列データを階層的に圧縮する仕組み:
 - 生ログ → Lv-1 あらすじ → Lv-2 統合 → ...
 - 古い出来事ほど粗い粒度になる
 - 詳細は失われるが、「そういう時期があった」という記憶は残る
 
-Memopedia にも同じ哲学を適用する:
-- 個別 Fragment → エンティティページにグルーピング
-- Chronicle が統合されると、配下の Fragment も段階的に圧縮される
-- 詳細は見えなくなるが、Chronicle の上位要約として残る
+Memopedia はこれと**対称ではなく補完**する:
+- Fragment は蓄積専用。Chronicle のように段階的に消えていくことはない
+- Fragment を Chronicle Lv-1 にリンクすることで、想起時に「そのとき何があったか（あらすじ）」と「同じ文脈で書かれた別の知識（共起 Fragment）」を芋づる式に復元できる
+- 忘却の対象は Fragment ではなくページ（エンティティ）のインデックス掲示。最近参照されないページは表面（常時コンテキスト注入）から落ちるが、Fragment embedding 検索でヒットすれば復帰する
 
 ### 人間の記憶のメタファー
 
 | メタファー | 対応する仕組み |
 |-----------|---------------|
 | 普段は忘れてるが、関連する話が出たら思い出す | Fragment embedding 検索 → エンティティページ想起 |
-| 最近の出来事は鮮明、古い出来事はぼんやり | Chronicle 統合連動の段階的圧縮 |
+| 思い出したら芋づるで色々出てくる | chronicle_entry_id → 同時期の Fragment + あらすじ |
+| 最近の出来事ほど思い出しやすい | ページインデックスの最終参照順 |
 | 重要な記憶はいつでも思い出せる | is_important フラグ、常駐コアメモリ |
 | 「何があったか」と「何を知っているか」は別 | Chronicle（体験の流れ）と Memopedia（知識の辞書）の棲み分け |
 
@@ -109,15 +110,17 @@ Memopedia にも同じ哲学を適用する:
 ```
 1. 抽出: Chronicle Lv-1 生成時のバッチコールバックで Fragment を生成
          → エンティティノードに紐付け
-         → 生成元の Chronicle Lv-1 エントリに紐付け
+         → 生成元の Chronicle Lv-1 エントリに chronicle_entry_id で紐付け
 
-2. 活用: embedding 検索で Fragment がヒット
+2. 蓄積: Fragment は削除されない。ページ指定の recall で全 Fragment が返る
+
+3. 想起: embedding 検索で Fragment がヒット
          → 所属エンティティノードの情報を想起
-
-3. 圧縮: Chronicle Lv-2 統合時、統合された Lv-1 群に紐づく Fragment 群の
-         vividness を下げて不可視化（検索インデックスは維持）
-         テーマの要約 = Chronicle Lv-2 の content がそのまま機能する
+         → chronicle_entry_id → 当時の Chronicle Lv-1（あらすじ）を復元
+         → 同じ chronicle_entry_id を持つ他の Fragment も芋づる想起
 ```
+
+Fragment は圧縮・忘却の対象ではない。忘却は**ページ（エンティティ）のインデックス掲示**で制御する。最近参照されないページは表面から落ちるが、Fragment embedding 検索でヒットすれば復帰する。
 
 ## 抽出段階の改善
 
@@ -154,76 +157,45 @@ Memopedia にも同じ哲学を適用する:
 
 Fragment に embedding を持たせることで、新規 Fragment 生成時に既存 Fragment との類似度を計算し、高類似度の Fragment は追加をスキップできる。
 
-## 圧縮（忘却）メカニズム
+## 忘却メカニズム
 
-### Chronicle 連動の圧縮
+### Fragment は忘却しない
 
-リアルタイムの時間経過ではなく、**Chronicle の統合イベントをトリガーとする**。
+Fragment は蓄積専用であり、圧縮・不可視化の対象ではない。ページ指定の recall では常に全 Fragment が返る。
 
-```
-Chronicle Lv-2 統合が発生
-  │
-  ├── 統合された Lv-1 エントリ群を特定
-  │
-  ├── それらの Lv-1 に紐づく Fragment 群を収集
-  │
-  └── 対象 Fragment の vividness を下げて不可視化
-      （検索インデックスは維持）
-      テーマの要約は Chronicle Lv-2 の content が担う
-      → Memopedia 側にテーマノードを別途作る必要がない
-```
+**理由**: Memopedia はページ単位で想起される（「まはーについて思い出して」「PostgreSQL のこと教えて」）。ページ内の Fragment を間引くと recall の情報量が劣化する。Chronicle のように「古い出来事をぼかす」必要はない — 知識は古くても正確であることに価値がある。
 
-### 圧縮の段階性
+### ページインデックスの忘却
 
-Chronicle の統合レベルに直接対応する:
+忘却の対象は**ページ（エンティティ）のインデックス掲示**。常時コンテキストに注入されるのは各カテゴリ最大100件のタイトル + サマリであり、最終参照/書き込み順でソートされる。長期間参照されないページは表面から落ちるが:
 
-- **Lv-2 統合時**: 配下 Lv-1 に紐づく Fragment 群を圧縮。Chronicle Lv-2 が比較的具体的なテーマ要約を提供（「ChatbotUI の PostgreSQL 認証設定」相当）
-- **Lv-3+ 統合時**: さらに上位の圧縮。Chronicle Lv-3+ がより抽象的なテーマ要約を提供（「ChatbotUI 導入期」相当）
-
-Fragment の vividness が各段で自動的に下がっていく。
-
-### vividness の再定義
-
-Fragment の圧縮度合いを表す指標として再解釈する:
-
-| vividness | 意味 | 可視性 |
-|-----------|------|--------|
-| vivid | 活性状態。紐づく Chronicle がまだ Lv-1 のみ | エンティティページから直接見える |
-| rough | 紐づく Chronicle が Lv-2 に統合済み | 通常のエンティティビューからは非表示、Chronicle Lv-2 経由で参照可能 |
-| faint | 紐づく Chronicle が Lv-3+ に統合済み | 検索ヒットでのみアクセス |
-| buried | 深層に沈んだ状態 | 検索ヒットでのみ浮上 |
-
-vividness の変化は Chronicle 統合イベントに連動して自動的に起きる。手動設定も可能だが、基本は自動制御。
+- Fragment embedding 検索でヒットすれば自動的に復帰する
+- is_important フラグを持つページは常駐する
+- ページや Fragment 自体は削除されない
 
 ## 想起メカニズム
 
-### 2段階の想起
+### 想起の流れ
 
-**リアルタイム想起（会話中）**:
-
-Chronicle 生成を待たず、会話の文脈から即座に関連情報を引き出す。
+**Fragment embedding 検索（メイン経路）**:
 
 ```
 ユーザー発言 / 会話コンテキスト
   → unified_recall で Fragment embedding 検索
   → ヒットした Fragment の所属エンティティノードを特定
-  → エンティティノードの全情報（summary + 可視 Fragment）をコンテキスト末尾に取り込み
+  → エンティティノードの全情報（summary + 全 Fragment）をコンテキストに取り込み
+  → chronicle_entry_id → 当時の Chronicle Lv-1 あらすじも取得（文脈復元）
+  → 同じ chronicle_entry_id を持つ他の Fragment → 共起知識の芋づる想起
 ```
 
-Fragment 単位の embedding は、ページ単位と比べて検索精度が高い。「SSL エラー」で検索すれば、PostgreSQL のエンティティに紐づく SSL 関連の Fragment がヒットし、そこから PostgreSQL の全情報が芋づる式に想起される。
-
-圧縮済み（faint/buried）の Fragment も検索インデックスには残すため、古い情報でも関連する話題が出れば想起される。
-
-**バッチ更新（Chronicle 生成時）**:
-
-Chronicle 生成のバッチコールバックで、エンティティとして抽出されたページの vividness を vivid に引き上げる。これにより「最近話題に出たエンティティ」が自動的に活性化する。
+Fragment 単位の embedding は、ページ単位と比べて検索精度が高い。「SSL エラー」で検索すれば、PostgreSQL のエンティティに紐づく SSL 関連の Fragment がヒットし、そこから PostgreSQL の全情報が芋づる式に想起される。さらに chronicle_entry_id を辿れば、同じ会話バッチで抽出された Supabase の Fragment なども一緒に浮上する。
 
 ### 普段のコンテキスト構成
 
 Fragment 検索による想起が実用的になることで、普段からコンテキストに載せるべき情報は最小限になる:
 
 - **常駐（コアメモリ）**: ペルソナのアイデンティティに関わる is_important なエンティティ情報（ユーザーとの関係性、大切な約束等）
-- **インデックス**: 各カテゴリ最大100エンティティの title + summary を、最終参照/書き込み順で掲示。ペルソナが「自分がどんな知識を持っているか」を自覚するための目次。101件目以降のエンティティはインデックスに載らないが、Fragment embedding 検索でヒットすれば想起される（消えるわけではない）
+- **インデックス**: 各カテゴリ最大100エンティティの title + summary を、最終参照/書き込み順で掲示。ペルソナが「自分がどんな知識を持っているか」を自覚するための目次。最終参照が古いページは自然にインデックスから落ちるが、Fragment embedding 検索でヒットすれば復帰する
 - **それ以外**: Fragment embedding 検索に委ねる。普段はコンテキストに載らないが、関連する話題が出れば随時想起される
 
 ## データモデル
@@ -236,15 +208,15 @@ CREATE TABLE IF NOT EXISTS memopedia_fragments (
     content TEXT NOT NULL,           -- 1文の事実・属性記述
     entity_id TEXT NOT NULL,         -- 所属エンティティノード
     chronicle_entry_id TEXT,         -- 生成元の Chronicle Lv-1 エントリ（静的属性はNULL）
-    vividness TEXT DEFAULT 'vivid',  -- vivid/rough/faint/buried
     source_date TEXT,                -- 抽出元の日付（YYYY-MM-DD）
     created_at INTEGER NOT NULL,
     FOREIGN KEY (entity_id) REFERENCES memopedia_pages(id)
 );
 CREATE INDEX idx_fragments_entity ON memopedia_fragments(entity_id);
 CREATE INDEX idx_fragments_chronicle ON memopedia_fragments(chronicle_entry_id);
-CREATE INDEX idx_fragments_vividness ON memopedia_fragments(vividness);
 ```
+
+**vividness カラムは廃止**。Fragment は忘却対象ではないため不要（既存データの vividness カラムは残置しても害はないが、新規コードでは参照しない）。
 
 ### Fragment embedding テーブル（新設）
 
@@ -256,7 +228,7 @@ CREATE TABLE IF NOT EXISTS memopedia_fragment_embeddings (
 );
 ```
 
-テーマノードテーブルは不要。Chronicle 統合階層（arasuji_entries テーブル）がテーマ軸を担う。Fragment → chronicle_entry_id → arasuji_entries の parent/child 関係で辿れる。
+テーマノードテーブルは不要。Chronicle 統合階層（arasuji_entries テーブル）がテーマ軸を担う。Fragment → chronicle_entry_id → arasuji_entries の parent/child 関係で辿れば「どの時期・どの文脈の知識か」が分かる。想起時には chronicle_entry_id を使って当時のあらすじと共起 Fragment を芋づるで取得する。
 
 ### 既存テーブルへの変更
 
@@ -286,13 +258,13 @@ Phase 2c（統一記憶探索）の recall_entry / recall_navigate も、Fragmen
 
 Fragment は特定のページの「中身」ではなく、独立したデータとして存在する。エンティティノードは Fragment のグルーピングビューの側面を持つが、同時にエンティティ固有の content（自由形式の説明文）も保持する。content と Fragment は役割が異なり共存する（後述「既存テーブルへの変更」参照）。
 
-### 2. 検索インデックスから消さない
+### 2. Fragment は削除・圧縮しない
 
-圧縮（不可視化）は表示レベルの操作であり、Fragment の embedding は常に検索可能な状態を維持する。「忘れた」情報でも、関連する文脈が与えられれば想起できる。
+Fragment は蓄積専用。recall 時には常に全 Fragment が返る。忘却はページのインデックス掲示で制御し、Fragment 単位では行わない。
 
-### 3. 圧縮は Chronicle 統合に連動する
+### 3. Fragment の embedding は常に検索可能
 
-リアルタイムの時間経過ではなく、Chronicle の統合イベントをトリガーとする。時間ベースの自動 decay は行わない。
+ページがインデックスから落ちても、Fragment の embedding は検索対象として残る。関連する話題が出れば、インデックスに載っていないページの Fragment もヒットし、ページごと復帰する。
 
 ### 4. エンティティノードは固有名詞で識別する
 
@@ -300,11 +272,11 @@ Fragment は特定のページの「中身」ではなく、独立したデー�
 
 ### 5. Fragment は Chronicle Lv-1 に紐づく
 
-Fragment の生成元を辿れば Chronicle Lv-1 に到達し、そこから生ログまで辿れる。このトレーサビリティは圧縮後も維持される。
+Fragment の生成元を辿れば Chronicle Lv-1 に到達し、そこから生ログまで辿れる。想起時には chronicle_entry_id を使って当時のあらすじと共起 Fragment を取得する。
 
 ### 6. エンティティ間の関係性は明示的に記述しない
 
-エンティティ間の関係は、Fragment の共起（同じ Chronicle に紐づく）として暗黙的に保持する。明示的な関係エッジは持たない。これは意図的なトレードオフ: 圧縮のしやすさとメンテナンスコストの低さを優先する。必要に応じて共起データから関係性を後付けで抽出できるため、構造は拡張可能。
+エンティティ間の関係は、Fragment の共起（同じ chronicle_entry_id を持つ）として暗黙的に保持する。明示的な関係エッジは持たない。想起時に chronicle_entry_id で芋づる検索すれば、同じ文脈で抽出された他のエンティティの Fragment も一緒に浮上する。
 
 ## 設計判断（議論で確定済み）
 
@@ -314,16 +286,17 @@ Fragment の生成元を辿れば Chronicle Lv-1 に到達し、そこから生�
 - 1 Fragment は 1 エンティティに所属（現行の抽出構造と同じ）
 - 会話当事者の静的属性/一過性情報の判定はプロンプト指示で LLM に委ねる
 
-### 圧縮の制御
+### 忘却の制御
 
-- Chronicle Lv-2 統合時、配下の全 Fragment の vividness を一律で下げる（選択的ではない）
-- is_important はエンティティレベルの属性。圧縮は一律で行い、可視性の方で制御する（is_important エンティティの Fragment は想起時に優先表示）
-- vividness のロールバック機構は不要。想起（embedding 検索）で必要に応じて再浮上するため
+- Fragment は忘却しない。蓄積専用。recall で常に全件返る
+- 忘却はページのインデックス掲示で制御。最終参照/書き込み順で各カテゴリ最大100件
+- is_important はエンティティレベルの属性。is_important なページはインデックスから落ちない（常駐）
+- vividness カラムは廃止（既存データは残置、新規コードでは不使用）
 
 ### 想起
 
 - Fragment embedding は生成時に即座に計算（Chronicle バッチコールバック内で一連の流れ）
-- エンティティページ想起時のトークン管理: vivid な Fragment のみ通常表示、rough 以下は検索ヒット時のみ展開
+- 想起時: ヒットした Fragment → エンティティの全情報 + chronicle_entry_id → あらすじ + 共起 Fragment
 - unified_recall は既存のページ embedding（content 用）と Fragment embedding を併存させる
 
 ### 移行
@@ -357,3 +330,4 @@ Fragment の生成元を辿れば Chronicle Lv-1 に到達し、そこから生�
 ## 変更履歴
 
 - **v0.1 (2026-05-27)**: 初版ドラフト。まはーとの設計議論を基に構想を記述
+- **v0.2 (2026-05-29)**: Fragment の vividness / 圧縮メカニズムを廃止。Fragment は蓄積専用に変更。忘却対象はページインデックス掲示のみ。chronicle_entry_id の用途を「圧縮トリガー」から「想起時の文脈復元 + 共起 Fragment の芋づる想起」に修正

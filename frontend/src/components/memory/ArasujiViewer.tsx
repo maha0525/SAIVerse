@@ -24,6 +24,13 @@ interface SourceMessage {
     created_at: number;
 }
 
+interface LinkedFragment {
+    id: string;
+    content: string;
+    source_date: string | null;
+    page_title: string;
+}
+
 interface ArasujiStats {
     max_level: number;
     counts_by_level: Record<string, number>;
@@ -45,6 +52,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [showList, setShowList] = useState(true);
     const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
     const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+    const [linkedFragments, setLinkedFragments] = useState<LinkedFragment[]>([]);
+    const [isLoadingFragments, setIsLoadingFragments] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
 
     // Generation state
@@ -182,12 +191,29 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
-    // Load source messages when a level-1 entry is selected
+    const fetchLinkedFragments = async (entryId: string) => {
+        setIsLoadingFragments(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/fragments`);
+            if (res.ok) {
+                const data = await res.json();
+                setLinkedFragments(data.fragments || []);
+            }
+        } catch (e) {
+            console.error("Failed to fetch linked fragments", e);
+        } finally {
+            setIsLoadingFragments(false);
+        }
+    };
+
+    // Load source messages and linked fragments when a level-1 entry is selected
     useEffect(() => {
         if (selectedEntry && selectedEntry.level === 1 && selectedEntry.source_ids.length > 0) {
             fetchSourceMessages(selectedEntry.id);
+            fetchLinkedFragments(selectedEntry.id);
         } else {
             setSourceMessages([]);
+            setLinkedFragments([]);
         }
     }, [selectedEntry?.id]);
 
@@ -899,6 +925,46 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                 );
                                             })}
                                         </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Linked Fragments Section */}
+                            {selectedEntry.level === 1 && (
+                                <div className={styles.sourceSection}>
+                                    <h3 className={styles.sourceSectionTitle}>
+                                        抽出された知識 (Fragments)
+                                        {linkedFragments.length > 0 && ` — ${linkedFragments.length}件`}
+                                    </h3>
+                                    {isLoadingFragments ? (
+                                        <div className={styles.loadingMessages}>
+                                            <Loader2 className={styles.loader} size={16} />
+                                            <span>Fragment を読み込み中...</span>
+                                        </div>
+                                    ) : linkedFragments.length > 0 ? (
+                                        <div className={styles.fragmentsByPage}>
+                                            {(() => {
+                                                const grouped: Record<string, LinkedFragment[]> = {};
+                                                for (const f of linkedFragments) {
+                                                    if (!grouped[f.page_title]) grouped[f.page_title] = [];
+                                                    grouped[f.page_title].push(f);
+                                                }
+                                                return Object.entries(grouped).map(([title, frags]) => (
+                                                    <div key={title} className={styles.fragmentPageGroup}>
+                                                        <div className={styles.fragmentPageTitle}>{title}</div>
+                                                        <ul className={styles.fragmentItems}>
+                                                            {frags.map(f => (
+                                                                <li key={f.id} className={styles.fragmentContent}>{f.content}</li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                ));
+                                            })()}
+                                        </div>
+                                    ) : (
+                                        <span style={{ opacity: 0.5, fontSize: '0.9em' }}>
+                                            この Chronicle から抽出された Fragment はありません
+                                        </span>
                                     )}
                                 </div>
                             )}

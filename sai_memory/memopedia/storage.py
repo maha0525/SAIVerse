@@ -481,12 +481,19 @@ def update_page(
 
 
 def delete_page(conn: sqlite3.Connection, page_id: str) -> bool:
-    """Delete a page and all its descendants."""
+    """Delete a page and all its descendants, including fragments."""
     # First, recursively delete children
     children = get_children(conn, page_id)
     for child in children:
         delete_page(conn, child.id)
 
+    # Delete fragment embeddings, then fragments
+    conn.execute(
+        "DELETE FROM memopedia_fragment_embeddings WHERE fragment_id IN "
+        "(SELECT id FROM memopedia_fragments WHERE entity_id = ?)",
+        (page_id,),
+    )
+    conn.execute("DELETE FROM memopedia_fragments WHERE entity_id = ?", (page_id,))
     # Delete page states
     conn.execute("DELETE FROM memopedia_page_states WHERE page_id = ?", (page_id,))
     # Delete the page itself

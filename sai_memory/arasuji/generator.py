@@ -963,7 +963,7 @@ class ArasujiGenerator:
         *,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        batch_callback: Optional[Callable[[List[Message]], None]] = None,
+        batch_callback: Optional[Callable[[List[Message], Optional[str]], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[List[ArasujiEntry], List[ArasujiEntry]]:
         """Generate arasuji entries from messages.
@@ -972,9 +972,9 @@ class ArasujiGenerator:
             messages: Messages to process
             dry_run: If True, don't save to database
             progress_callback: Optional callback(processed, total) for progress updates
-            batch_callback: Optional callback(batch_messages) called after each batch's
-                            Chronicle generation and consolidation. Use this to run
-                            Memopedia extraction per-batch for interleaved Memory Weave.
+            batch_callback: Optional callback(batch_messages, chronicle_entry_id) called
+                            after each batch. chronicle_entry_id is the Lv-1 entry ID
+                            for Fragment linkage.
             cancel_check: Optional callback that returns True if generation should stop.
                           Checked before each batch. On cancel, returns partial results.
 
@@ -1146,7 +1146,7 @@ class ArasujiGenerator:
 
             # Call batch callback for Memopedia extraction (Memory Weave interleaved mode)
             if batch_callback:
-                batch_callback(batch)
+                batch_callback(batch, entry.id if entry else None)
 
         if progress_callback:
             progress_callback(total, total)
@@ -1160,7 +1160,7 @@ class ArasujiGenerator:
         max_messages: Optional[int] = None,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        batch_callback: Optional[Callable[[List[Message]], None]] = None,
+        batch_callback: Optional[Callable[[List[Message], Optional[str]], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[List[ArasujiEntry], List[ArasujiEntry]]:
         """Filter out already-processed messages, group into contiguous runs, and generate.
@@ -1180,7 +1180,7 @@ class ArasujiGenerator:
             dry_run: If True, don't save to database
             progress_callback: Optional callback(processed, total) for progress updates.
                                Reports global progress across all runs.
-            batch_callback: Optional callback(batch_messages) called after each batch
+            batch_callback: Optional callback(batch_messages, chronicle_entry_id) called after each batch
             cancel_check: Optional callback that returns True if generation should stop
 
         Returns:
