@@ -46,6 +46,7 @@ class SpellListSnapshot:
     enabled: bool
     entries: tuple[SpellEntry, ...]                  # visible / hidden 含む
     addon_manifests: tuple[AddonManifest, ...]       # addon_key -> manifest (visible >0 or hidden >0 のみ)
+    registered_names: Optional[frozenset[str]] = None  # all SPELL_TOOL_SCHEMAS keys at capture time (pre-filter)
 
 
 class SpellListSection:
@@ -131,6 +132,7 @@ class SpellListSection:
             enabled=True,
             entries=tuple(entries),
             addon_manifests=tuple(manifests),
+            registered_names=frozenset(SPELL_TOOL_SCHEMAS.keys()),
         )
 
     # ---- render ----
@@ -248,6 +250,8 @@ class SpellListSection:
             "entries": [asdict(e) for e in snapshot.entries],
             "addon_manifests": [asdict(m) for m in snapshot.addon_manifests],
         }
+        if snapshot.registered_names is not None:
+            payload["registered_names"] = sorted(snapshot.registered_names)
         return json.dumps(payload, ensure_ascii=False)
 
     def deserialize_snapshot(self, data: str) -> SpellListSnapshot:
@@ -256,11 +260,57 @@ class SpellListSection:
         manifests = tuple(
             AddonManifest(**m) for m in payload.get("addon_manifests", [])
         )
-        return SpellListSnapshot(
+        raw_names = payload.get("registered_names")
+        registered_names = frozenset(raw_names) if raw_names is not None else None
+        snapshot = SpellListSnapshot(
             enabled=bool(payload.get("enabled", False)),
             entries=entries,
             addon_manifests=manifests,
+            registered_names=registered_names,
         )
+        self._check_spell_freshness(snapshot)
+        return snapshot
+
+    def _check_spell_freshness(self, snapshot: SpellListSnapshot) -> None:
+        """Raise if the live spell registry has spells unknown to the snapshot.
+
+        The stored snapshot reflects a *filtered* view (availability_check
+        already applied per-persona), so ``stored_names ⊂ live_names`` is
+        normal. What we care about is the opposite: spells that exist in the
+        live registry but were **not even candidates** when the snapshot was
+        captured — i.e., they were added after the snapshot was stored (new
+        addon installed). Removal (stored name not in live) also signals
+        staleness.
+
+        By raising here we make the section "missing" from the snapshot,
+        which triggers ``ensure_snapshot`` → ``capture_all`` and re-captures
+        spell_list with the current registry. Other unchanged sections are
+        also re-captured but produce no diff (= no wasted notifications).
+
+        To avoid a full availability_check evaluation (expensive, per-persona
+        DB queries), we store a ``_registered_names`` fingerprint alongside
+        the snapshot entries. This is the set of *all* registered spell names
+        at capture time, before per-persona filtering.
+        """
+        from tools import SPELL_TOOL_SCHEMAS
+
+        if not snapshot.enabled:
+            return
+
+        stored_registered = snapshot.registered_names
+        if stored_registered is None:
+            return
+
+        live_names = set(SPELL_TOOL_SCHEMAS.keys())
+        if stored_registered != live_names:
+            added = live_names - stored_registered
+            removed = stored_registered - live_names
+            LOGGER.info(
+                "spell_list: stored snapshot stale (added=%s removed=%s), "
+                "triggering recapture",
+                added or "{}", removed or "{}",
+            )
+            raise ValueError("spell set changed since snapshot was stored")
 
     # ---- 内部ヘルパー ----
 

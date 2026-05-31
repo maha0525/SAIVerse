@@ -21,7 +21,7 @@ import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
-import TweetConfirmDialog, { TweetConfirmData } from '@/components/TweetConfirmDialog';
+import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon } from 'lucide-react';
@@ -243,7 +243,7 @@ export default function Home() {
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
-    const [tweetConfirm, setTweetConfirm] = useState<TweetConfirmData | null>(null);
+    const [spellConfirm, setSpellConfirm] = useState<SpellConfirmData | null>(null);
     const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
@@ -1289,16 +1289,16 @@ export default function Home() {
         }
     }, []);
 
-    const handleTweetConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
-        setTweetConfirm(null);
+    const handleSpellConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
+        setSpellConfirm(null);
         try {
-            await fetch('/api/chat/tweet-confirmation-response', {
+            await fetch('/api/chat/spell-confirmation-response', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ request_id: requestId, decision, edited_text: editedText }),
             });
         } catch (e) {
-            console.error('Failed to send tweet confirmation response', e);
+            console.error('Failed to send spell confirmation response', e);
         }
     }, []);
 
@@ -1779,12 +1779,16 @@ export default function Home() {
                                 playbookDescription: event.playbook_description || '',
                                 personaName: event.persona_name || '',
                             });
-                        } else if (event.type === 'tweet_confirmation') {
-                            setTweetConfirm({
+                        } else if (event.type === 'spell_confirmation') {
+                            setSpellConfirm({
                                 requestId: event.request_id,
-                                tweetText: event.tweet_text,
-                                personaId: event.persona_id || '',
-                                xUsername: event.x_username || '',
+                                title: event.title || '確認',
+                                body: event.body || '',
+                                editable: !!event.editable,
+                                text: event.text,
+                                addon: event.addon || '',
+                                confirmText: event.confirm_text,
+                                maxChars: event.max_chars,
                             });
                         } else if (event.type === 'chronicle_confirm') {
                             setChronicleConfirm({
@@ -2694,10 +2698,10 @@ export default function Home() {
                 />
             )}
 
-            {tweetConfirm && (
-                <TweetConfirmDialog
-                    request={tweetConfirm}
-                    onRespond={handleTweetConfirmResponse}
+            {spellConfirm && (
+                <SpellConfirmDialog
+                    request={spellConfirm}
+                    onRespond={handleSpellConfirmResponse}
                 />
             )}
 

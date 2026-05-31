@@ -1047,30 +1047,30 @@ def respond_to_permission(req: PermissionResponseRequest, manager=Depends(get_ma
 
 
 # ---------------------------------------------------------------------------
-# Tweet confirmation
+# Generic spell confirmation (X, SwitchBot, future addons)
 # ---------------------------------------------------------------------------
 
-class TweetConfirmationRequest(BaseModel):
+class SpellConfirmationRequest(BaseModel):
     request_id: str
     decision: str  # approve | reject | edit
     edited_text: Optional[str] = None
 
 
-@router.post("/tweet-confirmation-response")
-def respond_to_tweet_confirmation(req: TweetConfirmationRequest, manager=Depends(get_manager)):
-    """Respond to a tweet posting confirmation request."""
+@router.post("/spell-confirmation-response")
+def respond_to_spell_confirmation(req: SpellConfirmationRequest, manager=Depends(get_manager)):
+    """Respond to a generic spell confirmation request."""
     valid_decisions = ("approve", "reject", "edit")
     if req.decision not in valid_decisions:
         raise HTTPException(status_code=400, detail=f"Invalid decision. Must be one of: {valid_decisions}")
 
-    event = manager._pending_tweet_confirmations.get(req.request_id)
+    event = manager._pending_spell_confirmations.get(req.request_id)
     if not event:
-        raise HTTPException(status_code=404, detail="Tweet confirmation request not found or expired")
+        raise HTTPException(status_code=404, detail="Spell confirmation request not found or expired")
 
     response_value = req.decision
     if req.decision == "edit" and req.edited_text:
         response_value = f"edit:{req.edited_text}"
 
-    manager._tweet_confirmation_responses[req.request_id] = response_value
+    manager._spell_confirmation_responses[req.request_id] = response_value
     event.set()
     return {"success": True}
