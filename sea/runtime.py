@@ -1292,109 +1292,93 @@ class SEARuntime:
                 getattr(persona, "persona_id", None),
             )
             return "" if return_message_id else False
+        # -- message dict 構築 (try の外: ここでのバグは即座に上位に伝播させる) --
+        current_thread = adapter.get_current_thread()
+        LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
+        if current_thread is None:
+            pid = getattr(persona, "persona_id", None) or "unknown"
+            default_thread = f"{pid}:{adapter._PERSONA_THREAD_SUFFIX}"
+            adapter.set_active_thread(default_thread)
+            current_thread = default_thread
+            LOGGER.info("[_store_memory] No active thread for %s — initialized default: %s", pid, default_thread)
+
+        # Resolve 7-layer metadata: explicit args win, otherwise read from
+        # the active LineFrame on the supplied PulseContext.
+        resolved_line_role = line_role
+        resolved_line_id = line_id
+        resolved_track_id = origin_track_id
+        resolved_scope = scope
+        if pulse_context is not None and (
+            resolved_line_role is None
+            or resolved_line_id is None
+            or resolved_track_id is None
+            or resolved_scope is None
+        ):
+            try:
+                meta = pulse_context.current_line_metadata()
+            except AttributeError:
+                meta = {}
+            if resolved_line_role is None:
+                resolved_line_role = meta.get("line_role")
+            if resolved_line_id is None:
+                resolved_line_id = meta.get("line_id")
+            if resolved_track_id is None:
+                resolved_track_id = meta.get("origin_track_id")
+            if resolved_scope is None:
+                resolved_scope = meta.get("scope")
+
+        message: Dict[str, Any] = {"role": role or "assistant", "content": text}
+        if resolved_line_role is not None:
+            message["line_role"] = resolved_line_role
+        if resolved_line_id is not None:
+            message["line_id"] = resolved_line_id
+        if resolved_track_id is not None:
+            message["origin_track_id"] = resolved_track_id
+        if resolved_scope is not None:
+            message["scope"] = resolved_scope
+        if paired_action_text is not None:
+            message["paired_action_text"] = paired_action_text
+        if pulse_id:
+            message["pulse_id"] = pulse_id
+        if thought_signature:
+            message["thought_signature"] = thought_signature
+            LOGGER.debug(
+                "[_store_memory] persona=%s role=%s thought_signature attached (%d bytes)",
+                getattr(persona, "persona_id", None), role, len(thought_signature),
+            )
+        if spell_origin_id is not None:
+            message["spell_origin_id"] = spell_origin_id
+        if spell_seq is not None:
+            message["spell_seq"] = spell_seq
+
+        clean_tags = [str(tag) for tag in (tags or []) if tag]
+        if playbook_name:
+            clean_tags.append(f"playbook:{playbook_name}")
+        msg_metadata: Dict[str, Any] = {}
+        if clean_tags:
+            msg_metadata["tags"] = clean_tags
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if key == "tags":
+                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                    msg_metadata.setdefault("tags", []).extend(extra_tags)
+                else:
+                    msg_metadata[key] = value
+        if msg_metadata:
+            message["metadata"] = msg_metadata
+
+        # -- DB 書き込み (ここだけ try で囲む: DB 障害は pulse を止めず WARNING) --
         try:
-            if adapter and adapter.is_ready():
-                current_thread = adapter.get_current_thread()
-                LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
-                # If no active thread, initialize the default __persona__ thread
-                if current_thread is None:
-                    pid = getattr(persona, "persona_id", None) or "unknown"
-                    default_thread = f"{pid}:{adapter._PERSONA_THREAD_SUFFIX}"
-                    adapter.set_active_thread(default_thread)
-                    current_thread = default_thread
-                    LOGGER.info("[_store_memory] No active thread for %s — initialized default: %s", pid, default_thread)
-
-                # Resolve 7-layer metadata: explicit args win, otherwise read from
-                # the active LineFrame on the supplied PulseContext.
-                resolved_line_role = line_role
-                resolved_line_id = line_id
-                resolved_track_id = origin_track_id
-                # 認知モデル v0.2 (§10.3): scope も line_role 同様、明示指定が
-                # なければ active LineFrame のアスペクトから導出する。これにより
-                # サブライン (WORKER) の volatile / メタ判断 (META) の discardable が
-                # ノード指定なしで構造的に決まる (v0.1 では scope 未継承で committed 固定)。
-                resolved_scope = scope
-                if pulse_context is not None and (
-                    resolved_line_role is None
-                    or resolved_line_id is None
-                    or resolved_track_id is None
-                    or resolved_scope is None
-                ):
-                    try:
-                        meta = pulse_context.current_line_metadata()
-                    except AttributeError:
-                        meta = {}
-                    if resolved_line_role is None:
-                        resolved_line_role = meta.get("line_role")
-                    if resolved_line_id is None:
-                        resolved_line_id = meta.get("line_id")
-                    if resolved_track_id is None:
-                        resolved_track_id = meta.get("origin_track_id")
-                    if resolved_scope is None:
-                        resolved_scope = meta.get("scope")
-
-                message: Dict[str, Any] = {"role": role or "assistant", "content": text}
-                # Attach 7-layer metadata to the message dict so SAIMemoryAdapter
-                # forwards them as dedicated columns (storage.py add_message).
-                if resolved_line_role is not None:
-                    message["line_role"] = resolved_line_role
-                if resolved_line_id is not None:
-                    message["line_id"] = resolved_line_id
-                if resolved_track_id is not None:
-                    message["origin_track_id"] = resolved_track_id
-                if resolved_scope is not None:
-                    message["scope"] = resolved_scope
-                if paired_action_text is not None:
-                    message["paired_action_text"] = paired_action_text
-                # Phase 2.5 (2026-05-01): pulse_id を専用カラムに書く。
-                # Phase 3 段階 4-D (2026-05-09): `pulse:{uuid}` タグの併行記録を廃止。
-                # 既存データの読み出しは saiverse_memory/adapter.py の legacy_pulse_tag
-                # で互換維持。
-                if pulse_id:
-                    message["pulse_id"] = pulse_id
-                # 2026-05-20: Gemini 3.x の thoughtSignature をターン跨ぎ永続化する。
-                # bytes 型を SAIMemoryAdapter._append_message 経由で thought_signature
-                # 列に保存し、次ターン再構築時に _payload_from_message_locked が
-                # payload に含めて Gemini Client が Part に乗せ直す。
-                # 詳細は docs/intent/thought_signature_persistence.md
-                if thought_signature:
-                    message["thought_signature"] = thought_signature
-                if spell_origin_id is not None:
-                    message["spell_origin_id"] = spell_origin_id
-                if spell_seq is not None:
-                    message["spell_seq"] = spell_seq
-                    LOGGER.debug(
-                        "[_store_memory] persona=%s role=%s thought_signature attached (%d bytes)",
-                        getattr(persona, "persona_id", None), role, len(thought_signature),
-                    )
-
-                clean_tags = [str(tag) for tag in (tags or []) if tag]
-                # Add playbook:name tag for automatic classification
-                if playbook_name:
-                    clean_tags.append(f"playbook:{playbook_name}")
-                # Build metadata dict
-                msg_metadata: Dict[str, Any] = {}
-                if clean_tags:
-                    msg_metadata["tags"] = clean_tags
-                # Merge additional metadata (e.g., media attachments)
-                if isinstance(metadata, dict):
-                    for key, value in metadata.items():
-                        if key == "tags":
-                            # Merge tags
-                            extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
-                            msg_metadata.setdefault("tags", []).extend(extra_tags)
-                        else:
-                            msg_metadata[key] = value
-                if msg_metadata:
-                    message["metadata"] = msg_metadata
-                # Pass thread_suffix to ensure message is saved to correct thread
-                thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
-                inserted_id = adapter.append_persona_message(message, thread_suffix=thread_suffix)
-                if return_message_id:
-                    return inserted_id or ""
+            thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
+            inserted_id = adapter.append_persona_message(message, thread_suffix=thread_suffix)
+            if return_message_id:
+                return inserted_id or ""
             return True
         except Exception:
-            LOGGER.warning("memorize node not stored", exc_info=True)
+            LOGGER.warning(
+                "[_store_memory] DB write failed for persona=%s role=%s — message lost",
+                getattr(persona, "persona_id", None), role, exc_info=True,
+            )
             return "" if return_message_id else False
 
     def _append_tool_result_message(
