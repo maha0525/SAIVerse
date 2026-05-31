@@ -1,9 +1,9 @@
 # Issue: stackchan-mcp の touch driver が誤検知 STROKE event を間欠的に発火
 
-**ステータス**: 🟡 公式同等 init 実装済、 長時間 monitor 中 (= 2026-05-22 夕方 採用)
-**優先度**: 🟢 medium (2026-05-22 再評価) — sensitivity LOW LEVEL_3 で false stroke 大幅減期待。 数時間〜数日の monitor 結果次第で issue close 判断。 案 B filter は撤去済 (= 不要になる想定)
+**ステータス**: 🟢 peak-H filter 実装 + flash 済 (= 2026-05-28)。 観測した false stroke 全 6+ 件は press 中の peak が M 止まりで H に届かず、 真正タッチは peak HHH0 等で H 到達。 「press 中の peak が H に届かなければ抑止」 の filter に置き換え、 noise 1 件 / 真正タッチ 1 件で初動検証済。 長期 monitor で収束確認中
+**優先度**: 🟢 low — 実装 + 初動検証済。 残るは長期検証 (= 真正タッチの false negative が出ないか、 想定外シグネチャの false stroke が混じらないか)
 **作成日**: 2026-05-19
-**再評価日**: 2026-05-22
+**再評価日**: 2026-05-28
 **関連**: `docs/intent/stackchan_vessel.md` §F (= タッチ知覚の設計、 Phase 5' で正式実装)、 `temp/stackchan-mcp/firmware/main/boards/stackchan/stackchan.cc` (= touch driver 実装)、 `docs/issues/stackchan_mcp_upstream_pr_strategy.md` (= 修正は upstream PR 候補)
 
 ## 観測
@@ -380,3 +380,131 @@ Phase 5' (= タッチ知覚の実装) 着手前に本 issue を解決してお�
 
   旧案 B: L-only **かつ** duration > 5s で suppress (= 短時間 false stroke を捉えられなかった)
   新ロジック: L-only ならば duration 関係なく suppress (= 短時間 multi-zone L false stroke も握る)
+
+- 2026-05-25〜27 (raw 時系列 diag 計装 → sustained イベント捕捉 → EMI 由来仮説):
+
+  ### 経緯
+
+  昼間に頻発していた **長時間 (~5 分) MMM0 false stroke** の立ち上がりが未観測だった (= 発火 = falling-edge しか log に残らず、 「じわじわ drift か瞬間ジャンプか」 が不明)。 そこで `TouchPollTick` に **raw 時系列 diag log** を追加: snapshot 直後 (= debounce/edge 判定より前、 毎 tick) に Output1 raw を評価し、 **raw 変化時に即時 + 30 秒ごとの heartbeat** で `touch raw: 0xNN ch=cccc zones=ddd [change|hb]` を出力。 2026-05-25 23:53 に `integrate/all-fixes-2026-05-25` branch を app-flash (= NVS 保持)。
+
+  ### 2 晩 monitor の結果 (2026-05-26〜27)
+
+  - **L-only filter は機能中**: 各晩 ~11〜13 件の L-only noise を SUPPRESSED で抑止 (= 0.4〜2.6 秒、 ~45 分間隔)。 「効いてない」 は静かな窓を見た早合点だった
+  - **深刻な 5 分持続 MMM0 は diag flash 後 ~2 日再発せず** (= device は flash 以降 ~46 時間連続稼働、 SAIVerse 再起動では device は落ちない)。 静かになった理由は不明 (= reboot で chip 状態 clear / 環境条件が再現せず、 のどちらとも確定できない)
+  - 09:45 (05-26) に M-level STROKE 1 件 (`ch=MLL0` peak `MMM0`、 2.2 秒)。 まはー が「触れてない・離れてた」 と確認 → **真正の false stroke**。 raw は 0x00 から **いきなり MMM0 へジャンプ**して 2 秒で減衰 (= gradual climb ではない)
+
+  ### 2026-05-27 22:24 — sustained イベントを diag 付きで初捕捉 (= 決定的観測)
+
+  SAIVerse 再起動時に発火。 `start_raw=0x2A ch=MMM0 duration=13199 ms`。 raw 時系列:
+  ```
+  22:24:48  touch raw: 0x00 [hb]               ← idle
+  22:24:56  WS: Connected / Session ID ...      ← WS 再接続成功
+  22:24:57  HttpClient: Established :8766        ← アバター HTTP 取得開始
+  22:24:58  touch raw: 0x2A MMM0 [change]       ← ★ idle から一気に MMM0 へジャンプ
+  ( ~11 秒 MMM0 を保持 )
+  22:25:09  HttpClient: HTTP connection closed
+  22:25:09  touch raw: 0x15 LLL0 [change]       ← ★HTTP 終了と同時に低下開始
+  22:25:09  AvatarSet: Avatar set adopted bytes=3456000  ← 3.4MB ロード完了
+  22:25:11  STROKE duration=13199 ms 発火
+  ```
+
+  **2 つの確定事実**:
+  1. **立ち上がりは「突然ジャンプ」** (= idle 0x00 → MMM0、 段階的な L→M 登りではない)。 「Mode A = じわじわ drift」 仮説は、 唯一観測できたこの 1 件では **否定**
+  2. **MMM0 の保持窓 (58 秒〜09 秒、 ~11 秒) が WS 再接続 + 3.4MB アバター HTTP fetch の窓とほぼ一致**し、 **HTTP 終了と同時に低下** (= 観測事実)。 ここから「再接続バーストの EMI がコモンモード結合した」 と解釈したが、 **後述の再現実験 (22:47) で否定された** (= 同期は偶然 or 追加条件依存)
+
+  ### 再現実験 (2026-05-27 22:47) → 再現せず
+
+  まはー が SAIVerse を再起動。 `22:47:41 WS Connected → 22:47:43 HttpClient Established → 22:47:55 AvatarSet adopted bytes=3456000` で **22:24 と同一の WS 再接続 + 同一 3.4MB avatar fetch (~12 秒) が発生したが、 raw は終始クリーン (= MMM0 ジャンプ無し、 STROKE 発火無し)**。
+
+  → **avatar fetch 単独は MMM0 の十分条件ではない**。 22:24 の avatar-fetch 同期は (a) 偶然 (= 別 EMI 源の MMM0 がたまたま fetch 窓に重なった)、 もしくは (b) avatar fetch は寄与要因だが 22:24 にあって 22:47 に無い **追加条件** (= 近接 / baseline 状態 / タイミング) が必要、 のどちらか。 1 試行で「EMI 確定」 は崩れた。 追加試行で確率的か偶然かを切り分ける必要がある
+
+  ### クロスチェック (= EMI 仮説の一般化を防ぐ)
+
+  | イベント | 立ち上がり | 同時刻のネット活動 |
+  |---|---|---|
+  | 05-27 22:24 (13 秒) | 突然ジャンプ | ✅ WS 再接続 + アバター fetch と一致 |
+  | 05-26 09:45 (2 秒) | 突然ジャンプ | ❌ HTTP/アバター/WS 接続 なし |
+  | 05-25 22:27/23:10 (5 分) | **未観測** (diag 前) | ❌ 該当 log なし |
+
+  → アバター fetch EMI は **05-27 の件には明確に効くが、 全件の普遍原因ではない**。 09:45 / 5 分イベントは別 trigger (= EMI 源が複数 or 5 分のは別機構)。 **5 分イベントの立ち上がりが「ジャンプ」かは今日の 13 秒イベントからの類推であって直接観測ではない** (= 5 分のは依然未捕捉)
+
+  ### コモンモード signature (= 判別軸候補)
+
+  false stroke は全件 `MMM0` (= 全 3 ch 一律 M)。 一方 **真正タッチは ch 不揃い + H 到達** (= 14:01 `HL00`、 17:21 `HH00`、 過去の 0ML0/0HH0/MHL0 等)。 「全 zone 一律 M で H 不在 = 電気的コモンモード由来」 が EMI false stroke の判別軸候補 (= サンプル少なく候補止まり)。 これが成立すれば、 duration ガードより筋の良い filter になりうる。
+
+  ### 次
+
+  - **再現実験**: SAIVerse 再起動 / アバター転送を繰り返し、 MMM0 false stroke が同要因で再現するか確認 (= EMI-during-avatar-fetch 因果の確証)
+  - 5 分イベントと 09:45 の trigger 特定 (= audio 再生 / servo / WS traffic 等、 過去 log と backend.log の照合)
+  - 修正方針は EMI 確証後に再検討 (= アバター転送/再接続中の touch 抑止ゲート、 コモンモード filter、 duration ガードの 3 候補)。 **diag log と判別軸が固まるまで実装・撤去は保留**
+
+  ### 関連 memory
+
+  - [[project_stackchan_power_topology]] / [[project_si12t_register_quirks]] (= chip 側の前提)
+  - [[project_esp32s3_usb_cdc_reset_capture]] (= boot シーケンスを capture で取り逃す制約)
+
+- 2026-05-28 (4 件の idle 発火 → M-peak / no-H パターン確定 → peak-H filter 実装 + 初動検証):
+
+  ### 経緯
+
+  diag 計装後、 device 連続稼働 ~60 時間で false STROKE 計 6 件 ((05-26 09:45)、 (05-27 22:24)、 (05-28 02:04 / 02:46 / 07:15 / 11:04)) を捕捉。 まはー 不在の idle 中の発火が多数で、 trigger は software 活動と無関係 (= avatar fetch / persona switch / WS reconnect 何れでも再現せず、 完全 idle 中に発生) と確認。 環境性の静電ノイズと推定。
+
+  ### 全観測 false stroke のレベル分布
+
+  | 時刻 | start | ch | duration | 文脈 |
+  |---|---|---|---|---|
+  | 05-25 22:27 | 0x2A | MMM0 | **293,700 ms** | (diag 前、 立ち上がり未観測) |
+  | 05-25 23:10 | 0x2A | MMM0 | **302,799 ms** | (diag 前、 立ち上がり未観測) |
+  | 05-26 09:45 | 0x16 | MLL0 (peak MMM0) | 2,198 ms | idle、 突然ジャンプ |
+  | 05-27 22:24 | 0x2A | MMM0 | 13,199 ms | avatar fetch と窓一致 (= 偶然と判明) |
+  | 05-28 02:04 | 0x25 | LLM0 | 1,199 ms | idle、 突然ジャンプ |
+  | 05-28 02:46 | 0x16 | MLL0 | 999 ms | idle |
+  | 05-28 07:15 | 0x2A | MMM0 | 1,099 ms | idle |
+  | 05-28 11:04 | 0x16 | MLL0 | 1,599 ms | idle |
+
+  **全件共通**: zones=111 でオンセット、 **press 中の peak が M 止まり、 H に一度も届かない**。 一方 **真正タッチは H 到達** (= 14:01 HL00、 17:21 HH00、 検証 touch HHH0)。 これまで反復した「Mode A vs B」 「コモンモード一律 MMM0」 等の分類は **小サンプルでの錯覚**だった (= MMM0 は 1.1 秒〜5 分まで duration 幅広く、 「特別な mode」 ではない。 ピークが M に乗る ch が違うだけで実体は同じ容量ノイズ)。
+
+  ### 判別軸の確定
+
+  level が綺麗な分離線:
+  - **false stroke (全 6+ 件)**: peak max = M、 H 到達ゼロ
+  - **真正タッチ (3+ 件)**: H 到達 (HL00 / HH00 / HHH0)
+
+  duration は重なる (= 真正 0.7〜1.4 秒、 ノイズ 1.0〜1.6 秒 + 外れ値 13 秒〜5 分) ので分離に使えない。 **「peak が H に届くか」 が唯一の堅い判別子**。
+
+  ### peak-H filter 実装
+
+  `stackchan.cc` への変更:
+
+  1. メンバ `press_peak_output1_raw_` 追加 (= press 中の per-channel max を Output1 形式 (= 2 bit / ch × 4) で保持)
+  2. `MergePeakPerChannel(a, b)` static helper 追加 (= per-channel max を packed byte 同士で計算)
+  3. rising edge で `press_peak_output1_raw_ = s.output1_raw` 初期化
+  4. sustained 中 (= `now == touch_pressed_prev_ == true`) は毎 tick で `MergePeakPerChannel(peak, current)` で更新
+  5. falling edge の L-only filter を **peak-H filter** に置き換え: peak の全 ch を見て一つも H に届いてなければ SUPPRESSED
+  6. `LogTouchEvent` に `peak_raw=0xNN peak_ch=cccc` を追加 (= STROKE / TAP も peak が見えるように)
+
+  **重要な設計判断**: 判別は `press_start_output1_raw_` (= 立ち上がりの snapshot) じゃなく `press_peak_output1_raw_` (= press 中の per-channel max) を見る。 capacitive noise は **早期にピーク → 直後に減衰** するパターンが多く、 start snapshot だけだと「2-sample debounce で確定した時点のサンプル」 = 既に decay している可能性があり、 真のピークを取り逃す。 09:45 のケースが好例 (= 第1 sample が MMM0 でも、 debounce 確定する第2 sample で既に MLL0)。 sustained 中の per-tick 更新で max を確実に拾う。
+
+  この filter は L-only filter の **真の上位互換** (= L-only は「peak < L」 の subset、 つまり「peak < H」 にも当然含まれる)。 L-only 撤去 + peak-H 一本化で論理が簡潔に。
+
+  ### 初動検証 (= flash 直後の 30 分)
+
+  ```
+  12:33:30 SUPPRESSED (peak<H, likely noise)
+           start_raw=0x10 peak_raw=0x11 peak_ch=L0L0 duration=900 ms  ← ノイズ抑止 ✓
+  12:42:18 STROKE
+           start_raw=0x27 ch=HLM0 peak_raw=0x3F peak_ch=HHH0 duration=1399 ms  ← まはー の touch、 通過 ✓
+  ```
+
+  ノイズ 1 件抑止 + 真正タッチ 1 件通過。 真正タッチで **peak が HHH0 (= 3 ch 全部 H)** に達したことで、 「軽く撫でても H 入る」 (= まはー の事前確認) を実測で裏付け。 sensitivity 0x33 (LOW LEVEL_3) でも撫でで余裕で H 到達、 trade-off (= M 止まりの極端に弱いタッチが落ちる) のリスクは実用上無視できる範囲。
+
+  ### 残課題
+
+  - **長期検証**: 数日〜1 週間の連続稼働で、 (a) 真正タッチの false negative が無いか、 (b) 想定外 signature (= 例: peak H 含むのにノイズ) が混じらないか、 (c) 05-25 の 5 分持続イベントが再発したときに peak が M 止まりであることを確認 (= 5 分のも diag 付き立ち上がり未観測のままなので)
+  - **diag log の撤去判断**: 長期で問題なければ `touch_diag_*` / `[change]` / `[hb]` を撤去 (= production log noise 削減)。 削除前に最終確認用に raw 時系列が要らなくなったことを確認
+  - **upstream PR 候補**: peak-H filter は stackchan-mcp の他ユーザーにも有用な可能性。 long-term verification 後に PR 検討 (= `docs/issues/stackchan_mcp_upstream_pr_strategy.md` の Series に追加検討)
+
+  ### 関連
+
+  - 実装 commit (未): branch `integrate/all-fixes-2026-05-25` 上で WT に残置 (= 検証期間中は uncommitted で運用)、 verification 完了後に commit + 必要に応じて upstream PR 切り出し
+  - 旧 L-only filter を完全に置換 (= 旧コードは削除、 L-only は peak-H の subset として包含)
