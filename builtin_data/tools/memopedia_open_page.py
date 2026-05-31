@@ -48,8 +48,10 @@ def memopedia_open_page(page_id: str) -> str:
     lines = [f"# {result['title']}"]
     if result.get("summary"):
         lines.append(f"\n*{result['summary']}*")
-    if result.get("content"):
-        lines.append(f"\n{result['content']}")
+
+    body = memopedia.render_page_body(page_id)
+    if body:
+        lines.append(f"\n{body}")
 
     children = result.get("children", [])
     if children:

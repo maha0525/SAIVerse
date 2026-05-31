@@ -49,6 +49,7 @@ def memopedia_get_page(
 
     # Format page content
     keywords_str = ", ".join(page.keywords) if page.keywords else "(なし)"
+    body = memopedia.render_page_body(page.id)
     result = f"""# {page.title}
 
 **ID**: {page.id}
@@ -59,8 +60,7 @@ def memopedia_get_page(
 ## 要約
 {page.summary or "(要約なし)"}
 
-## 内容
-{page.content or "(内容なし)"}
+{body or "(内容なし)"}
 """
     return result
 

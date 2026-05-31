@@ -335,9 +335,9 @@ def _get_memopedia_context(
                     elif vividness == "vivid":
                         summary = page['summary']
                         lines.append(f"{prefix}- **{page['title']}**: {summary}")
-                        content = page.get("content", "")
-                        if content:
-                            for line in content.split("\n"):
+                        body = memopedia.render_page_body(page["id"])
+                        if body:
+                            for line in body.split("\n"):
                                 lines.append(f"{prefix}  {line}")
 
                 children = page.get("children", [])

@@ -570,6 +570,7 @@ class Memopedia:
         Get the content of all open pages as Markdown.
 
         This is what gets injected into the persona's context.
+        Includes both manual content and fragments.
         """
         pages = self.get_open_pages(thread_id)
         if not pages:
@@ -580,9 +581,10 @@ class Memopedia:
             section_lines = [f"## {page.title}"]
             if page.summary:
                 section_lines.append(f"*{page.summary}*")
-            if page.content:
+            body = self.render_page_body(page.id)
+            if body:
                 section_lines.append("")
-                section_lines.append(page.content)
+                section_lines.append(body)
             sections.append("\n".join(section_lines))
 
         return "\n\n---\n\n".join(sections)
@@ -1073,3 +1075,37 @@ class Memopedia:
                 self.conn, entity_id,
                 vividness_filter=vividness_filter,
             )
+
+    def render_page_body(self, page_id: str) -> str:
+        """Render a page's full body text (content + fragments) for LLM consumption.
+
+        Returns content field (manual edits) followed by fragments grouped by date.
+        Either or both may be empty.
+        """
+        from sai_memory.memopedia.storage import get_page
+        page = get_page(self.conn, page_id)
+        if not page:
+            return ""
+
+        parts: List[str] = []
+
+        if page.content and page.content.strip():
+            parts.append(page.content.strip())
+
+        fragments = self.get_fragments(page_id)
+        if fragments:
+            grouped: dict[str, list[str]] = {}
+            for f in fragments:
+                key = f.source_date or "unknown"
+                if key not in grouped:
+                    grouped[key] = []
+                grouped[key].append(f.content)
+
+            frag_lines: List[str] = []
+            for date, notes in grouped.items():
+                frag_lines.append(f"## {date}")
+                for note in notes:
+                    frag_lines.append(f"- {note}")
+            parts.append("\n".join(frag_lines))
+
+        return "\n\n".join(parts)
