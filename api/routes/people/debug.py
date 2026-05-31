@@ -161,6 +161,42 @@ def get_scheduler_status(persona_id: str, manager=Depends(get_manager)):
     }
 
 
+@router.post("/{persona_id}/debug/generate-embeddings", response_model=DebugActionResponse)
+def generate_embeddings(persona_id: str, manager=Depends(get_manager)):
+    """Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成."""
+    persona = manager.personas.get(persona_id)
+    if persona is None:
+        raise HTTPException(status_code=404, detail=f"persona {persona_id} がロードされていません")
+
+    adapter = getattr(persona, "sai_memory", None)
+    if not adapter or not adapter.is_ready():
+        raise HTTPException(status_code=503, detail="SAIMemory が利用できません")
+    if not adapter.can_embed():
+        raise HTTPException(status_code=503, detail="Embedding モデルが利用できません")
+
+    try:
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.memopedia import init_memopedia_tables
+        from sai_memory.unified_recall import (
+            embed_chronicle_entries,
+            embed_memopedia_fragments,
+            embed_memopedia_pages,
+        )
+        init_arasuji_tables(adapter.conn)
+        init_memopedia_tables(adapter.conn)
+        n_chr = embed_chronicle_entries(adapter.conn, adapter.embedder, level=1)
+        n_page = embed_memopedia_pages(adapter.conn, adapter.embedder)
+        n_frag = embed_memopedia_fragments(adapter.conn, adapter.embedder)
+    except Exception as exc:
+        LOGGER.exception("[debug] Embedding generation failed")
+        raise HTTPException(status_code=500, detail=f"Embedding 生成に失敗: {exc}")
+
+    return DebugActionResponse(
+        success=True,
+        message=f"Embedding 生成完了: Chronicle={n_chr}, Pages={n_page}, Fragments={n_frag}",
+    )
+
+
 @router.post("/{persona_id}/debug/scheduler", response_model=DebugActionResponse)
 def control_scheduler(
     persona_id: str,

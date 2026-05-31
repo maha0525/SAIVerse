@@ -459,9 +459,12 @@ from typing import List, Optional
 
 class UnifiedRecallRequest(BaseModel):
     query: str
-    topk: int = 5
+    topk: Optional[int] = None
+    focus: Optional[str] = None
     search_chronicle: bool = True
     search_memopedia: bool = True
+    search_fragments: bool = True
+    search_messages: bool = True
 
 
 class UnifiedRecallHit(BaseModel):
@@ -476,6 +479,9 @@ class UnifiedRecallHit(BaseModel):
     start_time: Optional[int] = None
     end_time: Optional[int] = None
     message_count: Optional[int] = None
+    entity_id: Optional[str] = None
+    chronicle_entry_id: Optional[str] = None
+    source_date: Optional[str] = None
 
 
 class UnifiedRecallResponse(BaseModel):
@@ -513,10 +519,31 @@ def unified_recall_endpoint(
                 adapter.embedder,
                 query,
                 topk=request.topk,
+                focus=request.focus,
                 search_chronicle=request.search_chronicle,
                 search_memopedia=request.search_memopedia,
+                search_fragments=request.search_fragments,
+                search_messages=request.search_messages,
                 persona_id=persona_id,
             )
+
+            # Enrich hits with full content (same as the tool does)
+            from sai_memory.arasuji.storage import get_entry
+            from sai_memory.memopedia.storage import get_page
+            from sai_memory.memory.storage import get_message
+            for h in hits:
+                if h.source_type == "chronicle":
+                    entry = get_entry(adapter.conn, h.source_id)
+                    if entry:
+                        h.content = entry.content
+                elif h.source_type == "memopedia":
+                    page = get_page(adapter.conn, h.source_id)
+                    if page:
+                        h.content = page.summary or ""
+                elif h.source_type == "message":
+                    msg = get_message(adapter.conn, h.source_id)
+                    if msg:
+                        h.content = msg.content
 
             return UnifiedRecallResponse(
                 query=query,
@@ -534,6 +561,9 @@ def unified_recall_endpoint(
                         start_time=h.start_time,
                         end_time=h.end_time,
                         message_count=h.message_count,
+                        entity_id=h.entity_id,
+                        chronicle_entry_id=h.chronicle_entry_id,
+                        source_date=h.source_date,
                     )
                     for h in hits
                 ],

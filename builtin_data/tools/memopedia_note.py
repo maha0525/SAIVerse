@@ -1,9 +1,10 @@
-"""Direct write / append to Memopedia page (no research loop)."""
+"""Write knowledge fragments to Memopedia pages."""
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import date
 from typing import List, Optional
 
 from saiverse_memory import SAIMemoryAdapter
@@ -42,18 +43,18 @@ def memopedia_note(
     keywords: Optional[List[str]] = None,
     page_id: str = "",
 ) -> str:
-    """Directly write or append to a Memopedia page.
+    """Write a knowledge fragment to a Memopedia page.
 
-    - content: text to write (Markdown)
-    - title: page title (required for new pages, optional for append)
-    - summary: 1-2 sentence summary (optional)
+    - content: the fact or note to record (one concise statement)
+    - title: page (entity) title — required for new pages, optional when page_id given
+    - summary: 1-2 sentence page summary (optional, updates page-level summary)
     - category: one of 'people', 'terms', 'plans' (default: terms)
     - keywords: list of keywords for search (optional)
-    - page_id: existing page ID or saiverse:// URI to append to (optional)
+    - page_id: existing page ID or saiverse:// URI to write to (optional)
 
-    If page_id is provided, content is appended to the existing page.
-    If page_id is empty and title is provided, a new page is created
-    (or the existing page with the same title is updated).
+    Content is stored as a Fragment linked to the page, making it
+    individually searchable via embedding recall. If the page doesn't
+    exist, it is created first.
     """
     persona_id = get_active_persona_id()
     if not persona_id:
@@ -73,82 +74,64 @@ def memopedia_note(
     from sai_memory.memopedia import Memopedia
 
     memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
+    today = date.today().isoformat()
 
-    # --- Append mode: page_id (or URI) is provided ---
+    # --- Resolve target page ---
+    target_page = None
+
     if page_id:
         resolved_id = _extract_page_id(page_id)
-        page = memopedia.get_page(resolved_id)
-        if page is None:
+        target_page = memopedia.get_page(resolved_id)
+        if target_page is None:
             return f"Page not found: {resolved_id}"
+    else:
+        if not title:
+            return "Error: title is required when creating a new page (no page_id given)"
 
-        # Append content
-        updated = memopedia.append_to_content(
-            resolved_id,
-            content,
-            edit_source="ai_conversation",
-        )
-        if updated is None:
-            return f"Failed to append to page '{resolved_id}'"
+        cat = category.lower().strip()
+        if cat not in _CATEGORY_ROOT_MAP:
+            cat = "terms"
 
-        # Optionally update metadata
-        meta_updates = {}
-        if summary:
-            meta_updates["summary"] = summary
-        if keywords:
-            meta_updates["keywords"] = keywords
-        if title and title != page.title:
-            meta_updates["title"] = title
-        if meta_updates:
-            memopedia.update_page(
-                resolved_id,
+        existing = memopedia.find_by_title(title, category=cat)
+        if existing:
+            target_page = existing
+        else:
+            parent_id = _CATEGORY_ROOT_MAP[cat]
+            target_page = memopedia.create_page(
+                parent_id=parent_id,
+                title=title,
+                summary=summary or "",
+                content="",
+                keywords=keywords,
+                vividness="rough",
                 edit_source="ai_conversation",
-                **meta_updates,
             )
 
-        return (
-            f"Appended to page '{updated.title}' (id: {resolved_id})\n"
-            f"URI: saiverse://self/memopedia/page/{resolved_id}"
-        )
-
-    # --- Create mode: new page or find-by-title update ---
-    if not title:
-        return "Error: title is required when creating a new page (no page_id given)"
-
-    cat = category.lower().strip()
-    if cat not in _CATEGORY_ROOT_MAP:
-        cat = "terms"
-
-    existing = memopedia.find_by_title(title, category=cat)
-    if existing:
-        page = memopedia.update_page(
-            existing.id,
-            summary=summary or None,
-            content=content,
-            keywords=keywords,
+    # --- Update page metadata if provided ---
+    meta_updates = {}
+    if summary:
+        meta_updates["summary"] = summary
+    if keywords:
+        meta_updates["keywords"] = keywords
+    if title and target_page.title != title:
+        meta_updates["title"] = title
+    if meta_updates:
+        memopedia.update_page(
+            target_page.id,
             edit_source="ai_conversation",
+            **meta_updates,
         )
-        if page:
-            if existing.vividness in ("buried", "faint"):
-                memopedia.update_page(existing.id, vividness="rough")
-            return (
-                f"Updated page '{title}' (id: {existing.id})\n"
-                f"URI: saiverse://self/memopedia/page/{existing.id}"
-            )
-        return f"Failed to update page '{title}'"
 
-    parent_id = _CATEGORY_ROOT_MAP[cat]
-    page = memopedia.create_page(
-        parent_id=parent_id,
-        title=title,
-        summary=summary,
+    # --- Create fragment ---
+    memopedia.create_fragment(
+        entity_id=target_page.id,
         content=content,
-        keywords=keywords,
-        vividness="rough",
-        edit_source="ai_conversation",
+        source_date=today,
     )
+
     return (
-        f"Created page '{title}' (id: {page.id}, category: {cat})\n"
-        f"URI: saiverse://self/memopedia/page/{page.id}"
+        f"Fragment written to '{target_page.title}' (id: {target_page.id})\n"
+        f"URI: saiverse://self/memopedia/page/{target_page.id}"
     )
 
 
@@ -156,30 +139,29 @@ def schema() -> ToolSchema:
     return ToolSchema(
         name="memopedia_note",
         description=(
-            "Directly write or append to a Memopedia knowledge page. "
-            "Use this for quick note-taking from the current conversation context "
-            "without running a research loop. "
-            "If page_id is provided, content is appended to the existing page. "
-            "If page_id is empty, a new page is created (or existing page with "
-            "same title is updated)."
+            "Write a knowledge fragment to a Memopedia page. "
+            "Each call creates one fragment (a single fact or note) linked to the page. "
+            "Fragments are individually searchable via embedding recall. "
+            "If the page doesn't exist, it is created. "
+            "Use for quick note-taking from conversation context."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "Content to write (Markdown format)",
+                    "description": "The fact or note to record (one concise statement)",
                 },
                 "title": {
                     "type": "string",
                     "description": (
-                        "Page title. Required for new pages. "
-                        "Optional when appending to existing page via page_id."
+                        "Page (entity) title. Required for new pages. "
+                        "Optional when writing to existing page via page_id."
                     ),
                 },
                 "summary": {
                     "type": "string",
-                    "description": "1-2 sentence summary of the page",
+                    "description": "1-2 sentence page summary (updates page-level summary)",
                 },
                 "category": {
                     "type": "string",
@@ -194,8 +176,8 @@ def schema() -> ToolSchema:
                 "page_id": {
                     "type": "string",
                     "description": (
-                        "Existing page ID or saiverse:// URI to append to. "
-                        "Leave empty to create a new page."
+                        "Existing page ID or saiverse:// URI to write to. "
+                        "Leave empty to create a new page or find by title."
                     ),
                 },
             },

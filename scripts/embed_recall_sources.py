@@ -1,4 +1,4 @@
-"""Generate embeddings for Chronicle and Memopedia (unified recall sources).
+"""Generate embeddings for Chronicle, Memopedia, and Fragments (unified recall sources).
 
 Usage:
     python scripts/embed_recall_sources.py <persona_id>
@@ -38,10 +38,13 @@ def main():
     from sai_memory.unified_recall import (
         count_chronicle_embeddings,
         count_memopedia_embeddings,
+        count_fragment_embeddings,
         get_chronicle_entries_without_embeddings,
         get_memopedia_pages_without_embeddings,
+        get_fragments_without_embeddings,
         embed_chronicle_entries,
         embed_memopedia_pages,
+        embed_memopedia_fragments,
     )
 
     # Status
@@ -49,15 +52,18 @@ def main():
     chronicle_missing = len(get_chronicle_entries_without_embeddings(conn, level=1))
     memopedia_embedded = count_memopedia_embeddings(conn)
     memopedia_missing = len(get_memopedia_pages_without_embeddings(conn))
+    fragment_embedded = count_fragment_embeddings(conn)
+    fragment_missing = len(get_fragments_without_embeddings(conn))
 
     print(f"Chronicle Lv1: {chronicle_embedded} embedded, {chronicle_missing} missing")
     print(f"Memopedia:     {memopedia_embedded} embedded, {memopedia_missing} missing")
+    print(f"Fragments:     {fragment_embedded} embedded, {fragment_missing} missing")
 
     if args.status:
         conn.close()
         return
 
-    if chronicle_missing == 0 and memopedia_missing == 0:
+    if chronicle_missing == 0 and memopedia_missing == 0 and fragment_missing == 0:
         print("\nAll up to date.")
         conn.close()
         return
@@ -82,6 +88,11 @@ def main():
         print(f"\nEmbedding {memopedia_missing} Memopedia pages...")
         n = embed_memopedia_pages(conn, embedder)
         print(f"  Done: {n} pages embedded")
+
+    if fragment_missing > 0:
+        print(f"\nEmbedding {fragment_missing} Memopedia fragments...")
+        n = embed_memopedia_fragments(conn, embedder)
+        print(f"  Done: {n} fragments embedded")
 
     print("\nComplete.")
     conn.close()

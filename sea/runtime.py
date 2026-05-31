@@ -2210,6 +2210,27 @@ class SEARuntime:
                 "content": f"Chronicle生成完了: {len(level1)}件のエントリを作成しました。",
             })
 
+        # Generate embeddings for newly created entries/pages/fragments
+        if adapter.can_embed():
+            try:
+                from sai_memory.unified_recall import (
+                    embed_chronicle_entries,
+                    embed_memopedia_fragments,
+                    embed_memopedia_pages,
+                )
+                from sai_memory.memopedia import init_memopedia_tables
+                init_memopedia_tables(adapter.conn)
+                n_chr = embed_chronicle_entries(adapter.conn, adapter.embedder, level=1)
+                n_page = embed_memopedia_pages(adapter.conn, adapter.embedder)
+                n_frag = embed_memopedia_fragments(adapter.conn, adapter.embedder)
+                if n_chr or n_page or n_frag:
+                    LOGGER.info(
+                        "[metabolism] Embeddings generated: chronicle=%d, pages=%d, fragments=%d",
+                        n_chr, n_page, n_frag,
+                    )
+            except Exception:
+                LOGGER.exception("[metabolism] Embedding generation failed")
+
     def _generate_track_chronicle(self, persona) -> None:
         """Track Chronicle 生成 (v0.32, 2026-05-09)。
 

@@ -10,17 +10,21 @@ import numpy as np
 from sai_memory.arasuji import init_arasuji_tables
 from sai_memory.arasuji.storage import create_entry
 from sai_memory.memopedia import init_memopedia_tables
-from sai_memory.memopedia.storage import create_page
+from sai_memory.memopedia.storage import create_page, create_fragment
 from sai_memory.memory.storage import init_db
 from sai_memory.unified_recall import (
     RecallHit,
     count_chronicle_embeddings,
+    count_fragment_embeddings,
     count_memopedia_embeddings,
     embed_chronicle_entries,
+    embed_memopedia_fragments,
     embed_memopedia_pages,
     get_chronicle_entries_without_embeddings,
+    get_fragments_without_embeddings,
     get_memopedia_pages_without_embeddings,
     store_chronicle_embedding,
+    store_fragment_embedding,
     store_memopedia_embedding,
     unified_recall,
 )
@@ -135,6 +139,61 @@ class TestMemopediaEmbeddings(unittest.TestCase):
         self.assertEqual(count_memopedia_embeddings(self.conn), 3)
 
 
+class TestFragmentEmbeddings(unittest.TestCase):
+
+    def setUp(self):
+        self.conn = init_db(":memory:")
+        init_memopedia_tables(self.conn)
+        # Create an entity page to host fragments
+        self.page = create_page(
+            self.conn, parent_id="root_people", title="PostgreSQL",
+            summary="A relational database", content="", category="terms",
+        )
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_store_and_count(self):
+        frag = create_fragment(
+            self.conn, entity_id=self.page.id,
+            content="SSLエラーが発生した", source_date="2026-05-30",
+        )
+        store_fragment_embedding(self.conn, frag.id, [0.1, 0.2, 0.3])
+        self.assertEqual(count_fragment_embeddings(self.conn), 1)
+
+    def test_fragments_without_embeddings(self):
+        f1 = create_fragment(
+            self.conn, entity_id=self.page.id,
+            content="has embedding", source_date="2026-05-30",
+        )
+        f2 = create_fragment(
+            self.conn, entity_id=self.page.id,
+            content="no embedding", source_date="2026-05-30",
+        )
+        store_fragment_embedding(self.conn, f1.id, [0.1, 0.2])
+
+        missing = get_fragments_without_embeddings(self.conn)
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0][0], f2.id)
+
+    def test_batch_embed(self):
+        for i in range(5):
+            create_fragment(
+                self.conn, entity_id=self.page.id,
+                content=f"fact {i} about PostgreSQL",
+                source_date="2026-05-30",
+            )
+
+        embedder = DummyEmbedder()
+        n = embed_memopedia_fragments(self.conn, embedder)
+        self.assertEqual(n, 5)
+        self.assertEqual(count_fragment_embeddings(self.conn), 5)
+
+        # Running again should embed 0 (all done)
+        n = embed_memopedia_fragments(self.conn, embedder)
+        self.assertEqual(n, 0)
+
+
 class TestUnifiedRecall(unittest.TestCase):
 
     def setUp(self):
@@ -230,6 +289,88 @@ class TestUnifiedRecall(unittest.TestCase):
 
         hits = unified_recall(self.conn, self.embedder, "test", topk=3)
         self.assertLessEqual(len(hits), 3)
+
+    def test_search_fragments(self):
+        # Create entity page + fragments
+        page = create_page(
+            self.conn, parent_id="root_terms", title="PostgreSQL",
+            summary="A relational database", content="", category="terms",
+        )
+        create_fragment(
+            self.conn, entity_id=page.id,
+            content="SSLエラーが発生して接続できなかった",
+            source_date="2026-05-30",
+        )
+        create_fragment(
+            self.conn, entity_id=page.id,
+            content="バックアップ設定を変更した",
+            source_date="2026-05-30",
+        )
+        embed_memopedia_pages(self.conn, self.embedder)
+        embed_memopedia_fragments(self.conn, self.embedder)
+
+        hits = unified_recall(
+            self.conn, self.embedder, "SSL",
+            search_chronicle=False, search_memopedia=False, search_fragments=True,
+        )
+        self.assertGreater(len(hits), 0)
+        for hit in hits:
+            self.assertEqual(hit.source_type, "fragment")
+            self.assertEqual(hit.entity_id, page.id)
+            self.assertTrue(hit.uri.startswith("saiverse://"))
+
+    def test_fragment_with_chronicle_link(self):
+        # Create Chronicle entry
+        create_entry(
+            self.conn, level=1, content="PostgreSQLのSSL設定を修正した",
+            source_ids=[], start_time=1000, end_time=2000,
+            source_count=1, message_count=20, entry_id="c1",
+        )
+        # Create entity page + fragment linked to Chronicle
+        page = create_page(
+            self.conn, parent_id="root_terms", title="PostgreSQL",
+            summary="A database", content="", category="terms",
+        )
+        create_fragment(
+            self.conn, entity_id=page.id,
+            content="SSL証明書の期限切れ",
+            chronicle_entry_id="c1",
+            source_date="2026-05-30",
+        )
+        embed_memopedia_fragments(self.conn, self.embedder)
+
+        hits = unified_recall(
+            self.conn, self.embedder, "SSL",
+            search_chronicle=False, search_memopedia=False, search_fragments=True,
+        )
+        fragment_hits = [h for h in hits if h.source_type == "fragment"]
+        self.assertGreater(len(fragment_hits), 0)
+        self.assertEqual(fragment_hits[0].chronicle_entry_id, "c1")
+
+    def test_search_all_sources(self):
+        # Set up all three sources
+        create_entry(
+            self.conn, level=1, content="データベース移行の会話",
+            source_ids=[], start_time=1000, end_time=2000,
+            source_count=1, message_count=20,
+        )
+        embed_chronicle_entries(self.conn, self.embedder, level=1)
+
+        page = create_page(
+            self.conn, parent_id="root_terms", title="PostgreSQL",
+            summary="リレーショナルデータベース", content="", category="terms",
+        )
+        embed_memopedia_pages(self.conn, self.embedder)
+
+        create_fragment(
+            self.conn, entity_id=page.id,
+            content="データベースのバックアップ設定",
+            source_date="2026-05-30",
+        )
+        embed_memopedia_fragments(self.conn, self.embedder)
+
+        hits = unified_recall(self.conn, self.embedder, "データベース", topk=10)
+        self.assertGreater(len(hits), 0)
 
 
 if __name__ == "__main__":

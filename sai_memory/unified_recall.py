@@ -1,8 +1,8 @@
-"""Unified recall: embedding-based search across Chronicle and Memopedia.
+"""Unified recall: embedding-based search across Chronicle, Memopedia, and Fragments.
 
 Provides:
-- Embedding generation and storage for Chronicle Lv1 and Memopedia pages
-- Unified search that returns ranked results from both sources
+- Embedding generation and storage for Chronicle Lv1, Memopedia pages, and Fragments
+- Unified search that returns ranked results from all sources
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class RecallHit:
     """A single hit from unified recall search."""
-    source_type: str  # "chronicle" or "memopedia"
-    source_id: str    # entry_id or page_id
-    title: str        # Chronicle: time range, Memopedia: page title
-    content: str      # Chronicle: summary text, Memopedia: summary
+    source_type: str  # "chronicle", "memopedia", or "fragment"
+    source_id: str    # entry_id, page_id, or fragment_id
+    title: str        # Chronicle: time range, Memopedia: page title, Fragment: entity title
+    content: str      # Chronicle: summary text, Memopedia: summary, Fragment: fragment text
     score: float      # cosine similarity
     uri: str          # saiverse:// URI for navigation
     # Extra metadata
@@ -33,6 +33,9 @@ class RecallHit:
     start_time: Optional[int] = None
     end_time: Optional[int] = None
     message_count: Optional[int] = None
+    entity_id: Optional[str] = None             # Fragment: parent entity page ID
+    chronicle_entry_id: Optional[str] = None    # Fragment: linked Chronicle entry
+    source_date: Optional[str] = None           # Fragment: extraction date (YYYY-MM-DD)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +185,107 @@ def get_memopedia_pages_without_embeddings(conn: sqlite3.Connection) -> List[tup
 
 
 # ---------------------------------------------------------------------------
+# Embedding storage: Memopedia Fragments
+# ---------------------------------------------------------------------------
+
+def store_fragment_embedding(
+    conn: sqlite3.Connection,
+    fragment_id: str,
+    vector: List[float],
+) -> None:
+    """Store or replace an embedding for a Memopedia fragment."""
+    conn.execute(
+        "INSERT OR REPLACE INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
+        (fragment_id, json.dumps(vector)),
+    )
+    conn.commit()
+
+
+def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get all fragment embeddings with metadata.
+
+    Returns:
+        List of (fragment_id, vector, content, entity_id, chronicle_entry_id,
+                 source_date, entity_title, entity_category)
+    """
+    cur = conn.execute(
+        """
+        SELECT e.fragment_id, e.vector, f.content, f.entity_id,
+               f.chronicle_entry_id, f.source_date, p.title, p.category
+        FROM memopedia_fragment_embeddings e
+        JOIN memopedia_fragments f ON e.fragment_id = f.id
+        JOIN memopedia_pages p ON f.entity_id = p.id
+        """,
+    )
+    result = []
+    for row in cur.fetchall():
+        try:
+            vec = json.loads(row[1])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6], row[7]))
+    return result
+
+
+def count_fragment_embeddings(conn: sqlite3.Connection) -> int:
+    """Count Memopedia fragments that have embeddings."""
+    cur = conn.execute("SELECT COUNT(*) FROM memopedia_fragment_embeddings")
+    return cur.fetchone()[0]
+
+
+def get_fragments_without_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get Memopedia fragments that don't have embeddings yet.
+
+    Returns:
+        List of (fragment_id, content, entity_title)
+    """
+    cur = conn.execute(
+        """
+        SELECT f.id, f.content, p.title
+        FROM memopedia_fragments f
+        LEFT JOIN memopedia_fragment_embeddings e ON f.id = e.fragment_id
+        JOIN memopedia_pages p ON f.entity_id = p.id
+        WHERE e.fragment_id IS NULL
+        """,
+    )
+    return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Embedding retrieval: Messages (read-only, embeddings created elsewhere)
+# ---------------------------------------------------------------------------
+
+def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+    """Get all message embeddings for unified search (excluding system messages).
+
+    Returns best-scoring chunk per message later; here we return all chunks.
+
+    Returns:
+        List of (message_id, vector, chunk_index, content, role, created_at)
+    """
+    cur = conn.execute(
+        """
+        SELECT e.message_id, e.vector, e.chunk_index, m.content, m.role, m.created_at
+        FROM message_embeddings e
+        JOIN messages m ON e.message_id = m.id
+        WHERE m.role != 'system'
+        """,
+    )
+    result = []
+    for row in cur.fetchall():
+        try:
+            vec = json.loads(row[1])
+            if isinstance(vec, list) and vec and isinstance(vec[0], list):
+                for idx, entry in enumerate(vec):
+                    result.append((row[0], [float(v) for v in entry], idx, row[3], row[4], row[5]))
+            else:
+                result.append((row[0], [float(v) for v in vec], int(row[2]), row[3], row[4], row[5]))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Batch embedding generation
 # ---------------------------------------------------------------------------
 
@@ -264,6 +368,43 @@ def embed_memopedia_pages(
     return total
 
 
+def embed_memopedia_fragments(
+    conn: sqlite3.Connection,
+    embedder,
+    *,
+    batch_size: int = 64,
+) -> int:
+    """Generate and store embeddings for Memopedia fragments that don't have them.
+
+    Args:
+        conn: Database connection.
+        embedder: Embedder instance with embed() method.
+        batch_size: Batch size for embedding generation.
+
+    Returns:
+        Number of fragments embedded.
+    """
+    fragments = get_fragments_without_embeddings(conn)
+    if not fragments:
+        LOGGER.info("No Memopedia fragments need embedding")
+        return 0
+
+    LOGGER.info("Embedding %d Memopedia fragments", len(fragments))
+    total = 0
+
+    for i in range(0, len(fragments), batch_size):
+        batch = fragments[i:i + batch_size]
+        texts = [f"{entity_title}: {content}" for _, content, entity_title in batch]
+        vectors = embedder.embed(texts, is_query=False)
+
+        for (frag_id, _, _), vec in zip(batch, vectors):
+            store_fragment_embedding(conn, frag_id, list(vec))
+            total += 1
+
+    LOGGER.info("Embedded %d Memopedia fragments", total)
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Unified search
 # ---------------------------------------------------------------------------
@@ -273,6 +414,29 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     if denom == 0:
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+# Per-source base allocation weights.
+# These reflect the inherent characteristics of each source type:
+# - fragment: short texts, many available, high precision → most slots
+# - chronicle: medium-length summaries, moderate count → decent allocation
+# - memopedia: few pages, broader summaries → minimal to avoid irrelevant fills
+# - message: variable length, already covered by Chronicle → minimal
+SOURCE_ALLOCATIONS = {
+    "chronicle": 3,
+    "memopedia": 1,
+    "fragment": 5,
+    "message": 1,
+}
+
+FOCUS_MULTIPLIER = 4
+
+
+def _format_timestamp(ts: Optional[int]) -> str:
+    if not ts:
+        return "?"
+    from datetime import datetime
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
 def _format_time_range(start: Optional[int], end: Optional[int]) -> str:
@@ -290,32 +454,54 @@ def unified_recall(
     embedder,
     query: str,
     *,
-    topk: int = 5,
+    topk: Optional[int] = None,
+    focus: Optional[str] = None,
     search_chronicle: bool = True,
     search_memopedia: bool = True,
+    search_fragments: bool = True,
+    search_messages: bool = True,
     chronicle_level: int = 1,
     persona_id: Optional[str] = None,
 ) -> List[RecallHit]:
-    """Search across Chronicle and Memopedia using hybrid search.
+    """Search across Chronicle, Memopedia, Fragments, and Messages using hybrid search.
 
-    Combines keyword search (LIKE) and embedding search, merged via RRF
-    (Reciprocal Rank Fusion). This ensures that exact keyword matches
-    (e.g., proper nouns like "Project N.E.K.O.") rank high even when
-    embedding similarity is low.
+    Per-source allocation determines how many results each source type contributes,
+    based on SOURCE_ALLOCATIONS weights. The ``focus`` parameter gives one source
+    type FOCUS_MULTIPLIER× its normal allocation for deeper search.
 
     Args:
         conn: Database connection (memory.db with arasuji + memopedia tables).
         embedder: Embedder instance.
         query: Search query text.
-        topk: Maximum number of results to return.
+        topk: Hard cap on total results (None = use sum of allocations).
+        focus: Source type to give FOCUS_MULTIPLIER× allocation (e.g., "fragment").
         search_chronicle: Include Chronicle entries in search.
         search_memopedia: Include Memopedia pages in search.
+        search_fragments: Include Memopedia fragments in search.
+        search_messages: Include raw chat messages in search (default: off).
         chronicle_level: Chronicle level to search (default: 1).
         persona_id: Persona ID for URI generation.
 
     Returns:
         List of RecallHit sorted by fused score descending.
     """
+    # --- Compute per-source allocations ---
+    source_caps: dict[str, int] = {}
+    if search_chronicle:
+        base = SOURCE_ALLOCATIONS.get("chronicle", 3)
+        source_caps["chronicle"] = base * (FOCUS_MULTIPLIER if focus == "chronicle" else 1)
+    if search_memopedia:
+        base = SOURCE_ALLOCATIONS.get("memopedia", 1)
+        source_caps["memopedia"] = base * (FOCUS_MULTIPLIER if focus == "memopedia" else 1)
+    if search_fragments:
+        base = SOURCE_ALLOCATIONS.get("fragment", 5)
+        source_caps["fragment"] = base * (FOCUS_MULTIPLIER if focus == "fragment" else 1)
+    if search_messages:
+        base = SOURCE_ALLOCATIONS.get("message", 1)
+        source_caps["message"] = base * (FOCUS_MULTIPLIER if focus == "message" else 1)
+
+    total_cap = topk if topk is not None else sum(source_caps.values())
+
     # --- Keyword search ---
     # Search per-keyword and count matches per entry, avoiding OR+limit issues.
     keyword_hits: dict[str, RecallHit] = {}  # source_id → hit
@@ -397,6 +583,84 @@ def unified_recall(
                         category=page.category,
                     )
 
+    if search_fragments:
+        kw_id_sets = []
+        for kw in query_keywords:
+            cur = conn.execute(
+                "SELECT id FROM memopedia_fragments WHERE content LIKE ?",
+                (f"%{kw}%",),
+            )
+            kw_id_sets.append({row[0] for row in cur.fetchall()})
+
+        all_fragment_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_fragment_ids |= ids
+
+        for frag_id in all_fragment_ids:
+            count = sum(1 for ids in kw_id_sets if frag_id in ids)
+            keyword_match_count[frag_id] = count
+
+        if all_fragment_ids:
+            placeholders = ",".join("?" for _ in all_fragment_ids)
+            cur = conn.execute(
+                f"SELECT f.id, f.content, f.entity_id, f.chronicle_entry_id, "
+                f"f.source_date, p.title, p.category "
+                f"FROM memopedia_fragments f "
+                f"JOIN memopedia_pages p ON f.entity_id = p.id "
+                f"WHERE f.id IN ({placeholders})",
+                list(all_fragment_ids),
+            )
+            for row in cur.fetchall():
+                fid, fcontent, eid, ceid, sdate, etitle, ecat = row
+                keyword_hits[fid] = RecallHit(
+                    source_type="fragment",
+                    source_id=fid,
+                    title=etitle,
+                    content=fcontent[:200] if fcontent else "",
+                    score=0.0,
+                    uri=f"saiverse://self/memopedia/page/{eid}",
+                    category=ecat,
+                    entity_id=eid,
+                    chronicle_entry_id=ceid,
+                    source_date=sdate,
+                )
+
+    if search_messages:
+        kw_id_sets = []
+        for kw in query_keywords:
+            cur = conn.execute(
+                "SELECT id FROM messages WHERE content LIKE ? AND role != 'system'",
+                (f"%{kw}%",),
+            )
+            kw_id_sets.append({row[0] for row in cur.fetchall()})
+
+        all_message_ids: set[str] = set()
+        for ids in kw_id_sets:
+            all_message_ids |= ids
+
+        for mid in all_message_ids:
+            count = sum(1 for ids in kw_id_sets if mid in ids)
+            keyword_match_count[mid] = count
+
+        if all_message_ids:
+            placeholders = ",".join("?" for _ in all_message_ids)
+            cur = conn.execute(
+                f"SELECT id, content, role, created_at FROM messages WHERE id IN ({placeholders})",
+                list(all_message_ids),
+            )
+            for row in cur.fetchall():
+                mid, mcontent, mrole, mcreated = row
+                title = f"{mrole} @ {_format_timestamp(mcreated)}"
+                keyword_hits[mid] = RecallHit(
+                    source_type="message",
+                    source_id=mid,
+                    title=title,
+                    content=mcontent[:200] if mcontent else "",
+                    score=0.0,
+                    uri=f"saiverse://self/message/{mid}",
+                    start_time=mcreated,
+                )
+
     # --- Embedding search ---
     embedding_hits: dict[str, RecallHit] = {}
 
@@ -426,7 +690,7 @@ def unified_recall(
                 message_count=msg_count,
             )))
         scored.sort(key=lambda x: x[1], reverse=True)
-        for sid, _, hit in scored[:topk * 2]:
+        for sid, _, hit in scored[:total_cap * 2]:
             embedding_hits[sid] = hit
 
     if search_memopedia:
@@ -447,8 +711,56 @@ def unified_recall(
                 category=category,
             )))
         scored.sort(key=lambda x: x[1], reverse=True)
-        for sid, _, hit in scored[:topk * 2]:
+        for sid, _, hit in scored[:total_cap * 2]:
             embedding_hits[sid] = hit
+
+    if search_fragments:
+        corpus = get_fragment_embeddings(conn)
+        scored = []
+        for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat in corpus:
+            if len(vec) != vector_dim:
+                continue
+            v = np.array(vec, dtype=np.float32)
+            score = _cosine_sim(q, v)
+            scored.append((frag_id, score, RecallHit(
+                source_type="fragment",
+                source_id=frag_id,
+                title=etitle,
+                content=content[:200] if content else "",
+                score=score,
+                uri=f"saiverse://self/memopedia/page/{entity_id}",
+                category=ecat,
+                entity_id=entity_id,
+                chronicle_entry_id=chronicle_entry_id,
+                source_date=source_date,
+            )))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        for sid, _, hit in scored[:total_cap * 2]:
+            embedding_hits[sid] = hit
+
+    if search_messages:
+        corpus = get_message_embeddings(conn)
+        scored_map: dict[str, tuple[float, RecallHit]] = {}
+        for msg_id, vec, chunk_index, content, role, created_at in corpus:
+            if len(vec) != vector_dim:
+                continue
+            v = np.array(vec, dtype=np.float32)
+            score = _cosine_sim(q, v)
+            prev = scored_map.get(msg_id)
+            if prev is None or score > prev[0]:
+                title = f"{role} @ {_format_timestamp(created_at)}"
+                scored_map[msg_id] = (score, RecallHit(
+                    source_type="message",
+                    source_id=msg_id,
+                    title=title,
+                    content=content[:200] if content else "",
+                    score=score,
+                    uri=f"saiverse://self/message/{msg_id}",
+                    start_time=created_at,
+                ))
+        scored_list = sorted(scored_map.values(), key=lambda x: x[0], reverse=True)
+        for _, hit in scored_list[:total_cap * 2]:
+            embedding_hits[hit.source_id] = hit
 
     # --- RRF fusion ---
     RRF_K = 60  # Standard RRF constant
@@ -484,12 +796,22 @@ def unified_recall(
     # Sort by match_count DESC first, then RRF score DESC
     rrf_scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
-    # Build final result using the best hit info for each source_id
+    # Build final result using per-source caps computed at the top.
+    source_counts: dict[str, int] = {}
     results: List[RecallHit] = []
-    for sid, match_count, rrf_score in rrf_scored[:topk]:
+    for sid, match_count, rrf_score in rrf_scored:
+        if len(results) >= total_cap:
+            break
         hit = keyword_hits.get(sid) or embedding_hits.get(sid)
-        if hit:
-            hit.score = rrf_score
-            results.append(hit)
+        if not hit:
+            continue
+        st = hit.source_type
+        cap = source_caps.get(st, 0)
+        if source_counts.get(st, 0) >= cap:
+            continue
+        hit.score = rrf_score
+        results.append(hit)
+        source_counts[st] = source_counts.get(st, 0) + 1
 
+    results.sort(key=lambda h: h.score, reverse=True)
     return results

@@ -171,6 +171,16 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
                     </span>
                 </div>
 
+                {/* Embedding 生成 */}
+                <div style={rowStyle}>
+                    <button style={btnStyle} disabled={busy} onClick={() => post('generate-embeddings')}>
+                        Embedding 一括生成
+                    </button>
+                    <span style={{ fontSize: '0.75rem', color: '#888' }}>
+                        Chronicle / Memopedia / Fragment の未生成分
+                    </span>
+                </div>
+
                 {/* タイマー制御 */}
                 <div style={{ ...rowStyle, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
                     <span style={{ fontSize: '0.8rem' }}>

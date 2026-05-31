@@ -15,9 +15,10 @@ from tools.core import ToolSchema
 
 def memory_recall_unified(
     query: str,
-    topk: int = 5,
+    focus: str = "",
     search_chronicle: bool = True,
     search_memopedia: bool = True,
+    search_fragments: bool = True,
 ) -> str:
     """Search memory semantically across Chronicle and Memopedia.
 
@@ -54,9 +55,10 @@ def memory_recall_unified(
         adapter.conn,
         adapter.embedder,
         query,
-        topk=topk,
+        focus=focus or None,
         search_chronicle=search_chronicle,
         search_memopedia=search_memopedia,
+        search_fragments=search_fragments,
         persona_id=persona_id,
     )
 
@@ -74,6 +76,7 @@ def memory_recall_unified(
                 page = get_page(adapter.conn, hit.source_id)
                 if page:
                     hit.content = page.summary or ""
+            # fragment hits keep their original content (the matched fragment text)
 
     lines = [f"記憶検索結果: {len(hits)}件\n"]
     for i, hit in enumerate(hits, 1):
@@ -84,6 +87,11 @@ def memory_recall_unified(
             lines.append(f"[{i}] Chronicle Lv{hit.level} | {start} ~ {end} | {hit.message_count}件")
             lines.append(f"    URI: {hit.uri}")
             lines.append(f"    {hit.content}")
+        elif hit.source_type == "fragment":
+            date_str = f" ({hit.source_date})" if hit.source_date else ""
+            lines.append(f"[{i}] Fragment{date_str}")
+            lines.append(f"    {hit.title}: {hit.content}")
+            lines.append(f"    URI: {hit.uri}")
         else:
             lines.append(f"[{i}] Memopedia: {hit.title}")
             if hit.category:
@@ -112,10 +120,10 @@ def schema() -> ToolSchema:
                     "type": "string",
                     "description": "検索クエリ（自然言語で、思い出したい内容を記述）",
                 },
-                "topk": {
-                    "type": "integer",
-                    "description": "最大結果数（デフォルト: 5）",
-                    "default": 5,
+                "focus": {
+                    "type": "string",
+                    "enum": ["chronicle", "memopedia", "fragment"],
+                    "description": "特定のソースを重点的に検索する場合に指定。指定したソースから4倍多くの結果を取得する",
                 },
                 "search_chronicle": {
                     "type": "boolean",
@@ -125,6 +133,11 @@ def schema() -> ToolSchema:
                 "search_memopedia": {
                     "type": "boolean",
                     "description": "Memopediaを検索対象に含める（デフォルト: true）",
+                    "default": True,
+                },
+                "search_fragments": {
+                    "type": "boolean",
+                    "description": "Memopedia Fragmentを検索対象に含める（デフォルト: true）",
                     "default": True,
                 },
             },
