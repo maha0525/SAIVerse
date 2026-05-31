@@ -165,6 +165,52 @@ class UsageTracker:
         except Exception as e:
             LOGGER.error("Failed to connect to database for usage tracking: %s", e)
 
+    def record_cache_storage(
+        self,
+        model_id: str,
+        cached_tokens: int,
+        ttl_seconds: int,
+        *,
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Record explicit cache storage cost as a separate usage record.
+
+        Uses the "reserved seat" model: charges the full TTL window at create
+        time. If a delete mechanism later frees the cache early, record a
+        negative entry for the unused remainder.
+        """
+        from .model_configs import calculate_cache_storage_cost
+        cost_usd = calculate_cache_storage_cost(model_id, cached_tokens, ttl_seconds)
+        if cost_usd <= 0:
+            return
+
+        record = {
+            "timestamp": timestamp or datetime.now(),
+            "persona_id": persona_id,
+            "building_id": building_id,
+            "model_id": model_id,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": 0,
+            "cost_usd": cost_usd,
+            "node_type": None,
+            "playbook_name": None,
+            "category": "cache_storage",
+        }
+
+        with self._pending_lock:
+            self._pending_records.append(record)
+            if len(self._pending_records) >= self._batch_size:
+                self._flush_to_db()
+
+        LOGGER.debug(
+            "Cache storage recorded: model=%s tokens=%d ttl=%ds cost=$%.6f persona=%s",
+            model_id, cached_tokens, ttl_seconds, cost_usd, persona_id,
+        )
+
     def flush(self) -> None:
         """Force flush all pending records to database."""
         with self._pending_lock:

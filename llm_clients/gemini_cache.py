@@ -58,6 +58,15 @@ def parse_ttl_seconds(ttl: Any, default: int = 300) -> int:
 
 
 @dataclass
+class CacheEnsureResult:
+    """ensure() の戻り値。呼び出し側が storage 計上に必要な情報を持つ。"""
+    name: Optional[str]       # cache resource name (None = 作成失敗/スキップ)
+    created: bool = False     # このコールで新規作成したか (reuse 時 False)
+    cached_tokens: int = 0    # create 時の total_token_count (storage 計上用)
+    ttl_seconds: int = 0      # 設定した TTL 秒数
+
+
+@dataclass
 class _CacheEntry:
     name: str           # Gemini cache resource name (cached_content に渡す値)
     model: str
@@ -130,28 +139,29 @@ class GeminiCacheController:
         *,
         contents: Optional[list] = None,
         min_tokens: int = DEFAULT_MIN_TOKENS,
-    ) -> Optional[str]:
+    ) -> CacheEnsureResult:
         """``system_instruction`` + ``contents`` (キャッシュ対象の prefix) に対応する
         生きた cache の name を返す。無ければ作成。
 
         ``contents`` が None/空なら system_instruction のみをキャッシュする。
-        作成不能 (トークン不足 / API エラー) なら None を返し、呼び出し側は
-        explicit cache 無しの通常コールにフォールバックする。
+        作成不能 (トークン不足 / API エラー) なら name=None の結果を返し、
+        呼び出し側は explicit cache 無しの通常コールにフォールバックする。
         """
+        _none = CacheEnsureResult(name=None)
         if not client or not model or (not system_instruction and not contents):
-            return None
+            return _none
         key = self._key(model, system_instruction, contents)
         now = time.time()
 
         with self._lock:
             ent = self._entries.get(key)
             if ent and ent.expire_at > now + _EXPIRY_SAFETY_MARGIN:
-                return ent.name
+                return CacheEnsureResult(name=ent.name, created=False)
 
         # 最小トークンガード (文字数で安全側に判定、API コールなし)。
         if self._approx_chars(system_instruction, contents) < min_tokens:
             LOGGER.debug("[gemini_cache] skip create (prefix below min tokens) model=%s", model)
-            return None
+            return _none
 
         try:
             from google.genai import types
@@ -169,11 +179,16 @@ class GeminiCacheController:
             )
         except Exception:
             LOGGER.warning("[gemini_cache] caches.create failed model=%s", model, exc_info=True)
-            return None
+            return _none
 
         name = getattr(cache, "name", None)
         if not name:
-            return None
+            return _none
+
+        # create 時の cached token 数を取得 (storage 計上用)
+        um = getattr(cache, "usage_metadata", None)
+        cached_tokens = getattr(um, "total_token_count", 0) or 0 if um else 0
+
         entry = _CacheEntry(
             name=name,
             model=model,
@@ -183,10 +198,27 @@ class GeminiCacheController:
         with self._lock:
             self._entries[key] = entry
         LOGGER.info(
-            "[gemini_cache] created cache name=%s model=%s ttl=%ds cached_msgs=%d",
-            name, model, int(ttl_seconds), len(contents or []),
+            "[gemini_cache] created cache name=%s model=%s ttl=%ds cached_msgs=%d cached_tokens=%d",
+            name, model, int(ttl_seconds), len(contents or []), cached_tokens,
         )
-        return name
+        return CacheEnsureResult(
+            name=name, created=True,
+            cached_tokens=cached_tokens, ttl_seconds=int(ttl_seconds),
+        )
+
+    def delete(self, client: Any, cache_name: str) -> bool:
+        """cache を明示削除し、内部エントリも除去する。"""
+        try:
+            client.caches.delete(name=cache_name)
+        except Exception:
+            LOGGER.warning("[gemini_cache] caches.delete failed name=%s", cache_name, exc_info=True)
+            return False
+        with self._lock:
+            to_remove = [k for k, v in self._entries.items() if v.name == cache_name]
+            for k in to_remove:
+                del self._entries[k]
+        LOGGER.info("[gemini_cache] deleted cache name=%s", cache_name)
+        return True
 
 
 _DEFAULT_CONTROLLER: Optional[GeminiCacheController] = None

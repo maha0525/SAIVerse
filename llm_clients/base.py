@@ -18,6 +18,8 @@ class UsageInfo:
     cached_tokens: int = 0  # Tokens served FROM cache (cache read)
     cache_write_tokens: int = 0  # Tokens written TO cache (Anthropic: 1.25x cost for 5m, 2x for 1h)
     cache_ttl: str = ""  # Cache TTL used for this request ("5m", "1h", or "" if no cache)
+    cache_storage_tokens: int = 0  # Gemini explicit cache: tokens stored (for storage cost)
+    cache_storage_ttl_seconds: int = 0  # Gemini explicit cache: TTL in seconds
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility

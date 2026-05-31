@@ -333,6 +333,88 @@ class GeminiClient(LLMClient):
         # Set by generate_stream when SSE stream was interrupted by a server error (e.g. 504)
         self._last_stream_error: Optional[Dict[str, Any]] = None
 
+        # Pending cache storage info for usage tracking (set by _resolve_explicit_cache on create)
+        self._pending_cache_storage: Optional[Tuple[str, int, int]] = None  # (model, tokens, ttl_s)
+        # Auto cache mode: generate 完了後に delete する cache name
+        self._auto_cache_pending_cleanup: Optional[str] = None
+
+    def _store_usage(self, input_tokens, output_tokens, model=None, cached_tokens=0,
+                     cache_write_tokens=0, cache_ttl=""):
+        super()._store_usage(input_tokens, output_tokens, model=model,
+                             cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens,
+                             cache_ttl=cache_ttl)
+        pending = self._pending_cache_storage
+        if pending and self._latest_usage:
+            self._latest_usage.cache_storage_tokens = pending[1]
+            self._latest_usage.cache_storage_ttl_seconds = pending[2]
+            self._pending_cache_storage = None
+        # Auto cache mode: usage 記録完了後に cache を即削除
+        cleanup_name = getattr(self, "_auto_cache_pending_cleanup", None)
+        if cleanup_name:
+            self._auto_cache_pending_cleanup = None
+            self._auto_cache_cleanup(cleanup_name)
+
+    # ── Auto cache mode ──
+    # 環境変数 SAIVERSE_GEMINI_AUTO_CACHE=1 で有効。全 Gemini 呼び出しで
+    # create→use→delete を自動適用し、入力を 1/10 価格にする。
+    _AUTO_CACHE_ENABLED: bool = os.getenv(
+        "SAIVERSE_GEMINI_AUTO_CACHE", ""
+    ).lower() in ("1", "true", "yes", "on")
+    _AUTO_CACHE_MIN_TOKENS: int = 1024
+    _AUTO_CACHE_TTL: int = 300  # 保険 TTL (delete 失敗時の orphan 上限)
+
+    def _auto_cache_wrap(
+        self,
+        sys_msg: str,
+        contents: list,
+    ) -> Tuple[Optional[str], list, Optional[str]]:
+        """Auto cache mode: system + contents[:-1] を cache に焼き、tail だけ返す。
+
+        Returns (cache_name, send_contents, cache_name_for_cleanup).
+        cache_name_for_cleanup は finally で delete するために呼び出し元が保持する。
+        """
+        if not self._AUTO_CACHE_ENABLED:
+            return (None, contents, None)
+        if not contents or len(contents) < 2:
+            return (None, contents, None)
+
+        from llm_clients.gemini_cache import (
+            get_gemini_cache_controller, parse_ttl_seconds, CacheEnsureResult,
+        )
+        controller = get_gemini_cache_controller()
+        cached_contents = contents[:-1]
+        tail = contents[-1:]
+
+        if controller._approx_chars(sys_msg, cached_contents) < self._AUTO_CACHE_MIN_TOKENS:
+            return (None, contents, None)
+
+        result = controller.ensure(
+            self.client, self.model, sys_msg, self._AUTO_CACHE_TTL,
+            contents=cached_contents, min_tokens=self._AUTO_CACHE_MIN_TOKENS,
+        )
+        if not result or not result.name:
+            return (None, contents, None)
+
+        if result.created:
+            self._pending_cache_storage = (
+                self.config_key or self.model,
+                result.cached_tokens,
+                self._AUTO_CACHE_TTL,
+            )
+
+        logging.info(
+            "[gemini][auto_cache] cache=%s prefix=%d msgs, tail=%d msgs",
+            result.name, len(cached_contents), len(tail),
+        )
+        return (result.name, tail, result.name)
+
+    def _auto_cache_cleanup(self, cache_name: Optional[str]) -> None:
+        """Auto cache mode: generate 完了後に cache を即 delete。"""
+        if not cache_name:
+            return
+        from llm_clients.gemini_cache import get_gemini_cache_controller
+        get_gemini_cache_controller().delete(self.client, cache_name)
+
     def consume_stream_error(self) -> Optional[Dict[str, Any]]:
         """Return and clear the last SSE stream error (e.g. 504 DEADLINE_EXCEEDED).
 
@@ -378,7 +460,7 @@ class GeminiClient(LLMClient):
             from llm_clients.gemini_cache import get_gemini_cache_controller, parse_ttl_seconds
             min_tokens = int((self._cache_config or {}).get("min_tokens", 1024))
             ttl_seconds = parse_ttl_seconds(cache_ttl, default=300)
-            name = get_gemini_cache_controller().ensure(
+            result = get_gemini_cache_controller().ensure(
                 self.client, self.model, sys_msg, ttl_seconds,
                 contents=cached_contents, min_tokens=min_tokens,
             )
@@ -386,6 +468,13 @@ class GeminiClient(LLMClient):
             logging.warning("[gemini] explicit cache resolve failed; inline fallback", exc_info=True)
             return (None, contents)
 
+        name = result.name if result else None
+        if result and result.created:
+            self._pending_cache_storage = (
+                self.config_key or self.model,
+                result.cached_tokens,
+                result.ttl_seconds,
+            )
         if name:
             # backend.log に出す ([gemini_cache] created と同じ場所に揃える。
             # get_llm_logger は llm_io.log 行きで created と別ファイルになり紛らわしいため)。
@@ -1054,9 +1143,14 @@ class GeminiClient(LLMClient):
         if thinking_config is not None:
             cfg_kwargs["thinking_config"] = thinking_config
 
-        # Phase 3 / B: explicit cache (gemini_explicit) なら prefix をキャッシュ化し、
-        # 送信 contents を最新入力だけに絞る。
-        _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
+        # Auto cache mode: 全呼び出しで create→use→delete を自動適用。
+        # ON なら B 戦略 (_resolve_explicit_cache) をバイパスする。
+        _auto_cleanup_name: Optional[str] = None
+        _cache_name: Optional[str] = None
+        if self._AUTO_CACHE_ENABLED:
+            _cache_name, contents, _auto_cleanup_name = self._auto_cache_wrap(sys_msg, contents)
+        else:
+            _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
         if _cache_name:
             cfg_kwargs["cached_content"] = _cache_name
             cfg_kwargs.pop("system_instruction", None)
@@ -1071,6 +1165,9 @@ class GeminiClient(LLMClient):
             sum(len(getattr(p, "text", "") or "") for c in contents for p in (getattr(c, "parts", None) or [])),
             cfg_kwargs.get("cached_content"),
         )
+
+        if _auto_cleanup_name:
+            self._auto_cache_pending_cleanup = _auto_cleanup_name
 
         max_retries = 3
         model_id = self.model
@@ -1887,11 +1984,18 @@ class GeminiClient(LLMClient):
             if param in self._request_params:
                 cfg_kwargs[param] = self._request_params[param]
 
-        # Phase 3 / B: explicit cache なら prefix をキャッシュ化し送信 contents を最新入力だけに
-        _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
+        # Auto cache mode / B 戦略
+        _auto_cleanup_name: Optional[str] = None
+        _cache_name: Optional[str] = None
+        if self._AUTO_CACHE_ENABLED:
+            _cache_name, contents, _auto_cleanup_name = self._auto_cache_wrap(sys_msg, contents)
+        else:
+            _cache_name, contents = self._resolve_explicit_cache(sys_msg, contents, enable_cache, cache_ttl)
         if _cache_name:
             cfg_kwargs["cached_content"] = _cache_name
             cfg_kwargs.pop("system_instruction", None)
+        if _auto_cleanup_name:
+            self._auto_cache_pending_cleanup = _auto_cleanup_name
 
         get_llm_logger().debug(
             "Gemini stream config model=%s use_tools=%s cfg=%s",

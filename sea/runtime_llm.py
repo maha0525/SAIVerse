@@ -36,6 +36,20 @@ from tools.context import persona_context
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
+    """UsageInfo に cache_storage 情報があれば独立レコードで計上する。"""
+    if not usage or not getattr(usage, "cache_storage_tokens", 0):
+        return
+    get_usage_tracker().record_cache_storage(
+        model_id=usage.model,
+        cached_tokens=usage.cache_storage_tokens,
+        ttl_seconds=usage.cache_storage_ttl_seconds,
+        persona_id=persona_id,
+        building_id=building_id,
+    )
+
+
 # ── Spell system (text-based tool invocation) ──
 
 _MAX_SPELL_LOOPS = int(os.getenv("SAIVERSE_SPELL_MAX_ROUNDS", "3"))
@@ -1143,6 +1157,7 @@ async def _run_spell_loop(
                     playbook_name=playbook.name,
                     category="persona_speak",
                 )
+                _maybe_record_cache_storage(retry_usage, getattr(persona, "persona_id", None), building_id)
                 from saiverse.model_configs import calculate_cost
                 retry_cost = calculate_cost(
                     retry_usage.model, retry_usage.input_tokens, retry_usage.output_tokens,
@@ -1729,6 +1744,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             playbook_name=playbook.name,
                             category="persona_speak",
                         )
+                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
                         from saiverse.model_configs import calculate_cost, get_model_display_name
                         cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                         llm_usage_metadata = {
@@ -1882,6 +1898,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             playbook_name=playbook.name,
                             category="persona_speak",
                         )
+                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
                         # Accumulate into pulse total
                         from saiverse.model_configs import calculate_cost
                         cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
@@ -2270,6 +2287,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             playbook_name=playbook.name,
                             category="persona_speak",
                         )
+                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
                         LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                         # Build llm_usage metadata for message
                         from saiverse.model_configs import calculate_cost, get_model_display_name
@@ -2636,6 +2654,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             playbook_name=playbook.name,
                             category="persona_speak",
                         )
+                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
                         # Build llm_usage metadata for message
                         from saiverse.model_configs import calculate_cost, get_model_display_name
                         cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)

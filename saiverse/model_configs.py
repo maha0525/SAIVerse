@@ -447,6 +447,27 @@ def calculate_cost(
     return total
 
 
+def calculate_cache_storage_cost(model: str, cached_tokens: int, ttl_seconds: int) -> float:
+    """Calculate explicit-cache storage cost in USD.
+
+    Gemini explicit cache bills storage as an hourly rate per 1M cached tokens,
+    prorated. We adopt a "reserved seat" model: at create time we charge the
+    FULL TTL window up front (cached_tokens x rate x ttl_hours). If a delete
+    mechanism later frees the cache early, the unused remainder is refunded as a
+    negative record. Returns 0.0 when pricing or the storage rate is absent
+    (e.g. free-tier models without a pricing block).
+
+    See docs/intent/cache_lifecycle_control.md (storage accounting).
+    """
+    pricing = get_model_pricing(model)
+    if not pricing:
+        return 0.0
+    rate = pricing.get("cache_storage_per_1m_tokens_per_hour", 0.0)
+    if rate <= 0 or cached_tokens <= 0 or ttl_seconds <= 0:
+        return 0.0
+    return (cached_tokens / 1_000_000) * rate * (ttl_seconds / 3600.0)
+
+
 def _get_required_env_vars(model: str) -> list[str]:
     """Return the environment variable names required for a model's API key.
 

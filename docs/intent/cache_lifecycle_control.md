@@ -40,15 +40,16 @@ ChatOptions には既に `cache_enabled` トグル + `cache_ttl` 選択 (5m / 1h
 
 #### Gemini explicit cache の特性
 
-実測で確認した通り (2026-05-22):
-- 書き込み課金は**ない** (create 自体は無料)
-- 維持コストは storage = $1.00 / 1M tokens / hour
+実測で確認した通り (2026-05-22 初測定、2026-05-30 AI Studio 実課金で確定):
+- **書き込み課金はない** — create 自体は無料。AI Studio 実課金 (Gemini 3.1 Pro: 40k tokens create-only → storage 分のみ ≈ 2.37 円、input 課金ゼロ) で確定。公式 pricing ページも「Google doesn't charge separately for cache creation」と明記
+- 維持コストは storage = $1.00 / 1M tokens / hour (分単位 prorated、最小課金なし)
 - cached hit は通常 input の 1/10
-- → **breakeven = 1.35h 以内に 1 回ヒットで黒字** (Gemini 3.5 Flash)
 - TTL は `caches.update` で extend 可能、コンテンツ更新は不可
 - `caches.list` で orphan 検出可能、`caches.delete` で明示削除可能
 
-暗黙キャッシュは TTL が短く (実測 5 分未満) 信用できないため、長時間対話では explicit cache を能動的に張る必要がある。
+**create 無料の帰結 — breakeven は事実上消滅**: create が無料のため、1 回目の呼び出しから cached 価格 (1/10) で利用できる。従来の breakeven = 1.35h 計算は「create 後にキャッシュを保持し続ける」前提だったが、**毎 pulse create → 即使用 → 即 delete** (B 戦略) の場合、保持時間は数秒〜1分に収まり storage はほぼゼロ。間隔がどれだけ空こうが explicit cache が implicit を下回る。長時間保持にメリットはほぼなく、保持する唯一の利点は次回の create 遅延 (数秒〜十数秒) の回避のみ。
+
+暗黙キャッシュ (implicit) は 1 回目を通常価格で払うため、explicit の「1 回目から 1/10」には勝てない。ただし implicit は storage 課金がなく、prefix 一致で自動的に効くため、explicit 未対応モデルや短文リクエストでは依然有用。
 
 #### Anthropic cache の特性 (対比)
 
@@ -64,13 +65,15 @@ Anthropic は課金構造が Gemini と逆である:
 
 | | Anthropic | Gemini |
 |---|---|---|
-| 保持コスト | なし | storage 課金 (時間比例) |
+| 書き込みコスト | cache write (通常 input より割高) | **なし** (create 無料) |
+| 保持コスト | なし | storage 課金 (時間比例、分単位 prorated) |
 | 無料 extend | あり (再送で TTL リセット) | なし (`update` も時間課金が続く) |
-| 最適戦略 | **延命が得**。安い再発話で cache を温め続け、idle 保持も無害 | **idle 保持が損**。生きてる間に集中実行し、用が済んだら即 delete |
+| 1 回目から割引 | ×（初回は write 課金を払う） | **○（1 回目から cached price = 1/10）** |
+| 最適戦略 | **延命が得**。安い再発話で cache を温め続け、idle 保持も無害 | **毎回 create → 即使用 → 即 delete が最安**。保持のメリットは create 遅延 (数秒) 回避のみ |
 
-この逆転を理解した上で 3 モードを読むと意味が通る:
-- **標準モード** (pulse 終了 delete) は Gemini の storage 出血を即止める意味で Gemini 向きの安全側デフォルト。Anthropic では delete が no-op だが storage 課金が無いので害もない
-- **連続モード** (pulse 跨ぎ保持) は Anthropic では純粋に得 (保持無料 + 無料 extend)。Gemini では「確実に話し続ける」前提でのみ黒字 = §3.2 の breakeven 1.35h が守るライン
+この差を理解した上で 3 モードを読むと意味が通る:
+- **標準モード** (pulse 終了 delete) は Gemini では最適解そのもの (毎 pulse create → delete で storage を最小化)。Anthropic では delete が no-op だが storage 課金が無いので害もない
+- **連続モード** (pulse 跨ぎ保持) は Anthropic では純粋に得 (保持無料 + 無料 extend)。Gemini では create 遅延を避けたい場合にのみ意味がある (コスト面では標準モードに劣る)
 
 #### 統一抽象の必要性
 
@@ -131,13 +134,13 @@ cache の生存単位はこの pulse、もしくは pulse を跨いだ持続。
 | 項目 | 値 |
 |---|---|
 | Anthropic TTL | 1 時間 (`ttl="1h"`) |
-| Gemini TTL | 1.35 時間 (= breakeven 直上) |
+| Gemini TTL | 5 分 (create 遅延回避が目的。コスト面では短いほど得) |
 | 用途 | 同じペルソナと連続して話す / 継続的な議論 |
 | 振る舞い | pulse 開始で cache 作成 (既に生きてれば再利用)。pulse 終了でも **delete しない**。TTL 経過で自然消滅。ユーザーが明示的に delete / extend ボタンを押せば実行 |
 
 pulse を跨いで cache を保持することで、連続発話の 2 回目以降を cached hit にする。自動 extend は行わない (まはー指示: 「extend は救済用、delete と同列の手動制御」)。新ターンで cache 内容を更新したい場合は、ユーザーが手動 delete してから次 pulse で新規書き込み、という運用。
 
-Gemini の TTL = 1.35h は breakeven 計算の直上で「1 回でも追加発話があれば必ず黒字」を保証する値。
+**Gemini における連続モードの意味**: create が無料のため、標準モード (毎 pulse create) が常にコスト最安。連続モードで保持する唯一のメリットは **create の遅延 (数秒〜十数秒、トークン数に比例) をスキップできる**こと。コスト削減ではなくレイテンシ削減が動機。Gemini TTL は短いほど storage 節約になるため 5 分。旧 breakeven 1.35h は「保持し続ける前提」の計算であり、毎回 create → delete する B 戦略では無意味 (v0.13 で廃止)。
 
 ### 3.3. マニュアルモード
 
@@ -405,17 +408,37 @@ head が変わると cache hit しなくなるため、Metabolism dispatch で�
 当初タイマーに「累計ヒット / 節約額」を載せる設計だったが、これらは**即時性がない** (1-2 秒粒度で更新する意味がない) ため、タイマー (即時表示) ではなく **Usage ページ**で見せる。`LLMUsageLog` (`PERSONA_ID / MODEL_ID / CACHED_TOKENS / COST_USD`) に既にデータがあり、`/api/usage/*` に集計 API も既存。節約額計算 (`cached hit token × (通常単価 - cache 単価)`) は `saiverse/model_configs.py:calculate_cost` / `get_model_pricing` を再利用できる。
 → タイマーは「効いてるか / 残り時間」のみ。累計系の Usage ページ拡張は別タスク (本 intent の scope 外)。
 
-### 8.2. サブライン / 入れ子ラインの cache 戦略
+### 8.2. provider 統一抽象の見直し (2026-05-30 検証で浮上)
+
+create 無料の確定 (v0.13) により、Gemini と Anthropic の最適戦略が根本的に分岐した:
+
+| | Anthropic | Gemini |
+|---|---|---|
+| 核心 | write 課金あり → **reuse 最優先** | create 無料 → **freshness 最優先** |
+| pulse 内 | cache を温存して hit を稼ぐ | 毎 LLM コールで create し直す方が中間トークンも 1/10 で得 (要 delete) |
+| pulse 間 | 延命 (無料 extend) が最安 | 保持する意味がほぼない (create 遅延回避のみ) |
+| TTL の意味 | 延命の器 (長いほど得) | 異常終了時の orphan 保険 (短い方が安全) |
+
+現在の 3 モード (標準 / 連続 / マニュアル) は「TTL 戦略の違い」で抽象化しているが (§2 P1)、Gemini の最適解は TTL ではなく **create/delete の粒度** で決まる。同じ「標準モード」の中身が provider で全く異なる概念を指すことになり、統一抽象が形骸化する。
+
+検討すべき方向性:
+- **(a)** モード名を provider 非依存に保ちつつ、backend の振る舞いを provider ごとに完全に分ける (UI は統一、実装は分岐)
+- **(b)** provider ごとに別の戦略体系を持ち、UI も分ける (P2 の撤回)
+- **(c)** Gemini 向けに「毎コール create/delete」モードを新設し、Anthropic の reuse 系モードと並存させる
+
+いずれも session.md の統合議論 (§6) と合わせて検討する。
+
+### 8.3. サブライン / 入れ子ラインの cache 戦略
 
 メインラインは標準/連続/マニュアルがユーザー指定で動くが、サブライン (autonomous worker 等) は誰が cache モードを決めるか。
 → Phase 1-3 はメインラインのみ対応。サブラインは future scope。
 
-### 8.3. Gemini cache の最小トークン制約 (1024)
+### 8.4. Gemini cache の最小トークン制約 (1024)
 
 context が 1024 tokens に満たない場合、create が失敗する。標準モードで短いコンテキストを扱う場合の挙動。
 → create 失敗時は silent fallback (= cache なしで通常コール)。エラーは log のみ。
 
-### 8.4. 自律行動 (autonomous pulse) との連携 (将来展望)
+### 8.5. 自律行動 (autonomous pulse) との連携 (将来展望)
 
 本 intent doc の scope 外だが、自律側には既に **Anthropic 前提**の cache 延命機構が実装済みである。
 
@@ -443,6 +466,7 @@ context が 1024 tokens に満たない場合、create が失敗する。標準�
 - v0.1 (2026-05-22): 起草。Gemini explicit cache の実測 (書き込み無料 / storage 課金 / extend 可能) を受けて、3 モード抽象 + キャッシュタイマー UI + provider 統一の設計を整理。既存 ChatOptions の cache toggle はマニュアルモードの実体として温存・統合。
 - v0.2 (2026-05-22): まはー指摘で抜本修正。「pulse」を「session」と取り違えていた、自動 extend / idle delete を勝手に追加していた等の前提崩しを是正。標準モードは pulse 単位 (pulse 終了 delete)、連続モードは pulse 跨ぎ + TTL 任せ自然消滅、extend/delete は手動制御のみ、と明確化。cache key は `(persona_id, line_id)` に揃え、cached_head_architecture と整合。
 - v0.3 (2026-05-24): 既存実装の現状調査を反映。(1) **provider で最適戦略が逆転する**核心を §1 に明文化 (Anthropic = 延命が得 / 無料 extend・storage 課金なし、Gemini = 即 delete が得 / storage 時間課金・無料 extend なし)、設計原則 P6 (戦略は provider 依存・UI は統一) を追加。(2) 自律側の既存機構 Phase 4-e (`_schedule_cache_ttl_pulse`、Anthropic 無料 extend を利用した keep-awake + サブライン管理フロー) を §8.4 に追記、Gemini 展開時の戦略差を未解決事項として明示。(3) 前提 `cached_head_architecture` が `sea/head_pipeline/` として実装済みであることを反映。(4) 用語精度修正 (`extended_cache_ttl` → 実装通り `cache_control` の `ttl`)。(5) key 粒度調査を反映: DB `line_head_snapshot` PK = `(PERSONA_ID, LINE_ID)` で doc §4.2 と一致、現状 `line_id="main"` 固定 (サブライン未配線)、1 ライン 1 モデルで provider/model は属性で足りる点を §4.2 に追記。`resolve_ttl_seconds()` 翻訳関数を §4.3 に明記。anchor(per-model) と state(per-line) の共存を §5.2 に追記。既存 global TTL (`manager.state.cache_ttl` → `_get_anchor_validity_seconds`) を per-line state に付け替える作業 (3 消費者 a/b/c) を §5.4 として新設。
+- v0.13 (2026-05-30): **create 無料を AI Studio 実課金で確定** (Gemini 3.1 Pro 40k tokens create-only → input 課金ゼロ、storage 分 ≈ 2.37 円のみ / Gemini 3 Flash create+generate×2 → ≈ 1 円)。公式 caching docs / pricing と完全一致。これにより Gemini の最適戦略が確定: **毎 pulse create → 即使用 → 即 delete が最安** (1 回目から 1/10 価格、保持のメリットは create 遅延回避のみ)。旧 breakeven 1.35h は保持前提の計算で B 戦略では無意味 → 廃止。§1 Gemini 特性、§1 provider 逆転テーブル、§3.2 連続モード Gemini TTL を更新。**storage 計上を Usage に実装**: `calculate_cache_storage_cost()` (model_configs.py)、`CacheEnsureResult` (gemini_cache.py)、`record_cache_storage()` (usage_tracker.py)、runtime_llm.py 全 5 経路で `_maybe_record_cache_storage` 呼び出し。TTL 全体を予約席方式で先払い計上 (CATEGORY="cache_storage" の独立レコード)、将来の delete 時に残 TTL 分を負計上で返金する設計。pricing に `cache_storage_per_1m_tokens_per_hour` を追加 (gemini-3.5-flash-paid: $1.0)。
 - v0.12 (2026-05-25): 実機検証で B が正しく動作 (text+media を prefix キャッシュ、tail のみ送信) と確定。残った「~10,579 非キャッシュ」は **Gemini が thought_signature をキャッシュしない + 3.5 Flash の thought preservation デフォルト ON** が原因と判明 (公式 docs 確定)。B のバグではない。マルチターン推論 ON/OFF (過去 thought_signature の剥がし) を別 issue 化。§7 M1 に追記。
 - v0.11 (2026-05-25): 実機で M1 (system_instruction のみキャッシュ) が 7651/18937 しか効かないと判明。SAIVerse の head は system_instruction と contents 先頭 (memory_weave/visual) + 会話履歴に跨り、Anthropic は末尾 `cache_control` で head+履歴をキャッシュしているのに Gemini は system しか乗せていなかった。→ **B 戦略**に変更: `system_instruction + contents[:-1]` (最新入力以外全部) をキャッシュ、リクエストは `contents[-1:]` のみ。毎ターン create (Gemini create は無料)、古い cache は TTL + cleanup(M2) で処理。`GeminiCacheController.ensure` に contents 対応、key を sys+contents 署名に。test +2。
 - v0.10 (2026-05-25): Phase 3 (Gemini explicit cache) に着手、実機検証必須のため M1-M4 に分割。**M1 実装**: `GeminiCacheController` (create/reuse、head=system_instruction をキャッシュ、min-token ガード) + `gemini.py` 統合 (cached_content を渡し system_instruction 除去) + gemini-2.5-flash/3.5-flash-paid に cache 設定 (`gemini_explicit`)。安全のため env `SAIVERSE_GEMINI_EXPLICIT_CACHE` で全体 opt-in (cleanup/pulse-delete 未実装のため)。Gemini TTL は オフ/5分/15分/30分/1時間。test +5 (controller)。§7 Phase 3 を M1-M4 に再構成。
