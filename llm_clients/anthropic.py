@@ -75,6 +75,7 @@ class AnthropicClient(LLMClient):
         thinking_type = cfg.get("thinking_type") or os.getenv("ANTHROPIC_THINKING_TYPE")
         thinking_budget = cfg.get("thinking_budget") or os.getenv("ANTHROPIC_THINKING_BUDGET")
         thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
+        thinking_display = cfg.get("thinking_display") or os.getenv("ANTHROPIC_THINKING_DISPLAY")
 
         # Validate and store thinking_effort
         valid_efforts = ("low", "medium", "high", "max")
@@ -94,7 +95,12 @@ class AnthropicClient(LLMClient):
             # Adaptive thinking (Opus 4.6+): Claude decides when and how much to think
             # budget_tokens is not used with adaptive mode
             self._thinking_config = {"type": "adaptive"}
-            logging.debug("[anthropic] Using adaptive thinking mode (effort=%s)", self._thinking_effort or "default")
+            # Opus 4.7+ defaults display to "omitted" (thinking text is empty).
+            # Set "summarized" to restore visible thinking progress.
+            if thinking_display:
+                self._thinking_config["display"] = thinking_display
+            logging.debug("[anthropic] Using adaptive thinking mode (effort=%s, display=%s)",
+                          self._thinking_effort or "default", thinking_display or "default")
         elif thinking_type or thinking_budget:
             # Manual thinking (legacy): explicit budget_tokens
             self._thinking_config = {}
