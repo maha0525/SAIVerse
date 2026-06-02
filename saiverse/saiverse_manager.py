@@ -747,6 +747,15 @@ class SAIVerseManager(
         """Use an item to apply effects."""
         return self.item_service.use_item(persona_id, item_id, action_json)
 
+    def patch_document_content(self, persona_id: str, item_id: str, old_string: str, new_string: str) -> str:
+        return self.item_service.patch_document_content(persona_id, item_id, old_string, new_string)
+
+    def replace_document_content(self, persona_id: str, item_id: str, content: str) -> str:
+        return self.item_service.replace_document_content(persona_id, item_id, content)
+
+    def append_document_content(self, persona_id: str, item_id: str, content: str) -> str:
+        return self.item_service.append_document_content(persona_id, item_id, content)
+
     def view_item_for_persona(self, persona_id: str, item_id: str) -> str:
         """View the full content of a picture or document item."""
         return self.item_service.view_item(persona_id, item_id)

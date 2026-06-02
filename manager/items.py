@@ -549,6 +549,126 @@ class ItemService:
         item_name = item.get("name", item_id)
         return f"「{item_name}」の内容を更新した。"
 
+    # ---- document content operations (spell-oriented) ----
+
+    def _validate_document_access(self, persona_id: str, item_id: str) -> tuple:
+        """Validate persona can access the document item. Returns (item, file_path, persona)."""
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        if (item.get("type") or "").lower() != "document":
+            raise RuntimeError("この操作はdocumentタイプのアイテムにのみ使用できます。")
+
+        location = self.item_locations.get(item_id)
+        owner_kind = location.get("owner_kind") if location else None
+        owner_id = location.get("owner_id") if location else None
+        in_inventory = owner_kind == "persona" and owner_id == persona_id
+        in_current_building = owner_kind == "building" and owner_id == persona.current_building_id
+        if not location or not (in_inventory or in_current_building):
+            raise RuntimeError("このアイテムは現在あなたのインベントリまたは現在いる建物にありません。")
+
+        file_path_str = item.get("file_path")
+        if not file_path_str:
+            raise RuntimeError("このdocumentにはファイルパスが設定されていません。")
+        file_path = self._resolve_file_path(file_path_str)
+        if not file_path.exists():
+            raise RuntimeError(f"ファイルが見つかりません: {file_path}")
+
+        return item, file_path, persona
+
+    def _finalize_document_update(self, item_id: str, item: Dict, persona_id: str, file_path: Path) -> None:
+        """Update DB timestamp, refresh summary and caches after document content change."""
+        from saiverse.media_summary import ensure_document_summary
+        new_summary = ensure_document_summary(file_path)
+        timestamp = datetime.utcnow()
+
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row is None:
+                raise RuntimeError("アイテム本体が見つかりません。")
+            if new_summary:
+                row.DESCRIPTION = new_summary
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        if new_summary:
+            item["description"] = new_summary
+        item["updated_at"] = timestamp
+
+        location_owner_kind = self.item_locations.get(item_id, {}).get("owner_kind")
+        location_owner_id = self.item_locations.get(item_id, {}).get("owner_id")
+        if location_owner_kind == "building" and location_owner_id:
+            self.refresh_building_system_instruction(location_owner_id)
+
+        inventory = self.items_by_persona.get(persona_id, [])
+        persona_obj = self.manager.personas.get(persona_id)
+        if persona_obj:
+            persona_obj.set_inventory(list(inventory))
+
+    def patch_document_content(self, persona_id: str, item_id: str, old_string: str, new_string: str) -> str:
+        """Replace a substring in a document's content."""
+        item, file_path, persona = self._validate_document_access(persona_id, item_id)
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの読み込みに失敗しました: {exc}") from exc
+
+        if old_string not in content:
+            raise RuntimeError("指定された置換対象のテキストがドキュメント内に見つかりません。")
+
+        count = content.count(old_string)
+        if count > 1:
+            raise RuntimeError(f"置換対象のテキストが {count} 箇所見つかりました。一意になるよう、より長いテキストを指定してください。")
+
+        new_content = content.replace(old_string, new_string, 1)
+        try:
+            file_path.write_text(new_content, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+        self._finalize_document_update(item_id, item, persona_id, file_path)
+        item_name = item.get("name", item_id)
+        return f"「{item_name}」の内容を部分置換しました。"
+
+    def replace_document_content(self, persona_id: str, item_id: str, content: str) -> str:
+        """Replace the entire content of a document."""
+        item, file_path, persona = self._validate_document_access(persona_id, item_id)
+
+        try:
+            file_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+        self._finalize_document_update(item_id, item, persona_id, file_path)
+        item_name = item.get("name", item_id)
+        return f"「{item_name}」の内容を全置換しました。"
+
+    def append_document_content(self, persona_id: str, item_id: str, content: str) -> str:
+        """Append text to the end of a document."""
+        item, file_path, persona = self._validate_document_access(persona_id, item_id)
+
+        try:
+            current = file_path.read_text(encoding="utf-8")
+            file_path.write_text(current + "\n" + content, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+        self._finalize_document_update(item_id, item, persona_id, file_path)
+        item_name = item.get("name", item_id)
+        return f"「{item_name}」に内容を追記しました。"
+
     def view_item(self, persona_id: str, item_id: str) -> str:
         """View the full content of a picture or document item."""
         persona = self.manager.personas.get(persona_id)
