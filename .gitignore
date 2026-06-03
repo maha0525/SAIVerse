@@ -84,6 +84,8 @@ tasks.md
 scripts/.searxng-src/
 scripts/.searxng-venv/
 scripts/searxng_settings.yml
+scripts/searxng_settings.yml.bak
+scripts/searxng_user_engines.yml
 scripts/limiter.toml
 *.patch
 

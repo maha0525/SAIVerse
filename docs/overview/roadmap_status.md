@@ -54,7 +54,7 @@
 - ✅ **Chronicle 二重パイプライン統合**（Metabolism 時に Chronicle 生成と Fragment 生成が同バッチ連動）
 - 🟡 **Memopedia Fragment 化**（稼働中、air_city_a で 1162 件）。Fragment 専用 embedding 生成フローは未実装
 - 🔲 旧 `note_extractor` の整理（本番経路は `entity_extractor` に移行済、名残の掃除）
-- 🔵 **Building log の DB 化**（`saiverse.db` への building_messages テーブル化 + 視点別レンダリング、Phase 2.5 候補）
+- ✅ **Building log の DB 化**（`saiverse.db` への building_messages テーブル化 + 視点別レンダリング）
 
 ---
 
@@ -103,8 +103,9 @@
 - 🟡 **SwitchBot**（Intent doc draft 済、レビュー待ち。Cloud API v1.1 / 入出力両経路。Observer の利用者）
 - 🟡 **voice-tts**（GPT-SoVITS、実装済。GIL 飢餓問題対応中）
 - 🟡 **stack-chan**（Vessel 統合 §5 + 能動入力 BLE HID リモコン構想）
-- 🔲 **Discord**（ナチュレ見守り体制の軽量アドオン化構想）
-- 🔲 **Withings / 健康モニタリング**（見守りペルソナ + メール通報、構想）
+- 🔲 **Discord**（見守り機能の軽量アドオン化構想）
+- 🔲 **Withings 連携**（定期データ取得 + 通知ペルソナ、構想）
+- 🟡 **SearXNG**（メタ検索エンジン。3層マージ設定基盤実装済: SearXNG ベース → `searxng_engine_defaults.yml`（SAIVerse 推奨） → `searxng_user_engines.yml`（ユーザー三値オーバーライド）。検索ツールにカテゴリ指定追加済、web_research プレイブックでサイクルごと動的カテゴリ選択可能。**⚠️ 次回バージョンアップ時に既存ユーザーの settings.yml リセット検証が必要**）
 - 🔲 **Kitchen**（長時間処理の汎用基盤、未着手の予定要素）
 - 🔲 **Elicitation**（MCP 応答待ち、投稿前確認の標準化。優先度3位）
 
@@ -112,7 +113,7 @@
 
 ## 8. 復活予定
 
-- 💤 **SDS / multi-city**（Nature109 作。現状単一 City 運用のため停止中。将来 inter-city travel を復活させる際に再起動）
+- 💤 **SDS / multi-city**（現状単一 City 運用のため停止中。将来 inter-city travel を復活させる際に再起動）
 
 ---
 

@@ -351,7 +351,7 @@ graph TD
 
 ### SDS (SAIVerse Directory Service)
 
-複数の City プロセスを発見・追跡するインメモリ・レジストリ（`sds_server.py`、port 8080）。各 City が起動時に `/register`、`/heartbeat` で生存通知し、他 City は `/cities` で一覧を取得する。inter-city travel の前提機構として作られたが、**現状はデフォルト無効**（`--sds-url` 明示 + 別プロセス手動起動が必要）で、単一 City 運用に止まっているため**実質冬眠中**。Nature109（ナチュレ）作。将来 multi-city を復活させる際に再起動する想定。
+複数の City プロセスを発見・追跡するインメモリ・レジストリ（`sds_server.py`、port 8080）。各 City が起動時に `/register`、`/heartbeat` で生存通知し、他 City は `/cities` で一覧を取得する。inter-city travel の前提機構として作られたが、**現状はデフォルト無効**（`--sds-url` 明示 + 別プロセス手動起動が必要）で、単一 City 運用に止まっているため**実質冬眠中**。将来 multi-city を復活させる際に再起動する想定。
 
 ---
 
