@@ -78,7 +78,7 @@
     {
       "id": "plan_query",
       "type": "llm",
-      "action": "調査トピック「{research_topic}」について次の検索クエリを生成してください。\n\n## これまでに収集した重要情報\n{findings}\n\n## 現在のサイクル\n{iteration} / {max_loops}\n\n## 指示\n- 初回はトピックの核に当たる検索を行ってください\n- 既に情報がある場合は、不足している観点を補うクエリにしてください\n- 言語ヒント: トピックに応じて日本語/英語を使い分けてください",
+      "action": "調査トピック「{research_topic}」について次の検索クエリを生成してください。\n\n## これまでに収集した重要情報\n{findings}\n\n## 現在のサイクル\n{iteration} / {max_loops}\n\n## 指示\n- 初回はトピックの核に当たる検索を行ってください\n- 既に情報がある場合は、不足している観点を補うクエリにしてください\n- 言語ヒント: トピックに応じて日本語/英語を使い分けてください\n- カテゴリ: 調べる対象に応じて検索カテゴリを選んでください（一般的な話題＝general、時事・速報＝news、学術論文＝science、技術・プログラミング＝it など）。サイクルごとに変えて横断的に調べてもよいです",
       "response_schema": {
         "type": "object",
         "properties": {
@@ -90,6 +90,20 @@
             "type": "integer",
             "description": "取得件数（5-10推奨）"
           },
+          "category": {
+            "type": "string",
+            "enum": [
+              "general",
+              "news",
+              "images",
+              "videos",
+              "it",
+              "science",
+              "music",
+              "files"
+            ],
+            "description": "検索カテゴリ。一般的な話題は general、時事・速報は news、学術は science、技術は it。調べる対象に応じて選ぶ"
+          },
           "rationale": {
             "type": "string",
             "description": "このクエリを選んだ理由"
@@ -97,7 +111,8 @@
         },
         "required": [
           "query",
-          "max_results"
+          "max_results",
+          "category"
         ]
       },
       "output_key": "query_plan",
@@ -114,7 +129,8 @@
       "action": "searxng_search",
       "args_input": {
         "query": "query_plan.query",
-        "max_results": "query_plan.max_results"
+        "max_results": "query_plan.max_results",
+        "category": "query_plan.category"
       },
       "output_key": "search_results",
       "next": "select_urls"
