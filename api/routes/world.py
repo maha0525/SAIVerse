@@ -419,23 +419,29 @@ def get_playbook(playbook_id: int, db = Depends(get_db)):
     }
 
 def _validate_playbook_data(name: str, description: str, nodes_json: str, schema_json: str):
-    """Validate playbook schema and graph."""
+    """Validate playbook schema and graph.
+
+    nodes_json holds the FULL playbook structure (name, nodes, start_node,
+    input_schema, ...), matching how the runtime loader reads it
+    (see SEARuntime._load_playbook_from_db: ``PlaybookSchema(**json.loads(nodes_json))``).
+    schema_json is display/edit metadata only and is NOT consulted by the runtime.
+    """
     try:
-        nodes = json.loads(nodes_json)
-        schema = json.loads(schema_json)
+        data = json.loads(nodes_json)
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-    
-    # Build full playbook for validation
-    full_playbook = {
-        "name": name,
-        "description": description,
-        "nodes": nodes,
-        **schema
-    }
-    
+
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="nodes_json must be a full playbook object (dict), not a bare node list",
+        )
+
+    data["name"] = name
+    data["description"] = description
+
     try:
-        playbook_schema = PlaybookSchema(**full_playbook)
+        playbook_schema = PlaybookSchema(**data)
         validate_playbook_graph(playbook_schema)
     except PlaybookValidationError as e:
         raise HTTPException(status_code=400, detail=f"Graph validation error: {e}")
