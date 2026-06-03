@@ -56,10 +56,18 @@ class PulsePromptEntry(BaseModel):
     created_at: Optional[float]
 
 
+class GapMessage(BaseModel):
+    entry_id: str
+    role: str
+    content: str
+    created_at: Optional[float]
+
+
 class PulseDetailResponse(BaseModel):
     pulse_id: str
     messages: List[PulseTimelineMessage]
     prompts: List[PulsePromptEntry]
+    gap_messages: List[GapMessage]
     total: int
 
 
@@ -113,6 +121,25 @@ _DETAIL_SQL = """
     FROM messages
     WHERE thread_id LIKE ? AND pulse_id = ?
     ORDER BY created_at ASC
+"""
+
+_PREV_PULSE_MAX_CA_SQL = """
+    SELECT MAX(created_at) FROM messages
+    WHERE thread_id LIKE ? AND pulse_id IS NOT NULL AND pulse_id != ?
+      AND created_at < ?
+"""
+
+_GAP_MESSAGES_SQL = """
+    SELECT id, role, content, created_at FROM messages
+    WHERE thread_id LIKE ? AND pulse_id IS NULL
+      AND created_at > ? AND created_at < ?
+    ORDER BY created_at ASC
+"""
+
+_GAP_FALLBACK_SQL = """
+    SELECT id, role, content, created_at FROM messages
+    WHERE thread_id LIKE ? AND pulse_id IS NULL AND created_at < ?
+    ORDER BY created_at DESC LIMIT 1
 """
 
 
@@ -171,10 +198,31 @@ def get_pulse_detail(
     discardable も返すのは、メタ判断の破棄分も可視化したいため (storage_layers
     が discardable を除外するのと意図的に異なる)。
     """
+    thread_pat = _thread_prefix(persona_id)
     with get_adapter(persona_id, manager) as adapter:
         with adapter._db_lock:
-            cur = adapter.conn.execute(_DETAIL_SQL, (_thread_prefix(persona_id), pulse_id))
+            cur = adapter.conn.execute(_DETAIL_SQL, (thread_pat, pulse_id))
             rows = cur.fetchall()
+
+            # gap messages: 前回 Pulse 終了 〜 今回 Pulse 開始の間のメッセージ
+            first_ca = min((float(r[3]) for r in rows if r[3] is not None), default=None)
+            gap_rows: list = []
+            if first_ca is not None:
+                prev_cur = adapter.conn.execute(
+                    _PREV_PULSE_MAX_CA_SQL, (thread_pat, pulse_id, first_ca),
+                )
+                prev_max_ca = prev_cur.fetchone()[0]
+                if prev_max_ca is not None:
+                    gap_cur = adapter.conn.execute(
+                        _GAP_MESSAGES_SQL, (thread_pat, float(prev_max_ca), first_ca),
+                    )
+                    gap_rows = gap_cur.fetchall()
+                else:
+                    fb_cur = adapter.conn.execute(
+                        _GAP_FALLBACK_SQL, (thread_pat, first_ca),
+                    )
+                    gap_rows = fb_cur.fetchall()
+
     messages = [
         PulseTimelineMessage(
             entry_id=r[0],
@@ -189,22 +237,29 @@ def get_pulse_detail(
         )
         for r in rows
     ]
-    # 入力プロンプト = 各メッセージの paired_action_text (= その応答を引き出した
-    # action 指示)。送信物そのものなので messages テーブルの paired_action_text
-    # カラムから取る (pulse_logs への二重記録はしない)。
     prompts: List[PulsePromptEntry] = []
     for r in rows:
         pat = r[7]
         if pat:
             prompts.append(
                 PulsePromptEntry(
-                    node_id=r[0],  # 紐づく応答メッセージの id
+                    node_id=r[0],
                     content=pat,
                     created_at=float(r[3]) if r[3] is not None else None,
                 )
             )
+    gap_messages = [
+        GapMessage(
+            entry_id=r[0],
+            role=r[1],
+            content=r[2] or "",
+            created_at=float(r[3]) if r[3] is not None else None,
+        )
+        for r in gap_rows
+    ]
     return PulseDetailResponse(
-        pulse_id=pulse_id, messages=messages, prompts=prompts, total=len(messages)
+        pulse_id=pulse_id, messages=messages, prompts=prompts,
+        gap_messages=gap_messages, total=len(messages),
     )
 
 

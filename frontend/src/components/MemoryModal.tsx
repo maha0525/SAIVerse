@@ -6,7 +6,6 @@ import MemoryImport from './memory/MemoryImport';
 import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
 import ArasujiViewer from './memory/ArasujiViewer';
-import PulseLogsViewer from './memory/PulseLogsViewer';
 import PulseTimelineViewer from './memory/PulseTimelineViewer';
 import StorageLayersViewer from './memory/StorageLayersViewer';
 import TracksViewer from './memory/TracksViewer';
@@ -19,7 +18,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'arasuji' | 'memopedia' | 'storage_layers' | 'tracks' | 'pulse_logs' | 'pulse_timeline' | 'import' | 'debug';
+type Tab = 'browser' | 'arasuji' | 'memopedia' | 'storage_layers' | 'tracks' | 'pulse_timeline' | 'import' | 'debug';
 
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -73,13 +72,6 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         Tracks
                     </button>
                     <button
-                        className={`${styles.tab} ${activeTab === 'pulse_logs' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('pulse_logs')}
-                    >
-                        <Activity size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        Pulse Logs
-                    </button>
-                    <button
                         className={`${styles.tab} ${activeTab === 'pulse_timeline' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('pulse_timeline')}
                     >
@@ -108,7 +100,6 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
                     {activeTab === 'storage_layers' && <StorageLayersViewer personaId={personaId} />}
                     {activeTab === 'tracks' && <TracksViewer personaId={personaId} />}
-                    {activeTab === 'pulse_logs' && <PulseLogsViewer personaId={personaId} />}
                     {activeTab === 'pulse_timeline' && <PulseTimelineViewer personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}

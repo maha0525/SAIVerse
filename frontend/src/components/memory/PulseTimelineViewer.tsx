@@ -37,9 +37,17 @@ interface PulsePrompt {
     created_at: number | null;
 }
 
+interface GapMessage {
+    entry_id: string;
+    role: string;
+    content: string;
+    created_at: number | null;
+}
+
 interface PulseDetail {
     messages: PulseMessage[];
     prompts: PulsePrompt[];
+    gap_messages: GapMessage[];
 }
 
 const btnStyle: React.CSSProperties = {
@@ -175,7 +183,11 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                     const data = await res.json();
                     setDetail((prev) => ({
                         ...prev,
-                        [pulseId]: { messages: data.messages || [], prompts: data.prompts || [] },
+                        [pulseId]: {
+                            messages: data.messages || [],
+                            prompts: data.prompts || [],
+                            gap_messages: data.gap_messages || [],
+                        },
                     }));
                 }
             } catch (e) {
@@ -244,6 +256,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                             {(() => {
                                 const msgs = detail[p.pulse_id]?.messages || [];
                                 const prompts = detail[p.pulse_id]?.prompts || [];
+                                const gapMsgs = detail[p.pulse_id]?.gap_messages || [];
                                 const promptByNodeId = new Map<string, PulsePrompt>();
                                 prompts.forEach((pr) => {
                                     if (pr.node_id) promptByNodeId.set(pr.node_id, pr);
@@ -328,6 +341,43 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                 );
 
                                 const elements: React.ReactNode[] = [];
+
+                                if (gapMsgs.length > 0) {
+                                    elements.push(
+                                        <div key="gap-header" style={{
+                                            fontSize: '0.68rem', color: '#e0a060',
+                                            borderBottom: '1px dashed rgba(224,160,96,0.3)',
+                                            paddingBottom: '0.2rem', marginBottom: '0.3rem',
+                                        }}>
+                                            Pulse 前のメッセージ ({gapMsgs.length}件)
+                                        </div>
+                                    );
+                                    gapMsgs.forEach((g, gi) => {
+                                        elements.push(
+                                            <div key={`gap-${gi}`} style={{ marginBottom: '0.3rem', opacity: 0.75 }}>
+                                                <div style={{ fontSize: '0.7rem', display: 'flex', gap: '0.4rem', marginBottom: '2px' }}>
+                                                    <span style={{ color: '#e0a060' }}>{g.role}</span>
+                                                    <span style={{ color: '#888' }}>{fmtTime(g.created_at)}</span>
+                                                </div>
+                                                <div style={{
+                                                    fontSize: '0.8rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                                                    background: 'rgba(224,160,96,0.06)', padding: '0.3rem 0.5rem',
+                                                    borderRadius: '4px', fontFamily: 'monospace',
+                                                    borderLeft: '2px solid rgba(224,160,96,0.3)',
+                                                }}>
+                                                    {g.content}
+                                                </div>
+                                            </div>
+                                        );
+                                    });
+                                    elements.push(
+                                        <div key="gap-separator" style={{
+                                            borderBottom: '1px dashed rgba(224,160,96,0.3)',
+                                            marginBottom: '0.3rem',
+                                        }} />
+                                    );
+                                }
+
                                 let inSpellGroup = false;
                                 let currentSpellOrigin: string | null = null;
 
