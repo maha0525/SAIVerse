@@ -19,9 +19,11 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 LOGGER = logging.getLogger(__name__)
 
 
-# Per-message timestamp line (YYYY/M/D H:MM:SS, allows 1-2 digit month/day/hour)
+# Per-message timestamp line.
+# Old format: bare line          "2026/4/27 11:48:42"
+# New format: blockquote + MDY   "> 5/13/2026 1:15:28"
 _MESSAGE_TIMESTAMP_RE = re.compile(
-    r"^(\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}:\d{2})\s*$"
+    r"^>?\s*(\d{1,4}/\d{1,2}/\d{1,4}\s+\d{1,2}:\d{2}:\d{2})\s*$"
 )
 
 # Markdown image reference whose URL is a data: URI (typically a huge inline
@@ -390,7 +392,7 @@ def _parse_markdown_format(
         source = "chatgpt"
     elif "gemini exporter" in content_lower or "ai-chat-exporter.com" in content_lower:
         source = "gemini"
-    elif "claude exporter" in content_lower or "claudexporter.com" in content_lower:
+    elif "claude exporter" in content_lower or "claudexporter.com" in content_lower or "ai-chat-exporter.net" in content_lower:
         source = "claude"
 
     # Parse messages
@@ -402,35 +404,46 @@ def _parse_markdown_format(
     def _flush() -> None:
         if current_role and current_content:
             body = _strip_inline_base64_images("\n".join(current_content).strip())
-            messages.append(
-                ExporterMessage(
-                    role=current_role,
-                    content=body,
-                    timestamp=current_timestamp,
+            body = re.sub(
+                r"\n*(?:-{3,}\s*\n*)?Powered by.*$", "", body,
+                flags=re.DOTALL | re.IGNORECASE,
+            ).strip()
+            if body:
+                messages.append(
+                    ExporterMessage(
+                        role=current_role,
+                        content=body,
+                        timestamp=current_timestamp,
+                    )
                 )
-            )
 
     for line in lines:
-        if line.strip() == "## Prompt:":
+        stripped = line.strip().rstrip(":")
+        if stripped in ("## Prompt", "## User"):
             _flush()
             current_role = "user"
             current_content = []
             current_timestamp = None
-        elif line.strip() == "## Response:":
+        elif stripped in ("## Response", "## Assistant"):
             _flush()
             current_role = "assistant"
             current_content = []
             current_timestamp = None
         elif current_role:
             # Per-message timestamp line right after the role heading.
-            # Older exports only emitted this for Claude; newer ChatGPT Exporter
-            # adds it too. The blank line that follows is consumed naturally by
-            # the trailing strip when we join the content below.
-            if not current_content and current_timestamp is None:
-                ts_match = _MESSAGE_TIMESTAMP_RE.match(line.strip())
-                if ts_match:
-                    current_timestamp = _parse_datetime_flexible(ts_match.group(1))
-                    continue
+            # Old format: bare timestamp on the next line.
+            # New format: blank line, then "> M/D/YYYY H:MM:SS" blockquote.
+            # We allow blank lines before the timestamp so the detection
+            # window spans both layouts.
+            if current_timestamp is None:
+                if not line.strip():
+                    if not current_content:
+                        continue
+                else:
+                    ts_match = _MESSAGE_TIMESTAMP_RE.match(line.strip())
+                    if ts_match and not current_content:
+                        current_timestamp = _parse_datetime_flexible(ts_match.group(1))
+                        continue
             current_content.append(line)
 
     _flush()
@@ -521,7 +534,7 @@ def detect_exporter_source(file_path: Union[str, Path]) -> str:
         return "chatgpt"
     if "gemini exporter" in content_lower or "ai-chat-exporter.com" in content_lower:
         return "gemini"
-    if "claude exporter" in content_lower or "claudexporter.com" in content_lower:
+    if "claude exporter" in content_lower or "claudexporter.com" in content_lower or "ai-chat-exporter.net" in content_lower:
         return "claude"
 
     # Try JSON parsing for powered_by field
