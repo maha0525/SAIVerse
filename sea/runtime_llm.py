@@ -378,8 +378,15 @@ def _build_spell_user_only_block(
     tool_args: dict,
     display_name: str,
     result_str: str = "",
+    success: bool = True,
 ) -> str:
     """Build a ``<user_only>`` block carrying one spell invocation + result.
+
+    ``success=False`` renders the failure variant: the foldable disclosure
+    uses a cross (×) icon instead of the star and adds the
+    ``spellResultError`` class so the frontend can style misfired spells
+    (unknown spell name, bad invocation form, tool error) distinctly. The
+    ``result_str`` then carries the error / hint text shown to the user.
 
     Structure (Phase 2-B-step3 / 2-E, voice_tts_pipeline_streaming intent doc):
 
@@ -427,12 +434,23 @@ def _build_spell_user_only_block(
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
-    if result_escaped:
+    if success:
+        details_class = "spellResult"
+        icon_svg = (
+            '<path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 '
+            '5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z"/>'
+        )
+    else:
+        details_class = "spellResult spellResultError"
+        icon_svg = '<path d="M18 6L6 18M6 6l12 12"/>'
+    # Failure blocks always render (the error/hint text must reach the user);
+    # success blocks only render when there is a result to show.
+    if result_escaped or not success:
         result_section = (
-            f'<details class="spellResult">'
+            f'<details class="{details_class}">'
             f'<summary class="spellSummary">'
             f'<span class="spellIcon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
-            f'<path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z"/>'
+            f'{icon_svg}'
             f'</svg></span>'
             f'<span>{display_name_escaped}</span>'
             f'</summary>'
@@ -447,6 +465,69 @@ def _build_spell_user_only_block(
         f'{result_section}'
         f'</user_only>'
     )
+
+
+def _list_router_callable_playbook_names(persona: Any, building_id: Optional[str]) -> List[str]:
+    """Enumerate router_callable Playbook names available to ``persona``.
+
+    Best-effort: invokes the ``list_available_playbooks`` tool directly
+    (outside persona_context, so persona_id / building_id are passed
+    explicitly) and returns the sorted name list. Degrades to ``[]`` on any
+    failure since this only feeds an error hint.
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    try:
+        list_func = TOOL_REGISTRY.get("list_available_playbooks")
+        if list_func is None:
+            return []
+        raw = list_func(persona_id=persona_id, building_id=building_id)
+        payload = raw[0] if isinstance(raw, tuple) else raw
+        parsed = json.loads(payload) if isinstance(payload, str) else payload
+        if not isinstance(parsed, list):
+            return []
+        names = [
+            (item.get("name") or "").strip()
+            for item in parsed
+            if isinstance(item, dict) and (item.get("name") or "").strip()
+        ]
+        return sorted(names)
+    except Exception:
+        LOGGER.warning(
+            "[sea][spell] failed to enumerate playbooks for unknown-spell hint",
+            exc_info=True,
+        )
+        return []
+
+
+def _build_unknown_spell_error(spell_name: str, persona: Any, building_id: Optional[str]) -> str:
+    """Build a corrective error message for an unknown (unregistered) spell.
+
+    Most common mistake: invoking a Playbook **name** directly as a spell
+    (e.g. ``/spell name='web_research'``) instead of going through the
+    ``run_playbook`` spell. When the unknown name matches a router_callable
+    Playbook, point the persona at the correct ``run_playbook`` form so it can
+    self-correct on the retry round. Otherwise list the registered spells.
+    """
+    playbook_names = _list_router_callable_playbook_names(persona, building_id)
+
+    if spell_name in playbook_names:
+        return (
+            f"「{spell_name}」は Playbook であり、スペルとして直接は呼び出せません。"
+            f"Playbook を実行するには run_playbook スペルを使ってください: "
+            f"/spell name='run_playbook' args={{\"name\": \"{spell_name}\"}}"
+        )
+
+    available = ", ".join(sorted(SPELL_TOOL_NAMES)) or "(なし)"
+    hint = (
+        f"「{spell_name}」というスペルは存在しません。"
+        f"利用可能なスペル: {available}。"
+    )
+    if playbook_names:
+        hint += (
+            f" Playbook を実行したい場合は run_playbook を使ってください "
+            f"(利用可能な Playbook: {', '.join(playbook_names)})。"
+        )
+    return hint
 
 
 # ── Handy Tool inline execution (legacy, kept for non-spell tool_call path) ──
@@ -656,9 +737,11 @@ def _emit_bubble1_early(
     """Spell loop 開始前に bubble1 を早期 emit して、 voice-tts の TTS 合成を
     Spell 実行と並行で走らせる (Phase 1)。
 
-    Spell が無い、 unknown spell しか無い、 text_before が空、 ``speak`` が
-    False の場合は no-op で ``""`` を返す。 早期 emit した時はその text_before
-    を返し、 caller は後段の bubble1 emit を skip する判定に使う。
+    Spell が無い (= 通常応答)、 text_before が空、 ``speak`` が False の場合は
+    no-op で ``""`` を返す。 unknown spell しか無い場合は、 その手前の本文を
+    早期 emit する (unknown spell も spell loop で 1 ラウンド処理されるため、
+    valid spell ありの場合と同じ扱い)。 早期 emit した時はその text_before を
+    返し、 caller は後段の bubble1 emit を skip する判定に使う。
 
     ``send_streaming_discard``: streaming mode のみ True にする (= UI に途中の
     streaming chunk を破棄させて bubble1 を綺麗に再描画させるため)。 tool mode
@@ -700,12 +783,15 @@ def _emit_bubble1_early(
 
 
 def _extract_first_text_before(text: str) -> str:
-    """``text`` の中から最初の有効 spell 行までの本文を返す。
+    """``text`` の中から最初の spell 行 (有効 / unknown 問わず) までの本文を返す。
 
-    Spell が無い (= 通常応答)、 または unknown spell しか無い場合は ``""``
-    を返す。 ``_run_spell_loop`` の最初のラウンドで計算される ``text_before``
-    と同じ値になるよう、 ``_parse_spell_lines`` + ``SPELL_TOOL_NAMES`` で
-    フィルタする手順を共有する。
+    Spell が無い (= 通常応答) 場合は ``""`` を返す。 unknown spell しか無い
+    場合も、 その unknown 行の手前までの本文は正規の発言なので返す
+    (unknown spell も ``_run_spell_loop`` で 1 ラウンド処理される)。
+    ``_run_spell_loop`` の最初のラウンドで計算される ``text_before`` と同じ
+    値になるよう、 ``_parse_spell_lines`` の先頭エントリ位置を基準にする。
+    有効 spell より前に unknown spell がある場合に、 その生 ``/spell`` 行が
+    bubble1 へ漏れるのを防ぐためでもある。
 
     Phase 1 (bubble1 早期 emit、 voice-tts Spell 待ち遅延対策) で caller が
     spell loop 実行 **前** に bubble1 部分のテキストを取り出すために使う。
@@ -716,13 +802,9 @@ def _extract_first_text_before(text: str) -> str:
     if not text:
         return ""
     all_parsed = _parse_spell_lines(text)
-    valid_spells = [
-        (name, args, m, norm) for name, args, m, norm in all_parsed
-        if name in SPELL_TOOL_NAMES
-    ]
-    if not valid_spells:
+    if not all_parsed:
         return ""
-    return text[:valid_spells[0][2].start()].rstrip()
+    return text[:all_parsed[0][2].start()].rstrip()
 
 
 async def _consume_pipeline_stream(
@@ -925,29 +1007,42 @@ async def _run_spell_loop(
     # system hit an internal error is too aggressive.
     try:
         while loop_count < _MAX_SPELL_LOOPS:
-            # Parse all spells from current text (canonical + fuzzy), filter to registered ones
+            # Parse all spells from current text (canonical + fuzzy), then split
+            # into registered (executable) and unknown (misfired) invocations.
             all_parsed = _parse_spell_lines(text)
             valid_spells = [
                 (name, args, m, norm) for name, args, m, norm in all_parsed
                 if name in SPELL_TOOL_NAMES
             ]
-            unknown = [name for name, _, _, _ in all_parsed if name not in SPELL_TOOL_NAMES]
-            for name in unknown:
-                LOGGER.warning("[sea][spell] Unknown spell '%s', skipping", name)
+            unknown_spells = [
+                (name, args, m, norm) for name, args, m, norm in all_parsed
+                if name not in SPELL_TOOL_NAMES
+            ]
 
-            if not valid_spells:
+            # Nothing spell-like at all → normal speech, exit the loop. Unknown
+            # spells are NOT a reason to break: they are fed back as errors below
+            # so the persona can retry with the correct invocation.
+            if not valid_spells and not unknown_spells:
                 break
 
             loop_count += 1
-            spell_names = [s[0] for s in valid_spells]
-            LOGGER.info("[sea][spell] Round %d: executing %d spell(s) in parallel: %s",
-                        loop_count, len(valid_spells), spell_names)
+            LOGGER.info(
+                "[sea][spell] Round %d: %d valid spell(s) %s, %d unknown spell(s) %s",
+                loop_count,
+                len(valid_spells), [s[0] for s in valid_spells],
+                len(unknown_spells), [s[0] for s in unknown_spells],
+            )
 
-            # text_before = text preceding the first spell
-            text_before = text[:valid_spells[0][2].start()].rstrip()
+            # text_before = text preceding the FIRST spell of any kind (all_parsed
+            # is position-sorted), so a raw /spell line for an unknown spell does
+            # not leak into the bubble.
+            text_before = text[:all_parsed[0][2].start()].rstrip()
 
-            # Canonical assistant message: text_before + normalized spell lines
-            all_spell_lines_normalized = "\n".join(norm for _, _, _, norm in valid_spells)
+            # Canonical assistant message: text_before + ALL normalized spell
+            # lines (valid + unknown, in textual order) so the persona's record
+            # shows exactly what it tried — including the misfired invocation,
+            # which the following [Spell Error: ...] user message corrects.
+            all_spell_lines_normalized = "\n".join(norm for _, _, _, norm in all_parsed)
             assistant_content = (text_before + "\n" + all_spell_lines_normalized).strip()
             messages.append({"role": "assistant", "content": assistant_content})
 
@@ -980,6 +1075,7 @@ async def _run_spell_loop(
                 if _is_first_round and _stored_id:
                     _spell_origin_id = _stored_id
                     state["_spell_loop_origin_id"] = _spell_origin_id
+                    state["_spell_loop_count"] = loop_count
 
             # Execute all spells in parallel.
             # ``messages`` is snapshotted into a contextvar via persona_context so
@@ -989,28 +1085,53 @@ async def _run_spell_loop(
             # run_playbook use the metadata to forward sub-playbook media
             # (image generation results, etc.) up to the parent line so the
             # next LLM round can attach them as multimodal content.
-            results: List[Tuple[str, Optional[Dict[str, Any]]]] = list(await asyncio.gather(*[
+            valid_results: List[Tuple[str, Optional[Dict[str, Any]]]] = list(await asyncio.gather(*[
                 _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback, messages=messages)
                 for name, args, _, _ in valid_spells
             ]))
 
-            # メタ判断 Pulse の発動 spell + 結果をバッファに記録
+            # Unified, position-ordered record per spell line this round.
+            # Unknown spells are not executed — each gets a corrective error
+            # (``_build_unknown_spell_error``) that is fed back to the LLM and
+            # shown to the user as a failure (×) block, so the persona can retry.
+            round_records: List[Dict[str, Any]] = []
+            for (name, args, m, norm), (result_text, result_meta) in zip(valid_spells, valid_results):
+                round_records.append({
+                    "name": name, "args": args, "m": m, "norm": norm,
+                    "result": result_text, "meta": result_meta, "success": True,
+                })
+            for name, args, m, norm in unknown_spells:
+                error_text = _build_unknown_spell_error(name, persona, building_id)
+                LOGGER.warning(
+                    "[sea][spell] Unknown spell '%s' → returning error to persona for retry",
+                    name,
+                )
+                round_records.append({
+                    "name": name, "args": args, "m": m, "norm": norm,
+                    "result": error_text, "meta": None, "success": False,
+                })
+            round_records.sort(key=lambda r: r["m"].start())
+
+            # メタ判断 Pulse の発動 spell + 結果をバッファに記録 (失敗も含む)
             if _is_meta_judgment_pulse:
                 _meta_pulse_ctx = state.get("_pulse_context")
                 if _meta_pulse_ctx is not None:
-                    for (name, args, _, _), (result_text, _) in zip(valid_spells, results):
-                        _meta_pulse_ctx.append_meta_judgment_spell(name, args, result_text)
+                    for rec in round_records:
+                        _meta_pulse_ctx.append_meta_judgment_spell(rec["name"], rec["args"], rec["result"])
 
-            # All spell results in one user message (reduces per-result message overhead)
+            # All spell results in one user message (reduces per-result message
+            # overhead). Successful spells use [Spell Result: ...]; misfires use
+            # [Spell Error: ...] so the LLM clearly sees what it must correct.
             combined_results = "\n".join(
-                f"[Spell Result: {name}]\n{result_text}"
-                for (name, _, _, _), (result_text, _) in zip(valid_spells, results)
+                f"[Spell {'Result' if rec['success'] else 'Error'}: {rec['name']}]\n{rec['result']}"
+                for rec in round_records
             )
-            # Aggregate media from all spell results so the next LLM round can
-            # see images / files etc. as attachments. iter_image_media() in each
-            # LLM client picks this up via message["metadata"]["media"].
+            # Aggregate media from successful spell results so the next LLM round
+            # can see images / files etc. as attachments. iter_image_media() in
+            # each LLM client picks this up via message["metadata"]["media"].
             aggregated_media: List[Dict[str, Any]] = []
-            for _, result_meta in results:
+            for rec in round_records:
+                result_meta = rec["meta"]
                 if isinstance(result_meta, dict):
                     media_list = result_meta.get("media")
                     if isinstance(media_list, list):
@@ -1064,24 +1185,34 @@ async def _run_spell_loop(
                     spell_seq=loop_count,
                 )
 
-            # Record to activity trace
+            # Record to activity trace (failures carry success=False)
             _at = state.get("_activity_trace")
             if isinstance(_at, list):
-                for name, _, _, _ in valid_spells:
-                    _at.append({"action": "spell", "name": name, "playbook": playbook.name})
+                for rec in round_records:
+                    _at.append({
+                        "action": "spell", "name": rec["name"],
+                        "playbook": playbook.name, "success": rec["success"],
+                    })
 
             # Accumulate this round's content into merged_parts: round-leading
             # text_before (= raw text before the first /spell line of this round)
-            # followed by one ``<user_only>`` block per executed spell.
+            # followed by one ``<user_only>`` block per spell — a success (star)
+            # block for executed spells, a failure (×) block for misfires.
             # The final LLM continuation (= ``text`` after the retry below) is
             # appended once the loop exits — see the return path.
             if text_before:
                 merged_parts.append(text_before)
-            for (name, args, _, _), (result_text, _) in zip(valid_spells, results):
-                schema = SPELL_TOOL_SCHEMAS.get(name)
-                display = (schema.spell_display_name if schema else "") or name
+            for rec in round_records:
+                if rec["success"]:
+                    schema = SPELL_TOOL_SCHEMAS.get(rec["name"])
+                    display = (schema.spell_display_name if schema else "") or rec["name"]
+                else:
+                    display = rec["name"]
                 merged_parts.append(
-                    _build_spell_user_only_block(name, args, display, result_text)
+                    _build_spell_user_only_block(
+                        rec["name"], rec["args"], display, rec["result"],
+                        success=rec["success"],
+                    )
                 )
 
             # Re-invoke LLM once for the entire round.
@@ -2974,6 +3105,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     len(_memorize_sig) if isinstance(_memorize_sig, (bytes, str)) else 0,
                 )
                 _spell_origin = state.get("_spell_loop_origin_id")
+                _spell_lc = state.get("_spell_loop_count")
+                _spell_final_seq = (_spell_lc + 1) if _spell_lc is not None else None
                 _memorize_pat = None if _spell_origin else prompt
                 stored_message_id = runtime._store_memory(
                     persona,
@@ -2987,10 +3120,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     paired_action_text=_memorize_pat,
                     scope=memorize_scope,
                     line_role=memorize_line_role,
-                    # 2026-05-20: Gemini 3.x の thoughtSignature を永続化。state には
-                    # gemini.py の text/stream 経路から伝搬済み (LLM ノード処理内)。
                     thought_signature=_memorize_sig,
                     spell_origin_id=_spell_origin,
+                    spell_seq=_spell_final_seq,
                     return_message_id=True,
                 )
                 if not stored_message_id:

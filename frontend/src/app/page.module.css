@@ -1525,6 +1525,28 @@
     border-color: rgba(168, 85, 247, 0.12);
 }
 
+/* Failure (misfired spell) variant — red palette with the × icon picking up
+   the red summary color via currentColor. */
+:global(.spellResult.spellResultError) {
+    color: rgba(120, 50, 50, 0.9);
+    background: rgba(239, 68, 68, 0.05);
+    border-color: rgba(239, 68, 68, 0.2);
+}
+
+:global(.spellResultError .spellSummary) {
+    color: rgba(220, 38, 38, 0.85);
+}
+
+:global([data-theme="dark"] .spellResult.spellResultError) {
+    color: rgba(252, 165, 165, 0.85);
+    background: rgba(239, 68, 68, 0.08);
+    border-color: rgba(239, 68, 68, 0.25);
+}
+
+:global([data-theme="dark"] .spellResultError .spellSummary) {
+    color: rgba(248, 113, 113, 0.9);
+}
+
 /* Toast notifications */
 .toastContainer {
     position: fixed;
