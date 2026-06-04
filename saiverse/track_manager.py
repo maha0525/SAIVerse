@@ -28,7 +28,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
@@ -913,6 +913,66 @@ class TrackManager:
             f"invalid track reference: {ref!r} "
             f"(expected 't:N' or UUID format)"
         )
+
+    # ------------------------------------------------------------------
+    # Track タスクリスト
+    # ------------------------------------------------------------------
+
+    def get_tasks(self, track_id: str) -> List[Dict[str, Any]]:
+        """Track のタスクリストを返す。"""
+        db = self.SessionLocal()
+        try:
+            track = self._fetch_or_raise(db, track_id)
+            return json.loads(track.tasks_json) if track.tasks_json else []
+        finally:
+            db.close()
+
+    def add_task(self, track_id: str, title: str) -> List[Dict[str, Any]]:
+        """Track にタスクを追加して更新後のリストを返す。"""
+        db = self.SessionLocal()
+        try:
+            track = self._fetch_or_raise(db, track_id)
+            tasks = json.loads(track.tasks_json) if track.tasks_json else []
+            tasks.append({"title": title, "done": False})
+            track.tasks_json = json.dumps(tasks, ensure_ascii=False)
+            db.commit()
+            db.expunge(track)
+            return tasks
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def complete_task(self, track_id: str, index: int) -> List[Dict[str, Any]]:
+        """Track のタスクを完了にして更新後のリストを返す。"""
+        db = self.SessionLocal()
+        try:
+            track = self._fetch_or_raise(db, track_id)
+            tasks = json.loads(track.tasks_json) if track.tasks_json else []
+            if index < 0 or index >= len(tasks):
+                raise ValueError(f"task index out of range: {index} (total {len(tasks)})")
+            tasks[index]["done"] = True
+            track.tasks_json = json.dumps(tasks, ensure_ascii=False)
+            db.commit()
+            db.expunge(track)
+            return tasks
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def format_task_list(self, track_id: str) -> str:
+        """Track のタスクリストを Markdown チェックリスト形式で返す。"""
+        tasks = self.get_tasks(track_id)
+        if not tasks:
+            return "(タスクなし)"
+        lines = []
+        for i, t in enumerate(tasks):
+            mark = "x" if t.get("done") else " "
+            lines.append(f"{i}. [{mark}] {t['title']}")
+        return "\n".join(lines)
 
     def _fetch_or_raise(self, db: Session, track_id: str) -> ActionTrack:
         track = db.query(ActionTrack).filter_by(track_id=track_id).first()

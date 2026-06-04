@@ -50,9 +50,10 @@ def memopedia_get_page(
     # Format page content
     keywords_str = ", ".join(page.keywords) if page.keywords else "(なし)"
     body = memopedia.render_page_body(page.id)
+    short_ref = f"m:{page.short_id}" if page.short_id else page.id
     result = f"""# {page.title}
 
-**ID**: {page.id}
+**ID**: {short_ref}
 **カテゴリ**: {page.category or "未分類"}
 **キーワード**: {keywords_str}
 **更新日時**: {page.updated_at}
@@ -82,7 +83,7 @@ def schema() -> ToolSchema:
                 },
                 "page_id": {
                     "type": "string",
-                    "description": "Page ID (if known)",
+                    "description": "Page ID or short ref (e.g. m:1)",
                 },
             },
         },

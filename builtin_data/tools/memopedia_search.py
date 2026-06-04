@@ -70,18 +70,16 @@ def memopedia_search(
 
         kw_str = f" [{', '.join(keywords)}]" if keywords else ""
 
-        lines.append(f"[{i}] ({page.id}) [{page.category}] {page.title}{kw_str}")
+        short_ref = f"m:{page.short_id}" if page.short_id else page.id[:8]
+        lines.append(f"[{i}] ({short_ref}) [{page.category}] {page.title}{kw_str}")
         if page.summary:
             lines.append(f"    {page.summary}")
 
-        # Show content snippet if summary is sparse
         if page.content and (not page.summary or len(page.summary) < 20):
             snippet = page.content.strip()[:150]
             if len(page.content.strip()) > 150:
                 snippet += "..."
             lines.append(f"    Content: {snippet}")
-
-        lines.append(f"    URI: saiverse://self/memopedia/page/{page.id}")
         lines.append("")
 
     return "\n".join(lines)

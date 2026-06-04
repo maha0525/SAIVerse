@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -66,6 +67,7 @@ class MemopediaPage:
     is_important: bool = False  # True if page should not decay below "rough"
     last_referenced_at: Optional[int] = None  # Timestamp of last reference (for vividness decay)
     metadata: Optional[Dict[str, Any]] = None  # Additional metadata (e.g., persona_id)
+    short_id: Optional[int] = None  # Per-DB sequential ID (m:1, m:2, ...)
     children: List["MemopediaPage"] = field(default_factory=list)
 
     def to_dict(self, include_children: bool = True) -> Dict[str, Any]:
@@ -84,6 +86,7 @@ class MemopediaPage:
             "is_important": self.is_important,
             "last_referenced_at": self.last_referenced_at,
             "metadata": self.metadata,
+            "short_id": self.short_id,
         }
         if include_children:
             result["children"] = [c.to_dict(include_children=True) for c in self.children]
@@ -131,6 +134,57 @@ class MemopediaFragment:
     vividness: str = "vivid"
     source_date: Optional[str] = None
     created_at: int = 0
+
+
+def _backfill_short_ids(conn: sqlite3.Connection) -> None:
+    """Assign short_id to existing pages that lack one (migration helper)."""
+    cur = conn.execute(
+        "SELECT id FROM memopedia_pages WHERE short_id IS NULL ORDER BY created_at"
+    )
+    rows = cur.fetchall()
+    max_cur = conn.execute(
+        "SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages"
+    )
+    next_id = max_cur.fetchone()[0] + 1
+    for (page_id,) in rows:
+        conn.execute(
+            "UPDATE memopedia_pages SET short_id = ? WHERE id = ?",
+            (next_id, page_id),
+        )
+        next_id += 1
+    if rows:
+        conn.commit()
+
+
+def _next_short_id(conn: sqlite3.Connection) -> int:
+    """Return the next short_id for a new page (MAX + 1, first is 1)."""
+    cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages")
+    return cur.fetchone()[0] + 1
+
+
+_SHORT_ID_RE = re.compile(r"^[mM]:(\d+)$")
+
+
+def resolve_page_ref(conn: sqlite3.Connection, ref: str) -> Optional[str]:
+    """Resolve a page reference to a full page ID.
+
+    Accepts:
+    - ``m:1`` / ``M:1`` → page with short_id=1
+    - saiverse:// URI → extracted page_id
+    - UUID or prefix → as-is (existing get_page handles prefix fallback)
+
+    Returns the resolved page_id string, or None if not found.
+    """
+    ref = ref.strip()
+    m = _SHORT_ID_RE.match(ref)
+    if m:
+        sid = int(m.group(1))
+        cur = conn.execute(
+            "SELECT id FROM memopedia_pages WHERE short_id = ?", (sid,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    return ref
 
 
 def init_memopedia_tables(conn: sqlite3.Connection) -> None:
@@ -199,6 +253,13 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
         conn.execute("SELECT last_referenced_at FROM memopedia_pages LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE memopedia_pages ADD COLUMN last_referenced_at INTEGER")
+
+    # Migration: add short_id column (per-DB sequential ID for m:N references)
+    try:
+        conn.execute("SELECT short_id FROM memopedia_pages LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_pages ADD COLUMN short_id INTEGER")
+        _backfill_short_ids(conn)
 
     conn.execute(
         """
@@ -321,6 +382,13 @@ def _seed_root_pages(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_PAGE_SELECT_COLS = (
+    "id, parent_id, title, summary, content, category, "
+    "created_at, updated_at, keywords, vividness, is_trunk, "
+    "is_important, last_referenced_at, metadata, short_id"
+)
+
+
 def _row_to_page(row: tuple) -> MemopediaPage:
     """Convert a database row to a MemopediaPage object."""
     # Parse keywords JSON (column index 8)
@@ -351,6 +419,8 @@ def _row_to_page(row: tuple) -> MemopediaPage:
         except (json.JSONDecodeError, TypeError):
             metadata = None
 
+    short_id = int(row[14]) if len(row) > 14 and row[14] is not None else None
+
     return MemopediaPage(
         id=row[0],
         parent_id=row[1],
@@ -366,6 +436,7 @@ def _row_to_page(row: tuple) -> MemopediaPage:
         is_important=is_important,
         last_referenced_at=last_referenced_at,
         metadata=metadata,
+        short_id=short_id,
     )
 
 
@@ -391,12 +462,13 @@ def create_page(
     now = int(time.time())
     kw_list = keywords or []
     metadata_json = json.dumps(metadata) if metadata else None
+    sid = _next_short_id(conn)
     conn.execute(
         """
-        INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at, metadata, short_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list), vividness, int(is_trunk), 0, now, metadata_json),
+        (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list), vividness, int(is_trunk), 0, now, metadata_json, sid),
     )
     conn.commit()
     return MemopediaPage(
@@ -413,13 +485,18 @@ def create_page(
         is_trunk=is_trunk,
         last_referenced_at=now,
         metadata=metadata,
+        short_id=sid,
     )
 
 
 def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
-    """Get a page by ID (exact match, with prefix fallback)."""
+    """Get a page by ID, short ref (m:N), or prefix fallback."""
+    resolved = resolve_page_ref(conn, page_id)
+    if resolved is None:
+        return None
+    page_id = resolved
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at, metadata FROM memopedia_pages WHERE id = ?",
+        f"SELECT {_PAGE_SELECT_COLS} FROM memopedia_pages WHERE id = ?",
         (page_id,),
     )
     row = cur.fetchone()
@@ -429,7 +506,7 @@ def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
     # Fallback: prefix match for truncated IDs (e.g. first 8 chars)
     if len(page_id) < 36:
         cur = conn.execute(
-            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at, metadata FROM memopedia_pages WHERE id LIKE ? LIMIT 1",
+            f"SELECT {_PAGE_SELECT_COLS} FROM memopedia_pages WHERE id LIKE ? LIMIT 1",
             (f"{page_id}%",),
         )
         row = cur.fetchone()
@@ -527,7 +604,7 @@ def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[Mem
 def get_all_pages(conn: sqlite3.Connection) -> List[MemopediaPage]:
     """Get all non-deleted pages."""
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at, metadata FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
+        f"SELECT {_PAGE_SELECT_COLS} FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
     )
     return [_row_to_page(row) for row in cur.fetchall()]
 

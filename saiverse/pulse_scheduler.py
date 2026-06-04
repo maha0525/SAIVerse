@@ -262,6 +262,20 @@ class SubLineScheduler:
             persona_id, track.track_id, playbook_name,
         )
 
+        pulse_args: Dict[str, Any] = {"track_id": track.track_id}
+        task_list = self.track_manager.format_task_list(track.track_id)
+        pulse_args["track_tasks"] = task_list
+
+        sid = f"t:{track.short_id}" if track.short_id is not None else track.track_id[:8]
+        intent = track.intent or "(意図未設定)"
+        pulse_args["track_context"] = (
+            f"## 現在の Track\n"
+            f"タイトル: {track.title or '(無題)'}\n"
+            f"ID: {sid}\n"
+            f"Intent: {intent}\n\n"
+            f"## タスク\n{task_list}"
+        )
+
         # pulse_dispatch.md §7: PulseDispatcher 経由で起動
         dispatcher = getattr(self.manager, "pulse_dispatcher", None)
         if dispatcher is None:
@@ -274,7 +288,7 @@ class SubLineScheduler:
                     building_id,
                     occupants=[],
                     meta_playbook=playbook_name,
-                    args={"track_id": track.track_id},
+                    args=pulse_args,
                 )
             except Exception:
                 logging.exception(
@@ -288,6 +302,7 @@ class SubLineScheduler:
                 persona=persona,
                 track=track,
                 playbook_name=playbook_name,
+                args=pulse_args,
             )
 
         # Pulse メタデータ更新 (Track metadata に書き込む)

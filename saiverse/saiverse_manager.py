@@ -263,6 +263,7 @@ class SAIVerseManager(
         )
         self.autonomous_track_handler = AutonomousTrackHandler(
             track_manager=self.track_manager,
+            manager=self,
         )
         # pulse_dispatch.md §5: Track activate (= running 遷移) 時に各 Handler の
         # on_track_activated hook を発火する。Handler 側で track_type をフィルタ

@@ -47,14 +47,14 @@ def memopedia_manage(
     init_memopedia_tables(adapter.conn)
     memopedia = Memopedia(adapter.conn)
 
-    # Verify page exists
+    # Verify page exists (resolve m:N / UUID / URI)
     page = memopedia.get_page(page_id)
     if not page:
         return f"ページが見つかりません: {page_id}"
+    resolved_id = page.id
 
     if action == "delete":
         if page.parent_id and page.parent_id.startswith("root_"):
-            # Direct child of category root - warn about children
             children = page.children if hasattr(page, "children") else []
             if children:
                 return (
@@ -63,7 +63,7 @@ def memopedia_manage(
                     f"本当に削除する場合はもう一度このツールを呼んでください。"
                 )
         result = memopedia.delete_page(
-            page_id,
+            resolved_id,
             edit_source="autonomy_manage",
         )
         if result:
@@ -74,7 +74,7 @@ def memopedia_manage(
         if not new_parent_id:
             return "move アクションには new_parent_id が必要です"
         from sai_memory.memopedia.storage import move_pages_to_parent
-        count = move_pages_to_parent(adapter.conn, [page_id], new_parent_id)
+        count = move_pages_to_parent(adapter.conn, [resolved_id], new_parent_id)
         if count > 0:
             return f"ページ '{page.title}' を移動しました (新しい親: {new_parent_id})"
         return f"ページ '{page.title}' の移動に失敗しました"
@@ -83,7 +83,7 @@ def memopedia_manage(
         if not vividness or vividness not in VALID_VIVIDNESS:
             return f"set_vividness には vividness パラメータが必要です（{', '.join(sorted(VALID_VIVIDNESS))}）"
         from sai_memory.memopedia.storage import update_page
-        result = update_page(adapter.conn, page_id, vividness=vividness)
+        result = update_page(adapter.conn, resolved_id, vividness=vividness)
         if result:
             return f"ページ '{page.title}' の鮮明度を '{vividness}' に変更しました"
         return "鮮明度の変更に失敗しました"
@@ -91,7 +91,7 @@ def memopedia_manage(
     elif action == "set_important":
         if is_important is None:
             return "set_important には is_important パラメータ (true/false) が必要です"
-        result = memopedia.set_important(page_id, is_important)
+        result = memopedia.set_important(resolved_id, is_important)
         if result:
             flag = "重要" if is_important else "通常"
             return f"ページ '{page.title}' を{flag}に設定しました"
@@ -117,7 +117,7 @@ def schema() -> ToolSchema:
                 },
                 "page_id": {
                     "type": "string",
-                    "description": "対象ページのID",
+                    "description": "Page ref (m:1), UUID, or saiverse:// URI",
                 },
                 "new_parent_id": {
                     "type": "string",

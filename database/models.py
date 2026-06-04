@@ -466,6 +466,7 @@ class ActionTrack(Base):
     # running / alert / pending / unstarted / completed / aborted
     is_forgotten = Column(Boolean, default=False, nullable=False)
     intent = Column(Text, nullable=True)
+    tasks_json = Column(Text, nullable=True)
     track_metadata = Column(Text, nullable=True)
     # JSON: target identifiers (user_id, persona_id), external refs, etc.
     # NOTE: pause_summary / pause_summary_updated_at カラムは v0.32 (2026-05-09) で

@@ -55,7 +55,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "page_id": {
                     "type": "string",
-                    "description": "The ID of the page to close",
+                    "description": "Page ref (m:1), UUID, or saiverse:// URI",
                 },
             },
             "required": ["page_id"],

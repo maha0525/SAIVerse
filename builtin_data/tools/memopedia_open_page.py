@@ -38,18 +38,22 @@ def memopedia_open_page(page_id: str) -> str:
     # Get thread_id from adapter's active state
     thread_id = adapter._thread_id(None)
 
-    # Open the page (marks it as open for this thread)
-    result = memopedia.open_page(thread_id, page_id)
+    # Resolve page ref (m:N / UUID) then open
+    page = memopedia.get_page(page_id)
+    if page is None:
+        return f"ページが見つかりません: {page_id}"
+    resolved_id = page.id
 
+    result = memopedia.open_page(thread_id, resolved_id)
     if "error" in result:
         return f"Error: {result['error']}"
 
-    # Format as Markdown
-    lines = [f"# {result['title']}"]
+    short_ref = f"m:{page.short_id}" if page.short_id else resolved_id
+    lines = [f"# {result['title']} ({short_ref})"]
     if result.get("summary"):
         lines.append(f"\n*{result['summary']}*")
 
-    body = memopedia.render_page_body(page_id)
+    body = memopedia.render_page_body(resolved_id)
     if body:
         lines.append(f"\n{body}")
 
@@ -57,7 +61,9 @@ def memopedia_open_page(page_id: str) -> str:
     if children:
         lines.append("\n## 子ページ")
         for child in children:
-            lines.append(f"- **{child['title']}** (id: {child['id']}): {child.get('summary', '')}")
+            child_page = memopedia.get_page(child['id'])
+            child_ref = f"m:{child_page.short_id}" if child_page and child_page.short_id else child['id'][:8]
+            lines.append(f"- **{child['title']}** ({child_ref}): {child.get('summary', '')}")
 
     return "\n".join(lines)
 
@@ -71,7 +77,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "page_id": {
                     "type": "string",
-                    "description": "The ID of the page to open",
+                    "description": "Page ref (m:1), UUID, or saiverse:// URI",
                 },
             },
             "required": ["page_id"],

@@ -56,11 +56,11 @@ def memopedia_list_fragments(
     if not fragments:
         return f"'{page.title}' にフラグメントはありません。"
 
-    lines = [f"'{page.title}' のフラグメント一覧 ({len(fragments)}件):\n"]
+    short_ref = f"m:{page.short_id}" if page.short_id else resolved_id[:8]
+    lines = [f"'{page.title}' ({short_ref}) のフラグメント一覧 ({len(fragments)}件):\n"]
     for i, f in enumerate(fragments, 1):
         date_str = f.source_date or "日付なし"
         lines.append(f"[{i}] ({date_str}) {f.content}")
-        lines.append(f"    ID: {f.id}")
     return "\n".join(lines)
 
 
@@ -76,7 +76,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "page_id": {
                     "type": "string",
-                    "description": "ページID または saiverse:// URI",
+                    "description": "Page ref (m:1), UUID, or saiverse:// URI",
                 },
             },
             "required": ["page_id"],

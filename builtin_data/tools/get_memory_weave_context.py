@@ -325,16 +325,18 @@ def _get_memopedia_context(
             for page in pages:
                 if not page["id"].startswith("root_"):
                     vividness = page.get("vividness", "rough")
+                    sid = page.get("short_id")
+                    id_suffix = f" [id: m:{sid}]" if sid else ""
 
                     if vividness == "buried":
                         continue
                     elif vividness == "faint":
-                        lines.append(f"{prefix}- {page['title']}")
+                        lines.append(f"{prefix}- {page['title']}{id_suffix}")
                     elif vividness == "rough":
-                        lines.append(f"{prefix}- {page['title']}: {page['summary']}")
+                        lines.append(f"{prefix}- {page['title']}{id_suffix}: {page['summary']}")
                     elif vividness == "vivid":
                         summary = page['summary']
-                        lines.append(f"{prefix}- **{page['title']}**: {summary}")
+                        lines.append(f"{prefix}- **{page['title']}**{id_suffix}: {summary}")
                         body = memopedia.render_page_body(page["id"])
                         if body:
                             for line in body.split("\n"):
@@ -349,12 +351,8 @@ def _get_memopedia_context(
             LOGGER.debug("_get_memopedia_context: category=%s, pages count=%d", category, len(pages))
             if pages:
                 # Sort by most recently referenced/updated, apply limit
-                non_root = [p for p in pages if not p["id"].startswith("root_")]
-                non_root.sort(key=_sort_key, reverse=True)
-                if index_limit > 0 and len(non_root) > index_limit:
-                    non_root = non_root[:index_limit]
                 lines.append(f"\n### {category_names[category]}")
-                _list_pages(non_root)
+                _list_pages(pages)
 
         LOGGER.info("_get_memopedia_context: Generated %d lines", len(lines))
         if not lines:

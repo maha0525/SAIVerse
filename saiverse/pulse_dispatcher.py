@@ -89,6 +89,7 @@ class PulseDispatcher:
         persona: Any,
         track: Any,
         playbook_name: str,
+        args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """SubLineScheduler の poll で running な連続実行型 Track を発見した
         ときのディスパッチ。直接経路で ``run_sea_auto`` を呼ぶ。"""
@@ -106,13 +107,14 @@ class PulseDispatcher:
                 persona_id,
             )
             return
+        pulse_args = args if args is not None else {"track_id": track.track_id}
         try:
             run_sea_auto(
                 persona,
                 building_id,
-                occupants=[],  # auto pulse では使われない
+                occupants=[],
                 meta_playbook=playbook_name,
-                args={"track_id": track.track_id},
+                args=pulse_args,
             )
         except Exception:
             LOGGER.exception(

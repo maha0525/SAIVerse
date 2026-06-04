@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 // 自律稼働デバッグコントローラー (設計: docs/intent/persona_cognition/debug_controller.md)
-// タイマーを無視してメタ判断 / sub_line Pulse を手動発火し、タイマーを止めて
+// タイマーを無視してメタ判断 / 自律 Pulse を手動発火し、タイマーを止めて
 // 完全手動でペルソナを駆動する。UC-2「割り込みと復帰」等の検証用。
 
 interface DebugPanelProps {
@@ -128,14 +128,14 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
                     </label>
                 </div>
 
-                {/* 発火: sub_line Pulse */}
+                {/* 発火: 自律 Pulse */}
                 <div style={rowStyle}>
                     <button
                         style={btnStyle}
                         disabled={busy || !selectedTrack}
                         onClick={() => post('fire-subline-pulse', { track_id: selectedTrack })}
                     >
-                        sub_line Pulse を 1 回
+                        自律 Pulse を 1 回
                     </button>
                     <select
                         value={selectedTrack}

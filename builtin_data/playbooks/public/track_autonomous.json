@@ -20,7 +20,7 @@
     {
       "id": "main_line_judgment",
       "type": "llm",
-      "action": "あなたは今、自律 Track の Pulse の中にいます。Track の intent と直近の作業履歴を踏まえて、このターンで何をすべきかを内的独白で書き、必要なら Track 操作スペルを発火してください。\n\n判断の選択肢:\n- 作業を続行 (具体的な思索 / 計画 / メモ書き等を発話)\n- 作業を一段落させる: 別 Track に移るなら `/spell track_pause track_id='...'`、完了なら `/spell track_complete track_id='...'`\n- 別の Track を起動: `/spell track_create track_type='autonomous' title='...' activate=True`\n- Note を参照 / 編集: `/spell note_open note_id='...'` / `/spell note_close note_id='...'`\n\n**スペル発動形式は行頭が `/spell ` で始まる必要があります** (`/track_xxx` だけでは発動しません)。\n\n発話は独白として自然に書いてください。",
+      "action": "{track_context}\n\nあなたは今、自律 Track の Pulse の中にいます。上記の intent とタスクリストを踏まえて、このターンで何をすべきかを内的独白で書いてください。\n\nタスク管理スペル:\n- タスクを追加: `/spell track_task_add track_id='{track_id}' title='...'`\n- タスクを完了: `/spell track_task_done track_id='{track_id}' index=0`\n\n**スペル発動形式は行頭が `/spell ` で始まる必要があります**。\n\n発話は独白として自然に書いてください。",
       "speak": false,
       "memorize": {
         "tags": [

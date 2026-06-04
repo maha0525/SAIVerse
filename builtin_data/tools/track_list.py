@@ -88,7 +88,17 @@ def track_list(
     for t in tracks:
         last_dt = last_msg_times.get(t.track_id)
         short_id_str = f"t:{t.short_id}" if t.short_id is not None else None
-        payload.append({
+        tasks = json.loads(t.tasks_json) if t.tasks_json else []
+        tasks_done = sum(1 for tk in tasks if tk.get("done"))
+        if tasks:
+            task_lines = []
+            for tk in tasks:
+                mark = "[x]" if tk.get("done") else "[ ]"
+                task_lines.append(f"{mark} {tk.get('title', '')}")
+            tasks_summary = f"{tasks_done}/{len(tasks)}: " + "; ".join(task_lines)
+        else:
+            tasks_summary = None
+        entry = {
             "short_id": short_id_str,
             "title": t.title,
             "track_type": t.track_type,
@@ -99,7 +109,10 @@ def track_list(
             "last_active_at": t.last_active_at.isoformat() if t.last_active_at else None,
             "last_message_at": last_dt.isoformat() if last_dt else None,
             "last_message_relative": _format_relative(last_dt),
-        })
+        }
+        if tasks_summary:
+            entry["tasks"] = tasks_summary
+        payload.append(entry)
     snippet = ToolResult(history_snippet=json.dumps(payload, ensure_ascii=False))
     if not tracks:
         return "No tracks found.", snippet, None

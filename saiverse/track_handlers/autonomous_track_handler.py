@@ -86,8 +86,9 @@ class AutonomousTrackHandler:
         "- note_search: Note を検索 (引数: query='...')"
     )
 
-    def __init__(self, track_manager: TrackManager):
+    def __init__(self, track_manager: TrackManager, manager: Any = None):
         self.track_manager = track_manager
+        self.manager = manager
 
     # ------------------------------------------------------------------
     # Track 状態遷移フック (pulse_dispatch.md §5)
@@ -101,17 +102,69 @@ class AutonomousTrackHandler:
     ) -> None:
         """Track が activate されたときに呼ばれる hook。
 
-        現状は no-op。autonomous Track の連続 Pulse は SubLineScheduler の
-        5 秒 poll で拾われる設計なので、activate hook では何もしない。
-        将来的に Track Chronicle の即時注入や初回 Pulse の即時起動を担う
-        余地がある (pulse_dispatch.md §10.2)。
+        autonomous Track の連続 Pulse は SubLineScheduler の 5 秒 poll で
+        拾われる設計。activate 時に Track コンテキスト (intent 含む) を
+        SAIMemory に注入する。
         """
         if track.track_type != AUTONOMOUS_TRACK_TYPE:
             return
-        logging.debug(
-            "[autonomous-handler] on_track_activated: track=%s persona=%s pulse=%s (no-op, SubLineScheduler が拾う)",
+        logging.info(
+            "[autonomous-handler] on_track_activated: track=%s persona=%s pulse=%s",
             track.track_id, persona_id, pulse_id,
         )
+        self._inject_track_context(persona_id, track)
+
+    # ------------------------------------------------------------------
+    # Track コンテキスト注入
+    # ------------------------------------------------------------------
+
+    def _inject_track_context(self, persona_id: str, track: ActionTrack) -> None:
+        """Track コンテキストを SAIMemory に user メッセージ (system タグ付き) として注入する。"""
+        if self.manager is None:
+            logging.warning(
+                "[autonomous-handler] Cannot inject track context: manager is None"
+            )
+            return
+        persona = self._lookup_persona(persona_id)
+        if persona is None:
+            logging.warning(
+                "[autonomous-handler] Cannot inject track context: persona not found (%s)",
+                persona_id,
+            )
+            return
+
+        text = self.build_track_context(track)
+        formatted = f"<system>{text}</system>"
+        try:
+            history_manager = getattr(persona, "history_manager", None)
+            if history_manager is None:
+                logging.warning(
+                    "[autonomous-handler] Persona %s has no history_manager; "
+                    "track context not injected",
+                    persona_id,
+                )
+                return
+            history_manager.add_to_persona_only(
+                {
+                    "role": "user",
+                    "content": formatted,
+                    "metadata": {"tags": ["conversation", "track_context"]},
+                },
+                origin_track_id=track.track_id,
+            )
+            logging.info(
+                "[autonomous-handler] Injected track context for track=%s persona=%s",
+                track.track_id, persona_id,
+            )
+        except Exception:
+            logging.exception(
+                "[autonomous-handler] Failed to inject track context for track=%s",
+                track.track_id,
+            )
+
+    def _lookup_persona(self, persona_id: str) -> Optional[Any]:
+        personas = getattr(self.manager, "personas", None) or {}
+        return personas.get(persona_id)
 
     # ------------------------------------------------------------------
     # Track 検索

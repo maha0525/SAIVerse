@@ -22,6 +22,7 @@ from sai_memory.memopedia.storage import (
     create_page,
     delete_page,
     get_page,
+    resolve_page_ref,
     get_children,
     get_open_pages,
     get_all_states_for_thread,
@@ -93,13 +94,14 @@ class Memopedia:
         def _annotate(page: MemopediaPage) -> Dict[str, Any]:
             result = {
                 "id": page.id,
+                "short_id": page.short_id,
                 "title": page.title,
                 "summary": page.summary,
                 "keywords": page.keywords,
                 "vividness": page.vividness,
                 "is_trunk": page.is_trunk,
                 "is_important": page.is_important,
-                "content": page.content,  # Include content for vivid pages
+                "content": page.content,
                 "is_open": states.get(page.id, False),
                 "updated_at": page.updated_at,
                 "last_referenced_at": page.last_referenced_at,
@@ -160,11 +162,13 @@ class Memopedia:
             indent = "  " * depth
             
             # Build line content
+            sid = page.get("short_id")
+            id_suffix = f" [id: m:{sid}]" if sid else ""
             if show_markers:
                 marker = "[OPEN]" if page.get("is_open") else "[-]"
-                title_part = f"{marker} **{page['title']}**"
+                title_part = f"{marker} **{page['title']}**{id_suffix}"
             else:
-                title_part = page['title']
+                title_part = f"{page['title']}{id_suffix}"
             
             summary = page.get("summary", "")
             summary_part = f": {summary}" if summary else ""
@@ -534,6 +538,10 @@ class Memopedia:
             {"title": ..., "summary": ..., "content": ..., "children": [...]}
         """
         with self._lock:
+            resolved = resolve_page_ref(self.conn, page_id)
+            if resolved is None:
+                return {"error": f"Page not found: {page_id}"}
+            page_id = resolved
             set_page_open(self.conn, thread_id, page_id, True)
             page = get_page(self.conn, page_id)
             if page is None:
@@ -557,6 +565,10 @@ class Memopedia:
     def close_page(self, thread_id: str, page_id: str) -> Dict[str, Any]:
         """Close a page for a thread."""
         with self._lock:
+            resolved = resolve_page_ref(self.conn, page_id)
+            if resolved is None:
+                return {"error": f"Page not found: {page_id}"}
+            page_id = resolved
             set_page_open(self.conn, thread_id, page_id, False)
             return {"success": True, "page_id": page_id}
 
@@ -1092,7 +1104,7 @@ class Memopedia:
         if page.content and page.content.strip():
             parts.append(page.content.strip())
 
-        fragments = self.get_fragments(page_id)
+        fragments = self.get_fragments(page.id)
         if fragments:
             grouped: dict[str, list[str]] = {}
             for f in fragments:

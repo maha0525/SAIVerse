@@ -129,8 +129,9 @@ def memopedia_note(
         source_date=today,
     )
 
+    short_ref = f"m:{target_page.short_id}" if target_page.short_id else target_page.id
     return (
-        f"Fragment written to '{target_page.title}' (id: {target_page.id})\n"
+        f"Fragment written to '{target_page.title}' ({short_ref})\n"
         f"URI: saiverse://self/memopedia/page/{target_page.id}"
     )
 
@@ -176,7 +177,7 @@ def schema() -> ToolSchema:
                 "page_id": {
                     "type": "string",
                     "description": (
-                        "Existing page ID or saiverse:// URI to write to. "
+                        "Existing page ref (m:1), UUID, or saiverse:// URI. "
                         "Leave empty to create a new page or find by title."
                     ),
                 },
