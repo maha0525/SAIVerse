@@ -119,6 +119,10 @@ def _find_next_sentence_boundary(
     ``use_soft`` で 「、 ，」 等の弱い区切りも文区切りに含めるか制御する。
     Pipeline Streaming では低遅延を優先するので default True (= 短い句でも
     voice-tts に流す)。
+
+    Markdown リンク ``[text](url)`` 内部では文区切りを検出しない。 URL 中の
+    ``:`` や ``,`` で分断されると voice-tts 側の ``clean_text_for_tts`` が
+    リンク構文を認識できなくなり URI が読み上げられてしまうため。
     """
     if start >= len(buffer):
         return -1
@@ -126,8 +130,28 @@ def _find_next_sentence_boundary(
         _SENTENCE_BOUNDARY_CHARS | _SENTENCE_BOUNDARY_SOFT_CHARS
         if use_soft else _SENTENCE_BOUNDARY_CHARS
     )
-    for i in range(start, len(buffer)):
-        if buffer[i] in chars:
+    buf_len = len(buffer)
+    in_bracket = False
+    in_md_link_url = False
+    for i in range(start, buf_len):
+        ch = buffer[i]
+        if in_md_link_url:
+            if ch == ')':
+                in_md_link_url = False
+            continue
+        if ch == '[':
+            in_bracket = True
+            continue
+        if in_bracket:
+            if ch == ']' and i + 1 < buf_len and buffer[i + 1] == '(':
+                in_md_link_url = True
+                in_bracket = False
+            elif ch == ']':
+                in_bracket = False
+            continue
+        if ch in chars:
+            if ch == '!' and i + 1 < buf_len and buffer[i + 1] == '[':
+                continue
             return i + 1
     return -1
 
