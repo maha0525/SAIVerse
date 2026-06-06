@@ -13,12 +13,24 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
+import time
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_database_locked(exc: BaseException) -> bool:
+    """SQLite ``database is locked`` 系のエラーか判定する。"""
+    if isinstance(exc, sqlite3.OperationalError):
+        return "database is locked" in str(exc)
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "orig", None)
+    if isinstance(cause, sqlite3.OperationalError):
+        return "database is locked" in str(cause)
+    return False
 
 
 def deserialize_building_message(row: Any) -> Dict[str, Any]:
@@ -280,26 +292,29 @@ def insert_building_message(
     session_factory: Optional[Callable[[], "Session"]],
     building_id: str,
     building_msg: Dict[str, Any],
+    _max_retries: int = 5,
 ) -> Optional[Dict[str, Any]]:
     """``building_messages`` テーブルへ 1 件 INSERT し、 確定された行 dict を返す。
 
     seq / message_id は **DB 側で独立採番** する (max(seq)+1)。 呼び出し元 dict の
     seq / message_id は legacy_seq / legacy_message_id として保存される (= 過去
     JSON 由来の値を traceable に残す)。
+
+    ``database is locked`` 時はリトライする。
     """
     if session_factory is None:
         return None
-    try:
-        from database.models import BuildingMessage
-        from sqlalchemy import func as sa_func
-        from sqlalchemy.exc import IntegrityError
-        record = serialize_building_message(building_id, building_msg)
+
+    from database.models import BuildingMessage
+    from sqlalchemy import func as sa_func
+    from sqlalchemy.exc import IntegrityError
+
+    record = serialize_building_message(building_id, building_msg)
+    orig_seq = record.get("seq")
+    orig_message_id = record.get("message_id")
+    for attempt in range(_max_retries):
         db = session_factory()
         try:
-            # B-2 idempotency: 同じ client_message_id が既に存在すれば INSERT を試みず
-            # 既存行をそのまま返す。 これでネットワーク再送 / ユーザーの二重送信で
-            # 同一 UUID が来ても新規 row は作られない (= no-op、 既存 seq を返す)。
-            # See: docs/intent/building_memory_unified.md §B-2
             cmid = record.get("client_message_id")
             if cmid:
                 existing = db.query(BuildingMessage).filter_by(
@@ -317,9 +332,8 @@ def insert_building_message(
             ).scalar()
             new_seq = int(max_seq or 0) + 1
             new_message_id = f"{building_id}:{new_seq}"
-            # 旧 seq / message_id を legacy_* に保存し、 新採番で上書き
-            record["legacy_seq"] = record.get("seq") or None
-            record["legacy_message_id"] = record.get("message_id") or None
+            record["legacy_seq"] = orig_seq or None
+            record["legacy_message_id"] = orig_message_id or None
             record["seq"] = new_seq
             record["message_id"] = new_message_id
             obj = BuildingMessage(**record)
@@ -327,8 +341,6 @@ def insert_building_message(
             try:
                 db.commit()
             except IntegrityError:
-                # 並行 INSERT で同 client_message_id が同時に来た race ケース。
-                # rollback して再 SELECT、 もう一方が確定させた既存行を返す。
                 db.rollback()
                 if cmid:
                     existing = db.query(BuildingMessage).filter_by(
@@ -340,19 +352,32 @@ def insert_building_message(
                             cmid, existing.seq,
                         )
                         return deserialize_building_message(existing)
-                # client_message_id 以外の UNIQUE 違反 (= seq race 等) は表に出す
                 raise
             return deserialize_building_message(obj)
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            if _is_database_locked(exc) and attempt < _max_retries - 1:
+                wait = 0.5 * (2 ** attempt)
+                LOGGER.warning(
+                    "insert_building_message: database locked (attempt %d/%d), "
+                    "retrying in %.1fs: bid=%s",
+                    attempt + 1, _max_retries, wait, building_id,
+                )
+                time.sleep(wait)
+                continue
+            LOGGER.warning(
+                "Failed to insert building message to DB: building_id=%s msg_id=%s",
+                building_id,
+                building_msg.get("message_id"),
+                exc_info=True,
+            )
+            return None
         finally:
             db.close()
-    except Exception:
-        LOGGER.warning(
-            "Failed to insert building message to DB: building_id=%s msg_id=%s",
-            building_id,
-            building_msg.get("message_id"),
-            exc_info=True,
-        )
-        return None
+    return None
 
 
 def update_building_message_in_db(
@@ -362,14 +387,21 @@ def update_building_message_in_db(
     *,
     content: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    _max_retries: int = 5,
 ) -> None:
-    """``building_messages`` テーブルの既存行を update する dual-write 補助。"""
+    """``building_messages`` テーブルの既存行を update する。
+
+    ``database is locked`` (SQLite ロック競合) 時はリトライする。
+    ストリーミング placeholder の finalize など、消失が許されない更新がある。
+    """
     if session_factory is None:
         return
     if content is None and metadata is None:
         return
-    try:
-        from database.models import BuildingMessage
+
+    from database.models import BuildingMessage
+
+    for attempt in range(_max_retries):
         db = session_factory()
         try:
             obj = db.query(BuildingMessage).filter_by(
@@ -405,11 +437,23 @@ def update_building_message_in_db(
                     json.dumps(merged, ensure_ascii=False, default=str) if merged else None
                 )
             db.commit()
+            return
+        except Exception as exc:
+            db.rollback()
+            if _is_database_locked(exc) and attempt < _max_retries - 1:
+                wait = 0.5 * (2 ** attempt)
+                LOGGER.warning(
+                    "update_building_message: database locked (attempt %d/%d), "
+                    "retrying in %.1fs: bid=%s msg_id=%s",
+                    attempt + 1, _max_retries, wait, building_id, message_id,
+                )
+                time.sleep(wait)
+                continue
+            LOGGER.warning(
+                "Failed to update building message in DB: building_id=%s msg_id=%s",
+                building_id, message_id,
+                exc_info=True,
+            )
+            return
         finally:
             db.close()
-    except Exception:
-        LOGGER.warning(
-            "Failed to update building message mirror in DB: building_id=%s msg_id=%s",
-            building_id, message_id,
-            exc_info=True,
-        )

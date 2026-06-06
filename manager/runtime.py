@@ -624,16 +624,6 @@ class RuntimeService(
             self.manager._active_stop_events.pop(building_id, None)
             self.manager._active_sse_callbacks.pop(building_id, None)
 
-            # Persist building histories and session metadata.
-            # MUST be inside finally: this generator can be closed via
-            # GeneratorExit (e.g. HTTP disconnect after streaming completes),
-            # and code after try/finally would never execute in that case.
-            bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
-            logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
-            self._save_modified_buildings()
-            for persona in self.personas.values():
-                persona._save_session_metadata()
-
     def preview_context(
         self, message: str, building_id: Optional[str] = None,
         meta_playbook: Optional[str] = None,
@@ -673,10 +663,6 @@ class RuntimeService(
         for persona in self.personas.values():
             if getattr(persona, "activity_state", "Idle") == "Active":
                 replies.extend(persona.run_scheduled_prompt())
-        if replies:
-            self._save_modified_buildings()
-            for persona in self.personas.values():
-                persona._save_session_metadata()
         return replies
 
     def start_autonomous_conversations(self) -> None:
