@@ -1626,21 +1626,6 @@ class SAIVerseManager(
         """指定されたCityとBuilding名からBuildingIDを生成する"""
         return f"{building_name}_{city_name}"
 
-    def run_scheduled_prompts(self) -> List[str]:
-        """Run scheduled prompts via runtime service (fallback to local logic if needed)."""
-        if getattr(self, "runtime", None):
-            return self.runtime.run_scheduled_prompts()
-
-        replies: List[str] = []
-        for persona in self.personas.values():
-            if getattr(persona, "activity_state", "Idle") == "Active":
-                replies.extend(persona.run_scheduled_prompt())
-        if replies:
-            self._save_modified_buildings()
-            for persona in self.personas.values():
-                persona._save_session_metadata()
-        return replies
-
     def execute_tool(self, tool_id: int, persona_id: str, arguments: Dict[str, Any]) -> str:
         if getattr(self, "runtime", None):
             return self.runtime.execute_tool(tool_id, persona_id, arguments)

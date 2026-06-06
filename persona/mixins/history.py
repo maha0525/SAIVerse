@@ -1,28 +1,22 @@
 """History bookkeeping helpers for PersonaCore."""
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Dict, List, Optional
-
-from database.models import AI as AIModel
 
 
 class PersonaHistoryMixin:
     """Provide timeline utilities and persistence helpers."""
 
     SessionLocal: Any
-    auto_count: int
     conscious_log: List[Dict[str, Any]]
     conscious_log_path: Any
     current_building_id: str
     entry_markers: Dict[str, int]
-    emotion: Dict[str, Dict[str, float]]
     history_manager: Any
     id_to_name_map: Dict[str, str]
     is_visitor: bool
-    last_auto_prompt_times: Dict[str, float]
     occupants: Dict[str, List[str]]
     persona_id: str
     persona_name: str
@@ -138,31 +132,6 @@ class PersonaHistoryMixin:
             self.history_manager.save_all()
             self._save_conscious_log()
             return
-
-        db = self.SessionLocal()
-        try:
-            update_data = {
-                "EMOTION": json.dumps(self.emotion, ensure_ascii=False),
-                "AUTO_COUNT": self.auto_count,
-                "LAST_AUTO_PROMPT_TIMES": json.dumps(
-                    self.last_auto_prompt_times, ensure_ascii=False
-                ),
-            }
-            db.query(AIModel).filter(AIModel.AIID == self.persona_id).update(
-                update_data
-            )
-            db.commit()
-            logging.info("Saved dynamic state to DB for %s.", self.persona_name)
-        except Exception as exc:
-            db.rollback()
-            logging.error(
-                "Failed to save session data to DB for %s: %s",
-                self.persona_name,
-                exc,
-                exc_info=True,
-            )
-        finally:
-            db.close()
 
         if getattr(self, "messages", None):
             self.history_manager.save_all()

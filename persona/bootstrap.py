@@ -37,14 +37,6 @@ def load_session_data(persona) -> None:
     try:
         db_ai: Optional[AIModel] = session.query(AIModel).filter(AIModel.AIID == persona.persona_id).first()
         if db_ai:
-            persona.auto_count = db_ai.AUTO_COUNT or 0
-
-            if db_ai.LAST_AUTO_PROMPT_TIMES:
-                try:
-                    persona.last_auto_prompt_times.update(json.loads(db_ai.LAST_AUTO_PROMPT_TIMES))
-                except json.JSONDecodeError:
-                    logging.warning("Could not parse LAST_AUTO_PROMPT_TIMES from DB for %s.", persona.persona_name)
-
             if db_ai.EMOTION:
                 try:
                     persona.emotion = json.loads(db_ai.EMOTION)

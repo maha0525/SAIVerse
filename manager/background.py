@@ -1,8 +1,6 @@
 import json
 import logging
 
-from google.genai import errors
-
 from database.models import ThinkingRequest, VisitingAI
 
 
@@ -19,7 +17,6 @@ class DatabasePollingMixin:
             self._check_for_visitors()
             self._process_thinking_requests()
             self._check_dispatch_status()
-            self.run_scheduled_prompts()
         except Exception as exc:
             logging.error("Error in DB polling tick: %s", exc, exc_info=True)
 
@@ -56,28 +53,16 @@ class DatabasePollingMixin:
                         info_text_parts.append(f"  - {msg.get('role')}: {msg.get('content')}")
                     info_text = "\n".join(info_text_parts)
 
-                    response_text, _, _ = persona._generate(
-                        user_message=None,
-                        system_prompt_extra=None,
-                        info_text=info_text,
-                        log_extra_prompt=False,
-                        log_user_message=False,
-                    )
+                    messages = [
+                        {"role": "system", "content": persona.persona_system_instruction},
+                        {"role": "user", "content": info_text},
+                    ]
+                    response_text = persona.llm_client.generate(messages, tools=[])
 
                     req.response_text = response_text
                     req.status = "processed"
                     logging.info("Processed thinking request %s for %s.", req.request_id, req.persona_id)
 
-                except errors.ServerError as exc:
-                    logging.warning("LLM Server Error on thinking request %s: %s. Marking as error.", req.request_id, exc)
-                    req.status = "error"
-                    if "503" in str(exc):
-                        req.response_text = (
-                            "[SAIVERSE_ERROR] LLMモデルが一時的に利用できませんでした (503 Server Error)。時間をおいて再度試行してください。詳細: "
-                            f"{exc}"
-                        )
-                    else:
-                        req.response_text = f"[SAIVERSE_ERROR] LLMサーバーで予期せぬエラーが発生しました。詳細: {exc}"
                 except Exception as exc:
                     logging.error("Error processing thinking request %s: %s", req.request_id, exc, exc_info=True)
                     req.status = "error"

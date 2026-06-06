@@ -319,10 +319,8 @@ class RuntimeService(
             return False, reason
 
         persona.current_building_id = target_building_id
-        persona.auto_count = 0
         persona._mark_entry(target_building_id)
         persona._save_session_metadata()
-        persona.run_auto_conversation(initial=True)
         return True, None
 
     def end_conversation(
@@ -657,13 +655,6 @@ class RuntimeService(
             except Exception:
                 logging.exception("preview_context failed for persona %s", persona.persona_id)
         return results
-
-    def run_scheduled_prompts(self) -> List[str]:
-        replies: List[str] = []
-        for persona in self.personas.values():
-            if getattr(persona, "activity_state", "Idle") == "Active":
-                replies.extend(persona.run_scheduled_prompt())
-        return replies
 
     def start_autonomous_conversations(self) -> None:
         if self.state.autonomous_conversation_running:

@@ -11,7 +11,6 @@ from saiverse.buildings import Building
 from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client
 from saiverse.model_configs import model_supports_images
-from saiverse.action_handler import ActionHandler
 from persona.history_manager import HistoryManager
 from persona.emotion_module import EmotionControlModule
 from database.models import AI as AIModel
@@ -55,7 +54,6 @@ class PersonaCore(
         home_city_id: Optional[str] = None, # ★ 故郷のCity ID
         activity_state: str = "Idle", # ★ ペルソナのアクティビティ状態 (Stop/Sleep/Idle/Active)
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
-        emotion_prompt_path: Optional[Path] = None,
         action_priority_path: Path = Path("builtin_data/action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         occupants: Optional[Dict[str, List[str]]] = None,
@@ -89,10 +87,6 @@ class PersonaCore(
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.user_room_id = user_room_id
         self.common_prompt_path = common_prompt_path  # ファイルパスを保持
-        if emotion_prompt_path is None:
-            from saiverse.data_paths import find_file, PROMPTS_DIR
-            emotion_prompt_path = find_file(PROMPTS_DIR, "emotion_parameter.txt") or Path("system_prompts/emotion_parameter.txt")
-        self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_id = persona_id
         self.persona_name = persona_name
         self.persona_system_instruction = persona_system_instruction
@@ -111,15 +105,12 @@ class PersonaCore(
             for b_id in self.buildings
         }
         self.action_priority = load_action_priority(action_priority_path)
-        self.action_handler = ActionHandler(self.action_priority)
 
         self.occupants = occupants if occupants is not None else {}
         self.id_to_name_map = id_to_name_map if id_to_name_map is not None else {}
 
         # Initialize stateful attributes with defaults before loading session
         self.current_building_id = start_building_id
-        self.auto_count = 0
-        self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
         self.pulse_cursors: Dict[str, int] = {}
         self.entry_markers: Dict[str, int] = {}
