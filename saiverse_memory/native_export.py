@@ -90,7 +90,9 @@ def _export_thread(
 
     # Messages (raw, no role conversion or content expansion)
     query_parts = [
-        "SELECT id, role, content, resource_id, created_at, metadata",
+        "SELECT id, role, content, resource_id, created_at, metadata,"
+        " origin_track_id, line_role, line_id, scope, paired_action_text,"
+        " pulse_id, thought_signature, spell_origin_id, spell_seq",
         "FROM messages WHERE thread_id=?",
     ]
     params: List[Any] = [thread_id]
@@ -104,21 +106,42 @@ def _export_thread(
 
     rows = conn.execute(" ".join(query_parts), params).fetchall()
     messages: List[Dict[str, Any]] = []
-    for mid, role, content, res_id, created_at, meta_raw in rows:
+    for (mid, role, content, res_id, created_at, meta_raw,
+         origin_track_id, line_role, line_id, scope, paired_action_text,
+         pulse_id, thought_signature, spell_origin_id, spell_seq) in rows:
         meta = None
         if meta_raw:
             try:
                 meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
             except (json.JSONDecodeError, TypeError):
                 meta = None
-        messages.append({
+        msg: Dict[str, Any] = {
             "id": mid,
             "role": role,
             "content": content,
             "resource_id": res_id,
             "created_at": int(created_at) if created_at is not None else None,
             "metadata": meta,
-        })
+        }
+        if origin_track_id is not None:
+            msg["origin_track_id"] = origin_track_id
+        if line_role is not None:
+            msg["line_role"] = line_role
+        if line_id is not None:
+            msg["line_id"] = line_id
+        if scope is not None and scope != "committed":
+            msg["scope"] = scope
+        if paired_action_text is not None:
+            msg["paired_action_text"] = paired_action_text
+        if pulse_id is not None:
+            msg["pulse_id"] = pulse_id
+        if thought_signature is not None:
+            msg["thought_signature"] = thought_signature
+        if spell_origin_id is not None:
+            msg["spell_origin_id"] = spell_origin_id
+        if spell_seq is not None:
+            msg["spell_seq"] = spell_seq
+        messages.append(msg)
 
     return {
         "thread_id": thread_id,
@@ -310,16 +333,28 @@ def import_threads_native(
                 res_id = msg.get("resource_id", resource_id)
                 created_at = msg.get("created_at")
                 metadata = msg.get("metadata")
+                origin_track_id = msg.get("origin_track_id")
+                line_role = msg.get("line_role")
+                line_id = msg.get("line_id")
+                scope = msg.get("scope")
+                paired_action_text = msg.get("paired_action_text")
+                pulse_id = msg.get("pulse_id")
+                thought_signature = msg.get("thought_signature")
+                spell_origin_id = msg.get("spell_origin_id")
+                spell_seq = msg.get("spell_seq")
 
                 meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
 
                 if msg_id:
-                    # Use original message ID
                     conn.execute(
                         "INSERT OR REPLACE INTO messages"
-                        "(id, thread_id, role, content, resource_id, created_at, metadata)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (msg_id, thread_id, role, content, res_id, created_at, meta_json),
+                        "(id, thread_id, role, content, resource_id, created_at, metadata,"
+                        " origin_track_id, line_role, line_id, scope, paired_action_text,"
+                        " pulse_id, thought_signature, spell_origin_id, spell_seq)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (msg_id, thread_id, role, content, res_id, created_at, meta_json,
+                         origin_track_id, line_role, line_id, scope, paired_action_text,
+                         pulse_id, thought_signature, spell_origin_id, spell_seq),
                     )
                     conn.commit()
                 else:
@@ -331,6 +366,15 @@ def import_threads_native(
                         resource_id=res_id,
                         created_at=created_at,
                         metadata=metadata,
+                        origin_track_id=origin_track_id,
+                        line_role=line_role,
+                        line_id=line_id,
+                        scope=scope,
+                        paired_action_text=paired_action_text,
+                        pulse_id=pulse_id,
+                        thought_signature=thought_signature,
+                        spell_origin_id=spell_origin_id,
+                        spell_seq=spell_seq,
                     )
 
                 imported += 1
