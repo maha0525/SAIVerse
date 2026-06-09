@@ -310,10 +310,10 @@ class SAIVerseManager(
         self._load_personas_from_db()
         self._load_user_state_from_db()
 
-        # --- Phase B-X: 既存ペルソナへの social Track migration sweep ---
-        # 起動時、ロード済みペルソナ全員に交流 Track が存在することを保証する。
-        # 既存 Track がある場合は何もしない (冪等性は SocialTrackHandler 側で担保)。
-        self._ensure_social_tracks_for_all_personas()
+        # --- ペルソナ登録後の共通初期化 ---
+        # 全ペルソナに対して交流 Track 確保 + AutonomyManager 同期を実行する。
+        # _on_persona_registered は動的作成/Blueprint からも呼ばれる統一フック。
+        self._run_persona_post_registration()
 
         # Load saved meta playbook preference from DB
         try:
@@ -487,11 +487,8 @@ class SAIVerseManager(
         logging.info("Auto-starting autonomous conversation managers...")
         self.start_autonomous_conversations()
 
-        # Phase C-2 (intent A v0.9 §"ペルソナのアクティビティ状態"):
-        # ACTIVITY_STATE='Active' のペルソナで AutonomyManager を自動起動する。
-        # Active 以外 (Stop/Sleep/Idle) は起動しない (定期 tick OFF と整合)。
-        logging.info("Auto-starting autonomy managers for Active personas...")
-        self._ensure_autonomy_for_active_personas()
+        # NOTE: AutonomyManager 同期は _run_persona_post_registration() 内で
+        # 統一的に実行済み (ensure_autonomy_for → Active のみ起動)。
 
         # Emit server_start trigger
         self._emit_trigger(
@@ -1004,39 +1001,45 @@ class SAIVerseManager(
         self._save_modified_buildings()
         logging.info("SAIVerseManager shutdown complete.")
 
-    def _ensure_social_tracks_for_all_personas(self) -> None:
-        """起動時 migration: ロード済み全ペルソナに交流 Track を確保する。
+    # ------------------------------------------------------------------
+    # ペルソナ登録後の共通初期化フック
+    # ------------------------------------------------------------------
 
-        Phase B-X 導入以前に作られたペルソナは交流 Track を持たないため、
-        起動時に一度なめて未作成のものを作る。冪等なので何度走っても安全。
+    def _on_persona_registered(self, persona_id: str) -> None:
+        """PersonaCore を personas[] に登録した後に実行する共通初期化。
 
-        個別ペルソナの hook 失敗で他ペルソナの初期化を巻き込まないよう
-        try/except で囲む。
+        起動時のペルソナロード、動的なペルソナ作成 (_create_persona)、
+        Blueprint spawn のいずれの経路でも同じ後処理が走ることを保証する。
+        各ステップは独立で、1 つが失敗しても残りは実行される。
         """
+        # 1. 交流 Track 確保 (冪等)
+        try:
+            self.social_track_handler.ensure_track(persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to ensure social track: %s",
+                persona_id,
+            )
+
+        # 2. AutonomyManager を ACTIVITY_STATE に同期
+        #    (Active なら起動、Active 以外なら何もしない)
+        try:
+            self.ensure_autonomy_for(persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to sync autonomy: %s",
+                persona_id,
+            )
+
+    def _run_persona_post_registration(self) -> None:
+        """起動時: 全ペルソナに対して _on_persona_registered を実行する。"""
         if not self.personas:
             return
-        created_count = 0
-        existed_count = 0
         for persona_id in list(self.personas.keys()):
-            try:
-                # ensure_track は既存があれば無作成で返すため、ログだけ追跡する
-                # 簡便のため戻り値の status で「今作ったか / もとからあったか」を判別。
-                # 厳密な区別が必要なら handler に作成フックを追加することも可能だが、
-                # migration 用途では集計ログで十分。
-                track_before = self.social_track_handler._find_existing(persona_id)
-                self.social_track_handler.ensure_track(persona_id)
-                if track_before is None:
-                    created_count += 1
-                else:
-                    existed_count += 1
-            except Exception:
-                logging.exception(
-                    "[social-handler] migration sweep failed for persona=%s",
-                    persona_id,
-                )
+            self._on_persona_registered(persona_id)
         logging.info(
-            "[social-handler] migration sweep done: created=%d existed=%d total=%d",
-            created_count, existed_count, len(self.personas),
+            "[post-registration] Completed for %d personas.",
+            len(self.personas),
         )
 
     def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -1271,15 +1274,8 @@ class SAIVerseManager(
                     persona_id, state,
                 )
 
-    def _ensure_autonomy_for_active_personas(self) -> None:
-        """全ペルソナの AutonomyManager 状態を ACTIVITY_STATE に同期する (起動時用)。"""
-        for persona_id in list(self.personas.keys()):
-            try:
-                self.ensure_autonomy_for(persona_id)
-            except Exception:
-                logging.exception(
-                    "Failed to ensure autonomy for persona '%s'", persona_id,
-                )
+    # NOTE: _ensure_autonomy_for_active_personas は _run_persona_post_registration
+    # に統合済み (2026-06-09)。
 
     # ------------------------------------------------------------------
     # wait_response Track の自動 pause タイマー (handoff_2026-05-09.md §4)

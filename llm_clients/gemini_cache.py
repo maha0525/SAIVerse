@@ -83,6 +83,7 @@ class GeminiCacheController:
 
     def __init__(self) -> None:
         self._entries: Dict[Tuple[str, str], _CacheEntry] = {}
+        self._unsupported_models: set = set()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -150,6 +151,8 @@ class GeminiCacheController:
         _none = CacheEnsureResult(name=None)
         if not client or not model or (not system_instruction and not contents):
             return _none
+        if model in self._unsupported_models:
+            return _none
         key = self._key(model, system_instruction, contents)
         now = time.time()
 
@@ -177,8 +180,16 @@ class GeminiCacheController:
                 model=model,
                 config=types.CreateCachedContentConfig(**cfg_kwargs),
             )
-        except Exception:
-            LOGGER.warning("[gemini_cache] caches.create failed model=%s", model, exc_info=True)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            if status == 404:
+                self._unsupported_models.add(model)
+                LOGGER.info(
+                    "[gemini_cache] model=%s does not support createCachedContent; skipping future attempts",
+                    model,
+                )
+            else:
+                LOGGER.warning("[gemini_cache] caches.create failed model=%s", model, exc_info=True)
             return _none
 
         name = getattr(cache, "name", None)

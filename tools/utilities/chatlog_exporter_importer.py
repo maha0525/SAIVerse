@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -163,8 +164,10 @@ def _parse_datetime_flexible(value: Optional[str]) -> Optional[datetime]:
     for fmt in formats:
         try:
             dt = datetime.strptime(normalized, fmt)
-            # Assume local time, convert to UTC-aware
-            return dt.replace(tzinfo=timezone.utc)
+            # Exporter timestamps are in the PC's local timezone.
+            # mktime() interprets the tuple as local time and returns UTC epoch.
+            epoch = _time.mktime(dt.timetuple())
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
         except ValueError:
             continue
 

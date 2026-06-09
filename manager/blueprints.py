@@ -296,6 +296,9 @@ class BlueprintMixin:
                 self.id_to_name_map[new_ai_id] = entity_name
                 self.persona_map[entity_name] = new_ai_id
 
+                # 共通初期化フック (交流 Track 確保 + AutonomyManager 同期 等)
+                self._on_persona_registered(new_ai_id)
+
             self.occupants.setdefault(target_building_id, []).append(new_ai_id)
             arrival_message = (
                 "<div class=\"note-box\">✨ Blueprint Spawn:<br>"

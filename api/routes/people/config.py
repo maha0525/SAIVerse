@@ -208,6 +208,13 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
         except Exception as exc:
             LOGGER.warning("[organize-memory] Chronicle generation failed: %s", exc)
 
+    # 4. Dispatch METABOLISM event to head_pipeline (snapshot refresh)
+    try:
+        from saiverse.dynamic_state import DynamicStateManager
+        DynamicStateManager.on_metabolism(persona, manager)
+    except Exception:
+        LOGGER.warning("[organize-memory] on_metabolism dispatch failed", exc_info=True)
+
     return {
         "success": True,
         "anchors_cleared": True,

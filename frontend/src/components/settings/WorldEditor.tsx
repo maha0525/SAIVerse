@@ -105,7 +105,18 @@ async function apiCall(url: string, options?: RequestInit): Promise<boolean> {
         const res = await fetch(url, options);
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: res.statusText }));
-            alert(`エラー: ${err.detail || '不明なエラー'}`);
+            let msg = '不明なエラー';
+            if (Array.isArray(err.detail)) {
+                msg = err.detail.map((e: any) => {
+                    const loc = e.loc?.slice(1).join('.') || '?';
+                    return `${loc}: ${e.msg}`;
+                }).join('\n');
+            } else if (typeof err.detail === 'string') {
+                msg = err.detail;
+            } else if (err.detail) {
+                msg = JSON.stringify(err.detail);
+            }
+            alert(`エラー:\n${msg}`);
             return false;
         }
         return true;
@@ -367,9 +378,9 @@ export default function WorldEditor() {
                 <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> City</button>
                 <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); setFormData({}); }}><Layers size={16} /> Building</button>
                 <button className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> ペルソナ</button>
-                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({}); }}><FileText size={16} /> Blueprint</button>
+                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}><FileText size={16} /> Blueprint</button>
                 <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> ツール</button>
-                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({}); }}><Box size={16} /> アイテム</button>
+                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({ item_type: 'object', owner_kind: 'world' }); }}><Box size={16} /> アイテム</button>
                 <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> Playbook</button>
             </div>
 
