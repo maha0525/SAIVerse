@@ -1364,6 +1364,27 @@ class SEARuntime:
                     msg_metadata.setdefault("tags", []).extend(extra_tags)
                 else:
                     msg_metadata[key] = value
+
+        # audience: 同じ Building にいる他ペルソナ・ユーザーを記録
+        if role == "assistant" and "audience" not in msg_metadata:
+            persona_id = getattr(persona, "persona_id", None)
+            building_id = getattr(persona, "current_building_id", None)
+            if persona_id and building_id and self.manager:
+                occupants = getattr(self.manager, "occupants", {}).get(building_id, [])
+                audience_personas = [
+                    str(oid) for oid in occupants
+                    if str(oid) != persona_id and not str(oid).startswith("user_")
+                ]
+                if audience_personas:
+                    audience_users = [
+                        str(oid) for oid in occupants
+                        if str(oid).startswith("user_")
+                    ]
+                    msg_metadata["audience"] = {
+                        "personas": audience_personas,
+                        "users": audience_users,
+                    }
+
         if msg_metadata:
             message["metadata"] = msg_metadata
 

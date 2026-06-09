@@ -82,9 +82,16 @@ class BuildingOccupantsSection:
     ) -> list[NotificationLabel]:
         if old is None or new is None:
             return []
-        if old.building_id != new.building_id:
-            return []
         labels: list[NotificationLabel] = []
+        if old.building_id != new.building_id:
+            # 自分が別の Building に移動した場合、新 Building の全同席者を通知
+            for entry in new.entries:
+                labels.append(NotificationLabel(
+                    kind="occupant_entered",
+                    label=f"{entry.name} がいます",
+                    metadata={"occupant_id": entry.occupant_id, "occupant_kind": entry.kind},
+                ))
+            return labels
         old_map = {e.occupant_id: e for e in old.entries}
         new_map = {e.occupant_id: e for e in new.entries}
         for oid, entry in new_map.items():
@@ -92,12 +99,14 @@ class BuildingOccupantsSection:
                 labels.append(NotificationLabel(
                     kind="occupant_entered",
                     label=f"{entry.name} が入室しました",
+                    metadata={"occupant_id": oid, "occupant_kind": entry.kind},
                 ))
         for oid, entry in old_map.items():
             if oid not in new_map:
                 labels.append(NotificationLabel(
                     kind="occupant_left",
                     label=f"{entry.name} が退室しました",
+                    metadata={"occupant_id": oid, "occupant_kind": entry.kind},
                 ))
         return labels
 

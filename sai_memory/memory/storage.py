@@ -766,13 +766,15 @@ def get_messages_with_persona_in_audience(
     required_tags: Optional[List[str]] = None,
     limit: int = 10,
 ) -> List[Message]:
-    """Get messages where a specific persona is in the audience.
+    """Get messages where a specific persona is in the audience or is the speaker.
 
-    Filters messages where metadata.audience.personas contains persona_id.
+    Filters messages where metadata.audience.personas contains persona_id
+    (outgoing messages heard by the target) OR metadata.with contains persona_id
+    (incoming messages from the target, ingested via auto_ingest).
 
     Args:
         conn: Database connection
-        persona_id: Persona ID to search for in audience
+        persona_id: Persona ID to search for in audience or with
         thread_id: Optional thread filter
         exclude_message_ids: Message IDs to exclude (e.g., recent context)
         required_tags: Only include messages with these tags
@@ -781,11 +783,15 @@ def get_messages_with_persona_in_audience(
     Returns:
         List of messages, ordered by created_at DESC (most recent first)
     """
-    params = [persona_id]
+    params = [persona_id, persona_id]
 
     # Build WHERE clause
     where_conditions = [
+        "("
         "EXISTS (SELECT 1 FROM json_each(metadata, '$.audience.personas') WHERE json_each.value = ?)"
+        " OR "
+        "EXISTS (SELECT 1 FROM json_each(metadata, '$.with') WHERE json_each.value = ?)"
+        ")"
     ]
 
     if thread_id is not None:

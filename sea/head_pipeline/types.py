@@ -62,6 +62,7 @@ class NotificationLabel:
     kind: str   # 機械可読の識別子 ("spell_added", "building_image_changed" 等)
     label: str  # ペルソナに見せる文 ("移動先 Building で新たに使えるようになったスペル: …")
     media: list[MediaRef] = field(default_factory=list)  # 必要なら新コンテンツを tail に attach
+    metadata: dict = field(default_factory=dict)  # Section 固有の付加情報 (occupant_id 等)
 
 
 @dataclass

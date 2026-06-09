@@ -180,7 +180,63 @@ def inject_diff_notifications(
         "head_pipeline: injected %d notification labels for persona=%s building=%s",
         len(labels), ctx.persona_id, building_id,
     )
+
+    _inject_persona_recall_on_enter(persona, labels, sai_mem)
+
     return True
+
+
+def _inject_persona_recall_on_enter(
+    persona: Any,
+    labels: list[NotificationLabel],
+    sai_mem: Any,
+) -> None:
+    """occupant_entered ラベルに対応する過去会話・Memopedia を想起注入する。
+
+    Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、
+    過去の会話と Memopedia ページを自動的に思い出す。
+    """
+    history_manager = getattr(persona, "history_manager", None)
+    if not history_manager:
+        return
+
+    for label in labels:
+        if label.kind != "occupant_entered":
+            continue
+        occupant_id = label.metadata.get("occupant_id")
+        occupant_kind = label.metadata.get("occupant_kind")
+        if not occupant_id or occupant_kind != "persona":
+            continue
+
+        try:
+            recall_text = history_manager.recall_conversation_with(
+                occupant_id,
+                current_thread_only=False,
+                max_results=6,
+            )
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline: recall_conversation_with failed for %s", occupant_id,
+            )
+            continue
+        if not recall_text:
+            continue
+
+        message: dict[str, Any] = {
+            "role": "user",
+            "content": f"<system>{recall_text}</system>",
+            "metadata": {"tags": ["internal", "event_message"]},
+        }
+        try:
+            sai_mem.append_persona_message(message)
+            LOGGER.info(
+                "head_pipeline: injected persona recall for %s on occupant_entered",
+                occupant_id,
+            )
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline: failed to inject persona recall for %s", occupant_id,
+            )
 
 
 def _format_notification_block(labels: list[NotificationLabel]) -> str:

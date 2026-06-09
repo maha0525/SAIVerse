@@ -67,9 +67,22 @@ class DynamicStateManager:
         Phase 3-e: BUILDING_ENTERED イベントを head_pipeline に dispatch するだけ。
         refresh_on_events に列挙した Section (building / visual_context /
         building_items / building_occupants 等) の snapshot が再構築される。
+
+        dispatch_event の前に、新 Building の building_id を使って diff 通知を注入する。
+        この時点では persona.current_building_id がまだ旧 Building を指しているため、
+        maybe_inject_event_messages (persona.current_building_id を参照) は使えない。
+        引数の building_id (= 移動先) を直接渡す。
         """
         if not getattr(persona, "persona_id", None):
             return
+        try:
+            from sea.head_pipeline import inject_diff_notifications
+            inject_diff_notifications(persona, manager, building_id)
+        except Exception:
+            LOGGER.warning(
+                "[dynamic_state] pre-dispatch diff inject failed for %s -> %s",
+                getattr(persona, "persona_id", "?"), building_id, exc_info=True,
+            )
         _dispatch_head_event(persona, manager, building_id, "building_entered")
 
     @staticmethod
