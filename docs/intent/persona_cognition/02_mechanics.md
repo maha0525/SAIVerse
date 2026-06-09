@@ -465,6 +465,12 @@ Track を再開する時、起源 Track の認識回復が**主**であり、他
 
 Phase 5 でこの汎用化を実装する。
 
+#### v0.3.0 繋ぎ実装 (2026-06-07)
+
+Note システム完成前の繋ぎとして、head pipeline の `occupant_entered` 差分通知時に `recall_conversation_with()` を呼び、過去会話 + Memopedia ページを SAIMemory に注入する。詳細: `persona_action_tracks.md` 再会機能セクション。
+
+**重要な設計修正**: Person Note の自動開閉は **occupancy レイヤー（ペルソナ単位）** で行い、Track Handler には依存しない。`01_concepts.md` の「Note 開閉の 2 経路」を参照。
+
 ---
 
 ## ライン階層管理機構

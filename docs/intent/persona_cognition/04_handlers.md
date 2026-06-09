@@ -119,7 +119,7 @@ class AutonomousTrackHandler:
 - **alert トリガー**: ユーザー発話イベント
 - **post_complete_behavior**: `wait_response`
 - **output_target**: `building:current` または `external:...`
-- **Note**: 該当ユーザーの Person Note を自動開封
+- **Note (Track アタッチ)**: なし（Person Note は occupancy レイヤーで管理、`01_concepts.md` 参照）
 
 ### `SocialTrackHandler` (Phase 2 実装済み)
 
@@ -128,7 +128,7 @@ class AutonomousTrackHandler:
 - **alert トリガー**: 同 Building 内の他ペルソナ発話 (audience に自分が含まれる)
 - **post_complete_behavior**: `wait_response`
 - **output_target**: `building:current`
-- **Note**: 相手ペルソナの Person Note を自動開封
+- **Note (Track アタッチ)**: なし（Person Note は occupancy レイヤーで管理、`01_concepts.md` 参照）
 
 ### `AutonomousTrackHandler` (Phase 2 実装済み)
 
@@ -137,7 +137,9 @@ class AutonomousTrackHandler:
 - **alert トリガー**: なし (メインライン判断で `track_create` → `track_activate`)
 - **post_complete_behavior**: `meta_judge`
 - **output_target**: `none` (基本独白)
-- **Note**: 対象 Project Note + Vocation Note
+- **Note (Track アタッチ)**: 対象 Project Note + Vocation Note
+
+> **設計修正 (2026-06-07)**: Person Note の自動開封は Track Handler ではなく occupancy レイヤー（ペルソナ単位）が担う。Track Handler が Note をアタッチするのは Project / Vocation Note のみ。理由: ペルソナ間会話は Social Track に限らない（同席状態で UserConversation Track 中にも発生する）。
 
 ---
 

@@ -244,6 +244,19 @@ type を絞ることで Note 乱発を防ぎノウハウ集約を促す:
 - **直感的なペルソナ操作**: 「ノートを開く」「ノートに書き込む」という人間的な行動モデル
 - **Memopedia と接続**: Note は Memopedia ページを構成要素として持つ (既存 Memopedia は破壊されない)
 
+### Note 開閉の 2 経路 (2026-06-07 設計修正)
+
+Note の開閉は **ペルソナ単位** と **Track 単位** の 2 つの独立した経路で駆動される:
+
+| 経路 | トリガー | 対象 Note タイプ | 粒度 |
+|------|---------|-----------------|------|
+| **Occupancy 連動** | Building の入退室 (同席ペルソナの変化) | `person` | ペルソナ単位 |
+| **Track アタッチ** | Track の activate / pause | `project` / `vocation` | Track 単位 |
+
+ペルソナが「今開いている Note」 = occupancy 由来の Person Note + active Track にアタッチされた Note の合算。
+
+Person Note の開閉は **Track Handler の責任ではなく、occupancy レイヤー** で行う。理由: ペルソナ間の会話は Social Track に限らない（UserConversation Track 中に同席ペルソナと会話が発生しうる）。Track タイプに依存すると網羅できない。
+
 ### Track / thread / Note の関係
 
 | 概念 | 役割 | 多重度 |

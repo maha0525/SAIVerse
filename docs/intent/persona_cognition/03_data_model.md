@@ -127,7 +127,11 @@ CREATE TABLE note_messages (
 CREATE INDEX idx_note_messages_msg ON note_messages(message_id);
 ```
 
-### `track_open_notes` — Track ↔ 開いている Note (多対多)
+### `track_open_notes` — Track ↔ アタッチされた Note (多対多)
+
+Track に明示的にアタッチされた Note (主に `project` / `vocation` タイプ)。Track activate 時にアタッチされた Note が自動開封される。
+
+> **注意 (2026-06-07)**: Person Note の開閉はこのテーブルを使わない。Person Note は occupancy レイヤーがペルソナ単位で管理する（Building の同席ペルソナから導出）。詳細: `01_concepts.md`「Note 開閉の 2 経路」
 
 ```sql
 CREATE TABLE track_open_notes (

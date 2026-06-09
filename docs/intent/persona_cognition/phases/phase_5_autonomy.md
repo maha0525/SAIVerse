@@ -211,14 +211,17 @@ pending Track:
 
 既存 `persona/history_manager.py` の `recall_conversation_with` を新基盤上に再実装。
 
-**新基盤での再会フロー**:
+**v0.3.0 繋ぎ実装 (2026-06-07)**: Note 完成前の暫定として、head pipeline の `occupant_entered` 差分通知時に `recall_conversation_with()` を呼び、過去会話 + Memopedia を SAIMemory に注入する実装を投入済み (`integration.py:_inject_persona_recall_on_enter`)。
 
-1. occupancy event 検出 (既存通り)
-2. SocialTrackHandler が alert 化 (audience に自分が含まれる発話 or 入室イベント)
-3. 相手ペルソナの **Person Note** を検索
-4. 既存 Person Note があればその内容を読み込み、Track の開封 Note リストに追加
-5. 既存 Note がなければ新規作成 (Person Note は最初の会話で自動作成)
-6. メタレイヤーが「今この Track をアクティブにすべきか」を判断 (A/B フロー)
+**新基盤での再会フロー (設計 target)**:
+
+1. occupancy event 検出 (Building 入退室)
+2. **occupancy レイヤー** が同席ペルソナの Person Note を検索 (ペルソナ単位、Track 非依存)
+3. 既存 Person Note があれば開封し、Memopedia ページ + 直近メッセージを文脈注入
+4. 既存 Note がなければ新規作成 (Person Note は最初の会話で自動作成)
+5. ペルソナが Building を去ったら Person Note を閉じる
+
+> **設計修正 (2026-06-07)**: 旧設計では SocialTrackHandler が Person Note を自動開封する想定だったが、ペルソナ間会話は Social Track に限らない (UserConversation Track 中にも同席ペルソナとの会話が発生する)。Person Note の開閉は **Track Handler ではなく occupancy レイヤー（ペルソナ単位）** が担う。Track アタッチは Project / Vocation Note 専用。
 
 → 「再会」は特殊機能ではなく、汎用機構の **occupancy event 由来の Person Note 自動開封**という位置づけになる。
 
@@ -231,7 +234,7 @@ pending Track:
 - [ ] `track_parameter_set` ツールでペルソナ自身がパラメータを書き換えられる
 - [ ] SomaticHandler / ScheduledHandler / PerceptualHandler のうち少なくとも 1 つが運用ペルソナで動作確認済み
 - [ ] ScheduleManager と並走して、Track 経由のスケジュール起因 alert が動く
-- [ ] ペルソナ再会機能が SocialTrackHandler 経由で動き、既存の `recall_conversation_with` が deprecated になる
+- [ ] ペルソナ再会機能が occupancy レイヤー経由の Person Note 自動開封で動き、v0.3.0 繋ぎ実装 (`_inject_persona_recall_on_enter`) が Note 経由に差し替えられる
 - [ ] 時間差ツール基盤が動作し、少なくとも 1 つの個別ツール (Kitchen 完了 / MCP Elicitation / dispatch 等) が基盤上で結果配送できる
 
 ---

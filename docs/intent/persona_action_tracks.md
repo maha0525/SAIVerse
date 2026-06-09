@@ -1054,25 +1054,47 @@ ALTER TABLE AI ADD COLUMN SLEEP_ON_CACHE_EXPIRE BOOLEAN NOT NULL DEFAULT TRUE;
 - 新トラック機構が安定したら Stelis を新基盤に統合する検討を開始（v0.4.0 以降）
 - 移行期間は両方の機構が並走、データの相互参照は最小限
 
-### ペルソナ再会機能（v0.3 で Note 経由に再整理）
+### ペルソナ再会機能
 
-新基盤上に再実装（v0.3.0 内）。Note 概念導入によりさらに整理された:
+#### v0.3.0 繋ぎ実装 (2026-06-07)
+
+Note システムが未完成のため、v0.3.0 では **head pipeline の occupant_entered 差分通知** をフックして既存の `recall_conversation_with()` を呼ぶ繋ぎ実装で出荷する:
+
+- **トリガー**: `BuildingOccupantsSection.diff_to_notifications()` が `occupant_entered` を検出
+- **処理**: `integration.py:_inject_persona_recall_on_enter()` が `recall_conversation_with(target, current_thread_only=False)` を呼び、過去会話（最大 6 件）+ Memopedia ページ内容を `<system>` ラップで SAIMemory に注入
+- **タグ**: `["internal", "event_message"]`（通常のシステム通知と同じ）
+- **対象**: `occupant_kind == "persona"` のみ（ユーザーは対象外）
+
+この繋ぎは Note 完成時に `_inject_persona_recall_on_enter` を差し替えることで移行する。
+
+#### Note 完成時の再会フロー（設計 target）
+
+Note 概念導入によりさらに整理される:
 
 | 既存実装 (`persona/history_manager.py`) | 新基盤での位置づけ |
 |----------------------------------------|------------------|
-| `recall_conversation_with:587` | **Note 自動開封 + Note 内容のコンテキスト挿入**として再実装 |
+| `recall_conversation_with:587` | **Person Note 自動開封 + Note 内容のコンテキスト挿入**として再実装 |
 | `get_messages_with_persona_in_audience` (`adapter:1694`) | Note メッセージの取得経路として活用、または Note 自動メンバーシップ生成の入力 |
 | Memopedia ページ取得 (`ensure_persona_page`) | Note の `note_pages` を介して取得 |
 | `recalled_by` 冪等性マーカー | 同じ occupancy event で同じ Note が二重で開かれない冪等性に位置づけ直す |
 | `[想起: ...との過去の会話]` info_text | **Person Note の差分挿入テンプレート**として汎用化 |
 
+**重要な設計修正 (2026-06-07)**: Note の開閉は **2 つの独立経路** を持つ:
+
+| 経路 | トリガー | Note タイプ | 粒度 |
+|------|---------|------------|------|
+| **Occupancy 連動** | 同席ペルソナの入退室 | person | **ペルソナ単位** |
+| **Track アタッチ** | Track の activate/pause | project / vocation | Track 単位 |
+
+Person Note の自動開封は Track Handler の責任ではなく、**occupancy レイヤー（ペルソナ単位）** で行う。理由: 同じ Building にペルソナが複数いる状態でユーザーが話しかけた場合、Social Track ではなく UserConversation Track で会話が発生する。Track タイプに依存すると会話経路を網羅できない。
+
 新基盤での再会フロー:
 
-1. occupancy event 検出（既存通り）
-2. 相手ペルソナの **Person Note** を検索（`notes.note_type='person', metadata.persona_id=対象ペルソナ`）
-3. 既存 Person Note があればその内容を読み込み、Track の開封 Note リストに追加
-4. 既存 Note がなければ新規作成（Person Note は最初の会話で自動作成される）
-5. メタレイヤーが「今このトラックをアクティブにすべきか」を判断（A/B フロー）
+1. occupancy event 検出（Building 入退室）
+2. 同席ペルソナの **Person Note** を検索（`notes.note_type='person', metadata.persona_id=対象ペルソナ`）
+3. 既存 Person Note があればペルソナ単位で開封し、Memopedia ページ + 直近メッセージを文脈注入
+4. 既存 Note がなければ新規作成（Person Note は最初の会話で自動作成）
+5. ペルソナが Building を去ったら Person Note を閉じる
 
 → 「再会」は特殊機能ではなく、汎用機構の **occupancy event 由来の Person Note 自動開封**という位置づけになる。
 
