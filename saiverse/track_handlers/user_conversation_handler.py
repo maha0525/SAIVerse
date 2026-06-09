@@ -136,10 +136,10 @@ class UserConversationTrackHandler:
             is_persistent=True,
             output_target="building:current",
             metadata=json.dumps({"user_id": user_id}, ensure_ascii=False),
+            initial_status=STATUS_RUNNING,
         )
-        self.track_manager.activate(track_id)
         logging.info(
-            "[user-conv-handler] Created and activated user_conversation track "
+            "[user-conv-handler] Created user_conversation track as running "
             "%s persona=%s user_id=%s",
             track_id, persona_id, user_id,
         )

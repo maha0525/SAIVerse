@@ -275,8 +275,15 @@ class TrackManager:
         output_target: str = "none",
         is_persistent: bool = False,
         metadata: Optional[str] = None,
+        initial_status: str = STATUS_UNSTARTED,
     ) -> str:
-        """新規 Track を作成する。初期状態は unstarted。
+        """新規 Track を作成する。
+
+        ``initial_status`` で初期状態を指定できる。``STATUS_RUNNING`` を
+        渡すと、同一トランザクション内で既存 running Track の displacement
+        (→ pending 押し出し) も行い、作成と同時に running 状態で確定する。
+        これにより create → activate の 2 段階で生じていた UNSTARTED 窓を
+        排除し、メタ判断の誤発火を防ぐ。
 
         Returns:
             track_id (UUID 文字列)
@@ -285,11 +292,34 @@ class TrackManager:
             raise ValueError("persona_id is required")
         if not track_type:
             raise ValueError("track_type is required")
+        if initial_status not in (STATUS_UNSTARTED, STATUS_RUNNING):
+            raise ValueError(
+                f"initial_status must be unstarted or running, got: {initial_status}"
+            )
 
         track_id = str(uuid.uuid4())
+        displaced_track_ids: List[str] = []
         db = self.SessionLocal()
         try:
             short_id = self._next_short_id(db, persona_id)
+
+            # initial_status=running の場合、既存 running を pending に押し出す
+            if initial_status == STATUS_RUNNING:
+                running_q = (
+                    db.query(ActionTrack)
+                    .filter(
+                        ActionTrack.persona_id == persona_id,
+                        ActionTrack.status == STATUS_RUNNING,
+                    )
+                )
+                for existing in running_q.all():
+                    existing.status = STATUS_PENDING
+                    displaced_track_ids.append(existing.track_id)
+                    logging.info(
+                        "[track] auto-pause %s (was running) for creation of %s",
+                        existing.track_id, track_id,
+                    )
+
             track = ActionTrack(
                 track_id=track_id,
                 persona_id=persona_id,
@@ -298,23 +328,37 @@ class TrackManager:
                 track_type=track_type,
                 is_persistent=bool(is_persistent),
                 output_target=output_target,
-                status=STATUS_UNSTARTED,
+                status=initial_status,
                 is_forgotten=False,
                 intent=intent,
                 track_metadata=metadata,
+                last_active_at=datetime.now() if initial_status == STATUS_RUNNING else None,
             )
             db.add(track)
             db.commit()
+            db.refresh(track)
+            db.expunge(track)
             logging.info(
-                "[track] created %s (t:%d) persona=%s type=%s persistent=%s",
-                track_id, short_id, persona_id, track_type, is_persistent,
+                "[track] created %s (t:%d) persona=%s type=%s persistent=%s status=%s",
+                track_id, short_id, persona_id, track_type, is_persistent, initial_status,
             )
-            return track_id
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+
+        # running 作成時は activate 相当の後処理を実行
+        if initial_status == STATUS_RUNNING:
+            for displaced_id in displaced_track_ids:
+                self._cancel_wait_response_timeout(displaced_id)
+            self._schedule_wait_response_timeout(track)
+            for displaced_id in displaced_track_ids:
+                self._notify_status_change(persona_id, displaced_id, None)
+            self._notify_status_change(persona_id, track_id, None)
+            self._notify_track_activated(persona_id, track, None)
+
+        return track_id
 
     def get(self, track_id: str) -> ActionTrack:
         """Track を取得。存在しなければ TrackNotFoundError。"""

@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
-import { Loader2, GitBranch, ChevronDown, ChevronUp, RefreshCw, PauseCircle } from 'lucide-react';
+import { Loader2, GitBranch, ChevronDown, ChevronUp, RefreshCw, PauseCircle, PlayCircle } from 'lucide-react';
 import slStyles from './TracksViewer.module.css';
 
 interface TrackItem {
@@ -230,13 +230,14 @@ function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCar
     const [actionError, setActionError] = useState<string | null>(null);
 
     const canPause = track.status === 'running' || track.status === 'alert';
+    const canActivate = track.status === 'unstarted' || track.status === 'pending' || track.status === 'alert';
 
-    const pauseTrack = async () => {
+    const trackAction = async (action: 'pause' | 'activate') => {
         setActionLoading(true);
         setActionError(null);
         try {
             const res = await fetch(
-                `/api/people/${personaId}/tracks/${track.track_id}/pause`,
+                `/api/people/${personaId}/tracks/${track.track_id}/${action}`,
                 { method: 'POST' },
             );
             if (!res.ok) {
@@ -331,7 +332,24 @@ function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCar
                         <span className={slStyles.actionsLabel}>actions:</span>
                         <button
                             className={slStyles.actionBtn}
-                            onClick={pauseTrack}
+                            onClick={() => trackAction('activate')}
+                            disabled={!canActivate || actionLoading}
+                            title={
+                                canActivate
+                                    ? 'この Track を running にする (既存 running は pending に押し出し)'
+                                    : `activate は unstarted/pending/alert からのみ可能 (現在: ${track.status})`
+                            }
+                        >
+                            {actionLoading ? (
+                                <Loader2 size={12} className={slStyles.spin} />
+                            ) : (
+                                <PlayCircle size={12} />
+                            )}
+                            <span>running にする</span>
+                        </button>
+                        <button
+                            className={slStyles.actionBtn}
+                            onClick={() => trackAction('pause')}
                             disabled={!canPause || actionLoading}
                             title={
                                 canPause

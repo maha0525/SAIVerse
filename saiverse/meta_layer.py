@@ -57,6 +57,13 @@ _MAX_SPELL_LOOPS = 5
 # メタレイヤーが扱う Track 操作スペル (Phase B-3 で導入済み)。
 # 一覧は登録済みスペルから動的に拾うが、ペルソナ素体プロンプトと衝突しないよう
 # 「メタレイヤーが使ってよい」セットを明示的に絞る。
+def _short_ref(track: Any) -> str:
+    """Track の短縮参照 (t:N) を返す。short_id 未設定時は UUID[:8] フォールバック。"""
+    if getattr(track, "short_id", None) is not None:
+        return f"t:{track.short_id}"
+    return track.track_id[:8] + "…"
+
+
 _META_LAYER_SPELL_NAMES = (
     "track_create",
     "track_activate",
@@ -1173,7 +1180,7 @@ class MetaLayer:
         kind が未知 / Playbook 不要なら None を返す。
         """
         if kind == "alert_present":
-            alert_ids = [t.track_id for t in sit["alert"]]
+            alert_ids = [_short_ref(t) for t in sit["alert"]]
             if not alert_ids:
                 return None
             return {
@@ -1202,7 +1209,7 @@ class MetaLayer:
             }
 
         if kind == "idle_with_pending":
-            pending_ids = [t.track_id for t in sit["pending_or_unstarted"]]
+            pending_ids = [_short_ref(t) for t in sit["pending_or_unstarted"]]
             if not pending_ids:
                 # 候補なしのときは create のみに退化 (E 相当)
                 return self._build_response_schema("idle_no_pending", sit)
@@ -1336,7 +1343,7 @@ class MetaLayer:
             f"Track「{title}」が alert 状態です。alert はこの Track への対応が",
             "必要なシグナルで、起動するまで alert のままになります。",
             "",
-            f"操作例: /spell track_activate track_id='{primary.track_id}'",
+            f"操作例: /spell track_activate track_id='{_short_ref(primary)}'",
         ]
         if running_track is not None:
             lines.append(
@@ -1350,21 +1357,22 @@ class MetaLayer:
             for t in others:
                 lines.append(
                     f"  - 「{t.title or '(無題)'}」 → "
-                    f"/spell track_activate track_id='{t.track_id}'"
+                    f"/spell track_activate track_id='{_short_ref(t)}'"
                 )
         return "\n".join(lines)
 
     def _situation_running_active(self, sit: Dict[str, Any]) -> str:
         primary = sit["running"][0]
         title = primary.title or "(無題)"
+        sid = _short_ref(primary)
         return (
             "[状況]\n"
             f"Track「{title}」が running 中です。\n"
             "\n"
             "継続: スペル不要\n"
-            f"保留: /spell track_pause track_id='{primary.track_id}'\n"
-            f"完了: /spell track_complete track_id='{primary.track_id}'\n"
-            f"中止: /spell track_abort track_id='{primary.track_id}'"
+            f"保留: /spell track_pause track_id='{sid}'\n"
+            f"完了: /spell track_complete track_id='{sid}'\n"
+            f"中止: /spell track_abort track_id='{sid}'"
         )
 
     def _situation_idle_with_pending(self, sit: Dict[str, Any]) -> str:
@@ -1389,7 +1397,7 @@ class MetaLayer:
             intent_part = f"（intent: {intent}）" if intent else ""
             lines.append(
                 f"- 「{t.title or '(無題)'}」{intent_part} → "
-                f"/spell track_activate track_id='{t.track_id}'"
+                f"/spell track_activate track_id='{_short_ref(t)}'"
             )
         lines.extend([
             "",
@@ -1462,9 +1470,8 @@ class MetaLayer:
         last_part = ""
         if last_msg_time is not None:
             last_part = f" / 最終: {self._format_relative(last_msg_time)}"
-        sid = f"t:{track.short_id}" if getattr(track, "short_id", None) is not None else track.track_id[:8] + "…"
         return (
-            f"  - 「{title}」 (id={sid}, "
+            f"  - 「{title}」 (id={_short_ref(track)}, "
             f"{track.track_type}{intent_part}){last_part}"
         )
 

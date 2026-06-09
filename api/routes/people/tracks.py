@@ -221,3 +221,44 @@ def pause_track(
         except Exception:
             pass
     return _to_item(track, last_message_at=last_at)
+
+
+@router.post("/{persona_id}/tracks/{track_id}/activate", response_model=TrackItem)
+def activate_track(
+    persona_id: str,
+    track_id: str,
+    manager=Depends(get_manager),
+):
+    """Activate a Track (→ running).
+
+    unstarted / pending / alert の Track を running に遷移させる。
+    既存の running Track は自動的に pending に押し出される。
+    """
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is None:
+        raise HTTPException(status_code=503, detail="track_manager not initialized")
+    try:
+        existing = track_manager.get(track_id)
+    except TrackNotFoundError:
+        raise HTTPException(status_code=404, detail=f"track not found: {track_id}")
+    if existing.persona_id != persona_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"track {track_id} does not belong to persona {persona_id}",
+        )
+    try:
+        track = track_manager.activate(track_id)
+    except TrackNotFoundError:
+        raise HTTPException(status_code=404, detail=f"track not found: {track_id}")
+    except InvalidTrackStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    adapter = _resolve_persona_memory(manager, persona_id)
+    last_at: Optional[float] = None
+    if adapter is not None:
+        try:
+            dt = adapter.get_track_last_message_time(track_id)
+            if dt is not None:
+                last_at = dt.timestamp()
+        except Exception:
+            pass
+    return _to_item(track, last_message_at=last_at)
