@@ -695,6 +695,41 @@ modal 上部の busy バーは grid を下方 scroll 中だと視界に入らな
 
 `AvatarPipelineManager._set_exec_locks: dict[(persona_id, set_name), Lock]` で同 persona+set の `execute_stage` 並列実行を順次化。 chain 中に proxy timeout で frontend が再送した場合も backend で 1 face ずつ処理される (= OpenAI cost 倍増 + base copy 競合事故の防止)。 `regenerate_target` には適用しない (= per-target chain で並列度 5 を生かすため)。
 
+### M. ① アップロードのアス比は crop 矩形から導出 + ④ rect の比例スケール適用 (2026-06-10)
+
+**事故**: ① で外部画像を 4:3 にトリミングしたのに ②③ が 1:1 で生成された。
+原因は 2 段:
+
+1. ① アップロードパネルのアス比セレクト (`targetAspect`) と crop 矩形が別
+   state で、 `TrimRectVisualEditor` が lockAspect ON 時に crop 枠を (④ 用の
+   ハードコード) 4:3 へ自動補正する一方、 セレクトは推奨値 1:1 のままだった
+2. submit はセレクト値をそのまま `target_aspect` として送り、 backend は
+   crop 矩形 (4:3) で face.png を保存しつつ `metadata.aspect_ratio="1:1"`
+   を記録 → ②③ が 1:1 生成
+
+**設計判断 (= 再発防止の不変条件)**:
+
+- **crop 矩形が single source of truth**。 ユーザーが見て調整した切り出し
+  範囲 = 真実で、 セレクトは「crop 枠を refit する入力」 + 「現在の実アス比
+  表示」 に格下げ
+  - UI: crop 変更のたびに `closestSupportedAspect(w, h)` でセレクト表示を
+    同期、 submit も最終 crop から導出した値を送る
+  - backend (`upload_face_image`): `crop_rect` 指定時は実寸から
+    `closest_supported_aspect` を導出して metadata に保存 (= UI 側の値は
+    信用しない 2 重ガード、 食い違えば WARNING ログ)
+- **`TrimRectVisualEditor` の lock アス比は prop 化** (`lockAspectRatio`、
+  default "4:3")。 ④ は ⑤ の 160×120 出力に合わせ 4:3 のまま、 ① は選択中
+  の target アス比を渡す (= ④ 用の 4:3 自動補正が ① で誤発火しない)
+- **④ trim rect はピクセル絶対座標をやめ、 「編集時の参照画像サイズ
+  (`ref_width`/`ref_height`) 付き座標」** にする。 `_trim_one` は適用先画像の
+  サイズが ref と違えば比例スケールして適用
+  - 理由: ① 手動アップロード由来の face.png は crop 実寸 (例 851×639)、
+    ②③ 生成画像は backend 固定サイズ (例 gpt 4:3 = 1536×1152) でピクセル
+    サイズが違う。 同 face の 15 セルに同 rect を絶対座標で当てると、 base
+    copy セル (= face.png 由来) だけ切り出し位置がズレる
+  - ref 無し rect (= 既存セットの保存値) は従来通り絶対座標で適用
+    (後方互換)
+
 ## 設計判断の理由
 
 ### なぜ動的転送機構を新設するか (固定焼き込みじゃダメか)
