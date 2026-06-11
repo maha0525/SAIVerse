@@ -16,6 +16,9 @@ class UserStatusResponse(BaseModel):
     avatar: Optional[str]
     display_name: str
     email: Optional[str] = None
+    # Region RPG: ユーザーが参加中のゲーム Region 内に居る場合のゲームモード情報
+    # {region_id, region_name, phase, scene, party_location}。それ以外は None。
+    active_game: Optional[dict] = None
 
 class MoveRequest(BaseModel):
     target_building_id: str
@@ -55,13 +58,22 @@ def get_user_status(manager = Depends(get_manager)):
     presence_status = manager.state.user_presence_status
     is_online = presence_status != "offline"
 
+    active_game = None
+    lifecycle = getattr(manager, "game_lifecycle", None)
+    if lifecycle is not None:
+        try:
+            active_game = lifecycle.active_game_for_user()
+        except Exception:
+            _log.warning("Failed to resolve active game for user", exc_info=True)
+
     return {
         "is_online": is_online,
         "presence_status": presence_status,
         "current_building_id": manager.state.user_current_building_id,
         "avatar": manager.state.user_avatar_data,
         "display_name": manager.state.user_display_name,
-        "email": email
+        "email": email,
+        "active_game": active_game,
     }
 
 @router.post("/move", response_model=MoveResponse)

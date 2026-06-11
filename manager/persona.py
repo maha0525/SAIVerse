@@ -220,6 +220,7 @@ class PersonaMixin:
         )
 
         persona.private_room_id = private_room_id
+        persona.persona_role = getattr(db_ai, "PERSONA_ROLE", None)
         if private_room_id not in self.building_map:
             logging.warning(
                 "Persona '%s' private room '%s' is missing from building_map.",
@@ -290,7 +291,15 @@ class PersonaMixin:
             db.close()
 
     def _create_persona(
-        self, name: str, system_prompt: str, custom_ai_id: Optional[str] = None
+        self,
+        name: str,
+        system_prompt: str,
+        custom_ai_id: Optional[str] = None,
+        persona_role: Optional[str] = None,
+        room_name: Optional[str] = None,
+        room_capacity: int = 1,
+        room_system_instruction: Optional[str] = None,
+        room_description: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
@@ -301,6 +310,9 @@ class PersonaMixin:
             system_prompt: System prompt for the persona
             custom_ai_id: Optional custom ID (alphanumeric + underscore). If not provided,
                           auto-generated from name.
+            persona_role: Special persona role (AI.PERSONA_ROLE)。None=通常、'ruler'=Region RPG GM
+            room_name / room_capacity / room_system_instruction / room_description:
+                          私室のオーバーライド。Ruler では私室の代わりに Region の控室として使う
         """
         db = self.SessionLocal()
         try:
@@ -347,6 +359,7 @@ class PersonaMixin:
                 DEFAULT_MODEL=self.model,
                 CHRONICLE_ENABLED=False,
                 PRIVATE_ROOM_ID=new_building_id,
+                PERSONA_ROLE=persona_role,
             )
             db.add(new_ai_model)
             logging.info("DB: Added new AI '%s' (%s).", name, new_ai_id)
@@ -354,10 +367,10 @@ class PersonaMixin:
             new_building_model = BuildingModel(
                 CITYID=self.city_id,
                 BUILDINGID=new_building_id,
-                BUILDINGNAME=f"{name}の部屋",
-                CAPACITY=1,
-                SYSTEM_INSTRUCTION=f"{name}が待機する個室です。",
-                DESCRIPTION=f"{name}のプライベートルーム。",
+                BUILDINGNAME=room_name or f"{name}の部屋",
+                CAPACITY=room_capacity,
+                SYSTEM_INSTRUCTION=room_system_instruction or f"{name}が待機する個室です。",
+                DESCRIPTION=room_description or f"{name}のプライベートルーム。",
             )
             db.add(new_building_model)
             logging.info(
@@ -461,6 +474,7 @@ class PersonaMixin:
                 linked_user_name=linked_user_name,
             )
             new_persona_core.private_room_id = new_building_id
+            new_persona_core.persona_role = persona_role
             self.personas[new_ai_id] = new_persona_core
             self.avatar_map[new_ai_id] = self.default_avatar
             self.id_to_name_map[new_ai_id] = name

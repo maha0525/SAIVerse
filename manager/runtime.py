@@ -248,6 +248,8 @@ class RuntimeService(
             p.persona_name
             for p in self.personas.values()
             if not p.is_dispatched and p.current_building_id != here
+            # 特殊ペルソナ (Ruler 等) は通常世界の召喚対象にしない
+            and p.persona_role is None
         ]
         return sorted(summonable)
 
@@ -360,6 +362,38 @@ class RuntimeService(
 
     # ----- Conversation handlers -----
 
+    def _build_responding_personas(self, building_id: str) -> List[Any]:
+        """Building 内発話に応答するペルソナのリストを構築する。
+
+        通常は building の occupants (派遣中を除く)。game Region 内の Building では
+        Ruler を**先頭**に注入する (ruler_first: Ruler が最初に裁定し、その後に
+        同行ペルソナが反応する)。Ruler は控室に常駐したまま Region 内全 Building の
+        発話を受ける。設計: temp/region_rpg_intent.md §B, §E-2
+        """
+        personas = [
+            self.personas[pid]
+            for pid in self.occupants.get(building_id, [])
+            if pid in self.personas and not self.personas[pid].is_dispatched
+        ]
+        try:
+            top_region = self.manager.get_top_region_of_building(building_id)
+        except Exception:
+            logging.exception(
+                "[runtime] Failed to resolve region of building %s; skipping ruler injection",
+                building_id,
+            )
+            return personas
+        if top_region and top_region.is_game_region and top_region.ruler_id:
+            ruler = self.personas.get(top_region.ruler_id)
+            if ruler is None:
+                logging.warning(
+                    "[runtime] Region '%s' has ruler_id '%s' but no such persona is loaded",
+                    top_region.region_id, top_region.ruler_id,
+                )
+            elif not ruler.is_dispatched:
+                personas = [ruler] + [p for p in personas if p.persona_id != ruler.persona_id]
+        return personas
+
     def handle_user_input(
         self, message: str, metadata: Optional[Dict[str, Any]] = None
     ) -> List[str]:
@@ -375,11 +409,7 @@ class RuntimeService(
 
         building_id = self.state.user_current_building_id
         logging.debug("[runtime] handle_user_input building_id=%s", building_id)
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
+        responding_personas = self._build_responding_personas(building_id)
         logging.debug(
             "[runtime] handle_user_input responding_personas=%s occupants=%s",
             [p.persona_id for p in responding_personas],
@@ -396,16 +426,19 @@ class RuntimeService(
             )
 
         # ユーザーメッセージを building_histories へ1回だけ記録（全ペルソナ heard_by 付き）
-        # 各ペルソナの auto_ingest がこれを時系列順に取り込む
+        # 各ペルソナの auto_ingest がこれを時系列順に取り込む。
+        # 発話者 (ユーザー) 自身も heard_by に含める: heard_by は「その場に居た者」の
+        # 記録であり、セッションログビュー等の閲覧者フィルタが参照する
         if responding_personas:
             all_pids = [p.persona_id for p in responding_personas]
+            heard = all_pids + [str(self.state.user_id)]
             canonical_bid = self._canonical_building_id(building_id)
             bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
             if metadata:
                 bh_user_entry["metadata"] = dict(metadata)
             try:
                 responding_personas[0].history_manager.add_to_building_only(
-                    canonical_bid, bh_user_entry, heard_by=all_pids
+                    canonical_bid, bh_user_entry, heard_by=heard
                 )
             except Exception:
                 logging.exception("[runtime] Failed to pre-add user message to building_histories")
@@ -465,11 +498,7 @@ class RuntimeService(
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
         logging.debug("[runtime] handle_user_input_stream building_id=%s", building_id)
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
+        responding_personas = self._build_responding_personas(building_id)
         logging.debug(
             "[runtime] handle_user_input_stream responding_personas=%s occupants=%s",
             [p.persona_id for p in responding_personas],
@@ -518,8 +547,11 @@ class RuntimeService(
         def backend_worker():
             try:
                 # ユーザーメッセージを building_histories へ1回だけ記録（全ペルソナ heard_by 付き）
+                # 発話者 (ユーザー) 自身も heard_by に含める (セッションログビューの
+                # 閲覧者フィルタが「その場に居た者」として参照する)
                 if responding_personas:
                     all_pids = [p.persona_id for p in responding_personas]
+                    heard = all_pids + [str(self.state.user_id)]
                     canonical_bid = self._canonical_building_id(building_id)
                     bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
                     if metadata:
@@ -528,7 +560,7 @@ class RuntimeService(
                         bh_user_entry["client_message_id"] = client_message_id
                     try:
                         bm = responding_personas[0].history_manager.add_to_building_only(
-                            canonical_bid, bh_user_entry, heard_by=all_pids
+                            canonical_bid, bh_user_entry, heard_by=heard
                         )
                         user_msg_id = bm.get("message_id") if bm else None
                         if user_msg_id:
@@ -635,11 +667,7 @@ class RuntimeService(
         if not building_id:
             return []
 
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
+        responding_personas = self._build_responding_personas(building_id)
 
         sea_runtime = self.manager.sea_runtime
         results = []

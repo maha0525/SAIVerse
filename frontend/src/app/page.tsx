@@ -430,6 +430,13 @@ export default function Home() {
     // 切り替えても、 サーバの CURRENT_BUILDINGID は発言時の /chat/utter まで
     // 変わらない)。 expected_from CAS 用に server-side の現在地を ref で保持する。
     const serverCurrentBuildingIdRef = useRef<string | null>(null);
+    // ref の state ミラー (描画用: ゲームモード表示の出し分けに使う)。
+    // 更新は必ず updateServerBuildingId() 経由で ref と同時に行うこと。
+    const [serverBuildingId, setServerBuildingId] = useState<string | null>(null);
+    const updateServerBuildingId = (bid: string | null) => {
+        serverCurrentBuildingIdRef.current = bid;
+        setServerBuildingId(bid);
+    };
     // City Map: 街全体をシンボルマップで俯瞰するモーダル。展示用にデフォルト ON で起動。
     const [isMapModalOpen, setIsMapModalOpen] = useState<boolean>(true);
 
@@ -595,6 +602,20 @@ export default function Home() {
         error?: string;
     };
 
+    // Region RPG: ゲームモード (セッションログビュー表示) の状態。
+    // /api/user/status の active_game で判定し、ゲーム中はチャット表示を
+    // Building 単位ログからセッションログ (Region 横断 merge) に切り替える。
+    // 入力の投稿先は従来どおり現在 Building (配送・取り込みは不変)。
+    type ActiveGame = {
+        region_id: string;
+        region_name?: string;
+        phase: string;
+        scene?: string;
+        party_location?: string;
+    };
+    const [activeGame, setActiveGame] = useState<ActiveGame | null>(null);
+    const activeGameRef = useRef<ActiveGame | null>(null);
+
     const resolveHasMore = (data: HistoryResponse, newMessages: Message[]) => {
         return data.has_more !== undefined ? data.has_more : newMessages.length >= 20;
     };
@@ -614,11 +635,22 @@ export default function Home() {
             const params = new URLSearchParams({ limit: '20' });
             if (beforeId) params.append('before', beforeId);
             const bid = overrideBuildingId || currentBuildingIdRef.current;
-            if (bid) params.append('building_id', bid);
 
-            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}`);
+            // セッションログビューは「ゲーム中 かつ 閲覧中の建物 = 自分の実在地」
+            // のときだけ。閲覧モードで他の建物を見ている間はその建物の通常ログ。
+            const game = activeGameRef.current;
+            const gameView = !!game && !!bid && bid === serverCurrentBuildingIdRef.current;
+            let url: string;
+            if (gameView) {
+                url = `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?${params.toString()}`;
+            } else {
+                if (bid) params.append('building_id', bid);
+                url = `/api/chat/history?${params.toString()}`;
+            }
 
-            const res = await fetch(`/api/chat/history?${params.toString()}`);
+            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}, gameView=${gameView ? game.region_id : 'none'}`);
+
+            const res = await fetch(url);
             if (res.ok) {
                 setBackendConnected(true);
                 const data: HistoryResponse = await res.json();
@@ -697,6 +729,12 @@ export default function Home() {
         } finally {
             setIsLoadingMore(false);
         }
+    };
+
+    // Region RPG: active_game の状態反映 (表示切替の判断は呼び出し側が行う)
+    const applyActiveGame = (game: ActiveGame | null) => {
+        activeGameRef.current = game;
+        setActiveGame(game);
     };
 
     // Smart merge after AI response: updates IDs/metadata without replacing the whole array
@@ -862,10 +900,18 @@ export default function Home() {
                 if (data?.current_building_id) {
                     setCurrentBuildingId(data.current_building_id);
                     currentBuildingIdRef.current = data.current_building_id;
-                    serverCurrentBuildingIdRef.current = data.current_building_id;
+                    updateServerBuildingId(data.current_building_id);
                 }
                 if (data?.display_name) userDisplayNameRef.current = data.display_name;
                 if (data?.avatar) userAvatarRef.current = data.avatar;
+                applyActiveGame(data?.active_game ?? null);
+                // 起動直後の fetchHistory() は status 取得とレースするため、
+                // ゲーム中なら refs 確定後にセッションログで取り直す
+                if (data?.active_game && data?.current_building_id) {
+                    setMessages([]);
+                    setIsHistoryLoaded(false);
+                    fetchHistory(undefined, data.current_building_id);
+                }
             })
             .catch(() => setBackendConnected(false));
         fetchHistory();
@@ -1096,7 +1142,13 @@ export default function Home() {
             try {
                 const pollBid = currentBuildingIdRef.current;
                 const bidParam = pollBid ? `&building_id=${pollBid}` : '';
-                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50${bidParam}`);
+                const game = activeGameRef.current;
+                const gameView = !!game && !!pollBid
+                    && pollBid === serverCurrentBuildingIdRef.current;
+                const pollUrl = gameView
+                    ? `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?after=${encodeURIComponent(newestId)}&limit=50`
+                    : `/api/chat/history?after=${newestId}&limit=50${bidParam}`;
+                const res = await fetch(pollUrl);
                 if (res.ok) {
                     const data = await res.json();
                     const newMessages: Message[] = data.history || [];
@@ -1118,6 +1170,60 @@ export default function Home() {
         }, 5000); // Poll every 5 seconds
 
         return () => clearInterval(pollInterval);
+    }, [isHistoryLoaded]);
+
+    // Server-driven user movement sync (game_move_party / end_game 控室帰還など):
+    // サーバー側の実在地 (serverCurrentBuildingIdRef との差分) が変わった時だけ
+    // 画面を追従させる。閲覧モード (currentBuildingIdRef ≠ 実在地) で他の建物を
+    // 見ている間は、サーバー位置が動かない限り何もしない。
+    useEffect(() => {
+        if (!isHistoryLoaded) return;
+
+        const syncInterval = setInterval(async () => {
+            if (isProcessingRef.current) return; // ストリーミング中は画面を奪わない
+            try {
+                const res = await fetch('/api/user/status');
+                if (!res.ok) return;
+                const data = await res.json();
+                const serverBid: string | null = data.current_building_id ?? null;
+                const oldServerBid = serverCurrentBuildingIdRef.current;
+                const game = (data.active_game as ActiveGame | undefined) ?? null;
+                const prevGame = activeGameRef.current;
+
+                const serverMoved = !!serverBid && !!oldServerBid && serverBid !== oldServerBid;
+                // 「いまセッションログを表示しているか」= ゲーム中 かつ 閲覧先 = 実在地
+                const wasShowingLog = !!prevGame && !!oldServerBid
+                    && currentBuildingIdRef.current === oldServerBid;
+
+                if (serverBid) updateServerBuildingId(serverBid);
+                applyActiveGame(game);
+
+                if (serverMoved) {
+                    // サーバー発の移動 (= ゲームの物語が動いた)。画面を追従させる
+                    console.log(`[LocationSync] Server moved user: ${oldServerBid} -> ${serverBid}`);
+                    setCurrentBuildingId(serverBid);
+                    currentBuildingIdRef.current = serverBid;
+                    fetchBuildingInfo(serverBid);
+                    setMoveTrigger(prev => prev + 1);
+                }
+
+                const nowShowingLog = !!game
+                    && currentBuildingIdRef.current === serverCurrentBuildingIdRef.current;
+                // セッションログ → 同一セッションのログ なら表示は連続している
+                const logContinues = wasShowingLog && nowShowingLog
+                    && prevGame!.region_id === game!.region_id;
+                const viewSourceChanged = serverMoved || (wasShowingLog !== nowShowingLog);
+                if (viewSourceChanged && !logContinues) {
+                    setMessages([]);
+                    setIsHistoryLoaded(false);
+                    fetchHistory(undefined, currentBuildingIdRef.current ?? undefined);
+                }
+            } catch {
+                // backend 不達は再接続ポーリング側が面倒を見る
+            }
+        }, 5000);
+
+        return () => clearInterval(syncInterval);
     }, [isHistoryLoaded]);
 
     // Backend reconnection polling
@@ -1440,7 +1546,7 @@ export default function Home() {
                     const data = await res.json();
                     if (data?.detail?.message) conflictMsg = data.detail.message;
                     if (data?.detail?.current_building_id) {
-                        serverCurrentBuildingIdRef.current = data.detail.current_building_id;
+                        updateServerBuildingId(data.detail.current_building_id);
                     }
                 } catch { /* ignore JSON parse */ }
                 alert(conflictMsg);
@@ -1450,7 +1556,7 @@ export default function Home() {
                     if (statusRes.ok) {
                         const statusData = await statusRes.json();
                         if (statusData?.current_building_id) {
-                            serverCurrentBuildingIdRef.current = statusData.current_building_id;
+                            updateServerBuildingId(statusData.current_building_id);
                         }
                     }
                 } catch (statusErr) {
@@ -1473,7 +1579,7 @@ export default function Home() {
             // target_building_id に移動済 (= utter が atomic に auto-move
             // した)。 次回発言時の expected_from が古い値だと 409 になるので
             // ここで先に同期しておく。
-            serverCurrentBuildingIdRef.current = currentBuildingIdRef.current;
+            updateServerBuildingId(currentBuildingIdRef.current);
             // Sidebar / RightSidebar の status / details を再 fetch させて
             // D-1 マーカーや滞在ユーザー表示をサーバの新しい現在地に追従させる。
             setMoveTrigger(prev => prev + 1);
@@ -2134,6 +2240,21 @@ export default function Home() {
                             <Menu size={20} />
                         </button>
                         <h1>{currentBuildingName}</h1>
+                        {activeGame && (currentBuildingId === serverBuildingId ? (
+                            <span
+                                title={`セッションログ表示中 (${activeGame.region_name ?? activeGame.region_id})${activeGame.scene ? ` / scene: ${activeGame.scene}` : ''}`}
+                                style={{ fontSize: '0.8rem', opacity: 0.75, whiteSpace: 'nowrap' }}
+                            >
+                                🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
+                            </span>
+                        ) : (
+                            <span
+                                title={`${activeGame.region_name ?? activeGame.region_id} でゲーム進行中。この画面は閲覧中の建物のログです (実在地に戻るとセッションログ表示)`}
+                                style={{ fontSize: '0.8rem', opacity: 0.45, whiteSpace: 'nowrap' }}
+                            >
+                                🎲 {activeGame.region_name ?? 'ゲーム'}で進行中
+                            </span>
+                        ))}
                     </div>
                     <div className={styles.headerRight}>
                         <ActiveClientIndicator isActive={isActiveClientTab} />

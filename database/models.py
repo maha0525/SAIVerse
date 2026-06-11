@@ -72,6 +72,9 @@ class AI(Base):
     # Keys: cache_threshold_ratio (float 0-1), max_retries (int), retry_backoff_seconds (int).
     # NULL means use built-in defaults (see saiverse/meta_layer.py:_load_judgment_config).
     META_JUDGMENT_CONFIG = Column(Text, nullable=True)
+    # 特殊ペルソナの役割。NULL=通常ペルソナ、'ruler'=Region RPG の GM ペルソナ
+    # (召喚一覧から除外され、Region に常駐する)。設計: temp/region_rpg_intent.md §B
+    PERSONA_ROLE = Column(String(32), nullable=True)
     # 2026-05-09: post_complete_behavior='wait_response' Track の自動 pause タイマー閾値 (分)。
     # ユーザー会話 Track の長期 idle で自律稼働が止まる症状の脱出経路として導入
     # (docs/intent/persona_cognition/handoff_2026-05-09.md §4)。NULL なら既定値 30 分。
@@ -99,7 +102,34 @@ class Building(Base):
     # 「ペルソナが物理身体に降りている状態」を表現)。識別子の発番・解釈はアドオン側で行う。
     # 詳細: docs/intent/stackchan_vessel.md
     PHYSICAL_VESSEL_ID = Column(String(64), nullable=True)
+    # 所属する Region または SubRegion。NULL なら無所属 (従来どおりの Building)。
+    REGION_ID = Column(String(255), ForeignKey("region.REGION_ID"), nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
+
+
+class Region(Base):
+    """Building の上位グルーピング。PARENT_REGION_ID の自己参照で 1 段の入れ子
+    (トップ Region > SubRegion) を表現する。region_type='game' のトップ Region は
+    Ruler (GM ペルソナ)・控室・ゲーム進行状態を持つ。SubRegion は純粋な空間
+    グルーピングで、これらのカラムは使わない。
+    """
+    __tablename__ = "region"
+    REGION_ID = Column(String(255), primary_key=True)
+    CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
+    # NULL=トップ Region、非NULL=SubRegion (入れ子は 1 段まで。アプリ層で強制)
+    PARENT_REGION_ID = Column(String(255), ForeignKey("region.REGION_ID"), nullable=True)
+    NAME = Column(String(64), nullable=False)
+    DESCRIPTION = Column(String(2048), default="", nullable=False)
+    REGION_TYPE = Column(String(32), default="generic", nullable=False)  # 'generic' | 'game'
+    # game トップ Region のみ。FK 制約は意図的に付けない:
+    # region → building (控室) と building → region (所属) を両方 FK にすると
+    # 循環依存になり Base.metadata.sorted_tables (migrate.py の差分検出) が壊れるため。
+    RULER_ID = Column(String(255), nullable=True)           # ai.AIID (GM ペルソナ)
+    LOBBY_BUILDING_ID = Column(String(255), nullable=True)  # building.BUILDINGID (控室)
+    STATE_JSON = Column(Text, nullable=True)   # ゲーム進行状態 (phase/scene/参加者) / SubRegion ではメタデータ
+    CONFIG_JSON = Column(Text, nullable=True)  # ルール設定・クリア条件 / SubRegion では隣接グラフ等
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class City(Base):

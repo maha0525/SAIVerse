@@ -391,6 +391,20 @@ class MetaLayer:
                     )
                     return
 
+                # game Region 参加中はメタ判断・自律行動を全停止する
+                # (ペルソナ都合の離脱を構造的に防ぐ。temp/region_rpg_intent.md §D-1)
+                lifecycle = getattr(self.manager, "game_lifecycle", None)
+                if (
+                    lifecycle is not None
+                    and not force
+                    and lifecycle.is_participating(persona_id)
+                ):
+                    logging.debug(
+                        "[meta-layer] periodic tick skipped (participating in game session): persona=%s",
+                        persona_id,
+                    )
+                    return
+
                 # post_complete_behavior 抑止: 応答待ち型の Track は割り込まない
                 running_track = self._get_running_track(persona_id)
                 if running_track is not None:

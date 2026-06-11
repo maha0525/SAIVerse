@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from saiverse.buildings import Building
+from saiverse.regions import Region
 from database.models import City as CityModel
 
 if TYPE_CHECKING:
@@ -102,6 +103,7 @@ class InitializationMixin:
 
     def _init_buildings(self) -> None:
         """Step 1b: Load Static Assets from DB."""
+        self.regions: Dict[str, Region] = self._load_regions_from_db()
         self.buildings: List[Building] = self._load_and_create_buildings_from_db()
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}

@@ -69,7 +69,9 @@ from database.models import (
     PersonaEventLog,
     Playbook,
     PhenomenonRule,
+    Region as RegionModel,
 )
+from saiverse.regions import Region
 
 
 from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
@@ -204,6 +206,11 @@ class SAIVerseManager(
             manager_ref=self,
         )
         logging.info("Initialized OccupancyManager.")
+
+        # game Region のライフサイクル (phase 遷移 / 自動ポーズ / アーカイブ)。
+        # OccupancyManager の移動フックから on_entity_moved が呼ばれる。
+        from saiverse.game_lifecycle import GameLifecycleService
+        self.game_lifecycle = GameLifecycleService(self)
 
         # Phase 4-e: EventScheduler を TrackManager より先に作成する。
         # TrackManager の wait_response_timeout 予約 push 等に使うため。
@@ -679,6 +686,7 @@ class SAIVerseManager(
                     auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10,
                     extra_prompt_files=extra_prompts,
                     physical_vessel_id=getattr(db_b, 'PHYSICAL_VESSEL_ID', None),
+                    region_id=getattr(db_b, 'REGION_ID', None),
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -689,6 +697,64 @@ class SAIVerseManager(
         finally:
             db.close()
 
+
+    def _load_regions_from_db(self) -> Dict[str, Region]:
+        """DB から Region 情報を読み込み、Region オブジェクトの dict を生成する"""
+        db = self.SessionLocal()
+        try:
+            db_regions = db.query(RegionModel).filter(RegionModel.CITYID == self.city_id).all()
+            regions: Dict[str, Region] = {}
+            for db_r in db_regions:
+                region = Region(
+                    region_id=db_r.REGION_ID,
+                    city_id=db_r.CITYID,
+                    name=db_r.NAME,
+                    parent_region_id=db_r.PARENT_REGION_ID,
+                    description=db_r.DESCRIPTION or "",
+                    region_type=db_r.REGION_TYPE or "generic",
+                    ruler_id=db_r.RULER_ID,
+                    lobby_building_id=db_r.LOBBY_BUILDING_ID,
+                    state_json=db_r.STATE_JSON,
+                    config_json=db_r.CONFIG_JSON,
+                )
+                regions[region.region_id] = region
+            logging.info(f"Loaded {len(regions)} regions from database.")
+            return regions
+        except Exception as e:
+            logging.error(f"Failed to load regions from DB: {e}", exc_info=True)
+            return {}
+        finally:
+            db.close()
+
+    def get_region(self, region_id: str) -> Optional[Region]:
+        return self.regions.get(region_id)
+
+    def get_subregions(self, region_id: str) -> List[Region]:
+        """指定 Region 直下の SubRegion 一覧を返す。"""
+        return [r for r in self.regions.values() if r.parent_region_id == region_id]
+
+    def get_region_buildings(self, region_id: str, include_subregions: bool = True) -> List[Building]:
+        """Region に所属する Building 一覧を返す。
+
+        include_subregions=True なら直下の SubRegion に所属する Building も含める
+        (入れ子は 1 段までなのでこれで全域をカバーする)。
+        """
+        region_ids = {region_id}
+        if include_subregions:
+            region_ids.update(r.region_id for r in self.get_subregions(region_id))
+        return [b for b in self.buildings if b.region_id in region_ids]
+
+    def get_top_region_of_building(self, building_id: str) -> Optional[Region]:
+        """Building が所属するトップ Region を返す (SubRegion 所属なら親まで遡る)。"""
+        building = self.building_map.get(building_id)
+        if building is None or not building.region_id:
+            return None
+        region = self.regions.get(building.region_id)
+        if region is None:
+            return None
+        if region.parent_region_id:
+            return self.regions.get(region.parent_region_id)
+        return region
 
     def _ensure_item_tables(self, engine) -> None:
         """Ensure newly introduced item-related tables exist."""
@@ -1829,6 +1895,116 @@ class SAIVerseManager(
         if not result.startswith("Error") and was_in_city:
             self._reload_buildings()
         return result
+
+    # --- Region management (delegated to AdminService, hot in-memory sync) ---
+
+    def _reload_regions(self) -> None:
+        """Reload regions dict from database to reflect recent changes."""
+        new_regions = self._load_regions_from_db()
+        # Diff-based update (cf. _reload_buildings): avoid an empty-dict window
+        # being visible to concurrent request threads.
+        removed_ids = set(self.regions) - set(new_regions)
+        for rid in removed_ids:
+            del self.regions[rid]
+        self.regions.update(new_regions)
+
+    def create_region(
+        self,
+        name: str,
+        description: str,
+        region_type: str,
+        city_id: int,
+        parent_region_id: Optional[str] = None,
+        region_id: Optional[str] = None,
+    ) -> str:
+        result = self.admin.create_region(name, description, region_type, city_id, parent_region_id, region_id)
+        if not result.startswith("Error") and city_id == self.city_id:
+            self._reload_regions()
+        return result
+
+    def update_region(
+        self,
+        region_id: str,
+        name: str,
+        description: str,
+        region_type: str,
+        parent_region_id: Optional[str] = None,
+    ) -> str:
+        result = self.admin.update_region(region_id, name, description, region_type, parent_region_id)
+        if not result.startswith("Error"):
+            self._reload_regions()
+        return result
+
+    def delete_region(self, region_id: str) -> str:
+        result = self.admin.delete_region(region_id)
+        if not result.startswith("Error"):
+            self._reload_regions()
+        return result
+
+    def set_building_region(self, building_id: str, region_id: Optional[str]) -> str:
+        result = self.admin.set_building_region(building_id, region_id)
+        if not result.startswith("Error"):
+            # region_id は in-memory Building オブジェクトに載っているため建物側を再ロード
+            self._reload_buildings()
+        return result
+
+    def create_ruler(self, region_id: str, name: str, system_prompt: str) -> str:
+        """game Region に Ruler (GM ペルソナ) を生成し、控室とともに紐づける。
+
+        _create_persona の私室生成を「控室」として転用する: Ruler の常駐先 =
+        Region の控室。控室は region.LOBBY_BUILDING_ID で参照されるだけで、
+        building.REGION_ID は付けない (ゲームスコープ外、入場自由のままにする)。
+        設計: temp/region_rpg_intent.md §B, §D
+        """
+        region = self.regions.get(region_id)
+        if region is None:
+            return "Error: Region not found."
+        if region.is_subregion:
+            return "Error: A Ruler can only be assigned to a top-level region."
+        if region.region_type != "game":
+            return "Error: A Ruler can only be assigned to a game region."
+        if region.ruler_id:
+            return f"Error: This region already has a Ruler ({region.ruler_id})."
+
+        success, message, ai_id, room_id = self._create_persona(
+            name,
+            system_prompt,
+            custom_ai_id=f"ruler_{region_id}",
+            persona_role="ruler",
+            room_name=f"{region.name} 控室",
+            room_capacity=10,
+            room_system_instruction=(
+                f"『{region.name}』の控室。ゲーム空間への入口であり、参加者が GM である"
+                f"{name}とゲームのルールやキャラクターについて相談・準備をする部屋です。"
+            ),
+            room_description=f"『{region.name}』のゲーム控室。",
+        )
+        if not success:
+            return f"Error: {message}"
+
+        db = self.SessionLocal()
+        try:
+            db_region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+            if db_region is None:
+                return "Error: Region disappeared during Ruler creation."
+            db_region.RULER_ID = ai_id
+            db_region.LOBBY_BUILDING_ID = room_id
+            # Ruler は世界編集 spell (game_create_building 等) が職務の中核なので
+            # spell を最初から有効化する
+            db_ai = db.query(AIModel).filter_by(AIID=ai_id).first()
+            if db_ai is not None:
+                db_ai.SPELL_ENABLED = True
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to link Ruler to region '%s': %s", region_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+        self._reload_regions()
+        logging.info("Created Ruler '%s' (%s) for region '%s' with lobby '%s'.", name, ai_id, region_id, room_id)
+        return f"Ruler '{name}' (ID: {ai_id}) created for region '{region.name}' with lobby '{room_id}'."
 
     def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
         """

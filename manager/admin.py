@@ -19,6 +19,7 @@ from database.models import (
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
     Playbook as PlaybookModel,
+    Region as RegionModel,
 )
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
@@ -504,6 +505,177 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
 
+
+    # --- Region management ---
+    # Region は Building の上位グルーピング (PARENT_REGION_ID 自己参照で 1 段の
+    # SubRegion 入れ子)。設計意図: temp/region_rpg_intent.md §A (リポジトリ外管理)
+
+    VALID_REGION_TYPES = ("generic", "game")
+
+    def create_region(
+        self,
+        name: str,
+        description: str,
+        region_type: str,
+        city_id: int,
+        parent_region_id: Optional[str] = None,
+        region_id: Optional[str] = None,
+    ) -> str:
+        if region_type not in self.VALID_REGION_TYPES:
+            return f"Error: Invalid region_type '{region_type}'. Must be one of {self.VALID_REGION_TYPES}."
+        db = self.SessionLocal()
+        try:
+            city = db.query(CityModel).filter_by(CITYID=city_id).first()
+            if not city:
+                return "Error: Target city not found."
+
+            if parent_region_id:
+                parent = db.query(RegionModel).filter_by(REGION_ID=parent_region_id).first()
+                if not parent:
+                    return "Error: Parent region not found."
+                if parent.CITYID != city_id:
+                    return "Error: Parent region belongs to a different city."
+                if parent.PARENT_REGION_ID:
+                    # 入れ子は 1 段まで (モデル定義のコメント参照)。アプリ層で強制する
+                    return "Error: Nesting is limited to one level; the parent is already a SubRegion."
+
+            if region_id and region_id.strip():
+                region_id = region_id.strip()
+            else:
+                region_id = f"region_{name.lower().replace(' ', '_')}_{city.CITYNAME}"
+
+            if db.query(RegionModel).filter_by(REGION_ID=region_id).first():
+                return f"Error: A region with the ID '{region_id}' already exists."
+
+            db.add(RegionModel(
+                REGION_ID=region_id,
+                CITYID=city_id,
+                PARENT_REGION_ID=parent_region_id or None,
+                NAME=name,
+                DESCRIPTION=description,
+                REGION_TYPE=region_type,
+            ))
+            db.commit()
+            logging.info("Created new region '%s' (ID: %s) in city %s.", name, region_id, city_id)
+            return f"Region '{name}' (ID: {region_id}) created successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to create region '%s': %s", name, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def update_region(
+        self,
+        region_id: str,
+        name: str,
+        description: str,
+        region_type: str,
+        parent_region_id: Optional[str] = None,
+    ) -> str:
+        if region_type not in self.VALID_REGION_TYPES:
+            return f"Error: Invalid region_type '{region_type}'. Must be one of {self.VALID_REGION_TYPES}."
+        db = self.SessionLocal()
+        try:
+            region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+            if not region:
+                return "Error: Region not found."
+
+            if parent_region_id:
+                if parent_region_id == region_id:
+                    return "Error: A region cannot be its own parent."
+                parent = db.query(RegionModel).filter_by(REGION_ID=parent_region_id).first()
+                if not parent:
+                    return "Error: Parent region not found."
+                if parent.CITYID != region.CITYID:
+                    return "Error: Parent region belongs to a different city."
+                if parent.PARENT_REGION_ID:
+                    return "Error: Nesting is limited to one level; the parent is already a SubRegion."
+                has_children = db.query(RegionModel).filter_by(PARENT_REGION_ID=region_id).first()
+                if has_children:
+                    return "Error: Cannot make this region a SubRegion while it has SubRegions of its own."
+
+            region.NAME = name
+            region.DESCRIPTION = description
+            region.REGION_TYPE = region_type
+            region.PARENT_REGION_ID = parent_region_id or None
+            db.commit()
+            logging.info("Updated region '%s' (%s).", name, region_id)
+            return f"Region '{name}' updated successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to update region '%s': %s", region_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def delete_region(self, region_id: str) -> str:
+        db = self.SessionLocal()
+        try:
+            region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+            if not region:
+                return "Error: Region not found."
+
+            child = db.query(RegionModel).filter_by(PARENT_REGION_ID=region_id).first()
+            if child:
+                return (
+                    f"Error: Cannot delete '{region.NAME}' because it has SubRegions. "
+                    "Delete or detach them first."
+                )
+            if region.RULER_ID:
+                return (
+                    f"Error: Cannot delete '{region.NAME}' because it has a Ruler "
+                    f"({region.RULER_ID}). Remove the Ruler first."
+                )
+            assigned = db.query(BuildingModel).filter_by(REGION_ID=region_id).first()
+            if assigned:
+                return (
+                    f"Error: Cannot delete '{region.NAME}' because buildings are assigned to it. "
+                    "Detach them first."
+                )
+
+            db.delete(region)
+            db.commit()
+            logging.info("Deleted region '%s' (%s).", region.NAME, region_id)
+            return f"Region '{region.NAME}' deleted successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to delete region '%s': %s", region_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def set_building_region(self, building_id: str, region_id: Optional[str]) -> str:
+        """Building の Region 所属を設定/解除する (region_id=None で解除)。"""
+        db = self.SessionLocal()
+        try:
+            building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+            if not building:
+                return "Error: Building not found."
+
+            if region_id:
+                region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
+                if not region:
+                    return "Error: Region not found."
+                if region.CITYID != building.CITYID:
+                    return "Error: Region belongs to a different city."
+                building.REGION_ID = region_id
+            else:
+                building.REGION_ID = None
+
+            db.commit()
+            logging.info(
+                "Set region of building '%s' to %s.", building_id, region_id or "(none)"
+            )
+            return f"Building '{building.BUILDINGNAME}' region set to {region_id or '(none)'}."
+        except Exception as exc:
+            db.rollback()
+            logging.error(
+                "Failed to set region of building '%s': %s", building_id, exc, exc_info=True
+            )
+            return f"Error: {exc}"
+        finally:
+            db.close()
 
     # --- Item management ---
 

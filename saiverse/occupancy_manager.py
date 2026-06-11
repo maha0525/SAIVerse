@@ -36,6 +36,31 @@ class OccupancyManager:
         self.user_entity_id = str(user_id)
         self._manager_ref = manager_ref
 
+    def _check_game_region_gate(self, entity_id: str, to_id: str) -> Optional[str]:
+        """game Region の入場ゲート。拒否理由を返す (入場可なら None)。
+
+        ゲーム進行中 (phase が playing / paused) の Region 内 Building は、
+        参加者 (state.participants) と Ruler 以外の入場を拒否する。退出方向は
+        制限しない (退出はポーズで対応)。設計: temp/region_rpg_intent.md §D (不変条件 4)
+        """
+        get_top_region = getattr(self._manager_ref, "get_top_region_of_building", None)
+        if get_top_region is None:
+            return None
+        region = get_top_region(to_id)
+        if region is None or not region.is_game_region:
+            return None
+        phase = region.state.get("phase")
+        if phase not in ("playing", "paused"):
+            return None
+        participants = [str(p) for p in region.state.get("participants", [])]
+        if str(entity_id) in participants or str(entity_id) == str(region.ruler_id):
+            return None
+        building_name = self.building_map[to_id].name if to_id in self.building_map else to_id
+        return (
+            f"移動失敗: '{building_name}' では現在ゲームが進行中のため、"
+            "参加者以外は入場できません。"
+        )
+
     def move_entity(
         self,
         entity_id: str,
@@ -69,6 +94,14 @@ class OccupancyManager:
                 f"移動失敗: 建物 '{self.building_map[to_id].name}' は会話履歴ファイルが"
                 "破損しているため一時的に隔離されています。アラートバナーから対応してください。"
             )
+
+        game_gate_denial = self._check_game_region_gate(entity_id, to_id)
+        if game_gate_denial:
+            logging.info(
+                "move_entity blocked by game region gate: %s -> %s (%s)",
+                entity_id, to_id, game_gate_denial,
+            )
+            return False, game_gate_denial
 
         if entity_type == 'ai':
             capacity_limit = self.capacities.get(to_id, 1)
@@ -229,6 +262,12 @@ class OccupancyManager:
                         "[addon_hooks] persona move hook dispatch failed "
                         "for %s -> %s", entity_id, to_id,
                     )
+
+            # game Region ライフサイクル: 参加者の退出/帰還による自動ポーズ/再開。
+            # フック内部で例外を吸収するので移動本体には影響しない。
+            lifecycle = getattr(self._manager_ref, "game_lifecycle", None)
+            if lifecycle is not None:
+                lifecycle.on_entity_moved(entity_id, from_id, to_id)
 
             return True, None
         except Exception as e:

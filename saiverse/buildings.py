@@ -16,6 +16,7 @@ class Building:
         auto_interval_sec: int = 10,
         extra_prompt_files: Optional[list[str]] = None,
         physical_vessel_id: Optional[str] = None,
+        region_id: Optional[str] = None,
     ):
         self.building_id = building_id
         self.name = name
@@ -33,4 +34,6 @@ class Building:
         # 物理機体 (Stack-chan 等) を表す Vessel Building の場合に非NULL。
         # 詳細: docs/intent/stackchan_vessel.md
         self.physical_vessel_id: Optional[str] = physical_vessel_id
+        # 所属する Region / SubRegion の ID。NULL なら無所属 (従来どおりの Building)。
+        self.region_id: Optional[str] = region_id
 

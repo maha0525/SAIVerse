@@ -2321,9 +2321,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     #   で placeholder を確定 + final hook 発火。 final_voice_text
                     #   は 「last sub-speak 以降の残テキスト」 を strip_user_only
                     #   済の形で渡す (= 重複合成を回避)
+                    # placeholder の作成先 Building は固定で覚えておく。 Pulse 中に
+                    # ペルソナが移動しても (例: game_move_party spell)、 finalize は
+                    # placeholder が実在するこの Building に対して行う必要がある。
+                    # finalize 時に _effective_building_id で再解決すると移動後の
+                    # Building を見に行って update が空振りし、 content が空の
+                    # placeholder が永久に残る (2026-06-11 Region RPG 実機で発覚)。
+                    pipeline_eff_bid: str = runtime._effective_building_id(persona, building_id)
                     pipeline_msg_id: Optional[str] = runtime._emit_speak_start(
                         persona,
-                        runtime._effective_building_id(persona, building_id),
+                        pipeline_eff_bid,
                         pulse_id=state.get("_pulse_id"),
                     )
                     if not pipeline_msg_id:
@@ -2400,11 +2407,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 保存」 を強制する。 下流の spell loop / emit 経路は二重
                     # finalize しないよう pipeline_msg_id を倒しておく。
                     if cancelled_during_stream and pipeline_msg_id:
-                        _cancel_eff_bid = runtime._effective_building_id(persona, building_id)
                         pipeline_sub_seq += 1
                         try:
                             runtime._emit_speak_finalize(
-                                persona, _cancel_eff_bid, pipeline_msg_id, text or "",
+                                persona, pipeline_eff_bid, pipeline_msg_id, text or "",
                                 pulse_id=state.get("_pulse_id"),
                                 extra_metadata=None,
                                 final_sub_seq=pipeline_sub_seq,
@@ -2537,7 +2543,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 pipeline_sub_seq += 1
                                 runtime._emit_speak_finalize(
                                     persona,
-                                    runtime._effective_building_id(persona, building_id),
+                                    pipeline_eff_bid,
                                     pipeline_msg_id, text,
                                     pulse_id=state.get("_pulse_id"),
                                     extra_metadata=None,
@@ -2546,7 +2552,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 )
                         else:
                             pulse_id = state.get("_pulse_id")
-                            eff_bid = runtime._effective_building_id(persona, building_id)
 
                             _spell_msg_meta_ns: Dict[str, Any] = {}
                             if llm_usage_metadata:
@@ -2594,7 +2599,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if pipeline_msg_id:
                                 pipeline_sub_seq += 1
                                 runtime._emit_speak_finalize(
-                                    persona, eff_bid, pipeline_msg_id, text,
+                                    persona, pipeline_eff_bid, pipeline_msg_id, text,
                                     pulse_id=pulse_id,
                                     extra_metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None,
                                     final_sub_seq=pipeline_sub_seq,
@@ -2665,7 +2670,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # 「stream close + wav 保存」 のみ依頼する。
                             pipeline_sub_seq += 1
                             runtime._emit_speak_finalize(
-                                persona, eff_bid, pipeline_msg_id, text,
+                                persona, pipeline_eff_bid, pipeline_msg_id, text,
                                 pulse_id=pulse_id,
                                 extra_metadata=msg_metadata if msg_metadata else None,
                                 final_sub_seq=pipeline_sub_seq,

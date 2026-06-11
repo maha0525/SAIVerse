@@ -119,6 +119,111 @@ def fetch_building_messages(
         db.close()
 
 
+def fetch_game_session_log(
+    session_factory: Optional[Callable[[], "Session"]],
+    building_ids: List[str],
+    *,
+    viewer_id: Optional[str] = None,
+    since_ts: Optional[str] = None,
+    after_message_id: Optional[str] = None,
+    before_message_id: Optional[str] = None,
+    limit: int = 50,
+) -> "tuple[List[Dict[str, Any]], bool]":
+    """複数 Building のメッセージを挿入順 (id) で merge した「セッションログビュー」。
+
+    Region RPG のセッションログ用 (temp/region_rpg_intent.md §I-2、リポジトリ外管理)。
+    書き込みは通常の building_messages 経路のまま、読み出しだけを合成する。
+
+    - ``viewer_id``: heard_by に viewer_id を含む行のみ返す。セッションを跨いだ
+      情報流入をクエリレベルで防ぐため必須運用 (時間窓だけでは過去ログ閲覧時に
+      防壁にならない)。SQL LIKE で前置フィルタし、deserialize 後に厳密判定する。
+    - ``since_ts``: timestamp >= since_ts (ISO 文字列比較、セッション開始以降)。
+    - ``after_message_id``: その行より後を返す (ポーリング用)。
+    - ``before_message_id``: その行より前を返す (scrollback 用)。
+    - カーソルは Building 横断で単調な挿入順 PK (id) を内部使用し、外部 IF は
+      message_id で受ける (チャット UI の既存 ID 体系と揃えるため)。
+
+    Returns:
+        (messages, has_more_older)。各 dict は building_id キーを含む。
+    """
+    if session_factory is None or not building_ids:
+        return [], False
+    from database.models import BuildingMessage
+    db = session_factory()
+    try:
+        def _resolve_row_id(message_id: str) -> Optional[int]:
+            row = (
+                db.query(BuildingMessage.id)
+                .filter(
+                    BuildingMessage.building_id.in_(building_ids),
+                    BuildingMessage.message_id == message_id,
+                )
+                .first()
+            )
+            return row[0] if row else None
+
+        q = db.query(BuildingMessage).filter(
+            BuildingMessage.building_id.in_(building_ids)
+        )
+        if since_ts:
+            q = q.filter(BuildingMessage.timestamp >= since_ts)
+        if viewer_id:
+            q = q.filter(BuildingMessage.heard_by.like(f'%"{viewer_id}"%'))
+
+        has_more = False
+        if after_message_id:
+            anchor = _resolve_row_id(after_message_id)
+            if anchor is None:
+                LOGGER.warning(
+                    "fetch_game_session_log: after_message_id %s not found",
+                    after_message_id,
+                )
+                return [], False
+            rows = (
+                q.filter(BuildingMessage.id > anchor)
+                .order_by(BuildingMessage.id.asc())
+                .limit(limit)
+                .all()
+            )
+        elif before_message_id:
+            anchor = _resolve_row_id(before_message_id)
+            if anchor is None:
+                LOGGER.warning(
+                    "fetch_game_session_log: before_message_id %s not found",
+                    before_message_id,
+                )
+                return [], False
+            rows = (
+                q.filter(BuildingMessage.id < anchor)
+                .order_by(BuildingMessage.id.desc())
+                .limit(limit + 1)
+                .all()
+            )
+            has_more = len(rows) > limit
+            rows = list(reversed(rows[:limit]))
+        else:
+            rows = (
+                q.order_by(BuildingMessage.id.desc())
+                .limit(limit + 1)
+                .all()
+            )
+            has_more = len(rows) > limit
+            rows = list(reversed(rows[:limit]))
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            msg = deserialize_building_message(r)
+            msg["building_id"] = r.building_id
+            # LIKE は前置フィルタ。 厳密な heard_by 判定はここで行う
+            # (誤マッチで除外された分だけ limit より少なく返ることがある)
+            if viewer_id and viewer_id not in msg.get("heard_by", []):
+                continue
+            out.append(msg)
+        return out, has_more
+    finally:
+        db.close()
+
+
 def fetch_max_seq(
     session_factory: Optional[Callable[[], "Session"]],
     building_id: str,

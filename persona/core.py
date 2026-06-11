@@ -40,6 +40,10 @@ class PersonaCore(
     PersonaMovementMixin,
     PersonaEmotionMixin,
 ):
+    # 特殊ペルソナの役割 (AI.PERSONA_ROLE 由来)。None=通常ペルソナ、'ruler'=Region RPG の GM。
+    # 構築後に manager 側 (manager/persona.py) が設定する。設計: temp/region_rpg_intent.md §B
+    persona_role: Optional[str] = None
+
     def __init__(
         self,
         city_name: str,

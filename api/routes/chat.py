@@ -76,6 +76,157 @@ def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
 import logging
 import hashlib
 
+
+def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> "ChatMessage":
+    """building_messages の dict 1 件を ChatMessage (API レスポンス形式) へ変換する。
+
+    get_chat_history のループ本体を抽出したもの。ゲームセッションログビュー
+    (/api/world/regions/{id}/game/log) も同じ整形を共用する。
+    """
+    role = msg.get("role")
+    content = msg.get("content")
+    timestamp = msg.get("timestamp", "")
+
+    sender = "Unknown"
+    avatar = "/api/static/builtin_icons/host.png"
+
+    if role == "user":
+        sender = manager.user_display_name or "User"
+        avatar = manager.state.user_avatar_data or "/api/static/builtin_icons/user.png"
+    elif role == "assistant":
+        pid = msg.get("persona_id")
+        if pid:
+            persona = manager.personas.get(pid)
+            if persona:
+                sender = persona.persona_name
+                avatar = avatar_path_to_url(persona.avatar_image) or "/api/static/builtin_icons/host.png"
+        else:
+            sender = "Assistant"
+    elif role == "host":
+        sender = "System"
+        avatar = "/api/static/builtin_icons/host.png"
+
+    # Extract media from metadata
+    # - "images" (legacy, user upload): image-only entries
+    # - "media" (unified, audio/video and possibly mixed): type-tagged entries
+    images_list = None
+    audios_list = None
+    videos_list = None
+    metadata = msg.get("metadata", {})
+    if metadata and ("images" in metadata or "media" in metadata):
+        images_buf: List[ChatMessageImage] = []
+        audios_buf: List[ChatMessageImage] = []
+        videos_buf: List[ChatMessageImage] = []
+
+        def _classify_and_append(entry: Dict[str, Any], forced_type: Optional[str]) -> None:
+            """Resolve path → URL and route to the right buffer by media type."""
+            item_type = (forced_type or entry.get("type") or "").lower()
+            item_mime = (entry.get("mime_type") or "").lower()
+
+            # Resolve path from "path" or "uri"
+            img_path = entry.get("path") or ""
+            uri = entry.get("uri", "")
+            if not img_path and uri:
+                if uri.startswith("saiverse://image/"):
+                    filename = uri.replace("saiverse://image/", "")
+                    img_path = str(Path.home() / ".saiverse" / "image" / filename)
+                elif uri.startswith("saiverse://audio/"):
+                    filename = uri.replace("saiverse://audio/", "")
+                    img_path = str(Path.home() / ".saiverse" / "audio" / filename)
+                elif uri.startswith("saiverse://video/"):
+                    filename = uri.replace("saiverse://video/", "")
+                    img_path = str(Path.home() / ".saiverse" / "video" / filename)
+            if not img_path:
+                return
+
+            name = Path(img_path).name
+            # Pick serving endpoint per media type
+            if item_type == "audio" or item_mime.startswith("audio/"):
+                audios_buf.append(ChatMessageImage(
+                    url=f"/api/media/audio/{name}",
+                    mime_type=entry.get("mime_type") or "audio/ogg",
+                ))
+            elif item_type == "video" or item_mime.startswith("video/"):
+                videos_buf.append(ChatMessageImage(
+                    url=f"/api/media/video/{name}",
+                    mime_type=entry.get("mime_type") or "video/mp4",
+                ))
+            else:
+                # Default to image (legacy "images" entries and tool-generated images)
+                images_buf.append(ChatMessageImage(
+                    url=f"/api/static/uploads/{name}",
+                    mime_type=entry.get("mime_type"),
+                ))
+
+        # Legacy "images" key: every entry is an image
+        for img in metadata.get("images") or []:
+            _classify_and_append(img, forced_type="image")
+        # Unified "media" key: entries carry their own type
+        for img in metadata.get("media") or []:
+            _classify_and_append(img, forced_type=None)
+
+        images_list = images_buf or None
+        audios_list = audios_buf or None
+        videos_list = videos_buf or None
+
+    # Extract LLM usage from metadata
+    llm_usage_data = None
+    if metadata and "llm_usage" in metadata:
+        usage_raw = metadata["llm_usage"]
+        if isinstance(usage_raw, dict):
+            llm_usage_data = ChatMessageLLMUsage(
+                model=usage_raw.get("model", "unknown"),
+                model_display_name=usage_raw.get("model_display_name"),
+                input_tokens=usage_raw.get("input_tokens", 0),
+                output_tokens=usage_raw.get("output_tokens", 0),
+                cached_tokens=usage_raw.get("cached_tokens", 0),
+                cache_write_tokens=usage_raw.get("cache_write_tokens", 0),
+                cost_usd=usage_raw.get("cost_usd"),
+            )
+
+    # Extract LLM usage total (accumulated across all LLM calls in pulse)
+    llm_usage_total_data = None
+    if metadata and "llm_usage_total" in metadata:
+        total_raw = metadata["llm_usage_total"]
+        if isinstance(total_raw, dict):
+            llm_usage_total_data = ChatMessageLLMUsageTotal(
+                total_input_tokens=total_raw.get("total_input_tokens", 0),
+                total_output_tokens=total_raw.get("total_output_tokens", 0),
+                total_cached_tokens=total_raw.get("total_cached_tokens", 0),
+                total_cache_write_tokens=total_raw.get("total_cache_write_tokens", 0),
+                total_cost_usd=total_raw.get("total_cost_usd", 0.0),
+                call_count=total_raw.get("call_count", 0),
+                models_used=total_raw.get("models_used", []),
+            )
+
+    # Extract reasoning (thinking) from metadata
+    reasoning_data = None
+    if metadata and "reasoning" in metadata:
+        reasoning_data = metadata["reasoning"]
+
+    # Extract activity trace from metadata
+    activity_trace_data = None
+    if metadata and "activity_trace" in metadata:
+        activity_trace_data = metadata["activity_trace"]
+
+    return ChatMessage(
+        id=message_id,
+        role=role,
+        content=content,
+        timestamp=timestamp,
+        sender=sender,
+        avatar=avatar,
+        persona_id=msg.get("persona_id") if role == "assistant" else None,
+        images=images_list,
+        audios=audios_list,
+        videos=videos_list,
+        reasoning=reasoning_data,
+        activity_trace=activity_trace_data,
+        llm_usage=llm_usage_data,
+        llm_usage_total=llm_usage_total_data
+    )
+
+
 @router.get("/history", response_model=ChatHistoryResponse)
 def get_chat_history(
     limit: int = 20,
@@ -192,152 +343,10 @@ def get_chat_history(
     logging.info("get_chat_history: bid=%s total=%d limit=%d before=%s returned=%d has_more=%s",
                 current_bid, len(raw_history), limit, before, len(slice_history), has_more_old)
 
-    final_response = []
-    
-    for msg in slice_history:
-        role = msg.get("role")
-        content = msg.get("content")
-        timestamp = msg.get("timestamp", "")
-        message_id = msg["virtual_id"] # Use the robust ID
-        
-        sender = "Unknown"
-        avatar = "/api/static/builtin_icons/host.png" 
-        
-        if role == "user":
-            sender = manager.user_display_name or "User"
-            avatar = manager.state.user_avatar_data or "/api/static/builtin_icons/user.png"
-        elif role == "assistant":
-            pid = msg.get("persona_id")
-            if pid:
-                persona = manager.personas.get(pid)
-                if persona:
-                    sender = persona.persona_name
-                    avatar = avatar_path_to_url(persona.avatar_image) or "/api/static/builtin_icons/host.png"
-            else:
-                sender = "Assistant"
-        elif role == "host":
-            sender = "System"
-            avatar = "/api/static/builtin_icons/host.png"
-            
-        # Extract media from metadata
-        # - "images" (legacy, user upload): image-only entries
-        # - "media" (unified, audio/video and possibly mixed): type-tagged entries
-        images_list = None
-        audios_list = None
-        videos_list = None
-        metadata = msg.get("metadata", {})
-        if metadata and ("images" in metadata or "media" in metadata):
-            images_buf: List[ChatMessageImage] = []
-            audios_buf: List[ChatMessageImage] = []
-            videos_buf: List[ChatMessageImage] = []
-
-            def _classify_and_append(entry: Dict[str, Any], forced_type: Optional[str]) -> None:
-                """Resolve path → URL and route to the right buffer by media type."""
-                item_type = (forced_type or entry.get("type") or "").lower()
-                item_mime = (entry.get("mime_type") or "").lower()
-
-                # Resolve path from "path" or "uri"
-                img_path = entry.get("path") or ""
-                uri = entry.get("uri", "")
-                if not img_path and uri:
-                    if uri.startswith("saiverse://image/"):
-                        filename = uri.replace("saiverse://image/", "")
-                        img_path = str(Path.home() / ".saiverse" / "image" / filename)
-                    elif uri.startswith("saiverse://audio/"):
-                        filename = uri.replace("saiverse://audio/", "")
-                        img_path = str(Path.home() / ".saiverse" / "audio" / filename)
-                    elif uri.startswith("saiverse://video/"):
-                        filename = uri.replace("saiverse://video/", "")
-                        img_path = str(Path.home() / ".saiverse" / "video" / filename)
-                if not img_path:
-                    return
-
-                name = Path(img_path).name
-                # Pick serving endpoint per media type
-                if item_type == "audio" or item_mime.startswith("audio/"):
-                    audios_buf.append(ChatMessageImage(
-                        url=f"/api/media/audio/{name}",
-                        mime_type=entry.get("mime_type") or "audio/ogg",
-                    ))
-                elif item_type == "video" or item_mime.startswith("video/"):
-                    videos_buf.append(ChatMessageImage(
-                        url=f"/api/media/video/{name}",
-                        mime_type=entry.get("mime_type") or "video/mp4",
-                    ))
-                else:
-                    # Default to image (legacy "images" entries and tool-generated images)
-                    images_buf.append(ChatMessageImage(
-                        url=f"/api/static/uploads/{name}",
-                        mime_type=entry.get("mime_type"),
-                    ))
-
-            # Legacy "images" key: every entry is an image
-            for img in metadata.get("images") or []:
-                _classify_and_append(img, forced_type="image")
-            # Unified "media" key: entries carry their own type
-            for img in metadata.get("media") or []:
-                _classify_and_append(img, forced_type=None)
-
-            images_list = images_buf or None
-            audios_list = audios_buf or None
-            videos_list = videos_buf or None
-
-        # Extract LLM usage from metadata
-        llm_usage_data = None
-        if metadata and "llm_usage" in metadata:
-            usage_raw = metadata["llm_usage"]
-            if isinstance(usage_raw, dict):
-                llm_usage_data = ChatMessageLLMUsage(
-                    model=usage_raw.get("model", "unknown"),
-                    model_display_name=usage_raw.get("model_display_name"),
-                    input_tokens=usage_raw.get("input_tokens", 0),
-                    output_tokens=usage_raw.get("output_tokens", 0),
-                    cached_tokens=usage_raw.get("cached_tokens", 0),
-                    cache_write_tokens=usage_raw.get("cache_write_tokens", 0),
-                    cost_usd=usage_raw.get("cost_usd"),
-                )
-
-        # Extract LLM usage total (accumulated across all LLM calls in pulse)
-        llm_usage_total_data = None
-        if metadata and "llm_usage_total" in metadata:
-            total_raw = metadata["llm_usage_total"]
-            if isinstance(total_raw, dict):
-                llm_usage_total_data = ChatMessageLLMUsageTotal(
-                    total_input_tokens=total_raw.get("total_input_tokens", 0),
-                    total_output_tokens=total_raw.get("total_output_tokens", 0),
-                    total_cached_tokens=total_raw.get("total_cached_tokens", 0),
-                    total_cache_write_tokens=total_raw.get("total_cache_write_tokens", 0),
-                    total_cost_usd=total_raw.get("total_cost_usd", 0.0),
-                    call_count=total_raw.get("call_count", 0),
-                    models_used=total_raw.get("models_used", []),
-                )
-
-        # Extract reasoning (thinking) from metadata
-        reasoning_data = None
-        if metadata and "reasoning" in metadata:
-            reasoning_data = metadata["reasoning"]
-
-        # Extract activity trace from metadata
-        activity_trace_data = None
-        if metadata and "activity_trace" in metadata:
-            activity_trace_data = metadata["activity_trace"]
-
-        final_response.append(ChatMessage(
-            id=message_id,
-            role=role,
-            content=content,
-            timestamp=timestamp,
-            sender=sender,
-            avatar=avatar,
-            persona_id=msg.get("persona_id") if role == "assistant" else None,
-            images=images_list,
-            audios=audios_list,
-            videos=videos_list,
-            reasoning=reasoning_data,
-            activity_trace=activity_trace_data,
-            llm_usage=llm_usage_data,
-            llm_usage_total=llm_usage_total_data
-        ))
+    final_response = [
+        serialize_history_message(manager, msg, msg["virtual_id"])
+        for msg in slice_history
+    ]
 
     return {"history": final_response, "has_more": has_more_old}
 

@@ -64,6 +64,34 @@ class BuildingUpdate(BaseModel):
     extra_prompt_files: Optional[List[str]] = None  # Additional prompt files for this building
 
 
+class RegionCreate(BaseModel):
+    name: str
+    description: str = ""
+    region_type: str = "generic"  # 'generic' | 'game'
+    city_id: int
+    parent_region_id: Optional[str] = None  # 指定すると SubRegion になる (入れ子は1段まで)
+    region_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
+
+class RegionUpdate(BaseModel):
+    name: str
+    description: str = ""
+    region_type: str = "generic"
+    parent_region_id: Optional[str] = None
+
+class BuildingRegionAssign(BaseModel):
+    region_id: Optional[str] = None  # None で所属解除
+
+class RulerCreate(BaseModel):
+    name: str
+    system_prompt: str
+
+class GameStart(BaseModel):
+    participants: List[str]  # persona_id / user_id (str) のリスト。Ruler は含めない
+
+class GameEnd(BaseModel):
+    outcome: str = "clear"  # 'clear' | 'gameover' | 'aborted'
+
+
 class BuildingPosition(BaseModel):
     building_id: str
     x: float
@@ -216,6 +244,123 @@ def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManage
 @router.delete("/buildings/{building_id}")
 def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.delete_building(building_id))
+
+
+# --- Regions ---
+
+@router.get("/regions")
+def list_regions(manager: SAIVerseManager = Depends(get_manager)):
+    """この City の Region 一覧 (所属 Building の ID 付き)。"""
+    regions = []
+    for r in manager.regions.values():
+        regions.append({
+            "region_id": r.region_id,
+            "city_id": r.city_id,
+            "parent_region_id": r.parent_region_id,
+            "name": r.name,
+            "description": r.description,
+            "region_type": r.region_type,
+            "ruler_id": r.ruler_id,
+            "lobby_building_id": r.lobby_building_id,
+            "building_ids": [
+                b.building_id for b in manager.buildings if b.region_id == r.region_id
+            ],
+        })
+    return {"regions": regions}
+
+@router.post("/regions")
+def create_region(req: RegionCreate, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.create_region(
+        req.name, req.description, req.region_type, req.city_id,
+        req.parent_region_id, req.region_id,
+    ))
+
+@router.put("/regions/{region_id}")
+def update_region(region_id: str, req: RegionUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.update_region(
+        region_id, req.name, req.description, req.region_type, req.parent_region_id,
+    ))
+
+@router.delete("/regions/{region_id}")
+def delete_region(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.delete_region(region_id))
+
+@router.put("/buildings/{building_id}/region")
+def set_building_region(building_id: str, req: BuildingRegionAssign, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.set_building_region(building_id, req.region_id))
+
+@router.post("/regions/{region_id}/ruler")
+def create_ruler(region_id: str, req: RulerCreate, manager: SAIVerseManager = Depends(get_manager)):
+    """game Region に Ruler (GM ペルソナ) と控室を生成して紐づける。"""
+    return _check_result(manager.create_ruler(region_id, req.name, req.system_prompt))
+
+
+# --- Game lifecycle ---
+
+@router.get("/regions/{region_id}/game")
+def get_game_state(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    region = manager.get_region(region_id)
+    if region is None:
+        raise HTTPException(status_code=404, detail="Region not found")
+    return {"region_id": region_id, "state": region.state}
+
+@router.post("/regions/{region_id}/game/start")
+def start_game(region_id: str, req: GameStart, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.start_game(region_id, req.participants))
+
+@router.post("/regions/{region_id}/game/pause")
+def pause_game(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.pause_game(region_id, reason="manual"))
+
+@router.post("/regions/{region_id}/game/resume")
+def resume_game(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.resume_game(region_id))
+
+@router.post("/regions/{region_id}/game/end")
+def end_game(region_id: str, req: GameEnd, manager: SAIVerseManager = Depends(get_manager)):
+    return _check_result(manager.game_lifecycle.end_game(region_id, req.outcome))
+
+@router.get("/regions/{region_id}/game/log")
+def get_game_session_log(
+    region_id: str,
+    limit: int = 20,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """進行中セッションのログビュー (Region 内全 Building の時系列 merge)。
+
+    書き込みは通常の building_messages 経路のまま、読み出しだけを合成する。
+    heard_by に閲覧者 (ユーザー) を含むメッセージのみ返す。
+    レスポンス形式は /api/chat/history と互換 (フロントの描画を共用するため)。
+    """
+    region = manager.get_region(region_id)
+    if region is None:
+        raise HTTPException(status_code=404, detail="Region not found")
+    state = region.state
+    if state.get("phase") not in ("playing", "paused"):
+        return {"history": [], "has_more": False}
+
+    building_ids = [
+        b.building_id for b in manager.get_region_buildings(region_id)
+    ]
+    from database.building_messages import fetch_game_session_log
+    msgs, has_more = fetch_game_session_log(
+        manager.SessionLocal,
+        building_ids,
+        viewer_id=str(manager.user_id),
+        since_ts=state.get("started_at"),
+        after_message_id=after,
+        before_message_id=before,
+        limit=limit,
+    )
+    from api.routes.chat import serialize_history_message
+    history = [
+        serialize_history_message(manager, m, str(m.get("message_id")))
+        for m in msgs
+        if m.get("content")
+    ]
+    return {"history": history, "has_more": has_more}
 
 @router.get("/prompts/available")
 def get_available_prompts():
