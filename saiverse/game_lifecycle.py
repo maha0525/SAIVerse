@@ -136,13 +136,22 @@ class GameLifecycleService:
         LOGGER.info("[game_lifecycle] Game paused in region '%s' (%s)", region_id, reason or "manual")
         return f"Game paused in region '{region.name}'."
 
-    def resume_game(self, region_id: str) -> str:
+    def resume_game(
+        self, region_id: str, *,
+        location_overrides: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """ゲームを再開する。
+
+        location_overrides は on_entity_moved (移動フック) 専用: 移動した本人の
+        state 更新がフックより後になるため、所在を to_id で上書きして判定する。
+        手動 API (POST /game/resume) からは渡さない。
+        """
         region, err = self._resolve_game_region(region_id)
         if err:
             return err
         if region.state.get("phase") != PHASE_PAUSED:
             return "Error: No paused game in this region."
-        if not self._all_participants_inside(region):
+        if not self._all_participants_inside(region, overrides=location_overrides):
             return "Error: Cannot resume until all participants are inside the region."
         new_state = dict(region.state)
         new_state["phase"] = PHASE_PLAYING
@@ -285,14 +294,20 @@ class GameLifecycleService:
                 self._move_party_to(to_region, to_id, anchor_entity_id=entity_id)
 
             # 入場: paused 中の Region へ参加者が戻った
+            # 移動した本人の所在は to_id で上書きして判定する: ユーザー移動では
+            # state.user_current_building_id の更新が move_entity (= このフック) の
+            # 後に行われるため、state を読むと旧所在地のままで判定が空振りする
             if (
                 to_region is not None
                 and (from_region is None or from_region.region_id != to_region.region_id)
                 and to_region.state.get("phase") == PHASE_PAUSED
                 and entity_id in [str(p) for p in to_region.state.get("participants", [])]
-                and self._all_participants_inside(to_region)
+                and self._all_participants_inside(to_region, overrides={entity_id: to_id})
             ):
-                result = self.resume_game(to_region.region_id)
+                result = self.resume_game(
+                    to_region.region_id,
+                    location_overrides={entity_id: to_id},
+                )
                 LOGGER.info("[game_lifecycle] auto-resume: %s", result)
         except Exception:
             LOGGER.exception(
@@ -721,13 +736,24 @@ class GameLifecycleService:
             return region
         return None
 
-    def _all_participants_inside(self, region: Region) -> bool:
+    def _all_participants_inside(
+        self, region: Region, overrides: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """参加者全員が Region 内に居るかを返す。
+
+        overrides: {entity_id: building_id}。移動フックから呼ぶ場合、移動した
+        本人の state 更新がまだ済んでいないことがある (ユーザー移動の
+        user_current_building_id は move_entity の後に更新される) ため、
+        フックの引数 to_id をここで上書きとして渡す。
+        """
         building_ids = {
             b.building_id for b in self.manager.get_region_buildings(region.region_id)
         }
         user_id = str(self.manager.user_id)
         for pid in [str(p) for p in region.state.get("participants", [])]:
-            if pid == user_id:
+            if overrides and pid in overrides:
+                loc = overrides[pid]
+            elif pid == user_id:
                 loc = self.manager.state.user_current_building_id
             else:
                 persona = self.manager.personas.get(pid)

@@ -323,6 +323,19 @@ class GameLifecycleTestCase(unittest.TestCase):
         self.svc.on_entity_moved("air", "outside", "b1")
         self.assertEqual(self.region.state["phase"], "paused")  # user がまだ外
 
+    def test_auto_resume_before_user_state_update(self):
+        # 回帰テスト: 本番では on_entity_moved は move_entity の中で呼ばれ、
+        # ユーザーの state.user_current_building_id 更新はその後
+        # (manager/runtime.py move_user)。フック時点の state は旧所在地の
+        # ままなので、判定は to_id の上書きで行う必要がある
+        self._start()
+        self.manager.state.user_current_building_id = "outside"
+        self.svc.on_entity_moved("1", "b1", "outside")
+        self.assertEqual(self.region.state["phase"], "paused")
+        # 帰還: state は旧所在地 (outside) のままフックを呼ぶ (本番の順序)
+        self.svc.on_entity_moved("1", "outside", "b1")
+        self.assertEqual(self.region.state["phase"], "playing")
+
     # --- パーティー移動 ---
 
     def test_party_follows_user_move(self):
