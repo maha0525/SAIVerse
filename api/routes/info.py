@@ -192,6 +192,10 @@ class CityMapBuilding(BaseModel):
     map_x: Optional[float] = None
     map_y: Optional[float] = None
     occupants: List[OccupantInfo]
+    # この Building がいずれかの Region / SubRegion の入口なら、その region_id。
+    # マップ上で「子スコープへのノード」として描画・ナビゲートするための印
+    entrance_of: Optional[str] = None
+    entrance_of_name: Optional[str] = None
 
 
 class CityMapResponse(BaseModel):
@@ -199,15 +203,33 @@ class CityMapResponse(BaseModel):
     user_current_building_id: Optional[str] = None
     map_background_image: Optional[str] = None
     buildings: List[CityMapBuilding]
+    # スコープナビゲーション (docs/intent/region.md §2.2):
+    # region_id 未指定 = City スコープ (scope_region_id=None)。
+    # parent_scope_region_id は ↑ ボタンの遷移先 (None なら City へ)
+    scope_region_id: Optional[str] = None
+    scope_region_name: Optional[str] = None
+    parent_scope_region_id: Optional[str] = None
 
 
 @router.get("/city-map", response_model=CityMapResponse)
-def get_city_map(manager = Depends(get_manager)):
-    """Return the whole city in one shot: every Building plus its current occupants.
+def get_city_map(region_id: Optional[str] = None, manager = Depends(get_manager)):
+    """Return one map scope in one shot: its Buildings plus their current occupants.
 
-    展示用のマップビューが、Building ごとに /details を叩かずに 1 回でツリー全体を
+    展示用のマップビューが、Building ごとに /details を叩かずに 1 回でスコープ全体を
     取得できるよう用意した軽量エンドポイント。アイテム情報は含めない (描画に不要)。
+
+    スコープ規則 (docs/intent/region.md §2.2): 各スコープのマップに載るのは
+    「自スコープ直属の Building + 子スコープの入口」のみ。入口は親スコープに
+    属するため、REGION_ID によるフィルタだけでこの規則が成立する。
+    - region_id 省略 = City スコープ (REGION_ID なしの Building。トップ Region の
+      入口はここに自然に含まれる)
+    - region_id 指定 = その Region 直属の Building (SubRegion の入口を自然に含む)
     """
+    scope_region = None
+    if region_id:
+        scope_region = manager.get_region(region_id)
+        if scope_region is None:
+            raise HTTPException(status_code=404, detail="Region not found")
     # Building の IMAGE_PATH/MAP_X/MAP_Y と City の MAP_BACKGROUND_IMAGE を一括取得 (N+1 回避)
     image_map: dict = {}
     pos_map: dict = {}
@@ -241,7 +263,18 @@ def get_city_map(manager = Depends(get_manager)):
 
     buildings_payload: List[dict] = []
 
-    sorted_buildings = sorted(manager.buildings, key=lambda b: b.name)
+    # 入口 Building → 結び付く Region の逆引き (entrance_of マーキング用)
+    entrance_index = {
+        r.entrance_building_id: r
+        for r in getattr(manager, "regions", {}).values()
+        if r.entrance_building_id
+    }
+    scope_id = scope_region.region_id if scope_region else None
+
+    sorted_buildings = sorted(
+        (b for b in manager.buildings if getattr(b, "region_id", None) == scope_id),
+        key=lambda b: b.name,
+    )
     for building in sorted_buildings:
         bid = building.building_id
         occupants_list: List[dict] = []
@@ -257,6 +290,7 @@ def get_city_map(manager = Depends(get_manager)):
                 "avatar": avatar,
             })
         pos = pos_map.get(bid)
+        entrance_region = entrance_index.get(bid)
         buildings_payload.append({
             "id": bid,
             "name": building.name,
@@ -265,13 +299,21 @@ def get_city_map(manager = Depends(get_manager)):
             "map_x": pos[0] if pos else None,
             "map_y": pos[1] if pos else None,
             "occupants": occupants_list,
+            "entrance_of": entrance_region.region_id if entrance_region else None,
+            "entrance_of_name": entrance_region.name if entrance_region else None,
         })
+
+    if scope_region is not None:
+        map_background = scope_region.map_background_image
 
     return {
         "city_id": getattr(manager, "city_id", None),
         "user_current_building_id": manager.state.user_current_building_id,
         "map_background_image": map_background,
         "buildings": buildings_payload,
+        "scope_region_id": scope_id,
+        "scope_region_name": scope_region.name if scope_region else None,
+        "parent_scope_region_id": scope_region.parent_region_id if scope_region else None,
     }
 
 

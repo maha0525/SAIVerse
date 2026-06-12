@@ -592,18 +592,27 @@ class GameLifecycleService:
     GAME_TRACK_TYPE = "game_session"
 
     def active_game_for_user(self) -> Optional[Dict[str, Any]]:
-        """ユーザーが参加中 (playing/paused) のゲーム Region 内に居る場合、UI の
-        ゲームモード判定情報を返す。Region 外 (控室含む) に居る間は None。
+        """ユーザーが参加中 (playing/paused) のゲーム Region 内または入口 (控室)
+        に居る場合、UI のゲームモード判定情報を返す。それ以外は None。
 
         /api/user/status に載せて LocationSync ポーリングに相乗りさせる。
-        控室で None を返すのは「セッションログに表示されない Building で入力させない」
-        ため (控室はセッションログの対象外)。
+        - Region 内 (at_entrance=False): セッションログ表示 + 発話可
+        - 入口 (at_entrance=True): セッションログを read-only 表示 + 「復帰」
+          ボタン (入口はセッションログの対象外なのでゲームログ宛て入力はさせない)
         """
         user_id = str(self.manager.user_id)
         user_bid = self.manager.state.user_current_building_id
         if not user_bid:
             return None
+        at_entrance = False
         region = self._game_region_of(user_bid)
+        if region is None:
+            # 入口は Region 外 (REGION_ID なし) なのでポインタから引く
+            for r in self.manager.regions.values():
+                if r.is_game_region and r.entrance_building_id == user_bid:
+                    region = r
+                    at_entrance = True
+                    break
         if region is None:
             return None
         state = region.state
@@ -617,6 +626,7 @@ class GameLifecycleService:
             "phase": state.get("phase"),
             "scene": state.get("scene"),
             "party_location": state.get("party_location"),
+            "at_entrance": at_entrance,
         }
 
     def is_participating(self, persona_id: str) -> bool:

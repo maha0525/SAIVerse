@@ -16,8 +16,9 @@ class UserStatusResponse(BaseModel):
     avatar: Optional[str]
     display_name: str
     email: Optional[str] = None
-    # Region RPG: ユーザーが参加中のゲーム Region 内に居る場合のゲームモード情報
-    # {region_id, region_name, phase, scene, party_location}。それ以外は None。
+    # Region RPG: ユーザーが参加中のゲーム Region 内または入口 (控室) に居る場合の
+    # ゲームモード情報 {region_id, region_name, phase, scene, party_location,
+    # at_entrance}。それ以外は None。
     active_game: Optional[dict] = None
 
 class MoveRequest(BaseModel):
@@ -36,10 +37,23 @@ class MoveResponse(BaseModel):
 class BuildingInfo(BaseModel):
     id: str
     name: str
+    # 所属スコープ (Region / SubRegion の ID)。None なら City 直属
+    region_id: Optional[str] = None
+    # この Building がいずれかの Region / SubRegion の入口なら、その region_id
+    entrance_of: Optional[str] = None
+
+class RegionInfo(BaseModel):
+    region_id: str
+    name: str
+    parent_region_id: Optional[str] = None
+    region_type: str = "generic"
+    entrance_building_id: Optional[str] = None
 
 class BuildingsResponse(BaseModel):
     buildings: List[BuildingInfo]
     city_id: Optional[int] = None
+    # サイドバーの Region 折り畳み用 (docs/intent/region.md §2.2)
+    regions: List[RegionInfo] = []
 
 @router.get("/status", response_model=UserStatusResponse)
 def get_user_status(manager = Depends(get_manager)):
@@ -119,12 +133,32 @@ def move_user(req: MoveRequest, manager = Depends(get_manager)):
 def get_buildings(manager = Depends(get_manager)):
     # Sort buildings by name for better UI experience
     sorted_buildings = sorted(manager.buildings, key=lambda b: b.name)
+    regions = list(getattr(manager, "regions", {}).values())
+    entrance_index = {
+        r.entrance_building_id: r.region_id
+        for r in regions if r.entrance_building_id
+    }
     return {
         "buildings": [
-            {"id": b.building_id, "name": b.name}
+            {
+                "id": b.building_id,
+                "name": b.name,
+                "region_id": getattr(b, "region_id", None),
+                "entrance_of": entrance_index.get(b.building_id),
+            }
             for b in sorted_buildings
         ],
-        "city_id": getattr(manager, 'city_id', None)
+        "city_id": getattr(manager, 'city_id', None),
+        "regions": [
+            {
+                "region_id": r.region_id,
+                "name": r.name,
+                "parent_region_id": r.parent_region_id,
+                "region_type": r.region_type,
+                "entrance_building_id": r.entrance_building_id,
+            }
+            for r in regions
+        ],
     }
 
 class _Unset:

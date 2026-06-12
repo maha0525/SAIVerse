@@ -464,11 +464,22 @@ class GameLifecycleTestCase(unittest.TestCase):
         self.assertEqual(info["region_id"], "r1")
         self.assertEqual(info["phase"], "playing")
         self.assertEqual(info["scene"], "exploration")
+        self.assertFalse(info["at_entrance"])
+
+    def test_active_game_at_entrance(self):
+        self._start()
+        # 入口 (控室) では at_entrance=True で返す
+        # → UI は read-only セッションログ + 復帰ボタンを出す
+        self.manager.state.user_current_building_id = "lobby"
+        info = self.svc.active_game_for_user()
+        self.assertIsNotNone(info)
+        self.assertEqual(info["region_id"], "r1")
+        self.assertTrue(info["at_entrance"])
 
     def test_active_game_none_outside_region(self):
         self._start()
-        # 控室 (lobby) は Region 外 = セッションログ対象外なのでゲームモードにしない
-        self.manager.state.user_current_building_id = "lobby"
+        # Region 外 (入口でもない) ではゲームモードにしない
+        self.manager.state.user_current_building_id = "somewhere_else"
         self.assertIsNone(self.svc.active_game_for_user())
 
     def test_active_game_during_pause(self):
