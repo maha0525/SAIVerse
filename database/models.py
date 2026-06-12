@@ -110,8 +110,10 @@ class Building(Base):
 class Region(Base):
     """Building の上位グルーピング。PARENT_REGION_ID の自己参照で 1 段の入れ子
     (トップ Region > SubRegion) を表現する。region_type='game' のトップ Region は
-    Ruler (GM ペルソナ)・控室・ゲーム進行状態を持つ。SubRegion は純粋な空間
-    グルーピングで、これらのカラムは使わない。
+    Ruler (GM ペルソナ)・ゲーム進行状態を持つ。
+    すべての Region / SubRegion は入口 Building (ENTRANCE_BUILDING_ID) を必ず持つ。
+    入口は親スコープに属する (トップ Region の入口は REGION_ID なし = City 直属、
+    SubRegion の入口は REGION_ID = 親 Region)。設計意図: docs/intent/region.md
     """
     __tablename__ = "region"
     REGION_ID = Column(String(255), primary_key=True)
@@ -121,13 +123,15 @@ class Region(Base):
     NAME = Column(String(64), nullable=False)
     DESCRIPTION = Column(String(2048), default="", nullable=False)
     REGION_TYPE = Column(String(32), default="generic", nullable=False)  # 'generic' | 'game'
-    # game トップ Region のみ。FK 制約は意図的に付けない:
-    # region → building (控室) と building → region (所属) を両方 FK にすると
+    # RULER_ID は game トップ Region のみ。FK 制約は意図的に付けない:
+    # region → building (入口) と building → region (所属) を両方 FK にすると
     # 循環依存になり Base.metadata.sorted_tables (migrate.py の差分検出) が壊れるため。
-    RULER_ID = Column(String(255), nullable=True)           # ai.AIID (GM ペルソナ)
-    LOBBY_BUILDING_ID = Column(String(255), nullable=True)  # building.BUILDINGID (控室)
+    RULER_ID = Column(String(255), nullable=True)              # ai.AIID (GM ペルソナ)
+    # 入口 Building (旧 LOBBY_BUILDING_ID。migrate.py の KNOWN_COLUMN_RENAMES でリネーム)
+    ENTRANCE_BUILDING_ID = Column(String(255), nullable=True)  # building.BUILDINGID
+    MAP_BACKGROUND_IMAGE = Column(String(1024), nullable=True)  # Region 内マップの背景画像
     STATE_JSON = Column(Text, nullable=True)   # ゲーム進行状態 (phase/scene/参加者) / SubRegion ではメタデータ
-    CONFIG_JSON = Column(Text, nullable=True)  # ルール設定・クリア条件 / SubRegion では隣接グラフ等
+    CONFIG_JSON = Column(Text, nullable=True)  # ルール設定・クリア条件・entry policy / SubRegion では隣接グラフ等
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

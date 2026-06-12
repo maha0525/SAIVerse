@@ -9,9 +9,10 @@ class Region:
     """Building の上位グルーピングのランタイム表現。
 
     PARENT_REGION_ID の自己参照で 1 段の入れ子 (トップ Region > SubRegion) を表現する。
-    region_type='game' のトップ Region は Ruler (GM ペルソナ)・控室・ゲーム進行状態を持つ。
-    SubRegion は純粋な空間グルーピングで、ruler_id / lobby_building_id / state は使わない。
-    設計意図: temp/region_rpg_intent.md §A (リポジトリ外管理)
+    region_type='game' のトップ Region は Ruler (GM ペルソナ)・ゲーム進行状態を持つ。
+    すべての Region / SubRegion は入口 Building (entrance_building_id) を持つ。
+    入口は親スコープに属し、このポインタで子スコープに結び付く。
+    設計意図: docs/intent/region.md (汎用仕様) / temp/region_rpg_intent.md (RPG 固有、リポジトリ外管理)
     """
 
     def __init__(
@@ -23,7 +24,8 @@ class Region:
         description: str = "",
         region_type: str = "generic",
         ruler_id: Optional[str] = None,
-        lobby_building_id: Optional[str] = None,
+        entrance_building_id: Optional[str] = None,
+        map_background_image: Optional[str] = None,
         state_json: Optional[str] = None,
         config_json: Optional[str] = None,
     ):
@@ -34,7 +36,8 @@ class Region:
         self.description = description or ""
         self.region_type = region_type or "generic"
         self.ruler_id = ruler_id
-        self.lobby_building_id = lobby_building_id
+        self.entrance_building_id = entrance_building_id
+        self.map_background_image = map_background_image
         self.state: Dict[str, Any] = self._parse_json_field(state_json, "STATE_JSON")
         self.config: Dict[str, Any] = self._parse_json_field(config_json, "CONFIG_JSON")
 

@@ -713,7 +713,8 @@ class SAIVerseManager(
                     description=db_r.DESCRIPTION or "",
                     region_type=db_r.REGION_TYPE or "generic",
                     ruler_id=db_r.RULER_ID,
-                    lobby_building_id=db_r.LOBBY_BUILDING_ID,
+                    entrance_building_id=db_r.ENTRANCE_BUILDING_ID,
+                    map_background_image=db_r.MAP_BACKGROUND_IMAGE,
                     state_json=db_r.STATE_JSON,
                     config_json=db_r.CONFIG_JSON,
                 )
@@ -1097,6 +1098,20 @@ class SAIVerseManager(
                 persona_id,
             )
 
+        # 3. (C) wait_response 自動 pause タイマーの再確立。
+        #    タイマーは activate 時にしか張られず EventScheduler はインメモリの
+        #    ため再起動で失われる。ロード済みの running Track へ張り直す。
+        #    Idle ペルソナは provider の ACTIVITY_STATE ゲート (A) で skip される
+        #    ので、ここで全ペルソナを処理しても大量発火しない。
+        #    (新規作成経路では running Track がまだ無いので実質 no-op。)
+        try:
+            self.track_manager.ensure_wait_response_timeout(persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to (re)schedule wait_response timeout: %s",
+                persona_id,
+            )
+
     def _run_persona_post_registration(self) -> None:
         """起動時: 全ペルソナに対して _on_persona_registered を実行する。"""
         if not self.personas:
@@ -1355,12 +1370,19 @@ class SAIVerseManager(
         Returns:
             (timeout_minutes, last_message_time) — 対象 Track が
                 ``post_complete_behavior=='wait_response'`` の場合
-            None — Handler 不明 / wait_response 以外 / ペルソナ unloaded 等
+            None — Handler 不明 / wait_response 以外 / ペルソナ unloaded /
+                ACTIVITY_STATE != Active
 
         ``last_message_time`` は SAIMemory の ``MAX(messages.created_at) WHERE
         origin_track_id=...`` から取る (Track 紐付きメッセージの最新)。
         メッセージが無ければ None で返し、TrackManager 側が ``datetime.now()``
         にフォールバックする (= activate 直後の即時タイムアウトを防ぐ)。
+
+        本 provider は schedule 時 (``_schedule_wait_response_timeout``) と
+        発火時 re-eval (``_handle_wait_response_timeout``) の両方から呼ばれる
+        単一ゲート。ACTIVITY_STATE 判定もここに置くことで、Idle ペルソナでは
+        「予約しない」「(Active→Idle に落ちていたら) 発火時に pause しない」
+        の両方が一箇所で効く。
         """
         # デバッグ完全手動モード: 対象ペルソナは wait_response timeout を予約しない
         # (debug_controller.md)。None を返すと _schedule_wait_response_timeout が skip。
@@ -1378,6 +1400,13 @@ class SAIVerseManager(
             persona_id = track.persona_id
             persona = self.personas.get(persona_id)
             if persona is None:
+                return None
+
+            # (A) ACTIVITY_STATE ゲート: Idle ペルソナでは wait_response の
+            # 自動 pause を予約しない。schedule 時は予約 skip、発火時 re-eval では
+            # None 返却で _handle_wait_response_timeout が pause せず early return。
+            activity_state = getattr(persona, "activity_state", "Idle")
+            if activity_state != "Active":
                 return None
 
             # AI.USER_CONV_TIMEOUT_MINUTES (NULL=デフォルト) を読み出す
@@ -1952,9 +1981,11 @@ class SAIVerseManager(
         """game Region に Ruler (GM ペルソナ) を生成し、控室とともに紐づける。
 
         _create_persona の私室生成を「控室」として転用する: Ruler の常駐先 =
-        Region の控室。控室は region.LOBBY_BUILDING_ID で参照されるだけで、
-        building.REGION_ID は付けない (ゲームスコープ外、入場自由のままにする)。
-        設計: temp/region_rpg_intent.md §B, §D
+        Region の控室 = Region の入口 (region.ENTRANCE_BUILDING_ID)。
+        入口は親スコープ所属の原則どおり building.REGION_ID を付けない
+        (ゲームスコープ外、入場自由のまま)。Ruler の私室を控室と分けたく
+        なったらここを修正する (docs/intent/region.md §6-1)。
+        設計: docs/intent/region.md §2 / temp/region_rpg_intent.md §B, §D
         """
         region = self.regions.get(region_id)
         if region is None:
@@ -1988,7 +2019,7 @@ class SAIVerseManager(
             if db_region is None:
                 return "Error: Region disappeared during Ruler creation."
             db_region.RULER_ID = ai_id
-            db_region.LOBBY_BUILDING_ID = room_id
+            db_region.ENTRANCE_BUILDING_ID = room_id
             # Ruler は世界編集 spell (game_create_building 等) が職務の中核なので
             # spell を最初から有効化する
             db_ai = db.query(AIModel).filter_by(AIID=ai_id).first()
@@ -2003,8 +2034,8 @@ class SAIVerseManager(
             db.close()
 
         self._reload_regions()
-        logging.info("Created Ruler '%s' (%s) for region '%s' with lobby '%s'.", name, ai_id, region_id, room_id)
-        return f"Ruler '{name}' (ID: {ai_id}) created for region '{region.name}' with lobby '{room_id}'."
+        logging.info("Created Ruler '%s' (%s) for region '%s' with entrance '%s'.", name, ai_id, region_id, room_id)
+        return f"Ruler '{name}' (ID: {ai_id}) created for region '{region.name}' with entrance '{room_id}'."
 
     def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
         """

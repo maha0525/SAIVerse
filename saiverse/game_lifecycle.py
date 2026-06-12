@@ -91,7 +91,7 @@ class GameLifecycleService:
                 self._move_party_to(fresh, event_building, anchor_entity_id=user_id)
         self._emit_game_event(
             region_id,
-            event_building or region.lobby_building_id,
+            event_building or region.entrance_building_id,
             f"RPG セッションを開始しました (世界: {region.name} / scene: {new_state['scene']})",
             action="start",
         )
@@ -120,7 +120,7 @@ class GameLifecycleService:
             return err
         self._emit_game_event(
             region_id,
-            new_state.get("party_location") or region.lobby_building_id,
+            new_state.get("party_location") or region.entrance_building_id,
             f"ゲームを一時中断しました ({reason or 'manual'})",
             action="pause",
         )
@@ -144,7 +144,7 @@ class GameLifecycleService:
             return err
         self._emit_game_event(
             region_id,
-            new_state.get("party_location") or region.lobby_building_id,
+            new_state.get("party_location") or region.entrance_building_id,
             "ゲームを再開しました",
             action="resume",
         )
@@ -184,7 +184,7 @@ class GameLifecycleService:
 
         # パーティー全員 (参加者 + Ruler) を控室へ帰還させる。state リセット後に
         # 行うことで、移動フック (auto-pause) と入場ゲートが反応しない。
-        lobby = region.lobby_building_id
+        lobby = region.entrance_building_id
         if lobby:
             targets = list(participants)
             if region.ruler_id:
@@ -225,7 +225,7 @@ class GameLifecycleService:
             return err
         self._emit_game_event(
             region_id,
-            new_state.get("party_location") or region.lobby_building_id,
+            new_state.get("party_location") or region.entrance_building_id,
             f"シーンが「{scene}」に変わりました",
             action="scene_change",
         )
@@ -536,7 +536,7 @@ class GameLifecycleService:
             "description": region.description,
             "region_type": region.region_type,
             "ruler_id": region.ruler_id,
-            "lobby_building_id": region.lobby_building_id,
+            "entrance_building_id": region.entrance_building_id,
             "config": dict(region.config),
         }
 

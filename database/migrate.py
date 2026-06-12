@@ -93,6 +93,42 @@ def _render_default_sql(column) -> "str | None":
     return None
 
 
+# 既知のカラムリネーム: {table_name: {old_col: new_col}}。
+# リネームを放置すると diff 上「削除 + 追加」に見えて全書換に落ち、
+# 全書換のデータ移行は列名一致でコピーするため旧列のデータが失われる。
+# additive / 全書換どちらのパスでも、差分検出の前にここで RENAME COLUMN を当てる。
+KNOWN_COLUMN_RENAMES = {
+    # 2026-06-12: 控室 (game 専用語) → 入口 (Region 汎用仕様)。docs/intent/region.md
+    "region": {"LOBBY_BUILDING_ID": "ENTRANCE_BUILDING_ID"},
+}
+
+
+def apply_known_column_renames(db_path: str) -> None:
+    """KNOWN_COLUMN_RENAMES に従い ALTER TABLE RENAME COLUMN を適用する。
+
+    旧列が存在し新列が存在しない場合のみ発行する冪等な操作。
+    ALTER 系なので生きた DB にも安全に当たる (additive パスと同じ理屈)。
+    """
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        insp = inspect(engine)
+        for table_name, renames in KNOWN_COLUMN_RENAMES.items():
+            if not insp.has_table(table_name):
+                continue
+            db_cols = {c["name"] for c in insp.get_columns(table_name)}
+            for old_col, new_col in renames.items():
+                if old_col in db_cols and new_col not in db_cols:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            f'ALTER TABLE "{table_name}" RENAME COLUMN "{old_col}" TO "{new_col}"'
+                        ))
+                    logging.info(
+                        "カラムリネーム: %s.%s -> %s", table_name, old_col, new_col
+                    )
+    finally:
+        engine.dispose()
+
+
 def try_additive_migration(db_path: str) -> bool:
     """追加系 (新規テーブル / 新規列) のみのスキーマ差分を ALTER/CREATE で適用する。
 
@@ -107,6 +143,7 @@ def try_additive_migration(db_path: str) -> bool:
                 かつ既定値が無く安全に ALTER 追加できない列がある。 この場合 DB は
                 一切変更しない (部分適用しない)。
     """
+    apply_known_column_renames(db_path)
     missing_by_table, extra_by_table, missing_tables = _schema_diff(db_path)
 
     # DB にあってモデルに無い列 = 削除/リネーム → 全書換が必要
@@ -176,6 +213,10 @@ def migrate_database_in_place(db_path: str):
         logging.error(f"データベースファイルが見つかりません: {db_path}")
         logging.info("データベースファイルが存在しないため、マイグレーションは不要です。")
         return
+
+    # リネームを先に解消しておかないと「削除 + 追加」として扱われ、
+    # 列名一致コピーのデータ移行で旧列のデータが失われる
+    apply_known_column_renames(db_path)
 
     db_dir = os.path.dirname(db_path)
     db_name = os.path.basename(db_path)

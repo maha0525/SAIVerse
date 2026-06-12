@@ -261,7 +261,8 @@ def list_regions(manager: SAIVerseManager = Depends(get_manager)):
             "description": r.description,
             "region_type": r.region_type,
             "ruler_id": r.ruler_id,
-            "lobby_building_id": r.lobby_building_id,
+            "entrance_building_id": r.entrance_building_id,
+            "map_background_image": r.map_background_image,
             "building_ids": [
                 b.building_id for b in manager.buildings if b.region_id == r.region_id
             ],

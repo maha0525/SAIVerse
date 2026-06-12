@@ -130,7 +130,7 @@ class GameLifecycleTestCase(unittest.TestCase):
         try:
             db.add(RegionModel(
                 REGION_ID="r1", CITYID=1, NAME="霧の谷", REGION_TYPE="game",
-                RULER_ID="ruler1", LOBBY_BUILDING_ID="lobby",
+                RULER_ID="ruler1", ENTRANCE_BUILDING_ID="lobby",
             ))
             db.commit()
         finally:
@@ -138,7 +138,7 @@ class GameLifecycleTestCase(unittest.TestCase):
 
         self.region = Region(
             region_id="r1", city_id=1, name="霧の谷", region_type="game",
-            ruler_id="ruler1", lobby_building_id="lobby",
+            ruler_id="ruler1", entrance_building_id="lobby",
         )
         self.personas = {
             "ruler1": FakePersona("lobby"),
