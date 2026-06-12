@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, type ReactNode } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
@@ -21,6 +21,18 @@ interface UserStatus {
 interface Building {
     id: string;
     name: string;
+    // 所属スコープ (Region / SubRegion の ID)。null なら City 直属
+    region_id?: string | null;
+    // この Building がいずれかの Region の入口なら、その region_id
+    entrance_of?: string | null;
+}
+
+interface RegionInfo {
+    region_id: string;
+    name: string;
+    parent_region_id?: string | null;
+    region_type?: string;
+    entrance_building_id?: string | null;
 }
 
 interface SidebarProps {
@@ -42,6 +54,9 @@ interface SidebarProps {
 export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger, viewingBuildingId, serverMoveTrigger }: SidebarProps) {
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
+    const [regions, setRegions] = useState<RegionInfo[]>([]);
+    // Region 折り畳み (docs/intent/region.md §2.2): 展開中の region_id 集合
+    const [expandedRegions, setExpandedRegions] = useState<Set<string>>(new Set());
     const [cityId, setCityId] = useState<number | null>(null);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -96,6 +111,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
             if (buildingsRes.ok) {
                 const data = await buildingsRes.json();
                 setBuildings(data.buildings || []);
+                setRegions(data.regions || []);
                 if (data.city_id != null) setCityId(data.city_id);
             }
             if (devModeRes.ok) {
@@ -112,6 +128,40 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     useEffect(() => {
         refreshData();
     }, [refreshTrigger, serverMoveTrigger]);
+
+    // 閲覧中 / 現在地の Building が Region 内部にあるとき、その Region チェーンを
+    // 自動展開する (折り畳まれていて自分の居場所が見えない状態を防ぐ)
+    useEffect(() => {
+        const regionById = new Map(regions.map(r => [r.region_id, r]));
+        const buildingById = new Map(buildings.map(b => [b.id, b]));
+        const chain = (bid: string | null | undefined): string[] => {
+            const out: string[] = [];
+            let rid = bid ? buildingById.get(bid)?.region_id ?? null : null;
+            while (rid && !out.includes(rid)) {
+                out.push(rid);
+                rid = regionById.get(rid)?.parent_region_id ?? null;
+            }
+            return out;
+        };
+        const toExpand = [...chain(viewingBuildingId), ...chain(status?.current_building_id)];
+        if (toExpand.length === 0) return;
+        setExpandedRegions(prev => {
+            const next = new Set(prev);
+            let changed = false;
+            for (const rid of toExpand) {
+                if (!next.has(rid)) { next.add(rid); changed = true; }
+            }
+            return changed ? next : prev;
+        });
+    }, [buildings, regions, viewingBuildingId, status?.current_building_id]);
+
+    const toggleRegion = (regionId: string) => {
+        setExpandedRegions(prev => {
+            const next = new Set(prev);
+            if (next.has(regionId)) next.delete(regionId); else next.add(regionId);
+            return next;
+        });
+    };
 
     // Global Touch Handlers for swipe-to-open (separate effect to avoid re-fetching on onOpen change)
     useEffect(() => {
@@ -316,31 +366,69 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     </div>
                 )}
                 <div className={styles.buildingList}>
-                    {buildings.map(b => {
-                        const isQuarantined = quarantinedIds.has(b.id);
-                        return (
-                            <div
-                                key={b.id}
-                                // active hilight は 「閲覧中の building」 (= viewing)。
-                                // 「サーバ上の真の現在地」 は別途 D-1 マーカー (User
-                                // アイコン) で示す。 両者は閲覧モード中に乖離する。
-                                className={`${styles.buildingItem} ${(viewingBuildingId ?? status?.current_building_id) === b.id ? styles.active : ''}`}
-                                onClick={() => isQuarantined ? null : handleMove(b.id)}
-                                style={isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                                title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
-                            >
-                                <span>{b.name}</span>
-                                {isQuarantined && (
-                                    <AlertTriangle size={14} style={{ color: '#ff6666' }} />
-                                )}
-                                {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
-                                    閲覧モード中 (= viewing != server-current) は
-                                    active hilight と乖離して、 「自分は今そこではなく
-                                    別の場所に居る」 が一瞥で分かる。 */}
-                                {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
-                            </div>
+                    {(() => {
+                        // Region 折り畳み (docs/intent/region.md §2.2):
+                        // トップレベル = City 直属の Building (トップ Region の入口を
+                        // 自然に含む)。入口 Building は展開トグル付きで描画し、展開時に
+                        // その Region 直属の Building (SubRegion の入口を含む) を再帰
+                        // 表示する。入口を持たない Region の内部は到達不能にならない
+                        // ようトップレベルへフォールバック表示する。
+                        const regionsWithEntrance = new Set(
+                            regions.filter(r => r.entrance_building_id).map(r => r.region_id)
                         );
-                    })}
+                        const renderBuildingItem = (b: Building, depth: number): ReactNode => {
+                            const isQuarantined = quarantinedIds.has(b.id);
+                            const childRegionId = b.entrance_of ?? null;
+                            const isExpanded = !!childRegionId && expandedRegions.has(childRegionId);
+                            const children = (childRegionId && isExpanded)
+                                ? buildings.filter(cb => cb.region_id === childRegionId)
+                                : [];
+                            return (
+                                <div key={b.id}>
+                                    <div
+                                        // active hilight は 「閲覧中の building」 (= viewing)。
+                                        // 「サーバ上の真の現在地」 は別途 D-1 マーカー (User
+                                        // アイコン) で示す。 両者は閲覧モード中に乖離する。
+                                        className={`${styles.buildingItem} ${(viewingBuildingId ?? status?.current_building_id) === b.id ? styles.active : ''}`}
+                                        onClick={() => isQuarantined ? null : handleMove(b.id)}
+                                        style={{
+                                            ...(depth > 0 ? { marginLeft: `${depth * 14}px` } : {}),
+                                            ...(isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : {}),
+                                        }}
+                                        title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
+                                    >
+                                        {childRegionId && (
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); toggleRegion(childRegionId); }}
+                                                title={isExpanded ? '折り畳む' : '中を見る'}
+                                                style={{
+                                                    background: 'none', border: 'none', padding: 0,
+                                                    cursor: 'pointer', color: 'inherit',
+                                                    display: 'flex', alignItems: 'center',
+                                                }}
+                                            >
+                                                {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                            </button>
+                                        )}
+                                        <span>{b.name}</span>
+                                        {isQuarantined && (
+                                            <AlertTriangle size={14} style={{ color: '#ff6666' }} />
+                                        )}
+                                        {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
+                                            閲覧モード中 (= viewing != server-current) は
+                                            active hilight と乖離して、 「自分は今そこではなく
+                                            別の場所に居る」 が一瞥で分かる。 */}
+                                        {status?.current_building_id === b.id && <User size={14} style={{ opacity: 0.8 }} />}
+                                    </div>
+                                    {children.map(cb => renderBuildingItem(cb, depth + 1))}
+                                </div>
+                            );
+                        };
+                        const topLevel = buildings.filter(
+                            b => !b.region_id || !regionsWithEntrance.has(b.region_id)
+                        );
+                        return topLevel.map(b => renderBuildingItem(b, 0));
+                    })()}
                 </div>
 
                 {/* System Section */}

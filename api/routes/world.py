@@ -293,6 +293,32 @@ def delete_region(region_id: str, manager: SAIVerseManager = Depends(get_manager
 def set_building_region(building_id: str, req: BuildingRegionAssign, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.set_building_region(building_id, req.region_id))
 
+@router.patch("/regions/{region_id}/map-background")
+def update_region_map_background(region_id: str, req: CityMapBackgroundUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    """Region 内マップの背景画像だけを軽量に更新する PATCH エンドポイント。
+
+    City の /cities/{id}/map-background と対になる (マップのスコープ化:
+    docs/intent/region.md §6-4)。
+    """
+    from database.models import Region as RegionModel
+    session = manager.SessionLocal()
+    try:
+        region = session.query(RegionModel).filter(RegionModel.REGION_ID == region_id).first()
+        if not region:
+            raise HTTPException(status_code=404, detail="Region not found")
+        region.MAP_BACKGROUND_IMAGE = (req.map_background_image or "").strip() or None
+        session.commit()
+        result = {"map_background_image": region.MAP_BACKGROUND_IMAGE}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+    manager._reload_regions()
+    return result
+
 @router.post("/regions/{region_id}/ruler")
 def create_ruler(region_id: str, req: RulerCreate, manager: SAIVerseManager = Depends(get_manager)):
     """game Region に Ruler (GM ペルソナ) と控室を生成して紐づける。"""

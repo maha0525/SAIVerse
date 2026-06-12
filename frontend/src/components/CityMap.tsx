@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Home as HomeIcon, X, Edit3, Save, Image as ImageIcon, Loader2, Trash2 } from 'lucide-react';
+import { Home as HomeIcon, X, Edit3, Save, Image as ImageIcon, Loader2, Trash2, ArrowUp, DoorOpen } from 'lucide-react';
 import styles from './CityMap.module.css';
 import PersonaMenu from './PersonaMenu';
 import MemoryModal from './MemoryModal';
@@ -24,6 +24,9 @@ interface CityMapBuilding {
     map_x?: number | null;
     map_y?: number | null;
     occupants: Occupant[];
+    // この Building がいずれかの Region の入口なら、その region_id (子スコープへのノード)
+    entrance_of?: string | null;
+    entrance_of_name?: string | null;
 }
 
 interface CityMapResponse {
@@ -31,6 +34,10 @@ interface CityMapResponse {
     user_current_building_id: string | null;
     map_background_image?: string | null;
     buildings: CityMapBuilding[];
+    // マップのスコープナビゲーション (docs/intent/region.md §2.2)
+    scope_region_id?: string | null;
+    scope_region_name?: string | null;
+    parent_scope_region_id?: string | null;
 }
 
 interface CityMapProps {
@@ -164,15 +171,26 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     const bgFileInputRef = useRef<HTMLInputElement | null>(null);
     const [isBgUploading, setIsBgUploading] = useState(false);
 
+    // マップのスコープ (null = City、region_id = その Region 内マップ)。
+    // ポーリングの closure から最新値を読むため ref を併用する。
+    const [scopeRegionId, setScopeRegionId] = useState<string | null>(null);
+    const scopeRegionIdRef = useRef<string | null>(null);
+
     const fetchData = async () => {
         try {
-            const res = await fetch('/api/info/city-map');
+            const scope = scopeRegionIdRef.current;
+            const url = scope
+                ? `/api/info/city-map?region_id=${encodeURIComponent(scope)}`
+                : '/api/info/city-map';
+            const res = await fetch(url);
             if (!res.ok) {
                 setError(`Failed to load city map (${res.status})`);
                 return;
             }
             if (cancelledRef.current) return;
             const json: CityMapResponse = await res.json();
+            // スコープ切替直後に旧スコープのレスポンスが遅れて届いた場合は捨てる
+            if ((json.scope_region_id ?? null) !== scopeRegionIdRef.current) return;
             setData(json);
             setError(null);
         } catch (e) {
@@ -190,6 +208,17 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             clearInterval(id);
         };
     }, [refreshTrigger]);
+
+    // スコープ遷移: 入口セルの「中へ」 / ↑ ボタンから呼ぶ。
+    // 編集モードは破棄してから移る (スコープ跨ぎの座標編集を防ぐ)
+    const navigateScope = (regionId: string | null) => {
+        setEditedPositions({});
+        setIsEditMode(false);
+        scopeRegionIdRef.current = regionId;
+        setScopeRegionId(regionId);
+        setData(null);
+        fetchData();
+    };
 
     // 初回: viewport が描画されたら world の中心がビューポート中央に来るよう view を初期化
     useEffect(() => {
@@ -464,10 +493,19 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         bgFileInputRef.current?.click();
     };
 
+    // 背景 PATCH 先: City スコープなら City、Region スコープならその Region
+    const bgPatchUrl = () => {
+        const scope = scopeRegionIdRef.current;
+        if (scope) return `/api/world/regions/${encodeURIComponent(scope)}/map-background`;
+        if (cityIdRef == null) return null;
+        return `/api/world/cities/${cityIdRef}/map-background`;
+    };
+
     const handleBgFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        if (cityIdRef == null) {
+        const patchUrl = bgPatchUrl();
+        if (!patchUrl) {
             alert('City ID が未取得です');
             return;
         }
@@ -482,8 +520,8 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                 return;
             }
             const upJson = await upRes.json();
-            // 2) City の背景画像だけ PATCH で即時更新
-            const patchRes = await fetch(`/api/world/cities/${cityIdRef}/map-background`, {
+            // 2) 背景画像だけ PATCH で即時更新
+            const patchRes = await fetch(patchUrl, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ map_background_image: upJson.url }),
@@ -503,10 +541,11 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     };
 
     const handleBgClear = async () => {
-        if (cityIdRef == null) return;
-        if (!confirm('街マップの背景画像を削除しますか？')) return;
+        const patchUrl = bgPatchUrl();
+        if (!patchUrl) return;
+        if (!confirm('マップの背景画像を削除しますか？')) return;
         try {
-            const patchRes = await fetch(`/api/world/cities/${cityIdRef}/map-background`, {
+            const patchRes = await fetch(patchUrl, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ map_background_image: null }),
@@ -675,7 +714,26 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                 </div>
             ) : (
                 <div className={styles.titleBar}>
-                    <h2 className={styles.title}>S A I V e r s e &nbsp;C i t y</h2>
+                    {scopeRegionId && (
+                        <button
+                            onClick={() => navigateScope(data?.parent_scope_region_id ?? null)}
+                            title="上の階層へ戻る"
+                            style={{
+                                background: 'rgba(255,255,255,0.08)',
+                                border: '1px solid rgba(255,255,255,0.25)',
+                                borderRadius: 6, color: 'inherit', cursor: 'pointer',
+                                padding: '4px 10px', display: 'inline-flex',
+                                alignItems: 'center', gap: 4, marginBottom: 4,
+                            }}
+                        >
+                            <ArrowUp size={14} /> 上の階層へ
+                        </button>
+                    )}
+                    <h2 className={styles.title}>
+                        {scopeRegionId
+                            ? (data?.scope_region_name ?? scopeRegionId)
+                            : 'S A I V e r s e  C i t y'}
+                    </h2>
                     <div className={styles.subtitle}>
                         {data ? `${buildings.length} buildings · ${buildings.reduce((acc, b) => acc + b.occupants.length, 0)} residents` : ' '}
                     </div>
@@ -767,6 +825,28 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                     </div>
                                 )}
                                 <div className={styles.buildingName}>{b.name}</div>
+                                {b.entrance_of && !isEditMode && (
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (dragRef.current.dragged) return;
+                                            if (cellDragRef.current.dragged) return;
+                                            navigateScope(b.entrance_of!);
+                                        }}
+                                        title={`『${b.entrance_of_name ?? b.entrance_of}』の中のマップを見る`}
+                                        style={{
+                                            background: 'rgba(120,180,255,0.15)',
+                                            border: '1px solid rgba(120,180,255,0.5)',
+                                            borderRadius: 6, color: 'inherit', cursor: 'pointer',
+                                            padding: '2px 8px', display: 'inline-flex',
+                                            alignItems: 'center', gap: 4,
+                                            fontSize: `${Math.round(11 * inverseScale)}px`,
+                                            marginTop: 2,
+                                        }}
+                                    >
+                                        <DoorOpen size={Math.round(12 * inverseScale)} /> 中へ
+                                    </button>
+                                )}
                                 {isRichMode && b.description && (
                                     <div className={styles.buildingDescription}>{b.description}</div>
                                 )}
