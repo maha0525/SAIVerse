@@ -71,6 +71,9 @@ class RegionCreate(BaseModel):
     city_id: int
     parent_region_id: Optional[str] = None  # 指定すると SubRegion になる (入れ子は1段まで)
     region_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
+    # 既存 Building を入口に使う場合に指定。省略時は「(名): 入口」を自動作成
+    # (game トップ Region は create_ruler の控室が入口になるため作成しない)
+    entrance_building_id: Optional[str] = None
 
 class RegionUpdate(BaseModel):
     name: str
@@ -273,7 +276,7 @@ def list_regions(manager: SAIVerseManager = Depends(get_manager)):
 def create_region(req: RegionCreate, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.create_region(
         req.name, req.description, req.region_type, req.city_id,
-        req.parent_region_id, req.region_id,
+        req.parent_region_id, req.region_id, req.entrance_building_id,
     ))
 
 @router.put("/regions/{region_id}")

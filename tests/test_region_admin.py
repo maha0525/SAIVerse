@@ -95,6 +95,89 @@ class RegionAdminTestCase(unittest.TestCase):
         result = self.svc.create_region("Sub", "", "game", 1, parent_region_id="nope")
         self.assertIn("Error", result)
 
+    # --- entrance (入口必須の不変条件。docs/intent/region.md §3, §6) ---
+
+    def _get_building(self, building_id):
+        db = self.SessionLocal()
+        try:
+            return db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+        finally:
+            db.close()
+
+    def test_create_generic_region_auto_creates_entrance(self):
+        result = self.svc.create_region("エアの家", "", "generic", 1, region_id="r1")
+        self.assertNotIn("Error", result)
+        self.assertEqual(self._get_region("r1").ENTRANCE_BUILDING_ID, "entrance_r1")
+        entrance = self._get_building("entrance_r1")
+        self.assertIsNotNone(entrance)
+        self.assertEqual(entrance.BUILDINGNAME, "エアの家: 入口")
+        # トップ Region の入口は親スコープ (= City 直属) に属する
+        self.assertIsNone(entrance.REGION_ID)
+
+    def test_create_game_top_region_defers_entrance_to_ruler(self):
+        result = self.svc.create_region("Mist", "", "game", 1, region_id="r1")
+        self.assertNotIn("Error", result)
+        self.assertIsNone(self._get_region("r1").ENTRANCE_BUILDING_ID)
+        self.assertIsNone(self._get_building("entrance_r1"))
+
+    def test_create_subregion_auto_creates_entrance_in_parent_scope(self):
+        self.svc.create_region("Top", "", "game", 1, region_id="top")
+        result = self.svc.create_region("街", "", "game", 1, parent_region_id="top", region_id="sub")
+        self.assertNotIn("Error", result)
+        self.assertEqual(self._get_region("sub").ENTRANCE_BUILDING_ID, "entrance_sub")
+        entrance = self._get_building("entrance_sub")
+        self.assertIsNotNone(entrance)
+        # SubRegion の入口は親 Region に属する
+        self.assertEqual(entrance.REGION_ID, "top")
+
+    def test_create_region_with_explicit_entrance(self):
+        result = self.svc.create_region(
+            "X", "", "generic", 1, region_id="r1", entrance_building_id="bldg_a"
+        )
+        self.assertNotIn("Error", result)
+        self.assertEqual(self._get_region("r1").ENTRANCE_BUILDING_ID, "bldg_a")
+        self.assertIsNone(self._get_building("bldg_a").REGION_ID)
+        # 自動生成はされない
+        self.assertIsNone(self._get_building("entrance_r1"))
+
+    def test_create_region_rejects_missing_entrance(self):
+        result = self.svc.create_region(
+            "X", "", "generic", 1, entrance_building_id="nope"
+        )
+        self.assertIn("Error", result)
+
+    def test_create_region_rejects_cross_city_entrance(self):
+        result = self.svc.create_region(
+            "X", "", "generic", 1, entrance_building_id="bldg_b"
+        )
+        self.assertIn("Error", result)
+
+    def test_create_region_rejects_entrance_name_conflict(self):
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingModel(CITYID=1, BUILDINGID="dup_e", BUILDINGNAME="X: 入口"))
+            db.commit()
+        finally:
+            db.close()
+        result = self.svc.create_region("X", "", "generic", 1, region_id="r1")
+        self.assertIn("Error", result)
+        # Region 行もロールバックされている (部分作成しない)
+        self.assertIsNone(self._get_region("r1"))
+
+    def test_delete_region_removes_auto_created_entrance(self):
+        self.svc.create_region("X", "", "generic", 1, region_id="r1")
+        result = self.svc.delete_region("r1")
+        self.assertNotIn("Error", result)
+        self.assertIsNone(self._get_building("entrance_r1"))
+
+    def test_delete_region_keeps_user_specified_entrance(self):
+        self.svc.create_region(
+            "X", "", "generic", 1, region_id="r1", entrance_building_id="bldg_a"
+        )
+        result = self.svc.delete_region("r1")
+        self.assertNotIn("Error", result)
+        self.assertIsNotNone(self._get_building("bldg_a"))
+
     # --- update ---
 
     def test_update_region(self):

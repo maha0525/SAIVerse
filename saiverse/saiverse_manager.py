@@ -1945,10 +1945,16 @@ class SAIVerseManager(
         city_id: int,
         parent_region_id: Optional[str] = None,
         region_id: Optional[str] = None,
+        entrance_building_id: Optional[str] = None,
     ) -> str:
-        result = self.admin.create_region(name, description, region_type, city_id, parent_region_id, region_id)
+        result = self.admin.create_region(
+            name, description, region_type, city_id,
+            parent_region_id, region_id, entrance_building_id,
+        )
         if not result.startswith("Error") and city_id == self.city_id:
             self._reload_regions()
+            # 入口 Building の自動生成 / 既存 Building の REGION_ID 変更を反映する
+            self._reload_buildings()
         return result
 
     def update_region(
@@ -1968,6 +1974,8 @@ class SAIVerseManager(
         result = self.admin.delete_region(region_id)
         if not result.startswith("Error"):
             self._reload_regions()
+            # 自動生成入口の削除を反映する
+            self._reload_buildings()
         return result
 
     def set_building_region(self, building_id: str, region_id: Optional[str]) -> str:

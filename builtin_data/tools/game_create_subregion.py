@@ -45,6 +45,7 @@ def game_create_subregion(name: str, description: str) -> str:
     )
     return (
         f"SubRegion「{name}」(ID: {subregion_id}) を Region『{region.name}』内に作成しました。\n"
+        f"入口 Building「{name}: 入口」(ID: entrance_{subregion_id}) が自動作成されています。\n"
         "建物を配置するには game_create_building を subregion_id 付きで使用してください。"
     )
 

@@ -520,7 +520,19 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         city_id: int,
         parent_region_id: Optional[str] = None,
         region_id: Optional[str] = None,
+        entrance_building_id: Optional[str] = None,
     ) -> str:
+        """Region / SubRegion を作成する。
+
+        入口必須の不変条件 (docs/intent/region.md §3) を作成フローで保証する:
+        entrance_building_id 指定時は既存 Building を入口として紐づけ、省略時は
+        「(名): 入口」Building を自動作成する。入口は親スコープに属する
+        (トップ Region の入口は REGION_ID なし、SubRegion の入口は親 Region 所属)。
+
+        例外: game タイプのトップ Region は create_ruler が控室 (= 入口) を
+        作成するため、ここでは自動作成しない (Ruler 不在の game Region は
+        どのみちゲームを開始できない setup 途中の状態)。
+        """
         if region_type not in self.VALID_REGION_TYPES:
             return f"Error: Invalid region_type '{region_type}'. Must be one of {self.VALID_REGION_TYPES}."
         db = self.SessionLocal()
@@ -547,6 +559,50 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if db.query(RegionModel).filter_by(REGION_ID=region_id).first():
                 return f"Error: A region with the ID '{region_id}' already exists."
 
+            # --- 入口の決定 (region 行と同一トランザクションで原子的に) ---
+            entrance_id: Optional[str] = None
+            entrance_note = ""
+            if entrance_building_id and entrance_building_id.strip():
+                entrance_building_id = entrance_building_id.strip()
+                entrance = db.query(BuildingModel).filter_by(
+                    BUILDINGID=entrance_building_id
+                ).first()
+                if not entrance:
+                    return "Error: Entrance building not found."
+                if entrance.CITYID != city_id:
+                    return "Error: Entrance building belongs to a different city."
+                # 入口は親スコープに属する
+                entrance.REGION_ID = parent_region_id or None
+                entrance_id = entrance_building_id
+                entrance_note = f" Entrance: '{entrance.BUILDINGNAME}' (ID: {entrance_id})."
+            elif region_type == "game" and not parent_region_id:
+                # game トップ Region の入口は create_ruler の控室。ここでは作らない
+                pass
+            else:
+                entrance_name = f"{name}: 入口"
+                if db.query(BuildingModel).filter_by(
+                    CITYID=city_id, BUILDINGNAME=entrance_name
+                ).first():
+                    return (
+                        f"Error: A building named '{entrance_name}' already exists; "
+                        "cannot auto-create the entrance."
+                    )
+                entrance_id = f"entrance_{region_id}"
+                if db.query(BuildingModel).filter_by(BUILDINGID=entrance_id).first():
+                    return f"Error: A building with the ID '{entrance_id}' already exists."
+                db.add(BuildingModel(
+                    CITYID=city_id,
+                    BUILDINGID=entrance_id,
+                    BUILDINGNAME=entrance_name,
+                    DESCRIPTION=f"『{name}』への入口。",
+                    CAPACITY=10,
+                    SYSTEM_INSTRUCTION=(
+                        f"『{name}』の入口。ここから先が『{name}』の内部です。"
+                    ),
+                    REGION_ID=parent_region_id or None,
+                ))
+                entrance_note = f" Entrance '{entrance_name}' (ID: {entrance_id}) was auto-created."
+
             db.add(RegionModel(
                 REGION_ID=region_id,
                 CITYID=city_id,
@@ -554,10 +610,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 NAME=name,
                 DESCRIPTION=description,
                 REGION_TYPE=region_type,
+                ENTRANCE_BUILDING_ID=entrance_id,
             ))
             db.commit()
-            logging.info("Created new region '%s' (ID: %s) in city %s.", name, region_id, city_id)
-            return f"Region '{name}' (ID: {region_id}) created successfully."
+            logging.info(
+                "Created new region '%s' (ID: %s) in city %s (entrance: %s).",
+                name, region_id, city_id, entrance_id or "(deferred to create_ruler)",
+            )
+            return f"Region '{name}' (ID: {region_id}) created successfully.{entrance_note}"
         except Exception as exc:
             db.rollback()
             logging.error("Failed to create region '%s': %s", name, exc, exc_info=True)
@@ -634,10 +694,22 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "Detach them first."
                 )
 
+            region_name = region.NAME
+            entrance_id = region.ENTRANCE_BUILDING_ID
             db.delete(region)
             db.commit()
-            logging.info("Deleted region '%s' (%s).", region.NAME, region_id)
-            return f"Region '{region.NAME}' deleted successfully."
+            logging.info("Deleted region '%s' (%s).", region_name, region_id)
+
+            # 自動生成された入口 (ID 規約 entrance_<region_id>) は Region と運命を
+            # 共にする。ユーザー指定の既存 Building が入口の場合は残す。
+            note = ""
+            if entrance_id == f"entrance_{region_id}":
+                entrance_result = self.delete_building(entrance_id)
+                if entrance_result.startswith("Error"):
+                    note = f" Note: auto-created entrance could not be removed: {entrance_result}"
+                else:
+                    note = " Auto-created entrance building was also removed."
+            return f"Region '{region_name}' deleted successfully.{note}"
         except Exception as exc:
             db.rollback()
             logging.error("Failed to delete region '%s': %s", region_id, exc, exc_info=True)
