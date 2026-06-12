@@ -464,22 +464,35 @@ class GameLifecycleTestCase(unittest.TestCase):
         self.assertEqual(info["region_id"], "r1")
         self.assertEqual(info["phase"], "playing")
         self.assertEqual(info["scene"], "exploration")
+        self.assertTrue(info["inside"])
         self.assertFalse(info["at_entrance"])
 
     def test_active_game_at_entrance(self):
         self._start()
-        # 入口 (控室) では at_entrance=True で返す
-        # → UI は read-only セッションログ + 復帰ボタンを出す
+        # 入口 (控室) では inside=False / at_entrance=True で返す
+        # → UI は通常チャット + ログ閲覧トグル + 復帰ボタンを出す
         self.manager.state.user_current_building_id = "lobby"
         info = self.svc.active_game_for_user()
         self.assertIsNotNone(info)
         self.assertEqual(info["region_id"], "r1")
+        self.assertFalse(info["inside"])
         self.assertTrue(info["at_entrance"])
 
-    def test_active_game_none_outside_region(self):
+    def test_active_game_outside_region(self):
         self._start()
-        # Region 外 (入口でもない) ではゲームモードにしない
+        # 参加者なら Region 外に居ても返す (復帰の認可は参加者資格そのもの)。
+        # inside / at_entrance はともに False → UI はログ閲覧 + 復帰ボタンのみ
         self.manager.state.user_current_building_id = "somewhere_else"
+        info = self.svc.active_game_for_user()
+        self.assertIsNotNone(info)
+        self.assertEqual(info["region_id"], "r1")
+        self.assertFalse(info["inside"])
+        self.assertFalse(info["at_entrance"])
+
+    def test_active_game_none_for_non_participant(self):
+        self._start(participants=["air"])
+        # 非参加者にはどこに居ても出さない (Region 内でも)
+        self.manager.state.user_current_building_id = "b1"
         self.assertIsNone(self.svc.active_game_for_user())
 
     def test_active_game_during_pause(self):

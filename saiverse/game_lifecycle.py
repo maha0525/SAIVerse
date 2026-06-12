@@ -592,42 +592,42 @@ class GameLifecycleService:
     GAME_TRACK_TYPE = "game_session"
 
     def active_game_for_user(self) -> Optional[Dict[str, Any]]:
-        """ユーザーが参加中 (playing/paused) のゲーム Region 内または入口 (控室)
-        に居る場合、UI のゲームモード判定情報を返す。それ以外は None。
+        """ユーザーが参加中 (playing/paused) のゲームがあれば、現在地に関わらず
+        UI のゲームモード判定情報を返す。それ以外は None。
+
+        場所要件を課さない理由: 復帰 (rejoin) の認可は参加者資格そのものであり、
+        UI 上のユーザー移動は発言を伴う (= 復帰のために控室で一言喋らせるのは
+        無意味な手順になる)。物理位置は inside / at_entrance で通知し、表示の
+        切り替えはフロント側が行う。
 
         /api/user/status に載せて LocationSync ポーリングに相乗りさせる。
-        - Region 内 (at_entrance=False): セッションログ表示 + 発話可
-        - 入口 (at_entrance=True): セッションログを read-only 表示 + 「復帰」
-          ボタン (入口はセッションログの対象外なのでゲームログ宛て入力はさせない)
+        - inside=True: セッションログ表示 + 発話可
+        - inside=False (入口・ゲーム外を問わず): 通常チャット + セッションログの
+          read-only 閲覧トグル + 「復帰」ボタン
         """
         user_id = str(self.manager.user_id)
         user_bid = self.manager.state.user_current_building_id
-        if not user_bid:
-            return None
-        at_entrance = False
-        region = self._game_region_of(user_bid)
-        if region is None:
-            # 入口は Region 外 (REGION_ID なし) なのでポインタから引く
-            for r in self.manager.regions.values():
-                if r.is_game_region and r.entrance_building_id == user_bid:
-                    region = r
-                    at_entrance = True
-                    break
-        if region is None:
-            return None
-        state = region.state
-        if state.get("phase") not in (PHASE_PLAYING, PHASE_PAUSED):
-            return None
-        if user_id not in [str(p) for p in state.get("participants", [])]:
-            return None
-        return {
-            "region_id": region.region_id,
-            "region_name": region.name,
-            "phase": state.get("phase"),
-            "scene": state.get("scene"),
-            "party_location": state.get("party_location"),
-            "at_entrance": at_entrance,
-        }
+        for region in self.manager.regions.values():
+            if not region.is_game_region:
+                continue
+            state = region.state
+            if state.get("phase") not in (PHASE_PLAYING, PHASE_PAUSED):
+                continue
+            if user_id not in [str(p) for p in state.get("participants", [])]:
+                continue
+            inside_region = self._game_region_of(user_bid)
+            return {
+                "region_id": region.region_id,
+                "region_name": region.name,
+                "phase": state.get("phase"),
+                "scene": state.get("scene"),
+                "party_location": state.get("party_location"),
+                "inside": inside_region is not None
+                and inside_region.region_id == region.region_id,
+                "at_entrance": user_bid is not None
+                and user_bid == region.entrance_building_id,
+            }
+        return None
 
     def is_participating(self, persona_id: str) -> bool:
         """ペルソナが進行中 (playing / paused) のゲームの参加者かを返す。"""

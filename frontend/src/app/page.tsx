@@ -612,18 +612,21 @@ export default function Home() {
         phase: string;
         scene?: string;
         party_location?: string;
-        // 入口 (控室) に居る状態。通常チャット + 任意でセッションログの
-        // read-only 閲覧 + 「復帰」ボタン (docs/intent/region.md §7)
+        // 実在地がゲーム Region 内か。false なら (入口・ゲーム外を問わず)
+        // 通常チャット + セッションログの read-only 閲覧トグル + 「復帰」
+        // ボタンを出す (docs/intent/region.md §7)
+        inside?: boolean;
+        // 実在地が入口 (控室) か。表示文言の補足にのみ使う
         at_entrance?: boolean;
     };
     const [activeGame, setActiveGame] = useState<ActiveGame | null>(null);
     const activeGameRef = useRef<ActiveGame | null>(null);
-    // 入口でセッションログを閲覧中か (トグル)。fetch 系 closure 用に ref を併用
-    const [entranceLogView, setEntranceLogView] = useState(false);
-    const entranceLogViewRef = useRef(false);
-    const updateEntranceLogView = (v: boolean) => {
-        entranceLogViewRef.current = v;
-        setEntranceLogView(v);
+    // ゲーム外からセッションログを閲覧中か (トグル)。fetch 系 closure 用に ref を併用
+    const [sessionLogPeek, setSessionLogPeek] = useState(false);
+    const sessionLogPeekRef = useRef(false);
+    const updateSessionLogPeek = (v: boolean) => {
+        sessionLogPeekRef.current = v;
+        setSessionLogPeek(v);
     };
 
     const resolveHasMore = (data: HistoryResponse, newMessages: Message[]) => {
@@ -646,13 +649,15 @@ export default function Home() {
             if (beforeId) params.append('before', beforeId);
             const bid = overrideBuildingId || currentBuildingIdRef.current;
 
-            // セッションログビューは「ゲーム中 かつ 閲覧中の建物 = 自分の実在地」
-            // のときだけ。閲覧モードで他の建物を見ている間はその建物の通常ログ。
-            // 入口 (at_entrance) では通常は控室チャット、トグル ON のときだけ
-            // セッションログ (read-only) を出す。
+            // セッションログビューの条件:
+            // - Region 内 (inside): 閲覧中の建物 = 自分の実在地 のときだけ。
+            //   閲覧モードで他の建物を見ている間はその建物の通常ログ。
+            // - Region 外 (入口含む): トグル ON のときだけ read-only で出す。
+            //   閲覧場所は問わない (復帰前にどこからでも文脈を確認できる)
             const game = activeGameRef.current;
-            const gameView = !!game && !!bid && bid === serverCurrentBuildingIdRef.current
-                && (!game.at_entrance || entranceLogViewRef.current);
+            const gameView = !!game && (game.inside
+                ? !!bid && bid === serverCurrentBuildingIdRef.current
+                : sessionLogPeekRef.current);
             let url: string;
             if (gameView) {
                 url = `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?${params.toString()}`;
@@ -750,16 +755,16 @@ export default function Home() {
         setActiveGame(game);
     };
 
-    // 入口での「セッションログを見る ⇄ 控室チャットに戻る」トグル。
+    // ゲーム外での「セッションログを見る ⇄ 通常チャットに戻る」トグル。
     // 表示ソースが切り替わるので履歴をロードし直す
-    const toggleEntranceLogView = () => {
-        updateEntranceLogView(!entranceLogViewRef.current);
+    const toggleSessionLogPeek = () => {
+        updateSessionLogPeek(!sessionLogPeekRef.current);
         setMessages([]);
         setIsHistoryLoaded(false);
         fetchHistory(undefined, currentBuildingIdRef.current ?? undefined);
     };
 
-    // 入口の「復帰」ボタン: パーティーの現在地へ移動してゲームに戻る。
+    // 「復帰」ボタン: パーティーの現在地へ移動してゲームに戻る。
     // サーバー側で再集結 + 自動再開が発火する (lifecycle.rejoin_party)。
     // LocationSync の次 tick を待たず即時に状態同期する
     const handleRejoinGame = async () => {
@@ -774,7 +779,7 @@ export default function Home() {
                 console.error('[Game] rejoin failed', res.status);
                 return;
             }
-            updateEntranceLogView(false);
+            updateSessionLogPeek(false);
             const statusRes = await fetch('/api/user/status');
             if (statusRes.ok) {
                 const data = await statusRes.json();
@@ -926,6 +931,8 @@ export default function Home() {
         }
         setCurrentBuildingId(buildingId);
         currentBuildingIdRef.current = buildingId;
+        // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
+        updateSessionLogPeek(false);
         setMessages([]);
         setIsHistoryLoaded(false);
         fetchHistory(undefined, buildingId);
@@ -965,8 +972,8 @@ export default function Home() {
                 if (data?.avatar) userAvatarRef.current = data.avatar;
                 applyActiveGame(data?.active_game ?? null);
                 // 起動直後の fetchHistory() は status 取得とレースするため、
-                // ゲーム中なら refs 確定後にセッションログで取り直す
-                if (data?.active_game && data?.current_building_id) {
+                // ゲーム中 (Region 内) なら refs 確定後にセッションログで取り直す
+                if (data?.active_game?.inside && data?.current_building_id) {
                     setMessages([]);
                     setIsHistoryLoaded(false);
                     fetchHistory(undefined, data.current_building_id);
@@ -1202,9 +1209,9 @@ export default function Home() {
                 const pollBid = currentBuildingIdRef.current;
                 const bidParam = pollBid ? `&building_id=${pollBid}` : '';
                 const game = activeGameRef.current;
-                const gameView = !!game && !!pollBid
-                    && pollBid === serverCurrentBuildingIdRef.current
-                    && (!game.at_entrance || entranceLogViewRef.current);
+                const gameView = !!game && (game.inside
+                    ? !!pollBid && pollBid === serverCurrentBuildingIdRef.current
+                    : sessionLogPeekRef.current);
                 const pollUrl = gameView
                     ? `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?after=${encodeURIComponent(newestId)}&limit=50`
                     : `/api/chat/history?after=${newestId}&limit=50${bidParam}`;
@@ -1251,19 +1258,19 @@ export default function Home() {
                 const prevGame = activeGameRef.current;
 
                 const serverMoved = !!serverBid && !!oldServerBid && serverBid !== oldServerBid;
-                // 「いまセッションログを表示しているか」= ゲーム中 かつ 閲覧先 = 実在地
-                // (入口ではトグル ON のときだけ)
-                const wasShowingLog = !!prevGame && !!oldServerBid
-                    && currentBuildingIdRef.current === oldServerBid
-                    && (!prevGame.at_entrance || entranceLogViewRef.current);
+                // 「いまセッションログを表示しているか」:
+                // Region 内 = 閲覧先 = 実在地のとき / Region 外 = トグル ON のとき
+                const wasShowingLog = !!prevGame && (prevGame.inside
+                    ? !!oldServerBid && currentBuildingIdRef.current === oldServerBid
+                    : sessionLogPeekRef.current);
 
                 if (serverBid) updateServerBuildingId(serverBid);
                 applyActiveGame(game);
 
-                // 入口ログトグルは「入口に居る」状態にのみ意味がある。
-                // ゲーム終了 / 移動でその状態が消えたらリセットする
-                if (!game?.at_entrance && entranceLogViewRef.current) {
-                    updateEntranceLogView(false);
+                // ログ閲覧トグルは「ゲーム外に居る」状態にのみ意味がある。
+                // ゲーム終了 / Region 内への移動でその状態が消えたらリセットする
+                if ((!game || game.inside) && sessionLogPeekRef.current) {
+                    updateSessionLogPeek(false);
                 }
 
                 if (serverMoved) {
@@ -1275,9 +1282,9 @@ export default function Home() {
                     setMoveTrigger(prev => prev + 1);
                 }
 
-                const nowShowingLog = !!game
-                    && currentBuildingIdRef.current === serverCurrentBuildingIdRef.current
-                    && (!game.at_entrance || entranceLogViewRef.current);
+                const nowShowingLog = !!game && (game.inside
+                    ? currentBuildingIdRef.current === serverCurrentBuildingIdRef.current
+                    : sessionLogPeekRef.current);
                 // セッションログ → 同一セッションのログ なら表示は連続している
                 const logContinues = wasShowingLog && nowShowingLog
                     && prevGame!.region_id === game!.region_id;
@@ -2267,9 +2274,8 @@ export default function Home() {
         files.forEach(addFile);
     };
 
-    // 入口でセッションログを表示中か (= 入力を read-only にする条件)
-    const entranceLogShown = !!activeGame?.at_entrance && entranceLogView
-        && currentBuildingId === serverBuildingId;
+    // ゲーム外からセッションログを閲覧中か (= 入力を read-only にする条件)
+    const sessionLogReadOnly = !!activeGame && !activeGame.inside && sessionLogPeek;
 
     return (
         <div
@@ -2289,6 +2295,8 @@ export default function Home() {
                     // 発言時に /chat/utter が atomic に行う (= C-2)。
                     setCurrentBuildingId(buildingId);
                     currentBuildingIdRef.current = buildingId;
+                    // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
+                    updateSessionLogPeek(false);
                     setMessages([]);
                     setIsHistoryLoaded(false);
                     fetchHistory(undefined, buildingId);
@@ -2313,54 +2321,56 @@ export default function Home() {
                             <Menu size={20} />
                         </button>
                         <h1>{currentBuildingName}</h1>
-                        {activeGame && (currentBuildingId === serverBuildingId ? (
-                            activeGame.at_entrance ? (
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
-                                    <span
-                                        title={`『${activeGame.region_name ?? activeGame.region_id}』の入口に居ます${activeGame.phase === 'paused' ? ' (ゲームは中断中)' : ''}`}
-                                        style={{ opacity: 0.75 }}
-                                    >
-                                        🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
-                                    </span>
-                                    <button
-                                        onClick={toggleEntranceLogView}
-                                        title={entranceLogView ? '控室のチャットに戻る' : 'セッションログを閲覧する (発言はできません)'}
-                                        style={{
-                                            background: 'rgba(120,180,255,0.12)',
-                                            border: '1px solid rgba(120,180,255,0.4)',
-                                            borderRadius: 6, color: 'inherit', cursor: 'pointer',
-                                            padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
-                                        }}
-                                    >
-                                        {entranceLogView ? '💬 控室チャット' : '📜 セッションログ'}
-                                    </button>
-                                    <button
-                                        onClick={handleRejoinGame}
-                                        title="パーティーの現在地へ移動してゲームに戻る"
-                                        style={{
-                                            background: 'rgba(130,220,160,0.15)',
-                                            border: '1px solid rgba(130,220,160,0.5)',
-                                            borderRadius: 6, color: 'inherit', cursor: 'pointer',
-                                            padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
-                                        }}
-                                    >
-                                        ▶ 復帰
-                                    </button>
-                                </span>
-                            ) : (
+                        {activeGame && (activeGame.inside ? (
+                            currentBuildingId === serverBuildingId ? (
                                 <span
                                     title={`セッションログ表示中 (${activeGame.region_name ?? activeGame.region_id})${activeGame.scene ? ` / scene: ${activeGame.scene}` : ''}`}
                                     style={{ fontSize: '0.8rem', opacity: 0.75, whiteSpace: 'nowrap' }}
                                 >
                                     🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
                                 </span>
+                            ) : (
+                                <span
+                                    title={`${activeGame.region_name ?? activeGame.region_id} でゲーム進行中。この画面は閲覧中の建物のログです (実在地に戻るとセッションログ表示)`}
+                                    style={{ fontSize: '0.8rem', opacity: 0.45, whiteSpace: 'nowrap' }}
+                                >
+                                    🎲 {activeGame.region_name ?? 'ゲーム'}で進行中
+                                </span>
                             )
                         ) : (
-                            <span
-                                title={`${activeGame.region_name ?? activeGame.region_id} でゲーム進行中。この画面は閲覧中の建物のログです (実在地に戻るとセッションログ表示)`}
-                                style={{ fontSize: '0.8rem', opacity: 0.45, whiteSpace: 'nowrap' }}
-                            >
-                                🎲 {activeGame.region_name ?? 'ゲーム'}で進行中
+                            // ゲーム外 (入口含む): どこに居てもログ閲覧 + 復帰を出す。
+                            // 復帰の認可は参加者資格 (場所要件なし、docs/intent/region.md §7)
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
+                                <span
+                                    title={`『${activeGame.region_name ?? activeGame.region_id}』${activeGame.at_entrance ? 'の入口に居ます' : 'から離脱中です'}${activeGame.phase === 'paused' ? ' (ゲームは中断中)' : ''}`}
+                                    style={{ opacity: 0.75 }}
+                                >
+                                    🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
+                                </span>
+                                <button
+                                    onClick={toggleSessionLogPeek}
+                                    title={sessionLogPeek ? '通常のチャットに戻る' : 'セッションログを閲覧する (発言はできません)'}
+                                    style={{
+                                        background: 'rgba(120,180,255,0.12)',
+                                        border: '1px solid rgba(120,180,255,0.4)',
+                                        borderRadius: 6, color: 'inherit', cursor: 'pointer',
+                                        padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    {sessionLogPeek ? '💬 チャットに戻る' : '📜 セッションログ'}
+                                </button>
+                                <button
+                                    onClick={handleRejoinGame}
+                                    title="パーティーの現在地へ移動してゲームに戻る"
+                                    style={{
+                                        background: 'rgba(130,220,160,0.15)',
+                                        border: '1px solid rgba(130,220,160,0.5)',
+                                        borderRadius: 6, color: 'inherit', cursor: 'pointer',
+                                        padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    ▶ 復帰
+                                </button>
                             </span>
                         ))}
                     </div>
@@ -2841,11 +2851,11 @@ export default function Home() {
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            // 入口でのセッションログ閲覧は read-only (発言は控室チャット
-                            // か、復帰してゲーム内で行う)
-                            disabled={entranceLogShown}
-                            placeholder={entranceLogShown
-                                ? 'セッションログは閲覧専用です。発言するには「復帰」するか控室チャットに戻ってください。'
+                            // ゲーム外でのセッションログ閲覧は read-only (発言は通常
+                            // チャットか、復帰してゲーム内で行う)
+                            disabled={sessionLogReadOnly}
+                            placeholder={sessionLogReadOnly
+                                ? 'セッションログは閲覧専用です。発言するには「復帰」するかチャットに戻ってください。'
                                 : 'メッセージを入力...'}
                             rows={1}
                         />
@@ -2861,7 +2871,7 @@ export default function Home() {
                             <button
                                 className={styles.sendBtn}
                                 onClick={handleSendMessage}
-                                disabled={(!inputValue.trim() && attachments.length === 0) || entranceLogShown}
+                                disabled={(!inputValue.trim() && attachments.length === 0) || sessionLogReadOnly}
                             >
                                 <Send size={20} />
                             </button>

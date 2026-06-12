@@ -16,9 +16,10 @@ class UserStatusResponse(BaseModel):
     avatar: Optional[str]
     display_name: str
     email: Optional[str] = None
-    # Region RPG: ユーザーが参加中のゲーム Region 内または入口 (控室) に居る場合の
-    # ゲームモード情報 {region_id, region_name, phase, scene, party_location,
-    # at_entrance}。それ以外は None。
+    # Region RPG: ユーザーが参加中 (playing/paused) のゲームがあれば現在地に
+    # 関わらず返るゲームモード情報 {region_id, region_name, phase, scene,
+    # party_location, inside, at_entrance}。それ以外は None。
+    # inside=False のとき UI はセッションログ閲覧トグル + 復帰ボタンを出す。
     active_game: Optional[dict] = None
 
 class MoveRequest(BaseModel):

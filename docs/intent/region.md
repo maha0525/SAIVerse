@@ -86,5 +86,5 @@ move 系操作の引数を「移動先 Building」から「**目的地** Buildin
 ## 7. 実装ノート (確定済みの判断)
 
 - ゲーム Region では**控室 = 入口を兼用**する。Ruler の私室を控室と分けたくなったら Ruler 生成側だけ修正すればよい (2026-06-12 確定)
-- 入口での UX (ゲーム Region): 参加中ゲームが playing / paused のとき、`/api/user/status` の active_game を「入口に居る」状態でも返し (フラグ付き)、UI は read-only セッションログ + 復帰ボタンを表示。復帰ボタンは party_location への move を発行し、既存のパーティー追従 + 自動再開チェーンがそのまま発火する
+- ゲーム外での UX (ゲーム Region): 参加中ゲームが playing / paused のとき、`/api/user/status` の active_game を**現在地に関わらず**返す (`inside` / `at_entrance` フラグ付き)。Region 外なら UI はどこに居ても read-only セッションログ閲覧トグル + 復帰ボタンを表示する。場所要件を課さないのは、復帰の認可が参加者資格そのものであること、および UI 上のユーザー移動は発言を伴う (= 復帰のためだけに控室で一言喋らせる手順は無意味) ため (2026-06-12 確定)。復帰ボタンは party_location への system 移動を発行し、既存のパーティー追従 + 自動再開チェーンがそのまま発火する。トポロジー (通常移動の入口経由強制・entry policy) はこの判断と独立に維持される
 - City マップ API (`/api/info/city-map`) とサイドバー (`/api/user/buildings`) は Region 所属情報での絞り込み / グルーピングが必要になる
