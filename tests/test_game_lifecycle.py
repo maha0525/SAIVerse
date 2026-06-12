@@ -371,6 +371,40 @@ class GameLifecycleTestCase(unittest.TestCase):
     def test_move_party_requires_playing(self):
         self.assertIn("Error", self.svc.move_party("r1", "b1"))
 
+    # --- rejoin (入口の「復帰」ボタン経路) ---
+
+    def test_rejoin_moves_user_to_party_location(self):
+        self._start()
+        self.manager.state.user_current_building_id = "b2"
+        self.svc.on_entity_moved("1", "lobby", "b2")  # party_location = b2
+        # 離脱 → ポーズ
+        self.manager.state.user_current_building_id = "outside"
+        self.svc.on_entity_moved("1", "b2", "outside")
+        self.assertEqual(self.region.state["phase"], "paused")
+        # 復帰
+        result = self.svc.rejoin_party("r1")
+        self.assertNotIn("Error", result)
+        self.assertIn(("user", "b2"), self.manager.moved)
+
+    def test_rejoin_rejects_non_participant_user(self):
+        self._start()
+        new_state = dict(self.region.state)
+        new_state["participants"] = ["air"]  # ユーザーを外す
+        self.svc._write_state("r1", new_state)
+        self.assertIn("Error", self.svc.rejoin_party("r1"))
+
+    def test_rejoin_requires_game_in_progress(self):
+        self.assertIn("Error", self.svc.rejoin_party("r1"))
+
+    def test_rejoin_noop_when_already_with_party(self):
+        self._start()
+        self.manager.state.user_current_building_id = "b2"
+        self.svc.on_entity_moved("1", "lobby", "b2")
+        self.manager.moved.clear()
+        result = self.svc.rejoin_party("r1")
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.manager.moved, [])
+
     def test_end_game_returns_party_to_lobby(self):
         self._start()
         self.manager.state.user_current_building_id = "b2"

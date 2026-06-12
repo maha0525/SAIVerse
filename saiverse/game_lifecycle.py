@@ -20,6 +20,7 @@ phase: setup → playing ⇄ paused → (end_game: アーカイブ →) setup �
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,6 +39,14 @@ VALID_OUTCOMES = ("clear", "gameover", "aborted")
 class GameLifecycleService:
     def __init__(self, manager):
         self.manager = manager
+
+    def _system_move_context(self):
+        """ライフサイクル主導の移動 (パーティー追従・帰還・復帰) は system 移動
+        として入口トポロジーをバイパスする (docs/intent/region.md §2.4)。
+        """
+        om = getattr(self.manager, "occupancy_manager", None)
+        bypass = getattr(om, "topology_bypass", None)
+        return bypass() if bypass else nullcontext()
 
     # ------------------------------------------------------------------
     # phase 遷移 API
@@ -321,6 +330,35 @@ class GameLifecycleService:
             )
         return f"Party moved to '{name}'."
 
+    def rejoin_party(self, region_id: str) -> str:
+        """ユーザーをパーティーの現在地へ復帰させる (入口の「復帰」ボタン経路)。
+
+        参加者資格が認可そのものなので system 移動として入口トポロジーを
+        バイパスする (party_location が SubRegion 内部でも直接戻れる)。
+        移動に伴い on_entity_moved がパーティー再集結 + 自動再開を発火する。
+        """
+        region, err = self._resolve_game_region(region_id)
+        if err:
+            return err
+        phase = region.state.get("phase")
+        if phase not in (PHASE_PLAYING, PHASE_PAUSED):
+            return "Error: No game in progress in this region."
+        user_id = str(self.manager.user_id)
+        if user_id not in [str(p) for p in region.state.get("participants", [])]:
+            return "Error: You are not a participant of this game."
+        target = region.state.get("party_location") or region.entrance_building_id
+        if not target:
+            return "Error: The party location is unknown."
+        if self.manager.state.user_current_building_id == target:
+            return "Already with the party."
+        with self._system_move_context():
+            ok, msg = self.manager.move_user(target)
+        if not ok:
+            return f"Error: Failed to rejoin the party: {msg}"
+        building = self.manager.building_map.get(target)
+        name = getattr(building, "name", target) if building else target
+        return f"Rejoined the party at '{name}'."
+
     def _move_party_to(
         self,
         region: Region,
@@ -341,23 +379,24 @@ class GameLifecycleService:
             targets.append(str(region.ruler_id))
 
         failed: List[str] = []
-        for eid in targets:
-            if anchor_entity_id is not None and eid == str(anchor_entity_id):
-                continue
-            if eid == user_id:
-                if not include_user:
+        with self._system_move_context():
+            for eid in targets:
+                if anchor_entity_id is not None and eid == str(anchor_entity_id):
                     continue
-                ok, msg = self.manager.move_user(to_building_id)
-            else:
-                if eid not in self.manager.personas:
-                    continue
-                ok, msg = self.manager.summon_persona(eid, to_building_id)
-            if not ok:
-                failed.append(eid)
-                LOGGER.warning(
-                    "[game_lifecycle] party member '%s' failed to move to '%s': %s",
-                    eid, to_building_id, msg,
-                )
+                if eid == user_id:
+                    if not include_user:
+                        continue
+                    ok, msg = self.manager.move_user(to_building_id)
+                else:
+                    if eid not in self.manager.personas:
+                        continue
+                    ok, msg = self.manager.summon_persona(eid, to_building_id)
+                if not ok:
+                    failed.append(eid)
+                    LOGGER.warning(
+                        "[game_lifecycle] party member '%s' failed to move to '%s': %s",
+                        eid, to_building_id, msg,
+                    )
 
         # party_location を保存 (途中の自動再開等で state が動いている可能性が
         # あるので、reload 済みの最新 state に対して書く)
@@ -390,28 +429,29 @@ class GameLifecycleService:
             b.building_id for b in self.manager.get_region_buildings(region_id)
         }
         user_id = str(self.manager.user_id)
-        for eid in entity_ids:
-            eid = str(eid)
-            if eid == user_id:
-                loc = self.manager.state.user_current_building_id
-            else:
-                persona = self.manager.personas.get(eid)
-                if persona is None:
+        with self._system_move_context():
+            for eid in entity_ids:
+                eid = str(eid)
+                if eid == user_id:
+                    loc = self.manager.state.user_current_building_id
+                else:
+                    persona = self.manager.personas.get(eid)
+                    if persona is None:
+                        continue
+                    loc = getattr(persona, "current_building_id", None)
+                if loc == to_building_id:
                     continue
-                loc = getattr(persona, "current_building_id", None)
-            if loc == to_building_id:
-                continue
-            if only_from_region and loc not in region_building_ids:
-                continue
-            if eid == user_id:
-                ok, msg = self.manager.move_user(to_building_id)
-            else:
-                ok, msg = self.manager.summon_persona(eid, to_building_id)
-            if not ok:
-                LOGGER.warning(
-                    "[game_lifecycle] failed to return '%s' to '%s': %s",
-                    eid, to_building_id, msg,
-                )
+                if only_from_region and loc not in region_building_ids:
+                    continue
+                if eid == user_id:
+                    ok, msg = self.manager.move_user(to_building_id)
+                else:
+                    ok, msg = self.manager.summon_persona(eid, to_building_id)
+                if not ok:
+                    LOGGER.warning(
+                        "[game_lifecycle] failed to return '%s' to '%s': %s",
+                        eid, to_building_id, msg,
+                    )
 
     # ------------------------------------------------------------------
     # ライフサイクルイベント通知

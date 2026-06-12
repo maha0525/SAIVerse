@@ -324,6 +324,14 @@ def resume_game(region_id: str, manager: SAIVerseManager = Depends(get_manager))
 def end_game(region_id: str, req: GameEnd, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.game_lifecycle.end_game(region_id, req.outcome))
 
+@router.post("/regions/{region_id}/game/rejoin")
+def rejoin_game(region_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """ユーザーをパーティーの現在地へ復帰させる (入口の「復帰」ボタン)。
+
+    移動に伴いパーティー再集結 + 自動再開が発火する。
+    """
+    return _check_result(manager.game_lifecycle.rejoin_party(region_id))
+
 @router.get("/regions/{region_id}/game/log")
 def get_game_session_log(
     region_id: str,

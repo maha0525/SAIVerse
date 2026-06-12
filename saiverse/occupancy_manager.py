@@ -1,4 +1,6 @@
 import logging
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Callable, TYPE_CHECKING
 
@@ -35,6 +37,107 @@ class OccupancyManager:
         self.id_to_name_map = id_to_name_map
         self.user_entity_id = str(user_id)
         self._manager_ref = manager_ref
+        self._topology_bypass = threading.local()
+
+    # ------------------------------------------------------------------
+    # Region 入口トポロジー (docs/intent/region.md §2.4, §3)
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def topology_bypass(self):
+        """system 移動 (lifecycle のパーティー追従・帰還等) 用の入口トポロジー
+        バイパス。呼び出しスレッド内でのみ有効 (threading.local の深度カウンタ)。
+        """
+        depth = getattr(self._topology_bypass, "depth", 0)
+        self._topology_bypass.depth = depth + 1
+        try:
+            yield
+        finally:
+            self._topology_bypass.depth -= 1
+
+    def _topology_bypassed(self) -> bool:
+        return getattr(self._topology_bypass, "depth", 0) > 0
+
+    def _scope_chain(self, building_id: str) -> List[str]:
+        """Building の所属スコープを内側から外側へ並べたリストを返す。
+
+        例: SubRegion 内部 → [sub_id, region_id]、Region 直属 → [region_id]、
+        Region 無所属 (City 直属) → []。
+        """
+        chain: List[str] = []
+        building = self.building_map.get(building_id)
+        get_region = getattr(self._manager_ref, "get_region", None)
+        rid = getattr(building, "region_id", None)
+        while rid and get_region:
+            if rid in chain:  # 自己参照の破損データで無限ループしない
+                break
+            chain.append(rid)
+            region = get_region(rid)
+            rid = getattr(region, "parent_region_id", None) if region else None
+        return chain
+
+    def _check_entrance_topology(
+        self, entity_id: str, from_id: str, to_id: str
+    ) -> Optional[str]:
+        """Region 入口経由の不変条件を執行する。拒否理由を返す (移動可なら None)。
+
+        移動先のスコープチェーンに「移動元のチェーンに無いスコープ」が現れたら
+        境界越え。新規スコープがちょうど 1 つ、かつ移動元がその入口 Building の
+        ときだけ通過を許し、その境界点で entry policy を執行する。
+        退出方向 (新規スコープなし) は制限しない。
+        """
+        if self._topology_bypassed():
+            return None
+        get_region = getattr(self._manager_ref, "get_region", None)
+        if get_region is None:
+            return None
+        from_scopes = set(self._scope_chain(from_id))
+        to_chain = self._scope_chain(to_id)
+        new_scopes = [s for s in to_chain if s not in from_scopes]
+        if not new_scopes:
+            return None
+
+        if len(new_scopes) == 1:
+            region = get_region(new_scopes[0])
+            if region is not None and getattr(region, "entrance_building_id", None) == from_id:
+                # 入口→内部の正規の通過。境界点で entry policy を執行する
+                return self._check_entry_policy(entity_id, region)
+
+        # 直行は拒否し、最外殻の新規スコープの入口を案内する
+        outer = get_region(new_scopes[-1])
+        dest_name = self.building_map[to_id].name if to_id in self.building_map else to_id
+        if outer is None:
+            return f"移動失敗: '{dest_name}' の所属 Region 情報が見つかりません。"
+        entrance_id = getattr(outer, "entrance_building_id", None)
+        if entrance_id:
+            entrance = self.building_map.get(entrance_id)
+            entrance_name = getattr(entrance, "name", entrance_id) if entrance else entrance_id
+            return (
+                f"移動失敗: '{dest_name}' は『{outer.name}』の内部です。"
+                f"入口 '{entrance_name}' (ID: {entrance_id}) から入ってください。"
+            )
+        return (
+            f"移動失敗: '{dest_name}' は『{outer.name}』の内部ですが、"
+            "入口が設定されていないため外部から入れません。"
+        )
+
+    def _check_entry_policy(self, entity_id: str, region: Any) -> Optional[str]:
+        """入口→内部の境界点で entry policy を執行する。
+
+        config.entry_policy: 'open' (デフォルト) | 'locked' | 'whitelist'。
+        locked / whitelist は config.entry_allowed (ID リスト) に載っていれば通す。
+        鍵の開閉操作 (entry_policy の書き換え) は住人ペルソナの tool として別途実装する。
+        """
+        config = getattr(region, "config", None) or {}
+        policy = config.get("entry_policy", "open")
+        if policy == "open":
+            return None
+        allowed = [str(x) for x in (config.get("entry_allowed") or [])]
+        if str(entity_id) in allowed:
+            return None
+        if policy == "locked":
+            return f"移動失敗: 『{region.name}』には鍵がかかっています。"
+        return f"移動失敗: 『{region.name}』へは関係者以外入れません。"
 
     def _check_game_region_gate(self, entity_id: str, to_id: str) -> Optional[str]:
         """game Region の入場ゲート。拒否理由を返す (入場可なら None)。
@@ -94,6 +197,14 @@ class OccupancyManager:
                 f"移動失敗: 建物 '{self.building_map[to_id].name}' は会話履歴ファイルが"
                 "破損しているため一時的に隔離されています。アラートバナーから対応してください。"
             )
+
+        topology_denial = self._check_entrance_topology(entity_id, from_id, to_id)
+        if topology_denial:
+            logging.info(
+                "move_entity blocked by entrance topology: %s (%s -> %s): %s",
+                entity_id, from_id, to_id, topology_denial,
+            )
+            return False, topology_denial
 
         game_gate_denial = self._check_game_region_gate(entity_id, to_id)
         if game_gate_denial:
