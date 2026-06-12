@@ -1,6 +1,6 @@
 # Region — 空間スコープと入口 (Intent Document)
 
-- Status: Draft v0.1 (2026-06-12)
+- Status: v0.2 (2026-06-12) — interview 反映済み、確定
 - 対象: `saiverse/regions.py`, `database/models.py` (region / building), `saiverse/occupancy_manager.py`, `saiverse/game_lifecycle.py`, マップ/サイドバー UI
 - 関連: RPG (game Region) 固有の設計は `temp/region_rpg_intent.md` (リポジトリ外管理)。本書は **Region の汎用仕様** を扱う
 
@@ -30,7 +30,7 @@ Region は Building の上位空間スコープである。`City > Region > SubR
 
 ### 2.2 このルールから導出される仕様
 
-- **マップ**: 各スコープのマップに表示されるのは「自スコープ直属の Building + 子スコープの入口 + 自スコープの入口 (出口として)」。City マップには Region の入口だけが載り、内部 Building は載らない。Region 内マップには内部 Building と街の門 (SubRegion 入口) が載る
+- **マップ**: 各スコープのマップに表示されるのは「自スコープ直属の Building + 子スコープの入口」。City マップには Region の入口だけが載り、内部 Building は載らない。Region 内マップには内部 Building と SubRegion の入口が載る。上の階層へ戻る操作は UI のナビゲーション (エクスプローラーの ↑ に相当するボタン) で提供し、内部マップに「出口 Building」は置かない
 - **サイドバー**: Region は入口 1 ノードに折り畳まれる。展開は内部に居る / 参加中のときのみ
 - **入場制御の執行点**: entry policy は「入口 → 内部」の境界一点で執行する。**入口自体は常時開放**。ゲーム Region の参加者ゲート (`_check_game_region_gate`) も家の「鍵」も、この執行点に挿さる policy の実装である
 - **スコープ判定ロジックの不変**: 入口は REGION_ID スコープ外にあるため、REGION_ID ベースの既存ロジック (ゲームのセッションログビュー、game_session Track 拘束、参加者ゲート) は無修正で「内部のみ」を対象にし続ける
@@ -74,14 +74,14 @@ move 系操作の引数を「移動先 Building」から「**目的地** Buildin
 
 入口経由の強制 (§2.4) はこの仕組みの最初の 1 ホップに相当する。本書のスコープでは「外→内部直行の拒否」までを実装し、経路移動は別フェーズ。
 
-## 6. 未解決事項 (interview 対象)
+## 6. interview で確定した事項 (2026-06-12)
 
-1. **入口の自動生成**: create_region (汎用) で入口 Building を自動作成するか、既存 Building の指定を受けるか。ゲーム Region は create_ruler が控室を自動作成する現行フローを踏襲
-2. **SubRegion の入口生成**: game_create_subregion (Ruler の spell) が「街の門」Building を自動作成して紐付けるか
-3. **既存データの移行**: 入口必須化に伴い、入口を持たない既存 Region / SubRegion (現 Mistvale の SubRegion 群が該当) をどう移行するか
-4. **マップ座標系**: MAP_X/MAP_Y は現在 City グローバル座標。Region 内マップはスコープ別の座標系・背景画像を持つべきか (内部 Building はそのスコープのマップにしか出ないため、MAP_X/MAP_Y をスコープローカル座標として再解釈する案)。入口は親マップ上の座標を持つが、内部マップでの「出口」ノードの位置をどう決めるか
-5. **entry policy の語彙**: open / whitelist (ゲーム) / locked (家) 程度から始めるか。鍵の開閉操作の主体 (住人ペルソナの tool?)
-6. **拒否時のフィードバック**: ペルソナが内部 Building を直接 move 指定した場合、拒否メッセージで入口を案内するか
+1. **入口の自動生成**: create_region (汎用) が入口 Building「(Region名): 入口」を自動作成する。入口必須の不変条件を作成フローで保証する。ゲーム Region は create_ruler が控室を自動作成する現行フローを踏襲 (控室 = 入口)
+2. **SubRegion の入口生成**: game_create_subregion が入口 Building を自動作成して紐付ける。命名は汎用性を優先し「(SubRegion名): 入口」(「門」などゲーム固有の語をシステム側で決め打ちしない)
+3. **既存データの移行**: 行わない。入口を持たない既存 Region / SubRegion (テストデータ) は作り直す
+4. **マップ座標系**: MAP_X/MAP_Y はスコープローカル座標として再解釈する (内部 Building はそのスコープのマップにしか出ないため衝突しない)。Region にも背景画像欄を持たせる。内部マップに出口ノードは置かず、上階層へ戻るのは UI の ↑ ボタン
+5. **entry policy の語彙**: open / whitelist (ゲームの参加者ゲートが該当) / locked (家の鍵) の 3 値から始める。鍵の開閉は住人ペルソナの tool を想定 (本書スコープ外、policy の置き場だけ確保)
+6. **拒否時のフィードバック**: 内部 Building への直接移動を拒否する際、入口 Building を案内するメッセージを返す
 
 ## 7. 実装ノート (確定済みの判断)
 
