@@ -361,6 +361,87 @@ def test_wait_response_timeout_reschedules_when_not_idle_enough(session_factory,
         scheduler.stop()
 
 
+def test_ensure_wait_response_timeout_reestablishes_on_running(session_factory, persona):
+    """ensure_wait_response_timeout() が running Track にタイマーを張り直す (C)。
+
+    タイマーは activate 時にしか張られず EventScheduler はインメモリのため
+    再起動で失われる。起動時相当に running Track が存在する状態でタイマーが
+    無いところから、ensure_wait_response_timeout で再確立されることを確認する。
+    """
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        def provider(track):
+            return (60, None)
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.activate(t)
+        # 「再起動でタイマーが失われた」状態を再現
+        scheduler.cancel(f"wait_response_timeout:{t}")
+        assert not scheduler.has_key(f"wait_response_timeout:{t}")
+        # 再確立
+        tm_with_sched.ensure_wait_response_timeout(persona)
+        assert scheduler.has_key(f"wait_response_timeout:{t}")
+    finally:
+        scheduler.stop()
+
+
+def test_ensure_wait_response_timeout_skips_when_provider_none(session_factory, persona):
+    """provider が None (= Idle / 対象外) を返すなら再確立しても予約は入らない (A+C)。"""
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        # activate 時は予約させ、その後 provider を「対象外」に切り替えて
+        # ensure 時に None を返すようにする (Active→Idle 相当)。
+        active = {"on": True}
+
+        def provider(track):
+            return (60, None) if active["on"] else None
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        t = tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.activate(t)
+        scheduler.cancel(f"wait_response_timeout:{t}")
+        active["on"] = False  # 以後 provider は None (Idle ゲート相当)
+        tm_with_sched.ensure_wait_response_timeout(persona)
+        assert not scheduler.has_key(f"wait_response_timeout:{t}")
+    finally:
+        scheduler.stop()
+
+
+def test_ensure_wait_response_timeout_noop_without_running(session_factory, persona):
+    """running Track が無ければ ensure_wait_response_timeout は no-op (例外を出さない)。"""
+    from saiverse.event_scheduler import EventScheduler
+    scheduler = EventScheduler()
+    scheduler.start()
+    try:
+        def provider(track):
+            return (60, None)
+
+        tm_with_sched = TrackManager(
+            session_factory=session_factory,
+            event_scheduler=scheduler,
+            wait_response_timeout_provider=provider,
+        )
+        # 未 activate (unstarted) のみ存在 → running は無い
+        tm_with_sched.create(persona, "user_conversation", is_persistent=True)
+        tm_with_sched.ensure_wait_response_timeout(persona)  # 例外なく no-op
+        assert scheduler.pending_count() == 0
+    finally:
+        scheduler.stop()
+
+
 def test_complete_sets_timestamp(tm, persona):
     t = tm.create(persona, "autonomous")
     tm.activate(t)

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, Calendar, CheckSquare, Settings, X, RefreshCw, Network, Package, Sparkles } from 'lucide-react';
+import { Home, Brain, Calendar, Settings, X, RefreshCw, Network, Package, Sparkles, Activity } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -14,6 +14,8 @@ interface PersonaMenuProps {
      * viewing 中の部屋で帰ってもらえなくなるため明示する。
      */
     buildingId?: string | null;
+    /** ライフビュー (自律行動の観察面) を開く。persona_activity_view.md §4 */
+    onOpenLifeView?: () => void;
     onOpenMemory?: () => void;
     onOpenSchedule?: () => void;
     onOpenTasks?: () => void;
@@ -25,7 +27,7 @@ interface PersonaMenuProps {
     onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenLifeView, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
@@ -106,6 +108,22 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                 </div>
 
                 <div className={styles.actions}>
+                    <button
+                        className={`${styles.actionBtn} ${!onOpenLifeView ? styles.disabled : ''}`}
+                        onClick={() => {
+                            if (onOpenLifeView) {
+                                onOpenLifeView();
+                                // onOpenLifeView 側で menu を閉じる (selectedPersona を引き継ぐため)
+                            }
+                        }}
+                    >
+                        <Activity size={20} />
+                        <div className={styles.label}>
+                            <span>Life View</span>
+                            <span className={styles.subtext}>ようすを見る・自律行動</span>
+                        </div>
+                    </button>
+
                     <button className={styles.actionBtn} onClick={handleDismiss} disabled={loading}>
                         {loading ? <RefreshCw className={styles.spin} size={20} /> : <Home size={20} />}
                         <div className={styles.label}>

@@ -68,23 +68,10 @@ class AutonomousTrackHandler:
         "- 一段落したら track_pause か track_complete で合図できる。"
     )
 
-    available_spells_doc: str = (
-        "[使用可能な Track 操作スペル (自律 Track)]\n"
-        "発動形式は **行頭が `/spell ` で始まる**こと:\n"
-        "  /spell <スペル名> key='value' key2=value2 ...\n"
-        "例: /spell track_complete track_id='t:3'\n"
-        "\n"
-        "Track ID は短縮形式 (t:1, t:2, ...) で指定してください。\n"
-        "\n"
-        "利用可能なスペル名:\n"
-        "- track_pause: 現在の Track を一時停止 (引数: track_id='t:N')\n"
-        "- track_complete: 現在の Track を完了 (引数: track_id='t:N')\n"
-        "- track_create: 新しい Track を作成 (引数: track_type='...', title='...', intent='...', activate=True)\n"
-        "- track_list: 現在の Track 一覧を確認 (引数なし)\n"
-        "- note_open: Note を開く (引数: note_id='...')\n"
-        "- note_close: Note を閉じる (引数: note_id='...')\n"
-        "- note_search: Note を検索 (引数: query='...')"
-    )
+    # NOTE: かつてここに available_spells_doc (Track 操作スペルの一覧) があったが、
+    # head pipeline の SpellListSection がシステムプロンプトに「## スペル」セクション
+    # として同じ内容を常時描画しているため、Track 切替通知への重複掲載は削除した
+    # (2026-06-13)。
 
     def __init__(self, track_manager: TrackManager, manager: Any = None):
         self.track_manager = track_manager
@@ -99,12 +86,16 @@ class AutonomousTrackHandler:
         persona_id: str,
         track: ActionTrack,
         pulse_id: Optional[str] = None,
+        suppress_pulse: bool = False,
     ) -> None:
         """Track が activate されたときに呼ばれる hook。
 
         autonomous Track の連続 Pulse は SubLineScheduler の 5 秒 poll で
         拾われる設計。activate 時に Track コンテキスト (intent 含む) を
         SAIMemory に注入する。
+
+        ``suppress_pulse`` は本 Handler では参照しない (Pulse 起動は
+        SubLineScheduler 側の責務で、activate 時に直接起動しないため)。
         """
         if track.track_type != AUTONOMOUS_TRACK_TYPE:
             return
@@ -194,8 +185,6 @@ class AutonomousTrackHandler:
             f"intent: {intent}",
             "",
             self.pulse_completion_notice,
-            "",
-            self.available_spells_doc,
         ]
         return "\n".join(lines)
 

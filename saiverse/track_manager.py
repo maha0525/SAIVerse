@@ -129,12 +129,16 @@ class TrackManager:
         # set_alert は alert 観察ルートが別にあるためこの hook では発火しない。
         self._status_change_observers: List[Callable[[str, str, Optional[str]], None]] = []
         # Track activate (= running 遷移) を購読する observer 群。
-        # signature: (persona_id: str, track: ActionTrack, pulse_id: Optional[str]) -> None
+        # signature: (persona_id: str, track: ActionTrack, pulse_id: Optional[str],
+        #             suppress_pulse: bool) -> None
         # 用途: pulse_dispatch.md §5 で定義した on_track_activated hook。
         # Handler 側で _inject_track_context や Pulse 起動を担う統一経路。
         # `_status_change_observers` とは別軸で、activate 時のみ発火する
         # (pause / complete / abort 等では発火しない)。
-        self._track_activated_observers: List[Callable[[str, Any, Optional[str]], None]] = []
+        # suppress_pulse=True はライフビューの停止パッケージ (activity/stop) 用:
+        # Handler は Track 切替通知の注入のみ行い、Pulse 起動をスキップする
+        # (docs/intent/persona_activity_view.md §6.3)。
+        self._track_activated_observers: List[Callable[..., None]] = []
 
     # ------------------------------------------------------------------
     # Observer
@@ -221,13 +225,15 @@ class TrackManager:
                 )
 
     def add_track_activated_observer(
-        self, callback: Callable[[str, Any, Optional[str]], None]
+        self, callback: Callable[..., None]
     ) -> None:
         """Track の activate (= running 遷移) を購読する callback を登録する。
 
-        callback signature: (persona_id, track, pulse_id) -> None
+        callback signature: (persona_id, track, pulse_id, suppress_pulse) -> None
         ``track`` は遷移後の ``ActionTrack`` (detached, 読み取り専用想定)。
         ``pulse_id`` は呼び出し元の Pulse ID (Pulse 外なら None)。
+        ``suppress_pulse`` が True のとき、Handler は activate に伴う Pulse 起動を
+        スキップする (Track 切替通知の注入は行う)。
 
         pulse_dispatch.md §5 で定義した on_track_activated hook の登録口。
         Handler 側で track_type をフィルタして自分の責務範囲を判定する
@@ -241,7 +247,7 @@ class TrackManager:
         self._track_activated_observers.append(callback)
 
     def remove_track_activated_observer(
-        self, callback: Callable[[str, Any, Optional[str]], None]
+        self, callback: Callable[..., None]
     ) -> None:
         """登録済みの track_activated observer を解除する。未登録なら何もしない。"""
         try:
@@ -250,12 +256,16 @@ class TrackManager:
             pass
 
     def _notify_track_activated(
-        self, persona_id: str, track: Any, pulse_id: Optional[str]
+        self,
+        persona_id: str,
+        track: Any,
+        pulse_id: Optional[str],
+        suppress_pulse: bool = False,
     ) -> None:
         """Track の activate を全 observer に通知する。各 observer の例外は握り潰さず WARN ログ。"""
         for cb in list(self._track_activated_observers):
             try:
-                cb(persona_id, track, pulse_id)
+                cb(persona_id, track, pulse_id, suppress_pulse)
             except Exception:
                 logging.exception(
                     "[track] track_activated observer raised: cb=%r persona=%s track=%s",
@@ -372,6 +382,18 @@ class TrackManager:
         finally:
             db.close()
 
+    def set_title(self, track_id: str, title: str) -> None:
+        """Track のタイトルを貼り替える。存在しなければ何もしない。"""
+        db = self.SessionLocal()
+        try:
+            track = db.query(ActionTrack).filter_by(track_id=track_id).first()
+            if track is None:
+                return
+            track.title = title
+            db.commit()
+        finally:
+            db.close()
+
     def get_entry_line_role(self, track_id: str) -> str:
         """Read the Track's entry_line_role from its metadata JSON.
 
@@ -438,7 +460,13 @@ class TrackManager:
     # 状態遷移
     # ------------------------------------------------------------------
 
-    def activate(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
+    def activate(
+        self,
+        track_id: str,
+        *,
+        pulse_id: Optional[str] = None,
+        suppress_pulse: bool = False,
+    ) -> ActionTrack:
         """Track をアクティブ化する。
 
         - 同一ペルソナの既存 running が居れば pending に押し出す
@@ -447,6 +475,12 @@ class TrackManager:
         ``pulse_id`` は呼び出し元の Pulse 識別子。Pulse 完了時の deferred apply
         ルートから渡される。観察者 (status_change observer) が pulse_id ベースで
         メタ判断ターンを昇格する用途。Pulse 外 (CLI/テスト) では None で OK。
+
+        ``suppress_pulse=True`` はサイレント activate: track_activated observer に
+        フラグを伝搬し、Handler 側で activate に伴う Pulse 起動をスキップさせる。
+        ライフビューの停止パッケージが「ユーザー待ちに戻す」ために使う —
+        Track 切替通知の SAIMemory 注入は通常通り行われる
+        (docs/intent/persona_activity_view.md §6.3)。
         """
         db = self.SessionLocal()
         try:
@@ -508,7 +542,7 @@ class TrackManager:
         self._notify_status_change(track.persona_id, track_id, pulse_id)
         # Notify track_activated observers (pulse_dispatch.md §5)
         # Handler 側が _inject_track_context や Pulse 起動を担う統一経路。
-        self._notify_track_activated(track.persona_id, track, pulse_id)
+        self._notify_track_activated(track.persona_id, track, pulse_id, suppress_pulse)
         return track
 
     def pause(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
@@ -535,6 +569,24 @@ class TrackManager:
     # ------------------------------------------------------------------
     # Phase 4-e: wait_response timeout の EventScheduler 連携
     # ------------------------------------------------------------------
+
+    def ensure_wait_response_timeout(self, persona_id: str) -> None:
+        """ペルソナの現在 running な Track に wait_response 自動 pause タイマーを
+        張り直す (冪等)。
+
+        wait_response タイマーは Track が running に遷移する瞬間 (activate /
+        create(initial_status=running)) にしか予約されず、EventScheduler は
+        インメモリのため**再起動で失われる**。起動時に DB からロードした
+        running Track にはタイマーが無い状態になる。本メソッドはそれを補う。
+
+        対象外判定 (wait_response 以外 / ACTIVITY_STATE != Active /
+        ペルソナ unloaded 等) はすべて ``wait_response_timeout_provider`` に
+        委ねる (= activate 時と同じ単一ゲート)。同 key で再 schedule しても
+        EventScheduler が上書きするので冪等。
+        """
+        running = self.get_running(persona_id)
+        if running is not None:
+            self._schedule_wait_response_timeout(running)
 
     @staticmethod
     def _wait_response_timeout_key(track_id: str) -> str:

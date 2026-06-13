@@ -14,6 +14,10 @@ class OccupantInfo(BaseModel):
     id: str
     name: str
     avatar: Optional[str] = None
+    # ライフビューの常在インジケータ (persona_activity_view.md §4.2)。
+    # AI persona のみ設定される。users 配列では常に None。
+    activity_state: Optional[str] = None  # Stop / Sleep / Idle / Active
+    activity_label: Optional[str] = None  # running 自律 Track 由来の短い活動ラベル
 
 class ItemInfo(BaseModel):
     id: str
@@ -100,10 +104,30 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
                 persona = manager.personas[oid]
                 avatar = avatar_path_to_url(persona.avatar_image)
 
+                # ライフビューの常在インジケータ: running な自律 Track があれば
+                # その title/intent から短い活動ラベルを作る (LLM 不要のテンプレート整形、
+                # persona_activity_view.md §4.2)。
+                activity_label = None
+                try:
+                    from saiverse.activity_view import build_activity_label
+                    from saiverse.track_manager import STATUS_RUNNING
+                    tm = getattr(manager, "track_manager", None)
+                    if tm is not None:
+                        for track in tm.list_for_persona(oid, statuses=[STATUS_RUNNING]):
+                            if track.track_type == "autonomous":
+                                activity_label = build_activity_label(track.title, track.intent)
+                                break
+                except Exception:
+                    LOGGER.warning(
+                        "[info] Failed to build activity label for %s", oid, exc_info=True,
+                    )
+
                 occupants_list.append({
                     "id": oid,
                     "name": persona.persona_name,
-                    "avatar": avatar
+                    "avatar": avatar,
+                    "activity_state": getattr(persona, "activity_state", None),
+                    "activity_label": activity_label,
                 })
             elif oid == user_id_str:
                 # SAIVerse は現状単一ユーザー (USERID=1) 想定なので

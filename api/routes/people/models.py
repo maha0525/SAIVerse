@@ -126,6 +126,10 @@ class MetaJudgmentConfig(BaseModel):
     retry_backoff_seconds: Optional[int] = None      # default 5
     periodic_interval_minutes: Optional[int] = None  # default 50 (メタ判断自動発話間隔)
     keep_cache_alive: Optional[bool] = None          # default True (TTL 接近で前倒し fire)
+    # ライフビュー「作業のテンポ」: 自律 Track の Pulse 間隔 (秒) のペルソナ既定値。
+    # update_ai は META_JUDGMENT_CONFIG を丸ごと置換するため、ここに定義しないと
+    # SettingsModal 保存時にキーが消える (persona_activity_view.md §7)。
+    autonomous_pulse_interval_seconds: Optional[int] = None  # default 30
 
 
 class AIConfigResponse(BaseModel):

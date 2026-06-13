@@ -1,0 +1,343 @@
+/* ライフビュー: 右からスライドインする観察面パネル。
+   モーダル (= わざわざ見に行く感覚) ではなくサイドパネルにする
+   (persona_activity_view.md §4.3)。背景を遮らず、チャット UI を操作可能にする。 */
+
+.panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 380px;
+    max-width: 92vw;
+    height: 100%;
+    background-color: var(--bg-secondary);
+    border-left: 1px solid var(--border-color);
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    z-index: 900;
+    animation: slideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideIn {
+    from { transform: translateX(40px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--bg-tertiary);
+}
+
+.title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+}
+
+.statusLine {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.stateDot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.building {
+    color: var(--text-secondary);
+}
+
+.closeBtn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: 6px;
+}
+
+.closeBtn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.sectionHeading {
+    margin: 0;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.3rem;
+}
+
+.muted {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    padding: 0.25rem 0;
+}
+
+/* いま */
+.nowItem {
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 0.7rem 0.8rem;
+}
+
+.nowTitle {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.nowIntent {
+    margin-top: 0.25rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.nowMeta {
+    margin-top: 0.4rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.nowIdle {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.nextTick {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+/* 最近 */
+.recentList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.recentItem {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.45rem;
+    font-size: 0.82rem;
+    line-height: 1.4;
+}
+
+.recentTime {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    padding-top: 0.15rem;
+}
+
+.recentBody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+}
+
+.recentHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.recentTag {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    white-space: nowrap;
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tagTrack {
+    background-color: rgba(96, 165, 250, 0.15);
+    color: #60a5fa;
+}
+
+.tagMeta {
+    background-color: rgba(168, 85, 247, 0.15);
+    color: #a855f7;
+}
+
+.star {
+    flex-shrink: 0;
+    color: #eab308;
+    fill: #eab308;
+}
+
+.recentLabel {
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.detailLink {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0.2rem 0;
+    margin-top: 0.2rem;
+    font-size: 0.78rem;
+    color: var(--accent-primary);
+    cursor: pointer;
+}
+
+.detailLink:hover {
+    text-decoration: underline;
+}
+
+/* 自律行動 */
+.toggleBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    width: 100%;
+    padding: 0.6rem;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s;
+}
+
+.toggleBtn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.toggleBtn:not(:disabled):hover {
+    filter: brightness(1.08);
+}
+
+.playBtn {
+    background-color: #16a34a;
+    border-color: #16a34a;
+    color: #ffffff;
+}
+
+.stopBtn {
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.toggleHint {
+    font-size: 0.73rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.intervals {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+}
+
+.intervalRow {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.6rem;
+}
+
+.intervalLabel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+}
+
+.intervalHint {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+}
+
+.intervalInput {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.intervalInput input {
+    width: 64px;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background-color: var(--background);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+.applyBtn {
+    align-self: flex-end;
+    padding: 0.35rem 1rem;
+    border-radius: 8px;
+    border: none;
+    background-color: var(--accent-primary);
+    color: #ffffff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.applyBtn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* モバイル: ほぼ全幅のパネル */
+@media (max-width: 768px) {
+    .panel {
+        width: 100vw;
+        max-width: 100vw;
+    }
+}

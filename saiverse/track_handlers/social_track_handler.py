@@ -82,6 +82,7 @@ class SocialTrackHandler:
         persona_id: str,
         track: ActionTrack,
         pulse_id: Optional[str] = None,
+        suppress_pulse: bool = False,
     ) -> None:
         """Track が activate されたときに呼ばれる hook。
 

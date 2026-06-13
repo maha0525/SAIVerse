@@ -147,6 +147,48 @@
     font-size: 0.95rem;
 }
 
+/* 名前 + 常在インジケータの縦並びコンテナ */
+.occupantInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+/* ライフビューの常在インジケータ (persona_activity_view.md §4.2)。
+   状態ドット + 短い活動ラベル。クリックでライフビューが開く。 */
+.activityChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    align-self: flex-start;
+    padding: 0.1rem 0.4rem 0.1rem 0.25rem;
+    background: none;
+    border: none;
+    border-radius: 9999px;
+    cursor: pointer;
+    max-width: 100%;
+}
+
+.activityChip:hover {
+    background: rgba(96, 165, 250, 0.15);
+}
+
+.activityDot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.activityLabel {
+    font-size: 0.7rem;
+    color: #9ca3af;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .empty {
     font-size: 0.9rem;
     color: #6b7280;

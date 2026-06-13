@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional
 
 from database.models import ActionTrack
 
+from .activity_view import resolve_autonomous_pulse_interval
 from .track_handlers import (
     AutonomousTrackHandler,
 )
@@ -166,6 +167,9 @@ class SubLineScheduler:
         running_tracks = self.track_manager.list_for_persona(
             persona_id, statuses=[STATUS_RUNNING]
         )
+        # ペルソナ単位の Pulse 間隔設定 (META_JUDGMENT_CONFIG) は対象 Track が
+        # 見つかったときだけ読む (lazy)。1 ペルソナにつき高々 1 回の DB 読み。
+        persona_config: Optional[Dict[str, Any]] = None
         for track in running_tracks:
             handler_cls = _TRACK_TYPE_TO_HANDLER_CLASS.get(track.track_type)
             if handler_cls is None:
@@ -178,32 +182,60 @@ class SubLineScheduler:
             if playbook_name is None:
                 continue
 
-            if not self._should_trigger_next_pulse(track, handler_cls):
+            if persona_config is None:
+                persona_config = self._load_persona_judgment_config(persona)
+
+            if not self._should_trigger_next_pulse(track, handler_cls, persona_config):
                 continue
 
             self._trigger_pulse(persona_id, persona, track, playbook_name)
+
+    def _load_persona_judgment_config(self, persona: Any) -> Dict[str, Any]:
+        """ペルソナの META_JUDGMENT_CONFIG (既定値マージ済み) を読む。
+
+        autonomous_pulse_interval_seconds (作業のテンポ、persona_activity_view.md §7)
+        の解決に使う。MetaLayer が無い構成 (テスト等) では空 dict を返し、
+        Handler デフォルトにフォールバックする。
+        """
+        meta_layer = getattr(self.manager, "meta_layer", None)
+        if meta_layer is None:
+            return {}
+        try:
+            config = meta_layer._load_judgment_config(persona)
+            return config if isinstance(config, dict) else {}
+        except Exception:
+            logging.exception(
+                "[subline-scheduler] Failed to load judgment config for persona=%s",
+                getattr(persona, "persona_id", "?"),
+            )
+            return {}
 
     # ------------------------------------------------------------------
     # 判定 + 起動
     # ------------------------------------------------------------------
 
     def _should_trigger_next_pulse(
-        self, track: ActionTrack, handler_cls: type
+        self,
+        track: ActionTrack,
+        handler_cls: type,
+        persona_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """次 Pulse を起動すべきか判定する。
 
         判定基準 (Intent B v0.10 制御点 1, 2):
-        - last_pulse_at から default_pulse_interval (またはトラック metadata
-          上書き値) が経過しているか
+        - last_pulse_at から実効 Pulse 間隔 (Track metadata > ペルソナ設定 >
+          Handler デフォルトの優先順、persona_activity_view.md §7) が経過しているか
         - consecutive_pulse_count が default_max_consecutive_pulses 未満か
           (-1 = 無制限)
         """
         meta = self._read_metadata(track)
 
         # 制御点 1: Pulse 間隔
-        interval = meta.get("pulse_interval_seconds")
-        if interval is None:
-            interval = getattr(handler_cls, "default_pulse_interval", 30)
+        interval = resolve_autonomous_pulse_interval(
+            meta,
+            persona_config,
+            handler_default=getattr(handler_cls, "default_pulse_interval", 30),
+        )
 
         last_pulse_at = meta.get("last_pulse_at")
         if last_pulse_at is not None:

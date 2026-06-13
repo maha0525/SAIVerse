@@ -17,6 +17,9 @@ interface MetaJudgmentConfig {
     retry_backoff_seconds: number | null;
     periodic_interval_minutes: number | null;
     keep_cache_alive: boolean | null;
+    // ライフビュー「作業のテンポ」(persona_activity_view.md §7)。
+    // 本モーダルでは編集しないが、保存時に消さないよう保持が必要。
+    autonomous_pulse_interval_seconds?: number | null;
 }
 
 // 'default' = 設定なし (built-in default を使う)、'on'/'off' = 明示的な値
@@ -131,6 +134,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     // 自動発話間隔は「自律行動マネージャー」の interval 入力に統合済 (Phase 4-e)。
     // META_JUDGMENT_CONFIG.periodic_interval_minutes は autonomy API 経由で永続化される。
     const [metaKeepCacheAlive, setMetaKeepCacheAlive] = useState<TriState>('default');
+    // ロード時の META_JUDGMENT_CONFIG 全体。update_ai は config を丸ごと置換するため、
+    // 本モーダルが編集しないキー (periodic_interval_minutes /
+    // autonomous_pulse_interval_seconds 等、autonomy / activity API が永続化したもの)
+    // を保存時に巻き込んで消さないよう、ここからマージして送る。
+    const [loadedMetaConfig, setLoadedMetaConfig] = useState<Record<string, unknown> | null>(null);
     // 2026-05-09: ユーザー会話 Track の wait_response 自動 pause 閾値 (分)。
     // 空文字列 = 既定値 (30 分) を使う (DB は NULL)。
     const [userConvTimeoutMinutes, setUserConvTimeoutMinutes] = useState<string>('');
@@ -228,6 +236,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
                 // Phase 4-e: NULL → empty string で「既定値を使う」を表現
                 const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
+                setLoadedMetaConfig(mjc ? { ...mjc } : null);
                 setMetaCacheThresholdRatio(
                     mjc?.cache_threshold_ratio != null ? String(mjc.cache_threshold_ratio) : ''
                 );
@@ -340,21 +349,29 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     appearance_image_path: appearanceImagePath || null,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0,  // 0 = clear link
                     // Phase 4-e: 各値が空文字列なら null = 既定値使用。
-                    // 全項目空なら meta_judgment_config 全体を null で送り、DB 側を NULL に戻す。
+                    // 本モーダルが編集しないキー (periodic_interval_minutes 等) は
+                    // ロード時の値からマージして保持する (update_ai は丸ごと置換のため、
+                    // フォーム項目だけで再構築すると autonomy / activity API が永続化した
+                    // 値が消える)。結果が空オブジェクトなら null で DB 側を NULL に戻す。
                     meta_judgment_config: (() => {
+                        const obj: Record<string, unknown> = { ...(loadedMetaConfig ?? {}) };
+                        // null 値 (既定値使用) のキーは落とす
+                        for (const key of Object.keys(obj)) {
+                            if (obj[key] == null) delete obj[key];
+                        }
                         const ratio = metaCacheThresholdRatio.trim();
                         const retries = metaMaxRetries.trim();
                         const backoff = metaRetryBackoffSeconds.trim();
                         const keepCache = metaKeepCacheAlive;
-                        if (!ratio && !retries && !backoff && keepCache === 'default') {
-                            return null;
-                        }
-                        const obj: Record<string, number | boolean> = {};
                         if (ratio) obj.cache_threshold_ratio = parseFloat(ratio);
+                        else delete obj.cache_threshold_ratio;
                         if (retries) obj.max_retries = parseInt(retries);
+                        else delete obj.max_retries;
                         if (backoff) obj.retry_backoff_seconds = parseInt(backoff);
+                        else delete obj.retry_backoff_seconds;
                         if (keepCache !== 'default') obj.keep_cache_alive = (keepCache === 'on');
-                        return obj;
+                        else delete obj.keep_cache_alive;
+                        return Object.keys(obj).length > 0 ? obj : null;
                     })(),
                     // 2026-05-09: 空文字列 = 既定値 (= 0 を送って NULL に倒す)、
                     // それ以外は parseInt 結果。NaN は 0 扱いで既定値復帰。

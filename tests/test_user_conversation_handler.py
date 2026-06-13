@@ -53,12 +53,15 @@ def tm(session_factory):
 
 
 @pytest.fixture
-def manager_stub(persona):
+def manager_stub(persona, session_factory):
     """history_manager.add_to_persona_only と manager.run_sea_user を mock した最小限の manager スタブ。
 
     pulse_dispatch.md §9.3 段階 3 で on_track_activated hook 経由の main_line
     Pulse 起動を導入したため、テストでは ``mgr.run_sea_user`` の呼び出し回数を
     検証することで Pulse 起動の有無を確認する。
+
+    ``SessionLocal`` は実 DB (USERNAME 解決用) を指すよう実体を割り当てる
+    — MagicMock のままだとユーザー名解決のクエリチェーンが MagicMock を返す。
     """
     history_manager = MagicMock()
     persona_obj = MagicMock()
@@ -66,6 +69,7 @@ def manager_stub(persona):
     persona_obj.current_building_id = "test_building"
     mgr = MagicMock()
     mgr.personas = {persona: persona_obj}
+    mgr.SessionLocal = session_factory
     return mgr, history_manager
 
 
@@ -110,6 +114,31 @@ def test_different_user_ids_get_separate_tracks(handler, persona):
     assert t1.track_id != t2.track_id
 
 
+def test_title_uses_username(handler, persona):
+    """タイトルは USERNAME 入りの「対 <名前>（id:N）会話」形式 (旧 user1 形式ではない)。"""
+    track, _ = handler.get_or_create_track(persona, "1")
+    # fixture の USERNAME="tester"
+    assert track.title == "対 tester（id:1）会話"
+
+
+def test_unknown_user_id_falls_back_to_generic_name(handler, persona):
+    """USERNAME を引けない user_id ではフォールバック名「ユーザー」を使う。"""
+    track, _ = handler.get_or_create_track(persona, "999")
+    assert track.title == "対 ユーザー（id:999）会話"
+
+
+def test_legacy_title_is_healed_on_fetch(handler, tm, persona):
+    """旧形式タイトルの既存 Track は再取得時に新形式へ貼り替えられる。"""
+    track, _ = handler.get_or_create_track(persona, "1")
+    # 旧形式に巻き戻してから再取得
+    tm.set_title(track.track_id, "対 user1 会話")
+    healed, was_new = handler.get_or_create_track(persona, "1")
+    assert was_new is False
+    assert healed.title == "対 tester（id:1）会話"
+    # DB にも反映されている
+    assert tm.get(track.track_id).title == "対 tester（id:1）会話"
+
+
 # ---------------------------------------------------------------------------
 # build_track_context: Track コンテキスト本文の組み立て
 # ---------------------------------------------------------------------------
@@ -123,9 +152,10 @@ def test_build_track_context_includes_required_sections(handler, tm, persona):
     assert "user_conversation" in text
     # 完了後挙動 (pulse_completion_notice 由来)
     assert "ユーザーの返答を待つ" in text
-    # 利用可能スペル (available_spells_doc 由来)
-    assert "track_pause" in text
-    assert "track_activate" in text
+    # スペル一覧はシステムプロンプト側 (SpellListSection) に集約したので、
+    # Track 切替通知には載せない。
+    assert "track_pause" not in text
+    assert "利用可能なスペル名" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -318,3 +348,42 @@ def test_handler_works_without_manager_just_skips(tm, persona):
     # manager=None かつ新規作成 → hook は走るが _start_main_line_pulse / _inject_track_context が
     # WARN 出してスキップ。invoke_main_line も新仕様では was_newly_created=True 時には呼ばれない。
     assert invoked == []
+
+
+# ---------------------------------------------------------------------------
+# suppress_pulse: ライフビュー停止パッケージのサイレント activate
+# (persona_activity_view.md §6.3)
+# ---------------------------------------------------------------------------
+
+def test_silent_activate_injects_context_but_skips_pulse(handler, tm, persona, manager_stub):
+    """activate(suppress_pulse=True) では Track 切替通知は注入されるが
+    main_line Pulse は起動しない (= 停止ボタンで自動発言させない)。"""
+    mgr, history_manager = manager_stub
+
+    track, _ = handler.get_or_create_track(persona, "1")
+    # 作成 (initial_status=running) 時点の hook 呼び出し分を控えておく
+    inject_calls_after_create = history_manager.add_to_persona_only.call_count
+    pulse_calls_after_create = mgr.run_sea_user.call_count
+
+    tm.pause(track.track_id)
+    tm.activate(track.track_id, suppress_pulse=True)
+
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    # Track 切替通知は注入される (ペルソナは「ユーザー待ちに戻った」と知る)
+    assert history_manager.add_to_persona_only.call_count == inject_calls_after_create + 1
+    # main_line Pulse は起動しない
+    assert mgr.run_sea_user.call_count == pulse_calls_after_create
+
+
+def test_normal_activate_still_starts_pulse(handler, tm, persona, manager_stub):
+    """通常の activate (suppress_pulse 省略) では従来通り main_line Pulse が起動する。"""
+    mgr, history_manager = manager_stub
+
+    track, _ = handler.get_or_create_track(persona, "1")
+    pulse_calls_after_create = mgr.run_sea_user.call_count
+
+    tm.pause(track.track_id)
+    tm.activate(track.track_id)
+
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    assert mgr.run_sea_user.call_count == pulse_calls_after_create + 1

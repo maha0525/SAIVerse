@@ -243,6 +243,18 @@ class AutonomyManager:
             } if self._last_report else None,
         }
 
+    def get_next_tick_eta_seconds(self) -> Optional[int]:
+        """次のメタ判断 tick までの残り秒数を返す。予約がなければ None。"""
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            return None
+        key = _autonomy_key(self.persona_id)
+        entry = scheduler._entries_by_key.get(key)
+        if entry is None or entry.cancelled:
+            return None
+        remaining = entry.fire_at_ts - time.time()
+        return max(0, int(remaining))
+
     # ------------------------------------------------------------------
     # EventScheduler 連携
     # ------------------------------------------------------------------

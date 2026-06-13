@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
+import LifeView from './LifeView';
 import MemoryModal from './MemoryModal';
 import ScheduleModal from './ScheduleModal';
 import TasksModal from './TasksModal';
@@ -39,7 +40,18 @@ interface Occupant {
     id: string;
     name: string;
     avatar?: string;
+    // ライフビューの常在インジケータ (persona_activity_view.md §4.2)。AI のみ。
+    activity_state?: string | null;  // Stop / Sleep / Idle / Active
+    activity_label?: string | null;  // running 自律 Track 由来の短い活動ラベル
 }
+
+// 状態ドットの色 (LifeView 側のバッジと同じ対応)
+const ACTIVITY_DOT_COLORS: Record<string, string> = {
+    Active: '#22c55e',
+    Idle: '#eab308',
+    Sleep: '#3b82f6',
+    Stop: '#6b7280',
+};
 
 interface Item {
     id: string;
@@ -73,6 +85,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     const [showSettings, setShowSettings] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
     const [showBuildingSettings, setShowBuildingSettings] = useState(false);
+    // ライフビュー (観察面サイドパネル)。インジケータ直クリックでも開くため、
+    // PersonaMenu の selectedPersona とは独立に対象を保持する。
+    const [lifeViewPersona, setLifeViewPersona] = useState<Occupant | null>(null);
 
     // Keep track of which persona is active for modals
     // When opening a modal, we use selectedPersona's ID.
@@ -150,6 +165,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         setShowSettings(false);
         setShowInventory(false);
         setShowBuildingSettings(false);
+        setLifeViewPersona(null);
     }, [details?.id]);
 
     // Polling for real-time updates when sidebar is open
@@ -240,6 +256,31 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             return;
         }
 
+        applyOpen();
+    };
+
+    // ライフビューの「詳しく見る」からメモリーモーダル (Pulse タイムライン) を開く。
+    // openModal と同じ ID 整合性対策 (feedback_modal_id_integrity.md): 別ペルソナの
+    // モーダルが開いていたら全部閉じてから次 tick で開き直す。
+    const openMemoryFor = (target: Occupant) => {
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory;
+        const sameTarget = anyOpen && activeModalPersonaId === target.id;
+
+        const applyOpen = () => {
+            setActiveModalPersonaId(target.id);
+            setActiveModalPersonaName(target.name);
+            setShowMemory(true);
+        };
+
+        if (anyOpen && !sameTarget) {
+            setShowMemory(false);
+            setShowSchedule(false);
+            setShowTasks(false);
+            setShowSettings(false);
+            setShowInventory(false);
+            setTimeout(applyOpen, 0);
+            return;
+        }
         applyOpen();
     };
 
@@ -347,7 +388,30 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                                     onError={(e) => { e.currentTarget.src = "https://placehold.co/48x48?text=?"; }}
                                                 />
                                             </div>
-                                            <span className={styles.occupantName}>{user.name}</span>
+                                            <div className={styles.occupantInfo}>
+                                                <span className={styles.occupantName}>{user.name}</span>
+                                                {/* 常在インジケータ: 状態ドット + 活動ラベル。
+                                                    クリックでライフビューを直接開く (persona_activity_view.md §4.2) */}
+                                                {user.activity_state && (
+                                                    <button
+                                                        className={styles.activityChip}
+                                                        title="ライフビューを開く"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setLifeViewPersona(user);
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className={styles.activityDot}
+                                                            style={{ backgroundColor: ACTIVITY_DOT_COLORS[user.activity_state] || '#9ca3af' }}
+                                                        />
+                                                        <span className={styles.activityLabel}>
+                                                            {user.activity_label
+                                                                || (user.activity_state === 'Active' ? '活動中' : '')}
+                                                        </span>
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                     ))
                                 ) : (
@@ -429,6 +493,11 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         personaName={selectedPersona.name}
                         avatarUrl={selectedPersona.avatar || "/api/static/icons/host.png"}
                         buildingId={details?.id ?? currentBuildingId ?? null}
+                        onOpenLifeView={() => {
+                            const target = selectedPersona;
+                            setSelectedPersona(null);
+                            setLifeViewPersona(target);
+                        }}
                         onOpenMemory={() => openModal('memory')}
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenTasks={() => openModal('tasks')}
@@ -482,6 +551,21 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         onClose={() => setShowBuildingSettings(false)}
                         buildingId={details.id}
                         onSaved={() => fetchDetails()}
+                    />
+                )}
+
+                {/* ライフビュー (観察面サイドパネル) */}
+                {lifeViewPersona && (
+                    <LifeView
+                        isOpen={!!lifeViewPersona}
+                        onClose={() => setLifeViewPersona(null)}
+                        personaId={lifeViewPersona.id}
+                        personaName={lifeViewPersona.name}
+                        onOpenMemory={() => {
+                            const target = lifeViewPersona;
+                            setLifeViewPersona(null);
+                            if (target) openMemoryFor(target);
+                        }}
                     />
                 )}
             </div>

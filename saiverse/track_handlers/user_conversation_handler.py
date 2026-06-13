@@ -57,24 +57,10 @@ class UserConversationTrackHandler:
         "- Pulse 完了後の挙動: ユーザーの返答を待つ。次のイベントが来るまで他のことを考えなくて良い。"
     )
 
-    available_spells_doc: str = (
-        "[使用可能な Track 操作スペル]\n"
-        "発話の中に独白として埋め込んで使用できます。必要なときだけ使ってください。\n"
-        "発動形式は **行頭が `/spell ` で始まる**こと:\n"
-        "  /spell <スペル名> key='value' key2=value2 ...\n"
-        "例: /spell track_create track_type='autonomous' title='メモ整理' activate=True\n"
-        "\n"
-        "Track ID は短縮形式 (t:1, t:2, ...) で指定してください。\n"
-        "\n"
-        "利用可能なスペル名:\n"
-        "- track_pause: 現在の Track を一時停止 (引数: track_id='t:N')\n"
-        "- track_activate: 別の Track をアクティブ化 (引数: track_id='t:N')\n"
-        "- track_create: 新しい Track を作成 (引数: track_type='...', title='...', intent='...', activate=True)\n"
-        "- track_list: 現在の Track 一覧を確認 (引数なし)\n"
-        "- note_open: Note を開く (引数: note_id='...')\n"
-        "- note_close: Note を閉じる (引数: note_id='...')\n"
-        "- note_search: Note を検索 (引数: query='...')"
-    )
+    # NOTE: かつてここに available_spells_doc (Track 操作スペルの一覧) があったが、
+    # head pipeline の SpellListSection (sea/head_pipeline/sections/spell_list.py) が
+    # システムプロンプトに「## スペル」セクションとして同じ内容を常時描画している。
+    # Track 切替通知に重複して載せるのは無駄なので削除した (2026-06-13)。
 
     # v0.10 拡張: Pulse サイクル制御属性 (Intent B v0.10)
     # 対ユーザー会話 Track は応答待ち型なので、Pulse 連続実行の概念は適用されない。
@@ -127,12 +113,15 @@ class UserConversationTrackHandler:
         """
         existing = self._find_existing(persona_id, user_id)
         if existing is not None:
+            # 既存 Track のタイトルが旧形式 (対 userN 会話) のままなら、
+            # ユーザー名入りの新形式に貼り替える (自己修復)。
+            self._heal_legacy_title(existing, user_id)
             return existing, False
 
         track_id = self.track_manager.create(
             persona_id=persona_id,
             track_type="user_conversation",
-            title=f"対 user{user_id} 会話",
+            title=self._make_title(user_id),
             is_persistent=True,
             output_target="building:current",
             metadata=json.dumps({"user_id": user_id}, ensure_ascii=False),
@@ -159,6 +148,60 @@ class UserConversationTrackHandler:
                 return t
         return None
 
+    def _make_title(self, user_id: str) -> str:
+        """対ユーザー Track のタイトルを組み立てる。
+
+        ユーザー名 (User.USERNAME) を解決して「対 <名前>（id:<user_id>）会話」
+        の形にする。名前を引けない場合は「対 ユーザー（id:<user_id>）会話」。
+        """
+        name = self._resolve_user_name(user_id)
+        return f"対 {name}（id:{user_id}）会話"
+
+    def _resolve_user_name(self, user_id: str) -> str:
+        """user_id (USERID) から USERNAME を引く。引けなければ「ユーザー」。"""
+        session_factory = getattr(self.manager, "SessionLocal", None) if self.manager else None
+        if session_factory is None:
+            return "ユーザー"
+        db = session_factory()
+        try:
+            from database.models import User as UserModel
+            user = db.query(UserModel).filter_by(USERID=int(user_id)).first()
+            if user is not None and user.USERNAME:
+                return user.USERNAME
+        except (TypeError, ValueError):
+            pass
+        except Exception:
+            logging.warning(
+                "[user-conv-handler] Failed to resolve username for user_id=%s",
+                user_id, exc_info=True,
+            )
+        finally:
+            db.close()
+        return "ユーザー"
+
+    def _heal_legacy_title(self, track: ActionTrack, user_id: str) -> None:
+        """旧形式タイトル (対 userN 会話) を新形式に貼り替える自己修復。
+
+        新形式の生成と毎回付き合わせ、ズレていれば DB を更新して
+        渡された detached track オブジェクトにも反映する。ユーザー名解決に
+        失敗した (= フォールバック「ユーザー」) ときは貼り替えない
+        — 名前が引けない瞬間に正しい名前を消してしまわないため。
+        """
+        desired = self._make_title(user_id)
+        if track.title == desired:
+            return
+        if "（id:" not in desired:  # 念のため (理論上は常に含む)
+            return
+        # 名前解決に失敗したフォールバックタイトルでは上書きしない。
+        if desired == f"対 ユーザー（id:{user_id}）会話":
+            return
+        self.track_manager.set_title(track.track_id, desired)
+        track.title = desired
+        logging.info(
+            "[user-conv-handler] Healed legacy track title -> %r (track=%s)",
+            desired, track.track_id,
+        )
+
     # ------------------------------------------------------------------
     # Track コンテキスト構築 / 注入
     # ------------------------------------------------------------------
@@ -177,8 +220,6 @@ class UserConversationTrackHandler:
             f"あなたは Track 「{title}」 (id={sid}, type={track.track_type}) に入りました。",
             "",
             self.pulse_completion_notice,
-            "",
-            self.available_spells_doc,
         ]
         return "\n".join(lines)
 
@@ -246,6 +287,7 @@ class UserConversationTrackHandler:
         persona_id: str,
         track: ActionTrack,
         pulse_id: Optional[str] = None,
+        suppress_pulse: bool = False,
     ) -> None:
         """Track が activate (= running 遷移) されたときに呼ばれる hook。
 
@@ -259,19 +301,32 @@ class UserConversationTrackHandler:
 
         ``pulse_id`` は activate を起こした Pulse の ID (Pulse 外なら None)。
         deferred apply 経路で渡されてくる元のメタ判断 Pulse の id。
+
+        ``suppress_pulse=True`` (サイレント activate) では main_line Pulse 起動を
+        スキップする。ライフビューの停止パッケージが「待機に戻す」とき、停止
+        ボタンを押した瞬間にペルソナが自動発言する事故を防ぐ。Track 切替通知の
+        注入は行う — ペルソナの認知としては「ユーザー待ちに戻った」と知るべき
+        (docs/intent/persona_activity_view.md §6.3)。
         """
         if track.track_type != "user_conversation":
             # 他種別の Track には反応しない (種別固有の振る舞いは各 Handler が担う)
             return
         logging.info(
-            "[user-conv-handler] on_track_activated: track=%s persona=%s pulse=%s",
-            track.track_id, persona_id, pulse_id,
+            "[user-conv-handler] on_track_activated: track=%s persona=%s pulse=%s suppress_pulse=%s",
+            track.track_id, persona_id, pulse_id, suppress_pulse,
         )
         # Track 切替通知を SAIMemory に注入する。これにより:
         # - ケース1 (ユーザー発話 → alert → metalayer → activate)
         # - ケース2 (自律 tick → metalayer → activate)
         # の両方で同じ経路で通知が出る (pulse_dispatch.md §5.3)
         self._inject_track_context(persona_id, track)
+
+        if suppress_pulse:
+            logging.info(
+                "[user-conv-handler] suppress_pulse=True; skipping main_line pulse for track=%s",
+                track.track_id,
+            )
+            return
 
         # main_line Pulse を起動する (pulse_dispatch.md §9.3 段階 3)。
         # ユーザー発話メッセージは別経路 (building_histories →

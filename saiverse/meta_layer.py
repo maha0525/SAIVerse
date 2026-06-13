@@ -140,6 +140,11 @@ class MetaLayer:
         "retry_backoff_seconds": 5,       # リトライ間の待機秒数
         "periodic_interval_minutes": 50,  # メタ判断 Pulse の自動発話間隔 (旧 AutonomyManager.interval_minutes)
         "keep_cache_alive": True,         # True: cache TTL 接近で前倒し fire / False: TTL 無視 (低頻度ペルソナ向け)
+        # 自律 Track の Pulse 間隔 (秒) のペルソナ単位デフォルト。Track metadata
+        # の pulse_interval_seconds が個別上書き (優先順: Track metadata > ここ >
+        # AutonomousTrackHandler.default_pulse_interval)。ライフビューの
+        # 「作業のテンポ」設定の永続化先 (persona_activity_view.md §7)。
+        "autonomous_pulse_interval_seconds": 30,
     }
 
     def _load_judgment_config(self, persona: Any) -> Dict[str, Any]:
