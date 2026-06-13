@@ -86,3 +86,12 @@ new_msg["timestamp"] = int(time.time())
 ## ログ
 
 - 2026-05-10: pulse_dispatch.md §9.5 段階 5 完了後の実機テスト中に発見、起票
+- 2026-06-11: 同根の別経路を発見・修正。`builtin_data/tools/meta_judgment_finalize.py` が
+  メタ判断メッセージを `datetime.utcnow().isoformat()` (= naive UTC ISO) で書いており、
+  `_timestamp_to_epoch` がプロセスの system TZ (今回は JST) で naive を解釈して
+  created_at が 9h **手前** にずれていた (ruler_region_mistvale_city_a_city_a で実機確認、
+  stored=1781148122 vs 正=1781180522、差 32400s)。案 A に倣い tz-aware UTC
+  (`datetime.now(timezone.utc).isoformat()`) に修正。**`history_manager._prepare_message`
+  本体と他の `datetime.now().isoformat()` プロデューサ群は未修正のまま** (本 issue は継続)。
+  根治には naive を渡すプロデューサを全て tz-aware に揃えるか、`_timestamp_to_epoch` を
+  naive=UTC 固定にした上で local naive プロデューサを一掃する必要がある。

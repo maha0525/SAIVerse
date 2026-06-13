@@ -80,11 +80,6 @@ def test_pulse_completion_notice_mentions_meta_judge():
     assert "メタレイヤー" in AutonomousTrackHandler.pulse_completion_notice
 
 
-def test_available_spells_doc_includes_track_complete():
-    """自律 Track 用のスペル一覧に track_complete が含まれる (応答待ち型と違う点)。"""
-    assert "track_complete" in AutonomousTrackHandler.available_spells_doc
-
-
 # ---------------------------------------------------------------------------
 # list_active_autonomous_tracks
 # ---------------------------------------------------------------------------
@@ -133,8 +128,8 @@ def test_build_track_context_includes_required_sections(handler, tm, persona):
     assert "過去の会話を整理する" in text
     # 完了後挙動 notice
     assert "メタレイヤー" in text
-    # スペル一覧
-    assert "track_complete" in text
+    # スペル一覧はシステムプロンプト側 (SpellListSection) に集約したので載せない。
+    assert "利用可能なスペル名" not in text
 
 
 def test_build_track_context_handles_missing_intent(handler, tm, persona):

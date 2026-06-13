@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.context import (
@@ -199,7 +199,12 @@ def meta_judgment_finalize(
                 adapter.append_persona_message({
                     "role": "assistant",
                     "content": final_text,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    # tz-aware UTC ISO 文字列で渡す。naive ISO
+                    # (datetime.utcnow().isoformat()) を渡すと adapter の
+                    # _timestamp_to_epoch が naive をプロセスの system TZ で
+                    # 解釈し、created_at が ±9h ずれる
+                    # (docs/issues/history_manager_timestamp_tz_drift.md と同根)。
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "metadata": {"tags": ["meta_judgment"]},
                     "line_role": "meta_judgment",
                     "scope": scope,
