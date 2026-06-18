@@ -70,7 +70,7 @@ def memory_read_around(
     all_msgs = surrounding[:insert_idx] + [anchor] + surrounding[insert_idx:]
 
     # Format as conversation log
-    lines = []
+    lines = ["```"]
     for msg in all_msgs:
         dt = datetime.fromtimestamp(msg.created_at)
         ts = dt.strftime("%Y-%m-%d %H:%M")
@@ -79,9 +79,10 @@ def memory_read_around(
         marker = " <<<" if msg.id == message_id else ""
         lines.append(f"[{role}] {ts}: {content}{marker}")
 
-    if not lines:
+    if len(lines) == 1:
         return "(no messages found)"
 
+    lines.append("```")
     return "\n\n".join(lines)
 
 

@@ -86,11 +86,15 @@ def memory_recall_unified(
             end = datetime.fromtimestamp(hit.end_time).strftime("%Y-%m-%d %H:%M") if hit.end_time else "?"
             lines.append(f"[{i}] Chronicle Lv{hit.level} | {start} ~ {end} | {hit.message_count}件")
             lines.append(f"    URI: {hit.uri}")
-            lines.append(f"    {hit.content}")
+            lines.append("```")
+            lines.append(hit.content)
+            lines.append("```")
         elif hit.source_type == "fragment":
             date_str = f" ({hit.source_date})" if hit.source_date else ""
             lines.append(f"[{i}] Fragment{date_str}")
-            lines.append(f"    {hit.title}: {hit.content}")
+            lines.append("```")
+            lines.append(f"{hit.title}: {hit.content}")
+            lines.append("```")
             lines.append(f"    URI: {hit.uri}")
         else:
             lines.append(f"[{i}] Memopedia: {hit.title}")
@@ -98,7 +102,9 @@ def memory_recall_unified(
                 lines.append(f"    カテゴリ: {hit.category}")
             lines.append(f"    URI: {hit.uri}")
             if hit.content:
-                lines.append(f"    概要: {hit.content}")
+                lines.append("```")
+                lines.append(f"概要: {hit.content}")
+                lines.append("```")
         lines.append("")
 
     return "\n".join(lines)

@@ -56,7 +56,9 @@ def chronicle_context_down(entry_id: str) -> str:
         f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
         f"URI: {entry_uri}",
         "",
+        "```",
         entry.content,
+        "```",
         "",
     ]
 
@@ -68,6 +70,7 @@ def chronicle_context_down(entry_id: str) -> str:
         # Raw messages
         from sai_memory.memory.storage import get_message
         lines.append(f"--- 元のメッセージ ({len(entry.source_ids)}件) ---")
+        lines.append("```")
 
         with adapter._db_lock:
             messages = []
@@ -85,6 +88,7 @@ def chronicle_context_down(entry_id: str) -> str:
 
         if not messages:
             lines.append("(元のメッセージを取得できませんでした)")
+        lines.append("```")
 
     else:
         # Child Chronicle entries
@@ -99,7 +103,9 @@ def chronicle_context_down(entry_id: str) -> str:
                 child_uri = f"saiverse://self/chronicle/entry/{child.id}"
                 lines.append(f"[{child.id}] {_fmt_time(child.start_time)} ~ {_fmt_time(child.end_time)} | {child.message_count}件")
                 lines.append(f"URI: {child_uri}")
+                lines.append("```")
                 lines.append(child.content)
+                lines.append("```")
                 lines.append("")
 
     return "\n".join(lines)

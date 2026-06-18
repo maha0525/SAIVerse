@@ -112,7 +112,9 @@ def chronicle_search(
         lines.append(f"[{i}] ({entry.id}) Lv.{entry.level} | {start} ~ {end} | {entry.message_count}msg")
 
         # Show full content (chronicles are summaries, not long)
-        lines.append(f"    {entry.content.strip()}")
+        lines.append("```")
+        lines.append(entry.content.strip())
+        lines.append("```")
         lines.append("")
 
     return "\n".join(lines)

@@ -109,12 +109,14 @@ def get_since_last_user_conversation(
         raw_messages = messages_since[-max_raw_messages:]
         output_parts.append("")
         output_parts.append(f"【直近のログ】(最新{len(raw_messages)}件)")
+        output_parts.append("```")
         for msg in raw_messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")[:200]  # Truncate long messages
             if len(msg.get("content", "")) > 200:
                 content += "..."
             output_parts.append(f"- [{role}] {content}")
+        output_parts.append("```")
 
     return "\n".join(output_parts)
 

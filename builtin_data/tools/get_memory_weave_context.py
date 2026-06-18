@@ -270,7 +270,7 @@ def _get_track_unprocessed_messages_text(
     if not unprocessed:
         return ""
 
-    lines: List[str] = []
+    lines: List[str] = ["```"]
     for msg_id, role, content, created_at in unprocessed:
         try:
             ts = _dt.fromtimestamp(int(created_at)).strftime("%Y-%m-%d %H:%M")
@@ -283,6 +283,7 @@ def _get_track_unprocessed_messages_text(
         if len(content_clean) > 500:
             content_clean = content_clean[:500] + "…"
         lines.append(f"- [{ts}] {role_label}: {content_clean}")
+    lines.append("```")
     return "\n".join(lines)
 
 

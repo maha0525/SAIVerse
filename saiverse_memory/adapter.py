@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -804,7 +804,7 @@ class SAIMemoryAdapter:
             LOGGER.warning("SAIMemory recall failed for %s: %s", thread_id, exc)
             return ""
 
-        lines: List[str] = ["[Memory Recall]"]
+        lines: List[str] = ["[Memory Recall]", "```"]
         exclude_created_values: set[int] = set()
         if exclude_created_at is not None:
             if isinstance(exclude_created_at, (list, tuple, set)):
@@ -837,13 +837,17 @@ class SAIMemoryAdapter:
                 entry = f"- {role} @ {ts}: {content}"
                 if score is not None and msg.id == seed.id:
                     entry = f"- {role} @ {ts} (score={score:.3f}): {content}"
-                candidate = lines + [entry]
+                candidate = lines + [entry, "```"]
                 combined = "\n".join(candidate)
                 if len(combined) > max_chars:
+                    lines.append("```")
                     return "\n".join(lines)
                 lines.append(entry)
 
-        return "" if len(lines) == 1 else "\n".join(lines)
+        if len(lines) <= 2:
+            return ""
+        lines.append("```")
+        return "\n".join(lines)
 
     def recall_hybrid(
         self,
@@ -967,7 +971,7 @@ class SAIMemoryAdapter:
             return ""
 
         # Format output (same format as recall_snippet)
-        lines: List[str] = ["[Memory Recall]"]
+        lines: List[str] = ["[Memory Recall]", "```"]
         seen: set[str] = set()
         for seed, bundle, score in groups:
             for msg, rendered in bundle:
@@ -985,13 +989,17 @@ class SAIMemoryAdapter:
                 entry = f"- {role} @ {ts}: {content}"
                 if msg.id == seed.id:
                     entry = f"- {role} @ {ts} (score={score:.4f}): {content}"
-                candidate = lines + [entry]
+                candidate = lines + [entry, "```"]
                 combined = "\n".join(candidate)
                 if len(combined) > max_chars:
+                    lines.append("```")
                     return "\n".join(lines)
                 lines.append(entry)
 
-        return "" if len(lines) == 1 else "\n".join(lines)
+        if len(lines) <= 2:
+            return ""
+        lines.append("```")
+        return "\n".join(lines)
 
     def update_overview(self, building_id: str, provider) -> Optional[str]:
         if not self._ready or provider is None:
@@ -1907,6 +1915,8 @@ class SAIMemoryAdapter:
             return int(time.time())
         try:
             dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             return int(dt.timestamp())
         except Exception:
             return int(time.time())

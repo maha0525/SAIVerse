@@ -73,13 +73,15 @@ def messagelog_get_around(
         dt_str = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
         return f"No messages found near {dt_str} (timestamp={ts})"
 
-    lines: list[str] = []
+    lines: list[str] = ["```"]
     for msg in messages:
         dt_str = datetime.datetime.fromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M:%S")
         role = msg.role or "unknown"
         lines.append(f"[{dt_str}] ({role})\n{msg.content}")
+        lines.append("---")
 
-    return "\n---\n".join(lines)
+    lines.append("```")
+    return "\n".join(lines)
 
 
 def schema() -> ToolSchema:

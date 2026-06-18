@@ -58,7 +58,9 @@ def chronicle_read_detail(
         f"Level: {entry.level} | {start} ~ {end} | {entry.message_count}件のメッセージ",
         f"Consolidated: {'Yes' if entry.is_consolidated else 'No'}",
         "",
+        "```",
         entry.content,
+        "```",
     ]
 
     if include_sources and entry.source_ids:
@@ -67,6 +69,7 @@ def chronicle_read_detail(
         if entry.level == 1:
             # Level 1: sources are message UUIDs
             parts.append(f"--- 元のメッセージ ({len(entry.source_ids)}件, 最大{max_source_messages}件表示) ---")
+            parts.append("```")
 
             count = 0
             with adapter._db_lock:
@@ -82,6 +85,7 @@ def chronicle_read_detail(
 
             if count == 0:
                 parts.append("(元のメッセージを取得できませんでした)")
+            parts.append("```")
         else:
             # Level 2+: sources are child arasuji entry UUIDs
             parts.append(f"--- 子エントリ ({len(entry.source_ids)}件) ---")
@@ -93,8 +97,9 @@ def chronicle_read_detail(
                         c_start = datetime.fromtimestamp(child.start_time).strftime("%Y-%m-%d %H:%M") if child.start_time else "?"
                         c_end = datetime.fromtimestamp(child.end_time).strftime("%Y-%m-%d %H:%M") if child.end_time else "?"
                         parts.append(f"[{child.id}] Lv.{child.level} | {c_start} ~ {c_end} | {child.message_count}msg")
-                        # Show full child content
-                        parts.append(f"  {child.content}")
+                        parts.append("```")
+                        parts.append(child.content)
+                        parts.append("```")
                         parts.append("")
 
     return "\n".join(parts)

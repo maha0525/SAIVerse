@@ -76,7 +76,9 @@ def chronicle_context_up(entry_id: str) -> str:
         f"URI: {parent_uri}",
         f"期間: {_fmt_time(parent.start_time)} ~ {_fmt_time(parent.end_time)} | {parent.message_count}件",
         "",
+        "```",
         parent.content,
+        "```",
         "",
     ]
 
@@ -94,7 +96,9 @@ def chronicle_context_up(entry_id: str) -> str:
             sib_uri = f"saiverse://self/chronicle/entry/{sib.id}"
             lines.append(f"[{sib.id}] {_fmt_time(sib.start_time)} ~ {_fmt_time(sib.end_time)} | {sib.message_count}件")
             lines.append(f"URI: {sib_uri}")
+            lines.append("```")
             lines.append(sib.content)
+            lines.append("```")
             lines.append("")
 
     return "\n".join(lines)

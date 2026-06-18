@@ -183,7 +183,7 @@ def memory_search_brief(
     top_ids = sorted_ids[:topk]
 
     # Format as brief snippets with IDs
-    lines = []
+    lines = ["```"]
     for i, msg_id in enumerate(top_ids, start=1):
         msg = message_data[msg_id]
         score = message_scores[msg_id]
@@ -198,6 +198,7 @@ def memory_search_brief(
 
         lines.append(f"[{i}] ({msg_id}) {ts} {role}: {snippet} (score:{score:.4f})")
 
+    lines.append("```")
     return "\n".join(lines)
 
 
