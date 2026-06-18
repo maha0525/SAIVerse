@@ -307,7 +307,7 @@ class PulseContext:
         """
         current = self.current_line()
         if current is None:
-            return {"line_role": None, "line_id": None, "origin_track_id": None, "scope": None}
+            return {"line_role": None, "line_id": None, "origin_track_id": None, "scope": None, "aspect": None}
         return {
             "line_role": current.role,
             "line_id": current.line_id,
@@ -315,6 +315,7 @@ class PulseContext:
             # アスペクト由来の scope (§10.3)。legacy frame では None で、
             # _store_memory 側で SQL 既定 'committed' に落ちる。
             "scope": current.scope,
+            "aspect": current.aspect.value if current.aspect is not None else None,
         }
 
     # ------------------------------------------------------------------

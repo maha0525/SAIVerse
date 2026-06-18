@@ -340,6 +340,57 @@ def _parse_fuzzy_spell_args(args_raw: str) -> Optional[dict]:
     return None
 
 
+def _coerce_arg_to_type(value: Any, json_type: str) -> Any:
+    """Coerce a single spell arg *value* toward its declared JSON Schema *json_type*.
+
+    LLM が spell 行を生成する際、``"index": "2"`` のように integer / number /
+    boolean を文字列でクオートしてしまうケースが頻出する。そのまま tool に渡すと
+    ``index < 0`` のような比較が ``str < int`` で TypeError になる (track_task_done
+    の実例)。schema の宣言型に向けて文字列値だけを変換する。
+
+    変換できない値はそのまま返し (tool 側のバリデーションに委ねる)、すでに正しい
+    型の値は touch しない。型の緩めではなく schema 宣言型への正規化。
+    """
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    try:
+        if json_type == "integer":
+            return int(stripped)
+        if json_type == "number":
+            return float(stripped)
+        if json_type == "boolean":
+            low = stripped.lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+            return value
+    except ValueError:
+        return value
+    return value
+
+
+def _coerce_spell_args(tool_name: str, tool_args: dict) -> dict:
+    """Coerce spell args toward the tool's declared JSON Schema types.
+
+    LLM がクオートした数値 / 真偽値 (``"2"`` / ``"true"``) を schema の宣言型に
+    合わせて正規化する。schema が無い / properties に無いキーは素通し。
+    """
+    schema = SPELL_TOOL_SCHEMAS.get(tool_name)
+    if schema is None:
+        return tool_args
+    props = (schema.parameters or {}).get("properties") or {}
+    if not props:
+        return tool_args
+    coerced = {}
+    for key, value in tool_args.items():
+        prop = props.get(key)
+        json_type = prop.get("type") if isinstance(prop, dict) else None
+        coerced[key] = _coerce_arg_to_type(value, json_type) if json_type else value
+    return coerced
+
+
 def _normalize_spell_line(tool_name: str, tool_args: dict) -> str:
     """Produce the canonical /spell line for a given tool name and args dict."""
     return f"/spell name='{tool_name}' args={json.dumps(tool_args, ensure_ascii=False)}"
@@ -702,6 +753,10 @@ async def _run_spell_tool_async(
         LOGGER.error("[sea][spell] %s", result_str)
         return result_str, None
 
+    # LLM がクオートした数値 / 真偽値 (``"index": "2"``) を schema 宣言型へ正規化。
+    # これを怠ると ``index < 0`` が ``str < int`` で TypeError になる。
+    tool_args = _coerce_spell_args(tool_name, tool_args)
+
     # Wide try: covers persona_context setup, executor dispatch, tool
     # invocation. Any failure becomes a string result so the outer spell
     # loop can still proceed and, more importantly, the persona's utterance
@@ -975,10 +1030,13 @@ async def _run_spell_loop(
     pipeline_streaming_state: Optional[dict] = None,
     action_text: Optional[str] = None,
 ) -> Tuple[str, str, int]:
-    """Execute the spell loop with parallel spell execution per LLM round.
+    """Execute the spell loop, running each round's spells sequentially.
 
-    Each round: find ALL /spell lines → execute in parallel → re-invoke LLM once.
-    Sequential rounds handle dependency chains (result of round N used in round N+1).
+    Each round: find ALL /spell lines → execute them sequentially in the order
+    they were cast → re-invoke LLM once. (Sequential because spells can mutate
+    shared/physical state that races under concurrency — see the execution
+    block below.) Sequential rounds handle dependency chains (result of round
+    N used in round N+1).
 
     Returns ``(full_merged_text, final_continuation, loop_count)``:
 
@@ -1062,12 +1120,21 @@ async def _run_spell_loop(
             # not leak into the bubble.
             text_before = text[:all_parsed[0][2].start()].rstrip()
 
+            # text_after = text following the LAST spell line. The persona
+            # often writes a natural-language continuation after invoking a
+            # spell (e.g. explaining what it's about to do).  Dropping this
+            # text loses persona utterance from SAIMemory, Building history,
+            # and the retry-LLM context.
+            text_after = text[all_parsed[-1][2].end():].strip()
+
             # Canonical assistant message: text_before + ALL normalized spell
-            # lines (valid + unknown, in textual order) so the persona's record
-            # shows exactly what it tried — including the misfired invocation,
-            # which the following [Spell Error: ...] user message corrects.
+            # lines (valid + unknown, in textual order) + text_after so the
+            # persona's record shows exactly what it tried — including the
+            # misfired invocation, which the following [Spell Error: ...]
+            # user message corrects — and any surrounding prose.
             all_spell_lines_normalized = "\n".join(norm for _, _, _, norm in all_parsed)
-            assistant_content = (text_before + "\n" + all_spell_lines_normalized).strip()
+            assistant_content = (text_before + "\n" + all_spell_lines_normalized
+                                 + ("\n" + text_after if text_after else "")).strip()
             messages.append({"role": "assistant", "content": assistant_content})
 
             # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
@@ -1101,7 +1168,20 @@ async def _run_spell_loop(
                     state["_spell_loop_origin_id"] = _spell_origin_id
                     state["_spell_loop_count"] = loop_count
 
-            # Execute all spells in parallel.
+            # Execute this round's spells SEQUENTIALLY, in the textual order they
+            # were cast. Spells frequently mutate state that is unsafe under
+            # concurrency: run_playbook sub-lines share one
+            # PulseContext._line_stack (a lock-free LIFO that assumes a single
+            # nested line of execution — concurrent siblings corrupt parent /
+            # track inference and pop each other's frames), device spells drive
+            # physical hardware (a photo taken while move_head is still moving
+            # blurs), Track ops mutate cognitive state. The previous design ran
+            # them in parallel via asyncio.gather on executor threads and raced
+            # on all of the above. Personas also implicitly assume "spells run
+            # in the order I cast them". Sequential-by-position honors that and
+            # removes the race; the added latency is acceptable (long-running
+            # work should not be fanned out from a single utterance anyway).
+            #
             # ``messages`` is snapshotted into a contextvar via persona_context so
             # spells like run_playbook can fork their sub-line from the parent
             # LLM node's actual conversation context (intent A v0.14).
@@ -1109,10 +1189,19 @@ async def _run_spell_loop(
             # run_playbook use the metadata to forward sub-playbook media
             # (image generation results, etc.) up to the parent line so the
             # next LLM round can attach them as multimodal content.
-            valid_results: List[Tuple[str, Optional[Dict[str, Any]]]] = list(await asyncio.gather(*[
-                _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback, messages=messages)
-                for name, args, _, _ in valid_spells
-            ]))
+            #
+            # Sort by match position so results stay aligned with textual order;
+            # the downstream zip()/round_records logic (which re-sorts by
+            # m.start()) is unaffected.
+            valid_spells.sort(key=lambda s: s[2].start())
+            valid_results: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+            for _name, _args, _m, _norm in valid_spells:
+                valid_results.append(
+                    await _run_spell_tool_async(
+                        _name, _args, persona, state, playbook.name,
+                        event_callback, messages=messages,
+                    )
+                )
 
             # Unified, position-ordered record per spell line this round.
             # Unknown spells are not executed — each gets a corrective error
@@ -1221,7 +1310,8 @@ async def _run_spell_loop(
             # Accumulate this round's content into merged_parts: round-leading
             # text_before (= raw text before the first /spell line of this round)
             # followed by one ``<user_only>`` block per spell — a success (star)
-            # block for executed spells, a failure (×) block for misfires.
+            # block for executed spells, a failure (×) block for misfires —
+            # then text_after (prose the persona wrote after the spell line).
             # The final LLM continuation (= ``text`` after the retry below) is
             # appended once the loop exits — see the return path.
             if text_before:
@@ -1238,6 +1328,8 @@ async def _run_spell_loop(
                         success=rec["success"],
                     )
                 )
+            if text_after:
+                merged_parts.append(text_after)
 
             # Re-invoke LLM once for the entire round.
             # Pipeline Streaming で呼ばれた時 (= pipeline_streaming_state が
@@ -1492,8 +1584,8 @@ async def _execute_pre_spells(
       to obtain the args. The Playbook reads parent line messages via the
       snapshot pipeline (v0.25) so the persona can decide args from their
       ongoing context.
-    - Execute valid spells in parallel via ``_run_spell_tool_async``, the
-      same path used by the regular spell loop.
+    - Execute valid spells sequentially via ``_run_spell_tool_async``, the
+      same path (and the same ordering guarantee) used by the regular spell loop.
     - Append a single ``<system>``-tagged user message to
       ``state["_messages"]`` containing the combined results, so the
       first LLM round sees them as if the user had requested them.
@@ -1570,10 +1662,18 @@ async def _execute_pre_spells(
         len(valid_specs), [s[0] for s in valid_specs],
     )
 
-    results: List[Tuple[str, Optional[Dict[str, Any]]]] = list(await asyncio.gather(*[
-        _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback, messages=messages)
-        for name, args, _ in valid_specs
-    ]))
+    # Execute UI-requested spells SEQUENTIALLY, in the order requested. Same
+    # rationale as the regular spell loop (_run_spell_loop): spells can mutate
+    # shared state (run_playbook's shared PulseContext line stack, physical
+    # devices, Track ops) and are not safe to run concurrently.
+    results: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    for name, args, _ in valid_specs:
+        results.append(
+            await _run_spell_tool_async(
+                name, args, persona, state, playbook.name, event_callback,
+                messages=messages,
+            )
+        )
 
     triggered_lines = [norm for _, _, norm in valid_specs]
     result_lines = [

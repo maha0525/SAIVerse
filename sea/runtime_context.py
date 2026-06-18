@@ -15,6 +15,34 @@ from tools import SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """AUTONOMOUS アスペクトの assistant 発言を user+<system> 形式に変換する。
+
+    軽量モデルで生成された自律行動の口調が、後続パルスのコンテキストに
+    assistant ロールとして残ると口調ブレの感染源になる。コンテキスト組み立て
+    時のみ変換し、SAIMemory の保存データは変えない。
+    """
+    result: List[Dict[str, Any]] = []
+    for msg in messages:
+        aspect = (msg.get("metadata") or {}).get("aspect")
+        if aspect == "autonomous" and msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            reframed_content = (
+                "<system>[自律行動の記録]\n"
+                "あなたは自律的に以下の行動を取りました：\n"
+                f"```\n{content}\n```\n"
+                "</system>"
+            )
+            reframed = {k: v for k, v in msg.items() if k not in ("role", "content")}
+            reframed["role"] = "user"
+            reframed["content"] = reframed_content
+            result.append(reframed)
+        else:
+            result.append(msg)
+    return result
+
+
 def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
     from sea.playbook_models import ContextRequirements
 
@@ -354,6 +382,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 oldest_ts,
                             )
 
+                enriched_recent = _reframe_autonomous_messages(enriched_recent)
                 messages.extend(enriched_recent)
             except Exception as exc:
                 LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)

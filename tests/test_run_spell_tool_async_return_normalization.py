@@ -31,7 +31,13 @@ def _make_state() -> dict:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # Use asyncio.run (fresh loop per call, closed cleanly) rather than
+    # get_event_loop().run_until_complete: the latter depends on a "current"
+    # event loop existing, which breaks under Python 3.10+ when an earlier
+    # test in the same process closed the loop via asyncio.run (current loop
+    # reset to None → "no current event loop"). asyncio.run has no such
+    # cross-test ordering dependency.
+    return asyncio.run(coro)
 
 
 def _invoke(tool_func) -> tuple[str, dict | None]:

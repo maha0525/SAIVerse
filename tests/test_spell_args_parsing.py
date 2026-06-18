@@ -4,8 +4,15 @@
 救う _normalize_json_literals の回帰防止。
 """
 import unittest
+from unittest.mock import patch
 
-from sea.runtime_llm import _normalize_json_literals, _parse_spell_args
+from sea.runtime_llm import (
+    _coerce_arg_to_type,
+    _coerce_spell_args,
+    _normalize_json_literals,
+    _parse_spell_args,
+)
+from tools.core import ToolSchema
 
 
 class TestSpellArgsParsing(unittest.TestCase):
@@ -51,6 +58,59 @@ class TestSpellArgsParsing(unittest.TestCase):
     def test_normalize_noop_when_no_literals(self):
         src = "{'a': 1}"
         self.assertEqual(_normalize_json_literals(src), src)
+
+
+class TestCoerceArgToType(unittest.TestCase):
+    def test_integer_from_string(self):
+        self.assertEqual(_coerce_arg_to_type("2", "integer"), 2)
+
+    def test_number_from_string(self):
+        self.assertEqual(_coerce_arg_to_type("0.5", "number"), 0.5)
+
+    def test_boolean_from_string(self):
+        self.assertIs(_coerce_arg_to_type("true", "boolean"), True)
+        self.assertIs(_coerce_arg_to_type("false", "boolean"), False)
+
+    def test_already_correct_type_untouched(self):
+        self.assertEqual(_coerce_arg_to_type(2, "integer"), 2)
+        self.assertIs(_coerce_arg_to_type(True, "boolean"), True)
+
+    def test_unconvertible_string_preserved(self):
+        # 数値化できない文字列はそのまま (tool 側バリデーションに委ねる)
+        self.assertEqual(_coerce_arg_to_type("abc", "integer"), "abc")
+
+    def test_string_type_untouched(self):
+        self.assertEqual(_coerce_arg_to_type("t:13", "string"), "t:13")
+
+
+class TestCoerceSpellArgs(unittest.TestCase):
+    def test_track_task_done_quoted_index(self):
+        # air_city_a の実バグ: LLM が index を "2" とクオートして TypeError
+        schema = ToolSchema(
+            name="track_task_done",
+            description="",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "track_id": {"type": "string"},
+                    "index": {"type": "integer"},
+                },
+            },
+            result_type="string",
+        )
+        with patch.dict(
+            "sea.runtime_llm.SPELL_TOOL_SCHEMAS",
+            {"track_task_done": schema},
+            clear=False,
+        ):
+            result = _coerce_spell_args(
+                "track_task_done", {"track_id": "t:13", "index": "2"}
+            )
+        self.assertEqual(result, {"track_id": "t:13", "index": 2})
+
+    def test_unknown_tool_passthrough(self):
+        args = {"x": "2"}
+        self.assertEqual(_coerce_spell_args("no_such_tool", args), args)
 
 
 if __name__ == "__main__":

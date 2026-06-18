@@ -1308,6 +1308,7 @@ class SEARuntime:
         resolved_line_id = line_id
         resolved_track_id = origin_track_id
         resolved_scope = scope
+        resolved_aspect: Optional[str] = None
         if pulse_context is not None and (
             resolved_line_role is None
             or resolved_line_id is None
@@ -1326,6 +1327,7 @@ class SEARuntime:
                 resolved_track_id = meta.get("origin_track_id")
             if resolved_scope is None:
                 resolved_scope = meta.get("scope")
+            resolved_aspect = meta.get("aspect")
 
         message: Dict[str, Any] = {"role": role or "assistant", "content": text}
         if resolved_line_role is not None:
@@ -1364,6 +1366,9 @@ class SEARuntime:
                     msg_metadata.setdefault("tags", []).extend(extra_tags)
                 else:
                     msg_metadata[key] = value
+
+        if resolved_aspect:
+            msg_metadata["aspect"] = resolved_aspect
 
         # audience: 同じ Building にいる他ペルソナ・ユーザーを記録
         if role == "assistant" and "audience" not in msg_metadata:
