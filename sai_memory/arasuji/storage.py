@@ -488,12 +488,46 @@ def delete_incomplete_entries(
     """Delete all incomplete Lv1 entries for a Track. Used when regenerating
     proper Lv1 from accumulated messages.
 
+    Also removes deleted IDs from parent (Lv2+) entries' source_ids_json
+    to prevent dangling references.
+
     Returns the number of deleted entries.
     """
-    cur = conn.execute(
-        "DELETE FROM arasuji_entries "
+    # Collect IDs and their parent_ids before deletion
+    rows = conn.execute(
+        "SELECT id, parent_id FROM arasuji_entries "
         "WHERE origin_track_id = ? AND level = 1 AND is_incomplete = 1",
         (origin_track_id,),
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    deleted_ids = {row[0] for row in rows}
+
+    # Group by parent_id to batch-update each parent
+    parents_to_update: dict[str, list[str]] = {}
+    for row in rows:
+        pid = row[1]
+        if pid:
+            parents_to_update.setdefault(pid, []).append(row[0])
+
+    for pid, child_ids in parents_to_update.items():
+        parent = get_entry(conn, pid)
+        if parent:
+            new_source_ids = [
+                sid for sid in parent.source_ids if sid not in deleted_ids
+            ]
+            conn.execute(
+                "UPDATE arasuji_entries SET source_ids_json = ? WHERE id = ?",
+                (json.dumps(new_source_ids), pid),
+            )
+
+    # Delete the incomplete entries
+    placeholders = ",".join("?" for _ in deleted_ids)
+    cur = conn.execute(
+        f"DELETE FROM arasuji_entries WHERE id IN ({placeholders})",
+        list(deleted_ids),
     )
     conn.commit()
     return cur.rowcount
