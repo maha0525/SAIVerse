@@ -1,10 +1,12 @@
 {
-  "model": "mistralai/mistral-large-3-675b-instruct-2512",
+  "model": "mistralai/mistral-medium-3.5-128b",
   "system_prompt": "",
-  "display_name": "Mistral Large 3 (NIM)",
+  "display_name": "Mistral Medium 3.5 (NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": true,
   "context_length": 256000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 40,
   "base_url": "https://integrate.api.nvidia.com/v1",
   "api_key_env": "NVIDIA_API_KEY",
   "supports_images": true,
@@ -31,13 +33,11 @@
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 260000,
+      "max": 65536,
       "step": 1,
-      "default": 8000,
+      "default": 8192,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
-  },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  }
 }

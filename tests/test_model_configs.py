@@ -75,7 +75,7 @@ class TestModelSupportsImages(unittest.TestCase):
         self.assertTrue(model_configs.model_supports_images("claude-sonnet-4-5"))
 
     def test_non_vision_model(self):
-        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v3.2"))
+        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro"))
 
 
 class TestFindModelConfig(unittest.TestCase):

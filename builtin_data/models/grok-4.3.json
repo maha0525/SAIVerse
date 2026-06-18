@@ -1,21 +1,21 @@
 {
-  "model": "mistralai/mistral-large-3-675b-instruct-2512",
+  "model": "grok-4.3",
   "system_prompt": "",
-  "display_name": "Mistral Large 3 (NIM)",
-  "provider": "nvidia_nim",
+  "display_name": "Grok 4.3",
+  "provider": "xai",
+  "context_length": 1000000,
+  "default_max_history_messages": 100,
+  "metabolism_keep_messages": 40,
+  "api_key_env": "XAI_API_KEY",
   "supports_structured_output": true,
-  "context_length": 256000,
-  "base_url": "https://integrate.api.nvidia.com/v1",
-  "api_key_env": "NVIDIA_API_KEY",
   "supports_images": true,
-  "convert_system_to_user": true,
   "parameters": {
     "temperature": {
       "type": "float",
       "min": 0,
       "max": 2,
-      "step": 0.01,
-      "default": 0.2,
+      "step": 0.1,
+      "default": 1.0,
       "label": "Temperature",
       "description": "Controls randomness."
     },
@@ -24,20 +24,24 @@
       "min": 0,
       "max": 1,
       "step": 0.05,
-      "default": 1,
+      "default": 1.0,
       "label": "Top P",
       "description": "Nucleus sampling cutoff."
     },
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 260000,
+      "max": 16384,
       "step": 1,
-      "default": 8000,
+      "default": 4096,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
   },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  "pricing": {
+    "input_per_1m_tokens": 1.25,
+    "cached_input_per_1m_tokens": 0.2,
+    "output_per_1m_tokens": 2.5,
+    "currency": "USD"
+  }
 }

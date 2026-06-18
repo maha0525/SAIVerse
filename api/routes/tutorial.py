@@ -409,14 +409,14 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "task_creation_model": "openrouter-qwen3-coder-480b-a35b-free",
     },
     "nvidia": {
-        "default_model": "nim-qwen3-coder-480b-a35b-instruct",
+        "default_model": "nim-qwen3.5-397b-a17b-instruct",
         "lightweight_model": "nim-qwen3-next-80b-a3b-instruct",
         "agentic_model": "nim-qwen3-next-80b-a3b-instruct",
         "memory_weave_model": "nim-qwen3-next-80b-a3b-instruct",
-        "image_summary_model": "nim-kimi-k2.5",
+        "image_summary_model": "nim-kimi-k2.6",
         "audio_summary_model": None,
         "video_summary_model": None,
-        "task_creation_model": "nim-qwen3-coder-480b-a35b-instruct",
+        "task_creation_model": "nim-qwen3.5-397b-a17b-instruct",
     },
     "ollama": {
         "default_model": "ollama-qwen3-next-80b",
