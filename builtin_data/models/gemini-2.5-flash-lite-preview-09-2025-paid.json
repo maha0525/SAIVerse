@@ -29,6 +29,7 @@
     "thinking_budget": {
       "type": "dropdown",
       "options": [
+        "off",
         "default",
         "512",
         "1024",
@@ -39,7 +40,7 @@
       ],
       "default": "24576",
       "label": "Thinking Budget",
-      "description": "思考トークン予算。defaultで思考なし(Liteのデフォルト)。数値で思考を有効化し予算を指定(512〜24576)。"
+      "description": "思考トークン予算。offで推論完全無効(キャッシュ効率向上)。defaultでモデル任せ。数値で予算を指定。"
     },
     "safety_harassment": {
       "type": "dropdown",

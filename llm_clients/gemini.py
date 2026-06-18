@@ -257,7 +257,7 @@ GEMINI_ALLOWED_REQUEST_PARAMS = {
 
 # Special parameters that need custom handling (not passed directly to API)
 GEMINI_SPECIAL_PARAMS = {
-    "thinking_level", "thinking_budget",
+    "thinking_level", "thinking_budget", "multi_turn_thinking",
     "safety_harassment", "safety_hate_speech",
     "safety_sexually_explicit", "safety_dangerous_content",
 }
@@ -326,6 +326,9 @@ class GeminiClient(LLMClient):
         if not self._include_thoughts:
             model_lower = (model or "").lower()
             self._include_thoughts = "2.5" in model_lower or "-3-" in model_lower or model_lower.startswith("gemini-3")
+        self._multi_turn_thinking: bool = cfg.get("multi_turn_thinking", True)
+        model_lower = (model or "").lower()
+        self._is_gemini_3x: bool = "-3-" in model_lower or model_lower.startswith("gemini-3")
 
         # Safety settings overrides
         self._safety_overrides: Dict[str, str] = {}
@@ -576,6 +579,8 @@ class GeminiClient(LLMClient):
                     except (ValueError, TypeError):
                         logging.warning("Invalid thinking_budget value: %s", value)
                         self._thinking_budget = None
+            elif key == "multi_turn_thinking":
+                self._multi_turn_thinking = value != "off"
             elif key in SAFETY_PARAM_TO_CATEGORY:
                 if value:
                     self._safety_overrides[key] = value
@@ -709,8 +714,38 @@ class GeminiClient(LLMClient):
         return "404" in msg and ("not found" in msg or "not_found" in msg)
 
     @staticmethod
+    def _extract_retry_delay(err: Exception) -> Optional[float]:
+        """Extract retryDelay from a Gemini API 429 error response.
+
+        Returns seconds to wait, or None if not parseable.
+        """
+        from google.genai.errors import APIError as GenaiAPIError
+        if not isinstance(err, GenaiAPIError):
+            return None
+        details = getattr(err, "details", None)
+        if not isinstance(details, dict):
+            return None
+        error_block = details.get("error", details)
+        for detail in error_block.get("details", []):
+            if detail.get("@type", "").endswith("RetryInfo"):
+                delay_str = detail.get("retryDelay", "")
+                if isinstance(delay_str, str) and delay_str.endswith("s"):
+                    try:
+                        return float(delay_str[:-1])
+                    except ValueError:
+                        pass
+        return None
+
+    @staticmethod
     def _is_payment_error(err: Exception) -> bool:
-        """Check if the error is a payment/billing error (402) or quota exhaustion."""
+        """Check if the error is a payment/billing error (402), NOT a rate limit (429).
+
+        Gemini 429 RESOURCE_EXHAUSTED messages include "billing" in the text,
+        which would false-positive here. Use the HTTP status code to distinguish.
+        """
+        from google.genai.errors import APIError as GenaiAPIError
+        if isinstance(err, GenaiAPIError) and err.code == 429:
+            return False
         msg = str(err).lower()
         return (
             "402" in msg
@@ -845,10 +880,10 @@ class GeminiClient(LLMClient):
                     fc_part = types.Part(
                         function_call=types.FunctionCall(name=fn_name, args=fn_args)
                     )
-                    # Gemini thinking models require thought_signature echoed back
-                    _ts = tc.get("thought_signature") if isinstance(tc, dict) else None
-                    if _ts:
-                        fc_part.thought_signature = _ts
+                    if self._multi_turn_thinking or self._is_gemini_3x:
+                        _ts = tc.get("thought_signature") if isinstance(tc, dict) else None
+                        if _ts:
+                            fc_part.thought_signature = _ts
                     parts.append(fc_part)
                 if parts:
                     contents.append(types.Content(role="model", parts=parts))
@@ -1015,7 +1050,7 @@ class GeminiClient(LLMClient):
                 # 最初のパートまたは function_call パートに付与)。tool_calls 経路は
                 # 上記 line 682-684 で別途 echo 済み。
                 # 詳細は docs/intent/thought_signature_persistence.md
-                if g_role == "model":
+                if g_role == "model" and self._multi_turn_thinking:
                     _msg_thought_sig = message.get("thought_signature")
                     if _msg_thought_sig:
                         text_part.thought_signature = _msg_thought_sig
@@ -1571,11 +1606,24 @@ class GeminiClient(LLMClient):
                     continue
                 if self._is_payment_error(exc) or self._is_authentication_error(exc):
                     raise self._convert_to_llm_error(exc, "API call") from exc
-                if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                    logging.info("Retrying with paid Gemini API key due to rate limit")
-                    active_client = self.paid_client
-                    last_retry_exc = exc
-                    continue
+                if self._is_rate_limit_error(exc):
+                    if active_client is self.free_client and self.paid_client:
+                        logging.info("Retrying with paid Gemini API key due to rate limit")
+                        active_client = self.paid_client
+                        last_retry_exc = exc
+                        continue
+                    retry_delay = self._extract_retry_delay(exc)
+                    if retry_delay and attempt < max_retries - 1:
+                        capped_delay = min(retry_delay, 60.0)
+                        logging.info(
+                            "Rate limited (model=%s), waiting %.1fs before retry (attempt %d/%d)",
+                            model_id, capped_delay, attempt + 1, max_retries,
+                        )
+                        time.sleep(capped_delay)
+                        last_retry_exc = exc
+                        continue
+                    logging.warning("Rate limit exceeded for model=%s, no retries left", model_id)
+                    raise self._convert_to_llm_error(exc, "API call") from exc
                 logging.exception("Gemini call failed")
                 raise self._convert_to_llm_error(exc, "API call") from exc
 
@@ -1692,10 +1740,24 @@ class GeminiClient(LLMClient):
         except Exception as exc:
             if self._is_payment_error(exc) or self._is_authentication_error(exc):
                 raise self._convert_to_llm_error(exc, "streaming")
-            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                logging.info("Retrying with paid Gemini API key due to rate limit")
-                active_client = self.paid_client
-                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl)
+            if self._is_rate_limit_error(exc):
+                if active_client is self.free_client and self.paid_client:
+                    logging.info("Retrying with paid Gemini API key due to rate limit")
+                    active_client = self.paid_client
+                    stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl)
+                else:
+                    retry_delay = self._extract_retry_delay(exc)
+                    if retry_delay:
+                        capped_delay = min(retry_delay, 60.0)
+                        logging.info(
+                            "Rate limited (model=%s), waiting %.1fs before stream retry",
+                            self.model, capped_delay,
+                        )
+                        time.sleep(capped_delay)
+                        stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl)
+                    else:
+                        logging.warning("Rate limit exceeded for model=%s", self.model)
+                        raise self._convert_to_llm_error(exc, "streaming")
             else:
                 logging.exception("Gemini call failed")
                 raise self._convert_to_llm_error(exc, "streaming")

@@ -41,6 +41,13 @@
       "label": "Thinking Budget",
       "description": "思考トークン予算。defaultで思考なし。数値で思考を有効化し予算を指定(512〜24576)。"
     },
+    "multi_turn_thinking": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "on",
+      "label": "Multi-turn Thinking",
+      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率向上(各ターン独立思考)。"
+    },
     "safety_harassment": {
       "type": "dropdown",
       "options": [
