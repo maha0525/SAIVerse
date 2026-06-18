@@ -6,6 +6,7 @@ prompts, monitors progress, and stores the resulting image as a SAIVerse item.
 
 import json
 import logging
+import os
 import random
 import time
 import urllib.error
@@ -25,7 +26,7 @@ from saiverse.media_utils import store_image_bytes
 
 logger = logging.getLogger(__name__)
 
-COMFYUI_BASE_URL = "http://127.0.0.1:8188"
+COMFYUI_BASE_URL = os.environ.get("COMFYUI_BASE_URL", "http://127.0.0.1:8188")
 WORKFLOW_DIR = Path(__file__).parent / "comfyui_workflows"
 PROGRESS_POLL_INTERVAL = 3  # seconds
 PROGRESS_TIMEOUT = 300  # seconds (5 minutes)
