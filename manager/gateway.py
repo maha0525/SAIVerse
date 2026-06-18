@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Sequence
 
 from discord_gateway.integration import ensure_gateway_runtime
@@ -70,7 +70,7 @@ class GatewayMixin:
             "content": message.content,
             "speaker_name": message.author_name,
             "persona_id": message.persona_id,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._append_gateway_history(message.context.building_id, entry)
         commands: List[GatewayCommand] = []
@@ -98,7 +98,7 @@ class GatewayMixin:
             "persona_id": message.persona_id,
             "speaker_name": visitor.persona_name,
             "avatar_image": visitor.metadata.get("avatar_image", self.default_avatar),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._append_gateway_history(message.context.building_id, entry)
         self._gateway_send_message(

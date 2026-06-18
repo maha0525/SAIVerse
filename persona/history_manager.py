@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, TYPE_CHECKING, Any
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 if TYPE_CHECKING:
     from saiverse_memory import SAIMemoryAdapter
@@ -97,7 +97,7 @@ class HistoryManager:
         """
         new_msg = msg.copy()
         if "timestamp" not in new_msg:
-            new_msg["timestamp"] = datetime.now().isoformat()
+            new_msg["timestamp"] = datetime.now(timezone.utc).isoformat()
         if new_msg.get("role") == "assistant" and "persona_id" not in new_msg:
             new_msg["persona_id"] = self.persona_id
         if origin_track_id is not None and "origin_track_id" not in new_msg:

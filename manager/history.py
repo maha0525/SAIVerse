@@ -3,7 +3,7 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -109,7 +109,7 @@ class HistoryMixin:
 
         enriched: Dict[str, Any] = dict(msg)
         if "timestamp" not in enriched:
-            enriched["timestamp"] = datetime.now().isoformat()
+            enriched["timestamp"] = datetime.now(timezone.utc).isoformat()
         heard_set = sorted({str(eid) for eid in (heard_by or []) if eid})
         enriched["heard_by"] = heard_set
         if "ingested_by" not in enriched:
