@@ -1095,22 +1095,41 @@ class SaveModelFromChatRequest(BaseModel):
     overwrite: bool = False
 
 
+def _read_raw_model_file(key: str) -> tuple[Dict[str, Any], str] | None:
+    """Read the original model JSON file without provider_ref resolution."""
+    import json as _json
+    from saiverse.data_paths import USER_DATA_DIR, BUILTIN_DATA_DIR, EXPANSION_DATA_DIR, MODELS_DIR
+
+    user_path = USER_DATA_DIR / MODELS_DIR / f"{key}.json"
+    if user_path.is_file():
+        return _json.loads(user_path.read_text(encoding="utf-8")), "user_data"
+
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            exp_path = project_dir / MODELS_DIR / f"{key}.json"
+            if exp_path.is_file():
+                return _json.loads(exp_path.read_text(encoding="utf-8")), "expansion"
+
+    builtin_path = BUILTIN_DATA_DIR / MODELS_DIR / f"{key}.json"
+    if builtin_path.is_file():
+        return _json.loads(builtin_path.read_text(encoding="utf-8")), "builtin"
+
+    return None
+
+
 @router.get("/models/{key}")
 def get_model_file(key: str):
-    """Get the resolved config for a model (provider_ref already inherited)."""
+    """Get the raw (unresolved) config for a model, as written in the JSON file."""
     _validate_model_key(key)
-    from saiverse.model_configs import MODEL_CONFIGS
-    if key not in MODEL_CONFIGS:
-        raise HTTPException(status_code=404, detail=f"Model not found: {key}")
-    cfg = dict(MODEL_CONFIGS[key])
-    # Determine source for UI badge
-    user_path = _model_user_path(key)
-    if user_path.exists():
-        source = "user_data"
-    elif _model_builtin_path(key).exists():
-        source = "builtin"
-    else:
-        source = "expansion"
+    result = _read_raw_model_file(key)
+    if result is None:
+        from saiverse.model_configs import MODEL_CONFIGS
+        if key not in MODEL_CONFIGS:
+            raise HTTPException(status_code=404, detail=f"Model not found: {key}")
+        return {"key": key, "config": dict(MODEL_CONFIGS[key]), "source": "unknown"}
+    cfg, source = result
     return {"key": key, "config": cfg, "source": source}
 
 

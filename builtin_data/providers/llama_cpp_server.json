@@ -1,0 +1,7 @@
+{
+  "id": "llama_cpp_server",
+  "display_name": "llama.cpp Server (local)",
+  "protocol": "openai_compat",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "llama_server_binary": "/path/to/llama-server"
+}

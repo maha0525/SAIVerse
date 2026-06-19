@@ -139,6 +139,11 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         if supports_images and "max_image_bytes" not in extra_kwargs:
             extra_kwargs["max_image_bytes"] = 5 * 1024 * 1024
 
+        if isinstance(config, dict) and config.get("llama_server"):
+            from .llama_server import get_server_manager
+            server_base = config.get("base_url", "http://127.0.0.1:8080/v1")
+            get_server_manager().ensure_running(server_base, config)
+
         logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
 

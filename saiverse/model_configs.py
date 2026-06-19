@@ -33,6 +33,7 @@ _INHERITABLE_FIELDS = [
     ("max_image_bytes", "default_max_image_bytes"),
     ("supports_images", "default_supports_images"),
     ("request_kwargs", "default_request_kwargs"),
+    ("llama_server_binary", "llama_server_binary"),
 ]
 
 

@@ -453,6 +453,12 @@ def main():
                 logging.info("[shutdown] Unity Gateway stopped")
             except Exception as e:
                 logging.debug(f"Error stopping Unity Gateway: {e}")
+        try:
+            from llm_clients.llama_server import get_server_manager
+            get_server_manager().shutdown_all()
+            logging.info("[shutdown] llama-server processes stopped")
+        except Exception as e:
+            logging.debug("[shutdown] llama-server cleanup error: %s", e)
         shutdown_subprocess(api_server_process, "API Server")
         logging.info("[shutdown] API Server subprocess stopped")
         if manager:

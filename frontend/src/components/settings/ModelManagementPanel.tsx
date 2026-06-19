@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Plus, Edit2, Trash2, Copy, RefreshCw } from 'lucide-react';
 import styles from './ModelManagementPanel.module.css';
-import ModelEditorModal, { ModelEditorMode } from './ModelEditorModal';
+import ModelEditorModal, { ModelEditorMode, ModelCloneSource } from './ModelEditorModal';
 
 interface ModelInfo {
     id: string;
@@ -17,6 +17,7 @@ export default function ModelManagementPanel() {
     const [editorOpen, setEditorOpen] = useState(false);
     const [editorMode, setEditorMode] = useState<ModelEditorMode>('create');
     const [editingKey, setEditingKey] = useState<string | undefined>();
+    const [cloneSource, setCloneSource] = useState<ModelCloneSource | undefined>();
 
     const loadModels = useCallback(async () => {
         setLoading(true);
@@ -40,6 +41,7 @@ export default function ModelManagementPanel() {
     const openCreate = () => {
         setEditorMode('create');
         setEditingKey(undefined);
+        setCloneSource(undefined);
         setEditorOpen(true);
     };
 
@@ -50,20 +52,17 @@ export default function ModelManagementPanel() {
     };
 
     const handleClone = async (m: ModelInfo) => {
-        const newKey = prompt(`「${m.name}」を複製します。新しいキーを入力してください:`, `${m.id}-copy`);
-        if (!newKey) return;
         try {
-            const res = await fetch(`/api/config/models/${m.id}/clone`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ new_key: newKey }),
-            });
+            const res = await fetch(`/api/config/models/${m.id}`);
             if (!res.ok) {
-                const text = await res.text();
-                alert(`複製に失敗しました: ${text}`);
+                alert(`モデル情報の取得に失敗しました: HTTP ${res.status}`);
                 return;
             }
-            loadModels();
+            const data = await res.json();
+            setEditorMode('create');
+            setEditingKey(undefined);
+            setCloneSource({ key: m.id, config: data.config ?? {} });
+            setEditorOpen(true);
         } catch (e) {
             alert(`複製に失敗しました: ${e}`);
         }
@@ -149,6 +148,7 @@ export default function ModelManagementPanel() {
                 isOpen={editorOpen}
                 mode={editorMode}
                 modelKey={editingKey}
+                cloneSource={cloneSource}
                 onClose={() => setEditorOpen(false)}
                 onSaved={loadModels}
             />

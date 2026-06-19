@@ -10,10 +10,16 @@ interface ProviderChoice {
     display_name: string;
 }
 
+export interface ModelCloneSource {
+    key: string;
+    config: Record<string, unknown>;
+}
+
 interface Props {
     isOpen: boolean;
     mode: ModelEditorMode;
     modelKey?: string;  // required when mode='edit'
+    cloneSource?: ModelCloneSource;  // pre-fill for create mode (from duplicate)
     onClose: () => void;
     onSaved: () => void;
 }
@@ -22,7 +28,7 @@ interface Props {
 const BASIC_FIELDS = ['model', 'display_name', 'provider_ref', 'context_length'] as const;
 const DEFAULT_CONTEXT_LENGTH = 128000;
 
-export default function ModelEditorModal({ isOpen, mode, modelKey, onClose, onSaved }: Props) {
+export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, onClose, onSaved }: Props) {
     const [key, setKey] = useState('');
     // Basic fields (dedicated inputs)
     const [model, setModel] = useState('');
@@ -38,12 +44,32 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, onClose, onSa
     const [parseError, setParseError] = useState<string | null>(null);
     const [saveError, setSaveError] = useState<string | null>(null);
 
+    const applyConfig = (k: string, cfg: Record<string, unknown>) => {
+        setKey(k);
+        setModel(typeof cfg.model === 'string' ? cfg.model : '');
+        setDisplayName(typeof cfg.display_name === 'string' ? cfg.display_name : '');
+        setProviderRef(typeof cfg.provider_ref === 'string' ? cfg.provider_ref : '');
+        setContextLength(
+            typeof cfg.context_length === 'number' ? cfg.context_length : DEFAULT_CONTEXT_LENGTH,
+        );
+        const extra: Record<string, unknown> = {};
+        for (const [field, value] of Object.entries(cfg)) {
+            if (!(BASIC_FIELDS as readonly string[]).includes(field)) {
+                extra[field] = value;
+            }
+        }
+        setExtraJson(JSON.stringify(extra, null, 2));
+        setSource('user_data');
+    };
+
     useEffect(() => {
         if (!isOpen) return;
         setSaveError(null);
         loadProviderList();
         if (mode === 'edit' && modelKey) {
             loadModel(modelKey);
+        } else if (mode === 'create' && cloneSource) {
+            applyConfig(`${cloneSource.key}-copy`, cloneSource.config);
         } else {
             setKey('');
             setModel('');
@@ -53,7 +79,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, onClose, onSa
             setExtraJson('{}');
             setSource('user_data');
         }
-    }, [isOpen, mode, modelKey]);
+    }, [isOpen, mode, modelKey, cloneSource]);
 
     // Live JSON validation for the extras textarea
     useEffect(() => {
@@ -98,23 +124,9 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, onClose, onSa
                 return;
             }
             const data = await res.json();
-            setKey(data.key);
-            setSource(data.source);
             const cfg = (data.config ?? {}) as Record<string, unknown>;
-            setModel(typeof cfg.model === 'string' ? cfg.model : '');
-            setDisplayName(typeof cfg.display_name === 'string' ? cfg.display_name : '');
-            setProviderRef(typeof cfg.provider_ref === 'string' ? cfg.provider_ref : '');
-            setContextLength(
-                typeof cfg.context_length === 'number' ? cfg.context_length : DEFAULT_CONTEXT_LENGTH,
-            );
-            // Extra: everything except the basic fields
-            const extra: Record<string, unknown> = {};
-            for (const [field, value] of Object.entries(cfg)) {
-                if (!(BASIC_FIELDS as readonly string[]).includes(field)) {
-                    extra[field] = value;
-                }
-            }
-            setExtraJson(JSON.stringify(extra, null, 2));
+            applyConfig(data.key, cfg);
+            setSource(data.source);
         } catch (e) {
             setSaveError(`読み込み失敗: ${e}`);
         } finally {
@@ -205,7 +217,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, onClose, onSa
         <ModalOverlay onClose={onClose}>
             <div className={styles.modal}>
                 <div className={styles.header}>
-                    <h3>{mode === 'create' ? 'モデルを新規作成' : `モデルを編集: ${key}`}</h3>
+                    <h3>{mode === 'create' ? (cloneSource ? 'モデルを複製' : 'モデルを新規作成') : `モデルを編集: ${key}`}</h3>
                     <button className={styles.closeBtn} onClick={onClose}><X size={20} /></button>
                 </div>
 
