@@ -1,4 +1,4 @@
-"""ペルソナ単位のリアルタイムスペル binding CRUD。"""
+"""ペルソナ単位のリアルタイムスペル binding CRUD + スペル一覧 API。"""
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,6 +7,28 @@ from pydantic import BaseModel
 from api.deps import get_manager
 
 router = APIRouter()
+
+
+@router.get("/realtime-spell-catalog")
+def get_spell_catalog():
+    """リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。"""
+    from tools import SPELL_TOOL_SCHEMAS
+
+    catalog = []
+    for name, schema in SPELL_TOOL_SCHEMAS.items():
+        params = schema.parameters or {}
+        properties = params.get("properties", {})
+        required = params.get("required", [])
+        catalog.append({
+            "name": name,
+            "description": schema.description or "",
+            "parameters": {
+                "properties": properties,
+                "required": required,
+            },
+        })
+    catalog.sort(key=lambda x: x["name"])
+    return catalog
 
 
 class CreateBindingRequest(BaseModel):

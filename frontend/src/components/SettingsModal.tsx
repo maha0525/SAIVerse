@@ -136,8 +136,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
     const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
+    const [spellCatalog, setSpellCatalog] = useState<Array<{name: string; description: string; parameters: {properties: Record<string, any>; required: string[]}}>>([]);
     const [newSpellName, setNewSpellName] = useState('');
-    const [newSpellArgs, setNewSpellArgs] = useState('');
+    const [newSpellArgs, setNewSpellArgs] = useState<Record<string, string>>({});
     const [newSpellLabel, setNewSpellLabel] = useState('');
     // Phase 4-e: empty string = use built-in default (NULL in DB)
     const [metaCacheThresholdRatio, setMetaCacheThresholdRatio] = useState<string>('');
@@ -250,13 +251,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
-                // Load realtime spell bindings
+                // Load realtime spell bindings + catalog
                 try {
-                    const spellRes = await fetch(`/api/people/${personaId}/realtime-spell`);
-                    if (spellRes.ok) {
-                        const spellData = await spellRes.json();
-                        setRealtimeSpells(spellData);
-                    }
+                    const [spellRes, catalogRes] = await Promise.all([
+                        fetch(`/api/people/${personaId}/realtime-spell`),
+                        fetch('/api/people/realtime-spell-catalog'),
+                    ]);
+                    if (spellRes.ok) setRealtimeSpells(await spellRes.json());
+                    if (catalogRes.ok) setSpellCatalog(await catalogRes.json());
                 } catch (e) { /* ignore */ }
                 // Phase 4-e: NULL → empty string で「既定値を使う」を表現
                 const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
@@ -955,12 +957,12 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     会話のたびに自動実行し、結果をリアルタイム情報に追加するスペルを設定します。
                                 </div>
                                 {realtimeSpells.length > 0 && (
-                                    <div style={{ marginBottom: '0.5rem' }}>
+                                    <div style={{ marginBottom: '0.75rem' }}>
                                         {realtimeSpells.map((spell) => (
-                                            <div key={spell.binding_id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', padding: '0.25rem 0.5rem', background: 'var(--bg-secondary, #f5f5f5)', borderRadius: '4px' }}>
+                                            <div key={spell.binding_id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', padding: '0.4rem 0.6rem', background: 'var(--bg-secondary, #f5f5f5)', borderRadius: '4px' }}>
                                                 <span style={{ flex: 1, fontSize: '0.85rem' }}>
-                                                    {spell.label || spell.spell_name}
-                                                    {spell.spell_args_json && <span style={{ opacity: 0.6, marginLeft: '0.5rem' }}>{spell.spell_args_json}</span>}
+                                                    <strong>{spell.label || spell.spell_name}</strong>
+                                                    {spell.spell_args_json && <span style={{ opacity: 0.6, marginLeft: '0.5rem', fontSize: '0.8rem' }}>{spell.spell_args_json}</span>}
                                                 </span>
                                                 <button
                                                     type="button"
@@ -976,60 +978,89 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         ))}
                                     </div>
                                 )}
-                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                    <input
-                                        type="text"
-                                        placeholder="スペル名"
-                                        value={newSpellName}
-                                        onChange={(e) => setNewSpellName(e.target.value)}
-                                        style={{ flex: '1 1 120px', minWidth: '80px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
-                                    />
-                                    <input
-                                        type="text"
-                                        placeholder="引数 JSON (例: {&quot;observer_id&quot;:&quot;wearable-01&quot;})"
-                                        value={newSpellArgs}
-                                        onChange={(e) => setNewSpellArgs(e.target.value)}
-                                        style={{ flex: '2 1 200px', minWidth: '120px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
-                                    />
-                                    <input
-                                        type="text"
-                                        placeholder="ラベル"
-                                        value={newSpellLabel}
-                                        onChange={(e) => setNewSpellLabel(e.target.value)}
-                                        style={{ flex: '1 1 80px', minWidth: '60px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
-                                    />
-                                    <button
-                                        type="button"
-                                        style={{ padding: '0.25rem 0.75rem', fontSize: '0.85rem', cursor: 'pointer' }}
-                                        onClick={async () => {
-                                            if (!newSpellName.trim()) return;
-                                            const res = await fetch(`/api/people/${personaId}/realtime-spell`, {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({
-                                                    spell_name: newSpellName.trim(),
-                                                    spell_args_json: newSpellArgs.trim() || null,
-                                                    label: newSpellLabel.trim() || null,
-                                                }),
-                                            });
-                                            if (res.ok) {
-                                                const data = await res.json();
-                                                setRealtimeSpells(prev => [...prev, {
-                                                    binding_id: data.binding_id,
-                                                    spell_name: newSpellName.trim(),
-                                                    spell_args_json: newSpellArgs.trim() || null,
-                                                    label: newSpellLabel.trim() || null,
-                                                    enabled: true,
-                                                    priority: 0,
-                                                }]);
-                                                setNewSpellName('');
-                                                setNewSpellArgs('');
-                                                setNewSpellLabel('');
-                                            }
-                                        }}
-                                    >
-                                        追加
-                                    </button>
+                                <div style={{ border: '1px solid var(--border-color, #ddd)', borderRadius: '6px', padding: '0.75rem' }}>
+                                    <div style={{ marginBottom: '0.5rem' }}>
+                                        <select
+                                            value={newSpellName}
+                                            onChange={(e) => { setNewSpellName(e.target.value); setNewSpellArgs({}); }}
+                                            style={{ width: '100%', padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}
+                                        >
+                                            <option value="">スペルを選択...</option>
+                                            {spellCatalog.map(s => (
+                                                <option key={s.name} value={s.name}>{s.name} — {s.description.slice(0, 60)}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    {newSpellName && (() => {
+                                        const selected = spellCatalog.find(s => s.name === newSpellName);
+                                        if (!selected) return null;
+                                        const props = selected.parameters.properties;
+                                        const required = selected.parameters.required || [];
+                                        return (
+                                            <div style={{ marginBottom: '0.5rem' }}>
+                                                {Object.entries(props).map(([key, spec]: [string, any]) => (
+                                                    <div key={key} style={{ marginBottom: '0.35rem' }}>
+                                                        <label style={{ fontSize: '0.8rem', display: 'block', marginBottom: '0.1rem' }}>
+                                                            {key}{required.includes(key) ? ' *' : ''}
+                                                            {spec.description && <span style={{ opacity: 0.6, marginLeft: '0.5rem' }}>{spec.description.slice(0, 50)}</span>}
+                                                        </label>
+                                                        <input
+                                                            type="text"
+                                                            value={newSpellArgs[key] || ''}
+                                                            onChange={(e) => setNewSpellArgs(prev => ({ ...prev, [key]: e.target.value }))}
+                                                            placeholder={spec.default != null ? `default: ${spec.default}` : ''}
+                                                            style={{ width: '100%', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                                        />
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        );
+                                    })()}
+                                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                        <input
+                                            type="text"
+                                            placeholder="ラベル (表示名)"
+                                            value={newSpellLabel}
+                                            onChange={(e) => setNewSpellLabel(e.target.value)}
+                                            style={{ flex: 1, padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                        />
+                                        <button
+                                            type="button"
+                                            disabled={!newSpellName}
+                                            style={{ padding: '0.3rem 0.75rem', fontSize: '0.85rem', cursor: newSpellName ? 'pointer' : 'not-allowed' }}
+                                            onClick={async () => {
+                                                if (!newSpellName) return;
+                                                const argsObj: Record<string, any> = {};
+                                                Object.entries(newSpellArgs).forEach(([k, v]) => { if (v.trim()) argsObj[k] = v.trim(); });
+                                                const argsJson = Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj) : null;
+                                                const res = await fetch(`/api/people/${personaId}/realtime-spell`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({
+                                                        spell_name: newSpellName,
+                                                        spell_args_json: argsJson,
+                                                        label: newSpellLabel.trim() || null,
+                                                    }),
+                                                });
+                                                if (res.ok) {
+                                                    const data = await res.json();
+                                                    setRealtimeSpells(prev => [...prev, {
+                                                        binding_id: data.binding_id,
+                                                        spell_name: newSpellName,
+                                                        spell_args_json: argsJson,
+                                                        label: newSpellLabel.trim() || null,
+                                                        enabled: true,
+                                                        priority: 0,
+                                                    }]);
+                                                    setNewSpellName('');
+                                                    setNewSpellArgs({});
+                                                    setNewSpellLabel('');
+                                                }
+                                            }}
+                                        >
+                                            追加
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
