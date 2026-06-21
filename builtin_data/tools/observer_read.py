@@ -82,4 +82,6 @@ def schema() -> ToolSchema:
             "required": ["observer_id"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="観測値取得",
     )
