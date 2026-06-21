@@ -43,6 +43,12 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const [cities, setCities] = useState<City[]>([]);
     const [availablePrompts, setAvailablePrompts] = useState<string[]>([]);
 
+    // Realtime spell bindings
+    const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
+    const [newSpellName, setNewSpellName] = useState('');
+    const [newSpellArgs, setNewSpellArgs] = useState('');
+    const [newSpellLabel, setNewSpellLabel] = useState('');
+
     // 2026-04-30 のエリス上書き事故と同じ脆弱性を持つため、整合性ガードを追加。
     // (feedback_modal_id_integrity.md)
     const [loadedBuildingId, setLoadedBuildingId] = useState<string | null>(null);
@@ -134,6 +140,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     .map((l: any) => l.TOOLID);
                 setToolIds(ids);
             }
+
+            // Load realtime spell bindings
+            try {
+                const spellRes = await fetch(`/api/world/buildings/${targetBuildingId}/realtime-spell`);
+                if (spellRes.ok && !isStale()) {
+                    setRealtimeSpells(await spellRes.json());
+                }
+            } catch (e) { /* ignore */ }
 
             // building レコードが見つかった場合のみロード成功とみなす。
             if (buildingApplied) {
@@ -370,6 +384,90 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                         <span>{t.TOOLNAME}</span>
                                     </label>
                                 ))}
+                            </div>
+                        </div>
+
+                        <div className={styles.field}>
+                            <label>リアルタイムスペル</label>
+                            <small className={styles.hint} style={{ display: 'block', marginBottom: '0.5rem' }}>
+                                この Building にいるペルソナの会話時に自動実行するスペル
+                            </small>
+                            {realtimeSpells.length > 0 && (
+                                <div style={{ marginBottom: '0.5rem' }}>
+                                    {realtimeSpells.map((spell) => (
+                                        <div key={spell.binding_id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', padding: '0.25rem 0.5rem', background: 'var(--bg-secondary, #f5f5f5)', borderRadius: '4px' }}>
+                                            <span style={{ flex: 1, fontSize: '0.85rem' }}>
+                                                {spell.label || spell.spell_name}
+                                                {spell.spell_args_json && <span style={{ opacity: 0.6, marginLeft: '0.5rem' }}>{spell.spell_args_json}</span>}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}
+                                                onClick={async () => {
+                                                    await fetch(`/api/world/buildings/${buildingId}/realtime-spell/${spell.binding_id}`, { method: 'DELETE' });
+                                                    setRealtimeSpells(prev => prev.filter(s => s.binding_id !== spell.binding_id));
+                                                }}
+                                            >
+                                                削除
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <input
+                                    type="text"
+                                    placeholder="スペル名"
+                                    value={newSpellName}
+                                    onChange={(e) => setNewSpellName(e.target.value)}
+                                    style={{ flex: '1 1 120px', minWidth: '80px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                />
+                                <input
+                                    type="text"
+                                    placeholder='引数 JSON (例: {"observer_id":"wearable-01"})'
+                                    value={newSpellArgs}
+                                    onChange={(e) => setNewSpellArgs(e.target.value)}
+                                    style={{ flex: '2 1 200px', minWidth: '120px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="ラベル"
+                                    value={newSpellLabel}
+                                    onChange={(e) => setNewSpellLabel(e.target.value)}
+                                    style={{ flex: '1 1 80px', minWidth: '60px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                />
+                                <button
+                                    type="button"
+                                    style={{ padding: '0.25rem 0.75rem', fontSize: '0.85rem', cursor: 'pointer' }}
+                                    onClick={async () => {
+                                        if (!newSpellName.trim()) return;
+                                        const res = await fetch(`/api/world/buildings/${buildingId}/realtime-spell`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({
+                                                spell_name: newSpellName.trim(),
+                                                spell_args_json: newSpellArgs.trim() || null,
+                                                label: newSpellLabel.trim() || null,
+                                            }),
+                                        });
+                                        if (res.ok) {
+                                            const data = await res.json();
+                                            setRealtimeSpells(prev => [...prev, {
+                                                binding_id: data.binding_id,
+                                                spell_name: newSpellName.trim(),
+                                                spell_args_json: newSpellArgs.trim() || null,
+                                                label: newSpellLabel.trim() || null,
+                                                enabled: true,
+                                                priority: 0,
+                                            }]);
+                                            setNewSpellName('');
+                                            setNewSpellArgs('');
+                                            setNewSpellLabel('');
+                                        }
+                                    }}
+                                >
+                                    追加
+                                </button>
                             </div>
                         </div>
 

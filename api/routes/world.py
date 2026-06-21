@@ -769,3 +769,97 @@ def import_playbook(req: PlaybookImportRequest, db = Depends(get_db)):
         db.refresh(playbook)
         return {"success": True, "action": "created", "id": playbook.id, "name": name}
 
+
+# --- Building Realtime Spell Bindings ---
+
+class CreateBuildingRealtimeSpellRequest(BaseModel):
+    spell_name: str
+    spell_args_json: Optional[str] = None
+    label: Optional[str] = None
+    enabled: bool = True
+    priority: int = 0
+
+
+@router.get("/buildings/{building_id}/realtime-spell")
+def list_building_realtime_spells(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """Building に設定されたリアルタイムスペル一覧を取得する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        bindings = (
+            db.query(RealtimeSpellBinding)
+            .filter(
+                RealtimeSpellBinding.OWNER_KIND == "building",
+                RealtimeSpellBinding.OWNER_ID == building_id,
+            )
+            .order_by(RealtimeSpellBinding.PRIORITY.desc())
+            .all()
+        )
+        return [
+            {
+                "binding_id": b.BINDING_ID,
+                "spell_name": b.SPELL_NAME,
+                "spell_args_json": b.SPELL_ARGS_JSON,
+                "label": b.LABEL,
+                "enabled": b.ENABLED,
+                "priority": b.PRIORITY,
+            }
+            for b in bindings
+        ]
+    finally:
+        db.close()
+
+
+@router.post("/buildings/{building_id}/realtime-spell")
+def create_building_realtime_spell(
+    building_id: str,
+    body: CreateBuildingRealtimeSpellRequest,
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """Building にリアルタイムスペル binding を追加する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        binding = RealtimeSpellBinding(
+            OWNER_KIND="building",
+            OWNER_ID=building_id,
+            SPELL_NAME=body.spell_name,
+            SPELL_ARGS_JSON=body.spell_args_json,
+            LABEL=body.label,
+            ENABLED=body.enabled,
+            PRIORITY=body.priority,
+        )
+        db.add(binding)
+        db.commit()
+        db.refresh(binding)
+        return {"status": "ok", "binding_id": binding.BINDING_ID}
+    finally:
+        db.close()
+
+
+@router.delete("/buildings/{building_id}/realtime-spell/{binding_id}")
+def delete_building_realtime_spell(
+    building_id: str,
+    binding_id: int,
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """Building のリアルタイムスペル binding を削除する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        binding = db.query(RealtimeSpellBinding).filter(
+            RealtimeSpellBinding.BINDING_ID == binding_id,
+            RealtimeSpellBinding.OWNER_KIND == "building",
+            RealtimeSpellBinding.OWNER_ID == building_id,
+        ).first()
+        if not binding:
+            raise HTTPException(status_code=404, detail="Binding not found")
+        db.delete(binding)
+        db.commit()
+        return {"status": "ok"}
+    finally:
+        db.close()
+

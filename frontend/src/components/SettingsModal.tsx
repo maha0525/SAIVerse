@@ -31,6 +31,10 @@ interface AIConfig {
     system_prompt: string;
     default_model: string | null;
     lightweight_model: string | null;
+    vision_model: string | null;
+    audio_model: string | null;
+    video_model: string | null;
+    memory_weave_model: string | null;
     activity_state: string;  // 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: boolean;
     memory_weave_context: boolean;
@@ -122,11 +126,19 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [systemPrompt, setSystemPrompt] = useState('');
     const [defaultModel, setDefaultModel] = useState<string>('');
     const [lightweightModel, setLightweightModel] = useState<string>('');
+    const [visionModel, setVisionModel] = useState<string>('');
+    const [audioModel, setAudioModel] = useState<string>('');
+    const [videoModel, setVideoModel] = useState<string>('');
+    const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
     const [activityState, setActivityState] = useState<string>('Idle');
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
+    const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
+    const [newSpellName, setNewSpellName] = useState('');
+    const [newSpellArgs, setNewSpellArgs] = useState('');
+    const [newSpellLabel, setNewSpellLabel] = useState('');
     // Phase 4-e: empty string = use built-in default (NULL in DB)
     const [metaCacheThresholdRatio, setMetaCacheThresholdRatio] = useState<string>('');
     const [metaMaxRetries, setMetaMaxRetries] = useState<string>('');
@@ -229,11 +241,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setSystemPrompt(data.system_prompt);
                 setDefaultModel(data.default_model || '');
                 setLightweightModel(data.lightweight_model || '');
+                setVisionModel(data.vision_model || '');
+                setAudioModel(data.audio_model || '');
+                setVideoModel(data.video_model || '');
+                setMemoryWeaveModel(data.memory_weave_model || '');
                 setActivityState(data.activity_state || 'Idle');
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
+                // Load realtime spell bindings
+                try {
+                    const spellRes = await fetch(`/api/people/${personaId}/realtime-spell`);
+                    if (spellRes.ok) {
+                        const spellData = await spellRes.json();
+                        setRealtimeSpells(spellData);
+                    }
+                } catch (e) { /* ignore */ }
                 // Phase 4-e: NULL → empty string で「既定値を使う」を表現
                 const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
                 setLoadedMetaConfig(mjc ? { ...mjc } : null);
@@ -338,8 +362,12 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 body: JSON.stringify({
                     description: description,
                     system_prompt: systemPrompt,
-                    default_model: defaultModel,  // empty string = clear to None
-                    lightweight_model: lightweightModel,  // empty string = clear to None
+                    default_model: defaultModel,
+                    lightweight_model: lightweightModel,
+                    vision_model: visionModel,
+                    audio_model: audioModel,
+                    video_model: videoModel,
+                    memory_weave_model: memoryWeaveModel,
                     activity_state: activityState,
                     chronicle_enabled: chronicleEnabled,
                     memory_weave_context: memoryWeaveContext,
@@ -503,6 +531,78 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     ))}
                                 </select>
                                 <div className={styles.description}>該当する場合、より高速で安価なレスポンスに使用されます。</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>Memory Weaveモデル（任意）</label>
+                                <select
+                                    className={styles.select}
+                                    value={memoryWeaveModel}
+                                    onChange={(e) => setMemoryWeaveModel(e.target.value)}
+                                >
+                                    <option value="">グローバル設定を使用</option>
+                                    {memoryWeaveModel && !availableModels.some(m => m.id === memoryWeaveModel) && (
+                                        <option value={memoryWeaveModel}>⚠️ 不明: {memoryWeaveModel}</option>
+                                    )}
+                                    {availableModels.map(m => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                                <div className={styles.description}>クロニクル・メモペディア生成に使用するモデル。</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>画像要約モデル（任意）</label>
+                                <select
+                                    className={styles.select}
+                                    value={visionModel}
+                                    onChange={(e) => setVisionModel(e.target.value)}
+                                >
+                                    <option value="">グローバル設定を使用</option>
+                                    {visionModel && !availableModels.some(m => m.id === visionModel) && (
+                                        <option value={visionModel}>⚠️ 不明: {visionModel}</option>
+                                    )}
+                                    {availableModels.map(m => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                                <div className={styles.description}>画像・ドキュメントの要約生成に使用するモデル。</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>音声要約モデル（任意）</label>
+                                <select
+                                    className={styles.select}
+                                    value={audioModel}
+                                    onChange={(e) => setAudioModel(e.target.value)}
+                                >
+                                    <option value="">グローバル設定を使用</option>
+                                    {audioModel && !availableModels.some(m => m.id === audioModel) && (
+                                        <option value={audioModel}>⚠️ 不明: {audioModel}</option>
+                                    )}
+                                    {availableModels.map(m => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                                <div className={styles.description}>音声ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>動画要約モデル（任意）</label>
+                                <select
+                                    className={styles.select}
+                                    value={videoModel}
+                                    onChange={(e) => setVideoModel(e.target.value)}
+                                >
+                                    <option value="">グローバル設定を使用</option>
+                                    {videoModel && !availableModels.some(m => m.id === videoModel) && (
+                                        <option value={videoModel}>⚠️ 不明: {videoModel}</option>
+                                    )}
+                                    {availableModels.map(m => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                                <div className={styles.description}>動画ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
@@ -846,6 +946,90 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                                 <div className={styles.description}>
                                     発言の直前に現在時刻・前回発言時刻・空間情報などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>リアルタイムスペル</label>
+                                <div className={styles.description} style={{ marginBottom: '0.5rem' }}>
+                                    会話のたびに自動実行し、結果をリアルタイム情報に追加するスペルを設定します。
+                                </div>
+                                {realtimeSpells.length > 0 && (
+                                    <div style={{ marginBottom: '0.5rem' }}>
+                                        {realtimeSpells.map((spell) => (
+                                            <div key={spell.binding_id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem', padding: '0.25rem 0.5rem', background: 'var(--bg-secondary, #f5f5f5)', borderRadius: '4px' }}>
+                                                <span style={{ flex: 1, fontSize: '0.85rem' }}>
+                                                    {spell.label || spell.spell_name}
+                                                    {spell.spell_args_json && <span style={{ opacity: 0.6, marginLeft: '0.5rem' }}>{spell.spell_args_json}</span>}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}
+                                                    onClick={async () => {
+                                                        await fetch(`/api/people/${personaId}/realtime-spell/${spell.binding_id}`, { method: 'DELETE' });
+                                                        setRealtimeSpells(prev => prev.filter(s => s.binding_id !== spell.binding_id));
+                                                    }}
+                                                >
+                                                    削除
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <input
+                                        type="text"
+                                        placeholder="スペル名"
+                                        value={newSpellName}
+                                        onChange={(e) => setNewSpellName(e.target.value)}
+                                        style={{ flex: '1 1 120px', minWidth: '80px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="引数 JSON (例: {&quot;observer_id&quot;:&quot;wearable-01&quot;})"
+                                        value={newSpellArgs}
+                                        onChange={(e) => setNewSpellArgs(e.target.value)}
+                                        style={{ flex: '2 1 200px', minWidth: '120px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="ラベル"
+                                        value={newSpellLabel}
+                                        onChange={(e) => setNewSpellLabel(e.target.value)}
+                                        style={{ flex: '1 1 80px', minWidth: '60px', padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
+                                    />
+                                    <button
+                                        type="button"
+                                        style={{ padding: '0.25rem 0.75rem', fontSize: '0.85rem', cursor: 'pointer' }}
+                                        onClick={async () => {
+                                            if (!newSpellName.trim()) return;
+                                            const res = await fetch(`/api/people/${personaId}/realtime-spell`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                    spell_name: newSpellName.trim(),
+                                                    spell_args_json: newSpellArgs.trim() || null,
+                                                    label: newSpellLabel.trim() || null,
+                                                }),
+                                            });
+                                            if (res.ok) {
+                                                const data = await res.json();
+                                                setRealtimeSpells(prev => [...prev, {
+                                                    binding_id: data.binding_id,
+                                                    spell_name: newSpellName.trim(),
+                                                    spell_args_json: newSpellArgs.trim() || null,
+                                                    label: newSpellLabel.trim() || null,
+                                                    enabled: true,
+                                                    priority: 0,
+                                                }]);
+                                                setNewSpellName('');
+                                                setNewSpellArgs('');
+                                                setNewSpellLabel('');
+                                            }
+                                        }}
+                                    >
+                                        追加
+                                    </button>
                                 </div>
                             </div>
 
