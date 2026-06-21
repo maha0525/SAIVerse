@@ -1732,6 +1732,135 @@ async def _execute_pre_spells(
             _at.append({"action": "pre_spell", "name": name, "playbook": playbook.name})
 
 
+async def _execute_realtime_spells(
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    state: dict,
+    event_callback: Optional[Callable],
+) -> None:
+    """Execute bound realtime spells and inject results into the realtime context message.
+
+    Reads RealtimeSpellBinding entries for both the current persona and building,
+    executes each spell synchronously via _run_spell_tool_async, and appends
+    the results to the existing __realtime_context__ message in state["_messages"].
+
+    Unlike pre_spells, results are NOT stored in SAIMemory (they're volatile context).
+    """
+    messages = state.get("_messages")
+    if not isinstance(messages, list):
+        return
+
+    manager = getattr(runtime, "manager", None)
+    if not manager:
+        return
+
+    persona_id = getattr(persona, "persona_id", None)
+    if not persona_id:
+        return
+
+    # Load bindings from DB
+    session_factory = getattr(manager, "SessionLocal", None)
+    if not session_factory:
+        return
+
+    from database.models import RealtimeSpellBinding
+
+    db = session_factory()
+    try:
+        bindings = (
+            db.query(RealtimeSpellBinding)
+            .filter(
+                RealtimeSpellBinding.ENABLED == True,  # noqa: E712
+                (
+                    ((RealtimeSpellBinding.OWNER_KIND == "persona") & (RealtimeSpellBinding.OWNER_ID == persona_id))
+                    | ((RealtimeSpellBinding.OWNER_KIND == "building") & (RealtimeSpellBinding.OWNER_ID == building_id))
+                ),
+            )
+            .order_by(RealtimeSpellBinding.PRIORITY.desc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    if not bindings:
+        return
+
+    LOGGER.info(
+        "[sea][realtime_spells] Executing %d realtime spell(s) for persona=%s, building=%s",
+        len(bindings), persona_id, building_id,
+    )
+
+    # Execute each spell and collect results
+    result_sections: List[str] = []
+    for binding in bindings:
+        spell_name = binding.SPELL_NAME
+        if spell_name not in SPELL_TOOL_NAMES:
+            LOGGER.warning("[sea][realtime_spells] Unknown spell '%s', skipping", spell_name)
+            continue
+
+        try:
+            args = json.loads(binding.SPELL_ARGS_JSON) if binding.SPELL_ARGS_JSON else {}
+        except (json.JSONDecodeError, TypeError):
+            LOGGER.warning("[sea][realtime_spells] Invalid args JSON for binding %d", binding.BINDING_ID)
+            continue
+
+        try:
+            result_text, result_meta = await _run_spell_tool_async(
+                spell_name, args, persona, state, "__realtime__", event_callback,
+                messages=messages,
+            )
+        except Exception:
+            LOGGER.exception("[sea][realtime_spells] Spell '%s' failed", spell_name)
+            continue
+
+        if result_text:
+            label = binding.LABEL or spell_name
+            result_sections.append(f"{label}: {result_text}")
+
+    if not result_sections:
+        return
+
+    # Find the existing __realtime_context__ message and append results
+    realtime_idx = None
+    for i, msg in enumerate(messages):
+        if msg.get("metadata", {}).get("__realtime_context__"):
+            realtime_idx = i
+            break
+
+    new_content = "\n".join(f"- {s}" for s in result_sections)
+
+    if realtime_idx is not None:
+        existing_content = messages[realtime_idx].get("content", "")
+        # Insert before closing </system> tag
+        if "</system>" in existing_content:
+            messages[realtime_idx]["content"] = existing_content.replace(
+                "</system>",
+                "\n" + new_content + "\n</system>",
+            )
+        else:
+            messages[realtime_idx]["content"] = existing_content + "\n" + new_content
+    else:
+        # No realtime context message exists; create one
+        realtime_msg = {
+            "role": "user",
+            "content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>",
+            "metadata": {"__realtime_context__": True},
+        }
+        # Insert before last user message
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user" and not messages[i].get("metadata", {}).get("__realtime_context__"):
+                last_user_idx = i
+                break
+        if last_user_idx is not None:
+            messages.insert(last_user_idx, realtime_msg)
+        else:
+            messages.append(realtime_msg)
+
+    LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
+
+
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
     async def node(state: dict):
         # Check for cancellation at start of node
@@ -1753,6 +1882,19 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 )
             except Exception:
                 LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
+
+        # ── Realtime spells: auto-execute bound spells and inject into realtime context ──
+        # Configured per-persona and per-building via realtime_spell_binding table.
+        # Runs at most once per Pulse (gated by _realtime_spells_executed).
+        # Results are appended to the existing __realtime_context__ message in _messages.
+        if not state.get("_realtime_spells_executed"):
+            state["_realtime_spells_executed"] = True
+            try:
+                await _execute_realtime_spells(
+                    runtime, persona, building_id, state, event_callback,
+                )
+            except Exception:
+                LOGGER.exception("[sea][realtime_spells] Realtime spell execution failed; continuing")
 
         # Send status event for node execution
         node_id = getattr(node_def, "id", "llm")

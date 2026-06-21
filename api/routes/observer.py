@@ -6,7 +6,7 @@ token は環境変数 OBSERVER_PUSH_TOKEN で設定する。
 import os
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -231,3 +231,104 @@ def get_metric_history(
 
     history = obs_mgr.get_metric_history(observer_id, metric_name, limit=min(limit, 1000))
     return {"metric_name": metric_name, "history": history}
+
+
+# ------------------------------------------------------------------
+# Realtime Spell Binding CRUD
+# ------------------------------------------------------------------
+
+class CreateRealtimeSpellBindingRequest(BaseModel):
+    owner_kind: str  # "persona" | "building"
+    owner_id: str
+    spell_name: str
+    spell_args_json: Optional[str] = None
+    label: Optional[str] = None
+    enabled: bool = True
+    priority: int = 0
+
+
+@router.post("/realtime-spell")
+def create_realtime_spell_binding(
+    body: CreateRealtimeSpellBindingRequest,
+    manager=Depends(get_manager),
+):
+    """リアルタイムスペル binding を作成する。"""
+    from database.models import RealtimeSpellBinding
+
+    if body.owner_kind not in ("persona", "building"):
+        raise HTTPException(status_code=400, detail="owner_kind must be 'persona' or 'building'")
+
+    db = manager.SessionLocal()
+    try:
+        binding = RealtimeSpellBinding(
+            OWNER_KIND=body.owner_kind,
+            OWNER_ID=body.owner_id,
+            SPELL_NAME=body.spell_name,
+            SPELL_ARGS_JSON=body.spell_args_json,
+            LABEL=body.label,
+            ENABLED=body.enabled,
+            PRIORITY=body.priority,
+        )
+        db.add(binding)
+        db.commit()
+        db.refresh(binding)
+        return {"status": "ok", "binding_id": binding.BINDING_ID}
+    finally:
+        db.close()
+
+
+@router.get("/realtime-spell/{owner_kind}/{owner_id}")
+def list_realtime_spell_bindings(
+    owner_kind: str,
+    owner_id: str,
+    manager=Depends(get_manager),
+):
+    """指定オーナーのリアルタイムスペル binding 一覧を取得する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        bindings = (
+            db.query(RealtimeSpellBinding)
+            .filter(
+                RealtimeSpellBinding.OWNER_KIND == owner_kind,
+                RealtimeSpellBinding.OWNER_ID == owner_id,
+            )
+            .order_by(RealtimeSpellBinding.PRIORITY.desc())
+            .all()
+        )
+        return [
+            {
+                "binding_id": b.BINDING_ID,
+                "spell_name": b.SPELL_NAME,
+                "spell_args_json": b.SPELL_ARGS_JSON,
+                "label": b.LABEL,
+                "enabled": b.ENABLED,
+                "priority": b.PRIORITY,
+            }
+            for b in bindings
+        ]
+    finally:
+        db.close()
+
+
+@router.delete("/realtime-spell/{binding_id}")
+def delete_realtime_spell_binding(
+    binding_id: int,
+    manager=Depends(get_manager),
+):
+    """リアルタイムスペル binding を削除する。"""
+    from database.models import RealtimeSpellBinding
+
+    db = manager.SessionLocal()
+    try:
+        binding = db.query(RealtimeSpellBinding).filter(
+            RealtimeSpellBinding.BINDING_ID == binding_id
+        ).first()
+        if not binding:
+            raise HTTPException(status_code=404, detail="Binding not found")
+        db.delete(binding)
+        db.commit()
+        return {"status": "ok"}
+    finally:
+        db.close()

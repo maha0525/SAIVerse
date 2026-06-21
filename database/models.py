@@ -771,3 +771,25 @@ class ObserverMetric(Base):
         Index('idx_obs_metric_lookup', 'OBSERVER_ID', 'METRIC_NAME', 'RECORDED_AT'),
     )
 
+
+class RealtimeSpellBinding(Base):
+    """リアルタイム情報枠に自動挿入するスペルの設定。
+
+    ペルソナ単位 or Building 単位で設定可能。両方に設定がある場合は両方実行される。
+    Pulse 冒頭で1回だけ実行され、結果はリアルタイム情報メッセージに追記される。
+    """
+    __tablename__ = "realtime_spell_binding"
+    BINDING_ID = Column(Integer, primary_key=True, autoincrement=True)
+    OWNER_KIND = Column(String(32), nullable=False)  # "persona" | "building"
+    OWNER_ID = Column(String(255), nullable=False)
+    SPELL_NAME = Column(String(255), nullable=False)
+    SPELL_ARGS_JSON = Column(Text, nullable=True)
+    LABEL = Column(String(255), nullable=True)
+    ENABLED = Column(Boolean, default=True, nullable=False)
+    PRIORITY = Column(Integer, default=0, nullable=False)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        Index('idx_realtime_spell_owner', 'OWNER_KIND', 'OWNER_ID'),
+    )
+
