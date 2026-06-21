@@ -952,7 +952,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>リアルタイムスペル</label>
+                                <label className={styles.label}>事前実行スペル</label>
                                 <div className={styles.description} style={{ marginBottom: '0.5rem' }}>
                                     会話のたびに自動実行し、結果をリアルタイム情報に追加するスペルを設定します。
                                 </div>

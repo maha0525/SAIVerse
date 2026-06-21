@@ -393,7 +393,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>リアルタイムスペル</label>
+                            <label>事前実行スペル</label>
                             <small className={styles.hint} style={{ display: 'block', marginBottom: '0.5rem' }}>
                                 この Building にいるペルソナの会話時に自動実行するスペル
                             </small>
