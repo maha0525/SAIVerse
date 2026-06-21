@@ -21,6 +21,9 @@ api_router.include_router(uri.router, prefix="/uri", tags=["uri"])
 api_router.include_router(system.router, prefix="/system", tags=["system"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
 
+from api.routes import observer
+api_router.include_router(observer.router, prefix="/observer", tags=["observer"])
+
 from api.routes import addon, addon_catalog, addon_events, oauth
 # addon_events(/events など固定パス)を addon(/{addon_name} キャッチオール)より
 # 先に登録する。逆順だと GET /api/addon/events が GET /api/addon/{addon_name} に

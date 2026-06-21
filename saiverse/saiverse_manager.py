@@ -403,6 +403,11 @@ class SAIVerseManager(
         # この 1 個のスレッドで秒精度発火される。
         self.event_scheduler.start()
 
+        # Observer: Fixture/Observer の定期実行・push 受信・通知を管理する。
+        from saiverse.observer_manager import ObserverManager
+        self.observer_manager = ObserverManager(self)
+        self.observer_manager.start_pull_observers()
+
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
         self.sds_session = requests.Session()

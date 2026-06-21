@@ -45,8 +45,9 @@ class AI(Base):
     LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_VISION_MODEL = Column(String(255), nullable=True)
     VISION_MODEL = Column(String(255), nullable=True)
-    AUDIO_MODEL = Column(String(255), nullable=True)  # Audio summary/understanding model (unset → env → builtin default)
-    VIDEO_MODEL = Column(String(255), nullable=True)  # Video summary/understanding model (unset → env → builtin default)
+    AUDIO_MODEL = Column(String(255), nullable=True)
+    VIDEO_MODEL = Column(String(255), nullable=True)
+    MEMORY_WEAVE_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
@@ -723,5 +724,50 @@ class BuildingMessage(Base):
         Index('idx_building_msg_event', 'building_id', 'event_type'),
         Index('idx_building_msg_client_mid', 'client_message_id'),
         Index('idx_building_msg_legacy_mid', 'building_id', 'legacy_message_id'),
+    )
+
+
+# --- Fixture / Observer ---
+
+class Fixture(Base):
+    __tablename__ = "fixture"
+    FIXTURE_ID = Column(String(36), primary_key=True)
+    BUILDING_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
+    NAME = Column(String(255), nullable=False)
+    TYPE = Column(String(64), nullable=False, default="object")
+    DESCRIPTION = Column(String(2048), default="", nullable=False)
+    STATE_JSON = Column(Text, nullable=True)
+    FILE_PATH = Column(String(512), nullable=True)
+    CREATOR_ID = Column(String(255), nullable=True)
+    SOURCE_CONTEXT = Column(String, nullable=True)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ObserverConfig(Base):
+    __tablename__ = "observer_config"
+    OBSERVER_ID = Column(String(36), primary_key=True)
+    FIXTURE_ID = Column(String(36), ForeignKey("fixture.FIXTURE_ID"), nullable=False)
+    ENABLED = Column(Boolean, default=True, nullable=False)
+    EXEC_KIND = Column(String(32), nullable=False)  # "tool" | "playbook" | "push"
+    EXEC_TARGET = Column(String(255), nullable=True)
+    EXEC_ARGS_JSON = Column(Text, nullable=True)
+    INTERVAL_SEC = Column(Integer, nullable=True)
+    METRIC_KEYS_JSON = Column(Text, nullable=True)
+    NOTIFY_RULES_JSON = Column(Text, nullable=True)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ObserverMetric(Base):
+    __tablename__ = "observer_metrics"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    OBSERVER_ID = Column(String(36), ForeignKey("observer_config.OBSERVER_ID"), nullable=False)
+    METRIC_NAME = Column(String(64), nullable=False)
+    VALUE_NUM = Column(Float, nullable=True)
+    VALUE_TEXT = Column(Text, nullable=True)
+    RECORDED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    __table_args__ = (
+        Index('idx_obs_metric_lookup', 'OBSERVER_ID', 'METRIC_NAME', 'RECORDED_AT'),
     )
 

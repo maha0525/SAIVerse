@@ -174,17 +174,20 @@ Observer はペルソナにもアドオンにも属さない。SAIVerse 本体�
 
 **含む**:
 - `fixture` / `observer_config` / `observer_metrics` テーブル (additive migration)
-- Observer の定期実行 (EventScheduler 相乗り) と時系列蓄積
+- Observer の定期実行 (EventScheduler 相乗り) と時系列蓄積 (pull 型)
+- Push 型の HTTP エンドポイント (`/api/observer/{id}/push` + Bearer token 認証)
 - 閾値 / 変化検知による Building 内通知 (既存パイプライン経由)
 - アドオンが Fixture / Observer を登録する経路
 - ペルソナ向け「最新値を読む」spell
-- SGP30 を最初の利用者として実装 (`tools/units/sgp30.py` + stackchan アドオンからの Observer 登録)
+- SGP30 を pull 型の最初の利用者として実装 (`tools/units/sgp30.py` + stackchan アドオンからの Observer 登録)
+- ウェアラブルコンパニオンアプリ連携を push 型の最初の利用者として設計 (SAIVerse 側エンドポイントを初版に含む、アプリ実装は別リポジトリ)
 
 **含まない (将来)**:
 - UI からの Fixture 配置 / Observer 設定 (要検討)
 - 観測値の可視化 UI (グラフ等)
 - 高度な変化検知 (移動平均・異常検知等)。初版は単純閾値 + 前回比
 - 観測値の長期保持ポリシーの精緻化 (初版は素朴な TTL / 件数上限)
+- Fixture サブスクライブ (Building 外からの参照)
 
 ## 未解決の論点 (インタビュー対象)
 
@@ -207,6 +210,79 @@ Observer はペルソナにもアドオンにも属さない。SAIVerse 本体�
 - `manager/items.py` — Item の配置 / pickup / system_instruction 挿入 (Fixture が流用するロジック)
 - `manager/history.py` — `add_building_event` (通知注入経路)
 - `docs/intent/building_memory_unified.md` — Building メッセージ DB 化 (通知の保存層)
+- `temp/saiverse-wearable-companion-handoff.md` — ウェアラブルコンパニオンアプリ仕様 (push 型 Observer の最初の利用者)
+
+## Push モード — 外部ソースからの直接書き込み
+
+### 概念
+
+Observer の `EXEC_KIND` に `"pull"` (既存: tool/playbook 実行) に加え `"push"` を導入する。push モードの Observer は EventScheduler ジョブを持たず、外部アプリケーションが HTTP で `observer_metrics` に直接書き込む。
+
+```
+Pull 型 (SGP30 等):
+  EventScheduler → tool 実行 → observer_metrics INSERT → STATE_JSON 更新 → 閾値判定
+
+Push 型 (ウェアラブル等):
+  外部アプリ → HTTP POST /api/observer/{id}/push → observer_metrics INSERT → STATE_JSON 更新 → 閾値判定
+```
+
+蓄積以降のフロー (STATE_JSON キャッシュ / 閾値通知 / ペルソナ向け spell) は pull/push で完全に共通。
+
+### observer_config の拡張
+
+`EXEC_KIND` の値域:
+- `"tool"` — EventScheduler が `TOOL_REGISTRY` 経由でツール実行 (pull 型)
+- `"playbook"` — EventScheduler が PulseDispatcher 経由で Playbook 実行 (pull 型)
+- `"push"` — EventScheduler ジョブなし。HTTP エンドポイント経由で外部が書き込む
+
+push モードでは `EXEC_TARGET` / `EXEC_ARGS_JSON` / `INTERVAL_SEC` は使用しない (nullable 化 or 無視)。`METRIC_KEYS_JSON` と `NOTIFY_RULES_JSON` は push でも有効 (受信データのキー展開と閾値通知に使う)。
+
+### HTTP エンドポイント
+
+```
+POST /api/observer/{observer_id}/push
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "metrics": {
+    "heart_rate": {"value_num": 58},
+    "hrv_rmssd": {"value_num": 10.7},
+    "sleep_duration_min": {"value_num": 647},
+    "sleep_summary": {"value_text": "深い眠り 1.2h / 浅い眠り 4.5h / レム 1.6h"}
+  },
+  "recorded_at": "2026-06-21T02:24:00+09:00"
+}
+```
+
+- 認証: Bearer token (`.env` に `OBSERVER_PUSH_TOKEN` として保持。初版は単一トークン、将来は observer_id 別に拡張可能)
+- `metrics` の各キーが `observer_metrics.METRIC_NAME` に対応
+- `recorded_at` 省略時は server 側 now()
+- 冪等性: (OBSERVER_ID, METRIC_NAME, RECORDED_AT) の自然キーで upsert
+
+### ウェアラブルコンパニオンアプリ (push 型の最初の利用者)
+
+Android コンパニオンアプリが Health Connect からデータを読み、Tailscale 経由で SAIVerse へ POST する。詳細は `temp/saiverse-wearable-companion-handoff.md` 参照。
+
+データマッピング (Health Connect → observer_metrics):
+| Health Connect レコード | metric_name | value_num | value_text |
+|---|---|---|---|
+| HeartRateRecord | `heart_rate` | bpm (最新) | — |
+| HeartRateVariabilityRmssdRecord | `hrv_rmssd` | ms | — |
+| RestingHeartRateRecord | `resting_hr` | bpm | — |
+| RespiratoryRateRecord | `respiratory_rate` | rpm | — |
+| StepsRecord (集約) | `steps` | count | — |
+| SleepSessionRecord | `sleep_duration_min` | min | — |
+| SleepSessionRecord.stages | `sleep_summary` | — | ステージ要約テキスト |
+| WeightRecord | `weight` | kg | — |
+
+- 同期間隔: 15〜30分 (WorkManager 定期ジョブ)
+- 送信失敗時: ローカルキュー → リトライ (アプリ側責務)
+- SAIVerse 側は upsert で冪等
+
+### 将来拡張: Fixture サブスクライブ
+
+初版では Observer の値はその Fixture が設置された Building 内でのみ spell 参照可能。将来、ペルソナ/ユーザーが Fixture を「サブスクライブ」することで Building を離れても値を参照できる仕組みを追加する。初版の observer_metrics スキーマはこの拡張を妨げない (spell の参照範囲を広げるだけで対応可能)。
 
 ## 決定事項記録
 
@@ -217,3 +293,10 @@ Observer はペルソナにもアドオンにも属さない。SAIVerse 本体�
 - **実行主体は EventScheduler**: 新規スケジューラを作らず既存の `EventScheduler.schedule_periodic` に相乗り。`ConversationManager` (no-op 化済) には触らない。
 - **Observer は本体所有**: ペルソナにもアドオンにも持たせず、SAIVerse 本体の DB + scheduler が所有・実行。アドオンは登録するだけ。
 - **SGP30 を最初の利用者とする**: Observer 機構の検証ケースとして SGP30 (1Hz ポーリング → キャッシュ → ペルソナは最新値を読む) を実装する。
+
+### 2026-06-21 push モード追加合意
+
+- **EXEC_KIND に "push" を追加**: 外部アプリが HTTP POST で observer_metrics に直接書き込むモード。EventScheduler ジョブを持たない。蓄積以降のフロー (キャッシュ/通知/spell) は pull 型と共通。
+- **ウェアラブルコンパニオンアプリを push 型の最初の利用者とする**: Android + Health Connect → Tailscale → SAIVerse push endpoint。SGP30 (pull 型) と並ぶ2つ目の検証ケース。
+- **認証は Bearer token**: `.env` に `OBSERVER_PUSH_TOKEN`。初版は単一トークン。
+- **初版は Building 直結の参照のみ**: ペルソナ向け spell は Fixture の設置 Building 内で参照可能。Building 外からの参照 (サブスクライブ) は将来拡張。初版の A 方式 (ホーム Building に Fixture 配置) で開始し、後から拡張する。
