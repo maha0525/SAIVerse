@@ -169,6 +169,10 @@ class PersonaMixin:
             persona_context_length = get_context_length(persona_model)
             persona_provider = get_model_provider(persona_model)
         persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
+        persona_vision_model = db_ai.VISION_MODEL
+        persona_audio_model = db_ai.AUDIO_MODEL
+        persona_video_model = db_ai.VIDEO_MODEL
+        persona_memory_weave_model = getattr(db_ai, "MEMORY_WEAVE_MODEL", None)
 
         from saiverse.data_paths import find_file, PROMPTS_DIR
         common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
@@ -204,6 +208,10 @@ class PersonaMixin:
             start_building_id=private_room_id,
             model=persona_model,
             lightweight_model=persona_lightweight_model,
+            vision_model=persona_vision_model,
+            audio_model=persona_audio_model,
+            video_model=persona_video_model,
+            memory_weave_model=persona_memory_weave_model,
             context_length=persona_context_length,
             user_room_id=self.user_room_id,
             provider=persona_provider,
@@ -537,8 +545,19 @@ class PersonaMixin:
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         chronicle_enabled: Optional[bool] = None,
+        lightweight_model: Optional[str] = None,
+        vision_model: Optional[str] = None,
+        audio_model: Optional[str] = None,
+        video_model: Optional[str] = None,
+        memory_weave_model: Optional[str] = None,
+        appearance_image_path: Optional[str] = None,
+        memory_weave_context: Optional[bool] = None,
+        spell_enabled: Optional[bool] = None,
+        realtime_info_enabled: Optional[bool] = None,
+        meta_judgment_config: Optional[dict] = None,
+        user_conv_timeout_minutes: Optional[int] = None,
     ) -> str:
-        """ワールドエディタからAIの設定を更新する"""
+        """ワールドエディタ / ペルソナ設定モーダルからAIの設定を更新する"""
         db = self.SessionLocal()
         try:
             ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
@@ -629,6 +648,31 @@ class PersonaMixin:
             ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model or None
             ai.AVATAR_IMAGE = avatar_value
+            if lightweight_model is not None:
+                ai.LIGHTWEIGHT_MODEL = lightweight_model or None
+            if vision_model is not None:
+                ai.VISION_MODEL = vision_model or None
+            if audio_model is not None:
+                ai.AUDIO_MODEL = audio_model or None
+            if video_model is not None:
+                ai.VIDEO_MODEL = video_model or None
+            if memory_weave_model is not None:
+                ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
+            if appearance_image_path is not None:
+                ai.APPEARANCE_IMAGE_PATH = appearance_image_path or None
+            if chronicle_enabled is not None:
+                ai.CHRONICLE_ENABLED = chronicle_enabled
+            if memory_weave_context is not None:
+                ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
+            if spell_enabled is not None:
+                ai.SPELL_ENABLED = spell_enabled
+            if realtime_info_enabled is not None:
+                ai.REALTIME_INFO_ENABLED = realtime_info_enabled
+            if meta_judgment_config is not None:
+                import json as _json
+                ai.META_JUDGMENT_CONFIG = _json.dumps(meta_judgment_config, ensure_ascii=False) if meta_judgment_config else None
+            if user_conv_timeout_minutes is not None:
+                ai.USER_CONV_TIMEOUT_MINUTES = user_conv_timeout_minutes if user_conv_timeout_minutes > 0 else None
             db.commit()
 
             if ai_id in self.personas:
@@ -636,6 +680,18 @@ class PersonaMixin:
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
                 persona.activity_state = ai.ACTIVITY_STATE
+                if default_model is not None and hasattr(persona, "model"):
+                    persona.model = default_model or None
+                if lightweight_model is not None and hasattr(persona, "lightweight_model"):
+                    persona.lightweight_model = lightweight_model or None
+                if vision_model is not None and hasattr(persona, "vision_model"):
+                    persona.vision_model = vision_model or None
+                if audio_model is not None and hasattr(persona, "audio_model"):
+                    persona.audio_model = audio_model or None
+                if video_model is not None and hasattr(persona, "video_model"):
+                    persona.video_model = video_model or None
+                if memory_weave_model is not None and hasattr(persona, "memory_weave_model"):
+                    persona.memory_weave_model = memory_weave_model or None
                 logging.info("Updated in-memory persona '%s' with new settings.", name)
             self._set_persona_avatar(ai_id, avatar_value)
 
