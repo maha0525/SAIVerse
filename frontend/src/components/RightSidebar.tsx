@@ -10,7 +10,10 @@ import {
     Settings,
     Package,
     Music,
-    Video
+    Video,
+    Anchor,
+    Activity,
+    X,
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
@@ -63,6 +66,15 @@ interface Item {
     contained_count?: number;  // Number of items directly inside this bag
 }
 
+interface Fixture {
+    id: string;
+    name: string;
+    description: string;
+    type: string;
+    state_json: string | null;
+    has_observer: boolean;
+}
+
 interface BuildingDetails {
     id: string;
     name: string;
@@ -71,11 +83,13 @@ interface BuildingDetails {
     occupants: Occupant[];  // AI personas
     users?: Occupant[];  // Users present in the building (intent §D-3)
     items: Item[];
+    fixtures?: Fixture[];
 }
 
 export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged }: RightSidebarProps) {
     const [details, setDetails] = useState<BuildingDetails | null>(null);
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
+    const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
 
     // Modal States
@@ -466,6 +480,34 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                 )}
                             </div>
                         </div>
+
+                        {details.fixtures && details.fixtures.length > 0 && (
+                            <div className={styles.section}>
+                                <h3 className={styles.heading}>
+                                    <Anchor size={16} /> 設置物 ({details.fixtures.length})
+                                </h3>
+                                <div className={styles.grid}>
+                                    {details.fixtures.map(fixture => (
+                                        <div
+                                            key={fixture.id}
+                                            className={styles.card}
+                                            onClick={() => setSelectedFixture(fixture)}
+                                            style={{ cursor: 'pointer' }}
+                                        >
+                                            <div className={styles.cardIcon}>
+                                                {fixture.has_observer ? <Activity size={20} /> : <Anchor size={20} />}
+                                            </div>
+                                            <div className={styles.cardInfo}>
+                                                <div className={styles.cardName}>{fixture.name}</div>
+                                                {fixture.description && (
+                                                    <div className={styles.cardDesc}>{fixture.description}</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </>
                 ) : (
                     <div style={{ padding: '1rem', color: '#6b7280' }}>読み込み中...</div>
@@ -481,9 +523,16 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     item={selectedItem}
                     onItemUpdated={() => {
                         fetchDetails();
-                        setSelectedItem(null);  // Close modal after update
+                        setSelectedItem(null);
                     }}
                 />
+
+                {selectedFixture && (
+                    <FixtureModal
+                        fixture={selectedFixture}
+                        onClose={() => setSelectedFixture(null)}
+                    />
+                )}
 
                 {selectedPersona && (
                     <PersonaMenu
@@ -570,5 +619,69 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                 )}
             </div>
         </>
+    );
+}
+
+
+function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => void }) {
+    const state = fixture.state_json ? JSON.parse(fixture.state_json) : null;
+
+    return (
+        <div
+            style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+            }}
+            onClick={onClose}
+        >
+            <div
+                style={{
+                    background: 'var(--bg-primary, #fff)', borderRadius: '8px',
+                    padding: '1.25rem', maxWidth: '480px', width: '90%', maxHeight: '80vh',
+                    overflow: 'auto',
+                }}
+                onClick={e => e.stopPropagation()}
+            >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h3 style={{ margin: 0, fontSize: '1.1rem' }}>{fixture.name}</h3>
+                    <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.25rem' }}>
+                        <X size={18} />
+                    </button>
+                </div>
+                {fixture.description && (
+                    <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', opacity: 0.7 }}>{fixture.description}</p>
+                )}
+                <div style={{ fontSize: '0.8rem', opacity: 0.5, marginBottom: '0.5rem' }}>ID: {fixture.id}</div>
+                {state && Object.keys(state).length > 0 ? (
+                    <div>
+                        <h4 style={{ margin: '0.75rem 0 0.5rem', fontSize: '0.95rem' }}>観測値</h4>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                            <thead>
+                                <tr style={{ borderBottom: '1px solid var(--border-color, #ddd)' }}>
+                                    <th style={{ textAlign: 'left', padding: '0.4rem 0.5rem' }}>名前</th>
+                                    <th style={{ textAlign: 'right', padding: '0.4rem 0.5rem' }}>値</th>
+                                    <th style={{ textAlign: 'right', padding: '0.4rem 0.5rem' }}>記録時刻</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {Object.entries(state).map(([key, entry]: [string, any]) => (
+                                    <tr key={key} style={{ borderBottom: '1px solid var(--border-color, #eee)' }}>
+                                        <td style={{ padding: '0.4rem 0.5rem' }}>{key}</td>
+                                        <td style={{ textAlign: 'right', padding: '0.4rem 0.5rem', fontFamily: 'monospace' }}>
+                                            {entry?.value_num != null ? entry.value_num : entry?.value_text || '—'}
+                                        </td>
+                                        <td style={{ textAlign: 'right', padding: '0.4rem 0.5rem', fontSize: '0.75rem', opacity: 0.6 }}>
+                                            {entry?.recorded_at ? new Date(entry.recorded_at).toLocaleString('ja-JP') : '—'}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                ) : (
+                    <div style={{ padding: '1rem 0', opacity: 0.5, textAlign: 'center' }}>観測データなし</div>
+                )}
+            </div>
+        </div>
     );
 }

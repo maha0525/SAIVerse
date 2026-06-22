@@ -29,6 +29,14 @@ class ItemInfo(BaseModel):
     contained_items: Optional[List["ItemInfo"]] = None  # For bag type: items inside this bag
     contained_count: int = 0  # Number of items directly inside this bag
 
+class FixtureInfo(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    type: str = "object"
+    state_json: Optional[str] = None
+    has_observer: bool = False
+
 class BuildingDetailsResponse(BaseModel):
     id: str
     name: str
@@ -37,6 +45,7 @@ class BuildingDetailsResponse(BaseModel):
     occupants: List[OccupantInfo]  # AI personas only
     users: List[OccupantInfo] = []  # Users present in the building (intent §D-3)
     items: List[ItemInfo]
+    fixtures: List[FixtureInfo] = []
 
 def _build_item_info(data: dict, manager: Any = None) -> dict:
     """Build an ItemInfo dict from an item data dict."""
@@ -198,6 +207,25 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
     except Exception as e:
         LOGGER.warning("Failed to get building image for %s: %s", building_id, e, exc_info=True)
 
+    # 3. Fixtures
+    fixtures_list = []
+    obs_mgr = getattr(manager, "observer_manager", None)
+    if obs_mgr:
+        try:
+            fixtures = obs_mgr.get_building_fixtures(building_id)
+            for f in fixtures:
+                observers = obs_mgr.get_fixture_observers(f.FIXTURE_ID)
+                fixtures_list.append({
+                    "id": f.FIXTURE_ID,
+                    "name": f.NAME,
+                    "description": f.DESCRIPTION or "",
+                    "type": f.TYPE or "object",
+                    "state_json": f.STATE_JSON,
+                    "has_observer": len(observers) > 0,
+                })
+        except Exception:
+            LOGGER.warning("Failed to load fixtures for %s", building_id, exc_info=True)
+
     return {
         "id": building_id,
         "name": building.name,
@@ -205,7 +233,8 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         "image_path": building_image_path,
         "occupants": occupants_list,
         "users": users_list,
-        "items": items_list
+        "items": items_list,
+        "fixtures": fixtures_list,
     }
 
 class CityMapBuilding(BaseModel):

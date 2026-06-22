@@ -588,6 +588,35 @@ def get_visual_context(
         text_parts.append("アイテムはありません。")
         text_parts.append("")
 
+    # ========== Section 4: Fixture ==========
+    obs_mgr = getattr(manager, "observer_manager", None)
+    if obs_mgr:
+        fixtures = obs_mgr.get_building_fixtures(building_id)
+        if fixtures:
+            text_parts.append("---")
+            text_parts.append("")
+            text_parts.append("## 設置物 (Fixture)")
+            text_parts.append("")
+            for f in fixtures:
+                text_parts.append(f"- **{f.NAME}** (種別: {f.TYPE or 'object'}, ID: `{f.FIXTURE_ID}`)")
+                if f.DESCRIPTION:
+                    text_parts.append(f"  {f.DESCRIPTION}")
+                if f.STATE_JSON:
+                    import json as _json
+                    try:
+                        state = _json.loads(f.STATE_JSON)
+                        if state:
+                            state_parts = []
+                            for k, v in state.items():
+                                val = v.get("value_num") if isinstance(v, dict) and v.get("value_num") is not None else (v.get("value_text") if isinstance(v, dict) else v)
+                                if val is not None:
+                                    state_parts.append(f"{k}={val}")
+                            if state_parts:
+                                text_parts.append(f"  最新観測値: {', '.join(state_parts)}")
+                    except (TypeError, _json.JSONDecodeError):
+                        pass
+                text_parts.append("")
+
     text_parts.append("</system>")
 
     # Build message
