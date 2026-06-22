@@ -4,6 +4,7 @@ import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
 import ModalOverlay from './common/ModalOverlay';
 import DebugPanel from './DebugPanel';
+import { formatCost } from '@/lib/formatCost';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -68,6 +69,7 @@ interface ChronicleCostEstimate {
     model_name: string;
     is_free_tier: boolean;
     batch_size: number;
+    currency?: string;
 }
 
 interface UserChoice {
@@ -885,12 +887,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <div>
                                             推定コスト: <strong>
                                                 {costEstimate.is_free_tier
-                                                    ? '$0.00 (Free tier)'
-                                                    : costEstimate.estimated_cost_usd < 0.001
-                                                        ? `~$${costEstimate.estimated_cost_usd.toFixed(6)}`
-                                                        : costEstimate.estimated_cost_usd < 0.01
-                                                            ? `~$${costEstimate.estimated_cost_usd.toFixed(4)}`
-                                                            : `~$${costEstimate.estimated_cost_usd.toFixed(3)}`
+                                                    ? `${formatCost(0, costEstimate.currency)} (Free tier)`
+                                                    : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)
                                                 }
                                             </strong>
                                             {' '}({costEstimate.model_name})
@@ -1031,7 +1029,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             onClick={async () => {
                                                 if (!newSpellName) return;
                                                 const argsObj: Record<string, any> = {};
-                                                Object.entries(newSpellArgs).forEach(([k, v]) => { if (v.trim()) argsObj[k] = v.trim(); });
+                                                Object.entries(newSpellArgs).forEach(([k, v]) => {
+                                                    if (!v.trim()) return;
+                                                    try { argsObj[k] = JSON.parse(v.trim()); } catch { argsObj[k] = v.trim(); }
+                                                });
                                                 const argsJson = Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj) : null;
                                                 const res = await fetch(`/api/people/${personaId}/realtime-spell`, {
                                                     method: 'POST',

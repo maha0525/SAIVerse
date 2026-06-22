@@ -472,7 +472,10 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                         onClick={async () => {
                                             if (!newSpellName) return;
                                             const argsObj: Record<string, any> = {};
-                                            Object.entries(newSpellArgs).forEach(([k, v]) => { if (v.trim()) argsObj[k] = v.trim(); });
+                                            Object.entries(newSpellArgs).forEach(([k, v]) => {
+                                                if (!v.trim()) return;
+                                                try { argsObj[k] = JSON.parse(v.trim()); } catch { argsObj[k] = v.trim(); }
+                                            });
                                             const argsJson = Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj) : null;
                                             const res = await fetch(`/api/world/buildings/${buildingId}/realtime-spell`, {
                                                 method: 'POST',
