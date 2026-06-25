@@ -4,12 +4,12 @@
   "system_prompt": "",
   "display_name": "My Local Model (llama.cpp)",
   "provider_ref": "llama_cpp_server",
-  "context_length": 8192,
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 20,
+  "context_length": 80000,
+  "metabolism_token_threshold": 72000,
+  "metabolism_keep_messages": 40,
   "supports_images": false,
   "supports_structured_output": true,
-  "convert_system_to_user": false,
+  "convert_system_to_user": true,
   "timeout": 3600,
   "llama_slot_save_path": "~/.saiverse/llama_cache",
   "llama_parallel": 1,
@@ -50,6 +50,9 @@
     "model_path": "~/models/my-model.gguf",
     "n_gpu_layers": -1,
     "parallel": 1,
-    "extra_args": []
+    "extra_args": [],
+    "idle_timeout": 600,
+    "_comment_idle_timeout": "秒数。未使用時に自動停止するまでの時間。0 で無効（常時起動）。デフォルト 600（10分）",
+    "_comment_command": "バッチファイル/シェルスクリプトで起動する場合は command にパスを指定。指定時は model_path, n_gpu_layers, extra_args 等は無視される。例: \"command\": \"C:/llama/start.bat\""
   }
 }

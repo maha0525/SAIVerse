@@ -21,6 +21,9 @@ _HEALTH_CHECK_TIMEOUT = 2.0
 _HEALTH_CHECK_WAIT_MAX = 120.0
 _HEALTH_CHECK_INTERVAL = 2.0
 _SHUTDOWN_WAIT = 10
+_DEFAULT_IDLE_TIMEOUT = 600
+_DEFAULT_BUSY_DEADLINE = 3600
+_IDLE_CHECK_INTERVAL = 30
 
 
 @dataclass
@@ -29,6 +32,9 @@ class ManagedServer:
     identity: str
     port: int
     config: Dict[str, Any] = field(repr=False)
+    idle_timeout: float = _DEFAULT_IDLE_TIMEOUT
+    busy_deadline: float = _DEFAULT_BUSY_DEADLINE
+    last_activity: float = field(default_factory=time.monotonic)
 
 
 class LlamaServerManager:
@@ -45,6 +51,8 @@ class LlamaServerManager:
     def __init__(self) -> None:
         self._servers: Dict[int, ManagedServer] = {}
         self._lock = threading.Lock()
+        self._idle_checker: Optional[threading.Thread] = None
+        self._idle_checker_stop = threading.Event()
 
     def ensure_running(self, base_url: str, config: Dict[str, Any]) -> None:
         llama_cfg = config.get("llama_server")
@@ -66,6 +74,7 @@ class LlamaServerManager:
                     )
                     return
                 if managed.identity == desired_identity:
+                    managed.last_activity = time.monotonic()
                     logger.debug("[llama_server] Port %d already serving correct config", port)
                     return
                 logger.info(
@@ -75,8 +84,13 @@ class LlamaServerManager:
                 self._stop_server(port)
 
             self._launch(host, port, config, llama_cfg, desired_identity)
+            self._ensure_idle_checker()
 
     def shutdown_all(self) -> None:
+        self._idle_checker_stop.set()
+        if self._idle_checker is not None:
+            self._idle_checker.join(timeout=5)
+            self._idle_checker = None
         with self._lock:
             ports = list(self._servers.keys())
             for port in ports:
@@ -101,6 +115,10 @@ class LlamaServerManager:
         log_file = self._open_log_file(port)
         logger.info("[llama_server] Launching: %s (cwd=%s)", " ".join(cmd), cwd or "<inherit>")
 
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+
         process = subprocess.Popen(
             cmd,
             cwd=cwd,
@@ -108,14 +126,24 @@ class LlamaServerManager:
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=os.name != "nt",
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+            creationflags=flags,
         )
+
+        idle_timeout = llama_cfg.get("idle_timeout")
+        if not isinstance(idle_timeout, (int, float)) or idle_timeout < 0:
+            idle_timeout = _DEFAULT_IDLE_TIMEOUT
+
+        busy_deadline = llama_cfg.get("busy_deadline")
+        if not isinstance(busy_deadline, (int, float)) or busy_deadline <= 0:
+            busy_deadline = _DEFAULT_BUSY_DEADLINE
 
         self._servers[port] = ManagedServer(
             process=process,
             identity=identity,
             port=port,
             config=llama_cfg,
+            idle_timeout=float(idle_timeout),
+            busy_deadline=float(busy_deadline),
         )
 
         health_base = f"http://{host}:{port}"
@@ -172,6 +200,63 @@ class LlamaServerManager:
 
         return cmd
 
+    def _ensure_idle_checker(self) -> None:
+        if self._idle_checker is not None and self._idle_checker.is_alive():
+            return
+        self._idle_checker_stop.clear()
+        t = threading.Thread(target=self._idle_check_loop, daemon=True, name="llama-idle-checker")
+        self._idle_checker = t
+        t.start()
+
+    def _idle_check_loop(self) -> None:
+        while not self._idle_checker_stop.wait(timeout=_IDLE_CHECK_INTERVAL):
+            with self._lock:
+                if not self._servers:
+                    break
+                now = time.monotonic()
+                candidates: list[int] = []
+                for port, managed in self._servers.items():
+                    if managed.idle_timeout == 0:
+                        continue
+                    if now - managed.last_activity >= managed.idle_timeout:
+                        candidates.append(port)
+
+            to_stop: list[int] = []
+            for port in candidates:
+                with self._lock:
+                    managed = self._servers.get(port)
+                    if not managed:
+                        continue
+                    idle_secs = time.monotonic() - managed.last_activity
+                    deadline = managed.busy_deadline
+
+                if self._is_server_busy(port):
+                    if idle_secs >= deadline:
+                        logger.warning(
+                            "[llama_server] Port %d busy for %.0fs, exceeded deadline (%.0fs), forcing stop",
+                            port, idle_secs, deadline,
+                        )
+                        to_stop.append(port)
+                    else:
+                        logger.debug(
+                            "[llama_server] Port %d still processing (%.0fs/%.0fs deadline)",
+                            port, idle_secs, deadline,
+                        )
+                else:
+                    to_stop.append(port)
+
+            with self._lock:
+                for port in to_stop:
+                    managed = self._servers.get(port)
+                    if not managed:
+                        continue
+                    idle_secs = time.monotonic() - managed.last_activity
+                    logger.info(
+                        "[llama_server] Port %d idle for %.0fs (timeout=%.0fs), stopping",
+                        port, idle_secs, managed.idle_timeout,
+                    )
+                    self._stop_server(port)
+
     def _stop_server(self, port: int) -> None:
         managed = self._servers.pop(port, None)
         if managed is None:
@@ -182,15 +267,45 @@ class LlamaServerManager:
             return
         logger.info("[llama_server] Stopping server on port %d (PID %d)", port, proc.pid)
         try:
+            self._kill_process_tree(proc)
+        except Exception as exc:
+            logger.error("[llama_server] Failed to stop port %d cleanly: %s", port, exc)
+
+    @staticmethod
+    def _kill_process_tree(proc: subprocess.Popen) -> None:
+        pid = proc.pid
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+            )
+            try:
+                proc.wait(timeout=_SHUTDOWN_WAIT)
+            except subprocess.TimeoutExpired:
+                logger.warning("[llama_server] PID %d still alive after taskkill /T", pid)
+        else:
             proc.terminate()
             try:
                 proc.wait(timeout=_SHUTDOWN_WAIT)
             except subprocess.TimeoutExpired:
-                logger.warning("[llama_server] Port %d did not exit in time; killing", port)
+                logger.warning("[llama_server] PID %d did not exit in time; killing", pid)
                 proc.kill()
                 proc.wait(timeout=5)
-        except Exception as exc:
-            logger.error("[llama_server] Failed to stop port %d cleanly: %s", port, exc)
+
+    def _is_server_busy(self, port: int) -> bool:
+        """Check if the server has any slots currently processing."""
+        try:
+            resp = httpx.get(
+                f"http://127.0.0.1:{port}/health",
+                timeout=_HEALTH_CHECK_TIMEOUT,
+            )
+            return resp.status_code != 200
+        except Exception:
+            with self._lock:
+                managed = self._servers.get(port)
+                if managed and managed.process.poll() is None:
+                    return True
+            return False
 
     def _health_check(self, base_url: str) -> bool:
         try:
