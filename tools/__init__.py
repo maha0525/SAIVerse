@@ -65,9 +65,32 @@ def _add_registered_tool(name: str, schema: ToolSchema, func: Callable) -> None:
     schema_building_ids = getattr(schema, "building_ids", None)
     if schema_building_ids:
         func = _wrap_with_building_gate(name, list(schema_building_ids), func)
+    # Build the provider function-calling specs defensively. A single tool
+    # whose JSON schema a provider SDK rejects (e.g. an MCP tool whose schema
+    # uses a construct google-genai forbids) must NOT abort registration of
+    # every other tool on the same server. We skip only the offending provider
+    # spec and keep the tool callable + visible as a spell. Without this guard,
+    # one bad schema silently dropped all later tools on the server (this is
+    # how the Stack-chan LED spells went missing).
+    try:
+        openai_spec = oa.to_openai(schema)
+    except Exception:
+        LOGGER.warning(
+            "to_openai failed for tool '%s'; OpenAI function spec skipped", name, exc_info=True
+        )
+        openai_spec = None
+    try:
+        gemini_spec = gm.to_gemini(schema)
+    except Exception:
+        LOGGER.warning(
+            "to_gemini failed for tool '%s'; Gemini function spec skipped", name, exc_info=True
+        )
+        gemini_spec = None
     TOOL_REGISTRY[name] = func
-    OPENAI_TOOLS_SPEC.append(oa.to_openai(schema))
-    GEMINI_TOOLS_SPEC.append(gm.to_gemini(schema))
+    if openai_spec is not None:
+        OPENAI_TOOLS_SPEC.append(openai_spec)
+    if gemini_spec is not None:
+        GEMINI_TOOLS_SPEC.append(gemini_spec)
     TOOL_SCHEMAS.append(schema)
     if getattr(schema, "spell", False):
         SPELL_TOOL_NAMES.add(name)

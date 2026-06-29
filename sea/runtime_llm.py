@@ -1847,6 +1847,7 @@ async def _execute_realtime_spells(
 
     # Execute each spell and collect results
     result_sections: List[str] = []
+    aggregated_media: List[Dict[str, Any]] = []
     for binding in bindings:
         spell_name = binding.SPELL_NAME
         if spell_name not in SPELL_TOOL_NAMES:
@@ -1871,8 +1872,16 @@ async def _execute_realtime_spells(
         if result_text:
             label = binding.LABEL or spell_name
             result_sections.append(f"{label}: {result_text}")
+        # Forward any media (images, etc.) the spell returned. Mirrors the
+        # normal spell loop / pre_spells paths; without this, a realtime spell
+        # like `see` only injects its text stub ("目の前の光景を見た。") and the
+        # persona never receives the captured image.
+        if isinstance(result_meta, dict):
+            media_list = result_meta.get("media")
+            if isinstance(media_list, list):
+                aggregated_media.extend(media_list)
 
-    if not result_sections:
+    if not result_sections and not aggregated_media:
         return
 
     # Find the existing __realtime_context__ message and append results
@@ -1885,15 +1894,17 @@ async def _execute_realtime_spells(
     new_content = "\n".join(f"- {s}" for s in result_sections)
 
     if realtime_idx is not None:
-        existing_content = messages[realtime_idx].get("content", "")
-        # Insert before closing </system> tag
-        if "</system>" in existing_content:
-            messages[realtime_idx]["content"] = existing_content.replace(
-                "</system>",
-                "\n" + new_content + "\n</system>",
-            )
-        else:
-            messages[realtime_idx]["content"] = existing_content + "\n" + new_content
+        if new_content:
+            existing_content = messages[realtime_idx].get("content", "")
+            # Insert before closing </system> tag
+            if "</system>" in existing_content:
+                messages[realtime_idx]["content"] = existing_content.replace(
+                    "</system>",
+                    "\n" + new_content + "\n</system>",
+                )
+            else:
+                messages[realtime_idx]["content"] = existing_content + "\n" + new_content
+        target_msg = messages[realtime_idx]
     else:
         # No realtime context message exists; create one
         realtime_msg = {
@@ -1911,6 +1922,23 @@ async def _execute_realtime_spells(
             messages.insert(last_user_idx, realtime_msg)
         else:
             messages.append(realtime_msg)
+        target_msg = realtime_msg
+
+    # Attach media (images, etc.) onto the realtime context message so the LLM
+    # receives them as attachments. iter_image_media() in each LLM client picks
+    # these up via message["metadata"]["media"] across all messages, so the
+    # realtime context message's non-final position does not matter.
+    if aggregated_media:
+        meta = target_msg.setdefault("metadata", {})
+        existing_media = meta.get("media")
+        if isinstance(existing_media, list):
+            existing_media.extend(aggregated_media)
+        else:
+            meta["media"] = aggregated_media
+        LOGGER.info(
+            "[sea][realtime_spells] Attached %d media item(s) from realtime spell results",
+            len(aggregated_media),
+        )
 
     LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
 
