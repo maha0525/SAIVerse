@@ -34,7 +34,9 @@
         "running_track_id": "running_track_id",
         "trigger_type": "trigger_type",
         "trigger_context": "trigger_context",
-        "track_at_judgment_id": "track_at_judgment_id"
+        "track_at_judgment_id": "track_at_judgment_id",
+        "situation_text": "situation_text",
+        "recent_judgments": "recent_judgments"
       },
       "next": null
     }

@@ -427,6 +427,20 @@ class SEARuntime:
             }
         return {"enable_cache": True, "cache_ttl": "5m"}
 
+    @staticmethod
+    def _ensure_llama_server(model_name: str) -> None:
+        """Re-launch llama.cpp server if it was stopped by idle timeout."""
+        try:
+            from saiverse.model_configs import get_model_config
+            config = get_model_config(model_name)
+            if not isinstance(config, dict) or not config.get("llama_server"):
+                return
+            from llm_clients.llama_server import get_server_manager
+            server_base = config.get("base_url", "http://127.0.0.1:8080/v1")
+            get_server_manager().ensure_running(server_base, config)
+        except Exception as exc:
+            LOGGER.debug("[sea] _ensure_llama_server check failed (non-fatal): %s", exc)
+
     def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False, state: Optional[Dict[str, Any]] = None) -> Any:
         """Select the appropriate LLM client based on node's model_type and structured output needs.
 
@@ -495,6 +509,9 @@ class SEARuntime:
             base_model = getattr(persona, "model", "unknown")
             LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
 
+        # Ensure llama.cpp server is running (may have been stopped by idle timeout)
+        self._ensure_llama_server(base_model)
+
         # Guard: if no client was resolved, raise a clear error
         if base_client is None:
             persona_name = getattr(persona, "persona_name", "unknown")
@@ -505,28 +522,29 @@ class SEARuntime:
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
-            from saiverse.model_configs import get_agentic_model, get_context_length, get_model_provider, supports_structured_output
+            from saiverse.model_configs import get_context_length, get_model_provider, supports_structured_output
             if not supports_structured_output(base_model):
-                # Model doesn't support structured output, switch to agentic model
-                agentic_model = get_agentic_model()
-                # Guard: if the agentic model itself doesn't support structured output,
-                # fall back to the built-in default instead
-                if not supports_structured_output(agentic_model):
-                    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-                    builtin_default = BUILTIN_DEFAULT_LITE_MODEL
-                    LOGGER.warning(
-                        "[sea] Agentic model '%s' also doesn't support structured output, "
-                        "falling back to built-in default: %s", agentic_model, builtin_default)
-                    agentic_model = builtin_default
-                LOGGER.info("[sea] Model '%s' doesn't support structured output, switching to agentic model: %s",
-                           base_model, agentic_model)
+                lw_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                if not supports_structured_output(lw_model):
+                    persona_name = getattr(persona, "persona_name", "unknown")
+                    raise LLMError(
+                        f"Neither DEFAULT_MODEL '{base_model}' nor LIGHTWEIGHT_MODEL '{lw_model}' "
+                        f"supports structured output for persona '{persona_name}'",
+                        user_message=(
+                            f"現在選択されているモデル（{base_model}）も軽量モデル（{lw_model}）も"
+                            "構造化出力に対応していません。チャットオプションから対応モデルに変更してください。"
+                        ),
+                    )
+                LOGGER.info("[sea] Model '%s' doesn't support structured output, "
+                            "falling back to lightweight model: %s", base_model, lw_model)
                 try:
                     from llm_clients import get_llm_client
-                    ag_context = get_context_length(agentic_model)
-                    ag_provider = get_model_provider(agentic_model)
-                    return get_llm_client(agentic_model, ag_provider, ag_context)
+                    lw_context = get_context_length(lw_model)
+                    lw_provider = get_model_provider(lw_model)
+                    return get_llm_client(lw_model, lw_provider, lw_context)
                 except Exception as exc:
-                    LOGGER.warning("[sea] Failed to create agentic client: %s; using base client", exc)
+                    LOGGER.warning("[sea] Failed to create lightweight client for structured output: %s; "
+                                   "using base client", exc)
                     return base_client
 
         return base_client
@@ -541,7 +559,7 @@ class SEARuntime:
         client_class_name = type(llm_client).__name__
         LOGGER.info("[sea] LLM client class: %s", client_class_name)
 
-        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient", "LlamaCppClient"):
+        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
             # Filter OpenAI tools spec (OpenAI-compatible)
             LOGGER.info("[sea] Using OpenAI-compatible tools format (client: %s)", client_class_name)
             LOGGER.info("[sea] Filtering from OPENAI_TOOLS_SPEC (total: %d)", len(OPENAI_TOOLS_SPEC))
@@ -1549,11 +1567,14 @@ class SEARuntime:
     def _get_anchor_validity_seconds(self, model_key: str, persona_id: Optional[str] = None) -> int:
         """Get anchor validity duration in seconds based on model cache config.
 
+        - Models with metabolism_token_threshold: effectively infinite (token-based trigger only)
         - Anthropic (explicit cache): per-persona TTL override or global manager.state.cache_ttl (300s or 3600s)
         - Others (implicit/no cache): 1200s (20 min)
         """
         try:
-            from saiverse.model_configs import get_cache_config
+            from saiverse.model_configs import get_cache_config, get_metabolism_token_threshold
+            if get_metabolism_token_threshold(model_key) is not None:
+                return 86400 * 365  # token-based: never expire by time
             cache_config = get_cache_config(model_key)
             cache_type = cache_config.get("type", "implicit")
             if cache_type == "explicit":
@@ -1765,6 +1786,28 @@ class SEARuntime:
                 getattr(persona, "persona_id", "?"), persona_model,
             )
 
+        # Token-based metabolism trigger: flag persona if input_tokens exceeds threshold
+        self._check_token_threshold(persona, persona_model, usage)
+
+    def _check_token_threshold(self, persona, model_key: str, usage) -> None:
+        """Flag persona for metabolism if input_tokens exceeds configured threshold."""
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        if input_tokens <= 0:
+            return
+        try:
+            from saiverse.model_configs import get_metabolism_token_threshold
+            threshold = get_metabolism_token_threshold(model_key)
+            if threshold is None:
+                return
+            if input_tokens > threshold:
+                persona._metabolism_token_triggered = True
+                LOGGER.info(
+                    "[metabolism] Token threshold exceeded: persona=%s model=%s input_tokens=%d > threshold=%d",
+                    getattr(persona, "persona_id", "?"), model_key, input_tokens, threshold,
+                )
+        except Exception:
+            LOGGER.debug("[metabolism] Token threshold check failed", exc_info=True)
+
     def _schedule_cache_ttl_pulse(self, persona, model_key: str, cache_type: str) -> None:
         """anchor touch 直後に「TTL 接近で前倒し fire」を EventScheduler に予約する。
 
@@ -1859,6 +1902,11 @@ class SEARuntime:
         if not history_mgr or not anchor:
             return
 
+        # Token threshold trigger: check if last LLM call exceeded the threshold
+        token_triggered = getattr(persona, "_metabolism_token_triggered", False)
+        if token_triggered:
+            persona._metabolism_token_triggered = False
+
         high_wm = self._get_high_watermark(persona)
         if high_wm is None:
             return
@@ -1869,16 +1917,31 @@ class SEARuntime:
             required_line_roles=["main_line"],
             required_scopes=["committed"],
         )
-        if len(current_messages) <= high_wm:
-            return  # Haven't reached high watermark yet
+
+        should_run = False
+        if token_triggered:
+            should_run = True
+            LOGGER.info(
+                "[metabolism] Token threshold exceeded for %s, triggering metabolism",
+                getattr(persona, "persona_id", "?"),
+            )
+        elif len(current_messages) > high_wm:
+            should_run = True
+            LOGGER.info(
+                "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d",
+                getattr(persona, "persona_id", "?"), len(current_messages), high_wm,
+            )
+
+        if not should_run:
+            return
 
         low_wm = self._get_low_watermark(persona)
-        if low_wm is None or high_wm - low_wm < 20:
-            return  # Gap too small for a Chronicle batch
+        if low_wm is None or len(current_messages) - low_wm < 10:
+            return
 
         LOGGER.info(
-            "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d, will keep %d",
-            getattr(persona, "persona_id", "?"), len(current_messages), high_wm, low_wm,
+            "[metabolism] Running metabolism: %d messages, will keep %d",
+            len(current_messages), low_wm,
         )
         self._run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
 
@@ -2010,9 +2073,8 @@ class SEARuntime:
         from sai_memory.memory.storage import Message, get_messages_paginated
         from saiverse.model_configs import find_model_config
 
-        # Get LLM client using MEMORY_WEAVE_MODEL
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        model_name = getattr(persona, "memory_weave_model", None) or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
         model_id, model_config = find_model_config(model_name)
         if not model_config:
             LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
@@ -2286,8 +2348,7 @@ class SEARuntime:
             LOGGER.warning("[metabolism][track] SAIMemory not available for Track Chronicle")
             return
 
-        # LLM client (軽量モデル)
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        model_name = getattr(persona, "memory_weave_model", None) or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
         model_id, model_config = find_model_config(model_name)
         if not model_config:
             LOGGER.warning("[metabolism][track] Model '%s' not found for Track Chronicle", model_name)

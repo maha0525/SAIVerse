@@ -18,9 +18,15 @@ router = APIRouter()
 LOGGER = logging.getLogger(__name__)
 
 
+class CostByCurrency(BaseModel):
+    """通貨別コスト"""
+    currency: str
+    total_cost: float
+
 class UsageSummary(BaseModel):
     """使用量サマリー"""
     total_cost_usd: float
+    costs_by_currency: List[CostByCurrency] = []
     total_input_tokens: int
     total_output_tokens: int
     call_count: int
@@ -32,6 +38,7 @@ class DailyUsage(BaseModel):
     model_id: str
     model_display_name: str
     cost_usd: float
+    currency: str = "USD"
     input_tokens: int
     output_tokens: int
     call_count: int
@@ -58,24 +65,41 @@ def get_usage_summary(
     session = manager.SessionLocal()
     try:
         start_date = datetime.now() - timedelta(days=days)
-        query = session.query(
-            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
+
+        base_filter = [LLMUsageLog.TIMESTAMP >= start_date]
+        if persona_id:
+            base_filter.append(LLMUsageLog.PERSONA_ID == persona_id)
+        if category:
+            base_filter.append(LLMUsageLog.CATEGORY == category)
+
+        # Token totals and call count (currency-independent)
+        totals = session.query(
             func.coalesce(func.sum(LLMUsageLog.INPUT_TOKENS), 0).label("total_input"),
             func.coalesce(func.sum(LLMUsageLog.OUTPUT_TOKENS), 0).label("total_output"),
             func.count(LLMUsageLog.ID).label("call_count"),
-        ).filter(LLMUsageLog.TIMESTAMP >= start_date)
+        ).filter(*base_filter).one()
 
-        if persona_id:
-            query = query.filter(LLMUsageLog.PERSONA_ID == persona_id)
-        if category:
-            query = query.filter(LLMUsageLog.CATEGORY == category)
+        # Cost grouped by currency
+        cost_rows = session.query(
+            func.coalesce(LLMUsageLog.CURRENCY, "USD").label("currency"),
+            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
+        ).filter(*base_filter).group_by(
+            func.coalesce(LLMUsageLog.CURRENCY, "USD"),
+        ).all()
 
-        result = query.one()
+        costs_by_currency = [
+            CostByCurrency(currency=r.currency, total_cost=float(r.total_cost or 0))
+            for r in cost_rows if float(r.total_cost or 0) > 0
+        ]
+        # total_cost_usd: only USD rows (backward compat)
+        usd_total = sum(c.total_cost for c in costs_by_currency if c.currency == "USD")
+
         return UsageSummary(
-            total_cost_usd=float(result.total_cost or 0),
-            total_input_tokens=int(result.total_input or 0),
-            total_output_tokens=int(result.total_output or 0),
-            call_count=int(result.call_count or 0),
+            total_cost_usd=usd_total,
+            costs_by_currency=costs_by_currency,
+            total_input_tokens=int(totals.total_input or 0),
+            total_output_tokens=int(totals.total_output or 0),
+            call_count=int(totals.call_count or 0),
         )
     finally:
         session.close()
@@ -128,12 +152,21 @@ def get_daily_usage(
             query = query.filter(LLMUsageLog.CATEGORY == category)
 
         results = query.all()
+
+        # Build currency lookup: model_id -> currency
+        model_currencies: Dict[str, str] = {}
+        for r in results:
+            if r.MODEL_ID not in model_currencies:
+                p = get_model_pricing(r.MODEL_ID)
+                model_currencies[r.MODEL_ID] = p.get("currency", "USD") if p else "USD"
+
         return [
             DailyUsage(
                 date=str(r.date),
                 model_id=r.MODEL_ID,
                 model_display_name=get_model_display_name(r.MODEL_ID),
                 cost_usd=float(r.cost or 0),
+                currency=model_currencies.get(r.MODEL_ID, "USD"),
                 input_tokens=int(r.input_tokens or 0),
                 output_tokens=int(r.output_tokens or 0),
                 call_count=int(r.call_count or 0),
@@ -153,9 +186,10 @@ def get_usage_by_persona(
     session = manager.SessionLocal()
     try:
         start_date = datetime.now() - timedelta(days=days)
+
+        # Token/call totals per persona
         query = session.query(
             LLMUsageLog.PERSONA_ID,
-            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
             func.coalesce(func.sum(LLMUsageLog.INPUT_TOKENS), 0).label("total_input"),
             func.coalesce(func.sum(LLMUsageLog.OUTPUT_TOKENS), 0).label("total_output"),
             func.count(LLMUsageLog.ID).label("call_count"),
@@ -163,30 +197,50 @@ def get_usage_by_persona(
             LLMUsageLog.TIMESTAMP >= start_date,
         ).group_by(
             LLMUsageLog.PERSONA_ID,
-        ).order_by(
-            func.sum(LLMUsageLog.COST_USD).desc(),
         )
+        totals_by_persona = {r.PERSONA_ID: r for r in query.all()}
 
-        results = query.all()
+        # Cost per persona per currency
+        cost_query = session.query(
+            LLMUsageLog.PERSONA_ID,
+            func.coalesce(LLMUsageLog.CURRENCY, "USD").label("currency"),
+            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
+        ).filter(
+            LLMUsageLog.TIMESTAMP >= start_date,
+        ).group_by(
+            LLMUsageLog.PERSONA_ID,
+            func.coalesce(LLMUsageLog.CURRENCY, "USD"),
+        )
+        costs_map: Dict[Optional[str], List[Dict[str, Any]]] = {}
+        for r in cost_query.all():
+            cost_val = float(r.total_cost or 0)
+            if cost_val > 0:
+                costs_map.setdefault(r.PERSONA_ID, []).append(
+                    {"currency": r.currency, "total_cost": cost_val}
+                )
 
         # ペルソナ名を取得
         persona_names = {}
-        persona_ids = [r.PERSONA_ID for r in results if r.PERSONA_ID]
+        persona_ids = [pid for pid in totals_by_persona if pid]
         if persona_ids:
             personas = session.query(AI.AIID, AI.AINAME).filter(AI.AIID.in_(persona_ids)).all()
             persona_names = {p.AIID: p.AINAME for p in personas}
 
-        return [
-            {
-                "persona_id": r.PERSONA_ID or "system",
-                "persona_name": persona_names.get(r.PERSONA_ID, "System/User") if r.PERSONA_ID else "System/User",
-                "total_cost_usd": float(r.total_cost or 0),
+        result = []
+        for pid, r in totals_by_persona.items():
+            costs = costs_map.get(pid, [])
+            usd_total = sum(c["total_cost"] for c in costs if c["currency"] == "USD")
+            result.append({
+                "persona_id": pid or "system",
+                "persona_name": persona_names.get(pid, "System/User") if pid else "System/User",
+                "total_cost_usd": usd_total,
+                "costs_by_currency": costs,
                 "total_input_tokens": int(r.total_input or 0),
                 "total_output_tokens": int(r.total_output or 0),
                 "call_count": int(r.call_count or 0),
-            }
-            for r in results
-        ]
+            })
+        result.sort(key=lambda x: sum(c["total_cost"] for c in x["costs_by_currency"]), reverse=True)
+        return result
     finally:
         session.close()
 
@@ -258,42 +312,57 @@ def get_usage_by_category(
     session = manager.SessionLocal()
     try:
         start_date = datetime.now() - timedelta(days=days)
+
+        base_filter = [LLMUsageLog.TIMESTAMP >= start_date]
+        if persona_id:
+            base_filter.append(LLMUsageLog.PERSONA_ID == persona_id)
+
+        # Token/call totals per category
         query = session.query(
             LLMUsageLog.CATEGORY,
-            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
             func.coalesce(func.sum(LLMUsageLog.INPUT_TOKENS), 0).label("total_input"),
             func.coalesce(func.sum(LLMUsageLog.OUTPUT_TOKENS), 0).label("total_output"),
             func.count(LLMUsageLog.ID).label("call_count"),
-        ).filter(
-            LLMUsageLog.TIMESTAMP >= start_date,
-        ).group_by(
+        ).filter(*base_filter).group_by(LLMUsageLog.CATEGORY)
+        totals_by_cat = {r.CATEGORY: r for r in query.all()}
+
+        # Cost per category per currency
+        cost_query = session.query(
             LLMUsageLog.CATEGORY,
-        ).order_by(
-            func.sum(LLMUsageLog.COST_USD).desc(),
+            func.coalesce(LLMUsageLog.CURRENCY, "USD").label("currency"),
+            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
+        ).filter(*base_filter).group_by(
+            LLMUsageLog.CATEGORY,
+            func.coalesce(LLMUsageLog.CURRENCY, "USD"),
         )
+        costs_map: Dict[Optional[str], List[Dict[str, Any]]] = {}
+        for r in cost_query.all():
+            cost_val = float(r.total_cost or 0)
+            if cost_val > 0:
+                costs_map.setdefault(r.CATEGORY, []).append(
+                    {"currency": r.currency, "total_cost": cost_val}
+                )
 
-        if persona_id:
-            query = query.filter(LLMUsageLog.PERSONA_ID == persona_id)
-
-        results = query.all()
-
-        # Add display names for known categories
         category_display = {
             "persona_speak": "Persona Speech",
             "memory_weave_generate": "Memory Weave (Generate)",
         }
 
-        return [
-            {
-                "category": r.CATEGORY or "uncategorized",
-                "category_name": category_display.get(r.CATEGORY, r.CATEGORY or "Uncategorized"),
-                "total_cost_usd": float(r.total_cost or 0),
+        result = []
+        for cat, r in totals_by_cat.items():
+            costs = costs_map.get(cat, [])
+            usd_total = sum(c["total_cost"] for c in costs if c["currency"] == "USD")
+            result.append({
+                "category": cat or "uncategorized",
+                "category_name": category_display.get(cat, cat or "Uncategorized"),
+                "total_cost_usd": usd_total,
+                "costs_by_currency": costs,
                 "total_input_tokens": int(r.total_input or 0),
                 "total_output_tokens": int(r.total_output or 0),
                 "call_count": int(r.call_count or 0),
-            }
-            for r in results
-        ]
+            })
+        result.sort(key=lambda x: sum(c["total_cost"] for c in x["costs_by_currency"]), reverse=True)
+        return result
     finally:
         session.close()
 

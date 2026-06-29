@@ -188,6 +188,13 @@ ORDER BY created_at ASC
 
 これらは Track Chronicle の「### 最近の出来事」セクション末尾に生で添える形で出す。
 
+**実装注記 (2026-06-29)**: 上記 SQL の `{残存最古時刻}` は **metabolism anchor の
+`created_at`** を使う (`_get_track_unprocessed_messages_text` の `history_anchor_message_id`)。
+当初の実装はこの `created_at <` 条件が抜けており、anchor 以降 (= まだ会話履歴に載っている)
+の Track 生発言まで生ダンプに含めていた。結果、自律 Track の発言が head(track_chronicle) と
+tail(履歴) に二重に乗り 10k+ tokens を浪費していた。anchor cutoff で履歴窓内を除外し、本来
+意図どおり「押し出された分だけ」を補完する形に修正した。回帰テスト: `tests/test_memory_weave_track_dump.py`。
+
 ### 5-4. Track 切り替え時の挙動 (history 末尾近く)
 
 Track 切り替え時、**head の前 Track Chronicle はそのまま残し** (アンロードしない)、切り替え先 Track の Chronicle は **history 末尾近く に独立メッセージとして挿入**する。

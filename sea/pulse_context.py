@@ -56,6 +56,15 @@ class Aspect(str, Enum):
         """このアスペクトで使うモデル tier (``"standard"`` / ``"lightweight"``)。"""
         return _ASPECT_DERIVATION[self][2]
 
+    @property
+    def mode_display_name(self) -> str:
+        """ペルソナに見せる「モード」名 (mode_spell_permissions.md §3)。
+
+        コード上は ``aspect`` のまま扱い、ペルソナ向けの出力 (スペル権限のゲット文、
+        システムプロンプト解説、「今どのモードか」通知) でのみこの表記を使う。
+        """
+        return _ASPECT_MODE_DISPLAY_NAME[self]
+
 
 # Aspect → (line_role, scope, model_tier)。アスペクトは「呼び出し時に1つ指定」
 # される唯一の供給源で、ここから3軸を導出する (line_tag_responsibility.md §10.2)。
@@ -64,6 +73,15 @@ _ASPECT_DERIVATION: Dict["Aspect", tuple] = {
     Aspect.WORKER: ("sub_line", "volatile", "lightweight"),
     Aspect.AUTONOMOUS: ("main_line", "committed", "lightweight"),
     Aspect.META: ("meta_judgment", "discardable", "standard"),
+}
+
+# Aspect → ペルソナ向け「モード」名 (mode_spell_permissions.md §3)。コード上は
+# aspect で扱い、ペルソナに見せる文字列でのみモード表記を使う。
+_ASPECT_MODE_DISPLAY_NAME: Dict["Aspect", str] = {
+    Aspect.CONVERSATION: "メインモード",
+    Aspect.META: "自律制御モード",
+    Aspect.AUTONOMOUS: "自律作業モード",
+    Aspect.WORKER: "分身モード",
 }
 
 

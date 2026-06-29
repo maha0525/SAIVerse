@@ -3,14 +3,17 @@
 各 Section はこのパッケージ内に 1 ファイルずつ。``register_default_sections`` で
 プロセスの default registry に一括登録する想定。
 """
+from sea.head_pipeline.sections.autonomy_modes import AutonomyModesSection
 from sea.head_pipeline.sections.available_playbooks import AvailablePlaybooksSection
 from sea.head_pipeline.sections.building import BuildingSection
 from sea.head_pipeline.sections.building_items import BuildingItemsSection
 from sea.head_pipeline.sections.building_occupants import BuildingOccupantsSection
 from sea.head_pipeline.sections.chronicle_index import ChronicleIndexSection
 from sea.head_pipeline.sections.common_prompt import CommonPromptSection
+from sea.head_pipeline.sections.life_purpose import LifePurposeSection
 from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
+from sea.head_pipeline.sections.open_notes import OpenNotesSection
 from sea.head_pipeline.sections.persona_self import PersonaSelfSection
 from sea.head_pipeline.sections.spell_list import SpellListSection
 from sea.head_pipeline.sections.visual_context import VisualContextSection
@@ -25,8 +28,11 @@ def register_default_sections(registry) -> None:
     registry.register(PersonaSelfSection())
     registry.register(BuildingSection())
     registry.register(AvailablePlaybooksSection())
+    registry.register(AutonomyModesSection())
+    registry.register(LifePurposeSection())
     registry.register(SpellListSection())
     registry.register(MemoryWeaveSection())
+    registry.register(OpenNotesSection())
     registry.register(VisualContextSection())
     # Phase 3: dynamic_state Section 群 (head 描画なし、差分通知のみ)
     registry.register(BuildingItemsSection())
@@ -36,14 +42,17 @@ def register_default_sections(registry) -> None:
 
 
 __all__ = [
+    "AutonomyModesSection",
     "AvailablePlaybooksSection",
     "BuildingItemsSection",
     "BuildingOccupantsSection",
     "BuildingSection",
     "ChronicleIndexSection",
     "CommonPromptSection",
+    "LifePurposeSection",
     "MemopediaIndexSection",
     "MemoryWeaveSection",
+    "OpenNotesSection",
     "PersonaSelfSection",
     "SpellListSection",
     "VisualContextSection",

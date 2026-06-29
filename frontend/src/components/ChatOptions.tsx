@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
+import { formatCost } from '@/lib/formatCost';
 import ModelEditorModal from './settings/ModelEditorModal';
 
 interface RateLimitInfo {
@@ -13,8 +14,9 @@ interface ModelInfo {
     name: string;
     provider?: string | null;
     group?: string | null;  // UI grouping label (falls back to provider)
-    input_price?: number | null;   // USD per 1M input tokens
-    output_price?: number | null;  // USD per 1M output tokens
+    input_price?: number | null;
+    output_price?: number | null;
+    currency?: string;
     rate_limit?: RateLimitInfo | null;
 }
 
@@ -257,6 +259,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         xai: 'xAI',
         ollama: 'Ollama',
         llama_cpp: 'llama.cpp',
+        plamo: 'PLaMo',
+        sakana: 'Sakana AI',
     };
 
     const groupLabel = (group: string): string => {
@@ -620,12 +624,12 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                     {(() => {
                                         const sel = models.find(m => m.id === currentModel);
                                         if (!sel || (sel.input_price == null && sel.output_price == null)) return null;
-                                        const fmt = (v: number) => v < 1 ? `$${v}` : `$${v}`;
+                                        const cur = sel.currency ?? 'USD';
                                         return (
                                             <span className={styles.hint}>
-                                                {sel.input_price != null && `入力: ${fmt(sel.input_price)}/1M tokens`}
+                                                {sel.input_price != null && `入力: ${formatCost(sel.input_price, cur)}/1M tokens`}
                                                 {sel.input_price != null && sel.output_price != null && ' ・ '}
-                                                {sel.output_price != null && `出力: ${fmt(sel.output_price)}/1M tokens`}
+                                                {sel.output_price != null && `出力: ${formatCost(sel.output_price, cur)}/1M tokens`}
                                             </span>
                                         );
                                     })()}

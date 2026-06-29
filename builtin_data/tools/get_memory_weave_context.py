@@ -20,6 +20,7 @@ def get_memory_weave_context(
     persona_dir: Optional[str] = None,
     max_chronicle_entries: int = 50,
     memopedia_index_limit: int = 100,
+    history_anchor_message_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Build Memory Weave context messages containing Chronicle and Memopedia.
 
@@ -75,7 +76,8 @@ def get_memory_weave_context(
         # 1.5. Get Track Chronicle context for active track (v0.32, 2026-05-09)
         # アクティブ Track が無いペルソナや track_manager 利用不可な環境では空文字
         track_chronicle_text, track_title = _get_track_chronicle_context(
-            conn, persona_id, max_entries=max_chronicle_entries
+            conn, persona_id, max_entries=max_chronicle_entries,
+            history_anchor_message_id=history_anchor_message_id,
         )
 
         # 2. Get Memopedia context (semantic memory)
@@ -165,6 +167,7 @@ def _get_track_chronicle_context(
     conn: sqlite3.Connection,
     persona_id: str,
     max_entries: int = 50,
+    history_anchor_message_id: Optional[str] = None,
 ) -> tuple[str, str]:
     """Get Track Chronicle context for the persona's currently active track.
 
@@ -213,7 +216,9 @@ def _get_track_chronicle_context(
 
         # Chronicle 化されていない Track 紐付きメッセージを取得 (v0.32 §5-3)。
         # 1000 字未満でスキップされた分や、まだ Metabolism が走っていない分が対象。
-        raw_text = _get_track_unprocessed_messages_text(conn, track_id)
+        raw_text = _get_track_unprocessed_messages_text(
+            conn, track_id, history_anchor_message_id=history_anchor_message_id
+        )
         if raw_text:
             parts.append("### Chronicle 化されていないメッセージ")
             parts.append(raw_text)
@@ -234,14 +239,30 @@ def _get_track_unprocessed_messages_text(
     track_id: str,
     *,
     max_messages: int = 100,
+    history_anchor_message_id: Optional[str] = None,
 ) -> str:
     """Track 紐付きで Chronicle 化されていないメッセージを生で取得して整形する。
 
     v0.32 (2026-05-09): Chronicle 化されていない時間帯の補完。
     Chronicle entry の source_ids 集合に含まれないメッセージが対象。
+
+    2026-06-29: ``history_anchor_message_id`` (metabolism anchor) より新しい
+    メッセージは会話履歴 (anchor 以降を読む) に既に載っているので除外する。
+    これが無いと、自律 Track の生発言が head(track_chronicle) と tail(履歴) に
+    二重に乗り、トークンを浪費する (10k+ tokens の重複)。anchor が無い場合は
+    従来どおり全件 (metabolism 無効環境向けフォールバック)。
     """
-    import json as _json
     from datetime import datetime as _dt
+
+    # anchor より新しいメッセージは履歴に載るので除外するための cutoff (epoch)。
+    anchor_cutoff: Optional[int] = None
+    if history_anchor_message_id:
+        row = conn.execute(
+            "SELECT created_at FROM messages WHERE id = ?",
+            (history_anchor_message_id,),
+        ).fetchone()
+        if row and row[0] is not None:
+            anchor_cutoff = int(row[0])
 
     # 当該 Track の正規 Lv1 entry の source_ids を「処理済み」として収集
     cur = conn.execute(
@@ -252,18 +273,21 @@ def _get_track_unprocessed_messages_text(
     )
     processed_ids = {row[0] for row in cur.fetchall()}
 
-    # Track 紐付きメッセージから処理済みを除外して取得
-    cur = conn.execute(
+    # Track 紐付きメッセージから処理済み + 履歴窓内 (anchor 以降) を除外して取得
+    sql = (
         "SELECT id, role, content, created_at FROM messages "
         "WHERE origin_track_id = ? "
         "AND line_role = 'main_line' AND scope = 'committed' "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell', 'event_message')"
         ") "
-        "ORDER BY created_at ASC "
-        f"LIMIT {int(max_messages)}",
-        (track_id,),
     )
+    params: List[Any] = [track_id]
+    if anchor_cutoff is not None:
+        sql += "AND created_at < ? "
+        params.append(anchor_cutoff)
+    sql += f"ORDER BY created_at ASC LIMIT {int(max_messages)}"
+    cur = conn.execute(sql, params)
     unprocessed = [
         row for row in cur.fetchall() if row[0] not in processed_ids
     ]

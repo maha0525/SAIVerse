@@ -12,7 +12,6 @@ from .ollama import OllamaClient
 from .openai import OpenAIClient
 from .openai_codex import OpenAICodexClient
 from .nvidia_nim import NvidiaNIMClient
-from .llama_cpp import LlamaCppClient
 from .xai import XAIClient
 from .base import LLMClient
 
@@ -25,7 +24,6 @@ _LEGACY_PROVIDER_TO_PROTOCOL = {
     "anthropic": "anthropic_native",
     "gemini": "gemini_native",
     "xai": "xai_native",
-    "llama_cpp": "llama_cpp_native",
     "nvidia_nim": "nvidia_nim",
     "openai_codex": "openai_codex",
 }
@@ -197,24 +195,6 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     elif protocol == "gemini_native":
         logging.info("[factory] Creating GeminiClient with api_model='%s'", api_model)
         client = GeminiClient(api_model, config=config, supports_images=supports_images)
-    elif protocol == "llama_cpp_native":
-        extra_kwargs: Dict[str, object] = {}
-        if isinstance(config, dict):
-            # model_path is required for llama.cpp
-            model_path = config.get("model_path") or config.get("model")
-            if not model_path:
-                raise ValueError("llama_cpp provider requires 'model_path' in config")
-
-            # GPU layers (-1 = all, 0 = CPU only)
-            n_gpu_layers = config.get("n_gpu_layers", -1)
-            if isinstance(n_gpu_layers, int):
-                extra_kwargs["n_gpu_layers"] = n_gpu_layers
-        else:
-            # Fallback: use api_model as model_path
-            model_path = api_model
-
-        logging.debug("Creating llama.cpp client for model path '%s' with kwargs: %s", model_path, extra_kwargs)
-        client = LlamaCppClient(model_path, context_length, supports_images=supports_images, **extra_kwargs)
     elif protocol == "xai_native":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
@@ -257,7 +237,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         raise ValueError(
             f"Unknown protocol '{protocol}' (resolved from provider='{provider}') for model '{model}'. "
             f"Valid protocols: openai_compat, openai_codex, nvidia_nim, anthropic_native, "
-            f"gemini_native, xai_native, llama_cpp_native, ollama_compat"
+            f"gemini_native, xai_native, ollama_compat"
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)

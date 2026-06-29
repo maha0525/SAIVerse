@@ -1093,6 +1093,17 @@ class SAIVerseManager(
                 persona_id,
             )
 
+        # 1b. 候補補充 Track 確保 (冪等, autonomous_desire.md §11)。
+        #     ACTIVITY_STATE に依らず全ペルソナへ常設する。これにより起動 (再起動含む)
+        #     と動的作成の両方で「やりたいことを探す」永続 Track が必ず 1 本付く。
+        try:
+            self.track_manager.ensure_desire_refill_track(persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to ensure desire-refill track: %s",
+                persona_id,
+            )
+
         # 2. AutonomyManager を ACTIVITY_STATE に同期
         #    (Active なら起動、Active 以外なら何もしない)
         try:

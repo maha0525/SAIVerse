@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 import ModalOverlay from '../common/ModalOverlay';
+import { formatCost } from '@/lib/formatCost';
 
 interface ArasujiEntry {
     id: string;
@@ -67,6 +68,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         model_name: string;
         is_free_tier: boolean;
         batch_size: number;
+        currency?: string;
     } | null>(null);
     const [generateSettings, setGenerateSettings] = useState({
         maxMessages: 500,
@@ -1005,12 +1007,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                         <div>
                                             推定コスト: <strong>
                                                 {costEstimate.is_free_tier
-                                                    ? '$0.00 (Free tier)'
-                                                    : costEstimate.estimated_cost_usd < 0.001
-                                                        ? `~$${costEstimate.estimated_cost_usd.toFixed(6)}`
-                                                        : costEstimate.estimated_cost_usd < 0.01
-                                                            ? `~$${costEstimate.estimated_cost_usd.toFixed(4)}`
-                                                            : `~$${costEstimate.estimated_cost_usd.toFixed(3)}`
+                                                    ? `${formatCost(0, costEstimate.currency)} (Free tier)`
+                                                    : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)
                                                 }
                                             </strong>
                                             {' '}({costEstimate.model_name})

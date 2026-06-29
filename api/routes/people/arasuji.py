@@ -116,7 +116,9 @@ def estimate_chronicle_cost(
         batch_size = batch_size or int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", "20"))
         consolidation_size = consolidation_size or int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", "10"))
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        persona = manager.personas.get(persona_id) if manager else None
+        model_name = (getattr(persona, "memory_weave_model", None)
+                      or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL))
 
         # Calculate qualifying unprocessed messages using the same
         # contiguous-run logic as generate_unprocessed().  Messages in
@@ -260,6 +262,7 @@ def estimate_chronicle_cost(
             model_name=model_name,
             is_free_tier=is_free_tier,
             batch_size=batch_size,
+            currency=pricing.get("currency", "USD") if pricing else "USD",
         )
     finally:
         conn.close()
@@ -909,8 +912,16 @@ def _run_chronicle_generation(
         _update_job(job_id, message="Initializing LLM client...")
 
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        from database.models import AI as AIModel
+        from database.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            _ai = _db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+            persona_mw_model = getattr(_ai, "MEMORY_WEAVE_MODEL", None) if _ai else None
+        finally:
+            _db.close()
         env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_to_use = model_name or env_model
+        model_to_use = model_name or persona_mw_model or env_model
 
         resolved_model_id, model_config = find_model_config(model_to_use)
         if not resolved_model_id:

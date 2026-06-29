@@ -33,6 +33,7 @@ from saiverse.usage_tracker import get_usage_tracker
 from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 from tools.core import parse_tool_result
 from tools.context import persona_context
+from sea.mode_spell_permissions import check_spell_permission
 
 LOGGER = logging.getLogger(__name__)
 
@@ -273,7 +274,9 @@ def _normalize_json_literals(args_raw: str) -> str:
         return args_raw
 
 
-def _parse_spell_args(args_raw: str, *, silent: bool = False) -> Optional[dict]:
+def _parse_spell_args(
+    args_raw: str, *, silent: bool = False, mute: bool = False,
+) -> Optional[dict]:
     """Parse spell args string (Python dict or JSON). Returns dict or None.
 
     パース順: ``ast.literal_eval`` (Python リテラル) → ``json.loads`` (JSON)。
@@ -285,7 +288,14 @@ def _parse_spell_args(args_raw: str, *, silent: bool = False) -> Optional[dict]:
     fuzzy parser which routinely tries this strict path first and recovers via
     the KV pattern). Without ``silent``, failures are logged at WARNING since
     they indicate the LLM produced a canonical-form spell with malformed args.
+    ``mute=True`` suppresses the failure log entirely (read-only/display paths
+    that re-parse the same stored text on every poll — DEBUG would still spam).
     """
+    def _log_fail(msg, *a):
+        if mute:
+            return
+        (LOGGER.debug if silent else LOGGER.warning)(msg, *a)
+
     candidates = [args_raw]
     normalized = _normalize_json_literals(args_raw)
     if normalized != args_raw:
@@ -301,27 +311,24 @@ def _parse_spell_args(args_raw: str, *, silent: bool = False) -> Optional[dict]:
                 continue
         if isinstance(result, dict):
             return result
-        (LOGGER.debug if silent else LOGGER.warning)(
-            "[sea][spell] Args is not a dict: %s", type(result)
-        )
+        _log_fail("[sea][spell] Args is not a dict: %s", type(result))
         return None
 
-    (LOGGER.debug if silent else LOGGER.warning)(
-        "[sea][spell] Failed to parse args: %s", args_raw
-    )
+    _log_fail("[sea][spell] Failed to parse args: %s", args_raw)
     return None
 
 
-def _parse_fuzzy_spell_args(args_raw: str) -> Optional[dict]:
+def _parse_fuzzy_spell_args(args_raw: str, *, mute: bool = False) -> Optional[dict]:
     """Parse informal key=value... spell args into a dict.
 
     Handles single/double-quoted values, dict literals, and bare words.
     Falls back to _parse_spell_args for standard dict/JSON forms. The strict
     fallback is invoked with ``silent=True`` so its failure (the common case
     when the LLM uses fuzzy syntax like ``track_id='...'``) does not pollute
-    the log — fuzzy KV parsing recovers without user-visible noise.
+    the log — fuzzy KV parsing recovers without user-visible noise. ``mute``
+    fully suppresses that DEBUG too (display paths re-parsing stored text).
     """
-    result = _parse_spell_args(args_raw, silent=True)
+    result = _parse_spell_args(args_raw, silent=True, mute=mute)
     if result is not None:
         return result
     pairs = {}
@@ -345,8 +352,8 @@ def _coerce_arg_to_type(value: Any, json_type: str) -> Any:
 
     LLM が spell 行を生成する際、``"index": "2"`` のように integer / number /
     boolean を文字列でクオートしてしまうケースが頻出する。そのまま tool に渡すと
-    ``index < 0`` のような比較が ``str < int`` で TypeError になる (track_task_done
-    の実例)。schema の宣言型に向けて文字列値だけを変換する。
+    ``step_position`` のような整数比較が ``str < int`` で TypeError になる
+    (task_update_step の実例)。schema の宣言型に向けて文字列値だけを変換する。
 
     変換できない値はそのまま返し (tool 側のバリデーションに委ねる)、すでに正しい
     型の値は touch しない。型の緩めではなく schema 宣言型への正規化。
@@ -410,7 +417,9 @@ def _parse_spell_line(text: str):
     return m.group(1), tool_args, m
 
 
-def _parse_spell_lines(text: str) -> List[Tuple[str, dict, Any, str]]:
+def _parse_spell_lines(
+    text: str, *, quiet: bool = False,
+) -> List[Tuple[str, dict, Any, str]]:
     """Parse ALL /spell invocations in *text*, including fuzzy (informal) syntax.
 
     Returns list of ``(tool_name, tool_args, match, normalized_line)``.
@@ -418,13 +427,18 @@ def _parse_spell_lines(text: str) -> List[Tuple[str, dict, Any, str]]:
     - ``normalized_line`` is the canonical ``/spell name='...' args={...}`` form,
       which is used in SAIMemory storage so the persona learns correct syntax.
     Unparseable entries are silently skipped.
+
+    ``quiet=True`` suppresses the canonical-parse-failure and fuzzy-recovery
+    logging. Use it on read-only/display paths (e.g. activity-view re-parses
+    stored meta-judgment messages on every poll) where the same historical text
+    is parsed repeatedly and the log noise is pure spam.
     """
     found: List[Tuple[str, dict, Any, str]] = []
     matched_spans: List[Tuple[int, int]] = []
 
     # Pass 1: canonical form
     for m in _SPELL_PATTERN.finditer(text):
-        tool_args = _parse_spell_args(m.group(2).strip())
+        tool_args = _parse_spell_args(m.group(2).strip(), silent=quiet, mute=quiet)
         if tool_args is not None:
             normalized = _normalize_spell_line(m.group(1), tool_args)
             found.append((m.group(1), tool_args, m, normalized))
@@ -436,10 +450,11 @@ def _parse_spell_lines(text: str) -> List[Tuple[str, dict, Any, str]]:
         if any(s <= span[0] < e for s, e in matched_spans):
             continue
         tool_name = m.group(1)
-        tool_args = _parse_fuzzy_spell_args(m.group(2).strip())
+        tool_args = _parse_fuzzy_spell_args(m.group(2).strip(), mute=quiet)
         if tool_args is not None:
             normalized = _normalize_spell_line(tool_name, tool_args)
-            LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
+            if not quiet:
+                LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
             found.append((tool_name, tool_args, m, normalized))
             matched_spans.append(span)
 
@@ -1194,24 +1209,41 @@ async def _run_spell_loop(
             # the downstream zip()/round_records logic (which re-sorts by
             # m.start()) is unaffected.
             valid_spells.sort(key=lambda s: s[2].start())
-            valid_results: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+            # モード (aspect) 別スペル権限ゲート (mode_spell_permissions.md §6)。
+            # アクティブラインの aspect を引き、Track/Task 操作スペルが不許可なら
+            # 実行せずゲット文を結果に差し込む (executed=False で × ブロック表示)。
+            _active_aspect = None
+            if pulse_context is not None:
+                _active_line = pulse_context.current_line()
+                if _active_line is not None:
+                    _active_aspect = _active_line.aspect
+            # valid_results: (result_text, result_meta, executed)。executed=False は
+            # ゲートでブロックされた spell (round_records で success=False になる)。
+            valid_results: List[Tuple[str, Optional[Dict[str, Any]], bool]] = []
             for _name, _args, _m, _norm in valid_spells:
-                valid_results.append(
-                    await _run_spell_tool_async(
-                        _name, _args, persona, state, playbook.name,
-                        event_callback, messages=messages,
+                _block_msg = check_spell_permission(_name, _active_aspect)
+                if _block_msg is not None:
+                    LOGGER.info(
+                        "[sea][spell] Spell '%s' blocked by mode gate (aspect=%s)",
+                        _name, _active_aspect.value if _active_aspect else None,
                     )
+                    valid_results.append((_block_msg, None, False))
+                    continue
+                _rtext, _rmeta = await _run_spell_tool_async(
+                    _name, _args, persona, state, playbook.name,
+                    event_callback, messages=messages,
                 )
+                valid_results.append((_rtext, _rmeta, True))
 
             # Unified, position-ordered record per spell line this round.
             # Unknown spells are not executed — each gets a corrective error
             # (``_build_unknown_spell_error``) that is fed back to the LLM and
             # shown to the user as a failure (×) block, so the persona can retry.
             round_records: List[Dict[str, Any]] = []
-            for (name, args, m, norm), (result_text, result_meta) in zip(valid_spells, valid_results):
+            for (name, args, m, norm), (result_text, result_meta, executed) in zip(valid_spells, valid_results):
                 round_records.append({
                     "name": name, "args": args, "m": m, "norm": norm,
-                    "result": result_text, "meta": result_meta, "success": True,
+                    "result": result_text, "meta": result_meta, "success": executed,
                 })
             for name, args, m, norm in unknown_spells:
                 error_text = _build_unknown_spell_error(name, persona, building_id)
@@ -1662,23 +1694,45 @@ async def _execute_pre_spells(
         len(valid_specs), [s[0] for s in valid_specs],
     )
 
+    # モード (aspect) 別スペル権限ゲート (mode_spell_permissions.md §6)。事前実行
+    # スペルは LLM 初回呼び出し前でラインが未 push のことがあるため、アクティブ
+    # ラインの aspect → 無ければ pulse_type から導出してフォールバックする。
+    from sea.pulse_context import aspect_from_pulse_type
+    _active_aspect = None
+    _pre_pulse_ctx = state.get("_pulse_context")
+    if _pre_pulse_ctx is not None:
+        _pre_line = _pre_pulse_ctx.current_line()
+        if _pre_line is not None:
+            _active_aspect = _pre_line.aspect
+    if _active_aspect is None:
+        _active_aspect = aspect_from_pulse_type(state.get("_pulse_type"))
+
     # Execute UI-requested spells SEQUENTIALLY, in the order requested. Same
     # rationale as the regular spell loop (_run_spell_loop): spells can mutate
     # shared state (run_playbook's shared PulseContext line stack, physical
     # devices, Track ops) and are not safe to run concurrently.
-    results: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    # results: (result_text, result_meta, executed)。executed=False はゲートで
+    # ブロックされた spell。
+    results: List[Tuple[str, Optional[Dict[str, Any]], bool]] = []
     for name, args, _ in valid_specs:
-        results.append(
-            await _run_spell_tool_async(
-                name, args, persona, state, playbook.name, event_callback,
-                messages=messages,
+        _block_msg = check_spell_permission(name, _active_aspect)
+        if _block_msg is not None:
+            LOGGER.info(
+                "[sea][pre_spells] Spell '%s' blocked by mode gate (aspect=%s)",
+                name, _active_aspect.value if _active_aspect else None,
             )
+            results.append((_block_msg, None, False))
+            continue
+        _rtext, _rmeta = await _run_spell_tool_async(
+            name, args, persona, state, playbook.name, event_callback,
+            messages=messages,
         )
+        results.append((_rtext, _rmeta, True))
 
     triggered_lines = [norm for _, _, norm in valid_specs]
     result_lines = [
-        f"[Spell Result: {name}]\n{result_text}"
-        for (name, _, _), (result_text, _) in zip(valid_specs, results)
+        f"[Spell {'Result' if executed else 'Error'}: {name}]\n{result_text}"
+        for (name, _, _), (result_text, _, executed) in zip(valid_specs, results)
     ]
     system_body = (
         "ユーザーの操作により以下のスペルを事前に実行しました。"
@@ -1694,7 +1748,7 @@ async def _execute_pre_spells(
     }
 
     aggregated_media: List[Dict[str, Any]] = []
-    for _, result_meta in results:
+    for _, result_meta, _executed in results:
         if isinstance(result_meta, dict):
             media_list = result_meta.get("media")
             if isinstance(media_list, list):

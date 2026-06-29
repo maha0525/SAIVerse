@@ -34,6 +34,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from database.models import ActionTrack
+from saiverse.persona_task_manager import PersonaTaskManager
 
 _SHORT_REF_RE = re.compile(r"^[Tt]:(\d+)$")
 
@@ -54,6 +55,9 @@ LIVE_STATUSES = ALL_STATUSES - TERMINAL_STATUSES
 ACTIVATABLE_STATUSES = frozenset({
     STATUS_UNSTARTED, STATUS_PENDING, STATUS_ALERT,
 })
+
+# 候補補充 Track (autonomous_desire.md §11) の識別子 (track_metadata.role)。
+DESIRE_REFILL_ROLE = "desire_refill"
 
 
 class TrackError(Exception):
@@ -113,6 +117,10 @@ class TrackManager:
         # どちらも None の場合はタイマー機構が完全に無効化される (テスト容易性)。
         self.wait_response_timeout_provider = wait_response_timeout_provider
         self.wait_response_timeout_callback = wait_response_timeout_callback
+        # Track 内タスク (旧 track_task) は統合 persona_task テーブルに一本化された。
+        # 旧 ActionTrack.tasks_json チェックリスト API は PersonaTaskManager の
+        # track_task 互換層へ委譲する (unified_task_model.md §5 step 4)。
+        self._task_manager = PersonaTaskManager(session_factory)
         # alert 状態への遷移を購読する observer 群。
         # signature: (persona_id: str, track_id: str, context: dict) -> None
         # MetaLayer はここに登録される。TrackManager は観察対象を増やす責務を持たないため、
@@ -369,6 +377,52 @@ class TrackManager:
             self._notify_track_activated(persona_id, track, None)
 
         return track_id
+
+    def ensure_desire_refill_track(self, persona_id: str) -> str:
+        """ペルソナの「やりたいことを探す」永続 Track を get-or-create する。
+
+        候補補充 Track (autonomous_desire.md §11): 候補生成の動線 + idle 即帰宅の
+        歯止め。``track_metadata.role == 'desire_refill'`` で識別する singleton。
+        全ペルソナ共通・永続 (complete/abort 不可)・autonomous (sub_line/軽量)。
+        自律 ON 時に ensure する。既に在ればその track_id を返す。
+
+        Returns:
+            track_id (UUID 文字列)
+        """
+        if not persona_id:
+            raise ValueError("persona_id is required")
+        db = self.SessionLocal()
+        try:
+            rows = db.query(ActionTrack).filter_by(persona_id=persona_id).all()
+            for t in rows:
+                if not t.track_metadata:
+                    continue
+                try:
+                    md = json.loads(t.track_metadata)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(md, dict) and md.get("role") == DESIRE_REFILL_ROLE:
+                    return t.track_id
+        finally:
+            db.close()
+
+        metadata = json.dumps(
+            {"role": DESIRE_REFILL_ROLE, "entry_line_role": "sub_line"},
+            ensure_ascii=False,
+        )
+        return self.create(
+            persona_id=persona_id,
+            track_type="autonomous",
+            title="やりたいことを探す",
+            intent=(
+                "自分の生きる目的・趣味・興味・これまでの記憶をもとに、"
+                "これからやってみたいことを見つけて、desire_add スペルで候補として"
+                "書き留める。やることが尽きたときに立ち寄る、自分のための探索。"
+            ),
+            is_persistent=True,
+            metadata=metadata,
+            initial_status=STATUS_UNSTARTED,
+        )
 
     def get(self, track_id: str) -> ActionTrack:
         """Track を取得。存在しなければ TrackNotFoundError。"""
@@ -1015,60 +1069,38 @@ class TrackManager:
     # ------------------------------------------------------------------
 
     def get_tasks(self, track_id: str) -> List[Dict[str, Any]]:
-        """Track のタスクリストを返す。"""
-        db = self.SessionLocal()
-        try:
-            track = self._fetch_or_raise(db, track_id)
-            return json.loads(track.tasks_json) if track.tasks_json else []
-        finally:
-            db.close()
+        """Track のタスクリストを ``[{id, title, done}]`` で返す。
+
+        統合 persona_task テーブル (track_id バインド) から取得する。旧 tasks_json
+        互換の ``{title, done}`` に加え ``id`` を含む (呼び出し側は title/done のみ参照)。
+        """
+        return self._task_manager.get_track_tasks(track_id)
 
     def add_task(self, track_id: str, title: str) -> List[Dict[str, Any]]:
-        """Track にタスクを追加して更新後のリストを返す。"""
-        db = self.SessionLocal()
-        try:
-            track = self._fetch_or_raise(db, track_id)
-            tasks = json.loads(track.tasks_json) if track.tasks_json else []
-            tasks.append({"title": title, "done": False})
-            track.tasks_json = json.dumps(tasks, ensure_ascii=False)
-            db.commit()
-            db.expunge(track)
-            return tasks
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        """Track にタスクを追加して更新後のリストを返す。
+
+        persona_id は Track 行から導出する (統合テーブルは persona スコープ)。
+        """
+        persona_id = self._task_persona_id(track_id)
+        return self._task_manager.add_track_task(track_id, title, persona_id=persona_id)
 
     def complete_task(self, track_id: str, index: int) -> List[Dict[str, Any]]:
         """Track のタスクを完了にして更新後のリストを返す。"""
-        db = self.SessionLocal()
-        try:
-            track = self._fetch_or_raise(db, track_id)
-            tasks = json.loads(track.tasks_json) if track.tasks_json else []
-            if index < 0 or index >= len(tasks):
-                raise ValueError(f"task index out of range: {index} (total {len(tasks)})")
-            tasks[index]["done"] = True
-            track.tasks_json = json.dumps(tasks, ensure_ascii=False)
-            db.commit()
-            db.expunge(track)
-            return tasks
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        persona_id = self._task_persona_id(track_id)
+        return self._task_manager.complete_track_task(track_id, index, persona_id=persona_id)
 
     def format_task_list(self, track_id: str) -> str:
         """Track のタスクリストを Markdown チェックリスト形式で返す。"""
-        tasks = self.get_tasks(track_id)
-        if not tasks:
-            return "(タスクなし)"
-        lines = []
-        for i, t in enumerate(tasks):
-            mark = "x" if t.get("done") else " "
-            lines.append(f"{i}. [{mark}] {t['title']}")
-        return "\n".join(lines)
+        return self._task_manager.format_track_task_list(track_id)
+
+    def _task_persona_id(self, track_id: str) -> str:
+        """Track の persona_id を引く (タスク書き込みに必要)。存在しなければ raise。"""
+        db = self.SessionLocal()
+        try:
+            track = self._fetch_or_raise(db, track_id)
+            return track.persona_id
+        finally:
+            db.close()
 
     def _fetch_or_raise(self, db: Session, track_id: str) -> ActionTrack:
         track = db.query(ActionTrack).filter_by(track_id=track_id).first()

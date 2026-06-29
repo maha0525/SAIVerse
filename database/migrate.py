@@ -341,6 +341,13 @@ def migrate_database_in_place(db_path: str):
         # docs/intent/persona_cognition/handoff_waiting_track_removal.md.
         _demote_legacy_waiting_tracks(target_engine)
 
+        # Post-migration: convert legacy ActionTrack.tasks_json checklists into
+        # unified persona_task rows (track_id-bound). The column-copy phase only
+        # carries columns present in the new schema, so once tasks_json is
+        # dropped its data would be lost without this explicit translation.
+        # See docs/intent/persona_cognition/unified_task_model.md §3.1.
+        _migrate_track_tasks_json_to_persona_task(source_engine, target_engine)
+
     except Exception as e:
         logging.error(f"マイグレーション中にエラーが発生しました: {e}", exc_info=True)
         logging.info("ロールバックを試みます...")
@@ -407,6 +414,117 @@ def _migrate_interaction_mode_to_activity_state(source_engine, target_engine) ->
         )
     except Exception as exc:
         logging.warning("INTERACTION_MODE -> ACTIVITY_STATE 変換に失敗しました: %s", exc, exc_info=True)
+
+
+def _migrate_track_tasks_json_to_persona_task(source_engine, target_engine) -> None:
+    """Convert legacy ``ActionTrack.tasks_json`` checklists into ``persona_task`` rows.
+
+    Each ``{title, done}`` entry becomes a track_id-bound persona_task
+    (``parent_kind='track'``). ``done=True`` -> status 'completed', else 'pending'.
+    ``goal`` reuses the title (the lightweight checklist had no goal field).
+
+    Idempotent: skips any track that already has persona_task rows in the target
+    (so re-running the migration does not duplicate). Reads tasks_json from the
+    **source** (backup) DB because the new schema no longer carries the column.
+    No-op when the source has no tasks_json column (already migrated).
+    """
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    try:
+        source_inspector = inspect(source_engine)
+        if not source_inspector.has_table("action_track"):
+            return
+        src_cols = {c["name"] for c in source_inspector.get_columns("action_track")}
+        if "tasks_json" not in src_cols:
+            logging.info("action_track.tasks_json が source DB に無いため、track_task 移行をスキップします。")
+            return
+
+        with source_engine.connect() as src:
+            rows = src.execute(text(
+                'SELECT track_id, persona_id, tasks_json FROM "action_track" '
+                'WHERE tasks_json IS NOT NULL AND tasks_json != ""'
+            )).fetchall()
+        if not rows:
+            logging.info("移行対象の tasks_json を持つ Track はありませんでした。")
+            return
+
+        now = _dt.now()
+        migrated_tracks = 0
+        migrated_tasks = 0
+        # persona ごとの次 short_id (既存 MAX から継続。物理削除しない不変条件下で単調)。
+        persona_next_short: dict = {}
+
+        def _next_short(tgt, pid: str) -> int:
+            if pid not in persona_next_short:
+                cur = tgt.execute(text(
+                    'SELECT MAX(short_id) FROM "persona_task" WHERE persona_id = :pid'
+                ), {"pid": pid}).scalar()
+                persona_next_short[pid] = (cur or 0) + 1
+            val = persona_next_short[pid]
+            persona_next_short[pid] = val + 1
+            return val
+
+        with target_engine.begin() as tgt:
+            for track_id, persona_id, tasks_json in rows:
+                # 冪等: 既に persona_task 行がある Track はスキップ
+                existing = tgt.execute(text(
+                    'SELECT 1 FROM "persona_task" WHERE track_id = :tid LIMIT 1'
+                ), {"tid": track_id}).fetchone()
+                if existing is not None:
+                    continue
+                try:
+                    items = _json.loads(tasks_json)
+                except (TypeError, ValueError):
+                    logging.warning("  - Track %s の tasks_json をパースできずスキップ", track_id)
+                    continue
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    title = (item.get("title") or "").strip()
+                    if not title:
+                        continue
+                    done = bool(item.get("done"))
+                    status = "completed" if done else "pending"
+                    tgt.execute(text(
+                        'INSERT INTO "persona_task" ('
+                        'id, persona_id, short_id, parent_kind, note_id, track_id, '
+                        'title, goal, summary, notes, status, priority, origin, '
+                        'active_step_id, due_at, created_at, updated_at, completed_at, '
+                        'version, last_actor'
+                        ') VALUES ('
+                        ':id, :pid, :short_id, :pk, NULL, :tid, '
+                        ':title, :goal, :summary, NULL, :status, :priority, :origin, '
+                        'NULL, NULL, :created, :updated, :completed, '
+                        '0, :actor)'
+                    ), {
+                        "id": _uuid.uuid4().hex,
+                        "pid": persona_id,
+                        "short_id": _next_short(tgt, persona_id),
+                        "pk": "track",
+                        "tid": track_id,
+                        "title": title,
+                        "goal": title,
+                        "summary": "",
+                        "status": status,
+                        "priority": "normal",
+                        "origin": "migration",
+                        "created": now,
+                        "updated": now,
+                        "completed": now if done else None,
+                        "actor": "migration",
+                    })
+                    migrated_tasks += 1
+                migrated_tracks += 1
+        logging.info(
+            "track_task -> persona_task 移行完了: %d Track / %d タスクを移行しました。",
+            migrated_tracks, migrated_tasks,
+        )
+    except Exception as exc:
+        logging.warning("track_task -> persona_task 移行に失敗しました: %s", exc, exc_info=True)
 
 
 def _demote_legacy_waiting_tracks(engine) -> None:

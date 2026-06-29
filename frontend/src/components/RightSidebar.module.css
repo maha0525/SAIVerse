@@ -8,6 +8,7 @@
     padding: 1rem;
     gap: 1.5rem;
     height: 100%;
+    box-sizing: border-box;
     transition: transform 0.3s ease, margin-right 0.3s ease;
 }
 

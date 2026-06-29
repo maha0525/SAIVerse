@@ -622,9 +622,9 @@ def test_recent_judgments_block_renders_chronologically(
     user_pos = block.find("user_utterance")
     periodic_pos = block.find("periodic_tick")
     assert 0 < alert_pos < user_pos < periodic_pos
-    # committed=True の行に [committed] マーカー、スペル行は /spell 形式で出る
+    # committed=True の行に [committed] マーカー、スペル行は正準 /spell 形式で出る
     assert "[committed]" in block
-    assert "/spell track_pause" in block
+    assert "/spell name='track_pause'" in block
 
 
 def test_recent_judgments_empty_when_no_history(

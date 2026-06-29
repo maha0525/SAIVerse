@@ -32,12 +32,18 @@ _VISUAL_CONTEXT_MARKER = "__visual_context__"
 LOGGER = logging.getLogger(__name__)
 
 # 既知 Section の役割マッピング。新規 Section 追加時はここに分類を足す。
+# 並び順 = system メッセージ内の出力順。各 Section の order 属性に合わせる
+# (common_prompt < persona_self < building < available_playbooks(400) <
+#  autonomy_modes(550) < life_purpose(560) < spell_list(600) < open_notes(720))。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "common_prompt",
     "persona_self",
     "building",
     "available_playbooks",
+    "autonomy_modes",
+    "life_purpose",
     "spell_list",
+    "open_notes",
 )
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
 VISUAL_CONTEXT_SECTION_NAME = "visual_context"
@@ -327,43 +333,16 @@ def render_head_messages(
     ctx = build_line_head_input(persona, manager, building_id)
     ensure_snapshot(pipeline, ctx)
 
+    # render_head は (section_name, RenderedSection) を返すので、名前で直接
+    # enabled フィルタできる。位置依存の zip は廃止 (None render セクションで
+    # 名前がズレて内容が欠落するバグの根治)。
     rendered = pipeline.render_head(ctx.persona_id, ctx.line_id)
     rendered_by_name = {
         name: section
-        for name, section in _zip_rendered_with_names(pipeline, ctx, rendered)
+        for name, section in rendered
         if enabled_sections is None or name in enabled_sections
     }
     return _compose_messages(pipeline, ctx, rendered_by_name)
-
-
-def _zip_rendered_with_names(
-    pipeline: HeadPipeline,
-    ctx: LineHeadInput,
-    rendered: list[RenderedSection],
-) -> list[tuple[str, RenderedSection]]:
-    """RenderedSection 列に Section 名を対応付ける。
-
-    pipeline.render_head は order 順の RenderedSection を返すが、Section 名は
-    含まれていない。registry から order 順で名前を引いて zip する。
-    snapshot に無い Section は render されないので、空 entry はスキップして
-    順序が崩れないようにする。
-    """
-    pairs: list[tuple[str, RenderedSection]] = []
-    snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.line_id)
-    if snapshot is None:
-        return pairs
-    rendered_iter = iter(rendered)
-    # registry.all_sections() は pipeline と同じ order を返すので、
-    # snapshot.sections に含まれかつ render が None でない Section だけ拾う。
-    for section in pipeline.registry.all_sections():
-        if section.name not in snapshot.sections:
-            continue
-        try:
-            r = next(rendered_iter)
-        except StopIteration:
-            break
-        pairs.append((section.name, r))
-    return pairs
 
 
 def _compose_messages(

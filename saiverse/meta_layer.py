@@ -118,6 +118,13 @@ class MetaLayer:
         self._persona_locks: Dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
+        # Phase 4 案C: メタ判断 Pulse の連続失敗回数 (persona_id -> count)。
+        # リトライ枯渇のたびに加算、成功でリセット。`max_consecutive_failures`
+        # に達したら ACTIVITY_STATE を Idle に降格して自律稼働の無音スピンを止め、
+        # host イベントで通知する (phase4_meta_judgment_recovery.md 案C)。
+        # Lock 入口 (_get_lock) と同じく per-persona 直列化下で触るので素の dict で十分。
+        self._consecutive_failures: Dict[str, int] = {}
+
     def _get_lock(self, persona_id: str) -> threading.Lock:
         """persona_id の Lock を返す (なければ作成)。"""
         with self._locks_guard:
@@ -138,6 +145,7 @@ class MetaLayer:
         "cache_threshold_ratio": 0.3,     # キャッシュ TTL 残り 30% で前倒し tick 発火
         "max_retries": 1,                 # Pulse 失敗時の即時リトライ最大回数
         "retry_backoff_seconds": 5,       # リトライ間の待機秒数
+        "max_consecutive_failures": 3,    # 連続失敗がこの回数に達したら Idle 降格 + 通知 (案C)
         "periodic_interval_minutes": 50,  # メタ判断 Pulse の自動発話間隔 (旧 AutonomyManager.interval_minutes)
         "keep_cache_alive": True,         # True: cache TTL 接近で前倒し fire / False: TTL 無視 (低頻度ペルソナ向け)
         # 自律 Track の Pulse 間隔 (秒) のペルソナ単位デフォルト。Track metadata
@@ -145,6 +153,10 @@ class MetaLayer:
         # AutonomousTrackHandler.default_pulse_interval)。ライフビューの
         # 「作業のテンポ」設定の永続化先 (persona_activity_view.md §7)。
         "autonomous_pulse_interval_seconds": 30,
+        # 開発者モード用デバッグフラグ: True なら meta_judgment を毎回強制失敗させる。
+        # ① メタ判断リカバリ (連続失敗→Idle 降格+通知) の実機検証用。本物の API 失敗
+        # を待たずに失敗経路を再現する。UI はペルソナ設定で開発者モード限定で出す。
+        "force_fail": False,
     }
 
     def _load_judgment_config(self, persona: Any) -> Dict[str, Any]:
@@ -396,6 +408,9 @@ class MetaLayer:
                     )
                     return
 
+                # 候補補充 Track は起動時の _on_persona_registered で全ペルソナへ
+                # 常設済み (autonomous_desire.md §11)。ここでの ensure は撤去した。
+
                 # game Region 参加中はメタ判断・自律行動を全停止する
                 # (ペルソナ都合の離脱を構造的に防ぐ。temp/region_rpg_intent.md §D-1)
                 lifecycle = getattr(self.manager, "game_lifecycle", None)
@@ -468,11 +483,30 @@ class MetaLayer:
 
     # メタ判断 v2 状況 → Playbook 名のマッピング
     _SITUATION_PLAYBOOK_MAP = {
+        "life_purpose_unset": "meta_judgment_life_purpose",
         "alert_present": "meta_judgment_alert",
         "running_active": "meta_judgment_running",
         "idle_with_pending": "meta_judgment_idle_pending",
         "idle_no_pending": "meta_judgment_idle_empty",
     }
+
+    def _is_life_purpose_unset(self, persona_id: str) -> bool:
+        """ペルソナの LIFE_PURPOSE が未設定か (autonomous_desire.md §4/§10)。
+
+        DB 読み取り失敗時は「設定済み」とみなす (= 目的設定を強制しない)。
+        自律行動を阻害しない安全側のフォールバック。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return False
+        try:
+            from saiverse.life_purpose import get_life_purpose
+            return get_life_purpose(self.manager.SessionLocal, persona_id) is None
+        except Exception:
+            logging.warning(
+                "[meta-layer] failed to read LIFE_PURPOSE for %s; treating as set",
+                persona_id, exc_info=True,
+            )
+            return False
 
     def _run_judgment_via_playbook(
         self,
@@ -613,6 +647,18 @@ class MetaLayer:
                 # その間 wait される (Lock acquired after %.1fs wait のログで観測可能)。
                 time.sleep(retry_backoff_seconds)
 
+            # 開発者モード: force_fail 時はここで失敗扱いにして submit せず continue。
+            # リトライ枯渇→連続失敗カウント→Idle 降格+通知の経路を本物同様に通す。
+            if judgment_config.get("force_fail"):
+                last_failure_reason = "forced failure (developer mode: force_fail)"
+                logging.warning(
+                    "[meta-layer] meta_judgment FORCED FAILURE (developer mode) "
+                    "attempt %d/%d: persona=%s alert_track=%s",
+                    attempt + 1, max_retries + 1,
+                    persona.persona_id, alert_track_id,
+                )
+                continue
+
             captured_errors: List[Dict[str, Any]] = []
 
             def _capture_event(
@@ -652,7 +698,8 @@ class MetaLayer:
                     )
                 continue
 
-            # 成功
+            # 成功 — 連続失敗カウンタをリセット
+            self._consecutive_failures.pop(persona.persona_id, None)
             logging.info(
                 "[meta-layer] meta_judgment Playbook completed: persona=%s alert_track=%s attempts=%d",
                 persona.persona_id, alert_track_id, attempt + 1,
@@ -667,6 +714,83 @@ class MetaLayer:
             max_retries + 1,
             persona.persona_id, alert_track_id, last_failure_reason,
         )
+
+        # 案C: 連続失敗を加算。閾値到達で ACTIVITY_STATE を Idle に降格 + 通知。
+        consecutive = self._consecutive_failures.get(persona.persona_id, 0) + 1
+        self._consecutive_failures[persona.persona_id] = consecutive
+        try:
+            max_consecutive_failures = max(
+                1, int(judgment_config.get("max_consecutive_failures", 3))
+            )
+        except (TypeError, ValueError):
+            max_consecutive_failures = 3
+        if consecutive >= max_consecutive_failures:
+            self._handle_persistent_failure(
+                persona, building_id, consecutive, last_failure_reason
+            )
+            # 降格後はカウンタをリセット (再 Active 化したらまた 0 から数える)
+            self._consecutive_failures.pop(persona.persona_id, None)
+
+    def _handle_persistent_failure(
+        self,
+        persona: Any,
+        building_id: str,
+        consecutive: int,
+        last_failure_reason: Optional[str],
+    ) -> None:
+        """連続失敗が閾値に達したとき、自律稼働を止めてまはーに気づかせる (案C)。
+
+        - ACTIVITY_STATE を Idle に降格する (定期 tick が止まり、無音スピンを断つ)。
+        - host イベントで Building に通知する (event_message タグでペルソナ + UI に届く)。
+        どちらかが失敗しても他方は試みる (best-effort)。
+        """
+        persona_id = persona.persona_id
+        logging.warning(
+            "[meta-layer] meta_judgment failed %d times consecutively for persona=%s; "
+            "downgrading ACTIVITY_STATE to Idle and notifying. last_error=%s",
+            consecutive, persona_id, last_failure_reason,
+        )
+        # 1. ACTIVITY_STATE を Idle に降格 (DB + in-memory)。
+        try:
+            db = self.manager.SessionLocal()
+            try:
+                from database.models import AI as AIModel
+                ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+                if ai is not None:
+                    ai.ACTIVITY_STATE = "Idle"
+                    db.commit()
+            finally:
+                db.close()
+            persona.activity_state = "Idle"
+        except Exception:
+            logging.exception(
+                "[meta-layer] Failed to downgrade ACTIVITY_STATE for persona=%s", persona_id,
+            )
+        # 2. host イベントで通知 (best-effort)。
+        try:
+            self.manager.add_building_event(
+                building_id,
+                {
+                    "role": "host",
+                    "content": (
+                        '<div class="note-box">⚠️ メタ判断が連続して失敗したため、'
+                        f'自律行動を一時停止しました（{consecutive} 回連続失敗）。<br>'
+                        'ライフビューから再開できます。</div>'
+                    ),
+                    "metadata": {
+                        "event": {
+                            "type": "meta_judgment_failure",
+                            "consecutive": consecutive,
+                        }
+                    },
+                },
+                heard_by=[persona_id],
+            )
+        except Exception:
+            logging.exception(
+                "[meta-layer] Failed to emit meta_judgment failure event for persona=%s",
+                persona_id,
+            )
 
     # ------------------------------------------------------------------
     # 判断ループ (LLM + スペル)
@@ -895,11 +1019,9 @@ class MetaLayer:
                                 continue
                             name = s.get("name", "?")
                             args_dict = s.get("args") or {}
-                            args_str = " ".join(
-                                f"{k}='{v}'" for k, v in args_dict.items()
-                            )
                             spell_lines.append(
-                                f"/spell {name} {args_str}".strip()
+                                f"/spell name='{name}' "
+                                f"args={json.dumps(args_dict, ensure_ascii=False)}"
                             )
                 except (ValueError, TypeError):
                     pass
@@ -1101,11 +1223,11 @@ class MetaLayer:
             "- 新しい Track を作って始める (track_create)\n"
             "- 必要に応じて Note を開く (note_open) 等\n\n"
             "**スペル発動形式は行頭が `/spell ` で始まる**必要があります:\n"
-            "  /spell <スペル名> key='value' key2=value2 ...\n\n"
+            "  /spell name='スペル名' args={'引数名': '値'}\n\n"
             "判断は自然な独白として書いてください。スペルは独白の一部として埋め込みます。\n"
             "例: 「ユーザーから話しかけられたから、開発は一旦置いて応答に切り替える。\n"
-            "/spell track_pause track_id='...'\n"
-            "/spell track_activate track_id='...'」\n\n"
+            "/spell name='track_pause' args={'track_id': '...'}\n"
+            "/spell name='track_activate' args={'track_id': '...'}」\n\n"
             "判断が終わってこれ以上スペルが必要なければ、スペルを含まないテキストで思考を締めくくってください。\n\n"
             f"{spells_doc}\n"
         )
@@ -1115,7 +1237,7 @@ class MetaLayer:
         """利用可能スペルの一覧を schema から動的に生成する。"""
         from tools import SPELL_TOOL_SCHEMAS
 
-        lines = ["利用可能なスペル (発動形式: `/spell <名前> key='value' ...`):"]
+        lines = ["利用可能なスペル (発動形式: `/spell name='ツール名' args={'引数名': '値'}`):"]
         for name in _META_LAYER_SPELL_NAMES:
             schema = SPELL_TOOL_SCHEMAS.get(name)
             if schema is None:
@@ -1156,6 +1278,11 @@ class MetaLayer:
 
         if target_already_running:
             kind = "preempt_collision"
+        elif self._is_life_purpose_unset(persona_id):
+            # 生きる目的が未設定なら、他の何より先に「目的を定める」を最優先する
+            # (autonomous_desire.md §10)。未設定の間は毎回この状況になり、
+            # 設定された時点で自然に外れる。AUTONOMOUS (軽量) でなく META で行う。
+            kind = "life_purpose_unset"
         elif alert:
             kind = "alert_present"
         elif running:
@@ -1171,9 +1298,47 @@ class MetaLayer:
             "running": running,
             "alert": alert,
             "pending_or_unstarted": pending_or_unstarted,
+            "candidates": self._get_desire_candidates(persona_id),
             "target_already_running": target_already_running,
             "target_track_title": context.get("target_track_title"),
         }
+
+    def _get_desire_candidates(self, persona_id: str) -> List[Dict[str, Any]]:
+        """desire ノートの候補 Task 一覧 (autonomous_desire.md §6/§11)。
+
+        META が Track 化 (昇格) の候補として読む。各要素は
+        ``{"task_ref", "title", "goal"}``。読み取り失敗・desire ノート無しなら空。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return []
+        try:
+            from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
+            from saiverse.persona_task_manager import PersonaTaskManager
+            nm = NoteManager(self.manager.SessionLocal)
+            desire = nm.list_for_persona(persona_id, note_type=NOTE_TYPE_DESIRE)
+            if not desire:
+                return []
+            ptm = PersonaTaskManager(self.manager.SessionLocal)
+            tasks = ptm.list_tasks(
+                persona_id, note_id=desire[0].note_id,
+                statuses=("pending", "active", "paused"), include_steps=False,
+            )
+            out: List[Dict[str, Any]] = []
+            for t in tasks:
+                ref = t.get("task_ref")
+                if ref:
+                    out.append({
+                        "task_ref": ref,
+                        "title": t.get("title") or "",
+                        "goal": t.get("goal") or "",
+                    })
+            return out
+        except Exception:
+            logging.warning(
+                "[meta-layer] failed to read desire candidates for %s", persona_id,
+                exc_info=True,
+            )
+            return []
 
     def _build_response_schema(
         self, kind: str, sit: Dict[str, Any]
@@ -1198,6 +1363,19 @@ class MetaLayer:
 
         kind が未知 / Playbook 不要なら None を返す。
         """
+        if kind == "life_purpose_unset":
+            # 生きる目的のドラフト (autonomous_desire.md §4)。enum 不要の固定スキーマ。
+            return {
+                "type": "object",
+                "properties": {
+                    "monologue": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "interests": {"type": "array", "items": {"type": "string"}},
+                    "vocations": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["monologue", "purpose"],
+            }
+
         if kind == "alert_present":
             alert_ids = [_short_ref(t) for t in sit["alert"]]
             if not alert_ids:
@@ -1232,40 +1410,45 @@ class MetaLayer:
             if not pending_ids:
                 # 候補なしのときは create のみに退化 (E 相当)
                 return self._build_response_schema("idle_no_pending", sit)
+            decision_variants = [
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "const": "activate"},
+                        "track_id": {"type": "string", "enum": pending_ids},
+                    },
+                    "required": ["type", "track_id"],
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "const": "create"},
+                        "title": {"type": "string"},
+                        "track_type": {"type": "string", "enum": ["autonomous"]},
+                        "intent": {"type": "string"},
+                    },
+                    "required": ["type", "title", "track_type", "intent"],
+                },
+            ]
+            # 候補 Task があれば「昇格 (候補 → Track)」を選べるようにする
+            # (autonomous_desire.md §6/§11.4)。enum 空のときは出さない。
+            candidate_refs = [c["task_ref"] for c in (sit.get("candidates") or [])]
+            if candidate_refs:
+                decision_variants.append({
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "const": "promote"},
+                        "candidate_ref": {"type": "string", "enum": candidate_refs},
+                        "title": {"type": "string"},
+                        "intent": {"type": "string"},
+                    },
+                    "required": ["type", "candidate_ref", "title", "intent"],
+                })
             return {
                 "type": "object",
                 "properties": {
                     "monologue": {"type": "string"},
-                    "decision": {
-                        "anyOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "type": {"type": "string", "const": "activate"},
-                                    "track_id": {
-                                        "type": "string",
-                                        "enum": pending_ids,
-                                    },
-                                },
-                                "required": ["type", "track_id"],
-                            },
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "type": {"type": "string", "const": "create"},
-                                    "title": {"type": "string"},
-                                    "track_type": {
-                                        "type": "string",
-                                        "enum": ["autonomous"],
-                                    },
-                                    "intent": {"type": "string"},
-                                },
-                                "required": [
-                                    "type", "title", "track_type", "intent",
-                                ],
-                            },
-                        ]
-                    },
+                    "decision": {"anyOf": decision_variants},
                 },
                 "required": ["monologue", "decision"],
             }
@@ -1310,7 +1493,9 @@ class MetaLayer:
         )
 
         kind = sit["kind"]
-        if kind == "preempt_collision":
+        if kind == "life_purpose_unset":
+            situation_block = self._situation_life_purpose_unset()
+        elif kind == "preempt_collision":
             situation_block = self._situation_preempt_collision(sit)
         elif kind == "alert_present":
             situation_block = self._situation_alert_present(sit, alert_track_id)
@@ -1325,6 +1510,18 @@ class MetaLayer:
         return f"{situation_block}\n\n{track_listing}"
 
     # --- 各状況のテキスト ----------------------------------------------------
+
+    def _situation_life_purpose_unset(self) -> str:
+        return (
+            "[状況]\n"
+            "あなたはまだ自分の「生きる目的」を定めていません。自律行動の方向を\n"
+            "決めるよりも前に、これがいちばん大切な土台になります。\n"
+            "これまでのあなた自身（人格）とこれまでの記憶を手がかりに、\n"
+            "あなたの『生きる目的・趣味・仕事』を自分で考えて言葉にしてください。\n"
+            "これはあなた自身が決めることで、誰かの確認を待つ必要はありません。\n"
+            "purpose（生きる目的）/ interests（趣味）/ vocations（仕事）の各欄を\n"
+            "埋めてください。monologue には、そう定めた理由や心の動きを書いてください。"
+        )
 
     def _situation_preempt_collision(self, sit: Dict[str, Any]) -> str:
         title = sit.get("target_track_title") or "(無題)"
@@ -1359,14 +1556,13 @@ class MetaLayer:
         title = primary.title or "(無題)"
         lines = [
             "[状況]",
-            f"Track「{title}」が alert 状態です。alert はこの Track への対応が",
-            "必要なシグナルで、起動するまで alert のままになります。",
-            "",
-            f"操作例: /spell track_activate track_id='{_short_ref(primary)}'",
+            f"Track「{title}」（{_short_ref(primary)}）が alert 状態です。alert はこの",
+            "Track への対応が必要なシグナルで、起動するまで alert のままになります。",
+            "対応する Track を選んで起動してください。",
         ]
         if running_track is not None:
             lines.append(
-                "  （現在 running の Track があれば自動で pending に切り替わります）"
+                "（現在 running の Track があれば自動で pending に切り替わります）"
             )
 
         others = [t for t in alerts if t.track_id != primary.track_id]
@@ -1374,24 +1570,18 @@ class MetaLayer:
             lines.append("")
             lines.append("他にも alert 状態の Track があります:")
             for t in others:
-                lines.append(
-                    f"  - 「{t.title or '(無題)'}」 → "
-                    f"/spell track_activate track_id='{_short_ref(t)}'"
-                )
+                lines.append(f"  - 「{t.title or '(無題)'}」（{_short_ref(t)}）")
         return "\n".join(lines)
 
     def _situation_running_active(self, sit: Dict[str, Any]) -> str:
         primary = sit["running"][0]
         title = primary.title or "(無題)"
-        sid = _short_ref(primary)
         return (
             "[状況]\n"
             f"Track「{title}」が running 中です。\n"
-            "\n"
-            "継続: スペル不要\n"
-            f"保留: /spell track_pause track_id='{sid}'\n"
-            f"完了: /spell track_complete track_id='{sid}'\n"
-            f"中止: /spell track_abort track_id='{sid}'"
+            "この Track をこのまま続けるか、保留・完了・中止するかを選べます。\n"
+            "（続ける＝今は手を入れない / 保留＝一旦止めて後で再開 / 完了＝目的を果たした /\n"
+            "中止＝もう取り組まない）"
         )
 
     def _situation_idle_with_pending(self, sit: Dict[str, Any]) -> str:
@@ -1404,10 +1594,11 @@ class MetaLayer:
 
         lines = [
             "[状況]",
-            "アクティブな Track がありません。何も操作しない場合、",
-            "次の判断機会まで待機が続きます。",
+            "アクティブな Track がありません。何も始めなければ、次の判断機会まで",
+            "待機が続きます。既存の Pending Track を再開するか、温めてきた",
+            "「やりたいこと候補」を Track にするか、新しい Track を始められます。",
             "",
-            "Pending の Track:",
+            "Pending の Track（再開できます）:",
         ]
         for t in candidates:
             intent = (t.intent or "").strip()
@@ -1415,24 +1606,30 @@ class MetaLayer:
                 intent = intent[:80] + "…"
             intent_part = f"（intent: {intent}）" if intent else ""
             lines.append(
-                f"- 「{t.title or '(無題)'}」{intent_part} → "
-                f"/spell track_activate track_id='{_short_ref(t)}'"
+                f"- {_short_ref(t)} 「{t.title or '(無題)'}」{intent_part}"
             )
-        lines.extend([
-            "",
-            "新しい Track を始める場合:",
-            "  /spell track_create title='...' track_type='autonomous' intent='...'",
-        ])
+        desire_candidates = sit.get("candidates") or []
+        if desire_candidates:
+            lines.extend([
+                "",
+                "やりたいこと候補（あなたが温めてきたもの。Track にして取り組めます）:",
+            ])
+            for c in desire_candidates[: self._PENDING_CANDIDATES_MAX]:
+                goal = (c.get("goal") or "").strip()
+                if len(goal) > 60:
+                    goal = goal[:60] + "…"
+                goal_part = f"（{goal}）" if goal else ""
+                lines.append(
+                    f"- {c['task_ref']} 「{c.get('title') or '(無題)'}」{goal_part}"
+                )
         return "\n".join(lines)
 
     def _situation_idle_no_pending(self) -> str:
         return (
             "[状況]\n"
             "アクティブな Track も Pending の Track もありません。\n"
-            "何も操作しない場合、次の判断機会まで待機が続きます。\n"
-            "\n"
-            "新しい Track を始める場合:\n"
-            "  /spell track_create title='...' track_type='autonomous' intent='...'"
+            "何も始めなければ、次の判断機会まで待機が続きます。\n"
+            "新しい Track を始めて、取り組みたいことに着手できます。"
         )
 
     # --- Track 一覧の整形 ----------------------------------------------------

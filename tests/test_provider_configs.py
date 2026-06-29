@@ -25,11 +25,10 @@ def _patch_user_data(tmp_path: Path) -> list:
 class TestLoadProviders(unittest.TestCase):
     """Verify builtin providers load with builtin: True flag."""
 
-    def test_eight_builtin_providers_loaded(self):
+    def test_seven_builtin_providers_loaded(self):
         configs = provider_configs.load_configs()
-        # Eight builtin providers ship with the repo
         for pid in ("anthropic", "gemini", "openai", "ollama",
-                    "llama_cpp", "nvidia_nim", "xai", "openai_codex"):
+                    "nvidia_nim", "xai", "openai_codex"):
             self.assertIn(pid, configs, f"Missing builtin provider: {pid}")
             self.assertTrue(
                 configs[pid].get("builtin"),
@@ -217,7 +216,7 @@ class TestExistingModelsBackwardCompat(unittest.TestCase):
     def test_all_models_resolve_to_known_protocol(self):
         valid_protocols = {
             "openai_compat", "ollama_compat", "anthropic_native",
-            "gemini_native", "xai_native", "llama_cpp_native",
+            "gemini_native", "xai_native",
             "nvidia_nim", "openai_codex",
         }
         unknown = []
@@ -255,7 +254,6 @@ class TestProtocolResolution(unittest.TestCase):
             ("anthropic", "anthropic_native"),
             ("gemini", "gemini_native"),
             ("xai", "xai_native"),
-            ("llama_cpp", "llama_cpp_native"),
             ("nvidia_nim", "nvidia_nim"),
             ("openai_codex", "openai_codex"),
         ]

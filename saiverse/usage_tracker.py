@@ -9,7 +9,7 @@ import threading
 from datetime import datetime
 from typing import Any, Optional
 
-from .model_configs import calculate_cost
+from .model_configs import calculate_cost, get_model_pricing
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,10 +82,12 @@ class UsageTracker:
             timestamp: Optional timestamp (defaults to now)
         """
         # Calculate cost (with cache discount and write premium if applicable)
-        cost_usd = calculate_cost(
+        cost = calculate_cost(
             model_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
             cache_ttl=cache_ttl,
         )
+        pricing = get_model_pricing(model_id)
+        currency = pricing.get("currency", "USD") if pricing else "USD"
 
         record = {
             "timestamp": timestamp or datetime.now(),
@@ -96,7 +98,8 @@ class UsageTracker:
             "output_tokens": output_tokens,
             "cached_tokens": cached_tokens,
             "cache_write_tokens": cache_write_tokens,
-            "cost_usd": cost_usd if cost_usd > 0 else None,
+            "cost_usd": cost if cost > 0 else None,
+            "currency": currency,
             "node_type": node_type,
             "playbook_name": playbook_name,
             "category": category,
@@ -108,13 +111,14 @@ class UsageTracker:
                 self._flush_to_db()
 
         LOGGER.debug(
-            "Usage recorded: model=%s input=%d output=%d cached=%d cache_write=%d cost=$%.6f persona=%s",
+            "Usage recorded: model=%s input=%d output=%d cached=%d cache_write=%d cost=%.6f %s persona=%s",
             model_id,
             input_tokens,
             output_tokens,
             cached_tokens,
             cache_write_tokens,
-            cost_usd,
+            cost,
+            currency,
             persona_id,
         )
 
@@ -150,6 +154,7 @@ class UsageTracker:
                         OUTPUT_TOKENS=record["output_tokens"],
                         CACHED_TOKENS=record.get("cached_tokens", 0) or 0,
                         COST_USD=record["cost_usd"],
+                        CURRENCY=record.get("currency", "USD"),
                         NODE_TYPE=record["node_type"],
                         PLAYBOOK_NAME=record["playbook_name"],
                         CATEGORY=record.get("category"),

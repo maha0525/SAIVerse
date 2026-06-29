@@ -981,6 +981,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
+                "VISION_MODEL": ai.VISION_MODEL,
+                "AUDIO_MODEL": ai.AUDIO_MODEL,
+                "VIDEO_MODEL": ai.VIDEO_MODEL,
+                "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
                 "ACTIVITY_STATE": ai.ACTIVITY_STATE,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
@@ -1027,6 +1031,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
+        vision_model: Optional[str] = None,
+        audio_model: Optional[str] = None,
+        video_model: Optional[str] = None,
+        memory_weave_model: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
@@ -1127,6 +1135,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model or None
             ai.LIGHTWEIGHT_MODEL = lightweight_model or None
+            ai.VISION_MODEL = vision_model or None
+            ai.AUDIO_MODEL = audio_model or None
+            ai.VIDEO_MODEL = video_model or None
+            ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
             ai.AVATAR_IMAGE = avatar_value
             # Update appearance image path if provided
             if appearance_image_path is not None:
@@ -1166,6 +1178,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.persona_system_instruction = system_prompt
                 persona.activity_state = ai.ACTIVITY_STATE
                 persona.lightweight_model = lightweight_model
+                persona.vision_model = vision_model
+                persona.audio_model = audio_model
+                persona.video_model = video_model
+                persona.memory_weave_model = memory_weave_model
 
                 # Phase C-2: ACTIVITY_STATE 変更を AutonomyManager に反映
                 # (Active なら起動、Active 以外なら停止)。

@@ -19,7 +19,6 @@ _PROTOCOL_TO_LEGACY_PROVIDER = {
     "anthropic_native": "anthropic",
     "gemini_native": "gemini",
     "xai_native": "xai",
-    "llama_cpp_native": "llama_cpp",
     "nvidia_nim": "nvidia_nim",
     "openai_codex": "openai_codex",
 }
@@ -207,6 +206,19 @@ def get_metabolism_keep_messages(model: str) -> int | None:
     return None
 
 
+def get_metabolism_token_threshold(model: str) -> int | None:
+    """Get the token threshold that triggers metabolism.
+
+    When usage.input_tokens exceeds this value after a successful LLM call,
+    metabolism is triggered. Returns None if not configured (time-based fallback).
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    val = config.get("metabolism_token_threshold")
+    if val is not None:
+        return int(val)
+    return None
+
+
 def get_max_image_embeds(model: str) -> int | None:
     """Get the maximum number of image embeds for a model.
 
@@ -345,17 +357,6 @@ def find_model_config(query: str) -> tuple[str, Dict]:
     return "", {}
 
 
-def get_agentic_model() -> str:
-    """Get the default model for agentic tasks requiring structured output.
-
-    Priority:
-    1. SAIVERSE_AGENTIC_MODEL environment variable
-    2. Built-in default: BUILTIN_DEFAULT_LITE_MODEL (from saiverse.model_defaults)
-    """
-    import os
-    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-    return os.environ.get("SAIVERSE_AGENTIC_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-
 
 def get_model_pricing(model: str) -> Dict[str, Any] | None:
     """Get pricing information for a model.
@@ -441,9 +442,10 @@ def calculate_cost(
     output_cost = (output_tokens / 1_000_000) * output_rate
 
     total = non_cached_cost + cached_cost + cache_write_cost + output_cost
+    currency = pricing.get("currency", "USD")
     LOGGER.debug(
-        "[DEBUG] Cost calculated: $%.6f (non_cached_in=%d @ $%.4f, cached=%d @ $%.4f, cache_write=%d @ $%.4f, out=%d @ $%.4f)",
-        total, non_cached_input, input_rate, cached_tokens, cached_rate, cache_write_tokens, cache_write_rate, output_tokens, output_rate
+        "[DEBUG] Cost calculated: %.6f %s (non_cached_in=%d @ %.4f, cached=%d @ %.4f, cache_write=%d @ %.4f, out=%d @ %.4f)",
+        total, currency, non_cached_input, input_rate, cached_tokens, cached_rate, cache_write_tokens, cache_write_rate, output_tokens, output_rate
     )
     return total
 

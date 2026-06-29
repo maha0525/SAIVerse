@@ -85,6 +85,20 @@ def _format_spells(
                     "intent": intent,
                 })]
             return []
+        if decision.get("type") == "promote":
+            # 候補 (desire ノートの Task) を Track 化 (autonomous_desire.md §6/§11.4)。
+            # track_create が from_candidate で候補を新 Track へ張り替える (= 昇格)。
+            candidate_ref = decision.get("candidate_ref")
+            title = decision.get("title")
+            intent = decision.get("intent") or ""
+            if candidate_ref and title:
+                return [("track_create", {
+                    "title": title,
+                    "track_type": "autonomous",
+                    "intent": intent,
+                    "from_candidate": candidate_ref,
+                })]
+            return []
         return []
 
     if situation_kind == "idle_no_pending":
@@ -100,6 +114,19 @@ def _format_spells(
             })]
         return []
 
+    if situation_kind == "life_purpose_unset":
+        # 生きる目的のドラフト (autonomous_desire.md §4)。purpose 必須、interests /
+        # vocations は配列。実行は tool_func(**args) で直接渡るため配列も問題ない
+        # (/spell テキストは記録用のみ)。
+        purpose = (output.get("purpose") or "").strip()
+        if purpose:
+            return [("life_purpose_set", {
+                "purpose": purpose,
+                "interests": output.get("interests") or [],
+                "vocations": output.get("vocations") or [],
+            })]
+        return []
+
     LOGGER.warning(
         "[meta_judgment_finalize] unknown situation_kind=%r; no spells will fire",
         situation_kind,
@@ -108,11 +135,33 @@ def _format_spells(
 
 
 def _spell_to_text(name: str, args: Dict[str, Any]) -> str:
-    """Render a /spell line in the canonical free form used elsewhere in SAIVerse."""
-    parts = [f"/spell {name}"]
-    for k, v in args.items():
-        parts.append(f"{k}='{v}'")
-    return " ".join(parts)
+    """Render a /spell line for the memory record (display only; execution uses args dict).
+
+    正準形式 ``/spell name='ツール名' args={...}`` で出力する。KV 自由形式は配列・
+    オブジェクト引数を解析できないため、見本としても正しい正準形式に統一する。
+    """
+    return f"/spell name='{name}' args={json.dumps(args, ensure_ascii=False)}"
+
+
+def _build_prompt_snapshot(
+    situation_text: str, trigger_context: str, recent_judgments: str,
+) -> Optional[str]:
+    """judge に渡された動的プロンプト (= デバッグで見たい内容) を再構成する。
+
+    Playbook judge ノードの action テンプレートの静的部分は除き、MetaLayer が
+    組み立てた可変部分 (トリガー情報 / 状況テキスト / 過去ログ) を結合する。
+    Pulse タイムライン (paired_action_text) と meta_judgment_log.prompt_snapshot に
+    載せ、メタ判断時のプロンプトを後から確認できるようにする。
+    """
+    parts: List[str] = []
+    if trigger_context and trigger_context.strip() not in ("", "{}"):
+        parts.append(f"トリガー情報: {trigger_context}")
+    if situation_text and situation_text.strip():
+        parts.append(situation_text.strip())
+    if recent_judgments and recent_judgments.strip():
+        parts.append(recent_judgments.strip())
+    text = "\n\n".join(parts).strip()
+    return text or None
 
 
 def meta_judgment_finalize(
@@ -122,6 +171,8 @@ def meta_judgment_finalize(
     trigger_type: str = "",
     trigger_context: str = "",
     track_at_judgment_id: str = "",
+    situation_text: str = "",
+    recent_judgments: str = "",
 ) -> Tuple[str, ToolResult, None]:
     """Finalize a meta_judgment v2 turn (see module docstring)."""
     persona_id = get_active_persona_id()
@@ -132,6 +183,9 @@ def meta_judgment_finalize(
 
     output = judgment_output if isinstance(judgment_output, dict) else {}
     monologue = (output.get("monologue") or "").strip()
+    prompt_snapshot = _build_prompt_snapshot(
+        situation_text, trigger_context, recent_judgments,
+    )
 
     spells_to_fire = _format_spells(situation_kind, output, running_track_id)
     spell_lines = [_spell_to_text(name, args) for name, args in spells_to_fire]
@@ -209,6 +263,9 @@ def meta_judgment_finalize(
                     "line_role": "meta_judgment",
                     "scope": scope,
                     "pulse_id": pulse_id,
+                    # メタ判断時のプロンプトを Pulse タイムラインで見えるようにする
+                    # (paired_action_text が「渡されたプロンプト」として表示される)。
+                    "paired_action_text": prompt_snapshot,
                 })
             except Exception:
                 LOGGER.exception(
@@ -228,7 +285,7 @@ def meta_judgment_finalize(
                     track_at_judgment_id=track_at_judgment_id or None,
                     trigger_type=trigger_type or "unknown",
                     trigger_context=trigger_context or None,
-                    prompt_snapshot=None,
+                    prompt_snapshot=prompt_snapshot,
                     judgment_thought=monologue or None,
                     spells_emitted=(
                         json.dumps(spells_record, ensure_ascii=False)
@@ -276,6 +333,8 @@ def schema() -> ToolSchema:
                 "trigger_type": {"type": "string"},
                 "trigger_context": {"type": "string"},
                 "track_at_judgment_id": {"type": "string"},
+                "situation_text": {"type": "string"},
+                "recent_judgments": {"type": "string"},
             },
             "required": ["judgment_output", "situation_kind"],
         },

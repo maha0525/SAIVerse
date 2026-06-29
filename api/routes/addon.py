@@ -441,6 +441,22 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, manager=Depends(
             exc,
         )
 
+    # Composite actions (user-defined multi-step MCP tool sequences)
+    try:
+        if body.is_enabled:
+            from saiverse.composite_actions import register_action_spells
+            register_action_spells(addon_name)
+        else:
+            from saiverse.composite_actions import unregister_action_spells
+            unregister_action_spells(addon_name)
+    except Exception as exc:
+        LOGGER.warning(
+            "addon: composite actions notification failed for '%s' (enabled=%s): %s",
+            addon_name,
+            body.is_enabled,
+            exc,
+        )
+
     # Broadcast to frontend subscribers as well so UIs can react
     try:
         from saiverse.addon_events import emit_addon_event

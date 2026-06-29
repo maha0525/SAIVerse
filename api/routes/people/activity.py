@@ -440,26 +440,16 @@ def _load_meta_judgment_spells(
 def _parse_spell_lines(content: str) -> List[Dict[str, Any]]:
     """メタ判断の assistant メッセージから /spell 行をパースする。
 
-    形式: /spell track_activate track_id='t:3'
+    正準形式 ``/spell name='track_activate' args={"track_id": "t:3"}`` を解釈する。
+    runtime の堅牢なパーサ (正準/fuzzy 両対応) に委譲して二重実装を避ける。
     戻り値: [{"name": "track_activate", "args": {"track_id": "t:3"}}]
     """
-    import re
-    results: List[Dict[str, Any]] = []
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line.startswith("/spell "):
-            continue
-        parts = line[7:].split()
-        if not parts:
-            continue
-        name = parts[0]
-        args: Dict[str, Any] = {}
-        for part in parts[1:]:
-            m = re.match(r"(\w+)=['\"]?(.+?)['\"]?$", part)
-            if m:
-                args[m.group(1)] = m.group(2)
-        results.append({"name": name, "args": args})
-    return results
+    from sea.runtime_llm import _parse_spell_lines as _runtime_parse
+
+    return [
+        {"name": tool_name, "args": tool_args}
+        for tool_name, tool_args, _match, _normalized in _runtime_parse(content, quiet=True)
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -537,6 +527,9 @@ def start_activity(persona_id: str, manager=Depends(get_manager)):
     persona = _get_persona_or_404(manager, persona_id)
 
     _set_activity_state(manager, persona_id, persona, "Active")
+
+    # 候補補充 Track (autonomous_desire.md §11) は _on_persona_registered で
+    # 起動時/作成時に常設済みなので、ここでの ensure は不要。
 
     am = _get_or_create_autonomy(persona_id, manager)
     started = am.start()

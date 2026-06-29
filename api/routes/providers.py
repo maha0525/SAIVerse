@@ -32,7 +32,7 @@ VALID_UI_PROTOCOLS = {"openai_compat", "ollama_compat"}
 # requests don't introduce unknown protocol names by typo.
 ALL_PROTOCOLS = {
     "openai_compat", "ollama_compat", "anthropic_native", "gemini_native",
-    "xai_native", "llama_cpp_native", "nvidia_nim", "openai_codex",
+    "xai_native", "nvidia_nim", "openai_codex",
 }
 
 CONNECTION_TEST_TIMEOUT = 5.0

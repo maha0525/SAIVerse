@@ -308,11 +308,18 @@ class HeadPipeline:
 
     # ---- render ----
 
-    def render_head(self, persona_id: str, line_id: str) -> list[RenderedSection]:
-        """現在の snapshot から head の RenderedSection 列を作る。
+    def render_head(
+        self, persona_id: str, line_id: str
+    ) -> list[tuple[str, RenderedSection]]:
+        """現在の snapshot から head の ``(section_name, RenderedSection)`` 列を作る。
 
         snapshot 経由のみで render する (= live state 参照不可)。snapshot 不在時は
         空 list を返す (呼び出し側で capture_all を先に呼ぶこと)。
+
+        Section 名を render 結果に同梱する。render が None のセクションは除外される
+        ため、呼び出し側が「order 順の位置」だけから名前を復元しようとすると、None
+        セクションの分だけ後続がズレる (enabled フィルタが別セクションに化け、内容が
+        欠落する)。名前を一緒に返して位置依存を排除する。
         """
         with self._lock:
             state = self._states.get((persona_id, line_id))
@@ -320,7 +327,7 @@ class HeadPipeline:
                 return []
             snapshot = state.snapshot
 
-        rendered: list[RenderedSection] = []
+        rendered: list[tuple[str, RenderedSection]] = []
         for section in self._registry.all_sections():
             section_snapshot = snapshot.sections.get(section.name)
             if section_snapshot is None:
@@ -334,7 +341,7 @@ class HeadPipeline:
                 )
                 continue
             if result is not None:
-                rendered.append(result)
+                rendered.append((section.name, result))
         return rendered
 
     # ---- アクセサ ----

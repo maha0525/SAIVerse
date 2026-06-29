@@ -21,6 +21,7 @@ class ChatMessageLLMUsage(BaseModel):
     cached_tokens: int = 0  # Tokens served from cache (cache read)
     cache_write_tokens: int = 0  # Tokens written to cache (Anthropic: 1.25x cost)
     cost_usd: Optional[float] = None
+    currency: str = "USD"
 
 class ChatMessageLLMUsageTotal(BaseModel):
     """Accumulated LLM usage for entire pulse (all LLM calls leading to this message)."""
@@ -31,6 +32,7 @@ class ChatMessageLLMUsageTotal(BaseModel):
     total_cost_usd: float
     call_count: int
     models_used: List[str] = []
+    currency: str = "USD"
 
 class ChatMessage(BaseModel):
     id: Optional[str] = None
@@ -174,14 +176,22 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
     if metadata and "llm_usage" in metadata:
         usage_raw = metadata["llm_usage"]
         if isinstance(usage_raw, dict):
+            usage_model = usage_raw.get("model", "unknown")
+            usage_currency = usage_raw.get("currency", "USD")
+            if usage_currency == "USD":
+                from saiverse.model_configs import get_model_pricing
+                _p = get_model_pricing(usage_model)
+                if _p:
+                    usage_currency = _p.get("currency", "USD")
             llm_usage_data = ChatMessageLLMUsage(
-                model=usage_raw.get("model", "unknown"),
+                model=usage_model,
                 model_display_name=usage_raw.get("model_display_name"),
                 input_tokens=usage_raw.get("input_tokens", 0),
                 output_tokens=usage_raw.get("output_tokens", 0),
                 cached_tokens=usage_raw.get("cached_tokens", 0),
                 cache_write_tokens=usage_raw.get("cache_write_tokens", 0),
                 cost_usd=usage_raw.get("cost_usd"),
+                currency=usage_currency,
             )
 
     # Extract LLM usage total (accumulated across all LLM calls in pulse)
@@ -189,6 +199,13 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
     if metadata and "llm_usage_total" in metadata:
         total_raw = metadata["llm_usage_total"]
         if isinstance(total_raw, dict):
+            total_models = total_raw.get("models_used", [])
+            total_currency = total_raw.get("currency", "USD")
+            if total_currency == "USD" and total_models:
+                from saiverse.model_configs import get_model_pricing
+                _p = get_model_pricing(total_models[0])
+                if _p:
+                    total_currency = _p.get("currency", "USD")
             llm_usage_total_data = ChatMessageLLMUsageTotal(
                 total_input_tokens=total_raw.get("total_input_tokens", 0),
                 total_output_tokens=total_raw.get("total_output_tokens", 0),
@@ -196,7 +213,8 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
                 total_cache_write_tokens=total_raw.get("total_cache_write_tokens", 0),
                 total_cost_usd=total_raw.get("total_cost_usd", 0.0),
                 call_count=total_raw.get("call_count", 0),
-                models_used=total_raw.get("models_used", []),
+                models_used=total_models,
+                currency=total_currency,
             )
 
     # Extract reasoning (thinking) from metadata

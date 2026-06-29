@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, Suspense } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
+import ActionsPanel from './ActionsPanel';
 import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
 import { ADDON_PANELS } from '../addon-panels.generated';
 import AddonCatalogPanel from './AddonCatalogPanel';
@@ -839,6 +840,7 @@ function AddonCard({
                 <div className={styles.addonCardBody}>
                     <ParamsSection addon={addon} personas={personas} />
                     <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
+                    <ActionsPanel addonName={addon.addon_name} />
                     {(() => {
                         const AddonPanel = ADDON_PANELS[addon.addon_name];
                         if (!AddonPanel) return null;

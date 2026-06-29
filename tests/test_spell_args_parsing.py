@@ -84,29 +84,34 @@ class TestCoerceArgToType(unittest.TestCase):
 
 
 class TestCoerceSpellArgs(unittest.TestCase):
-    def test_track_task_done_quoted_index(self):
-        # air_city_a の実バグ: LLM が index を "2" とクオートして TypeError
+    def test_task_update_step_quoted_int(self):
+        # LLM が step_position を "2" とクオートして渡すと str<int で TypeError になる
+        # 既知バグの回帰防止。整数パラメータは coerce で int 化される。
         schema = ToolSchema(
-            name="track_task_done",
+            name="task_update_step",
             description="",
             parameters={
                 "type": "object",
                 "properties": {
-                    "track_id": {"type": "string"},
-                    "index": {"type": "integer"},
+                    "task_ref": {"type": "string"},
+                    "step_position": {"type": "integer"},
+                    "status": {"type": "string"},
                 },
             },
             result_type="string",
         )
         with patch.dict(
             "sea.runtime_llm.SPELL_TOOL_SCHEMAS",
-            {"track_task_done": schema},
+            {"task_update_step": schema},
             clear=False,
         ):
             result = _coerce_spell_args(
-                "track_task_done", {"track_id": "t:13", "index": "2"}
+                "task_update_step",
+                {"task_ref": "task:5", "step_position": "2", "status": "completed"},
             )
-        self.assertEqual(result, {"track_id": "t:13", "index": 2})
+        self.assertEqual(
+            result, {"task_ref": "task:5", "step_position": 2, "status": "completed"}
+        )
 
     def test_unknown_tool_passthrough(self):
         args = {"x": "2"}

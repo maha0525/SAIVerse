@@ -84,6 +84,32 @@ class BuildingSection:
         return json.loads(data)
 
 
+class EmptySection:
+    """capture はするが render は常に None (= dynamic_state 系 / 未設定の任意 Section)。
+
+    snapshot には載るが head には描画されない。order を building と spell_list の
+    間に置き、render_head の戻り値が「名前付き」で位置非依存であることを検証する。
+    """
+    name = "empty"
+    order = 400  # building(300) < empty(400) < spell_list(600)
+    refresh_on_events = frozenset()
+
+    def capture(self, ctx):
+        return {"present": True}
+
+    def render(self, snapshot):
+        return None  # head には何も出さない
+
+    def diff_to_notifications(self, old, new):
+        return []
+
+    def serialize_snapshot(self, snapshot):
+        return json.dumps(snapshot or {})
+
+    def deserialize_snapshot(self, data):
+        return json.loads(data)
+
+
 class IncompleteSection:
     name = "broken"
     order = 0
@@ -154,8 +180,32 @@ def test_render_head_outputs_in_order(pipeline, ctx):
     pipeline.capture_all(ctx)
     rendered = pipeline.render_head("air", "main")
     assert len(rendered) == 2
-    assert rendered[0].text.startswith("## Building:")
-    assert rendered[1].text.startswith("## スペル")
+    assert rendered[0][0] == "building"
+    assert rendered[0][1].text.startswith("## Building:")
+    assert rendered[1][0] == "spell_list"
+    assert rendered[1][1].text.startswith("## スペル")
+
+
+def test_render_head_carries_names_past_none_section(ctx):
+    """render が None のセクションを間に挟んでも、後続セクションの名前がズレない。
+
+    回帰: 旧実装は render_head が名前無しの RenderedSection 列を返し、呼び出し側が
+    order 順の位置から名前を復元していた。間に None render セクションがあると後続が
+    1 つズレ、enabled フィルタが別名で評価されて内容が欠落していた (2026-06-29)。
+    """
+    r = HeadSectionRegistry()
+    r.register(BuildingSection())      # order 300, renders text
+    r.register(EmptySection())         # order 400, renders None
+    r.register(SpellListSection())     # order 600, renders text
+    pipeline = HeadPipeline(registry=r)
+    pipeline.capture_all(ctx)
+
+    rendered = pipeline.render_head("air", "main")
+    # empty は除外され、building / spell_list が正しい名前で残る
+    assert [name for name, _ in rendered] == ["building", "spell_list"]
+    by_name = dict(rendered)
+    assert by_name["building"].text.startswith("## Building:")
+    assert by_name["spell_list"].text.startswith("## スペル")
 
 
 def test_render_head_returns_empty_when_no_snapshot(pipeline):

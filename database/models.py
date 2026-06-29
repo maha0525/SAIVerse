@@ -81,6 +81,11 @@ class AI(Base):
     # (docs/intent/persona_cognition/handoff_2026-05-09.md §4)。NULL なら既定値 30 分。
     # 軽量モデルと重量級モデルで「自然な対話の間」が違うためペルソナ別に持つ。
     USER_CONV_TIMEOUT_MINUTES = Column(Integer, nullable=True)
+    # 自律の源泉 (autonomous_desire.md §4): ペルソナの「生きる目的 / 趣味 / 仕事」。
+    # 自律初回 ON 時に C 案聞き取りでドラフト→ユーザー確認→確定し保存する。
+    # JSON {"purpose": str, "interests": [str], "vocations": [str]}。NULL = 未設定
+    # (= 聞き取り未実施)。AUTONOMOUS / META プロンプトに常駐注入される (§4.5)。
+    LIFE_PURPOSE = Column(Text, nullable=True)
 
 class Building(Base):
     __tablename__ = "building"
@@ -366,7 +371,8 @@ class LLMUsageLog(Base):
     INPUT_TOKENS = Column(Integer, nullable=False)
     OUTPUT_TOKENS = Column(Integer, nullable=False)
     CACHED_TOKENS = Column(Integer, nullable=True, default=0)  # Tokens served from cache
-    COST_USD = Column(Float, nullable=True)  # Calculated cost in USD
+    COST_USD = Column(Float, nullable=True)  # Calculated cost in the model's native currency
+    CURRENCY = Column(String(8), nullable=True, default="USD")  # ISO 4217 currency code
     NODE_TYPE = Column(String(64), nullable=True)  # llm, router, tool_detection, etc.
     PLAYBOOK_NAME = Column(String(255), nullable=True)
     CATEGORY = Column(String(64), nullable=True)  # persona_speak, memory_weave_generate, etc.
@@ -501,7 +507,12 @@ class ActionTrack(Base):
     # running / alert / pending / unstarted / completed / aborted
     is_forgotten = Column(Boolean, default=False, nullable=False)
     intent = Column(Text, nullable=True)
-    tasks_json = Column(Text, nullable=True)
+    # NOTE (unified_task_model.md §5 step 6, 2026-06-28): tasks_json カラムは
+    # Task 一本化に伴い廃止した。Track 内タスクは統合 persona_task テーブル
+    # (track_id バインド) へ移行済み。既存 DB の tasks_json は migrate.py の全書換
+    # パスで列ドロップされ、post-migration フック
+    # _migrate_track_tasks_json_to_persona_task が backup から persona_task へ
+    # データを保全する。
     track_metadata = Column(Text, nullable=True)
     # JSON: target identifiers (user_id, persona_id), external refs, etc.
     # NOTE: pause_summary / pause_summary_updated_at カラムは v0.32 (2026-05-09) で
@@ -791,5 +802,94 @@ class RealtimeSpellBinding(Base):
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     __table_args__ = (
         Index('idx_realtime_spell_owner', 'OWNER_KIND', 'OWNER_ID'),
+    )
+
+
+# ============================================================================
+# 統合 Task モデル (unified_task_model.md v0.1)
+# ============================================================================
+# 旧 track_task (ActionTrack.tasks_json 軽量チェックリスト) と旧 standalone Task
+# (per-persona tasks.db のリッチタスク) を 1 枚のテーブルに統合する。standalone の
+# 豊かなフィールドを正とし、親を note_id / track_id (or なし) で持つ:
+#   note_id あり = 候補 (desire ノート内のやりたいこと) ← 自律の源泉 ③
+#   track_id あり = Track 内の実行小目標 ← 旧 track_task
+#   どちらもなし = 未所属 (生成直後 等)
+# 昇格 (候補→Track) = 親を note_id → track_id に張り替えるだけ (コピー/破棄しない)。
+# 詳細: docs/intent/persona_cognition/unified_task_model.md
+
+class PersonaTask(Base):
+    """統合 Task: ペルソナの「やること」最小単位。
+
+    親バインド (parent_kind + note_id / track_id) で「候補」「Track 内小目標」
+    「未所属」を区別する。standalone Task のリッチフィールド (goal / status /
+    priority / steps / history) を踏襲する。
+    """
+    __tablename__ = "persona_task"
+    id = Column(String(36), primary_key=True)  # UUID hex
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    # persona 内連番 (task:N 参照子)。所属 (track/note/なし) を横断する単一の参照空間。
+    # **不変条件**: タスク行は物理削除しない (掃除は status での論理削除)。これにより
+    # MAX(short_id)+1 採番が単調増加し、番号は二度と再利用されない (Track の short_id と対称)。
+    short_id = Column(Integer, nullable=True)
+    # 親バインド (排他: note か track の一方、or どちらも NULL)
+    parent_kind = Column(String(16), nullable=True)  # 'note' | 'track' | None
+    note_id = Column(String(36), ForeignKey("note.note_id"), nullable=True)
+    track_id = Column(String(36), ForeignKey("action_track.track_id"), nullable=True)
+    # 本体フィールド (standalone 踏襲)
+    title = Column(String(255), nullable=False)
+    goal = Column(Text, nullable=False, default="")
+    summary = Column(Text, nullable=False, default="")
+    notes = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    # pending / active / paused / completed / cancelled
+    priority = Column(String(16), nullable=False, default="normal")
+    origin = Column(String(32), nullable=False, default="auto")
+    active_step_id = Column(String(36), nullable=True)  # references persona_task_step.id (no FK: 自己参照順序)
+    due_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    version = Column(Integer, nullable=False, default=0)
+    last_actor = Column(String(255), nullable=True)
+    __table_args__ = (
+        Index("idx_persona_task_persona_status", "persona_id", "status"),
+        Index("idx_persona_task_note", "note_id"),
+        Index("idx_persona_task_track", "track_id"),
+        Index("idx_persona_task_updated", "persona_id", "updated_at"),
+        Index("idx_persona_task_short", "persona_id", "short_id"),
+    )
+
+
+class PersonaTaskStep(Base):
+    """統合 Task のステップ (standalone task_steps 踏襲)。"""
+    __tablename__ = "persona_task_step"
+    id = Column(String(36), primary_key=True)  # UUID hex
+    task_id = Column(String(36), ForeignKey("persona_task.id", ondelete="CASCADE"), nullable=False)
+    position = Column(Integer, nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    version = Column(Integer, nullable=False, default=0)
+    __table_args__ = (
+        Index("idx_persona_task_step_task_pos", "task_id", "position"),
+    )
+
+
+class PersonaTaskHistory(Base):
+    """統合 Task の履歴 (standalone task_history 踏襲)。"""
+    __tablename__ = "persona_task_history"
+    id = Column(String(36), primary_key=True)  # UUID hex
+    task_id = Column(String(36), ForeignKey("persona_task.id", ondelete="CASCADE"), nullable=False)
+    step_id = Column(String(36), ForeignKey("persona_task_step.id", ondelete="CASCADE"), nullable=True)
+    event_type = Column(String(64), nullable=False)
+    payload = Column(Text, nullable=True)  # JSON
+    actor = Column(String(255), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    __table_args__ = (
+        Index("idx_persona_task_history_task_created", "task_id", "created_at"),
     )
 

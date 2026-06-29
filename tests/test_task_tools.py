@@ -1,16 +1,29 @@
-import json
+"""Task スペルの結合テスト (タスク一本化後 / unified_task_model.md §5)。
+
+タスクは統合 persona_task テーブル (main DB) に一本化され、task:N 参照で指す。
+スペル (task_add / task_done / task_update_step) は module レベルで
+``SessionLocal`` に束縛した manager singleton を持つため、テストは load 後の
+module 上で singleton を temp DB 版に差し替える ([[reference_test_infrastructure]]:
+動的ロードは patch.object 必須)。
+"""
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from database.models import ActionTrack, Base
+from saiverse.persona_task_manager import PARENT_TRACK, PersonaTaskManager
+from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
-from persona.tasks import TaskStorage
 from tools.context import persona_context
 
-task_change_active = load_builtin_tool("task_change_active").task_change_active
-task_close = load_builtin_tool("task_close").task_close
-task_request_creation = load_builtin_tool("task_request_creation").task_request_creation
-task_update_step = load_builtin_tool("task_update_step").task_update_step
+_mod_add = load_builtin_tool("task_add")
+_mod_done = load_builtin_tool("task_done")
+_mod_step = load_builtin_tool("task_update_step")
+_mod_decompose = load_builtin_tool("task_decompose")
 
 
 class TaskToolsTestCase(unittest.TestCase):
@@ -20,84 +33,93 @@ class TaskToolsTestCase(unittest.TestCase):
         self.persona_id = "tester"
         self.persona_dir = self.root / "personas" / self.persona_id
         self.persona_dir.mkdir(parents=True)
-        self.storage = TaskStorage(self.persona_id, base_dir=self.root)
-        # Seed two tasks
-        self.storage.create_task(
-            title="短編小説タスクA",
-            goal="短編小説Aを完成させる",
-            summary="短編小説Aの執筆",
-            notes=None,
-            steps=[
-                {"title": "プロット"},
-                {"title": "本文"},
-            ],
-            actor=self.persona_id,
-        )
-        self.storage.create_task(
-            title="短編小説タスクB",
-            goal="短編小説Bを完成させる",
-            summary="短編小説Bの執筆",
-            notes=None,
-            steps=[{"title": "プロットB"}],
-            actor=self.persona_id,
-        )
+
+        db_path = self.root / "saiverse_test.db"
+        self.engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        self.ptm = PersonaTaskManager(self.SessionLocal)
+        self.tm = TrackManager(session_factory=self.SessionLocal)
+
+        # load 済みスペル module の manager singleton を temp DB 版へ差し替え
+        _mod_add._track_manager = self.tm
+        _mod_done._task_manager = self.ptm
+        _mod_step._task_manager = self.ptm
+        _mod_decompose._task_manager = self.ptm
+
+        # 自律 Track を1本 (t:1 が解決できるように)
+        self.track_id = str(uuid.uuid4())
+        db = self.SessionLocal()
+        db.add(ActionTrack(
+            track_id=self.track_id, persona_id=self.persona_id, short_id=1,
+            track_type="autonomous", status="running",
+        ))
+        db.commit()
+        db.close()
 
     def tearDown(self) -> None:
-        self.storage.close()
+        self.engine.dispose()
         self.tmp.cleanup()
 
-    def test_task_change_active_and_update_flow(self) -> None:
+    def test_task_add_assigns_ref(self) -> None:
         with persona_context(self.persona_id, self.persona_dir):
-            msg, snippet, _ = task_change_active()
-            self.assertIn("Activated task", msg)
-            self.assertIsNotNone(snippet.history_snippet)
+            out = _mod_add.task_add(track_id="t:1", title="調査する")
+        self.assertIn("task:1", out)
+        tasks = self.ptm.list_tasks(self.persona_id, track_id=self.track_id)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["parent_kind"], PARENT_TRACK)
 
-            msg, snippet, _ = task_update_step(step_position=1, status="completed")
-            self.assertIn("Updated step 1", msg)
-            self.assertIsNotNone(snippet.history_snippet)
-
-        refreshed = TaskStorage(self.persona_id, base_dir=self.root)
-        try:
-            active_tasks = refreshed.list_tasks(statuses=["active"], limit=1, include_steps=True)
-            self.assertTrue(active_tasks)
-            active = active_tasks[0]
-            self.assertEqual(active.steps[0].status, "completed")
-        finally:
-            refreshed.close()
-
-    def test_task_close_auto_activates_next(self) -> None:
+    def test_task_done_by_ref(self) -> None:
         with persona_context(self.persona_id, self.persona_dir):
-            task_change_active()
-            msg, snippet, _ = task_close(status="completed", reason="done")
-            self.assertIn("Marked task", msg)
-            self.assertIsNotNone(snippet.history_snippet)
+            _mod_add.task_add(track_id="t:1", title="やること")
+            out = _mod_done.task_done(task_ref="task:1")
+        self.assertIn("タスク完了", out)
+        tasks = self.ptm.list_tasks(self.persona_id, track_id=self.track_id)
+        self.assertEqual(tasks[0]["status"], "completed")
 
-        refreshed = TaskStorage(self.persona_id, base_dir=self.root)
-        try:
-            active_tasks = refreshed.list_tasks(statuses=["active"], limit=1, include_steps=True)
-            self.assertTrue(active_tasks)
-            self.assertIn("タスクA", active_tasks[0].title)
-        finally:
-            refreshed.close()
-
-    def test_task_request_creation_logs_entry(self) -> None:
+    def test_task_update_step_by_ref(self) -> None:
+        # ステップ付きタスクを直接作る (decompose 相当)
+        task = self.ptm.create_task(
+            persona_id=self.persona_id, title="分解済みタスク",
+            parent_kind=PARENT_TRACK, track_id=self.track_id, auto_activate=False,
+            steps=[{"title": "下調べ"}, {"title": "実作業"}],
+        )
+        ref = task["task_ref"]
         with persona_context(self.persona_id, self.persona_dir):
-            msg, snippet, _ = task_request_creation(summary="新しい創作タスク", context="テーマは星空")
-            self.assertIn("Task creation request", msg)
-            self.assertIsNotNone(snippet.history_snippet)
+            msg, snippet, _ = _mod_step.task_update_step(
+                task_ref=ref, step_position=1, status="completed",
+            )
+        self.assertIn("Updated step 1", msg)
+        self.assertIsNotNone(snippet.history_snippet)
+        refreshed = self.ptm.get_task(task["id"], persona_id=self.persona_id)
+        self.assertEqual(refreshed["steps"][0]["status"], "completed")
+        # auto_advance: active_step が次 (step2) に進む
+        self.assertEqual(refreshed["active_step_id"], refreshed["steps"][1]["id"])
 
-        log_path = self.persona_dir / "task_requests.jsonl"
-        if log_path.exists():
-            entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["summary"], "新しい創作タスク")
-        else:
-            storage = TaskStorage(self.persona_id, base_dir=self.root)
-            try:
-                tasks = storage.list_tasks()
-                self.assertTrue(any(task.summary == "新しい創作タスク" for task in tasks))
-            finally:
-                storage.close()
+
+    def test_task_decompose_writes_steps(self) -> None:
+        # canonical 形式 (配列引数) のスペル行をパースして decompose を実行する
+        from sea.runtime_llm import _coerce_spell_args, _parse_spell_lines
+
+        with persona_context(self.persona_id, self.persona_dir):
+            self.ptm.create_task(
+                persona_id=self.persona_id, title="分解対象",
+                parent_kind=PARENT_TRACK, track_id=self.track_id, auto_activate=False,
+            )
+            line = (
+                "/spell name='task_decompose' args={\"task_ref\":\"task:1\","
+                "\"steps\":[{\"title\":\"下調べ\"},{\"title\":\"実作業\"},{\"title\":\"仕上げ\"}]}"
+            )
+            name, args, _meta, _raw = _parse_spell_lines(line)[0]
+            args = _coerce_spell_args(name, args)
+            self.assertEqual(len(args["steps"]), 3)  # 配列引数が canonical で解析される
+            out = _mod_decompose.task_decompose(**args)
+
+        self.assertIn("task:1", out)
+        tasks = self.ptm.list_tasks(self.persona_id, track_id=self.track_id)
+        self.assertEqual(len(tasks[0]["steps"]), 3)
+        # active_step は最初のステップ
+        self.assertEqual(tasks[0]["active_step_id"], tasks[0]["steps"][0]["id"])
 
 
 if __name__ == "__main__":

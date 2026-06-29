@@ -3,10 +3,17 @@
 import { useEffect, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { ArrowLeft, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { formatCost } from '@/lib/formatCost';
 import styles from './page.module.css';
+
+interface CostByCurrency {
+    currency: string;
+    total_cost: number;
+}
 
 interface UsageSummary {
     total_cost_usd: number;
+    costs_by_currency?: CostByCurrency[];
     total_input_tokens: number;
     total_output_tokens: number;
     call_count: number;
@@ -17,6 +24,7 @@ interface DailyUsage {
     model_id: string;
     model_display_name: string;
     cost_usd: number;
+    currency?: string;
     input_tokens: number;
     output_tokens: number;
     call_count: number;
@@ -36,6 +44,7 @@ interface CategoryUsage {
     category: string;
     category_name: string;
     total_cost_usd: number;
+    costs_by_currency?: CostByCurrency[];
     total_input_tokens: number;
     total_output_tokens: number;
     call_count: number;
@@ -146,9 +155,9 @@ export default function UsagePage() {
         };
     })();
 
-    const formatCurrency = (value: number) => {
-        if (value < 0.01) return `$${value.toFixed(4)}`;
-        return `$${value.toFixed(2)}`;
+    const formatCostsByCurrency = (costs?: CostByCurrency[]): string => {
+        if (!costs || costs.length === 0) return formatCost(0);
+        return costs.map(c => formatCost(c.total_cost, c.currency)).join(' + ');
     };
 
     const formatTokens = (value: number) => {
@@ -234,7 +243,7 @@ export default function UsagePage() {
                 <div className={styles.summaryCards}>
                     <div className={styles.card}>
                         <div className={styles.cardLabel}>合計コスト</div>
-                        <div className={styles.cardValue}>{formatCurrency(summary.total_cost_usd)}</div>
+                        <div className={styles.cardValue}>{formatCostsByCurrency(summary.costs_by_currency)}</div>
                     </div>
                     <div className={styles.card}>
                         <div className={styles.cardLabel}>入力トークン</div>
@@ -269,13 +278,13 @@ export default function UsagePage() {
                             />
                             <YAxis
                                 tick={{ fill: '#ccc', fontSize: 12 }}
-                                tickFormatter={(value) => `$${value.toFixed(2)}`}
+                                tickFormatter={(value) => formatCost(value)}
                             />
                             <Tooltip
                                 contentStyle={{ backgroundColor: '#2a2a2a', border: '1px solid #444' }}
                                 labelStyle={{ color: '#fff' }}
                                 formatter={(value: number, name: string) => [
-                                    formatCurrency(value),
+                                    formatCost(value),
                                     name,
                                 ]}
                             />
@@ -343,7 +352,7 @@ export default function UsagePage() {
                                 <div className={styles.categoryStats}>
                                     <div className={styles.categoryStat}>
                                         <span className={styles.statLabel}>コスト</span>
-                                        <span className={styles.statValue}>{formatCurrency(cat.total_cost_usd)}</span>
+                                        <span className={styles.statValue}>{formatCostsByCurrency(cat.costs_by_currency)}</span>
                                     </div>
                                     <div className={styles.categoryStat}>
                                         <span className={styles.statLabel}>呼び出し</span>

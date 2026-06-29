@@ -21,11 +21,13 @@ from _track_common import (
 )
 from saiverse.track_manager import TrackNotFoundError
 from database.session import SessionLocal
+from saiverse.persona_task_manager import PersonaTaskManager
 from saiverse.track_manager import TrackManager
 from tools.context import get_active_persona_id
 from tools.core import ToolResult, ToolSchema
 
 _track_manager = TrackManager(session_factory=SessionLocal)
+_task_manager = PersonaTaskManager(SessionLocal)
 
 
 def track_create(
@@ -37,6 +39,7 @@ def track_create(
     metadata: Optional[str] = None,
     activate: bool = False,
     entry_line_role: Optional[str] = None,
+    from_candidate: Optional[str] = None,
 ) -> Tuple[str, ToolResult, None]:
     """Create a new action track for the active persona.
 
@@ -94,6 +97,22 @@ def track_create(
             elif activate_result.track is not None:
                 final_status = activate_result.track.status
 
+    # 候補 Task からの昇格 (autonomous_desire.md §6): desire ノートの候補 Task を
+    # この Track へ張り替える (promote_to_track)。昇格した候補は note_id→None で
+    # 候補プールから自動的に消える。Track 作成は成功済みなので、昇格失敗しても
+    # Track は残し、エラーは戻り値に載せて次ターンで反応できるようにする。
+    promoted_ref: Optional[str] = None
+    promote_error: Optional[str] = None
+    if from_candidate:
+        try:
+            task_id = _task_manager.resolve_task_ref(persona_id, from_candidate)
+            _task_manager.promote_to_track(
+                task_id, track_id, persona_id=persona_id, actor=persona_id,
+            )
+            promoted_ref = from_candidate
+        except Exception as exc:
+            promote_error = f"{type(exc).__name__}: {exc}"
+
     snippet = ToolResult(
         history_snippet=json.dumps(
             {
@@ -105,6 +124,8 @@ def track_create(
                 "status": final_status,
                 "activate_queued": activate_queued,
                 "activate_error": activate_error,
+                "promoted_candidate": promoted_ref,
+                "promote_error": promote_error,
             },
             ensure_ascii=False,
         )
@@ -124,6 +145,10 @@ def track_create(
         message = f"Created and activated track '{label}' ({short_id_str}, running)."
     else:
         message = f"Created track '{label}' ({short_id_str}, unstarted)."
+    if promoted_ref:
+        message += f" 候補 {promoted_ref} をこの Track に昇格しました。"
+    elif promote_error:
+        message += f"（候補 {from_candidate} の昇格に失敗: {promote_error}）"
     return message, snippet, None
 
 
@@ -195,6 +220,17 @@ def schema() -> ToolSchema:
                         "so explicit override is only needed for unusual cases."
                     ),
                     "enum": ["main_line", "sub_line"],
+                },
+                "from_candidate": {
+                    "type": "string",
+                    "description": (
+                        "Optional: a desire-pool candidate task ref (e.g. 'task:3') to "
+                        "promote into this new Track. When set, that candidate is "
+                        "rebound from the desire note to this Track (it leaves the "
+                        "candidate pool and becomes this Track's sub-goal). Use this "
+                        "when you are turning one of your 'want to do' candidates into "
+                        "an actual Track."
+                    ),
                 },
             },
             "required": ["track_type"],

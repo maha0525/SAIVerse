@@ -12,7 +12,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 SAIVerse is a multi-agent AI system where autonomous AI personas (agents) inhabit a virtual world composed of Cities and Buildings. The system features:
 
-- Multiple LLM providers (OpenAI, Anthropic, Google Gemini, Ollama, llama.cpp) with automatic fallback
+- Multiple LLM providers (OpenAI, Anthropic, Google Gemini, Ollama, llama.cpp server) with automatic fallback
 - Persistent long-term memory using SAIMemory (SQLite)
 - Inter-city travel: personas can dispatch to other SAIVerse instances via database-mediated transactions
 - SEA (Self-Evolving Agent) framework: LangGraph-based playbook system for routing conversations and autonomous behavior
@@ -381,13 +381,11 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 
 ### LLM Integration (`llm_clients/`, `saiverse/llm_router.py`)
 - Factory pattern: `get_llm_client(model_name, config)` returns provider-specific client
-- Providers: OpenAI (`openai.py`), Anthropic (`anthropic.py`), Gemini (`gemini.py`), Ollama (`ollama.py`), llama.cpp (`llama_cpp.py`)
+- Providers: OpenAI (`openai.py`), Anthropic (`anthropic.py`), Gemini (`gemini.py`), Ollama (`ollama.py`)
 - Ollama auto-probes localhost and falls back to Gemini 2.0 Flash if unreachable
-- llama.cpp: Directly loads GGUF models without external servers (requires `llama-cpp-python`). Falls back to Gemini on load failure if `fallback_on_error: true`
+- llama.cpp server: Uses `llama_server.py` to auto-launch and manage llama.cpp server processes. Configured via `llama_server` field in model JSON (see `builtin_data/models/llama-cpp-server-template.json`)
 - `llm_router.py`: Uses Gemini 2.0 Flash to decide whether to call tools (returns JSON with call/tool/args)
 - Model configs in `models.json`: defines provider, context_length, image support, thinking_type/budget for Anthropic
-- For llama.cpp models: `model_path` (GGUF file path), `n_gpu_layers` (-1=all, 0=CPU only), `fallback_on_error` (default: true)
-- See `docs/llama_cpp_integration.md` for detailed setup instructions
 
 ### Tools (`tools/`)
 - **Registry**: `tools/__init__.py` exports `TOOL_REGISTRY` dict (function_name → schema + callable)

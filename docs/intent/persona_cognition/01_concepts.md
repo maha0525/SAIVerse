@@ -386,6 +386,8 @@ Track が異なっても、pulse_logs / messages / Chronicle / Memopedia は単�
 
 通常レイヤーの Playbook 内で「今切り替える」を判断させない。Playbook の簡便さを保つため、Track 切り替えは外部 (メタレイヤー) の責任。
 
+**再解釈 (2026-06-27, [`mode_spell_permissions.md`](mode_spell_permissions.md) §7)**: モード別スペル権限の導入により、本不変条件は「**自律作業モード (AUTONOMOUS) は自分で Track を切り替え/完了できない**」という具体ルールとして実装ゲートが enforcement を肩代わりする。Track 操作スペルは自律制御モード (META) と メインモード (CONVERSATION) のみ実行可。メインモードの Track 操作は「ユーザー駆動のライフサイクル」として独占の例外ではなく別系統と位置づける。
+
 ### 4. Track の永続化
 
 プロセス再起動を跨いで休止 Track は失われない。アクティブ・休止・忘却すべて DB で永続化する。

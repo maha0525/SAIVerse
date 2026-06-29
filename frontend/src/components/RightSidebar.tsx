@@ -18,6 +18,8 @@ import {
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
 import LifeView from './LifeView';
+import ModalOverlay from './common/ModalOverlay';
+import fixtureStyles from './FixtureModal.module.css';
 import MemoryModal from './MemoryModal';
 import ScheduleModal from './ScheduleModal';
 import TasksModal from './TasksModal';
@@ -627,61 +629,50 @@ function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => v
     const state = fixture.state_json ? JSON.parse(fixture.state_json) : null;
 
     return (
-        <div
-            style={{
-                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-            }}
-            onClick={onClose}
-        >
-            <div
-                style={{
-                    background: 'var(--bg-primary, #fff)', borderRadius: '8px',
-                    padding: '1.25rem', maxWidth: '480px', width: '90%', maxHeight: '80vh',
-                    overflow: 'auto',
-                }}
-                onClick={e => e.stopPropagation()}
-            >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                    <h3 style={{ margin: 0, fontSize: '1.1rem' }}>{fixture.name}</h3>
-                    <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.25rem' }}>
+        <ModalOverlay onClose={onClose} className={fixtureStyles.overlay}>
+            <div className={fixtureStyles.modal} onClick={e => e.stopPropagation()}>
+                <div className={fixtureStyles.header}>
+                    <h3 className={fixtureStyles.title}>{fixture.name}</h3>
+                    <button className={fixtureStyles.closeButton} onClick={onClose}>
                         <X size={18} />
                     </button>
                 </div>
-                {fixture.description && (
-                    <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', opacity: 0.7 }}>{fixture.description}</p>
-                )}
-                <div style={{ fontSize: '0.8rem', opacity: 0.5, marginBottom: '0.5rem' }}>ID: {fixture.id}</div>
-                {state && Object.keys(state).length > 0 ? (
-                    <div>
-                        <h4 style={{ margin: '0.75rem 0 0.5rem', fontSize: '0.95rem' }}>観測値</h4>
-                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-                            <thead>
-                                <tr style={{ borderBottom: '1px solid var(--border-color, #ddd)' }}>
-                                    <th style={{ textAlign: 'left', padding: '0.4rem 0.5rem' }}>名前</th>
-                                    <th style={{ textAlign: 'right', padding: '0.4rem 0.5rem' }}>値</th>
-                                    <th style={{ textAlign: 'right', padding: '0.4rem 0.5rem' }}>記録時刻</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {Object.entries(state).map(([key, entry]: [string, any]) => (
-                                    <tr key={key} style={{ borderBottom: '1px solid var(--border-color, #eee)' }}>
-                                        <td style={{ padding: '0.4rem 0.5rem' }}>{key}</td>
-                                        <td style={{ textAlign: 'right', padding: '0.4rem 0.5rem', fontFamily: 'monospace' }}>
-                                            {entry?.value_num != null ? entry.value_num : entry?.value_text || '—'}
-                                        </td>
-                                        <td style={{ textAlign: 'right', padding: '0.4rem 0.5rem', fontSize: '0.75rem', opacity: 0.6 }}>
-                                            {entry?.recorded_at ? new Date(entry.recorded_at).toLocaleString('ja-JP') : '—'}
-                                        </td>
+                <div className={fixtureStyles.content}>
+                    {fixture.description && (
+                        <p className={fixtureStyles.description}>{fixture.description}</p>
+                    )}
+                    <div className={fixtureStyles.fixtureId}>ID: {fixture.id}</div>
+                    {state && Object.keys(state).length > 0 ? (
+                        <div>
+                            <h4 className={fixtureStyles.metricsTitle}>観測値</h4>
+                            <table className={fixtureStyles.table}>
+                                <thead>
+                                    <tr>
+                                        <th>名前</th>
+                                        <th>値</th>
+                                        <th>記録時刻</th>
                                     </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                ) : (
-                    <div style={{ padding: '1rem 0', opacity: 0.5, textAlign: 'center' }}>観測データなし</div>
-                )}
+                                </thead>
+                                <tbody>
+                                    {Object.entries(state).map(([key, entry]: [string, any]) => (
+                                        <tr key={key}>
+                                            <td>{key}</td>
+                                            <td className={fixtureStyles.valueCell}>
+                                                {entry?.value_num != null ? entry.value_num : entry?.value_text || '—'}
+                                            </td>
+                                            <td className={fixtureStyles.timeCell}>
+                                                {entry?.recorded_at ? new Date(entry.recorded_at).toLocaleString('ja-JP') : '—'}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <div className={fixtureStyles.emptyState}>観測データなし</div>
+                    )}
+                </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

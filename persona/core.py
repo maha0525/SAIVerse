@@ -23,7 +23,7 @@ from persona.constants import (
     RECALL_SNIPPET_PULSE_MAX_CHARS,
 )
 from persona.history import initialise_pulse_state
-from persona.tasks import TaskStorage
+from persona.tasks import PersonaTaskStore
 from persona.mixins import (
     PersonaGenerationMixin,
     PersonaHistoryMixin,
@@ -69,6 +69,10 @@ class PersonaCore(
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         lightweight_model: Optional[str] = None,
+        vision_model: Optional[str] = None,
+        audio_model: Optional[str] = None,
+        video_model: Optional[str] = None,
+        memory_weave_model: Optional[str] = None,
         context_length: int = 120000,
         user_room_id: str = "user_room",
         provider: str = "ollama",
@@ -103,7 +107,9 @@ class PersonaCore(
         self.conscious_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "conscious_log.json"
         )
-        self.task_storage = TaskStorage(self.persona_id, base_dir=self.saiverse_home)
+        # Task は統合 persona_task テーブル (main DB) へ一本化された。PersonaTaskStore は
+        # 旧 TaskStorage 互換 API を持つアダプタ (unified_task_model.md §5 step 4b)。
+        self.task_storage = PersonaTaskStore(self.persona_id)
         self.building_memory_paths: Dict[str, Path] = {
             b_id: self.saiverse_home / "buildings" / b_id / "log.json"
             for b_id in self.buildings
@@ -152,6 +158,10 @@ class PersonaCore(
         self.create_persona_callback = create_persona_callback
         self.model = model
         self.lightweight_model = lightweight_model
+        self.vision_model = vision_model
+        self.audio_model = audio_model
+        self.video_model = video_model
+        self.memory_weave_model = memory_weave_model
         self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)

@@ -45,6 +45,10 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         system_prompt=details["SYSTEMPROMPT"] or "",
         default_model=details["DEFAULT_MODEL"],
         lightweight_model=details.get("LIGHTWEIGHT_MODEL"),
+        vision_model=details.get("VISION_MODEL"),
+        audio_model=details.get("AUDIO_MODEL"),
+        video_model=details.get("VIDEO_MODEL"),
+        memory_weave_model=details.get("MEMORY_WEAVE_MODEL"),
         activity_state=details["ACTIVITY_STATE"],
         chronicle_enabled=details.get("CHRONICLE_ENABLED", True),
         memory_weave_context=details.get("MEMORY_WEAVE_CONTEXT", True),
@@ -77,6 +81,10 @@ def update_persona_config(
     new_model = (req.default_model or None) if req.default_model is not None else current["DEFAULT_MODEL"]
     
     new_lightweight_model = (req.lightweight_model or None) if req.lightweight_model is not None else current.get("LIGHTWEIGHT_MODEL")
+    new_vision_model = (req.vision_model or None) if req.vision_model is not None else current.get("VISION_MODEL")
+    new_audio_model = (req.audio_model or None) if req.audio_model is not None else current.get("AUDIO_MODEL")
+    new_video_model = (req.video_model or None) if req.video_model is not None else current.get("VIDEO_MODEL")
+    new_memory_weave_model = (req.memory_weave_model or None) if req.memory_weave_model is not None else current.get("MEMORY_WEAVE_MODEL")
     new_state = req.activity_state if req.activity_state is not None else current["ACTIVITY_STATE"]
     new_avatar = req.avatar_path if req.avatar_path is not None else current.get("AVATAR_IMAGE")
     new_appearance = req.appearance_image_path if req.appearance_image_path is not None else current.get("APPEARANCE_IMAGE_PATH")
@@ -100,6 +108,10 @@ def update_persona_config(
         home_city_id=current["HOME_CITYID"],
         default_model=new_model,
         lightweight_model=new_lightweight_model,
+        vision_model=new_vision_model,
+        audio_model=new_audio_model,
+        video_model=new_video_model,
+        memory_weave_model=new_memory_weave_model,
         activity_state=new_state,
         avatar_path=new_avatar,
         avatar_upload=None,

@@ -21,6 +21,8 @@ interface MetaJudgmentConfig {
     // ライフビュー「作業のテンポ」(persona_activity_view.md §7)。
     // 本モーダルでは編集しないが、保存時に消さないよう保持が必要。
     autonomous_pulse_interval_seconds?: number | null;
+    // 開発者モード用デバッグ: true なら meta_judgment を毎回強制失敗させる。
+    force_fail?: boolean | null;
 }
 
 // 'default' = 設定なし (built-in default を使う)、'on'/'off' = 明示的な値
@@ -149,6 +151,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     // 自動発話間隔は「自律行動マネージャー」の interval 入力に統合済 (Phase 4-e)。
     // META_JUDGMENT_CONFIG.periodic_interval_minutes は autonomy API 経由で永続化される。
     const [metaKeepCacheAlive, setMetaKeepCacheAlive] = useState<TriState>('default');
+    // 開発者モード用デバッグ: meta_judgment を毎回強制失敗させる (① リカバリ検証用)。
+    const [metaForceFail, setMetaForceFail] = useState<boolean>(false);
     // ロード時の META_JUDGMENT_CONFIG 全体。update_ai は config を丸ごと置換するため、
     // 本モーダルが編集しないキー (periodic_interval_minutes /
     // autonomous_pulse_interval_seconds 等、autonomy / activity API が永続化したもの)
@@ -278,6 +282,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     mjc?.keep_cache_alive == null ? 'default' :
                         (mjc.keep_cache_alive ? 'on' : 'off')
                 );
+                setMetaForceFail(mjc?.force_fail === true);
                 setUserConvTimeoutMinutes(
                     data.user_conv_timeout_minutes != null
                         ? String(data.user_conv_timeout_minutes)
@@ -403,6 +408,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                         else delete obj.retry_backoff_seconds;
                         if (keepCache !== 'default') obj.keep_cache_alive = (keepCache === 'on');
                         else delete obj.keep_cache_alive;
+                        // 開発者モードデバッグ: ON のときだけ書く (OFF はキーごと落とす)。
+                        if (metaForceFail) obj.force_fail = true;
+                        else delete obj.force_fail;
                         return Object.keys(obj).length > 0 ? obj : null;
                     })(),
                     // 2026-05-09: 空文字列 = 既定値 (= 0 を送って NULL に倒す)、
@@ -814,6 +822,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                         (既定: {META_JUDGMENT_DEFAULTS.cache_threshold_ratio})
                                                     </span>
                                                 </div>
+                                                {developerMode && (
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                        <span style={{ minWidth: '160px', color: '#e8590c' }}>
+                                                            🛠 メタ判断を強制失敗
+                                                        </span>
+                                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={metaForceFail}
+                                                                onChange={(e) => setMetaForceFail(e.target.checked)}
+                                                            />
+                                                            <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                                                ON にすると毎回失敗させ、連続失敗→Idle 降格+通知を検証できます（検証後は必ず OFF に）
+                                                            </span>
+                                                        </label>
+                                                    </div>
+                                                )}
                                             </div>
                                             <div className={styles.description}>
                                                 メインモデルのキャッシュ TTL 残り割合が「キャッシュ閾値」を下回ると、メタ判断 Pulse を前倒しで発火します。Pulse が失敗した場合は「失敗時リトライ回数」の上限まで「リトライ待機秒数」を空けて再試行します。「キャッシュ維持」を OFF にすると TTL 接近時の前倒しを行わず、自律行動マネージャーの「間隔」ぴったりに走ります (24 時間間隔等の低頻度ペルソナ向け)。空欄の項目は既定値が適用されます。

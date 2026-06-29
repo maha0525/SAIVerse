@@ -88,7 +88,7 @@ def track_list(
     for t in tracks:
         last_dt = last_msg_times.get(t.track_id)
         short_id_str = f"t:{t.short_id}" if t.short_id is not None else None
-        tasks = json.loads(t.tasks_json) if t.tasks_json else []
+        tasks = _track_manager.get_tasks(t.track_id)
         tasks_done = sum(1 for tk in tasks if tk.get("done"))
         if tasks:
             task_lines = []

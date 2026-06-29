@@ -78,6 +78,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [updateCheckEnabled, setUpdateCheckEnabled] = useState(true);
     const [announcementsEnabled, setAnnouncementsEnabled] = useState(true);
 
+    // Image default quality
+    const [imageDefaultQuality, setImageDefaultQuality] = useState<'low' | 'medium' | 'high'>('high');
+
     // Collapsible sections
     const [envSectionOpen, setEnvSectionOpen] = useState(false);
 
@@ -149,6 +152,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadDeveloperModeState();
             loadUpdateCheckState();
             loadAnnouncementsState();
+            loadImageDefaultQuality();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -217,6 +221,33 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         setTheme(newTheme);
         localStorage.setItem('saiverse-theme', newTheme);
         window.dispatchEvent(new Event('theme-change'));
+    };
+
+    const loadImageDefaultQuality = async () => {
+        try {
+            const res = await fetch('/api/config/image-default-quality');
+            if (res.ok) {
+                const data = await res.json();
+                setImageDefaultQuality(data.quality);
+            }
+        } catch (e) {
+            console.error("Failed to load image default quality", e);
+        }
+    };
+
+    const changeImageDefaultQuality = async (q: 'low' | 'medium' | 'high') => {
+        try {
+            const res = await fetch('/api/config/image-default-quality', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ quality: q })
+            });
+            if (res.ok) {
+                setImageDefaultQuality(q);
+            }
+        } catch (e) {
+            console.error("Failed to set image default quality", e);
+        }
     };
 
     const loadGlobalAutoState = async () => {
@@ -590,6 +621,39 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     </div>
                                 </div>
 
+                                {/* Image Default Quality Selector */}
+                                <div className={styles.themeContainer}>
+                                    <div>
+                                        <div className={styles.themeLabel}>
+                                            <Layers size={18} />
+                                            画像生成デフォルト品質
+                                        </div>
+                                        <div className={styles.themeDescription}>
+                                            画像生成ツールでquality未指定時のデフォルト品質を設定します
+                                        </div>
+                                    </div>
+                                    <div className={styles.themeSelector}>
+                                        <button
+                                            className={`${styles.themeOption} ${imageDefaultQuality === 'low' ? styles.active : ''}`}
+                                            onClick={() => changeImageDefaultQuality('low')}
+                                        >
+                                            Low
+                                        </button>
+                                        <button
+                                            className={`${styles.themeOption} ${imageDefaultQuality === 'medium' ? styles.active : ''}`}
+                                            onClick={() => changeImageDefaultQuality('medium')}
+                                        >
+                                            Medium
+                                        </button>
+                                        <button
+                                            className={`${styles.themeOption} ${imageDefaultQuality === 'high' ? styles.active : ''}`}
+                                            onClick={() => changeImageDefaultQuality('high')}
+                                        >
+                                            High
+                                        </button>
+                                    </div>
+                                </div>
+
                                 {/* Global Auto Mode Toggle - only visible in developer mode */}
                                 {developerMode && (
                                     <div className={styles.toggleContainer}>
@@ -818,7 +882,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     {expandedModelRole === role && (
                                                         <div className={styles.roleDropdown}>
                                                             {modelsAvailable
-                                                                .filter(m => m.is_available && (role !== 'agentic_model' || m.supports_structured_output !== false))
+                                                                .filter(m => m.is_available)
                                                                 .map(model => (
                                                                     <div
                                                                         key={model.id}

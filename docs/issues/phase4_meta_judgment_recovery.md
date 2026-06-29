@@ -1,6 +1,6 @@
 # Issue: Phase 4 — メタ判断 Pulse の失敗時リカバリ
 
-**ステータス**: 🟡 進行中
+**ステータス**: ✅ 実装完了（実機検証待ち, 2026-06-27）
 **優先度**: medium
 **作成日**: 2026-05-08
 **関連**: [docs/intent/persona_cognition/README.md](../intent/persona_cognition/README.md) Phase 4 進捗表, `saiverse/meta_layer.py`, [addon_event_scheduler_integration.md](addon_event_scheduler_integration.md)
@@ -57,3 +57,4 @@ LLM が一時的に応答しなかったり、構造化出力を間違えたり�
   - **EventScheduler への集約** (新規実装)。ScheduleManager / AutonomyManager / internal_alert_poller / `_db_polling_loop` / `_sds_background_loop` のポーリング loop 群を全廃して push 駆動に統一。リアルタイム性をローカル LLM 用途まで考慮した秒精度に。タスク #8 で着手予定。
   - **メタ判断 Pulse 失敗時の統一挙動定義** (本 issue 起票時の中心トピック)。`META_JUDGMENT_CONFIG.max_retries` + `retry_backoff_seconds` に基づく。タスク #9。
   - 関連: addon (X 監視等) のポーリング統合は別 issue ([addon_event_scheduler_integration.md](addon_event_scheduler_integration.md)) に切り出し。Phase 4-e のスコープ外。
+- 2026-06-27: 実装完了。調査の結果、案 A (全例外 catch + `with lock:` での Lock 解放) と案 B (`max_retries` / `retry_backoff_seconds` リトライ) は既に実装済みだった。未実装だった**案 C** を追加: per-persona 連続失敗カウンタ + `META_JUDGMENT_CONFIG.max_consecutive_failures` (既定3)。閾値到達で `MetaLayer._handle_persistent_failure` が ACTIVITY_STATE を Idle に降格 + `add_building_event` で host 通知 (event_message タグ)。成功でカウンタリセット。テスト `tests/test_meta_judgment_recovery.py`。残: 実機検証。

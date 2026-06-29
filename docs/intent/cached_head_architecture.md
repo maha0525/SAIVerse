@@ -53,6 +53,15 @@ snapshot の値が live state から逸脱したとき (= 世界状態が変わ�
 
 pipeline は定期的に各 section の `capture(live)` を呼んで「もし今 snapshot を更新するならどうなるか」を見て、saved snapshot との diff から `diff_to_notifications` でラベルを得る。空 list が返れば通知不要 (= 内部実装の変動など見せる必要がないやつ)、何か返れば末尾に 1 メッセージとして注入する。
 
+### ⚠️ 新規 Section を context に出すには「2 つの関所」を通す (2026-06-29 追記)
+
+`register_default_sections` で registry に登録しただけでは、その Section は **capture と差分通知は走るが、context には一切描画されない**。実際に LLM へ送るには、登録に加えて以下 2 つに名前を通す必要がある:
+
+1. **`runtime_context.prepare_context` の `enabled_sections`** — render 対象の allowlist。`if reqs.system_prompt:` 等の固定セットに入れる ([[feedback_head_fixed_per_persona_model_no_gating]]: 用途で出し分けず固定追加)。
+2. **`integration._compose_messages` の `SYSTEM_PROMPT_SECTION_NAMES`** (または `MEMORY_WEAVE_SECTION_NAME` / `VISUAL_CONTEXT_SECTION_NAME` の役割マッピング) — composition 時にどの message へ畳むかの分類。
+
+どちらか一方でも漏れると「登録済み・capture 済み・差分通知だけ出る・本文は届かない」という静かな欠落になる。実際 `autonomy_modes` / `life_purpose` / `open_notes` がこの 2 つ目を漏らして長く描画されていなかった。新規 Section 追加時は **registry 登録 + 上記 2 関所** をセットで必ず確認する。
+
 ### ライン単位で snapshot を持つ
 
 `persona_cognition/01_concepts.md` の通り、メインライン / サブラインは別モデルで動き、独立した prompt cache を持つ。head snapshot もライン単位で持たないと整合が取れない。

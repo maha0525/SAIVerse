@@ -16,7 +16,7 @@
     {
       "id": "judge",
       "type": "llm",
-      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\nトリガー情報: {trigger_context}\n\n{situation_text}\n\n{recent_judgments}\n\n応答は monologue (内的独白) と decision (起動する Track) の 2 フィールドからなる構造化出力です。\ndecision は次のどちらかを選んでください:\n  - 既存の Pending Track を再開する場合: type='activate', track_id (提示された候補から選択)\n  - 新しい Track を始める場合: type='create', title (簡潔な題), track_type (autonomous), intent (やりたいことの要約)\nmonologue には判断に至る素直な思考を書いてください。",
+      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\nトリガー情報: {trigger_context}\n\n{situation_text}\n\n{recent_judgments}\n\n応答は monologue (内的独白) と decision (起動する Track) の 2 フィールドからなる構造化出力です。\ndecision は次のいずれかを選んでください:\n  - 既存の Pending Track を再開する場合: type='activate', track_id (提示された候補から選択)\n  - 「やりたいこと候補」を Track 化して取り組み始める場合: type='promote', candidate_ref (提示された task:N から選択), title (簡潔な題), intent (やりたいことの要約)\n  - 上記に当てはまらず新しい Track を始める場合: type='create', title (簡潔な題), track_type (autonomous), intent (やりたいことの要約)\n温めてきた「やりたいこと候補」があるなら、それを promote で具体的な Track に育てるのが自然です。\nmonologue には判断に至る素直な思考を書いてください。",
       "response_schema_source": "arg:response_schema",
       "output_key": "judgment",
       "memorize": null,
@@ -33,7 +33,9 @@
         "running_track_id": {"$literal": ""},
         "trigger_type": "trigger_type",
         "trigger_context": "trigger_context",
-        "track_at_judgment_id": "track_at_judgment_id"
+        "track_at_judgment_id": "track_at_judgment_id",
+        "situation_text": "situation_text",
+        "recent_judgments": "recent_judgments"
       },
       "next": null
     }

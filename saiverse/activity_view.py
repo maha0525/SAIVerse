@@ -107,7 +107,8 @@ _TOOL_PHRASES: Dict[str, Tuple[str, str, List[str]]] = {
 # 汎用ラベル (「〜を進めた」) に落とす。
 _HIDDEN_TOOLS = frozenset({
     "track_create", "track_pause", "track_activate", "track_complete",
-    "track_abort", "track_list", "track_task_add", "track_task_done",
+    "track_abort", "track_list", "task_add", "task_done",
+    "task_update_step", "task_decompose", "desire_add", "life_purpose_set",
     "track_parameter_set",
     "note_open", "note_close",
     "thread_switch", "meta_judgment_finalize", "forget_recalled",
@@ -201,6 +202,7 @@ _SKIP_PLAYBOOK_NAMES = frozenset({
     "track_autonomous", "track_user_conversation", "track_social", "track_external",
     "meta_judgment", "meta_judgment_alert", "meta_judgment_idle_empty",
     "meta_judgment_idle_pending", "meta_judgment_running",
+    "meta_judgment_life_purpose",
     "meta_exec_speak", "sub_speak", "sub_think_meta",
     "spell_args_decider", "meta_simple_speak",
 })
@@ -220,6 +222,8 @@ def _format_meta_judgment_result(
     for spell in spells_emitted:
         name = spell.get("name", "")
         args = spell.get("args", {})
+        if name == "life_purpose_set":
+            return "生きる目的を考えた"
         if name == "track_activate":
             tid = args.get("track_id", "")
             track = (track_resolver or {}).get(tid)
@@ -235,6 +239,11 @@ def _format_meta_judgment_result(
             return "次にすることを考えた → 別の作業に切り替えた"
         if name == "track_create":
             ttitle = args.get("title", "")
+            # 候補からの昇格 (from_candidate) は「温めてきたやりたいこと」が動き出した瞬間。
+            if args.get("from_candidate"):
+                if ttitle:
+                    return f"やりたかった「{_truncate(ttitle, 24)}」をついに始めることにした"
+                return "温めていたやりたいことを始めることにした"
             if ttitle:
                 return f"次にすることを考えた → 「{_truncate(ttitle, 24)}」を始めることにした"
             return "次にすることを考えた → 新しいことを始めることにした"

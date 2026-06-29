@@ -74,11 +74,17 @@ class MemoryWeaveSection:
 
         index_limit = self._resolve_memopedia_index_limit(manager, ctx.persona_id)
 
+        # metabolism anchor を渡して、track_chronicle の生メッセージダンプから
+        # 「履歴 (anchor 以降) に既に載っている分」を除外させる (重複トークン削減)。
+        history_mgr = getattr(persona, "history_manager", None)
+        anchor_id = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
+
         try:
             with persona_context(ctx.persona_id, persona_dir, manager):
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
                     memopedia_index_limit=index_limit,
+                    history_anchor_message_id=anchor_id,
                 )
         except Exception:
             LOGGER.warning(

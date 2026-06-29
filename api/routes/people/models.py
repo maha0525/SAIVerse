@@ -130,6 +130,9 @@ class MetaJudgmentConfig(BaseModel):
     # update_ai は META_JUDGMENT_CONFIG を丸ごと置換するため、ここに定義しないと
     # SettingsModal 保存時にキーが消える (persona_activity_view.md §7)。
     autonomous_pulse_interval_seconds: Optional[int] = None  # default 30
+    # 開発者モード用デバッグフラグ: True なら meta_judgment を毎回強制失敗させる
+    # (① リカバリの実機検証用)。UI は開発者モード限定で表示する。
+    force_fail: Optional[bool] = None  # default False
 
 
 class AIConfigResponse(BaseModel):
@@ -138,6 +141,10 @@ class AIConfigResponse(BaseModel):
     system_prompt: str
     default_model: Optional[str]
     lightweight_model: Optional[str] = None
+    vision_model: Optional[str] = None
+    audio_model: Optional[str] = None
+    video_model: Optional[str] = None
+    memory_weave_model: Optional[str] = None
     activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: bool = True
     memory_weave_context: bool = True
@@ -155,6 +162,10 @@ class UpdateAIConfigRequest(BaseModel):
     system_prompt: Optional[str] = None
     default_model: Optional[str] = None
     lightweight_model: Optional[str] = None
+    vision_model: Optional[str] = None
+    audio_model: Optional[str] = None
+    video_model: Optional[str] = None
+    memory_weave_model: Optional[str] = None
     activity_state: Optional[str] = None  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
@@ -353,6 +364,10 @@ class TaskRecordModel(BaseModel):
     active_step_id: Optional[str]
     updated_at: str
     steps: List[TaskStep]
+    # 統合 Task の所属 (unified_task_model.md): 'note'=候補 / 'track'=Track 小目標 / None=単独。
+    parent_kind: Optional[str] = None
+    task_ref: Optional[str] = None        # "task:N" (persona 内通し番号)
+    parent_label: Optional[str] = None    # UI 表示用: "候補" / "t:N {title}" / "単独"
 
 class CreateTaskRequest(BaseModel):
     title: str
@@ -458,6 +473,7 @@ class ChronicleCostEstimate(BaseModel):
     model_name: str
     is_free_tier: bool
     batch_size: int
+    currency: str = "USD"
 
 
 class GenerationJobStatus(BaseModel):

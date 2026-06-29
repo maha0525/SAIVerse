@@ -36,7 +36,16 @@ NOTE_TYPE_PERSON = "person"      # 関わる相手 (ペルソナ・ユーザー�
 NOTE_TYPE_PROJECT = "project"    # 期限のある取り組み
 NOTE_TYPE_VOCATION = "vocation"  # 恒久的な専門性・アイデンティティ
 
+# desire は「やりたいこと候補」の器 (autonomous_desire.md §5)。ペルソナ 1 枚の
+# 恒久 singleton で、system が ensure_desire_note() で生成する。ユーザー (ペルソナ)
+# が note_create スペルで乱造できないよう、ALL_NOTE_TYPES (= 作成可能型) には
+# 含めない。検証・一覧用の KNOWN_NOTE_TYPES にのみ含める。
+NOTE_TYPE_DESIRE = "desire"      # やりたいこと候補プール (Track 非依存・全 Track open)
+
+# ペルソナが note_create スペルで作れる型 (desire は含めない = system 専管)
 ALL_NOTE_TYPES = frozenset({NOTE_TYPE_PERSON, NOTE_TYPE_PROJECT, NOTE_TYPE_VOCATION})
+# 検証・一覧で受理する全ての型 (desire を含む)
+KNOWN_NOTE_TYPES = ALL_NOTE_TYPES | frozenset({NOTE_TYPE_DESIRE})
 
 
 class NoteError(Exception):
@@ -113,6 +122,47 @@ class NoteManager:
         finally:
             db.close()
 
+    def ensure_desire_note(self, persona_id: str) -> str:
+        """ペルソナの desire ノート (候補プール) を get-or-create する。
+
+        desire ノートは「やりたいこと候補」の恒久的な器で、ペルソナ 1 枚の
+        singleton (autonomous_desire.md §5)。既に在ればその note_id を返し、
+        無ければ新規作成して返す。ユーザー作成経路 (create / note_create スペル)
+        とは別経路 = system が自律行動初回などで確保する。
+
+        Returns:
+            note_id (UUID 文字列)
+        """
+        if not persona_id:
+            raise ValueError("persona_id is required")
+        db = self.SessionLocal()
+        try:
+            existing = (
+                db.query(Note)
+                .filter_by(persona_id=persona_id, note_type=NOTE_TYPE_DESIRE)
+                .order_by(Note.created_at.asc())
+                .first()
+            )
+            if existing is not None:
+                return existing.note_id
+            note_id = str(uuid.uuid4())
+            db.add(Note(
+                note_id=note_id,
+                persona_id=persona_id,
+                title="やりたいこと",
+                note_type=NOTE_TYPE_DESIRE,
+                description="自律行動の候補プール。ここに溜めた候補から Track が生まれる。",
+                is_active=True,
+            ))
+            db.commit()
+            logging.info("[note] ensured desire note %s persona=%s", note_id, persona_id)
+            return note_id
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def get(self, note_id: str) -> Note:
         db = self.SessionLocal()
         try:
@@ -130,7 +180,7 @@ class NoteManager:
         note_type: Optional[str] = None,
         include_inactive: bool = False,
     ) -> List[Note]:
-        if note_type is not None and note_type not in ALL_NOTE_TYPES:
+        if note_type is not None and note_type not in KNOWN_NOTE_TYPES:
             raise InvalidNoteTypeError(f"unknown note_type: {note_type!r}")
         db = self.SessionLocal()
         try:

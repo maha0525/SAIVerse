@@ -1,0 +1,186 @@
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+}
+
+.modal {
+    background: #1f2937;
+    color: #f3f4f6;
+    width: 90%;
+    max-width: 480px;
+    max-height: 80vh;
+    border-radius: 12px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid #374151;
+}
+
+.header {
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid #374151;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #111827;
+}
+
+.title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #9ca3af;
+    padding: 4px;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.closeButton:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.25rem;
+}
+
+.description {
+    margin: 0 0 0.75rem;
+    font-size: 0.85rem;
+    color: #9ca3af;
+}
+
+.fixtureId {
+    font-size: 0.8rem;
+    color: #6b7280;
+    margin-bottom: 0.75rem;
+}
+
+.metricsTitle {
+    margin: 0.75rem 0 0.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.table thead tr {
+    border-bottom: 1px solid #374151;
+}
+
+.table th {
+    padding: 0.4rem 0.5rem;
+    font-weight: 600;
+    color: #9ca3af;
+}
+
+.table th:first-child {
+    text-align: left;
+}
+
+.table th:not(:first-child) {
+    text-align: right;
+}
+
+.table tbody tr {
+    border-bottom: 1px solid #2d3748;
+}
+
+.table td {
+    padding: 0.4rem 0.5rem;
+}
+
+.table td:not(:first-child) {
+    text-align: right;
+}
+
+.valueCell {
+    font-family: monospace;
+    color: #60a5fa;
+}
+
+.timeCell {
+    font-size: 0.75rem;
+    color: #6b7280;
+}
+
+.emptyState {
+    padding: 1rem 0;
+    color: #6b7280;
+    text-align: center;
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .header {
+    background: #f1f5f9;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeButton:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .description {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .fixtureId {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .table thead tr {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .table th {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .table tbody tr {
+    border-bottom-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .valueCell {
+    color: #3b82f6;
+}
+
+:global([data-theme="light"]) .timeCell {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .emptyState {
+    color: #94a3b8;
+}

@@ -28,8 +28,9 @@ class ModelInfo(BaseModel):
     name: str
     provider: Optional[str] = None
     group: Optional[str] = None  # UI grouping label (falls back to provider)
-    input_price: Optional[float] = None   # USD per 1M input tokens
-    output_price: Optional[float] = None  # USD per 1M output tokens
+    input_price: Optional[float] = None
+    output_price: Optional[float] = None
+    currency: str = "USD"
     rate_limit: Optional[RateLimitInfo] = None
 
 class PlaybookParamInfo(BaseModel):
@@ -110,9 +111,10 @@ def get_models():
             "id": mid,
             "name": name,
             "provider": cfg.get("provider"),
-            "group": cfg.get("group") or cfg.get("provider"),
+            "group": cfg.get("group") or cfg.get("provider_ref") or cfg.get("provider"),
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
+            "currency": pricing.get("currency", "USD"),
             "rate_limit": rate_limit,
         })
     return result
@@ -717,6 +719,27 @@ def set_cache_settings(req: CacheConfigRequest, manager = Depends(get_manager)):
         "enabled": manager.state.cache_enabled,
         "ttl": manager.state.cache_ttl,
     }
+
+
+class ImageDefaultQualityRequest(BaseModel):
+    quality: str
+
+
+@router.get("/image-default-quality")
+def get_image_default_quality(manager=Depends(get_manager)):
+    """Get default image generation quality setting."""
+    return {"quality": manager.state.image_default_quality}
+
+
+@router.post("/image-default-quality")
+def set_image_default_quality(req: ImageDefaultQualityRequest, manager=Depends(get_manager)):
+    """Set default image generation quality and persist to .env."""
+    if req.quality not in ("low", "medium", "high"):
+        raise HTTPException(status_code=400, detail="Invalid quality. Must be 'low', 'medium', or 'high'")
+    manager.state.image_default_quality = req.quality
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_IMAGE_DEFAULT_QUALITY": req.quality})
+    return {"success": True, "quality": req.quality}
 
 
 class MaxHistoryMessagesRequest(BaseModel):

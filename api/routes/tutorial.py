@@ -279,16 +279,13 @@ def get_env_key_mapping():
 
 # --- Model Role Presets ---
 
-# The 6 model roles that can be auto-configured
 MODEL_ROLES = {
     "default_model": "SAIVERSE_DEFAULT_MODEL",
     "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
-    "agentic_model": "SAIVERSE_AGENTIC_MODEL",
     "memory_weave_model": "MEMORY_WEAVE_MODEL",
     "image_summary_model": "SAIVERSE_IMAGE_SUMMARY_MODEL",
     "audio_summary_model": "SAIVERSE_AUDIO_SUMMARY_MODEL",
     "video_summary_model": "SAIVERSE_VIDEO_SUMMARY_MODEL",
-    "task_creation_model": "SAIVERSE_TASK_CREATION_MODEL",
 }
 
 # Roles that fall back to a Gemini default when the active provider doesn't
@@ -308,10 +305,6 @@ MODEL_ROLE_DESCRIPTIONS = {
         "label": "軽量モデル",
         "description": "ルーティングやツール判断に使用する高速・安価なモデル",
     },
-    "agentic_model": {
-        "label": "エージェントモデル",
-        "description": "構造化出力を使うエージェントタスク用モデル",
-    },
     "memory_weave_model": {
         "label": "Memory Weaveモデル",
         "description": "クロニクル・メモペディアの生成に使用するモデル",
@@ -328,10 +321,6 @@ MODEL_ROLE_DESCRIPTIONS = {
         "label": "動画要約モデル",
         "description": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
     },
-    "task_creation_model": {
-        "label": "タスク生成モデル",
-        "description": "タスクの自動生成に使用するモデル",
-    },
 }
 
 # Provider presets: values are config keys (filename stems).
@@ -341,92 +330,74 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {
         "default_model": "gemini-3-flash-preview-paid",
         "lightweight_model": "gemini-3.1-flash-lite-preview-paid",
-        "agentic_model": "gemini-3.1-flash-lite-preview-paid",
         "memory_weave_model": "gemini-3.1-flash-lite-preview-paid",
         "image_summary_model": "gemini-3.1-flash-lite-preview-paid",
         "audio_summary_model": "gemini-3.1-flash-lite-preview-paid",
         "video_summary_model": "gemini-3.1-flash-lite-preview-paid",
-        "task_creation_model": "gemini-3-flash-preview-paid",
     },
     "gemini_free": {
         "default_model": "gemini-3-flash-preview",
         "lightweight_model": "gemini-3.1-flash-lite-preview",
-        "agentic_model": "gemini-3.1-flash-lite-preview",
         "memory_weave_model": "gemini-3.1-flash-lite-preview",
         "image_summary_model": "gemini-3.1-flash-lite-preview",
         "audio_summary_model": "gemini-3.1-flash-lite-preview",
         "video_summary_model": "gemini-3.1-flash-lite-preview",
-        "task_creation_model": "gemini-3-flash-preview",
     },
     "anthropic": {
         "default_model": "claude-sonnet-4-5",
         "lightweight_model": "claude-haiku-4-5",
-        "agentic_model": "claude-haiku-4-5",
         "memory_weave_model": "claude-haiku-4-5",
         "image_summary_model": "claude-haiku-4-5",
         "audio_summary_model": None,  # Anthropic は音声入力非対応 → Gemini fallback
         "video_summary_model": None,
-        "task_creation_model": "claude-haiku-4-5",
     },
     "openai": {
         "default_model": "gpt-4o-2024-11-20",
         "lightweight_model": "gpt-5.4-nano",
-        "agentic_model": "gpt-5.4-mini",
         "memory_weave_model": "gpt-5.4-mini",
         "image_summary_model": "gpt-5.4-nano",
         "audio_summary_model": None,  # OpenAI 音声対応モデルは別系統 → Gemini fallback
         "video_summary_model": None,
-        "task_creation_model": "gpt-5.4-mini",
     },
     "grok": {
         "default_model": "grok-4-1-fast-reasoning",
         "lightweight_model": "grok-4-1-fast-reasoning",
-        "agentic_model": "grok-4-1-fast-reasoning",
         "memory_weave_model": "grok-4-1-fast-reasoning",
         "image_summary_model": "grok-4-1-fast-reasoning",
         "audio_summary_model": None,
         "video_summary_model": None,
-        "task_creation_model": "grok-4-1-fast-reasoning",
     },
     "openrouter": {
         "default_model": "openrouter-kimi-k2.5",
         "lightweight_model": "openrouter-qwen3-next-80b-a3b-instruct",
-        "agentic_model": "openrouter-qwen3-next-80b-a3b-instruct",
         "memory_weave_model": "openrouter-qwen3-next-80b-a3b-instruct",
         "image_summary_model": "openrouter-kimi-k2.5",
         "audio_summary_model": None,
         "video_summary_model": None,
-        "task_creation_model": "openrouter-kimi-k2.5",
     },
     "openrouter_free": {
         "default_model": "openrouter-qwen3-coder-480b-a35b-free",
         "lightweight_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
-        "agentic_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
         "memory_weave_model": "openrouter-qwen3-next-80b-a3b-instruct-free",
         "image_summary_model": None,
         "audio_summary_model": None,
         "video_summary_model": None,
-        "task_creation_model": "openrouter-qwen3-coder-480b-a35b-free",
     },
     "nvidia": {
         "default_model": "nim-qwen3.5-397b-a17b-instruct",
         "lightweight_model": "nim-qwen3-next-80b-a3b-instruct",
-        "agentic_model": "nim-qwen3-next-80b-a3b-instruct",
         "memory_weave_model": "nim-qwen3-next-80b-a3b-instruct",
         "image_summary_model": "nim-kimi-k2.6",
         "audio_summary_model": None,
         "video_summary_model": None,
-        "task_creation_model": "nim-qwen3.5-397b-a17b-instruct",
     },
     "ollama": {
         "default_model": "ollama-qwen3-next-80b",
         "lightweight_model": "ollama-gpt-oss-20b",
-        "agentic_model": "ollama-gpt-oss-20b",
         "memory_weave_model": "ollama-qwen3-next-80b",
         "image_summary_model": None,
         "audio_summary_model": None,
         "video_summary_model": None,
-        "task_creation_model": "ollama-qwen3-next-80b",
     },
 }
 

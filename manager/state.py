@@ -13,6 +13,13 @@ def _default_developer_mode() -> bool:
     return os.environ.get("SAIVERSE_DEVELOPER_MODE", "").lower() in ("1", "true", "yes")
 
 
+def _default_image_quality() -> str:
+    val = os.environ.get("SAIVERSE_IMAGE_DEFAULT_QUALITY", "high").lower()
+    if val in ("low", "medium", "high"):
+        return val
+    return "high"
+
+
 @dataclass
 class CoreState:
     """Shared mutable state for runtime/admin services."""
@@ -77,3 +84,6 @@ class CoreState:
     # Cache settings for Anthropic prompt caching
     cache_enabled: bool = True  # Whether prompt caching is enabled
     cache_ttl: str = "5m"  # Cache TTL ("5m" or "1h" for Anthropic)
+
+    # Image generation defaults
+    image_default_quality: str = field(default_factory=_default_image_quality)

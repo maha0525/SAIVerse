@@ -1,0 +1,44 @@
+{
+  "model": "plamo-3.0-prime",
+  "system_prompt": "現在の使用モデルはPLaMo 3.0 Primeです。",
+  "display_name": "PLaMo 3.0 Prime",
+  "provider_ref": "plamo",
+  "context_length": 262144,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "supports_structured_output": false,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 0.7,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 1,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 20000,
+      "step": 1,
+      "default": 4096,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 60,
+    "output_per_1m_tokens": 250,
+    "currency": "JPY"
+  }
+}

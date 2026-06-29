@@ -24,6 +24,17 @@ interface TaskRecord {
     active_step_id: string | null;
     updated_at: string;
     steps: TaskStep[];
+    // 統合 Task の所属 (unified_task_model.md)。
+    parent_kind?: string | null;   // 'note'=候補 / 'track'=Track 小目標 / null=単独
+    task_ref?: string | null;      // "task:N"
+    parent_label?: string | null;  // "候補" / "t:N {title}" / "単独"
+}
+
+// 所属バッジの色 (候補=橙 / Track=青 / 単独=灰)。
+function parentBadgeColor(parentKind?: string | null): string {
+    if (parentKind === 'note') return '#e8590c';
+    if (parentKind === 'track') return '#1971c2';
+    return '#868e96';
 }
 
 interface HistoryEntry {
@@ -142,8 +153,22 @@ export default function TasksModal({ isOpen, onClose, personaId }: TasksModalPro
                                     onClick={() => { setSelectedTask(t); setView('details'); }}
                                 >
                                     <div className={styles.taskItemTitle}>{t.title}</div>
+                                    {t.parent_label && (
+                                        <div style={{ marginTop: 2 }}>
+                                            <span style={{
+                                                display: 'inline-block',
+                                                fontSize: '0.7em',
+                                                padding: '1px 6px',
+                                                borderRadius: 4,
+                                                color: '#fff',
+                                                background: parentBadgeColor(t.parent_kind),
+                                            }}>
+                                                {t.parent_label}
+                                            </span>
+                                        </div>
+                                    )}
                                     <div className={styles.taskItemMeta}>
-                                        <span>{t.status}</span>
+                                        <span>{t.task_ref ? `${t.task_ref} · ` : ''}{t.status}</span>
                                         <span>{new Date(t.updated_at).toLocaleDateString()}</span>
                                     </div>
                                 </div>
@@ -180,7 +205,16 @@ export default function TasksModal({ isOpen, onClose, personaId }: TasksModalPro
                                 <div className={styles.detailsHeader}>
                                     <div>
                                         <h1 className={styles.detailsTitle}>{selectedTask.title}</h1>
-                                        <div className={styles.detailsMeta}>
+                                        <div className={styles.detailsMeta} style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                            {selectedTask.task_ref && <span style={{ color: '#aaa' }}>{selectedTask.task_ref}</span>}
+                                            {selectedTask.parent_label && (
+                                                <span style={{
+                                                    fontSize: '0.75em', padding: '1px 6px', borderRadius: 4,
+                                                    color: '#fff', background: parentBadgeColor(selectedTask.parent_kind),
+                                                }}>
+                                                    {selectedTask.parent_label}
+                                                </span>
+                                            )}
                                             <span>Goal: {selectedTask.goal}</span>
                                         </div>
                                     </div>

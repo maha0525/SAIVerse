@@ -132,7 +132,7 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 **フィールド説明**:
 
 - **`id`**: プロバイダ一意識別子（ファイル名 stem と一致させる）
-- **`protocol`**: `openai_compat` / `ollama_compat` / `anthropic_native` / `gemini_native` / `xai_native` / `llama_cpp_native` / `openai_codex` / `nvidia_nim`。UI 作成可能なのは前2つのみ
+- **`protocol`**: `openai_compat` / `ollama_compat` / `anthropic_native` / `gemini_native` / `xai_native` / `openai_codex` / `nvidia_nim`。UI 作成可能なのは前2つのみ
 - **`base_url` / `api_key_env`**: 該当プロトコルが必要とする接続情報
 - **`default_*`**: モデル JSON 側で `request_kwargs` / `convert_system_to_user` 等が未指定の場合のフォールバック値
 - **`builtin`**: true なら UI から編集・削除不可（builtin_data 配下のものは自動的に true 扱い）
@@ -314,7 +314,6 @@ builtin_data/
 │   ├── gemini.json          ← protocol: gemini_native
 │   ├── openai.json          ← protocol: openai_compat (公式 OpenAI)
 │   ├── ollama.json          ← protocol: ollama_compat (localhost:11434)
-│   ├── llama_cpp.json       ← protocol: llama_cpp_native
 │   ├── nvidia_nim.json      ← protocol: nvidia_nim
 │   ├── xai.json             ← protocol: xai_native
 │   └── openai_codex.json    ← protocol: openai_codex

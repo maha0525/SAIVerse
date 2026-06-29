@@ -465,15 +465,23 @@ def _run_memopedia_generation(
         _update_memopedia_job(job_id, message="Initializing LLM client...")
         
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        from database.models import AI as AIModel
+        from database.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            _ai = _db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+            persona_mw_model = getattr(_ai, "MEMORY_WEAVE_MODEL", None) if _ai else None
+        finally:
+            _db.close()
         env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_to_use = model_name or env_model
-        
+        model_to_use = model_name or persona_mw_model or env_model
+
         resolved_model_id, model_config = find_model_config(model_to_use)
         if not resolved_model_id:
             _update_memopedia_job(job_id, status="failed", error=f"Model '{model_to_use}' not found")
             conn.close()
             return
-        
+
         provider = model_config.get("provider", "gemini")
         context_length = model_config.get("context_length", 128000)
         actual_model_id = model_config.get("model", resolved_model_id)
@@ -661,9 +669,16 @@ def _run_build_memopedia_from_logs(
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
         from saiverse.model_configs import find_model_config
         from llm_clients.factory import get_llm_client
-
+        from database.models import AI as AIModel
+        from database.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            _ai = _db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+            persona_mw_model = getattr(_ai, "MEMORY_WEAVE_MODEL", None) if _ai else None
+        finally:
+            _db.close()
         env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_to_use = model_name or env_model
+        model_to_use = model_name or persona_mw_model or env_model
 
         resolved_model_id, model_config = find_model_config(model_to_use)
         if not resolved_model_id:

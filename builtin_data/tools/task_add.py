@@ -1,4 +1,4 @@
-"""track_task_done: Track のタスクを完了にする。"""
+"""task_add: Track にタスクを追加する。"""
 from __future__ import annotations
 
 from database.session import SessionLocal
@@ -9,23 +9,20 @@ from tools.core import ToolSchema
 _track_manager = TrackManager(session_factory=SessionLocal)
 
 
-def track_task_done(track_id: str, index: int) -> str:
+def task_add(track_id: str, title: str) -> str:
     persona_id = get_active_persona_id()
     if not persona_id:
         return "Error: persona not active"
 
     resolved = _track_manager.resolve_track_ref(persona_id, track_id)
-    try:
-        _track_manager.complete_task(resolved, index)
-    except ValueError as e:
-        return f"Error: {e}"
-    return f"タスク完了: #{index}\n\n{_track_manager.format_task_list(resolved)}"
+    _track_manager.add_task(resolved, title)
+    return f"タスク追加: {title}\n\n{_track_manager.format_task_list(resolved)}"
 
 
 def schema() -> ToolSchema:
     return ToolSchema(
-        name="track_task_done",
-        description="Mark a task as done in a Track's task list.",
+        name="task_add",
+        description="Add a task to a Track's task list.",
         parameters={
             "type": "object",
             "properties": {
@@ -33,14 +30,14 @@ def schema() -> ToolSchema:
                     "type": "string",
                     "description": "Track ref (e.g. t:3)",
                 },
-                "index": {
-                    "type": "integer",
-                    "description": "Task index (0-based, shown in task list)",
+                "title": {
+                    "type": "string",
+                    "description": "Task title",
                 },
             },
-            "required": ["track_id", "index"],
+            "required": ["track_id", "title"],
         },
         result_type="string",
         spell=True,
-        spell_display_name="タスク完了",
+        spell_display_name="タスク追加",
     )

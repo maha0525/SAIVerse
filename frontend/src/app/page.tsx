@@ -12,6 +12,7 @@ import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
 import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
+import { formatCost } from '@/lib/formatCost';
 import RightSidebar from '@/components/RightSidebar';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
@@ -102,6 +103,7 @@ interface MessageLLMUsage {
     output_tokens: number;
     cached_tokens?: number;  // Tokens served from cache
     cost_usd?: number;
+    currency?: string;
 }
 
 interface MessageLLMUsageTotal {
@@ -111,6 +113,7 @@ interface MessageLLMUsageTotal {
     total_cost_usd: number;
     call_count: number;
     models_used: string[];
+    currency?: string;
 }
 
 interface Message {
@@ -1229,6 +1232,7 @@ export default function Home() {
                             if (filtered.length === 0) return prev;
                             return [...prev, ...filtered];
                         });
+                        setMoveTrigger(prev => prev + 1);
                     }
                 }
             } catch (err) {
@@ -2057,6 +2061,7 @@ export default function Home() {
             });
             await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
             isProcessingRef.current = false; // Allow polling AFTER sync completes
+            setMoveTrigger(prev => prev + 1);
             // Refresh RPD usage after message sent
             if (selectedModelRateLimit && selectedModel) {
                 fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
@@ -2657,7 +2662,7 @@ export default function Home() {
                                             // Show total usage when multiple LLM calls were made
                                             <span className={styles.llmUsageWrap}>
                                                 <span className={styles.llmUsage} onClick={(e) => { e.stopPropagation(); setUsageTooltipId(prev => prev === (msg.id || `msg-${idx}`) ? null : (msg.id || `msg-${idx}`)); }}>
-                                                    {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · ${msg.llm_usage_total.total_cost_usd.toFixed(4)}
+                                                    {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · {formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}
                                                 </span>
                                                 {usageTooltipId === (msg.id || `msg-${idx}`) && (
                                                     <div className={styles.usageTooltip}>
@@ -2665,7 +2670,7 @@ export default function Home() {
                                                         <div>LLM Calls: {msg.llm_usage_total.call_count}</div>
                                                         <div>Total Input: {msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens{msg.llm_usage_total.total_cached_tokens ? ` (${msg.llm_usage_total.total_cached_tokens.toLocaleString()} cached)` : ''}</div>
                                                         <div>Total Output: {msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens</div>
-                                                        <div>Total Cost: ${msg.llm_usage_total.total_cost_usd.toFixed(4)}</div>
+                                                        <div>Total Cost: {formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}</div>
                                                     </div>
                                                 )}
                                             </span>
@@ -2680,7 +2685,7 @@ export default function Home() {
                                                         <div>Model: {msg.llm_usage.model}</div>
                                                         <div>Input: {msg.llm_usage.input_tokens.toLocaleString()} tokens{msg.llm_usage.cached_tokens ? ` (${msg.llm_usage.cached_tokens.toLocaleString()} cached)` : ''}</div>
                                                         <div>Output: {msg.llm_usage.output_tokens.toLocaleString()} tokens</div>
-                                                        <div>Cost: ${(msg.llm_usage.cost_usd || 0).toFixed(4)}</div>
+                                                        <div>Cost: {formatCost(msg.llm_usage.cost_usd || 0, msg.llm_usage.currency)}</div>
                                                     </div>
                                                 )}
                                             </span>

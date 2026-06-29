@@ -58,8 +58,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # 詳細: docs/intent/cached_head_architecture.md
     enabled_sections: set[str] = set()
     if reqs.system_prompt:
+        # head は (persona, model) で固定 = キャッシュ共有の土台。用途 (ライン /
+        # playbook) で出し分けると同一モデルで head が変わり prefix キャッシュが
+        # 壊れる。恒常セクションはここに固定で並べ、条件分岐させない。
         enabled_sections.update({
             "common_prompt", "persona_self", "building", "spell_list",
+            "autonomy_modes", "life_purpose", "open_notes",
         })
         if reqs.available_playbooks:
             enabled_sections.add("available_playbooks")
@@ -417,84 +421,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             LOGGER.debug("[sea][prepare-context] Failed to build realtime context: %s", exc)
 
     # ---- Token budget check ----
-    try:
-        from saiverse.token_estimator import estimate_messages_tokens
-        from saiverse.model_configs import get_context_length, get_model_provider
-
-        persona_model = getattr(persona, "model", None)
-        if persona_model:
-            provider = get_model_provider(persona_model)
-            context_length = get_context_length(persona_model)
-            estimated_tokens = estimate_messages_tokens(messages, provider)
-            LOGGER.debug(
-                "[sea][prepare-context] Token budget: estimated=%d, limit=%d (model=%s)",
-                estimated_tokens, context_length, persona_model,
-            )
-
-            if estimated_tokens > context_length:
-                # Over budget: trim history messages from oldest until within budget
-                # Find indices of history messages (not system, not visual context, not realtime)
-                history_indices = []
-                for i, msg in enumerate(messages):
-                    meta = msg.get("metadata") or {}
-                    if (
-                        msg.get("role") != "system"
-                        and not meta.get("__visual_context__")
-                        and not meta.get("__realtime_context__")
-                        and not meta.get("__memory_weave_context__")
-                        and not meta.get("__recalled_memory__")
-                    ):
-                        history_indices.append(i)
-
-                original_count = len(history_indices)
-                # Remove oldest history messages until under budget
-                while history_indices and estimated_tokens > context_length:
-                    remove_idx = history_indices.pop(0)
-                    removed_msg = messages[remove_idx]
-                    removed_tokens = estimate_messages_tokens([removed_msg], provider)
-                    estimated_tokens -= removed_tokens
-                    messages[remove_idx] = None  # mark for removal
-
-                # Clean up None entries
-                messages = [m for m in messages if m is not None]
-                remaining_count = len(history_indices)
-
-                warning_msg = {
-                    "type": "warning",
-                    "warning_code": "context_auto_trimmed",
-                    "content": (
-                        f"コンテキスト超過のため、履歴を直近{original_count}件→{remaining_count}件に"
-                        f"自動削減しました（推定: {estimated_tokens:,} / {context_length:,}トークン）。"
-                        f"ChatOptionsでメッセージ数上限を下げてください。"
-                    ),
-                }
-                LOGGER.warning(
-                    "[sea][prepare-context] Context auto-trimmed: %d -> %d messages (est=%d, limit=%d)",
-                    original_count, remaining_count, estimated_tokens, context_length,
-                )
-                if warnings is not None:
-                    warnings.append(warning_msg)
-
-            elif estimated_tokens > context_length * 0.85:
-                # Approaching limit: warn but continue
-                warning_msg = {
-                    "type": "warning",
-                    "warning_code": "context_approaching_limit",
-                    "content": (
-                        f"コンテキスト使用量がモデルの上限に近づいています"
-                        f"（推定: {estimated_tokens:,} / {context_length:,}トークン）。"
-                        f"ChatOptionsでメッセージ数上限を下げることを検討してください。"
-                    ),
-                }
-                LOGGER.warning(
-                    "[sea][prepare-context] Context approaching limit: est=%d, limit=%d (%.0f%%)",
-                    estimated_tokens, context_length, estimated_tokens / context_length * 100,
-                )
-                if warnings is not None:
-                    warnings.append(warning_msg)
-    except Exception as exc:
-        LOGGER.debug("[sea][prepare-context] Token budget check failed: %s", exc)
-
     return messages
 
 

@@ -512,7 +512,7 @@ def generate_image(
     prompt: str,
     model: ModelType = "nano_banana_2",
     aspect_ratio: AspectRatioType = "1:1",
-    quality: QualityType = "high",
+    quality: QualityType = "auto",
     size: SizeType = "auto",
     title: Optional[str] = None,
     input_images: Optional[List[str]] = None,
@@ -527,7 +527,8 @@ def generate_image(
             - gpt_image_1_5: State of the art quality (OpenAI GPT Image 1.5)
             - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
-        quality: Image quality level ("low", "medium", "high", "auto")
+        quality: Image quality level ("low", "medium", "high", "auto").
+            "auto" uses the global default quality setting.
         size: Output image size in pixels (gpt_image_* only). "auto" uses
             aspect_ratio + quality to pick a size. Specific values like
             "2048x2048" override aspect_ratio. Ignored for non-OpenAI models.
@@ -549,8 +550,12 @@ def generate_image(
     # Normalize empty strings to defaults
     if not aspect_ratio:
         aspect_ratio = "1:1"
-    if not quality:
-        quality = "high"
+    if not quality or quality == "auto":
+        manager = get_active_manager()
+        if manager:
+            quality = manager.state.image_default_quality
+        else:
+            quality = os.getenv("SAIVERSE_IMAGE_DEFAULT_QUALITY", "high")
     if not model:
         model = "nano_banana_2"
     if not size:
@@ -769,8 +774,8 @@ def schema() -> ToolSchema:
                 "quality": {
                     "type": "string",
                     "enum": ["low", "medium", "high", "auto"],
-                    "description": "Image quality level",
-                    "default": "high"
+                    "description": "Image quality level. 'auto' uses the global default quality setting.",
+                    "default": "auto"
                 },
                 "size": {
                     "type": "string",

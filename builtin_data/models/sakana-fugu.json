@@ -1,0 +1,31 @@
+{
+  "model": "fugu",
+  "system_prompt": "現在の使用モデルはSakana AI Fuguです。",
+  "display_name": "Sakana Fugu",
+  "provider_ref": "sakana",
+  "context_length": 1000000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 20,
+  "supports_images": true,
+  "supports_structured_output": false,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 0.7,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 4096,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}

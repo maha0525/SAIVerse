@@ -420,6 +420,14 @@ def main():
     except Exception:
         logging.warning("MCP initialization failed (non-fatal)", exc_info=True)
 
+    try:
+        from saiverse.composite_actions import register_all_addon_action_spells
+        _action_count = register_all_addon_action_spells()
+        if _action_count:
+            logging.info("Composite actions: registered %d action spell(s)", _action_count)
+    except Exception:
+        logging.warning("Composite actions initialization failed (non-fatal)", exc_info=True)
+
     api_server_process = cleanup_and_start_server_with_args(
         manager.api_port,
         Path(__file__).parent / "database" / "api_server.py",
