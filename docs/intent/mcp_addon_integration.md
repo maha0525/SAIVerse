@@ -51,6 +51,8 @@ MCPサーバーに env 経由でAPIキーを渡す場合、現状の選択肢は
 
 ペルソナ（およびLLM）は通常、`{server_name}__{tool_name}` という短い形でツールを呼ぶ。per_persona スコープかどうか、どのプロセスが実体かをLLMが意識する必要はない。SAIVerseが実行時に適切なインスタンスへ振り分ける。
 
+名前付きインスタンス（設計 G）の場合、同名ツールが複数インスタンスに並ぶため本体だけでは一意に振り分けられない。この場合は呼び出し側 addon の native wrapper が現在の実行文脈（例: ペルソナが居る Building）から対象インスタンスを解決する。本不変条件の達成手段は「global / per_persona は本体が文脈解決」「名前付きインスタンスは addon wrapper が解決」と分担するが、いずれの場合もペルソナがインスタンスを意識しない点は共通して守る。
+
 ## 設計
 
 ### A. per_persona スコープの MCP サーバー管理
@@ -153,6 +155,7 @@ instance: saiverse-elyth-addon__elyth:persona:air_city_a
 | `${VAR}` | OS環境変数 | 既存互換（残す） |
 | `${addon.<addon_name>.<key>}` | `AddonConfig` (グローバル) | アドオン全体で共通の設定 |
 | `${persona.addon.<addon_name>.<key>}` | `AddonPersonaConfig` (ペルソナ固有) → フォールバックで `AddonConfig` | ペルソナごとに異なる値（API key等） |
+| `${instance.<key>}` | 名前付きインスタンス起動時に addon が渡す per-instance context（設計 G） | 同一 server 定義から複数インスタンスを立てる際の個別値（token / port 等） |
 
 #### 解決タイミング
 
@@ -221,6 +224,46 @@ MCP管理セクションの表示・操作：
 #### 失敗時のインスタンス状態
 
 起動失敗したインスタンスは `failed` 状態として記録し、UIに表示する。次回tool呼び出しで再試行はする（ユーザーが設定修正した直後に自動復旧できる）が、短時間の連続失敗ではバックオフを入れる（連続呼び出しで子プロセスをフラッピングさせない）。
+
+### G. 名前付きインスタンス（同一 server 定義からの複数動的起動）
+
+#### 動機
+
+これまで instance_key の scope_key は `global` / `persona:{id}` の 2 値で、1 つの server 定義からは（per_persona でも）「ペルソナ 1 人につき 1 インスタンス」しか立たなかった。だが「**同一 server 定義を設定違いで複数同時に立てたい**」需要がある。最初の駆動ユースケースは saiverse-stackchan-addon が複数の物理機体それぞれに gateway subprocess を立てるケース（各 gateway は別ポート・別 token で listen。詳細は `stackchan_vessel.md` 設計 K）。これは Stack-chan 固有ではなく、「同一 MCP server を別エンドポイント / 別認証で N 個」という汎用パターンとして本体に置く。
+
+#### scope_key への instance 次元追加
+
+設計 B の scope_key に第 3 の型を足す:
+
+```
+scope_key = "global"
+          = "persona:{persona_id}"
+          = "instance:{instance_id}"   ← 新規（名前付きインスタンス）
+```
+
+`instance:{instance_id}` は「同一 `qualified_server_name` から、`instance_id` で区別される複数の独立 subprocess」を表す。`instance_id` の意味（vessel_id 等）は宣言側 addon が決め、本体は不透明な識別子として扱う。具体例: `saiverse-stackchan-addon__stackchan:instance:<vessel_uuid>`。
+
+#### per-instance config context
+
+各インスタンスは別々の env（token / port 等）で起動する必要がある。設計 C の参照構文に `${instance.<key>}` を足し、名前付きインスタンス起動時に addon が渡す per-instance context dict から解決する。既存の `resolve_config_placeholders` が persona context で `${persona.addon.x.y}` を解決する仕組みを、instance context に拡張する形（`_start_instance` が context を受け取り、解決に渡す）。
+
+例: stackchan の gateway インスタンスは `mcp_servers.json` の env に `${instance.master_token}` / `${instance.ws_port}` / `${instance.capture_port}` を書き、addon が vessel ごとの値を context で渡す。
+
+#### 動的 register / start / stop
+
+global / per_persona は config source（`mcp_servers.json`）を起点に起動するが、名前付きインスタンスは **実行時に外部 source（addon が持つ DB 等）から動的に登録・起動・停止**する。本体 MCP client に口を足す:
+
+- `register_instance(qualified_server_name, instance_id, context)` — per-instance context を添えて登録し、起動する
+- `stop_instance(instance_key)` — 停止（既存 `manual_stop_instance` を流用）
+- `_start_instance` を per-instance context を受け取れるよう拡張
+
+addon は自分のライフサイクル（例: vessel ペアリング追加 / 削除、アプリ起動時の全件ロード）でこれらを呼ぶ。refcount は addon referrer タグで管理（既存機構そのまま）。
+
+**静的宣言との関係**: 名前付きインスタンスは `mcp_servers.json` に「テンプレート」として 1 つの server 定義を書き（`${instance.*}` プレースホルダ入り）、実体は動的 register で N 個立てる。「機体数ぶんのエントリを静的手書き」はしない（駆動ユースケース側の要件、`stackchan_vessel.md` K-2）。
+
+#### ツール名前空間と不変条件 #6 の達成
+
+名前付きインスタンスのツールは instance_key ごとに登録されるため、LLM から見ると複数インスタンスで同名ツールが並ぶ。これを単一論理名に集約してペルソナにインスタンス差を見せないのは **呼び出し側 addon の native wrapper の責務**（本体は instance ごとの素の名前空間を提供するに留める）。不変条件 #6 の達成手段の分担はその不変条件本文に記載した通り。
 
 ## 設計判断の理由
 

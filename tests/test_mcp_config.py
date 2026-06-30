@@ -8,7 +8,11 @@ import uuid
 
 from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, register_external_tool, unregister_external_tool
 from tools.core import ToolSchema
-from tools.mcp_client import _normalize_spell_config
+from tools.mcp_client import (
+    MCPClientManager,
+    _make_instance_key,
+    _normalize_spell_config,
+)
 from tools.mcp_config import (
     _resolve_placeholder,
     load_mcp_configs,
@@ -206,6 +210,69 @@ class MCPConfigTestCase(unittest.TestCase):
             os.environ.pop("MCP_DEFINITELY_UNSET_VAR_XYZ", None)
             resolved = resolve_config_placeholders(raw)
         self.assertEqual(resolved["env"]["X"], "${env.MCP_DEFINITELY_UNSET_VAR_XYZ}")
+
+    # -- Named instances (設計 G) ---------------------------------------
+
+    def test_resolve_placeholder_instance_context(self) -> None:
+        ctx = {"ws_port": "8765", "master_token": "tok-abc"}
+        self.assertEqual(
+            _resolve_placeholder("instance.ws_port", instance_context=ctx), "8765"
+        )
+        self.assertEqual(
+            _resolve_placeholder("instance.master_token", instance_context=ctx),
+            "tok-abc",
+        )
+
+    def test_resolve_placeholder_instance_requires_context(self) -> None:
+        # Without instance context, an ${instance.*} placeholder stays unresolved.
+        self.assertIsNone(_resolve_placeholder("instance.ws_port"))
+
+    def test_resolve_placeholder_instance_missing_key_returns_none(self) -> None:
+        self.assertIsNone(
+            _resolve_placeholder("instance.nope", instance_context={"ws_port": "1"})
+        )
+
+    def test_resolve_config_placeholders_instance_context(self) -> None:
+        raw = {
+            "env": {
+                "STACKCHAN_TOKEN": "${instance.master_token}",
+                "WS_PORT": "${instance.ws_port}",
+                "VISION_HOST": "${runtime.lan_ip}",
+            },
+        }
+        with mock.patch(
+            "tools.mcp_config._resolve_runtime", return_value="192.168.0.10"
+        ):
+            resolved = resolve_config_placeholders(
+                raw,
+                instance_context={"master_token": "tok-xyz", "ws_port": "8775"},
+            )
+        self.assertEqual(resolved["env"]["STACKCHAN_TOKEN"], "tok-xyz")
+        self.assertEqual(resolved["env"]["WS_PORT"], "8775")
+        self.assertEqual(resolved["env"]["VISION_HOST"], "192.168.0.10")
+
+    def test_make_instance_key_scopes(self) -> None:
+        # backward compat
+        self.assertEqual(_make_instance_key("s"), "s:global")
+        self.assertEqual(_make_instance_key("s", persona_id="p"), "s:persona:p")
+        # named instance
+        self.assertEqual(
+            _make_instance_key("addon__stackchan", instance_id="vessel1"),
+            "addon__stackchan:instance:vessel1",
+        )
+        # instance_id takes precedence over persona_id
+        self.assertEqual(
+            _make_instance_key("s", persona_id="p", instance_id="v"), "s:instance:v"
+        )
+
+    def test_qualified_from_instance_key_named_instance(self) -> None:
+        q = MCPClientManager._qualified_from_instance_key
+        self.assertEqual(
+            q("addon__stackchan:instance:vessel1"), "addon__stackchan"
+        )
+        self.assertEqual(q("foo:global"), "foo")
+        self.assertEqual(q("foo:persona:air_city_a"), "foo")
+        self.assertIsNone(q("nocolon"))
 
     def test_normalize_spell_config_supports_multiple_shapes(self) -> None:
         self.assertEqual(

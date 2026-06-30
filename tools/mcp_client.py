@@ -560,12 +560,23 @@ class MCPServerConnection:
         self._ready_future = None
 
 
-def _make_instance_key(qualified_server_name: str, persona_id: Optional[str]) -> str:
+def _make_instance_key(
+    qualified_server_name: str,
+    persona_id: Optional[str] = None,
+    instance_id: Optional[str] = None,
+) -> str:
     """Build the internal instance key.
 
-    - Global scope: ``"<qualified_name>:global"``
-    - Per-persona : ``"<qualified_name>:persona:<persona_id>"``
+    - Global scope   : ``"<qualified_name>:global"``
+    - Per-persona    : ``"<qualified_name>:persona:<persona_id>"``
+    - Named instance : ``"<qualified_name>:instance:<instance_id>"``
+      (設計 G, docs/intent/mcp_addon_integration.md — 同一 server 定義から
+      設定違いで複数インスタンスを動的起動する場合に使う)
+
+    ``instance_id`` takes precedence over ``persona_id`` when both are given.
     """
+    if instance_id is not None:
+        return f"{qualified_server_name}:instance:{instance_id}"
     if persona_id is None:
         return f"{qualified_server_name}:global"
     return f"{qualified_server_name}:persona:{persona_id}"
@@ -601,6 +612,11 @@ class MCPClientManager:
         self._refs: Dict[str, Set[str]] = {}
         self._server_meta: Dict[str, Dict[str, Any]] = {}
         self._registered_tools: Dict[str, Dict[str, Any]] = {}
+        # instance_key -> per-named-instance config context (token/port/...),
+        # kept so reconnect / backoff-retry can re-resolve ${instance.*} without
+        # the caller re-supplying it. Only populated for ":instance:" keys.
+        # See docs/intent/mcp_addon_integration.md 設計 G.
+        self._instance_contexts: Dict[str, Dict[str, str]] = {}
         # instance_key -> failure record with backoff deadline
         self._failed_instances: Dict[str, Dict[str, Any]] = {}
         # qualified_name -> subscribers waiting for this server to become ready
@@ -644,6 +660,18 @@ class MCPClientManager:
                 # Run one-shot tool discovery so the LLM can see the tools;
                 # actual per-persona instances start lazily on first call.
                 await self._discover_per_persona_tools(qualified_name)
+            elif scope == "instance_template":
+                # A template for named instances (設計 G): do NOT auto-start.
+                # The meta is registered above; an addon spawns concrete
+                # instances on demand via ``register_instance`` (e.g.
+                # one gateway per vessel). Tools are reached through the
+                # instance connection (``conn.call_tool``) directly, so no
+                # global tool discovery is performed here.
+                LOGGER.info(
+                    "MCP: server '%s' is an instance_template; deferring start "
+                    "to dynamic register_instance() calls",
+                    qualified_name,
+                )
             else:
                 LOGGER.warning(
                     "MCP server '%s' has unknown scope '%s'; treating as global",
@@ -674,6 +702,76 @@ class MCPClientManager:
         self._add_reference(instance_key, referrer)
         self._fire_server_ready(qualified_name)
         return instance_key
+
+    async def register_instance(
+        self,
+        qualified_server_name: str,
+        instance_id: str,
+        context: Dict[str, str],
+    ) -> Optional[str]:
+        """Dynamically start a **named instance** of an already-loaded server
+        definition, injecting per-instance ``${instance.*}`` values.
+
+        Used when an addon wants several independent subprocesses from the
+        same server template — e.g. saiverse-stackchan-addon spawning one
+        gateway per physical vessel, each on its own port/token (設計 G,
+        docs/intent/mcp_addon_integration.md; driving use case in
+        docs/intent/stackchan_vessel.md 設計 K).
+
+        The template must already be in ``_server_meta`` (declared in some
+        ``mcp_servers.json`` and seen at ``start_all``). ``context`` is stored
+        so reconnect / backoff-retry can re-resolve without the caller
+        re-supplying it. Idempotent: registering an already-running instance
+        refreshes its context and keeps it alive.
+
+        Returns the instance_key on success, ``None`` on start failure.
+        """
+        meta = self._server_meta.get(qualified_server_name)
+        if meta is None:
+            raise ValueError(
+                f"Unknown MCP server '{qualified_server_name}'; named instances "
+                "require a server template declared in mcp_servers.json"
+            )
+
+        instance_key = _make_instance_key(
+            qualified_server_name, instance_id=instance_id
+        )
+        referrer = _referrer_from_meta(
+            meta.get("addon_name"), meta.get("source_path")
+        )
+        self._instance_contexts[instance_key] = dict(context)
+
+        existing = self._connections.get(instance_key)
+        if existing is not None and existing.connected:
+            # Already running — just refresh context + ensure a reference.
+            self._add_reference(instance_key, referrer)
+            return instance_key
+
+        try:
+            await self._start_instance(
+                instance_key, qualified_server_name, instance_context=context
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "MCP: named instance '%s' failed to start: %s",
+                instance_key,
+                exc,
+            )
+            return None
+
+        self._add_reference(instance_key, referrer)
+        self._fire_server_ready(qualified_server_name)
+        return instance_key
+
+    async def stop_instance(self, instance_key: str) -> bool:
+        """Stop a named instance and forget its context.
+
+        Counterpart to :py:meth:`register_instance` for when a vessel is
+        unpaired / deleted. Force-stops regardless of refcount and drops the
+        stored ``${instance.*}`` context so it is not silently restarted.
+        """
+        self._instance_contexts.pop(instance_key, None)
+        return await self.manual_stop_instance(instance_key)
 
     async def _discover_per_persona_tools(self, qualified_name: str) -> None:
         """One-shot tool discovery for a per_persona server.
@@ -791,6 +889,7 @@ class MCPClientManager:
         instance_key: str,
         qualified_name: str,
         persona_id: Optional[str] = None,
+        instance_context: Optional[Dict[str, str]] = None,
     ) -> None:
         """Open a fresh MCPServerConnection and register its tools.
 
@@ -798,6 +897,11 @@ class MCPClientManager:
         error category and updating the exponential backoff deadline.
         Caller is responsible for adding a reference (refcount) after a
         successful start.
+
+        ``instance_context`` supplies ``${instance.*}`` values for named
+        instances (設計 G). When omitted, it is recovered from
+        ``self._instance_contexts`` so backoff-retry / reconnect paths that
+        only know the instance_key still resolve correctly.
         """
         from tools.mcp_config import resolve_config_placeholders
 
@@ -805,8 +909,13 @@ class MCPClientManager:
         if meta is None:
             raise ValueError(f"Unknown MCP server '{qualified_name}'")
 
+        if instance_context is None:
+            instance_context = self._instance_contexts.get(instance_key)
+
         raw_config = meta["raw_config"]
-        resolved = resolve_config_placeholders(raw_config, persona_id=persona_id)
+        resolved = resolve_config_placeholders(
+            raw_config, persona_id=persona_id, instance_context=instance_context
+        )
 
         unresolved = _find_unresolved_placeholders(resolved)
         if unresolved:
@@ -1057,6 +1166,7 @@ class MCPClientManager:
                 "MCP: failed to disconnect instance '%s': %s", instance_key, exc
             )
         self._refs.pop(instance_key, None)
+        self._instance_contexts.pop(instance_key, None)
 
     async def _unregister_instance_tools(self, instance_key: str) -> None:
         """Unregister tools tied to a specific instance.
@@ -1088,13 +1198,19 @@ class MCPClientManager:
 
     @staticmethod
     def _qualified_from_instance_key(instance_key: str) -> Optional[str]:
-        # Format: "<qualified>:global" or "<qualified>:persona:<persona_id>"
-        # Split at the FIRST colon that starts the scope suffix.
-        # ``qualified`` may itself contain no colons (SAIVerse does not use
-        # colons in server_name or addon_name).
+        # Format: "<qualified>:global", "<qualified>:persona:<persona_id>",
+        # or "<qualified>:instance:<instance_id>" (named instance, 設計 G).
+        # Split at the scope suffix. ``qualified`` may itself contain no
+        # colons (SAIVerse does not use colons in server_name or addon_name).
         if ":" not in instance_key:
             return None
-        return instance_key.rsplit(":", 1)[0] if instance_key.endswith(":global") else instance_key.split(":persona:", 1)[0]
+        if instance_key.endswith(":global"):
+            return instance_key.rsplit(":", 1)[0]
+        if ":persona:" in instance_key:
+            return instance_key.split(":persona:", 1)[0]
+        if ":instance:" in instance_key:
+            return instance_key.split(":instance:", 1)[0]
+        return None
 
     # -- Reference counting ---------------------------------------------
 
@@ -1218,9 +1334,12 @@ class MCPClientManager:
             # restart, rather than leaving the subprocess stale.
             if raw_config is not None:
                 persona_id = self._persona_id_from_instance_key(instance_key)
+                instance_context = self._instance_contexts.get(instance_key)
                 try:
                     connection.config = resolve_config_placeholders(
-                        raw_config, persona_id=persona_id,
+                        raw_config,
+                        persona_id=persona_id,
+                        instance_context=instance_context,
                     )
                 except Exception as exc:
                     LOGGER.warning(

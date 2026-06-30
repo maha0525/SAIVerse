@@ -96,6 +96,7 @@ def _resolve_runtime(key: str) -> Optional[str]:
 def _resolve_placeholder(
     placeholder: str,
     persona_id: Optional[str] = None,
+    instance_context: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Resolve a single ``${...}`` placeholder body.
 
@@ -104,6 +105,9 @@ def _resolve_placeholder(
       * ``addon.<addon_name>.<key>``        -- AddonConfig (global) via get_params
       * ``persona.addon.<addon_name>.<key>`` -- AddonPersonaConfig via get_params
       * ``runtime.<key>``                    -- runtime-computed value (e.g. lan_ip)
+      * ``instance.<key>``                   -- per-instance context passed at
+        named-instance launch time (e.g. ``${instance.ws_port}``). See
+        ``docs/intent/mcp_addon_integration.md`` 設計 G.
       * ``VAR_NAME``                         -- legacy OS environment variable form
     """
     parts = placeholder.split(".")
@@ -117,6 +121,26 @@ def _resolve_placeholder(
 
     if len(parts) == 2 and parts[0] == "runtime":
         return _resolve_runtime(parts[1])
+
+    if len(parts) == 2 and parts[0] == "instance":
+        key = parts[1]
+        if instance_context is None:
+            LOGGER.warning(
+                "MCP config: placeholder '${%s}' requires named-instance "
+                "context but none provided",
+                placeholder,
+            )
+            return None
+        value = instance_context.get(key)
+        if value is None:
+            LOGGER.warning(
+                "MCP config: named-instance context has no key '%s' "
+                "(placeholder '${%s}')",
+                key,
+                placeholder,
+            )
+            return None
+        return str(value)
 
     if len(parts) == 3 and parts[0] == "addon":
         _, addon_name, key = parts
@@ -143,7 +167,11 @@ def _resolve_placeholder(
     return None
 
 
-def _interpolate_env(value: str, persona_id: Optional[str] = None) -> str:
+def _interpolate_env(
+    value: str,
+    persona_id: Optional[str] = None,
+    instance_context: Optional[Dict[str, str]] = None,
+) -> str:
     """Replace all ``${...}`` placeholders in a string with resolved values.
 
     Unresolved placeholders are left intact so that callers (or the tests)
@@ -152,7 +180,9 @@ def _interpolate_env(value: str, persona_id: Optional[str] = None) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         placeholder = match.group(1)
-        resolved = _resolve_placeholder(placeholder, persona_id=persona_id)
+        resolved = _resolve_placeholder(
+            placeholder, persona_id=persona_id, instance_context=instance_context
+        )
         if resolved is None:
             return match.group(0)
         return resolved
@@ -160,27 +190,50 @@ def _interpolate_env(value: str, persona_id: Optional[str] = None) -> str:
     return _PLACEHOLDER_RE.sub(_replace, value)
 
 
-def _interpolate_value(value: Any, persona_id: Optional[str] = None) -> Any:
+def _interpolate_value(
+    value: Any,
+    persona_id: Optional[str] = None,
+    instance_context: Optional[Dict[str, str]] = None,
+) -> Any:
     if isinstance(value, str):
-        return _interpolate_env(value, persona_id=persona_id)
+        return _interpolate_env(
+            value, persona_id=persona_id, instance_context=instance_context
+        )
     if isinstance(value, list):
-        return [_interpolate_value(item, persona_id=persona_id) for item in value]
+        return [
+            _interpolate_value(
+                item, persona_id=persona_id, instance_context=instance_context
+            )
+            for item in value
+        ]
     if isinstance(value, dict):
-        return {key: _interpolate_value(item, persona_id=persona_id) for key, item in value.items()}
+        return {
+            key: _interpolate_value(
+                item, persona_id=persona_id, instance_context=instance_context
+            )
+            for key, item in value.items()
+        }
     return value
 
 
 def resolve_config_placeholders(
     config: Dict[str, Any],
     persona_id: Optional[str] = None,
+    instance_context: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Public entry point: resolve all placeholders in a single server config.
 
     Intended for the MCP client to call at process-launch time with the
     appropriate persona context, after loading raw configs via
     :func:`load_mcp_configs_raw`.
+
+    ``instance_context`` carries per-named-instance values (e.g. token / port
+    for one of several gateway instances spawned from the same server
+    definition). See ``docs/intent/mcp_addon_integration.md`` 設計 G.
     """
-    return _interpolate_value(config, persona_id=persona_id)
+    return _interpolate_value(
+        config, persona_id=persona_id, instance_context=instance_context
+    )
 
 
 def _load_config_file(path: Path) -> Dict[str, Dict[str, Any]]:

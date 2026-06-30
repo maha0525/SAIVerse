@@ -1,6 +1,6 @@
 # Intent: スタックチャン Vessel 統合（saiverse-stackchan-addon）
 
-**ステータス**: v0.8（2026-05-19 改訂、Phase 2' 認証・ペアリング UX を完了）
+**ステータス**: v0.10（2026-06-30 改訂、複数機体の同時稼働対応を設計。Phase 1'〜3' は実機検証込みで完了済み）
 
 ## v0.4 → v0.5 の主要変更（路線変更）
 
@@ -187,7 +187,9 @@ v0.4 から **変更なし**。Vessel Building 自体がペルソナの認知モ
 
 ### 2. Vessel Building は 1 機体につき 1 つ、capacity=1
 
-v0.4 から **変更なし**。物理機体は 1 台しかなく、複数ペルソナが同時に同一身体に降りられる概念ではない。`Building.CAPACITY = 1` で既存 OccupancyManager のキャパシティチェックが効くようにする。
+**v0.10 で更新**（複数機体対応）。1 つの Vessel Building には 1 機体が対応し、同時に降りられるペルソナは 1 人（`Building.CAPACITY = 1` で既存 OccupancyManager のキャパシティチェックが効く）。これは「複数ペルソナが同一身体に同時に降りる」ことを禁じる不変条件で、v0.10 でも変わらない。
+
+v0.10 では機体が複数になりうるが、その場合も **機体ごとに別の Vessel Building** が並ぶだけで、本不変条件は各 Vessel Building 単位で維持される。「物理機体は 1 台しかない」という v0.4 の前提は撤回し、N 機体 = N 個の Vessel Building（各 capacity=1）として扱う。同時稼働の実装方式は本書「設計 K. マルチ機体対応」を参照。
 
 ### 3. 物理身体が切断されてもペルソナの主体性は保たれる
 
@@ -276,6 +278,17 @@ stackchan-mcp ファームの書き込みは esptool 経由（Python パッケ�
 書き込み後の Wi-Fi + gateway URL + Token 設定は xiaozhi-esp32 の captive portal Web UI 経由（= AP モードに device を起動 → スマホ/PC で AP に接続 → ブラウザで Web UI 開く → SAIVerse が表示する値を入力）。SAIVerse は QR コードで設定値を提示し、device 側に QR スキャン機能を追加する PR を出すと UX が更に良くなる（= Phase 6 候補）。
 
 SAIVerse のユーザー層（AITuber 運用者・創作者中心）が組み込み開発の経験を前提にできない、という条件は維持。esptool の手動コマンドラインを要求しない（= SAIVerse の CLI / UI でラップする）。
+
+### 14. ツールの使用可否は機体の capability に従う（v0.10 追加）
+
+機体ごとに搭載デバイスが異なる（例: Port A に ENV III を挿した機体と挿していない機体）。ユニット由来ツール（温湿度・気圧・測距・サーボユニット等）は、そのユニットを実際に搭載している機体に降りているときだけ使えてはいけない。搭載していない機体で当該スペルが見える / 撃てる状態は不変条件違反とする。
+
+実装上は per-vessel の capability（搭載ユニット集合）を真実の source とし、ツール可視性を2層で決める:
+
+- **共通ツール**（首・表情・LED・カメラ等、全 Stack-chan が必ず持つ）: 全 Vessel Building で visible
+- **ユニット由来ツール**: そのユニットを capability に持つ vessel の Vessel Building でのみ visible
+
+「全 Vessel Building の無条件和集合」で可視性を決めてはならない（= capability の差を潰すため）。詳細は「設計 K-5. capability カタログ」を参照。
 
 ### 廃止された不変条件（v0.4 まで）
 
@@ -730,6 +743,77 @@ AddonManager に Stack-chan アドオン専用パネル:
 
 を記録。
 
+### K. マルチ機体対応（v0.10）
+
+複数の Stack-chan を同時に稼働させ、ペルソナがそれぞれ別の機体に降りられるようにする。設計の柱は 7 つ。**ファーム改修は不要**（device は接続時に `Device-Id`=MAC / `Client-Id`=UUID / per-device token を既に送り、gateway URL も NVS の captive portal 設定で機体ごとに変えられる。`websocket_protocol.cc` 425-430 行で確認済み。複数機体に必要な自己識別と接続先設定はファームに既存）。
+
+#### K-1. 全体構成: 機体ごとに gateway インスタンス（A-2 方式）
+
+採用方式は「**1 gateway = 1 device** を保ったまま、機体数ぶん gateway subprocess を別ポートで起動」。各 gateway は単一 device 前提の現状コードのまま無改修で、機体ごとに別ポート・別 token で listen する。
+
+検討した代替（A-1）: gateway 1 個で N device を多重化する。これは upstream stackchan-mcp の根本改修（`ESP32Manager` の `self._connection` 単一スロット → `Dict[device_id]` 化、`_check_auth` の multi-token validation、MCP tool への宛先 device 引数追加）を要し、xiaozhi-esp32 の device セッション管理に踏み込む。A-2 なら本体の既存機構（1 server エントリ = 1 subprocess + tool 名前空間 + instance_key 管理）にそのまま乗るので upstream 非依存・自分の制御下で完結する。よって A-2 を採る。
+
+副次効果として、将来余地 §6 に挙げていた「multi-token authentication の upstream PR」は不要化される（各 gateway が単一 token を持てば足りる）。
+
+#### K-2. 本体 MCP client: 汎用「名前付きインスタンス」（別 intent に切り出し）
+
+現状 `tools/mcp_client.py` の instance_key は `{server}:global` / `{server}:persona:{persona_id}` の 2 次元。ここに `{server}:instance:{instance_id}` 次元を足し、**同一 server 定義から名前付き N インスタンスを動的起動**できるよう一般化する。各インスタンスに per-instance の config context（token / port 等）を注入する（既存の `resolve_config_placeholders` が persona context で `${...}` を解決する仕組みを instance context に拡張）。
+
+これは Stack-chan 固有ではなく、他 addon でも「同一 MCP server を設定違いで複数立てたい」需要に応える**汎用基盤**。詳細設計は `docs/intent/mcp_addon_integration.md` に切り出し、本書はそれを前提に使う（将来余地 §2「共通 device gateway」の実装フェーズ化）。
+
+**静的手書き（`mcp_servers.json` に機体数ぶんエントリを書く）は不採用**。`vessels.db` を source に機体数ぶんのインスタンスを動的起動する。ペアリング追加で起動、削除で停止、アプリ起動時は全機体ぶん起動。「動的起動まで作らないとリリースしない」をリリース要件とする。
+
+#### K-3. ポート: ペアリング時に確定・vessels.db 永続
+
+device は NVS の固定 URL（`ws://<lan-ip>:<port>`）に繋ぐため、ポートは安定していなければならない。**起動ごとに変わる動的割当は不可**（device が繋ぎ先を見失う）。
+
+ペアリング時にシステムが空きポート（`ws_port` / `capture_port` のペア）を 1 つ選んで `vessels.db` に永続化し、以降その機体に固定する。captive portal はこのポートを含む URL をユーザーに提示し、device の NVS に焼かせる。gateway 起動時は `vessels.db` の永続値で listen。`lan_ip` は従来通り `${runtime.lan_ip}` で自動追従し、ポートだけ機体固定。
+
+ここでの「動的」は「**ユーザーがポート番号を手で選ばない（システムが自動割当して永続化する）**」の意味であって、「起動ごとに変わる」ではない。後者は device の固定 URL と両立しない。
+
+#### K-4. ツール: wrapper dispatcher で単一名前空間
+
+**ペルソナに生 MCP ツールを露出させない**。全身体ツールを addon の native wrapper に集約し、ペルソナには機体に依らない単一論理名（`move_head` / `see` / `set_avatar` …）だけを見せる。wrapper は実行時に「現在ペルソナが居る Vessel Building → `vessels.db` で vessel を逆引き → その vessel の gateway インスタンス（`{server}:instance:{vessel_id}`）」を解決し、該当機体の生 MCP ツールに転送する。
+
+ペルソナは機体を意識しない。リビングの機体に降りていればリビングの身体が、机の機体に降りていれば机の身体が動く。「Vessel Building = 身体」メタファーの一貫性を保つ。
+
+現状 `move_head` / `see` / `body_status` は既にこの wrapper パターン（生 MCP は `visible:false`）。ただし宛先 server がハードコード（`{ADDON}__stackchan`）なので、現在 building からの実行時解決に置き換える。`set_avatar` / `set_led` / `set_mouth` / `set_brightness` / `set_volume` 等は現状 `visible:true` の生 MCP なので、同じ wrapper dispatcher に巻き取る。
+
+生ツール露出をやめる判断は複数機体に依らず正しい: 後から挙動を変えたい・機能を足したいときに結局ラップが要るため、最初から wrapper に統一しておく。
+
+#### K-5. capability カタログ: per-vessel、手動が基盤
+
+機体ごとに刺さっている Port A ユニットが違う（ENV III を挿した機体・挿していない機体）。ユニット由来ツール（`env3` / `servo8` / `sonic`）の使用可否は vessel ごとの capability に依存する（不変条件 #14）。
+
+`vessels.db` に per-vessel の capability（有効ユニット集合 + ハブ構成）を持つ。ツール可視性は K-4 と同じ dispatcher で扱い、building_ids を 2 層で決める:
+
+- 共通ツール: building_ids = 全 Vessel Building
+- ユニット由来ツール: building_ids = そのユニットを capability に持つ vessel の building のみ
+
+i2c の宛先も現在 vessel の gateway インスタンスに実行時解決する（現状 `env3.py` の `MCP_QUALIFIED_SERVER` ハードコードを置き換え）。現状の addon 単一 toggle（`unit_env3_enabled` が AddonConfig 全体で 1 個）を **per-vessel 設定に作り変える**。
+
+capability の source は **手動が基盤、自動検出は後付けアシスト**:
+
+- **手動（v0.10 / 必須）**: 機体管理 UI で機体ごとに搭載ユニットをチェック → `vessels.db` に保存
+- **自動検出（Phase 8' / 後付け）**: 各 vessel の gateway で `i2c_scan` / `get_device_info` を叩いて capability 候補を推定し、ペアリング時の自動検出 +「自動検出」ボタンで手動設定欄を埋める。手動を上書きせず**提案で埋める**補助に留める
+
+手動を先に確実な基盤として作る理由: 自動検出が誤検出 / 未検出したとき手動で確定できないと運用が詰む。自動検出は手動の上に乗る便利機能であり、順序を逆にしない。
+
+#### K-6. 機体管理 UI
+
+機体ごとの設定を一望・編集できる管理面。addon の `ui/` + `frontend/src/addon-panels/saiverse-stackchan-addon`（既存 addon UI パネル機構）に実装する。機体ごとに:
+
+- 基本情報: vessel_id, hardware_model, firmware_version, paired_at, last_seen
+- 接続: ws_port / capture_port（ペアリング時に自動割当・表示）、token 再発行
+- バインド: bound_building_id, bound_persona_id
+- capability: 搭載ユニット toggle（手動）、自動検出ボタン（Phase 8'）
+- ペアリング / 削除
+
+#### K-7. PCM 出力・音声入力の機体振り分け
+
+- **TTS 出力（speak_hook）**: 現在 vessel を `get_vessel_for_persona` で解決し、その vessel の gateway の `/pcm` ポートに PCM POST する（単一 endpoint ハードコードをやめ、vessel → ポート解決を挟む）。
+- **音声入力（audio-in hook）**: 複数 gateway が同じ addon hook を叩くので、どの vessel からの音声かを区別する。各 gateway の `STACKCHAN_AUDIO_HOOK_URL` に vessel 識別子を埋める、または token 逆引きで vessel → `bound_building_id` を解決して inject する。
+
 ## 設計判断の理由
 
 ### なぜ自前ファームを廃止して stackchan-mcp に乗り換えるか
@@ -928,6 +1012,26 @@ stackchan-mcp の 21 ツールから:
 21. **アドオン**: TTS エンベロープ → `set_mouth` 高頻度駆動
 22. **検証**: 発話中に口が動く、感情に応じて表情変化
 
+### Phase 7' — 複数機体の同時稼働（v0.10、リリース要件）
+
+A-2 方式（機体ごとに gateway インスタンス）+ wrapper dispatcher + 手動 capability + 機体管理 UI まで。**動的起動・手動 capability・機体管理 UI が揃わなければリリースしない**（静的手書きは不採用）。
+
+- **本体（別 intent `mcp_addon_integration.md`）**: instance_key に `:instance:{id}` 次元追加、per-instance config context 注入、`vessels.db` 駆動の動的 register / start / stop（K-2）
+- **vessels.db スキーマ拡張**: `ws_port` / `capture_port` / capability（搭載ユニット集合 + ハブ構成）カラム追加。ポートはペアリング時に空きを確定して永続（K-3）
+- **アドオン: wrapper dispatcher**: `move_head` / `see` / `body_status` の宛先 server ハードコードを「現在 building → vessel → instance」解決に置換。`set_avatar` / `set_led` / `set_mouth` / `set_brightness` / `set_volume` 等の生 MCP も wrapper に巻き取り、ペルソナへの生ツール露出をゼロにする（K-4）
+- **アドオン: capability カタログ**: `unit_env3_enabled` 等の addon 単一 toggle を per-vessel に作り変え、ユニット由来ツールの building_ids を capability から生成。`env3.py` 等の i2c 宛先を現在 vessel の instance に解決（K-5）
+- **アドオン: 機体管理 UI**: 機体ごとの接続 / バインド / capability / ペアリング / 削除（K-6）
+- **アドオン: PCM / audio-in 振り分け**: speak_hook の `/pcm` POST 先を vessel 解決、audio-in hook で発信元 vessel を区別（K-7）
+- **検証**: 2 機体（片方 ENV III あり / 片方なし）を同時接続し、(a) 別ペルソナが各機体に降りて同時に首振り・発話、(b) ENV III なしの機体に降りたペルソナに温湿度スペルが見えない、(c) 機体を持ち替えると同じ `move_head` で別機体が動く、を実機確認
+
+### Phase 8' — capability 自動検出（後付けアシスト）
+
+手動 capability（Phase 7'）の上に乗せる補助機能。
+
+- **アドオン**: 各 vessel の gateway で `i2c_scan` / `get_device_info` を叩いて搭載ユニット候補を推定
+- **UI**: ペアリング時の自動検出 + 機体管理 UI の「自動検出」ボタンで手動設定欄を**提案で埋める**（手動を上書きしない）
+- **検証**: ENV III / PaHub 構成を自動検出が正しく拾い、誤検出をユーザーが手動で弾けること
+
 ### Phase X' — 上流 PR 投稿（Phase 1'〜6' の実機検証後）
 
 stackchan-mcp 本家へ **計 7 PR** を投稿。Phase 1' 中に当初想定の 3 PR を超えて拡張された (= 検証中に発見した必須修正 4 件 = PR4-PR7 を追加)。**ブランチ分割の具体手順 + 依存グラフ + 各 PR の注意点は [`docs/issues/stackchan_mcp_upstream_pr_strategy.md`](../issues/stackchan_mcp_upstream_pr_strategy.md) を参照**。
@@ -958,7 +1062,7 @@ Phase X' 着手の前提:
 - カスタムウェイクワード（= Espressif の Wake Word Customization 経由で "エア" 等ペルソナ名トリガーのモデル発注）
 - 歩行（外付け車輪モジュール対応）
 - IMU 連動
-- 複数 Vessel 対応の本格化（Vessel テーブル切り出し）
+- ~~複数 Vessel 対応の本格化~~ → **v0.10 で範囲内化**（Phase 7'、設計 K 参照）。`Vessel` テーブルの本格切り出し（`Building.PHYSICAL_VESSEL_ID` の FK 化）は引き続き将来余地だが、複数機体の同時稼働そのものは v0.10 で実装する
 - 別機種対応（眼鏡型、別ロボット）
 - 物理 Vessel SDK 共通基盤化
 - Stack-chan シリアルログを SAIVerse logs/ に統合
@@ -1018,19 +1122,19 @@ Phase X' 着手の前提:
 
 ## 将来 / Vessel 共通仕様への展開余地
 
-v0.4 から **基本維持**、stackchan-mcp 採用を踏まえて若干更新:
+v0.4 から **基本維持**、stackchan-mcp 採用を踏まえて若干更新。**§1〜§3 は v0.10（Phase 7'/8'、設計 K）で実装フェーズに引き上げた**。当初「将来余地」として置いていた区画が、複数機体対応の骨格として地続きに繋がった形。
 
-### 1. `Vessel` テーブルの切り出し
+### 1. `Vessel` テーブルの切り出し（v0.10 で部分実装）
 
-`Building.PHYSICAL_VESSEL_ID` を `FK → Vessel.vessel_id` に変更し、Vessel に固有メタデータ（型番、ファーム version、能力一覧）を集約する。stackchan-mcp 採用後は `Vessel.firmware_version` を `xiaozhi-esp32 v2.2.6` 等の値で管理。
+固有メタデータ（型番、ファーム version、能力一覧、ws_port / capture_port）の集約は v0.10 の `vessels.db` 拡張で実装する（設計 K-3 / K-5）。ただし `Building.PHYSICAL_VESSEL_ID` を `FK → Vessel.vessel_id` に変更する DB 正規化は v0.10 では行わず、addon 側 `vessels.db` の `bound_building_id` で紐付けを保つ。本格的な FK 化は引き続き将来余地。
 
-### 2. 共通 device gateway
+### 2. 共通 device gateway（v0.10 で汎用基盤化）
 
-stackchan-mcp は xiaozhi-esp32 ベースで汎用 device gateway として既に機能している。SAIVerse 内で「stackchan-mcp 以外の vessel」が出てきた時は、stackchan-mcp と同様に `mcp_servers.json` で subprocess 起動 + stdio MCP 経由でツール公開、というパターンを踏襲する。
+stackchan-mcp を `mcp_servers.json` で subprocess 起動するパターンは維持しつつ、v0.10 で本体 MCP client に「同一 server 定義から名前付き N インスタンスを動的起動」する汎用機構を足す（設計 K-2、詳細は `mcp_addon_integration.md`）。「stackchan-mcp 以外の vessel」が出てきた時も、この名前付きインスタンス基盤に乗せられる。
 
-### 3. Vessel 能力宣言（capabilities）
+### 3. Vessel 能力宣言（capabilities）（v0.10 で実装）
 
-stackchan-mcp の `get_device_info()` MCP tool で device の capability を取得できる。これを SAIVerse 側で Vessel レコードに記録し、ペルソナがツール選択時に参照できるようにする。
+per-vessel capability を `vessels.db` に持ち、ツール可視性（共通 / ユニット由来の 2 層）と i2c 宛先解決に使う（設計 K-5、不変条件 #14）。source は手動が基盤（Phase 7'）、`get_device_info()` / `i2c_scan` による自動検出は後付けアシスト（Phase 8'）。
 
 ### 4. 共通の感情 → 表情マッピング
 
@@ -1252,3 +1356,17 @@ Phase 3' (= 音声入力経路 / Gemini inline 認識) を実機検証込みで�
 - **PR-M** (= 新規 2026-05-21): stack-chan board のタッチ UX 統合 (= StopListening 分岐 + StartListening 経路 + RGB LED feedback + デバウンス + タイムアウト + nano-printf format fix)
 
 PR 投稿は当面 dev/integration 運用継続、 実機で安定運用が確認できた段階で着手 (= まはー判断 2026-05-21、 「ひとまずこのまましばらく運用してみる」)。
+
+### v0.9 → v0.10 で確定（複数機体の同時稼働、2026-06-30）
+
+複数の Stack-chan を同時稼働させ、ペルソナが各機体に降りられるようにする方針を設計（Phase 7'/8'、設計 K）。対話で詰めた確定事項:
+
+- **A-2 方式採用（機体ごとに gateway インスタンス）**: 「1 gateway = 1 device」を保ったまま機体数ぶん subprocess を別ポートで起動。upstream gateway の multi-device 改修（A-1: `ESP32Manager` の Dict 化 + multi-token + tool 宛先引数）は不採用。本体の既存機構（1 エントリ = 1 subprocess + 名前空間 + instance_key）に乗るため upstream 非依存で完結する。
+- **ファーム改修は不要**: device は接続時に `Device-Id`=MAC / `Client-Id`=UUID / per-device token を既に送り、gateway URL も NVS（captive portal）で機体ごとに設定可能（`websocket_protocol.cc` 425-430 で確認）。当初「device state machine に波及して重い」と見積もったが、コード確認の結果その波及は無く、改修は gateway(Python) 側に閉じると訂正。
+- **本体 MCP client を汎用「名前付きインスタンス」化**: instance_key に `:instance:{id}` 次元を足し、同一 server から N インスタンスを動的起動 + per-instance config 注入。Stack-chan 固有でなく汎用基盤として `mcp_addon_integration.md` に切り出す。
+- **静的手書きは不採用、動的起動がリリース要件**（まはー判断: 「静的手書きは絶対やらん、動的起動までやらないならリリースできない」）。`vessels.db` 駆動で動的 register / start / stop。
+- **ポートはペアリング時に確定・vessels.db 永続**（起動ごとの動的割当は device の固定 URL と両立せず不可。「動的」= ユーザーが手で選ばない、の意味）。
+- **ペルソナに生 MCP ツールを露出させない（wrapper dispatcher で単一名前空間）**: 全身体ツールを native wrapper に集約し、現在 building → vessel → instance を実行時解決。生ツール露出をやめるのは複数機体に依らず正しい投資（まはー同意: 「変えたい・足したい時に結局ラップが要る」）。
+- **per-vessel capability カタログ、手動が基盤**: ユニット由来ツールは搭載機体でのみ visible（不変条件 #14）。`unit_env3_enabled` 等の addon 単一 toggle を per-vessel に作り変える。自動検出は手動の上に乗る後付けアシスト（まはー判断: 手動を先に確実な基盤として作り、自動検出ボタンで設定欄を埋める）。
+- **機体管理 UI が必要**（まはー判断）: 機体ごとの接続 / バインド / capability / ペアリング / 削除を一望。
+- 当初「v0.9 で書く」としていたが既存が v0.9（Phase 3' 完了）だったため **v0.10** として追記。将来余地 §1〜§3 を実装フェーズに引き上げ。
