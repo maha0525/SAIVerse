@@ -60,8 +60,8 @@ P0 の per-vessel ループが `last_sid_by_building` で機体ごとに session
 - intent §K-1 の「各 gateway は**無改修で**機体ごとに別ポートで listen」前提がこのロックで崩れる。「device を 2 つの gateway が奪い合わない」ための安全機構だが、複数機体=複数 device を想定していない。
 **方針決定 (まはー、2026-07-01)**: A-1（1 ポートで複数 device 多重化）は gateway が構造的に単一 device 設計（`ESP32Manager._connection` 単一スロット・新接続が旧を evict・単一トークン認証・全 tool が単一接続対象）で大改修が必要と確認したため不採用。A-2 継続 + per-port lock で進める。詳細比較は本セッションのやり取り参照。
 
-**修正 (fork checkout に実装済み・未コミット、要デプロイ)**: `temp/stackchan-mcp/gateway/stackchan_mcp/cli.py` に per-WS_PORT ロック化を実装。`_ws_port_lock_path()` ヘルパ追加（`LOCK_DIR / f"owner-{ws_port}.lock"`）、`_acquire_startup_lock` の acquire・stdio/http 両経路の release・`_run_ownership_check`（`--check` 診断）を全て per-port path に統一（`--check` が旧 global lock を読んで誤報告する既存ユーザー影響も解消）。各 device の gateway が自分のポートのロックを持ち N gateway 共存、同一ポート二重起動は従来通り拒否。py_compile OK。まはーの firmware WIP (`stackchan.cc`) には非接触。
-**残: デプロイ（まはー fork パイプライン）**: uvx が取る場所へ反映が必要。(a) fork integration ブランチに commit + push → uvx キャッシュ更新（`--from git+...@branch` はブランチ ref をキャッシュするので `uv cache clean` か `--refresh` が要る）、または (b) テスト用に addon `mcp_servers.json` の `--from` をローカル checkout パスへ一時的に向ける。**上流 PR 候補**（ロックは machine-global でなく device/port スコープが正しい）。
+**修正 (fork に `daac8a7` コミット済み・上流 PR [#320](https://github.com/kisaragi-mochi/stackchan-mcp/pull/320) 投稿済み)**: `gateway/stackchan_mcp/cli.py` に per-WS_PORT ロック化を実装。`_ws_port_lock_path()` ヘルパ追加（`LOCK_DIR / f"owner-{ws_port}.lock"`）、`_acquire_startup_lock` の acquire・stdio/http 両経路の release・`_run_ownership_check`（`--check` 診断）を全て per-port path に統一（`--check` が旧 global lock を読んで誤報告する既存ユーザー影響も解消）。各 device の gateway が自分のポートのロックを持ち N gateway 共存、同一ポート二重起動は従来通り拒否。まはーの firmware WIP (`stackchan.cc`) には非接触。**実機で 2 機体同時起動を確認済み**。
+**デプロイ済み**: fork integration ブランチ `integrate/all-fixes-2026-06-24` に反映、uvx 経由で per-port lock 版がロードされ 2 機体同時起動に成功（本セッション確認済み）。上流 PR は #320 として review 待ち（詳細・投稿前の論点は `stackchan_mcp_upstream_pr_strategy.md` §PR-O）。
 **回避 (暫定)**: この修正をデプロイするまで 1 機体しか同時起動できず、A-2 の 2 機体テストはブロックされる。
 
 ### 別軸 — 複数ペルソナ同時発話で後発ペルソナの音声が物理機体に届かない

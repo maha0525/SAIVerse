@@ -927,7 +927,7 @@ idf.py -p COM3 app-flash
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
 - `docs/intent/stackchan_avatar_pipeline.md` §B-0 (= 3 層モデル) / §E (= upstream PR ストーリー)
 
-## 追補: PR-O — ownership lock を per-WS_PORT に scope（複数機体対応、2026-07-01 実装・未投稿）
+## 追補: PR-O — ownership lock を per-WS_PORT に scope（複数機体対応、2026-07-01 実装・[#320](https://github.com/kisaragi-mochi/stackchan-mcp/pull/320) 投稿済み）
 
 **次セッションでの PR 化用ハンドオフ。** Stack-chan 複数機体（1 gateway = 1 device を機体数ぶん別ポートで同時起動、A-2 方式）を成立させる過程で必要になった gateway 側の唯一の改修。SAIVerse 側で実機検証済み（2 機体同時起動を確認）なので、投稿条件（Phase 検証後に出す）は満たしている。
 
@@ -935,7 +935,7 @@ idf.py -p COM3 app-flash
 
 | PR | 内容 | base | 依存 | 状態 |
 |---|---|---|---|---|
-| **PR-O** | fix(ownership): scope the gateway ownership lock per WS port | upstream `main` | 独立 | fork checkout に実装済み・**未コミット**、未投稿 |
+| **PR-O** = [#320](https://github.com/kisaragi-mochi/stackchan-mcp/pull/320) | fix(ownership): scope the gateway ownership lock per WS port | upstream `main` | 独立 | 投稿済み (2026-07-01)、review 待ち |
 
 ### 動機・背景
 
@@ -965,17 +965,17 @@ idf.py -p COM3 app-flash
 3. **upstream の multi-device ロードマップ確認**: kisaragi-mochi / xiaozhi-esp32 が multi-device に向かっているか。向かっているなら本 PR はその布石として位置づけられる。単一 device 前提が固い場合は「per-port lock は単一運用も壊さない安全な一般化」として提案。
 4. **PR description**: 「lock の本来の不変条件は 1 gateway=1 device、global は過剰」を明示。単一機体ユーザー非破壊を強調。`--check` 追随も含める。
 
-### fork 状態 / ブランチ手順
+### fork 状態 / ブランチ手順（実施済み）
 
-- fork `maha0525/stackchan-mcp`、現在の作業ブランチ `integrate/all-fixes-2026-06-24`。**cli.py の変更は未コミット**。同ブランチにまはーの firmware WIP（`firmware/main/boards/stackchan/stackchan.cc`）も未コミットで同居しているので、**PR 化時は cli.py だけを切り出してコミット**すること（`git add gateway/stackchan_mcp/cli.py` のみ）。
-- 他 PR と同様、upstream/main から新ブランチを切って cherry-pick:
+- fork `maha0525/stackchan-mcp`。cli.py の per-port lock は integration ブランチ `integrate/all-fixes-2026-06-24` に `daac8a7 fix(ownership): scope lock per WS_PORT for multi-device` として **コミット済み**（cli.py のみ、まはーの firmware WIP `stackchan.cc` には非接触）。
+- upstream/main から `pr-o-ownership-lock-per-port` を切って `daac8a7` を cherry-pick（→ `1c12de8`）、origin に push、`gh pr create` で #320 を投稿済み:
   ```bash
   cd temp/stackchan-mcp
   git fetch upstream
   git switch -c pr-o-ownership-lock-per-port upstream/main
-  # cli.py の per-port lock 変更を 1 commit として適用（未コミットなら先に integration で commit → cherry-pick、
-  # または upstream/main 上で直接パッチを再適用）
-  git push origin pr-o-ownership-lock-per-port
+  git cherry-pick daac8a7
+  git push -u origin pr-o-ownership-lock-per-port
+  gh pr create --repo kisaragi-mochi/stackchan-mcp --base main --head maha0525:pr-o-ownership-lock-per-port ...
   ```
 - SAIVerse addon 側 `mcp_servers.json` は fork branch を `--from git+...@integrate/all-fixes-2026-06-24` で参照。デプロイ時 uvx はブランチ ref をキャッシュするので、push 後は `uv cache clean` か `--refresh` で取り直させる（本セッションで確認済み: per-port lock を載せた版が uvx 経由でロードされ 2 機体同時起動に成功）。
 
