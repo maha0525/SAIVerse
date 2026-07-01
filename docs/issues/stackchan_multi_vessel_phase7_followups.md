@@ -69,8 +69,9 @@ voice-tts が GPU 1 個で TTS 生成を順次処理するため、一方が長�
 
 ### P3 — 本体 MCP client がコメント欄の `${}` を placeholder として解決しようとする（latent）
 
-### P4 — 本体 MCP client の subprocess errlog が server 名共有（instance 別でない）
-`_open_subprocess_errlog` (`tools/mcp_client.py:430`) が `mcp_subprocess_{server_name}.log` を使い、名前付きインスタンス間で errlog を共有。append モードなので致命ではないが、複数機体の subprocess ログが 1 ファイルに混ざり診断しづらい。instance_id を含めた per-instance パスにするのが望ましい（本体側、低優先）。
+### ✅ P4 — 本体 MCP client の subprocess errlog が server 名共有（instance 別でない）→ 修正済み（2026-07-02）
+**実害（当初想定より重い）**: `_open_subprocess_errlog` (`tools/mcp_client.py`) が `mcp_subprocess_{server_name}.log` を使い、名前付きインスタンス間で errlog を共有していた。append モードだが Windows では**同一パスを 2 つの subprocess が開くと 1 つ目の stderr しか残らず、2 号機以降の gateway ログ（Gateway started / vision_url / ESP32 デバイス接続 / `/capture` 着信）が丸ごと消える**。2 号機カメラ不動（`see`→`take_photo` が "Failed to upload photo"）の真因調査が、この欠落で止まった（20260701_211243 セッションで 1 号機 gateway ログのみ残存）。
+**修正**: `MCPServerConnection` に `instance_key` を持たせ（`_start_instance` から渡す）、errlog を scope 別パスに。named instance = `mcp_subprocess_{server}_instance_{id}.log`、persona = `_persona_{id}`、global = 従来どおり `mcp_subprocess_{server}.log`（後方互換）。回帰テスト `tests/test_mcp_subprocess_errlog.py`。**要バックエンド再起動**で 2 号機 gateway ログが独立ファイルに出る → カメラ真因の再調査が可能に。
 **症状**: `mcp_servers.json` の `_comment_*` フィールドに `${...}` リテラルを書くと、resolver が本物の placeholder と誤認して解決を試み、不正キーだと `missing_config` で subprocess 起動を abort する。
 **原因**: `tools/mcp_config.py` の `resolve_config_placeholders` が config 全 string を走査し、`_comment_*` 等のドキュメント用フィールドを除外していない。
 **修正方針**(本体側、別スコープ): resolver が `_` 始まりのキー(慣習的にコメント)や既知の非解決フィールドをスキップする。当面は「コメントに構文記号を書かない」で回避(2026-07-01 実施済み)。

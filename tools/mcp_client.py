@@ -304,9 +304,20 @@ class MCPServerConnection:
     used for logging; it does not affect the underlying MCP protocol.
     """
 
-    def __init__(self, server_name: str, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        server_name: str,
+        config: Dict[str, Any],
+        instance_key: Optional[str] = None,
+    ) -> None:
         self.server_name = server_name
         self.config = config
+        # Full instance key (``<server>:global`` / ``:persona:<id>`` /
+        # ``:instance:<id>``). Used to give each named instance its own
+        # subprocess errlog so concurrent subprocesses from one server
+        # template (e.g. one gateway per vessel) don't interleave / clobber
+        # into a single shared file. ``None`` keeps the legacy per-server path.
+        self.instance_key = instance_key
         self.session: Any = None
         self.tools: List[Any] = []
         self._connected = False
@@ -427,7 +438,23 @@ class MCPServerConnection:
 
         # Sanitize server_name for filesystem
         safe_name = self.server_name.replace("/", "_").replace("\\", "_")
-        path = log_dir / f"mcp_subprocess_{safe_name}.log"
+        # Append the instance scope so named instances (and personas) get a
+        # dedicated file. Global scope keeps the bare per-server path so
+        # existing single-instance setups are unaffected. Without this, several
+        # concurrent subprocesses spawned from one server template (e.g. one
+        # stackchan gateway per vessel) all open the SAME path, and only the
+        # first instance's stderr survives — the rest are invisible for
+        # debugging (per-vessel "Gateway started" / vision_url / device logs).
+        suffix = ""
+        instance_key = self.instance_key
+        if instance_key and instance_key.startswith(self.server_name + ":"):
+            scope = instance_key[len(self.server_name) + 1:]
+            if scope and scope != "global":
+                safe_scope = (
+                    scope.replace(":", "_").replace("/", "_").replace("\\", "_")
+                )
+                suffix = f"_{safe_scope}"
+        path = log_dir / f"mcp_subprocess_{safe_name}{suffix}.log"
         handle = open(path, "a", encoding="utf-8", buffering=1)
         stack.callback(handle.close)
         return handle
@@ -933,7 +960,9 @@ class MCPClientManager:
             )
             raise RuntimeError(detail)
 
-        connection = MCPServerConnection(qualified_name, resolved)
+        connection = MCPServerConnection(
+            qualified_name, resolved, instance_key=instance_key
+        )
         try:
             await connection.connect()
         except Exception as exc:
