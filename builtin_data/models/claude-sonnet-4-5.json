@@ -9,6 +9,17 @@
   "thinking_type": "enabled",
   "thinking_budget": 4096,
   "supports_images": true,
+  "parameters": {
+    "thinking_budget": {
+      "type": "int",
+      "min": 1024,
+      "max": 32000,
+      "step": 1024,
+      "default": 4096,
+      "label": "思考トークン量",
+      "description": "拡張思考に割り当てるトークン数の上限。多いほど深く考えますが、コストと応答時間が増えます。"
+    }
+  },
   "pricing": {
     "input_per_1m_tokens": 3,
     "output_per_1m_tokens": 15,

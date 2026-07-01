@@ -792,6 +792,31 @@ class TestLLMClients(unittest.TestCase):
         client.configure_parameters({"thinking_effort": "invalid"})
         self.assertIsNone(client._thinking_effort)
 
+    def test_anthropic_configure_thinking_budget(self):
+        """thinking_budget updates manual thinking config (enabled models only)."""
+        client = AnthropicClient(
+            "claude-opus-4-5",
+            config={"thinking_type": "enabled", "thinking_budget": 8192},
+        )
+        self.assertEqual(client._thinking_config.get("budget_tokens"), 8192)
+
+        # Raising the budget updates it and keeps max_tokens above the budget
+        client.configure_parameters({"thinking_budget": 20000})
+        self.assertEqual(client._thinking_config["budget_tokens"], 20000)
+        self.assertGreater(client._max_tokens, 20000)
+
+        # Non-numeric / non-positive values are ignored
+        client.configure_parameters({"thinking_budget": "oops"})
+        self.assertEqual(client._thinking_config["budget_tokens"], 20000)
+
+        # Adaptive models must ignore budget entirely
+        adaptive = AnthropicClient(
+            "claude-opus-4-6", config={"thinking_type": "adaptive"}
+        )
+        adaptive.configure_parameters({"thinking_budget": 12000})
+        self.assertEqual(adaptive._thinking_config.get("type"), "adaptive")
+        self.assertNotIn("budget_tokens", adaptive._thinking_config)
+
 
     @patch('llm_clients.anthropic.time.sleep')
     @patch('llm_clients.anthropic.Anthropic')

@@ -9,6 +9,20 @@
   "thinking_type": "adaptive",
   "thinking_effort": "high",
   "supports_images": true,
+  "parameters": {
+    "thinking_effort": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "label": "思考の深さ",
+      "description": "モデルが応答前に費やす思考の度合い。高いほど深く考えますが、コストと応答時間が増えます。"
+    }
+  },
   "pricing": {
     "input_per_1m_tokens": 5,
     "output_per_1m_tokens": 25,

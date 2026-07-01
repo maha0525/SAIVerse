@@ -1,14 +1,13 @@
 {
-  "model": "claude-opus-4-8",
-  "system_prompt": "現在の使用モデルはClaude Opus 4.8です。",
-  "display_name": "Claude Opus 4.8",
+  "model": "claude-sonnet-5",
+  "system_prompt": "現在の使用モデルはClaude Sonnet 5です。\n\n[Model info]\n- 2026 Jan knowledge cutoff",
+  "display_name": "Claude Sonnet 5",
   "provider": "anthropic",
   "context_length": 1000000,
   "default_max_history_messages": 100,
   "metabolism_keep_messages": 40,
   "thinking_type": "adaptive",
   "thinking_effort": "high",
-  "thinking_display": "summarized",
   "supports_images": true,
   "parameters": {
     "thinking_effort": {
@@ -25,11 +24,11 @@
     }
   },
   "pricing": {
-    "input_per_1m_tokens": 5,
-    "output_per_1m_tokens": 25,
-    "cached_input_per_1m_tokens": 0.5,
-    "cache_write_per_1m_tokens": 6.25,
-    "cache_write_1h_per_1m_tokens": 10,
+    "input_per_1m_tokens": 3,
+    "output_per_1m_tokens": 15,
+    "cached_input_per_1m_tokens": 0.3,
+    "cache_write_per_1m_tokens": 3.75,
+    "cache_write_1h_per_1m_tokens": 6,
     "currency": "USD"
   },
   "cache": {
@@ -41,6 +40,6 @@
       "1h"
     ],
     "type": "explicit",
-    "min_tokens": 4096
+    "min_tokens": 1024
   }
 }

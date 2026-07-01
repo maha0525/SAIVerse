@@ -45,7 +45,7 @@ class AnthropicClient(LLMClient):
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-5-20250514",
+        model: str = "claude-sonnet-5",
         config: Optional[Dict[str, Any]] = None,
         supports_images: bool = True,
     ) -> None:
@@ -150,6 +150,24 @@ class AnthropicClient(LLMClient):
                     self._thinking_effort = value
                 elif value is None:
                     self._thinking_effort = None
+                continue
+            # Handle thinking_budget specially (manual/enabled thinking only;
+            # adaptive thinking ignores budget_tokens and must not be touched)
+            if key == "thinking_budget":
+                if isinstance(self._thinking_config, dict) and self._thinking_config.get("type") == "adaptive":
+                    continue
+                try:
+                    budget = int(value) if value is not None else 0
+                except (TypeError, ValueError):
+                    continue
+                if budget > 0:
+                    if not isinstance(self._thinking_config, dict):
+                        self._thinking_config = {}
+                    self._thinking_config.setdefault("type", "enabled")
+                    self._thinking_config["budget_tokens"] = budget
+                    # max_tokens must exceed the thinking budget (mirrors __init__)
+                    if self._max_tokens <= budget:
+                        self._max_tokens = budget + 4096
                 continue
             if key not in allowed_params:
                 continue
