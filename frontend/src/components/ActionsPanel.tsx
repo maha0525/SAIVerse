@@ -705,7 +705,9 @@ function ArgsForm({
     const hasSchema = !!props && Object.keys(props).length > 0;
     const [raw, setRaw] = useState(!hasSchema);
 
-    useEffect(() => { if (!hasSchema) setRaw(true); }, [hasSchema]);
+    // スキーマが手に入ったらフォーム編集を既定にする (新規ツール選択時など)。
+    // スキーマが無いときは JSON 編集しか選べないので raw を維持。
+    useEffect(() => { setRaw(!hasSchema); }, [hasSchema]);
 
     if (raw || !hasSchema) {
         return (

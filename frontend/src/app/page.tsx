@@ -2885,7 +2885,12 @@ export default function Home() {
                 </div>
             </main>
 
-            {isMapModalOpen && (
+            {/* チュートリアル表示中は街マップを開かない。初回起動では map (デフォルト ON) と
+                チュートリアルの表示条件が同時に成立するため、判定完了 (tutorialChecked) かつ
+                チュートリアル非表示のときだけ開く。これで初回のマップちらつきと、チュートリアル
+                裏でのマップ mount/ポーリングを防ぐ。チュートリアル完了時は reload が走るので、
+                現在地が設定された状態で改めてマップが現在地中心で開く。 */}
+            {isMapModalOpen && tutorialChecked && !showTutorial && (
                 <ModalOverlay onClose={() => setIsMapModalOpen(false)}>
                     <div className={cityMapStyles.modalShell}>
                         <CityMap

@@ -220,7 +220,9 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         fetchData();
     };
 
-    // 初回: viewport が描画されたら world の中心がビューポート中央に来るよう view を初期化
+    // 初回: viewport が描画されたら、ユーザーの現在地 Building をビューポート中央に
+    // 据えて view を初期化する。現在地が不明なら world 中央へフォールバック。
+    // building 一覧 (= data) が揃わないと現在地座標を解決できないので data を待つ。
     useEffect(() => {
         if (initializedRef.current) return;
         const vp = viewportRef.current;
@@ -228,13 +230,36 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         const w = vp.clientWidth;
         const h = vp.clientHeight;
         if (w === 0 || h === 0) return;
+        if (!data) return; // 現在地座標を解決するため building 一覧の到着を待つ
+
+        const list = data.buildings ?? [];
+        const targetId = currentBuildingId ?? data.user_current_building_id ?? null;
+
+        // 現在地 Building のセル中央をビューポート中央に合わせる中心点を求める。
+        // 初回なのでユーザー編集中の座標 (editedPositions) は無く、DB値 > 擬似座標で解決。
+        let center: { x: number; y: number } | null = null;
+        if (targetId) {
+            const idx = list.findIndex(b => b.id === targetId);
+            if (idx >= 0) {
+                const b = list[idx];
+                const pos = (b.map_x != null && b.map_y != null)
+                    ? { x: b.map_x, y: b.map_y }
+                    : pseudoBuildingPosition(b.id, idx, list.length);
+                // セルは rich で約 200×180。左上 anchor なので半分ずらして中央を狙う。
+                center = { x: pos.x + 100, y: pos.y + 90 };
+            }
+        }
+        // 現在地が一覧に無い (region スコープ等) 場合は world 中央。
+        const fallback = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+        const c = center ?? fallback;
+
         updateView({
-            x: w / 2 - WORLD_WIDTH / 2,
-            y: h / 2 - WORLD_HEIGHT / 2,
+            x: w / 2 - c.x,
+            y: h / 2 - c.y,
             scale: 1,
         });
         initializedRef.current = true;
-    }, [data, updateView]);
+    }, [data, currentBuildingId, updateView]);
 
     // ホイールズーム: cursor 位置を中心にスケール
     // React の onWheel は passive: true で preventDefault が効かないため直接購読
