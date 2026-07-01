@@ -12,6 +12,16 @@
       "name": "metadata",
       "description": "Optional metadata",
       "required": false
+    },
+    {
+      "name": "track_context",
+      "description": "現在の Track の足場 (タイトル / ID / intent / 現在のタスクリスト)。SubLineScheduler が毎 Pulse 組み立てて渡す。action 冒頭の {track_context} に展開される",
+      "required": false
+    },
+    {
+      "name": "track_id",
+      "description": "この Pulse が属する Track の ID。タスク管理スペルの例 {track_id} に展開される",
+      "required": false
     }
   ],
   "router_callable": false,
@@ -20,7 +30,7 @@
     {
       "id": "main_line_judgment",
       "type": "llm",
-      "action": "{track_context}\n\nあなたは今「自律作業モード」です。\n\nあなたは今、自律 Track の Pulse の中にいます。上記の intent とタスクリストを踏まえて、このターンで何をすべきかを内的独白で書いてください。\n\nタスク管理スペル（タスクは上記タスクリストの `task:N` で指定します）:\n- タスクを追加: `/spell name='task_add' args={\"track_id\":\"{track_id}\",\"title\":\"...\"}`\n- タスクをステップに分解: `/spell name='task_decompose' args={\"task_ref\":\"task:N\",\"steps\":[{\"title\":\"下調べ\"},{\"title\":\"実作業\"},{\"title\":\"仕上げ\"}]}`\n- ステップを更新: `/spell name='task_update_step' args={\"task_ref\":\"task:N\",\"step_position\":1,\"status\":\"completed\"}`\n- タスクを完了: `/spell name='task_done' args={\"task_ref\":\"task:N\"}`\n\nまた、作業の中で「今すぐではないが、いつかやってみたい」と思うことが浮かんだら、候補として書き留めておけます（後でその候補から新しい Track を始められます）:\n- やりたいこと候補を追加: `/spell name='desire_add' args={\"title\":\"...\"}`\n\n**スペル発動形式は行頭が `/spell name='ツール名' args={...}` で始まる必要があります**。\n\n発話は独白として自然に書いてください。",
+      "action": "{track_context}\n\nあなたは今「自律作業モード」です。\n\nあなたは今、自律 Track の Pulse の中にいます。上記の intent とタスクリストを踏まえて、このターンで何をすべきかを、あなたらしい言葉で、内なる声として書いてください。\n\nタスク管理スペル（タスクは上記タスクリストの `task:N` で指定します）:\n- タスクを追加: `/spell name='task_add' args={\"track_id\":\"{track_id}\",\"title\":\"...\"}`\n- タスクをステップに分解: `/spell name='task_decompose' args={\"task_ref\":\"task:N\",\"steps\":[{\"title\":\"下調べ\"},{\"title\":\"実作業\"},{\"title\":\"仕上げ\"}]}`\n- ステップを更新: `/spell name='task_update_step' args={\"task_ref\":\"task:N\",\"step_position\":1,\"status\":\"completed\"}`\n- タスクを完了: `/spell name='task_done' args={\"task_ref\":\"task:N\"}`\n\nまた、作業の中で「今すぐではないが、いつかやってみたい」と思うことが浮かんだら、候補として書き留めておけます（後でその候補から新しい Track を始められます）:\n- やりたいこと候補を追加: `/spell name='desire_add' args={\"title\":\"...\"}`\n\n**スペル発動形式は行頭が `/spell name='ツール名' args={...}` で始まる必要があります**。\n\n発話は、あなた本来の口調や人柄を保ったまま、内なる声として自然に綴ってください。作業ログのような無味な説明調にはしないでください。",
       "speak": false,
       "memorize": {
         "tags": [

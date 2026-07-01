@@ -311,6 +311,25 @@ class SAIVerseManager(
             "SubLineScheduler + InternalAlertPoller + EventScheduler instantiated [will start at startup])."
         )
 
+        # SEA runtime + Pulse controller (always enabled).
+        # ⚠️ 起動直後レース対策: 自律 tick スレッド (AutonomyManager) は直後の
+        # _run_persona_post_registration() で起動する。そのスレッドが最初の tick を
+        # 発火した時点で pulse_controller がまだ None だと、メタ判断が正規の
+        # playbook 経路 (submit_meta_judgment → finalize) に行けず、ロスのある
+        # レガシー _run_judgment にフォールバックする。レガシー経路は
+        # meta_judgment_log は書くが line_role='meta_judgment' の SAIMemory
+        # メッセージを保存しないため、ペルソナの記憶に「なぜその Track を始めたか」
+        # が残らない (実害観測: 2026-06-29 14:34 の共創小説 Track)。
+        # → tick スレッド起動より前に、ここで確実に初期化しておく。
+        self.sea_runtime: SEARuntime = SEARuntime(self)
+        self.pulse_controller: PulseController = PulseController(self.sea_runtime)
+        # pulse_dispatch.md §6.2: Track 状態変化で current pulse を cancel する経路。
+        # メタ判断結果として Track が pending に押し出された場合、その Track 起点の
+        # 進行中 Pulse は意味を失うので cancellation_token.cancel() で止める。
+        self.track_manager.add_status_change_observer(
+            self.pulse_controller.on_track_status_change
+        )
+
         # --- Step 5: Load Dynamic States from DB ---
         # データベースから動的な状態（ペルソナ、ユーザー状態、入室状況）を読み込み、
         # メモリ上のオブジェクトに反映させます。
@@ -455,18 +474,8 @@ class SAIVerseManager(
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
-        # SEA runtime (always enabled)
-        self.sea_runtime: SEARuntime = SEARuntime(self)
-        
-        # Pulse controller for managing concurrent playbook executions
-        self.pulse_controller: PulseController = PulseController(self.sea_runtime)
-
-        # pulse_dispatch.md §6.2: Track 状態変化で current pulse を cancel する経路。
-        # メタ判断結果として Track が pending に押し出された場合、その Track 起点の
-        # 進行中 Pulse は意味を失うので cancellation_token.cancel() で止める。
-        self.track_manager.add_status_change_observer(
-            self.pulse_controller.on_track_status_change
-        )
+        # NOTE: sea_runtime / pulse_controller はペルソナ登録より前 (Step 5 直前) で
+        # 初期化済み。起動直後の自律 tick レース対策のため意図的に前倒ししている。
 
         # Stop event registry for user-initiated generation cancellation
         self._active_stop_events: Dict[str, threading.Event] = {}

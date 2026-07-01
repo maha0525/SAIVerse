@@ -79,10 +79,14 @@ def _format_spells(
             track_type = decision.get("track_type") or "autonomous"
             intent = decision.get("intent") or ""
             if title:
+                # META が「今これを始める」と決めた以上、unstarted で次の META まで
+                # 待たせるのは無駄。activate=True で即 running にする (Pulse 完了時
+                # deferred で適用 → 直後の自律 tick が着手)。
                 return [("track_create", {
                     "title": title,
                     "track_type": track_type,
                     "intent": intent,
+                    "activate": True,
                 })]
             return []
         if decision.get("type") == "promote":
@@ -92,11 +96,14 @@ def _format_spells(
             title = decision.get("title")
             intent = decision.get("intent") or ""
             if candidate_ref and title:
+                # 昇格した Track も即 running にする (unstarted で次の META まで
+                # 待たせない)。activate は Pulse 完了時 deferred で適用される。
                 return [("track_create", {
                     "title": title,
                     "track_type": "autonomous",
                     "intent": intent,
                     "from_candidate": candidate_ref,
+                    "activate": True,
                 })]
             return []
         return []
@@ -107,10 +114,12 @@ def _format_spells(
         track_type = create.get("track_type") or "autonomous"
         intent = create.get("intent") or ""
         if title:
+            # idle で新規作成した Track も即 running にする (次の META 待ち回避)。
             return [("track_create", {
                 "title": title,
                 "track_type": track_type,
                 "intent": intent,
+                "activate": True,
             })]
         return []
 

@@ -528,9 +528,17 @@ class MetaLayer:
         # 並列レーンとして起動する (旧: runtime.run_meta_user 直叩き)。
         pulse_controller = getattr(self.manager, "pulse_controller", None)
         if pulse_controller is None:
+            # 通常はここに来ない: saiverse_manager.__init__ が自律 tick スレッド起動
+            # (_run_persona_post_registration) より前に pulse_controller を初期化する
+            # ため、本番のレースは閉じている (2026-06-29 14:34 の起動直後レース対策)。
+            # それでも None の場合のみ、互換のためレガシー経路にフォールバックする。
+            # ⚠️ レガシー _run_judgment は line_role='meta_judgment' の SAIMemory 保存を
+            #    行わない (判断がペルソナの記憶に残らない) 既知の欠陥がある。
+            #    到達したら警告として残す。除去は docs/issues 参照。
             logging.warning(
                 "[meta-layer] No pulse_controller on manager — cannot run meta_judgment Playbook; "
-                "falling back to legacy path"
+                "falling back to legacy path (lossy: no SAIMemory record). persona=%s",
+                persona.persona_id,
             )
             self._run_judgment(persona, alert_track_id, context)
             return

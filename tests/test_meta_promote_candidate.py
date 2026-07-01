@@ -122,6 +122,8 @@ class FinalizePromoteTest(unittest.TestCase):
         self.assertEqual(name, "track_create")
         self.assertEqual(args["from_candidate"], "task:3")
         self.assertEqual(args["title"], "言語学習")
+        # 昇格した Track は即 running にする (次の META まで待たせない)
+        self.assertTrue(args.get("activate"), "promoted track must auto-activate")
 
     def test_promote_without_ref_is_noop(self):
         from builtin_data.tools.meta_judgment_finalize import _format_spells
