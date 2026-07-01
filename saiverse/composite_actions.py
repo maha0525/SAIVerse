@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import functools
+import contextvars
 import inspect
 import json
 import logging
@@ -463,13 +463,19 @@ def _mcp_tool_names(conn) -> set:
     return names
 
 
-def _make_call_awaitable(conn, mcp_names: set, tool: str, args: Dict[str, Any]):
-    """1 件のツール呼び出しを awaitable にして返す (MCP 優先 → native fallback)。
+def _make_call_awaitable(
+    conn, mcp_names: set, tool: str, args: Dict[str, Any],
+    ctx: contextvars.Context,
+):
+    """1 件のツール呼び出しを awaitable にして返す (native 優先 → MCP fallback)。
 
-    MCP ツール (gateway 接続上に存在する名前) は従来どおり ``conn.call_tool``
-    に流す (= Phase 1 の挙動を変えない)。 MCP に存在しない名前は SAIVerse 側の
-    native tool (例: ``servo8_set_angle`` — 内部で汎用 ``i2c_write`` を叩く)
-    として ``TOOL_REGISTRY`` から解決する。
+    **native tool を優先する**。 native wrapper (move_head / set_avatar 等) は
+    現在ペルソナが降りている機体の gateway インスタンスへの per-vessel 解決を
+    内包するため、 複数機体では生 MCP ツール (``conn.call_tool``、 単一の global
+    接続前提) では正しい機体に振り分けられない。 native tool が存在しない名前
+    のみ、 gateway 接続上の生 MCP ツールとして ``conn.call_tool`` に流す
+    (= global / per_persona scope の addon 向けの従来経路)。 conn が無い
+    (= instance_template で global インスタンスが無い) 場合は native のみで動く。
 
     native tool は同期 callable で、 内部で MCP イベントループに
     ``run_coroutine_threadsafe(...).result()`` でブロックする (env3 / move_head
@@ -480,24 +486,32 @@ def _make_call_awaitable(conn, mcp_names: set, tool: str, args: Dict[str, Any]):
     既に vessel building gate 済みで、 ワーカースレッドには persona context が
     伝播しないため、 内側で再度ゲートを通すと誤判定で弾かれる。
     """
-    if tool in mcp_names:
-        return conn.call_tool(tool, args)
-
     from tools import TOOL_REGISTRY
 
     func = TOOL_REGISTRY.get(tool)
-    if func is None:
-        async def _missing():
-            raise RuntimeError(
-                f"ツール '{tool}' は MCP サーバーにも native tool にも見つかりません"
-            )
-        return _missing()
+    if func is not None:
+        target = getattr(func, "__wrapped__", func)  # building-gate ラッパを外す
+        if inspect.iscoroutinefunction(target):
+            # async native は _execute_action_async の Task 文脈 (persona_context
+            # 伝播済み) で await されるので、 そのまま返せば文脈が乗る。
+            return target(**args)
+        # sync native は executor スレッドに逃がすが、 run_in_executor は
+        # contextvars を伝播しないため、 捕捉済み ``ctx`` を ``ctx.run`` で張り
+        # 直す。 これで native wrapper 内の resolve_vessel_connection が現在
+        # ペルソナを解決でき、 per-vessel に正しく振り分く (= 直の spell が
+        # _run_spell_tool_async の ``_run`` で persona_context を張るのと同形)。
+        loop = asyncio.get_running_loop()
+        return loop.run_in_executor(None, lambda: ctx.run(target, **args))
 
-    target = getattr(func, "__wrapped__", func)  # building-gate ラッパを外す
-    if inspect.iscoroutinefunction(target):
-        return target(**args)
-    loop = asyncio.get_running_loop()
-    return loop.run_in_executor(None, functools.partial(target, **args))
+    if conn is not None and tool in mcp_names:
+        return conn.call_tool(tool, args)
+
+    async def _missing():
+        raise RuntimeError(
+            f"ツール '{tool}' は native tool にも MCP サーバーにも見つかりません"
+            " (複数機体では native wrapper 経由が必要です)"
+        )
+    return _missing()
 
 
 async def _execute_action_async(
@@ -505,10 +519,27 @@ async def _execute_action_async(
     action: ActionDefinition,
     param_values: Optional[Dict[str, Any]] = None,
 ) -> str:
-    conn = _get_mcp_connection(addon_name)
-    mcp_names = _mcp_tool_names(conn)
+    # global MCP 接続は native tool 主体のアクションには必須でない。 addon が
+    # instance_template scope (複数機体) だと global インスタンスは存在せず
+    # _get_mcp_connection が失敗するが、 native wrapper が per-vessel 解決する
+    # ので、 conn 不在でも native のみのアクションは実行できる。 生 MCP ツール
+    # だけは conn 不在時に _make_call_awaitable が明示エラーにする。
+    try:
+        conn = _get_mcp_connection(addon_name)
+    except RuntimeError as exc:
+        LOGGER.info(
+            "composite_actions: no global MCP conn for %s (%s); "
+            "native-wrapper-only mode", addon_name, exc,
+        )
+        conn = None
+    mcp_names = _mcp_tool_names(conn) if conn is not None else set()
     param_values = param_values or {}
     results: List[str] = []
+
+    # persona_context (execute_action の run_coroutine_threadsafe で本 Task へ
+    # 伝播済み) を捕捉し、 native tool を executor に逃がす際に ``ctx.run`` で
+    # 張り直すために使う (_make_call_awaitable 参照)。
+    _ctx = contextvars.copy_context()
 
     for i, step in enumerate(action.steps):
         if step.type == "wait":
@@ -529,7 +560,7 @@ async def _execute_action_async(
                 for call in step.calls
             ]
             coros = [
-                _make_call_awaitable(conn, mcp_names, tool, args)
+                _make_call_awaitable(conn, mcp_names, tool, args, _ctx)
                 for tool, args in resolved
             ]
             step_results = await asyncio.gather(*coros, return_exceptions=True)
@@ -715,6 +746,16 @@ def get_available_tool_schemas(addon_name: str) -> List[Dict[str, Any]]:
             if meta.get("addon_name") != addon_name:
                 continue
             conn = manager._connections.get(f"{qname}:global")
+            if conn is None:
+                # 複数機体 (instance_template): global が無いので、 tool 一覧の
+                # 取得元として任意の稼働インスタンスを 1 つ使う (どの機体でも
+                # gateway が公開する MCP ツール名は同じ)。
+                prefix = f"{qname}:instance:"
+                conn = next(
+                    (c for k, c in manager._connections.items()
+                     if k.startswith(prefix)),
+                    None,
+                )
             if conn is None:
                 continue
             for tool_def in getattr(conn, "tools", []):

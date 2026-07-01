@@ -926,3 +926,59 @@ idf.py -p COM3 app-flash
 - upstream: `https://github.com/kisaragi-mochi/stackchan-mcp`
 - `docs/intent/stackchan_vessel.md` §「Phase X'」(= 上位概念のスコープ定義)
 - `docs/intent/stackchan_avatar_pipeline.md` §B-0 (= 3 層モデル) / §E (= upstream PR ストーリー)
+
+## 追補: PR-O — ownership lock を per-WS_PORT に scope（複数機体対応、2026-07-01 実装・未投稿）
+
+**次セッションでの PR 化用ハンドオフ。** Stack-chan 複数機体（1 gateway = 1 device を機体数ぶん別ポートで同時起動、A-2 方式）を成立させる過程で必要になった gateway 側の唯一の改修。SAIVerse 側で実機検証済み（2 機体同時起動を確認）なので、投稿条件（Phase 検証後に出す）は満たしている。
+
+### 概要
+
+| PR | 内容 | base | 依存 | 状態 |
+|---|---|---|---|---|
+| **PR-O** | fix(ownership): scope the gateway ownership lock per WS port | upstream `main` | 独立 | fork checkout に実装済み・**未コミット**、未投稿 |
+
+### 動機・背景
+
+- gateway は `~/.stackchan-mcp/owner.lock` という **machine-global の単一 ownership lock** を持ち、`acquire_lock` が「生きた pid が既に握っていれば `OwnershipError`」で拒否する（`stackchan_mcp/ownership.py`: `LOCK_PATH = LOCK_DIR / "owner.lock"`）。
+- これは「同一 device を 2 つの gateway が奪い合わない」ための機構だが、**1 device = 1 gateway を機体数ぶん別ポートで同時に立てる構成**（各 gateway は別 WS ポートで別 device を所有）を、global lock が誤って弾く。実機で 2 台目 gateway が `unhandled errors in a TaskGroup`（= OwnershipError で subprocess 即死）になった。
+- lock の本来の不変条件は「**1 gateway = 1 device を所有**」であり、global lock はそれを「1 マシン 1 gateway」と過剰にエンコードしていた。**per-WS_PORT に scope するのが本来正しい**（バグ修正として説明可能）。
+
+### 変更内容（実装済み、`temp/stackchan-mcp/gateway/stackchan_mcp/cli.py`）
+
+- `_ws_port_lock_path()` ヘルパ追加: `LOCK_DIR / f"owner-{ws_port}.lock"`（WS_PORT 未解決時は従来 `owner.lock` にフォールバック）。`_resolve_ws_port()` で WS_PORT を解決。
+- `_acquire_startup_lock` の `acquire_lock(...)` に `path=_ws_port_lock_path()` を渡す（stdio / streamable-http 両モード）。
+- release も per-port に統一: `_run_stdio_gateway` / streamable-http daemon の `release_lock_if_owner(info, _ws_port_lock_path())`、atexit 登録も同 path。
+- `--check`（`_run_ownership_check`）を `read_lock(_ws_port_lock_path())` に変更（旧 global を読んで誤報告する既存ユーザー影響を解消）。
+- `ownership.py` は無改修（`acquire_lock` / `read_lock` / `release_lock_if_owner` は元々 `path` 引数を取る）。
+
+### 既存ユーザー（単一機体）への影響
+
+- **機能的にはほぼ同一**: デフォルト WS_PORT=8765 のユーザーは lock が `owner.lock` → `owner-8765.lock` になるだけ。単一運用・同一ポート二重起動拒否は従来通り。
+- `--check` も per-port を読むよう直したので誤報告なし。
+- 移行時、古い `owner.lock` が orphan として残る（`--check` 以外は誰も読まない、無害）。
+- 「device 奪い合い防止」の意味が machine → port に変わるが、device は単一 WS URL（1 ポート）にしか繋がないので実害は限定的（別ポートの余分な idle gateway が理論上できうる程度）。
+
+### PR 投稿前に詰めるべき点
+
+1. **移行**: 旧 `owner-.lock` の掃除 / 検出をどうするか（無害だが説明が要る）。
+2. **lock の括り**: port スコープで十分か、`Device-Id`（MAC）等の device identity で括る方が upstream 的に筋が良いか。port は「1 gateway = 1 endpoint」の proxy として妥当だが、reviewer 好み次第。
+3. **upstream の multi-device ロードマップ確認**: kisaragi-mochi / xiaozhi-esp32 が multi-device に向かっているか。向かっているなら本 PR はその布石として位置づけられる。単一 device 前提が固い場合は「per-port lock は単一運用も壊さない安全な一般化」として提案。
+4. **PR description**: 「lock の本来の不変条件は 1 gateway=1 device、global は過剰」を明示。単一機体ユーザー非破壊を強調。`--check` 追随も含める。
+
+### fork 状態 / ブランチ手順
+
+- fork `maha0525/stackchan-mcp`、現在の作業ブランチ `integrate/all-fixes-2026-06-24`。**cli.py の変更は未コミット**。同ブランチにまはーの firmware WIP（`firmware/main/boards/stackchan/stackchan.cc`）も未コミットで同居しているので、**PR 化時は cli.py だけを切り出してコミット**すること（`git add gateway/stackchan_mcp/cli.py` のみ）。
+- 他 PR と同様、upstream/main から新ブランチを切って cherry-pick:
+  ```bash
+  cd temp/stackchan-mcp
+  git fetch upstream
+  git switch -c pr-o-ownership-lock-per-port upstream/main
+  # cli.py の per-port lock 変更を 1 commit として適用（未コミットなら先に integration で commit → cherry-pick、
+  # または upstream/main 上で直接パッチを再適用）
+  git push origin pr-o-ownership-lock-per-port
+  ```
+- SAIVerse addon 側 `mcp_servers.json` は fork branch を `--from git+...@integrate/all-fixes-2026-06-24` で参照。デプロイ時 uvx はブランチ ref をキャッシュするので、push 後は `uv cache clean` か `--refresh` で取り直させる（本セッションで確認済み: per-port lock を載せた版が uvx 経由でロードされ 2 機体同時起動に成功）。
+
+### 実機検証済み（2026-07-01）
+
+- 2 機体（stackchan_room=18765/8766, stackchan_2nd_room_city_a=8767/8768）を同時起動、各 gateway が `owner-18765.lock` / `owner-8767.lock` を個別取得（errlog の `acquired ownership lock (... lock=owner-XXXX.lock)` で確認）。別ペルソナが同時に首振り・発話・LED・複合アクションまで動作。→ 「実機で有用」を PR description で示せる。
