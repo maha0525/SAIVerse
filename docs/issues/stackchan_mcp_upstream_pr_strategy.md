@@ -982,3 +982,12 @@ idf.py -p COM3 app-flash
 ### 実機検証済み（2026-07-01）
 
 - 2 機体（stackchan_room=18765/8766, stackchan_2nd_room_city_a=8767/8768）を同時起動、各 gateway が `owner-18765.lock` / `owner-8767.lock` を個別取得（errlog の `acquired ownership lock (... lock=owner-XXXX.lock)` で確認）。別ペルソナが同時に首振り・発話・LED・複合アクションまで動作。→ 「実機で有用」を PR description で示せる。
+
+### 投稿後 CI / Codex 対応ラウンド（2026-07-02、pr-o コミット `5e61fd7` に amend 済み）
+
+初回投稿（cli.py のみ）で CI 2 件が赤 + Codex P2。全て pr-o 単一コミットに畳んで force-push で対応（CHANGELOG / Gateway test / Codex P2 いずれも同一 PR の一部として）。
+
+- **CHANGELOG check（赤→緑）**: gateway/ を触ったので `[Unreleased]` の `### Gateway` にエントリ追加が必須だった（`build.yml` の check が base↔head で [Unreleased] body の増分を要求）。#320 エントリを追記。
+- **Gateway test（赤→緑）**: upstream `tests/test_cli.py` が `release_lock_if_owner` / `read_lock` を旧 arity の lambda / `list.append` で monkeypatch していたため、per-port 化で `path` 引数が増えて 4 件 TypeError。モック 4 箇所を `path=None` 受けに更新（本番 `ownership.py` は元々 `path` 引数対応なので production は無改修で正しい。fork の integrate ブランチも同じ latent 破綻を持つが runtime 非影響）。
+- **Codex [P2] `.env` を check lock 選定前にロード**: `--check`（`_run_ownership_check`）が `_load_dotenv()` を通さず `_ws_port_lock_path()` を呼ぶため、WS_PORT が `.env` にしか無いと稼働機体が `owner-18765.lock` を持つ一方 `--check` は `owner-8765.lock` を見て別ポートを ready 誤報告。startup は `.env` ロード後にロックを取るので、`--check` も先頭で `_load_dotenv()` するよう修正（`--preflight` が `_run_preflight` 内で `.env` を読むのと同形）。回帰テスト `test_main_check_flag_inspects_per_ws_port_lock` を追加。
+- **未反映（follow-up 候補）**: 上記 3 点は pr-o のみ。fork `integrate/all-fixes-2026-06-24`（addon の uvx デプロイ元）の daac8a7 は cli.py のみで、test 修正・CHANGELOG・`.env`-before-check を持たない。runtime 影響は `--check` 診断の誤ポートのみ（通常の複数機体 runtime は per-port lock で成立済み）。整合させるなら integrate に backport 可。
