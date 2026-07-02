@@ -64,6 +64,20 @@ City単位だけだと、シティに紐づく全ペルソナの個別処理を�
    - `ai_version < current_version` ならペルソナ単位のアップデートハンドラを順次実行
 5. 全て成功したら `LAST_KNOWN_VERSION` を `current_version` に更新
 
+### 新規作成エンティティは作成時点でバージョンを刻む
+
+City / AI の `LAST_KNOWN_VERSION` は `database/models.py` の column default
+(`_current_saiverse_version`) により、**ORM 経由の新規作成時点で現行バージョンが
+刻まれる**。これがないと、実行中のバージョンで作ったペルソナも `NULL` のまま残り、
+次回起動時に「version-aware 以前 (v0.0.0)」とみなされて全ハンドラ（`dynamic_state_reset`
+の SAIMemory アップデート通知を含む）が走ってしまう。作成直後のペルソナの最初の会話に
+アップデート通知ノイズが乗るのを防ぐため、作成時点で `current >= target` を成立させる。
+
+`NULL` は「version-aware システム導入 (v0.3.0) より前から存在するエンティティ」だけを
+意味するよう限定される。マイグレーション（`database/migrate.py`）の行コピーは生 SQL
+INSERT / `ALTER ADD COLUMN` で行われ、Python の column default を発火させないため、
+既存の pre-version-aware 行は `NULL` のまま保たれる（= 正しくハンドラ対象に残る）。
+
 ### アップデートハンドラの責務
 
 各ハンドラは「あるバージョン範囲で走るべき処理」を定義する。

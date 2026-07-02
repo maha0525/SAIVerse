@@ -15,6 +15,32 @@ from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
+
+def _current_saiverse_version():
+    """新規 City / AI 行に「作成時点の SAIVerse バージョン」を刻む column default。
+
+    起動時のバージョン認識アップグレード (saiverse/upgrade.py) は
+    ``LAST_KNOWN_VERSION IS NULL`` を「version-aware 以前 (v0.0.0)」とみなして
+    全ハンドラを適用する。この default が無いと、実行中のバージョンで新規作成
+    したペルソナも NULL のまま残り、次回起動時にアップグレードハンドラ (SAIMemory
+    への「アップデート検知」通知を含む) が走ってしまい、最初の会話にノイズが乗る。
+    作成時点で現行バージョンを刻んでおけば ``current >= target`` で no-op になる。
+
+    - ORM 経由の INSERT (ペルソナ/シティ作成・seed) にのみ効く。
+    - マイグレーション (生 SQL INSERT / ALTER ADD COLUMN) は Python default を
+      発火させないため、既存の pre-version-aware 行は NULL のまま保たれる
+      (= 意図通りハンドラ対象に残る)。
+    - バージョン取得に失敗した場合は None を返し、従来どおり NULL 扱いにする。
+
+    循環 import (saiverse -> database.models) を避けるため関数内で遅延 import する。
+    """
+    try:
+        from saiverse import __version__
+        return __version__
+    except Exception:
+        return None
+
+
 # --- テーブルモデル定義 ---
 
 class User(Base):
@@ -52,7 +78,7 @@ class AI(Base):
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     MEMOPEDIA_INDEX_LIMIT = Column(Integer, nullable=True)  # Max pages per category in Memory Weave index (NULL → default 100)
-    SPELL_ENABLED = Column(Boolean, default=False, nullable=False)  # Per-persona spell system toggle
+    SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
     # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的
     # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
@@ -68,7 +94,9 @@ class AI(Base):
     SLEEP_ON_CACHE_EXPIRE = Column(Boolean, default=True, nullable=False)
     # Last SAIVerse version this persona was successfully running on. NULL means
     # the persona predates the version-aware system (treat as v0.3.0 or earlier).
-    LAST_KNOWN_VERSION = Column(String(64), nullable=True)
+    # 新規作成時は現行バージョンを刻む (_current_saiverse_version) ことで、作成直後の
+    # ペルソナが次回起動でアップグレード通知を受けてしまうのを防ぐ。
+    LAST_KNOWN_VERSION = Column(String(64), nullable=True, default=_current_saiverse_version)
     # Phase 4-e: Per-persona meta-judgment Pulse configuration (JSON).
     # Keys: cache_threshold_ratio (float 0-1), max_retries (int), retry_backoff_seconds (int).
     # NULL means use built-in defaults (see saiverse/meta_layer.py:_load_judgment_config).
@@ -157,7 +185,8 @@ class City(Base):
     MAP_BACKGROUND_IMAGE = Column(String(512), nullable=True)
     # Last SAIVerse version this city was successfully running on. NULL means
     # the city predates the version-aware system (treat as v0.3.0 or earlier).
-    LAST_KNOWN_VERSION = Column(String(64), nullable=True)
+    # 新規作成時は現行バージョンを刻む (AI と同様、作成直後のアップグレード通知を防ぐ)。
+    LAST_KNOWN_VERSION = Column(String(64), nullable=True, default=_current_saiverse_version)
     __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):

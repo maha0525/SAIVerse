@@ -313,6 +313,39 @@ def _v0_3_0_dev2_legacy_schedule_selected_playbook(*, session: "Session", ai: "A
         )
 
 
+# ---- v0.3.0.dev3: SPELL_ENABLED デフォルト ON 化 ----
+
+
+def _v0_3_0_dev3_spell_enabled_default_on(*, session: "Session", ai: "AI") -> None:
+    """Spell 機能が基幹機能化したため、既存ペルソナの ``AI.SPELL_ENABLED`` を
+    ON に引き上げる。
+
+    背景: Spell はもともと ``SPELL_ENABLED`` デフォルト OFF で導入されたが、
+    判断ループ・Track 続行・native tool コール撲滅（prefix キャッシュ共用）の
+    中核を担う基幹機能に育った。v0.3.0.dev3 でカラムデフォルトを True に変更した
+    が、既存 DB の行には既に False が保存済みで、スキーマ差分が出ないため
+    ``database/migrate.py`` の追加系/全書換どちらの経路でも書き換わらない。
+    そこでバージョン認識アップグレードで既存ペルソナを一括 ON にする。
+
+    「以前のバージョンから上げてきた場合も初期値 ON」というリリース方針に沿う。
+    OFF を明示選択したペルソナと「触っていないだけの OFF」を DB 上で区別できない
+    ため、本ハンドラは一律 True にする（= 移行時点の初期値を ON に揃える）。
+
+    冪等性: True を代入するだけなので何度走らせても同じ状態に収束する。Phase 1 の
+    機構により、通常は dev2→dev3 の遷移で1度だけ走る。
+
+    副作用の局所化: ``ai`` 単体を触るだけで他ペルソナには影響しない。
+    """
+    persona_id = ai.AIID
+    old_value = bool(ai.SPELL_ENABLED)
+    ai.SPELL_ENABLED = True
+    LOGGER.info(
+        "[handler:v0_3_0_dev3_spell_enabled_default_on] persona=%s: "
+        "SPELL_ENABLED %s -> True",
+        persona_id, old_value,
+    )
+
+
 # ---- ハンドラ登録リスト ----
 
 # 各ハンドラは to_version の昇順に書くと読みやすい（実行順は upgrade.py 側で
@@ -356,6 +389,19 @@ HANDLERS: List[UpgradeHandler] = [
             "meta_user_manual removal) to the new pre_spells format "
             "(/spell name='X'). The runtime resolves the missing args via "
             "spell_args_decider Playbook at execution time."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev3_spell_enabled_default_on",
+        scope="ai",
+        from_version="0.3.0.dev2",
+        to_version="0.3.0.dev3",
+        run=_v0_3_0_dev3_spell_enabled_default_on,
+        description=(
+            "Enable AI.SPELL_ENABLED for all existing personas. Spell has become "
+            "a core feature; the column default flips to True in v0.3.0.dev3, but "
+            "existing rows already hold False and produce no schema diff, so this "
+            "handler brings migrated personas up to the new ON default."
         ),
     ),
 ]
