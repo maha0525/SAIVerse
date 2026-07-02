@@ -50,7 +50,7 @@
     ACTIVITY_STATE を Idle に降格（無音スピンを断つ）+ `add_building_event` で host 通知
     （event_message タグでペルソナ/UI に届く）。成功でカウンタリセット。
   - テスト: `tests/test_meta_judgment_recovery.py`（4件）+ 既存 meta/autonomy テスト（50件）pass。
-  - **残**: 実機で「メタ判断を連続失敗させたとき Idle に落ちて通知が出る」確認。**検証ブロッカー（2026-06-28）**: そのためにまず**失敗を意図的に注入するデバッグ機能**が要る（自然発生の API 失敗を待つのは非現実的）。デバッグ機能を用意してから検証する＝**順序として少し後**。
+  - **残（← 現在の検証対象, 2026-07-02）**: 実機で「メタ判断を連続失敗させたとき Idle に落ちて通知が出る」確認。検証ブロッカーだった**失敗注入デバッグ機能は実装済み**（トグルで強制失敗させられる）→ 再起動して連続失敗→Idle降格→host 通知の一巡を確認するだけ。まはーが検証中。
 - **依存**: ②③とは独立。
 
 ### ② トラック操作スペルの権限制御 ✅ — 実装完了・実機検証済（2026-06-28）
@@ -184,7 +184,7 @@
 - **実 DB 適用済（まはー環境, 2026-06-28）**: `Track.tasks_json` ドロップ → migrate.py 全書換でフックが persona_task に保全（short_id 採番込）。全テーブル行数完全一致（無損失）・2 tracks のタスク移行・standalone tasks.db 全ペルソナ空。**4スペル全て自律 Track 上で正常作動確認**。
 - **残派生**: UI 表示の出し分け（`api/routes/people/tasks.py` candidate / track-task）→ ③で候補概念が立ってから一緒にやるのが自然。
 
-### ③ 自律の源泉（欲求エンジン + やりたいこと候補）✅ — 実装完了・実機検証待ち（2026-06-28）
+### ③ 自律の源泉（欲求エンジン + やりたいこと候補）🟡 — 実装完了、実機検証でバグ1件発見→修正（再検証待ち, 2026-07-02）
 
 **実装サマリ（2026-06-28）**: autonomous_desire.md §8 タスク 1〜7 完了・テスト緑。
 - `desire` note_type（`NoteManager.ensure_desire_note` singleton、user 作成不可）。
@@ -193,7 +193,12 @@
 - `LIFE_PURPOSE` カラム（追加系 migration・安全）＋ヘルパ＋`LifePurposeSection`（① 駆動文＋② 目的、order 560）＋`life_purpose_set` スペル。**初回目的設定は促し駆動**（`LifePurposeSection` が未設定時に促し render→ペルソナが自分で決めて保存）。**当初「メインモード切替＋ユーザー確認＋自律停止」の重い対話フローを設計したが、まはーに却下され全廃**。
 - `track_create(from_candidate='task:N')` で候補昇格（`promote_to_track`、候補プールから自動消去、META/CONVERSATION のみ）。
 - テスト: `test_open_notes.py`（11）/ `test_note_manager.py`（desire 3）/ `test_life_purpose.py`（10）/ `test_mode_spell_permissions.py`（desire_add）。
-- **残**: 実機検証（候補→head→昇格→消去の一巡、目的促し→保存）＋ `LIFE_PURPOSE` の実 DB migration。
+- **実機検証（2026-07-02）**: 候補→head→昇格→消去の一巡、目的設定→ライフビュー表示まで確認。`LIFE_PURPOSE` の実 DB migration 適用済。
+- **🐛 バグ発見→修正（2026-07-02, quon_city_a）**: 生きる目的設定のメタ判断が走った後、本人が**自分で定めた目的を認識しない**応答をした。
+  - **真因**: committed のメタ判断が `line_role` フィルタで main_line コンテキストから除外されていた。`_payload_passes_context_filter`（`saiverse_memory/adapter.py`）が `required_line_roles=['main_line']` のとき `line_role='meta_judgment'` を scope 問わず弾いていた。設計意図（`committed_to_main_cache=TRUE` = 既にメインキャッシュに乗っている, `03_data_model.md §176`）と食い違う**実装バグ**。life_purpose メタ判断は `life_purpose_set` スペル発火で既に `scope='committed'` だったが、line_role で消えていた。
+  - **修正**: `_payload_passes_context_filter` を「main_line 要求時、committed なメタ判断も通す」に一元修正。会話コンテキスト＋Metabolism カウント両経路に効く。discardable のメタ判断は従来通り除外（`_build_recent_judgments_block` が judge プロンプトへ別注入、二重なし）。Track 切替の確定独白も同様に会話に載るようになる（これまで載っていなかったのがバグ）。
+  - テスト: `test_payload_context_filter.py` に committed メタ判断の包含 / discardable 除外 / sub_line 非昇格の3件追加、既存 meta/life_purpose/history 系緑。**既存データで効く**（quon の判断は既に committed なので再設定不要、次会話で認識するはず）。**残**: まはーが quon で再検証（会話して目的を認識するか）。
+- **残派生**: ③-0 の UI 表示出し分け（`api/routes/people/tasks.py` candidate / track-task）はまだ。候補概念が立った今、単独で片付けられる。
 
 ---
 
@@ -229,13 +234,14 @@
 
 ---
 
-## 推奨着手順（2026-06-28 更新）
+## 推奨着手順（2026-07-02 更新）
 
 1. ~~② 権限ゲート~~ ✅ 完了・実機検証済。
 2. ~~③-0 Task モデル一本化~~ ✅ 完了・実機検証済。
-3. **③ 自律の源泉（欲求エンジン＋候補）** ← **次の本丸**。最初に **Note↔Task 紐付け＋`open_notes` head セクション**を建てる（これが無いと候補 Task が context に出ず見えない＝順序制約）。UI 表示出し分け（③-0 残派生）もここで同梱。
-4. ④ オートノミー系 ↔ Track 整理（②③の結論を受けて）。
-5. ① メタ判断リカバリの実機検証 — **失敗注入デバッグ機能**を先に用意してから。③と並行で独立に挿せる。
+3. ③ 自律の源泉（欲求エンジン＋候補）🟡 実装完了。実機検証で目的認識バグ発見→修正済（committed メタ判断が main_line 未載）。まはー再検証待ち。
+4. **① メタ判断リカバリの実機検証** ← **いま検証中**。失敗注入トグル実装済み → 再起動して連続失敗→Idle降格→通知を確認。
+5. **④ オートノミー系 ↔ Track 整理** ← ②③の結論が揃ったので着手可能。`self_reflection` 欠けの扱いもここで決まる。
+6. ③-0 残派生: UI 表示出し分け（candidate / track-task）。単独で挿せる小タスク。
 
 ---
 
@@ -244,7 +250,7 @@
 - ~~② の権限ガードを「表示から落とす」か「実行時に拒否」か~~ → **決着**: リスト不変・実行時ゲート。
 - ~~② のモード命名~~ → **決着**: メインモード / 自律制御モード / 自律作業モード / 分身モード（2026-06-27）。
 - ~~② メインモードのスペル返り値プライバシー（他ペルソナ不可視）の実装状況~~ → **既実装で確認済**（全スペル共通で他ペルソナ不可視）。
-- ① の失敗注入デバッグ機能をどう作るか（env フラグで強制例外 / 専用デバッグ API 等）。
-- ③ の `open_notes` head セクションのキャッシュ制御（`visual_context`/`memory_weave` と同方式）。
-- ③ の desire ノートの "消えない" をどう担保するか（forgotten / close からの保護）。
-- ④ で `self_reflection` を足すか否か、`autonomy_*` を Track 機構へ寄せるか廃すか。
+- ~~① の失敗注入デバッグ機能をどう作るか~~ → **決着**: トグル実装済み。あとは実機検証（2026-07-02, まはー検証中）。
+- ~~③ の `open_notes` head セクションのキャッシュ制御~~ → **決着**: `visual_context`/`memory_weave` 同方式（capture 凍結→末尾通知→Metabolism 再 capture）で実装・検証済。
+- ~~③ の desire ノートの "消えない" をどう担保するか~~ → 実装済み（singleton `ensure_desire_note`）。実機一巡で消えないこと確認済。
+- ④ で `self_reflection` を足すか否か、`autonomy_*` を Track 機構へ寄せるか廃すか。 ← **残る唯一の設計未決**。

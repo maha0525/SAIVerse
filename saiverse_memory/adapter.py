@@ -1976,7 +1976,27 @@ def _payload_passes_context_filter(
     if required_line_roles:
         payload_role = payload.get("line_role")
         effective_role = payload_role if payload_role is not None else "main_line"
-        if effective_role not in required_line_roles:
+        role_ok = effective_role in required_line_roles
+        # committed なメタ判断は「メインキャッシュに乗った確定来歴」として main_line
+        # 文脈に属する (Track 切替の確定独白 / 生きる目的の初回設定など)。
+        # meta_judgment_finalize は Track 操作 or 自己定義スペルが発火したとき
+        # scope='committed' で書き、_promote_meta_judgment_in_pulse が Track 切替時に
+        # discardable→committed へ昇格する。設計意図は committed_to_main_cache=TRUE
+        # = 既にメインキャッシュに乗っている
+        # (docs/intent/persona_cognition/03_data_model.md §176)。line_role が
+        # 'meta_judgment' のままでも committed なら main_line 要求で通す。
+        # discardable のメタ判断は従来通り除外され、judge プロンプトへは
+        # MetaLayer._build_recent_judgments_block が別途注入する (二重にならない)。
+        if (
+            not role_ok
+            and effective_role == "meta_judgment"
+            and "main_line" in required_line_roles
+        ):
+            payload_scope = payload.get("scope")
+            effective_scope = payload_scope if payload_scope is not None else "committed"
+            if effective_scope == "committed":
+                role_ok = True
+        if not role_ok:
             return False
 
     # Scope filter. Legacy scope IS NULL maps to 'committed'.

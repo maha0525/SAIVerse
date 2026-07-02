@@ -89,6 +89,43 @@ def test_line_role_multi_value_filter():
 
 
 # ---------------------------------------------------------------------------
+# 1-b. committed なメタ判断は main_line 文脈に属する
+#      (Track 切替の確定独白 / 生きる目的の初回設定。03_data_model.md §176)
+# ---------------------------------------------------------------------------
+
+def test_committed_meta_judgment_passes_main_line_filter():
+    """committed なメタ判断は line_role='meta_judgment' のままでも main_line 要求で
+    通る (committed_to_main_cache=TRUE = 既にメインキャッシュに乗った確定来歴)。"""
+    payload = {"line_role": "meta_judgment", "scope": "committed"}
+    assert _payload_passes_context_filter(
+        payload,
+        required_line_roles=["main_line"],
+        required_scopes=["committed"],
+    ) is True
+
+
+def test_discardable_meta_judgment_still_rejected_by_main_line_filter():
+    """discardable なメタ判断は従来通り除外 (judge プロンプトへは
+    _build_recent_judgments_block が別経路で注入)。committed 昇格の抜け道が
+    discardable に波及していないことを担保する。"""
+    payload = {"line_role": "meta_judgment", "scope": "discardable"}
+    assert _payload_passes_context_filter(
+        payload,
+        required_line_roles=["main_line"],
+        required_scopes=["committed"],
+    ) is False
+
+
+def test_committed_meta_judgment_not_admitted_without_main_line_request():
+    """committed 昇格は main_line を要求したときだけ。sub_line のみ要求時には
+    committed なメタ判断も通さない (main_line 文脈への昇格であって全許容ではない)。"""
+    payload = {"line_role": "meta_judgment", "scope": "committed"}
+    assert _payload_passes_context_filter(
+        payload, required_line_roles=["sub_line"]
+    ) is False
+
+
+# ---------------------------------------------------------------------------
 # 2. scope フィルタ
 # ---------------------------------------------------------------------------
 

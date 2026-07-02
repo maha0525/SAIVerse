@@ -103,10 +103,15 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 #
                 # Default policy:
                 #   - line_role IN ('main_line') AND scope IN ('committed')
-                #     → ペルソナのメインラインの会話履歴のみを context に含める
-                #   - meta_judgment Pulse の discardable メッセージは別経路
-                #     (MetaLayer._build_recent_judgments_block) で動的注入される
-                #     ので、ここでは載せない
+                #     → ペルソナのメインラインの会話履歴を context に含める
+                #   - committed なメタ判断 (line_role='meta_judgment') も
+                #     「メインキャッシュに乗った確定来歴」として含まれる
+                #     (_payload_passes_context_filter が committed_to_main_cache
+                #     = TRUE を main_line 文脈へ通す。03_data_model.md §176)。
+                #     Track 切替の確定独白・生きる目的の初回設定がこれに該当する。
+                #   - meta_judgment Pulse の discardable メッセージは含めない。
+                #     judge プロンプトへは別経路
+                #     (MetaLayer._build_recent_judgments_block) で動的注入される。
                 #
                 # 段階 4-D (2026-05-09): 旧 ``include_internal`` フォールバックを
                 # 削除。サブラインメッセージへのアクセスは sub_line が起動する
