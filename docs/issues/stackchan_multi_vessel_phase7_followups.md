@@ -78,8 +78,15 @@ voice-tts が GPU 1 個で TTS 生成を順次処理するため、一方が長�
 
 ---
 
+### ✅ 2号機だけカメラが作動しない（`see` が "Failed to upload photo"）→ gateway バグ、修正済み（2026-07-02、上流 PR [#326](https://github.com/kisaragi-mochi/stackchan-mcp/pull/326)）
+**症状**: 2号機で `see`→`take_photo` が "Failed to upload photo"。1号機は正常。
+**調査**: P4（errlog per-instance 化）で 2号機 gateway ログが初めて見え、`POST /capture` が **413** で弾かれていると判明。routing/vision_url/デバイス接続は全て正常だった。live gateway へのダミー POST で「**非空 `question` フィールドがあると 413、空なら 200**」を実測。
+**真因**: `create_capture_app` の `web.Application(client_max_size=0)`（/pcm 用に body cap 無効化）が、aiohttp **>= 3.14** の multipart reader では「上限0バイト」と誤解釈される（`request.read()/.post()` の `if 0 < max_size` ガードが multipart に無い）。`/capture` は `question` を `part.read()` で読むため、非空 question の全アップロードが 413。1号機成功は question 空だったから（file は `read_chunk` で cap 判定を通らない）＝デバイス差でも #320 でもない。依存が aiohttp 3.13.5→3.14 に上がって顕在化。副次で `.decode("utf-8")` が非 UTF-8 question で 500。
+**修正**: `client_max_size=sys.maxsize` + `question` を `errors="replace"` デコード。回帰テスト 2 件。詳細は `stackchan_mcp_upstream_pr_strategy.md` §PR-P。**実機で2号機カメラ復活を確認**（非空 question プローブ 413→200、まはーが 2号機で写真取得確認）。
+
 ## ✅ 実機で検証済み（OK）
 
+- **2号機カメラ復活**（gateway `client_max_size` 修正後、非空 question の写真取得 OK）。
 - デバイス制御(音量スライダ / タッチ有効無効)が gateway 経由で選択機体に貫通。
 - `mcp_servers.json` コメント地雷除去後、gateway がクリーン起動(実 instance_key、startup error なし)。
 - device_controls.py の 9 ツールが to_gemini で 1 つも落ちない(set_leds/set_mouth_sequence のネスト配列含め Gemini spec OK)。

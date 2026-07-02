@@ -991,3 +991,22 @@ idf.py -p COM3 app-flash
 - **Gateway test（赤→緑）**: upstream `tests/test_cli.py` が `release_lock_if_owner` / `read_lock` を旧 arity の lambda / `list.append` で monkeypatch していたため、per-port 化で `path` 引数が増えて 4 件 TypeError。モック 4 箇所を `path=None` 受けに更新（本番 `ownership.py` は元々 `path` 引数対応なので production は無改修で正しい。fork の integrate ブランチも同じ latent 破綻を持つが runtime 非影響）。
 - **Codex [P2] `.env` を check lock 選定前にロード**: `--check`（`_run_ownership_check`）が `_load_dotenv()` を通さず `_ws_port_lock_path()` を呼ぶため、WS_PORT が `.env` にしか無いと稼働機体が `owner-18765.lock` を持つ一方 `--check` は `owner-8765.lock` を見て別ポートを ready 誤報告。startup は `.env` ロード後にロックを取るので、`--check` も先頭で `_load_dotenv()` するよう修正（`--preflight` が `_run_preflight` 内で `.env` を読むのと同形）。回帰テスト `test_main_check_flag_inspects_per_ws_port_lock` を追加。
 - **integrate へ backport 済み（2026-07-02、`f87d76e`）**: fork `integrate/all-fixes-2026-06-24`（addon の uvx デプロイ元）に `.env`-before-check fix と test_cli.py モック修正 + 回帰テストを backport して push 済み（worktree で作業し、まはーの firmware WIP `stackchan.cc` には非接触）。CHANGELOG エントリは upstream PR 専用のため backport に含めない。**稼働中システムへの反映**: uvx はブランチ ref をキャッシュするので、次回再起動時に `uv cache clean` か `--refresh` で取り直しが要る。
+
+## 追補: PR-P — /capture の 413 (aiohttp>=3.14) + 非UTF-8 question 500 修正（2026-07-02 投稿: [#326](https://github.com/kisaragi-mochi/stackchan-mcp/pull/326)）
+
+「2号機だけカメラが作動しない」（`see`→`take_photo` が "Failed to upload photo"）の実機調査で判明した gateway バグ 2 件。P4（subprocess errlog の per-instance 化）で 2 号機 gateway のログが初めて見えるようになり特定できた。#320 とは無関係の別系統。
+
+| PR | 内容 | base | 状態 |
+|---|---|---|---|
+| **PR-P** = [#326](https://github.com/kisaragi-mochi/stackchan-mcp/pull/326) | fix(capture): don't 413 uploads on aiohttp>=3.14; tolerate non-UTF-8 question | upstream `main` | 投稿済み (2026-07-02)、CHANGELOG/Gateway test 緑 |
+
+### 真因（実測で確定）
+- `create_capture_app` は `/pcm` の長時間ストリーミングのため `web.Application(client_max_size=0)`。
+- aiohttp **>= 3.14** で multipart reader (`BodyPartReader.read()`) に `if len(data) > client_max_size: raise 413` が追加。`request.read()/.post()` の `if 0 < max_size` ガードが **multipart には無い**ため、`request.multipart()` に伝播した `client_max_size=0` が「上限0バイト」と解釈され、**非空の `question` フィールドを持つ全アップロードが 413**。空 question は file を `read_chunk` で読むので通り、バグがデバイス依存に見えていた。
+- 旧 aiohttp 3.13.5 には該当 check が無い → 依存が 3.14 に上がって顕在化（稼働 env 3.14.1、新規解決 3.13.5 と揺れる）。
+- 副次: `question` を `.decode("utf-8")` 厳格デコード → 非 UTF-8 で 500。
+
+### 修正
+- `client_max_size=sys.maxsize`（有限大）。read/multipart 実質無制限、`/pcm` 維持、`/capture` の実上限はハンドラ内 `CAPTURE_MAX_BYTES`。
+- `question` を `errors="replace"` でデコード。
+- 回帰テスト 2 件（TestClient 実経路、aiohttp 3.14.1 でバグ再現も反証確認）。fork `integrate/all-fixes-2026-06-24` に `978f6c5`/`9df458f` として backport 済み・実機で 2 号機カメラ復活を確認。
