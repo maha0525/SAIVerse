@@ -12,6 +12,8 @@ SAIVerseの世界を編集する「ワールドエディタ」の使い方を説
 
 ## タブ構成
 
+実 UI のサブタブは **City / Building / ペルソナ / Blueprint / ツール / アイテム / Playbook** の7つ。主なものを以下で説明する（Blueprint = ペルソナ生成テンプレート、Playbook = Playbook 管理、ツール = 下記の注記参照）。
+
 ### Cities タブ
 
 Cityの管理。
@@ -20,7 +22,7 @@ Cityの管理。
 |------|------|
 | 追加 | 新しいCityを作成 |
 | 編集 | 名前・ポート設定を変更 |
-| オンライン/オフライン | SDS連携の切り替え |
+| オンラインモードで起動 | SDS 連携を有効化（City 選択時のチェックボックス、既定 off） |
 
 ### Buildings タブ
 
@@ -34,6 +36,9 @@ Buildingの管理。
 | Capacity | 定員（0=無制限） |
 | Auto Pulse Interval | 自律パルスの間隔（秒） |
 | Interior Image | 内装画像（AIの視覚コンテキスト用） |
+| 都市（city_id） | 所属 City |
+| Description | 説明 |
+| 追加プロンプトファイル | 追加のプロンプト |
 
 ### AIs タブ
 
@@ -41,15 +46,15 @@ Buildingの管理。
 
 | フィールド | 説明 |
 |------------|------|
-| ID | 一意の識別子 |
-| Name | 表示名 |
-| System Prompt | 性格・背景設定 |
-| Building | 現在の所属Building |
-| Private Room | 休眠時に戻る個室 |
-| Activity State | 自律性の状態（`ACTIVITY_STATE`: Stop / Sleep / Idle / Active） |
-| Appearance Image | 外見画像 |
+| 名前 | 表示名 |
+| ホーム都市 | 所属 City |
+| デフォルトモデル / 軽量モデル | 使用モデル |
+| アクティビティ状態 | 自律性の状態（`ACTIVITY_STATE`: Stop / Sleep / Idle / Active） |
+| アバター / 外見画像 | アイコン・外見画像 |
+| システムプロンプト | 性格・背景設定 |
+| 説明 | ペルソナの説明 |
 
-> **ツールの管理について**: ワールドエディタにツールを追加したり Building に紐付けたりする機能は**ありません**。ペルソナがツールを使えるようにするには、ツールを Spell 化（`spell=True`）するか Playbook の TOOL ノードに置く（→ [ツールの追加](../developer-guide/adding-tools.md)）。
+> **ツールタブ / Building 紐付けについて**: ワールドエディタには「ツール」タブと Building へのツール紐付け UI（`BuildingToolLink`）が**残っているが、現在は実効性がない**——この紐付けではペルソナにツールは届かない。ペルソナに使わせるには Spell 化（`spell=True`）するか Playbook の TOOL ノードに置く（→ [ツールの追加](../developer-guide/adding-tools.md)）。
 
 ### Items タブ
 
