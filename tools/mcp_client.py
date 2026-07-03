@@ -321,6 +321,13 @@ class MCPServerConnection:
         self.session: Any = None
         self.tools: List[Any] = []
         self._connected = False
+        # 管理側 (``_shutdown_instance``) が意図的に停止した接続かどうか。
+        # ``call_tool`` の失敗時 auto-reconnect が、 既に stop された instance を
+        # 接続オブジェクト単位で蘇生し、 port を掴んだ孤児 subprocess を生む事故
+        # を防ぐ (in-flight のツールコールと stop がレースする経路。 stackchan の
+        # per-vessel gateway 停止で顕在化した)。stop 時に True を立て、 except
+        # 分岐で再接続せず素通しで raise させる。
+        self._closed = False
         # 接続の async context (transport / ClientSession) は単一の長命
         # 「所有タスク」(_owner_task) の中で開いて同じタスクの中で閉じる。
         # anyio のキャンセルスコープはタスク束縛のため、別タスクから閉じると
@@ -344,6 +351,8 @@ class MCPServerConnection:
     async def connect(self) -> None:
         if self.connected:
             return
+        # 明示 stop 後に (reconnect_server 等で) 意図的に繋ぎ直す場合は復活を許す。
+        self._closed = False
 
         loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
@@ -537,6 +546,10 @@ class MCPServerConnection:
                 read_timeout_seconds=timedelta(seconds=timeout_seconds),
             )
         except Exception as exc:
+            if self._closed:
+                # 管理側が意図的に stop 済み。 ここで再接続すると停止したはずの
+                # subprocess を蘇生させ、 port を掴む孤児になる。 素通しで raise。
+                raise
             LOGGER.warning(
                 "MCP tool call '%s__%s' failed (%s). Reconnecting once...",
                 self.server_name,
@@ -1186,6 +1199,10 @@ class MCPClientManager:
         connection = self._connections.pop(instance_key, None)
         if connection is None:
             return
+        # in-flight のツールコールが disconnect のキャンセルで失敗しても、
+        # call_tool の auto-reconnect でこの接続を蘇生させない (孤児 subprocess
+        # 防止)。disconnect が例外を投げる前に立てておく必要がある。
+        connection._closed = True
         if not force:
             await self._unregister_instance_tools(instance_key)
         try:

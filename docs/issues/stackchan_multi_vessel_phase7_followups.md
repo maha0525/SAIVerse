@@ -28,6 +28,18 @@
 ### P1 — 再起動を跨ぐと在室ペルソナの gateway が自動起動しない → 実装済み
 **原因** (`vessel_gateways.py`): gateway 起動は `persona_entered_building` (移動イベント)のみが契機で、起動時に既に在室しているペルソナには発火しない。単一機体時代の global 常時起動からの退行。
 **修正** (実装済み): `vessel_gateways.py` に起動時 reconcile daemon thread (`_reconcile_gateways_on_startup`) 追加。MCP manager ready を待ってから、occupant の居る全 Vessel の gateway を冪等起動。誰も居ない Vessel は起動しない(入室時 lazy)。**要実機検証**: 再起動だけで(出し入れ不要で)在室機体の gateway が起動する。
+> **⚠️ 2026-07-03 で上書き**: 下記 P4 で「常時接続」に切り替えたため、この occupant ゲート付き reconcile は撤去済み（現在は在室有無に依らず全ペアリング機体を起動）。
+
+### P4 — gateway lazy 起動（入室で起動/退室で停止）が UX 退行を生む → 常時接続に切替（2026-07-03 実装済み）
+**症状**: 機体（デバイス）を再起動しても SAIVerse に繋がらない。加えて、退室→再入室で gateway がハングし身体ツールが全滅（`VesselNotAvailable` 連発）。
+**原因（2 層、ログ `20260703_221500` で確定）**:
+1. **設計変更の副作用**: lazy 起動（入室で起動・退室で停止）にした結果、ペルソナが機体に降りていない間は gateway subprocess 自体が存在しない → デバイス再起動時に繋ぎ先がいない。機体設定（音量など）もペルソナ非在室では触れない。
+2. **退室レース → 孤児 subprocess**: 退室イベントで「gateway 停止」と avatar「表情消し（`set_avatar`）」が同時発火。停止済み gateway 宛の `set_avatar` が 30s timeout → `MCPServerConnection.call_tool` の "Reconnecting once" が接続オブジェクト単位で subprocess を蘇生（manager 非追跡の孤児）→ port 18765 占有 → 次の正規 `register_instance` が TaskGroup 例外で失敗（`instance=None`）→ 以降 `VesselNotAvailable`。
+**修正** (実装済み):
+- **常時接続化** (`vessel_gateways.py` / `api_routes.py` / `addon.json`): gateway は「ペアリング済み全機体を SAIVerse 稼働中ずっと起動」。起動契機＝起動時 reconcile（全機体・occupant ゲート撤去）+ `pair_vessel` 直後 + 入室時の冪等保険。停止＝`delete_vessel` のみ。退室 hook（`vessel_gateways:on_persona_exited_building`）は撤去。
+- **孤児防止の根ガード** (`tools/mcp_client.py`): `MCPServerConnection._closed` を追加。`_shutdown_instance` が disconnect 前に立て、`call_tool` の失敗時 auto-reconnect は `_closed` なら素通しで raise（= 意図的 stop 済み接続を蘇生させない）。退室・削除どちらの stop レースにも効く。
+- intent `docs/intent/stackchan_vessel.md` K-2 にライフサイクル注記を追加。
+**要実機検証**: (1) ペルソナ非在室でもデバイス再起動で繋がる、(2) 機体管理 UI の音量設定が非在室で効く、(3) 入退室を繰り返しても `VesselNotAvailable` が出ない、(4) 入室時の待ち時間が縮む。
 
 ### P2 — avatar の device-reboot 検知が multi-vessel で機能しない → P0 に内包して実装済み
 P0 の per-vessel ループが `last_sid_by_building` で機体ごとに session_id を監視し、変化(=reboot)を検知したらその機体を再 reconcile する。**残る精緻化**(未対応・低優先): `AvatarLoader.reconcile_session` の last-session cache が global のままなので、2 機体が別 session を持つと初回 reconcile 時に一度だけ cache が振れる(視覚バグではない)。per-vessel cache 化は将来。

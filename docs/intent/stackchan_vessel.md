@@ -763,6 +763,8 @@ AddonManager に Stack-chan アドオン専用パネル:
 
 **静的手書き（`mcp_servers.json` に機体数ぶんエントリを書く）は不採用**。`vessels.db` を source に機体数ぶんのインスタンスを動的起動する。ペアリング追加で起動、削除で停止、アプリ起動時は全機体ぶん起動。「動的起動まで作らないとリリースしない」をリリース要件とする。
 
+**gateway ライフサイクルは「常時接続」（ペルソナ在室に連動させない）**。ペアリング済みの各機体の gateway は SAIVerse 稼働中ずっと起動しておく。起動契機は 3 つ ——① 起動時 reconcile（全ペアリング機体）② ペアリング直後（`pair_vessel`）③ 入室時の冪等な保険（`vessel_gateways:on_persona_entered_building`）。停止はペアリング解除時（`delete_vessel`）のみ。**退室では止めない**。理由: (1) 機体設定（音量など `gateway_config`）はペルソナが降りていなくても機体管理 UI から触れて当然、(2) 入室のたびに subprocess 起動 + device 接続を待たされる体験を避ける、(3) 退室時に「gateway 停止」と avatar の「表情消し（`set_avatar`）」が同一イベントでレースし、停止済み gateway 宛の `set_avatar` が timeout → MCP client の auto-reconnect で **port を掴んだ孤児 subprocess** を生む退行を構造的に潰す（実装 `expansion_data/saiverse-stackchan-addon/vessel_gateways.py`。孤児防止の根ガードは `tools/mcp_client.py` の `MCPServerConnection._closed`＝意図的 stop 済みは call_tool の auto-reconnect を素通しで raise）。※ かつて一時的に「入室で起動・退室で停止」の lazy 実装だった時期があるが、本 K-2 の当初設計（全機体常時起動）に揃え直した。
+
 #### K-3. ポート: ペアリング時に確定・vessels.db 永続
 
 device は NVS の固定 URL（`ws://<lan-ip>:<port>`）に繋ぐため、ポートは安定していなければならない。**起動ごとに変わる動的割当は不可**（device が繋ぎ先を見失う）。
