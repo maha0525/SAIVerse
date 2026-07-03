@@ -296,8 +296,10 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
         if uri:
             path = resolve_media_uri(uri)
         
-        # Fallback: use direct path field if URI resolution failed
-        if path is None:
+        # Fallback: use direct path field if URI resolution failed or the
+        # resolved file is missing (e.g. records saved under a different
+        # SAIVERSE_HOME before path derivation was unified)
+        if path is None or not path.exists():
             direct_path = item.get("path")
             if direct_path:
                 if isinstance(direct_path, Path):

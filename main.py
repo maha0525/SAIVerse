@@ -16,7 +16,7 @@ from pathlib import Path
 load_dotenv()
 
 # Migrate legacy user_data/ to ~/.saiverse/user_data/ if needed
-from saiverse.data_paths import migrate_legacy_user_data
+from saiverse.data_paths import get_saiverse_home, migrate_legacy_user_data
 migrate_legacy_user_data()
 
 try:
@@ -397,7 +397,7 @@ def main():
 
     # Mount uploads directory for user-attached images FIRST (more specific path)
     # Access via /api/static/uploads/filename.png
-    uploads_dir = Path.home() / ".saiverse" / "image"
+    uploads_dir = get_saiverse_home() / "image"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 

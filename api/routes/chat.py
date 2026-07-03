@@ -8,6 +8,8 @@ router = APIRouter()
 from fastapi.responses import FileResponse
 import os
 
+from saiverse.data_paths import get_saiverse_home
+
 class ChatMessageImage(BaseModel):
     url: str  # URL to access the image
     mime_type: Optional[str] = None
@@ -219,7 +221,7 @@ def get_chat_history(
                     uri = img.get("uri", "")
                     if uri.startswith("saiverse://image/"):
                         filename = uri.replace("saiverse://image/", "")
-                        img_path = str(Path.home() / ".saiverse" / "image" / filename)
+                        img_path = str(get_saiverse_home() / "image" / filename)
                 if img_path:
                     # Serve via static endpoint
                     images_list.append(ChatMessageImage(
@@ -324,7 +326,7 @@ def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
         
         data = base64.b64decode(encoded)
         
-        dest_dir = Path.home() / ".saiverse" / "image"
+        dest_dir = get_saiverse_home() / "image"
         dest_dir.mkdir(parents=True, exist_ok=True)
         
         dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}{ext}"
@@ -360,7 +362,7 @@ def _store_image_attachment(
     building_id: str
 ) -> Dict[str, Any]:
     """Store image and create picture Item."""
-    dest_dir = Path.home() / ".saiverse" / "image"
+    dest_dir = get_saiverse_home() / "image"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine extension from mime_type
@@ -405,7 +407,7 @@ def _store_document_attachment(
     building_id: str
 ) -> Dict[str, Any]:
     """Store document and create document Item."""
-    dest_dir = Path.home() / ".saiverse" / "documents"
+    dest_dir = get_saiverse_home() / "documents"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}_{att.filename}"
