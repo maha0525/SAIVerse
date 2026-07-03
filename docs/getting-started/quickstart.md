@@ -21,8 +21,9 @@ SAIVerseを10分で動かすためのガイドです。
 ```
 
 オプション:
-- `./start.sh city_b` — 別のCityを起動
 - `SAIVERSE_SEARXNG=1 ./start.sh` — SearXNGサーバーも同時起動
+
+> 既定でセットアップされる City は `city_a` の1つ。別 City（例 city_b）を使うには先に `cities.json` / DB に追加が必要（未追加だと `main.py city_b` 起動はエラーになる）。
 
 停止するには `Ctrl+C` を押してください。
 
@@ -60,7 +61,7 @@ http://localhost:3000 を開くと、SAIVerseのUIが表示されます。
 
 ### チュートリアル
 
-初回起動時のチュートリアルで、**City 名 → ペルソナ作成 → モデル設定**を順に行う（後からやり直すこともできる）。
+初回起動時のチュートリアルで、**ユーザー名 → City 名 → ペルソナ作成 → API キー → モデル設定**を順に行う（後からやり直すこともできる）。
 
 ### ワールドビューを確認
 
@@ -78,7 +79,7 @@ http://localhost:3000 を開くと、SAIVerseのUIが表示されます。
 
 ### ポートが使用中
 
-`main.py` に個別ポート指定の引数はない（`city_name` / `--db-file` / `--sds-url` のみ）。別の City を起動する（`python main.py city_b` は 9000 系）か、`cities.json` のポート設定を変更する。
+`main.py` に個別ポート指定の引数はない（`city_name` / `--db-file` / `--sds-url` のみ）。ポートを変えるには `cities.json` の設定を変更する（既定の City は `city_a`=8000 の1つ）。
 
 ### APIエラーが発生
 

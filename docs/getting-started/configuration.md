@@ -60,7 +60,7 @@ python main.py <city_id> [オプション]
 | `--db-file PATH` | データベースファイルのパス |
 | `--sds-url URL` | ディレクトリサービスのURL |
 
-> ポートは `cities.json` で City ごとに設定する（city_a=8000 系 / city_b=9000 系）。個別ポート指定の起動引数はない。
+> ポートは `cities.json` で City ごとに設定する（既定は `city_a`=8000 の1つ。別 City を使うには `cities.json` / DB に追加が必要）。個別ポート指定の起動引数はない。
 
 ## モデル設定
 

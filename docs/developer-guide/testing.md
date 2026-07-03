@@ -23,8 +23,11 @@ python -m pytest tests/test_persona_mixins.py
 ### 特定のテストクラス・メソッド
 
 ```bash
-python -m pytest tests/test_persona_mixins.py::TestMovementMixin
-python -m pytest tests/test_persona_mixins.py::TestMovementMixin::test_move_to_building
+# 特定の関数を1つだけ
+python -m pytest tests/test_persona_mixins.py::test_timestamp_to_epoch_parses_iso_string
+
+# unittest スタイルのクラス/メソッド指定（該当ファイルがクラスを持つ場合）
+python -m pytest tests/<file>.py::<TestClass>::<test_method>
 ```
 
 ## テストファイル

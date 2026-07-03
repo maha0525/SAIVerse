@@ -60,7 +60,9 @@ python sds_server.py
 # Launch a city instance
 python main.py city_a
 # city_a backend runs on http://127.0.0.1:8000 (API at /api)
-# city_b backend runs on http://127.0.0.1:9000 (API at /api)
+# NOTE: only city_a is seeded by default (builtin_data/cities.json). A second
+#       city (e.g. city_b on 9000) must be added to cities.json / DB first —
+#       `python main.py city_b` errors out until then.
 # Frontend (Next.js) runs on http://localhost:3000
 
 # With custom options
