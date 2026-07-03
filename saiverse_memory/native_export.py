@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from saiverse.data_paths import get_persona_memory_db
 from sai_memory.memory.storage import (
     add_message,
     delete_thread,
@@ -147,7 +148,7 @@ def export_threads_native(
     Returns:
         Dict in saiverse_saimemory_v1 format.
     """
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise FileNotFoundError(f"memory.db not found for persona {persona_id}: {db_path}")
 
@@ -176,7 +177,7 @@ def export_thread_by_id(
     thread_id: str,
 ) -> Dict[str, Any]:
     """Export a single thread by its full thread_id. Used by API."""
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise FileNotFoundError(f"memory.db not found for persona {persona_id}: {db_path}")
 
@@ -267,7 +268,7 @@ def import_threads_native(
     """
     _validate_native_format(data)
 
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = init_db(str(db_path), check_same_thread=True)
 

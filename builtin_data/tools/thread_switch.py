@@ -129,7 +129,8 @@ def _build_adapter(persona_id: str, persona_path: Optional[str]) -> SAIMemoryAda
     if persona_path:
         persona_dir = Path(persona_path).expanduser()
         if not persona_dir.is_absolute():
-            persona_dir = Path.home() / ".saiverse" / "personas" / persona_path
+            from saiverse.data_paths import get_personas_dir
+            persona_dir = get_personas_dir() / persona_path
         persona_dir = persona_dir.resolve()
     else:
         ctx_path = get_active_persona_path()

@@ -195,7 +195,8 @@ class TaskCreationProcessor:
 
 
 def process_all_personas(base_dir: Optional[Path] = None) -> Dict[str, List[str]]:
-    base = base_dir or (Path.home() / ".saiverse" / "personas")
+    from saiverse.data_paths import get_personas_dir
+    base = base_dir or get_personas_dir()
     results: Dict[str, List[str]] = {}
     if not base.exists():
         return results

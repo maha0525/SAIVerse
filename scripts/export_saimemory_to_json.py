@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import sys
@@ -59,7 +61,7 @@ def _resolve_thread_ids(conn, persona: str, threads: Optional[Iterable[str]]) ->
 
 
 def export_messages(persona: str, threads: Optional[Iterable[str]], start_ts: Optional[str], end_ts: Optional[str]) -> list[dict]:
-    db_path = Path.home() / ".saiverse" / "personas" / persona / "memory.db"
+    db_path = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona / "memory.db"
     if not db_path.exists():
         raise FileNotFoundError(f"memory.db not found for persona {persona}: {db_path}")
 

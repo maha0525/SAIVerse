@@ -19,7 +19,7 @@ def prepare_script_runtime() -> None:
 
 
 def resolve_persona_db_path(persona_id: str) -> Path:
-    return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    return Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
 
 
 def load_runtime_config(persona_id: str) -> MemopediaRuntimeConfig:

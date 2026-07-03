@@ -6,6 +6,7 @@ Usage example:
     python scripts/prune_sai_memory.py --persona eris_city_a --since "2025-10-08T00:00:00"
 """
 
+import os
 import argparse
 import sqlite3
 from datetime import datetime
@@ -142,7 +143,7 @@ def main() -> None:
 
     cutoff = parse_timestamp(args.since) if args.since is not None else None
     persona_id = args.persona
-    db_path = Path(args.db) if args.db else Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = Path(args.db) if args.db else Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
 
     if not db_path.exists():
         raise SystemExit(f"memory database not found at {db_path}")

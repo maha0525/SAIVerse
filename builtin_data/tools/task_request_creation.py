@@ -100,7 +100,8 @@ def _require_persona_id() -> str:
 def _resolve_persona_dir() -> Path:
     persona_path = get_active_persona_path()
     if persona_path is None:
-        base = Path.home() / ".saiverse" / "personas"
+        from saiverse.data_paths import get_personas_dir
+        base = get_personas_dir()
         persona_id = _require_persona_id()
         return base / persona_id
     return persona_path

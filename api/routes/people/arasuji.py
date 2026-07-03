@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional
 from api.deps import get_manager
+from saiverse.data_paths import get_persona_memory_db
 from .models import (
     ArasujiStatsResponse, ArasujiListResponse, ArasujiEntryItem, SourceMessageItem,
     GenerateArasujiRequest, GenerationJobStatus, ChronicleCostEstimate,
@@ -63,7 +64,7 @@ def _get_arasuji_db(persona_id: str):
     import sqlite3
     from sai_memory.arasuji.storage import init_arasuji_tables
 
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         return None
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
@@ -845,7 +846,7 @@ def _run_chronicle_generation(
 
     try:
         # Get database path
-        db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+        db_path = get_persona_memory_db(persona_id)
         if not db_path.exists():
             _update_job(job_id, status="failed", error=f"Database not found: {db_path}")
             return
@@ -1043,7 +1044,7 @@ async def start_arasuji_generation(
     """
     # Verify persona exists
     from pathlib import Path
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 

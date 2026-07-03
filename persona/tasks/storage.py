@@ -89,7 +89,11 @@ class TaskStorage:
         create_dir: bool = True,
     ) -> None:
         self.persona_id = persona_id
-        home_dir = base_dir or (Path.home() / ".saiverse")
+        if base_dir:
+            home_dir = base_dir
+        else:
+            from saiverse.data_paths import get_saiverse_home
+            home_dir = get_saiverse_home()
         personas_root = home_dir / "personas"
         if create_dir:
             personas_root.mkdir(parents=True, exist_ok=True)

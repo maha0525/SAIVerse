@@ -80,7 +80,7 @@ def load_prompt(name: str) -> str:
 
 def get_persona_db_path(persona_id: str) -> Path:
     """Get the path to a persona's memory.db file."""
-    return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    return Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
 
 
 def get_all_descendant_ids(memopedia: Memopedia, page_id: str) -> set:

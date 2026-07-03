@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 import gradio as gr
+
+from saiverse.data_paths import get_persona_memory_db
 import pandas as pd
 from gradio.events import SelectData
 
@@ -1454,7 +1456,7 @@ def create_memory_settings_ui(manager) -> None:
             """Get database connection for arasuji."""
             from pathlib import Path
             import sqlite3
-            db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+            db_path = get_persona_memory_db(persona_id)
             if not db_path.exists():
                 return None
             conn = sqlite3.connect(str(db_path), check_same_thread=False)

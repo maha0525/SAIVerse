@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
+
 import json
 import sqlite3
 from pathlib import Path
@@ -40,7 +42,7 @@ def migrate_memory_tags(persona_dir: Path) -> None:
 
 
 def main() -> None:
-    base = Path.home() / ".saiverse" / "personas"
+    base = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas"
     if not base.exists():
         print(f"No personas found at {base}")
         return
