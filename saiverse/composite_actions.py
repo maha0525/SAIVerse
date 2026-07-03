@@ -453,6 +453,32 @@ def _get_mcp_connection(addon_name: str):
     return conn
 
 
+def _get_mcp_instance_connection(addon_name: str, instance_id: str):
+    """指定機体 (MCP 名前付きインスタンス) の gateway 接続を返す (無ければ None)。
+
+    複数機体アドオン (instance_template scope) は global インスタンスを持たず、
+    生 MCP ツール (native wrapper の無い ``get_device_info`` 等) は
+    ``{server}:instance:{instance_id}`` の接続へ流す必要がある。 テスト実行では
+    対象機体が明示されているので、 その機体の instance 接続を直接引く
+    (native tool は resolve_vessel_connection が同じ機体へ解決するので、 生 MCP と
+    native で同一機体に揃う)。 接続が無い (機体未起動) 場合は None。
+    """
+    from tools.mcp_client import get_mcp_manager, _make_instance_key
+
+    manager = get_mcp_manager()
+    if manager is None:
+        return None
+    for qname, meta in manager._server_meta.items():
+        if meta.get("addon_name") != addon_name:
+            continue
+        conn = manager._connections.get(
+            _make_instance_key(qname, instance_id=instance_id)
+        )
+        if conn is not None:
+            return conn
+    return None
+
+
 def _mcp_tool_names(conn) -> set:
     """gateway 接続が公開している MCP ツール名の集合。"""
     names: set = set()
@@ -518,20 +544,45 @@ async def _execute_action_async(
     addon_name: str,
     action: ActionDefinition,
     param_values: Optional[Dict[str, Any]] = None,
+    target_instance_id: Optional[str] = None,
 ) -> str:
-    # global MCP 接続は native tool 主体のアクションには必須でない。 addon が
-    # instance_template scope (複数機体) だと global インスタンスは存在せず
-    # _get_mcp_connection が失敗するが、 native wrapper が per-vessel 解決する
-    # ので、 conn 不在でも native のみのアクションは実行できる。 生 MCP ツール
-    # だけは conn 不在時に _make_call_awaitable が明示エラーにする。
-    try:
-        conn = _get_mcp_connection(addon_name)
-    except RuntimeError as exc:
-        LOGGER.info(
-            "composite_actions: no global MCP conn for %s (%s); "
-            "native-wrapper-only mode", addon_name, exc,
-        )
-        conn = None
+    # テスト実行 (addon 管理 UI 発) は persona 文脈が無いので、 native wrapper の
+    # per-vessel 解決 (現在ペルソナが降りている機体) が効かない。 UI で選んだ機体
+    # を狙えるよう、 ここで「対象インスタンス上書き」を張る。 本コルーチンは MCP
+    # ループスレッド上の Task として走るため、 ここで set した contextvar は下の
+    # ``copy_context()`` に取り込まれ、 sync native は ``ctx.run`` 経由の executor
+    # で、 async native は本 Task の await でそれぞれ同じ値を読む (他 Task には
+    # 漏れない = Task ごとに独立 context)。 target_instance_id が None のスペル経路
+    # では上書きせず、 従来の persona 文脈解決に委ねる。
+    if target_instance_id:
+        from tools.context import set_tool_target_instance_id
+        set_tool_target_instance_id(target_instance_id)
+
+    # 生 MCP 接続 (native wrapper の無い ``get_device_info`` 等の直呼び用) を引く。
+    #  - target_instance_id あり (テスト実行で機体を明示): その機体の instance
+    #    接続。 複数機体は global を持たないので、 生 MCP ツールも native tool と
+    #    同じ選択機体へ揃える。
+    #  - target_instance_id なし (スペル経路): 従来通り global 接続 (global /
+    #    per_persona scope の addon 向け)。 instance_template では global が無いので
+    #    conn=None になるが、 native wrapper が per-vessel 解決するため native のみ
+    #    のアクションは実行できる (生 MCP ツールだけは conn 不在時に
+    #    _make_call_awaitable が明示エラーにする)。
+    if target_instance_id:
+        conn = _get_mcp_instance_connection(addon_name, target_instance_id)
+        if conn is None:
+            LOGGER.info(
+                "composite_actions: no instance MCP conn for %s/%s; "
+                "native-wrapper-only mode", addon_name, target_instance_id,
+            )
+    else:
+        try:
+            conn = _get_mcp_connection(addon_name)
+        except RuntimeError as exc:
+            LOGGER.info(
+                "composite_actions: no global MCP conn for %s (%s); "
+                "native-wrapper-only mode", addon_name, exc,
+            )
+            conn = None
     mcp_names = _mcp_tool_names(conn) if conn is not None else set()
     param_values = param_values or {}
     results: List[str] = []
@@ -582,7 +633,15 @@ def execute_action(
     action: ActionDefinition,
     param_values: Optional[Dict[str, Any]] = None,
     timeout_sec: float = 30.0,
+    target_instance_id: Optional[str] = None,
 ) -> str:
+    """アクションを実行する。
+
+    ``target_instance_id`` を渡すと、 native wrapper の per-vessel 解決を persona
+    文脈ではなく指定の MCP インスタンス (= 機体) に固定する。 addon 管理 UI の
+    テスト実行が「どの機体で試すか」をユーザーに選ばせるために使う。 スペル経路
+    (ペルソナ駆動) では None のまま呼び、 従来通り現在機体へ解決する。
+    """
     import tools.mcp_client as _mcp
 
     loop = _mcp._loop
@@ -591,7 +650,11 @@ def execute_action(
 
     resolved = _resolve_param_values(action, param_values)
     future = asyncio.run_coroutine_threadsafe(
-        _execute_action_async(addon_name, action, resolved), loop
+        _execute_action_async(
+            addon_name, action, resolved,
+            target_instance_id=target_instance_id,
+        ),
+        loop,
     )
     return future.result(timeout=timeout_sec)
 

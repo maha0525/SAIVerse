@@ -908,3 +908,59 @@
 :global([data-theme="dark"]) .argModeBtn:hover {
     background: rgba(255, 255, 255, 0.06);
 }
+
+/* ----- テスト対象機体セレクタ (複数機体アドオン) ----- */
+.testTargetRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+    padding: 0.5rem 0.6rem;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+}
+
+.testTargetLabel {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #475569;
+    flex-shrink: 0;
+}
+
+.testTargetSelect {
+    flex: 1;
+    min-width: 0;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    background: white;
+    color: #1e293b;
+}
+
+.testTargetSelect:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+:global([data-theme="dark"]) .testTargetRow {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .testTargetLabel {
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .testTargetSelect {
+    background: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .testTargetSelect:focus {
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}

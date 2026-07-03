@@ -461,6 +461,52 @@ def load_addon_server_hooks() -> None:
     LOGGER.info("addon_loader: %d addon server_hook(s) registered", total)
 
 
+def get_addon_action_test_targets(addon_name: str) -> List[Dict[str, str]]:
+    """アドオンが宣言した「複合アクションのテスト実行先」候補一覧を返す。
+
+    複数機体アドオン (stackchan 等) は native tool を「今ペルソナが降りている
+    機体」へ振り分けるため、 persona 文脈を持たない addon 管理 UI のテスト実行
+    では対象機体を明示的に選ぶ必要がある。 addon.json の ``action_test_targets``
+    (``"module:function"`` 形式、 server_hooks と同形) が宣言されていれば、 その
+    関数を呼んで ``[{"value": <instance_id>, "label": <表示名>}]`` を得る。
+
+    宣言が無い / 解決や呼び出しに失敗した場合は空リスト (= 単一接続で足りる
+    従来型アドオン、 UI は機体プルダウンを出さず従来通りテストする)。 例外は
+    ここで握り潰す (テスト実行 UI が addon 実装ミスで 500 にならないように)。
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    addon_dir = EXPANSION_DATA_DIR / addon_name
+    if not addon_dir.is_dir():
+        return []
+    manifest = _load_addon_manifest(addon_dir)
+    spec = manifest.get("action_test_targets")
+    if not spec or not isinstance(spec, str):
+        return []
+    try:
+        provider = _resolve_hook_handler(addon_dir, spec)
+        raw = provider() or []
+    except Exception:
+        LOGGER.warning(
+            "addon_loader: action_test_targets provider %r failed (addon=%s)",
+            spec, addon_name, exc_info=True,
+        )
+        return []
+
+    targets: List[Dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value")
+        if value is None:
+            continue
+        targets.append({
+            "value": str(value),
+            "label": str(entry.get("label", value)),
+        })
+    return targets
+
+
 def register_addon_server_hooks(addon_name: str) -> int:
     """指定アドオンの server_hooks をランタイムで register する（有効化時用）。
 

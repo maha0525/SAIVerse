@@ -27,6 +27,19 @@ _PULSE_CONTEXT: ContextVar[Optional[Any]] = ContextVar("saiverse_pulse_context",
 _LLM_MESSAGES: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar(
     "saiverse_llm_messages", default=None
 )
+# Optional override for the MCP instance a tool call should target. When set,
+# addon tools that normally resolve their target from persona context (e.g. the
+# stackchan vessel dispatcher, which picks the gateway of the building the acting
+# persona is in) instead route to this named MCP instance. Used by the addon
+# management UI's composite-action *test* execution, which has no persona /
+# building context but lets the operator pick which vessel to fire the test at.
+# ``None`` (default) preserves the persona-context resolution. Read by addon code
+# via :func:`get_tool_target_instance_id`; the value is opaque to the core (it is
+# the ``instance_id`` of ``_make_instance_key``, which the stackchan addon fills
+# with a vessel_id).
+_TOOL_TARGET_INSTANCE_ID: ContextVar[Optional[str]] = ContextVar(
+    "saiverse_tool_target_instance_id", default=None
+)
 
 
 def get_active_persona_id() -> Optional[str]:
@@ -79,6 +92,29 @@ def get_active_llm_messages() -> Optional[List[Dict[str, Any]]]:
     of a spell-invoking LLM call (tool nodes, CLI runs, etc.).
     """
     return _LLM_MESSAGES.get()
+
+
+def get_tool_target_instance_id() -> Optional[str]:
+    """Return the MCP instance id a tool call should target, or None.
+
+    Addon tools that resolve their target from persona context read this first
+    and, when set, route to the named instance instead. Returns None outside of
+    an explicit override (= the normal persona-driven path). See
+    ``_TOOL_TARGET_INSTANCE_ID`` for the full rationale.
+    """
+    return _TOOL_TARGET_INSTANCE_ID.get()
+
+
+def set_tool_target_instance_id(instance_id: Optional[str]) -> None:
+    """Set the MCP instance id override for the current context.
+
+    Callers set this inside a task-/context-scoped body (e.g. the coroutine that
+    runs a composite action's steps) so the value is captured by the surrounding
+    ``copy_context()`` and dies with that context. No explicit reset is needed
+    when the setting is confined to a short-lived task; setting it in a
+    long-lived context should be paired with a manual reset.
+    """
+    _TOOL_TARGET_INSTANCE_ID.set(instance_id)
 
 
 def set_active_message_id(message_id: Optional[str]) -> None:

@@ -72,6 +72,11 @@ function parseDurationInput(raw: string): number | string {
     return raw;
 }
 
+interface TestTarget {
+    value: string;
+    label: string;
+}
+
 interface ActionsPanelProps {
     addonName: string;
 }
@@ -92,6 +97,10 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
     const [actions, setActions] = useState<ActionDef[]>([]);
     const [availableTools, setAvailableTools] = useState<string[]>([]);
     const [toolSchemas, setToolSchemas] = useState<Record<string, ToolSchema>>({});
+    // 複数機体アドオンでのテスト実行先 (機体) 候補。空なら従来通り機体を選ばず
+    // テストする (単一接続の従来型アドオン)。
+    const [testTargets, setTestTargets] = useState<TestTarget[]>([]);
+    const [selectedTarget, setSelectedTarget] = useState<string>('');
     const [editing, setEditing] = useState<ActionDef | null>(null);
     const [isNew, setIsNew] = useState(false);
     const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -119,11 +128,28 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
         fetchActions();
     }, [fetchActions]);
 
+    const fetchTestTargets = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/${addonName}/actions/test-targets`);
+            if (res.ok) {
+                const list: TestTarget[] = await res.json();
+                setTestTargets(list);
+                // 機体が居れば先頭を既定選択にする (デバイス操作 UI と同じ挙動)。
+                // 既選択が候補から消えていたら選び直す。
+                setSelectedTarget(prev =>
+                    list.some(t => t.value === prev)
+                        ? prev
+                        : (list[0]?.value ?? ''));
+            }
+        } catch { /* ignore */ }
+    }, [addonName]);
+
     useEffect(() => {
         if (!collapsed) {
             fetchTools();
+            fetchTestTargets();
         }
-    }, [collapsed, fetchTools]);
+    }, [collapsed, fetchTools, fetchTestTargets]);
 
     const handleDelete = async (actionId: string) => {
         if (!confirm(`アクション「${actionId}」を削除しますか？`)) return;
@@ -134,10 +160,18 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
     };
 
     const handleTest = async (action: ActionDef) => {
+        // 機体候補があるのに未選択ならテストしない (どの機体で撃つか曖昧なため)。
+        if (testTargets.length > 0 && !selectedTarget) {
+            setTestResult({ ok: false, text: 'テスト対象の機体を選んでください。' });
+            return;
+        }
         setBusy(true);
         setTestResult(null);
         try {
-            const res = await fetch(`${API_BASE}/${addonName}/actions/test`, {
+            const url = selectedTarget
+                ? `${API_BASE}/${addonName}/actions/test?instance_id=${encodeURIComponent(selectedTarget)}`
+                : `${API_BASE}/${addonName}/actions/test`;
+            const res = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(action),
@@ -205,6 +239,11 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
             </button>
             {!collapsed && (
                 <div className={styles.body}>
+                    <TestTargetSelector
+                        targets={testTargets}
+                        selected={selectedTarget}
+                        onSelect={setSelectedTarget}
+                    />
                     {actions.length === 0 ? (
                         <p className={styles.emptyMessage}>アクションが定義されていません</p>
                     ) : (
@@ -271,12 +310,42 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
                     toolSchemas={toolSchemas}
                     testResult={testResult}
                     busy={busy}
+                    testTargets={testTargets}
+                    selectedTarget={selectedTarget}
+                    onSelectTarget={setSelectedTarget}
                     onChange={setEditing}
                     onSave={handleSave}
                     onTest={() => handleTest(editing)}
                     onClose={() => { setEditing(null); setTestResult(null); }}
                 />
             )}
+        </div>
+    );
+}
+
+
+// 複数機体アドオンのテスト実行先セレクタ。候補が無ければ何も描画しない
+// (= 単一接続の従来型アドオンでは従来通り機体を選ばずテストする)。
+function TestTargetSelector({
+    targets, selected, onSelect,
+}: {
+    targets: TestTarget[];
+    selected: string;
+    onSelect: (value: string) => void;
+}) {
+    if (targets.length === 0) return null;
+    return (
+        <div className={styles.testTargetRow}>
+            <span className={styles.testTargetLabel}>テスト対象の機体</span>
+            <select
+                className={styles.testTargetSelect}
+                value={selected}
+                onChange={e => onSelect(e.target.value)}
+            >
+                {targets.map(t => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+            </select>
         </div>
     );
 }
@@ -289,6 +358,9 @@ interface ActionEditorProps {
     toolSchemas: Record<string, ToolSchema>;
     testResult: { ok: boolean; text: string } | null;
     busy: boolean;
+    testTargets: TestTarget[];
+    selectedTarget: string;
+    onSelectTarget: (value: string) => void;
     onChange: (a: ActionDef) => void;
     onSave: () => void;
     onTest: () => void;
@@ -297,6 +369,7 @@ interface ActionEditorProps {
 
 function ActionEditor({
     action, isNew, availableTools, toolSchemas, testResult, busy,
+    testTargets, selectedTarget, onSelectTarget,
     onChange, onSave, onTest, onClose,
 }: ActionEditorProps) {
 
@@ -582,6 +655,12 @@ function ActionEditor({
                             + 待機ステップ
                         </button>
                     </div>
+
+                    <TestTargetSelector
+                        targets={testTargets}
+                        selected={selectedTarget}
+                        onSelect={onSelectTarget}
+                    />
 
                     {testResult && (
                         <div className={testResult.ok ? styles.testResultOk : styles.testResultError}>

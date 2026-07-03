@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 LOGGER = logging.getLogger(__name__)
@@ -47,6 +47,21 @@ def tool_schemas(addon_name: str):
     """ステップで呼べるツールを引数スキーマ付きで返す (UI の引数フォーム用)。"""
     from saiverse.composite_actions import get_available_tool_schemas
     return get_available_tool_schemas(addon_name)
+
+
+@router.get("/{addon_name}/actions/test-targets")
+def test_targets(addon_name: str):
+    """テスト実行の対象候補 (機体) を返す。
+
+    複数機体アドオンでは native tool が「今ペルソナが降りている機体」へ振り分
+    けるため、 persona 文脈を持たない UI のテスト実行では対象機体を選ぶ必要が
+    ある。 addon が ``action_test_targets`` を宣言していれば候補を返し、 無けれ
+    ば空リスト (= UI は機体プルダウンを出さず従来通りテストする)。
+
+    各要素は ``{"value": <instance_id>, "label": <表示名>}``。
+    """
+    from saiverse.addon_loader import get_addon_action_test_targets
+    return get_addon_action_test_targets(addon_name)
 
 
 @router.get("/{addon_name}/actions/{action_id}")
@@ -124,7 +139,18 @@ def delete_action_endpoint(addon_name: str, action_id: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{addon_name}/actions/test")
-def test_action(addon_name: str, body: ActionBody):
+def test_action(
+    addon_name: str,
+    body: ActionBody,
+    instance_id: str | None = Query(
+        default=None,
+        description=(
+            "テスト実行先の機体 (MCP インスタンス) id。 複数機体アドオンで、 "
+            "どの機体でステップを試すかを指定する。 省略時は persona 文脈解決"
+            " (= 従来型アドオン / 単一接続) に委ねる。"
+        ),
+    ),
+):
     from saiverse.composite_actions import validate_action, execute_action
 
     # テスト実行はステップの動作確認が目的。 id / display_name はまだ未入力でも
@@ -142,7 +168,9 @@ def test_action(addon_name: str, body: ActionBody):
         raise HTTPException(status_code=400, detail=str(exc))
 
     try:
-        result = execute_action(addon_name, action)
+        result = execute_action(
+            addon_name, action, target_instance_id=instance_id,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
