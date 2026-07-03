@@ -133,7 +133,7 @@ PaHUB / PaHUB 2 は TCA9548A I2C MUX を搭載した 6 channel ハブ。 制御 
 - **「起動時 1 回 init」 ではなく lazy recovery**: SAIVerse プロセスが起動しっぱなしでも、 Stack-chan 再起動 / ハブ付け替え / 電源瞬断で PaHUB は default の全 channel closed 状態に戻る。 「事前 init」 方式だと SAIVerse 側がそれを検知できず以降のセンサー操作が無応答になる
 - **エラー駆動回復**: 各 i2c 操作で 1 回目試行 → i2c-level error (= `ESP_ERR_*` で始まる error) が返ったら `hub.open_all_channels()` を 1 回呼んで → 2 回目試行 → そのまま結果返却。 通常運用 (= hub が open 状態を維持してる) では 1 回目で成功して余分な往復ゼロ
 - **直結時はリカバリ機構を skip**: `hub_type=none` なら recovery 経路自体スキップして既存挙動と等価 (= ハブ無関係なエラーで余分な i2c_write を走らせない)
-- **per-channel select は future work**: 同 channel に同 address Unit を複数並べる / 別 channel に同 address Unit を挿す要求が出てきた時に、 PaHub に `select_channel(ch)` を追加する。 現状は不要
+- **per-channel select は実装済み (2026-07-03)**: 別 channel に同 address Unit を挿す要求 (VL53L1X ×2) が出たので、 `PaHub.select_channel(ch)` + per-vessel の「ユニット配置」 (ハブ + channel + label) を実装した。 設計と詳細は `docs/intent/stackchan_unit_placement.md`。 全 channel open は「配置情報の無い旧構成」 の後方互換フォールバックとして残置
 
 #### 守るべき不変条件
 
@@ -274,4 +274,4 @@ AXERA-TECH (AX630C の SoC ベンダ Axera 公式) が Hugging Face に AX630C �
 - **全 channel open + lazy recovery**: 起動時 init を採用せず、 各 i2c 操作で 1 回目試行 → ESP_ERR_* なら hub の全 channel open を試みて 2 回目試行、 の機構に倒す。 Stack-chan 再起動・ハブ付け替え・電源瞬断のいずれが起きてもユーザー操作不要で復帰する
 - **hub 抽象は `tools/hubs/pahub.py` に切り出し**: ENV III に閉じず、 将来追加される CardKB / IMU 等他 Unit でも共通利用できる粒度。 TCA9548A 系の特殊性は本クラス内に閉じ込め、 別形式 MUX (TCA9543A / PCA9544A 等) が必要になったら別ドライバを追加する形 (= MUX 一般抽象は作らない)
 - **UI は物理 A0/A1/A2 toggle**: 16 進アドレスでなく物理パッドの ON/OFF をそのまま受ける。 ハブ関連 4 項目 (hub_type + hub_addr_a0/a1/a2) は全部 `advanced: true` で「詳細設定」 セクションに折りたたみ、 ハブ非使用者には見えない
-- **per-channel select は future work**: 同 address Unit を別 channel に挿す要求が出てきた時に PaHub に `select_channel(ch)` を追加する
+- **per-channel select は実装済み (2026-07-03)**: 同 address Unit を別 channel に挿す構成 (VL53L1X ×2) 対応で `PaHub.select_channel(ch)` + per-vessel ユニット配置を実装。詳細 `docs/intent/stackchan_unit_placement.md`

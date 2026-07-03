@@ -785,7 +785,9 @@ device は NVS の固定 URL（`ws://<lan-ip>:<port>`）に繋ぐため、ポー
 
 #### K-5. capability カタログ: per-vessel、手動が基盤
 
-機体ごとに刺さっている Port A ユニットが違う（ENV III を挿した機体・挿していない機体）。ユニット由来ツール（`env3` / `servo8` / `sonic`）の使用可否は vessel ごとの capability に依存する（不変条件 #14）。
+> **更新 (2026-07-03)**: 「有効ユニット集合 + ハブ構成」は当初 bool capability + グローバル hub で実装したが、同アドレスユニットを別 channel に挿す要求（VL53L1X ×2）を受けて **per-vessel の「ユニット配置」（`unit_config` = ハブ + channel + label のリスト）** に発展させた。bool capability を包含し、hub 構成も per-vessel 化（K-5 当初意図への回帰）。可視性判定は配置リストに type が含まれるかで行う。詳細は `docs/intent/stackchan_unit_placement.md`。
+
+機体ごとに刺さっている Port A ユニットが違う（ENV III を挿した機体・挿していない機体）。ユニット由来ツール（`env3` / `servo8` / `sonic` / `tof`）の使用可否は vessel ごとの capability に依存する（不変条件 #14）。
 
 `vessels.db` に per-vessel の capability（有効ユニット集合 + ハブ構成）を持つ。ツール可視性は K-4 と同じ dispatcher で扱い、building_ids を 2 層で決める:
 
