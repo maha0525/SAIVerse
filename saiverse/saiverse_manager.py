@@ -330,6 +330,11 @@ class SAIVerseManager(
             self.pulse_controller.on_track_status_change
         )
 
+        # ライフサイクル状態: __init__ 完了時点ではまだ False。start() が全背景ループを
+        # 起動する瞬間に True になる。ensure_autonomy_for はこのフラグで「起動前は
+        # AutonomyManager スレッドを立てない」を保証する (起動前 pulse レース防止)。
+        self._started = False
+
         # --- Step 5: Load Dynamic States from DB ---
         # データベースから動的な状態（ペルソナ、ユーザー状態、入室状況）を読み込み、
         # メモリ上のオブジェクトに反映させます。
@@ -379,11 +384,8 @@ class SAIVerseManager(
         logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
 
         # スケジュールマネージャーを初期化 (Phase 4-e: push 駆動、ポーリング廃止)。
-        # start() は EventScheduler.start() より後 (startup 内) で呼ぶ必要が
-        # あったが、EventScheduler.schedule() は thread 起動前でも heap に積めるので
-        # ここで start しても問題ない (dispatch 開始は startup 内で行う)。
+        # ⚠️ 構築のみ。起動 (.start()) は start() に集約する (下記 NOTE 参照)。
         self.schedule_manager = ScheduleManager(saiverse_manager=self)
-        self.schedule_manager.start()
         logging.info("Initialized ScheduleManager (push-driven, no polling).")
 
         # --- Initialize PhenomenonManager ---
@@ -392,40 +394,25 @@ class SAIVerseManager(
             async_execution=True,
             saiverse_manager=self,
         )
-        self.phenomenon_manager.start()
-        logging.info("Initialized and started PhenomenonManager.")
+        logging.info("Initialized PhenomenonManager.")
 
         # --- Initialize IntegrationManager ---
         self.integration_manager = IntegrationManager(self, tick_interval=30)
         self._register_integrations()
-        self.integration_manager.start()
-        logging.info("Initialized and started IntegrationManager.")
-
-        # --- Phase C-3b: Start SubLineScheduler ---
-        # 全ペルソナのインメモリ状態が揃った後に起動する (personas dict が利用可能)。
-        # SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false で起動を抑止できる
-        # (動き出した自律行動を一時的に止めたい時の安全弁)。
-        if is_subline_scheduler_enabled():
-            self.subline_scheduler.start()
-            logging.info("Started SubLineScheduler.")
-        else:
-            logging.warning(
-                "SubLineScheduler is disabled by SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false. "
-                "Autonomous tracks will not run pulses until re-enabled and restarted."
-            )
-
-        # Phase C-2: Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構")
-        self.internal_alert_poller.start()
-
-        # Phase 4-e: Start EventScheduler dispatcher loop. 以降、push される
-        # 予約 (TTL 接近 / interval / schedule / wait_response timeout 等) は
-        # この 1 個のスレッドで秒精度発火される。
-        self.event_scheduler.start()
+        logging.info("Initialized IntegrationManager.")
 
         # Observer: Fixture/Observer の定期実行・push 受信・通知を管理する。
         from saiverse.observer_manager import ObserverManager
         self.observer_manager = ObserverManager(self)
-        self.observer_manager.start_pull_observers()
+
+        # ⚠️ 構築 / 起動 分離の不変条件:
+        #   背景ループ (schedule_manager / phenomenon / integration /
+        #   subline_scheduler / internal_alert_poller / event_scheduler /
+        #   observer pull / AutonomyManager / 自律会話) の起動はここでは一切行わない。
+        #   すべて start() に集約し、main.py がワールド初期化 (MCP 接続・addon 登録)
+        #   完了後に 1 回だけ呼ぶ。これより前に pulse / capture が走ると、未初期化の
+        #   サブシステム基準で head を capture してしまい偽の差分通知が出る。
+        #   詳細は start() の docstring を参照。
 
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
@@ -504,18 +491,85 @@ class SAIVerseManager(
             first_fire_immediate=True,
         )
 
-        # Auto-start autonomous conversation managers for personas with mode=auto
+        # NOTE: 自律会話マネージャ・AutonomyManager (Active ペルソナ)・server_start
+        # トリガの起動はすべて start() に移設した。__init__ は構築のみで、pulse /
+        # capture を生む背景ループは 1 本も起こさない (初期化完了前レース防止の不変条件)。
+        # _run_persona_post_registration() は track 確保等の冪等な下ごしらえだけを行い、
+        # ensure_autonomy_for は _started=False の間 no-op になる。
+
+    def start(self) -> None:
+        """全背景ループ (pulse / capture を生む物すべて) を起動する。
+
+        ⚠️ 構築 (__init__) と起動 (start) を分離する契約:
+          __init__ はオブジェクトを組み立てるだけで、スレッドは 1 本も起こさない。
+          pulse を生む背景ループはすべてこの 1 箇所で起動する。main.py はワールド
+          初期化 (MCP 接続・addon 登録・API サーバ) を終えた後に本メソッドを 1 回だけ
+          呼ぶ。
+
+        これにより「初期化前に pulse が走る」レースが構造的に起きない: 活動を生む物は
+        例外なくこのゲートの後ろにしか無いため、"ready 判定に入れ忘れたサブシステム"
+        という状態が存在しえない (per-subsystem の ready チェックリストではなく、
+        構築フェーズ / 稼働フェーズの単一境界で管理する)。
+
+        背景 (2026-07-02): これが無かった頃、MCP manager 接続完了前に自律 pulse が
+        走り、spell_list section が building ゲート (is_tool_available_for_persona は
+        mcp_mgr 未準備だと丸ごと skip) を抜けて vessel スペルを全部 visible として
+        capture → 初回 pulse の flush_diffs で 17 個の偽「使えなくなりました」通知を
+        SAIMemory に注入する事故が起きた。
+        """
+        if self._started:
+            logging.warning("SAIVerseManager.start() called twice; ignoring.")
+            return
+        self._started = True
+
+        # 1. 背景スケジューラ / ポーラ群 (構築は __init__ 済み)。
+        self.schedule_manager.start()
+        self.phenomenon_manager.start()
+        self.integration_manager.start()
+
+        # SubLineScheduler: 自律 Track の pulse 駆動源。
+        # SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false で起動を抑止できる
+        # (動き出した自律行動を一時的に止めたい時の安全弁)。
+        if is_subline_scheduler_enabled():
+            self.subline_scheduler.start()
+            logging.info("Started SubLineScheduler.")
+        else:
+            logging.warning(
+                "SubLineScheduler is disabled by SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false. "
+                "Autonomous tracks will not run pulses until re-enabled and restarted."
+            )
+
+        # Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構")。
+        self.internal_alert_poller.start()
+
+        # EventScheduler dispatcher loop。以降、push される予約 (TTL 接近 / interval /
+        # schedule / db_polling / wait_response timeout / SDS heartbeat 等) が発火する。
+        # 予約自体は __init__ 中に heap へ積まれているが、ここで dispatcher が動き出す
+        # まで 1 件も発火しない。
+        self.event_scheduler.start()
+
+        # Observer: Fixture/Observer の定期実行・push 受信・通知。
+        self.observer_manager.start_pull_observers()
+
+        # 2. Active ペルソナの AutonomyManager を起動する。起動前は
+        #    ensure_autonomy_for が _started ゲートで no-op にしていたぶんを、
+        #    _started=True になった今ここでまとめて立てる。
+        for persona_id in list(self.personas.keys()):
+            try:
+                self.ensure_autonomy_for(persona_id)
+            except Exception:
+                logging.exception("[start] Failed to sync autonomy for %s", persona_id)
+
+        # 3. 自律会話マネージャ (mode=auto のペルソナ)。
         logging.info("Auto-starting autonomous conversation managers...")
         self.start_autonomous_conversations()
 
-        # NOTE: AutonomyManager 同期は _run_persona_post_registration() 内で
-        # 統一的に実行済み (ensure_autonomy_for → Active のみ起動)。
-
-        # Emit server_start trigger
+        # 4. server_start トリガ (ここまで来て初めてワールドは "稼働中")。
         self._emit_trigger(
             TriggerType.SERVER_START,
             {"city_id": self.city_id, "city_name": self.city_name},
         )
+        logging.info("SAIVerseManager background loops started (world is now running).")
 
     @staticmethod
     def _load_avatar_data(path: Path) -> Optional[str]:
@@ -1351,6 +1405,12 @@ class SAIVerseManager(
         起動しない。既に起動中で Active 以外になった場合は停止する。
         """
         from saiverse.autonomy_manager import AutonomyManager
+
+        # 起動前 (start() 前) は AutonomyManager スレッドを立てない。起動時の全 Active
+        # ペルソナぶんは start() がまとめて同期する。動的作成 / Blueprint 経路は
+        # start() 後 (=_started True) に呼ばれるので通常どおり即時同期される。
+        if not getattr(self, "_started", False):
+            return
 
         if not hasattr(self, "_autonomy_managers"):
             self._autonomy_managers = {}

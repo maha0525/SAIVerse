@@ -436,6 +436,14 @@ def main():
     )
     app_state.child_processes.append(api_server_process)
 
+    # --- Start manager background loops (LAST — after full world init) ---
+    # 構築 (__init__) と起動 (start) を分離: MCP 接続・addon 登録・API サーバまで
+    # 揃ってから初めて pulse / capture を生む背景ループを起動する。これより前に自律
+    # pulse が走ると、未初期化のサブシステム (例: MCP 未接続) 基準で head を capture
+    # し、初回 pulse で偽の差分通知が出る (2026-07-02 の vessel スペル 17 個誤通知)。
+    # 詳細は SAIVerseManager.start() の docstring 参照。
+    manager.start()
+
     # --- アプリケーション終了時のクリーンアップ ---
     shutdown_called = False
 
