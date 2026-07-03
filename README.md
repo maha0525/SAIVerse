@@ -136,8 +136,8 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
   **（目立つボタンの「Download Python install manager」ではありません）**
   - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。チェックを入れないとsetup.bat実行時にエラーになります
 - [Node.js 18以上](https://nodejs.org/)（未インストールの場合、setup.batが自動でインストールします）
-- できれば[Git](https://git-scm.com/)<br>
-  →なくても本体は動きますが、検索ツールの導入に必要です。ネット上の解説（[おすすめ](https://qiita.com/takeru-hirai/items/4fbe6593d42f9a844b1c)）などを見て導入頂くことを勧めます。
+- [Git](https://git-scm.com/)（**Windows は `setup.bat` が自動でインストールします**ので事前準備は不要）<br>
+  →Mac/Linux で未導入の場合は、自動更新や検索ツールの導入に必要なので導入を勧めます。ネット上の解説（[おすすめ](https://qiita.com/takeru-hirai/items/4fbe6593d42f9a844b1c)）などを参照してください。
 
 <details open>
 <summary>Windows向けの導入</summary>
@@ -357,7 +357,10 @@ python test_fixtures/test_api.py --quick   # クイックテスト（LLM除く�
 - [開発者ガイド](./docs/developer-guide/) - コントリビューション・拡張方法
 - [リファレンス](./docs/reference/) - DB・API・ツール・スクリプト一覧
 
-## 今後の開発予定（2026年2月～3月ごろ）
+## 今後の開発予定
+
+> 最新の進捗・実装状況は [進捗マップ（roadmap_status.md）](./docs/overview/roadmap_status.md)、概念どうしの関係は [俯瞰地図（landscape.md）](./docs/overview/landscape.md) を参照してください。以下は構想レベルの一覧です（一部は実装済み／進行中）。
+
 - バグfix、エラーハンドリングの改良。
 - UI改良。
 - Geminiの明示的キャッシュ機能に対応予定。

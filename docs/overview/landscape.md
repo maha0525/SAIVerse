@@ -368,6 +368,7 @@ graph TD
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
 | **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換）。クラス削除は別タスク |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
+| **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 
 ---
 
@@ -439,6 +440,6 @@ graph TD
 - **概念に実装の型が無い**: §4 Beat（→ [issue](../issues/beat_concept_not_typed_in_implementation.md)）
 - **短期→長期の選別が未整理**: システム通知を長期記憶に渡さない入口選別（→ [issue](../issues/short_term_to_long_term_memory_filtering.md)）
 
-### 各概念の詳細リファレンス（将来作成）
+### 各概念の詳細リファレンス
 
-現状、概念解説は intent doc と issue にしか存在しない。地図完成後の次フェーズとして、各概念の解説を `docs/concepts/` 配下に整備する（→ [`roadmap_status.md`](roadmap_status.md) §8）。
+各概念の「何で・どう動き・どこに実装され・どう増やすか」の開発者向け解説を [`docs/concepts/`](../concepts/README.md) 配下に整備済み（索引は [`concepts/README.md`](../concepts/README.md)）。この地図が「概念どうしの関係」を、concepts が「各概念 → 実装への入口」を担う二層構成。設計意図（なぜ）は各 concepts ページからリンクする `docs/intent/` を参照。

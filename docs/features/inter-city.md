@@ -6,6 +6,8 @@
 
 SAIVerseでは、複数のCityを独立したインスタンスとして起動し、ネットワーク経由で連携させることができます。ペルソナは他のCityに「訪問」し、そこで活動することが可能です。
 
+> ⚠️ **現状は冬眠中**: 都市間連携（SDS）はデフォルト無効で、単一 City 運用が通常。使うには SDS を別プロセスで起動し `main.py ... --sds-url` を明示する必要がある（→ [landscape §8](../overview/landscape.md)）。以下は将来 multi-city を復活させる際の仕様。
+
 ## アーキテクチャ
 
 ```
@@ -93,4 +95,5 @@ UIから切り替え可能：
 
 ## 次のステップ
 
-- [アーキテクチャ](../concepts/architecture.md) - システム全体像
+- [俯瞰地図 landscape.md](../overview/landscape.md) - システム全体像（SDS は §8）
+- [SDS](../concepts/sds.md) - ディレクトリサービスの概念

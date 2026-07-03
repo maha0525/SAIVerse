@@ -4,11 +4,11 @@ SAIVerseの世界を編集する「ワールドエディタ」の使い方を説
 
 ## 概要
 
-ワールドエディタでは、City・Building・ペルソナ・ツールの追加・編集・削除を行えます。`database/seed.py` を直接編集することなく、UIから動的に世界を構築できます。
+ワールドエディタでは、City・Building・ペルソナ・アイテムの追加・編集・削除を行えます。`database/seed.py` を直接編集することなく、UIから動的に世界を構築できます。
 
 ## アクセス方法
 
-サイドバーのメニューから「World Editor」を選択。
+左サイドバー フッターの歯車（設定）→「ワールドエディタ」タブ。
 
 ## タブ構成
 
@@ -46,17 +46,10 @@ Buildingの管理。
 | System Prompt | 性格・背景設定 |
 | Building | 現在の所属Building |
 | Private Room | 休眠時に戻る個室 |
-| Interaction Mode | auto/user/sleep |
+| Activity State | 自律性の状態（`ACTIVITY_STATE`: Stop / Sleep / Idle / Active） |
 | Appearance Image | 外見画像 |
 
-### Tools タブ
-
-AIが使用できるツールの管理。
-
-| 操作 | 説明 |
-|------|------|
-| ツール一覧 | 登録されているツールを表示 |
-| Building紐付け | どのBuildingでどのツールを使えるか設定 |
+> **ツールの管理について**: ワールドエディタにツールを追加したり Building に紐付けたりする機能は**ありません**。ペルソナがツールを使えるようにするには、ツールを Spell 化（`spell=True`）するか Playbook の TOOL ノードに置く（→ [ツールの追加](../developer-guide/adding-tools.md)）。
 
 ### Items タブ
 
@@ -86,13 +79,6 @@ AIが使用できるツールの管理。
 3. System Prompt やCapacity を編集
 4. 「Save」で保存
 
-### ツールをBuildingに追加
-
-1. Tools タブを開く
-2. 対象のBuildingを選択
-3. 使用可能にしたいツールをチェック
-4. 「Save」で保存
-
 ## 注意事項
 
 - 変更は即座にデータベースに保存されます
@@ -100,5 +86,4 @@ AIが使用できるツールの管理。
 
 ## 次のステップ
 
-- [コマンド一覧](./commands.md) - ユーザーコマンド
 - [ツールシステム](../features/tools-system.md) - ツールの詳細

@@ -4,7 +4,7 @@ SAIVerseの設定オプションを説明します。
 
 ## 環境変数
 
-`.env` ファイルで設定します。
+`.env` ファイルで設定します。よく使うものを抜粋。完全な一覧は [reference/environment-vars.md](../reference/environment-vars.md) を参照。
 
 ### LLM APIキー
 
@@ -24,7 +24,7 @@ SAIVerseの設定オプションを説明します。
 |--------|-----------|------|
 | `SAIMEMORY_EMBED_MODEL` | `intfloat/multilingual-e5-small` | 埋め込みモデル |
 | `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカルモデルのパス |
-| `SAIMEMORY_LAST_MESSAGES` | 20 | 想起時の最大メッセージ数 |
+| `SAIMEMORY_MEMORY_LAST_MESSAGES` | 40 | 文脈に載せる直近メッセージ数 |
 
 ### ネットワーク
 
@@ -56,10 +56,11 @@ python main.py <city_id> [オプション]
 
 | オプション | 説明 |
 |-----------|------|
+| `<city_id>` | 起動する City（位置引数、既定 `city_a`） |
 | `--db-file PATH` | データベースファイルのパス |
-| `--ui-port PORT` | フロントエンド用ポート |
-| `--api-port PORT` | APIサーバーのポート |
 | `--sds-url URL` | ディレクトリサービスのURL |
+
+> ポートは `cities.json` で City ごとに設定する（city_a=8000 系 / city_b=9000 系）。個別ポート指定の起動引数はない。
 
 ## モデル設定
 
@@ -88,6 +89,8 @@ python main.py <city_id> [オプション]
 - `api_key_env`: APIキーの環境変数名
 - `parameters`: 温度・top_pなどのパラメータ制約
 
+> 新しいモデルは、接続情報を `provider_ref` でプロバイダ定義から参照する形が推奨（→ [reference/providers.md](../reference/providers.md)）。追加・編集は グローバル設定 > モデル管理 タブからも行える（→ [グローバル設定](../user-guide/global-settings.md)）。
+
 ## 次のステップ
 
-- [アーキテクチャ](../concepts/architecture.md) - システムの仕組み
+- [基本概念](../concepts/README.md) - システムの仕組み

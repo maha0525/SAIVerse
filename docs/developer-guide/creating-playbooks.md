@@ -1,169 +1,149 @@
-# Playbook作成
+# Playbook 作成
 
-独自のPlaybookを作成する方法を説明します。
+独自の Playbook を作成する方法を説明する。概念的な位置づけは [concepts/playbook.md](../concepts/playbook.md)、Spell との接続は [concepts/spell.md](../concepts/spell.md) を参照。スキーマの正は [`sea/playbook_models.py`](../../sea/playbook_models.py)。
 
-## 基本構造
+## 配置とインポート（重要）
 
-Playbookは以下のディレクトリにJSONファイルとして配置します：
-- `user_data/playbooks/` - カスタムPlaybook（優先読み込み）
-- `builtin_data/playbooks/` - 組み込みデフォルト
+Playbook は JSON ファイルとして以下に置く:
+
+```
+~/.saiverse/user_data/playbooks/   # カスタム（優先）
+builtin_data/playbooks/public/     # 組み込み
+```
+
+> ⚠️ **ファイルを置く/編集するだけでは反映されない。** Playbook は DB の `playbooks` テーブルに取り込まれて実行される。編集後は必ずインポートする:
+>
+> ```bash
+> python scripts/import_playbook.py --file <path>      # 単一
+> python scripts/import_all_playbooks.py               # 全 Playbook（安全・personas 等は不変）
+> ```
+>
+> グラフ検証込みで保存する `save_playbook` ツール経由でも可。
+
+## トップレベル構造（PlaybookSchema）
 
 ```json
 {
   "name": "my_playbook",
-  "description": "カスタムPlaybookの説明",
-  "start_node": "start",
-  "nodes": [
-    {
-      "id": "start",
-      "type": "pass",
-      "next": "process"
-    },
-    {
-      "id": "process",
-      "type": "llm",
-      "prompt_template": "処理: {input}",
-      "output_key": "result",
-      "next": "end"
-    }
-  ]
-}
-```
-
-## ノードタイプ詳細
-
-### pass
-
-条件なしまたは条件付きで次のノードへ遷移。
-
-```json
-{
-  "id": "check",
-  "type": "pass",
-  "next": "default",
-  "conditional_next": [
-    {"condition": "{flag} == true", "next": "branch_a"},
-    {"condition": "{count} > 5", "next": "branch_b"}
-  ]
-}
-```
-
-### llm
-
-LLMを呼び出して応答を生成。
-
-```json
-{
-  "id": "generate",
-  "type": "llm",
-  "prompt_template": "以下に応答:\n{context}",
-  "system_prompt": "あなたはアシスタントです",
-  "model": "gemini-2.5-flash",
-  "output_key": "response",
-  "json_output": false,
-  "tools_enabled": false,
-  "next": "end"
+  "display_name": "マイPlaybook",
+  "description": "カスタム Playbook の説明",
+  "input_schema": [
+    { "name": "input", "description": "呼び出し時の入力" }
+  ],
+  "output_schema": ["result"],
+  "router_callable": true,
+  "can_run_as_child": false,
+  "nodes": [ ... ],
+  "start_node": "start"
 }
 ```
 
 | フィールド | 説明 |
-|------------|------|
-| `prompt_template` | プロンプトテンプレート |
-| `system_prompt` | システムプロンプト（オプション） |
-| `model` | 使用するモデル（オプション） |
-| `output_key` | 結果を保存する変数名 |
-| `json_output` | JSON形式で出力するか |
-| `tools_enabled` | ツール呼び出しを許可するか |
+|---|---|
+| `name` | Playbook ID（`^[a-z0-9_]+$`・必須） |
+| `display_name` | UI 表示名 |
+| `input_schema` | 入力パラメータ定義（`List[InputParam]`）。`{var}` で参照する変数は**ここに宣言が必要** |
+| `output_schema` | 親 Playbook に伝播する state キー群（サブライン完了時） |
+| `report_template` | サブライン完了時の `report_to_parent` を機械的にレンダリング（LLM 不要な定型報告向け） |
+| `context_requirements` | 読み込むコンテキスト（履歴深さ・inventory・memory_weave 等）。未指定はフルコンテキスト |
+| `router_callable` | メタ判断・`run_playbook` / `exec` から呼び出し可能にするか（フィールド名は名残で「router」だが LLM ルーターは無い） |
+| `can_run_as_child` | サブライン（`/run_playbook` / subplay `line="sub"`）として呼べるか。**True なら `report_to_parent` の産出が必須**（`report_template` か、LLM ノードの `response_schema.properties` に `report_to_parent`） |
+| `user_selectable` / `dev_only` | UI ユーザー選択可 / 開発者モード限定 |
+| `nodes` / `start_node` | ノード配列と開始ノード ID |
 
-### memorize
+> **`input_schema` 宣言漏れの罠**: `action` テンプレートで `{var}` を使うなら `input_schema` に宣言する。宣言漏れだと引数が state に昇格せず `{var}` がリテラル落ちする（`{input}` のみ特別扱い）。
 
-状態変数に値を保存。
+## ノードタイプ（実際の type 名とフィールド）
+
+主要なノードは以下（全型は `playbook_models.py` の `NodeType`）。**全ノード共通**で `id` / `next` / `conditional_next` を持つ。
+
+### llm — LLM 呼び出し
+
+| フィールド | 説明 |
+|---|---|
+| `action` | プロンプトテンプレート（`{var}` 展開） |
+| `response_schema` | 構造化出力を強制する JSON Schema |
+| `output_key` | 構造化出力を保存する state キー（既定はノード id） |
+| `output_mapping` | 構造化出力のフィールドを state 変数へマップ（例: `{"decision.next_action": "chosen_action"}`） |
+| `available_tools` | ネイティブ tool calling を許可するツール名リスト（通常は使わない。下記「設計哲学」参照） |
+| `output_keys` | 出力タイプ→state キー（`text` / `function_call` / `thought`） |
+| `memorize` | `true` か dict で prompt/response を SAIMemory 保存 |
+| `speak` | `true` で応答を Building（UI）へ出力（既定でストリーミング） |
+| `important` | `true` で pulse_logs と messages に二重書き込み |
+
+### tool — ツールの固定実行
+
+| フィールド | 説明 |
+|---|---|
+| `action` | 実行するツール名（registry の名前） |
+| `args_input` | 引数名→state キー or リテラル。**文字列は state キーとして解決**される。リテラル文字列を渡すには `{"$literal": "値"}` |
+| `output_key` / `output_keys` | 結果の保存先。タプル戻り値は `output_keys` で複数 state 変数に展開 |
+
+### memorize — SAIMemory へ保存
+
+`action`（保存テキスト）/ `role`（既定 `assistant`）/ `tags`（意味分類タグのみ。`internal` 等の context 制御タグは書かない）/ `metadata_key`。
+
+### subplay — サブ Playbook を静的に呼ぶ
+
+`playbook`（名前）/ `args`（テンプレート文字列）/ `line`（`"main"` or `"sub"`。`sub` は軽量モデルの子ライン、完了時 `report_to_parent` を親へ）/ `execution`（`inline` or `subagent`）。
+
+### その他
+
+- **pass** — 分岐のみ（`conditional_next`）
+- **set** — state 変数の代入（リテラル・テンプレート・算術式 `"{count} + 1"`）
+- **exec** — LLM ノードが state 変数（`selected_playbook`）に入れた Playbook 名を動的に実行（選択→実行パターン）
+- **say** — UI 出力のみ（SAIMemory 非記録）
+- **think** — 内的メモの記録
+- **speak** — 最終発話（既定 `important=true`）
+- **tool_call** — LLM が選んだツールを動的実行（`available_tools` + `output_keys` と組む agentic loop）
+- **stelis_start / stelis_end** — 階層コンテキスト管理（Stelis スレッド）
+
+### conditional_next の形（旧記法と別物）
 
 ```json
-{
-  "id": "save",
-  "type": "memorize",
-  "key": "saved_value",
-  "value": "{computed_result}",
-  "next": "end"
+"conditional_next": {
+  "field": "decision.action",
+  "operator": "eq",
+  "cases": { "recall": "do_recall", "default": "fallback" }
 }
 ```
 
-### tool_call
-
-ツールを実行。
-
-```json
-{
-  "id": "search",
-  "type": "tool_call",
-  "tool_name": "web_search",
-  "tool_args": {
-    "query": "{search_term}"
-  },
-  "output_key": "search_result",
-  "next": "process_result"
-}
-```
-
-### sub_playbook
-
-別のPlaybookを呼び出し。
-
-```json
-{
-  "id": "call_sub",
-  "type": "sub_playbook",
-  "playbook_name": "sub_speak",
-  "input_mapping": {
-    "message": "{generated_text}"
-  },
-  "output_mapping": {
-    "sub_result": "final_output"
-  },
-  "next": "end"
-}
-```
+`operator` は `eq`(既定) / `ne` / `gt` / `gte` / `lt` / `lte`。`cases` の値に `null` を置くと実行終了。指定時は `next` を上書きする。
 
 ## 変数の参照
 
-`{variable_name}` で状態変数を参照。
+- `action` テンプレート内は `{var}` / `{nested.key}` で state を参照
+- `args_input` の文字列値は state キーパス、リテラル文字列は `{"$literal": "..."}`
 
-### ネストした変数
+## canonical 実例（LLM → TOOL → MEMORIZE）
 
-```json
-{
-  "prompt_template": "{response.content}"
-}
-```
+[`builtin_data/playbooks/public/generate_image_playbook.json`](../../builtin_data/playbooks/public/generate_image_playbook.json) が模範パターン:
 
-### 組み込み変数
+1. `decide_prompt`（**llm** + `response_schema` で引数を構造化 → `output_key: "gen_params"`）
+2. `generate`（**tool** `action: "generate_image"` + `args_input` で `gen_params.*` をツール引数にマップ + `output_keys` で戻り値を展開）
+3. `record`（**memorize** で結果を SAIMemory に保存）
 
-| 変数 | 説明 |
-|------|------|
-| `{user_input}` | ユーザー入力 |
-| `{context}` | 現在のコンテキスト |
-| `{persona_name}` | ペルソナ名 |
-| `{building_name}` | Building名 |
+`report_template` で機械的な完了報告を返し、`can_run_as_child: true` の契約（`report_to_parent` 産出）を満たしている。
 
-## デバッグ
+## Spell との接続（run_playbook）
 
-### ログ出力
+メインライン LLM が発話中に `/spell run_playbook name='my_playbook'` と書くと、`router_callable: true` の Playbook が**サブライン**として動的起動される。引数は呼ばれた Playbook の最初の LLM ノードが決める（呼び出し側は名前のみ）。→ [concepts/spell.md](../concepts/spell.md)
 
-`SAIVERSE_LOG_LEVEL=DEBUG` でPlaybookの実行ログを確認。
+## 設計哲学
 
-### ステップ実行
+- **メタ判断の Playbook 選択は決定論的**: `meta_judgment_*` の選択は MetaLayer が Track/persona 状態から決める（`saiverse/meta_layer.py` の `_SITUATION_PLAYBOOK_MAP`）。軽量 LLM ルーターは廃止された
+- **引数は Playbook 内で決める**: 各 Playbook がコンテキストを見て tool 引数を組む LLM ノードを持つ
+- **function calling を使わない**: ネイティブ tool call はプロンプトキャッシュを壊す。structured output + tool ノード固定実行が正道
+- **新フィールドを足すときは `sea/playbook_models.py` の node 定義も更新**。しないと `import_playbook.py` / `save_playbook` が Pydantic 検証で黙って落とす
 
-UI のデバッグモードでノードごとの実行状態を確認可能。
+## 検証・デバッグ
 
-## ベストプラクティス
-
-1. **小さく始める**: 単純なフローから始めて徐々に複雑化
-2. **サブPlaybookを活用**: 再利用可能な処理は分離
-3. **エラーハンドリング**: 失敗時の分岐を考慮
-4. **テスト**: 重要なフローはテストを作成
+- グラフ検証: `validate_playbook_graph`（到達不能ノード・欠落 `next` を検出）
+- 実行トレース: `SAIVERSE_SEA_TRACE=1` で `sea_trace.log` に詳細出力
+- DB 反映確認: `sqlite3 ~/.saiverse/user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<name>'"`
 
 ## 次のステップ
 
-- [Playbook/SEA](../features/playbooks.md) - Playbookの概要
-- [テスト](./testing.md) - テストの実行方法
+- [Playbook/SEA 概要](../features/playbooks.md)
+- [concepts/playbook.md](../concepts/playbook.md) - 概念と実装入口
+- [テスト](./testing.md)

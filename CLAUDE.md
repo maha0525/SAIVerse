@@ -176,18 +176,6 @@ python scripts/backup_saimemory.py persona_id --output-dir ~/.saiverse/backups/
 # Import legacy JSON logs to SAIMemory
 python scripts/import_persona_logs_to_saimemory.py --persona air_city_a
 
-# Ingest logs into Qdrant for semantic recall
-python scripts/ingest_persona_log.py persona_id
-
-# Query memory semantically
-python scripts/recall_persona_memory.py persona_id "query text"
-
-# Process task requests
-python scripts/process_task_requests.py --base ~/.saiverse/personas
-
-# Visualize memory topics in browser
-python scripts/memory_topics_ui.py
-
 # Migrate data to new user_data structure
 python scripts/migrate_to_user_data.py --dry-run  # Preview
 python scripts/migrate_to_user_data.py             # Execute
@@ -213,12 +201,12 @@ python scripts/migrate_to_user_data.py             # Execute
 **SEARuntime** (`sea/runtime.py`)
 - Executes playbooks (workflow graphs) for conversation routing using LangGraph
 - Two meta-playbooks: `meta_user` (handles user input) and `meta_auto` (autonomous pulse)
-- Playbooks are JSON files in `sea/playbooks/` or stored in DB `playbooks` table
-- **Lightweight model support**: LLM nodes can specify `model_type: "lightweight"` to use a faster, cheaper model for simple tasks (e.g., router decisions)
+- Playbooks are JSON files in `builtin_data/playbooks/` (or `~/.saiverse/user_data/playbooks/`) or stored in DB `playbooks` table
+- **Lightweight model support**: an LLM node runs on either the persona's `DEFAULT_MODEL` or `LIGHTWEIGHT_MODEL`. Which one is derived from the line's **aspect** (CONVERSATION/WORKER/AUTONOMOUS/META → model tier; see `sea/pulse_context.py`), not a per-node field. (The old per-node `model_type` field is deprecated — it only survives in `builtin_data/playbooks/archive/`.)
   - Each persona has two model settings: `DEFAULT_MODEL` (normal) and `LIGHTWEIGHT_MODEL` (optional)
   - If `LIGHTWEIGHT_MODEL` is not set, system falls back to environment variable `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` or `BUILTIN_DEFAULT_LITE_MODEL` (defined in `saiverse/model_defaults.py`)
   - Persona model priority: chat UI override > persona `DEFAULT_MODEL` (DB) > env `SAIVERSE_DEFAULT_MODEL` > built-in default (see `saiverse/model_defaults.py`).
-  - Use lightweight models for router nodes and simple decision-making; use default models for complex reasoning and tool parameter generation
+  - Lightweight tier is used for sub-line/worker and autonomous judgment; default tier for main-line conversation and tool parameter generation
 
 **OccupancyManager** (`saiverse/occupancy_manager.py`)
 - Handles all entity movement (users, AI personas, visitors)
@@ -358,9 +346,6 @@ file via "削除" restores the builtin.
 "上書き保存" (overwrite). For builtin models, "上書き保存" creates a user_data
 override; the builtin file is preserved.
 
-**Migration Script**:
-- `scripts/migrate_models_to_directory.py`: Migrates legacy `models.json` to `models/` directory structure
-
 ## Directory Structure
 
 ### Repository Root
@@ -441,7 +426,7 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 - **BuildingOccupancyLog**: tracks entry/exit timestamps
 - **VisitingAI**: manages inter-city move transactions (status: requested/accepted/rejected)
 - **ThinkingRequest**: queues remote thinking calls (status: pending/processed/error)
-- **Tool** + **BuildingToolLink**: associates available tools with buildings
+- **Tool** + **BuildingToolLink**: legacy table for associating tools with buildings — **currently unused**. Tools reach personas via Spell (`spell=True`) or Playbook TOOL nodes, not this table.
 - **Blueprint**: templates for creating new personas
 - **Playbook**: stores SEA playbook schemas and nodes
 
@@ -458,7 +443,7 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 - **Loading**: Tools are loaded from both `~/.saiverse/user_data/tools/` (priority) and `builtin_data/tools/`
 - **Subdirectory support**: Tools can be organized in subdirectories with `schema.py` (e.g., git-cloned tool repos)
 - **Context**: `tools/context.py` uses contextvars to inject persona/manager references during tool execution
-- **Built-in tools** (`builtin_data/tools/defs/` or `tools/defs/`):
+- **Built-in tools** (`builtin_data/tools/`):
   - `calculator.py`: safe AST-based expression evaluator
   - `image_generator.py`: Gemini 2.5 Flash Image API
   - `item_*.py`: pickup/place/use item in building inventory
@@ -492,6 +477,19 @@ Each feature/subsystem has an **Intent Document** in `docs/intent/` that describ
 Intent documents record the "why" that code alone cannot express. They prevent well-intentioned changes from violating design assumptions (e.g., increasing Stelis anchor display to 50 messages defeats the purpose of context isolation).
 
 ## Important Conventions
+
+### Documentation Maintenance (keep docs in sync with code)
+
+**Docs are part of the change surface, not an afterthought.** When a change alters a fact a doc states, update that doc in the *same* change:
+
+- **Adding / moving / renaming modules or top-level directories** → update `docs/developer-guide/project-structure.md` (it drifts fastest — it describes the file tree)
+- **New or changed concept / mechanism** → update the relevant `docs/concepts/*.md` and the map `docs/overview/landscape.md`
+- **Deprecating / killing a concept** → record it in `docs/overview/landscape.md` §9 (死んだ概念) and remove *actionable* references to it elsewhere (don't leave "do X via the dead thing" instructions)
+- **New / removed feature, playbook node field, env var, API route, DB table, script** → update the matching `docs/reference/*` / `docs/features/*`
+
+**Auto-generated reference docs**: `docs/reference/{tool-catalog,api-endpoints,database-schema}.md` are generated from code (they carry an `AUTO-GENERATED` banner — **never hand-edit them**). After changing tools (`builtin_data/tools/`), API routes (`api/routes/`), or DB models (`database/models.py`), **run `gen_reference_docs.bat` before committing** (non-Windows: `python scripts/gen_reference_docs.py`) and include the regenerated docs in the same commit. This is a developer-side step only — it is intentionally **not** wired into end-user `update.*` (that would create local git diffs on pull) and there is **no CI gate** (regenerating after the fact is harmless). `... --check` reports drift if you want to verify locally. The other reference docs (providers / phenomena / playbooks / env vars / `saiverse://` URI) are hand-maintained.
+
+If unsure whether any doc references what you changed, `grep docs/` for the symbol / name before finishing. Stale docs send the next agent and the user to the wrong entry point — that is a real cost, not a cosmetic one. Prefer updating docs proactively even when not asked.
 
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
@@ -555,7 +553,7 @@ Intent documents record the "why" that code alone cannot express. They prevent w
      - Elements: Inspect actual DOM structure and CSS
      - Network: Verify request URLs and responses
 - **When touching external APIs**: Always check official docs first (especially Gemini structured output limitations)
-- **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `sea/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
+- **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `builtin_data/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
 - **Database changes**: Write migration in `database/migrate.py`, test with `--db-file` on copy first
 
 ### Memory and History
@@ -574,7 +572,7 @@ Intent documents record the "why" that code alone cannot express. They prevent w
 - Tests use `unittest` framework (pytest also works)
 - Mock LLM clients when testing conversation logic
 - DB tests should use temporary databases
-- Check `docs/test_manual.md` for manual integration test scenarios (World Dive, Persona Genesis, etc.)
+- See `docs/developer-guide/testing.md` and `docs/test_environment.md` for test setup and scenarios
 
 ### Logging
 
@@ -636,12 +634,12 @@ Critical settings (see `.env.example`):
 
 ## Documentation
 
-- `docs/architecture.md`: component diagram and data flow
-- `docs/database_design.md`: table schemas and rationale
-- `docs/test_manual.md`: manual test scenarios
-- `docs/sea_integration_plan.md`: SEA framework integration roadmap
 - `docs/overview/landscape.md`: 概念の俯瞰地図（何があってどう繋がるか）
 - `docs/overview/roadmap_status.md`: 進捗マップ（何が予定され、いまどこにいるか）
+- `docs/concepts/`: 各概念の開発者向けリファレンス（実装への入口。索引は `concepts/README.md`）
+- `docs/reference/database-schema.md`: テーブル定義とスキーマ
+- `docs/reference/api-endpoints.md`: REST API 一覧
+- `docs/developer-guide/`: コントリビューション・プロジェクト構造・ツール/Playbook 追加・テスト
 - `docs/session_reflection_*.md`: lessons learned from development sessions (debugging approaches, etc.)
 - `README.md`: comprehensive setup and usage guide
 
@@ -651,20 +649,20 @@ Critical settings (see `.env.example`):
 
 **Move persona between buildings**: `OccupancyManager.move_to(persona, building_id)` (do not call PersonaCore methods directly)
 
-**Add new tool**: Define in `tools/defs/` (or `~/.saiverse/user_data/tools/` for custom tools), register automatically on startup. Tools in subdirectories need a `schema.py` file. Link to buildings via `BuildingToolLink` table or frontend UI
+**Add new tool**: Define in `builtin_data/tools/` (or `~/.saiverse/user_data/tools/` for custom tools) with a `schema()` function returning `ToolSchema` + a same-named callable; registers automatically on startup. Tools in subdirectories need a `schema.py` (with `schemas()`). To make it usable by a persona, either set `spell=True` (callable from plaintext via `/spell`) or reference it in a Playbook TOOL node — **not** the legacy `BuildingToolLink` table.
 
 **Modify playbook**: Edit JSON in `builtin_data/playbooks/` or `~/.saiverse/user_data/playbooks/`, then run `python scripts/import_playbook.py --file <path>` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
 
 **Playbook design philosophy**:
-- **Router simplicity**: The router node in meta playbooks is designed to run on lightweight LLMs. It should ONLY select which playbook to execute (enum selection), not decide complex arguments.
+- **Meta-judgment dispatch is deterministic (no LLM router)**: which `meta_judgment_*` playbook runs is selected in code by `MetaLayer._SITUATION_PLAYBOOK_MAP` (`saiverse/meta_layer.py`) from Track/persona state. The dispatched situation playbooks (`meta_judgment_running` / `idle_pending` / `idle_empty` / `alert` / `life_purpose`) use structured output: an LLM node with `response_schema` returns the decision (action/decision/create enums), then a `tool` node applies the Track op. (The base `meta_judgment.json` is a separate NL-monologue-+-`/spell` variant that is NOT in the dispatch map.)
 - **Arguments decided inside playbooks**: Each playbook should include an LLM node that decides the tool arguments based on available context (inventory, building items, conversation history, etc.). This approach provides better flexibility and leverages the full context within the playbook.
-- **Reference implementation**: See `memory_recall_playbook.json` for the canonical pattern:
-  1. `generate_query` LLM node with `response_schema` to structure output
-  2. `recall` TOOL node with `args_input` mapping state variables to tool parameters
+- **Reference implementation**: See `builtin_data/playbooks/public/generate_image_playbook.json` for the canonical pattern:
+  1. `decide_prompt` LLM node with `response_schema` to structure output (→ `output_key: "gen_params"`)
+  2. `generate` TOOL node with `args_input` mapping state variables to tool parameters (+ `output_keys` for tuple returns)
   3. `record` MEMORIZE node to save results to SAIMemory
 - **`args_input` value types**: String values are resolved as state variable paths (e.g., `"gen_params.title"`). Non-string values (int, bool, etc.) are used as literals. To pass a **literal string**, use `{"$literal": "value"}` syntax (e.g., `{"$literal": "Anima.json"}`). Without `$literal`, a string like `"Anima.json"` would be interpreted as a state key lookup and resolve to `None`.
 - **Multi-value tool returns**: Tools returning tuples (e.g., `generate_image`) can use `output_keys` to expand values into multiple state variables. Example: `"output_keys": ["text", "snippet", "file_path", "metadata"]`
-- **Adding new node fields**: When adding new fields to playbook nodes (e.g., `model_type`, `output_keys`):
+- **Adding new node fields**: When adding new fields to playbook nodes (e.g., `output_keys`, `response_schema_source`):
   1. **MUST update** `sea/playbook_models.py` node definitions (`LLMNodeDef`, `ToolNodeDef`, etc.) with the new field
   2. Without this, `save_playbook` tool and `import_playbook.py` will silently drop the field during Pydantic validation
   3. After updating the schema, **re-import all affected playbooks** using `python scripts/import_playbook.py --file <path>`
@@ -672,4 +670,4 @@ Critical settings (see `.env.example`):
 
 **Debug LLM calls**: Check `~/.saiverse/user_data/logs/{session}/llm_io.log` for LLM I/O, `sea_trace.log` for playbook execution traces
 
-**Access persona memory**: Use `scripts/recall_persona_memory.py` or Memory Settings UI tab
+**Access persona memory**: Use the Memory Settings UI tab (semantic recall / browse). Per-persona memory lives in `~/.saiverse/personas/<id>/memory.db`.

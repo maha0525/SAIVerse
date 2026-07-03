@@ -1,79 +1,47 @@
 # 自律行動モード
 
-ペルソナの自律行動（パルス駆動）について説明します。
+ユーザーからの入力がなくても、ペルソナが能動的に思考・行動する仕組み。概念の詳細は [concepts/pulse.md](../concepts/pulse.md) / [track.md](../concepts/track.md) / [meta-judgment.md](../concepts/meta-judgment.md) を参照。
 
 ## 概要
 
-自律行動モードでは、ペルソナが定期的に自分から思考・発言を行います。ユーザーからの入力がなくても、AIが能動的に活動します。
+ペルソナは [Pulse](../concepts/pulse.md)（認知サイクル1回分）を回して自律的に活動する。Pulse は「どの [Track](../concepts/track.md)（進行中の作業文脈）に対して思考するか」を [Meta-Judgment](../concepts/meta-judgment.md) が決め、その Track のメインライン Playbook が発話・ツール実行などの行動を生む。
 
-## パルス駆動
+## 何が Pulse を起こすか（時間機構）
 
-### 仕組み
+> ⚠️ 旧 `ConversationManager`（10秒ごとに全員を回すプロトタイプ）は**廃止済み**（2026-05-01 の認知モデル移行で no-op 化）。現在の自律稼働は2層のリズムで駆動される。
 
-`ConversationManager` が定期的にペルソナの `run_pulse` を呼び出します。
+- **AutonomyManager**（`saiverse/autonomy_manager.py`、既定 約50分間隔）— per-persona のタイマー。tick でメタ判断 Pulse を起こす。**自律バイオリズムの大リズム**
+- **SubLineScheduler**（`saiverse/pulse_scheduler.py`、30秒ポーリング）— running 状態の自律 Track を拾って Pulse を連続実行する。**小リズム**
 
-```
-[10秒経過] → ConversationManager → PersonaCore.run_pulse()
-                                          │
-                                          ▼
-                                    認知 → 判断 → 行動
-                                          │
-                                          ▼
-                                    発話 or 待機
-```
+これらが [PulseController](../concepts/pulse.md) に Pulse を投げ、優先度（USER > SCHEDULE > AUTO）で捌かれる。
 
-### パルス間隔
+Building 側の自動 pulse 間隔は `AUTO_INTERVAL_SEC` カラム（既定 10 秒）で持つ。
 
-Building ごとに設定可能（デフォルト: 10秒）。
+## ACTIVITY_STATE（自律性の宣言）
 
-```python
-# Building の AUTO_PULSE_INTERVAL カラムで設定
-# 例: 30秒間隔
-building.AUTO_PULSE_INTERVAL = 30
-```
+各ペルソナは `ACTIVITY_STATE`（`ai` テーブル、既定 `Idle`）で自律性を外部に宣言する。
 
-## 行動モード
+| 状態 | 説明 |
+|---|---|
+| `Active` | アクティブに活動中 |
+| `Idle` | 待機（応答可能、次の起動を待つ） |
+| `Sleep` | 休眠 |
+| `Stop` | 停止 |
 
-### INTERACTION_MODE
+## 自律行動の中身
 
-| モード | 説明 | 自律発話 |
-|--------|------|:--------:|
-| `auto` | 自律会話モード | ✓ |
-| `user` | ユーザー対話モード | ✗ |
-| `sleep` | 休眠モード | ✗ |
+メタ判断が自律 Track を選ぶと、`track_autonomous`（自律 Track メインライン）が回る。さらに `meta_autonomy_decision` が次に実行する能力 Playbook を選び、以下のような自律活動を行う（→ [Playbook カタログ](../reference/playbook-catalog.md)）:
 
-### モードの切り替え
-
-- **召喚時**: `auto` → `user` に自動切替
-- **帰還時**: `user` → 元のモードに復帰
-- **ワールドエディタ**: 手動で `sleep` に設定可能
-
-## 思考フロー
-
-パルス実行時のPlaybook例（`meta_auto`）：
-
-```
-start → 状況認知 → 行動判断 → speak/think/wait
-```
-
-### 出力オプション
-
-| 行動 | 説明 |
-|------|------|
-| `speak` | Building内で発言 |
-| `think` | 内部で思考（発話なし） |
-| `wait` | 何もしない |
+- `autonomy_creation` — 創作（ドキュメント執筆・画像生成）
+- `autonomy_memory_organization` — 記憶整理（Memopedia）
+- `autonomy_web_research` — Web 調査
 
 ## グローバル制御
 
-### 自律モードスイッチ
-
-サイドバーから全体のON/OFFを切り替え可能。
-
-- **ON**: 全ペルソナが設定に従い自律行動
-- **OFF**: 全ての自律行動を停止
+サイドバー / ライフビューから自律行動の再生・停止をトグルできる。停止中は自律 Pulse が起きない。
 
 ## 次のステップ
 
+- [concepts/pulse.md](../concepts/pulse.md) - Pulse と時間機構
+- [concepts/meta-judgment.md](../concepts/meta-judgment.md) - どの Track を動かすか
 - [Playbook/SEA](./playbooks.md) - 行動パターンの定義
-- [ペルソナ](../concepts/persona.md) - AIの仕組み

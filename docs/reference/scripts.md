@@ -1,159 +1,76 @@
 # スクリプト一覧
 
-`scripts/` ディレクトリにある保守スクリプトの一覧です。
+`scripts/` にある保守スクリプトの**主要なもの**。全一覧は `ls scripts/`（一回きりの移行・デバッグ用スクリプトも多数あるため、ここは常用のものに絞った curated 版）。
 
-## SAIMemory関連
+## Playbook
 
-### backup_saimemory.py
+| スクリプト | 用途 |
+|---|---|
+| `import_playbook.py` | 単一 Playbook JSON を DB にインポート（`--file <path>`） |
+| `import_all_playbooks.py` | 全 Playbook を DB にインポート（`--force` / `--dry-run`。安全） |
+| `playbook_dry_run.py` | Playbook のドライラン検証 |
+| `strip_playbook_line_fields.py` | Playbook の line フィールド除去（移行系） |
 
-rdiff-backupでSAIMemoryを差分バックアップ。
+## ドキュメント生成
+
+| スクリプト | 用途 |
+|---|---|
+| `gen_reference_docs.py` | `docs/reference/` の自動生成 doc（tool-catalog / api-endpoints / database-schema）を再生成。`--check` でドリフト検査。ルートの [`gen_reference_docs.bat`](../../gen_reference_docs.bat) から叩く |
+
+## SAIMemory / 記憶
 
 ```bash
+# rdiff-backup で差分バックアップ
 python scripts/backup_saimemory.py air eris --output-dir ~/.saiverse/backups
 python scripts/backup_saimemory.py air --full --verbose
-```
 
-### export_saimemory_to_json.py
-
-指定期間のメッセージをJSONエクスポート。
-
-```bash
+# 期間指定で JSON エクスポート
 python scripts/export_saimemory_to_json.py air --start 2025-01-01 --end 2025-12-31 --output air.json
-```
 
-### import_persona_logs_to_saimemory.py
-
-JSONログをSAIMemoryにインポート。
-
-```bash
+# JSON ログを SAIMemory にインポート
 python scripts/import_persona_logs_to_saimemory.py --persona air --reset
-python scripts/import_persona_logs_to_saimemory.py --persona air --include-archives
-```
 
-### prune_sai_memory.py
-
-古いエントリを整理。
-
-```bash
+# 古いエントリを整理 / 埋め込み再生成 / タグ付与
 python scripts/prune_sai_memory.py air --days 365
-```
-
-### tag_conversation_messages.py
-
-メッセージにタグを付与。
-
-```bash
+python scripts/reembed_memory.py air
 python scripts/tag_conversation_messages.py air --auto
 ```
 
-### reembed_memory.py
+その他: `export_saimemory_native.py` / `import_saimemory_native.py`（ネイティブ形式）、`embed_recall_sources.py`、`extract_memory_notes.py` / `organize_memory_notes.py`（メモ）、`debug_memory.py`。
 
-埋め込みを再生成。
+## Memopedia / Chronicle
 
-```bash
-python scripts/reembed_memory.py air
-```
+> ⚠️ Memopedia / Chronicle の生成・整理は、現在はペルソナの自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で**自動的に**行われる。`build_memopedia.py` / `maintain_memopedia.py` / `build_arasuji.py` 等の手動構築スクリプトは**旧フロー**で、通常は使わない（`export_memopedia.py` などの export 系のみ補助的に残る）。
 
-## Memopedia関連
+## インポート（引っ越し）
 
-### build_memopedia.py
+| スクリプト | 用途 |
+|---|---|
+| `import_chatgpt_conversations.py` | ChatGPT 公式エクスポートを取り込み |
+| `import_chatlog_json.py` | 汎用チャットログ JSON を取り込み |
 
-会話履歴からMemopediaを構築。
+## アドオン
 
-```bash
-python scripts/build_memopedia.py air --limit 100
-python scripts/build_memopedia.py air --model gemini-2.5-pro --dry-run
-python scripts/build_memopedia.py air --export backup.json
-python scripts/build_memopedia.py air --import backup.json
-```
-
-### maintain_memopedia.py
-
-Memopediaを自動メンテナンス。
-
-```bash
-python scripts/maintain_memopedia.py air --auto
-python scripts/maintain_memopedia.py air --fix-markdown
-python scripts/maintain_memopedia.py air --split-large
-python scripts/maintain_memopedia.py air --merge-similar
-```
-
-## タスク関連
-
-### process_task_requests.py
-
-タスクリクエストを処理。
-
-```bash
-python scripts/process_task_requests.py --base ~/.saiverse/personas
-```
-
-## Playbook関連
-
-### import_all_playbooks.py
-
-Playbookをデータベースにインポート。
-
-```bash
-python scripts/import_all_playbooks.py
-```
+| スクリプト | 用途 |
+|---|---|
+| `addon_install.py` | アドオンのインストール |
 
 ## データ移行
 
-### migrate_to_user_data.py
-
-既存データを `user_data/` 構造に移行。
+一回きりのマイグレーション群（実行前に `--dry-run` があるものは必ず確認）:
 
 ```bash
-python scripts/migrate_to_user_data.py --dry-run  # プレビュー
-python scripts/migrate_to_user_data.py            # 実行
+python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saiverse/user_data 構造へ
 ```
 
-処理内容：
-- `database/data/*` → `user_data/database/`
-- `assets/avatars/*` → `user_data/icons/`
-- DBのアバターパス更新
+その他: `migrate_building_logs_to_db.py` / `migrate_conscious_log_to_db.py` / `migrate_memory_tags.py` / `migrate_playbooks_to_lines.py` / `migrate_tasks_db_to_unified.py` / `migrate_track_tasks_json.py`。
 
-## Discord関連
+## 開発 / 運用
 
-### run_discord_gateway_tests.py
-
-Discord Gatewayのテスト実行。
-
-```bash
-python scripts/run_discord_gateway_tests.py
-```
-
-## ユーティリティ
-
-### memory_topics_ui.py
-
-トピックをブラウザUIで可視化。
-
-```bash
-python scripts/memory_topics_ui.py
-```
-
-### ingest_persona_log.py
-
-ペルソナログを取り込み。
-
-```bash
-python scripts/ingest_persona_log.py air
-```
-
-### recall_persona_memory.py
-
-関連記憶を検索。
-
-```bash
-python scripts/recall_persona_memory.py air "旅行 温泉" --json
-```
-
-### rename_generic_topics.py
-
-トピック名を一括リネーム。
-
-```bash
-python scripts/rename_generic_topics.py air --dry-run
-```
+| スクリプト | 用途 |
+|---|---|
+| `self_update.py` | セルフアップデート（`update.bat`/`update.sh` と同じフロー） |
+| `set_version.py` | バージョン刻印 |
+| `snapshot.py` | スナップショット取得（ルートに `snapshot.bat`） |
+| `run_discord_gateway_tests.py` | Discord Gateway テスト |
+| `download_searxng_source.py` / `merge_searxng_settings.py` | SearXNG セットアップ |

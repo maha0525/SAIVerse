@@ -1,6 +1,6 @@
 # Issue: ドキュメントの古い記載を棚卸しして更新する
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 完了（2026-07-03）
 **優先度**: medium
 **作成日**: 2026-06-18
 **関連**: `README.md`、`AGENTS.md`、`CLAUDE.md`、`docs/developer-guide/project-structure.md`、`docs/index.md`
@@ -47,3 +47,11 @@ SAIVerse の実装・ディレクトリ構成が進んだ一方で、README や�
 ## ログ
 
 - 2026-06-18: Hermes cron によるドキュメント整合性確認の流れで、主要ドキュメントに古い記載が残っている可能性があるため起票。まずは棚卸しと優先度分類を行い、後で着手できる状態にする。
+- 2026-07-03: 起票の4対象（README / AGENTS / project-structure / index）を実装と全照合して更新完了。主な修正:
+  - **`docs/developer-guide/project-structure.md`**: 全面書き直し。実態と乖離していた記述を修正（マネージャ群はルート直下でなく `saiverse/` 配下、存在しない `ui/` Gradio・`models.json`/`cities.json` ルート配置・リポジトリ直下 `user_data/` の記載を削除、Playbook は `sea/playbooks/` でなく `builtin_data/playbooks/public/`、ツール定義は `tools/defs/` でなく `builtin_data/tools/`、api は `routes/` サブ構成）。3層優先順位・`~/.saiverse/` 構成・`builtin_data/providers/` を反映。
+  - **`docs/index.md`**: 基本概念のリンク切れ（legacy 退避済みファイル参照）を新 `concepts/` 22ページ構成へ差し替え、`features/mcp-integration.md` を追加、存在しない `docs_legacy/` リンクを overview/issues 導線へ置換。
+  - **`README.md`**: 陳腐化した「今後の開発予定（2026年2月〜3月ごろ）」の日付固定を外し、維持中の `roadmap_status.md`/`landscape.md` へ誘導。構造セクションは照合の結果正確だったので維持。
+  - **`AGENTS.md`**: `CLAUDE.md` の古い複製が別々保守でドリフトしていたため、単一正典（CLAUDE.md）を読ませる薄いポインタに一本化（Codex 固有の枠のみ残置）。
+  - **`CLAUDE.md`**: 存在しない doc 参照（`architecture.md`/`database_design.md`/`test_manual.md`/`sea_integration_plan.md`）と `sea/playbooks/`・`tools/defs/` 参照を実在先へ surgical 修正（計6箇所）。
+  - 併せて `docs/concepts/` に概念リファレンス18本 + 索引 README を新規整備し、`overview/landscape.md` 末尾の「将来作成」注記を完成状態へ更新。
+  - 検証: 対象5ファイルから壊れたトークンが全滅したことを grep で確認。→ 完了につき `archive/` へ移動。

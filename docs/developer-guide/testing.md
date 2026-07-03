@@ -27,7 +27,9 @@ python -m pytest tests/test_persona_mixins.py::TestMovementMixin
 python -m pytest tests/test_persona_mixins.py::TestMovementMixin::test_move_to_building
 ```
 
-## テストファイル一覧
+## テストファイル
+
+`tests/` に 100 本超（`test_*.py`）。代表例:
 
 | ファイル | 対象 |
 |----------|------|
@@ -37,10 +39,15 @@ python -m pytest tests/test_persona_mixins.py::TestMovementMixin::test_move_to_b
 | `test_persona_mixins.py` | ペルソナMixin |
 | `test_sai_memory_storage.py` | SAIMemoryストレージ |
 | `test_sai_memory_chunking.py` | メッセージ分割 |
-| `test_task_storage.py` | タスクストレージ |
 | `test_task_tools.py` | タスク関連ツール |
+| `test_track_manager.py` | Track 管理 |
+| `test_pulse_scheduler.py` | SubLineScheduler |
+| `test_autonomy_manager.py` | AutonomyManager |
+| `test_entity_extractor.py` | Memopedia エンティティ抽出 |
 | `test_image_generator.py` | 画像生成 |
 | `test_thread_switch_tool.py` | スレッド切替 |
+
+全一覧は `ls tests/test_*.py` で確認する。
 
 ## テストの書き方
 
@@ -91,6 +98,13 @@ class TestWithMock(unittest.TestCase):
         # テスト実行
 ```
 
+## テスト時の注意（実装由来の落とし穴）
+
+- **ツールは動的ロードされる**: `TOOL_REGISTRY` はモジュールを動的に読み込んで構築されるため、モジュールトップの参照を差し替える `patch('module.func')` では効かない場合がある。**`patch.object`** で対象オブジェクトを直接差し替える（→ [reference_test_infrastructure]）。
+- **DB テストは一時 DB を使う**: 本番 DB を触らない。テンポラリファイルに対して検証する。
+- **Windows の SQLite ロック**: Windows ではファイルハンドルが開いたままだと削除・置換で `WinError 32` が出やすい。teardown で接続を確実に close してから片付ける。
+- **隔離テスト環境**: バックエンドを本番データなしで叩くには `test_fixtures/`（`SAIVERSE_HOME=test_data/.saiverse`、ポート 18000）。詳細は [test_environment.md](../test_environment.md)。LLM コストを避けるなら `--quick`。
+
 ## CI/CD
 
 プルリクエスト時に自動でテストが実行されます。
@@ -102,10 +116,6 @@ python -m pytest --cov=./ --cov-report=html
 ```
 
 `htmlcov/index.html` でカバレッジレポートを確認。
-
-## 既知の腐食テスト
-
-`pytest tests/` で常時失敗する 9 件はテスト側のモック追従漏れ (本番コードの regression ではない)。一覧と症状: [known_test_failures.md](./known_test_failures.md)。
 
 ## 次のステップ
 
