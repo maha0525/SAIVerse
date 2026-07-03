@@ -60,20 +60,44 @@ type RowState =
     | { kind: 'installed_latest'; current_version: string }
     | { kind: 'update_available'; current_version: string; new_version: string };
 
+/**
+ * セマンティックバージョンを数値タプルとして比較する。
+ * `a > b` なら正、`a < b` なら負、等しければ 0 を返す。
+ * 数値化できない部分 (プレリリースタグ等) は 0 とみなす。
+ * バックエンド `api/routes/system.py:_compare_versions` と同じロジック。
+ */
+function compareVersions(a: string, b: string): number {
+    const parse = (v: string): number[] =>
+        v.replace(/^v/, '').split('.').map((p) => {
+            const n = parseInt(p, 10);
+            return Number.isNaN(n) ? 0 : n;
+        });
+    const pa = parse(a);
+    const pb = parse(b);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (diff !== 0) return diff > 0 ? 1 : -1;
+    }
+    return 0;
+}
+
 function deriveRowState(
     entry: RegistryAddonEntry,
     installedManifestByName: Map<string, { version: string }>,
 ): RowState {
     const installed = installedManifestByName.get(entry.id);
     if (!installed) return { kind: 'not_installed' };
-    if (installed.version === entry.latest) {
-        return { kind: 'installed_latest', current_version: installed.version };
+    // latest が installed より真に新しいときだけ「更新あり」。
+    // 等しい / installed が先行 (ローカル開発版など) は「導入済み」扱い。
+    if (compareVersions(entry.latest, installed.version) > 0) {
+        return {
+            kind: 'update_available',
+            current_version: installed.version,
+            new_version: entry.latest,
+        };
     }
-    return {
-        kind: 'update_available',
-        current_version: installed.version,
-        new_version: entry.latest,
-    };
+    return { kind: 'installed_latest', current_version: installed.version };
 }
 
 // ---------------------------------------------------------------------------
