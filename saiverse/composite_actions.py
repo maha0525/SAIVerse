@@ -491,7 +491,6 @@ def _mcp_tool_names(conn) -> set:
 
 def _make_call_awaitable(
     conn, mcp_names: set, tool: str, args: Dict[str, Any],
-    ctx: contextvars.Context,
 ):
     """1 件のツール呼び出しを awaitable にして返す (native 優先 → MCP fallback)。
 
@@ -522,12 +521,19 @@ def _make_call_awaitable(
             # 伝播済み) で await されるので、 そのまま返せば文脈が乗る。
             return target(**args)
         # sync native は executor スレッドに逃がすが、 run_in_executor は
-        # contextvars を伝播しないため、 捕捉済み ``ctx`` を ``ctx.run`` で張り
-        # 直す。 これで native wrapper 内の resolve_vessel_connection が現在
-        # ペルソナを解決でき、 per-vessel に正しく振り分く (= 直の spell が
-        # _run_spell_tool_async の ``_run`` で persona_context を張るのと同形)。
+        # contextvars を伝播しないため、 **この呼び出しごとに** 現在の Task 文脈を
+        # copy して ``call_ctx.run`` で張り直す。 これで native wrapper 内の
+        # resolve_vessel / resolve_vessel_connection が現在ペルソナ (または
+        # テスト実行の対象機体上書き) を解決でき、 per-vessel に正しく振り分く
+        # (= 直の spell が _run_spell_tool_async の ``_run`` で persona_context を
+        # 張るのと同形)。 1 つの parallel ステップに複数の sync native call がある
+        # とき、 同じ Context を共有すると ``ctx.run`` が並列で二重に入り
+        # "Context is already entered" になるため、 call ごとに独立 copy にする。
+        # 本関数は _execute_action_async の Task 文脈内で呼ばれるので、 ここでの
+        # copy_context() は上書き済みの instance_id 等を正しく捕捉する。
+        call_ctx = contextvars.copy_context()
         loop = asyncio.get_running_loop()
-        return loop.run_in_executor(None, lambda: ctx.run(target, **args))
+        return loop.run_in_executor(None, lambda: call_ctx.run(target, **args))
 
     if conn is not None and tool in mcp_names:
         return conn.call_tool(tool, args)
@@ -587,10 +593,9 @@ async def _execute_action_async(
     param_values = param_values or {}
     results: List[str] = []
 
-    # persona_context (execute_action の run_coroutine_threadsafe で本 Task へ
-    # 伝播済み) を捕捉し、 native tool を executor に逃がす際に ``ctx.run`` で
-    # 張り直すために使う (_make_call_awaitable 参照)。
-    _ctx = contextvars.copy_context()
+    # native tool を executor に逃がす際の contextvars 張り直しは、
+    # _make_call_awaitable が **call ごとに** copy_context() する (同一 Context を
+    # 共有すると parallel step で "Context is already entered" になるため)。
 
     for i, step in enumerate(action.steps):
         if step.type == "wait":
@@ -611,7 +616,7 @@ async def _execute_action_async(
                 for call in step.calls
             ]
             coros = [
-                _make_call_awaitable(conn, mcp_names, tool, args, _ctx)
+                _make_call_awaitable(conn, mcp_names, tool, args)
                 for tool, args in resolved
             ]
             step_results = await asyncio.gather(*coros, return_exceptions=True)
