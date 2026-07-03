@@ -12,7 +12,7 @@ from tools.core import ToolSchema
 def memopedia_get_tree() -> str:
     """Get the Memopedia page tree as Markdown outline.
 
-    Returns the tree structure showing all pages organized by category (人物/出来事/予定).
+    Returns the tree structure showing all pages organized by category (人物/用語/計画/出来事).
     Open pages are marked with [OPEN], closed with [-].
     """
     persona_id = get_active_persona_id()
@@ -43,7 +43,7 @@ def memopedia_get_tree() -> str:
 def schema() -> ToolSchema:
     return ToolSchema(
         name="memopedia_get_tree",
-        description="Get the Memopedia knowledge page tree structure. Shows all pages organized by category (人物/出来事/予定) with open/closed status.",
+        description="Get the Memopedia knowledge page tree structure. Shows all pages organized by category (人物/用語/計画/出来事) with open/closed status.",
         parameters={
             "type": "object",
             "properties": {},
