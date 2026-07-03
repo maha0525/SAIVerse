@@ -38,7 +38,7 @@ City は User が運営する一つの「世界」。複数の Building を束�
 
 ### 入退室の管理
 
-エンティティ（ユーザー・ペルソナ・訪問者）の移動は **OccupancyManager**（`saiverse/occupancy_manager.py`）が一元管理し、`BuildingOccupancyLog` に記録する。ペルソナの移動は `OccupancyManager.move_to(persona, building_id)` を使う（PersonaCore のメソッドを直接呼ばない）。
+エンティティ（ユーザー・ペルソナ・訪問者）の移動は **OccupancyManager**（`saiverse/occupancy_manager.py`）が一元管理し、`BuildingOccupancyLog` に記録する。ペルソナの移動は `OccupancyManager.move_entity(entity_id, entity_type, from_id, to_id)` を使う（PersonaCore のメソッドを直接呼ばない）。
 
 ## 実装
 

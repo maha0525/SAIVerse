@@ -40,10 +40,10 @@
 ## 実装
 
 - 実装本体: `sai_memory/`（`memory/` / `arasuji/` / `memopedia/`）
-- アダプタ: `saiverse_memory/adapter.py`（`SAIMemoryAdapter.log_message()` でタグ付き追記）
+- アダプタ: `saiverse_memory/adapter.py`（`SAIMemoryAdapter.append_building_message()` / `append_persona_message()` でタグ付き追記）
 - 保存先: `~/.saiverse/personas/<id>/memory.db`
 - バックアップ: rdiff-backup で `~/.saiverse/backups/saimemory_rdiff/<persona_id>/`（`SAIMEMORY_BACKUP_ON_START=true`）
-- 検索スクリプト: `scripts/recall_persona_memory.py`
+- 想起: `sai_memory/unified_recall.py`（意味/キーワード検索）。UI は記憶モーダルの「デバッグ」タブ（→ [user-guide/memory-view.md](../user-guide/memory-view.md)）
 
 ## 関連概念
 

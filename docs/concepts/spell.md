@@ -12,7 +12,7 @@ Tool を平文応答の中で `/spell <スペル名> key='value'` 構文で呼�
 
 ## 仕組み
 
-ペルソナの [Beat](beat.md) 内の発話ノード（LLM）が平文中に **`/spell ` で始まる行**を書く → `_run_spell_loop` が各 round で全 `/spell` 行を検出 → 並列実行 → 結果を `<user_only>` ブロックに包んで次の LLM round に渡す → spell が出なくなるまで繰り返す。結果は Beat に統合されて表示・記憶される。
+ペルソナの [Beat](beat.md) 内の発話ノード（LLM）が平文中に **`/spell ` で始まる行**を書く → `_run_spell_loop` が各 round で全 `/spell` 行を検出 → **テキスト順に逐次実行**（以前は並列 gather だったが `_line_stack` 破壊・デバイス spell 等のレースで撤去）→ 結果を `<user_only>` ブロックに包んで次の LLM round に渡す → spell が出なくなるまで繰り返す。結果は Beat に統合されて表示・記憶される。
 
 構文には2形式がある（`_parse_spell_lines`）:
 - **正規形**: `/spell name='ツール名' args={...JSONオブジェクト...}`（`_normalize_spell_line` が生成する形。SAIMemory にはこの形で保存し、ペルソナが正しい構文を学習する）

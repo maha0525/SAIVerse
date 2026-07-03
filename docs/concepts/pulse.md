@@ -4,7 +4,7 @@
 
 ## 一言で
 
-ペルソナの認知サイクル1回分（`run_pulse`）が **Pulse**、その起動を優先度で捌く制御層が **PulseController**、いつ起動するかを刻む時計が **SubLineScheduler / AutonomyManager** 等の時間機構。
+ペルソナの認知サイクル1回分が **Pulse**、その起動を優先度で捌く制御層が **PulseController**、いつ起動するかを刻む時計が **SubLineScheduler / AutonomyManager** 等の時間機構。
 
 ## 役割
 
@@ -33,15 +33,15 @@ PulseController は「起こされた Pulse を捌く」層で、**いつ起こ�
 
 | 機構 | 実装 | リズム | 役割 |
 |---|---|---|---|
-| **SubLineScheduler** | `saiverse/pulse_scheduler.py` | 30秒ポーリング | running 状態の Track を拾って Pulse を回す。自律 Track の「連続する Pulse」を駆動する主体 |
+| **SubLineScheduler** | `saiverse/pulse_scheduler.py` | 5秒ポーリング | running 状態の Track を拾って Pulse を回す。自律 Track の「連続する Pulse」を駆動する主体 |
 | **AutonomyManager** | `saiverse/autonomy_manager.py` | 既定50分間隔 | per-persona の self-rescheduling timer。tick で `dispatch_autonomy_tick` → メタ判断 Pulse。自律バイオリズムの大リズム |
 | EventScheduler / InternalAlertPoller / Phenomena | — | イベント駆動 | スケジュール実行・内部 alert ポーリング・外部イベント起動 |
 
-つまり自律稼働は2層のリズム: **大リズム**（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → **小リズム**（SubLineScheduler 30秒で running 自律 Track の Pulse を連続実行）。
+つまり自律稼働は2層のリズム: **大リズム**（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → **小リズム**（SubLineScheduler 5秒で running 自律 Track の Pulse を連続実行）。
 
 ## 実装
 
-- Pulse 実行の入口: `SAIVerseManager.run_pulse`（`saiverse/saiverse_manager.py`）。ペルソナの認知サイクルを回す
+- Pulse 実行の入口: `SAIVerseManager.run_sea_user`（ユーザー発話）/ `run_sea_auto`（自律）（`saiverse/saiverse_manager.py`）→ `PulseController` 経由で `SEARuntime.run_meta_user` が実行（`run_pulse` という名前のメソッドは存在しない）
 - 制御層: `sea/pulse_controller.py`（`submit_user` / `submit_schedule` / `submit_auto` / `submit_meta_judgment`）
 - 時間機構: `saiverse/pulse_scheduler.py`（SubLineScheduler、`SAIVERSE_SUBLINE_SCHEDULER_ENABLED` で制御・既定有効）/ `saiverse/autonomy_manager.py`（AutonomyManager）
 - Pulse 内の実行状態: `sea/pulse_context.py`（`PulseContext`）

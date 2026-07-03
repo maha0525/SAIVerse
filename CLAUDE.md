@@ -194,8 +194,8 @@ python scripts/migrate_to_user_data.py             # Execute
 
 **PersonaCore** (`persona/core.py`)
 - The "soul" of each AI persona
-- `run_pulse()` executes autonomous "cognition→decision→action" cycles
-- Integrates with SAIMemory, emotion module, action handler, and task storage
+- Its "Pulse" (cognition→decision→action cycle) is driven by the SEA runtime — execution entry is `SAIVerseManager.run_sea_user` / `run_sea_auto` → `PulseController` → `SEARuntime` (there is **no** `run_pulse()` method)
+- Integrates with SAIMemory, emotion module, and task storage
 - Conversation flow is driven by SEA runtime (playbook-based)
 
 **SEARuntime** (`sea/runtime.py`)
@@ -213,9 +213,8 @@ python scripts/migrate_to_user_data.py             # Execute
 - Enforces building capacity limits
 - Updates `BuildingOccupancyLog` and in-memory state
 
-**ConversationManager** (`saiverse/conversation_manager.py`)
-- Drives autonomous conversations in each building
-- Periodically calls `run_pulse()` on occupants in round-robin fashion
+**ConversationManager** (`saiverse/conversation_manager.py`) — **legacy / no-op**
+- Old autonomous-conversation driver. Superseded by `AutonomyManager` (per-persona ~50min tick) + `SubLineScheduler` (`saiverse/pulse_scheduler.py`, ~5s poll) + `track_autonomous` playbook (2026-05-01 cognitive-model migration). Class removal is a pending cleanup (see landscape §9).
 
 **RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`)
 - Lightweight proxy for visiting personas from other cities
@@ -225,7 +224,7 @@ python scripts/migrate_to_user_data.py             # Execute
 
 **User Interaction**: UI → SAIVerseManager → PersonaCore → LLM + Tools → ActionHandler → SAIMemory + BuildingHistory
 
-**Autonomous Pulse**: ConversationManager → PersonaCore.run_pulse() → SEARuntime → think/speak nodes → SAIMemory
+**Autonomous Pulse**: AutonomyManager / SubLineScheduler → PulseController → SEARuntime → think/speak nodes → SAIMemory
 
 **Inter-City Travel** (DB-mediated, not direct API calls):
 1. Source city writes `VisitingAI` record with status='requested'
@@ -558,7 +557,7 @@ If unsure whether any doc references what you changed, `grep docs/` for the symb
 
 ### Memory and History
 - Building chat history: stored in memory, logged to `~/.saiverse/cities/<city>/buildings/<building>/log.json`
-- SAIMemory logs: appended via `SAIMemoryAdapter.log_message()` with tags
+- SAIMemory logs: appended via `SAIMemoryAdapter.append_building_message()` / `append_persona_message()` with tags
 - Pulse internal thoughts: tag='internal', include pulse_id for grouping
 - User conversations: tag='conversation'
 
@@ -647,7 +646,7 @@ Critical settings (see `.env.example`):
 
 **Create new persona**: Use the frontend UI or have user ask Genesis in "創造の祭壇" building
 
-**Move persona between buildings**: `OccupancyManager.move_to(persona, building_id)` (do not call PersonaCore methods directly)
+**Move persona between buildings**: `OccupancyManager.move_entity(entity_id, entity_type, from_id, to_id)` (do not call PersonaCore methods directly)
 
 **Add new tool**: Define in `builtin_data/tools/` (or `~/.saiverse/user_data/tools/` for custom tools) with a `schema()` function returning `ToolSchema` + a same-named callable; registers automatically on startup. Tools in subdirectories need a `schema.py` (with `schemas()`). To make it usable by a persona, either set `spell=True` (callable from plaintext via `/spell`) or reference it in a Playbook TOOL node — **not** the legacy `BuildingToolLink` table.
 

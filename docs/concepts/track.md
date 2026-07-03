@@ -35,7 +35,7 @@ Handler の中核は **`post_complete_behavior`**（[Pulse](pulse.md) 完了後�
 
 - 管理層: `saiverse/track_manager.py`（`TrackManager`）
 - Handler 群: `saiverse/track_handlers/`（`autonomous_track_handler.py` / `user_conversation_handler.py` / `social_track_handler.py`）
-- 永続化: `action_tracks` テーブル（`database/models.py`）
+- 永続化: `action_track` テーブル（`database/models.py`、`ActionTrack`）
 
 ## 関連概念
 

@@ -15,8 +15,8 @@ X mentions、SwitchBot センサー、webhook など、ペルソナ自身の思�
 非同期イベントが `PhenomenonManager.emit(TriggerEvent)` に流入する:
 
 ```
-外部イベント → emit(TriggerEvent) → ルール評価 → inject_persona_event
-            → dispatch_phenomenon_event → 新しい Pulse を起動
+外部イベント → emit(TriggerEvent) → ルール評価 → inject_persona_event（フェノメノン関数）
+            → dispatch_phenomenon_event → PulseController.submit_schedule → 新しい Pulse を起動
 ```
 
 - デフォルトの meta_playbook は `track_user_conversation`
@@ -26,9 +26,10 @@ X mentions、SwitchBot センサー、webhook など、ペルソナ自身の思�
 
 ## 実装
 
-- マネージャ: `phenomena/manager.py`（`PhenomenonManager.emit` / `inject_persona_event`）
+- マネージャ: `phenomena/manager.py`（`PhenomenonManager.emit`）
+- 注入フェノメノン: `builtin_data/phenomena/inject_persona_event.py`（`inject_persona_event`。これは manager のメソッドではなくフェノメノン関数）
 - コア/トリガー: `phenomena/core.py` / `phenomena/triggers.py`
-- Pulse 起動: `dispatch_phenomenon_event` → [PulseController](pulse.md) `submit_auto`
+- Pulse 起動: `dispatch_phenomenon_event`（`saiverse/pulse_dispatcher.py`）→ [PulseController](pulse.md) `submit_schedule`（SCHEDULE レーン。スケジュール実行と同じ優先度）
 
 ## 関連概念
 

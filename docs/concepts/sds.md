@@ -27,7 +27,7 @@ inter-city travel（都市間のペルソナ移動）の前提機構として作
 
 ## 現状（冬眠中）
 
-**デフォルト無効**（`--sds-url` 明示 + 別プロセス手動起動が必要）で、単一 City 運用に止まっているため**実質冬眠中**。将来 multi-city を復活させる際に再起動する想定。
+**デフォルト無効**：City の online mode（`START_IN_ONLINE_MODE`、`database/models.py` 既定 `False`）が off のため SDS 登録が走らない（`SAIVerseManager` は `if self.start_in_online_mode:` でのみ登録）。`--sds-url` はデフォルト値 `http://127.0.0.1:8080` を持つので明示は不要。使うには City を online mode にした上で SDS を別プロセスで起動する。単一 City 運用に止まっているため**実質冬眠中**で、将来 multi-city を復活させる際に再起動する想定。
 
 ## 実装
 

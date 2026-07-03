@@ -11,7 +11,7 @@
 `Item` テーブルで定義される。「どこに在るか」は **`ItemLocation` テーブルの多態**で管理され、`OWNER_KIND` が `building` / `persona` / `world` / `bag` のいずれかを取る。
 
 - 同じ Item が異なる所有者に紐付くことで、建物に置かれているのか・ペルソナが手に持っているのかを表現する
-- `pickup` / `place` 操作で配置が更新される（[Tool](tool.md) の `item_*`、`saiverse/action_handler.py`）
+- 配置の更新は [Tool](tool.md) の `item_move`（`builtin_data/tools/item_move.py`、`destination_type`: building/persona/bag）で行う。pickup/place/use の実体はマネージャの `SAIVerseManager.pickup_item_for_persona` / `use_item_for_persona`（→ `item_service`）
 
 ## 拡張中の存在論
 
@@ -35,7 +35,7 @@
 ## 実装
 
 - DB: `Item` / `ItemLocation` テーブル（`database/models.py`）
-- 操作: `saiverse/action_handler.py`（`pickup` / `place` / `use_item`）、`builtin_data/tools/item_*.py`
+- 操作: `SAIVerseManager.pickup_item_for_persona` / `use_item_for_persona`（`item_service` に委譲）、Tool は `item_move` / `item_view` / `item_change_name` / `item_write_description`（`builtin_data/tools/`）。※旧 `action_handler.py` は pickup/place を扱わない（実質 no-op）
 - Vessel フック: `Building.PHYSICAL_VESSEL_ID`
 
 ## 関連概念

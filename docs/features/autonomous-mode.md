@@ -11,7 +11,7 @@
 > ⚠️ 旧 `ConversationManager`（10秒ごとに全員を回すプロトタイプ）は**廃止済み**（2026-05-01 の認知モデル移行で no-op 化）。現在の自律稼働は2層のリズムで駆動される。
 
 - **AutonomyManager**（`saiverse/autonomy_manager.py`、既定 約50分間隔）— per-persona のタイマー。tick でメタ判断 Pulse を起こす。**自律バイオリズムの大リズム**
-- **SubLineScheduler**（`saiverse/pulse_scheduler.py`、30秒ポーリング）— running 状態の自律 Track を拾って Pulse を連続実行する。**小リズム**
+- **SubLineScheduler**（`saiverse/pulse_scheduler.py`、既定5秒ポーリング）— running 状態の自律 Track を拾って Pulse を連続実行する。**小リズム**
 
 これらが [PulseController](../concepts/pulse.md) に Pulse を投げ、優先度（USER > SCHEDULE > AUTO）で捌かれる。
 

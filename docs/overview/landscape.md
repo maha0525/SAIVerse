@@ -113,7 +113,7 @@ graph LR
 
 ### Pulse
 
-ペルソナの認知サイクル1回分（`run_pulse`）。アクティブな Track に対して思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源は4種類ある: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler）/ **Phenomena**（外部イベント、§4）/ **自律 Track**。これらを集約・制御するのが下記の PulseController。
+ペルソナの認知サイクル1回分（実行入口は `SAIVerseManager.run_sea_user` / `run_sea_auto`。`run_pulse` という名前のメソッドは無い）。アクティブな Track に対して思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源は4種類ある: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler）/ **Phenomena**（外部イベント、§4）/ **自律 Track**。これらを集約・制御するのが下記の PulseController。
 
 ### PulseController（Pulse 起動の制御層）
 
@@ -125,15 +125,15 @@ graph LR
 
 PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。これらが `submit_*` で PulseController に Pulse を投げる:
 
-- **SubLineScheduler**（`pulse_scheduler.py`、30秒ポーリング）: running 状態の Track を拾って Pulse を回す。**自律 Track の「短時間で連続する Pulse」を駆動する主体**。自律 Track は連続実行型（下記 Handler）なので、メインキャッシュ TTL まで Pulse が連続する。実装済（`SAIVERSE_SUBLINE_SCHEDULER_ENABLED` で制御、既定有効）
+- **SubLineScheduler**（`pulse_scheduler.py`、5秒ポーリング）: running 状態の Track を拾って Pulse を回す。**自律 Track の「短時間で連続する Pulse」を駆動する主体**。自律 Track は連続実行型（下記 Handler）なので、メインキャッシュ TTL まで Pulse が連続する。実装済（`SAIVERSE_SUBLINE_SCHEDULER_ENABLED` で制御、既定有効）
 - **AutonomyManager**（`autonomy_manager.py`、既定50分間隔）: per-persona の self-rescheduling timer。periodic tick で `dispatch_autonomy_tick` → メタ判断 Pulse を起こす。**自律バイオリズムの大リズム**
 - **EventScheduler / InternalAlertPoller / Phenomena**: スケジュール実行・内部 alert ポーリング・外部イベントによる起動
 
-つまり自律稼働は2層のリズム: 大リズム（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → 小リズム（SubLineScheduler 30秒で running 自律 Track の Pulse を連続実行）。
+つまり自律稼働は2層のリズム: 大リズム（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → 小リズム（SubLineScheduler 5秒で running 自律 Track の Pulse を連続実行）。
 
 ### Track / Handler
 
-**Track**（通称「行動の線」、`action_tracks` テーブル）は進行中の作業文脈そのもの。対ユーザー会話・自律稼働・交流・外部通信などが各1本の Track として並存し、実行されるのは常にアクティブな1本のみ。休止中の Track は状態を保ったまま残り、判断により再開される。「永続 Track」（ユーザーごとの会話・交流）と「一時 Track」（プロジェクト・自律行動）の区別があり、永続 Track は完了・中止に遷移しない。
+**Track**（通称「行動の線」、`action_track` テーブル）は進行中の作業文脈そのもの。対ユーザー会話・自律稼働・交流・外部通信などが各1本の Track として並存し、実行されるのは常にアクティブな1本のみ。休止中の Track は状態を保ったまま残り、判断により再開される。「永続 Track」（ユーザーごとの会話・交流）と「一時 Track」（プロジェクト・自律行動）の区別があり、永続 Track は完了・中止に遷移しない。
 
 > **ペルソナ間会話の現状**: 交流（Social）Track はペルソナ同士の会話の器で、`SocialTrackHandler` と自動作成はあるが、**「他ペルソナ発話イベントの受け口」（入口）が未実装**。そのためペルソナ間会話の機序はまだ成立しておらず、この地図でも描けていない（→ [`roadmap_status.md`](roadmap_status.md) §2）。
 
@@ -166,7 +166,7 @@ graph TD
     User((User)) -->|"発言 (Building→SAIVerseManager→submit_user)"| PulseController
     SubLineScheduler["SubLineScheduler (30s)"] -->|running Track を submit_auto| PulseController
     AutonomyManager["AutonomyManager (50min)"] -->|tick で submit_meta_judgment| PulseController
-    Phenomena -->|submit_auto| PulseController
+    Phenomena -->|submit_schedule| PulseController
     Session["Session (短期記憶 §6)"] -->|判断材料| MetaJudgment["Meta-Judgment"]
     MetaJudgment -->|選択| Track
     PulseController -->|"優先度 USER>SCHEDULE>AUTO + 割り込み"| Pulse
@@ -351,7 +351,7 @@ graph TD
 
 ### SDS (SAIVerse Directory Service)
 
-複数の City プロセスを発見・追跡するインメモリ・レジストリ（`sds_server.py`、port 8080）。各 City が起動時に `/register`、`/heartbeat` で生存通知し、他 City は `/cities` で一覧を取得する。inter-city travel の前提機構として作られたが、**現状はデフォルト無効**（`--sds-url` 明示 + 別プロセス手動起動が必要）で、単一 City 運用に止まっているため**実質冬眠中**。将来 multi-city を復活させる際に再起動する想定。
+複数の City プロセスを発見・追跡するインメモリ・レジストリ（`sds_server.py`、port 8080）。各 City が起動時に `/register`、`/heartbeat` で生存通知し、他 City は `/cities` で一覧を取得する。inter-city travel の前提機構として作られたが、**現状はデフォルト無効**（City の online mode `START_IN_ONLINE_MODE` が既定 off のため SDS 登録が走らない。別プロセスで SDS 起動 + City を online mode 化が必要）で、単一 City 運用に止まっているため**実質冬眠中**。将来 multi-city を復活させる際に再起動する想定。
 
 ---
 
@@ -384,10 +384,10 @@ graph TD
 | Beat | 積まれる | Building | ペルソナの発言（表示用）が共有場に積まれ他者に感知される |
 | Building | 属す | City | 建物は都市に属す |
 | Item | 在る | Building/Persona/world/bag | ItemLocation 多態で配置 |
-| Persona | 回す | Pulse | run_pulse で認知サイクル |
+| Persona | 回す | Pulse | run_sea_user / run_sea_auto で認知サイクル |
 | User発言/Schedule/Phenomena/Meta-Judgment | submit | PulseController | 4起動源が制御層に集約 |
 | Building | 発言を検知（SAIVerseManager 経由） | PulseController | ユーザー発言が `submit_user` へ |
-| SubLineScheduler | 30秒ポーリングで submit_auto | PulseController | running 自律 Track の Pulse を連続実行 |
+| SubLineScheduler | 5秒ポーリングで submit_auto | PulseController | running 自律 Track の Pulse を連続実行 |
 | AutonomyManager | 50分 tick で submit_meta_judgment | PulseController | 自律バイオリズムの大リズム |
 | Handler | `post_complete_behavior` で規定 | Pulse 挙動 | meta_judge=連続 / wait_response=単発 |
 | PulseController | 起動 | Pulse | 優先度（USER>SCHEDULE>AUTO）+ 割り込み制御で実行 |
@@ -423,13 +423,13 @@ graph TD
 
 | 通称 | 正式概念 | 実装 |
 |---|---|---|
-| 行動の線 | Track | `action_tracks` テーブル |
+| 行動の線 | Track | `action_track` テーブル |
 | メタレイヤー | Meta-Judgment Pulse | `meta_judgment.json` Playbook |
 | 短期記憶 / ワーキングメモリ | Session | 統一制御は未実装（起草中） |
 | 長期記憶 DB（容れ物） | SAIMemory | per-persona `memory.db`。中身 = 生ログ / Chronicle / Memopedia |
 | 生ログ | Thread（⊃ Message） | `threads` / `messages` テーブル |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
-| 自律バイオリズム | AutonomyManager (50分) + SubLineScheduler (30秒) | 大リズム=メタ判断 tick / 小リズム=連続 Pulse |
+| 自律バイオリズム | AutonomyManager (50分) + SubLineScheduler (5秒) | 大リズム=メタ判断 tick / 小リズム=連続 Pulse |
 
 ### ドキュメント⇄実装の乖離（要追従）
 
