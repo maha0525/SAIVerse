@@ -245,6 +245,11 @@ export default function Home() {
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
+    // metabolism 完了メッセージを 2 秒見せてから 'Thinking...' に戻す遅延タイマー。
+    // ストリームが閉じる finally / cancelled でクリアしないと、後始末で
+    // loadingStatus=null にした後にこのタイマーが発火してスピナーが復活し、
+    // 二度と消えなくなる (記憶整理が応答の最後の処理だった場合に多発)。
+    const metabolismStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
     const [spellConfirm, setSpellConfirm] = useState<SpellConfirmData | null>(null);
     const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
@@ -1934,7 +1939,11 @@ export default function Home() {
                                 // Show completion message briefly, then transition
                                 if (event.content) {
                                     setLoadingStatus(event.content);
-                                    setTimeout(() => setLoadingStatus('Thinking...'), 2000);
+                                    if (metabolismStatusTimerRef.current) clearTimeout(metabolismStatusTimerRef.current);
+                                    metabolismStatusTimerRef.current = setTimeout(() => {
+                                        metabolismStatusTimerRef.current = null;
+                                        setLoadingStatus('Thinking...');
+                                    }, 2000);
                                 } else {
                                     setLoadingStatus('Thinking...');
                                 }
@@ -2023,6 +2032,10 @@ export default function Home() {
                                 }
                                 return prev;
                             });
+                            if (metabolismStatusTimerRef.current) {
+                                clearTimeout(metabolismStatusTimerRef.current);
+                                metabolismStatusTimerRef.current = null;
+                            }
                             setLoadingStatus(null);
                         } else if (event.response) {
                             setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
@@ -2038,6 +2051,12 @@ export default function Home() {
             console.error(error);
             setMessages(prev => [...prev, { role: 'assistant', content: "Error: Failed to send message." }]);
         } finally {
+            // ストリームが閉じた後に metabolism の遅延タイマーが発火すると
+            // スピナーが復活して二度と消えなくなるため、必ずここで潰す。
+            if (metabolismStatusTimerRef.current) {
+                clearTimeout(metabolismStatusTimerRef.current);
+                metabolismStatusTimerRef.current = null;
+            }
             setLoadingStatus(null);
             // Finalize any orphaned _streaming messages left after the stream ends
             // (e.g. activity events that arrived after the last streaming_complete)
