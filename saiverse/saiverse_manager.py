@@ -1383,6 +1383,105 @@ class SAIVerseManager(
     # NOTE: _ensure_autonomy_for_active_personas は _run_persona_post_registration
     # に統合済み (2026-06-09)。
 
+    def stop_autonomy(self, persona_id: str) -> Dict[str, Any]:
+        """自律行動を実効的に停止する（停止ボタンと連続失敗リカバリの共用経路）。
+
+        ``ACTIVITY_STATE=Idle`` にするだけでは止まらない: AutonomyManager の定期
+        メタ判断 tick 予約は残り、SubLineScheduler は ACTIVITY_STATE を見ずに
+        running な autonomous Track を pulse し続ける（pulse_scheduler.py の
+        ``_tick_persona`` は ACTIVITY_STATE フィルタ未実装）。実効的に止めるには
+        次の 4 つを揃える必要がある。停止ボタン（activity/stop）とメタ判断連続
+        失敗リカバリ（MetaLayer._handle_persistent_failure）が同じ挙動になるよう
+        1 箇所に集約する（片方だけ直すと乖離するため）。
+
+          1. AutonomyManager.stop() — 定期メタ判断 tick の予約 cancel
+          2. running な autonomous Track を全 pause — SubLineScheduler を止める
+          3. ACTIVITY_STATE → Idle（DB + in-memory）
+          4. 対ユーザー Track をサイレント activate — プロンプト待ちに戻す
+
+        Returns:
+            {"paused_tracks": List[str], "user_track_activated": bool,
+             "autonomy_running": bool}
+        """
+        from saiverse.autonomy_manager import AutonomyManager
+        from saiverse.track_manager import (
+            STATUS_RUNNING,
+            TERMINAL_STATUSES,
+            InvalidTrackStateError,
+            TrackNotFoundError,
+        )
+
+        persona = self.personas.get(persona_id)
+        tm = self.track_manager
+
+        # 1. 定期 tick 停止
+        if not hasattr(self, "_autonomy_managers"):
+            self._autonomy_managers = {}
+        am = self._autonomy_managers.get(persona_id)
+        if am is None:
+            am = AutonomyManager(persona_id=persona_id, manager=self)
+            self._autonomy_managers[persona_id] = am
+        am.stop()
+
+        # 2. running な autonomous Track を pause（SubLineScheduler を実効停止）
+        paused: List[str] = []
+        for track in tm.list_for_persona(persona_id, statuses=[STATUS_RUNNING]):
+            if track.track_type != "autonomous":
+                continue
+            try:
+                tm.pause(track.track_id)
+                paused.append(track.track_id)
+            except (InvalidTrackStateError, TrackNotFoundError) as exc:
+                logging.warning(
+                    "[stop-autonomy] failed to pause track %s: %s", track.track_id, exc,
+                )
+
+        # 3. ACTIVITY_STATE → Idle（DB + in-memory）
+        db = self.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+            if ai is not None:
+                ai.ACTIVITY_STATE = "Idle"
+                db.commit()
+        except Exception:
+            db.rollback()
+            logging.exception(
+                "[stop-autonomy] failed to set ACTIVITY_STATE=Idle for %s", persona_id,
+            )
+        finally:
+            db.close()
+        if persona is not None:
+            persona.activity_state = "Idle"
+
+        # 4. 対ユーザー Track をサイレント activate（プロンプト待ちに戻す）
+        user_track_activated = False
+        user_tracks = [
+            t for t in tm.list_for_persona(persona_id)
+            if t.track_type == "user_conversation" and t.status not in TERMINAL_STATUSES
+        ]
+        if user_tracks:
+            target = user_tracks[0]  # last_active_at desc の先頭 = 最新
+            if target.status != STATUS_RUNNING:
+                try:
+                    tm.activate(target.track_id, suppress_pulse=True)
+                    user_track_activated = True
+                except (InvalidTrackStateError, TrackNotFoundError) as exc:
+                    logging.warning(
+                        "[stop-autonomy] failed to activate user track %s: %s",
+                        target.track_id, exc,
+                    )
+
+        logging.info(
+            "[stop-autonomy] persona=%s paused_tracks=%s user_track_activated=%s",
+            persona_id, paused, user_track_activated,
+        )
+        return {
+            "paused_tracks": paused,
+            "user_track_activated": user_track_activated,
+            "autonomy_running": am.is_running,
+        }
+
     # ------------------------------------------------------------------
     # wait_response Track の自動 pause タイマー (handoff_2026-05-09.md §4)
     # ------------------------------------------------------------------

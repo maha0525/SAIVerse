@@ -556,58 +556,22 @@ def stop_activity(persona_id: str, manager=Depends(get_manager)):
     4. 対ユーザー Track をサイレント activate (suppress_pulse=True —
        停止ボタンで自動発言させない、不変条件 4)
     """
-    persona = _get_persona_or_404(manager, persona_id)
-    tm = manager.track_manager
+    # 存在確認のみ (実処理は manager.stop_autonomy に集約)。
+    _get_persona_or_404(manager, persona_id)
 
-    # 1. 定期 tick 停止
-    am = _get_or_create_autonomy(persona_id, manager)
-    am.stop()
-
-    # 2. running な autonomous Track を pause
-    paused: List[str] = []
-    for track in tm.list_for_persona(persona_id, statuses=[STATUS_RUNNING]):
-        if track.track_type != "autonomous":
-            continue
-        try:
-            tm.pause(track.track_id)
-            paused.append(track.track_id)
-        except (InvalidTrackStateError, TrackNotFoundError) as exc:
-            LOGGER.warning(
-                "[activity] stop: failed to pause track %s: %s", track.track_id, exc,
-            )
-
-    # 3. Idle 化
-    _set_activity_state(manager, persona_id, persona, "Idle")
-
-    # 4. 対ユーザー Track のサイレント activate。既に running なら何もしない。
-    #    存在しない場合もスキップ (次のユーザー発話で通常経路により作成される)。
-    user_track_activated = False
-    user_tracks = [
-        t for t in tm.list_for_persona(persona_id)
-        if t.track_type == "user_conversation" and t.status not in TERMINAL_STATUSES
-    ]
-    if user_tracks:
-        # list_for_persona は last_active_at desc 順 — 先頭が最新
-        target = user_tracks[0]
-        if target.status != STATUS_RUNNING:
-            try:
-                tm.activate(target.track_id, suppress_pulse=True)
-                user_track_activated = True
-            except (InvalidTrackStateError, TrackNotFoundError) as exc:
-                LOGGER.warning(
-                    "[activity] stop: failed to activate user track %s: %s",
-                    target.track_id, exc,
-                )
+    # 停止の 4 ステップ (AM 停止 / Track pause / Idle / 対ユーザー Track 復帰) は
+    # manager.stop_autonomy に集約。メタ判断連続失敗リカバリと同じ経路を通す。
+    result = manager.stop_autonomy(persona_id)
 
     LOGGER.info(
         "[activity] stop: persona=%s paused_tracks=%s user_track_activated=%s",
-        persona_id, paused, user_track_activated,
+        persona_id, result["paused_tracks"], result["user_track_activated"],
     )
     return ActivityToggleResponse(
         success=True,
         message="自律行動を停止して待機に戻しました",
         activity_state="Idle",
-        autonomy_running=am.is_running,
+        autonomy_running=result["autonomy_running"],
     )
 
 

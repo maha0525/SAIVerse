@@ -758,21 +758,15 @@ class MetaLayer:
             "downgrading ACTIVITY_STATE to Idle and notifying. last_error=%s",
             consecutive, persona_id, last_failure_reason,
         )
-        # 1. ACTIVITY_STATE を Idle に降格 (DB + in-memory)。
+        # 1. 自律行動を実効的に停止する。ACTIVITY_STATE=Idle にするだけでは
+        #    AutonomyManager の tick 予約と SubLineScheduler の Track pulse が残り、
+        #    実際には止まらない。停止ボタンと同じ経路 (manager.stop_autonomy) に
+        #    集約して、AM 停止 + Track pause + Idle + 対ユーザー Track 復帰を揃える。
         try:
-            db = self.manager.SessionLocal()
-            try:
-                from database.models import AI as AIModel
-                ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
-                if ai is not None:
-                    ai.ACTIVITY_STATE = "Idle"
-                    db.commit()
-            finally:
-                db.close()
-            persona.activity_state = "Idle"
+            self.manager.stop_autonomy(persona_id)
         except Exception:
             logging.exception(
-                "[meta-layer] Failed to downgrade ACTIVITY_STATE for persona=%s", persona_id,
+                "[meta-layer] Failed to stop autonomy for persona=%s", persona_id,
             )
         # 2. host イベントで通知 (best-effort)。
         try:

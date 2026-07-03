@@ -19,20 +19,17 @@ class TestPersistentFailureHandling(unittest.TestCase):
     def test_default_config_has_threshold(self):
         self.assertIn("max_consecutive_failures", MetaLayer._DEFAULT_JUDGMENT_CONFIG)
 
-    def test_handle_persistent_failure_downgrades_activity_state(self):
+    def test_handle_persistent_failure_stops_autonomy(self):
+        # 実効停止 (AM 停止 / Track pause / Idle / 対ユーザー Track 復帰) は
+        # manager.stop_autonomy に委譲される。ACTIVITY_STATE=Idle 直書きだけでは
+        # 止まらないため (SubLineScheduler が ACTIVITY_STATE 非依存)。
         layer, manager = _make_layer()
         persona = MagicMock()
         persona.persona_id = "p1"
 
         layer._handle_persistent_failure(persona, "b1", 3, "boom")
 
-        # in-memory persona の降格
-        self.assertEqual(persona.activity_state, "Idle")
-        # DB セッションを開いて commit したこと
-        manager.SessionLocal.assert_called()
-        db = manager.SessionLocal.return_value
-        db.commit.assert_called()
-        db.close.assert_called()
+        manager.stop_autonomy.assert_called_once_with("p1")
 
     def test_handle_persistent_failure_emits_host_event(self):
         layer, manager = _make_layer()
@@ -58,7 +55,47 @@ class TestPersistentFailureHandling(unittest.TestCase):
         persona.persona_id = "p1"
 
         layer._handle_persistent_failure(persona, "b1", 3, "boom")  # should not raise
+        manager.stop_autonomy.assert_called_once_with("p1")
+
+
+class TestStopAutonomy(unittest.TestCase):
+    """manager.stop_autonomy: 実効停止の 4 ステップ (停止ボタンと降格の共用経路)。"""
+
+    def test_stop_autonomy_runs_all_four_steps(self):
+        from saiverse.saiverse_manager import SAIVerseManager
+
+        mgr = MagicMock()
+        persona = MagicMock()
+        mgr.personas = {"p1": persona}
+        am = MagicMock()
+        am.is_running = False
+        mgr._autonomy_managers = {"p1": am}
+
+        tm = mgr.track_manager
+        auto_track = MagicMock()
+        auto_track.track_type = "autonomous"
+        auto_track.track_id = "t:1"
+        auto_track.status = "running"
+        user_track = MagicMock()
+        user_track.track_type = "user_conversation"
+        user_track.track_id = "t:2"
+        user_track.status = "paused"
+
+        def _list(persona_id, statuses=None):
+            # statuses 指定 = running autonomous 抽出、無指定 = 全 Track
+            return [auto_track] if statuses else [user_track]
+
+        tm.list_for_persona.side_effect = _list
+
+        result = SAIVerseManager.stop_autonomy(mgr, "p1")
+
+        # 1. AM 停止 / 2. autonomous Track pause / 3. Idle / 4. 対ユーザー Track 復帰
+        am.stop.assert_called_once()
+        tm.pause.assert_called_once_with("t:1")
         self.assertEqual(persona.activity_state, "Idle")
+        tm.activate.assert_called_once_with("t:2", suppress_pulse=True)
+        self.assertEqual(result["paused_tracks"], ["t:1"])
+        self.assertTrue(result["user_track_activated"])
 
 
 class TestForceFailDebugFlag(unittest.TestCase):
