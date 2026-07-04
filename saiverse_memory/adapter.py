@@ -1025,6 +1025,68 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to update overview for %s: %s", thread_id, exc)
             return None
 
+    def backfill_missing_message_embeddings(
+        self,
+        *,
+        progress_callback: Optional[Any] = None,
+    ) -> Dict[str, int]:
+        """埋め込みが欠落しているメッセージ (message_embeddings に無い) を一括生成する。
+
+        通常は書き込み時 (``_append_message``) にローカル embedder でその場埋め込まれる
+        (LLM 不使用)。ここが必要になるのは、書き込み時に embedder が未初期化だった場合
+        (embedding モデルのロード失敗・初回起動時のダウンロード未完了等) や、大量インポート
+        直後の検証・保険としてまとめて埋めたい場合。
+
+        Returns:
+            {"total_missing": N, "embedded": M, "failed": K} の集計。
+            can_embed() が False の場合は total_missing のみ数えて embedded=0 で返す
+            (embedder が無いので埋められない)。
+        """
+        result = {"total_missing": 0, "embedded": 0, "failed": 0}
+        if not self._ready:
+            return result
+
+        from sai_memory.memory.storage import get_messages_without_embeddings
+
+        try:
+            with self._db_lock:
+                missing = get_messages_without_embeddings(self.conn)
+        except Exception as exc:
+            LOGGER.warning("Failed to list messages without embeddings: %s", exc)
+            return result
+
+        result["total_missing"] = len(missing)
+        if not missing or self.embedder is None:
+            return result
+
+        for idx, msg in enumerate(missing):
+            try:
+                content = (msg.content or "").strip()
+                if not content:
+                    continue
+                chunks = chunk_text(
+                    content,
+                    min_chars=self.settings.chunk_min_chars,
+                    max_chars=self.settings.chunk_max_chars,
+                )
+                payload = [c.strip() for c in chunks if c and c.strip()]
+                if not payload:
+                    continue
+                with self._db_lock:
+                    vectors = self.embedder.embed(payload, is_query=False)
+                    replace_message_embeddings(self.conn, msg.id, vectors)
+                result["embedded"] += 1
+            except Exception as exc:
+                result["failed"] += 1
+                LOGGER.warning("Failed to backfill embedding for message %s: %s", msg.id, exc)
+            if progress_callback:
+                try:
+                    progress_callback(idx + 1, len(missing))
+                except Exception:
+                    LOGGER.debug("progress_callback raised during embedding backfill", exc_info=True)
+
+        return result
+
     def close(self) -> None:
         if self.conn is not None:
             try:

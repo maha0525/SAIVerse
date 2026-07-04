@@ -466,6 +466,33 @@ def upsert_embedding(conn: sqlite3.Connection, message_id: str, vector: Iterable
     replace_message_embeddings(conn, message_id, [vector])
 
 
+def count_message_embeddings(conn: sqlite3.Connection) -> int:
+    """message_embeddings に登録済みの distinct message_id 数を返す。"""
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT message_id) FROM message_embeddings"
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def get_messages_without_embeddings(conn: sqlite3.Connection) -> List["Message"]:
+    """埋め込みが1件も無い non-empty content のメッセージを返す（インポート後バックフィル用）。
+
+    content が空/空白のみのメッセージは書き込み時点でも埋め込み対象外
+    (_append_message の仕様と同じ) なので、ここでも除外する。
+    """
+    cur = conn.execute(
+        f"""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata,
+               {_LINE_METADATA_COLUMNS}
+        FROM messages
+        WHERE TRIM(COALESCE(content, '')) != ''
+          AND id NOT IN (SELECT DISTINCT message_id FROM message_embeddings)
+        ORDER BY created_at ASC
+        """
+    )
+    return [_row_to_message(row) for row in cur.fetchall()]
+
+
 def get_message(conn: sqlite3.Connection, message_id: str) -> Optional[Message]:
     cur = conn.execute(
         "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE id=?",

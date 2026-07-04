@@ -33,7 +33,10 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sai_memory.arasuji.estimate import ChronicleCostEstimate
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -147,6 +150,47 @@ def print_stats(conn, persona_id: str) -> None:
         print("\nNo chronicle entries yet.")
 
     print("=" * 60)
+
+
+def print_cost_estimate(
+    conn,
+    persona_id: str,
+    *,
+    model_name: str,
+    batch_size: int,
+    consolidation_size: int,
+) -> "ChronicleCostEstimate":
+    """未処理メッセージから Chronicle を一括生成した場合の費用を見積もり表示する。
+
+    LLM は一切呼ばない。api/routes/people/arasuji.py の cost-estimate エンドポイント
+    (UI 用) と同じロジック (sai_memory.arasuji.estimate) を使う。
+    """
+    from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+
+    estimate = estimate_chronicle_generation_cost(
+        conn,
+        batch_size=batch_size,
+        consolidation_size=consolidation_size,
+        model_name=model_name,
+    )
+
+    print("\n" + "=" * 60)
+    print(f"Chronicle 一括生成 費用見積もり: {persona_id}")
+    print("=" * 60)
+    print(f"総メッセージ数:         {estimate.total_messages}")
+    print(f"処理済みメッセージ数:   {estimate.processed_messages}")
+    print(f"未処理メッセージ数:     {estimate.unprocessed_messages} (バッチサイズ {batch_size} 件/コール)")
+    print(f"Lv1 生成コール数:       {estimate.level1_calls}")
+    print(f"統合コール数:           {estimate.consolidation_calls} (統合サイズ {consolidation_size} 件/コール)")
+    print(f"LLM コール数合計:       {estimate.estimated_llm_calls}")
+    print(f"使用モデル:             {estimate.model_name}")
+    if estimate.is_free_tier:
+        print("概算費用:               不明 (このモデルには pricing 情報がありません。コール数のみ参考にしてください)")
+    else:
+        print(f"概算費用:               {estimate.estimated_cost_usd:.4f} {estimate.currency} (目安。実際の入出力量により変動)")
+    print("=" * 60)
+
+    return estimate
 
 
 def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> None:
@@ -505,6 +549,14 @@ def run_cli() -> None:
         "--debug-log", type=str, metavar="FILE",
         help="Output prompts and LLM responses to a log file for debugging"
     )
+    parser.add_argument(
+        "--estimate", action="store_true",
+        help="Show cost estimate for unprocessed messages and exit (no LLM calls, no writes)"
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the cost-estimate confirmation prompt before generation"
+    )
 
     args = parser.parse_args()
 
@@ -530,6 +582,22 @@ def run_cli() -> None:
     # Handle --stats
     if args.stats:
         print_stats(conn, args.persona_id)
+        conn.close()
+        sys.exit(0)
+
+    # Handle --estimate (見積もりのみ、LLM 呼び出しなし・書き込みなし)
+    if args.estimate:
+        resolved_model_id, model_config = find_model_config(args.model)
+        estimate_model_name = args.model
+        if resolved_model_id:
+            estimate_model_name = model_config.get("model", resolved_model_id)
+        print_cost_estimate(
+            conn,
+            args.persona_id,
+            model_name=estimate_model_name,
+            batch_size=args.batch_size,
+            consolidation_size=args.consolidation_size,
+        )
         conn.close()
         sys.exit(0)
 
@@ -617,6 +685,22 @@ def run_cli() -> None:
 
     LOGGER.info(f"Using model: {actual_model_id}")
     LOGGER.info(f"Using provider: {provider}")
+
+    # 実行前の見積もり表示 (LLM 呼び出しなし)。--dry-run は書き込みが起きないので
+    # 確認プロンプトは不要 (見積もりだけ表示して続行)。それ以外は --yes 無しなら確認する。
+    print_cost_estimate(
+        conn,
+        args.persona_id,
+        model_name=actual_model_id,
+        batch_size=args.batch_size,
+        consolidation_size=args.consolidation_size,
+    )
+    if not args.dry_run and not args.yes:
+        answer = input("\nこの内容で Chronicle 生成を実行しますか？ [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            LOGGER.info("ユーザーの選択により中止しました。")
+            conn.close()
+            sys.exit(0)
 
     # Import factory directly to avoid circular import
     from llm_clients.factory import get_llm_client

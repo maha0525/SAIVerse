@@ -40,14 +40,19 @@ python scripts/tag_conversation_messages.py air --auto
 
 ## Memopedia / Chronicle
 
-> ⚠️ Memopedia / Chronicle の生成・整理は、現在はペルソナの自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で**自動的に**行われる。`build_memopedia.py` / `maintain_memopedia.py` / `build_arasuji.py` 等の手動構築スクリプトは**旧フロー**で、通常は使わない（`export_memopedia.py` などの export 系のみ補助的に残る）。
+> ⚠️ Memopedia / Chronicle の生成・整理は、現在はペルソナの自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で**自動的に**行われる。`build_memopedia.py` / `maintain_memopedia.py` 等の手動構築スクリプトは**旧フロー**で、通常は使わない（`export_memopedia.py` などの export 系のみ補助的に残る）。
+>
+> `build_arasuji.py` は例外的に現役: インポート直後など、Chronicle をまとめて前倒し生成したい場合の任意ツールとして使う。`--estimate` で LLM を呼ばずに未処理メッセージ数・コール数・概算費用（pricing 設定済みモデルのみ）を表示でき、通常実行時も生成前に同じ見積もりを表示したうえで確認を求める（`--yes` でスキップ可）。
 
 ## インポート（引っ越し）
+
+> 記憶アーキ v2 Phase 4（2026-07-04）: インポートは**挿入＋ローカル埋め込み（無料・LLM 不使用）のみ**で完了とし、完了直後から自動想起（ゾーン C）が機能する。Chronicle（あらすじ）の一括生成は任意・後回しでよい（費用見積もり付き、`build_arasuji.py --estimate`）。詳細は `docs/user-guide/memory-migration.md`。
 
 | スクリプト | 用途 |
 |---|---|
 | `import_chatgpt_conversations.py` | ChatGPT 公式エクスポートを取り込み |
 | `import_chatlog_json.py` | 汎用チャットログ JSON を取り込み |
+| `import_persona_logs_to_saimemory.py` | SAIVerse 内の旧形式ログ（`log.json` 等）を取り込み。完了時に埋め込みバックフィル＋サマリを表示 |
 
 ## アドオン
 

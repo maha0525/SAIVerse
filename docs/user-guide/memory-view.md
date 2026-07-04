@@ -12,7 +12,7 @@
 | **7層ストレージ** | 記憶の内部階層を Track 単位で確認する可視化（開発者寄りの調査ビュー） |
 | **Tracks** | ペルソナの行動 Track 一覧（→ [concepts/track.md](../concepts/track.md)） |
 | **Pulse タイムライン** | Pulse の時系列（→ [concepts/pulse.md](../concepts/pulse.md)） |
-| **インポート** | 外部チャットログ（ChatGPT エクスポート等）の取り込み + エンベディング管理（未作成メッセージへの埋め込み生成） |
+| **インポート** | 外部チャットログ（ChatGPT エクスポート等）の取り込み + エンベディング管理（未作成メッセージへの埋め込み生成）。手順は [他サービスからの引っ越し](memory-migration.md) |
 | **デバッグ** | セマンティック想起のテスト（検索クエリを投げて確認）、Stelis スレッド救出などの調査用 |
 
 ## よく使うタブ
@@ -24,4 +24,5 @@
 ## 関連
 
 - [Memopedia](memopedia.md) - Memopedia タブの詳しい使い方
+- [他サービスからの引っ越し](memory-migration.md) - インポートタブ / 引っ越しスクリプトの詳しい手順
 - [concepts/saimemory.md](../concepts/saimemory.md) - 記憶システムの全体像

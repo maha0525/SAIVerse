@@ -268,6 +268,10 @@ def migrate_persona(
     extra_logs: Iterable[Path],
     thread_suffix: Optional[str],
 ) -> None:
+    import time
+
+    started_at = time.monotonic()
+
     db_path = persona_dir / "memory.db"
     if reset and db_path.exists():
         db_path.unlink()
@@ -299,11 +303,121 @@ def migrate_persona(
     messages = _fill_missing_timestamps(messages, default_start)
     messages.sort(key=_message_sort_key)
 
+    # 挿入 (LLM 不使用)。書き込み時にローカル embedder が動いていれば、この時点で
+    # ほぼ全メッセージの埋め込みが揃う (embedder 不在時のみ後段のバックフィルが効く)。
     imported = 0
     for msg in messages:
         adapter.append_persona_message(msg, thread_suffix=thread_suffix)
         imported += 1
     LOGGER.info("Imported %d messages into %s", imported, persona_id)
+
+    # 埋め込みバックフィル (§8 不変条件: LLM API を一切呼ばない)。
+    # embedder が起動時に初期化できなかった場合や、書き込み時点でモデルの
+    # ダウンロードが未完了だった場合などに、挿入済みメッセージの埋め込みが
+    # 欠けたまま残る。ここで全件チェックして欠落分だけ埋める。
+    if not adapter.can_embed():
+        LOGGER.warning(
+            "Persona %s: embedding model is unavailable. Messages were inserted "
+            "without embeddings; auto-recall will not work until the embedding "
+            "model becomes available and this script is re-run (or "
+            "scripts/embed_recall_sources.py is used once fixed).",
+            persona_id,
+        )
+        backfill_result = {"total_missing": 0, "embedded": 0, "failed": 0}
+        try:
+            with adapter._db_lock:  # type: ignore[attr-defined]
+                from sai_memory.memory.storage import get_messages_without_embeddings
+                backfill_result["total_missing"] = len(get_messages_without_embeddings(adapter.conn))
+        except Exception as exc:
+            LOGGER.warning("Failed to count missing embeddings for %s: %s", persona_id, exc)
+    else:
+        LOGGER.info("Verifying embeddings for %s (backfilling any gaps)...", persona_id)
+        backfill_result = adapter.backfill_missing_message_embeddings()
+        if backfill_result["total_missing"] == 0:
+            LOGGER.info("Persona %s: all messages already embedded at write time.", persona_id)
+        else:
+            LOGGER.info(
+                "Persona %s: backfilled %d/%d missing embeddings (%d failed).",
+                persona_id,
+                backfill_result["embedded"],
+                backfill_result["total_missing"],
+                backfill_result["failed"],
+            )
+
+    elapsed = time.monotonic() - started_at
+
+    from sai_memory.memory.storage import count_messages, count_message_embeddings
+    with adapter._db_lock:  # type: ignore[attr-defined]
+        total_messages = count_messages(adapter.conn)
+        total_embedded = count_message_embeddings(adapter.conn)
+        total_nonempty = adapter.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE TRIM(COALESCE(content, '')) != ''"
+        ).fetchone()[0]
+
+    _print_import_summary(
+        persona_id,
+        imported=imported,
+        total_messages=total_messages,
+        total_nonempty=total_nonempty,
+        total_embedded=total_embedded,
+        backfill_result=backfill_result,
+        elapsed_seconds=elapsed,
+        embed_available=adapter.can_embed(),
+    )
+
+
+def _print_import_summary(
+    persona_id: str,
+    *,
+    imported: int,
+    total_messages: int,
+    total_nonempty: int,
+    total_embedded: int,
+    backfill_result: dict,
+    elapsed_seconds: float,
+    embed_available: bool,
+) -> None:
+    """インポート完了サマリを表示する（次に何をすればいいかが分かる案内文つき）。
+
+    「埋め込み済み数 < 総メッセージ数」は空メッセージが含まれる限り常に起こりうる
+    (空メッセージは書き込み時点でも埋め込み対象外なので正常)。判定基準は
+    non-empty content のメッセージ数と比較する。
+    """
+    print("\n" + "=" * 60)
+    print(f"インポート完了: {persona_id}")
+    print("=" * 60)
+    print(f"挿入したメッセージ数:     {imported}")
+    print(f"DB内の総メッセージ数:     {total_messages}")
+    print(f"埋め込み済みメッセージ数: {total_embedded} / {total_nonempty} (空メッセージを除く対象数)")
+    if backfill_result["total_missing"] > 0:
+        print(
+            f"  (うち今回バックフィルで埋めた分: {backfill_result['embedded']}, "
+            f"失敗: {backfill_result['failed']})"
+        )
+    print(f"所要時間:                 {elapsed_seconds:.1f} 秒")
+    print("-" * 60)
+    if not embed_available:
+        print(
+            "注意: 埋め込みモデルが利用できなかったため、メッセージは埋め込み無しで"
+            "挿入されています。自動想起はまだ機能しません。埋め込みモデルの利用可否"
+            "を確認したうえで、このスクリプトを再実行するか "
+            "scripts/embed_recall_sources.py で埋め込みを埋めてください。"
+        )
+    elif total_embedded < total_nonempty:
+        print(
+            "注意: 一部のメッセージで埋め込みが完了していません "
+            f"(不足 {total_nonempty - total_embedded} 件)。"
+            "バックフィルを再実行するか scripts/embed_recall_sources.py で"
+            "状況を確認してください。"
+        )
+    else:
+        print(
+            "自動想起はこの時点から機能します。\n"
+            "Chronicle（あらすじ）の生成は任意で、後から "
+            "scripts/build_arasuji.py（費用見積もり付き、--estimate オプション）"
+            "またはふだんの会話（Metabolism）で少しずつ進みます。"
+        )
+    print("=" * 60)
 
 
 def parse_args() -> argparse.Namespace:
