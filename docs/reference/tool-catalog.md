@@ -54,7 +54,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `item_move` | Move items to a building, your inventory, or inside a bag. Specify comma-separated item IDs and a destination. | `item_ids*`: string, `destination_type*`: string, `destination_id`: string | アイテム移動 |
 | `item_view` | View item details. For pictures: shows the image. For documents: shows full text. For bags: shows contents list. Supp… | `item_id`: string, `item_ids`: string | アイテム閲覧 |
 | `item_write_description` | Update the description (概要) of an item. Use this when an item's name is a meaningless string, or its description is i… | `item_id*`: string, `description*`: string | アイテム概要の書き換え |
-| `judgment_finalize` | Internal tool for judgment-point Playbooks only (judgment_day_open / judgment_post_session). Receives the judge node'… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
+| `judgment_finalize` | Internal tool for judgment-point Playbooks only (judgment_day_open / judgment_post_conversation / judgment_post_sessi… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
 | `life_purpose_set` | Save your confirmed life purpose / interests / vocations. Use this once, during the first-time self-definition: after… | `purpose*`: string, `interests`: array, `vocations`: array | 生きる目的を保存 |
 | `list_available_playbooks` | List playbooks available for router selection based on persona and building context. | `persona_id`: string, `building_id`: string | — |
 | `list_city_buildings` | List all buildings in the current city with their IDs and occupant personas. | (なし) | — |

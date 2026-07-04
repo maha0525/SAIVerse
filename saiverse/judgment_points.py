@@ -14,10 +14,16 @@
 5. ``additionalProperties`` はスキーマにハードコードしない (プロバイダ正規化層に
    任せる。meta_judgment_structured.md §Phase4 の Gemini 事故の教訓)
 
-本フェーズの判断点は 2 種:
+判断点は 5 種 (judgment_points.md §2 の一覧):
 
 - ``day_open``   — 起床判断: 時間割の編成 + 予算配分 (+ 欲求→関心の昇格)
+- ``post_conversation`` — 会話終了判断: 会話からの収穫 (タスク・欲求) +
+  中断中セッションの扱い + 残り時間割の整え
 - ``post_session`` — セッション終了判断: タスクの裁定 (接地検証つき) + 次への接続
+- ``on_event``   — イベント到着判断: 反応の選択 (engage_now / insert_slot /
+  note_only / ignore。alert は engage_now のみに縮退)
+- ``day_close``  — 就寝判断: 予定 vs 実績のふりかえり + 明日への机メモ +
+  欲求のたな卸し + ユーザーへの報告種
 
 モデルは standard (META 相当): 起動は ``PulseController.submit_meta_judgment``
 (= ``pulse_type="meta_judgment"``) を使い、``sea.pulse_context.aspect_from_pulse_type``
@@ -71,14 +77,40 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 KIND_DAY_OPEN = "day_open"
+KIND_POST_CONVERSATION = "post_conversation"
 KIND_POST_SESSION = "post_session"
+KIND_ON_EVENT = "on_event"
+KIND_DAY_CLOSE = "day_close"
 
 #: 判断点 kind → Playbook 名 (builtin_data/playbooks/public/)。
-#: 後続フェーズで post_conversation / on_event / day_close が加わる。
 JUDGMENT_PLAYBOOK_MAP: Dict[str, str] = {
     KIND_DAY_OPEN: "judgment_day_open",
+    KIND_POST_CONVERSATION: "judgment_post_conversation",
     KIND_POST_SESSION: "judgment_post_session",
+    KIND_ON_EVENT: "judgment_on_event",
+    KIND_DAY_CLOSE: "judgment_day_close",
 }
+
+# 会話終了判断 resume_session の選択肢 (judgment_points.md §5)
+RESUME_NOW = "resume_now"
+RESUME_DEFER = "defer_to_slot"
+RESUME_DROP = "drop"
+RESUME_CHOICES = (RESUME_NOW, RESUME_DEFER, RESUME_DROP)
+
+# イベント到着判断 reaction の種別 (judgment_points.md §7)
+REACTION_ENGAGE_NOW = "engage_now"
+REACTION_INSERT_SLOT = "insert_slot"
+REACTION_NOTE_ONLY = "note_only"
+REACTION_IGNORE = "ignore"
+
+#: 「中断中セッション」と見なす desk_memo.status (post_session 判断が刻む)
+DESK_MEMO_INTERRUPTED_STATUSES = ("continue", "blocked")
+
+#: picked_tasks.track_ref の enum に載せる Track status
+#: (judgment_points.md §5「active/pending Track の動的注入」。alert は
+#: 「要即応の active」なので含める。unstarted / 終了状態は含めない。
+#: 値は saiverse.track_manager の STATUS_RUNNING / STATUS_ALERT / STATUS_PENDING)
+PICKABLE_TRACK_STATUSES = ("running", "alert", "pending")
 
 #: 日次予算 (ラウンド) の既定値。予算ゲート (v2 §4.5) が乗るまでの素朴な形
 #: (セッション数 × ラウンド上限 ≒ 5 × 8)。context["daily_budget_rounds"] で上書き可。
@@ -167,6 +199,106 @@ def collect_promotion_refs(manager: Any, persona_id: str) -> List[str]:
         if ref.startswith("task:"):
             out.append("desire:" + ref[len("task:"):])
     return out
+
+
+def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
+    """picked_tasks.track_ref enum: 実在の active/pending Track (t:N 形式)。
+
+    judgment_points.md §5。short_id 未採番の行は参照子が無いため載せない。
+    """
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is None:
+        return []
+    try:
+        tracks = track_manager.list_for_persona(
+            persona_id, statuses=PICKABLE_TRACK_STATUSES,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to list pickable tracks for %s", persona_id,
+            exc_info=True,
+        )
+        return []
+    return [f"t:{t.short_id}" for t in tracks if t.short_id is not None]
+
+
+def find_interrupted_session(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
+    """「中断中セッション」= desk_memo (status: continue/blocked) を持つ生きた Track。
+
+    post_session 判断が :func:`save_desk_memo` で凍結した机メモが実体
+    (judgment_points.md §5「中断中セッションの机メモ (あれば)」)。複数あれば
+    updated_at が最新の 1 件を返す (resume_session は単一選択のため)。
+
+    Returns:
+        ``{"track_id", "track_ref", "track_title", "task_ref", "text",
+        "status", "updated_at"}`` または None。
+    """
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is None:
+        return None
+    from saiverse.track_manager import LIVE_STATUSES
+
+    try:
+        tracks = track_manager.list_for_persona(persona_id, statuses=LIVE_STATUSES)
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to scan desk memos for %s", persona_id, exc_info=True,
+        )
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    for t in tracks:
+        raw = getattr(t, "track_metadata", None)
+        if not raw:
+            continue
+        try:
+            metadata = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        memo = metadata.get("desk_memo") if isinstance(metadata, dict) else None
+        if not isinstance(memo, dict):
+            continue
+        if memo.get("status") not in DESK_MEMO_INTERRUPTED_STATUSES:
+            continue
+        candidate = {
+            "track_id": t.track_id,
+            "track_ref": f"t:{t.short_id}" if t.short_id is not None else t.track_id[:8],
+            "track_title": t.title or "(無題)",
+            "task_ref": str(memo.get("task_ref") or ""),
+            "text": str(memo.get("text") or ""),
+            "status": str(memo.get("status") or ""),
+            "updated_at": str(memo.get("updated_at") or ""),
+        }
+        if best is None or candidate["updated_at"] > best["updated_at"]:
+            best = candidate
+    return best
+
+
+def collect_today_touched_desires(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
+    """今日生まれた・触れた欲求 (生きている候補のみ) の dict リスト。
+
+    就寝判断 ``desire_reviews`` の動的 enum 供給元 (judgment_points.md §8
+    「今日触れた欲求のみ動的注入」)。「今日」の判定は ``last_touched_at``
+    または ``created_at`` の暦日が ``clock.now()`` の日付に一致すること。
+    """
+    today = clock.now().date().isoformat()
+    out: List[Dict[str, Any]] = []
+    for task in _list_desire_tasks(manager, persona_id):
+        touched = str(task.get("last_touched_at") or "")
+        created = str(task.get("created_at") or "")
+        if touched.startswith(today) or created.startswith(today):
+            out.append(task)
+    return out
+
+
+def collect_today_touched_desire_refs(manager: Any, persona_id: str) -> List[str]:
+    """collect_today_touched_desires の ref のみ (desire:N 形式)。"""
+    refs: List[str] = []
+    for task in collect_today_touched_desires(manager, persona_id):
+        ref = task.get("task_ref") or ""
+        if ref.startswith("task:"):
+            refs.append("desire:" + ref[len("task:"):])
+    return refs
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +455,180 @@ def build_post_session_schema(
     return {"type": "object", "properties": props, "required": required}
 
 
+def build_post_conversation_schema(
+    manager: Any,
+    persona_id: str,
+    track_refs: List[str],
+    has_interrupted_session: bool,
+) -> Dict[str, Any]:
+    """会話終了判断の response_schema (judgment_points.md §5)。
+
+    - picked_tasks.track_ref は実在の active/pending Track (t:N) + "new" の動的 enum
+    - resume_session は **中断中セッションがあるときだけ** フィールドを挿入する
+      (無いのに要求しない — v1 の空 enum 事故の教訓)
+    """
+    slot = _build_slot_schema(
+        collect_slot_ref_enum(manager, persona_id),
+        collect_facility_ids(manager),
+    )
+    props: Dict[str, Any] = {
+        "monologue": {"type": "string"},
+        "picked_tasks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "track_ref": {
+                        "type": "string",
+                        "enum": list(track_refs) + ["new"],
+                        "description": (
+                            "このタスクが属する関心 (実在の Track)。"
+                            "新しい関心として立てるなら 'new'"
+                        ),
+                    },
+                    "origin_quote": {
+                        "type": "string",
+                        "description": "根拠となる会話中の発言の引用",
+                    },
+                },
+                "required": ["title", "track_ref", "origin_quote"],
+            },
+        },
+        "new_desires": _new_desires_schema(),
+        "remaining_timetable": {
+            "anyOf": [
+                {"type": "array", "items": slot},
+                {"type": "null"},
+            ],
+        },
+    }
+    if has_interrupted_session:
+        props["resume_session"] = {
+            "type": "string",
+            "enum": list(RESUME_CHOICES),
+            "description": (
+                "中断中の作業をどうするか: resume_now (今すぐ再開) / "
+                "defer_to_slot (残りの時間割の中で再開) / drop (取りやめる)"
+            ),
+        }
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["monologue", "picked_tasks", "new_desires", "remaining_timetable"],
+    }
+
+
+def build_on_event_schema(
+    manager: Any, persona_id: str, is_alert: bool
+) -> Dict[str, Any]:
+    """イベント到着判断の response_schema (judgment_points.md §7)。
+
+    reaction は anyOf 4 分岐 (engage_now / insert_slot / note_only / ignore)。
+    **alert イベントでは anyOf を engage_now のみに動的縮退**させる
+    (v1 状況 B の「強制」の継承)。
+    """
+    engage_now = {
+        "type": "object",
+        "properties": {"type": {"type": "string", "const": REACTION_ENGAGE_NOW}},
+        "required": ["type"],
+    }
+    variants: List[Dict[str, Any]] = [engage_now]
+    if not is_alert:
+        slot = _build_slot_schema(
+            collect_slot_ref_enum(manager, persona_id),
+            collect_facility_ids(manager),
+        )
+        variants.append({
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "const": REACTION_INSERT_SLOT},
+                "slot": slot,
+            },
+            "required": ["type", "slot"],
+        })
+        variants.append({
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "const": REACTION_NOTE_ONLY},
+                "memo": {"type": "string"},
+            },
+            "required": ["type", "memo"],
+        })
+        variants.append({
+            "type": "object",
+            "properties": {"type": {"type": "string", "const": REACTION_IGNORE}},
+            "required": ["type"],
+        })
+    return {
+        "type": "object",
+        "properties": {
+            "monologue": {"type": "string"},
+            "reaction": {"anyOf": variants},
+            "new_desires": _new_desires_schema(),
+        },
+        "required": ["monologue", "reaction"],
+    }
+
+
+def build_day_close_schema(
+    manager: Any, persona_id: str, touched_desire_refs: List[str]
+) -> Dict[str, Any]:
+    """就寝判断の response_schema (judgment_points.md §8)。
+
+    desire_reviews の enum は **今日触れた欲求のみ**。空なら
+    フィールド自体を出さない (空 enum 事故防止)。
+    """
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "monologue": {
+                "type": "string",
+                "description": "一日のふりかえり。予定と実際のズレに触れる",
+            },
+            "tomorrow_memo": {
+                "type": "string",
+                "description": "明日の自分への机メモ",
+            },
+            "day_theme": {
+                "type": "string",
+                "description": "今日という一日を一言で表すなら (任意)",
+            },
+            "user_report_seeds": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {
+                    "type": "string",
+                    "description": (
+                        "帰還したユーザーに自分から話したいこと。"
+                        "今日実際に起きたことに限る"
+                    ),
+                },
+            },
+        },
+        "required": ["monologue", "tomorrow_memo"],
+    }
+    if touched_desire_refs:
+        schema["properties"]["desire_reviews"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "desire_ref": {
+                        "type": "string",
+                        "enum": list(touched_desire_refs),
+                    },
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["keep", "fading", "fulfilled"],
+                    },
+                },
+                "required": ["desire_ref", "verdict"],
+            },
+        }
+    return schema
+
+
 # ---------------------------------------------------------------------------
 # 状況テキスト (tail 注入)
 # ---------------------------------------------------------------------------
@@ -398,8 +704,9 @@ def _format_remaining_timetable(manager: Any, persona_id: str, plan_date: str) -
 
 
 def _yesterday_review_text(manager: Any, persona_id: str, yesterday: str) -> str:
-    """昨日のふりかえり素材。day_close (後続 4b) が meta_json に書く day_digest を
-    優先し、無ければ昨日の時間割の予定 vs 実績を要約する。"""
+    """昨日のふりかえり素材。就寝判断 (day_close) の finalize が meta_json に書く
+    day_digest (実績の決定論要約) を優先し、無ければ昨日の時間割の予定 vs 実績を
+    要約する。"""
     meta = load_plan_meta(manager, persona_id, yesterday)
     digest = (meta.get("day_digest") or "").strip() if isinstance(meta, dict) else ""
     if digest:
@@ -525,6 +832,231 @@ def build_post_session_situation_text(
     return "\n".join(parts)
 
 
+def _format_pickable_tracks(manager: Any, persona_id: str) -> str:
+    """picked_tasks.track_ref の選択材料 (t:N がどの関心かを示す一覧)。"""
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is None:
+        return "進行中の関心 (Track) はありません。"
+    try:
+        tracks = track_manager.list_for_persona(
+            persona_id, statuses=PICKABLE_TRACK_STATUSES,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to list tracks for %s", persona_id, exc_info=True,
+        )
+        return "(Track 情報は取得できませんでした)"
+    live = [t for t in tracks if t.short_id is not None]
+    if not live:
+        return "進行中の関心 (Track) はありません。"
+    lines = ["進行中の関心 (Track):"]
+    for t in live:
+        lines.append(f"- t:{t.short_id} [{t.track_type}/{t.status}] {t.title or '(無題)'}")
+    return "\n".join(lines)
+
+
+def build_post_conversation_situation_text(
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    interrupted: Optional[Dict[str, Any]] = None,
+) -> str:
+    """会話終了判断の tail 注入テキスト (judgment_points.md §5「見るもの」)。
+
+    会話本文は載せない — この判断は会話と同じ main line 文脈で走るため、
+    会話はコンテキストに既に在る (メタ判断と同じ起動経路)。
+    """
+    now = clock.now()
+    today = now.date().isoformat()
+    parts = [
+        "[会話終了判断]",
+        "会話がひと区切りつきました。この会話から拾うべきこと"
+        "（約束・頼まれごと・やりたくなったこと）と、残りの時間の使い方を"
+        "決めてください。会話の内容はこの文脈にあります。",
+        "",
+        f"現在時刻: {now.strftime('%H:%M')}",
+        _format_remaining_timetable(manager, persona_id, today),
+    ]
+    if interrupted:
+        memo_label = "詰まり" if interrupted.get("status") == "blocked" else "続き"
+        parts += [
+            "",
+            "[中断中の作業]",
+            f"{interrupted['track_ref']}「{interrupted['track_title']}」"
+            f"の机メモ [{memo_label}]: {interrupted['text'] or '(記載なし)'}",
+            "この作業をどうするかを resume_session で選んでください。",
+        ]
+    parts += [
+        "",
+        "[すでにあるもの（重複して作らないでください）]",
+        _format_pickable_tracks(manager, persona_id),
+        "",
+        _format_task_backlog(manager, persona_id),
+        "",
+        desire_summary_for_prompt(manager, persona_id),
+    ]
+    return "\n".join(parts)
+
+
+def build_on_event_situation_text(
+    manager: Any, persona_id: str, context: Dict[str, Any]
+) -> str:
+    """イベント到着判断の tail 注入テキスト (judgment_points.md §7「見るもの」)。"""
+    now = clock.now()
+    today = now.date().isoformat()
+    event_text = str(context.get("event_text") or "").strip()
+    is_alert = bool(context.get("is_alert"))
+
+    # 現在の活動状態 (running Track から導出)
+    activity = "手すきです（暮らし）。"
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is not None:
+        try:
+            running = track_manager.get_running(persona_id)
+        except Exception:
+            LOGGER.warning(
+                "[judgment] get_running failed for %s", persona_id, exc_info=True,
+            )
+            running = None
+        if running is not None:
+            if getattr(running, "track_type", None) == "user_conversation":
+                activity = "ユーザーと会話中です。"
+            else:
+                activity = f"「{running.title or '(無題)'}」に取り組んでいます。"
+
+    parts = [
+        "[イベント到着判断]",
+        "イベントが届きました。どう反応するかを決めてください。",
+    ]
+    if is_alert:
+        parts.append("このイベントは即応が必要です（今すぐ応対してください）。")
+    parts += [
+        "",
+        "[イベント内容]",
+        event_text or "(内容なし)",
+        "",
+        "[現在の状態]",
+        f"現在時刻: {now.strftime('%H:%M')}",
+        f"いまの活動: {activity}",
+        _format_remaining_timetable(manager, persona_id, today),
+    ]
+    return "\n".join(parts)
+
+
+_SLOT_RESULT_LABELS = {
+    STATUS_PENDING: "未実施",
+    "fired": "実行した（完了記録なし）",
+    STATUS_DEFERRED: "繰り下げのまま",
+    "skipped": "見送り",
+    "done": "実行済み",
+}
+
+
+def _collect_today_session_digests(
+    manager: Any, persona_id: str, plan_date: str, limit: int = 12
+) -> List[str]:
+    """今日の作業セッションのダイジェスト本文 (best-effort)。
+
+    SAIMemory の committed ダイジェスト (``sea.work_session.DIGEST_TAG``) を
+    adapter 経由で読む。adapter が read API を持たない / 読めない場合は
+    空リスト (状況テキストは slots_json の実績だけで成立する)。
+    """
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    fetch = getattr(adapter, "recent_persona_messages_by_count", None)
+    if not callable(fetch):
+        return []
+    from sea.work_session import DIGEST_TAG
+
+    try:
+        payloads = fetch(limit, required_tags=[DIGEST_TAG])
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to fetch session digests for %s", persona_id,
+            exc_info=True,
+        )
+        return []
+    out: List[str] = []
+    for payload in payloads:
+        created = str(payload.get("created_at") or "")
+        if created and not created.startswith(plan_date):
+            continue
+        content = str(payload.get("content") or "").strip()
+        if content:
+            out.append(content)
+    return out
+
+
+def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str:
+    """今日の予定 vs 実績の対照テキスト (judgment_points.md §8「見るもの」)。
+
+    slots_json の status / note と予算 (計画値)、取得できれば work_session
+    ダイジェスト群を含む。就寝判断の状況テキストと、finalize が meta_json に
+    保存する ``day_digest`` (翌朝 day_open の「昨日のふりかえり」が読む) の
+    両方がこれを使う — 決定論構築なので接地が保たれる。
+    """
+    slots = load_day_plan(manager, persona_id, plan_date)
+    if not slots:
+        return "今日の時間割はありませんでした。"
+    lines = ["今日の時間割（予定 → 実績）:"]
+    consumed = 0
+    planned = 0
+    for s in slots:
+        status = str(s.get("status") or STATUS_PENDING)
+        label = _SLOT_RESULT_LABELS.get(status, status)
+        budget = int(s.get("budget_rounds") or 0)
+        planned += budget
+        if status in ("fired", "done"):
+            consumed += budget
+        line = (
+            f"- {s.get('start')} {s.get('kind')}"
+            + (f" ref={s.get('ref')}" if s.get("ref") not in (None, REF_NONE) else "")
+            + f" @{s.get('facility')} → {label}"
+        )
+        note = (s.get("note") or "").strip()
+        if note:
+            line += f"（{note}）"
+        lines.append(line)
+    lines.append(f"作業予算（計画値）: 消化 {consumed} / 計画 {planned} ラウンド")
+    digests = _collect_today_session_digests(manager, persona_id, plan_date)
+    if digests:
+        lines.append("")
+        lines.append("今日の作業セッションのダイジェスト:")
+        for d in digests:
+            lines.append(f"- {d}")
+    return "\n".join(lines)
+
+
+def build_day_close_situation_text(
+    manager: Any, persona_id: str, context: Dict[str, Any]
+) -> str:
+    """就寝判断の tail 注入テキスト (judgment_points.md §8「見るもの」)。"""
+    now = clock.now()
+    today = now.date().isoformat()
+    parts = [
+        "[就寝判断]",
+        f"今日 ({today}) を終えます。予定と実際に起きたことを見比べて、"
+        "ふりかえりと明日の自分への机メモを書いてください。",
+        "",
+        build_day_results_text(manager, persona_id, today),
+        "",
+        "[今日生まれた・触れた「やりたいこと」]",
+    ]
+    touched = collect_today_touched_desires(manager, persona_id)
+    if touched:
+        for task in touched:
+            ref = task.get("task_ref") or "task:?"
+            dtype = task.get("desire_type") or "未分類"
+            title = task.get("title") or "(無題)"
+            count = task.get("touch_count") or 0
+            parts.append(
+                f"- desire:{ref[len('task:'):]} [{dtype}] {title} (再訪: {count}回)"
+            )
+    else:
+        parts.append("今日触れた「やりたいこと」はありません。")
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # 判断点の起動
 # ---------------------------------------------------------------------------
@@ -567,6 +1099,48 @@ def build_judgment_args(
             "task_ref": str(task_ref) if task_ref else None,
             "track_id": str(track_id) if track_id else None,
         }
+    elif kind == KIND_POST_CONVERSATION:
+        track_refs = collect_pickable_track_refs(manager, persona_id)
+        interrupted = find_interrupted_session(manager, persona_id)
+        situation_text = build_post_conversation_situation_text(
+            manager, persona_id, context, interrupted=interrupted,
+        )
+        response_schema = build_post_conversation_schema(
+            manager, persona_id, track_refs, interrupted is not None,
+        )
+        judgment_context = {
+            "plan_date": today,
+            "track_refs": track_refs,
+        }
+        if interrupted is not None:
+            judgment_context["resume"] = {
+                "track_id": interrupted["track_id"],
+                "task_ref": interrupted["task_ref"],
+                "text": interrupted["text"],
+            }
+    elif kind == KIND_ON_EVENT:
+        event_text = str(context.get("event_text") or "").strip()
+        if not event_text:
+            raise ValueError(
+                "on_event judgment requires context['event_text'] (non-empty)"
+            )
+        is_alert = bool(context.get("is_alert"))
+        situation_text = build_on_event_situation_text(manager, persona_id, context)
+        response_schema = build_on_event_schema(manager, persona_id, is_alert)
+        judgment_context = {
+            "plan_date": today,
+            "is_alert": is_alert,
+            # note_only の覚え書きに「何のイベントだったか」を添えるための抜粋
+            "event_text": event_text[:200],
+        }
+    elif kind == KIND_DAY_CLOSE:
+        touched_refs = collect_today_touched_desire_refs(manager, persona_id)
+        situation_text = build_day_close_situation_text(manager, persona_id, context)
+        response_schema = build_day_close_schema(manager, persona_id, touched_refs)
+        judgment_context = {
+            "plan_date": today,
+            "touched_desire_refs": touched_refs,
+        }
     else:
         raise ValueError(f"unknown judgment kind: {kind!r}")
 
@@ -593,9 +1167,19 @@ def run_judgment_point(
     Args:
         context: 判断点ごとの入力。
             - day_open: ``daily_budget_rounds`` (省略可) / ``scheduled_events`` (省略可)
+            - post_conversation: なし (中断中セッション・Track・タスク・欲求は
+              本モジュールが DB から収集する)。会話本文は main line 文脈に
+              既に在る前提 (メタ判断と同じ起動経路)
             - post_session: ``session_result`` (WorkSessionResult または dict、必須) /
               ``task_ref`` / ``track_id`` / ``budget_rounds`` (いずれも省略時は
               session_result から読む)
+            - on_event: ``event_text`` (必須) / ``is_alert`` (省略時 False。
+              True なら reaction スキーマが engage_now のみに縮退)。
+              **ユーザー会話中は原則発火させないこと** — 会話の至上性
+              (judgment_points.md §7)。その抑止は呼び出し側の責務であり、
+              本モジュールは判定しない (会話中の収穫は会話終了判断が担う)
+            - day_close: なし (予定 vs 実績・今日触れた欲求は本モジュールが
+              DB から収集する)
 
     Returns:
         ``{"kind", "playbook", "args", "submitted": bool, "errors": [...]}``。
@@ -776,6 +1360,80 @@ def sanitize_timetable(
     return deduped, warnings
 
 
+def insert_timetable_slot(
+    manager: Any,
+    persona_id: str,
+    plan_date: str,
+    slot: Dict[str, Any],
+    not_before: Optional[str] = None,
+) -> Tuple[Optional[int], List[str]]:
+    """コマ 1 件を今日の残り時間割へ挿入する (on_event insert_slot / resume_now)。
+
+    検証は :func:`sanitize_timetable` (単一コマ) + 時刻整合:
+
+    - ``not_before`` (HH:MM) より前の start は棄却 (過去のコマは挿入できない。
+      「今すぐ」は engage_now / resume_now が担う)
+    - start が既存コマ (消化済み含む) と重複する場合は空きが見つかるまで
+      1 分ずつ繰り下げる (上限 30 分。同時刻コマは day_plan の key 空間で
+      衝突するため)
+    - 適用は :func:`day_plan.replace_remaining_slots` (残りコマ + 挿入コマの
+      全置換)。時刻昇順の検証に失敗した場合は時間割を一切変更しない
+
+    Returns:
+        (置換後に push したコマ数 | 失敗時 None, 警告メッセージのリスト)
+    """
+    cleaned, warnings = sanitize_timetable(manager, persona_id, [slot])
+    if not cleaned:
+        return None, warnings
+    new_slot = cleaned[0]
+
+    if not_before and new_slot["start"] < not_before:
+        warnings.append(
+            f"挿入コマ rejected: start={new_slot['start']} は現在時刻 "
+            f"{not_before} より前です"
+        )
+        return None, warnings
+
+    current = load_day_plan(manager, persona_id, plan_date) or []
+    remaining = [
+        s for s in current if s.get("status") in (STATUS_PENDING, STATUS_DEFERRED)
+    ]
+    taken = {s.get("start") for s in current}
+    start = new_slot["start"]
+    for _ in range(30):
+        if start not in taken:
+            break
+        minutes = int(start[:2]) * 60 + int(start[3:]) + 1
+        if minutes >= 24 * 60:
+            warnings.append(
+                f"挿入コマ rejected: start={new_slot['start']} 以降に空き時刻が"
+                "ありません (日を跨ぐ挿入は不可)"
+            )
+            return None, warnings
+        start = f"{minutes // 60:02d}:{minutes % 60:02d}"
+    else:
+        warnings.append(
+            f"挿入コマ rejected: start={new_slot['start']} 周辺 30 分に空き時刻が"
+            "ありません"
+        )
+        return None, warnings
+    if start != new_slot["start"]:
+        warnings.append(
+            f"挿入コマ: start={new_slot['start']} は使用済みのため {start} へ繰り下げ"
+        )
+        new_slot["start"] = start
+
+    merged = sorted(remaining + [new_slot], key=lambda s: s["start"])
+    from saiverse.day_plan import replace_remaining_slots
+
+    try:
+        pushed = replace_remaining_slots(manager, persona_id, plan_date, merged)
+    except ValueError as exc:
+        warnings.append(f"コマの挿入に失敗 (時間割は不変): {exc}")
+        return None, warnings
+    return pushed, warnings
+
+
 def save_desk_memo(
     manager: Any, track_id: str, memo: Dict[str, Any]
 ) -> bool:
@@ -803,6 +1461,41 @@ def save_desk_memo(
         if not isinstance(metadata, dict):
             metadata = {}
         metadata["desk_memo"] = dict(memo)
+        track.track_metadata = json.dumps(metadata, ensure_ascii=False)
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def clear_desk_memo(manager: Any, track_id: str) -> bool:
+    """Track metadata の机メモを片づける (resume_session='drop' の適用)。
+
+    ``track_metadata.desk_memo`` を除去する。以後この Track は
+    :func:`find_interrupted_session` の対象から外れる (タスク自体は残る)。
+
+    Returns:
+        除去できたら True。Track が無い / 机メモが無い場合は False。
+    """
+    from database.models import ActionTrack
+
+    db = manager.SessionLocal()
+    try:
+        track = (
+            db.query(ActionTrack).filter(ActionTrack.track_id == track_id).first()
+        )
+        if track is None or not track.track_metadata:
+            return False
+        try:
+            metadata = json.loads(track.track_metadata)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(metadata, dict) or "desk_memo" not in metadata:
+            return False
+        metadata.pop("desk_memo", None)
         track.track_metadata = json.dumps(metadata, ensure_ascii=False)
         db.commit()
         return True

@@ -1,6 +1,7 @@
 """judgment_finalize: 判断点 (judgment_points.md) の後処理ツール。
 
-判断点 Playbook (judgment_day_open / judgment_post_session) の最終ノードで
+判断点 Playbook (judgment_day_open / judgment_post_conversation /
+judgment_post_session / judgment_on_event / judgment_day_close) の最終ノードで
 呼ばれる。meta_judgment_finalize と同じ様式の kind ディスパッチ:
 
 1. judge LLM ノードが返した dict (構造化出力結果) を受け取る
@@ -8,9 +9,20 @@
    (判断全体を落とさない。握り潰さない)
    - day_open: timetable 検証 → save_day_plan + schedule_day_plan。
      promotions → track_create (from_candidate) スペル
+   - post_conversation: picked_tasks → タスク作成 (origin_quote 必須の接地、
+     track_ref='new' は新規 autonomous Track) / resume_session (resume_now は
+     再開コマの即時挿入 / drop は机メモ片づけ) / new_desires /
+     remaining_timetable
    - post_session: task_verdict 適用 (done は artifact_ref の接地検証つき) /
      desk_memo → Track metadata / track_op / new_desires → desire_add /
      remaining_timetable → 残りコマの全置換
+   - on_event: reaction (engage_now は結果への反映のみ — 応対の起動は
+     呼び出し側の責務 / insert_slot は時刻整合検証つき挿入 / note_only は
+     plan meta への覚え書き / ignore は記録のみ)。alert では engage_now 以外を
+     棄却 (スキーマ縮退の二重ガード)
+   - day_close: tomorrow_memo + day_theme + day_digest (実績の決定論要約) +
+     user_report_seeds → plan meta / desire_reviews → apply_desire_reviews
+     (今日触れた欲求のみ)
 3. 整形済みテキスト ``monologue + 適用結果の要約行 + /spell 行`` を SAIMemory に
    ``role='assistant', line_role='meta_judgment'`` で保存する。
    メインキャッシュに LLM の生 JSON は残らない (不変条件 v2-A 継承)。
@@ -26,16 +38,30 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from saiverse import clock
 from saiverse import day_plan as day_plan_mod
-from saiverse.desire_engine import DESIRE_TYPES
+from saiverse.desire_engine import DESIRE_TYPES, apply_desire_reviews
 from saiverse.judgment_points import (
+    KIND_DAY_CLOSE,
     KIND_DAY_OPEN,
+    KIND_ON_EVENT,
+    KIND_POST_CONVERSATION,
     KIND_POST_SESSION,
+    REACTION_ENGAGE_NOW,
+    REACTION_IGNORE,
+    REACTION_INSERT_SLOT,
+    REACTION_NOTE_ONLY,
+    RESUME_DEFER,
+    RESUME_DROP,
+    RESUME_NOW,
+    build_day_results_text,
+    clear_desk_memo,
     collect_promotion_refs,
+    insert_timetable_slot,
     normalize_task_ref,
     sanitize_timetable,
     save_desk_memo,
 )
 from saiverse.persona_task_manager import (
+    PARENT_TRACK,
     STATUS_COMPLETED,
     PersonaTaskManager,
     TaskNotFoundError,
@@ -174,6 +200,86 @@ def _finalize_day_open(
 
 
 # ---------------------------------------------------------------------------
+# 共通適用部品 (post_conversation / post_session / on_event が共有)
+# ---------------------------------------------------------------------------
+
+
+def _apply_new_desires(
+    output: Dict[str, Any],
+    warnings: List[str],
+    spells_record: List[Dict[str, Any]],
+) -> bool:
+    """new_desires → desire_add スペル (type/source 付き; v2 §5.2)。"""
+    applied = False
+    for i, desire in enumerate(output.get("new_desires") or []):
+        if not isinstance(desire, dict):
+            warnings.append(f"new_desires[{i}] rejected: not a dict")
+            continue
+        dtype = desire.get("type")
+        title = str(desire.get("title") or "").strip()
+        source_quote = str(desire.get("source_quote") or "").strip()
+        if dtype not in DESIRE_TYPES:
+            warnings.append(f"new_desires[{i}] rejected: 未知の型 {dtype!r}")
+            continue
+        if not title:
+            warnings.append(f"new_desires[{i}] rejected: title が空です")
+            continue
+        _fire_spell("desire_add", {
+            "title": title,
+            "type": dtype,
+            "source": source_quote,
+        }, spells_record)
+        applied = True
+    return applied
+
+
+def _apply_remaining_timetable(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """remaining_timetable: null=変更なし / 配列=残りコマの全置換 (§3.3)。"""
+    rt = output.get("remaining_timetable")
+    if isinstance(rt, list):
+        plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
+        if not rt:
+            # 空配列は「残りを全部無くす」とも読めるが、空の時間割は保存できない
+            # (最低 1 コマ要件) ため変更なし扱いにする。
+            warnings.append(
+                "remaining_timetable が空配列のため、時間割は変更しません"
+            )
+        else:
+            slots, rt_warnings = sanitize_timetable(manager, persona_id, rt)
+            warnings.extend(rt_warnings)
+            if not slots:
+                warnings.append(
+                    "remaining_timetable が検証後に空になったため、時間割は変更しません"
+                )
+            else:
+                try:
+                    pushed = day_plan_mod.replace_remaining_slots(
+                        manager, persona_id, plan_date, slots
+                    )
+                except ValueError as exc:
+                    warnings.append(
+                        f"remaining_timetable の置換に失敗 (時間割は不変): {exc}"
+                    )
+                else:
+                    lines.append(
+                        f"（残りの時間割を組み替えた: {len(slots)} コマ、{pushed} コマを予約）"
+                    )
+                    return True
+    elif rt is not None:
+        warnings.append(
+            f"remaining_timetable rejected: 配列または null が必要 (got {type(rt).__name__})"
+        )
+    return False
+
+
+# ---------------------------------------------------------------------------
 # post_session
 # ---------------------------------------------------------------------------
 
@@ -300,61 +406,484 @@ def _finalize_post_session(
         warnings.append(f"track_op rejected: 未知の値 {track_op!r}")
 
     # --- new_desires → desire_add (type/source 付き; v2 §5.2) ------------
-    for i, desire in enumerate(output.get("new_desires") or []):
-        if not isinstance(desire, dict):
-            warnings.append(f"new_desires[{i}] rejected: not a dict")
-            continue
-        dtype = desire.get("type")
-        title = str(desire.get("title") or "").strip()
-        source_quote = str(desire.get("source_quote") or "").strip()
-        if dtype not in DESIRE_TYPES:
-            warnings.append(f"new_desires[{i}] rejected: 未知の型 {dtype!r}")
-            continue
-        if not title:
-            warnings.append(f"new_desires[{i}] rejected: title が空です")
-            continue
-        _fire_spell("desire_add", {
-            "title": title,
-            "type": dtype,
-            "source": source_quote,
-        }, spells_record)
-        applied = True
+    applied |= _apply_new_desires(output, warnings, spells_record)
 
     # --- remaining_timetable: null=変更なし / 配列=残りコマの全置換 ------
-    rt = output.get("remaining_timetable")
-    if isinstance(rt, list):
-        plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
-        if not rt:
-            # 空配列は「残りを全部無くす」とも読めるが、空の時間割は保存できない
-            # (最低 1 コマ要件) ため変更なし扱いにする。
+    applied |= _apply_remaining_timetable(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
+
+    return applied
+
+
+# ---------------------------------------------------------------------------
+# post_conversation
+# ---------------------------------------------------------------------------
+
+
+def _create_picked_task(
+    manager: Any,
+    persona_id: str,
+    ptm: PersonaTaskManager,
+    title: str,
+    track_ref: str,
+    origin_quote: str,
+    valid_track_refs: set,
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """picked_tasks 1 件の適用 (タスク作成。track_ref='new' は新規 Track も)。"""
+    track_manager = getattr(manager, "track_manager", None)
+    track_id: Optional[str] = None
+    dest_label = "(未所属)"
+
+    if track_ref == "new":
+        # 新しい関心として Track を立てる (track_create 相当。unstarted のまま —
+        # 稼働させるかは以後のメタ判断/起床判断に委ねる)
+        if track_manager is None:
             warnings.append(
-                "remaining_timetable が空配列のため、時間割は変更しません"
+                f"picked_task「{title}」: track_manager が無いため Track を作れません; "
+                "未所属タスクとして作成します"
             )
         else:
-            slots, rt_warnings = sanitize_timetable(manager, persona_id, rt)
-            warnings.extend(rt_warnings)
-            if not slots:
-                warnings.append(
-                    "remaining_timetable が検証後に空になったため、時間割は変更しません"
-                )
-            else:
+            try:
                 try:
-                    pushed = day_plan_mod.replace_remaining_slots(
-                        manager, persona_id, plan_date, slots
-                    )
-                except ValueError as exc:
-                    warnings.append(
-                        f"remaining_timetable の置換に失敗 (時間割は不変): {exc}"
-                    )
-                else:
+                    # 通常経路: tools ローダが builtin tools ディレクトリを
+                    # sys.path に載せている (tools/__init__.py)。
+                    from _track_common import resolve_default_entry_line_role
+                    entry_line_role = resolve_default_entry_line_role("autonomous")
+                except ImportError:
+                    # 単体ロード (テスト等) では _track_common が見えない。
+                    # resolve_default_entry_line_role 自身の unknown fallback と
+                    # 同じ安全側 (= main_line) に倒す。
+                    entry_line_role = "main_line"
+                track_id = track_manager.create(
+                    persona_id=persona_id,
+                    track_type="autonomous",
+                    title=title,
+                    intent=f"会話からの持ち帰り。根拠: {origin_quote}",
+                    metadata=json.dumps(
+                        {"entry_line_role": entry_line_role}, ensure_ascii=False,
+                    ),
+                )
+                created = track_manager.get(track_id)
+                short = (
+                    f"t:{created.short_id}" if created.short_id is not None
+                    else track_id[:8]
+                )
+                dest_label = f"新しい関心「{title}」({short})"
+            except Exception as exc:
+                LOGGER.exception(
+                    "[judgment_finalize] track create for picked_task failed"
+                )
+                warnings.append(
+                    f"picked_task「{title}」rejected: Track の作成に失敗: {exc}"
+                )
+                return False
+    else:
+        if track_ref not in valid_track_refs:
+            warnings.append(
+                f"picked_task「{title}」rejected: track_ref={track_ref!r} は"
+                "選択可能な Track にありません"
+            )
+            return False
+        if track_manager is None:
+            warnings.append(
+                f"picked_task「{title}」rejected: track_manager が無いため "
+                f"{track_ref!r} を解決できません"
+            )
+            return False
+        try:
+            track_id = track_manager.resolve_track_ref(persona_id, track_ref)
+        except Exception as exc:
+            warnings.append(
+                f"picked_task「{title}」rejected: track_ref={track_ref!r} が"
+                f"解決できません: {exc}"
+            )
+            return False
+        dest_label = track_ref
+
+    task = ptm.create_task(
+        persona_id=persona_id,
+        title=title,
+        # origin_quote は接地の証跡としてタスクの自由記述 (notes) に残す
+        notes=origin_quote,
+        parent_kind=PARENT_TRACK if track_id else None,
+        track_id=track_id,
+        auto_activate=False,
+        actor="judgment_post_conversation",
+    )
+    lines.append(
+        f"（会話からタスクを拾った: {task.get('task_ref')}「{title}」→ {dest_label}）"
+    )
+    return True
+
+
+def _apply_resume_now(
+    manager: Any,
+    persona_id: str,
+    plan_date: str,
+    resume_ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """resume_session='resume_now' の適用。
+
+    **妥協点** (judgment_points.md §5): セッションの凍結コンテキストを復元する
+    「再開機構」は未実装のため、resume_now は「凍結済み机メモ付きタスクを参照
+    する『作る/知る』コマの現在時刻への即時挿入」で表現する。kind / facility /
+    予算は今日の時間割で同じタスクを指していた元コマから引き継ぐ (無ければ
+    「作る」/ own_room / 既定予算)。挿入されたコマは即時発火し、机メモは
+    セッション指示書の参照先 (Track metadata) に残ったまま新セッションが走る。
+    """
+    task_ref = str(resume_ctx.get("task_ref") or "").strip()
+    if not task_ref:
+        warnings.append("resume_now rejected: 再開対象の task_ref が不明です")
+        return False
+
+    kind = day_plan_mod.KIND_CREATE
+    facility = day_plan_mod.FACILITY_OWN_ROOM
+    budget = day_plan_mod.DEFAULT_BUDGET_ROUNDS
+    norm = normalize_task_ref(task_ref)
+    for s in day_plan_mod.load_day_plan(manager, persona_id, plan_date) or []:
+        if normalize_task_ref(str(s.get("ref") or "")) == norm:
+            if s.get("kind") == day_plan_mod.KIND_LEARN:
+                kind = day_plan_mod.KIND_LEARN
+            facility = s.get("facility") or facility
+            if int(s.get("budget_rounds") or 0) > 0:
+                budget = int(s["budget_rounds"])
+            break
+
+    memo_text = str(resume_ctx.get("text") or "").strip()
+    note = "中断していた作業の再開"
+    if memo_text:
+        note += f"（机メモ: {memo_text[:60]}）"
+    now_hhmm = clock.now().strftime("%H:%M")
+    slot = {
+        "start": now_hhmm,
+        "kind": kind,
+        "ref": task_ref,
+        "facility": facility,
+        "budget_rounds": budget,
+        "note": note,
+    }
+    pushed, insert_warnings = insert_timetable_slot(
+        manager, persona_id, plan_date, slot,
+    )
+    warnings.extend(insert_warnings)
+    if pushed is None:
+        return False
+    lines.append(
+        f"（中断していた作業 {task_ref} を今すぐ再開する: {slot['start']} の"
+        f"「{kind}」コマとして挿入）"
+    )
+    return True
+
+
+def _finalize_post_conversation(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+    spells_record: List[Dict[str, Any]],
+) -> bool:
+    """会話終了判断の適用。何か 1 つでも適用したら True (committed)。
+
+    収穫ゼロ (picked_tasks / new_desires が空 + timetable 変更なし +
+    resume なし) は正常系 — 全会話がタスクを生むわけではない (§5)。
+    """
+    applied = False
+    plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
+    valid_track_refs = set(ctx.get("track_refs") or [])
+    ptm = PersonaTaskManager(manager.SessionLocal)
+
+    # --- picked_tasks → タスク作成 (origin_quote 必須の接地) --------------
+    for i, picked in enumerate(output.get("picked_tasks") or []):
+        if not isinstance(picked, dict):
+            warnings.append(f"picked_tasks[{i}] rejected: not a dict")
+            continue
+        title = str(picked.get("title") or "").strip()
+        track_ref = str(picked.get("track_ref") or "").strip()
+        origin_quote = str(picked.get("origin_quote") or "").strip()
+        if not title:
+            warnings.append(f"picked_tasks[{i}] rejected: title が空です")
+            continue
+        if not origin_quote:
+            # 無根拠のタスク発生をここで塞ぐ (§5 — 接地の証跡)
+            warnings.append(
+                f"picked_tasks[{i}]「{title}」rejected: origin_quote (根拠となる"
+                "会話中の発言の引用) がありません"
+            )
+            continue
+        try:
+            applied |= _create_picked_task(
+                manager, persona_id, ptm, title, track_ref, origin_quote,
+                valid_track_refs, lines, warnings,
+            )
+        except Exception as exc:
+            LOGGER.exception("[judgment_finalize] picked_task creation raised")
+            warnings.append(f"picked_tasks[{i}]「{title}」の作成に失敗: {exc}")
+
+    # --- new_desires → desire_add ----------------------------------------
+    applied |= _apply_new_desires(output, warnings, spells_record)
+
+    # --- remaining_timetable: 全置換を先に適用してから resume_now を挿入 --
+    applied |= _apply_remaining_timetable(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
+
+    # --- resume_session (中断中セッションがあったときのみ ctx に resume) --
+    resume_choice = output.get("resume_session")
+    resume_ctx = ctx.get("resume")
+    if resume_choice is not None:
+        if not isinstance(resume_ctx, dict) or not resume_ctx:
+            warnings.append(
+                "resume_session rejected: 中断中セッションがありません"
+            )
+        elif resume_choice == RESUME_NOW:
+            applied |= _apply_resume_now(
+                manager, persona_id, plan_date, resume_ctx, lines, warnings,
+            )
+        elif resume_choice == RESUME_DEFER:
+            # 時間割側 (remaining_timetable) に委ねる。状態は変えない。
+            lines.append("（中断中の作業は残りの時間割の中で再開する）")
+        elif resume_choice == RESUME_DROP:
+            track_id = str(resume_ctx.get("track_id") or "")
+            try:
+                if track_id and clear_desk_memo(manager, track_id):
                     applied = True
-                    lines.append(
-                        f"（残りの時間割を組み替えた: {len(slots)} コマ、{pushed} コマを予約）"
+                    lines.append("（中断中の作業は取りやめ、机メモを片づけた）")
+                else:
+                    warnings.append(
+                        f"resume_session 'drop': 机メモの削除先 Track "
+                        f"{track_id!r} が見つかりません"
                     )
-    elif rt is not None:
+            except Exception as exc:
+                LOGGER.exception("[judgment_finalize] clear_desk_memo raised")
+                warnings.append(f"机メモの片づけに失敗: {exc}")
+        else:
+            warnings.append(
+                f"resume_session rejected: 未知の値 {resume_choice!r}"
+            )
+
+    return applied
+
+
+# ---------------------------------------------------------------------------
+# on_event
+# ---------------------------------------------------------------------------
+
+
+def _append_event_memo(
+    manager: Any,
+    persona_id: str,
+    plan_date: str,
+    memo_text: str,
+    event_text: Optional[str],
+) -> None:
+    """note_only の覚え書きを plan meta (``event_memos`` 配列) に積む。
+
+    机メモ (Track metadata) 様式の記録先だが、イベントは Track に属さないため
+    「その日」の付帯情報 (persona_day_plan.meta_json) を置き場にする。
+    """
+    meta = day_plan_mod.load_plan_meta(manager, persona_id, plan_date)
+    memos = meta.get("event_memos")
+    memos = list(memos) if isinstance(memos, list) else []
+    memos.append({
+        "text": memo_text,
+        "event": str(event_text or "")[:120],
+        "at": clock.now().isoformat(timespec="seconds"),
+    })
+    day_plan_mod.update_plan_meta(
+        manager, persona_id, plan_date, {"event_memos": memos},
+    )
+
+
+def _finalize_on_event(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+    spells_record: List[Dict[str, Any]],
+    summary_extras: List[str],
+) -> bool:
+    """イベント到着判断の適用。
+
+    engage_now は状態を変えない — 「今すぐ応対する」の実行 (Pulse 起動 /
+    Track alert 処理) は呼び出し側の責務で、ここでは判断結果を要約
+    (summary_extras) と記録テキストに反映するのみ (配線は後続フェーズ)。
+    """
+    applied = False
+    plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
+    is_alert = bool(ctx.get("is_alert"))
+
+    reaction = output.get("reaction")
+    rtype = reaction.get("type") if isinstance(reaction, dict) else None
+    if not isinstance(reaction, dict) or not rtype:
         warnings.append(
-            f"remaining_timetable rejected: 配列または null が必要 (got {type(rt).__name__})"
+            f"reaction rejected: type を持つ object が必要 (got {reaction!r})"
         )
+    elif is_alert and rtype != REACTION_ENGAGE_NOW:
+        # スキーマ縮退 (engage_now のみ) の二重ガード
+        warnings.append(
+            f"reaction rejected: alert イベントでは engage_now のみ選べます "
+            f"(got {rtype!r})"
+        )
+    elif rtype == REACTION_ENGAGE_NOW:
+        summary_extras.append("reaction=engage_now")
+        lines.append("（このイベントに今すぐ応対する）")
+        applied = True
+    elif rtype == REACTION_INSERT_SLOT:
+        summary_extras.append("reaction=insert_slot")
+        slot = reaction.get("slot")
+        if not isinstance(slot, dict):
+            warnings.append("insert_slot rejected: slot (object) がありません")
+        else:
+            pushed, insert_warnings = insert_timetable_slot(
+                manager, persona_id, plan_date, slot,
+                not_before=clock.now().strftime("%H:%M"),
+            )
+            warnings.extend(insert_warnings)
+            if pushed is not None:
+                applied = True
+                lines.append(
+                    f"（このイベントのためのコマを時間割へ挿入: "
+                    f"{slot.get('start')} {slot.get('kind')}）"
+                )
+    elif rtype == REACTION_NOTE_ONLY:
+        summary_extras.append("reaction=note_only")
+        memo_text = str(reaction.get("memo") or "").strip()
+        if not memo_text:
+            warnings.append("note_only rejected: memo が空です")
+        else:
+            try:
+                _append_event_memo(
+                    manager, persona_id, plan_date, memo_text,
+                    ctx.get("event_text"),
+                )
+                applied = True
+                lines.append(f"（覚え書きに留める: {memo_text}）")
+            except Exception as exc:
+                LOGGER.exception("[judgment_finalize] event memo append raised")
+                warnings.append(f"覚え書きの保存に失敗: {exc}")
+    elif rtype == REACTION_IGNORE:
+        summary_extras.append("reaction=ignore")
+        lines.append("（このイベントには反応しない）")
+    else:
+        warnings.append(f"reaction rejected: 未知の type {rtype!r}")
+
+    applied |= _apply_new_desires(output, warnings, spells_record)
+    return applied
+
+
+# ---------------------------------------------------------------------------
+# day_close
+# ---------------------------------------------------------------------------
+
+
+def _finalize_day_close(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """就寝判断の適用。
+
+    - tomorrow_memo / day_theme / user_report_seeds → 当日 plan 行の meta_json
+      (翌朝の day_open は「昨日 = この plan_date」の meta を読む —
+      ``build_day_open_situation_text`` と対になる読み書き)
+    - day_digest: LLM 出力ではなく **実績の決定論要約**
+      (:func:`saiverse.judgment_points.build_day_results_text`) を保存する。
+      翌朝 day_open の「昨日のふりかえり」が最優先で読むフォールバック元
+    - desire_reviews → apply_desire_reviews (今日触れた欲求のみ。enum 外は棄却)
+    """
+    applied = False
+    plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
+
+    updates: Dict[str, Any] = {}
+    tomorrow_memo = str(output.get("tomorrow_memo") or "").strip()
+    if tomorrow_memo:
+        updates["tomorrow_memo"] = tomorrow_memo
+    else:
+        warnings.append(
+            "tomorrow_memo が空です (明日の起床判断は机メモなしで始まります)"
+        )
+    day_theme = str(output.get("day_theme") or "").strip()
+    if day_theme:
+        updates["day_theme"] = day_theme
+
+    seeds_raw = output.get("user_report_seeds")
+    seeds: List[str] = []
+    if isinstance(seeds_raw, list):
+        for i, seed in enumerate(seeds_raw):
+            if isinstance(seed, str) and seed.strip():
+                seeds.append(seed.strip())
+            else:
+                warnings.append(
+                    f"user_report_seeds[{i}] rejected: 空でない文字列が必要"
+                )
+        if len(seeds) > 3:
+            warnings.append(
+                f"user_report_seeds は最大 3 件 (got {len(seeds)}); 先頭 3 件のみ保存"
+            )
+            seeds = seeds[:3]
+    elif seeds_raw is not None:
+        warnings.append(
+            f"user_report_seeds rejected: 配列が必要 (got {type(seeds_raw).__name__})"
+        )
+    if seeds:
+        updates["user_report_seeds"] = seeds
+
+    # day_digest は実績からの決定論構築 (接地保証。虚構のふりかえりが翌朝に残らない)
+    updates["day_digest"] = build_day_results_text(manager, persona_id, plan_date)
+
+    try:
+        day_plan_mod.update_plan_meta(manager, persona_id, plan_date, updates)
+        applied = True
+        lines.append("（今日のふりかえりを記録した）")
+        if tomorrow_memo:
+            lines.append(f"（明日への机メモ: {tomorrow_memo}）")
+        if day_theme:
+            lines.append(f"（今日のテーマ: {day_theme}）")
+        if seeds:
+            lines.append("（ユーザーに話したいこと: " + " / ".join(seeds) + "）")
+    except Exception as exc:
+        LOGGER.exception("[judgment_finalize] update_plan_meta raised")
+        warnings.append(f"ふりかえりの保存に失敗: {exc}")
+
+    # --- desire_reviews → apply_desire_reviews (今日触れた欲求のみ) -------
+    valid_refs = set(ctx.get("touched_desire_refs") or [])
+    reviews: List[Dict[str, Any]] = []
+    for i, review in enumerate(output.get("desire_reviews") or []):
+        if not isinstance(review, dict):
+            warnings.append(f"desire_reviews[{i}] rejected: not a dict")
+            continue
+        ref = str(review.get("desire_ref") or "")
+        if ref not in valid_refs:
+            warnings.append(
+                f"desire_reviews[{i}] rejected: {ref!r} は今日触れた欲求にありません"
+            )
+            continue
+        reviews.append({"desire_ref": ref, "verdict": review.get("verdict")})
+    if reviews:
+        result = apply_desire_reviews(manager, persona_id, reviews)
+        for skipped_ref in result.get("skipped") or []:
+            warnings.append(f"desire_review を適用できませんでした: {skipped_ref}")
+        n_fulfilled = len(result.get("fulfilled") or [])
+        n_fading = len(result.get("fading") or [])
+        n_kept = len(result.get("kept") or [])
+        if n_fulfilled or n_fading or n_kept:
+            applied = True
+            lines.append(
+                f"（やりたいことのたな卸し: 満たされた {n_fulfilled} / "
+                f"薄れていく {n_fading} / 持ち続ける {n_kept}）"
+            )
 
     return applied
 
@@ -394,14 +923,28 @@ def judgment_finalize(
     lines: List[str] = []
     warnings: List[str] = []
     spells_record: List[Dict[str, Any]] = []
+    summary_extras: List[str] = []
 
     if kind == KIND_DAY_OPEN:
         committed = _finalize_day_open(
             manager, persona_id, output, ctx, lines, warnings, spells_record,
         )
+    elif kind == KIND_POST_CONVERSATION:
+        committed = _finalize_post_conversation(
+            manager, persona_id, output, ctx, lines, warnings, spells_record,
+        )
     elif kind == KIND_POST_SESSION:
         committed = _finalize_post_session(
             manager, persona_id, output, ctx, lines, warnings, spells_record,
+        )
+    elif kind == KIND_ON_EVENT:
+        committed = _finalize_on_event(
+            manager, persona_id, output, ctx, lines, warnings, spells_record,
+            summary_extras,
+        )
+    elif kind == KIND_DAY_CLOSE:
+        committed = _finalize_day_close(
+            manager, persona_id, output, ctx, lines, warnings,
         )
     else:
         LOGGER.warning("[judgment_finalize] unknown kind=%r; nothing applied", kind)
@@ -447,6 +990,10 @@ def judgment_finalize(
         f"Judgment finalized (kind={kind}, applied={committed}, "
         f"spells={len(spells_record)}, warnings={len(warnings)}, scope={scope})"
     )
+    if summary_extras:
+        # on_event の reaction 等、呼び出し側が読む判断結果 (engage_now の
+        # 応対起動は呼び出し側の責務 — 配線は後続フェーズ)。
+        summary += " [" + ", ".join(summary_extras) + "]"
     return summary, ToolResult(history_snippet=summary), None
 
 
@@ -455,11 +1002,14 @@ def schema() -> ToolSchema:
         name="judgment_finalize",
         description=(
             "Internal tool for judgment-point Playbooks only (judgment_day_open / "
-            "judgment_post_session). Receives the judge node's structured output "
-            "(dict), validates and applies it per judgment kind (day plan save, "
-            "task verdict with artifact grounding, desk memo, promotions, new "
-            "desires), and persists the resulting monologue + summary text to "
-            "SAIMemory. Invalid items are rejected individually with warnings."
+            "judgment_post_conversation / judgment_post_session / "
+            "judgment_on_event / judgment_day_close). Receives the judge node's "
+            "structured output (dict), validates and applies it per judgment kind "
+            "(day plan save, task verdict with artifact grounding, desk memo, "
+            "promotions, picked tasks with origin-quote grounding, event "
+            "reactions, day-close review, new desires), and persists the "
+            "resulting monologue + summary text to SAIMemory. Invalid items are "
+            "rejected individually with warnings."
         ),
         parameters={
             "type": "object",

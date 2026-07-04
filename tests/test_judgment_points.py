@@ -1,14 +1,22 @@
-"""判断点の基盤 + 起床/セッション終了の 2 判断点のテスト (judgment_points.md §4/§6)。
+"""判断点 5 種のテスト (judgment_points.md §4〜§8)。
 
 一時 DB (in-memory SQLite) + mock LLM 出力 (構造化出力 dict) + 仮想クロックで検証:
 
 - day_open: 動的スキーマ (ref/facility enum、promotions の空 enum 回避)、
   decay_desires の前処理、finalize による save_day_plan + EventScheduler push、
   不正 ref のコマだけ棄却 + WARN
+- post_conversation: picked_tasks (track_ref enum + origin_quote 接地)、
+  resume_session の動的挿入 (中断中セッションがあるときのみ)、収穫ゼロ正常、
+  remaining_timetable 全置換、resume_now の即時コマ挿入 / drop の机メモ片づけ
 - post_session: artifacts 空で done 分岐がスキーマから消える (やったフリの構造的封じ)、
   done + 実在 artifact_ref でタスク completed + artifact_refs 記録、
   偽 artifact_ref は棄却、desk_memo が Track metadata に載る、
   track_op='complete' の全タスク消化ゲート、remaining_timetable の全置換
+- on_event: reaction の 4 分岐、alert での engage_now 縮退 (スキーマ + finalize
+  二重ガード)、insert_slot の時刻整合検証、note_only の plan meta 覚え書き
+- day_close: 今日触れた欲求のみの desire_reviews enum、tomorrow_memo /
+  day_digest が翌朝 day_open の状況テキストに現れる (連結)、
+  apply_desire_reviews の適用
 - 生成スキーマに additionalProperties が含まれない (プロバイダ正規化層に任せる)
 - LLM の生 JSON がメインキャッシュ (SAIMemory 記録) に混入しない (不変条件 v2-A)
 
@@ -663,10 +671,649 @@ def test_plan_meta_roundtrip_and_survives_slot_save(manager, task_refs):
 
 def test_unknown_kind_raises(manager):
     with pytest.raises(ValueError, match="unknown judgment kind"):
-        jp.run_judgment_point(manager, PERSONA_ID, "day_close")
+        jp.run_judgment_point(manager, PERSONA_ID, "nap_time")
 
 
 def test_missing_persona_returns_unsubmitted(manager):
     result = jp.run_judgment_point(manager, "nobody", "day_open")
     assert result["submitted"] is False
     assert manager.pulse_controller.submissions == []
+
+
+# ---------------------------------------------------------------------------
+# post_conversation: 起動 (スキーマ + 状況テキスト + resume の動的挿入)
+# ---------------------------------------------------------------------------
+
+
+def test_post_conversation_dispatch_schema_and_situation(manager, task_refs):
+    manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+        initial_status="running",
+    )
+
+    result = jp.run_judgment_point(manager, PERSONA_ID, "post_conversation")
+
+    assert result["submitted"] is True
+    assert result["playbook"] == "judgment_post_conversation"
+    args = result["args"]
+    schema = args["response_schema"]
+    _assert_no_additional_properties(schema)
+
+    picked = schema["properties"]["picked_tasks"]["items"]
+    assert picked["properties"]["track_ref"]["enum"] == ["t:1", "new"]
+    assert picked["required"] == ["title", "track_ref", "origin_quote"]
+    # 中断中セッションなし → resume_session フィールド自体が無い (空 enum 事故防止)
+    assert "resume_session" not in schema["properties"]
+    assert set(schema["required"]) == {
+        "monologue", "picked_tasks", "new_desires", "remaining_timetable",
+    }
+
+    text = args["situation_text"]
+    assert "07:00" in text  # 現在時刻
+    assert "t:1" in text and "調べ物" in text  # track_ref の選択材料
+    assert "task:1" in text  # 既存タスク (重複作成の抑止)
+    assert "言葉の標本集" in text  # 既存欲求 (重複作成の抑止)
+
+    ctx = json.loads(args["judgment_context"])
+    assert ctx["plan_date"] == PLAN_DATE
+    assert ctx["track_refs"] == ["t:1"]
+    assert "resume" not in ctx
+
+
+def test_post_conversation_resume_appears_only_with_interrupted_session(
+    manager, task_refs
+):
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    )
+    jp.save_desk_memo(manager, track_id, {
+        "text": "第3節まで読了。次は第4節から", "status": "continue",
+        "task_ref": "task:1", "updated_at": "2026-07-03T22:00:00",
+    })
+
+    result = jp.run_judgment_point(manager, PERSONA_ID, "post_conversation")
+    args = result["args"]
+    schema = args["response_schema"]
+    _assert_no_additional_properties(schema)
+    assert schema["properties"]["resume_session"]["enum"] == [
+        "resume_now", "defer_to_slot", "drop",
+    ]
+    assert "第3節まで読了" in args["situation_text"]
+
+    ctx = json.loads(args["judgment_context"])
+    assert ctx["resume"]["track_id"] == track_id
+    assert ctx["resume"]["task_ref"] == "task:1"
+
+
+# ---------------------------------------------------------------------------
+# post_conversation: finalize
+# ---------------------------------------------------------------------------
+
+
+def test_post_conversation_finalize_creates_tasks_with_origin_quote(
+    manager, ptm, task_refs, finalize_mod, tmp_path, caplog
+):
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+        initial_status="running",
+    )
+    output = {
+        "monologue": "約束を忘れないうちに書き留めておく。",
+        "picked_tasks": [
+            {"title": "蒸留メモを見せる", "track_ref": "t:1",
+             "origin_quote": "「できたら見せてほしい」と言われた"},
+            {"title": "新しい題材を探す", "track_ref": "new",
+             "origin_quote": "「次は何を作るの？」と聞かれた"},
+            {"title": "引用なしの思いつき", "track_ref": "t:1",
+             "origin_quote": ""},  # 接地なし → 棄却
+        ],
+        "new_desires": [],
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": ["t:1"]})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output, kind="post_conversation",
+                judgment_context=ctx, situation_text="[会話終了判断] ...",
+            )
+
+    # 既存 Track (t:1) にタスクが 1 件、origin_quote は notes に保存される
+    bound = ptm.list_tasks(
+        PERSONA_ID, track_id=track_id, parent_kind="track", include_steps=False,
+    )
+    assert len(bound) == 1
+    assert bound[0]["title"] == "蒸留メモを見せる"
+    assert bound[0]["notes"] == "「できたら見せてほしい」と言われた"
+
+    # track_ref='new' → 新規 autonomous Track が立ち、タスクが紐づく
+    new_tracks = [
+        t for t in manager.track_manager.list_for_persona(PERSONA_ID)
+        if t.title == "新しい題材を探す"
+    ]
+    assert len(new_tracks) == 1
+    assert new_tracks[0].track_type == "autonomous"
+    assert new_tracks[0].status == "unstarted"
+    assert "entry_line_role" in json.loads(new_tracks[0].track_metadata)
+    new_bound = ptm.list_tasks(
+        PERSONA_ID, track_id=new_tracks[0].track_id,
+        parent_kind="track", include_steps=False,
+    )
+    assert len(new_bound) == 1
+    assert new_bound[0]["notes"] == "「次は何を作るの？」と聞かれた"
+
+    # origin_quote 無しは棄却 + WARN
+    assert any("origin_quote" in r.message for r in caplog.records)
+    all_titles = [
+        t["title"] for t in ptm.list_tasks(PERSONA_ID, include_steps=False)
+    ]
+    assert "引用なしの思いつき" not in all_titles
+
+    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
+    assert recorded["scope"] == "committed"
+    assert '"picked_tasks"' not in recorded["content"]  # JSON 非混入
+    assert "judgment:post_conversation" in recorded["metadata"]["tags"]
+    assert "applied=True" in summary
+
+
+def test_post_conversation_zero_harvest_is_normal(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    """収穫ゼロ (両配列空 + 時間割変更なし) は警告なしの正常系。"""
+    output = {
+        "monologue": "ただの雑談だった。心地よい時間だったな。",
+        "picked_tasks": [],
+        "new_desires": [],
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": []})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+        )
+
+    assert "warnings=0" in summary
+    assert "applied=False" in summary
+    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
+    assert recorded["scope"] == "discardable"
+    assert "ただの雑談だった" in recorded["content"]
+
+
+def test_post_conversation_remaining_timetable_full_replace(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "14:00", "kind": "知る", "ref": "task:1",
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+        _rest_slot("20:00"),
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert manager.event_scheduler.pending_count() == 2
+
+    output = {
+        "monologue": "会話で時間を使ったから、残りは一本にまとめる。",
+        "picked_tasks": [],
+        "new_desires": [],
+        "remaining_timetable": [
+            {"start": "16:00", "kind": "知る", "ref": "task:1",
+             "facility": "library", "budget_rounds": 4, "note": "続き"},
+        ],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": []})
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+        )
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [("16:00", "pending")]
+    assert manager.event_scheduler.pending_count() == 1
+
+
+def test_post_conversation_resume_now_inserts_immediate_slot(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    """resume_now = 凍結タスクを参照する作業コマの現在時刻への即時挿入。
+
+    kind / facility / 予算は同じタスクを指していた元コマから引き継ぐ。
+    """
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    )
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "06:30", "kind": "知る", "ref": "task:1",
+         "facility": "library", "budget_rounds": 5, "note": "朝の調べもの",
+         "status": "fired"},
+        _rest_slot("21:00"),
+    ])
+    output = {
+        "monologue": "会話も終わったし、さっきの続きに戻ろう。",
+        "picked_tasks": [],
+        "new_desires": [],
+        "remaining_timetable": None,
+        "resume_session": "resume_now",
+    }
+    ctx = json.dumps({
+        "plan_date": PLAN_DATE, "track_refs": [],
+        "resume": {"track_id": track_id, "task_ref": "task:1",
+                   "text": "第3節まで読了"},
+    })
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+        )
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [
+        ("06:30", "fired"), ("07:00", "pending"), ("21:00", "pending"),
+    ]
+    inserted = slots[1]
+    assert inserted["kind"] == "知る"           # 元コマから引き継ぎ
+    assert inserted["ref"] == "task:1"
+    assert inserted["facility"] == "library"    # 元コマから引き継ぎ
+    assert inserted["budget_rounds"] == 5       # 元コマから引き継ぎ
+    key = f"day_plan:{PERSONA_ID}:{PLAN_DATE}:"
+    assert manager.event_scheduler.has_key(key + "1")
+    assert "applied=True" in summary
+
+
+def test_post_conversation_resume_drop_clears_desk_memo(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    )
+    jp.save_desk_memo(manager, track_id, {
+        "text": "第3節まで", "status": "continue", "task_ref": "task:1",
+        "updated_at": "2026-07-03T22:00:00",
+    })
+    assert jp.find_interrupted_session(manager, PERSONA_ID) is not None
+
+    output = {
+        "monologue": "あの作業はもういい。区切りにする。",
+        "picked_tasks": [], "new_desires": [], "remaining_timetable": None,
+        "resume_session": "drop",
+    }
+    ctx = json.dumps({
+        "plan_date": PLAN_DATE, "track_refs": [],
+        "resume": {"track_id": track_id, "task_ref": "task:1", "text": "第3節まで"},
+    })
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+        )
+
+    track = manager.track_manager.get(track_id)
+    assert "desk_memo" not in json.loads(track.track_metadata)
+    assert jp.find_interrupted_session(manager, PERSONA_ID) is None
+
+
+def test_post_conversation_resume_without_interrupted_session_rejected(
+    manager, task_refs, finalize_mod, tmp_path, caplog
+):
+    """ctx に resume が無い (= 中断中セッションが無い) のに選ばれたら棄却。"""
+    output = {
+        "monologue": "……",
+        "picked_tasks": [], "new_desires": [], "remaining_timetable": None,
+        "resume_session": "resume_now",
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": []})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            finalize_mod.judgment_finalize(
+                judgment_output=output, kind="post_conversation",
+                judgment_context=ctx,
+            )
+    assert any("中断中セッションがありません" in r.message for r in caplog.records)
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
+
+
+# ---------------------------------------------------------------------------
+# on_event: 起動 (4 分岐スキーマ / alert 縮退)
+# ---------------------------------------------------------------------------
+
+
+def _reaction_types(schema):
+    variants = schema["properties"]["reaction"]["anyOf"]
+    return [v["properties"]["type"]["const"] for v in variants]
+
+
+def test_on_event_dispatch_schema_four_branches(manager, task_refs):
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event",
+        {"event_text": "来訪: ボブが訪ねてきた"},
+    )
+    args = result["args"]
+    schema = args["response_schema"]
+    _assert_no_additional_properties(schema)
+    assert _reaction_types(schema) == [
+        "engage_now", "insert_slot", "note_only", "ignore",
+    ]
+    # insert_slot の slot は §3.2 共通定義 (実在 ref / facility の enum)
+    slot = schema["properties"]["reaction"]["anyOf"][1]["properties"]["slot"]
+    assert "task:1" in slot["properties"]["ref"]["enum"]
+    assert slot["properties"]["facility"]["enum"] == ["library", "workshop", "own_room"]
+
+    text = args["situation_text"]
+    assert "ボブが訪ねてきた" in text
+    assert "07:00" in text
+    assert "手すき" in text  # running Track なし → 暮らし
+
+    ctx = json.loads(args["judgment_context"])
+    assert ctx["is_alert"] is False
+    assert result["playbook"] == "judgment_on_event"
+
+
+def test_on_event_alert_collapses_to_engage_now(manager, task_refs):
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event",
+        {"event_text": "ユーザーからの呼びかけ", "is_alert": True},
+    )
+    schema = result["args"]["response_schema"]
+    _assert_no_additional_properties(schema)
+    assert _reaction_types(schema) == ["engage_now"]
+    assert "即応が必要" in result["args"]["situation_text"]
+    assert json.loads(result["args"]["judgment_context"])["is_alert"] is True
+
+
+def test_on_event_requires_event_text(manager):
+    with pytest.raises(ValueError, match="event_text"):
+        jp.run_judgment_point(manager, PERSONA_ID, "on_event")
+
+
+def test_on_event_situation_shows_running_activity(manager, task_refs):
+    manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="標本集の整理",
+        initial_status="running",
+    )
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
+    )
+    assert "標本集の整理" in result["args"]["situation_text"]
+
+
+# ---------------------------------------------------------------------------
+# on_event: finalize (4 分岐 + alert 二重ガード + 時刻整合)
+# ---------------------------------------------------------------------------
+
+
+def test_on_event_finalize_engage_now(manager, task_refs, finalize_mod, tmp_path):
+    output = {
+        "monologue": "ボブが来たなら顔を出そう。",
+        "reaction": {"type": "engage_now"},
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "来訪: ボブ"})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    # 呼び出し側が読む判断結果として summary に反映 (応対の起動は配線後続)
+    assert "reaction=engage_now" in summary
+    assert "applied=True" in summary
+    assert manager.personas[PERSONA_ID].sai_memory.messages[0]["scope"] == "committed"
+
+
+def test_on_event_finalize_insert_slot_and_time_validation(
+    manager, task_refs, finalize_mod, tmp_path, caplog
+):
+    # 有効なコマ (現在 07:00 より後) → 挿入 + 予約
+    output = {
+        "monologue": "今は手が離せないから午後に見よう。",
+        "reaction": {"type": "insert_slot", "slot": {
+            "start": "15:00", "kind": "知る", "ref": "task:1",
+            "facility": "library", "budget_rounds": 4, "note": "届いた資料を読む",
+        }},
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "資料が届いた"})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [("15:00", "pending")]
+    assert manager.event_scheduler.pending_count() == 1
+    assert "reaction=insert_slot" in summary
+    assert "applied=True" in summary
+
+    # 過去時刻 (06:00 < 現在 07:00) → 棄却 + WARN、時間割は不変
+    output_past = {
+        "monologue": "……",
+        "reaction": {"type": "insert_slot", "slot": {
+            "start": "06:00", "kind": "知る", "ref": "task:1",
+            "facility": "library", "budget_rounds": 4, "note": "x",
+        }},
+    }
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            summary2, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output_past, kind="on_event", judgment_context=ctx,
+            )
+    assert any("現在時刻" in r.message for r in caplog.records)
+    assert "applied=False" in summary2
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [("15:00", "pending")]
+
+
+def test_on_event_finalize_note_only_saves_event_memo(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    output = {
+        "monologue": "今すぐでなくていい。覚えておこう。",
+        "reaction": {"type": "note_only",
+                     "memo": "新しい展示が始まったらしい。今度見に行く"},
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "掲示板の告知"})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    memos = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)["event_memos"]
+    assert len(memos) == 1
+    assert memos[0]["text"] == "新しい展示が始まったらしい。今度見に行く"
+    assert memos[0]["event"] == "掲示板の告知"
+    assert "reaction=note_only" in summary
+    assert "applied=True" in summary
+
+
+def test_on_event_finalize_ignore_is_discardable(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    output = {"monologue": "自分には関係のない通知だ。",
+              "reaction": {"type": "ignore"}}
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "無関係な通知"})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    assert "reaction=ignore" in summary
+    assert "applied=False" in summary
+    assert manager.personas[PERSONA_ID].sai_memory.messages[0]["scope"] == "discardable"
+
+
+def test_on_event_finalize_alert_rejects_non_engage(
+    manager, task_refs, finalize_mod, tmp_path, caplog
+):
+    """alert ではスキーマ縮退に加えて finalize でも engage_now 以外を棄却する。"""
+    output = {
+        "monologue": "後回しにしたい。",
+        "reaction": {"type": "insert_slot", "slot": {
+            "start": "15:00", "kind": "知る", "ref": "task:1",
+            "facility": "library", "budget_rounds": 4, "note": "x",
+        }},
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": True,
+                      "event_text": "ユーザーからの呼びかけ"})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output, kind="on_event", judgment_context=ctx,
+            )
+    assert any("engage_now のみ" in r.message for r in caplog.records)
+    assert "applied=False" in summary
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
+
+
+# ---------------------------------------------------------------------------
+# day_close: 起動 (今日触れた欲求のみの enum + 予定 vs 実績)
+# ---------------------------------------------------------------------------
+
+
+def test_day_close_dispatch_schema_and_situation(
+    manager, ptm, task_refs, session_factory
+):
+    from saiverse.desire_engine import touch_desire
+
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": "task:1",
+         "facility": "library", "budget_rounds": 5, "note": "記事の続き",
+         "status": "done"},
+        {**_rest_slot("21:00"), "status": "pending"},
+    ])
+    # desire:2 は今日 (仮想 2026-07-04) 触れた
+    touch_desire(manager, PERSONA_ID, task_refs["desire"])
+    # 触れていない欲求 (作成も接触も昨日以前) は enum に出ない
+    nm = NoteManager(manager.SessionLocal)
+    note_id = nm.ensure_desire_note(PERSONA_ID)
+    old = ptm.create_task(
+        persona_id=PERSONA_ID, title="以前からの思いつき",
+        parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
+    )
+    db = session_factory()
+    try:
+        row = db.query(PersonaTask).filter(PersonaTask.id == old["id"]).first()
+        row.created_at = BASE - timedelta(days=3)
+        row.last_touched_at = BASE - timedelta(days=3)
+        db.commit()
+    finally:
+        db.close()
+
+    result = jp.run_judgment_point(manager, PERSONA_ID, "day_close")
+
+    assert result["submitted"] is True
+    assert result["playbook"] == "judgment_day_close"
+    args = result["args"]
+    schema = args["response_schema"]
+    _assert_no_additional_properties(schema)
+    reviews = schema["properties"]["desire_reviews"]["items"]["properties"]
+    assert reviews["desire_ref"]["enum"] == ["desire:2"], (
+        "今日触れていない欲求が enum に混入している"
+    )
+    assert reviews["verdict"]["enum"] == ["keep", "fading", "fulfilled"]
+    assert schema["properties"]["user_report_seeds"]["maxItems"] == 3
+    assert schema["required"] == ["monologue", "tomorrow_memo"]
+
+    text = args["situation_text"]
+    assert "09:00" in text and "実行済み" in text  # 予定 vs 実績
+    assert "21:00" in text and "未実施" in text
+    assert "消化 5 / 計画 5" in text  # 予算 (計画値) の対照
+    assert "言葉の標本集" in text  # 今日触れた欲求一覧
+    assert "以前からの思いつき" not in text
+
+    ctx = json.loads(args["judgment_context"])
+    assert ctx["touched_desire_refs"] == ["desire:2"]
+
+
+def test_day_close_schema_omits_desire_reviews_when_none_touched(
+    manager, ptm, task_refs, session_factory
+):
+    # fixture の desire:2 は「今日作成」扱いなので、作成日を過去に倒す
+    desire_id = ptm.resolve_task_ref(PERSONA_ID, "task:2")
+    db = session_factory()
+    try:
+        row = db.query(PersonaTask).filter(PersonaTask.id == desire_id).first()
+        row.created_at = BASE - timedelta(days=2)
+        row.last_touched_at = BASE - timedelta(days=2)
+        db.commit()
+    finally:
+        db.close()
+
+    result = jp.run_judgment_point(manager, PERSONA_ID, "day_close")
+    schema = result["args"]["response_schema"]
+    _assert_no_additional_properties(schema)
+    assert "desire_reviews" not in schema["properties"], (
+        "触れた欲求ゼロなのに desire_reviews が要求されている (空 enum 事故)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# day_close: finalize (+ 翌朝 day_open との連結)
+# ---------------------------------------------------------------------------
+
+
+def test_day_close_finalize_and_day_open_linkage(
+    manager, ptm, task_refs, finalize_mod, tmp_path, caplog
+):
+    from saiverse.desire_engine import touch_desire
+
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": "task:1",
+         "facility": "library", "budget_rounds": 5, "note": "記事の続き",
+         "status": "done"},
+    ])
+    touch_desire(manager, PERSONA_ID, task_refs["desire"])
+
+    output = {
+        "monologue": "概ね予定どおりに進んだ一日だった。",
+        "tomorrow_memo": "朝一は標本集の整理から始める",
+        "day_theme": "収集",
+        "desire_reviews": [
+            {"desire_ref": "desire:2", "verdict": "fulfilled"},
+            {"desire_ref": "desire:9", "verdict": "keep"},  # 触れていない → 棄却
+        ],
+        "user_report_seeds": ["蒸留記事の要点を覚え書きにまとめた"],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE,
+                      "touched_desire_refs": ["desire:2"]})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output, kind="day_close",
+                judgment_context=ctx, situation_text="[就寝判断] ...",
+            )
+
+    # meta_json に机メモ・テーマ・報告種・実績ダイジェストが保存される
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert meta["tomorrow_memo"] == "朝一は標本集の整理から始める"
+    assert meta["day_theme"] == "収集"
+    assert meta["user_report_seeds"] == ["蒸留記事の要点を覚え書きにまとめた"]
+    assert "09:00" in meta["day_digest"]  # 決定論構築の実績要約
+
+    # desire_reviews: fulfilled は即消化 (completed)、enum 外は棄却 + WARN
+    desire = ptm.get_task(
+        ptm.resolve_task_ref(PERSONA_ID, "task:2"), persona_id=PERSONA_ID,
+    )
+    assert desire["status"] == "completed"
+    assert any("desire:9" in r.message for r in caplog.records)
+
+    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
+    assert recorded["scope"] == "committed"
+    assert '"tomorrow_memo"' not in recorded["content"]  # JSON 非混入
+    assert "judgment:day_close" in recorded["metadata"]["tags"]
+    assert "applied=True" in summary
+
+    # --- 連結: 翌朝の起床判断が机メモとダイジェストを読む -----------------
+    clock.advance_to(datetime(2026, 7, 5, 7, 0, 0))
+    morning_text = jp.build_day_open_situation_text(manager, PERSONA_ID, {})
+    assert "朝一は標本集の整理から始める" in morning_text  # tomorrow_memo
+    assert "今日の時間割（予定 → 実績）" in morning_text   # day_digest
+    assert "09:00" in morning_text
+
+
+def test_day_close_finalize_empty_memo_warns_but_saves_digest(
+    manager, task_refs, finalize_mod, tmp_path, caplog
+):
+    output = {"monologue": "……", "tomorrow_memo": ""}
+    ctx = json.dumps({"plan_date": PLAN_DATE, "touched_desire_refs": []})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            finalize_mod.judgment_finalize(
+                judgment_output=output, kind="day_close", judgment_context=ctx,
+            )
+    assert any("tomorrow_memo が空" in r.message for r in caplog.records)
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert "tomorrow_memo" not in meta
+    assert meta["day_digest"] == "今日の時間割はありませんでした。"

@@ -30,7 +30,10 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 | Playbook | 表示名 | 用途 |
 |---|---|---|
 | `judgment_day_open` | 起床判断 (day_open) | 今日の時間割の編成 + 予算配分 + 欲求→関心の昇格 |
+| `judgment_post_conversation` | 会話終了判断 (post_conversation) | 会話からの収穫（picked_tasks は origin_quote 必須の接地）+ 中断中セッションの扱い + 残り時間割の整え |
 | `judgment_post_session` | セッション終了判断 (post_session) | タスクの裁定（done は実在成果物 ref 必須の接地検証つき）+ 残り時間割の整え |
+| `judgment_on_event` | イベント到着判断 (on_event) | 反応の選択（engage_now / insert_slot / note_only / ignore）。alert は engage_now のみに縮退 |
+| `judgment_day_close` | 就寝判断 (day_close) | 予定 vs 実績のふりかえり + 明日への机メモ + 欲求のたな卸し + ユーザーへの報告種 |
 
 ## Track メインライン
 
