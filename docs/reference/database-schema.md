@@ -197,6 +197,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `AUTO_RECALL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `MEMORY_WEAVE_CONTEXT` | BOOLEAN | NOT NULL, default=True |  |
 | `MEMOPEDIA_INDEX_LIMIT` | INTEGER | — |  |
+| `MEMOPEDIA_INDEX_ENABLED` | BOOLEAN | NOT NULL, default=False |  |
 | `SPELL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `REALTIME_INFO_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `METABOLISM_ANCHORS` | TEXT | — |  |

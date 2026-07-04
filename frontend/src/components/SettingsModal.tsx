@@ -43,6 +43,7 @@ interface AIConfig {
     autonomous_chronicle_enabled: boolean;
     auto_recall_enabled: boolean;
     memory_weave_context: boolean;
+    memopedia_index_enabled: boolean;
     realtime_info_enabled: boolean;
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
@@ -141,6 +142,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
+    const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(false);
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
     const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
@@ -261,6 +263,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
+                setMemopediaIndexEnabled(data.memopedia_index_enabled ?? false);
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
                 // Load realtime spell bindings + catalog
@@ -388,6 +391,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     autonomous_chronicle_enabled: autonomousChronicleEnabled,
                     auto_recall_enabled: autoRecallEnabled,
                     memory_weave_context: memoryWeaveContext,
+                    memopedia_index_enabled: memopediaIndexEnabled,
                     spell_enabled: spellEnabled,
                     realtime_info_enabled: realtimeInfoEnabled,
                     avatar_path: avatarPath || null,
@@ -979,6 +983,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                                 <div className={styles.description}>
                                     会話時にChronicle・Memopediaの情報をLLMに提供します。無効にするとコンテキスト量が減りますが、長期記憶を参照できなくなります。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>Memopedia索引の常時表示（旧方式）</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={memopediaIndexEnabled}
+                                            onChange={(e) => setMemopediaIndexEnabled(e.target.checked)}
+                                        />
+                                        <span>{memopediaIndexEnabled ? '有効' : '無効'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    Memopediaの全ページ一覧を、常にペルソナのコンテキストへ読み込みます（自動想起の導入前の方式）。Memopediaをメモ帳として能動的に使っている場合に有効にしてください。トークン消費が増えます。反映は次の記憶整理（Metabolism）からです。
                                 </div>
                             </div>
 

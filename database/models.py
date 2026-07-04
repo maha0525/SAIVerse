@@ -88,6 +88,13 @@ class AI(Base):
     AUTO_RECALL_ENABLED = Column(Boolean, default=True, nullable=False)
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     MEMOPEDIA_INDEX_LIMIT = Column(Integer, nullable=True)  # Max pages per category in Memory Weave index (NULL → default 100)
+    # Memopedia 索引の head 常時表示 (旧方式) を per-persona で復活させる後方互換トグル。
+    # 記憶アーキv2 §7.1 (2026-07-04) で自動想起 (ゾーンC) + 深掘りスペルに一本化した際、
+    # head への Memopedia 全ページ一覧の常時掲示は廃止された。本トグルを True にすると、
+    # MemoryWeaveSection.capture が旧実装 (_get_memopedia_context) を呼び、Memopedia 索引を
+    # 独立 user メッセージとして head に含める。メモ帳として能動的に Memopedia を使う
+    # ユーザー向けの脱出経路。デフォルト OFF (トークン消費増のため既定は新方式に従う)。
+    MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=False, nullable=False)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
     # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的

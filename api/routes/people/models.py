@@ -150,6 +150,7 @@ class AIConfigResponse(BaseModel):
     autonomous_chronicle_enabled: bool = True
     auto_recall_enabled: bool = True
     memory_weave_context: bool = True
+    memopedia_index_enabled: bool = False
     spell_enabled: bool = False
     realtime_info_enabled: bool = True
     avatar_path: Optional[str] = None
@@ -173,6 +174,7 @@ class UpdateAIConfigRequest(BaseModel):
     autonomous_chronicle_enabled: Optional[bool] = None
     auto_recall_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
+    memopedia_index_enabled: Optional[bool] = None
     spell_enabled: Optional[bool] = None
     realtime_info_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None

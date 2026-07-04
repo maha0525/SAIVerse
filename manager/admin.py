@@ -990,6 +990,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
                 "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
+                "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
@@ -1041,6 +1042,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
+        memopedia_index_enabled: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
@@ -1159,6 +1161,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Memory Weave context injection toggle
             if memory_weave_context is not None:
                 ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
+            # Update Memopedia 索引の head 常時表示 (旧方式) 復活トグル
+            if memopedia_index_enabled is not None:
+                ai.MEMOPEDIA_INDEX_ENABLED = memopedia_index_enabled
             # Update Spell system toggle
             if spell_enabled is not None:
                 ai.SPELL_ENABLED = spell_enabled

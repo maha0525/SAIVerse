@@ -9,6 +9,11 @@ snapshot のみから組み立てる。
 ラベル分けしていた。本 Section は 3 種類を独立 entry として snapshot に保持し、
 composition (integration.py) 側でそれぞれ別 message として展開する形を維持する。
 
+記憶アーキv2 §7.1 (2026-07-04): Memopedia 索引の head 常時掲示は既定で廃止し、
+知識への接触は自動想起 (ゾーンC) + 深掘りスペルに一本化した。ただし per-persona
+トグル ``MEMOPEDIA_INDEX_ENABLED`` (database/models.py) が ON の場合のみ、
+後方互換として旧方式 (Memopedia 全ページ一覧の常時表示) を復活させる。
+
 refresh_on_events は空 (Metabolism のみ)。Chronicle / Memopedia の動的更新は
 将来 dynamic_state 連携で末尾通知に流す前提。
 
@@ -77,12 +82,15 @@ class MemoryWeaveSection:
         history_mgr = getattr(persona, "history_manager", None)
         anchor_id = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
 
+        # 後方互換トグル: MEMOPEDIA_INDEX_ENABLED が ON のペルソナだけ Memopedia
+        # 索引の常時表示 (旧方式) を含める。既定 False (記憶アーキv2 §7.1)。
+        include_memopedia = self._resolve_memopedia_index_enabled(manager, ctx.persona_id)
+
         try:
             with persona_context(ctx.persona_id, persona_dir, manager):
-                # 記憶アーキv2 §7.1: Memopedia 索引の head 掲示は廃止。この経路は
-                # Chronicle / Track Chronicle のみを返す。
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
+                    include_memopedia=include_memopedia,
                     history_anchor_message_id=anchor_id,
                 )
         except Exception:
@@ -158,6 +166,24 @@ class MemoryWeaveSection:
         )
 
     # ---- 内部ヘルパー ----
+
+    def _resolve_memopedia_index_enabled(self, manager, persona_id: str) -> bool:
+        session_factory = getattr(manager, "SessionLocal", None)
+        if not session_factory:
+            return False
+        db = session_factory()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return bool(ai.MEMOPEDIA_INDEX_ENABLED) if ai else False
+        except Exception:
+            LOGGER.warning(
+                "memory_weave: failed to resolve MEMOPEDIA_INDEX_ENABLED persona=%s",
+                persona_id, exc_info=True,
+            )
+            return False
+        finally:
+            db.close()
 
     def _resolve_enabled(self, manager, persona_id: str) -> bool:
         session_factory = getattr(manager, "SessionLocal", None)
