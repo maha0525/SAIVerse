@@ -1805,6 +1805,9 @@ def get_conversation_window_around(
     # 'model' (Gemini 系呼称) と 'assistant' (OpenAI 系呼称・インポートログ) の
     # 両方が実データに存在する (実 DB 実査で確認、2026-07-04)。'system'/'host' は
     # 会話本文ではないため除外する。
+    # content が '<system>' で始まる行は、role=user で保存されるシステム通知
+    # (Track切替通知等、event_message タグを持たない世代がある) なので除外する。
+    # 口調のアンカー (scene) にシステム通知が混入すると手本として劣化するため。
     exclusion_clause = f"""
         thread_id NOT IN (SELECT thread_id FROM stelis_threads)
         AND role IN ('user', 'model', 'assistant')
@@ -1813,6 +1816,7 @@ def get_conversation_window_around(
             WHERE json_each.value IN ({tag_placeholders})
         )
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+        AND content NOT LIKE '<system>%'
     """
     exclusion_params = CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
 
@@ -1860,3 +1864,72 @@ def get_conversation_window_around(
         after_rows = [_row_to_message(r) for r in cur.fetchall()]
 
     return before_rows + [anchor_msg] + after_rows
+
+
+def search_conversation_messages(
+    conn: sqlite3.Connection,
+    keywords: List[str],
+    *,
+    date_from_ts: Optional[int] = None,
+    date_to_ts: Optional[int] = None,
+    limit: int = 20,
+) -> List[Message]:
+    """会話本文を対象にキーワード AND の LIKE 検索を行う (コア記憶 scene の探索 UI 用)。
+
+    「実会話」の定義は ``get_conversation_window_around`` と同一の除外条件を流用する
+    (Stelis スレッド除外・handy_tool/spell/event_message タグ除外・sub_line/
+    meta_judgment/nested line_role 除外・role は user/model/assistant のみ)。scene は
+    この検索結果からアンカーを選んで刻むため、検索対象と切り抜き対象が一致している
+    ことが重要 (検索でヒットしたのに切り抜けない、という齟齬を防ぐ)。
+
+    - ``keywords``: 空要素は無視し、全キーワードを含む (AND) メッセージのみ返す。
+      空リストの場合は期間フィルタのみ適用する。
+    - ``date_from_ts`` / ``date_to_ts``: created_at の範囲 (Unix 秒、両端含む)。
+    - 戻り値は created_at 降順 (新しい順)、最大 ``limit`` 件。
+    """
+    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
+    exclusion_clause = f"""
+        thread_id NOT IN (SELECT thread_id FROM stelis_threads)
+        AND role IN ('user', 'model', 'assistant')
+        AND NOT EXISTS (
+            SELECT 1 FROM json_each(metadata, '$.tags')
+            WHERE json_each.value IN ({tag_placeholders})
+        )
+        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+        AND content NOT LIKE '<system>%'
+    """
+    params: List[Any] = list(CHRONICLE_EXCLUDED_TAGS) + list(CHRONICLE_EXCLUDED_LINE_ROLES)
+
+    where_parts = [exclusion_clause]
+    for kw in keywords:
+        kw_stripped = kw.strip()
+        if not kw_stripped:
+            continue
+        where_parts.append("content LIKE ? ESCAPE '\\'")
+        # LIKE のワイルドカード (% _ \) をエスケープしてリテラル一致にする。
+        escaped = (
+            kw_stripped.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        params.append(f"%{escaped}%")
+
+    if date_from_ts is not None:
+        where_parts.append("created_at >= ?")
+        params.append(int(date_from_ts))
+    if date_to_ts is not None:
+        where_parts.append("created_at <= ?")
+        params.append(int(date_to_ts))
+
+    where_clause = " AND ".join(f"({p})" for p in where_parts)
+    lim = max(1, int(limit))
+    cur = conn.execute(
+        f"""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        FROM messages
+        WHERE {where_clause}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (*params, lim),
+    )
+    return [_row_to_message(row) for row in cur.fetchall()]

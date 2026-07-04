@@ -64,6 +64,30 @@ class GetConversationWindowAroundTest(unittest.TestCase):
         # アンカー自身が含まれる
         self.assertIn(anchor, [m.id for m in window])
 
+    def test_excludes_system_notice_messages(self):
+        # Track切替通知等のシステム通知は role=user・タグなしで保存される世代があり、
+        # content が '<system>' で始まる。scene (口調のアンカー) に混入すると手本が
+        # 劣化するため、窓からも検索からも除外される (2026-07-04)。
+        ids = []
+        for i in range(6):
+            role = "user" if i % 2 == 0 else "model"
+            ids.append(self._add(role, f"msg{i}"))
+        self._add("user", "<system>## Track切替通知\n作業に戻ります</system>")
+        ids.append(self._add("model", "msg6"))
+        anchor = ids[5]
+        window = get_conversation_window_around(self.conn, anchor, rounds=2)
+        contents = [m.content for m in window]
+        self.assertTrue(all(not c.startswith("<system>") for c in contents))
+        self.assertIn("msg6", contents)  # 通知を飛ばして実会話は拾う
+
+    def test_search_excludes_system_notice_messages(self):
+        from sai_memory.memory.storage import search_conversation_messages
+        self._add("user", "スタックチャンの話をしよう")
+        self._add("user", "<system>## Track切替通知: スタックチャン関連</system>")
+        hits = search_conversation_messages(self.conn, ["スタックチャン"])
+        self.assertEqual(len(hits), 1)
+        self.assertFalse(hits[0].content.startswith("<system>"))
+
     def test_window_shrinks_at_start_of_conversation(self):
         # rounds=2 -> window=4 件/方向欲しいが、先頭アンカーの前には何も無いので
         # before 側は 0 件に自然に縮む (after は要求通り4件)。

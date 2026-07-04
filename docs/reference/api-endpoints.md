@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 331（tag グループ: 22）
+**エンドポイント数**: 335（tag グループ: 22）
 
 ## addon
 
@@ -234,6 +234,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/cache-status` | 指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。 |
 | GET | `/api/people/{persona_id}/config` | Get persona configuration. |
 | PATCH | `/api/people/{persona_id}/config` | Update persona configuration. |
+| GET | `/api/people/{persona_id}/core-memory` | 既存コア記憶の一覧 (読み取り専用)。編集はペルソナの領分のため UI からは追加のみ。 |
+| POST | `/api/people/{persona_id}/core-memory/scene` | アンカー周辺の会話を scene としてコア記憶に刻む。 |
 | POST | `/api/people/{persona_id}/debug/fire-meta-judgment` | メタ判断 (on_periodic_tick) を 1 回手動発火. force=True で抑止 (Active/wait_response) を無視. |
 | POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | 指定 autonomous Track の sub_line Pulse を 1 回手動起動 (30秒間隔を無視). |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
@@ -269,6 +271,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/memopedia/unorganized` | Get pages that are direct children of the root (not in any trunk). |
 | GET | `/api/people/{persona_id}/memory-notes` | List unresolved memory notes. |
 | POST | `/api/people/{persona_id}/memory-notes/resolve` | Mark memory notes as resolved. |
+| GET | `/api/people/{persona_id}/memory/messages/search` | 会話メッセージをキーワード (空白区切りで AND) で検索する。 |
+| GET | `/api/people/{persona_id}/memory/messages/{message_id}/window` | アンカーメッセージ周辺の会話窓を返す (scene プレビュー用)。 |
 | PATCH | `/api/people/{persona_id}/messages` | SAIMemory messages の line_role / scope を一括更新する。 |
 | PATCH | `/api/people/{persona_id}/messages/{message_id}` | Update message content and/or timestamp. |
 | DELETE | `/api/people/{persona_id}/messages/{message_id}` | Delete a message. |

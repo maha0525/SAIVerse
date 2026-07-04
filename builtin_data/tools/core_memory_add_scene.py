@@ -11,9 +11,6 @@ scene ＝口調・性格・ユーザーとの関係性を固定するアンカ�
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime
-
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -26,20 +23,6 @@ from builtin_data.tools._core_memory_common import (
 )
 
 DEFAULT_ROUNDS = 3
-
-
-def _format_transcript(messages, persona_name: str) -> str:
-    """会話メッセージ列を ``ラベル「原文」`` 形式に整形する。content は無改変。
-
-    persona 応答の role は歴史的に 'model' (Gemini 系呼称) と 'assistant'
-    (OpenAI 系呼称・インポートログ) の両方が実データに存在する
-    (実 DB 実査で確認、2026-07-04)。
-    """
-    lines = []
-    for msg in messages:
-        label = persona_name if msg.role in ("model", "assistant") else "user"
-        lines.append(f"{label}「{msg.content}」")
-    return "\n".join(lines)
 
 
 def core_memory_add_scene(message_id: str, rounds: int = DEFAULT_ROUNDS) -> str:
@@ -73,47 +56,29 @@ def core_memory_add_scene(message_id: str, rounds: int = DEFAULT_ROUNDS) -> str:
     if not adapter.is_ready():
         raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    from sai_memory.core_memory import add_core_memory, total_core_memory_chars
-    from sai_memory.memory.storage import get_conversation_window_around
+    # 窓切り出し＋トランスクリプト整形＋保存は sai_memory.core_memory の共通ロジック
+    # に集約されている (スペルと REST API で共用、複製禁止)。
+    from sai_memory.core_memory import create_scene_core_memory
+
+    persona_name = resolve_persona_display_name(persona_id)
 
     with adapter._db_lock:
-        window = get_conversation_window_around(adapter.conn, mid, rounds=rounds_int)
+        result = create_scene_core_memory(
+            adapter.conn, mid, rounds=rounds_int, persona_name=persona_name,
+        )
 
-    if window is None:
+    if result is None:
         return (
             f"Error: メッセージ {mid} が見つからないか、実会話ではありません"
             "（ツール実行ログ等は切り抜き対象外です）。"
         )
-    if not window:
-        return f"Error: メッセージ {mid} の周辺に会話が見つかりませんでした。"
-
-    persona_name = resolve_persona_display_name(persona_id)
-    transcript = _format_transcript(window, persona_name)
-
-    start_dt = datetime.fromtimestamp(window[0].created_at).strftime("%Y-%m-%d")
-    end_dt = datetime.fromtimestamp(window[-1].created_at).strftime("%Y-%m-%d")
-
-    metadata = json.dumps(
-        {
-            "anchor_id": mid,
-            "message_ids": [m.id for m in window],
-            "date_range": [start_dt, end_dt],
-        },
-        ensure_ascii=False,
-    )
-
-    with adapter._db_lock:
-        new_id = add_core_memory(
-            adapter.conn, transcript, kind="scene", metadata=metadata,
-        )
-        total = total_core_memory_chars(adapter.conn)
 
     budget = resolve_core_memory_budget(persona_id)
-    note = format_budget_note(total, budget)
+    note = format_budget_note(result.total_chars, budget)
     return (
-        f"コア記憶 c:{new_id}（会話の記憶）を追加しました。"
-        f"{len(window)} 発言分（{start_dt}〜{end_dt}）を含めました。"
-        f"現在 {total:,} 字 / 目安 {budget:,} 字。"
+        f"コア記憶 c:{result.memory_id}（会話の記憶）を追加しました。"
+        f"{result.message_count} 発言分（{result.date_start}〜{result.date_end}）を含めました。"
+        f"現在 {result.total_chars:,} 字 / 目安 {budget:,} 字。"
         f"head への反映は次の記憶整理（Metabolism）からです。{note}"
     )
 

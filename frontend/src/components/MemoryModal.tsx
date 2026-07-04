@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Boxes, GitBranch } from 'lucide-react';
+import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Boxes, GitBranch, Anchor } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
 import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
+import CoreMemoryScene from './memory/CoreMemoryScene';
 import ArasujiViewer from './memory/ArasujiViewer';
 import PulseTimelineViewer from './memory/PulseTimelineViewer';
 import StorageLayersViewer from './memory/StorageLayersViewer';
@@ -18,7 +19,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'arasuji' | 'memopedia' | 'storage_layers' | 'tracks' | 'pulse_timeline' | 'import' | 'debug';
+type Tab = 'browser' | 'core_memory' | 'arasuji' | 'memopedia' | 'storage_layers' | 'tracks' | 'pulse_timeline' | 'import' | 'debug';
 
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -42,6 +43,13 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     >
                         <MessageSquare size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
                         チャットログ
+                    </button>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'core_memory' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('core_memory')}
+                    >
+                        <Anchor size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        コア記憶
                     </button>
                     <button
                         className={`${styles.tab} ${activeTab === 'arasuji' ? styles.activeTab : ''}`}
@@ -96,6 +104,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
 
                 <div className={styles.content}>
                     {activeTab === 'browser' && <MemoryBrowser personaId={personaId} />}
+                    {activeTab === 'core_memory' && <CoreMemoryScene personaId={personaId} />}
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
                     {activeTab === 'storage_layers' && <StorageLayersViewer personaId={personaId} />}
