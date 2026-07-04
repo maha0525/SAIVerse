@@ -1044,6 +1044,7 @@ async def _run_spell_loop(
     node_def: Any = None,
     pipeline_streaming_state: Optional[dict] = None,
     action_text: Optional[str] = None,
+    max_rounds: Optional[int] = None,
 ) -> Tuple[str, str, int]:
     """Execute the spell loop, running each round's spells sequentially.
 
@@ -1077,12 +1078,19 @@ async def _run_spell_loop(
     ``{"msg_id": str, "sub_seq": int, "cancellation_token": ...}``。
     helper が dict を in-place mutate して sub_seq を更新する。 None の場合
     は従来通り ``generate()`` 単発呼び出しで全文一括受信。
+
+    ``max_rounds`` (自律行動 v2 §4.3 作業セッション用): この呼び出しに限った
+    ラウンド予算。正の int を渡すと env グローバル ``_MAX_SPELL_LOOPS`` の
+    代わりに上限として使う。None (既定) では従来挙動のまま変わらない。
     """
     from sea.pulse_context import PulseLogEntry
 
     if not spell_enabled or not text:
         return text, text, 0
 
+    _effective_max_rounds = (
+        max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else _MAX_SPELL_LOOPS
+    )
     loop_count = 0
     merged_parts: List[str] = []
     _spell_origin_id: Optional[str] = None
@@ -1103,7 +1111,7 @@ async def _run_spell_loop(
     # ``text`` to Building/SAIMemory — losing it just because the spell
     # system hit an internal error is too aggressive.
     try:
-        while loop_count < _MAX_SPELL_LOOPS:
+        while loop_count < _effective_max_rounds:
             # Parse all spells from current text (canonical + fuzzy), then split
             # into registered (executable) and unknown (misfired) invocations.
             all_parsed = _parse_spell_lines(text)

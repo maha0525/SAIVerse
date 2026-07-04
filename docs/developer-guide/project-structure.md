@@ -131,6 +131,7 @@ sea/
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── pulse_root_context.py # ルートコンテキスト
 ├── mode_spell_permissions.py # モード別 Spell 許可
+├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）
 ├── cancellation.py       # キャンセル
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
