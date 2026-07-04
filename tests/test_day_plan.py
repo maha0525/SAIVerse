@@ -386,6 +386,55 @@ def test_deferred_slot_fires_after_conversation_ends(manager, task_refs):
 
 
 # ---------------------------------------------------------------------------
+# facility='own_room' の移動処理 (自律行動 v2 §6.1)
+# ---------------------------------------------------------------------------
+
+
+def test_own_room_slot_skips_move_when_already_home(manager):
+    """own_room は private_room_id に解決され、既に自室なら移動しない。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    DaySimulator(
+        manager.event_scheduler,
+        start=BASE + timedelta(hours=8),
+        end=BASE + timedelta(hours=10),
+    ).run()
+
+    assert manager.occupancy_manager.moves == []  # 自室 → 自室は移動なし
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+
+
+def test_own_room_without_private_room_warns_and_continues(manager, caplog):
+    """private_room_id の無いペルソナの own_room コマは移動スキップ (WARN) + ハンドラ実行。"""
+    manager.personas[PERSONA_ID].private_room_id = None
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "作る", "ref": "none",
+         "facility": "own_room", "budget_rounds": 3, "note": "下書き"},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with caplog.at_level("WARNING", logger="saiverse.day_plan"):
+        with patch("sea.work_session.run_work_session",
+                   return_value=_mock_work_session_result()) as mock_ws:
+            DaySimulator(
+                manager.event_scheduler,
+                start=BASE + timedelta(hours=8),
+                end=BASE + timedelta(hours=10),
+            ).run()
+
+    assert manager.occupancy_manager.moves == []
+    assert any("no private_room_id" in r.message for r in caplog.records)
+    assert mock_ws.call_count == 1  # 移動できなくてもコマ自体は実行される
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
 # reschedule_pending_slots の冪等性
 # ---------------------------------------------------------------------------
 

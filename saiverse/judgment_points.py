@@ -136,14 +136,28 @@ def normalize_task_ref(ref: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def collect_facility_ids(manager: Any) -> List[str]:
-    """コマの facility enum: 実在の Building ID 一覧 + "own_room"。
+def _facility_candidate_buildings(manager: Any) -> List[Any]:
+    """facility enum / 状況テキストの施設一覧に載せる Building 群。
 
-    TODO(#7): 公共施設タグは未実装のため当面は全 Building を提示する。
-    タグが乗ったら公共施設のみに絞る (judgment_points.md §3.2 / v2 §6.1)。
+    公共施設タグ (FACILITY_ROLES) 付き Building が 1 つでもあればそれのみ、
+    ゼロなら後方互換で全 Building (まだ誰もタグ付けしていない DB で従来挙動を
+    壊さない — v2 §6.1 / facility_map.py)。
+    """
+    from saiverse.facility_map import list_tagged_buildings
+
+    tagged = list_tagged_buildings(manager)
+    if tagged:
+        return tagged
+    return list(getattr(manager, "buildings", None) or [])
+
+
+def collect_facility_ids(manager: Any) -> List[str]:
+    """コマの facility enum: 公共施設タグ付き Building + "own_room" (v2 §6.1)。
+
+    タグ付き Building がゼロの DB では全 Building を提示する (後方互換)。
     """
     out: List[str] = []
-    for b in getattr(manager, "buildings", None) or []:
+    for b in _facility_candidate_buildings(manager):
         bid = getattr(b, "building_id", None)
         if bid:
             out.append(bid)
@@ -674,13 +688,18 @@ def _format_task_backlog(manager: Any, persona_id: str) -> str:
 
 
 def _format_facilities(manager: Any) -> str:
+    """施設一覧 (facility enum と同じ候補集合。ロールタグがあれば併記)。"""
+    from saiverse.facility_map import ROLE_LABELS, building_roles
+
     lines = ["行ける場所:"]
-    for b in getattr(manager, "buildings", None) or []:
+    for b in _facility_candidate_buildings(manager):
         bid = getattr(b, "building_id", None)
         if not bid:
             continue
         name = getattr(b, "name", "") or bid
-        lines.append(f"- {bid}: {name}")
+        roles = building_roles(b)
+        label = "・".join(ROLE_LABELS.get(r, r) for r in roles)
+        lines.append(f"- {bid}: {name}" + (f"（{label}）" if label else ""))
     lines.append(f"- {FACILITY_OWN_ROOM}: 自分の部屋")
     return "\n".join(lines)
 
@@ -734,6 +753,19 @@ def build_day_open_situation_text(
     memo = (load_plan_meta(manager, persona_id, yesterday).get("tomorrow_memo") or "").strip()
     budget = context.get("daily_budget_rounds") or DEFAULT_DAILY_BUDGET_ROUNDS
 
+    # 残高 (v2 §4.5): 起床判断のやり直し等で今日すでに消費済みなら明示する
+    from saiverse.day_plan import get_budget_state
+
+    budget_lines = [
+        f"作業ラウンドの日次予算: {budget} (全コマの budget_rounds 合計の目安)",
+    ]
+    budget_state = get_budget_state(manager, persona_id, today)
+    if budget_state and budget_state["used"] > 0:
+        budget_lines.append(
+            f"今日すでに消費済み: {budget_state['used']} ラウンド"
+            f" (残り {max(0, int(budget) - budget_state['used'])})"
+        )
+
     parts = [
         "[起床判断]",
         f"おはようございます。今日 ({today}) の一日が始まります。",
@@ -754,7 +786,7 @@ def build_day_open_situation_text(
         desire_summary_for_prompt(manager, persona_id),
         "",
         "[今日の予算]",
-        f"作業ラウンドの日次予算: {budget} (全コマの budget_rounds 合計の目安)",
+        *budget_lines,
         "",
         "[施設一覧]",
         _format_facilities(manager),
@@ -1018,6 +1050,14 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
             line += f"（{note}）"
         lines.append(line)
     lines.append(f"作業予算（計画値）: 消化 {consumed} / 計画 {planned} ラウンド")
+    from saiverse.day_plan import get_budget_state
+
+    budget_state = get_budget_state(manager, persona_id, plan_date)
+    if budget_state is not None:
+        lines.append(
+            f"日次予算（実測）: {budget_state['used']} / {budget_state['total']} "
+            f"ラウンド消費 (残り {budget_state['remaining']})"
+        )
     digests = _collect_today_session_digests(manager, persona_id, plan_date)
     if digests:
         lines.append("")

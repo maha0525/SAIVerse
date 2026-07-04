@@ -7,8 +7,16 @@
 
 コマ発火 (``_fire_slot``) の処理:
 1. ユーザー会話中なら繰り下げ (10 分後に再 push、上限 3 回で skipped)
-2. facility が現在地と違えば OccupancyManager で移動 (失敗は WARN + 続行)
-3. kind 別ハンドラ実行 → status 更新
+2. 予算ゲート (v2 §4.5): セッション系 (consumes_budget) コマは日次予算台帳の
+   残高でラウンドを切り詰める (残高 0 なら skipped + WARN、ハンドラ実行しない)
+3. facility が現在地と違えば OccupancyManager で移動 (失敗は WARN + 続行)
+4. kind 別ハンドラ実行 → 実 rounds_used を台帳へ積算 → status 更新
+
+日次予算台帳 (v2 §4.5) は persona_day_plan.meta_json の
+``{"budget_total_rounds": N, "budget_used_rounds": M}``。total は起床判断
+(day_open) の finalize が編成時に書き (``init_budget_ledger``)、used は発火後の
+``consume_budget`` が実測値で積算する。台帳の無い日 (day_open 前 / 旧データ)
+はゲート無効 = 従来挙動 (後方互換)。
 
 「ユーザー会話中」の判定は running Track が user_conversation 種別であること
 (``TrackManager.get_running``)。対ユーザー Track は wait_response 型で、会話が
@@ -83,6 +91,10 @@ MAX_DEFERRALS = 3
 #: budget_rounds が 0 / 未指定の作業コマに使う既定ラウンド予算
 DEFAULT_BUDGET_ROUNDS = 8
 
+#: 日次予算台帳 (persona_day_plan.meta_json) のキー (v2 §4.5)
+META_BUDGET_TOTAL = "budget_total_rounds"
+META_BUDGET_USED = "budget_used_rounds"
+
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _REF_RE = re.compile(r"^(task|desire):(\d+)$")
 
@@ -90,21 +102,35 @@ _REF_RE = re.compile(r"^(task|desire):(\d+)$")
 # kind 別ハンドラのレジストリ
 # ---------------------------------------------------------------------------
 
-#: ハンドラ signature: fn(manager, persona_id, plan_date, slot, index) -> None
-SlotHandler = Callable[[Any, str, str, Dict[str, Any], int], None]
+#: ハンドラ signature: fn(manager, persona_id, plan_date, slot, index) -> Optional[int]
+#: 戻り値は「実際に消費したラウンド数」(None / 0 = 予算消費なし)。
+#: consumes_budget=True で登録された kind は、戻り値が予算台帳へ積算される。
+SlotHandler = Callable[[Any, str, str, Dict[str, Any], int], Optional[int]]
 
 _SLOT_HANDLERS: Dict[str, SlotHandler] = {}
 
+#: 予算ゲート (v2 §4.5) の対象 kind (register_slot_handler の consumes_budget)
+_BUDGET_GATED_KINDS: set = set()
 
-def register_slot_handler(kind: str, fn: SlotHandler) -> None:
+
+def register_slot_handler(kind: str, fn: SlotHandler, *, consumes_budget: bool = False) -> None:
     """kind に対するコマ発火ハンドラを登録する (同 kind は上書き)。
 
     後続フェーズ (話す/聞く/経験する/自分を更新する の社交・経験系、
     暮らし Pulse) はここへ登録することで配線に乗る。
+
+    Args:
+        consumes_budget: True なら予算ゲートの対象 (v2 §4.5)。発火前に日次
+            残高で budget_rounds が切り詰められ (残高 0 なら skipped)、
+            ハンドラの戻り値 (実 rounds_used) が台帳へ積算される。
     """
     if kind in _SLOT_HANDLERS:
         LOGGER.info("[day_plan] slot handler overridden: kind=%s", kind)
     _SLOT_HANDLERS[kind] = fn
+    if consumes_budget:
+        _BUDGET_GATED_KINDS.add(kind)
+    else:
+        _BUDGET_GATED_KINDS.discard(kind)
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +426,93 @@ def update_plan_meta(
 
 
 # ---------------------------------------------------------------------------
+# 日次予算台帳 (v2 §4.5): meta_json の budget_total_rounds / budget_used_rounds
+# ---------------------------------------------------------------------------
+
+
+def _read_nonneg_int(value: Any) -> Optional[int]:
+    """非負 int なら int を、そうでなければ None を返す (bool は不可)。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def init_budget_ledger(
+    manager: Any, persona_id: str, plan_date: Any, total_rounds: int
+) -> Dict[str, int]:
+    """日次予算台帳を初期化する (起床判断 day_open の finalize が編成時に呼ぶ)。
+
+    total を書き、used は既存値を保持する (起床判断のやり直しで消費済み分は
+    リセットされない — 使った予算は使ったまま)。
+
+    Returns:
+        :func:`get_budget_state` と同形の ``{"total", "used", "remaining"}``。
+    """
+    total = _read_nonneg_int(total_rounds)
+    if total is None:
+        raise ValueError(f"total_rounds must be a non-negative int (got {total_rounds!r})")
+    meta = load_plan_meta(manager, persona_id, plan_date)
+    used = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
+    update_plan_meta(manager, persona_id, plan_date, {
+        META_BUDGET_TOTAL: total,
+        META_BUDGET_USED: used,
+    })
+    LOGGER.info(
+        "[day_plan] budget ledger initialized: persona=%s date=%s total=%d used=%d",
+        persona_id, _normalize_plan_date(plan_date), total, used,
+    )
+    return {"total": total, "used": used, "remaining": max(0, total - used)}
+
+
+def get_budget_state(
+    manager: Any, persona_id: str, plan_date: Any
+) -> Optional[Dict[str, int]]:
+    """日次予算の残高 ``{"total", "used", "remaining"}`` を返す。
+
+    台帳が無い日 (day_open がまだ走っていない / 本機能より前のデータ) は
+    None — 予算ゲートは無効 = 従来挙動 (後方互換)。
+    """
+    meta = load_plan_meta(manager, persona_id, plan_date)
+    total = _read_nonneg_int(meta.get(META_BUDGET_TOTAL))
+    if total is None:
+        return None
+    used = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
+    return {"total": total, "used": used, "remaining": max(0, total - used)}
+
+
+def consume_budget(
+    manager: Any, persona_id: str, plan_date: Any, rounds: int
+) -> Optional[Dict[str, int]]:
+    """実際に消費したラウンド数を台帳へ積算する (発火後の実測値)。
+
+    台帳 (total) がまだ無い日でも used だけは記録する — 後から day_open が
+    :func:`init_budget_ledger` で total を書いたとき、既消費分が保持される。
+
+    Returns:
+        積算後の :func:`get_budget_state` (total 未設定の日は None)。
+    """
+    inc = _read_nonneg_int(rounds)
+    if inc is None:
+        LOGGER.warning(
+            "[day_plan] consume_budget: rounds=%r is not a non-negative int; ignored",
+            rounds,
+        )
+        return get_budget_state(manager, persona_id, plan_date)
+    if inc == 0:
+        return get_budget_state(manager, persona_id, plan_date)
+    meta = load_plan_meta(manager, persona_id, plan_date)
+    used = (_read_nonneg_int(meta.get(META_BUDGET_USED)) or 0) + inc
+    update_plan_meta(manager, persona_id, plan_date, {META_BUDGET_USED: used})
+    state = get_budget_state(manager, persona_id, plan_date)
+    LOGGER.info(
+        "[day_plan] budget consumed: persona=%s date=%s +%d rounds (used=%d remaining=%s)",
+        persona_id, _normalize_plan_date(plan_date), inc, used,
+        state["remaining"] if state else "?",
+    )
+    return state
+
+
+# ---------------------------------------------------------------------------
 # EventScheduler への push
 # ---------------------------------------------------------------------------
 
@@ -609,12 +722,63 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> No
         )
 
 
+def _effective_budget_rounds(slot: Dict[str, Any]) -> int:
+    """コマの実効ラウンド予算 (0 / 未指定は既定値 DEFAULT_BUDGET_ROUNDS)。"""
+    budget = int(slot.get("budget_rounds") or 0)
+    return budget if budget >= 1 else DEFAULT_BUDGET_ROUNDS
+
+
+def _apply_budget_gate(
+    manager: Any, persona_id: str, plan_date_str: str, index: int, slot: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """予算ゲート (v2 §4.5)。切り詰め後の slot を返す。残高 0 なら None (発火中止)。
+
+    - 台帳が無い日 (day_open 前 / 旧データ) はゲート無効 = slot をそのまま返す
+    - 残高 < 実効予算 → 残高まで切り詰め (slots_json に永続化) + WARN
+    - 残高 0 → status='skipped' + WARN、ハンドラは実行しない
+    """
+    requested = _effective_budget_rounds(slot)
+    state = get_budget_state(manager, persona_id, plan_date_str)
+    if state is None:
+        return slot
+    remaining = state["remaining"]
+    if remaining <= 0:
+        _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_SKIPPED)
+        LOGGER.warning(
+            "[day_plan] slot skipped: daily budget exhausted "
+            "(persona=%s date=%s index=%d kind=%s used=%d/%d)",
+            persona_id, plan_date_str, index, slot.get("kind"),
+            state["used"], state["total"],
+        )
+        return None
+    if remaining < requested:
+        LOGGER.warning(
+            "[day_plan] slot budget clamped to remaining daily budget: %d -> %d "
+            "(persona=%s date=%s index=%d kind=%s used=%d/%d)",
+            requested, remaining, persona_id, plan_date_str, index,
+            slot.get("kind"), state["used"], state["total"],
+        )
+        requested = remaining
+    if requested != int(slot.get("budget_rounds") or 0):
+        # 切り詰め (または既定値の具体化) を slots_json に永続化する — 就寝判断の
+        # 予定 vs 実績が「実際に許可された予算」を見られるようにするため。
+        updated = _update_slot(
+            manager, persona_id, plan_date_str, index, budget_rounds=requested,
+        )
+        if updated is not None:
+            return updated
+        slot = {**slot, "budget_rounds": requested}
+    return slot
+
+
 def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) -> None:
     """コマ発火。判断点ではないため LLM を呼ばない (judgment_points.md §2)。
 
     1. ユーザー会話中 → 繰り下げ (10 分後に同 key 再 push、上限 3 回で skipped)
-    2. facility が現在地と違えば移動 (失敗は WARN + 続行)
-    3. kind 別ハンドラ実行 → status 更新 (fired → done / 未登録 kind は skipped)
+    2. 予算ゲート (consumes_budget な kind のみ): 残高で切り詰め / 残高 0 は skipped
+    3. facility が現在地と違えば移動 (失敗は WARN + 続行)
+    4. kind 別ハンドラ実行 → 実 rounds_used を台帳へ積算 →
+       status 更新 (fired → done / 未登録 kind は skipped)
     """
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None or index >= len(slots):
@@ -667,10 +831,18 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         )
         return
 
-    # (b) 施設へ移動 (型 → 行き先の実行。移動自体が接地した行動 — v2 §6.1)
+    # (b) 予算ゲート (v2 §4.5): セッション系コマのみ。残高 0 なら skipped で終了
+    gated = kind in _BUDGET_GATED_KINDS
+    if gated:
+        gated_slot = _apply_budget_gate(manager, persona_id, plan_date_str, index, slot)
+        if gated_slot is None:
+            return
+        slot = gated_slot
+
+    # (c) 施設へ移動 (型 → 行き先の実行。移動自体が接地した行動 — v2 §6.1)
     _move_to_facility(manager, persona_id, slot)
 
-    # (c) kind 別ハンドラ実行。fired を先に永続化することで、ハンドラ実行中の
+    # (d) kind 別ハンドラ実行。fired を先に永続化することで、ハンドラ実行中の
     # クラッシュ後に watchdog (reschedule_pending_slots) が同じコマを二重発火
     # させない (pending/deferred のみ再 push されるため)。
     updated = _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_FIRED)
@@ -696,16 +868,30 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
             )
 
     try:
-        handler(manager, persona_id, plan_date_str, slot, index)
+        used_rounds = handler(manager, persona_id, plan_date_str, slot, index)
     except Exception:
         # 失敗コマは fired のまま残す (再発火しない安全側)。就寝判断の
         # 予定 vs 実績で「実行したが完了記録が無い」として観察できる。
+        # NOTE: raise 経路では消費ラウンドが不明のため台帳へ積算できない
+        # (run_work_session は raise しない契約なので、通常この経路は通らない)。
         LOGGER.exception(
             "[day_plan] slot handler failed (persona=%s date=%s index=%d kind=%s); "
             "slot left as 'fired'",
             persona_id, plan_date_str, index, kind,
         )
         return
+
+    # (e) 実測の消費ラウンドを日次予算台帳へ積算する (v2 §4.5)
+    if gated and isinstance(used_rounds, int) and not isinstance(used_rounds, bool) \
+            and used_rounds > 0:
+        try:
+            consume_budget(manager, persona_id, plan_date_str, used_rounds)
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] consume_budget failed (persona=%s date=%s index=%d); "
+                "continuing",
+                persona_id, plan_date_str, index,
+            )
     _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_DONE)
 
 
@@ -782,8 +968,12 @@ _NO_REF_TARGET = "(参照タスクなし。目的の記述に従うこと)"
 
 def _handle_worker_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
-) -> None:
-    """「作る」「知る」コマ: 決定論テンプレートで指示書を組み run_work_session を運転する。"""
+) -> Optional[int]:
+    """「作る」「知る」コマ: 決定論テンプレートで指示書を組み run_work_session を運転する。
+
+    Returns:
+        実際に消費したラウンド数 (``_fire_slot`` が予算台帳へ積算する)。
+    """
     kind = slot["kind"]
     template = _WORKER_INSTRUCTION_TEMPLATES[kind]
     ref = slot.get("ref") or REF_NONE
@@ -793,12 +983,14 @@ def _handle_worker_slot(
 
     budget = int(slot.get("budget_rounds") or 0)
     if budget < 1:
+        # 予算ゲート (_apply_budget_gate) が実効値を永続化済みのはずだが、
+        # 台帳の無い日 / 直接呼び出しのフォールバックとして既定値を保つ。
+        budget = _effective_budget_rounds(slot)
         LOGGER.info(
-            "[day_plan] slot budget_rounds=%d < 1; using default %d "
+            "[day_plan] slot budget_rounds < 1; using default %d "
             "(persona=%s date=%s index=%d)",
-            budget, DEFAULT_BUDGET_ROUNDS, persona_id, plan_date_str, index,
+            budget, persona_id, plan_date_str, index,
         )
-        budget = DEFAULT_BUDGET_ROUNDS
 
     from sea.work_session import run_work_session
 
@@ -816,6 +1008,8 @@ def _handle_worker_slot(
         persona_id, plan_date_str, index, kind,
         result.ended_reason, result.rounds_used, len(result.artifacts),
     )
+    rounds_used = getattr(result, "rounds_used", 0) or 0
+    return int(rounds_used) if isinstance(rounds_used, int) else 0
 
 
 def _handle_living_slot(
@@ -840,7 +1034,7 @@ def _handle_rest_slot(
     )
 
 
-register_slot_handler(KIND_CREATE, _handle_worker_slot)
-register_slot_handler(KIND_LEARN, _handle_worker_slot)
+register_slot_handler(KIND_CREATE, _handle_worker_slot, consumes_budget=True)
+register_slot_handler(KIND_LEARN, _handle_worker_slot, consumes_budget=True)
 register_slot_handler(KIND_LIVING, _handle_living_slot)
 register_slot_handler(KIND_REST, _handle_rest_slot)

@@ -161,6 +161,13 @@ class Building(Base):
     PHYSICAL_VESSEL_ID = Column(String(64), nullable=True)
     # 所属する Region または SubRegion。NULL なら無所属 (従来どおりの Building)。
     REGION_ID = Column(String(255), ForeignKey("region.REGION_ID"), nullable=True)
+    # 公共施設のロールタグ (自律行動 v2 §6.1)。JSON 配列 (例: '["library", "plaza"]')。
+    # 語彙は saiverse/facility_map.py の FACILITY_ROLE_VOCAB:
+    #   "plaza"(広場: 話す/聞く) / "workshop"(工房: 作る) /
+    #   "library"(図書館: 知る) / "park"(公園: 経験する)
+    # 1 Building 複数ロール可。NULL/空 = ロールなし (私室・通常 Building)。
+    # タグ付け UI/CLI は将来フェーズ — 手動 SQL 例は facility_map.py の docstring 参照。
+    FACILITY_ROLES = Column(Text, nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 

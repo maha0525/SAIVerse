@@ -136,14 +136,16 @@ def _finalize_day_open(
     warnings.extend(tt_warnings)
 
     # 予算合計の検証はソフト制約 (judgment_points.md §3.2)。超過は WARN のみで
-    # 保存は通す — 予算ゲート (v2 §4.5) が乗ったら実行側で打ち切られる。
+    # 保存は通す — 予算ゲート (v2 §4.5) が発火時に日次残高でラウンドを切り詰める。
     daily_budget = ctx.get("daily_budget_rounds")
-    if isinstance(daily_budget, int) and daily_budget > 0:
-        total = sum(s["budget_rounds"] for s in slots)
-        if total > daily_budget:
-            warnings.append(
-                f"budget_rounds 合計 {total} が日次予算 {daily_budget} を超過 (保存は続行)"
-            )
+    if not isinstance(daily_budget, int) or isinstance(daily_budget, bool) or daily_budget <= 0:
+        from saiverse.judgment_points import DEFAULT_DAILY_BUDGET_ROUNDS
+        daily_budget = DEFAULT_DAILY_BUDGET_ROUNDS
+    total = sum(s["budget_rounds"] for s in slots)
+    if total > daily_budget:
+        warnings.append(
+            f"budget_rounds 合計 {total} が日次予算 {daily_budget} を超過 (保存は続行)"
+        )
 
     if not slots:
         # 空配列は不可 — 最低 1 コマを要求する (judgment_points.md §4)。
@@ -171,6 +173,23 @@ def _finalize_day_open(
                     + f" @{s['facility']}"
                     + (f"（{s['note']}）" if s["note"] else "")
                 )
+            # 日次予算台帳の初期化 (v2 §4.5)。total を書き、消費済み (used) は
+            # 保持する — 発火時の予算ゲートがこの残高でラウンドを切り詰める。
+            try:
+                budget_state = day_plan_mod.init_budget_ledger(
+                    manager, persona_id, plan_date, daily_budget,
+                )
+            except Exception as exc:
+                LOGGER.exception("[judgment_finalize] init_budget_ledger raised")
+                warnings.append(f"日次予算台帳の初期化に失敗: {exc}")
+            else:
+                budget_line = f"（今日の作業ラウンド予算: {budget_state['total']}"
+                if budget_state["used"]:
+                    budget_line += (
+                        f"、消費済み {budget_state['used']}"
+                        f"、残り {budget_state['remaining']}"
+                    )
+                lines.append(budget_line + "）")
 
     # --- promotions: 欲求 → 関心 (Track 化) ------------------------------
     promo_valid = set(collect_promotion_refs(manager, persona_id))

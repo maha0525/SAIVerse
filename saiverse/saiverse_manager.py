@@ -743,6 +743,28 @@ class SAIVerseManager(
                     except json.JSONDecodeError:
                         extra_prompts = []
 
+                # Parse facility role tags from JSON (自律行動 v2 §6.1)
+                facility_roles: List[str] = []
+                raw_roles = getattr(db_b, 'FACILITY_ROLES', None)
+                if raw_roles:
+                    try:
+                        parsed_roles = json.loads(raw_roles)
+                        if isinstance(parsed_roles, list):
+                            facility_roles = [
+                                r.strip() for r in parsed_roles
+                                if isinstance(r, str) and r.strip()
+                            ]
+                        else:
+                            logging.warning(
+                                "Building %s: FACILITY_ROLES is not a JSON array (%r); ignoring",
+                                db_b.BUILDINGID, raw_roles,
+                            )
+                    except json.JSONDecodeError:
+                        logging.warning(
+                            "Building %s: FACILITY_ROLES is not valid JSON (%r); ignoring",
+                            db_b.BUILDINGID, raw_roles,
+                        )
+
                 building = Building(
                     building_id=db_b.BUILDINGID,
                     name=db_b.BUILDINGNAME,
@@ -755,6 +777,7 @@ class SAIVerseManager(
                     extra_prompt_files=extra_prompts,
                     physical_vessel_id=getattr(db_b, 'PHYSICAL_VESSEL_ID', None),
                     region_id=getattr(db_b, 'REGION_ID', None),
+                    facility_roles=facility_roles,
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
