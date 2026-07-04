@@ -141,8 +141,23 @@ class PersonaTaskManager:
             "desire_state": task.desire_state,
             "last_touched_at": task.last_touched_at.isoformat() if task.last_touched_at else None,
             "touch_count": task.touch_count,
+            # 成果物参照 (judgment_points.md §6 の接地の証跡)。JSON 配列を list に展開。
+            "artifact_refs": cls._parse_artifact_refs(task.artifact_refs),
             "steps": [cls._step_to_dict(s) for s in steps],
         }
+
+    @staticmethod
+    def _parse_artifact_refs(raw: Optional[str]) -> List[str]:
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            LOGGER.warning("[task] artifact_refs is not valid JSON: %r", raw)
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(r) for r in parsed]
 
     # ------------------------------------------------------------------
     # 内部: 取得
@@ -671,6 +686,49 @@ class PersonaTaskManager:
             )
             db.commit()
             LOGGER.info("[task] decomposed %s into %d steps", task_id, len(steps))
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def append_artifact_ref(
+        self,
+        task_id: str,
+        artifact_ref: str,
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """タスクに成果物参照 (Item ID 等) を追記する (重複は無視、履歴つき)。
+
+        セッション終了判断 (judgment_points.md §6) の done 裁定が「このセッションが
+        実際に作った成果物」の ref を刻む接地の証跡。起床判断のバックログ提示
+        (§4「成果物参照の有無つき」) がここを読む。
+        """
+        if not artifact_ref:
+            raise ValueError("artifact_ref is required")
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            refs = self._parse_artifact_refs(task.artifact_refs)
+            if artifact_ref not in refs:
+                refs.append(artifact_ref)
+            task.artifact_refs = json.dumps(refs, ensure_ascii=False)
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="append_artifact_ref",
+                payload={"artifact_ref": artifact_ref},
+                actor=actor,
+            )
+            db.commit()
         except Exception:
             db.rollback()
             raise

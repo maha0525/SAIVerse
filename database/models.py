@@ -912,6 +912,12 @@ class PersonaTask(Base):
     desire_state = Column(String(16), nullable=True)   # 'fresh' | 'fading' | 'expired' (NULL は fresh 扱い)
     last_touched_at = Column(DateTime, nullable=True)  # 最終再訪時刻 (鮮度の基準。無ければ created_at)
     touch_count = Column(Integer, nullable=True)       # 再訪回数 (NULL は 0 扱い)
+    # --- 成果物参照 (JSON 配列; judgment_points.md §6 の接地の証跡) ---
+    # セッション終了判断の done 裁定で「このセッションが実際に作った成果物」の
+    # ref (Item ID 等) を刻む。notes (自由記述) と分けるのは、起床判断のバックログ
+    # 提示 (§4「成果物参照の有無つき」) や接地監査が機械可読に読むため。
+    # nullable = 追加系 migration (try_additive_migration) で安全に足せる。
+    artifact_refs = Column(Text, nullable=True)
     __table_args__ = (
         Index("idx_persona_task_persona_status", "persona_id", "status"),
         Index("idx_persona_task_note", "note_id"),
@@ -975,6 +981,11 @@ class PersonaDayPlan(Base):
     persona_id = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
     plan_date = Column(String(10), primary_key=True)  # "YYYY-MM-DD"
     slots_json = Column(Text, nullable=False)
+    # 日付に紐づく付帯情報 (JSON dict)。就寝判断 (day_close) が書く
+    # {"tomorrow_memo": 明日の自分への机メモ, "day_theme": ...} 等を格納し、
+    # 翌朝の起床判断 (day_open) が読む (judgment_points.md §4/§8)。
+    # 読み書きは saiverse/day_plan.py の load_plan_meta / update_plan_meta。
+    meta_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
 

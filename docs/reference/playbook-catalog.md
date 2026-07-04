@@ -23,6 +23,15 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 | `meta_judgment` | メタ判断 | base（NL 独白 + `/spell`）。dispatch マップには含まれない別系統 |
 | `meta_autonomy_decision` | 自律行動: 意思決定 | 前回結果を検収し、次に実行する Playbook と意図を決める |
 
+## 判断点（自律行動 v2 の意思決定層）
+
+`saiverse/judgment_points.py` の `run_judgment_point` が起動する（→ [intent/persona_cognition/judgment_points.md](../intent/persona_cognition/judgment_points.md)）。メタ判断と同じ様式: 構造化出力 + 動的 enum 注入 + `judgment_finalize` ツールでの検証・適用（メインキャッシュへの JSON 非混入）。
+
+| Playbook | 表示名 | 用途 |
+|---|---|---|
+| `judgment_day_open` | 起床判断 (day_open) | 今日の時間割の編成 + 予算配分 + 欲求→関心の昇格 |
+| `judgment_post_session` | セッション終了判断 (post_session) | タスクの裁定（done は実在成果物 ref 必須の接地検証つき）+ 残り時間割の整え |
+
 ## Track メインライン
 
 各 Track 種別の会話・行動を回すメインライン Playbook（→ [concepts/track.md](../concepts/track.md)）。

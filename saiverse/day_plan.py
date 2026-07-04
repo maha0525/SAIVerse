@@ -312,6 +312,94 @@ def _update_slot(
 
 
 # ---------------------------------------------------------------------------
+# 日付付帯情報 (meta_json): tomorrow_memo 等の机メモ置き場
+# ---------------------------------------------------------------------------
+
+
+def load_plan_meta(manager: Any, persona_id: str, plan_date: Any) -> Dict[str, Any]:
+    """plan 行の付帯情報 (meta_json) を dict で返す。行なし / 不正 JSON は空 dict。
+
+    就寝判断 (day_close) が書いた ``tomorrow_memo`` 等を、翌朝の起床判断
+    (day_open) が読む入口 (judgment_points.md §4/§8)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    from database.models import PersonaDayPlan
+
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(PersonaDayPlan)
+            .filter_by(persona_id=persona_id, plan_date=plan_date_str)
+            .first()
+        )
+        if row is None or not row.meta_json:
+            return {}
+        try:
+            meta = json.loads(row.meta_json)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "[day_plan] meta_json is not valid JSON (persona=%s date=%s); returning {}",
+                persona_id, plan_date_str,
+            )
+            return {}
+        return meta if isinstance(meta, dict) else {}
+    finally:
+        db.close()
+
+
+def update_plan_meta(
+    manager: Any, persona_id: str, plan_date: Any, updates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """plan 行の付帯情報 (meta_json) へ updates をマージして永続化する。
+
+    行が無ければ meta のみの行 (slots_json="[]") を作る — 就寝判断が「時間割の
+    無かった日」にも明日への机メモを残せるようにするため。slots_json="[]" は
+    ``load_day_plan`` では空配列、``schedule_day_plan`` では push 0 件として
+    無害に振る舞う (save_day_plan で本物の時間割が上書きされたら meta は残る)。
+
+    Returns:
+        マージ後の meta dict。
+    """
+    if not isinstance(updates, dict):
+        raise ValueError(f"updates must be a dict (got {type(updates).__name__})")
+    plan_date_str = _normalize_plan_date(plan_date)
+    from database.models import PersonaDayPlan
+
+    now = clock.now()
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(PersonaDayPlan)
+            .filter_by(persona_id=persona_id, plan_date=plan_date_str)
+            .first()
+        )
+        if row is None:
+            merged = dict(updates)
+            db.add(PersonaDayPlan(
+                persona_id=persona_id,
+                plan_date=plan_date_str,
+                slots_json="[]",
+                meta_json=json.dumps(merged, ensure_ascii=False),
+                created_at=now,
+                updated_at=now,
+            ))
+        else:
+            try:
+                merged = json.loads(row.meta_json) if row.meta_json else {}
+            except (TypeError, ValueError):
+                merged = {}
+            if not isinstance(merged, dict):
+                merged = {}
+            merged.update(updates)
+            row.meta_json = json.dumps(merged, ensure_ascii=False)
+            row.updated_at = now
+        db.commit()
+        return merged
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # EventScheduler への push
 # ---------------------------------------------------------------------------
 
@@ -395,6 +483,60 @@ def reschedule_pending_slots(manager: Any, persona_id: str) -> int:
             persona_id, plan_date_str, pushed,
         )
     return pushed
+
+
+def cancel_scheduled_slots(manager: Any, persona_id: str, plan_date: Any) -> int:
+    """保存済み plan の全コマ分の EventScheduler 予約を cancel し、数を返す。
+
+    時間割の全置換 (起床判断のやり直し / remaining_timetable の置換) の前処理。
+    key は index ベースなので、コマ数が減る置換では旧 index の予約が残留し、
+    新 plan の別コマ (または範囲外 index) を誤発火させる。置換前に旧 plan の
+    全 key を cancel することでこれを防ぐ (発火済み key の cancel は no-op)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return 0
+    slots = load_day_plan(manager, persona_id, plan_date_str) or []
+    cancelled = 0
+    for index in range(len(slots)):
+        if scheduler.cancel(_slot_key(persona_id, plan_date_str, index)):
+            cancelled += 1
+    if cancelled:
+        LOGGER.info(
+            "[day_plan] cancelled scheduled slots: persona=%s date=%s cancelled=%d",
+            persona_id, plan_date_str, cancelled,
+        )
+    return cancelled
+
+
+def replace_remaining_slots(
+    manager: Any, persona_id: str, plan_date: Any, new_slots: List[Dict[str, Any]]
+) -> int:
+    """残りコマ (pending / deferred) を new_slots で全置換する (judgment_points.md §3.3)。
+
+    消化済みコマ (fired / done / skipped) は帳簿として残し、残りコマだけを
+    new_slots に差し替える。検証は保存時と同一 (``_validate_and_normalize_slots``)
+    で、失敗時は ValueError を投げて **plan も予約も一切変更しない**。
+
+    Returns:
+        置換後に EventScheduler へ push した pending コマ数。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    current = load_day_plan(manager, persona_id, plan_date_str) or []
+    kept = [
+        s for s in current
+        if s.get("status") not in (STATUS_PENDING, STATUS_DEFERRED)
+    ]
+    candidate = kept + [
+        {**slot, "status": STATUS_PENDING, "defer_count": 0} for slot in new_slots
+    ]
+    normalized = _validate_and_normalize_slots(candidate)  # 失敗時はここで raise
+
+    # 検証が通ってから旧予約を落とし、保存 → 再 push する。
+    cancel_scheduled_slots(manager, persona_id, plan_date_str)
+    save_day_plan(manager, persona_id, plan_date_str, normalized)
+    return schedule_day_plan(manager, persona_id, plan_date_str)
 
 
 # ---------------------------------------------------------------------------

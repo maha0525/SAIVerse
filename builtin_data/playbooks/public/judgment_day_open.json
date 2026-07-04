@@ -1,0 +1,37 @@
+{
+  "name": "judgment_day_open",
+  "display_name": "起床判断 (day_open)",
+  "description": "自律行動 v2 の判断点: 起床。昨夜の机メモ・昨日のふりかえり・バックログ・欲求リストを見て、今日の時間割を編成する (+ 欲求→関心の昇格)。構造化出力 + judgment_finalize による検証・適用。詳細は docs/intent/persona_cognition/judgment_points.md §4。",
+  "input_schema": [
+    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (机メモ / 昨日のふりかえり / バックログ / 欲求 / 予算 / 施設一覧)。", "required": false, "default": ""},
+    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / daily_budget_rounds)。", "required": false, "default": "{}"},
+    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (実在の ref / facility / 昇格候補の enum 注入済み)。", "required": false, "default": null}
+  ],
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "judge",
+      "type": "llm",
+      "action": "このターンは『内的独白』です。ユーザーには届きません。\n相手に呼びかける文体（「〜ね」「〜だよ」「ありがとう」「お疲れさま」等）は使わず、\n自分自身に語る一人称（例: 「〜と判断する」「〜しよう」「〜の方が自然だな」）で書いてください。\n\n{situation_text}\n\n応答は構造化出力です:\n- monologue: この判断に至る素直な思考。起床時の気分や今日への向き合いを含めてかまいません\n- timetable: 今日の時間割 (コマの配列)。各コマは start (HH:MM、コマは開始時刻の厳密昇順) / kind / ref / facility / budget_rounds / note を持ちます\n  - 六型 (話す/聞く/作る/知る/経験する/自分を更新する) のコマは、ref に実在のタスク・欲求 (task:N / desire:N) を指してください\n  - 「暮らし」「休む」のコマは ref を 'none' にしてください\n  - budget_rounds の合計は日次予算の範囲内に収めてください\n  - 全コマ「休む」でも構いません（それも今日の選択です）が、最低 1 コマは必要です\n- promotions (欄がある場合のみ): 何度も再訪してきた欲求を関心 (Track) に昇格します。昇格するものだけを選び、title と intent を自分の言葉で書いてください。昇格しないなら空配列で構いません",
+      "response_schema_source": "arg:response_schema",
+      "output_key": "judgment",
+      "memorize": null,
+      "speak": false,
+      "next": "finalize"
+    },
+    {
+      "id": "finalize",
+      "type": "tool",
+      "action": "judgment_finalize",
+      "args_input": {
+        "judgment_output": "judgment",
+        "kind": {"$literal": "day_open"},
+        "judgment_context": "judgment_context",
+        "situation_text": "situation_text"
+      },
+      "next": null
+    }
+  ],
+  "start_node": "judge"
+}

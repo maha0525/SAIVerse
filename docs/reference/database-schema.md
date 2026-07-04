@@ -438,6 +438,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `persona_id` | VARCHAR(255) | PK, FK→ai.AIID, NOT NULL |  |
 | `plan_date` | VARCHAR(10) | PK, NOT NULL |  |
 | `slots_json` | TEXT | NOT NULL |  |
+| `meta_json` | TEXT | — |  |
 | `created_at` | DATETIME | NOT NULL |  |
 | `updated_at` | DATETIME | NOT NULL |  |
 
@@ -582,6 +583,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `desire_state` | VARCHAR(16) | — |  |
 | `last_touched_at` | DATETIME | — |  |
 | `touch_count` | INTEGER | — |  |
+| `artifact_refs` | TEXT | — |  |
 
 ## track_local_log
 
