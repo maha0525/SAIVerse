@@ -26,7 +26,7 @@ Fragment は単独では生成されない。**[Metabolism](metabolism.md) 発�
 ### 実装状況メモ
 
 - air_city_a 実 DB で `memopedia_fragments` は稼働中（1000件超）
-- Fragment 専用の embedding 生成フローは現状なし（embedding 系テーブルは空 = 設計通り）
+- Fragment の embedding は Metabolism 時に生成される（`sea/runtime.py:2313` 付近で `entity_extractor` が Fragment を作った後、`sea/runtime.py` の `embed_memopedia_fragments`（`sai_memory/unified_recall.py`）が未 embedding の Fragment に埋め込みを付与）。生成された embedding は `unified_recall`（`sai_memory/unified_recall.py:717` 付近、`search_fragments` 経路）が検索に使用する
 - 旧 `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（併存は移行の名残）
 
 ## 実装
