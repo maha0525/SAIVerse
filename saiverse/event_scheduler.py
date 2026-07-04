@@ -20,6 +20,12 @@ addon 由来のポーリング (X 監視等) は本 Phase ではスコープ外�
 - リトライポリシー (callback 側のドメイン責務)
 - callback の例外による再試行 (WARN ログ + 該当予約消去のみ)
 - Alert 観察ルート (TrackManager._notify_alert の同期 callback で別途処理)
+
+仮想クロック対応 (自律行動 v2 §12):
+- 時刻の読み出しは ``saiverse.clock.now()`` に一元化 (実モードでは挙動不変)
+- 仮想モード中は dispatch スレッドが発火せず、同期駆動 API
+  (``next_fire_time`` / ``run_due``) のみが実行経路になる。
+  DES ドライバは ``saiverse.day_simulator.DaySimulator`` を参照。
 """
 from __future__ import annotations
 
@@ -27,10 +33,11 @@ import heapq
 import itertools
 import logging
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional
+
+from saiverse import clock
 
 LOGGER = logging.getLogger(__name__)
 
@@ -146,7 +153,7 @@ class EventScheduler:
             LOGGER.debug(
                 "[event_scheduler] schedule key=%s fire_at=%s (in %.1fs)",
                 key, fire_at.isoformat(timespec="seconds"),
-                fire_ts - time.time(),
+                fire_ts - clock.now().timestamp(),
             )
 
             # heap の先頭が変わった可能性があるので dispatch ループを起こす。
@@ -200,15 +207,15 @@ class EventScheduler:
                 return
             # 成功時のみ次回を schedule
             self.schedule(
-                fire_at=datetime.now() + timedelta(seconds=interval_seconds),
+                fire_at=clock.now() + timedelta(seconds=interval_seconds),
                 callback=wrapper,
                 key=key,
             )
 
         first_fire_at = (
-            datetime.now()
+            clock.now()
             if first_fire_immediate
-            else datetime.now() + timedelta(seconds=interval_seconds)
+            else clock.now() + timedelta(seconds=interval_seconds)
         )
         self.schedule(fire_at=first_fire_at, callback=wrapper, key=key)
 
@@ -221,6 +228,13 @@ class EventScheduler:
         LOGGER.info("[event_scheduler] dispatch loop started")
         while not self._stop_event.is_set():
             with self._cond:
+                if clock.is_virtual():
+                    # 仮想モード中: 背景スレッドは発火しない。
+                    # 実行経路は同期駆動 API (next_fire_time / run_due) のみ。
+                    # 短い timeout で再確認し、disable_virtual 後に自然復帰する。
+                    self._cond.wait(timeout=0.5)
+                    continue
+
                 # キャンセル済みのエントリを heap 先頭からスキップ
                 while self._heap and self._heap[0].cancelled:
                     heapq.heappop(self._heap)
@@ -231,7 +245,7 @@ class EventScheduler:
                     continue
 
                 next_entry = self._heap[0]
-                now_ts = time.time()
+                now_ts = clock.now().timestamp()
                 wait_seconds = next_entry.fire_at_ts - now_ts
 
                 if wait_seconds > 0:
@@ -263,6 +277,64 @@ class EventScheduler:
                 "[event_scheduler] callback raised; dropping key=%s",
                 entry.key,
             )
+
+    # ------------------------------------------------------------------
+    # Synchronous drive (virtual-clock simulation; 自律行動 v2 §12)
+    # ------------------------------------------------------------------
+
+    def next_fire_time(self) -> Optional[datetime]:
+        """キューの次イベント (有効な予約のうち最も早いもの) の発火時刻を返す。
+
+        予約がなければ None。DES ドライバが「次にどこまで時計をワープするか」
+        を決めるために使う。
+        """
+        with self._cond:
+            while self._heap and self._heap[0].cancelled:
+                heapq.heappop(self._heap)
+            if not self._heap:
+                return None
+            return datetime.fromtimestamp(self._heap[0].fire_at_ts)
+
+    def run_due(self, now: datetime) -> int:
+        """``now`` 以前が期限のイベントを期限順に同期実行し、実行数を返す。
+
+        シムモードの実行経路。呼び出しスレッド上で callback を直接実行する
+        (dispatch スレッドは経由しない)。callback 内で新たに schedule された
+        イベントも、期限が ``now`` 以前なら同じ呼び出しで消化する。
+
+        注意: callback が「期限 <= now」の予約を無限に積み続けると本メソッドは
+        返らない (例: ``schedule_periodic(interval_seconds=0)``)。DES では
+        派生イベントは必ず未来時刻に積むこと。
+
+        Args:
+            now: 期限判定の基準時刻 (通常は ``clock.now()`` の仮想時刻)。
+
+        Returns:
+            実行した callback の数。
+        """
+        now_ts = now.timestamp()
+        executed = 0
+        while True:
+            with self._cond:
+                while self._heap and self._heap[0].cancelled:
+                    heapq.heappop(self._heap)
+                if not self._heap or self._heap[0].fire_at_ts > now_ts:
+                    break
+                entry = heapq.heappop(self._heap)
+                # _entries_by_key から自分自身を削除 (cancel/再 schedule の race 回避)
+                if self._entries_by_key.get(entry.key) is entry:
+                    self._entries_by_key.pop(entry.key, None)
+
+            LOGGER.debug(
+                "[event_scheduler] run_due fire key=%s (due=%s, now=%s)",
+                entry.key,
+                datetime.fromtimestamp(entry.fire_at_ts).isoformat(timespec="seconds"),
+                now.isoformat(timespec="seconds"),
+            )
+            # Lock を抜けた状態で callback を実行 (callback 内で再 schedule 可能にする)
+            self._fire(entry)
+            executed += 1
+        return executed
 
     # ------------------------------------------------------------------
     # Introspection (debug / tests)

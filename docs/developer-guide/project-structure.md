@@ -67,6 +67,8 @@ saiverse/
 ├── autonomy_manager.py     # 自律バイオリズムの大リズム（50分 tick）
 ├── pulse_scheduler.py      # SubLineScheduler（30秒ポーリングで自律 Track を回す）
 ├── event_scheduler.py      # スケジュール実行
+├── clock.py                # 仮想クロック（時刻の一元供給源、一日シミュレータ用）
+├── day_simulator.py        # DES ドライバ（仮想時刻でイベントキューを早回し）
 ├── internal_alert_poller.py# 内部 alert ポーリング
 ├── llm_router.py           # ツール呼び出し判定
 ├── model_configs.py        # モデル設定管理
