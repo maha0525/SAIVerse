@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 43
+**テーブル数**: 44
 
 ## addon_config
 
@@ -430,6 +430,16 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `BASELINE_JSON` | TEXT | — |  |
 | `LAST_NOTIFIED_JSON` | TEXT | — |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
+
+## persona_day_plan
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `persona_id` | VARCHAR(255) | PK, FK→ai.AIID, NOT NULL |  |
+| `plan_date` | VARCHAR(10) | PK, NOT NULL |  |
+| `slots_json` | TEXT | NOT NULL |  |
+| `created_at` | DATETIME | NOT NULL |  |
+| `updated_at` | DATETIME | NOT NULL |  |
 
 ## persona_event_log
 

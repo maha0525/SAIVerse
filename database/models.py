@@ -945,3 +945,27 @@ class PersonaTaskHistory(Base):
         Index("idx_persona_task_history_task_created", "task_id", "created_at"),
     )
 
+
+class PersonaDayPlan(Base):
+    """時間割 (day plan): 起床判断が編成した一日の駆動データ (自律行動 v2 §4.2)。
+
+    1 ペルソナ 1 日 1 行 (複合 PK)。slots_json はコマの配列 (JSON):
+    [{start: "HH:MM", kind: 六型|"暮らし"|"休む", ref: "task:N"|"desire:N"|"none",
+      facility: building_id|"own_room", budget_rounds: int, note: str,
+      status: "pending"|"fired"|"deferred"|"skipped"|"done", defer_count: int}, ...]
+
+    コマ開始の駆動は saiverse/day_plan.py が EventScheduler へ push する決定論
+    処理であり、コマ開始は判断点ではない = LLM を呼ばない
+    (docs/intent/persona_cognition/judgment_points.md §2)。
+
+    NOTE: 時刻刻印 (created_at / updated_at) は server_default にせず、コード側で
+    ``saiverse.clock.now()`` を書き込む (一日シミュレータの仮想時刻を尊重するため。
+    autonomous_behavior_v2.md §12 の不変条件)。
+    """
+    __tablename__ = "persona_day_plan"
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    plan_date = Column(String(10), primary_key=True)  # "YYYY-MM-DD"
+    slots_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
