@@ -538,6 +538,21 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         "[day_plan] slot fired: persona=%s date=%s index=%d kind=%s ref=%s facility=%s",
         persona_id, plan_date_str, index, kind, slot.get("ref"), slot.get("facility"),
     )
+
+    # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
+    # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。ハンドラの成否に
+    # 依らず「取り組みに向かった」事実を記録するため、実行前に付ける。
+    ref = slot.get("ref") or REF_NONE
+    if ref.startswith("desire:"):
+        try:
+            from saiverse.desire_engine import touch_desire
+            touch_desire(manager, persona_id, ref)
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] touch_desire failed (persona=%s ref=%s); continuing",
+                persona_id, ref, exc_info=True,
+            )
+
     try:
         handler(manager, persona_id, plan_date_str, slot, index)
     except Exception:

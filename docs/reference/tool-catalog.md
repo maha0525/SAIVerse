@@ -27,7 +27,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `core_memory_remove` | コア記憶から1項目を削除します。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string | コア記憶から消す |
 | `core_memory_update` | コア記憶の既存の1項目を新しい内容に書き換えます。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string, `content*`: string | コア記憶を書き換える |
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |
-| `desire_add` | Add a 'want to do someday' candidate to your desire pool. Use this when, during autonomous work, you think of somethi… | `title*`: string, `goal`: string | やりたいこと追加 |
+| `desire_add` | Add a 'want to do someday' candidate to your desire pool. Use this when, during autonomous work, you think of somethi… | `title*`: string, `goal`: string, `type`: string, `source`: string | やりたいこと追加 |
 | `document_append_content` | Append text to the end of a document item. Use this to add new content without modifying existing text. | `item_id*`: string, `content*`: string | ドキュメント追記 |
 | `document_create` | Create a new document item with text content and place it in the current building. | `name*`: string, `description*`: string, `content*`: string | ドキュメント作成 |
 | `document_edit` | Edit a document item. Either replace the full content, or replace a specific line range. Use document_read first to s… | `item_id*`: string, `new_content`: string, `start_line`: integer, `end_line`: integer, `replacement`: string | ドキュメント編集 |

@@ -577,6 +577,11 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `completed_at` | DATETIME | — |  |
 | `version` | INTEGER | NOT NULL, default=0 |  |
 | `last_actor` | VARCHAR(255) | — |  |
+| `desire_type` | VARCHAR(32) | — |  |
+| `desire_source` | TEXT | — |  |
+| `desire_state` | VARCHAR(16) | — |  |
+| `last_touched_at` | DATETIME | — |  |
+| `touch_count` | INTEGER | — |  |
 
 ## track_local_log
 

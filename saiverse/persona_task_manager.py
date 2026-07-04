@@ -31,6 +31,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from database.models import PersonaTask, PersonaTaskHistory, PersonaTaskStep
+from saiverse import clock
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +53,11 @@ TERMINAL_TASK_STATUSES = frozenset({STATUS_COMPLETED, STATUS_CANCELLED})
 PARENT_NOTE = "note"    # 候補 (desire ノート内のやりたいこと)
 PARENT_TRACK = "track"  # Track 内の実行小目標 (旧 track_task)
 
+# --- 欲求の帳簿: desire_state 値 (自律行動 v2 §5.3。運用は saiverse/desire_engine.py) ---
+DESIRE_STATE_FRESH = "fresh"      # 新鮮 (既定。NULL も fresh 扱い)
+DESIRE_STATE_FADING = "fading"    # 薄れつつある (放置 or 就寝レビューの fading 裁定)
+DESIRE_STATE_EXPIRED = "expired"  # 期限切れ (status=cancelled の論理アーカイブと対で付く)
+
 
 class TaskError(Exception):
     """Base error for PersonaTaskManager."""
@@ -66,8 +72,10 @@ class TaskConflictError(TaskError):
 
 
 def _now() -> datetime:
-    # main DB の他テーブル (ActionTrack 等) は naive ``datetime.now()`` を使うので揃える。
-    return datetime.now()
+    # naive datetime は main DB の他テーブル (ActionTrack 等) と同じ慣習。
+    # ``saiverse.clock.now()`` は実モードでは ``datetime.now()`` と同一で、
+    # 一日シミュレータの仮想時刻を尊重する (autonomous_behavior_v2.md §12 の不変条件)。
+    return clock.now()
 
 
 class PersonaTaskManager:
@@ -127,6 +135,12 @@ class PersonaTaskManager:
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             "version": task.version,
             "last_actor": task.last_actor,
+            # 欲求の帳簿 (desire ledger; parent_kind='note' の候補行でのみ意味を持つ)
+            "desire_type": task.desire_type,
+            "desire_source": task.desire_source,
+            "desire_state": task.desire_state,
+            "last_touched_at": task.last_touched_at.isoformat() if task.last_touched_at else None,
+            "touch_count": task.touch_count,
             "steps": [cls._step_to_dict(s) for s in steps],
         }
 
@@ -246,6 +260,8 @@ class PersonaTaskManager:
         note_id: Optional[str] = None,
         track_id: Optional[str] = None,
         auto_activate: bool = True,
+        desire_type: Optional[str] = None,
+        desire_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """新規 Task を作成する。
 
@@ -256,6 +272,11 @@ class PersonaTaskManager:
 
         ``auto_activate=True`` のとき、そのペルソナに active な Task が無ければ
         作成した Task を active にし最初の未完ステップを active_step にする。
+
+        ``desire_type`` / ``desire_source`` は欲求の六型と接地参照 (自律行動 v2 §5)。
+        候補 (parent_kind='note') では帳簿 (last_touched_at / touch_count /
+        desire_state) も初期化する。値の検証は呼び出し側 (desire_add スペル等) の
+        責務 — 本レイヤーは priority / origin と同じく永続化のみ担う。
         """
         if not persona_id:
             raise ValueError("persona_id is required")
@@ -299,6 +320,12 @@ class PersonaTaskManager:
                 completed_at=None,
                 version=0,
                 last_actor=actor,
+                desire_type=desire_type,
+                desire_source=desire_source,
+                # 帳簿の初期化は候補 (note 親) のみ。鮮度の起点 = 作成時刻。
+                desire_state=DESIRE_STATE_FRESH if kind == PARENT_NOTE else None,
+                last_touched_at=now if kind == PARENT_NOTE else None,
+                touch_count=0 if kind == PARENT_NOTE else None,
             )
             db.add(task)
 
@@ -336,6 +363,8 @@ class PersonaTaskManager:
                     "parent_kind": kind,
                     "note_id": n_id,
                     "track_id": t_id,
+                    "desire_type": desire_type,
+                    "desire_source": desire_source,
                     "steps": [
                         {"title": s.title, "description": s.description, "status": s.status}
                         for s in step_records

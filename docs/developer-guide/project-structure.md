@@ -70,6 +70,7 @@ saiverse/
 ├── clock.py                # 仮想クロック（時刻の一元供給源、一日シミュレータ用）
 ├── day_simulator.py        # DES ドライバ（仮想時刻でイベントキューを早回し）
 ├── day_plan.py             # 時間割の保存とコマ発火配線（自律行動 v2 §4.2）
+├── desire_engine.py        # 欲求の帳簿（六型・鮮度・再訪・淘汰の決定論処理、自律行動 v2 §5）
 ├── internal_alert_poller.py# 内部 alert ポーリング
 ├── llm_router.py           # ツール呼び出し判定
 ├── model_configs.py        # モデル設定管理

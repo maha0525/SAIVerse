@@ -903,6 +903,15 @@ class PersonaTask(Base):
     completed_at = Column(DateTime, nullable=True)
     version = Column(Integer, nullable=False, default=0)
     last_actor = Column(String(255), nullable=True)
+    # --- 欲求の帳簿 (desire ledger; 自律行動 v2 §5「意志 — 六型欲求」) ---
+    # parent_kind='note' の候補 (desire) 行でのみ使う。運用 (減衰・再訪・昇格候補) は
+    # saiverse/desire_engine.py の決定論関数群が担う。全て nullable = 追加系
+    # migration (try_additive_migration の自動 ADD COLUMN) で安全に足せる。
+    desire_type = Column(String(32), nullable=True)    # 六型 (話す/聞く/作る/知る/経験する/自分を更新する)。NULL=未分類
+    desire_source = Column(Text, nullable=True)        # この欲求を生んだ実経験への参照/引用 (接地の証跡)
+    desire_state = Column(String(16), nullable=True)   # 'fresh' | 'fading' | 'expired' (NULL は fresh 扱い)
+    last_touched_at = Column(DateTime, nullable=True)  # 最終再訪時刻 (鮮度の基準。無ければ created_at)
+    touch_count = Column(Integer, nullable=True)       # 再訪回数 (NULL は 0 扱い)
     __table_args__ = (
         Index("idx_persona_task_persona_status", "persona_id", "status"),
         Index("idx_persona_task_note", "note_id"),
