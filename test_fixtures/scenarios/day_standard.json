@@ -1,0 +1,34 @@
+{
+  "persona_id": "sim_persona",
+  "plan_date": "2026-07-05",
+  "wake": "09:00",
+  "sleep": "22:00",
+  "daily_budget_rounds": 20,
+  "seed": {
+    "desires": [
+      {
+        "title": "言葉の標本集を始める",
+        "type": "作る",
+        "source": "会話で言い回しを褒められて、集めてみたくなった"
+      },
+      {
+        "title": "気になっていた記事の続きを調べる",
+        "type": "知る",
+        "source": "昨日の散策で掲示板の切り抜きを見かけた"
+      }
+    ],
+    "tasks": [
+      {
+        "title": "共有文の下書きを書く",
+        "goal": "document_create で下書きを実際に作成し、読み直して整えてあること"
+      }
+    ]
+  },
+  "user_events": [
+    { "at": "15:00", "type": "message", "text": "ただいま、ちょっとだけ話せる？" },
+    { "at": "15:30", "type": "leave" }
+  ],
+  "events": [
+    { "at": "18:00", "description": "掲示板の告知: 広場で新しい展示が始まった", "is_alert": false }
+  ]
+}
