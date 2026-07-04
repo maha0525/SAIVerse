@@ -122,4 +122,6 @@ def schema() -> ToolSchema:
             "required": ["item_id"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ドキュメント読み取り",
     )

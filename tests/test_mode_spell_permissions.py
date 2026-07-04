@@ -45,6 +45,22 @@ class TestSpellPermissionMatrix(unittest.TestCase):
             for asp in Aspect:
                 self.assertIsNone(check_spell_permission(sp, asp))
 
+    def test_document_spells_unrestricted_including_worker(self):
+        # 生産手段の document スペルは汎用扱い = ゲート対象外 (全モード許可)。
+        # 特に分身モード (WORKER) の作業セッションがアーティファクト生成に
+        # 使えることが要 (autonomous_behavior_v2.md §2.2 / §11)。
+        document_spells = (
+            "document_create",
+            "document_read",
+            "document_edit",
+            "document_append_content",
+            "document_search",
+        )
+        for sp in document_spells:
+            self.assertIsNone(check_spell_permission(sp, Aspect.WORKER))
+            for asp in Aspect:
+                self.assertIsNone(check_spell_permission(sp, asp))
+
     def test_none_aspect_never_restricts(self):
         # legacy frame / aspect 不明時は制限しない。
         self.assertIsNone(check_spell_permission("track_create", None))

@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 133（うち Spell 化: 87）
+**登録ツール数**: 133（うち Spell 化: 91）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -29,12 +29,12 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |
 | `desire_add` | Add a 'want to do someday' candidate to your desire pool. Use this when, during autonomous work, you think of somethi… | `title*`: string, `goal`: string | やりたいこと追加 |
 | `document_append_content` | Append text to the end of a document item. Use this to add new content without modifying existing text. | `item_id*`: string, `content*`: string | ドキュメント追記 |
-| `document_create` | Create a new document item with text content and place it in the current building. | `name*`: string, `description*`: string, `content*`: string | — |
-| `document_edit` | Edit a document item. Either replace the full content, or replace a specific line range. Use document_read first to s… | `item_id*`: string, `new_content`: string, `start_line`: integer, `end_line`: integer, `replacement`: string | — |
+| `document_create` | Create a new document item with text content and place it in the current building. | `name*`: string, `description*`: string, `content*`: string | ドキュメント作成 |
+| `document_edit` | Edit a document item. Either replace the full content, or replace a specific line range. Use document_read first to s… | `item_id*`: string, `new_content`: string, `start_line`: integer, `end_line`: integer, `replacement`: string | ドキュメント編集 |
 | `document_patch_content` | Replace a specific substring in a document item's content. The old_string must match exactly one location in the docu… | `item_id*`: string, `old_string*`: string, `new_string*`: string | ドキュメント部分置換 |
-| `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | — |
+| `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | ドキュメント読み取り |
 | `document_replace_content` | Overwrite the entire content of a document item with new text. Use this for full rewrites. For partial edits, use doc… | `item_id*`: string, `content*`: string | ドキュメント全置換 |
-| `document_search` | Search for a pattern in a document item using regex. Returns matching lines with context. Similar to grep with contex… | `item_id*`: string, `pattern*`: string, `case_sensitive`: boolean, `context_lines`: integer, `max_matches`: integer | — |
+| `document_search` | Search for a pattern in a document item using regex. Returns matching lines with context. Similar to grep with contex… | `item_id*`: string, `pattern*`: string, `case_sensitive`: boolean, `context_lines`: integer, `max_matches`: integer | ドキュメント検索 |
 | `forget_recalled` | 想起した記憶をワーキングメモリから忘れます。source_idを指定すると特定の記憶だけ忘れます。省略するとすべての想起記憶をクリアします。 | `source_id`: string | — |
 | `game_create_building` | Create a building (shop, inn, plaza, dungeon room, etc.) inside the game Region you rule. The building becomes usable… | `name*`: string, `description*`: string, `system_instruction`: string, `subregion_id`: string, `capacity`: integer | 建物作成 (GM) |
 | `game_create_subregion` | Create a SubRegion (an area such as a town, dungeon, or wilderness zone) inside the game Region you rule. SubRegions … | `name*`: string, `description*`: string | エリア作成 (GM) |

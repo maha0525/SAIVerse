@@ -146,4 +146,6 @@ def schema() -> ToolSchema:
             "required": ["item_id", "pattern"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ドキュメント検索",
     )
