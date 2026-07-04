@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 132（うち Spell 化: 86）
+**登録ツール数**: 133（うち Spell 化: 87）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -23,6 +23,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `chronicle_search` | Search Chronicle (arasuji) entries by keyword, time range, and/or level. Returns a list of matching entries with IDs … | `query`: string, `start_date`: string, `end_date`: string, `level`: integer, `max_results`: integer | — |
 | `control_body` | Extract body control commands from message and send to Unity Gateway. | `message*`: string, `persona_id`: string | — |
 | `core_memory_add` | あなたが常に携えておきたい恒常知識を「コア記憶」に1件刻みます。コア記憶は system プロンプトに常駐し、記憶整理（Metabolism）のたびに最新の内容が反映されます。何を恒常領域に残すかはあなた自身の判断です。 | `content*`: string | コア記憶に刻む |
+| `core_memory_add_scene` | 実際にあった会話の一場面を、原文のままコア記憶に刻みます。口調・性格・ユーザーとの関係性を固定するアンカーとして使います。message_id で指定したメッセージを中心に、前後の会話を自動でそのまま複製します（言い換えは行いません）… | `message_id*`: string, `rounds`: integer | 会話をコア記憶に刻む |
 | `core_memory_remove` | コア記憶から1項目を削除します。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string | コア記憶から消す |
 | `core_memory_update` | コア記憶の既存の1項目を新しい内容に書き換えます。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string, `content*`: string | コア記憶を書き換える |
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |

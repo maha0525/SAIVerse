@@ -1767,3 +1767,96 @@ def get_messages_for_chronicle(
         CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES,
     )
     return [_row_to_message(row) for row in cur.fetchall()]
+
+
+def get_conversation_window_around(
+    conn: sqlite3.Connection,
+    message_id: str,
+    *,
+    rounds: int = 3,
+) -> Optional[List[Message]]:
+    """アンカーメッセージを中心とした「実会話」の窓を切り出す (コア記憶 scene 用)。
+
+    「実会話」の定義は Chronicle 生成と同じ (``get_messages_for_chronicle`` と
+    同一の除外条件を再利用): Stelis サブエージェントのスレッド除外・
+    handy_tool/spell/event_message タグ除外・sub_line/meta_judgment/nested
+    line_role 除外。加えてここでは role を user/model (表示名 assistant) に限定する
+    (ツール応答や内部ロールを切り抜きに混ぜない)。
+
+    窓の大きさは前後 ``rounds`` 往復 ≒ ``rounds * 2`` 件ずつ (アンカー自身は含めた
+    上で前後に最大 rounds*2 件)。会話の端では自然に短くなる (それ以上前/後が
+    存在しないだけで、エラーにはしない)。
+
+    アンカーが見つからない、またはアンカー自体が除外対象 (ツール実行ログ等) の
+    場合は ``None`` を返す。
+
+    戻り値は created_at 昇順 (時系列) のメッセージ一覧。
+    """
+    anchor_row = conn.execute(
+        "SELECT rowid FROM messages WHERE id=?", (message_id,)
+    ).fetchone()
+    if not anchor_row:
+        return None
+    anchor_rowid = int(anchor_row[0])
+
+    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
+    # role: 会話本文 (user 発話 / persona 応答) のみ対象。persona 応答は歴史的に
+    # 'model' (Gemini 系呼称) と 'assistant' (OpenAI 系呼称・インポートログ) の
+    # 両方が実データに存在する (実 DB 実査で確認、2026-07-04)。'system'/'host' は
+    # 会話本文ではないため除外する。
+    exclusion_clause = f"""
+        thread_id NOT IN (SELECT thread_id FROM stelis_threads)
+        AND role IN ('user', 'model', 'assistant')
+        AND NOT EXISTS (
+            SELECT 1 FROM json_each(metadata, '$.tags')
+            WHERE json_each.value IN ({tag_placeholders})
+        )
+        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+    """
+    exclusion_params = CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+
+    # アンカー自身が会話フィルタを通るか確認する。
+    anchor_ok = conn.execute(
+        f"SELECT 1 FROM messages WHERE rowid=? AND {exclusion_clause}",
+        (anchor_rowid, *exclusion_params),
+    ).fetchone()
+    if not anchor_ok:
+        return None
+
+    window = max(0, int(rounds)) * 2
+
+    before_rows: List[Message] = []
+    if window > 0:
+        cur = conn.execute(
+            f"""
+            SELECT id, thread_id, role, content, resource_id, created_at, metadata
+            FROM messages
+            WHERE rowid < ? AND {exclusion_clause}
+            ORDER BY rowid DESC LIMIT ?
+            """,
+            (anchor_rowid, *exclusion_params, window),
+        )
+        before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
+
+    anchor_full = conn.execute(
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        "FROM messages WHERE rowid=?",
+        (anchor_rowid,),
+    ).fetchone()
+    anchor_msg = _row_to_message(anchor_full)
+
+    after_rows: List[Message] = []
+    if window > 0:
+        cur = conn.execute(
+            f"""
+            SELECT id, thread_id, role, content, resource_id, created_at, metadata
+            FROM messages
+            WHERE rowid > ? AND {exclusion_clause}
+            ORDER BY rowid ASC LIMIT ?
+            """,
+            (anchor_rowid, *exclusion_params, window),
+        )
+        after_rows = [_row_to_message(r) for r in cur.fetchall()]
+
+    return before_rows + [anchor_msg] + after_rows

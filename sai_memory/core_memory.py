@@ -62,12 +62,23 @@ def init_core_memory_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def add_core_memory(conn: sqlite3.Connection, content: str) -> int:
-    """コア記憶を1件追加し、採番された id を返す。"""
+def add_core_memory(
+    conn: sqlite3.Connection,
+    content: str,
+    *,
+    kind: str = "note",
+    metadata: Optional[str] = None,
+) -> int:
+    """コア記憶を1件追加し、採番された id を返す。
+
+    ``kind`` / ``metadata`` は 'scene' (実会話の切り抜き) 用の追加パラメータ。
+    'note' の既存呼び出し (kind/metadata 省略) は後方互換のまま動く。
+    """
     now = int(time.time())
     cur = conn.execute(
-        "INSERT INTO core_memories (content, created_at, updated_at) VALUES (?, ?, ?)",
-        (content, now, now),
+        "INSERT INTO core_memories (content, created_at, updated_at, kind, metadata) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (content, now, now, kind, metadata),
     )
     conn.commit()
     return int(cur.lastrowid)
