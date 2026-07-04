@@ -147,6 +147,8 @@ class AIConfigResponse(BaseModel):
     memory_weave_model: Optional[str] = None
     activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: bool = True
+    autonomous_chronicle_enabled: bool = True
+    auto_recall_enabled: bool = True
     memory_weave_context: bool = True
     spell_enabled: bool = False
     realtime_info_enabled: bool = True
@@ -168,6 +170,8 @@ class UpdateAIConfigRequest(BaseModel):
     memory_weave_model: Optional[str] = None
     activity_state: Optional[str] = None  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: Optional[bool] = None
+    autonomous_chronicle_enabled: Optional[bool] = None
+    auto_recall_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
     spell_enabled: Optional[bool] = None
     realtime_info_enabled: Optional[bool] = None

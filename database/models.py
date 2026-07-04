@@ -76,6 +76,16 @@ class AI(Base):
     MEMORY_WEAVE_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
+    # 自律/schedule Pulse でも確認ダイアログなしで General Chronicle 生成を実行するかの
+    # per-persona トグル (docs/intent/memory_architecture_v2.md §6.3, Phase 0)。デフォルト ON:
+    # 生成コストは軽量モデルで小さく、記憶が残らない実害の方が大きいため (2026-07-04 決定)。
+    # ユーザー Pulse の確認ダイアログ挙動には無関係 (そちらは常に確認あり)。
+    AUTONOMOUS_CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)
+    # 自動想起 (記憶アーキv2 ゾーン C, sea/auto_recall.py) の per-persona トグル。
+    # False の場合、_maybe_inject_auto_recall (sea/runtime_context.py) は末尾注入を
+    # 一切行わず粘着台帳もリセットする。手動想起 (recall_entry/recall_navigate スペル)
+    # には影響しない。デフォルト ON (2026-07-04 決定)。
+    AUTO_RECALL_ENABLED = Column(Boolean, default=True, nullable=False)
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     MEMOPEDIA_INDEX_LIMIT = Column(Integer, nullable=True)  # Max pages per category in Memory Weave index (NULL → default 100)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)

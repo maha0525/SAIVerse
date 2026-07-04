@@ -193,6 +193,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `MEMORY_WEAVE_MODEL` | VARCHAR(255) | — |  |
 | `PRIVATE_ROOM_ID` | VARCHAR(255) | FK→building.BUILDINGID |  |
 | `CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `AUTONOMOUS_CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `AUTO_RECALL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `MEMORY_WEAVE_CONTEXT` | BOOLEAN | NOT NULL, default=True |  |
 | `MEMOPEDIA_INDEX_LIMIT` | INTEGER | — |  |
 | `SPELL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |

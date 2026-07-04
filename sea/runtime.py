@@ -871,6 +871,7 @@ class SEARuntime:
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
             reasoning_details_val = state.pop("_reasoning_details", None)
+            auto_recall_text = state.pop("_auto_recall_text", None)
             pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
@@ -886,6 +887,11 @@ class SEARuntime:
                 msg_metadata["reasoning"] = reasoning_text
             if reasoning_details_val is not None:
                 msg_metadata["reasoning_details"] = reasoning_details_val
+            if auto_recall_text:
+                # 記憶アーキv2 §4.5: この Pulse で末尾注入された「ふと浮かんだ記憶」を
+                # reasoning と同じ流儀で永続化する。LLM コンテキストには渡さない
+                # (state.pop 済みで再利用不可、metadata は llm_clients 側で読まれない)。
+                msg_metadata["auto_recall"] = auto_recall_text
 
             # Include pulse usage accumulator total for UI display
             accumulator = state.get("_pulse_usage_accumulator")
@@ -1982,6 +1988,12 @@ class SEARuntime:
             except Exception as exc:
                 LOGGER.warning("[metabolism] Track Chronicle generation failed: %s", exc)
 
+        # 2.7. Recall embedding maintenance — Chronicle 生成の成否・トグルとは独立に、
+        # 未埋め込みの Chronicle/ページ/Fragment を毎回埋める (ローカル・無料)。
+        # Chronicle 生成に相乗りさせると早期 return の巻き添えでバックログが溜まる
+        # (2026-07-04 の実測で確認済み)。自動想起 (ゾーン C) の再現率を支える。
+        self._ensure_recall_embeddings(persona)
+
         # 3. Update anchor to new window start
         new_anchor_id = current_messages[evict_count].get("id")
         if new_anchor_id:
@@ -2018,6 +2030,42 @@ class SEARuntime:
             from database.models import AI as AIModel
             ai = db.query(AIModel).filter_by(AIID=persona_id).first()
             return ai.CHRONICLE_ENABLED if ai else True
+        finally:
+            db.close()
+
+    def _is_autonomous_chronicle_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona toggle for Chronicle generation during non-user Pulses.
+
+        docs/intent/memory_architecture_v2.md §6.3 (Phase 0): 自律/schedule Pulse
+        では確認ダイアログが出せないため、この設定が True なら確認なしで生成を実行する。
+        デフォルト True。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.AUTONOMOUS_CHRONICLE_ENABLED if ai else True
+        finally:
+            db.close()
+
+    def _is_auto_recall_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona 自動想起 (記憶アーキv2 ゾーン C) トグルを DB から確認する。
+
+        False の場合、sea/runtime_context.py の _maybe_inject_auto_recall は
+        末尾注入を行わず、粘着台帳もリセットする。手動想起 (recall_entry /
+        recall_navigate スペル) には影響しない。デフォルト True。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.AUTO_RECALL_ENABLED if ai else True
         finally:
             db.close()
 
@@ -2065,8 +2113,16 @@ class SEARuntime:
         persona,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
+        force: bool = False,
     ) -> None:
-        """Generate Chronicle entries from all unprocessed messages."""
+        """Generate Chronicle entries from all unprocessed messages.
+
+        ``force=True`` は確認ダイアログ・pulse_type 判定を経ずに即生成する。
+        UI の「記憶の整理」ボタン (organize-memory API) のように、呼び出しの
+        時点でユーザーが既に明示的に同意しているケース専用。Pulse の外から
+        呼ばれるため ``persona._current_pulse_type`` は前回 Pulse の残留値で
+        あてにならない — force はその不定性を回避する意味もある。
+        """
         from llm_clients.factory import get_llm_client
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
@@ -2149,8 +2205,25 @@ class SEARuntime:
         # MetaLayer / autonomy / schedule pass an event_callback (for internal
         # event capture / progress notifications) but no UI is attached, so
         # waiting on confirm_event would just stall for the full timeout.
+        #
+        # docs/intent/memory_architecture_v2.md §6.3 (Phase 0, 2026-07-04):
+        # 非 user pulse (auto/schedule/meta_judgment) では、ペルソナ単位の
+        # AUTONOMOUS_CHRONICLE_ENABLED が True なら確認なしで生成を実行する。
+        # False なら従来どおりスキップする。
         pulse_type = getattr(persona, "_current_pulse_type", None)
-        if event_callback and pulse_type == "user":
+        if force:
+            LOGGER.info(
+                "[metabolism] Generating Chronicle (forced by explicit request, "
+                "%d unprocessed messages)",
+                unprocessed_count,
+            )
+        elif pulse_type != "user" and self._is_autonomous_chronicle_enabled_for_persona(persona):
+            LOGGER.info(
+                "[metabolism] Generating Chronicle without confirmation "
+                "(pulse_type=%s, AUTONOMOUS_CHRONICLE_ENABLED=True, %d unprocessed messages)",
+                pulse_type, unprocessed_count,
+            )
+        elif event_callback and pulse_type == "user":
             import threading as _threading
 
             request_id = str(uuid.uuid4())
@@ -2192,7 +2265,8 @@ class SEARuntime:
                 return
             LOGGER.info("[metabolism] Chronicle generation approved by user")
         else:
-            # No interactive route available — skip without waiting.
+            # No interactive route available and AUTONOMOUS_CHRONICLE_ENABLED is
+            # False (or no event_callback/manager) — skip without waiting.
             # (auto / schedule / meta_judgment pulses, or pure CLI runs)
             LOGGER.info(
                 "[metabolism] Skipping Chronicle generation confirmation "
@@ -2298,26 +2372,42 @@ class SEARuntime:
                 "content": f"Chronicle生成完了: {len(level1)}件のエントリを作成しました。",
             })
 
-        # Generate embeddings for newly created entries/pages/fragments
-        if adapter.can_embed():
-            try:
-                from sai_memory.unified_recall import (
-                    embed_chronicle_entries,
-                    embed_memopedia_fragments,
-                    embed_memopedia_pages,
+    def _ensure_recall_embeddings(self, persona) -> None:
+        """Chronicle / Memopedia ページ / Fragment の未埋め込み分を全件埋める。
+
+        自動想起 (ゾーン C) の想起インフラ整備。ローカル埋め込みのみで API コスト
+        ゼロのため、Metabolism のたびに**無条件で**実行する (Chronicle 生成の
+        成否・トグルに相乗りさせない)。
+
+        歴史的経緯: かつてこの処理は _generate_chronicle の末尾にあり、生成の
+        早期 return (未処理なし / 20件揃った run なし / 自律 Pulse の確認スキップ /
+        ユーザーの確認拒否) のたびに巻き添えでスキップされ、埋め込みバックログが
+        恒常的に溜まっていた (2026-07-04 に air_city_a で Fragment 778/1638 を確認)。
+        記憶アーキv2 §4.1 運用ノート参照。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready() or not adapter.can_embed():
+            return
+        try:
+            from sai_memory.unified_recall import (
+                embed_chronicle_entries,
+                embed_memopedia_fragments,
+                embed_memopedia_pages,
+            )
+            from sai_memory.arasuji import init_arasuji_tables
+            from sai_memory.memopedia import init_memopedia_tables
+            init_arasuji_tables(adapter.conn)
+            init_memopedia_tables(adapter.conn)
+            n_chr = embed_chronicle_entries(adapter.conn, adapter.embedder, level=1)
+            n_page = embed_memopedia_pages(adapter.conn, adapter.embedder)
+            n_frag = embed_memopedia_fragments(adapter.conn, adapter.embedder)
+            if n_chr or n_page or n_frag:
+                LOGGER.info(
+                    "[metabolism] Embeddings generated: chronicle=%d, pages=%d, fragments=%d",
+                    n_chr, n_page, n_frag,
                 )
-                from sai_memory.memopedia import init_memopedia_tables
-                init_memopedia_tables(adapter.conn)
-                n_chr = embed_chronicle_entries(adapter.conn, adapter.embedder, level=1)
-                n_page = embed_memopedia_pages(adapter.conn, adapter.embedder)
-                n_frag = embed_memopedia_fragments(adapter.conn, adapter.embedder)
-                if n_chr or n_page or n_frag:
-                    LOGGER.info(
-                        "[metabolism] Embeddings generated: chronicle=%d, pages=%d, fragments=%d",
-                        n_chr, n_page, n_frag,
-                    )
-            except Exception:
-                LOGGER.exception("[metabolism] Embedding generation failed")
+        except Exception:
+            LOGGER.exception("[metabolism] Embedding generation failed")
 
     def _generate_track_chronicle(self, persona) -> None:
         """Track Chronicle 生成 (v0.32, 2026-05-09)。
@@ -2506,7 +2596,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -2518,6 +2608,7 @@ class SEARuntime:
             preview_only=preview_only,
             event_callback=event_callback,
             cancellation_token=cancellation_token,
+            pulse_type=pulse_type,
         )
 
     # ---- Context Preview (read-only, no side effects) ----

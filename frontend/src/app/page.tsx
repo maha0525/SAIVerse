@@ -140,6 +140,9 @@ interface Message {
     isInfo?: boolean;
     // Reasoning (thinking) from LLM
     reasoning?: string;
+    // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
+    // <system>...</system> を剥がした本文を保持し、スペル結果と同じ折りたたみで表示する。
+    auto_recall?: string;
     // Activity trace (exec/tool steps before final response)
     activity_trace?: ActivityEntry[];
     // Streaming state
@@ -1745,6 +1748,29 @@ export default function Home() {
                                 }];
                             });
                             setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
+                        } else if (event.type === 'auto_recall') {
+                            // 自動想起 (記憶アーキv2 §4.5): 末尾注入された「ふと浮かんだ記憶」を
+                            // スペル結果と同じ折りたたみで表示する。<system> タグは剥がす。
+                            const rawContent: string = typeof event.content === 'string' ? event.content : '';
+                            const recallBody = rawContent
+                                .replace(/^\s*<system>/, '')
+                                .replace(/<\/system>\s*$/, '')
+                                .trim();
+                            if (recallBody) {
+                                const arAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                                setMessages(prev => {
+                                    const last = prev[prev.length - 1];
+                                    if (last && last.role === 'assistant' && last._streaming) {
+                                        return [...prev.slice(0, -1), { ...last, auto_recall: recallBody }];
+                                    }
+                                    return [...prev, {
+                                        role: 'assistant' as const, content: '', _streaming: true,
+                                        sender: event.persona_name || undefined,
+                                        avatar: arAvatarUrl,
+                                        auto_recall: recallBody, timestamp: new Date().toISOString(),
+                                    }];
+                                });
+                            }
                         } else if (event.type === 'streaming_thinking') {
                             // Streaming thinking: accumulate into _streamingThinking
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
@@ -2648,6 +2674,19 @@ export default function Home() {
                                                     </details>
                                                 );
                                             })()}
+                                            {msg.auto_recall && (
+                                                <details className={styles.recallBlock}>
+                                                    <summary className={styles.recallSummary}>
+                                                        <span className={styles.recallIcon}>
+                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
+                                                        </span>
+                                                        <span>ふと浮かんだ記憶</span>
+                                                    </summary>
+                                                    <div className={styles.recallContent}>
+                                                        {msg.auto_recall}
+                                                    </div>
+                                                </details>
+                                            )}
                                             {(msg.reasoning || msg._streamingThinking) && (
                                                 <details className={styles.thinkingBlock} open={!!msg._streaming}>
                                                     <summary className={styles.thinkingSummary}>

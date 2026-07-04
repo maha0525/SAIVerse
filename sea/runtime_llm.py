@@ -2279,6 +2279,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             _at_both = state.get("_activity_trace")
                             if _at_both:
                                 msg_metadata["activity_trace"] = list(_at_both)
+                            _auto_recall_both = state.pop("_auto_recall_text", None)
+                            if _auto_recall_both:
+                                msg_metadata["auto_recall"] = _auto_recall_both
                             eff_bid = runtime._effective_building_id(persona, building_id)
                             _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                             if isinstance(_last_bmsg, dict):
@@ -2332,6 +2335,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         accumulator = state.get("_pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
+                        _auto_recall_stream = state.pop("_auto_recall_text", None)
+                        if _auto_recall_stream:
+                            msg_metadata["auto_recall"] = _auto_recall_stream
                         eff_bid = runtime._effective_building_id(persona, building_id)
                         _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                         # 後続ツールが新しい persona_context 配下でも
@@ -2470,6 +2476,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _spell_at = state.get("_activity_trace")
                         if _spell_at:
                             _spell_msg_meta["activity_trace"] = list(_spell_at)
+                        _auto_recall_spell = state.pop("_auto_recall_text", None)
+                        if _auto_recall_spell:
+                            _spell_msg_meta["auto_recall"] = _auto_recall_spell
 
                         if event_callback:
                             _say_event: Dict[str, Any] = {
@@ -2886,6 +2895,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             accumulator = state.get("_pulse_usage_accumulator")
                             if accumulator:
                                 _spell_msg_meta_ns["llm_usage_total"] = dict(accumulator)
+                            _auto_recall_spell_ns = state.pop("_auto_recall_text", None)
+                            if _auto_recall_spell_ns:
+                                _spell_msg_meta_ns["auto_recall"] = _auto_recall_spell_ns
 
                             # Pipeline Streaming finalize: placeholder を全文 (= text、
                             # merged form) で確定。 voice-tts は sub-speak 経由で
@@ -2985,6 +2997,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         accumulator = state.get("_pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
+                        _auto_recall_ns = state.pop("_auto_recall_text", None)
+                        if _auto_recall_ns:
+                            msg_metadata["auto_recall"] = _auto_recall_ns
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
                         if pipeline_msg_id:
@@ -3235,6 +3250,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         accumulator = state.get("_pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
+                        _auto_recall_sync = state.pop("_auto_recall_text", None)
+                        if _auto_recall_sync:
+                            msg_metadata["auto_recall"] = _auto_recall_sync
                         eff_bid = runtime._effective_building_id(persona, building_id)
                         _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                         # 後続ツールが新しい persona_context 配下でも

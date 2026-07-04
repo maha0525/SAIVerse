@@ -502,6 +502,7 @@ class RuntimeEngine:
         text = state.get("last") or ""
         reasoning_text = state.pop("_reasoning_text", "")
         reasoning_details_val = state.pop("_reasoning_details", None)
+        auto_recall_text = state.pop("_auto_recall_text", None)
         activity_trace = state.get("_activity_trace")
         pulse_id = state.get("_pulse_id")
         eff_bid = self.runtime._effective_building_id(persona, building_id)
@@ -511,6 +512,9 @@ class RuntimeEngine:
             speak_metadata["reasoning"] = reasoning_text
         if reasoning_details_val is not None:
             speak_metadata["reasoning_details"] = reasoning_details_val
+        if auto_recall_text:
+            # 記憶アーキv2 §4.5: reasoning と同じ流儀で「ふと浮かんだ記憶」を永続化。
+            speak_metadata["auto_recall"] = auto_recall_text
         building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
         if outputs is not None:
             outputs.append(text)

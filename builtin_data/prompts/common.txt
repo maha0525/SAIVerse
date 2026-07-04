@@ -39,6 +39,10 @@ SAIVerse内の情報リソースには `saiverse://` で始まるURIでアクセ
 - `saiverse://self/messagelog/msg?contain=テキスト&window=2` — 該当メッセージの前後N件も含む
 
 ### 知識ベース（memopedia）
+あなたには「Memopedia」という知識ベースがあり、これまでに出会った人物・用語・出来事などの記憶が整理されて蓄えられています。
+会話に関連する記憶は自動的に「ふと浮かんだ記憶」として意識に上ってきます。無理に思い出そうとしなくても、必要な断片は勝手に浮かんできます。
+浮かんだ記憶をもっと深く知りたいときや、自分から特定のことを調べたいときは、memopedia_get_page や memory_recall_unified といったスペルでページの本文を読めます。
+
 - `saiverse://self/memopedia/page?title={title}` — Memopediaページ（タイトル指定）
 
 ### あらすじ（chronicle）

@@ -179,6 +179,11 @@ def compile_with_langgraph(
         # サブライン子 Playbook は run_playbook で _force_lightweight_model を立てる。
         # 子の中の LLM ノードがこれを見て軽量モデルを選ぶ。
         "_force_lightweight_model": parent.get("_force_lightweight_model", False),
+        # 自動想起 (記憶アーキv2 §4.5): このメッセージ列に対して _prepare_context が
+        # 実際に注入した「ふと浮かんだ記憶」本文 (<system> タグ除去済み)。say/speak
+        # ノードが state.pop() で取り出し、応答メッセージの metadata["auto_recall"]
+        # に載せる (reasoning と同じ運搬パターン)。未注入なら None。
+        "_auto_recall_text": parent.get("_auto_recall_text"),
         # UI-triggered pre-spells: executed once at the entry of the first LLM node.
         # Only seeded for top-level Pulses; sub-pulses (sub_play / run_playbook)
         # must not re-execute UI choices. Top-level is detected by absence of

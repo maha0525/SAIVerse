@@ -987,6 +987,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
                 "ACTIVITY_STATE": ai.ACTIVITY_STATE,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
+                "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
+                "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
@@ -1036,6 +1038,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         video_model: Optional[str] = None,
         memory_weave_model: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
+        autonomous_chronicle_enabled: Optional[bool] = None,
+        auto_recall_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         spell_enabled: Optional[bool] = None,
         realtime_info_enabled: Optional[bool] = None,
@@ -1146,6 +1150,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Chronicle auto-generation toggle
             if chronicle_enabled is not None:
                 ai.CHRONICLE_ENABLED = chronicle_enabled
+            # Update autonomous-Pulse Chronicle generation toggle (Phase 0, memory_architecture_v2 §6.3)
+            if autonomous_chronicle_enabled is not None:
+                ai.AUTONOMOUS_CHRONICLE_ENABLED = autonomous_chronicle_enabled
+            # Update auto-recall (記憶アーキv2 ゾーン C) per-persona toggle
+            if auto_recall_enabled is not None:
+                ai.AUTO_RECALL_ENABLED = auto_recall_enabled
             # Update Memory Weave context injection toggle
             if memory_weave_context is not None:
                 ai.MEMORY_WEAVE_CONTEXT = memory_weave_context

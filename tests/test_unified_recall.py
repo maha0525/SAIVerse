@@ -11,9 +11,11 @@ from sai_memory.arasuji import init_arasuji_tables
 from sai_memory.arasuji.storage import create_entry
 from sai_memory.memopedia import init_memopedia_tables
 from sai_memory.memopedia.storage import create_page, create_fragment
-from sai_memory.memory.storage import init_db
+from sai_memory.memory.chunking import chunk_text
+from sai_memory.memory.storage import add_message, init_db, replace_message_embeddings
 from sai_memory.unified_recall import (
     RecallHit,
+    _keyword_excerpt,
     count_chronicle_embeddings,
     count_fragment_embeddings,
     count_memopedia_embeddings,
@@ -23,6 +25,7 @@ from sai_memory.unified_recall import (
     get_chronicle_entries_without_embeddings,
     get_fragments_without_embeddings,
     get_memopedia_pages_without_embeddings,
+    reconstruct_message_excerpt,
     store_chronicle_embedding,
     store_fragment_embedding,
     store_memopedia_embedding,
@@ -371,6 +374,108 @@ class TestUnifiedRecall(unittest.TestCase):
 
         hits = unified_recall(self.conn, self.embedder, "データベース", topk=10)
         self.assertGreater(len(hits), 0)
+
+
+class TestMessageExcerptReconstruction(unittest.TestCase):
+    """rev4: メッセージヒットの表示 content を「マッチ箇所の抜粋」にする。"""
+
+    def setUp(self):
+        self.conn = init_db(":memory:")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_reconstruct_picks_matched_chunk(self):
+        # 長文メッセージを実際の chunk_text と同じパラメータ (既定 120/480) で
+        # 分割し、embedding 行数と一致させた状態で、後半のチャンクを指定して
+        # 復元すると、そのチャンクのテキストが返る (先頭ではない)。
+        head = "無関係な導入部の文章です。" * 30
+        target = "アイフィについての固有の話題がここにあります。"
+        tail = "さらに続く関係ない話です。" * 30
+        content = head + target + tail
+
+        msg_id = add_message(self.conn, thread_id="t1", role="user", content=content)
+        chunks = chunk_text(content, min_chars=120, max_chars=480)
+        # ターゲット文を含むチャンクの index を特定
+        target_idx = next(i for i, c in enumerate(chunks) if target in c)
+        self.assertGreater(target_idx, 0, "test setup should place target beyond chunk 0")
+        replace_message_embeddings(self.conn, msg_id, [[0.0] * 4 for _ in chunks])
+
+        excerpt, used_idx = reconstruct_message_excerpt(self.conn, msg_id, target_idx, content)
+        self.assertEqual(used_idx, target_idx)
+        self.assertIn(target, excerpt)
+        # 先頭200字だけのフォールバックでは含まれないはず (先頭は無関係な導入部)
+        self.assertNotIn(target, content[:200])
+
+    def test_reconstruct_falls_back_on_chunk_count_mismatch(self):
+        # embedding 行数と再分割チャンク数が食い違う場合 (パラメータ変更等を模す)、
+        # 整合性ガードにより先頭200字へフォールバックする。
+        content = "先頭の文章です。" + "本文が続きます。" * 50
+        msg_id = add_message(self.conn, thread_id="t1", role="user", content=content)
+        # 実際のチャンク数とは無関係な行数を挿入 (1行だけ = 明らかに不一致)
+        replace_message_embeddings(self.conn, msg_id, [[0.0] * 4])
+
+        excerpt, used_idx = reconstruct_message_excerpt(self.conn, msg_id, 0, content)
+        self.assertIsNone(used_idx)
+        self.assertEqual(excerpt, content[:200])
+
+    def test_reconstruct_empty_content(self):
+        excerpt, used_idx = reconstruct_message_excerpt(self.conn, "m1", 0, "")
+        self.assertEqual(excerpt, "")
+        self.assertIsNone(used_idx)
+
+    def test_keyword_excerpt_centers_on_match(self):
+        content = "前置き。" * 60 + "アイフィの話をしよう。" + "後書き。" * 60
+        excerpt = _keyword_excerpt(content, ["アイフィ"])
+        self.assertIn("アイフィ", excerpt)
+        # 先頭200字だけでは含まれない (前置きが200字を超えている)
+        self.assertNotIn("アイフィ", content[:200])
+
+    def test_keyword_excerpt_no_match_falls_back_to_head(self):
+        content = "関係ない内容です。" * 60
+        excerpt = _keyword_excerpt(content, ["存在しないキーワード"])
+        self.assertEqual(excerpt, content[:200])
+
+    def test_message_hit_content_is_excerpt_not_head(self):
+        # unified_recall 経由で、embedding のみでヒットするケース (クエリ語がキーワード
+        # としては本文と一致しない) を作り、表示 content が先頭200字固定でなく
+        # マッチしたチャンクの抜粋になっていること・chunk_index が埋め込み由来で
+        # 設定されることを確認する。
+        head = "全然関係ない話が延々と続きます。" * 15
+        target = "アイフィという固有の名前についての詳しい相談をしたい"
+        content = head + target
+        msg_id = add_message(self.conn, thread_id="t1", role="user", content=content)
+        chunks = chunk_text(content, min_chars=120, max_chars=480)
+        target_idx = next(i for i, c in enumerate(chunks) if target in c)
+        self.assertGreater(target_idx, 0)
+
+        class TargetedEmbedder:
+            model_name = "test"
+
+            def embed(self, texts, *, is_query=False):
+                out = []
+                for t in texts:
+                    if is_query or target in t:
+                        out.append([1.0, 0.0])
+                    else:
+                        out.append([0.0, 1.0])
+                return out
+
+        embedder = TargetedEmbedder()
+        vectors = embedder.embed(chunks, is_query=False)
+        replace_message_embeddings(self.conn, msg_id, vectors)
+
+        # クエリに使う語は本文中の語と重ならない語にして、キーワードパスでは
+        # ヒットしない (embedding 経由のみ) 状況を作る。
+        hits = unified_recall(
+            self.conn, embedder, "全く別の検索クエリ",
+            search_chronicle=False, search_memopedia=False,
+            search_fragments=False, search_messages=True,
+        )
+        message_hits = [h for h in hits if h.source_type == "message"]
+        self.assertEqual(len(message_hits), 1)
+        self.assertIn(target, message_hits[0].content)
+        self.assertEqual(message_hits[0].chunk_index, target_idx)
 
 
 if __name__ == "__main__":

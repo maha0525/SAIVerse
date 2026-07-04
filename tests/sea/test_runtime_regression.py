@@ -171,6 +171,97 @@ def test_run_playbook_delegates_to_runtime_runner(monkeypatch: pytest.MonkeyPatc
     }
 
 
+def test_run_playbook_carries_auto_recall_text_into_parent_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """記憶アーキv2 §4.5: _prepare_context (= _maybe_inject_auto_recall) が
+
+    persona._pending_auto_recall_text を立てたら、run_playbook がそれを
+    parent_state["_auto_recall_text"] へ転記し、_compile_with_langgraph の
+    parent_state kwarg まで運ぶこと (say/speak ノードが state.pop() で拾える
+    ようにする配線)。
+    """
+    from sea.runtime_runner import run_playbook
+
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
+    captured: dict = {}
+
+    def _prepare_context(*args, **kwargs):
+        # _maybe_inject_auto_recall が注入したときの挙動を模倣。
+        persona._pending_auto_recall_text = "ふと浮かんだ記憶:\n- [Chronicle] テスト"
+        return []
+
+    def _compile(*args, **kwargs):
+        captured["parent_state"] = kwargs["parent_state"]
+        return []
+
+    runtime._prepare_context = Mock(side_effect=_prepare_context)
+    runtime._compile_with_langgraph = Mock(side_effect=_compile)
+
+    run_playbook(runtime, playbook, persona, "b1", "hello", auto_mode=False)
+
+    assert captured["parent_state"]["_auto_recall_text"] == "ふと浮かんだ記憶:\n- [Chronicle] テスト"
+
+
+def test_run_playbook_does_not_carry_stale_auto_recall_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """前回 Pulse の persona._pending_auto_recall_text が残っていても、今回
+
+    _prepare_context が注入しなければ parent_state に auto_recall_text は
+    立たない (stale 値の混入防止)。
+    """
+    from sea.runtime_runner import run_playbook
+
+    runtime, persona = _runtime_and_persona()
+    persona._pending_auto_recall_text = "前回 Pulse の古い想起"
+    playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
+    captured: dict = {}
+
+    def _prepare_context(*args, **kwargs):
+        # 今回は注入なし (_maybe_inject_auto_recall がクリア済みの想定)。
+        return []
+
+    def _compile(*args, **kwargs):
+        captured["parent_state"] = kwargs["parent_state"]
+        return []
+
+    runtime._prepare_context = Mock(side_effect=_prepare_context)
+    runtime._compile_with_langgraph = Mock(side_effect=_compile)
+
+    run_playbook(runtime, playbook, persona, "b1", "hello", auto_mode=False)
+
+    assert "_auto_recall_text" not in captured["parent_state"]
+
+
+def test_lg_say_node_persists_auto_recall_into_metadata() -> None:
+    """記憶アーキv2 §4.5: state["_auto_recall_text"] は _lg_say_node が pop して
+
+    metadata["auto_recall"] に載る (reasoning と同じ運搬パターン)。次回以降の
+    ノード呼び出しでは再利用されない (pop 済み = 1 回だけ付与)。
+    """
+    runtime, persona = _runtime_and_persona()
+    persona.history_manager = SimpleNamespace(add_to_building_only=Mock())
+    manager = runtime.manager
+    manager.building_histories = {"b1": []}
+    manager.occupants = {"b1": ["pid"]}
+    manager.user_presence_status = "online"
+    manager.gateway_handle_ai_replies = Mock()
+    manager.unity_gateway = None
+
+    playbook = SimpleNamespace(name="pb")
+    node_def = SimpleNamespace(id="say", metadata_key=None)
+    node = runtime._lg_say_node(node_def, persona, "b1", playbook, outputs=[], event_callback=None)
+
+    state = {
+        "last": "こんにちは",
+        "_auto_recall_text": "ふと浮かんだ記憶:\n- [Chronicle] テスト",
+        "_pulse_id": "p-1",
+    }
+    asyncio.run(node(state))
+
+    payload = persona.history_manager.add_to_building_only.call_args.args[1]
+    assert payload["metadata"]["auto_recall"] == "ふと浮かんだ記憶:\n- [Chronicle] テスト"
+    assert "_auto_recall_text" not in state
+
+
 def test_emit_speak_payload_compatibility() -> None:
     manager = SimpleNamespace(
         building_histories={"b1": []},

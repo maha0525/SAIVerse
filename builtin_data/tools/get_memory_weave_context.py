@@ -19,14 +19,19 @@ def get_memory_weave_context(
     persona_id: Optional[str] = None,
     persona_dir: Optional[str] = None,
     max_chronicle_entries: int = 50,
-    memopedia_index_limit: int = 100,
+    memopedia_index_limit: int = 100,  # 記憶アーキv2 §7.1 で未使用化 (掲示廃止)。互換のため残置。
     history_anchor_message_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Build Memory Weave context messages containing Chronicle and Memopedia.
+    """Build Memory Weave context messages containing Chronicle (General + Track).
 
     This provides the persona with:
     - Chronicle: Recent events in detail, older events in summary (hierarchical)
-    - Memopedia: Page titles, keywords, and summaries (semantic memory)
+    - Track Chronicle: work history for the active track
+
+    記憶アーキv2 §7.1 (2026-07-04): Memopedia 索引の head 掲示は**廃止**した。
+    知識への接触はゾーン C の自動想起 (sea/auto_recall.py) + 深掘りスペルに一本化。
+    ペルソナが明示的に開いたページ (memopedia_open_page → get_open_pages_content) は
+    別機構なので影響しない。``memopedia_index_limit`` 引数は互換のため残すが未使用。
 
     The context is inserted after the system prompt but before visual context
     and conversation history.
@@ -80,15 +85,11 @@ def get_memory_weave_context(
             history_anchor_message_id=history_anchor_message_id,
         )
 
-        # 2. Get Memopedia context (semantic memory)
-        memopedia_text = _get_memopedia_context(conn, index_limit=memopedia_index_limit)
-        LOGGER.info("get_memory_weave_context: Memopedia text length=%d", len(memopedia_text))
-        if not memopedia_text:
-            LOGGER.warning("get_memory_weave_context: Memopedia context is empty")
-
+        # 記憶アーキv2 §7.1: Memopedia 索引の head 掲示は廃止 (自動想起 + 深掘り
+        # スペルに一本化)。ここでは Memopedia を組み立てない。
         conn.close()
 
-        # Build separate messages for Chronicle / Track Chronicle / Memopedia
+        # Build separate messages for Chronicle / Track Chronicle
         # so the context preview can show token breakdown per source
         messages: List[Dict[str, Any]] = []
         if chronicle_text:
@@ -113,21 +114,6 @@ def get_memory_weave_context(
                     "__memory_weave_type__": "track_chronicle",
                 },
             })
-        if memopedia_text:
-            memopedia_intro = (
-                "以下は、あなたの長期記憶（Memopedia: 記憶ベース）です。\n"
-                "タイトルと概要のみが表示されているページは、ここに載っている以上の詳細な内容を持っています。"
-                "特定のページの詳細を確認したい場合は、memopedia_get_page ツールを使って本文を読んでください。"
-            )
-            messages.append({
-                "role": "user",
-                "content": f"{memopedia_intro}\n\n{memopedia_text}",
-                "metadata": {
-                    MEMORY_WEAVE_CONTEXT_MARKER: True,
-                    "__memory_weave_type__": "memopedia",
-                },
-            })
-
         total_chars = sum(len(m["content"]) for m in messages)
         LOGGER.info(
             "get_memory_weave_context: Generated %d messages (%d chars total, track_chronicle=%s)",
@@ -309,87 +295,6 @@ def _get_track_unprocessed_messages_text(
         lines.append(f"- [{ts}] {role_label}: {content_clean}")
     lines.append("```")
     return "\n".join(lines)
-
-
-def _get_memopedia_context(
-    conn: sqlite3.Connection,
-    *,
-    index_limit: int = 100,
-) -> str:
-    """Get Memopedia context (page titles, summaries, optionally content for vivid pages).
-
-    Args:
-        conn: Database connection to memory.db
-        index_limit: Max pages per category to include (sorted by most recently
-                     referenced/updated). 0 = unlimited.
-    """
-    try:
-        from sai_memory.memopedia import Memopedia, init_memopedia_tables
-
-        init_memopedia_tables(conn)
-        memopedia = Memopedia(conn)
-
-        tree = memopedia.get_tree()
-        LOGGER.info("_get_memopedia_context: tree keys=%s", list(tree.keys()))
-        lines: List[str] = []
-
-        category_names = {
-            "people": "人物",
-            "terms": "用語",
-            "plans": "予定",
-            "events": "出来事",
-        }
-
-        def _sort_key(page: Dict) -> int:
-            return max(
-                page.get("last_referenced_at") or 0,
-                page.get("updated_at") or 0,
-            )
-
-        def _list_pages(pages: List[Dict], prefix: str = "") -> None:
-            for page in pages:
-                if not page["id"].startswith("root_"):
-                    vividness = page.get("vividness", "rough")
-                    sid = page.get("short_id")
-                    id_suffix = f" [id: m:{sid}]" if sid else ""
-
-                    if vividness == "buried":
-                        continue
-                    elif vividness == "faint":
-                        lines.append(f"{prefix}- {page['title']}{id_suffix}")
-                    elif vividness == "rough":
-                        lines.append(f"{prefix}- {page['title']}{id_suffix}: {page['summary']}")
-                    elif vividness == "vivid":
-                        summary = page['summary']
-                        lines.append(f"{prefix}- **{page['title']}**{id_suffix}: {summary}")
-                        body = memopedia.render_page_body(page["id"])
-                        if body:
-                            for line in body.split("\n"):
-                                lines.append(f"{prefix}  {line}")
-
-                children = page.get("children", [])
-                if children:
-                    _list_pages(children, prefix + "  ")
-
-        for category in ["people", "terms", "plans", "events"]:
-            pages = tree.get(category, [])
-            LOGGER.debug("_get_memopedia_context: category=%s, pages count=%d", category, len(pages))
-            if pages:
-                # Sort by most recently referenced/updated, apply limit
-                lines.append(f"\n### {category_names[category]}")
-                _list_pages(pages)
-
-        LOGGER.info("_get_memopedia_context: Generated %d lines", len(lines))
-        if not lines:
-            return ""
-
-        return "\n".join(lines)
-    except ImportError:
-        LOGGER.debug("Memopedia module not available")
-        return ""
-    except Exception as exc:
-        LOGGER.warning("Failed to get Memopedia context: %s", exc)
-        return ""
 
 
 # Tool definition for registry (optional, mainly used via runtime.py)

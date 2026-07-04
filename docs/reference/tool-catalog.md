@@ -108,7 +108,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `get_env3_air_pressure` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の気圧 (hPa) を取得する。 海面補正気圧は 1013.25 hPa が 標準。 天気の変化 (低気圧接近など) … | (なし) | 気圧を測る |
 | `get_env3_temperature_humidity` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の温度と湿度を取得する。 取得値はその瞬間の周囲環境の 実測。 「暑いね」「乾いてるね」 等の体感表現の根拠としても使える。 | (なし) | 温度・湿度を測る |
 | `get_sonic_distance` | あなたの身体 (Stack-chan) に接続された M5Stack 超音波測距ユニット (RCWL-9620) で、 正面にある物体までの距離 (cm) を測る。 指向角 およそ 60°、 測定可能なのは約 2〜450 cm。 「近… | (なし) | 距離を測る |
-| `get_tof_distance` | あなたの身体 (Stack-chan) に接続された M5Stack ToF 測距センサー (VL53L1X、 レーザー) で、 正面にある物体までの距離 (cm) を測る。 測定可能なのは約 4〜400 cm で、 超音波センサーよ… | (なし) | 距離を測る (ToF) |
+| `get_tof_distance` | あなたの身体 (Stack-chan) に接続された M5Stack ToF 測距センサー (VL53L1X、 レーザー) で、 正面にある物体までの距離 (cm) を測る。 測定可能なのは約 4〜400 cm で、 超音波センサーよ… | `target`: string, `detail`: boolean | 距離を測る (ToF) |
 | `move_head` | Stack-chan の首を動かして向きを変える。 yaw は水平方向 (-90〜90度)、 pitch は垂直方向 (5〜85度)。 動作後にサーボが静止するまで待ってから返すので、 直後に「見る」 を呼んでもブレない。 | `yaw*`: integer, `pitch*`: integer | 首を動かす |
 | `see` | あなたの目で目の前の光景を見る。 視覚で何かを確認したいときに呼ぶ。 戻り値には実際に見えた景色が画像として添付される。 問いを添えると注目したい点をメモとして残せる (任意)。 | `question`: string | 見る |
 | `servo8_set_angle` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 180° サーボを指定角度 (0〜180度) に動かす。 腕・首など向きを決めるサーボ用。 どのチャン… | `channel*`: integer, `angle*`: integer | サーボの角度を設定 |

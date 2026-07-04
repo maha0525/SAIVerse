@@ -1314,6 +1314,78 @@
     to { transform: rotate(360deg); }
 }
 
+/* Auto-recall Block (記憶アーキv2 §4.5: 「ふと浮かんだ記憶」) */
+.recallBlock {
+    margin-bottom: 8px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.06) 0%, rgba(168, 85, 247, 0.06) 100%);
+    border: 1px solid rgba(139, 92, 246, 0.15);
+    font-size: 0.85rem;
+    overflow: hidden;
+}
+
+:global([data-theme="dark"]) .recallBlock {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.12) 0%, rgba(168, 85, 247, 0.1) 100%);
+    border-color: rgba(139, 92, 246, 0.25);
+}
+
+.recallSummary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+    color: rgba(139, 92, 246, 0.85);
+    font-weight: 500;
+    font-size: 0.8rem;
+    list-style: none;
+}
+
+.recallSummary::-webkit-details-marker {
+    display: none;
+}
+
+.recallSummary::after {
+    content: '';
+    margin-left: auto;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    opacity: 0.5;
+    transition: transform 0.2s;
+}
+
+.recallBlock[open] .recallSummary::after {
+    transform: rotate(180deg);
+}
+
+:global([data-theme="dark"]) .recallSummary {
+    color: rgba(196, 181, 253, 0.9);
+}
+
+.recallIcon {
+    display: flex;
+    align-items: center;
+    opacity: 0.75;
+}
+
+.recallContent {
+    padding: 0 12px 10px;
+    color: rgba(100, 100, 120, 0.85);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+:global([data-theme="dark"]) .recallContent {
+    color: rgba(180, 180, 200, 0.8);
+}
+
 /* Activity Block */
 .activityBlock {
     margin-bottom: 8px;

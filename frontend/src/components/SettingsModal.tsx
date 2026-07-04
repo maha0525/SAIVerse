@@ -40,6 +40,8 @@ interface AIConfig {
     memory_weave_model: string | null;
     activity_state: string;  // 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: boolean;
+    autonomous_chronicle_enabled: boolean;
+    auto_recall_enabled: boolean;
     memory_weave_context: boolean;
     realtime_info_enabled: boolean;
     avatar_path: string | null;
@@ -136,6 +138,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
     const [activityState, setActivityState] = useState<string>('Idle');
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
+    const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
+    const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
@@ -254,6 +258,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setMemoryWeaveModel(data.memory_weave_model || '');
                 setActivityState(data.activity_state || 'Idle');
                 setChronicleEnabled(data.chronicle_enabled ?? true);
+                setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
+                setAutoRecallEnabled(data.auto_recall_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
@@ -379,6 +385,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     memory_weave_model: memoryWeaveModel,
                     activity_state: activityState,
                     chronicle_enabled: chronicleEnabled,
+                    autonomous_chronicle_enabled: autonomousChronicleEnabled,
+                    auto_recall_enabled: autoRecallEnabled,
                     memory_weave_context: memoryWeaveContext,
                     spell_enabled: spellEnabled,
                     realtime_info_enabled: realtimeInfoEnabled,
@@ -921,6 +929,40 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <div>推定LLM呼び出し: {costEstimate.estimated_llm_calls}回</div>
                                     </div>
                                 )}
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>自律行動中も記憶整理（Chronicle生成）を行う</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={autonomousChronicleEnabled}
+                                            onChange={(e) => setAutonomousChronicleEnabled(e.target.checked)}
+                                        />
+                                        <span>{autonomousChronicleEnabled ? '有効' : '無効'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    自律稼働中（ユーザーとの会話以外のタイミング）にMetabolismが走った際も、確認なしでChronicleを自動生成します。無効にすると、自律稼働中に溜まった会話はChronicle化されず、次にユーザーと会話するまで長期記憶に残りません。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>自動想起（ふと浮かんだ記憶）</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={autoRecallEnabled}
+                                            onChange={(e) => setAutoRecallEnabled(e.target.checked)}
+                                        />
+                                        <span>{autoRecallEnabled ? '有効' : '無効'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    会話の内容に関連する記憶を自動的に思い出し、応答に反映します。無効にすると、記憶の想起はスペルによる手動想起のみになります。
+                                </div>
                             </div>
 
                             <div className={styles.fieldGroup}>

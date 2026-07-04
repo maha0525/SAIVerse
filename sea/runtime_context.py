@@ -43,7 +43,7 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
     return result
 
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None) -> List[Dict[str, Any]]:
     from sea.playbook_models import ContextRequirements
 
     # Use provided requirements or default to full context
@@ -425,8 +425,127 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         except Exception as exc:
             LOGGER.debug("[sea][prepare-context] Failed to build realtime context: %s", exc)
 
+    # ---- 自動想起 第0層 (ゾーン C) — 「浮かんだ記憶」の末尾注入 ----
+    # 記憶アーキv2 §4。CONVERSATION アスペクト (user/schedule Pulse) のときのみ、
+    # ローカル埋め込み検索で現在の話題に関連する記憶を末尾に一時注入する。
+    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1)。
+    # サブライン (line='sub') はそもそも _prepare_context を通らないので自然に除外。
+    if not preview_only:
+        try:
+            _maybe_inject_auto_recall(
+                runtime, persona, messages,
+                pulse_type=pulse_type,
+                event_callback=event_callback,
+            )
+        except Exception:
+            LOGGER.exception("[sea][prepare-context] auto_recall injection failed (non-fatal)")
+
     # ---- Token budget check ----
     return messages
+
+
+def _maybe_inject_auto_recall(
+    runtime,
+    persona: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    pulse_type: Optional[str],
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> None:
+    """自動想起ブロックを組み立て、履歴末尾 (最新 user 入力の直前) に注入する。
+
+    記憶アーキv2 §4。スコープは CONVERSATION アスペクトのみ (§4.6)。注入発生時は
+    event_callback で ``auto_recall`` イベントを流し、フロントで折りたたみ表示する (§4.5)。
+    """
+    from sea.pulse_context import Aspect, aspect_from_pulse_type
+
+    aspect = aspect_from_pulse_type(pulse_type)
+    if aspect is not Aspect.CONVERSATION:
+        LOGGER.debug(
+            "[sea][auto_recall] skip: aspect=%s (pulse_type=%s) is not CONVERSATION",
+            aspect.value, pulse_type,
+        )
+        return
+
+    # ペルソナ単位 ON/OFF トグル (AUTO_RECALL_ENABLED)。OFF のときは注入せず、
+    # 粘着台帳もリセットする (再度 ON にしたとき古い記憶を引きずらないため)。
+    persona_id_for_gate = getattr(persona, "persona_id", None)
+    if not runtime._is_auto_recall_enabled_for_persona(persona):
+        LOGGER.debug(
+            "[sea][auto_recall] skip: AUTO_RECALL_ENABLED=False for persona=%s",
+            persona_id_for_gate,
+        )
+        if persona_id_for_gate:
+            from sea.auto_recall import reset_ledger
+            reset_ledger(persona_id_for_gate)
+        return
+
+    sai_mem = getattr(persona, "sai_memory", None)
+    conn = getattr(sai_mem, "conn", None) if sai_mem else None
+    embedder = getattr(sai_mem, "embedder", None) if sai_mem else None
+    persona_id = getattr(persona, "persona_id", None)
+    if not persona_id or conn is None or embedder is None:
+        LOGGER.debug(
+            "[sea][auto_recall] skip: persona_id/conn/embedder unavailable (persona=%s)",
+            persona_id,
+        )
+        return
+
+    from sea.auto_recall import run_auto_recall
+
+    result = run_auto_recall(conn, embedder, messages, persona_id=persona_id)
+    if not result.injected or not result.block:
+        return
+
+    recall_msg = {
+        "role": "user",
+        "content": result.block,
+        "metadata": {"__auto_recall__": True},
+    }
+
+    # realtime_context と同じ挿入面: 最新 user メッセージの直前に入れる
+    # (cached_head_architecture C5 と同じ末尾注入面)。auto_recall メタ付きの
+    # 自己メッセージは対象外にして冪等にする。
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "user":
+            continue
+        meta = m.get("metadata") or {}
+        if meta.get("__auto_recall__") or meta.get("__realtime_context__"):
+            continue
+        last_user_idx = i
+        break
+
+    if last_user_idx is not None:
+        messages.insert(last_user_idx, recall_msg)
+    else:
+        messages.append(recall_msg)
+
+    LOGGER.debug(
+        "[sea][auto_recall] injected block before last user (idx=%s, %d chars)",
+        last_user_idx, result.char_count,
+    )
+
+    if event_callback:
+        try:
+            event_callback({
+                "type": "auto_recall",
+                "content": result.block,
+                "persona_id": persona_id,
+                "persona_name": getattr(persona, "persona_name", None),
+            })
+        except Exception:
+            LOGGER.debug("[sea][auto_recall] event_callback failed", exc_info=True)
+
+    # 永続化用の受け渡し (reasoning と同じ「state 経由で speak/say ノードまで運ぶ」流儀)。
+    # _prepare_context は純粋関数 (messages しか返さない) なので、run_playbook が
+    # parent_state に転記できるよう persona の一時属性に置く (persona._current_pulse_type
+    # と同じパターン。永続化するのは <system> タグを剥がした本文のみ — スペル実行結果と
+    # 同様、履歴末尾への再注入とは別経路で ChatMessage.auto_recall に載る (api/routes/chat.py)。
+    # LLM コンテキストには載らない (推論と同じ扱い。metadata は llm_clients 側で
+    # 読まれるのは media 系キーのみ)。
+    persona._pending_auto_recall_text = result.plain_text
 
 
 def _expand_recalled_ids(

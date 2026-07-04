@@ -189,6 +189,13 @@ def run_playbook(
             pulse_id,
             "playbook-defined" if playbook.context_requirements else "FULL (default)",
         )
+        # persona._pending_auto_recall_text は _prepare_context (実体は
+        # _maybe_inject_auto_recall) が「今回このメッセージ列に注入した」場合のみ
+        # 立てる一時属性。呼び出し前に一旦クリアしておき、今回の呼び出しで注入が
+        # 起きなければ古い値を引きずらないようにする (state 経由で say/speak
+        # ノードまで運ぶ設計は reasoning の _reasoning_text と同じ、docs/intent/
+        # memory_architecture_v2.md §4.5)。
+        persona._pending_auto_recall_text = None
         base_messages = runtime._prepare_context(
             persona,
             building_id,
@@ -198,8 +205,16 @@ def run_playbook(
             warnings=context_warnings,
             event_callback=wrapped_event_callback,
             cancellation_token=cancellation_token,
+            pulse_type=pulse_type,
         )
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
+        _auto_recall_text = getattr(persona, "_pending_auto_recall_text", None)
+        if _auto_recall_text:
+            parent["_auto_recall_text"] = _auto_recall_text
+            LOGGER.debug(
+                "[sea][run-playbook] %s: carrying auto_recall text (%d chars) into state",
+                playbook.name, len(_auto_recall_text),
+            )
     conversation_msgs = list(base_messages)
 
     for warn in context_warnings:

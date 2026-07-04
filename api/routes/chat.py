@@ -48,6 +48,11 @@ class ChatMessage(BaseModel):
     audios: Optional[List[ChatMessageImage]] = None
     videos: Optional[List[ChatMessageImage]] = None
     reasoning: Optional[str] = None
+    # 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」の
+    # 本文 (<system> タグ除去済み)。reasoning と同じくアシスタント応答メッセージの
+    # metadata から復元する (永続化は sea/runtime.py _lg_say_node 等、
+    # metadata["auto_recall"])。
+    auto_recall: Optional[str] = None
     activity_trace: Optional[List[dict]] = None
     llm_usage: Optional[ChatMessageLLMUsage] = None
     llm_usage_total: Optional[ChatMessageLLMUsageTotal] = None
@@ -222,6 +227,14 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
     if metadata and "reasoning" in metadata:
         reasoning_data = metadata["reasoning"]
 
+    # Extract auto_recall (記憶アーキv2 §4.5「ふと浮かんだ記憶」) from metadata.
+    # reasoning と全く同じパターン: 永続化された metadata から復元するだけで、
+    # LLM コンテキストの再構築には一切使わない (sea/runtime_context.py 側で
+    # 履歴末尾への一時注入と ChatMessage 復元は別経路)。
+    auto_recall_data = None
+    if metadata and "auto_recall" in metadata:
+        auto_recall_data = metadata["auto_recall"]
+
     # Extract activity trace from metadata
     activity_trace_data = None
     if metadata and "activity_trace" in metadata:
@@ -239,6 +252,7 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
         audios=audios_list,
         videos=videos_list,
         reasoning=reasoning_data,
+        auto_recall=auto_recall_data,
         activity_trace=activity_trace_data,
         llm_usage=llm_usage_data,
         llm_usage_total=llm_usage_total_data

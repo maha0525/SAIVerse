@@ -51,6 +51,8 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         memory_weave_model=details.get("MEMORY_WEAVE_MODEL"),
         activity_state=details["ACTIVITY_STATE"],
         chronicle_enabled=details.get("CHRONICLE_ENABLED", True),
+        autonomous_chronicle_enabled=details.get("AUTONOMOUS_CHRONICLE_ENABLED", True),
+        auto_recall_enabled=details.get("AUTO_RECALL_ENABLED", True),
         memory_weave_context=details.get("MEMORY_WEAVE_CONTEXT", True),
         spell_enabled=details.get("SPELL_ENABLED", True),
         realtime_info_enabled=details.get("REALTIME_INFO_ENABLED", True),
@@ -117,6 +119,8 @@ def update_persona_config(
         avatar_upload=None,
         appearance_image_path=new_appearance,
         chronicle_enabled=req.chronicle_enabled,
+        autonomous_chronicle_enabled=req.autonomous_chronicle_enabled,
+        auto_recall_enabled=req.auto_recall_enabled,
         memory_weave_context=req.memory_weave_context,
         spell_enabled=req.spell_enabled,
         realtime_info_enabled=req.realtime_info_enabled,
@@ -213,12 +217,26 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
                 memory_weave_enabled = False
         finally:
             db2.close()
-    if memory_weave_enabled and hasattr(manager, "runtime") and manager.runtime:
+    # NOTE: SEARuntime は manager.sea_runtime。manager.runtime は RuntimeService
+    # (別物) で、かつて誤参照して AttributeError を握り潰し「完了しました」を
+    # 返し続けていた (2026-07-04 修正)。フロントの confirm() で同意済みのため
+    # force=True で確認ダイアログを経ずに生成する。
+    sea_runtime = getattr(manager, "sea_runtime", None)
+    if memory_weave_enabled and sea_runtime:
         try:
-            manager.runtime._generate_chronicle(persona)
+            sea_runtime._generate_chronicle(persona, force=True)
             chronicle_generated = True
         except Exception as exc:
             LOGGER.warning("[organize-memory] Chronicle generation failed: %s", exc)
+
+    # 3.5. Recall embedding maintenance — Chronicle 生成の成否・トグルとは独立に
+    # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料)。
+    # _run_metabolism 側の step 2.7 と同じ独立ステップ。
+    if sea_runtime:
+        try:
+            sea_runtime._ensure_recall_embeddings(persona)
+        except Exception:
+            LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
 
     # 4. Dispatch METABOLISM event to head_pipeline (snapshot refresh)
     try:

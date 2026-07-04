@@ -72,8 +72,6 @@ class MemoryWeaveSection:
         persona_dir_path = getattr(sai_mem, "persona_dir", None) if sai_mem else None
         persona_dir = str(persona_dir_path) if persona_dir_path else None
 
-        index_limit = self._resolve_memopedia_index_limit(manager, ctx.persona_id)
-
         # metabolism anchor を渡して、track_chronicle の生メッセージダンプから
         # 「履歴 (anchor 以降) に既に載っている分」を除外させる (重複トークン削減)。
         history_mgr = getattr(persona, "history_manager", None)
@@ -81,9 +79,10 @@ class MemoryWeaveSection:
 
         try:
             with persona_context(ctx.persona_id, persona_dir, manager):
+                # 記憶アーキv2 §7.1: Memopedia 索引の head 掲示は廃止。この経路は
+                # Chronicle / Track Chronicle のみを返す。
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
-                    memopedia_index_limit=index_limit,
                     history_anchor_message_id=anchor_id,
                 )
         except Exception:
@@ -159,22 +158,6 @@ class MemoryWeaveSection:
         )
 
     # ---- 内部ヘルパー ----
-
-    def _resolve_memopedia_index_limit(self, manager, persona_id: str) -> int:
-        session_factory = getattr(manager, "SessionLocal", None)
-        if not session_factory:
-            return 100
-        db = session_factory()
-        try:
-            from database.models import AI as AIModel
-            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
-            if ai and ai.MEMOPEDIA_INDEX_LIMIT is not None:
-                return int(ai.MEMOPEDIA_INDEX_LIMIT)
-            return 100
-        except Exception:
-            return 100
-        finally:
-            db.close()
 
     def _resolve_enabled(self, manager, persona_id: str) -> bool:
         session_factory = getattr(manager, "SessionLocal", None)
