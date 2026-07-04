@@ -232,7 +232,7 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 
 - **Phase 0（独立・先行可、2026-07-04 実装済み）**: 自律 Pulse の General Chronicle 生成修正（§6.3、`AUTONOMOUS_CHRONICLE_ENABLED` 列＋設定チェーン＋UI トグル）。`docs/concepts/memopedia.md` の陳腐化修正（§7.4）。Memopedia `MEMOPEDIA_INDEX_LIMIT` の確認 → **未適用が事実と確定**（`_list_pages()` にスライスなし、`_sort_key()` は未使用のデッドコード。全ページが無制限列挙されている。Phase 1 の掲示廃止で解消されるため修正しない）。
 - **Phase 1（体感が変わる本丸、2026-07-04 実装済み・実機検証待ち）**: 自動想起 第0層（§4、`sea/auto_recall.py`）＋ weave からの Memopedia 索引除去（§7.1）＋共通プロンプト告知（§7.1）＋折りたたみ UI（§4.5）。しきい値は実測により 0.86（§12-1）。
-- **Phase 2**: コア記憶セクション＋編集ツール＋初期シード導入フロー（§5）。
+- **Phase 2（2026-07-04 実装済み）**: コア記憶セクション＋編集スペル（note）＋ scene 種別（実会話の切り抜き）＋ UI 導線（会話検索→窓プレビュー→刻む）（§5）。初期シード導入フロー（人物カテゴリから選ばせる会話）のみ未着手。
 - **Phase 3**: Chronicle 読み込みの予算制（§6.2）。
 - **Phase 4**: インポート新フロー（§8）＋ドキュメント（引っ越しガイド更新）。
 - **Phase 5（余白と掃除）**: Fragment スキーマ余白の ALTER（§7.3）。v1 メモリーノート方式（`note_extractor.py` 等）・`recalled_ids` 系 API・archive playbooks の撤去。
