@@ -966,13 +966,18 @@ _WORKER_INSTRUCTION_TEMPLATES = {
 _NO_REF_TARGET = "(参照タスクなし。目的の記述に従うこと)"
 
 
-def _handle_worker_slot(
+def run_worker_slot_session(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
-) -> Optional[int]:
-    """「作る」「知る」コマ: 決定論テンプレートで指示書を組み run_work_session を運転する。
+) -> Any:
+    """「作る」「知る」コマの作業セッション 1 本を運転し、結果をそのまま返す。
+
+    決定論テンプレートで指示書を組み ``run_work_session`` を呼ぶ実体。組み込み
+    ハンドラ (:func:`_handle_worker_slot`) と、セッション終了判断へ接続する
+    上位層 (``saiverse.day_scenario.ScenarioPlayer`` のラップハンドラ) が共有する
+    — 後者は post_session 判断の入力として ``WorkSessionResult`` 全体が要る。
 
     Returns:
-        実際に消費したラウンド数 (``_fire_slot`` が予算台帳へ積算する)。
+        ``sea.work_session.WorkSessionResult`` (raise しない契約)。
     """
     kind = slot["kind"]
     template = _WORKER_INSTRUCTION_TEMPLATES[kind]
@@ -1008,8 +1013,27 @@ def _handle_worker_slot(
         persona_id, plan_date_str, index, kind,
         result.ended_reason, result.rounds_used, len(result.artifacts),
     )
+    return result
+
+
+def worker_session_rounds_used(result: Any) -> int:
+    """WorkSessionResult から予算台帳へ積算する実測ラウンド数を安全に読む。"""
     rounds_used = getattr(result, "rounds_used", 0) or 0
-    return int(rounds_used) if isinstance(rounds_used, int) else 0
+    if isinstance(rounds_used, bool) or not isinstance(rounds_used, int):
+        return 0
+    return int(rounds_used)
+
+
+def _handle_worker_slot(
+    manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
+) -> Optional[int]:
+    """「作る」「知る」コマの組み込みハンドラ。
+
+    Returns:
+        実際に消費したラウンド数 (``_fire_slot`` が予算台帳へ積算する)。
+    """
+    result = run_worker_slot_session(manager, persona_id, plan_date_str, slot, index)
+    return worker_session_rounds_used(result)
 
 
 def _handle_living_slot(

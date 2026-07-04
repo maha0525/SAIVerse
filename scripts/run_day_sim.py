@@ -1,0 +1,477 @@
+#!/usr/bin/env python
+"""一日シミュレータ CLI — シナリオを回して一日レポート (一日新聞) を出す (自律行動 v2 §12)。
+
+Usage:
+  python scripts/run_day_sim.py --scenario <file.json> [--db-file <path>]
+  python scripts/run_day_sim.py --scenario <file.json> --real --city city_a --db-file <path>
+  python scripts/run_day_sim.py --scenario <file.json> --report-only --db-file <path>
+
+モード (二段モード、intent §12):
+
+- **mock (既定、安全側)**: LLM を一切呼ばない配線テスト。判断点はルールベースの
+  mock 裁定 (day_open は動的 enum から時間割を機械編成、post_session は成果物が
+  あれば done)、作業セッションは mock LLM (document_create スペル発動 → mock
+  スペルが Item を実際に DB へ作る) で運転する。DB は --db-file (省略時
+  in-memory) に最小スキーマを作る — **本番 DB を渡さないこと** (シナリオの
+  ペルソナ行等を書き込む)。
+- **--real (実 LLM モード)**: SAIVerseManager を実 DB で構築し (``start()`` は
+  呼ばない — 背景スレッドなしの DES 単一スレッド)、判断点は実 Playbook + 実 LLM、
+  セッションは実スペルで運転する。**環境の API キー (OPENAI_API_KEY /
+  GEMINI_API_KEY / CLAUDE_API_KEY 等) を使い、実コストが発生する。** 一巡の
+  コストはおおよそ日次予算ぶんの LLM コールになる。テスト環境
+  (test_fixtures/setup_test_env.py で作った test_data/) の DB を --db-file で
+  渡し、SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR も test_fixtures 流儀で
+  切り替えて使うこと (本番 DB / 本番ペルソナには向けない)。
+
+- **--report-only**: シナリオは回さず、シナリオの persona_id / plan_date に
+  対する一日レポートだけを既存 DB から生成する。SAIMemory 由来の節
+  (セッションダイジェスト等) はペルソナ adapter が無い構成では「(なし)」になる。
+
+レポートは stdout に出力し、--out (省略時 ~/.saiverse/personas/<id>/day_reports/
+<date>.md) へも書き出す。
+
+シナリオ JSON の形式は saiverse/day_scenario.py のモジュール docstring を参照。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import tempfile
+import uuid
+from contextlib import ExitStack
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
+from unittest.mock import patch
+
+# プロジェクトルートを追加
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+LOGGER = logging.getLogger("scripts.run_day_sim")
+
+
+# ---------------------------------------------------------------------------
+# mock モードの部品 (配線テスト: LLM コストゼロ)
+# ---------------------------------------------------------------------------
+
+
+class ListMemoryAdapter:
+    """SAIMemory adapter の最小 mock (append + tag フィルタ付き読み出し)。"""
+
+    def __init__(self) -> None:
+        self.messages: List[Dict[str, Any]] = []
+
+    def get_current_thread(self) -> str:
+        return "mock_thread"
+
+    def append_persona_message(self, payload: Dict[str, Any]) -> None:
+        self.messages.append(dict(payload))
+
+    def recent_persona_messages_by_count(self, max_messages, *, required_tags=None,
+                                         required_line_roles=None,
+                                         required_scopes=None, pulse_id=None):
+        selected = []
+        for payload in self.messages:
+            tags = (payload.get("metadata") or {}).get("tags") or []
+            if required_tags and not all(t in tags for t in required_tags):
+                continue
+            selected.append(payload)
+        return selected[-max_messages:]
+
+
+class MockSessionLLMClient:
+    """作業セッション用のルールベース mock LLM。
+
+    直近のメッセージを見て応答を決める:
+    - 指示書 (【指示書】) が来たら: 指示書に document_create の語があれば
+      document_create スペルを 1 発、なければスペルなしの短い作業報告
+    - ダイジェスト指示が来たら: 短い要約
+    - それ以外 (スペル実行結果の確認) は: スペルなしの締めの言葉
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, messages, tools=None, temperature=None, **kwargs):
+        self.calls += 1
+        last = str((messages or [{}])[-1].get("content") or "")
+        if "作業セッションはここで終了" in last:
+            return "指示書のとおりに作業した。実際に行ったことだけをここに残す。"
+        if "【指示書】" in last:
+            if "document_create" in last:
+                title = f"mock成果物-{self.calls}"
+                return (
+                    "作業に取りかかる。\n"
+                    f"/spell name='document_create' args={{\"title\": \"{title}\"}}"
+                )
+            return "資料を読み、要点を頭の中で整理した。今回はここまでにする。"
+        return "結果を確認した。これで一区切りにする。"
+
+    def consume_usage(self):
+        return None
+
+
+class MockWorkRuntime:
+    """run_work_session が触る SEARuntime 最小 mock (tests/test_work_session.py と同型)。
+
+    _store_memory は committed / volatile を解決しつつ、ペルソナの
+    ListMemoryAdapter へ転送する (一日レポートがダイジェストを読めるように)。
+    """
+
+    def __init__(self, llm_client: MockSessionLLMClient):
+        self.llm_client = llm_client
+
+    def _prepare_context(self, persona, building_id, user_input, requirements,
+                         pulse_id=None, **kwargs):
+        return [{"role": "system", "content": "HEAD (mock)"}]
+
+    def _select_llm_client(self, node_def, persona, needs_structured_output=False,
+                           state=None):
+        return self.llm_client
+
+    def _default_temperature(self, persona):
+        return None
+
+    def _get_cache_kwargs(self, persona_id=None):
+        return {}
+
+    def _is_spell_enabled_for_persona(self, persona):
+        return True
+
+    def _dump_llm_io(self, playbook_name, node_id, persona, messages, output_text):
+        return None
+
+    def _accumulate_usage(self, state, model, input_tokens, output_tokens,
+                          cost_usd, cached_tokens=0, cache_write_tokens=0):
+        return None
+
+    def _touch_anchor_after_llm_call(self, persona, usage):
+        return None
+
+    def _get_or_create_pulse_context(self, pulse_id, thread_id):
+        from sea.pulse_context import PulseContext
+        return PulseContext(pulse_id=pulse_id, thread_id=thread_id)
+
+    def _flush_pulse_logs(self, persona, pulse_context):
+        return None
+
+    def _store_memory(self, persona, text, *, role="assistant", tags=None,
+                      pulse_id=None, metadata=None, playbook_name=None,
+                      pulse_context=None, line_role=None, line_id=None,
+                      origin_track_id=None, scope=None, paired_action_text=None,
+                      thought_signature=None, spell_origin_id=None, spell_seq=None,
+                      return_message_id=False):
+        from saiverse import clock
+
+        resolved_scope = scope
+        if pulse_context is not None and resolved_scope is None:
+            resolved_scope = pulse_context.current_line_metadata().get("scope")
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is not None and hasattr(adapter, "append_persona_message"):
+            payload_metadata = dict(metadata or {})
+            payload_metadata["tags"] = list(tags or [])
+            adapter.append_persona_message({
+                "role": role,
+                "content": text,
+                "created_at": clock.now().isoformat(timespec="seconds"),
+                "metadata": payload_metadata,
+                "scope": resolved_scope,
+                "line_role": line_role,
+            })
+        return "mock-msg-id" if return_message_id else True
+
+
+def _make_mock_spell_executor(session_factory):
+    """document_create スペルの mock 実行器 (Item を実際に DB へ作る)。"""
+
+    async def _fake_spell(tool_name, tool_args, persona, state, playbook_name,
+                          event_callback, messages=None):
+        if tool_name == "document_create":
+            from database.models import Item
+
+            item_id = str(uuid.uuid4())
+            title = str(tool_args.get("title") or tool_args.get("name") or "mock文書")
+            now = datetime.utcnow()
+            db = session_factory()
+            try:
+                db.add(Item(
+                    ITEM_ID=item_id, NAME=title, TYPE="document",
+                    DESCRIPTION="mock day sim artifact",
+                    CREATOR_ID=persona.persona_id, CREATED_AT=now, UPDATED_AT=now,
+                ))
+                db.commit()
+            finally:
+                db.close()
+            return (f"文書「{title}」を作成しました。アイテムID: {item_id}", None)
+        return (f"スペル {tool_name} を実行しました (mock)。", None)
+
+    return _fake_spell
+
+
+def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """判断点のルールベース mock 裁定 (配線テストの既定挙動)。
+
+    day_open は response_schema の動的 enum (実在 ref / facility) から時間割を
+    機械編成する。post_session は成果物があれば done、なければ continue。
+    """
+    ctx = json.loads(args.get("judgment_context") or "{}")
+    schema = args.get("response_schema") or {}
+
+    if kind == "day_open":
+        slot_props = (
+            schema.get("properties", {}).get("timetable", {})
+            .get("items", {}).get("properties", {})
+        )
+        ref_enum = [r for r in slot_props.get("ref", {}).get("enum", []) if r != "none"]
+        facility_enum = slot_props.get("facility", {}).get("enum", ["own_room"])
+
+        def _pick_facility(kind_name: str) -> str:
+            preferred = {"知る": "library", "作る": "workshop"}.get(kind_name)
+            if preferred and preferred in facility_enum:
+                return preferred
+            return facility_enum[-1]  # own_room が末尾
+
+        timetable: List[Dict[str, Any]] = []
+        hour = 10
+        for i, ref in enumerate(ref_enum[:3]):
+            slot_kind = "作る" if i % 2 else "知る"
+            timetable.append({
+                "start": f"{hour:02d}:00", "kind": slot_kind, "ref": ref,
+                "facility": _pick_facility(slot_kind), "budget_rounds": 4,
+                "note": f"{ref} に取り組む (mock)",
+            })
+            hour += 2
+        timetable.append({
+            "start": f"{hour:02d}:00", "kind": "暮らし", "ref": "none",
+            "facility": "own_room", "budget_rounds": 0, "note": "静かな時間 (mock)",
+        })
+        timetable.append({
+            "start": "20:00", "kind": "休む", "ref": "none",
+            "facility": "own_room", "budget_rounds": 0, "note": "",
+        })
+        return {
+            "monologue": "今日の時間割を組んだ (mock 裁定)。",
+            "timetable": timetable,
+        }
+    if kind == "post_session":
+        artifacts = ctx.get("artifacts") or []
+        output: Dict[str, Any] = {
+            "monologue": "セッションを終えた (mock 裁定)。",
+            "new_desires": [],
+            "remaining_timetable": None,
+        }
+        if ctx.get("task_ref"):
+            if artifacts:
+                output["task_verdict"] = {
+                    "status": "done", "artifact_ref": artifacts[0],
+                    "desk_memo": "成果物を作り終えた (mock)",
+                }
+            else:
+                output["task_verdict"] = {
+                    "status": "continue", "desk_memo": "続きは次のコマで (mock)",
+                }
+        return output
+    if kind == "post_conversation":
+        return {
+            "monologue": "会話が終わった (mock 裁定)。",
+            "picked_tasks": [], "new_desires": [], "remaining_timetable": None,
+        }
+    if kind == "on_event":
+        if ctx.get("is_alert"):
+            return {"monologue": "すぐに応対する (mock 裁定)。",
+                    "reaction": {"type": "engage_now"}}
+        return {"monologue": "覚えておく (mock 裁定)。",
+                "reaction": {"type": "note_only", "memo": "イベントがあった (mock)"}}
+    if kind == "day_close":
+        return {
+            "monologue": "一日を終える (mock 裁定)。予定と実績を見比べた。",
+            "tomorrow_memo": "今日の続きから始める (mock)",
+            "day_theme": "配線テストの一日",
+            "user_report_seeds": [],
+        }
+    raise ValueError(f"unknown judgment kind: {kind!r}")
+
+
+def _build_mock_manager(db_file: Optional[str], scenario) -> Any:
+    """配線テスト用の最小スタブ manager を組み立てる。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from database.models import AI, Base, City, User
+    from saiverse.day_scenario import MockJudgmentPulseController
+    from saiverse.event_scheduler import EventScheduler
+    from saiverse.track_manager import TrackManager
+
+    if db_file:
+        engine = create_engine(f"sqlite:///{db_file}",
+                               connect_args={"check_same_thread": False})
+    else:
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+
+    persona_id = scenario.persona_id
+    db = session_factory()
+    try:
+        if db.query(User).count() == 0:
+            db.add(User(USERID=1, PASSWORD="x", USERNAME="sim"))
+            db.flush()
+        city = db.query(City).first()
+        if city is None:
+            city = City(USERID=1, CITYNAME="sim_city", UI_PORT=3001, API_PORT=8001)
+            db.add(city)
+            db.flush()
+        if db.query(AI).filter(AI.AIID == persona_id).first() is None:
+            db.add(AI(AIID=persona_id, HOME_CITYID=city.CITYID, AINAME=persona_id))
+        db.commit()
+    finally:
+        db.close()
+
+    persona = SimpleNamespace(
+        persona_id=persona_id,
+        persona_name=persona_id,
+        current_building_id="own_room",
+        private_room_id="own_room",
+        sai_memory=ListMemoryAdapter(),
+    )
+
+    class _StubOccupancy:
+        def move_entity(self, entity_id, entity_type, from_id, to_id, db_session=None):
+            p = manager.personas.get(entity_id)
+            if p is not None:
+                p.current_building_id = to_id
+            return True, "ok (mock)"
+
+    manager = SimpleNamespace(
+        SessionLocal=session_factory,
+        personas={persona_id: persona},
+        buildings=[
+            SimpleNamespace(building_id="library", name="図書館"),
+            SimpleNamespace(building_id="workshop", name="工房"),
+        ],
+        event_scheduler=EventScheduler(),  # start() しない (DES 前提)
+        track_manager=TrackManager(session_factory=session_factory),
+        occupancy_manager=_StubOccupancy(),
+        sea_runtime=MockWorkRuntime(MockSessionLLMClient()),
+        _engine=engine,
+    )
+    persona_path = Path(tempfile.mkdtemp(prefix="day_sim_"))
+    manager.pulse_controller = MockJudgmentPulseController(
+        manager, _default_mock_judge, persona_path,
+    )
+    return manager
+
+
+def _build_real_manager(city_name: str, db_file: Optional[str], sds_url: str) -> Any:
+    """実 LLM モード: SAIVerseManager を構築する (start() は呼ばない)。"""
+    from database.paths import default_db_path
+    from saiverse.saiverse_manager import SAIVerseManager
+
+    db_path = Path(db_file) if db_file else default_db_path()
+    manager = SAIVerseManager(
+        city_name=city_name,
+        db_path=str(db_path),
+        sds_url=sds_url,
+    )
+    return manager
+
+
+# ---------------------------------------------------------------------------
+# エントリポイント
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--scenario", required=True, help="シナリオ JSON ファイル")
+    parser.add_argument("--db-file", default=None, help="SQLite DB パス (mock 既定: in-memory)")
+    parser.add_argument("--real", action="store_true",
+                        help="実 LLM モード (API キー必須・実コスト発生)。既定は mock")
+    parser.add_argument("--city", default="city_a",
+                        help="--real 時の City 名 (default: city_a)")
+    parser.add_argument("--sds-url", default="http://127.0.0.1:8080",
+                        help="--real 時の SDS URL")
+    parser.add_argument("--report-only", action="store_true",
+                        help="シナリオを回さず一日レポートだけ生成する")
+    parser.add_argument("--out", default=None,
+                        help="レポートの出力先ファイル (省略時: ~/.saiverse/personas/<id>/day_reports/<date>.md)")
+    args = parser.parse_args()
+
+    # Windows コンソール (cp932) では日本語レポートの一部文字が出力できないため
+    # stdout を UTF-8 に固定する (リダイレクト先ファイルも UTF-8 になる)。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    from saiverse import clock
+    from saiverse.day_report import generate_day_report, save_day_report
+    from saiverse.day_scenario import ScenarioPlayer, SyncJudgmentDispatcher, load_scenario
+
+    scenario = load_scenario(args.scenario)
+
+    try:
+        if args.report_only:
+            if args.real:
+                manager = _build_real_manager(args.city, args.db_file, args.sds_url)
+            else:
+                manager = _build_mock_manager(args.db_file, scenario)
+        elif args.real:
+            manager = _build_real_manager(args.city, args.db_file, args.sds_url)
+            # 判断点は同期実行 (DES 単一スレッド)。実 PulseController は
+            # 並列レーンなので、シナリオ実行中だけ差し替える。
+            original_controller = manager.pulse_controller
+            manager.pulse_controller = SyncJudgmentDispatcher(manager)
+            try:
+                result = ScenarioPlayer().run(manager, scenario)
+            finally:
+                manager.pulse_controller = original_controller
+            LOGGER.info("scenario finished: events=%d judgments=%d",
+                        result.executed_events, len(result.judgments))
+        else:
+            manager = _build_mock_manager(args.db_file, scenario)
+            # スペル実行を mock に差し替える (document_create → 実 Item 作成)
+            with ExitStack() as stack:
+                stack.enter_context(patch(
+                    "sea.runtime_llm.SPELL_TOOL_NAMES",
+                    {"document_create", "searxng_search", "memory_recall"},
+                ))
+                stack.enter_context(patch(
+                    "sea.runtime_llm._run_spell_tool_async",
+                    new=_make_mock_spell_executor(manager.SessionLocal),
+                ))
+                result = ScenarioPlayer().run(manager, scenario)
+            LOGGER.info("scenario finished: events=%d judgments=%d",
+                        result.executed_events, len(result.judgments))
+
+        report = generate_day_report(manager, scenario.persona_id, scenario.plan_date)
+        print(report)
+
+        if args.out:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(report, encoding="utf-8")
+        else:
+            out_path = save_day_report(
+                manager, scenario.persona_id, scenario.plan_date, report_text=report,
+            )
+        LOGGER.info("report saved: %s", out_path)
+        return 0
+    finally:
+        clock.disable_virtual()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
