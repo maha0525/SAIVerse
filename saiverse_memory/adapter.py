@@ -122,6 +122,12 @@ class SAIMemoryAdapter:
             # the schema being migrated without first instantiating Memopedia(conn).
             from sai_memory.memopedia.storage import init_memopedia_tables
             init_memopedia_tables(self.conn)
+
+            # Initialize core_memories table (記憶アーキv2 ゾーン A, 冪等)。
+            # Memopedia と同様、self.conn 直参照経路 (core_memory スペル / head
+            # セクション) がテーブルの存在を前提にできるよう、ここで作成する。
+            from sai_memory.core_memory import init_core_memory_table
+            init_core_memory_table(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None

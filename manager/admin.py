@@ -991,6 +991,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
+                "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
@@ -1043,6 +1044,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         auto_recall_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         memopedia_index_enabled: Optional[bool] = None,
+        core_memory_char_budget: Optional[int] = None,
         spell_enabled: Optional[bool] = None,
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
@@ -1164,6 +1166,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Memopedia 索引の head 常時表示 (旧方式) 復活トグル
             if memopedia_index_enabled is not None:
                 ai.MEMOPEDIA_INDEX_ENABLED = memopedia_index_enabled
+            # Update コア記憶の文字数目安 (記憶アーキv2 ゾーン A, §5)。
+            # 0 / 負値が渡されたら NULL に倒して既定値運用 (= 2000 字) に戻す。
+            if core_memory_char_budget is not None:
+                if core_memory_char_budget > 0:
+                    ai.CORE_MEMORY_CHAR_BUDGET = int(core_memory_char_budget)
+                else:
+                    ai.CORE_MEMORY_CHAR_BUDGET = None
             # Update Spell system toggle
             if spell_enabled is not None:
                 ai.SPELL_ENABLED = spell_enabled

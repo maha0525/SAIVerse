@@ -44,6 +44,7 @@ interface AIConfig {
     auto_recall_enabled: boolean;
     memory_weave_context: boolean;
     memopedia_index_enabled: boolean;
+    core_memory_char_budget: number | null;  // 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
     realtime_info_enabled: boolean;
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
@@ -143,6 +144,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(false);
+    const [coreMemoryCharBudget, setCoreMemoryCharBudget] = useState<string>('');
     const [spellEnabled, setSpellEnabled] = useState(false);
     const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
     const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
@@ -264,6 +266,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setMemopediaIndexEnabled(data.memopedia_index_enabled ?? false);
+                setCoreMemoryCharBudget(
+                    data.core_memory_char_budget != null
+                        ? String(data.core_memory_char_budget)
+                        : ''
+                );
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
                 // Load realtime spell bindings + catalog
@@ -392,6 +399,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     auto_recall_enabled: autoRecallEnabled,
                     memory_weave_context: memoryWeaveContext,
                     memopedia_index_enabled: memopediaIndexEnabled,
+                    // 記憶アーキv2 ゾーンA 容量目安: 空文字列 = 既定値 (0 を送って NULL に倒す)、
+                    // それ以外は parseInt 結果。NaN は 0 扱いで既定値 (2000) 復帰。
+                    core_memory_char_budget: (() => {
+                        const trimmed = coreMemoryCharBudget.trim();
+                        if (!trimmed) return 0;
+                        const parsed = parseInt(trimmed);
+                        return Number.isNaN(parsed) ? 0 : parsed;
+                    })(),
                     spell_enabled: spellEnabled,
                     realtime_info_enabled: realtimeInfoEnabled,
                     avatar_path: avatarPath || null,
@@ -1000,6 +1015,28 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                                 <div className={styles.description}>
                                     Memopediaの全ページ一覧を、常にペルソナのコンテキストへ読み込みます（自動想起の導入前の方式）。Memopediaをメモ帳として能動的に使っている場合に有効にしてください。トークン消費が増えます。反映は次の記憶整理（Metabolism）からです。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>コア記憶の文字数目安</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <input
+                                        type="number"
+                                        step="100"
+                                        min="0"
+                                        placeholder="2000"
+                                        value={coreMemoryCharBudget}
+                                        onChange={(e) => setCoreMemoryCharBudget(e.target.value)}
+                                        style={{ width: '7rem' }}
+                                    />
+                                    <span>字</span>
+                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
+                                        (既定: 2000 字 / 空で既定に戻す)
+                                    </span>
+                                </div>
+                                <div className={styles.description}>
+                                    ペルソナが自分で刻む「コア記憶」（常に携えておく恒常知識）の合計文字数の目安です。この文字数を超えると、コア記憶を編集するスペルの結果に整理を促す通知が添えられます。目安を超えても内容が切り詰められることはありません（通知のみ）。
                                 </div>
                             </div>
 

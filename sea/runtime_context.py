@@ -62,7 +62,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         # playbook) で出し分けると同一モデルで head が変わり prefix キャッシュが
         # 壊れる。恒常セクションはここに固定で並べ、条件分岐させない。
         enabled_sections.update({
-            "common_prompt", "persona_self", "building", "spell_list",
+            "common_prompt", "persona_self", "core_memory", "building", "spell_list",
             "autonomy_modes", "life_purpose", "open_notes",
         })
         if reqs.available_playbooks:

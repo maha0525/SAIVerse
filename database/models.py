@@ -95,6 +95,12 @@ class AI(Base):
     # 独立 user メッセージとして head に含める。メモ帳として能動的に Memopedia を使う
     # ユーザー向けの脱出経路。デフォルト OFF (トークン消費増のため既定は新方式に従う)。
     MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=False, nullable=False)
+    # コア記憶 (記憶アーキv2 ゾーン A, docs/intent/memory_architecture_v2.md §5) の
+    # 容量目安 (文字数)。ペルソナが自分で刻む恒常知識の合計文字数がこの値を超えると、
+    # core_memory 系スペルの返り値に「整理を検討」の通知を添える (切り詰め・拒否は
+    # 一切しない)。NULL → 既定 2000 字。コストと記憶量のトレードオフはユーザーに
+    # よって異なるため per-persona で変更可能 (2026-07-04 決定)。
+    CORE_MEMORY_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
     # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻 / 空間情報)
     # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的

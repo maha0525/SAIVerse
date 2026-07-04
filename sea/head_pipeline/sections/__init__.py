@@ -10,6 +10,7 @@ from sea.head_pipeline.sections.building_items import BuildingItemsSection
 from sea.head_pipeline.sections.building_occupants import BuildingOccupantsSection
 from sea.head_pipeline.sections.chronicle_index import ChronicleIndexSection
 from sea.head_pipeline.sections.common_prompt import CommonPromptSection
+from sea.head_pipeline.sections.core_memory import CoreMemorySection
 from sea.head_pipeline.sections.life_purpose import LifePurposeSection
 from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
@@ -26,6 +27,7 @@ def register_default_sections(registry) -> None:
     """
     registry.register(CommonPromptSection())
     registry.register(PersonaSelfSection())
+    registry.register(CoreMemorySection())
     registry.register(BuildingSection())
     registry.register(AvailablePlaybooksSection())
     registry.register(AutonomyModesSection())
@@ -49,6 +51,7 @@ __all__ = [
     "BuildingSection",
     "ChronicleIndexSection",
     "CommonPromptSection",
+    "CoreMemorySection",
     "LifePurposeSection",
     "MemopediaIndexSection",
     "MemoryWeaveSection",

@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 129（うち Spell 化: 83）
+**登録ツール数**: 132（うち Spell 化: 86）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -22,6 +22,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `chronicle_read_detail` | Read a Chronicle (arasuji) entry in detail, including its source messages (for level 1) or child summary entries (for… | `entry_id*`: string, `include_sources`: boolean, `max_source_messages`: integer | — |
 | `chronicle_search` | Search Chronicle (arasuji) entries by keyword, time range, and/or level. Returns a list of matching entries with IDs … | `query`: string, `start_date`: string, `end_date`: string, `level`: integer, `max_results`: integer | — |
 | `control_body` | Extract body control commands from message and send to Unity Gateway. | `message*`: string, `persona_id`: string | — |
+| `core_memory_add` | あなたが常に携えておきたい恒常知識を「コア記憶」に1件刻みます。コア記憶は system プロンプトに常駐し、記憶整理（Metabolism）のたびに最新の内容が反映されます。何を恒常領域に残すかはあなた自身の判断です。 | `content*`: string | コア記憶に刻む |
+| `core_memory_remove` | コア記憶から1項目を削除します。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string | コア記憶から消す |
+| `core_memory_update` | コア記憶の既存の1項目を新しい内容に書き換えます。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string, `content*`: string | コア記憶を書き換える |
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |
 | `desire_add` | Add a 'want to do someday' candidate to your desire pool. Use this when, during autonomous work, you think of somethi… | `title*`: string, `goal`: string | やりたいこと追加 |
 | `document_append_content` | Append text to the end of a document item. Use this to add new content without modifying existing text. | `item_id*`: string, `content*`: string | ドキュメント追記 |

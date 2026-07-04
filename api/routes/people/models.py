@@ -151,6 +151,7 @@ class AIConfigResponse(BaseModel):
     auto_recall_enabled: bool = True
     memory_weave_context: bool = True
     memopedia_index_enabled: bool = False
+    core_memory_char_budget: Optional[int] = None  # 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
     spell_enabled: bool = False
     realtime_info_enabled: bool = True
     avatar_path: Optional[str] = None
@@ -175,6 +176,10 @@ class UpdateAIConfigRequest(BaseModel):
     auto_recall_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
     memopedia_index_enabled: Optional[bool] = None
+    # 記憶アーキv2 ゾーンA 容量目安 (文字数)。
+    #   None = no change, 0 (or any non-positive) = clear to default (= 2000),
+    #   positive int = override.
+    core_memory_char_budget: Optional[int] = None
     spell_enabled: Optional[bool] = None
     realtime_info_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
