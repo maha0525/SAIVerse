@@ -45,7 +45,9 @@ def get_memory_weave_context(
     Args:
         persona_id: Persona ID (auto-detected if not provided)
         persona_dir: Persona directory path (auto-detected if not provided)
-        max_chronicle_entries: Maximum number of Chronicle entries to include
+        max_chronicle_entries: Max Chronicle entries. General Chronicle は §6.2
+            の文字数予算制に移行したためこの値は安全弁の下限として扱われる (予算が
+            主制御)。Track Chronicle 側では従来どおり件数上限として効く。
         memopedia_index_limit: Max pages per category in the Memopedia index
             (``include_memopedia=True`` の場合のみ使用。旧実装からの既知の乖離として、
             この limit は実際には _get_memopedia_context 内で適用されない。後方互換
@@ -168,11 +170,29 @@ def _get_chronicle_context(conn: sqlite3.Connection, max_entries: int = 50) -> s
     v0.32 (2026-05-09): Track Chronicle と排他にするため、内部で
     origin_track_id IS NULL の entry のみが対象になる (get_episode_context が
     origin_track_id=None で呼ばれると General Chronicle のみフィルタする実装)。
+
+    記憶アーキv2 §6.2 (Phase 3, 2026-07-04): General Chronicle の読み込みは件数上限
+    から文字数予算制へ移行した。件数上限だと超過時に最古が黙って落ちる (不変条件
+    §10-4) ため、``char_budget=USE_DEFAULT_BUDGET`` を渡して予算制を有効化する。既定
+    予算は 20,000 字 / env ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` で調整可。``max_entries``
+    は安全弁として残す (予算制側が主制御)。Track Chronicle 側 (_get_track_chronicle_context)
+    は従来どおり件数上限のまま (§6.2 item 5)。
     """
     try:
-        from sai_memory.arasuji.context import get_episode_context, format_episode_context
+        from sai_memory.arasuji.context import (
+            USE_DEFAULT_BUDGET,
+            format_episode_context,
+            get_episode_context,
+        )
 
-        context = get_episode_context(conn, max_entries=max_entries)
+        # 予算制が主制御なので max_entries は「暴走防止の安全弁」に格下げ。既定 50 の
+        # ままだと 20万メッセージ級ユーザーで最古到達前に打ち切られ不変条件 §10-4 を
+        # 破るため、予算制では十分大きい上限に引き上げる (件数ではなく予算で絞る)。
+        context = get_episode_context(
+            conn,
+            max_entries=max(max_entries, 10_000),
+            char_budget=USE_DEFAULT_BUDGET,
+        )
         if not context:
             return ""
 

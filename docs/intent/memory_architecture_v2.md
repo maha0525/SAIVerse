@@ -233,7 +233,7 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 - **Phase 0（独立・先行可、2026-07-04 実装済み）**: 自律 Pulse の General Chronicle 生成修正（§6.3、`AUTONOMOUS_CHRONICLE_ENABLED` 列＋設定チェーン＋UI トグル）。`docs/concepts/memopedia.md` の陳腐化修正（§7.4）。Memopedia `MEMOPEDIA_INDEX_LIMIT` の確認 → **未適用が事実と確定**（`_list_pages()` にスライスなし、`_sort_key()` は未使用のデッドコード。全ページが無制限列挙されている。Phase 1 の掲示廃止で解消されるため修正しない）。
 - **Phase 1（体感が変わる本丸、2026-07-04 実装済み・実機検証待ち）**: 自動想起 第0層（§4、`sea/auto_recall.py`）＋ weave からの Memopedia 索引除去（§7.1）＋共通プロンプト告知（§7.1）＋折りたたみ UI（§4.5）。しきい値は実測により 0.86（§12-1）。
 - **Phase 2（2026-07-04 実装済み）**: コア記憶セクション＋編集スペル（note）＋ scene 種別（実会話の切り抜き）＋ UI 導線（会話検索→窓プレビュー→刻む）（§5）。初期シード導入フロー（人物カテゴリから選ばせる会話）のみ未着手。
-- **Phase 3**: Chronicle 読み込みの予算制（§6.2）。
+- **Phase 3（2026-07-04 実装済み）**: Chronicle 読み込みの予算制（§6.2、`sai_memory/arasuji/context.py`）。件数上限 `max_entries` を **文字数予算** に置換（既定 20,000 字 / env `SAIVERSE_CHRONICLE_CHAR_BUDGET`）。予算超過時は「粗さの段列」`(min_entries_per_level, prefer_coarse)` = `(10,False)→(5,True)→(3,True)→(1,True)` を一段ずつ下って再走行し、予算内に収まる最も詳細な段で確定する。`prefer_coarse=True` は選択優先度を「近い細粒度より粗いレベル優先」に反転させる補助レバー（連続 Lv1 タイムラインでは閾値だけ下げても "closest end_time wins" で細粒度が勝ち続けるため、これが無いと畳めないと実測で判明）。最粗段でも予算超過なら超過を許容して WARNING（最古は必ず含む）。General weave のみ対象、Track Chronicle は件数上限のまま（§6.2 item 5）。実機（air_city_a 実 DB）: 既定 20k で現行と同一の 32 entries、予算 3,000 字では Lv3(2024-12〜2025-11)+Lv2+Lv1 の 3 entries に畳まれ **最古（ChatbotUI 期 2024-12-25）が保持され直近が詳細** のまま。
 - **Phase 4**: インポート新フロー（§8）＋ドキュメント（引っ越しガイド更新）。
 - **Phase 5（余白と掃除）**: Fragment スキーマ余白の ALTER（§7.3）。v1 メモリーノート方式（`note_extractor.py` 等）・`recalled_ids` 系 API・archive playbooks の撤去。
 - Phase 間の依存: 1 が最優先。0 と 5 は独立。2〜4 は任意順。
@@ -246,4 +246,5 @@ v0.1 の未決事項のうち UI 露出（→§4.5）・コア記憶容量（→
 
 1. §4 の初期パラメータ: 類似度しきい値 / sticky ターン数 / 注入文字数上限 / クエリに含める直近メッセージ数。
    - **Phase 1 実装時の実測決定 (2026-07-04)**: 類似度しきい値の既定は **0.86**（doc 本文の暫定 0.78 から引き上げ）。air_city_a の実 memory.db で測定したところ、E5 (multilingual-e5-small) は `query:`/`passage:` プレフィックス方式のため cosine が 0.8〜0.9 に圧縮され、無関係クエリでも top ヒットが 0.83〜0.84 に達した（0.78 では毎ターン全件注入になる）。実測分布: オントピック top クラスタ 0.86〜0.89 / 無関係 top max 0.842 / 汎用短文「うん」top max 0.837。0.86 でオントピック上位のみを拾える。全パラメータは `SAIVERSE_AUTO_RECALL_*` env で調整可（`sea/auto_recall.py`）。他既定値: sticky 3 ターン / 文字数上限 1200 / クエリ直近 4 件 / topk 8。
-2. §6.2 の予算の具体値（文字数/トークン数）と、モデルごとの context_length 連動の要否 — Phase 3 着手時に決定。
+2. §6.2 の予算の具体値（文字数/トークン数）と、モデルごとの context_length 連動の要否。
+   - **Phase 3 実装時の決定 (2026-07-04)**: 予算は **文字数** で既定 **20,000 字**、env `SAIVERSE_CHRONICLE_CHAR_BUDGET` で調整可（`sai_memory/arasuji/context.py`）。現行の実質 13〜20k 字相当（air_city_a 実 DB で 32 entries ≒ 13k 字）に合わせ、既定で既存ユーザーの weave が痩せないようにした。モデル `context_length` 連動は v1 では **しない**（複雑化に見合う利得が不明なため。将来、極端に短い context のモデルで問題が出たら予算を context_length から導出する層を足す）。

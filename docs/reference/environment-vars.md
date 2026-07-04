@@ -36,6 +36,7 @@
 | `MEMORY_WEAVE_BATCH_SIZE` | `20` | あらすじ生成のバッチ件数 |
 | `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | あらすじ統合の閾値 |
 | `MEMORY_WEAVE_MAINTAIN_INTERVAL` | `200` | メンテ間隔 |
+| `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。記憶アーキv2 §6.2 |
 
 ## バックアップ
 
