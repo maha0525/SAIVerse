@@ -1,6 +1,7 @@
 # Intent: 参照アドレッシングの統一規格
 
-**status: v0.4（設計・実装計画確定 / 実装待ち）**
+**status: v0.5（設計・計画・移行スコープ全確定 / Phase 0 実装済み / Phase 1-6 は一括切替）**
+**実装方針: Plan B（全種類を1つの整合状態でまとめて切替、フルスイート緑で1コミット）**
 **author: エア（草案）**
 **date: 2026-07-05**
 
@@ -249,13 +250,28 @@ Q4=B（中間状態を作らない）を守るため、Phase 0〜4 は**1つの�
   `resolve_slot_ref` は `item:N` 解決へ置換、または locator 表示専用に縮退。
 
 ### Phase 5 — 保存済みデータ移行（`database/migrate.py`、不可逆）
-- item テーブル `SHORT_ID` backfill（Phase 0 と同梱）。
-- `persona_day_plan` のコマ ref（`task:` / `desire:` / `none`）を新表記へ
-  （`desire:`→`task:`、位置参照が紛れていれば `item:N` へ）。
-- **要洗い出し**: SAIMemory（message content 等）に文字列として書かれた旧 `saiverse://`
-  URI の移行対象。どのテーブル/カラムに URI 文字列が入りうるかを実装前に洗い出す。
-  旧形式を解決時に受理しない方針（Q4=B）なので、過去ログのリンクを生かすなら移行必須。
+
+**移行スコープ（2026-07-05 まはー確定）: 構造化データのみ。過去の自然文は触らない。**
+
+- item テーブル `SHORT_ID` backfill（Phase 0 と同梱・済）。
+- `persona_day_plan.slots_json` のコマ ref を `desire:`→`task:` に統合（コマ ref は
+  `task:`/`desire:`/`none` のみで track も位置参照も入らないので、これだけで済む）。
+- **過去の自然文（`messages.content` / `pulse_logs` / `arasuji_entries` /
+  memopedia 本文 / `building_messages.content` 等）に地の文として埋まった旧 URI・
+  旧短縮参照は書き換えない**。理由: (1) 記憶の改変で侵襲的、(2) 位置参照 `b:1`/`i:1`
+  は当時どのアイテムかを復元できず原理的に移行不能、(3) 想起時は unified_recall が
+  新書式で URI を作り直すので過去の文中リンクを読み直す経路が実質ない。旧書式を
+  解決時に受理しない（Q4=B）ため文中の旧リンクは不活性になるが、これは許容する。
+  Q4=B の「中間状態を作るな」は**動いている系**について満たす（新規生成・解析・
+  生きた構造化データはすべて新書式、過去の地の文はスキーム以前の歴史として残す）。
 - 移行は不可逆なので起動時バックアップ前提（既存の DB/memory バックアップが効く）。
+
+### Phase 5.5 — ペルソナへの記法提示を更新（プロンプト文言）
+ペルソナに参照記法を説明しているプロンプト文言（day_open/judgment 系の
+「ref に `task:N` / `desire:N` を指定」、アイテムのスロット説明等）を新書式に更新する。
+ペルソナには「記法が変わった」ことがシステムプロンプト経由で伝わればよい（まはー確認）。
+対象: `saiverse/judgment_points.py` の各プロンプト、`saiverse/day_plan.py` の指示書
+テンプレート、item ツールの description、visual_context の凡例など。
 
 ### Phase 6 — テスト・ドキュメント
 - 期待値更新: `test_day_plan` / `test_judgment_points` / `test_desire_types` /
