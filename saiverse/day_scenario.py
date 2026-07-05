@@ -813,8 +813,6 @@ class ScenarioPlayer:
                     actor="day_scenario_seed",
                 )
                 ref = task.get("task_ref") or task["id"]
-                if ref.startswith("task:"):
-                    ref = "desire:" + ref[len("task:"):]
                 result.seeded_desire_refs.append(ref)
         LOGGER.info(
             "[day_scenario] seeded: persona=%s tasks=%s desires=%s",

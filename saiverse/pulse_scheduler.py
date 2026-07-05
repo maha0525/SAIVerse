@@ -298,7 +298,7 @@ class SubLineScheduler:
         task_list = self.track_manager.format_task_list(track.track_id)
         pulse_args["track_tasks"] = task_list
 
-        sid = f"t:{track.short_id}" if track.short_id is not None else track.track_id[:8]
+        sid = f"track:{track.short_id}" if track.short_id is not None else track.track_id[:8]
         intent = track.intent or "(意図未設定)"
         pulse_args["track_context"] = (
             f"## 現在の Track\n"

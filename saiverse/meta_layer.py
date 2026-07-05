@@ -58,9 +58,9 @@ _MAX_SPELL_LOOPS = 5
 # 一覧は登録済みスペルから動的に拾うが、ペルソナ素体プロンプトと衝突しないよう
 # 「メタレイヤーが使ってよい」セットを明示的に絞る。
 def _short_ref(track: Any) -> str:
-    """Track の短縮参照 (t:N) を返す。short_id 未設定時は UUID[:8] フォールバック。"""
+    """Track の短縮参照 (track:N) を返す。short_id 未設定時は UUID[:8] フォールバック。"""
     if getattr(track, "short_id", None) is not None:
-        return f"t:{track.short_id}"
+        return f"track:{track.short_id}"
     return track.track_id[:8] + "…"
 
 

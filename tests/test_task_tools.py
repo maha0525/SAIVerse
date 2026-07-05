@@ -47,7 +47,7 @@ class TaskToolsTestCase(unittest.TestCase):
         _mod_step._task_manager = self.ptm
         _mod_decompose._task_manager = self.ptm
 
-        # 自律 Track を1本 (t:1 が解決できるように)
+        # 自律 Track を1本 (track:1 が解決できるように)
         self.track_id = str(uuid.uuid4())
         db = self.SessionLocal()
         db.add(ActionTrack(
@@ -63,7 +63,7 @@ class TaskToolsTestCase(unittest.TestCase):
 
     def test_task_add_assigns_ref(self) -> None:
         with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_add.task_add(track_id="t:1", title="調査する")
+            out = _mod_add.task_add(track_id="track:1", title="調査する")
         self.assertIn("task:1", out)
         tasks = self.ptm.list_tasks(self.persona_id, track_id=self.track_id)
         self.assertEqual(len(tasks), 1)
@@ -71,7 +71,7 @@ class TaskToolsTestCase(unittest.TestCase):
 
     def test_task_done_by_ref(self) -> None:
         with persona_context(self.persona_id, self.persona_dir):
-            _mod_add.task_add(track_id="t:1", title="やること")
+            _mod_add.task_add(track_id="track:1", title="やること")
             out = _mod_done.task_done(task_ref="task:1")
         self.assertIn("タスク完了", out)
         tasks = self.ptm.list_tasks(self.persona_id, track_id=self.track_id)

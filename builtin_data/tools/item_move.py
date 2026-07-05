@@ -48,7 +48,8 @@ def schema() -> ToolSchema:
             "properties": {
                 "item_ids": {
                     "type": "string",
-                    "description": "Comma-separated item IDs to move (max 100).",
+                    "description": "Comma-separated item references to move (max 100). "
+                                   "Use the item:N form shown in your visual context (e.g. item:5).",
                 },
                 "destination_type": {
                     "type": "string",

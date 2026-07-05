@@ -13,11 +13,26 @@ from database.models import (
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
 )
+from saiverse.references import parse_ref
 
 if TYPE_CHECKING:
     from manager.state import CoreState
 
 LOGGER = logging.getLogger(__name__)
+
+
+def item_db_filter(key):
+    """``short_id`` (数字) と UUID を判定して ``Item`` への WHERE 句を返す。
+
+    参照アドレッシング統一で、AI 可視のアドレスは short_id (``item:N``) を使い、
+    UUID は裏方 (DB 主キー・ファイル解決・frontend href) に留める。解決側は
+    short_id を主に受理しつつ、過去ログの UUID URI や frontend href が死なない
+    よう UUID もフォールバックで受ける。この判定を1箇所に集約する。
+    """
+    s = str(key).strip()
+    if s.isdigit():
+        return ItemModel.SHORT_ID == int(s)
+    return ItemModel.ITEM_ID == s
 
 
 class ItemService:
@@ -849,6 +864,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "document",
             "description": summary,
@@ -940,6 +956,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "picture",
             "description": description,
@@ -1025,6 +1042,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "picture",
             "description": description,
@@ -1112,6 +1130,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": "document",
             "description": description,
@@ -1207,6 +1226,7 @@ class ItemService:
 
         self.items[item_id] = {
             "item_id": item_id,
+            "short_id": self._short_id_of(item_id),
             "name": name,
             "type": item_type,
             "description": description,
@@ -1319,71 +1339,70 @@ class ItemService:
             slot += 1
         return slot
 
-    def _find_item_by_slot(self, owner_kind: str, owner_id: str, slot_number: int) -> Optional[str]:
-        """コンテナ内の指定スロット番号のアイテムIDを返す。"""
-        if owner_kind == "building":
-            candidates = self.items_by_building.get(owner_id, [])
-        elif owner_kind == "persona":
-            candidates = self.items_by_persona.get(owner_id, [])
-        elif owner_kind == "bag":
-            candidates = self.items_by_bag.get(owner_id, [])
-        else:
-            return None
-        for item_id in candidates:
-            loc = self.item_locations.get(item_id)
-            if loc and loc.get("slot_number") == slot_number:
+    def _short_id_of(self, item_id: str) -> Optional[int]:
+        """作成直後のアイテムの short_id を DB から引く。
+
+        SHORT_ID は before_insert リスナーが commit 時に採番する。生成メソッドが
+        インメモリキャッシュ (self.items) を組む際、この値を載せておかないと直後の
+        get_visual_context / URI 生成で ``item:?`` になる。セッションを跨ぐ detached
+        参照を避けるため、確定後に軽い SELECT で読み直す (item 生成は低頻度)。
+        """
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel.SHORT_ID).filter(ItemModel.ITEM_ID == item_id).first()
+            return row[0] if row else None
+        finally:
+            db.close()
+
+    def _find_item_by_short_id(self, short_id: int) -> Optional[str]:
+        """世界全体の安定 short_id からアイテム UUID を引く。"""
+        for item_id, data in self.items.items():
+            if data.get("short_id") == short_id:
                 return item_id
         return None
 
-    def resolve_slot_ref(self, ref: str, persona_id: str, building_id: Optional[str]) -> str:
-        """スロット参照またはUUIDをアイテムUUIDに解決する。
+    def item_dict_by_key(self, key) -> Optional[Dict[str, Any]]:
+        """short_id (数字) または UUID でインメモリ item dict を引く。
 
-        b:3    → buildingのスロット3
-        i:3    → personaインベントリのスロット3
-        b:5>2  → buildingスロット5のbag内スロット2
-        i:2>1  → inventoryスロット2のbag内スロット1
-        UUID形式はそのまま返す（後方互換）。
+        AI 可視のアドレスは short_id (``item:N`` / ``saiverse://item/N``) だが、
+        過去ログの UUID URI も裏方フォールバックで解決できるよう両対応する。
+        """
+        s = str(key).strip()
+        if s in self.items:
+            return self.items[s]
+        if s.isdigit():
+            item_id = self._find_item_by_short_id(int(s))
+            if item_id:
+                return self.items.get(item_id)
+        return None
+
+    def resolve_item_ref(self, ref: str, persona_id: str, building_id: Optional[str]) -> str:
+        """``item:N``（安定 short_id）または UUID をアイテム UUID に解決する。
+
+        参照は同一性（short_id）で行う。スロット（位置）は locator であって
+        同一性ではないため参照には使わない（intent reference_addressing I5）。
+        ``persona_id`` / ``building_id`` は呼び出し側の文脈保持のため残すが、
+        short_id は世界全体で一意なので解決には使わない。
+        UUID 形式はそのまま返す（後方互換）。
         """
         ref = ref.strip()
         if len(ref) == 36 and ref.count("-") == 4:
             return ref
 
-        parts = ref.split(">")
-        first = parts[0].strip()
-        if ":" not in first:
-            raise RuntimeError(f"無効なアイテム参照形式: '{ref}' (例: b:3, i:2, b:5>1)")
-
-        prefix, slot_str = first.split(":", 1)
         try:
-            slot_num = int(slot_str)
+            parsed = parse_ref(ref)
+        except ValueError as exc:
+            raise RuntimeError(f"無効なアイテム参照形式: '{ref}' (例: item:3)") from exc
+        if parsed.kind != "item":
+            raise RuntimeError(f"アイテム参照ではありません: '{ref}' (例: item:3)")
+        try:
+            short_id = int(parsed.key)
         except ValueError:
-            raise RuntimeError(f"スロット番号が無効: '{slot_str}'")
+            raise RuntimeError(f"アイテム番号が無効: '{parsed.key}'")
 
-        if prefix == "b":
-            if not building_id:
-                raise RuntimeError("現在のBuilding情報が取得できません。")
-            item_id = self._find_item_by_slot("building", building_id, slot_num)
-            if not item_id:
-                raise RuntimeError(f"Buildingのスロット{slot_num}にアイテムが見つかりません。")
-        elif prefix == "i":
-            item_id = self._find_item_by_slot("persona", persona_id, slot_num)
-            if not item_id:
-                raise RuntimeError(f"インベントリのスロット{slot_num}にアイテムが見つかりません。")
-        else:
-            raise RuntimeError(f"無効なプレフィックス: '{prefix}' (b=Building, i=インベントリ)")
-
-        for nested_part in parts[1:]:
-            try:
-                nested_slot = int(nested_part.strip())
-            except ValueError:
-                raise RuntimeError(f"スロット番号が無効: '{nested_part}'")
-            bag_item = self.items.get(item_id)
-            if not bag_item or (bag_item.get("type") or "").lower() != "bag":
-                raise RuntimeError("スロット参照の途中にBagでないアイテムがあります。")
-            item_id = self._find_item_by_slot("bag", item_id, nested_slot)
-            if not item_id:
-                raise RuntimeError(f"Bag内のスロット{nested_slot}にアイテムが見つかりません。")
-
+        item_id = self._find_item_by_short_id(short_id)
+        if not item_id:
+            raise RuntimeError(f"item:{short_id} に対応するアイテムが見つかりません。")
         return item_id
 
     def _is_ancestor_bag(self, item_id: str, potential_ancestor_id: str, max_depth: int = 50) -> bool:

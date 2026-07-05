@@ -284,7 +284,7 @@ class TestEntityTrigger(AutoRecallBase):
             )
         self.assertTrue(res.injected)
         self.assertIn("アイフィ", res.block)
-        self.assertIn("m:12", res.block)
+        self.assertIn("memopedia:12", res.block)
         self.assertEqual(res.accepted_count, 1)
 
     def test_ambient_entity_skipped(self):

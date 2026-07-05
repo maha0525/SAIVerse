@@ -214,7 +214,7 @@ class UserConversationTrackHandler:
         前提状況に入った」という会話の流れの中の system 通知として認識される。
         """
         title = track.title or "(無題)"
-        sid = f"t:{track.short_id}" if track.short_id is not None else track.track_id[:8] + "…"
+        sid = f"track:{track.short_id}" if track.short_id is not None else track.track_id[:8] + "…"
         lines = [
             "## Track 切替通知",
             f"あなたは Track 「{title}」 (id={sid}, type={track.track_type}) に入りました。",

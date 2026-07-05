@@ -167,10 +167,11 @@ def _resolve_item_image(item_id: str, saiverse_home: Path) -> Optional[Path]:
     try:
         from database.session import SessionLocal
         from database.models import Item
+        from manager.items import item_db_filter
 
         session = SessionLocal()
         try:
-            item = session.query(Item).filter(Item.ITEM_ID == item_id).first()
+            item = session.query(Item).filter(item_db_filter(item_id)).first()
             if not item or not item.FILE_PATH:
                 LOGGER.debug("Item %s not found or has no file_path", item_id)
                 return None
@@ -222,10 +223,11 @@ def _resolve_item_typed_file(
     try:
         from database.session import SessionLocal
         from database.models import Item
+        from manager.items import item_db_filter
 
         session = SessionLocal()
         try:
-            item = session.query(Item).filter(Item.ITEM_ID == item_id).first()
+            item = session.query(Item).filter(item_db_filter(item_id)).first()
             if not item or not item.FILE_PATH:
                 LOGGER.debug("Item %s not found or has no file_path", item_id)
                 return None

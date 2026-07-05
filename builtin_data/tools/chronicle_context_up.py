@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sai_memory.arasuji.storage import get_entry, get_children
+from saiverse.references import to_uri
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -51,7 +52,7 @@ def chronicle_context_up(entry_id: str) -> str:
     if not entry:
         return f"(Chronicle entry が見つかりません: {entry_id})"
 
-    entry_uri = f"saiverse://self/chronicle/entry/{entry.id}"
+    entry_uri = to_uri("chronicle", entry.id)
     lines = [
         "【Chronicle上流参照】",
         f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
@@ -70,7 +71,7 @@ def chronicle_context_up(entry_id: str) -> str:
         lines.append(f"(親エントリの取得に失敗しました: {entry.parent_id})")
         return "\n".join(lines)
 
-    parent_uri = f"saiverse://self/chronicle/entry/{parent.id}"
+    parent_uri = to_uri("chronicle", parent.id)
     lines += [
         f"--- 親エントリ (Lv{parent.level}) ---",
         f"URI: {parent_uri}",
@@ -93,7 +94,7 @@ def chronicle_context_up(entry_id: str) -> str:
         lines.append("(他のエントリはありません)")
     else:
         for sib in siblings:
-            sib_uri = f"saiverse://self/chronicle/entry/{sib.id}"
+            sib_uri = to_uri("chronicle", sib.id)
             lines.append(f"[{sib.id}] {_fmt_time(sib.start_time)} ~ {_fmt_time(sib.end_time)} | {sib.message_count}件")
             lines.append(f"URI: {sib_uri}")
             lines.append("```")

@@ -102,24 +102,6 @@ def _normalize_ref(ref: str) -> str:
     return ref
 
 
-def to_desire_ref(task_ref: Optional[str]) -> str:
-    """欲求の ``task:N`` を提示用の ``desire:N`` へ変換する。
-
-    判断点のコマ ref enum (judgment_points.collect_slot_ref_enum) は欲求を
-    ``desire:N`` で載せるため、ペルソナに見せる表記も必ずこれに揃える。
-    表記が食い違うと、プロンプトの ``task:N`` を書こうとした構造化出力の
-    制約デコードが enum 内の別 ref に滑り、無関係なタスクが選ばれる
-    (2026-07-05 実 LLM 一日シムで実証)。task_ref が無い・不正な行は
-    ``desire:?`` (enum に載らない表示専用のフォールバック)。
-    """
-    ref = (task_ref or "").strip()
-    if ref.startswith("task:"):
-        return "desire:" + ref[len("task:"):]
-    if ref.startswith("desire:"):
-        return ref
-    return "desire:?"
-
-
 def _as_date(value: datetime | date) -> date:
     return value.date() if isinstance(value, datetime) else value
 
@@ -288,11 +270,13 @@ def apply_desire_reviews(
 def touch_desire(manager: Any, persona_id: str, ref: str) -> Optional[Dict[str, Any]]:
     """欲求への再訪を記録する (last_touched_at 更新 + touch_count 加算 + fresh 復帰)。
 
-    時間割のコマが desire を参照して発火したとき (``day_plan._fire_slot``) に
-    呼ばれる。``ref`` は ``task:N`` / ``desire:N`` / UUID hex。
+    時間割のコマが発火したとき (``day_plan._fire_slot``) に、その ref が指すタスクへ
+    呼ばれる。``ref`` は ``task:N`` / UUID hex。参照アドレッシング統一 (Q2) 後は
+    バックログタスクのコマ発火でもこれが呼ばれるため、desire でない (parent_kind が
+    note でない) 場合の no-op は正常系 (DEBUG ログ)。
 
     Returns:
-        更新後の Task dict。ref が候補 (parent_kind='note') でなければ WARN + None。
+        更新後の Task dict。ref が候補 (parent_kind='note') でなければ None。
 
     Raises:
         TaskNotFoundError: ref が解決できないとき。
@@ -301,7 +285,8 @@ def touch_desire(manager: Any, persona_id: str, ref: str) -> Optional[Dict[str, 
     task_id = ptm.resolve_task_ref(persona_id, _normalize_ref(ref))
     task = ptm.get_task(task_id, persona_id=persona_id)
     if task.get("parent_kind") != PARENT_NOTE:
-        LOGGER.warning(
+        # 統合後はバックログタスクのコマ発火でも呼ばれる正常系なので DEBUG。
+        LOGGER.debug(
             "[desire] touch skipped (not a desire candidate): persona=%s ref=%r parent_kind=%r",
             persona_id, ref, task.get("parent_kind"),
         )
@@ -348,15 +333,16 @@ def desire_summary_for_prompt(manager: Any, persona_id: str) -> str:
     """起床判断の状況テキスト用の欲求一覧 (ref / 型 / タイトル / 鮮度 / 再訪回数)。
 
     文言は客観 + 丁寧語 (キャラ付けしない)。欲求が無ければその旨を 1 行で返す。
-    ref の表記は ``desire:N`` — コマ ref enum と一致させる (:func:`to_desire_ref`)。
+    ref の表記は ``task:N`` — 欲求もバックログタスクも同じ short_id 参照空間で、
+    参照アドレッシング統一 (docs/intent/reference_addressing.md, Q2) により符号は
+    ``task:`` に一本化した。欲求らしさはこの「やりたいこと候補」という提示文脈で伝わる。
     """
     desires = _list_desires(manager, persona_id)
     if not desires:
         return "やりたいこと候補はありません。"
     lines = ["やりたいこと候補:"]
     for task in desires:
-        # 表記は enum (collect_slot_ref_enum) と同じ desire:N に揃える。
-        ref = to_desire_ref(task.get("task_ref"))
+        ref = task.get("task_ref") or "task:?"
         dtype = task.get("desire_type") or UNTYPED_LABEL
         title = task.get("title") or "(無題)"
         state = task.get("desire_state") or DESIRE_STATE_FRESH

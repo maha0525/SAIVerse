@@ -28,7 +28,7 @@ def list_tasks(persona_id: str, manager = Depends(get_manager)):
         db = manager.SessionLocal()
         try:
             for tr in db.query(ActionTrack).filter(ActionTrack.track_id.in_(track_ids)).all():
-                label = f"t:{tr.short_id}" if tr.short_id is not None else tr.track_id[:8]
+                label = f"track:{tr.short_id}" if tr.short_id is not None else tr.track_id[:8]
                 if tr.title:
                     label = f"{label} {tr.title}"
                 track_labels[tr.track_id] = label

@@ -25,6 +25,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from saiverse.references import to_uri
+
 LOGGER = logging.getLogger("saiverse.auto_recall")
 
 
@@ -748,7 +750,7 @@ def run_auto_recall(
         key = ("memopedia", str(page_id))
         accepted_keys.add(key)
         accepted_count += 1
-        display_title = f"{title} (m:{short_id})" if short_id is not None else title
+        display_title = f"{title} (memopedia:{short_id})" if short_id is not None else title
         existing = ledger.items.get(key)
         if existing is not None:
             existing.stale_turns = 0
@@ -761,7 +763,7 @@ def run_auto_recall(
                 source_id=str(page_id),
                 title=display_title,
                 content=summary or "",
-                uri=f"saiverse://self/memopedia/page/{page_id}",
+                uri=to_uri("memopedia", short_id if short_id is not None else page_id),
                 best_score=1.0,
                 stale_turns=0,
             )

@@ -75,7 +75,7 @@ def track_create(
     # Resolve short_id for the newly created track
     try:
         created_track = _track_manager.get(track_id)
-        short_id_str = f"t:{created_track.short_id}" if created_track.short_id else track_id[:8] + "…"
+        short_id_str = f"track:{created_track.short_id}" if created_track.short_id else track_id[:8] + "…"
     except TrackNotFoundError:
         short_id_str = track_id[:8] + "…"
 

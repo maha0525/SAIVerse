@@ -54,11 +54,11 @@ def schema() -> ToolSchema:
             "properties": {
                 "item_id": {
                     "type": "string",
-                    "description": "Single item ID to view.",
+                    "description": "Single item reference to view (item:N form, e.g. item:5).",
                 },
                 "item_ids": {
                     "type": "string",
-                    "description": "Comma-separated item IDs to view (max 5).",
+                    "description": "Comma-separated item references to view (max 5, item:N form).",
                 },
             },
         },

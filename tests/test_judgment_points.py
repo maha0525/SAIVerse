@@ -163,7 +163,7 @@ def task_refs(manager, ptm, nm):
     )
     assert t1["task_ref"] == "task:1"
     assert t2["task_ref"] == "task:2"
-    return {"task": "task:1", "desire": "desire:2"}
+    return {"task": "task:1", "desire": "task:2"}
 
 
 @pytest.fixture
@@ -243,9 +243,9 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     slot = schema["properties"]["timetable"]["items"]
     ref_enum = slot["properties"]["ref"]["enum"]
     assert "task:1" in ref_enum
-    assert "desire:2" in ref_enum
+    assert "task:2" in ref_enum
     assert "none" in ref_enum
-    assert "desire:3" not in ref_enum, "decay で期限切れになった欲求が enum に残っている"
+    assert "task:3" not in ref_enum, "decay で期限切れになった欲求が enum に残っている"
     assert slot["properties"]["facility"]["enum"] == ["library", "workshop", "own_room"]
     # 表題 (title): 各コマにペルソナ自身が付ける (一日新聞の主役列)
     assert "title" in slot["properties"]
@@ -300,7 +300,7 @@ def test_day_open_promotions_enum_present_when_candidates(manager, task_refs):
     schema = result["args"]["response_schema"]
     _assert_no_additional_properties(schema)
     promos = schema["properties"]["promotions"]
-    assert promos["items"]["properties"]["desire_ref"]["enum"] == ["desire:2"]
+    assert promos["items"]["properties"]["desire_ref"]["enum"] == ["task:2"]
 
 
 # ---------------------------------------------------------------------------
@@ -392,9 +392,9 @@ def test_day_open_finalize_promotions_fire_track_create(
         "monologue": "標本集はもう関心と呼んでいい。",
         "timetable": [_rest_slot("09:00")],
         "promotions": [
-            {"desire_ref": "desire:2", "title": "言葉の標本集",
+            {"desire_ref": "task:2", "title": "言葉の標本集",
              "intent": "気に入った言い回しを集める"},
-            {"desire_ref": "desire:9", "title": "架空", "intent": "x"},  # 候補にない
+            {"desire_ref": "task:9", "title": "架空", "intent": "x"},  # 候補にない
         ],
     }
     import tools as tools_pkg
@@ -410,7 +410,7 @@ def test_day_open_finalize_promotions_fire_track_create(
     assert calls[0]["from_candidate"] == "task:2"  # desire:2 → task:2 に正規化
     assert calls[0]["track_type"] == "autonomous"
     assert calls[0]["title"] == "言葉の標本集"
-    assert any("desire:9" in r.message for r in caplog.records)
+    assert any("task:9" in r.message for r in caplog.records)
     # 発動した /spell 行が記録テキストに載る
     content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
     assert "/spell name='track_create'" in content
@@ -692,7 +692,7 @@ def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
     output = {
         "monologue": "13:30 のコマは対象を直してやり直す。",
         "remaining_timetable": [
-            {"start": "13:30", "kind": "作る", "ref": "desire:2",
+            {"start": "13:30", "kind": "作る", "ref": "task:2",
              "facility": "workshop", "budget_rounds": 4, "note": "対象を直した"},
             _rest_slot("17:00"),
         ],
@@ -707,7 +707,7 @@ def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [(s["start"], s["status"], s["ref"]) for s in slots] == [
         ("13:30", "done", "task:1"),
-        ("13:30", "pending", "desire:2"),
+        ("13:30", "pending", "task:2"),
         ("17:00", "pending", "none"),
     ]
     content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
@@ -826,10 +826,10 @@ def test_sanitize_timetable_rejects_completed_task_ref(manager, ptm, task_refs):
     slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, [
         {"start": "10:00", "kind": "作る", "ref": "task:1",
          "facility": "workshop", "budget_rounds": 4, "note": "完了済みを指す"},
-        {"start": "12:00", "kind": "作る", "ref": "desire:2",
+        {"start": "12:00", "kind": "作る", "ref": "task:2",
          "facility": "workshop", "budget_rounds": 4, "note": "生きている欲求"},
     ])
-    assert [s["ref"] for s in slots] == ["desire:2"]
+    assert [s["ref"] for s in slots] == ["task:2"]
     assert any("completed" in w for w in warnings)
 
 
@@ -891,7 +891,7 @@ def test_post_conversation_dispatch_schema_and_situation(manager, task_refs):
     _assert_no_additional_properties(schema)
 
     picked = schema["properties"]["picked_tasks"]["items"]
-    assert picked["properties"]["track_ref"]["enum"] == ["t:1", "new"]
+    assert picked["properties"]["track_ref"]["enum"] == ["track:1", "new"]
     assert picked["required"] == ["title", "track_ref", "origin_quote"]
     # 中断中セッションなし → resume_session フィールド自体が無い (空 enum 事故防止)
     assert "resume_session" not in schema["properties"]
@@ -901,13 +901,13 @@ def test_post_conversation_dispatch_schema_and_situation(manager, task_refs):
 
     text = args["situation_text"]
     assert "07:00" in text  # 現在時刻
-    assert "t:1" in text and "調べ物" in text  # track_ref の選択材料
+    assert "track:1" in text and "調べ物" in text  # track_ref の選択材料
     assert "task:1" in text  # 既存タスク (重複作成の抑止)
     assert "言葉の標本集" in text  # 既存欲求 (重複作成の抑止)
 
     ctx = json.loads(args["judgment_context"])
     assert ctx["plan_date"] == PLAN_DATE
-    assert ctx["track_refs"] == ["t:1"]
+    assert ctx["track_refs"] == ["track:1"]
     assert "resume" not in ctx
 
 
@@ -951,17 +951,17 @@ def test_post_conversation_finalize_creates_tasks_with_origin_quote(
     output = {
         "monologue": "約束を忘れないうちに書き留めておく。",
         "picked_tasks": [
-            {"title": "蒸留メモを見せる", "track_ref": "t:1",
+            {"title": "蒸留メモを見せる", "track_ref": "track:1",
              "origin_quote": "「できたら見せてほしい」と言われた"},
             {"title": "新しい題材を探す", "track_ref": "new",
              "origin_quote": "「次は何を作るの？」と聞かれた"},
-            {"title": "引用なしの思いつき", "track_ref": "t:1",
+            {"title": "引用なしの思いつき", "track_ref": "track:1",
              "origin_quote": ""},  # 接地なし → 棄却
         ],
         "new_desires": [],
         "remaining_timetable": None,
     }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": ["t:1"]})
+    ctx = json.dumps({"plan_date": PLAN_DATE, "track_refs": ["track:1"]})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             summary, _, _ = finalize_mod.judgment_finalize(
@@ -1390,7 +1390,7 @@ def test_day_close_dispatch_schema_and_situation(
     schema = args["response_schema"]
     _assert_no_additional_properties(schema)
     reviews = schema["properties"]["desire_reviews"]["items"]["properties"]
-    assert reviews["desire_ref"]["enum"] == ["desire:2"], (
+    assert reviews["desire_ref"]["enum"] == ["task:2"], (
         "今日触れていない欲求が enum に混入している"
     )
     assert reviews["verdict"]["enum"] == ["keep", "fading", "fulfilled"]
@@ -1405,7 +1405,7 @@ def test_day_close_dispatch_schema_and_situation(
     assert "以前からの思いつき" not in text
 
     ctx = json.loads(args["judgment_context"])
-    assert ctx["touched_desire_refs"] == ["desire:2"]
+    assert ctx["touched_desire_refs"] == ["task:2"]
 
 
 def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
@@ -1502,13 +1502,13 @@ def test_day_close_finalize_and_day_open_linkage(
         "tomorrow_memo": "朝一は標本集の整理から始める",
         "day_theme": "収集",
         "desire_reviews": [
-            {"desire_ref": "desire:2", "verdict": "fulfilled"},
-            {"desire_ref": "desire:9", "verdict": "keep"},  # 触れていない → 棄却
+            {"desire_ref": "task:2", "verdict": "fulfilled"},
+            {"desire_ref": "task:9", "verdict": "keep"},  # 触れていない → 棄却
         ],
         "user_report_seeds": ["蒸留記事の要点を覚え書きにまとめた"],
     }
     ctx = json.dumps({"plan_date": PLAN_DATE,
-                      "touched_desire_refs": ["desire:2"]})
+                      "touched_desire_refs": ["task:2"]})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
             summary, _, _ = finalize_mod.judgment_finalize(
@@ -1528,7 +1528,7 @@ def test_day_close_finalize_and_day_open_linkage(
         ptm.resolve_task_ref(PERSONA_ID, "task:2"), persona_id=PERSONA_ID,
     )
     assert desire["status"] == "completed"
-    assert any("desire:9" in r.message for r in caplog.records)
+    assert any("task:9" in r.message for r in caplog.records)
 
     recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
     assert recorded["scope"] == "committed"

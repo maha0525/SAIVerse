@@ -68,7 +68,7 @@ class TasksListApiTest(unittest.TestCase):
 
         track_task = by_title["Track小目標"]
         self.assertEqual(track_task.parent_kind, "track")
-        self.assertEqual(track_task.parent_label, "t:2 言語学習")
+        self.assertEqual(track_task.parent_label, "track:2 言語学習")
 
         solo = by_title["単独タスク"]
         self.assertIsNone(solo.parent_kind)

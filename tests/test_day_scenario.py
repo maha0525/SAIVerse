@@ -302,7 +302,7 @@ def _patched_spells(session_factory, created_item_ids):
 
 
 _TIMETABLE = [
-    {"start": "10:00", "kind": "知る", "title": "標本の材料を探す", "ref": "desire:2",
+    {"start": "10:00", "kind": "知る", "title": "標本の材料を探す", "ref": "task:2",
      "facility": "library", "budget_rounds": 3, "note": "図鑑コーナーを中心に見る"},
     {"start": "14:00", "kind": "作る", "title": "共有文の下書きを書く", "ref": "task:1",
      "facility": "workshop", "budget_rounds": 8, "note": "命令調にしないこと"},
@@ -492,7 +492,7 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     # 時間割: 主役 3 列は「時刻 | やること (表題) | 実績」。型・場所・参照・
     # 予算・予定メモは補足列 (まはーフィードバック #1/#2)
     assert "| 時刻 | やること | 実績 | 補足 |" in report
-    assert "| 10:00 | 標本の材料を探す | 実行済み | 知る ／ 図書館 ／ 参照: desire:2 ／ 予算: 3 ／ 図鑑コーナーを中心に見る |" in report
+    assert "| 10:00 | 標本の材料を探す | 実行済み | 知る ／ 図書館 ／ 参照: task:2 ／ 予算: 3 ／ 図鑑コーナーを中心に見る |" in report
     assert "| 14:00 | 共有文の下書きを書く | 実行済み | 作る ／ 工房 ／ 参照: task:1 ／ 予算: 8 ／ 命令調にしないこと |" in report
     # title の無いコマ (休む) は kind で代替表示、場所は表示名 (後方互換)。
     # 休む (スタブ) は「実行済み」と偽らず、詳細記録が無いことを正直に示す
@@ -502,7 +502,14 @@ def test_standard_day_report_contents(standard_run, tmp_path):
         < report.index("## 作業セッションの成果") < report.index("## 作業予算")
     # セッションの成果 (ダイジェスト + 成果物名と saiverse:// URI)
     assert "共有文の下書きを書いた" in report
-    assert f"共有文の下書き（saiverse://item/{created_item_ids[0]}/content）" in report
+    # URI は AI 可視の short_id (item:N 系)。UUID は裏方なので出さない。
+    db = manager.SessionLocal()
+    try:
+        item = db.query(Item).filter(Item.ITEM_ID == created_item_ids[0]).first()
+        item_ref = item.SHORT_ID if item.SHORT_ID is not None else created_item_ids[0]
+    finally:
+        db.close()
+    assert f"共有文の下書き（saiverse://item/{item_ref}/content）" in report
     # 判断プロンプト (paired_action_text のタグ無し展開) が成果・独白に混入しない
     # (adapter のタグフィルタはタグ無し行を素通しするため、day_report 側のタグ
     #  厳密チェックが無いと [起床判断] 等の状況テキストがセッション扱いになる)

@@ -189,6 +189,7 @@ def _resolve_item_labels(manager: Any, item_ids: List[str]) -> Dict[str, str]:
         return labels
     session_factory = getattr(manager, "SessionLocal", None)
     names: Dict[str, str] = {}
+    short_ids: Dict[str, Any] = {}
     if session_factory is not None:
         try:
             from database.models import Item
@@ -196,18 +197,22 @@ def _resolve_item_labels(manager: Any, item_ids: List[str]) -> Dict[str, str]:
             db = session_factory()
             try:
                 rows = (
-                    db.query(Item.ITEM_ID, Item.NAME)
+                    db.query(Item.ITEM_ID, Item.NAME, Item.SHORT_ID)
                     .filter(Item.ITEM_ID.in_(list(item_ids)))
                     .all()
                 )
                 names = {row[0]: (row[1] or "") for row in rows}
+                short_ids = {row[0]: row[2] for row in rows}
             finally:
                 db.close()
         except Exception:
             LOGGER.warning("[day_report] item name lookup failed", exc_info=True)
     for item_id in item_ids:
         name = names.get(item_id) or "(名称不明)"
-        labels[item_id] = f"{name}（saiverse://item/{item_id}/content）"
+        # artifacts は裏方 UUID で追跡。ラベルの URI は AI 可視の short_id を使う。
+        sid = short_ids.get(item_id)
+        uri_key = sid if sid is not None else item_id
+        labels[item_id] = f"{name}（saiverse://item/{uri_key}/content）"
     return labels
 
 

@@ -536,7 +536,7 @@ def _create_picked_task(
                 )
                 created = track_manager.get(track_id)
                 short = (
-                    f"t:{created.short_id}" if created.short_id is not None
+                    f"track:{created.short_id}" if created.short_id is not None
                     else track_id[:8]
                 )
                 dest_label = f"新しい関心「{title}」({short})"

@@ -132,9 +132,9 @@ class TestDesireAddSpell:
                 type="作る",
                 source="図書館で読んだ語源の記事",
             )
-        # 表記は判断点の enum と同じ desire:N (task:N の生表示は制約デコード事故の元)。
-        assert "desire:1" in out
-        assert "task:1" not in out
+        # 表記は判断点の enum と同じ task:N に統一 (desire: 二重 prefix は廃止)。
+        assert "task:1" in out
+        assert "desire:1" not in out
         assert "作る" in out
         note_id = nm.ensure_desire_note(PERSONA_ID)
         tasks = ptm.list_tasks(PERSONA_ID, note_id=note_id)
@@ -154,7 +154,7 @@ class TestDesireAddSpell:
         mod, persona_dir = desire_add_mod
         with persona_context(PERSONA_ID, persona_dir):
             out = mod.desire_add(title="新しい言語を学びたい", goal="表現の幅を広げる")
-        assert "desire:1" in out
+        assert "task:1" in out
         assert "未分類" in out
         assert not out.startswith("Error")
         note_id = nm.ensure_desire_note(PERSONA_ID)
@@ -362,12 +362,12 @@ class TestSummary:
 
         text = desire_engine.desire_summary_for_prompt(manager, PERSONA_ID)
         assert text.startswith("やりたいこと候補:")
-        # ref の表記は enum (collect_slot_ref_enum) と同じ desire:N。
-        ref = desire_engine.to_desire_ref(typed["task_ref"])
-        assert ref.startswith("desire:")
+        # ref の表記は enum (collect_slot_ref_enum) と同じ task:N に統一 (desire: は廃止)。
+        ref = typed["task_ref"]
+        assert ref.startswith("task:")
         assert f"- {ref} [作る] 言葉の標本集を作りたい (鮮度: 新鮮 / 再訪: 1回)" in text
         assert "[未分類] 散歩したい (鮮度: 新鮮 / 再訪: 0回)" in text
-        assert "task:" not in text
+        assert "desire:" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +386,8 @@ class TestDayPlanTouchWiring:
         plan_date = clock.now().date().isoformat()
         day_plan.save_day_plan(manager, PERSONA_ID, plan_date, [{
             "start": "09:00", "kind": "作る",
-            "ref": task["task_ref"].replace("task:", "desire:"),
+            # 欲求も task:N に統一。_fire_slot は task: ref で touch_desire を呼ぶ。
+            "ref": task["task_ref"],
             "facility": "own_room", "budget_rounds": 2, "note": "標本集",
         }])
         session_result = SimpleNamespace(

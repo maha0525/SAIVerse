@@ -8,6 +8,7 @@ from typing import Optional
 
 from sai_memory.memopedia.core import Memopedia
 from sai_memory.memopedia.storage import search_pages_filtered
+from saiverse.references import to_short_ref
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -70,7 +71,7 @@ def memopedia_search(
 
         kw_str = f" [{', '.join(keywords)}]" if keywords else ""
 
-        short_ref = f"m:{page.short_id}" if page.short_id else page.id[:8]
+        short_ref = to_short_ref("memopedia", page.short_id) if page.short_id else page.id[:8]
         lines.append(f"[{i}] ({short_ref}) [{page.category}] {page.title}{kw_str}")
         if page.summary:
             lines.append(f"    {page.summary}")

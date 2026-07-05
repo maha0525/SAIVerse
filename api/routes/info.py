@@ -370,9 +370,25 @@ def get_city_map(region_id: Optional[str] = None, manager = Depends(get_manager)
     }
 
 
+def _resolve_item_uuid(manager, key: str) -> str:
+    """AI 可視の short_id (``item:N`` の N) を裏方 UUID に解決する。
+
+    frontend は persona 可視の ``saiverse://item/N`` からキー N を取り出して
+    ``/api/info/item/N`` を叩く。API 側は short_id を裏方 UUID に解決してから
+    従来の UUID 経路に載せる。UUID や未知キーはそのまま返す (呼び出し側が 404)。
+    """
+    svc = getattr(manager, "item_service", None)
+    if svc is not None and hasattr(svc, "item_dict_by_key"):
+        d = svc.item_dict_by_key(key)
+        if d:
+            return d.get("item_id", key)
+    return key
+
+
 @router.get("/item/{item_id}/bag-contents")
 def get_bag_contents(item_id: str, manager = Depends(get_manager)):
     """Get the contents of a bag item."""
+    item_id = _resolve_item_uuid(manager, item_id)
     items_dict = manager.items if hasattr(manager, 'items') else {}
     item = items_dict.get(item_id)
     if not item:
@@ -397,8 +413,10 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
     elif hasattr(manager, 'items'):
         items_map = manager.items
     
+    # AI 可視の short_id を裏方 UUID に解決してから UUID 経路に載せる。
+    item_id = _resolve_item_uuid(manager, item_id)
     LOGGER.debug("Requesting item_id: %s (items_map size: %d)", item_id, len(items_map))
-    
+
     if item_id not in items_map:
         # Fallback to registry if needed (for admin/seed items not yet in memory?)
         if hasattr(manager, 'item_registry') and item_id in manager.item_registry:
@@ -542,6 +560,7 @@ def toggle_item_open(item_id: str, manager = Depends(get_manager)):
     - Document items: Added as text in prompt
     """
     try:
+        item_id = _resolve_item_uuid(manager, item_id)
         new_state = manager.toggle_item_open_state(item_id)
         return {"success": True, "is_open": new_state, "item_id": item_id}
     except RuntimeError as e:
@@ -558,6 +577,7 @@ class DocumentContentUpdate(BaseModel):
 def update_item_content(item_id: str, body: DocumentContentUpdate, manager = Depends(get_manager)):
     """Update the content of a document item."""
     # Get item data
+    item_id = _resolve_item_uuid(manager, item_id)
     items_map = {}
     if hasattr(manager, 'state') and hasattr(manager.state, 'items'):
         items_map = manager.state.items

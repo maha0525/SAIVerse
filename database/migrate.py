@@ -645,6 +645,59 @@ def backfill_item_short_ids(db_path: str) -> None:
         engine.dispose()
 
 
+def _backfill_day_plan_refs(engine) -> None:
+    """persona_day_plan.slots_json のコマ ref を ``desire:N`` → ``task:N`` に統合する。
+
+    参照アドレッシング統一 (Q2=A): 欲求とタスクは同一 short_id 空間なので、
+    prefix を task: に畳むだけで実体は変わらない。移行対象は構造化データのみで、
+    過去の自然文は触らない (reference_addressing.md §5)。冪等なので毎起動で呼んでも
+    害はない (desire: を含む行だけを LIKE で拾って書き換える)。schema 変更を伴わない
+    データ移行なので needs_migration では拾えず、起動時に無条件で呼ぶ。
+    """
+    import json
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                "SELECT persona_id, plan_date, slots_json FROM persona_day_plan "
+                "WHERE slots_json LIKE '%desire:%'"
+            )).fetchall()
+            if not rows:
+                return
+            changed = 0
+            for persona_id, plan_date, slots_json in rows:
+                try:
+                    slots = json.loads(slots_json)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                dirty = False
+                for slot in slots:
+                    ref = slot.get("ref") if isinstance(slot, dict) else None
+                    if isinstance(ref, str) and ref.startswith("desire:"):
+                        slot["ref"] = "task:" + ref[len("desire:"):]
+                        dirty = True
+                if dirty:
+                    conn.execute(
+                        text("UPDATE persona_day_plan SET slots_json = :s "
+                             "WHERE persona_id = :p AND plan_date = :d"),
+                        {"s": json.dumps(slots, ensure_ascii=False),
+                         "p": persona_id, "d": plan_date},
+                    )
+                    changed += 1
+            if changed:
+                logging.info("day_plan の desire: 参照を %d 行で task: に統合しました。", changed)
+    except Exception as e:
+        logging.warning("day_plan ref バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_day_plan_refs(db_path: str) -> None:
+    """slots_json の desire: → task: 統合を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_day_plan_refs(engine)
+    finally:
+        engine.dispose()
+
+
 def _assign_initial_slot_numbers(engine) -> None:
     """既存アイテムに作成日時順でスロット番号を割り当てる。"""
     try:

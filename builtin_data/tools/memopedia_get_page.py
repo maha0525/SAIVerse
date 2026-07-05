@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from sai_memory.memopedia.storage import resolve_page_ref
+from saiverse.references import to_short_ref
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -39,7 +41,8 @@ def memopedia_get_page(
 
     page = None
     if page_id:
-        page = memopedia.get_page(page_id)
+        resolved = resolve_page_ref(adapter.conn, page_id)
+        page = memopedia.get_page(resolved) if resolved else None
     elif title:
         page = memopedia.find_by_title(title)
 
@@ -50,7 +53,7 @@ def memopedia_get_page(
     # Format page content
     keywords_str = ", ".join(page.keywords) if page.keywords else "(なし)"
     body = memopedia.render_page_body(page.id)
-    short_ref = f"m:{page.short_id}" if page.short_id else page.id
+    short_ref = to_short_ref("memopedia", page.short_id) if page.short_id else page.id
     result = f"""# {page.title}
 
 **ID**: {short_ref}
@@ -83,7 +86,7 @@ def schema() -> ToolSchema:
                 },
                 "page_id": {
                     "type": "string",
-                    "description": "Page ID or short ref (e.g. m:1)",
+                    "description": "Page ID or short ref (e.g. memopedia:1)",
                 },
             },
         },

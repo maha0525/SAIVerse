@@ -278,10 +278,13 @@ def generate_image_local(
                 file_path=str(stored_path),
                 source_context=source_context,
             )
-            item_uri = f"saiverse://item/{item_id}/image"
+            # AI 可視の参照は安定 short_id (item:N)。UUID は裏方。
+            short_id = manager.item_service.items.get(item_id, {}).get("short_id")
+            item_ref = f"item:{short_id}" if short_id is not None else item_id
+            item_uri = f"saiverse://item/{short_id if short_id is not None else item_id}/image"
             item_text = (
                 f"\n\n画像をアイテムとして登録しました"
-                f"（アイテムID: {item_id}、スロット番号: b:{slot_num}、URI: {item_uri}）。"
+                f"（{item_ref}、URI: {item_uri}）。"
             )
     except Exception as exc:
         logger.warning("Failed to create picture item: %s", exc)

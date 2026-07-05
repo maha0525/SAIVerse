@@ -162,23 +162,41 @@ def _next_short_id(conn: sqlite3.Connection) -> int:
     return cur.fetchone()[0] + 1
 
 
-_SHORT_ID_RE = re.compile(r"^[mM]:(\d+)$")
+_SHORT_ID_RE = re.compile(r"^memopedia:(\d+)$", re.IGNORECASE)
+# saiverse://self/memopedia/{key}  /  saiverse://{city}/{persona}/memopedia/{key}
+# 参照アドレッシング統一で page/ 階層は平坦化済み。key は short_id が主・UUID も可。
+_MEMOPEDIA_URI_KEY_RE = re.compile(
+    r"^saiverse://[^/]+(?:/[^/]+)?/memopedia/(?P<key>[^?/]+)"
+)
 
 
 def resolve_page_ref(conn: sqlite3.Connection, ref: str) -> Optional[str]:
-    """Resolve a page reference to a full page ID.
+    """ページ参照を実 page_id (UUID) に解決する単一の入口。
 
-    Accepts:
-    - ``m:1`` / ``M:1`` → page with short_id=1
-    - saiverse:// URI → extracted page_id
-    - UUID or prefix → as-is (existing get_page handles prefix fallback)
+    参照アドレッシング統一の AI 可視キーは short_id (``memopedia:N``)。この関数が
+    全経路 (memopedia_note / list_fragments / get_page / open_page / uri_resolver 等)
+    の入力正規化を担う。受理する形:
 
-    Returns the resolved page_id string, or None if not found.
+    - ``memopedia:N`` / 素の数字 ``N`` → short_id で page を引く (AI 可視の主形式)
+    - ``saiverse://.../memopedia/{key}`` URI → key を取り出して再解決
+    - UUID / prefix → そのまま (get_page 側の prefix フォールバックに委ねる)
+
+    見つからなければ None。
     """
     ref = ref.strip()
-    m = _SHORT_ID_RE.match(ref)
+    # URI ならキーを取り出して再帰的に解く。
+    m = _MEMOPEDIA_URI_KEY_RE.match(ref)
     if m:
-        sid = int(m.group(1))
+        ref = m.group("key")
+    # memopedia:N か素の数字は short_id。
+    sm = _SHORT_ID_RE.match(ref)
+    if sm:
+        sid = int(sm.group(1))
+    elif ref.isdigit():
+        sid = int(ref)
+    else:
+        sid = None
+    if sid is not None:
         cur = conn.execute(
             "SELECT id FROM memopedia_pages WHERE short_id = ?", (sid,)
         )

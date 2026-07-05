@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from saiverse.references import to_short_ref
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -70,7 +71,7 @@ def memopedia_save_page(
             # Just saved — set vividness to vivid (freshly written/updated)
             if existing.vividness != "vivid":
                 memopedia.update_page(existing.id, vividness="vivid")
-            ex_ref = f"m:{existing.short_id}" if existing.short_id else existing.id[:8]
+            ex_ref = to_short_ref("memopedia", existing.short_id) if existing.short_id else existing.id[:8]
             action = f"Updated page '{title}' ({ex_ref})"
         else:
             return f"Failed to update page '{title}'"
@@ -86,7 +87,7 @@ def memopedia_save_page(
             vividness="vivid",
             edit_source="ai_conversation",
         )
-        pg_ref = f"m:{page.short_id}" if page.short_id else page.id[:8]
+        pg_ref = to_short_ref("memopedia", page.short_id) if page.short_id else page.id[:8]
         action = f"Created page '{title}' ({pg_ref}, category: {cat})"
 
     # Return the full page content so the persona can see what was saved

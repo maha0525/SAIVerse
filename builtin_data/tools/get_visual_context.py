@@ -135,7 +135,6 @@ def _render_bag_contents(
     media_list: List[Dict[str, str]],
     manager: Any,
     indent: int = 1,
-    parent_ref: Optional[str] = None,
 ) -> None:
     """Render bag contents as indented list (all items shown as closed)."""
     prefix = "  " * indent
@@ -151,13 +150,10 @@ def _render_bag_contents(
             child_desc = child_desc[:157] + "..."
         label = type_labels.get(child_type, child_type.capitalize() or "Item")
 
-        slot_num = entry.get("slot_number")
-        if parent_ref and slot_num is not None:
-            child_ref = f"{parent_ref}>{slot_num}"
-        elif slot_num is not None:
-            child_ref = str(slot_num)
-        else:
-            child_ref = "?"
+        # 入れ子アイテムも自分の item:N (安定 short_id) を持つので、位置チェーン
+        # (旧 b:5>2) ではなく同一性で指す。
+        child_short_id = entry.get("short_id")
+        child_ref = f"item:{child_short_id}" if child_short_id is not None else "item:?"
 
         text_parts.append(f"{prefix}- [{child_ref}] [{label}] {child_name}")
         text_parts.append(f"{prefix}  {child_desc}")
@@ -165,7 +161,7 @@ def _render_bag_contents(
         # Recurse into nested bags
         children = entry.get("_children", [])
         if children and child_type == "bag":
-            _render_bag_contents(children, text_parts, media_list, manager, indent + 1, parent_ref=child_ref)
+            _render_bag_contents(children, text_parts, media_list, manager, indent + 1)
 
 
 def _format_item_created_at(item: Dict[str, Any]) -> str:
@@ -257,7 +253,7 @@ def _render_item(
     media_list: List[Dict[str, str]],
     manager: Any,
     persona_id: Optional[str] = None,
-    slot_ref: Optional[str] = None,
+    ref: Optional[str] = None,
 ) -> None:
     """Render a single item into the visual context text and media list."""
     item_id = item.get("item_id", "")
@@ -269,7 +265,12 @@ def _render_item(
     file_path_str = item.get("file_path")
     created_at_str = _format_item_created_at(item)
 
-    ref_label = f"[{slot_ref}] " if slot_ref else ""
+    # AI 可視の item アドレスは安定 short_id (item:N)。メディア URI も short_id を
+    # 使い、UUID は裏方 (ファイル解決) に留める。
+    short_id = item.get("short_id")
+    item_uri_key = short_id if short_id is not None else item_id
+
+    ref_label = f"[{ref}] " if ref else ""
 
     type_label = {
         "picture": "Image",
@@ -296,7 +297,7 @@ def _render_item(
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
             if resolved and os.path.exists(resolved):
-                text_parts.append(f"saiverse://item/{item_id}/image")
+                text_parts.append(f"saiverse://item/{item_uri_key}/image")
                 _add_to_media_list(resolved, media_list)
                 LOGGER.debug("get_visual_context: Added open picture item: %s", item_name)
                 # Append description as caption when image is displayed
@@ -349,7 +350,7 @@ def _render_item(
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
             if resolved and os.path.exists(resolved):
-                text_parts.append(f"saiverse://item/{item_id}/audio")
+                text_parts.append(f"saiverse://item/{item_uri_key}/audio")
                 _add_audio_to_media_list(resolved, media_list)
                 LOGGER.debug("get_visual_context: Added open audio item: %s", item_name)
                 text_parts.append(description)
@@ -369,7 +370,7 @@ def _render_item(
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
             if resolved and os.path.exists(resolved):
-                text_parts.append(f"saiverse://item/{item_id}/video")
+                text_parts.append(f"saiverse://item/{item_uri_key}/video")
                 _add_video_to_media_list(resolved, media_list)
                 LOGGER.debug("get_visual_context: Added open video item: %s", item_name)
                 text_parts.append(description)
@@ -391,7 +392,7 @@ def _render_item(
             contents = manager.get_bag_contents_recursive(item_id)
             if contents:
                 text_parts.append("")
-                _render_bag_contents(contents, text_parts, media_list, manager, indent=1, parent_ref=slot_ref)
+                _render_bag_contents(contents, text_parts, media_list, manager, indent=1)
             else:
                 text_parts.append("  (空)")
         text_parts.append("")
@@ -567,9 +568,9 @@ def get_visual_context(
         text_parts.append(f"### あなた自身（{persona_name}）のインベントリ内")
         text_parts.append("")
         for item in inventory_items:
-            slot_num = item.get("slot_number")
-            slot_ref = f"i:{slot_num}" if slot_num is not None else None
-            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, slot_ref=slot_ref)
+            short_id = item.get("short_id")
+            ref = f"item:{short_id}" if short_id is not None else None
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, ref=ref)
 
     # 3b. Building items
     building_items = (
@@ -580,9 +581,9 @@ def get_visual_context(
         text_parts.append("### Building内")
         text_parts.append("")
         for item in building_items:
-            slot_num = item.get("slot_number")
-            slot_ref = f"b:{slot_num}" if slot_num is not None else None
-            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, slot_ref=slot_ref)
+            short_id = item.get("short_id")
+            ref = f"item:{short_id}" if short_id is not None else None
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, ref=ref)
 
     if not inventory_items and not building_items:
         text_parts.append("アイテムはありません。")

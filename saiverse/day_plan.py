@@ -1062,7 +1062,10 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。ハンドラの成否に
     # 依らず「取り組みに向かった」事実を記録するため、実行前に付ける。
     ref = slot.get("ref") or REF_NONE
-    if ref.startswith("desire:"):
+    # 欲求コマ発火 = 再訪記録。参照アドレッシング統一 (Q2) で全 ref が task:N に
+    # なり prefix では desire を判別できないが、touch_desire は parent_kind で
+    # desire でなければ安全に no-op するので、task ref すべてに対して呼ぶ。
+    if ref != REF_NONE and ref.startswith("task:"):
         try:
             from saiverse.desire_engine import touch_desire
             touch_desire(manager, persona_id, ref)

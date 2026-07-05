@@ -71,6 +71,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | カラム | 型 | 制約 | 説明 |
 |---|---|---|---|
 | `ITEM_ID` | VARCHAR(36) | PK, NOT NULL |  |
+| `SHORT_ID` | INTEGER | — |  |
 | `NAME` | VARCHAR(255) | NOT NULL |  |
 | `TYPE` | VARCHAR(64) | NOT NULL, default='object' |  |
 | `DESCRIPTION` | VARCHAR(2048) | NOT NULL, default='' |  |

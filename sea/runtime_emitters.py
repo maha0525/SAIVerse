@@ -56,23 +56,19 @@ class RuntimeEmitters:
         msg_id_for_hook: Optional[str] = None
         if record_history:
             try:
-                from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, strip_user_only
+                from saiverse.content_tags import strip_in_heart, strip_user_only
                 heard_by_list = list(occupants)
                 if persona.persona_id not in heard_by_list:
                     heard_by_list.append(persona.persona_id)
                 # Pulse-bound origin_track_id (set by run_meta_user). Falls back
                 # to None when emit is invoked outside a Pulse (defensive).
                 pulse_track_id = getattr(persona, "_current_pulse_origin_track_id", None)
-                # SAIMemory: 生のテキスト（<in_heart>タグ・スロット参照含む）を保存
-                # ペルソナが「b:3と書いた」という記憶をそのまま残す
+                # SAIMemory: 生のテキスト（<in_heart>タグ含む）を保存。ペルソナが
+                # 書いた item:N は安定 short_id なのでそのまま記憶に残せる。
                 persona.history_manager.add_to_persona_only(msg, origin_track_id=pulse_track_id)
-                # building_histories / gateway: <in_heart>除去 + スロット参照をUUIDに解決
+                # building_histories / gateway: <in_heart>除去。item 参照は item:N /
+                # saiverse://item/N が既に安定・world共通なので解決 pin は不要。
                 building_content = strip_in_heart(text)
-                item_service = getattr(self.runtime.manager, "item_service", None)
-                if item_service:
-                    building_content = resolve_item_slot_uris(
-                        building_content, item_service, persona.persona_id, building_id
-                    )
                 # text_for_voice: <user_only> ブロックを完全除去 (TTS / 音声系
                 # アドオンに UI 専用の HTML 等を読み上げさせないため)。emit_speak
                 # は通常 wrap_spell_blocks を経由しないが、ペルソナが手書きで
@@ -161,18 +157,13 @@ class RuntimeEmitters:
         building_content_for_hook: Optional[str] = None
         msg_id_for_hook: Optional[str] = None
         try:
-            from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, strip_user_only, wrap_spell_blocks
+            from saiverse.content_tags import strip_in_heart, strip_user_only, wrap_spell_blocks
             heard_by_list = list(occupants)
             if persona.persona_id not in heard_by_list:
                 heard_by_list.append(persona.persona_id)
-            # スペルブロックを <user_only alt="Name"> でラッピング、<in_heart> を除去
+            # スペルブロックを <user_only alt="Name"> でラッピング、<in_heart> を除去。
+            # item 参照 (item:N / saiverse://item/N) は安定・world共通なので解決 pin 不要。
             building_content = wrap_spell_blocks(strip_in_heart(text))
-            # スロット参照をUUIDに解決（外向けテキストのみ）
-            item_service = getattr(self.runtime.manager, "item_service", None)
-            if item_service:
-                building_content = resolve_item_slot_uris(
-                    building_content, item_service, persona.persona_id, building_id
-                )
             # text_for_voice: <user_only> ブロック (= スペル HTML 詳細含む) を
             # 完全除去する。voice/外部出力系アドオン (TTS, gateway audio 等) が
             # スペル名・引数・結果といった UI 専用要素を読み上げないようにするため。
@@ -393,15 +384,8 @@ class RuntimeEmitters:
         text_for_voice: Optional[str] = None
 
         try:
-            from saiverse.content_tags import (
-                resolve_item_slot_uris, strip_in_heart, strip_user_only,
-            )
+            from saiverse.content_tags import strip_in_heart, strip_user_only
             building_content = strip_in_heart(text)
-            item_service = getattr(self.runtime.manager, "item_service", None)
-            if item_service:
-                building_content = resolve_item_slot_uris(
-                    building_content, item_service, persona.persona_id, building_id
-                )
             text_for_voice = strip_user_only(building_content)
 
             update_metadata = dict(metadata)

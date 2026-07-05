@@ -317,7 +317,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -328,6 +328,11 @@ def main():
             logging.info("Database migration completed.")
         backfill_track_short_ids(str(db_path))
         backfill_item_short_ids(str(db_path))
+
+    # 参照アドレッシング統一のデータ移行 (day_plan slots_json の desire:→task:) は
+    # schema 変更を伴わないため needs_migration では拾えない。冪等かつ desire: を含む
+    # 行だけを触るので、起動ごとに無条件で呼んで問題ない。
+    backfill_day_plan_refs(str(db_path))
 
     # Building Memory 関連テーブル (Phase 2+3) を軽量パスで揃える。
     # needs_migration が拾うのは「カラム差分」 のみで「テーブル追加」 は素早く確実に

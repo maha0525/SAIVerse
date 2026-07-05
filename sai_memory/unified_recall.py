@@ -15,6 +15,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from saiverse.references import to_uri
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -149,11 +151,11 @@ def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     """Get all Memopedia embeddings.
 
     Returns:
-        List of (page_id, vector, title, summary, category)
+        List of (page_id, vector, title, summary, category, short_id)
     """
     cur = conn.execute(
         """
-        SELECT e.page_id, e.vector, p.title, p.summary, p.category
+        SELECT e.page_id, e.vector, p.title, p.summary, p.category, p.short_id
         FROM memopedia_embeddings e
         JOIN memopedia_pages p ON e.page_id = p.id
         WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
@@ -165,7 +167,7 @@ def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
             vec = json.loads(row[1])
         except (json.JSONDecodeError, TypeError):
             continue
-        result.append((row[0], vec, row[2], row[3], row[4]))
+        result.append((row[0], vec, row[2], row[3], row[4], row[5]))
     return result
 
 
@@ -216,12 +218,12 @@ def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
 
     Returns:
         List of (fragment_id, vector, content, entity_id, chronicle_entry_id,
-                 source_date, entity_title, entity_category)
+                 source_date, entity_title, entity_category, entity_short_id)
     """
     cur = conn.execute(
         """
         SELECT e.fragment_id, e.vector, f.content, f.entity_id,
-               f.chronicle_entry_id, f.source_date, p.title, p.category
+               f.chronicle_entry_id, f.source_date, p.title, p.category, p.short_id
         FROM memopedia_fragment_embeddings e
         JOIN memopedia_fragments f ON e.fragment_id = f.id
         LEFT JOIN memopedia_pages p ON f.entity_id = p.id
@@ -233,7 +235,7 @@ def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
             vec = json.loads(row[1])
         except (json.JSONDecodeError, TypeError):
             continue
-        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6], row[7]))
+        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6], row[7], row[8]))
     return result
 
 
@@ -703,7 +705,7 @@ def unified_recall(
                         title=f"Chronicle Lv{entry.level}: {time_range}",
                         content=entry.content[:200] if entry.content else "",
                         score=0.0,
-                        uri=f"saiverse://self/chronicle/entry/{entry.id}",
+                        uri=to_uri("chronicle", entry.id),
                         level=entry.level,
                         start_time=entry.start_time,
                         end_time=entry.end_time,
@@ -742,7 +744,7 @@ def unified_recall(
                         title=page.title,
                         content=page.summary[:200] if page.summary else "",
                         score=0.0,
-                        uri=f"saiverse://self/memopedia/page/{page.id}",
+                        uri=to_uri("memopedia", page.short_id if page.short_id is not None else page.id),
                         category=page.category,
                     )
 
@@ -767,21 +769,21 @@ def unified_recall(
             placeholders = ",".join("?" for _ in all_fragment_ids)
             cur = conn.execute(
                 f"SELECT f.id, f.content, f.entity_id, f.chronicle_entry_id, "
-                f"f.source_date, p.title, p.category "
+                f"f.source_date, p.title, p.category, p.short_id "
                 f"FROM memopedia_fragments f "
                 f"LEFT JOIN memopedia_pages p ON f.entity_id = p.id "
                 f"WHERE f.id IN ({placeholders})",
                 list(all_fragment_ids),
             )
             for row in cur.fetchall():
-                fid, fcontent, eid, ceid, sdate, etitle, ecat = row
+                fid, fcontent, eid, ceid, sdate, etitle, ecat, eshort = row
                 keyword_hits[fid] = RecallHit(
                     source_type="fragment",
                     source_id=fid,
                     title=etitle,
                     content=fcontent[:200] if fcontent else "",
                     score=0.0,
-                    uri=f"saiverse://self/memopedia/page/{eid}",
+                    uri=to_uri("memopedia", eshort if eshort is not None else eid),
                     category=ecat,
                     entity_id=eid,
                     chronicle_entry_id=ceid,
@@ -821,7 +823,7 @@ def unified_recall(
                     title=title,
                     content=excerpt,
                     score=0.0,
-                    uri=f"saiverse://self/message/{mid}",
+                    uri=to_uri("message", mid),
                     start_time=mcreated,
                 )
 
@@ -848,7 +850,7 @@ def unified_recall(
                 content=content[:200] if content else "",
                 score=score,
                 embed_score=score,
-                uri=f"saiverse://self/chronicle/entry/{entry_id}",
+                uri=to_uri("chronicle", entry_id),
                 level=level,
                 start_time=start_time,
                 end_time=end_time,
@@ -861,7 +863,7 @@ def unified_recall(
     if search_memopedia:
         corpus = get_memopedia_embeddings(conn)
         scored = []
-        for page_id, vec, title, summary, category in corpus:
+        for page_id, vec, title, summary, category, short_id in corpus:
             if len(vec) != vector_dim:
                 continue
             v = np.array(vec, dtype=np.float32)
@@ -873,7 +875,8 @@ def unified_recall(
                 content=summary[:200] if summary else "",
                 score=score,
                 embed_score=score,
-                uri=f"saiverse://self/memopedia/page/{page_id}",
+                # AI 可視のキーは short_id。page_id (uuid) は裏方フォールバック。
+                uri=to_uri("memopedia", short_id if short_id is not None else page_id),
                 category=category,
             )))
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -883,7 +886,7 @@ def unified_recall(
     if search_fragments:
         corpus = get_fragment_embeddings(conn)
         scored = []
-        for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat in corpus:
+        for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat, eshort in corpus:
             if len(vec) != vector_dim:
                 continue
             v = np.array(vec, dtype=np.float32)
@@ -895,7 +898,7 @@ def unified_recall(
                 content=content[:200] if content else "",
                 score=score,
                 embed_score=score,
-                uri=f"saiverse://self/memopedia/page/{entity_id}",
+                uri=to_uri("memopedia", eshort if eshort is not None else entity_id),
                 category=ecat,
                 entity_id=entity_id,
                 chronicle_entry_id=chronicle_entry_id,
@@ -933,7 +936,7 @@ def unified_recall(
                 content=excerpt,
                 score=score,
                 embed_score=score,
-                uri=f"saiverse://self/message/{msg_id}",
+                uri=to_uri("message", msg_id),
                 start_time=created_at,
                 chunk_index=used_chunk_index,
             )

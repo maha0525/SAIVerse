@@ -7,6 +7,8 @@ import re
 from datetime import date
 from typing import List, Optional
 
+from sai_memory.memopedia.storage import resolve_page_ref
+from saiverse.references import to_short_ref, to_uri
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -19,20 +21,6 @@ _CATEGORY_ROOT_MAP = {
     "terms": "root_terms",
     "plans": "root_plans",
 }
-
-# Pattern: saiverse://self/memopedia/page/{page_id}  or  saiverse://{city}/{persona}/memopedia/page/{page_id}
-_MEMOPEDIA_URI_RE = re.compile(
-    r"^saiverse://[^/]+(?:/[^/]+)?/memopedia/page/(?P<page_id>[^?/]+)"
-)
-
-
-def _extract_page_id(value: str) -> str:
-    """Extract page_id from a raw string that may be a saiverse:// URI or a plain ID."""
-    value = value.strip()
-    m = _MEMOPEDIA_URI_RE.match(value)
-    if m:
-        return m.group("page_id")
-    return value
 
 
 def memopedia_note(
@@ -80,10 +68,10 @@ def memopedia_note(
     target_page = None
 
     if page_id:
-        resolved_id = _extract_page_id(page_id)
-        target_page = memopedia.get_page(resolved_id)
+        resolved_id = resolve_page_ref(adapter.conn, page_id)
+        target_page = memopedia.get_page(resolved_id) if resolved_id else None
         if target_page is None:
-            return f"Page not found: {resolved_id}"
+            return f"Page not found: {page_id}"
     else:
         if not title:
             return "Error: title is required when creating a new page (no page_id given)"
@@ -129,10 +117,15 @@ def memopedia_note(
         source_date=today,
     )
 
-    short_ref = f"m:{target_page.short_id}" if target_page.short_id else target_page.id
+    if target_page.short_id is not None:
+        short_ref = to_short_ref("memopedia", target_page.short_id)
+        uri = to_uri("memopedia", target_page.short_id)
+    else:
+        short_ref = target_page.id
+        uri = to_uri("memopedia", target_page.id)
     return (
         f"Fragment written to '{target_page.title}' ({short_ref})\n"
-        f"URI: saiverse://self/memopedia/page/{target_page.id}"
+        f"URI: {uri}"
     )
 
 

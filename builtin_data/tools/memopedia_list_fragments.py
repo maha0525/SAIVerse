@@ -5,21 +5,11 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from sai_memory.memopedia.storage import resolve_page_ref
+from saiverse.references import to_short_ref
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
-
-_MEMOPEDIA_URI_RE = re.compile(
-    r"^saiverse://[^/]+(?:/[^/]+)?/memopedia/page/(?P<page_id>[^?/]+)"
-)
-
-
-def _resolve_page_id(value: str) -> str:
-    value = value.strip()
-    m = _MEMOPEDIA_URI_RE.match(value)
-    if m:
-        return m.group("page_id")
-    return value
 
 
 def memopedia_list_fragments(
@@ -47,16 +37,16 @@ def memopedia_list_fragments(
 
     memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
 
-    resolved_id = _resolve_page_id(page_id)
-    page = memopedia.get_page(resolved_id)
+    resolved_id = resolve_page_ref(adapter.conn, page_id)
+    page = memopedia.get_page(resolved_id) if resolved_id else None
     if page is None:
-        return f"ページが見つかりません: {resolved_id}"
+        return f"ページが見つかりません: {page_id}"
 
     fragments = memopedia.get_fragments(resolved_id)
     if not fragments:
         return f"'{page.title}' にフラグメントはありません。"
 
-    short_ref = f"m:{page.short_id}" if page.short_id else resolved_id[:8]
+    short_ref = to_short_ref("memopedia", page.short_id) if page.short_id else resolved_id[:8]
     lines = [f"'{page.title}' ({short_ref}) のフラグメント一覧 ({len(fragments)}件):\n"]
     for i, f in enumerate(fragments, 1):
         date_str = f.source_date or "日付なし"
@@ -76,7 +66,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "page_id": {
                     "type": "string",
-                    "description": "Page ref (m:1), UUID, or saiverse:// URI",
+                    "description": "Page ref (memopedia:1), UUID, or saiverse:// URI",
                 },
             },
             "required": ["page_id"],

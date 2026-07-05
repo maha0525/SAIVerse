@@ -66,12 +66,12 @@ class TrackShortIdTests(unittest.TestCase):
 
     def test_resolve_short_ref(self):
         t_id = self.tm.create("persona_A", "autonomous")
-        resolved = self.tm.resolve_track_ref("persona_A", "t:1")
+        resolved = self.tm.resolve_track_ref("persona_A", "track:1")
         self.assertEqual(resolved, t_id)
 
     def test_resolve_short_ref_case_insensitive(self):
         t_id = self.tm.create("persona_A", "autonomous")
-        resolved = self.tm.resolve_track_ref("persona_A", "T:1")
+        resolved = self.tm.resolve_track_ref("persona_A", "Track:1")
         self.assertEqual(resolved, t_id)
 
     def test_resolve_uuid_passthrough(self):
@@ -86,7 +86,7 @@ class TrackShortIdTests(unittest.TestCase):
     def test_resolve_nonexistent_short_id_raises(self):
         self.tm.create("persona_A", "autonomous")
         with self.assertRaises(TrackNotFoundError):
-            self.tm.resolve_track_ref("persona_A", "t:999")
+            self.tm.resolve_track_ref("persona_A", "track:999")
 
     def test_resolve_empty_raises(self):
         with self.assertRaises(TrackNotFoundError):
@@ -95,7 +95,7 @@ class TrackShortIdTests(unittest.TestCase):
     def test_resolve_wrong_persona_raises(self):
         self.tm.create("persona_A", "autonomous")
         with self.assertRaises(TrackNotFoundError):
-            self.tm.resolve_track_ref("persona_B", "t:1")
+            self.tm.resolve_track_ref("persona_B", "track:1")
 
 
 class BackfillTests(unittest.TestCase):

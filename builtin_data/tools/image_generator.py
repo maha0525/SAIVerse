@@ -7,7 +7,7 @@ Supported models:
 
 Input image URI formats:
 - saiverse://image/<filename> - Generated image file
-- saiverse://item/<item_id>/image - Picture item's image
+- saiverse://item/<N>/image - Picture item's image
 - saiverse://persona/<persona_id>/image - Persona's avatar
 - saiverse://persona/self/image - Your own avatar
 - saiverse://building/<building_id>/image - Building's interior
@@ -536,7 +536,7 @@ def generate_image(
         input_images: Optional list of image URIs to use as reference/input.
             Supported URI formats:
             - saiverse://image/<filename>
-            - saiverse://item/<item_id>/image
+            - saiverse://item/<N>/image
             - saiverse://persona/<persona_id>/image
             - saiverse://persona/self/image
             - saiverse://building/<building_id>/image
@@ -693,6 +693,7 @@ def generate_image(
         persona_id = get_active_persona_id()
         manager = get_active_manager()
         item_text = ""
+        item_ref = None
 
         if persona_id and manager:
             import json as _json
@@ -706,11 +707,14 @@ def generate_image(
                 file_path=str(stored_path),
                 source_context=_source_context,
             )
-            item_text = f"\n\n画像をアイテムとして登録しました（アイテムID: {item_id}、スロット番号: b:{slot_num}）。"
+            # AI 可視の参照は安定 short_id (item:N)。UUID は裏方 (ファイル解決) に留める。
+            short_id = manager.item_service.items.get(item_id, {}).get("short_id")
+            item_ref = short_id if short_id is not None else item_id
+            item_text = f"\n\n画像をアイテムとして登録しました（item:{item_ref}）。"
     except Exception as exc:
         logger.warning(f"Failed to create picture item: {exc}")
         item_text = ""
-        item_id = None
+        item_ref = None
 
     text = (
         f"画像が生成されました。\n\n"
@@ -720,10 +724,10 @@ def generate_image(
         f"{fallback_note}"
     )
 
-    # 5要素 tuple: text, snippet, file_path, metadata, item_id
-    # item_id は report_template の {item_id} 展開で URI 組み立てに使う
-    # (saiverse://item/{item_id}/content)
-    return text, ToolResult(snippet), stored_path.as_posix(), metadata, item_id
+    # 5要素 tuple: text, snippet, file_path, metadata, item_ref
+    # item_ref は AI 可視の安定 short_id。report_template の {item_ref} 展開で
+    # persona 向け URI を組み立てる (saiverse://item/{item_ref}/content)。UUID は裏方。
+    return text, ToolResult(snippet), stored_path.as_posix(), metadata, item_ref
 
 
 def schema() -> ToolSchema:
@@ -744,7 +748,7 @@ def schema() -> ToolSchema:
             "- saiverse://persona/self/image - Your own avatar\n"
             "- saiverse://building/current/image - Current building's interior\n"
             "- saiverse://persona/<persona_id>/image - Another persona's avatar\n"
-            "- saiverse://item/<item_id>/image - A picture item\n"
+            "- saiverse://item/<N>/image - A picture item\n"
             "- saiverse://building/<building_id>/image - A building's interior"
         ),
         parameters={

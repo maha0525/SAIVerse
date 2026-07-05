@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sai_memory.arasuji.storage import get_entry, get_children
+from saiverse.references import to_uri
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -50,7 +51,7 @@ def chronicle_context_down(entry_id: str) -> str:
     if not entry:
         return f"(Chronicle entry が見つかりません: {entry_id})"
 
-    entry_uri = f"saiverse://self/chronicle/entry/{entry.id}"
+    entry_uri = to_uri("chronicle", entry.id)
     lines = [
         "【Chronicle下流参照】",
         f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
@@ -100,7 +101,7 @@ def chronicle_context_down(entry_id: str) -> str:
             lines.append("(子エントリが見つかりません)")
         else:
             for child in children:
-                child_uri = f"saiverse://self/chronicle/entry/{child.id}"
+                child_uri = to_uri("chronicle", child.id)
                 lines.append(f"[{child.id}] {_fmt_time(child.start_time)} ~ {_fmt_time(child.end_time)} | {child.message_count}件")
                 lines.append(f"URI: {child_uri}")
                 lines.append("```")

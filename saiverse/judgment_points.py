@@ -62,7 +62,6 @@ from saiverse.desire_engine import (
     decay_desires,
     desire_summary_for_prompt,
     promotion_candidates,
-    to_desire_ref,
 )
 from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
 from saiverse.persona_task_manager import (
@@ -219,7 +218,7 @@ def _list_desire_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
 
 
 def collect_slot_ref_enum(manager: Any, persona_id: str) -> List[str]:
-    """コマの ref enum: 実在の task:N / desire:N + "none" (judgment_points.md §3.2)。"""
+    """コマの ref enum: 実在の task:N (欲求もバックログも同一符号) + "none" (judgment_points.md §3.2)。"""
     refs: List[str] = []
     for t in _list_backlog_tasks(manager, persona_id):
         ref = t.get("task_ref")
@@ -228,23 +227,23 @@ def collect_slot_ref_enum(manager: Any, persona_id: str) -> List[str]:
     for t in _list_desire_tasks(manager, persona_id):
         ref = t.get("task_ref")
         if ref:
-            refs.append("desire:" + ref[len("task:"):])
+            refs.append(ref)
     refs.append(REF_NONE)
     return refs
 
 
 def collect_promotion_refs(manager: Any, persona_id: str) -> List[str]:
-    """promotions.desire_ref enum: 再訪回数が閾値を超えた欲求のみ (desire:N 形式)。"""
+    """promotions.desire_ref enum: 再訪回数が閾値を超えた欲求のみ (task:N 形式。フィールド名は互換で desire_ref)。"""
     out: List[str] = []
     for c in promotion_candidates(manager, persona_id):
         ref = c.get("task_ref") or ""
         if ref.startswith("task:"):
-            out.append("desire:" + ref[len("task:"):])
+            out.append(ref)
     return out
 
 
 def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
-    """picked_tasks.track_ref enum: 実在の active/pending Track (t:N 形式)。
+    """picked_tasks.track_ref enum: 実在の active/pending Track (track:N 形式)。
 
     judgment_points.md §5。short_id 未採番の行は参照子が無いため載せない。
     """
@@ -261,7 +260,7 @@ def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
             exc_info=True,
         )
         return []
-    return [f"t:{t.short_id}" for t in tracks if t.short_id is not None]
+    return [f"track:{t.short_id}" for t in tracks if t.short_id is not None]
 
 
 def find_interrupted_session(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
@@ -304,7 +303,7 @@ def find_interrupted_session(manager: Any, persona_id: str) -> Optional[Dict[str
             continue
         candidate = {
             "track_id": t.track_id,
-            "track_ref": f"t:{t.short_id}" if t.short_id is not None else t.track_id[:8],
+            "track_ref": f"track:{t.short_id}" if t.short_id is not None else t.track_id[:8],
             "track_title": t.title or "(無題)",
             "task_ref": str(memo.get("task_ref") or ""),
             "text": str(memo.get("text") or ""),
@@ -334,12 +333,12 @@ def collect_today_touched_desires(manager: Any, persona_id: str) -> List[Dict[st
 
 
 def collect_today_touched_desire_refs(manager: Any, persona_id: str) -> List[str]:
-    """collect_today_touched_desires の ref のみ (desire:N 形式)。"""
+    """collect_today_touched_desires の ref のみ (task:N 形式)。"""
     refs: List[str] = []
     for task in collect_today_touched_desires(manager, persona_id):
         ref = task.get("task_ref") or ""
         if ref.startswith("task:"):
-            refs.append("desire:" + ref[len("task:"):])
+            refs.append(ref)
     return refs
 
 
@@ -710,7 +709,7 @@ def _format_track_backlog(manager: Any, persona_id: str) -> str:
         return "進行中の Track はありません。"
     lines = ["Track:"]
     for t in tracks:
-        short = f"t:{t.short_id}" if t.short_id is not None else t.track_id[:8]
+        short = f"track:{t.short_id}" if t.short_id is not None else t.track_id[:8]
         lines.append(
             f"- {short} [{t.track_type}/{t.status}] {t.title or '(無題)'}"
         )
@@ -918,7 +917,7 @@ def build_post_session_situation_text(
 
 
 def _format_pickable_tracks(manager: Any, persona_id: str) -> str:
-    """picked_tasks.track_ref の選択材料 (t:N がどの関心かを示す一覧)。"""
+    """picked_tasks.track_ref の選択材料 (track:N がどの関心かを示す一覧)。"""
     track_manager = getattr(manager, "track_manager", None)
     if track_manager is None:
         return "進行中の関心 (Track) はありません。"
@@ -936,7 +935,7 @@ def _format_pickable_tracks(manager: Any, persona_id: str) -> str:
         return "進行中の関心 (Track) はありません。"
     lines = ["進行中の関心 (Track):"]
     for t in live:
-        lines.append(f"- t:{t.short_id} [{t.track_type}/{t.status}] {t.title or '(無題)'}")
+        lines.append(f"- track:{t.short_id} [{t.track_type}/{t.status}] {t.title or '(無題)'}")
     return "\n".join(lines)
 
 
@@ -1144,7 +1143,7 @@ def build_day_close_situation_text(
     touched = collect_today_touched_desires(manager, persona_id)
     if touched:
         for task in touched:
-            ref = to_desire_ref(task.get("task_ref"))
+            ref = task.get("task_ref") or "task:?"
             dtype = task.get("desire_type") or "未分類"
             title = task.get("title") or "(無題)"
             count = task.get("touch_count") or 0

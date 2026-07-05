@@ -28,10 +28,12 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ItemEntry:
-    item_id: str
+    item_id: str        # 裏方 UUID (差分の同一性キー)
     name: str
     item_type: str
-    slot: str           # "b:3" (building slot) or "i:2" (inventory slot)
+    slot: str           # locator: "b:3" (building slot) or "i:2" (inventory slot)
+    ref: str = ""       # AI 可視の同一性参照 "item:N" (安定 short_id)。
+                        # 旧 snapshot 復元時は空 (差分は item_id で取る)。
 
 
 @dataclass(frozen=True)
@@ -68,11 +70,13 @@ class BuildingItemsSection:
             loc = locations_map.get(item_id, {})
             slot_num = loc.get("slot_number")
             slot = f"b:{slot_num}" if slot_num is not None else "b:?"
+            short_id = item_data.get("short_id")
             entries.append(ItemEntry(
                 item_id=item_id,
                 name=item_data.get("name", "") or "",
                 item_type=item_data.get("type", "object") or "object",
                 slot=slot,
+                ref=f"item:{short_id}" if short_id is not None else "item:?",
             ))
 
         # ペルソナのインベントリ (slot prefix "i:")
@@ -85,11 +89,13 @@ class BuildingItemsSection:
                 loc = locations_map.get(item_id, {})
                 slot_num = loc.get("slot_number")
                 slot = f"i:{slot_num}" if slot_num is not None else "i:?"
+                short_id = item_data.get("short_id")
                 entries.append(ItemEntry(
                     item_id=item_id,
                     name=item_data.get("name", "") or "",
                     item_type=item_data.get("type", "object") or "object",
                     slot=slot,
+                    ref=f"item:{short_id}" if short_id is not None else "item:?",
                 ))
 
         entries.sort(key=lambda e: (e.slot, e.item_id))
@@ -122,24 +128,24 @@ class BuildingItemsSection:
             if item_id not in old_items:
                 labels.append(NotificationLabel(
                     kind="item_added",
-                    label=f"アイテム「{c_item.name}」({c_item.slot}) が追加されました",
+                    label=f"アイテム「{c_item.name}」({c_item.ref}, 位置 {c_item.slot}) が追加されました",
                 ))
             elif old_items[item_id].name != c_item.name:
                 labels.append(NotificationLabel(
                     kind="item_renamed",
-                    label=f"アイテム「{old_items[item_id].name}」が「{c_item.name}」に名前変更されました",
+                    label=f"アイテム「{old_items[item_id].name}」({c_item.ref}) が「{c_item.name}」に名前変更されました",
                 ))
             elif old_items[item_id].slot != c_item.slot:
                 labels.append(NotificationLabel(
                     kind="item_moved",
-                    label=f"アイテム「{c_item.name}」が {old_items[item_id].slot} から {c_item.slot} へ移動されました",
+                    label=f"アイテム「{c_item.name}」({c_item.ref}) が {old_items[item_id].slot} から {c_item.slot} へ移動されました",
                 ))
 
         for item_id, b_item in old_items.items():
             if item_id not in new_items:
                 labels.append(NotificationLabel(
                     kind="item_removed",
-                    label=f"アイテム「{b_item.name}」({b_item.slot}) が削除されました",
+                    label=f"アイテム「{b_item.name}」({b_item.ref}) が削除されました",
                 ))
 
         return labels

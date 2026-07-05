@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from database.session import SessionLocal
-from saiverse.desire_engine import DESIRE_TYPES, to_desire_ref
+from saiverse.desire_engine import DESIRE_TYPES
 from saiverse.note_manager import NoteManager
 from saiverse.persona_task_manager import PARENT_NOTE, PersonaTaskManager
 from tools.context import get_active_persona_id
@@ -58,9 +58,9 @@ def desire_add(
         desire_type=type,
         desire_source=source,
     )
-    # 表記は判断点の enum (desire:N) に揃える — task:N のまま見せると
-    # ペルソナが後段の構造化出力で存在しない ref を書こうとする。
-    ref = to_desire_ref(task.get("task_ref"))
+    # 符号は task:N に一本化 (参照アドレッシング統一 Q2)。欲求もバックログタスクも
+    # 同じ short_id 参照空間なので task:N で一意。欲求らしさは提示文脈で伝わる。
+    ref = task.get("task_ref") or "task:?"
     return f"やりたいこと候補を追加: {ref} [{type or '未分類'}] {title}"
 
 

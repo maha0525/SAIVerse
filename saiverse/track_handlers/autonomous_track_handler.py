@@ -177,7 +177,7 @@ class AutonomousTrackHandler:
         自律 Track 種別の情報を入れる。
         """
         title = track.title or "(無題)"
-        sid = f"t:{track.short_id}" if track.short_id is not None else track.track_id[:8] + "…"
+        sid = f"track:{track.short_id}" if track.short_id is not None else track.track_id[:8] + "…"
         intent = track.intent or "(意図未設定)"
         lines = [
             "## Track 切替通知 (自律 Track)",

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from sai_memory.memopedia.storage import resolve_page_ref
+from saiverse.references import to_short_ref
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
@@ -38,8 +40,9 @@ def memopedia_open_page(page_id: str) -> str:
     # Get thread_id from adapter's active state
     thread_id = adapter._thread_id(None)
 
-    # Resolve page ref (m:N / UUID) then open
-    page = memopedia.get_page(page_id)
+    # Resolve page ref (memopedia:N / UUID / URI) then open
+    resolved = resolve_page_ref(adapter.conn, page_id)
+    page = memopedia.get_page(resolved) if resolved else None
     if page is None:
         return f"ページが見つかりません: {page_id}"
     resolved_id = page.id
@@ -48,7 +51,7 @@ def memopedia_open_page(page_id: str) -> str:
     if "error" in result:
         return f"Error: {result['error']}"
 
-    short_ref = f"m:{page.short_id}" if page.short_id else resolved_id
+    short_ref = to_short_ref("memopedia", page.short_id) if page.short_id else resolved_id
     lines = [f"# {result['title']} ({short_ref})"]
     if result.get("summary"):
         lines.append(f"\n*{result['summary']}*")
@@ -62,7 +65,7 @@ def memopedia_open_page(page_id: str) -> str:
         lines.append("\n## 子ページ")
         for child in children:
             child_page = memopedia.get_page(child['id'])
-            child_ref = f"m:{child_page.short_id}" if child_page and child_page.short_id else child['id'][:8]
+            child_ref = to_short_ref("memopedia", child_page.short_id) if child_page and child_page.short_id else child['id'][:8]
             lines.append(f"- **{child['title']}** ({child_ref}): {child.get('summary', '')}")
 
     return "\n".join(lines)
@@ -77,7 +80,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "page_id": {
                     "type": "string",
-                    "description": "Page ref (m:1), UUID, or saiverse:// URI",
+                    "description": "Page ref (memopedia:1), UUID, or saiverse:// URI",
                 },
             },
             "required": ["page_id"],

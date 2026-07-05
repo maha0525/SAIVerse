@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 from database.models import ActionTrack
 from saiverse.persona_task_manager import PersonaTaskManager
 
-_SHORT_REF_RE = re.compile(r"^[Tt]:(\d+)$")
+_SHORT_REF_RE = re.compile(r"^track:(\d+)$", re.IGNORECASE)
 
 # --- 状態定数 ---
 STATUS_RUNNING = "running"
@@ -1025,9 +1025,9 @@ class TrackManager:
         return (current_max or 0) + 1
 
     def resolve_track_ref(self, persona_id: str, ref: str) -> str:
-        """短縮参照 (t:N) または UUID を track_id に解決する。
+        """短縮参照 (track:N) または UUID を track_id に解決する。
 
-        - ``t:1`` / ``T:1`` → persona_id のTrack で short_id=1 の track_id を返す
+        - ``track:1`` → persona_id のTrack で short_id=1 の track_id を返す
         - UUID 形式 (36文字, 4ハイフン) → そのまま返す
         - それ以外 → TrackNotFoundError
 
@@ -1049,7 +1049,7 @@ class TrackManager:
                 )
                 if track is None:
                     raise TrackNotFoundError(
-                        f"track not found: t:{short_id} (persona={persona_id})"
+                        f"track not found: track:{short_id} (persona={persona_id})"
                     )
                 return track.track_id
             finally:
@@ -1061,7 +1061,7 @@ class TrackManager:
 
         raise TrackNotFoundError(
             f"invalid track reference: {ref!r} "
-            f"(expected 't:N' or UUID format)"
+            f"(expected 'track:N' or UUID format)"
         )
 
     # ------------------------------------------------------------------
