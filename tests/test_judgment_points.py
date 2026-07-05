@@ -264,6 +264,32 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     assert ctx["plan_date"] == PLAN_DATE
 
 
+def test_day_open_desire_candidate_lines_match_ref_enum(manager, task_refs):
+    """やりたいこと候補の各行の ref 表記が、コマ ref の enum の要素と一致する。
+
+    回帰防止 (2026-07-05 実 LLM 一日シム): プロンプトが欲求を task:2 と生表示し、
+    enum は desire:2 だったため、ペルソナの書いた task:2 が制約デコードで
+    無関係な task:1 に滑った。プロンプト表示と enum の整合そのものを固定する。
+    """
+    jp.run_judgment_point(manager, PERSONA_ID, "day_open")
+    args = manager.pulse_controller.submissions[0]["args"]
+    text = args["situation_text"]
+    slot = args["response_schema"]["properties"]["timetable"]["items"]
+    ref_enum = set(slot["properties"]["ref"]["enum"])
+
+    lines = text.splitlines()
+    start = lines.index("やりたいこと候補:")
+    candidate_lines = []
+    for line in lines[start + 1:]:
+        if not line.startswith("- "):
+            break
+        candidate_lines.append(line)
+    assert candidate_lines, "やりたいこと候補が 1 行も無い (フィクスチャの前提が崩れた)"
+    for line in candidate_lines:
+        ref = line[2:].split(" ", 1)[0]
+        assert ref in ref_enum, f"表示 ref {ref!r} が enum {sorted(ref_enum)} に無い: {line}"
+
+
 def test_day_open_promotions_enum_present_when_candidates(manager, task_refs):
     from saiverse.desire_engine import touch_desire
 

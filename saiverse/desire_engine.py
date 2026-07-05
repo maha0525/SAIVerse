@@ -102,6 +102,24 @@ def _normalize_ref(ref: str) -> str:
     return ref
 
 
+def to_desire_ref(task_ref: Optional[str]) -> str:
+    """欲求の ``task:N`` を提示用の ``desire:N`` へ変換する。
+
+    判断点のコマ ref enum (judgment_points.collect_slot_ref_enum) は欲求を
+    ``desire:N`` で載せるため、ペルソナに見せる表記も必ずこれに揃える。
+    表記が食い違うと、プロンプトの ``task:N`` を書こうとした構造化出力の
+    制約デコードが enum 内の別 ref に滑り、無関係なタスクが選ばれる
+    (2026-07-05 実 LLM 一日シムで実証)。task_ref が無い・不正な行は
+    ``desire:?`` (enum に載らない表示専用のフォールバック)。
+    """
+    ref = (task_ref or "").strip()
+    if ref.startswith("task:"):
+        return "desire:" + ref[len("task:"):]
+    if ref.startswith("desire:"):
+        return ref
+    return "desire:?"
+
+
 def _as_date(value: datetime | date) -> date:
     return value.date() if isinstance(value, datetime) else value
 
@@ -330,13 +348,15 @@ def desire_summary_for_prompt(manager: Any, persona_id: str) -> str:
     """起床判断の状況テキスト用の欲求一覧 (ref / 型 / タイトル / 鮮度 / 再訪回数)。
 
     文言は客観 + 丁寧語 (キャラ付けしない)。欲求が無ければその旨を 1 行で返す。
+    ref の表記は ``desire:N`` — コマ ref enum と一致させる (:func:`to_desire_ref`)。
     """
     desires = _list_desires(manager, persona_id)
     if not desires:
         return "やりたいこと候補はありません。"
     lines = ["やりたいこと候補:"]
     for task in desires:
-        ref = task.get("task_ref") or "task:?"
+        # 表記は enum (collect_slot_ref_enum) と同じ desire:N に揃える。
+        ref = to_desire_ref(task.get("task_ref"))
         dtype = task.get("desire_type") or UNTYPED_LABEL
         title = task.get("title") or "(無題)"
         state = task.get("desire_state") or DESIRE_STATE_FRESH

@@ -62,6 +62,7 @@ from saiverse.desire_engine import (
     decay_desires,
     desire_summary_for_prompt,
     promotion_candidates,
+    to_desire_ref,
 )
 from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
 from saiverse.persona_task_manager import (
@@ -1137,12 +1138,12 @@ def build_day_close_situation_text(
     touched = collect_today_touched_desires(manager, persona_id)
     if touched:
         for task in touched:
-            ref = task.get("task_ref") or "task:?"
+            ref = to_desire_ref(task.get("task_ref"))
             dtype = task.get("desire_type") or "未分類"
             title = task.get("title") or "(無題)"
             count = task.get("touch_count") or 0
             parts.append(
-                f"- desire:{ref[len('task:'):]} [{dtype}] {title} (再訪: {count}回)"
+                f"- {ref} [{dtype}] {title} (再訪: {count}回)"
             )
     else:
         parts.append("今日触れた「やりたいこと」はありません。")

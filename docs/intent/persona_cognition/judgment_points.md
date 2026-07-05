@@ -87,6 +87,7 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 - `title` はペルソナ自身が付ける各コマの表題（2026-07-05 追加）。ユーザーが一日新聞で最初に読む欄で、「時間割が何の予定なのか」を仕組みを知らない人にも読めるようにする。旧データには無いため、保存・検証は省略（空文字）を許容し、表示側（一日新聞）は note 先頭 or kind で代替する（後方互換）
 - 六型のコマは `ref` に実在のタスク／欲求を指す（動的 enum なので実在しないものは指せない）。`暮らし`・`休む` は `ref: "none"`。**終了済み（completed / cancelled）タスクを指す ref は finalize の検証（sanitize_timetable）でコマごと棄却**——enum は生存タスクから構築されるが、「enum 構築後に完了したタスクの ref」が同じ判断の remaining_timetable や旧 plan の引き写しで滑り込む経路を塞ぐ（2026-07-05 実 LLM シム 3 回目 異常③）
 - `facility` は型からのデフォルト対応（v2 §6.1）を deterministic に提示し、LLM は上書きのみ
+- **欲求の提示書式は enum と同じ `desire:N`**（`desire_engine.to_desire_ref`）：状況テキストの「やりたいこと候補」一覧・就寝判断の「今日触れた欲求」・`desire_add` の戻りテキストは、ref を `task:N` の生表示ではなく `desire:N` で見せる。プロンプトに `task:N` と表示すると、ペルソナがそれを書こうとした構造化出力の制約デコードが enum 内の別 ref に滑り、無関係なタスクが選ばれる（2026-07-05 実 LLM シム: `task:2` 表示 → enum は `desire:2` → 制約デコードが `task:1` に滑落）。プロンプト表示と enum の整合は回帰テストで固定（`tests/test_judgment_points.py::test_day_open_desire_candidate_lines_match_ref_enum`）。なおメタ判断（idle_pending の promote）は enum・提示とも `task:N` で内部整合しており別語彙のまま
 - finalize の検証：時刻昇順・就寝時刻内・ref と kind の整合・予算合計が日次予算内
 
 ### 3.3 時間割の編集形式
