@@ -8,7 +8,7 @@
 python scripts/run_day_sim.py --scenario test_fixtures/scenarios/day_standard.json
 
 # 実 LLM（コスト発生）: テスト環境の DB とペルソナを使うこと（本番に向けない）
-python scripts/run_day_sim.py --scenario <file> --real --city city_a --db-file test_data/.saiverse/user_data/database/saiverse.db
+python scripts/run_day_sim.py --scenario <file> --real --city city_a --db-file test_data/user_data/database/saiverse.db
 ```
 
 ## フィールド
