@@ -332,6 +332,9 @@ def migrate_database_in_place(db_path: str):
         # Post-migration: assign short_ids to existing Tracks that don't have one.
         _backfill_track_short_ids(target_engine)
 
+        # Post-migration: assign world-global short_ids to existing items.
+        _backfill_item_short_ids(target_engine)
+
         # Post-migration: demote legacy STATUS_WAITING Tracks to 'pending'.
         # waiting_for / waiting_timeout_at columns are dropped by the schema
         # copy phase above (they no longer exist in the new schema), but the
@@ -596,6 +599,48 @@ def backfill_track_short_ids(db_path: str) -> None:
     engine = create_engine(f"sqlite:///{db_path}")
     try:
         _backfill_track_short_ids(engine)
+    finally:
+        engine.dispose()
+
+
+def _backfill_item_short_ids(engine) -> None:
+    """既存 item に世界全体の連番 short_id を作成日時順で割り当てる。
+
+    Track と違い item は world スコープ (saiverse.db に世界で1つ) なので、ペルソナ
+    単位ではなく世界全体の単一カウンタ。参照アドレッシング統一 (item:N) の同一性キー。
+    """
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                'SELECT ITEM_ID FROM item '
+                'WHERE SHORT_ID IS NULL '
+                'ORDER BY CREATED_AT'
+            )).fetchall()
+
+            if not rows:
+                return
+
+            current_max = conn.execute(text(
+                'SELECT COALESCE(MAX(SHORT_ID), 0) FROM item'
+            )).scalar() or 0
+
+            for (item_id,) in rows:
+                current_max += 1
+                conn.execute(
+                    text('UPDATE item SET SHORT_ID = :sid WHERE ITEM_ID = :iid'),
+                    {"sid": current_max, "iid": item_id},
+                )
+
+            logging.info("short_id を %d 件の item に割り当てました。", len(rows))
+    except Exception as e:
+        logging.warning("Item short_id バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_item_short_ids(db_path: str) -> None:
+    """追加系マイグレーション後に呼ぶ standalone エントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_item_short_ids(engine)
     finally:
         engine.dispose()
 

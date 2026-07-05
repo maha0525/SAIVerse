@@ -10,6 +10,8 @@ from sqlalchemy import (
     func,
     Text,
     Float,
+    event,
+    select,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -327,6 +329,11 @@ class Blueprint(Base):
 class Item(Base):
     __tablename__ = "item"
     ITEM_ID = Column(String(36), primary_key=True)
+    # 世界全体で一意の安定連番。参照アドレッシング統一 (item:N / saiverse://item/N)
+    # の同一性キー。位置 (ItemLocation.SLOT_NUMBER) とは別概念で、アイテムが動いても
+    # 変わらない。採番は下の before_insert リスナーが世界全体の MAX+1 で行う。
+    # 詳細: docs/intent/reference_addressing.md
+    SHORT_ID = Column(Integer, nullable=True)
     NAME = Column(String(255), nullable=False)
     TYPE = Column(String(64), nullable=False, default="object")
     DESCRIPTION = Column(String(2048), default="", nullable=False)
@@ -336,6 +343,29 @@ class Item(Base):
     SOURCE_CONTEXT = Column(String, nullable=True)
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+@event.listens_for(Item, "before_insert")
+def _assign_item_short_id(mapper, connection, target) -> None:
+    """挿入時に SHORT_ID 未設定なら世界全体の連番を刻む (world スコープ)。
+
+    全 item 生成経路を一箇所でカバーする (create_document_item / create_picture_item
+    など各メソッドが個別に採番する必要がない)。削除後も MAX ベースなので再利用せず、
+    一度 item:N が指したアイテムが消えても N が別物に化けない (I5)。
+
+    バッチ安全性: SQLAlchemy は同一クラスの複数行を executemany にまとめ、before_insert
+    を全行ぶん先に発火させてから INSERT するため、DB の MAX は同一フラッシュ内の先行行を
+    見られない。接続スコープの high-water mark (``connection.info``) と DB の MAX の大きい
+    方 +1 を採ることで、単発・バッチ・後続トランザクションのいずれでも重複しない連番になる。
+    """
+    if getattr(target, "SHORT_ID", None) is not None:
+        return
+    db_max = connection.execute(
+        select(func.coalesce(func.max(Item.SHORT_ID), 0))
+    ).scalar() or 0
+    next_val = max(connection.info.get("_item_short_id_hwm", 0), db_max) + 1
+    connection.info["_item_short_id_hwm"] = next_val
+    target.SHORT_ID = next_val
 
 
 class ItemLocation(Base):

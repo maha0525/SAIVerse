@@ -127,6 +127,7 @@ class ItemService:
                 state_payload = {}
             self.items[row.ITEM_ID] = {
                 "item_id": row.ITEM_ID,
+                "short_id": row.SHORT_ID,
                 "name": row.NAME,
                 "type": row.TYPE,
                 "description": row.DESCRIPTION or "",
