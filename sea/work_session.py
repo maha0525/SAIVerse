@@ -21,7 +21,7 @@ act→observe ループを、ラウンド予算付きで運転する。実体は
     書く。セッションの生ログ (各ラウンドのやり取り) は WORKER アスペクト
     由来の scope='volatile' で保存され、メインライン context には乗らない
     (sea/runtime_context.py: required_scopes=['committed'])。
-  - 机メモ (Track への状態メモ) は呼び出し側 (セッション終了判断,
+  - 作業メモ (desk_memo — Track への状態メモ) は呼び出し側 (セッション終了判断,
     judgment_points.md §6) の責務であり本モジュールでは扱わない。
 
 記憶の接地原則 (autonomous_behavior_v2.md §3-1, §8-5):

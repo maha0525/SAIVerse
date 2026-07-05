@@ -22,7 +22,7 @@
 - ``post_session`` — セッション終了判断: タスクの裁定 (接地検証つき) + 次への接続
 - ``on_event``   — イベント到着判断: 反応の選択 (engage_now / insert_slot /
   note_only / ignore。alert は engage_now のみに縮退)
-- ``day_close``  — 就寝判断: 予定 vs 実績のふりかえり + 明日への机メモ +
+- ``day_close``  — 就寝判断: 予定 vs 実績のふりかえり + 明日の自分へのメモ +
   欲求のたな卸し + ユーザーへの報告種
 
 モデルは standard (META 相当): 起動は ``PulseController.submit_meta_judgment``
@@ -239,8 +239,8 @@ def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
 def find_interrupted_session(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
     """「中断中セッション」= desk_memo (status: continue/blocked) を持つ生きた Track。
 
-    post_session 判断が :func:`save_desk_memo` で凍結した机メモが実体
-    (judgment_points.md §5「中断中セッションの机メモ (あれば)」)。複数あれば
+    post_session 判断が :func:`save_desk_memo` で凍結した作業メモが実体
+    (judgment_points.md §5「中断中セッションの作業メモ (あれば)」)。複数あれば
     updated_at が最新の 1 件を返す (resume_session は単一選択のため)。
 
     Returns:
@@ -606,7 +606,7 @@ def build_day_close_schema(
             },
             "tomorrow_memo": {
                 "type": "string",
-                "description": "明日の自分への机メモ",
+                "description": "明日の自分へのメモ",
             },
             "day_theme": {
                 "type": "string",
@@ -776,13 +776,13 @@ def build_day_open_situation_text(
     parts = [
         "[起床判断]",
         f"おはようございます。今日 ({today}) の一日が始まります。",
-        "机メモ・昨日のふりかえり・バックログ・やりたいこと候補を見て、"
-        "今日の時間割を編成してください。",
+        "昨日の自分からのメモ・昨日のふりかえり・バックログ・やりたいこと候補を"
+        "見て、今日の時間割を編成してください。",
         "各コマには「○○をする」という短い表題 (title) を付けてください — "
         "あなたの一日の予定表にそのまま載ります。",
         "",
-        "[昨日の自分からの机メモ]",
-        memo or "(机メモはありません)",
+        "[昨日の自分からのメモ]",
+        memo or "(メモはありません)",
         "",
         "[昨日のふりかえり]",
         _yesterday_review_text(manager, persona_id, yesterday),
@@ -924,7 +924,7 @@ def build_post_conversation_situation_text(
             "",
             "[中断中の作業]",
             f"{interrupted['track_ref']}「{interrupted['track_title']}」"
-            f"の机メモ [{memo_label}]: {interrupted['text'] or '(記載なし)'}",
+            f"の作業メモ [{memo_label}]: {interrupted['text'] or '(記載なし)'}",
             "この作業をどうするかを resume_session で選んでください。",
         ]
     parts += [
@@ -1087,7 +1087,7 @@ def build_day_close_situation_text(
     parts = [
         "[就寝判断]",
         f"今日 ({today}) を終えます。予定と実際に起きたことを見比べて、"
-        "ふりかえりと明日の自分への机メモを書いてください。",
+        "ふりかえりと明日の自分へのメモを書いてください。",
         "",
         build_day_results_text(manager, persona_id, today),
         "",
@@ -1492,7 +1492,7 @@ def insert_timetable_slot(
 def save_desk_memo(
     manager: Any, track_id: str, memo: Dict[str, Any]
 ) -> bool:
-    """Track metadata に机メモを保存する (judgment_points.md §6 の continue/blocked)。
+    """Track metadata に作業メモを保存する (judgment_points.md §6 の continue/blocked)。
 
     ``track_metadata.desk_memo = {text, status, task_ref, updated_at}`` を上書きする。
     次の起床判断・セッション再開が「どこまでやった・次はどこから」を読む置き場。
@@ -1527,13 +1527,13 @@ def save_desk_memo(
 
 
 def clear_desk_memo(manager: Any, track_id: str) -> bool:
-    """Track metadata の机メモを片づける (resume_session='drop' の適用)。
+    """Track metadata の作業メモを片づける (resume_session='drop' の適用)。
 
     ``track_metadata.desk_memo`` を除去する。以後この Track は
     :func:`find_interrupted_session` の対象から外れる (タスク自体は残る)。
 
     Returns:
-        除去できたら True。Track が無い / 机メモが無い場合は False。
+        除去できたら True。Track が無い / 作業メモが無い場合は False。
     """
     from database.models import ActionTrack
 

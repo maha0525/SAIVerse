@@ -415,7 +415,7 @@ def _section_day_close(
     lines.append(monologue or NONE_TEXT)
     lines.append("")
     memo = (meta.get("tomorrow_memo") or "").strip() if isinstance(meta, dict) else ""
-    lines.append(f"明日への机メモ: {memo or NONE_TEXT}")
+    lines.append(f"明日の自分へのメモ: {memo or NONE_TEXT}")
     seeds = meta.get("user_report_seeds") if isinstance(meta, dict) else None
     lines.append("")
     lines.append("ユーザーに話したいこと:")

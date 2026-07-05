@@ -9,7 +9,7 @@ mock LLM (LLM コストゼロ) で一日を端から端まで回す配線テス�
   - タスクが artifact_refs 付きで completed になる
   - 日次予算台帳が実測ラウンドで消費される
   - day_close の tomorrow_memo が翌日 day_open の状況テキストに出る (連結)
-  - 一日レポートに予定 vs 実績・成果物 (saiverse:// URI)・机メモが含まれる
+  - 一日レポートに予定 vs 実績・成果物 (saiverse:// URI)・明日の自分へのメモが含まれる
   - 実時間 30 秒未満で完走する
 - 終日不在 + 空バックログ: 全コマ 暮らし/休む でもクラッシュせずレポートが出る
 
@@ -472,7 +472,7 @@ def test_standard_day_tomorrow_memo_links_to_next_day_open(standard_run):
     assert meta["tomorrow_memo"] == "明日は標本集の整理から始める"
     assert meta["day_theme"] == "制作"
 
-    # 翌朝の起床判断の状況テキストに机メモと昨日の実績ダイジェストが出る
+    # 翌朝の起床判断の状況テキストに昨日の自分からのメモと実績ダイジェストが出る
     clock.advance_to(datetime(2026, 7, 5, 7, 0, 0))
     morning_text = jp.build_day_open_situation_text(manager, PERSONA_ID, {})
     assert "明日は標本集の整理から始める" in morning_text
@@ -510,12 +510,12 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     assert "再訪: 1 回" in report
     # 予算 (実測)
     assert "消費 2 / 全体 20 ラウンド（残り 18）" in report
-    # 就寝のふりかえり (独白・机メモ・報告種)
+    # 就寝のふりかえり (独白・明日の自分へのメモ・報告種)
     assert "概ね予定どおりの一日だった" in report
-    assert "明日への机メモ: 明日は標本集の整理から始める" in report
+    assert "明日の自分へのメモ: 明日は標本集の整理から始める" in report
     assert "共有文の下書きを仕上げました" in report
-    # 就寝判断の適用エコー行は載せない — 独白だけを表示し、机メモ・テーマ等は
-    # plan meta 由来の節で一度だけ出す (重複解消、フィードバック #5)
+    # 就寝判断の適用エコー行は載せない — 独白だけを表示し、明日へのメモ・テーマ等
+    # は plan meta 由来の節で一度だけ出す (重複解消、フィードバック #5)
     assert "（今日のふりかえりを記録した）" not in report
     assert report.count("明日は標本集の整理から始める") == 1
 
@@ -583,7 +583,7 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
     assert "| 20:00 | 休む | 実行済み | 自分の部屋 |" in report  # title なし → kind 代替
     assert "## 作業セッションの成果" in report
     assert "（なし）" in report
-    assert "明日への机メモ: 明日も同じように" in report
+    assert "明日の自分へのメモ: 明日も同じように" in report
     assert "何も成さない一日だったが" in report
 
 

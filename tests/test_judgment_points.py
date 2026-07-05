@@ -7,7 +7,7 @@
   不正 ref のコマだけ棄却 + WARN
 - post_conversation: picked_tasks (track_ref enum + origin_quote 接地)、
   resume_session の動的挿入 (中断中セッションがあるときのみ)、収穫ゼロ正常、
-  remaining_timetable 全置換、resume_now の即時コマ挿入 / drop の机メモ片づけ
+  remaining_timetable 全置換、resume_now の即時コマ挿入 / drop の作業メモ片づけ
 - post_session: artifacts 空で done 分岐がスキーマから消える (やったフリの構造的封じ)、
   done + 実在 artifact_ref でタスク completed + artifact_refs 記録、
   偽 artifact_ref は棄却、desk_memo が Track metadata に載る、
@@ -201,7 +201,7 @@ def _rest_slot(start="21:00"):
 
 
 def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, session_factory):
-    # 昨夜の机メモ (yesterday の plan meta に格納)
+    # 昨夜の自分からのメモ (yesterday の plan meta に格納)
     day_plan.update_plan_meta(manager, PERSONA_ID, YESTERDAY,
                               {"tomorrow_memo": "明日は標本集の続きから"})
 
@@ -229,7 +229,7 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     assert subs[0]["building_id"] == "alice_room"
 
     args = subs[0]["args"]
-    # 状況テキスト: 机メモ・バックログ・欲求・予算・施設
+    # 状況テキスト: 昨日の自分からのメモ・バックログ・欲求・予算・施設
     text = args["situation_text"]
     assert "明日は標本集の続きから" in text
     assert "task:1" in text
@@ -505,7 +505,7 @@ def test_post_session_fake_artifact_ref_is_rejected(
     assert task["status"] == "pending", "偽 artifact_ref でタスクが完了してしまった"
     assert task["artifact_refs"] == []
     assert any("item-zzz" in r.message for r in caplog.records)
-    # continue 相当に降格し、机メモは Track に残る
+    # continue 相当に降格し、作業メモは Track に残る
     track = manager.track_manager.get(track_id)
     memo = json.loads(track.track_metadata)["desk_memo"]
     assert memo["text"] == "続きは明日"
@@ -544,7 +544,7 @@ def test_post_session_desk_memo_and_new_desires(
                     judgment_output=output, kind="post_session", judgment_context=ctx,
                 )
 
-    # desk_memo が Track metadata (机メモ) に載る
+    # desk_memo (作業メモ) が Track metadata に載る
     track = manager.track_manager.get(track_id)
     memo = json.loads(track.track_metadata)["desk_memo"]
     assert memo["text"] == "第3節まで読了。次は第4節から"
@@ -652,7 +652,7 @@ def test_post_session_remaining_timetable_replaces_and_cancels_stale(
 
 
 def test_plan_meta_roundtrip_and_survives_slot_save(manager, task_refs):
-    # plan 行が無くても meta を書ける (就寝判断が時間割の無い日に机メモを残せる)
+    # plan 行が無くても meta を書ける (就寝判断が時間割の無い日にメモを残せる)
     day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE,
                               {"tomorrow_memo": "朝一で標本集"})
     assert day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE) == {
@@ -1279,7 +1279,7 @@ def test_day_close_finalize_and_day_open_linkage(
                 judgment_context=ctx, situation_text="[就寝判断] ...",
             )
 
-    # meta_json に机メモ・テーマ・報告種・実績ダイジェストが保存される
+    # meta_json に明日へのメモ・テーマ・報告種・実績ダイジェストが保存される
     meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
     assert meta["tomorrow_memo"] == "朝一は標本集の整理から始める"
     assert meta["day_theme"] == "収集"
@@ -1299,7 +1299,7 @@ def test_day_close_finalize_and_day_open_linkage(
     assert "judgment:day_close" in recorded["metadata"]["tags"]
     assert "applied=True" in summary
 
-    # --- 連結: 翌朝の起床判断が机メモとダイジェストを読む -----------------
+    # --- 連結: 翌朝の起床判断が昨夜のメモとダイジェストを読む -------------
     clock.advance_to(datetime(2026, 7, 5, 7, 0, 0))
     morning_text = jp.build_day_open_situation_text(manager, PERSONA_ID, {})
     assert "朝一は標本集の整理から始める" in morning_text  # tomorrow_memo

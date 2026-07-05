@@ -11,7 +11,7 @@ judgment_post_session / judgment_on_event / judgment_day_close) の最終ノー�
      promotions → track_create (from_candidate) スペル
    - post_conversation: picked_tasks → タスク作成 (origin_quote 必須の接地、
      track_ref='new' は新規 autonomous Track) / resume_session (resume_now は
-     再開コマの即時挿入 / drop は机メモ片づけ) / new_desires /
+     再開コマの即時挿入 / drop は作業メモ片づけ) / new_desires /
      remaining_timetable
    - post_session: task_verdict 適用 (done は artifact_ref の接地検証つき) /
      desk_memo → Track metadata / track_op / new_desires → desire_add /
@@ -312,7 +312,7 @@ def _apply_task_verdict(
     lines: List[str],
     warnings: List[str],
 ) -> bool:
-    """task_verdict の適用。タスク完了 or 机メモ保存があれば True。"""
+    """task_verdict の適用。タスク完了 or 作業メモ保存があれば True。"""
     verdict = output.get("task_verdict")
     if not isinstance(verdict, dict):
         return False
@@ -352,7 +352,7 @@ def _apply_task_verdict(
             applied = True
         else:
             # やったフリの棄却: 成果物リストに無い ref は完了させない。
-            # continue 相当に降格 (タスクは動かさず、机メモだけ残す)。
+            # continue 相当に降格 (タスクは動かさず、作業メモだけ残す)。
             warnings.append(
                 f"task_verdict 'done' rejected: artifact_ref={artifact_ref!r} は"
                 "このセッションの成果物リストにありません (タスクは完了させません)"
@@ -362,7 +362,7 @@ def _apply_task_verdict(
     if status in ("continue", "blocked"):
         memo_label = "詰まり" if status == "blocked" else "続き"
         if desk_memo:
-            lines.append(f"（机メモ [{memo_label}]: {desk_memo}）")
+            lines.append(f"（作業メモ [{memo_label}]: {desk_memo}）")
         track_id = ctx.get("track_id")
         if track_id:
             memo = {
@@ -550,10 +550,10 @@ def _apply_resume_now(
     """resume_session='resume_now' の適用。
 
     **妥協点** (judgment_points.md §5): セッションの凍結コンテキストを復元する
-    「再開機構」は未実装のため、resume_now は「凍結済み机メモ付きタスクを参照
+    「再開機構」は未実装のため、resume_now は「凍結済み作業メモ付きタスクを参照
     する『作る/知る』コマの現在時刻への即時挿入」で表現する。kind / facility /
     予算は今日の時間割で同じタスクを指していた元コマから引き継ぐ (無ければ
-    「作る」/ own_room / 既定予算)。挿入されたコマは即時発火し、机メモは
+    「作る」/ own_room / 既定予算)。挿入されたコマは即時発火し、作業メモは
     セッション指示書の参照先 (Track metadata) に残ったまま新セッションが走る。
     """
     task_ref = str(resume_ctx.get("task_ref") or "").strip()
@@ -577,7 +577,7 @@ def _apply_resume_now(
     memo_text = str(resume_ctx.get("text") or "").strip()
     note = "中断していた作業の再開"
     if memo_text:
-        note += f"（机メモ: {memo_text[:60]}）"
+        note += f"（作業メモ: {memo_text[:60]}）"
     now_hhmm = clock.now().strftime("%H:%M")
     slot = {
         "start": now_hhmm,
@@ -675,15 +675,15 @@ def _finalize_post_conversation(
             try:
                 if track_id and clear_desk_memo(manager, track_id):
                     applied = True
-                    lines.append("（中断中の作業は取りやめ、机メモを片づけた）")
+                    lines.append("（中断中の作業は取りやめ、作業メモを片づけた）")
                 else:
                     warnings.append(
-                        f"resume_session 'drop': 机メモの削除先 Track "
+                        f"resume_session 'drop': 作業メモの削除先 Track "
                         f"{track_id!r} が見つかりません"
                     )
             except Exception as exc:
                 LOGGER.exception("[judgment_finalize] clear_desk_memo raised")
-                warnings.append(f"机メモの片づけに失敗: {exc}")
+                warnings.append(f"作業メモの片づけに失敗: {exc}")
         else:
             warnings.append(
                 f"resume_session rejected: 未知の値 {resume_choice!r}"
@@ -706,7 +706,7 @@ def _append_event_memo(
 ) -> None:
     """note_only の覚え書きを plan meta (``event_memos`` 配列) に積む。
 
-    机メモ (Track metadata) 様式の記録先だが、イベントは Track に属さないため
+    作業メモ (Track metadata) 様式の記録先だが、イベントは Track に属さないため
     「その日」の付帯情報 (persona_day_plan.meta_json) を置き場にする。
     """
     meta = day_plan_mod.load_plan_meta(manager, persona_id, plan_date)
@@ -833,7 +833,7 @@ def _finalize_day_close(
         updates["tomorrow_memo"] = tomorrow_memo
     else:
         warnings.append(
-            "tomorrow_memo が空です (明日の起床判断は机メモなしで始まります)"
+            "tomorrow_memo が空です (明日の起床判断はメモなしで始まります)"
         )
     day_theme = str(output.get("day_theme") or "").strip()
     if day_theme:
@@ -869,7 +869,7 @@ def _finalize_day_close(
         applied = True
         lines.append("（今日のふりかえりを記録した）")
         if tomorrow_memo:
-            lines.append(f"（明日への机メモ: {tomorrow_memo}）")
+            lines.append(f"（明日の自分へのメモ: {tomorrow_memo}）")
         if day_theme:
             lines.append(f"（今日のテーマ: {day_theme}）")
         if seeds:

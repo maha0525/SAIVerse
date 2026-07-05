@@ -989,7 +989,7 @@ class PersonaDayPlan(Base):
     plan_date = Column(String(10), primary_key=True)  # "YYYY-MM-DD"
     slots_json = Column(Text, nullable=False)
     # 日付に紐づく付帯情報 (JSON dict)。就寝判断 (day_close) が書く
-    # {"tomorrow_memo": 明日の自分への机メモ, "day_theme": ...} 等を格納し、
+    # {"tomorrow_memo": 明日の自分へのメモ, "day_theme": ...} 等を格納し、
     # 翌朝の起床判断 (day_open) が読む (judgment_points.md §4/§8)。
     # 読み書きは saiverse/day_plan.py の load_plan_meta / update_plan_meta。
     meta_json = Column(Text, nullable=True)

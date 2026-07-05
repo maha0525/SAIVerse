@@ -30,7 +30,9 @@ meta_judgment v2 で確立したパターンをそのまま継承する：
 | 会話終了 (post_conversation) | 会話終了イベント（タイムアウト統合は v2 §10-5） | 会話からの収穫（タスク・欲求）＋残り時間割の整え |
 | セッション終了 (post_session) | セッションランナーの終了 | タスクの裁定（接地検証つき）＋次への接続 |
 | イベント到着 (on_event) | 来訪・alert・システムイベント | 反応の選択 |
-| 就寝 (day_close) | PersonaSchedule の就寝時刻 or 最終コマ終了 | 予定と実際のふりかえり＋明日への机メモ |
+| 就寝 (day_close) | PersonaSchedule の就寝時刻 or 最終コマ終了 | 予定と実際のふりかえり＋明日の自分へのメモ |
+
+> **用語（2026-07-05）**: 造語「机メモ」はユーザー／ペルソナに見える文言から全廃した。表示・プロンプトでは Track の状態メモ（`desk_memo`）を「作業メモ」、`tomorrow_memo` を「明日の自分へのメモ／昨日の自分からのメモ」と呼ぶ。内部フィールド名（`desk_memo` / `tomorrow_memo`）は変更しない。
 
 **コマ開始は判断点ではない**（設計原理 6 の帰結）。LLM を呼ばず、コードのみで処理する：ユーザー会話中なら繰り下げ → 施設へ移動（OccupancyManager）→ コマ種別に応じてセッション起動 or 暮らし Pulse 実行。「動くか、休むか」を問う場面を作らない。
 
@@ -97,7 +99,7 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 ### 見るもの（tail 注入の状況テキスト）
 
-1. 昨夜の `tomorrow_memo`（昨日の自分からの机メモ）
+1. 昨夜の `tomorrow_memo`（昨日の自分からのメモ）
 2. 昨日のダイジェスト要約
 3. Track・タスクのバックログ（ref・状態・成果物参照の有無つき）
 4. 欲求リスト（ref・型・鮮度・再訪回数つき。**減衰の帳簿処理はこの判断の前に deterministic に済ませる**）
@@ -142,7 +144,7 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 会話本文は main line のコンテキストにそのまま在る（この判断はペルソナ自身の直後の思考として走る）。tail 注入は：
 
 1. 現在時刻と残りの時間割
-2. 中断中セッションの机メモ（あれば）
+2. 中断中セッションの作業メモ（あれば）
 3. 既存タスク・欲求リスト（重複作成の抑止）
 
 ### response_schema
@@ -279,7 +281,7 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
   "type": "object",
   "properties": {
     "monologue": {"type": "string", "description": "一日のふりかえり。予定と実際のズレに触れる"},
-    "tomorrow_memo": {"type": "string", "description": "明日の自分への机メモ"},
+    "tomorrow_memo": {"type": "string", "description": "明日の自分へのメモ"},
     "desire_reviews": {
       "type": "array",
       "items": {
