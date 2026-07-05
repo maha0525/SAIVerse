@@ -81,6 +81,22 @@ test_entity_extractor）＋ test_searxng_search の collection error
 
 - 接地原則: 達成・欲求・記憶は実在参照を持つ。post_session の artifact_ref enum は
   そのセッションの実成果物のみ（やったフリはスキーマレベルで不可能）
+
+## 7. 再開セッションの進捗 (2026-07-05)
+
+§4 の 1〜6 まで完了。コミット: 2cd7dc4（クローンスクリプト、レビューで
+モデル JSON 解決の user_data>builtin 優先度バグを修正）/ 07c6ca7（setup_test_env
+の playbook ディレクトリ修正 + activity_state カラム名修正 + 判断点5本を定義に
+標準搭載 — テスト環境は setup_test_env.py 一発で --real 対応）/ 9090a74
+（run_day_sim に load_dotenv）/ dcc59a4（一日新聞が実環境で成果を落とす2バグ:
+epoch created_at の日付フィルタ + タグ無し素通し混入。メモリ
+project_adapter_required_tags_not_strict 参照）。
+
+砂箱: quon_city_a を複製済み（記憶1932件、integrity ok、本番無傷）。
+`test_fixtures/scenarios/day_quon.json`（未追跡 — 個人的文脈を含むためコミットは
+まはー判断）で実 LLM 一日シム完走。新聞 `test_data/day_report_quon_v3.md`。
+成果物『急性膵炎まとめ』が実 Item として生成され artifact_refs で接地確認。
+残り: まはーとの新聞レビュー → §4-7 の活性化配線。
 - 設計原理6: 意志は文脈の濃い判断点で表明し、駆動は決定論に任せる（時間割・コマ発火に LLM なし）
 - セッション = WORKER アスペクトの予算付き運転（新アスペクト無し）。生ログ volatile、committed はダイジェスト1件
 - 一日新聞・day_digest は LLM を使わず実在記録から決定論構築（虚構が翌朝に残らない）
