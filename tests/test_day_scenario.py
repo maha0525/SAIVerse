@@ -78,7 +78,15 @@ def _reset_clock():
 
 
 class RecordingAdapter:
-    """SAIMemory adapter の mock (append + tag フィルタ付き読み出し)。"""
+    """SAIMemory adapter の mock (append + tag フィルタ付き読み出し)。
+
+    実 adapter (saiverse_memory/adapter.py) の読み出し挙動に合わせている:
+
+    - created_at は Unix epoch (int) — ISO 文字列で返すと day_report の
+      日付フィルタが偶然通ってしまい、実環境でのみ壊れる
+    - paired_action_text は「タグ無しの user payload」として直前に展開される
+    - タグ無し payload はタグフィルタを素通しする (レガシー互換の寛容フォールバック)
+    """
 
     def __init__(self):
         self.messages: List[Dict[str, Any]] = []
@@ -87,15 +95,30 @@ class RecordingAdapter:
         return f"{PERSONA_ID}:persona_main"
 
     def append_persona_message(self, payload):
-        self.messages.append(dict(payload))
+        payload = dict(payload)
+        created = payload.get("created_at")
+        if isinstance(created, str):
+            payload["created_at"] = int(datetime.fromisoformat(created).timestamp())
+        self.messages.append(payload)
 
     def recent_persona_messages_by_count(self, max_messages, *, required_tags=None,
                                          required_line_roles=None,
                                          required_scopes=None, pulse_id=None):
+        expanded: List[Dict[str, Any]] = []
+        for p in self.messages:
+            action_text = p.get("paired_action_text")
+            if action_text:
+                expanded.append({
+                    "role": "user",
+                    "content": action_text,
+                    "created_at": p.get("created_at"),
+                })
+                p = {k: v for k, v in p.items() if k != "paired_action_text"}
+            expanded.append(p)
         selected = []
-        for payload in self.messages:
+        for payload in expanded:
             tags = (payload.get("metadata") or {}).get("tags") or []
-            if required_tags and not all(t in tags for t in required_tags):
+            if required_tags and tags and not all(t in tags for t in required_tags):
                 continue
             selected.append(payload)
         return selected[-max_messages:]
@@ -181,6 +204,7 @@ class FakeWorkRuntime:
             "metadata": payload_metadata,
             "scope": resolved_scope,
             "line_role": line_role,
+            "paired_action_text": paired_action_text,
         })
         return "msg-x" if return_message_id else True
 
@@ -470,6 +494,11 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     # セッションの成果 (ダイジェスト + 成果物名と saiverse:// URI)
     assert "共有文の下書きを書いた" in report
     assert f"共有文の下書き（saiverse://item/{created_item_ids[0]}/content）" in report
+    # 判断プロンプト (paired_action_text のタグ無し展開) が成果・独白に混入しない
+    # (adapter のタグフィルタはタグ無し行を素通しするため、day_report 側のタグ
+    #  厳密チェックが無いと [起床判断] 等の状況テキストがセッション扱いになる)
+    assert "[起床判断]" not in report
+    assert "[就寝判断]" not in report
     # 欲求の動き (今日生まれた種の欲求と再訪)
     assert "[作る] 言葉の標本集 — 出自: 会話で言い回しを褒められた" in report
     assert "再訪: 1 回" in report

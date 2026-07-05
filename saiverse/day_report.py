@@ -84,8 +84,42 @@ def _fetch_memory_payloads(
         return []
 
 
+def _payload_tags(payload: Dict[str, Any]) -> List[str]:
+    """payload の metadata tags。
+
+    adapter のタグフィルタはタグ無し行 (レガシー互換 + paired_action 展開) を
+    素通しにするため、タグが本当に付いているかは呼び出し側で確認する。
+    """
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw = metadata.get("tags")
+    return [str(t) for t in raw if t] if isinstance(raw, list) else []
+
+
 def _payload_created_at(payload: Dict[str, Any]) -> str:
-    return str(payload.get("created_at") or payload.get("timestamp") or "")
+    raw = payload.get("created_at") or payload.get("timestamp") or ""
+    # 実 adapter は Unix epoch (int) を返す。日付比較のため ISO に正規化する
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.fromtimestamp(raw).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return str(raw)
+
+
+def _digest_plan_date(payload: Dict[str, Any], ws: Dict[str, Any]) -> str:
+    """ダイジェストが属する日付 (YYYY-MM-DD)。
+
+    シム中の記録は payload の created_at が実時刻でも、work_session metadata が
+    仮想クロックの日付を持つ。仮想日 > 仮想開始時刻 > created_at の順で解決する。
+    """
+    extra = ws.get("extra") if isinstance(ws.get("extra"), dict) else {}
+    day_plan = extra.get("day_plan") if isinstance(extra.get("day_plan"), dict) else {}
+    if day_plan.get("plan_date"):
+        return str(day_plan["plan_date"])[:10]
+    started = str(ws.get("started_at") or "")
+    if started:
+        return started[:10]
+    return _payload_created_at(payload)[:10]
 
 
 def _collect_session_digests(
@@ -96,12 +130,14 @@ def _collect_session_digests(
 
     out: List[Dict[str, Any]] = []
     for payload in _fetch_memory_payloads(manager, persona_id, [DIGEST_TAG]):
-        created = _payload_created_at(payload)
-        if created and not created.startswith(plan_date_str):
+        if DIGEST_TAG not in _payload_tags(payload):
             continue
-        content = str(payload.get("content") or "").strip()
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         ws = metadata.get("work_session") if isinstance(metadata.get("work_session"), dict) else {}
+        digest_date = _digest_plan_date(payload, ws)
+        if digest_date and digest_date != plan_date_str:
+            continue
+        content = str(payload.get("content") or "").strip()
         out.append({
             "content": content,
             "task_ref": ws.get("task_ref"),
@@ -121,9 +157,10 @@ def _latest_day_close_monologue(manager: Any, persona_id: str) -> str:
     「最新 1 件」で当日分と見なす。
     """
     payloads = _fetch_memory_payloads(manager, persona_id, ["judgment:day_close"])
-    if not payloads:
-        return ""
-    return str(payloads[-1].get("content") or "").strip()
+    for payload in reversed(payloads):
+        if "judgment:day_close" in _payload_tags(payload):
+            return str(payload.get("content") or "").strip()
+    return ""
 
 
 def _resolve_item_labels(manager: Any, item_ids: List[str]) -> Dict[str, str]:
