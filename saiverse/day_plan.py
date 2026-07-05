@@ -30,7 +30,12 @@ kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。本�
   (v2 §9.2-8) で指示書を組み ``run_work_session`` を運転 (予算ゲート対象)。
   社交機構 (対ペルソナ会話) が未実装の「話す」「聞く」は、伝えたいことの文章化・
   読む/調べる、という現時点で実際にできる接地行動に指示書を限定する
-- 「暮らし」「休む」: ログのみのスタブ (暮らし Pulse / 判断点は後続フェーズ)
+- 「暮らし」「休む」: ログのみのスタブ (暮らし Pulse / 判断点は後続フェーズ)。
+  施設への実移動 (presence) だけは本物なので status=done とするが、完了時に
+  slot へ ``record_level='presence_only'`` を永続化し、表示側 (一日新聞 /
+  就寝判断の状況テキスト) が「実行済み」でなく「時間を過ごした（詳細な記録
+  なし）」と正直に提示する — していない活動の詳細をペルソナがふりかえりで
+  捏造しないため (soft-confabulation、2026-07-05 実 LLM シム 異常 #4)
 未登録 kind のコマは WARN + skipped (``skip_reason='no_handler'``)。
 
 コマの skipped はシステム都合とペルソナ判断を区別して記録する (``skip_reason``)。
@@ -113,6 +118,17 @@ SKIP_REASON_LABELS = {
     SKIP_REASON_DEFERRAL_LIMIT: "流れた（ユーザーとの会話を優先したため）",
 }
 
+#: slot の record_level: 完了記録の詳しさ。presence_only は「その場に居た
+#: (施設への実移動) 以外の詳細な実行記録が無い」— 暮らし/休む のスタブ
+#: ハンドラが完了時に付ける。マーカーの無い done (旧データ / セッション系) は
+#: 従来どおり「実行済み」(後方互換)。
+RECORD_LEVEL_PRESENCE_ONLY = "presence_only"
+
+#: record_level='presence_only' な done コマの実績ラベル。「実行済み」と
+#: 提示すると、ペルソナが就寝ふりかえりで具体的な活動内容 (食事の選定等) を
+#: 捏造する (soft-confabulation、2026-07-05 実 LLM シムで観測)。
+LABEL_DONE_PRESENCE_ONLY = "時間を過ごした（詳細な記録なし）"
+
 
 def slot_result_label(slot: Dict[str, Any]) -> str:
     """コマの実績ラベル (就寝判断の状況テキストと一日新聞が共用する語彙)。
@@ -126,6 +142,11 @@ def slot_result_label(slot: Dict[str, Any]) -> str:
     if status == STATUS_SKIPPED:
         reason = str(slot.get("skip_reason") or "")
         return SKIP_REASON_LABELS.get(reason, "実行されず（理由の記録なし）")
+    if status == STATUS_DONE \
+            and str(slot.get("record_level") or "") == RECORD_LEVEL_PRESENCE_ONLY:
+        # 詳細な実行記録の無い done (暮らし/休む スタブ)。「実行済み」と提示
+        # するとペルソナが活動内容を捏造してふりかえる (soft-confabulation)。
+        return LABEL_DONE_PRESENCE_ONLY
     return SLOT_STATUS_LABELS.get(status, status)
 
 REF_NONE = "none"
@@ -296,6 +317,12 @@ def _validate_and_normalize_slots(
                 f"slot[{i}].skip_reason must be a string (got {type(skip_reason).__name__})"
             )
 
+        record_level = slot.get("record_level", "")
+        if not isinstance(record_level, str):
+            raise ValueError(
+                f"slot[{i}].record_level must be a string (got {type(record_level).__name__})"
+            )
+
         normalized_slot = {
             "start": start,
             "kind": kind,
@@ -307,10 +334,12 @@ def _validate_and_normalize_slots(
             "status": status,
             "defer_count": defer_count,
         }
-        # skipped の理由は帳簿の一部 — 消化済みコマを残す全置換
-        # (replace_remaining_slots) の再検証を通っても保持する。
+        # skipped の理由と完了記録の詳しさは帳簿の一部 — 消化済みコマを残す
+        # 全置換 (replace_remaining_slots) の再検証を通っても保持する。
         if skip_reason:
             normalized_slot["skip_reason"] = skip_reason
+        if record_level:
+            normalized_slot["record_level"] = record_level
         normalized.append(normalized_slot)
     return normalized
 
@@ -1251,22 +1280,40 @@ def _handle_worker_slot(
 def _handle_living_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「暮らし」コマ: ログのみのスタブ。暮らし Pulse は後続フェーズで刺さる。"""
+    """「暮らし」コマ: ログのみのスタブ。暮らし Pulse は後続フェーズで刺さる。
+
+    施設への実移動 (presence) は ``_fire_slot`` (c) で済んでおり、それだけは
+    本物 — カフェ等に実際に居ることが遭遇と会話のきっかけになる (まはー決定
+    2026-07-05)。ここでは「詳細な実行記録が無い」ことを slot に永続化し、
+    表示側が「実行済み」と偽らないようにする。
+    """
     LOGGER.info(
         "[day_plan] living slot (stub — 暮らし Pulse は後続フェーズ): "
         "persona=%s date=%s index=%d note=%r",
         persona_id, plan_date_str, index, slot.get("note"),
+    )
+    _update_slot(
+        manager, persona_id, plan_date_str, index,
+        record_level=RECORD_LEVEL_PRESENCE_ONLY,
     )
 
 
 def _handle_rest_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「休む」コマ: 何もしない。不作為の可視化として INFO で記録する (v2 §4.2)。"""
+    """「休む」コマ: 何もしない。不作為の可視化として INFO で記録する (v2 §4.2)。
+
+    暮らしと同じく、詳細な実行記録が無いことを slot に永続化する
+    (:data:`RECORD_LEVEL_PRESENCE_ONLY`)。
+    """
     LOGGER.info(
         "[day_plan] rest slot: persona=%s date=%s index=%d — 何もしない "
         "(コマとして明示的に選ばれた休息) note=%r",
         persona_id, plan_date_str, index, slot.get("note"),
+    )
+    _update_slot(
+        manager, persona_id, plan_date_str, index,
+        record_level=RECORD_LEVEL_PRESENCE_ONLY,
     )
 
 

@@ -1405,6 +1405,33 @@ def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
     assert "消化 5 / 計画 13" in text
 
 
+def test_day_close_situation_shows_presence_only_honestly(manager, task_refs):
+    """詳細記録の無い done (暮らし/休む スタブ) を「実行済み」として提示しない。
+
+    2026-07-05 の実 LLM シム回帰 (異常 #4): スタブで何も実行していない暮らし
+    コマが「→ 実行済み」と提示され、ペルソナが「食事の選定を行った」等、
+    していない活動を自分の成果としてふりかえった (soft-confabulation)。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "12:00", "kind": "暮らし", "ref": "none",
+         "facility": "cafe", "budget_rounds": 0, "note": "昼の時間",
+         "status": "done",
+         "record_level": day_plan.RECORD_LEVEL_PRESENCE_ONLY},
+        # マーカーの無い done (旧データ / セッション系) は従来どおり (後方互換)
+        {"start": "14:00", "kind": "知る", "ref": "task:1",
+         "facility": "library", "budget_rounds": 5, "note": "記事の続き",
+         "status": "done"},
+    ])
+
+    text = jp.build_day_results_text(manager, PERSONA_ID, PLAN_DATE)
+    assert "時間を過ごした（詳細な記録なし）" in text
+    assert "実行済み" in text  # マーカー無し done の後方互換
+    # 暮らしコマの行が「実行済み」になっていないこと
+    living_line = next(line for line in text.splitlines() if "12:00" in line)
+    assert "実行済み" not in living_line
+    assert "時間を過ごした（詳細な記録なし）" in living_line
+
+
 def test_day_close_schema_omits_desire_reviews_when_none_touched(
     manager, ptm, task_refs, session_factory
 ):

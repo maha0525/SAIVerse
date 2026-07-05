@@ -1070,7 +1070,10 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
     実績ラベルは :func:`saiverse.day_plan.slot_result_label` — skipped は
     システム都合 (実行手段未実装 / 予算切れ / 会話優先) を明示し、本人の
     「見送り」判断として提示しない (してもいない判断の理由をペルソナに
-    捏造させないため。接地原則 v2 §3-1)。
+    捏造させないため。接地原則 v2 §3-1)。同様に、詳細な実行記録の無い done
+    (暮らし/休む スタブ、record_level='presence_only') は「実行済み」でなく
+    「時間を過ごした（詳細な記録なし）」— していない活動の内容をふりかえりで
+    捏造させない (soft-confabulation 防止、2026-07-05)。
     """
     from saiverse.day_plan import slot_result_label
 

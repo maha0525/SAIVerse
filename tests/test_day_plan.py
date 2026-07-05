@@ -304,9 +304,13 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
         (PERSONA_ID, "ai", "workshop", "alice_room"),
     ]
 
-    # status 更新: 全コマ done
+    # status 更新: 全コマ done。休む (スタブ) には「詳細な実行記録なし」の
+    # マーカーが付き、セッションを実際に運転した作業コマには付かない
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["status"] for s in slots] == ["done", "done", "done"]
+    assert "record_level" not in slots[0]
+    assert "record_level" not in slots[1]
+    assert slots[2]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +694,78 @@ def test_slot_result_label_distinguishes_system_skips():
     assert legacy == "実行されず（理由の記録なし）"
     assert day_plan.slot_result_label({"status": "done"}) == "実行済み"
     assert day_plan.slot_result_label({}) == "未実施"
+
+
+def test_living_and_rest_slots_record_presence_only(manager):
+    """暮らし/休む スタブ: done + record_level='presence_only' を永続化する。
+
+    スタブでも施設への実移動 (presence) は本物として行う — カフェ等に実際に
+    居ることが遭遇と会話のきっかけになる (まはー決定 2026-07-05)。詳細な
+    実行記録が無いことだけをマーカーで残し、表示側が「実行済み」と偽らない。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "10:00", "kind": "暮らし", "ref": "none",
+         "facility": "cafe", "budget_rounds": 0, "note": "カフェで過ごす"},
+        {"start": "20:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    DaySimulator(
+        manager.event_scheduler,
+        start=BASE + timedelta(hours=9),
+        end=BASE + timedelta(hours=22),
+    ).run()
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["status"] for s in slots] == ["done", "done"]
+    assert [s["record_level"] for s in slots] == [
+        day_plan.RECORD_LEVEL_PRESENCE_ONLY,
+        day_plan.RECORD_LEVEL_PRESENCE_ONLY,
+    ]
+    # 施設移動はスタブでも実行される (own_room は private_room_id に解決)
+    assert manager.occupancy_manager.moves == [
+        (PERSONA_ID, "ai", "alice_room", "cafe"),
+        (PERSONA_ID, "ai", "cafe", "alice_room"),
+    ]
+
+
+def test_slot_result_label_presence_only_done():
+    """実績ラベル: 詳細記録の無い done (暮らし/休む スタブ) を「実行済み」と偽らない。
+
+    「実行済み」と提示すると、ペルソナが就寝ふりかえりでしていない活動の
+    内容 (食事の選定等) を捏造する (soft-confabulation、2026-07-05 実 LLM シム
+    異常 #4 の回帰)。
+    """
+    assert day_plan.slot_result_label(
+        {"status": "done", "record_level": day_plan.RECORD_LEVEL_PRESENCE_ONLY}
+    ) == "時間を過ごした（詳細な記録なし）"
+    # マーカーの無い done (旧データ / セッション系) は従来どおり (後方互換)
+    assert day_plan.slot_result_label({"status": "done"}) == "実行済み"
+    # done 以外では record_level はラベルに影響しない
+    assert day_plan.slot_result_label(
+        {"status": "pending", "record_level": day_plan.RECORD_LEVEL_PRESENCE_ONLY}
+    ) == "未実施"
+
+
+def test_record_level_survives_remaining_slot_replacement(manager):
+    """record_level は帳簿の一部 — 残りコマ全置換の再検証を通っても保持される。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "10:00", "kind": "暮らし", "ref": "none",
+         "facility": "cafe", "budget_rounds": 0, "note": "カフェで過ごす",
+         "status": "done", "record_level": day_plan.RECORD_LEVEL_PRESENCE_ONLY},
+        {"start": "14:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "20:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "早めに休む"},
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+    # 新規コマには record_level が付かない
+    assert "record_level" not in slots[1]
 
 
 def test_skip_reason_survives_remaining_slot_replacement(manager, task_refs):

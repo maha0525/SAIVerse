@@ -494,8 +494,9 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     assert "| 時刻 | やること | 実績 | 補足 |" in report
     assert "| 10:00 | 標本の材料を探す | 実行済み | 知る ／ 図書館 ／ 参照: desire:2 ／ 予算: 3 ／ 図鑑コーナーを中心に見る |" in report
     assert "| 14:00 | 共有文の下書きを書く | 実行済み | 作る ／ 工房 ／ 参照: task:1 ／ 予算: 8 ／ 命令調にしないこと |" in report
-    # title の無いコマ (休む) は kind で代替表示、場所は表示名 (後方互換)
-    assert "| 20:00 | 休む | 実行済み | 自分の部屋 |" in report
+    # title の無いコマ (休む) は kind で代替表示、場所は表示名 (後方互換)。
+    # 休む (スタブ) は「実行済み」と偽らず、詳細記録が無いことを正直に示す
+    assert "| 20:00 | 休む | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report
     # 節順序: 時間割 → 就寝のふりかえり → システム的な節 (フィードバック #3)
     assert report.index("## 時間割") < report.index("## 就寝のふりかえり") \
         < report.index("## 作業セッションの成果") < report.index("## 作業予算")
@@ -857,8 +858,10 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
     # レポートは穴なく出る (データの無い節は「（なし）」)
     report = generate_day_report(manager, PERSONA_ID, PLAN_DATE)
     assert "の一日新聞 — 2026-07-04" in report
-    assert "| 10:00 | 静かに過ごす | 実行済み | 暮らし ／ 自分の部屋 ／ 静かな時間 |" in report
-    assert "| 20:00 | 休む | 実行済み | 自分の部屋 |" in report  # title なし → kind 代替
+    # 暮らし/休む (スタブ) は「実行済み」でなく「時間を過ごした（詳細な記録
+    # なし）」— していない活動の詳細をペルソナに捏造させない (異常 #4 回帰)
+    assert "| 10:00 | 静かに過ごす | 時間を過ごした（詳細な記録なし） | 暮らし ／ 自分の部屋 ／ 静かな時間 |" in report
+    assert "| 20:00 | 休む | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report  # title なし → kind 代替
     assert "## 作業セッションの成果" in report
     assert "（なし）" in report
     assert "明日の自分へのメモ: 明日も同じように" in report
