@@ -59,6 +59,13 @@ def memory_recall_unified(
         search_chronicle=search_chronicle,
         search_memopedia=search_memopedia,
         search_fragments=search_fragments,
+        # 生メッセージは検索対象にしない。このツールの契約は Chronicle /
+        # Memopedia / Fragment（要約・整理済みの記憶）で、生メッセージは
+        # Chronicle が要約形で既にカバーしている。search_messages はデフォルト
+        # True なので明示的に False を渡さないと、検索を発行した spell 行その
+        # もの（自メッセージ）を拾う自己ヒットが起きる。生メッセージの vivid
+        # recall が要る自動想起 (sea/auto_recall.py) だけが True を渡す。
+        search_messages=False,
         persona_id=persona_id,
     )
 
@@ -96,6 +103,16 @@ def memory_recall_unified(
             lines.append(f"{hit.title}: {hit.content}")
             lines.append("```")
             lines.append(f"    URI: {hit.uri}")
+        elif hit.source_type == "message":
+            # 生メッセージヒット。このツールは search_messages=False なので
+            # 通常は現れないが、Memopedia の else に落として誤表示するのを防ぐ
+            # ため専用分岐を持つ。hit.title は "role @ timestamp"。
+            lines.append(f"[{i}] メッセージ: {hit.title}")
+            lines.append(f"    URI: {hit.uri}")
+            if hit.content:
+                lines.append("```")
+                lines.append(hit.content)
+                lines.append("```")
         else:
             lines.append(f"[{i}] Memopedia: {hit.title}")
             if hit.category:
