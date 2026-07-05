@@ -103,4 +103,18 @@ test_entity_extractor）＋ test_searxng_search の collection error
 生データ抽出 `test_data/quon_day_raw_log.md` が判断材料として有効だった —
 新聞と生データはセットでレビューに出すこと。
 `test_fixtures/scenarios/day_quon.json` は個人的文脈を含むため未追跡のまま（コミットはまはー判断）。
-残り: 修正後の実 LLM 再走→まはーレビュー → §4-7 の活性化配線。
+残り: まはーレビュー（判断待ち3件、下記）→ §4-7 の活性化配線。
+
+### 実走3回の改善サイクル（新聞+生データのセットレビュー方式）
+
+- 2回目走で発覚→修正: 2f129f6 施設移動が実際には移動していない / c1acae3 スペル args parse 失敗の無言握り潰し（差し戻し+複数行 JSON 救済） / 85a3d45 ペルソナ可視時刻が実時刻（仮想クロック無視）
+- 3回目走で発覚→修正: d08e86d 時間割組み替えの不当却下（消化済み区間との境界で昇順違反）+ 却下の無通知 + completed タスクの再 done 経路2つ / 44d27ea DES 空回り（実時刻由来の定期予約を ScenarioPlayer が cancel_all）
+- 3回目の成果データ: 新聞 test_data/day_report_quon_v6.md、生データ test_data/quon_day3_raw_log.md（検証 Q1〜Q6 付き）。施設移動・スペル救済・see エラーの正直な伝播・会話→欲求・実在引用まで生データで確認済み
+
+### まはーの判断待ち（設計問題3件）
+
+1. 計画時の ref 選択ミス（day_open がコマ表題と無関係な ref を付けた→指示書が矛盾文面化）: スキーマでは防げない。指示書生成時に ref 先タイトルとコマ表題を並置して気付かせる緩和案 vs 割り切り
+2. 暮らし/休むコマが stub なのに「実行済み」表記 → soft-confabulation の温床。正直ラベル案 vs 軽い実体を与える案
+3. 裁定独白の出典作話（2回目走「学会ガイドラインに基づき」）: post_session プロンプトに禁止明示か、構造対策か
+
+細かい残件: b:{slot} 表記の曖昧さ / 永続化タイムスタンプ3系統混在 / memory_recall の直前自メッセージ自己ヒット / see.py の coroutine never awaited 警告
