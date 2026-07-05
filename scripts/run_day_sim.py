@@ -51,6 +51,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# --real で API キーが要る。main.py と同じく .env を読む (既存の環境変数は上書きしない)
+from dotenv import load_dotenv
+
+load_dotenv(ROOT / ".env")
+
 LOGGER = logging.getLogger("scripts.run_day_sim")
 
 
