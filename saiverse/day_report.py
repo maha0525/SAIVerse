@@ -296,7 +296,10 @@ def _section_timetable(
         kind = str(s.get("kind") or "")
         title = (s.get("title") or "").strip()
         note = (s.get("note") or "").strip()
-        doing = title or note or kind or "—"
+        # title の無い旧データは note 先頭で代替する (長文 note は切り詰め、
+        # 全文は補足列に残る)。note も無ければ kind。
+        note_head = note if len(note) <= 30 else note[:30] + "……"
+        doing = title or note_head or kind or "—"
 
         extras: List[str] = []
         if kind and kind != doing:
