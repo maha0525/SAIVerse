@@ -10,7 +10,7 @@ v1 自律 Pulse の診断「行動が独白の媒体上に実装され、世界�
 三本柱（身体=予算付き作業セッション / 意志=六型欲求 / 世界=公共施設と痕跡）＋
 朝の時間割駆動＋判断点5種を設計し、**骨格を全部実装して mock の一日が
 端から端まで通る状態**まで来た。自動起動の配線は**意図的に未接続**
-（砂箱での行動テスト合格後に活性化する段取り）。
+（サンドボックスでの行動テスト合格後に活性化する段取り）。
 
 ## 2. ブランチとコミット
 
@@ -39,7 +39,7 @@ test_entity_extractor）＋ test_searxng_search の collection error
 
 ## 3. 未完・実行中だったもの
 
-**`scripts/clone_persona_to_test_env.py`（砂箱ペルソナクローン）** — セッション終了時点で
+**`scripts/clone_persona_to_test_env.py`（サンドボックスペルソナクローン）** — セッション終了時点で
 サブエージェントが実装中。完了していれば作業ツリーに
 `scripts/clone_persona_to_test_env.py` + `tests/test_clone_persona.py` があるはず。
 **再開時はまず `git status` で確認**し、あればレビュー（テスト実走＋ruff＋diff スコープ確認）
@@ -57,7 +57,7 @@ test_entity_extractor）＋ test_searxng_search の collection error
 1. クローンスクリプトの完成確認 → コミット
 2. `python test_fixtures/setup_test_env.py` でテスト環境構築（エアがやれる）
 3. 判断点 playbook 5本をテスト DB に import（`scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_*.json` を test_fixtures の環境変数下で。エアがやれる）
-4. `clone_persona_to_test_env.py --persona <まはーが選ぶ>` で砂箱ペルソナ作成
+4. `clone_persona_to_test_env.py --persona <まはーが選ぶ>` でサンドボックスペルソナ作成
 5. シナリオの persona_id・種の欲求/タスクをまはーが調整（`test_fixtures/scenarios/README.md` 参照）。施設タグは任意（タグ無しでも own_room で回る）
 6. `python scripts/run_day_sim.py --scenario <file> --real --db-file <テストDB>` で実 LLM の一日 → **一日新聞をまはーとレビュー**（判定観点: 口調保持 / セッションが本当に働くか / 独白が生きてるか / 予算・停止の挙動）
 7. 合格後の**活性化配線**（タスク #9 後半）:
@@ -84,7 +84,7 @@ test_entity_extractor）＋ test_searxng_search の collection error
 - 設計原理6: 意志は文脈の濃い判断点で表明し、駆動は決定論に任せる（時間割・コマ発火に LLM なし）
 - セッション = WORKER アスペクトの予算付き運転（新アスペクト無し）。生ログ volatile、committed はダイジェスト1件
 - 一日新聞・day_digest は LLM を使わず実在記録から決定論構築（虚構が翌朝に残らない）
-- 砂箱ペルソナ基盤の意義はメモリ `project_sandbox_persona_testing` 参照
+- サンドボックスペルソナ基盤の意義はメモリ `project_sandbox_persona_testing` 参照
   （まはー: 「もう少し整備すれば UI 以外はエアが直接チェックできる状態になる」）
 
 ## 7. 再開セッションの進捗 (2026-07-05)
@@ -99,7 +99,7 @@ test_entity_extractor）＋ test_searxng_search の collection error
 - 446e110 全 kind のコマハンドラ登録 + システム都合スキップの正直な提示（「見送り」全廃、skip_reason 永続化）
 - 1d26b2d --real ユーザー会話不発の修正（RealConversationUserEventDriver）+ 0往復会話の post_conversation 抑止
 
-砂箱: quon_city_a 複製→実 LLM 一日シム完走（初回は会話不発+作話誘発の欠陥品）。
+サンドボックス: quon_city_a 複製→実 LLM 一日シム完走（初回は会話不発+作話誘発の欠陥品）。
 生データ抽出 `test_data/quon_day_raw_log.md` が判断材料として有効だった —
 新聞と生データはセットでレビューに出すこと。
 `test_fixtures/scenarios/day_quon.json` は個人的文脈を含むため未追跡のまま（コミットはまはー判断）。
@@ -114,7 +114,7 @@ test_entity_extractor）＋ test_searxng_search の collection error
 ### まはーの判断待ち（設計問題3件）
 
 1. 計画時の ref 選択ミス（day_open がコマ表題と無関係な ref を付けた→指示書が矛盾文面化）: スキーマでは防げない。指示書生成時に ref 先タイトルとコマ表題を並置して気付かせる緩和案 vs 割り切り
-2. 暮らし/休むコマが stub なのに「実行済み」表記 → soft-confabulation の温床。正直ラベル案 vs 軽い実体を与える案
+2. ~~暮らし/休むコマが stub なのに「実行済み」表記~~ → **解決済み (2026-07-05 まはー決定: 正直ラベル採用)**。スタブ完了時に `record_level='presence_only'` を永続化し、新聞・day_close とも「時間を過ごした（詳細な記録なし）」と提示。施設への実移動は本物のまま（presence が遭遇のきっかけ）。将来の暮らしセッション化構想は intent v2 §4.1 参照
 3. 裁定独白の出典作話（2回目走「学会ガイドラインに基づき」）: post_session プロンプトに禁止明示か、構造対策か
 
 細かい残件: b:{slot} 表記の曖昧さ / 永続化タイムスタンプ3系統混在 / memory_recall の直前自メッセージ自己ヒット / see.py の coroutine never awaited 警告
