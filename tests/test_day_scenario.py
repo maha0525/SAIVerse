@@ -42,7 +42,10 @@ from saiverse import judgment_points as jp
 from saiverse.day_report import generate_day_report, save_day_report
 from saiverse.day_scenario import (
     MockJudgmentPulseController,
+    RealConversationUserEventDriver,
     ScenarioPlayer,
+    SyncJudgmentDispatcher,
+    TrackSimUserEventDriver,
     parse_scenario,
 )
 from saiverse.event_scheduler import EventScheduler
@@ -526,6 +529,222 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     )
     assert path.name == "2026-07-04.md"
     assert path.read_text(encoding="utf-8") == report
+
+
+# ---------------------------------------------------------------------------
+# 実 LLM モードのユーザー会話経路 (バグ回帰: 2026-07-05 クオン一日シム)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_dispatcher_submit_user_runs_sea_user_path():
+    """SyncJudgmentDispatcher.submit_user が実 SEA のユーザー会話経路を同期で叩く。
+
+    回帰: --real で UserConversationTrackHandler → run_sea_user →
+    pulse_controller.submit_user が AttributeError になり、ユーザー発話への
+    応答が一切生成されなかった。
+    """
+    calls: List[Dict[str, Any]] = []
+
+    class RecordingRuntime:
+        def run_meta_user(self, persona, **kwargs):
+            calls.append({"persona": persona, **kwargs})
+            return ["応答した"]
+
+    persona = SimpleNamespace(persona_id=PERSONA_ID)
+    manager = SimpleNamespace(
+        personas={PERSONA_ID: persona}, sea_runtime=RecordingRuntime(),
+    )
+    dispatcher = SyncJudgmentDispatcher(manager)
+
+    out = dispatcher.submit_user(
+        persona_id=PERSONA_ID, building_id="lobby", user_input="",
+        origin_track_id="track-1",
+    )
+
+    assert out == ["応答した"]
+    assert len(calls) == 1
+    assert calls[0]["persona"] is persona
+    assert calls[0]["pulse_type"] == "user"
+    assert calls[0]["building_id"] == "lobby"
+    assert calls[0]["origin_track_id"] == "track-1"
+
+    with pytest.raises(RuntimeError, match="not found"):
+        dispatcher.submit_user(
+            persona_id="ghost", building_id="lobby", user_input="x",
+        )
+
+
+class _FakeHistoryManager:
+    """building_messages の最小フェイク (seq 採番 + heard_by 保持)。"""
+
+    def __init__(self):
+        self.building: List[Dict[str, Any]] = []
+
+    def add_to_building_only(self, building_id, msg, *, heard_by=None,
+                             origin_track_id=None):
+        entry = dict(msg)
+        entry["seq"] = len(self.building) + 1
+        entry["heard_by"] = list(heard_by or [])
+        self.building.append(entry)
+        return entry
+
+    def get_building_history(self, building_id):
+        return list(self.building)
+
+
+class _FakeTrackManagerWithHook:
+    """create(initial_status='running') で observer (main_line 起動) を模す。"""
+
+    def __init__(self, on_activate=None):
+        self.on_activate = on_activate
+        self.created: List[Dict[str, Any]] = []
+        self.running_track = None
+        self.completed: List[str] = []
+
+    def get_running(self, persona_id):
+        return self.running_track
+
+    def create(self, persona_id, track_type, title=None, intent=None,
+               output_target="none", is_persistent=False, metadata=None,
+               initial_status="unstarted"):
+        track_id = f"track-{len(self.created) + 1}"
+        self.created.append({
+            "track_id": track_id, "track_type": track_type,
+            "output_target": output_target, "initial_status": initial_status,
+        })
+        self.running_track = SimpleNamespace(
+            track_id=track_id, track_type=track_type,
+        )
+        if self.on_activate is not None:
+            self.on_activate(track_id)
+        return track_id
+
+    def complete(self, track_id):
+        self.completed.append(track_id)
+        self.running_track = None
+
+
+def _make_real_driver_manager(persona, reply: bool):
+    """RealConversationUserEventDriver 用の最小 manager フェイク。
+
+    reply=True なら run_sea_user (実 Pulse の代役) がペルソナ応答を
+    building_messages に書く。False なら何も書かない (応答生成失敗の再現)。
+    """
+    manager = SimpleNamespace(personas={PERSONA_ID: persona}, user_id=1)
+    sea_calls: List[Dict[str, Any]] = []
+
+    def run_sea_user(p, building_id, user_input, **kwargs):
+        sea_calls.append({
+            "building_id": building_id, "user_input": user_input, **kwargs,
+        })
+        if reply:
+            persona.history_manager.add_to_building_only(
+                building_id,
+                {"role": "assistant", "content": "おかえり", "persona_id": PERSONA_ID},
+                heard_by=[PERSONA_ID],
+            )
+        return ["おかえり"] if reply else []
+
+    manager.run_sea_user = run_sea_user
+    manager.track_manager = _FakeTrackManagerWithHook(
+        on_activate=lambda tid: manager.run_sea_user(
+            persona, persona.current_building_id, "", origin_track_id=tid,
+        ),
+    )
+    manager._sea_calls = sea_calls
+    return manager
+
+
+def test_real_driver_records_user_message_and_detects_reply():
+    """実会話ドライバ: 発話の building 記録 + 応答の実在検査 + 会話継続の直接起動。"""
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, current_building_id="lobby",
+        history_manager=_FakeHistoryManager(),
+    )
+    manager = _make_real_driver_manager(persona, reply=True)
+    driver = RealConversationUserEventDriver()
+
+    driver.begin_conversation(manager, PERSONA_ID, "ただいま")
+
+    hist = persona.history_manager.building
+    assert hist[0]["role"] == "user" and hist[0]["content"] == "ただいま"
+    # auto_ingest の取り込み条件 (heard_by にペルソナ) + 閲覧者フィルタ (ユーザー)
+    assert PERSONA_ID in hist[0]["heard_by"] and "1" in hist[0]["heard_by"]
+    # Track は実経路と同じ output_target で running 作成される
+    assert manager.track_manager.created == [{
+        "track_id": "track-1", "track_type": "user_conversation",
+        "output_target": "building:current", "initial_status": "running",
+    }]
+    assert driver.conversation_had_exchange(manager, PERSONA_ID) is True
+
+    # 会話継続: 2 通目は既存 running Track へ直接メインライン起動 (Track 追加なし)
+    driver.begin_conversation(manager, PERSONA_ID, "つかれたー……")
+    assert len(manager.track_manager.created) == 1
+    assert manager._sea_calls[-1]["user_input"] == "つかれたー……"
+    assert manager._sea_calls[-1]["origin_track_id"] == "track-1"
+
+    assert driver.end_conversation(manager, PERSONA_ID) is True
+    assert manager.track_manager.completed == ["track-1"]
+
+
+def test_real_driver_flags_zero_exchange_when_no_reply(caplog):
+    """応答が building_messages に実在しない会話は「成立していない」と記録される。"""
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, current_building_id="lobby",
+        history_manager=_FakeHistoryManager(),
+    )
+    manager = _make_real_driver_manager(persona, reply=False)
+    driver = RealConversationUserEventDriver()
+
+    with caplog.at_level("WARNING", logger="saiverse.day_scenario"):
+        driver.begin_conversation(manager, PERSONA_ID, "ただいま")
+
+    assert driver.conversation_had_exchange(manager, PERSONA_ID) is False
+    assert any("did not reply" in r.message for r in caplog.records)
+
+
+class _NoExchangeDriver(TrackSimUserEventDriver):
+    """会話は再生するが「往復ゼロ」を申告するドライバ (応答生成失敗の再現)。"""
+
+    def conversation_had_exchange(self, manager, persona_id):
+        return False
+
+
+def test_zero_exchange_conversation_skips_post_conversation(session_factory, tmp_path):
+    """1 往復も成立しなかった会話では post_conversation 判断を撃たない。
+
+    回帰: --real で応答生成が失敗したのに「会話がひと区切りつきました」前提の
+    判断が走り、ペルソナが存在しない会話の振り返りを書いた (作話の温床)。
+    """
+    manager = _make_manager(
+        session_factory, tmp_path, _standard_judge, list(_SESSION_RESPONSES),
+    )
+    created: List[str] = []
+    p_names, p_exec = _patched_spells(session_factory, created)
+    with p_names, p_exec:
+        result = ScenarioPlayer(user_event_driver=_NoExchangeDriver()).run(
+            manager, dict(_STANDARD_SCENARIO),
+        )
+
+    # post_conversation は submitted されず、skip の帳簿だけが残る
+    # (_standard_judge は post_conversation が来たら応答を返すので、撃たれて
+    #  いないことは submitted 記録の不在で判定できる)
+    post_conv = [j for j in result.judgments if j["kind"] == "post_conversation"]
+    assert len(post_conv) == 1
+    assert post_conv[0]["submitted"] is False
+    assert "no exchange" in post_conv[0]["reason"]
+    # 会話イベント自体は再生されている (Track が completed)
+    completed = [
+        t for t in manager.track_manager.list_for_persona(
+            PERSONA_ID, statuses=["completed"],
+        )
+        if t.track_type == "user_conversation"
+    ]
+    assert len(completed) == 1
+    # 他の判断点は通常どおり
+    assert [j["kind"] for j in result.judgments if j["submitted"]] == [
+        "day_open", "post_session", "post_session", "day_close",
+    ]
 
 
 def test_day_report_shows_system_skip_honestly(session_factory, tmp_path):

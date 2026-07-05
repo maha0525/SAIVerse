@@ -64,7 +64,7 @@ test_entity_extractor）＋ test_searxng_search の collection error
    - PersonaSchedule に起床/就寝の恒久フック（day_open / day_close）
    - セッション終了 → post_session の恒久配線（現状は ScenarioPlayer がハンドラをラップ登録する構成 — `saiverse/day_scenario.py` 参照）
    - 会話終了（30分タイムアウト機構との統合、intent §10-5）と on_event の実イベント接続
-   - `ApiUserEventDriver` の実装（POST /api/chat 経由、スタブ有り）
+   - ~~`ApiUserEventDriver` の実装~~ → 実装済み: `RealConversationUserEventDriver`（HTTP を経由せず in-process で実チャット経路を同期に通す。`saiverse/day_scenario.py`）
    - **旧 track_autonomous 経路の停止**（env flag 温存はしない。`SubLineScheduler` の自律駆動と `max_consecutive_pulses` 概念ごと。intent §9.3）
    - 本番 DB への playbook import、landscape.md §9（死んだ概念）更新、`gen_reference_docs` 再確認
 8. マージは feature → develop（ただし base が memory ブランチなので、memory ブランチのマージ後に）

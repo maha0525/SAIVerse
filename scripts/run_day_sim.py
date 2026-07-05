@@ -426,7 +426,12 @@ def main() -> int:
 
     from saiverse import clock
     from saiverse.day_report import generate_day_report, save_day_report
-    from saiverse.day_scenario import ScenarioPlayer, SyncJudgmentDispatcher, load_scenario
+    from saiverse.day_scenario import (
+        RealConversationUserEventDriver,
+        ScenarioPlayer,
+        SyncJudgmentDispatcher,
+        load_scenario,
+    )
 
     scenario = load_scenario(args.scenario)
 
@@ -438,12 +443,17 @@ def main() -> int:
                 manager = _build_mock_manager(args.db_file, scenario)
         elif args.real:
             manager = _build_real_manager(args.city, args.db_file, args.sds_url)
-            # 判断点は同期実行 (DES 単一スレッド)。実 PulseController は
-            # 並列レーンなので、シナリオ実行中だけ差し替える。
+            # 判断点・ユーザー会話 Pulse は同期実行 (DES 単一スレッド)。実
+            # PulseController はレーン管理を持つため、シナリオ実行中だけ
+            # 差し替える。ユーザー発話は実チャット経路 (building_messages 記録
+            # → Track activate → main_line Pulse) を通すドライバで注入する。
             original_controller = manager.pulse_controller
             manager.pulse_controller = SyncJudgmentDispatcher(manager)
             try:
-                result = ScenarioPlayer().run(manager, scenario)
+                player = ScenarioPlayer(
+                    user_event_driver=RealConversationUserEventDriver(),
+                )
+                result = player.run(manager, scenario)
             finally:
                 manager.pulse_controller = original_controller
             LOGGER.info("scenario finished: events=%d judgments=%d",

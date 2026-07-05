@@ -13,9 +13,13 @@ DES ドライバ (``saiverse.day_simulator.DaySimulator``) の上に載り、シ
    ScenarioPlayer がラップハンドラを登録し、``run_work_session`` の後に
    **セッション終了判断** (post_session) を続けて撃つ (v2 §4.2 の背骨。
    恒久配線は活性化フェーズの仕事で、シム中は本プレイヤーが担う)
-3. ユーザーイベント (message / leave) は「会話中フラグ = running な
-   user_conversation Track」の作成 / 完了で再生し、leave で **会話終了判断**
-   (post_conversation) を撃つ
+3. ユーザーイベント (message / leave) はドライバが再生する。mock
+   (:class:`TrackSimUserEventDriver`) は「会話中フラグ = running な
+   user_conversation Track」の作成 / 完了のみ、実 LLM モード
+   (:class:`RealConversationUserEventDriver`) は building_messages への発話記録
+   + Track activate 経由の main_line Pulse という実チャット経路を同期に通す。
+   leave で **会話終了判断** (post_conversation) を撃つ — ただし 1 往復も
+   成立しなかった会話では撃たない (偽前提の状況テキストは作話を誘発するため)
 4. events は **イベント到着判断** (on_event)
 5. sleep 時刻に **就寝判断** (day_close)
 
@@ -283,6 +287,18 @@ class UserEventDriver:
         """
         raise NotImplementedError
 
+    def conversation_had_exchange(self, manager: Any, persona_id: str) -> bool:
+        """現在の会話で 1 往復以上 (ユーザー発話 + ペルソナ応答) 成立したか。
+
+        ScenarioPlayer が leave 時に読む — False なら会話終了判断
+        (post_conversation) を撃たない (存在しない会話の振り返り = 作話を
+        誘発しないため。接地原則 v2 §3-1)。
+
+        既定は True: mock 配線テスト (TrackSimUserEventDriver) は会話本文を
+        再生せず「会話が成立した」ものとして扱う (検証対象は判断の配線)。
+        """
+        return True
+
 
 class TrackSimUserEventDriver(UserEventDriver):
     """会話中フラグを running な user_conversation Track で表現するシム内ドライバ。
@@ -333,30 +349,168 @@ class TrackSimUserEventDriver(UserEventDriver):
         return True
 
 
-class ApiUserEventDriver(UserEventDriver):
-    """実 API 注入ドライバ (スタブ)。
+class RealConversationUserEventDriver(TrackSimUserEventDriver):
+    """行動テスト (実 LLM モード) 用: ユーザー発話を本物の会話経路へ注入するドライバ。
 
-    行動テスト (実 LLM モード) では、ユーザー発話を **本物の経路** で注入する
-    (intent §12「発話は実 API 経由で注入」)。想定する実装:
+    mock の :class:`TrackSimUserEventDriver` が「会話中フラグ (Track)」だけを
+    再生するのに対し、本ドライバは実チャット経路 (``manager/runtime.py``
+    ``handle_user_input_stream`` の backend_worker) と同じ順序で正規経路を叩く:
 
-    - ``begin_conversation``: チャット API (``POST /api/chat`` 相当。ストリーミング
-      NDJSON) にユーザー発話を投げ、応答完了まで同期で待つ。これにより
-      user_conversation Track の生成・running 化はサーバ側の正規経路が行う
-    - ``end_conversation``: 退室 (ユーザーの current building 更新) または
-      無応答タイムアウト相当の Track pending 化を正規経路で起こす
+    1. ユーザー発話を building_messages へ記録 (heard_by = ペルソナ + ユーザー)
+    2. user_conversation Track を running で作成 — 実 TrackManager の
+       track_activated observer (UserConversationTrackHandler) が Track 切替通知の
+       注入と main_line Pulse の起動 (``manager.run_sea_user``) を行い、Pulse
+       冒頭の auto_ingest が (1) の発話をペルソナ記憶 (memory.db) へ取り込む。
+       Pulse は :class:`SyncJudgmentDispatcher` の ``submit_user`` 経由で
+       呼び出しスレッド上で同期実行される (DES 単一スレッド)
+    3. 会話中の追加メッセージは実経路の「running Track → 直接メインライン起動」
+       と同型に ``manager.run_sea_user`` を直接呼ぶ
+    4. Pulse 後にペルソナ応答が building_messages に実在するかを検査して
+       「会話が成立したか」を記録する (:meth:`conversation_had_exchange`)。
+       応答ゼロの会話では ScenarioPlayer が会話終了判断を撃たない
 
-    実装は行動テストの接続フェーズで行う。現状はインターフェイスのみ。
+    前提: manager は実 SAIVerseManager (persona に history_manager がある)。
     """
 
+    def __init__(self) -> None:
+        #: persona_id → 現在の会話で 1 往復以上成立したか
+        self._had_exchange: Dict[str, bool] = {}
+
     def begin_conversation(self, manager: Any, persona_id: str, text: str) -> None:
-        raise NotImplementedError(
-            "ApiUserEventDriver is a stub — 行動テスト接続フェーズで実装する"
-        )
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            raise RuntimeError(f"persona '{persona_id}' not found on manager")
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            raise RuntimeError(f"persona '{persona_id}' has no current building")
+
+        # (1) ユーザー発話を building_messages へ記録 (実チャット経路の pre-add)
+        seq_before = self._record_user_message(manager, persona, building_id, text)
+
+        track_manager = manager.track_manager
+        running = track_manager.get_running(persona_id)
+        if running is not None and getattr(running, "track_type", None) == "user_conversation":
+            # (3) 会話継続: 実経路の「既存 running → 直接メインライン起動」と同型
+            LOGGER.info(
+                "[day_scenario] user message in ongoing conversation "
+                "(persona=%s track=%s); invoking main line directly",
+                persona_id, running.track_id,
+            )
+            manager.run_sea_user(
+                persona, building_id, text, origin_track_id=running.track_id,
+            )
+        else:
+            # (2) Track を running で作成 → track_activated observer が Track
+            # 切替通知 + main_line Pulse (user_input は auto_ingest 経由) を起動
+            track_id = track_manager.create(
+                persona_id=persona_id,
+                track_type="user_conversation",
+                title="ユーザーとの会話 (シナリオ再生)",
+                output_target="building:current",
+                metadata=json.dumps(
+                    {"scenario": True, "first_message": text[:120]},
+                    ensure_ascii=False,
+                ),
+                initial_status="running",
+            )
+            LOGGER.info(
+                "[day_scenario] conversation started via real path: "
+                "persona=%s track=%s text=%r",
+                persona_id, track_id, text[:60],
+            )
+
+        # (4) 応答の実在検査 (building_messages の追記で確認 — 接地)
+        replied = self._persona_replied_after(manager, persona, building_id, seq_before)
+        self._had_exchange[persona_id] = self._had_exchange.get(persona_id, False) or replied
+        if not replied:
+            LOGGER.warning(
+                "[day_scenario] persona did not reply to user message "
+                "(persona=%s text=%r) — this conversation has no exchange yet",
+                persona_id, text[:60],
+            )
 
     def end_conversation(self, manager: Any, persona_id: str) -> bool:
-        raise NotImplementedError(
-            "ApiUserEventDriver is a stub — 行動テスト接続フェーズで実装する"
+        ended = super().end_conversation(manager, persona_id)
+        if ended:
+            # 次の会話のために往復フラグを畳む (leave 時の判定は ScenarioPlayer が
+            # end_conversation の前に conversation_had_exchange で読む)
+            self._had_exchange.pop(persona_id, None)
+        return ended
+
+    def conversation_had_exchange(self, manager: Any, persona_id: str) -> bool:
+        return self._had_exchange.get(persona_id, False)
+
+    # ------------------------------------------------------------------
+    # 内部
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _canonical_building_id(manager: Any, building_id: str) -> str:
+        """実 manager の building_id 正規化 (無ければ素通し)。"""
+        runtime = getattr(manager, "runtime", None)
+        fn = getattr(runtime, "_canonical_building_id", None)
+        if callable(fn):
+            try:
+                return fn(building_id)
+            except Exception:
+                LOGGER.warning(
+                    "[day_scenario] _canonical_building_id failed for %r; "
+                    "using it as-is", building_id, exc_info=True,
+                )
+        return building_id
+
+    def _record_user_message(
+        self, manager: Any, persona: Any, building_id: str, text: str
+    ) -> int:
+        """ユーザー発話を building_messages へ記録し、その seq を返す。
+
+        実チャット経路 (backend_worker) と同じ ``add_to_building_only`` +
+        heard_by。auto_ingest は heard_by にペルソナが居るメッセージだけを
+        取り込むため、heard_by は必須。
+        """
+        history_manager = getattr(persona, "history_manager", None)
+        if history_manager is None:
+            raise RuntimeError(
+                f"persona '{persona.persona_id}' has no history_manager — "
+                "RealConversationUserEventDriver は実 SAIVerseManager 専用です"
+            )
+        canonical_bid = self._canonical_building_id(manager, building_id)
+        heard = [persona.persona_id]
+        user_id = getattr(manager, "user_id", None)
+        if user_id is not None:
+            heard.append(str(user_id))
+        saved = history_manager.add_to_building_only(
+            canonical_bid, {"role": "user", "content": text}, heard_by=heard,
         )
+        try:
+            return int((saved or {}).get("seq") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _persona_replied_after(
+        self, manager: Any, persona: Any, building_id: str, seq_before: int
+    ) -> bool:
+        """seq_before より後にペルソナの assistant 発言が実在するか (接地検査)。"""
+        canonical_bid = self._canonical_building_id(manager, building_id)
+        try:
+            hist = persona.history_manager.get_building_history(canonical_bid) or []
+        except Exception:
+            LOGGER.warning(
+                "[day_scenario] failed to read building history for reply check "
+                "(persona=%s building=%s)",
+                persona.persona_id, canonical_bid, exc_info=True,
+            )
+            return False
+        for msg in hist:
+            try:
+                seq = int(msg.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq <= seq_before:
+                continue
+            if msg.get("role") == "assistant" and msg.get("persona_id") == persona.persona_id:
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -454,12 +608,21 @@ class MockJudgmentPulseController:
 
 
 class SyncJudgmentDispatcher:
-    """行動テスト (実 LLM) 用の同期判断点ディスパッチャ。
+    """行動テスト (実 LLM) 用の同期 Pulse ディスパッチャ。
 
-    実 ``PulseController.submit_meta_judgment`` は並列レーンで Pulse を走らせる
-    (非同期) ため、単一スレッド前提の DES とは合わない。本ディスパッチャは
+    実 ``PulseController`` はレーン管理 (優先度・並列メタ判断レーン・キュー) を
+    持ち、単一スレッド前提の DES とは合わない。本ディスパッチャは
     ``manager.sea_runtime.run_meta_user`` を呼び出しスレッドでそのまま実行する
     (Playbook・finalize・SAIMemory 書き込みはすべて正規経路)。
+
+    シム中に叩かれる入口は 2 つ:
+
+    - ``submit_meta_judgment``: 判断点 (``run_judgment_point``) の起動経路
+    - ``submit_user``: ユーザー会話 Pulse。実チャット経路
+      (UserConversationTrackHandler → ``manager.run_sea_user``) がシム中の
+      Track activate から呼んでくる。実 ``PulseController.submit_user`` と
+      同シグネチャ (これが無いと --real でユーザー会話が AttributeError で
+      不発になる — 2026-07-05 クオン一日シムの実バグ)
 
     使い方: シナリオ実行の間だけ ``manager.pulse_controller`` をこれに
     差し替える (``scripts/run_day_sim.py`` の実 LLM モード参照)。
@@ -467,6 +630,12 @@ class SyncJudgmentDispatcher:
 
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+
+    def _require_persona(self, persona_id: str) -> Any:
+        persona = (getattr(self.manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            raise RuntimeError(f"persona '{persona_id}' not found on manager")
+        return persona
 
     def submit_meta_judgment(
         self,
@@ -476,9 +645,7 @@ class SyncJudgmentDispatcher:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[List[str]]:
-        persona = (getattr(self.manager, "personas", None) or {}).get(persona_id)
-        if persona is None:
-            raise RuntimeError(f"persona '{persona_id}' not found on manager")
+        persona = self._require_persona(persona_id)
         return self.manager.sea_runtime.run_meta_user(
             persona,
             user_input=None,
@@ -487,6 +654,39 @@ class SyncJudgmentDispatcher:
             args=args,
             event_callback=event_callback,
             pulse_type="meta_judgment",
+        )
+
+    def submit_user(
+        self,
+        persona_id: str,
+        building_id: str,
+        user_input: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        pre_spells: Optional[List[str]] = None,
+        origin_track_id: Optional[str] = None,
+    ) -> Optional[List[str]]:
+        """ユーザー会話 Pulse を呼び出しスレッドで同期実行する。
+
+        実 ``PulseController.submit_user`` → ``_do_execute`` と同じく
+        ``run_meta_user(pulse_type="user")`` (CONVERSATION アスペクト) を叩く。
+        ユーザー発話本体は building_messages に事前記録され、Pulse 冒頭の
+        auto_ingest がペルソナ記憶へ取り込む (実チャット経路と同型)。
+        """
+        persona = self._require_persona(persona_id)
+        return self.manager.sea_runtime.run_meta_user(
+            persona,
+            user_input=user_input,
+            building_id=building_id,
+            metadata=metadata,
+            meta_playbook=meta_playbook,
+            args=args,
+            event_callback=event_callback,
+            pre_spells=pre_spells,
+            origin_track_id=origin_track_id,
+            pulse_type="user",
         )
 
 
@@ -723,10 +923,31 @@ class ScenarioPlayer:
             if ue.type == USER_EVENT_MESSAGE:
                 self.user_event_driver.begin_conversation(manager, persona_id, ue.text)
             elif ue.type == USER_EVENT_LEAVE:
+                had_exchange = self.user_event_driver.conversation_had_exchange(
+                    manager, persona_id,
+                )
                 ended = self.user_event_driver.end_conversation(manager, persona_id)
-                if ended:
+                if not ended:
+                    return
+                if had_exchange:
                     # 会話終了 = 会話終了判断の発火点 (intent §4.2)
                     self._judge(manager, persona_id, KIND_POST_CONVERSATION, {}, result)
+                else:
+                    # 1 往復も成立しなかった会話 (応答生成の失敗等) では判断を
+                    # 撃たない。「会話がひと区切りつきました」という前提が偽の
+                    # 状況テキストは、存在しない会話の振り返り (作話) を誘発する
+                    # (接地原則 v2 §3-1。2026-07-05 実 LLM シムで実証)。
+                    LOGGER.warning(
+                        "[day_scenario] conversation ended with zero exchange "
+                        "(persona=%s); skipping post_conversation judgment",
+                        persona_id,
+                    )
+                    result.judgments.append({
+                        "kind": KIND_POST_CONVERSATION,
+                        "at": clock.now().isoformat(timespec="seconds"),
+                        "submitted": False,
+                        "reason": "conversation had no exchange; judgment skipped",
+                    })
         return _callback
 
     def _make_world_event_callback(
