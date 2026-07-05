@@ -744,8 +744,65 @@ def _is_in_user_conversation(manager: Any, persona_id: str) -> bool:
     return running is not None and getattr(running, "track_type", None) == "user_conversation"
 
 
+def _building_display_name(manager: Any, building_id: Any) -> str:
+    """building_id を表示名へ解決する (building_map が無い / 未登録なら ID のまま)。"""
+    building = (getattr(manager, "building_map", {}) or {}).get(building_id)
+    name = getattr(building, "name", None)
+    return str(name or building_id)
+
+
+def _record_move_failure(
+    manager: Any, persona: Any, slot: Dict[str, Any],
+    current: Any, target: Any, reason: Any,
+) -> None:
+    """施設移動の失敗をペルソナに見える形で記録する (SAIMemory system 通知)。
+
+    移動失敗時のフォールバックは「移動せず現在地で実行」だが、それが黙って
+    起きるとペルソナは「予定の場所で作業した」つもりのまま現在地の文脈で
+    振る舞う (接地原則違反の温床)。event_message タグ付きで通知を挿入し、
+    次の head 構築時にペルソナの context へ乗るようにする。
+    """
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None or not hasattr(adapter, "append_persona_message"):
+        return
+    target_name = _building_display_name(manager, target)
+    current_name = _building_display_name(manager, current)
+    title = str(slot.get("title") or slot.get("kind") or "").strip()
+    reason_text = str(reason or "理由不明")
+    message = {
+        "role": "user",
+        "content": (
+            "<system>[システム通知] "
+            f"時間割のコマ「{title}」で予定していた場所「{target_name}」へ"
+            f"移動できませんでした（{reason_text}）。"
+            f"このコマは現在地「{current_name}」で行います。</system>"
+        ),
+        "metadata": {"tags": ["internal", "event_message", "day_plan"]},
+    }
+    try:
+        adapter.append_persona_message(message)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to record move failure notice (persona=%s)",
+            getattr(persona, "persona_id", "?"), exc_info=True,
+        )
+
+
 def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> None:
-    """facility が現在地と違えば OccupancyManager で移動する。失敗は WARN + 続行。"""
+    """facility が現在地と違えば OccupancyManager で移動する。
+
+    移動の実体 (occupancy / DB / host メッセージ) は ``move_entity`` に集約
+    されているが、``persona.current_building_id`` の更新は設計上 **呼び出し側の
+    責務** (manager/runtime.py summon_persona / builtin_data/tools/move_persona.py
+    と同じパターン)。ここで更新しないと、コマの作業セッション
+    (sea/work_session.py は current_building_id から head / audience を組む) と
+    成果物の配置先 (manager/items.py) が終日 stale な旧建物の文脈で走り、
+    次の head 構築時に occupancy 記録の無い幻の「戻った」diff 通知まで発生する
+    (2026-07-05 実 LLM シム 異常 #1)。
+
+    移動失敗 (満員等) は「移動せず現在地で実行」に倒すが、黙って現在地に
+    ならないよう、その事実を WARN + ペルソナへの system 通知で記録する。
+    """
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     if persona is None:
         LOGGER.warning("[day_plan] persona %s not loaded; skipping facility move", persona_id)
@@ -775,16 +832,33 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> No
             "[day_plan] move_entity raised (persona=%s %s -> %s); continuing",
             persona_id, current, target, exc_info=True,
         )
+        _record_move_failure(manager, persona, slot, current, target, "内部エラー")
         return
     if not ok:
         LOGGER.warning(
             "[day_plan] facility move failed (persona=%s %s -> %s): %s — continuing in place",
             persona_id, current, target, msg,
         )
-    else:
-        LOGGER.info(
-            "[day_plan] moved for slot: persona=%s %s -> %s", persona_id, current, target
-        )
+        _record_move_failure(manager, persona, slot, current, target, msg)
+        return
+
+    # move_entity は persona.current_building_id を書き換えない (呼び出し側責務)。
+    # on_building_entered (move_entity 内) は「属性がまだ旧 Building」を前提に
+    # 走るため、更新は必ず move_entity 成功の後に行う。
+    persona.current_building_id = target
+    for hook_name, hook_args in (("_mark_entry", (target,)), ("_save_session_metadata", ())):
+        hook = getattr(persona, hook_name, None)
+        if callable(hook):
+            try:
+                hook(*hook_args)
+            except Exception:
+                LOGGER.warning(
+                    "[day_plan] %s failed after facility move (persona=%s)",
+                    hook_name, persona_id, exc_info=True,
+                )
+    LOGGER.info(
+        "[day_plan] moved for slot: persona=%s %s -> %s", persona_id, current, target
+    )
 
 
 def _effective_budget_rounds(slot: Dict[str, Any]) -> int:

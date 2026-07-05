@@ -353,10 +353,9 @@ def _build_mock_manager(db_file: Optional[str], scenario) -> Any:
     )
 
     class _StubOccupancy:
+        # 本物の OccupancyManager と同じく persona.current_building_id は触らない
+        # (更新は day_plan._move_to_facility の責務)。
         def move_entity(self, entity_id, entity_type, from_id, to_id, db_session=None):
-            p = manager.personas.get(entity_id)
-            if p is not None:
-                p.current_building_id = to_id
             return True, "ok (mock)"
 
     manager = SimpleNamespace(

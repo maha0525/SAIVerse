@@ -94,15 +94,22 @@ def manager(session_factory):
     )
 
     class StubOccupancy:
+        """本物の OccupancyManager.move_entity と同じく、persona 属性は触らない。
+
+        current_building_id の更新は呼び出し側 (day_plan._move_to_facility) の
+        責務 — stub がここで代入すると本体の更新漏れがテストで見えなくなる
+        (2026-07-05 実 LLM シム 異常 #1 の温床)。
+        """
+
         def __init__(self, personas: Dict[str, Any]):
             self.moves: List[tuple] = []
             self._personas = personas
+            self.fail_with: str | None = None  # 拒否理由を入れると移動失敗を再現
 
         def move_entity(self, entity_id, entity_type, from_id, to_id, db_session=None):
             self.moves.append((entity_id, entity_type, from_id, to_id))
-            p = self._personas.get(entity_id)
-            if p is not None:
-                p.current_building_id = to_id
+            if self.fail_with is not None:
+                return False, self.fail_with
             return True, "ok"
 
     personas = {PERSONA_ID: persona}
@@ -431,6 +438,82 @@ def test_own_room_without_private_room_warns_and_continues(manager, caplog):
     assert manager.occupancy_manager.moves == []
     assert any("no private_room_id" in r.message for r in caplog.records)
     assert mock_ws.call_count == 1  # 移動できなくてもコマ自体は実行される
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# 施設移動と persona.current_building_id (2026-07-05 実 LLM シム 異常 #1 回帰)
+# ---------------------------------------------------------------------------
+
+
+def test_move_updates_persona_current_building(manager, task_refs):
+    """移動成功時に persona.current_building_id が移動先に更新される。
+
+    move_entity は設計上この属性を書き換えない (呼び出し側責務)。day_plan が
+    更新しないと、作業セッションの head/audience と成果物の配置先が終日
+    旧建物のままになる (2026-07-05 実 LLM シムで実証)。
+    """
+    persona = manager.personas[PERSONA_ID]
+    assert persona.current_building_id == "alice_room"
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result()):
+        DaySimulator(
+            manager.event_scheduler,
+            start=BASE + timedelta(hours=8),
+            end=BASE + timedelta(hours=10),
+        ).run()
+
+    assert manager.occupancy_manager.moves == [
+        (PERSONA_ID, "ai", "alice_room", "library"),
+    ]
+    # 呼び出し側 (day_plan) が属性を更新している (stub は触らない)
+    assert persona.current_building_id == "library"
+
+
+def test_move_failure_runs_in_place_and_notifies_persona(manager, task_refs):
+    """移動失敗 (満員等) は現在地で実行 + その事実をペルソナに通知する。
+
+    黙って現在地文脈にならないこと: current_building_id は旧地のまま、
+    event_message タグの system 通知が SAIMemory に入り、ハンドラは実行される。
+    """
+    persona = manager.personas[PERSONA_ID]
+    notices: List[Dict[str, Any]] = []
+    persona.sai_memory = SimpleNamespace(
+        append_persona_message=lambda payload: notices.append(payload),
+    )
+    manager.occupancy_manager.fail_with = "図書館は定員オーバーです"
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5,
+         "title": "記事を調べる", "note": "調べもの"},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result()) as mock_ws:
+        DaySimulator(
+            manager.event_scheduler,
+            start=BASE + timedelta(hours=8),
+            end=BASE + timedelta(hours=10),
+        ).run()
+
+    # フォールバック: 移動せず現在地で実行 (コマ自体は流れない)
+    assert mock_ws.call_count == 1
+    assert persona.current_building_id == "alice_room"
+    # 失敗の事実がペルソナに見える形で記録される
+    assert len(notices) == 1
+    content = notices[0]["content"]
+    assert "移動できませんでした" in content
+    assert "記事を調べる" in content        # どのコマか
+    assert "定員オーバー" in content          # なぜか
+    assert "event_message" in notices[0]["metadata"]["tags"]
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "done"
 

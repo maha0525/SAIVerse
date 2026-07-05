@@ -94,15 +94,14 @@ def manager(session_factory):
     )
 
     class StubOccupancy:
+        # 本物と同じく persona.current_building_id は触らない
+        # (更新は day_plan._move_to_facility の責務)。
         def __init__(self, personas):
             self.moves: List[tuple] = []
             self._personas = personas
 
         def move_entity(self, entity_id, entity_type, from_id, to_id, db_session=None):
             self.moves.append((entity_id, entity_type, from_id, to_id))
-            p = self._personas.get(entity_id)
-            if p is not None:
-                p.current_building_id = to_id
             return True, "ok"
 
     personas = {PERSONA_ID: persona}
