@@ -1694,10 +1694,16 @@ class MetaLayer:
         )
 
     def _format_relative(self, dt: Optional[datetime]) -> str:
-        """大まかな相対時刻を返す (track_list._format_relative と同等)。"""
+        """大まかな相対時刻を返す (track_list._format_relative と同等)。
+
+        メタ判断の状況テキスト (ペルソナに見える) に載るため、基準時刻は
+        ``saiverse.clock`` を読む (仮想クロック無効時は実時刻と同値 = 挙動不変)。
+        """
         if dt is None:
             return "?"
-        diff_sec = int((datetime.now() - dt).total_seconds())
+        from saiverse import clock
+
+        diff_sec = int((clock.now() - dt).total_seconds())
         if diff_sec < 0:
             return "未来"
         if diff_sec < 60:

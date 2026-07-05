@@ -2706,7 +2706,17 @@ class SEARuntime:
         sections: List[str] = []
 
         # 1. Current timestamp
-        now = datetime.now(persona.timezone)
+        # 仮想クロック (一日シミュレータ) 有効時は仮想時刻を見せる。実時刻を
+        # 注入すると、判断プロンプト側の仮想時刻 (saiverse.clock 経由) と head の
+        # 「現在時刻」が矛盾し、ペルソナの世界像が実時計に引っ張られる
+        # (2026-07-05 実 LLM シム 異常 #3: 09:00 起床なのに時間割が 15:00 始まり)。
+        # 実モードでは従来どおり persona.timezone の実時刻 (挙動不変)。
+        from saiverse import clock
+
+        if clock.is_virtual():
+            now = clock.now()  # naive ローカル (シナリオの仮想時刻)
+        else:
+            now = datetime.now(persona.timezone)
         weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
         current_time_str = now.strftime(f"%Y年%m月%d日({weekday_names[now.weekday()]}) %H:%M")
         sections.append(f"現在時刻: {current_time_str}")

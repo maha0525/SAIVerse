@@ -364,10 +364,19 @@ class ScheduleManager:
     # ------------------------------------------------------------------
 
     def _generate_schedule_prompt(self, schedule: PersonaSchedule, session, persona_id: str) -> str:
-        """スケジュール実行時のプロンプトを生成"""
-        now = datetime.now(timezone.utc)
+        """スケジュール実行時のプロンプトを生成
+
+        「現在の日時」はペルソナに見える時刻のため、仮想クロック (一日
+        シミュレータ) 有効時は仮想時刻を使う。実モードでは従来どおり
+        persona timezone の実時刻 (挙動不変)。
+        """
+        from saiverse import clock
+
         persona_tz = self._get_persona_timezone(persona_id, session)
-        local_now = now.astimezone(persona_tz)
+        if clock.is_virtual():
+            local_now = clock.now()  # naive ローカル (シナリオの仮想時刻)
+        else:
+            local_now = datetime.now(timezone.utc).astimezone(persona_tz)
 
         scheduled_time_str = ""
         if schedule.SCHEDULE_TYPE == "periodic":
