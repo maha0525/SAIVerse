@@ -62,6 +62,7 @@ from saiverse.judgment_points import (
 )
 from saiverse.persona_task_manager import (
     PARENT_TRACK,
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     PersonaTaskManager,
     TaskNotFoundError,
@@ -150,8 +151,14 @@ def _finalize_day_open(
     if not slots:
         # 空配列は不可 — 最低 1 コマを要求する (judgment_points.md §4)。
         # 検証で全滅した場合も plan は保存しない (前日の plan / 既存 plan を壊さない)。
+        # 却下はペルソナの文脈 (lines) にも載せる — 黙って捨てない
+        # (_apply_remaining_timetable と同じ接地原則)。
         warnings.append(
             "timetable が検証後に空になったため、時間割は保存しませんでした"
+        )
+        lines.append(
+            "（時間割は保存されませんでした: 提出されたコマがすべて無効でした。"
+            "今日の時間割は編成されていません）"
         )
     else:
         # 全置換: 旧 plan の予約 (index ベースの key) を先に落としてから保存する。
@@ -160,6 +167,10 @@ def _finalize_day_open(
             day_plan_mod.save_day_plan(manager, persona_id, plan_date, slots)
         except ValueError as exc:
             warnings.append(f"時間割の保存に失敗: {exc}")
+            lines.append(
+                f"（時間割は保存されませんでした（{exc}）。"
+                "今日の時間割は編成されていません）"
+            )
         else:
             pushed = day_plan_mod.schedule_day_plan(manager, persona_id, plan_date)
             applied = True
@@ -261,7 +272,13 @@ def _apply_remaining_timetable(
     lines: List[str],
     warnings: List[str],
 ) -> bool:
-    """remaining_timetable: null=変更なし / 配列=残りコマの全置換 (§3.3)。"""
+    """remaining_timetable: null=変更なし / 配列=残りコマの全置換 (§3.3)。
+
+    却下 (全滅・置換失敗) は warnings (ログ) だけでなく **lines (ペルソナの
+    文脈に乗る適用サマリ) にも必ず載せる** — 黙って捨てるとペルソナは
+    「組み替えた」つもりのまま一日を続け、就寝判断が実態とズレた総括をする
+    (接地原則違反。2026-07-05 実 LLM シム 3回目で実証)。
+    """
     rt = output.get("remaining_timetable")
     if isinstance(rt, list):
         plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
@@ -271,12 +288,20 @@ def _apply_remaining_timetable(
             warnings.append(
                 "remaining_timetable が空配列のため、時間割は変更しません"
             )
+            lines.append(
+                "（時間割の変更は適用されませんでした: 空の時間割には"
+                "置き換えられません。今日の残りのコマは元のままです）"
+            )
         else:
             slots, rt_warnings = sanitize_timetable(manager, persona_id, rt)
             warnings.extend(rt_warnings)
             if not slots:
                 warnings.append(
                     "remaining_timetable が検証後に空になったため、時間割は変更しません"
+                )
+                lines.append(
+                    "（時間割の変更は適用されませんでした: 提出されたコマが"
+                    "すべて無効でした。今日の残りのコマは元のままです）"
                 )
             else:
                 try:
@@ -287,10 +312,19 @@ def _apply_remaining_timetable(
                     warnings.append(
                         f"remaining_timetable の置換に失敗 (時間割は不変): {exc}"
                     )
+                    lines.append(
+                        f"（時間割の変更は適用されませんでした（{exc}）。"
+                        "今日の残りのコマは元のままです）"
+                    )
                 else:
                     lines.append(
                         f"（残りの時間割を組み替えた: {len(slots)} コマ、{pushed} コマを予約）"
                     )
+                    dropped = len(rt) - len(slots)
+                    if dropped > 0:
+                        lines.append(
+                            f"（うち {dropped} コマは無効のため除外されました）"
+                        )
                     return True
     elif rt is not None:
         warnings.append(
@@ -328,8 +362,22 @@ def _apply_task_verdict(
     ptm = PersonaTaskManager(manager.SessionLocal)
     try:
         task_id = ptm.resolve_task_ref(persona_id, normalize_task_ref(str(task_ref)))
+        task = ptm.get_task(task_id, persona_id=persona_id)
     except TaskNotFoundError:
         warnings.append(f"task_verdict rejected: タスク {task_ref!r} が見つかりません")
+        return False
+
+    # 終了済みタスクへの再裁定は棄却する (二重ガード — スキーマ側でも終了済み
+    # タスクには裁定欄を出さない: judgment_points.build_post_session_schema)。
+    # 再 done を通すと artifact_refs への多重追記・completed_at の上書きが起きる
+    # (2026-07-05 実 LLM シム 3回目 異常③)。desk_memo の保存もしない —
+    # 終了済みタスクを「中断中の作業」に見せてしまうため。
+    current_status = task.get("status")
+    if current_status in (STATUS_COMPLETED, STATUS_CANCELLED):
+        warnings.append(
+            f"task_verdict rejected: タスク {task_ref} は既に {current_status} です"
+            " (再裁定はできません)"
+        )
         return False
 
     applied = False

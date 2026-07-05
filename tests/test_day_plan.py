@@ -712,6 +712,69 @@ def test_skip_reason_survives_remaining_slot_replacement(manager, task_refs):
     assert "skip_reason" not in slots[1]
 
 
+def test_replace_remaining_allows_restart_at_consumed_slot_time(manager, task_refs):
+    """正当な組み替え: 消化済みコマと同時刻から始まる残りコマの全置換は通る。
+
+    2026-07-05 実 LLM シム 3回目の回帰: 13:30 コマ直後の post_session が
+    「13:30 のコマを ref を直して置き直す」組み替えを返したところ、消化済み
+    13:30 コマとの境界比較で『昇順でない』と全却下された。昇順検証は新コマ
+    区間のみに適用し、消化済み区間 (歴史) は保護したまま置換を通す。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:30", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 4, "note": "調べもの",
+         "status": "done"},
+        {"start": "13:30", "kind": "作る", "ref": task_refs["task"],
+         "facility": "workshop", "budget_rounds": 6, "note": "済んだコマ",
+         "status": "done"},
+        {"start": "15:30", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    pushed = day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "13:30", "kind": "作る", "ref": task_refs["desire"],
+         "facility": "workshop", "budget_rounds": 4, "note": "ref を直してやり直す"},
+        {"start": "15:30", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    assert pushed == 2
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [
+        ("09:30", "done"), ("13:30", "done"),
+        ("13:30", "pending"), ("15:30", "pending"),
+    ]
+    # 消化済みコマは書き換えられていない (歴史の保護)
+    assert slots[1]["ref"] == task_refs["task"]
+    # 新コマはペルソナの意志どおり
+    assert slots[2]["ref"] == task_refs["desire"]
+
+
+def test_replace_remaining_still_rejects_unordered_new_slots(manager, task_refs):
+    """新コマ区間そのものが昇順でない置換は従来どおり全却下 (plan も予約も不変)。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:30", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 4, "note": "",
+         "status": "done"},
+        {"start": "15:30", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    with pytest.raises(ValueError, match="not strictly ascending"):
+        day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "16:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": ""},
+            {"start": "15:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": ""},
+        ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [
+        ("09:30", "done"), ("15:30", "pending"),
+    ]
+    assert manager.event_scheduler.has_key(
+        f"day_plan:{PERSONA_ID}:{PLAN_DATE}:1"
+    )
+
+
 def test_handler_failure_leaves_slot_fired(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "09:00", "kind": "作る", "ref": "none",

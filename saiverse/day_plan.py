@@ -200,17 +200,30 @@ def _normalize_plan_date(plan_date: Any) -> str:
     raise ValueError(f"invalid plan_date type: {type(plan_date).__name__}")
 
 
-def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
+def _validate_and_normalize_slots(
+    slots: Any, *, ascending_from: int = 0
+) -> List[Dict[str, Any]]:
     """コマ配列を検証し、正規化したコピーを返す。不正は ValueError。
 
     検証項目 (judgment_points.md §3.2 の finalize 検証のうち保存時に決まるもの):
-    - start は "HH:MM" で厳密に昇順 (同時刻も不可 — 同 key 空間で衝突するため)
+    - start は "HH:MM" で厳密に昇順 (同時刻も不可)
     - kind は六型 + 暮らし/休む のみ
     - ref は "task:N" / "desire:N" / "none"。暮らし/休む は "none" 必須
     - facility は非空文字列 (building_id or "own_room")
     - budget_rounds は非負 int (bool は不可)
     - title は文字列 (「○○をする」という短い表題。旧データは無いので省略可 = "")
     - status は既知の値のみ (省略時 pending)
+
+    Args:
+        ascending_from: 厳密昇順を検証する開始 index。残りコマの全置換
+            (:func:`replace_remaining_slots`) では消化済みコマ (帳簿) を先頭に
+            残すため、昇順検証は **新コマ区間のみ** に適用する — 消化済み区間との
+            境界を跨いだ比較はしない (直前に消化したコマと同時刻・過去時刻の
+            新コマは正当な組み替えであり、EventScheduler は過去時刻を即時扱い
+            する。予約 key は index ベースなので同時刻でも衝突しない)。
+            index < ascending_from のコマもフィールド検証は全て受ける。
+            2026-07-05 実 LLM シム 3回目: 消化済み 13:30 コマの直後に 13:30 の
+            新コマを置く組み替えが「昇順でない」で全却下された不具合の修正。
     """
     if not isinstance(slots, list) or not slots:
         raise ValueError("slots must be a non-empty list")
@@ -224,13 +237,14 @@ def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
         start = slot.get("start")
         if not isinstance(start, str) or not _TIME_RE.match(start):
             raise ValueError(f"slot[{i}].start must be 'HH:MM' (got {start!r})")
-        minutes = int(start[:2]) * 60 + int(start[3:])
-        if minutes <= prev_minutes:
-            raise ValueError(
-                f"slot[{i}].start={start!r} is not strictly ascending "
-                "(slots must be sorted by start time)"
-            )
-        prev_minutes = minutes
+        if i >= ascending_from:
+            minutes = int(start[:2]) * 60 + int(start[3:])
+            if minutes <= prev_minutes:
+                raise ValueError(
+                    f"slot[{i}].start={start!r} is not strictly ascending "
+                    "(slots must be sorted by start time)"
+                )
+            prev_minutes = minutes
 
         kind = slot.get("kind")
         if kind not in ALL_KINDS:
@@ -311,7 +325,13 @@ def save_day_plan(manager: Any, persona_id: str, plan_date: Any, slots: List[Dic
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
     normalized = _validate_and_normalize_slots(slots)
+    _upsert_plan_slots(manager, persona_id, plan_date_str, normalized)
 
+
+def _upsert_plan_slots(
+    manager: Any, persona_id: str, plan_date_str: str, normalized: List[Dict[str, Any]]
+) -> None:
+    """検証済みコマ配列を upsert する (save_day_plan / replace_remaining_slots 共用)。"""
     from database.models import PersonaDayPlan
 
     now = clock.now()
@@ -697,6 +717,13 @@ def replace_remaining_slots(
     new_slots に差し替える。検証は保存時と同一 (``_validate_and_normalize_slots``)
     で、失敗時は ValueError を投げて **plan も予約も一切変更しない**。
 
+    厳密昇順の検証は **new_slots の区間のみ** に適用する
+    (``ascending_from=len(kept)``)。消化済みコマは書き換え不可の歴史であり、
+    「直前に消化したコマと同時刻・過去時刻から始まる組み替え」(直近コマの
+    やり直し等) は正当な意志なので、消化済み区間との境界比較で全却下しない
+    (2026-07-05 実 LLM シム 3回目の不具合)。過去時刻の新コマは
+    EventScheduler が即時扱いする。
+
     Returns:
         置換後に EventScheduler へ push した pending コマ数。
     """
@@ -709,11 +736,12 @@ def replace_remaining_slots(
     candidate = kept + [
         {**slot, "status": STATUS_PENDING, "defer_count": 0} for slot in new_slots
     ]
-    normalized = _validate_and_normalize_slots(candidate)  # 失敗時はここで raise
+    # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)
+    normalized = _validate_and_normalize_slots(candidate, ascending_from=len(kept))
 
     # 検証が通ってから旧予約を落とし、保存 → 再 push する。
     cancel_scheduled_slots(manager, persona_id, plan_date_str)
-    save_day_plan(manager, persona_id, plan_date_str, normalized)
+    _upsert_plan_slots(manager, persona_id, plan_date_str, normalized)
     return schedule_day_plan(manager, persona_id, plan_date_str)
 
 

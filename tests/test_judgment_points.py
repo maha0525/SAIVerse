@@ -646,6 +646,167 @@ def test_post_session_remaining_timetable_replaces_and_cancels_stale(
     assert manager.event_scheduler.pending_count() == 1
 
 
+def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    """正当な組み替え: 消化済みコマと同時刻から始まる置換が finalize 経由で通る。
+
+    2026-07-05 実 LLM シム 3回目の回帰 (sanitize → replace_remaining_slots の
+    通し): 13:30 コマ消化直後に「13:30 を ref を直して置き直す」置換が
+    『昇順でない』で全却下 → ペルソナは組み替えたつもりのまま、が直っている。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "13:30", "kind": "作る", "ref": "task:1",
+         "facility": "workshop", "budget_rounds": 6, "note": "済んだコマ",
+         "status": "done"},
+        _rest_slot("17:00"),
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    output = {
+        "monologue": "13:30 のコマは対象を直してやり直す。",
+        "remaining_timetable": [
+            {"start": "13:30", "kind": "作る", "ref": "desire:2",
+             "facility": "workshop", "budget_rounds": 4, "note": "対象を直した"},
+            _rest_slot("17:00"),
+        ],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": []})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+
+    assert "applied=True" in summary
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"], s["ref"]) for s in slots] == [
+        ("13:30", "done", "task:1"),
+        ("13:30", "pending", "desire:2"),
+        ("17:00", "pending", "none"),
+    ]
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "残りの時間割を組み替えた" in content
+
+
+def test_post_session_remaining_timetable_rejection_reaches_persona(
+    manager, task_refs, finalize_mod, tmp_path, caplog
+):
+    """置換が全滅した却下は warnings (ログ) だけでなくペルソナの文脈にも返る。
+
+    黙って捨てるとペルソナは「組み替えた」つもりのまま一日を続ける
+    (接地原則違反。2026-07-05 実 LLM シム 3回目 異常②の回帰)。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_rest_slot("17:00")])
+    output = {
+        "monologue": "残りを組み替えるつもり。",
+        "remaining_timetable": [
+            {"start": "15:00", "kind": "作る", "ref": "task:99",  # 実在しない
+             "facility": "workshop", "budget_rounds": 4, "note": "?"},
+        ],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": []})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output, kind="post_session", judgment_context=ctx,
+            )
+
+    # 時間割は不変
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [("17:00", "pending")]
+    # 却下がペルソナに見える記録 (SAIMemory content) に載る
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "時間割の変更は適用されませんでした" in content
+    assert any("task:99" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# post_session: 終了済みタスクの再裁定封じ (シム 3回目 異常③)
+# ---------------------------------------------------------------------------
+
+
+def test_post_session_schema_omits_verdict_for_completed_task(
+    manager, ptm, task_refs
+):
+    """終了済みタスクが対象のセッションでは task_verdict 欄自体を出さない。
+
+    completed 済みタスクに done 裁定 → artifact_refs 多重追記、を構造的に
+    封じる (2026-07-05 実 LLM シム 3回目 異常③)。
+    """
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    ptm.update_task_status(task_id, status="completed",
+                           actor="test", persona_id=PERSONA_ID)
+
+    schema = jp.build_post_session_schema(
+        manager, PERSONA_ID, ["item-abc"], "task:1", None,
+    )
+    assert "task_verdict" not in schema["properties"]
+    assert "task_verdict" not in schema["required"]
+
+    # 生きているタスクなら従来どおり欄が出る (退行防止)
+    schema_alive = jp.build_post_session_schema(
+        manager, PERSONA_ID, ["item-abc"], "task:2", None,
+    )
+    assert "task_verdict" in schema_alive["properties"]
+
+
+def test_post_session_re_done_on_completed_task_is_rejected(
+    manager, ptm, task_refs, finalize_mod, tmp_path, caplog
+):
+    """finalize 側の二重ガード: 終了済みタスクへの done 裁定は適用しない。
+
+    artifact_refs への多重追記も、終了済みタスクへの desk_memo (偽の
+    「中断中の作業」化) もしない。
+    """
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    )
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    ptm.update_task_status(task_id, status="completed",
+                           actor="test", persona_id=PERSONA_ID)
+    ptm.append_artifact_ref(task_id, "item-old",
+                            persona_id=PERSONA_ID, actor="test")
+
+    output = {
+        "monologue": "また完了にしておこう。",
+        "task_verdict": {"status": "done", "artifact_ref": "item-new",
+                         "desk_memo": "二度目の完了"},
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-new"],
+                      "task_ref": "task:1", "track_id": track_id})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output, kind="post_session", judgment_context=ctx,
+            )
+
+    task = ptm.get_task(task_id, persona_id=PERSONA_ID)
+    assert task["status"] == "completed"
+    assert task["artifact_refs"] == ["item-old"], "終了済みタスクに成果物が多重追記された"
+    assert any("既に completed" in r.message for r in caplog.records)
+    # desk_memo も書かれない (終了済みタスクを「中断中」に見せない)
+    track = manager.track_manager.get(track_id)
+    assert not track.track_metadata or "desk_memo" not in json.loads(track.track_metadata)
+    assert "applied=False" in summary
+
+
+def test_sanitize_timetable_rejects_completed_task_ref(manager, ptm, task_refs):
+    """終了済みタスクを指すコマは棄却される (新しい時間割が完了済みを指せない)。"""
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    ptm.update_task_status(task_id, status="completed",
+                           actor="test", persona_id=PERSONA_ID)
+
+    slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, [
+        {"start": "10:00", "kind": "作る", "ref": "task:1",
+         "facility": "workshop", "budget_rounds": 4, "note": "完了済みを指す"},
+        {"start": "12:00", "kind": "作る", "ref": "desire:2",
+         "facility": "workshop", "budget_rounds": 4, "note": "生きている欲求"},
+    ])
+    assert [s["ref"] for s in slots] == ["desire:2"]
+    assert any("completed" in w for w in warnings)
+
+
 # ---------------------------------------------------------------------------
 # plan meta (tomorrow_memo の置き場)
 # ---------------------------------------------------------------------------

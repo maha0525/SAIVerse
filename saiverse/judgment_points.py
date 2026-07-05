@@ -66,6 +66,8 @@ from saiverse.desire_engine import (
 from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
 from saiverse.persona_task_manager import (
     PARENT_NOTE,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
     PersonaTaskManager,
     TaskNotFoundError,
 )
@@ -119,6 +121,14 @@ DEFAULT_DAILY_BUDGET_ROUNDS = 40
 #: バックログとして提示するタスクの status (生きているもの)
 BACKLOG_TASK_STATUSES = ("pending", "active", "paused")
 
+#: 終了済み (裁定・時間割の参照対象にならない) タスクの status。
+#: enum 構築 (collect_slot_ref_enum) は生存 status の positive フィルタで
+#: 元から completed を除外しているが、「enum 構築後に完了した task を指す
+#: 古い ref」がスキーマ・時間割へ滑り込む経路を塞ぐための negative フィルタ
+#: (2026-07-05 実 LLM シム 3回目 異常③: completed 済み task:1 への再セッション
+#: → 再 done 裁定 → artifact_refs 多重追記)。
+TERMINAL_TASK_STATUSES = (STATUS_COMPLETED, STATUS_CANCELLED)
+
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _REF_RE = re.compile(r"^(task|desire):(\d+)$")
 
@@ -129,6 +139,23 @@ def normalize_task_ref(ref: str) -> str:
     if ref.startswith("desire:"):
         return "task:" + ref[len("desire:"):]
     return ref
+
+
+def _task_ref_status(manager: Any, persona_id: str, ref: str) -> Optional[str]:
+    """ref (task:N / desire:N) が指すタスクの status を返す。解決不能は None。"""
+    try:
+        ptm = PersonaTaskManager(manager.SessionLocal)
+        task_id = ptm.resolve_task_ref(persona_id, normalize_task_ref(str(ref)))
+        task = ptm.get_task(task_id, persona_id=persona_id)
+    except TaskNotFoundError:
+        return None
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to read status for ref %r (persona=%s)",
+            ref, persona_id, exc_info=True,
+        )
+        return None
+    return task.get("status") if isinstance(task, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +451,11 @@ def build_post_session_schema(
     **接地の要**: done 分岐の artifact_ref enum は「このセッションが実際に作った
     成果物」のみ。成果物ゼロのセッションでは done 分岐 (anyOf の第 1 分岐) を
     スキーマから除去する — やったフリはスキーマのレベルで構造的に不可能になる。
+
+    対象タスクが既に終了済み (completed / cancelled) の場合は **task_verdict
+    欄自体を出さない** — 再 done 裁定 (artifact_refs 多重追記) も、終了済み
+    タスクへの desk_memo (偽の「中断中の作業」) も構造的に不可能にする
+    (状況テキストには [completed] と正直に出る。2026-07-05 実 LLM シム 異常③)。
     """
     slot = _build_slot_schema(
         collect_slot_ref_enum(manager, persona_id),
@@ -431,6 +463,14 @@ def build_post_session_schema(
     )
     props: Dict[str, Any] = {"monologue": {"type": "string"}}
     required = ["monologue"]
+
+    if task_ref and _task_ref_status(manager, persona_id, task_ref) in TERMINAL_TASK_STATUSES:
+        LOGGER.info(
+            "[judgment] post_session target %s is already terminal; "
+            "omitting task_verdict from schema (persona=%s)",
+            task_ref, persona_id,
+        )
+        task_ref = None
 
     if task_ref:
         variants: List[Dict[str, Any]] = []
@@ -1362,9 +1402,20 @@ def sanitize_timetable(
                 warnings.append(f"slot[{i}] rejected: invalid ref format {ref!r}")
                 continue
             try:
-                ptm.resolve_task_ref(persona_id, normalize_task_ref(ref))
+                task_id = ptm.resolve_task_ref(persona_id, normalize_task_ref(ref))
+                task = ptm.get_task(task_id, persona_id=persona_id)
             except TaskNotFoundError:
                 warnings.append(f"slot[{i}] rejected: ref {ref!r} does not exist")
+                continue
+            # 終了済みタスクを指すコマは棄却する。ref enum は生存タスクから
+            # 構築されるが、判断の適用順 (task_verdict で完了 → 同じ判断の
+            # remaining_timetable が旧 enum の ref を再提出) や旧 plan からの
+            # 引き写しで、完了済み ref がここへ届きうる (シム 3回目 異常③)。
+            status = (task or {}).get("status")
+            if status in TERMINAL_TASK_STATUSES:
+                warnings.append(
+                    f"slot[{i}] rejected: ref {ref!r} は既に {status} のタスクです"
+                )
                 continue
 
         facility = str(slot.get("facility") or "").strip()
