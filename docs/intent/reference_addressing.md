@@ -137,11 +137,19 @@ N 番スロット）という**位置**で指す。位置なのでアイテム�
     ITEM_ID=UUID・ペルソナスコープなし）。よって item short_id は**世界全体の連番**で、
     URI は `saiverse://item/N`（グローバル、ペルソナ ID 不要）。現状 item テーブルに
     short_id 列は無いので**追加する**。ItemLocation の SLOT_NUMBER は locator として存置。
-- **Q2 → A（名前を1つに統一。最初から A で進める）**: task と desire を単一の正典名に
-  寄せる。「欲求」は符号ではなく状態/種別のラベルとして扱う。
-  - **報告条件（まはー指示）**: storage は同じ persona_task 行でも、ペルソナ向けの
-    意味（「やりたいこと」＝desire と「やること」＝task）が分かれている可能性がある。
-    単語を1つにするとその区別が潰れて厳しくなる場合は、実装前に報告する。
+- **Q2 → A（名前を1つに統一。最初から A で進める）**: task と desire を単一の正典名
+  `task:N` に寄せる。「欲求」は符号ではなく状態/種別のラベルとして扱う。
+  - **報告条件のチェック結果（2026-07-05・成立可能）**: 調査の結果、統合は安全と確定。
+    (1) desire と task は既に**同じ short_id 参照空間**（`desire:5` と `task:5` は同一の
+    persona_task 行。desire_engine `_normalize_ref` のコメント通り）で衝突しない。
+    (2) 「欲求かバックログタスクか」の区別は prefix ではなく**構造**（`parent_kind ==
+    PARENT_NOTE` / desire ノート所属）で判定している（`_list_backlog_tasks` vs
+    `_list_desire_tasks`）。(3) 解決は既に `normalize_task_ref` で `desire:`→`task:` に
+    正規化してから引いており、prefix は resolution 時点で飾り。(4) `desire:N` は
+    `collect_slot_ref_enum` 等がプレゼン用に文字列変換して出しているだけ。
+    → 統合＝その変換を消して全箇所 `task:N` にするだけ。欲求らしさはペルソナには
+    「やりたいこと候補」セクション・種別ラベルという**提示文脈**で、内部挙動には
+    `parent_kind` で伝わり続ける。f8a2f2f の `to_desire_ref` 食い違い防止も変換消滅で不要化。
 - **Q3 → A（短縮参照を URI にも展開できる）**: 全種類で URI 形式を持てる。ただし
   P7 の通り、URI はパスで種類を表すので短縮 prefix を重ねず、ペルソナ依存の実体は
   ペルソナ ID を含む。**正: `saiverse://self/track/2`**（草案の
