@@ -11,6 +11,7 @@ from sea.runtime_llm import (
     _coerce_spell_args,
     _normalize_json_literals,
     _parse_spell_args,
+    _parse_spell_lines,
 )
 from tools.core import ToolSchema
 
@@ -58,6 +59,73 @@ class TestSpellArgsParsing(unittest.TestCase):
     def test_normalize_noop_when_no_literals(self):
         src = "{'a': 1}"
         self.assertEqual(_normalize_json_literals(src), src)
+
+
+class TestMultilineArgsRescue(unittest.TestCase):
+    """args JSON の文字列値に生改行が入ったケースの救済と、救えないケースの
+    malformed 報告 (2026-07-05 実 LLM シム 異常 #2 の回帰防止)。"""
+
+    def test_multiline_json_string_rescued(self):
+        # LLM が content 内に生の改行を書いた実例形。行単位の canonical パターン
+        # では先頭行で千切れるが、brace 追跡 + 改行の \n 正規化で救済される。
+        text = (
+            "作業に取りかかる。\n"
+            '/spell name=\'document_create\' args={"title": "メモ", '
+            '"content": "1行目\n2行目\n\n3行目"}\n'
+            "これでよし。"
+        )
+        malformed = []
+        parsed = _parse_spell_lines(text, malformed_out=malformed)
+        self.assertEqual(malformed, [])
+        self.assertEqual(len(parsed), 1)
+        name, args, span, norm = parsed[0]
+        self.assertEqual(name, "document_create")
+        self.assertEqual(args["title"], "メモ")
+        self.assertEqual(args["content"], "1行目\n2行目\n\n3行目")
+        # span は閉じ } まで。後続の平文は失われない
+        self.assertEqual(text[span.end():].strip(), "これでよし。")
+        # 正規化行は 1 行の canonical 形 (SAIMemory に正しい書式が残る)
+        self.assertNotIn("\n", norm)
+        self.assertTrue(norm.startswith("/spell name='document_create' args={"))
+
+    def test_unclosed_brace_reported_as_malformed(self):
+        # brace が閉じない = 救済不能。黙って捨てず malformed_out に報告される
+        text = '/spell name=\'document_create\' args={"content": "途中で切れた'
+        malformed = []
+        parsed = _parse_spell_lines(text, malformed_out=malformed)
+        self.assertEqual(parsed, [])
+        self.assertEqual(len(malformed), 1)
+        name, args_raw, _m = malformed[0]
+        self.assertEqual(name, "document_create")
+        self.assertIn("途中で切れた", args_raw)
+
+    def test_without_malformed_out_unparseable_is_skipped(self):
+        # malformed_out を渡さない既存呼び出し (表示系等) は従来どおり skip
+        self.assertEqual(
+            _parse_spell_lines("/spell name='x' args={broken", quiet=True), []
+        )
+
+    def test_trailing_prose_after_json_on_same_line(self):
+        # } の後に同一行で文が続くケース: brace 対応で JSON 部分だけを読む
+        text = '/spell name=\'make_doc\' args={"a": 1} と唱えた'
+        parsed = _parse_spell_lines(text)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0][1], {"a": 1})
+        self.assertEqual(text[parsed[0][2].end():].strip(), "と唱えた")
+
+    def test_spell_like_line_inside_rescued_args_not_double_parsed(self):
+        # 救済した args 本文の中に /spell 行そっくりの文字列があっても、
+        # 飲み込んだ範囲内の再マッチは無視される
+        text = (
+            '/spell name=\'document_create\' args={"content": "スペルの書式:\n'
+            "/spell name='calculator' args={\\\"expression\\\": \\\"1+1\\\"}\n"
+            'という形で書く"}'
+        )
+        malformed = []
+        parsed = _parse_spell_lines(text, malformed_out=malformed)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0][0], "document_create")
+        self.assertEqual(malformed, [])
 
 
 class TestCoerceArgToType(unittest.TestCase):

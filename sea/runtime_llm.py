@@ -417,16 +417,119 @@ def _parse_spell_line(text: str):
     return m.group(1), tool_args, m
 
 
+class _SpellSpan:
+    """``re.Match`` 互換の最小スパン (複数行 args 救済用)。
+
+    ``_SPELL_PATTERN`` は行単位マッチのため、複数行にまたがる args を救済した
+    エントリには本物の Match が無い。呼び出し側 (text_before / text_after の
+    切り出し・位置ソート) が使うのは start/end/span だけなので、それだけを持つ。
+    """
+
+    __slots__ = ("_start", "_end")
+
+    def __init__(self, start: int, end: int) -> None:
+        self._start = start
+        self._end = end
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+    def span(self) -> Tuple[int, int]:
+        return (self._start, self._end)
+
+
+def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpan"]]:
+    """canonical /spell 行の args が 1 行で parse できなかったときの救済パース。
+
+    ``_SPELL_PATTERN`` は MULTILINE の行単位マッチ (``.`` は改行を跨がない) の
+    ため、LLM が args の JSON 文字列値に **生の改行** を書くと ``group(2)`` は
+    先頭行で千切れて必ず parse に失敗する (2026-07-05 実 LLM シム 異常 #2:
+    document_create の本文入り args が丸ごと握り潰された)。
+
+    ここでは args の開始 ``{`` から brace の対応を追い (文字列リテラル内は
+    数えない)、対応する閉じ ``}`` までを取り出した上で、文字列値の中の生改行を
+    ``\\n`` に正規化して再 parse する。これは決定論的な正規化であり、曖昧な
+    入力の推測修復はしない: brace が閉じない / 正規化後も parse できない場合は
+    None を返し、呼び出し側が差し戻しエラー (再試行の機会) にする。
+
+    Returns:
+        ``(tool_args, span)``。span は ``/spell`` 行頭から閉じ ``}`` まで。
+    """
+    pos = m.start(2)
+    end_limit = len(text)
+    while pos < end_limit and text[pos] in " \t":
+        pos += 1
+    if pos >= end_limit or text[pos] != "{":
+        return None
+
+    depth = 0
+    in_string = False
+    quote = ""
+    escaped = False
+    out: List[str] = []
+    i = pos
+    while i < end_limit:
+        ch = text[i]
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                out.append(ch)
+                escaped = True
+            elif ch == quote:
+                out.append(ch)
+                in_string = False
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                # \r\n は次の \n 側で \\n になる。単独 \r も \\n に倒す
+                if i + 1 >= end_limit or text[i + 1] != "\n":
+                    out.append("\\n")
+            else:
+                out.append(ch)
+        else:
+            if ch in "\"'":
+                in_string = True
+                quote = ch
+                out.append(ch)
+            elif ch == "{":
+                depth += 1
+                out.append(ch)
+            elif ch == "}":
+                depth -= 1
+                out.append(ch)
+                if depth == 0:
+                    candidate = "".join(out)
+                    parsed = _parse_spell_args(candidate, silent=True, mute=True)
+                    if isinstance(parsed, dict):
+                        return parsed, _SpellSpan(m.start(), i + 1)
+                    return None
+            else:
+                out.append(ch)
+        i += 1
+    return None
+
+
 def _parse_spell_lines(
     text: str, *, quiet: bool = False,
+    malformed_out: Optional[List[Tuple[str, str, Any]]] = None,
 ) -> List[Tuple[str, dict, Any, str]]:
     """Parse ALL /spell invocations in *text*, including fuzzy (informal) syntax.
 
     Returns list of ``(tool_name, tool_args, match, normalized_line)``.
     - ``match`` points to the original text position (for text_before calculation).
+      複数行 args を救済したエントリは ``_SpellSpan`` (start/end/span のみ) になる。
     - ``normalized_line`` is the canonical ``/spell name='...' args={...}`` form,
       which is used in SAIMemory storage so the persona learns correct syntax.
-    Unparseable entries are silently skipped.
+    Unparseable entries are skipped from the return value; canonical-form
+    entries whose args failed to parse (after the multiline rescue) are
+    reported via ``malformed_out`` when the caller passes a list — the spell
+    loop uses this to feed a corrective error back to the persona instead of
+    silently dropping the invocation (2026-07-05 実 LLM シム 異常 #2).
 
     ``quiet=True`` suppresses the canonical-parse-failure and fuzzy-recovery
     logging. Use it on read-only/display paths (e.g. activity-view re-parses
@@ -438,11 +541,31 @@ def _parse_spell_lines(
 
     # Pass 1: canonical form
     for m in _SPELL_PATTERN.finditer(text):
-        tool_args = _parse_spell_args(m.group(2).strip(), silent=quiet, mute=quiet)
+        # 直前の複数行救済が飲み込んだ範囲内 (= args の本文中) の再マッチは無視
+        if any(s <= m.start() < e for s, e in matched_spans):
+            continue
+        args_raw = m.group(2).strip()
+        tool_args = _parse_spell_args(args_raw, silent=quiet, mute=quiet)
         if tool_args is not None:
             normalized = _normalize_spell_line(m.group(1), tool_args)
             found.append((m.group(1), tool_args, m, normalized))
             matched_spans.append(m.span())
+            continue
+        # 1 行で読めない args: 文字列値に生改行を含む複数行 JSON/dict を救済
+        rescued = _rescue_multiline_args(text, m)
+        if rescued is not None:
+            tool_args, span = rescued
+            normalized = _normalize_spell_line(m.group(1), tool_args)
+            if not quiet:
+                LOGGER.info(
+                    "[sea][spell] Rescued multiline args for spell '%s' → %s",
+                    m.group(1), normalized[:200],
+                )
+            found.append((m.group(1), tool_args, span, normalized))
+            matched_spans.append(span.span())
+            continue
+        if malformed_out is not None:
+            malformed_out.append((m.group(1), args_raw, m))
 
     # Pass 2: fuzzy form — skip spans already matched by canonical pattern
     for m in _SPELL_PATTERN_FUZZY.finditer(text):
@@ -469,6 +592,7 @@ def _build_spell_user_only_block(
     display_name: str,
     result_str: str = "",
     success: bool = True,
+    spell_line: Optional[str] = None,
 ) -> str:
     """Build a ``<user_only>`` block carrying one spell invocation + result.
 
@@ -505,8 +629,12 @@ def _build_spell_user_only_block(
     - The whole block is stripped from voice/external paths by
       ``strip_user_only`` and replaced with placeholder by
       ``strip_for_other_persona``.
+    - ``spell_line`` overrides the rendered ``/spell ...`` line. Args-parse
+      failures have no args dict to normalize from, so the caller passes the
+      raw invocation line instead of a misleading ``args={}``.
     """
-    spell_line = _normalize_spell_line(tool_name, tool_args)
+    if spell_line is None:
+        spell_line = _normalize_spell_line(tool_name, tool_args)
     result_escaped = (
         result_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if result_str else ""
@@ -618,6 +746,28 @@ def _build_unknown_spell_error(spell_name: str, persona: Any, building_id: Optio
             f"(利用可能な Playbook: {', '.join(playbook_names)})。"
         )
     return hint
+
+
+def _build_malformed_args_error(spell_name: str, args_raw: str) -> str:
+    """args の parse に失敗した既知スペルへの差し戻しエラーを組み立てる。
+
+    unknown spell と同じく [Spell Error] としてペルソナに返し、次のラウンドで
+    正しい書式で再発動できるようにする (何が悪いか + 正しい書式例)。
+    握り潰すとペルソナは失敗自体を知覚できず、書き上げた内容ごと平文として
+    消える (2026-07-05 実 LLM シム 異常 #2)。
+    """
+    preview = args_raw if len(args_raw) <= 120 else args_raw[:120] + "…"
+    example = f"/spell name='{spell_name}' args={{\"content\": \"1行目\\n2行目\"}}"
+    return (
+        f"スペル「{spell_name}」の args を JSON として読み取れなかったため、"
+        "実行されませんでした。\n"
+        f"読み取れなかった args (先頭部分): {preview}\n"
+        "args は 1 つの JSON オブジェクトとして書いてください。"
+        "文字列値の中の改行は \\n とエスケープしてください"
+        "（生の改行を含めると途中で途切れます）。\n"
+        f"書式例: {example}\n"
+        "同じ内容で args を書き直して、もう一度スペルを発動してください。"
+    )
 
 
 # ── Handy Tool inline execution (legacy, kept for non-spell tool_call path) ──
@@ -895,10 +1045,12 @@ def _extract_first_text_before(text: str) -> str:
     """
     if not text:
         return ""
-    all_parsed = _parse_spell_lines(text)
-    if not all_parsed:
+    malformed: List[Tuple[str, str, Any]] = []
+    all_parsed = _parse_spell_lines(text, malformed_out=malformed)
+    spans = [entry[2] for entry in all_parsed] + [m for _, _, m in malformed]
+    if not spans:
         return ""
-    return text[:all_parsed[0][2].start()].rstrip()
+    return text[:min(s.start() for s in spans)].rstrip()
 
 
 async def _consume_pipeline_stream(
@@ -1114,7 +1266,12 @@ async def _run_spell_loop(
         while loop_count < _effective_max_rounds:
             # Parse all spells from current text (canonical + fuzzy), then split
             # into registered (executable) and unknown (misfired) invocations.
-            all_parsed = _parse_spell_lines(text)
+            # Canonical-form lines whose args failed to parse (even after the
+            # multiline rescue) land in malformed_spells — they are fed back as
+            # [Spell Error] like unknown spells, NOT silently dropped
+            # (2026-07-05 実 LLM シム 異常 #2).
+            malformed_spells: List[Tuple[str, str, Any]] = []
+            all_parsed = _parse_spell_lines(text, malformed_out=malformed_spells)
             valid_spells = [
                 (name, args, m, norm) for name, args, m, norm in all_parsed
                 if name in SPELL_TOOL_NAMES
@@ -1125,37 +1282,55 @@ async def _run_spell_loop(
             ]
 
             # Nothing spell-like at all → normal speech, exit the loop. Unknown
-            # spells are NOT a reason to break: they are fed back as errors below
-            # so the persona can retry with the correct invocation.
-            if not valid_spells and not unknown_spells:
+            # or malformed spells are NOT a reason to break: they are fed back
+            # as errors below so the persona can retry with the correct
+            # invocation.
+            if not valid_spells and not unknown_spells and not malformed_spells:
                 break
 
             loop_count += 1
             LOGGER.info(
-                "[sea][spell] Round %d: %d valid spell(s) %s, %d unknown spell(s) %s",
+                "[sea][spell] Round %d: %d valid spell(s) %s, %d unknown spell(s) %s, "
+                "%d malformed spell(s) %s",
                 loop_count,
                 len(valid_spells), [s[0] for s in valid_spells],
                 len(unknown_spells), [s[0] for s in unknown_spells],
+                len(malformed_spells), [s[0] for s in malformed_spells],
             )
 
-            # text_before = text preceding the FIRST spell of any kind (all_parsed
-            # is position-sorted), so a raw /spell line for an unknown spell does
-            # not leak into the bubble.
-            text_before = text[:all_parsed[0][2].start()].rstrip()
+            # Position-sorted spans of every spell-like line this round
+            # (valid + unknown + malformed) for text_before / text_after.
+            spell_spans = sorted(
+                [entry[2] for entry in all_parsed]
+                + [m for _, _, m in malformed_spells],
+                key=lambda s: s.start(),
+            )
+
+            # text_before = text preceding the FIRST spell of any kind, so a raw
+            # /spell line for an unknown/malformed spell does not leak into the
+            # bubble.
+            text_before = text[:spell_spans[0].start()].rstrip()
 
             # text_after = text following the LAST spell line. The persona
             # often writes a natural-language continuation after invoking a
             # spell (e.g. explaining what it's about to do).  Dropping this
             # text loses persona utterance from SAIMemory, Building history,
             # and the retry-LLM context.
-            text_after = text[all_parsed[-1][2].end():].strip()
+            text_after = text[spell_spans[-1].end():].strip()
 
-            # Canonical assistant message: text_before + ALL normalized spell
-            # lines (valid + unknown, in textual order) + text_after so the
-            # persona's record shows exactly what it tried — including the
-            # misfired invocation, which the following [Spell Error: ...]
-            # user message corrects — and any surrounding prose.
-            all_spell_lines_normalized = "\n".join(norm for _, _, _, norm in all_parsed)
+            # Canonical assistant message: text_before + ALL spell lines
+            # (valid + unknown normalized, malformed raw, in textual order) +
+            # text_after so the persona's record shows exactly what it tried —
+            # including the misfired invocation, which the following
+            # [Spell Error: ...] user message corrects — and any surrounding
+            # prose.
+            _spell_line_entries = [
+                (entry[2].start(), entry[3]) for entry in all_parsed
+            ] + [
+                (m.start(), text[m.start():m.end()]) for _, _, m in malformed_spells
+            ]
+            _spell_line_entries.sort(key=lambda t: t[0])
+            all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
             assistant_content = (text_before + "\n" + all_spell_lines_normalized
                                  + ("\n" + text_after if text_after else "")).strip()
             messages.append({"role": "assistant", "content": assistant_content})
@@ -1263,6 +1438,18 @@ async def _run_spell_loop(
                     "name": name, "args": args, "m": m, "norm": norm,
                     "result": error_text, "meta": None, "success": False,
                 })
+            for name, args_raw, m in malformed_spells:
+                error_text = _build_malformed_args_error(name, args_raw)
+                LOGGER.warning(
+                    "[sea][spell] Malformed args for spell '%s' → returning error "
+                    "to persona for retry",
+                    name,
+                )
+                round_records.append({
+                    "name": name, "args": {}, "m": m,
+                    "norm": text[m.start():m.end()],
+                    "result": error_text, "meta": None, "success": False,
+                })
             round_records.sort(key=lambda r: r["m"].start())
 
             # メタ判断 Pulse の発動 spell + 結果をバッファに記録 (失敗も含む)
@@ -1365,7 +1552,7 @@ async def _run_spell_loop(
                 merged_parts.append(
                     _build_spell_user_only_block(
                         rec["name"], rec["args"], display, rec["result"],
-                        success=rec["success"],
+                        success=rec["success"], spell_line=rec["norm"],
                     )
                 )
             if text_after:

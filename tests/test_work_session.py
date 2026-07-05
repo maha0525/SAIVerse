@@ -358,6 +358,85 @@ def test_digest_is_the_only_committed_record(session_factory, persona):
     assert runtime.flushed
 
 
+def test_multiline_args_are_rescued_and_executed(session_factory, persona):
+    """args JSON の文字列値に生改行があってもスペルは実行される (異常 #2 救済側)。
+
+    2026-07-05 実 LLM シムで document_create の本文入り args (生改行) が
+    parse 失敗で握り潰され、書き上げた文書ごと消えた。決定論的な改行
+    エスケープ救済で発動が生きることを固定する。
+    """
+    # 生改行入り args (canonical パターンでは先頭行で千切れる形)
+    raw_newline_spell = (
+        "本文を書き上げた。\n"
+        f"/spell name='{SPELL_NAME}' args={{\"name\": \"病態メモ\n第1章\"}}"
+    )
+    responses = [
+        raw_newline_spell,
+        "できた。読み直しても問題ない。",   # round 1 retry → spell なし
+        "文書を 1 本作った。",              # digest
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=5)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert result.rounds_used == 1
+    # スペルは実行され、成果物が実在する
+    assert len(created_ids) == 1
+    assert result.artifacts == created_ids
+    # 生改行は \n として args に届いている (内容が失われない)
+    db = session_factory()
+    try:
+        item = db.query(Item).filter(Item.ITEM_ID == created_ids[0]).first()
+        assert item.NAME == "病態メモ\n第1章"
+    finally:
+        db.close()
+
+
+def test_malformed_args_fed_back_and_retried(session_factory, persona):
+    """救済不能な args parse 失敗は [Spell Error] で差し戻され、再試行できる (異常 #2 本線)。
+
+    従来は valid にも unknown にも入らずループが黙って終了し、ペルソナは失敗を
+    知覚できないまま artifacts=0 / ended_reason=finished になっていた。
+    """
+    responses = [
+        # round 1: brace が閉じない args (救済も不能) → 差し戻し
+        f"/spell name='{SPELL_NAME}' args={{\"name\": \"草稿",
+        # round 1 retry: 正しい書式で再発動
+        _spell_line("草稿"),
+        # round 2 retry: spell なし → 自然終了
+        "今度はできた。",
+        "書式を直して文書を作った。",  # digest
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=5)
+
+    # parse 失敗もラウンドを消費し (差し戻し 1 + 再試行 1)、黙って終了しない
+    assert result.rounds_used == 2
+    assert result.ended_reason == ENDED_FINISHED
+    # 再試行でスペルが実行され、成果物が実在する
+    assert len(created_ids) == 1
+    assert result.artifacts == created_ids
+    # 差し戻しエラーが LLM の次ラウンド入力に載っている
+    retry_inputs = [
+        str(msg.get("content") or "")
+        for call in client.calls
+        for msg in call
+        if msg.get("role") == "user"
+    ]
+    assert any(
+        f"[Spell Error: {SPELL_NAME}]" in c and "読み取れなかった" in c
+        for c in retry_inputs
+    )
+
+
 def test_error_returns_error_result(session_factory, persona, caplog):
     """LLM 呼び出しの例外は握り潰さず LOGGER に残し、error 結果として返す。"""
     responses = [RuntimeError("boom: provider down")]

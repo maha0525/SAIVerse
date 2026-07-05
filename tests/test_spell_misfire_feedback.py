@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sea.runtime_llm import (
+    _build_malformed_args_error,
     _build_spell_user_only_block,
     _build_unknown_spell_error,
 )
@@ -109,3 +110,29 @@ def test_unknown_spell_error_degrades_without_playbook_tool() -> None:
     ):
         msg = _build_unknown_spell_error("web_research", _persona(), "bld_1")
     assert "存在しません" in msg
+
+
+# ---------------------------------------------------------------------------
+# _build_malformed_args_error: args parse 失敗の差し戻し文面
+# (2026-07-05 実 LLM シム 異常 #2 の回帰防止)
+# ---------------------------------------------------------------------------
+
+def test_malformed_args_error_contains_hint_and_preview() -> None:
+    msg = _build_malformed_args_error(
+        "document_create", '{"content": "急性膵炎に関する基本事項'
+    )
+    # 何が起きたか (実行されていないこと) が明示される
+    assert "実行されませんでした" in msg
+    # どの発動のことか分かる (スペル名 + 受け取った args の先頭)
+    assert "document_create" in msg
+    assert "急性膵炎" in msg
+    # 正しい書式 (改行のエスケープ) への誘導と再試行の指示
+    assert "\\n" in msg
+    assert "もう一度" in msg
+
+
+def test_malformed_args_error_truncates_long_preview() -> None:
+    long_args = '{"content": "' + "あ" * 500
+    msg = _build_malformed_args_error("document_create", long_args)
+    assert "あ" * 500 not in msg  # 全文は貼らない (先頭部分のみ)
+    assert "…" in msg
