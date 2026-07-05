@@ -155,7 +155,7 @@ def import_playbooks(definitions: dict):
         LOGGER.info("No playbooks to import.")
         return
 
-    playbooks_dir = PROJECT_ROOT / "sea" / "playbooks" / "public"
+    playbooks_dir = PROJECT_ROOT / "builtin_data" / "playbooks" / "public"
     if not playbooks_dir.exists():
         LOGGER.warning(f"Playbooks directory not found: {playbooks_dir}")
         return
