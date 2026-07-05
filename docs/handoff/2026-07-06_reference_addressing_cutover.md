@@ -1,6 +1,13 @@
-# ハンドオフ: 参照アドレッシング統一 — 一括切替(Plan B)の途中
+# ハンドオフ: 参照アドレッシング統一 — 一括切替(Plan B)【完了】
 
-次に引き継ぐエア向け。設計の正典は `docs/intent/reference_addressing.md`（v0.5、
+> **✅ 完了 (2026-07-06, commit 6ea9d44)**: (A)item / (B)URI平坦化+messagelog→message /
+> (C)day_plan slots_json 移行 / (D)プロンプト / (E)テスト を全て実装し、参照系テスト
+> 258 緑・ruff クリーンで 1 コミット。以下は着手時のメモ（履歴として残す）。次は実機検証。
+> 着手時の想定から踏み込んだ点: **memopedia も short_id 化**（page.id=uuid が recall/戻り
+> でペルソナに漏れていたため item と同基準に）、`_format_pickable_tracks` の t:N 残存
+> (表示/enum ドリフト) と memopedia ツール6箇所の m: 残存を修正。
+
+次に引き継ぐエア向け。設計の正典は `docs/intent/reference_addressing.md`（v1.0、
 コミット済み）。この文書は**実装の進捗と作業ツリーの状態**だけを扱う。
 
 ## 0. 一言
