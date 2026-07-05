@@ -12,11 +12,22 @@
   (``sea.work_session.DIGEST_TAG``) と、その metadata の成果物 ref。
   成果物名は Item テーブルから解決し ``saiverse://item/<id>/content`` を添える
 - 欲求の動き: desire ノート内の候補 Task の帳簿カラム (生まれた/触れた/消えた)
-- 就寝のふりかえり: SAIMemory の ``judgment:day_close`` 記録 (独白) と
+- 就寝のふりかえり: SAIMemory の ``judgment:day_close`` 記録の
+  ``metadata.judgment.monologue`` (独白本文のみ。適用エコー行は載せない —
+  同内容が plan meta 由来の節で再掲されるため) と
   plan meta (tomorrow_memo / day_theme / user_report_seeds)
 
 LLM は呼ばない (全節が決定論構築)。データの無い節は「(なし)」で埋め、
 穴を作らない。文言は客観 + 丁寧語。
+
+読ませ方 (2026-07-05 まはーフィードバック):
+
+- 節順序は「人の一日の読み物」を先に、システム的な帳簿を後に —
+  ヘッダ/テーマ → 時間割 → 就寝のふりかえり → セッションの成果 →
+  やりたいことの動き → 予算 → 独白
+- 時間割テーブルは「時刻 | やること (ペルソナ自身が付けた表題) | 実績」が主役。
+  型・場所・参照・予算・予定時の覚え書きは補足列に格下げする
+- title の無い旧データは note 先頭 or kind で代替表示する (後方互換)
 
 保存先: ``~/.saiverse/personas/<id>/day_reports/<date>.md``
 (:func:`save_day_report`。SAIVERSE_HOME は ``saiverse.data_paths`` の解決に従う)。
@@ -150,7 +161,13 @@ def _collect_session_digests(
 
 
 def _latest_day_close_monologue(manager: Any, persona_id: str) -> str:
-    """最新の就寝判断 (judgment:day_close) の記録テキスト。無ければ空文字。
+    """最新の就寝判断 (judgment:day_close) の独白本文。無ければ空文字。
+
+    記録の content は「独白 + 適用エコー行 (（今日のふりかえりを記録した）等、
+    judgment_finalize が連結)」の全文で、エコー行の中身は新聞自身が plan meta
+    から再掲するため二重になる。metadata.judgment.monologue (finalize が独白を
+    分離して持たせる読み口) を優先し、それが無い旧記録のみ content 全文へ
+    フォールバックする (旧データはクラッシュせず従来表示)。
 
     NOTE: 判断記録のタイムスタンプは adapter 互換のため実時刻 (UTC) で刻まれる
     ことがあり、シム中は仮想日と一致しない。就寝判断は一日 1 回なので
@@ -158,8 +175,13 @@ def _latest_day_close_monologue(manager: Any, persona_id: str) -> str:
     """
     payloads = _fetch_memory_payloads(manager, persona_id, ["judgment:day_close"])
     for payload in reversed(payloads):
-        if "judgment:day_close" in _payload_tags(payload):
-            return str(payload.get("content") or "").strip()
+        if "judgment:day_close" not in _payload_tags(payload):
+            continue
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        judgment = metadata.get("judgment")
+        if isinstance(judgment, dict) and "monologue" in judgment:
+            return str(judgment.get("monologue") or "").strip()
+        return str(payload.get("content") or "").strip()
     return ""
 
 
@@ -243,25 +265,55 @@ def _persona_display_name(manager: Any, persona_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _section_timetable(slots: Optional[List[Dict[str, Any]]]) -> List[str]:
+def _facility_labels(manager: Any) -> Dict[str, str]:
+    """facility 値 → 表示名 (Building 名 / 自分の部屋)。解決不能な ID は素通し。"""
+    labels: Dict[str, str] = {"own_room": "自分の部屋"}
+    for b in getattr(manager, "buildings", None) or []:
+        bid = getattr(b, "building_id", None)
+        if bid:
+            labels[bid] = str(getattr(b, "name", "") or bid)
+    return labels
+
+
+def _section_timetable(
+    slots: Optional[List[Dict[str, Any]]], facility_labels: Dict[str, str],
+) -> List[str]:
+    """時間割の予定 vs 実績。
+
+    主役は「時刻 | やること (ペルソナが付けた表題) | 実績」の 3 列。
+    型・場所・参照・予算・予定時の覚え書き (note) は補足列に格下げする。
+    title の無い旧データは note 先頭 or kind で代替表示する (後方互換)。
+    """
     lines = ["## 時間割（予定と実績）", ""]
     if not slots:
         lines.append("この日の時間割はありませんでした。")
         return lines
-    lines.append("| 時刻 | 型 | 場所 | 参照 | 予算 | 実績 |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| 時刻 | やること | 実績 | 補足 |")
+    lines.append("|---|---|---|---|")
     for s in slots:
         status = str(s.get("status") or "pending")
         label = SLOT_RESULT_LABELS.get(status, status)
-        ref = s.get("ref")
-        ref_text = ref if ref and ref != REF_NONE else "—"
+        kind = str(s.get("kind") or "")
+        title = (s.get("title") or "").strip()
         note = (s.get("note") or "").strip()
-        if note:
-            label = f"{label}（{note}）"
-        lines.append(
-            f"| {s.get('start')} | {s.get('kind')} | {s.get('facility')} "
-            f"| {ref_text} | {int(s.get('budget_rounds') or 0)} | {label} |"
-        )
+        doing = title or note or kind or "—"
+
+        extras: List[str] = []
+        if kind and kind != doing:
+            extras.append(kind)
+        facility = str(s.get("facility") or "")
+        if facility:
+            extras.append(facility_labels.get(facility, facility))
+        ref = s.get("ref")
+        if ref and ref != REF_NONE:
+            extras.append(f"参照: {ref}")
+        budget = int(s.get("budget_rounds") or 0)
+        if budget > 0:
+            extras.append(f"予算: {budget}")
+        if note and note != doing:
+            extras.append(note)
+        extras_text = " ／ ".join(extras) if extras else "—"
+        lines.append(f"| {s.get('start')} | {doing} | {label} | {extras_text} |")
     return lines
 
 
@@ -431,21 +483,23 @@ def generate_day_report(manager: Any, persona_id: str, plan_date: Any) -> str:
 
     day_theme = (meta.get("day_theme") or "").strip() if isinstance(meta, dict) else ""
 
+    # 節順序: 人の一日の読み物 (時間割 → 就寝のふりかえり) を先に、
+    # システム的な帳簿 (セッション → 欲求 → 予算 → 独白) を後に。
     parts: List[str] = [
         f"# {persona_name} の一日新聞 — {plan_date_str}",
         "",
         f"今日のテーマ: {day_theme or NONE_TEXT}",
         "",
     ]
-    parts.extend(_section_timetable(slots))
+    parts.extend(_section_timetable(slots, _facility_labels(manager)))
+    parts.append("")
+    parts.extend(_section_day_close(meta if isinstance(meta, dict) else {}, monologue))
     parts.append("")
     parts.extend(_section_sessions(digests, item_labels))
     parts.append("")
     parts.extend(_section_desires(desires, plan_date_str))
     parts.append("")
     parts.extend(_section_budget(budget_state))
-    parts.append("")
-    parts.extend(_section_day_close(meta if isinstance(meta, dict) else {}, monologue))
     parts.append("")
     parts.extend(_section_monologues(digests))
     parts.append("")

@@ -995,7 +995,14 @@ def judgment_finalize(
                     # tz-aware UTC ISO で渡す (naive ISO は adapter 側で ±9h ずれる。
                     # docs/issues/history_manager_timestamp_tz_drift.md と同根)。
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "metadata": {"tags": ["meta_judgment", f"judgment:{kind}"]},
+                    # metadata.judgment: 独白本文を適用エコー行と構造的に分離して
+                    # 持つ。一日新聞 (saiverse/day_report.py) が「就寝のふりかえり」
+                    # に独白だけを載せるための読み口 (content は従来どおり
+                    # 独白+要約行の全文 — ペルソナの文脈に乗る内容は変えない)。
+                    "metadata": {
+                        "tags": ["meta_judgment", f"judgment:{kind}"],
+                        "judgment": {"kind": kind, "monologue": monologue},
+                    },
                     "line_role": "meta_judgment",
                     "scope": scope,
                     "pulse_id": pulse_id,

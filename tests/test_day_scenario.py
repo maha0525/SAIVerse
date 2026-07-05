@@ -487,10 +487,16 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     # ヘッダ (ペルソナ名・日付・テーマ)
     assert "Alice の一日新聞 — 2026-07-04" in report
     assert "今日のテーマ: 制作" in report
-    # 予定 vs 実績 (時間割の各コマと実績ラベル)
-    assert "| 10:00 | 知る | library | desire:2 |" in report
-    assert "| 14:00 | 作る | workshop | task:1 |" in report
-    assert "実行済み" in report
+    # 時間割: 主役 3 列は「時刻 | やること (表題) | 実績」。型・場所・参照・
+    # 予算・予定メモは補足列 (まはーフィードバック #1/#2)
+    assert "| 時刻 | やること | 実績 | 補足 |" in report
+    assert "| 10:00 | 標本の材料を探す | 実行済み | 知る ／ 図書館 ／ 参照: desire:2 ／ 予算: 3 ／ 図鑑コーナーを中心に見る |" in report
+    assert "| 14:00 | 共有文の下書きを書く | 実行済み | 作る ／ 工房 ／ 参照: task:1 ／ 予算: 8 ／ 命令調にしないこと |" in report
+    # title の無いコマ (休む) は kind で代替表示、場所は表示名 (後方互換)
+    assert "| 20:00 | 休む | 実行済み | 自分の部屋 |" in report
+    # 節順序: 時間割 → 就寝のふりかえり → システム的な節 (フィードバック #3)
+    assert report.index("## 時間割") < report.index("## 就寝のふりかえり") \
+        < report.index("## 作業セッションの成果") < report.index("## 作業予算")
     # セッションの成果 (ダイジェスト + 成果物名と saiverse:// URI)
     assert "共有文の下書きを書いた" in report
     assert f"共有文の下書き（saiverse://item/{created_item_ids[0]}/content）" in report
@@ -508,6 +514,10 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     assert "概ね予定どおりの一日だった" in report
     assert "明日への机メモ: 明日は標本集の整理から始める" in report
     assert "共有文の下書きを仕上げました" in report
+    # 就寝判断の適用エコー行は載せない — 独白だけを表示し、机メモ・テーマ等は
+    # plan meta 由来の節で一度だけ出す (重複解消、フィードバック #5)
+    assert "（今日のふりかえりを記録した）" not in report
+    assert report.count("明日は標本集の整理から始める") == 1
 
     # 保存 (base_dir 上書きでテスト内に閉じる)
     path = save_day_report(
@@ -569,7 +579,8 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
     # レポートは穴なく出る (データの無い節は「（なし）」)
     report = generate_day_report(manager, PERSONA_ID, PLAN_DATE)
     assert "の一日新聞 — 2026-07-04" in report
-    assert "| 10:00 | 暮らし | own_room |" in report
+    assert "| 10:00 | 静かに過ごす | 実行済み | 暮らし ／ 自分の部屋 ／ 静かな時間 |" in report
+    assert "| 20:00 | 休む | 実行済み | 自分の部屋 |" in report  # title なし → kind 代替
     assert "## 作業セッションの成果" in report
     assert "（なし）" in report
     assert "明日への机メモ: 明日も同じように" in report
