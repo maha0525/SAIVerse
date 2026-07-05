@@ -72,15 +72,17 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
   "properties": {
     "start": {"type": "string", "description": "HH:MM"},
     "kind": {"type": "string", "enum": ["話す", "聞く", "作る", "知る", "経験する", "自分を更新する", "暮らし", "休む"]},
+    "title": {"type": "string", "description": "「○○をする」という短い表題。一日新聞の予定表にそのまま載る"},
     "ref": {"type": "string", "enum": ["<task:N / desire:N の実在リストを動的注入>", "none"]},
     "facility": {"type": "string", "enum": ["<公共 Building ID リストを動的注入>", "own_room"]},
     "budget_rounds": {"type": "integer"},
     "note": {"type": "string"}
   },
-  "required": ["start", "kind", "ref", "facility", "note"]
+  "required": ["start", "kind", "title", "ref", "facility", "note"]
 }
 ```
 
+- `title` はペルソナ自身が付ける各コマの表題（2026-07-05 追加）。ユーザーが一日新聞で最初に読む欄で、「時間割が何の予定なのか」を仕組みを知らない人にも読めるようにする。旧データには無いため、保存・検証は省略（空文字）を許容し、表示側（一日新聞）は note 先頭 or kind で代替する（後方互換）
 - 六型のコマは `ref` に実在のタスク／欲求を指す（動的 enum なので実在しないものは指せない）。`暮らし`・`休む` は `ref: "none"`
 - `facility` は型からのデフォルト対応（v2 §6.1）を deterministic に提示し、LLM は上書きのみ
 - finalize の検証：時刻昇順・就寝時刻内・ref と kind の整合・予算合計が日次予算内

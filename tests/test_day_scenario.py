@@ -300,10 +300,10 @@ def _patched_spells(session_factory, created_item_ids):
 
 
 _TIMETABLE = [
-    {"start": "10:00", "kind": "知る", "ref": "desire:2",
-     "facility": "library", "budget_rounds": 3, "note": "標本の材料を探す"},
-    {"start": "14:00", "kind": "作る", "ref": "task:1",
-     "facility": "workshop", "budget_rounds": 8, "note": "共有文の下書きを書く"},
+    {"start": "10:00", "kind": "知る", "title": "標本の材料を探す", "ref": "desire:2",
+     "facility": "library", "budget_rounds": 3, "note": "図鑑コーナーを中心に見る"},
+    {"start": "14:00", "kind": "作る", "title": "共有文の下書きを書く", "ref": "task:1",
+     "facility": "workshop", "budget_rounds": 8, "note": "命令調にしないこと"},
     {"start": "20:00", "kind": "休む", "ref": "none",
      "facility": "own_room", "budget_rounds": 0, "note": ""},
 ]
@@ -528,8 +528,10 @@ def _idle_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "monologue": "急ぐものは何もない。静かに過ごす。",
             "timetable": [
-                {"start": "10:00", "kind": "暮らし", "ref": "none",
-                 "facility": "own_room", "budget_rounds": 0, "note": "静かな時間"},
+                {"start": "10:00", "kind": "暮らし", "title": "静かに過ごす",
+                 "ref": "none", "facility": "own_room", "budget_rounds": 0,
+                 "note": "静かな時間"},
+                # title なし (旧データ互換): 新聞は kind で代替表示する
                 {"start": "20:00", "kind": "休む", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": ""},
             ],

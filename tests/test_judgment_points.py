@@ -247,6 +247,10 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     assert "none" in ref_enum
     assert "desire:3" not in ref_enum, "decay で期限切れになった欲求が enum に残っている"
     assert slot["properties"]["facility"]["enum"] == ["library", "workshop", "own_room"]
+    # 表題 (title): 各コマにペルソナ自身が付ける (一日新聞の主役列)
+    assert "title" in slot["properties"]
+    assert "title" in slot["required"]
+    assert "短い表題" in text  # プロンプト側の指示
     # 昇格候補ゼロ → promotions フィールド自体が無い (空 enum 事故防止)
     assert "promotions" not in schema["properties"]
 

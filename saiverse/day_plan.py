@@ -161,6 +161,7 @@ def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
     - ref は "task:N" / "desire:N" / "none"。暮らし/休む は "none" 必須
     - facility は非空文字列 (building_id or "own_room")
     - budget_rounds は非負 int (bool は不可)
+    - title は文字列 (「○○をする」という短い表題。旧データは無いので省略可 = "")
     - status は既知の値のみ (省略時 pending)
     """
     if not isinstance(slots, list) or not slots:
@@ -209,6 +210,10 @@ def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
                 f"slot[{i}].budget_rounds must be a non-negative int (got {budget!r})"
             )
 
+        title = slot.get("title", "")
+        if not isinstance(title, str):
+            raise ValueError(f"slot[{i}].title must be a string (got {type(title).__name__})")
+
         note = slot.get("note", "")
         if not isinstance(note, str):
             raise ValueError(f"slot[{i}].note must be a string (got {type(note).__name__})")
@@ -229,6 +234,7 @@ def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
             "ref": ref,
             "facility": facility.strip(),
             "budget_rounds": budget,
+            "title": title.strip(),
             "note": note,
             "status": status,
             "defer_count": defer_count,

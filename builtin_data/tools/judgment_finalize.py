@@ -169,6 +169,7 @@ def _finalize_day_open(
             for s in slots:
                 lines.append(
                     f"  {s['start']} {s['kind']}"
+                    + (f"「{s['title']}」" if s.get("title") else "")
                     + (f" {s['ref']}" if s["ref"] != "none" else "")
                     + f" @{s['facility']}"
                     + (f"（{s['note']}）" if s["note"] else "")
@@ -581,6 +582,7 @@ def _apply_resume_now(
     slot = {
         "start": now_hhmm,
         "kind": kind,
+        "title": "中断していた作業を再開する",
         "ref": task_ref,
         "facility": facility,
         "budget_rounds": budget,

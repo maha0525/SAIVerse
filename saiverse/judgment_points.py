@@ -333,6 +333,10 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
                 "description": "開始時刻 HH:MM (24時間制)。コマは開始時刻の厳密昇順に並べる",
             },
             "kind": {"type": "string", "enum": list(ALL_KINDS)},
+            "title": {
+                "type": "string",
+                "description": "このコマの表題。「○○をする」という形の短い一文 (一日の予定表にそのまま載る)",
+            },
             "ref": {
                 "type": "string",
                 "enum": list(ref_enum),
@@ -349,7 +353,7 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
             },
             "note": {"type": "string", "description": "このコマで何をするかの短い覚え書き"},
         },
-        "required": ["start", "kind", "ref", "facility", "note"],
+        "required": ["start", "kind", "title", "ref", "facility", "note"],
     }
 
 
@@ -715,9 +719,12 @@ def _format_remaining_timetable(manager: Any, persona_id: str, plan_date: str) -
         return "今日の残りのコマはありません。"
     lines = ["残りの時間割:"]
     for s in remaining:
+        title = (s.get("title") or "").strip()
         lines.append(
-            f"- {s.get('start')} {s.get('kind')} ref={s.get('ref')}"
-            f" @{s.get('facility')} 予算{s.get('budget_rounds', 0)} {s.get('note') or ''}".rstrip()
+            f"- {s.get('start')} {s.get('kind')}"
+            + (f"「{title}」" if title else "")
+            + f" ref={s.get('ref')}"
+            + f" @{s.get('facility')} 予算{s.get('budget_rounds', 0)} {s.get('note') or ''}".rstrip()
         )
     return "\n".join(lines)
 
@@ -771,6 +778,8 @@ def build_day_open_situation_text(
         f"おはようございます。今日 ({today}) の一日が始まります。",
         "机メモ・昨日のふりかえり・バックログ・やりたいこと候補を見て、"
         "今日の時間割を編成してください。",
+        "各コマには「○○をする」という短い表題 (title) を付けてください — "
+        "あなたの一日の予定表にそのまま載ります。",
         "",
         "[昨日の自分からの机メモ]",
         memo or "(机メモはありません)",
@@ -1040,8 +1049,10 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
         planned += budget
         if status in ("fired", "done"):
             consumed += budget
+        title = (s.get("title") or "").strip()
         line = (
             f"- {s.get('start')} {s.get('kind')}"
+            + (f"「{title}」" if title else "")
             + (f" ref={s.get('ref')}" if s.get("ref") not in (None, REF_NONE) else "")
             + f" @{s.get('facility')} → {label}"
         )
@@ -1373,6 +1384,9 @@ def sanitize_timetable(
             budget = 0
         budget = int(budget)
 
+        title = slot.get("title")
+        title = title.strip() if isinstance(title, str) else ""
+
         note = slot.get("note")
         note = note if isinstance(note, str) else ""
 
@@ -1382,6 +1396,7 @@ def sanitize_timetable(
             "ref": ref,
             "facility": facility,
             "budget_rounds": budget,
+            "title": title,
             "note": note,
         })
 

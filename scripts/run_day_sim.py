@@ -244,18 +244,21 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         hour = 10
         for i, ref in enumerate(ref_enum[:3]):
             slot_kind = "作る" if i % 2 else "知る"
+            verb = "作業を進める" if slot_kind == "作る" else "調べ物をする"
             timetable.append({
-                "start": f"{hour:02d}:00", "kind": slot_kind, "ref": ref,
+                "start": f"{hour:02d}:00", "kind": slot_kind,
+                "title": f"{ref} の{verb} (mock)", "ref": ref,
                 "facility": _pick_facility(slot_kind), "budget_rounds": 4,
                 "note": f"{ref} に取り組む (mock)",
             })
             hour += 2
         timetable.append({
             "start": f"{hour:02d}:00", "kind": "暮らし", "ref": "none",
+            "title": "静かに過ごす (mock)",
             "facility": "own_room", "budget_rounds": 0, "note": "静かな時間 (mock)",
         })
         timetable.append({
-            "start": "20:00", "kind": "休む", "ref": "none",
+            "start": "20:00", "kind": "休む", "ref": "none", "title": "休む (mock)",
             "facility": "own_room", "budget_rounds": 0, "note": "",
         })
         return {
