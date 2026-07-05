@@ -44,20 +44,16 @@ from saiverse.day_plan import (
     get_budget_state,
     load_day_plan,
     load_plan_meta,
+    slot_result_label,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 NONE_TEXT = "（なし）"
 
-#: コマ status → 実績ラベル (judgment_points の予定 vs 実績と同じ語彙)
-SLOT_RESULT_LABELS = {
-    "pending": "未実施",
-    "fired": "実行した（完了記録なし）",
-    "deferred": "繰り下げのまま",
-    "skipped": "見送り",
-    "done": "実行済み",
-}
+# コマの実績ラベルは day_plan.slot_result_label (就寝判断の予定 vs 実績と同じ
+# 語彙)。skipped はシステム都合 (実行手段未実装 / 予算切れ / 会話優先) を明示し、
+# 本人の「見送り」判断として表示しない。
 
 #: SAIMemory から読む最大件数 (一日分には十分な深さ)
 _FETCH_LIMIT = 50
@@ -291,8 +287,7 @@ def _section_timetable(
     lines.append("| 時刻 | やること | 実績 | 補足 |")
     lines.append("|---|---|---|---|")
     for s in slots:
-        status = str(s.get("status") or "pending")
-        label = SLOT_RESULT_LABELS.get(status, status)
+        label = slot_result_label(s)
         kind = str(s.get("kind") or "")
         title = (s.get("title") or "").strip()
         note = (s.get("note") or "").strip()

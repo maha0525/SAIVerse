@@ -528,6 +528,20 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     assert path.read_text(encoding="utf-8") == report
 
 
+def test_day_report_shows_system_skip_honestly(session_factory, tmp_path):
+    """一日新聞: システム都合の skipped を「見送り」(本人判断) として表示しない。"""
+    manager = _make_manager(session_factory, tmp_path, _standard_judge, [])
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "21:00", "kind": "自分を更新する", "ref": "none",
+         "facility": "own_room", "budget_rounds": 8, "note": "気づきの整理",
+         "title": "気づきを整理する", "status": "skipped",
+         "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
+    ])
+    report = generate_day_report(manager, PERSONA_ID, PLAN_DATE)
+    assert "見送り" not in report
+    assert "| 21:00 | 気づきを整理する | 実行できず（システム側の問題: このコマ種別の実行手段が未実装） |" in report
+
+
 # ---------------------------------------------------------------------------
 # 終日不在 + 空バックログ
 # ---------------------------------------------------------------------------

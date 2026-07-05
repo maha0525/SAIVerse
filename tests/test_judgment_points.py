@@ -1221,6 +1221,29 @@ def test_day_close_dispatch_schema_and_situation(
     assert ctx["touched_desire_refs"] == ["desire:2"]
 
 
+def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
+    """システム都合で skipped になったコマは「見送り」(本人判断) として提示しない。
+
+    2026-07-05 の実 LLM シム回帰: no-handler スキップが「→ 見送り」と提示され、
+    ペルソナが「あえて見送る判断をした」と理由まで捏造した (接地原則違反)。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": "task:1",
+         "facility": "library", "budget_rounds": 5, "note": "記事の続き",
+         "status": "done"},
+        {"start": "21:00", "kind": "自分を更新する", "ref": task_refs["desire"],
+         "facility": "own_room", "budget_rounds": 8, "note": "気づきの整理",
+         "status": "skipped",
+         "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
+    ])
+
+    text = jp.build_day_results_text(manager, PERSONA_ID, PLAN_DATE)
+    assert "見送り" not in text
+    assert "実行できず（システム側の問題" in text
+    # 実行できなかったコマの予算は「消化」に数えない (従来どおり)
+    assert "消化 5 / 計画 13" in text
+
+
 def test_day_close_schema_omits_desire_reviews_when_none_touched(
     manager, ptm, task_refs, session_factory
 ):

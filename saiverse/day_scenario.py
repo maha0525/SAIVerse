@@ -9,7 +9,7 @@ DES ドライバ (``saiverse.day_simulator.DaySimulator``) の上に載り、シ
 
 1. wake 時刻に **起床判断** (day_open) — finalize が時間割を保存し、コマの発火を
    同じ EventScheduler へ push する (以後は決定論)
-2. コマ発火は day_plan の既存機構。ただし「作る」「知る」の作業コマは
+2. コマ発火は day_plan の既存機構。ただし六型の作業コマは
    ScenarioPlayer がラップハンドラを登録し、``run_work_session`` の後に
    **セッション終了判断** (post_session) を続けて撃つ (v2 §4.2 の背骨。
    恒久配線は活性化フェーズの仕事で、シム中は本プレイヤーが担う)
@@ -536,18 +536,14 @@ class ScenarioPlayer:
         scheduler = manager.event_scheduler
         saved_handlers = dict(day_plan._SLOT_HANDLERS)
         saved_gated = set(day_plan._BUDGET_GATED_KINDS)
-        # 「作る」「知る」の作業コマにセッション終了判断を接続するラップハンドラ。
+        # 六型の作業コマにセッション終了判断を接続するラップハンドラ。
         # 恒久配線は活性化フェーズの仕事なので、シム実行中だけ登録して必ず戻す。
-        day_plan.register_slot_handler(
-            day_plan.KIND_CREATE,
-            self._make_session_slot_handler(result),
-            consumes_budget=True,
-        )
-        day_plan.register_slot_handler(
-            day_plan.KIND_LEARN,
-            self._make_session_slot_handler(result),
-            consumes_budget=True,
-        )
+        for worker_kind in day_plan.WORKER_SESSION_KINDS:
+            day_plan.register_slot_handler(
+                worker_kind,
+                self._make_session_slot_handler(result),
+                consumes_budget=True,
+            )
         try:
             self._schedule_all(manager, sc, result, plan_day, wake_dt, sleep_dt)
             sim = DaySimulator(scheduler, start=wake_dt, end=sleep_dt)
@@ -639,7 +635,7 @@ class ScenarioPlayer:
         return jr
 
     def _make_session_slot_handler(self, result: ScenarioRunResult) -> day_plan.SlotHandler:
-        """「作る」「知る」コマ: 既存のセッション運転 + セッション終了判断の接続。
+        """六型の作業コマ: 既存のセッション運転 + セッション終了判断の接続。
 
         NOTE: post_session 判断はコマの status が done になる前 (fired のまま)
         に走る — 判断が見る「残りの時間割」に当該コマは含まれない

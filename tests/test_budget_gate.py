@@ -237,6 +237,8 @@ def test_fire_skips_when_budget_exhausted(manager, task_ref, caplog):
     assert any("budget exhausted" in r.message for r in caplog.records)
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "skipped"
+    # システム都合のスキップとして理由が記録される (本人判断の「見送り」ではない)
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_BUDGET_EXHAUSTED
     # 残高 0 のコマは施設移動もしない
     assert manager.occupancy_manager.moves == []
 

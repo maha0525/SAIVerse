@@ -340,6 +340,7 @@ def test_slot_deferred_three_times_then_skipped(manager, task_refs):
     mock_ws.assert_not_called()
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_DEFERRAL_LIMIT
     assert slots[0]["defer_count"] == 3
     # 会話中は施設移動もしない
     assert manager.occupancy_manager.moves == []
@@ -500,26 +501,132 @@ def test_reschedule_repushes_deferred_and_skips_done(manager, task_refs):
 # ---------------------------------------------------------------------------
 
 
-def test_unregistered_kind_is_skipped_with_warning(manager, task_refs, caplog):
-    # 「経験する」は本フェーズではハンドラ未登録
+def test_all_kinds_have_registered_handlers():
+    """六型 + 暮らし/休む の全 kind にハンドラが解決する (バグ2(a) 回帰)。
+
+    2026-07-05 の実 LLM シムで「自分を更新する」コマが no handler で skipped
+    になり、就寝判断がそれを本人の「見送り」として作話した。全 kind が組み込みで
+    処理されることを固定する。
+    """
+    for kind in day_plan.ALL_KINDS:
+        assert kind in day_plan._SLOT_HANDLERS, f"kind={kind!r} has no handler"
+    # 六型は作業セッション運転 = 予算ゲート対象
+    for kind in day_plan.SIX_KINDS:
+        assert kind in day_plan._BUDGET_GATED_KINDS, f"kind={kind!r} not budget-gated"
+        assert kind in day_plan.WORKER_SESSION_KINDS
+    # 暮らし/休む はスタブ (予算を消費しない)
+    assert day_plan.KIND_LIVING not in day_plan._BUDGET_GATED_KINDS
+    assert day_plan.KIND_REST not in day_plan._BUDGET_GATED_KINDS
+
+
+@pytest.mark.parametrize(
+    "kind, grounding",
+    [
+        ("話す", "「話した」「伝えた」と書かないこと"),
+        ("聞く", "「聞いた」と書かないこと"),
+        ("経験する", "実際に起きていない体験を「した」と書かないこと"),
+        ("自分を更新する", "「更新した」と書かないこと"),
+    ],
+)
+def test_new_worker_kinds_run_sessions_with_grounded_instruction(
+    manager, task_refs, kind, grounding
+):
+    """話す/聞く/経験する/自分を更新する も作業セッションとして発火する (バグ2(a))。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "経験する", "ref": task_refs["task"],
-         "facility": "park", "budget_rounds": 0, "note": "公園を歩く"},
+        {"start": "09:00", "kind": kind, "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 4, "note": "取り組む"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
 
-    with caplog.at_level("WARNING", logger="saiverse.day_plan"):
+    calls: List[Dict[str, Any]] = []
+
+    def fake_ws(persona_id, instruction, budget_rounds, **kwargs):
+        calls.append({"instruction": instruction, "budget_rounds": budget_rounds})
+        return _mock_work_session_result(rounds_used=budget_rounds)
+
+    with patch("sea.work_session.run_work_session", side_effect=fake_ws):
         DaySimulator(
             manager.event_scheduler,
             start=BASE + timedelta(hours=8),
             end=BASE + timedelta(hours=10),
         ).run()
 
+    assert len(calls) == 1
+    assert calls[0]["budget_rounds"] == 4
+    assert "取り組む" in calls[0]["instruction"]          # slot.note
+    assert "蒸留記事の続きを読む" in calls[0]["instruction"]  # ref のタイトル
+    assert grounding in calls[0]["instruction"]           # 接地文言
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+
+
+def test_unregistered_kind_is_skipped_with_system_reason(manager, task_refs, caplog):
+    """ハンドラ未登録 kind は skipped + skip_reason='no_handler' (バグ2(b) 回帰)。
+
+    全 kind が組み込み登録済みのため、未登録状態はレジストリから外して再現する。
+    システム都合のスキップが「見送り」(本人判断) として提示されないことは
+    slot_result_label 側のテストで固定する。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "経験する", "ref": task_refs["task"],
+         "facility": "park", "budget_rounds": 0, "note": "公園を歩く"},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with patch.dict(day_plan._SLOT_HANDLERS):
+        del day_plan._SLOT_HANDLERS["経験する"]
+        with caplog.at_level("WARNING", logger="saiverse.day_plan"):
+            DaySimulator(
+                manager.event_scheduler,
+                start=BASE + timedelta(hours=8),
+                end=BASE + timedelta(hours=10),
+            ).run()
+
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_NO_HANDLER
     assert any("no handler registered" in r.message for r in caplog.records)
     # 未登録 kind では施設移動しない
     assert manager.occupancy_manager.moves == []
+
+
+def test_slot_result_label_distinguishes_system_skips():
+    """実績ラベル: システム都合の skipped を本人判断の「見送り」として見せない。"""
+    assert day_plan.slot_result_label(
+        {"status": "skipped", "skip_reason": day_plan.SKIP_REASON_NO_HANDLER}
+    ).startswith("実行できず（システム側の問題")
+    assert day_plan.slot_result_label(
+        {"status": "skipped", "skip_reason": day_plan.SKIP_REASON_BUDGET_EXHAUSTED}
+    ) == "実行できず（作業ラウンドの日次予算切れ）"
+    assert day_plan.slot_result_label(
+        {"status": "skipped", "skip_reason": day_plan.SKIP_REASON_DEFERRAL_LIMIT}
+    ) == "流れた（ユーザーとの会話を優先したため）"
+    # 理由の無い旧データは中立表現 (「見送り」に倒さない)
+    legacy = day_plan.slot_result_label({"status": "skipped"})
+    assert "見送り" not in legacy
+    assert legacy == "実行されず（理由の記録なし）"
+    assert day_plan.slot_result_label({"status": "done"}) == "実行済み"
+    assert day_plan.slot_result_label({}) == "未実施"
+
+
+def test_skip_reason_survives_remaining_slot_replacement(manager, task_refs):
+    """skip_reason は帳簿の一部 — 残りコマ全置換の再検証を通っても保持される。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 4, "note": "調べもの",
+         "status": "skipped", "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
+        {"start": "14:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "20:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "早めに休む"},
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_NO_HANDLER
+    # 新規コマには skip_reason が付かない
+    assert "skip_reason" not in slots[1]
 
 
 def test_handler_failure_leaves_slot_fired(manager, task_refs):

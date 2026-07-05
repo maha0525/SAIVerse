@@ -26,9 +26,18 @@ running user_conversation = 会話中 が最も設計に整合する述語であ
 
 kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。本モジュールが
 組み込みで登録するのは:
-- 「作る」「知る」: 決定論テンプレートで指示書を組み ``run_work_session`` を運転
+- 六型 (話す/聞く/作る/知る/経験する/自分を更新する): 型別の決定論テンプレート
+  (v2 §9.2-8) で指示書を組み ``run_work_session`` を運転 (予算ゲート対象)。
+  社交機構 (対ペルソナ会話) が未実装の「話す」「聞く」は、伝えたいことの文章化・
+  読む/調べる、という現時点で実際にできる接地行動に指示書を限定する
 - 「暮らし」「休む」: ログのみのスタブ (暮らし Pulse / 判断点は後続フェーズ)
-未登録 kind のコマは WARN + skipped。
+未登録 kind のコマは WARN + skipped (``skip_reason='no_handler'``)。
+
+コマの skipped はシステム都合とペルソナ判断を区別して記録する (``skip_reason``)。
+システム都合のスキップ (ハンドラ未登録 / 予算切れ / 会話優先の流れ) を
+「見送り」= 本人の判断としてペルソナに提示すると、就寝判断がしてもいない判断の
+理由を捏造する (接地原則違反、2026-07-05 実 LLM シムで実証)。実績ラベルは
+:func:`slot_result_label` が skip_reason 込みで返す。
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 EventScheduler の同一 key 再 push は既存の再スケジュール挙動 (古い予約の
@@ -81,6 +90,44 @@ SLOT_STATUSES = (
     STATUS_PENDING, STATUS_FIRED, STATUS_DEFERRED, STATUS_SKIPPED, STATUS_DONE,
 )
 
+# skipped の理由 (slot の skip_reason フィールド)。システム都合のスキップを
+# 「見送り」= 本人の判断としてペルソナ/ユーザーに提示しないための区別。
+SKIP_REASON_NO_HANDLER = "no_handler"          # kind の実行手段が未登録 (システム側)
+SKIP_REASON_BUDGET_EXHAUSTED = "budget_exhausted"  # 日次予算の残高ゼロ
+SKIP_REASON_DEFERRAL_LIMIT = "deferral_limit"  # 会話優先の繰り下げ上限で流れた
+
+#: コマ status → 実績ラベル (skipped 以外)。skipped は skip_reason で細分化する
+#: ため :func:`slot_result_label` を使うこと。
+SLOT_STATUS_LABELS = {
+    STATUS_PENDING: "未実施",
+    STATUS_FIRED: "実行した（完了記録なし）",
+    STATUS_DEFERRED: "繰り下げのまま",
+    STATUS_DONE: "実行済み",
+}
+
+#: skip_reason → 実績ラベル。ペルソナが自分の判断でないものを自分の判断として
+#: 振り返らされないよう、システム都合であることを明示する文言にする。
+SKIP_REASON_LABELS = {
+    SKIP_REASON_NO_HANDLER: "実行できず（システム側の問題: このコマ種別の実行手段が未実装）",
+    SKIP_REASON_BUDGET_EXHAUSTED: "実行できず（作業ラウンドの日次予算切れ）",
+    SKIP_REASON_DEFERRAL_LIMIT: "流れた（ユーザーとの会話を優先したため）",
+}
+
+
+def slot_result_label(slot: Dict[str, Any]) -> str:
+    """コマの実績ラベル (就寝判断の状況テキストと一日新聞が共用する語彙)。
+
+    skipped はシステム都合 (skip_reason) を明示して返す。「見送り」のような
+    本人判断を示唆する語は、実際に本人が判断した記録があるときにしか使わない
+    (現状、本人判断でコマを skipped にする機構は無い — 残り時間割の全置換で
+    コマ自体が消える)。理由の無い旧データは中立の「実行されず」に倒す。
+    """
+    status = str(slot.get("status") or STATUS_PENDING)
+    if status == STATUS_SKIPPED:
+        reason = str(slot.get("skip_reason") or "")
+        return SKIP_REASON_LABELS.get(reason, "実行されず（理由の記録なし）")
+    return SLOT_STATUS_LABELS.get(status, status)
+
 REF_NONE = "none"
 FACILITY_OWN_ROOM = "own_room"
 
@@ -116,8 +163,9 @@ _BUDGET_GATED_KINDS: set = set()
 def register_slot_handler(kind: str, fn: SlotHandler, *, consumes_budget: bool = False) -> None:
     """kind に対するコマ発火ハンドラを登録する (同 kind は上書き)。
 
-    後続フェーズ (話す/聞く/経験する/自分を更新する の社交・経験系、
-    暮らし Pulse) はここへ登録することで配線に乗る。
+    組み込みでは六型すべてが作業セッション運転、暮らし/休む がスタブとして
+    登録される (モジュール末尾)。後続フェーズ (対ペルソナ社交・暮らし Pulse) は
+    ここへ上書き登録することで配線に乗る。
 
     Args:
         consumes_budget: True なら予算ゲートの対象 (v2 §4.5)。発火前に日次
@@ -228,7 +276,13 @@ def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
                 f"slot[{i}].defer_count must be a non-negative int (got {defer_count!r})"
             )
 
-        normalized.append({
+        skip_reason = slot.get("skip_reason", "")
+        if not isinstance(skip_reason, str):
+            raise ValueError(
+                f"slot[{i}].skip_reason must be a string (got {type(skip_reason).__name__})"
+            )
+
+        normalized_slot = {
             "start": start,
             "kind": kind,
             "ref": ref,
@@ -238,7 +292,12 @@ def _validate_and_normalize_slots(slots: Any) -> List[Dict[str, Any]]:
             "note": note,
             "status": status,
             "defer_count": defer_count,
-        })
+        }
+        # skipped の理由は帳簿の一部 — 消化済みコマを残す全置換
+        # (replace_remaining_slots) の再検証を通っても保持する。
+        if skip_reason:
+            normalized_slot["skip_reason"] = skip_reason
+        normalized.append(normalized_slot)
     return normalized
 
 
@@ -749,7 +808,10 @@ def _apply_budget_gate(
         return slot
     remaining = state["remaining"]
     if remaining <= 0:
-        _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_SKIPPED)
+        _update_slot(
+            manager, persona_id, plan_date_str, index,
+            status=STATUS_SKIPPED, skip_reason=SKIP_REASON_BUDGET_EXHAUSTED,
+        )
         LOGGER.warning(
             "[day_plan] slot skipped: daily budget exhausted "
             "(persona=%s date=%s index=%d kind=%s used=%d/%d)",
@@ -806,7 +868,10 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     if _is_in_user_conversation(manager, persona_id):
         defer_count = int(slot.get("defer_count", 0))
         if defer_count >= MAX_DEFERRALS:
-            _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_SKIPPED)
+            _update_slot(
+                manager, persona_id, plan_date_str, index,
+                status=STATUS_SKIPPED, skip_reason=SKIP_REASON_DEFERRAL_LIMIT,
+            )
             LOGGER.info(
                 "[day_plan] slot skipped after %d deferrals (persona=%s date=%s index=%d kind=%s)",
                 defer_count, persona_id, plan_date_str, index, slot.get("kind"),
@@ -829,7 +894,10 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     kind = slot.get("kind")
     handler = _SLOT_HANDLERS.get(kind)
     if handler is None:
-        _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_SKIPPED)
+        _update_slot(
+            manager, persona_id, plan_date_str, index,
+            status=STATUS_SKIPPED, skip_reason=SKIP_REASON_NO_HANDLER,
+        )
         LOGGER.warning(
             "[day_plan] no handler registered for kind=%r; slot skipped "
             "(persona=%s date=%s index=%d)",
@@ -952,9 +1020,25 @@ def _resolve_ref(manager: Any, persona_id: str, ref: str) -> Optional[str]:
 # 組み込みハンドラ
 # ---------------------------------------------------------------------------
 
-# 決定論テンプレート (v2 §9.2-8 の先行 2 種)。「実際に起きたこと以外を
-# 書かせない」文言を含める (接地原則 §3-1)。
+# 型別の決定論テンプレート (v2 §9.2-8 の 6 種)。「実際に起きたこと以外を
+# 書かせない」文言を含める (接地原則 §3-1)。社交機構 (対ペルソナ会話) が
+# 未実装の「話す」「聞く」は、現時点で実際にできる接地行動 (文章化 / 読む) に
+# 指示書を限定し、していない対話を「した」と書かせない。
 _WORKER_INSTRUCTION_TEMPLATES = {
+    KIND_TALK: (
+        "目的: {note}。対象: {target}。"
+        "相手とその場で直接話す手段はまだありません。伝えたいことを実際に文章に"
+        "整えること (必要なら document_create 等のスペルで実際に書き残すこと)。"
+        "完成条件: 伝えたい内容が読み返せる形で残っていること。"
+        "実際に話していない相手に「話した」「伝えた」と書かないこと。"
+    ),
+    KIND_LISTEN: (
+        "目的: {note}。対象: {target}。"
+        "memory_recall や searxng_search、その場に置かれた文書の読み込み等の"
+        "スペルで実際に読む・調べること。"
+        "完成条件: 実際に読んで得られた内容だけを短い覚え書きにまとめてあること。"
+        "読めていない・聞けていない内容を「聞いた」と書かないこと。"
+    ),
     KIND_CREATE: (
         "目的: {note}。対象: {target}。"
         "成果物を document_create で実際に作成すること。"
@@ -967,7 +1051,27 @@ _WORKER_INSTRUCTION_TEMPLATES = {
         "完成条件: 実際に調べて得られた内容だけを短い覚え書きにまとめてあること。"
         "調べていないこと・確認できていないことを書かないこと。"
     ),
+    KIND_EXPERIENCE: (
+        "目的: {note}。対象: {target}。"
+        "その場でスペルにより実際に確認・実行できたことだけを行うこと。"
+        "完成条件: 実際に見聞き・実行できたことだけを短い覚え書きに残してあること。"
+        "実際に起きていない体験を「した」と書かないこと。"
+    ),
+    KIND_SELF_UPDATE: (
+        "目的: {note}。対象: {target}。"
+        "memory_recall 等のスペルで実際に記憶を確かめ、得られた気づきを整理すること。"
+        "整理した内容は document_create 等のスペルで実際に書き残すこと。"
+        "完成条件: 実際に確かめた記憶に基づく覚え書きが読み返せる形で残っていること。"
+        "実際に確かめ・書き残したこと以外を「更新した」と書かないこと。"
+    ),
 }
+
+#: 作業セッション運転で処理する kind (= 六型すべて。予算ゲート対象)。
+#: ScenarioPlayer のセッション終了判断ラップもこの集合を使う。
+WORKER_SESSION_KINDS = SIX_KINDS
+assert set(WORKER_SESSION_KINDS) == set(_WORKER_INSTRUCTION_TEMPLATES), (
+    "worker session kinds and instruction templates must stay in sync"
+)
 
 _NO_REF_TARGET = "(参照タスクなし。目的の記述に従うこと)"
 
@@ -975,9 +1079,9 @@ _NO_REF_TARGET = "(参照タスクなし。目的の記述に従うこと)"
 def run_worker_slot_session(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Any:
-    """「作る」「知る」コマの作業セッション 1 本を運転し、結果をそのまま返す。
+    """六型の作業コマの作業セッション 1 本を運転し、結果をそのまま返す。
 
-    決定論テンプレートで指示書を組み ``run_work_session`` を呼ぶ実体。組み込み
+    型別の決定論テンプレートで指示書を組み ``run_work_session`` を呼ぶ実体。組み込み
     ハンドラ (:func:`_handle_worker_slot`) と、セッション終了判断へ接続する
     上位層 (``saiverse.day_scenario.ScenarioPlayer`` のラップハンドラ) が共有する
     — 後者は post_session 判断の入力として ``WorkSessionResult`` 全体が要る。
@@ -1033,7 +1137,7 @@ def worker_session_rounds_used(result: Any) -> int:
 def _handle_worker_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Optional[int]:
-    """「作る」「知る」コマの組み込みハンドラ。
+    """六型の作業コマの組み込みハンドラ。
 
     Returns:
         実際に消費したラウンド数 (``_fire_slot`` が予算台帳へ積算する)。
@@ -1064,7 +1168,7 @@ def _handle_rest_slot(
     )
 
 
-register_slot_handler(KIND_CREATE, _handle_worker_slot, consumes_budget=True)
-register_slot_handler(KIND_LEARN, _handle_worker_slot, consumes_budget=True)
+for _kind in WORKER_SESSION_KINDS:
+    register_slot_handler(_kind, _handle_worker_slot, consumes_budget=True)
 register_slot_handler(KIND_LIVING, _handle_living_slot)
 register_slot_handler(KIND_REST, _handle_rest_slot)

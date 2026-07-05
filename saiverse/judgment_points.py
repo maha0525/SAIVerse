@@ -984,15 +984,6 @@ def build_on_event_situation_text(
     return "\n".join(parts)
 
 
-_SLOT_RESULT_LABELS = {
-    STATUS_PENDING: "未実施",
-    "fired": "実行した（完了記録なし）",
-    STATUS_DEFERRED: "繰り下げのまま",
-    "skipped": "見送り",
-    "done": "実行済み",
-}
-
-
 def _collect_today_session_digests(
     manager: Any, persona_id: str, plan_date: str, limit: int = 12
 ) -> List[str]:
@@ -1035,7 +1026,14 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
     ダイジェスト群を含む。就寝判断の状況テキストと、finalize が meta_json に
     保存する ``day_digest`` (翌朝 day_open の「昨日のふりかえり」が読む) の
     両方がこれを使う — 決定論構築なので接地が保たれる。
+
+    実績ラベルは :func:`saiverse.day_plan.slot_result_label` — skipped は
+    システム都合 (実行手段未実装 / 予算切れ / 会話優先) を明示し、本人の
+    「見送り」判断として提示しない (してもいない判断の理由をペルソナに
+    捏造させないため。接地原則 v2 §3-1)。
     """
+    from saiverse.day_plan import slot_result_label
+
     slots = load_day_plan(manager, persona_id, plan_date)
     if not slots:
         return "今日の時間割はありませんでした。"
@@ -1044,7 +1042,7 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
     planned = 0
     for s in slots:
         status = str(s.get("status") or STATUS_PENDING)
-        label = _SLOT_RESULT_LABELS.get(status, status)
+        label = slot_result_label(s)
         budget = int(s.get("budget_rounds") or 0)
         planned += budget
         if status in ("fired", "done"):
