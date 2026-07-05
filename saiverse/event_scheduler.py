@@ -176,6 +176,31 @@ class EventScheduler:
             # 起きてからスキップして次のエントリを見るだけなので問題なし。
             return True
 
+    def cancel_all(self) -> list[str]:
+        """有効な予約を全てキャンセルし、キャンセルした key のリストを返す。
+
+        一日シミュレータ (DES) がシナリオ実行前に、manager 構築時に積まれた
+        実時刻由来の予約 (db_polling / SDS heartbeat 等の定期イベント) を
+        一括除去するための入口 (自律行動 v2 §12)。仮想クロック下では実時刻で
+        シードされた 3 秒周期イベントが数千ステップの空回りになるため、
+        シナリオ由来のイベントだけを回す前提を「シム側が」成立させる。
+        本番経路 (dispatch スレッド運転) からは呼ばれない。
+        """
+        with self._cond:
+            keys = [
+                key for key, entry in self._entries_by_key.items()
+                if not entry.cancelled
+            ]
+            for entry in self._entries_by_key.values():
+                entry.cancelled = True
+            self._entries_by_key.clear()
+            if keys:
+                LOGGER.info(
+                    "[event_scheduler] cancel_all: %d reservations cancelled (%s)",
+                    len(keys), ", ".join(sorted(keys)),
+                )
+            return keys
+
     def schedule_periodic(
         self,
         interval_seconds: float,

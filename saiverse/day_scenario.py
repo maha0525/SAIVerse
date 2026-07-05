@@ -734,6 +734,19 @@ class ScenarioPlayer:
         self._seed(manager, sc, result)
 
         scheduler = manager.event_scheduler
+        # シナリオ外の既存予約を除去する。実 SAIVerseManager は __init__ で
+        # 実時刻シードの定期イベント (db_polling 3 秒周期 / SDS heartbeat 等) を
+        # 積むため、そのまま DES を回すと仮想時刻がそこへ達した時点から 3 秒
+        # 刻みの no-op ステップを一日ぶん (数千回) 消化してしまう
+        # (2026-07-05 実 LLM シム 3回目: steps=8,350 の 99% が db_polling 空回り)。
+        # シムの前提は「シナリオ由来のイベントだけを回す」— 除去はシム側の責務
+        # (本番コードに sim 分岐を持ち込まない)。
+        stale_keys = scheduler.cancel_all()
+        if stale_keys:
+            LOGGER.info(
+                "[day_scenario] cleared %d pre-existing reservations before sim: %s",
+                len(stale_keys), ", ".join(sorted(stale_keys)),
+            )
         saved_handlers = dict(day_plan._SLOT_HANDLERS)
         saved_gated = set(day_plan._BUDGET_GATED_KINDS)
         # 六型の作業コマにセッション終了判断を接続するラップハンドラ。

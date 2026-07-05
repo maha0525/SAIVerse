@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import patch
@@ -743,6 +743,52 @@ def test_zero_exchange_conversation_skips_post_conversation(session_factory, tmp
     # 他の判断点は通常どおり
     assert [j["kind"] for j in result.judgments if j["submitted"]] == [
         "day_open", "post_session", "post_session", "day_close",
+    ]
+
+
+def test_pre_existing_periodic_reservations_cleared_before_sim(
+    session_factory, tmp_path,
+):
+    """シナリオ外の既存予約 (db_polling 等の実時刻シード) はシムで空回りさせない。
+
+    回帰: --real で SAIVerseManager.__init__ が仮想化前に積んだ 3 秒周期の
+    db_polling を、仮想時刻が予約時刻へ達した時点から DES が一日ぶん
+    (約 8,300 ステップ) 空実行した (2026-07-05 実 LLM シム 3回目)。
+    ScenarioPlayer はシム実行前に既存予約を全て除去する。
+    """
+    manager = _make_manager(
+        session_factory, tmp_path, _standard_judge, list(_SESSION_RESPONSES),
+    )
+    polls: List[str] = []
+
+    def _db_polling_tick():
+        polls.append(clock.now().isoformat(timespec="seconds"))
+        manager.event_scheduler.schedule(
+            fire_at=clock.now() + timedelta(seconds=3),
+            callback=_db_polling_tick,
+            key="db_polling",
+        )
+
+    # SAIVerseManager.__init__ 相当: シナリオ開始前に積まれる自己再予約型の
+    # 周期イベント。仮想の一日 (09:00-22:00) の中に入る時刻で積む — 実シムで
+    # 起きた「到達した瞬間から 3 秒刻みで空回り」の再現条件。
+    manager.event_scheduler.schedule(
+        fire_at=datetime(2026, 7, 4, 12, 0, 0),
+        callback=_db_polling_tick,
+        key="db_polling",
+    )
+
+    created: List[str] = []
+    p_names, p_exec = _patched_spells(session_factory, created)
+    with p_names, p_exec:
+        result = ScenarioPlayer().run(manager, dict(_STANDARD_SCENARIO))
+
+    assert polls == [], "シナリオ外の定期イベントがシム中に発火した"
+    assert not manager.event_scheduler.has_key("db_polling")
+    # シナリオ由来のイベントは通常どおり消化される (標準の一日と同数)
+    assert result.executed_events == 7
+    assert [j["kind"] for j in result.judgments] == [
+        "day_open", "post_session", "post_session", "post_conversation", "day_close",
     ]
 
 
