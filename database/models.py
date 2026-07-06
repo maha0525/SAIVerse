@@ -204,7 +204,11 @@ class Region(Base):
 
 class City(Base):
     __tablename__ = "city"
-    USERID = Column(Integer, ForeignKey("user.USERID"), nullable=False)
+    # use_alter=True で city→user の FK をテーブル作成後の ALTER に回し、
+    # user⇄city / user→building→(region→)city→user の FK 循環を1点で断つ。
+    # city.USERID は user へ戻る唯一の辺なので、ここ1箇所で全閉路が DAG 化され、
+    # SQLAlchemy の sorted_tables が出す unresolvable cycles 警告 (将来 error 化) を解消する。
+    USERID = Column(Integer, ForeignKey("user.USERID", use_alter=True, name="fk_city_user"), nullable=False)
     CITYID = Column(Integer, primary_key=True, autoincrement=True)
     CITYNAME = Column(String(32), nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
