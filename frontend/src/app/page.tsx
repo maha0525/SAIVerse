@@ -306,12 +306,12 @@ export default function Home() {
     // remounts <img> tags and re-fetches their src on every keystroke.
     const markdownComponents = useMemo<Components>(() => ({
         a: ({ href, children }) => (
-            <SaiverseLink href={href} children={children as ReactNode} onOpenItem={handleOpenItemFromLink} />
+            <SaiverseLink href={href} onOpenItem={handleOpenItemFromLink}>{children as ReactNode}</SaiverseLink>
         ),
         img: ({ src, alt }) => {
             const resolved = typeof src === 'string' ? resolveSaiverseImageSrc(src) : src;
-            // eslint-disable-next-line @next/next/no-img-element
             return (
+                // eslint-disable-next-line @next/next/no-img-element
                 <img
                     src={resolved as string}
                     alt={alt || ''}
