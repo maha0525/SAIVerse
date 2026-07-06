@@ -955,6 +955,26 @@ class PersonaTask(Base):
     # 提示 (§4「成果物参照の有無つき」) や接地監査が機械可読に読むため。
     # nullable = 追加系 migration (try_additive_migration) で安全に足せる。
     artifact_refs = Column(Text, nullable=True)
+    # --- 目的ノードの段階 (stage; life_concept_map.md §3.1「種・段階・位置」) ---
+    # 'candidate' (候補=未採用) | 'adopted' (採用済=木の中) | 'dormant' (休眠) |
+    # 'completed' | 'aborted'。NULL = stage 導入前の既存行 — 読み手は
+    # saiverse/persona_task_manager.py の derive_stage() で parent_kind / status /
+    # desire_state から決定論導出する (後方互換の既定規則: 既存 desire 行 →
+    # candidate、既存 task 行 → adopted)。nullable = 追加系 migration で安全。
+    stage = Column(String(16), nullable=True)
+    # ノード種別 (life_concept_map.md §3 の大枝二種、将来用):
+    # 'practice' (営み: 細分化した先がいくら完了しても終わらない) |
+    # 'venture' (企て: 細分化した全ての完了で自動的に終わる)。
+    # 語の選定理由: practice は「日々続ける営み」(a daily practice) の英語慣用で
+    # 無限継続の含意があり、venture は「結末のある企て」(undertaking) の含意が強い。
+    # project (Note の note_type と衝突) / activity (ACTIVITY_STATE と衝突) を避けた。
+    # NULL = 未指定 (葉ノードや未分類)。
+    nature = Column(String(16), nullable=True)
+    # 昇格・命名の来歴 (JSON 配列の ref 群; artifact_refs と同形式)。
+    # 収穫 (mark → candidate) や命名 (テーマノード ← 航跡クラスタのメンバー) の
+    # 由来ノード参照を刻む (§3.1「昇格の来歴リンクを残せば意志がクエリ可能な実体になる」)。
+    # NULL = 来歴なし。
+    promoted_from = Column(Text, nullable=True)
     __table_args__ = (
         Index("idx_persona_task_persona_status", "persona_id", "status"),
         Index("idx_persona_task_note", "note_id"),
@@ -1025,4 +1045,49 @@ class PersonaDayPlan(Base):
     meta_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
+
+
+class Episode(Base):
+    """出来事 (Episode): 実際に時間を満たしたものの「薄い封筒」。
+
+    life_concept_map.md §8/§8.1 の出来事テーブル。会話・作業セッション・コマ実績
+    など既存の実体を置換せず、kind + 実体参照で包む共通エンベロープ。一日新聞・
+    ライフビューの一次データ源 (一覧は SELECT のみで LLM 不要)。
+
+    - 行はペルソナ単位 (複数主観: 境界と意味は参加者ごとに引かれる §9)。
+      同一の世界的出来事は OCCURRENCE_ID で束ねる。
+    - 無計画の出来事は ORIGIN_REF が NULL (= 自発)。予定に偽のコマを起こさない (§6)。
+    - 閉じ処理は意味を書かず再訪の鍵 (DIGEST_REF) だけ書く (§9)。
+    - 時刻は epoch 秒 int。刻印は必ず ``saiverse.clock.now()`` 経由
+      (一日シミュレータの仮想クロック尊重、autonomous_behavior_v2.md §12)。
+      そのため server_default は使わない (PersonaDayPlan と同じ判断)。
+
+    NOTE: PersonaEventLog (外部イベントの受信箱) とは別物。混同しないこと。
+    操作は saiverse/episodes.py に集約する。
+    """
+    __tablename__ = "episodes"
+    EPISODE_ID = Column(String(36), primary_key=True)  # UUID
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    # ペルソナ内で安定の整数連番 (episode:N 参照子)。MAX+1 採番 (ActionTrack と同流儀)
+    # で、行を物理削除しない限り番号は再利用されない。
+    SHORT_ID = Column(Integer, nullable=True)
+    # 'conversation' | 'work_session' | 'slot' | 'presence' | 'stroll' | 'other'
+    KIND = Column(String(32), nullable=False)
+    # 同一の世界的出来事を複数ペルソナ行で束ねる相関 ID (§8.1 複数主観)。NULL = 単独。
+    OCCURRENCE_ID = Column(String(64), nullable=True)
+    STARTED_AT = Column(Integer, nullable=False)  # epoch 秒
+    ENDED_AT = Column(Integer, nullable=True)     # epoch 秒。open の間は NULL
+    BUILDING_ID = Column(String(255), nullable=True)
+    PARTICIPANTS_JSON = Column(Text, nullable=True)  # JSON 配列 (entity id 群)
+    # 出自参照 (コマ・呼びかけ等)。NULL = 自発 (無計画の出来事は出自なしが合法)。
+    ORIGIN_REF = Column(String(255), nullable=True)
+    STATUS = Column(String(16), nullable=False, default="open")  # 'open' | 'closed'
+    # 閉じダイジェスト参照 (再訪の鍵。意味は書かない §9)。NULL = 未発行。
+    DIGEST_REF = Column(String(255), nullable=True)
+    META_JSON = Column(Text, nullable=True)
+    __table_args__ = (
+        Index("idx_episodes_persona_status", "PERSONA_ID", "STATUS"),
+        Index("idx_episodes_persona_started", "PERSONA_ID", "STARTED_AT"),
+        Index("idx_episodes_occurrence", "OCCURRENCE_ID"),
+    )
 

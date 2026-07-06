@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 44
+**テーブル数**: 45
 
 ## addon_config
 
@@ -363,6 +363,24 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `ENTRY_TIMESTAMP` | DATETIME | NOT NULL |  |
 | `EXIT_TIMESTAMP` | DATETIME | — |  |
 
+## episodes
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `EPISODE_ID` | VARCHAR(36) | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
+| `SHORT_ID` | INTEGER | — |  |
+| `KIND` | VARCHAR(32) | NOT NULL |  |
+| `OCCURRENCE_ID` | VARCHAR(64) | — |  |
+| `STARTED_AT` | INTEGER | NOT NULL |  |
+| `ENDED_AT` | INTEGER | — |  |
+| `BUILDING_ID` | VARCHAR(255) | — |  |
+| `PARTICIPANTS_JSON` | TEXT | — |  |
+| `ORIGIN_REF` | VARCHAR(255) | — |  |
+| `STATUS` | VARCHAR(16) | NOT NULL, default='open' |  |
+| `DIGEST_REF` | VARCHAR(255) | — |  |
+| `META_JSON` | TEXT | — |  |
+
 ## line_head_snapshot
 
 | カラム | 型 | 制約 | 説明 |
@@ -586,6 +604,9 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `last_touched_at` | DATETIME | — |  |
 | `touch_count` | INTEGER | — |  |
 | `artifact_refs` | TEXT | — |  |
+| `stage` | VARCHAR(16) | — |  |
+| `nature` | VARCHAR(16) | — |  |
+| `promoted_from` | TEXT | — |  |
 
 ## track_local_log
 

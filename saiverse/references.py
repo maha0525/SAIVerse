@@ -39,6 +39,7 @@ class RefKind:
 _KIND_LIST = [
     RefKind("track", True, True),
     RefKind("task", True, True),        # desire は task に統合 (状態ラベル化)
+    RefKind("episode", True, True),     # 出来事 (life_concept_map.md §8.1。saiverse/episodes.py)
     RefKind("memopedia", True, True),
     RefKind("message", True, False),
     RefKind("chronicle", True, False),

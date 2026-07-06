@@ -58,6 +58,47 @@ DESIRE_STATE_FRESH = "fresh"      # 新鮮 (既定。NULL も fresh 扱い)
 DESIRE_STATE_FADING = "fading"    # 薄れつつある (放置 or 就寝レビューの fading 裁定)
 DESIRE_STATE_EXPIRED = "expired"  # 期限切れ (status=cancelled の論理アーカイブと対で付く)
 
+# --- 目的ノードの段階 (stage; life_concept_map.md §3.1「種・段階・位置」) ---
+# desire と task は同一実体の段階違い (採用の前後で呼び名が変わるだけ)。
+# 物理カラム persona_task.stage が NULL の既存行は derive_stage() で決定論導出する。
+STAGE_CANDIDATE = "candidate"  # 候補 (未採用 = 従来の desire)
+STAGE_ADOPTED = "adopted"      # 採用済 (木の中 = 従来の task)
+STAGE_DORMANT = "dormant"      # 休眠 (薄れても消滅でなく休眠 §5。欲求の期限切れが対応)
+STAGE_COMPLETED = "completed"  # 完了
+STAGE_ABORTED = "aborted"      # 中止
+
+# --- ノード種別 (nature; life_concept_map.md §3 の大枝二種。将来用・値は models.py 参照) ---
+NATURE_PRACTICE = "practice"  # 営み (終わらない)
+NATURE_VENTURE = "venture"    # 企て (全完了で終わる)
+
+
+def derive_stage(
+    status: Optional[str],
+    parent_kind: Optional[str],
+    desire_state: Optional[str],
+) -> str:
+    """stage カラムが NULL の既存行から段階を決定論導出する (後方互換の既定規則)。
+
+    life_concept_map.md §3.1 / §10.1「desire の実装 → 目的ノード stage=候補へ正規化」
+    の読み出し側。既存カラムだけから一意に決まる:
+
+    - status=completed → completed
+    - status=cancelled かつ desire の期限切れ (desire_state='expired') → dormant
+      (§5「薄れても消滅でなく休眠」— desire_engine の論理アーカイブが対応)
+    - status=cancelled (その他) → aborted
+    - 生きている行: parent_kind='note' (desire ノートの候補) → candidate、
+      それ以外 (track 内小目標・未所属) → adopted
+    """
+    if status == STATUS_COMPLETED:
+        return STAGE_COMPLETED
+    if status == STATUS_CANCELLED:
+        if parent_kind == PARENT_NOTE and desire_state == DESIRE_STATE_EXPIRED:
+            return STAGE_DORMANT
+        return STAGE_ABORTED
+    if parent_kind == PARENT_NOTE:
+        return STAGE_CANDIDATE
+    return STAGE_ADOPTED
+
 
 class TaskError(Exception):
     """Base error for PersonaTaskManager."""
@@ -143,6 +184,14 @@ class PersonaTaskManager:
             "touch_count": task.touch_count,
             # 成果物参照 (judgment_points.md §6 の接地の証跡)。JSON 配列を list に展開。
             "artifact_refs": cls._parse_artifact_refs(task.artifact_refs),
+            # 目的ノードの段階 (life_concept_map.md §3.1)。物理カラムが NULL の
+            # 既存行は derive_stage() の既定規則で埋めて返す (= 実効値を見せる)。
+            "stage": task.stage or derive_stage(
+                task.status, task.parent_kind, task.desire_state
+            ),
+            "nature": task.nature,
+            # 昇格・命名の来歴 (JSON 配列を list に展開。artifact_refs と同形式)。
+            "promoted_from": cls._parse_artifact_refs(task.promoted_from),
             "steps": [cls._step_to_dict(s) for s in steps],
         }
 
@@ -277,6 +326,9 @@ class PersonaTaskManager:
         auto_activate: bool = True,
         desire_type: Optional[str] = None,
         desire_source: Optional[str] = None,
+        stage: Optional[str] = None,
+        nature: Optional[str] = None,
+        promoted_from: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """新規 Task を作成する。
 
@@ -292,6 +344,12 @@ class PersonaTaskManager:
         候補 (parent_kind='note') では帳簿 (last_touched_at / touch_count /
         desire_state) も初期化する。値の検証は呼び出し側 (desire_add スペル等) の
         責務 — 本レイヤーは priority / origin と同じく永続化のみ担う。
+
+        ``stage`` / ``nature`` / ``promoted_from`` は目的ノードの段階・種別・来歴
+        (life_concept_map.md §3.1)。省略 (None) 時は物理カラムを NULL のままにし、
+        読み出し側が derive_stage() の既定規則で埋める — 既存呼び出し元の挙動は
+        一切変わらない。``promoted_from`` は ref のシーケンスで、JSON 配列として
+        永続化される (artifact_refs と同形式)。
         """
         if not persona_id:
             raise ValueError("persona_id is required")
@@ -341,6 +399,12 @@ class PersonaTaskManager:
                 desire_state=DESIRE_STATE_FRESH if kind == PARENT_NOTE else None,
                 last_touched_at=now if kind == PARENT_NOTE else None,
                 touch_count=0 if kind == PARENT_NOTE else None,
+                stage=stage,
+                nature=nature,
+                promoted_from=(
+                    json.dumps([str(r) for r in promoted_from], ensure_ascii=False)
+                    if promoted_from else None
+                ),
             )
             db.add(task)
 
@@ -769,6 +833,99 @@ class PersonaTaskManager:
             )
             db.commit()
             LOGGER.info("[task] promoted %s note=%s -> track=%s", task_id, prev_note, track_id)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def detach_parent(
+        self, task_id: str, *, persona_id: Optional[str] = None, actor: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Task の親バインドを外して未所属にする (parent_kind/note_id/track_id を NULL)。
+
+        親なし採用ノード (life_concept_map.md §3.1「採用時の親なし — 第一階層に
+        小さく立つ」) を作る採用操作 (saiverse/purpose_tree.py の adopt) が使う。
+        promote_to_track と同じく行をコピー/破棄せず親だけ変える (履歴つき)。
+        """
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            prev_kind, prev_note, prev_track = task.parent_kind, task.note_id, task.track_id
+            task.parent_kind = None
+            task.note_id = None
+            task.track_id = None
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="detach_parent",
+                payload={
+                    "from_parent_kind": prev_kind,
+                    "from_note_id": prev_note,
+                    "from_track_id": prev_track,
+                },
+                actor=actor,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    def set_purpose_fields(
+        self,
+        task_id: str,
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+        stage: Optional[str] = None,
+        nature: Optional[str] = None,
+        promoted_from: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """目的ノードの段階・種別・来歴を更新する (life_concept_map.md §3.1)。
+
+        None の引数は据え置き (部分更新)。stage の遷移規則 (candidate→adopted 等)
+        の検証は呼び出し側 (saiverse/purpose_tree.py) の責務 — 本レイヤーは
+        priority / origin と同じく永続化のみ担う。履歴 (set_purpose_fields) つき。
+        """
+        if stage is None and nature is None and promoted_from is None:
+            raise ValueError("at least one of stage/nature/promoted_from is required")
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            if stage is not None:
+                task.stage = stage
+            if nature is not None:
+                task.nature = nature
+            if promoted_from is not None:
+                task.promoted_from = json.dumps(
+                    [str(r) for r in promoted_from], ensure_ascii=False
+                )
+            task.updated_at = now
+            task.last_actor = actor
+            task.version = task.version + 1
+            self._insert_history(
+                db,
+                task_id=task_id,
+                step_id=None,
+                event_type="set_purpose_fields",
+                payload={
+                    "stage": stage,
+                    "nature": nature,
+                    "promoted_from": list(promoted_from) if promoted_from else None,
+                },
+                actor=actor,
+            )
+            db.commit()
         except Exception:
             db.rollback()
             raise
