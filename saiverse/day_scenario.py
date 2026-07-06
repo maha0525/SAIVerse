@@ -341,7 +341,15 @@ class TrackSimUserEventDriver(UserEventDriver):
                 "(persona=%s); ignoring", persona_id,
             )
             return False
-        track_manager.complete(running.track_id)
+        # 本番由来の対ユーザー会話 Track は永続 (is_persistent=true) で
+        # completed への遷移が禁止されている。leave の意味論は本番の
+        # wait_response 自動 pause と同じ running → pending (world clone した
+        # 実ペルソナで 2026-07-06 に顕在化。シム内で新規作成した非永続 Track
+        # は従来どおり complete で畳む)
+        if getattr(running, "is_persistent", False):
+            track_manager.pause(running.track_id)
+        else:
+            track_manager.complete(running.track_id)
         LOGGER.info(
             "[day_scenario] conversation ended: persona=%s track=%s",
             persona_id, running.track_id,

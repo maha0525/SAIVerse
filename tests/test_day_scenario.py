@@ -607,6 +607,7 @@ class _FakeTrackManagerWithHook:
         self.created: List[Dict[str, Any]] = []
         self.running_track = None
         self.completed: List[str] = []
+        self.paused: List[str] = []
 
     def get_running(self, persona_id):
         return self.running_track
@@ -628,6 +629,10 @@ class _FakeTrackManagerWithHook:
 
     def complete(self, track_id):
         self.completed.append(track_id)
+        self.running_track = None
+
+    def pause(self, track_id):
+        self.paused.append(track_id)
         self.running_track = None
 
 
@@ -692,6 +697,25 @@ def test_real_driver_records_user_message_and_detects_reply():
 
     assert driver.end_conversation(manager, PERSONA_ID) is True
     assert manager.track_manager.completed == ["track-1"]
+
+
+def test_end_conversation_pauses_persistent_track():
+    """本番由来の永続会話 Track は complete でなく pause で畳む。
+
+    world clone した実ペルソナで顕在化 (2026-07-06): 対ユーザー会話 Track は
+    is_persistent=true で completed への遷移が禁止。leave の意味論は本番の
+    wait_response 自動 pause と同じ running → pending。
+    """
+    tm = _FakeTrackManagerWithHook()
+    tm.running_track = SimpleNamespace(
+        track_id="t-persistent", track_type="user_conversation", is_persistent=True,
+    )
+    manager = SimpleNamespace(track_manager=tm)
+    driver = TrackSimUserEventDriver()
+
+    assert driver.end_conversation(manager, PERSONA_ID) is True
+    assert tm.paused == ["t-persistent"]
+    assert tm.completed == []
 
 
 def test_real_driver_flags_zero_exchange_when_no_reply(caplog):
