@@ -142,6 +142,60 @@
     color: var(--text-secondary);
 }
 
+/* 今日の予定 (時間割メタファーの縦帯) */
+.planStrip {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.planRow {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    padding: 0.45rem 0.7rem;
+    background-color: var(--bg-tertiary);
+}
+
+.planRow + .planRow {
+    border-top: 1px solid var(--border-color);
+}
+
+.planTime {
+    flex-shrink: 0;
+    width: 3.2em;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.planBody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+}
+
+.planTitle {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.planResult {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.planBudget {
+    font-size: 0.73rem;
+    color: var(--text-secondary);
+    padding-top: 0.2rem;
+}
+
 /* 最近 */
 .recentList {
     display: flex;

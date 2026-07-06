@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, type ReactNode } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown, Newspaper } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
@@ -447,6 +447,17 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             </span>
                         </div>
                     )}
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => {
+                            window.location.href = '/events';
+                            if (onClose) onClose();
+                        }}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Newspaper size={16} /> できごと
+                        </span>
+                    </div>
                     <div
                         className={styles.buildingItem}
                         onClick={() => {

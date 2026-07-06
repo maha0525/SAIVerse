@@ -43,6 +43,22 @@ interface ActivityViewData {
     next_wait_response_timeout_seconds: number | null;
 }
 
+interface DayPlanSlot {
+    index: number;
+    start: string;          // "HH:MM"
+    kind: string;
+    title: string;
+    status: string;
+    result_label: string;
+}
+
+interface DayPlanData {
+    persona_id: string;
+    date: string;
+    slots: DayPlanSlot[];
+    budget: { total: number; used: number; remaining: number } | null;
+}
+
 interface LifeViewProps {
     isOpen: boolean;
     onClose: () => void;
@@ -86,6 +102,9 @@ function fmtEta(seconds: number | null): string {
 
 export default function LifeView({ isOpen, onClose, personaId, personaName, onOpenMemory }: LifeViewProps) {
     const [data, setData] = useState<ActivityViewData | null>(null);
+    // 今日の予定表 (画面 B: day-plan の読み取り専用ストリップ)
+    const [dayPlan, setDayPlan] = useState<DayPlanData | null>(null);
+    const [dayPlanFailed, setDayPlanFailed] = useState(false);
     const [toggleBusy, setToggleBusy] = useState(false);
     // 間隔フォーム (空文字列 = 未編集でサーバー値を表示)
     const [reviewMinutes, setReviewMinutes] = useState<string>('');
@@ -117,6 +136,35 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
         const interval = setInterval(fetchData, 5000);
         return () => clearInterval(interval);
     }, [isOpen, fetchData]);
+
+    // 今日の予定表: 開いたとき + 60 秒ごと (コマの実績は分単位でしか動かない)
+    useEffect(() => {
+        if (!isOpen) {
+            setDayPlan(null);
+            setDayPlanFailed(false);
+            return;
+        }
+        let cancelled = false;
+        const fetchPlan = async () => {
+            try {
+                const res = await fetch(`/api/people/${personaId}/day-plan`);
+                if (cancelled) return;
+                if (res.ok) {
+                    setDayPlan(await res.json());
+                    setDayPlanFailed(false);
+                } else {
+                    console.error('[LifeView] day-plan fetch failed:', res.status);
+                    setDayPlanFailed(true);
+                }
+            } catch (err) {
+                console.error('[LifeView] day-plan fetch error:', err);
+                if (!cancelled) setDayPlanFailed(true);
+            }
+        };
+        fetchPlan();
+        const interval = setInterval(fetchPlan, 60000);
+        return () => { cancelled = true; clearInterval(interval); };
+    }, [isOpen, personaId]);
 
     if (!isOpen) return null;
 
@@ -248,6 +296,41 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
                                 </div>
                             );
                         })()}
+                    </div>
+
+                    {/* 今日の予定 (時間割の見た目の縦帯。読み取り専用) */}
+                    <div className={styles.section}>
+                        <h4 className={styles.sectionHeading}>今日の予定</h4>
+                        {dayPlanFailed ? (
+                            <div className={styles.muted}>予定表を取得できませんでした</div>
+                        ) : dayPlan == null ? (
+                            <div className={styles.muted}>読み込み中...</div>
+                        ) : dayPlan.slots.length > 0 ? (
+                            <>
+                                <div className={styles.planStrip}>
+                                    {dayPlan.slots.map(slot => (
+                                        <div key={slot.index} className={styles.planRow}>
+                                            <span className={styles.planTime}>{slot.start || '--:--'}</span>
+                                            <div className={styles.planBody}>
+                                                <span className={styles.planTitle}>
+                                                    {slot.title || slot.kind}
+                                                </span>
+                                                {slot.result_label && (
+                                                    <span className={styles.planResult}>{slot.result_label}</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                {dayPlan.budget && (
+                                    <div className={styles.planBudget}>
+                                        作業にあてられる回数: のこり {dayPlan.budget.remaining} / {dayPlan.budget.total}
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div className={styles.muted}>今日はまだ予定表がありません</div>
+                        )}
                     </div>
 
                     {/* 最近 */}

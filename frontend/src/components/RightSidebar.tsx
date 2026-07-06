@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
+import PersonaProfileModal from './PersonaProfileModal';
 import LifeView from './LifeView';
 import ModalOverlay from './common/ModalOverlay';
 import fixtureStyles from './FixtureModal.module.css';
@@ -100,6 +101,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     const [showTasks, setShowTasks] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
+    const [showProfile, setShowProfile] = useState(false);
     const [showBuildingSettings, setShowBuildingSettings] = useState(false);
     // ライフビュー (観察面サイドパネル)。インジケータ直クリックでも開くため、
     // PersonaMenu の selectedPersona とは独立に対象を保持する。
@@ -110,6 +112,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // We need to keep the ID even if selectedPersona is cleared (though typically we might close menu first).
     const [activeModalPersonaId, setActiveModalPersonaId] = useState<string | null>(null);
     const [activeModalPersonaName, setActiveModalPersonaName] = useState<string | null>(null);
+    const [activeModalPersonaAvatar, setActiveModalPersonaAvatar] = useState<string | null>(null);
 
     // 2026-04-30 のエリス上書き事故 (feedback_modal_id_integrity.md) の再発防止:
     // サーバ side global の user_current_building_id が他デバイスの操作で変動すると、
@@ -180,6 +183,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         setShowTasks(false);
         setShowSettings(false);
         setShowInventory(false);
+        setShowProfile(false);
         setShowBuildingSettings(false);
         setLifeViewPersona(null);
     }, [details?.id]);
@@ -237,22 +241,25 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // activeModalPersonaId だけが上書きされ、対象モーダルは開いたまま personaId プロパティ
     // だけが切り替わる現象が起きる。このとき「フォームの中身は古いまま、保存先 ID だけ新しい」
     // という極めて危険な状態になりうるため、いったんすべてのモーダルを閉じてから開き直す。
-    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'inventory') => {
+    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'inventory' | 'profile') => {
         if (!selectedPersona) return;
         const newId = selectedPersona.id;
         const newName = selectedPersona.name;
+        const newAvatar = selectedPersona.avatar ?? null;
 
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory;
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory || showProfile;
         const sameTarget = anyOpen && activeModalPersonaId === newId;
 
         const applyOpen = () => {
             setActiveModalPersonaId(newId);
             setActiveModalPersonaName(newName);
+            setActiveModalPersonaAvatar(newAvatar);
             if (type === 'memory') setShowMemory(true);
             if (type === 'schedule') setShowSchedule(true);
             if (type === 'tasks') setShowTasks(true);
             if (type === 'settings') setShowSettings(true);
             if (type === 'inventory') setShowInventory(true);
+            if (type === 'profile') setShowProfile(true);
         };
 
         // Close the menu in either branch.
@@ -267,6 +274,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             setShowTasks(false);
             setShowSettings(false);
             setShowInventory(false);
+            setShowProfile(false);
             // 次の tick で開く: state 反映と useEffect cleanup を間に挟むため
             setTimeout(applyOpen, 0);
             return;
@@ -279,12 +287,13 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // openModal と同じ ID 整合性対策 (feedback_modal_id_integrity.md): 別ペルソナの
     // モーダルが開いていたら全部閉じてから次 tick で開き直す。
     const openMemoryFor = (target: Occupant) => {
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory;
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory || showProfile;
         const sameTarget = anyOpen && activeModalPersonaId === target.id;
 
         const applyOpen = () => {
             setActiveModalPersonaId(target.id);
             setActiveModalPersonaName(target.name);
+            setActiveModalPersonaAvatar(target.avatar ?? null);
             setShowMemory(true);
         };
 
@@ -294,6 +303,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             setShowTasks(false);
             setShowSettings(false);
             setShowInventory(false);
+            setShowProfile(false);
             setTimeout(applyOpen, 0);
             return;
         }
@@ -549,6 +559,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             setSelectedPersona(null);
                             setLifeViewPersona(target);
                         }}
+                        onOpenProfile={() => openModal('profile')}
                         onOpenMemory={() => openModal('memory')}
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenTasks={() => openModal('tasks')}
@@ -591,6 +602,19 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             isOpen={showInventory}
                             onClose={() => setShowInventory(false)}
                             personaId={activeModalPersonaId}
+                        />
+                        <PersonaProfileModal
+                            isOpen={showProfile}
+                            onClose={() => setShowProfile(false)}
+                            personaId={activeModalPersonaId}
+                            personaName={activeModalPersonaName || undefined}
+                            avatarUrl={activeModalPersonaAvatar || "/api/static/icons/host.png"}
+                            onOpenTasks={() => {
+                                // 「頼まれごと・約束」は既存のタスク画面を再利用する。
+                                // 同一ペルソナのままなので ID 整合性対策の閉じ直しは不要。
+                                setShowProfile(false);
+                                setShowTasks(true);
+                            }}
                         />
                     </>
                 )}

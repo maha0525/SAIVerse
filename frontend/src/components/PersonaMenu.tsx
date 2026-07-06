@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, Calendar, Settings, X, RefreshCw, Network, Package, Sparkles, Activity } from 'lucide-react';
+import { Home, Brain, Calendar, Settings, X, RefreshCw, Network, Package, Sparkles, Activity, Heart } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -16,6 +16,8 @@ interface PersonaMenuProps {
     buildingId?: string | null;
     /** ライフビュー (自律行動の観察面) を開く。persona_activity_view.md §4 */
     onOpenLifeView?: () => void;
+    /** プロフィール (この子はどんな子？) を開く。life_concept_map.md §15 */
+    onOpenProfile?: () => void;
     onOpenMemory?: () => void;
     onOpenSchedule?: () => void;
     onOpenTasks?: () => void;
@@ -27,7 +29,7 @@ interface PersonaMenuProps {
     onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenLifeView, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenLifeView, onOpenProfile, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
 
@@ -111,6 +113,22 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                         <div className={styles.label}>
                             <span>Life View</span>
                             <span className={styles.subtext}>ようすを見る・自律行動</span>
+                        </div>
+                    </button>
+
+                    <button
+                        className={`${styles.actionBtn} ${!onOpenProfile ? styles.disabled : ''}`}
+                        onClick={() => {
+                            if (onOpenProfile) {
+                                onOpenProfile();
+                                onClose(); // Close menu when opening modal
+                            }
+                        }}
+                    >
+                        <Heart size={20} />
+                        <div className={styles.label}>
+                            <span>Profile</span>
+                            <span className={styles.subtext}>この子はどんな子？</span>
                         </div>
                     </button>
 

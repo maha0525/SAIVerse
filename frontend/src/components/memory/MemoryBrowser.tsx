@@ -29,6 +29,61 @@ interface MemoryBrowserProps {
     personaId: string;
 }
 
+/** ペルソナがメッセージ中で気に留めた言葉 (GET /api/people/{id}/marks) */
+interface MarkItem {
+    mark_id: string;
+    message_id: string;
+    quote: string;
+    purpose_ref: string | null;
+    created_at: number;
+}
+
+/** marks API のバッチ上限 (api/routes/people/life.py MARKS_BATCH_LIMIT と同値) */
+const MARKS_BATCH_LIMIT = 100;
+
+/**
+ * 本文中の quote の最初の出現を蛍光ペン風の <mark> で強調して描画する。
+ * quote が本文に見つからない場合は無視 (エラーにしない)。
+ * marks が空なら本文文字列をそのまま返す (DOM 加工なし)。
+ */
+function renderContentWithMarks(content: string, marks: MarkItem[] | undefined): React.ReactNode {
+    if (!marks || marks.length === 0) return content;
+
+    // 各 quote の最初の出現位置を集め、重複・重なりは先勝ちで除外する
+    const ranges: { start: number; end: number; mark: MarkItem }[] = [];
+    for (const mark of marks) {
+        const quote = mark.quote;
+        if (!quote) continue;
+        const idx = content.indexOf(quote);
+        if (idx < 0) continue;
+        const end = idx + quote.length;
+        if (ranges.some(r => idx < r.end && end > r.start)) continue; // 重なりはスキップ
+        ranges.push({ start: idx, end, mark });
+    }
+    if (ranges.length === 0) return content;
+    ranges.sort((a, b) => a.start - b.start);
+
+    const parts: React.ReactNode[] = [];
+    let cursor = 0;
+    for (const r of ranges) {
+        if (r.start > cursor) parts.push(content.slice(cursor, r.start));
+        parts.push(
+            <mark
+                key={r.mark.mark_id}
+                className={styles.markHighlight}
+                title={r.mark.purpose_ref
+                    ? `ペルソナが気に留めた言葉 (${r.mark.purpose_ref})`
+                    : 'ペルソナが気に留めた言葉'}
+            >
+                {content.slice(r.start, r.end)}
+            </mark>
+        );
+        cursor = r.end;
+    }
+    if (cursor < content.length) parts.push(content.slice(cursor));
+    return parts;
+}
+
 export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const [threads, setThreads] = useState<ThreadSummary[]>([]);
     const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -88,6 +143,9 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         });
     };
 
+    // ペルソナが気に留めた言葉 (message_id → marks)。表示中ページの分だけ保持
+    const [marksByMessage, setMarksByMessage] = useState<Record<string, MarkItem[]>>({});
+
     // Add message state
     const [showAddForm, setShowAddForm] = useState(false);
     const [newMsgRole, setNewMsgRole] = useState<string>("user");
@@ -99,6 +157,37 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     useEffect(() => {
         loadThreads();
     }, [personaId]);
+
+    // 表示中メッセージの marks (気に留めた言葉) をバッチ取得する。
+    // marks はあくまで装飾 — 取得失敗は無視し、本文表示には影響させない。
+    useEffect(() => {
+        const ids = messages.map(m => m.id).filter(Boolean);
+        if (ids.length === 0) {
+            setMarksByMessage({});
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            const collected: Record<string, MarkItem[]> = {};
+            for (let i = 0; i < ids.length; i += MARKS_BATCH_LIMIT) {
+                const chunk = ids.slice(i, i + MARKS_BATCH_LIMIT);
+                try {
+                    const res = await fetch(
+                        `/api/people/${personaId}/marks?message_ids=${encodeURIComponent(chunk.join(','))}`
+                    );
+                    if (!res.ok) continue;
+                    const data = await res.json();
+                    for (const mark of (data.marks ?? []) as MarkItem[]) {
+                        (collected[mark.message_id] = collected[mark.message_id] || []).push(mark);
+                    }
+                } catch {
+                    // marks が取れなくても閲覧は続行
+                }
+            }
+            if (!cancelled) setMarksByMessage(collected);
+        })();
+        return () => { cancelled = true; };
+    }, [messages, personaId]);
 
     // Load messages when thread or page changes
     useEffect(() => {
@@ -757,7 +846,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         </div>
                                     ) : (
                                         <>
-                                            {msg.content}
+                                            {renderContentWithMarks(msg.content, marksByMessage[msg.id])}
                                             {overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && (
                                                 <div className={styles.contentFade} />
                                             )}
