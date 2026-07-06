@@ -272,6 +272,45 @@ def load_scenario(path: Path | str) -> DayScenario:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_conversation_episode(manager: Any, persona_id: str) -> None:
+    """会話の出来事 (kind='conversation') を開く (冪等)。
+
+    実 manager (--real) では UserConversationTrackHandler の track_activated
+    hook が既に開いている場合があり、その場合は no-op になる。mock 構成
+    (最小スタブ manager) では observer が居ないため、ここが唯一の開き点。
+    出来事は記録専用 — 失敗してもシナリオ再生を止めない。
+    """
+    try:
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        building_id = getattr(persona, "current_building_id", None)
+        participants = [persona_id]
+        user_id = getattr(manager, "user_id", None)
+        if user_id is not None:
+            participants.append(str(user_id))
+        from saiverse.episodes import open_conversation_episode
+        open_conversation_episode(
+            manager, persona_id,
+            building_id=building_id, participants=participants,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_scenario] failed to open conversation episode (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
+def _close_conversation_episode(manager: Any, persona_id: str) -> None:
+    """開いている会話の出来事を閉じる (無ければ no-op)。"""
+    try:
+        from saiverse.episodes import close_conversation_episode
+        close_conversation_episode(manager, persona_id)
+    except Exception:
+        LOGGER.warning(
+            "[day_scenario] failed to close conversation episode (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
 class UserEventDriver:
     """ユーザーの在不在をシムに反映するドライバのインターフェイス。"""
 
@@ -317,6 +356,7 @@ class TrackSimUserEventDriver(UserEventDriver):
                 "[day_scenario] user message while already in conversation "
                 "(persona=%s); keeping the running track", persona_id,
             )
+            _ensure_conversation_episode(manager, persona_id)
             return
         track_id = track_manager.create(
             persona_id=persona_id,
@@ -327,6 +367,7 @@ class TrackSimUserEventDriver(UserEventDriver):
             ),
             initial_status="running",
         )
+        _ensure_conversation_episode(manager, persona_id)
         LOGGER.info(
             "[day_scenario] conversation started: persona=%s track=%s text=%r",
             persona_id, track_id, text[:60],
@@ -350,6 +391,9 @@ class TrackSimUserEventDriver(UserEventDriver):
             track_manager.pause(running.track_id)
         else:
             track_manager.complete(running.track_id)
+        # 会話の出来事を閉じる (本番の wait_response タイムアウト経路に対応する
+        # シム側の閉じ点。leave = 運用の線 §8)
+        _close_conversation_episode(manager, persona_id)
         LOGGER.info(
             "[day_scenario] conversation ended: persona=%s track=%s",
             persona_id, running.track_id,
@@ -404,6 +448,7 @@ class RealConversationUserEventDriver(TrackSimUserEventDriver):
                 "(persona=%s track=%s); invoking main line directly",
                 persona_id, running.track_id,
             )
+            _ensure_conversation_episode(manager, persona_id)
             manager.run_sea_user(
                 persona, building_id, text, origin_track_id=running.track_id,
             )
@@ -426,6 +471,9 @@ class RealConversationUserEventDriver(TrackSimUserEventDriver):
                 "persona=%s track=%s text=%r",
                 persona_id, track_id, text[:60],
             )
+            # 実 manager では track_activated observer (UserConversationTrackHandler)
+            # が既に出来事を開いている — 冪等なので二重には開かない。
+            _ensure_conversation_episode(manager, persona_id)
 
         # (4) 応答の実在検査 (building_messages の追記で確認 — 接地)
         replied = self._persona_replied_after(manager, persona, building_id, seq_before)

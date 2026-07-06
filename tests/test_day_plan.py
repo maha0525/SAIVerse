@@ -254,7 +254,8 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
     calls: List[Dict[str, Any]] = []
 
     def fake_run_work_session(persona_id, instruction, budget_rounds, task_ref=None,
-                              metadata=None, *, manager=None, track_id=None):
+                              metadata=None, *, manager=None, track_id=None,
+                              title=None):
         calls.append({
             "at": clock.now(),
             "persona_id": persona_id,
@@ -262,6 +263,7 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
             "budget_rounds": budget_rounds,
             "task_ref": task_ref,
             "metadata": metadata,
+            "title": title,
         })
         return _mock_work_session_result(rounds_used=budget_rounds)
 

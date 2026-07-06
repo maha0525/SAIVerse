@@ -924,6 +924,92 @@ def _effective_budget_rounds(slot: Dict[str, Any]) -> int:
     return budget if budget >= 1 else DEFAULT_BUDGET_ROUNDS
 
 
+# ---------------------------------------------------------------------------
+# コマの出来事 (Episode): 実行区間の記録 (life_concept_map.md §8.1)
+# ---------------------------------------------------------------------------
+
+
+def _episode_kind_for_slot(slot_kind: Any) -> str:
+    """コマ種別 → 出来事 kind の写像。
+
+    暮らし/休む は「その場に居た」以上の実行記録が無いスタブなので presence。
+    六型の作業コマは中の作業セッションが別の出来事 (kind='work_session') を
+    開くため、コマの実行区間そのものは kind='slot' として並存させる
+    (セッション側の origin_ref がコマ出来事を指して親子が読める)。
+    """
+    from saiverse import episodes
+
+    if slot_kind in (KIND_LIVING, KIND_REST):
+        return episodes.KIND_PRESENCE
+    return episodes.KIND_SLOT
+
+
+def _slot_origin_ref(persona_id: str, plan_date_str: str, index: int) -> str:
+    """コマ参照 (出来事の origin_ref)。EventScheduler の予約 key と同形の
+    決定論文字列。コマ参照の統一文法化は P5 (life_concept_map.md §14) で
+    再訪する。"""
+    return _slot_key(persona_id, plan_date_str, index)
+
+
+def _open_slot_episode(
+    manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
+) -> Optional[str]:
+    """コマの実行区間の出来事を開き、episode_ref を返す (失敗時 None)。
+
+    呼び出し点は発火チェック (繰り下げ / 予算 / ハンドラ有無) と施設移動を
+    抜けた後 — skip されたコマは出来事を作らない。場所は移動後の現在地。
+    出来事は記録専用でコマの実行には影響しない (失敗は WARN のみ)。
+    """
+    try:
+        from saiverse import episodes
+
+        persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+        building_id = getattr(persona, "current_building_id", None)
+        meta: Dict[str, Any] = {"slot_kind": str(slot.get("kind") or "")}
+        title = str(slot.get("title") or "").strip()
+        if title:
+            meta["title"] = title
+        ep = episodes.open_episode(
+            manager, persona_id,
+            _episode_kind_for_slot(slot.get("kind")),
+            building_id=building_id,
+            participants=[persona_id],
+            origin_ref=_slot_origin_ref(persona_id, plan_date_str, index),
+            meta=meta,
+        )
+        return ep.get("episode_ref")
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to open slot episode (persona=%s date=%s index=%d)",
+            persona_id, plan_date_str, index, exc_info=True,
+        )
+        return None
+
+
+def _close_slot_episode(
+    manager: Any,
+    persona_id: str,
+    episode_ref: Optional[str],
+    slot_after: Optional[Dict[str, Any]],
+) -> None:
+    """コマの出来事を閉じる。record_level (presence_only 等) を meta に透過する。"""
+    if not episode_ref:
+        return
+    try:
+        from saiverse import episodes
+
+        meta: Optional[Dict[str, Any]] = None
+        record_level = str((slot_after or {}).get("record_level") or "")
+        if record_level:
+            meta = {"record_level": record_level}
+        episodes.close_episode(manager, persona_id, episode_ref, meta=meta)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to close slot episode %s (persona=%s)",
+            episode_ref, persona_id, exc_info=True,
+        )
+
+
 def _apply_budget_gate(
     manager: Any, persona_id: str, plan_date_str: str, index: int, slot: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
@@ -1058,6 +1144,10 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         persona_id, plan_date_str, index, kind, slot.get("ref"), slot.get("facility"),
     )
 
+    # コマの実行区間を出来事として開く (skip 済み経路はここに到達しない =
+    # skip されたコマは出来事を作らない。life_concept_map.md §8.1)
+    episode_ref = _open_slot_episode(manager, persona_id, plan_date_str, slot, index)
+
     # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
     # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。ハンドラの成否に
     # 依らず「取り組みに向かった」事実を記録するため、実行前に付ける。
@@ -1087,6 +1177,8 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
             "slot left as 'fired'",
             persona_id, plan_date_str, index, kind,
         )
+        # 実行区間は終わった (異常終了) — 出来事は閉じる (事実の記録)。
+        _close_slot_episode(manager, persona_id, episode_ref, None)
         return
 
     # (e) 実測の消費ラウンドを日次予算台帳へ積算する (v2 §4.5)
@@ -1100,7 +1192,10 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
                 "continuing",
                 persona_id, plan_date_str, index,
             )
-    _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_DONE)
+    done_slot = _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_DONE)
+    # 出来事を閉じる。record_level (presence_only 等、ハンドラが永続化した
+    # 完了記録の詳しさ) は DONE 更新後の slot から透過する。
+    _close_slot_episode(manager, persona_id, episode_ref, done_slot)
 
 
 # ---------------------------------------------------------------------------
@@ -1250,6 +1345,7 @@ def run_worker_slot_session(
         task_ref=ref if ref != REF_NONE else None,
         metadata={"day_plan": {"plan_date": plan_date_str, "slot_index": index, "kind": kind}},
         manager=manager,
+        title=str(slot.get("title") or "").strip() or None,
     )
     LOGGER.info(
         "[day_plan] work session for slot finished: persona=%s date=%s index=%d kind=%s "

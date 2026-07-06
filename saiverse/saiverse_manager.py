@@ -1664,11 +1664,27 @@ class SAIVerseManager(
         ``TrackManager._handle_wait_response_timeout`` がペルソナの Track を既に
         pending に落とした後に呼ばれる。本メソッドの責務は:
 
-        1. ``MetaLayer.on_periodic_tick`` を ``trigger=wait_response_timeout``
+        1. 対ユーザー会話 Track なら、開いている会話の出来事 (Episode) を閉じる
+           — v2 の「会話終了」= wait_response タイムアウトによる pending 遷移
+           (life_concept_map.md §8「運用の線」。intent v2 §10-5)
+        2. ``MetaLayer.on_periodic_tick`` を ``trigger=wait_response_timeout``
            context で発火 → ペルソナに「次に何をするか」決めさせる
-        2. AutonomyManager の次回 tick を ``now + interval`` に押し戻す
+        3. AutonomyManager の次回 tick を ``now + interval`` に押し戻す
            (= 直後に AutonomyManager の自動 tick が重なって二重発火しないように)
         """
+        # (1) 会話の出来事を閉じる。出来事は記録であってペルソナの認知には
+        # 影響しない — 失敗しても後続 (メタ判断) を止めない。
+        try:
+            track = self.track_manager.get(track_id)
+            if getattr(track, "track_type", None) == "user_conversation":
+                from saiverse.episodes import close_conversation_episode
+                close_conversation_episode(self, persona_id)
+        except Exception:
+            logging.warning(
+                "[wait_response_timeout] failed to close conversation episode: "
+                "persona=%s track=%s",
+                persona_id, track_id, exc_info=True,
+            )
         try:
             meta_layer = getattr(self, "meta_layer", None)
             if meta_layer is None:

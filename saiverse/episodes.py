@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -53,6 +54,15 @@ EPISODE_KINDS = frozenset({
     KIND_CONVERSATION, KIND_WORK_SESSION, KIND_SLOT,
     KIND_PRESENCE, KIND_STROLL, KIND_OTHER,
 })
+
+
+#: 開いている出来事のペルソナ別キャッシュを守るロック (プロセス内)。
+#: キャッシュ本体は manager オブジェクトに持たせる (``_open_episode_cache``:
+#: persona_id → 直列化済み episode dict | None)。manager 単位に持つのは、
+#: テストが別々の in-memory DB を持つ複数 manager を同一プロセスで作るため
+#: (モジュールグローバルだと persona_id 衝突で漏れる)。
+_OPEN_CACHE_LOCK = threading.Lock()
+_OPEN_CACHE_ATTR = "_open_episode_cache"
 
 
 class EpisodeError(Exception):
@@ -141,6 +151,77 @@ def _resolve_episode_id(db: Session, persona_id: str, ref: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 開いている出来事のキャッシュ (層0タグの高頻度読み出し対策)
+# ---------------------------------------------------------------------------
+
+
+def _open_cache(manager: Any) -> Dict[str, Optional[Dict[str, Any]]]:
+    """manager にぶら下がるキャッシュ dict を取得 (無ければ生成)。"""
+    cache = getattr(manager, _OPEN_CACHE_ATTR, None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(manager, _OPEN_CACHE_ATTR, cache)
+        except (AttributeError, TypeError):
+            # setattr できない manager (frozen 等)。キャッシュ無しで動く。
+            return {}
+    return cache
+
+
+def _cache_set_open(manager: Any, persona_id: str, ep: Optional[Dict[str, Any]]) -> None:
+    with _OPEN_CACHE_LOCK:
+        _open_cache(manager)[persona_id] = ep
+
+
+def _cache_drop(manager: Any, persona_id: str) -> None:
+    """キャッシュエントリを落とす (次回読み出しで DB から復元)。"""
+    with _OPEN_CACHE_LOCK:
+        _open_cache(manager).pop(persona_id, None)
+
+
+def _query_latest_open(
+    db: Session, persona_id: str, kind: Optional[str] = None
+) -> Optional[Episode]:
+    q = (
+        db.query(Episode)
+        .filter(Episode.PERSONA_ID == persona_id, Episode.STATUS == STATUS_OPEN)
+    )
+    if kind is not None:
+        q = q.filter(Episode.KIND == kind)
+    # SHORT_ID はペルソナ内単調増加なので「最後に開いた open」を一意に選べる
+    # (仮想クロック下で STARTED_AT が同秒になっても順序が壊れない)。
+    return q.order_by(Episode.SHORT_ID.desc()).first()
+
+
+def get_open_episode(
+    manager: Any, persona_id: str, kind: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """開いている出来事のうち最後に開いた 1 件を返す (無ければ None)。
+
+    ``kind=None`` は層0タグ (メッセージへの origin_episode 付与) の高頻度経路
+    なので、per-persona の in-memory キャッシュを使う (open/close 時に更新、
+    プロセス再起動後は初回読み出しで DB から復元)。``kind`` 指定時は
+    open/close の瞬間にしか呼ばれない低頻度経路なので素直に DB を引く。
+    """
+    if not persona_id:
+        return None
+    if kind is None:
+        with _OPEN_CACHE_LOCK:
+            cache = _open_cache(manager)
+            if persona_id in cache:
+                return cache[persona_id]
+    db = manager.SessionLocal()
+    try:
+        ep = _query_latest_open(db, persona_id, kind)
+        result = _to_dict(ep) if ep is not None else None
+    finally:
+        db.close()
+    if kind is None:
+        _cache_set_open(manager, persona_id, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 公開 API
 # ---------------------------------------------------------------------------
 
@@ -199,6 +280,8 @@ def open_episode(
         db.commit()
         db.refresh(ep)
         result = _to_dict(ep)
+        # いま開いたものが「最後に開いた open」(SHORT_ID 最大) — キャッシュ更新。
+        _cache_set_open(manager, persona_id, result)
         LOGGER.info(
             "[episode] opened %s (episode:%d) persona=%s kind=%s origin=%s",
             episode_id, short_id, persona_id, kind, origin_ref,
@@ -217,6 +300,7 @@ def close_episode(
     ref: str,
     *,
     digest_ref: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """出来事を閉じる (ENDED_AT を刻み status='closed')。
 
@@ -224,6 +308,11 @@ def close_episode(
     閉じダイジェスト (事実の記録) への参照で、意味づけの完了ではなく開始である。
     既に closed の出来事を再度閉じるのは InvalidStateError にせず no-op で返す
     (運用の線は「安い・撤回可能」§8 — 冪等に倒す)。
+
+    Args:
+        meta: META_JSON へ浅くマージする追加情報 (例: 作業セッションの
+            ``title`` / ``artifacts`` — meta 書式契約 life_concept_map.md §14)。
+            事実の記録のみを書くこと (意味づけは書かない)。
     """
     db = manager.SessionLocal()
     try:
@@ -242,9 +331,25 @@ def close_episode(
         ep.ENDED_AT = _now_epoch()
         if digest_ref is not None:
             ep.DIGEST_REF = digest_ref
+        if meta:
+            try:
+                existing = json.loads(ep.META_JSON) if ep.META_JSON else {}
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "[episode] META_JSON is not valid JSON on close: %r", ep.META_JSON,
+                )
+                existing = {}
+            if not isinstance(existing, dict):
+                existing = {}
+            existing.update(meta)
+            ep.META_JSON = json.dumps(existing, ensure_ascii=False)
         db.commit()
         db.refresh(ep)
         result = _to_dict(ep)
+        # 閉じたものがキャッシュ中の「最後に開いた open」だったかに依らず、
+        # エントリごと落として次回読み出しで DB から引き直す (外側でまだ開いて
+        # いる出来事があればそれが復元される)。
+        _cache_drop(manager, persona_id)
         LOGGER.info(
             "[episode] closed %s persona=%s digest=%s", episode_id, persona_id, digest_ref,
         )
@@ -301,3 +406,105 @@ def get_by_ref(manager: Any, persona_id: str, ref: str) -> Dict[str, Any]:
         return _to_dict(ep)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 会話の出来事 (kind='conversation') 専用ヘルパー
+# ---------------------------------------------------------------------------
+
+
+def _shared_conversation_occurrence(db: Session, building_id: str) -> Optional[str]:
+    """同じ Building で開いている会話出来事の occurrence_id を返す (無ければ None)。
+
+    同じ場のユーザー会話は複数ペルソナが同時に参加しうる (§8.1 複数主観)。
+    先に開いた行の occurrence_id を共有することで「同じ場の出来事」として
+    束ねられる。open な会話行はすべて本モジュール経由で occurrence_id を
+    持って作られるため、最初に見つかった 1 件を採用すれば決定論。
+    """
+    row = (
+        db.query(Episode.OCCURRENCE_ID)
+        .filter(
+            Episode.KIND == KIND_CONVERSATION,
+            Episode.STATUS == STATUS_OPEN,
+            Episode.BUILDING_ID == building_id,
+            Episode.OCCURRENCE_ID.isnot(None),
+        )
+        .order_by(Episode.STARTED_AT.asc())
+        .first()
+    )
+    return row[0] if row is not None else None
+
+
+def open_conversation_episode(
+    manager: Any,
+    persona_id: str,
+    *,
+    building_id: Optional[str] = None,
+    participants: Optional[Sequence[str]] = None,
+    origin_ref: Optional[str] = None,
+) -> Dict[str, Any]:
+    """会話の出来事を開く (冪等)。
+
+    既にこのペルソナで open な kind='conversation' 行があれば **開き直さず**
+    それを返す (再入 = 会話継続。user_conversation Track の再 activate は
+    新しい会話の開始とは限らない)。
+
+    occurrence_id の生成規則 (決定論):
+
+    - 同じ Building に他ペルソナの open 会話行があれば、その occurrence_id を
+      共有する (同じ場の会話 = 同一の世界的出来事)
+    - 無ければ ``conv:{building_id}:{開始epoch秒}`` を新規発行
+    - building_id 不明 (None) の会話は束ねようが無いので occurrence_id なし
+      (NULL = 単独。§8.1)
+    """
+    existing = get_open_episode(manager, persona_id, kind=KIND_CONVERSATION)
+    if existing is not None:
+        LOGGER.debug(
+            "[episode] conversation already open (idempotent): %s persona=%s",
+            existing.get("episode_ref"), persona_id,
+        )
+        return existing
+
+    occurrence_id: Optional[str] = None
+    if building_id:
+        db = manager.SessionLocal()
+        try:
+            occurrence_id = _shared_conversation_occurrence(db, building_id)
+        finally:
+            db.close()
+        if occurrence_id is None:
+            occurrence_id = f"conv:{building_id}:{_now_epoch()}"
+
+    return open_episode(
+        manager,
+        persona_id,
+        KIND_CONVERSATION,
+        building_id=building_id,
+        participants=participants,
+        origin_ref=origin_ref,
+        occurrence_id=occurrence_id,
+    )
+
+
+def close_conversation_episode(
+    manager: Any,
+    persona_id: str,
+    *,
+    digest_ref: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """開いている会話の出来事を閉じる。無ければ no-op で None を返す。
+
+    会話終了 (wait_response タイムアウト / シムの leave イベント) から呼ばれる。
+    閉じるのは「最後に開いた open な conversation 行」1 件のみ (会話は同時に
+    ひとつ — 排他性は出来事側の性質 §8)。
+    """
+    open_conv = get_open_episode(manager, persona_id, kind=KIND_CONVERSATION)
+    if open_conv is None:
+        LOGGER.debug(
+            "[episode] close_conversation: no open conversation (persona=%s); no-op",
+            persona_id,
+        )
+        return None
+    return close_episode(
+        manager, persona_id, open_conv["episode_id"], digest_ref=digest_ref,
+    )

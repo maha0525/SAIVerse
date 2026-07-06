@@ -279,6 +279,48 @@ class UserConversationTrackHandler:
         return personas.get(persona_id)
 
     # ------------------------------------------------------------------
+    # 会話の出来事 (Episode) の開き (life_concept_map.md §8.1)
+    # ------------------------------------------------------------------
+
+    def _open_conversation_episode(self, persona_id: str, track: ActionTrack) -> None:
+        """kind='conversation' の出来事を開く (冪等 — 既に開いていれば no-op)。
+
+        呼び出し点は「会話が running になった / running のままユーザーが話した」
+        瞬間。閉じ (close) は wait_response タイムアウト
+        (SAIVerseManager._wait_response_timeout_callback) が担う。
+        出来事は記録であってペルソナの認知・行動には影響しない — 失敗しても
+        会話経路を止めない (WARN のみ)。
+        """
+        if self.manager is None or getattr(self.manager, "SessionLocal", None) is None:
+            return
+        try:
+            user_id: Optional[str] = None
+            try:
+                md = json.loads(track.track_metadata) if track.track_metadata else {}
+                if isinstance(md, dict) and md.get("user_id") is not None:
+                    user_id = str(md["user_id"])
+            except (TypeError, ValueError):
+                pass
+            persona = self._lookup_persona(persona_id)
+            building_id = getattr(persona, "current_building_id", None)
+            participants = [persona_id] + ([user_id] if user_id else [])
+
+            from saiverse.episodes import open_conversation_episode
+            open_conversation_episode(
+                self.manager,
+                persona_id,
+                building_id=building_id,
+                participants=participants,
+                origin_ref=f"track:{track.short_id}" if track.short_id is not None else None,
+            )
+        except Exception:
+            logging.warning(
+                "[user-conv-handler] Failed to open conversation episode "
+                "(persona=%s track=%s) — conversation continues without it",
+                persona_id, getattr(track, "track_id", "?"), exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
     # Track 状態遷移フック (pulse_dispatch.md §5)
     # ------------------------------------------------------------------
 
@@ -315,6 +357,10 @@ class UserConversationTrackHandler:
             "[user-conv-handler] on_track_activated: track=%s persona=%s pulse=%s suppress_pulse=%s",
             track.track_id, persona_id, pulse_id, suppress_pulse,
         )
+        # 会話の出来事 (Episode) を開く (冪等)。create(initial_status=running) と
+        # activate の両経路がこの hook を通るため、running 遷移 = 会話開始の
+        # 単一の開き点になる (life_concept_map.md §8.1)。
+        self._open_conversation_episode(persona_id, track)
         # Track 切替通知を SAIMemory に注入する。これにより:
         # - ケース1 (ユーザー発話 → alert → metalayer → activate)
         # - ケース2 (自律 tick → metalayer → activate)
@@ -456,10 +502,14 @@ class UserConversationTrackHandler:
         elif track.status == STATUS_RUNNING:
             # 直接経路 (1-A 既存 running): activate は走らないので hook は発火
             # しない。invoke_main_line で直接 main_line Pulse を起動する。
+            # 会話出来事の開きも冪等に通す — 前回タイムアウトで閉じた後も
+            # Track が running のまま残る経路 (再起動直後等) で、発話 = 会話
+            # 再開の瞬間に新しい出来事が開くようにするため。
             logging.debug(
                 "[user-conv-handler] Track %s is running; direct main-line response",
                 track.track_id,
             )
+            self._open_conversation_episode(persona_id, track)
             invoke_main_line(track.track_id)
         else:
             # 熟慮経路 (1-B): set_alert → MetaLayer → activate されれば

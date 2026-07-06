@@ -1424,6 +1424,31 @@ class SEARuntime:
                         "users": audience_users,
                     }
 
+        # -- 層0タグ: 開いている出来事の参照を自動継承 (life_concept_map.md §9.1) --
+        # ペルソナに open な出来事があれば origin_episode に episode_ref を刻む
+        # (origin_track_id の一般化)。開いている出来事が無ければ何も付けない。
+        # 高頻度経路のため get_open_episode は per-persona キャッシュ
+        # (saiverse/episodes.py) で DB を引かずに済む。記録専用 — 失敗しても
+        # メッセージ保存を止めない。
+        l0_persona_id = getattr(persona, "persona_id", None)
+        if (
+            l0_persona_id
+            and "origin_episode" not in msg_metadata
+            and self.manager is not None
+            and getattr(self.manager, "SessionLocal", None) is not None
+        ):
+            try:
+                from saiverse.episodes import get_open_episode
+                open_ep = get_open_episode(self.manager, l0_persona_id)
+                if open_ep and open_ep.get("episode_ref"):
+                    msg_metadata["origin_episode"] = open_ep["episode_ref"]
+            except Exception:
+                LOGGER.debug(
+                    "[_store_memory] open-episode lookup failed (persona=%s); "
+                    "message stored without origin_episode",
+                    l0_persona_id, exc_info=True,
+                )
+
         if msg_metadata:
             message["metadata"] = msg_metadata
 

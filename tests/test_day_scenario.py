@@ -538,6 +538,66 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     assert path.read_text(encoding="utf-8") == report
 
 
+def test_standard_day_episodes_recorded(standard_run):
+    """活性化 A1: 一日の実経路から出来事 (Episode) 行が生まれる。
+
+    期待列 (short_id 順): 知るコマ (slot) → その作業セッション (work_session)
+    → 作るコマ (slot) → その作業セッション → 会話 (conversation、15:00-15:30)
+    → 休むコマ (presence、record_level 透過)。skip されたコマは無いので 6 行。
+    """
+    manager, result, elapsed, created_item_ids = standard_run
+    from database.models import Episode
+    from saiverse import episodes as ep_mod
+
+    db = manager.SessionLocal()
+    try:
+        rows = (
+            db.query(Episode)
+            .filter(Episode.PERSONA_ID == PERSONA_ID)
+            .order_by(Episode.SHORT_ID.asc())
+            .all()
+        )
+        for r in rows:
+            db.expunge(r)
+    finally:
+        db.close()
+
+    assert [r.KIND for r in rows] == [
+        "slot", "work_session", "slot", "work_session", "conversation", "presence",
+    ]
+    # 一日の終わりには全て閉じている
+    assert all(r.STATUS == ep_mod.STATUS_CLOSED for r in rows)
+
+    # コマ出来事: meta.title = コマの title、origin_ref = コマ参照
+    slot_learn = rows[0]
+    meta_learn = json.loads(slot_learn.META_JSON)
+    assert meta_learn["title"] == "標本の材料を探す"
+    assert slot_learn.ORIGIN_REF == f"day_plan:{PERSONA_ID}:{PLAN_DATE}:0"
+    assert slot_learn.BUILDING_ID == "library"
+
+    # 作業セッション出来事: 出自 = 包んでいるコマ出来事、meta 書式契約 (§14)
+    ws_learn = rows[1]
+    assert ws_learn.ORIGIN_REF == f"episode:{slot_learn.SHORT_ID}"
+    meta_ws_create = json.loads(rows[3].META_JSON)
+    assert meta_ws_create["title"] == "共有文の下書きを書く"
+    assert meta_ws_create["artifacts"] == created_item_ids
+    assert rows[3].DIGEST_REF == "message:msg-x"  # FakeWorkRuntime の返す固定 id
+
+    # 会話出来事: 15:00 開始 / 15:30 終了 (仮想クロック経由の epoch)
+    conv = rows[4]
+    assert conv.STARTED_AT == int(datetime(2026, 7, 4, 15, 0, 0).timestamp())
+    assert conv.ENDED_AT == int(datetime(2026, 7, 4, 15, 30, 0).timestamp())
+    assert PERSONA_ID in json.loads(conv.PARTICIPANTS_JSON)
+    # 15:00 時点の現在地 (14:00 に工房へ移動済み)
+    assert conv.BUILDING_ID == "workshop"
+    assert conv.OCCURRENCE_ID == f"conv:workshop:{conv.STARTED_AT}"
+
+    # 休むコマ: presence + record_level 透過 (「実行済み」と偽らない)
+    rest = rows[5]
+    meta_rest = json.loads(rest.META_JSON)
+    assert meta_rest["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+
+
 # ---------------------------------------------------------------------------
 # 実 LLM モードのユーザー会話経路 (バグ回帰: 2026-07-05 クオン一日シム)
 # ---------------------------------------------------------------------------

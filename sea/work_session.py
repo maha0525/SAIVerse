@@ -99,6 +99,7 @@ def run_work_session(
     *,
     manager: Optional[Any] = None,
     track_id: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> WorkSessionResult:
     """指示書とラウンド予算を渡して作業セッションを 1 本運転する。
 
@@ -116,6 +117,9 @@ def run_work_session(
             (ツール実行中の contextvar) から解決する。
         track_id: セッションが属する Track の ID (あれば)。ラインの
             origin_track_id として記録される。
+        title: セッションの短い表題 (コマの title / タスク題)。出来事
+            (Episode) の ``meta.title`` に透過する (meta 書式契約
+            life_concept_map.md §14)。省略可。
 
     Returns:
         WorkSessionResult。例外は握り潰さず LOGGER に記録した上で
@@ -138,6 +142,7 @@ def run_work_session(
     pulse_ctx: Optional[Any] = None
     frame_pushed = False
     items_before: Optional[Set[str]] = None
+    episode_ref: Optional[str] = None  # 開いた出来事の参照 (close 用)
 
     try:
         # ---- setup: manager / persona / runtime ----
@@ -170,6 +175,14 @@ def run_work_session(
         # クロック (シムモード) 下では実時刻刻印と必ずズレるため。ID 集合差分
         # なら時計に依存しない。
         items_before = _snapshot_item_ids(manager, persona_id)
+
+        # ---- 出来事 (Episode) を開く: kind='work_session' ----
+        # コマ発火から呼ばれた場合、開いている kind='slot' の出来事が「出自」。
+        # コマ外 (直接呼び出し) では task_ref を出自として残す。出来事は記録
+        # 専用でセッションの運転には影響しない — 失敗は WARN のみ。
+        episode_ref = _open_ws_episode(
+            manager, persona_id, building_id, task_ref=task_ref, title=title,
+        )
 
         # ---- PulseContext + WORKER ライン ----
         pulse_id = str(uuid.uuid4())
@@ -333,6 +346,7 @@ def run_work_session(
             digest_error = f"digest failed: {type(exc).__name__}: {exc}"
 
         ended_at = clock.now()
+        digest_ref: Optional[str] = None
         if digest:
             ws_meta: Dict[str, Any] = {
                 "work_session": {
@@ -349,7 +363,8 @@ def run_work_session(
                 ws_meta["work_session"]["extra"] = dict(metadata)
             # committed はこの 1 件のみ。WORKER フレームの volatile 解決を
             # 明示引数で上書きし、メインライン context に乗る形で保存する。
-            runtime._store_memory(
+            # message id は出来事の digest_ref (再訪の鍵 §9) に使う。
+            digest_msg_id = runtime._store_memory(
                 persona, digest, role="assistant",
                 tags=[DIGEST_TAG], pulse_id=pulse_id,
                 metadata=ws_meta,
@@ -357,12 +372,22 @@ def run_work_session(
                 line_role="main_line",
                 scope="committed",
                 origin_track_id=track_id,
+                return_message_id=True,
             )
+            if isinstance(digest_msg_id, str) and digest_msg_id:
+                digest_ref = f"message:{digest_msg_id}"
             pulse_ctx.append(PulseLogEntry(
                 role="assistant", content=digest,
                 node_id="work_session_digest",
                 playbook_name=WORK_SESSION_PLAYBOOK_NAME,
             ))
+
+        # ---- 出来事を閉じる (meta 書式契約: title / artifacts + digest_ref) ----
+        _close_ws_episode(
+            manager, persona_id, episode_ref,
+            title=title, artifacts=artifacts,
+            ended_reason=ended_reason, digest_ref=digest_ref,
+        )
 
         LOGGER.info(
             "[work_session] end: persona=%s ended_reason=%s rounds=%d/%d "
@@ -395,6 +420,12 @@ def run_work_session(
                     "[work_session] artifact collection failed on error path",
                     exc_info=True,
                 )
+        # エラー終了でも出来事は閉じる (実行区間は終わった — 事実の記録)。
+        _close_ws_episode(
+            manager, persona_id, episode_ref,
+            title=title, artifacts=artifacts,
+            ended_reason=ENDED_ERROR, digest_ref=None,
+        )
         return WorkSessionResult(
             digest="",
             artifacts=artifacts,
@@ -423,6 +454,86 @@ def run_work_session(
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _open_ws_episode(
+    manager: Any,
+    persona_id: str,
+    building_id: Optional[str],
+    *,
+    task_ref: Optional[str],
+    title: Optional[str],
+) -> Optional[str]:
+    """kind='work_session' の出来事を開き、episode_ref を返す (失敗時 None)。
+
+    出自 (origin_ref): 開いている kind='slot' の出来事 (コマ発火の実行区間 —
+    day_plan._fire_slot が開く) があればその参照。コマ外の直接呼び出しでは
+    task_ref。どちらも無ければ None (= 自発)。
+    """
+    try:
+        from saiverse import episodes
+
+        origin_ref: Optional[str] = None
+        slot_ep = episodes.get_open_episode(
+            manager, persona_id, kind=episodes.KIND_SLOT,
+        )
+        if slot_ep is not None and slot_ep.get("episode_ref"):
+            origin_ref = slot_ep["episode_ref"]
+        elif task_ref:
+            origin_ref = task_ref
+
+        meta = {"title": title} if title else None
+        ep = episodes.open_episode(
+            manager, persona_id, episodes.KIND_WORK_SESSION,
+            building_id=building_id,
+            participants=[persona_id],
+            origin_ref=origin_ref,
+            meta=meta,
+        )
+        return ep.get("episode_ref")
+    except Exception:
+        LOGGER.warning(
+            "[work_session] failed to open episode (persona=%s) — "
+            "session continues without it", persona_id, exc_info=True,
+        )
+        return None
+
+
+def _close_ws_episode(
+    manager: Any,
+    persona_id: str,
+    episode_ref: Optional[str],
+    *,
+    title: Optional[str],
+    artifacts: List[str],
+    ended_reason: str,
+    digest_ref: Optional[str],
+) -> None:
+    """作業セッションの出来事を閉じる (meta 書式契約 life_concept_map.md §14)。
+
+    ``meta.title`` / ``meta.artifacts`` はフロント (lib/episodeText.ts) が読む
+    キー名 — 変えないこと。事実の記録のみを書く (意味づけは書かない §9)。
+    """
+    if not episode_ref or manager is None:
+        return
+    try:
+        from saiverse import episodes
+
+        meta: Dict[str, Any] = {
+            "artifacts": list(artifacts),
+            "ended_reason": ended_reason,
+        }
+        if title:
+            meta["title"] = title
+        episodes.close_episode(
+            manager, persona_id, episode_ref,
+            digest_ref=digest_ref, meta=meta,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[work_session] failed to close episode %s (persona=%s)",
+            episode_ref, persona_id, exc_info=True,
+        )
 
 
 def _resolve_manager_from_context() -> Optional[Any]:
