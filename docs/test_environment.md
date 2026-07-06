@@ -53,6 +53,17 @@ python scripts/inspect_world.py errors                       # WARNING 以上の
 # --env test を省略すると本番 (~/.saiverse)。すべて読み取り専用
 ```
 
+## 会話テスト (run_conversation.py)
+
+台本 (複数ターンのユーザー発話) をテスト環境のペルソナへ実チャット経路で流し、
+transcript を得ます（実 LLM・実コスト。設計は `docs/intent/conversation_runner.md`）：
+
+```bash
+python scripts/run_conversation.py --persona <id> --message "おはよう" --message "昨日何してた？"
+python scripts/run_conversation.py --script <台本.json>
+# 環境変数未設定なら自動で test_data/ を指す。本番 DB を指すと起動拒否
+```
+
 ## コマンド詳細
 
 ### setup_test_env.py
