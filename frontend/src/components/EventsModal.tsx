@@ -17,9 +17,14 @@ import styles from './EventsModal.module.css';
 interface EventsModalProps {
     isOpen: boolean;
     onClose: () => void;
+    /** 開いた時点のペルソナ絞り込み (ライフビューの「今日のできごとを見る」用)。
+        モーダルは閉じると unmount されるため、次に開く時にまた反映される。 */
+    initialPersonaId?: string | null;
+    /** 「いま」行のペルソナ名クリックでその子のライフビューを開く (EventsTimeline へ中継)。 */
+    onOpenLifeView?: (persona: { id: string; name: string }) => void;
 }
 
-export default function EventsModal({ isOpen, onClose }: EventsModalProps) {
+export default function EventsModal({ isOpen, onClose, initialPersonaId, onOpenLifeView }: EventsModalProps) {
     if (!isOpen) return null;
 
     return (
@@ -30,7 +35,7 @@ export default function EventsModal({ isOpen, onClose }: EventsModalProps) {
                     <button className={styles.closeBtn} onClick={onClose}><X size={22} /></button>
                 </div>
                 <div className={styles.body}>
-                    <EventsTimeline />
+                    <EventsTimeline initialPersonaId={initialPersonaId} onOpenLifeView={onOpenLifeView} />
                 </div>
             </div>
         </ModalOverlay>

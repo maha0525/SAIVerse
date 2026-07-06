@@ -122,7 +122,16 @@ function groupEpisodes(episodes: EpisodeItem[]): EpisodeGroup[] {
     return groups;
 }
 
-export default function EventsTimeline() {
+interface EventsTimelineProps {
+    /** 初期のペルソナ絞り込み。ライフビューの「今日のできごとを見る」から
+        開いたとき、その子のチップを選択済みの状態で始める。 */
+    initialPersonaId?: string | null;
+    /** 「いま」(open 行) のペルソナ名クリックでその子のライフビューを開く。
+        置けない画面 (/events 直リンクページ等) では省略し、名前は非クリックのまま。 */
+    onOpenLifeView?: (persona: { id: string; name: string }) => void;
+}
+
+export default function EventsTimeline({ initialPersonaId = null, onOpenLifeView }: EventsTimelineProps = {}) {
     const [cityId, setCityId] = useState<number | null>(null);
     const [cityLoadFailed, setCityLoadFailed] = useState(false);
     const [data, setData] = useState<EpisodesResponse | null>(null);
@@ -133,7 +142,7 @@ export default function EventsTimeline() {
     // 全ペルソナの名前解決 (会話の「相手」表示用)
     const [personaNames, setPersonaNames] = useState<Map<string, string>>(new Map());
     // チップ絞り込み (null = みんな)
-    const [selectedPersonaId, setSelectedPersonaId] = useState<string | null>(null);
+    const [selectedPersonaId, setSelectedPersonaId] = useState<string | null>(initialPersonaId);
     // 予定と見比べるトグル + その子の day-plan
     const [showPlan, setShowPlan] = useState(false);
     const [plan, setPlan] = useState<DayPlanResponse | null>(null);
@@ -282,6 +291,9 @@ export default function EventsTimeline() {
     const renderGroupCard = (group: EpisodeGroup, ongoing: boolean) => {
         const primary = group.episodes[0];
         const groupIds = group.members.map(m => m.id);
+        // 「いま」行のペルソナ名はライフビュー (生中継) への入口にする。
+        // 閉じた行は過去のできごとなので生中継に繋がず、そのまま。
+        const memberClickable = ongoing && !!onOpenLifeView;
         const sentence = buildEpisodeSentence(primary, {
             resolveName,
             groupPersonaIds: groupIds,
@@ -306,7 +318,22 @@ export default function EventsTimeline() {
                             ))}
                         </div>
                         <span className={styles.names}>
-                            {group.members.map(mem => mem.name).join('・')}
+                            {group.members.map((mem, i) => (
+                                <span key={mem.id}>
+                                    {i > 0 && '・'}
+                                    {memberClickable ? (
+                                        <button
+                                            className={styles.nameLink}
+                                            onClick={() => onOpenLifeView!({ id: mem.id, name: mem.name })}
+                                            title={`${mem.name}のライフビューを開く`}
+                                        >
+                                            {mem.name}
+                                        </button>
+                                    ) : (
+                                        mem.name
+                                    )}
+                                </span>
+                            ))}
                         </span>
                         {ongoing && <span className={styles.liveDot} />}
                     </div>

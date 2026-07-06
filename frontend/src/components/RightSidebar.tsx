@@ -19,6 +19,7 @@ import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
 import PersonaProfileModal from './PersonaProfileModal';
 import LifeView from './LifeView';
+import EventsModal from './EventsModal';
 import ModalOverlay from './common/ModalOverlay';
 import fixtureStyles from './FixtureModal.module.css';
 import MemoryModal from './MemoryModal';
@@ -106,6 +107,10 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // ライフビュー (観察面サイドパネル)。インジケータ直クリックでも開くため、
     // PersonaMenu の selectedPersona とは独立に対象を保持する。
     const [lifeViewPersona, setLifeViewPersona] = useState<Occupant | null>(null);
+    // ライフビューの「今日のできごとを見る」から開くできごとモーダルの絞り込み対象。
+    // Sidebar 側の EventsModal とは別インスタンス (どちらも self-contained なので
+    // ローカル state で足りる。null = 閉じている)。
+    const [eventsPersonaId, setEventsPersonaId] = useState<string | null>(null);
 
     // Keep track of which persona is active for modals
     // When opening a modal, we use selectedPersona's ID.
@@ -186,6 +191,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         setShowProfile(false);
         setShowBuildingSettings(false);
         setLifeViewPersona(null);
+        setEventsPersonaId(null);
     }, [details?.id]);
 
     // Polling for real-time updates when sidebar is open
@@ -641,8 +647,24 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             setLifeViewPersona(null);
                             if (target) openMemoryFor(target);
                         }}
+                        // できごとモーダル (z1000) はパネル (z900) の上に重なるので
+                        // ライフビューは開いたまま。モーダルを閉じれば戻ってくる。
+                        onOpenEvents={() => setEventsPersonaId(lifeViewPersona.id)}
                     />
                 )}
+
+                {/* できごとモーダル (ライフビューからこの子で絞り込んで開く)。
+                    「いま」行のペルソナ名クリックはライフビューへ戻す双方向リンク:
+                    モーダルを閉じてから対象を差し替える。 */}
+                <EventsModal
+                    isOpen={eventsPersonaId != null}
+                    onClose={() => setEventsPersonaId(null)}
+                    initialPersonaId={eventsPersonaId}
+                    onOpenLifeView={(p) => {
+                        setEventsPersonaId(null);
+                        setLifeViewPersona({ id: p.id, name: p.name });
+                    }}
+                />
             </div>
         </>
     );

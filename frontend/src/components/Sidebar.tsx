@@ -9,6 +9,7 @@ import PersonaWizard from './PersonaWizard';
 import TutorialSelectModal from './tutorial/TutorialSelectModal';
 import AddonManagerModal from './AddonManagerModal';
 import EventsModal from './EventsModal';
+import LifeView from './LifeView';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -69,6 +70,11 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [isAddonManagerOpen, setIsAddonManagerOpen] = useState(false);
     // できごとはページ遷移でなくモーダルで開く (チャットの書きかけメッセージを失わないため)
     const [isEventsOpen, setIsEventsOpen] = useState(false);
+    // できごとの初期絞り込み (ライフビューの「今日のできごとを見る」から再度開く時のみ設定)
+    const [eventsPersonaId, setEventsPersonaId] = useState<string | null>(null);
+    // できごとの「いま」行から開くライフビュー。RightSidebar のライフビューとは
+    // 別インスタンス (LifeView は personaId だけで self-contained なのでローカルで足りる)
+    const [lifeViewTarget, setLifeViewTarget] = useState<{ id: string; name: string } | null>(null);
     const [developerMode, setDeveloperMode] = useState(false);
     const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
 
@@ -562,8 +568,38 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
 
                 <EventsModal
                     isOpen={isEventsOpen}
-                    onClose={() => setIsEventsOpen(false)}
+                    onClose={() => {
+                        setIsEventsOpen(false);
+                        // メニューから次に開く時は「みんな」に戻す
+                        setEventsPersonaId(null);
+                    }}
+                    initialPersonaId={eventsPersonaId}
+                    onOpenLifeView={(p) => {
+                        // できごと (閉じた列) からその子の生中継へ: モーダルを
+                        // 閉じてからライフビューを開く (重なり回避)
+                        setIsEventsOpen(false);
+                        setEventsPersonaId(null);
+                        setLifeViewTarget(p);
+                    }}
                 />
+
+                {/* できごとから開くライフビュー (観察面サイドパネル)。
+                    「今日のできごとを見る」で絞り込み済みのできごとへ戻れる
+                    (モーダル z1000 がパネル z900 の上に重なるので開いたままでよい)。
+                    メモリーモーダルの機構は Sidebar に無いため onOpenMemory は渡さない
+                    (「詳しく見る」リンクが出ないだけで他は同じ)。 */}
+                {lifeViewTarget && (
+                    <LifeView
+                        isOpen={!!lifeViewTarget}
+                        onClose={() => setLifeViewTarget(null)}
+                        personaId={lifeViewTarget.id}
+                        personaName={lifeViewTarget.name}
+                        onOpenEvents={() => {
+                            setEventsPersonaId(lifeViewTarget.id);
+                            setIsEventsOpen(true);
+                        }}
+                    />
+                )}
             </aside>
         </>
     );

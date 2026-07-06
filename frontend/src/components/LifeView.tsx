@@ -66,6 +66,10 @@ interface LifeViewProps {
     personaName: string;
     /** 「詳しく見る」リンクからメモリーモーダル (Pulse タイムライン) を開く */
     onOpenMemory?: () => void;
+    /** 「今日のできごとを見る」リンクから、この子で絞り込んだできごと
+        (EventsModal) を開く。モーダル (z1000) はこのパネル (z900) の上に
+        重なるので、ライフビューは開いたままでよい (閉じれば戻ってくる)。 */
+    onOpenEvents?: () => void;
 }
 
 const STATE_BADGES: Record<string, { dot: string; label: string }> = {
@@ -100,7 +104,7 @@ function fmtEta(seconds: number | null): string {
     return `あと${Math.ceil(seconds / 60)}分`;
 }
 
-export default function LifeView({ isOpen, onClose, personaId, personaName, onOpenMemory }: LifeViewProps) {
+export default function LifeView({ isOpen, onClose, personaId, personaName, onOpenMemory, onOpenEvents }: LifeViewProps) {
     const [data, setData] = useState<ActivityViewData | null>(null);
     // 今日の予定表 (画面 B: day-plan の読み取り専用ストリップ)
     const [dayPlan, setDayPlan] = useState<DayPlanData | null>(null);
@@ -369,6 +373,13 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
                             </>
                         ) : (
                             <div className={styles.muted}>まだ自律行動の記録がありません</div>
+                        )}
+                        {/* 街の日記 (できごと) をこの子で絞り込んで開く。
+                            recent が空でも閉じたできごとは存在しうるので分岐の外に置く */}
+                        {onOpenEvents && (
+                            <button className={styles.detailLink} onClick={onOpenEvents}>
+                                今日のできごとを見る →
+                            </button>
                         )}
                     </div>
 

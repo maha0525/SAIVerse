@@ -210,6 +210,21 @@
     white-space: nowrap;
 }
 
+/* 「いま」行のペルソナ名リンク (ライフビューへの入口) */
+.nameLink {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-weight: 600;
+    color: var(--accent-primary);
+    cursor: pointer;
+}
+
+.nameLink:hover {
+    text-decoration: underline;
+}
+
 .cardBody {
     font-size: 0.9rem;
     color: var(--text-primary);
