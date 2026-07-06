@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 335（tag グループ: 22）
+**エンドポイント数**: 339（tag グループ: 23）
 
 ## addon
 
@@ -134,6 +134,12 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/db/tables/{table_name}` | Insert or Update a row. |
 | DELETE | `/api/db/tables/{table_name}` | Delete a row by Primary Key(s). |
 
+## episodes
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/episodes` | City に属するペルソナの当日 episodes を返す (画面 A: 今日のできごと)。 |
+
 ## info
 
 | メソッド | パス | 説明 |
@@ -236,6 +242,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | PATCH | `/api/people/{persona_id}/config` | Update persona configuration. |
 | GET | `/api/people/{persona_id}/core-memory` | 既存コア記憶の一覧 (読み取り専用)。編集はペルソナの領分のため UI からは追加のみ。 |
 | POST | `/api/people/{persona_id}/core-memory/scene` | アンカー周辺の会話を scene としてコア記憶に刻む。 |
+| GET | `/api/people/{persona_id}/day-plan` | ペルソナの時間割 (画面 B: 今日の予定表)。plan を持たない日は空配列。 |
 | POST | `/api/people/{persona_id}/debug/fire-meta-judgment` | メタ判断 (on_periodic_tick) を 1 回手動発火. force=True で抑止 (Active/wait_response) を無視. |
 | POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | 指定 autonomous Track の sub_line Pulse を 1 回手動起動 (30秒間隔を無視). |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
@@ -251,6 +258,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/import/official/preview` | Preview ChatGPT export file and return conversation list for selection. |
 | GET | `/api/people/{persona_id}/import/official/status` | Get the status of official import task. |
 | GET | `/api/people/{persona_id}/items` | List items held by a persona. |
+| GET | `/api/people/{persona_id}/marks` | メッセージ群に付いた観測点 (mark) をバッチで返す (画面 C: ハイライト)。 |
 | POST | `/api/people/{persona_id}/memopedia/build-from-logs` | Start building Memopedia pages from chat logs as a background job. |
 | GET | `/api/people/{persona_id}/memopedia/export` | Export all Memopedia pages as JSON. |
 | POST | `/api/people/{persona_id}/memopedia/generate` | Start Memopedia page generation as a background job. |
@@ -279,6 +287,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | POST | `/api/people/{persona_id}/organize-memory` | Clear all metabolism anchors and trigger metabolism (Chronicle generation + anchor reset). |
+| GET | `/api/people/{persona_id}/profile-tree` | ペルソナのプロフィール用の目的の木 (画面 D)。読み取り専用の集約。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
 | GET | `/api/people/{persona_id}/pulse-timeline` | messages を pulse_id でグルーピングした Pulse サマリ一覧 (新しい順)。 |
