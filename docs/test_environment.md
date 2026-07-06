@@ -38,6 +38,21 @@ python test_fixtures/test_api.py         # フルテスト
 python test_fixtures/test_api.py --quick # クイックテスト（LLM除く）
 ```
 
+## 状態の検分 (inspect_world.py)
+
+本番・テスト環境どちらの状態も、読み取り専用の検分 CLI で確認できます
+（sqlite を直接叩く必要はありません。設計は `docs/intent/agent_inspection_cli.md`）：
+
+```bash
+python scripts/inspect_world.py personas --env test          # ペルソナ一覧
+python scripts/inspect_world.py memory <persona> --env test  # 記憶 (タグ/期間/grep フィルタ)
+python scripts/inspect_world.py tracks <persona> --env test  # Track 状態
+python scripts/inspect_world.py day-plan <persona> --env test # 時間割
+python scripts/inspect_world.py llm-io --env test            # LLM I/O ログ
+python scripts/inspect_world.py errors                       # WARNING 以上のダイジェスト
+# --env test を省略すると本番 (~/.saiverse)。すべて読み取り専用
+```
+
 ## コマンド詳細
 
 ### setup_test_env.py
