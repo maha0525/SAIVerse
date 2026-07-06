@@ -30,7 +30,6 @@ from .track_manager import TrackManager
 from .note_manager import NoteManager
 from .meta_layer import MetaLayer
 from .pulse_dispatcher import PulseDispatcher
-from .pulse_scheduler import SubLineScheduler, is_subline_scheduler_enabled
 from .track_handlers import (
     AutonomousTrackHandler,
     SocialTrackHandler,
@@ -288,14 +287,13 @@ class SAIVerseManager(
             self.autonomous_track_handler.on_track_activated
         )
         # pulse_dispatch.md §7: ペルソナを動かす全イベントの一元的なディスパッチャ。
-        # 各起点コード (manager/runtime, SubLineScheduler, ScheduleManager,
-        # AutonomyManager, phenomena 系) は self.pulse_dispatcher 経由でイベントを
-        # 発火させる。経路選択 (直接 / 熟慮) と実行先の振り分けはここで担う。
+        # 各起点コード (manager/runtime, ScheduleManager, AutonomyManager,
+        # phenomena 系) は self.pulse_dispatcher 経由でイベントを発火させる。
+        # 経路選択 (直接 / 熟慮) と実行先の振り分けはここで担う。
+        # NOTE: 旧 SubLineScheduler (autonomous Track への 30 秒連続 Pulse) は
+        # 自律行動 v2 で廃止 (intent §9.3)。駆動は時間割のコマ発火
+        # (saiverse/day_plan.py) + 判断点 (saiverse/autonomy_wiring.py) が担う。
         self.pulse_dispatcher = PulseDispatcher(self)
-        # Phase C-3b: SubLineScheduler を生成 (start は startup 内で行う)。
-        # これにより running な連続実行型 Track のサブライン Pulse が定期的に
-        # 起動される (Intent A v0.13 / Intent B v0.10)。
-        self.subline_scheduler = SubLineScheduler(self)
         # デバッグコントローラー (debug_controller.md): 完全手動モード対象ペルソナ。
         # このセットに入った persona は wait_response timeout を予約しない
         # (_wait_response_timeout_provider が None を返す)。
@@ -308,7 +306,7 @@ class SAIVerseManager(
             "Initialized cognitive-model runtime layers "
             "(MetaLayer registered as alert observer, "
             "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
-            "SubLineScheduler + InternalAlertPoller + EventScheduler instantiated [will start at startup])."
+            "InternalAlertPoller + EventScheduler instantiated [will start at startup])."
         )
 
         # SEA runtime + Pulse controller (always enabled).
@@ -407,7 +405,7 @@ class SAIVerseManager(
 
         # ⚠️ 構築 / 起動 分離の不変条件:
         #   背景ループ (schedule_manager / phenomenon / integration /
-        #   subline_scheduler / internal_alert_poller / event_scheduler /
+        #   internal_alert_poller / event_scheduler /
         #   observer pull / AutonomyManager / 自律会話) の起動はここでは一切行わない。
         #   すべて start() に集約し、main.py がワールド初期化 (MCP 接続・addon 登録)
         #   完了後に 1 回だけ呼ぶ。これより前に pulse / capture が走ると、未初期化の
@@ -527,17 +525,9 @@ class SAIVerseManager(
         self.phenomenon_manager.start()
         self.integration_manager.start()
 
-        # SubLineScheduler: 自律 Track の pulse 駆動源。
-        # SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false で起動を抑止できる
-        # (動き出した自律行動を一時的に止めたい時の安全弁)。
-        if is_subline_scheduler_enabled():
-            self.subline_scheduler.start()
-            logging.info("Started SubLineScheduler.")
-        else:
-            logging.warning(
-                "SubLineScheduler is disabled by SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false. "
-                "Autonomous tracks will not run pulses until re-enabled and restarted."
-            )
+        # NOTE: 旧 SubLineScheduler の起動は自律行動 v2 で廃止 (intent §9.3)。
+        # autonomous Track への 30 秒連続 Pulse は存在しない。自律駆動は
+        # 起床判断が編成する時間割のコマ発火 (EventScheduler 予約) が担う。
 
         # Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構")。
         self.internal_alert_poller.start()
@@ -655,10 +645,11 @@ class SAIVerseManager(
         """Run autonomous pulse via PulseController.
 
         Args:
-            meta_playbook: auto pulse として起動する Playbook 名 (例:
-                SubLineScheduler から track_autonomous を回す用途)。
+            meta_playbook: auto pulse として起動する Playbook 名。
                 2026-05-01 の認知モデル移行以降は **必須**。None で呼ぶと
                 PulseController が ERROR ログを出して何もしない。
+                (旧 SubLineScheduler の track_autonomous 連続 Pulse は
+                自律行動 v2 で廃止 — intent §9.3。)
             args: Playbook 起動時に渡す引数。
 
         Discord visitors (DiscordVisitorStub) are handled by DiscordConnector,
@@ -1134,13 +1125,6 @@ class SAIVerseManager(
             {"city_id": self.city_id, "city_name": self.city_name},
         )
 
-        # Phase C-3b: Stop SubLineScheduler before saving persona state
-        if hasattr(self, "subline_scheduler") and self.subline_scheduler:
-            try:
-                self.subline_scheduler.stop()
-            except Exception:
-                logging.exception("Failed to stop SubLineScheduler")
-
         # Phase 4-e: Stop EventScheduler. pending callback は破棄される。
         if hasattr(self, "event_scheduler") and self.event_scheduler:
             try:
@@ -1211,6 +1195,24 @@ class SAIVerseManager(
         except Exception:
             logging.exception(
                 "[on_persona_registered] Failed to (re)schedule wait_response timeout: %s",
+                persona_id,
+            )
+
+        # 4. (自律行動 v2) 当日 day_plan のコマ予約を再確立 (冪等)。
+        #    コマの EventScheduler 予約はインメモリで、再起動で失われる。
+        #    Active なペルソナの pending / deferred コマを同 key で再 push する
+        #    (同 key 上書きなので二重発火しない。過去時刻は即時扱い —
+        #    起床済みの一日を再起動後に続きから駆動する)。Idle ペルソナは
+        #    再開 (Active 化) 後の watchdog が拾う。
+        try:
+            persona = self.personas.get(persona_id)
+            if persona is not None and getattr(persona, "activity_state", "Idle") == "Active":
+                from saiverse.day_plan import reschedule_pending_slots
+
+                reschedule_pending_slots(self, persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to reschedule day-plan slots: %s",
                 persona_id,
             )
 
@@ -1469,17 +1471,16 @@ class SAIVerseManager(
     def stop_autonomy(self, persona_id: str) -> Dict[str, Any]:
         """自律行動を実効的に停止する（停止ボタンと連続失敗リカバリの共用経路）。
 
-        ``ACTIVITY_STATE=Idle`` にするだけでは止まらない: AutonomyManager の定期
-        メタ判断 tick 予約は残り、SubLineScheduler は ACTIVITY_STATE を見ずに
-        running な autonomous Track を pulse し続ける（pulse_scheduler.py の
-        ``_tick_persona`` は ACTIVITY_STATE フィルタ未実装）。実効的に止めるには
-        次の 4 つを揃える必要がある。停止ボタン（activity/stop）とメタ判断連続
-        失敗リカバリ（MetaLayer._handle_persistent_failure）が同じ挙動になるよう
-        1 箇所に集約する（片方だけ直すと乖離するため）。
+        停止ボタン（activity/stop）とメタ判断連続失敗リカバリ
+        （MetaLayer._handle_persistent_failure）が同じ挙動になるよう 1 箇所に
+        集約する（片方だけ直すと乖離するため）。
 
-          1. AutonomyManager.stop() — 定期メタ判断 tick の予約 cancel
-          2. running な autonomous Track を全 pause — SubLineScheduler を止める
-          3. ACTIVITY_STATE → Idle（DB + in-memory）
+          1. AutonomyManager.stop() — watchdog tick の予約 cancel
+          2. running な autonomous Track を全 pause — Track の帳簿を待機状態に
+             揃える（旧 SubLineScheduler は v2 で廃止済みだが、running のまま
+             残すと get_running / メタ判断の状況分類が「作業中」と誤認する）
+          3. ACTIVITY_STATE → Idle（DB + in-memory）— 判断点・watchdog の
+             Active ゲートが全て閉じる
           4. 対ユーザー Track をサイレント activate — プロンプト待ちに戻す
 
         Returns:
@@ -1506,7 +1507,7 @@ class SAIVerseManager(
             self._autonomy_managers[persona_id] = am
         am.stop()
 
-        # 2. running な autonomous Track を pause（SubLineScheduler を実効停止）
+        # 2. running な autonomous Track を pause（帳簿を待機状態に揃える）
         paused: List[str] = []
         for track in tm.list_for_persona(persona_id, statuses=[STATUS_RUNNING]):
             if track.track_type != "autonomous":
@@ -1662,61 +1663,25 @@ class SAIVerseManager(
         """TrackManager から呼ばれる timeout 発火後 callback。
 
         ``TrackManager._handle_wait_response_timeout`` がペルソナの Track を既に
-        pending に落とした後に呼ばれる。本メソッドの責務は:
+        pending に落とした後に呼ばれる。実体は
+        ``saiverse.autonomy_wiring.handle_wait_response_timeout``:
 
-        1. 対ユーザー会話 Track なら、開いている会話の出来事 (Episode) を閉じる
-           — v2 の「会話終了」= wait_response タイムアウトによる pending 遷移
-           (life_concept_map.md §8「運用の線」。intent v2 §10-5)
-        2. ``MetaLayer.on_periodic_tick`` を ``trigger=wait_response_timeout``
-           context で発火 → ペルソナに「次に何をするか」決めさせる
-        3. AutonomyManager の次回 tick を ``now + interval`` に押し戻す
-           (= 直後に AutonomyManager の自動 tick が重なって二重発火しないように)
+        1. 対ユーザー会話 Track なら、開いている会話の出来事 (Episode) を閉じ、
+           **会話終了判断 (post_conversation)** を撃つ — v2 の「会話終了」=
+           wait_response タイムアウトによる pending 遷移 (intent v2 §10-5)。
+           1 往復も成立しなかった会話では撃たない (作話防止)
+        2. それ以外の wait_response Track (social 等) は従来どおり
+           ``MetaLayer.on_periodic_tick`` (イベント駆動メタ判断)
+        3. AutonomyManager (watchdog) の次回 tick を ``now + interval`` に押し戻す
         """
-        # (1) 会話の出来事を閉じる。出来事は記録であってペルソナの認知には
-        # 影響しない — 失敗しても後続 (メタ判断) を止めない。
         try:
-            track = self.track_manager.get(track_id)
-            if getattr(track, "track_type", None) == "user_conversation":
-                from saiverse.episodes import close_conversation_episode
-                close_conversation_episode(self, persona_id)
-        except Exception:
-            logging.warning(
-                "[wait_response_timeout] failed to close conversation episode: "
-                "persona=%s track=%s",
-                persona_id, track_id, exc_info=True,
-            )
-        try:
-            meta_layer = getattr(self, "meta_layer", None)
-            if meta_layer is None:
-                logging.warning(
-                    "[wait_response_timeout] meta_layer not initialized; "
-                    "cannot fire judgment for persona=%s track=%s",
-                    persona_id, track_id,
-                )
-            else:
-                meta_layer.on_periodic_tick(
-                    persona_id,
-                    context={
-                        "trigger": "wait_response_timeout",
-                        "track_id": track_id,
-                    },
-                )
-        except Exception:
-            logging.exception(
-                "[wait_response_timeout] meta-judgment fire failed: persona=%s track=%s",
-                persona_id, track_id,
-            )
+            from saiverse.autonomy_wiring import handle_wait_response_timeout
 
-        # AutonomyManager の次回 tick を押し戻す (存在すれば)
-        try:
-            autonomy_managers = getattr(self, "_autonomy_managers", None) or {}
-            am = autonomy_managers.get(persona_id)
-            if am is not None:
-                am.defer_next_tick()
+            handle_wait_response_timeout(self, persona_id, track_id)
         except Exception:
             logging.exception(
-                "[wait_response_timeout] defer_next_tick failed: persona=%s",
-                persona_id,
+                "[wait_response_timeout] handling failed: persona=%s track=%s",
+                persona_id, track_id,
             )
 
     # ------------------------------------------------------------------

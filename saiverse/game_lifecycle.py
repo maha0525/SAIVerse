@@ -600,9 +600,10 @@ class GameLifecycleService:
     # ------------------------------------------------------------------
     # ゲーム開始時に参加ペルソナへ game_session Track を initial_status=running で
     # 作成する。TrackManager が既存 running Track を pending に押し出すため、
-    # 進行中の行動はここで自然に退避される。SubLineScheduler は handler 未登録の
-    # track_type を auto-pulse しないので、この Track が勝手に回ることはない。
-    # メタ判断の停止は MetaLayer.on_periodic_tick 側の is_participating ゲートで行う。
+    # 進行中の行動はここで自然に退避される。連続 auto-pulse 機構は存在しない
+    # (旧 SubLineScheduler は自律行動 v2 で廃止) ので、この Track が勝手に回る
+    # ことはない。メタ判断の停止は MetaLayer.on_periodic_tick 側の
+    # is_participating ゲートで行う。
 
     GAME_TRACK_TYPE = "game_session"
 

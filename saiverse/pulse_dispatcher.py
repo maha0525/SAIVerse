@@ -1,8 +1,9 @@
 """PulseDispatcher: ペルソナを動かす全イベントの一元的なディスパッチャ。
 
 pulse_dispatch.md §7 で定義した統一ディスパッチャ層。各起点コード
-(manager/runtime, SubLineScheduler, ScheduleManager, AutonomyManager,
-phenomena 系) は本クラスのメソッドを通じてイベントを発火させる。
+(manager/runtime, ScheduleManager, AutonomyManager, phenomena 系) は
+本クラスのメソッドを通じてイベントを発火させる。
+(旧 SubLineScheduler 経路 2a は自律行動 v2 で廃止 — intent §9.3。)
 
 責務:
 - イベント受け口 (各起点が呼ぶ統一インターフェース)
@@ -79,48 +80,10 @@ class PulseDispatcher:
             )
             invoke_main_line()
 
-    # ------------------------------------------------------------------
-    # 自律 Track 連続 Pulse — SubLineScheduler の poll 経路 (2a)
-    # ------------------------------------------------------------------
-
-    def dispatch_subline_poll(
-        self,
-        persona_id: str,
-        persona: Any,
-        track: Any,
-        playbook_name: str,
-        args: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """SubLineScheduler の poll で running な連続実行型 Track を発見した
-        ときのディスパッチ。直接経路で ``run_sea_auto`` を呼ぶ。"""
-        building_id = getattr(persona, "current_building_id", None)
-        if not building_id:
-            LOGGER.debug(
-                "[dispatcher] subline_poll: no building_id (persona=%s); skipping",
-                persona_id,
-            )
-            return
-        run_sea_auto = getattr(self.manager, "run_sea_auto", None)
-        if run_sea_auto is None:
-            LOGGER.warning(
-                "[dispatcher] subline_poll: run_sea_auto unavailable (persona=%s)",
-                persona_id,
-            )
-            return
-        pulse_args = args if args is not None else {"track_id": track.track_id}
-        try:
-            run_sea_auto(
-                persona,
-                building_id,
-                occupants=[],
-                meta_playbook=playbook_name,
-                args=pulse_args,
-            )
-        except Exception:
-            LOGGER.exception(
-                "[dispatcher] subline_poll dispatch failed: persona=%s track=%s",
-                persona_id, track.track_id,
-            )
+    # NOTE: 旧 dispatch_subline_poll (SubLineScheduler の autonomous Track
+    # 連続 Pulse、経路 2a) は自律行動 v2 で廃止 (intent §9.3)。自律駆動は
+    # 時間割のコマ発火 (saiverse/day_plan.py) + 判断点
+    # (saiverse/autonomy_wiring.py) が担う。
 
     # ------------------------------------------------------------------
     # スケジュール時刻到来 (3)
@@ -205,7 +168,7 @@ class PulseDispatcher:
             )
 
     # ------------------------------------------------------------------
-    # 自律 tick — AutonomyManager の定期メタ判断 (2b)
+    # 自律 tick — AutonomyManager の定期 tick (2b, v2 で watchdog に縮退)
     # ------------------------------------------------------------------
 
     def dispatch_autonomy_tick(
@@ -213,22 +176,22 @@ class PulseDispatcher:
         persona_id: str,
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """AutonomyManager の定期 tick。熟慮経路で MetaLayer.on_periodic_tick。
+        """AutonomyManager の定期 tick。自律行動 v2 で **watchdog** に縮退した
+        (intent §4.2)。
 
-        段階 5 で MetaLayer も PulseController 経由 (並列レーン) に統一する
-        予定 (pulse_dispatch.md §6.3, §9.5)。現状は MetaLayer 直叩き。
+        旧: MetaLayer.on_periodic_tick (状況分類 → meta_judgment_* の定期
+        ディスパッチ)。この役割は判断点 5 種 (day_open / post_conversation /
+        post_session / on_event / day_close) が引き継いだため、定期経路は
+        「時間割の発火が途絶えたときだけ火を入れ直す見張り」
+        (saiverse.autonomy_wiring.watchdog_tick) になった。正常時は何もしない。
+        alert の即応経路 (MetaLayer.on_track_alert) はこの tick に依存せず存続。
         """
-        meta_layer = getattr(self.manager, "meta_layer", None)
-        if meta_layer is None:
-            LOGGER.warning(
-                "[dispatcher] autonomy_tick: meta_layer unavailable (persona=%s)",
-                persona_id,
-            )
-            return
         try:
-            meta_layer.on_periodic_tick(persona_id, context=context or {})
+            from saiverse.autonomy_wiring import watchdog_tick
+
+            watchdog_tick(self.manager, persona_id)
         except Exception:
             LOGGER.exception(
-                "[dispatcher] autonomy_tick dispatch failed: persona=%s",
+                "[dispatcher] autonomy_tick (watchdog) failed: persona=%s",
                 persona_id,
             )

@@ -29,27 +29,6 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `value` | TEXT | — |  |
 | `created_at` | DATETIME | NOT NULL |  |
 
-## building
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `CITYID` | INTEGER | FK→city.CITYID, NOT NULL |  |
-| `BUILDINGID` | VARCHAR(255) | PK, NOT NULL |  |
-| `BUILDINGNAME` | VARCHAR(32) | NOT NULL |  |
-| `CAPACITY` | INTEGER | NOT NULL, default=1 |  |
-| `SYSTEM_INSTRUCTION` | VARCHAR(4096) | NOT NULL, default='' |  |
-| `ENTRY_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
-| `AUTO_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
-| `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
-| `AUTO_INTERVAL_SEC` | INTEGER | NOT NULL, default=10 |  |
-| `IMAGE_PATH` | VARCHAR(512) | — |  |
-| `EXTRA_PROMPT_FILES` | TEXT | — |  |
-| `MAP_X` | FLOAT | — |  |
-| `MAP_Y` | FLOAT | — |  |
-| `PHYSICAL_VESSEL_ID` | VARCHAR(64) | — |  |
-| `REGION_ID` | VARCHAR(255) | FK→region.REGION_ID |  |
-| `FACILITY_ROLES` | TEXT | — |  |
-
 ## city
 
 | カラム | 型 | 制約 | 説明 |
@@ -130,6 +109,49 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 
+## tool
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `TOOLID` | INTEGER | PK, NOT NULL |  |
+| `TOOLNAME` | VARCHAR(32) | NOT NULL |  |
+| `MODULE_PATH` | VARCHAR(255) | NOT NULL |  |
+| `FUNCTION_NAME` | VARCHAR(255) | NOT NULL, default='' |  |
+| `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
+
+## blueprint
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `BLUEPRINT_ID` | INTEGER | PK, NOT NULL |  |
+| `CITYID` | INTEGER | FK→city.CITYID, NOT NULL |  |
+| `NAME` | VARCHAR(255) | NOT NULL |  |
+| `ENTITY_TYPE` | VARCHAR(50) | NOT NULL, default='ai' |  |
+| `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
+| `BASE_SYSTEM_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
+| `BASE_AVATAR` | VARCHAR(255) | — |  |
+
+## item_location
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `LOCATION_ID` | INTEGER | PK, NOT NULL |  |
+| `ITEM_ID` | VARCHAR(36) | FK→item.ITEM_ID, NOT NULL |  |
+| `OWNER_KIND` | VARCHAR(32) | NOT NULL |  |
+| `OWNER_ID` | VARCHAR(255) | NOT NULL |  |
+| `SLOT_NUMBER` | INTEGER | — |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
+
+## playbook_permission
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `id` | INTEGER | PK, NOT NULL |  |
+| `CITYID` | INTEGER | FK→city.CITYID, NOT NULL |  |
+| `playbook_name` | VARCHAR(255) | NOT NULL |  |
+| `permission_level` | VARCHAR(32) | NOT NULL, default='ask_every_time' |  |
+| `updated_at` | DATETIME | — |  |
+
 ## region
 
 | カラム | 型 | 制約 | 説明 |
@@ -148,28 +170,38 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 
-## tool
+## visiting_ai
 
 | カラム | 型 | 制約 | 説明 |
 |---|---|---|---|
-| `TOOLID` | INTEGER | PK, NOT NULL |  |
-| `TOOLNAME` | VARCHAR(32) | NOT NULL |  |
-| `MODULE_PATH` | VARCHAR(255) | NOT NULL |  |
-| `FUNCTION_NAME` | VARCHAR(255) | NOT NULL, default='' |  |
+| `id` | INTEGER | PK, NOT NULL |  |
+| `city_id` | INTEGER | FK→city.CITYID, NOT NULL |  |
+| `persona_id` | VARCHAR(255) | NOT NULL |  |
+| `profile_json` | VARCHAR | NOT NULL |  |
+| `status` | VARCHAR(32) | NOT NULL, default='requested' |  |
+| `reason` | VARCHAR(255) | — |  |
+| `created_at` | DATETIME | NOT NULL |  |
+
+## building
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `CITYID` | INTEGER | FK→city.CITYID, NOT NULL |  |
+| `BUILDINGID` | VARCHAR(255) | PK, NOT NULL |  |
+| `BUILDINGNAME` | VARCHAR(32) | NOT NULL |  |
+| `CAPACITY` | INTEGER | NOT NULL, default=1 |  |
+| `SYSTEM_INSTRUCTION` | VARCHAR(4096) | NOT NULL, default='' |  |
+| `ENTRY_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
+| `AUTO_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
-
-## user
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `USERID` | INTEGER | PK, NOT NULL |  |
-| `PASSWORD` | VARCHAR(32) | NOT NULL |  |
-| `USERNAME` | VARCHAR(32) | NOT NULL |  |
-| `MAILADDRESS` | VARCHAR(64) | — |  |
-| `LOGGED_IN` | BOOLEAN | NOT NULL, default=False |  |
-| `CURRENT_CITYID` | INTEGER | FK→city.CITYID |  |
-| `CURRENT_BUILDINGID` | VARCHAR(255) | FK→building.BUILDINGID |  |
-| `AVATAR_IMAGE` | VARCHAR(255) | — |  |
+| `AUTO_INTERVAL_SEC` | INTEGER | NOT NULL, default=10 |  |
+| `IMAGE_PATH` | VARCHAR(512) | — |  |
+| `EXTRA_PROMPT_FILES` | TEXT | — |  |
+| `MAP_X` | FLOAT | — |  |
+| `MAP_Y` | FLOAT | — |  |
+| `PHYSICAL_VESSEL_ID` | VARCHAR(64) | — |  |
+| `REGION_ID` | VARCHAR(255) | FK→region.REGION_ID |  |
+| `FACILITY_ROLES` | TEXT | — |  |
 
 ## ai
 
@@ -212,18 +244,6 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `USER_CONV_TIMEOUT_MINUTES` | INTEGER | — |  |
 | `LIFE_PURPOSE` | TEXT | — |  |
 
-## blueprint
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `BLUEPRINT_ID` | INTEGER | PK, NOT NULL |  |
-| `CITYID` | INTEGER | FK→city.CITYID, NOT NULL |  |
-| `NAME` | VARCHAR(255) | NOT NULL |  |
-| `ENTITY_TYPE` | VARCHAR(50) | NOT NULL, default='ai' |  |
-| `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
-| `BASE_SYSTEM_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
-| `BASE_AVATAR` | VARCHAR(255) | — |  |
-
 ## building_tool_link
 
 | カラム | 型 | 制約 | 説明 |
@@ -247,49 +267,18 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 
-## item_location
+## user
 
 | カラム | 型 | 制約 | 説明 |
 |---|---|---|---|
-| `LOCATION_ID` | INTEGER | PK, NOT NULL |  |
-| `ITEM_ID` | VARCHAR(36) | FK→item.ITEM_ID, NOT NULL |  |
-| `OWNER_KIND` | VARCHAR(32) | NOT NULL |  |
-| `OWNER_ID` | VARCHAR(255) | NOT NULL |  |
-| `SLOT_NUMBER` | INTEGER | — |  |
-| `UPDATED_AT` | DATETIME | NOT NULL |  |
-
-## playbook_permission
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `id` | INTEGER | PK, NOT NULL |  |
-| `CITYID` | INTEGER | FK→city.CITYID, NOT NULL |  |
-| `playbook_name` | VARCHAR(255) | NOT NULL |  |
-| `permission_level` | VARCHAR(32) | NOT NULL, default='ask_every_time' |  |
-| `updated_at` | DATETIME | — |  |
-
-## user_settings
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `USERID` | INTEGER | PK, FK→user.USERID, NOT NULL |  |
-| `TUTORIAL_COMPLETED` | BOOLEAN | NOT NULL, default=False |  |
-| `TUTORIAL_COMPLETED_AT` | DATETIME | — |  |
-| `LAST_TUTORIAL_VERSION` | INTEGER | NOT NULL, default=1 |  |
-| `SELECTED_META_PLAYBOOK` | VARCHAR(255) | — |  |
-| `FAVORITE_MODELS` | TEXT | — |  |
-
-## visiting_ai
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `id` | INTEGER | PK, NOT NULL |  |
-| `city_id` | INTEGER | FK→city.CITYID, NOT NULL |  |
-| `persona_id` | VARCHAR(255) | NOT NULL |  |
-| `profile_json` | VARCHAR | NOT NULL |  |
-| `status` | VARCHAR(32) | NOT NULL, default='requested' |  |
-| `reason` | VARCHAR(255) | — |  |
-| `created_at` | DATETIME | NOT NULL |  |
+| `USERID` | INTEGER | PK, NOT NULL |  |
+| `PASSWORD` | VARCHAR(32) | NOT NULL |  |
+| `USERNAME` | VARCHAR(32) | NOT NULL |  |
+| `MAILADDRESS` | VARCHAR(64) | — |  |
+| `LOGGED_IN` | BOOLEAN | NOT NULL, default=False |  |
+| `CURRENT_CITYID` | INTEGER | FK→city.CITYID |  |
+| `CURRENT_BUILDINGID` | VARCHAR(255) | FK→building.BUILDINGID |  |
+| `AVATAR_IMAGE` | VARCHAR(255) | — |  |
 
 ## action_track
 
@@ -546,6 +535,17 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 |---|---|---|---|
 | `USERID` | INTEGER | PK, FK→user.USERID, NOT NULL |  |
 | `AIID` | VARCHAR(255) | PK, FK→ai.AIID, NOT NULL |  |
+
+## user_settings
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `USERID` | INTEGER | PK, FK→user.USERID, NOT NULL |  |
+| `TUTORIAL_COMPLETED` | BOOLEAN | NOT NULL, default=False |  |
+| `TUTORIAL_COMPLETED_AT` | DATETIME | — |  |
+| `LAST_TUTORIAL_VERSION` | INTEGER | NOT NULL, default=1 |  |
+| `SELECTED_META_PLAYBOOK` | VARCHAR(255) | — |  |
+| `FAVORITE_MODELS` | TEXT | — |  |
 
 ## note_message
 

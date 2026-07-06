@@ -70,9 +70,9 @@ def test_default_pulse_interval_is_set():
     assert AutonomousTrackHandler.default_pulse_interval > 0
 
 
-def test_default_max_consecutive_pulses_is_unlimited():
-    """default_max_consecutive_pulses は -1 (無制限)。"""
-    assert AutonomousTrackHandler.default_max_consecutive_pulses == -1
+def test_max_consecutive_pulses_concept_is_gone():
+    """default_max_consecutive_pulses は自律行動 v2 で概念ごと廃止 (intent §9.3)。"""
+    assert not hasattr(AutonomousTrackHandler, "default_max_consecutive_pulses")
 
 
 def test_pulse_completion_notice_mentions_meta_judge():

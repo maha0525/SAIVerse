@@ -421,12 +421,22 @@ class ScheduleManager:
         return prompt
 
     def _execute_schedule(self, schedule: PersonaSchedule, session) -> None:
-        """スケジュールを実行 (PulseController.submit_schedule)。"""
+        """スケジュールを実行 (PulseController.submit_schedule)。
+
+        META_PLAYBOOK が自律行動 v2 の判断点 Playbook (judgment_day_open /
+        judgment_day_close) の場合は専用経路 —
+        ``saiverse.autonomy_wiring.handle_scheduled_judgment`` — を通す。
+        判断点は発火時に judgment_points が組む動的 args (situation_text /
+        response_schema) が必須で、通常の「<system> プロンプト + Playbook」の
+        submit_schedule では起動できないため。起床・就寝時刻の出所はこの
+        PersonaSchedule 行そのもの (スケジュール未設定のペルソナは発火しない)。
+        """
         persona_id = schedule.PERSONA_ID
         meta_playbook = schedule.META_PLAYBOOK
 
         schedule_args: Optional[Dict[str, Any]] = None
         pre_spells: Optional[List[str]] = None
+        parsed_params: Optional[Dict[str, Any]] = None
         if schedule.PLAYBOOK_PARAMS:
             try:
                 parsed_params = json.loads(schedule.PLAYBOOK_PARAMS)
@@ -441,6 +451,28 @@ class ScheduleManager:
                 if isinstance(raw_pre_spells, list):
                     pre_spells = [s for s in raw_pre_spells if isinstance(s, str) and s.strip()]
                 schedule_args = {k: v for k, v in parsed_params.items() if k != "pre_spells"} or None
+
+        # 自律行動 v2: 判断点スケジュール (起床 / 就寝) の専用経路
+        from saiverse.autonomy_wiring import (
+            JUDGMENT_PLAYBOOK_NAMES,
+            handle_scheduled_judgment,
+        )
+        if meta_playbook in JUDGMENT_PLAYBOOK_NAMES:
+            LOGGER.info(
+                "[ScheduleManager] Executing judgment schedule %d for persona %s "
+                "(playbook=%s)",
+                schedule.SCHEDULE_ID, persona_id, meta_playbook,
+            )
+            try:
+                handle_scheduled_judgment(
+                    self.manager, persona_id, meta_playbook,
+                    params=parsed_params if isinstance(parsed_params, dict) else None,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "[ScheduleManager] Judgment schedule %d failed", schedule.SCHEDULE_ID,
+                )
+            return
 
         LOGGER.info(
             "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s)",

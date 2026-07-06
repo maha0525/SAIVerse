@@ -244,7 +244,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/core-memory/scene` | アンカー周辺の会話を scene としてコア記憶に刻む。 |
 | GET | `/api/people/{persona_id}/day-plan` | ペルソナの時間割 (画面 B: 今日の予定表)。plan を持たない日は空配列。 |
 | POST | `/api/people/{persona_id}/debug/fire-meta-judgment` | メタ判断 (on_periodic_tick) を 1 回手動発火. force=True で抑止 (Active/wait_response) を無視. |
-| POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | 指定 autonomous Track の sub_line Pulse を 1 回手動起動 (30秒間隔を無視). |
+| POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | (廃止) 旧 autonomous Track の sub_line Pulse 手動起動。 |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
 | POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. subline (全体) / autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止). |

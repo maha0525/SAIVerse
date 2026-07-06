@@ -712,6 +712,32 @@ def reschedule_pending_slots(manager: Any, persona_id: str) -> int:
     return pushed
 
 
+def find_lost_slot_reservations(
+    manager: Any, persona_id: str, plan_date: Any
+) -> List[int]:
+    """EventScheduler 予約が消えている pending / deferred コマの index を返す。
+
+    watchdog (saiverse/autonomy_wiring.py) の「コマ予約の途絶」判定に使う。
+    予約はインメモリなので再起動・EventScheduler 再生成で失われるが、
+    slots_json の pending / deferred は残る — その差分が「途絶」。
+
+    deferred コマは繰り下げ再 push (10 分後) の予約 key が同じなので、
+    正常な繰り下げ待ち中は「予約あり」と判定される (途絶と誤認しない)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return []
+    slots = load_day_plan(manager, persona_id, plan_date_str) or []
+    lost: List[int] = []
+    for index, slot in enumerate(slots):
+        if slot.get("status") not in (STATUS_PENDING, STATUS_DEFERRED):
+            continue
+        if not scheduler.has_key(_slot_key(persona_id, plan_date_str, index)):
+            lost.append(index)
+    return lost
+
+
 def cancel_scheduled_slots(manager: Any, persona_id: str, plan_date: Any) -> int:
     """保存済み plan の全コマ分の EventScheduler 予約を cancel し、数を返す。
 
@@ -1367,12 +1393,41 @@ def worker_session_rounds_used(result: Any) -> int:
 def _handle_worker_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Optional[int]:
-    """六型の作業コマの組み込みハンドラ。
+    """六型の作業コマの組み込みハンドラ (本番の恒久配線)。
+
+    セッション運転の後に **セッション終了判断 (post_session)** を撃つ
+    (v2 §4.2 の背骨。かつては ScenarioPlayer のラップハンドラだけが担っていた
+    接続の恒久化)。判断は ``saiverse.autonomy_wiring.fire_judgment_point`` の
+    本番ゲート (Active のみ / Playbook 欠如は WARNING スキップ) を通る。
+    シム (ScenarioPlayer) は実行中このハンドラ自体を自前のラップに差し替える
+    ため二重発火しない (day_scenario.py の register_slot_handler 上書き)。
+
+    NOTE: post_session 判断はコマの status が done になる前 (fired のまま) に
+    走る — 判断が見る「残りの時間割」に当該コマは含まれない。予算台帳への
+    積算は判断の後、戻り値経由で行われる (ScenarioPlayer のラップと同順序)。
 
     Returns:
         実際に消費したラウンド数 (``_fire_slot`` が予算台帳へ積算する)。
     """
     result = run_worker_slot_session(manager, persona_id, plan_date_str, slot, index)
+    try:
+        from saiverse.autonomy_wiring import fire_judgment_point
+        from saiverse.judgment_points import KIND_POST_SESSION
+
+        ref = str(slot.get("ref") or REF_NONE)
+        context: Dict[str, Any] = {
+            "session_result": result,
+            "budget_rounds": int(slot.get("budget_rounds") or 0) or None,
+        }
+        if ref != REF_NONE:
+            context["task_ref"] = ref
+        fire_judgment_point(manager, persona_id, KIND_POST_SESSION, context)
+    except Exception:
+        LOGGER.exception(
+            "[day_plan] post_session judgment failed (persona=%s date=%s index=%d); "
+            "slot bookkeeping continues",
+            persona_id, plan_date_str, index,
+        )
     return worker_session_rounds_used(result)
 
 

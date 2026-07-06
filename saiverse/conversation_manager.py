@@ -9,10 +9,10 @@ if TYPE_CHECKING:
 class ConversationManager:
     """旧自律会話駆動プロトタイプ (run_meta_auto + meta_auto Playbook 経路) 用。
 
-    2026-05-01 の認知モデル移行に伴い無効化。Building 内 AI 自律会話は
-    PulseScheduler + track_autonomous 経由で駆動する設計に置き換わったため、
-    本クラスのループはすべて no-op となる。クラス自体の削除は saiverse_manager
-    などの参照整理を伴うので別タスクで対応予定。
+    2026-05-01 の認知モデル移行に伴い無効化 (本クラスのループはすべて no-op)。
+    後継だった PulseScheduler + track_autonomous 連続 Pulse も自律行動 v2
+    (2026-07) で廃止され、駆動は時間割のコマ発火 + 判断点に置き換わった。
+    クラス自体の削除は saiverse_manager などの参照整理を伴うので別タスクで対応予定。
     """
 
     def __init__(self, building_id: str, saiverse_manager: 'SAIVerseManager', interval: int = 10):

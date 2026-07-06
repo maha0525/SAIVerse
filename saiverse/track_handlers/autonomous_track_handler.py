@@ -6,13 +6,14 @@ Intent A v0.13 / Intent B v0.10 における「自律 Track」(一時 Track) の
 
 責務:
 - 自律 Track の取得 / 一覧
-- Pulse 完了時のメタ判断委譲 (post_complete_behavior=meta_judge)
-- 連続実行型 Track として SubLineScheduler の対象になる属性提供
+- activate 時の Track コンテキスト注入
 
 責務外:
 - Track の自動作成 (ペルソナがメインラインから /track_create で作る経路)
 - メタ判断ロジック (Playbook で書く)
-- スケジューラ本体 (Phase C-3b/c で別途実装)
+- Pulse の駆動 — 旧 SubLineScheduler (30 秒連続 Pulse) は自律行動 v2 で廃止
+  (intent autonomous_behavior_v2.md §9.3)。自律 Track は関心の帳簿であり、
+  実行は時間割のコマ発火 (saiverse/day_plan.py) + 判断点が担う
 
 詳細: docs/intent/persona_action_tracks.md (Track 種別 / Pulse 階層 / 7 制御点)
 """
@@ -38,11 +39,10 @@ class AutonomousTrackHandler:
     """
 
     # v0.10 拡張: Pulse サイクル制御属性 (Intent B v0.10)
-    # 自律 Track は連続実行型 (Pulse 完了後にメタ判断 → 続行 / 切替 / 完了)。
-    # SubLineScheduler の対象になる。
-    post_complete_behavior: str = "meta_judge"  # 連続実行型
-    default_pulse_interval: int = 30  # 30 秒間隔 (環境次第で上書き)
-    default_max_consecutive_pulses: int = -1  # 無制限 (メインキャッシュ TTL までは続行可)
+    # NOTE: 連続 Pulse の駆動 (旧 SubLineScheduler) と max_consecutive_pulses
+    # 概念は自律行動 v2 で廃止 (intent §9.3。予算はセッションのラウンド予算に置換)。
+    post_complete_behavior: str = "meta_judge"
+    default_pulse_interval: int = 30  # 旧・作業のテンポの既定値 (表示互換で残置)
     default_subline_pulse_interval: int = 0  # サブライン連続実行 (ローカル想定)
 
     # v0.11→v0.32 変更: 起点ライン種別
@@ -90,12 +90,12 @@ class AutonomousTrackHandler:
     ) -> None:
         """Track が activate されたときに呼ばれる hook。
 
-        autonomous Track の連続 Pulse は SubLineScheduler の 5 秒 poll で
-        拾われる設計。activate 時に Track コンテキスト (intent 含む) を
-        SAIMemory に注入する。
+        activate 時に Track コンテキスト (intent 含む) を SAIMemory に注入する。
+        Pulse は起動しない — autonomous Track の連続 Pulse 駆動は自律行動 v2 で
+        廃止済み (実行は時間割のコマ発火が担う)。
 
-        ``suppress_pulse`` は本 Handler では参照しない (Pulse 起動は
-        SubLineScheduler 側の責務で、activate 時に直接起動しないため)。
+        ``suppress_pulse`` は本 Handler では参照しない (もともと activate 時に
+        Pulse を直接起動しないため)。
         """
         if track.track_type != AUTONOMOUS_TRACK_TYPE:
             return
@@ -162,7 +162,7 @@ class AutonomousTrackHandler:
     # ------------------------------------------------------------------
 
     def list_active_autonomous_tracks(self, persona_id: str) -> List[ActionTrack]:
-        """ペルソナの running な自律 Track 一覧を返す (SubLineScheduler が使う)。"""
+        """ペルソナの running な自律 Track 一覧を返す。"""
         from ..track_manager import STATUS_RUNNING
         result = []
         for t in self.track_manager.list_for_persona(persona_id, statuses=[STATUS_RUNNING]):
@@ -195,16 +195,13 @@ class AutonomousTrackHandler:
     def on_pulse_complete(
         self, persona_id: str, track: ActionTrack, pulse_outputs: Any
     ) -> None:
-        """Pulse 完了時の処理。
+        """Pulse 完了時の処理 (ログ記録のみ)。
 
-        自律 Track は post_complete_behavior=meta_judge なので、本来はここで
-        メタレイヤーへ「次どうするか」の判断を促す。
-        Phase C-3a の最小実装ではログ記録のみ。SubLineScheduler が次 Pulse
-        スケジュールを担うため、ここでは追加処理不要。
-        メタ判断委譲は Phase C-3c (MainLineScheduler 整備時) で実装する。
+        旧設計では SubLineScheduler が次 Pulse を拾っていたが、連続 Pulse は
+        自律行動 v2 で廃止された。「次どうするか」は判断点 (post_session 等) が
+        決める。
         """
         logging.debug(
-            "[autonomous-handler] on_pulse_complete: track=%s persona=%s "
-            "(behavior=meta_judge, will be picked up by SubLineScheduler for next Pulse)",
+            "[autonomous-handler] on_pulse_complete: track=%s persona=%s",
             track.track_id, persona_id,
         )

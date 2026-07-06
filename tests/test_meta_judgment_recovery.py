@@ -21,8 +21,7 @@ class TestPersistentFailureHandling(unittest.TestCase):
 
     def test_handle_persistent_failure_stops_autonomy(self):
         # 実効停止 (AM 停止 / Track pause / Idle / 対ユーザー Track 復帰) は
-        # manager.stop_autonomy に委譲される。ACTIVITY_STATE=Idle 直書きだけでは
-        # 止まらないため (SubLineScheduler が ACTIVITY_STATE 非依存)。
+        # manager.stop_autonomy に委譲される (停止ボタンと同一経路の維持)。
         layer, manager = _make_layer()
         persona = MagicMock()
         persona.persona_id = "p1"

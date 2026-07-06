@@ -150,13 +150,10 @@ def cmd_delete_user_conversation(args: argparse.Namespace) -> int:
 def cmd_pause_all_autonomous(args: argparse.Namespace) -> int:
     """全 (or 指定ペルソナの) running な autonomous Track を一括 pause する。
 
-    SubLineScheduler が動いている状態で「動き出した自律行動を稼働中に止めたい」
-    時の緊急停止用。SubLineScheduler は次の tick で running な autonomous Track が
-    無いことを検知し、新規 Pulse を起動しなくなる (既に起動済みの Pulse は
-    完了するまで止まらない)。
-
-    Phase C-3b 緊急停止手段。SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false で
-    起動時に止めるのと違い、サーバー再起動なしで動的に止められる。
+    帳簿整理用。旧 SubLineScheduler (autonomous Track の 30 秒連続 Pulse) は
+    自律行動 v2 で廃止済みのため、running のまま残った autonomous Track が
+    Pulse を生むことはないが、running が残ると get_running / メタ判断の
+    状況分類が「作業中」と誤認するので pause で待機状態に揃える。
     """
     from saiverse.track_manager import STATUS_RUNNING
     tm = _get_track_manager()
@@ -236,9 +233,8 @@ def main() -> int:
     p_pause_all = sub.add_parser(
         "pause-all-autonomous",
         help=(
-            "EMERGENCY STOP: pause ALL running autonomous tracks. "
-            "Use this to stop runaway autonomous activity without restarting the server. "
-            "SubLineScheduler will skip these tracks on next tick."
+            "Pause ALL running autonomous tracks (bookkeeping cleanup; "
+            "the v1 continuous-pulse driver was removed in autonomous v2)."
         ),
     )
     p_pause_all.add_argument(

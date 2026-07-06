@@ -2,10 +2,14 @@
 
 設計: docs/intent/persona_cognition/debug_controller.md
 
-UC-2「割り込みと復帰」等の検証で、自律稼働の 3 タイマー
-(SubLineScheduler 30秒 / AutonomyManager 50分 / wait_response timeout 30分) を
-無視して手動でステップ実行する。発火系は LLM 呼び出しを伴うため別スレッドで投げ、
+UC-2「割り込みと復帰」等の検証で、自律稼働のタイマー
+(AutonomyManager watchdog / wait_response timeout 30分) を無視して手動で
+ステップ実行する。発火系は LLM 呼び出しを伴うため別スレッドで投げ、
 API をブロックしない。
+
+NOTE: 旧 SubLineScheduler (autonomous Track への 30 秒連続 Pulse) は自律行動 v2
+で廃止された (intent autonomous_behavior_v2.md §9.3)。関連エンドポイント
+(fire-subline-pulse / scheduler.subline) は互換のため残すが no-op を返す。
 """
 import logging
 import threading
@@ -79,39 +83,17 @@ def fire_subline_pulse(
     request: FireSublinePulseRequest,
     manager=Depends(get_manager),
 ):
-    """指定 autonomous Track の sub_line Pulse を 1 回手動起動 (30秒間隔を無視)."""
-    persona = manager.personas.get(persona_id)
-    if persona is None:
-        raise HTTPException(
-            status_code=404, detail=f"persona {persona_id} がロードされていません"
-        )
-    try:
-        track = manager.track_manager.get(request.track_id)
-    except Exception:
-        raise HTTPException(
-            status_code=404, detail=f"track {request.track_id} が見つかりません"
-        )
-    if track.track_type != "autonomous":
-        raise HTTPException(
-            status_code=400,
-            detail=f"track_type={track.track_type} は sub_line Pulse 対象外 (autonomous のみ)",
-        )
-    if track.status != "running":
-        raise HTTPException(
-            status_code=400, detail=f"track status={track.status} は running ではありません"
-        )
-    dispatcher = getattr(manager, "pulse_dispatcher", None)
-    if dispatcher is None:
-        raise HTTPException(status_code=503, detail="pulse_dispatcher が初期化されていません")
-    _run_in_background(
-        dispatcher.dispatch_subline_poll,
-        persona_id=persona_id,
-        persona=persona,
-        track=track,
-        playbook_name="track_autonomous",
-    )
+    """(廃止) 旧 autonomous Track の sub_line Pulse 手動起動。
+
+    自律行動 v2 で track_autonomous 連続 Pulse 経路ごと廃止された
+    (intent §9.3)。エンドポイントは UI 互換のため残すが何もしない。
+    """
     return DebugActionResponse(
-        success=True, message=f"sub_line Pulse を発火しました (track={request.track_id})"
+        success=False,
+        message=(
+            "自律サブライン Pulse は自律行動 v2 で廃止されました "
+            "(駆動は時間割のコマ発火 + 判断点)。"
+        ),
     )
 
 
@@ -207,15 +189,9 @@ def control_scheduler(
     msgs = []
 
     if request.subline is not None:
-        subline = getattr(manager, "subline_scheduler", None)
-        if subline is None:
-            raise HTTPException(status_code=503, detail="subline_scheduler が初期化されていません")
-        if request.subline:
-            subline.start()
-            msgs.append("SubLineScheduler 開始")
-        else:
-            subline.stop()
-            msgs.append("SubLineScheduler 停止")
+        # 旧 SubLineScheduler は自律行動 v2 で廃止 (no-op)。フロントの一括制御
+        # (subline + autonomy + manual_mode の同時指定) を壊さないため raise しない。
+        msgs.append("SubLineScheduler は自律行動 v2 で廃止されました (no-op)")
 
     if request.autonomy is not None:
         from api.routes.people.autonomy import _get_or_create_autonomy

@@ -1841,6 +1841,39 @@ class SAIMemoryAdapter:
         except (TypeError, ValueError, OSError):
             return None
 
+    def has_track_assistant_message_since(
+        self, track_id: str, since_epoch: int
+    ) -> Optional[bool]:
+        """``since_epoch`` 以降に当該 Track 紐付きの assistant メッセージがあるか。
+
+        自律行動 v2 の会話終了判断 (post_conversation) の「1 往復も成立しなかった
+        会話では判断を撃たない」抑止 (saiverse/autonomy_wiring.py) が使う。
+        対ユーザー会話 Track は永続なので「Track にメッセージがあるか」だけでは
+        過去の会話に反応してしまう — 今回の会話区間 (会話の出来事の started_at
+        以降) で切る。
+
+        Returns:
+            True / False。判定不能 (adapter 未 ready / クエリ失敗) は None —
+            呼び出し側がフォールバック (撃つ側に倒す) を決める。
+        """
+        if not self._ready or not track_id:
+            return None
+        try:
+            with self._db_lock:
+                row = self.conn.execute(
+                    "SELECT 1 FROM messages "
+                    "WHERE origin_track_id = ? AND role = 'assistant' "
+                    "AND created_at >= ? LIMIT 1",
+                    (track_id, int(since_epoch)),
+                ).fetchone()
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to query assistant message for track %s since %s: %s",
+                track_id, since_epoch, exc,
+            )
+            return None
+        return row is not None
+
     def get_track_last_message_times(
         self, track_ids: Iterable[str]
     ) -> Dict[str, datetime]:

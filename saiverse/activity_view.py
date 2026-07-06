@@ -10,7 +10,8 @@
 
 責務外:
 - API ルーティング / DB アクセス (api/routes/people/activity.py が担う)
-- Pulse の発火制御 (pulse_scheduler.py)
+- Pulse の発火制御 (旧 pulse_scheduler.py は自律行動 v2 で廃止。駆動は
+  day_plan のコマ発火 + 判断点)
 
 詳細: docs/intent/persona_activity_view.md
 """

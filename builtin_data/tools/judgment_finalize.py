@@ -784,7 +784,9 @@ def _finalize_on_event(
 
     engage_now は状態を変えない — 「今すぐ応対する」の実行 (Pulse 起動 /
     Track alert 処理) は呼び出し側の責務で、ここでは判断結果を要約
-    (summary_extras) と記録テキストに反映するのみ (配線は後続フェーズ)。
+    (summary_extras) と記録テキストに反映するのみ (本番の応対起動は
+    saiverse/autonomy_wiring.py の handle_external_event が judgment_applied
+    イベント経由で reaction を読んで行う)。
     """
     applied = False
     plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
@@ -1067,9 +1069,30 @@ def judgment_finalize(
         f"spells={len(spells_record)}, warnings={len(warnings)}, scope={scope})"
     )
     if summary_extras:
-        # on_event の reaction 等、呼び出し側が読む判断結果 (engage_now の
-        # 応対起動は呼び出し側の責務 — 配線は後続フェーズ)。
+        # on_event の reaction 等、呼び出し側が読む判断結果。
         summary += " [" + ", ".join(summary_extras) + "]"
+
+    # 適用結果を Pulse の event_callback へ通知する (best-effort)。
+    # run_judgment_point (saiverse/judgment_points.py) がこれを捕捉して
+    # applied_events として呼び出し側へ返す — on_event の engage_now で
+    # 応対 Pulse を起動するか等を、本番配線 (saiverse/autonomy_wiring.py) が
+    # 判断結果に基づいて選ぶための唯一の戻り経路。
+    try:
+        from tools.context import get_event_callback
+
+        _cb = get_event_callback()
+        if callable(_cb):
+            _cb({
+                "type": "judgment_applied",
+                "kind": kind,
+                "applied": committed,
+                "extras": list(summary_extras),
+            })
+    except Exception:
+        LOGGER.debug(
+            "[judgment_finalize] failed to emit judgment_applied event",
+            exc_info=True,
+        )
     return summary, ToolResult(history_snippet=summary), None
 
 

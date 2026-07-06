@@ -67,8 +67,9 @@ class UserConversationTrackHandler:
     # ユーザー発話イベントが来たときだけ起動する。
     post_complete_behavior: str = "wait_response"  # 応答待ち型 (Pulse 完了後アイドル化)
     default_pulse_interval: int = 0  # 連続実行しない (応答駆動)
-    default_max_consecutive_pulses: int = 1  # 1 回だけ
     default_subline_pulse_interval: int = 0
+    # NOTE: default_max_consecutive_pulses は自律行動 v2 で概念ごと廃止
+    # (intent §9.3。連続 Pulse 駆動が消え、予算はセッションのラウンド予算に置換)。
 
     # v0.11 拡張: 起点ライン種別 (Intent A v0.14, Intent B v0.11)
     # ユーザーへの応答は重量級モデルが書く (Intent A 不変条件 9: 他者会話は重量級)。

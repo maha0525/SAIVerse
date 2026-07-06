@@ -142,7 +142,8 @@ def inject_persona_event(
         )
     effective_playbook = meta_playbook or "track_user_conversation"
 
-    try:
+    def _dispatch_direct() -> None:
+        """従来の応対経路: イベントを <system> プロンプト付き Pulse として submit。"""
         dispatcher.dispatch_phenomenon_event(
             persona_id=persona_id,
             building_id=building_id,
@@ -155,6 +156,29 @@ def inject_persona_event(
             "[inject_persona_event] Dispatched via PulseDispatcher: persona=%s, playbook=%s, args=%s",
             persona_id, effective_playbook, playbook_args,
         )
+
+    try:
+        if meta_playbook is None:
+            # 自律行動 v2: 既定経路のイベントはイベント到着判断 (on_event) を通す。
+            # Active かつユーザー会話中でないペルソナのみ判断が走り、engage_now を
+            # 選んだときだけ _dispatch_direct で応対する。非 Active ペルソナ・
+            # 会話中・判断が起動できない場合は従来どおり _dispatch_direct
+            # (経路の判断基準は saiverse/autonomy_wiring.py handle_external_event)。
+            # meta_playbook を明示指定した呼び出し (アドオンの専用経路) は
+            # 呼び出し側の意図を尊重して従来どおり直接 dispatch する。
+            from saiverse.autonomy_wiring import handle_external_event
+
+            event_text = "\n".join([event_description] + extra_lines)
+            route = handle_external_event(
+                _manager, persona_id, event_text,
+                dispatch_direct=_dispatch_direct,
+            )
+            LOGGER.info(
+                "[inject_persona_event] on_event route=%s (persona=%s, type=%s)",
+                route, persona_id, event_type,
+            )
+        else:
+            _dispatch_direct()
         return "ok"
     except Exception:
         LOGGER.error(

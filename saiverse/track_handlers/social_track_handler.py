@@ -47,8 +47,8 @@ class SocialTrackHandler:
     # 交流 Track は応答待ち型 (他ペルソナ発話駆動)。
     post_complete_behavior: str = "wait_response"
     default_pulse_interval: int = 0
-    default_max_consecutive_pulses: int = 1
     default_subline_pulse_interval: int = 0
+    # NOTE: default_max_consecutive_pulses は自律行動 v2 で概念ごと廃止 (intent §9.3)。
 
     # v0.11 拡張: 起点ライン種別 (Intent A v0.14, Intent B v0.11)
     # 他ペルソナへの応答も「他者会話」(Intent A 不変条件 9) に該当するため、

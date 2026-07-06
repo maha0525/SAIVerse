@@ -31,8 +31,10 @@
 を導出する — meta_judgment Playbook の起動経路と同一。
 
 **自動起動の配線は本モジュールではしない** (中間起動の空打ち防止、
-feedback_phased_implementation_intermediate_run)。呼び出しはシム / テスト /
-後続フェーズの配線 (PersonaSchedule 起床時刻 / セッションランナー終了) から行う。
+feedback_phased_implementation_intermediate_run)。本番の恒久配線は
+``saiverse.autonomy_wiring`` (Active ゲート / Playbook 欠如スキップ / watchdog
+込み) が担い、シム (``saiverse.day_scenario``) とテストは ``run_judgment_point``
+を直接呼ぶ。
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 """
@@ -1319,10 +1321,18 @@ def run_judgment_point(
     args = build_judgment_args(manager, persona_id, kind, context)
 
     errors: List[Dict[str, Any]] = []
+    applied_events: List[Dict[str, Any]] = []
 
     def _capture_event(ev: Dict[str, Any]) -> None:
-        if isinstance(ev, dict) and ev.get("type") == "error":
+        if not isinstance(ev, dict):
+            return
+        if ev.get("type") == "error":
             errors.append(ev)
+        elif ev.get("type") == "judgment_applied":
+            # judgment_finalize が emit する適用結果 (kind / applied / extras)。
+            # on_event の reaction 等、呼び出し側 (saiverse.autonomy_wiring) が
+            # 判断結果に応じて後続処理 (engage_now の応対起動) を選ぶために使う。
+            applied_events.append(ev)
 
     LOGGER.info(
         "[judgment] dispatching %s: persona=%s playbook=%s", kind, persona_id,
@@ -1343,7 +1353,7 @@ def run_judgment_point(
         )
         return {"kind": kind, "playbook": playbook_name, "args": args,
                 "submitted": False, "reason": f"runtime exception: {exc!r}",
-                "errors": errors}
+                "errors": errors, "applied_events": applied_events}
 
     if errors:
         for err in errors:
@@ -1352,7 +1362,7 @@ def run_judgment_point(
                 kind, persona_id, err,
             )
     return {"kind": kind, "playbook": playbook_name, "args": args,
-            "submitted": True, "errors": errors}
+            "submitted": True, "errors": errors, "applied_events": applied_events}
 
 
 # ---------------------------------------------------------------------------

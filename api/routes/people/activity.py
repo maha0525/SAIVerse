@@ -521,8 +521,10 @@ def start_activity(persona_id: str, manager=Depends(get_manager)):
     """再生: 自律行動を始めさせる (persona_activity_view.md §6.1)。
 
     1. ACTIVITY_STATE → Active (Idle / Sleep / Stop のどこからでも起こす)
-    2. AutonomyManager.start() — 即時メタ判断 tick が走り、何をするかは
-       ペルソナ自身が決める。pause 済み Track の自動 resume はしない。
+    2. AutonomyManager.start() — 即時に watchdog チェックが走る (自律行動 v2)。
+       起床時間帯で今日の day_plan が無ければ、その場で起床判断 (day_open) が
+       火入れされ、時間割の編成から一日が始まる。pause 済み Track の自動
+       resume はしない。
     """
     persona = _get_persona_or_404(manager, persona_id)
 
@@ -549,10 +551,9 @@ def stop_activity(persona_id: str, manager=Depends(get_manager)):
     """停止: 「いつもの、プロンプトを静かに待っている AI」に戻す
     (persona_activity_view.md §6.2)。
 
-    1. AutonomyManager.stop() — 定期メタ判断 tick の予約 cancel
-    2. running な autonomous Track を全て pause (実効的な停止 —
-       SubLineScheduler は ACTIVITY_STATE を見ていないため)
-    3. ACTIVITY_STATE → Idle
+    1. AutonomyManager.stop() — watchdog tick の予約 cancel
+    2. running な autonomous Track を全て pause (帳簿を待機状態に揃える)
+    3. ACTIVITY_STATE → Idle (判断点・watchdog の Active ゲートが閉じる)
     4. 対ユーザー Track をサイレント activate (suppress_pulse=True —
        停止ボタンで自動発言させない、不変条件 4)
     """
@@ -604,7 +605,8 @@ def update_activity_intervals(
         if "periodic_interval_minutes" in updates:
             am = _get_or_create_autonomy(persona_id, manager)
             am.set_interval(float(updates["periodic_interval_minutes"]))
-        # pulse_seconds は SubLineScheduler が tick ごとに読むため即時反映される
+        # pulse_seconds は旧・自律 Track の Pulse 間隔 (v2 で連続 Pulse 廃止に
+        # 伴い駆動には使われない。設定値としては保存され UI 表示互換を保つ)
 
     config = _load_judgment_config(manager, persona)
     return ActivityIntervals(

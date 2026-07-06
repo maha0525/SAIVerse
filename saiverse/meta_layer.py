@@ -759,9 +759,9 @@ class MetaLayer:
             consecutive, persona_id, last_failure_reason,
         )
         # 1. 自律行動を実効的に停止する。ACTIVITY_STATE=Idle にするだけでは
-        #    AutonomyManager の tick 予約と SubLineScheduler の Track pulse が残り、
-        #    実際には止まらない。停止ボタンと同じ経路 (manager.stop_autonomy) に
-        #    集約して、AM 停止 + Track pause + Idle + 対ユーザー Track 復帰を揃える。
+        #    AutonomyManager (watchdog) の tick 予約が残る。停止ボタンと同じ経路
+        #    (manager.stop_autonomy) に集約して、AM 停止 + Track pause + Idle +
+        #    対ユーザー Track 復帰を揃える。
         try:
             self.manager.stop_autonomy(persona_id)
         except Exception:

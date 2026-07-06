@@ -4,8 +4,14 @@ Phase 4-e で **EventScheduler 駆動の薄いラッパー** に再構成され�
 
 - 旧実装 (Phase C-2): per-persona の sleep ループ thread が ``interval_minutes``
   ごとに ``MetaLayer.on_periodic_tick`` を発火していた
-- 新実装 (Phase 4-e): EventScheduler に「次回発火時刻」を push する。fire 時に
-  callback で ``MetaLayer.on_periodic_tick`` を呼び、完了後に次回を再 push する
+- Phase 4-e: EventScheduler に「次回発火時刻」を push する。fire 時に callback で
+  tick を呼び、完了後に次回を再 push する
+- 自律行動 v2 (2026-07): tick の中身が **watchdog に縮退** した (intent §4.2)。
+  定期メタ判断 (状況分類ディスパッチ) は判断点 5 種が後継となり、tick は
+  ``PulseDispatcher.dispatch_autonomy_tick`` →
+  ``saiverse.autonomy_wiring.watchdog_tick`` — 「Active・起床時間帯・今日の
+  day_plan が無い or コマ予約が途絶」のときだけ火を入れ直す保守的な見張りで、
+  正常時は何もしない (LLM も呼ばない)
 
 API 互換性 (``start`` / ``stop`` / ``set_interval`` / ``get_status`` / ``set_models``)
 は維持する。``/people/{id}/autonomy`` API ルートと既存テストはそのまま動く。
@@ -63,7 +69,12 @@ def _autonomy_key(persona_id: str) -> str:
 
 
 class AutonomyManager:
-    """ペルソナの自動発話間隔タイマー (EventScheduler 駆動)。"""
+    """ペルソナの自律稼働 watchdog タイマー (EventScheduler 駆動)。
+
+    自律行動 v2 で tick の中身は watchdog (autonomy_wiring.watchdog_tick) に
+    縮退した — 正常時は何もしない見張り。start/stop は従来どおり
+    ACTIVITY_STATE 同期 (ensure_autonomy_for) が握る。
+    """
 
     def __init__(
         self,
@@ -126,8 +137,10 @@ class AutonomyManager:
     def start(self) -> bool:
         """Start the periodic tick. Returns True if started, False if already running.
 
-        旧実装と同じく **start 直後に最初の tick が即時走る** (Active 化と同時に
-        メタ判断を 1 回流す挙動を維持)。次回以降は ``interval_minutes`` 待機。
+        旧実装と同じく **start 直後に最初の tick が即時走る** — v2 では
+        watchdog の即時チェックになる (Active 化した時点で今日の day_plan が
+        無ければ、起床時間帯なら day_open がその場で火入れされる)。
+        次回以降は ``interval_minutes`` 待機。
         """
         with self._lock:
             if self._state != AutonomyState.STOPPED:

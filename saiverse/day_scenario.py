@@ -11,8 +11,11 @@ DES ドライバ (``saiverse.day_simulator.DaySimulator``) の上に載り、シ
    同じ EventScheduler へ push する (以後は決定論)
 2. コマ発火は day_plan の既存機構。ただし六型の作業コマは
    ScenarioPlayer がラップハンドラを登録し、``run_work_session`` の後に
-   **セッション終了判断** (post_session) を続けて撃つ (v2 §4.2 の背骨。
-   恒久配線は活性化フェーズの仕事で、シム中は本プレイヤーが担う)
+   **セッション終了判断** (post_session) を続けて撃つ (v2 §4.2 の背骨)。
+   本番の恒久配線は day_plan の組み込みハンドラ (_handle_worker_slot →
+   autonomy_wiring.fire_judgment_point) に実装済みだが、シム中は本プレイヤーの
+   ラップが同 kind を **上書き登録** して置き換えるため二重発火しない
+   (ラップは result への記録と mock/sync ディスパッチを担う)
 3. ユーザーイベント (message / leave) はドライバが再生する。mock
    (:class:`TrackSimUserEventDriver`) は「会話中フラグ = running な
    user_conversation Track」の作成 / 完了のみ、実 LLM モード
@@ -806,7 +809,10 @@ class ScenarioPlayer:
         saved_handlers = dict(day_plan._SLOT_HANDLERS)
         saved_gated = set(day_plan._BUDGET_GATED_KINDS)
         # 六型の作業コマにセッション終了判断を接続するラップハンドラ。
-        # 恒久配線は活性化フェーズの仕事なので、シム実行中だけ登録して必ず戻す。
+        # 本番の恒久配線 (_handle_worker_slot 内の fire_judgment_point) を
+        # シム実行中だけ **上書き** して置き換え (二重発火しない)、必ず戻す。
+        # ラップ側は result への記録と、mock/sync ディスパッチャ経由の
+        # run_judgment_point 直呼び (Active ゲート無し) を担う。
         for worker_kind in day_plan.WORKER_SESSION_KINDS:
             day_plan.register_slot_handler(
                 worker_kind,

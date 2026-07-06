@@ -19,8 +19,10 @@ def _apply_deferred_track_ops(parent_state: Dict[str, Any], persona: Any) -> Non
     happen at Pulse boundaries and don't bleed into the current Pulse's
     main-cache continuation. (Intent A v0.14, Intent B v0.11)
 
-    Newly running Tracks are picked up by SubLineScheduler on its next tick
-    (no immediate kick — keeps the scheduling model in one place).
+    Newly running Tracks are not kicked immediately here — track_activated
+    observers (Track 切替通知の注入等) run inside TrackManager.activate, and
+    autonomous execution is driven by day-plan slot firing / judgment points
+    (自律行動 v2。旧 SubLineScheduler の連続 Pulse は廃止 — intent §9.3)。
     """
     pulse_ctx = parent_state.get("_pulse_context") if parent_state else None
     if pulse_ctx is None or not getattr(pulse_ctx, "deferred_track_ops", None):
@@ -81,13 +83,12 @@ def _apply_deferred_track_ops(parent_state: Dict[str, Any], persona: Any) -> Non
     pulse_ctx.deferred_track_ops.clear()
 
     if activated_track_id:
-        # SubLineScheduler picks this up on its next poll tick. We don't kick
-        # immediately — keeping all sub-line Pulse triggering inside one
-        # scheduler avoids race conditions with the scheduler's own
-        # interval / max-consecutive bookkeeping.
+        # No immediate pulse kick here — Track activation is bookkeeping.
+        # Autonomous execution is driven by day-plan slot firing / judgment
+        # points (自律行動 v2). track_activated observers already ran inside
+        # TrackManager.activate.
         LOGGER.info(
-            "[deferred-track-ops] Track %s is now running; SubLineScheduler "
-            "will pick it up on its next tick",
+            "[deferred-track-ops] Track %s is now running",
             activated_track_id,
         )
 
