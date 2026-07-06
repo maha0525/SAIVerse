@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
+from saiverse.marker_parser import strip_marks
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -127,6 +129,10 @@ class RuntimeEmitters:
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
+        # 層1マーカー (==語句==) は表示系シンク (建物履歴 / gateway / Unity /
+        # TTS hook) には流さない (life_concept_map.md §9.1 / P3)。mark の保存は
+        # SAIMemory 側の _store_memory が担うので、ここでは剥離のみ。
+        text = strip_marks(text)
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
         # Phase 3 段階 4-D (2026-05-09): pulse_id は専用カラムへ。タグ併行記録廃止。
         if pulse_id:
@@ -300,7 +306,10 @@ class RuntimeEmitters:
         try:
             from saiverse.addon_hooks import dispatch_hook
             from saiverse.content_tags import strip_in_heart, strip_user_only
-            text_for_voice = strip_user_only(strip_in_heart(sub_text))
+            # 層1マーカーを音声に読み上げさせない。マーカーが文区切りを跨いだ
+            # 場合は閉じない "==" として残る (剥がせない) が、ペルソナが記法を
+            # 知らない現状では実害なし。
+            text_for_voice = strip_marks(strip_user_only(strip_in_heart(sub_text)))
             if not text_for_voice:
                 return
             dispatch_hook(
@@ -361,6 +370,12 @@ class RuntimeEmitters:
         voice-tts は 「合成すべきテキスト無し → stream close + wav 保存のみ」
         で完結する。
         """
+        # 層1マーカー (==語句==) の剥離 (emit_say と同じ理由)。確定 content /
+        # ペルソナ log / gateway / hook の text_raw 全てが綺麗な本文になる。
+        # mark の保存は SAIMemory 側 (_store_memory) が担う。
+        text = strip_marks(text)
+        if final_voice_text:
+            final_voice_text = strip_marks(final_voice_text)
         metadata: Dict[str, Any] = {"tags": ["conversation"]}
         if isinstance(extra_metadata, dict):
             for key, value in extra_metadata.items():

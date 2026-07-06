@@ -1316,6 +1316,16 @@ class SEARuntime:
                 getattr(persona, "persona_id", None),
             )
             return "" if return_message_id else False
+        # -- 層1マーカー (==語句==) の抽出・剥離 (life_concept_map.md §9.1 / P3) --
+        # ペルソナ自身の生成テキスト (assistant) のみ対象。ここが SEA 経路の
+        # 「本文最終確定点」: SAIMemory に永続化される content からマーカーを
+        # 剥がし、抽出した観測点は insert 後に message_id 付きで marks へ保存
+        # する。マーカーが無ければ extract_marks は文字列走査 1 回の no-op。
+        mark_spans: List[Any] = []
+        if (role or "assistant") == "assistant":
+            from saiverse.marker_parser import extract_marks
+            text, mark_spans = extract_marks(text)
+
         # -- message dict 構築 (try の外: ここでのバグは即座に上位に伝播させる) --
         current_thread = adapter.get_current_thread()
         LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
@@ -1421,6 +1431,10 @@ class SEARuntime:
         try:
             thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
             inserted_id = adapter.append_persona_message(message, thread_suffix=thread_suffix)
+            # 層1マーカー由来の観測点を保存 (アンカー = 挿入されたメッセージ)。
+            # hasattr ガードはテストのスタブ adapter (add_marks 未実装) 対策。
+            if mark_spans and inserted_id and hasattr(adapter, "add_marks"):
+                adapter.add_marks(inserted_id, mark_spans)
             if return_message_id:
                 return inserted_id or ""
             return True

@@ -128,6 +128,12 @@ class SAIMemoryAdapter:
             # セクション) がテーブルの存在を前提にできるよう、ここで作成する。
             from sai_memory.core_memory import init_core_memory_table
             init_core_memory_table(self.conn)
+
+            # Initialize marks table (層1 観測点, life_concept_map.md §9.1, 冪等)。
+            # mark のアンカーは SAIMemory メッセージなので memory.db に相乗りする
+            # (sai_memory/marks.py の module docstring 参照)。
+            from sai_memory.marks import init_marks_tables
+            init_marks_tables(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None
@@ -331,6 +337,37 @@ class SAIMemoryAdapter:
         thread_suffix: Optional[str] = None,
     ) -> Optional[str]:
         return self._append_message(building_id=None, message=message, thread_suffix=thread_suffix)
+
+    def add_marks(self, message_id: str, spans) -> int:
+        """層1マーカー (``==語句==``) から抽出された観測点を marks テーブルへ保存する。
+
+        ``spans`` は ``saiverse.marker_parser.MarkSpan`` 互換 (``quote`` /
+        ``purpose_ref`` 属性を持つ) の列。保存経路 (_store_memory) から
+        メッセージ insert の直後に呼ばれる想定で、失敗しても例外を上げず
+        WARNING に落とす (mark はメッセージ本体より優先度が低い)。
+
+        Returns: 保存できた mark の件数。
+        """
+        if not self._ready or not message_id or not spans:
+            return 0
+        from sai_memory.marks import add_mark
+        saved = 0
+        with self._db_lock:
+            for span in spans:
+                try:
+                    add_mark(
+                        self.conn,
+                        message_id=message_id,
+                        quote=span.quote,
+                        purpose_ref=span.purpose_ref,
+                    )
+                    saved += 1
+                except Exception:
+                    LOGGER.warning(
+                        "Failed to add mark for message=%s quote=%r",
+                        message_id, getattr(span, "quote", None), exc_info=True,
+                    )
+        return saved
 
     def recent_messages(self, building_id: str, max_chars: int) -> List[dict]:
         if not self._ready:
