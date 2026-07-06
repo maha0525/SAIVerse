@@ -8,6 +8,7 @@ import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
 import TutorialSelectModal from './tutorial/TutorialSelectModal';
 import AddonManagerModal from './AddonManagerModal';
+import EventsModal from './EventsModal';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -66,6 +67,8 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
     const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
     const [isAddonManagerOpen, setIsAddonManagerOpen] = useState(false);
+    // できごとはページ遷移でなくモーダルで開く (チャットの書きかけメッセージを失わないため)
+    const [isEventsOpen, setIsEventsOpen] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
     const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
 
@@ -449,10 +452,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     )}
                     <div
                         className={styles.buildingItem}
-                        onClick={() => {
-                            window.location.href = '/events';
-                            if (onClose) onClose();
-                        }}
+                        onClick={() => setIsEventsOpen(true)}
                     >
                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Newspaper size={16} /> できごと
@@ -558,6 +558,11 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                 <AddonManagerModal
                     isOpen={isAddonManagerOpen}
                     onClose={() => setIsAddonManagerOpen(false)}
+                />
+
+                <EventsModal
+                    isOpen={isEventsOpen}
+                    onClose={() => setIsEventsOpen(false)}
                 />
             </aside>
         </>

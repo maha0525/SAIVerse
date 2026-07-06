@@ -1,17 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { X, Heart, Sparkles, Compass, HandHeart, ChevronRight } from 'lucide-react';
+import { X, Heart, Sparkles, Compass, ChevronRight } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
+import TermHint from './common/TermHint';
 import styles from './PersonaProfileModal.module.css';
 
 /**
  * ペルソナのプロフィール (画面 D:「この子はどんな子？」)。
  *
- * GET /api/people/{id}/profile-tree の読み取り専用ビュー。内部用語
- * (Track / stage / ref 等) は画面に出さず、日常語の節構成に変換する:
- * - is_persistent な営み        → 「大切にしていること」
- * - それ以外の第一階層          → 「いま取り組んでいること」
- * - candidates                  → 「やってみたいこと」(欲求の型は日常語バッジ)
- * - 頼まれごと・約束            → 既存のタスク画面へのリンク (onOpenTasks)
+ * GET /api/people/{id}/profile-tree の読み取り専用ビュー。二層ラベル方式:
+ * ユーザーが将来ペルソナを独力で管理できるよう、機構名は Track / Task の
+ * 2 語だけ大見出しとして露出し ((?) ヒント付き)、日常語の節をその下に置く。
+ * stage / ref 等それ以外の内部用語は引き続き画面に出さない。
+ * - 大見出し「Track — 暮らしの軸」
+ *   - is_persistent な営み      → 節「大切にしていること」
+ *   - それ以外の第一階層        → 節「最近取り組んでいること」
+ * - candidates                  → 節「やってみたいこと」(機構名は出さない)
+ * - 大見出し「Task — 頼まれごと・約束」→ 既存のタスク画面へのリンク (onOpenTasks)
  *
  * 設計正典: docs/intent/persona_cognition/life_concept_map.md §15
  */
@@ -190,55 +194,63 @@ export default function PersonaProfileModal({
 
                     {!loading && !loadFailed && data != null && !isEmpty && (
                         <>
-                            {/* 大切にしていること (営み = 永続) */}
-                            <div className={styles.section}>
-                                <h3 className={styles.sectionHeading}>
-                                    <Heart size={15} /> 大切にしていること
+                            {/* Track — 暮らしの軸 (機構名の大見出し + 日常語の節) */}
+                            <div className={styles.group}>
+                                <h3 className={styles.groupHeading}>
+                                    Track — 暮らしの軸
+                                    <TermHint term="track" />
                                 </h3>
-                                {cherished.length > 0 ? (
-                                    <div className={styles.itemList}>
-                                        {cherished.map(node => (
-                                            <div key={node.id} className={styles.item}>
-                                                <div className={styles.itemTitle}>{node.title || '(名前のない営み)'}</div>
-                                                {node.intent && <div className={styles.itemNote}>{node.intent}</div>}
-                                                {renderOrigin(node.source_ref)}
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <div className={styles.muted}>まだ言葉になっていないようです</div>
-                                )}
-                            </div>
 
-                            {/* いま取り組んでいること (企て・テーマ) */}
-                            <div className={styles.section}>
-                                <h3 className={styles.sectionHeading}>
-                                    <Compass size={15} /> いま取り組んでいること
-                                </h3>
-                                {ventures.length > 0 ? (
-                                    <div className={styles.itemList}>
-                                        {ventures.map(node => {
-                                            const day = fmtShortDay(node.last_activity_at);
-                                            return (
+                                {/* 大切にしていること (営み = 永続) */}
+                                <div className={styles.section}>
+                                    <h4 className={styles.sectionHeading}>
+                                        <Heart size={15} /> 大切にしていること
+                                    </h4>
+                                    {cherished.length > 0 ? (
+                                        <div className={styles.itemList}>
+                                            {cherished.map(node => (
                                                 <div key={node.id} className={styles.item}>
-                                                    <div className={styles.itemTitleRow}>
-                                                        <span className={styles.itemTitle}>{node.title || '(無題)'}</span>
-                                                        {day && <span className={styles.itemDay}>{day} ごろ</span>}
-                                                    </div>
+                                                    <div className={styles.itemTitle}>{node.title || '(名前のない営み)'}</div>
                                                     {node.intent && <div className={styles.itemNote}>{node.intent}</div>}
                                                     {renderOrigin(node.source_ref)}
                                                 </div>
-                                            );
-                                        })}
-                                    </div>
-                                ) : (
-                                    <div className={styles.muted}>いまは静かに過ごしているようです</div>
-                                )}
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className={styles.muted}>まだ言葉になっていないようです</div>
+                                    )}
+                                </div>
+
+                                {/* 最近取り組んでいること (企て・テーマ) */}
+                                <div className={styles.section}>
+                                    <h4 className={styles.sectionHeading}>
+                                        <Compass size={15} /> 最近取り組んでいること
+                                    </h4>
+                                    {ventures.length > 0 ? (
+                                        <div className={styles.itemList}>
+                                            {ventures.map(node => {
+                                                const day = fmtShortDay(node.last_activity_at);
+                                                return (
+                                                    <div key={node.id} className={styles.item}>
+                                                        <div className={styles.itemTitleRow}>
+                                                            <span className={styles.itemTitle}>{node.title || '(無題)'}</span>
+                                                            {day && <span className={styles.itemDay}>{day} ごろ</span>}
+                                                        </div>
+                                                        {node.intent && <div className={styles.itemNote}>{node.intent}</div>}
+                                                        {renderOrigin(node.source_ref)}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <div className={styles.muted}>いまは静かに過ごしているようです</div>
+                                    )}
+                                </div>
                             </div>
 
-                            {/* やってみたいこと (候補) */}
+                            {/* やってみたいこと (候補。機構名は出さない) */}
                             <div className={styles.section}>
-                                <h3 className={styles.sectionHeading}>
+                                <h3 className={styles.groupHeading}>
                                     <Sparkles size={15} /> やってみたいこと
                                 </h3>
                                 {candidates.length > 0 ? (
@@ -261,11 +273,12 @@ export default function PersonaProfileModal({
                                 )}
                             </div>
 
-                            {/* 頼まれごと・約束 (既存のタスク画面を再利用) */}
+                            {/* Task — 頼まれごと・約束 (既存のタスク画面を再利用) */}
                             {onOpenTasks && (
                                 <div className={styles.section}>
-                                    <h3 className={styles.sectionHeading}>
-                                        <HandHeart size={15} /> 頼まれごと・約束
+                                    <h3 className={styles.groupHeading}>
+                                        Task — 頼まれごと・約束
+                                        <TermHint term="task" />
                                     </h3>
                                     <button className={styles.tasksLink} onClick={onOpenTasks}>
                                         頼まれごと・約束の一覧を見る <ChevronRight size={14} />

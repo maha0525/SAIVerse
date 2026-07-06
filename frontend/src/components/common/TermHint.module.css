@@ -1,0 +1,54 @@
+/* 機構名の (?) ヒント。globals.css のセマンティックトークンのみ使用し、
+   ライト / ダーク両テーマに自動追従する。position: fixed は使わない
+   (祖先 transform で座標が壊れるため。root 相対の absolute で完結)。 */
+
+.root {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1;
+    padding: 0;
+    cursor: help;
+    flex-shrink: 0;
+}
+
+.icon:hover {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+}
+
+.tooltip {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: min(280px, 70vw);
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.5rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 400;
+    letter-spacing: normal;
+    line-height: 1.6;
+    white-space: normal;
+    text-align: left;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    z-index: 20;
+}
