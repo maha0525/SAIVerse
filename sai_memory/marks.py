@@ -170,7 +170,9 @@ def list_marks(
         params.append(message_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     cur = conn.execute(
-        f"SELECT {_MARK_COLS} FROM marks {where} ORDER BY created_at ASC, mark_id ASC",
+        # 同一 epoch 秒の同点解決は挿入順 (rowid)。mark_id はランダム UUID
+        # なので tiebreak に使うと並びが非決定になる (2026-07-06 フレーク修正)
+        f"SELECT {_MARK_COLS} FROM marks {where} ORDER BY created_at ASC, rowid ASC",
         params,
     )
     return [_row_to_mark(row) for row in cur.fetchall()]
