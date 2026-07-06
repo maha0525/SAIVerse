@@ -332,7 +332,8 @@ Track は誤った概念ではなく、**複数の概念の未分化な束**だ�
 活性化配線（v2 handoff §4-7）は Track 語彙を焼き込む工程を含む。変更の確定リストは **§10.1**。順序の決定（2026-07-06）:
 
 - 参照アドレッシング統一は別セッションでコミット済み——short_id 参照は目的ノードでも意味が保たれるため障害にならない
-- **P1: DB 基盤** ✅（コミット 2982658）→ **P3: 層 1 マーカー** ✅（57ca63d。P2 より先行——P2 は出来事の開閉配線に依存するため活性化工程へ）→ **P4: 連想歩行 v1** ✅（e3f576c）→ **P2: タグ層 0・層 2 の配線** / **P5: コマ参照の任意階層化**（いずれも活性化工程: 出来事の開閉を会話・セッション・コマの実経路に接続する工程と同時に行う）
+- **P1: DB 基盤** ✅（コミット 2982658）→ **P3: 層 1 マーカー** ✅（57ca63d）→ **P4: 連想歩行 v1** ✅（e3f576c）→ **A1: 出来事の開閉＋層 0** ✅（5b35470。会話は本番 30 分タイムアウトに close 接続済み）→ **A2: 判断点恒久配線＋旧経路停止** ✅（eb5ccca。SubLineScheduler 削除・watchdog 縮退。本番活性化は playbook 5 本 import ＋ PersonaSchedule 作成＋ Active 化の運用手順）→ 残り **A3: 層 2 タグ・P5 コマ参照の任意階層化・head 語彙（自己像＋`==語句==` 教示）**
+- A2 積み残し（要判断/後続）: cache TTL keep-alive が旧状況分類メタ判断を発火し続ける（時間割駆動と併走する空判断——停止か watchdog 化か要まはー判断）／EventScheduler dispatch スレッドで判断・セッションが同期実行（長時間占有の逃がしは別途）／day_close の watchdog 補完なし（就寝時刻にサーバー停止なら翌日まで走らない）
 - 活性化工程への持ち越しメモ: emit_speak / emit_think の message_id 返却改修（P3 の未組み込み経路、独白は観測点の一等地）／purpose_ref の正規化層（walk は exact match 前提）／目的ノードへの created_at 写像（tree 辺の鮮度加点が現状 0）／チャットバブル⇔mark の ID 橋渡し（building_messages と memory.db は別体系。`_append_message` の metadata に building message_id を刻む片方向リンクが最小改修。当面ハイライトは記憶ブラウザ側）／Episode 刻印の epoch が naive local のため サーバー OS TZ ≠ City.TIMEZONE 環境で日付窓とずれうる（刻印を TZ-aware にするか City TZ で正規化するか）／**episode meta の書式契約**: フロント（lib/episodeText.ts）は `meta.title`・`meta.artifacts`（＋`meta.work_session.artifacts`）を防御的に読む——活性化で open_episode を書く側はこのキー名に揃えること／できごと画面のペルソナ絞り込みは `/api/people` に city が無いため全 City 住人が並ぶ（City スコープの persona 一覧で改善余地）
 - 判断点 playbook の track_op / track_ref enum は P2〜P5 の過程で目的ノード語彙へ改修。landscape.md §9 への記載（Track 状態機械・activate 想起の死亡）は配線完了時
 
