@@ -11,6 +11,15 @@ python scripts/run_day_sim.py --scenario test_fixtures/scenarios/day_standard.js
 python scripts/run_day_sim.py --scenario <file> --real --city city_a --db-file test_data/user_data/database/saiverse.db
 ```
 
+出力は**一日新聞と生データの対**（レビューは必ずセットで見る）:
+- 新聞: `--out` 先（省略時 `~/.saiverse/personas/<id>/day_reports/<date>.md`）
+- 生データ: 新聞と同じ場所の `<date>_raw.md`（判断点・SAIMemory 全文・建物メッセージ・
+  移動・タスク/欲求・時間割・アイテム）。`--raw-log-out` で場所変更、`--no-raw-log` で抑止
+
+mock シムの不変条件は回帰スイート `tests/test_day_sim_regression.py` が守っている
+（全判断点 submitted / 全コマ終端 / 成果物実在 / 予算内 / 新聞・生データ生成）。
+自律行動まわりを変更したらまずこれを回すこと。
+
 ## フィールド
 
 | フィールド | 必須 | 意味 |

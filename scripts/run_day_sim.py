@@ -392,6 +392,255 @@ def _build_real_manager(city_name: str, db_file: Optional[str], sds_url: str) ->
     return manager
 
 
+def run_mock_scenario(scenario: Any, db_file: Optional[str] = None):
+    """mock 一日シムを端から端まで回す (CLI と回帰テストの共用経路)。
+
+    LLM を一切呼ばない。スペル実行は mock に差し替える (document_create →
+    実 Item 作成)。呼び出し側は終了後に ``clock.disable_virtual()`` を呼ぶこと。
+
+    Returns:
+        (manager, result, markers) — markers は generate_raw_log 用の実行前高水位。
+    """
+    from saiverse.day_scenario import ScenarioPlayer
+
+    manager = _build_mock_manager(db_file, scenario)
+    markers = _capture_world_markers(manager)
+    with ExitStack() as stack:
+        stack.enter_context(patch(
+            "sea.runtime_llm.SPELL_TOOL_NAMES",
+            {"document_create", "searxng_search", "memory_recall"},
+        ))
+        stack.enter_context(patch(
+            "sea.runtime_llm._run_spell_tool_async",
+            new=_make_mock_spell_executor(manager.SessionLocal),
+        ))
+        result = ScenarioPlayer().run(manager, scenario)
+    return manager, result, markers
+
+
+# ---------------------------------------------------------------------------
+# 生データ抽出 (raw log)
+# ---------------------------------------------------------------------------
+# 一日新聞は決定論の要約であり、レビューには「実際に何が起きたか」の生データが
+# 対で必要 (2026-07-05 の実 LLM 3 回サイクルで確立した運用: 新聞と生データは
+# セットでレビューに出す)。以前はアドホックに sqlite / sea_trace を掘っていた
+# のを、シム実行の直後に同じプロセスから決定論で抽出する。
+
+
+def _capture_world_markers(manager: Any) -> Dict[str, int]:
+    """シナリオ実行前の連番高水位を記録する (この走で増えた行だけ抽出するため)。
+
+    building_messages.timestamp 等は実時刻系が混ざる (タイムスタンプ3系統問題)
+    ため、日付では絞れない。連番 (autoincrement id) の前後比較が唯一確実。
+    """
+    from sqlalchemy import func as sqla_func
+
+    from database.models import BuildingMessage, BuildingOccupancyLog
+
+    db = manager.SessionLocal()
+    try:
+        return {
+            "building_messages": db.query(
+                sqla_func.coalesce(sqla_func.max(BuildingMessage.id), 0)).scalar(),
+            "occupancy": db.query(
+                sqla_func.coalesce(sqla_func.max(BuildingOccupancyLog.ID), 0)).scalar(),
+        }
+    finally:
+        db.close()
+
+
+def _fmt_memory_created_at(value: Any) -> str:
+    """SAIMemory payload の created_at (epoch int / ISO 文字列) を表示用に。"""
+    if isinstance(value, (int, float)) or (isinstance(value, str) and str(value).isdigit()):
+        try:
+            return datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return str(value)
+    return str(value)[:19] if value else "-"
+
+
+def generate_raw_log(
+    manager: Any,
+    scenario: Any,
+    result: Any,
+    markers: Dict[str, int],
+    *,
+    mode: str,
+) -> str:
+    """一日シムの生データを markdown で組み立てる (LLM 不使用・実在記録のみ)。"""
+    from sqlalchemy import func as sqla_func
+
+    from database.models import (
+        BuildingMessage, BuildingOccupancyLog, PersonaDayPlan, PersonaTask,
+    )
+
+    persona_id = scenario.persona_id
+    lines: List[str] = []
+    lines.append(f"# 一日シム生データ — {persona_id} {scenario.plan_date} (mode={mode})")
+    lines.append("")
+    lines.append(f"- 実行統計: events={result.executed_events} / judgments={len(result.judgments)}")
+    lines.append(f"- 種まき: tasks={result.seeded_task_refs} desires={result.seeded_desire_refs}")
+
+    # ログセッションへの参照 (フル LLM I/O は llm_io.log / sea_trace.log にある)
+    try:
+        from saiverse import logging_config
+        if logging_config._initialized:
+            lines.append(f"- ログセッション: {logging_config.get_session_log_dir()}")
+    except Exception:
+        pass
+    lines.append("")
+
+    # --- 判断点 ---
+    lines.append("## 判断点")
+    lines.append("")
+    if result.judgments:
+        for j in result.judgments:
+            status = "OK" if j.get("submitted") else f"SKIP ({j.get('reason')})"
+            lines.append(f"- [{j.get('at')}] {j.get('kind')}: {status}")
+    else:
+        lines.append("(なし)")
+    lines.append("")
+
+    # --- ペルソナ記憶 (plan_date の全行・全文) ---
+    lines.append("## ペルソナ記憶 (SAIMemory)")
+    lines.append("")
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    if adapter is None:
+        lines.append("(sai_memory adapter なし)")
+    else:
+        payloads = adapter.recent_persona_messages_by_count(2000)
+        plan_date = str(scenario.plan_date)
+        shown = 0
+        for p in payloads:
+            ts = _fmt_memory_created_at(p.get("created_at"))
+            if not ts.startswith(plan_date):
+                continue
+            shown += 1
+            meta = p.get("metadata") or {}
+            tags = ",".join(meta.get("tags") or []) or "-"
+            attrs = [f"tags={tags}"]
+            if p.get("scope"):
+                attrs.append(f"scope={p['scope']}")
+            if p.get("line_role"):
+                attrs.append(f"line={p['line_role']}")
+            lines.append(f"### [{ts}] {p.get('role')}  ({'  '.join(attrs)})")
+            lines.append("")
+            if p.get("paired_action_text"):
+                lines.append(f"> action: {p['paired_action_text']}")
+                lines.append("")
+            lines.append(str(p.get("content") or ""))
+            lines.append("")
+        if shown == 0:
+            lines.append(f"(plan_date={plan_date} のメッセージなし — "
+                         "タイムスタンプが実時刻系の場合は全件が対象外になる)")
+    lines.append("")
+
+    db = manager.SessionLocal()
+    try:
+        # --- 建物メッセージ (この走で増えた分) ---
+        lines.append("## 建物メッセージ (building_messages)")
+        lines.append("")
+        bm_rows = (
+            db.query(BuildingMessage)
+            .filter(BuildingMessage.id > markers["building_messages"])
+            .order_by(BuildingMessage.id)
+            .all()
+        )
+        if bm_rows:
+            for m in bm_rows:
+                who = m.persona_id or m.role
+                event = f"  event={m.event_type}" if m.event_type else ""
+                lines.append(f"- [{m.timestamp}] {m.building_id} seq={m.seq} {m.role}({who}){event}")
+                lines.append(f"  {m.content}")
+        else:
+            lines.append("(なし)")
+        lines.append("")
+
+        # --- 移動 (この走で増えた occupancy 行) ---
+        lines.append("## 移動 (building_occupancy_log)")
+        lines.append("")
+        occ_rows = (
+            db.query(BuildingOccupancyLog)
+            .filter(BuildingOccupancyLog.ID > markers["occupancy"])
+            .order_by(BuildingOccupancyLog.ID)
+            .all()
+        )
+        if occ_rows:
+            for o in occ_rows:
+                exit_ts = o.EXIT_TIMESTAMP or "(滞在中)"
+                lines.append(f"- {o.AIID}: {o.BUILDINGID}  {o.ENTRY_TIMESTAMP} → {exit_ts}")
+        else:
+            lines.append("(なし)")
+        lines.append("")
+
+        # --- タスク / 欲求のスナップショット (全 status) ---
+        lines.append("## タスク / 欲求スナップショット (persona_task)")
+        lines.append("")
+        task_rows = (
+            db.query(PersonaTask)
+            .filter(PersonaTask.persona_id == persona_id)
+            .order_by(PersonaTask.short_id)
+            .all()
+        )
+        if task_rows:
+            for t in task_rows:
+                kind = "desire" if t.parent_kind == "note" else (t.parent_kind or "standalone")
+                desire = ""
+                if t.desire_type or t.desire_state:
+                    desire = (f"  desire_type={t.desire_type} state={t.desire_state}"
+                              f" source={t.desire_source!r}")
+                artifacts = f"  artifacts={t.artifact_refs}" if t.artifact_refs else ""
+                lines.append(
+                    f"- task:{t.short_id} [{t.status}] ({kind}) {t.title}"
+                    f"  goal={t.goal!r}{desire}{artifacts}"
+                    f"  created={t.created_at} updated={t.updated_at} completed={t.completed_at}"
+                )
+        else:
+            lines.append("(なし)")
+        lines.append("")
+
+        # --- 時間割の最終状態 ---
+        lines.append("## 時間割 (persona_day_plan)")
+        lines.append("")
+        plan_row = (
+            db.query(PersonaDayPlan)
+            .filter(PersonaDayPlan.persona_id == persona_id)
+            .filter(PersonaDayPlan.plan_date == str(scenario.plan_date))
+            .first()
+        )
+        if plan_row is not None:
+            lines.append("```json")
+            lines.append(json.dumps(
+                {"slots": json.loads(plan_row.slots_json),
+                 "meta": json.loads(plan_row.meta_json) if plan_row.meta_json else None},
+                ensure_ascii=False, indent=2))
+            lines.append("```")
+        else:
+            lines.append("(なし)")
+
+        # --- この走で作られた Item (成果物の突合用) ---
+        from database.models import Item
+        lines.append("")
+        lines.append("## アイテム (直近作成順・上位 20)")
+        lines.append("")
+        item_rows = (
+            db.query(Item).order_by(Item.CREATED_AT.desc()).limit(20).all()
+        )
+        for it in item_rows:
+            lines.append(
+                f"- item:{it.SHORT_ID} [{it.TYPE}] {it.NAME}"
+                f"  creator={it.CREATOR_ID}  file={it.FILE_PATH or '-'}  created={it.CREATED_AT}"
+            )
+        if not item_rows:
+            lines.append("(なし)")
+    finally:
+        db.close()
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # エントリポイント
 # ---------------------------------------------------------------------------
@@ -411,6 +660,10 @@ def main() -> int:
                         help="シナリオを回さず一日レポートだけ生成する")
     parser.add_argument("--out", default=None,
                         help="レポートの出力先ファイル (省略時: ~/.saiverse/personas/<id>/day_reports/<date>.md)")
+    parser.add_argument("--no-raw-log", action="store_true",
+                        help="生データ抽出を出力しない (既定はレポートと対で <date>_raw.md を出す)")
+    parser.add_argument("--raw-log-out", default=None,
+                        help="生データの出力先ファイル (省略時: レポートと同じ場所の <date>_raw.md)")
     args = parser.parse_args()
 
     # Windows コンソール (cp932) では日本語レポートの一部文字が出力できないため
@@ -433,6 +686,8 @@ def main() -> int:
     )
 
     scenario = load_scenario(args.scenario)
+    result = None
+    markers = None
 
     try:
         if args.report_only:
@@ -442,6 +697,7 @@ def main() -> int:
                 manager = _build_mock_manager(args.db_file, scenario)
         elif args.real:
             manager = _build_real_manager(args.city, args.db_file, args.sds_url)
+            markers = _capture_world_markers(manager)
             # 判断点・ユーザー会話 Pulse は同期実行 (DES 単一スレッド)。実
             # PulseController はレーン管理を持つため、シナリオ実行中だけ
             # 差し替える。ユーザー発話は実チャット経路 (building_messages 記録
@@ -458,18 +714,7 @@ def main() -> int:
             LOGGER.info("scenario finished: events=%d judgments=%d",
                         result.executed_events, len(result.judgments))
         else:
-            manager = _build_mock_manager(args.db_file, scenario)
-            # スペル実行を mock に差し替える (document_create → 実 Item 作成)
-            with ExitStack() as stack:
-                stack.enter_context(patch(
-                    "sea.runtime_llm.SPELL_TOOL_NAMES",
-                    {"document_create", "searxng_search", "memory_recall"},
-                ))
-                stack.enter_context(patch(
-                    "sea.runtime_llm._run_spell_tool_async",
-                    new=_make_mock_spell_executor(manager.SessionLocal),
-                ))
-                result = ScenarioPlayer().run(manager, scenario)
+            manager, result, markers = run_mock_scenario(scenario, args.db_file)
             LOGGER.info("scenario finished: events=%d judgments=%d",
                         result.executed_events, len(result.judgments))
 
@@ -485,6 +730,20 @@ def main() -> int:
                 manager, scenario.persona_id, scenario.plan_date, report_text=report,
             )
         LOGGER.info("report saved: %s", out_path)
+
+        # 生データはレポートと対で出す (シナリオを実際に回した場合のみ)
+        if result is not None and markers is not None and not args.no_raw_log:
+            raw_text = generate_raw_log(
+                manager, scenario, result, markers,
+                mode="real" if args.real else "mock",
+            )
+            if args.raw_log_out:
+                raw_path = Path(args.raw_log_out)
+            else:
+                raw_path = Path(out_path).with_name(f"{scenario.plan_date}_raw.md")
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(raw_text, encoding="utf-8")
+            LOGGER.info("raw log saved: %s", raw_path)
         return 0
     finally:
         clock.disable_virtual()
