@@ -150,7 +150,7 @@ def get_system_prompt(
     except Exception:
         LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
 
-    # 4. "## 利用可能な能力" section (available playbooks)
+    # 4. "## 利用可能なPlaybook" section (available playbooks)
     if include_available_playbooks:
         try:
             from tools import TOOL_REGISTRY
@@ -167,7 +167,7 @@ def get_system_prompt(
                         # bullet list 形式: `- name — description`
                         # JSON ダンプより人間/LLM 双方に読みやすく、トークン消費も少ない。
                         lines = [
-                            "## 利用可能な能力",
+                            "## 利用可能なPlaybook",
                             "",
                             "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:",
                             "",

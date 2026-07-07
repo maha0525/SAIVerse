@@ -154,7 +154,7 @@ class LifePurposeSectionTest(unittest.TestCase):
         text = section.render(snap).text
         self.assertIn("- 言葉の標本集", text)
         # 参照子 (track:N) はメニューに出さない (固有名詞 Track は出す — まはー 2026-07-07)
-        self.assertNotIn("track:", text.split("【言葉への印（mark）】")[0])
+        self.assertNotIn("track:", text.split("## 言葉への印（mark）")[0])
         # 第一階層の変化でのみ render が変わる (キャッシュ再張りは稀)
         self.assertNotEqual(empty_text, text)
 

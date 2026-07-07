@@ -1,4 +1,4 @@
-"""AvailablePlaybooksSection — "## 利用可能な能力" を head に。
+"""AvailablePlaybooksSection — "## 利用可能なPlaybook" を head に。
 
 `sea/runtime_context.py` 旧 system prompt の 4. available playbooks を移植。
 capture で ``list_available_playbooks`` ツールを 1 回呼んで結果を frozen 化する。
@@ -89,7 +89,7 @@ class AvailablePlaybooksSection:
         if snapshot is None or not snapshot.entries:
             return None
         lines = [
-            "## 利用可能な能力",
+            "## 利用可能なPlaybook",
             "",
             "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:",
             "",

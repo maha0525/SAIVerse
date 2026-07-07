@@ -158,8 +158,12 @@ class OpenNotesSection:
         blocks: list[str] = []
 
         if snapshot.desire_note_title:
+            # ノート title が既定の「やりたいこと」のままなら括弧は同語反復になるので省く
+            header = "## やりたいこと候補"
+            if snapshot.desire_note_title != "やりたいこと":
+                header += f"（{snapshot.desire_note_title}）"
             lines = [
-                f"【やりたいこと候補（{snapshot.desire_note_title}）】",
+                header,
                 "いつか取り組みたいと温めている候補のプールです。"
                 "自律制御モードではここから Track を作れます。"
                 "自律作業モードでは新しい候補を書き加えられます。",
@@ -171,7 +175,7 @@ class OpenNotesSection:
             blocks.append("\n".join(lines))
 
         if snapshot.open_notes:
-            lines = ["【いま開いているノート】"]
+            lines = ["## いま開いているノート"]
             for n in snapshot.open_notes:
                 head = f"- [{n.note_type}] {n.title}" if n.note_type else f"- {n.title}"
                 if n.description:

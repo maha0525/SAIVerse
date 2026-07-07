@@ -271,7 +271,7 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 | 1. common_prompt 展開 | `CommonPromptSection` | (なし、Metabolism のみ) |
 | 2. ## あなたについて | `PersonaSelfSection` | `{system_prompt_edited, appearance_changed}` |
 | 3. ## Building 名 | `BuildingSection` | `{building_entered, system_prompt_edited}` |
-| 4. ## 利用可能な能力 | `AvailablePlaybooksSection` | `{addon_loaded, addon_unloaded}` |
+| 4. ## 利用可能なPlaybook | `AvailablePlaybooksSection` | `{addon_loaded, addon_unloaded}` |
 | 6. ## スペル | `SpellListSection` | `{addon_loaded, addon_unloaded}` |
 | (visual_context) | `VisualContextSection` | `{building_entered, appearance_changed}` |
 | (memory_weave) | `MemoryWeaveSection` | (Metabolism のみ) |

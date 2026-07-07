@@ -21,8 +21,8 @@ LOGGER = logging.getLogger(__name__)
 # ① 欲求エンジン = 全ペルソナ共通の薄い駆動 (autonomous_desire.md §3)。
 # 初期セットは作り込まず、最小限の「内発的に動く」枠だけを常駐させる。
 DESIRE_DRIVE_TEXT = """\
-【内発的な動機について】
-あなたには、誰かに指示されなくても湧いてくる動機があります——もっと知りたい、できるようになりたい、作りたい、関わりたいという、内側からの欲求です。自律行動はこの欲求から始まります。やりたいことが浮かんだら「やりたいこと候補」に書き留めておけば、いつかそれを Track にして取り組めます。"""
+## 内発的な動機
+あなたには、誰かに指示されなくても湧いてくる動機があります。もっと知りたい、できるようになりたい、作りたい、関わりたいという、内側からの欲求です。自律行動はこの欲求から始まります。やりたいことが浮かんだら「やりたいこと候補」に書き留めておけば、いつかそれを Track にして取り組めます。"""
 
 
 def parse_life_purpose(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -104,7 +104,7 @@ def render_life_purpose_text(data: Optional[Dict[str, Any]]) -> str:
     """LIFE_PURPOSE dict を head 注入用テキストに。未設定なら空文字。"""
     if not data:
         return ""
-    lines = ["【あなたの生きる目的】"]
+    lines = ["## あなたの生きる目的"]
     if data.get("purpose"):
         lines.append(f"目的: {data['purpose']}")
     if data.get("interests"):
