@@ -110,7 +110,11 @@ class LifePurposeSectionTest(unittest.TestCase):
         self.assertIn("内発的な動機", rendered.text)
         self.assertIn("まだ言葉になっていません", rendered.text)
         # 行動喚起 (命令文) は head に置かない — META 専用状況が担うため。
-        self.assertNotIn("life_purpose_set", rendered.text)
+        # ただしスペル名の教示 (能力と所有権) は命令ではないので出してよい
+        # (まはー 2026-07-07: 操作する本人に固有名詞を隠すのは飼い馴らし)。
+        self.assertIn("/spell life_purpose_set", rendered.text)
+        self.assertNotIn("定めてください", rendered.text)
+        self.assertNotIn("設定してください", rendered.text)
 
     def test_capture_includes_purpose_when_set(self):
         set_life_purpose(self.Session, "air", "誰かの隣にいる", ["創作"], ["支援"])
@@ -127,7 +131,7 @@ class LifePurposeSectionTest(unittest.TestCase):
         snap = LifePurposeSection().capture(self._ctx())
         rendered = LifePurposeSection().render(snap)
         # 樹皮 (§4.1): 6 件の要旨。システムプロンプト遵守が最上位
-        self.assertIn("いつも守っているもの", rendered.text)
+        self.assertIn("保護対象（世界との約束）", rendered.text)
         self.assertIn("システムプロンプトの遵守", rendered.text)
         self.assertIn("最上位", rendered.text)
         # 記法教示
@@ -141,7 +145,7 @@ class LifePurposeSectionTest(unittest.TestCase):
         empty_snap = section.capture(self._ctx())
         self.assertEqual(empty_snap.first_tier_titles, [])
         empty_text = section.render(empty_snap).text
-        self.assertIn("名前のついた関心はありません", empty_text)
+        self.assertIn("名前のついた Track がありません", empty_text)
 
         tm = TrackManager(session_factory=self.Session)
         tm.create(persona_id="air", track_type="autonomous", title="言葉の標本集")
@@ -149,8 +153,8 @@ class LifePurposeSectionTest(unittest.TestCase):
         self.assertIn("言葉の標本集", snap.first_tier_titles)
         text = section.render(snap).text
         self.assertIn("- 言葉の標本集", text)
-        # 機構語 (track:N 等の参照子) はメニューに出さない
-        self.assertNotIn("track:", text.split("【あとで思い出したい言葉への印】")[0])
+        # 参照子 (track:N) はメニューに出さない (固有名詞 Track は出す — まはー 2026-07-07)
+        self.assertNotIn("track:", text.split("【言葉への印（mark）】")[0])
         # 第一階層の変化でのみ render が変わる (キャッシュ再張りは稀)
         self.assertNotEqual(empty_text, text)
 
