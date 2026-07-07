@@ -1188,7 +1188,9 @@ class SAIVerseManager(
         #    タイマーは activate 時にしか張られず EventScheduler はインメモリの
         #    ため再起動で失われる。ロード済みの running Track へ張り直す。
         #    Idle ペルソナは provider の ACTIVITY_STATE ゲート (A) で skip される
-        #    ので、ここで全ペルソナを処理しても大量発火しない。
+        #    ので、ここで全ペルソナを処理しても大量発火しない
+        #    (例外: user_conversation は Idle でも張る — episode close のため。
+        #    provider の 2026-07-07 例外条項を参照)。
         #    (新規作成経路では running Track がまだ無いので実質 no-op。)
         try:
             self.track_manager.ensure_wait_response_timeout(persona_id)
@@ -1613,8 +1615,18 @@ class SAIVerseManager(
             # (A) ACTIVITY_STATE ゲート: Idle ペルソナでは wait_response の
             # 自動 pause を予約しない。schedule 時は予約 skip、発火時 re-eval では
             # None 返却で _handle_wait_response_timeout が pause せず early return。
+            #
+            # ただし user_conversation は例外 (2026-07-07): 会話 episode の close
+            # (A1 配線) がこのタイマーに乗っており、記録系は「認知不変・全ペルソナ」
+            # が原則 (life_concept_map.md §8)。Idle のまま会話が永遠に「いま」に
+            # 残る実害をまはーが観測。タイマー・pause・close は全員に、
+            # post_conversation 判断は fire_judgment_point 内の Active ゲートが
+            # 従来通り絞る (Idle は close のみで判断は走らない)。
             activity_state = getattr(persona, "activity_state", "Idle")
-            if activity_state != "Active":
+            if (
+                activity_state != "Active"
+                and getattr(track, "track_type", None) != "user_conversation"
+            ):
                 return None
 
             # AI.USER_CONV_TIMEOUT_MINUTES (NULL=デフォルト) を読み出す
