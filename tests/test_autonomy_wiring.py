@@ -846,14 +846,23 @@ def test_slots_fire_on_real_dispatch_thread(session_factory):
 
     manager.event_scheduler.start()
     try:
-        deadline = time.monotonic() + 5.0
+        # 通常 1 秒未満で発火する。上限は負荷時の余裕。
+        # NOTE: dispatch スレッドの書き込みと同時に読むと、共有 in-memory
+        # SQLite の癖で load_day_plan が一瞬 None を返すことがある
+        # (2026-07-07 に間欠観測)。「まだ読めない」は「まだ done でない」と
+        # 同じ扱いでポーリングを続け、最終 assert は締切後の再読で行う。
+        deadline = time.monotonic() + 20.0
         status = None
         while time.monotonic() < deadline:
             slots = day_plan.load_day_plan(manager, PERSONA_ID, today)
-            status = slots[0]["status"]
-            if status == "done":
-                break
+            if slots:
+                status = slots[0]["status"]
+                if status == "done":
+                    break
             time.sleep(0.05)
+        slots = day_plan.load_day_plan(manager, PERSONA_ID, today)
+        assert slots, "day plan unreadable after polling deadline"
+        status = slots[0]["status"]
         assert status == "done", f"slot did not fire on dispatch thread (status={status})"
         assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
     finally:
