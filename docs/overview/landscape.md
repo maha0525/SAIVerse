@@ -370,7 +370,7 @@ graph TD
 | **SubLineScheduler** | v1 自律駆動（track_autonomous への 30 秒連続 Pulse）。自律行動 v2 活性化（2026-07-06）で**モジュールごと削除**（`saiverse/pulse_scheduler.py`）。後継は時間割＋判断点（`saiverse/autonomy_wiring.py`、intent: `autonomous_behavior_v2.md` / `persona_cognition/life_concept_map.md`） |
 | **track_autonomous playbook** | v1 自律 Pulse の中身。コード参照は全除去済み（2026-07-06）。builtin JSON と既存 DB 行の掃除は未 |
 | **max_consecutive_pulses** | 連続 Pulse 上限の概念。駆動源ごと廃止（セッション予算に置換） |
-| **メタ判断の定期ディスパッチ（状況分類）** | 50 分 tick からの `_SITUATION_PLAYBOOK_MAP` 定期起動は停止。tick は watchdog（時間割発火の途絶検知）に縮退。alert 即応と cache TTL keep-alive 経由の起動は存続 |
+| **メタ判断の定期ディスパッチ（状況分類）** | 50 分 tick からの `_SITUATION_PLAYBOOK_MAP` 定期起動は停止。tick は watchdog（時間割発火の途絶検知）に縮退。cache TTL keep-alive 経由の起動も 2026-07-07 に停止（意味的に不活性な極小 touch へ置換、`SEARuntime.run_cache_keepalive`）。**alert 即応（呼びかけ）経由のみ存続** |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 

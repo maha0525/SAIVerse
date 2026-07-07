@@ -48,6 +48,7 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 - `monologue`（全判断点で必須・先頭）：判断に至る素直な思考。committed されるのはこれ（＋スペル整形行）のみ
 - `new_desires`（post_conversation / post_session / on_event で任意）：欲求の型付き変換（v2 §5.2）の出力口
+- `episode_purposes`（post_conversation / post_session / day_close で任意、2026-07-07 追加）：閉じた出来事への目的タグの棚入れ（層 2、`life_concept_map.md` §9.1）。enum は実在の Track＋採用済み task の参照（欲求候補は含めない——候補は木の外）。post_conversation / post_session は当該 episode への参照配列、day_close は `{episode, purpose}` ペア配列。finalize が `purpose_tags`（layer=2）へ永続化し、適用エコーが記録本文に乗る。スキーマはコード側（`saiverse/judgment_points.py`）で注入され playbook JSON は不変
 
 ```json
 "new_desires": {
