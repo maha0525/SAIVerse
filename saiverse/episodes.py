@@ -391,6 +391,32 @@ def list_today(
         db.close()
 
 
+def get_latest_closed_episode(
+    manager: Any, persona_id: str, kind: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """最後に閉じた出来事 1 件を返す (無ければ None)。
+
+    層2 棚入れ (life_concept_map.md §9.1) の判断点が「いま閉じたばかりの
+    出来事」を引くフォールバック入口 (post_conversation は close 直後に
+    判断が走るため、SHORT_ID 最大の closed 行 = 当該会話)。open と同じく
+    SHORT_ID 降順で選ぶ (仮想クロック下の同秒 ENDED_AT に頑健)。
+    """
+    if not persona_id:
+        return None
+    db = manager.SessionLocal()
+    try:
+        q = (
+            db.query(Episode)
+            .filter(Episode.PERSONA_ID == persona_id, Episode.STATUS == STATUS_CLOSED)
+        )
+        if kind is not None:
+            q = q.filter(Episode.KIND == kind)
+        ep = q.order_by(Episode.SHORT_ID.desc()).first()
+        return _to_dict(ep) if ep is not None else None
+    finally:
+        db.close()
+
+
 def get_by_ref(manager: Any, persona_id: str, ref: str) -> Dict[str, Any]:
     """``episode:N`` / UUID から出来事を引く。無ければ EpisodeNotFoundError。"""
     db = manager.SessionLocal()

@@ -923,12 +923,17 @@ class ScenarioPlayer:
             session_result = day_plan.run_worker_slot_session(
                 manager, persona_id, plan_date_str, slot, index,
             )
+            if session_result is None:
+                # 中身が空の track コマの presence 縮退 (P5)。本番の
+                # _handle_worker_slot と同じく判断点は撃たない。
+                return 0
             ref = str(slot.get("ref") or day_plan.REF_NONE)
             context: Dict[str, Any] = {
                 "session_result": session_result,
                 "budget_rounds": int(slot.get("budget_rounds") or 0) or None,
             }
-            if ref != day_plan.REF_NONE:
+            # track:N コマの対象は Track (session_result.track_id 経由)。
+            if ref != day_plan.REF_NONE and not ref.startswith("track:"):
                 context["task_ref"] = ref
             self._judge(manager, persona_id, KIND_POST_SESSION, context, result)
             return day_plan.worker_session_rounds_used(session_result)

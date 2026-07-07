@@ -231,6 +231,131 @@ def _finalize_day_open(
 
 
 # ---------------------------------------------------------------------------
+# 層2 棚入れ: episode_purposes → purpose_tags (life_concept_map.md §9.1)
+# ---------------------------------------------------------------------------
+
+
+def _write_shelving_tags(
+    manager: Any,
+    persona_id: str,
+    pairs: List[Tuple[str, str]],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """検証済み (episode_ref, purpose_ref) ペア群を層2タグとして永続化する。
+
+    書き込み口はペルソナの SAIMemory adapter (``add_purpose_tag``、memory.db
+    相乗り)。adapter が未対応 (テスト・シムの軽量スタブ等) なら WARN して
+    棄却する — 黙って捨てない。
+    """
+    if not pairs:
+        return False
+    from sai_memory.purpose_tags import LAYER_SHELVE
+
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    add = getattr(adapter, "add_purpose_tag", None)
+    if not callable(add):
+        warnings.append(
+            "episode_purposes: 記憶アダプタが目的タグ未対応のため保存できません"
+        )
+        return False
+    applied = False
+    by_episode: Dict[str, List[str]] = {}
+    for episode_ref, purpose_ref in pairs:
+        if add(target_ref=episode_ref, purpose_ref=purpose_ref, layer=LAYER_SHELVE):
+            applied = True
+            by_episode.setdefault(episode_ref, []).append(purpose_ref)
+        else:
+            warnings.append(
+                f"episode_purposes: タグの保存に失敗 ({episode_ref} → {purpose_ref})"
+            )
+    for episode_ref, purposes in by_episode.items():
+        lines.append(
+            f"（この出来事 {episode_ref} を {', '.join(purposes)} の棚に入れた）"
+        )
+    return applied
+
+
+def _apply_episode_purposes_single(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """episode_purposes (purpose 参照の配列) の適用 — 対象の出来事は判断文脈で単一。
+
+    post_conversation (閉じた会話) / post_session (セッション) が使う。
+    enum 外 ref は該当項目だけ棄却 + WARN。
+    """
+    raw = output.get("episode_purposes")
+    if not raw:
+        return False
+    if not isinstance(raw, list):
+        warnings.append(
+            f"episode_purposes rejected: 配列が必要 (got {type(raw).__name__})"
+        )
+        return False
+    episode_ref = str(ctx.get("episode_ref") or "")
+    if not episode_ref:
+        warnings.append("episode_purposes rejected: 対象の出来事が不明です")
+        return False
+    valid = set(ctx.get("purpose_refs") or [])
+    pairs: List[Tuple[str, str]] = []
+    for i, ref in enumerate(raw):
+        ref_str = str(ref or "").strip()
+        if ref_str not in valid:
+            warnings.append(
+                f"episode_purposes[{i}] rejected: {ref_str!r} は選択可能な目的にありません"
+            )
+            continue
+        pairs.append((episode_ref, ref_str))
+    return _write_shelving_tags(manager, persona_id, pairs, lines, warnings)
+
+
+def _apply_episode_purposes_pairs(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """episode_purposes ({episode, purpose} ペア配列) の適用 — day_close 用。"""
+    raw = output.get("episode_purposes")
+    if not raw:
+        return False
+    if not isinstance(raw, list):
+        warnings.append(
+            f"episode_purposes rejected: 配列が必要 (got {type(raw).__name__})"
+        )
+        return False
+    valid_episodes = set(ctx.get("episode_refs") or [])
+    valid_purposes = set(ctx.get("purpose_refs") or [])
+    pairs: List[Tuple[str, str]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            warnings.append(f"episode_purposes[{i}] rejected: not a dict")
+            continue
+        episode_ref = str(item.get("episode") or "").strip()
+        purpose_ref = str(item.get("purpose") or "").strip()
+        if episode_ref not in valid_episodes:
+            warnings.append(
+                f"episode_purposes[{i}] rejected: {episode_ref!r} は今日の出来事にありません"
+            )
+            continue
+        if purpose_ref not in valid_purposes:
+            warnings.append(
+                f"episode_purposes[{i}] rejected: {purpose_ref!r} は選択可能な目的にありません"
+            )
+            continue
+        pairs.append((episode_ref, purpose_ref))
+    return _write_shelving_tags(manager, persona_id, pairs, lines, warnings)
+
+
+# ---------------------------------------------------------------------------
 # 共通適用部品 (post_conversation / post_session / on_event が共有)
 # ---------------------------------------------------------------------------
 
@@ -476,6 +601,11 @@ def _finalize_post_session(
     # --- new_desires → desire_add (type/source 付き; v2 §5.2) ------------
     applied |= _apply_new_desires(output, warnings, spells_record)
 
+    # --- episode_purposes → 層2 棚入れタグ (§9.1) -------------------------
+    applied |= _apply_episode_purposes_single(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
+
     # --- remaining_timetable: null=変更なし / 配列=残りコマの全置換 ------
     applied |= _apply_remaining_timetable(
         manager, persona_id, output, ctx, lines, warnings,
@@ -697,6 +827,11 @@ def _finalize_post_conversation(
 
     # --- new_desires → desire_add ----------------------------------------
     applied |= _apply_new_desires(output, warnings, spells_record)
+
+    # --- episode_purposes → 層2 棚入れタグ (§9.1) -------------------------
+    applied |= _apply_episode_purposes_single(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
 
     # --- remaining_timetable: 全置換を先に適用してから resume_now を挿入 --
     applied |= _apply_remaining_timetable(
@@ -955,6 +1090,11 @@ def _finalize_day_close(
                 f"（やりたいことのたな卸し: 満たされた {n_fulfilled} / "
                 f"薄れていく {n_fading} / 持ち続ける {n_kept}）"
             )
+
+    # --- episode_purposes → 層2 棚入れタグ ({episode, purpose} ペア; §9.1) --
+    applied |= _apply_episode_purposes_pairs(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
 
     return applied
 

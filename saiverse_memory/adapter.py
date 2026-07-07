@@ -134,6 +134,12 @@ class SAIMemoryAdapter:
             # (sai_memory/marks.py の module docstring 参照)。
             from sai_memory.marks import init_marks_tables
             init_marks_tables(self.conn)
+
+            # Initialize purpose_tags table (層2〜4 目的タグ, life_concept_map.md
+            # §9.1, 冪等)。タグの target の主流は SAIMemory メッセージ・出来事
+            # なので memory.db に相乗りする (sai_memory/purpose_tags.py 参照)。
+            from sai_memory.purpose_tags import init_purpose_tags_tables
+            init_purpose_tags_tables(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None
@@ -368,6 +374,35 @@ class SAIMemoryAdapter:
                         message_id, getattr(span, "quote", None), exc_info=True,
                     )
         return saved
+
+    def add_purpose_tag(self, target_ref: str, purpose_ref: str, layer: int) -> bool:
+        """目的タグ 1 件を purpose_tags テーブルへ永続化する (upsert)。
+
+        層2 棚入れ (judgment_finalize) 等の書き込み口。同一 (target, purpose)
+        ペアは sai_memory/purpose_tags.py の add_tag が再訪として同じ行に
+        濃さを積む。失敗しても例外を上げず WARNING に落とす (タグは
+        メッセージ本体より優先度が低い — add_marks と同じ姿勢)。
+
+        Returns: 保存 (upsert) できたら True。
+        """
+        if not self._ready or not target_ref or not purpose_ref:
+            return False
+        from sai_memory.purpose_tags import add_tag
+        with self._db_lock:
+            try:
+                add_tag(
+                    self.conn,
+                    target_ref=str(target_ref),
+                    purpose_ref=str(purpose_ref),
+                    layer=int(layer),
+                )
+                return True
+            except Exception:
+                LOGGER.warning(
+                    "Failed to add purpose tag target=%r purpose=%r layer=%r",
+                    target_ref, purpose_ref, layer, exc_info=True,
+                )
+                return False
 
     def recent_messages(self, building_id: str, max_chars: int) -> List[dict]:
         if not self._ready:

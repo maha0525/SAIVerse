@@ -1854,16 +1854,19 @@ class SEARuntime:
             LOGGER.debug("[metabolism] Token threshold check failed", exc_info=True)
 
     def _schedule_cache_ttl_pulse(self, persona, model_key: str, cache_type: str) -> None:
-        """anchor touch 直後に「TTL 接近で前倒し fire」を EventScheduler に予約する。
+        """anchor touch 直後に「TTL 接近の keep-alive」を EventScheduler に予約する。
 
         計算: ``fire_at = now + cache_ttl_seconds * (1 - cache_threshold_ratio)``
         (キャッシュ寿命のうち threshold_ratio 分が残ったタイミング)。
         cache_threshold_ratio はペルソナの ``META_JUDGMENT_CONFIG`` から取得。
 
-        callback 内では ``MetaLayer.should_fire(persona_id, "ttl")`` で再評価し、
-        True なら ``on_periodic_tick`` を発火する。schedule した時刻と発火時刻
-        の間にユーザー対話が入って TTL 起点が更新された場合、再 touch で予約が
-        上書きされるため、古い予約は自然に消える。
+        callback は :meth:`run_cache_keepalive` — 意味的に不活性な極小 LLM コール
+        で同一 prefix を温め直すだけで、**判断 (メタ判断 / 判断点) は行わない**。
+        旧実装は ``MetaLayer.on_periodic_tick`` (v1 状況分類のメタ判断) を発火して
+        いたが、自律行動 v2 の判断点 5 種と併走する空判断になるため置き換えた
+        (life_concept_map.md §14 A2 積み残しの解消、まはー決定 2026-07-07)。
+        schedule した時刻と発火時刻の間にユーザー対話が入って TTL 起点が更新
+        された場合、再 touch で予約が上書きされるため、古い予約は自然に消える。
 
         ``cache_type == 'explicit'`` のみ予約対象 (implicit cache モデルは
         TTL 概念が曖昧なので、interval 経過のみで動作させる)。
@@ -1878,6 +1881,8 @@ class SEARuntime:
         scheduler = getattr(manager, "event_scheduler", None) if manager else None
         meta_layer = getattr(manager, "meta_layer", None) if manager else None
         if scheduler is None or meta_layer is None:
+            # meta_layer は keep_cache_alive 等の設定 (_load_judgment_config) の
+            # 読み口としてのみ使う (判断は発火しない)。
             return
 
         persona_id = getattr(persona, "persona_id", None)
@@ -1917,20 +1922,156 @@ class SEARuntime:
         key = f"ttl:{persona_id}"
 
         def _fire_callback() -> None:
-            ctx = meta_layer.should_fire(persona_id, "cache_ttl_approaching")
-            if ctx is None:
-                LOGGER.debug(
-                    "[metabolism] TTL pulse skipped (should_fire returned None): persona=%s",
-                    persona_id,
+            try:
+                self.run_cache_keepalive(persona_id)
+            except Exception:
+                LOGGER.exception(
+                    "[keepalive] cache keep-alive raised: persona=%s", persona_id,
                 )
-                return
-            meta_layer.on_periodic_tick(persona_id, context=ctx)
 
         scheduler.schedule(fire_at=fire_at, callback=_fire_callback, key=key)
         LOGGER.debug(
-            "[metabolism] scheduled cache TTL pulse: persona=%s model=%s in %.0fs (ttl=%ds, threshold=%.2f)",
+            "[metabolism] scheduled cache TTL keep-alive: persona=%s model=%s in %.0fs (ttl=%ds, threshold=%.2f)",
             persona_id, model_key, wait_seconds, ttl_seconds, threshold_ratio,
         )
+
+    #: keep-alive の末尾メッセージ。意味的に不活性 (何のイベントでもない) で、
+    #: SAIMemory には保存されない — 次の本物の呼び出しのリクエストには現れず、
+    #: 共有 prefix (head + 履歴) だけがキャッシュ上で温め直される。
+    _KEEPALIVE_TAIL = (
+        "<system>（キャッシュ維持のための自動処理です。世界では何も起きていません。"
+        "「.」とだけ返答してください）</system>"
+    )
+
+    def run_cache_keepalive(self, persona_id: str) -> bool:
+        """メインキャッシュの keep-alive: 意味的に不活性な極小 LLM コール 1 回。
+
+        TTL 接近時 (:meth:`_schedule_cache_ttl_pulse` の予約) に呼ばれる。
+        メインラインと同じ context (head + 履歴) を組み、末尾に不活性な 1 文を
+        足して standard tier のモデルを 1 回だけ呼ぶ:
+
+        - **判断はしない**: playbook もスペルも走らず、応答は破棄される
+        - **記憶に残らない**: SAIMemory へは一切書かない (discardable ですらない)
+        - **キャッシュ経済**: 共有 prefix が cache read でヒットし、プロバイダ側の
+          TTL ウィンドウが更新される。成功時は ``_touch_anchor_after_llm_call``
+          が anchor を touch → 次回 keep-alive が再予約される (従来と同じ連鎖)
+        - **自然停止**: 失効済み (温め直しても意味がない) / Active でない /
+          呼び出し失敗のときは touch しない → 連鎖は止まり、次の本物の呼び出し
+          まで keep-alive は走らない
+
+        Returns:
+            LLM コールまで到達し成功したら True (テスト・観察用)。
+        """
+        manager = self.manager
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            LOGGER.debug("[keepalive] persona not found: %s", persona_id)
+            return False
+        if getattr(persona, "activity_state", "Idle") != "Active":
+            LOGGER.debug(
+                "[keepalive] skipped (persona=%s not Active)", persona_id,
+            )
+            return False
+        model_key = getattr(persona, "model", None)
+        if not model_key:
+            return False
+
+        # anchor の生存確認: 既に失効しているキャッシュは温め直さない
+        # (全額書き直しになるだけ。次の本物の呼び出しが自然に張り直す)。
+        try:
+            anchors = self._load_anchors(persona) or {}
+            entry = anchors.get(str(model_key))
+            if not entry or not entry.get("updated_at"):
+                LOGGER.debug(
+                    "[keepalive] no anchor entry; skipping (persona=%s model=%s)",
+                    persona_id, model_key,
+                )
+                return False
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+            ttl_seconds = self._anchor_entry_ttl_seconds(
+                entry, str(model_key), persona_id,
+            )
+            if datetime.now() >= updated_at + timedelta(seconds=ttl_seconds):
+                LOGGER.info(
+                    "[keepalive] cache already expired; not re-warming "
+                    "(persona=%s model=%s)", persona_id, model_key,
+                )
+                return False
+        except Exception:
+            LOGGER.warning(
+                "[keepalive] failed to read anchor state (persona=%s)",
+                persona_id, exc_info=True,
+            )
+            return False
+
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            LOGGER.debug(
+                "[keepalive] persona %s has no current_building_id; skipping",
+                persona_id,
+            )
+            return False
+
+        from types import SimpleNamespace
+
+        try:
+            # メインラインと同じ既定 requirements で context を組む — 共有 prefix
+            # (head + main_line 履歴) が前回の本物の呼び出しと一致することが
+            # キャッシュヒットの条件。
+            messages = list(
+                self._prepare_context(persona, building_id, None) or []
+            )
+            messages.append({"role": "user", "content": self._KEEPALIVE_TAIL})
+            node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
+            llm_client = self._select_llm_client(node_def, persona)  # standard tier
+            llm_client.generate(
+                messages,
+                tools=[],
+                temperature=self._default_temperature(persona),
+                **self._get_cache_kwargs(persona_id),
+            )
+        except Exception:
+            # 失敗時は touch しない → 予約も更新されず連鎖は自然停止する。
+            LOGGER.warning(
+                "[keepalive] keep-alive LLM call failed (persona=%s model=%s)",
+                persona_id, model_key, exc_info=True,
+            )
+            return False
+
+        usage = (
+            llm_client.consume_usage()
+            if hasattr(llm_client, "consume_usage") else None
+        )
+        if usage is not None:
+            try:
+                get_usage_tracker().record_usage(
+                    model_id=usage.model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    cache_ttl=usage.cache_ttl,
+                    persona_id=persona_id,
+                    building_id=building_id,
+                    node_type="cache_keepalive",
+                    playbook_name="cache_keepalive",
+                    category="cache_keepalive",
+                )
+            except Exception:
+                LOGGER.warning(
+                    "[keepalive] usage tracking failed (persona=%s)",
+                    persona_id, exc_info=True,
+                )
+            # 成功 = anchor touch → 次の keep-alive が再予約される。
+            self._touch_anchor_after_llm_call(persona, usage)
+        LOGGER.info(
+            "[keepalive] cache keep-alive completed (persona=%s model=%s "
+            "cache_read=%s cache_write=%s)",
+            persona_id, model_key,
+            getattr(usage, "cached_tokens", None),
+            getattr(usage, "cache_write_tokens", None),
+        )
+        return True
 
     def _maybe_run_metabolism(
         self,

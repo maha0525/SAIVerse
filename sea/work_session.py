@@ -75,6 +75,11 @@ class WorkSessionResult:
             (total_input_tokens / total_output_tokens / total_cost_usd /
             call_count / models_used 等)。
         task_ref: 呼び出し時に渡された対象タスク参照 (透過)。
+        track_id: 呼び出し時に渡された所属 Track ID (透過)。track:N コマ
+            (P5 コマ参照の任意階層化) では判断点がここから desk_memo /
+            track_op の対象を読む。
+        episode_ref: このセッションの出来事 (kind='work_session') の参照。
+            セッション終了判断の層2 棚入れ (episode_purposes) の対象。
         error: ended_reason='error' のときの ``型名: メッセージ``。
         started_at / ended_at: ISO 形式時刻 (saiverse.clock.now() 由来)。
     """
@@ -85,6 +90,8 @@ class WorkSessionResult:
     ended_reason: str
     usage: Dict[str, Any] = field(default_factory=dict)
     task_ref: Optional[str] = None
+    track_id: Optional[str] = None
+    episode_ref: Optional[str] = None
     error: Optional[str] = None
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
@@ -402,6 +409,8 @@ def run_work_session(
             ended_reason=ended_reason,
             usage=dict(usage_accumulator),
             task_ref=task_ref,
+            track_id=track_id,
+            episode_ref=episode_ref,
             error=digest_error,
             started_at=started_at.isoformat(timespec="seconds"),
             ended_at=ended_at.isoformat(timespec="seconds"),
@@ -433,6 +442,8 @@ def run_work_session(
             ended_reason=ENDED_ERROR,
             usage=dict(usage_accumulator),
             task_ref=task_ref,
+            track_id=track_id,
+            episode_ref=episode_ref,
             error=f"{type(exc).__name__}: {exc}",
             started_at=started_at.isoformat(timespec="seconds"),
             ended_at=clock.now().isoformat(timespec="seconds"),

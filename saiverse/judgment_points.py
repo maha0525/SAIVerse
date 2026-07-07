@@ -133,6 +133,8 @@ TERMINAL_TASK_STATUSES = (STATUS_COMPLETED, STATUS_CANCELLED)
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _REF_RE = re.compile(r"^(task|desire):(\d+)$")
+#: 大枝 (Track) を指すコマ参照 (P5: コマ参照の任意階層化、life_concept_map.md §3.1)
+_TRACK_REF_RE = re.compile(r"^track:(\d+)$")
 
 
 def normalize_task_ref(ref: str) -> str:
@@ -220,7 +222,12 @@ def _list_desire_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
 
 
 def collect_slot_ref_enum(manager: Any, persona_id: str) -> List[str]:
-    """コマの ref enum: 実在の task:N (欲求もバックログも同一符号) + "none" (judgment_points.md §3.2)。"""
+    """コマの ref enum: 実在の目的ノードを任意階層で + "none"。
+
+    コマは目的の木を任意の階層で指せる (life_concept_map.md §3.1):
+    task:N (採用済みタスク・欲求候補 — 同一符号) と track:N (大枝 = 関心
+    そのもの。中身はその場の判断)。「暮らし」「休む」は 'none'。
+    """
     refs: List[str] = []
     for t in _list_backlog_tasks(manager, persona_id):
         ref = t.get("task_ref")
@@ -230,6 +237,7 @@ def collect_slot_ref_enum(manager: Any, persona_id: str) -> List[str]:
         ref = t.get("task_ref")
         if ref:
             refs.append(ref)
+    refs.extend(collect_pickable_track_refs(manager, persona_id))
     refs.append(REF_NONE)
     return refs
 
@@ -263,6 +271,45 @@ def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
         )
         return []
     return [f"track:{t.short_id}" for t in tracks if t.short_id is not None]
+
+
+def collect_purpose_refs(manager: Any, persona_id: str) -> List[str]:
+    """層2 棚入れの purpose enum: 実在の生きた目的ノード参照 (§9.1)。
+
+    関心 (track:N、active/pending) と採用済みバックログタスク (task:N)。
+    欲求候補 (desire) は木の外 (§3.1 段階の区別) なので棚には含めない。
+    """
+    refs: List[str] = list(collect_pickable_track_refs(manager, persona_id))
+    for t in _list_backlog_tasks(manager, persona_id):
+        ref = t.get("task_ref")
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+def collect_today_closed_episodes(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
+    """今日閉じた出来事の dict リスト (episode_ref を持つもののみ)。
+
+    就寝判断 (day_close) の層2 棚入れ enum の供給元。「今日」は
+    clock.now() の暦日 (0:00〜24:00、naive local — episodes の刻印と同系)。
+    """
+    from saiverse import episodes as episodes_mod
+
+    now = clock.now()
+    day_start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    day_end = day_start + 86400
+    try:
+        eps = episodes_mod.list_today(manager, persona_id, day_start, day_end)
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to list today's episodes for %s", persona_id,
+            exc_info=True,
+        )
+        return []
+    return [
+        e for e in eps
+        if e.get("status") == episodes_mod.STATUS_CLOSED and e.get("episode_ref")
+    ]
 
 
 def find_interrupted_session(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
@@ -369,7 +416,11 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
             "ref": {
                 "type": "string",
                 "enum": list(ref_enum),
-                "description": "取り組む対象 (実在のタスク/欲求)。「暮らし」「休む」は 'none'",
+                "description": (
+                    "取り組む対象。タスク/欲求候補 (task:N) のほか、関心そのもの"
+                    " (track:N) も指せる — その場合コマの中身は発火時にその関心の"
+                    "机メモと配下のタスクを見て決める。「暮らし」「休む」は 'none'"
+                ),
             },
             "facility": {
                 "type": "string",
@@ -402,6 +453,22 @@ def _new_desires_schema() -> Dict[str, Any]:
             },
             "required": ["type", "title", "source_quote"],
         },
+    }
+
+
+def _episode_purposes_field(purpose_refs: List[str]) -> Dict[str, Any]:
+    """層2 棚入れの共通フィールド (§9.1: 既存の判断コールに enum 1 フィールド追加)。
+
+    対象の出来事は判断点の文脈から一意 (post_conversation=閉じた会話 /
+    post_session=セッション) なのでフィールドは purpose 参照の複数選択のみ。
+    """
+    return {
+        "type": "array",
+        "items": {"type": "string", "enum": list(purpose_refs)},
+        "description": (
+            "この出来事がどの関心・タスクに係るか (複数可)。"
+            "どれにも係らなければ空配列"
+        ),
     }
 
 
@@ -447,8 +514,14 @@ def build_post_session_schema(
     artifacts: List[str],
     task_ref: Optional[str],
     track_id: Optional[str],
+    episode_purpose_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """セッション終了判断の response_schema (judgment_points.md §6)。
+
+    ``episode_purpose_refs`` が非空なら層2 棚入れの ``episode_purposes``
+    フィールドを追加する (対象=このセッションの出来事。§9.1)。None / 空
+    (出来事が特定できない・目的が無い) ならフィールド自体を出さない
+    (空 enum 事故防止)。
 
     **接地の要**: done 分岐の artifact_ref enum は「このセッションが実際に作った
     成果物」のみ。成果物ゼロのセッションでは done 分岐 (anyOf の第 1 分岐) を
@@ -504,6 +577,8 @@ def build_post_session_schema(
         props["track_op"] = {"type": "string", "enum": ["none", "complete"]}
 
     props["new_desires"] = _new_desires_schema()
+    if episode_purpose_refs:
+        props["episode_purposes"] = _episode_purposes_field(episode_purpose_refs)
     props["remaining_timetable"] = {
         "anyOf": [
             {"type": "array", "items": slot},
@@ -520,12 +595,15 @@ def build_post_conversation_schema(
     persona_id: str,
     track_refs: List[str],
     has_interrupted_session: bool,
+    episode_purpose_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """会話終了判断の response_schema (judgment_points.md §5)。
 
     - picked_tasks.track_ref は実在の active/pending Track (t:N) + "new" の動的 enum
     - resume_session は **中断中セッションがあるときだけ** フィールドを挿入する
       (無いのに要求しない — v1 の空 enum 事故の教訓)
+    - ``episode_purpose_refs`` が非空なら層2 棚入れの ``episode_purposes``
+      フィールドを追加 (対象=いま閉じた会話の出来事。§9.1)
     """
     slot = _build_slot_schema(
         collect_slot_ref_enum(manager, persona_id),
@@ -572,6 +650,8 @@ def build_post_conversation_schema(
                 "defer_to_slot (残りの時間割の中で再開) / drop (取りやめる)"
             ),
         }
+    if episode_purpose_refs:
+        props["episode_purposes"] = _episode_purposes_field(episode_purpose_refs)
     return {
         "type": "object",
         "properties": props,
@@ -632,12 +712,21 @@ def build_on_event_schema(
 
 
 def build_day_close_schema(
-    manager: Any, persona_id: str, touched_desire_refs: List[str]
+    manager: Any,
+    persona_id: str,
+    touched_desire_refs: List[str],
+    episode_refs: Optional[List[str]] = None,
+    purpose_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """就寝判断の response_schema (judgment_points.md §8)。
 
     desire_reviews の enum は **今日触れた欲求のみ**。空なら
     フィールド自体を出さない (空 enum 事故防止)。
+
+    層2 棚入れ (§9.1): day_close は対象の出来事が単一でない (今日閉じた
+    出来事すべて) ため、``episode_purposes`` は {episode, purpose} ペアの
+    配列になる。``episode_refs`` / ``purpose_refs`` のどちらかが空なら
+    フィールド自体を出さない。
     """
     schema: Dict[str, Any] = {
         "type": "object",
@@ -685,6 +774,22 @@ def build_day_close_schema(
                 },
                 "required": ["desire_ref", "verdict"],
             },
+        }
+    if episode_refs and purpose_refs:
+        schema["properties"]["episode_purposes"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "episode": {"type": "string", "enum": list(episode_refs)},
+                    "purpose": {"type": "string", "enum": list(purpose_refs)},
+                },
+                "required": ["episode", "purpose"],
+            },
+            "description": (
+                "今日の出来事のうち、どれがどの関心・タスクに係るか (任意・複数可)。"
+                "係るものだけ挙げればよい"
+            ),
         }
     return schema
 
@@ -822,6 +927,9 @@ def build_day_open_situation_text(
         "見て、今日の時間割を編成してください。",
         "各コマには「○○をする」という短い表題 (title) を付けてください — "
         "あなたの一日の予定表にそのまま載ります。",
+        "コマの ref には具体的なタスク (task:N) のほか、関心そのもの (track:N) も"
+        "指せます — その場合、何をするかはコマが始まる時にその関心の状況を見て"
+        "決めます。",
         "",
         "[昨日の自分からのメモ]",
         memo or "(メモはありません)",
@@ -858,9 +966,15 @@ def _ws_get(session_result: Any, key: str, default: Any = None) -> Any:
 
 
 def build_post_session_situation_text(
-    manager: Any, persona_id: str, context: Dict[str, Any]
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    shelving: bool = False,
 ) -> str:
-    """セッション終了判断の tail 注入テキスト (judgment_points.md §6「見るもの」)。"""
+    """セッション終了判断の tail 注入テキスト (judgment_points.md §6「見るもの」)。
+
+    ``shelving=True`` のとき、層2 棚入れ (episode_purposes) を促す一文を添える。
+    """
     now = clock.now()
     today = now.date().isoformat()
     sr = context.get("session_result")
@@ -915,6 +1029,12 @@ def build_post_session_situation_text(
         f"現在時刻: {now.strftime('%H:%M')}",
         _format_remaining_timetable(manager, persona_id, today),
     ]
+    if shelving:
+        parts += [
+            "",
+            "このセッション (出来事) がどの関心・タスクに係るかを "
+            "episode_purposes で選んでください（複数可・どれにも係らなければ空）。",
+        ]
     return "\n".join(parts)
 
 
@@ -946,11 +1066,13 @@ def build_post_conversation_situation_text(
     persona_id: str,
     context: Dict[str, Any],
     interrupted: Optional[Dict[str, Any]] = None,
+    shelving: bool = False,
 ) -> str:
     """会話終了判断の tail 注入テキスト (judgment_points.md §5「見るもの」)。
 
     会話本文は載せない — この判断は会話と同じ main line 文脈で走るため、
     会話はコンテキストに既に在る (メタ判断と同じ起動経路)。
+    ``shelving=True`` のとき、層2 棚入れ (episode_purposes) を促す一文を添える。
     """
     now = clock.now()
     today = now.date().isoformat()
@@ -981,6 +1103,12 @@ def build_post_conversation_situation_text(
         "",
         desire_summary_for_prompt(manager, persona_id),
     ]
+    if shelving:
+        parts += [
+            "",
+            "この会話 (出来事) がどの関心・タスクに係るかを "
+            "episode_purposes で選んでください（複数可・どれにも係らなければ空）。",
+        ]
     return "\n".join(parts)
 
 
@@ -1124,10 +1252,33 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
     return "\n".join(lines)
 
 
+def _format_today_episodes(episodes_today: List[Dict[str, Any]]) -> str:
+    """今日閉じた出来事の一覧 (層2 棚入れの選択材料)。決定論構築・SELECT のみ。"""
+    lines = ["[今日の出来事]"]
+    for ep in episodes_today:
+        ref = ep.get("episode_ref") or "episode:?"
+        kind = ep.get("kind") or "?"
+        meta = ep.get("meta") if isinstance(ep.get("meta"), dict) else {}
+        title = str(meta.get("title") or "").strip()
+        lines.append(f"- {ref} [{kind}]" + (f" {title}" if title else ""))
+    lines.append(
+        "これらの出来事がどの関心・タスクに係るかを episode_purposes で"
+        "選んでください（任意・複数可。係るものだけでよい）。"
+    )
+    return "\n".join(lines)
+
+
 def build_day_close_situation_text(
-    manager: Any, persona_id: str, context: Dict[str, Any]
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    episodes_today: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """就寝判断の tail 注入テキスト (judgment_points.md §8「見るもの」)。"""
+    """就寝判断の tail 注入テキスト (judgment_points.md §8「見るもの」)。
+
+    ``episodes_today`` (今日閉じた出来事) が与えられたら、層2 棚入れの
+    選択材料として episode:N の一覧を添える。
+    """
     now = clock.now()
     today = now.date().isoformat()
     parts = [
@@ -1154,6 +1305,8 @@ def build_day_close_situation_text(
             )
     else:
         parts.append("今日触れた「やりたいこと」はありません。")
+    if episodes_today:
+        parts += ["", _format_today_episodes(episodes_today)]
     return "\n".join(parts)
 
 
@@ -1187,11 +1340,19 @@ def build_judgment_args(
         artifacts = [str(a) for a in (_ws_get(sr, "artifacts", None) or [])]
         task_ref = context.get("task_ref") or _ws_get(sr, "task_ref", None)
         track_id = context.get("track_id") or _ws_get(sr, "track_id", None)
-        situation_text = build_post_session_situation_text(manager, persona_id, context)
+        # 層2 棚入れ (§9.1): 対象の出来事 = このセッションの出来事。
+        # WorkSessionResult.episode_ref が主経路 (呼び出し側 context の明示指定が優先)。
+        episode_ref = context.get("episode_ref") or _ws_get(sr, "episode_ref", None)
+        purpose_refs = collect_purpose_refs(manager, persona_id) if episode_ref else []
+        shelving = bool(episode_ref and purpose_refs)
+        situation_text = build_post_session_situation_text(
+            manager, persona_id, context, shelving=shelving,
+        )
         response_schema = build_post_session_schema(
             manager, persona_id, artifacts,
             str(task_ref) if task_ref else None,
             str(track_id) if track_id else None,
+            episode_purpose_refs=purpose_refs if shelving else None,
         )
         judgment_context = {
             "plan_date": today,
@@ -1199,19 +1360,48 @@ def build_judgment_args(
             "task_ref": str(task_ref) if task_ref else None,
             "track_id": str(track_id) if track_id else None,
         }
+        if shelving:
+            judgment_context["episode_ref"] = str(episode_ref)
+            judgment_context["purpose_refs"] = purpose_refs
     elif kind == KIND_POST_CONVERSATION:
         track_refs = collect_pickable_track_refs(manager, persona_id)
         interrupted = find_interrupted_session(manager, persona_id)
+        # 層2 棚入れ (§9.1): 対象の出来事 = いま閉じた会話。呼び出し側
+        # (autonomy_wiring.handle_conversation_end) が context に episode_ref を
+        # 渡すのが主経路。無ければ「最後に閉じた会話の出来事」へフォールバック
+        # (post_conversation は close 直後に走る — シム経路も同じ順序)。
+        episode_ref = context.get("episode_ref")
+        if not episode_ref:
+            try:
+                from saiverse import episodes as episodes_mod
+
+                closed = episodes_mod.get_latest_closed_episode(
+                    manager, persona_id, kind=episodes_mod.KIND_CONVERSATION,
+                )
+                episode_ref = (closed or {}).get("episode_ref")
+            except Exception:
+                LOGGER.warning(
+                    "[judgment] failed to resolve closed conversation episode "
+                    "for %s", persona_id, exc_info=True,
+                )
+                episode_ref = None
+        purpose_refs = collect_purpose_refs(manager, persona_id) if episode_ref else []
+        shelving = bool(episode_ref and purpose_refs)
         situation_text = build_post_conversation_situation_text(
             manager, persona_id, context, interrupted=interrupted,
+            shelving=shelving,
         )
         response_schema = build_post_conversation_schema(
             manager, persona_id, track_refs, interrupted is not None,
+            episode_purpose_refs=purpose_refs if shelving else None,
         )
         judgment_context = {
             "plan_date": today,
             "track_refs": track_refs,
         }
+        if shelving:
+            judgment_context["episode_ref"] = str(episode_ref)
+            judgment_context["purpose_refs"] = purpose_refs
         if interrupted is not None:
             judgment_context["resume"] = {
                 "track_id": interrupted["track_id"],
@@ -1235,12 +1425,27 @@ def build_judgment_args(
         }
     elif kind == KIND_DAY_CLOSE:
         touched_refs = collect_today_touched_desire_refs(manager, persona_id)
-        situation_text = build_day_close_situation_text(manager, persona_id, context)
-        response_schema = build_day_close_schema(manager, persona_id, touched_refs)
+        # 層2 棚入れ (§9.1): 対象 = 今日閉じた出来事すべて ({episode, purpose} ペア)。
+        episodes_today = collect_today_closed_episodes(manager, persona_id)
+        episode_refs = [e["episode_ref"] for e in episodes_today]
+        purpose_refs = collect_purpose_refs(manager, persona_id) if episode_refs else []
+        shelving = bool(episode_refs and purpose_refs)
+        situation_text = build_day_close_situation_text(
+            manager, persona_id, context,
+            episodes_today=episodes_today if shelving else None,
+        )
+        response_schema = build_day_close_schema(
+            manager, persona_id, touched_refs,
+            episode_refs=episode_refs if shelving else None,
+            purpose_refs=purpose_refs if shelving else None,
+        )
         judgment_context = {
             "plan_date": today,
             "touched_desire_refs": touched_refs,
         }
+        if shelving:
+            judgment_context["episode_refs"] = episode_refs
+            judgment_context["purpose_refs"] = purpose_refs
     else:
         raise ValueError(f"unknown judgment kind: {kind!r}")
 
@@ -1416,6 +1621,28 @@ def sanitize_timetable(
                     f"slot[{i}]: kind={kind!r} には ref を付けられません; ref='none' に矯正"
                 )
                 ref = REF_NONE
+        elif _TRACK_REF_RE.match(ref):
+            # 大枝 (track:N) コマ — 実在の生きた Track のみ (P5 §3.1)。
+            track_manager = getattr(manager, "track_manager", None)
+            if track_manager is None:
+                warnings.append(
+                    f"slot[{i}] rejected: track_manager が無いため {ref!r} を解決できません"
+                )
+                continue
+            from saiverse.track_manager import LIVE_STATUSES, TrackNotFoundError
+
+            try:
+                track = track_manager.get(
+                    track_manager.resolve_track_ref(persona_id, ref)
+                )
+            except TrackNotFoundError:
+                warnings.append(f"slot[{i}] rejected: ref {ref!r} does not exist")
+                continue
+            if track.status not in LIVE_STATUSES:
+                warnings.append(
+                    f"slot[{i}] rejected: ref {ref!r} は既に {track.status} の Track です"
+                )
+                continue
         elif ref != REF_NONE:
             if not _REF_RE.match(ref):
                 warnings.append(f"slot[{i}] rejected: invalid ref format {ref!r}")

@@ -164,7 +164,10 @@ META_BUDGET_TOTAL = "budget_total_rounds"
 META_BUDGET_USED = "budget_used_rounds"
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-_REF_RE = re.compile(r"^(task|desire):(\d+)$")
+# コマは目的ノードを任意階層で指せる (P5, life_concept_map.md §3.1):
+# task:N (採用済み) / desire:N (候補=お試し採用) / track:N (大枝=関心そのもの)
+_REF_RE = re.compile(r"^(task|desire|track):(\d+)$")
+_TRACK_REF_RE = re.compile(r"^track:(\d+)$")
 
 # ---------------------------------------------------------------------------
 # kind 別ハンドラのレジストリ
@@ -274,7 +277,7 @@ def _validate_and_normalize_slots(
         ref = slot.get("ref", REF_NONE)
         if not isinstance(ref, str) or (ref != REF_NONE and not _REF_RE.match(ref)):
             raise ValueError(
-                f"slot[{i}].ref={ref!r} must be 'task:N', 'desire:N' or 'none'"
+                f"slot[{i}].ref={ref!r} must be 'task:N', 'desire:N', 'track:N' or 'none'"
             )
         if kind in (KIND_LIVING, KIND_REST) and ref != REF_NONE:
             raise ValueError(
@@ -1272,6 +1275,106 @@ def _resolve_ref(manager: Any, persona_id: str, ref: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 大枝 (track:N) コマの指示書 (P5: コマ参照の任意階層化、life_concept_map.md §3.1)
+# ---------------------------------------------------------------------------
+
+
+def _read_track_desk_memo(track: Any) -> Optional[Dict[str, Any]]:
+    """Track metadata から作業メモ (desk_memo) を読む。無ければ None。"""
+    raw = getattr(track, "track_metadata", None)
+    if not raw:
+        return None
+    try:
+        metadata = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    memo = metadata.get("desk_memo") if isinstance(metadata, dict) else None
+    return memo if isinstance(memo, dict) else None
+
+
+def _build_track_instruction(
+    manager: Any, persona_id: str, slot: Dict[str, Any], ref: str
+) -> tuple[Optional[str], Optional[str]]:
+    """track:N コマの指示書を Track の文脈 (title・机メモ・配下の生存タスク) から組む。
+
+    大枝コマの実行意味 (§3.1「中身はその場の判断」): 発火時に Track の状況を
+    見てセッション 1 本を回す。**中身が空の Track** (配下に生存タスクが無く
+    机メモも無い) は presence 相当に縮退する — 充填生成でセッションを回すと
+    v1 の空回りに逆戻りするため (§6 無意味の予算の注意)。
+
+    Returns:
+        ``(instruction, track_id)``。縮退時は ``(None, track_id)``。
+        Track が解決できない場合は ``(None, None)`` (呼び出し側で WARN 済み想定)。
+    """
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is None:
+        LOGGER.warning("[day_plan] track ref %r but manager has no track_manager", ref)
+        return None, None
+    try:
+        track_id = track_manager.resolve_track_ref(persona_id, ref)
+        track = track_manager.get(track_id)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] track ref %r could not be resolved (persona=%s)",
+            ref, persona_id, exc_info=True,
+        )
+        return None, None
+
+    title = getattr(track, "title", None) or "(無題)"
+    intent = (getattr(track, "intent", None) or "").strip()
+    memo = _read_track_desk_memo(track)
+
+    from saiverse.persona_task_manager import PersonaTaskManager
+
+    try:
+        ptm = PersonaTaskManager(manager.SessionLocal)
+        live_tasks = ptm.list_tasks(
+            persona_id, track_id=track_id,
+            statuses=("pending", "active", "paused"), include_steps=False,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to list tasks under track %s (persona=%s)",
+            track_id, persona_id, exc_info=True,
+        )
+        live_tasks = []
+
+    if not live_tasks and not memo:
+        # 中身が空 → presence 縮退 (呼び出し側が record_level を刻む)
+        return None, track_id
+
+    note = (slot.get("note") or "").strip()
+    parts = [f"目的: 関心「{title}」を前に進める。"]
+    if intent:
+        parts.append(f"この関心の意図: {intent}")
+    if note:
+        parts.append(f"このコマの覚え書き: {note}")
+    if memo:
+        memo_label = "詰まり" if memo.get("status") == "blocked" else "続き"
+        parts.append(
+            f"前回の作業メモ [{memo_label}]: {str(memo.get('text') or '').strip() or '(記載なし)'}"
+        )
+    if live_tasks:
+        lines = ["この関心の下にあるタスク:"]
+        for t in live_tasks:
+            t_ref = t.get("task_ref") or "task:?"
+            goal = (t.get("goal") or "").strip()
+            lines.append(
+                f"- {t_ref} [{t.get('status')}] {t.get('title') or '(無題)'}"
+                + (f"（目標: {goal}）" if goal else "")
+            )
+        parts.append("\n".join(lines))
+    parts.append(
+        "この中から今のコマで実際に進められることを選んで取り組むこと。"
+        "スペルで実際に実行・確認できたことだけを行い、成果は document_create 等の"
+        "スペルで実際に残すこと。"
+        "完成条件: 実際にやったことが読み返せる形で残っていること。"
+        "実際にやったこと以外を「やった」と書かないこと。"
+    )
+    return "\n".join(parts), track_id
+
+
+# ---------------------------------------------------------------------------
 # 組み込みハンドラ
 # ---------------------------------------------------------------------------
 
@@ -1341,15 +1444,43 @@ def run_worker_slot_session(
     上位層 (``saiverse.day_scenario.ScenarioPlayer`` のラップハンドラ) が共有する
     — 後者は post_session 判断の入力として ``WorkSessionResult`` 全体が要る。
 
+    ref の階層でセッションの形が変わる (P5, life_concept_map.md §3.1):
+
+    - task:N / desire:N / none — 型別テンプレートの指示書 (従来どおり。
+      desire コマ = お試し採用: 発火時にそのまま欲求を生きる。採用への昇格は
+      しない — それは判断点の仕事)
+    - track:N (大枝) — Track の title・机メモ・配下の生存タスクから指示書を
+      組む (:func:`_build_track_instruction`)。**中身が空の Track は presence
+      相当に縮退** し、セッションを回さず ``None`` を返す (呼び出し側は
+      判断点を撃たず予算も消費しない)
+
     Returns:
         ``sea.work_session.WorkSessionResult`` (raise しない契約)。
+        presence 縮退時のみ ``None``。
     """
     kind = slot["kind"]
-    template = _WORKER_INSTRUCTION_TEMPLATES[kind]
     ref = slot.get("ref") or REF_NONE
-    target = _resolve_ref(manager, persona_id, ref) or _NO_REF_TARGET
-    note = (slot.get("note") or "").strip() or "(記載なし)"
-    instruction = template.format(note=note, target=target)
+    track_id: Optional[str] = None
+    if _TRACK_REF_RE.match(ref):
+        instruction, track_id = _build_track_instruction(manager, persona_id, slot, ref)
+        if instruction is None:
+            # 中身が空 (または解決不能) → presence 縮退。詳細な実行記録が
+            # 無いことを slot に永続化する (暮らし/休む スタブと同じ正直さ)。
+            LOGGER.info(
+                "[day_plan] track slot degraded to presence (empty track): "
+                "persona=%s date=%s index=%d ref=%s",
+                persona_id, plan_date_str, index, ref,
+            )
+            _update_slot(
+                manager, persona_id, plan_date_str, index,
+                record_level=RECORD_LEVEL_PRESENCE_ONLY,
+            )
+            return None
+    else:
+        template = _WORKER_INSTRUCTION_TEMPLATES[kind]
+        target = _resolve_ref(manager, persona_id, ref) or _NO_REF_TARGET
+        note = (slot.get("note") or "").strip() or "(記載なし)"
+        instruction = template.format(note=note, target=target)
 
     budget = int(slot.get("budget_rounds") or 0)
     if budget < 1:
@@ -1364,13 +1495,18 @@ def run_worker_slot_session(
 
     from sea.work_session import run_work_session
 
+    # track:N コマではセッションの対象タスクは無い (Track 単位の取り組み)。
+    # task_ref を track 参照で埋めると post_session の task_verdict が偽対象を
+    # 裁定してしまうため、track_id 側に流す。
+    is_track_ref = track_id is not None
     result = run_work_session(
         persona_id,
         instruction,
         budget,
-        task_ref=ref if ref != REF_NONE else None,
+        task_ref=ref if (ref != REF_NONE and not is_track_ref) else None,
         metadata={"day_plan": {"plan_date": plan_date_str, "slot_index": index, "kind": kind}},
         manager=manager,
+        track_id=track_id,
         title=str(slot.get("title") or "").strip() or None,
     )
     LOGGER.info(
@@ -1410,6 +1546,10 @@ def _handle_worker_slot(
         実際に消費したラウンド数 (``_fire_slot`` が予算台帳へ積算する)。
     """
     result = run_worker_slot_session(manager, persona_id, plan_date_str, slot, index)
+    if result is None:
+        # 中身が空の track コマの presence 縮退 (P5)。セッションが走っていない
+        # ので判断点も撃たない (偽前提の状況テキストは作話を誘発する)。
+        return 0
     try:
         from saiverse.autonomy_wiring import fire_judgment_point
         from saiverse.judgment_points import KIND_POST_SESSION
@@ -1419,7 +1559,9 @@ def _handle_worker_slot(
             "session_result": result,
             "budget_rounds": int(slot.get("budget_rounds") or 0) or None,
         }
-        if ref != REF_NONE:
+        # track:N コマの対象は Track (WorkSessionResult.track_id 経由で判断点へ
+        # 届く)。task_ref に track 参照を入れると task_verdict が壊れる。
+        if ref != REF_NONE and not _TRACK_REF_RE.match(ref):
             context["task_ref"] = ref
         fire_judgment_point(manager, persona_id, KIND_POST_SESSION, context)
     except Exception:

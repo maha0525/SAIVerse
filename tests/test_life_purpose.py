@@ -100,16 +100,17 @@ class LifePurposeSectionTest(unittest.TestCase):
             model_key="m", current_building_id="b", persona=None, manager=self.manager,
         )
 
-    def test_capture_drive_only_when_unset(self):
+    def test_unset_purpose_renders_neutral_text(self):
+        """未設定でも省略しない — 中立文を出す (life_concept_map.md §15 ①)。"""
         snap = LifePurposeSection().capture(self._ctx())
         self.assertEqual(snap.drive_text, DESIRE_DRIVE_TEXT)
         self.assertEqual(snap.purpose_text, "")
         rendered = LifePurposeSection().render(snap)
-        self.assertIsNotNone(rendered)  # 駆動文 (背景) のみ
+        self.assertIsNotNone(rendered)
         self.assertIn("内発的な動機", rendered.text)
+        self.assertIn("まだ言葉になっていません", rendered.text)
         # 行動喚起 (命令文) は head に置かない — META 専用状況が担うため。
         self.assertNotIn("life_purpose_set", rendered.text)
-        self.assertNotIn("生きる目的", rendered.text)
 
     def test_capture_includes_purpose_when_set(self):
         set_life_purpose(self.Session, "air", "誰かの隣にいる", ["創作"], ["支援"])
@@ -118,6 +119,46 @@ class LifePurposeSectionTest(unittest.TestCase):
         rendered = LifePurposeSection().render(snap)
         self.assertIn("生きる目的", rendered.text)
         self.assertIn("誰かの隣にいる", rendered.text)
+        # 設定済みなら中立文は出ない
+        self.assertNotIn("まだ言葉になっていません", rendered.text)
+
+    def test_render_includes_bark_and_mark_notation(self):
+        """樹皮の要旨と ==語句== 記法の教示が恒常で出る (§15 ① / §9.1 層1)。"""
+        snap = LifePurposeSection().capture(self._ctx())
+        rendered = LifePurposeSection().render(snap)
+        # 樹皮 (§4.1): 6 件の要旨。システムプロンプト遵守が最上位
+        self.assertIn("いつも守っているもの", rendered.text)
+        self.assertIn("システムプロンプトの遵守", rendered.text)
+        self.assertIn("最上位", rendered.text)
+        # 記法教示
+        self.assertIn("==語句==", rendered.text)
+
+    def test_first_tier_menu_in_render(self):
+        """第一階層の title がメニューとして出る。変化すると内容が変わる。"""
+        from saiverse.track_manager import TrackManager
+
+        section = LifePurposeSection()
+        empty_snap = section.capture(self._ctx())
+        self.assertEqual(empty_snap.first_tier_titles, [])
+        empty_text = section.render(empty_snap).text
+        self.assertIn("名前のついた関心はありません", empty_text)
+
+        tm = TrackManager(session_factory=self.Session)
+        tm.create(persona_id="air", track_type="autonomous", title="言葉の標本集")
+        snap = section.capture(self._ctx())
+        self.assertIn("言葉の標本集", snap.first_tier_titles)
+        text = section.render(snap).text
+        self.assertIn("- 言葉の標本集", text)
+        # 機構語 (track:N 等の参照子) はメニューに出さない
+        self.assertNotIn("track:", text.split("【あとで思い出したい言葉への印】")[0])
+        # 第一階層の変化でのみ render が変わる (キャッシュ再張りは稀)
+        self.assertNotEqual(empty_text, text)
+
+    def test_render_is_line_role_independent(self):
+        """render は snapshot のみに依存 — 用途/ラインで出し分けない (head 固定)。"""
+        section = LifePurposeSection()
+        snap = section.capture(self._ctx())
+        self.assertEqual(section.render(snap).text, section.render(snap).text)
 
     def test_diff_notifies_on_purpose_set(self):
         old = LifePurposeSnapshot(drive_text=DESIRE_DRIVE_TEXT, purpose_text="")
@@ -127,10 +168,18 @@ class LifePurposeSectionTest(unittest.TestCase):
         self.assertEqual(labels[0].kind, "life_purpose_set")
 
     def test_snapshot_roundtrip(self):
-        snap = LifePurposeSnapshot(drive_text="d", purpose_text="p")
+        snap = LifePurposeSnapshot(
+            drive_text="d", purpose_text="p", first_tier_titles=["a", "b"],
+        )
         section = LifePurposeSection()
         restored = section.deserialize_snapshot(section.serialize_snapshot(snap))
         self.assertEqual(restored, snap)
+
+    def test_deserialize_old_snapshot_without_first_tier(self):
+        """旧 snapshot (first_tier_titles 無し) は default で復元できる (後方互換)。"""
+        section = LifePurposeSection()
+        restored = section.deserialize_snapshot('{"drive_text": "d", "purpose_text": "p"}')
+        self.assertEqual(restored.first_tier_titles, [])
 
 
 class LifePurposeSetSpellTest(unittest.TestCase):

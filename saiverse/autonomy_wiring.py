@@ -310,10 +310,13 @@ def handle_conversation_end(
     had_exchange = _conversation_had_exchange(manager, persona_id, track_id)
 
     # 会話の出来事を閉じる (A1 の運用の線)。記録専用 — 失敗しても判断は止めない。
+    # 閉じた出来事の参照は post_conversation 判断へ渡す (層2 棚入れの対象 §9.1)。
+    episode_ref: Optional[str] = None
     try:
         from saiverse.episodes import close_conversation_episode
 
-        close_conversation_episode(manager, persona_id)
+        closed = close_conversation_episode(manager, persona_id)
+        episode_ref = (closed or {}).get("episode_ref")
     except Exception:
         LOGGER.warning(
             "[autonomy-wiring] failed to close conversation episode: "
@@ -329,7 +332,10 @@ def handle_conversation_end(
         return {"kind": KIND_POST_CONVERSATION, "submitted": False,
                 "reason": "conversation had no exchange; judgment skipped"}
 
-    return fire_judgment_point(manager, persona_id, KIND_POST_CONVERSATION, {})
+    context: Dict[str, Any] = {}
+    if episode_ref:
+        context["episode_ref"] = episode_ref
+    return fire_judgment_point(manager, persona_id, KIND_POST_CONVERSATION, context)
 
 
 def handle_wait_response_timeout(manager: Any, persona_id: str, track_id: str) -> None:
