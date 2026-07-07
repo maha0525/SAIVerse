@@ -67,7 +67,10 @@ class StoreMemoryMarkerTest(unittest.TestCase):
         gc.collect()
         try:
             self._tmp.cleanup()
-        except PermissionError:
+        except OSError:
+            # Windows では SQLite ハンドル解放のタイミング次第で rmdir が
+            # WinError 145 (not empty) を間欠で返す (PermissionError では
+            # なく素の OSError)。一時ディレクトリの取り残しは OS に任せる。
             pass
 
     def _stored_content(self, message_id: str) -> str:
