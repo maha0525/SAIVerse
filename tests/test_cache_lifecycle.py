@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from api.routes.people.cache_status import _resolve_cache_setting
 from saiverse.saiverse_manager import SAIVerseManager
 from sea.runtime import SEARuntime
+from sea.session_lifecycle import SessionLifecycle
 
 
 def _make_manager(cache_enabled=True, cache_ttl="5m"):
@@ -118,33 +119,33 @@ def test_get_cache_kwargs_per_persona():
 def test_anchor_entry_ttl_prefers_stored_value():
     """anchor に記録された ttl_seconds を優先 (= 書き込み時 TTL)。現行設定は見ない。"""
     rt = SimpleNamespace()
-    rt._anchor_entry_ttl_seconds = SEARuntime._anchor_entry_ttl_seconds.__get__(rt)
-    # stored があるとき _get_anchor_validity_seconds (現行設定) は呼ばれてはいけない
-    rt._get_anchor_validity_seconds = lambda *a, **k: (_ for _ in ()).throw(
+    rt.anchor_entry_ttl_seconds = SessionLifecycle.anchor_entry_ttl_seconds.__get__(rt)
+    # stored があるとき get_anchor_validity_seconds (現行設定) は呼ばれてはいけない
+    rt.get_anchor_validity_seconds = lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("stored ttl があるとき現行設定を見てはいけない")
     )
-    assert rt._anchor_entry_ttl_seconds({"ttl_seconds": 3600}, "claude-x", "air") == 3600
-    assert rt._anchor_entry_ttl_seconds({"ttl_seconds": 300}, "claude-x", "air") == 300
+    assert rt.anchor_entry_ttl_seconds({"ttl_seconds": 3600}, "claude-x", "air") == 3600
+    assert rt.anchor_entry_ttl_seconds({"ttl_seconds": 300}, "claude-x", "air") == 300
 
 
 def test_anchor_entry_ttl_falls_back_when_no_stored():
     """旧 anchor (ttl_seconds 無し) は現行設定にフォールバック (後方互換)。"""
     rt = SimpleNamespace()
-    rt._anchor_entry_ttl_seconds = SEARuntime._anchor_entry_ttl_seconds.__get__(rt)
-    rt._get_anchor_validity_seconds = lambda model, persona_id=None: 1200
-    assert rt._anchor_entry_ttl_seconds({}, "model", "air") == 1200
-    assert rt._anchor_entry_ttl_seconds({"anchor_id": "x", "updated_at": "t"}, "model", "air") == 1200
+    rt.anchor_entry_ttl_seconds = SessionLifecycle.anchor_entry_ttl_seconds.__get__(rt)
+    rt.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    assert rt.anchor_entry_ttl_seconds({}, "model", "air") == 1200
+    assert rt.anchor_entry_ttl_seconds({"anchor_id": "x", "updated_at": "t"}, "model", "air") == 1200
 
 
 # ---- 書き込み時 TTL の更新規則 (生存中は短縮しない = Anthropic 実測) ----
 
 def _make_anchor_writer(existing):
-    """_load_anchors/_save_anchors を stub した rt で _update_anchor_for_model を束縛。"""
+    """load_anchors/save_anchors を stub した rt で update_anchor_for_model を束縛。"""
     saved = {}
     rt = SimpleNamespace()
-    rt._load_anchors = lambda persona: dict(existing)
-    rt._save_anchors = lambda persona, anchors: saved.update(anchors)
-    rt._update_anchor_for_model = SEARuntime._update_anchor_for_model.__get__(rt)
+    rt.load_anchors = lambda persona: dict(existing)
+    rt.save_anchors = lambda persona, anchors: saved.update(anchors)
+    rt.update_anchor_for_model = SessionLifecycle.update_anchor_for_model.__get__(rt)
     return rt, saved
 
 
@@ -154,7 +155,7 @@ def test_update_anchor_short_write_keeps_ttl_and_does_not_slide_window():
     existing = {"claude-x": {"anchor_id": "a1", "updated_at": t1, "ttl_seconds": 3600}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
-    rt._update_anchor_for_model(persona, "claude-x", "a2", 300)  # 5m 書き込み
+    rt.update_anchor_for_model(persona, "claude-x", "a2", 300)  # 5m 書き込み
     assert saved["claude-x"]["ttl_seconds"] == 3600       # 短縮しない
     assert saved["claude-x"]["updated_at"] == t1          # window はスライドしない
 
@@ -165,7 +166,7 @@ def test_update_anchor_same_ttl_refreshes_window():
     existing = {"claude-x": {"anchor_id": "a1", "updated_at": t1, "ttl_seconds": 3600}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
-    rt._update_anchor_for_model(persona, "claude-x", "a2", 3600)  # 1h 書き込み
+    rt.update_anchor_for_model(persona, "claude-x", "a2", 3600)  # 1h 書き込み
     assert saved["claude-x"]["ttl_seconds"] == 3600
     assert saved["claude-x"]["updated_at"] != t1          # now にリフレッシュ
 
@@ -176,7 +177,7 @@ def test_update_anchor_resets_ttl_after_expiry():
     existing = {"claude-x": {"anchor_id": "a1", "updated_at": old, "ttl_seconds": 3600}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
-    rt._update_anchor_for_model(persona, "claude-x", "a2", 300)
+    rt.update_anchor_for_model(persona, "claude-x", "a2", 300)
     assert saved["claude-x"]["ttl_seconds"] == 300
     assert saved["claude-x"]["updated_at"] != old         # 失効後はリセット
 
@@ -187,6 +188,6 @@ def test_update_anchor_upgrades_to_longer_ttl_and_slides_window():
     existing = {"claude-x": {"anchor_id": "a1", "updated_at": t1, "ttl_seconds": 300}}
     rt, saved = _make_anchor_writer(existing)
     persona = SimpleNamespace(persona_id="air", model="claude-x")
-    rt._update_anchor_for_model(persona, "claude-x", "a2", 3600)
+    rt.update_anchor_for_model(persona, "claude-x", "a2", 3600)
     assert saved["claude-x"]["ttl_seconds"] == 3600
     assert saved["claude-x"]["updated_at"] != t1

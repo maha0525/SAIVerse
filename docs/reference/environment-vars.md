@@ -37,6 +37,10 @@
 | `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | あらすじ統合の閾値 |
 | `MEMORY_WEAVE_MAINTAIN_INTERVAL` | `200` | メンテ間隔 |
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。記憶アーキv2 §6.2 |
+| `SAIVERSE_GOLD_PANNING_ENABLED` | `1` | 砂金採り（Metabolism 時のコア記憶採取）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る）。intent `gold_panning.md` |
+| `SAIVERSE_GOLD_PANNING_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
+| `SAIVERSE_GOLD_PANNING_MIN_QUOTE_CHARS` | `10` | scene 指差し引用の最小文字数（これ未満は照合せず失敗扱い） |
+| `SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES` | `10` | セッションクローズ時採取のスキップ下限（新規メッセージがこれ未満なら採取しない。Phase 3） |
 
 ## バックアップ
 
