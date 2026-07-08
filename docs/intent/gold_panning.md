@@ -1,6 +1,7 @@
 # gold_panning（砂金採り）— 押し出される記憶からの恒常知識の採取
 
-**Status**: v0.1（2026-07-07 起草、まはー×エアの設計議論に基づく。まはーレビュー待ち）
+**Status**: v0.1（2026-07-07 起草、まはー×エアの設計議論に基づく）。実装済み・実機検証待ち。
+**2026-07-08 改訂**: 実運用で **SCENE 自動採取が暴走（1 回で数千字）** したため、gold_panning の自動採取は **NOTE（add / update / remove）のみ**に絞った。SCENE 種別自体（`create_scene_core_memory`）と手動ツール（`core_memory_add_scene`）は存置し、gold_panning の response_schema・プロンプト・ファジー照合（`_resolve_quote` 等）・`SAIVERSE_GOLD_PANNING_MIN_QUOTE_CHARS` を除去。以降 §5 以下の scene 採取に関する記述は「手動ツール経由のみ」と読み替えること。
 **起草**: まはー × エア（Claude Code）
 **コード参照の行番号**: 2026-07-07 時点（branch `feature/autonomous-behavior-v2`）
 

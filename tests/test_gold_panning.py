@@ -1,8 +1,7 @@
 """gold_panning (砂金採り) のユニットテスト。
 
-- ops 適用 (add / update / remove / add_scene) が実 SAIMemory (temp DB) に届くこと
+- ops 適用 (add / update / remove) が実 SAIMemory (temp DB) に届くこと
 - 採取ありは committed / 採取なしは discardable で判断ターンが記録されること
-- scene のファジー照合 (表記揺れ許容 / 照合失敗の明示)
 - LLM 例外が呼び出し側 (run_metabolism) の try/except で隔離されること
 - defer-to-hot: anchor 冷で pending が立ち metabolism がスキップ / 圧力弁で実行
 
@@ -271,42 +270,6 @@ class GoldPanningRunTest(unittest.TestCase):
         self.assertEqual(summary["ops_applied"], 1)
         self.assertEqual(self._list_core(), [])
 
-    # -- case 4: add_scene (match success / miss failure) ----------------
-
-    def test_add_scene_exact_match_success(self):
-        msgs = self._add_conversation([
-            ("user", "海外赴任は九月まで続くんだ、時差があるから気をつけて"),
-            ("model", "うん、体調に気をつけてね"),
-        ])
-        result = {"reflection": "この場面を残す", "ops": [
-            {"op": "add_scene", "quote": "海外赴任は九月まで続くんだ、時差があるから気をつけて", "rounds": 1},
-        ]}
-        summary, _ = self._run(result, current_messages=msgs, evict_count=2)
-        self.assertEqual(summary["ops_applied"], 1)
-
-        cores = self._list_core()
-        scene = [c for c in cores if c.kind == "scene"]
-        self.assertEqual(len(scene), 1)
-
-        row = _read_gold_record(self.adapter)
-        self.assertEqual(row[1], "committed")
-        self.assertIn("会話の記憶", row[0])
-
-    def test_add_scene_missing_quote_is_failure_and_explicit(self):
-        msgs = self._add_conversation([
-            ("user", "今日はいい天気だね"),
-            ("model", "そうだね、散歩日和だ"),
-        ])
-        result = {"reflection": "残したい", "ops": [
-            {"op": "add_scene", "quote": "この発言はどこにも存在しない架空の引用文です", "rounds": 1},
-        ]}
-        summary, _ = self._run(result, current_messages=msgs, evict_count=2)
-        self.assertEqual(summary["ops_applied"], 0)
-        self.assertEqual(summary["ops_failed"], 1)
-        # scene の失敗は黙って捨てず記録テキストに明示される (intent §5-4)
-        row = _read_gold_record(self.adapter)
-        self.assertIn("scene 照合失敗", row[0])
-
     # -- case: str fallback (parse failure) ------------------------------
 
     def test_str_result_non_json_is_no_op_with_reflection(self):
@@ -347,49 +310,6 @@ class GoldPanningRunTest(unittest.TestCase):
         self.assertEqual(summary["reason"], "disabled")
         self.assertEqual(client.calls, [])  # LLM 呼び出しすら起きない
         self.assertEqual(self._list_core(), [])
-
-
-class ResolveQuoteTest(unittest.TestCase):
-    """scene のファジー照合 (_resolve_quote) 単体。"""
-
-    def _msgs(self):
-        return [
-            {"id": "m1", "role": "user", "content": "ABCの前置き"},
-            {"id": "m2", "role": "user", "content": "海外赴任は九月まで続くのだと彼は言った"},
-            {"id": "m3", "role": "model", "content": "了解、気をつけてね"},
-        ]
-
-    def test_stage1_substring_with_whitespace_and_width_variation(self):
-        # 全角スペース + 半角/全角の揺れが NFKC + 空白圧縮で吸収され、第1段一致する。
-        quote = "海外赴任は九月　まで続くのだ"
-        mid = gold_panning._resolve_quote(quote, self._msgs(), min_quote_chars=10)
-        self.assertEqual(mid, "m2")
-
-    def test_stage1_latest_wins_on_multiple_hits(self):
-        msgs = [
-            {"id": "a", "content": "共通のフレーズを含む文章その1"},
-            {"id": "b", "content": "共通のフレーズを含む文章その2"},
-        ]
-        mid = gold_panning._resolve_quote("共通のフレーズを含む", msgs, min_quote_chars=5)
-        self.assertEqual(mid, "b")  # 最後 (最新) を採用
-
-    def test_short_quote_is_rejected(self):
-        msgs = [{"id": "m1", "content": "短い"}]
-        self.assertIsNone(gold_panning._resolve_quote("短い", msgs, min_quote_chars=10))
-
-    def test_no_match_returns_none(self):
-        self.assertIsNone(
-            gold_panning._resolve_quote(
-                "どこにも存在しない完全に無関係な長い文字列", self._msgs(), min_quote_chars=10,
-            )
-        )
-
-    def test_stage2_fuzzy_partial_match(self):
-        # 1 文字だけ違う (誤字) を第2段の部分一致比率で拾う。
-        msgs = [{"id": "x", "content": "本日の会議は午後三時から開始する予定です"}]
-        quote = "本日の会議は午後三時から開始する予定でず"  # 末尾 1 字違い
-        mid = gold_panning._resolve_quote(quote, msgs, min_quote_chars=10)
-        self.assertEqual(mid, "x")
 
 
 class DeferToHotTest(unittest.TestCase):

@@ -15,11 +15,9 @@ Metabolism の eviction 直前、メインラインの温まった prefix (head 
 """
 from __future__ import annotations
 
-import difflib
 import json
 import logging
 import os
-import unicodedata
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -70,11 +68,6 @@ def get_pending_cap() -> float:
     return _env_float("SAIVERSE_GOLD_PANNING_PENDING_CAP", 1.5)
 
 
-def get_min_quote_chars() -> int:
-    """scene 引用の最小文字数。これ未満は一意に指せないので照合せず失敗扱い。"""
-    return _env_int("SAIVERSE_GOLD_PANNING_MIN_QUOTE_CHARS", 10)
-
-
 def get_close_min_messages() -> int:
     """セッションクローズ (Phase 3) 時のスキップ下限。定義だけ先置き。"""
     return _env_int("SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES", 10)
@@ -99,7 +92,7 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
                 "properties": {
                     "op": {
                         "type": "string",
-                        "enum": ["add", "update", "remove", "add_scene"],
+                        "enum": ["add", "update", "remove"],
                     },
                     "content": {
                         "type": "string",
@@ -108,14 +101,6 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
                     "memory_id": {
                         "type": "integer",
                         "description": "update / remove 対象の c:N の N。",
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "add_scene: 残したい場面の発言の原文引用 1 行。",
-                    },
-                    "rounds": {
-                        "type": "integer",
-                        "description": "add_scene: 引用前後の往復数 (既定 3)。",
                     },
                 },
                 "required": ["op"],
@@ -179,16 +164,11 @@ def _build_panning_prompt(persona: Any) -> str:
         "- 状態の変化（生活・仕事・健康・関係性など、いま進行中の事実）。状態には\n"
         "  日付を含めてください（例: 2026年6月頃〜 ユーザーは海外赴任中、9月帰国予定）。\n"
         "- 既存のコア記憶と矛盾する新情報（帰国・引っ越しなど。矛盾は update で解消）。\n"
-        "- 原文のまま残したい印象的な場面（口調・関係性のアンカー）。\n"
         "\n"
         "姿勢:\n"
         "- **採取しないのが普通です。** ほとんどの記憶整理では何も採りません（ops は\n"
         "  空配列）。無理に何かを刻もうとしないでください。\n"
         "- 既にコア記憶にあることは再度採らないでください。\n"
-        "\n"
-        "場面（scene）を原文で残したい場合は、その場面に含まれる発言を一字一句その\n"
-        "まま 1 行 quote に引用してください（要約・言い換えはしない）。システムが\n"
-        "その発言を探し当て、前後を含めて原文のまま複製します。\n"
         "\n"
         f"### 現在のコア記憶（合計 {total_chars:,} 字 / 目安 {budget:,} 字）\n"
         f"{core_block}\n"
@@ -198,95 +178,12 @@ def _build_panning_prompt(persona: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# scene のファジー照合
-# ---------------------------------------------------------------------------
-
-def _normalize(text: str) -> str:
-    """NFKC → 空白類圧縮 → lowercase。"""
-    if not text:
-        return ""
-    norm = unicodedata.normalize("NFKC", text)
-    norm = " ".join(norm.split())
-    return norm.lower()
-
-
-def _partial_ratio(shorter: str, longer: str) -> float:
-    """shorter を longer 内の最良部分窓に対して照合した比率 (fuzzywuzzy partial_ratio 相当)。"""
-    if not shorter or not longer:
-        return 0.0
-    if len(shorter) > len(longer):
-        shorter, longer = longer, shorter
-    matcher = difflib.SequenceMatcher(None, shorter, longer)
-    best = 0.0
-    for i, j, _n in matcher.get_matching_blocks():
-        start = max(0, j - i)
-        end = start + len(shorter)
-        substr = longer[start:end]
-        if not substr:
-            continue
-        ratio = difflib.SequenceMatcher(None, shorter, substr).ratio()
-        if ratio > best:
-            best = ratio
-    return best
-
-
-def _resolve_quote(
-    quote: str,
-    current_messages: List[Dict[str, Any]],
-    *,
-    min_quote_chars: int,
-    threshold: float = 0.8,
-) -> Optional[str]:
-    """quote に対応する message id をファジー照合で解決する。見つからなければ None。
-
-    照合対象は current_messages 全体 (押し出し分に限定しない — 引用が残留窓側でも
-    scene として有効)。
-    """
-    norm_quote = _normalize(quote)
-    if len(norm_quote) < min_quote_chars:
-        # 短すぎる引用は一意に指せない (誤爆防止)。
-        return None
-
-    # 第1段: 正規化部分文字列一致。複数ヒット時は最後 (最新) のメッセージを採用。
-    substr_hit: Optional[str] = None
-    for msg in current_messages:
-        mid = msg.get("id")
-        if not mid:
-            continue
-        norm_content = _normalize(msg.get("content", ""))
-        if norm_quote and norm_quote in norm_content:
-            substr_hit = mid  # 後勝ち = 最新
-    if substr_hit is not None:
-        return substr_hit
-
-    # 第2段: SequenceMatcher の最良部分一致比率で threshold 以上の最高スコア。
-    best_id: Optional[str] = None
-    best_ratio = threshold
-    for msg in current_messages:
-        mid = msg.get("id")
-        if not mid:
-            continue
-        norm_content = _normalize(msg.get("content", ""))
-        if not norm_content:
-            continue
-        ratio = _partial_ratio(norm_quote, norm_content)
-        # ties は後勝ち (最新) — >= で更新する。
-        if ratio >= best_ratio:
-            best_ratio = ratio
-            best_id = mid
-    return best_id
-
-
-# ---------------------------------------------------------------------------
 # ops の適用 (tool 関数を経由せず直接)
 # ---------------------------------------------------------------------------
 
 def _apply_ops(
     persona: Any,
     ops: List[Dict[str, Any]],
-    current_messages: List[Dict[str, Any]],
-    *,
-    min_quote_chars: int,
 ) -> tuple[int, int, List[str]]:
     """ops を順に適用し、(成功数, 失敗数, 結果テキスト行) を返す。
 
@@ -294,14 +191,11 @@ def _apply_ops(
     """
     from sai_memory.core_memory import (
         add_core_memory,
-        create_scene_core_memory,
         remove_core_memory,
         update_core_memory,
     )
 
     adapter = getattr(persona, "sai_memory", None)
-    persona_id = getattr(persona, "persona_id", None)
-    persona_name = getattr(persona, "persona_name", None) or persona_id or "assistant"
 
     applied = 0
     failed = 0
@@ -366,40 +260,6 @@ def _apply_ops(
                     failed += 1
                     lines.append(f"remove 失敗: c:{memory_id} が見つかりませんでした。")
 
-            elif kind == "add_scene":
-                quote = op.get("quote") or ""
-                rounds = op.get("rounds")
-                try:
-                    rounds_int = int(rounds) if rounds is not None else 3
-                except (TypeError, ValueError):
-                    rounds_int = 3
-                if rounds_int <= 0:
-                    rounds_int = 3
-                mid = _resolve_quote(
-                    quote, current_messages, min_quote_chars=min_quote_chars,
-                )
-                if not mid:
-                    failed += 1
-                    lines.append(
-                        f"scene 照合失敗: 引用「{quote}」に一致する発言が"
-                        "見つかりませんでした。"
-                    )
-                    continue
-                with adapter._db_lock:
-                    result = create_scene_core_memory(
-                        adapter.conn, mid, rounds=rounds_int, persona_name=persona_name,
-                    )
-                if result is None:
-                    failed += 1
-                    lines.append(
-                        f"scene 採取失敗: メッセージ {mid} が実会話として切り抜けませんでした。"
-                    )
-                else:
-                    applied += 1
-                    lines.append(
-                        f"コア記憶 c:{result.memory_id}（会話の記憶）に採取: "
-                        f"{result.message_count} 発言分（{result.date_start}〜{result.date_end}）。"
-                    )
             else:
                 failed += 1
                 lines.append(f"未知の op '{kind}' をスキップしました。")
@@ -637,10 +497,7 @@ def run_gold_panning(
         )
 
     # 4. ops を適用。
-    min_quote_chars = get_min_quote_chars()
-    applied, failed, result_lines = _apply_ops(
-        persona, ops, current_messages, min_quote_chars=min_quote_chars,
-    )
+    applied, failed, result_lines = _apply_ops(persona, ops)
 
     # 5. 記録テキスト。event_message 形式のシステム通知として <system> に包む
     #    (ペルソナ発話ではなくナレーション。few-shot 汚染回避、2026-07-07 まはー指摘)。

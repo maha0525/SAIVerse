@@ -42,7 +42,8 @@
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
 | 🟠 実装中 | 自律行動v2 活性化配線 | playbook 5本 import → `--real` 行動テスト(まはーレビュー) → 起床/就寝/セッション終了/会話終了/on_event の配線 → 旧 track_autonomous 停止 | 私 → まはー | [autonomous_behavior_v2.md](../intent/autonomous_behavior_v2.md) | 2026-07-08 |
-| 🟣 検証待ち | gold_panning 砂金採り | 実機で採取(コア記憶化)とセッションクローズ・defer-to-hot の動作確認 | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
+| 🟣 検証待ち | gold_panning 砂金採り | SCENE 自動採取除去(NOTE のみ化)は**完了**(暴走対策)。残: 実機で採取・defer-to-hot・セッションクローズの動作確認 | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
+| 🔵 設計中 | コア記憶の訂正導線 (チャット可視化 + ユーザー訂正) | gold_panning のコア記憶更新が Metabolism 裏で走りチャット UI に出ない → 更新をチャットに可視化し、その場で訂正/取消できる導線を設計(intent 化を検討) | まはー(設計相談) | (intent 未起草) | 2026-07-08 |
 | 🟡 実装待ち | quick_spell 本体実装 | サブエージェント委譲で実装(クオンのデータ修復は完了済) | まはー(GO) | [quick_spell.md](../intent/quick_spell.md) | 2026-07-08 |
 | 🟡 実装待ち | runtime_llm.py 巨大 node 分割 | Phase 0(重複ヘルパ抽出)から着手。副産物で Beat 型導入 | 私 / まはー | [runtime_llm_node_split_design.md](../issues/runtime_llm_node_split_design.md) | 2026-07-08 |
 | 🔵 設計中 | session_lifecycle Step 3 (Session 統一制御) | `session.md` を実装に移す。抽出済み SessionLifecycle に Session 識別と状態を持たせる | session.md 待ち | [session_lifecycle_extraction_design.md](../issues/session_lifecycle_extraction_design.md) / [session.md](../intent/session.md) | 2026-07-08 |
