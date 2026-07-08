@@ -165,7 +165,11 @@ class SceneResult:
 
 
 def format_scene_transcript(messages, persona_name: str) -> str:
-    """会話メッセージ列を ``ラベル「原文」`` 形式に整形する。content は無改変。
+    """会話メッセージ列を ``[時刻] [ラベル]: 原文`` 形式に整形する。content は無改変。
+
+    記法は複数メッセージ表示の既存慣行 (chronicle_context_down 等) に揃える
+    (2026-07-07 まはー指定。旧 ``ラベル「原文」`` 形式はカギカッコが content 内の
+    カギカッコと衝突してメッセージ境界が読み取れなかった)。
 
     persona 応答の role は 'model' / 'assistant' 両方が実データに存在するため
     ``_PERSONA_ROLES`` で判定する。それ以外は user ラベル。
@@ -173,7 +177,9 @@ def format_scene_transcript(messages, persona_name: str) -> str:
     lines = []
     for msg in messages:
         label = persona_name if msg.role in _PERSONA_ROLES else "user"
-        lines.append(f"{label}「{msg.content}」")
+        ts = getattr(msg, "created_at", None)
+        ts_label = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "?"
+        lines.append(f"[{ts_label}] [{label}]: {msg.content}")
     return "\n".join(lines)
 
 

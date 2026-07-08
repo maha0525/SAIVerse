@@ -308,7 +308,7 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].kind, "scene")
         self.assertIn("ソフィーーーー！！！いけたーーーー！！", items[0].content)
-        self.assertIn("エア「やったね、まはー！」", items[0].content)
+        self.assertIn("[エア]: やったね、まはー！", items[0].content)
 
     def test_accepts_uri_form_message_id(self):
         from tools.context import persona_context
@@ -352,7 +352,7 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
                 items = list_core_memories(adapter2.conn)
         finally:
             adapter2.close()
-        self.assertIn("エア「いけたーーーー！！！！！！！」", items[0].content)
+        self.assertIn("[エア]: いけたーーーー！！！！！！！", items[0].content)
 
 
 class CoreMemorySceneRenderTest(unittest.TestCase):
