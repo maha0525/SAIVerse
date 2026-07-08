@@ -36,6 +36,8 @@ class CoreMemory:
     updated_at: int
     kind: str = "note"
     metadata: Optional[str] = None
+    confirmed: int = 1
+    deleted_at: Optional[int] = None
 
     @property
     def ref(self) -> str:
@@ -57,10 +59,23 @@ def init_core_memory_table(conn: sqlite3.Connection) -> None:
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             kind TEXT NOT NULL DEFAULT 'note',
-            metadata TEXT
+            metadata TEXT,
+            confirmed INTEGER NOT NULL DEFAULT 1,
+            deleted_at INTEGER
         )
         """
     )
+    # 既存 DB 向けの追加系マイグレーション (memopedia_pages と同方式)。
+    # confirmed: 0=自動採取の未確認 / 1=確認済み。既存行は 1 (確認済み扱い)。
+    # deleted_at: soft-delete (ごみ箱) 用。NULL=生存。
+    for ddl in (
+        "confirmed INTEGER NOT NULL DEFAULT 1",
+        "deleted_at INTEGER",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE core_memories ADD COLUMN {ddl}")
+        except sqlite3.OperationalError:
+            pass  # 既に存在する
     conn.commit()
 
 
@@ -70,63 +85,129 @@ def add_core_memory(
     *,
     kind: str = "note",
     metadata: Optional[str] = None,
+    confirmed: int = 1,
 ) -> int:
     """コア記憶を1件追加し、採番された id を返す。
 
-    ``kind`` / ``metadata`` は 'scene' (実会話の切り抜き) 用の追加パラメータ。
-    'note' の既存呼び出し (kind/metadata 省略) は後方互換のまま動く。
+    ``kind`` / ``metadata`` は 'scene' (実会話の切り抜き) / 由来参照用。
+    ``confirmed`` は 0 で「未確認 (自動採取)」= ユーザーの確認待ち。ペルソナ自身や
+    ユーザーの手動追加は 1 (確認済み)。gold_panning の自動採取だけ 0 で書く。
+    既存呼び出し (省略) は後方互換で confirmed=1 のまま動く。
     """
     now = int(time.time())
     cur = conn.execute(
-        "INSERT INTO core_memories (content, created_at, updated_at, kind, metadata) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (content, now, now, kind, metadata),
+        "INSERT INTO core_memories (content, created_at, updated_at, kind, metadata, confirmed) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (content, now, now, kind, metadata, confirmed),
     )
     conn.commit()
     return int(cur.lastrowid)
 
 
-def update_core_memory(conn: sqlite3.Connection, memory_id: int, content: str) -> bool:
-    """既存のコア記憶を書き換える。対象が存在すれば True。"""
+def update_core_memory(
+    conn: sqlite3.Connection, memory_id: int, content: str, *, confirmed: Optional[int] = None,
+) -> bool:
+    """既存のコア記憶を書き換える。対象が存在すれば True。
+
+    ``confirmed`` を渡すと確認フラグも更新する (gold_panning の自動 update は
+    confirmed=0 で「未確認」に戻し、ユーザーの再確認を促す)。省略時は現状維持。
+    """
     now = int(time.time())
-    cur = conn.execute(
-        "UPDATE core_memories SET content = ?, updated_at = ? WHERE id = ?",
-        (content, now, memory_id),
-    )
+    if confirmed is None:
+        cur = conn.execute(
+            "UPDATE core_memories SET content = ?, updated_at = ? WHERE id = ?",
+            (content, now, memory_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE core_memories SET content = ?, updated_at = ?, confirmed = ? WHERE id = ?",
+            (content, now, int(confirmed), memory_id),
+        )
     conn.commit()
     return cur.rowcount > 0
 
 
 def remove_core_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
-    """コア記憶を削除する。対象が存在すれば True。"""
-    cur = conn.execute("DELETE FROM core_memories WHERE id = ?", (memory_id,))
+    """コア記憶を soft-delete する (ごみ箱へ移す)。生存中の対象があれば True。
+
+    物理削除しないのは、gold_panning の自動 remove やペルソナの誤削除を
+    ユーザーが後から復元できるようにするため (restore_core_memory)。
+    """
+    now = int(time.time())
+    cur = conn.execute(
+        "UPDATE core_memories SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+        (now, memory_id),
+    )
     conn.commit()
     return cur.rowcount > 0
 
 
+_SELECT_COLUMNS = "id, content, created_at, updated_at, kind, metadata, confirmed, deleted_at"
+
+
+def _row_to_core_memory(row) -> CoreMemory:
+    return CoreMemory(
+        id=int(row[0]),
+        content=str(row[1]),
+        created_at=int(row[2]),
+        updated_at=int(row[3]),
+        kind=str(row[4]) if row[4] is not None else "note",
+        metadata=row[5] if row[5] is not None else None,
+        confirmed=int(row[6]) if row[6] is not None else 1,
+        deleted_at=int(row[7]) if row[7] is not None else None,
+    )
+
+
 def list_core_memories(conn: sqlite3.Connection) -> List[CoreMemory]:
-    """全コア記憶を id 昇順で返す。"""
+    """生存中 (未削除) の全コア記憶を id 昇順で返す。"""
     rows = conn.execute(
-        "SELECT id, content, created_at, updated_at, kind, metadata "
-        "FROM core_memories ORDER BY id ASC"
+        f"SELECT {_SELECT_COLUMNS} FROM core_memories "
+        "WHERE deleted_at IS NULL ORDER BY id ASC"
     ).fetchall()
-    return [
-        CoreMemory(
-            id=int(row[0]),
-            content=str(row[1]),
-            created_at=int(row[2]),
-            updated_at=int(row[3]),
-            kind=str(row[4]) if row[4] is not None else "note",
-            metadata=row[5] if row[5] is not None else None,
-        )
-        for row in rows
-    ]
+    return [_row_to_core_memory(row) for row in rows]
+
+
+def list_deleted_core_memories(conn: sqlite3.Connection) -> List[CoreMemory]:
+    """ごみ箱 (soft-delete 済み) のコア記憶を削除の新しい順に返す。"""
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLUMNS} FROM core_memories "
+        "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+    ).fetchall()
+    return [_row_to_core_memory(row) for row in rows]
+
+
+def confirm_core_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
+    """未確認 (自動採取) のコア記憶をユーザーが確認済みにする。生存中の対象があれば True。"""
+    cur = conn.execute(
+        "UPDATE core_memories SET confirmed = 1 WHERE id = ? AND deleted_at IS NULL",
+        (memory_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def restore_core_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
+    """ごみ箱から復元する (deleted_at をクリア)。対象が削除済みなら True。"""
+    cur = conn.execute(
+        "UPDATE core_memories SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL",
+        (memory_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def count_unconfirmed_core_memories(conn: sqlite3.Connection) -> int:
+    """未確認 (confirmed=0) かつ生存中の件数。チャットの「N件更新」バッジ用。"""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM core_memories WHERE confirmed = 0 AND deleted_at IS NULL"
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def total_core_memory_chars(conn: sqlite3.Connection) -> int:
     """全コア記憶の本文文字数の合計を返す (容量目安判定に使う)。"""
     row = conn.execute(
-        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM core_memories"
+        "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM core_memories WHERE deleted_at IS NULL"
     ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 

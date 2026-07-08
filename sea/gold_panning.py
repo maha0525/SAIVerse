@@ -218,7 +218,11 @@ def _apply_ops(
                     lines.append("add 失敗: 本文が空でした。")
                     continue
                 with adapter._db_lock:
-                    new_id = add_core_memory(adapter.conn, content)
+                    new_id = add_core_memory(
+                        adapter.conn, content,
+                        metadata=json.dumps({"source": "gold_panning"}),
+                        confirmed=0,  # 自動採取はユーザー確認待ち
+                    )
                 applied += 1
                 # 記録は <system> 包みのシステム通知として SAIMemory に残る
                 # (_persist_record 参照)。省略・切り詰めは採取事実の改変になるため、
@@ -237,7 +241,9 @@ def _apply_ops(
                     lines.append(f"update 失敗: c:{memory_id} の新しい本文が空でした。")
                     continue
                 with adapter._db_lock:
-                    ok = update_core_memory(adapter.conn, int(memory_id), content)
+                    ok = update_core_memory(
+                        adapter.conn, int(memory_id), content, confirmed=0,
+                    )
                 if ok:
                     applied += 1
                     lines.append(f"コア記憶 c:{memory_id} を更新: {content}")

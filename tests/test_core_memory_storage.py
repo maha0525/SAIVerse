@@ -4,9 +4,13 @@ import unittest
 
 from sai_memory.core_memory import (
     add_core_memory,
+    confirm_core_memory,
+    count_unconfirmed_core_memories,
     init_core_memory_table,
     list_core_memories,
+    list_deleted_core_memories,
     remove_core_memory,
+    restore_core_memory,
     total_core_memory_chars,
     update_core_memory,
 )
@@ -20,11 +24,12 @@ class CoreMemoryStorageTest(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def test_init_creates_table_with_future_columns(self):
-        # kind / metadata 列が最初から存在する (将来拡張用)。
+    def test_init_creates_table_with_all_columns(self):
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(core_memories)")}
         self.assertEqual(
-            cols, {"id", "content", "created_at", "updated_at", "kind", "metadata"}
+            cols,
+            {"id", "content", "created_at", "updated_at", "kind", "metadata",
+             "confirmed", "deleted_at"},
         )
 
     def test_init_idempotent(self):
@@ -67,6 +72,54 @@ class CoreMemoryStorageTest(unittest.TestCase):
         add_core_memory(self.conn, "12345")   # 5 字
         add_core_memory(self.conn, "あいう")  # 3 字
         self.assertEqual(total_core_memory_chars(self.conn), 8)
+
+    # -- confirmed (未確認フラグ) --------------------------------------
+
+    def test_add_defaults_to_confirmed(self):
+        add_core_memory(self.conn, "手動追加は確認済み")
+        self.assertEqual(count_unconfirmed_core_memories(self.conn), 0)
+        self.assertEqual(list_core_memories(self.conn)[0].confirmed, 1)
+
+    def test_add_unconfirmed_counts_and_confirm_clears(self):
+        mid = add_core_memory(self.conn, "自動採取", confirmed=0)
+        self.assertEqual(count_unconfirmed_core_memories(self.conn), 1)
+        self.assertEqual(list_core_memories(self.conn)[0].confirmed, 0)
+        self.assertTrue(confirm_core_memory(self.conn, mid))
+        self.assertEqual(count_unconfirmed_core_memories(self.conn), 0)
+
+    def test_update_can_reset_confirmed(self):
+        mid = add_core_memory(self.conn, "確認済み")  # confirmed=1
+        update_core_memory(self.conn, mid, "書き換え", confirmed=0)
+        self.assertEqual(list_core_memories(self.conn)[0].confirmed, 0)
+
+    # -- soft-delete (ごみ箱) + 復元 -----------------------------------
+
+    def test_remove_is_soft_delete_and_listed_in_trash(self):
+        mid = add_core_memory(self.conn, "削除対象")
+        self.assertTrue(remove_core_memory(self.conn, mid))
+        # 生存一覧からは消えるが、ごみ箱に残り物理削除されていない。
+        self.assertEqual(list_core_memories(self.conn), [])
+        trash = list_deleted_core_memories(self.conn)
+        self.assertEqual([i.id for i in trash], [mid])
+        self.assertIsNotNone(trash[0].deleted_at)
+
+    def test_restore_from_trash(self):
+        mid = add_core_memory(self.conn, "復元対象")
+        remove_core_memory(self.conn, mid)
+        self.assertTrue(restore_core_memory(self.conn, mid))
+        self.assertEqual([i.id for i in list_core_memories(self.conn)], [mid])
+        self.assertEqual(list_deleted_core_memories(self.conn), [])
+
+    def test_double_remove_returns_false(self):
+        mid = add_core_memory(self.conn, "x")
+        self.assertTrue(remove_core_memory(self.conn, mid))
+        self.assertFalse(remove_core_memory(self.conn, mid))  # 二重削除しない
+
+    def test_total_chars_excludes_deleted(self):
+        add_core_memory(self.conn, "12345")   # 5 字
+        mid = add_core_memory(self.conn, "あいう")  # 3 字
+        remove_core_memory(self.conn, mid)
+        self.assertEqual(total_core_memory_chars(self.conn), 5)
 
 
 if __name__ == "__main__":
