@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 from sea.runtime import SEARuntime
 
@@ -172,7 +173,8 @@ def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
     return touched
 
 
-def test_keepalive_touches_cache_without_writing_memory():
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_touches_cache_without_writing_memory(_mock_cache):
     persona = _persona()
     runtime, _ = _make_runtime(persona)
     client = FakeLLMClient()
@@ -204,7 +206,8 @@ def test_keepalive_skips_when_not_active():
     assert client.calls == []
 
 
-def test_keepalive_skips_when_anchor_expired():
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_skips_when_anchor_expired(_mock_cache):
     """失効済みキャッシュは温め直さない — 連鎖は自然停止する。"""
     persona = _persona()
     runtime, _ = _make_runtime(persona)
@@ -218,7 +221,8 @@ def test_keepalive_skips_when_anchor_expired():
     assert touched == []
 
 
-def test_keepalive_skips_when_no_anchor():
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_skips_when_no_anchor(_mock_cache):
     persona = _persona()
     runtime, _ = _make_runtime(persona)
     client = FakeLLMClient()
@@ -227,7 +231,8 @@ def test_keepalive_skips_when_no_anchor():
     assert client.calls == []
 
 
-def test_keepalive_failure_does_not_touch_anchor():
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_failure_does_not_touch_anchor(_mock_cache):
     persona = _persona()
     runtime, _ = _make_runtime(persona)
 
@@ -239,3 +244,22 @@ def test_keepalive_failure_does_not_touch_anchor():
     touched = _wire_keepalive(runtime, persona, client)
     assert runtime.run_cache_keepalive("air") is False
     assert touched == []
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "implicit"})
+@patch("sea.gold_panning.is_enabled", return_value=True)
+def test_keepalive_non_explicit_reschedules_watchdog_without_llm(_mock_enabled, _mock_cache):
+    """非 explicit キャッシュ (Gemini/implicit 等) では keep-alive LLM を呼ばず、
+    セッション見張り (クローズ採取の足場) だけ再予約する (gold_panning.md §3.6)。"""
+    persona = _persona()
+    scheduler = FakeScheduler()
+    runtime, _ = _make_runtime(persona, scheduler=scheduler)
+    runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    client = FakeLLMClient()
+    _wire_keepalive(runtime, persona, client)
+
+    assert runtime.run_cache_keepalive("air") is False
+    # 温め直す実キャッシュがないので LLM は呼ばない
+    assert client.calls == []
+    # 見張りとしてタイマーだけ再予約される (次の TTL 接近でクローズ採取を試みる)
+    assert "ttl:air" in scheduler.scheduled
