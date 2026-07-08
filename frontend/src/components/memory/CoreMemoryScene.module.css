@@ -64,9 +64,7 @@
 
 .coreItem {
     display: flex;
-    align-items: flex-start;
-    gap: 0.5rem;
-    padding: 0.35rem 0;
+    flex-direction: column;
     border-top: 1px solid #2a2a2a;
     font-size: 0.85rem;
     line-height: 1.4;
@@ -74,6 +72,44 @@
 
 .coreItem:first-of-type {
     border-top: none;
+}
+
+.coreItemRow {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.35rem 0;
+    background: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.coreItemRow:hover .corePreview {
+    color: #fff;
+}
+
+.coreChevron {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: #888;
+}
+
+.coreFull {
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+    color: #ddd;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    background: #1a1b1e;
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    margin: 0 0 0.5rem 1.35rem;
 }
 
 .kindBadge {
@@ -498,6 +534,20 @@
 
 :global([data-theme="light"]) .corePreview {
     color: #334155;
+}
+
+:global([data-theme="light"]) .coreItemRow:hover .corePreview {
+    color: #0f172a;
+}
+
+:global([data-theme="light"]) .coreChevron {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .coreFull {
+    color: #334155;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
 }
 
 :global([data-theme="light"]) .coreChars {

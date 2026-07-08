@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Search, Loader2, AlertCircle, Anchor, Minus, Plus, CheckCircle2 } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Anchor, Minus, Plus, CheckCircle2, ChevronRight, ChevronDown } from 'lucide-react';
 import styles from './CoreMemoryScene.module.css';
 
 interface CoreMemorySceneProps {
     personaId: string;
 }
 
-const BACKEND_URL = 'http://127.0.0.1:8000';
+// API は相対パスで叩く。next.config.ts の rewrite が /api/:path* を
+// バックエンドへプロキシするため、同一オリジンで届く。
+// ここに http://127.0.0.1:8000 をハードコードすると、スマホ (Tailscale 経由)
+// からはループバックが端末自身を指してしまい何も返らない。
 
 interface SearchHit {
     id: string;
@@ -42,6 +45,7 @@ interface CoreMemoryItem {
     ref: string;
     kind: string;
     preview: string;
+    content: string;
     char_count: number;
 }
 
@@ -72,10 +76,23 @@ function formatDate(ts: number): string {
 export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
     // Existing core memory list
     const [coreList, setCoreList] = useState<CoreMemoryListResponse | null>(null);
+    const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+
+    const toggleExpanded = (id: number) => {
+        setExpandedIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) {
+                next.delete(id);
+            } else {
+                next.add(id);
+            }
+            return next;
+        });
+    };
 
     const loadCoreList = useCallback(async () => {
         try {
-            const res = await fetch(`${BACKEND_URL}/api/people/${personaId}/core-memory`);
+            const res = await fetch(`/api/people/${personaId}/core-memory`);
             if (!res.ok) return;
             const data = await res.json();
             setCoreList(data);
@@ -112,7 +129,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             if (dateFrom) params.set('date_from', dateFrom);
             if (dateTo) params.set('date_to', dateTo);
             const res = await fetch(
-                `${BACKEND_URL}/api/people/${personaId}/memory/messages/search?${params.toString()}`
+                `/api/people/${personaId}/memory/messages/search?${params.toString()}`
             );
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
@@ -139,7 +156,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
         setWindowError(null);
         try {
             const res = await fetch(
-                `${BACKEND_URL}/api/people/${personaId}/memory/messages/${encodeURIComponent(anchorId)}/window?rounds=${r}`
+                `/api/people/${personaId}/memory/messages/${encodeURIComponent(anchorId)}/window?rounds=${r}`
             );
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
@@ -181,7 +198,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
         setCarveError(null);
         setCarveToast(null);
         try {
-            const res = await fetch(`${BACKEND_URL}/api/people/${personaId}/core-memory/scene`, {
+            const res = await fetch(`/api/people/${personaId}/core-memory/scene`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ anchor_id: selectedAnchor, rounds }),
@@ -222,33 +239,6 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                         口調が安定しないとき、記述指示より実際の会話例のほうが強く効きます。
                     </p>
                 </div>
-            </div>
-
-            {/* Existing core memory list */}
-            <div className={styles.coreList}>
-                <div className={styles.coreListHeader}>
-                    <span>既存のコア記憶（読み取り専用・編集はペルソナの領分）</span>
-                    {coreList && (
-                        <span className={`${styles.budgetInfo} ${coreList.over_budget ? styles.budgetOver : ''}`}>
-                            合計 {coreList.total_chars.toLocaleString()} 字 / 目安 {coreList.budget.toLocaleString()} 字
-                        </span>
-                    )}
-                </div>
-                {coreList && coreList.items.length > 0 ? (
-                    coreList.items.map((it) => (
-                        <div key={it.id} className={styles.coreItem}>
-                            <span className={`${styles.kindBadge} ${it.kind === 'scene' ? styles.kindScene : styles.kindNote}`}>
-                                {it.kind}
-                            </span>
-                            <span className={styles.corePreview}>
-                                <strong>{it.ref}</strong> {it.preview}
-                            </span>
-                            <span className={styles.coreChars}>{it.char_count.toLocaleString()}字</span>
-                        </div>
-                    ))
-                ) : (
-                    <div className={styles.emptyCore}>まだコア記憶はありません。</div>
-                )}
             </div>
 
             {/* Search form */}
@@ -422,6 +412,51 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                     )}
                 </div>
             )}
+
+            {/* Existing core memory list (reference — kept at the bottom so the
+                search → carve flow comes first) */}
+            <div className={styles.coreList}>
+                <div className={styles.coreListHeader}>
+                    <span>既存のコア記憶（読み取り専用・編集はペルソナの領分）</span>
+                    {coreList && (
+                        <span className={`${styles.budgetInfo} ${coreList.over_budget ? styles.budgetOver : ''}`}>
+                            合計 {coreList.total_chars.toLocaleString()} 字 / 目安 {coreList.budget.toLocaleString()} 字
+                        </span>
+                    )}
+                </div>
+                {coreList && coreList.items.length > 0 ? (
+                    coreList.items.map((it) => {
+                        const expanded = expandedIds.has(it.id);
+                        return (
+                            <div key={it.id} className={styles.coreItem}>
+                                <button
+                                    type="button"
+                                    className={styles.coreItemRow}
+                                    onClick={() => toggleExpanded(it.id)}
+                                    aria-expanded={expanded}
+                                    title={expanded ? '折りたたむ' : '全文を表示'}
+                                >
+                                    {expanded ? (
+                                        <ChevronDown size={14} className={styles.coreChevron} />
+                                    ) : (
+                                        <ChevronRight size={14} className={styles.coreChevron} />
+                                    )}
+                                    <span className={`${styles.kindBadge} ${it.kind === 'scene' ? styles.kindScene : styles.kindNote}`}>
+                                        {it.kind}
+                                    </span>
+                                    <span className={styles.corePreview}>
+                                        <strong>{it.ref}</strong> {it.preview}
+                                    </span>
+                                    <span className={styles.coreChars}>{it.char_count.toLocaleString()}字</span>
+                                </button>
+                                {expanded && <div className={styles.coreFull}>{it.content}</div>}
+                            </div>
+                        );
+                    })
+                ) : (
+                    <div className={styles.emptyCore}>まだコア記憶はありません。</div>
+                )}
+            </div>
         </div>
     );
 }

@@ -51,8 +51,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setExportImportResult(null);
         setExportImportError(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/export`);
+            const res = await fetch(`/api/people/${personaId}/memopedia/export`);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || `HTTP ${res.status}`);
@@ -87,9 +86,8 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 throw new Error('無効なフォーマット: pages 配列が見つかりません');
             }
             const shouldClear = importClear && confirmImportClear;
-            const backendUrl = 'http://127.0.0.1:8000';
             const res = await fetch(
-                `${backendUrl}/api/people/${personaId}/memopedia/import?clear=${shouldClear}`,
+                `/api/people/${personaId}/memopedia/import?clear=${shouldClear}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -186,8 +184,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setUnifiedError(null);
         setUnifiedResult(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/unified-recall`, {
+            const res = await fetch(`/api/people/${personaId}/unified-recall`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -234,8 +231,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setRescueResult(null);
         setRescueError(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/rescue-stelis-thread`, {
+            const res = await fetch(`/api/people/${personaId}/rescue-stelis-thread`, {
                 method: 'POST',
             });
             const data = await res.json();
@@ -264,8 +260,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setBuildMemopediaResult(null);
         setBuildMemopediaError(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/build-from-logs`, {
+            const res = await fetch(`/api/people/${personaId}/memopedia/build-from-logs`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ batch_size: 20, limit: 0, start_after: 0 }),
@@ -282,7 +277,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             // Poll for status
             buildMemopediaPollRef.current = setInterval(async () => {
                 try {
-                    const statusRes = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/generate/${jobId}`);
+                    const statusRes = await fetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
                     if (!statusRes.ok) return;
                     const status = await statusRes.json();
                     const progressText = status.total > 0
@@ -437,8 +432,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDiagnosing(true);
         setDiagnosisError(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/arasuji/diagnosis`);
+            const res = await fetch(`/api/people/${personaId}/arasuji/diagnosis`);
             if (!res.ok) {
                 const text = await res.text();
                 try {
@@ -479,8 +473,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDeletingChronicle(true);
         setDeleteResult(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/arasuji`, {
+            const res = await fetch(`/api/people/${personaId}/arasuji`, {
                 method: 'DELETE',
             });
             if (!res.ok) {
@@ -501,8 +494,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDeletingMemopedia(true);
         setDeleteResult(null);
         try {
-            const backendUrl = 'http://127.0.0.1:8000';
-            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/pages`, {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages`, {
                 method: 'DELETE',
             });
             if (!res.ok) {

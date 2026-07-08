@@ -385,7 +385,8 @@ class CoreMemoryListItem(BaseModel):
     id: int
     ref: str          # "c:N"
     kind: str         # "note" | "scene"
-    preview: str      # 内容の先頭 80 字
+    preview: str      # 内容の先頭 80 字 (既存 UI 互換のため残置)
+    content: str      # 全文 (UI の展開表示用)
     char_count: int
 
 
@@ -422,6 +423,7 @@ def list_core_memory(
                 ref=it.ref,
                 kind=it.kind,
                 preview=(it.content[:80] + ("…" if len(it.content) > 80 else "")),
+                content=it.content,
                 char_count=len(it.content),
             )
             for it in items
