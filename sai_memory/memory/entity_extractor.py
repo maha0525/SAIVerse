@@ -323,13 +323,16 @@ def reflect_to_memopedia(
 
     For each entity:
     - Search for existing page by title
-    - If found, append notes to content (with same-day merge) and create Fragments
-    - If not found, create a new page and create Fragments
+    - If found, refresh its summary when changed and create Fragments from notes
+    - If not found, create a new page and create Fragments from notes
+
+    Notes are recorded as Fragments, not appended to page content (content is
+    reserved for manual edits).
 
     Args:
         entities: Extracted entities from extract_entities().
         memopedia: Memopedia instance.
-        source_time: Timestamp for the date header in appended content.
+        source_time: Timestamp used as the source date on created Fragments.
         chronicle_entry_id: ID of the Chronicle Lv-1 entry that triggered this extraction.
 
     Returns:
