@@ -378,6 +378,8 @@ class GeminiClient(LLMClient):
         """
         if not self._AUTO_CACHE_ENABLED:
             return (None, contents, None)
+        if self._cache_unavailable_on_free_tier():
+            return (None, contents, None)
         if not contents or len(contents) < 2:
             return (None, contents, None)
 
@@ -418,6 +420,21 @@ class GeminiClient(LLMClient):
         from llm_clients.gemini_cache import get_gemini_cache_controller
         get_gemini_cache_controller().delete(self.client, cache_name)
 
+    def _cache_unavailable_on_free_tier(self) -> bool:
+        """いま使っているクライアントが無料枠 (free_client) かを判定する。
+
+        無料枠キーは explicit cache のストレージ上限が 0
+        (``TotalCachedContentStorageTokensPerModelFreeTier limit=0``) で、
+        ``caches.create`` が必ず 429 RESOURCE_EXHAUSTED になる。しかも SDK の
+        HttpRetryOptions が 429 を再試行対象に含むため、毎コール create が 5 回
+        リトライしてから失敗する (無駄な往復 + backoff)。そもそも無料枠は課金が
+        無くキャッシュの節約効果も無いので、free_client 使用時は create を試みない。
+
+        free / paid はモデル API 名 (free/paid 共通) では区別できないため、
+        クライアントオブジェクトの identity で厳密に判定する。
+        """
+        return self.free_client is not None and self.client is self.free_client
+
     def consume_stream_error(self) -> Optional[Dict[str, Any]]:
         """Return and clear the last SSE stream error (e.g. 504 DEADLINE_EXCEEDED).
 
@@ -452,6 +469,9 @@ class GeminiClient(LLMClient):
         # M1 安全ゲート: 実験段階 (orphan cleanup / pulse 終了 delete 未実装) のため、
         # env で明示 opt-in したときだけ有効化する。M2-M4 完了後にこのゲートは外す。
         if os.getenv("SAIVERSE_GEMINI_EXPLICIT_CACHE", "").lower() not in ("1", "true", "yes", "on"):
+            return (None, contents)
+        # 無料枠キーは cache storage 上限 0 で create が必ず 429 になるためスキップ。
+        if self._cache_unavailable_on_free_tier():
             return (None, contents)
         # 最新入力以外にキャッシュできる中身が無い (履歴ゼロ) ならスキップ。
         if not contents or len(contents) < 2:

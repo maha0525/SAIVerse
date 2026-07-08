@@ -1,7 +1,7 @@
 """GeminiCacheController (Phase 3 / M1) のユニットテスト。
 
-実 API は使わず MagicMock で client.models.count_tokens / client.caches.create を
-差し替えて、create / reuse / token guard のロジックを検証する。
+実 API は使わず MagicMock で client.caches.create を差し替えて、
+create / reuse / token guard (文字数ベース) のロジックを検証する。
 """
 from unittest.mock import MagicMock
 
@@ -22,24 +22,24 @@ def test_parse_ttl_seconds():
 def test_controller_creates_then_reuses_same_head():
     ctrl = GeminiCacheController()
     client = MagicMock()
-    client.models.count_tokens.return_value.total_tokens = 5000
     client.caches.create.return_value.name = "cachedContents/abc"
 
     head = "SYSTEM INSTRUCTION " * 500
-    name1 = ctrl.ensure(client, "gemini-2.5-flash", head, 300)
-    assert name1 == "cachedContents/abc"
+    r1 = ctrl.ensure(client, "gemini-2.5-flash", head, 300)
+    assert r1.name == "cachedContents/abc"
+    assert r1.created is True
     assert client.caches.create.call_count == 1
 
     # 同一 head・生存中 → 再利用 (新規 create しない)
-    name2 = ctrl.ensure(client, "gemini-2.5-flash", head, 300)
-    assert name2 == "cachedContents/abc"
+    r2 = ctrl.ensure(client, "gemini-2.5-flash", head, 300)
+    assert r2.name == "cachedContents/abc"
+    assert r2.created is False  # 再利用なので created=False
     assert client.caches.create.call_count == 1
 
 
 def test_controller_different_head_creates_new():
     ctrl = GeminiCacheController()
     client = MagicMock()
-    client.models.count_tokens.return_value.total_tokens = 5000
     client.caches.create.return_value.name = "cachedContents/x"
 
     ctrl.ensure(client, "gemini-2.5-flash", "HEAD A " * 500, 300)
@@ -50,21 +50,20 @@ def test_controller_different_head_creates_new():
 def test_controller_token_guard_skips_small_head():
     ctrl = GeminiCacheController()
     client = MagicMock()
-    client.models.count_tokens.return_value.total_tokens = 100  # < 1024
 
-    name = ctrl.ensure(client, "gemini-2.5-flash", "tiny head", 300, min_tokens=1024)
-    assert name is None
+    # 文字数ベースのガード (_approx_chars): "tiny head" は 1024 char 未満 → 作成しない
+    result = ctrl.ensure(client, "gemini-2.5-flash", "tiny head", 300, min_tokens=1024)
+    assert result.name is None
     assert client.caches.create.call_count == 0  # 作成しない
 
 
 def test_controller_create_failure_returns_none():
     ctrl = GeminiCacheController()
     client = MagicMock()
-    client.models.count_tokens.return_value.total_tokens = 5000
     client.caches.create.side_effect = RuntimeError("api error")
 
-    name = ctrl.ensure(client, "gemini-2.5-flash", "HEAD " * 500, 300)
-    assert name is None  # 失敗時は None (= inline フォールバック)
+    result = ctrl.ensure(client, "gemini-2.5-flash", "HEAD " * 500, 300)
+    assert result.name is None  # 失敗時は name=None (= inline フォールバック)
 
 
 def _content(role, text):
@@ -79,8 +78,8 @@ def test_controller_caches_contents_prefix():
     client.caches.create.return_value.name = "cachedContents/p"
     sys = "SYS " * 500
     contents = [_content("user", "history A " * 200), _content("model", "reply " * 200)]
-    name = ctrl.ensure(client, "gemini-2.5-flash", sys, 300, contents=contents)
-    assert name == "cachedContents/p"
+    result = ctrl.ensure(client, "gemini-2.5-flash", sys, 300, contents=contents)
+    assert result.name == "cachedContents/p"
     cfg = client.caches.create.call_args.kwargs["config"]
     assert getattr(cfg, "contents", None)  # contents がキャッシュ対象に含まれる
 
