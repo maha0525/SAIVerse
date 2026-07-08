@@ -9,6 +9,7 @@
   "thinking_type": "adaptive",
   "thinking_effort": "high",
   "thinking_display": "summarized",
+  "max_output_tokens": 64000,
   "supports_images": true,
   "parameters": {
     "thinking_effort": {

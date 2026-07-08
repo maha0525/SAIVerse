@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import anthropic
+import httpx
 from anthropic import Anthropic
 from anthropic.types import Message
 
@@ -40,6 +41,20 @@ from .exceptions import (
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
 
+# Anthropic client read timeout (seconds). Thinking-heavy models (Fable 5) can
+# spend many minutes thinking before producing output. The SDK default read
+# timeout is 600s (10min):
+#   - Streaming: read is a per-chunk timeout, reset by the API's periodic ping
+#     events, so it is not a wall-clock cap. 600s would already be fine.
+#   - Non-streaming (generate() -> messages.create(), used for structured-output
+#     / worker calls): the whole request must complete within read, so 600s is
+#     an effective wall-clock cap that deep thinking can hit.
+# Passing an explicit timeout also disables the SDK's non-streaming max_tokens
+# guard (anthropic messages.py only guards when client.timeout == DEFAULT_TIMEOUT),
+# so both paths can use the full configured max_tokens without a ValueError.
+# connect stays short so genuine connection failures still fail fast.
+DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 min; override via ANTHROPIC_TIMEOUT_SECONDS
+
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
 
@@ -58,7 +73,16 @@ class AnthropicClient(LLMClient):
                 user_message="Anthropic APIキーが設定されていません。管理者にお問い合わせください。"
             )
 
-        self.client = Anthropic(api_key=api_key)
+        try:
+            timeout_seconds = float(
+                os.getenv("ANTHROPIC_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
+            )
+        except (TypeError, ValueError):
+            timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+        self.client = Anthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(timeout_seconds, connect=5.0),
+        )
         self.model = model
 
         cfg = config or {}
