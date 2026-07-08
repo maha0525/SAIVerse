@@ -541,6 +541,48 @@ class SessionCloseTest(unittest.TestCase):
         # マーカーが窓の末尾 id に更新される。
         self.assertEqual(persona._gold_panning_last_pan_id, "m4")
 
+    # -- case: window 起点は pan マーカー・性質フィルタ無し (2026-07-08 sophie 修正) --
+
+    def _persona_recording_history(self, messages, *, last_pan_id=None):
+        calls = []
+
+        def fake_get(anchor, required_line_roles=None, required_scopes=None):
+            calls.append((anchor, required_line_roles, required_scopes))
+            return messages
+
+        history_mgr = SimpleNamespace(metabolism_anchor_message_id="cache_anchor")
+        history_mgr.get_history_from_anchor = fake_get
+        persona = SimpleNamespace(
+            persona_id="tester", persona_name="エア", model="claude-x",
+            sai_memory=self.adapter, history_manager=history_mgr, current_building_id="b",
+        )
+        if last_pan_id is not None:
+            persona._gold_panning_last_pan_id = last_pan_id
+        return persona, calls
+
+    def test_window_starts_from_pan_marker_without_line_filter(self):
+        """window 起点は pan マーカー (cache 都合で動く metabolism anchor でない)、かつ
+        性質フィルタ (main_line/committed) を付けない。metabolism anchor + main_line 絞りで
+        window が 4 件に縮んだ sophie 問題の修正。"""
+        persona, calls = self._persona_recording_history(self._msgs(12), last_pan_id="prev_pan")
+        lifecycle = self._make_lifecycle(FakeLLMClient({"reflection": "x", "ops": []}), hot=True)
+        with patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES": "3"}):
+            gold_panning.run_session_close(lifecycle, persona)
+        start, lr, sc = calls[0]
+        self.assertEqual(start, "prev_pan")   # metabolism anchor "cache_anchor" ではない
+        self.assertIsNone(lr)                 # 性質フィルタ無し
+        self.assertIsNone(sc)
+
+    def test_initial_window_uses_anchor_as_read_head(self):
+        """初回 (pan マーカー無し) は metabolism anchor を『読んでいる範囲の先頭』として
+        起点に使い、全生履歴 (12件) を window にして採取する。"""
+        persona, calls = self._persona_recording_history(self._msgs(12), last_pan_id=None)
+        lifecycle = self._make_lifecycle(FakeLLMClient({"reflection": "x", "ops": []}), hot=True)
+        with patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES": "3"}):
+            result = gold_panning.run_session_close(lifecycle, persona)
+        self.assertEqual(calls[0][0], "cache_anchor")  # 初回は anchor 起点
+        self.assertTrue(result["panned"])              # 12件全部新規 → close_min 3 超え
+
     # -- case 3: cold -> pan skipped, Chronicle still runs --------------
 
     def test_cold_skips_pan_but_runs_chronicle(self):

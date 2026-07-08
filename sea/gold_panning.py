@@ -612,23 +612,32 @@ def run_session_close(lifecycle: Any, persona: Any) -> Dict[str, Any]:
     chronicle_done = False
     skipped_reason: Optional[str] = None
     try:
-        # window 取得 (maybe_run_metabolism と同じ形)。
+        # window の起点は gold_panning 自身の pan マーカー (前回処理した末尾)。
+        # metabolism anchor は cache TTL 都合で動く点 (失効すると張り直る) なので採取
+        # 範囲の起点には使わない — キャッシュが切れただけで未採取メッセージが範囲外へ
+        # 落ちる (2026-07-08 sophie 実機で判明: anchor が当日リセットされ window が
+        # main_line/committed/現スレッド絞りで 4 件に縮んでいた)。初回 (マーカー無し) は
+        # 「今コンテキストに載っている生履歴の先頭」として metabolism anchor を起点に使う
+        # (この時 anchor は読んでいる範囲の先頭を表す)。
+        # 性質フィルタ (main_line/committed) は付けない: 読んでいる生履歴全体を範囲に取る
+        # (main_line 限定は metabolism のカウント用で、gold_panning の範囲とは別軸)。
         history_mgr = getattr(persona, "history_manager", None)
-        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
-        if not history_mgr or not anchor:
+        if not history_mgr:
+            return {"panned": False, "chronicle": False, "skipped_reason": "no_history"}
+
+        pan_marker = _load_pan_marker(persona)
+        window_start = pan_marker or getattr(history_mgr, "metabolism_anchor_message_id", None)
+        if not window_start:
             LOGGER.info(
-                "[gold_panning] session close: no anchor; skipping (persona=%s)", persona_id,
+                "[gold_panning] session close: no window start; skipping (persona=%s)", persona_id,
             )
             return {"panned": False, "chronicle": False, "skipped_reason": "no_anchor"}
 
-        current_messages = history_mgr.get_history_from_anchor(
-            anchor,
-            required_line_roles=["main_line"],
-            required_scopes=["committed"],
-        ) or []
+        current_messages = history_mgr.get_history_from_anchor(window_start) or []
 
-        # マーカーガード: 新規件数が close_min 未満なら採取スキップ (Chronicle は実行してよい)。
-        new_count = _count_new_since_marker(current_messages, _load_pan_marker(persona))
+        # マーカーガード: 新規件数 (マーカー以降。初回は全件) が close_min 未満なら採取
+        # スキップ (Chronicle は実行してよい)。
+        new_count = _count_new_since_marker(current_messages, pan_marker)
         close_min = get_close_min_messages()
         pan_allowed = new_count >= close_min
         if not pan_allowed:

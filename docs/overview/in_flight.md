@@ -3,6 +3,8 @@
 > **これは何**: いま動いている案件だけの索引。**状態の真実は各 intent(ステータス行)/issue(未解決↔archive フォルダ)が持ち**、この台帳はそこから「進行中(アクティブ)なもの」だけを抽出して **次アクション** と **誰待ち** を可視化する薄いビュー。完了・未着手(構想止まり)は載せない — それらは各 doc / issue フォルダで管理する。
 >
 > **番人**: 更新は Claude(メティス)が担う。まはーは台帳の更新を意識しなくてよい。動きがあったセッションで、Claude が終わる前に台帳と doc のステータスを現況に合わせる(下の「更新トリガー」)。
+>
+> **手前の容器**: まだ動いていない生アイディアは [アイディア帳 (ideas.md)](ideas.md) に溜める。そこで育ったものが intent 起草 or 実装着手で **この台帳に卒業** してくる。
 
 ## 状態の語彙
 
@@ -42,7 +44,7 @@
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
 | 🟠 実装中 | 自律行動v2 活性化配線 | playbook 5本 import → `--real` 行動テスト(まはーレビュー) → 起床/就寝/セッション終了/会話終了/on_event の配線 → 旧 track_autonomous 停止 | 私 → まはー | [autonomous_behavior_v2.md](../intent/autonomous_behavior_v2.md) | 2026-07-08 |
-| 🟣 検証待ち | gold_panning 砂金採り | SCENE 自動採取除去(NOTE のみ化)は**完了**(暴走対策)。残: 実機で採取・defer-to-hot・セッションクローズの動作確認 | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
+| 🟣 検証待ち | gold_panning 砂金採り | SCENE 除去(NOTE のみ化)＋**クローズ window 起点を pan マーカー基準に修正**(metabolism anchor 流用で採取範囲が cache 都合に縮む問題、sophie 実機で判明)は完了。残: 実機で初回採取・defer-to-hot の確認、**応答後経路との pan マーカー整合の検討** | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
 | 🟠 実装中 | コア記憶の訂正導線 + ごみ箱 (短期対応) | **DB層✅**(confirmed/deleted_at 追加・remove を soft-delete化・source を metadata・gold_panning は confirmed=0)。残: API(未確認一覧/確認/編集/soft-delete/復元) → メモリタブUI(項目ごと確認/編集 + ごみ箱復元) → チャット「N件更新｜確認」バッジ → ユーザー編集時に event_message でペルソナ通知(仮想センサー専用実装) | 私 → まはー | (短期は既存メモリタブ内) | 2026-07-08 |
 | 🔵 設計中 | 神モードUI (住民/神モードの二層プラットフォーム) | 自律行動の本格化で局所干渉では足りず俯瞰視点が必要に。住民モード(Building 主語・世界に入って暮らす)と神モード(Persona/世界を俯瞰・管理する創造主視点)を別UI・別タブに分離。Persona ホームは神モードの一要素。世界観 intent 起草 → 部分再設計の段階設計 | まはー(設計) | (intent 未起草) | 2026-07-08 |
 | 🟡 実装待ち | quick_spell 本体実装 | サブエージェント委譲で実装(クオンのデータ修復は完了済) | まはー(GO) | [quick_spell.md](../intent/quick_spell.md) | 2026-07-08 |
