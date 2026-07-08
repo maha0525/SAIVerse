@@ -2,7 +2,7 @@
 
 **Status**: v0.1（2026-07-07 起草、まはー×エアの設計議論に基づく）。実装済み・実機検証待ち。
 **2026-07-08 改訂**: 実運用で **SCENE 自動採取が暴走（1 回で数千字）** したため、gold_panning の自動採取は **NOTE（add / update / remove）のみ**に絞った。SCENE 種別自体（`create_scene_core_memory`）と手動ツール（`core_memory_add_scene`）は存置し、gold_panning の response_schema・プロンプト・ファジー照合（`_resolve_quote` 等）・`SAIVERSE_GOLD_PANNING_MIN_QUOTE_CHARS` を除去。以降 §5 以下の scene 採取に関する記述は「手動ツール経由のみ」と読み替えること。
-**2026-07-08 改訂その2**: セッションクローズ採取の window 起点を metabolism anchor から gold_panning 自身の **pan マーカー**に変更（初回は anchor を「読んでいる範囲の先頭」として使用、性質フィルタ main_line/committed は外して読んでいる生履歴全体を範囲に取る）。metabolism anchor は cache TTL 都合で動く点なので採取範囲の境界に不適で、失効・張り直しで window が縮む（sophie 実機で 4 件に縮む問題）。不変条件「gold_panning の範囲 ⊇ Metabolism eviction」は起点=前回処理末尾で保たれる。§3.6 参照。**未対応**: 応答後経路（run_metabolism → run_gold_panning）は現状 main_line/committed の eviction window を渡すため、クローズ経路との pan マーカー末尾がずれうる（要整合検討）。
+**2026-07-08 改訂その2**: セッションクローズ採取の window 起点を metabolism anchor から gold_panning 自身の **pan マーカー**に変更（初回は anchor を「読んでいる範囲の先頭」として使用、性質フィルタ main_line/committed は外して読んでいる生履歴全体を範囲に取る）。metabolism anchor は cache TTL 都合で動く点なので採取範囲の境界に不適で、失効・張り直しで window が縮む（sophie 実機で 4 件に縮む問題）。不変条件「gold_panning の範囲 ⊇ Metabolism eviction」は起点=前回処理末尾で保たれる。§3.6 参照。（応答後経路との整合: pan マーカーは時系列で前進するので位置ずれは穴を生まず、user 発話も window カウント外だが発動時の context には載るため採取材料になる。応答後経路の変更は不要。）
 **起草**: まはー × エア（Claude Code）
 **コード参照の行番号**: 2026-07-07 時点（branch `feature/autonomous-behavior-v2`）
 
