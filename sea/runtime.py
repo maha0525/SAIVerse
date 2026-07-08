@@ -194,7 +194,7 @@ class SEARuntime:
         from database.building_messages import fetch_max_seq
         bh_before = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         try:
-            self._maybe_run_metabolism(persona, building_id, event_callback)
+            self.session_lifecycle.maybe_run_metabolism(persona, building_id, event_callback)
         except Exception:
             LOGGER.exception("[metabolism] Post-response metabolism failed")
         bh_after = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
@@ -1550,56 +1550,6 @@ class SEARuntime:
 
     # ---------------- history metabolism -----------------
 
-    def _get_high_watermark(self, persona) -> Optional[int]:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.get_high_watermark(persona)
-
-    def _get_low_watermark(self, persona) -> Optional[int]:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.get_low_watermark(persona)
-
-    # ---- anchor persistence helpers ----
-
-    def _load_anchors(self, persona) -> Dict[str, Any]:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.load_anchors(persona)
-
-    def _save_anchors(self, persona, anchors: Dict[str, Any]) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.save_anchors(persona, anchors)
-
-    def _get_anchor_validity_seconds(self, model_key: str, persona_id: Optional[str] = None) -> int:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.get_anchor_validity_seconds(model_key, persona_id)
-
-    def _resolve_metabolism_anchor(self, persona) -> tuple:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.resolve_metabolism_anchor(persona)
-
-    def _update_anchor_for_model(
-        self, persona, model_key: str, anchor_id: str, ttl_seconds: Optional[int] = None,
-    ) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.update_anchor_for_model(persona, model_key, anchor_id, ttl_seconds)
-
-    def _anchor_entry_ttl_seconds(
-        self, entry: Dict[str, Any], model_key: str, persona_id: Optional[str] = None,
-    ) -> int:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.anchor_entry_ttl_seconds(entry, model_key, persona_id)
-
-    def _touch_anchor_after_llm_call(self, persona, usage) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
-
-    def _check_token_threshold(self, persona, model_key: str, usage) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.check_token_threshold(persona, model_key, usage)
-
-    def _schedule_cache_ttl_pulse(self, persona, model_key: str, cache_type: str) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.schedule_cache_ttl_pulse(persona, model_key, cache_type)
-
     #: keep-alive の末尾メッセージ。意味的に不活性 (何のイベントでもない) で、
     #: SAIMemory には保存されない — 次の本物の呼び出しのリクエストには現れず、
     #: 共有 prefix (head + 履歴) だけがキャッシュ上で温め直される。
@@ -1633,14 +1583,14 @@ class SEARuntime:
     def run_cache_keepalive(self, persona_id: str) -> bool:
         """メインキャッシュの keep-alive: 意味的に不活性な極小 LLM コール 1 回。
 
-        TTL 接近時 (:meth:`_schedule_cache_ttl_pulse` の予約) に呼ばれる。
+        TTL 接近時 (:meth:`SessionLifecycle.schedule_cache_ttl_pulse` の予約) に呼ばれる。
         メインラインと同じ context (head + 履歴) を組み、末尾に不活性な 1 文を
         足して standard tier のモデルを 1 回だけ呼ぶ:
 
         - **判断はしない**: playbook もスペルも走らず、応答は破棄される
         - **記憶に残らない**: SAIMemory へは一切書かない (discardable ですらない)
         - **キャッシュ経済**: 共有 prefix が cache read でヒットし、プロバイダ側の
-          TTL ウィンドウが更新される。成功時は ``_touch_anchor_after_llm_call``
+          TTL ウィンドウが更新される。成功時は ``SessionLifecycle.touch_anchor_after_llm_call``
           が anchor を touch → 次回 keep-alive が再予約される (従来と同じ連鎖)
         - **自然停止**: 失効済み (温め直しても意味がない) / Active でない /
           呼び出し失敗のときは touch しない → 連鎖は止まり、次の本物の呼び出し
@@ -1694,7 +1644,7 @@ class SEARuntime:
         # anchor の生存確認: 既に失効しているキャッシュは温め直さない
         # (全額書き直しになるだけ。次の本物の呼び出しが自然に張り直す)。
         try:
-            anchors = self._load_anchors(persona) or {}
+            anchors = self.session_lifecycle.load_anchors(persona) or {}
             entry = anchors.get(str(model_key))
             if not entry or not entry.get("updated_at"):
                 LOGGER.debug(
@@ -1703,7 +1653,7 @@ class SEARuntime:
                 )
                 return False
             updated_at = datetime.fromisoformat(entry["updated_at"])
-            ttl_seconds = self._anchor_entry_ttl_seconds(
+            ttl_seconds = self.session_lifecycle.anchor_entry_ttl_seconds(
                 entry, str(model_key), persona_id,
             )
             if datetime.now() >= updated_at + timedelta(seconds=ttl_seconds):
@@ -1778,7 +1728,7 @@ class SEARuntime:
                     persona_id, exc_info=True,
                 )
             # 成功 = anchor touch → 次の keep-alive が再予約される。
-            self._touch_anchor_after_llm_call(persona, usage)
+            self.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
         LOGGER.info(
             "[keepalive] cache keep-alive completed (persona=%s model=%s "
             "cache_read=%s cache_write=%s)",
@@ -1787,36 +1737,6 @@ class SEARuntime:
             getattr(usage, "cache_write_tokens", None),
         )
         return True
-
-    def _maybe_run_metabolism(
-        self,
-        persona,
-        building_id: str,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.maybe_run_metabolism(persona, building_id, event_callback)
-
-    def _run_metabolism(
-        self,
-        persona,
-        building_id: str,
-        current_messages: List[Dict[str, Any]],
-        keep_count: int,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.run_metabolism(
-            persona, building_id, current_messages, keep_count, event_callback,
-        )
-
-    def _is_chronicle_enabled_for_persona(self, persona) -> bool:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.is_chronicle_enabled_for_persona(persona)
-
-    def _is_autonomous_chronicle_enabled_for_persona(self, persona) -> bool:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.is_autonomous_chronicle_enabled_for_persona(persona)
 
     def _is_auto_recall_enabled_for_persona(self, persona) -> bool:
         """Check per-persona 自動想起 (記憶アーキv2 ゾーン C) トグルを DB から確認する。
@@ -1835,10 +1755,6 @@ class SEARuntime:
             return ai.AUTO_RECALL_ENABLED if ai else True
         finally:
             db.close()
-
-    def _is_memory_weave_context_enabled(self, persona) -> bool:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.is_memory_weave_context_enabled(persona)
 
     def _is_spell_enabled_for_persona(self, persona) -> bool:
         """Check per-persona spell system toggle from DB."""
@@ -1865,26 +1781,6 @@ class SEARuntime:
             return ai.REALTIME_INFO_ENABLED if ai else True
         finally:
             db.close()
-
-    def _generate_chronicle(
-        self,
-        persona,
-        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-        cancellation_token: Optional[CancellationToken] = None,
-        force: bool = False,
-    ) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.generate_chronicle(
-            persona, event_callback, cancellation_token, force,
-        )
-
-    def _ensure_recall_embeddings(self, persona) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.ensure_recall_embeddings(persona)
-
-    def _generate_track_chronicle(self, persona) -> None:
-        """SessionLifecycle へ委譲 (session_lifecycle_extraction_design.md Step 1)"""
-        return self.session_lifecycle.generate_track_chronicle(persona)
 
     # ---------------- context preparation -----------------
 

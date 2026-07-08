@@ -154,6 +154,9 @@ class FakeWorkRuntime:
     def __init__(self, llm_client, personas: Dict[str, Any]):
         self.llm_client = llm_client
         self.personas = personas
+        self.session_lifecycle = SimpleNamespace(
+            touch_anchor_after_llm_call=lambda persona, usage: None,
+        )
 
     def _prepare_context(self, persona, building_id, user_input, requirements,
                          pulse_id=None, **kwargs):
@@ -177,9 +180,6 @@ class FakeWorkRuntime:
 
     def _accumulate_usage(self, state, model, input_tokens, output_tokens,
                           cost_usd, cached_tokens=0, cache_write_tokens=0):
-        return None
-
-    def _touch_anchor_after_llm_call(self, persona, usage):
         return None
 
     def _get_or_create_pulse_context(self, pulse_id, thread_id):

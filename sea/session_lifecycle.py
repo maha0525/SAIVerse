@@ -239,7 +239,7 @@ class SessionLifecycle:
 
         旧実装は ``runtime_context.py`` の prepare_context 内で touch していたが、
         その方式だと「context 組成は走ったが LLM 呼び出しが失敗した」ケースで
-        updated_at が前進してしまい、次回 ``_resolve_metabolism_anchor`` が「TTL 内」
+        updated_at が前進してしまい、次回 ``resolve_metabolism_anchor`` が「TTL 内」
         と誤判定して、実際には切れているキャッシュに対して長大コンテキストを
         送り直す不整合を招いていた。
 
@@ -250,7 +250,7 @@ class SessionLifecycle:
           touch しない (= 次回 prepare_context で TTL 切れ判定 → Case 3 fallback)。
         - implicit / no cache モデル (Gemini implicit cache, Ollama 等): 呼び出し
           成功 = touch。プロバイダ側で cache 状態を直接観測できないため、
-          ``_get_anchor_validity_seconds`` が返す既定値 (1200s) を起点として扱う。
+          ``get_anchor_validity_seconds`` が返す既定値 (1200s) を起点として扱う。
         """
         if persona is None or usage is None:
             return
@@ -1010,7 +1010,7 @@ class SessionLifecycle:
         ゼロのため、Metabolism のたびに**無条件で**実行する (Chronicle 生成の
         成否・トグルに相乗りさせない)。
 
-        歴史的経緯: かつてこの処理は _generate_chronicle の末尾にあり、生成の
+        歴史的経緯: かつてこの処理は generate_chronicle の末尾にあり、生成の
         早期 return (未処理なし / 20件揃った run なし / 自律 Pulse の確認スキップ /
         ユーザーの確認拒否) のたびに巻き添えでスキップされ、埋め込みバックログが
         恒常的に溜まっていた (2026-07-04 に air_city_a で Fragment 778/1638 を確認)。
@@ -1043,7 +1043,7 @@ class SessionLifecycle:
     def generate_track_chronicle(self, persona) -> None:
         """Track Chronicle 生成 (v0.32, 2026-05-09)。
 
-        General Chronicle (_generate_chronicle) と独立に走る。設計上の特徴:
+        General Chronicle (generate_chronicle) と独立に走る。設計上の特徴:
 
         - **pulse_type 制限なし**: 自律稼働 / メタ判断 / スケジュール pulse でも走る
         - **ユーザー確認 dialog 不要**: ペルソナの自律的な記憶整理として、自動承認

@@ -121,12 +121,12 @@ def test_ttl_callback_does_not_fire_v1_meta_judgment():
     scheduler = FakeScheduler()
     meta_layer = FakeMetaLayer()
     runtime, _ = _make_runtime(persona, meta_layer=meta_layer, scheduler=scheduler)
-    runtime._get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
 
     keepalive_calls: List[str] = []
     runtime.run_cache_keepalive = lambda pid: keepalive_calls.append(pid)
 
-    runtime._schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+    runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
     assert "ttl:air" in scheduler.scheduled
 
     scheduler.scheduled["ttl:air"]["callback"]()
@@ -149,8 +149,8 @@ def test_ttl_schedule_respects_keep_cache_alive_off():
     runtime, _ = _make_runtime(
         persona, meta_layer=OffMetaLayer(), scheduler=scheduler,
     )
-    runtime._get_anchor_validity_seconds = lambda model, persona_id=None: 1200
-    runtime._schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+    runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
     assert "ttl:air" not in scheduler.scheduled
 
 
@@ -160,7 +160,7 @@ def test_ttl_schedule_respects_keep_cache_alive_off():
 
 
 def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
-    runtime._load_anchors = lambda p: anchors if anchors is not None else {
+    runtime.session_lifecycle.load_anchors = lambda p: anchors if anchors is not None else {
         "claude-x": _live_anchor_entry(),
     }
     runtime._prepare_context = (
@@ -168,7 +168,7 @@ def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
     )
     runtime._select_llm_client = lambda node_def, p, **k: client
     touched: List[Any] = []
-    runtime._touch_anchor_after_llm_call = lambda p, usage: touched.append(usage)
+    runtime.session_lifecycle.touch_anchor_after_llm_call = lambda p, usage: touched.append(usage)
     return touched
 
 

@@ -75,7 +75,7 @@ class FakeRuntime:
     def _get_cache_kwargs(self, persona_id=None):
         return {"enable_cache": True, "cache_ttl": "5m"}
 
-    def _touch_anchor_after_llm_call(self, persona, usage):
+    def touch_anchor_after_llm_call(self, persona, usage):
         self.touched.append(usage)
 
 
@@ -140,7 +140,11 @@ class GoldPanningRunTest(unittest.TestCase):
 
     def _run(self, result, current_messages=None, evict_count=0, event_callback=None):
         client = FakeLLMClient(result)
-        lifecycle = SimpleNamespace(runtime=FakeRuntime(client))
+        runtime = FakeRuntime(client)
+        lifecycle = SimpleNamespace(
+            runtime=runtime,
+            touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+        )
         return gold_panning.run_gold_panning(
             lifecycle, self._persona(), "b",
             current_messages or [], evict_count, event_callback,
@@ -323,7 +327,10 @@ class GoldPanningRunTest(unittest.TestCase):
         )
         client = FakeLLMClient(result, usage=usage)
         runtime = FakeRuntime(client)
-        lifecycle = SimpleNamespace(runtime=runtime)
+        lifecycle = SimpleNamespace(
+            runtime=runtime,
+            touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+        )
         with patch("saiverse.usage_tracker.get_usage_tracker") as get_tracker:
             gold_panning.run_gold_panning(lifecycle, self._persona(), "b", [], 0)
         get_tracker.return_value.record_usage.assert_called_once()

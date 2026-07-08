@@ -604,7 +604,7 @@ def run_gold_panning(
         except Exception:
             LOGGER.warning("[gold_panning] usage tracking failed (persona=%s)", persona_id, exc_info=True)
         try:
-            runtime._touch_anchor_after_llm_call(persona, usage)
+            lifecycle.touch_anchor_after_llm_call(persona, usage)
         except Exception:
             LOGGER.warning("[gold_panning] anchor touch failed (persona=%s)", persona_id, exc_info=True)
 

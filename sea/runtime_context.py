@@ -133,7 +133,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                     if metabolism_enabled and not preview_only:
                         # Persistent anchor resolution with 3-level fallback
-                        anchor_id, resolution = runtime._resolve_metabolism_anchor(persona)
+                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(persona)
 
                         if anchor_id:
                             # Case 1 or 2: valid anchor found
@@ -158,7 +158,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         else:
                             # Case 3: no valid anchor — minimal load + Chronicle generation
                             memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-                            if memory_weave_enabled and runtime._is_chronicle_enabled_for_persona(persona):
+                            if memory_weave_enabled and runtime.session_lifecycle.is_chronicle_enabled_for_persona(persona):
                                 if event_callback:
                                     event_callback({
                                         "type": "metabolism",
@@ -167,14 +167,14 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                     })
                                 try:
                                     LOGGER.info("[metabolism] Triggering Chronicle generation on anchor expiry")
-                                    runtime._generate_chronicle(
+                                    runtime.session_lifecycle.generate_chronicle(
                                         persona,
                                         event_callback=event_callback,
                                         cancellation_token=cancellation_token,
                                     )
                                     # Track Chronicle (v0.32, 2026-05-09): General と並行で走らせる
                                     try:
-                                        runtime._generate_track_chronicle(persona)
+                                        runtime.session_lifecycle.generate_track_chronicle(persona)
                                     except Exception as exc:
                                         LOGGER.warning(
                                             "[metabolism] Track Chronicle generation on anchor expiry failed: %s",
@@ -200,7 +200,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                     })
 
                             # Load minimal history (low watermark)
-                            low_wm = runtime._get_low_watermark(persona)
+                            low_wm = runtime.session_lifecycle.get_low_watermark(persona)
                             limit_value = low_wm if low_wm and low_wm > 0 else 20
                             use_message_count = True
                             LOGGER.debug(
@@ -210,7 +210,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                     elif metabolism_enabled and preview_only:
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
-                        anchor_id, resolution = runtime._resolve_metabolism_anchor(persona)
+                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(persona)
                         if anchor_id:
                             recent_from_anchor = history_mgr.get_history_from_anchor(
                                 anchor_id,
@@ -222,7 +222,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 recent = recent_from_anchor
                                 used_anchor = True
                         if not used_anchor:
-                            low_wm = runtime._get_low_watermark(persona)
+                            low_wm = runtime.session_lifecycle.get_low_watermark(persona)
                             limit_value = low_wm if low_wm and low_wm > 0 else 20
                             use_message_count = True
 

@@ -1643,7 +1643,7 @@ async def _run_spell_loop(
                     retry_usage.cached_tokens, retry_usage.cache_write_tokens,
                 )
                 # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)
-                runtime._touch_anchor_after_llm_call(persona, retry_usage)
+                runtime.session_lifecycle.touch_anchor_after_llm_call(persona, retry_usage)
 
             if isinstance(retry_result, dict):
                 text = retry_result.get("content", "")
@@ -2432,7 +2432,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         }
                         runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
                         # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)
-                        runtime._touch_anchor_after_llm_call(persona, usage)
+                        runtime.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
 
                     # Check tool detection — did LLM call a tool?
                     tool_detection = llm_client.consume_tool_detection()
@@ -2584,7 +2584,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                         runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
                         # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)
-                        runtime._touch_anchor_after_llm_call(persona, usage)
+                        runtime.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
 
                 # ── Common tool result handling (shared by streaming & sync) ──
                 # Parse output_keys to determine where to store results
@@ -2993,7 +2993,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # Accumulate into pulse total
                         runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
                         # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)
-                        runtime._touch_anchor_after_llm_call(persona, usage)
+                        runtime.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
                     else:
                         LOGGER.warning("[DEBUG] No usage data from LLM client")
 
@@ -3364,7 +3364,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # Accumulate into pulse total
                         runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
                         # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)
-                        runtime._touch_anchor_after_llm_call(persona, usage)
+                        runtime.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
 
                     # Consume reasoning (thinking) from LLM — store as metadata
                     reasoning_entries = llm_client.consume_reasoning()

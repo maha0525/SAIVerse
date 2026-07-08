@@ -134,15 +134,16 @@ def _resolve_anchor_state(
     """``(anchor.updated_at epoch, per-model TTL秒)`` を返す。引けなければ ``(None, None)``。
 
     ``sea/head_pipeline/integration.py:_resolve_anchor_ttl_state`` と同じ経路
-    (``SEARuntime._load_anchors`` / ``_get_anchor_validity_seconds``) を辿る。
+    (``SessionLifecycle.load_anchors`` / ``get_anchor_validity_seconds``) を辿る。
     anchor.updated_at は LLM 呼び出し成功時にのみ touch されるため、prompt cache
     書き込みの真の起点になる。
     """
     runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
     if runtime is None:
         return (None, None)
-    load_anchors = getattr(runtime, "_load_anchors", None)
-    get_validity = getattr(runtime, "_get_anchor_validity_seconds", None)
+    lifecycle = getattr(runtime, "session_lifecycle", None)
+    load_anchors = getattr(lifecycle, "load_anchors", None)
+    get_validity = getattr(lifecycle, "get_anchor_validity_seconds", None)
     if load_anchors is None or get_validity is None:
         return (None, None)
     try:

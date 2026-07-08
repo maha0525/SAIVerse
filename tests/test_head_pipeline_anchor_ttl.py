@@ -152,16 +152,23 @@ def test_ensure_snapshot_partial_ttl_only_one_field(pipeline):
 # ---- build_line_head_input integration ----
 
 
-class _FakeRuntime:
-    def __init__(self, anchors_dict, validity_map=None):
-        self._anchors = anchors_dict
-        self._validity = validity_map or {}
+class _FakeLifecycle:
+    """SessionLifecycle の最小フェイク (anchor 状態解決に必要な公開 API だけ)。"""
 
-    def _load_anchors(self, persona):
+    def __init__(self, anchors_dict, validity_map):
+        self._anchors = anchors_dict
+        self._validity = validity_map
+
+    def load_anchors(self, persona):
         return self._anchors
 
-    def _get_anchor_validity_seconds(self, model_key, persona_id=None):
+    def get_anchor_validity_seconds(self, model_key, persona_id=None):
         return self._validity.get(model_key, 1200)
+
+
+class _FakeRuntime:
+    def __init__(self, anchors_dict, validity_map=None):
+        self.session_lifecycle = _FakeLifecycle(anchors_dict, validity_map or {})
 
 
 class _FakeManager:

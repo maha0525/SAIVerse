@@ -36,7 +36,7 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
         return ["assistant response"]
 
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     result = runtime.run_meta_user(
         persona=persona,
@@ -79,7 +79,7 @@ def test_run_meta_user_returns_error_when_meta_playbook_unresolved() -> None:
     runtime._load_playbook_for = Mock(return_value=None)
     runtime._choose_playbook = Mock()
     runtime._run_playbook = Mock()
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     result = runtime.run_meta_user(persona, "hello", "b1", meta_playbook="not_found", event_callback=events.append)
 
@@ -110,7 +110,7 @@ def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> 
 
     runtime._prepare_context = Mock(side_effect=_prepare_context)
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     runtime.run_meta_user(persona, "hello", "b1", event_callback=events.append, cancellation_token=token)
 
@@ -136,7 +136,7 @@ def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:
         return []
 
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
-    runtime._maybe_run_metabolism = Mock()
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
     runtime.run_meta_user(persona, "hello", "b1")
 

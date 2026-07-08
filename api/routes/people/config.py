@@ -228,17 +228,17 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
     sea_runtime = getattr(manager, "sea_runtime", None)
     if memory_weave_enabled and sea_runtime:
         try:
-            sea_runtime._generate_chronicle(persona, force=True)
+            sea_runtime.session_lifecycle.generate_chronicle(persona, force=True)
             chronicle_generated = True
         except Exception as exc:
             LOGGER.warning("[organize-memory] Chronicle generation failed: %s", exc)
 
     # 3.5. Recall embedding maintenance — Chronicle 生成の成否・トグルとは独立に
     # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料)。
-    # _run_metabolism 側の step 2.7 と同じ独立ステップ。
+    # run_metabolism 側の step 2.7 と同じ独立ステップ。
     if sea_runtime:
         try:
-            sea_runtime._ensure_recall_embeddings(persona)
+            sea_runtime.session_lifecycle.ensure_recall_embeddings(persona)
         except Exception:
             LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
 

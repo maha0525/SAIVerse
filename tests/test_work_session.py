@@ -80,6 +80,9 @@ class FakeRuntime:
         self.flushed: List[Any] = []
         self.selected_aspects: List[Any] = []
         self._store_seq = 0
+        self.session_lifecycle = SimpleNamespace(
+            touch_anchor_after_llm_call=lambda persona, usage: None,
+        )
 
     # --- context / client -------------------------------------------------
     def _prepare_context(self, persona, building_id, user_input, requirements,
@@ -113,9 +116,6 @@ class FakeRuntime:
 
     def _accumulate_usage(self, state, model, input_tokens, output_tokens,
                           cost_usd, cached_tokens=0, cache_write_tokens=0):
-        return None
-
-    def _touch_anchor_after_llm_call(self, persona, usage):
         return None
 
     # --- pulse context / memory --------------------------------------------

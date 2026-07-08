@@ -95,7 +95,7 @@ def _resolve_anchor_ttl_state(
     """``METABOLISM_ANCHORS[model_key].updated_at`` を epoch seconds として取得、
     同 model の cache TTL (秒) と組で返す。
 
-    LLM 呼び出し成功後に ``_touch_anchor_after_llm_call`` が touch する updated_at が
+    LLM 呼び出し成功後に ``SessionLifecycle.touch_anchor_after_llm_call`` が touch する updated_at が
     prompt cache の真の起点 (= 最後の cache 書き込み時刻)。 これと TTL を ctx に
     積むことで、 ``ensure_snapshot`` が「TTL 超えたら snapshot も再 capture」 を
     判定できる。 anchor 不在 (初期状態 / load 失敗) / model 不明時は両方 None で返し、
@@ -107,8 +107,9 @@ def _resolve_anchor_ttl_state(
     if sea_runtime is None:
         return (None, None)
 
-    load_anchors = getattr(sea_runtime, "_load_anchors", None)
-    get_validity = getattr(sea_runtime, "_get_anchor_validity_seconds", None)
+    lifecycle = getattr(sea_runtime, "session_lifecycle", None)
+    load_anchors = getattr(lifecycle, "load_anchors", None)
+    get_validity = getattr(lifecycle, "get_anchor_validity_seconds", None)
     if load_anchors is None or get_validity is None:
         return (None, None)
 

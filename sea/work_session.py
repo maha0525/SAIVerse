@@ -688,7 +688,7 @@ def _record_llm_usage(
         usage.cached_tokens, usage.cache_write_tokens,
     )
     try:
-        runtime._touch_anchor_after_llm_call(persona, usage)
+        runtime.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
     except Exception:
         LOGGER.debug("[work_session] anchor touch failed (non-fatal)", exc_info=True)
 
