@@ -142,7 +142,7 @@ desire ノートに候補 Task をぶら下げる関連を作る（`NoteTask(not
    - ✅ `AI.LIFE_PURPOSE`（Text, nullable, JSON `{purpose, interests[], vocations[]}`）。追加系 migration（`try_additive_migration` が自動 ADD COLUMN、nullable なので手動フック不要）。
    - ✅ ヘルパ `saiverse/life_purpose.py`（parse / serialize / get / set / render + ① 駆動文 `DESIRE_DRIVE_TEXT`）。
    - ✅ 保存スペル `life_purpose_set(purpose, interests?, vocations?)`（canonical 形式、Track/Task 制御外＝ゲート対象外）。
-   - ✅ **初回の目的設定 = META 専用状況**（§10）。`_classify_situation` の最優先状況 `life_purpose_unset`（未設定の間毎回・META 標準モデル）→ Playbook `meta_judgment_life_purpose`（judge ドラフト → finalize が `life_purpose_set` 整形実行）。head の命令文は撤去（背景のみ）。`life_purpose_set` は `SELF_DEFINITION_SPELLS` で META/CONVERSATION 限定。ライフビューに「生きる目的を考えた」表示。
+   - ✅ **初回の目的設定 = META 専用状況**（§10）。`_classify_situation` の状況 `life_purpose_unset`（未設定の間毎回・META 標準モデル。優先度は alert_present の次 — §10.1 例外参照）→ Playbook `meta_judgment_life_purpose`（judge ドラフト → finalize が `life_purpose_set` 整形実行）。head の命令文は撤去（背景のみ）。`life_purpose_set` は `SELF_DEFINITION_SPELLS` で META/CONVERSATION 限定。ライフビューに「生きる目的を考えた」表示。
 6. ✅ `LIFE_PURPOSE` + ①駆動文を常駐注入 = `LifePurposeSection`（`sea/head_pipeline/sections/life_purpose.py`, order 560, Metabolism 凍結、駆動文は常時 / 目的は設定時のみ render、確定は diff 通知 `life_purpose_set`）。
 7. ✅ META の Track 化時に候補 Task を昇格（案A: `track_create(from_candidate='task:N')`）。Track 作成後に `promote_to_track` で候補を Track へ張り替え＝候補プールから自動消去。Track 作成成功後に昇格を試み、昇格失敗は Track を残して戻り値に載せる。権限は既存 `track_create`（TRACK_CONTROL = META/CONVERSATION）のまま＝AUTONOMOUS は昇格不可（§6 整合）。2026-06-28 完了。
 
@@ -177,9 +177,14 @@ desire ノートに候補 Task をぶら下げる関連を作る（`NoteTask(not
 - **head からは命令文を抜く**（`LifePurposeSection` は ① 駆動文＋② 設定済み目的を
   **背景知識**として render するだけ。未設定時の行動喚起は出さない）。
 - **META 判断 v2 に新状況 `life_purpose_unset` を追加**（`meta_judgment_structured.md`）。
-  `_classify_situation` で `LIFE_PURPOSE` 未設定を **preempt_collision の次に最優先**で
-  判定（alert/running 等より先）。未設定の間は**毎回**この状況になり、設定された時点で
+  `_classify_situation` で `LIFE_PURPOSE` 未設定を **preempt_collision・alert_present の
+  次**に判定（running 等より先）。未設定の間は**毎回**この状況になり、設定された時点で
   自然に外れる（フラグ不要）。
+  - **例外: alert (外部イベント) は目的設定より優先**（2026-07-07 改訂）。当初は
+    「alert/running 等より先」の最優先だったが、LIFE_PURPOSE 未設定のペルソナに
+    ユーザーが話しかけると alert が `meta_judgment_life_purpose` に横取りされ、
+    対ユーザー Track が activate されず**無応答**になる実害が出た。外部イベントへの
+    即応が目的設定より先。目的設定は alert の無い次回の META 判断で行われる。
 - **専用 Playbook `meta_judgment_life_purpose`**: judge ノードが構造化出力
   `{monologue, purpose, interests[], vocations[]}` で目的をドラフト（自分の人格定義と
   記憶から）→ `meta_judgment_finalize` が `life_purpose_set` スペルに整形・実行・記録

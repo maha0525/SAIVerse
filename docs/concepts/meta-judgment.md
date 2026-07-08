@@ -23,11 +23,13 @@ MetaLayer が状況を判定して**状況別 Playbook**を選び（下表）、
 
 | 状況キー | Playbook | 条件 |
 |---|---|---|
-| `life_purpose_unset` | `meta_judgment_life_purpose` | LIFE_PURPOSE 未設定 |
-| `alert_present` | `meta_judgment_alert` | alert（Track 状態の固有用語）発火 |
+| `alert_present` | `meta_judgment_alert` | alert（Track 状態の固有用語）発火。外部イベント即応のため `life_purpose_unset` より優先（2026-07-07 改訂） |
+| `life_purpose_unset` | `meta_judgment_life_purpose` | LIFE_PURPOSE 未設定（alert が無い場合に最優先） |
 | `running_active` | `meta_judgment_running` | 実行中 Track がある |
 | `idle_with_pending` | `meta_judgment_idle_pending` | アイドル・保留 Track あり |
 | `idle_no_pending` | `meta_judgment_idle_empty` | アイドル・保留なし |
+
+表は判定の優先順（`_classify_situation`）。
 
 > ⚠️ base の `meta_judgment.json` は `_SITUATION_PLAYBOOK_MAP` に**含まれない**別系統で、構造化出力を使わず内的独白 + `/spell` で完結する（そのファイル自身の設計メモは「重量級モデルのメインキャッシュに JSON を混ぜない」ためと述べる）。実際に dispatch されるのは上表の5つ。
 

@@ -59,7 +59,7 @@
 | # | トリガー | 状態 | 経路 | 起動 Pulse | 現状 |
 |---|---|---|---|---|---|
 | 1a | ユーザー発話 | user_conversation Track が running | **直接** | main_line | 動いてる (`invoke_main_line` 直叩き) |
-| 1b | ユーザー発話 | user_conversation Track が pending/alert/unstarted | **熟慮** | meta_judgment → main_line | 動いてる (`invoke_main_line` ハードコードで強制) |
+| 1b | ユーザー発話 | user_conversation Track が pending/alert/unstarted | **衝突なし: 直接 / 衝突あり: 熟慮** | 直接 activate → main_line / meta_judgment → main_line | 動いてる (2026-07-07 改訂、§4.2 参照) |
 | 2a | SubLineScheduler 5秒 poll | autonomous Track が running | **直接** | sub_line | 動いてる |
 | 2b | AutonomyManager push tick | persona idle / interval 到来 | **熟慮** | meta_judgment → (activate あれば) main_line | メタ判断は走るが activate 後の Pulse 起動が未実装 |
 | 3 | スケジュール時刻到来 | 任意 | **直接** | (スケジュール定義による) | 動いてる、ただし Track 紐付けは未対応 |
@@ -95,7 +95,7 @@
 
 メタ判断を介さず即時に Pulse を起動する経路。
 
-対象: 1a, 2a, 3, 9
+対象: 1a, 1b (running 衝突なし — 2026-07-07 改訂、§4.2 参照), 2a, 3, 9
 
 特徴:
 - イベント受信 → 即時 `PulseController.submit_xxx` で Pulse 起動
@@ -112,7 +112,7 @@
 
 メタ判断を経由してから Pulse を起動するか / 起動しないかを決める経路。
 
-対象: 1b, 2b, 5, 8
+対象: 1b (running 衝突あり), 2b, 5, 8
 
 フロー:
 
@@ -138,7 +138,12 @@ PulseController.submit_xxx で Pulse 起動 (or 起動しない)
 
 「activate しなかった場合は Pulse 起動しない」が原則 (Q2 で確定)。これによりメタ判断結果が「現状維持」だった場合は何も起きない (= 望ましい挙動)。
 
-対 user 発話 (1b) で「メタ判断後に activate しなかったらユーザー応答が無くなる」問題は、**1b を熟慮経路に置き続けるかどうかで再検討する**。応答無しが頻発するなら 1b を直接経路に動かす (= メタ判断スキップ + main_line 直接起動) という対応を取る。本 Intent では現状の熟慮経路として記述するが、運用次第で経路変更する余地を残す。
+**Q2 改訂 (2026-07-07)**: 対 user 発話 (1b) について、当初は「Track が running 以外なら常に熟慮経路 (activate されなかった場合は応答しない)」としつつ「応答無しが頻発するなら 1b を直接経路に動かす」と再検討余地を残していた。実際に LIFE_PURPOSE 未設定のペルソナで alert が `meta_judgment_life_purpose` に横取りされ、ユーザーの呼びかけが無応答になる実害が発生したため、以下に改訂した:
+
+- **別の running Track と衝突していない**場合 (Idle への呼びかけ等): メタ判断を経由せず `TrackManager.activate` で対ユーザー Track を直接 activate → `on_track_activated` hook 経由で main_line 応答を起動する (= 常に即応答)
+- **別の running Track と衝突している**場合のみ: 従来どおり熟慮経路 (`set_alert` → メタ判断)。activate されなかった場合は応答しない
+
+判定と分岐は `UserConversationTrackHandler.on_user_utterance` が行う (Track 状態の動的判定は Handler 責務 — §7.1)。running 衝突時も強制応答に寄せるかは未決の残論点 (`docs/issues/user_utterance_forced_response_on_running_conflict.md`、自律行動 v2 の割り込みと復帰と合わせて設計する)。
 
 ### 4.3 メタ判断並列レーン (Meta-Judgment Parallel Lane)
 
@@ -273,7 +278,8 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 ```python
 # event_kind, track_status → path
 ("user_utterance", "running") → DIRECT (submit_user with main_line)
-("user_utterance", "pending"|"alert"|"unstarted") → REFLECTIVE (set_alert → MetaLayer)
+("user_utterance", "pending"|"alert"|"unstarted", 別 running Track なし) → DIRECT (直接 activate → hook 経由 main_line)  # 2026-07-07 改訂
+("user_utterance", "pending"|"alert"|"unstarted", 別 running Track あり) → REFLECTIVE (set_alert → MetaLayer)
 ("subline_poll", "running" + autonomous) → DIRECT (submit_auto with sub_line)
 ("autonomy_tick", any) → REFLECTIVE (on_periodic_tick)
 ("schedule_fire", any) → DIRECT (submit_schedule, スケジュール定義の Pulse 種別)
@@ -301,7 +307,7 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 
 | # | 経路 | 実装状況 | 実用状況 | 備考 |
 |---|---|---|---|---|
-| α | `UserConversationTrackHandler.on_user_utterance` で `set_alert` | ✅ 実装済 | ✅ 動いてる | ユーザー発話起因の alert 化 |
+| α | `UserConversationTrackHandler.on_user_utterance` で `set_alert` | ✅ 実装済 | ✅ 動いてる | ユーザー発話起因の alert 化 (2026-07-07 改訂: 別の running Track と衝突している場合のみ。衝突なしは直接 activate — §4.2) |
 | β | `InternalAlertPoller` 60秒 tick でパラメータ閾値超過 | ✅ 実装済 | 🟡 空回り | Track の `metadata.thresholds` 未設定なので閾値判定対象が無い、Phase 5 で運用化 |
 | γ | `InternalAlertPoller` 内で `Handler.tick()` を呼ぶ枠組み | ✅ 呼び出し側のみ | 🟡 各 Handler に `tick` 未実装 | Phase 5 で SomaticHandler / ScheduledHandler / PerceptualHandler を実装 |
 | δ | 時間差ツール完了 → call_id 経由 alert | 🔲 Phase 5 構想 | 🔲 未実装 | Kitchen / dispatch_persona / X 投稿等のサブタスク |
@@ -330,6 +336,7 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 - ケース1 (1b) の `invoke_main_line()` ハードコードを削除
 - 代わりに `UserConversationTrackHandler.on_track_activated` 内で main_line Pulse を起動
 - 注意: 「activate しなかった場合に応答が無い」運用問題の発生有無を観察。多発したら 1b を直接経路に変更する。
+- **2026-07-07 追記**: 上記の運用問題が実際に発生した (life_purpose_unset がメタ判断で alert より優先され、Idle ペルソナへの呼びかけが無応答になった)。1b は「別の running Track と衝突していなければ直接 activate (即応答)、衝突時のみ熟慮経路」に改訂 (§4.2 Q2 改訂)。
 
 ### 9.4 段階 4: ディスパッチャ層の導入 (✅ 完了 commit `8c34933`)
 
@@ -391,7 +398,7 @@ USER (1) > SCHEDULE (2) > AUTO (3)
 - **「メタ判断 = 応答」案は不採用**: メタ判断と応答は出力構造・永続化経路・7 層ストレージ分類の役割が違うため統合せず、「メタ判断スキップ + 直接応答」を素直に作る方針 (まはー判断)
 - **直接経路 / 熟慮経路の 2 経路分け**: 「メタ判断要否」をハードコードマップで事前定義。動的判定は不要 (まはー判断)
 - **メタ判断の並列実行は将来余地ではなく必須**: alert 発生時の中断 / 継続判断のため、メタ判断は他 Pulse と並列に動く必要がある (まはー判断)
-- **`invoke_main_line` ハードコード廃止 + activate しなかったら応答しない**: 1b で応答なし問題が頻発するなら 1b を直接経路に動かす (まはー判断 Q2)
+- **`invoke_main_line` ハードコード廃止 + activate しなかったら応答しない**: 1b で応答なし問題が頻発するなら 1b を直接経路に動かす (まはー判断 Q2) — ※ 2026-07-07 に実際に無応答の実害が出たため改訂済み (§4.2 Q2 改訂)
 - **スケジュール ↔ Track 紐付けは別 Intent**: 本 Intent では概念のみ言及 (まはー判断 Q2 解 c)
 - **ファイル名 `pulse_dispatch.md`**: Pulse 起動の入り口を一本化する話、というのが核心 (まはー判断 Q3)
 - **メタ判断結果の cancel 経路 (§6.2)**: PulseController が `_notify_status_change` observer 経由で current pulse を cancel する形に確定 (まはー判断、v0.2)

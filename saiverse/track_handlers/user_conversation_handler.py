@@ -6,9 +6,12 @@ Intent A v0.9 / Intent B v0.6 における「対ユーザー会話 Track」(永�
 責務:
 - ユーザー発話を受けたときに対ユーザー Track の取得 / 自動作成
 - Track が running ならメインライン応答を直接起動
-- Track が running 以外なら alert 遷移を起こし、メタレイヤーに判断を委ねる
-  (alert observer 経由で MetaLayer が動く)
-- メタレイヤー処理後、最終的にメインライン応答を必ず 1 回起動する
+- Track が running 以外でも、別の running Track と衝突していなければ直接
+  activate してメインライン応答を起動する (Idle への呼びかけは常に即応答。
+  2026-07-07 改訂、pulse_dispatch.md §4.2)
+- 別の running Track と衝突している場合のみ alert 遷移を起こし、メタレイヤー
+  に仲裁を委ねる (alert observer 経由で MetaLayer が動く。activate されなければ
+  応答しない)
 - Track が running に **遷移したタイミング** で Track コンテキストを SAIMemory に
   注入する (Intent A v0.12 / 議論 2026-04-28: 末尾追加でキャッシュ親和、ペルソナの
   認知としては「Track 切替を会話の流れの中で受け取る」自然な順序を実現)
@@ -478,11 +481,17 @@ class UserConversationTrackHandler:
 
         - running (新規作成 or 既存 running): Track 切替通知は不要 (新規作成時は
           ``on_track_activated`` hook が走って通知される)。直接メインライン起動。
-        - それ以外 (pending / waiting / alert / unstarted):
+        - それ以外 (pending / alert / unstarted) で、同一ペルソナに**別の running
+          Track が無い**場合: メタ判断を経由せず ``TrackManager.activate`` で直接
+          running 化する (2026-07-07 改訂: life_purpose 横取りによる無応答の実害を
+          受け、running 衝突が無ければユーザー発話には常に即応答する)。activate
+          により ``on_track_activated`` hook が Track 切替通知の注入 + main_line
+          Pulse 起動を担う。
+        - それ以外で**別の running Track と衝突している**場合:
           alert に遷移 → alert observer (MetaLayer) が同期実行され Track 切替判断
           → MetaLayer が activate して running に遷移していれば
           ``on_track_activated`` hook 経由で Track 切替通知が SAIMemory に注入される
-          → メインライン起動
+          → メインライン起動。activate されなかった場合は応答しない。
 
         Track 切替通知 (``_inject_track_context``) は ``on_track_activated`` hook
         経由に統一された (pulse_dispatch.md §5、段階 2)。本メソッドからは直接
@@ -513,14 +522,37 @@ class UserConversationTrackHandler:
             self._open_conversation_episode(persona_id, track)
             invoke_main_line(track.track_id)
         else:
-            # 熟慮経路 (1-B): set_alert → MetaLayer → activate されれば
-            # on_track_activated hook 経由で main_line Pulse が起動する。
-            # activate されなかった場合 (メタ判断が現状維持を選んだ等) は
-            # 応答しない (pulse_dispatch.md §4.2、まはー判断 Q2)。
+            # running 以外 (pending / alert / unstarted)。別の running Track と
+            # 衝突しているかで経路を分ける (2026-07-07 改訂、pulse_dispatch.md §4.2):
+            # - 衝突なし → 直接経路 (1-A'): メタ判断を経由せず直接 activate。
+            #   ユーザーの呼びかけには常に応答する。
+            # - 衝突あり → 熟慮経路 (1-B): set_alert → MetaLayer が仲裁。
+            running_other = self.track_manager.get_running(persona_id)
+            has_running_conflict = (
+                running_other is not None
+                and running_other.track_id != track.track_id
+            )
+            if not has_running_conflict:
+                # 直接経路 (1-A'): running 衝突なし → 直接 activate。
+                # TrackManager.activate 末尾で on_track_activated hook が走り、
+                # Track 切替通知の注入 + 会話出来事の開き + main_line Pulse 起動
+                # が行われる (invoke_main_line の直呼びで hook をバイパスしない)。
+                logging.info(
+                    "[user-conv-handler] Track %s status=%s; no running conflict -> "
+                    "direct activate (main_line starts via on_track_activated hook)",
+                    track.track_id, track.status,
+                )
+                self.track_manager.activate(track.track_id)
+                return
+            # 熟慮経路 (1-B): 別の running Track が存在する → set_alert →
+            # MetaLayer → activate されれば on_track_activated hook 経由で
+            # main_line Pulse が起動する。activate されなかった場合 (メタ判断が
+            # 現状維持を選んだ等) は応答しない (pulse_dispatch.md §4.2)。
             # invoke_main_line のハードコード起動は廃止 (§9.3 段階 3)。
             logging.info(
-                "[user-conv-handler] Track %s status=%s; raising alert for metalayer (no direct invoke_main_line)",
-                track.track_id, track.status,
+                "[user-conv-handler] Track %s status=%s; running conflict with %s -> "
+                "raising alert for metalayer (no direct invoke_main_line)",
+                track.track_id, track.status, running_other.track_id,
             )
             ctx = {
                 "trigger": "user_utterance",

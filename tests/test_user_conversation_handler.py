@@ -3,7 +3,9 @@
 Handler の責務:
 - 対ユーザー Track の取得 / 自動作成
 - Track が running なら invoke_main_line を直接呼ぶ
-- Track が running 以外なら set_alert を発火 → invoke_main_line
+- Track が running 以外でも、別の running Track と衝突していなければ直接
+  activate → on_track_activated hook 経由で main_line 起動 (2026-07-07 改訂)
+- 別の running Track と衝突している場合のみ set_alert を発火 → MetaLayer 仲裁
 - Track が running に**遷移したタイミング**で Track コンテキストを SAIMemory に注入
 """
 from unittest.mock import MagicMock
@@ -222,16 +224,66 @@ def test_subsequent_utterance_on_running_track_uses_invoke_main_line(handler, tm
 
 
 # ---------------------------------------------------------------------------
-# on_user_utterance: alert 経路
+# on_user_utterance: pending + running 衝突なし → 直接 activate (2026-07-07 改訂)
 # ---------------------------------------------------------------------------
 
-def test_pending_track_triggers_alert_no_response_when_not_activated(handler, tm, persona, manager_stub):
-    """Track が pending → alert 遷移後 MetaLayer が activate しない場合、
-    新仕様 (pulse_dispatch.md §4.2) では応答しない。
+def test_pending_track_without_running_conflict_directly_activates(handler, tm, persona, manager_stub):
+    """pending Track + 別の running Track なし → set_alert せず直接 activate。
+    on_track_activated hook 経由で Track コンテキスト注入 + main_line Pulse 起動
+    (Idle への呼びかけは常に即応答、pulse_dispatch.md §4.2 Q2 改訂)。"""
+    mgr, history_manager = manager_stub
+    track, _ = handler.get_or_create_track(persona, "1")
+    tm.pause(track.track_id)  # running -> pending (他に running なし)
+    history_manager.reset_mock()  # 初回注入をクリア
+    mgr.run_sea_user.reset_mock()  # 初回 hook 経由 Pulse 起動をクリア
+
+    alert_observer_calls = []
+    tm.add_alert_observer(
+        lambda pid, tid, ctx: alert_observer_calls.append((pid, tid, ctx))
+    )
+
+    invoked = []
+    handler.on_user_utterance(
+        persona_id=persona,
+        user_id="1",
+        event={"role": "user", "content": "話しかけた"},
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
+    )
+    # メタ判断経路 (set_alert) は通らない
+    assert alert_observer_calls == []
+    # 直接 activate されて running になっている
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    # hook 経由で Track コンテキスト注入 + main_line Pulse 起動
+    history_manager.add_to_persona_only.assert_called_once()
+    mgr.run_sea_user.assert_called_once()
+    # invoke_main_line のハードコード起動は無し (hook 経由に統一)
+    assert invoked == []
+
+
+# ---------------------------------------------------------------------------
+# on_user_utterance: alert 経路 (別の running Track と衝突している場合のみ)
+# ---------------------------------------------------------------------------
+
+def _create_conflicting_running_track(tm, persona):
+    """別種別の running Track (作業中の自律 Track 相当) を作る。"""
+    return tm.create(
+        persona_id=persona,
+        track_type="autonomous",
+        title="作業セッション",
+        initial_status=STATUS_RUNNING,
+    )
+
+
+def test_pending_track_with_running_conflict_triggers_alert_no_response_when_not_activated(
+    handler, tm, persona, manager_stub
+):
+    """pending Track + 別の running Track あり → 熟慮経路 (set_alert)。
+    MetaLayer が activate しない場合は応答しない (pulse_dispatch.md §4.2)。
     invoke_main_line のハードコード起動は廃止された (§9.3 段階 3)。"""
     mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)  # running -> pending
+    _create_conflicting_running_track(tm, persona)
     history_manager.reset_mock()  # 初回注入をクリア
     mgr.run_sea_user.reset_mock()  # 初回 hook 経由 Pulse 起動をクリア
 
@@ -260,11 +312,13 @@ def test_pending_track_triggers_alert_no_response_when_not_activated(handler, tm
 def test_pending_track_with_metalayer_activating_starts_pulse_via_hook(
     handler, tm, persona, manager_stub
 ):
-    """pending → MetaLayer が activate して running になれば、on_track_activated hook 経由で
-    Track コンテキスト注入 + main_line Pulse 起動が行われる (新仕様 §9.3 段階 3)。"""
+    """pending + running 衝突 → MetaLayer が activate して running になれば、
+    on_track_activated hook 経由で Track コンテキスト注入 + main_line Pulse 起動が
+    行われる (新仕様 §9.3 段階 3)。"""
     mgr, history_manager = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
+    _create_conflicting_running_track(tm, persona)
     history_manager.reset_mock()
     mgr.run_sea_user.reset_mock()
 
@@ -289,10 +343,12 @@ def test_pending_track_with_metalayer_activating_starts_pulse_via_hook(
 
 def test_alert_observer_raise_does_not_propagate(handler, tm, persona, manager_stub):
     """alert observer が例外を出しても on_user_utterance は例外を伝播しない。
-    新仕様では activate されないので Pulse 起動もしないが、エラーで落ちないことを確認。"""
+    (running 衝突あり = 熟慮経路。activate されないので Pulse 起動もしないが、
+    エラーで落ちないことを確認。)"""
     mgr, _hm = manager_stub
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
+    _create_conflicting_running_track(tm, persona)
     mgr.run_sea_user.reset_mock()
 
     def bad_observer(*args):
@@ -314,9 +370,11 @@ def test_alert_observer_raise_does_not_propagate(handler, tm, persona, manager_s
 
 
 def test_alert_status_after_handler_pending_path(handler, tm, persona, manager_stub):
-    """pending 経路を通った後、Track の status は alert になっている (MetaLayer 未起動時)。"""
+    """pending + running 衝突の経路を通った後、Track の status は alert になっている
+    (MetaLayer 未起動時)。"""
     track, _ = handler.get_or_create_track(persona, "1")
     tm.pause(track.track_id)
+    _create_conflicting_running_track(tm, persona)
     assert tm.get(track.track_id).status == STATUS_PENDING
 
     handler.on_user_utterance(

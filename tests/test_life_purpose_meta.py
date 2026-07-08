@@ -14,6 +14,7 @@ from database.models import AI, Base, City, User
 from saiverse.activity_view import _format_meta_judgment_result
 from saiverse.life_purpose import set_life_purpose
 from saiverse.meta_layer import MetaLayer
+from saiverse.track_manager import STATUS_ALERT
 
 
 def _make_db():
@@ -59,6 +60,16 @@ class ClassifyLifePurposeTest(unittest.TestCase):
         # 未設定でも preempt_collision (no-op 衝突) が最優先。
         sit = self.layer._classify_situation("p1", {"target_already_running": True})
         self.assertEqual(sit["kind"], "preempt_collision")
+
+    def test_alert_wins_over_unset_life_purpose(self):
+        # alert Track あり + LIFE_PURPOSE 未設定 → alert_present に分類される
+        # (2026-07-07 改訂: 外部イベント即応を目的設定より優先。逆だとユーザー
+        # 発話の alert が目的設定に横取りされ無応答になる)。
+        alert_track = MagicMock()
+        alert_track.status = STATUS_ALERT
+        self.manager.track_manager.list_for_persona.return_value = [alert_track]
+        sit = self.layer._classify_situation("p1", {})
+        self.assertEqual(sit["kind"], "alert_present")
 
     def test_response_schema_and_situation_text(self):
         schema = self.layer._build_response_schema("life_purpose_unset", {})

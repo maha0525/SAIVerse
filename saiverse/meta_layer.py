@@ -26,7 +26,7 @@ Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path**
 - メインライン応答 (発話生成) の起動。これは呼び出し元 (Handler) が責任を持つ
 - Track の作成 / 状態遷移ロジック (TrackManager / dispatch ツールに委譲)
 - Track 内必要情報の維持・再開コンテキスト構築は Track Chronicle 機構が担う
-  (Metabolism 連動、`sea/runtime.py:_generate_track_chronicle` + `_promote_meta_judgment_in_pulse`
+  (Metabolism 連動、`sea/session_lifecycle.py:generate_track_chronicle` + `_promote_meta_judgment_in_pulse`
   の延長で切り替え時挿入。詳細: docs/intent/persona_cognition/track_chronicle.md)
 
 詳細: docs/intent/persona_cognition/ (Intent doc 群)
@@ -1258,14 +1258,15 @@ class MetaLayer:
     def _classify_situation(
         self, persona_id: str, context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Track 状態と trigger context から状況を5パターンに分類する。
+        """Track 状態と trigger context から状況を6パターンに分類する。
 
         分類 (優先順):
           A. preempt_collision    -- 先制起動と外部イベントの衝突
-          B. alert_present        -- alert 状態の Track あり
-          C. running_active       -- alert なし、running 中
-          D. idle_with_pending    -- アクティブなし、pending/unstarted あり
-          E. idle_no_pending      -- 上記すべて該当なし
+          B. alert_present        -- alert 状態の Track あり (外部イベント即応を優先)
+          C. life_purpose_unset   -- LIFE_PURPOSE 未設定 (alert が無ければ最優先)
+          D. running_active       -- alert なし、running 中
+          E. idle_with_pending    -- アクティブなし、pending/unstarted あり
+          F. idle_no_pending      -- 上記すべて該当なし
         """
         tracks = self.track_manager.list_for_persona(
             persona_id, statuses=LIVE_STATUSES
@@ -1280,13 +1281,18 @@ class MetaLayer:
 
         if target_already_running:
             kind = "preempt_collision"
-        elif self._is_life_purpose_unset(persona_id):
-            # 生きる目的が未設定なら、他の何より先に「目的を定める」を最優先する
-            # (autonomous_desire.md §10)。未設定の間は毎回この状況になり、
-            # 設定された時点で自然に外れる。AUTONOMOUS (軽量) でなく META で行う。
-            kind = "life_purpose_unset"
         elif alert:
+            # alert は外部イベント (ユーザー発話等) への即応要求なので、
+            # life_purpose_unset より先に判定する。逆順だと LIFE_PURPOSE 未設定の
+            # ペルソナに話しかけたとき alert が目的設定に横取りされ、対ユーザー
+            # Track が activate されず無応答になる (2026-07-07 実害、
+            # autonomous_desire.md §10.1 の例外)。
             kind = "alert_present"
+        elif self._is_life_purpose_unset(persona_id):
+            # 生きる目的が未設定なら、alert 対応を除く何より先に「目的を定める」
+            # を最優先する (autonomous_desire.md §10)。未設定の間は毎回この状況に
+            # なり、設定された時点で自然に外れる。AUTONOMOUS (軽量) でなく META で行う。
+            kind = "life_purpose_unset"
         elif running:
             kind = "running_active"
         elif pending_or_unstarted:
