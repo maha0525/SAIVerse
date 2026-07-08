@@ -228,6 +228,23 @@
     font-size: 1.5rem;
 }
 
+/* Thumbnail for picture items */
+.cardThumb {
+    width: 100%;
+    height: 90px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #111827;
+    border: 1px solid #374151;
+}
+
+.cardThumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
 .cardInfo {
     display: flex;
     flex-direction: column;
@@ -457,6 +474,11 @@
 
 :global([data-theme="light"]) .cardIcon {
     color: #374151;
+}
+
+:global([data-theme="light"]) .cardThumb {
+    background: #e2e8f0;
+    border-color: #e2e8f0;
 }
 
 :global([data-theme="light"]) .toggleOpenBtn {

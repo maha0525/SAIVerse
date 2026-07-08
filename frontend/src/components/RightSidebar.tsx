@@ -95,6 +95,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
+    // Track picture items whose thumbnail failed to load, so we fall back to the icon
+    const [thumbErrors, setThumbErrors] = useState<Set<string>>(new Set());
 
     // Modal States
     const [showMemory, setShowMemory] = useState(false);
@@ -464,13 +466,28 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                             className={`${styles.card} ${styles[item.type]} ${item.is_open ? styles.itemOpen : ''}`}
                                             onClick={() => setSelectedItem(item)}
                                         >
-                                            <div className={styles.cardIcon}>
-                                                {item.type === 'picture' ? <ImageIcon size={20} />
-                                                    : item.type === 'bag' ? <Package size={20} />
-                                                    : item.type === 'audio' ? <Music size={20} />
-                                                    : item.type === 'video' ? <Video size={20} />
-                                                    : <File size={20} />}
-                                            </div>
+                                            {item.type === 'picture' && !thumbErrors.has(item.id) ? (
+                                                <div className={styles.cardThumb}>
+                                                    <img
+                                                        src={`/api/info/item/${item.id}`}
+                                                        alt={item.name}
+                                                        loading="lazy"
+                                                        onError={() => setThumbErrors(prev => {
+                                                            const next = new Set(prev);
+                                                            next.add(item.id);
+                                                            return next;
+                                                        })}
+                                                    />
+                                                </div>
+                                            ) : (
+                                                <div className={styles.cardIcon}>
+                                                    {item.type === 'picture' ? <ImageIcon size={20} />
+                                                        : item.type === 'bag' ? <Package size={20} />
+                                                        : item.type === 'audio' ? <Music size={20} />
+                                                        : item.type === 'video' ? <Video size={20} />
+                                                        : <File size={20} />}
+                                                </div>
+                                            )}
                                             <div className={styles.cardInfo}>
                                                 <div className={styles.cardName}>
                                                     {item.name}
