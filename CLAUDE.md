@@ -516,7 +516,7 @@ The repository owner cannot judge *when* refactoring is due — noticing the tim
 
 **状態語彙(intent ステータス行と台帳で共通)**: `未着手`(構想止まり・台帳外) / `設計中` / `実装待ち` / `実装中` / `検証待ち` / `完了` / `凍結`。intent のステータス行はこの語彙に寄せる(将来のドリフト検出スクリプトが機械判定しやすいように)。
 
-### Code Changes
+**台帳の手前 — アイディア帳 (`docs/overview/ideas.md`)**: intent にも issue にもなっていない生アイディアの置き場。規律のない容器で、思いついたら一行で放り込む。まはーがチャットで「これやりたい」と口にしたアイディアは、私(Claude)がここに書き留める(まはーに管理させない)。育って着手が決まったら `ideas.md` から削除して in_flight 台帳へ卒業させる(卒業フローは `ideas.md` 内)。
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
 
 - **⚠️ NEVER GUESS ATTRIBUTE/METHOD NAMES (CRITICAL) ⚠️**:
