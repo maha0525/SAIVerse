@@ -7,8 +7,10 @@ _running / _idle_pending / _idle_empty) の最終ノードで呼ばれる。
 1. judge LLM ノードが返した dict (構造化出力結果) を受け取る
 2. 状況 (situation_kind) に応じて /spell 行を組み立てる
 3. 各 /spell を内部実行 (既存の Track 操作スペル経由 → PulseContext.deferred_track_ops に enqueue)
-4. 整形済みテキスト ``monologue + "\n\n" + /spell ...`` を SAIMemory に
-   ``role='assistant', line_role='meta_judgment'`` として保存
+4. 整形済みテキスト ``monologue + "\n\n" + /spell ...`` を ``<system>…</system>``
+   に包み、SAIMemory に ``role='user', line_role='meta_judgment'`` として保存
+   (プロンプト無しの ``role='assistant'`` は「自分は普段こう喋る」の few-shot 汚染源
+   になるため、ペルソナ発話ではなくナレーションで残す。2026-07-07 まはー指摘)
    - Track 操作なし (= C状況の continue / 全状況で空の判断) なら scope='discardable'
    - Track 操作あり なら scope='committed'
 5. ``meta_judgment_log`` テーブルにも書き込む (旧仕様互換)
@@ -246,8 +248,13 @@ def meta_judgment_finalize(
                 "result": f"error: {exc}",
             })
 
-    # Persist as assistant message in SAIMemory (line_role='meta_judgment').
-    # Intent v2 §6: メインキャッシュには整形済みテキストのみ残す。
+    # Persist as a <system>-wrapped narration in SAIMemory (line_role='meta_judgment',
+    # role='user'). Intent v2 §6: メインキャッシュには整形済みテキストのみ残す。
+    # role='user' + <system> 包みは few-shot 汚染回避 (2026-07-07 まはー指摘)。
+    # meta_judgment は line_role で既に Chronicle 除外済みのため event_message タグは
+    # 付けない (既存の判定キーを増やさない)。judge プロンプトへ過去判断を再掲する
+    # MetaLayer._build_recent_judgments_block は meta_judgment_log.judgment_thought
+    # (= 生 monologue) を読むため、この <system> 包みは judge プロンプトに漏れない。
     manager = get_active_manager()
     persona = (
         (getattr(manager, "personas", None) or {}).get(persona_id)
@@ -260,8 +267,8 @@ def meta_judgment_finalize(
             pulse_id = getattr(pulse_ctx, "pulse_id", None) if pulse_ctx else None
             try:
                 adapter.append_persona_message({
-                    "role": "assistant",
-                    "content": final_text,
+                    "role": "user",
+                    "content": f"<system>メタ判断の記録:\n{final_text}</system>",
                     # tz-aware UTC ISO 文字列で渡す。naive ISO
                     # (datetime.utcnow().isoformat()) を渡すと adapter の
                     # _timestamp_to_epoch が naive をプロセスの system TZ で
