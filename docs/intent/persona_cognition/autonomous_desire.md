@@ -1,6 +1,6 @@
 # Intent: 自律の源泉（欲求エンジンとやりたいこと候補）
 
-> **ステータス**: ✅ 実装完了 v0.2（2026-06-27 設計確定 → 2026-06-28 §8 タスク 1〜7 実装完了・テスト緑。実機検証＋`LIFE_PURPOSE` カラムの実 DB migration 待ち）
+> **ステータス**: ✅ 実装完了・実機検証済 v0.2（2026-06-27 設計確定 → 2026-06-28 §8 タスク 1〜7 実装完了・テスト緑 → 2026-07-08 実機検証済＋`LIFE_PURPOSE` 実 DB migration 適用済、まはー）
 > **親**: [`01_concepts.md`](01_concepts.md)（Track / Note / メタレイヤー）
 > **関連**: [`mode_spell_permissions.md`](mode_spell_permissions.md)（Track操作はMETAのみ＝本設計の構造的前提）/
 > [`unified_task_model.md`](unified_task_model.md)（③-0 で Task を一本化済み・本設計の土台）/

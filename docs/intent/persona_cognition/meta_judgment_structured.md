@@ -1,6 +1,6 @@
 # Intent: メタ判断 v2 (構造化出力ベース)
 
-**ステータス**: v0.3 実機検証 1 回目で 2 件の関連バグを修正済 (2026-05-10)。汚染ログ除去 + 実機検証 2 回目待ち
+**ステータス**: v0.3 実機検証済 (2026-07-08, まはー)。1 回目で 2 件の関連バグを修正済 (2026-05-10)
 **親 Intent**: [`README.md`](README.md) (ペルソナ認知モデル全体)
 **置き換え対象**: [`02_mechanics.md`](02_mechanics.md) §「メタ判断の動作仕様」(構造化出力非使用方針) — 本 Intent 確定後に該当節をリダイレクト stub 化予定
 **関連 issue**: [`docs/issues/llm_provider_anyof_support.md`](../../issues/llm_provider_anyof_support.md)

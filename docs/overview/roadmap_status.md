@@ -38,7 +38,7 @@
 
 - ✅ **Track** 実装・拡張中
 - ✅ **入れ子サブライン Spell**（`/run_playbook`、深さ4段、`report_to_parent`）実装済（v0.24）
-- ✅ **aspect** v0.2 実装済・実機検証待ち
+- ✅ **aspect** v0.2 実装済・実機検証済 (2026-07-08)
 - 🔵 **session（= 短期記憶 / ワーキングメモリ）** 起草中（`docs/intent/session.md` v0.1）— 統一制御単位はコード未実装。Session は「節と節の間」という時間区間に留まらず、**ペルソナが今見ている短期記憶**（長期記憶の末尾・head・進行中 Beat・外界入力・システム通知の集約）であり、全 LLM 判断の入力ハブ
 - 🟡 **Metabolism / head / Anchor** 機構は Phase 1 実装済（`sea/head_pipeline/`）。Session 概念への統合は検討中
 - 🔲 **Social Track 入口（ペルソナ間会話）** — `SocialTrackHandler` と Track 自動作成（ensure_track）はあるが、**「他ペルソナ発話イベントの受け口」が未実装**（Phase B-Y）。「相手は誰か」判定もこれから。ペルソナ間会話の機序はここが入るまで成立しない

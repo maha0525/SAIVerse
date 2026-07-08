@@ -1,6 +1,6 @@
 # Intent: LLM → TTS Pipeline Streaming + bubble1/bubble2 撤廃
 
-**ステータス**: 設計確定 (2026-05-15 まはー インタビュー 6 周経て大幅改訂)、 Phase 2-B-step3 + Phase 2-C + Phase 2-D + Phase 2-E 実装済 (2026-05-15 後半セッション)、 実機テスト待ち
+**ステータス**: 設計確定 (2026-05-15 まはー インタビュー 6 周経て大幅改訂)、 Phase 2-B-step3 + Phase 2-C + Phase 2-D + Phase 2-E 実装済 (2026-05-15 後半セッション)、 **実機検証済 (2026-07-08, まはー)**
 
 **関連**: [`voice_tts_playback_queue.md`](voice_tts_playback_queue.md) (= subscriber 側 queue + Stack-chan 流量制御 + bubble1 早期 emit)、 [`addon_speak_hooks.md`](addon_speak_hooks.md) (= persona_speak hook 経路)、 [`stackchan_vessel.md`](stackchan_vessel.md)
 
