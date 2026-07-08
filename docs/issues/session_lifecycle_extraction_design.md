@@ -1,6 +1,6 @@
 # 分割設計書: SEARuntime からの記憶ライフサイクル抽出 (SessionLifecycle)
 
-**ステータス**: 🟡 Step 1 完了（抽出＋委譲シム、2026-07-08）・Step 2/3 未着手
+**ステータス**: 🟡 Step 2 完了（呼び出し元直接参照化＋シム削除、2026-07-08）・Step 3 未着手
 **優先度**: high（`docs/intent/session.md` を実装に移すときの第一歩。記憶アーキテクチャ v2 Phase 0 で Chronicle 系に入る場合も先にこれ）
 **作成日**: 2026-07-06
 **関連**: `docs/overview/architecture_health.md` §3.2、`docs/intent/session.md`（起草中 v0.1）、`docs/overview/landscape.md` §6
@@ -104,8 +104,19 @@ def _touch_anchor_after_llm_call(self, persona, usage) -> None:
    SEARuntime に委譲シムを設置。`test_cache_lifecycle.py` の直束縛のみ書き換え。
    `self.` 参照のうち移動対象同士は `self.` のまま、残留メソッド
    （`_is_auto_recall_enabled_for_persona` 等）への参照は `self.runtime.` 経由にする
-2. **Step 2（呼び出し元の直接参照化）**: §3 の呼び出し元を触るついでに
-   `runtime.session_lifecycle.xxx()` へ移行。全箇所移行後にシム削除
+2. ✅ **Step 2（呼び出し元の直接参照化）完了（2026-07-08）**: §3 の呼び出し元を
+   `runtime.session_lifecycle.xxx()`（gold_panning のみ既に手元にある `lifecycle.xxx()`）へ移行し、
+   `sea/runtime.py` の委譲シム 19 個を削除。§3 の一覧は commit `b4ca78e` 時点のもので
+   **不完全だった** — 実際には以下も参照していた（Step 1 以降に追加された経路含む）:
+   - `sea/gold_panning.py`（`_touch_anchor_after_llm_call` → `lifecycle.touch_anchor_after_llm_call`）
+   - `sea/head_pipeline/integration.py`（getattr 経由の `_load_anchors` / `_get_anchor_validity_seconds`
+     → `session_lifecycle.load_anchors` / `get_anchor_validity_seconds`）
+   - テスト側の instance 差し替え / stub フェイク:
+     `tests/test_cache_keepalive.py`（`session_lifecycle.*` へ差し替え）、
+     `tests/test_gold_panning.py` / `tests/test_day_scenario.py` / `tests/test_episodes_wiring.py` /
+     `tests/test_work_session.py` / `scripts/run_day_sim.py`（フェイク runtime に `session_lifecycle`
+     を持たせる形へ）、`tests/sea/test_runtime_regression.py`（`runtime.session_lifecycle.maybe_run_metabolism = Mock()`）、
+     `tests/test_head_pipeline_anchor_ttl.py`（`_FakeRuntime` を `_FakeLifecycle` 経由へ）
 3. **Step 3（session.md 実装時）**: SessionLifecycle に Session の識別
    （`(persona_id, model_key)` 粒度）と状態を持たせ、「anchor touch → 履歴取得 → head render の
    三部構成が個別に動く」現状（landscape §6 注記）を統一制御に置き換える。
@@ -129,3 +140,4 @@ def _touch_anchor_after_llm_call(self, persona, usage) -> None:
 
 - 2026-07-06: アーキテクチャ健診（`architecture_health.md` §3.2）を受けて本設計書を起草（エア / Fable 5）
 - 2026-07-08: Step 1 完了。対象メソッド群を `sea/session_lifecycle.py`（SessionLifecycle）へ移動し、SEARuntime に委譲シムを設置（挙動不変）。`test_cache_lifecycle.py` の直束縛を `SessionLifecycle.xxx.__get__` へ書き換え。gold_panning の受け皿として本抽出の上に砂金採りを配線（gold_panning.md）。Step 2（呼び出し元の直接参照化＋シム削除）と Step 3（Session 統一制御化）は未着手（メティス）
+- 2026-07-08: Step 2 完了。全呼び出し元（`runtime_llm.py` / `runtime_context.py` / `work_session.py` / `gold_panning.py` / `runtime.py` 内部 / `api/routes/people/{config,cache_status}.py` / `head_pipeline/integration.py`）を `session_lifecycle.<公開名>` 直接参照へ移行し、`sea/runtime.py` の委譲シム 19 個を削除（`_is_auto_recall_enabled_for_persona` / `_is_spell_enabled_for_persona` / `_is_realtime_info_enabled_for_persona` は §1「移動しないもの」なので SEARuntime に残置）。テストのシム差し替え・stub フェイクも `session_lifecycle` 経由へ揃えた。検証: `ruff check`（変更ファイル clean）、import smoke、`pytest`（186 passed）。既知の pre-existing failure `test_cache_keepalive.py::test_keepalive_touches_cache_without_writing_memory` は本 Step 以前から red（`get_cache_config('claude-x')` が implicit を返し run_cache_keepalive が非 explicit 見張り分岐で False を返すため。stash 検証で baseline でも失敗を確認）— 本リファクタとは無関係で未修正。Step 3（Session 統一制御化）は未着手（メティス）
