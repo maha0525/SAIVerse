@@ -155,7 +155,7 @@ class TestExtractEntities(unittest.TestCase):
 class TestReflectToMemopedia(unittest.TestCase):
     """Test Memopedia reflection logic."""
 
-    def test_append_to_existing_page(self):
+    def test_existing_page_creates_fragments(self):
         memopedia = MagicMock()
         page = MagicMock()
         page.id = "page_123"
@@ -169,7 +169,12 @@ class TestReflectToMemopedia(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].is_new_page)
         self.assertEqual(results[0].page_id, "page_123")
-        memopedia.append_to_content.assert_called_once()
+        # Notes are stored as Fragments (not appended to page content).
+        memopedia.create_fragment.assert_called_once()
+        call_kwargs = memopedia.create_fragment.call_args.kwargs
+        self.assertEqual(call_kwargs["entity_id"], "page_123")
+        self.assertEqual(call_kwargs["content"], "新しい情報")
+        memopedia.append_to_content.assert_not_called()
 
     def test_create_new_page_with_summary(self):
         memopedia = MagicMock()
@@ -207,7 +212,8 @@ class TestReflectToMemopedia(unittest.TestCase):
         reflect_to_memopedia(entities, memopedia, source_time=1711900000)
         mock_update.assert_called_once_with(memopedia.conn, "page_123", summary="ユーザー")
 
-    def test_existing_page_keeps_summary_if_present(self):
+    @patch("sai_memory.memopedia.storage.update_page")
+    def test_existing_page_skips_summary_update_when_unchanged(self, mock_update):
         memopedia = MagicMock()
         page = MagicMock()
         page.id = "page_123"
@@ -215,13 +221,15 @@ class TestReflectToMemopedia(unittest.TestCase):
         memopedia.find_by_title.return_value = page
 
         entities = [
-            ExtractedEntity(name="まはー", category="people", summary="新しい概要", notes=["新情報"]),
+            # Same summary as the existing page.
+            ExtractedEntity(name="まはー", category="people", summary="既存の概要", notes=["新情報"]),
         ]
 
-        # Should not attempt to update summary since page already has one
         reflect_to_memopedia(entities, memopedia, source_time=1711900000)
-        # append_to_content should be called, but no summary update
-        memopedia.append_to_content.assert_called_once()
+        # Summary is only rewritten when it differs, so no update here.
+        mock_update.assert_not_called()
+        # Notes are still recorded as Fragments.
+        memopedia.create_fragment.assert_called_once()
 
     def test_empty_notes_skipped(self):
         memopedia = MagicMock()
