@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes } from 'lucide-react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
@@ -15,12 +15,6 @@ interface EnvVar {
     key: string;
     value: string;
     is_sensitive: boolean;
-}
-
-interface TableInfo {
-    name: string;
-    columns: string[];
-    pk_columns: string[];
 }
 
 interface ModelRoleInfo {
@@ -52,7 +46,7 @@ interface PlaybookPermEntry {
     permission_level: string;
 }
 
-type TabId = 'env' | 'world' | 'db' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
+type TabId = 'env' | 'world' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
 type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
@@ -63,10 +57,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [editedEnv, setEditedEnv] = useState<Record<string, string>>({});
 
     // DB State
-    const [tables, setTables] = useState<TableInfo[]>([]);
-    const [selectedTable, setSelectedTable] = useState<string | null>(null);
-    const [tableData, setTableData] = useState<any[]>([]);
-    const [dbLoading, setDbLoading] = useState(false);
 
     // Global Auto Mode
     const [globalAutoEnabled, setGlobalAutoEnabled] = useState(true);
@@ -156,9 +146,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
-        }
-        if (isOpen && activeTab === 'db') {
-            loadTables();
         }
         if (isOpen && activeTab === 'models') {
             loadModelRoles();
@@ -366,34 +353,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
     };
 
-    const loadTables = async () => {
-        try {
-            const res = await fetch('/api/db/tables');
-            if (res.ok) {
-                const data = await res.json();
-                setTables(data);
-            }
-        } catch (e) {
-            console.error("Failed to load tables", e);
-        }
-    };
-
-    const loadTableData = async (tableName: string) => {
-        setDbLoading(true);
-        setSelectedTable(tableName);
-        try {
-            const res = await fetch(`/api/db/tables/${tableName}`);
-            if (res.ok) {
-                const data = await res.json();
-                setTableData(data);
-            }
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setDbLoading(false);
-        }
-    };
-
     const loadEnvVars = async () => {
         setIsLoading(true);
         try {
@@ -545,12 +504,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             onClick={() => setActiveTab('world')}
                         >
                             <Globe size={18} /> ワールドエディタ
-                        </div>
-                        <div
-                            className={`${styles.navItem} ${activeTab === 'db' ? styles.active : ''}`}
-                            onClick={() => setActiveTab('db')}
-                        >
-                            <Database size={18} /> データベース管理
                         </div>
                         <div
                             className={`${styles.navItem} ${activeTab === 'models' ? styles.active : ''}`}
@@ -771,59 +724,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
                         {activeTab === 'world' && (
                             <WorldEditor />
-                        )}
-
-                        {activeTab === 'db' && (
-                            <div className={styles.dbContainer}>
-                                <div className={styles.sectionHeader}>
-                                    <h3>データベース管理</h3>
-                                    <div className={styles.selectWrapper}>
-                                        <select
-                                            className={styles.dbSelect}
-                                            onChange={(e) => loadTableData(e.target.value)}
-                                            value={selectedTable || ""}
-                                        >
-                                            <option value="" disabled>テーブルを選択...</option>
-                                            {tables.map(t => (
-                                                <option key={t.name} value={t.name}>{t.name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {dbLoading && <div>データ読み込み中...</div>}
-
-                                {!dbLoading && selectedTable && tableData.length === 0 && (
-                                    <div style={{ padding: '1rem', color: '#888' }}>レコードが見つかりません。</div>
-                                )}
-
-                                {!dbLoading && selectedTable && tableData.length > 0 && (
-                                    <div className={styles.tableWrapper}>
-                                        <table className={styles.dataTable}>
-                                            <thead>
-                                                <tr>
-                                                    {Object.keys(tableData[0] || {}).map(k => (
-                                                        <th key={k}>{k}</th>
-                                                    ))}
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {tableData.map((row, idx) => (
-                                                    <tr key={idx}>
-                                                        {Object.values(row).map((val: any, cIdx) => (
-                                                            <td key={cIdx} title={String(val)}>
-                                                                {val === null ? <span style={{ color: '#ccc' }}>NULL</span> : (
-                                                                    String(val).length > 50 ? String(val).substring(0, 50) + '...' : String(val)
-                                                                )}
-                                                            </td>
-                                                        ))}
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                )}
-                            </div>
                         )}
 
                         {activeTab === 'models' && (
