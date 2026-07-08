@@ -492,6 +492,15 @@ Intent documents record the "why" that code alone cannot express. They prevent w
 
 If unsure whether any doc references what you changed, `grep docs/` for the symbol / name before finishing. Stale docs send the next agent and the user to the wrong entry point — that is a real cost, not a cosmetic one. Prefer updating docs proactively even when not asked.
 
+### Continuous Refactoring (Claude must surface this proactively)
+
+The repository owner cannot judge *when* refactoring is due — noticing the timing is Claude's job. Refactoring is narrow and frequent, never repo-wide:
+
+- **Boy-scout rule (ついで直し)**: When working in a file/area, fix small obviously-safe debt you notice there (dead code, stale comments, trivial duplication) in the same branch — as a separate commit from the feature change. For anything larger, propose it instead of silently mixing it in.
+- **Pre-work health check**: Before starting a significant change in a subsystem, consult `docs/overview/architecture_health.md` (repo-wide audit: per-subsystem findings with prep-refactor triggers, see its §4 lookup table) and check for known debt (`docs/issues/`, landscape §9 dead concepts). If a split/cleanup would make the coming change safer or easier to verify, propose it as a prep step *before* implementing the feature.
+- **Scope discipline**: A refactor needs a reason — usually "we are about to touch this area". Do not launch broad refactors of code nobody plans to touch; the value is never recovered and the regression-verification cost falls on the owner.
+- **Filler tasks**: Dead-concept removals listed in `docs/issues/` and landscape §9 are low-risk standalone cleanups — good candidates to suggest when work is otherwise paused.
+
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
 

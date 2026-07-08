@@ -32,7 +32,7 @@ git checkout -b feature/your-feature-name
 ### TypeScript (frontend)
 
 - Next.js のプロジェクト構成に従う
-- ESLint の設定に従う
+- ESLint の設定に従う（`frontend/` で `npm run lint`。エラー 0 を維持する。既存の警告は残っていてよい）
 
 ## プルリクエスト
 

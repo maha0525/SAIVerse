@@ -43,3 +43,4 @@ Beat は記録先で2つに割れていて、これを束ねる概念名（型�
 ## ログ
 
 - 2026-05-29: 俯瞰地図作成中に Beat 概念を発見・命名。実装に型が無いことが判明したため本 issue を起票（リファクタは後日）。
+- 2026-07-06: `runtime_llm.py` 分割設計書（[runtime_llm_node_split_design.md](runtime_llm_node_split_design.md)）に本 issue の解決を組み込み。`BeatExecution` dataclass（display_text / memory_text の対を持つ）として Phase 1 で型を導入し、Phase 3 で `Beat` を公開する計画。
