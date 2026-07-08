@@ -1,6 +1,6 @@
 # 分割設計書: SEARuntime からの記憶ライフサイクル抽出 (SessionLifecycle)
 
-**ステータス**: 🔲 設計済・実装未着手
+**ステータス**: 🟡 Step 1 完了（抽出＋委譲シム、2026-07-08）・Step 2/3 未着手
 **優先度**: high（`docs/intent/session.md` を実装に移すときの第一歩。記憶アーキテクチャ v2 Phase 0 で Chronicle 系に入る場合も先にこれ）
 **作成日**: 2026-07-06
 **関連**: `docs/overview/architecture_health.md` §3.2、`docs/intent/session.md`（起草中 v0.1）、`docs/overview/landscape.md` §6
@@ -100,7 +100,7 @@ def _touch_anchor_after_llm_call(self, persona, usage) -> None:
 
 ## 4. 段階手順
 
-1. **Step 1（機械的移動）**: L1511-2598 の対象メソッドを `sea/session_lifecycle.py` へ移動し、
+1. ✅ **Step 1（機械的移動）完了（2026-07-08）**: L1511-2598 の対象メソッドを `sea/session_lifecycle.py` へ移動し、
    SEARuntime に委譲シムを設置。`test_cache_lifecycle.py` の直束縛のみ書き換え。
    `self.` 参照のうち移動対象同士は `self.` のまま、残留メソッド
    （`_is_auto_recall_enabled_for_persona` 等）への参照は `self.runtime.` 経由にする
@@ -128,3 +128,4 @@ def _touch_anchor_after_llm_call(self, persona, usage) -> None:
 ## ログ
 
 - 2026-07-06: アーキテクチャ健診（`architecture_health.md` §3.2）を受けて本設計書を起草（エア / Fable 5）
+- 2026-07-08: Step 1 完了。対象メソッド群を `sea/session_lifecycle.py`（SessionLifecycle）へ移動し、SEARuntime に委譲シムを設置（挙動不変）。`test_cache_lifecycle.py` の直束縛を `SessionLifecycle.xxx.__get__` へ書き換え。gold_panning の受け皿として本抽出の上に砂金採りを配線（gold_panning.md）。Step 2（呼び出し元の直接参照化＋シム削除）と Step 3（Session 統一制御化）は未着手（メティス）
