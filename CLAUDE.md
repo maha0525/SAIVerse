@@ -501,6 +501,21 @@ The repository owner cannot judge *when* refactoring is due — noticing the tim
 - **Scope discipline**: A refactor needs a reason — usually "we are about to touch this area". Do not launch broad refactors of code nobody plans to touch; the value is never recovered and the regression-verification cost falls on the owner.
 - **Filler tasks**: Dead-concept removals listed in `docs/issues/` and landscape §9 are low-risk standalone cleanups — good candidates to suggest when work is otherwise paused.
 
+### Progress Tracking — 進行中案件の台帳 (`docs/overview/in_flight.md`)
+
+進行中(アクティブ)の案件は `docs/overview/in_flight.md` に索引される。**状態の真実は各 intent(冒頭のステータス行) / issue(未解決 `docs/issues/` ↔ 完了 `docs/issues/archive/` のフォルダ位置)が持ち**、台帳はそこから「進行中」だけを抽出して *次アクション* と *誰待ち* を可視化する薄いビュー(完了・未着手は載せない、状態は背負わない)。
+
+**Claude が番人**: 案件(intent / issue / 対応コード)に触れたセッションでは、終わる前に台帳と doc のステータスを**同じコミット**で現況に合わせる。まはーに更新を求めない。トリガーと対応:
+
+| トリガー | やること |
+|---|---|
+| **進行中入り**(実装着手 or レビュー/検証サイクル入り) | 台帳に行追加 + doc を進行中に(issue=未解決に置く / intent=ステータス行を設計中〜検証待ちに) |
+| **進行中の変化**(次アクション/誰待ち/フェーズが動いた) | 台帳の該当行を更新 |
+| **完了**(実機/まはー検証まで済) | 台帳から削除 + issue は `archive/` へ移動 / intent はステータス行を「完了」に / 必要ならメモリも |
+| **却下・凍結** | 台帳から外す + doc に理由を記録 |
+
+**状態語彙(intent ステータス行と台帳で共通)**: `未着手`(構想止まり・台帳外) / `設計中` / `実装待ち` / `実装中` / `検証待ち` / `完了` / `凍結`。intent のステータス行はこの語彙に寄せる(将来のドリフト検出スクリプトが機械判定しやすいように)。
+
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
 
