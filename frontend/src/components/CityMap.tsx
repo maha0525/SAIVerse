@@ -31,6 +31,7 @@ interface CityMapBuilding {
 
 interface CityMapResponse {
     city_id: number | null;
+    city_name?: string | null;
     user_current_building_id: string | null;
     map_background_image?: string | null;
     buildings: CityMapBuilding[];
@@ -757,7 +758,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                     <h2 className={styles.title}>
                         {scopeRegionId
                             ? (data?.scope_region_name ?? scopeRegionId)
-                            : 'S A I V e r s e  C i t y'}
+                            : (data?.city_name ?? 'SAIVerse City')}
                     </h2>
                     <div className={styles.subtitle}>
                         {data ? `${buildings.length} buildings · ${buildings.reduce((acc, b) => acc + b.occupants.length, 0)} residents` : ' '}

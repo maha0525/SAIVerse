@@ -253,6 +253,7 @@ class CityMapBuilding(BaseModel):
 
 class CityMapResponse(BaseModel):
     city_id: Optional[int] = None
+    city_name: Optional[str] = None
     user_current_building_id: Optional[str] = None
     map_background_image: Optional[str] = None
     buildings: List[CityMapBuilding]
@@ -287,6 +288,7 @@ def get_city_map(region_id: Optional[str] = None, manager = Depends(get_manager)
     image_map: dict = {}
     pos_map: dict = {}
     map_background: Optional[str] = None
+    city_name: Optional[str] = None
     try:
         from database.models import Building as BuildingModel, City as CityModel
         session = manager.SessionLocal()
@@ -305,10 +307,14 @@ def get_city_map(region_id: Optional[str] = None, manager = Depends(get_manager)
             city_id = getattr(manager, "city_id", None)
             if city_id is not None:
                 city_row = session.query(
-                    CityModel.MAP_BACKGROUND_IMAGE
+                    CityModel.MAP_BACKGROUND_IMAGE,
+                    CityModel.CITYNAME,
                 ).filter(CityModel.CITYID == city_id).first()
-                if city_row and city_row[0]:
-                    map_background = city_row[0]
+                if city_row:
+                    if city_row[0]:
+                        map_background = city_row[0]
+                    if city_row[1]:
+                        city_name = city_row[1]
         finally:
             session.close()
     except Exception as e:
@@ -361,6 +367,7 @@ def get_city_map(region_id: Optional[str] = None, manager = Depends(get_manager)
 
     return {
         "city_id": getattr(manager, "city_id", None),
+        "city_name": city_name,
         "user_current_building_id": manager.state.user_current_building_id,
         "map_background_image": map_background,
         "buildings": buildings_payload,
