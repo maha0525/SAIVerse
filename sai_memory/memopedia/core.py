@@ -20,7 +20,6 @@ from sai_memory.memopedia.storage import (
     CATEGORY_EVENTS,
     build_tree,
     create_page,
-    delete_page,
     get_page,
     resolve_page_ref,
     get_children,
@@ -817,7 +816,6 @@ class Memopedia:
         Returns:
             Number of pages imported
         """
-        version = data.get("version", 1)
         pages_data = data.get("pages", [])
 
         if not pages_data:
