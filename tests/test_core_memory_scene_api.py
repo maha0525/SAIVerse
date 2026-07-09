@@ -20,10 +20,16 @@ from sqlalchemy.orm import sessionmaker
 
 from api.routes.people.core_memory import (
     CreateSceneRequest,
+    UpdateCoreMemoryRequest,
+    confirm_core_memory_item,
     create_scene,
+    delete_core_memory_item,
     get_message_window,
     list_core_memory,
+    list_core_memory_trash,
+    restore_core_memory_item,
     search_conversation_messages,
+    update_core_memory_item,
 )
 from database.models import AI, Base, City, User
 
@@ -213,6 +219,170 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(listing.total_chars, 0)
         self.assertEqual(listing.budget, 2000)
         self.assertFalse(listing.over_budget)
+        self.assertEqual(listing.unconfirmed_count, 0)
+
+    # --- correction導線: confirm / edit / delete / restore / trash ---
+
+    def _seed_core_memory(self, content="自動採取メモ", *, confirmed=1):
+        from sai_memory.core_memory import add_core_memory, init_core_memory_table
+
+        with self.adapter._db_lock:
+            init_core_memory_table(self.adapter.conn)
+            return add_core_memory(self.adapter.conn, content, confirmed=confirmed)
+
+    def test_list_reports_unconfirmed(self):
+        self._seed_core_memory("未確認の採取", confirmed=0)
+        self._seed_core_memory("確認済みの手動追加", confirmed=1)
+        listing = list_core_memory("tester", manager=self.manager)
+        self.assertEqual(len(listing.items), 2)
+        self.assertEqual(listing.unconfirmed_count, 1)
+        by_conf = {it.confirmed for it in listing.items}
+        self.assertEqual(by_conf, {0, 1})
+
+    def test_confirm_marks_confirmed(self):
+        mid = self._seed_core_memory("未確認", confirmed=0)
+        resp = confirm_core_memory_item("tester", mid, manager=self.manager)
+        self.assertTrue(resp.ok)
+        self.assertEqual(resp.unconfirmed_count, 0)
+        listing = list_core_memory("tester", manager=self.manager)
+        self.assertEqual(listing.items[0].confirmed, 1)
+
+    def test_confirm_missing_404(self):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            confirm_core_memory_item("tester", 999, manager=self.manager)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_update_rewrites_and_confirms(self):
+        mid = self._seed_core_memory("旧い本文", confirmed=0)
+        req = UpdateCoreMemoryRequest(content="ユーザーが直した本文")
+        resp = update_core_memory_item("tester", mid, req, manager=self.manager)
+        self.assertTrue(resp.ok)
+        self.assertEqual(resp.unconfirmed_count, 0)  # 訂正で確認済みに倒れる
+        listing = list_core_memory("tester", manager=self.manager)
+        self.assertEqual(listing.items[0].content, "ユーザーが直した本文")
+        self.assertEqual(listing.items[0].confirmed, 1)
+
+    def test_update_empty_content_400(self):
+        from fastapi import HTTPException
+        mid = self._seed_core_memory("本文")
+        req = UpdateCoreMemoryRequest(content="   ")
+        with self.assertRaises(HTTPException) as ctx:
+            update_core_memory_item("tester", mid, req, manager=self.manager)
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_update_missing_404(self):
+        from fastapi import HTTPException
+        req = UpdateCoreMemoryRequest(content="x")
+        with self.assertRaises(HTTPException) as ctx:
+            update_core_memory_item("tester", 999, req, manager=self.manager)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_delete_moves_to_trash_and_excludes_from_total(self):
+        mid = self._seed_core_memory("12345")  # 5 字
+        resp = delete_core_memory_item("tester", mid, manager=self.manager)
+        self.assertTrue(resp.ok)
+        self.assertEqual(resp.total_chars, 0)  # 削除済みは容量に数えない
+        # 生存一覧から消え、ごみ箱に現れる
+        self.assertEqual(len(list_core_memory("tester", manager=self.manager).items), 0)
+        trash = list_core_memory_trash("tester", manager=self.manager)
+        self.assertEqual([it.id for it in trash.items], [mid])
+        self.assertIsNotNone(trash.items[0].deleted_at)
+
+    def test_delete_missing_404(self):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            delete_core_memory_item("tester", 999, manager=self.manager)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_double_delete_404(self):
+        from fastapi import HTTPException
+        mid = self._seed_core_memory("x")
+        delete_core_memory_item("tester", mid, manager=self.manager)
+        with self.assertRaises(HTTPException) as ctx:
+            delete_core_memory_item("tester", mid, manager=self.manager)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_restore_brings_back(self):
+        mid = self._seed_core_memory("復元対象")
+        delete_core_memory_item("tester", mid, manager=self.manager)
+        resp = restore_core_memory_item("tester", mid, manager=self.manager)
+        self.assertTrue(resp.ok)
+        self.assertEqual([it.id for it in list_core_memory("tester", manager=self.manager).items], [mid])
+        self.assertEqual(len(list_core_memory_trash("tester", manager=self.manager).items), 0)
+
+    def test_restore_not_in_trash_404(self):
+        from fastapi import HTTPException
+        mid = self._seed_core_memory("生存中")  # 削除していない
+        with self.assertRaises(HTTPException) as ctx:
+            restore_core_memory_item("tester", mid, manager=self.manager)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    # --- 仮想センサー (ユーザー訂正→ペルソナへ event_message 通知) ---
+
+    def _correction_notices(self):
+        """挿入された訂正通知 (event_message) を新しい順に返す。"""
+        import json
+        with self.adapter._db_lock:
+            rows = self.adapter.conn.execute(
+                "SELECT content, role, line_role, scope, metadata FROM messages "
+                "WHERE content LIKE ? ORDER BY created_at DESC, rowid DESC",
+                ("%[コア記憶の更新通知]%",),
+            ).fetchall()
+        out = []
+        for content, role, line_role, scope, metadata in rows:
+            tags = []
+            if metadata:
+                try:
+                    tags = (json.loads(metadata) or {}).get("tags", [])
+                except (ValueError, TypeError):
+                    tags = []
+            out.append({
+                "content": content, "role": role, "line_role": line_role,
+                "scope": scope, "tags": tags,
+            })
+        return out
+
+    def test_edit_notifies_persona(self):
+        mid = self._seed_core_memory("旧い本文", confirmed=0)
+        req = UpdateCoreMemoryRequest(content="ユーザーが直した新しい本文")
+        update_core_memory_item("tester", mid, req, manager=self.manager)
+        notices = self._correction_notices()
+        self.assertEqual(len(notices), 1)
+        n = notices[0]
+        # event_message 形式: <system> 包み・user 名義・main_line/committed・タグ付き
+        self.assertIn("ユーザーが直した新しい本文", n["content"])
+        self.assertIn(f"c:{mid}", n["content"])
+        self.assertEqual(n["role"], "user")
+        self.assertEqual(n["line_role"], "main_line")
+        self.assertEqual(n["scope"], "committed")
+        self.assertIn("event_message", n["tags"])
+        self.assertIn("core_memory_correction", n["tags"])
+
+    def test_delete_notifies_with_removed_content(self):
+        mid = self._seed_core_memory("消される秘密の内容")
+        delete_core_memory_item("tester", mid, manager=self.manager)
+        notices = self._correction_notices()
+        self.assertEqual(len(notices), 1)
+        # 削除で head から消えるので、失われた内容を通知に載せる
+        self.assertIn("消される秘密の内容", notices[0]["content"])
+        self.assertIn("削除", notices[0]["content"])
+
+    def test_restore_notifies(self):
+        mid = self._seed_core_memory("復元される内容")
+        delete_core_memory_item("tester", mid, manager=self.manager)   # 通知1
+        restore_core_memory_item("tester", mid, manager=self.manager)  # 通知2
+        notices = self._correction_notices()
+        self.assertEqual(len(notices), 2)
+        # 最新 (先頭) が復元通知
+        self.assertIn("復元", notices[0]["content"])
+        self.assertIn("復元される内容", notices[0]["content"])
+
+    def test_confirm_does_not_notify(self):
+        mid = self._seed_core_memory("未確認", confirmed=0)
+        confirm_core_memory_item("tester", mid, manager=self.manager)
+        # confirm は内容不変なので通知しない
+        self.assertEqual(self._correction_notices(), [])
 
 
 if __name__ == "__main__":

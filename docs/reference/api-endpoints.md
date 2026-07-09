@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 339（tag グループ: 23）
+**エンドポイント数**: 344（tag グループ: 23）
 
 ## addon
 
@@ -240,8 +240,13 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/cache-status` | 指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。 |
 | GET | `/api/people/{persona_id}/config` | Get persona configuration. |
 | PATCH | `/api/people/{persona_id}/config` | Update persona configuration. |
-| GET | `/api/people/{persona_id}/core-memory` | 既存コア記憶の一覧 (読み取り専用)。編集はペルソナの領分のため UI からは追加のみ。 |
+| GET | `/api/people/{persona_id}/core-memory` | 生存中のコア記憶を一覧する (未確認フラグ付き)。訂正・確認・削除は各変更系 API で。 |
 | POST | `/api/people/{persona_id}/core-memory/scene` | アンカー周辺の会話を scene としてコア記憶に刻む。 |
+| GET | `/api/people/{persona_id}/core-memory/trash` | ごみ箱 (soft-delete 済み) のコア記憶を削除の新しい順に一覧する。 |
+| PUT | `/api/people/{persona_id}/core-memory/{memory_id}` | コア記憶の本文をユーザーが訂正する。訂正した時点で確認済み (confirmed=1) になる。 |
+| DELETE | `/api/people/{persona_id}/core-memory/{memory_id}` | コア記憶を soft-delete する (ごみ箱へ)。物理削除はせず復元可能に残す。 |
+| POST | `/api/people/{persona_id}/core-memory/{memory_id}/confirm` | 未確認 (自動採取) のコア記憶をユーザーが「確認済み」にする。 |
+| POST | `/api/people/{persona_id}/core-memory/{memory_id}/restore` | ごみ箱からコア記憶を復元する。 |
 | GET | `/api/people/{persona_id}/day-plan` | ペルソナの時間割 (画面 B: 今日の予定表)。plan を持たない日は空配列。 |
 | POST | `/api/people/{persona_id}/debug/fire-meta-judgment` | メタ判断 (on_periodic_tick) を 1 回手動発火. force=True で抑止 (Active/wait_response) を無視. |
 | POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | (廃止) 旧 autonomous Track の sub_line Pulse 手動起動。 |

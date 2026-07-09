@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Search, Loader2, AlertCircle, Anchor, Minus, Plus, CheckCircle2, ChevronRight, ChevronDown } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Anchor, Minus, Plus, CheckCircle2, ChevronRight, ChevronDown, Check, Pencil, Trash2, RotateCcw, X, Save } from 'lucide-react';
 import styles from './CoreMemoryScene.module.css';
 
 interface CoreMemorySceneProps {
@@ -47,6 +47,10 @@ interface CoreMemoryItem {
     preview: string;
     content: string;
     char_count: number;
+    confirmed: number;      // 1=確認済み / 0=未確認 (自動採取)
+    created_at: number;
+    updated_at: number;
+    deleted_at: number | null;
 }
 
 interface CoreMemoryListResponse {
@@ -54,6 +58,7 @@ interface CoreMemoryListResponse {
     total_chars: number;
     budget: number;
     over_budget: boolean;
+    unconfirmed_count: number;
 }
 
 interface CreateSceneResponse {
@@ -104,6 +109,97 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
     useEffect(() => {
         loadCoreList();
     }, [loadCoreList]);
+
+    // --- Correction導線: confirm / edit / delete / restore ---
+    const [rowBusy, setRowBusy] = useState<number | null>(null);   // 操作中の item id
+    const [rowError, setRowError] = useState<string | null>(null);
+    const [editingId, setEditingId] = useState<number | null>(null);
+    const [editContent, setEditContent] = useState('');
+
+    // ごみ箱
+    const [trash, setTrash] = useState<CoreMemoryItem[]>([]);
+    const [trashOpen, setTrashOpen] = useState(false);
+
+    const loadTrash = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/core-memory/trash`);
+            if (!res.ok) return;
+            const data: CoreMemoryListResponse = await res.json();
+            setTrash(data.items);
+        } catch {
+            /* non-fatal */
+        }
+    }, [personaId]);
+
+    useEffect(() => {
+        loadTrash();
+    }, [loadTrash]);
+
+    // 変更系レスポンスで一覧・ごみ箱・バッジをまとめて更新する。
+    const refreshAfterMutation = useCallback(async () => {
+        await Promise.all([loadCoreList(), loadTrash()]);
+    }, [loadCoreList, loadTrash]);
+
+    const runRowAction = async (id: number, req: () => Promise<Response>) => {
+        setRowBusy(id);
+        setRowError(null);
+        try {
+            const res = await req();
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            await refreshAfterMutation();
+            return true;
+        } catch (e: any) {
+            setRowError(e.message || '操作に失敗しました');
+            return false;
+        } finally {
+            setRowBusy(null);
+        }
+    };
+
+    const handleConfirm = (id: number) =>
+        runRowAction(id, () =>
+            fetch(`/api/people/${personaId}/core-memory/${id}/confirm`, { method: 'POST' })
+        );
+
+    const handleDelete = (id: number) =>
+        runRowAction(id, () =>
+            fetch(`/api/people/${personaId}/core-memory/${id}`, { method: 'DELETE' })
+        );
+
+    const handleRestore = (id: number) =>
+        runRowAction(id, () =>
+            fetch(`/api/people/${personaId}/core-memory/${id}/restore`, { method: 'POST' })
+        );
+
+    const startEdit = (it: CoreMemoryItem) => {
+        setEditingId(it.id);
+        setEditContent(it.content);
+        setRowError(null);
+    };
+
+    const cancelEdit = () => {
+        setEditingId(null);
+        setEditContent('');
+    };
+
+    const handleSaveEdit = async (id: number) => {
+        const content = editContent.trim();
+        if (!content) {
+            setRowError('本文が空です。');
+            return;
+        }
+        const ok = await runRowAction(id, () =>
+            fetch(`/api/people/${personaId}/core-memory/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            })
+        );
+        if (ok) cancelEdit();
+    };
 
     // Search state
     const [keyword, setKeyword] = useState('');
@@ -413,43 +509,138 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                 </div>
             )}
 
-            {/* Existing core memory list (reference — kept at the bottom so the
-                search → carve flow comes first) */}
+            {/* Existing core memory list (kept at the bottom so the
+                search → carve flow comes first). 確認・訂正・削除ができる。 */}
             <div className={styles.coreList}>
                 <div className={styles.coreListHeader}>
-                    <span>既存のコア記憶（読み取り専用・編集はペルソナの領分）</span>
+                    <span>
+                        コア記憶（確認・訂正・削除ができます）
+                        {coreList && coreList.unconfirmed_count > 0 && (
+                            <span className={styles.unconfirmedBadge}>
+                                未確認 {coreList.unconfirmed_count}
+                            </span>
+                        )}
+                    </span>
                     {coreList && (
                         <span className={`${styles.budgetInfo} ${coreList.over_budget ? styles.budgetOver : ''}`}>
                             合計 {coreList.total_chars.toLocaleString()} 字 / 目安 {coreList.budget.toLocaleString()} 字
                         </span>
                     )}
                 </div>
+
+                {rowError && (
+                    <div className={styles.error} style={{ marginBottom: '0.5rem' }}>
+                        <AlertCircle size={16} />
+                        <span>{rowError}</span>
+                    </div>
+                )}
+
                 {coreList && coreList.items.length > 0 ? (
                     coreList.items.map((it) => {
                         const expanded = expandedIds.has(it.id);
+                        const editing = editingId === it.id;
+                        const busy = rowBusy === it.id;
+                        const unconfirmed = it.confirmed === 0;
                         return (
-                            <div key={it.id} className={styles.coreItem}>
-                                <button
-                                    type="button"
-                                    className={styles.coreItemRow}
-                                    onClick={() => toggleExpanded(it.id)}
-                                    aria-expanded={expanded}
-                                    title={expanded ? '折りたたむ' : '全文を表示'}
-                                >
-                                    {expanded ? (
-                                        <ChevronDown size={14} className={styles.coreChevron} />
-                                    ) : (
-                                        <ChevronRight size={14} className={styles.coreChevron} />
-                                    )}
-                                    <span className={`${styles.kindBadge} ${it.kind === 'scene' ? styles.kindScene : styles.kindNote}`}>
-                                        {it.kind}
-                                    </span>
-                                    <span className={styles.corePreview}>
-                                        <strong>{it.ref}</strong> {it.preview}
-                                    </span>
+                            <div
+                                key={it.id}
+                                className={`${styles.coreItem} ${unconfirmed ? styles.coreItemUnconfirmed : ''}`}
+                            >
+                                <div className={styles.coreItemRow}>
+                                    <button
+                                        type="button"
+                                        className={styles.coreToggle}
+                                        onClick={() => toggleExpanded(it.id)}
+                                        aria-expanded={expanded}
+                                        title={expanded ? '折りたたむ' : '全文を表示'}
+                                        disabled={editing}
+                                    >
+                                        {expanded ? (
+                                            <ChevronDown size={14} className={styles.coreChevron} />
+                                        ) : (
+                                            <ChevronRight size={14} className={styles.coreChevron} />
+                                        )}
+                                        <span className={`${styles.kindBadge} ${it.kind === 'scene' ? styles.kindScene : styles.kindNote}`}>
+                                            {it.kind}
+                                        </span>
+                                        {unconfirmed && (
+                                            <span className={styles.unconfirmedDot} title="自動採取・未確認">●</span>
+                                        )}
+                                        <span className={styles.corePreview}>
+                                            <strong>{it.ref}</strong> {it.preview}
+                                        </span>
+                                    </button>
                                     <span className={styles.coreChars}>{it.char_count.toLocaleString()}字</span>
-                                </button>
-                                {expanded && <div className={styles.coreFull}>{it.content}</div>}
+                                    {!editing && (
+                                        <div className={styles.coreActions}>
+                                            {unconfirmed && (
+                                                <button
+                                                    type="button"
+                                                    className={styles.rowActionBtn}
+                                                    onClick={() => handleConfirm(it.id)}
+                                                    disabled={busy}
+                                                    title="この採取内容を確認済みにする"
+                                                >
+                                                    {busy ? <Loader2 size={13} className={styles.loader} /> : <Check size={13} />}
+                                                    確認
+                                                </button>
+                                            )}
+                                            <button
+                                                type="button"
+                                                className={styles.rowActionBtn}
+                                                onClick={() => startEdit(it)}
+                                                disabled={busy}
+                                                title="本文を訂正する"
+                                            >
+                                                <Pencil size={13} />
+                                                編集
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={`${styles.rowActionBtn} ${styles.rowActionBtnDanger}`}
+                                                onClick={() => handleDelete(it.id)}
+                                                disabled={busy}
+                                                title="ごみ箱へ移す（復元できます）"
+                                            >
+                                                {busy ? <Loader2 size={13} className={styles.loader} /> : <Trash2 size={13} />}
+                                                削除
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {editing ? (
+                                    <div className={styles.editArea}>
+                                        <textarea
+                                            className={styles.editTextarea}
+                                            value={editContent}
+                                            onChange={(e) => setEditContent(e.target.value)}
+                                            rows={Math.min(12, Math.max(3, editContent.split('\n').length + 1))}
+                                        />
+                                        <div className={styles.editButtons}>
+                                            <button
+                                                type="button"
+                                                className={styles.rowActionBtn}
+                                                onClick={() => handleSaveEdit(it.id)}
+                                                disabled={busy}
+                                            >
+                                                {busy ? <Loader2 size={13} className={styles.loader} /> : <Save size={13} />}
+                                                保存
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={styles.rowActionBtn}
+                                                onClick={cancelEdit}
+                                                disabled={busy}
+                                            >
+                                                <X size={13} />
+                                                キャンセル
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    expanded && <div className={styles.coreFull}>{it.content}</div>
+                                )}
                             </div>
                         );
                     })
@@ -457,6 +648,48 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                     <div className={styles.emptyCore}>まだコア記憶はありません。</div>
                 )}
             </div>
+
+            {/* ごみ箱（soft-delete 済み・復元できる） */}
+            {trash.length > 0 && (
+                <div className={styles.coreList}>
+                    <button
+                        type="button"
+                        className={styles.trashToggle}
+                        onClick={() => setTrashOpen((v) => !v)}
+                        aria-expanded={trashOpen}
+                    >
+                        {trashOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        <Trash2 size={14} />
+                        ごみ箱（{trash.length}）
+                    </button>
+                    {trashOpen &&
+                        trash.map((it) => (
+                            <div key={it.id} className={styles.coreItem}>
+                                <div className={styles.coreItemRow}>
+                                    <span className={`${styles.kindBadge} ${it.kind === 'scene' ? styles.kindScene : styles.kindNote}`}>
+                                        {it.kind}
+                                    </span>
+                                    <span className={styles.corePreview}>
+                                        <strong>{it.ref}</strong> {it.preview}
+                                    </span>
+                                    <span className={styles.coreChars}>{it.char_count.toLocaleString()}字</span>
+                                    <div className={styles.coreActions}>
+                                        <button
+                                            type="button"
+                                            className={styles.rowActionBtn}
+                                            onClick={() => handleRestore(it.id)}
+                                            disabled={rowBusy === it.id}
+                                            title="ごみ箱から戻す"
+                                        >
+                                            {rowBusy === it.id ? <Loader2 size={13} className={styles.loader} /> : <RotateCcw size={13} />}
+                                            復元
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                </div>
+            )}
         </div>
     );
 }

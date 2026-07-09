@@ -146,6 +146,23 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
   - **UI 導線（scene の本命、フロントエンド増分として実装予定）**: チャット/記憶画面から目的の会話を探して選択→「コア記憶に刻む」。前提としてメッセージ検索の改修が要る: **期間指定＋キーワード検索**（キーワード一致が無ければセマンティック検索へフォールバック）。バックエンドの部品は既存（messages テーブルの LIKE＋期間フィルタ、unified_recall の message 検索、memory_read_around の周辺展開）で薄い API を足すだけで成立する見込み。
 - 容量: 目安の既定値は **2000 字**、ペルソナ設定で変更可能にする（コストと記憶量のどちらを取るかはユーザーによって異なるため。2026-07-04 決定）。目安超過時の整理はペルソナの判断に委ね、システムは通知のみ行う。
 
+### 5.1 ユーザーの訂正導線（2026-07-08 追加）
+
+**背景**: gold_panning（砂金採り＝Metabolism 時の自動採取）が入ったことで、コア記憶は「ペルソナが自分で刻む」だけでなく「システムが自動で刻む」経路を持った。自動採取は誤り（過剰採取・見当違い・大量流入）を含みうるため、**ユーザーが後追いで直せる面**が要る。「編集主体はペルソナ自身」（§5 冒頭）の原則は維持しつつ、その上に**ユーザーの訂正（correction）レイヤ**を重ねる。
+
+**DB（`sai_memory/core_memory.py`）**:
+- `confirmed`（1=確認済み / 0=未確認）: gold_panning の自動採取（add/update）は `confirmed=0` で書く。ペルソナ自身のスペル追加・ユーザーの手動追加は 1。ユーザーが確認 or 訂正した時点で 1 に倒れる。
+- `deleted_at`（NULL=生存 / 非NULL=ごみ箱）: `remove` は物理削除ではなく **soft-delete**。gold_panning の自動削除やペルソナ／ユーザーの誤削除を後から復元できる。容量目安・render・一覧は生存分のみ対象。
+- どちらも既存 DB へ `ALTER TABLE ADD COLUMN`（memopedia_pages と同方式）で追加。既存行は `confirmed=1`（確認済み扱い）。
+
+**API（`api/routes/people/core_memory.py`）**: `GET .../core-memory`（`confirmed`＋`unconfirmed_count` 付き） / `GET .../core-memory/trash` / `POST .../{id}/confirm` / `PUT .../{id}`（訂正＝確認済みに） / `DELETE .../{id}`（soft-delete） / `POST .../{id}/restore`。
+
+**UI（メモリタブ `CoreMemoryScene`）**: 一覧の各項目に確認／編集（インライン）／削除、未確認バッジ、ごみ箱セクション（復元）。
+
+**仮想センサー（2026-07-08 実装済み）**: ユーザーが edit / delete / restore すると、ペルソナへ「あなたのコア記憶がユーザーに◯◯された」を **event_message** で通知する（`_notify_persona_correction`）。ペルソナの記憶を黙って書き換えるのではなく、本人が気づける形にすることで自己像の尊厳を保つ。形式は gold_panning の判断記録と同じ確立形式（`<system>` 包み・role="user"・`event_message` タグ・main_line/committed・origin_track_id=NULL）。REST 文脈なので pulse_id は無い。delete は head から消える内容も通知に載せる。**confirm（承認）は内容が変わらないので通知しない**。フックは変更系エンドポイント（`api/routes/people/core_memory.py`）。
+
+**未確認バッジ（未実装・次フェーズ）**: gold_panning の自動採取（confirmed=0）が溜まったことをユーザーに気づかせる導線。件数は `unconfirmed_count`（一覧 API）で取れる。置き場所はペルソナ固有アフォーダンス（住民/神モード UI の設計と交差するため未確定）。
+
 ---
 
 ## 6. ゾーン B: Chronicle

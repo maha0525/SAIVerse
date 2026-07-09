@@ -80,6 +80,15 @@
     gap: 0.5rem;
     width: 100%;
     padding: 0.35rem 0;
+}
+
+.coreToggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    padding: 0;
     background: none;
     border: none;
     font: inherit;
@@ -88,8 +97,127 @@
     cursor: pointer;
 }
 
-.coreItemRow:hover .corePreview {
+.coreToggle:disabled {
+    cursor: default;
+}
+
+.coreToggle:hover:not(:disabled) .corePreview {
     color: #fff;
+}
+
+/* --- Correction導線: unconfirmed / row actions / edit / trash --- */
+.coreItemUnconfirmed {
+    background: rgba(255, 193, 7, 0.05);
+}
+
+.unconfirmedBadge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #ffc107;
+    background: rgba(255, 193, 7, 0.15);
+    border: 1px solid rgba(255, 193, 7, 0.4);
+    border-radius: 8px;
+    padding: 1px 7px;
+}
+
+.unconfirmedDot {
+    flex-shrink: 0;
+    color: #ffc107;
+    font-size: 0.6rem;
+    line-height: 1.4;
+}
+
+.coreActions {
+    display: flex;
+    gap: 0.3rem;
+    flex-shrink: 0;
+    align-items: center;
+}
+
+.rowActionBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.72rem;
+    padding: 0.2rem 0.5rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid #555;
+    border-radius: 5px;
+    color: #ccc;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+
+.rowActionBtn:hover:not(:disabled) {
+    background: rgba(255, 193, 7, 0.15);
+    border-color: #ffc107;
+    color: #ffc107;
+}
+
+.rowActionBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.rowActionBtnDanger:hover:not(:disabled) {
+    background: rgba(250, 82, 82, 0.15);
+    border-color: #fa5252;
+    color: #fa5252;
+}
+
+.editArea {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0.25rem 0 0.6rem 1.35rem;
+}
+
+.editTextarea {
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    background: #1a1b1e;
+    border: 1px solid #555;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    font-family: inherit;
+    resize: vertical;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    box-sizing: border-box;
+}
+
+.editTextarea:focus {
+    outline: none;
+    border-color: #ffc107;
+}
+
+.editButtons {
+    display: flex;
+    gap: 0.4rem;
+}
+
+.trashToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    background: none;
+    border: none;
+    font: inherit;
+    font-size: 0.85rem;
+    color: #aaa;
+    cursor: pointer;
+    padding: 0.15rem 0;
+}
+
+.trashToggle:hover {
+    color: #e0e0e0;
 }
 
 .coreChevron {
@@ -686,4 +814,59 @@
     color: #7c3aed;
     background: rgba(124, 58, 237, 0.08);
     border-color: rgba(124, 58, 237, 0.3);
+}
+
+/* --- Correction導線 (light) --- */
+:global([data-theme="light"]) .coreToggle:hover:not(:disabled) .corePreview {
+    color: #0f172a;
+}
+
+:global([data-theme="light"]) .coreItemUnconfirmed {
+    background: rgba(217, 119, 6, 0.06);
+}
+
+:global([data-theme="light"]) .unconfirmedBadge {
+    color: #b45309;
+    background: rgba(217, 119, 6, 0.12);
+    border-color: rgba(217, 119, 6, 0.4);
+}
+
+:global([data-theme="light"]) .unconfirmedDot {
+    color: #d97706;
+}
+
+:global([data-theme="light"]) .rowActionBtn {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .rowActionBtn:hover:not(:disabled) {
+    background: rgba(217, 119, 6, 0.12);
+    border-color: #d97706;
+    color: #b45309;
+}
+
+:global([data-theme="light"]) .rowActionBtnDanger:hover:not(:disabled) {
+    background: rgba(220, 38, 38, 0.1);
+    border-color: #dc2626;
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .editTextarea {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .editTextarea:focus {
+    border-color: #d97706;
+}
+
+:global([data-theme="light"]) .trashToggle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .trashToggle:hover {
+    color: #1f2937;
 }

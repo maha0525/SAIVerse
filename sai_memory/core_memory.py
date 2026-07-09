@@ -158,6 +158,21 @@ def _row_to_core_memory(row) -> CoreMemory:
     )
 
 
+def get_core_memory(
+    conn: sqlite3.Connection, memory_id: int, *, include_deleted: bool = False,
+) -> Optional[CoreMemory]:
+    """id 指定で 1 件取得する。無ければ None。
+
+    既定では生存中 (deleted_at IS NULL) のみ。``include_deleted=True`` でごみ箱も対象。
+    訂正導線の通知 (仮想センサー) が「何が変わったか」を得るための読み口。
+    """
+    where = "id = ?" if include_deleted else "id = ? AND deleted_at IS NULL"
+    row = conn.execute(
+        f"SELECT {_SELECT_COLUMNS} FROM core_memories WHERE {where}", (memory_id,)
+    ).fetchone()
+    return _row_to_core_memory(row) if row else None
+
+
 def list_core_memories(conn: sqlite3.Connection) -> List[CoreMemory]:
     """生存中 (未削除) の全コア記憶を id 昇順で返す。"""
     rows = conn.execute(

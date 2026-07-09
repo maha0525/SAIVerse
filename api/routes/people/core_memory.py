@@ -5,15 +5,27 @@
 仕様の出典: docs/intent/memory_architecture_v2.md §5「UI 導線」。
 
 エンドポイント:
-- GET  /{persona_id}/memory/messages/search        会話メッセージのキーワード検索
-- GET  /{persona_id}/memory/messages/{id}/window   アンカー周辺の会話窓プレビュー
-- POST /{persona_id}/core-memory/scene             scene を刻む (スペルとロジック共通化)
-- GET  /{persona_id}/core-memory                   既存コア記憶の一覧 (読み取り専用)
+- GET    /{persona_id}/memory/messages/search        会話メッセージのキーワード検索
+- GET    /{persona_id}/memory/messages/{id}/window   アンカー周辺の会話窓プレビュー
+- POST   /{persona_id}/core-memory/scene             scene を刻む (スペルとロジック共通化)
+- GET    /{persona_id}/core-memory                   生存コア記憶の一覧 (未確認フラグ付き)
+- GET    /{persona_id}/core-memory/trash             ごみ箱 (soft-delete 済み) の一覧
+- POST   /{persona_id}/core-memory/{id}/confirm      未確認 (自動採取) 項目をユーザーが確認
+- PUT    /{persona_id}/core-memory/{id}              本文をユーザーが訂正 (確認済みになる)
+- DELETE /{persona_id}/core-memory/{id}              soft-delete (ごみ箱へ)
+- POST   /{persona_id}/core-memory/{id}/restore      ごみ箱から復元
 
 scene 作成の窓切り出し・整形・保存は sai_memory.core_memory.create_scene_core_memory
 に集約されており、スペル (core_memory_add_scene) と本 API が同じ関数を呼ぶ。
+
+訂正導線 (confirm/edit/delete/restore) は gold_panning の自動採取 (confirmed=0) を
+含むコア記憶をユーザーが後追いで直せるようにするための面。ユーザーの edit/delete/
+restore は「仮想センサー」(_notify_persona_correction) でペルソナへ event_message
+通知する — 記憶を黙って書き換えず本人が気づける形にして自己像の尊厳を保つ
+(docs/intent/memory_architecture_v2.md §5.1)。confirm は内容不変なので通知しない。
 """
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,7 +39,47 @@ from builtin_data.tools._core_memory_common import (
 
 from .utils import get_adapter
 
+LOGGER = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# 仮想センサー: ユーザーの訂正をペルソナへ通知する (event_message)
+# ---------------------------------------------------------------------------
+#
+# ユーザーがコア記憶を書き換え・削除・復元したとき、その事実をペルソナ本人が次に
+# 考えるときに気づける形で残す。ペルソナの記憶を黙って書き換えるのではなく、本人が
+# 検知できるようにすることで自己像の尊厳を保つ (docs/intent/memory_architecture_v2.md
+# §5.1)。confirm (承認) は内容が変わらないので通知しない。
+#
+# 形式は gold_panning の判断記録と同じ確立形式: <system> 包みの role="user"
+# メッセージ + event_message タグ (General Chronicle / scene 切り出し / キーワード
+# 検索から自動除外)、main_line/committed でメインライン文脈へ通す。origin_track_id は
+# NULL (世界横断のメタログ)。REST 文脈なので pulse_id は無い。
+
+
+def _notify_persona_correction(adapter, notice: str) -> None:
+    """訂正通知 1 件をペルソナの SAIMemory に event_message として挿入する。
+
+    ``notice`` は ``<system>`` で包む前の本文。書き込み失敗は API 応答を妨げない
+    (WARNING に落として続行 — 通知はメインの DB 反映より優先度が低い)。
+    """
+    if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
+        return
+    body = "<system>[コア記憶の更新通知]\n" + notice + "\n</system>"
+    try:
+        adapter.append_persona_message({
+            "role": "user",
+            "content": body,
+            # tz-aware UTC ISO 必須 (naive だと adapter が system TZ 解釈で ±9h ずれる)。
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"tags": ["internal", "event_message", "core_memory_correction"]},
+            "line_role": "main_line",
+            "scope": "committed",
+        })
+    except Exception:
+        LOGGER.warning("[core_memory] correction notify failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +440,10 @@ class CoreMemoryListItem(BaseModel):
     preview: str      # 内容の先頭 80 字 (既存 UI 互換のため残置)
     content: str      # 全文 (UI の展開表示用)
     char_count: int
+    confirmed: int    # 1=確認済み / 0=未確認 (自動採取・ユーザー確認待ち)
+    created_at: int
+    updated_at: int
+    deleted_at: Optional[int] = None  # 生存一覧では常に None、ごみ箱一覧で埋まる
 
 
 class CoreMemoryListResponse(BaseModel):
@@ -395,6 +451,22 @@ class CoreMemoryListResponse(BaseModel):
     total_chars: int
     budget: int
     over_budget: bool
+    unconfirmed_count: int  # 未確認 (confirmed=0) の生存件数。チャットのバッジ用。
+
+
+def _to_list_item(it) -> "CoreMemoryListItem":
+    return CoreMemoryListItem(
+        id=it.id,
+        ref=it.ref,
+        kind=it.kind,
+        preview=(it.content[:80] + ("…" if len(it.content) > 80 else "")),
+        content=it.content,
+        char_count=len(it.content),
+        confirmed=it.confirmed,
+        created_at=it.created_at,
+        updated_at=it.updated_at,
+        deleted_at=it.deleted_at,
+    )
 
 
 @router.get("/{persona_id}/core-memory", response_model=CoreMemoryListResponse)
@@ -402,8 +474,9 @@ def list_core_memory(
     persona_id: str,
     manager=Depends(get_manager),
 ):
-    """既存コア記憶の一覧 (読み取り専用)。編集はペルソナの領分のため UI からは追加のみ。"""
+    """生存中のコア記憶を一覧する (未確認フラグ付き)。訂正・確認・削除は各変更系 API で。"""
     from sai_memory.core_memory import (
+        count_unconfirmed_core_memories,
         init_core_memory_table,
         list_core_memories,
         total_core_memory_chars,
@@ -414,21 +487,229 @@ def list_core_memory(
             init_core_memory_table(adapter.conn)
             items = list_core_memories(adapter.conn)
             total = total_core_memory_chars(adapter.conn)
+            unconfirmed = count_unconfirmed_core_memories(adapter.conn)
 
     budget = _resolve_budget(manager, persona_id)
     return CoreMemoryListResponse(
-        items=[
-            CoreMemoryListItem(
-                id=it.id,
-                ref=it.ref,
-                kind=it.kind,
-                preview=(it.content[:80] + ("…" if len(it.content) > 80 else "")),
-                content=it.content,
-                char_count=len(it.content),
-            )
-            for it in items
-        ],
+        items=[_to_list_item(it) for it in items],
         total_chars=total,
         budget=budget,
         over_budget=total > budget,
+        unconfirmed_count=unconfirmed,
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. GET /{persona_id}/core-memory/trash  — ごみ箱 (soft-delete 済み)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{persona_id}/core-memory/trash", response_model=CoreMemoryListResponse)
+def list_core_memory_trash(
+    persona_id: str,
+    manager=Depends(get_manager),
+):
+    """ごみ箱 (soft-delete 済み) のコア記憶を削除の新しい順に一覧する。
+
+    容量目安 (total_chars / budget / over_budget) は生存分のみで計算する
+    (削除済みは容量に数えない)。``unconfirmed_count`` も生存分の値。
+    """
+    from sai_memory.core_memory import (
+        count_unconfirmed_core_memories,
+        init_core_memory_table,
+        list_deleted_core_memories,
+        total_core_memory_chars,
+    )
+
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            init_core_memory_table(adapter.conn)
+            items = list_deleted_core_memories(adapter.conn)
+            total = total_core_memory_chars(adapter.conn)
+            unconfirmed = count_unconfirmed_core_memories(adapter.conn)
+
+    budget = _resolve_budget(manager, persona_id)
+    return CoreMemoryListResponse(
+        items=[_to_list_item(it) for it in items],
+        total_chars=total,
+        budget=budget,
+        over_budget=total > budget,
+        unconfirmed_count=unconfirmed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. 変更系 (confirm / edit / delete / restore)
+# ---------------------------------------------------------------------------
+#
+# いずれも「ユーザーによる訂正操作」。将来この面に仮想センサー (event_message で
+# ペルソナへ「あなたのコア記憶がユーザーに直されました」を通知) をフックする
+# (docs/intent/memory_architecture_v2.md §5)。今は DB 反映のみ。
+
+
+class CoreMemoryMutationResponse(BaseModel):
+    """変更系の共通レスポンス。UI がヘッダ数値とバッジを追加取得なしで更新できる。"""
+    ok: bool
+    total_chars: int
+    budget: int
+    over_budget: bool
+    unconfirmed_count: int
+
+
+class UpdateCoreMemoryRequest(BaseModel):
+    content: str
+
+
+def _mutation_response(adapter, manager, persona_id: str) -> "CoreMemoryMutationResponse":
+    """変更後の容量・未確認件数を集計して共通レスポンスを組む (呼び出し側で lock 取得済み)。"""
+    from sai_memory.core_memory import (
+        count_unconfirmed_core_memories,
+        total_core_memory_chars,
+    )
+
+    total = total_core_memory_chars(adapter.conn)
+    unconfirmed = count_unconfirmed_core_memories(adapter.conn)
+    budget = _resolve_budget(manager, persona_id)
+    return CoreMemoryMutationResponse(
+        ok=True,
+        total_chars=total,
+        budget=budget,
+        over_budget=total > budget,
+        unconfirmed_count=unconfirmed,
+    )
+
+
+@router.post(
+    "/{persona_id}/core-memory/{memory_id}/confirm",
+    response_model=CoreMemoryMutationResponse,
+)
+def confirm_core_memory_item(
+    persona_id: str,
+    memory_id: int,
+    manager=Depends(get_manager),
+):
+    """未確認 (自動採取) のコア記憶をユーザーが「確認済み」にする。"""
+    from sai_memory.core_memory import confirm_core_memory, init_core_memory_table
+
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            init_core_memory_table(adapter.conn)
+            ok = confirm_core_memory(adapter.conn, memory_id)
+            if not ok:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"c:{memory_id} が見つからないか、既に削除されています。",
+                )
+            return _mutation_response(adapter, manager, persona_id)
+
+
+@router.put(
+    "/{persona_id}/core-memory/{memory_id}",
+    response_model=CoreMemoryMutationResponse,
+)
+def update_core_memory_item(
+    persona_id: str,
+    memory_id: int,
+    request: UpdateCoreMemoryRequest,
+    manager=Depends(get_manager),
+):
+    """コア記憶の本文をユーザーが訂正する。訂正した時点で確認済み (confirmed=1) になる。"""
+    from sai_memory.core_memory import init_core_memory_table, update_core_memory
+
+    content = (request.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="本文が空です。")
+
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            init_core_memory_table(adapter.conn)
+            # ユーザーが目を通して直した = 確認済みに倒す。
+            ok = update_core_memory(adapter.conn, memory_id, content, confirmed=1)
+            if not ok:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"c:{memory_id} が見つかりません。",
+                )
+            resp = _mutation_response(adapter, manager, persona_id)
+        # 仮想センサー: 内容が書き換わった事実をペルソナへ通知 (ロック外)。
+        _notify_persona_correction(
+            adapter,
+            f"ユーザーがあなたのコア記憶 c:{memory_id} の内容を書き換えました。\n"
+            f"新しい内容:\n{content}",
+        )
+        return resp
+
+
+@router.delete(
+    "/{persona_id}/core-memory/{memory_id}",
+    response_model=CoreMemoryMutationResponse,
+)
+def delete_core_memory_item(
+    persona_id: str,
+    memory_id: int,
+    manager=Depends(get_manager),
+):
+    """コア記憶を soft-delete する (ごみ箱へ)。物理削除はせず復元可能に残す。"""
+    from sai_memory.core_memory import (
+        get_core_memory,
+        init_core_memory_table,
+        remove_core_memory,
+    )
+
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            init_core_memory_table(adapter.conn)
+            # 削除前に内容を控える (head から消えるので、何が失われたかを通知に載せる)。
+            item = get_core_memory(adapter.conn, memory_id)
+            ok = remove_core_memory(adapter.conn, memory_id)
+            if not ok:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"c:{memory_id} が見つからないか、既に削除されています。",
+                )
+            resp = _mutation_response(adapter, manager, persona_id)
+        removed = item.content if item else ""
+        # 仮想センサー: 削除された事実と内容をペルソナへ通知 (ロック外)。
+        _notify_persona_correction(
+            adapter,
+            f"ユーザーがあなたのコア記憶 c:{memory_id} を削除しました（ごみ箱へ移動。復元可能）。\n"
+            f"削除された内容:\n{removed}",
+        )
+        return resp
+
+
+@router.post(
+    "/{persona_id}/core-memory/{memory_id}/restore",
+    response_model=CoreMemoryMutationResponse,
+)
+def restore_core_memory_item(
+    persona_id: str,
+    memory_id: int,
+    manager=Depends(get_manager),
+):
+    """ごみ箱からコア記憶を復元する。"""
+    from sai_memory.core_memory import (
+        get_core_memory,
+        init_core_memory_table,
+        restore_core_memory,
+    )
+
+    with get_adapter(persona_id, manager) as adapter:
+        with adapter._db_lock:
+            init_core_memory_table(adapter.conn)
+            ok = restore_core_memory(adapter.conn, memory_id)
+            if not ok:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"c:{memory_id} はごみ箱にありません。",
+                )
+            item = get_core_memory(adapter.conn, memory_id)
+            resp = _mutation_response(adapter, manager, persona_id)
+        restored = item.content if item else ""
+        # 仮想センサー: 復元された事実をペルソナへ通知 (ロック外)。
+        _notify_persona_correction(
+            adapter,
+            f"ユーザーがあなたのコア記憶 c:{memory_id} をごみ箱から復元しました。\n"
+            f"内容:\n{restored}",
+        )
+        return resp
