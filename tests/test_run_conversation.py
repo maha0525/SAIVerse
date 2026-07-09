@@ -5,6 +5,7 @@
 実チャット経路そのもの (RealConversationUserEventDriver) は一日シム側で
 実証済みのため、ここでは対象にしない。
 """
+import os
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -120,7 +121,10 @@ class RunConversationTest(unittest.TestCase):
             normalize_script({"persona_id": "a", "messages": ["ok", ""]})  # 空文字列混入
 
     def test_production_guard(self):
-        production_db = Path.home() / ".saiverse" / "user_data" / "database" / "saiverse.db"
+        # ガードは SAIVERSE_HOME (未設定時は ~/.saiverse) を本番ルートと見なすため、
+        # テスト側も同じ導出で本番 DB パスを組み立てる (env が設定された環境でも整合)。
+        production_root = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse")
+        production_db = production_root / "user_data" / "database" / "saiverse.db"
         with self.assertRaises(ConversationError):
             _guard_not_production(production_db)
         _guard_not_production(Path("test_data/user_data/database/saiverse.db"))  # OK
