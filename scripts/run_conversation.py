@@ -186,7 +186,7 @@ def format_transcript(script: Dict[str, Any], transcript: List[Dict[str, Any]]) 
 
 def _guard_not_production(db_path: Path) -> None:
     """本番 DB (~/.saiverse 配下) への実行をハード拒否する (intent doc §2-1)。"""
-    production_root = Path.home() / ".saiverse"
+    production_root = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse")
     try:
         db_path.resolve().relative_to(production_root.resolve())
     except ValueError:

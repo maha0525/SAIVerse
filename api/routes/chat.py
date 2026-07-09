@@ -138,13 +138,13 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
             if not img_path and uri:
                 if uri.startswith("saiverse://image/"):
                     filename = uri.replace("saiverse://image/", "")
-                    img_path = str(Path.home() / ".saiverse" / "image" / filename)
+                    img_path = str(get_saiverse_home() / "image" / filename)
                 elif uri.startswith("saiverse://audio/"):
                     filename = uri.replace("saiverse://audio/", "")
-                    img_path = str(Path.home() / ".saiverse" / "audio" / filename)
+                    img_path = str(get_saiverse_home() / "audio" / filename)
                 elif uri.startswith("saiverse://video/"):
                     filename = uri.replace("saiverse://video/", "")
-                    img_path = str(Path.home() / ".saiverse" / "video" / filename)
+                    img_path = str(get_saiverse_home() / "video" / filename)
             if not img_path:
                 return
 
@@ -628,7 +628,7 @@ def _store_audio_attachment(
             tmp.write(data)
             tmp_input = Path(tmp.name)
 
-        dest_dir = Path.home() / ".saiverse" / "audio"
+        dest_dir = get_saiverse_home() / "audio"
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.ogg"
         dest_path = dest_dir / dest_name
@@ -691,7 +691,7 @@ def _store_video_attachment(
             tmp.write(data)
             tmp_input = Path(tmp.name)
 
-        dest_dir = Path.home() / ".saiverse" / "video"
+        dest_dir = get_saiverse_home() / "video"
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}.mp4"
         dest_path = dest_dir / dest_name
@@ -748,7 +748,7 @@ def _register_uploaded_video_by_uri(
     if not filename or "/" in filename or "\\" in filename:
         raise RuntimeError(f"Invalid video filename in URI: {att.uri!r}")
 
-    dest_path = Path.home() / ".saiverse" / "video" / filename
+    dest_path = get_saiverse_home() / "video" / filename
     if not dest_path.exists():
         raise RuntimeError(f"Video file not found for URI {att.uri!r}")
 

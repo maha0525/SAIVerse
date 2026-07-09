@@ -10,6 +10,7 @@ Examples:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def main():
     from sai_memory.arasuji import init_arasuji_tables
     from sai_memory.memopedia import init_memopedia_tables
 
-    db_path = Path.home() / ".saiverse" / "personas" / args.persona_id / "memory.db"
+    db_path = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / args.persona_id / "memory.db"
     if not db_path.exists():
         print(f"Database not found: {db_path}")
         sys.exit(1)

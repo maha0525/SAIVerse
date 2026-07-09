@@ -23,6 +23,7 @@ Examples:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -34,7 +35,7 @@ def _init(persona_id: str):
     from sai_memory.memory.storage import init_db
     from sai_memory.memopedia import Memopedia, init_memopedia_tables
 
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
     if not db_path.exists():
         print(f"Database not found: {db_path}")
         sys.exit(1)

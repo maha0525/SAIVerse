@@ -52,9 +52,16 @@ class BackupRootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             db_path = Path(tmp) / "memory.db"
-            with sqlite3.connect(db_path) as conn:
+            # sqlite3 の `with` はトランザクションを閉じるだけで接続は閉じない。
+            # Windows では接続が開いたままだと TemporaryDirectory の後片付けが
+            # memory.db を削除できず WinError 32 になるため、明示的にクローズする。
+            conn = sqlite3.connect(db_path)
+            try:
                 conn.execute("CREATE TABLE t (x INTEGER)")
                 conn.execute("INSERT INTO t VALUES (1)")
+                conn.commit()
+            finally:
+                conn.close()
 
             with patch.dict(os.environ, {"SAIVERSE_HOME": str(home)}):
                 result = run_backup_auto(

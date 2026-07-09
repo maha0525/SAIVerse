@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import uuid
 from pathlib import Path
 from typing import Optional
 
 
-SAIVERSE_HOME = Path.home() / ".saiverse"
+SAIVERSE_HOME = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse")
 AFFECTED_PERSONAS = ["air_city_a", "eris_city_a"]
 BUG_START_EPOCH = 1748267620  # 2026-05-26 22:53:40 JST (commit 99566e5)
 PERSONA_THREAD_SUFFIX = "__persona__"
@@ -52,7 +53,7 @@ def recover_persona(persona_id: str, dry_run: bool) -> int:
     candidates = cur.fetchall()
 
     if not candidates:
-        print(f"  [INFO] No spell entries in pulse_logs after bug start")
+        print("  [INFO] No spell entries in pulse_logs after bug start")
         conn.close()
         return 0
 

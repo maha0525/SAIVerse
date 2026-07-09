@@ -653,7 +653,7 @@ def _run_build_memopedia_from_logs(
     try:
         _update_memopedia_job(job_id, message="データベースを初期化中...")
 
-        persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+        persona_dir = get_personas_dir() / persona_id
         db_path = persona_dir / "memory.db"
 
         if not db_path.exists():
@@ -826,7 +826,7 @@ async def start_build_memopedia_from_logs(
     Processes messages in batches, extracting entities and reflecting them
     to Memopedia pages (creating new pages or appending to existing ones).
     """
-    persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+    persona_dir = get_personas_dir() / persona_id
     if not persona_dir.exists():
         raise HTTPException(status_code=404, detail=f"Persona not found: {persona_id}")
 
