@@ -54,7 +54,7 @@
 | 🔵 設計中 | Physical Ear (常時リッスン音声入力) | 骨子確定 (別 Fixture タイプ / 応答者全員 / transport 案A / 非蓄積)。残論点 (continue セッション管理・判断層 E4B 実行環境・応答中の耳) を詰める → PC マイク+母艦捕捉クライアントを最初の検証ケースに実装 | まはー(残論点) → 私(実装) | [physical_ear.md](../intent/physical_ear.md) | 2026-07-09 |
 | 🔵 設計中 | SwitchBot 連携 | 末尾「未確定事項」を詰めて確定 → 実装(Observer の利用者) | まはー(レビュー) | [switchbot_integration.md](../intent/switchbot_integration.md) | 2026-07-08 |
 | 🔵 設計中 | アドオン拡張点 (OAuth / speak hooks) | draft レビュー → 汎用 `OAuthFlowSection` / persona_speak hook の実装 | まはー(レビュー) | [addon_extension_points.md](../intent/addon_extension_points.md) / [addon_speak_hooks.md](../intent/addon_speak_hooks.md) | 2026-07-08 |
-| 🟣 検証待ち | head スペル一覧ダイエット | 統合ダイエット済(document 7→4・item 2→1、二重実装/アイソレーション漏れも解消)。残: 実機で document_edit/item_annotate 動作確認 → その後 visible=false 遅延開示(本 issue 本線) | まはー(検証) | [head_prompt_followups.md](../issues/head_prompt_followups.md) | 2026-07-08 |
-| 🟣 検証待ち | アイディア帳由来 UI 修正3件(Cityタイトル / アイテムサムネイル / usage通貨) | 3 worktree を feature へマージ → 実機で表示確認(サムネ描画・City名反映・通貨別グラフ) | まはー(マージ先判断+検証) | [ideas.md](ideas.md) 由来 | 2026-07-08 |
+| 🟡 実装待ち | head スペル一覧ダイエット | 統合ダイエット(document 7→4・item 2→1、二重実装/アイソレーション漏れ解消)は**実機確認済**(2026-07-09、まはー)。残(本 issue 本線): 使用頻度の低いスペルの `visible=false` 化 + `addon_spell_help` 型の遅延開示を builtin にも(候補=life_purpose_set / observer_read / messagelog_get_around / send_email_to_user) | 私 | [head_prompt_followups.md](../issues/head_prompt_followups.md) | 2026-07-09 |
+| 🟣 検証待ち | アイディア帳由来 UI 修正3件(Cityタイトル / アイテムサムネイル / usage通貨) | 3 worktree を feature へマージ済。**サムネイル=実機確認済**(2026-07-09、軽量 webp 化で解決)。残: City名反映・通貨別グラフの実機確認 | まはー(検証) | [ideas.md](ideas.md) 由来 | 2026-07-09 |
 
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Track解体(目的の木), Social Track 入口(Phase 5) など -->
