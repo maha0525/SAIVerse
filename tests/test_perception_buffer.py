@@ -88,6 +88,21 @@ class PerceptionBufferTest(unittest.TestCase):
         self.assertIn("誰かが退室した", text)
         self.assertIn("そういえば前に…", text)  # persona_recall 本文
 
+    def test_format_preserves_chronological_order(self):
+        # 移動→surroundings→次の移動、の時系列が壊れないこと (kind グルーピング廃止)。
+        push_perception(self.conn, "world_state", "現在地が A から B に変わりました")
+        push_perception(self.conn, "surroundings", "「B」の様子…")
+        push_perception(self.conn, "world_state", "現在地が B から A に変わりました")
+        text = format_perception_message(list_pending(self.conn))
+        # surroundings は 2 つの world_state の「間」に来る (末尾に固まらない)。
+        pos_b_arrive = text.index("A から B")
+        pos_surround = text.index("「B」の様子")
+        pos_a_return = text.index("B から A")
+        self.assertLess(pos_b_arrive, pos_surround)
+        self.assertLess(pos_surround, pos_a_return)
+        # world_state が連続してないので [システム通知] 見出しは 2 回出る。
+        self.assertEqual(text.count("[システム通知]"), 2)
+
     def test_delete_removes_only_given_ids(self):
         i1 = push_perception(self.conn, "k", "a")
         push_perception(self.conn, "k", "b")

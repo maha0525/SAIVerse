@@ -197,18 +197,29 @@ _DEFAULT_HEADER = "[システム通知]"
 def format_perception_message(items: List[PerceptionItem]) -> str:
     """reduce 済み知覚を 1 メッセージ分の本文に整形する (``<system>`` 包みは呼び出し側)。
 
-    型ごとに見出しでグルーピングし (初出順)、各項目の content を空行区切りで並べる。
-    同一 Pulse で消費される全知覚を 1 メッセージにまとめる (不変条件 C3)。見出しが
-    空文字列の型は content だけを出す。
+    **発生順 (list_pending の created_at→id 順) を保って出す**。型でグルーピングすると
+    時系列が壊れ、複数 Building を移動した場合に「後から入室した相手が前の部屋にいた」
+    ように見えてしまう (実運用で発覚, 2026-07-09)。連続する ``world_state`` だけは
+    1 つの見出しにまとめ (通知の乱発を防ぐ)、それ以外の型 (surroundings / correction /
+    persona_recall 等) はその発生位置に独立ブロックとして差し込む。見出しが空文字列の
+    型は content だけを出す。同一 Pulse で消費される全知覚を 1 メッセージにまとめる (C3)。
     """
-    kinds_ordered: List[str] = []
-    for it in items:
-        if it.kind not in kinds_ordered:
-            kinds_ordered.append(it.kind)
-
     blocks: List[str] = []
-    for kind in kinds_ordered:
-        header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
-        contents = "\n\n".join(it.content for it in items if it.kind == kind)
-        blocks.append(f"{header}\n{contents}" if header else contents)
+    i = 0
+    n = len(items)
+    while i < n:
+        kind = items[i].kind
+        if kind == "world_state":
+            # 連続する world_state を 1 見出しにまとめる。
+            group: List[str] = []
+            while i < n and items[i].kind == "world_state":
+                group.append(items[i].content)
+                i += 1
+            header = _KIND_HEADERS.get("world_state", _DEFAULT_HEADER)
+            blocks.append(f"{header}\n" + "\n\n".join(group))
+        else:
+            header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
+            content = items[i].content
+            blocks.append(f"{header}\n{content}" if header else content)
+            i += 1
     return "\n\n".join(blocks)

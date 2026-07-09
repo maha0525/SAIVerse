@@ -122,17 +122,13 @@ class DynamicStateManager:
             sai_mem = getattr(persona, "sai_memory", None)
             if pid and sai_mem is not None:
                 with persona_context(pid, pdir, manager):
-                    vc_messages = get_visual_context(building_id=building_id, include_self=False)
+                    # for_perception=True: 知覚バッファ向けの簡潔記法・<system> 包みなし。
+                    vc_messages = get_visual_context(
+                        building_id=building_id, include_self=False, for_perception=True,
+                    )
                 if vc_messages:
                     vc = vc_messages[0]
                     content = (vc.get("content") or "").strip()
-                    # get_visual_context は <system>...</system> で包むので、flush の
-                    # 二重包みを避けるため外側タグを剥がす。
-                    if content.startswith("<system>"):
-                        content = content[len("<system>"):]
-                    if content.endswith("</system>"):
-                        content = content[: -len("</system>")]
-                    content = content.strip()
                     media = (vc.get("metadata") or {}).get("media") or []
                     if content:
                         sai_mem.push_perception("surroundings", content, media=media)

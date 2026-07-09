@@ -130,24 +130,13 @@ class VisualContextSection:
         old: Optional[VisualContextSnapshot],
         new: Optional[VisualContextSnapshot],
     ) -> list[NotificationLabel]:
-        if old is None or new is None:
-            return []
-        labels: list[NotificationLabel] = []
-        old_paths = {m.path for m in old.media}
-        new_paths = {m.path for m in new.media}
-        added = new_paths - old_paths
-        removed = old_paths - new_paths
-        if added or removed:
-            labels.append(NotificationLabel(
-                kind="visual_context_media_changed",
-                label="周囲の見え方が変わりました",
-            ))
-        elif old.text != new.text:
-            labels.append(NotificationLabel(
-                kind="visual_context_text_changed",
-                label="周囲の状況に変化がありました",
-            ))
-        return labels
+        # 中身ゼロの「周囲の見え方が変わりました」フラグは廃止 (2026-07-09)。
+        # 移動時の視覚変化は on_building_entered が「移動先の様子」(内装画像・アイテム・
+        # 他ペルソナ外見) を知覚バッファへ push して中身ごと届ける。外見変化は
+        # refresh_on_events={APPEARANCE_CHANGED} で head 本体が更新され反映される。
+        # よって tail の中身ゼロ通知は不要 (ごちゃつきの原因だった)。
+        # 詳細: docs/intent/perception_buffer.md §5.4
+        return []
 
     def serialize_snapshot(self, snapshot: VisualContextSnapshot) -> str:
         return json.dumps(

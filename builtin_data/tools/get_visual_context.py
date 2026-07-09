@@ -411,6 +411,7 @@ def get_visual_context(
     include_self: bool = True,
     include_building: bool = True,
     include_other_personas: bool = True,
+    for_perception: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build structured visual context message for LLM.
 
@@ -422,6 +423,11 @@ def get_visual_context(
         include_self: Include the active persona's appearance image.
         include_building: Include the current building's interior image.
         include_other_personas: Include appearance images of other personas in the building.
+        for_perception: 知覚バッファ (移動時の「移動先の様子」) 向けの記法で出力する。
+            head 常駐用と違い、複数通知が時系列で並ぶ前提なので: (1) 「現在いる」断定を
+            避け Building 名を明示、(2) インベントリ (移動で変わらない) を除外し Building
+            内アイテムのみ、(3) 「### Building内」見出しを省略、(4) <system> で包まない
+            (flush 側が包む)。詳細: docs/intent/perception_buffer.md §5.4。
 
     Returns:
         List of message dicts with 'role', 'content', and 'metadata' keys.
@@ -451,24 +457,43 @@ def get_visual_context(
     text_parts: List[str] = []
     media_list: List[Dict[str, str]] = []
 
-    text_parts.append("<system>")
-    text_parts.append("# ビジュアルコンテキスト")
-    text_parts.append("以下は現在の状況を視覚的に示す情報です。この情報はメッセージ履歴の位置にかかわらず、常に現在時点のリアルタイム状態を反映しています。")
-    text_parts.append("")
-    text_parts.append("---")
-    text_parts.append("")
+    # Building 名 (見出しの明示に使う)。
+    _building_obj_for_name = getattr(persona, "buildings", {}).get(building_id)
+    building_name = _building_obj_for_name.name if _building_obj_for_name else building_id
+
+    if not for_perception:
+        text_parts.append("<system>")
+        text_parts.append("# ビジュアルコンテキスト")
+        # NOTE: かつて「常にリアルタイム状態を反映」と書いていたが、head の
+        # visual_context は Metabolism まで凍結されるため嘘だった (2026-07-09 削除)。
+        text_parts.append("以下は現在の状況を視覚的に示す情報です。")
+        text_parts.append("")
+        text_parts.append("---")
+        text_parts.append("")
+    else:
+        # 知覚バッファ用: どの Building の様子かを見出しで明示 (複数通知が並ぶため)。
+        text_parts.append(f"# 「{building_name}」の様子")
+        text_parts.append("")
 
     # ========== Section 1: ペルソナ ==========
-    text_parts.append("## ペルソナ")
     all_occupants = manager.occupants.get(building_id, [])
     # ユーザーIDはall_personasに存在しないのでフィルタしてAIペルソナのみに絞る
     occupants = [oid for oid in all_occupants if manager.all_personas.get(oid)]
     persona_count = len(occupants)
-    if persona_count <= 1:
-        text_parts.append("現在、このBuildingにはあなただけがいます。")
+    if for_perception:
+        # 「一緒にいる他ペルソナ」だけを述べる (self は include_self=False で除外済み)。
+        others = [oid for oid in occupants if oid != persona_id]
+        text_parts.append("## 一緒にいるペルソナ")
+        if not others:
+            text_parts.append("他のペルソナはいません。")
+        text_parts.append("")
     else:
-        text_parts.append(f"現在、このBuildingにはあなた含め{persona_count}人のペルソナがいます。")
-    text_parts.append("")
+        text_parts.append("## ペルソナ")
+        if persona_count <= 1:
+            text_parts.append("現在、このBuildingにはあなただけがいます。")
+        else:
+            text_parts.append(f"現在、このBuildingにはあなた含め{persona_count}人のペルソナがいます。")
+        text_parts.append("")
 
     # Self appearance
     if include_self:
@@ -527,10 +552,12 @@ def get_visual_context(
     text_parts.append("")
     text_parts.append("## Building")
 
-    building_obj = getattr(persona, "buildings", {}).get(building_id)
-    building_name = building_obj.name if building_obj else building_id
-    text_parts.append(f"現在、「{building_name}」にいます。")
-    text_parts.append("")
+    building_obj = _building_obj_for_name
+    if not for_perception:
+        text_parts.append(f"現在、「{building_name}」にいます。")
+        text_parts.append("")
+    # for_perception では「現在いる」と断定しない (通知が出た後さらに移動しうるため)。
+    # Building 名は冒頭見出し「「X」の様子」で既に明示している。
 
     # Building interior image
     if include_building:
@@ -560,9 +587,11 @@ def get_visual_context(
     persona_name = getattr(persona, "persona_name", persona_id)
 
     # 3a. Persona inventory items
+    # for_perception では除外: インベントリは移動で変わらない (持ち物は付いてくる) ので、
+    # 「移動先の様子」に載せると毎回重複する。Building 内アイテムだけを見せる。
     inventory_items = (
         manager.get_all_items_for_persona(persona_id)
-        if hasattr(manager, 'get_all_items_for_persona') else []
+        if (not for_perception and hasattr(manager, 'get_all_items_for_persona')) else []
     )
     if inventory_items:
         text_parts.append(f"### あなた自身（{persona_name}）のインベントリ内")
@@ -578,8 +607,10 @@ def get_visual_context(
         if hasattr(manager, 'get_all_items_in_building') else []
     )
     if building_items:
-        text_parts.append("### Building内")
-        text_parts.append("")
+        # for_perception ではインベントリと分ける必要がないので「### Building内」見出しは省く。
+        if not for_perception:
+            text_parts.append("### Building内")
+            text_parts.append("")
         for item in building_items:
             short_id = item.get("short_id")
             ref = f"item:{short_id}" if short_id is not None else None
@@ -618,7 +649,8 @@ def get_visual_context(
                         pass
                 text_parts.append("")
 
-    text_parts.append("</system>")
+    if not for_perception:
+        text_parts.append("</system>")
 
     # Build message
     messages: List[Dict[str, Any]] = [
