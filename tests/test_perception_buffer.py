@@ -100,6 +100,17 @@ class PerceptionBufferTest(unittest.TestCase):
         delete_perceptions(self.conn, [])
         self.assertEqual(len(list_pending(self.conn)), 1)
 
+    def test_media_roundtrip(self):
+        media = [{"path": "/img/room.png", "mime_type": "image/png", "role": "image"}]
+        push_perception(self.conn, "surroundings", "移動先の様子…", media=media)
+        item = list_pending(self.conn)[0]
+        self.assertEqual(item.media_list(), media)
+
+    def test_media_list_empty_when_none(self):
+        push_perception(self.conn, "world_state", "何か")
+        item = list_pending(self.conn)[0]
+        self.assertEqual(item.media_list(), [])
+
     def test_salient_and_metadata_roundtrip(self):
         push_perception(
             self.conn, "k", "x", salient=True, metadata='{"foo": 1}', reduce_key="rk",

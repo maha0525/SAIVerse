@@ -108,6 +108,40 @@ class DynamicStateManager:
                 building_id, exc_info=True,
             )
 
+        # 移動先の様子 (アイテム一覧・内装画像・居合わせる他ペルソナの外見) を、移動した
+        # 本人の知覚バッファへ push する。head の visual_context は移動で refresh されない
+        # (cache 保護) ため、これが無いと本人は次の Metabolism まで新しい部屋のアイテム/
+        # 内装を正確に知れず、旧部屋のものと誤認しうる (まはー指摘 2026-07-09)。
+        # get_visual_context(include_self=False) は他ペルソナ外見+内装+アイテム(無い時も
+        # 明示)+Fixture を返す。self は head と重複するので除外。消費は本人の次 Pulse。
+        try:
+            from builtin_data.tools.get_visual_context import get_visual_context
+            from tools.context import persona_context
+            pid = getattr(persona, "persona_id", None)
+            pdir = getattr(persona, "persona_dir", None)
+            sai_mem = getattr(persona, "sai_memory", None)
+            if pid and sai_mem is not None:
+                with persona_context(pid, pdir, manager):
+                    vc_messages = get_visual_context(building_id=building_id, include_self=False)
+                if vc_messages:
+                    vc = vc_messages[0]
+                    content = (vc.get("content") or "").strip()
+                    # get_visual_context は <system>...</system> で包むので、flush の
+                    # 二重包みを避けるため外側タグを剥がす。
+                    if content.startswith("<system>"):
+                        content = content[len("<system>"):]
+                    if content.endswith("</system>"):
+                        content = content[: -len("</system>")]
+                    content = content.strip()
+                    media = (vc.get("metadata") or {}).get("media") or []
+                    if content:
+                        sai_mem.push_perception("surroundings", content, media=media)
+        except Exception:
+            LOGGER.warning(
+                "[dynamic_state] surroundings push on entry failed -> %s",
+                building_id, exc_info=True,
+            )
+
         _dispatch_head_event(persona, manager, building_id, "building_entered")
 
     @staticmethod

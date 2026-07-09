@@ -409,6 +409,23 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertFalse(self.adapter.flush_perception_buffer())
         self.assertEqual(self._correction_notices(), [])
 
+    def test_flush_attaches_media_to_message(self):
+        # 移動先の様子など、メディア付き知覚は flush で event_message の
+        # metadata.media に載る (内装画像・外見画像を運ぶ経路)。
+        import json
+        media = [{"path": "/img/ai_room.png", "mime_type": "image/png", "role": "image"}]
+        self.adapter.push_perception("surroundings", "AI談話室の様子…", media=media)
+        self.assertTrue(self.adapter.flush_perception_buffer())
+        with self.adapter._db_lock:
+            row = self.adapter.conn.execute(
+                "SELECT metadata FROM messages WHERE content LIKE ? ORDER BY created_at DESC LIMIT 1",
+                ("%AI談話室の様子%",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        meta = json.loads(row[0]) if row[0] else {}
+        self.assertEqual(meta.get("media"), media)
+        self.assertIn("perception", meta.get("tags", []))
+
     def test_confirm_does_not_push(self):
         mid = self._seed_core_memory("未確認", confirmed=0)
         confirm_core_memory_item("tester", mid, manager=self.manager)

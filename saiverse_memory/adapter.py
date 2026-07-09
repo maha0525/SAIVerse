@@ -365,16 +365,21 @@ class SAIMemoryAdapter:
         *,
         reduce_key: Optional[str] = None,
         salient: bool = False,
+        media: Optional[list] = None,
         metadata: Optional[str] = None,
     ) -> None:
-        """知覚を 1 件バッファに積む (まだ SAIMemory には入れない)。"""
+        """知覚を 1 件バッファに積む (まだ SAIMemory には入れない)。
+
+        ``media`` は画像等の添付 (``[{"path","mime_type","role"}, ...]``)。消費時に
+        event_message の metadata.media へ載る。
+        """
         if not self._ready:
             return
         from sai_memory.perception_buffer import push_perception
         with self._db_lock:
             push_perception(
                 self.conn, kind, content,
-                reduce_key=reduce_key, salient=salient, metadata=metadata,
+                reduce_key=reduce_key, salient=salient, media=media, metadata=metadata,
             )
 
     def flush_perception_buffer(self) -> bool:
@@ -396,15 +401,32 @@ class SAIMemoryAdapter:
             items = list_pending(self.conn)
         if not items:
             return False
-        text = format_perception_message(reduce_perceptions(items))
+        reduced = reduce_perceptions(items)
+        text = format_perception_message(reduced)
+        # reduce 後の全知覚の添付メディア (画像等) を集約して 1 メッセージに載せる。
+        # 移動時の内装画像・他ペルソナ外見画像などがここで event_message に付く。
+        # path で重複排除 (同じ画像を二重添付しない)。
+        media: list = []
+        seen_media: set = set()
+        for it in reduced:
+            for m in it.media_list():
+                key = m.get("path") if isinstance(m, dict) else None
+                if key and key in seen_media:
+                    continue
+                if key:
+                    seen_media.add(key)
+                media.append(m)
         # tz-aware UTC ISO 必須 (naive だと system TZ 解釈で ±9h ずれる)。
         # event_message = Track 横断メタログ (origin_track_id は付けない)。
         from datetime import datetime, timezone
+        metadata: dict = {"tags": ["internal", "event_message", "perception"]}
+        if media:
+            metadata["media"] = media
         message = {
             "role": "user",
             "content": f"<system>{text}</system>",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "metadata": {"tags": ["internal", "event_message", "perception"]},
+            "metadata": metadata,
             "line_role": "main_line",
             "scope": "committed",
         }

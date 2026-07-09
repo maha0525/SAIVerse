@@ -34,6 +34,9 @@ class PerceptionItem:
         複数操作)。None なら個別に残る (集約対象外)。
     ``salient``: 起動力フラグ (1 = 到着で Pulse を起こす「絶対反応する」)。Phase 1
         では格納のみで未使用 (起動力ディスパッチャは Phase 2 以降)。
+    ``media``: 添付メディア (画像等) の JSON 文字列。``[{"path","mime_type","role"}, ...]``
+        形式。移動時の内装画像・他ペルソナ外見画像などを運ぶ (None = メディアなし)。
+        消費時に flush が全知覚のメディアを集めて event_message の metadata.media に載せる。
     ``metadata``: JSON 付加情報 (由来参照など)。将来余地。
     ``created_at``: 発生時刻 (Unix 秒, 客観時間)。
     """
@@ -42,8 +45,20 @@ class PerceptionItem:
     content: str
     reduce_key: Optional[str]
     salient: int
+    media: Optional[str]
     metadata: Optional[str]
     created_at: int
+
+    def media_list(self) -> list:
+        """``media`` (JSON) を list に復元する。空/不正なら空 list。"""
+        if not self.media:
+            return []
+        try:
+            import json
+            data = json.loads(self.media)
+            return data if isinstance(data, list) else []
+        except (ValueError, TypeError):
+            return []
 
 
 def init_perception_buffer_table(conn: sqlite3.Connection) -> None:
@@ -60,11 +75,18 @@ def init_perception_buffer_table(conn: sqlite3.Connection) -> None:
             content TEXT NOT NULL,
             reduce_key TEXT,
             salient INTEGER NOT NULL DEFAULT 0,
+            media TEXT,
             metadata TEXT,
             created_at INTEGER NOT NULL
         )
         """
     )
+    # 既存 DB 向けの追加系マイグレーション (core_memory と同方式)。
+    # media: 移動時の内装/外見画像などの添付 (JSON)。Phase 1a 時点の DB には無い。
+    try:
+        conn.execute("ALTER TABLE perception_buffer ADD COLUMN media TEXT")
+    except sqlite3.OperationalError:
+        pass  # 既に存在する
     conn.commit()
 
 
@@ -75,24 +97,32 @@ def push_perception(
     *,
     reduce_key: Optional[str] = None,
     salient: bool = False,
+    media: Optional[list] = None,
     metadata: Optional[str] = None,
 ) -> int:
     """知覚を 1 件バッファに積む。採番された id を返す。
 
     書き込みは客観時間で随時起きる (ペルソナはまだ知覚しない)。実際に知覚される
     のは次の Pulse 消費時 (``list_pending`` → reduce → SAIMemory → ``delete``)。
+
+    ``media`` は ``[{"path","mime_type","role"}, ...]`` の list (画像等)。JSON 化して
+    保存し、消費時に event_message の metadata.media へ載せる。
     """
     now = int(time.time())
+    media_json = None
+    if media:
+        import json
+        media_json = json.dumps(media, ensure_ascii=False)
     cur = conn.execute(
-        "INSERT INTO perception_buffer (kind, content, reduce_key, salient, metadata, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (kind, content, reduce_key, 1 if salient else 0, metadata, now),
+        "INSERT INTO perception_buffer (kind, content, reduce_key, salient, media, metadata, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (kind, content, reduce_key, 1 if salient else 0, media_json, metadata, now),
     )
     conn.commit()
     return int(cur.lastrowid)
 
 
-_SELECT_COLUMNS = "id, kind, content, reduce_key, salient, metadata, created_at"
+_SELECT_COLUMNS = "id, kind, content, reduce_key, salient, media, metadata, created_at"
 
 
 def _row_to_item(row) -> PerceptionItem:
@@ -102,8 +132,9 @@ def _row_to_item(row) -> PerceptionItem:
         content=str(row[2]),
         reduce_key=row[3] if row[3] is not None else None,
         salient=int(row[4]) if row[4] is not None else 0,
-        metadata=row[5] if row[5] is not None else None,
-        created_at=int(row[6]),
+        media=row[5] if row[5] is not None else None,
+        metadata=row[6] if row[6] is not None else None,
+        created_at=int(row[7]),
     )
 
 
@@ -158,6 +189,7 @@ _KIND_HEADERS = {
     "core_memory_correction": "[コア記憶の更新通知]",
     "world_state": "[システム通知]",       # 世界状態の差分 (入退室・アイテム・スペル 等)
     "persona_recall": "",                     # 入室時の過去会話想起 (本文が自己完結)
+    "surroundings": "",                       # 移動先の様子 (本文が <system> 見出し込みで自己完結)
 }
 _DEFAULT_HEADER = "[システム通知]"
 
