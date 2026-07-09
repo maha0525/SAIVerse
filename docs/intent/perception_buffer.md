@@ -147,8 +147,13 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 **対応**: head は凍結のまま、tail (知覚バッファ) で新しい景色を届ける。
 - **メディア channel**: 知覚バッファに `media` 列 (JSON) を追加。push/list/flush で画像 ref を運び、flush が全知覚のメディアを path 重複排除で集約して event_message の `metadata.media` に載せる (`NotificationLabel.media` / `append_persona_message` の media 対応は既存)。
-- **移動時 push**: `on_building_entered` で移動した本人へ `get_visual_context(include_self=False)` の内容 (他ペルソナ外見画像 + 内装画像 + アイテム一覧〔**無い時も明示**〕+ Fixture) を kind=`surroundings` で push。self は head と重複するので除外。消費は本人の次 Pulse。
+- **移動時 push**: `on_building_entered` で移動した本人へ `get_visual_context(include_self=False, for_perception=True)` の内容 (他ペルソナ外見画像 + 内装画像 + Building 内アイテム〔**無い時も明示**〕+ Fixture) を kind=`surroundings` で push。self は head と重複するので除外。消費は本人の次 Pulse。
 - **入室を既存者へ**: 併せて、`on_building_entered` は居合わせる既存ペルソナ全員にも occupant 検知を push する (新入りに自分の次 Pulse を待たず気づける)。
+- **知覚バッファ向けの整形** (2026-07-09): head 記法をそのまま入れるとごちゃつくため:
+  - flush の format は **kind グルーピングでなく発生順**。移動を跨いだとき「後から入室した相手が前の部屋にいた」ように見える崩れを防ぐ (連続する world_state だけ 1 見出しにまとめる)。
+  - 中身ゼロの **「周囲の見え方が変わりました」フラグは廃止** (`visual_context.diff_to_notifications → []`)。移動時は surroundings が中身を届け、外見変化は head refresh で反映されるため。
+  - **`get_visual_context(for_perception=True)`** = バッファ向け記法: 「リアルタイム反映」文言削除 (head は凍結され嘘だったので head 側からも削除) / Building 名を見出しで明示 / 「現在いる」断定回避 (通知後さらに移動しうる) / インベントリ除外 (移動で変わらない) / 「### Building内」見出し省略 / `<system>` 包みなし。head 用 (`for_perception=False`) と記法は分けるが収集ロジックは共通 (処理統一)。
+- **既知の限界 (今は未対応・まはー 2026-07-09)**: 2 つ以上の Building の様子が 1 つの知覚バッファに載ると、途中の一時滞在を「消す」戦略が使えない (今いる部屋に相手が来て喋ったように見えうる)。将来、会話を別型で保持し「発話を聞いた時点でバッファ前半を固定」する戦略 (§4.4 会話統合と接続) で、会話が無い移動は省略・会話があれば移動を認識、と両立できる見込み。
 
 ---
 
