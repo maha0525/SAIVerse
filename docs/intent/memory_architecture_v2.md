@@ -161,7 +161,7 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 
 **仮想センサー（2026-07-08 実装 → 2026-07-09 SAIMemory 挿入を応急停止）**: ユーザーが edit / delete / restore すると、ペルソナへ「あなたのコア記憶がユーザーに◯◯された」を **event_message** で通知する（`_notify_persona_correction`）。ペルソナの記憶を黙って書き換えるのではなく、本人が気づける形にすることで自己像の尊厳を保つ。形式は gold_panning の判断記録と同じ確立形式（`<system>` 包み・role="user"・`event_message` タグ・main_line/committed・origin_track_id=NULL）。REST 文脈なので pulse_id は無い。delete は head から消える内容も通知に載せる。**confirm（承認）は内容が変わらないので通知しない**。フックは変更系エンドポイント（`api/routes/people/core_memory.py`）。
 
-> **応急停止（2026-07-09）**: 削除・訂正は**まとめて複数回**行われることが多く（ごみ箱整理・一括修正）、1 操作 = 1 通知で挿入すると event_message がメインライン文脈を埋め、**通常の会話がコンテキストから押し出される**問題が実運用で発覚。当面 `_notify_persona_correction` は呼び出し経路（edit/delete/restore フック）を残したまま **SAIMemory への実挿入だけを早期 return で止めている**。恒久対応は「1 操作分（あるいは短時間window内）の訂正を**まとめて 1 通知に集約**する」方向で検討中（未着手・設計待ち）。集約単位（操作単位 / 時間窓 / セッション終了時フラッシュ）が論点。
+> **通知過多問題と恒久対応（2026-07-09）**: 削除・訂正は**まとめて複数回**行われることが多く（ごみ箱整理・一括修正）、1 操作 = 1 通知で即挿入すると event_message がメインライン文脈を埋め、**通常の会話がコンテキストから押し出される**問題が実運用で発覚。一旦 SAIMemory 挿入を応急停止した後、**知覚バッファ（[perception_buffer.md](perception_buffer.md)）の最初の利用者として恒久対応を実装済み（Phase 1、実機検証待ち）**。`_notify_persona_correction` は訂正を知覚バッファへ push するだけになり、実際に SAIMemory へ入る（＝ペルソナが知覚する）のは次の Pulse 消費時。そこで型別 reduce され（同一コア記憶への連続操作は最新 1 件に集約）、同一 Pulse の全知覚が 1 メッセージにまとまる。これにより一括操作でも通知が会話文脈を埋めない。
 
 **未確認バッジ（未実装・次フェーズ）**: gold_panning の自動採取（confirmed=0）が溜まったことをユーザーに気づかせる導線。件数は `unconfirmed_count`（一覧 API）で取れる。置き場所はペルソナ固有アフォーダンス（住民/神モード UI の設計と交差するため未確定）。
 

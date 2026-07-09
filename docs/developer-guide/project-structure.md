@@ -173,6 +173,9 @@ sai_memory/
 ├── memory/           # 生ログ（Thread/Message）・recall・entity_extractor
 ├── arasuji/          # Chronicle（あらすじ）生成（generator/storage/context）
 ├── memopedia/        # Memopedia（知識グラフ。core/storage/generator）
+├── core_memory.py    # コア記憶（記憶アーキv2 ゾーンA。memory.db 同居）
+├── perception_buffer.py # 知覚バッファ（未消費知覚を溜め Pulse 消費で放出。memory.db 同居）
+├── marks.py / purpose_tags.py # ライフ層の観測点・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
 ├── backup.py         # rdiff-backup
 ├── config.py / cli.py / logging_utils.py
