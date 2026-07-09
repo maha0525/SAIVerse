@@ -675,7 +675,7 @@ def preview_context(
     section_order = [
         "system_prompt", "memory_weave_chronicle", "memory_weave_memopedia",
         "memory_weave", "visual_context",
-        "history", "realtime_context", "user_message",
+        "history", "realtime_context", "perception_buffer", "user_message",
     ]
     section_labels = {
         "system_prompt": "System Prompt",
@@ -685,6 +685,7 @@ def preview_context(
         "visual_context": "Visual Context",
         "history": "Conversation History",
         "realtime_context": "Realtime Context",
+        "perception_buffer": "知覚バッファ（未消費・次のPulseで反映）",
         "user_message": "Your Message",
         "attachments": "Attachments",
     }
@@ -735,6 +736,36 @@ def preview_context(
         # Rough estimate: ~500 tokens per document (varies widely)
         attachment_tokens += document_count * 500
     section_tokens["attachments"] = attachment_tokens
+
+    # 知覚バッファ (未消費) — 次の Pulse で flush されてプロンプトに入る予定の知覚を
+    # プレビューに出す (docs/intent/perception_buffer.md Phase 3, 透明性 §6)。
+    # ここでは read-only: 検知 (snapshot 比較) は走らせず、既に溜まっている未消費分
+    # だけを表示する (検知は snapshot を進めるため、プレビューで走らせると実 Pulse の
+    # 差分が消える副作用がある)。実際の flush と同じく型別 reduce → 1 メッセージに畳む。
+    try:
+        sai_mem = getattr(persona, "sai_memory", None)
+        if sai_mem is not None and getattr(sai_mem, "is_ready", lambda: False)():
+            from sai_memory.perception_buffer import (
+                format_perception_message,
+                list_pending,
+                reduce_perceptions,
+            )
+            with sai_mem._db_lock:
+                pending = list_pending(sai_mem.conn)
+            if pending:
+                pb_text = format_perception_message(reduce_perceptions(pending))
+                pb_msg = {"role": "user", "content": f"<system>{pb_text}</system>"}
+                pb_tokens = estimate_messages_tokens([pb_msg], provider)
+                section_tokens["perception_buffer"] = pb_tokens
+                section_msg_counts["perception_buffer"] = 1
+                annotated_messages.append({
+                    "role": "user",
+                    "content": pb_msg["content"],
+                    "section": "perception_buffer",
+                    "tokens": pb_tokens,
+                })
+    except Exception:
+        LOGGER.warning("[preview] perception buffer section failed", exc_info=True)
 
     total_input_tokens = sum(section_tokens.values())
     context_length = get_context_length(persona_model)
