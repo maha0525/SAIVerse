@@ -141,6 +141,15 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 他ペルソナの発話取り込みは「ペルソナに向けられた発話」であり、通知（知覚ラベル）ではなく会話内容。**この経路も知覚バッファに載せる**（まはー確定 2026-07-09）。発話は起動力属性（§4.4）を持ち、フラグが立てば到着で Pulse 起動（＝ペルソナ同士の自律会話の土台）、立たなければ溜まって次 Pulse で消費される。「経路に載せる」のであって会話内容を通知ラベルに変質させるわけではない——バッファは「通知ラベル型」と「会話発話型」を別型として保持し、reduce と render を型ごとに分ける。
 
+### 5.4 移動時の「移動先の様子」とメディア channel（2026-07-09 実装）
+
+**問題**: head の visual_context Section は移動 (`building_entered`) で refresh しない (cache 保護。`refresh_on_events={APPEARANCE_CHANGED}` のみ)。かつ head のアイテム一覧・内装は visual_context が唯一の描画者 (`building_items.render` は None)。よって移動直後、ペルソナの head は**旧 Building のアイテム/内装のまま**次の Metabolism まで凍結し、唯一の信号「周囲の見え方が変わりました」は中身ゼロ。ペルソナは新しい部屋の様子を正確に知れず、旧部屋のものと誤認しうる (まはー指摘)。
+
+**対応**: head は凍結のまま、tail (知覚バッファ) で新しい景色を届ける。
+- **メディア channel**: 知覚バッファに `media` 列 (JSON) を追加。push/list/flush で画像 ref を運び、flush が全知覚のメディアを path 重複排除で集約して event_message の `metadata.media` に載せる (`NotificationLabel.media` / `append_persona_message` の media 対応は既存)。
+- **移動時 push**: `on_building_entered` で移動した本人へ `get_visual_context(include_self=False)` の内容 (他ペルソナ外見画像 + 内装画像 + アイテム一覧〔**無い時も明示**〕+ Fixture) を kind=`surroundings` で push。self は head と重複するので除外。消費は本人の次 Pulse。
+- **入室を既存者へ**: 併せて、`on_building_entered` は居合わせる既存ペルソナ全員にも occupant 検知を push する (新入りに自分の次 Pulse を待たず気づける)。
+
 ---
 
 ## 6. 透明性の二層
