@@ -152,8 +152,12 @@ def reduce_perceptions(items: List[PerceptionItem]) -> List[PerceptionItem]:
 
 
 # 型 → 消費メッセージ内の見出し。未知の型は汎用見出しにフォールバックする。
+# 空文字列 "" を指定した型は見出しを付けない (content が自己完結している場合。
+# 例: persona_recall は「過去の会話の想起」本文そのものなので見出し不要)。
 _KIND_HEADERS = {
     "core_memory_correction": "[コア記憶の更新通知]",
+    "world_state": "[システム通知]",       # 世界状態の差分 (入退室・アイテム・スペル 等)
+    "persona_recall": "",                     # 入室時の過去会話想起 (本文が自己完結)
 }
 _DEFAULT_HEADER = "[システム通知]"
 
@@ -162,7 +166,8 @@ def format_perception_message(items: List[PerceptionItem]) -> str:
     """reduce 済み知覚を 1 メッセージ分の本文に整形する (``<system>`` 包みは呼び出し側)。
 
     型ごとに見出しでグルーピングし (初出順)、各項目の content を空行区切りで並べる。
-    同一 Pulse で消費される全知覚を 1 メッセージにまとめる (不変条件 C3)。
+    同一 Pulse で消費される全知覚を 1 メッセージにまとめる (不変条件 C3)。見出しが
+    空文字列の型は content だけを出す。
     """
     kinds_ordered: List[str] = []
     for it in items:
@@ -172,6 +177,6 @@ def format_perception_message(items: List[PerceptionItem]) -> str:
     blocks: List[str] = []
     for kind in kinds_ordered:
         header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
-        contents = [it.content for it in items if it.kind == kind]
-        blocks.append(header + "\n" + "\n\n".join(contents))
+        contents = "\n\n".join(it.content for it in items if it.kind == kind)
+        blocks.append(f"{header}\n{contents}" if header else contents)
     return "\n\n".join(blocks)

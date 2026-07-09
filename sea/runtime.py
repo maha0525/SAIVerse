@@ -121,35 +121,38 @@ class SEARuntime:
         from sea.pulse_context import aspect_from_pulse_type
         _root_aspect = aspect_from_pulse_type(pulse_type)
 
-        # 知覚バッファの消費 (flush): 未消費の知覚を型別 reduce して 1 メッセージで
-        # SAIMemory へ書き出す。主観時間は Pulse でのみ進む ので、ここが消費点。
-        # 全 Pulse タイプ (user / schedule / auto) が run_meta_user を通る
-        # (pulse_controller.py) ため、ここ 1 箇所で全 Pulse の消費が成立する。
-        # 詳細: docs/intent/perception_buffer.md (Phase 1)。
+        # --- 知覚の「検知」フェーズ (バッファへ push、まだ消費しない) ---
+        # 世界状態の差分 (入退室・アイテム・スペル 等) と入室時想起を検知し、知覚
+        # バッファへ push する (SAIMemory へは直接入れない)。Phase 2 で
+        # inject_diff_notifications を「検知＝push」に変更した。詳細:
+        # docs/intent/perception_buffer.md §4.5 / §5.1。
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[dynamic_state] Event detection failed in run_meta_user")
+
+        # 同Building内の他ペルソナ発言とユーザーメッセージを building_histories から時系列順に取り込む
+        # （ユーザーメッセージは manager が事前に building_histories へ追加済み）
+        # ※会話取り込みの知覚バッファ統合は Phase 2 (会話統合) で対応予定。現状は従来経路。
+        try:
+            from builtin_data.tools.get_building_messages import auto_ingest_building_messages
+            auto_ingest_building_messages(persona, self.manager, origin_track_id=_root_track_id)
+        except Exception:
+            LOGGER.exception("[auto_ingest] Failed in run_meta_user")
+
+        # --- 知覚の「消費」フェーズ (flush) ---
+        # 未消費の知覚 (REST 由来のメタ記憶訂正 + 上で検知した world_state/persona_recall)
+        # を型別 reduce して 1 メッセージで SAIMemory へ書き出す。主観時間は Pulse でのみ
+        # 進むので、ここが消費点。全 Pulse タイプ (user/schedule/auto) が run_meta_user を
+        # 通る (pulse_controller.py) ため、ここ 1 箇所で全 Pulse の消費が成立する。
+        # 検知 (上) → 消費 (ここ) の順序が重要 (同 Pulse 内で検知分も消費するため)。
         try:
             sai_mem = getattr(persona, "sai_memory", None)
             if sai_mem is not None:
                 sai_mem.flush_perception_buffer()
         except Exception:
             LOGGER.exception("[perception_buffer] flush failed in run_meta_user")
-
-        # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入。
-        # event_message は世界の変化通知 = Track 横断のメタログなので
-        # origin_track_id は付けない (handoff_2026-05-10)。
-        # (Phase 2 でこの経路も知覚バッファへ寄せる予定。現状は併存。)
-        try:
-            from saiverse.dynamic_state import DynamicStateManager
-            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
-        except Exception:
-            LOGGER.exception("[dynamic_state] Event injection failed in run_meta_user")
-
-        # 同Building内の他ペルソナ発言とユーザーメッセージを building_histories から時系列順に取り込む
-        # （ユーザーメッセージは manager が事前に building_histories へ追加済み）
-        try:
-            from builtin_data.tools.get_building_messages import auto_ingest_building_messages
-            auto_ingest_building_messages(persona, self.manager, origin_track_id=_root_track_id)
-        except Exception:
-            LOGGER.exception("[auto_ingest] Failed in run_meta_user")
 
         # スケジュール実行時はプロンプトをペルソナ自身のhistoryに直接追加（他のペルソナには見せない）
         if pulse_type == "schedule" and user_input:

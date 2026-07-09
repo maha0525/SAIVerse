@@ -143,18 +143,23 @@ def inject_diff_notifications(
     *,
     pipeline: HeadPipeline | None = None,
 ) -> bool:
-    """全 Section の diff を集めて末尾通知 user message として SAIMemory に注入する。
+    """全 Section の diff を検知し、知覚バッファへ型付き項目として push する (消費はしない)。
 
-    旧 ``DynamicStateManager.maybe_inject_event_messages`` の置き換え。pipeline 経由で
-    全 Section の diff_to_notifications を回し、得られた NotificationLabel 群を
-    ``[システム通知]`` 形式 1 メッセージにまとめてペルソナの SAIMemory へ append する。
+    【知覚バッファ経由に変更 (2026-07-09, Phase 2)】以前は差分を直接 SAIMemory へ
+    append していたが、これは「検知＝消費」を癒着させ、pulse 前のプレビューを不可能に
+    していた。本関数は **検知器** に徹し、差分を知覚バッファ (kind='world_state') へ
+    push するだけにする。実際に SAIMemory へ入る (= ペルソナが知覚する) のは呼び出し元
+    が ``flush_perception_buffer`` を呼ぶ消費時。呼び出し元ごとの flush 制御:
+    - Pulse 開始 (run_meta_user): push → 末尾で flush (同 Pulse で消費)。
+    - Pulse 中の metabolism 直後 (runtime_context): push → 直後に flush (同ターン知覚)。
+    - 移動時 (on_building_entered, pulse 外): push のみ。次の Pulse で消費される
+      (= 主観時間が止まっている間の知覚は詰まって待つ、という時間モデル通り)。
 
-    notification は **Track 横断のメタログ扱い** (= 旧 dynamic_state と同じ):
-    ``origin_track_id`` を付けず、``metadata.tags = ['internal', 'event_message']``
-    で保存する。詳細: docs/intent/persona_cognition/handoff_2026-05-10.md §3
+    入室想起 (persona_recall) も同じくバッファへ push する。詳細:
+    docs/intent/perception_buffer.md §4.5 / §5.1。
 
     Returns:
-        ラベルが 1 件以上注入された場合 True、差分なしなら False。
+        ラベルが 1 件以上 push された場合 True、差分なしなら False。
     """
     pipeline = pipeline or get_default_pipeline()
     ctx = build_line_head_input(persona, manager, building_id)
@@ -171,21 +176,15 @@ def inject_diff_notifications(
         )
         return False
 
-    text = _format_notification_block(labels)
-    message: dict[str, Any] = {
-        "role": "user",
-        "content": f"<system>{text}</system>",
-        "metadata": {"tags": ["internal", "event_message"]},
-    }
-    try:
-        sai_mem.append_persona_message(message)
-    except Exception:
-        LOGGER.exception(
-            "head_pipeline: append_persona_message failed for diff notification",
-        )
-        return False
+    for label in labels:
+        try:
+            sai_mem.push_perception("world_state", label.label)
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline: push_perception failed for world_state label",
+            )
     LOGGER.info(
-        "head_pipeline: injected %d notification labels for persona=%s building=%s",
+        "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
         len(labels), ctx.persona_id, building_id,
     )
 
@@ -199,10 +198,11 @@ def _inject_persona_recall_on_enter(
     labels: list[NotificationLabel],
     sai_mem: Any,
 ) -> None:
-    """occupant_entered ラベルに対応する過去会話・Memopedia を想起注入する。
+    """occupant_entered ラベルに対応する過去会話・Memopedia を知覚バッファへ push する。
 
-    Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、
-    過去の会話と Memopedia ページを自動的に思い出す。
+    Note システム完成までの繋ぎ実装。ペルソナが同じ Building に入室した際、過去の会話と
+    Memopedia ページを想起する。以前は直接 SAIMemory へ append していたが、Phase 2 で
+    知覚バッファ (kind='persona_recall') への push に変更 (消費は呼び出し元の flush)。
     """
     history_manager = getattr(persona, "history_manager", None)
     if not history_manager:
@@ -230,28 +230,16 @@ def _inject_persona_recall_on_enter(
         if not recall_text:
             continue
 
-        message: dict[str, Any] = {
-            "role": "user",
-            "content": f"<system>{recall_text}</system>",
-            "metadata": {"tags": ["internal", "event_message"]},
-        }
         try:
-            sai_mem.append_persona_message(message)
+            sai_mem.push_perception("persona_recall", recall_text)
             LOGGER.info(
-                "head_pipeline: injected persona recall for %s on occupant_entered",
+                "head_pipeline: pushed persona recall perception for %s on occupant_entered",
                 occupant_id,
             )
         except Exception:
             LOGGER.exception(
-                "head_pipeline: failed to inject persona recall for %s", occupant_id,
+                "head_pipeline: failed to push persona recall for %s", occupant_id,
             )
-
-
-def _format_notification_block(labels: list[NotificationLabel]) -> str:
-    lines = ["[システム通知]"]
-    for label in labels:
-        lines.append(f"- {label.label}")
-    return "\n".join(lines)
 
 
 def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:

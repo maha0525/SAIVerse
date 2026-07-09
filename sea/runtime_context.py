@@ -181,15 +181,20 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                             exc,
                                         )
                                     # Pre-response metabolism で発生した Memopedia 変化を即座に
-                                    # event_message として SAIMemory に挿入する。これがないと、
-                                    # 続く履歴取得で event_message が拾えず、AI 応答コンテキストに
-                                    # 反映されないため、ペルソナは「自分が直前に行った記憶整理」を
-                                    # 同じターンの応答時に認識できない（次ターンで初めて検知）。
+                                    # ペルソナに知覚させる。これがないと、続く履歴取得で拾えず、
+                                    # ペルソナは「自分が直前に行った記憶整理」を同じターンの応答時に
+                                    # 認識できない（次ターンで初めて検知）。
+                                    # Phase 2 で inject は「検知＝バッファへ push」に変わったため、
+                                    # ここでは検知 (push) の直後に flush (消費) を呼び、同一ターンでの
+                                    # 知覚を維持する。詳細: docs/intent/perception_buffer.md §4.5。
                                     try:
                                         from saiverse.dynamic_state import DynamicStateManager
                                         DynamicStateManager.maybe_inject_event_messages(persona, runtime.manager)
+                                        sai_mem = getattr(persona, "sai_memory", None)
+                                        if sai_mem is not None:
+                                            sai_mem.flush_perception_buffer()
                                     except Exception:
-                                        LOGGER.exception("[dynamic_state] Event injection after pre-response metabolism failed")
+                                        LOGGER.exception("[dynamic_state] Event detection/flush after pre-response metabolism failed")
                                 except Exception as exc:
                                     LOGGER.warning("[metabolism] Chronicle generation on anchor expiry failed: %s", exc)
                                 if event_callback:

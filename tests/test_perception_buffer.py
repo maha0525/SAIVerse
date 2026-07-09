@@ -62,6 +62,32 @@ class PerceptionBufferTest(unittest.TestCase):
         self.assertIn("[システム通知]", text)
         self.assertIn("なにか", text)
 
+    def test_world_state_uses_system_header(self):
+        push_perception(self.conn, "world_state", "アイフィが入室した")
+        text = format_perception_message(list_pending(self.conn))
+        self.assertIn("[システム通知]", text)
+        self.assertIn("アイフィが入室した", text)
+
+    def test_persona_recall_has_no_header(self):
+        push_perception(self.conn, "persona_recall", "過去の会話: …")
+        text = format_perception_message(list_pending(self.conn))
+        # persona_recall は本文が自己完結なので見出しを付けない。
+        self.assertNotIn("[システム通知]", text)
+        self.assertNotIn("[コア記憶の更新通知]", text)
+        self.assertEqual(text, "過去の会話: …")
+
+    def test_multiple_kinds_in_one_message(self):
+        # 同一 Pulse で消費される複数型の知覚は 1 メッセージにまとまる (C3)。
+        push_perception(self.conn, "core_memory_correction", "訂正あり")
+        push_perception(self.conn, "world_state", "誰かが退室した")
+        push_perception(self.conn, "persona_recall", "そういえば前に…")
+        text = format_perception_message(list_pending(self.conn))
+        self.assertIn("[コア記憶の更新通知]", text)
+        self.assertIn("訂正あり", text)
+        self.assertIn("[システム通知]", text)
+        self.assertIn("誰かが退室した", text)
+        self.assertIn("そういえば前に…", text)  # persona_recall 本文
+
     def test_delete_removes_only_given_ids(self):
         i1 = push_perception(self.conn, "k", "a")
         push_perception(self.conn, "k", "b")
