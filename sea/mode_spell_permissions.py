@@ -13,8 +13,8 @@
 
 - 読み取り系 (``track_list`` / ``get_task_summary`` 等) と汎用スペル
   (recall / note / memopedia / image / web 等) は全モード無制限 (= ここに載せない)。
-- 生産手段の ``document_*`` スペル (create / read / edit / append_content /
-  search) も汎用スペル扱いで全モード無制限。特に分身モード (WORKER) の
+- 生産手段の ``document_*`` スペル (create / read / edit / search) も汎用スペル
+  扱いで全モード無制限。特に分身モード (WORKER) の
   作業セッションがアーティファクト生成に使う前提なので、ここに載せて
   制限しないこと (autonomous_behavior_v2.md §2.2 / §11)。
 - 旧 ``task_*`` 系は廃止予定でゲート対象外。

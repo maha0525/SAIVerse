@@ -85,9 +85,6 @@ _TOOL_PHRASES: Dict[str, Tuple[str, str, List[str]]] = {
     "memopedia_edit_fragment": ("Memopedia の断片を整理した", "Memopedia の断片を整理した", []),
     "document_create": ("文書「{arg}」を書いた", "文書を書いた", ["title", "name"]),
     "document_edit": ("文書「{arg}」を編集した", "文書を編集した", ["title", "name"]),
-    "document_append_content": ("文書「{arg}」に書き足した", "文書に書き足した", ["title", "name"]),
-    "document_patch_content": ("文書「{arg}」を手直しした", "文書を手直しした", ["title", "name"]),
-    "document_replace_content": ("文書「{arg}」を書き直した", "文書を書き直した", ["title", "name"]),
     "document_read": ("文書「{arg}」を読んだ", "文書を読んだ", ["title", "name"]),
     "document_search": ("文書から「{arg}」を探した", "文書を探した", ["query"]),
     "note_create": ("Note「{arg}」を作った", "Note を作った", ["title"]),
@@ -100,6 +97,7 @@ _TOOL_PHRASES: Dict[str, Tuple[str, str, List[str]]] = {
     "send_email_to_user": ("ユーザーにメールを送った", "ユーザーにメールを送った", []),
     "update_working_memory": ("考えを書き留めた", "考えを書き留めた", []),
     "item_view": ("アイテムを眺めた", "アイテムを眺めた", []),
+    "item_annotate": ("アイテム「{arg}」を整理した", "アイテムを整理した", ["name"]),
     "move_persona": ("別の場所へ移動した", "別の場所へ移動した", []),
     "invoke_phenomenon": ("フェノメナを起こした", "フェノメナを起こした", []),
 }

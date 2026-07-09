@@ -29,10 +29,10 @@
 
 ## 組み込みツール
 
-全ツールの網羅一覧（自動生成）は [ツールカタログ](../reference/tool-catalog.md) を参照（128 ツール、うち Spell 82）。代表例:
+全ツールの網羅一覧（自動生成）は [ツールカタログ](../reference/tool-catalog.md) を参照（130 ツール、うち Spell 87）。代表例:
 
 - 汎用: `calculate_expression`（計算）/ `generate_image`（画像生成）
-- アイテム: `item_move`（移動）/ `item_view`（閲覧）/ `item_change_name` / `item_write_description`
+- アイテム: `item_move`（移動）/ `item_view`（閲覧）/ `item_annotate`（名前・概要の編集）
 - 記憶: `memory_recall`（想起）/ `switch_active_thread`（スレッド切替）/ Chronicle・Memopedia 系
 - Playbook: `run_playbook`（サブライン起動）/ `call_playbook`
 

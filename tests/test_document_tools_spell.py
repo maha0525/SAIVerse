@@ -14,7 +14,6 @@ DOCUMENT_SPELL_TOOLS = [
     "document_create",
     "document_read",
     "document_edit",
-    "document_append_content",
     "document_search",
 ]
 

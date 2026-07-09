@@ -35,7 +35,7 @@
 ## 実装
 
 - DB: `Item` / `ItemLocation` テーブル（`database/models.py`）
-- 操作: `SAIVerseManager.pickup_item_for_persona` / `use_item_for_persona`（`item_service` に委譲）、Tool は `item_move` / `item_view` / `item_change_name` / `item_write_description`（`builtin_data/tools/`）。※旧 `action_handler.py` は pickup/place を扱わない（実質 no-op）
+- 操作: `SAIVerseManager.pickup_item_for_persona` / `use_item_for_persona`（`item_service` に委譲）、Tool は `item_move` / `item_view` / `item_annotate`（`builtin_data/tools/`）。※旧 `action_handler.py` は pickup/place を扱わない（実質 no-op）
 - Vessel フック: `Building.PHYSICAL_VESSEL_ID`
 
 ## 関連概念

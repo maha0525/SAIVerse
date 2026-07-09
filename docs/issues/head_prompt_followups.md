@@ -11,6 +11,26 @@
 - parameters JSON Schema の描画省略・簡約（引数名と型だけにする等）
 - 使用頻度の低いスペルの `visible=false` 化 + `addon_spell_help` 型の遅延開示を builtin にも適用
 
+### 進捗: スペル棚卸し → 統合ダイエット（2026-07-08、検証待ち）
+
+「隠す」前にまず「削る」を実施。builtin スペルを棚卸しし、役割被り・二重実装を統合した。
+
+- **document 編集系 7→4**: `document_edit` を書き直し、旧 `document_replace_content` /
+  `document_patch_content` / `document_append_content` を1本に統合（部分置換 / 追記 / 全置換の3操作）。
+  同時に、旧 `document_edit` が生ファイル直書き（item ref 未解決・アクセス制御なし）だった系統Aから、
+  manager サービス経由の系統B（`resolve_item_ref_for_persona` + `_validate_document_access`）へ寄せ、
+  二重実装とアイソレーション漏れを解消。行範囲置換モードは廃止（部分置換が上位互換）。
+- **item メタ 2→1**: `item_change_name` + `item_write_description` を `item_annotate(name?, description?)` に統合。
+
+これで builtin Spell は 91→87（当環境の addon 込みカタログ値）、ペルソナ常駐分は実質 -5。
+
+**残タスク（本 issue 本線）**: 使用頻度の低いスペルの `visible=false` 化 + 遅延開示。棚卸しで挙がった
+head 常駐だが出番の稀な候補 — `life_purpose_set`（一生に一度）/ `observer_read`（Observer 建物限定）/
+`messagelog_get_around`（ニッチ）/ `send_email_to_user`（SMTP 前提）。
+
+**関連の積み残し（別 issue 化候補）**: `document_read` / `document_search` は依然として系統A（アクセス制御なし・
+item ref 未解決）。読み取り専用で低リスクだが、`document_edit` と挙動が非対称。統合の完遂には要修正。
+
 ## 2. City 全景の把握手段がない
 
 ペルソナは「今いる Building の同居人」（`building_occupants`、order 1100）しか見えず、City 内にどんな Building があり誰が住んでいるかを知る恒常手段がない。`building_move` Playbook 実行時に一覧が出るのみ。

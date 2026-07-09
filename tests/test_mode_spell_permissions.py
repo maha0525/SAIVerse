@@ -53,7 +53,6 @@ class TestSpellPermissionMatrix(unittest.TestCase):
             "document_create",
             "document_read",
             "document_edit",
-            "document_append_content",
             "document_search",
         )
         for sp in document_spells:

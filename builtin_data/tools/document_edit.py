@@ -1,10 +1,23 @@
-"""Document edit tool - Replace content in a document item."""
+"""document_edit — ドキュメントItemの内容を編集する統合スペル。
+
+3つの編集操作を1本に集約している (旧 document_replace_content /
+document_patch_content / document_append_content を統合):
+
+- **部分置換 (patch)**: ``old_string`` / ``new_string`` を渡すと、文書内で
+  一意にマッチする箇所だけを差し替える (外科的な修正向け)。
+- **追記 (append)**: ``mode='append'`` + ``content`` で末尾に追記する。
+- **全置換 (replace)**: ``content`` を渡すと全文を書き換える (推敲・書き直し向け)。
+
+いずれも manager の document サービスを経由するので、``item:N`` 参照の解決と
+アクセス制御 (自分のインベントリ or 現在いる建物のdocumentのみ)、編集後の
+要約再生成が共通で効く。
+"""
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
-from tools.context import get_active_manager
+from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -12,121 +25,96 @@ LOGGER = logging.getLogger(__name__)
 
 def document_edit(
     item_id: str,
-    new_content: Optional[str] = None,
-    start_line: Optional[int] = None,
-    end_line: Optional[int] = None,
-    replacement: Optional[str] = None,
+    content: Optional[str] = None,
+    old_string: Optional[str] = None,
+    new_string: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> str:
-    """Edit a document item's content.
-
-    Two modes:
-    1. Full replacement: provide new_content to replace entire document.
-    2. Line range replacement: provide start_line, end_line, and replacement
-       to replace specific lines.
+    """Edit a document item's content (patch / append / replace).
 
     Args:
-        item_id: Identifier of the document item.
-        new_content: Full replacement content (replaces entire document).
-        start_line: Starting line number (1-based, inclusive) for partial edit.
-        end_line: Ending line number (1-based, inclusive) for partial edit.
-        replacement: Text to insert in place of lines start_line..end_line.
+        item_id: Identifier of the document item (raw ID or ``item:N`` ref).
+        content: Text for full replacement (default) or append (mode='append').
+        old_string: Exact substring to find; presence selects patch mode.
+        new_string: Replacement text for the matched substring (default '').
+        mode: Optional explicit selector: 'patch' / 'append' / 'replace'.
+              If omitted, inferred from the provided arguments.
 
     Returns:
-        Confirmation with line count information.
+        Confirmation message from the manager service.
     """
+    persona_id = get_active_persona_id()
+    if not persona_id:
+        raise RuntimeError("Active persona context is not set.")
     manager = get_active_manager()
     if manager is None:
         raise RuntimeError("Manager context is not available.")
 
-    item = manager.item_service.items.get(item_id)
-    if not item:
-        raise RuntimeError(f"Item '{item_id}' not found.")
+    item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
 
-    if (item.get("type") or "").lower() != "document":
-        raise RuntimeError(f"Item '{item_id}' is not a document type.")
+    # 操作の判定: 明示 mode > 引数からの推論。
+    resolved_mode = (mode or "").strip().lower() or None
+    if resolved_mode is None:
+        if old_string is not None:
+            resolved_mode = "patch"
+        elif content is not None:
+            resolved_mode = "replace"
 
-    file_path_str = item.get("file_path")
-    if not file_path_str:
-        raise RuntimeError("This document has no file_path set.")
-
-    file_path = manager.item_service._resolve_file_path(file_path_str)
-    if not file_path.exists():
-        raise RuntimeError(f"File not found: {file_path}")
-
-    item_name = item.get("name", item_id)
-
-    if new_content is not None:
-        # Full replacement mode
-        file_path.write_text(new_content, encoding="utf-8")
-        new_lines = new_content.count("\n") + 1
-        LOGGER.info("document_edit: full replacement of '%s' (%d lines)", item_name, new_lines)
-        return f"ドキュメント '{item_name}' を全文置換しました ({new_lines}行)"
-
-    if start_line is not None and end_line is not None and replacement is not None:
-        # Line range replacement mode
-        try:
-            content = file_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise RuntimeError(f"Failed to read file: {exc}") from exc
-
-        lines = content.split("\n")
-        total_lines = len(lines)
-
-        # Normalize
-        start_line = int(start_line)
-        end_line = int(end_line)
-        start_idx = max(0, start_line - 1)
-        end_idx = min(total_lines, end_line)
-
-        # Replace lines
-        replacement_lines = replacement.split("\n")
-        new_lines = lines[:start_idx] + replacement_lines + lines[end_idx:]
-        new_content = "\n".join(new_lines)
-
-        file_path.write_text(new_content, encoding="utf-8")
-
-        LOGGER.info(
-            "document_edit: replaced lines %d-%d of '%s' (%d lines → %d lines)",
-            start_line, end_line, item_name, end_idx - start_idx, len(replacement_lines),
+    if resolved_mode == "patch":
+        if old_string is None:
+            return "部分置換 (patch) には old_string を指定してください。"
+        return manager.patch_document_content(
+            persona_id, item_id, old_string, new_string or "",
         )
-        return (
-            f"ドキュメント '{item_name}' の {start_line}-{end_line}行を置換しました "
-            f"({end_idx - start_idx}行 → {len(replacement_lines)}行, 合計 {len(new_lines)}行)"
-        )
+    if resolved_mode == "append":
+        if content is None:
+            return "追記 (append) には content を指定してください。"
+        return manager.append_document_content(persona_id, item_id, content)
+    if resolved_mode == "replace":
+        if content is None:
+            return "全置換 (replace) には content を指定してください。"
+        return manager.replace_document_content(persona_id, item_id, content)
 
-    return "new_content（全文置換）または start_line + end_line + replacement（部分置換）を指定してください"
+    return (
+        "編集内容を指定してください: 部分置換なら old_string(+new_string)、"
+        "追記なら mode='append'+content、全置換なら content。"
+    )
 
 
 def schema() -> ToolSchema:
     return ToolSchema(
         name="document_edit",
         description=(
-            "Edit a document item. Either replace the full content, "
-            "or replace a specific line range. Use document_read first "
-            "to see the current content and line numbers."
+            "Edit a document item. Three operations in one: "
+            "(1) patch — give old_string (+new_string) to replace a single "
+            "uniquely-matching substring; "
+            "(2) append — set mode='append' with content to append to the end; "
+            "(3) replace — give content alone to overwrite the whole document. "
+            "Use document_read first to see the current content."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "item_id": {
                     "type": "string",
-                    "description": "Identifier of the document item.",
+                    "description": "Identifier of the document item (ID or item:N ref).",
                 },
-                "new_content": {
+                "content": {
                     "type": "string",
-                    "description": "Full replacement content (replaces entire document). Omit for partial edit.",
+                    "description": "Text for full replacement, or for append (with mode='append').",
                 },
-                "start_line": {
-                    "type": "integer",
-                    "description": "Starting line number (1-based) for partial replacement.",
-                },
-                "end_line": {
-                    "type": "integer",
-                    "description": "Ending line number (1-based) for partial replacement.",
-                },
-                "replacement": {
+                "old_string": {
                     "type": "string",
-                    "description": "Text to insert in place of the specified line range.",
+                    "description": "Exact substring to find (must match one location). Selects patch mode.",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement for old_string in patch mode. Omit to delete the match.",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Explicit operation: 'patch' / 'append' / 'replace'. Inferred if omitted.",
+                    "enum": ["patch", "append", "replace"],
                 },
             },
             "required": ["item_id"],

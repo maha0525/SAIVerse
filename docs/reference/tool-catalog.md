@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 134（うち Spell 化: 91）
+**登録ツール数**: 130（うち Spell 化: 87）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -28,12 +28,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `core_memory_update` | コア記憶の既存の1項目を新しい内容に書き換えます。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string, `content*`: string | コア記憶を書き換える |
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |
 | `desire_add` | Add a 'want to do someday' candidate to your desire pool. Use this when, during autonomous work, you think of somethi… | `title*`: string, `goal`: string, `type`: string, `source`: string | やりたいこと追加 |
-| `document_append_content` | Append text to the end of a document item. Use this to add new content without modifying existing text. | `item_id*`: string, `content*`: string | ドキュメント追記 |
 | `document_create` | Create a new document item with text content and place it in the current building. | `name*`: string, `description*`: string, `content*`: string | ドキュメント作成 |
-| `document_edit` | Edit a document item. Either replace the full content, or replace a specific line range. Use document_read first to s… | `item_id*`: string, `new_content`: string, `start_line`: integer, `end_line`: integer, `replacement`: string | ドキュメント編集 |
-| `document_patch_content` | Replace a specific substring in a document item's content. The old_string must match exactly one location in the docu… | `item_id*`: string, `old_string*`: string, `new_string*`: string | ドキュメント部分置換 |
+| `document_edit` | Edit a document item. Three operations in one: (1) patch — give old_string (+new_string) to replace a single uniquely… | `item_id*`: string, `content`: string, `old_string`: string, `new_string`: string, `mode`: string | ドキュメント編集 |
 | `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | ドキュメント読み取り |
-| `document_replace_content` | Overwrite the entire content of a document item with new text. Use this for full rewrites. For partial edits, use doc… | `item_id*`: string, `content*`: string | ドキュメント全置換 |
 | `document_search` | Search for a pattern in a document item using regex. Returns matching lines with context. Similar to grep with contex… | `item_id*`: string, `pattern*`: string, `case_sensitive`: boolean, `context_lines`: integer, `max_matches`: integer | ドキュメント検索 |
 | `forget_recalled` | 想起した記憶をワーキングメモリから忘れます。source_idを指定すると特定の記憶だけ忘れます。省略するとすべての想起記憶をクリアします。 | `source_id`: string | — |
 | `game_create_building` | Create a building (shop, inn, plaza, dungeon room, etc.) inside the game Region you rule. The building becomes usable… | `name*`: string, `description*`: string, `system_instruction`: string, `subregion_id`: string, `capacity`: integer | 建物作成 (GM) |
@@ -50,10 +47,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `get_task_summary` | Get a summary of the active persona's tasks including active and pending tasks. | `limit`: integer | — |
 | `get_visual_context` | Build visual context messages containing structured environment info for LLM context. | `building_id`: string, `include_self`: boolean, `include_building`: boolean, `include_other_personas`: boolean | — |
 | `invoke_phenomenon` | フェノメノン（現象）を直接呼び出して実行します。フェノメノンはSAIVerse世界で発生させることができる汎用的な処理単位です。 | `phenomenon_name*`: string, `arguments`: string | — |
-| `item_change_name` | Rename an item. Use this when an item's name is a meaningless string (e.g. a raw filename like '20260401025103-01KN2E… | `item_id*`: string, `name*`: string | アイテム名の変更 |
+| `item_annotate` | Update an item's name and/or description (概要). Provide name, description, or both (at least one is required). Use thi… | `item_id*`: string, `name`: string, `description`: string | アイテム名・概要の編集 |
 | `item_move` | Move items to a building, your inventory, or inside a bag. Specify comma-separated item IDs and a destination. | `item_ids*`: string, `destination_type*`: string, `destination_id`: string | アイテム移動 |
 | `item_view` | View item details. For pictures: shows the image. For documents: shows full text. For bags: shows contents list. Supp… | `item_id`: string, `item_ids`: string | アイテム閲覧 |
-| `item_write_description` | Update the description (概要) of an item. Use this when an item's name is a meaningless string, or its description is i… | `item_id*`: string, `description*`: string | アイテム概要の書き換え |
 | `judgment_finalize` | Internal tool for judgment-point Playbooks only (judgment_day_open / judgment_post_conversation / judgment_post_sessi… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
 | `life_purpose_set` | Save your confirmed life purpose / interests / vocations. Use this once, during the first-time self-definition: after… | `purpose*`: string, `interests`: array, `vocations`: array | 生きる目的を保存 |
 | `list_available_playbooks` | List playbooks available for router selection based on persona and building context. | `persona_id`: string, `building_id`: string | — |
