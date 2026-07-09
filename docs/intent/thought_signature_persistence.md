@@ -127,6 +127,18 @@ Migration は `database/migrate.py` ではなく、`sai_memory/memory/storage.py
 - ターン跨ぎで signature が消失した場合: warning ログを出し、リクエストは続行 (品質低下を許容)
 - 1 メッセージにつき 0 個または 1 個。複数 signature の concat は行わない。ストリーミング応答では通常 1 つだけ送られてくる想定だが、Gemini 公式 doc が「最終チャンクの空 text part に signature だけ乗ることがある」と明記している以上、複数 chunk に signature が現れた場合は **最後に受信した非 None 値を採用する**
 
+### 3.5. UI パラメータの命名とモデル世代での出し分け (2026-07-09 追記)
+
+ユーザーがモデル JSON の `parameters` から操作できるスイッチは実体としては **thought_signature を次ターンに echo するか否か**の一択であり、モデル側の「マルチターン推論そのもの」を on/off する API パラメータは存在しない。しかし当初この UI 項目を全 Gemini モデルで `multi_turn_thinking` (ラベル "Multi-turn Thinking") と名付けていたため、名前が実態と食い違うモデルが生じていた。
+
+食い違いの原因は、公式仕様上「マルチターン推論 = 全ターンの推論文脈を引き継ぐ」挙動が **GenerateContent API では Gemini 3.5 Flash から**である点 ([whats-new-gemini-3.5](https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5))。SAIVerse は `generate_content` / `generate_content_stream` 経路のみ使用するため、3.5 未満 (Gemini 3 / 3.1 / 2.5 系) では signature を echo しても「全ターン推論の引き継ぎ」は起きず、echo が効くのは主に function calling の連続性維持のみ。よって:
+
+- **3.5 系**: UI キーは `multi_turn_thinking` のまま (名前が実態に合う)。**default は `off`** — 全ターン推論の引き継ぎはトークン/コストへの悪影響が大きいため
+- **3.5 未満 (3 / 3.1 / 2.5 系)**: UI キーを `thought_signature_echo` (ラベル「思考署名の引き継ぎ」) にリネーム。**default は `on`**
+- コード側 `configure_parameters` (`gemini.py`) は両キーを受けて同一の `_multi_turn_thinking` フラグに落とす (後方互換)
+
+**スイッチの非対称性** (要注意): `_multi_turn_thinking` が off でも、Gemini 3.x 系は function_call パートの signature を常に echo する (`gemini.py` の `if self._multi_turn_thinking or self._is_gemini_3x:`)。off で止まるのは text パートの signature echo (`gemini.py` の `if g_role == "model" and self._multi_turn_thinking:`) のみ。これは「3.x は function calling で signature を返さないと 400 になる」公式仕様に対する安全側の設計。UI の description もこの非対称を明記している。
+
 ---
 
 ## 4. 既存実装との整合

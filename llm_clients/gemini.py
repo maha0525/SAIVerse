@@ -599,7 +599,12 @@ class GeminiClient(LLMClient):
                     except (ValueError, TypeError):
                         logging.warning("Invalid thinking_budget value: %s", value)
                         self._thinking_budget = None
-            elif key == "multi_turn_thinking":
+            elif key in ("multi_turn_thinking", "thought_signature_echo"):
+                # 3.5+ は "multi_turn_thinking" (全ターン推論の引き継ぎ。GenerateContent
+                # では 3.5 Flash から), 3.5 未満は "thought_signature_echo"
+                # (関数呼び出し連続性のための署名 echo) と UI 上の名前が異なるが,
+                # SAIVerse 側の制御対象はどちらも thought_signature の echo 可否のみ。
+                # 詳細は docs/intent/thought_signature_persistence.md
                 self._multi_turn_thinking = value != "off"
             elif key in SAFETY_PARAM_TO_CATEGORY:
                 if value:

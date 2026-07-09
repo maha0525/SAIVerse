@@ -47,12 +47,12 @@
       "label": "Thinking Budget",
       "description": "思考トークン予算。defaultで思考なし。数値で思考を有効化し予算を指定(512〜24576)。"
     },
-    "multi_turn_thinking": {
+    "thought_signature_echo": {
       "type": "dropdown",
       "options": ["on", "off"],
       "default": "on",
-      "label": "Multi-turn Thinking",
-      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率向上(各ターン独立思考)。"
+      "label": "思考署名の引き継ぎ",
+      "description": "モデルが返す思考署名 (thought signature) を次ターンに載せ直すか。onで関数呼び出しの連続性を維持。offでキャッシュ効率が上がる(3.x系では関数呼び出しパートの署名は常に引き継がれ、テキストパートの署名のみoffで止まる)。"
     },
     "safety_harassment": {
       "type": "dropdown",
