@@ -1,6 +1,6 @@
 # Intent Document: Thought Signature Persistence
 
-**ステータス**: 起草中 (v0.1, 2026-05-20)
+**ステータス**: 完了 (2026-05-20 実装 / 2026-07-09 現況確認: 保存↔復元の全レイヤ実装済み)
 **位置付け**: Gemini 3.5 Flash 投入に伴う追加実装。マルチターン会話で Gemini が生成する `thoughtSignature` を欠落させないため、SAIMemory の `messages` テーブルに専用カラムを追加してターン跨ぎ永続化を実現する。
 **前提**: `unified_memory_architecture.md` (SAIMemory schema)、`cached_head_architecture.md` (head/tail 分離)
 
@@ -77,7 +77,7 @@ Migration は `database/migrate.py` ではなく、`sai_memory/memory/storage.py
 
 1. `GeminiClient._separate_parts` / stream のテキスト抽出で、最初の text Part の `thought_signature` を拾う
 2. `_store_thought_signature(value)` (新規 LLMClient API) で client インスタンスに保持
-3. SEA runtime の LLM ノード処理が response 完了時に `client.get_response_thought_signature()` を取得し `state["_last_thought_signature"]` に保存 (既存の Function Calling 経路と同じパターン)
+3. SEA runtime の LLM ノード処理が response 完了時に `client.consume_thought_signature()` を取得し `state["_last_thought_signature"]` に保存 (既存の Function Calling 経路と同じパターン)
 4. `_assistant_msg` 構築時に `message["thought_signature"] = state["_last_thought_signature"]` をトップレベルに入れる
 5. `history_manager._sync_to_memory` → `append_persona_message(message)` → adapter `_append_message` が `thought_signature` キーを読み取って `add_message(..., thought_signature=...)` に渡す
 6. `add_message` (storage.py) が `thought_signature` 列に INSERT
@@ -94,7 +94,7 @@ Migration は `database/migrate.py` ではなく、`sai_memory/memory/storage.py
 
 **LLMClient base クラス (`llm_clients/base.py`):**
 
-- 新規: `_store_thought_signature(self, value: Optional[str])` / `get_response_thought_signature(self) -> Optional[str]`
+- 新規: `_store_thought_signature(self, value: Optional[str])` / `consume_thought_signature(self) -> Optional[str]` (取得時に内部状態をクリアする)
 - Gemini 以外は default 実装で常に None
 
 **Gemini Client (`llm_clients/gemini.py`):**
