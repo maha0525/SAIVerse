@@ -45,13 +45,16 @@
 |---|---|---|---|---|---|
 | 🟠 実装中 | 自律行動v2 活性化配線 | playbook 5本 import → `--real` 行動テスト(まはーレビュー) → 起床/就寝/セッション終了/会話終了/on_event の配線 → 旧 track_autonomous 停止 | 私 → まはー | [autonomous_behavior_v2.md](../intent/autonomous_behavior_v2.md) | 2026-07-08 |
 | 🟣 検証待ち | gold_panning 砂金採り | SCENE 除去(NOTE のみ化)＋**クローズ window 起点を pan マーカー基準に修正**(metabolism anchor 流用で採取範囲が cache 都合に縮む問題、sophie 実機で判明)は完了。残: 実機で初回採取・defer-to-hot の確認 | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
-| 🟠 実装中 | コア記憶の訂正導線 + ごみ箱 (短期対応) | **DB層✅**(confirmed/deleted_at 追加・remove を soft-delete化・source を metadata・gold_panning は confirmed=0)。残: API(未確認一覧/確認/編集/soft-delete/復元) → メモリタブUI(項目ごと確認/編集 + ごみ箱復元) → チャット「N件更新｜確認」バッジ → ユーザー編集時に event_message でペルソナ通知(仮想センサー専用実装) | 私 → まはー | (短期は既存メモリタブ内) | 2026-07-08 |
+| 🟣 検証待ち | コア記憶の訂正導線 + ごみ箱 (短期対応) | **DB層✅ / API層✅ / メモリタブUI✅**(削除は実機確認済) **/ 仮想センサー✅**(edit/delete/restore→ペルソナへ event_message 通知、confirm は不通知、pytest 40件)。残: **未確認バッジの置き場所を確定**(ペルソナ固有アフォーダンス、住民/神モードUI と交差 → まはー判断) → 実装 | まはー(バッジ置き場) → 私 | [memory_architecture_v2.md](../intent/memory_architecture_v2.md) §5.1 | 2026-07-08 |
 | 🔵 設計中 | 神モードUI (住民/神モードの二層プラットフォーム) | 自律行動の本格化で局所干渉では足りず俯瞰視点が必要に。住民モード(Building 主語・世界に入って暮らす)と神モード(Persona/世界を俯瞰・管理する創造主視点)を別UI・別タブに分離。Persona ホームは神モードの一要素。世界観 intent 起草 → 部分再設計の段階設計 | まはー(設計) | (intent 未起草) | 2026-07-08 |
 | 🟡 実装待ち | quick_spell 本体実装 | サブエージェント委譲で実装(クオンのデータ修復は完了済) | まはー(GO) | [quick_spell.md](../intent/quick_spell.md) | 2026-07-08 |
 | 🟡 実装待ち | runtime_llm.py 巨大 node 分割 | Phase 0(重複ヘルパ抽出)から着手。副産物で Beat 型導入 | 私 / まはー | [runtime_llm_node_split_design.md](../issues/runtime_llm_node_split_design.md) | 2026-07-08 |
 | 🔵 設計中 | session_lifecycle Step 3 (Session 統一制御) | `session.md` を実装に移す。抽出済み SessionLifecycle に Session 識別と状態を持たせる | session.md 待ち | [session_lifecycle_extraction_design.md](../issues/session_lifecycle_extraction_design.md) / [session.md](../intent/session.md) | 2026-07-08 |
 | 🔵 設計中 | v0.3.0 ④ オートノミー整理 | `autonomy_*` Playbook ↔ Track 機構の関係を設計決定(self_reflection の扱いもここ次第)。v0.3.0 リリース最後の設計未決 | まはー | [v030_release_worklist.md](v030_release_worklist.md) | 2026-07-08 |
+| 🔵 設計中 | Physical Ear (常時リッスン音声入力) | 骨子確定 (別 Fixture タイプ / 応答者全員 / transport 案A / 非蓄積)。残論点 (continue セッション管理・判断層 E4B 実行環境・応答中の耳) を詰める → PC マイク+母艦捕捉クライアントを最初の検証ケースに実装 | まはー(残論点) → 私(実装) | [physical_ear.md](../intent/physical_ear.md) | 2026-07-09 |
 | 🔵 設計中 | SwitchBot 連携 | 末尾「未確定事項」を詰めて確定 → 実装(Observer の利用者) | まはー(レビュー) | [switchbot_integration.md](../intent/switchbot_integration.md) | 2026-07-08 |
 | 🔵 設計中 | アドオン拡張点 (OAuth / speak hooks) | draft レビュー → 汎用 `OAuthFlowSection` / persona_speak hook の実装 | まはー(レビュー) | [addon_extension_points.md](../intent/addon_extension_points.md) / [addon_speak_hooks.md](../intent/addon_speak_hooks.md) | 2026-07-08 |
+| 🟣 検証待ち | head スペル一覧ダイエット | 統合ダイエット済(document 7→4・item 2→1、二重実装/アイソレーション漏れも解消)。残: 実機で document_edit/item_annotate 動作確認 → その後 visible=false 遅延開示(本 issue 本線) | まはー(検証) | [head_prompt_followups.md](../issues/head_prompt_followups.md) | 2026-07-08 |
+| 🟣 検証待ち | アイディア帳由来 UI 修正3件(Cityタイトル / アイテムサムネイル / usage通貨) | 3 worktree を feature へマージ → 実機で表示確認(サムネ描画・City名反映・通貨別グラフ) | まはー(マージ先判断+検証) | [ideas.md](ideas.md) 由来 | 2026-07-08 |
 
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Track解体(目的の木), Social Track 入口(Phase 5) など -->
