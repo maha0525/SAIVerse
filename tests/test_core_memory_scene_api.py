@@ -96,7 +96,11 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         gc.collect()
         try:
             self._tmp.cleanup()
-        except PermissionError:
+        except OSError:
+            # Windows では sqlite の memory.db ハンドル解放が rmtree に間に合わず
+            # WinError 32 (sharing violation) 等で落ちることがある。temp の後始末は
+            # best-effort なので握り潰す (PermissionError は OSError の subclass だが、
+            # 素の OSError で来るケースもあるため OSError で受ける)。
             pass
 
     def tearDown(self):
@@ -343,51 +347,74 @@ class CoreMemorySceneApiTest(unittest.TestCase):
             })
         return out
 
-    # 応急処置 (2026-07-09): 仮想センサーの SAIMemory 挿入を一時停止中
-    # (通知過多でメインライン文脈が埋まる問題)。恒久対応 (バッチ集約) が入ったら
-    # 挿入形式に合わせて書き直す。memory_architecture_v2.md §5.1 参照。
-    @unittest.skip("仮想センサーの SAIMemory 挿入は応急停止中 (通知過多対策)")
-    def test_edit_notifies_persona(self):
+    def _pending_perceptions(self):
+        """知覚バッファの未消費項目 (発生順) を返す。"""
+        from sai_memory.perception_buffer import list_pending
+        with self.adapter._db_lock:
+            return list_pending(self.adapter.conn)
+
+    # --- 知覚バッファ経由 (2026-07-09): 訂正は push → Pulse 消費 (flush) で SAIMemory へ ---
+
+    def test_edit_pushes_to_buffer_then_flush_notifies(self):
         mid = self._seed_core_memory("旧い本文", confirmed=0)
         req = UpdateCoreMemoryRequest(content="ユーザーが直した新しい本文")
         update_core_memory_item("tester", mid, req, manager=self.manager)
+
+        # 訂正時点ではまだ SAIMemory に入らない (知覚バッファに溜まるだけ)。
+        self.assertEqual(self._correction_notices(), [])
+        pending = self._pending_perceptions()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].kind, "core_memory_correction")
+        self.assertEqual(pending[0].reduce_key, f"c:{mid}")
+        self.assertIn("ユーザーが直した新しい本文", pending[0].content)
+
+        # 消費 (Pulse 相当) すると 1 メッセージで SAIMemory に入り、バッファは空になる。
+        self.assertTrue(self.adapter.flush_perception_buffer())
         notices = self._correction_notices()
         self.assertEqual(len(notices), 1)
         n = notices[0]
-        # event_message 形式: <system> 包み・user 名義・main_line/committed・タグ付き
         self.assertIn("ユーザーが直した新しい本文", n["content"])
         self.assertIn(f"c:{mid}", n["content"])
         self.assertEqual(n["role"], "user")
         self.assertEqual(n["line_role"], "main_line")
         self.assertEqual(n["scope"], "committed")
         self.assertIn("event_message", n["tags"])
-        self.assertIn("core_memory_correction", n["tags"])
+        self.assertIn("perception", n["tags"])
+        self.assertEqual(self._pending_perceptions(), [])
 
-    @unittest.skip("仮想センサーの SAIMemory 挿入は応急停止中 (通知過多対策)")
-    def test_delete_notifies_with_removed_content(self):
+    def test_delete_flush_carries_removed_content(self):
         mid = self._seed_core_memory("消される秘密の内容")
         delete_core_memory_item("tester", mid, manager=self.manager)
+        self.assertTrue(self.adapter.flush_perception_buffer())
         notices = self._correction_notices()
         self.assertEqual(len(notices), 1)
         # 削除で head から消えるので、失われた内容を通知に載せる
         self.assertIn("消される秘密の内容", notices[0]["content"])
         self.assertIn("削除", notices[0]["content"])
 
-    @unittest.skip("仮想センサーの SAIMemory 挿入は応急停止中 (通知過多対策)")
-    def test_restore_notifies(self):
+    def test_same_memory_ops_reduce_to_latest(self):
+        # 同一コア記憶への複数操作は 1 Pulse 内 (未消費) で最新に集約される。
         mid = self._seed_core_memory("復元される内容")
-        delete_core_memory_item("tester", mid, manager=self.manager)   # 通知1
-        restore_core_memory_item("tester", mid, manager=self.manager)  # 通知2
+        delete_core_memory_item("tester", mid, manager=self.manager)
+        restore_core_memory_item("tester", mid, manager=self.manager)
+        # バッファには 2 件溜まっているが、reduce_key が同じなので消費は最新 1 件のみ。
+        self.assertEqual(len(self._pending_perceptions()), 2)
+        self.assertTrue(self.adapter.flush_perception_buffer())
         notices = self._correction_notices()
-        self.assertEqual(len(notices), 2)
-        # 最新 (先頭) が復元通知
+        self.assertEqual(len(notices), 1)
         self.assertIn("復元", notices[0]["content"])
-        self.assertIn("復元される内容", notices[0]["content"])
+        self.assertNotIn("削除しました", notices[0]["content"])
 
-    def test_confirm_does_not_notify(self):
+    def test_flush_empty_buffer_is_noop(self):
+        self.assertFalse(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._correction_notices(), [])
+
+    def test_confirm_does_not_push(self):
         mid = self._seed_core_memory("未確認", confirmed=0)
         confirm_core_memory_item("tester", mid, manager=self.manager)
-        # confirm は内容不変なので通知しない
+        # confirm は内容不変なので知覚バッファにも積まれない。
+        self.assertEqual(self._pending_perceptions(), [])
+        self.adapter.flush_perception_buffer()
         self.assertEqual(self._correction_notices(), [])
 
 

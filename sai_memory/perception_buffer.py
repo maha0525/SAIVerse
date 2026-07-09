@@ -1,0 +1,177 @@
+"""知覚バッファ (Perception Buffer) のストレージ層。
+
+ペルソナが発話していない間 (主観時間が止まっている間) に外界で発生した知覚を、
+型付きで溜め込む**永続**バッファ。次の Pulse 開始時にまとめて型別 reduce し、
+1 つのシステムメッセージとして SAIMemory へ書き出して消費する。
+
+設計の核 (docs/intent/perception_buffer.md):
+- 主観時間は Pulse でのみ進む。知覚が SAIMemory に入る (= ペルソナが知覚する) のは
+  Pulse 消費時のみ。バッファへの書き込み自体は客観時間で随時起きる。
+- 未消費の間だけ型別 reduce (相殺・集約) できる。消費済みは相殺不可。
+- 揮発ではなく永続 (再起動耐性・任意タイミングのプレビューのため)。テーブルは
+  ペルソナの memory.db に同居する (core_memory / Memopedia と同じ conn)。
+- 会話履歴 (messages) とは別テーブル。まだ「知覚」になっていない未消費のものを
+  会話に混ぜないため。消費時にここから SAIMemory (messages) へ移す。
+
+Phase 1 の利用者はメタ記憶訂正 (kind='core_memory_correction') のみ。状態差分
+(入退室等) の載せ替えと起動力ディスパッチャは Phase 2 以降。
+"""
+from __future__ import annotations
+
+import sqlite3
+import time
+from dataclasses import dataclass
+from typing import List, Optional
+
+
+@dataclass(frozen=True)
+class PerceptionItem:
+    """未消費の知覚 1 件。
+
+    ``kind``: 型 (reduce / 表示の単位)。例: 'core_memory_correction'。
+    ``content``: ペルソナに見せる文 (整形済み)。消費時にそのまま本文へ入る。
+    ``reduce_key``: 同型内で集約・相殺するキー (例: 'c:5' = 同じコア記憶への
+        複数操作)。None なら個別に残る (集約対象外)。
+    ``salient``: 起動力フラグ (1 = 到着で Pulse を起こす「絶対反応する」)。Phase 1
+        では格納のみで未使用 (起動力ディスパッチャは Phase 2 以降)。
+    ``metadata``: JSON 付加情報 (由来参照など)。将来余地。
+    ``created_at``: 発生時刻 (Unix 秒, 客観時間)。
+    """
+    id: int
+    kind: str
+    content: str
+    reduce_key: Optional[str]
+    salient: int
+    metadata: Optional[str]
+    created_at: int
+
+
+def init_perception_buffer_table(conn: sqlite3.Connection) -> None:
+    """知覚バッファテーブルを初期化する (冪等)。
+
+    新設テーブルなので、将来使う ``salient`` / ``metadata`` も最初から DDL に含める
+    (後のマイグレーションを不要にする)。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS perception_buffer (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            content TEXT NOT NULL,
+            reduce_key TEXT,
+            salient INTEGER NOT NULL DEFAULT 0,
+            metadata TEXT,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def push_perception(
+    conn: sqlite3.Connection,
+    kind: str,
+    content: str,
+    *,
+    reduce_key: Optional[str] = None,
+    salient: bool = False,
+    metadata: Optional[str] = None,
+) -> int:
+    """知覚を 1 件バッファに積む。採番された id を返す。
+
+    書き込みは客観時間で随時起きる (ペルソナはまだ知覚しない)。実際に知覚される
+    のは次の Pulse 消費時 (``list_pending`` → reduce → SAIMemory → ``delete``)。
+    """
+    now = int(time.time())
+    cur = conn.execute(
+        "INSERT INTO perception_buffer (kind, content, reduce_key, salient, metadata, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (kind, content, reduce_key, 1 if salient else 0, metadata, now),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+_SELECT_COLUMNS = "id, kind, content, reduce_key, salient, metadata, created_at"
+
+
+def _row_to_item(row) -> PerceptionItem:
+    return PerceptionItem(
+        id=int(row[0]),
+        kind=str(row[1]),
+        content=str(row[2]),
+        reduce_key=row[3] if row[3] is not None else None,
+        salient=int(row[4]) if row[4] is not None else 0,
+        metadata=row[5] if row[5] is not None else None,
+        created_at=int(row[6]),
+    )
+
+
+def list_pending(conn: sqlite3.Connection) -> List[PerceptionItem]:
+    """未消費の知覚を発生順 (created_at → id 昇順) で全件返す。
+
+    消費 (Pulse) とプレビュー (任意タイミング) の両方がこの読み口を使う。
+    プレビューは読むだけ (削除しない)、消費は読んで整形・書き出し後に ``delete`` する。
+    """
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLUMNS} FROM perception_buffer ORDER BY created_at ASC, id ASC"
+    ).fetchall()
+    return [_row_to_item(row) for row in rows]
+
+
+def delete_perceptions(conn: sqlite3.Connection, ids: List[int]) -> None:
+    """指定 id の知覚をバッファから削除する (消費完了時に呼ぶ)。"""
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        f"DELETE FROM perception_buffer WHERE id IN ({placeholders})", tuple(ids)
+    )
+    conn.commit()
+
+
+def reduce_perceptions(items: List[PerceptionItem]) -> List[PerceptionItem]:
+    """未消費知覚を型別に畳み込む (相殺・集約)。表示順は元の発生順を保つ。
+
+    Phase 1 の方針: 同一 ``(kind, reduce_key)`` は**最新 (最後に積まれた) 1 件だけ**
+    残す (= 同じコア記憶への複数操作を最新状態に集約)。``reduce_key`` が None の
+    項目は集約せず全件残す。
+
+    将来: 型ごとの reduce 関数 (例: occupant enter+leave の相殺) に一般化する。
+    """
+    last_pos: dict = {}
+    for i, it in enumerate(items):
+        if it.reduce_key is not None:
+            last_pos[(it.kind, it.reduce_key)] = i
+    out: List[PerceptionItem] = []
+    for i, it in enumerate(items):
+        if it.reduce_key is not None and last_pos[(it.kind, it.reduce_key)] != i:
+            continue  # 同一キーのより新しい項目があるので畳む
+        out.append(it)
+    return out
+
+
+# 型 → 消費メッセージ内の見出し。未知の型は汎用見出しにフォールバックする。
+_KIND_HEADERS = {
+    "core_memory_correction": "[コア記憶の更新通知]",
+}
+_DEFAULT_HEADER = "[システム通知]"
+
+
+def format_perception_message(items: List[PerceptionItem]) -> str:
+    """reduce 済み知覚を 1 メッセージ分の本文に整形する (``<system>`` 包みは呼び出し側)。
+
+    型ごとに見出しでグルーピングし (初出順)、各項目の content を空行区切りで並べる。
+    同一 Pulse で消費される全知覚を 1 メッセージにまとめる (不変条件 C3)。
+    """
+    kinds_ordered: List[str] = []
+    for it in items:
+        if it.kind not in kinds_ordered:
+            kinds_ordered.append(it.kind)
+
+    blocks: List[str] = []
+    for kind in kinds_ordered:
+        header = _KIND_HEADERS.get(kind, _DEFAULT_HEADER)
+        contents = [it.content for it in items if it.kind == kind]
+        blocks.append(header + "\n" + "\n\n".join(contents))
+    return "\n\n".join(blocks)

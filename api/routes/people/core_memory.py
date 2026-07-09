@@ -25,7 +25,7 @@ restore は「仮想センサー」(_notify_persona_correction) でペルソナ�
 (docs/intent/memory_architecture_v2.md §5.1)。confirm は内容不変なので通知しない。
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,7 +45,7 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# 仮想センサー: ユーザーの訂正をペルソナへ通知する (event_message)
+# 仮想センサー: ユーザーの訂正を知覚バッファへ積む (Pulse 消費時にペルソナが知覚)
 # ---------------------------------------------------------------------------
 #
 # ユーザーがコア記憶を書き換え・削除・復元したとき、その事実をペルソナ本人が次に
@@ -53,43 +53,30 @@ router = APIRouter()
 # 検知できるようにすることで自己像の尊厳を保つ (docs/intent/memory_architecture_v2.md
 # §5.1)。confirm (承認) は内容が変わらないので通知しない。
 #
-# 形式は gold_panning の判断記録と同じ確立形式: <system> 包みの role="user"
-# メッセージ + event_message タグ (General Chronicle / scene 切り出し / キーワード
-# 検索から自動除外)、main_line/committed でメインライン文脈へ通す。origin_track_id は
-# NULL (世界横断のメタログ)。REST 文脈なので pulse_id は無い。
+# 【知覚バッファ経由に変更 (2026-07-09)】REST 文脈で発生したこの訂正は「非状態
+# イベント」として知覚バッファへ push するだけ。実際に SAIMemory へ入る (= ペルソナ
+# が知覚する) のは次の Pulse 開始時の flush で、そこで型別 reduce され 1 メッセージに
+# まとまる。これにより一括操作 (ごみ箱整理・連続修正) でも通知が会話文脈を埋めない。
+# 詳細: docs/intent/perception_buffer.md (Phase 1 の最初の利用者)。
+#
+# reduce_key に同一コア記憶の参照を渡すことで、同じ記憶への複数操作は最新 1 件に
+# 集約される (未消費バッファ内での型別 reduce)。
 
 
-def _notify_persona_correction(adapter, notice: str) -> None:
-    """訂正通知 1 件をペルソナの SAIMemory に event_message として挿入する。
+def _notify_persona_correction(adapter, notice: str, *, reduce_key: Optional[str] = None) -> None:
+    """訂正 1 件を知覚バッファへ積む (Pulse 消費時に event_message として知覚される)。
 
-    ``notice`` は ``<system>`` で包む前の本文。書き込み失敗は API 応答を妨げない
+    ``notice`` はペルソナに見せる本文。push 失敗は API 応答を妨げない
     (WARNING に落として続行 — 通知はメインの DB 反映より優先度が低い)。
     """
-    # --- 応急処置 (2026-07-09): SAIMemory への挿入を一時停止 ---
-    # 削除・訂正はまとめて複数回行われることが多く (ごみ箱整理・一括修正)、その都度
-    # 1 件ずつ event_message を挿入するとメインライン文脈が通知で埋まり、通常の会話が
-    # コンテキストから押し出される問題が実運用で発覚した。呼び出し経路 (edit/delete/
-    # restore ハンドラ → 本関数) は残し、実挿入だけを止める。恒久対応 (1 操作分の訂正を
-    # まとめて 1 通知に集約する等) は memory_architecture_v2.md §5.1 で検討中。
-    # この return を外せば下の挿入経路がそのまま復活する。
-    LOGGER.debug("[core_memory] correction notify suppressed (stopgap): %s", notice[:80])
-    return
-
     if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
         return
-    body = "<system>[コア記憶の更新通知]\n" + notice + "\n</system>"
     try:
-        adapter.append_persona_message({
-            "role": "user",
-            "content": body,
-            # tz-aware UTC ISO 必須 (naive だと adapter が system TZ 解釈で ±9h ずれる)。
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "metadata": {"tags": ["internal", "event_message", "core_memory_correction"]},
-            "line_role": "main_line",
-            "scope": "committed",
-        })
+        adapter.push_perception(
+            "core_memory_correction", notice, reduce_key=reduce_key,
+        )
     except Exception:
-        LOGGER.warning("[core_memory] correction notify failed", exc_info=True)
+        LOGGER.warning("[core_memory] correction perception push failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +633,7 @@ def update_core_memory_item(
             adapter,
             f"ユーザーがあなたのコア記憶 c:{memory_id} の内容を書き換えました。\n"
             f"新しい内容:\n{content}",
+            reduce_key=f"c:{memory_id}",
         )
         return resp
 
@@ -684,6 +672,7 @@ def delete_core_memory_item(
             adapter,
             f"ユーザーがあなたのコア記憶 c:{memory_id} を削除しました（ごみ箱へ移動。復元可能）。\n"
             f"削除された内容:\n{removed}",
+            reduce_key=f"c:{memory_id}",
         )
         return resp
 
@@ -721,5 +710,6 @@ def restore_core_memory_item(
             adapter,
             f"ユーザーがあなたのコア記憶 c:{memory_id} をごみ箱から復元しました。\n"
             f"内容:\n{restored}",
+            reduce_key=f"c:{memory_id}",
         )
         return resp

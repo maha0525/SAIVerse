@@ -121,9 +121,22 @@ class SEARuntime:
         from sea.pulse_context import aspect_from_pulse_type
         _root_aspect = aspect_from_pulse_type(pulse_type)
 
+        # 知覚バッファの消費 (flush): 未消費の知覚を型別 reduce して 1 メッセージで
+        # SAIMemory へ書き出す。主観時間は Pulse でのみ進む ので、ここが消費点。
+        # 全 Pulse タイプ (user / schedule / auto) が run_meta_user を通る
+        # (pulse_controller.py) ため、ここ 1 箇所で全 Pulse の消費が成立する。
+        # 詳細: docs/intent/perception_buffer.md (Phase 1)。
+        try:
+            sai_mem = getattr(persona, "sai_memory", None)
+            if sai_mem is not None:
+                sai_mem.flush_perception_buffer()
+        except Exception:
+            LOGGER.exception("[perception_buffer] flush failed in run_meta_user")
+
         # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入。
         # event_message は世界の変化通知 = Track 横断のメタログなので
         # origin_track_id は付けない (handoff_2026-05-10)。
+        # (Phase 2 でこの経路も知覚バッファへ寄せる予定。現状は併存。)
         try:
             from saiverse.dynamic_state import DynamicStateManager
             DynamicStateManager.maybe_inject_event_messages(persona, self.manager)

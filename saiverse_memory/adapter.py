@@ -140,6 +140,12 @@ class SAIMemoryAdapter:
             # なので memory.db に相乗りする (sai_memory/purpose_tags.py 参照)。
             from sai_memory.purpose_tags import init_purpose_tags_tables
             init_purpose_tags_tables(self.conn)
+
+            # Initialize perception_buffer table (知覚バッファ, 冪等)。未消費の知覚を
+            # 溜める永続テーブルで、Pulse 消費時に messages へ書き出す。会話履歴とは
+            # 別テーブルだが memory.db に同居する (perception_buffer.py 参照)。
+            from sai_memory.perception_buffer import init_perception_buffer_table
+            init_perception_buffer_table(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None
@@ -343,6 +349,76 @@ class SAIMemoryAdapter:
         thread_suffix: Optional[str] = None,
     ) -> Optional[str]:
         return self._append_message(building_id=None, message=message, thread_suffix=thread_suffix)
+
+    # ------------------------------------------------------------------
+    # 知覚バッファ (Perception Buffer) — docs/intent/perception_buffer.md
+    # ------------------------------------------------------------------
+    #
+    # 未消費の知覚を溜め (push)、Pulse 開始時に型別 reduce して 1 メッセージで
+    # SAIMemory へ書き出す (flush = 消費)。書き込みは客観時間で随時、消費は主観
+    # 時間の一歩 (Pulse) でのみ。
+
+    def push_perception(
+        self,
+        kind: str,
+        content: str,
+        *,
+        reduce_key: Optional[str] = None,
+        salient: bool = False,
+        metadata: Optional[str] = None,
+    ) -> None:
+        """知覚を 1 件バッファに積む (まだ SAIMemory には入れない)。"""
+        if not self._ready:
+            return
+        from sai_memory.perception_buffer import push_perception
+        with self._db_lock:
+            push_perception(
+                self.conn, kind, content,
+                reduce_key=reduce_key, salient=salient, metadata=metadata,
+            )
+
+    def flush_perception_buffer(self) -> bool:
+        """未消費の知覚を型別 reduce して 1 メッセージで SAIMemory へ書き出す (Pulse 消費)。
+
+        Pulse 開始時に呼ばれる。書き出しに成功した項目だけバッファから削除する
+        (append 失敗時は残して次 Pulse で再試行 = 永続バッファゆえ知覚を落とさない)。
+        Returns: 1 件以上消費したら True。
+        """
+        if not self._ready:
+            return False
+        from sai_memory.perception_buffer import (
+            delete_perceptions,
+            format_perception_message,
+            list_pending,
+            reduce_perceptions,
+        )
+        with self._db_lock:
+            items = list_pending(self.conn)
+        if not items:
+            return False
+        text = format_perception_message(reduce_perceptions(items))
+        # tz-aware UTC ISO 必須 (naive だと system TZ 解釈で ±9h ずれる)。
+        # event_message = Track 横断メタログ (origin_track_id は付けない)。
+        from datetime import datetime, timezone
+        message = {
+            "role": "user",
+            "content": f"<system>{text}</system>",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"tags": ["internal", "event_message", "perception"]},
+            "line_role": "main_line",
+            "scope": "committed",
+        }
+        try:
+            self.append_persona_message(message)
+        except Exception:
+            LOGGER.warning(
+                "[perception_buffer] flush append failed; keeping %d item(s) for retry",
+                len(items), exc_info=True,
+            )
+            return False
+        with self._db_lock:
+            delete_perceptions(self.conn, [it.id for it in items])
+        return True
 
     def add_marks(self, message_id: str, spans) -> int:
         """層1マーカー (``==語句==``) から抽出された観測点を marks テーブルへ保存する。
