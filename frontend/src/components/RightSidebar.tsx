@@ -469,7 +469,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                             {item.type === 'picture' && !thumbErrors.has(item.id) ? (
                                                 <div className={styles.cardThumb}>
                                                     <img
-                                                        src={`/api/info/item/${item.id}`}
+                                                        src={`/api/info/item/${item.id}?thumb=1`}
                                                         alt={item.name}
                                                         loading="lazy"
                                                         onError={() => setThumbErrors(prev => {

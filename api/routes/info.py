@@ -412,7 +412,7 @@ def get_bag_contents(item_id: str, manager = Depends(get_manager)):
 
 
 @router.get("/item/{item_id}")
-def get_item_content(item_id: str, manager = Depends(get_manager)):
+def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager)):
     # Use manager.state.items if available, or manager.items
     items_map = {}
     if hasattr(manager, 'state') and hasattr(manager.state, 'items'):
@@ -537,6 +537,20 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
         # For now, let's return the content as FileResponse so the browser displays it if visited?
         # NO, frontend needs to Embed it.
         # API: GET /api/info/item/{id}/image -> returns image bytes
+        # thumb=1: 一覧表示用の軽量 webp サムネイルを返す (未生成ならその場で
+        # 生成してキャッシュ)。生成に失敗したらオリジナルへフォールバック。
+        if thumb:
+            from saiverse.image_thumbnail import get_or_create_thumbnail
+            try:
+                thumb_path = get_or_create_thumbnail(
+                    path, home=getattr(manager, "saiverse_home", None)
+                )
+                return FileResponse(thumb_path, media_type="image/webp")
+            except Exception as e:
+                LOGGER.warning(
+                    "Thumbnail generation failed for %s: %s; serving original",
+                    path, e,
+                )
         return FileResponse(path)
 
     elif item_type == "audio":
