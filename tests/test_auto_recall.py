@@ -47,7 +47,6 @@ class AutoRecallBase(unittest.TestCase):
         self._env_keys = [
             "SAIVERSE_AUTO_RECALL_THRESHOLD",
             "SAIVERSE_AUTO_RECALL_STICKY_TURNS",
-            "SAIVERSE_AUTO_RECALL_CHAR_BUDGET",
             "SAIVERSE_AUTO_RECALL_QUERY_MESSAGES",
             "SAIVERSE_AUTO_RECALL_TOPK",
             "SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET",
@@ -165,12 +164,14 @@ class TestStickyWindow(AutoRecallBase):
         self.assertTrue(r.injected)
 
 
-class TestCharBudget(AutoRecallBase):
+class TestStickyAlwaysShown(AutoRecallBase):
+    """intent doc §4.3: 台帳に残っている (粘着中の) アイテムは、新規採用が何件浮かんで
+    も解除されるまで必ず注入される。以前は char_budget で末尾の粘着分が切られ、台帳に
+    は残るのに LLM/UI に出ない幽霊になっていた (sticky 仕様違反バグ)。"""
 
-    def test_budget_truncates_items(self):
-        import os
-        # 5件全部+フッターは入らないが、数件+フッターなら収まる予算にする。
-        os.environ["SAIVERSE_AUTO_RECALL_CHAR_BUDGET"] = "300"
+    def test_all_ledger_items_injected(self):
+        # 台帳に載ったアイテムは (数の抑制は取り込み側の責務なので) 表示側で
+        # 予算足切りされず全件出る。
         hits = [
             _hit("chronicle", f"c{i}", embed_score=0.9 - i * 0.01,
                  title=f"Chronicle Lv1: 2025-06-0{i}",
@@ -179,23 +180,26 @@ class TestCharBudget(AutoRecallBase):
         ]
         res = self._run(hits, _msgs(("user", "話題")))
         self.assertTrue(res.injected)
-        # 全 5 件は入っていない (予算超過分は落ちる)。
-        self.assertLess(res.block.count("\n- "), 5)
-        self.assertGreaterEqual(res.block.count("\n- "), 1)
-        # フッター行 (ハンドル union) が必ず付く。
+        # 全 5 件が入る (chronicle は vivid サブ行を持たないので行数 == アイテム数)。
+        self.assertEqual(res.block.count("\n- "), 5)
         self.assertIn("深掘り用スペル", res.block)
         self.assertIn("chronicle_read_detail", res.block)
-        # ブロックは header + 少数行 + フッターのみ (全件連結 600+ 字にはならない)
-        self.assertLess(res.char_count, 400)
 
-    def test_footer_alone_exceeding_budget_skips_injection(self):
-        import os
-        # フッター文言だけでも超えるほど極端に小さい予算では注入しない。
-        os.environ["SAIVERSE_AUTO_RECALL_CHAR_BUDGET"] = "5"
-        hits = [_hit("chronicle", "c1", embed_score=0.9, content="X" * 80)]
-        res = self._run(hits, _msgs(("user", "話題")))
-        self.assertFalse(res.injected)
-        self.assertIsNone(res.block)
+    def test_sticky_item_survives_flood_of_fresh_accepts(self):
+        # ターン1: 記憶 A が浮かぶ (stale=0)。
+        a = [_hit("fragment", "A", embed_score=0.9, title="記憶A", content="Aの内容")]
+        r1 = self._run(a, _msgs(("user", "Aの話")))
+        self.assertIn("記憶A", r1.block)
+        # ターン2: A は再ヒットしない (stale=1 で粘着継続) が、新規が大量に浮かぶ。
+        flood = [
+            _hit("fragment", f"N{i}", embed_score=0.9, title=f"新規{i}", content="X" * 80)
+            for i in range(8)
+        ]
+        r2 = self._run(flood, _msgs(("user", "別の話")))
+        # 新規8件すべてに加え、粘着中の A も残る (budget で押し出されない = 幽霊化しない)。
+        self.assertIn("記憶A", r2.block)
+        for i in range(8):
+            self.assertIn(f"新規{i}", r2.block)
 
 
 class TestFooterHandles(AutoRecallBase):

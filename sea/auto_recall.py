@@ -75,11 +75,6 @@ def get_sticky_turns() -> int:
     return _env_int("SAIVERSE_AUTO_RECALL_STICKY_TURNS", 3)
 
 
-# 注入ブロック全体の文字数上限。超過分は落とす。
-def get_char_budget() -> int:
-    return _env_int("SAIVERSE_AUTO_RECALL_CHAR_BUDGET", 1200)
-
-
 # クエリに含める直近メッセージ数 (user/assistant 両ロール)。
 #
 # rev2: 既定を 4 → 1 に変更。air_city_a の実 memory.db で測定した結果、直近4件
@@ -731,7 +726,6 @@ def run_auto_recall(
     threshold = get_similarity_threshold()
     msg_threshold_offset = get_message_threshold_offset()
     sticky_turns = get_sticky_turns()
-    char_budget = get_char_budget()
     topk = get_topk()
 
     context_ids = _context_message_ids(messages)
@@ -774,10 +768,16 @@ def run_auto_recall(
     else:
         try:
             from sai_memory.unified_recall import unified_recall
+            # Chronicle は自動想起の対象から外す。Chronicle は人生の背骨を要約した
+            # 広い文なので意味ベクトルが多くの話題に薄く当たり、どんなクエリでも
+            # cosine が高めに出て門を通りやすい (「ふと浮かぶ」より「常に浮かぶ」に
+            # なる)。かつ要約ゆえ具体シーンが無く、会話に連想として繋げにくい
+            # (fragment / message は「そのときの会話」があるので連想として振る舞える)。
+            # 将来はソース種別ごとの「思い出しやすさ」に一般化する予定 (§4 参照)。
             hits = unified_recall(
                 conn, embedder, query,
                 topk=topk,
-                search_chronicle=True,
+                search_chronicle=False,
                 search_memopedia=True,
                 search_fragments=True,
                 search_messages=True,
@@ -864,41 +864,32 @@ def run_auto_recall(
         LOGGER.debug("[auto_recall] ledger empty after update; no injection (persona=%s)", persona_id)
         return AutoRecallResult(False, None, query, len(hits), accepted_count, 0, 0)
 
-    # --- 注入ブロック組み立て: 台帳の全アイテムを、鮮度 (stale_turns 昇順) →
-    #     スコア降順で並べ、文字数上限まで採用 ---
+    # --- 注入ブロック組み立て: 台帳に残っているアイテムを全件注入する ---
+    # 台帳に残っている = まだ sticky_turns 以内 (= 粘着中) なので、intent doc §4.3 の
+    # sticky 仕様「一度浮かんだ記憶はしきい値を割っても解除されるまで注入を維持する」
+    # に従い、全件を見せる。鮮度 (stale_turns 昇順) → スコア降順の並びは表示順のみの意味。
+    #
+    # 以前はここで注入ブロックの文字数上限 (char_budget) による足切りをしていたが、
+    # それが粘着アイテムを削り落として「台帳には残っているのに LLM にも UI にも
+    # 出ない幽霊」にする sticky 仕様違反バグだった (新規採用 stale=0 が先頭を占め、
+    # 粘着 stale>=1 が末尾で毎ターン予算超過により消えていた)。浮かぶ「数」の抑制は
+    # 取り込み側 (1ターンの新規採用数) の責務であって、表示側の予算足切りではない。
     ordered = sorted(
         ledger.items.values(),
         key=lambda it: (it.stale_turns, -it.best_score),
     )
     header = "ふと浮かんだ記憶:"
-    lines: List[str] = []
-    included_items: List[_LedgerItem] = []
-    total = len(header) + 1  # header + 改行
-    for item in ordered:
-        line = _format_line(item)
-        # +1 は行間の改行分。
-        if total + len(line) + 1 > char_budget and lines:
-            LOGGER.debug(
-                "[auto_recall] char budget %d reached; %d/%d items included",
-                char_budget, len(lines), len(ordered),
-            )
-            break
-        lines.append(line)
-        included_items.append(item)
-        total += len(line) + 1
-
-    if not lines:
-        return AutoRecallResult(False, None, query, len(hits), accepted_count, len(ledger.items), 0)
+    included_items: List[_LedgerItem] = list(ordered)
+    lines: List[str] = [_format_line(item) for item in included_items]
 
     # --- 鮮明想起 (§C, vivid recall) — rev4: 注入順序決定後の「全 fragment 項目」に
     #     「そのときの会話」サブ行を添える (先頭項目だけ最大2行、それ以外は1行 =
-    #     鮮明度の勾配)。fragment + chronicle_entry_id を持つ項目のみ対象。
-    #     LLM は呼ばない。文字数予算は VIVID_CHARS を「全項目の vivid 合計」として
-    #     共有し、並び順 (鮮度→スコア = included_items の順) に消費、尽きたら
-    #     残りの項目はスキップする。
+    #     鮮明度の勾配)。fragment + chronicle_entry_id を持つ項目のみ対象。LLM は
+    #     呼ばない。vivid サブ行の合計は VIVID_CHARS を予算に並び順で消費し、尽きたら
+    #     残りの項目はスキップする (これは vivid サブ行だけの上限。想起アイテム本体は
+    #     §4.3 に従い常に全件出す)。
     vivid_lines_by_index: Dict[int, List[str]] = {}
-    vivid_char_budget = get_vivid_char_budget()
-    vivid_budget_remaining = vivid_char_budget
+    vivid_budget_remaining = get_vivid_char_budget()
     for idx, item in enumerate(included_items):
         if item.source_type != "fragment" or not item.chronicle_entry_id:
             continue
@@ -922,34 +913,13 @@ def run_auto_recall(
         block_len = sum(len(ln) + 1 for ln in item_lines)
         vivid_lines_by_index[idx] = item_lines
         vivid_budget_remaining -= block_len
-        total += block_len
         LOGGER.debug(
             "[auto_recall][vivid] attached %d vivid line(s) to item[%d] %s/%s (+%d chars, remaining budget=%d)",
             len(item_lines), idx, item.source_type, item.source_id, block_len, vivid_budget_remaining,
         )
 
     # --- フッター行 (§B: 冗長排除) — 含まれたアイテムのハンドル union を1行だけ出す。
-    #     文字数予算にフッターも含める。予算超過なら末尾のアイテムから間引く
-    #     (間引くとハンドル union が縮む可能性があるので都度再計算する)。
     footer = _format_footer(included_items)
-    while lines and total + len(footer) + 1 > char_budget:
-        drop_idx = len(included_items) - 1
-        lines.pop()
-        dropped = included_items.pop()
-        total -= len(_format_line(dropped)) + 1
-        dropped_vivid = vivid_lines_by_index.pop(drop_idx, None)
-        if dropped_vivid:
-            total -= sum(len(ln) + 1 for ln in dropped_vivid)
-        footer = _format_footer(included_items)
-        LOGGER.debug(
-            "[auto_recall] dropped item to fit footer within char budget: %s/%s",
-            dropped.source_type, dropped.source_id,
-        )
-
-    if not lines:
-        # フッターだけでも予算を超える極端なケース。何も注入しない。
-        LOGGER.debug("[auto_recall] footer alone exceeds char budget; no injection (persona=%s)", persona_id)
-        return AutoRecallResult(False, None, query, len(hits), accepted_count, len(ledger.items), 0)
 
     # 各行の直下に、その項目に割り当てられた vivid サブ行 (あれば) を挿入する。
     body_lines: List[str] = []
