@@ -1,6 +1,6 @@
 # Intent Document: 知覚バッファ (Perception Buffer)
 
-**ステータス**: 実装中 (Phase 1a=器＋メタ記憶訂正＝quon で**実機検証済み**。Phase 2a=3直挿入撤去・Phase 3=プレビュー閲覧＝**実装済み・実機検証待ち**。残: Phase 1b/2b=起動力ディスパッチャ＋会話統合〔Phase 5 UC-2 と重なる設計フォーク・後回し確定〕、Phase 3 の項目編集。2026-07-09)
+**ステータス**: Phase 1a/2a/3＋移動時拡充まで**実機検証済み・完了** (quon で確認、ペルソナ側評判も良好, 2026-07-09)。残 (いずれも後回し): Phase 4=凍結概念の一般化 (独立着手可)、Phase 1b/2b=起動力ディスパッチャ＋会話統合 (Phase 5 UC-2 と重なる)、Phase 3 の項目編集。
 **位置付け**: 「ペルソナが発話していない間に外界から得る知覚」を統一的に扱う永続バッファ。現在バラバラに実装されている世界状態の差分通知・メタ記憶訂正通知・入室時想起・他ペルソナ発話取り込みを、一つの時間モデルの派生として畳む横断基盤。
 **前提**: `cached_head_architecture.md` (Section / 差分通知 / 末尾注入)、`persona_cognition/pulse_dispatch.md` (Pulse 起動契機)、`memory_architecture_v2.md` §5.1 (コア記憶訂正 = 知覚バッファの一利用者)
 
@@ -181,9 +181,9 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 - **Phase 0（応急・完了）**: メタ記憶訂正の SAIMemory 挿入停止（2026-07-09。通知スパム回避。Phase 1 で恒久対応に置換済み）。
 - **Phase 1a（実機検証済み, 2026-07-09）**: 知覚バッファの器（**永続ストア** `sai_memory/perception_buffer.py`・型付き項目・型別 reduce・Pulse 消費で 1 メッセージ flush・検知と消費の分離〈§4.5〉）を実装。メタ記憶訂正を最初の利用者として載せ替え（`_notify_persona_correction` → `adapter.push_perception`、reduce_key=`c:{id}` で同一記憶の連続操作を集約）。消費は `run_meta_user` 冒頭の `flush_perception_buffer`（全 Pulse タイプの単一入口）。**quon_city_a で実機確認**: コア記憶3件を復元→バッファに3件溜まる（SAIMemory 0）→会話（Pulse）で1メッセージに畳まれ SAIMemory へ→バッファ空、まで全経路通過。
-- **Phase 2a（3直挿入撤去・実装済み・実機検証待ち 2026-07-09）**: 世界状態差分（world_state）・入室想起（persona_recall）・メタ記憶訂正の**3直挿入を全廃**し、全て知覚バッファへ push → 呼び出し元の flush で消費する形に統一。`inject_diff_notifications` は検知器（push）に降格、snapshot 比較は残す（§9-B）。4呼び出しサイトの timing 契約を検知/消費分離（§4.5）で一貫化: pulse開始=末尾flush / pulse中(metabolism直後)=即flush / 移動時(pulse外)=pushのみ(次pulse消費、＝主観時間停止中の知覚は詰まって待つ、が正しくなった)。
+- **Phase 2a（3直挿入撤去・実機検証済み 2026-07-09）**: 世界状態差分（world_state）・入室想起（persona_recall）・メタ記憶訂正の**3直挿入を全廃**し、全て知覚バッファへ push → 呼び出し元の flush で消費する形に統一。`inject_diff_notifications` は検知器（push）に降格、snapshot 比較は残す（§9-B）。4呼び出しサイトの timing 契約を検知/消費分離（§4.5）で一貫化: pulse開始=末尾flush / pulse中(metabolism直後)=即flush / 移動時(pulse外)=pushのみ(次pulse消費、＝主観時間停止中の知覚は詰まって待つ、が正しくなった)。
 - **Phase 1b / 2b（設計フォーク・未着手）**: **起動力ディスパッチャ（§4.4）＋会話取り込み（auto_ingest）統合**。「絶対反応する」フラグを §3.1 全契機に付与し、他ペルソナ発話が Pulse を起こせるようにする。これは**新能力＝Phase 5 UC-2（対ペルソナ social Track 入口）と重なる**（単なる rewire でなく、(1) 会話型知覚を flush で個別メッセージとして render する拡張、(2) salience 判定ルール、(3) pulse_controller/AutonomyManager との接続、の設計判断を含む）。Phase 5 と足並みを揃えて設計してから実装する。※メタ記憶訂正・world_state・persona_recall は起動力なし（溜まる）なので 2a では不要だった。
-- **Phase 3（閲覧・実装済み・実機検証待ち 2026-07-09）**: 未消費バッファの**閲覧（read-only）**を `ContextPreviewModal` に 1 section「知覚バッファ（未消費・次のPulseで反映）」として追加（`preview_context` が list_pending→reduce→format で実 flush と同じ形に畳み、section・トークン推定を返す。フロントは section 汎用描画なので変更不要）。read-only 徹底: プレビューで検知（snapshot 比較）は走らせない（snapshot を進める副作用回避）ので、既に溜まっている未消費分のみ表示。項目編集（削除 / 抑制 / 本文）とペルソナホームからのアクセスは後続。
+- **Phase 3（閲覧・実機検証済み 2026-07-09）**: 未消費バッファの**閲覧（read-only）**を `ContextPreviewModal` に 1 section「知覚バッファ（未消費・次のPulseで反映）」として追加（`preview_context` が list_pending→reduce→format で実 flush と同じ形に畳み、section・トークン推定を返す。フロントは section 汎用描画なので変更不要）。read-only 徹底: プレビューで検知（snapshot 比較）は走らせない（snapshot を進める副作用回避）ので、既に溜まっている未消費分のみ表示。項目編集（削除 / 抑制 / 本文）とペルソナホームからのアクセスは後続。
 - **Phase 4（構想）**: 凍結概念（Cached Head / visual / weave）の知覚バッファ一般形への寄せ。
 
 ---
