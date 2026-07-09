@@ -83,6 +83,31 @@ class DynamicStateManager:
                 "[dynamic_state] pre-dispatch diff inject failed for %s -> %s",
                 getattr(persona, "persona_id", "?"), building_id, exc_info=True,
             )
+
+        # 既に同じ Building にいる他ペルソナにも「この入室」を検知させる。
+        # 入室は客観時間のイベントなので、居合わせる全員の知覚バッファへ push して
+        # おく (消費は各自の次 Pulse)。これが無いと、既存者は自分が次に Pulse を
+        # 打つまで新入りに気づけず、プレビューにも出ない (実運用で顕在化した穴、
+        # 2026-07-09)。inject_diff_notifications は検知器 (push のみ、flush しない)
+        # なので、居合わせる側を起こさずバッファに積むだけ。詳細: perception_buffer.md
+        try:
+            from sea.head_pipeline import inject_diff_notifications
+            newcomer_id = getattr(persona, "persona_id", None)
+            personas_map = getattr(manager, "personas", {})
+            occupants = list(getattr(manager, "occupants", {}).get(building_id, []))
+            for oid in occupants:
+                if oid == newcomer_id:
+                    continue
+                other = personas_map.get(oid)
+                if other is None:
+                    continue  # user 等・未ロードのペルソナは対象外
+                inject_diff_notifications(other, manager, building_id)
+        except Exception:
+            LOGGER.warning(
+                "[dynamic_state] notify existing occupants failed on entry -> %s",
+                building_id, exc_info=True,
+            )
+
         _dispatch_head_event(persona, manager, building_id, "building_entered")
 
     @staticmethod
