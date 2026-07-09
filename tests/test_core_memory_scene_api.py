@@ -343,6 +343,10 @@ class CoreMemorySceneApiTest(unittest.TestCase):
             })
         return out
 
+    # 応急処置 (2026-07-09): 仮想センサーの SAIMemory 挿入を一時停止中
+    # (通知過多でメインライン文脈が埋まる問題)。恒久対応 (バッチ集約) が入ったら
+    # 挿入形式に合わせて書き直す。memory_architecture_v2.md §5.1 参照。
+    @unittest.skip("仮想センサーの SAIMemory 挿入は応急停止中 (通知過多対策)")
     def test_edit_notifies_persona(self):
         mid = self._seed_core_memory("旧い本文", confirmed=0)
         req = UpdateCoreMemoryRequest(content="ユーザーが直した新しい本文")
@@ -359,6 +363,7 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertIn("event_message", n["tags"])
         self.assertIn("core_memory_correction", n["tags"])
 
+    @unittest.skip("仮想センサーの SAIMemory 挿入は応急停止中 (通知過多対策)")
     def test_delete_notifies_with_removed_content(self):
         mid = self._seed_core_memory("消される秘密の内容")
         delete_core_memory_item("tester", mid, manager=self.manager)
@@ -368,6 +373,7 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertIn("消される秘密の内容", notices[0]["content"])
         self.assertIn("削除", notices[0]["content"])
 
+    @unittest.skip("仮想センサーの SAIMemory 挿入は応急停止中 (通知過多対策)")
     def test_restore_notifies(self):
         mid = self._seed_core_memory("復元される内容")
         delete_core_memory_item("tester", mid, manager=self.manager)   # 通知1

@@ -65,6 +65,16 @@ def _notify_persona_correction(adapter, notice: str) -> None:
     ``notice`` は ``<system>`` で包む前の本文。書き込み失敗は API 応答を妨げない
     (WARNING に落として続行 — 通知はメインの DB 反映より優先度が低い)。
     """
+    # --- 応急処置 (2026-07-09): SAIMemory への挿入を一時停止 ---
+    # 削除・訂正はまとめて複数回行われることが多く (ごみ箱整理・一括修正)、その都度
+    # 1 件ずつ event_message を挿入するとメインライン文脈が通知で埋まり、通常の会話が
+    # コンテキストから押し出される問題が実運用で発覚した。呼び出し経路 (edit/delete/
+    # restore ハンドラ → 本関数) は残し、実挿入だけを止める。恒久対応 (1 操作分の訂正を
+    # まとめて 1 通知に集約する等) は memory_architecture_v2.md §5.1 で検討中。
+    # この return を外せば下の挿入経路がそのまま復活する。
+    LOGGER.debug("[core_memory] correction notify suppressed (stopgap): %s", notice[:80])
+    return
+
     if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
         return
     body = "<system>[コア記憶の更新通知]\n" + notice + "\n</system>"

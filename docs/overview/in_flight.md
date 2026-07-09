@@ -45,7 +45,7 @@
 |---|---|---|---|---|---|
 | 🟠 実装中 | 自律行動v2 活性化配線 | playbook 5本 import → `--real` 行動テスト(まはーレビュー) → 起床/就寝/セッション終了/会話終了/on_event の配線 → 旧 track_autonomous 停止 | 私 → まはー | [autonomous_behavior_v2.md](../intent/autonomous_behavior_v2.md) | 2026-07-08 |
 | 🟣 検証待ち | gold_panning 砂金採り | SCENE 除去(NOTE のみ化)＋**クローズ window 起点を pan マーカー基準に修正**(metabolism anchor 流用で採取範囲が cache 都合に縮む問題、sophie 実機で判明)は完了。残: 実機で初回採取・defer-to-hot の確認 | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
-| 🟣 検証待ち | コア記憶の訂正導線 + ごみ箱 (短期対応) | **DB層✅ / API層✅ / メモリタブUI✅**(削除は実機確認済) **/ 仮想センサー✅**(edit/delete/restore→ペルソナへ event_message 通知、confirm は不通知、pytest 40件)。残: **未確認バッジの置き場所を確定**(ペルソナ固有アフォーダンス、住民/神モードUI と交差 → まはー判断) → 実装 | まはー(バッジ置き場) → 私 | [memory_architecture_v2.md](../intent/memory_architecture_v2.md) §5.1 | 2026-07-08 |
+| 🟠 実装中 | コア記憶の訂正導線 + ごみ箱 (短期対応) | **DB層✅ / API層✅ / メモリタブUI✅**(削除は実機確認済)。**仮想センサーは 2026-07-09 に SAIMemory 挿入を応急停止**(削除/訂正の一括操作で通知が会話文脈を埋める問題、実機発覚。経路は残し実挿入だけ early return)。残①: **訂正通知のバッチ集約**を設計→実装(集約単位=操作/時間窓/セッション終了フラッシュが論点)。残②: 未確認バッジの置き場所を確定(ペルソナ固有アフォーダンス、住民/神モードUI と交差) | まはー(集約方針+バッジ置き場) → 私 | [memory_architecture_v2.md](../intent/memory_architecture_v2.md) §5.1 | 2026-07-09 |
 | 🔵 設計中 | 神モードUI (住民/神モードの二層プラットフォーム) | 自律行動の本格化で局所干渉では足りず俯瞰視点が必要に。住民モード(Building 主語・世界に入って暮らす)と神モード(Persona/世界を俯瞰・管理する創造主視点)を別UI・別タブに分離。Persona ホームは神モードの一要素。世界観 intent 起草 → 部分再設計の段階設計 | まはー(設計) | (intent 未起草) | 2026-07-08 |
 | 🟡 実装待ち | quick_spell 本体実装 | サブエージェント委譲で実装(クオンのデータ修復は完了済) | まはー(GO) | [quick_spell.md](../intent/quick_spell.md) | 2026-07-08 |
 | 🟡 実装待ち | runtime_llm.py 巨大 node 分割 | Phase 0(重複ヘルパ抽出)から着手。副産物で Beat 型導入 | 私 / まはー | [runtime_llm_node_split_design.md](../issues/runtime_llm_node_split_design.md) | 2026-07-08 |
