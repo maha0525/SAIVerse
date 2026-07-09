@@ -7,6 +7,7 @@ from typing import Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from api.deps import get_manager
+from saiverse.data_paths import get_personas_dir
 from .models import (
     UpdateMemopediaPageRequest,
     CreateMemopediaPageRequest,
@@ -451,7 +452,7 @@ def _run_memopedia_generation(
         _update_memopedia_job(job_id, message="Initializing...")
         
         # Get persona database path
-        persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+        persona_dir = get_personas_dir() / persona_id
         db_path = persona_dir / "memory.db"
         
         if not db_path.exists():
@@ -573,7 +574,7 @@ async def start_memopedia_generation(
     6. Save as Memopedia page
     """
     # Validate that persona exists
-    persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+    persona_dir = get_personas_dir() / persona_id
     if not persona_dir.exists():
         raise HTTPException(status_code=404, detail=f"Persona not found: {persona_id}")
     

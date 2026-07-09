@@ -24,7 +24,7 @@ from tqdm import tqdm as _tqdm_for_patch
 _tqdm_for_patch.monitor_interval = 0
 
 # Migrate legacy user_data/ to ~/.saiverse/user_data/ if needed
-from saiverse.data_paths import migrate_legacy_user_data
+from saiverse.data_paths import get_saiverse_home, migrate_legacy_user_data
 migrate_legacy_user_data()
 
 # Migrate legacy per-addon persistent data dirs to the new addon_data/ layout.
@@ -515,7 +515,7 @@ def main():
 
     # Mount uploads directory for user-attached images FIRST (more specific path)
     # Access via /api/static/uploads/filename.png
-    uploads_dir = Path.home() / ".saiverse" / "image"
+    uploads_dir = get_saiverse_home() / "image"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 

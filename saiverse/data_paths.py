@@ -305,6 +305,16 @@ def load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def get_personas_dir() -> Path:
+    """Get the canonical persona data root (SAIVERSE_HOME/personas)."""
+    return get_saiverse_home() / "personas"
+
+
+def get_persona_memory_db(persona_id: str) -> Path:
+    """Get the canonical SAIMemory database path for a persona."""
+    return get_personas_dir() / persona_id / "memory.db"
+
+
 def get_user_icons_dir() -> Path:
     """Get the user icons directory, creating it if needed."""
     icons_dir = USER_DATA_DIR / ICONS_DIR

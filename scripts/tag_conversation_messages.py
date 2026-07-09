@@ -2,6 +2,8 @@
 """Add missing 'conversation' tags to SAIMemory messages."""
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import sqlite3
@@ -52,7 +54,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    db_path = Path(args.db) if args.db else Path.home() / ".saiverse" / "personas" / args.persona / "memory.db"
+    db_path = Path(args.db) if args.db else Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / args.persona / "memory.db"
     if not db_path.exists():
         parser.error(f"memory.db not found at {db_path}")
 

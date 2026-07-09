@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import logging
@@ -22,8 +24,8 @@ LOGGER = logging.getLogger("sai_memory.migrate")
 
 load_dotenv()
 
-PERSONA_ROOT = Path.home() / ".saiverse" / "personas"
-CITIES_ROOT = Path.home() / ".saiverse" / "cities"
+PERSONA_ROOT = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas"
+CITIES_ROOT = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "cities"
 
 
 def _parse_log_path(entry: str) -> Tuple[Optional[str], Path]:

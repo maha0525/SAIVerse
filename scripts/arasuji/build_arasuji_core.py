@@ -85,7 +85,7 @@ ENV_CONSOLIDATION_SIZE = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", str(DE
 
 def get_persona_db_path(persona_id: str) -> Path:
     """Get the path to a persona's memory.db file."""
-    return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    return Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
 
 
 def fetch_messages(

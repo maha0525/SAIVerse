@@ -496,7 +496,8 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
             if saiverse_home:
                 full_path = saiverse_home / file_path
             else:
-                full_path = Path.home() / ".saiverse" / file_path
+                from saiverse.data_paths import get_saiverse_home
+                full_path = get_saiverse_home() / file_path
             
             if full_path.exists():
                 item_type = i.item_type.lower()

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import sys
@@ -62,7 +64,7 @@ def _reembed_persona(
     chunk_max: int,
     force: bool = False,
 ) -> None:
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
     if not db_path.exists():
         print(f"[skip] memory.db not found for {persona_id}: {db_path}", file=sys.stderr)
         return

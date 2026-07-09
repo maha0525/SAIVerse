@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
+
 import argparse
 import logging
 import sys
@@ -16,8 +18,8 @@ from sai_memory.backup import BackupError, run_backup
 
 load_dotenv()
 
-DEFAULT_BACKUP_ROOT = Path.home() / ".saiverse" / "backups" / "saimemory_rdiff"
-DEFAULT_PERSONA_ROOT = Path.home() / ".saiverse" / "personas"
+DEFAULT_BACKUP_ROOT = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "backups" / "saimemory_rdiff"
+DEFAULT_PERSONA_ROOT = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas"
 
 
 def parse_args() -> argparse.Namespace:

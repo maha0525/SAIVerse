@@ -37,7 +37,8 @@ def _resolve_image_path(path_or_url: Optional[str]) -> Optional[str]:
     # Handle API URL format
     if path_or_url.startswith(API_MEDIA_PREFIX):
         filename = path_or_url[len(API_MEDIA_PREFIX):]
-        return str(Path.home() / ".saiverse" / "image" / filename)
+        from saiverse.data_paths import get_saiverse_home
+        return str(get_saiverse_home() / "image" / filename)
 
     # Handle saiverse:// URI format
     if path_or_url.startswith("saiverse://"):
@@ -72,7 +73,8 @@ def _resolve_item_file_path(manager, file_path_str: str) -> Optional[str]:
     # Try recovery strategies using saiverse_home
     home = getattr(manager, 'saiverse_home', None)
     if not home:
-        home = Path.home() / ".saiverse"
+        from saiverse.data_paths import get_saiverse_home
+        home = get_saiverse_home()
 
     # Strategy 0: Relative path (new format)
     if not path.is_absolute():

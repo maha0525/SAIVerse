@@ -5,6 +5,7 @@ import time
 
 LOGGER = logging.getLogger(__name__)
 from api.deps import get_manager
+from saiverse.data_paths import get_persona_memory_db
 from .models import (
     ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest, CreateMessageRequest
 )
@@ -244,7 +245,7 @@ def rescue_stelis_thread(persona_id: str, manager=Depends(get_manager)):
         )
 
     thread_id = active_summary["thread_id"]
-    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail="Memory database not found")
 
