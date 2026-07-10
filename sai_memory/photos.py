@@ -51,11 +51,20 @@ class Photo:
     created_at: int                    # epoch 秒 (clock 経由)
     pasted_to: Optional[str]           # 貼り付け先の来歴 ref (未貼り付けは None = 土壌プール)
     origin_episode_ref: Optional[str]  # 撮られた時に開いていた出来事 (``episode:N``)
+    # Per-DB sequential ID (P2b, 2026-07-10): Memory Atlas の ``p:N`` 短縮参照。
+    # 「全文は写真そのものを読む」= memory_read p:N の宛先 (concept_consolidation.md
+    # 「clip と写真の見え方」)。arasuji_entries / memopedia_pages の short_id と同じ流儀。
+    short_id: Optional[int] = None
 
     @property
     def is_range(self) -> bool:
         """範囲写真なら True。"""
         return self.message_id_end is not None
+
+    @property
+    def ref(self) -> str:
+        """ペルソナ提示用の参照 (例: ``p:3``)。short_id 未採番なら photo_id で代替。"""
+        return f"p:{self.short_id}" if self.short_id is not None else self.photo_id
 
 
 def _now_epoch() -> int:
@@ -70,12 +79,46 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return cur.fetchone() is not None
 
 
+def _backfill_photo_short_ids(conn: sqlite3.Connection) -> None:
+    """short_id を持たない既存写真に採番する (migration helper、冪等)。
+
+    created_at 昇順 (同点は rowid 昇順 = 挿入順) で MAX+1 から採番する
+    (arasuji の _backfill_chronicle_short_ids と同じ流儀。旧 marks からの
+    移行行にもここで番号が付く)。
+    """
+    cur = conn.execute(
+        "SELECT photo_id FROM photos WHERE short_id IS NULL "
+        "ORDER BY created_at ASC, rowid ASC"
+    )
+    rows = cur.fetchall()
+    max_cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM photos")
+    next_id = max_cur.fetchone()[0] + 1
+    for (photo_id,) in rows:
+        conn.execute(
+            "UPDATE photos SET short_id = ? WHERE photo_id = ?",
+            (next_id, photo_id),
+        )
+        next_id += 1
+    if rows:
+        conn.commit()
+
+
+def _next_photo_short_id(conn: sqlite3.Connection) -> int:
+    """新規写真の次の short_id (MAX + 1、初回は 1)。"""
+    cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM photos")
+    return cur.fetchone()[0] + 1
+
+
 def init_photos_tables(conn: sqlite3.Connection) -> None:
     """photos テーブルを初期化する (冪等)。
 
     旧 ``marks`` テーブル (点写真のみ・列名が mark 語彙) が存在し、``photos`` が
     未作成の DB では、一度だけデータを移行して marks を DROP する
     (mark_id → photo_id / harvested_to → pasted_to / message_id_end = NULL)。
+
+    short_id (``p:N``、P2b) は新規 DB では DDL に含まれ、既存 DB では追加系
+    migration (ALTER) で足す。NULL 行の backfill は marks 移行行にも番号を
+    振る必要があるため、列の有無に関わらず毎回呼ぶ (NULL 行が無ければ no-op)。
     """
     has_photos = _table_exists(conn, "photos")
     conn.execute(
@@ -88,7 +131,8 @@ def init_photos_tables(conn: sqlite3.Connection) -> None:
             purpose_ref TEXT,
             created_at INTEGER NOT NULL,
             pasted_to TEXT,
-            origin_episode_ref TEXT
+            origin_episode_ref TEXT,
+            short_id INTEGER
         )
         """
     )
@@ -104,6 +148,14 @@ def init_photos_tables(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("DROP TABLE marks")
+    # Migration (P2b, 2026-07-10): 既存 DB (short_id 列なし) への追加系 migration
+    try:
+        conn.execute("SELECT short_id FROM photos LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE photos ADD COLUMN short_id INTEGER")
+        conn.commit()
+    # backfill は毎回 (冪等・NULL 行のみ対象): marks 移行行 / ALTER 直後の既存行
+    _backfill_photo_short_ids(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_photos_message ON photos(message_id)"
     )
@@ -114,12 +166,15 @@ def init_photos_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_photos_pasted ON photos(pasted_to)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_short_id ON photos(short_id)"
+    )
     conn.commit()
 
 
 _PHOTO_COLS = (
     "photo_id, message_id, quote, message_id_end, purpose_ref, "
-    "created_at, pasted_to, origin_episode_ref"
+    "created_at, pasted_to, origin_episode_ref, short_id"
 )
 
 
@@ -133,6 +188,7 @@ def _row_to_photo(row: tuple) -> Photo:
         created_at=int(row[5]),
         pasted_to=row[6],
         origin_episode_ref=row[7],
+        short_id=int(row[8]) if len(row) > 8 and row[8] is not None else None,
     )
 
 
@@ -168,13 +224,14 @@ def add_photo(
         created_at=_now_epoch(),
         pasted_to=pasted_to,
         origin_episode_ref=origin_episode_ref,
+        short_id=_next_photo_short_id(conn),
     )
     conn.execute(
-        f"INSERT INTO photos ({_PHOTO_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO photos ({_PHOTO_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             photo.photo_id, photo.message_id, photo.quote, photo.message_id_end,
             photo.purpose_ref, photo.created_at, photo.pasted_to,
-            photo.origin_episode_ref,
+            photo.origin_episode_ref, photo.short_id,
         ),
     )
     conn.commit()
@@ -185,6 +242,15 @@ def get_photo(conn: sqlite3.Connection, photo_id: str) -> Optional[Photo]:
     """photo_id で 1 枚引く。無ければ None。"""
     cur = conn.execute(
         f"SELECT {_PHOTO_COLS} FROM photos WHERE photo_id = ?", (photo_id,)
+    )
+    row = cur.fetchone()
+    return _row_to_photo(row) if row else None
+
+
+def get_photo_by_short_id(conn: sqlite3.Connection, short_id: int) -> Optional[Photo]:
+    """short_id (``p:N`` の N) で 1 枚引く。無ければ None。"""
+    cur = conn.execute(
+        f"SELECT {_PHOTO_COLS} FROM photos WHERE short_id = ?", (short_id,)
     )
     row = cur.fetchone()
     return _row_to_photo(row) if row else None

@@ -5,7 +5,8 @@ concept_consolidation.md「P2: 統一スペル動詞 v0.2」の read。中身が
 取らない、既定の行為。常に見える状態を保ちたいときは ``memory_open`` を使う。
 
 対応 ref: ``m:N`` (Memopedia) / ``core`` (コア記憶全件) / ``c:N`` (コア記憶1件)
-/ ``ch:N`` (Chronicle)。``task:N`` (目的の地図) は P2b まで未対応。
+/ ``ch:N`` (Chronicle) / ``p:N`` (写真 — 写真が写す生ログの全文)。
+``task:N`` (目的の地図) は P2c まで未対応。
 """
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ from saiverse import memory_atlas
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
+
+from builtin_data.tools._core_memory_common import resolve_persona_display_name
 
 
 def memory_read(ref: str) -> str:
@@ -30,8 +33,9 @@ def memory_read(ref: str) -> str:
     if not adapter.is_ready():
         raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
+    persona_name = resolve_persona_display_name(persona_id)
     try:
-        return memory_atlas.read_page(adapter, ref)
+        return memory_atlas.read_page(adapter, ref, persona_name=persona_name)
     except memory_atlas.AtlasRefError as exc:
         return f"Error: {exc}"
 
@@ -45,14 +49,14 @@ def schema() -> ToolSchema:
             "（机の場所は取りません）。常に見える状態を保ちたい場合は "
             "memory_open を使ってください。"
             "参照は m:N（Memopedia）/ core（コア記憶全件）/ c:N（コア記憶1件）/ "
-            "ch:N（Chronicle）の形式です。"
+            "ch:N（Chronicle）/ p:N（写真 — その写真が写す会話の生ログ全文）の形式です。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "読みたいページの参照（例: m:3 / core / c:2 / ch:5）",
+                    "description": "読みたいページの参照（例: m:3 / core / c:2 / ch:5 / p:1）",
                 },
             },
             "required": ["ref"],

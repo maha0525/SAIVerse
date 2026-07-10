@@ -6,7 +6,7 @@ Metabolism を跨いで head に残り続ける — 高価で明示的な行為�
 
 対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle)。コア記憶は常時開の
 システム常設ピンなので対象外 (``core`` / ``c:N`` は「既に開いています」を
-返す)。``task:N`` (目的の地図) は P2b まで未対応。
+返す)。``task:N`` (目的の地図) は P2c まで未対応。
 """
 from __future__ import annotations
 

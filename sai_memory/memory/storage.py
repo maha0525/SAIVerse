@@ -1796,6 +1796,74 @@ def get_messages_for_chronicle(
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
+def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
+    """「実会話」フィルタの共有 SQL 断片 ``(clause, params)`` を返す。
+
+    role: 会話本文 (user 発話 / persona 応答) のみ対象。persona 応答は歴史的に
+    'model' (Gemini 系呼称) と 'assistant' (OpenAI 系呼称・インポートログ) の
+    両方が実データに存在する (実 DB 実査で確認、2026-07-04)。'system'/'host' は
+    会話本文ではないため除外する。
+    content が '<system>' で始まる行は、role=user で保存されるシステム通知
+    (Track切替通知等、event_message タグを持たない世代がある) なので除外する。
+    口調のアンカー (scene) にシステム通知が混入すると手本として劣化するため。
+
+    ``get_conversation_window_around`` (コア記憶 scene) と
+    ``get_conversation_messages_between`` (範囲写真の読み出し) が共用する
+    (同じ「実会話」定義を一点管理)。
+    """
+    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
+    clause = f"""
+        thread_id NOT IN (SELECT thread_id FROM stelis_threads)
+        AND role IN ('user', 'model', 'assistant')
+        AND NOT EXISTS (
+            SELECT 1 FROM json_each(metadata, '$.tags')
+            WHERE json_each.value IN ({tag_placeholders})
+        )
+        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+        AND content NOT LIKE '<system>%'
+    """
+    return clause, CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+
+
+def get_conversation_messages_between(
+    conn: sqlite3.Connection,
+    start_message_id: str,
+    end_message_id: str,
+) -> Optional[List[Message]]:
+    """範囲写真が指す [start, end] 区間 (両端含む) の実会話メッセージを返す。
+
+    Memory Atlas の ``memory_read p:N`` (範囲写真の全文読み出し) が使う。区間の
+    中身には ``get_conversation_window_around`` と同一の「実会話」フィルタを適用
+    する — SCENE 由来の範囲写真は clip 時と同じ窓が再現され、区間内に後から
+    混ざったツール実行ログ等は範囲写真の読み出しにも混入しない。
+
+    どちらかの端メッセージが存在しなければ ``None``。端の順序は rowid で正規化
+    する (逆順で渡されても動く)。戻り値は時系列 (rowid 昇順)。
+    """
+    start_row = conn.execute(
+        "SELECT rowid FROM messages WHERE id=?", (start_message_id,)
+    ).fetchone()
+    end_row = conn.execute(
+        "SELECT rowid FROM messages WHERE id=?", (end_message_id,)
+    ).fetchone()
+    if not start_row or not end_row:
+        return None
+    lo, hi = sorted((int(start_row[0]), int(end_row[0])))
+
+    exclusion_clause, exclusion_params = _conversation_exclusion()
+    cur = conn.execute(
+        f"""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        FROM messages
+        WHERE rowid BETWEEN ? AND ? AND {exclusion_clause}
+        ORDER BY rowid ASC
+        """,
+        (lo, hi, *exclusion_params),
+    )
+    return [_row_to_message(r) for r in cur.fetchall()]
+
+
 def get_conversation_window_around(
     conn: sqlite3.Connection,
     message_id: str,
@@ -1826,26 +1894,7 @@ def get_conversation_window_around(
         return None
     anchor_rowid = int(anchor_row[0])
 
-    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
-    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
-    # role: 会話本文 (user 発話 / persona 応答) のみ対象。persona 応答は歴史的に
-    # 'model' (Gemini 系呼称) と 'assistant' (OpenAI 系呼称・インポートログ) の
-    # 両方が実データに存在する (実 DB 実査で確認、2026-07-04)。'system'/'host' は
-    # 会話本文ではないため除外する。
-    # content が '<system>' で始まる行は、role=user で保存されるシステム通知
-    # (Track切替通知等、event_message タグを持たない世代がある) なので除外する。
-    # 口調のアンカー (scene) にシステム通知が混入すると手本として劣化するため。
-    exclusion_clause = f"""
-        thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-        AND role IN ('user', 'model', 'assistant')
-        AND NOT EXISTS (
-            SELECT 1 FROM json_each(metadata, '$.tags')
-            WHERE json_each.value IN ({tag_placeholders})
-        )
-        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
-        AND content NOT LIKE '<system>%'
-    """
-    exclusion_params = CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+    exclusion_clause, exclusion_params = _conversation_exclusion()
 
     # アンカー自身が会話フィルタを通るか確認する。
     anchor_ok = conn.execute(

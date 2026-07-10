@@ -177,7 +177,7 @@
 
 ### 次アクション
 
-P2b 着手。委譲分=p:N 追加・写真抜粋描画・memory_clip/memory_write スペル。メイン直接=head 机セクション＋Metabolism 追い出しフック。旧スペル撤去と purpose 動詞・task:N 解決は消費者監査（playbook TOOL ノード参照の洗い出し）とセットで後続（P2c）。
+P2b 委譲分=**実装済**（2026-07-10。p:N・写真抜粋描画・`memory_read p:N`（範囲全文は SCENE と同一の実会話フィルタを storage.py で一点管理）・memory_write（m:N 追記=編集来歴つき / core / c:N）・memory_clip（点=引用実在検証 / 範囲=anchor+rounds、参照貼りのみ）。pytest 248 passed）。残 P2b=**head 机セクション（DeskSection、open_notes 後継・refresh=Metabolism のみ=フェードアウト自動・capture 冒頭で evict_lru=Metabolism 追い出しフック）→ メイン直接**。旧スペル撤去と purpose 動詞・task:N 解決・life API /marks→/photos 改称は消費者監査（playbook TOOL ノード参照の洗い出し）とセットで後続（P2c）。
 
 ---
 

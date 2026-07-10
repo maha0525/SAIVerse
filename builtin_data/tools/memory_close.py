@@ -6,7 +6,7 @@ concept_consolidation.md「開閉制御 — 机の物理」の実装。``memory_
 
 対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle)。コア記憶は常時開の
 システム常設ピンなので対象外 (``core`` / ``c:N`` は「閉じられません」を返す)。
-``task:N`` (目的の地図) は P2b まで未対応。
+``task:N`` (目的の地図) は P2c まで未対応。
 """
 from __future__ import annotations
 

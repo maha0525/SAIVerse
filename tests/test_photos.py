@@ -147,6 +147,78 @@ class PhotosTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             P.photo_pasted(self.conn, photo.photo_id, "")
 
+    # ----- short_id (p:N、P2b) -----
+
+    def test_add_photo_assigns_sequential_short_ids(self):
+        first = P.add_photo(self.conn, message_id="m1", quote="一枚目")
+        second = P.add_photo(self.conn, message_id="m2", quote="二枚目")
+        self.assertEqual(first.short_id, 1)
+        self.assertEqual(second.short_id, 2)
+        self.assertEqual(first.ref, "p:1")
+
+    def test_get_photo_by_short_id(self):
+        photo = P.add_photo(self.conn, message_id="m1", quote="探す")
+        got = P.get_photo_by_short_id(self.conn, photo.short_id)
+        self.assertEqual(got, photo)
+        self.assertIsNone(P.get_photo_by_short_id(self.conn, 999))
+
+
+class LegacyPhotosShortIdMigrationTests(unittest.TestCase):
+    """short_id 列を持たない既存 photos テーブルへの追加系 migration + backfill。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self._tmpdir.name) / "memory.db")
+        self.conn = sqlite3.connect(self.db_path)
+        # P2a 当時の DDL (short_id 列なし) を再現
+        self.conn.execute(
+            """
+            CREATE TABLE photos (
+                photo_id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                quote TEXT,
+                message_id_end TEXT,
+                purpose_ref TEXT,
+                created_at INTEGER NOT NULL,
+                pasted_to TEXT,
+                origin_episode_ref TEXT
+            )
+            """
+        )
+        # 挿入順と created_at 順をわざと食い違わせる (採番基準の検証)
+        self.conn.execute(
+            "INSERT INTO photos VALUES ('new-photo', 'm2', '新しい', NULL, NULL, 200, NULL, NULL)"
+        )
+        self.conn.execute(
+            "INSERT INTO photos VALUES ('old-photo', 'm1', '古い', NULL, NULL, 100, NULL, NULL)"
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        gc.collect()
+        try:
+            self._tmpdir.cleanup()
+        except PermissionError:
+            pass
+
+    def test_alter_and_backfill_by_created_at_order(self):
+        P.init_photos_tables(self.conn)
+        old = P.get_photo(self.conn, "old-photo")
+        new = P.get_photo(self.conn, "new-photo")
+        # created_at 昇順 (old=100 が new=200 より先) で 1, 2。
+        # 挿入順採番なら逆になるはずなので、基準が created_at であることを検証
+        self.assertEqual(old.short_id, 1)
+        self.assertEqual(new.short_id, 2)
+        self.assertEqual(P.get_photo_by_short_id(self.conn, 1).photo_id, "old-photo")
+
+    def test_backfill_runs_once_new_photos_continue_numbering(self):
+        P.init_photos_tables(self.conn)
+        added = P.add_photo(self.conn, message_id="m3", quote="続き")
+        self.assertEqual(added.short_id, 3)
+        P.init_photos_tables(self.conn)  # 再 init で再採番しない
+        self.assertEqual(P.get_photo(self.conn, "old-photo").short_id, 1)
+
 
 class LegacyMarksMigrationTests(unittest.TestCase):
     """旧 marks テーブルが存在する DB での一回きり移行。"""
@@ -184,6 +256,12 @@ class LegacyMarksMigrationTests(unittest.TestCase):
             self._tmpdir.cleanup()
         except PermissionError:
             pass
+
+    def test_migrated_marks_get_short_ids(self):
+        # marks 移行行にも backfill で p:N が振られる (created_at 昇順)
+        P.init_photos_tables(self.conn)
+        photos = P.list_photos(self.conn)
+        self.assertEqual([p.short_id for p in photos], [1, 2])
 
     def test_migrates_rows_and_drops_marks(self):
         P.init_photos_tables(self.conn)
