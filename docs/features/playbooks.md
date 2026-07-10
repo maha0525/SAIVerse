@@ -9,7 +9,7 @@
 ペルソナの1回の [Pulse](../concepts/pulse.md)（認知サイクル）は Playbook を1つ実行する。入口となる**メタ Playbook**が2系統ある:
 
 - `meta_user` 系（`track_user_conversation.json` 等）— ユーザー入力を捌く
-- `meta_auto` 系（`track_autonomous.json`、[メタ判断](../concepts/meta-judgment.md) の `meta_judgment*.json` 等）— 自律 Pulse を捌く
+- `meta_auto` 系（[メタ判断](../concepts/meta-judgment.md) の `meta_judgment*.json`、時間割の判断点 `judgment_*.json` 等）— 自律 Pulse を捌く（v1 の `track_autonomous.json` は時間割移行で退役済み）
 
 ## ノードと配置（要点）
 

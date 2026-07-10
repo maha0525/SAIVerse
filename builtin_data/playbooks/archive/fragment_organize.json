@@ -1,7 +1,7 @@
 {
   "name": "fragment_organize",
   "display_name": "フラグメント整理",
-  "description": "Memopediaページのフラグメント（断片知識）の重複削除・統合・修正を行います。",
+  "description": "P4 庭仕事ワーカーへ転生予定 (docs/intent/concept_consolidation.md)。Memopediaページのフラグメント（断片知識）の重複削除・統合・修正を行います。",
   "input_schema": [
     {
       "name": "page_id",

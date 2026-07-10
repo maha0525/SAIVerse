@@ -346,6 +346,98 @@ def _v0_3_0_dev3_spell_enabled_default_on(*, session: "Session", ai: "AI") -> No
     )
 
 
+# ---- v0.3.0.dev4: v1 自律系 Playbook (track_autonomous 等) の退役巻き取り ----
+
+# 概念再編⑥ P2c-3 (2026-07-10、④オートノミー整理「時間割へ完全移行」裁定) で
+# 退役した v1 自律系 Playbook の名前。public JSON 除去 + playbook_sync の DB prune
+# により実体が消えるため、参照が残っていると Pulse 起動時に Playbook not found に
+# なる。詳細: docs/overview/v030_release_worklist.md ④ /
+# docs/handoff/2026-07-10_memory_atlas_p2c_consumer_audit.md §3
+_DEPRECATED_PLAYBOOK_NAMES_V0_3_0_DEV4 = {
+    "track_autonomous",
+    "meta_autonomy_decision",
+}
+
+
+def _v0_3_0_dev4_retired_autonomy_schedule_names(*, session: "Session", ai: "AI") -> None:
+    """persona_schedule.META_PLAYBOOK の track_autonomous / meta_autonomy_decision を
+    track_user_conversation に巻き取る (dev1 ハンドラと同じ巻き取りパターン)。
+
+    冪等性: 退役名を置換するだけ。何度走らせても同じ状態に収束する。
+    副作用の局所化: PERSONA_ID で絞るので自ペルソナのスケジュールしか触らない。
+    """
+    from database.models import PersonaSchedule
+
+    persona_id = ai.AIID
+    rows = (
+        session.query(PersonaSchedule)
+        .filter(
+            PersonaSchedule.PERSONA_ID == persona_id,
+            PersonaSchedule.META_PLAYBOOK.in_(_DEPRECATED_PLAYBOOK_NAMES_V0_3_0_DEV4),
+        )
+        .all()
+    )
+    if not rows:
+        LOGGER.debug(
+            "[handler:v0_3_0_dev4_retired_autonomy_schedule_names] persona=%s: "
+            "no schedules with retired playbook names",
+            persona_id,
+        )
+        return
+
+    for row in rows:
+        old_name = row.META_PLAYBOOK
+        row.META_PLAYBOOK = _LEGACY_PLAYBOOK_REPLACEMENT
+        LOGGER.info(
+            "[handler:v0_3_0_dev4_retired_autonomy_schedule_names] persona=%s "
+            "schedule_id=%s: %s -> %s",
+            persona_id, row.SCHEDULE_ID, old_name, _LEGACY_PLAYBOOK_REPLACEMENT,
+        )
+
+
+def _v0_3_0_dev4_retired_autonomy_selected_playbook(*, session: "Session", city) -> None:
+    """UserSettings.SELECTED_META_PLAYBOOK の退役名を NULL (= auto 既定) に巻き取る。
+
+    背景: saiverse_manager が起動時に SELECTED_META_PLAYBOOK を
+    ``state.current_playbook`` へ読み込む。退役 Playbook の名前が残っていると、
+    prune 済みで実体の無い Playbook を指し続ける。NULL に戻せば読み込みが
+    スキップされ、既定 (auto) で動く。
+
+    dev1 ハンドラは「frontend が legacy 値を auto に collapse するため触らない」
+    としたが、backend の state 読み込み (saiverse_manager) は collapse を通らない
+    ため、退役分は DB 側で掃除する。
+
+    スコープ: UserSettings はペルソナでなくユーザー単位のため city スコープに
+    乗せる (複数 City 環境では複数回走るが、NULL 化は冪等)。
+    """
+    from database.models import UserSettings
+
+    rows = (
+        session.query(UserSettings)
+        .filter(
+            UserSettings.SELECTED_META_PLAYBOOK.in_(
+                _DEPRECATED_PLAYBOOK_NAMES_V0_3_0_DEV4
+            )
+        )
+        .all()
+    )
+    if not rows:
+        LOGGER.debug(
+            "[handler:v0_3_0_dev4_retired_autonomy_selected_playbook] "
+            "no user settings with retired playbook names",
+        )
+        return
+
+    for row in rows:
+        old_name = row.SELECTED_META_PLAYBOOK
+        row.SELECTED_META_PLAYBOOK = None
+        LOGGER.info(
+            "[handler:v0_3_0_dev4_retired_autonomy_selected_playbook] userid=%s: "
+            "%s -> None (auto)",
+            row.USERID, old_name,
+        )
+
+
 # ---- ハンドラ登録リスト ----
 
 # 各ハンドラは to_version の昇順に書くと読みやすい（実行順は upgrade.py 側で
@@ -402,6 +494,32 @@ HANDLERS: List[UpgradeHandler] = [
             "a core feature; the column default flips to True in v0.3.0.dev3, but "
             "existing rows already hold False and produce no schema diff, so this "
             "handler brings migrated personas up to the new ON default."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev4_retired_autonomy_selected_playbook",
+        scope="city",
+        from_version="0.3.0.dev3",
+        to_version="0.3.0.dev4",
+        run=_v0_3_0_dev4_retired_autonomy_selected_playbook,
+        description=(
+            "Reset UserSettings.SELECTED_META_PLAYBOOK to NULL (= auto) where it "
+            "still names the retired v1 autonomy playbooks (track_autonomous / "
+            "meta_autonomy_decision), removed in P2c-3 after the timetable "
+            "migration verdict."
+        ),
+    ),
+    UpgradeHandler(
+        name="v0_3_0_dev4_retired_autonomy_schedule_names",
+        scope="ai",
+        from_version="0.3.0.dev3",
+        to_version="0.3.0.dev4",
+        run=_v0_3_0_dev4_retired_autonomy_schedule_names,
+        description=(
+            "Rewrite retired track_autonomous / meta_autonomy_decision references "
+            "in persona_schedule.META_PLAYBOOK to track_user_conversation, so "
+            "existing schedules don't error out after the v1 autonomy playbook "
+            "retirement (P2c-3)."
         ),
     ),
 ]

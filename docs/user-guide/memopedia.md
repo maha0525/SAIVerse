@@ -52,7 +52,7 @@ Memopediaは、SAIMemoryに記録された会話ログから知識を抽出し�
 
 > このほか `memopedia_manage` / `memopedia_health` / フラグメント系（`memopedia_list_fragments` / `_edit_fragment` / `_delete_fragment`）がある。全一覧は [ツールカタログ](../reference/tool-catalog.md)（`memopedia_*`）。
 
-> Memopedia の生成・整理は、ペルソナが自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で自動的に行う。ユーザーが手動で構築・メンテナンスする通常の導線はない。
+> Memopedia のフラグメント生成は Metabolism の中で自動的に行われる（`ArasujiGenerator` / `entity_extractor`、`sea/session_lifecycle.py`）。整理系 Playbook（`autonomy_memory_organization` / `fragment_organize`）は v1 自律系の退役（2026-07-10、時間割への完全移行）に伴い `builtin_data/playbooks/archive/` へ移された（P4 庭仕事ワーカーへの再設計待ち）。ユーザーが手動で構築・メンテナンスする通常の導線はない。
 
 ## 設計詳細
 

@@ -21,7 +21,6 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 | `meta_judgment_alert` | メタ判断 (alert) | alert 状態の Track があるとき |
 | `meta_judgment_life_purpose` | メタ判断 (生きる目的の設定) | LIFE_PURPOSE 未設定時。他より先に起動し目的をドラフト |
 | `meta_judgment` | メタ判断 | base（NL 独白 + `/spell`）。dispatch マップには含まれない別系統 |
-| `meta_autonomy_decision` | 自律行動: 意思決定 | 前回結果を検収し、次に実行する Playbook と意図を決める |
 
 ## 判断点（自律行動 v2 の意思決定層）
 
@@ -44,17 +43,8 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 | `track_user_conversation` | 対ユーザー会話 Track | ✓ | 対ユーザー会話。重量級 LLM で応答生成 + `track_*`/`note_*` スペル |
 | `track_social` | 交流 Track | | 他ペルソナとの会話（入口は未実装） |
 | `track_external` | 外部通信 Track | | X / Discord / Elyth 等への通信 |
-| `track_autonomous` | 自律 Track | ✓ | 自律行動。次に何をすべきか判断しサブ Playbook 起動 or スペル発火 |
 
-## 自律行動（capability）
-
-`meta_autonomy_decision` が選んで実行する自律活動。
-
-| Playbook | 表示名 | 用途 |
-|---|---|---|
-| `autonomy_creation` | 自律行動: 創作活動 | ドキュメント執筆・画像生成などの創作 |
-| `autonomy_memory_organization` | 自律行動: 記憶整理 | Memopedia の分割・概要生成・不要情報削除 |
-| `autonomy_web_research` | 自律行動: Web調査 | Web 検索 + URL 読み込みで収集し Memopedia に記録 |
+> **v1 自律系は退役済み**（2026-07-10、時間割への完全移行 — [features/autonomous-mode.md](../features/autonomous-mode.md)）: `track_autonomous` / `meta_autonomy_decision` は削除。`autonomy_creation` / `autonomy_web_research` は `builtin_data/playbooks/archive/` へ（復活時は `memory_*` 語彙で再設計）。`autonomy_memory_organization` / `fragment_organize` も archive（P4 庭仕事ワーカーへ転生予定）。
 
 ## 能力 Playbook（`run_playbook` / `exec` から呼ばれる）
 
@@ -83,4 +73,3 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 | `meta_exec_speak` | — | Playbook を実行して結果を発話（`call_playbook` ツールが使用） |
 | `meta_simple_speak` | ツール不使用（喋るだけ） | speak のみ（`usel=True`） |
 | `spell_args_decider` | Spell 引数決定 | pre_spells で引数なし指定の Spell の引数を認知から決める内部 Playbook |
-| `fragment_organize` | フラグメント整理 | Memopedia フラグメントの重複削除・統合・修正 |

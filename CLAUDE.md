@@ -216,7 +216,7 @@ python scripts/migrate_to_user_data.py             # Execute
 - Updates `BuildingOccupancyLog` and in-memory state
 
 **ConversationManager** (`saiverse/conversation_manager.py`) — **legacy / no-op**
-- Old autonomous-conversation driver. Superseded by `AutonomyManager` (per-persona ~50min tick) + `SubLineScheduler` (`saiverse/pulse_scheduler.py`, ~5s poll) + `track_autonomous` playbook (2026-05-01 cognitive-model migration). Class removal is a pending cleanup (see landscape §9).
+- Old autonomous-conversation driver, no-op since the 2026-05-01 cognitive-model migration. Its v1 successors — `SubLineScheduler` (`saiverse/pulse_scheduler.py`, ~5s poll) and the `track_autonomous` playbook — are themselves **removed** as part of the autonomous-behavior-v2 migration (module deleted 2026-07-06, playbook retired 2026-07-10). Current autonomous driving is the **time-table + judgment points** (`saiverse/autonomy_wiring.py`; `AutonomyManager` now runs a watchdog-only tick). Class removal of `ConversationManager` itself is still a pending cleanup (see landscape §9).
 
 **RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`)
 - Lightweight proxy for visiting personas from other cities
@@ -226,7 +226,7 @@ python scripts/migrate_to_user_data.py             # Execute
 
 **User Interaction**: UI → SAIVerseManager → PersonaCore → LLM + Tools → ActionHandler → SAIMemory + BuildingHistory
 
-**Autonomous Pulse**: AutonomyManager / SubLineScheduler → PulseController → SEARuntime → think/speak nodes → SAIMemory
+**Autonomous Pulse**: Time-table (day plan) + judgment points (`saiverse/autonomy_wiring.py`) / `AutonomyManager` watchdog → PulseController → SEARuntime → think/speak nodes → SAIMemory
 
 **Inter-City Travel** (DB-mediated, not direct API calls):
 1. Source city writes `VisitingAI` record with status='requested'

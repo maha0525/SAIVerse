@@ -8,10 +8,11 @@
 
 ## 何が Pulse を起こすか（時間機構）
 
-> ⚠️ 旧 `ConversationManager`（10秒ごとに全員を回すプロトタイプ）は**廃止済み**（2026-05-01 の認知モデル移行で no-op 化）。現在の自律稼働は2層のリズムで駆動される。
+> ⚠️ 旧 `ConversationManager`（10秒ごとに全員を回すプロトタイプ）と、その後継だった `SubLineScheduler`（running Track の連続 Pulse）は**廃止済み**。現在の自律稼働は**時間割（自律行動 v2）**で駆動される — 数分刻みの自律 Pulse は意味のある行動を生まない、という v1 の失敗診断に基づく移行（2026-07-10 確定）。
 
-- **AutonomyManager**（`saiverse/autonomy_manager.py`、既定 約50分間隔）— per-persona のタイマー。tick でメタ判断 Pulse を起こす。**自律バイオリズムの大リズム**
-- **SubLineScheduler**（`saiverse/pulse_scheduler.py`、既定5秒ポーリング）— running 状態の自律 Track を拾って Pulse を連続実行する。**小リズム**
+- **時間割（day plan）** — 起床判断（`judgment_day_open`）でペルソナ自身が今日のコマを編成し、各コマが `PersonaSchedule` / スケジューラに予約される。コマ発火で予算付きの作業セッションが走る
+- **判断点（judgment points）** — 起床・就寝はスケジュール駆動（`judgment_day_open` / `judgment_day_close`）、会話終了・セッション終了・イベント到着は文脈駆動で発火する（`saiverse/autonomy_wiring.py`）
+- **AutonomyManager**（`saiverse/autonomy_manager.py`）— 定期 tick は watchdog に縮退。正常時は何もせず、「Active・起床時間帯なのに今日の時間割が無い / コマ予約が途絶」のときだけ火入れし直す
 
 これらが [PulseController](../concepts/pulse.md) に Pulse を投げ、優先度（USER > SCHEDULE > AUTO）で捌かれる。
 
@@ -30,11 +31,9 @@ Building 側の自動 pulse 間隔は `AUTO_INTERVAL_SEC` カラム（既定 10 
 
 ## 自律行動の中身
 
-メタ判断が自律 Track を選ぶと、`track_autonomous`（自律 Track メインライン）が回る。さらに `meta_autonomy_decision` が次に実行する能力 Playbook を選び、以下のような自律活動を行う（→ [Playbook カタログ](../reference/playbook-catalog.md)）:
+起床判断で編成した時間割のコマ（作る / 知る / 無意味の予算 等）が発火すると、予算（ラウンド数）付きの作業セッションが走り、対象タスク（目的ノード）に対してドキュメント執筆・調査などの実作業を行う。セッション終了・会話終了・就寝などの節目では判断点がふりかえり（タスク裁定・やりたいこと候補の採取・残り時間割の組み替え）を行う。
 
-- `autonomy_creation` — 創作（ドキュメント執筆・画像生成）
-- `autonomy_memory_organization` — 記憶整理（Memopedia）
-- `autonomy_web_research` — Web 調査
+> ⚠️ v1 の自律系 Playbook（`track_autonomous` / `meta_autonomy_decision` / `autonomy_*`）は**退役済み**（2026-07-10、時間割への完全移行）。v1 が担った機能は全て v2 に座席がある — 連続実行→コマ内作業セッション、自発性→無意味の予算コマ、割り込み→呼びかけ即応、途絶検知→watchdog。
 
 ## グローバル制御
 

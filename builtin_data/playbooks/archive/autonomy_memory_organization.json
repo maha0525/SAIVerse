@@ -1,7 +1,7 @@
 {
   "name": "autonomy_memory_organization",
   "display_name": "自律行動: 記憶整理",
-  "description": "Memopediaページの分割、概要生成、不要情報の削除など、知識ベースの整理を行う自律行動Playbook。",
+  "description": "P4 庭仕事ワーカーへ転生予定 (docs/intent/concept_consolidation.md)。Memopediaページの分割、概要生成、不要情報の削除など、知識ベースの整理を行う自律行動Playbook。",
   "input_schema": [
     {
       "name": "input",

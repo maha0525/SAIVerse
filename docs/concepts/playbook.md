@@ -17,7 +17,7 @@ LLM / tool / speak ノードのグラフで、条件分岐・反復が組める�
 Pulse の入口となる2つの Playbook がある:
 
 - **`meta_user`** 系 — ユーザー入力を捌く（`track_user_conversation.json` 等）
-- **`meta_auto`** 系 — 自律 Pulse を捌く（`track_autonomous.json`、[Meta-Judgment](meta-judgment.md) の `meta_judgment*.json` 等）
+- **`meta_auto`** 系 — 自律 Pulse を捌く（[Meta-Judgment](meta-judgment.md) の `meta_judgment*.json`、時間割の判断点 `judgment_*.json` 等。v1 の `track_autonomous.json` は時間割移行で退役済み）
 
 ### ノードの種類（主要）
 
