@@ -161,12 +161,12 @@
 
 | 片 | 内容 | 担当 |
 |---|---|---|
-| **P2a** | 机ストア（memory.db 新テーブル・LRU 追い出し関数）＋ Atlas ファサード（ref 解決: m:N / core / task:N / Chronicle 参照の新設）＋ read/open/close/search スペル | サブエージェント（pytest 検証） |
-| **P2b** | write/clip/purpose 動詞 ＋ 旧スペル撤去 ＋ head 机セクション描画 ＋ Metabolism 追い出しフック | head/Metabolism 配線はキャッシュ感応部＝メイン直接。残りは委譲 |
+| **P2a** ✅ | 机ストア（desk.py・LRU 追い出し）＋ Atlas ファサード（memory_atlas.py、m:N / core / c:N / ch:N。task:N は P2b stub）＋ read/open/close/search スペル4本。**実装済 2026-07-10**（サブエージェント実装＋メイン検収: read の touch 欠落と keep_ref を修正。Chronicle に short_id 追加・ch:N。Memopedia search の short_id 欠落バグをついで修正。pytest 223 passed） | サブエージェント＋メイン検収 |
+| **P2b** | write/clip/purpose 動詞 ＋ 旧スペル撤去 ＋ head 机セクション描画 ＋ Metabolism 追い出しフック ＋ task:N 解決 ＋ life API /marks→/photos 改称。積み残し: memopedia storage の `search_pages_filtered`/`get_children` にも SELECT 列 short_id 欠落が残存（P2a で発見・範囲外として未修正） | head/Metabolism 配線はキャッシュ感応部＝メイン直接。残りは委譲 |
 
 ### 次アクション
 
-P2a をサブエージェント委譲 → 検収 → P2b。
+P2b 着手（head 机セクション＋Metabolism フックはメイン直接、残りは委譲）。
 
 ---
 

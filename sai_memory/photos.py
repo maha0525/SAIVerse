@@ -226,6 +226,23 @@ def list_photos(
     return [_row_to_photo(row) for row in cur.fetchall()]
 
 
+def list_photos_pasted_to(conn: sqlite3.Connection, pasted_to: str) -> List[Photo]:
+    """指定した貼り付け先 (ref) に貼られている写真の一覧 (created_at 昇順)。
+
+    Memory Atlas のページ読み出し (``saiverse/memory_atlas.py``) が「このページに
+    貼られた写真」を列挙するのに使う。``pasted_to`` はページの参照 (``c:3`` /
+    ``m:5`` / ``ch:2`` 等) をそのまま渡す。
+    """
+    if not pasted_to:
+        return []
+    cur = conn.execute(
+        f"SELECT {_PHOTO_COLS} FROM photos WHERE pasted_to = ? "
+        f"ORDER BY created_at ASC, rowid ASC",
+        (pasted_to,),
+    )
+    return [_row_to_photo(row) for row in cur.fetchall()]
+
+
 def photo_pasted(
     conn: sqlite3.Connection, photo_id: str, pasted_to: str
 ) -> Optional[Photo]:

@@ -29,6 +29,9 @@ class ArasujiEntry:
     origin_track_id: Optional[str] = None
     # incomplete Lv1 (Track Chronicle, v0.32): バッチサイズ未満で作られた一時 Lv1。後で 20 件揃った時に削除して正規 Lv1 に作り直される
     is_incomplete: bool = False
+    # Per-DB sequential ID (P2a, 2026-07-10: Memory Atlas の ch:N 短縮参照用。
+    # memopedia_pages.short_id と同じ流儀)。既存 DB では追加系 migration で backfill。
+    short_id: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -45,6 +48,7 @@ class ArasujiEntry:
             "created_at": self.created_at,
             "origin_track_id": self.origin_track_id,
             "is_incomplete": self.is_incomplete,
+            "short_id": self.short_id,
         }
 
 
@@ -64,6 +68,33 @@ def _ensure_arasuji_column(conn: sqlite3.Connection, table: str, column: str, co
     except sqlite3.OperationalError:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
         conn.commit()
+
+
+def _backfill_chronicle_short_ids(conn: sqlite3.Connection) -> None:
+    """short_id を持たない既存 Chronicle エントリに採番する (migration helper)。
+
+    created_at 昇順で 1 から採番する (memopedia の _backfill_short_ids と同じ流儀)。
+    """
+    cur = conn.execute(
+        "SELECT id FROM arasuji_entries WHERE short_id IS NULL ORDER BY created_at ASC"
+    )
+    rows = cur.fetchall()
+    max_cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM arasuji_entries")
+    next_id = max_cur.fetchone()[0] + 1
+    for (entry_id,) in rows:
+        conn.execute(
+            "UPDATE arasuji_entries SET short_id = ? WHERE id = ?",
+            (next_id, entry_id),
+        )
+        next_id += 1
+    if rows:
+        conn.commit()
+
+
+def _next_chronicle_short_id(conn: sqlite3.Connection) -> int:
+    """新規 Chronicle エントリの次の short_id (MAX + 1、初回は 1)。"""
+    cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM arasuji_entries")
+    return cur.fetchone()[0] + 1
 
 
 def init_arasuji_tables(conn: sqlite3.Connection) -> None:
@@ -109,6 +140,19 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
         "ON arasuji_entries(origin_track_id, level, end_time DESC)"
     )
 
+    # Migration (P2a, 2026-07-10): short_id — Memory Atlas の ch:N 短縮参照用。
+    # memopedia_pages.short_id の追加系 migration と同じ流儀 (ALTER →
+    # 一度きりの backfill、既存行は created_at 昇順で採番)。
+    try:
+        conn.execute("SELECT short_id FROM arasuji_entries LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE arasuji_entries ADD COLUMN short_id INTEGER")
+        conn.commit()
+        _backfill_chronicle_short_ids(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_arasuji_short_id ON arasuji_entries(short_id)"
+    )
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS arasuji_progress (
@@ -138,7 +182,7 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
 _ENTRY_COLUMNS = (
     "id, level, content, source_ids_json, start_time, end_time, "
     "source_count, message_count, parent_id, is_consolidated, created_at, "
-    "origin_track_id, is_incomplete"
+    "origin_track_id, is_incomplete, short_id"
 )
 
 
@@ -150,10 +194,11 @@ def _row_to_entry(row: Tuple[Any, ...]) -> ArasujiEntry:
     except (json.JSONDecodeError, TypeError):
         source_ids = []
 
-    # 末尾の origin_track_id / is_incomplete は migration 適用前の DB では存在しない可能性あり。
-    # 行長で判定して fallback。
+    # 末尾の origin_track_id / is_incomplete / short_id は migration 適用前の DB や
+    # short_id を含まない SELECT では存在しない可能性あり。行長で判定して fallback。
     origin_track_id = row[11] if len(row) > 11 else None
     is_incomplete = bool(row[12]) if len(row) > 12 else False
+    short_id = int(row[13]) if len(row) > 13 and row[13] is not None else None
 
     return ArasujiEntry(
         id=row[0],
@@ -169,6 +214,7 @@ def _row_to_entry(row: Tuple[Any, ...]) -> ArasujiEntry:
         created_at=int(row[10]),
         origin_track_id=origin_track_id,
         is_incomplete=is_incomplete,
+        short_id=short_id,
     )
 
 
@@ -202,14 +248,15 @@ def create_entry(
     """
     eid = entry_id or str(uuid.uuid4())
     now = int(time.time())
+    sid = _next_chronicle_short_id(conn)
     conn.execute(
         """
         INSERT INTO arasuji_entries (
             id, level, content, source_ids_json, start_time, end_time,
             source_count, message_count, parent_id, is_consolidated, created_at,
-            thread_id, origin_track_id, is_incomplete
+            thread_id, origin_track_id, is_incomplete, short_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?)
         """,
         (
             eid,
@@ -224,6 +271,7 @@ def create_entry(
             thread_id,
             origin_track_id,
             1 if is_incomplete else 0,
+            sid,
         ),
     )
     conn.commit()
@@ -241,7 +289,17 @@ def create_entry(
         created_at=now,
         origin_track_id=origin_track_id,
         is_incomplete=is_incomplete,
+        short_id=sid,
     )
+
+
+def get_entry_by_short_id(conn: sqlite3.Connection, short_id: int) -> Optional[ArasujiEntry]:
+    """short_id (``ch:N`` の N) で 1 件取得する。無ければ None。"""
+    cur = conn.execute(
+        f"SELECT {_ENTRY_COLUMNS} FROM arasuji_entries WHERE short_id = ?", (short_id,)
+    )
+    row = cur.fetchone()
+    return _row_to_entry(row) if row else None
 
 
 def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]:
@@ -1041,9 +1099,7 @@ def search_entries(
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     sql = f"""
-        SELECT id, level, content, source_ids_json, start_time, end_time,
-               source_count, message_count, parent_id, is_consolidated, created_at,
-               origin_track_id, is_incomplete
+        SELECT {_ENTRY_COLUMNS}
         FROM arasuji_entries
         WHERE {where_clause}
         ORDER BY end_time DESC

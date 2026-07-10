@@ -872,9 +872,8 @@ def search_pages(conn: sqlite3.Connection, query: str, limit: int = 10) -> List[
     """Search non-deleted pages by title or content (simple LIKE search)."""
     pattern = f"%{query}%"
     cur = conn.execute(
-        """
-        SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-               keywords, vividness, is_trunk, is_important, last_referenced_at, metadata
+        f"""
+        SELECT {_PAGE_SELECT_COLS}
         FROM memopedia_pages
         WHERE (title LIKE ? OR summary LIKE ? OR content LIKE ?)
           AND (is_deleted = 0 OR is_deleted IS NULL)

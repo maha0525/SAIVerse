@@ -142,6 +142,12 @@ class SAIMemoryAdapter:
             from sai_memory.purpose_tags import init_purpose_tags_tables
             init_purpose_tags_tables(self.conn)
 
+            # Initialize desk_items table (机の物理, 冪等)。Memory Atlas の
+            # memory_open/close が使う「開いている」真実源。memory.db に相乗り
+            # する (sai_memory/desk.py の module docstring 参照)。
+            from sai_memory.desk import init_desk_tables
+            init_desk_tables(self.conn)
+
             # Initialize perception_buffer table (知覚バッファ, 冪等)。未消費の知覚を
             # 溜める永続テーブルで、Pulse 消費時に messages へ書き出す。会話履歴とは
             # 別テーブルだが memory.db に同居する (perception_buffer.py 参照)。

@@ -42,7 +42,11 @@ _KIND_LIST = [
     RefKind("episode", True, True),     # 出来事 (life_concept_map.md §8.1。saiverse/episodes.py)
     RefKind("memopedia", True, True),
     RefKind("message", True, False),
-    RefKind("chronicle", True, False),
+    # P2a (2026-07-10): arasuji_entries に short_id を追加 (Memory Atlas の ch:N
+    # 短縮参照)。memopedia と同じ経緯で numeric_key を True に更新。実際の ch:N
+    # 表記は saiverse/memory_atlas.py が直接パースする軽量プレフィックス系列
+    # (m:N / c:N と同じ扱いで、本 RefKind の word:key 形式 "chronicle:N" とは別)。
+    RefKind("chronicle", True, True),
     RefKind("item", False, True),
     RefKind("image", False, False),
     RefKind("document", False, False),
