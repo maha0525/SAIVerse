@@ -24,7 +24,7 @@ def memory_recall_unified(
 
     Returns ranked results with full Chronicle content and Memopedia summaries,
     plus saiverse:// URIs for further navigation via chronicle_context_up/down
-    or memopedia_get_page.
+    or memory_read.
 
     Args:
         query: What to search for (natural language).
@@ -133,7 +133,7 @@ def schema() -> ToolSchema:
         description=(
             "ChronicleとMemopediaを横断してセマンティック検索を行います。"
             "Chronicleはあらすじ全文、MemopediaはページのURIと概要を返します。"
-            "取得したURIを使って chronicle_context_up/down や memopedia_get_page で"
+            "取得したURIを使って chronicle_context_up/down や memory_read で"
             "さらに詳しく参照できます。"
         ),
         parameters={

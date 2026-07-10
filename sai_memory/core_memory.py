@@ -1,9 +1,10 @@
 """コア記憶 (記憶アーキv2 ゾーン A) のストレージ層。
 
 コア記憶＝ペルソナが**自分で選んで刻む恒常知識**。head (システムプロンプト部) に
-常駐し、Metabolism 時のみ更新が反映される。編集主体はペルソナ自身 (専用スペル
-core_memory_add / core_memory_update / core_memory_remove)。システムは容量目安を
-超過しても絶対に切り詰めない (通知のみ)。
+常駐し、Metabolism 時のみ更新が反映される。編集主体はペルソナ自身 (memory_write /
+memory_delete スペル。宛先 core / c:N でコア記憶を指す。旧専用スペル
+core_memory_add / core_memory_update / core_memory_remove は P2c-4a で撤去)。
+システムは容量目安を超過しても絶対に切り詰めない (通知のみ)。
 
 ペルソナへの提示時は ``c:{id}`` 形式で参照する (Memopedia の ``m:N`` と同じ操作感)。
 
@@ -232,7 +233,8 @@ def total_core_memory_chars(conn: sqlite3.Connection) -> int:
 # ---------------------------------------------------------------------------
 #
 # scene の窓切り出し・トランスクリプト整形・保存はスペル
-# (builtin_data/tools/core_memory_add_scene.py) と REST API
+# (builtin_data/tools/memory_clip.py mode='transcribe' paste_to='core'、旧
+# core_memory_add_scene) と REST API
 # (api/routes/people/core_memory.py) の両方から呼ばれる。ロジックの複製を避け、
 # 手本の劣化 (言い換えドリフト) を防ぐ「参照によるコピー」の一点管理をここに集約する。
 # 詳細: docs/intent/memory_architecture_v2.md §5

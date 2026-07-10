@@ -333,8 +333,8 @@ def _context_message_ids(messages: List[Dict[str, Any]]) -> set:
 # union を 1 行だけ出す (フッター行、_format_footer 参照)。
 _HANDLE_BY_SOURCE = {
     "chronicle": "chronicle_read_detail",
-    "memopedia": "memopedia_get_page",
-    "fragment": "memopedia_get_page",
+    "memopedia": "memory_read",
+    "fragment": "memory_read",
     "message": "memory_recall_unified",
 }
 
@@ -358,7 +358,7 @@ def _format_source_label(item: _LedgerItem) -> str:
 def _item_handle(item: _LedgerItem) -> Optional[str]:
     """このアイテムを深掘りするためのスペル名 (フッターの union 計算用)。"""
     if item.source_type in ("memopedia", "fragment") and not item.title:
-        # 孤児 Fragment はページが無いので memopedia_get_page では深掘りできない。
+        # 孤児 Fragment はページが無いので memory_read では深掘りできない。
         return "memory_recall_unified"
     return _HANDLE_BY_SOURCE.get(item.source_type)
 

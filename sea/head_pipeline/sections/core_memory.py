@@ -1,8 +1,8 @@
 """CoreMemorySection — ペルソナのコア記憶 (記憶アーキv2 ゾーン A) を head に注入する。
 
 コア記憶＝ペルソナが自分で選んで刻む恒常知識。head (システムプロンプト部) に常駐し、
-Metabolism 時のみ更新が反映される。編集主体はペルソナ自身 (core_memory_add /
-core_memory_update / core_memory_remove スペル)。
+Metabolism 時のみ更新が反映される。編集主体はペルソナ自身 (memory_write /
+memory_delete スペル。宛先 core / c:N でコア記憶を指す)。
 
 cache 安定性: ``refresh_on_events = frozenset()`` = Metabolism のみ再 capture。
 ペルソナがスペルでコア記憶を編集しても、head は次の Metabolism まで凍結したまま

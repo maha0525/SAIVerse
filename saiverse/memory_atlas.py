@@ -943,6 +943,7 @@ def clip_photo(
     paste_to: Optional[str] = None,
     persona_name: Optional[str] = None,
     mode: str = "attach",
+    core_budget: Optional[int] = None,
 ) -> str:
     """写真を撮ってクリップで貼る (concept_consolidation.md P2 memory_clip)。
 
@@ -958,7 +959,9 @@ def clip_photo(
     - ``mode='transcribe'``: **転写** — 本文に焼き込み、常に生で見える。
       貼り先必須。core 宛の範囲転写は旧 SCENE (create_scene_core_memory) と
       同一の共有ロジックを通す。転写でも写真は撮って由来参照を残す
-      (SCENE の現行流儀と同じ)。
+      (SCENE の現行流儀と同じ)。paste_to='core' のときは memory_write と同じ
+      容量目安 (``core_budget``) 超過通知を添える (P2c-4a: 旧 core_memory_add_scene
+      にあった budget 通知の欠落を埋める)。
 
     貼り先が机に開かれていれば touch する (touch の定義に clip が含まれる)。
     """
@@ -982,6 +985,7 @@ def clip_photo(
             adapter, message_id,
             quote=quote, rounds=rounds,
             paste_to=str(paste_to).strip(), persona_name=name,
+            core_budget=core_budget,
         )
 
     norm_paste, paste_err = _normalize_paste_target(adapter, paste_to)
@@ -1068,6 +1072,7 @@ def _clip_transcribe(
     rounds: int,
     paste_to: str,
     persona_name: str,
+    core_budget: Optional[int] = None,
 ) -> str:
     """転写 (mode='transcribe'): 本文に焼き込み + 写真で由来参照を残す。
 
@@ -1080,6 +1085,10 @@ def _clip_transcribe(
       (編集来歴つき append 経路) + 写真。
     - ``c:N`` (既存コア記憶への焼き込み) は非対応 — 共有ロジックが無く挙動が
       割れるため、新しいコア記憶として刻む ``paste_to='core'`` に誘導する。
+
+    ``core_budget`` は ``paste_to='core'`` の 2 経路 (範囲・点) 共通の容量目安
+    通知 (write_page と同じ ``_core_budget_note``)。旧 core_memory_add_scene /
+    core_memory_add にあった budget 超過警告を、転写でも同じように出す。
     """
     from sai_memory.photos import add_photo
 
@@ -1116,7 +1125,8 @@ def _clip_transcribe(
             ]
             if photo_ref:
                 lines.append(f"由来参照として写真 {photo_ref} も貼りました。")
-            lines.append("head への反映は次の記憶整理（Metabolism）からです。")
+            note = _core_budget_note(conn, core_budget)
+            lines.append(f"head への反映は次の記憶整理（Metabolism）からです。{note}")
             return "\n".join(lines)
 
         # 点転写 = 引用を新しいコア記憶として刻む + 点写真
@@ -1139,10 +1149,11 @@ def _clip_transcribe(
                 conn, message_id=message_id, quote=quote_text,
                 pasted_to=f"c:{new_id}",
             )
+        note = _core_budget_note(conn, core_budget)
         return (
             f"引用をコア記憶 c:{new_id} に転写しました。\n"
             f"由来参照として写真 {photo.ref} も貼りました。\n"
-            "head への反映は次の記憶整理（Metabolism）からです。"
+            f"head への反映は次の記憶整理（Metabolism）からです。{note}"
         )
 
     # --- 宛先の解釈 -------------------------------------------------------

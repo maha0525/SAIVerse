@@ -764,6 +764,24 @@ class DeletePageTests(_AtlasTestBase):
 class ClipTranscribeTests(_AtlasTestBase):
     """memory_clip mode='transcribe' (P2c-0 決定2: 転写は clip のモードに畳む)。"""
 
+    def test_transcribe_range_to_core_shows_budget_note_when_exceeded(self):
+        # 旧 core_memory_add_scene にあった budget 超過通知を範囲転写でも出す
+        # (P2c-4a: memory_write(core) にはあったが clip transcribe(core) に無かった)。
+        ids = self._add_conversation([f"発言{i}" for i in range(1, 6)])
+        result = atlas.clip_photo(
+            self.adapter, ids[2], paste_to="core", mode="transcribe",
+            core_budget=10,
+        )
+        self.assertIn("目安を超えています", result)
+
+    def test_transcribe_point_to_core_shows_budget_note_when_exceeded(self):
+        ids = self._add_conversation(["刻みたい一言があった", "そうですね"])
+        result = atlas.clip_photo(
+            self.adapter, ids[0], quote="刻みたい一言",
+            paste_to="core", mode="transcribe", core_budget=5,
+        )
+        self.assertIn("目安を超えています", result)
+
     def test_transcribe_range_to_core_matches_old_scene_logic(self):
         # core 宛の範囲転写 = 旧 core_memory_add_scene と同一の共有ロジック
         # (create_scene_core_memory)。transcript が完全一致すること

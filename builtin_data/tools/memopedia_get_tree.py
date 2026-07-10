@@ -1,4 +1,7 @@
-"""Tool to get the Memopedia page tree structure."""
+"""Tool to get the Memopedia page tree structure.
+
+P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation.md)。
+"""
 
 from __future__ import annotations
 

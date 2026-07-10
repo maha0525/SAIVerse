@@ -1,4 +1,7 @@
-"""Write knowledge fragments to Memopedia pages."""
+"""Write knowledge fragments to Memopedia pages.
+
+P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation.md)。
+"""
 
 from __future__ import annotations
 
@@ -178,6 +181,6 @@ def schema() -> ToolSchema:
             "required": ["content"],
         },
         result_type="string",
-        spell=True,
+        spell=False,
         spell_display_name="メモペディア書き込み",
     )

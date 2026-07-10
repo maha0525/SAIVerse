@@ -1,6 +1,7 @@
 """欲求の六型拡張 (自律行動 v2 §5) のテスト。
 
-- desire_add の type/source 付き追加と後方互換 (type/source なしでも従来どおり)
+- purpose_seed (旧 desire_add 後継、P2c-4a で撤去) の type/source 付き追加と
+  後方互換 (type/source なしでも従来どおり)
 - 減衰の時間発展 (仮想クロックで日を進めて fresh → fading → 期限切れ)
 - 再訪 (touch) → 昇格候補 (promotion_candidates)
 - 就寝判断 desire_reviews (keep/fading/fulfilled) の反映
@@ -92,10 +93,10 @@ def nm(session_factory):
 
 @pytest.fixture
 def desire_add_mod(session_factory, nm, ptm, tmp_path):
-    """desire_add ツールを temp DB 版 singleton で動的ロードする。"""
+    """purpose_seed ツール (旧 desire_add 後継) を temp DB 版 singleton で動的ロードする。"""
     from tool_loader import load_builtin_tool
 
-    mod = load_builtin_tool("desire_add")
+    mod = load_builtin_tool("purpose_seed")
     mod._note_manager = nm
     mod._task_manager = ptm
     persona_dir = Path(tmp_path) / PERSONA_ID
@@ -117,7 +118,7 @@ def _advance_days(days: int):
 
 
 # ---------------------------------------------------------------------------
-# desire_add: type/source 付き追加と後方互換
+# purpose_seed (旧 desire_add 後継): type/source 付き追加と後方互換
 # ---------------------------------------------------------------------------
 
 
@@ -127,7 +128,7 @@ class TestDesireAddSpell:
 
         mod, persona_dir = desire_add_mod
         with persona_context(PERSONA_ID, persona_dir):
-            out = mod.desire_add(
+            out = mod.purpose_seed(
                 title="言葉の標本集を作りたい",
                 type="作る",
                 source="図書館で読んだ語源の記事",
@@ -153,7 +154,7 @@ class TestDesireAddSpell:
 
         mod, persona_dir = desire_add_mod
         with persona_context(PERSONA_ID, persona_dir):
-            out = mod.desire_add(title="新しい言語を学びたい", goal="表現の幅を広げる")
+            out = mod.purpose_seed(title="新しい言語を学びたい", goal="表現の幅を広げる")
         assert "task:1" in out
         assert "未分類" in out
         assert not out.startswith("Error")
@@ -171,7 +172,7 @@ class TestDesireAddSpell:
 
         mod, persona_dir = desire_add_mod
         with persona_context(PERSONA_ID, persona_dir):
-            out = mod.desire_add(title="なにか", type="遊ぶ")
+            out = mod.purpose_seed(title="なにか", type="遊ぶ")
         assert out.startswith("Error")
         note_id = nm.ensure_desire_note(PERSONA_ID)
         assert ptm.list_tasks(PERSONA_ID, note_id=note_id) == []

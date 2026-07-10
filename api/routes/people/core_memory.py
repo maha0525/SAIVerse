@@ -16,7 +16,8 @@
 - POST   /{persona_id}/core-memory/{id}/restore      ごみ箱から復元
 
 scene 作成の窓切り出し・整形・保存は sai_memory.core_memory.create_scene_core_memory
-に集約されており、スペル (core_memory_add_scene) と本 API が同じ関数を呼ぶ。
+に集約されており、スペル (memory_clip mode='transcribe' paste_to='core'、旧
+core_memory_add_scene) と本 API が同じ関数を呼ぶ。
 
 訂正導線 (confirm/edit/delete/restore) は gold_panning の自動採取 (confirmed=0) を
 含むコア記憶をユーザーが後追いで直せるようにするための面。ユーザーの edit/delete/
@@ -380,8 +381,9 @@ def create_scene(
 ):
     """アンカー周辺の会話を scene としてコア記憶に刻む。
 
-    窓切り出し・整形・保存はスペル (core_memory_add_scene) と共通の
-    sai_memory.core_memory.create_scene_core_memory を呼ぶ (ロジック非複製)。
+    窓切り出し・整形・保存はスペル (memory_clip mode='transcribe' paste_to='core'、
+    旧 core_memory_add_scene) と共通の sai_memory.core_memory.create_scene_core_memory
+    を呼ぶ (ロジック非複製)。
     """
     from sai_memory.core_memory import create_scene_core_memory
 

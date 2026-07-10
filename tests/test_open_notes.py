@@ -1,7 +1,8 @@
-"""OpenNotesSection (desire ノート→head) + desire_add スペルのテスト。
+"""OpenNotesSection (desire ノート→head) + purpose_seed スペルのテスト。
 
 autonomous_desire.md §5/§7: desire ノートは候補プールの器、open_notes は
-それを head に注入、desire_add は AUTONOMOUS が候補 Task を足すスペル。
+それを head に注入、purpose_seed (旧 desire_add 後継、P2c-4a で撤去) は
+AUTONOMOUS が候補 Task を足すスペル。
 """
 import tempfile
 import unittest
@@ -184,7 +185,7 @@ class DesireAddSpellTest(unittest.TestCase):
         self.engine, self.Session = _make_db()
         self.nm = NoteManager(self.Session)
         self.ptm = PersonaTaskManager(self.Session)
-        self.mod = load_builtin_tool("desire_add")
+        self.mod = load_builtin_tool("purpose_seed")
         # module-singleton を temp DB 版へ差し替え (動的ロード = patch.object 相当)。
         self.mod._note_manager = self.nm
         self.mod._task_manager = self.ptm
@@ -201,7 +202,7 @@ class DesireAddSpellTest(unittest.TestCase):
         from tools.context import persona_context
 
         with persona_context("air", self.persona_dir):
-            out = self.mod.desire_add(title="新しい言語を学びたい", goal="表現の幅を広げる")
+            out = self.mod.purpose_seed(title="新しい言語を学びたい", goal="表現の幅を広げる")
         self.assertIn("task:1", out)
         # desire ノートが ensure され、候補 Task が note 紐付けで作られている。
         note_id = self.nm.ensure_desire_note("air")

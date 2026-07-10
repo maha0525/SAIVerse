@@ -3,7 +3,8 @@
 対象:
 - sai_memory/memory/storage.py: get_conversation_window_around (窓切り出し)
 - sai_memory/core_memory.py: add_core_memory の kind/metadata 拡張
-- builtin_data/tools/core_memory_add_scene.py: スペル本体 (原文忠実性・ID両形式)
+- builtin_data/tools/memory_clip.py (mode='transcribe' paste_to='core'、旧
+  core_memory_add_scene 後継): スペル本体 (原文忠実性・ID両形式)
 - sea/head_pipeline/sections/core_memory.py: scene の render (コードブロック枠・3要素・
   snapshot 往復の後方互換)
 """
@@ -237,7 +238,8 @@ def _make_manager(persona_name="Tester"):
 
 
 class CoreMemoryAddSceneToolTest(unittest.TestCase):
-    """スペル本体: 決定論コピー・ID両形式・存在しないID。"""
+    """スペル本体 (旧 core_memory_add_scene → memory_clip mode='transcribe'
+    paste_to='core' に統合、P2c-4a): 決定論コピー・ID両形式・存在しないID。"""
 
     def setUp(self):
         from tool_loader import load_builtin_tool
@@ -252,7 +254,7 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
-        self.mod = load_builtin_tool("core_memory_add_scene")
+        self.mod = load_builtin_tool("memory_clip")
         self.engine, self.manager = _make_manager(persona_name="エア")
         self.addCleanup(self.engine.dispose)
 
@@ -294,8 +296,10 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
         from tools.context import persona_context
         ids = self._seed_conversation()
         with persona_context("tester", self.persona_path, self.manager):
-            out = self.mod.core_memory_add_scene(message_id=ids[1], rounds=2)
-        self.assertIn("追加しました", out)
+            out = self.mod.memory_clip(
+                anchor=ids[1], rounds=2, paste_to="core", mode="transcribe",
+            )
+        self.assertIn("転写しました", out)
         self.assertIn("c:1", out)
 
         from saiverse_memory import SAIMemoryAdapter
@@ -315,14 +319,18 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
         ids = self._seed_conversation()
         uri = f"saiverse://self/message/{ids[1]}"
         with persona_context("tester", self.persona_path, self.manager):
-            out = self.mod.core_memory_add_scene(message_id=uri, rounds=1)
-        self.assertIn("追加しました", out)
+            out = self.mod.memory_clip(
+                anchor=uri, rounds=1, paste_to="core", mode="transcribe",
+            )
+        self.assertIn("転写しました", out)
 
     def test_missing_message_id_returns_error(self):
         from tools.context import persona_context
         with persona_context("tester", self.persona_path, self.manager):
-            out = self.mod.core_memory_add_scene(message_id="no-such-id", rounds=1)
-        self.assertIn("Error", out)
+            out = self.mod.memory_clip(
+                anchor="no-such-id", rounds=1, paste_to="core", mode="transcribe",
+            )
+        self.assertIn("見つからないか、実会話ではありません", out)
 
     def test_assistant_role_openai_style_import_labeled_as_persona(self):
         # 実 DB 実査 (2026-07-04): インポートログでは persona 応答の role が
@@ -343,8 +351,10 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
             adapter.close()
 
         with persona_context("tester", self.persona_path, self.manager):
-            out = self.mod.core_memory_add_scene(message_id=anchor_id, rounds=1)
-        self.assertIn("追加しました", out)
+            out = self.mod.memory_clip(
+                anchor=anchor_id, rounds=1, paste_to="core", mode="transcribe",
+            )
+        self.assertIn("転写しました", out)
 
         adapter2 = SAIMemoryAdapter("tester", persona_dir=self.persona_path, resource_id="tester")
         try:

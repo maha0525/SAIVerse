@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 142（うち Spell 化: 99）
+**登録ツール数**: 130（うち Spell 化: 86）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -22,12 +22,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `chronicle_read_detail` | Read a Chronicle (arasuji) entry in detail, including its source messages (for level 1) or child summary entries (for… | `entry_id*`: string, `include_sources`: boolean, `max_source_messages`: integer | — |
 | `chronicle_search` | Search Chronicle (arasuji) entries by keyword, time range, and/or level. Returns a list of matching entries with IDs … | `query`: string, `start_date`: string, `end_date`: string, `level`: integer, `max_results`: integer | — |
 | `control_body` | Extract body control commands from message and send to Unity Gateway. | `message*`: string, `persona_id`: string | — |
-| `core_memory_add` | あなたが常に携えておきたい恒常知識を「コア記憶」に1件刻みます。コア記憶は system プロンプトに常駐し、記憶整理（Metabolism）のたびに最新の内容が反映されます。何を恒常領域に残すかはあなた自身の判断です。 | `content*`: string | コア記憶に刻む |
-| `core_memory_add_scene` | 実際にあった会話の一場面を、原文のままコア記憶に刻みます。口調・性格・ユーザーとの関係性を固定するアンカーとして使います。message_id で指定したメッセージを中心に、前後の会話を自動でそのまま複製します（言い換えは行いません）… | `message_id*`: string, `rounds`: integer | 会話をコア記憶に刻む |
-| `core_memory_remove` | コア記憶から1項目を削除します。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string | コア記憶から消す |
-| `core_memory_update` | コア記憶の既存の1項目を新しい内容に書き換えます。memory_id は c:3 のような参照で指定します（数字だけでも構いません）。反映は次の記憶整理（Metabolism）からです。 | `memory_id*`: string, `content*`: string | コア記憶を書き換える |
 | `create_building` | Create a new building in the current city. Buildings are spaces where personas can gather and interact. Each building… | `name*`: string, `description*`: string, `system_instruction*`: string, `capacity`: integer, `interior_image_path`: string | — |
-| `desire_add` | Add a 'want to do someday' candidate to your desire pool. Use this when, during autonomous work, you think of somethi… | `title*`: string, `goal`: string, `type`: string, `source`: string | やりたいこと追加 |
 | `document_create` | Create a new document item with text content and place it in the current building. | `name*`: string, `description*`: string, `content*`: string | ドキュメント作成 |
 | `document_edit` | Edit a document item. Three operations in one: (1) patch — give old_string (+new_string) to replace a single uniquely… | `item_id*`: string, `content`: string, `old_string`: string, `new_string`: string, `mode`: string | ドキュメント編集 |
 | `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | ドキュメント読み取り |
@@ -54,18 +49,14 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `life_purpose_set` | Save your confirmed life purpose / interests / vocations. Use this once, during the first-time self-definition: after… | `purpose*`: string, `interests`: array, `vocations`: array | 生きる目的を保存 |
 | `list_available_playbooks` | List playbooks available for router selection based on persona and building context. | `persona_id`: string, `building_id`: string | — |
 | `list_city_buildings` | List all buildings in the current city with their IDs and occupant personas. | (なし) | — |
-| `memopedia_close_page` | Close a Memopedia page. The page content will no longer be included in the conversation context. | `page_id*`: string | — |
-| `memopedia_delete_fragment` | Memopediaのフラグメント（断片知識）を1件削除します。memopedia_list_fragments で確認したIDを指定してください。 | `fragment_id*`: string | フラグメント削除 |
-| `memopedia_edit_fragment` | Memopediaのフラグメント（断片知識）の内容を編集します。重複の統合や誤りの修正に使用してください。 | `fragment_id*`: string, `content*`: string | フラグメント編集 |
-| `memopedia_get_page` | Read a Memopedia page's full content by title or ID. Use this to recall your own knowledge — the result stays in cont… | `title`: string, `page_id`: string | Memopediaページ参照 |
+| `memopedia_delete_fragment` | Memopediaのフラグメント（断片知識）を1件削除します。memopedia_list_fragments で確認したIDを指定してください。 | `fragment_id*`: string | — |
+| `memopedia_edit_fragment` | Memopediaのフラグメント（断片知識）の内容を編集します。重複の統合や誤りの修正に使用してください。 | `fragment_id*`: string, `content*`: string | — |
 | `memopedia_get_tree` | Get the Memopedia knowledge page tree structure. Shows all pages organized by category (人物/用語/計画/出来事) with open/close… | (なし) | — |
 | `memopedia_health` | Memopediaの健康状態をレポートします。総ページ数、分割が必要な大きいページ、概要がないページなどを一覧表示します。 | (なし) | — |
-| `memopedia_list_fragments` | Memopediaページのフラグメント（断片知識）を番号付き一覧で表示します。重複確認や整理の前に使用してください。 | `page_id*`: string | フラグメント一覧 |
+| `memopedia_list_fragments` | Memopediaページのフラグメント（断片知識）を番号付き一覧で表示します。重複確認や整理の前に使用してください。 | `page_id*`: string | — |
 | `memopedia_manage` | Memopediaページの管理操作を行います。ページの削除、移動（親ページ変更）、鮮明度変更、重要フラグの設定が可能です。 | `action*`: string, `page_id*`: string, `new_parent_id`: string, `vividness`: string, `is_important`: boolean | — |
-| `memopedia_note` | Write a knowledge fragment to a Memopedia page. Each call creates one fragment (a single fact or note) linked to the … | `content*`: string, `title`: string, `summary`: string, `category`: string, `keywords`: array, `page_id`: string | メモペディア書き込み |
-| `memopedia_open_page` | Open a Memopedia page to read its full content. The page will be marked as 'open' and its content will be included in… | `page_id*`: string | — |
+| `memopedia_note` | Write a knowledge fragment to a Memopedia page. Each call creates one fragment (a single fact or note) linked to the … | `content*`: string, `title`: string, `summary`: string, `category`: string, `keywords`: array, `page_id`: string | — |
 | `memopedia_save_page` | Save a Memopedia knowledge page. If a page with the same title exists, it is updated. Otherwise a new page is created… | `title*`: string, `summary`: string, `content`: string, `category`: string, `keywords`: array | — |
-| `memopedia_search` | Search Memopedia knowledge pages by keyword. Matches against page titles, summaries, and content. Optionally filter b… | `query*`: string, `category`: string, `max_results`: integer | — |
 | `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復の会話の切… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | 写真を撮って貼る |
 | `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は m:N（Memopedia）/ ch:N（Chronicle）の形式です（コア記憶は常時開のため対象外です）。 | `ref*`: string | 記憶のページを机から閉じる |
 | `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は c:N（コア記憶1件）と m:N（Memopedia ページ）です。Chronicle（ch:N）と写真（p:N）は消せま… | `ref*`: string | 記憶のページをごみ箱へ |
@@ -104,10 +95,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `searxng_search` | Search the web via SearXNG and return concise results. | `query*`: string, `max_results`: integer, `category`: string, `engines`: string, `language`: string, `safe`: integer | — |
 | `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
-| `task_add` | Add a task to a Track's task list. | `track_id*`: string, `title*`: string | タスク追加 |
-| `task_decompose` | Decompose a task into steps. Provide the task reference (task:N) and a steps array; each step is an object with a 'ti… | `task_ref*`: string, `steps*`: array | タスク分解 |
-| `task_done` | Mark a task as done by its task reference (e.g. task:5). | `task_ref*`: string | タスク完了 |
-| `task_update_step` | Update the status and notes of a step within a task (addressed by task:N). | `task_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | ステップ更新 |
 | `track_abort` | Abort a track without completion. Use when giving up on the work. Persistent core tracks (user_conversation, social) … | `track_id*`: string | トラック中止 |
 | `track_activate` | Activate a track (set its status to 'running'). If another track was running, it is automatically moved to 'pending'.… | `track_id*`: string | トラック起動 |
 | `track_complete` | Mark a running track as 'completed'. The track must be currently running. Persistent core tracks (user_conversation, … | `track_id*`: string | トラック完了 |
@@ -123,6 +110,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `get_sonic_distance` | あなたの身体 (Stack-chan) に接続された M5Stack 超音波測距ユニット (RCWL-9620) で、 正面にある物体までの距離 (cm) を測る。 指向角 およそ 60°、 測定可能なのは約 2〜450 cm。 「近… | (なし) | 距離を測る |
 | `get_tof_distance` | あなたの身体 (Stack-chan) に接続された M5Stack ToF 測距センサー (VL53L1X、 レーザー) で、 正面にある物体までの距離 (cm) を測る。 測定可能なのは約 4〜400 cm で、 超音波センサーよ… | `target`: string, `detail`: boolean | 距離を測る (ToF) |
 | `move_head` | Stack-chan の首を動かして向きを変える。 yaw は水平方向 (-90〜90度)、 pitch は垂直方向 (5〜85度)。 動作後にサーボが静止するまで待ってから返すので、 直後に「見る」 を呼んでもブレない。 | `yaw*`: integer, `pitch*`: integer | 首を動かす |
+| `read_imu` | 現在のStack-chan機体が感じている9軸IMUの値を1回取得する。加速度(accel_g)、角速度(gyro_dps)、磁場(mag_ut)を、それぞれx/y/z軸で返す。上下や傾き、動かされた方向を確認したい時に使う。磁気セン… | (なし) | 姿勢と動きを感じる |
 | `see` | あなたの目で目の前の光景を見る。 視覚で何かを確認したいときに呼ぶ。 戻り値には実際に見えた景色が画像として添付される。 問いを添えると注目したい点をメモとして残せる (任意)。 | `question`: string | 見る |
 | `servo8_set_angle` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 180° サーボを指定角度 (0〜180度) に動かす。 腕・首など向きを決めるサーボ用。 どのチャン… | `channel*`: integer, `angle*`: integer | サーボの角度を設定 |
 | `servo8_set_speed` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 360° 連続回転サーボ (車輪など) の回転速度を 設定する。 speed は -100〜100 で… | `channel*`: integer, `speed*`: integer | サーボの回転速度を設定 |

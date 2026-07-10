@@ -24,6 +24,7 @@ from tools.core import ToolSchema
 
 from builtin_data.tools._core_memory_common import (
     parse_message_ref,
+    resolve_core_memory_budget,
     resolve_persona_display_name,
 )
 
@@ -56,12 +57,13 @@ def memory_clip(
         raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
     persona_name = resolve_persona_display_name(persona_id)
+    budget = resolve_core_memory_budget(persona_id)
     try:
         with adapter._db_lock:
             return memory_atlas.clip_photo(
                 adapter, mid,
                 quote=quote, rounds=rounds, paste_to=paste_to,
-                persona_name=persona_name, mode=mode,
+                persona_name=persona_name, mode=mode, core_budget=budget,
             )
     except memory_atlas.AtlasRefError as exc:
         return f"Error: {exc}"

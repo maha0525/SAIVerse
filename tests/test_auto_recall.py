@@ -221,27 +221,27 @@ class TestFooterHandles(AutoRecallBase):
         self.assertTrue(res.injected)
         # union なので重複せず1回ずつ、chronicle 用と memopedia 用の両方が出る。
         self.assertEqual(res.block.count("chronicle_read_detail"), 1)
-        self.assertEqual(res.block.count("memopedia_get_page"), 1)
+        self.assertEqual(res.block.count("memory_read"), 1)
         # フッターはブロック末尾の1行のみ。
         self.assertEqual(res.block.count("深掘り用スペル"), 1)
 
     def test_orphan_fragment_adds_memory_recall_unified_to_footer(self):
-        # 孤児 Fragment (親ページ削除済み = title 空) は memopedia_get_page で
+        # 孤児 Fragment (親ページ削除済み = title 空) は memory_read で
         # 深掘りできないので、footer には memory_recall_unified を含める。
         hits = [_hit("fragment", "f1", embed_score=0.9, title="", content="断片の中身")]
         res = self._run(hits, _msgs(("user", "話題")))
         self.assertTrue(res.injected)
         self.assertIn("[記憶の断片]", res.block)
         self.assertIn("memory_recall_unified", res.block)
-        # memopedia_get_page は (孤児なので) union に含まれない。
-        self.assertNotIn("memopedia_get_page", res.block)
+        # memory_read は (孤児なので) union に含まれない。
+        self.assertNotIn("memory_read", res.block)
 
     def test_footer_omitted_source_types_not_listed(self):
         # 採用されたのが chronicle だけなら memopedia/message 用ハンドルは出ない。
         hits = [_hit("chronicle", "c1", embed_score=0.9)]
         res = self._run(hits, _msgs(("user", "話題")))
         self.assertTrue(res.injected)
-        self.assertNotIn("memopedia_get_page", res.block)
+        self.assertNotIn("memory_read", res.block)
         self.assertNotIn("memory_recall_unified", res.block)
 
 

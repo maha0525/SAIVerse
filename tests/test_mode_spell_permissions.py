@@ -20,13 +20,14 @@ class TestSpellPermissionMatrix(unittest.TestCase):
             self.assertIsNotNone(check_spell_permission(sp, Aspect.WORKER))
 
     def test_task_control_allowed_in_autonomous_and_conversation(self):
-        for sp in ("task_add", "task_done", "task_update_step", "task_decompose"):
+        # P2c-4a: 旧 task_* は撤去済み。ゲート対象は purpose_* 動詞 (旧 task_* 後継)。
+        for sp in ("purpose_adopt", "purpose_close", "purpose_step", "purpose_decompose"):
             self.assertIsNone(check_spell_permission(sp, Aspect.AUTONOMOUS))
             self.assertIsNone(check_spell_permission(sp, Aspect.CONVERSATION))
 
     def test_task_control_blocked_in_meta_and_worker(self):
         # 厳密版: META は大目的 (Track) のみ、Task (小目標) には触らない。
-        for sp in ("task_add", "task_done", "task_update_step", "task_decompose"):
+        for sp in ("purpose_adopt", "purpose_close", "purpose_step", "purpose_decompose"):
             self.assertIsNotNone(check_spell_permission(sp, Aspect.META))
             self.assertIsNotNone(check_spell_permission(sp, Aspect.WORKER))
 
@@ -63,7 +64,7 @@ class TestSpellPermissionMatrix(unittest.TestCase):
     def test_none_aspect_never_restricts(self):
         # legacy frame / aspect 不明時は制限しない。
         self.assertIsNone(check_spell_permission("track_create", None))
-        self.assertIsNone(check_spell_permission("task_add", None))
+        self.assertIsNone(check_spell_permission("purpose_adopt", None))
 
     def test_block_message_uses_mode_display_name(self):
         msg = check_spell_permission("track_create", Aspect.AUTONOMOUS)

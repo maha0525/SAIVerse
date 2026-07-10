@@ -304,14 +304,14 @@ class PurposeSpellPermissionTests(unittest.TestCase):
             self.assertIsNotNone(check_spell_permission(sp, Aspect.META))
             self.assertIsNotNone(check_spell_permission(sp, Aspect.WORKER))
 
-    def test_old_names_remain_gated(self):
-        # 旧名の権限は消さない (旧スペル自体は P2c-4 まで残る)
+    def test_old_names_no_longer_gated(self):
+        # P2c-4a: 旧 task_*/desire_add スペル自体が撤去されたので、ゲートからも
+        # 落ちている (aspect 制限なし = 実体が無い名前を誤って通しても実害は無い)。
         from sea.mode_spell_permissions import check_spell_permission
         from sea.pulse_context import Aspect
 
         for sp in ("task_add", "task_done", "desire_add"):
-            self.assertIsNone(check_spell_permission(sp, Aspect.AUTONOMOUS))
-            self.assertIsNotNone(check_spell_permission(sp, Aspect.META))
+            self.assertIsNone(check_spell_permission(sp, Aspect.META))
 
 
 class PurposeSpellSchemaTests(unittest.TestCase):

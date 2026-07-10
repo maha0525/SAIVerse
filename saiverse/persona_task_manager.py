@@ -342,8 +342,9 @@ class PersonaTaskManager:
 
         ``desire_type`` / ``desire_source`` は欲求の六型と接地参照 (自律行動 v2 §5)。
         候補 (parent_kind='note') では帳簿 (last_touched_at / touch_count /
-        desire_state) も初期化する。値の検証は呼び出し側 (desire_add スペル等) の
-        責務 — 本レイヤーは priority / origin と同じく永続化のみ担う。
+        desire_state) も初期化する。値の検証は呼び出し側 (purpose_seed スペル等、
+        旧 desire_add 後継) の責務 — 本レイヤーは priority / origin と同じく
+        永続化のみ担う。
 
         ``stage`` / ``nature`` / ``promoted_from`` は目的ノードの段階・種別・来歴
         (life_concept_map.md §3.1)。省略 (None) 時は物理カラムを NULL のままにし、

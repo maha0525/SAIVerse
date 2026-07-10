@@ -36,7 +36,7 @@ def get_memory_weave_context(
     ``MEMOPEDIA_INDEX_ENABLED`` (database/models.py) で旧方式 (全ページ一覧の常時表示)
     を復活できる後方互換経路を用意している。``include_memopedia`` はそのゲート引数で、
     呼び出し元 (MemoryWeaveSection.capture) がトグルを解決して渡す。
-    ペルソナが明示的に開いたページ (memopedia_open_page → get_open_pages_content) は
+    ペルソナが明示的に開いたページ (memory_open → get_open_pages_content) は
     別機構なので、このトグルの影響を受けない。
 
     The context is inserted after the system prompt but before visual context
@@ -139,7 +139,8 @@ def get_memory_weave_context(
             memopedia_intro = (
                 "以下は、あなたの長期記憶（Memopedia: 記憶ベース）です。\n"
                 "タイトルと概要のみが表示されているページは、ここに載っている以上の詳細な内容を持っています。"
-                "特定のページの詳細を確認したい場合は、memopedia_get_page ツールを使って本文を読んでください。"
+                "特定のページの詳細を確認したい場合は、memory_read スペル（例: m:3）で本文を読んでください。"
+                "常に見ておきたいページは memory_open で机に開いておけます。"
             )
             messages.append({
                 "role": "user",

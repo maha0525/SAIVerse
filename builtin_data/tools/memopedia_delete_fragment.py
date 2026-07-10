@@ -1,4 +1,7 @@
-"""Delete a Memopedia fragment by ID."""
+"""Delete a Memopedia fragment by ID.
+
+P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation.md)。
+"""
 
 from __future__ import annotations
 
@@ -64,6 +67,6 @@ def schema() -> ToolSchema:
             "required": ["fragment_id"],
         },
         result_type="string",
-        spell=True,
+        spell=False,
         spell_display_name="フラグメント削除",
     )

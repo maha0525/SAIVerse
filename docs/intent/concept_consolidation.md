@@ -187,7 +187,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 ### 次アクション
 
-**P2=完了**（P1/P2a/P2b コミット済み 2026-07-10）。P2c-0 の4決定=**裁定済み**（上記）。現在: **P2c-1**（task:N 解決＋purpose 動詞4本＋現役機械消費者〔judgment_finalize / track_manager / mode_spell_permissions〕の同時切替。旧スペルの削除はしない=P2c-4）→ P2c-2（memory_delete / clip transcribe / write 新規作成）→ P2c-3（v1 Playbook 退役）→ P2c-4（/photos 改称＋旧ツール最終撤去）。Note スペル（meta_layer の4本）は P3c（Note→テーマノード統合）まで温存。
+**P2c-1〜P2c-4a=完了**（2026-07-10/11）。P2c-4a: 旧13スペル削除（core_memory 4・task 4・desire_add・memopedia 読み書き4）、庭仕事系9ツール内部専用化（spell=False、P4 素材）、common.txt をはじめ教示・案内を memory_*/purpose_* 語彙へ原子的切替（read/open の違いの説明義務込み）、コア記憶の容量目安通知を memory_write(core)/clip transcribe に移植、再監査済（残存は歴史・互換・archive・note 系温存のみ）。**Note スペル4本は P3c まで温存**。残: **P2c-4b**（/marks→/photos 改称: backend+frontend+tests+reference 1コミット切替）→ **landscape 改稿**（⑥仕上げ・メイン直接）→ P3 物理統合。
 
 ---
 

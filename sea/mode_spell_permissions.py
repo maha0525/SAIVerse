@@ -39,14 +39,9 @@ TRACK_CONTROL_SPELLS = frozenset({
 # Task 操作スペル (mutating)。タスク一本化 (unified_task_model.md) 後の統合スペル群。
 # task は task:N 参照で指す (所属 track/note/なしを横断)。旧 standalone スペル
 # (task_change_active / task_close / task_request_creation) は撤去された。
-# P2c-1: purpose 動詞 (concept_consolidation.md P2 統一スペル) を旧 task/desire
-# 系と同じ権限で追加。旧名は旧スペル自体が P2c-4 で撤去されるまで両方有効。
+# P2c-4a: 旧 task_* / desire_add スペル自体が撤去された (concept_consolidation.md
+# P2c-2 削除表) ので、ここのゲート対象も purpose_* のみに揃える。
 TASK_CONTROL_SPELLS = frozenset({
-    "task_add",           # Track にタスク追加
-    "task_done",          # タスク完了 (task:N)
-    "task_update_step",   # タスクのステップ更新 (task:N)
-    "task_decompose",     # タスクをステップに分解 (task:N)
-    "desire_add",         # やりたいこと候補を desire ノートに追加 (note 紐付け Task)
     "purpose_seed",       # 候補を生む (旧 desire_add 後継)
     "purpose_adopt",      # 候補を木に接ぐ / 枝に小目標を作る (旧 task_add 後継)
     "purpose_decompose",  # 目的ノードをステップに分解 (旧 task_decompose 後継)

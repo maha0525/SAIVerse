@@ -1,4 +1,7 @@
-"""Save or update a Memopedia page (find-or-create by title)."""
+"""Save or update a Memopedia page (find-or-create by title).
+
+P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation.md)。
+"""
 
 from __future__ import annotations
 

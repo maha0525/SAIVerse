@@ -1,4 +1,7 @@
-"""Edit a Memopedia fragment's content."""
+"""Edit a Memopedia fragment's content.
+
+P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation.md)。
+"""
 
 from __future__ import annotations
 
@@ -78,6 +81,6 @@ def schema() -> ToolSchema:
             "required": ["fragment_id", "content"],
         },
         result_type="string",
-        spell=True,
+        spell=False,
         spell_display_name="フラグメント編集",
     )
