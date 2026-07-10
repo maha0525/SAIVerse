@@ -185,9 +185,29 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 3. **ページ作成**: `memory_write` を新規ページ作成まで拡張。**構造編集（移動・統合・分割）は日常動詞にしない** — ただし禁止ではなく非掲載: 庭仕事モードに入った時に `addon_spell_help` 型の遅延スキーマロードで開示する構想（この仕様は別途・後回し）
 4. **候補生成**: **分ける**。候補を生む動詞（仮称 `purpose_seed`、旧 desire_add 後継）と `purpose_adopt`（木に接ぐ）は別。**注**: ペルソナが自発スペルとして本当に使うかは怪しい — 作ってから統合・一部自動化・候補作成トリガーの自動発生を検討する前提
 
+### P3 物理統合 — 写像設計 v0.1（2026-07-11 メイン起草）
+
+**戦略: モジュール API を互換層にする（strangler-fig の完成形）。** 各ストレージモジュール（core_memory.py / arasuji/storage.py / persona_task_manager）の**関数シグネチャと dataclass を変えず、中身だけ memopedia_pages 実装に差し替える**。消費者（head section・API routes・gold_panning・ファサード・判断点）は無変更、既存テストがそのまま挙動契約になる。データ移行は adapter init の一回きり冪等 migration（marks→photos と同じ流儀）で、**旧テーブルは移行後 DROP**（旧 path を残さない）。
+
+**共通不変条件**:
+1. 既存 ref（`c:N` / `ch:N` / `task:N`、写真の pasted_to 文字列を含む）は**移行後も同じ実体に解決される**——土地（生ログ・写真）は書き換えない
+2. head の render 文字列は移行前後で同一（キャッシュ整合・スナップショット互換）
+3. 既存テストは無変更で通る（モジュール API が契約）＋ 移行テストを追加
+
+**P3a: コア記憶 → 常時開ページ**
+- ページ化: trunk `root_core`（category `core`・is_trunk）配下の子ページ。content=本文、title=`コア記憶 c:N`、metadata JSON に `{core_id, kind, confirmed, scene由来参照, deleted_at}`。`is_important=1`
+- `c:N` 解決: metadata.core_id で引く（m:N の採番とは独立。既存の pasted_to="c:N" がそのまま生きる）。採番は max(core_id)+1
+- ごみ箱: memopedia の is_deleted ＋ metadata.deleted_at（トラッシュ UI の削除時刻順を維持）
+- 常時開: category `core` は desk 対象外・PageState 不要（既存のファサードガードのまま）
+- 移行: `core_memories` テーブル → ページ生成 → DROP（冪等・一回きり）
+- 留意: memory_search / memopedia ツリーにコア記憶ページが現れるようになる（検索できるのはむしろ望ましい）。maintain_memopedia（P4 素材）は category `core` を分割/統合対象から除外すること
+
+**P3b: Chronicle → 時間の地図ページ**（3a 検収後に詳細化）: arasuji/storage.py の API を維持したままページ実装へ。parent_id=Lv 統合の親子、metadata に source_ids/level/is_consolidated。ArasujiGenerator は無変更
+**P3c: 目的の木 + Note 畳み**（最重量・cross-DB）: persona_task（main DB）→ per-persona memory.db のページへ。Note→テーマノード統合・TrackOpenNote→机の掛け替え・note スペル4本と open_notes section の退役もここ。3a/3b の学びを踏まえて着手前に詳細化
+
 ### 次アクション
 
-**P2c-1〜P2c-4a=完了**（2026-07-10/11）。P2c-4a: 旧13スペル削除（core_memory 4・task 4・desire_add・memopedia 読み書き4）、庭仕事系9ツール内部専用化（spell=False、P4 素材）、common.txt をはじめ教示・案内を memory_*/purpose_* 語彙へ原子的切替（read/open の違いの説明義務込み）、コア記憶の容量目安通知を memory_write(core)/clip transcribe に移植、再監査済（残存は歴史・互換・archive・note 系温存のみ）。**Note スペル4本は P3c まで温存**。残: **P2c-4b**（/marks→/photos 改称: backend+frontend+tests+reference 1コミット切替）→ **landscape 改稿**（⑥仕上げ・メイン直接）→ P3 物理統合。
+P3a をサブエージェント委譲（夜間チェーン: 3a 実装 → メイン検収 → 3b 詳細化・委譲 → …）。
 
 ---
 
