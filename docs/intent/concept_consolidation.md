@@ -175,9 +175,19 @@
 
 `memory_clip` の引数は両対応: 点=逐語引用＋貼り先 / 範囲=アンカー＋往復数（SCENE と同じ操作感）。
 
+### P2c 消費者監査 — 完了（Codex、2026-07-10）
+
+P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_atlas_p2c_consumer_audit.md](../handoff/2026-07-10_memory_atlas_p2c_consumer_audit.md)** に完了済み（Codex 実施・まはー依頼）。要旨: 旧26ツールは一括削除不可。`judgment_finalize` の `_fire_spell("desire_add")` 等の**現役機械消費者**があり、`core_memory_remove`（削除）・`core_memory_add_scene`（転写）・ページ新規作成/構造編集・候補生成には現行6動詞に等価が無い。推奨分割 P2c-0〜4 は同 doc §9。
+
+**P2c-0: 着手前に決める4点**（まはーとの設計議論待ち）:
+1. **ページ削除**: `core_memory_remove` と Memopedia delete を統一する動詞（`memory_delete`?）を作るか
+2. **転写**: `core_memory_add_scene` を残すか、`memory_clip` に参照貼り/転写モードを持たせるか
+3. **ページ作成・構造編集**: `memory_write` を create/replace/metadata まで広げるか、庭仕事用の別動詞にするか
+4. **候補生成**: `desire_add` 相当（候補を生む）と `purpose_adopt`（候補を木に接ぐ）を分けるか
+
 ### 次アクション
 
-P2b 委譲分=**実装済**（2026-07-10。p:N・写真抜粋描画・`memory_read p:N`（範囲全文は SCENE と同一の実会話フィルタを storage.py で一点管理）・memory_write（m:N 追記=編集来歴つき / core / c:N）・memory_clip（点=引用実在検証 / 範囲=anchor+rounds、参照貼りのみ）。pytest 248 passed）。残 P2b=**head 机セクション（DeskSection、open_notes 後継・refresh=Metabolism のみ=フェードアウト自動・capture 冒頭で evict_lru=Metabolism 追い出しフック）→ メイン直接**。旧スペル撤去と purpose 動詞・task:N 解決・life API /marks→/photos 改称は消費者監査（playbook TOOL ノード参照の洗い出し）とセットで後続（P2c）。
+P2b 委譲分=**実装済**（p:N・写真抜粋描画・memory_read p:N・memory_write・memory_clip。248 passed）。P2b メイン直接分=**実装済**（DeskSection＋snapshot_desk。検収で soft-delete 素通しバグ発見・修正、追い出し通知を溢れ/消失で分離）— **テスト最終確認中 → コミットで P2b 完了**。次: **P2c-0 の4決定（まはー議論）** → P2c-1〜4 は監査 doc §9 の分割に従う。
 
 ---
 
