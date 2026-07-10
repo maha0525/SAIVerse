@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v1.7 (2026-05-29 改訂 — 外部ログのインポート経路を §5 に追記)
+> **ステータス**: v2.0 (2026-07-11 改訂 — Memory Atlas〔記憶概念の統合、§5〕と自律行動 v2〔時間割+判断点、§3〕を反映する大改訂。concept_consolidation.md / autonomous_behavior_v2.md の実装完了に伴う)
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -19,9 +19,10 @@ graph TD
     Persona -->|回す| Pulse
     PulseController -->|"起動 (優先度・割り込み)"| Pulse
     Building -->|発言を検知| PulseController
-    Schedulers["時間機構: SubLineScheduler 30s / AutonomyManager 50min"] -->|submit| PulseController
-    MetaJudgment["Meta-Judgment"] -->|選ぶ| Track
-    Track -->|Handler が Pulse 挙動を規定| Pulse
+    DayPlan["時間割 (day plan) + 判断点"] -->|"コマ発火・判断"| PulseController
+    Watchdog["AutonomyManager (watchdog)"] -.->|途絶時のみ火入れ| DayPlan
+    JudgmentPoints["判断点 (起床/就寝/セッション終了/会話終了/on_event)"] -->|"接ぎ直し・裁定"| PurposeTree
+    PurposeTree["目的の木 (目的の地図)"] -->|コマの対象| DayPlan
     Pulse -->|内包| Beat
     Pulse -->|実行| Playbook
     Playbook -->|発話ノードが生成| Beat
@@ -30,30 +31,33 @@ graph TD
     Spell -->|呼ぶ| Tool
 
     Session["Session (短期記憶)"]
-    LongTerm["長期記憶 SAIMemory: 生ログ / Chronicle / Memopedia"]
+    Land["土地 = 生ログ (SAIMemory messages)"]
+    Atlas["Memory Atlas (地図帳): 時間の地図=Chronicle / 意味の地図=Memopedia・コア記憶 / 目的の地図=目的の木"]
     User((User))
-    LongTerm -->|末尾を供給| Session
+    Land -->|末尾を供給| Session
+    Land -->|"編纂 (Metabolism・判断点)"| Atlas
+    Atlas -->|"目次・机・コア記憶 (head)"| Session
     head -->|含まれる| Session
     Beat -->|自分の短期記憶へ| Session
     Beat -->|発言が積まれる| Building
     User -->|書き込む| Building
     Building -->|チャットUIで見る| User
     Building -->|未読・システム通知が流入| Session
-    Session -->|判断材料| MetaJudgment
+    Session -->|判断材料| JudgmentPoints
     Session -->|文脈| Beat
     Session -->|継続不能で発火| Metabolism
-    Metabolism -->|結晶化| LongTerm
+    Metabolism -->|結晶化・編纂| Atlas
     Metabolism -->|更新 → 新 Session| head
-    Pulse -->|記録| LongTerm
+    Pulse -->|記録| Land
     Addon -->|提供| Tool
     Addon -->|提供| Playbook
 ```
 
 **4つのハブ概念**（線が集中する中心）:
-- **Pulse** — 駆動の中心。Track・Playbook・長期記憶・Session すべてに接続する
-- **SAIMemory（長期記憶 DB）** — 記録の中心。生ログ・Chronicle・Memopedia を内包する容れ物
+- **Pulse** — 駆動の中心。時間割・Playbook・土地・Session すべてに接続する
+- **土地と Memory Atlas（§5）** — 記録の中心。**土地**＝生ログ（実際に起きたことの不変の地面）、**Memory Atlas（地図帳）**＝土地から編纂される三種の地図（時間＝Chronicle / 意味＝Memopedia・コア記憶 / 目的＝目的の木）。土地参照は**写真**（p:N）に統一
 - **Playbook** — 行動の中心。Beat が生成され、Spell を介して Tool やサブライン Playbook に繋がる
-- **Session（短期記憶）** — 認知の中心。長期記憶の末尾・head・進行中の Beat・外界入力を集約し、**すべての LLM 判断（Meta-Judgment / Beat 生成）に供給する**。継続不能になると Metabolism を発火し、新 Session が始まる
+- **Session（短期記憶）** — 認知の中心。土地の末尾・head（目次・机・コア記憶を含む）・進行中の Beat・外界入力を集約し、**すべての LLM 判断（判断点 / Beat 生成）に供給する**。継続不能になると Metabolism を発火し、新 Session が始まる
 
 **ユーザーとの接点**: これらの認知サイクルの外周に **User ⇄ Building** の感知ループがある。User はチャットUI（= Building）にメッセージを書き込み、ペルソナの Beat も Building に積まれる。Building は複数主体の**共有メッセージ場**であり、そこに居る全員（ユーザー・在室ペルソナ）が内容を各自の Session（短期記憶）に取り込む。つまり **Building = 公共の場 / Session = 各自の私的な短期記憶** という対比になる。
 
@@ -113,7 +117,7 @@ graph LR
 
 ### Pulse
 
-ペルソナの認知サイクル1回分（実行入口は `SAIVerseManager.run_sea_user` / `run_sea_auto`。`run_pulse` という名前のメソッドは無い）。アクティブな Track に対して思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源は4種類ある: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler）/ **Phenomena**（外部イベント、§4）/ **自律 Track**。これらを集約・制御するのが下記の PulseController。
+ペルソナの認知サイクル1回分（実行入口は `SAIVerseManager.run_sea_user` / `run_sea_auto`。`run_pulse` という名前のメソッドは無い）。思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler — 時間割のコマ発火・起床/就寝の判断点を含む）/ **Phenomena**（外部イベント、§4）/ **文脈駆動の判断点**（セッション終了・会話終了・on_event）。これらを集約・制御するのが下記の PulseController。
 
 ### PulseController（Pulse 起動の制御層）
 
@@ -123,32 +127,34 @@ graph LR
 
 ### 駆動の時間機構（誰がいつ Pulse を起こすか）
 
-PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。これらが `submit_*` で PulseController に Pulse を投げる:
+PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。自律稼働は**計画駆動＋出来事駆動**の二本（自律行動 v2、2026-07-10 完全移行）:
 
-- **SubLineScheduler**（`pulse_scheduler.py`、5秒ポーリング）: running 状態の Track を拾って Pulse を回す。**自律 Track の「短時間で連続する Pulse」を駆動する主体**。自律 Track は連続実行型（下記 Handler）なので、メインキャッシュ TTL まで Pulse が連続する。実装済（`SAIVERSE_SUBLINE_SCHEDULER_ENABLED` で制御、既定有効）
-- **AutonomyManager**（`autonomy_manager.py`、既定50分間隔）: per-persona の self-rescheduling timer。periodic tick で `dispatch_autonomy_tick` → メタ判断 Pulse を起こす。**自律バイオリズムの大リズム**
-- **EventScheduler / InternalAlertPoller / Phenomena**: スケジュール実行・内部 alert ポーリング・外部イベントによる起動
+- **時間割（day plan）**: 起床判断（`judgment_day_open`）でペルソナ自身が一日のコマを編成し、コマ開始が EventScheduler へ決定論で予約される（`saiverse/day_plan.py` / `saiverse/autonomy_wiring.py`）。コマ発火で**予算（ラウンド数）付きの作業セッション**が走る — 旧「数分刻みの連続 Pulse」の正当な後継（粒度が機械的な刻みからコマ＝意味の単位に変わった）
+- **判断点（judgment points）**: 起床・就寝はスケジュール駆動、セッション終了・会話終了・イベント到着（on_event）は文脈駆動で発火し、ふりかえり・タスク裁定・候補採取・時間割の組み替えを行う
+- **AutonomyManager**（`autonomy_manager.py`）: 定期 tick は **watchdog に縮退** — 正常時は何もせず、「Active・起床時間帯なのに時間割が無い／コマ予約が途絶」のときだけ火入れし直す
+- **EventScheduler / InternalAlertPoller / Phenomena**: スケジュール実行・内部 alert（呼びかけ）ポーリング・外部イベントによる起動
 
-つまり自律稼働は2層のリズム: 大リズム（AutonomyManager 50分のメタ判断 tick）→ Track 選択 → 小リズム（SubLineScheduler 5秒で running 自律 Track の Pulse を連続実行）。
+> 旧2層リズム（AutonomyManager 50分 tick ＋ SubLineScheduler 5秒ポーリング）は**廃止済み**（§9）。数分刻みの自律 Pulse は意味のある行動を生まない、という v1 失敗診断に基づく。
 
-### Track / Handler
+### Track / 目的の木
 
-**Track**（通称「行動の線」、`action_track` テーブル）は進行中の作業文脈そのもの。対ユーザー会話・自律稼働・交流・外部通信などが各1本の Track として並存し、実行されるのは常にアクティブな1本のみ。休止中の Track は状態を保ったまま残り、判断により再開される。「永続 Track」（ユーザーごとの会話・交流）と「一時 Track」（プロジェクト・自律行動）の区別があり、永続 Track は完了・中止に遷移しない。
+**Track**（通称「行動の線」、`action_track` テーブル）は、認知モデルの初期に「進行中の作業文脈」を一手に担った概念で、**複数の概念の未分化な束**だったことが分かっている（life_concept_map.md §10）。分化の結果:
+
+| Track が担っていた責務 | 分化先 |
+|---|---|
+| 目的の切り出し | **目的の木**（Memory Atlas の目的の地図、§5。第一階層＝旧 Track、中間＝task、末端＝step） |
+| 「いま」の容れ物 | **出来事**（episode テーブル） |
+| 文脈復元の鍵 | 目的タグ＋想起（purpose_tags / recall_walk） |
+| 世界の要求の受け口 | 呼びかけ（alert） |
+| 時間を受け取る順番 | 時間割＋判断点 |
+
+`action_track` の行データ（title・意図・机メモ）は第一階層の目的ノードとして存続し、`task:N` / `track:N` の統一参照で指せる。永続 Track（対ユーザー会話・交流）は構成系の営みノードとして残る。物理統合（persona_task と Memopedia ページの同一実体化）は P3c 予定。
 
 > **ペルソナ間会話の現状**: 交流（Social）Track はペルソナ同士の会話の器で、`SocialTrackHandler` と自動作成はあるが、**「他ペルソナ発話イベントの受け口」（入口）が未実装**。そのためペルソナ間会話の機序はまだ成立しておらず、この地図でも描けていない（→ [`roadmap_status.md`](roadmap_status.md) §2）。
 
-**Handler** は Track 種別ごとの振る舞いを定義するパターン（`track_handlers/`）。その中核が **`post_complete_behavior`**（Pulse 完了後にどうするか）で、これが Track 種別ごとの Pulse 挙動を決める:
+### 判断点（旧 Meta-Judgment）
 
-| Handler | `post_complete_behavior` | 挙動 |
-|---|---|---|
-| AutonomousTrackHandler | `meta_judge` | 完了後メタ判断 → 続行/切替/完了。**連続実行型**（`max_consecutive_pulses=-1`、TTL まで） |
-| UserConversationTrackHandler | `wait_response` | 完了後アイドル化、応答待ち（`max_consecutive_pulses=1`、**単発**） |
-
-これにより「自律 Track は連続、会話 Track は単発で応答待ち」という差が生まれる。SubLineScheduler はこの属性を見て Pulse を回すか止めるかを決める。新しい Track 種別の追加は対応する Handler を書くだけで済み、TrackManager 本体は変更しない。
-
-### Meta-Judgment
-
-「どの Track を動かすか」を判断する上位視点（通称「メタレイヤー」）。実装は `meta_judgment.json` Playbook で、専用 LLM ノードが「現 Track 続行 / 別 Track を activate / 新規 Track を create」を決める。**判断材料は Session（短期記憶、§6）から得る**——今見ているコンテキスト（長期記憶の末尾・head・進行中の Beat・外界入力）を根拠に判断する。判断ログは `meta_judgment_log` に蓄積され、次の判断時に参考情報として注入される。
+「何をするか」をペルソナが決める上位視点。旧メタ判断（50分 tick の状況分類ディスパッチ）は**判断点5種に置換された**: 起床（`judgment_day_open`＝時間割の編成）・就寝（`judgment_day_close`＝ふりかえりと接ぎ直し）・セッション終了・会話終了・イベント到着（on_event）。いずれも**出来事の境界**（文脈の濃い場所）に置かれ、構造化出力でタスク裁定・候補採取（`purpose_seed` 発火）・時間割の組み替えを行う（`builtin_data/tools/judgment_finalize.py`）。**判断材料は Session（短期記憶、§6）から得る**。判断ログは `meta_judgment_log` に蓄積される。alert（呼びかけ）即応のみ旧経路が存続。
 
 ### line（ラインの3軸）
 
@@ -164,13 +170,14 @@ Track 内の処理は複数の **line** に分かれ、3つの独立した軸で
 ```mermaid
 graph TD
     User((User)) -->|"発言 (Building→SAIVerseManager→submit_user)"| PulseController
-    SubLineScheduler["SubLineScheduler (30s)"] -->|running Track を submit_auto| PulseController
-    AutonomyManager["AutonomyManager (50min)"] -->|tick で submit_meta_judgment| PulseController
+    DayPlan["時間割 (コマ予約 → EventScheduler)"] -->|コマ発火 submit_schedule| PulseController
+    JudgmentPoints["判断点 (起床/就寝/セッション終了/会話終了/on_event)"] -->|submit| PulseController
+    Watchdog["AutonomyManager (watchdog)"] -.->|途絶検知時のみ| DayPlan
     Phenomena -->|submit_schedule| PulseController
-    Session["Session (短期記憶 §6)"] -->|判断材料| MetaJudgment["Meta-Judgment"]
-    MetaJudgment -->|選択| Track
+    Session["Session (短期記憶 §6)"] -->|判断材料| JudgmentPoints
+    JudgmentPoints -->|"裁定・接ぎ直し・候補採取"| PurposeTree["目的の木 (§5 目的の地図)"]
+    PurposeTree -->|"コマの対象 (task参照)"| DayPlan
     PulseController -->|"優先度 USER>SCHEDULE>AUTO + 割り込み"| Pulse
-    Track -->|"Handler が Pulse 挙動を規定 (meta_judge=連続/wait_response=単発)"| Pulse
     Pulse -->|内包| Beat["Beat (§4)"]
     Pulse -->|複数の処理ライン| line
     aspect -->|導出| line
@@ -190,7 +197,7 @@ Beat は Pulse（認知サイクル）より小さく、message（記録単位�
 
 > ⚠️ **実装ギャップ（明示）**: Beat は概念として確立・命名されたが、**実装には型 / クラスとして存在しない**。実体は `sea/runtime_llm.py` の `_run_spell_loop` の戻り値 `full_merged_text`（ただの `str`）でしかない。名前が無いまま実装が育ったため、概念図で `Playbook → Spell` と中間が飛ばされる歪みを生んでいた。将来 `Beat` を型として導入するリファクタが必要（→ [issue](../issues/beat_concept_not_typed_in_implementation.md)）。
 
-Beat の構成: 発話ノード(LLM)の出力 + Spell loop 全 round の本文 + 各 Spell の `<user_only>` 結果ブロック + 最終 continuation の連結。Beat は記録先で2つに割れる: **表示用** = `full_merged_text`（Spell 結果込みの合成版）/ **長期記憶保存用** = `final_continuation`（最終発言のみ、重複回避）。表示用の Beat は **Building（共有メッセージ場、§2）に積まれて**ユーザーや他ペルソナに感知され、同時に **自分の Session（短期記憶、§6）にも積まれ**て次の Beat や Meta-Judgment の文脈になる。
+Beat の構成: 発話ノード(LLM)の出力 + Spell loop 全 round の本文 + 各 Spell の `<user_only>` 結果ブロック + 最終 continuation の連結。Beat は記録先で2つに割れる: **表示用** = `full_merged_text`（Spell 結果込みの合成版）/ **長期記憶保存用** = `final_continuation`（最終発言のみ、重複回避）。表示用の Beat は **Building（共有メッセージ場、§2）に積まれて**ユーザーや他ペルソナに感知され、同時に **自分の Session（短期記憶、§6）にも積まれ**て次の Beat や判断点の文脈になる。
 
 ### Playbook / Spell / Tool
 
@@ -229,41 +236,73 @@ graph TD
 
 ---
 
-## 5. 長期記憶: 経験はどう蓄積されるか
+## 5. 土地と Memory Atlas: 経験はどう蓄積されるか
 
-ペルソナの長期記憶はすべて per-persona の SQLite DB **SAIMemory**（`memory.db`）に格納される。SAIMemory は記憶の**容れ物**であり、その中に「生ログ」「Chronicle」「Memopedia」が同居する。これらは短期記憶（§6 Session）とは階層が異なり、必要に応じて短期記憶へ引き出される。
+ペルソナの長期記憶は **土地と地図帳** の二層でできている（concept_consolidation.md、2026-07-10 統合）:
 
-> ⚠️ **注意**: SAIMemory は **DB（容れ物）の名前**であって、生ログそのものではない。生ログ・Chronicle・Memopedia・pulse_logs・memory_notes などはすべて SAIMemory の中身。
+- **土地（生ログ）** — 実際に起きた出来事の生の連なり。不変の地面
+- **Memory Atlas（記憶の地図帳）** — 土地から**編纂**される三種の地図。どの地図も新しい事実を足さず、土地に在るものを選び・圧縮し・並べ替えるだけ（地図は土地を偽造しない＝接地の規律）
 
-### 生ログ（Thread / Message）
+| 地図 | 派生方式 | 実体 |
+|---|---|---|
+| **時間の地図** | 時間的要約（本を章・部に区切る） | Chronicle（`arasuji_entries`、`ch:N`） |
+| **意味の地図** | 意味の抽出（固有名詞の辞書） | Memopedia・Fragment（`m:N`）＋ コア記憶（常時開の特殊ページ、`c:N`） |
+| **目的の地図** | 文脈的分類（クエストライン） | 目的の木（`persona_task`、`task:N`。旧 Track/Task/Desire/Note の統合先） |
 
-ペルソナが経験したメッセージ・ツール結果・思考の時系列の連なり。個々の発言が **Message**（`messages` テーブル）、それを束ねる会話単位が **Thread**（`thread_id` / `get_or_create_thread`）。タグ（conversation / internal / task / summary 等）で分類・検索される。Pulse 内の詳細は `pulse_logs` テーブルに記録され、重要なノード出力は両方に書く「二重書き込み」で確実に残る。
+**三地図共通の法則**: **ノード状態が構造の代謝（分割・統合）を駆動する**。時間の地図は自動（Lv1→Lv2 統合）、意味・目的の地図はペルソナの自己著者性を通す（判断点で提案 → 本人が裁定 → 睡眠中バッチで実行 ＝ 庭仕事）。
 
-生ログへの入力は Pulse 記録だけではない。**外部ログのインポート**経路があり、ChatGPT 公式エクスポートや Chrome 拡張のエクスポートを SAIMemory に取り込める（新規ユーザーが過去の対話履歴を持ち込む導線 → [`roadmap_status.md`](roadmap_status.md) §6）。
+格納先はすべて per-persona の SQLite DB **SAIMemory**（`memory.db`）——ただし目的の木のみ main DB（P3c で物理統合予定）。
 
-### Chronicle（時系列圧縮 / Track 再開）
+> ⚠️ **注意**: SAIMemory は **DB（容れ物）の名前**であって、生ログそのものではない。
 
-蓄積された Message は、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに「あらすじのあらすじ」（Lv2+）へ統合される（`arasuji_entries` テーブル）。加えて Track が中断・再開される際には `origin_track_id` 付きの Track 専用 Chronicle が生成され、その Track の目的に沿った情報が復帰時に呼び戻される。
+### 写真 — 土地参照の統一プリミティブ
 
-### Memopedia（知識グラフ）
+地図が土地を指す方法は**写真**（`photos` テーブル、`p:N`）に統一されている。**点写真**＝1メッセージ内の逐語引用（旧 mark・観測点。`==語句==` マーカーや `memory_clip` で撮られる）、**範囲写真**＝メッセージ区間（SCENE の由来参照・切り抜き）。`pasted_to` でどの地図に貼られたかの来歴を持ち、未貼り付けの写真の集合が**土壌プール**（候補の種、収穫待ち）。ページに貼られた写真の描画は常に**抜粋**で、全文は `memory_read p:N`（写真を読む＝その写真が写す土地を見に行く）。
 
-会話に登場した固有の対象（人物・AI・プロジェクト・概念）は Memopedia のページとして整理される。`entity_extractor` が会話からエンティティを認識し、各エンティティの知識を **Fragment**（知識の最小単位）として抽出・追記する。ページは summary（一文定義）+ content + Fragment 群で構成され、固有名詞を title とした親子構造を持つ。
+### 統一スペル — ペルソナが地図帳を触る動詞
 
-**Fragment の生成タイミング（検証済）**: Fragment は単独では生成されない。**Metabolism（§6）発火時に `ArasujiGenerator` が Chronicle を生成する各バッチで、`batch_callback` として `entity_extractor` が相乗りして Fragment を生成する**（`sea/runtime.py:2192-2215`）。これが「Chronicle 二重パイプライン統合」の実体であり、**記憶の「圧縮（Chronicle）」と「知識化（Fragment）」は Metabolism という同じ節目で連動する**（§5 と §6 の接続点）。
+全地図を統一動詞で触れる（`saiverse/memory_atlas.py` ファサード、2026-07-11 旧スペル群から一本化完了）:
 
-> **実装状況メモ**: air_city_a 実 DB で `memopedia_fragments` は 1162 件と稼働中。Fragment 専用の embedding 生成フローは現状存在しない（embedding 系テーブルは空＝設計通り）。旧 `note_extractor.py` は本番 Metabolism 経路からは呼ばれておらず、現行は `entity_extractor`（併存は移行の名残）。
+- **memory_read** — 読む（tail に流れる。机の場所を取らない）/ **memory_open / memory_close** — 机に開く／棚に戻す / **memory_search** — 検索 / **memory_write** — 書く（追記・コア記憶・新規ページ作成）/ **memory_clip** — 写真を撮って貼る（参照貼り／転写）/ **memory_delete** — ごみ箱へ（soft-delete）
+- **purpose_seed**（候補を生む）/ **purpose_adopt**（木に接ぐ）/ **purpose_decompose・purpose_step**（細分化・進行）/ **purpose_close**（完了・中止・休眠）
+
+### 生ログ（Thread / Message）＝土地
+
+ペルソナが経験したメッセージ・ツール結果・思考の時系列の連なり。個々の発言が **Message**（`messages` テーブル）、それを束ねる会話単位が **Thread**。タグで分類・検索される。Pulse 内の詳細は `pulse_logs` に記録され、重要なノード出力は両方に書く「二重書き込み」で確実に残る。**外部ログのインポート**経路もここに入る（ChatGPT 公式エクスポート等 → [`roadmap_status.md`](roadmap_status.md) §6）。
+
+### Chronicle（時間の地図）
+
+蓄積された Message は、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに Lv2+ へ統合される。`short_id`（`ch:N`）で参照でき、`memory_read ch:N` で読める（読みは tail に流れるので圧縮の意味は死なない）。編纂はシステム側の仕事で、ペルソナ向けの書き込み動詞はない。
+
+### Memopedia とコア記憶（意味の地図）
+
+会話に登場した固有の対象（人物・AI・プロジェクト・概念）は Memopedia のページとして整理される。`entity_extractor` がエンティティを認識し、知識を **Fragment** として抽出・追記する。**コア記憶**は意味の地図の**常時開の特殊ページ**——ペルソナが自分で選んで刻む恒常知識で、head に常駐する（`memory_write ref="core"` で刻む。SCENE＝実会話の転写は `memory_clip mode='transcribe'`）。
+
+**Fragment の生成タイミング（検証済）**: Metabolism（§6）発火時に `ArasujiGenerator` の Chronicle 生成バッチへ `entity_extractor` が `batch_callback` として相乗りする——**圧縮（時間の地図）と知識化（意味の地図）は Metabolism という同じ節目で連動する**。
+
+> **実装状況メモ**: 意味の地図の構造代謝（肥大ページの分割・小ページの統合）は `scripts/maintain_memopedia.py` に手動操作として存在するが lifecycle 未配線（P4 で庭仕事として配線予定）。vividness（鮮度減衰）は廃止確定（§9）。
+
+### 目的の木（目的の地図）
+
+意志の構造（life_concept_map.md）。根＝在り方（LIFE_PURPOSE）、第一階層＝旧 Track（営み／企て）、中間＝task、末端＝step。候補（stage=candidate、旧 desire）は採用（`purpose_adopt`＝接ぎ木）で木に入り、完了ノードの航跡クラスタへの**命名**が統合操作（設計済・実装は P4）。判断点が接ぎ直し（庭仕事）を行う。
 
 ```mermaid
 graph TD
-    subgraph SAIMemory["SAIMemory (memory.db = 容れ物)"]
-        ChatLog["生ログ: Thread ⊃ Message"]
-        Chronicle
-        Memopedia
+    Land["土地: 生ログ (Thread ⊃ Message)"]
+    subgraph Atlas["Memory Atlas (地図帳)"]
+        TimeMap["時間の地図: Chronicle (ch:N)"]
+        MeaningMap["意味の地図: Memopedia (m:N) + コア記憶 (c:N 常時開)"]
+        PurposeMap["目的の地図: 目的の木 (task:N)"]
     end
-    Pulse -->|記録| ChatLog
-    Metabolism -->|"バッチ圧縮 (ArasujiGenerator)"| Chronicle
-    Metabolism -->|"知識化 (entity_extractor)"| Memopedia
-    ChatLog -->|末尾を引き出し| Session["Session (短期記憶 §6)"]
+    Photo["写真 (p:N): 点=引用 / 範囲=区間"]
+    Pulse -->|記録| Land
+    Metabolism -->|"時間的要約 (ArasujiGenerator)"| TimeMap
+    Metabolism -->|"意味の抽出 (entity_extractor 相乗り)"| MeaningMap
+    JudgmentPoints["判断点"] -->|"文脈的分類 (裁定・接ぎ直し・収穫)"| PurposeMap
+    Atlas -->|貼る| Photo
+    Photo -->|指す| Land
+    Land -->|末尾を引き出し| Session["Session (短期記憶 §6)"]
+    MeaningMap -->|"コア記憶・目次・机 (head)"| Session
 ```
 
 ---
@@ -292,6 +331,10 @@ graph TD
 
 短期記憶のうち prompt cache が継続して効く先頭領域。`LineHeadSnapshot` として freeze された Section 群（common_prompt / persona_self / building / spell_list / available_playbooks 等）の render 結果で構成される。snapshot の更新は Metabolism または明示的なイベントでのみ起き、平時は immutable。head 文字列が変動しない限り cache hit が継続する。**機構は実装済（`sea/head_pipeline/`、Phase 1 完成）**。
 
+### 机（desk）— head の開きっぱなし領域
+
+ペルソナが `memory_open` で開いた地図帳のページは、**机**（`desk_items` テーブル + `DeskSection`、head の一角）に Metabolism を跨いで残り続ける。**読む（tail に流れる）と開く（机に残る）の分離**が肥大化を防ぐ核。机は有限の作業面（文字数予算、既定8000字）で、溢れると最も長く触られていないページから自動で棚に戻る（LRU。touch＝そのページへの read/write/clip）。コア記憶は机の予算外の常設ピン。**閉じてもフェードアウト**——head は Metabolism 時のみ再構築されるため、閉じたページは次の節目まで視界に残って自然に消える。机から下ろした通知は理由別（溢れ／実体消失）にシステムが出し、本人の開閉は通知しない。
+
 ### Metabolism（節目：短期リフレッシュ + 長期結晶化）
 
 **Session が継続不能になる**（cache TTL 切れ = Anchor 判定、context 過剰など）と発火する節目のイベント。発火すると全 Section に `capture(live_state)` を走らせて **短期記憶（head snapshot）を再構築**しつつ、同時に **長期記憶への結晶化**（履歴圧縮・Chronicle 化・Fragment 生成 §5）を束ねて実行し、**新しい Session を開始する**。つまり Metabolism は **Session を区切り直す節目**であり、同時に**短期記憶と長期記憶をつなぐ**。`_resolve_metabolism_anchor` が3段フォールバック（当該モデルの anchor → 別モデルの最新 → 最小ロード）で文脈取得を切り替える。**実装済**。
@@ -306,15 +349,16 @@ Metabolism の起点を指すマーカー。`METABOLISM_ANCHORS` は per-model d
 
 ```mermaid
 graph TD
-    LongTerm["長期記憶 §5 (生ログ Thread)"] -->|末尾を引き出し| Session["Session (短期記憶)"]
-    head -->|含まれる| Session
+    Land["土地 §5 (生ログ Thread)"] -->|末尾を引き出し| Session["Session (短期記憶)"]
+    head -->|"含まれる (コア記憶・机・目次)"| Session
+    Desk["机 (memory_open したページ)"] -->|DeskSection| head
     Beat["現Pulseの Beat (§4)"] -->|積まれる| Session
-    World["Building 未読 / システム通知"] -->|流入| Session
-    Session -->|判断材料・文脈| LLM["Pulse の全 LLM 判断 (Meta-Judgment / Beat 生成)"]
+    World["Building 未読 / システム通知 / 知覚バッファ"] -->|流入| Session
+    Session -->|判断材料・文脈| LLM["Pulse の全 LLM 判断 (判断点 / Beat 生成)"]
     Session -->|継続不能で発火| Metabolism
     Anchor -->|TTL 切れで判定| Metabolism
-    Metabolism -->|短期リフレッシュ → 新 Session| head
-    Metabolism -->|"長期結晶化 (選別が要る)"| LongTerm
+    Metabolism -->|"短期リフレッシュ → 新 Session (机の予算再評価込み)"| head
+    Metabolism -->|"編纂 (時間の地図・意味の地図)"| Atlas["Memory Atlas §5"]
 ```
 
 ---
@@ -363,12 +407,15 @@ graph TD
 |---|---|
 | **Blueprint** | `blueprint` テーブルは実在するが（ペルソナ生成テンプレート）、現状は運用されていない |
 | **Emotion** | PersonaCore の感情モジュールとして存在するが、実質未活用 |
-| **task** | `tasks.db` ベースのタスク管理。現状ほぼ死んでいる |
+| **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。persona_task 自体は目的の木として現役（§5） |
+| **mark（観測点）** | **写真 (photo) に一般化**（2026-07-10）。`marks` テーブルは `photos` へ移行済み（点写真＝旧 mark）。mark は「まだどの地図にも貼られていない写真」という状態の呼び名として残る |
+| **vividness（Memopedia 鮮度減衰）** | **廃止確定**（2026-07-10）。減衰の発動が観測されたことがなく（バグ疑い）、head 索引廃止で効果もなかった。「見えなくするだけで生産性がない」— 置換は構造状態（肥大/過小 → 分割/統合の代謝、P4） |
+| **旧記憶・タスクスペル群** | core_memory_add/add_scene/update/remove・task_add/decompose/done/update_step・desire_add・memopedia_get_page/open_page/close_page/search の 13 本は **memory_*/purpose_* 12 本に一本化され削除**（2026-07-11 P2c-4a）。memopedia_note/save_page/get_tree/health/manage・fragment 3本・get_task_summary は spell=False の内部専用（P4 庭仕事の素材） |
 | **working_memory** | `working_memory` テーブルは存在するが、ワーキングメモリ実装は死亡。短期記憶は §6 Session 概念へ |
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
 | **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。クラス削除は別タスク |
 | **SubLineScheduler** | v1 自律駆動（track_autonomous への 30 秒連続 Pulse）。自律行動 v2 活性化（2026-07-06）で**モジュールごと削除**（`saiverse/pulse_scheduler.py`）。後継は時間割＋判断点（`saiverse/autonomy_wiring.py`、intent: `autonomous_behavior_v2.md` / `persona_cognition/life_concept_map.md`） |
-| **track_autonomous playbook** | v1 自律 Pulse の中身。コード参照は全除去済み（2026-07-06）。builtin JSON と既存 DB 行の掃除は未 |
+| **track_autonomous / meta_autonomy_decision playbook** | v1 自律 Pulse の中身と能力選択。**退役完了**（2026-07-11 P2c-3: public JSON 削除・DB prune・`SELECTED_META_PLAYBOOK`/`PersonaSchedule` の巻き取り＝upgrade handler v0.3.0.dev4）。autonomy_creation / autonomy_web_research は archive、autonomy_memory_organization / fragment_organize は P4 庭仕事へ転生予定で archive |
 | **max_consecutive_pulses** | 連続 Pulse 上限の概念。駆動源ごと廃止（セッション予算に置換） |
 | **メタ判断の定期ディスパッチ（状況分類）** | 50 分 tick からの `_SITUATION_PLAYBOOK_MAP` 定期起動は停止。tick は watchdog（時間割発火の途絶検知）に縮退。cache TTL keep-alive 経由の起動も 2026-07-07 に停止（意味的に不活性な極小 touch へ置換、`SEARuntime.run_cache_keepalive`）。**alert 即応（呼びかけ）経由のみ存続** |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
@@ -389,16 +436,14 @@ graph TD
 | Building | 属す | City | 建物は都市に属す |
 | Item | 在る | Building/Persona/world/bag | ItemLocation 多態で配置 |
 | Persona | 回す | Pulse | run_sea_user / run_sea_auto で認知サイクル |
-| User発言/Schedule/Phenomena/Meta-Judgment | submit | PulseController | 4起動源が制御層に集約 |
+| User発言/Schedule/Phenomena/判断点 | submit | PulseController | 起動源が制御層に集約 |
 | Building | 発言を検知（SAIVerseManager 経由） | PulseController | ユーザー発言が `submit_user` へ |
-| SubLineScheduler | 5秒ポーリングで submit_auto | PulseController | running 自律 Track の Pulse を連続実行 |
-| AutonomyManager | 50分 tick で submit_meta_judgment | PulseController | 自律バイオリズムの大リズム |
-| Handler | `post_complete_behavior` で規定 | Pulse 挙動 | meta_judge=連続 / wait_response=単発 |
+| 時間割（day plan） | コマ発火を予約 | EventScheduler → PulseController | 起床判断が編成、コマで予算付き作業セッション |
+| 判断点 | 裁定・接ぎ直し・候補採取 | 目的の木 / 時間割 | 起床/就寝/セッション終了/会話終了/on_event |
+| AutonomyManager | watchdog | 時間割 | 途絶検知時のみ火入れ（定期ディスパッチは廃止） |
 | PulseController | 起動 | Pulse | 優先度（USER>SCHEDULE>AUTO）+ 割り込み制御で実行 |
-| Session | 判断材料 | Meta-Judgment | 短期記憶が判断の根拠 |
-| Meta-Judgment | 選ぶ | Track | どの Track を動かすか判断 |
-| Track | の中で | Pulse | 1 Track 内で複数 Pulse が連続実行 |
-| Track | 制御 | Handler | Track 種別ごとの制御ロジック |
+| Session | 判断材料 | 判断点 | 短期記憶が判断の根拠 |
+| 目的の木 | コマの対象（task:N） | 時間割 | 意志の実行可能形（旧 Track の本業の分化先） |
 | Pulse | 内包 | Beat | 1 Pulse に複数 Beat |
 | Pulse | 実行 | Playbook | Pulse が Playbook グラフを回す |
 | Playbook(発話ノード) | 生成 | Beat | LLM 出力が1 Beat になる |
@@ -410,15 +455,19 @@ graph TD
 | line | 階層化 | Pulse | main/sub で Pulse 階層を表現 |
 | aspect | 導出元 | line + scope + model | 4分類を導出 |
 | Phenomena | 起動 | Pulse | 外部イベントが新 Pulse を起動 |
-| SAIMemory | 内包 | 生ログ / Chronicle / Memopedia | DB（容れ物）が長期記憶3層を格納 |
-| Pulse | 記録 | 生ログ(Thread) | Message を `messages` に追記 |
-| 生ログ(Thread) | 末尾を供給 | Session | 最近の Message が短期記憶へ |
-| Chronicle | 圧縮元 | 生ログ(Thread) | Message を「あらすじ」へ圧縮 |
-| Memopedia | 抽出元 | 生ログ(Thread) | Message からエンティティ知識を Fragment 化 |
+| 土地（生ログ） | 編纂元 | Memory Atlas | 三種の地図（時間/意味/目的）が土地から編まれる |
+| 写真 (p:N) | 指す | 土地 | 点=逐語引用 / 範囲=区間。全地図共用の統一参照 |
+| Memory Atlas | 貼る | 写真 | pasted_to で来歴、未貼り＝土壌プール |
+| Pulse | 記録 | 土地(Thread) | Message を `messages` に追記 |
+| 土地(Thread) | 末尾を供給 | Session | 最近の Message が短期記憶へ |
+| Chronicle（時間の地図） | 圧縮元 | 土地 | Message を「あらすじ」へ時間的要約 |
+| Memopedia（意味の地図） | 抽出元 | 土地 | エンティティ知識を Fragment 化。コア記憶＝常時開ページ |
+| 目的の木（目的の地図） | 分類元 | 土地 | 接地の証跡（写真・origin_quote）で土地に係留 |
+| 机（desk） | head に載せる | Atlas のページ | memory_open で開く。予算制 LRU、閉じてもフェードアウト |
 | Session | 継続不能で発火 | Metabolism | Session が続けられなくなると節目が起きる |
 | Anchor | TTL 切れで判定 | Metabolism | cache 継続不能の予兆を検知 |
-| Metabolism | 短期リフレッシュ → 新 Session | head | 全 Section snapshot を再構築 |
-| Metabolism | 長期結晶化（選別が要る） | 長期記憶 | Chronicle 圧縮 + Fragment 生成 |
+| Metabolism | 短期リフレッシュ → 新 Session | head | 全 Section snapshot を再構築（机の予算再評価込み） |
+| Metabolism | 編纂 | Memory Atlas | Chronicle 圧縮 + Fragment 生成（同じ節目で連動） |
 | Addon | 提供 | Tool/Playbook/Phenomena | 拡張点を通じて結合 |
 | MCP | 登録 | Spell | MCP tool が spell_tools で Spell 化 |
 | SDS | 発見 | City | 都市レジストリ（冬眠中） |
@@ -427,13 +476,17 @@ graph TD
 
 | 通称 | 正式概念 | 実装 |
 |---|---|---|
-| 行動の線 | Track | `action_track` テーブル |
-| メタレイヤー | Meta-Judgment Pulse | `meta_judgment.json` Playbook |
+| 行動の線 | Track（→ 目的の木の第一階層へ分化） | `action_track` テーブル（P3c で Memopedia ページと物理統合予定） |
+| メタレイヤー / メタ判断 | 判断点（起床/就寝/セッション終了/会話終了/on_event） | `judgment_*.json` Playbook + `judgment_finalize` |
 | 短期記憶 / ワーキングメモリ | Session | 統一制御は未実装（起草中） |
-| 長期記憶 DB（容れ物） | SAIMemory | per-persona `memory.db`。中身 = 生ログ / Chronicle / Memopedia |
-| 生ログ | Thread（⊃ Message） | `threads` / `messages` テーブル |
+| 土地 | 生ログ = Thread（⊃ Message） | `threads` / `messages` テーブル（memory.db） |
+| 地図帳 / 記憶の地図帳 | Memory Atlas（時間/意味/目的の三地図） | `saiverse/memory_atlas.py` ファサード + memory_*/purpose_* スペル12本 |
+| 写真 | 土地参照の統一プリミティブ（旧 mark を包含） | `photos` テーブル（`p:N`） |
+| 机 | head の開きっぱなし領域（memory_open の行き先） | `desk_items` テーブル + `DeskSection` |
+| コア記憶 | 意味の地図の常時開特殊ページ | `core_memories` テーブル（`c:N` / `core`） |
+| 目的の木 | 目的の地図（旧 Track/Task/Desire の統合先） | `persona_task`（main DB、`task:N`） |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
-| 自律バイオリズム | AutonomyManager (50分) + SubLineScheduler (5秒) | 大リズム=メタ判断 tick / 小リズム=連続 Pulse |
+| 自律駆動 | 時間割 + 判断点（+ watchdog） | `saiverse/day_plan.py` / `autonomy_wiring.py`（旧2層リズムは廃止 §9） |
 
 ### ドキュメント⇄実装の乖離（要追従）
 
