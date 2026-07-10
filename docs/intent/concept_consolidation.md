@@ -205,6 +205,23 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 **P3b: Chronicle → 時間の地図ページ** ✅ **実装済**（2026-07-11。API 完全維持〔`sai_memory/arasuji/storage.py` の公開シグネチャ・戻り値は無変更〕。物理格納は memopedia_pages 〔trunk `root_chronicle`〕へ移行。**新規知見**: 生 SQL で `arasuji_entries` を直接読む消費者が `sea/head_pipeline/sections/chronicle_index.py`（変更禁止領域）を含め9箇所あり、P3a の想定より広い互換面が必要だった → 同名の読み取り専用 SQL VIEW（`json_extract` 展開・`parent_id` の root_chronicle⇄NULL 相互変換込み）を張ることで無改修対応。書き込み側の唯一の直接 SQL（`sai_memory/arasuji/generator.py` の `regenerate_consolidated_content`）は `update_entry_full` 経由に変更。expression index 7本で旧 index 相当をカバー。`Memopedia.search()` に Chronicle ページが現れる二重ヒットは `memory_atlas.search_pages` 側で `category != "chronicle"` を除外して解消。書き換えテスト1件〔`ChronicleShortIdBackfillTests`、旧物理スキーマの直接検査〕・移行テストはスモークスクリプトで検証、既存 373 passed）
 **P3c: 目的の木 + Note 畳み**（最重量・cross-DB）: persona_task（main DB）→ per-persona memory.db のページへ。Note→テーマノード統合・TrackOpenNote→机の掛け替え・note スペル4本と open_notes section の退役もここ。3a/3b の学びを踏まえて着手前に詳細化
 
+### P3c 設計提案 v0.1（2026-07-11 深夜・メティス起草、**まはー朝レビュー待ち**）
+
+**提案: P3c を再定義し、persona_task の物理移動はやらない。**
+
+3a/3b の「モジュール API 互換＋同名互換 VIEW」の型は sqlite3 生 conn の世界（memory.db）だから効いた。persona_task 系は **main DB の SQLAlchemy ORM 世界**に居て、判断点・TrackManager・API・episodes 等と JOIN・FK・同一トランザクションで結ばれている（面積は夜間監査 `docs/handoff/2026-07-11_p3c_purpose_note_audit.md` で棚卸し中）。これを per-persona memory.db へ物理移動すると、ORM 消費者の全面書き換えと main DB 内整合の喪失が起きる——**コストが (A) の残り便益に見合わない**可能性が高い。
+
+**(A) 同一実体の便益は、物理テーブルの一本化ではなく「単一アドレス空間＋統一ファサード＋ページ機構の ref 適用」で既にほぼ回収済み**という読み:
+- task:N は memory_read で読める（P2c-1）/ 写真は pasted_to="task:N" で貼れる（ref 文字列ベース）/ purpose 動詞で操作できる
+- 残っていた「ページ機構の恩恵」= 机の開閉・編集来歴 — **机は ref ベースなので物理移動なしで対応可能**
+
+**再定義後の P3c スコープ案**:
+1. **Note → テーマノードページ移行**（3a/3b 型で安全: NoteManager API 互換のままページ実装へ、note/note_page/note_message は memory.db 側と親和的）＋ note スペル4本・open_notes section の退役、meta_layer の切替
+2. **task:N の机開閉対応**（desk は ref 文字列ベース — TrackOpenNote の「Track 掛け替え」意味論を desk.purpose_ref で継承し、TrackOpenNote 退役）
+3. **persona_task / action_track の物理格納は現状維持**（目的の地図の物理格納が main DB、という事実を写像設計に明記。将来 UI/神モードが「1本の木」を描くのはファサード経由なので支障なし）
+
+→ 監査結果と突き合わせて、朝にまはーが (X) この再定義案 / (Y) 原案（物理移動を敢行）を裁定。
+
 ### 次アクション
 
 P3a をサブエージェント委譲（夜間チェーン: 3a 実装 → メイン検収 → 3b 詳細化・委譲 → …）。
