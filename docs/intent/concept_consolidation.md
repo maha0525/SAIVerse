@@ -164,9 +164,20 @@
 | **P2a** ✅ | 机ストア（desk.py・LRU 追い出し）＋ Atlas ファサード（memory_atlas.py、m:N / core / c:N / ch:N。task:N は P2b stub）＋ read/open/close/search スペル4本。**実装済 2026-07-10**（サブエージェント実装＋メイン検収: read の touch 欠落と keep_ref を修正。Chronicle に short_id 追加・ch:N。Memopedia search の short_id 欠落バグをついで修正。pytest 223 passed） | サブエージェント＋メイン検収 |
 | **P2b** | write/clip/purpose 動詞 ＋ 旧スペル撤去 ＋ head 机セクション描画 ＋ Metabolism 追い出しフック ＋ task:N 解決 ＋ life API /marks→/photos 改称。積み残し: memopedia storage の `search_pages_filtered`/`get_children` にも SELECT 列 short_id 欠落が残存（P2a で発見・範囲外として未修正） | head/Metabolism 配線はキャッシュ感応部＝メイン直接。残りは委譲 |
 
+### clip と写真の見え方 — 抜粋は写真の性質、全文は読む行為、常駐は転写（2026-07-10 まはー合意・確定）
+
+「貼った範囲写真がページを読んだ時にどう見えるか」の解。折り畳み ON/OFF という**新しい状態は作らない**:
+
+1. **写真は参照であって内容の運搬手段ではない** → 貼られた写真の描画は**常に抜粋**（点=引用全文〔元々短い〕/ 範囲=先頭数行＋「全Nメッセージ・M字、前後省略」）。丸ごと載せるとページが写真に食われる
+2. **全文は写真そのものを読む** → 写真に short_id（`p:N`）を与え、`memory_read p:N` で範囲の生ログ全文がその場（tail）に流れる。**写真を読む＝その写真が写す土地を見に行く**。read の意味論なので机も head も太らない
+3. **コア記憶 SCENE は例外でなく貼り方の違い** → 貼り方は二種: **参照貼り**（既定・抜粋）と**転写**（本文に焼き込み・常に生で見える）。SCENE は現行実装が既に転写（transcript が content、写真は由来参照）。普通のページへの全文常駐も転写で可能——肥大すれば代謝の肥大検知が拾う（自己調整）
+4. 畳まれているのは状態でなく**参照貼りの性質**、開くのは状態でなく**読む行為** → 状態を増やさない（⑥は概念を減らす工事。head に折り畳み状態を持つとキャッシュも荒れる）
+
+`memory_clip` の引数は両対応: 点=逐語引用＋貼り先 / 範囲=アンカー＋往復数（SCENE と同じ操作感）。
+
 ### 次アクション
 
-P2b 着手（head 机セクション＋Metabolism フックはメイン直接、残りは委譲）。
+P2b 着手。委譲分=p:N 追加・写真抜粋描画・memory_clip/memory_write スペル。メイン直接=head 机セクション＋Metabolism 追い出しフック。旧スペル撤去と purpose 動詞・task:N 解決は消費者監査（playbook TOOL ノード参照の洗い出し）とセットで後続（P2c）。
 
 ---
 
