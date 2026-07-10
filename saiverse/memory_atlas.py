@@ -17,7 +17,9 @@ memory_read.py`` 等) から呼ばれる薄い変換層で、地図の実体に�
 - ``p:N``  — 写真 (short_id)。「写真を読む＝その写真が写す土地を見に行く」—
   範囲写真は区間の生ログ全文、点写真は対象メッセージ本文＋引用箇所が tail に
   流れる (机にも head にも触らない。concept_consolidation.md「clip と写真の見え方」)
-- ``task:N`` — 目的の地図 (P2c で対応。現状は案内メッセージを返す stub)
+- ``task:N`` — 目的の地図 (目的ノード)。read は解決済み (P2c-1) — 実体は
+  main DB (persona_task) なので ``manager`` (world 文脈) を追加で受ける。
+  開閉は目的の木の Atlas 統合 (P3c) まで stub
 
 **書く (memory_write) / 撮って貼る (memory_clip)**: 書き先は Memopedia 本文
 への追記 (編集来歴が残る) / コア記憶の新規・上書き。clip は**参照貼り**のみ
@@ -38,7 +40,7 @@ RefKind に未登録のまま各ストレージモジュール内で扱われて
 **開閉 (机の物理)**: ``open_page`` / ``close_page`` は ``sai_memory/desk.py``
 に委譲する。コア記憶 (``core`` / ``c:N``) は常時開のシステム常設ピンなので
 机の対象外 — open は「既に開いている」、close は「閉じられない」を返す。
-``task:N`` (目的の地図) の開閉も P2b 対応まで stub。
+``task:N`` (目的の地図) の開閉は P3c (目的の木の Atlas 統合) まで stub。
 """
 from __future__ import annotations
 
@@ -173,8 +175,9 @@ def _ensure_chronicle_ready(conn) -> None:
 
 
 def _task_stub_message(key: Optional[str], action: str = "の閲覧") -> str:
-    # TODO(P2c): 目的の地図 (task:N) の解決は目的の木 (persona_task) の Atlas
-    # 統合・purpose 動詞と合わせて実装する (concept_consolidation.md P2 実装分割)。
+    # TODO(P3c): 目的の地図 (task:N) の開閉は目的の木の Atlas 統合 (P3c) で
+    # 実装する。read は P2c-1 で解決済み (_read_task)。write / clip の貼り先
+    # としての task:N も purpose 動詞側 (収穫) に委ねる。
     ref = f"task:{key}" if key else "task:N"
     return f"目的ノード ({ref}) {action}は今後対応予定です。"
 
@@ -187,7 +190,9 @@ def _resolve_persona_name(adapter, persona_name: Optional[str]) -> str:
 # ----- read_page -----
 
 
-def read_page(adapter, ref: str, persona_name: Optional[str] = None) -> str:
+def read_page(
+    adapter, ref: str, persona_name: Optional[str] = None, manager=None,
+) -> str:
     """ref の内容を読む。読んだ内容は会話の流れに残るだけで机の場所は取らない。
 
     対象が机に開かれている場合は touch する (touch の定義 = read/write/clip が
@@ -196,6 +201,11 @@ def read_page(adapter, ref: str, persona_name: Optional[str] = None) -> str:
 
     ``persona_name`` は写真のトランスクリプト描画でペルソナ応答に付ける表示名
     (スペル層が AINAME を解決して渡す)。未指定は persona_id で代替。
+
+    ``manager`` は ``task:N`` (目的ノード) の解決にのみ要る world 文脈
+    (``SessionLocal`` を持つオブジェクト。目的の木は main DB 在住のため)。
+    スペル層が ``get_active_manager()`` を渡す。他の ref では不要 — 省略時も
+    従来の全 ref が動く (後方互換)。
     """
     kind, key = _parse_ref(ref)
     conn = adapter.conn
@@ -217,8 +227,69 @@ def read_page(adapter, ref: str, persona_name: Optional[str] = None) -> str:
         # (貼り先ページの touch もしない — 読んだのは土地であってページではない)
         return _read_photo(conn, key, name)
     if kind == "task":
-        return _task_stub_message(key)
+        return _read_task(adapter, key, manager, name)
     raise AtlasRefError(f"未対応の ref kind: {kind}")
+
+
+def _read_task(adapter, key: Optional[str], manager, persona_name: str) -> str:
+    """目的ノード (task:N) を読む — title / goal / stage / status / steps / 写真。
+
+    実体は main DB の persona_task (PersonaTaskManager)。旧 task ツール群と同じ
+    DB アクセスパターン (SessionLocal factory) を踏襲する。貼られた写真
+    (pasted_to="task:N") はペルソナの memory.db 側 (adapter.conn) にある。
+    """
+    from saiverse.persona_task_manager import PersonaTaskManager, TaskNotFoundError
+
+    if not key:
+        return "目的ノードの参照が不正です: task:"
+    if manager is None or getattr(manager, "SessionLocal", None) is None:
+        return (
+            f"目的ノード (task:{key}) を読むための world 文脈がありません"
+            "（スペル実行の文脈でのみ読めます）。"
+        )
+
+    ptm = PersonaTaskManager(manager.SessionLocal)
+    ref_text = f"task:{key}" if key.isdigit() else key
+    try:
+        task_id = ptm.resolve_task_ref(adapter.persona_id, ref_text)
+        task = ptm.get_task(task_id, persona_id=adapter.persona_id)
+    except TaskNotFoundError:
+        return f"目的ノードが見つかりません: task:{key}"
+
+    task_ref = task.get("task_ref") or ref_text
+    lines = [f"# {task.get('title') or '(無題)'} ({task_ref})"]
+    meta_bits = [f"段階: {task.get('stage')}", f"状態: {task.get('status')}"]
+    if task.get("nature"):
+        meta_bits.append(f"種別: {task['nature']}")
+    if task.get("desire_type"):
+        meta_bits.append(f"欲求の型: {task['desire_type']}")
+    lines.append(" / ".join(meta_bits))
+    if task.get("goal"):
+        lines.append(f"目標: {task['goal']}")
+    if task.get("desire_source"):
+        # 接地の証跡 (この目的が何から生まれたか)
+        lines.append(f"由来: {task['desire_source']}")
+    if task.get("notes"):
+        lines.append(f"メモ: {task['notes']}")
+
+    steps = task.get("steps") or []
+    if steps:
+        lines.append("")
+        lines.append("## ステップ")
+        for idx, st in enumerate(steps, start=1):
+            mark = "x" if st.get("status") == "completed" else " "
+            note = f" — {st['notes']}" if st.get("notes") else ""
+            lines.append(f"{idx}. [{mark}] {st.get('title')} ({st.get('status')}){note}")
+
+    photos_text = _format_photos(
+        adapter.conn,
+        list_photos_pasted_to(adapter.conn, task_ref),
+        persona_name,
+    )
+    if photos_text:
+        lines.append("")
+        lines.append(photos_text)
+    return "\n".join(lines)
 
 
 def _read_photo(conn, key: Optional[str], persona_name: str) -> str:

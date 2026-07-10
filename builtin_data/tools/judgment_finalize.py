@@ -14,7 +14,7 @@ judgment_post_session / judgment_on_event / judgment_day_close) の最終ノー�
      再開コマの即時挿入 / drop は作業メモ片づけ) / new_desires /
      remaining_timetable
    - post_session: task_verdict 適用 (done は artifact_ref の接地検証つき) /
-     desk_memo → Track metadata / track_op / new_desires → desire_add /
+     desk_memo → Track metadata / track_op / new_desires → purpose_seed /
      remaining_timetable → 残りコマの全置換
    - on_event: reaction (engage_now は結果への反映のみ — 応対の起動は
      呼び出し側の責務 / insert_slot は時刻整合検証つき挿入 / note_only は
@@ -365,7 +365,10 @@ def _apply_new_desires(
     warnings: List[str],
     spells_record: List[Dict[str, Any]],
 ) -> bool:
-    """new_desires → desire_add スペル (type/source 付き; v2 §5.2)。"""
+    """new_desires → purpose_seed スペル (type/source 付き; v2 §5.2)。
+
+    P2c-1 で候補生成の動詞を desire_add → purpose_seed へ切替 (引数は同一)。
+    """
     applied = False
     for i, desire in enumerate(output.get("new_desires") or []):
         if not isinstance(desire, dict):
@@ -380,7 +383,7 @@ def _apply_new_desires(
         if not title:
             warnings.append(f"new_desires[{i}] rejected: title が空です")
             continue
-        _fire_spell("desire_add", {
+        _fire_spell("purpose_seed", {
             "title": title,
             "type": dtype,
             "source": source_quote,
@@ -598,7 +601,7 @@ def _finalize_post_session(
     elif track_op not in (None, "none"):
         warnings.append(f"track_op rejected: 未知の値 {track_op!r}")
 
-    # --- new_desires → desire_add (type/source 付き; v2 §5.2) ------------
+    # --- new_desires → purpose_seed (type/source 付き; v2 §5.2) ----------
     applied |= _apply_new_desires(output, warnings, spells_record)
 
     # --- episode_purposes → 層2 棚入れタグ (§9.1) -------------------------
@@ -825,7 +828,7 @@ def _finalize_post_conversation(
             LOGGER.exception("[judgment_finalize] picked_task creation raised")
             warnings.append(f"picked_tasks[{i}]「{title}」の作成に失敗: {exc}")
 
-    # --- new_desires → desire_add ----------------------------------------
+    # --- new_desires → purpose_seed --------------------------------------
     applied |= _apply_new_desires(output, warnings, spells_record)
 
     # --- episode_purposes → 層2 棚入れタグ (§9.1) -------------------------

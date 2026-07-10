@@ -182,9 +182,11 @@ class ReadPageTests(_AtlasTestBase):
         result = atlas.read_page(self.adapter, "ch:999")
         self.assertIn("見つかりません", result)
 
-    def test_read_task_returns_stub(self):
+    def test_read_task_without_manager_reports_missing_context(self):
+        # task:N の read は P2c-1 で解決済み。ただし目的の木は main DB 在住
+        # なので manager (world 文脈) なしでは読めない — 丁寧に案内する
         result = atlas.read_page(self.adapter, "task:1")
-        self.assertIn("今後対応予定", result)
+        self.assertIn("world 文脈", result)
 
     def test_read_page_shows_pasted_photos(self):
         from sai_memory.core_memory import add_core_memory
@@ -682,6 +684,86 @@ class ClipPhotoTests(_AtlasTestBase):
         )
         result = atlas.clip_photo(self.adapter, mid)
         self.assertIn("実会話ではありません", result)
+
+
+class TaskReadTests(_AtlasTestBase):
+    """task:N (目的ノード) の read_page 解決 (P2c-1)。
+
+    目的の木は main DB (persona_task) 在住なので、adapter に加えて manager
+    (SessionLocal を持つ world 文脈の shim) を渡す。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from types import SimpleNamespace
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from database.models import Base
+
+        self._engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(self._engine)
+        self.manager = SimpleNamespace(SessionLocal=sessionmaker(bind=self._engine))
+        self.addCleanup(self._engine.dispose)
+
+    def _make_task(self, **kwargs):
+        from saiverse.persona_task_manager import PersonaTaskManager
+
+        ptm = PersonaTaskManager(self.manager.SessionLocal)
+        defaults = {
+            "persona_id": "tester",  # _AtlasTestBase の adapter.persona_id と揃える
+            "title": "語源メモをまとめる",
+            "goal": "一冊のノートに仕上げる",
+            "auto_activate": False,
+        }
+        defaults.update(kwargs)
+        return ptm.create_task(**defaults)
+
+    def test_read_task_renders_node(self):
+        task = self._make_task(
+            steps=[{"title": "下調べ"}, {"title": "清書"}],
+            desire_source="図書館で読んだ語源の記事",
+        )
+        result = atlas.read_page(
+            self.adapter, task["task_ref"], manager=self.manager,
+        )
+        self.assertIn("語源メモをまとめる", result)
+        self.assertIn(task["task_ref"], result)
+        self.assertIn("段階:", result)
+        self.assertIn("状態:", result)
+        self.assertIn("目標: 一冊のノートに仕上げる", result)
+        self.assertIn("由来: 図書館で読んだ語源の記事", result)  # 接地の証跡
+        self.assertIn("下調べ", result)
+        self.assertIn("清書", result)
+
+    def test_read_task_shows_pasted_photos(self):
+        from sai_memory.photos import add_photo
+
+        task = self._make_task()
+        add_photo(
+            self.adapter.conn, message_id="m1", quote="きっかけの一言",
+            pasted_to=task["task_ref"],
+        )
+        result = atlas.read_page(
+            self.adapter, task["task_ref"], manager=self.manager,
+        )
+        self.assertIn("[写真", result)
+        self.assertIn("きっかけの一言", result)
+
+    def test_read_task_not_found(self):
+        result = atlas.read_page(self.adapter, "task:999", manager=self.manager)
+        self.assertIn("見つかりません", result)
+
+    def test_open_task_still_stub(self):
+        # 開閉は P3c (目的の木の Atlas 統合) まで stub のまま
+        result = atlas.open_page(self.adapter, "task:1")
+        self.assertIn("今後対応予定", result)
 
 
 class SnapshotDeskTests(_AtlasTestBase):

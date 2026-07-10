@@ -545,7 +545,7 @@ def test_post_session_desk_memo_and_new_desires(
     )
     desire_calls: List[Dict[str, Any]] = []
 
-    def fake_desire_add(**kwargs):
+    def fake_purpose_seed(**kwargs):
         desire_calls.append(kwargs)
         return "added"
 
@@ -564,7 +564,7 @@ def test_post_session_desk_memo_and_new_desires(
                       "task_ref": "task:1", "track_id": track_id})
     import tools as tools_pkg
     with caplog.at_level("WARNING"):
-        with patch.dict(tools_pkg.TOOL_REGISTRY, {"desire_add": fake_desire_add}):
+        with patch.dict(tools_pkg.TOOL_REGISTRY, {"purpose_seed": fake_purpose_seed}):
             with _persona_ctx(manager, tmp_path):
                 finalize_mod.judgment_finalize(
                     judgment_output=output, kind="post_session", judgment_context=ctx,
@@ -577,7 +577,8 @@ def test_post_session_desk_memo_and_new_desires(
     assert memo["status"] == "continue"
     assert memo["task_ref"] == "task:1"
 
-    # new_desires → desire_add (type/source 付き)。未知の型は棄却 + WARN
+    # new_desires → purpose_seed (type/source 付き; P2c-1 で desire_add から切替)。
+    # 未知の型は棄却 + WARN
     assert len(desire_calls) == 1
     assert desire_calls[0] == {
         "title": "語源メモを一冊にまとめたい",
