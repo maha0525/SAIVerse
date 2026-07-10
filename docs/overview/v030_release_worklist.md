@@ -223,14 +223,21 @@
   - **解決済**: ①初期セット（置かない）/ 候補粒度・消化マーキング（Task に吸収）。
 - **依存**: ②（モード権限・実装済み）に構造的に依存（AUTONOMOUS は Track 作れない前提）。
 
-### ④ オートノミー系 ↔ Track 機構の関係整理 🔲 — 要結論
+### ④ オートノミー系 ↔ Track 機構の関係整理 ✅ — **結論確定（2026-07-10 まはー裁定）**
 
-- **問題**: `autonomy_creation` / `autonomy_memory_organization` / `autonomy_web_research`
-  プレイブック群は**前の自律行動仕様**で作られたもの。今の Track 機構に対して
-  使うべきか未結論。
-- **補足**: バイオリズム 5 活動種別のうち `self_reflection` 専用プレイブックが
-  欠けている件は、"単純な取りこぼし" ではなく**この整理の結論次第**。
-- **依存**: ②③が固まると、この答えも自然に出る見込み。
+- **結論**: **時間割（自律行動v2）への完全移行**。数分刻みの自律 Pulse は意味のある行動を
+  生まない（v1 失敗診断の言い直し）。v1 が担った機能は全て v2 に座席がある —
+  連続実行→コマ内作業セッション（予算） / 自発性→無意味の予算コマ / 割り込み→呼びかけ即応 /
+  途絶検知→watchdog。
+- **v1 系 Playbook の処遇**（Codex 監査 `docs/handoff/2026-07-10_memory_atlas_p2c_consumer_audit.md` §3 に従い実装は概念再編⑥ P2c-3 で実施）:
+  - `track_autonomous` / `meta_autonomy_decision` — **退役**（public JSON 除去 + DB prune +
+    `SELECTED_META_PLAYBOOK` 巻き取り + docs 追従）
+  - `autonomy_creation` / `autonomy_web_research` — **archive**（復活時は memory_* 語彙で再設計）
+  - `autonomy_memory_organization` / `fragment_organize` — **P4 庭仕事のワーカーへ転生**（保留）
+- `self_reflection` 専用プレイブック欠けの件: 専用 playbook は作らない — v2 では
+  就寝判断（day_close のふりかえり）と無意味の予算コマが内省の座席。
+- 必要になった能力は**新しい種のコマ**として作る（新種コマの作成手順は未整備 →
+  アイディア帳に記録、本作業の外）。
 
 ---
 
@@ -240,7 +247,7 @@
 2. ~~③-0 Task モデル一本化~~ ✅ 完了・実機検証済。
 3. ③ 自律の源泉（欲求エンジン＋候補）🟡 実装完了。実機検証で目的認識バグ発見→修正済（committed メタ判断が main_line 未載）。まはー再検証待ち。
 4. **① メタ判断リカバリの実機検証** ← **いま検証中**。失敗注入トグル実装済み → 再起動して連続失敗→Idle降格→通知を確認。
-5. **④ オートノミー系 ↔ Track 整理** ← ②③の結論が揃ったので着手可能。`self_reflection` 欠けの扱いもここで決まる。
+5. ~~④ オートノミー系 ↔ Track 整理~~ ✅ **結論確定（2026-07-10、時間割へ完全移行）**。実装（Playbook 退役）は概念再編⑥ P2c-3 に合流。
 6. ③-0 残派生: UI 表示出し分け（candidate / track-task）。単独で挿せる小タスク。
 
 ---
