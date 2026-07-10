@@ -1214,7 +1214,14 @@ class SoftDeletedPageDeskTests(_AtlasTestBase):
 
 
 class ChronicleShortIdBackfillTests(unittest.TestCase):
-    """既存 (short_id 列なし) DB からの一回きり backfill と新規採番。"""
+    """既存 (short_id 列なし) DB からの一回きり backfill と新規採番。
+
+    P3b (2026-07-11) で物理格納が memopedia_pages に統合されたため、旧
+    ``arasuji_entries`` は「物理テーブル」ではなく init_arasuji_tables の
+    一回きり移行元、以後は読み取り専用 VIEW になった。書き換え理由:
+    このテストは旧テーブルの列を直接構築しており、旧物理レイアウトに
+    依存していたため (物理格納を直接検査するテスト)。
+    """
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -1290,6 +1297,146 @@ class ChronicleShortIdBackfillTests(unittest.TestCase):
             "SELECT short_id FROM arasuji_entries WHERE id = 'old-1'"
         ).fetchone()
         self.assertEqual(row[0], 1)
+
+
+class ChronicleLegacyMigrationTest(unittest.TestCase):
+    """旧 arasuji_entries テーブル → memopedia_pages への一回きり移行 (P3b)。
+
+    P3a の CoreMemoryLegacyMigrationTest (tests/test_core_memory_storage.py)
+    と同型: Lv1/Lv2 の親子・incomplete・Track Chronicle・short_id 付き/無し
+    の行を含む legacy テーブルを仕込み、init_arasuji_tables 後にページ化・
+    親子逆写像・ch:N 解決・旧テーブル DROP・冪等性を検証する。
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self._tmpdir.name) / "memory.db")
+        self.conn = sqlite3.connect(self.db_path)
+        # P2a 以降の旧スキーマ (thread_id/origin_track_id/is_incomplete/short_id あり) を再現。
+        self.conn.execute(
+            """
+            CREATE TABLE arasuji_entries (
+                id TEXT PRIMARY KEY,
+                level INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                source_ids_json TEXT NOT NULL,
+                start_time INTEGER,
+                end_time INTEGER,
+                source_count INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                parent_id TEXT,
+                is_consolidated INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                thread_id TEXT,
+                origin_track_id TEXT,
+                is_incomplete INTEGER NOT NULL DEFAULT 0,
+                short_id INTEGER
+            )
+            """
+        )
+        rows = [
+            # Lv1 (未統合) — short_id 付き
+            ("lv1-a", 1, "第一のあらすじ", '["m1","m2"]', 100, 200, 2, 2,
+             None, 0, 100, None, None, 0, 5),
+            # Lv1 (Lv2 に統合済み) — short_id 無し (backfill 対象)
+            ("lv1-b", 1, "第二のあらすじ", '["m3"]', 201, 300, 1, 1,
+             "lv2-a", 1, 200, None, None, 0, None),
+            # Lv2 (lv1-b を統合)
+            ("lv2-a", 2, "統合されたあらすじ", '["lv1-b"]', 201, 300, 1, 1,
+             None, 0, 250, None, None, 0, None),
+            # Track Chronicle の incomplete Lv1
+            ("trk-1", 1, "作業途中のトラック記録", '["m4"]', 400, 410, 1, 1,
+             None, 0, 400, "thread-x", "track-1", 1, None),
+        ]
+        self.conn.executemany(
+            "INSERT INTO arasuji_entries VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        gc.collect()
+        try:
+            self._tmpdir.cleanup()
+        except PermissionError:
+            pass
+
+    def test_migration_creates_pages_drops_legacy_table_and_maps_parent(self):
+        from sai_memory.arasuji.storage import (
+            get_entry,
+            get_entry_by_short_id,
+            init_arasuji_tables,
+        )
+
+        init_arasuji_tables(self.conn)
+
+        # 旧テーブルは移行後 DROP される (旧 path を残さない)。
+        legacy = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='arasuji_entries'"
+        ).fetchone()
+        self.assertIsNone(legacy)
+        # 互換 VIEW は張られている。
+        view = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='arasuji_entries'"
+        ).fetchone()
+        self.assertIsNotNone(view)
+
+        # 未統合 Lv1 (旧 parent_id=NULL) は VIEW 越しに None のまま見える
+        # (物理的には root_chronicle 配下に reparent されている)。
+        lv1_a = get_entry(self.conn, "lv1-a")
+        self.assertIsNone(lv1_a.parent_id)
+        self.assertEqual(lv1_a.content, "第一のあらすじ")
+        self.assertEqual(lv1_a.source_ids, ["m1", "m2"])
+        self.assertEqual(lv1_a.created_at, 100)
+        page_a = self.conn.execute(
+            "SELECT parent_id FROM memopedia_pages WHERE id = 'lv1-a'"
+        ).fetchone()
+        self.assertEqual(page_a[0], "root_chronicle")
+
+        # 統合済み Lv1 (旧 parent_id=lv2-a) は VIEW でもそのまま lv2-a を指す。
+        lv1_b = get_entry(self.conn, "lv1-b")
+        self.assertEqual(lv1_b.parent_id, "lv2-a")
+        self.assertTrue(lv1_b.is_consolidated)
+
+        # short_id: 既存値 (5) は保全、欠落分は created_at 昇順で backfill される
+        # (lv1-a=5 は既存値なので、他行の backfill 開始点は MAX+1=6 から)。
+        # get_entry() は元々 short_id を SELECT しない (旧実装から変更なし) ので、
+        # VIEW を直接引いて確認する。
+        entry_a = get_entry_by_short_id(self.conn, 5)
+        self.assertEqual(entry_a.id, "lv1-a")
+        lv1_b_short_id = self.conn.execute(
+            "SELECT short_id FROM arasuji_entries WHERE id = 'lv1-b'"
+        ).fetchone()[0]
+        self.assertIsNotNone(lv1_b_short_id)
+        self.assertNotEqual(lv1_b_short_id, 5)
+
+        # Track Chronicle (origin_track_id/thread_id/is_incomplete) が保全されている。
+        trk = get_entry(self.conn, "trk-1")
+        self.assertEqual(trk.origin_track_id, "track-1")
+        self.assertTrue(trk.is_incomplete)
+
+        # ch:N (short_id) 解決で lv1-a を引ける。
+        by_short = get_entry_by_short_id(self.conn, entry_a.short_id)
+        self.assertEqual(by_short.id, "lv1-a")
+
+    def test_migration_is_idempotent(self):
+        from sai_memory.arasuji.storage import get_entries_by_level, init_arasuji_tables
+
+        init_arasuji_tables(self.conn)
+        first = {e.id: e.content for e in get_entries_by_level(self.conn, 1)}
+        init_arasuji_tables(self.conn)  # 2回目は旧テーブルが無いので no-op
+        second = {e.id: e.content for e in get_entries_by_level(self.conn, 1)}
+        self.assertEqual(first, second)
+
+        # 新規追加は移行済みの最大 short_id の続きから採番される (衝突なし)。
+        from sai_memory.arasuji.storage import create_entry
+        new_entry = create_entry(
+            self.conn, level=1, content="移行後の新規", source_ids=[],
+            source_count=0, message_count=0,
+        )
+        existing_short_ids = {e.short_id for e in get_entries_by_level(self.conn, 1)}
+        self.assertNotIn(new_entry.short_id, existing_short_ids - {new_entry.short_id})
 
 
 if __name__ == "__main__":

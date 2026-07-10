@@ -23,6 +23,7 @@ from sai_memory.arasuji.storage import (
     get_leaf_entries_by_level,
     get_max_level,
     mark_consolidated,
+    update_entry_full,
 )
 from sai_memory.arasuji.context import (
     get_episode_context,
@@ -781,16 +782,17 @@ def regenerate_consolidated_content(
         return None
 
     # 6. UPDATE in-place (preserve parent_id, is_consolidated, etc.)
-    conn.execute(
-        """
-        UPDATE arasuji_entries
-        SET content = ?, start_time = ?, end_time = ?,
-            message_count = ?, source_count = ?
-        WHERE id = ?
-        """,
-        (content, start_time, end_time, total_messages, len(source_entries), entry_id),
+    # P3b (2026-07-11): arasuji_entries は memopedia_pages 上の読み取り専用 VIEW に
+    # なったため、直接 UPDATE できない。storage.py 経由で書く。
+    update_entry_full(
+        conn,
+        entry_id,
+        content=content,
+        start_time=start_time,
+        end_time=end_time,
+        message_count=total_messages,
+        source_count=len(source_entries),
     )
-    conn.commit()
 
     LOGGER.info(
         f"Regenerated content for level-{entry.level} entry {entry_id[:8]} "

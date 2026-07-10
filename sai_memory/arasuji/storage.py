@@ -1,4 +1,37 @@
-"""Arasuji (episode memory) database storage layer."""
+"""Arasuji (episode memory) database storage layer.
+
+【P3b 物理統合 (2026-07-11)】このモジュールの公開 API (関数シグネチャ・戻り値の
+形・意味) は変えず、格納先を ``memopedia_pages`` に統合した
+(docs/intent/concept_consolidation.md「P3 物理統合」)。Chronicle エントリ 1 件は
+trunk ``root_chronicle`` (category ``chronicle``・is_trunk・title「時間の地図」)
+配下の子ページで、``ch:N`` の N はページ本体の memopedia short_id (m:N) とは別に
+metadata JSON の ``short_id`` (Chronicle 内で閉じた連番) を使う (P3a の core_id と
+同じ流儀)。ページ id = 旧 arasuji entry の UUID をそのまま流用するため、
+``MemopediaFragment.chronicle_entry_id`` 等の既存参照は無傷で解決される。
+
+parent_id の写像: 旧 arasuji の parent_id=NULL (未統合・最上位) → ページの
+parent=root_chronicle。parent_id=X (Lv2+ に統合済み) → ページの parent=X。
+読み出し側は逆写像 (parent==root_chronicle → None)。
+
+【互換 VIEW】このコードベースには sea/auto_recall.py・
+sea/head_pipeline/sections/chronicle_index.py・sea/session_lifecycle.py・
+sai_memory/unified_recall.py・sai_memory/arasuji/estimate.py・
+api/routes/people/arasuji.py・tools/utilities/memory_settings_ui.py・
+builtin_data/tools/get_memory_weave_context.py 等、本モジュールを経由せず
+生 SQL で ``arasuji_entries`` テーブルを直接読む消費者が多数ある (一部は
+sea/head_pipeline/ など変更禁止領域)。物理格納を変えつつこれらを無傷で通すため、
+``init_arasuji_tables`` は同名の読み取り専用 SQL VIEW を ``memopedia_pages`` の
+上に張る。書き込みはすべて本モジュールの関数 (と generator.py 経由) からのみ行われ、
+生の UPDATE/INSERT/DELETE は memopedia_pages に対して行う。VIEW は SELECT 専用
+(SQLite はビューへの直接 UPDATE/DELETE を許さない) — 実際に確認済み。
+
+旧 ``arasuji_entries`` テーブルは ``init_arasuji_tables`` 内の一回きり冪等
+migration でページへ写し切ってから DROP する (``sai_memory/photos.py`` の
+marks→photos や ``sai_memory/core_memory.py`` の core_memories→pages と同じ流儀)。
+
+詳細設計: docs/intent/memory_architecture_v2.md / docs/intent/concept_consolidation.md
+「P3b: Chronicle → 時間の地図ページ」
+"""
 
 from __future__ import annotations
 
@@ -61,97 +94,169 @@ class ArasujiProgress:
     last_processed_at: Optional[int]
 
 
-def _ensure_arasuji_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
-    """Add a column to a table if it doesn't exist."""
-    try:
-        conn.execute(f"SELECT {column} FROM {table} LIMIT 0")
-    except sqlite3.OperationalError:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        conn.commit()
+# ---------------------------------------------------------------------------
+# 物理格納: memopedia_pages (trunk root_chronicle 配下の子ページ) + 互換 VIEW
+# ---------------------------------------------------------------------------
+
+ROOT_CHRONICLE_ID = "root_chronicle"
+CATEGORY_CHRONICLE = "chronicle"
+
+# 互換 VIEW の列名。名前だけ既存 SQL (本モジュール内・外部消費者とも) と一致していれば
+# 内部の列順は問わない (呼び出し側は SELECT で明示的に列名を指定しているため)。
+_COMPAT_VIEW_SQL = f"""
+    CREATE VIEW arasuji_entries AS
+    SELECT
+        id,
+        CAST(json_extract(metadata, '$.level') AS INTEGER) AS level,
+        content,
+        json_extract(metadata, '$.source_ids') AS source_ids_json,
+        CAST(json_extract(metadata, '$.start_time') AS INTEGER) AS start_time,
+        CAST(json_extract(metadata, '$.end_time') AS INTEGER) AS end_time,
+        CAST(json_extract(metadata, '$.source_count') AS INTEGER) AS source_count,
+        CAST(json_extract(metadata, '$.message_count') AS INTEGER) AS message_count,
+        CASE WHEN parent_id = '{ROOT_CHRONICLE_ID}' THEN NULL ELSE parent_id END AS parent_id,
+        CAST(json_extract(metadata, '$.is_consolidated') AS INTEGER) AS is_consolidated,
+        created_at,
+        json_extract(metadata, '$.thread_id') AS thread_id,
+        json_extract(metadata, '$.origin_track_id') AS origin_track_id,
+        CAST(json_extract(metadata, '$.is_incomplete') AS INTEGER) AS is_incomplete,
+        CAST(json_extract(metadata, '$.short_id') AS INTEGER) AS short_id
+    FROM memopedia_pages
+    WHERE category = '{CATEGORY_CHRONICLE}' AND is_trunk = 0
+      AND (is_deleted = 0 OR is_deleted IS NULL)
+"""
 
 
-def _backfill_chronicle_short_ids(conn: sqlite3.Connection) -> None:
-    """short_id を持たない既存 Chronicle エントリに採番する (migration helper)。
+def _ensure_root_chronicle(conn: sqlite3.Connection) -> None:
+    """trunk root_chronicle ページを冪等に用意する (無ければ作る)。"""
+    row = conn.execute(
+        "SELECT id FROM memopedia_pages WHERE id = ?", (ROOT_CHRONICLE_ID,)
+    ).fetchone()
+    if row is not None:
+        return
+    from sai_memory.memopedia.storage import create_page
 
-    created_at 昇順で 1 から採番する (memopedia の _backfill_short_ids と同じ流儀)。
-    """
-    cur = conn.execute(
-        "SELECT id FROM arasuji_entries WHERE short_id IS NULL ORDER BY created_at ASC"
+    create_page(
+        conn,
+        parent_id=None,
+        title="時間の地図",
+        category=CATEGORY_CHRONICLE,
+        is_trunk=True,
+        page_id=ROOT_CHRONICLE_ID,
     )
+    conn.commit()
+
+
+def _fallback_chronicle_title(rec: Dict[str, Any]) -> str:
+    """short_id が採れなかった場合の機械的表題 (通常は到達しない防御的分岐)。"""
+    start = rec.get("start_time")
+    end = rec.get("end_time")
+    if start or end:
+        from datetime import datetime
+        s = datetime.fromtimestamp(start).strftime("%Y-%m-%d") if start else "?"
+        e = datetime.fromtimestamp(end).strftime("%Y-%m-%d") if end else "?"
+        return f"Chronicle {s}~{e}"
+    return f"Chronicle {str(rec.get('id') or '')[:8]}"
+
+
+def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
+    """旧 ``arasuji_entries`` テーブルが存在すれば、全行をページへ写して DROP する。
+
+    一回きり・冪等 (旧テーブルが無ければ即 return)。id → ページ id にそのまま流用し、
+    level/content/source_ids/start_time/end_time/source_count/message_count/
+    is_consolidated/origin_track_id/is_incomplete/thread_id/short_id を metadata に
+    忠実に写す。列の有無は ``PRAGMA`` を引かず ``SELECT *`` の ``cursor.description``
+    から動的に読む (thread_id/origin_track_id/is_incomplete/short_id が無い、
+    P2a より前の超古い DB にも耐える)。
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='arasuji_entries'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    from sai_memory.memopedia.storage import create_page
+
+    cur = conn.execute("SELECT * FROM arasuji_entries ORDER BY created_at ASC")
+    col_names = [d[0] for d in cur.description]
     rows = cur.fetchall()
-    max_cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM arasuji_entries")
-    next_id = max_cur.fetchone()[0] + 1
-    for (entry_id,) in rows:
-        conn.execute(
-            "UPDATE arasuji_entries SET short_id = ? WHERE id = ?",
-            (next_id, entry_id),
+
+    has_short_id_col = "short_id" in col_names
+    next_short_id = 1
+    if has_short_id_col and rows:
+        sid_idx = col_names.index("short_id")
+        existing_max = max((row[sid_idx] or 0) for row in rows)
+        next_short_id = existing_max + 1
+
+    for row in rows:
+        rec = dict(zip(col_names, row))
+        old_id = rec["id"]
+        try:
+            source_ids = json.loads(rec.get("source_ids_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            source_ids = []
+
+        short_id = rec.get("short_id")
+        if short_id is None:
+            short_id = next_short_id
+            next_short_id += 1
+
+        legacy_parent_id = rec.get("parent_id")
+        page_parent = legacy_parent_id if legacy_parent_id else ROOT_CHRONICLE_ID
+
+        meta = {
+            "level": int(rec["level"]),
+            "source_ids": source_ids,
+            "start_time": rec.get("start_time"),
+            "end_time": rec.get("end_time"),
+            "source_count": int(rec.get("source_count") or 0),
+            "message_count": int(rec.get("message_count") or 0),
+            "is_consolidated": int(rec.get("is_consolidated") or 0),
+            "is_incomplete": int(rec.get("is_incomplete") or 0),
+            "origin_track_id": rec.get("origin_track_id"),
+            "thread_id": rec.get("thread_id"),
+            "short_id": short_id,
+        }
+        title = f"ch:{short_id}" if short_id is not None else _fallback_chronicle_title(rec)
+
+        page = create_page(
+            conn,
+            parent_id=page_parent,
+            title=title,
+            content=rec.get("content") or "",
+            category=CATEGORY_CHRONICLE,
+            is_trunk=False,
+            metadata=meta,
+            page_id=old_id,
         )
-        next_id += 1
-    if rows:
-        conn.commit()
-
-
-def _next_chronicle_short_id(conn: sqlite3.Connection) -> int:
-    """新規 Chronicle エントリの次の short_id (MAX + 1、初回は 1)。"""
-    cur = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM arasuji_entries")
-    return cur.fetchone()[0] + 1
+        conn.execute(
+            "UPDATE memopedia_pages SET created_at = ? WHERE id = ?",
+            (int(rec["created_at"]), page.id),
+        )
+    conn.commit()
+    conn.execute("DROP TABLE arasuji_entries")
+    conn.commit()
 
 
 def init_arasuji_tables(conn: sqlite3.Connection) -> None:
-    """Initialize arasuji tables if they don't exist."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS arasuji_entries (
-            id TEXT PRIMARY KEY,
-            level INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            source_ids_json TEXT NOT NULL,
-            start_time INTEGER,
-            end_time INTEGER,
-            source_count INTEGER NOT NULL,
-            message_count INTEGER NOT NULL,
-            parent_id TEXT,
-            is_consolidated INTEGER DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            FOREIGN KEY (parent_id) REFERENCES arasuji_entries(id)
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_level ON arasuji_entries(level)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_end_time ON arasuji_entries(end_time DESC)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_arasuji_consolidated ON arasuji_entries(is_consolidated)"
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_parent ON arasuji_entries(parent_id)")
+    """Initialize arasuji (Chronicle) storage — memopedia_pages ベース (冪等)。
 
-    # Migration: add thread_id column for Stelis thread isolation
-    _ensure_arasuji_column(conn, "arasuji_entries", "thread_id", "TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_thread ON arasuji_entries(thread_id)")
+    1. Memopedia テーブルを保証。
+    2. trunk root_chronicle ページを冪等に用意する。
+    3. 旧 arasuji_entries テーブルが存在すれば一回きり移行して DROP する
+       (この時点で旧テーブルは必ず消えている)。
+    4. 互換 VIEW ``arasuji_entries`` を (再) 作成する — 生 SQL 消費者向け。
+    5. arasuji_progress / arasuji_embeddings (Chronicle の物理格納とは無関係、
+       現状維持) と、旧テーブルの index に対応する expression index を作る。
+    """
+    from sai_memory.memopedia.storage import init_memopedia_tables
 
-    # Migration (v0.32, 2026-05-09): Track Chronicle のための列追加
-    # - origin_track_id: NULL = General Chronicle (Track 横断), set = Track Chronicle (Track 紐付き)
-    # - is_incomplete: バッチサイズ未満で作られた一時 Lv1。後で 20 件揃ったら削除して正規 Lv1 に再生成
-    # 詳細は docs/intent/persona_cognition/track_chronicle.md
-    _ensure_arasuji_column(conn, "arasuji_entries", "origin_track_id", "TEXT")
-    _ensure_arasuji_column(conn, "arasuji_entries", "is_incomplete", "INTEGER NOT NULL DEFAULT 0")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_track ON arasuji_entries(origin_track_id)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_arasuji_track_level_time "
-        "ON arasuji_entries(origin_track_id, level, end_time DESC)"
-    )
+    init_memopedia_tables(conn)
+    _ensure_root_chronicle(conn)
+    _migrate_legacy_arasuji_table(conn)
 
-    # Migration (P2a, 2026-07-10): short_id — Memory Atlas の ch:N 短縮参照用。
-    # memopedia_pages.short_id の追加系 migration と同じ流儀 (ALTER →
-    # 一度きりの backfill、既存行は created_at 昇順で採番)。
-    try:
-        conn.execute("SELECT short_id FROM arasuji_entries LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE arasuji_entries ADD COLUMN short_id INTEGER")
-        conn.commit()
-        _backfill_chronicle_short_ids(conn)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_arasuji_short_id ON arasuji_entries(short_id)"
-    )
+    conn.execute("DROP VIEW IF EXISTS arasuji_entries")
+    conn.execute(_COMPAT_VIEW_SQL)
 
     conn.execute(
         """
@@ -163,7 +268,10 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # Embeddings for Chronicle entries (used by unified recall)
+    # Embeddings for Chronicle entries (used by unified recall). entry_id は
+    # 引き続き Chronicle エントリ (== ページ) の id。FK は宣言のみ (このコードベースは
+    # foreign_keys pragma を有効化しないため実効しない。VIEW への FK 宣言も
+    # CREATE TABLE 時点ではエラーにならないことを確認済み)。
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS arasuji_embeddings (
@@ -174,11 +282,72 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # 旧 idx_arasuji_* に対応する expression index (category='chronicle' に絞った部分 index)。
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_level ON memopedia_pages"
+        f"(json_extract(metadata, '$.level')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_end_time ON memopedia_pages"
+        f"(json_extract(metadata, '$.end_time')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_consolidated ON memopedia_pages"
+        f"(json_extract(metadata, '$.is_consolidated')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_thread ON memopedia_pages"
+        f"(json_extract(metadata, '$.thread_id')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_track ON memopedia_pages"
+        f"(json_extract(metadata, '$.origin_track_id')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_track_level_time ON memopedia_pages"
+        f"(json_extract(metadata, '$.origin_track_id'), json_extract(metadata, '$.level'), "
+        f"json_extract(metadata, '$.end_time')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_chronicle_short_id ON memopedia_pages"
+        f"(json_extract(metadata, '$.short_id')) WHERE category = '{CATEGORY_CHRONICLE}'"
+    )
+
     conn.commit()
+
+
+def _next_chronicle_short_id(conn: sqlite3.Connection) -> int:
+    """新規 Chronicle エントリの次の short_id (MAX + 1、初回は 1)。"""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(CAST(json_extract(metadata, '$.short_id') AS INTEGER)), 0) "
+        "FROM memopedia_pages WHERE category = ?",
+        (CATEGORY_CHRONICLE,),
+    ).fetchone()
+    return int(row[0]) + 1 if row and row[0] is not None else 1
+
+
+def _get_chronicle_page_row(
+    conn: sqlite3.Connection, entry_id: str,
+) -> Optional[Tuple[str, Optional[str], str, Optional[str], int]]:
+    """id (== page id) で生ページ行 (id, parent_id, content, metadata, created_at) を取る。"""
+    return conn.execute(
+        "SELECT id, parent_id, content, metadata, created_at FROM memopedia_pages "
+        "WHERE id = ? AND category = ?",
+        (entry_id, CATEGORY_CHRONICLE),
+    ).fetchone()
+
+
+def _parse_chronicle_meta(metadata_json: Optional[str]) -> Dict[str, Any]:
+    try:
+        return json.loads(metadata_json) if metadata_json else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 # Standard SELECT 句。すべての SELECT で同じ並びを保つことで _row_to_entry が動く。
 # (v0.32, 2026-05-09) 末尾に origin_track_id, is_incomplete を追加。
+# (P3b, 2026-07-11) 物理格納は memopedia_pages に変わったが、この列名リストは
+# init_arasuji_tables が張る互換 VIEW ``arasuji_entries`` に対してそのまま使える。
 _ENTRY_COLUMNS = (
     "id, level, content, source_ids_json, start_time, end_time, "
     "source_count, message_count, parent_id, is_consolidated, created_at, "
@@ -246,33 +415,33 @@ def create_entry(
         is_incomplete: バッチサイズ未満で作られた一時 Lv1 (Track Chronicle 用)。
                        後で 20 件揃った時に削除して正規 Lv1 に作り直される。
     """
+    from sai_memory.memopedia.storage import create_page
+
+    _ensure_root_chronicle(conn)
     eid = entry_id or str(uuid.uuid4())
-    now = int(time.time())
     sid = _next_chronicle_short_id(conn)
-    conn.execute(
-        """
-        INSERT INTO arasuji_entries (
-            id, level, content, source_ids_json, start_time, end_time,
-            source_count, message_count, parent_id, is_consolidated, created_at,
-            thread_id, origin_track_id, is_incomplete, short_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?)
-        """,
-        (
-            eid,
-            level,
-            content,
-            json.dumps(source_ids, ensure_ascii=False),
-            start_time,
-            end_time,
-            source_count,
-            message_count,
-            now,
-            thread_id,
-            origin_track_id,
-            1 if is_incomplete else 0,
-            sid,
-        ),
+    meta = {
+        "level": level,
+        "source_ids": source_ids,
+        "start_time": start_time,
+        "end_time": end_time,
+        "source_count": source_count,
+        "message_count": message_count,
+        "is_consolidated": 0,
+        "is_incomplete": 1 if is_incomplete else 0,
+        "origin_track_id": origin_track_id,
+        "thread_id": thread_id,
+        "short_id": sid,
+    }
+    page = create_page(
+        conn,
+        parent_id=ROOT_CHRONICLE_ID,
+        title=f"ch:{sid}",
+        content=content,
+        category=CATEGORY_CHRONICLE,
+        is_trunk=False,
+        metadata=meta,
+        page_id=eid,
     )
     conn.commit()
     return ArasujiEntry(
@@ -286,7 +455,7 @@ def create_entry(
         message_count=message_count,
         parent_id=None,
         is_consolidated=False,
-        created_at=now,
+        created_at=page.created_at,
         origin_track_id=origin_track_id,
         is_incomplete=is_incomplete,
         short_id=sid,
@@ -401,15 +570,17 @@ def mark_consolidated(
     """Mark entries as consolidated into a parent entry."""
     if not entry_ids:
         return
-    placeholders = ",".join("?" for _ in entry_ids)
-    conn.execute(
-        f"""
-        UPDATE arasuji_entries
-        SET is_consolidated = 1, parent_id = ?
-        WHERE id IN ({placeholders})
-        """,
-        [parent_id] + entry_ids,
-    )
+    for eid in entry_ids:
+        row = _get_chronicle_page_row(conn, eid)
+        if row is None:
+            continue
+        _pid, _old_parent, _content, meta_json, _created = row
+        meta = _parse_chronicle_meta(meta_json)
+        meta["is_consolidated"] = 1
+        conn.execute(
+            "UPDATE memopedia_pages SET metadata = ?, parent_id = ? WHERE id = ?",
+            (json.dumps(meta, ensure_ascii=False), parent_id, eid),
+        )
     conn.commit()
 
 
@@ -428,12 +599,48 @@ def update_entry_content(
     Returns:
         True if the entry was found and updated, False otherwise
     """
-    cur = conn.execute(
-        "UPDATE arasuji_entries SET content = ? WHERE id = ?",
+    row = _get_chronicle_page_row(conn, entry_id)
+    if row is None:
+        return False
+    conn.execute(
+        "UPDATE memopedia_pages SET content = ? WHERE id = ?",
         (content, entry_id),
     )
     conn.commit()
-    return cur.rowcount > 0
+    return True
+
+
+def update_entry_full(
+    conn: sqlite3.Connection,
+    entry_id: str,
+    *,
+    content: str,
+    start_time: Optional[int],
+    end_time: Optional[int],
+    message_count: int,
+    source_count: int,
+) -> bool:
+    """content と時間範囲/件数メタデータを一括更新する (regenerate_consolidated_content 用)。
+
+    P3b 以前は ``UPDATE arasuji_entries SET content=?, start_time=?, end_time=?,
+    message_count=?, source_count=? WHERE id=?`` を generator.py が直接発行していたが、
+    ``arasuji_entries`` が読み取り専用 VIEW になったためこの関数を介する。
+    """
+    row = _get_chronicle_page_row(conn, entry_id)
+    if row is None:
+        return False
+    _pid, _parent, _content, meta_json, _created = row
+    meta = _parse_chronicle_meta(meta_json)
+    meta["start_time"] = start_time
+    meta["end_time"] = end_time
+    meta["message_count"] = message_count
+    meta["source_count"] = source_count
+    conn.execute(
+        "UPDATE memopedia_pages SET content = ?, metadata = ? WHERE id = ?",
+        (content, json.dumps(meta, ensure_ascii=False), entry_id),
+    )
+    conn.commit()
+    return True
 
 
 def get_all_entries_ordered(
@@ -551,7 +758,8 @@ def delete_incomplete_entries(
 
     Returns the number of deleted entries.
     """
-    # Collect IDs and their parent_ids before deletion
+    # Collect IDs and their parent_ids before deletion (parent_id here is the
+    # view's un-mapped value: NULL for un-consolidated entries).
     rows = conn.execute(
         "SELECT id, parent_id FROM arasuji_entries "
         "WHERE origin_track_id = ? AND level = 1 AND is_incomplete = 1",
@@ -576,16 +784,21 @@ def delete_incomplete_entries(
             new_source_ids = [
                 sid for sid in parent.source_ids if sid not in deleted_ids
             ]
-            conn.execute(
-                "UPDATE arasuji_entries SET source_ids_json = ? WHERE id = ?",
-                (json.dumps(new_source_ids), pid),
-            )
+            prow = _get_chronicle_page_row(conn, pid)
+            if prow is not None:
+                _ppid, _pparent, _pcontent, pmeta_json, _pcreated = prow
+                pmeta = _parse_chronicle_meta(pmeta_json)
+                pmeta["source_ids"] = new_source_ids
+                conn.execute(
+                    "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                    (json.dumps(pmeta, ensure_ascii=False), pid),
+                )
 
     # Delete the incomplete entries
     placeholders = ",".join("?" for _ in deleted_ids)
     cur = conn.execute(
-        f"DELETE FROM arasuji_entries WHERE id IN ({placeholders})",
-        list(deleted_ids),
+        f"DELETE FROM memopedia_pages WHERE id IN ({placeholders}) AND category = ?",
+        list(deleted_ids) + [CATEGORY_CHRONICLE],
     )
     conn.commit()
     return cur.rowcount
@@ -595,7 +808,8 @@ def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
     """Delete an arasuji entry.
 
     If the entry is level 2+, its child entries (referenced by source_ids)
-    are automatically reset: ``is_consolidated`` → 0, ``parent_id`` → NULL.
+    are automatically reset: ``is_consolidated`` → 0, ``parent_id`` → NULL
+    (physically: reparented back under root_chronicle).
     This ensures children become eligible for re-consolidation.
     """
     entry = get_entry(conn, entry_id)
@@ -604,24 +818,32 @@ def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
 
     # Reset children when deleting a consolidated parent
     if entry.level >= 2 and entry.source_ids:
-        placeholders = ",".join("?" for _ in entry.source_ids)
-        conn.execute(
-            f"UPDATE arasuji_entries SET is_consolidated = 0, parent_id = NULL "
-            f"WHERE id IN ({placeholders})",
-            entry.source_ids,
-        )
+        for sid in entry.source_ids:
+            row = _get_chronicle_page_row(conn, sid)
+            if row is None:
+                continue
+            _pid, _parent, _content, meta_json, _created = row
+            meta = _parse_chronicle_meta(meta_json)
+            meta["is_consolidated"] = 0
+            conn.execute(
+                "UPDATE memopedia_pages SET metadata = ?, parent_id = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), ROOT_CHRONICLE_ID, sid),
+            )
 
-    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    conn.execute(
+        "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
+        (entry_id, CATEGORY_CHRONICLE),
+    )
     conn.commit()
     return True
 
 
 def delete_entry_and_update_parent(
-    conn: sqlite3.Connection, 
+    conn: sqlite3.Connection,
     entry_id: str
 ) -> tuple[bool, Optional[str]]:
     """Delete entry and remove from parent's source_ids.
-    
+
     Returns:
         (success, parent_id) - parent_id is None if no parent existed
     """
@@ -629,23 +851,29 @@ def delete_entry_and_update_parent(
     entry = get_entry(conn, entry_id)
     if not entry:
         return False, None
-    
+
     parent_id = entry.parent_id
-    
+
     # Update parent's source_ids if exists
     if parent_id:
-        parent = get_entry(conn, parent_id)
-        if parent:
-            new_source_ids = [sid for sid in parent.source_ids if sid != entry_id]
+        prow = _get_chronicle_page_row(conn, parent_id)
+        if prow is not None:
+            _ppid, _pparent, _pcontent, pmeta_json, _pcreated = prow
+            pmeta = _parse_chronicle_meta(pmeta_json)
+            new_source_ids = [sid for sid in (pmeta.get("source_ids") or []) if sid != entry_id]
+            pmeta["source_ids"] = new_source_ids
             conn.execute(
-                "UPDATE arasuji_entries SET source_ids_json = ? WHERE id = ?",
-                (json.dumps(new_source_ids), parent_id)
+                "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                (json.dumps(pmeta, ensure_ascii=False), parent_id),
             )
-    
+
     # Delete entry
-    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    conn.execute(
+        "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
+        (entry_id, CATEGORY_CHRONICLE),
+    )
     conn.commit()
-    
+
     return True, parent_id
 
 
@@ -655,31 +883,38 @@ def add_to_parent_source_ids(
     parent_id: str
 ) -> bool:
     """Add entry to parent's source_ids and mark as consolidated.
-    
+
     Args:
         entry_id: ID of entry to add to parent
         parent_id: ID of parent entry
-        
+
     Returns:
         True if successful, False if parent not found
     """
-    parent = get_entry(conn, parent_id)
-    if not parent:
+    prow = _get_chronicle_page_row(conn, parent_id)
+    if prow is None:
         return False
-    
-    # Add to parent's source_ids
-    new_source_ids = parent.source_ids + [entry_id]
+
+    _ppid, _pparent, _pcontent, pmeta_json, _pcreated = prow
+    pmeta = _parse_chronicle_meta(pmeta_json)
+    new_source_ids = (pmeta.get("source_ids") or []) + [entry_id]
+    pmeta["source_ids"] = new_source_ids
     conn.execute(
-        "UPDATE arasuji_entries SET source_ids_json = ? WHERE id = ?",
-        (json.dumps(new_source_ids), parent_id)
+        "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+        (json.dumps(pmeta, ensure_ascii=False), parent_id),
     )
-    
+
     # Mark entry as consolidated
-    conn.execute(
-        "UPDATE arasuji_entries SET is_consolidated = 1, parent_id = ? WHERE id = ?",
-        (parent_id, entry_id)
-    )
-    
+    erow = _get_chronicle_page_row(conn, entry_id)
+    if erow is not None:
+        _eid, _eparent, _econtent, emeta_json, _ecreated = erow
+        emeta = _parse_chronicle_meta(emeta_json)
+        emeta["is_consolidated"] = 1
+        conn.execute(
+            "UPDATE memopedia_pages SET metadata = ?, parent_id = ? WHERE id = ?",
+            (json.dumps(emeta, ensure_ascii=False), parent_id, entry_id),
+        )
+
     conn.commit()
     return True
 
@@ -698,7 +933,7 @@ def dismantle_entry(
 
     Steps:
         1. Reset all source children to unconsolidated
-           (``is_consolidated=0, parent_id=NULL``).
+           (``is_consolidated=0, parent_id=NULL``, i.e. reparented to root_chronicle).
         2. Remove this entry from its parent's ``source_ids`` (if any).
            If the parent has no remaining sources, recursively dismantle it.
         3. Delete this entry.
@@ -721,19 +956,25 @@ def dismantle_entry(
     freed_ids = list(entry.source_ids)
 
     # 1. Reset source children to unconsolidated
-    if entry.source_ids:
-        placeholders = ",".join("?" for _ in entry.source_ids)
+    for sid in entry.source_ids:
+        row = _get_chronicle_page_row(conn, sid)
+        if row is None:
+            continue
+        _pid, _parent, _content, meta_json, _created = row
+        meta = _parse_chronicle_meta(meta_json)
+        meta["is_consolidated"] = 0
         conn.execute(
-            f"UPDATE arasuji_entries SET is_consolidated = 0, parent_id = NULL "
-            f"WHERE id IN ({placeholders})",
-            entry.source_ids,
+            "UPDATE memopedia_pages SET metadata = ?, parent_id = ? WHERE id = ?",
+            (json.dumps(meta, ensure_ascii=False), ROOT_CHRONICLE_ID, sid),
         )
 
     # 2. Remove from parent's source_ids
     if entry.parent_id:
-        parent = get_entry(conn, entry.parent_id)
-        if parent:
-            new_source_ids = [sid for sid in parent.source_ids if sid != entry_id]
+        prow = _get_chronicle_page_row(conn, entry.parent_id)
+        if prow is not None:
+            _ppid, _pparent, _pcontent, pmeta_json, _pcreated = prow
+            pmeta = _parse_chronicle_meta(pmeta_json)
+            new_source_ids = [sid for sid in (pmeta.get("source_ids") or []) if sid != entry_id]
             if not new_source_ids:
                 # Parent has no remaining sources — dismantle it too
                 _logger.info(
@@ -743,14 +984,18 @@ def dismantle_entry(
                 )
                 dismantle_entry(conn, entry.parent_id)
             else:
+                pmeta["source_ids"] = new_source_ids
+                pmeta["source_count"] = len(new_source_ids)
                 conn.execute(
-                    "UPDATE arasuji_entries SET source_ids_json = ?, source_count = ? "
-                    "WHERE id = ?",
-                    (json.dumps(new_source_ids), len(new_source_ids), entry.parent_id),
+                    "UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                    (json.dumps(pmeta, ensure_ascii=False), entry.parent_id),
                 )
 
     # 3. Delete this entry
-    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    conn.execute(
+        "DELETE FROM memopedia_pages WHERE id = ? AND category = ?",
+        (entry_id, CATEGORY_CHRONICLE),
+    )
     conn.commit()
 
     _logger.info(
@@ -789,11 +1034,15 @@ def get_entries_by_thread(
 
 
 def clear_all_entries(conn: sqlite3.Connection) -> int:
-    """Delete all arasuji entries. Returns count of deleted entries."""
-    cur = conn.execute("DELETE FROM arasuji_entries")
+    """Delete all arasuji entries (not the root_chronicle trunk). Returns count deleted."""
+    cur = conn.execute(
+        "DELETE FROM memopedia_pages WHERE category = ? AND is_trunk = 0",
+        (CATEGORY_CHRONICLE,),
+    )
+    count = cur.rowcount
     conn.execute("DELETE FROM arasuji_progress")
     conn.commit()
-    return cur.rowcount
+    return count
 
 
 def regenerate_entry(
@@ -803,65 +1052,65 @@ def regenerate_entry(
     persona_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Regenerate a Chronicle entry while preserving parent relationship.
-    
+
     This orchestrates the full regeneration process:
     1. Get existing entry and save parent info
     2. Delete entry and update parent's source_ids
     3. Get original messages
     4. Call build_arasuji.regenerate_entry_from_messages for business logic
     5. Restore parent relationship
-    
+
     Args:
         conn: Database connection
         entry_id: ID of entry to regenerate
         model_name: Model to use (defaults to MEMORY_WEAVE_MODEL env var)
-        
+
     Returns:
         New ArasujiEntry or None on failure
     """
     from sai_memory.memory.storage import get_message
-    
+
     # 1. Get existing entry
     entry = get_entry(conn, entry_id)
     if not entry:
         return None
-    
+
     if entry.level != 1:
         raise ValueError("Only level-1 entries can be regenerated")
-    
+
     # 2. Save parent info and source message IDs
     parent_id = entry.parent_id
     source_message_ids = entry.source_ids
-    
+
     # 3. Delete entry and update parent
     success, _ = delete_entry_and_update_parent(conn, entry_id)
     if not success:
         return None
-    
+
     # 4. Get original messages
     messages = []
     for msg_id in source_message_ids:
         msg = get_message(conn, msg_id)
         if msg:
             messages.append(msg)
-    
+
     if not messages:
         return None
-    
+
     # Sort by created_at
     messages.sort(key=lambda m: m.created_at)
-    
+
     # 5. Call scripts layer for business logic
     from scripts.arasuji.build_arasuji_core import regenerate_entry_from_messages
     new_entry = regenerate_entry_from_messages(conn, messages, model_name, persona_id=persona_id)
-    
+
     if not new_entry:
         return None
-    
+
     # 6. Restore parent relationship
     if parent_id:
         add_to_parent_source_ids(conn, new_entry.id, parent_id)
-    
+
     return new_entry
 
 
@@ -985,16 +1234,16 @@ def has_overlapping_entries(
     level: int = 1,
 ) -> bool:
     """Check if there are existing entries that overlap with the given time range.
-    
+
     An entry overlaps if:
     - entry.start_time <= end_time AND entry.end_time >= start_time
-    
+
     Args:
         conn: Database connection
         start_time: Start of time range to check
         end_time: End of time range to check
         level: Level to check (default: 1 for level-1 Chronicle)
-        
+
     Returns:
         True if overlapping entries exist, False otherwise
     """

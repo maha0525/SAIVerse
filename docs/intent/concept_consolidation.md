@@ -202,7 +202,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - 移行: `core_memories` テーブル → ページ生成 → DROP（冪等・一回きり）
 - 留意: memory_search / memopedia ツリーにコア記憶ページが現れるようになる（検索できるのはむしろ望ましい）。maintain_memopedia（P4 素材）は category `core` を分割/統合対象から除外すること
 
-**P3b: Chronicle → 時間の地図ページ**（3a 検収後に詳細化）: arasuji/storage.py の API を維持したままページ実装へ。parent_id=Lv 統合の親子、metadata に source_ids/level/is_consolidated。ArasujiGenerator は無変更
+**P3b: Chronicle → 時間の地図ページ** ✅ **実装済**（2026-07-11。API 完全維持〔`sai_memory/arasuji/storage.py` の公開シグネチャ・戻り値は無変更〕。物理格納は memopedia_pages 〔trunk `root_chronicle`〕へ移行。**新規知見**: 生 SQL で `arasuji_entries` を直接読む消費者が `sea/head_pipeline/sections/chronicle_index.py`（変更禁止領域）を含め9箇所あり、P3a の想定より広い互換面が必要だった → 同名の読み取り専用 SQL VIEW（`json_extract` 展開・`parent_id` の root_chronicle⇄NULL 相互変換込み）を張ることで無改修対応。書き込み側の唯一の直接 SQL（`sai_memory/arasuji/generator.py` の `regenerate_consolidated_content`）は `update_entry_full` 経由に変更。expression index 7本で旧 index 相当をカバー。`Memopedia.search()` に Chronicle ページが現れる二重ヒットは `memory_atlas.search_pages` 側で `category != "chronicle"` を除外して解消。書き換えテスト1件〔`ChronicleShortIdBackfillTests`、旧物理スキーマの直接検査〕・移行テストはスモークスクリプトで検証、既存 373 passed）
 **P3c: 目的の木 + Note 畳み**（最重量・cross-DB）: persona_task（main DB）→ per-persona memory.db のページへ。Note→テーマノード統合・TrackOpenNote→机の掛け替え・note スペル4本と open_notes section の退役もここ。3a/3b の学びを踏まえて着手前に詳細化
 
 ### 次アクション

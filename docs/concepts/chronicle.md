@@ -16,7 +16,7 @@
 
 - Message が一定数（`DEFAULT_BATCH_SIZE=20`）貯まるごとに LLM が **「あらすじ」（Lv1）** へ圧縮
 - 古い Lv1 同士はさらに **「あらすじのあらすじ」（Lv2+）** へ統合
-- `arasuji_entries` テーブルに格納
+- 物理格納は `memopedia_pages`（trunk `root_chronicle` 配下の子ページ、Memory Atlas「時間の地図」。P3b, 2026-07-11）。`arasuji_entries` は生 SQL 消費者向けの読み取り専用 SQL VIEW として残る
 
 ### Track 専用 Chronicle
 
@@ -31,7 +31,7 @@ Chronicle は [Metabolism](metabolism.md) 発火時に `ArasujiGenerator` が生
 ## 実装
 
 - 生成: `sai_memory/arasuji/generator.py`（`ArasujiGenerator`）
-- ストレージ: `sai_memory/arasuji/storage.py`、`arasuji_entries` テーブル
+- ストレージ: `sai_memory/arasuji/storage.py`（物理格納は `memopedia_pages`、`arasuji_entries` は互換 VIEW）
 - コンテキスト構築: `sai_memory/arasuji/context.py`
 - 読み出しツール: `builtin_data/tools/chronicle_*.py`（search / read_detail / context_up / context_down）
 

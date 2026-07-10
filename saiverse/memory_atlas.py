@@ -596,6 +596,11 @@ def search_pages(adapter, query: str, limit: int = 8) -> str:
 
     memopedia = Memopedia(conn, db_lock=adapter._db_lock)
     pages = memopedia.search(text, limit=limit)
+    # P3b (2026-07-11): Chronicle エントリは memopedia_pages 上のページにもなった
+    # ため、素の memopedia.search() にも Chronicle が混じる。直下で search_entries()
+    # により "## Chronicle" として別途表示するので、ここでの二重ヒットを除外する
+    # (docs/intent/concept_consolidation.md「P3b」周辺の整合)。
+    pages = [p for p in pages if p.category != "chronicle"]
     _ensure_chronicle_ready(conn)
     entries = search_entries(conn, text, limit=limit)
 
