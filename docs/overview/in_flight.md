@@ -43,8 +43,8 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🔵 設計中 | ⑥ 概念再編（九龍城の解体） | 大物＝記憶概念の統合 → **Memory Atlas**(土地=生ログ/地図帳=編纂物/写真=統一参照)。概念骨格確定・**実装順序 v0.1 合意済(2026-07-10)**: P1写真 → P2ファサード+統一スペル → P3物理統合(コア記憶→Chronicle→目的の木) → P4代謝配線。①との交差は **(i) P3cを①実機テストより先に**で確定。現在: **P1 実装中** | 私(P1実装) | [concept_consolidation.md](../intent/concept_consolidation.md) / [life_concept_map.md](../intent/persona_cognition/life_concept_map.md) | 2026-07-10 |
 | 🟠 実装中 | 自律行動v2 活性化配線 | playbook 5本 import → `--real` 行動テスト(まはーレビュー) → 起床/就寝/セッション終了/会話終了/on_event の配線 → 旧 track_autonomous 停止 | 私 → まはー | [autonomous_behavior_v2.md](../intent/autonomous_behavior_v2.md) | 2026-07-08 |
-| 🟣 検証待ち | gold_panning 砂金採り | SCENE 除去(NOTE のみ化)＋**クローズ window 起点を pan マーカー基準に修正**(metabolism anchor 流用で採取範囲が cache 都合に縮む問題、sophie 実機で判明)は完了。残: 実機で初回採取・defer-to-hot の確認 | まはー | [gold_panning.md](../intent/gold_panning.md) | 2026-07-08 |
 | 🟠 実装中 | コア記憶の訂正導線 + ごみ箱 (短期対応) | **DB層✅ / API層✅ / メモリタブUI✅**(削除は実機確認済)。**仮想センサーは [知覚バッファ](../intent/perception_buffer.md) の一利用者として恒久対応済み・実機検証済み**(通知過多→応急停止→Phase 1a で push→Pulse消費集約に載せ替え、quon で確認)。残: 未確認バッジの置き場所を確定(ペルソナ固有アフォーダンス、住民/神モードUI と交差) | まはー(バッジ置き場) → 私 | [memory_architecture_v2.md](../intent/memory_architecture_v2.md) §5.1 | 2026-07-09 |
 | 🔵 設計中 | 神モードUI (住民/神モードの二層プラットフォーム) | 自律行動の本格化で局所干渉では足りず俯瞰視点が必要に。住民モード(Building 主語・世界に入って暮らす)と神モード(Persona/世界を俯瞰・管理する創造主視点)を別UI・別タブに分離。Persona ホームは神モードの一要素。世界観 intent 起草 → 部分再設計の段階設計 | まはー(設計) | (intent 未起草) | 2026-07-08 |
 | 🟡 実装待ち | quick_spell 本体実装 | サブエージェント委譲で実装(クオンのデータ修復は完了済) | まはー(GO) | [quick_spell.md](../intent/quick_spell.md) | 2026-07-08 |
@@ -56,6 +56,5 @@
 | 🔵 設計中 | SwitchBot 連携 | 末尾「未確定事項」を詰めて確定 → 実装(Observer の利用者) | まはー(レビュー) | [switchbot_integration.md](../intent/switchbot_integration.md) | 2026-07-08 |
 | 🔵 設計中 | アドオン拡張点 (OAuth / speak hooks) | draft レビュー → 汎用 `OAuthFlowSection` / persona_speak hook の実装 | まはー(レビュー) | [addon_extension_points.md](../intent/addon_extension_points.md) / [addon_speak_hooks.md](../intent/addon_speak_hooks.md) | 2026-07-08 |
 | 🟡 実装待ち | head スペル一覧ダイエット | 統合ダイエット(document 7→4・item 2→1、二重実装/アイソレーション漏れ解消)は**実機確認済**(2026-07-09、まはー)。残(本 issue 本線): 使用頻度の低いスペルの `visible=false` 化 + `addon_spell_help` 型の遅延開示を builtin にも(候補=life_purpose_set / observer_read / messagelog_get_around / send_email_to_user) | 私 | [head_prompt_followups.md](../issues/head_prompt_followups.md) | 2026-07-09 |
-| 🟣 検証待ち | アイディア帳由来 UI 修正3件(Cityタイトル / アイテムサムネイル / usage通貨) | 3 worktree を feature へマージ済。**サムネイル=実機確認済**(2026-07-09、軽量 webp 化で解決)。残: City名反映・通貨別グラフの実機確認 | まはー(検証) | [ideas.md](ideas.md) 由来 | 2026-07-09 |
 
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Track解体(目的の木), Social Track 入口(Phase 5) など -->
