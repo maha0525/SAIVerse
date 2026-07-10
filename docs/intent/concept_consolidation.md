@@ -179,15 +179,15 @@
 
 P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_atlas_p2c_consumer_audit.md](../handoff/2026-07-10_memory_atlas_p2c_consumer_audit.md)** に完了済み（Codex 実施・まはー依頼）。要旨: 旧26ツールは一括削除不可。`judgment_finalize` の `_fire_spell("desire_add")` 等の**現役機械消費者**があり、`core_memory_remove`（削除）・`core_memory_add_scene`（転写）・ページ新規作成/構造編集・候補生成には現行6動詞に等価が無い。推奨分割 P2c-0〜4 は同 doc §9。
 
-**P2c-0: 着手前に決める4点**（まはーとの設計議論待ち）:
-1. **ページ削除**: `core_memory_remove` と Memopedia delete を統一する動詞（`memory_delete`?）を作るか
-2. **転写**: `core_memory_add_scene` を残すか、`memory_clip` に参照貼り/転写モードを持たせるか
-3. **ページ作成・構造編集**: `memory_write` を create/replace/metadata まで広げるか、庭仕事用の別動詞にするか
-4. **候補生成**: `desire_add` 相当（候補を生む）と `purpose_adopt`（候補を木に接ぐ）を分けるか
+**P2c-0: 4決定 — まはー裁定済み（2026-07-10）**:
+1. **ページ削除**: `memory_delete` を新設（core + Memopedia の soft-delete を統一する動詞）。**ごみ箱を漁る動詞（閲覧・復元）は後回し**
+2. **転写**: `memory_clip` に `mode='transcribe'` を持たせ、`core_memory_add_scene` は畳む
+3. **ページ作成**: `memory_write` を新規ページ作成まで拡張。**構造編集（移動・統合・分割）は日常動詞にしない** — ただし禁止ではなく非掲載: 庭仕事モードに入った時に `addon_spell_help` 型の遅延スキーマロードで開示する構想（この仕様は別途・後回し）
+4. **候補生成**: **分ける**。候補を生む動詞（仮称 `purpose_seed`、旧 desire_add 後継）と `purpose_adopt`（木に接ぐ）は別。**注**: ペルソナが自発スペルとして本当に使うかは怪しい — 作ってから統合・一部自動化・候補作成トリガーの自動発生を検討する前提
 
 ### 次アクション
 
-P2b 委譲分=**実装済**（p:N・写真抜粋描画・memory_read p:N・memory_write・memory_clip。248 passed）。P2b メイン直接分=**実装済**（DeskSection＋snapshot_desk。検収で soft-delete 素通しバグ発見・修正、追い出し通知を溢れ/消失で分離）— **テスト最終確認中 → コミットで P2b 完了**。次: **P2c-0 の4決定（まはー議論）** → P2c-1〜4 は監査 doc §9 の分割に従う。
+**P2=完了**（P1/P2a/P2b コミット済み 2026-07-10）。P2c-0 の4決定=**裁定済み**（上記）。現在: **P2c-1**（task:N 解決＋purpose 動詞4本＋現役機械消費者〔judgment_finalize / track_manager / mode_spell_permissions〕の同時切替。旧スペルの削除はしない=P2c-4）→ P2c-2（memory_delete / clip transcribe / write 新規作成）→ P2c-3（v1 Playbook 退役）→ P2c-4（/photos 改称＋旧ツール最終撤去）。Note スペル（meta_layer の4本）は P3c（Note→テーマノード統合）まで温存。
 
 ---
 
