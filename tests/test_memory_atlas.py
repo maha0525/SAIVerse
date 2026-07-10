@@ -684,6 +684,162 @@ class ClipPhotoTests(_AtlasTestBase):
         self.assertIn("実会話ではありません", result)
 
 
+class SnapshotDeskTests(_AtlasTestBase):
+    """snapshot_desk — Metabolism 時の机の確定処理 (head 机セクションの材料)。
+
+    戻り値は (pages, evicted, dropped) の 3-tuple — evicted=机の溢れ (LRU) /
+    dropped=実体の消失。理由が違うものを同じ「溢れたため」と言わない。
+    """
+
+    def test_snapshot_returns_desk_page_views(self):
+        page = self._make_memopedia_page(title="開いた本", content="開いた中身")
+        ref = f"m:{page.short_id}"
+        atlas.open_page(self.adapter, ref, purpose_ref="task:2")
+
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+
+        self.assertEqual(evicted, [])
+        self.assertEqual(dropped, [])
+        self.assertEqual(len(pages), 1)
+        view = pages[0]
+        self.assertEqual(view.ref, ref)
+        self.assertEqual(view.purpose_ref, "task:2")
+        # text は read_page 相当の整形本文
+        self.assertIn("開いた本", view.text)
+        self.assertIn("開いた中身", view.text)
+
+    def test_snapshot_pages_ordered_by_opened_at(self):
+        clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
+        first = self._make_memopedia_page(title="先")
+        second = self._make_memopedia_page(title="後")
+        atlas.open_page(self.adapter, f"m:{first.short_id}")
+        clock.advance_to(datetime(2026, 7, 6, 9, 20, 0))
+        atlas.open_page(self.adapter, f"m:{second.short_id}")
+
+        pages, _, _ = atlas.snapshot_desk(self.adapter)
+        self.assertEqual(
+            [p.ref for p in pages],
+            [f"m:{first.short_id}", f"m:{second.short_id}"],
+        )
+
+    def test_snapshot_does_not_touch(self):
+        # 机の一覧描画は「触った」に数えない — Metabolism のたびに全ページ
+        # touch すると鮮度差が消えて LRU が壊れる
+        from sai_memory.desk import list_open
+
+        clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
+        page = self._make_memopedia_page()
+        atlas.open_page(self.adapter, f"m:{page.short_id}")
+        before = list_open(self.adapter.conn)[0]
+
+        clock.advance_to(datetime(2026, 7, 6, 10, 0, 0))
+        atlas.snapshot_desk(self.adapter)
+
+        after = list_open(self.adapter.conn)[0]
+        self.assertEqual(after.last_touched_at, before.last_touched_at)
+        self.assertEqual(after.opened_at, before.opened_at)
+
+    def test_snapshot_evicts_over_budget_into_evicted(self):
+        # Metabolism 追い出しフック: 開いた時は収まっていた机が、節目の
+        # 予算再評価で溢れていたら LRU で棚に戻る → evicted に入る
+        clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
+        os.environ["SAIVERSE_DESK_BUDGET_CHARS"] = "10000"  # 開く時は余裕
+        old_page = self._make_memopedia_page(title="古", content="あ" * 50)
+        new_page = self._make_memopedia_page(title="新", content="い" * 50)
+        atlas.open_page(self.adapter, f"m:{old_page.short_id}")
+        clock.advance_to(datetime(2026, 7, 6, 9, 10, 0))
+        atlas.open_page(self.adapter, f"m:{new_page.short_id}")
+
+        os.environ["SAIVERSE_DESK_BUDGET_CHARS"] = "60"  # 節目には溢れている
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+
+        self.assertEqual(evicted, [f"m:{old_page.short_id}"])  # LRU 最古から
+        self.assertEqual(dropped, [])  # 溢れは dropped に混ざらない
+        self.assertEqual([p.ref for p in pages], [f"m:{new_page.short_id}"])
+
+    def test_snapshot_drops_lost_entity_refs(self):
+        # 実体が消えたページ (不正 ref を直接挿入して再現) → dropped に入る
+        from sai_memory.desk import list_open, open_item
+
+        open_item(self.adapter.conn, "m:999")  # 存在しないページ
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+
+        self.assertEqual(pages, [])
+        self.assertEqual(evicted, [])  # 実体消失は evicted に混ざらない
+        self.assertIn("m:999", dropped)
+        self.assertEqual(list_open(self.adapter.conn), [])  # 机からも下りている
+
+    def test_snapshot_drops_unparseable_refs_defensively(self):
+        from sai_memory.desk import list_open, open_item
+
+        open_item(self.adapter.conn, "garbage-ref")  # 解釈不能な ref
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+
+        self.assertEqual(pages, [])
+        self.assertIn("garbage-ref", dropped)
+        self.assertEqual(list_open(self.adapter.conn), [])
+
+    def test_snapshot_survivors_keep_rendering_after_partial_drop(self):
+        # 消えた ref と生きたページが混在しても、生きた方は描画される
+        from sai_memory.desk import open_item
+
+        page = self._make_memopedia_page(title="生存")
+        atlas.open_page(self.adapter, f"m:{page.short_id}")
+        open_item(self.adapter.conn, "m:999")
+
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+        self.assertEqual([p.ref for p in pages], [f"m:{page.short_id}"])
+        self.assertEqual(evicted, [])
+        self.assertEqual(dropped, ["m:999"])
+
+    def test_snapshot_empty_desk(self):
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+        self.assertEqual(pages, [])
+        self.assertEqual(evicted, [])
+        self.assertEqual(dropped, [])
+
+
+class SoftDeletedPageDeskTests(_AtlasTestBase):
+    """soft-delete (is_deleted=1) されたページは机の対象外 (P2b テストで発見したバグの回帰)。
+
+    resolve_page_ref / get_page は is_deleted を見ないため、_normalize_ref_for_desk
+    側で弾かないと削除済みページが机に居座って本文を head に描画し続けていた。
+    """
+
+    def _delete_page(self, page):
+        from sai_memory.memopedia import Memopedia
+
+        memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
+        self.assertTrue(memopedia.delete_page(page.id))
+
+    def test_open_page_rejects_soft_deleted_page(self):
+        from sai_memory.desk import list_open
+
+        page = self._make_memopedia_page(title="消される本")
+        self._delete_page(page)
+
+        result = atlas.open_page(self.adapter, f"m:{page.short_id}")
+        self.assertIn("見つかりません", result)
+        self.assertEqual(list_open(self.adapter.conn), [])
+
+    def test_snapshot_drops_page_deleted_after_open(self):
+        # 机に開いた後にページが削除される (本命シナリオ): snapshot_desk が
+        # dropped に入れて机から下ろし、本文は head に残らない
+        from sai_memory.desk import list_open
+
+        page = self._make_memopedia_page(title="開いてから消える本", content="消える中身")
+        ref = f"m:{page.short_id}"
+        atlas.open_page(self.adapter, ref)
+        self._delete_page(page)
+
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
+
+        self.assertEqual(pages, [])  # 削除済みページの本文は描画されない
+        self.assertEqual(evicted, [])
+        self.assertEqual(dropped, [ref])
+        self.assertEqual(list_open(self.adapter.conn), [])  # 机からも下りている
+
+
 class ChronicleShortIdBackfillTests(unittest.TestCase):
     """既存 (short_id 列なし) DB からの一回きり backfill と新規採番。"""
 

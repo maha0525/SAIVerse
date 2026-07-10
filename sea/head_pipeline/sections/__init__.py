@@ -11,6 +11,7 @@ from sea.head_pipeline.sections.building_occupants import BuildingOccupantsSecti
 from sea.head_pipeline.sections.chronicle_index import ChronicleIndexSection
 from sea.head_pipeline.sections.common_prompt import CommonPromptSection
 from sea.head_pipeline.sections.core_memory import CoreMemorySection
+from sea.head_pipeline.sections.desk import DeskSection
 from sea.head_pipeline.sections.life_purpose import LifePurposeSection
 from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
@@ -35,6 +36,7 @@ def register_default_sections(registry) -> None:
     registry.register(SpellListSection())
     registry.register(MemoryWeaveSection())
     registry.register(OpenNotesSection())
+    registry.register(DeskSection())
     registry.register(VisualContextSection())
     # Phase 3: dynamic_state Section 群 (head 描画なし、差分通知のみ)
     registry.register(BuildingItemsSection())
@@ -52,6 +54,7 @@ __all__ = [
     "ChronicleIndexSection",
     "CommonPromptSection",
     "CoreMemorySection",
+    "DeskSection",
     "LifePurposeSection",
     "MemopediaIndexSection",
     "MemoryWeaveSection",

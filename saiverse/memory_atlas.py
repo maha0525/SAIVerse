@@ -43,6 +43,7 @@ RefKind に未登録のまま各ストレージモジュール内で扱われて
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from sai_memory import desk
@@ -382,6 +383,11 @@ def _normalize_ref_for_desk(adapter, kind: str, key: Optional[str]) -> Optional[
         page = memopedia.get_page(resolved)
         if page is None:
             return None
+        # soft-delete (is_deleted=1) されたページは机の対象外。resolve_page_ref /
+        # get_page は is_deleted を見ないため、ここで弾かないと削除済みページが
+        # 机に居座って本文を head に描画し続ける (P2b テストで発見)
+        if _is_memopedia_page_deleted(adapter.conn, page.id):
+            return None
         return f"m:{page.short_id}" if page.short_id else f"m:{page.id}"
     if kind == "chronicle":
         from sai_memory.arasuji.storage import get_entry_by_short_id
@@ -395,6 +401,14 @@ def _normalize_ref_for_desk(adapter, kind: str, key: Optional[str]) -> Optional[
             return None
         return f"ch:{entry.short_id}"
     return None
+
+
+def _is_memopedia_page_deleted(conn, page_id: str) -> bool:
+    """soft-delete (is_deleted=1) 済みページか。storage の定型ガードと同じ判定。"""
+    row = conn.execute(
+        "SELECT is_deleted FROM memopedia_pages WHERE id = ?", (page_id,)
+    ).fetchone()
+    return bool(row and row[0])
 
 
 def _size_of_ref(adapter, ref: str) -> int:
@@ -776,3 +790,76 @@ def clip_photo(
     else:
         lines.append("貼り先は未指定です（あとから貼れます）。")
     return "\n".join(lines)
+
+
+# ----- snapshot_desk (head 机セクション用、Metabolism 時のみ呼ばれる) -----
+
+
+@dataclass(frozen=True)
+class DeskPageView:
+    """机に開いている 1 ページの描画済みビュー (head 机セクションの材料)。"""
+
+    ref: str                    # 正規形 (m:N / ch:N)
+    text: str                   # read_page と同じ整形の本文 (写真は抜粋)
+    purpose_ref: Optional[str]  # この開きが紐づく目的 (無ければ None)
+
+
+def snapshot_desk(
+    adapter, persona_name: Optional[str] = None,
+) -> Tuple[List[DeskPageView], List[str], List[str]]:
+    """Metabolism (head snapshot 再構築) 用: 机の現況を確定して描画する。
+
+    1. 予算を再評価して溢れ分を LRU 追い出す (**Metabolism 追い出しフック**。
+       ページは成長するので、開いた時に収まっていても節目には溢れていることが
+       ある)
+    2. 実体が消えたページ (削除済み等) は机から自動で閉じる (決定論の掃除)
+    3. 残った開きページを read_page と同じ整形で描画する
+
+    **touch はしない** — 机の一覧描画は「触った」に数えない。LRU の鮮度は
+    ペルソナの能動的な read / write / clip だけが動かす (Metabolism のたびに
+    全ページを touch すると鮮度差が消えて LRU が壊れる)。
+
+    Returns:
+        (pages, evicted, dropped): 描画済みページ一覧 (opened_at 昇順) と、
+        この snapshot で机から下ろされた ref の 2 リスト —
+        **evicted** = 机の溢れ (LRU 追い出し) / **dropped** = 実体の消失
+        (ページ削除・不正 ref)。head 机セクションが diff 通知の材料に使う
+        (理由が違うものを同じ「溢れたため」と言うのは嘘になるので分ける)。
+    """
+    name = _resolve_persona_name(adapter, persona_name)
+    conn = adapter.conn
+    evicted: List[str] = []
+    dropped: List[str] = []
+    with adapter._db_lock:
+        budget = desk.resolve_desk_budget_chars()
+        evicted.extend(
+            desk.evict_lru(conn, budget, lambda r: _size_of_ref(adapter, r))
+        )
+        items = desk.list_open(conn)
+
+    pages: List[DeskPageView] = []
+    for item in items:
+        try:
+            kind, key = _parse_ref(item.ref)
+        except AtlasRefError:
+            kind, key = "", None
+        if kind not in ("memopedia", "chronicle"):
+            # 机には open_page が正規形しか入れないはずだが、防御的に閉じる
+            with adapter._db_lock:
+                desk.close_item(conn, item.ref)
+            dropped.append(item.ref)
+            continue
+        if _normalize_ref_for_desk(adapter, kind, key) is None:
+            # 実体が消えている (ページ削除等)。机から下ろす
+            with adapter._db_lock:
+                desk.close_item(conn, item.ref)
+            dropped.append(item.ref)
+            continue
+        if kind == "memopedia":
+            text = _read_memopedia(adapter, key, name)
+        else:
+            text = _read_chronicle(conn, key, name)
+        pages.append(
+            DeskPageView(ref=item.ref, text=text, purpose_ref=item.purpose_ref)
+        )
+    return pages, evicted, dropped
