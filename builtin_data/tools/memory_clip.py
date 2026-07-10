@@ -1,9 +1,13 @@
 """Memory Atlas: 写真を撮ってクリップで貼るスペル (統一スペル動詞 ``memory_clip``)。
 
-concept_consolidation.md「clip と写真の見え方」の実装。写真＝土地 (生ログ) を
-そのまま写す参照で、貼り方は**参照貼り**のみ (ページには抜粋が表示され、全文は
-``memory_read p:N``)。本文への転写 (常に生で見える形) は既存の
-core_memory_add_scene の役割のままで、このスペルは行わない。
+concept_consolidation.md「clip と写真の見え方」+ P2c-0 決定2 の実装。
+写真＝土地 (生ログ) をそのまま写す参照。貼り方は 2 種:
+
+- **参照貼り** (``mode='attach'``、既定): ページには抜粋が表示され、全文は
+  ``memory_read p:N``。ページが写真に食われない
+- **転写** (``mode='transcribe'``): 本文に焼き込み、常に生で見える。貼り先必須。
+  core 宛の範囲転写は旧 SCENE (core_memory_add_scene) と同一の共有ロジック。
+  転写でも写真は撮られ、由来参照が残る
 
 - 点写真: ``quote`` (逐語引用) を指定。本文との一致を検証する
 - 範囲写真: ``quote`` を省略し、``anchor`` 前後 ``rounds`` 往復の実会話窓を写す
@@ -31,6 +35,7 @@ def memory_clip(
     quote: Optional[str] = None,
     rounds: int = DEFAULT_ROUNDS,
     paste_to: Optional[str] = None,
+    mode: str = "attach",
 ) -> str:
     """写真を撮る (点=引用 / 範囲=切り抜き)。paste_to 指定で即貼り。"""
     persona_id = get_active_persona_id()
@@ -56,7 +61,7 @@ def memory_clip(
             return memory_atlas.clip_photo(
                 adapter, mid,
                 quote=quote, rounds=rounds, paste_to=paste_to,
-                persona_name=persona_name,
+                persona_name=persona_name, mode=mode,
             )
     except memory_atlas.AtlasRefError as exc:
         return f"Error: {exc}"
@@ -66,13 +71,15 @@ def schema() -> ToolSchema:
     return ToolSchema(
         name="memory_clip",
         description=(
-            "会話の生ログから写真を撮り、記憶の地図帳のページにクリップで貼ります。"
+            "会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。"
             "quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句"
             "一致している必要があります）、省略すると範囲写真（anchor の前後 rounds "
             "往復の会話の切り抜き）になります。"
-            "写真は参照であり、貼り先のページには抜粋が表示されます"
-            "（全文は memory_read p:N で読めます）。"
-            "paste_to（m:N / c:N）を指定すると撮った瞬間に貼ります。"
+            "貼り方は2種: mode='attach'（既定・参照貼り — ページには抜粋が表示され、"
+            "全文は memory_read p:N で読めます）/ mode='transcribe'（転写 — 本文に"
+            "焼き込み、常に生の全文が見えます。paste_to 必須。転写先は m:N または "
+            "core = 新しいコア記憶）。参照貼りの paste_to は m:N / c:N、省略すると"
+            "貼らずに保管します。"
             "anchor は自動想起で示されたハンドル（saiverse://self/message/... 形式）"
             "や生のメッセージ ID をそのまま渡せます。"
         ),
@@ -93,7 +100,16 @@ def schema() -> ToolSchema:
                 },
                 "paste_to": {
                     "type": "string",
-                    "description": "貼り先の参照（任意、例: m:3 / c:2）。省略すると貼らずに保管",
+                    "description": (
+                        "貼り先の参照（attach: 任意、例 m:3 / c:2。省略で保管のみ。"
+                        "transcribe: 必須、m:3 または core）"
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["attach", "transcribe"],
+                    "default": "attach",
+                    "description": "貼り方（attach = 参照貼り・抜粋表示 / transcribe = 本文に転写・常に全文）",
                 },
             },
             "required": ["anchor"],

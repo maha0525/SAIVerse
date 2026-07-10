@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 141（うち Spell 化: 98）
+**登録ツール数**: 142（うち Spell 化: 99）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -66,8 +66,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memopedia_open_page` | Open a Memopedia page to read its full content. The page will be marked as 'open' and its content will be included in… | `page_id*`: string | — |
 | `memopedia_save_page` | Save a Memopedia knowledge page. If a page with the same title exists, it is updated. Otherwise a new page is created… | `title*`: string, `summary`: string, `content`: string, `category`: string, `keywords`: array | — |
 | `memopedia_search` | Search Memopedia knowledge pages by keyword. Matches against page titles, summaries, and content. Optionally filter b… | `query*`: string, `category`: string, `max_results`: integer | — |
-| `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページにクリップで貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string | 写真を撮って貼る |
+| `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復の会話の切… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | 写真を撮って貼る |
 | `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は m:N（Memopedia）/ ch:N（Chronicle）の形式です（コア記憶は常時開のため対象外です）。 | `ref*`: string | 記憶のページを机から閉じる |
+| `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は c:N（コア記憶1件）と m:N（Memopedia ページ）です。Chronicle（ch:N）と写真（p:N）は消せま… | `ref*`: string | 記憶のページをごみ箱へ |
 | `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。以後の思考で常に見える状態が続きますが、机の広さ（文字数予算）を消費します。机が溢れると、長く触っていないページから自動的に棚へ戻ります。参照は m:N（Me… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
 | `memory_read` | 記憶の地図帳（Memory Atlas）の1ページをその場で読みます。読んだ内容は会話の流れに残り、時間とともに流れていきます（机の場所は取りません）。常に見える状態を保ちたい場合は memory_open を使ってください。参照は … | `ref*`: string | 記憶のページを読む |
 | `memory_read_around` | Read the conversation context around a specific message. Use this after memory_search_brief to expand context around … | `message_id*`: string, `window`: integer | — |
@@ -75,7 +76,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memory_recall_unified` | ChronicleとMemopediaを横断してセマンティック検索を行います。Chronicleはあらすじ全文、MemopediaはページのURIと概要を返します。取得したURIを使って chronicle_context_up/do… | `query*`: string, `focus`: string, `search_chronicle`: boolean, `search_memopedia`: boolean, `search_fragments`: boolean | 記憶想起 |
 | `memory_search` | 記憶の地図帳（Memopedia のページ・Chronicle の章）をキーワードで検索します。タイトル・本文に含まれる語句で照合し、一致したページを 参照（m:N / ch:N）と一行プレビューで一覧します。 | `query*`: string | 記憶の地図帳を検索する |
 | `memory_search_brief` | Search memory and return brief snippets with message IDs. Use this for finding relevant messages before reading full … | `query`: string, `keywords`: array, `topk`: integer, `max_snippet_chars`: integer, `start_date`: string, `end_date`: string | — |
-| `memory_write` | 記憶の地図帳（Memory Atlas）のページに書きます。宛先 m:N は Memopedia ページ本文への追記（編集来歴が残ります）。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで、system … | `ref*`: string, `content*`: string | 記憶のページに書く |
+| `memory_write` | 記憶の地図帳（Memory Atlas）のページに書きます。宛先 m:N は Memopedia ページ本文への追記（編集来歴が残ります）。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで、system … | `ref`: string, `content*`: string, `title`: string, `category`: string | 記憶のページに書く |
 | `messagelog_get_around` | Retrieve chat messages around a specific timestamp. Accepts Unix epoch (integer) or ISO 8601 string (e.g. '2026-04-14… | `timestamp*`: string, `count`: integer, `thread_id`: string | 特定時刻のログ取得 |
 | `meta_judgment_finalize` | Internal tool for meta_judgment v2 Playbooks only. Receives the judge node's structured output (dict), formats /spell… | `judgment_output*`: object, `situation_kind*`: string, `running_track_id`: string, `trigger_type`: string, `trigger_context`: string, `track_at_judgment_id`: string, `situation_text`: string, `recent_judgments`: string | — |
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |

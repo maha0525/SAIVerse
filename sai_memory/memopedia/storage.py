@@ -846,18 +846,18 @@ def record_update_log(
 
 def find_page_by_title(conn: sqlite3.Connection, title: str, category: Optional[str] = None) -> Optional[MemopediaPage]:
     """Find a non-deleted page by exact title match, optionally filtered by category."""
+    # _PAGE_SELECT_COLS を使う (旧・手書き列リストは short_id / metadata を
+    # 落としていた — search_pages と同族の欠落。P2c-2 でついで修正)
     if category:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE title = ? AND category = ? AND (is_deleted = 0 OR is_deleted IS NULL)""",
             (title, category),
         )
     else:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE title = ? AND (is_deleted = 0 OR is_deleted IS NULL)""",
             (title,),

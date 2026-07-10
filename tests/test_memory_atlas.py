@@ -686,6 +686,279 @@ class ClipPhotoTests(_AtlasTestBase):
         self.assertIn("実会話ではありません", result)
 
 
+class DeletePageTests(_AtlasTestBase):
+    """memory_delete / delete_page (P2c-0 決定1: soft-delete の統一動詞)。"""
+
+    def test_delete_core_memory_soft_deletes(self):
+        from sai_memory.core_memory import add_core_memory, list_deleted_core_memories
+
+        mid = add_core_memory(self.adapter.conn, "消される恒常知識")
+        result = atlas.delete_page(self.adapter, f"c:{mid}")
+
+        self.assertIn("ごみ箱", result)
+        # soft-delete: read は「見つかりません」だが行はごみ箱に残る
+        self.assertIn("見つかりません", atlas.read_page(self.adapter, f"c:{mid}"))
+        trash = list_deleted_core_memories(self.adapter.conn)
+        self.assertEqual([cm.id for cm in trash], [mid])
+
+    def test_delete_core_memory_not_found(self):
+        result = atlas.delete_page(self.adapter, "c:999")
+        self.assertIn("見つかりません", result)
+
+    def test_delete_memopedia_page_soft_deletes(self):
+        page = self._make_memopedia_page(title="消される本", content="消える中身")
+        ref = f"m:{page.short_id}"
+        result = atlas.delete_page(self.adapter, ref)
+
+        self.assertIn("ごみ箱", result)
+        # read は「見つかりません」(soft-delete 済みは Atlas の読み口で弾く)
+        self.assertIn("見つかりません", atlas.read_page(self.adapter, ref))
+        # 行そのものは残る (is_deleted=1 のごみ箱)
+        row = self.adapter.conn.execute(
+            "SELECT is_deleted FROM memopedia_pages WHERE id = ?", (page.id,)
+        ).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_delete_memopedia_page_closes_desk(self):
+        from sai_memory.desk import list_open
+
+        page = self._make_memopedia_page(title="机の上で消える本")
+        ref = f"m:{page.short_id}"
+        atlas.open_page(self.adapter, ref)
+
+        result = atlas.delete_page(self.adapter, ref)
+        self.assertIn("机からも下ろしました", result)
+        self.assertEqual(list_open(self.adapter.conn), [])
+
+    def test_delete_memopedia_not_on_desk_omits_desk_note(self):
+        page = self._make_memopedia_page(title="棚のまま消える本")
+        result = atlas.delete_page(self.adapter, f"m:{page.short_id}")
+        self.assertNotIn("机からも", result)
+
+    def test_delete_already_deleted_page_reports_not_found(self):
+        page = self._make_memopedia_page(title="二度消される本")
+        ref = f"m:{page.short_id}"
+        atlas.delete_page(self.adapter, ref)
+        result = atlas.delete_page(self.adapter, ref)
+        self.assertIn("見つかりません", result)
+
+    def test_delete_rejects_chronicle(self):
+        entry = self._make_chronicle_entry()
+        result = atlas.delete_page(self.adapter, f"ch:{entry.short_id}")
+        self.assertIn("消せません", result)
+
+    def test_delete_rejects_photo(self):
+        result = atlas.delete_page(self.adapter, "p:1")
+        self.assertIn("消せません", result)
+        self.assertIn("歴史", result)
+
+    def test_delete_rejects_core_all(self):
+        result = atlas.delete_page(self.adapter, "core")
+        self.assertIn("消せません", result)
+
+    def test_delete_task_redirects_to_purpose_close(self):
+        result = atlas.delete_page(self.adapter, "task:1")
+        self.assertIn("purpose_close", result)
+
+
+class ClipTranscribeTests(_AtlasTestBase):
+    """memory_clip mode='transcribe' (P2c-0 決定2: 転写は clip のモードに畳む)。"""
+
+    def test_transcribe_range_to_core_matches_old_scene_logic(self):
+        # core 宛の範囲転写 = 旧 core_memory_add_scene と同一の共有ロジック
+        # (create_scene_core_memory)。transcript が完全一致すること
+        from sai_memory.core_memory import format_scene_transcript, list_core_memories
+        from sai_memory.memory.storage import get_conversation_window_around
+        from sai_memory.photos import list_photos_pasted_to
+
+        ids = self._add_conversation([f"発言{i}" for i in range(1, 6)])
+        anchor = ids[2]
+        result = atlas.clip_photo(
+            self.adapter, anchor, paste_to="core", mode="transcribe",
+        )
+
+        self.assertIn("転写しました", result)
+        items = list_core_memories(self.adapter.conn)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].kind, "scene")  # 共有ロジックの証跡
+        expected = format_scene_transcript(
+            get_conversation_window_around(self.adapter.conn, anchor, rounds=3),
+            "tester",
+        )
+        self.assertEqual(items[0].content, expected)
+        # 転写でも写真 (由来参照) は撮られる
+        photos = list_photos_pasted_to(self.adapter.conn, f"c:{items[0].id}")
+        self.assertEqual(len(photos), 1)
+        self.assertTrue(photos[0].is_range)
+        self.assertIn(photos[0].ref, result)
+
+    def test_transcribe_point_to_core_creates_core_memory(self):
+        from sai_memory.core_memory import list_core_memories
+        from sai_memory.photos import list_photos
+
+        ids = self._add_conversation(["刻みたい一言があった", "そうですね"])
+        result = atlas.clip_photo(
+            self.adapter, ids[0], quote="刻みたい一言",
+            paste_to="core", mode="transcribe",
+        )
+        self.assertIn("転写しました", result)
+        items = list_core_memories(self.adapter.conn)
+        self.assertEqual([cm.content for cm in items], ["刻みたい一言"])
+        photos = list_photos(self.adapter.conn)
+        self.assertEqual(photos[0].pasted_to, f"c:{items[0].id}")
+        self.assertFalse(photos[0].is_range)
+
+    def test_transcribe_range_to_memopedia_burns_transcript(self):
+        from sai_memory.core_memory import format_scene_transcript
+        from sai_memory.memopedia import Memopedia
+        from sai_memory.memory.storage import get_conversation_window_around
+        from sai_memory.photos import list_photos_pasted_to
+
+        page = self._make_memopedia_page(title="転写先", content="既存の本文")
+        ref = f"m:{page.short_id}"
+        ids = self._add_conversation([f"会話{i}" for i in range(1, 6)])
+        anchor = ids[2]
+
+        result = atlas.clip_photo(
+            self.adapter, anchor, paste_to=ref, mode="transcribe",
+        )
+        self.assertIn("転写しました", result)
+
+        memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
+        updated = memopedia.get_page(page.id)
+        expected = format_scene_transcript(
+            get_conversation_window_around(self.adapter.conn, anchor, rounds=3),
+            "tester",
+        )
+        self.assertIn("既存の本文", updated.content)  # 追記 (上書きしない)
+        self.assertIn(expected, updated.content)
+        # 編集来歴が残る append 経路
+        history = memopedia.get_page_edit_history(page.id)
+        self.assertIn("append", [h.edit_type for h in history])
+        # 写真 (由来参照) も撮られて貼られる
+        photos = list_photos_pasted_to(self.adapter.conn, ref)
+        self.assertEqual(len(photos), 1)
+        self.assertTrue(photos[0].is_range)
+
+    def test_transcribe_point_to_memopedia_burns_quote(self):
+        from sai_memory.memopedia import Memopedia
+        from sai_memory.photos import list_photos_pasted_to
+
+        page = self._make_memopedia_page(title="引用の転写先", content="本文")
+        ref = f"m:{page.short_id}"
+        ids = self._add_conversation(["残したい言葉が出た", "はい"])
+
+        result = atlas.clip_photo(
+            self.adapter, ids[0], quote="残したい言葉",
+            paste_to=ref, mode="transcribe",
+        )
+        self.assertIn("転写しました", result)
+        memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
+        self.assertIn("残したい言葉", memopedia.get_page(page.id).content)
+        photos = list_photos_pasted_to(self.adapter.conn, ref)
+        self.assertFalse(photos[0].is_range)
+        self.assertEqual(photos[0].quote, "残したい言葉")
+
+    def test_transcribe_point_quote_mismatch_rejected(self):
+        from sai_memory.core_memory import list_core_memories
+        from sai_memory.photos import list_photos
+
+        ids = self._add_conversation(["本文はこれだけ", "はい"])
+        result = atlas.clip_photo(
+            self.adapter, ids[0], quote="本文に無い言葉",
+            paste_to="core", mode="transcribe",
+        )
+        self.assertIn("見つかりませんでした", result)
+        self.assertEqual(list_core_memories(self.adapter.conn), [])
+        self.assertEqual(list_photos(self.adapter.conn), [])
+
+    def test_transcribe_requires_paste_to(self):
+        ids = self._add_conversation(["何か", "はい"])
+        result = atlas.clip_photo(self.adapter, ids[0], mode="transcribe")
+        self.assertIn("Error", result)
+        self.assertIn("paste_to", result)
+
+    def test_transcribe_rejects_existing_core_target(self):
+        from sai_memory.core_memory import add_core_memory
+
+        mid = add_core_memory(self.adapter.conn, "既存のコア記憶")
+        ids = self._add_conversation(["何か", "はい"])
+        result = atlas.clip_photo(
+            self.adapter, ids[0], paste_to=f"c:{mid}", mode="transcribe",
+        )
+        self.assertIn("できません", result)
+        self.assertIn("core", result)  # 新規に刻む "core" への誘導
+
+    def test_invalid_mode_rejected(self):
+        ids = self._add_conversation(["何か", "はい"])
+        result = atlas.clip_photo(self.adapter, ids[0], mode="burn")
+        self.assertIn("Error", result)
+
+    def test_attach_default_does_not_burn_content(self):
+        # 既定 (attach) は従来どおり参照貼りのみ — 本文は変わらない
+        from sai_memory.memopedia import Memopedia
+
+        page = self._make_memopedia_page(title="参照貼り先", content="元の本文")
+        ids = self._add_conversation([f"会話{i}" for i in range(1, 6)])
+        atlas.clip_photo(self.adapter, ids[2], paste_to=f"m:{page.short_id}")
+
+        memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
+        self.assertEqual(memopedia.get_page(page.id).content, "元の本文")
+
+
+class WriteCreatePageTests(_AtlasTestBase):
+    """memory_write の新規ページ作成 (P2c-0 決定3)。"""
+
+    def test_title_creates_new_page_with_history(self):
+        from sai_memory.memopedia import Memopedia
+
+        result = atlas.write_page(
+            self.adapter, content="最初の本文", title="新しい知識", category="events",
+        )
+        self.assertIn("新しいページを作りました", result)
+        self.assertIn("events", result)
+
+        memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
+        page = memopedia.find_by_title("新しい知識")
+        self.assertIsNotNone(page)
+        self.assertEqual(page.content, "最初の本文")
+        self.assertEqual(page.parent_id, "root_events")  # カテゴリ root の下
+        # 編集来歴が残る create 経路
+        history = memopedia.get_page_edit_history(page.id)
+        self.assertIn("create", [h.edit_type for h in history])
+
+    def test_title_default_category_is_terms(self):
+        from sai_memory.memopedia import Memopedia
+
+        atlas.write_page(self.adapter, content="本文", title="無指定カテゴリ")
+        memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
+        page = memopedia.find_by_title("無指定カテゴリ")
+        self.assertEqual(page.parent_id, "root_terms")
+
+    def test_title_duplicate_guides_to_append(self):
+        page = self._make_memopedia_page(title="既にある本")
+        result = atlas.write_page(
+            self.adapter, content="本文", title="既にある本",
+        )
+        self.assertIn("既にあります", result)
+        self.assertIn(f"m:{page.short_id}", result)  # 追記への誘導
+
+    def test_title_invalid_category_rejected(self):
+        result = atlas.write_page(
+            self.adapter, content="本文", title="変なカテゴリ", category="dreams",
+        )
+        self.assertIn("Error", result)
+
+    def test_ref_and_title_are_mutually_exclusive(self):
+        page = self._make_memopedia_page()
+        both = atlas.write_page(
+            self.adapter, f"m:{page.short_id}", "本文", title="両方指定",
+        )
+        neither = atlas.write_page(self.adapter, content="本文だけ")
+        self.assertIn("Error", both)
+        self.assertIn("Error", neither)
+
+
 class TaskReadTests(_AtlasTestBase):
     """task:N (目的ノード) の read_page 解決 (P2c-1)。
 

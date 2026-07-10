@@ -394,6 +394,10 @@ def _read_memopedia(adapter, key: Optional[str], persona_name: str) -> str:
     page = memopedia.get_page(resolved) if resolved else None
     if page is None:
         return f"ページが見つかりません: m:{key}"
+    # soft-delete 済みページは「無い」扱い (resolve_page_ref / get_page は
+    # is_deleted を見ないため、Atlas の読み口でも弾く。desk と同じガード)
+    if _is_memopedia_page_deleted(adapter.conn, page.id):
+        return f"ページが見つかりません: m:{key}"
 
     ref = f"m:{page.short_id}" if page.short_id else page.id
     body = memopedia.render_page_body(page.id)
@@ -619,8 +623,23 @@ def search_pages(adapter, query: str, limit: int = 8) -> str:
 # ----- write_page -----
 
 
+# 新規ページ作成のカテゴリ → root ページ ID (memopedia INITIAL_ROOTS と対)
+_WRITE_CATEGORY_ROOT_MAP = {
+    "people": "root_people",
+    "terms": "root_terms",
+    "plans": "root_plans",
+    "events": "root_events",
+}
+
+
 def write_page(
-    adapter, ref: str, content: str, *, core_budget: Optional[int] = None,
+    adapter,
+    ref: Optional[str] = None,
+    content: str = "",
+    *,
+    title: Optional[str] = None,
+    category: Optional[str] = None,
+    core_budget: Optional[int] = None,
 ) -> str:
     """ページに書く (concept_consolidation.md P2 統一スペル動詞 memory_write)。
 
@@ -629,8 +648,11 @@ def write_page(
       touch する (touch の定義に write が含まれる)。
     - ``core``: 新しいコア記憶を刻む (常時開の特殊ページ)。
     - ``c:N``: 既存コア記憶の**上書き**。
+    - ``ref`` の代わりに ``title`` (+ ``category``): Memopedia に**新規ページ作成**
+      (P2c-0 決定3)。構造編集 (移動・統合・分割・summary/keywords 更新) は
+      日常動詞にしない — 庭仕事モードの遅延開示 (別仕様・後回し) の領分。
     - ``ch:N`` / ``p:N``: 書けない (Chronicle の編纂はシステム側 / 写真は参照)。
-    - ``task:N``: P2c まで stub。
+    - ``task:N``: purpose 動詞の領分 (P3c まで stub)。
 
     ``core_budget`` はコア記憶の容量目安 (per-persona 設定)。スペル層が解決して
     渡す。超過時は通知を添える (切り詰め・拒否は絶対にしない —
@@ -639,6 +661,16 @@ def write_page(
     text = (content or "").strip()
     if not text:
         return "Error: content は空にできません。"
+
+    has_ref = bool(ref and str(ref).strip())
+    has_title = bool(title and str(title).strip())
+    if has_ref == has_title:
+        return (
+            "Error: ref（既存ページに書く）と title（新規ページを作る）の"
+            "どちらか一方だけを指定してください。"
+        )
+    if has_title:
+        return _write_memopedia_create(adapter, str(title).strip(), category, text)
 
     kind, key = _parse_ref(ref)
     conn = adapter.conn
@@ -733,6 +765,136 @@ def _write_memopedia_append(adapter, key: Optional[str], text: str) -> str:
     return f"{ref}「{page.title}」に追記しました。"
 
 
+def _active_message_id() -> Optional[str]:
+    """スペル実行中の contextvar から由来メッセージ ID を取る (無ければ None)。"""
+    from tools.context import get_active_message_id
+
+    try:
+        return get_active_message_id()
+    except Exception:
+        return None
+
+
+def _write_memopedia_create(
+    adapter, title: str, category: Optional[str], text: str
+) -> str:
+    """Memopedia に新規ページを作成する (P2c-0 決定3、編集来歴つき create 経路)。"""
+    from sai_memory.memopedia import Memopedia
+
+    cat = (category or "terms").lower().strip()
+    root_id = _WRITE_CATEGORY_ROOT_MAP.get(cat)
+    if root_id is None:
+        return (
+            f"Error: category が不正です: {category!r}"
+            f"（有効: {', '.join(sorted(_WRITE_CATEGORY_ROOT_MAP))}）"
+        )
+
+    memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
+    existing = memopedia.find_by_title(title)
+    if existing is not None and not _is_memopedia_page_deleted(adapter.conn, existing.id):
+        ex_ref = f"m:{existing.short_id}" if existing.short_id else existing.id
+        return (
+            f"同名のページが既にあります: {ex_ref}「{existing.title}」。"
+            f"追記するには memory_write の ref に {ex_ref} を指定してください。"
+        )
+
+    msg_id = _active_message_id()
+    page = memopedia.create_page(
+        parent_id=root_id,
+        title=title,
+        content=text,
+        ref_start_message_id=msg_id,
+        ref_end_message_id=msg_id,
+        edit_source="ai_conversation",
+    )
+    ref = f"m:{page.short_id}" if page.short_id else page.id
+    return f"新しいページを作りました: {ref}「{title}」（カテゴリ: {cat}）"
+
+
+# ----- delete_page -----
+
+
+def delete_page(adapter, ref: str) -> str:
+    """ページをごみ箱へ移す (P2c-0 決定1: memory_delete)。
+
+    - ``c:N``: コア記憶の soft-delete (``deleted_at`` 刻印。旧 core_memory_remove
+      と同じ経路 — 復元可能)
+    - ``m:N``: Memopedia の soft-delete (``is_deleted``。復元は後回しのごみ箱仕様)
+    - ``ch:N`` (編纂はシステム側) / ``p:N`` (写真は歴史として残す §5.1) /
+      ``core`` 全体 / ``task:N`` (purpose_close の領分) は消せない
+
+    削除したページが机に開いていたら desk からも即時クローズする (放置しても
+    次の Metabolism で dropped になるが、即時の方が誠実)。
+    """
+    kind, key = _parse_ref(ref)
+    conn = adapter.conn
+
+    if kind == "core_all":
+        return "コア記憶全体は消せません。1件ずつ c:N で指定してください。"
+    if kind == "chronicle":
+        return (
+            f"ch:{key} は消せません。"
+            "時間の地図（Chronicle）の編纂はシステムが行います。"
+        )
+    if kind == "photo":
+        return (
+            f"p:{key} は消せません。写真は撮られた歴史としてそのまま残ります。"
+        )
+    if kind == "task":
+        return (
+            f"目的ノード (task:{key}) はこのスペルでは消せません。"
+            "完了・中止・休眠にするには purpose_close を使ってください。"
+        )
+
+    if kind == "core_one":
+        from sai_memory.core_memory import remove_core_memory
+
+        mid = _parse_int(key)
+        if mid is None:
+            return f"コア記憶の参照が不正です: c:{key}"
+        with adapter._db_lock:
+            ok = remove_core_memory(conn, mid)
+        if not ok:
+            return f"コア記憶が見つかりません: c:{mid}"
+        return (
+            f"コア記憶 c:{mid} をごみ箱に移しました（完全に消えるわけでは"
+            "ありません）。head への反映は次の記憶整理（Metabolism）からです。"
+        )
+
+    if kind == "memopedia":
+        from sai_memory.memopedia import Memopedia
+        from sai_memory.memopedia.storage import resolve_page_ref
+
+        if not key:
+            return "Memopedia の参照が不正です: m:"
+        resolved = resolve_page_ref(conn, key)
+        memopedia = Memopedia(conn, db_lock=adapter._db_lock)
+        page = memopedia.get_page(resolved) if resolved else None
+        if page is None or _is_memopedia_page_deleted(conn, page.id):
+            return f"ページが見つかりません: m:{key}"
+
+        norm_ref = f"m:{page.short_id}" if page.short_id else f"m:{page.id}"
+        msg_id = _active_message_id()
+        if not memopedia.delete_page(
+            page.id,
+            ref_start_message_id=msg_id, ref_end_message_id=msg_id,
+            edit_source="ai_conversation",
+        ):
+            return f"ページを消せませんでした: {norm_ref}"
+
+        # 机に開いていたら即時クローズ (次の Metabolism を待たない)
+        lines = [
+            f"{norm_ref}「{page.title}」をごみ箱に移しました"
+            "（完全に消えるわけではありません）。"
+        ]
+        with adapter._db_lock:
+            if desk.close_item(conn, norm_ref):
+                lines.append("机からも下ろしました。")
+        return "\n".join(lines)
+
+    raise AtlasRefError(f"未対応の ref kind: {kind}")
+
+
 # ----- clip_photo -----
 
 
@@ -780,6 +942,7 @@ def clip_photo(
     rounds: int = 3,
     paste_to: Optional[str] = None,
     persona_name: Optional[str] = None,
+    mode: str = "attach",
 ) -> str:
     """写真を撮ってクリップで貼る (concept_consolidation.md P2 memory_clip)。
 
@@ -788,14 +951,38 @@ def clip_photo(
     - ``quote`` なし → **範囲写真**: ``message_id`` をアンカーに前後 ``rounds``
       往復の実会話窓 (SCENE と同じ窓切り出し) を範囲として撮る。
 
-    貼り方は**参照貼り**のみ (photos に pasted_to 付きで保存)。ページ本文への
-    転写は既存 SCENE (core_memory_add_scene) の役割のままで、ここでは行わない。
+    貼り方は 2 種 (P2c-0 決定2):
+
+    - ``mode='attach'`` (既定): **参照貼り** — photos に pasted_to 付きで保存し、
+      ページには抜粋が表示される (全文は memory_read p:N)。
+    - ``mode='transcribe'``: **転写** — 本文に焼き込み、常に生で見える。
+      貼り先必須。core 宛の範囲転写は旧 SCENE (create_scene_core_memory) と
+      同一の共有ロジックを通す。転写でも写真は撮って由来参照を残す
+      (SCENE の現行流儀と同じ)。
+
     貼り先が机に開かれていれば touch する (touch の定義に clip が含まれる)。
     """
     from sai_memory.photos import add_photo
 
     conn = adapter.conn
     name = _resolve_persona_name(adapter, persona_name)
+
+    if mode not in ("attach", "transcribe"):
+        return (
+            f"Error: mode が不正です: {mode!r}"
+            "（attach = 参照貼り / transcribe = 転写）"
+        )
+    if mode == "transcribe":
+        if paste_to is None or not str(paste_to).strip():
+            return (
+                "Error: 転写 (mode='transcribe') には貼り先 (paste_to) が必要です"
+                "（焼き込み先の無い転写はできません）。"
+            )
+        return _clip_transcribe(
+            adapter, message_id,
+            quote=quote, rounds=rounds,
+            paste_to=str(paste_to).strip(), persona_name=name,
+        )
 
     norm_paste, paste_err = _normalize_paste_target(adapter, paste_to)
     if paste_err:
@@ -861,6 +1048,183 @@ def clip_photo(
     else:
         lines.append("貼り先は未指定です（あとから貼れます）。")
     return "\n".join(lines)
+
+
+def _latest_photo_ref_pasted_to(conn, pasted_to: str) -> Optional[str]:
+    """貼り先 ref に貼られた最新の写真の p:N を返す (無ければ None)。
+
+    create_scene_core_memory (共有ロジック) は写真を撮るが Photo を返さない
+    ため、結果テキストに p:N を載せるための読み口。
+    """
+    photos = list_photos_pasted_to(conn, pasted_to)
+    return photos[-1].ref if photos else None
+
+
+def _clip_transcribe(
+    adapter,
+    message_id: str,
+    *,
+    quote: Optional[str],
+    rounds: int,
+    paste_to: str,
+    persona_name: str,
+) -> str:
+    """転写 (mode='transcribe'): 本文に焼き込み + 写真で由来参照を残す。
+
+    - 範囲 + ``paste_to='core'``: 旧 SCENE と**同一の共有ロジック**
+      (``create_scene_core_memory``) を通す — 窓切り出し・トランスクリプト整形・
+      写真 (pasted_to="c:{id}") まで全部同じ。旧 core_memory_add_scene スペルと
+      挙動が割れない (言い換えドリフト防止の一点管理)。
+    - 点 + ``paste_to='core'``: 引用を新しいコア記憶として刻む + 点写真。
+    - ``paste_to='m:N'``: トランスクリプト / 引用をページ本文に追記
+      (編集来歴つき append 経路) + 写真。
+    - ``c:N`` (既存コア記憶への焼き込み) は非対応 — 共有ロジックが無く挙動が
+      割れるため、新しいコア記憶として刻む ``paste_to='core'`` に誘導する。
+    """
+    from sai_memory.photos import add_photo
+
+    conn = adapter.conn
+    is_point = bool(quote and str(quote).strip())
+
+    try:
+        rounds_int = int(rounds)
+    except (TypeError, ValueError):
+        rounds_int = 3
+    if rounds_int <= 0:
+        rounds_int = 3
+
+    # --- 宛先: core (常時開の特殊ページ) ---------------------------------
+    if paste_to.lower() == "core":
+        if not is_point:
+            # 範囲転写 = 旧 SCENE と同一の共有ロジック (複製禁止)
+            from sai_memory.core_memory import create_scene_core_memory
+
+            with adapter._db_lock:
+                result = create_scene_core_memory(
+                    conn, message_id, rounds=rounds_int, persona_name=persona_name,
+                )
+            if result is None:
+                return (
+                    f"メッセージ {message_id} が見つからないか、実会話ではありません"
+                    "（ツール実行ログ等は切り抜き対象外です）。"
+                )
+            photo_ref = _latest_photo_ref_pasted_to(conn, f"c:{result.memory_id}")
+            lines = [
+                f"会話の切り抜きをコア記憶 c:{result.memory_id} に転写しました"
+                f"（{result.message_count} 発言・{result.char_count:,}字、"
+                f"{result.date_start}〜{result.date_end}）。",
+            ]
+            if photo_ref:
+                lines.append(f"由来参照として写真 {photo_ref} も貼りました。")
+            lines.append("head への反映は次の記憶整理（Metabolism）からです。")
+            return "\n".join(lines)
+
+        # 点転写 = 引用を新しいコア記憶として刻む + 点写真
+        from sai_memory.core_memory import add_core_memory
+        from sai_memory.memory.storage import get_message
+
+        quote_text = str(quote).strip()
+        message = get_message(conn, message_id)
+        if message is None:
+            return f"メッセージが見つかりません: {message_id}"
+        if quote_text not in (message.content or ""):
+            return (
+                "引用が対象メッセージの本文に見つかりませんでした。"
+                "写真は土地（生ログ）をそのまま写すものなので、"
+                "本文にある言葉を一字一句そのまま指定してください。"
+            )
+        with adapter._db_lock:
+            new_id = add_core_memory(conn, quote_text)
+            photo = add_photo(
+                conn, message_id=message_id, quote=quote_text,
+                pasted_to=f"c:{new_id}",
+            )
+        return (
+            f"引用をコア記憶 c:{new_id} に転写しました。\n"
+            f"由来参照として写真 {photo.ref} も貼りました。\n"
+            "head への反映は次の記憶整理（Metabolism）からです。"
+        )
+
+    # --- 宛先の解釈 -------------------------------------------------------
+    try:
+        kind, key = _parse_ref(paste_to)
+    except AtlasRefError:
+        return f"転写先の形式を解釈できません: {paste_to}（例: m:3 / core）"
+
+    if kind == "core_one":
+        # 既存コア記憶への焼き込みは共有ロジックが無い (SCENE は常に新規作成)。
+        # 挙動が割れる独自実装はせず、新規に刻む "core" へ誘導する。
+        return (
+            f"{paste_to} への転写はできません。コア記憶への転写は"
+            " paste_to='core'（新しいコア記憶として刻む）を使ってください。"
+        )
+    if kind != "memopedia":
+        return (
+            f"この宛先には転写できません: {paste_to}"
+            "（転写先は m:N または core です）"
+        )
+
+    # --- 宛先: m:N (Memopedia ページ本文への焼き込み) ---------------------
+    norm_ref = _normalize_ref_for_desk(adapter, "memopedia", key)
+    if norm_ref is None:
+        return f"転写先のページが見つかりません: {paste_to}"
+
+    if is_point:
+        from sai_memory.memory.storage import get_message
+
+        quote_text = str(quote).strip()
+        message = get_message(conn, message_id)
+        if message is None:
+            return f"メッセージが見つかりません: {message_id}"
+        if quote_text not in (message.content or ""):
+            return (
+                "引用が対象メッセージの本文に見つかりませんでした。"
+                "写真は土地（生ログ）をそのまま写すものなので、"
+                "本文にある言葉を一字一句そのまま指定してください。"
+            )
+        burned_text = quote_text
+        ref_start, ref_end = message_id, message_id
+    else:
+        from sai_memory.core_memory import format_scene_transcript
+        from sai_memory.memory.storage import get_conversation_window_around
+
+        window = get_conversation_window_around(conn, message_id, rounds=rounds_int)
+        if not window:
+            return (
+                f"メッセージ {message_id} が見つからないか、実会話ではありません"
+                "（ツール実行ログ等は切り抜き対象外です）。"
+            )
+        burned_text = format_scene_transcript(window, persona_name)
+        ref_start, ref_end = window[0].id, window[-1].id
+
+    from sai_memory.memopedia import Memopedia
+    from sai_memory.memopedia.storage import resolve_page_ref
+
+    resolved = resolve_page_ref(conn, norm_ref[2:])
+    memopedia = Memopedia(conn, db_lock=adapter._db_lock)
+    page = memopedia.get_page(resolved)
+    if page is None:
+        return f"転写先のページが見つかりません: {paste_to}"
+    memopedia.append_to_content(
+        page.id, burned_text,
+        ref_start_message_id=ref_start, ref_end_message_id=ref_end,
+        edit_source="ai_conversation",
+    )
+    with adapter._db_lock:
+        photo = add_photo(
+            conn,
+            message_id=ref_start,
+            quote=(str(quote).strip() if is_point else None),
+            message_id_end=(None if is_point else ref_end),
+            pasted_to=norm_ref,
+        )
+    _touch_if_open(adapter, "memopedia", norm_ref[2:])
+
+    what = "引用" if is_point else "会話の切り抜き"
+    return (
+        f"{what}を {norm_ref}「{page.title}」の本文に転写しました。\n"
+        f"由来参照として写真 {photo.ref} も貼りました。"
+    )
 
 
 # ----- snapshot_desk (head 机セクション用、Metabolism 時のみ呼ばれる) -----
