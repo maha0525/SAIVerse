@@ -194,7 +194,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 2. head の render 文字列は移行前後で同一（キャッシュ整合・スナップショット互換）
 3. 既存テストは無変更で通る（モジュール API が契約）＋ 移行テストを追加
 
-**P3a: コア記憶 → 常時開ページ**
+**P3a: コア記憶 → 常時開ページ** ✅ **実装済**（2026-07-11。API 完全維持・書き換えテスト1件のみ〔物理格納の直接検査〕・移行テスト2件・266 passed。観察: `get_tree`/maintain_memopedia は4カテゴリ固定のため core ページは元々対象外、`Memopedia.search` には現れる〔望ましい〕、`get_trunks(category=None)` に root_core が出る可能性は未確認）
 - ページ化: trunk `root_core`（category `core`・is_trunk）配下の子ページ。content=本文、title=`コア記憶 c:N`、metadata JSON に `{core_id, kind, confirmed, scene由来参照, deleted_at}`。`is_important=1`
 - `c:N` 解決: metadata.core_id で引く（m:N の採番とは独立。既存の pasted_to="c:N" がそのまま生きる）。採番は max(core_id)+1
 - ごみ箱: memopedia の is_deleted ＋ metadata.deleted_at（トラッシュ UI の削除時刻順を維持）
