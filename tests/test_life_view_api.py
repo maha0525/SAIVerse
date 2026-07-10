@@ -3,7 +3,7 @@
 対象:
 - GET /api/episodes                          (api/routes/episodes.py — 画面 A)
 - GET /api/people/{id}/day-plan              (api/routes/people/life.py — 画面 B)
-- GET /api/people/{id}/marks                 (同上 — 画面 C)
+- GET /api/people/{id}/photos                (同上 — 画面 C)
 - GET /api/people/{id}/profile-tree          (同上 — 画面 D)
 
 一時 DB (temp dir の file sqlite) + 一時 persona dir を使い本番に触れない。
@@ -315,10 +315,10 @@ class LifeViewApiTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
-    # C: GET /api/people/{id}/marks
+    # C: GET /api/people/{id}/photos
     # ------------------------------------------------------------------
 
-    def test_marks_batch(self):
+    def test_photos_batch(self):
         from sai_memory.photos import add_photo
 
         with self.adapter._db_lock:
@@ -330,46 +330,46 @@ class LifeViewApiTest(unittest.TestCase):
             add_photo(self.adapter.conn, message_id="m9", quote="対象外")
 
         resp = self.client.get(
-            "/api/people/air/marks", params={"message_ids": "m1, m2, missing"},
+            "/api/people/air/photos", params={"message_ids": "m1, m2, missing"},
         )
         self.assertEqual(resp.status_code, 200)
-        marks = resp.json()["marks"]
-        self.assertEqual(len(marks), 3)  # m9 は要求外、missing は 0 件
-        self.assertEqual({m["message_id"] for m in marks}, {"m1", "m2"})
-        m1_marks = [m for m in marks if m["message_id"] == "m1"]
-        self.assertEqual({m["quote"] for m in m1_marks}, {"言葉の標本", "夕方の音"})
-        refs = {m["quote"]: m["purpose_ref"] for m in marks}
+        photos = resp.json()["photos"]
+        self.assertEqual(len(photos), 3)  # m9 は要求外、missing は 0 件
+        self.assertEqual({p["message_id"] for p in photos}, {"m1", "m2"})
+        m1_photos = [p for p in photos if p["message_id"] == "m1"]
+        self.assertEqual({p["quote"] for p in m1_photos}, {"言葉の標本", "夕方の音"})
+        refs = {p["quote"]: p["purpose_ref"] for p in photos}
         self.assertEqual(refs["言葉の標本"], "task:3")
         self.assertIsNone(refs["夕方の音"])
-        for m in marks:
-            self.assertIn("mark_id", m)
-            self.assertIsInstance(m["created_at"], int)
+        for p in photos:
+            self.assertIn("photo_id", p)
+            self.assertIsInstance(p["created_at"], int)
 
-    def test_marks_empty_result(self):
+    def test_photos_empty_result(self):
         resp = self.client.get(
-            "/api/people/air/marks", params={"message_ids": "no-such-id"},
+            "/api/people/air/photos", params={"message_ids": "no-such-id"},
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["marks"], [])
+        self.assertEqual(resp.json()["photos"], [])
 
-    def test_marks_errors(self):
+    def test_photos_errors(self):
         # 空の message_ids → 400
         resp = self.client.get(
-            "/api/people/air/marks", params={"message_ids": " , ,"},
+            "/api/people/air/photos", params={"message_ids": " , ,"},
         )
         self.assertEqual(resp.status_code, 400)
         # 上限超過 (101 件) → 400
         too_many = ",".join(f"m{i}" for i in range(101))
         resp = self.client.get(
-            "/api/people/air/marks", params={"message_ids": too_many},
+            "/api/people/air/photos", params={"message_ids": too_many},
         )
         self.assertEqual(resp.status_code, 400)
         # message_ids 欠落 → 422
-        resp = self.client.get("/api/people/air/marks")
+        resp = self.client.get("/api/people/air/photos")
         self.assertEqual(resp.status_code, 422)
         # 未知ペルソナ → 404
         resp = self.client.get(
-            "/api/people/nobody/marks", params={"message_ids": "m1"},
+            "/api/people/nobody/photos", params={"message_ids": "m1"},
         )
         self.assertEqual(resp.status_code, 404)
 

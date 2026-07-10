@@ -1,11 +1,11 @@
 """ペルソナの暮らしビュー API (life_concept_map.md の読み出し面)。
 
-画面 B (今日の予定表) / C (会話バブルのマーカーハイライト) /
+画面 B (今日の予定表) / C (会話バブルの点写真ハイライト) /
 D (プロフィール) 用の読み取り専用エンドポイント群。全て決定論
 (SELECT + 整形のみ) で LLM は呼ばない。
 
 - GET /{persona_id}/day-plan      : 時間割のコマ一覧 (saiverse/day_plan.py)
-- GET /{persona_id}/marks         : メッセージに付いた観測点＝点写真 (sai_memory/photos.py)
+- GET /{persona_id}/photos        : メッセージに付いた観測点＝点写真 (sai_memory/photos.py)
 - GET /{persona_id}/profile-tree  : 目的の木の第一階層 + 候補 (§15 の随意アクセス面)
 """
 import logging
@@ -24,8 +24,8 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
-#: /marks の message_ids 一括指定の上限 (チャット 1 画面分を想定)
-MARKS_BATCH_LIMIT = 100
+#: /photos の message_ids 一括指定の上限 (チャット 1 画面分を想定)
+PHOTOS_BATCH_LIMIT = 100
 
 
 def _require_persona(manager: Any, persona_id: str) -> None:
@@ -126,41 +126,39 @@ def get_day_plan(
 
 
 # ---------------------------------------------------------------------------
-# C: マーカー (観測点) のバッチ取得
+# C: 点写真 (観測点) のバッチ取得
 # ---------------------------------------------------------------------------
 
 
-class MarkItem(BaseModel):
-    mark_id: str                    # フロントの key 用
+class PhotoItem(BaseModel):
+    photo_id: str                   # フロントの key 用
     message_id: str                 # SAIMemory (memory.db) の message id
     quote: str                      # 本文からの逐語引用 (ハイライト対象)
     purpose_ref: Optional[str]      # 目的ノード参照 ("task:N" 等)。素の予約は None
     created_at: int                 # epoch 秒
 
 
-class MarksResponse(BaseModel):
+class PhotosResponse(BaseModel):
     persona_id: str
-    marks: List[MarkItem]           # message_id 昇順ではなく created_at 昇順 (打たれた順)
+    photos: List[PhotoItem]         # message_id 昇順ではなく created_at 昇順 (撮られた順)
 
 
-@router.get("/{persona_id}/marks", response_model=MarksResponse)
-def list_message_marks(
+@router.get("/{persona_id}/photos", response_model=PhotosResponse)
+def list_message_photos(
     persona_id: str,
     message_ids: str,
     manager=Depends(get_manager),
-) -> MarksResponse:
-    """メッセージ群に付いた観測点 (mark) をバッチで返す (画面 C: ハイライト)。
+) -> PhotosResponse:
+    """メッセージ群に付いた観測点 (点写真) をバッチで返す (画面 C: ハイライト)。
 
     ``message_ids`` はカンマ区切りの SAIMemory message id (上限
-    :data:`MARKS_BATCH_LIMIT`)。**建物履歴 (building_messages) の message_id
+    :data:`PHOTOS_BATCH_LIMIT`)。**建物履歴 (building_messages) の message_id
     とは別体系** — memory.db の messages.id を渡すこと (記憶ブラウズ API
     ``GET /{persona_id}/threads/{thread_id}/messages`` が返す ``id`` と同じ体系)。
 
     memory.db へのアクセスは記憶ブラウズ系と同じ ``get_adapter`` 経由
     (adapter.conn + adapter._db_lock)。photos テーブルは adapter 初期化時に
     冪等作成されるため、観測点ゼロのペルソナでも空リストで正しく返る。
-    ルート名 /marks とレスポンス形は frontend (MemoryBrowser) 互換のため維持
-    — Atlas ファサード (concept_consolidation.md P2) で /photos へ改称予定。
     """
     _require_persona(manager, persona_id)
     ids: List[str] = []
@@ -172,30 +170,30 @@ def list_message_marks(
             ids.append(mid)
     if not ids:
         raise HTTPException(status_code=400, detail="message_ids is empty")
-    if len(ids) > MARKS_BATCH_LIMIT:
+    if len(ids) > PHOTOS_BATCH_LIMIT:
         raise HTTPException(
             status_code=400,
-            detail=f"too many message_ids: {len(ids)} (max {MARKS_BATCH_LIMIT})",
+            detail=f"too many message_ids: {len(ids)} (max {PHOTOS_BATCH_LIMIT})",
         )
 
     from sai_memory.photos import list_photos
 
-    items: List[MarkItem] = []
+    items: List[PhotoItem] = []
     with get_adapter(persona_id, manager) as adapter:
         with adapter._db_lock:
             for mid in ids:
                 for photo in list_photos(adapter.conn, message_id=mid):
                     if not photo.quote:
                         continue  # ハイライトは引用アンカーを持つ点写真のみ対象
-                    items.append(MarkItem(
-                        mark_id=photo.photo_id,
+                    items.append(PhotoItem(
+                        photo_id=photo.photo_id,
                         message_id=photo.message_id,
                         quote=photo.quote,
                         purpose_ref=photo.purpose_ref,
                         created_at=photo.created_at,
                     ))
-    items.sort(key=lambda m: (m.created_at, m.mark_id))
-    return MarksResponse(persona_id=persona_id, marks=items)
+    items.sort(key=lambda p: (p.created_at, p.photo_id))
+    return PhotosResponse(persona_id=persona_id, photos=items)
 
 
 # ---------------------------------------------------------------------------

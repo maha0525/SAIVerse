@@ -263,7 +263,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/import/official/preview` | Preview ChatGPT export file and return conversation list for selection. |
 | GET | `/api/people/{persona_id}/import/official/status` | Get the status of official import task. |
 | GET | `/api/people/{persona_id}/items` | List items held by a persona. |
-| GET | `/api/people/{persona_id}/marks` | メッセージ群に付いた観測点 (mark) をバッチで返す (画面 C: ハイライト)。 |
 | POST | `/api/people/{persona_id}/memopedia/build-from-logs` | Start building Memopedia pages from chat logs as a background job. |
 | GET | `/api/people/{persona_id}/memopedia/export` | Export all Memopedia pages as JSON. |
 | POST | `/api/people/{persona_id}/memopedia/generate` | Start Memopedia page generation as a background job. |
@@ -292,6 +291,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | POST | `/api/people/{persona_id}/organize-memory` | Clear all metabolism anchors and trigger metabolism (Chronicle generation + anchor reset). |
+| GET | `/api/people/{persona_id}/photos` | メッセージ群に付いた観測点 (点写真) をバッチで返す (画面 C: ハイライト)。 |
 | GET | `/api/people/{persona_id}/profile-tree` | ペルソナのプロフィール用の目的の木 (画面 D)。読み取り専用の集約。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
