@@ -209,7 +209,11 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 **提案: P3c を再定義し、persona_task の物理移動はやらない。**
 
-3a/3b の「モジュール API 互換＋同名互換 VIEW」の型は sqlite3 生 conn の世界（memory.db）だから効いた。persona_task 系は **main DB の SQLAlchemy ORM 世界**に居て、判断点・TrackManager・API・episodes 等と JOIN・FK・同一トランザクションで結ばれている（面積は夜間監査 `docs/handoff/2026-07-11_p3c_purpose_note_audit.md` で棚卸し中）。これを per-persona memory.db へ物理移動すると、ORM 消費者の全面書き換えと main DB 内整合の喪失が起きる——**コストが (A) の残り便益に見合わない**可能性が高い。
+3a/3b の「モジュール API 互換＋同名互換 VIEW」の型は sqlite3 生 conn の世界（memory.db）だから効いた。persona_task 系は **main DB の SQLAlchemy ORM 世界**に居る。夜間監査（`docs/handoff/2026-07-11_p3c_purpose_note_audit.md`）で障壁の正体を事実確認: FK は実行時未強制・実 JOIN 無し・テーブル跨ぎトランザクション無し（＝当初想定の整合喪失は**杞憂**）。**本当のコストは ①約40箇所の呼び出し元の構築パターン変更 ②main DB 1表 → N 個の per-persona memory.db への扇形移行**（adapter init の一回きり流儀が使えない）。いずれにせよ**コストが (A) の残り便益に見合わない**。
+
+**→ まはー裁定（2026-07-11 深夜）: X 案で確定。** ただし「だいぶ気持ち悪い」＝概念上は一つの地図帳、実装上は二棟のまま。本質的な実費は**可搬性**（ペルソナの記憶がペルソナのディレクトリで完結しない——City 訪問・引っ越し・エクスポートの枷。Y 案でも episode/judgment log/AI 行が main DB に残るため完全には解けない）→ 独立 issue [persona_memory_not_self_contained.md](../issues/persona_memory_not_self_contained.md) に起票、発火条件つきで後回し。
+
+**監査の副産物（P3c 実装に効く事実）**: `note_page`/`note_message`（Note↔ページ/メッセージの多対多）は**本番消費者ゼロ**（設計されたが配線されなかった）→ Note 畳みは note 本体テーブルと open_notes section・note スペル4本・meta_layer が主戦場。desire ノート（persona_task の parent_kind='note' の親）の扱いは life_concept_map §10.1 の「stage=候補への正規化」と絡む——**Note 畳みの着手前にここだけ設計が要る**（扇形移行の置き場は `_on_persona_registered` フック＝manager と adapter が揃う点）。
 
 **(A) 同一実体の便益は、物理テーブルの一本化ではなく「単一アドレス空間＋統一ファサード＋ページ機構の ref 適用」で既にほぼ回収済み**という読み:
 - task:N は memory_read で読める（P2c-1）/ 写真は pasted_to="task:N" で貼れる（ref 文字列ベース）/ purpose 動詞で操作できる
