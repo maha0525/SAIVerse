@@ -5,7 +5,7 @@ D (プロフィール) 用の読み取り専用エンドポイント群。全て
 (SELECT + 整形のみ) で LLM は呼ばない。
 
 - GET /{persona_id}/day-plan      : 時間割のコマ一覧 (saiverse/day_plan.py)
-- GET /{persona_id}/marks         : メッセージに付いた観測点 (sai_memory/marks.py)
+- GET /{persona_id}/marks         : メッセージに付いた観測点＝点写真 (sai_memory/photos.py)
 - GET /{persona_id}/profile-tree  : 目的の木の第一階層 + 候補 (§15 の随意アクセス面)
 """
 import logging
@@ -157,8 +157,10 @@ def list_message_marks(
     ``GET /{persona_id}/threads/{thread_id}/messages`` が返す ``id`` と同じ体系)。
 
     memory.db へのアクセスは記憶ブラウズ系と同じ ``get_adapter`` 経由
-    (adapter.conn + adapter._db_lock)。marks テーブルは adapter 初期化時に
-    冪等作成されるため、mark ゼロのペルソナでも空リストで正しく返る。
+    (adapter.conn + adapter._db_lock)。photos テーブルは adapter 初期化時に
+    冪等作成されるため、観測点ゼロのペルソナでも空リストで正しく返る。
+    ルート名 /marks とレスポンス形は frontend (MemoryBrowser) 互換のため維持
+    — Atlas ファサード (concept_consolidation.md P2) で /photos へ改称予定。
     """
     _require_persona(manager, persona_id)
     ids: List[str] = []
@@ -176,19 +178,21 @@ def list_message_marks(
             detail=f"too many message_ids: {len(ids)} (max {MARKS_BATCH_LIMIT})",
         )
 
-    from sai_memory.marks import list_marks
+    from sai_memory.photos import list_photos
 
     items: List[MarkItem] = []
     with get_adapter(persona_id, manager) as adapter:
         with adapter._db_lock:
             for mid in ids:
-                for mark in list_marks(adapter.conn, message_id=mid):
+                for photo in list_photos(adapter.conn, message_id=mid):
+                    if not photo.quote:
+                        continue  # ハイライトは引用アンカーを持つ点写真のみ対象
                     items.append(MarkItem(
-                        mark_id=mark.mark_id,
-                        message_id=mark.message_id,
-                        quote=mark.quote,
-                        purpose_ref=mark.purpose_ref,
-                        created_at=mark.created_at,
+                        mark_id=photo.photo_id,
+                        message_id=photo.message_id,
+                        quote=photo.quote,
+                        purpose_ref=photo.purpose_ref,
+                        created_at=photo.created_at,
                     ))
     items.sort(key=lambda m: (m.created_at, m.mark_id))
     return MarksResponse(persona_id=persona_id, marks=items)

@@ -319,15 +319,15 @@ class LifeViewApiTest(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_marks_batch(self):
-        from sai_memory.marks import add_mark
+        from sai_memory.photos import add_photo
 
         with self.adapter._db_lock:
-            add_mark(self.adapter.conn, message_id="m1",
-                     quote="言葉の標本", purpose_ref="task:3")
-            add_mark(self.adapter.conn, message_id="m1", quote="夕方の音")
-            add_mark(self.adapter.conn, message_id="m2",
-                     quote="朝の光", purpose_ref=None)
-            add_mark(self.adapter.conn, message_id="m9", quote="対象外")
+            add_photo(self.adapter.conn, message_id="m1",
+                      quote="言葉の標本", purpose_ref="task:3")
+            add_photo(self.adapter.conn, message_id="m1", quote="夕方の音")
+            add_photo(self.adapter.conn, message_id="m2",
+                      quote="朝の光", purpose_ref=None)
+            add_photo(self.adapter.conn, message_id="m9", quote="対象外")
 
         resp = self.client.get(
             "/api/people/air/marks", params={"message_ids": "m1, m2, missing"},

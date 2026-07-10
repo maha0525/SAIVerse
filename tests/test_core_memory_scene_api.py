@@ -209,6 +209,16 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(listing.items[0].kind, "scene")
         self.assertIn("ソフィー", listing.items[0].preview)
 
+        # 由来参照が範囲写真として撮られ、このコア記憶に貼られている
+        # (土地参照の統一プリミティブ、concept_consolidation.md「写真」)
+        from sai_memory.photos import list_photos
+        with self.adapter._db_lock:
+            photos = [p for p in list_photos(self.adapter.conn) if p.is_range]
+        self.assertEqual(len(photos), 1)
+        self.assertEqual(photos[0].pasted_to, f"c:{resp.memory_id}")
+        self.assertEqual(photos[0].message_id, self.ids[0])
+        self.assertEqual(photos[0].message_id_end, self.ids[2])
+
     def test_create_scene_missing_anchor_404(self):
         from fastapi import HTTPException
         req = CreateSceneRequest(anchor_id="no-such-id", rounds=1)

@@ -175,7 +175,7 @@ sai_memory/
 ├── memopedia/        # Memopedia（知識グラフ。core/storage/generator）
 ├── core_memory.py    # コア記憶（記憶アーキv2 ゾーンA。memory.db 同居）
 ├── perception_buffer.py # 知覚バッファ（未消費知覚を溜め Pulse 消費で放出。memory.db 同居）
-├── marks.py / purpose_tags.py # ライフ層の観測点・目的タグ（memory.db 同居）
+├── photos.py / purpose_tags.py # 写真（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
 ├── backup.py         # rdiff-backup
 ├── config.py / cli.py / logging_utils.py

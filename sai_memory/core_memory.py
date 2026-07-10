@@ -317,6 +317,22 @@ def create_scene_core_memory(
     )
 
     new_id = add_core_memory(conn, transcript, kind="scene", metadata=metadata)
+
+    # 由来参照を範囲写真として撮り、このコア記憶へ貼る (土地参照の統一
+    # プリミティブ、concept_consolidation.md「写真」)。正リンクは写真側の
+    # pasted_to = "c:{id}" 一本。写真が撮れなくても scene 本体は生かす
+    # (由来参照は本体より優先度が低い — adapter.add_photos と同じ姿勢)。
+    try:
+        from sai_memory.photos import add_photo
+        add_photo(
+            conn,
+            message_id=message_ids[0],
+            message_id_end=message_ids[-1],
+            pasted_to=f"c:{new_id}",
+        )
+    except Exception:
+        pass
+
     total = total_core_memory_chars(conn)
 
     return SceneResult(

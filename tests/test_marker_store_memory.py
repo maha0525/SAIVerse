@@ -2,8 +2,8 @@
 
 対象:
 - SEARuntime._store_memory (sea/runtime.py): ペルソナ生成テキスト (assistant)
-  の SAIMemory 永続化点。マーカー剥離 + marks テーブルへの観測点保存を検証
-- SAIMemoryAdapter: marks テーブルの init 配線と add_marks API
+  の SAIMemory 永続化点。マーカー剥離 + photos テーブルへの観測点 (点写真) 保存を検証
+- SAIMemoryAdapter: photos テーブルの init 配線と add_photos API
 - RuntimeEmitters.emit_say (sea/runtime_emitters.py): 建物履歴 (表示系シンク)
   への剥離のみ (mark は作らない)
 
@@ -22,7 +22,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sai_memory.marks import list_marks
+from sai_memory.photos import list_photos
 
 
 class DummyEmbedder:
@@ -95,17 +95,17 @@ class StoreMemoryMarkerTest(unittest.TestCase):
         self.assertEqual(content, "今日は言葉の標本を見つけた。夕方の音も良かった。")
         self.assertNotIn("==", content)
 
-        # (b) mark 行が message_id・quote・purpose_ref 付きで生まれている
+        # (b) 点写真が message_id・quote・purpose_ref 付きで生まれている
         with self.adapter._db_lock:
-            marks = list_marks(self.adapter.conn, message_id=mid)
-        self.assertEqual(len(marks), 2)
-        self.assertEqual(marks[0].quote, "言葉の標本")
-        self.assertEqual(marks[0].purpose_ref, "task:3")
-        self.assertEqual(marks[1].quote, "夕方の音")
-        self.assertIsNone(marks[1].purpose_ref)
+            photos = list_photos(self.adapter.conn, message_id=mid)
+        self.assertEqual(len(photos), 2)
+        self.assertEqual(photos[0].quote, "言葉の標本")
+        self.assertEqual(photos[0].purpose_ref, "task:3")
+        self.assertEqual(photos[1].quote, "夕方の音")
+        self.assertIsNone(photos[1].purpose_ref)
         # quote は保存本文からの逐語引用として成立する (引用アンカー §9.1)
-        for mark in marks:
-            self.assertIn(mark.quote, content)
+        for photo in photos:
+            self.assertIn(photo.quote, content)
 
     def test_plain_assistant_text_is_untouched_and_no_marks(self):
         text = "マーカーの無い普通の発言。"
@@ -115,7 +115,7 @@ class StoreMemoryMarkerTest(unittest.TestCase):
         self.assertTrue(mid)
         self.assertEqual(self._stored_content(mid), text)
         with self.adapter._db_lock:
-            self.assertEqual(list_marks(self.adapter.conn, message_id=mid), [])
+            self.assertEqual(list_photos(self.adapter.conn, message_id=mid), [])
 
     def test_non_assistant_role_is_not_processed(self):
         # spell 結果等は role="user" で保存される。マーカー処理の対象外
@@ -127,13 +127,13 @@ class StoreMemoryMarkerTest(unittest.TestCase):
         self.assertTrue(mid)
         self.assertEqual(self._stored_content(mid), text)
         with self.adapter._db_lock:
-            self.assertEqual(list_marks(self.adapter.conn, message_id=mid), [])
+            self.assertEqual(list_photos(self.adapter.conn, message_id=mid), [])
 
-    def test_marks_table_initialized_by_adapter(self):
-        # adapter __init__ が init_marks_tables を配線している (再オープンも冪等)
+    def test_photos_table_initialized_by_adapter(self):
+        # adapter __init__ が init_photos_tables を配線している (再オープンも冪等)
         with self.adapter._db_lock:
             row = self.adapter.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='marks'"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='photos'"
             ).fetchone()
         self.assertIsNotNone(row)
 

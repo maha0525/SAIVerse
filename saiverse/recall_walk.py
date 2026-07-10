@@ -11,7 +11,7 @@ SQL と既存のローカル埋め込み検索 (fastembed) で完結する (§9.
 | タグ直撃 | ``tag_direct`` | purpose_tags (sai_memory/purpose_tags.py) の seed 目的 → target |
 | タグ共起 (2ホップ) | ``tag_cooccur`` | target に付いた別目的 → その目的の別 target |
 | 木の構造 | ``tree`` | purpose_tree の親・子・兄弟・来歴 (promoted_from) |
-| mark | ``mark`` | purpose_ref 一致・未収穫の観測点 (sai_memory/marks.py) |
+| photo (旧 mark) | ``photo`` | purpose_ref 一致・未貼り付けの写真＝観測点 (sai_memory/photos.py) |
 | 出来事所属 | ``episode`` | ORIGIN_REF / DIGEST_REF が seed に係る episode (saiverse/episodes.py)。target_ref が ``episode:N`` のタグは tag 辺で拾われる |
 | 意味的近傍 | ``semantic`` | seed 目的ノードの title/intent をクエリにした埋め込み検索 (sai_memory/memory/recall.py semantic_recall。ローカル計算) |
 | Memopedia 実体言及 | ``memopedia`` | (a) seed タイトルと完全一致するページ (b) 歩行で見つかったメッセージを編集来歴 (memopedia_page_edit_history の ref_start/ref_end_message_id) に持つページ |
@@ -25,8 +25,8 @@ SQL と既存のローカル埋め込み検索 (fastembed) で完結する (§9.
 パラメータ (辺の重み・既定 budget) はモジュール冒頭の定数にまとめてある。
 これらは life_concept_map.md §9.3「残る決定: 辺の優先度・重みの初期値／歩行
 予算の既定値」への**暫定回答**である — 辺種別の固定優先度は §9.3 の並び
-(タグ直撃 > 木構造 > mark > 出来事 > 意味的近傍 > Memopedia) に従い、タグ共起
-(2ホップ) はタグ系として木構造と mark の間に置いた。鮮度は半減期つき加点、
+(タグ直撃 > 木構造 > photo > 出来事 > 意味的近傍 > Memopedia) に従い、タグ共起
+(2ホップ) はタグ系として木構造と photo の間に置いた。鮮度は半減期つき加点、
 再訪回数は上限つき加点。実運用の手応えで調整されることを前提とする。
 
 本モジュールは P4 時点ではどこからも呼ばれない (休眠)。配線先は随意想起
@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from database.models import Episode
-from sai_memory import marks as marks_store
+from sai_memory import photos as photos_store
 from sai_memory import purpose_tags as tags_store
 from sai_memory.memopedia import storage as memopedia_storage
 from sai_memory.memory.recall import semantic_recall
@@ -52,14 +52,14 @@ LOGGER = logging.getLogger(__name__)
 # パラメータ (§9.3「残る決定」への暫定回答。module docstring 参照)
 # ---------------------------------------------------------------------------
 
-#: 辺種別の基礎スコア。§9.3 の固定優先度 (タグ直撃 > 木構造 > mark >
+#: 辺種別の基礎スコア。§9.3 の固定優先度 (タグ直撃 > 木構造 > photo >
 #: 出来事 > 意味的近傍 > Memopedia)。tag_cooccur は 2 ホップのタグ辺で
-#: 木構造と mark の間に置いた。
+#: 木構造と photo の間に置いた。photo は旧 mark (観測点) 辺の後継。
 EDGE_WEIGHTS: Dict[str, float] = {
     "tag_direct": 100.0,
     "tree": 80.0,
     "tag_cooccur": 70.0,
-    "mark": 60.0,
+    "photo": 60.0,
     "episode": 50.0,
     "semantic": 40.0,
     "memopedia": 30.0,
@@ -342,17 +342,17 @@ def walk(
                         0, 0, (s, parent["ref"], sib["ref"]),
                     )
 
-    # --- 辺 3: mark (purpose_ref 一致・未収穫の観測点) ---
+    # --- 辺 3: photo (purpose_ref 一致・未貼り付けの写真 = 旧 mark 観測点) ---
     if has_memory:
         with lock:
-            open_marks = marks_store.list_marks(conn, unharvested_only=True)
-        for mark in open_marks:
-            if mark.purpose_ref not in seed_set:
+            open_photos = photos_store.list_photos(conn, unpasted_only=True)
+        for photo in open_photos:
+            if photo.purpose_ref not in seed_set:
                 continue
-            msg_ref = references.to_short_ref("message", mark.message_id)
+            msg_ref = references.to_short_ref("message", photo.message_id)
             _add(
-                msg_ref, "mark", _snippet(mark.quote),
-                mark.created_at, 0, (mark.purpose_ref, msg_ref),
+                msg_ref, "photo", _snippet(photo.quote or ""),
+                photo.created_at, 0, (photo.purpose_ref, msg_ref),
             )
 
     # --- 辺 4: 出来事所属 (ORIGIN_REF / DIGEST_REF が seed に係る episode) ---
