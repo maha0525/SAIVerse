@@ -871,3 +871,62 @@ def test_handler_failure_leaves_slot_fired(manager, task_refs):
     clock.disable_virtual()
     clock.enable_virtual(BASE + timedelta(hours=10))
     assert day_plan.reschedule_pending_slots(manager, PERSONA_ID) == 0
+
+
+# ---------------------------------------------------------------------------
+# 深夜跨ぎ: wake の自己解決 (検収追加 2026-07-12)
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_resolves_wake_for_overnight_slot(manager, monkeypatch):
+    """wake 引数を渡さない呼び出し (起床判断 finalize の経路) でも、
+    PersonaSchedule から起床時刻を自己解決して深夜コマを翌暦日に予約する。
+
+    委譲実装は wake をオプトイン引数にしていたため、主経路 (finalize →
+    schedule_day_plan) では深夜コマが「当日の 00:30 = 過去」となり編成直後に
+    即発火するバグが残っていた — その回帰テスト。
+    """
+    from datetime import datetime as _dt
+
+    from database.models import PersonaSchedule
+
+    db = manager.SessionLocal()
+    try:
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_open", ENABLED=True, TIME_OF_DAY="07:00",
+        ))
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_close", ENABLED=True, TIME_OF_DAY="01:00",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    # 注: save_day_plan の昇順検証は暦時刻ベースのため、深夜帯コマは
+    # リスト末尾には置けない (時間割の意味論は当面「暦日内」— 深夜帯は
+    # コマの無い自由時間)。ここでは暦時刻昇順で保存できる並びを使い、
+    # 「万一 start < wake のコマが存在した場合に翌暦日で予約される」
+    # 防御 (wake 自己解決) だけを検証する。
+    slots = [
+        {"start": "00:30", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "深夜の一息"},
+        {"start": "09:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ]
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, slots)
+
+    captured: List[tuple] = []
+    monkeypatch.setattr(
+        day_plan, "_push_slot",
+        lambda mgr, pid, pdate, idx, fire_at: captured.append((idx, fire_at)),
+    )
+    pushed = day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)  # wake 渡さない
+    assert pushed == 2
+
+    fire_by_index = dict(captured)
+    d = _dt.fromisoformat(PLAN_DATE)
+    assert fire_by_index[1] == d.replace(hour=9, minute=0)
+    # 深夜コマ (start < wake) は翌暦日 (同じ営業日の尻尾) として予約される
+    assert fire_by_index[0] == (d + timedelta(days=1)).replace(hour=0, minute=30)

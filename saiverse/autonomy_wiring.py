@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import nullcontext
+from datetime import date, timedelta
 from typing import Any, Callable, Dict, Optional
 
 from saiverse import clock
@@ -47,6 +48,69 @@ from saiverse.judgment_points import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 一日リズムの深夜跨ぎ (overnight) ヘルパ
+# ---------------------------------------------------------------------------
+
+
+def is_overnight(wake: str, close: Optional[str]) -> bool:
+    """就寝時刻が日付を跨ぐリズムかどうかを返す。
+
+    ``close`` が存在し、かつ ``close < wake`` (就寝が起床より前の HH:MM) なら
+    跨ぎリズム。close が None (就寝スケジュール未設定) は跨ぎなし。
+
+    Args:
+        wake:  起床時刻 "HH:MM"
+        close: 就寝時刻 "HH:MM" または None
+    """
+    if not close:
+        return False
+    return close < wake
+
+
+def effective_plan_date(
+    now_dt: Any, wake: Optional[str], close: Optional[str]
+) -> date:
+    """現在時刻が属する「営業日」の date を返す。
+
+    「営業日」= 覚醒日。深夜跨ぎリズム (close < wake) で、かつ現在時刻が
+    00:00〜wake の深夜帯 (前日リズムの尻尾) に在るときは **前日** を返す。
+    それ以外 (通常帯 / 非跨ぎ / wake が None) は ``now_dt.date()`` を返す。
+
+    Args:
+        now_dt: saiverse.clock.now() の戻り値 (naive datetime)
+        wake:   起床時刻 "HH:MM"。None なら暦日をそのまま返す
+        close:  就寝時刻 "HH:MM"。None は跨ぎなし扱い
+    """
+    if not wake:
+        return now_dt.date()
+    hhmm = now_dt.strftime("%H:%M")
+    if is_overnight(wake, close) and hhmm < wake:
+        # 深夜帯 (前日リズムの尻尾) — 覚醒日は前日
+        return now_dt.date() - timedelta(days=1)
+    return now_dt.date()
+
+
+def in_waking_window(hhmm: str, wake: str, close: Optional[str]) -> bool:
+    """「起きている時間帯」かどうかを返す。
+
+    - 跨ぎリズム (close < wake): ``hhmm >= wake`` (起床後) または
+      ``hhmm < close`` (深夜帯の尻尾) が「窓の中」
+    - 非跨ぎリズム (wake <= close): ``wake <= hhmm < close`` が「窓の中」
+    - close が None (就寝なし): ``hhmm >= wake`` が「窓の中」
+
+    Args:
+        hhmm:  現在時刻 "HH:MM"
+        wake:  起床時刻 "HH:MM"
+        close: 就寝時刻 "HH:MM" または None
+    """
+    if not close:
+        return hhmm >= wake
+    if is_overnight(wake, close):
+        return hhmm >= wake or hhmm < close
+    return wake <= hhmm < close
+
 
 #: 判断点 Playbook 名の集合 (ScheduleManager の経路分岐が使う)
 JUDGMENT_PLAYBOOK_NAMES = frozenset(JUDGMENT_PLAYBOOK_MAP.values())
@@ -599,19 +663,41 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     now = clock.now()
     hhmm = now.strftime("%H:%M")
     close = sched.get("close")
-    if hhmm < wake:
-        return {"action": "none", "reason": "before wake"}
-    if close and hhmm >= close:
-        return {"action": "none", "reason": "after close"}
+
+    if not in_waking_window(hhmm, wake, close):
+        # 起きていない時間帯 — before wake か after close か
+        if not is_overnight(wake, close):
+            reason = "before wake" if hhmm < wake else "after close"
+        else:
+            # 跨ぎリズムで窓外 = close <= hhmm < wake の帯 (前日就寝後・未起床)
+            reason = "before wake" if hhmm < wake else "after close"
+        return {"action": "none", "reason": reason}
+
     wake_days = sched.get("wake_days")
-    if wake_days is not None and now.weekday() not in wake_days:
-        return {"action": "none", "reason": "not a scheduled day"}
+    if wake_days is not None:
+        # 跨ぎリズムの深夜帯 (hhmm < wake) は「前日の weekday」が正しい対照日
+        check_date = effective_plan_date(now, wake, close)
+        if check_date.weekday() not in wake_days:
+            return {"action": "none", "reason": "not a scheduled day"}
 
     from saiverse import day_plan
 
-    today = now.date().isoformat()
+    # 営業日 (覚醒日) の plan を引く
+    plan_date = effective_plan_date(now, wake, close)
+    today = plan_date.isoformat()
     plan = day_plan.load_day_plan(manager, persona_id, today)
     if plan is None:
+        # day_open 再発火の制約: hhmm >= wake の帯 (起床後の通常帯) でのみ撃つ。
+        # 深夜帯 (跨ぎの尻尾、hhmm < wake) は「前日の覚醒日に plan が無い」状態
+        # だが、ここで新しい day_open を 00:30 に撃つのは誤り — 起きなかった日に
+        # 深夜に plan を作っても時間割が即発火してしまう。
+        if is_overnight(wake, close) and hhmm < wake:
+            LOGGER.debug(
+                "[watchdog] overnight tail: no plan for %s but in midnight zone; "
+                "skipping day_open refire (persona=%s)", today, persona_id,
+            )
+            return {"action": "none", "reason": "overnight tail: no refire in midnight zone"}
+
         LOGGER.info(
             "[watchdog] no day plan for today; re-firing day_open "
             "(persona=%s date=%s wake=%s)", persona_id, today, wake,
@@ -637,7 +723,7 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             "[watchdog] %d slot reservation(s) lost; re-scheduling pending slots "
             "(persona=%s date=%s indices=%s)", len(lost), persona_id, today, lost,
         )
-        pushed = day_plan.reschedule_pending_slots(manager, persona_id)
+        pushed = day_plan.reschedule_pending_slots(manager, persona_id, plan_date)
         return {"action": "reschedule", "pushed": pushed, "lost": lost}
 
     return {"action": "none"}

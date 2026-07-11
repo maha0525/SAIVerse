@@ -638,10 +638,46 @@ def _slot_key(persona_id: str, plan_date_str: str, index: int) -> str:
     return f"day_plan:{persona_id}:{plan_date_str}:{index}"
 
 
-def _slot_fire_at(plan_date_str: str, slot: Dict[str, Any]) -> datetime:
-    """コマの開始時刻 (naive datetime)。過去時刻は EventScheduler が即時扱いする。"""
+def _resolve_wake(manager: Any, persona_id: str) -> Optional[str]:
+    """ペルソナの起床時刻 "HH:MM" を PersonaSchedule から解決する (無ければ None)。
+
+    深夜跨ぎリズムの暦日補正 (_slot_fire_at) に使う。呼び出し元が wake を
+    明示しなくても、コマ予約の全経路が跨ぎ対応になるようにするための自己解決。
+    """
+    try:
+        from saiverse.autonomy_wiring import _find_day_schedules
+        return _find_day_schedules(manager, persona_id).get("wake")
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to resolve wake time (persona=%s)", persona_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _slot_fire_at(
+    plan_date_str: str, slot: Dict[str, Any], *, wake: Optional[str] = None
+) -> datetime:
+    """コマの開始時刻 (naive datetime)。過去時刻は EventScheduler が即時扱いする。
+
+    深夜跨ぎリズム対応: ``wake`` が指定され、かつコマの start < wake のとき、
+    そのコマは「同じ営業日の深夜帯 (翌暦日)」に属するため、
+    ``plan_date + 1 日`` の日付で combine する。
+
+    例: plan_date="2026-07-04", wake="07:00", slot.start="00:30" → 2026-07-05 00:30
+        plan_date="2026-07-04", wake="07:00", slot.start="09:00" → 2026-07-04 09:00
+
+    Args:
+        plan_date_str: 営業日の "YYYY-MM-DD"
+        slot:          コマ dict (``start`` フィールド必須)
+        wake:          起床時刻 "HH:MM"。None なら従来どおり同日で combine
+    """
     d = date.fromisoformat(plan_date_str)
-    hh, mm = slot["start"].split(":")
+    start = slot["start"]
+    if wake and start < wake:
+        # 深夜帯 (同営業日の翌暦日)
+        d = d + timedelta(days=1)
+    hh, mm = start.split(":")
     return datetime.combine(d, dt_time(int(hh), int(mm)))
 
 
@@ -655,15 +691,25 @@ def _push_slot(
     )
 
 
-def schedule_day_plan(manager: Any, persona_id: str, plan_date: Any) -> int:
+def schedule_day_plan(
+    manager: Any, persona_id: str, plan_date: Any, *, wake: Optional[str] = None
+) -> int:
     """pending コマを EventScheduler に push し、push した数を返す。
 
     key は ``day_plan:{persona_id}:{plan_date}:{index}``。同 key の再 push は
     EventScheduler の既存挙動 (古い予約 cancel + 上書き) に従うため冪等。
     過去時刻のコマは即時扱い (EventScheduler.schedule の仕様)。
     保存済みの時間割が無ければ WARN + 0 を返す (watchdog 経路で安全)。
+
+    Args:
+        wake: 起床時刻 "HH:MM"。深夜跨ぎリズムのとき、start < wake のコマは
+            ``plan_date + 1 日`` の時刻で push される。None (省略) は従来動作。
     """
     plan_date_str = _normalize_plan_date(plan_date)
+    if wake is None:
+        # 呼び出し元 (起床判断 finalize 等) に配線を強要しない — 深夜跨ぎの
+        # 暦日補正はコマ予約の全経路で常に効くべき (検収追加 2026-07-12)
+        wake = _resolve_wake(manager, persona_id)
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None:
         LOGGER.warning(
@@ -676,7 +722,10 @@ def schedule_day_plan(manager: Any, persona_id: str, plan_date: Any) -> int:
     for index, slot in enumerate(slots):
         if slot.get("status") != STATUS_PENDING:
             continue
-        _push_slot(manager, persona_id, plan_date_str, index, _slot_fire_at(plan_date_str, slot))
+        _push_slot(
+            manager, persona_id, plan_date_str, index,
+            _slot_fire_at(plan_date_str, slot, wake=wake),
+        )
         pushed += 1
     LOGGER.info(
         "[day_plan] scheduled: persona=%s date=%s pushed=%d/%d",
@@ -685,8 +734,14 @@ def schedule_day_plan(manager: Any, persona_id: str, plan_date: Any) -> int:
     return pushed
 
 
-def reschedule_pending_slots(manager: Any, persona_id: str) -> int:
-    """当日 plan の pending / deferred コマを再 push する (watchdog / 再起動後の再接続)。
+def reschedule_pending_slots(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any = None,
+    *,
+    wake: Optional[str] = None,
+) -> int:
+    """当日 (営業日) plan の pending / deferred コマを再 push する (watchdog / 再起動後の再接続)。
 
     deferred コマも開始時刻 (過去なら即時扱い) で再 push する。繰り下げ待ちの
     残り時間は再起動を跨いで保持しない — 即時に発火し、まだ会話中なら
@@ -695,8 +750,26 @@ def reschedule_pending_slots(manager: Any, persona_id: str) -> int:
 
     同 key 上書きなので二重呼び出ししても二重発火しない (冪等)。
     plan が無ければ 0。
+
+    Args:
+        plan_date: 引く営業日 (date / datetime / "YYYY-MM-DD")。None のとき
+            ``clock.now().date()`` を使う (後方互換)。深夜跨ぎリズムでは呼び
+            出し元 (watchdog_tick) が :func:`~autonomy_wiring.effective_plan_date`
+            で算出した date を渡すこと。
+        wake: 起床時刻 "HH:MM"。_slot_fire_at に透過し、深夜帯コマの暦日補正
+            に使う。
     """
-    plan_date_str = clock.now().date().isoformat()
+    if wake is None:
+        wake = _resolve_wake(manager, persona_id)
+    if plan_date is None:
+        # 深夜跨ぎリズムでは now.date() でなく営業日で引く (自己解決)
+        from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
+        sched = _find_day_schedules(manager, persona_id)
+        plan_date_str = effective_plan_date(
+            clock.now(), sched.get("wake"), sched.get("close"),
+        ).isoformat()
+    else:
+        plan_date_str = _normalize_plan_date(plan_date)
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None:
         return 0
@@ -705,7 +778,10 @@ def reschedule_pending_slots(manager: Any, persona_id: str) -> int:
     for index, slot in enumerate(slots):
         if slot.get("status") not in (STATUS_PENDING, STATUS_DEFERRED):
             continue
-        _push_slot(manager, persona_id, plan_date_str, index, _slot_fire_at(plan_date_str, slot))
+        _push_slot(
+            manager, persona_id, plan_date_str, index,
+            _slot_fire_at(plan_date_str, slot, wake=wake),
+        )
         pushed += 1
     if pushed:
         LOGGER.info(

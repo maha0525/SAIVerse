@@ -281,16 +281,29 @@ def collect_purpose_refs(manager: Any, persona_id: str) -> List[str]:
     return refs
 
 
-def collect_today_closed_episodes(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
+def collect_today_closed_episodes(
+    manager: Any, persona_id: str, plan_date: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """今日閉じた出来事の dict リスト (episode_ref を持つもののみ)。
 
     就寝判断 (day_close) の層2 棚入れ enum の供給元。「今日」は
     clock.now() の暦日 (0:00〜24:00、naive local — episodes の刻印と同系)。
+
+    Args:
+        plan_date: 収集対象日 "YYYY-MM-DD"。深夜跨ぎリズムでは就寝判断の
+            営業日 (前日の暦日) を渡す。None のとき clock.now().date() を使う。
     """
+    from datetime import date as _date
+
     from saiverse import episodes as episodes_mod
 
     now = clock.now()
-    day_start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    if plan_date is not None:
+        d = _date.fromisoformat(plan_date)
+    else:
+        d = now.date()
+    from datetime import datetime as _datetime
+    day_start = int(_datetime(d.year, d.month, d.day, 0, 0, 0).timestamp())
     day_end = day_start + 86400
     try:
         eps = episodes_mod.list_today(manager, persona_id, day_start, day_end)
@@ -358,14 +371,20 @@ def find_interrupted_session(manager: Any, persona_id: str) -> Optional[Dict[str
     return best
 
 
-def collect_today_touched_desires(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
+def collect_today_touched_desires(
+    manager: Any, persona_id: str, plan_date: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """今日生まれた・触れた欲求 (生きている候補のみ) の dict リスト。
 
     就寝判断 ``desire_reviews`` の動的 enum 供給元 (judgment_points.md §8
     「今日触れた欲求のみ動的注入」)。「今日」の判定は ``last_touched_at``
-    または ``created_at`` の暦日が ``clock.now()`` の日付に一致すること。
+    または ``created_at`` の暦日が対象日に一致すること。
+
+    Args:
+        plan_date: 対象日 "YYYY-MM-DD"。深夜跨ぎリズムでは就寝判断の
+            営業日 (前日の暦日) を渡す。None のとき clock.now().date() を使う。
     """
-    today = clock.now().date().isoformat()
+    today = plan_date if plan_date is not None else clock.now().date().isoformat()
     out: List[Dict[str, Any]] = []
     for task in _list_desire_tasks(manager, persona_id):
         touched = str(task.get("last_touched_at") or "")
@@ -375,10 +394,16 @@ def collect_today_touched_desires(manager: Any, persona_id: str) -> List[Dict[st
     return out
 
 
-def collect_today_touched_desire_refs(manager: Any, persona_id: str) -> List[str]:
-    """collect_today_touched_desires の ref のみ (task:N 形式)。"""
+def collect_today_touched_desire_refs(
+    manager: Any, persona_id: str, plan_date: Optional[str] = None
+) -> List[str]:
+    """collect_today_touched_desires の ref のみ (task:N 形式)。
+
+    Args:
+        plan_date: 対象日 "YYYY-MM-DD"。None のとき clock.now().date() を使う。
+    """
     refs: List[str] = []
-    for task in collect_today_touched_desires(manager, persona_id):
+    for task in collect_today_touched_desires(manager, persona_id, plan_date=plan_date):
         ref = task.get("task_ref") or ""
         if ref.startswith("task:"):
             refs.append(ref)
@@ -1382,6 +1407,7 @@ def build_day_close_situation_text(
     episodes_today: Optional[List[Dict[str, Any]]] = None,
     curation_candidates: Optional[List[Dict[str, Any]]] = None,
     naming_candidates: Optional[List[Dict[str, Any]]] = None,
+    plan_date: Optional[str] = None,
 ) -> str:
     """就寝判断の tail 注入テキスト (judgment_points.md §8「見るもの」)。
 
@@ -1393,9 +1419,14 @@ def build_day_close_situation_text(
 
     ``naming_candidates`` (命名候補) が与えられたら「テーマの芽」節を追加する
     （P4-b 裁定の就寝判断相乗り）。候補ゼロ・None なら節ごと出さない。
+
+    Args:
+        plan_date: 営業日 "YYYY-MM-DD"。深夜跨ぎリズムで就寝判断が翌暦日 01:00
+            に発火するケースでは前日の暦日を渡す。None のとき clock.now().date()
+            を使う (後方互換)。
     """
     now = clock.now()
-    today = now.date().isoformat()
+    today = plan_date if plan_date is not None else now.date().isoformat()
     parts = [
         "[就寝判断]",
         f"今日 ({today}) を終えます。予定と実際に起きたことを見比べて、"
@@ -1408,7 +1439,7 @@ def build_day_close_situation_text(
         "",
         "[今日生まれた・触れた「やりたいこと」]",
     ]
-    touched = collect_today_touched_desires(manager, persona_id)
+    touched = collect_today_touched_desires(manager, persona_id, plan_date=plan_date)
     if touched:
         for task in touched:
             ref = task.get("task_ref") or "task:?"
@@ -1549,9 +1580,34 @@ def build_judgment_args(
             "event_text": event_text[:200],
         }
     elif kind == KIND_DAY_CLOSE:
-        touched_refs = collect_today_touched_desire_refs(manager, persona_id)
+        # 営業日 (覚醒日) の算出 — 深夜跨ぎリズムで 01:00 に発火した就寝判断は
+        # 「前日」が営業日になる。_find_day_schedules は autonomy_wiring に在るが、
+        # autonomy_wiring が judgment_points を import するため遅延 import で循環回避。
+        _day_close_plan_date: str
+        try:
+            from saiverse.autonomy_wiring import (
+                _find_day_schedules,
+                effective_plan_date,
+            )
+            sched = _find_day_schedules(manager, persona_id)
+            _now_for_date = clock.now()
+            _day_close_plan_date = effective_plan_date(
+                _now_for_date, sched.get("wake"), sched.get("close")
+            ).isoformat()
+        except Exception:
+            LOGGER.warning(
+                "[judgment] failed to derive effective plan_date for day_close "
+                "(persona=%s); falling back to calendar date", persona_id, exc_info=True,
+            )
+            _day_close_plan_date = today
+
+        touched_refs = collect_today_touched_desire_refs(
+            manager, persona_id, plan_date=_day_close_plan_date
+        )
         # 層2 棚入れ (§9.1): 対象 = 今日閉じた出来事すべて ({episode, purpose} ペア)。
-        episodes_today = collect_today_closed_episodes(manager, persona_id)
+        episodes_today = collect_today_closed_episodes(
+            manager, persona_id, plan_date=_day_close_plan_date
+        )
         episode_refs = [e["episode_ref"] for e in episodes_today]
         purpose_refs = collect_purpose_refs(manager, persona_id) if episode_refs else []
         shelving = bool(episode_refs and purpose_refs)
@@ -1587,6 +1643,7 @@ def build_judgment_args(
             episodes_today=episodes_today if shelving else None,
             curation_candidates=curation_candidates if curation_candidates else None,
             naming_candidates=naming_candidates if naming_candidates else None,
+            plan_date=_day_close_plan_date,
         )
         response_schema = build_day_close_schema(
             manager, persona_id, touched_refs,
@@ -1596,7 +1653,7 @@ def build_judgment_args(
             naming_candidates=naming_candidates if naming_candidates else None,
         )
         judgment_context = {
-            "plan_date": today,
+            "plan_date": _day_close_plan_date,
             "touched_desire_refs": touched_refs,
         }
         if curation_candidates:

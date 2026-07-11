@@ -670,7 +670,7 @@ def test_watchdog_reschedules_lost_slot_reservations(session_factory, monkeypatc
     rescheduled: List[str] = []
     monkeypatch.setattr(
         day_plan, "reschedule_pending_slots",
-        lambda mgr, pid: rescheduled.append(pid) or 1,
+        lambda mgr, pid, plan_d=None, **kw: rescheduled.append(pid) or 1,
     )
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["action"] == "reschedule"
@@ -867,3 +867,210 @@ def test_slots_fire_on_real_dispatch_thread(session_factory):
         assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
     finally:
         manager.event_scheduler.stop()
+
+
+# ---------------------------------------------------------------------------
+# 深夜跨ぎ (overnight) ヘルパ
+# ---------------------------------------------------------------------------
+
+
+def test_is_overnight_with_close_before_wake():
+    assert wiring.is_overnight("07:00", "01:00") is True
+
+
+def test_is_overnight_with_close_after_wake():
+    assert wiring.is_overnight("07:00", "22:00") is False
+
+
+def test_is_overnight_with_no_close():
+    assert wiring.is_overnight("07:00", None) is False
+
+
+def test_effective_plan_date_normal_time():
+    """非跨ぎリズム: 常に暦日を返す。"""
+    from datetime import date as _date
+    now = datetime(2026, 7, 5, 12, 0, 0)  # 12:00 (wake=07:00, close=22:00)
+    result = wiring.effective_plan_date(now, "07:00", "22:00")
+    assert result == _date(2026, 7, 5)
+
+
+def test_effective_plan_date_midnight_tail_is_previous_day():
+    """跨ぎリズムで深夜帯 (01:00 発火) → 前日が営業日。"""
+    from datetime import date as _date
+    now = datetime(2026, 7, 5, 1, 0, 0)  # 01:00 (wake=07:00, close=01:00)
+    result = wiring.effective_plan_date(now, "07:00", "01:00")
+    assert result == _date(2026, 7, 4)
+
+
+def test_effective_plan_date_daytime_is_same_day():
+    """跨ぎリズムで昼間 (12:00) → 当日が営業日。"""
+    from datetime import date as _date
+    now = datetime(2026, 7, 5, 12, 0, 0)  # 12:00
+    result = wiring.effective_plan_date(now, "07:00", "01:00")
+    assert result == _date(2026, 7, 5)
+
+
+def test_effective_plan_date_no_wake():
+    """wake が None → 暦日をそのまま返す。"""
+    from datetime import date as _date
+    now = datetime(2026, 7, 5, 1, 0, 0)
+    result = wiring.effective_plan_date(now, None, None)
+    assert result == _date(2026, 7, 5)
+
+
+def test_in_waking_window_overnight():
+    """跨ぎリズム (wake=07:00, close=01:00)。"""
+    assert wiring.in_waking_window("12:00", "07:00", "01:00") is True   # 昼間 = 窓内
+    assert wiring.in_waking_window("00:30", "07:00", "01:00") is True   # 深夜帯 = 窓内
+    assert wiring.in_waking_window("06:00", "07:00", "01:00") is False  # 起床前 = 窓外
+    assert wiring.in_waking_window("01:30", "07:00", "01:00") is False  # 就寝後 = 窓外
+
+
+def test_in_waking_window_normal():
+    """非跨ぎリズム (wake=07:00, close=22:00)。"""
+    assert wiring.in_waking_window("12:00", "07:00", "22:00") is True
+    assert wiring.in_waking_window("06:00", "07:00", "22:00") is False
+    assert wiring.in_waking_window("22:00", "07:00", "22:00") is False  # close は窓外
+    assert wiring.in_waking_window("23:00", "07:00", "22:00") is False
+
+
+def test_in_waking_window_no_close():
+    """close なし: 起床以降はずっと窓内。"""
+    assert wiring.in_waking_window("07:00", "07:00", None) is True
+    assert wiring.in_waking_window("06:59", "07:00", None) is False
+
+
+# ---------------------------------------------------------------------------
+# watchdog — 深夜跨ぎリズム
+# ---------------------------------------------------------------------------
+
+
+def test_watchdog_overnight_daytime_no_plan_refires(session_factory, monkeypatch):
+    """跨ぎリズムで昼間 (12:00) に plan が無い → day_open を再発火する。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(
+        session_factory, "judgment_day_open", "07:00",
+        params={"daily_budget_rounds": 12},
+    )
+    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 12, 0, 0))
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["action"] == "day_open_refire"
+    assert calls[0][0] == "day_open"
+
+
+def test_watchdog_overnight_midnight_no_plan_does_not_refire(session_factory, monkeypatch):
+    """跨ぎリズムで深夜帯 (00:30) に plan が無い → 再発火しない (深夜制約)。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
+    # 00:30 は深夜帯 (前日リズムの尻尾)。plan が無くても撃たない。
+    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["action"] == "none"
+    assert out["reason"] == "overnight tail: no refire in midnight zone"
+    assert calls == []
+
+
+def test_watchdog_overnight_midnight_with_plan_reschedules(session_factory, monkeypatch):
+    """跨ぎリズムで深夜帯 (00:30)、前日 plan がある + 予約消失 → re-push する。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
+    # 2026-07-05 00:30 は 2026-07-04 の営業日の深夜帯
+    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
+
+    # 前日 (営業日) の plan を保存
+    yesterday = "2026-07-04"
+    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
+        {"start": "00:30", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    # 予約は push していない (= 消失状態)
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
+
+    rescheduled: List[str] = []
+    monkeypatch.setattr(
+        day_plan, "reschedule_pending_slots",
+        lambda mgr, pid, plan_d=None, **kw: rescheduled.append(pid) or 1,
+    )
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["action"] == "reschedule"
+    assert rescheduled == [PERSONA_ID]
+
+
+# ---------------------------------------------------------------------------
+# day_close: 就寝判断の plan_date が前日になる (深夜跨ぎ)
+# ---------------------------------------------------------------------------
+
+
+def test_day_close_judgment_plan_date_is_previous_day_at_midnight(
+    session_factory, monkeypatch
+):
+    """跨ぎリズムで 01:00 に発火した就寝判断は、judgment_context の
+    plan_date が前日の暦日になる。"""
+    from saiverse import judgment_points
+
+    manager, _ = _make_manager(session_factory)
+    # wake=07:00 / close=01:00 のスケジュールを DB に入れる
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
+
+    # 2026-07-05 01:00 に発火 → 営業日は 2026-07-04
+    clock.enable_virtual(datetime(2026, 7, 5, 1, 0, 0))
+
+    captured_args: List[Any] = []
+
+    def _fake_submit(persona_id, building_id, meta_playbook, args=None, event_callback=None):
+        captured_args.append(args or {})
+
+    manager.pulse_controller.submit_meta_judgment = _fake_submit
+
+    from saiverse.judgment_points import run_judgment_point
+    run_judgment_point(manager, PERSONA_ID, "day_close")
+
+    assert captured_args, "submit_meta_judgment was not called"
+    import json as _json
+    jctx = _json.loads(captured_args[0].get("judgment_context", "{}"))
+    assert jctx.get("plan_date") == "2026-07-04", (
+        f"expected plan_date=2026-07-04 but got {jctx.get('plan_date')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# day_plan: 深夜コマの発火時刻 (plan_date + 1 日)
+# ---------------------------------------------------------------------------
+
+
+def test_slot_fire_at_overnight_midnight_slot():
+    """wake=07:00, start=00:30 → plan_date+1日 の datetime を返す。"""
+    from datetime import datetime as _dt
+    fire = day_plan._slot_fire_at(
+        "2026-07-04",
+        {"start": "00:30"},
+        wake="07:00",
+    )
+    assert fire == _dt(2026, 7, 5, 0, 30, 0)
+
+
+def test_slot_fire_at_normal_slot():
+    """wake=07:00, start=09:00 → 同日の datetime を返す。"""
+    from datetime import datetime as _dt
+    fire = day_plan._slot_fire_at(
+        "2026-07-04",
+        {"start": "09:00"},
+        wake="07:00",
+    )
+    assert fire == _dt(2026, 7, 4, 9, 0, 0)
+
+
+def test_slot_fire_at_no_wake_is_same_day():
+    """wake=None → 従来どおり同日 combine (後方互換)。"""
+    from datetime import datetime as _dt
+    fire = day_plan._slot_fire_at(
+        "2026-07-04",
+        {"start": "00:30"},
+    )
+    assert fire == _dt(2026, 7, 4, 0, 30, 0)
