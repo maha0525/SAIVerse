@@ -710,6 +710,11 @@ def _backfill_desire_stage_normalization(engine) -> None:
     根拠 (parent_kind='note' → candidate) が消えて誤って adopted に刻まれる。
 
     (a) stage IS NULL の全行に derive_stage() 相当を CASE で刻印
+    (a2) stage='candidate' で帳簿無し (desire_state IS NULL) の行に帳簿を
+        バックフィルする — 帳簿カラム導入前に生まれた古い候補行が対象。
+        「stage=candidate ⇒ 帳簿を持つ」の不変条件 (create_task が新規行で
+        保証) を既存行にも揃える。鮮度の起点は既存の created_at (decay の
+        フォールバックと同じ基準なので減衰挙動は変わらない)
     (b) parent_kind='note' の行を親なし (parent_kind/note_id を NULL) にする
     (c) note_type='desire' の Note 行と、それを参照する note_page/note_message/
         track_open_note を削除する (desire ノートは title と定型 description
@@ -733,6 +738,20 @@ def _backfill_desire_stage_normalization(engine) -> None:
                 logging.info(
                     "[desire正規化] persona_task.stage を %d 行に刻印しました。",
                     result_a.rowcount,
+                )
+
+            # (a2) 古い候補行への帳簿バックフィル (stage=candidate ⇒ 帳簿あり)
+            result_a2 = conn.execute(text("""
+                UPDATE persona_task SET
+                    desire_state = 'fresh',
+                    last_touched_at = COALESCE(last_touched_at, created_at),
+                    touch_count = COALESCE(touch_count, 0)
+                WHERE stage = 'candidate' AND desire_state IS NULL
+            """))
+            if result_a2.rowcount:
+                logging.info(
+                    "[desire正規化] 帳簿無しの候補 %d 行に帳簿をバックフィルしました。",
+                    result_a2.rowcount,
                 )
 
             # (b) note_id 親バインドの撤去 (候補は親なしが正規形)

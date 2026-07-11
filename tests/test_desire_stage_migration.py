@@ -4,6 +4,8 @@ database.migrate._backfill_desire_stage_normalization / その public エント�
 ``backfill_desire_stage_normalization`` を検証する:
 
 - (a) stage IS NULL の全行に derive_stage() 相当の CASE で刻印
+- (a2) 帳簿無し (desire_state IS NULL) の候補行に帳簿をバックフィル
+  (帳簿カラム導入前の古い候補行を「stage=candidate ⇒ 帳簿あり」に揃える)
 - (b) parent_kind='note' の行を親なし (parent_kind/note_id を NULL) にする
 - (a)→(b) の順序 (候補の導出根拠が消える前に刻印する)
 - (c) note_type='desire' の Note 行と note_page/note_message/track_open_note の
@@ -86,6 +88,18 @@ class DesireStageMigrationTests(unittest.TestCase):
                 " '既に刻印済み', '', '', 'pending', 'normal', 'auto', 'adopted', "
                 " '2026-01-03 00:00:00', '2026-01-03 00:00:00', 0)"
             ))
+            # 帳簿カラム導入前に生まれた古い候補行 (desire_state すら NULL) —
+            # (a2) で帳簿がバックフィルされ、鮮度の起点は created_at になるはず。
+            db.execute(text(
+                "INSERT INTO persona_task "
+                "(id, persona_id, short_id, parent_kind, note_id, track_id, "
+                " title, goal, summary, status, priority, origin, "
+                " created_at, updated_at, version) "
+                "VALUES "
+                "('e', 'p1', 5, 'note', 'note-1', NULL, "
+                " '帳簿無しの古い欲求', '', '', 'pending', 'normal', 'auto', "
+                " '2026-01-04 00:00:00', '2026-01-04 00:00:00', 0)"
+            ))
             db.commit()
 
             # desire ノート (削除対象) + 関連リンク
@@ -140,6 +154,21 @@ class DesireStageMigrationTests(unittest.TestCase):
         # 既刻印済みの行は上書きされない (stage IS NULL の行だけが対象)。
         self.assertEqual(
             self._row("persona_task", "id", "d", ["stage"]), ("adopted",),
+        )
+
+        # (a2) 帳簿無しの古い候補行: candidate 刻印 + 帳簿バックフィル
+        # (desire_state='fresh'、鮮度の起点は created_at、touch_count=0)。
+        self.assertEqual(
+            self._row(
+                "persona_task", "id", "e",
+                ["stage", "desire_state", "last_touched_at", "touch_count"],
+            ),
+            ("candidate", "fresh", "2026-01-04 00:00:00", 0),
+        )
+        # 帳簿を既に持つ行 (a) は (a2) の対象外 — desire_state は上書きされない。
+        self.assertEqual(
+            self._row("persona_task", "id", "a", ["desire_state", "touch_count"]),
+            ("fresh", None),
         )
 
         # (b) note 親バインドの撤去 — 生存中の候補も親なしに正規化される
