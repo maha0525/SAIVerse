@@ -9,6 +9,7 @@ import logging
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
 from sai_memory.memopedia.storage import category_keys
+from saiverse.curation import HEALTH_LARGE_THRESHOLD, HEALTH_OVERSIZED_THRESHOLD
 
 LOGGER = logging.getLogger(__name__)
 
@@ -16,8 +17,11 @@ LOGGER = logging.getLogger(__name__)
 def memopedia_health() -> str:
     """Return a compact health report of Memopedia pages.
 
-    Includes: total page count, oversized pages (>3000 chars),
+    Includes: total page count, oversized pages (>HEALTH_OVERSIZED_THRESHOLD chars),
     pages without summaries, and category breakdown.
+
+    閾値は saiverse/curation.py の HEALTH_OVERSIZED_THRESHOLD /
+    HEALTH_LARGE_THRESHOLD から一元取得している。
     """
     persona_id = get_active_persona_id()
     if not persona_id:
@@ -37,8 +41,8 @@ def memopedia_health() -> str:
     tree = memopedia.get_tree()
 
     total_pages = 0
-    oversized = []       # >3000 chars
-    large = []           # >2000 chars
+    oversized = []       # > HEALTH_OVERSIZED_THRESHOLD chars
+    large = []           # > HEALTH_LARGE_THRESHOLD chars
     no_summary = []
     category_counts = {}
 
@@ -53,9 +57,9 @@ def memopedia_health() -> str:
 
             category_counts[category] = category_counts.get(category, 0) + 1
 
-            if content_len > 3000:
+            if content_len > HEALTH_OVERSIZED_THRESHOLD:
                 oversized.append(f"  - {title} ({content_len}字) [{category}]")
-            elif content_len > 2000:
+            elif content_len > HEALTH_LARGE_THRESHOLD:
                 large.append(f"  - {title} ({content_len}字) [{category}]")
 
             if not summary.strip():
@@ -77,14 +81,19 @@ def memopedia_health() -> str:
 
     # Oversized pages (need splitting)
     if oversized:
-        lines.append(f"\n### 分割推奨 (3000字超): {len(oversized)}件")
+        lines.append(
+            f"\n### 分割推奨 ({HEALTH_OVERSIZED_THRESHOLD}字超): {len(oversized)}件"
+        )
         lines.extend(oversized)
     else:
         lines.append("\n分割推奨ページ: なし")
 
     # Large pages (approaching limit)
     if large:
-        lines.append(f"\n### 注意 (2000-3000字): {len(large)}件")
+        lines.append(
+            f"\n### 注意 ({HEALTH_LARGE_THRESHOLD}-{HEALTH_OVERSIZED_THRESHOLD}字):"
+            f" {len(large)}件"
+        )
         lines.extend(large)
 
     # Pages without summaries

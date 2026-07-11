@@ -50,8 +50,10 @@ from scripts.memopedia.maintenance_store import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)
 
-# Constants
-SPLIT_THRESHOLD = 5000  # Characters
+# 閾値定数は saiverse/curation.py に一元化されている。ここはその alias。
+# 既存コードが SPLIT_THRESHOLD を参照しているためそのまま維持するが、
+# 変更が必要なときは curation.py の OVERSIZED_THRESHOLD を変える。
+from saiverse.curation import OVERSIZED_THRESHOLD as SPLIT_THRESHOLD  # noqa: E402
 
 
 def _get_prompts_dir() -> Path:

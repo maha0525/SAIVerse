@@ -160,6 +160,11 @@ class SAIMemoryAdapter:
             # ため移行を逃すと意図が永遠に失われる（冪等・毎回 no-op が既定）。
             from sai_memory.memopedia.vivid_to_desk_migration import migrate_vivid_pages_to_desk
             migrate_vivid_pages_to_desk(self.conn)
+
+            # P4-a: 編纂プランテーブル（curation_plans）冪等初期化。
+            # just_sleep バッチ（P4-a2）が pending プランを読んで実行する。
+            from sai_memory.curation_ops import init_curation_tables
+            init_curation_tables(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None

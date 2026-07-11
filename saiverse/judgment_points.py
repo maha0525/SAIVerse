@@ -711,6 +711,7 @@ def build_day_close_schema(
     touched_desire_refs: List[str],
     episode_refs: Optional[List[str]] = None,
     purpose_refs: Optional[List[str]] = None,
+    curation_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """就寝判断の response_schema (judgment_points.md §8)。
 
@@ -721,6 +722,10 @@ def build_day_close_schema(
     出来事すべて) ため、``episode_purposes`` は {episode, purpose} ペアの
     配列になる。``episode_refs`` / ``purpose_refs`` のどちらかが空なら
     フィールド自体を出さない。
+
+    P4-a 編纂候補 (``curation_candidates``): 候補が空 / None なら
+    ``curation_reviews`` フィールド自体を出さない (空 enum 事故防止)。
+    各 review: ``op_id`` (候補の op_id の enum) + ``verdict`` ("approve"|"skip")。
     """
     schema: Dict[str, Any] = {
         "type": "object",
@@ -785,6 +790,33 @@ def build_day_close_schema(
                 "係るものだけ挙げればよい"
             ),
         }
+    # P4-a 編纂候補 — 候補が空なら空 enum 事故防止のためフィールド自体を出さない
+    if curation_candidates:
+        op_id_enum = [c["op_id"] for c in curation_candidates if c.get("op_id")]
+        if op_id_enum:
+            schema["properties"]["curation_reviews"] = {
+                "type": "array",
+                "description": (
+                    "棚の乱れの裁定。approve すると眠っている間にバックグラウンドで整理されます。"
+                    "skip は翌日以降に再提示されます"
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op_id": {
+                            "type": "string",
+                            "enum": op_id_enum,
+                            "description": "裁定する編纂候補の ID",
+                        },
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["approve", "skip"],
+                            "description": "approve=承認（実行する） / skip=見送り（翌日再提示）",
+                        },
+                    },
+                    "required": ["op_id", "verdict"],
+                },
+            }
     return schema
 
 
@@ -1262,16 +1294,41 @@ def _format_today_episodes(episodes_today: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_curation_candidates(candidates: List[Dict[str, Any]]) -> str:
+    """編纂候補の状況テキスト節（就寝判断用）。
+
+    ``detect_curation_candidates`` が返した候補リストを
+    「## 今日の棚の乱れ（承認したものだけ、眠っている間に整理されます）」
+    節として整形する。候補ゼロなら空文字を返す（節ごと出さない）。
+    """
+    if not candidates:
+        return ""
+    lines = [
+        "## 今日の棚の乱れ（承認したものだけ、眠っている間に整理されます）",
+    ]
+    for c in candidates:
+        lines.append(f"- {c['line']}")
+    lines.append(
+        "承認した項目に verdict='approve' を、見送りは 'skip' を設定してください。"
+        "skip は条件が続く限り翌日以降に再提示されます。"
+    )
+    return "\n".join(lines)
+
+
 def build_day_close_situation_text(
     manager: Any,
     persona_id: str,
     context: Dict[str, Any],
     episodes_today: Optional[List[Dict[str, Any]]] = None,
+    curation_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """就寝判断の tail 注入テキスト (judgment_points.md §8「見るもの」)。
 
     ``episodes_today`` (今日閉じた出来事) が与えられたら、層2 棚入れの
     選択材料として episode:N の一覧を添える。
+
+    ``curation_candidates`` (編纂候補) が与えられたら「今日の棚の乱れ」節を
+    追加する（P4-a 裁定の就寝判断相乗り）。候補ゼロ・None なら節ごと出さない。
     """
     now = clock.now()
     today = now.date().isoformat()
@@ -1301,6 +1358,11 @@ def build_day_close_situation_text(
         parts.append("今日触れた「やりたいこと」はありません。")
     if episodes_today:
         parts += ["", _format_today_episodes(episodes_today)]
+    # P4-a 編纂候補（棚の乱れ）
+    if curation_candidates:
+        curation_text = _format_curation_candidates(curation_candidates)
+        if curation_text:
+            parts += ["", curation_text]
     return "\n".join(parts)
 
 
@@ -1424,19 +1486,39 @@ def build_judgment_args(
         episode_refs = [e["episode_ref"] for e in episodes_today]
         purpose_refs = collect_purpose_refs(manager, persona_id) if episode_refs else []
         shelving = bool(episode_refs and purpose_refs)
+
+        # P4-a 編纂候補: ペルソナの memory.db を adapter 経由で読んで検知
+        curation_candidates: List[Dict[str, Any]] = []
+        try:
+            persona_obj = (getattr(manager, "personas", None) or {}).get(persona_id)
+            adapter = getattr(persona_obj, "sai_memory", None) if persona_obj else None
+            mem_conn = getattr(adapter, "conn", None) if adapter else None
+            if mem_conn is not None:
+                from saiverse.curation import detect_curation_candidates
+                curation_candidates = detect_curation_candidates(mem_conn, persona_id)
+        except Exception:
+            LOGGER.warning(
+                "[judgment] failed to detect curation candidates for %s",
+                persona_id, exc_info=True,
+            )
+
         situation_text = build_day_close_situation_text(
             manager, persona_id, context,
             episodes_today=episodes_today if shelving else None,
+            curation_candidates=curation_candidates if curation_candidates else None,
         )
         response_schema = build_day_close_schema(
             manager, persona_id, touched_refs,
             episode_refs=episode_refs if shelving else None,
             purpose_refs=purpose_refs if shelving else None,
+            curation_candidates=curation_candidates if curation_candidates else None,
         )
         judgment_context = {
             "plan_date": today,
             "touched_desire_refs": touched_refs,
         }
+        if curation_candidates:
+            judgment_context["curation_candidates"] = curation_candidates
         if shelving:
             judgment_context["episode_refs"] = episode_refs
             judgment_context["purpose_refs"] = purpose_refs

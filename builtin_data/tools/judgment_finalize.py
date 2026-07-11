@@ -990,6 +990,121 @@ def _finalize_on_event(
 
 
 # ---------------------------------------------------------------------------
+# curation_reviews (P4-a 編纂裁定)
+# ---------------------------------------------------------------------------
+
+
+def _apply_curation_reviews(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """curation_reviews → approve 分を編纂プランとして永続化する (P4-a)。
+
+    - approve: ペルソナの memory.db の curation_plans テーブルに pending 行を積む。
+      同じ op_id の pending が既にあれば重複挿入しない（冪等）。
+    - skip: 何もしない（条件が続けば翌日以降に再提示）。
+
+    **実際の分割・統合（書き換え）は P4-a2 の curation_ops.py で実装する。
+    このモジュールは「プランを積む」だけで実行しない。**
+    """
+    raw = output.get("curation_reviews")
+    if not raw:
+        return False
+    if not isinstance(raw, list):
+        warnings.append(
+            f"curation_reviews rejected: 配列が必要 (got {type(raw).__name__})"
+        )
+        return False
+
+    # ctx に格納された候補リストから有効な op_id を収集
+    candidates = ctx.get("curation_candidates") or []
+    valid_ops: Dict[str, Any] = {}  # op_id → candidate dict
+    for c in candidates:
+        oid = c.get("op_id")
+        if oid:
+            valid_ops[oid] = c
+
+    if not valid_ops:
+        warnings.append(
+            "curation_reviews: 候補が不明のため適用できません (judgment_context に "
+            "curation_candidates がありません)"
+        )
+        return False
+
+    # adapter / conn の取得
+    persona_obj = (getattr(manager, "personas", None) or {}).get(persona_id)
+    adapter = getattr(persona_obj, "sai_memory", None) if persona_obj else None
+    mem_conn = getattr(adapter, "conn", None) if adapter else None
+    if mem_conn is None:
+        warnings.append(
+            "curation_reviews: 記憶アダプタが利用できないため編纂プランを保存できません"
+        )
+        return False
+
+    from sai_memory.curation_ops import enqueue_plan
+
+    applied = False
+    for i, review in enumerate(raw):
+        if not isinstance(review, dict):
+            warnings.append(f"curation_reviews[{i}] rejected: not a dict")
+            continue
+        op_id = str(review.get("op_id") or "").strip()
+        verdict = str(review.get("verdict") or "").strip()
+        if op_id not in valid_ops:
+            warnings.append(
+                f"curation_reviews[{i}] rejected: op_id={op_id!r} は"
+                "今日の棚の乱れ候補にありません"
+            )
+            continue
+        if verdict not in ("approve", "skip"):
+            warnings.append(
+                f"curation_reviews[{i}] rejected: verdict={verdict!r} は"
+                " approve または skip が必要です"
+            )
+            continue
+        if verdict == "skip":
+            # skip は何もしない（翌日再提示）
+            LOGGER.debug(
+                "[judgment_finalize] curation_reviews: op_id=%r skipped (persona=%s)",
+                op_id, persona_id,
+            )
+            continue
+
+        # approve → プランをキューに積む
+        cand = valid_ops[op_id]
+        try:
+            plan_id = enqueue_plan(
+                conn=mem_conn,
+                kind=cand.get("kind", "split"),
+                op_id=op_id,
+                refs=list(cand.get("refs") or []),
+            )
+            applied = True
+            lines.append(
+                f"（棚の整理を予定に入れた: {op_id}）"
+            )
+            LOGGER.info(
+                "[judgment_finalize] curation_reviews: op_id=%r enqueued "
+                "as plan_id=%s (persona=%s)",
+                op_id, plan_id, persona_id,
+            )
+        except Exception as exc:
+            LOGGER.exception(
+                "[judgment_finalize] curation_reviews: enqueue_plan raised "
+                "(op_id=%r, persona=%s)", op_id, persona_id,
+            )
+            warnings.append(
+                f"curation_reviews[{i}] の編纂プラン保存に失敗: {exc}"
+            )
+
+    return applied
+
+
+# ---------------------------------------------------------------------------
 # day_close
 # ---------------------------------------------------------------------------
 
@@ -1096,6 +1211,11 @@ def _finalize_day_close(
 
     # --- episode_purposes → 層2 棚入れタグ ({episode, purpose} ペア; §9.1) --
     applied |= _apply_episode_purposes_pairs(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
+
+    # --- curation_reviews → 承認分を編纂プランとして永続化 (P4-a) ----------
+    applied |= _apply_curation_reviews(
         manager, persona_id, output, ctx, lines, warnings,
     )
 
