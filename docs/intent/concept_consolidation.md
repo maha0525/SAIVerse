@@ -337,8 +337,14 @@ issue の発火条件「カテゴリ機構を触る前」が来た——庭仕�
 - 検知カウンタ: 完了ノード・休眠欲求の desire_type／キーワード共起クラスタ（決定論）。**写真の航跡クラスタは後回し**（pasted_to/時刻はあるがタグが無く材料が薄い——レビュー論点 e）
 - 裁定: 就寝判断に「テーマ候補」を提示 → ペルソナが承認＋**名を与える**（自由記述フィールド）→ `theme_pages.create_theme_page`（新設）で root_theme 配下にページ化＋構成ノードの ref を本文に記録。P3c① で立てた root_theme の「移行専用でない最初の住人」
 
-**P4-c: vividness 除去**（地均し——P4-a の検知は vividness でなく構造状態を数える前提なので先にやる）
-- 書き手3・読み手2・運搬（API パラメータ・get_tree annotate・UI の編集/CSS/ラベル・memopedia_manage の set_vividness action）を除去。weave の buried スキップ廃止＝全ページ平等掲示。**カラムは死置き**（per-persona memory.db N個への ALTER は扇形になるので触らない。storage コメントに死亡明記）
+**P4-c: vividness 除去 ＋ vivid→机 移行**（地均し——P4-a の検知は vividness でなく構造状態を数える前提なので先にやる）
+- **まはー指摘（2026-07-11）で移行を追加**: vivid（鮮明）をメモ＝常設掲示として使う実ユーザーがいる。「鮮明にする」は机が生まれる前から存在した**「開きっぱなしにしたい」需要の先行表現**——データに込められた意図を机へ連れて行く
+- **移行**: per-persona memory.db 内の一回きり冪等 migration（marks→photos / P3a と同じ adapter init 流儀。机と同じ DB 内なので扇形にならない）: `vividness='vivid'` かつ未削除のページを `desk_items` に open（opened_at / last_touched_at＝移行時刻、purpose_ref なし）
+- **裁定 (b)「移行は机に置かない」との整合**: あちらは TrackOpenNote＝Track 文脈の付随状態で、開き直しは本人の行為に委ねた。こちらは**「常に見えるように」と明示的に刻まれた意図そのもの**の移行——意味論が一致する後継へ運ぶのは代筆でなく継承（vividness の意図データはこの移行を最後に消えるので、逃すと二度と回収できない点も違う）
+- **予算との整合**: 机は 8000 字予算＋LRU。vivid が多い/大きいユーザーでは溢れる → 次の Metabolism snapshot が正直な通知つきで LRU 追い出し（移行を特別扱いせず机の物理にそのまま従う）
+- faint / buried: 索引が消えた今は単なる通常ページ——**何もしない**（「隠したい」を削除に読み替える等の破壊的再解釈はしない）
+- 除去本体: 書き手3・読み手2・運搬（API パラメータ・get_tree annotate・UI の編集/CSS/ラベル・memopedia_manage の set_vividness action）。weave の buried スキップ廃止＝全ページ平等掲示。**カラムは死置き**（storage コメントに死亡明記）。順序は**移行 → 除去**（同一片内）
+- 実データ確認済み（2026-07-11）: air=vivid 1枚（content 空）/ quon=0。本番の重みは外部ユーザーのデータ側
 
 **P4-d: head 目次（索引復帰の実験）**
 - `MemopediaIndexSection.render` に**深さ制限の目次**を実装（カテゴリ＋上位N階層タイトル＋件数、開いているページと is_important に印。Metabolism のみ更新は既に `refresh_on_events=∅` で整合）
@@ -354,6 +360,7 @@ issue の発火条件「カテゴリ機構を触る前」が来た——庭仕�
 - (d) 目次実験の opt-in に既存フラグ MEMOPEDIA_INDEX_ENABLED を再利用、まずエアだけ ON——OK か
 - (e) 命名の写真航跡クラスタは後回し（完了ノード・休眠欲求クラスタ先行）——OK か
 - (f) 庭仕事の実行結果を新聞（day_report）に「棚の整理」欄として載せる——OK か
+- (g) **vivid→机 移行後、「新しく常設メモを立てる」ユーザー側の導線**をどうするか。vividness UI が消えると、ユーザーがメモリタブから「これを常に見えるように」と置く手段が無くなる（ペルソナ自身は memory_open でできる）。選択肢: (i) メモリタブに「机に開く/閉じる」ボタンを足す（神の介入として机に手を入れることを許す） (ii) 会話でペルソナに頼む運用に寄せる（自己著者性どおり、導線は作らない） (iii) ⑤神モードUI の設計に送る
 
 ### 次アクション
 
