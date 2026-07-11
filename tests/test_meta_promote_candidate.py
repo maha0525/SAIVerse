@@ -10,8 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import AI, ActionTrack, Base, City, User
-from saiverse.note_manager import NoteManager
-from saiverse.persona_task_manager import PARENT_NOTE, PersonaTaskManager
+from saiverse.persona_task_manager import STAGE_CANDIDATE, PersonaTaskManager
 from saiverse.meta_layer import MetaLayer
 
 
@@ -41,7 +40,6 @@ class CandidatesInSchemaTest(unittest.TestCase):
         # life purpose set so we don't classify as life_purpose_unset
         from saiverse.life_purpose import set_life_purpose
         set_life_purpose(self.Session, "p1", "x")
-        self.nm = NoteManager(self.Session)
         self.ptm = PersonaTaskManager(self.Session)
         # one pending track so we're in idle_with_pending
         db = self.Session()
@@ -70,10 +68,9 @@ class CandidatesInSchemaTest(unittest.TestCase):
             db.close()
 
     def _add_candidate(self, title):
-        note_id = self.nm.ensure_desire_note("p1")
         return self.ptm.create_task(
             persona_id="p1", title=title,
-            parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
+            stage=STAGE_CANDIDATE, auto_activate=False,
         )
 
     def test_promote_variant_present_when_candidates_exist(self):

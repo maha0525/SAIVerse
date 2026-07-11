@@ -226,9 +226,52 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 → 監査結果と突き合わせて、朝にまはーが (X) この再定義案 / (Y) 原案（物理移動を敢行）を裁定。
 
+### P3c-0: desire 正規化 ✅ **実装済**（2026-07-11 設計 v0.1 メティス起草 → 同日実装。pytest 追加分含め全通過、実機/まはー検証待ち）
+
+**目的**: 候補（欲求）の表現を「desire ノートの子（`parent_kind='note'` ＋ note_id）」から「**親なし目的ノード `stage='candidate'`**」へ正規化する。life_concept_map §10.1 の確定項目「desire の実装 → 目的ノード stage=候補へ正規化」の実装設計。**P3c①（Note→テーマノード移行）の前提工事**——これが済むと Note の実消費経路は person/project/vocation の3種だけになり、desire という特殊ケースを Note 畳みから切り離せる。
+
+**現状の非対称（消費者調査 2026-07-11 で確認した事実）**:
+- 書き手（`purpose_seed` / `day_scenario` seed / `judgment_finalize._apply_new_desires`→purpose_seed スペル）と読み手5箇所（`meta_layer._get_desire_candidates` / `judgment_points._list_desire_tasks` / `desire_engine._list_desires` / `day_report._list_all_desires` / day_scenario）は全て **note_id 起点**（`ensure_desire_note` → `list_tasks(note_id=...)`）
+- 一方 `purpose_tree.py`（休眠）と `api/routes/people/life.py`（ProfileTree UI）は既に **stage 起点**（親なし＋stage='candidate'）を先取り実装済み
+- stage は現在**読み出し時導出**（`derive_stage`: 生存＋parent_kind='note' → candidate）。物理カラムはほぼ NULL
+
+**設計の芯 — stage を「読み出し時導出」から「書き込み時刻印」へ**:
+
+親を外すだけだと `derive_stage` が既存候補を全部 adopted と誤導出する（candidate の導出根拠が parent_kind='note' だから）。よって正規化は「stage の物理刻印」とセットでしか成立しない:
+
+1. **候補の正規形**: `parent_kind=NULL` / `note_id=NULL` / **`stage='candidate'`（物理）**。休眠中の `purpose_tree.create_candidate` が作る形と完全一致
+2. **全書き込み点で stage を刻印**（読み出し時導出は撤去 — 旧 path を残さない）:
+   - `create_task`: stage 省略時も物理刻印。**帳簿初期化（desire_state/last_touched_at/touch_count）の条件を `kind==PARENT_NOTE` → `stage=='candidate'` に変更**（現状 purpose_tree.create_candidate 経由の候補は帳簿が初期化されないバグ予備軍——正規化が同時に治す）
+   - `update_task_status`: 遷移時に刻印（completed→completed / cancelled→aborted）。**desire 失効だけは `decay_desires` が明示的に `stage='dormant'` を刻む**（現行は cancel 後に desire_state=expired を書く順序のため、汎用刻印では dormant にならない）
+   - `promote_to_track`: `stage='adopted'` を刻印（track_create の from_candidate 直呼び経路が purpose_tree.adopt を通らないため）
+   - 移行後、`_task_to_dict` の `task.stage or derive_stage(...)` フォールバックを撤去し、derive_stage は移行 SQL の参照仕様としてのみ残す
+3. **書き手の一本化**: `purpose_seed` / `day_scenario` seed → **`purpose_tree.create_candidate` を唯一の候補作成入口に**（休眠モジュールの起床）。judgment_finalize は purpose_seed スペル経由なので無改修
+4. **読み手5箇所の切替**: `list_tasks` に `stage=` フィルタを追加し、note_id 起点 → `stage='candidate'` 起点へ。刻印が正しければ **stage='candidate' だけで生存候補と一致**する（完了/失効/昇格は刻印で stage が変わる）ため、CANDIDATE_STATUSES の併用条件は不要になる。`touch_desire` のガードも `parent_kind != PARENT_NOTE` → `stage != 'candidate'`
+5. **day_report（一日新聞）だけは識別子が別**: 「消えた欲求も見る」要件のため stage では引けない → **`desire_state IS NOT NULL`（帳簿を持つ＝欲求として生まれた行）かつ当日動きのあった行**（updated_at が当日）で引く。レンダラ（`_section_desires`）は既に born/touched/gone を当日日付プレフィックスで絞る実装なので掲載は元々「その日一回だけ」——無限増加はクエリ側だけの問題で、当日絞りで解消。**追加: 「旅立ったもの（Track へ昇格）」行を新設**——現行は昇格すると note からも外れて新聞のどこにも出ない。当日判定は updated_at でなく `persona_task_history` の `promote_to_track` イベント日で行う（採用後の活動日に updated_at が動いて再掲されるのを防ぐ）
+6. **desire ノートの退役**: `ensure_desire_note` / `NOTE_TYPE_DESIRE` を撤去（切替後、呼び出し元ゼロ）。open_notes section の desire 除外行は P3c① で section ごと退役するので触らない
+7. **移行（`database/migrate.py`、main DB 内・UPDATE のみの軽量パス）**:
+   - (a) stage IS NULL の**全行**（track 親・未所属も含む）に derive_stage 相当の SQL CASE で刻印
+   - (b) parent_kind='note' の行の parent_kind / note_id を NULL に
+   - (c) `note_type='desire'` の Note 行を削除（title と定型 description しか持たない器。レビュー論点 a）
+   - **順序 (a)→(b) が不変条件**（先に親を外すと candidate の導出根拠が消える）
+8. **死ぬもの**: `persona_task.note_id` カラム（読者・書き手ゼロの死カラム化。物理 DROP は P3c① の Note テーブル DROP 時に再判断、models.py にコメント明記）／ `purpose_tree.adopt` の旧 desire 正規化枝（parent_kind='note' → detach_parent。移行後は到達不能）
+9. **不変条件**: task:N ref は不変（short_id 無変更・履歴/ステップ連続）／判断点 playbook JSON は無変更（ref enum は動的注入）／ProfileTree UI は無変更（既に stage 起点）
+
+**レビュー論点 → まはー裁定（2026-07-11 朝）**:
+- (a) desire Note 行の migration での削除 → **承認**。quon_city_a / air_city_a に実データあり、まはーがコピー（バックアップ）済みのため内容保全の特別対応は不要
+- (b) 新聞への掲載 → **「無限に増えるのはダメ、載せるなら昇格・成就したその日の一回だけ」で修正**。上記 5. をこの裁定に合わせて改稿済み（当日絞りクエリ＋昇格行の新設、判定は history イベント日）
+- (c) `purpose_tree.create_candidate` を唯一の入口に → **承認**（休眠モジュールの起床）
+
+### P3c-0 実装ノート（2026-07-11 実装時の判断）
+
+- **NOTE_TYPE_DESIRE 定数は撤去せず残置**: `ensure_desire_note`（書き手）は撤去したが、`sea/head_pipeline/sections/open_notes.py` が読み取り専用でこの定数を今も import している（「open_notes は触らない」の設計指示と矛盾しないよう、定数だけは P3c①（Note→テーマノード移行・open_notes 退役）まで残す判断。撤去前の grep 確認で発覚）
+- **purpose_seed の source は必須化**: `purpose_tree.create_candidate` の接地原則を経由する以上、旧仕様の「source 省略可」は維持できない。ツール引数の `required` にも `source` を追加し、省略時は明示 Error を返す（旧テストの後方互換ケースは source を補って書き換え）
+- **`purpose_tree.create_candidate` に `desire_type` / `actor` / `origin` / `goal` を追加**: 設計は `desire_type`/`actor` のみ言及していたが、purpose_seed からの `origin="autonomous"` 引き継ぎと、persona 指定 `goal` の消失防止のため追加した
+- **`_list_backlog_tasks`（judgment_points.py）と `day_plan._resolve_ref` の判定式を parent_kind→stage に修正**: 設計指示に明記はなかったが、候補が常に親なしになる以上 parent_kind だけでは区別できず、修正しないと壊れる箇所として発見・対応
+
 ### 次アクション
 
-P3a をサブエージェント委譲（夜間チェーン: 3a 実装 → メイン検収 → 3b 詳細化・委譲 → …）。
+P3c-0（desire 正規化）実装完了、まはー実機検証待ち → P3c①（Note→テーマノード移行＋note スペル4本/open_notes 退役）→ P3c②（task:N 机開閉＋TrackOpenNote 退役）。
 
 ---
 

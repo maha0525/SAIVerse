@@ -698,6 +698,88 @@ def backfill_day_plan_refs(db_path: str) -> None:
         engine.dispose()
 
 
+def _backfill_desire_stage_normalization(engine) -> None:
+    """desire 正規化 (P3c-0): stage の物理刻印 + note_id 親バインドの撤去 + desire ノート削除。
+
+    concept_consolidation.md P3c-0「stage を読み出し時導出から書き込み時刻印へ」の
+    main DB 側移行。schema 変更を伴わないデータ移行なので needs_migration では
+    拾えず、起動ごとに無条件で呼んで問題ない (各ステップとも実行後は対象行が
+    残らないため冪等)。
+
+    **順序 (a)→(b) は不変条件**: 先に parent_kind='note' を外すと、stage 導出の
+    根拠 (parent_kind='note' → candidate) が消えて誤って adopted に刻まれる。
+
+    (a) stage IS NULL の全行に derive_stage() 相当を CASE で刻印
+    (b) parent_kind='note' の行を親なし (parent_kind/note_id を NULL) にする
+    (c) note_type='desire' の Note 行と、それを参照する note_page/note_message/
+        track_open_note を削除する (desire ノートは title と定型 description
+        しか持たない器 — 中身の候補 Task 自体は (a)(b) で既に正規化済み)
+    """
+    try:
+        with engine.begin() as conn:
+            # (a) stage の物理刻印 (derive_stage() と同じ規則)
+            result_a = conn.execute(text("""
+                UPDATE persona_task SET stage = CASE
+                    WHEN status = 'completed' THEN 'completed'
+                    WHEN status = 'cancelled' AND parent_kind = 'note'
+                         AND desire_state = 'expired' THEN 'dormant'
+                    WHEN status = 'cancelled' THEN 'aborted'
+                    WHEN parent_kind = 'note' THEN 'candidate'
+                    ELSE 'adopted'
+                END
+                WHERE stage IS NULL
+            """))
+            if result_a.rowcount:
+                logging.info(
+                    "[desire正規化] persona_task.stage を %d 行に刻印しました。",
+                    result_a.rowcount,
+                )
+
+            # (b) note_id 親バインドの撤去 (候補は親なしが正規形)
+            result_b = conn.execute(text("""
+                UPDATE persona_task SET parent_kind = NULL, note_id = NULL
+                WHERE parent_kind = 'note'
+            """))
+            if result_b.rowcount:
+                logging.info(
+                    "[desire正規化] persona_task の note 親バインドを %d 行で解除しました。",
+                    result_b.rowcount,
+                )
+
+            # (c) desire ノートの削除 (関連する多対多リンクも先に消す)
+            desire_note_ids = [
+                row[0] for row in conn.execute(
+                    text("SELECT note_id FROM note WHERE note_type = 'desire'")
+                ).fetchall()
+            ]
+            if desire_note_ids:
+                placeholders = ", ".join(f":id{i}" for i in range(len(desire_note_ids)))
+                params = {f"id{i}": nid for i, nid in enumerate(desire_note_ids)}
+                for table_name in ("note_page", "note_message", "track_open_note"):
+                    conn.execute(
+                        text(f"DELETE FROM {table_name} WHERE note_id IN ({placeholders})"),
+                        params,
+                    )
+                conn.execute(
+                    text(f"DELETE FROM note WHERE note_id IN ({placeholders})"), params,
+                )
+                logging.info(
+                    "[desire正規化] desire ノート %d 件と関連リンクを削除しました。",
+                    len(desire_note_ids),
+                )
+    except Exception as e:
+        logging.warning("desire 正規化マイグレーションに失敗しました（スキップ）: %s", e)
+
+
+def backfill_desire_stage_normalization(db_path: str) -> None:
+    """desire 正規化 (P3c-0) を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_desire_stage_normalization(engine)
+    finally:
+        engine.dispose()
+
+
 def _assign_initial_slot_numbers(engine) -> None:
     """既存アイテムに作成日時順でスロット番号を割り当てる。"""
     try:

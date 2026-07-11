@@ -1312,24 +1312,18 @@ class MetaLayer:
         }
 
     def _get_desire_candidates(self, persona_id: str) -> List[Dict[str, Any]]:
-        """desire ノートの候補 Task 一覧 (autonomous_desire.md §6/§11)。
+        """生きている欲求候補 (stage='candidate' の目的ノード) 一覧 (P3c-0)。
 
         META が Track 化 (昇格) の候補として読む。各要素は
-        ``{"task_ref", "title", "goal"}``。読み取り失敗・desire ノート無しなら空。
+        ``{"task_ref", "title", "goal"}``。読み取り失敗なら空。
         """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return []
         try:
-            from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
-            from saiverse.persona_task_manager import PersonaTaskManager
-            nm = NoteManager(self.manager.SessionLocal)
-            desire = nm.list_for_persona(persona_id, note_type=NOTE_TYPE_DESIRE)
-            if not desire:
-                return []
+            from saiverse.persona_task_manager import STAGE_CANDIDATE, PersonaTaskManager
             ptm = PersonaTaskManager(self.manager.SessionLocal)
             tasks = ptm.list_tasks(
-                persona_id, note_id=desire[0].note_id,
-                statuses=("pending", "active", "paused"), include_steps=False,
+                persona_id, stage=STAGE_CANDIDATE, include_steps=False,
             )
             out: List[Dict[str, Any]] = []
             for t in tasks:

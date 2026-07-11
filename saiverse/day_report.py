@@ -11,7 +11,8 @@
 - セッションの成果: SAIMemory の committed ダイジェスト
   (``sea.work_session.DIGEST_TAG``) と、その metadata の成果物 ref。
   成果物名は Item テーブルから解決し ``saiverse://item/<id>/content`` を添える
-- 欲求の動き: desire ノート内の候補 Task の帳簿カラム (生まれた/触れた/消えた)
+- 欲求の動き: 欲求として生まれた目的ノード (帳簿カラムを持つ行、P3c-0 desire
+  正規化) の帳簿カラム (生まれた/触れた/消えた/旅立った)
 - 就寝のふりかえり: SAIMemory の ``judgment:day_close`` 記録の
   ``metadata.judgment.monologue`` (独白本文のみ。適用エコー行は載せない —
   同内容が plan meta 由来の節で再掲されるため) と
@@ -216,28 +217,67 @@ def _resolve_item_labels(manager: Any, item_ids: List[str]) -> Dict[str, str]:
     return labels
 
 
-def _list_all_desires(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
-    """desire ノート内の候補 Task 全件 (status 問わず — 消えたものも見るため)。"""
-    try:
-        from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
-        from saiverse.persona_task_manager import PARENT_NOTE, PersonaTaskManager
+def _list_all_desires(
+    manager: Any, persona_id: str, plan_date_str: str,
+) -> List[Dict[str, Any]]:
+    """欲求として生まれた目的ノードのうち、当日動きがあった行 (P3c-0)。
 
-        notes = NoteManager(manager.SessionLocal).list_for_persona(
-            persona_id, note_type=NOTE_TYPE_DESIRE,
+    「消えたものも見る」ため stage を問わず ``desire_state IS NOT NULL``
+    (欲求として生まれた行すべて) を引き、Python 側で
+    created_at / last_touched_at / updated_at のいずれかが当日のものに絞る
+    (無限に増え続けるのを防ぐ — 就寝裁定 2026-07-11「載せるなら動きのあった
+    その日の一回だけ」)。
+    """
+    try:
+        from saiverse.persona_task_manager import PersonaTaskManager
+
+        all_desires = PersonaTaskManager(manager.SessionLocal).list_tasks(
+            persona_id, desire_only=True, include_steps=False,
         )
-        if not notes:
-            return []
-        return PersonaTaskManager(manager.SessionLocal).list_tasks(
-            persona_id,
-            note_id=notes[0].note_id,
-            parent_kind=PARENT_NOTE,
-            include_steps=False,
-        )
+        def _touched_today(task: Dict[str, Any]) -> bool:
+            for key in ("created_at", "last_touched_at", "updated_at"):
+                if str(task.get(key) or "").startswith(plan_date_str):
+                    return True
+            return False
+        return [t for t in all_desires if _touched_today(t)]
     except Exception:
         LOGGER.warning(
             "[day_report] desire listing failed (persona=%s)", persona_id, exc_info=True,
         )
         return []
+
+
+def _list_departed_desires(
+    manager: Any, persona_id: str, desires: List[Dict[str, Any]], plan_date_str: str,
+) -> List[Dict[str, Any]]:
+    """当日 Track へ昇格した (旅立った) 欲求の一覧 (P3c-0)。
+
+    昇格後は stage='adopted' になり、以後の活動で updated_at が動き続けるため
+    updated_at では「当日昇格したこと」を判定できない (採用後の活動日に再掲
+    される)。判定は persona_task_history の promote_to_track イベント日で行う。
+    """
+    from saiverse.persona_task_manager import STAGE_ADOPTED, PersonaTaskManager
+
+    ptm = PersonaTaskManager(manager.SessionLocal)
+    out: List[Dict[str, Any]] = []
+    for task in desires:
+        if task.get("stage") != STAGE_ADOPTED:
+            continue
+        try:
+            history = ptm.fetch_history(task["id"])
+        except Exception:
+            LOGGER.warning(
+                "[day_report] history fetch failed (persona=%s task=%s)",
+                persona_id, task.get("id"), exc_info=True,
+            )
+            continue
+        for h in history:
+            if h.get("event_type") != "promote_to_track":
+                continue
+            if str(h.get("created_at") or "").startswith(plan_date_str):
+                out.append(task)
+            break
+    return out
 
 
 def _persona_display_name(manager: Any, persona_id: str) -> str:
@@ -361,7 +401,7 @@ def _section_sessions(
 
 
 def _section_desires(
-    desires: List[Dict[str, Any]], plan_date_str: str,
+    manager: Any, persona_id: str, desires: List[Dict[str, Any]], plan_date_str: str,
 ) -> List[str]:
     born: List[str] = []
     touched: List[str] = []
@@ -388,6 +428,12 @@ def _section_desires(
             reason = "満たされました" if status == "completed" else "静かに消えました"
             gone.append(f"- [{dtype}] {title} — {reason}")
 
+    departed: List[str] = []
+    for task in _list_departed_desires(manager, persona_id, desires, plan_date_str):
+        title = task.get("title") or "(無題)"
+        dtype = task.get("desire_type") or "未分類"
+        departed.append(f"- [{dtype}] {title} — 目的の木へ旅立ちました")
+
     lines = ["## やりたいことの動き", ""]
     lines.append("生まれたもの:")
     lines.extend(born or [f"- {NONE_TEXT}"])
@@ -397,6 +443,9 @@ def _section_desires(
     lines.append("")
     lines.append("消えたもの:")
     lines.extend(gone or [f"- {NONE_TEXT}"])
+    lines.append("")
+    lines.append("旅立ったもの:")
+    lines.extend(departed or [f"- {NONE_TEXT}"])
     return lines
 
 
@@ -482,7 +531,7 @@ def generate_day_report(manager: Any, persona_id: str, plan_date: Any) -> str:
             if a not in all_artifact_ids:
                 all_artifact_ids.append(a)
     item_labels = _resolve_item_labels(manager, all_artifact_ids)
-    desires = _list_all_desires(manager, persona_id)
+    desires = _list_all_desires(manager, persona_id, plan_date_str)
     monologue = _latest_day_close_monologue(manager, persona_id)
 
     day_theme = (meta.get("day_theme") or "").strip() if isinstance(meta, dict) else ""
@@ -501,7 +550,7 @@ def generate_day_report(manager: Any, persona_id: str, plan_date: Any) -> str:
     parts.append("")
     parts.extend(_section_sessions(digests, item_labels))
     parts.append("")
-    parts.extend(_section_desires(desires, plan_date_str))
+    parts.extend(_section_desires(manager, persona_id, desires, plan_date_str))
     parts.append("")
     parts.extend(_section_budget(budget_state))
     parts.append("")

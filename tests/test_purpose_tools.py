@@ -25,7 +25,6 @@ from sqlalchemy.orm import sessionmaker
 from database.models import ActionTrack, Base
 from saiverse.note_manager import NoteManager
 from saiverse.persona_task_manager import (
-    PARENT_NOTE,
     PARENT_TRACK,
     STAGE_ADOPTED,
     STAGE_CANDIDATE,
@@ -62,8 +61,9 @@ class PurposeToolsTestCase(unittest.TestCase):
         self.nm = NoteManager(session_factory=self.SessionLocal)
 
         # load 済みスペル module の manager singleton を temp DB 版へ差し替え
-        _mod_seed._note_manager = self.nm
-        _mod_seed._task_manager = self.ptm
+        # (P3c-0: purpose_seed も purpose_tree 経由になったので、SessionLocal
+        # だけ差し替える shim 流儀に統一)。
+        _mod_seed._manager.SessionLocal = self.SessionLocal
         _mod_adopt._track_manager = self.tm
         _mod_adopt._manager.SessionLocal = self.SessionLocal
         _mod_decompose._task_manager = self.ptm
@@ -88,7 +88,8 @@ class PurposeToolsTestCase(unittest.TestCase):
     # purpose_seed — 候補を生む (接地の維持)
     # ------------------------------------------------------------------
 
-    def test_seed_creates_note_bound_candidate_with_grounding(self):
+    def test_seed_creates_parentless_candidate_with_grounding(self):
+        """P3c-0: 候補は親なし + stage='candidate' で生まれる (desire ノートの子ではない)。"""
         with persona_context(self.persona_id, self.persona_dir):
             out = _mod_seed.purpose_seed(
                 title="風景スケッチの練習をしたい",
@@ -97,19 +98,23 @@ class PurposeToolsTestCase(unittest.TestCase):
             )
         self.assertIn("task:1", out)
         self.assertIn("作る", out)
-        note_id = self.nm.ensure_desire_note(self.persona_id)
-        tasks = self.ptm.list_tasks(self.persona_id, note_id=note_id)
+        tasks = self.ptm.list_tasks(self.persona_id, stage=STAGE_CANDIDATE)
         self.assertEqual(len(tasks), 1)
         t = tasks[0]
-        self.assertEqual(t["parent_kind"], PARENT_NOTE)
+        self.assertIsNone(t["parent_kind"])
+        self.assertIsNone(t["note_id"])
         self.assertEqual(t["stage"], STAGE_CANDIDATE)  # 候補 = 木の外
         self.assertEqual(t["desire_type"], "作る")
         # 接地の維持 (旧 desire_add の source 規律そのまま)
         self.assertEqual(t["desire_source"], "窓から見た夕暮れの色")
+        # 帳簿の初期化 (P3c-0: 実効 stage='candidate' が判定条件になった)。
+        self.assertEqual(t["desire_state"], "fresh")
+        self.assertEqual(t["touch_count"], 0)
+        self.assertIsNotNone(t["last_touched_at"])
 
     def test_seed_without_type_is_unclassified(self):
         with persona_context(self.persona_id, self.persona_dir):
-            out = _mod_seed.purpose_seed(title="新しい言語を学びたい")
+            out = _mod_seed.purpose_seed(title="新しい言語を学びたい", source="ふと思った")
         self.assertIn("未分類", out)
 
     def test_seed_rejects_invalid_type(self):
@@ -117,6 +122,13 @@ class PurposeToolsTestCase(unittest.TestCase):
             out = _mod_seed.purpose_seed(title="なにか", type="遊ぶ")
         self.assertIn("Error", out)
         self.assertIn("遊ぶ", out)
+
+    def test_seed_requires_source(self):
+        """P3c-0: source は purpose_tree.create_candidate の接地原則で必須。"""
+        with persona_context(self.persona_id, self.persona_dir):
+            out = _mod_seed.purpose_seed(title="根拠のない思いつき")
+        self.assertIn("Error", out)
+        self.assertEqual(self.ptm.list_tasks(self.persona_id, stage=STAGE_CANDIDATE), [])
 
     # ------------------------------------------------------------------
     # purpose_adopt — 候補の採用 (接ぎ木) / 枝への小目標追加
@@ -126,8 +138,7 @@ class PurposeToolsTestCase(unittest.TestCase):
         with persona_context(self.persona_id, self.persona_dir):
             out = _mod_seed.purpose_seed(title=title, source="友人の一言")
         self.assertIn("task:", out)
-        note_id = self.nm.ensure_desire_note(self.persona_id)
-        return self.ptm.list_tasks(self.persona_id, note_id=note_id)[-1]
+        return self.ptm.list_tasks(self.persona_id, stage=STAGE_CANDIDATE)[-1]
 
     def test_adopt_candidate_without_parent_stands_first_tier(self):
         cand = self._seed_candidate()

@@ -59,15 +59,13 @@ from saiverse.day_plan import (
     load_plan_meta,
 )
 from saiverse.desire_engine import (
-    CANDIDATE_STATUSES,
     DESIRE_TYPES,
     decay_desires,
     desire_summary_for_prompt,
     promotion_candidates,
 )
-from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
 from saiverse.persona_task_manager import (
-    PARENT_NOTE,
+    STAGE_CANDIDATE,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     PersonaTaskManager,
@@ -197,27 +195,23 @@ def collect_facility_ids(manager: Any) -> List[str]:
 
 
 def _list_backlog_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
-    """バックログタスク (desire 候補を除く生きているタスク) の dict リスト。"""
+    """バックログタスク (欲求候補を除く生きているタスク) の dict リスト。
+
+    P3c-0 以降、欲求候補は parent_kind でなく stage='candidate' で識別する
+    (候補は常に親なしで生まれるため、parent_kind だけではもう区別できない)。
+    """
     ptm = PersonaTaskManager(manager.SessionLocal)
     tasks = ptm.list_tasks(
         persona_id, statuses=BACKLOG_TASK_STATUSES, include_steps=False,
     )
-    return [t for t in tasks if t.get("parent_kind") != PARENT_NOTE]
+    return [t for t in tasks if t.get("stage") != STAGE_CANDIDATE]
 
 
 def _list_desire_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
-    """生きている欲求候補 (desire ノート内 Task) の dict リスト。"""
-    nm = NoteManager(manager.SessionLocal)
-    notes = nm.list_for_persona(persona_id, note_type=NOTE_TYPE_DESIRE)
-    if not notes:
-        return []
+    """生きている欲求候補 (stage='candidate' の目的ノード) の dict リスト (P3c-0)。"""
     ptm = PersonaTaskManager(manager.SessionLocal)
     return ptm.list_tasks(
-        persona_id,
-        note_id=notes[0].note_id,
-        parent_kind=PARENT_NOTE,
-        statuses=CANDIDATE_STATUSES,
-        include_steps=False,
+        persona_id, stage=STAGE_CANDIDATE, include_steps=False,
     )
 
 

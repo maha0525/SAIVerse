@@ -40,8 +40,7 @@ from saiverse import clock
 from saiverse import day_plan
 from saiverse import judgment_points as jp
 from saiverse.event_scheduler import EventScheduler
-from saiverse.note_manager import NoteManager
-from saiverse.persona_task_manager import PARENT_NOTE, PersonaTaskManager
+from saiverse.persona_task_manager import STAGE_CANDIDATE, PersonaTaskManager
 from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
@@ -144,21 +143,15 @@ def ptm(manager):
 
 
 @pytest.fixture
-def nm(manager):
-    return NoteManager(manager.SessionLocal)
-
-
-@pytest.fixture
-def task_refs(manager, ptm, nm):
+def task_refs(manager, ptm):
     """task:1 (バックログ) と desire:2 (欲求候補) を用意する。"""
     t1 = ptm.create_task(
         persona_id=PERSONA_ID, title="蒸留記事の続きを読む",
         goal="要点を覚え書きにする", auto_activate=False,
     )
-    note_id = nm.ensure_desire_note(PERSONA_ID)
     t2 = ptm.create_task(
         persona_id=PERSONA_ID, title="言葉の標本集",
-        parent_kind=PARENT_NOTE, note_id=note_id,
+        stage=STAGE_CANDIDATE, desire_source="test-seed",
         origin="autonomous", auto_activate=False, desire_type="作る",
     )
     assert t1["task_ref"] == "task:1"
@@ -206,11 +199,9 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
                               {"tomorrow_memo": "明日は標本集の続きから"})
 
     # 放置された欲求 (20 日前が最終接触) — decay の前処理で期限切れになるはず
-    nm = NoteManager(manager.SessionLocal)
-    note_id = nm.ensure_desire_note(PERSONA_ID)
     stale = ptm.create_task(
         persona_id=PERSONA_ID, title="古い思いつき",
-        parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
+        stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
     )
     db = session_factory()
     try:
@@ -1368,11 +1359,9 @@ def test_day_close_dispatch_schema_and_situation(
     # desire:2 は今日 (仮想 2026-07-04) 触れた
     touch_desire(manager, PERSONA_ID, task_refs["desire"])
     # 触れていない欲求 (作成も接触も昨日以前) は enum に出ない
-    nm = NoteManager(manager.SessionLocal)
-    note_id = nm.ensure_desire_note(PERSONA_ID)
     old = ptm.create_task(
         persona_id=PERSONA_ID, title="以前からの思いつき",
-        parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
+        stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
     )
     db = session_factory()
     try:

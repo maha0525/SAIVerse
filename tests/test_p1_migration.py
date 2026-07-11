@@ -4,8 +4,11 @@
 - episodes テーブル (新規) と persona_task の stage / nature / promoted_from
   (新規列) が try_additive_migration の追加系パスで適用されること
   (全書換パスに落ちないこと — Windows の WinError 32 回避の前提)
-- 旧スキーマの既存行 (desire / task) がデータを失わず、stage の後方互換既定規則
-  (desire 行 → candidate / task 行 → adopted) で読めること
+- 旧スキーマの既存行 (desire / task) がデータを失わないこと。stage は
+  P3c-0 (desire 正規化) 以降、読み出し時導出でなく
+  ``database.migrate.backfill_desire_stage_normalization`` の一回きりデータ
+  移行が derive_stage() 相当の規則で物理刻印する (旧行の parent_kind='note'
+  も併せて親なしへ正規化される)
 """
 from __future__ import annotations
 
@@ -93,8 +96,29 @@ class P1AdditiveMigrationTests(unittest.TestCase):
         finally:
             engine.dispose()
 
-    def test_legacy_rows_survive_and_derive_stage(self):
+    def test_legacy_rows_survive_and_stage_gets_stamped(self):
+        """スキーマの追加系移行 (列追加) だけでは stage は NULL のまま。
+
+        P3c-0 以降、物理刻印は別ステップ (backfill_desire_stage_normalization、
+        main.py で schema 移行の直後に無条件で呼ばれる) が担う — 両方を通した
+        後の最終状態を検証する。
+        """
         self.assertTrue(try_additive_migration(self.db_path))
+
+        # 列追加だけでは NULL のまま (derive_stage 相当の刻印はまだ走っていない)。
+        check_engine = create_engine(f"sqlite:///{self.db_path}")
+        try:
+            with check_engine.connect() as conn:
+                raw = conn.execute(text(
+                    "SELECT stage FROM persona_task WHERE id='a'"
+                )).fetchone()
+            self.assertEqual(tuple(raw), (None,))
+        finally:
+            check_engine.dispose()
+
+        from database.migrate import backfill_desire_stage_normalization
+        backfill_desire_stage_normalization(self.db_path)
+
         engine = create_engine(f"sqlite:///{self.db_path}")
         try:
             SessionLocal = sessionmaker(bind=engine)
@@ -104,14 +128,17 @@ class P1AdditiveMigrationTests(unittest.TestCase):
             # データ保全
             self.assertEqual(desire["title"], "古い欲求")
             self.assertEqual(task["title"], "古いタスク")
-            # 後方互換の既定規則: 物理 stage は NULL のまま導出で埋まる
+            # derive_stage() 相当の規則で物理刻印される
             self.assertEqual(desire["stage"], "candidate")
             self.assertEqual(task["stage"], "adopted")
+            # 候補は親なしへ正規化される (P3c-0)
+            self.assertIsNone(desire["parent_kind"])
+            self.assertIsNone(desire["note_id"])
             with engine.connect() as conn:
                 raw = conn.execute(text(
                     "SELECT stage, nature, promoted_from FROM persona_task WHERE id='a'"
                 )).fetchone()
-            self.assertEqual(tuple(raw), (None, None, None))
+            self.assertEqual(tuple(raw), ("candidate", None, None))
         finally:
             engine.dispose()
 

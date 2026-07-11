@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 130（うち Spell 化: 86）
+**登録ツール数**: 132（うち Spell 化: 88）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -80,7 +80,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `purpose_adopt` | 目的の木に接ぎます（adopt = 接ぐ。候補を生むのは purpose_seed）。candidate_ref（task:N）を指定すると、書き留めてあった候補を採用して木に接ぎます — parent_ref（track:N）を添え… | `candidate_ref`: string, `title`: string, `parent_ref`: string | 目的の木に接ぐ |
 | `purpose_close` | 目的ノード（task:N）を閉じます。outcome で閉じ方を選びます: completed（やり遂げた）/ cancelled（やらないと決めた）/ dormant（今は続けないが、いつか戻るかもしれない — 休眠）。 | `node_ref*`: string, `outcome`: string, `reason`: string | 目的を閉じる |
 | `purpose_decompose` | 目的ノード（task:N）をステップに分解します。steps 配列の各要素は title（と任意の description）を持つオブジェクトで、既存のステップはすべて置き換えられます。1つのステップの進捗を更新するには purpos… | `node_ref*`: string, `steps*`: array | 目的をステップに分解 |
-| `purpose_seed` | 「いつかやりたい」と思いついたことを、候補として書き留めます（seed = 候補を生む。木に接ぐ = 採用は purpose_adopt が担います）。候補はやりたいことの候補プールに保管され、後から採用されて目的の木に接がれます。1… | `title*`: string, `goal`: string, `type`: string, `source`: string | やりたいことを書き留める |
+| `purpose_seed` | 「いつかやりたい」と思いついたことを、候補として書き留めます（seed = 候補を生む。木に接ぐ = 採用は purpose_adopt が担います）。候補はやりたいことの候補プールに保管され、後から採用されて目的の木に接がれます。1… | `title*`: string, `goal`: string, `type`: string, `source*`: string | やりたいことを書き留める |
 | `purpose_step` | 目的ノード（task:N）の中の1ステップの状態とメモを更新します。ステップへの分解（全置換）は purpose_decompose を使ってください。 | `node_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | 目的のステップを更新 |
 | `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
@@ -110,7 +110,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `get_sonic_distance` | あなたの身体 (Stack-chan) に接続された M5Stack 超音波測距ユニット (RCWL-9620) で、 正面にある物体までの距離 (cm) を測る。 指向角 およそ 60°、 測定可能なのは約 2〜450 cm。 「近… | (なし) | 距離を測る |
 | `get_tof_distance` | あなたの身体 (Stack-chan) に接続された M5Stack ToF 測距センサー (VL53L1X、 レーザー) で、 正面にある物体までの距離 (cm) を測る。 測定可能なのは約 4〜400 cm で、 超音波センサーよ… | `target`: string, `detail`: boolean | 距離を測る (ToF) |
 | `move_head` | Stack-chan の首を動かして向きを変える。 yaw は水平方向 (-90〜90度)、 pitch は垂直方向 (5〜85度)。 動作後にサーボが静止するまで待ってから返すので、 直後に「見る」 を呼んでもブレない。 | `yaw*`: integer, `pitch*`: integer | 首を動かす |
+| `read_environment` | 現在のStack-chan機体が感じている環境光と近接の値を1回取得する。環境光は可視+IRとIRのみのADC count、近接もADC countで返す。明るさの変化、手や物が顔の近くにあるかを確かめたい時に使う。常時監視や距離への… | (なし) | 光と近さを感じる |
 | `read_imu` | 現在のStack-chan機体が感じている9軸IMUの値を1回取得する。加速度(accel_g)、角速度(gyro_dps)、磁場(mag_ut)を、それぞれx/y/z軸で返す。上下や傾き、動かされた方向を確認したい時に使う。磁気セン… | (なし) | 姿勢と動きを感じる |
+| `scan_nfc` | 現在のStack-chan機体で、近くにかざされたISO 14443A NFCタグを1回だけ探す。タグがあればUID・ATQA・SAKを返す。タグ内容の読書き、認証、カードのエミュレーションは行わない。UIDは安定した識別子になり得る… | (なし) | NFCタグを探す |
 | `see` | あなたの目で目の前の光景を見る。 視覚で何かを確認したいときに呼ぶ。 戻り値には実際に見えた景色が画像として添付される。 問いを添えると注目したい点をメモとして残せる (任意)。 | `question`: string | 見る |
 | `servo8_set_angle` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 180° サーボを指定角度 (0〜180度) に動かす。 腕・首など向きを決めるサーボ用。 どのチャン… | `channel*`: integer, `angle*`: integer | サーボの角度を設定 |
 | `servo8_set_speed` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 360° 連続回転サーボ (車輪など) の回転速度を 設定する。 speed は -100〜100 で… | `channel*`: integer, `speed*`: integer | サーボの回転速度を設定 |

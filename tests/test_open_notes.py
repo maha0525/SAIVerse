@@ -12,8 +12,10 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from database.models import AI, ActionTrack, Base, City, User
-from saiverse.note_manager import NOTE_TYPE_PROJECT, NoteManager
+import uuid
+
+from database.models import AI, ActionTrack, Base, City, Note, User
+from saiverse.note_manager import NOTE_TYPE_DESIRE, NOTE_TYPE_PROJECT, NoteManager
 from saiverse.persona_task_manager import PARENT_NOTE, PARENT_TRACK, PersonaTaskManager
 from saiverse.track_manager import TrackManager
 from sea.head_pipeline.types import LineHeadInput
@@ -23,6 +25,27 @@ from sea.head_pipeline.sections.open_notes import (
     OpenNotesSection,
     OpenNotesSnapshot,
 )
+
+
+def _make_desire_note(Session, persona_id="air") -> str:
+    """desire 型 Note 行を直接作る (旧 note_manager.ensure_desire_note 相当)。
+
+    P3c-0 (desire 正規化) で ensure_desire_note は撤去済み — システムはもう
+    desire ノートを新規作成しない。open_notes.py の読み取り専用挙動 (P3c① で
+    section ごと退役予定、今回は「触らない」) を直接検証するため、テストは
+    ここで desire 型 Note 行を直接構成する。
+    """
+    note_id = str(uuid.uuid4())
+    db = Session()
+    try:
+        db.add(Note(
+            note_id=note_id, persona_id=persona_id, title="やりたいこと",
+            note_type=NOTE_TYPE_DESIRE, description="候補プール", is_active=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    return note_id
 
 
 def _make_db():
@@ -83,7 +106,7 @@ class OpenNotesSectionTest(unittest.TestCase):
         self.assertIsNone(OpenNotesSection().render(snap))
 
     def test_capture_lists_candidate_tasks(self):
-        note_id = self.nm.ensure_desire_note("air")
+        note_id = _make_desire_note(self.Session)
         self.ptm.create_task(
             persona_id="air", title="風景スケッチを練習したい",
             parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
@@ -122,7 +145,7 @@ class OpenNotesSectionTest(unittest.TestCase):
         self.assertEqual(snap.open_notes, ())
 
     def test_completed_candidate_excluded(self):
-        note_id = self.nm.ensure_desire_note("air")
+        note_id = _make_desire_note(self.Session)
         task = self.ptm.create_task(
             persona_id="air", title="済んだ候補",
             parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
@@ -135,7 +158,7 @@ class OpenNotesSectionTest(unittest.TestCase):
 
     def test_promoted_candidate_leaves_pool(self):
         """昇格 (note_id→track_id) した候補は候補プールから消える。"""
-        note_id = self.nm.ensure_desire_note("air")
+        note_id = _make_desire_note(self.Session)
         task = self.ptm.create_task(
             persona_id="air", title="昇格させる候補",
             parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
@@ -186,9 +209,10 @@ class DesireAddSpellTest(unittest.TestCase):
         self.nm = NoteManager(self.Session)
         self.ptm = PersonaTaskManager(self.Session)
         self.mod = load_builtin_tool("purpose_seed")
-        # module-singleton を temp DB 版へ差し替え (動的ロード = patch.object 相当)。
-        self.mod._note_manager = self.nm
-        self.mod._task_manager = self.ptm
+        # P3c-0: purpose_seed は purpose_tree.create_candidate 経由になった。
+        # module-singleton は「SessionLocal を持つ manager」の shim なので、
+        # SessionLocal だけ temp DB 版へ差し替える (purpose_adopt と同じ流儀)。
+        self.mod._manager.SessionLocal = self.Session
 
         self.tmp = tempfile.TemporaryDirectory()
         self.persona_dir = Path(self.tmp.name) / "air"
@@ -198,17 +222,21 @@ class DesireAddSpellTest(unittest.TestCase):
         self.engine.dispose()
         self.tmp.cleanup()
 
-    def test_desire_add_creates_note_bound_candidate(self):
+    def test_desire_add_creates_parentless_candidate(self):
+        """P3c-0: 候補は desire ノートに紐づかず、親なし + stage='candidate' で生まれる。"""
+        from saiverse.persona_task_manager import STAGE_CANDIDATE
         from tools.context import persona_context
 
         with persona_context("air", self.persona_dir):
-            out = self.mod.purpose_seed(title="新しい言語を学びたい", goal="表現の幅を広げる")
+            out = self.mod.purpose_seed(
+                title="新しい言語を学びたい", goal="表現の幅を広げる",
+                source="友人との会話で思いついた",
+            )
         self.assertIn("task:1", out)
-        # desire ノートが ensure され、候補 Task が note 紐付けで作られている。
-        note_id = self.nm.ensure_desire_note("air")
-        tasks = self.ptm.list_tasks("air", note_id=note_id)
+        tasks = self.ptm.list_tasks("air", stage=STAGE_CANDIDATE)
         self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0]["parent_kind"], PARENT_NOTE)
+        self.assertIsNone(tasks[0]["parent_kind"])
+        self.assertIsNone(tasks[0]["note_id"])
         self.assertEqual(tasks[0]["title"], "新しい言語を学びたい")
 
 
@@ -235,12 +263,12 @@ class TrackCreatePromoteTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_from_candidate_promotes_into_new_track(self):
+        from saiverse.persona_task_manager import STAGE_ADOPTED, STAGE_CANDIDATE
         from tools.context import persona_context
 
-        note_id = self.nm.ensure_desire_note("air")
         cand = self.ptm.create_task(
             persona_id="air", title="新言語を学ぶ",
-            parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
+            stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
         )
         ref = cand["task_ref"]
         with persona_context("air", self.persona_dir):
@@ -250,12 +278,15 @@ class TrackCreatePromoteTest(unittest.TestCase):
             )
         self.assertIn("昇格", msg)
         # 候補プールから消えている。
-        pool = self.ptm.list_tasks("air", note_id=note_id)
+        pool = self.ptm.list_tasks("air", stage=STAGE_CANDIDATE)
         self.assertEqual(pool, [])
         # 昇格後の Task は Track 紐付けになっている。
         promoted = self.ptm.get_task(cand["id"], persona_id="air")
         self.assertEqual(promoted["parent_kind"], PARENT_TRACK)
         self.assertIsNone(promoted["note_id"])
+        # P3c-0: track_create の from_candidate 直呼び経路は purpose_tree.adopt
+        # を通らないため、promote_to_track 自体が stage='adopted' を刻む。
+        self.assertEqual(promoted["stage"], STAGE_ADOPTED)
 
 
 if __name__ == "__main__":

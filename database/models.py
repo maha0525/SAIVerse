@@ -924,8 +924,12 @@ class PersonaTask(Base):
     # **不変条件**: タスク行は物理削除しない (掃除は status での論理削除)。これにより
     # MAX(short_id)+1 採番が単調増加し、番号は二度と再利用されない (Track の short_id と対称)。
     short_id = Column(Integer, nullable=True)
-    # 親バインド (排他: note か track の一方、or どちらも NULL)
-    parent_kind = Column(String(16), nullable=True)  # 'note' | 'track' | None
+    # 親バインド (排他: note か track の一方、or どちらも NULL)。
+    # 'note' は P3c-0 (desire 正規化) で撤去 — 欲求候補は親なし+stage='candidate'
+    # で表現するため、新規行はもう parent_kind='note' を持たない。
+    parent_kind = Column(String(16), nullable=True)  # 'note' (旧) | 'track' | None
+    # P3c-0 以降は死カラム (書き手・読み手ゼロ)。物理 DROP は Note テーブル退役
+    # (P3c①) 時に判断する。
     note_id = Column(String(36), ForeignKey("note.note_id"), nullable=True)
     track_id = Column(String(36), ForeignKey("action_track.track_id"), nullable=True)
     # 本体フィールド (standalone 踏襲)
@@ -961,10 +965,11 @@ class PersonaTask(Base):
     artifact_refs = Column(Text, nullable=True)
     # --- 目的ノードの段階 (stage; life_concept_map.md §3.1「種・段階・位置」) ---
     # 'candidate' (候補=未採用) | 'adopted' (採用済=木の中) | 'dormant' (休眠) |
-    # 'completed' | 'aborted'。NULL = stage 導入前の既存行 — 読み手は
-    # saiverse/persona_task_manager.py の derive_stage() で parent_kind / status /
-    # desire_state から決定論導出する (後方互換の既定規則: 既存 desire 行 →
-    # candidate、既存 task 行 → adopted)。nullable = 追加系 migration で安全。
+    # 'completed' | 'aborted'。P3c-0 (desire 正規化) 以降は全書き込み点
+    # (create_task/update_task_status/promote_to_track) で常に物理刻印される
+    # — NULL は移行前の既存行のみで、database/migrate.py の一回きり移行
+    # ステップが saiverse/persona_task_manager.py の derive_stage() と同じ規則
+    # で刻印する。nullable のままなのは追加系 migration の都合 (列自体は必須)。
     stage = Column(String(16), nullable=True)
     # ノード種別 (life_concept_map.md §3 の大枝二種、将来用):
     # 'practice' (営み: 細分化した先がいくら完了しても終わらない) |

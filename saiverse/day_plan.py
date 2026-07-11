@@ -1182,8 +1182,8 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     # 依らず「取り組みに向かった」事実を記録するため、実行前に付ける。
     ref = slot.get("ref") or REF_NONE
     # 欲求コマ発火 = 再訪記録。参照アドレッシング統一 (Q2) で全 ref が task:N に
-    # なり prefix では desire を判別できないが、touch_desire は parent_kind で
-    # desire でなければ安全に no-op するので、task ref すべてに対して呼ぶ。
+    # なり prefix では desire を判別できないが、touch_desire は stage='candidate'
+    # でなければ安全に no-op するので、task ref すべてに対して呼ぶ。
     if ref != REF_NONE and ref.startswith("task:"):
         try:
             from saiverse.desire_engine import touch_desire
@@ -1235,8 +1235,8 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
 def _resolve_ref(manager: Any, persona_id: str, ref: str) -> Optional[str]:
     """ref を人間可読なタイトル/目標へ解決する。none / 解決不能は None。
 
-    desire は persona_task の parent_kind='note' 行 (desire ノート紐付き) であり、
-    task:N と同じ short_id 参照空間を共有する (persona_task_manager.py)。
+    desire は親なし + stage='candidate' の目的ノード (P3c-0 desire 正規化) で
+    あり、task:N と同じ short_id 参照空間を共有する (persona_task_manager.py)。
     したがって "desire:N" も同じ短縮参照 N で解決する。
     """
     if not ref or ref == REF_NONE:
@@ -1247,7 +1247,7 @@ def _resolve_ref(manager: Any, persona_id: str, ref: str) -> Optional[str]:
         return None
 
     from saiverse.persona_task_manager import (
-        PARENT_NOTE,
+        STAGE_CANDIDATE,
         PersonaTaskManager,
         TaskNotFoundError,
     )
@@ -1263,10 +1263,10 @@ def _resolve_ref(manager: Any, persona_id: str, ref: str) -> Optional[str]:
         )
         return None
 
-    if m.group(1) == "desire" and task.get("parent_kind") != PARENT_NOTE:
+    if m.group(1) == "desire" and task.get("stage") != STAGE_CANDIDATE:
         LOGGER.warning(
-            "[day_plan] ref %r resolved to a non-desire task (parent_kind=%r); using it anyway",
-            ref, task.get("parent_kind"),
+            "[day_plan] ref %r resolved to a non-desire task (stage=%r); using it anyway",
+            ref, task.get("stage"),
         )
 
     title = task.get("title") or "(無題)"

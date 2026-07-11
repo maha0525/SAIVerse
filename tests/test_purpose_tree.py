@@ -88,21 +88,26 @@ class _DbTestCase(unittest.TestCase):
 
 
 class StageBackwardCompatDbTests(_DbTestCase):
-    """既存経路で書かれた行が既定規則で正しく読めること (DB 経由)。"""
+    """既存経路で書かれた行が既定規則で正しく読めること (DB 経由)。
 
-    def test_existing_desire_path_reads_candidate_without_writing_stage(self):
-        # 既存の desire_add 相当の経路 (parent_kind='note')
+    P3c-0 (desire 正規化) 以降、stage は読み出し時導出でなく書き込み時刻印に
+    なった — 以下は「物理カラムは NULL のまま」でなく「物理カラムに正しく
+    刻印される」ことを検証する (旧テスト名の「without_writing_stage」は反転)。
+    """
+
+    def test_existing_desire_path_stamps_candidate_stage(self):
+        # 旧 desire_add 相当の呼び出し形 (parent_kind='note') でも stage は
+        # 物理刻印される (create_task の実効 stage 導出)。
         task = self.ptm.create_task(
             persona_id="p1", title="星を見たい",
             parent_kind="note", note_id="note-1",
             auto_activate=False, desire_source="散歩の記憶",
         )
         self.assertEqual(task["stage"], STAGE_CANDIDATE)
-        # 物理カラムは NULL のまま (= 既存経路の挙動不変)
         db = self.SessionLocal()
         try:
             row = db.query(PersonaTask).filter_by(id=task["id"]).first()
-            self.assertIsNone(row.stage)
+            self.assertEqual(row.stage, STAGE_CANDIDATE)
         finally:
             db.close()
 
@@ -117,10 +122,8 @@ class StageBackwardCompatDbTests(_DbTestCase):
             persona_id="p1", title="消える欲求",
             parent_kind="note", note_id="note-1", auto_activate=False,
         )
-        # desire_engine.decay_desires の論理アーカイブと同じ書き込み
-        self.ptm.update_task_status(
-            task["id"], status=STATUS_CANCELLED, actor="test", persona_id="p1",
-        )
+        # P3c-0: desire_engine.decay_desires と同じ順序 (帳簿の expired を
+        # 先に刻んでから status 遷移を記録する) — この順序が不変条件。
         db = self.SessionLocal()
         try:
             row = db.query(PersonaTask).filter_by(id=task["id"]).first()
@@ -128,6 +131,9 @@ class StageBackwardCompatDbTests(_DbTestCase):
             db.commit()
         finally:
             db.close()
+        self.ptm.update_task_status(
+            task["id"], status=STATUS_CANCELLED, actor="test", persona_id="p1",
+        )
         got = self.ptm.get_task(task["id"], persona_id="p1")
         self.assertEqual(got["stage"], "dormant")
 
@@ -138,6 +144,34 @@ class StageBackwardCompatDbTests(_DbTestCase):
         )
         got = self.ptm.get_task(task["id"], persona_id="p1")
         self.assertEqual(got["stage"], "completed")
+
+    def test_live_status_transitions_leave_stage_unchanged(self):
+        """P3c-0: 生存 status (pending/active/paused) への遷移は stage を触らない。
+
+        candidate は candidate のまま、adopted は adopted のまま — 遷移時の
+        刻印規則は completed/cancelled のみを対象にする。
+        """
+        candidate = self.ptm.create_task(
+            persona_id="p1", title="候補のまま",
+            parent_kind="note", note_id="note-1", auto_activate=False,
+        )
+        self.assertEqual(candidate["stage"], STAGE_CANDIDATE)
+        self.ptm.update_task_status(
+            candidate["id"], status="active", actor="test", persona_id="p1",
+        )
+        self.ptm.update_task_status(
+            candidate["id"], status="paused", actor="test", persona_id="p1",
+        )
+        still_candidate = self.ptm.get_task(candidate["id"], persona_id="p1")
+        self.assertEqual(still_candidate["stage"], STAGE_CANDIDATE)
+
+        adopted = self.ptm.create_task(persona_id="p1", title="採用のまま", auto_activate=False)
+        self.assertEqual(adopted["stage"], STAGE_ADOPTED)
+        self.ptm.update_task_status(
+            adopted["id"], status="active", actor="test", persona_id="p1",
+        )
+        still_adopted = self.ptm.get_task(adopted["id"], persona_id="p1")
+        self.assertEqual(still_adopted["stage"], STAGE_ADOPTED)
 
 
 class PurposeTreeTests(_DbTestCase):
@@ -163,18 +197,6 @@ class PurposeTreeTests(_DbTestCase):
         self.assertEqual(adopted["stage"], STAGE_ADOPTED)
         first = PT.list_first_tier(self.manager, "p1")
         self.assertEqual([n["ref"] for n in first], [adopted["ref"]])
-
-    def test_adopt_legacy_note_bound_desire_detaches_note(self):
-        # 旧 desire 実装 (parent_kind='note') → 採用で正規化 (§10.1)
-        task = self.ptm.create_task(
-            persona_id="p1", title="古い欲求",
-            parent_kind="note", note_id="note-1",
-            auto_activate=False,
-        )
-        adopted = PT.adopt(self.manager, "p1", task["task_ref"])
-        self.assertEqual(adopted["stage"], STAGE_ADOPTED)
-        self.assertIsNone(adopted["parent_kind"])
-        self.assertIsNone(adopted["note_id"])
 
     def test_adopt_under_track_parent(self):
         track_id = self.tm.create("p1", "autonomous", title="言葉集め")

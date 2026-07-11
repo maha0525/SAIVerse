@@ -1,9 +1,10 @@
 """欲求の帳簿 (desire ledger) — 六型欲求の鮮度・再訪・淘汰の決定論処理 (自律行動 v2 §5)。
 
-欲求の実体は desire ノートに紐づく候補 Task (``persona_task`` の
-``parent_kind='note'`` 行、autonomous_desire.md §5) であり、本モジュールは
-その行の帳簿カラム (``desire_type`` / ``desire_source`` / ``desire_state`` /
-``last_touched_at`` / ``touch_count``) を決定論で運用する。**LLM は呼ばない**:
+欲求の実体は親なし + ``stage='candidate'`` の目的ノード (``persona_task`` 行、
+P3c-0 desire 正規化。旧「desire ノートに紐づく Task (parent_kind='note')」
+という表現は撤去) であり、本モジュールはその行の帳簿カラム (``desire_type`` /
+``desire_source`` / ``desire_state`` / ``last_touched_at`` / ``touch_count``)
+を決定論で運用する。**LLM は呼ばない**:
 
 - :func:`decay_desires` — 起床判断 (day_open) 前の帳簿処理。放置された欲求を
   fading → 期限切れ (論理アーカイブ) へ送る
@@ -22,9 +23,10 @@
 - 基準から :data:`FADING_AFTER_DAYS` 日 (暦日) で ``fading``
 - :data:`EXPIRE_AFTER_DAYS` 日で期限切れ = status を cancelled にする
   **論理アーカイブ** (物理削除しない)。``persona_task`` は「行を物理削除しない」
-  不変条件 (short_id の単調増加) を持ち、候補プールの読み手 (open_notes /
-  メタ判断 / 本モジュール) は全て status でフィルタするため、cancelled 化だけで
-  候補から自動的に消え、履歴と接地の証跡 (desire_source) は残る
+  不変条件 (short_id の単調増加) を持ち、候補プールの読み手 (メタ判断 / 本
+  モジュール) は全て stage='candidate' でフィルタするため、cancelled 化に
+  伴う stage 遷移 (dormant/aborted) だけで候補から自動的に消え、履歴と接地の
+  証跡 (desire_source) は残る
 - 再訪 (touch) は鮮度を全回復する (state を fresh に戻す)
 
 閾値の初期値 (FADING_AFTER_DAYS=7 / EXPIRE_AFTER_DAYS=14 /
@@ -42,17 +44,13 @@ from typing import Any, Dict, List, Optional
 from database.models import PersonaTask
 from saiverse import clock
 from saiverse.day_plan import SIX_KINDS
-from saiverse.note_manager import NOTE_TYPE_DESIRE, NoteManager
 from saiverse.persona_task_manager import (
     DESIRE_STATE_EXPIRED,
     DESIRE_STATE_FADING,
     DESIRE_STATE_FRESH,
-    PARENT_NOTE,
-    STATUS_ACTIVE,
+    STAGE_CANDIDATE,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
-    STATUS_PAUSED,
-    STATUS_PENDING,
     PersonaTaskManager,
     TaskNotFoundError,
 )
@@ -73,9 +71,6 @@ EXPIRE_AFTER_DAYS = 14
 
 #: promotion_candidates に載る再訪回数の閾値 (touch_count >= この値)
 PROMOTION_TOUCH_THRESHOLD = 3
-
-#: 候補プールとして「生きている」status (open_notes / メタ判断の読み手と同一)
-CANDIDATE_STATUSES = (STATUS_PENDING, STATUS_ACTIVE, STATUS_PAUSED)
 
 # 就寝判断 desire_reviews の verdict (judgment_points.md §8)
 VERDICT_KEEP = "keep"
@@ -106,24 +101,17 @@ def _as_date(value: datetime | date) -> date:
     return value.date() if isinstance(value, datetime) else value
 
 
-def _desire_note_id(manager: Any, persona_id: str) -> Optional[str]:
-    """ペルソナの desire ノート note_id。無ければ None (欲求ゼロと同義)。"""
-    nm = NoteManager(manager.SessionLocal)
-    notes = nm.list_for_persona(persona_id, note_type=NOTE_TYPE_DESIRE)
-    return notes[0].note_id if notes else None
-
-
 def _list_desires(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
-    """生きている欲求 (候補 Task) の dict リスト。desire ノート無しなら空。"""
-    note_id = _desire_note_id(manager, persona_id)
-    if note_id is None:
-        return []
+    """生きている欲求候補 (stage='candidate' の目的ノード) の dict リスト (P3c-0)。
+
+    刻印が正しければ stage='candidate' だけで生存候補と一致する (完了/失効/
+    昇格は書き込み時の刻印で stage が変わるため、status での併用フィルタは
+    不要)。
+    """
     ptm = PersonaTaskManager(manager.SessionLocal)
     return ptm.list_tasks(
         persona_id,
-        note_id=note_id,
-        parent_kind=PARENT_NOTE,
-        statuses=CANDIDATE_STATUSES,
+        stage=STAGE_CANDIDATE,
         include_steps=False,
     )
 
@@ -186,13 +174,16 @@ def decay_desires(
             continue
         days = (today_d - datetime.fromisoformat(base_iso).date()).days
         if days >= EXPIRE_AFTER_DAYS:
-            # 論理アーカイブ: status 遷移は履歴つきで記録し、帳簿に expired を刻む。
+            # 論理アーカイブ: 帳簿の expired を**先に**刻んでから status 遷移を
+            # 記録する (P3c-0: update_task_status の cancelled 刻印規則は
+            # desire_state を見て dormant/aborted を選ぶため、順序が不変条件 —
+            # 逆順だと desire_state がまだ expired でなく aborted に落ちる)。
+            _update_ledger_fields(
+                manager, persona_id, task["id"], desire_state=DESIRE_STATE_EXPIRED,
+            )
             ptm.update_task_status(
                 task["id"], status=STATUS_CANCELLED, actor="desire_engine",
                 persona_id=persona_id, reason="desire_expired",
-            )
-            _update_ledger_fields(
-                manager, persona_id, task["id"], desire_state=DESIRE_STATE_EXPIRED,
             )
             expired.append(ref)
         elif days >= FADING_AFTER_DAYS:
@@ -272,11 +263,11 @@ def touch_desire(manager: Any, persona_id: str, ref: str) -> Optional[Dict[str, 
 
     時間割のコマが発火したとき (``day_plan._fire_slot``) に、その ref が指すタスクへ
     呼ばれる。``ref`` は ``task:N`` / UUID hex。参照アドレッシング統一 (Q2) 後は
-    バックログタスクのコマ発火でもこれが呼ばれるため、desire でない (parent_kind が
-    note でない) 場合の no-op は正常系 (DEBUG ログ)。
+    バックログタスクのコマ発火でもこれが呼ばれるため、desire でない (stage が
+    candidate でない) 場合の no-op は正常系 (DEBUG ログ)。
 
     Returns:
-        更新後の Task dict。ref が候補 (parent_kind='note') でなければ None。
+        更新後の Task dict。ref が候補 (stage='candidate') でなければ None。
 
     Raises:
         TaskNotFoundError: ref が解決できないとき。
@@ -284,11 +275,11 @@ def touch_desire(manager: Any, persona_id: str, ref: str) -> Optional[Dict[str, 
     ptm = PersonaTaskManager(manager.SessionLocal)
     task_id = ptm.resolve_task_ref(persona_id, _normalize_ref(ref))
     task = ptm.get_task(task_id, persona_id=persona_id)
-    if task.get("parent_kind") != PARENT_NOTE:
+    if task.get("stage") != STAGE_CANDIDATE:
         # 統合後はバックログタスクのコマ発火でも呼ばれる正常系なので DEBUG。
         LOGGER.debug(
-            "[desire] touch skipped (not a desire candidate): persona=%s ref=%r parent_kind=%r",
-            persona_id, ref, task.get("parent_kind"),
+            "[desire] touch skipped (not a desire candidate): persona=%s ref=%r stage=%r",
+            persona_id, ref, task.get("stage"),
         )
         return None
     new_count = (task.get("touch_count") or 0) + 1

@@ -14,9 +14,11 @@ node dict の形 (両実体を同じ語彙に写す):
 ``{"node_kind": "track"|"task"|"step", "ref", "id", "title", "stage",
    "nature", "status", "promoted_from", ...}``
 
-P1 (DB 基盤) 時点では本モジュールはどこからも呼ばれない (休眠)。判断点
-playbook の track_op / track_ref enum の目的ノード語彙への改修 (P2〜P5) で
-配線される (life_concept_map.md §14)。
+P3c-0 (desire 正規化) で起床: ``create_candidate`` は ``purpose_seed`` /
+``day_scenario`` の種まきの唯一の候補作成入口になった (旧「desire ノートの子」
+表現は撤去)。API (``api/routes/people/life.py`` ProfileTree UI) も本モジュール
+経由で読む。判断点 playbook の track_op / track_ref enum の目的ノード語彙への
+改修 (P2〜P5) は引き続き life_concept_map.md §14 で追う。
 """
 from __future__ import annotations
 
@@ -239,14 +241,29 @@ def list_children(manager: Any, persona_id: str, node_ref: str) -> List[Dict[str
 
 
 def create_candidate(
-    manager: Any, persona_id: str, title: str, source_ref: str
+    manager: Any,
+    persona_id: str,
+    title: str,
+    source_ref: str,
+    *,
+    desire_type: Optional[str] = None,
+    actor: Optional[str] = None,
+    origin: Optional[str] = None,
+    goal: Optional[str] = None,
 ) -> Dict[str, Any]:
     """候補ノードを作る (§3.1: 収穫されて初めて候補が生まれる)。
+
+    P3c-0 (desire 正規化) で本関数は候補作成の唯一の入口になった
+    (``purpose_seed`` / ``day_scenario`` 種まきの双方がここを通る)。
 
     ``source_ref`` は必須 = 接地原則 (§3.1 来歴リンク / §12 主張の接地)。
     mark 参照・実経験の引用など「この候補が何から生まれたか」を必ず刻む。
     候補は木の外 (stage=candidate) に親なしで置かれ、adopt で木に接がれる。
     規模は宣言でなく獲得 (§3.1) — 候補は常に小さく生まれる。
+
+    ``desire_type`` は欲求の六型 (自律行動 v2 §5、省略時は未分類)。``actor`` /
+    ``origin`` は呼び出し元の識別子 (省略時は本モジュールの :data:`ACTOR`)。
+    ``goal`` 省略時は ``title`` をそのまま goal として使う (既定の挙動)。
     """
     if not source_ref or not str(source_ref).strip():
         raise ValueError("source_ref is required (接地原則: 候補は必ず来歴を持つ)")
@@ -254,10 +271,11 @@ def create_candidate(
     task = ptm.create_task(
         persona_id=persona_id,
         title=title,
-        goal=title,
-        origin=ACTOR,
-        actor=ACTOR,
+        goal=goal if goal else title,
+        origin=origin or ACTOR,
+        actor=actor or ACTOR,
         auto_activate=False,
+        desire_type=desire_type,
         desire_source=str(source_ref).strip(),
         stage=STAGE_CANDIDATE,
     )
@@ -298,9 +316,10 @@ def adopt(
     ptm = PersonaTaskManager(manager.SessionLocal)
     task_id = node["id"]
     if parent_ref is None:
-        if node.get("parent_kind") is not None:
-            # 旧 desire 実装 (parent_kind='note') の正規化 (§10.1)。
-            ptm.detach_parent(task_id, persona_id=persona_id, actor=ACTOR)
+        # 候補 (stage=candidate) は P3c-0 の正規化により常に親なしで生まれる。
+        # 親を持ったまま candidate に留まる行はもう発生しないため、ここでの
+        # detach_parent は不要 (旧 desire 正規化枝は移行後に到達不能なので撤去)。
+        pass
     else:
         parent = resolve_ref(manager, persona_id, parent_ref)
         if parent["node_kind"] != "track":

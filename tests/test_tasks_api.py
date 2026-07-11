@@ -48,10 +48,13 @@ class TasksListApiTest(unittest.TestCase):
         self.engine.dispose()
 
     def test_list_returns_all_kinds_with_parent_labels(self):
-        desire = self.nm.ensure_desire_note("air")
+        # parent_kind='note' 自体は P3c-0 (desire 正規化) 以降どこからも書かれ
+        # なくなったが、API のラベル付けロジック (parent_kind='note' → "候補")
+        # 自体は変更対象外なので、行を直接構成して検証する (note_id の FK は
+        # 実行時未強制)。
         self.ptm.create_task(
             persona_id="air", title="候補タスク",
-            parent_kind=PARENT_NOTE, note_id=desire, auto_activate=False,
+            parent_kind=PARENT_NOTE, note_id="fake-note-id", auto_activate=False,
         )
         self.ptm.create_task(
             persona_id="air", title="Track小目標",

@@ -268,29 +268,16 @@ def test_list_tracks_with_note(nm, persona):
 
 
 # ---------------------------------------------------------------------------
-# desire ノート (やりたいこと候補プール, autonomous_desire.md §5)
+# desire (旧「やりたいこと候補プール」note_type, autonomous_desire.md §5)
+#
+# P3c-0 (desire 正規化) で候補の実体は親なし+stage='candidate' の目的ノードへ
+# 移行し、この note_type を新規作成する経路 (旧 ensure_desire_note) は撤去済み。
+# 残るのは「ユーザーが note_create で作れない」という拒否側の検証のみ
+# (sea/head_pipeline/sections/open_notes.py の読み取り専用消費は別途 P3c① で
+# 退役予定)。
 # ---------------------------------------------------------------------------
-
-def test_ensure_desire_note_creates_singleton(nm, persona):
-    from saiverse.note_manager import NOTE_TYPE_DESIRE
-
-    nid = nm.ensure_desire_note(persona)
-    note = nm.get(nid)
-    assert note.note_type == NOTE_TYPE_DESIRE
-    assert note.persona_id == persona
-    # 2 回目は同じ note_id を返す (singleton)。
-    assert nm.ensure_desire_note(persona) == nid
-    desires = nm.list_for_persona(persona, note_type=NOTE_TYPE_DESIRE)
-    assert len(desires) == 1
-
 
 def test_user_create_rejects_desire_type(nm, persona):
     """desire は system 専管 = ユーザー作成経路 (create) では拒否される。"""
     with pytest.raises(InvalidNoteTypeError):
         nm.create(persona, "勝手な欲求", "desire")
-
-
-def test_desire_note_is_per_persona(nm, persona):
-    a = nm.ensure_desire_note("alice")
-    b = nm.ensure_desire_note("bob")
-    assert a != b

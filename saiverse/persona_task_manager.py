@@ -77,16 +77,20 @@ def derive_stage(
     parent_kind: Optional[str],
     desire_state: Optional[str],
 ) -> str:
-    """stage カラムが NULL の既存行から段階を決定論導出する (後方互換の既定規則)。
+    """stage 列の値を status/parent_kind/desire_state から決定論導出する。
 
-    life_concept_map.md §3.1 / §10.1「desire の実装 → 目的ノード stage=候補へ正規化」
-    の読み出し側。既存カラムだけから一意に決まる:
+    **P3c-0 (desire 正規化) 以降、これは書き込み時刻印の仕様を移行 SQL 用に
+    写した参照実装としてのみ残る**——実行時の読み出しはもう本関数を経由しない
+    (``_task_to_dict`` は物理カラム ``task.stage`` を直接返す)。
+    ``database/migrate.py`` の一回きり移行ステップがこの規則と同じ CASE 文で
+    既存 NULL 行に物理刻印する。life_concept_map.md §3.1 / §10.1「desire の
+    実装 → 目的ノード stage=候補へ正規化」の仕様書:
 
     - status=completed → completed
     - status=cancelled かつ desire の期限切れ (desire_state='expired') → dormant
       (§5「薄れても消滅でなく休眠」— desire_engine の論理アーカイブが対応)
     - status=cancelled (その他) → aborted
-    - 生きている行: parent_kind='note' (desire ノートの候補) → candidate、
+    - 生きている行: parent_kind='note' (旧 desire ノートの候補) → candidate、
       それ以外 (track 内小目標・未所属) → adopted
     """
     if status == STATUS_COMPLETED:
@@ -184,11 +188,10 @@ class PersonaTaskManager:
             "touch_count": task.touch_count,
             # 成果物参照 (judgment_points.md §6 の接地の証跡)。JSON 配列を list に展開。
             "artifact_refs": cls._parse_artifact_refs(task.artifact_refs),
-            # 目的ノードの段階 (life_concept_map.md §3.1)。物理カラムが NULL の
-            # 既存行は derive_stage() の既定規則で埋めて返す (= 実効値を見せる)。
-            "stage": task.stage or derive_stage(
-                task.status, task.parent_kind, task.desire_state
-            ),
+            # 目的ノードの段階 (life_concept_map.md §3.1)。P3c-0 以降、stage は
+            # 全書き込み点 (create_task/update_task_status/promote_to_track) で
+            # 物理刻印される — 読み出し時導出 (derive_stage) はもう行わない。
+            "stage": task.stage,
             "nature": task.nature,
             # 昇格・命名の来歴 (JSON 配列を list に展開。artifact_refs と同形式)。
             "promoted_from": cls._parse_artifact_refs(task.promoted_from),
@@ -341,22 +344,26 @@ class PersonaTaskManager:
         作成した Task を active にし最初の未完ステップを active_step にする。
 
         ``desire_type`` / ``desire_source`` は欲求の六型と接地参照 (自律行動 v2 §5)。
-        候補 (parent_kind='note') では帳簿 (last_touched_at / touch_count /
-        desire_state) も初期化する。値の検証は呼び出し側 (purpose_seed スペル等、
-        旧 desire_add 後継) の責務 — 本レイヤーは priority / origin と同じく
-        永続化のみ担う。
+        候補 (実効 stage='candidate') では帳簿 (last_touched_at / touch_count /
+        desire_state) も初期化する。値の検証は呼び出し側 (purpose_tree.create_candidate
+        等) の責務 — 本レイヤーは priority / origin と同じく永続化のみ担う。
 
         ``stage`` / ``nature`` / ``promoted_from`` は目的ノードの段階・種別・来歴
-        (life_concept_map.md §3.1)。省略 (None) 時は物理カラムを NULL のままにし、
-        読み出し側が derive_stage() の既定規則で埋める — 既存呼び出し元の挙動は
-        一切変わらない。``promoted_from`` は ref のシーケンスで、JSON 配列として
-        永続化される (artifact_refs と同形式)。
+        (life_concept_map.md §3.1)。**P3c-0 (desire 正規化) 以降、stage は常に
+        物理刻印する** — ``stage`` 引数が None なら
+        ``STAGE_CANDIDATE if kind == PARENT_NOTE else STAGE_ADOPTED``
+        (derive_stage() の「生きている行」規則と同じ導出) で確定して書き込む。
+        ``promoted_from`` は ref のシーケンスで、JSON 配列として永続化される
+        (artifact_refs と同形式)。
         """
         if not persona_id:
             raise ValueError("persona_id is required")
         if not title:
             raise ValueError("title is required")
         kind, n_id, t_id = self._normalize_parent(parent_kind, note_id, track_id)
+        effective_stage = stage if stage is not None else (
+            STAGE_CANDIDATE if kind == PARENT_NOTE else STAGE_ADOPTED
+        )
 
         task_id = uuid.uuid4().hex
         now = _now()
@@ -396,11 +403,14 @@ class PersonaTaskManager:
                 last_actor=actor,
                 desire_type=desire_type,
                 desire_source=desire_source,
-                # 帳簿の初期化は候補 (note 親) のみ。鮮度の起点 = 作成時刻。
-                desire_state=DESIRE_STATE_FRESH if kind == PARENT_NOTE else None,
-                last_touched_at=now if kind == PARENT_NOTE else None,
-                touch_count=0 if kind == PARENT_NOTE else None,
-                stage=stage,
+                # 帳簿の初期化は候補 (実効 stage='candidate') のみ。鮮度の起点 = 作成時刻。
+                # P3c-0: 判定条件を kind==PARENT_NOTE から実効 stage へ変更 — これにより
+                # purpose_tree.create_candidate 経由 (parent_kind なし) の候補にも帳簿が
+                # 正しく付くようになる (旧条件では帳簿が初期化されないバグ予備軍だった)。
+                desire_state=DESIRE_STATE_FRESH if effective_stage == STAGE_CANDIDATE else None,
+                last_touched_at=now if effective_stage == STAGE_CANDIDATE else None,
+                touch_count=0 if effective_stage == STAGE_CANDIDATE else None,
+                stage=effective_stage,
                 nature=nature,
                 promoted_from=(
                     json.dumps([str(r) for r in promoted_from], ensure_ascii=False)
@@ -513,9 +523,20 @@ class PersonaTaskManager:
         parent_kind: Optional[str] = None,
         note_id: Optional[str] = None,
         track_id: Optional[str] = None,
+        stage: Optional[str] = None,
+        desire_only: bool = False,
         limit: Optional[int] = None,
         include_steps: bool = True,
     ) -> List[Dict[str, Any]]:
+        """persona のタスクを条件でフィルタして一覧する。
+
+        ``stage``: 物理刻印された段階 (life_concept_map.md §3.1) で絞る
+        (例: ``stage='candidate'`` = 生きている欲求候補一覧、P3c-0)。
+        ``desire_only``: 欲求の帳簿を持つ行 (``desire_state IS NOT NULL``、
+        = 欲求として生まれた行) だけに絞る。完了/失効/昇格後も帳簿は残るため、
+        stage を問わず「欲求として生まれた行すべて」を見たいとき (day_report の
+        一日新聞) に使う。
+        """
         db = self.SessionLocal()
         try:
             q = db.query(PersonaTask).filter(PersonaTask.persona_id == persona_id)
@@ -527,6 +548,10 @@ class PersonaTaskManager:
                 q = q.filter(PersonaTask.note_id == note_id)
             if track_id is not None:
                 q = q.filter(PersonaTask.track_id == track_id)
+            if stage is not None:
+                q = q.filter(PersonaTask.stage == stage)
+            if desire_only:
+                q = q.filter(PersonaTask.desire_state.isnot(None))
             q = q.order_by(PersonaTask.updated_at.desc())
             if limit:
                 q = q.limit(int(limit))
@@ -553,6 +578,18 @@ class PersonaTaskManager:
         reason: Optional[str] = None,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Task の status を遷移し、stage も刻印規則に従って物理刻印する (P3c-0)。
+
+        刻印規則 (life_concept_map.md §3.1 / concept_consolidation.md P3c-0):
+
+        - status=completed → stage=completed
+        - status=cancelled かつ現在の desire_state が既に 'expired' → stage=dormant
+          (desire_engine.decay_desires は先に desire_state=expired を書いてから
+          この遷移を呼ぶので、ここで dormant が刻める — 順序が不変条件)
+        - status=cancelled (その他) → stage=aborted
+        - 生存 status (pending/active/paused) への遷移 → stage は据え置き
+          (candidate は candidate のまま、adopted は adopted のまま)
+        """
         now = _now()
         db = self.SessionLocal()
         try:
@@ -564,6 +601,13 @@ class PersonaTaskManager:
             task.completed_at = now if status in TERMINAL_TASK_STATUSES else None
             task.last_actor = actor
             task.version = task.version + 1
+            if status == STATUS_COMPLETED:
+                task.stage = STAGE_COMPLETED
+            elif status == STATUS_CANCELLED:
+                task.stage = (
+                    STAGE_DORMANT if task.desire_state == DESIRE_STATE_EXPIRED
+                    else STAGE_ABORTED
+                )
             self._insert_history(
                 db,
                 task_id=task_id,
@@ -811,7 +855,9 @@ class PersonaTaskManager:
         """候補 Task の親を ``note_id`` → ``track_id`` に張り替える (= 昇格)。
 
         Task をコピー/破棄せず親だけ付け替えるので、履歴・ステップ・status は
-        そのまま連続する (不変条件2)。
+        そのまま連続する (不変条件2)。stage も 'adopted' に刻印する — track_create
+        の from_candidate 直呼び経路は purpose_tree.adopt を通らないため、ここで
+        刻まないと stage が候補のまま (または NULL) 残ってしまう (P3c-0)。
         """
         now = _now()
         db = self.SessionLocal()
@@ -821,6 +867,7 @@ class PersonaTaskManager:
             task.parent_kind = PARENT_TRACK
             task.note_id = None
             task.track_id = track_id
+            task.stage = STAGE_ADOPTED
             task.updated_at = now
             task.last_actor = actor
             task.version = task.version + 1

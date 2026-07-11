@@ -1,7 +1,7 @@
 """欲求の六型拡張 (自律行動 v2 §5) のテスト。
 
-- purpose_seed (旧 desire_add 後継、P2c-4a で撤去) の type/source 付き追加と
-  後方互換 (type/source なしでも従来どおり)
+- purpose_seed (旧 desire_add 後継、P2c-4a で撤去) の type 付き追加 (source は
+  P3c-0 desire 正規化以降必須 — purpose_tree.create_candidate の接地原則)
 - 減衰の時間発展 (仮想クロックで日を進めて fresh → fading → 期限切れ)
 - 再訪 (touch) → 昇格候補 (promotion_candidates)
 - 就寝判断 desire_reviews (keep/fading/fulfilled) の反映
@@ -29,7 +29,7 @@ from saiverse.persona_task_manager import (
     DESIRE_STATE_EXPIRED,
     DESIRE_STATE_FADING,
     DESIRE_STATE_FRESH,
-    PARENT_NOTE,
+    STAGE_CANDIDATE,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     PersonaTaskManager,
@@ -93,22 +93,26 @@ def nm(session_factory):
 
 @pytest.fixture
 def desire_add_mod(session_factory, nm, ptm, tmp_path):
-    """purpose_seed ツール (旧 desire_add 後継) を temp DB 版 singleton で動的ロードする。"""
+    """purpose_seed ツール (旧 desire_add 後継) を temp DB 版 singleton で動的ロードする。
+
+    purpose_seed は内部で ``saiverse.purpose_tree.create_candidate`` を呼ぶため
+    (P3c-0)、差し替えるのは NoteManager/PersonaTaskManager でなく、module に
+    持たせた shim (``_manager``) の SessionLocal (purpose_adopt と同じ流儀)。
+    """
     from tool_loader import load_builtin_tool
 
     mod = load_builtin_tool("purpose_seed")
-    mod._note_manager = nm
-    mod._task_manager = ptm
+    mod._manager.SessionLocal = session_factory
     persona_dir = Path(tmp_path) / PERSONA_ID
     persona_dir.mkdir(parents=True, exist_ok=True)
     return mod, persona_dir
 
 
 def _add_desire(nm, ptm, title="言葉の標本集を作りたい", **kwargs):
-    note_id = nm.ensure_desire_note(PERSONA_ID)
+    """候補 (親なし + stage='candidate') を直接作る (P3c-0 の正規形)。"""
     return ptm.create_task(
         persona_id=PERSONA_ID, title=title,
-        parent_kind=PARENT_NOTE, note_id=note_id, auto_activate=False,
+        stage=STAGE_CANDIDATE, auto_activate=False,
         **kwargs,
     )
 
@@ -137,8 +141,7 @@ class TestDesireAddSpell:
         assert "task:1" in out
         assert "desire:1" not in out
         assert "作る" in out
-        note_id = nm.ensure_desire_note(PERSONA_ID)
-        tasks = ptm.list_tasks(PERSONA_ID, note_id=note_id)
+        tasks = ptm.list_tasks(PERSONA_ID, stage=STAGE_CANDIDATE)
         assert len(tasks) == 1
         t = tasks[0]
         assert t["desire_type"] == "作る"
@@ -149,23 +152,35 @@ class TestDesireAddSpell:
         assert datetime.fromisoformat(t["last_touched_at"]) == T0
 
     def test_add_without_type_is_backward_compatible(self, desire_add_mod, nm, ptm):
-        """既存呼び出し (track_autonomous 等) の type/source なし呼びは従来どおり動く。"""
+        """type 省略の呼び出しは従来どおり動く (source は P3c-0 以降必須)。"""
         from tools.context import persona_context
 
         mod, persona_dir = desire_add_mod
         with persona_context(PERSONA_ID, persona_dir):
-            out = mod.purpose_seed(title="新しい言語を学びたい", goal="表現の幅を広げる")
+            out = mod.purpose_seed(
+                title="新しい言語を学びたい", goal="表現の幅を広げる",
+                source="友人との会話で思いついた",
+            )
         assert "task:1" in out
         assert "未分類" in out
         assert not out.startswith("Error")
-        note_id = nm.ensure_desire_note(PERSONA_ID)
-        tasks = ptm.list_tasks(PERSONA_ID, note_id=note_id)
+        tasks = ptm.list_tasks(PERSONA_ID, stage=STAGE_CANDIDATE)
         assert len(tasks) == 1
         assert tasks[0]["desire_type"] is None
-        assert tasks[0]["desire_source"] is None
+        assert tasks[0]["desire_source"] == "友人との会話で思いついた"
         # 未分類でも帳簿は付く (減衰・再訪の対象になる)。
         assert tasks[0]["touch_count"] == 0
         assert tasks[0]["last_touched_at"] is not None
+
+    def test_add_without_source_returns_error(self, desire_add_mod, ptm):
+        """P3c-0: source は接地原則により必須。省略するとエラーになる。"""
+        from tools.context import persona_context
+
+        mod, persona_dir = desire_add_mod
+        with persona_context(PERSONA_ID, persona_dir):
+            out = mod.purpose_seed(title="根拠のない思いつき")
+        assert out.startswith("Error")
+        assert ptm.list_tasks(PERSONA_ID) == []
 
     def test_add_with_invalid_type_returns_error(self, desire_add_mod, nm, ptm):
         from tools.context import persona_context
@@ -174,8 +189,7 @@ class TestDesireAddSpell:
         with persona_context(PERSONA_ID, persona_dir):
             out = mod.purpose_seed(title="なにか", type="遊ぶ")
         assert out.startswith("Error")
-        note_id = nm.ensure_desire_note(PERSONA_ID)
-        assert ptm.list_tasks(PERSONA_ID, note_id=note_id) == []
+        assert ptm.list_tasks(PERSONA_ID, stage=STAGE_CANDIDATE) == []
 
     def test_schema_declares_six_types(self, desire_add_mod):
         mod, _ = desire_add_mod
@@ -183,8 +197,8 @@ class TestDesireAddSpell:
         props = schema.parameters["properties"]
         assert tuple(props["type"]["enum"]) == desire_engine.DESIRE_TYPES
         assert "source" in props
-        # 後方互換: 必須は title のみ。
-        assert schema.parameters["required"] == ["title"]
+        # P3c-0: source は必須 (接地原則)。title と併せて required に載る。
+        assert schema.parameters["required"] == ["title", "source"]
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +237,10 @@ class TestDecay:
         # 論理アーカイブ: 行は残り (物理削除しない)、status で候補プールから消える。
         assert updated["status"] == STATUS_CANCELLED
         assert updated["desire_state"] == DESIRE_STATE_EXPIRED
+        # P3c-0: 失効の最終 stage は dormant (完全消滅でなく休眠 — §5)。
+        # decay_desires が先に desire_state=expired を刻んでから status 遷移を
+        # 記録する順序でないと aborted に落ちる (順序の回帰防止)。
+        assert updated["stage"] == "dormant"
         assert desire_engine.desire_summary_for_prompt(manager, PERSONA_ID) == (
             "やりたいこと候補はありません。"
         )

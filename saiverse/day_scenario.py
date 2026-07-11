@@ -846,8 +846,8 @@ class ScenarioPlayer:
 
     def _seed(self, manager: Any, sc: DayScenario, result: ScenarioRunResult) -> None:
         """種のタスク・欲求を DB に植える (シナリオの初期状態)。"""
-        from saiverse.note_manager import NoteManager
-        from saiverse.persona_task_manager import PARENT_NOTE, PersonaTaskManager
+        from saiverse import purpose_tree
+        from saiverse.persona_task_manager import PersonaTaskManager
 
         ptm = PersonaTaskManager(manager.SessionLocal)
         for seed_task in sc.seed_tasks:
@@ -861,20 +861,18 @@ class ScenarioPlayer:
             )
             result.seeded_task_refs.append(task.get("task_ref") or task["id"])
         if sc.seed_desires:
-            note_id = NoteManager(manager.SessionLocal).ensure_desire_note(sc.persona_id)
             for seed_desire in sc.seed_desires:
-                task = ptm.create_task(
-                    persona_id=sc.persona_id,
-                    title=seed_desire.title,
-                    parent_kind=PARENT_NOTE,
-                    note_id=note_id,
+                # purpose_tree.create_candidate は唯一の候補作成入口 (P3c-0)。
+                # 接地原則で source_ref が必須のため、シナリオ側が空にしている
+                # ケースはシナリオ自体を来歴として使う (シム専用の種まきなので
+                # 実接地の対象外)。
+                node = purpose_tree.create_candidate(
+                    manager, sc.persona_id, seed_desire.title,
+                    seed_desire.source or f"day_scenario_seed:{sc.plan_date}",
+                    desire_type=seed_desire.type, actor="day_scenario_seed",
                     origin="autonomous",
-                    auto_activate=False,
-                    desire_type=seed_desire.type,
-                    desire_source=seed_desire.source or None,
-                    actor="day_scenario_seed",
                 )
-                ref = task.get("task_ref") or task["id"]
+                ref = node.get("ref") or node["id"]
                 result.seeded_desire_refs.append(ref)
         LOGGER.info(
             "[day_scenario] seeded: persona=%s tasks=%s desires=%s",

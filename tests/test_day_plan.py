@@ -30,8 +30,7 @@ from saiverse import clock
 from saiverse import day_plan
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
-from saiverse.note_manager import NoteManager
-from saiverse.persona_task_manager import PARENT_NOTE, PersonaTaskManager
+from saiverse.persona_task_manager import STAGE_CANDIDATE, PersonaTaskManager
 from saiverse.track_manager import STATUS_RUNNING, TrackManager
 
 PERSONA_ID = "alice"
@@ -132,15 +131,14 @@ def task_refs(manager):
         goal="要点を覚え書きにする",
         auto_activate=False,
     )
-    note_id = NoteManager(session_factory=manager.SessionLocal).ensure_desire_note(PERSONA_ID)
     t2 = task_manager.create_task(
         persona_id=PERSONA_ID,
         title="言葉の標本集",
         goal="気に入った言い回しを document にまとめる",
-        parent_kind=PARENT_NOTE,
-        note_id=note_id,
         origin="autonomous",
         auto_activate=False,
+        desire_source="test-seed",
+        stage=STAGE_CANDIDATE,
     )
     assert t1["task_ref"] == "task:1"
     assert t2["task_ref"] == "task:2"
