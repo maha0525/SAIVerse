@@ -14,8 +14,6 @@ sai_memory/__pycache__/
 .gradio/*.pem
 .claude/
 .agent/
-# Local Grok Build prefs / generated rules (mirrors .claude/)
-.grok/
 
 # User data directory (legacy location, now at ~/.saiverse/user_data/)
 user_data/
