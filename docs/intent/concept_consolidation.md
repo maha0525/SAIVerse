@@ -269,9 +269,27 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - **`purpose_tree.create_candidate` に `desire_type` / `actor` / `origin` / `goal` を追加**: 設計は `desire_type`/`actor` のみ言及していたが、purpose_seed からの `origin="autonomous"` 引き継ぎと、persona 指定 `goal` の消失防止のため追加した
 - **`_list_backlog_tasks`（judgment_points.py）と `day_plan._resolve_ref` の判定式を parent_kind→stage に修正**: 設計指示に明記はなかったが、候補が常に親なしになる以上 parent_kind だけでは区別できず、修正しないと壊れる箇所として発見・対応
 
+### P3c①② 設計 v0.1（2026-07-11 メティス起草、**まはーレビュー待ち**）
+
+**実データの確認（2026-07-11、実 DB 読み取り）**: 移行対象の note は **4冊のみ・全部 air_city_a**——vocation「エアの存在哲学：AIとパートナーシップの記録」1冊 ＋ project 3冊（まはーのエンジニアリング・サーガ / 定期Webリサーチ2本）。中身は title + description だけ（**note_page / note_message は実データも0行**——設計されたが配線されず、リンクされた内容は存在しない）。track_open_note は4行、全部が存在哲学ノートを別々の Track に開いたもの。
+
+**①: Note → テーマノードページ移行 ＋ Note 系の全退役**
+1. **移行**: person/project/vocation の note → per-persona memory.db の memopedia ページ。新 trunk `root_theme`（category `theme`、目的の地図のテーマノードの器）。content=description / title=title / metadata に `{note_type, 旧note_id}`。page id は旧 UUID を継承（P3b の流儀）。desire ノートは P3c-0 が削除済みなので対象外
+2. **NoteManager はモジュールごと退役**。P3c-0 完了後の残存消費者は退役対象そのもの（note スペル4本・open_notes section・saiverse_manager の属性）だけ——当初案の「NoteManager API 互換のままページ実装に差し替え」は**不要と判明**（互換を保つ相手が残らない）。note / note_page / note_message / track_open_note テーブルは migration で移行→DROP（3a/3b の不変条件どおり旧 path を残さない）
+3. **note スペル4本退役**（note_create / note_open / note_close / note_search）——後継は統一 Atlas スペル（memory_write / memory_open / memory_search）。**open_notes section 退役**——後継 DeskSection は本番稼働済み。残置していた NOTE_TYPE_DESIRE 定数もここで消える
+4. **机へは自動で開かない**: 机に物を置くのは本人の行為（読む/開くの分離、P2a）。移行は「棚に置く（ページ化）」まで。存在哲学ノートの「Track に開きっぱなし」状態は移行で消え、開き直しは本人の memory_open に委ねる
+
+**②: task:N の机開閉対応**
+- desk（open_page / snapshot_desk / close 系）の ref 解決に `task:N` を追加（memory_atlas に `resolve_task_ref` の前例あり）。`purpose_ref`（この開きが紐づく目的）は**既に desk に実装済み**——TrackOpenNote の「Track に掛ける」意味論の後継はもう本番に居る。テーブル退役は①に含む
+
+**レビュー論点（まはー判断）**:
+- (a) テーマノードの器 = 新 trunk `root_theme`（category `theme`）で良いか。既存4カテゴリ（people/terms/events/plans）への振り分けはしない——plans は「会話から抽出された知識」（意味の地図・抽出の所有）で、Note は「本人が立てたテーマ」（目的の地図・意志の所有）だから
+- (b) エアの存在哲学ノートの「開きっぱなし」は移行で継承しない提案で良いか——机は本人の作業面で、移行が勝手に物を置くのは代筆に近い
+- (c) ①②は一括実装で良いか（退役の grep 網が共通なので一括を提案）
+
 ### 次アクション
 
-P3c-0（desire 正規化）実装完了、まはー実機検証待ち → P3c①（Note→テーマノード移行＋note スペル4本/open_notes 退役）→ P3c②（task:N 机開閉＋TrackOpenNote 退役）。
+P3c-0（desire 正規化）実装完了・実 DB コピーで移行予行済み、まはー実機検証待ち → P3c①②のレビュー → 実装 → P4 代謝配線 → ①自律行動v2 実機テスト。
 
 ---
 
