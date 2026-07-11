@@ -158,5 +158,85 @@ class TestRecentEntrantEventsViaDB(unittest.TestCase):
         self.assertTrue(ok2)
 
 
+class TestEnsurePersonaPage(unittest.TestCase):
+    """ensure_persona_page (再会システムの個人ページ ensure) の重複防止。
+
+    2026-07-11 実データで「まはー」(extractor 製・紐づけ無し) と「まはー (1)」
+    (再会システム製・persona_id 持ち) の恒久重複が発覚。修正後の仕様:
+    同名の未紐づけ people ページがあれば新規作成せず**採用**して persona_id を刻む。
+    同名ページが既に別人に紐づいている場合のみサフィックス付き新規作成。
+    """
+
+    def setUp(self):
+        import sqlite3
+        from types import SimpleNamespace
+
+        from sai_memory.memopedia.storage import init_memopedia_tables
+
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
+        self.addCleanup(self.engine.dispose)
+        self.mock_path_exists = patch("pathlib.Path.exists", return_value=True).start()
+        self.mock_path_stat = patch("pathlib.Path.stat").start()
+        self.mock_path_stat.return_value.st_size = 0
+        self.addCleanup(patch.stopall)
+        self.hm = HistoryManager(
+            persona_id="me",
+            persona_log_path=Path("/mock/p/log.json"),
+            building_memory_paths={"room": Path("/mock/b/room/log.json")},
+            initial_persona_history=[],
+            db_session_factory=self.SessionLocal,
+        )
+        self.conn = sqlite3.connect(":memory:")
+        self.addCleanup(self.conn.close)
+        init_memopedia_tables(self.conn)
+        self.hm.memory_adapter = SimpleNamespace(
+            conn=self.conn, is_ready=lambda: True,
+        )
+
+    def _page_by_persona(self, pid):
+        from sai_memory.memopedia.storage import get_page_by_persona_id
+        return get_page_by_persona_id(self.conn, pid)
+
+    def test_creates_new_page_with_binding(self):
+        ok = self.hm.ensure_persona_page("elis_city_a", "エリス")
+        self.assertTrue(ok)
+        page = self._page_by_persona("elis_city_a")
+        self.assertIsNotNone(page)
+        self.assertEqual(page.title, "エリス")
+
+    def test_adopts_existing_unbound_page(self):
+        from sai_memory.memopedia.storage import create_page
+
+        existing = create_page(
+            self.conn, parent_id="root_people", title="エリス",
+            summary="会話から抽出", category="people",
+        )
+        ok = self.hm.ensure_persona_page("elis_city_a", "エリス")
+        self.assertTrue(ok)
+        page = self._page_by_persona("elis_city_a")
+        # 新規作成でなく既存ページが採用される (「(id)」ページが生まれない)
+        self.assertEqual(page.id, existing.id)
+        self.assertEqual(page.title, "エリス")
+
+    def test_same_name_other_person_gets_suffix(self):
+        from sai_memory.memopedia.storage import create_page
+
+        create_page(
+            self.conn, parent_id="root_people", title="エリス",
+            summary="別人", category="people",
+            metadata={"persona_id": "other_persona"},
+        )
+        ok = self.hm.ensure_persona_page("elis_city_a", "エリス")
+        self.assertTrue(ok)
+        page = self._page_by_persona("elis_city_a")
+        self.assertIsNotNone(page)
+        self.assertEqual(page.title, "エリス (elis_city_a)")
+        # 別人の紐づけは無傷
+        other = self._page_by_persona("other_persona")
+        self.assertEqual(other.title, "エリス")
+
+
 if __name__ == "__main__":
     unittest.main()

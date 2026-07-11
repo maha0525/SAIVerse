@@ -788,6 +788,33 @@ class HistoryManager:
                 persona_name,
                 category=CATEGORY_PEOPLE,
             )
+
+            # 同名の people ページが既にあり、まだ誰にも紐づいていなければ
+            # 新規作成せず**そのページを採用**して persona_id を刻む。
+            # entity_extractor が会話から先にページを作っているのが常態で、
+            # ここで別ページを作ると「まはー」と「まはー (1)」のような恒久
+            # 重複が生まれる (2026-07-11 実データで確認、編纂の類似検知が発見)。
+            # 同名ページが既に**別の** persona_id に紐づいている場合のみ
+            # 同名別人としてサフィックス付き新規作成にフォールバックする。
+            if existing_title_page is not None:
+                existing_meta = existing_title_page.metadata or {}
+                if not existing_meta.get("persona_id"):
+                    from sai_memory.memopedia.storage import update_page
+
+                    merged_meta = dict(existing_meta)
+                    merged_meta["persona_id"] = target_persona_id
+                    update_page(
+                        self.memory_adapter.conn,
+                        existing_title_page.id,
+                        metadata=merged_meta,
+                    )
+                    LOGGER.info(
+                        "Adopted existing Memopedia page %s as persona page for %s "
+                        "(persona_name=%s)",
+                        existing_title_page.id, target_persona_id, persona_name,
+                    )
+                    return True
+
             page_title = (
                 f"{persona_name} ({target_persona_id})"
                 if existing_title_page
