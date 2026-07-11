@@ -249,7 +249,7 @@ graph TD
 | **意味の地図** | 意味の抽出（固有名詞の辞書） | Memopedia・Fragment（`m:N`）＋ コア記憶（常時開の特殊ページ、`c:N`） |
 | **目的の地図** | 文脈的分類（クエストライン） | 目的の木（`persona_task`、`task:N`。旧 Track/Task/Desire/Note の統合先） |
 
-**三地図共通の法則**: **ノード状態が構造の代謝（分割・統合）を駆動する**。時間の地図は自動（Lv1→Lv2 統合）、意味・目的の地図はペルソナの自己著者性を通す（判断点で提案 → 本人が裁定 → 睡眠中バッチで実行 ＝ 庭仕事）。
+**三地図共通の法則**: **ノード状態が構造の代謝（分割・統合）を駆動する**。時間の地図は自動（Lv1→Lv2 統合）、意味・目的の地図はペルソナの自己著者性を通す（判断点で提案 → 本人が裁定 → 睡眠中バッチで実行 ＝ **編纂**〔旧称・庭仕事、P4 設計 v0.2 で改名〕）。
 
 格納先はすべて per-persona の SQLite DB **SAIMemory**（`memory.db`）——ただし目的の木のみ main DB（P3c で物理統合予定）。
 
@@ -280,11 +280,11 @@ graph TD
 
 **Fragment の生成タイミング（検証済）**: Metabolism（§6）発火時に `ArasujiGenerator` の Chronicle 生成バッチへ `entity_extractor` が `batch_callback` として相乗りする——**圧縮（時間の地図）と知識化（意味の地図）は Metabolism という同じ節目で連動する**。
 
-> **実装状況メモ**: 意味の地図の構造代謝（肥大ページの分割・小ページの統合）は `scripts/maintain_memopedia.py` に手動操作として存在するが lifecycle 未配線（P4 で庭仕事として配線予定）。vividness（鮮度減衰）は廃止確定（§9）。
+> **実装状況メモ**: 意味の地図の構造代謝（肥大ページの分割・小ページの統合）は `scripts/maintain_memopedia.py` に手動操作として存在するが lifecycle 未配線（P4 で編纂（旧称・庭仕事）として配線予定）。vividness（鮮度減衰）は廃止確定（§9）。
 
 ### 目的の木（目的の地図）
 
-意志の構造（life_concept_map.md）。根＝在り方（LIFE_PURPOSE）、第一階層＝旧 Track（営み／企て）、中間＝task、末端＝step。候補（stage=candidate、旧 desire）は採用（`purpose_adopt`＝接ぎ木）で木に入り、完了ノードの航跡クラスタへの**命名**が統合操作（設計済・実装は P4）。判断点が接ぎ直し（庭仕事）を行う。
+意志の構造（life_concept_map.md）。根＝在り方（LIFE_PURPOSE）、第一階層＝旧 Track（営み／企て）、中間＝task、末端＝step。候補（stage=candidate、旧 desire）は採用（`purpose_adopt`＝接ぎ木）で木に入り、完了ノードの航跡クラスタへの**命名**が統合操作（設計済・実装は P4）。判断点が接ぎ直し（編纂）を行う。
 
 ```mermaid
 graph TD
@@ -410,13 +410,13 @@ graph TD
 | **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。persona_task 自体は目的の木として現役（§5） |
 | **mark（観測点）** | **写真 (photo) に一般化**（2026-07-10）。`marks` テーブルは `photos` へ移行済み（点写真＝旧 mark）。mark は「まだどの地図にも貼られていない写真」という状態の呼び名として残る |
 | **vividness（Memopedia 鮮度減衰）** | **廃止確定**（2026-07-10）。減衰の発動が観測されたことがなく（バグ疑い）、head 索引廃止で効果もなかった。「見えなくするだけで生産性がない」— 置換は構造状態（肥大/過小 → 分割/統合の代謝、P4） |
-| **旧記憶・タスクスペル群** | core_memory_add/add_scene/update/remove・task_add/decompose/done/update_step・desire_add・memopedia_get_page/open_page/close_page/search の 13 本は **memory_*/purpose_* 12 本に一本化され削除**（2026-07-11 P2c-4a）。memopedia_note/save_page/get_tree/health/manage・fragment 3本・get_task_summary は spell=False の内部専用（P4 庭仕事の素材） |
+| **旧記憶・タスクスペル群** | core_memory_add/add_scene/update/remove・task_add/decompose/done/update_step・desire_add・memopedia_get_page/open_page/close_page/search の 13 本は **memory_*/purpose_* 12 本に一本化され削除**（2026-07-11 P2c-4a）。memopedia_note/save_page/get_tree/health/manage・fragment 3本・get_task_summary は spell=False の内部専用（P4 編纂の素材） |
 | **Note (NoteManager) / note スペル4本 / open_notes section / TrackOpenNote** | Note（person/project/vocation。desire は P3c-0 で先行撤去）は per-persona memory.db 側のテーマノードページ（trunk `root_theme`、参照は通常の `m:N`）へ物理統合され、`saiverse/note_manager.py`・note_create/note_open/note_close/note_search スペル4本・`sea/head_pipeline/sections/open_notes.py` は**モジュールごと削除**（2026-07-11 P3c①）。後継は統一 Atlas 動詞（memory_write/memory_open/memory_close/memory_search）と `DeskSection`（開きっぱなし制御の一本化）。main DB の `note`/`note_page`/`note_message`/`track_open_note` テーブルは persona 単位の扇形移行（`SAIVerseManager._on_persona_registered` → `saiverse/note_theme_migration.py`）で空になり次第 `database/migrate.py:_drop_empty_legacy_note_tables` が DROP する。`persona_task.note_id` は死カラムとして残置（FK 宣言のみ撤去）。task:N（目的ノード）の机開閉も同時に実装（P3c②） |
 | **working_memory** | `working_memory` テーブルは存在するが、ワーキングメモリ実装は死亡。短期記憶は §6 Session 概念へ |
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
 | **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。クラス削除は別タスク |
 | **SubLineScheduler** | v1 自律駆動（track_autonomous への 30 秒連続 Pulse）。自律行動 v2 活性化（2026-07-06）で**モジュールごと削除**（`saiverse/pulse_scheduler.py`）。後継は時間割＋判断点（`saiverse/autonomy_wiring.py`、intent: `autonomous_behavior_v2.md` / `persona_cognition/life_concept_map.md`） |
-| **track_autonomous / meta_autonomy_decision playbook** | v1 自律 Pulse の中身と能力選択。**退役完了**（2026-07-11 P2c-3: public JSON 削除・DB prune・`SELECTED_META_PLAYBOOK`/`PersonaSchedule` の巻き取り＝upgrade handler v0.3.0.dev4）。autonomy_creation / autonomy_web_research は archive、autonomy_memory_organization / fragment_organize は P4 庭仕事へ転生予定で archive |
+| **track_autonomous / meta_autonomy_decision playbook** | v1 自律 Pulse の中身と能力選択。**退役完了**（2026-07-11 P2c-3: public JSON 削除・DB prune・`SELECTED_META_PLAYBOOK`/`PersonaSchedule` の巻き取り＝upgrade handler v0.3.0.dev4）。autonomy_creation / autonomy_web_research は archive、autonomy_memory_organization / fragment_organize は P4 編纂へ転生予定で archive |
 | **max_consecutive_pulses** | 連続 Pulse 上限の概念。駆動源ごと廃止（セッション予算に置換） |
 | **メタ判断の定期ディスパッチ（状況分類）** | 50 分 tick からの `_SITUATION_PLAYBOOK_MAP` 定期起動は停止。tick は watchdog（時間割発火の途絶検知）に縮退。cache TTL keep-alive 経由の起動も 2026-07-07 に停止（意味的に不活性な極小 touch へ置換、`SEARuntime.run_cache_keepalive`）。**alert 即応（呼びかけ）経由のみ存続** |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
