@@ -394,23 +394,11 @@ def _get_memopedia_context(
         def _list_pages(pages: List[Dict], prefix: str = "") -> None:
             for page in pages:
                 if not page["id"].startswith("root_"):
-                    vividness = page.get("vividness", "rough")
                     sid = page.get("short_id")
                     id_suffix = f" [id: m:{sid}]" if sid else ""
-
-                    if vividness == "buried":
-                        continue
-                    elif vividness == "faint":
-                        lines.append(f"{prefix}- {page['title']}{id_suffix}")
-                    elif vividness == "rough":
-                        lines.append(f"{prefix}- {page['title']}{id_suffix}: {page['summary']}")
-                    elif vividness == "vivid":
-                        summary = page['summary']
-                        lines.append(f"{prefix}- **{page['title']}**{id_suffix}: {summary}")
-                        body = memopedia.render_page_body(page["id"])
-                        if body:
-                            for line in body.split("\n"):
-                                lines.append(f"{prefix}  {line}")
+                    # P4-c: vividness 廃止 — 全ページを平等掲示 (rough 描画を適用)。
+                    # buried/faint スキップと vivid 全内容展開は廃止。
+                    lines.append(f"{prefix}- {page['title']}{id_suffix}: {page['summary']}")
 
                 children = page.get("children", [])
                 if children:

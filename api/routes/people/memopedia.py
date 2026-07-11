@@ -13,6 +13,7 @@ from .models import (
     CreateMemopediaPageRequest,
     SetTrunkRequest,
     SetImportantRequest,
+    DeskPageRequest,
     MovePagesToTrunkRequest,
     GenerateMemopediaRequest,
     GenerationJobStatus,
@@ -158,7 +159,6 @@ def update_memopedia_page(
                 summary=request.summary,
                 content=request.content,
                 keywords=request.keywords,
-                vividness=request.vividness,
                 edit_source="manual_ui",
             )
             if request.is_trunk is not None:
@@ -174,7 +174,6 @@ def update_memopedia_page(
                     "summary": updated.summary,
                     "content": updated.content,
                     "keywords": updated.keywords,
-                    "vividness": updated.vividness,
                     "is_trunk": updated.is_trunk,
                 }
             }
@@ -269,7 +268,6 @@ def create_memopedia_page(
                 summary=request.summary,
                 content=request.content,
                 keywords=request.keywords,
-                vividness=request.vividness,
                 is_trunk=request.is_trunk,
                 edit_source="manual_ui",
             )
@@ -283,7 +281,6 @@ def create_memopedia_page(
                     "content": page.content,
                     "category": page.category,
                     "keywords": page.keywords,
-                    "vividness": page.vividness,
                     "is_trunk": page.is_trunk,
                 }
             }
@@ -382,6 +379,49 @@ def set_memopedia_page_important(
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+
+
+@router.post("/{persona_id}/memopedia/pages/{page_id}/desk")
+def set_memopedia_page_desk(
+    persona_id: str,
+    page_id: str,
+    request: DeskPageRequest,
+    manager = Depends(get_manager),
+):
+    """机に開く / 棚に戻す (open=true: 机に開く、open=false: 棚に戻す)。
+
+    P4-c: vividness UI の後継。ページを机に開いておくと Metabolism を跨いで
+    head に残り続ける（memory_open / memory_close スペルと同等）。
+    """
+    if page_id.startswith("root_"):
+        raise HTTPException(status_code=400, detail="Cannot open/close root pages on desk")
+
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            # short_id を取得して m:N ref を組む
+            memopedia = _get_memopedia(adapter)
+            page = memopedia.get_page(page_id)
+            if not page:
+                raise HTTPException(status_code=404, detail="Page not found")
+            if page.short_id is None:
+                raise HTTPException(status_code=422, detail="Page has no short_id; cannot open on desk")
+
+            ref = f"m:{page.short_id}"
+            from saiverse.memory_atlas import open_page, close_page, AtlasRefError
+            try:
+                if request.open:
+                    result_text = open_page(adapter, ref, manager=manager)
+                else:
+                    result_text = close_page(adapter, ref, manager=manager)
+            except AtlasRefError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+            return {"success": True, "message": result_text, "ref": ref}
+        except HTTPException:
+            raise
+        except Exception as e:
+            LOGGER.exception("[desk API] Exception for page=%s: %s", page_id, e)
+            raise HTTPException(status_code=500, detail=f"Desk operation failed: {e}")
 
 
 @router.post("/{persona_id}/memopedia/pages/move")

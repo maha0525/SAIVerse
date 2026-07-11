@@ -113,10 +113,13 @@ class MemopediaPage:
     created_at: int
     updated_at: int
     keywords: List[str] = field(default_factory=list)
-    vividness: str = "rough"  # vivid, rough, faint, buried
+    # P4-c (concept_consolidation.md): vividness は廃止済み (2026-07-11)。
+    # カラムは DB に死置き — 読み書き経路から除去済み。
+    # vivid→机移行: vivid_to_desk_migration.py が adapter init 時に一回きり実行済み。
+    vividness: str = "rough"  # DEAD: vivid, rough, faint, buried (廃止)
     is_trunk: bool = False  # True if this page is a trunk (category container)
     is_important: bool = False  # True if page should not decay below "rough"
-    last_referenced_at: Optional[int] = None  # Timestamp of last reference (for vividness decay)
+    last_referenced_at: Optional[int] = None  # Timestamp of last reference
     metadata: Optional[Dict[str, Any]] = None  # Additional metadata (e.g., persona_id)
     short_id: Optional[int] = None  # Per-DB sequential ID (m:1, m:2, ...)
     children: List["MemopediaPage"] = field(default_factory=list)

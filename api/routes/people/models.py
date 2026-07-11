@@ -277,7 +277,7 @@ class UpdateMemopediaPageRequest(BaseModel):
     summary: Optional[str] = None
     content: Optional[str] = None
     keywords: Optional[List[str]] = None
-    vividness: Optional[str] = None
+    # P4-c: vividness は廃止。フィールドを除去した。
     is_trunk: Optional[bool] = None
 
 
@@ -287,7 +287,7 @@ class CreateMemopediaPageRequest(BaseModel):
     summary: str = ""
     content: str = ""
     keywords: Optional[List[str]] = None
-    vividness: str = "rough"
+    # P4-c: vividness は廃止。
     is_trunk: bool = False
 
 
@@ -297,6 +297,10 @@ class SetTrunkRequest(BaseModel):
 
 class SetImportantRequest(BaseModel):
     is_important: bool
+
+
+class DeskPageRequest(BaseModel):
+    open: bool  # True = 机に開く、False = 机から閉じる
 
 
 class MovePagesToTrunkRequest(BaseModel):

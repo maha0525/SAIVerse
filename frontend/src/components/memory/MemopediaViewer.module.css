@@ -764,23 +764,7 @@
     cursor: not-allowed;
 }
 
-/* Vividness Styles */
-.pageVividVivid {
-    font-weight: 700;
-    color: #fff;
-}
-
-/* pageVividRough: Default styling, no additional rules needed */
-
-.pageVividFaint {
-    color: #666;
-}
-
-.pageVividBuried {
-    color: #444;
-    font-style: italic;
-    opacity: 0.7;
-}
+/* P4-c: Vividness Styles を廃止 (2026-07-11) */
 
 /* Trunk Styles */
 .trunkItem {
@@ -1078,17 +1062,7 @@
     color: #2563eb;
 }
 
-:global([data-theme="light"]) .pageVividVivid {
-    color: #0f172a;
-}
-
-:global([data-theme="light"]) .pageVividFaint {
-    color: #94a3b8;
-}
-
-:global([data-theme="light"]) .pageVividBuried {
-    color: #cbd5e1;
-}
+/* P4-c: pageVividVivid / pageVividFaint / pageVividBuried light-mode rules 廃止 */
 
 /* Fragment section */
 .fragmentsSection {

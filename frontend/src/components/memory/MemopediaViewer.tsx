@@ -9,7 +9,7 @@ interface MemopediaPage {
     title: string;
     summary: string;
     keywords: string[];
-    vividness: string;
+    // P4-c: vividness は廃止。フィールドを除去した。
     is_trunk: boolean;
     is_important: boolean;
     updated_at?: number;
@@ -101,7 +101,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [editSummary, setEditSummary] = useState("");
     const [editContent, setEditContent] = useState("");
     const [editKeywords, setEditKeywords] = useState("");
-    const [editVividness, setEditVividness] = useState("rough");
+    // P4-c: editVividness は廃止。
     const [isSaving, setIsSaving] = useState(false);
 
     // Delete confirmation state
@@ -115,7 +115,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [createSummary, setCreateSummary] = useState("");
     const [createContent, setCreateContent] = useState("");
     const [createKeywords, setCreateKeywords] = useState("");
-    const [createVividness, setCreateVividness] = useState("rough");
+    // P4-c: createVividness は廃止。
     const [createIsTrunk, setCreateIsTrunk] = useState(false);
     const [isCreating, setIsCreating] = useState(false);
 
@@ -281,7 +281,6 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setEditSummary(summary);
         setEditContent(content);
         setEditKeywords(page.keywords?.join(', ') || '');
-        setEditVividness(page.vividness || 'rough');
         setIsEditing(true);
         setShowHistory(false);
     };
@@ -290,24 +289,26 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setIsEditing(false);
     };
 
-    const handleVividnessChange = async (newVividness: string) => {
+    // P4-c: handleVividnessChange は廃止。代わりに机の開閉を管理する。
+    const handleDeskToggle = async (open: boolean) => {
         if (!selectedPageId) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
-                method: 'PUT',
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}/desk`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ vividness: newVividness }),
+                body: JSON.stringify({ open }),
             });
 
             if (res.ok) {
-                await loadTree(); // Refresh tree to show updated vividness
+                const data = await res.json();
+                alert(data.message || (open ? '机に開きました' : '机から閉じました'));
             } else {
                 const err = await res.json();
-                alert(`鮮明度の更新に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(`操作に失敗しました: ${err.detail || 'Unknown error'}`);
             }
         } catch (error) {
-            console.error('Failed to update vividness', error);
-            alert('鮮明度の更新に失敗しました');
+            console.error('Failed to toggle desk', error);
+            alert('操作に失敗しました');
         }
     };
 
@@ -328,7 +329,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     summary: editSummary,
                     content: editContent,
                     keywords,
-                    vividness: editVividness,
+                    // P4-c: vividness は廃止。送信しない。
                 }),
             });
 
@@ -379,7 +380,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setCreateSummary("");
         setCreateContent("");
         setCreateKeywords("");
-        setCreateVividness("rough");
+        // P4-c: createVividness は廃止。
         setCreateIsTrunk(false);
         setShowCreateModal(true);
     };
@@ -406,7 +407,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     summary: createSummary,
                     content: createContent,
                     keywords,
-                    vividness: createVividness,
+                    // P4-c: vividness は廃止。送信しない。
                     is_trunk: createIsTrunk,
                 }),
             });
@@ -617,26 +618,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             openCreateModal(page.id);
         };
 
-        // CSS class based on vividness
-        const getVividnessClass = () => {
-            switch (page.vividness) {
-                case 'vivid':
-                    return styles.pageVividVivid;
-                case 'rough':
-                    return styles.pageVividRough;
-                case 'faint':
-                    return styles.pageVividFaint;
-                case 'buried':
-                    return styles.pageVividBuried;
-                default:
-                    return '';
-            }
-        };
+        // P4-c: getVividnessClass は廃止。
 
         return (
             <div>
                 <div
-                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${getVividnessClass()} ${page.is_trunk ? styles.trunkItem : ''}`}
+                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${page.is_trunk ? styles.trunkItem : ''}`}
                     onClick={handlePageClick}
                 >
                     {hasChildren || page.is_trunk || isRoot ? (
@@ -697,21 +684,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return Array.isArray(keywords) ? keywords : [];
     };
 
-    // Helper to find selected page and get its vividness
-    const getSelectedPageVividness = (): string => {
-        if (!tree || !selectedPageId) return 'rough';
-        const allPages = Object.values(tree).flat() as MemopediaPage[];
-        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
-            for (const p of pages) {
-                if (p.id === selectedPageId) return p;
-                const found = findPage(p.children);
-                if (found) return found;
-            }
-            return null;
-        };
-        const page = findPage(allPages);
-        return page?.vividness || 'rough';
-    };
+    // P4-c: getSelectedPageVividness は廃止。
 
     // Helper to find selected page and get its is_trunk
     const getSelectedPageIsTrunk = (): boolean => {
@@ -746,19 +719,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     };
 
     const selectedKeywords = getSelectedPageKeywords();
-    const selectedVividness = getSelectedPageVividness();
+    // P4-c: selectedVividness は廃止。
     const selectedIsTrunk = getSelectedPageIsTrunk();
     const selectedIsImportant = getSelectedPageIsImportant();
-
-    const getVividnessLabel = (vividness: string) => {
-        switch (vividness) {
-            case 'vivid': return '鮮明（全内容）';
-            case 'rough': return '概要';
-            case 'faint': return '淡い（タイトルのみ）';
-            case 'buried': return '埋没（非表示）';
-            default: return vividness;
-        }
-    };
+    // P4-c: getVividnessLabel は廃止。
 
     // Sort helper: most recently referenced/updated first
     const pageFreshness = (p: MemopediaPage) => Math.max(p.last_referenced_at || 0, p.updated_at || 0);
@@ -1017,22 +981,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 placeholder="キーワード1, キーワード2, ..."
                             />
                         </div>
-                        <div className={styles.formGroup}>
-                            <label>鮮明度</label>
-                            <select
-                                value={editVividness}
-                                onChange={e => setEditVividness(e.target.value)}
-                                className={styles.formInput}
-                            >
-                                <option value="vivid">鮮明（全内容）</option>
-                                <option value="rough">概要（デフォルト）</option>
-                                <option value="faint">淡い（タイトルのみ）</option>
-                                <option value="buried">埋没（非表示）</option>
-                            </select>
-                            <small style={{ color: '#888', display: 'block', marginTop: '4px' }}>
-                                コンテキストに含める情報量を制御します
-                            </small>
-                        </div>
+                        {/* P4-c: 鮮明度 select 廃止 */}
                         <div className={styles.formGroup}>
                             <label>本文</label>
                             <textarea
@@ -1078,29 +1027,28 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         </div>
                                     </div>
                                 )}
-                                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                    <label style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>鮮明度:</label>
-                                    <select
-                                        value={selectedVividness}
-                                        onChange={e => handleVividnessChange(e.target.value)}
-                                        style={{
-                                            padding: '4px 8px',
-                                            fontSize: '0.9em',
-                                            borderRadius: '4px',
-                                            border: '1px solid #ccc',
-                                            backgroundColor: '#fff',
-                                            cursor: 'pointer'
-                                        }}
-                                    >
-                                        <option value="vivid">鮮明（全内容）</option>
-                                        <option value="rough">概要（デフォルト）</option>
-                                        <option value="faint">淡い（タイトルのみ）</option>
-                                        <option value="buried">埋没（非表示）</option>
-                                    </select>
-                                    <small style={{ color: '#888' }}>
-                                        コンテキストに含める情報量
-                                    </small>
-                                </div>
+                                {/* P4-c: 鮮明度 select の代わりに机ボタン */}
+                                {selectedPageId && !selectedPageId.startsWith('root_') && (
+                                    <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                        <button
+                                            className={styles.editButton}
+                                            onClick={() => handleDeskToggle(true)}
+                                            title="このページを机に開く（常時ヘッドに表示）"
+                                        >
+                                            机に開く
+                                        </button>
+                                        <button
+                                            className={styles.historyButton}
+                                            onClick={() => handleDeskToggle(false)}
+                                            title="このページを机から閉じる"
+                                        >
+                                            机から閉じる
+                                        </button>
+                                        <small style={{ color: '#888' }}>
+                                            机に開くとコンテキストの先頭に常時表示されます
+                                        </small>
+                                    </div>
+                                )}
                                 {selectedPageId && !selectedPageId.startsWith('root_') && (
                                     <>
                                         <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1115,7 +1063,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                                 <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>重要</span>
                                             </label>
                                             <small style={{ color: '#888' }}>
-                                                鮮明度が概要以下に下がらなくなります
+                                                代謝でページが縮小されにくくなります
                                             </small>
                                         </div>
                                         <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1241,19 +1189,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                     placeholder="キーワード1, キーワード2, ..."
                                 />
                             </div>
-                            <div className={styles.formGroup}>
-                                <label>鮮明度</label>
-                                <select
-                                    value={createVividness}
-                                    onChange={e => setCreateVividness(e.target.value)}
-                                    className={styles.formInput}
-                                >
-                                    <option value="vivid">鮮明（全内容）</option>
-                                    <option value="rough">概要（デフォルト）</option>
-                                    <option value="faint">淡い（タイトルのみ）</option>
-                                    <option value="buried">埋没（非表示）</option>
-                                </select>
-                            </div>
+                            {/* P4-c: 鮮明度 select 廃止 */}
                             <div className={styles.formGroup}>
                                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                     <input

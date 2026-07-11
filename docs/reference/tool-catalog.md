@@ -54,7 +54,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memopedia_get_tree` | Get the Memopedia knowledge page tree structure. Shows all pages organized by category (人物/用語/計画/出来事) with open/close… | (なし) | — |
 | `memopedia_health` | Memopediaの健康状態をレポートします。総ページ数、分割が必要な大きいページ、概要がないページなどを一覧表示します。 | (なし) | — |
 | `memopedia_list_fragments` | Memopediaページのフラグメント（断片知識）を番号付き一覧で表示します。重複確認や整理の前に使用してください。 | `page_id*`: string | — |
-| `memopedia_manage` | Memopediaページの管理操作を行います。ページの削除、移動（親ページ変更）、鮮明度変更、重要フラグの設定が可能です。 | `action*`: string, `page_id*`: string, `new_parent_id`: string, `vividness`: string, `is_important`: boolean | — |
+| `memopedia_manage` | Memopediaページの管理操作を行います。ページの削除、移動（親ページ変更）、重要フラグの設定が可能です。常に見えるようにしたい場合は memory_open で机に開いてください。 | `action*`: string, `page_id*`: string, `new_parent_id`: string, `is_important`: boolean | — |
 | `memopedia_note` | Write a knowledge fragment to a Memopedia page. Each call creates one fragment (a single fact or note) linked to the … | `content*`: string, `title`: string, `summary`: string, `category`: string, `keywords`: array, `page_id`: string | — |
 | `memopedia_save_page` | Save a Memopedia knowledge page. If a page with the same title exists, it is updated. Otherwise a new page is created… | `title*`: string, `summary`: string, `content`: string, `category`: string, `keywords`: array | — |
 | `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復の会話の切… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | 写真を撮って貼る |

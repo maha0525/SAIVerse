@@ -1,6 +1,10 @@
-"""Manage Memopedia pages: delete, move, set vividness, set important flag.
+"""Manage Memopedia pages: delete, move, set important flag.
 
 P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation.md)。
+
+Note: set_vividness アクションは P4-c で廃止。vividness カラムは storage 上に
+死置きされているが、読み書き経路からは除去済み。「常に見えるように」の
+導線は UIの「机に開く / 閉じる」ボタンへ移行した。
 """
 from __future__ import annotations
 
@@ -12,24 +16,21 @@ from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 
-VALID_ACTIONS = {"delete", "move", "set_vividness", "set_important"}
-VALID_VIVIDNESS = {"vivid", "rough", "faint", "buried"}
+VALID_ACTIONS = {"delete", "move", "set_important"}
 
 
 def memopedia_manage(
     action: str,
     page_id: str,
     new_parent_id: Optional[str] = None,
-    vividness: Optional[str] = None,
     is_important: Optional[bool] = None,
 ) -> str:
-    """Manage a Memopedia page (delete, move, change vividness, set important).
+    """Manage a Memopedia page (delete, move, set important).
 
     Args:
-        action: One of: delete, move, set_vividness, set_important
+        action: One of: delete, move, set_important
         page_id: Target page ID (or first chars for prefix match)
         new_parent_id: For move action: destination parent page ID
-        vividness: For set_vividness: vivid/rough/faint/buried
         is_important: For set_important: true/false
     """
     if action not in VALID_ACTIONS:
@@ -82,15 +83,6 @@ def memopedia_manage(
             return f"ページ '{page.title}' を移動しました (新しい親: {new_parent_id})"
         return f"ページ '{page.title}' の移動に失敗しました"
 
-    elif action == "set_vividness":
-        if not vividness or vividness not in VALID_VIVIDNESS:
-            return f"set_vividness には vividness パラメータが必要です（{', '.join(sorted(VALID_VIVIDNESS))}）"
-        from sai_memory.memopedia.storage import update_page
-        result = update_page(adapter.conn, resolved_id, vividness=vividness)
-        if result:
-            return f"ページ '{page.title}' の鮮明度を '{vividness}' に変更しました"
-        return "鮮明度の変更に失敗しました"
-
     elif action == "set_important":
         if is_important is None:
             return "set_important には is_important パラメータ (true/false) が必要です"
@@ -108,14 +100,15 @@ def schema() -> ToolSchema:
         name="memopedia_manage",
         description=(
             "Memopediaページの管理操作を行います。"
-            "ページの削除、移動（親ページ変更）、鮮明度変更、重要フラグの設定が可能です。"
+            "ページの削除、移動（親ページ変更）、重要フラグの設定が可能です。"
+            "常に見えるようにしたい場合は memory_open で机に開いてください。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["delete", "move", "set_vividness", "set_important"],
+                    "enum": ["delete", "move", "set_important"],
                     "description": "実行する操作",
                 },
                 "page_id": {
@@ -125,11 +118,6 @@ def schema() -> ToolSchema:
                 "new_parent_id": {
                     "type": "string",
                     "description": "moveアクション時: 移動先の親ページID",
-                },
-                "vividness": {
-                    "type": "string",
-                    "enum": ["vivid", "rough", "faint", "buried"],
-                    "description": "set_vividnessアクション時: 新しい鮮明度",
                 },
                 "is_important": {
                     "type": "boolean",

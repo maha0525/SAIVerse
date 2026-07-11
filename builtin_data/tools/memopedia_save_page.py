@@ -68,9 +68,6 @@ def memopedia_save_page(
             edit_source="ai_conversation",
         )
         if page:
-            # Just saved — set vividness to vivid (freshly written/updated)
-            if existing.vividness != "vivid":
-                memopedia.update_page(existing.id, vividness="vivid")
             ex_ref = to_short_ref("memopedia", existing.short_id) if existing.short_id else existing.id[:8]
             action = f"Updated page '{title}' ({ex_ref})"
         else:
@@ -84,7 +81,6 @@ def memopedia_save_page(
             summary=summary,
             content=content,
             keywords=keywords,
-            vividness="vivid",
             edit_source="ai_conversation",
         )
         pg_ref = to_short_ref("memopedia", page.short_id) if page.short_id else page.id[:8]

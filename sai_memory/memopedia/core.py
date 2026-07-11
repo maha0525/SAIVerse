@@ -101,7 +101,7 @@ class Memopedia:
                 "title": page.title,
                 "summary": page.summary,
                 "keywords": page.keywords,
-                "vividness": page.vividness,
+                # P4-c: vividness は廃止 (死置きカラム)。get_tree レスポンスから除外。
                 "is_trunk": page.is_trunk,
                 "is_important": page.is_important,
                 "content": page.content,
@@ -545,9 +545,7 @@ class Memopedia:
         # Update reference timestamp (outside lock to avoid deadlock)
         self.touch_page(page_id)
 
-        # Promote buried/faint pages when opened
-        if page.vividness in ("buried", "faint"):
-            self.update_page(page_id, vividness="rough")
+        # P4-c: vividness 廃止のため buried/faint 昇格は除去。
 
         return {
             "title": page.title,

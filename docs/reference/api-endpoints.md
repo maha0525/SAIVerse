@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 344（tag グループ: 23）
+**エンドポイント数**: 345（tag グループ: 23）
 
 ## addon
 
@@ -274,6 +274,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/memopedia/pages/{page_id}` | Get a Memopedia page content as Markdown, plus fragments. |
 | PUT | `/api/people/{persona_id}/memopedia/pages/{page_id}` | Update a Memopedia page (title, summary, content, keywords). |
 | DELETE | `/api/people/{persona_id}/memopedia/pages/{page_id}` | Delete a Memopedia page (soft delete). |
+| POST | `/api/people/{persona_id}/memopedia/pages/{page_id}/desk` | 机に開く / 棚に戻す (open=true: 机に開く、open=false: 棚に戻す)。 |
 | GET | `/api/people/{persona_id}/memopedia/pages/{page_id}/history` | Get the edit history for a Memopedia page. |
 | PUT | `/api/people/{persona_id}/memopedia/pages/{page_id}/important` | Set or unset the important flag for a page. |
 | POST | `/api/people/{persona_id}/memopedia/pages/{page_id}/rollback/{edit_id}` | Rollback a page to the state before a specific edit. |

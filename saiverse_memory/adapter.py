@@ -153,6 +153,13 @@ class SAIMemoryAdapter:
             # 別テーブルだが memory.db に同居する (perception_buffer.py 参照)。
             from sai_memory.perception_buffer import init_perception_buffer_table
             init_perception_buffer_table(self.conn)
+
+            # P4-c 一回きり移行: vividness='vivid' のページを desk_items へ open。
+            # 「鮮明＝常設掲示」という旧意図を、desk が生まれた後の正しい後継へ
+            # 繋ぎ直す。vividness カラムはこの移行後、読み書きが止まる（死置き）
+            # ため移行を逃すと意図が永遠に失われる（冪等・毎回 no-op が既定）。
+            from sai_memory.memopedia.vivid_to_desk_migration import migrate_vivid_pages_to_desk
+            migrate_vivid_pages_to_desk(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None

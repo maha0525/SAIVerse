@@ -90,7 +90,6 @@ def memopedia_note(
                 summary=summary or "",
                 content="",
                 keywords=keywords,
-                vividness="rough",
                 edit_source="ai_conversation",
             )
 
