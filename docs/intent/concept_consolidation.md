@@ -304,9 +304,15 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 **修正**: `CATEGORY_THEME` を storage.py に一元定義（theme_pages.py は import に変更）し、theme を明示的に通した: `build_tree` / `get_tree`（→ UI API）/ `get_tree_markdown`（→ ペルソナの memopedia_get_tree スペル。ラベル「テーマ」）/ `export_all_markdown` / `memopedia_health`。フロント `MemopediaViewer.tsx` は型＋集約6箇所＋「テーマ / Themes」節（テーマ0件のペルソナには見出しを出さない）。**意図的に通さなかった消費者**: `entity_extractor`（抽出器が theme に書くのは設計違反——テーマは本人が立てるもの）と `note_organizer`・ページ生成 UI のカテゴリ選択肢（同上）。回帰テスト `test_theme_pages_visible_in_memopedia_tree` 追加。
 
+### 机の実機検証での追修正②: 開く＝読む行為を兼ねる（2026-07-11 午後）
+
+**まはー実機検証の結果**: Metabolism 後に机セクションは head に正しく載った（机の機構自体は機能）。ただし **memory_open の結果が「開きました」だけで本文を返さず**、机の head セクションは次の Metabolism まで凍結のため、ペルソナは「開いたのに中身が見えない → memory_read を撃ち直す二度手間」になる——机の比喩（開いたら紙面が見える）が壊れていた。
+
+**修正**: `open_page` が結果テキストにページ本文（snapshot_desk / memory_read と共通の整形器 `_read_memopedia` / `_read_chronicle` / `_read_task`）を含める。開いた瞬間は tail で見え、以後は机（次の Metabolism から head）に残る二段構え。描画失敗時は「開く」自体は成立させて本文なしで返す（WARN ログ）。memory_open のスペル説明にも「読む行為を兼ねるため read を続けて撃つ必要はない」を明記。
+
 ### 次アクション
 
-P3c①②（Note→テーマノード移行 + task:N 机開閉）実装完了・UI 表示の追修正済み・pytest 全通過 → まはー実機再確認（メモリタブにテーマ4ページ）→ P4 代謝配線 → ①自律行動v2 実機テスト。
+P3c①②（Note→テーマノード移行 + task:N 机開閉）実装完了・追修正2件（UI テーマ表示 / 開く＝読む）済み・pytest 全通過 → まはー実機再確認 → P4 代謝配線 → ①自律行動v2 実機テスト。
 
 ---
 

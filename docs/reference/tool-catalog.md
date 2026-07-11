@@ -60,7 +60,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復の会話の切… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | 写真を撮って貼る |
 | `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は m:N（Memopedia）/ ch:N（Chronicle）/ task:N（目的ノード）の形式です（コア… | `ref*`: string | 記憶のページを机から閉じる |
 | `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は c:N（コア記憶1件）と m:N（Memopedia ページ）です。Chronicle（ch:N）と写真（p:N）は消せま… | `ref*`: string | 記憶のページをごみ箱へ |
-| `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。「読む（memory_read）」がその場限りで流れていくのに対し、「開く」は以後の思考で常に見える状態が続きますが、机の広さ（文字数予算）を消費します。机が… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
+| `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。開くと、そのページの現在の内容が結果に表示されます（読む行為を兼ねるため、memory_read を続けて撃つ必要はありません）。「読む（memory_rea… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
 | `memory_read` | 記憶の地図帳（Memory Atlas）の1ページをその場で読みます。読んだ内容は会話の流れに残り、時間とともに流れていきます（机の場所は取りません）。常に見える状態を保ちたい場合は memory_open を使ってください。参照は … | `ref*`: string | 記憶のページを読む |
 | `memory_read_around` | Read the conversation context around a specific message. Use this after memory_search_brief to expand context around … | `message_id*`: string, `window`: integer | — |
 | `memory_recall` | Recall relevant past messages from long-term memory. Use 'query' for semantic (meaning-based) search and 'keywords' f… | `query`: string, `keywords`: array, `max_chars`: integer, `topk`: integer, `start_date`: string, `end_date`: string | — |
@@ -108,7 +108,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `move_head` | Stack-chan の首を動かして向きを変える。 yaw は水平方向 (-90〜90度)、 pitch は垂直方向 (5〜85度)。 動作後にサーボが静止するまで待ってから返すので、 直後に「見る」 を呼んでもブレない。 | `yaw*`: integer, `pitch*`: integer | 首を動かす |
 | `read_environment` | 現在のStack-chan機体が感じている環境光と近接の値を1回取得する。環境光は可視+IRとIRのみのADC count、近接もADC countで返す。明るさの変化、手や物が顔の近くにあるかを確かめたい時に使う。常時監視や距離への… | (なし) | 光と近さを感じる |
 | `read_imu` | 現在のStack-chan機体が感じている9軸IMUの値を1回取得する。加速度(accel_g)、角速度(gyro_dps)、磁場(mag_ut)を、それぞれx/y/z軸で返す。上下や傾き、動かされた方向を確認したい時に使う。磁気セン… | (なし) | 姿勢と動きを感じる |
-| `scan_nfc` | 現在のStack-chan機体で、近くにかざされたISO 14443A NFCタグを1回だけ探す。タグがあればUID・ATQA・SAKを返す。タグ内容の読書き、認証、カードのエミュレーションは行わない。UIDは安定した識別子になり得る… | (なし) | NFCタグを探す |
+| `scan_nfc` | 現在のStack-chan機体で、近くにかざされたISO 14443AまたはNFC-F（FeliCa）タグを1回だけ探す。ISO 14443AはUID・ATQA・SAK、NFC-FはIDm・PMmを返す。タグ内容の読書き、認証、カード… | (なし) | NFCタグを探す |
 | `see` | あなたの目で目の前の光景を見る。 視覚で何かを確認したいときに呼ぶ。 戻り値には実際に見えた景色が画像として添付される。 問いを添えると注目したい点をメモとして残せる (任意)。 | `question`: string | 見る |
 | `servo8_set_angle` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 180° サーボを指定角度 (0〜180度) に動かす。 腕・首など向きを決めるサーボ用。 どのチャン… | `channel*`: integer, `angle*`: integer | サーボの角度を設定 |
 | `servo8_set_speed` | あなたの身体 (Stack-chan) に接続された M5Stack 8Servos Unit の指定 チャンネル (0〜7) の 360° 連続回転サーボ (車輪など) の回転速度を 設定する。 speed は -100〜100 で… | `channel*`: integer, `speed*`: integer | サーボの回転速度を設定 |

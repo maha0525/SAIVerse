@@ -232,6 +232,17 @@ class OpenClosePageTests(_AtlasTestBase):
         self.assertIn("机に開きました", result)
         self.assertIn(f"m:{page.short_id}", self._desk_refs())
 
+    def test_open_returns_page_content_inline(self):
+        """開く＝読む行為を兼ねる: 結果にページ本文が含まれる (2026-07-11 まはー指摘)。
+
+        机の head セクションは次の Metabolism まで凍結されるため、ここで本文を
+        返さないと「開いたのに中身が見えず read を撃ち直す二度手間」になる。
+        """
+        page = self._make_memopedia_page(title="琥珀色の聖域", content="温かみのある光")
+        result = atlas.open_page(self.adapter, f"m:{page.short_id}")
+        self.assertIn("琥珀色の聖域", result)
+        self.assertIn("温かみのある光", result)
+
     def test_open_unknown_memopedia_ref_reports_not_found(self):
         result = atlas.open_page(self.adapter, "m:999")
         self.assertIn("見つかりません", result)
@@ -1069,6 +1080,12 @@ class TaskDeskTests(TaskReadTests):
         result = atlas.open_page(self.adapter, ref, manager=self.manager)
         self.assertIn("机に開きました", result)
         self.assertIn(ref, self._desk_refs())
+
+    def test_open_task_returns_content_inline(self):
+        # 開く＝読む行為を兼ねる (m:N と同じ)。task の整形は _read_task と共通
+        task = self._make_task()
+        result = atlas.open_page(self.adapter, task["task_ref"], manager=self.manager)
+        self.assertIn(task["title"], result)
 
     def test_open_unknown_task_reports_not_found(self):
         result = atlas.open_page(self.adapter, "task:999", manager=self.manager)

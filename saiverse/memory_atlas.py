@@ -579,6 +579,12 @@ def open_page(
     れていないページから自動で棚に戻す (LRU)。追い出しが起きた場合はその旨を
     結果テキストに含める。
 
+    **開く＝読む行為を兼ねる**: 結果テキストにページの現在の本文
+    (snapshot_desk / memory_read と同じ整形) を含める。机の head セクションは
+    次の Metabolism まで凍結されているため、本文を返さないと「開いたのに
+    中身が見えず、memory_read をもう一度撃つ二度手間」になる
+    (2026-07-11 実機検証・まはー指摘)。
+
     ``manager`` は ``task:N`` (目的ノード = main DB 在住) の解決にのみ要る
     world 文脈。スペル層が ``get_active_manager()`` を渡す。
     """
@@ -611,6 +617,25 @@ def open_page(
     lines = [f"{norm_ref} を机に開きました。"]
     if evicted:
         lines.append(f"机が溢れたため {'、'.join(evicted)} を棚に戻しました。")
+
+    # 開いた本人にその場で本文を見せる (renderer は snapshot_desk と共通。
+    # 失敗しても「開く」自体は成立しているので、本文なしで返す)
+    try:
+        norm_kind, norm_key = _parse_ref(norm_ref)
+        name = _resolve_persona_name(adapter, None)
+        if norm_kind == "memopedia":
+            rendered = _read_memopedia(adapter, norm_key, name)
+        elif norm_kind == "chronicle":
+            rendered = _read_chronicle(conn, norm_key, name)
+        else:
+            rendered = _read_task(adapter, norm_key, manager, name)
+        lines.append("")
+        lines.append(rendered)
+    except Exception:
+        LOGGER.warning(
+            "memory_atlas: failed to render opened page ref=%s", norm_ref,
+            exc_info=True,
+        )
     return "\n".join(lines)
 
 
