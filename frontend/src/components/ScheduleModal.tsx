@@ -127,7 +127,10 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const loadPlaybooks = async () => {
         try {
-            const res = await fetch(`/api/people/meta_playbooks`);
+            // include_day_rhythm: 起床 (judgment_day_open)・就寝 (judgment_day_close) は
+            // user_selectable=false (召喚に出すのは誤り) だが、スケジュール登録は
+            // 自律行動 v2 の正規の儀式なのでこのダイアログでは選択肢に含める
+            const res = await fetch(`/api/people/meta_playbooks?include_day_rhythm=true`);
             if (res.ok) {
                 const data = await res.json();
                 setPlaybooks(data);
