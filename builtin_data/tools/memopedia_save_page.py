@@ -11,14 +11,11 @@ from saiverse.references import to_short_ref
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
+from sai_memory.memopedia.storage import category_keys
 
 
-# Map category names to root page IDs
-_CATEGORY_ROOT_MAP = {
-    "people": "root_people",
-    "terms": "root_terms",
-    "plans": "root_plans",
-}
+# Map category names to root page IDs (レジストリから生成 — ハードコード禁止)
+_CATEGORY_ROOT_MAP = {k: f"root_{k}" for k in category_keys("writable")}
 
 
 def memopedia_save_page(
@@ -33,7 +30,7 @@ def memopedia_save_page(
     - title: page title
     - summary: 1-2 sentence summary
     - content: full page content (Markdown)
-    - category: one of 'people', 'terms', 'plans'
+    - category: one of 'people', 'terms', 'plans', 'events'
     - keywords: list of keywords for search
     """
     persona_id = get_active_persona_id()
@@ -130,7 +127,7 @@ def schema() -> ToolSchema:
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["people", "terms", "plans"],
+                    "enum": category_keys("writable"),
                     "description": "Page category (default: terms)",
                 },
                 "keywords": {

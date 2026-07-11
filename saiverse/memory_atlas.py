@@ -53,6 +53,7 @@ from typing import List, Optional, Tuple
 
 from sai_memory import desk
 from sai_memory.core_memory import get_core_memory, list_core_memories
+from sai_memory.memopedia.storage import category_keys
 from sai_memory.photos import Photo, get_photo_by_short_id, list_photos_pasted_to
 
 LOGGER = logging.getLogger(__name__)
@@ -710,13 +711,8 @@ def search_pages(adapter, query: str, limit: int = 8) -> str:
 # ----- write_page -----
 
 
-# 新規ページ作成のカテゴリ → root ページ ID (memopedia INITIAL_ROOTS と対)
-_WRITE_CATEGORY_ROOT_MAP = {
-    "people": "root_people",
-    "terms": "root_terms",
-    "plans": "root_plans",
-    "events": "root_events",
-}
+# 新規ページ作成のカテゴリ → root ページ ID (レジストリから生成 — ハードコード禁止)
+_WRITE_CATEGORY_ROOT_MAP = {k: f"root_{k}" for k in category_keys("writable")}
 
 
 def write_page(

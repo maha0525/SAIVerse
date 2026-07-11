@@ -20,6 +20,7 @@ from sai_memory.memory.storage import (
     resolve_memory_notes,
     set_note_plan,
 )
+from sai_memory.memopedia.storage import category_keys, category_label
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,12 +43,6 @@ def _format_memopedia_tree_for_plan(tree: Dict[str, Any]) -> str:
     Includes page ID and content length for each page.
     """
     lines: List[str] = []
-    category_names = {
-        "people": "人物",
-        "terms": "用語",
-        "plans": "予定",
-        "events": "出来事",
-    }
 
     def _render(page: Dict[str, Any], depth: int = 0) -> None:
         # Skip root pages
@@ -69,10 +64,10 @@ def _format_memopedia_tree_for_plan(tree: Dict[str, Any]) -> str:
         for child in page.get("children", []):
             _render(child, depth + 1)
 
-    for category_key in ["people", "terms", "plans", "events"]:
+    for category_key in category_keys("extractable"):
         pages = tree.get(category_key, [])
         if pages:
-            category_name = category_names.get(category_key, category_key)
+            category_name = category_label(category_key)
             lines.append(f"\n### {category_name} ({category_key})")
             for page in pages:
                 _render(page, depth=0)

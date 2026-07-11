@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sai_memory.memory.storage import init_db, get_messages_paginated, Message
 from sai_memory.memopedia import Memopedia, init_memopedia_tables, CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS
+from sai_memory.memopedia.storage import category_keys
 from saiverse.model_configs import get_model_config, find_model_config
 from scripts._shared.config import load_prompt, load_runtime_config
 
@@ -57,7 +58,7 @@ PROMPTS_DIR = _get_prompts_dir()
 
 
 def category_to_root_id(category: str) -> str | None:
-    return {"people": "root_people", "terms": "root_terms", "plans": "root_plans"}.get(category)
+    return {k: f"root_{k}" for k in category_keys("extractable")}.get(category)
 
 
 def filter_valid_pages(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -179,7 +180,7 @@ def extract_knowledge_from_text(
                     "properties": {
                         "category": {
                             "type": "string",
-                            "enum": ["people", "events", "plans"],
+                            "enum": category_keys("extractable"),
                         },
                         "title": {"type": "string"},
                         "summary": {"type": "string"},
@@ -412,7 +413,7 @@ def extract_knowledge(
                     "properties": {
                         "category": {
                             "type": "string",
-                            "enum": ["people", "terms", "plans"],
+                            "enum": category_keys("extractable"),
                         },
                         "title": {"type": "string"},
                         "summary": {"type": "string"},

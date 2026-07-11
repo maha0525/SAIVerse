@@ -19,6 +19,9 @@ from sai_memory.memopedia.storage import (
     CATEGORY_PLANS,
     CATEGORY_EVENTS,
     CATEGORY_THEME,
+    CATEGORY_DEFS,
+    category_keys,
+    category_label,
     build_tree,
     create_page,
     get_page,
@@ -110,12 +113,8 @@ class Memopedia:
             return result
 
         return {
-            "people": [_annotate(p) for p in tree.get(CATEGORY_PEOPLE, [])],
-            "terms": [_annotate(p) for p in tree.get(CATEGORY_TERMS, [])],
-            "plans": [_annotate(p) for p in tree.get(CATEGORY_PLANS, [])],
-            "events": [_annotate(p) for p in tree.get(CATEGORY_EVENTS, [])],
-            # テーマ (旧 Note、P3c①)。抽出4カテゴリと違い本人が立てる地図
-            "theme": [_annotate(p) for p in tree.get(CATEGORY_THEME, [])],
+            key: [_annotate(p) for p in tree.get(key, [])]
+            for key in category_keys("in_tree")
         }
 
     def get_tree_markdown(
@@ -141,14 +140,6 @@ class Memopedia:
         """
         tree = self.get_tree(thread_id)
         lines: List[str] = []
-
-        category_names = {
-            "people": "人物",
-            "terms": "用語",
-            "plans": "予定",
-            "events": "出来事",
-            "theme": "テーマ",
-        }
 
         def _render_page(page: Dict[str, Any], depth: int = 0, current_depth: int = 0) -> None:
             # Check depth limit
@@ -191,8 +182,8 @@ class Memopedia:
                 for child in children:
                     _render_page(child, depth + 1, current_depth + 1)
 
-        for category_key in ["people", "terms", "plans", "events", "theme"]:
-            category_name = category_names.get(category_key, category_key)
+        for category_key in category_keys("in_tree"):
+            category_name = category_label(category_key)
             pages = tree.get(category_key, [])
             if pages:
                 lines.append(f"\n### {category_name}")
@@ -721,14 +712,6 @@ class Memopedia:
         with self._lock:
             tree = build_tree(self.conn)
 
-        category_names = {
-            CATEGORY_PEOPLE: "人物",
-            CATEGORY_TERMS: "用語",
-            CATEGORY_PLANS: "予定",
-            CATEGORY_EVENTS: "出来事",
-            CATEGORY_THEME: "テーマ",
-        }
-
         sections: List[str] = ["# Memopedia\n"]
 
         def _render_page(page: MemopediaPage, level: int = 2) -> List[str]:
@@ -744,8 +727,8 @@ class Memopedia:
                 lines.extend(_render_page(child, level + 1))
             return lines
 
-        for category in [CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS, CATEGORY_EVENTS, CATEGORY_THEME]:
-            category_name = category_names.get(category, category)
+        for category in category_keys("in_tree"):
+            category_name = category_label(category)
             pages = tree.get(category, [])
             if not pages:
                 continue
@@ -959,7 +942,7 @@ class Memopedia:
         Get all trunk pages, optionally filtered by category.
 
         Args:
-            category: Optional category filter ('people', 'terms', 'plans')
+            category: Optional category filter (CATEGORY_DEFS のキー, e.g. 'people')
 
         Returns:
             List of trunk pages
@@ -974,7 +957,7 @@ class Memopedia:
         These are pages that haven't been organized into trunks yet.
 
         Args:
-            category: Category to search ('people', 'terms', 'plans')
+            category: Category to search (CATEGORY_DEFS のキー, e.g. 'people')
 
         Returns:
             List of unorganized pages

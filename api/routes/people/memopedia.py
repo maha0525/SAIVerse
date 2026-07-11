@@ -19,6 +19,7 @@ from .models import (
     BuildMemopediaFromLogsRequest,
 )
 from .utils import get_adapter
+from sai_memory.memopedia.storage import CATEGORY_DEFS, category_keys
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -36,11 +37,24 @@ def _get_memopedia(adapter):
 
 @router.get("/{persona_id}/memopedia/tree")
 def get_memopedia_tree(persona_id: str, manager = Depends(get_manager)):
-    """Get the Memopedia knowledge tree."""
+    """Get the Memopedia knowledge tree with category metadata."""
     with get_adapter(persona_id, manager) as adapter:
         try:
             memopedia = _get_memopedia(adapter)
-            return memopedia.get_tree()
+            tree = memopedia.get_tree()
+            categories_meta = [
+                {
+                    "key": d.key,
+                    "label": d.label,
+                    "label_en": d.label_en,
+                    "hide_when_empty": d.hide_when_empty,
+                    "can_generate": d.extractable,
+                    "writable": d.writable,
+                }
+                for d in sorted(CATEGORY_DEFS.values(), key=lambda d: d.order)
+                if d.in_tree
+            ]
+            return {"categories": categories_meta, **tree}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
 
@@ -395,8 +409,9 @@ def get_unorganized_pages(
     manager = Depends(get_manager)
 ):
     """Get pages that are direct children of the root (not in any trunk)."""
-    if category not in ("people", "terms", "plans"):
-        raise HTTPException(status_code=400, detail="Invalid category. Must be 'people', 'terms', or 'plans'")
+    _valid = set(category_keys("extractable"))
+    if category not in _valid:
+        raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {', '.join(sorted(_valid))}")
 
     with get_adapter(persona_id, manager) as adapter:
         try:

@@ -278,7 +278,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | PUT | `/api/people/{persona_id}/memopedia/pages/{page_id}/important` | Set or unset the important flag for a page. |
 | POST | `/api/people/{persona_id}/memopedia/pages/{page_id}/rollback/{edit_id}` | Rollback a page to the state before a specific edit. |
 | PUT | `/api/people/{persona_id}/memopedia/pages/{page_id}/trunk` | Set or unset the trunk flag for a page. |
-| GET | `/api/people/{persona_id}/memopedia/tree` | Get the Memopedia knowledge tree. |
+| GET | `/api/people/{persona_id}/memopedia/tree` | Get the Memopedia knowledge tree with category metadata. |
 | GET | `/api/people/{persona_id}/memopedia/trunks` | Get all trunk pages, optionally filtered by category. |
 | GET | `/api/people/{persona_id}/memopedia/unorganized` | Get pages that are direct children of the root (not in any trunk). |
 | GET | `/api/people/{persona_id}/memory-notes` | List unresolved memory notes. |

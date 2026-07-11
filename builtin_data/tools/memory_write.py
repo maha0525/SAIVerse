@@ -22,6 +22,7 @@ from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
 
 from builtin_data.tools._core_memory_common import resolve_core_memory_budget
+from sai_memory.memopedia.storage import category_keys
 
 
 def memory_write(
@@ -87,7 +88,7 @@ def schema() -> ToolSchema:
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["people", "terms", "plans", "events"],
+                    "enum": category_keys("writable"),
                     "description": "新規ページのカテゴリ（title 指定時のみ。既定: terms）",
                 },
             },

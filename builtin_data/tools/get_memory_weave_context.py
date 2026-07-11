@@ -376,6 +376,7 @@ def _get_memopedia_context(
     """
     try:
         from sai_memory.memopedia import Memopedia, init_memopedia_tables
+        from sai_memory.memopedia.storage import category_keys, category_label
 
         init_memopedia_tables(conn)
         memopedia = Memopedia(conn)
@@ -383,13 +384,6 @@ def _get_memopedia_context(
         tree = memopedia.get_tree()
         LOGGER.info("_get_memopedia_context: tree keys=%s", list(tree.keys()))
         lines: List[str] = []
-
-        category_names = {
-            "people": "人物",
-            "terms": "用語",
-            "plans": "予定",
-            "events": "出来事",
-        }
 
         def _sort_key(page: Dict) -> int:
             return max(
@@ -422,12 +416,12 @@ def _get_memopedia_context(
                 if children:
                     _list_pages(children, prefix + "  ")
 
-        for category in ["people", "terms", "plans", "events"]:
+        for category in category_keys("extractable"):
             pages = tree.get(category, [])
             LOGGER.debug("_get_memopedia_context: category=%s, pages count=%d", category, len(pages))
             if pages:
                 # Sort by most recently referenced/updated, apply limit
-                lines.append(f"\n### {category_names[category]}")
+                lines.append(f"\n### {category_label(category)}")
                 _list_pages(pages)
 
         LOGGER.info("_get_memopedia_context: Generated %d lines", len(lines))

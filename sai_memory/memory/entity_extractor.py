@@ -22,19 +22,17 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from sai_memory.memory.storage import Message
+from sai_memory.memopedia.storage import CATEGORY_DEFS, category_keys
 
 LOGGER = logging.getLogger(__name__)
 
-# Valid Memopedia categories
-VALID_CATEGORIES = {"people", "terms", "plans", "events"}
+# Valid Memopedia categories (レジストリから生成 — ハードコード禁止)
+VALID_CATEGORIES: set = set(category_keys("extractable"))
 DEFAULT_CATEGORY = "terms"
 
-# Category root page IDs
-CATEGORY_ROOT_IDS = {
-    "people": "root_people",
-    "terms": "root_terms",
-    "plans": "root_plans",
-    "events": "root_events",
+# Category root page IDs (レジストリから生成 — ハードコード禁止)
+CATEGORY_ROOT_IDS: Dict[str, str] = {
+    k: f"root_{k}" for k in category_keys("extractable")
 }
 
 
@@ -151,7 +149,7 @@ def _build_extraction_prompt(
         "- 会話の中で明確に述べられた事実のみを抽出してください（推測や解釈は含めない）",
         "- 既存ページに記録済みの情報と重複するnotesは除外してください",
         "- 抽出すべきエンティティがない場合は空のリストを返してください",
-        "- categoryは people / terms / plans / events のいずれかを指定してください",
+        f"- categoryは {' / '.join(category_keys('extractable'))} のいずれかを指定してください",
         "- 日本語で出力してください",
         "",
         "## 出力形式",
@@ -241,7 +239,7 @@ def _format_page_list(memopedia) -> str:
         return ""
 
     lines = []
-    for category_key in ("people", "terms", "plans", "events"):
+    for category_key in category_keys("extractable"):
         pages = tree.get(category_key, [])
         if not pages:
             continue

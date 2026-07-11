@@ -29,6 +29,7 @@ from sai_memory.memory.storage import (
 )
 from sai_memory.memory.recall import semantic_recall_groups
 from sai_memory.memopedia import Memopedia
+from sai_memory.memopedia.storage import category_keys, category_label
 from saiverse.usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
@@ -655,11 +656,13 @@ def generate_memopedia_page(
         }
 
     # Generate final page
-    category_hint = ""
+    _extractable = category_keys("extractable")
+    _cat_hint_pairs = "、".join(f"{k}={category_label(k)}" for k in _extractable)
+    _cat_enum = "|".join(_extractable)
     if category:
         category_hint = f"カテゴリは「{category}」を使用してください。"
     else:
-        category_hint = "適切なカテゴリ（people=人物、terms=用語・概念、plans=計画・予定）を選んでください。"
+        category_hint = f"適切なカテゴリ（{_cat_hint_pairs}）を選んでください。"
 
     page_prompt = f"""収集した情報を元に「{keyword}」についてのMemopediaページを作成してください。
 
@@ -676,7 +679,7 @@ def generate_memopedia_page(
 以下のJSON形式で返してください:
 ```json
 {{
-  "category": "people|terms|plans|events",
+  "category": "{_cat_enum}",
   "title": "ページタイトル",
   "summary": "1-2文の要約",
   "content": "本文（Markdown可）",
@@ -716,12 +719,8 @@ def generate_memopedia_page(
         page_data["action"] = "updated"
         LOGGER.info(f"Updated existing page: {page_data['title']}")
     else:
-        category_root = {
-            "people": "root_people",
-            "terms": "root_terms",
-            "plans": "root_plans",
-            "events": "root_events",
-        }.get(page_data.get("category", "terms"), "root_terms")
+        _cat_to_root = {k: f"root_{k}" for k in category_keys("extractable")}
+        category_root = _cat_to_root.get(page_data.get("category", "terms"), "root_terms")
 
         new_page = memopedia.create_page(
             parent_id=category_root,

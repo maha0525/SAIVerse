@@ -38,6 +38,7 @@ os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from sai_memory.memory.storage import init_db
 from sai_memory.memopedia import Memopedia
+from sai_memory.memopedia.storage import category_keys
 from saiverse.model_configs import find_model_config
 from scripts.memopedia.maintenance_store import (
     count_target_pages,
@@ -113,7 +114,7 @@ def format_page_list(memopedia: Memopedia) -> str:
             for child in page.get("children", []):
                 _list_pages([child], category, depth + 1, page["id"])
     
-    for category in ["people", "events", "plans"]:
+    for category in category_keys("metabolizable"):
         _list_pages(tree.get(category, []), category)
     
     return "\n".join(lines) if lines else "(ページなし)"
@@ -196,7 +197,7 @@ def run_fix_markdown(
             for child in page.get("children", []):
                 _process_pages([child])
     
-    for category in ["people", "events", "plans"]:
+    for category in category_keys("metabolizable"):
         _process_pages(tree.get(category, []))
     
     return fixed_pages
@@ -356,7 +357,7 @@ def run_split_large(
             for child in page.get("children", []):
                 _process_pages([child])
     
-    for category in ["people", "events", "plans"]:
+    for category in category_keys("metabolizable"):
         _process_pages(tree.get(category, []))
     
     return split_pages
@@ -426,7 +427,7 @@ def run_merge_similar(
                 _collect_descendants([child])
     
     tree = memopedia.get_tree()
-    for category in ["people", "events", "plans"]:
+    for category in category_keys("metabolizable"):
         _collect_descendants(tree.get(category, []))
     
     find_prompt = f"""以下はMemopediaのページ一覧です。
@@ -620,7 +621,7 @@ def get_depth1_pages_by_category(memopedia: Memopedia) -> Dict[str, List[Dict]]:
     tree = memopedia.get_tree()
     result: Dict[str, List[Dict]] = {}
     
-    for category in ["people", "events", "plans"]:
+    for category in category_keys("metabolizable"):
         pages = []
         for root_page in tree.get(category, []):
             if not root_page["id"].startswith("root_"):

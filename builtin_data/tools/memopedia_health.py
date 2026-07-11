@@ -8,6 +8,7 @@ import logging
 
 from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
+from sai_memory.memopedia.storage import category_keys
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def memopedia_health() -> str:
             if children:
                 _scan(children, category, depth + 1)
 
-    for cat_key in ("people", "terms", "plans", "events", "theme"):
+    for cat_key in category_keys("in_tree"):
         _scan(tree.get(cat_key, []), cat_key)
 
     lines = ["## Memopedia ヘルスレポート", f"総ページ数: {total_pages}"]

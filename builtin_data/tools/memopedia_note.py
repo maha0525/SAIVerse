@@ -10,7 +10,7 @@ import re
 from datetime import date
 from typing import List, Optional
 
-from sai_memory.memopedia.storage import resolve_page_ref
+from sai_memory.memopedia.storage import resolve_page_ref, category_keys
 from saiverse.references import to_short_ref, to_uri
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
@@ -18,12 +18,8 @@ from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 
-# Map category names to root page IDs
-_CATEGORY_ROOT_MAP = {
-    "people": "root_people",
-    "terms": "root_terms",
-    "plans": "root_plans",
-}
+# Map category names to root page IDs (レジストリから生成 — ハードコード禁止)
+_CATEGORY_ROOT_MAP = {k: f"root_{k}" for k in category_keys("writable")}
 
 
 def memopedia_note(
@@ -39,7 +35,7 @@ def memopedia_note(
     - content: the fact or note to record (one concise statement)
     - title: page (entity) title — required for new pages, optional when page_id given
     - summary: 1-2 sentence page summary (optional, updates page-level summary)
-    - category: one of 'people', 'terms', 'plans' (default: terms)
+    - category: one of 'people', 'terms', 'plans', 'events' (default: terms)
     - keywords: list of keywords for search (optional)
     - page_id: existing page ID or saiverse:// URI to write to (optional)
 
@@ -162,7 +158,7 @@ def schema() -> ToolSchema:
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["people", "terms", "plans"],
+                    "enum": category_keys("writable"),
                     "description": "Page category (default: terms)",
                 },
                 "keywords": {

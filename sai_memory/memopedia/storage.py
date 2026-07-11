@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -11,7 +12,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-# Category constants
+LOGGER = logging.getLogger(__name__)
+
+# Category constants (後方互換のため残す — 新規コードは CATEGORY_DEFS を使うこと)
 CATEGORY_PEOPLE = "people"
 CATEGORY_TERMS = "terms"
 CATEGORY_PLANS = "plans"
@@ -20,6 +23,50 @@ CATEGORY_EVENTS = "events"
 # 含めない — テーマは本人が立てるもので、抽出で自動生成しない
 # (新規テーマの命名は P4 代謝の領分。sai_memory/theme_pages.py 参照)。
 CATEGORY_THEME = "theme"
+
+
+@dataclass(frozen=True)
+class CategoryDef:
+    """カテゴリ定義。全フラグはここが唯一の真実の源。"""
+
+    key: str
+    label: str
+    label_en: str
+    order: int
+    in_tree: bool = True
+    hide_when_empty: bool = False
+    extractable: bool = False
+    writable: bool = False
+    metabolizable: bool = False
+
+
+CATEGORY_DEFS: Dict[str, CategoryDef] = {
+    "people": CategoryDef("people", "人物", "People", order=1, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "terms": CategoryDef("terms", "用語", "Terms", order=2, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "plans": CategoryDef("plans", "計画", "Plans", order=3, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "events": CategoryDef("events", "出来事", "Events", order=4, in_tree=True, extractable=True, writable=True, metabolizable=True),
+    "theme": CategoryDef("theme", "テーマ", "Themes", order=5, in_tree=True, hide_when_empty=True),
+    "core": CategoryDef("core", "コア記憶", "Core Memory", order=6, in_tree=False),
+    "chronicle": CategoryDef("chronicle", "クロニクル", "Chronicle", order=7, in_tree=False),
+}
+
+
+def category_keys(role: str) -> List[str]:
+    """role フラグが True のカテゴリキーを order 順で返す。
+
+    role: "in_tree" | "extractable" | "writable" | "metabolizable" | "hide_when_empty"
+    """
+    return [
+        d.key
+        for d in sorted(CATEGORY_DEFS.values(), key=lambda d: d.order)
+        if getattr(d, role, False)
+    ]
+
+
+def category_label(key: str) -> str:
+    """カテゴリキーに対応する日本語ラベルを返す。未知キーはキーそのものを返す。"""
+    return CATEGORY_DEFS[key].label if key in CATEGORY_DEFS else key
+
 
 INITIAL_ROOTS = [
     {
@@ -38,7 +85,7 @@ INITIAL_ROOTS = [
     },
     {
         "id": "root_plans",
-        "title": "予定",
+        "title": "計画",
         "category": CATEGORY_PLANS,
         "summary": "進行中や計画中のプロジェクト・予定",
         "content": "",
@@ -739,16 +786,18 @@ def build_tree(conn: sqlite3.Connection) -> Dict[str, List[MemopediaPage]]:
     # Organize by category
     # (core / chronicle カテゴリの trunk は意図的に含めない — コア記憶は
     #  常時開の head 常設、Chronicle は時間の地図として別導線を持つ)
-    result: Dict[str, List[MemopediaPage]] = {
-        CATEGORY_PEOPLE: [],
-        CATEGORY_TERMS: [],
-        CATEGORY_PLANS: [],
-        CATEGORY_EVENTS: [],
-        CATEGORY_THEME: [],
-    }
+    result: Dict[str, List[MemopediaPage]] = {k: [] for k in category_keys("in_tree")}
+    unknown_cats: set = set()
     for root in roots:
         if root.category in result:
             result[root.category].append(root)
+        elif root.category not in CATEGORY_DEFS:
+            unknown_cats.add(root.category)
+    if unknown_cats:
+        LOGGER.warning(
+            "build_tree: unknown categories skipped (not in CATEGORY_DEFS): %s",
+            sorted(unknown_cats),
+        )
 
     return result
 
@@ -904,7 +953,7 @@ def search_pages_filtered(
     Args:
         conn: Database connection
         query: Search keyword (LIKE match on title, summary, content)
-        category: Optional category filter ("people", "terms", "plans")
+        category: Optional category filter (CATEGORY_DEFS のキー, e.g. "people")
         limit: Maximum results
 
     Returns:
