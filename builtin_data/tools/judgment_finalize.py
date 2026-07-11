@@ -1219,7 +1219,72 @@ def _finalize_day_close(
         manager, persona_id, output, ctx, lines, warnings,
     )
 
+    # --- curation バッチ起動 (裁定 (c): 就寝判断適用直後の背景ジョブ) --------
+    # pending プランがあれば背景スレッドで即実行する。
+    # スレッド起動前に必要な依存（manager, persona_id）は全て構築済み。
+    _maybe_launch_curation_batch(manager, persona_id)
+
     return applied
+
+
+def _maybe_launch_curation_batch(manager: Any, persona_id: str) -> None:
+    """pending の編纂プランがあれば背景スレッドで run_pending_plans を起動する。
+
+    - daemon スレッドとして起動するので本体の終了を妨げない。
+    - 依存（manager, persona_id）はスレッド起動前にここで確認し、問題があれば
+      起動しない——スレッド内での None アクセスを防ぐ。
+    - 既存の背景スレッド起動流儀（event_scheduler / integration_manager）に倣い
+      threading.Thread(daemon=True) を使う。
+    """
+    import threading
+
+    try:
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            return
+        adapter = getattr(persona, "sai_memory", None)
+        mem_conn = getattr(adapter, "conn", None) if adapter is not None else None
+        if mem_conn is None:
+            return
+
+        from sai_memory.curation_ops import list_pending
+        pending = list_pending(mem_conn)
+        if not pending:
+            LOGGER.debug(
+                "[judgment_finalize] curation_batch: no pending plans, skip (persona=%s)",
+                persona_id,
+            )
+            return
+
+        LOGGER.info(
+            "[judgment_finalize] curation_batch: launching background thread "
+            "(persona=%s pending=%d)",
+            persona_id, len(pending),
+        )
+
+        from sai_memory.curation_ops import run_pending_plans
+
+        def _run() -> None:
+            try:
+                run_pending_plans(manager, persona_id)
+            except Exception:
+                LOGGER.warning(
+                    "[judgment_finalize] curation_batch: background run raised",
+                    exc_info=True,
+                )
+
+        t = threading.Thread(
+            target=_run,
+            name=f"CurationBatch-{persona_id[:8]}",
+            daemon=True,
+        )
+        t.start()
+
+    except Exception:
+        LOGGER.warning(
+            "[judgment_finalize] _maybe_launch_curation_batch raised",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

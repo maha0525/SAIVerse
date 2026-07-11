@@ -48,6 +48,15 @@ from saiverse.day_plan import (
     slot_result_label,
 )
 
+# ---------------------------------------------------------------------------
+# 新聞生成時刻の永続化キー（窓集計の起点）
+# ---------------------------------------------------------------------------
+# per-persona memory.db の kv テーブル（または plan meta）に保存することを
+# 避け、シンプルに per-persona のファイルシステムキャッシュを使う。
+# 保存先: ~/.saiverse/personas/<id>/day_report_last_generated_at.txt
+# 形式: Unix epoch 秒（整数文字列）
+_LAST_GENERATED_FILENAME = "day_report_last_generated_at.txt"
+
 LOGGER = logging.getLogger(__name__)
 
 NONE_TEXT = "（なし）"
@@ -490,6 +499,121 @@ def _section_day_close(
     return lines
 
 
+def _get_last_generated_at(persona_id: str, base_dir: Optional[Path] = None) -> Optional[int]:
+    """前回の新聞生成時刻（Unix epoch 秒）を返す。記録なしは None。"""
+    try:
+        if base_dir is None:
+            from saiverse.data_paths import get_saiverse_home
+            base_dir = get_saiverse_home() / "personas" / persona_id
+        path = Path(base_dir) / _LAST_GENERATED_FILENAME
+        if path.exists():
+            return int(path.read_text(encoding="utf-8").strip())
+    except Exception:
+        LOGGER.debug("[day_report] failed to read last_generated_at", exc_info=True)
+    return None
+
+
+def _save_last_generated_at(
+    persona_id: str,
+    ts: int,
+    base_dir: Optional[Path] = None,
+) -> None:
+    """新聞生成時刻（Unix epoch 秒）をファイルに保存する。"""
+    try:
+        if base_dir is None:
+            from saiverse.data_paths import get_saiverse_home
+            base_dir = get_saiverse_home() / "personas" / persona_id
+        path = Path(base_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / _LAST_GENERATED_FILENAME).write_text(str(ts), encoding="utf-8")
+    except Exception:
+        LOGGER.warning(
+            "[day_report] failed to save last_generated_at (persona=%s)", persona_id,
+            exc_info=True,
+        )
+
+
+def _section_curation_edits(
+    persona: Any,
+    since_epoch: int,
+) -> List[str]:
+    """「棚の整理」節 — 前回の新聞生成時刻以降の編纂編集を集計する（裁定 (f)）。
+
+    PageEditHistory を edit_source でグルーピングする。
+    日常の本文追記（edit_source='ai_conversation'）は
+    セッションダイジェスト欄と重複するため対象外。
+
+    Args:
+        persona: PersonaCore インスタンス（sai_memory adapter 付き）
+        since_epoch: 窓の起点（Unix epoch 秒）
+    """
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    mem_conn = getattr(adapter, "conn", None) if adapter is not None else None
+
+    lines = ["## 棚の整理", ""]
+
+    if mem_conn is None:
+        lines.append(NONE_TEXT)
+        return lines
+
+    # edit_source 別に集計（'ai_conversation' は除外）
+    EXCLUDE_SOURCES = {"ai_conversation"}
+
+    try:
+        cur = mem_conn.execute(
+            """
+            SELECT
+                COALESCE(edit_source, 'unknown') AS src,
+                COUNT(*) AS cnt,
+                GROUP_CONCAT(DISTINCT p.title) AS page_titles
+            FROM memopedia_page_edit_history h
+            JOIN memopedia_pages p ON h.page_id = p.id
+            WHERE h.edited_at >= ?
+            GROUP BY src
+            ORDER BY cnt DESC
+            """,
+            (since_epoch,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        LOGGER.warning("[day_report] curation_edits query failed", exc_info=True)
+        lines.append(NONE_TEXT)
+        return lines
+
+    # edit_source の表示名
+    SOURCE_LABELS = {
+        "curation": "棚の整理（編纂）",
+        "auto_maintenance": "自動整備",
+        "manual": "手動編集",
+        "api": "API 経由",
+        "manual_ui": "UI 操作",
+        "core_memory": "コア記憶",
+        "unknown": "その他",
+    }
+
+    has_content = False
+    for row in rows:
+        src, cnt, page_titles_raw = row
+        if src in EXCLUDE_SOURCES:
+            continue
+        label = SOURCE_LABELS.get(src, src)
+        titles_preview = ""
+        if page_titles_raw:
+            titles = [t.strip() for t in page_titles_raw.split(",") if t.strip()]
+            if titles:
+                preview = "、".join(titles[:3])
+                if len(titles) > 3:
+                    preview += f"ほか{len(titles) - 3}件"
+                titles_preview = f"（{preview}）"
+        lines.append(f"- {label}: {cnt} 件{titles_preview}")
+        has_content = True
+
+    if not has_content:
+        lines.append(f"- {NONE_TEXT}")
+
+    return lines
+
+
 def _section_monologues(digests: List[Dict[str, Any]]) -> List[str]:
     """committed された独白 (session_digest 等) の抜粋。"""
     lines = ["## 今日の独白から", ""]
@@ -512,12 +636,23 @@ def _section_monologues(digests: List[Dict[str, Any]]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def generate_day_report(manager: Any, persona_id: str, plan_date: Any) -> str:
+def generate_day_report(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    _last_generated_epoch: Optional[int] = None,
+) -> str:
     """ペルソナの一日レポート (markdown) を生成して返す。
 
     実在の記録 (時間割・台帳・SAIMemory・Item) だけから決定論で構築する。
     データの無い節は「(なし)」で埋める。
+
+    Args:
+        _last_generated_epoch: 前回の新聞生成時刻（窓集計の起点）。
+            省略時は _get_last_generated_at で自動取得。テスト用に外部から渡せる。
     """
+    import time as _time
+
     plan_date_str = _normalize_plan_date(plan_date)
     persona_name = _persona_display_name(manager, persona_id)
 
@@ -534,10 +669,18 @@ def generate_day_report(manager: Any, persona_id: str, plan_date: Any) -> str:
     desires = _list_all_desires(manager, persona_id, plan_date_str)
     monologue = _latest_day_close_monologue(manager, persona_id)
 
+    # 棚の整理節: 前回の新聞生成時刻以降の編纂編集を集計
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    if _last_generated_epoch is None:
+        _last_generated_epoch = _get_last_generated_at(persona_id)
+    if _last_generated_epoch is None:
+        # 初回（記録なし）は過去24時間を窓とする
+        _last_generated_epoch = int(_time.time()) - 86400
+
     day_theme = (meta.get("day_theme") or "").strip() if isinstance(meta, dict) else ""
 
     # 節順序: 人の一日の読み物 (時間割 → 就寝のふりかえり) を先に、
-    # システム的な帳簿 (セッション → 欲求 → 予算 → 独白) を後に。
+    # システム的な帳簿 (セッション → 欲求 → 予算 → 棚の整理 → 独白) を後に。
     parts: List[str] = [
         f"# {persona_name} の一日新聞 — {plan_date_str}",
         "",
@@ -554,6 +697,8 @@ def generate_day_report(manager: Any, persona_id: str, plan_date: Any) -> str:
     parts.append("")
     parts.extend(_section_budget(budget_state))
     parts.append("")
+    parts.extend(_section_curation_edits(persona, _last_generated_epoch))
+    parts.append("")
     parts.extend(_section_monologues(digests))
     parts.append("")
     return "\n".join(parts)
@@ -565,14 +710,23 @@ def save_day_report(
     plan_date: Any,
     report_text: Optional[str] = None,
     base_dir: Optional[Path] = None,
+    _persona_base_dir: Optional[Path] = None,
 ) -> Path:
     """一日レポートをファイルに保存し、保存先パスを返す。
+
+    保存と同時に、新聞生成時刻（Unix epoch 秒）を
+    ``~/.saiverse/personas/<id>/day_report_last_generated_at.txt`` に記録する。
+    次回の新聞生成時にこの時刻が「棚の整理」節の窓の起点になる。
 
     Args:
         report_text: 省略時は :func:`generate_day_report` で生成する。
         base_dir: 保存先ルートの上書き (テスト用)。省略時は
             ``~/.saiverse/personas/<id>/day_reports/`` (SAIVERSE_HOME 準拠)。
+        _persona_base_dir: 窓時刻の保存先ルートの上書き (テスト用)。省略時は
+            ``~/.saiverse/personas/<id>/`` (SAIVERSE_HOME 準拠)。
     """
+    import time as _time
+
     plan_date_str = _normalize_plan_date(plan_date)
     if report_text is None:
         report_text = generate_day_report(manager, persona_id, plan_date_str)
@@ -588,4 +742,8 @@ def save_day_report(
     LOGGER.info(
         "[day_report] saved: persona=%s date=%s -> %s", persona_id, plan_date_str, path,
     )
+
+    # 新聞生成時刻を記録（次回の「棚の整理」節の窓の起点）
+    _save_last_generated_at(persona_id, int(_time.time()), base_dir=_persona_base_dir)
+
     return path
