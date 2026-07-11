@@ -3,9 +3,33 @@
   "display_name": "起床判断 (day_open)",
   "description": "自律行動 v2 の判断点: 起床。昨夜の自分からのメモ・昨日のふりかえり・バックログ・欲求リストを見て、今日の時間割を編成する (+ 欲求→関心の昇格)。構造化出力 + judgment_finalize による検証・適用。詳細は docs/intent/persona_cognition/judgment_points.md §4。",
   "input_schema": [
-    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (昨日の自分からのメモ / 昨日のふりかえり / バックログ / 欲求 / 予算 / 施設一覧)。", "required": false, "default": ""},
-    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / daily_budget_rounds)。", "required": false, "default": "{}"},
-    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (実在の ref / facility / 昇格候補の enum 注入済み)。", "required": false, "default": null}
+    {
+      "name": "situation_text",
+      "description": "judgment_points が組み立てた状況テキスト (昨日の自分からのメモ / 昨日のふりかえり / バックログ / 欲求 / 予算 / 施設一覧)。",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "judgment_context",
+      "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / daily_budget_rounds)。",
+      "required": false,
+      "default": "{}"
+    },
+    {
+      "name": "response_schema",
+      "param_type": "object",
+      "description": "judgment_points が動的に組み立てた JSON Schema (実在の ref / facility / 昇格候補の enum 注入済み)。",
+      "required": false,
+      "default": null
+    },
+    {
+      "name": "daily_budget_rounds",
+      "description": "一日の作業予算（ラウンド数）。起床判断が時間割を編成するときの上限。空欄なら既定値。",
+      "param_type": "number",
+      "required": false,
+      "default": null,
+      "user_configurable": true
+    }
   ],
   "router_callable": false,
   "user_selectable": false,
@@ -26,7 +50,9 @@
       "action": "judgment_finalize",
       "args_input": {
         "judgment_output": "judgment",
-        "kind": {"$literal": "day_open"},
+        "kind": {
+          "$literal": "day_open"
+        },
         "judgment_context": "judgment_context",
         "situation_text": "situation_text"
       },
