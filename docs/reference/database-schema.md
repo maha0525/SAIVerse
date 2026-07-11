@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 45
+**テーブル数**: 41
 
 ## addon_config
 
@@ -399,21 +399,6 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `spells_emitted` | TEXT | — |  |
 | `committed_to_main_cache` | BOOLEAN | NOT NULL, default=False |  |
 
-## note
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `note_id` | VARCHAR(36) | PK, NOT NULL |  |
-| `persona_id` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
-| `title` | VARCHAR(255) | NOT NULL |  |
-| `note_type` | VARCHAR(32) | NOT NULL |  |
-| `description` | TEXT | — |  |
-| `note_metadata` | TEXT | — |  |
-| `is_active` | BOOLEAN | NOT NULL, default=True |  |
-| `created_at` | DATETIME | NOT NULL |  |
-| `last_opened_at` | DATETIME | — |  |
-| `closed_at` | DATETIME | — |  |
-
 ## observer_config
 
 | カラム | 型 | 制約 | 説明 |
@@ -547,22 +532,6 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `SELECTED_META_PLAYBOOK` | VARCHAR(255) | — |  |
 | `FAVORITE_MODELS` | TEXT | — |  |
 
-## note_message
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `note_id` | VARCHAR(36) | PK, FK→note.note_id, NOT NULL |  |
-| `message_id` | VARCHAR(255) | PK, NOT NULL |  |
-| `added_at` | DATETIME | NOT NULL |  |
-| `auto_added` | BOOLEAN | NOT NULL, default=False |  |
-
-## note_page
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `note_id` | VARCHAR(36) | PK, FK→note.note_id, NOT NULL |  |
-| `page_id` | VARCHAR(255) | PK, NOT NULL |  |
-
 ## observer_metrics
 
 | カラム | 型 | 制約 | 説明 |
@@ -582,7 +551,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `persona_id` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
 | `short_id` | INTEGER | — |  |
 | `parent_kind` | VARCHAR(16) | — |  |
-| `note_id` | VARCHAR(36) | FK→note.note_id |  |
+| `note_id` | VARCHAR(36) | — |  |
 | `track_id` | VARCHAR(36) | FK→action_track.track_id |  |
 | `title` | VARCHAR(255) | NOT NULL |  |
 | `goal` | TEXT | NOT NULL, default='' |  |
@@ -619,14 +588,6 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `payload` | TEXT | — |  |
 | `source_line_id` | VARCHAR(36) | — |  |
 | `visible_to_other_tracks` | BOOLEAN | NOT NULL, default=False |  |
-
-## track_open_note
-
-| カラム | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `track_id` | VARCHAR(36) | PK, FK→action_track.track_id, NOT NULL |  |
-| `note_id` | VARCHAR(36) | PK, FK→note.note_id, NOT NULL |  |
-| `opened_at` | DATETIME | NOT NULL |  |
 
 ## persona_task_step
 

@@ -29,7 +29,14 @@ from database.migrate import (
     _backfill_desire_stage_normalization,
     backfill_desire_stage_normalization,
 )
-from database.models import Base, Note, NoteMessage, NotePage, TrackOpenNote
+from database.models import Base
+
+# note / note_page / note_message / track_open_note は P3c①
+# (concept_consolidation.md「Note → テーマノード移行」) で database.models から
+# ORM クラスが削除された (Note は per-persona memory.db 側のテーマノードページへ
+# 物理統合済み)。本テストは「まだ移行を経ていない旧スキーマの main DB」を模して
+# _backfill_desire_stage_normalization の (c) を検証するものなので、Base.metadata
+# に頼らず raw SQL で旧テーブルを直接組み立てる。
 
 
 class DesireStageMigrationTests(unittest.TestCase):
@@ -102,20 +109,55 @@ class DesireStageMigrationTests(unittest.TestCase):
             ))
             db.commit()
 
-            # desire ノート (削除対象) + 関連リンク
-            db.add(Note(
-                note_id="note-1", persona_id="p1", title="やりたいこと",
-                note_type="desire", description="候補プール", is_active=True,
+            # 旧 note/note_page/note_message/track_open_note テーブルを raw SQL で
+            # 組み立てる (P3c① で database.models から ORM クラスが削除され、
+            # Base.metadata.create_all では作られなくなったため — 「まだ移行を
+            # 経ていない旧スキーマの main DB」を模す)。
+            db.execute(text(
+                "CREATE TABLE note ("
+                " note_id VARCHAR(36) PRIMARY KEY, persona_id VARCHAR(255) NOT NULL,"
+                " title VARCHAR(255) NOT NULL, note_type VARCHAR(32) NOT NULL,"
+                " description TEXT, note_metadata TEXT,"
+                " is_active BOOLEAN NOT NULL DEFAULT 1,"
+                " created_at DATETIME, last_opened_at DATETIME, closed_at DATETIME)"
             ))
-            # 通常の note (削除対象外の対照)
-            db.add(Note(
-                note_id="note-2", persona_id="p1", title="友人",
-                note_type="person", is_active=True,
+            db.execute(text(
+                "CREATE TABLE note_page ("
+                " note_id VARCHAR(36), page_id VARCHAR(255),"
+                " PRIMARY KEY (note_id, page_id))"
+            ))
+            db.execute(text(
+                "CREATE TABLE note_message ("
+                " note_id VARCHAR(36), message_id VARCHAR(255),"
+                " added_at DATETIME, auto_added BOOLEAN DEFAULT 0,"
+                " PRIMARY KEY (note_id, message_id))"
+            ))
+            db.execute(text(
+                "CREATE TABLE track_open_note ("
+                " track_id VARCHAR(36), note_id VARCHAR(36), opened_at DATETIME,"
+                " PRIMARY KEY (track_id, note_id))"
             ))
             db.commit()
-            db.add(NotePage(note_id="note-1", page_id="page-1"))
-            db.add(NoteMessage(note_id="note-1", message_id="msg-1"))
-            db.add(TrackOpenNote(track_id="track-1", note_id="note-1"))
+
+            # desire ノート (削除対象) + 関連リンク
+            db.execute(text(
+                "INSERT INTO note (note_id, persona_id, title, note_type, description, is_active) "
+                "VALUES ('note-1', 'p1', 'やりたいこと', 'desire', '候補プール', 1)"
+            ))
+            # 通常の note (削除対象外の対照)
+            db.execute(text(
+                "INSERT INTO note (note_id, persona_id, title, note_type, is_active) "
+                "VALUES ('note-2', 'p1', '友人', 'person', 1)"
+            ))
+            db.execute(text(
+                "INSERT INTO note_page (note_id, page_id) VALUES ('note-1', 'page-1')"
+            ))
+            db.execute(text(
+                "INSERT INTO note_message (note_id, message_id) VALUES ('note-1', 'msg-1')"
+            ))
+            db.execute(text(
+                "INSERT INTO track_open_note (track_id, note_id) VALUES ('track-1', 'note-1')"
+            ))
             db.commit()
         finally:
             db.close()

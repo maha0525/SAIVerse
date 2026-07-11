@@ -17,9 +17,10 @@ memory_read.py`` 等) から呼ばれる薄い変換層で、地図の実体に�
 - ``p:N``  — 写真 (short_id)。「写真を読む＝その写真が写す土地を見に行く」—
   範囲写真は区間の生ログ全文、点写真は対象メッセージ本文＋引用箇所が tail に
   流れる (机にも head にも触らない。concept_consolidation.md「clip と写真の見え方」)
-- ``task:N`` — 目的の地図 (目的ノード)。read は解決済み (P2c-1) — 実体は
-  main DB (persona_task) なので ``manager`` (world 文脈) を追加で受ける。
-  開閉は目的の木の Atlas 統合 (P3c) まで stub
+- ``task:N`` — 目的の地図 (目的ノード)。read は解決済み (P2c-1)、開閉も
+  P3c①②で対応済み — 実体は main DB (persona_task) なので ``manager``
+  (world 文脈) を追加で受ける。書く (memory_write) / 撮って貼る
+  (memory_clip) は引き続き未対応 (purpose 動詞の領分)
 
 **書く (memory_write) / 撮って貼る (memory_clip)**: 書き先は Memopedia 本文
 への追記 (編集来歴が残る) / コア記憶の新規・上書き。clip は**参照貼り**のみ
@@ -40,7 +41,9 @@ RefKind に未登録のまま各ストレージモジュール内で扱われて
 **開閉 (机の物理)**: ``open_page`` / ``close_page`` は ``sai_memory/desk.py``
 に委譲する。コア記憶 (``core`` / ``c:N``) は常時開のシステム常設ピンなので
 机の対象外 — open は「既に開いている」、close は「閉じられない」を返す。
-``task:N`` (目的の地図) の開閉は P3c (目的の木の Atlas 統合) まで stub。
+``task:N`` (目的ノード) は main DB 在住のため ``manager`` を追加で受ける
+(P3c①②)。完了/中止 (TERMINAL_TASK_STATUSES) の目的ノードは soft-delete
+された Memopedia ページと同じ「無い」扱いになり、机から自動で下ろされる。
 """
 from __future__ import annotations
 
@@ -175,9 +178,9 @@ def _ensure_chronicle_ready(conn) -> None:
 
 
 def _task_stub_message(key: Optional[str], action: str = "の閲覧") -> str:
-    # TODO(P3c): 目的の地図 (task:N) の開閉は目的の木の Atlas 統合 (P3c) で
-    # 実装する。read は P2c-1 で解決済み (_read_task)。write / clip の貼り先
-    # としての task:N も purpose 動詞側 (収穫) に委ねる。
+    # read (P2c-1) と開閉 (P3c①②) は解決済み (_read_task / _normalize_ref_for_desk)。
+    # write / clip の貼り先としての task:N は purpose 動詞側 (収穫) に委ねる
+    # ため未対応のまま — write_page の task 分岐からのみ呼ばれる。
     ref = f"task:{key}" if key else "task:N"
     return f"目的ノード ({ref}) {action}は今後対応予定です。"
 
@@ -438,12 +441,18 @@ def _read_chronicle(conn, key: Optional[str], persona_name: str) -> str:
 # ----- open_page / close_page (机の物理、desk.py に委譲) -----
 
 
-def _normalize_ref_for_desk(adapter, kind: str, key: Optional[str]) -> Optional[str]:
-    """desk.py の主キーに使う正規形 (``m:{short_id}`` / ``ch:{short_id}``) に揃える。
+def _normalize_ref_for_desk(
+    adapter, kind: str, key: Optional[str], manager=None,
+) -> Optional[str]:
+    """desk.py の主キーに使う正規形 (``m:{short_id}`` / ``ch:{short_id}`` /
+    ``task:{short_id}``) に揃える。
 
     呼び出し側が UUID や別表記の key を渡しても、常に short_id ベースの一意な
     ref に正規化する (同じページを異なる表記で開いて二重登録するのを防ぐ)。
     見つからなければ None。
+
+    ``manager`` は ``task:N`` (目的ノード = main DB 在住) の実在確認にのみ要る
+    world 文脈。他 kind では不要。
     """
     if kind == "memopedia":
         if not key:
@@ -475,7 +484,40 @@ def _normalize_ref_for_desk(adapter, kind: str, key: Optional[str]) -> Optional[
         if entry is None:
             return None
         return f"ch:{entry.short_id}"
+    if kind == "task":
+        return _resolve_task_ref_for_desk(adapter, key, manager)
     return None
+
+
+def _resolve_task_ref_for_desk(adapter, key: Optional[str], manager) -> Optional[str]:
+    """task:N の実在確認 (desk 正規形は元々 ``task:{short_id}`` 一本で UUID
+    表記のような別形は無いため、確認できればそのまま返すだけでよい)。
+
+    完了/中止 (TERMINAL_TASK_STATUSES) の目的ノードは「無い」扱いにする —
+    persona_task 行は不変条件により物理削除されない (short_id を二度と
+    再利用しないため) が、Memopedia の soft-delete (``is_deleted=1``) が
+    desk の存在チェックで「無い」扱いになるのと同じ既存規約に揃える
+    (P3c①②設計 v0.1「無理に新機構を作らない」— 新しい終了検知を作らず、
+    既存の存在チェックの仕組みに乗せる)。
+    """
+    from saiverse.persona_task_manager import (
+        TERMINAL_TASK_STATUSES,
+        PersonaTaskManager,
+        TaskNotFoundError,
+    )
+
+    if not key or manager is None or getattr(manager, "SessionLocal", None) is None:
+        return None
+    ptm = PersonaTaskManager(manager.SessionLocal)
+    ref_text = f"task:{key}"
+    try:
+        task_id = ptm.resolve_task_ref(adapter.persona_id, ref_text)
+        task = ptm.get_task(task_id, persona_id=adapter.persona_id)
+    except TaskNotFoundError:
+        return None
+    if task.get("status") in TERMINAL_TASK_STATUSES:
+        return None
+    return ref_text
 
 
 def _is_memopedia_page_deleted(conn, page_id: str) -> bool:
@@ -486,8 +528,11 @@ def _is_memopedia_page_deleted(conn, page_id: str) -> bool:
     return bool(row and row[0])
 
 
-def _size_of_ref(adapter, ref: str) -> int:
-    """desk の評価用サイズ解決 (ref → 現在の本文文字数)。解決できなければ 0。"""
+def _size_of_ref(adapter, ref: str, manager=None) -> int:
+    """desk の評価用サイズ解決 (ref → 現在の本文文字数)。解決できなければ 0。
+
+    ``manager`` は ``task:N`` の解決にのみ要る world 文脈 (main DB 在住)。
+    """
     try:
         if ref.startswith("m:"):
             from sai_memory.memopedia import Memopedia
@@ -511,6 +556,13 @@ def _size_of_ref(adapter, ref: str) -> int:
                 return 0
             entry = get_entry_by_short_id(adapter.conn, sid)
             return len(entry.content) if entry else 0
+        if ref.startswith("task:"):
+            key = ref[5:]
+            if _resolve_task_ref_for_desk(adapter, key, manager) is None:
+                return 0
+            name = _resolve_persona_name(adapter, None)
+            rendered = _read_task(adapter, key, manager, name)
+            return len(rendered or "")
     except Exception:
         LOGGER.warning(
             "memory_atlas: failed to resolve desk size for ref=%s", ref, exc_info=True,
@@ -518,12 +570,17 @@ def _size_of_ref(adapter, ref: str) -> int:
     return 0
 
 
-def open_page(adapter, ref: str, purpose_ref: Optional[str] = None) -> str:
+def open_page(
+    adapter, ref: str, purpose_ref: Optional[str] = None, manager=None,
+) -> str:
     """ページを机に開いたままにする (Metabolism を跨いで head に残り続ける)。
 
     机の予算 (``desk.resolve_desk_budget_chars()``) を超えたら、最も長く触ら
     れていないページから自動で棚に戻す (LRU)。追い出しが起きた場合はその旨を
     結果テキストに含める。
+
+    ``manager`` は ``task:N`` (目的ノード = main DB 在住) の解決にのみ要る
+    world 文脈。スペル層が ``get_active_manager()`` を渡す。
     """
     kind, key = _parse_ref(ref)
     if kind in ("core_all", "core_one"):
@@ -533,12 +590,10 @@ def open_page(adapter, ref: str, purpose_ref: Optional[str] = None) -> str:
             "写真は机に開けません（写真は土地への参照です）。"
             f"memory_read p:{key} でその場で読めます。"
         )
-    if kind == "task":
-        return _task_stub_message(key, action="を机に開くこと")
-    if kind not in ("memopedia", "chronicle"):
+    if kind not in ("memopedia", "chronicle", "task"):
         raise AtlasRefError(f"未対応の ref kind: {kind}")
 
-    norm_ref = _normalize_ref_for_desk(adapter, kind, key)
+    norm_ref = _normalize_ref_for_desk(adapter, kind, key, manager=manager)
     if norm_ref is None:
         return f"見つかりません: {ref}"
 
@@ -549,7 +604,8 @@ def open_page(adapter, ref: str, purpose_ref: Optional[str] = None) -> str:
         # keep_ref: いま開いた本人は同一呼び出しでは追い出さない (「開きました」
         # と「棚に戻しました」の同居を防ぐ。desk.evict_lru docstring 参照)
         evicted = desk.evict_lru(
-            conn, budget, lambda r: _size_of_ref(adapter, r), keep_ref=norm_ref,
+            conn, budget, lambda r: _size_of_ref(adapter, r, manager=manager),
+            keep_ref=norm_ref,
         )
 
     lines = [f"{norm_ref} を机に開きました。"]
@@ -558,19 +614,20 @@ def open_page(adapter, ref: str, purpose_ref: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-def close_page(adapter, ref: str) -> str:
-    """ページを机から閉じる (棚に戻す)。"""
+def close_page(adapter, ref: str, manager=None) -> str:
+    """ページを机から閉じる (棚に戻す)。
+
+    ``manager`` は ``task:N`` の解決にのみ要る world 文脈。
+    """
     kind, key = _parse_ref(ref)
     if kind in ("core_all", "core_one"):
         return "コア記憶は閉じられません(常時開です)。"
     if kind == "photo":
         return "写真は机の対象外です（開閉はありません）。"
-    if kind == "task":
-        return _task_stub_message(key, action="を閉じること")
-    if kind not in ("memopedia", "chronicle"):
+    if kind not in ("memopedia", "chronicle", "task"):
         raise AtlasRefError(f"未対応の ref kind: {kind}")
 
-    norm_ref = _normalize_ref_for_desk(adapter, kind, key)
+    norm_ref = _normalize_ref_for_desk(adapter, kind, key, manager=manager)
     if norm_ref is None:
         return f"見つかりません: {ref}"
 
@@ -1256,7 +1313,7 @@ class DeskPageView:
 
 
 def snapshot_desk(
-    adapter, persona_name: Optional[str] = None,
+    adapter, persona_name: Optional[str] = None, manager=None,
 ) -> Tuple[List[DeskPageView], List[str], List[str]]:
     """Metabolism (head snapshot 再構築) 用: 机の現況を確定して描画する。
 
@@ -1269,6 +1326,9 @@ def snapshot_desk(
     **touch はしない** — 机の一覧描画は「触った」に数えない。LRU の鮮度は
     ペルソナの能動的な read / write / clip だけが動かす (Metabolism のたびに
     全ページを touch すると鮮度差が消えて LRU が壊れる)。
+
+    ``manager`` は ``task:N`` (目的ノード = main DB 在住) の解決にのみ要る
+    world 文脈。head の DeskSection.capture が ``ctx.manager`` を渡す。
 
     Returns:
         (pages, evicted, dropped): 描画済みページ一覧 (opened_at 昇順) と、
@@ -1284,7 +1344,7 @@ def snapshot_desk(
     with adapter._db_lock:
         budget = desk.resolve_desk_budget_chars()
         evicted.extend(
-            desk.evict_lru(conn, budget, lambda r: _size_of_ref(adapter, r))
+            desk.evict_lru(conn, budget, lambda r: _size_of_ref(adapter, r, manager=manager))
         )
         items = desk.list_open(conn)
 
@@ -1294,22 +1354,25 @@ def snapshot_desk(
             kind, key = _parse_ref(item.ref)
         except AtlasRefError:
             kind, key = "", None
-        if kind not in ("memopedia", "chronicle"):
+        if kind not in ("memopedia", "chronicle", "task"):
             # 机には open_page が正規形しか入れないはずだが、防御的に閉じる
             with adapter._db_lock:
                 desk.close_item(conn, item.ref)
             dropped.append(item.ref)
             continue
-        if _normalize_ref_for_desk(adapter, kind, key) is None:
-            # 実体が消えている (ページ削除等)。机から下ろす
+        if _normalize_ref_for_desk(adapter, kind, key, manager=manager) is None:
+            # 実体が消えている (ページ削除・完了/中止による目的ノード終了等)。
+            # 机から下ろす
             with adapter._db_lock:
                 desk.close_item(conn, item.ref)
             dropped.append(item.ref)
             continue
         if kind == "memopedia":
             text = _read_memopedia(adapter, key, name)
-        else:
+        elif kind == "chronicle":
             text = _read_chronicle(conn, key, name)
+        else:
+            text = _read_task(adapter, key, manager, name)
         pages.append(
             DeskPageView(ref=item.ref, text=text, purpose_ref=item.purpose_ref)
         )

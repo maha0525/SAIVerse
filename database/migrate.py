@@ -765,12 +765,20 @@ def _backfill_desire_stage_normalization(engine) -> None:
                     result_b.rowcount,
                 )
 
-            # (c) desire ノートの削除 (関連する多対多リンクも先に消す)
+            # (c) desire ノートの削除 (関連する多対多リンクも先に消す)。
+            # P3c① で note テーブル自体が database.models から削除された
+            # (Note はテーマノードページへ物理統合済み) ため、Base.metadata
+            # から作られた新規 DB にはこのテーブルが無い — 存在確認してから
+            # 触る (無ければこのステップは何もしない、他ステップの結果は
+            # 巻き戻さない)。
+            note_table_exists = conn.execute(text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='note'"
+            )).fetchone() is not None
             desire_note_ids = [
                 row[0] for row in conn.execute(
                     text("SELECT note_id FROM note WHERE note_type = 'desire'")
                 ).fetchall()
-            ]
+            ] if note_table_exists else []
             if desire_note_ids:
                 placeholders = ", ".join(f":id{i}" for i in range(len(desire_note_ids)))
                 params = {f"id{i}": nid for i, nid in enumerate(desire_note_ids)}
@@ -795,6 +803,56 @@ def backfill_desire_stage_normalization(db_path: str) -> None:
     engine = create_engine(f"sqlite:///{db_path}")
     try:
         _backfill_desire_stage_normalization(engine)
+    finally:
+        engine.dispose()
+
+
+def _drop_empty_legacy_note_tables(engine) -> None:
+    """note (+ note_page/note_message/track_open_note) を空になったら DROP する (P3c①)。
+
+    concept_consolidation.md「Note → テーマノード移行」。Note の物理格納先は
+    per-persona memory.db 側の memopedia ページ (trunk root_theme) へ移った
+    (``saiverse/note_theme_migration.py``、呼び出し元は
+    ``SAIVerseManager._on_persona_registered``)。main DB の note テーブルは
+    1 枚に全ペルソナの行が同居する単一テーブルで、移行はペルソナ単位の
+    扇形移行 (persona registration のたびにそのペルソナの行だけ移す) なので、
+    全ペルソナが一度は起動してこの移行を経るまで note テーブルの行はゼロに
+    ならない (docs/handoff/2026-07-11_p3c_purpose_note_audit.md §0-6)。
+
+    本関数は「note が存在してかつ空」の時だけ4テーブルを DROP する冪等ステップ
+    で、未移行データが残っている間は何もしない (models.py から Note 系クラスを
+    削除したため、Base.metadata 経由の schema diff (_schema_diff/needs_migration)
+    はこれらのテーブルの存在に気づかない — 明示的な DROP が必要)。
+    テーブル不存在は正常系 (新規 DB ではそもそも作られない)。
+    """
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='note'"
+            )).fetchone()
+            if exists is None:
+                return
+            count = conn.execute(text("SELECT COUNT(*) FROM note")).scalar()
+            if count:
+                logging.info(
+                    "[note退役] note テーブルに未移行の行が %d 件残っているため "
+                    "DROP をスキップします。", count,
+                )
+                return
+            for table_name in ("note_page", "note_message", "track_open_note", "note"):
+                conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+            logging.info(
+                "[note退役] note/note_page/note_message/track_open_note を DROP しました。"
+            )
+    except Exception as e:
+        logging.warning("note テーブルの DROP に失敗しました（スキップ）: %s", e)
+
+
+def drop_empty_legacy_note_tables(db_path: str) -> None:
+    """note 系テーブルの空 DROP (P3c①) を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _drop_empty_legacy_note_tables(engine)
     finally:
         engine.dispose()
 

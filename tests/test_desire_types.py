@@ -24,7 +24,6 @@ from sqlalchemy.pool import StaticPool
 
 from database.models import AI, Base, City, User
 from saiverse import clock, day_plan, desire_engine
-from saiverse.note_manager import NoteManager
 from saiverse.persona_task_manager import (
     DESIRE_STATE_EXPIRED,
     DESIRE_STATE_FADING,
@@ -87,17 +86,12 @@ def ptm(session_factory):
 
 
 @pytest.fixture
-def nm(session_factory):
-    return NoteManager(session_factory)
-
-
-@pytest.fixture
-def desire_add_mod(session_factory, nm, ptm, tmp_path):
+def desire_add_mod(session_factory, ptm, tmp_path):
     """purpose_seed ツール (旧 desire_add 後継) を temp DB 版 singleton で動的ロードする。
 
     purpose_seed は内部で ``saiverse.purpose_tree.create_candidate`` を呼ぶため
-    (P3c-0)、差し替えるのは NoteManager/PersonaTaskManager でなく、module に
-    持たせた shim (``_manager``) の SessionLocal (purpose_adopt と同じ流儀)。
+    (P3c-0)、差し替えるのは PersonaTaskManager でなく、module に持たせた shim
+    (``_manager``) の SessionLocal (purpose_adopt と同じ流儀)。
     """
     from tool_loader import load_builtin_tool
 
@@ -108,7 +102,7 @@ def desire_add_mod(session_factory, nm, ptm, tmp_path):
     return mod, persona_dir
 
 
-def _add_desire(nm, ptm, title="言葉の標本集を作りたい", **kwargs):
+def _add_desire(ptm, title="言葉の標本集を作りたい", **kwargs):
     """候補 (親なし + stage='candidate') を直接作る (P3c-0 の正規形)。"""
     return ptm.create_task(
         persona_id=PERSONA_ID, title=title,
@@ -127,7 +121,7 @@ def _advance_days(days: int):
 
 
 class TestDesireAddSpell:
-    def test_add_with_type_and_source(self, desire_add_mod, nm, ptm):
+    def test_add_with_type_and_source(self, desire_add_mod, ptm):
         from tools.context import persona_context
 
         mod, persona_dir = desire_add_mod
@@ -151,7 +145,7 @@ class TestDesireAddSpell:
         assert t["touch_count"] == 0
         assert datetime.fromisoformat(t["last_touched_at"]) == T0
 
-    def test_add_without_type_is_backward_compatible(self, desire_add_mod, nm, ptm):
+    def test_add_without_type_is_backward_compatible(self, desire_add_mod, ptm):
         """type 省略の呼び出しは従来どおり動く (source は P3c-0 以降必須)。"""
         from tools.context import persona_context
 
@@ -182,7 +176,7 @@ class TestDesireAddSpell:
         assert out.startswith("Error")
         assert ptm.list_tasks(PERSONA_ID) == []
 
-    def test_add_with_invalid_type_returns_error(self, desire_add_mod, nm, ptm):
+    def test_add_with_invalid_type_returns_error(self, desire_add_mod, ptm):
         from tools.context import persona_context
 
         mod, persona_dir = desire_add_mod
@@ -207,15 +201,15 @@ class TestDesireAddSpell:
 
 
 class TestDecay:
-    def test_no_decay_within_week(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_no_decay_within_week(self, manager, ptm):
+        task = _add_desire(ptm)
         _advance_days(6)
         result = desire_engine.decay_desires(manager, PERSONA_ID)
         assert result == {"checked": 1, "faded": [], "expired": []}
         assert ptm.get_task(task["id"])["desire_state"] == DESIRE_STATE_FRESH
 
-    def test_fading_after_seven_days(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_fading_after_seven_days(self, manager, ptm):
+        task = _add_desire(ptm)
         _advance_days(desire_engine.FADING_AFTER_DAYS)
         result = desire_engine.decay_desires(manager, PERSONA_ID)
         assert result["faded"] == [task["task_ref"]]
@@ -225,8 +219,8 @@ class TestDecay:
         # fading はまだ候補プールに残る (summary にも出る)。
         assert "薄れつつある" in desire_engine.desire_summary_for_prompt(manager, PERSONA_ID)
 
-    def test_expiry_after_fourteen_days_archives_not_deletes(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_expiry_after_fourteen_days_archives_not_deletes(self, manager, ptm):
+        task = _add_desire(ptm)
         # 時間発展: 8 日で fading → 15 日で期限切れ。
         _advance_days(8)
         assert desire_engine.decay_desires(manager, PERSONA_ID)["faded"] == [task["task_ref"]]
@@ -248,8 +242,8 @@ class TestDecay:
         events = [h["event_type"] for h in ptm.fetch_history(task["id"])]
         assert "update_task_status" in events
 
-    def test_decay_is_idempotent_per_day(self, manager, nm, ptm):
-        _add_desire(nm, ptm)
+    def test_decay_is_idempotent_per_day(self, manager, ptm):
+        _add_desire(ptm)
         _advance_days(8)
         first = desire_engine.decay_desires(manager, PERSONA_ID)
         assert len(first["faded"]) == 1
@@ -264,8 +258,8 @@ class TestDecay:
 
 
 class TestTouchAndPromotion:
-    def test_touch_updates_ledger_and_restores_freshness(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_touch_updates_ledger_and_restores_freshness(self, manager, ptm):
+        task = _add_desire(ptm)
         _advance_days(8)
         desire_engine.decay_desires(manager, PERSONA_ID)
         assert ptm.get_task(task["id"])["desire_state"] == DESIRE_STATE_FADING
@@ -278,8 +272,8 @@ class TestTouchAndPromotion:
         result = desire_engine.decay_desires(manager, PERSONA_ID)
         assert result == {"checked": 1, "faded": [], "expired": []}
 
-    def test_touch_accepts_desire_ref_alias(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_touch_accepts_desire_ref_alias(self, manager, ptm):
+        task = _add_desire(ptm)
         ref = task["task_ref"].replace("task:", "desire:")
         touched = desire_engine.touch_desire(manager, PERSONA_ID, ref)
         assert touched["touch_count"] == 1
@@ -292,9 +286,9 @@ class TestTouchAndPromotion:
         assert desire_engine.touch_desire(manager, PERSONA_ID, task["task_ref"]) is None
         assert ptm.get_task(task["id"])["touch_count"] is None
 
-    def test_promotion_after_threshold_touches(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm, desire_type="作る")
-        other = _add_desire(nm, ptm, title="散歩したい")
+    def test_promotion_after_threshold_touches(self, manager, ptm):
+        task = _add_desire(ptm, desire_type="作る")
+        other = _add_desire(ptm, title="散歩したい")
         for _ in range(desire_engine.PROMOTION_TOUCH_THRESHOLD - 1):
             desire_engine.touch_desire(manager, PERSONA_ID, task["task_ref"])
         # 閾値未満はまだ昇格候補にならない。
@@ -313,8 +307,8 @@ class TestTouchAndPromotion:
 
 
 class TestDesireReviews:
-    def test_fulfilled_completes_task(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_fulfilled_completes_task(self, manager, ptm):
+        task = _add_desire(ptm)
         result = desire_engine.apply_desire_reviews(
             manager, PERSONA_ID,
             [{"desire_ref": task["task_ref"], "verdict": "fulfilled"}],
@@ -322,8 +316,8 @@ class TestDesireReviews:
         assert result["fulfilled"] == [task["task_ref"]]
         assert ptm.get_task(task["id"])["status"] == STATUS_COMPLETED
 
-    def test_fading_verdict_accelerates_decay(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_fading_verdict_accelerates_decay(self, manager, ptm):
+        task = _add_desire(ptm)
         result = desire_engine.apply_desire_reviews(
             manager, PERSONA_ID,
             [{"desire_ref": task["task_ref"], "verdict": "fading"}],
@@ -335,8 +329,8 @@ class TestDesireReviews:
         decay = desire_engine.decay_desires(manager, PERSONA_ID)
         assert decay["expired"] == [task["task_ref"]]
 
-    def test_keep_leaves_desire_untouched(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_keep_leaves_desire_untouched(self, manager, ptm):
+        task = _add_desire(ptm)
         before = ptm.get_task(task["id"])
         result = desire_engine.apply_desire_reviews(
             manager, PERSONA_ID,
@@ -348,8 +342,8 @@ class TestDesireReviews:
         assert after["last_touched_at"] == before["last_touched_at"]
         assert after["touch_count"] == before["touch_count"]
 
-    def test_unresolvable_ref_and_unknown_verdict_are_skipped(self, manager, nm, ptm):
-        task = _add_desire(nm, ptm)
+    def test_unresolvable_ref_and_unknown_verdict_are_skipped(self, manager, ptm):
+        task = _add_desire(ptm)
         result = desire_engine.apply_desire_reviews(
             manager, PERSONA_ID,
             [
@@ -371,12 +365,12 @@ class TestSummary:
             "やりたいこと候補はありません。"
         )
 
-    def test_summary_lists_ref_type_title_freshness_touches(self, manager, nm, ptm):
+    def test_summary_lists_ref_type_title_freshness_touches(self, manager, ptm):
         typed = _add_desire(
-            nm, ptm, title="言葉の標本集を作りたい",
+            ptm, title="言葉の標本集を作りたい",
             desire_type="作る", desire_source="図書館の記事",
         )
-        _add_desire(nm, ptm, title="散歩したい")
+        _add_desire(ptm, title="散歩したい")
         desire_engine.touch_desire(manager, PERSONA_ID, typed["task_ref"])
 
         text = desire_engine.desire_summary_for_prompt(manager, PERSONA_ID)
@@ -395,13 +389,13 @@ class TestSummary:
 
 
 class TestDayPlanTouchWiring:
-    def test_fire_slot_with_desire_ref_touches_desire(self, session_factory, nm, ptm):
+    def test_fire_slot_with_desire_ref_touches_desire(self, session_factory, ptm):
         manager = SimpleNamespace(
             SessionLocal=session_factory,
             personas={},
             track_manager=TrackManager(session_factory=session_factory),
         )
-        task = _add_desire(nm, ptm, desire_type="作る")
+        task = _add_desire(ptm, desire_type="作る")
         plan_date = clock.now().date().isoformat()
         day_plan.save_day_plan(manager, PERSONA_ID, plan_date, [{
             "start": "09:00", "kind": "作る",

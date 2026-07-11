@@ -3,10 +3,10 @@
 concept_consolidation.md「開閉制御 — 机の物理」の head 側。ペルソナが
 ``memory_open`` で机に開いたページ (Memopedia / Chronicle) を、Metabolism を
 跨いで head に残し続ける。OpenNotesSection (旧 Note の開きっぱなし制御) の
-直系後継 — Note がテーマノードとして Atlas に吸収されたら open_notes は
-本セクションに畳まれる予定 (P2c/P3c)。
+直系後継 — Note がテーマノードページとして Atlas に吸収され (P3c①)、
+open_notes 自体は退役済み。開きっぱなし制御は本セクションに一本化された。
 
-cache 安定性 (open_notes / core_memory と同じ手法):
+cache 安定性 (core_memory と同じ手法):
     ``refresh_on_events = frozenset()`` = Metabolism のみ再 capture。開閉スペル
     を使っても head は次の Metabolism まで凍結したまま — **閉じたページが節目
     まで見え続ける「フェードアウト」はこの凍結の直接の帰結** (閉じる=即忘却
@@ -58,7 +58,7 @@ class DeskSection:
     name = "desk"
     order = 730  # open_notes(720) の直後、visual_context(800) の前
     # refresh_on_events 空 = Metabolism のみ。開閉スペルでは cache を切らない
-    # (フェードアウトの実体。open_notes / core_memory と同じ)。
+    # (フェードアウトの実体。core_memory と同じ)。
     refresh_on_events = frozenset()
 
     def capture(self, ctx: LineHeadInput) -> DeskSnapshot:
@@ -73,7 +73,8 @@ class DeskSection:
         try:
             from saiverse.memory_atlas import snapshot_desk
             pages, evicted, dropped = snapshot_desk(
-                adapter, persona_name=getattr(persona, "persona_name", None)
+                adapter, persona_name=getattr(persona, "persona_name", None),
+                manager=ctx.manager,
             )
         except Exception:
             LOGGER.warning(

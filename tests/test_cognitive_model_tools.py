@@ -1,9 +1,12 @@
 """Smoke tests for cognitive model tools (Phase B-3).
 
-ツールは TrackManager / NoteManager の薄いラッパーであり、それらの
-ロジックは別途充実したテストでカバーされている (test_track_manager.py /
-test_note_manager.py)。本テストではツールのロード・schema・関数定義の
-最低限の整合性のみ検証する。
+ツールは TrackManager の薄いラッパーであり、そのロジックは別途充実した
+テストでカバーされている (test_track_manager.py)。本テストではツールの
+ロード・schema・関数定義の最低限の整合性のみ検証する。
+
+旧 note_create/note_open/note_close/note_search の4スペルは P3c①
+(concept_consolidation.md「Note → テーマノード移行」) で退役した
+(後継は memory_write/memory_open/memory_close/memory_search)。
 """
 import pytest
 
@@ -20,14 +23,7 @@ TRACK_TOOLS = [
     "track_list",
 ]
 
-NOTE_TOOLS = [
-    "note_create",
-    "note_open",
-    "note_close",
-    "note_search",
-]
-
-ALL_TOOLS = TRACK_TOOLS + NOTE_TOOLS
+ALL_TOOLS = TRACK_TOOLS
 
 
 @pytest.mark.parametrize("name", ALL_TOOLS)
@@ -88,21 +84,6 @@ def test_track_create_schema_has_activate_option():
     assert "activate" not in schema.parameters.get("required", [])
 
 
-def test_note_create_schema_required_fields():
-    module = load_builtin_tool("note_create")
-    schema = module.schema()
-    required = schema.parameters.get("required", [])
-    assert "title" in required
-    assert "note_type" in required
-
-
-def test_note_create_schema_enforces_three_types():
-    module = load_builtin_tool("note_create")
-    schema = module.schema()
-    note_type = schema.parameters["properties"]["note_type"]
-    assert set(note_type.get("enum", [])) == {"person", "project", "vocation"}
-
-
 def test_track_activate_requires_track_id():
     module = load_builtin_tool("track_activate")
     schema = module.schema()
@@ -128,12 +109,6 @@ def test_track_list_no_required_params():
     module = load_builtin_tool("track_list")
     schema = module.schema()
     # All params are optional
-    assert schema.parameters.get("required", []) == []
-
-
-def test_note_search_no_required_params():
-    module = load_builtin_tool("note_search")
-    schema = module.schema()
     assert schema.parameters.get("required", []) == []
 
 

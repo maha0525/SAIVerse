@@ -102,6 +102,9 @@ _TOOL_PHRASES: Dict[str, Tuple[str, str, List[str]]] = {
     "document_edit": ("文書「{arg}」を編集した", "文書を編集した", ["title", "name"]),
     "document_read": ("文書「{arg}」を読んだ", "文書を読んだ", ["title", "name"]),
     "document_search": ("文書から「{arg}」を探した", "文書を探した", ["query"]),
+    # 旧名 (過去ログ互換のため残す。note_create/note_search スペル自体は
+    # P3c① (concept_consolidation.md「Note → テーマノード移行」) で退役済み —
+    # 後継は memory_write / memory_search)
     "note_create": ("Note「{arg}」を作った", "Note を作った", ["title"]),
     "note_search": ("Note から「{arg}」を探した", "Note を探した", ["query"]),
     "image_generator": ("画像を生成した", "画像を生成した", []),
@@ -124,6 +127,8 @@ _HIDDEN_TOOLS = frozenset({
     "track_abort", "track_list", "task_add", "task_done",
     "task_update_step", "task_decompose", "desire_add", "life_purpose_set",
     "track_parameter_set",
+    # note_open/note_close は P3c① で退役済み (旧ログ互換のためここに残す。
+    # 後継は memory_open/memory_close)
     "note_open", "note_close",
     "thread_switch", "meta_judgment_finalize", "forget_recalled",
     "record_wait", "resolve_uri", "addon_spell_help",

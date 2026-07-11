@@ -11,7 +11,6 @@ from sqlalchemy.orm import sessionmaker
 
 from api.routes.people.tasks import list_tasks
 from database.models import AI, ActionTrack, Base, City, User
-from saiverse.note_manager import NoteManager
 from saiverse.persona_task_manager import PARENT_NOTE, PARENT_TRACK, PersonaTaskManager
 
 
@@ -41,7 +40,6 @@ class TasksListApiTest(unittest.TestCase):
     def setUp(self):
         self.engine, self.Session = _make_db()
         self.manager = SimpleNamespace(SessionLocal=self.Session)
-        self.nm = NoteManager(self.Session)
         self.ptm = PersonaTaskManager(self.Session)
 
     def tearDown(self):

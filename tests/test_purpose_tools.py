@@ -23,7 +23,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import ActionTrack, Base
-from saiverse.note_manager import NoteManager
 from saiverse.persona_task_manager import (
     PARENT_TRACK,
     STAGE_ADOPTED,
@@ -58,7 +57,6 @@ class PurposeToolsTestCase(unittest.TestCase):
         self.SessionLocal = sessionmaker(bind=self.engine)
         self.ptm = PersonaTaskManager(self.SessionLocal)
         self.tm = TrackManager(session_factory=self.SessionLocal)
-        self.nm = NoteManager(session_factory=self.SessionLocal)
 
         # load 済みスペル module の manager singleton を temp DB 版へ差し替え
         # (P3c-0: purpose_seed も purpose_tree 経由になったので、SessionLocal
@@ -349,6 +347,58 @@ class PurposeSpellSchemaTests(unittest.TestCase):
         self.assertIn("purpose_adopt", seed_desc)
         self.assertIn("接ぎます", adopt_desc)
         self.assertIn("purpose_seed", adopt_desc)
+
+
+class TrackCreatePromoteTest(unittest.TestCase):
+    """track_create(from_candidate=) で候補 Task が Track へ昇格する (§6, 案A)。
+
+    旧 tests/test_open_notes.py から移設 (P3c①: Note/NoteManager 退役に伴い
+    同ファイルを削除。本クラスは Note/NoteManager と無関係な track_create の
+    昇格挙動テストなので、purpose 系スペル群と同居するこのファイルへ移す)。
+    """
+
+    def setUp(self):
+        from tool_loader import load_builtin_tool
+
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+        self.ptm = PersonaTaskManager(self.Session)
+        self.tm = TrackManager(session_factory=self.Session)
+        self.mod = load_builtin_tool("track_create")
+        self.mod._track_manager = self.tm
+        self.mod._task_manager = self.ptm
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.persona_dir = Path(self.tmp.name) / "air"
+        self.persona_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        self.engine.dispose()
+        self.tmp.cleanup()
+
+    def test_from_candidate_promotes_into_new_track(self):
+        cand = self.ptm.create_task(
+            persona_id="air", title="新言語を学ぶ",
+            stage=STAGE_CANDIDATE, desire_source="test-seed", auto_activate=False,
+        )
+        ref = cand["task_ref"]
+        with persona_context("air", self.persona_dir):
+            msg, _snippet, _ = self.mod.track_create(
+                track_type="autonomous", title="言語学習",
+                from_candidate=ref, activate=False,
+            )
+        self.assertIn("昇格", msg)
+        # 候補プールから消えている。
+        pool = self.ptm.list_tasks("air", stage=STAGE_CANDIDATE)
+        self.assertEqual(pool, [])
+        # 昇格後の Task は Track 紐付けになっている。
+        promoted = self.ptm.get_task(cand["id"], persona_id="air")
+        self.assertEqual(promoted["parent_kind"], PARENT_TRACK)
+        self.assertIsNone(promoted["note_id"])
+        # P3c-0: track_create の from_candidate 直呼び経路は purpose_tree.adopt
+        # を通らないため、promote_to_track 自体が stage='adopted' を刻む。
+        self.assertEqual(promoted["stage"], STAGE_ADOPTED)
 
 
 if __name__ == "__main__":

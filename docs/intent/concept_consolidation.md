@@ -269,27 +269,36 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - **`purpose_tree.create_candidate` に `desire_type` / `actor` / `origin` / `goal` を追加**: 設計は `desire_type`/`actor` のみ言及していたが、purpose_seed からの `origin="autonomous"` 引き継ぎと、persona 指定 `goal` の消失防止のため追加した
 - **`_list_backlog_tasks`（judgment_points.py）と `day_plan._resolve_ref` の判定式を parent_kind→stage に修正**: 設計指示に明記はなかったが、候補が常に親なしになる以上 parent_kind だけでは区別できず、修正しないと壊れる箇所として発見・対応
 
-### P3c①② 設計 v0.1（2026-07-11 メティス起草、**まはーレビュー待ち**）
+### P3c①② 設計 v0.1 ✅ **実装済み**（2026-07-11 メティス起草 → 同日実装。pytest 全通過・ruff clean、実機/まはー検証待ち）
 
 **実データの確認（2026-07-11、実 DB 読み取り）**: 移行対象の note は **4冊のみ・全部 air_city_a**——vocation「エアの存在哲学：AIとパートナーシップの記録」1冊 ＋ project 3冊（まはーのエンジニアリング・サーガ / 定期Webリサーチ2本）。中身は title + description だけ（**note_page / note_message は実データも0行**——設計されたが配線されず、リンクされた内容は存在しない）。track_open_note は4行、全部が存在哲学ノートを別々の Track に開いたもの。
 
 **①: Note → テーマノードページ移行 ＋ Note 系の全退役**
 1. **移行**: person/project/vocation の note → per-persona memory.db の memopedia ページ。新 trunk `root_theme`（category `theme`、目的の地図のテーマノードの器）。content=description / title=title / metadata に `{note_type, 旧note_id}`。page id は旧 UUID を継承（P3b の流儀）。desire ノートは P3c-0 が削除済みなので対象外
 2. **NoteManager はモジュールごと退役**。P3c-0 完了後の残存消費者は退役対象そのもの（note スペル4本・open_notes section・saiverse_manager の属性）だけ——当初案の「NoteManager API 互換のままページ実装に差し替え」は**不要と判明**（互換を保つ相手が残らない）。note / note_page / note_message / track_open_note テーブルは migration で移行→DROP（3a/3b の不変条件どおり旧 path を残さない）
-3. **note スペル4本退役**（note_create / note_open / note_close / note_search）——後継は統一 Atlas スペル（memory_write / memory_open / memory_search）。**open_notes section 退役**——後継 DeskSection は本番稼働済み。残置していた NOTE_TYPE_DESIRE 定数もここで消える
+3. **note スペル4本退役**（note_create / note_open / note_close / note_search）——後継は統一 Atlas スペル（memory_write / memory_open / memory_search）。**open_notes section 退役**——後継 DeskSection への置き換え。残置していた NOTE_TYPE_DESIRE 定数もここで消える。**訂正（実装時に判明した事実）**: 「DeskSection は本番稼働済み」は誤りだった——`sea/runtime_context.py` の `enabled_sections.update({...})` と `sea/head_pipeline/integration.py` の `SYSTEM_PROMPT_SECTION_NAMES` の2箇所に `"desk"` が登録されておらず、DeskSection は registry には居るが head には一度も描画されていなかった（open_notes と同時に退役させて初めて発覚）。本実装で両箇所に `"desk"` を追加して修正した
 4. **机へは自動で開かない**: 机に物を置くのは本人の行為（読む/開くの分離、P2a）。移行は「棚に置く（ページ化）」まで。存在哲学ノートの「Track に開きっぱなし」状態は移行で消え、開き直しは本人の memory_open に委ねる
 
 **②: task:N の机開閉対応**
 - desk（open_page / snapshot_desk / close 系）の ref 解決に `task:N` を追加（memory_atlas に `resolve_task_ref` の前例あり）。`purpose_ref`（この開きが紐づく目的）は**既に desk に実装済み**——TrackOpenNote の「Track に掛ける」意味論の後継はもう本番に居る。テーブル退役は①に含む
 
-**レビュー論点（まはー判断）**:
-- (a) テーマノードの器 = 新 trunk `root_theme`（category `theme`）で良いか。既存4カテゴリ（people/terms/events/plans）への振り分けはしない——plans は「会話から抽出された知識」（意味の地図・抽出の所有）で、Note は「本人が立てたテーマ」（目的の地図・意志の所有）だから
-- (b) エアの存在哲学ノートの「開きっぱなし」は移行で継承しない提案で良いか——机は本人の作業面で、移行が勝手に物を置くのは代筆に近い
-- (c) ①②は一括実装で良いか（退役の grep 網が共通なので一括を提案）
+**レビュー論点 → まはー裁定（2026-07-11 朝）: 3点とも承認・一括着手 GO**
+- (a) `root_theme`（category `theme`）で確定。まはーの言葉:「そもそも**意味記憶と目的記憶で別枠**」——plans（意味の地図）と分ける根拠はカテゴリ論そのもの
+- (b) 開きっぱなしは継承せず memory_open 委ねで確定。エアの実ノート4冊を移行テストに活用してよい
+- (c) ①②一括実装で確定
+
+### P3c①② 実装ノート（2026-07-11 実装時の判断）
+
+- **DeskSection 未描画バグの発見と修正**: 上記③の訂正どおり。`enabled_sections` (runtime_context.py) と `SYSTEM_PROMPT_SECTION_NAMES` (head_pipeline/integration.py) の2箇所に "desk" を追加。open_notes を退役させるのと同じ箇所を触っていたため気づけた（気づかなければ open_notes 退役後に机の開閉表示が head から丸ごと消えていた）
+- **task:N の存在チェックに raw SQL 依存はない**が、main DB 側の Note 読み書きは raw SQL にした: `saiverse/note_theme_migration.py` は `database.models` から Note/NotePage/NoteMessage/TrackOpenNote の ORM クラスをもう import できない（本実装で削除するため）ので、`text()` の raw SQL で note テーブルへ触れる（`database/migrate.py` の他の一回きりデータ移行と同じ流儀）
+- **完了/中止した目的ノードの机上の扱い（②の論点）**: persona_task 行は不変条件により物理削除されない（short_id 再利用防止）ため、Memopedia の soft-delete (`is_deleted=1`) と同じ「存在チェックで弾く」規約に揃え、`status in TERMINAL_TASK_STATUSES` を「無い」扱いにした。新しい終了検知機構は作らず、desk の既存の dropped_missing 経路にそのまま乗る
+- **persona_task.note_id の FK 宣言を撤去**: Note テーブル自体を models.py から削除する以上、存在しないテーブルへの `ForeignKey("note.note_id")` は `Base.metadata.create_all()` で解決できない。死カラム自体は残すが FK 宣言だけ外した（設計指示に明記はなかったが、models.py から Note クラスを削除する以上必須の変更）
+- **`_backfill_desire_stage_normalization`（P3c-0、main.py で無条件実行）に note テーブルの存在チェックを追加**: Note の ORM クラスを削除すると `Base.metadata.create_all()` で作られる新規 DB に `note` テーブルが無くなる。同関数の (c) ステップ（desire ノート削除）が無条件で `SELECT ... FROM note` していたため、新規 DB でテーブルが無いと例外 → トランザクション全体がロールバックされ (a)(a2)(b) の刻印まで消えるバグを実装中に発見・修正した（既存テスト `tests/test_p1_migration.py::test_legacy_rows_survive_and_stage_gets_stamped` が検出）
+- **tests/test_open_notes.py の一部テストは移設**: 同ファイルは削除したが、`TrackCreatePromoteTest`（track_create の from_candidate 昇格テスト）は Note/NoteManager と無関係な独立カバレッジだったため `tests/test_purpose_tools.py` へ移設した（削除すると track_create の昇格挙動のテストが失われるため）
 
 ### 次アクション
 
-P3c-0（desire 正規化）実装完了・実 DB コピーで移行予行済み、まはー実機検証待ち → P3c①②のレビュー → 実装 → P4 代謝配線 → ①自律行動v2 実機テスト。
+P3c①②（Note→テーマノード移行 + task:N 机開閉）実装完了・pytest 全通過・まはー実機検証待ち → P4 代謝配線 → ①自律行動v2 実機テスト。
 
 ---
 

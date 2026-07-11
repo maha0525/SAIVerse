@@ -630,76 +630,16 @@ class ActionTrack(Base):
     )
 
 
-class Note(Base):
-    """Note: 関心の固まり (恒久的な資産)。
-
-    Memopedia ページとメッセージ群を束ねる「スクラップブック」。
-    type は person / project / vocation の 3 種のみ (Intent A v0.6 で確定)。
-    Track が close されても Note は残り続ける。
-    """
-    __tablename__ = "note"
-    note_id = Column(String(36), primary_key=True)  # UUID
-    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
-    title = Column(String(255), nullable=False)
-    note_type = Column(String(32), nullable=False)  # person / project / vocation
-    description = Column(Text, nullable=True)
-    note_metadata = Column(Text, nullable=True)
-    # JSON: target persona_id (for person), deadline (for project), etc.
-    is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    last_opened_at = Column(DateTime, nullable=True)
-    closed_at = Column(DateTime, nullable=True)  # used when project completes
-    __table_args__ = (
-        Index("idx_note_persona_type", "persona_id", "note_type", "is_active"),
-    )
-
-
-class NotePage(Base):
-    """Note と Memopedia ページの関連 (多対多)。
-
-    page_id は SAIMemory 側 (memopedia_pages) に存在するため、メインDBからは
-    外部キー制約をかけない。
-    """
-    __tablename__ = "note_page"
-    note_id = Column(String(36), ForeignKey("note.note_id"), primary_key=True)
-    page_id = Column(String(255), primary_key=True)
-    __table_args__ = (
-        Index("idx_note_page_page", "page_id"),
-    )
-
-
-class NoteMessage(Base):
-    """Note とメッセージの関連 (多対多)。
-
-    message_id は SAIMemory 側に存在するため、メインDBからは外部キー制約を
-    かけない。同一メッセージが複数 Note に属することができ、3 人会話のメッセージ
-    重複問題はこの構造で解決される (Intent B v0.3)。
-    """
-    __tablename__ = "note_message"
-    note_id = Column(String(36), ForeignKey("note.note_id"), primary_key=True)
-    message_id = Column(String(255), primary_key=True)
-    added_at = Column(DateTime, server_default=func.now(), nullable=False)
-    auto_added = Column(Boolean, default=False, nullable=False)
-    # auto: derived from audience metadata; manual: persona explicitly added
-    __table_args__ = (
-        Index("idx_note_message_msg", "message_id"),
-    )
-
-
-class TrackOpenNote(Base):
-    """行動 Track と「開いている Note」の関連 (多対多)。
-
-    Track ごとに複数の Note が開かれる。Track が pending になっても open は維持
-    され、再 active 化時に Note の差分が再開コンテキストに挿入される。
-    """
-    __tablename__ = "track_open_note"
-    track_id = Column(String(36), ForeignKey("action_track.track_id"), primary_key=True)
-    note_id = Column(String(36), ForeignKey("note.note_id"), primary_key=True)
-    opened_at = Column(DateTime, server_default=func.now(), nullable=False)
-    __table_args__ = (
-        Index("idx_track_open_note_track", "track_id"),
-        Index("idx_track_open_note_note", "note_id"),
-    )
+# NOTE (2026-07-11, P3c①): Note / NotePage / NoteMessage / TrackOpenNote の
+# ORM クラス (旧テーブル note / note_page / note_message / track_open_note) は
+# concept_consolidation.md「Note → テーマノード移行」でここから削除した。
+# Note は per-persona memory.db 側の memopedia ページ (trunk root_theme、
+# category "theme") へ物理統合済み — saiverse/note_theme_migration.py が
+# SAIVerseManager._on_persona_registered で扇形移行し、main DB 側の行は
+# 移行後 DELETE する。旧テーブル自体は database/migrate.py の
+# _drop_empty_legacy_note_tables が「note が存在してかつ空」になった時点で
+# DROP する (扇形移行のため即時 DROP はできない — 詳細は同関数の docstring)。
+# persona_task.note_id は死カラムとして残す (コメント参照)。
 
 
 # ============================================================================
@@ -928,9 +868,11 @@ class PersonaTask(Base):
     # 'note' は P3c-0 (desire 正規化) で撤去 — 欲求候補は親なし+stage='candidate'
     # で表現するため、新規行はもう parent_kind='note' を持たない。
     parent_kind = Column(String(16), nullable=True)  # 'note' (旧) | 'track' | None
-    # P3c-0 以降は死カラム (書き手・読み手ゼロ)。物理 DROP は Note テーブル退役
-    # (P3c①) 時に判断する。
-    note_id = Column(String(36), ForeignKey("note.note_id"), nullable=True)
+    # P3c-0 以降は死カラム (書き手・読み手ゼロ)。P3c① で note テーブル自体が
+    # models.py から削除された (Note はテーマノードページへ物理統合済み) ため、
+    # FK 宣言は外した (存在しないテーブルへの ForeignKey は create_all で解決
+    # できない)。物理 DROP はまだしない (このカラム自体の削除は別途判断)。
+    note_id = Column(String(36), nullable=True)
     track_id = Column(String(36), ForeignKey("action_track.track_id"), nullable=True)
     # 本体フィールド (standalone 踏襲)
     title = Column(String(255), nullable=False)

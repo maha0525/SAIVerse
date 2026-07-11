@@ -145,7 +145,7 @@ class CoreMemoryComposedSystemPromptTest(unittest.TestCase):
         # runtime_context.py と同じ固定 enabled_sections で core_memory を含める。
         enabled = {
             "common_prompt", "persona_self", "core_memory", "building", "spell_list",
-            "autonomy_modes", "life_purpose", "open_notes",
+            "autonomy_modes", "life_purpose", "desk",
         }
         messages = render_head_messages(
             persona, manager, "b", enabled_sections=enabled, pipeline=pipeline,

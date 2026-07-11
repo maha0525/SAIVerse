@@ -7,14 +7,16 @@
 責務:
 - Task の作成 / 取得 / 一覧 (親バインドでフィルタ)
 - 状態遷移 (active/paused/completed/cancelled) + ステップ更新
-- 親バインド: 候補 (note_id) / Track 内小目標 (track_id) / 未所属
-- 昇格 (候補 → Track) = 親を note_id → track_id に張り替え (コピー/破棄しない)
+- 親バインド: Track 内小目標 (track_id) / 未所属。候補は親なし +
+  stage='candidate' (P3c-0 desire 正規化以降。note_id 経由の親バインドは撤去済み)
+- 昇格 (候補 → Track) = 親を track_id に張り替え (コピー/破棄しない)
 - 旧 track_task 互換層 (get_track_tasks / add_track_task / complete_track_task /
   format_track_task_list) — 既存の Track チェックリスト呼び出しを温存する
 
 責務外:
 - スペル登録 (builtin_data/tools 配下で別途)
-- Note との連携配線 (NoteManager / head セクションで扱う)
+- Note (旧概念。P3c① でテーマノードページへ物理統合済み、head セクションでは
+  desk が扱う) との連携
 
 設計: docs/intent/persona_cognition/unified_task_model.md
 """

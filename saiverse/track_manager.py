@@ -13,7 +13,7 @@ CRUD + 状態遷移を扱う純粋ロジックレイヤー。
 - Track 作成の自動トリガー (ペルソナ作成 hook 等は別レイヤー)
 - メタレイヤーの判断ロジック (AutonomyManager / 後継のメインライン)
 - LLM ツールへの登録 (tools/ 配下で別途行う)
-- Note との連携 (NoteManager で扱う、Phase C)
+- Note (旧概念。P3c① でテーマノードページへ物理統合済み) との連携
 
 NOTE: 「待ち (waiting) Track」機構は v0.31 (2026-05-09) で廃止された。
 Phase 5 の時間差ツール基盤が同等機能 (Pulse 中断 → 完了通知で再開) を

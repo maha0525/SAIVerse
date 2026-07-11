@@ -269,5 +269,5 @@ def test_section_registered_in_defaults():
     register_default_sections(registry)
     names = [s.name for s in registry.all_sections()]
     assert "desk" in names
-    # order 730 = open_notes(720) の直後
-    assert names.index("open_notes") < names.index("desk")
+    # order 730 = memory_weave(700) の直後 (P3c①で open_notes(720) は退役)
+    assert names.index("memory_weave") < names.index("desk")

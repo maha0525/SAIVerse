@@ -243,9 +243,13 @@ class OpenClosePageTests(_AtlasTestBase):
         self.assertIn(f"ch:{entry.short_id}", self._desk_refs())
         self.assertIn("机に開きました", result)
 
-    def test_open_task_returns_stub(self):
+    def test_open_task_without_manager_reports_not_found(self):
+        # task:N (目的の地図) は main DB 在住 — manager (world 文脈) を渡さない
+        # 呼び出しでは解決できず、m:N の未知参照と同じ「見つかりません」を返す
+        # (P3c①② で task:N の開閉は実装済み。manager 込みの動作は
+        # TaskDeskTests でカバーする)。
         result = atlas.open_page(self.adapter, "task:1")
-        self.assertIn("今後対応予定", result)
+        self.assertIn("見つかりません", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_open_photo_is_rejected_with_read_hint(self):
@@ -1051,10 +1055,81 @@ class TaskReadTests(_AtlasTestBase):
         result = atlas.read_page(self.adapter, "task:999", manager=self.manager)
         self.assertIn("見つかりません", result)
 
-    def test_open_task_still_stub(self):
-        # 開閉は P3c (目的の木の Atlas 統合) まで stub のまま
-        result = atlas.open_page(self.adapter, "task:1")
-        self.assertIn("今後対応予定", result)
+class TaskDeskTests(TaskReadTests):
+    """task:N (目的ノード) の机開閉 (P3c①②)。
+
+    ``purpose_ref`` (この開きが紐づく目的) は既に desk に実装済み — ここでは
+    ref 自体が task:N である場合の open/close/snapshot を検証する。
+    setUp/_make_task は TaskReadTests から継承 (manager 込みの土台を共用)。
+    """
+
+    def test_open_task_registers_desk_item(self):
+        task = self._make_task()
+        ref = task["task_ref"]
+        result = atlas.open_page(self.adapter, ref, manager=self.manager)
+        self.assertIn("机に開きました", result)
+        self.assertIn(ref, self._desk_refs())
+
+    def test_open_unknown_task_reports_not_found(self):
+        result = atlas.open_page(self.adapter, "task:999", manager=self.manager)
+        self.assertIn("見つかりません", result)
+        self.assertEqual(self._desk_refs(), set())
+
+    def test_close_task_removes_desk_item(self):
+        task = self._make_task()
+        ref = task["task_ref"]
+        atlas.open_page(self.adapter, ref, manager=self.manager)
+        result = atlas.close_page(self.adapter, ref, manager=self.manager)
+        self.assertIn("机から閉じました", result)
+        self.assertEqual(self._desk_refs(), set())
+
+    def test_close_task_without_manager_reports_not_found(self):
+        # close も open と対称 — manager が無いと task:N は解決できない
+        task = self._make_task()
+        result = atlas.close_page(self.adapter, task["task_ref"])
+        self.assertIn("見つかりません", result)
+
+    def test_snapshot_renders_open_task_like_read_task(self):
+        task = self._make_task(
+            steps=[{"title": "下調べ"}], desire_source="きっかけ",
+        )
+        ref = task["task_ref"]
+        atlas.open_page(self.adapter, ref, manager=self.manager)
+
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter, manager=self.manager)
+
+        self.assertEqual(evicted, [])
+        self.assertEqual(dropped, [])
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].ref, ref)
+        self.assertIn("語源メモをまとめる", pages[0].text)
+        self.assertIn("下調べ", pages[0].text)
+
+    def test_snapshot_drops_terminal_task(self):
+        # 完了/中止 (TERMINAL_TASK_STATUSES) の目的ノードは soft-delete された
+        # Memopedia ページと同じ「無い」扱い — 机から自動で下ろされる
+        # (P3c①② 設計: 既存の存在チェックの仕組みに乗せる、新機構は作らない)。
+        from saiverse.persona_task_manager import PersonaTaskManager
+
+        task = self._make_task()
+        ref = task["task_ref"]
+        atlas.open_page(self.adapter, ref, manager=self.manager)
+
+        ptm = PersonaTaskManager(self.manager.SessionLocal)
+        ptm.update_task_status(
+            task["id"], status="completed", actor=None, persona_id="tester",
+        )
+
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter, manager=self.manager)
+        self.assertEqual(pages, [])
+        self.assertEqual(evicted, [])
+        self.assertEqual(dropped, [ref])
+        self.assertEqual(self._desk_refs(), set())
+
+    def _desk_refs(self):
+        from sai_memory.desk import list_open
+
+        return {item.ref for item in list_open(self.adapter.conn)}
 
 
 class SnapshotDeskTests(_AtlasTestBase):

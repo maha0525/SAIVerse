@@ -27,7 +27,6 @@ from .conversation_manager import ConversationManager
 from .schedule_manager import ScheduleManager
 from .integration_manager import IntegrationManager
 from .track_manager import TrackManager
-from .note_manager import NoteManager
 from .meta_layer import MetaLayer
 from .pulse_dispatcher import PulseDispatcher
 from .track_handlers import (
@@ -225,8 +224,7 @@ class SAIVerseManager(
             wait_response_timeout_provider=self._wait_response_timeout_provider,
             wait_response_timeout_callback=self._wait_response_timeout_callback,
         )
-        self.note_manager = NoteManager(session_factory=self.SessionLocal)
-        logging.info("Initialized cognitive-model managers (TrackManager, NoteManager).")
+        logging.info("Initialized cognitive-model managers (TrackManager).")
 
         # --- Initialize Cached Head Architecture (Phase 2-h) ---
         # Section registry + pipeline + store の wiring。LLM context の head 部分を
@@ -1215,6 +1213,20 @@ class SAIVerseManager(
         except Exception:
             logging.exception(
                 "[on_persona_registered] Failed to reschedule day-plan slots: %s",
+                persona_id,
+            )
+
+        # 5. (P3c①) Note → テーマノードページ移行 (main DB → per-persona
+        #    memory.db)。ペルソナ単位の扇形移行で、呼ばれるたびにそのペルソナの
+        #    未移行 Note だけを移す (冪等・main DB 行はゼロになるまで無害な
+        #    no-op を繰り返すだけ)。詳細: saiverse/note_theme_migration.py
+        try:
+            from saiverse.note_theme_migration import migrate_persona_notes_to_theme_pages
+
+            migrate_persona_notes_to_theme_pages(self, persona_id)
+        except Exception:
+            logging.exception(
+                "[on_persona_registered] Failed to migrate notes to theme pages: %s",
                 persona_id,
             )
 

@@ -71,10 +71,6 @@ _META_LAYER_SPELL_NAMES = (
     "track_complete",
     "track_abort",
     "track_list",
-    "note_create",
-    "note_open",
-    "note_close",
-    "note_search",
 )
 
 
@@ -1222,8 +1218,7 @@ class MetaLayer:
             "現在の状態と新着イベントを踏まえ、以下のいずれかを判断してください:\n"
             "- 現在の Track をそのまま続ける (何もスペルを発行しない)\n"
             "- 別の Track をアクティブに切り替える (track_pause で現 running を後回しにし track_activate で対象を起動)\n"
-            "- 新しい Track を作って始める (track_create)\n"
-            "- 必要に応じて Note を開く (note_open) 等\n\n"
+            "- 新しい Track を作って始める (track_create)\n\n"
             "**スペル発動形式は行頭が `/spell ` で始まる**必要があります:\n"
             "  /spell name='スペル名' args={'引数名': '値'}\n\n"
             "判断は自然な独白として書いてください。スペルは独白の一部として埋め込みます。\n"

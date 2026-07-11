@@ -15,7 +15,6 @@ from sea.head_pipeline.sections.desk import DeskSection
 from sea.head_pipeline.sections.life_purpose import LifePurposeSection
 from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
-from sea.head_pipeline.sections.open_notes import OpenNotesSection
 from sea.head_pipeline.sections.persona_self import PersonaSelfSection
 from sea.head_pipeline.sections.spell_list import SpellListSection
 from sea.head_pipeline.sections.visual_context import VisualContextSection
@@ -35,7 +34,6 @@ def register_default_sections(registry) -> None:
     registry.register(LifePurposeSection())
     registry.register(SpellListSection())
     registry.register(MemoryWeaveSection())
-    registry.register(OpenNotesSection())
     registry.register(DeskSection())
     registry.register(VisualContextSection())
     # Phase 3: dynamic_state Section 群 (head 描画なし、差分通知のみ)
@@ -58,7 +56,6 @@ __all__ = [
     "LifePurposeSection",
     "MemopediaIndexSection",
     "MemoryWeaveSection",
-    "OpenNotesSection",
     "PersonaSelfSection",
     "SpellListSection",
     "VisualContextSection",

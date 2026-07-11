@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 132（うち Spell 化: 88）
+**登録ツール数**: 128（うち Spell 化: 84）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -58,9 +58,9 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memopedia_note` | Write a knowledge fragment to a Memopedia page. Each call creates one fragment (a single fact or note) linked to the … | `content*`: string, `title`: string, `summary`: string, `category`: string, `keywords`: array, `page_id`: string | — |
 | `memopedia_save_page` | Save a Memopedia knowledge page. If a page with the same title exists, it is updated. Otherwise a new page is created… | `title*`: string, `summary`: string, `content`: string, `category`: string, `keywords`: array | — |
 | `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復の会話の切… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | 写真を撮って貼る |
-| `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は m:N（Memopedia）/ ch:N（Chronicle）の形式です（コア記憶は常時開のため対象外です）。 | `ref*`: string | 記憶のページを机から閉じる |
+| `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は m:N（Memopedia）/ ch:N（Chronicle）/ task:N（目的ノード）の形式です（コア… | `ref*`: string | 記憶のページを机から閉じる |
 | `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は c:N（コア記憶1件）と m:N（Memopedia ページ）です。Chronicle（ch:N）と写真（p:N）は消せま… | `ref*`: string | 記憶のページをごみ箱へ |
-| `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。以後の思考で常に見える状態が続きますが、机の広さ（文字数予算）を消費します。机が溢れると、長く触っていないページから自動的に棚へ戻ります。参照は m:N（Me… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
+| `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。「読む（memory_read）」がその場限りで流れていくのに対し、「開く」は以後の思考で常に見える状態が続きますが、机の広さ（文字数予算）を消費します。机が… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
 | `memory_read` | 記憶の地図帳（Memory Atlas）の1ページをその場で読みます。読んだ内容は会話の流れに残り、時間とともに流れていきます（机の場所は取りません）。常に見える状態を保ちたい場合は memory_open を使ってください。参照は … | `ref*`: string | 記憶のページを読む |
 | `memory_read_around` | Read the conversation context around a specific message. Use this after memory_search_brief to expand context around … | `message_id*`: string, `window`: integer | — |
 | `memory_recall` | Recall relevant past messages from long-term memory. Use 'query' for semantic (meaning-based) search and 'keywords' f… | `query`: string, `keywords`: array, `max_chars`: integer, `topk`: integer, `start_date`: string, `end_date`: string | — |
@@ -71,10 +71,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `messagelog_get_around` | Retrieve chat messages around a specific timestamp. Accepts Unix epoch (integer) or ISO 8601 string (e.g. '2026-04-14… | `timestamp*`: string, `count`: integer, `thread_id`: string | 特定時刻のログ取得 |
 | `meta_judgment_finalize` | Internal tool for meta_judgment v2 Playbooks only. Receives the judge node's structured output (dict), formats /spell… | `judgment_output*`: object, `situation_kind*`: string, `running_track_id`: string, `trigger_type`: string, `trigger_context`: string, `track_at_judgment_id`: string, `situation_text`: string, `recent_judgments`: string | — |
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
-| `note_close` | Detach a note from a track (the note itself is preserved as a permanent asset). Use when a particular reference is no… | `note_id*`: string, `track_id`: string | ノートを閉じる |
-| `note_create` | Create a new Note. Notes hold a 'cluster of interest' — collected Memopedia pages and conversation messages tied to a… | `title*`: string, `note_type*`: string, `description`: string, `metadata`: string | ノート作成 |
-| `note_open` | Open (attach) a note to a track so it stays referenced while the track is running. If track_id is omitted, the curren… | `note_id*`: string, `track_id`: string | ノートを開く |
-| `note_search` | Search the persona's notes. Filter by note_type (person/project/vocation) and/or by case-insensitive substring match … | `query`: string, `note_type`: string, `include_inactive`: boolean | ノート検索 |
 | `observer_read` | Read the latest observation data from a building fixture's sensor/monitor. Returns cached values — does not trigger n… | `observer_id*`: string, `metric_name`: string | オブザーバー観測値取得 |
 | `pdf_read` | Extract and read text from a PDF document item. Specify page range to read specific pages. Requires pypdf to be insta… | `item_id*`: string, `pages`: string, `max_chars`: integer | — |
 | `purpose_adopt` | 目的の木に接ぎます（adopt = 接ぐ。候補を生むのは purpose_seed）。candidate_ref（task:N）を指定すると、書き留めてあった候補を採用して木に接ぎます — parent_ref（track:N）を添え… | `candidate_ref`: string, `title`: string, `parent_ref`: string | 目的の木に接ぐ |

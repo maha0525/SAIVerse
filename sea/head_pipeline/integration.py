@@ -34,7 +34,9 @@ LOGGER = logging.getLogger(__name__)
 # 既知 Section の役割マッピング。新規 Section 追加時はここに分類を足す。
 # 並び順 = system メッセージ内の出力順。各 Section の order 属性に合わせる
 # (common_prompt < persona_self < core_memory(250) < building < available_playbooks(400) <
-#  autonomy_modes(550) < life_purpose(560) < spell_list(600) < open_notes(720))。
+#  autonomy_modes(550) < life_purpose(560) < spell_list(600) < desk(730))。
+# 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
+# で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "common_prompt",
     "persona_self",
@@ -44,7 +46,7 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "autonomy_modes",
     "life_purpose",
     "spell_list",
-    "open_notes",
+    "desk",
 )
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
 VISUAL_CONTEXT_SECTION_NAME = "visual_context"
