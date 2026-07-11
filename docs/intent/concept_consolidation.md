@@ -310,9 +310,54 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 **修正**: `open_page` が結果テキストにページ本文（snapshot_desk / memory_read と共通の整形器 `_read_memopedia` / `_read_chronicle` / `_read_task`）を含める。開いた瞬間は tail で見え、以後は机（次の Metabolism から head）に残る二段構え。描画失敗時は「開く」自体は成立させて本文なしで返す（WARN ログ）。memory_open のスペル説明にも「読む行為を兼ねるため read を続けて撃つ必要はない」を明記。
 
+## P4 代謝の配線 — 設計 v0.1（2026-07-11 メティス起草、**まはーレビュー待ち**）
+
+**目的**: 地図帳を「置き場」から「生きて代謝する記憶」へ。三層の型（検知＝決定論／裁定＝ペルソナ・就寝判断相乗り／実行＝睡眠中バッチ）は「目次と庭仕事」節で合意済み——本節はその実装設計。
+
+### 部材の現状（2026-07-11 事実調査）
+
+- **maintain_memopedia**（実行部の素材）: CLI 専用で main() 直書き＝ライブラリ import 不可。merge-similar は**発見も LLM**（決定論でない・閾値なし）、split-large は 5000字閾値＋LLM、fix-markdown は決定論。書き換えは `Memopedia.update_page`（edit_source="auto_maintenance"）。既知の腐敗: カテゴリループが terms 漏れ（[issue](../issues/memopedia_category_hardcoding.md)）
+- **就寝判断の相乗り前例**: desire_reviews——スキーマ動的注入（`build_day_close_schema`、対象が空ならフィールド自体を出さない）＋状況テキスト（`build_day_close_situation_text`）＋適用（judgment_finalize → `apply_desire_reviews`）の3点セット
+- **睡眠中バッチの既存フックは無い**（day_close 適用は全て同期）
+- **vividness**: 減衰コードは**そもそも存在しない**（未実装のまま廃止確定に）。書き手3（save_page=vivid / note=rough / manage の set_vividness）・読み手2（weave の buried スキップ等4分岐 / UI の編集・CSS・ラベル）・運搬（API・get_tree annotate）
+- **head 索引**: `MemopediaIndexSection` は実在するが **render なし・差分通知専用**。目次の実描画は weave ツール内 `_list_pages`（per-persona DB フラグ `MEMOPEDIA_INDEX_ENABLED` 配下、既定 OFF）に眠っている
+- **命名の素材**: persona_task の stage/desire_type/touch_count・photos の pasted_to/時刻はあるが、クラスタカウンタは未実装。root_theme への新規ページ作成 API は移行専用（`migrate_note_to_theme_page`）しかない
+
+### 実装片と順序（提案）
+
+**P4-0: カテゴリレジストリ**（[memopedia_category_hardcoding](../issues/memopedia_category_hardcoding.md) の prep-refactor）
+issue の発火条件「カテゴリ機構を触る前」が来た——庭仕事は「どのカテゴリが代謝対象か」（people/terms/plans/events は対象、theme/core/chronicle は対象外）をレジストリの役割フラグで引くべきで、ハードコード列挙をこれ以上増やせない。storage.py に `CATEGORY_DEFS`（名前・ラベル・in_tree / extractable / writable / **metabolizable**）を一元化し、既存列挙を導出に置換＋build_tree にレジストリ外カテゴリの WARN。terms/events 漏れの実バグもここで治る
+
+**P4-a: 庭仕事の三層配線**（本丸）
+1. **検知**（決定論・ゼロコール、新設 `saiverse/garden.py`）: 肥大（文字数閾値。memopedia_health の 2000/3000 と maintain の 5000 に散在する閾値もレジストリへ）／過小（短小＋last_referenced 古）／類似（タイトル・キーワード共起。**LLM 発見は廃止**——発見まで LLM の現行 merge-similar と違い、決定論候補＋判断材料だけ組む）。提示は最大3件（ノイズ制御）
+2. **裁定**（就寝判断相乗り）: desire_reviews と同じ3点セットで `shelf_reviews` を追加——状況テキストに「今日の棚の乱れ」、スキーマに ref enum＋verdict（approve / skip）、finalize で承認分を**庭仕事プラン**として永続化
+3. **実行**（睡眠中バッチ）: maintain の実行部を `sai_memory/garden_ops.py` へライブラリ化（merge 2ページ / split 1ページ単位の関数、edit_source="garden"）。day_close 適用後に**背景スレッドの一回きりジョブ**で承認分だけ実行（LIGHTWEIGHT モデル）。結果は event_message で翌朝に届く＋新聞に「棚の整理」欄——「寝ている間に記憶が整理される」の人間対応と、裁定が自分の決定である自己著者性
+
+**P4-b: 命名（テーマ立て）**
+- 検知カウンタ: 完了ノード・休眠欲求の desire_type／キーワード共起クラスタ（決定論）。**写真の航跡クラスタは後回し**（pasted_to/時刻はあるがタグが無く材料が薄い——レビュー論点 e）
+- 裁定: 就寝判断に「テーマ候補」を提示 → ペルソナが承認＋**名を与える**（自由記述フィールド）→ `theme_pages.create_theme_page`（新設）で root_theme 配下にページ化＋構成ノードの ref を本文に記録。P3c① で立てた root_theme の「移行専用でない最初の住人」
+
+**P4-c: vividness 除去**（地均し——P4-a の検知は vividness でなく構造状態を数える前提なので先にやる）
+- 書き手3・読み手2・運搬（API パラメータ・get_tree annotate・UI の編集/CSS/ラベル・memopedia_manage の set_vividness action）を除去。weave の buried スキップ廃止＝全ページ平等掲示。**カラムは死置き**（per-persona memory.db N個への ALTER は扇形になるので触らない。storage コメントに死亡明記）
+
+**P4-d: head 目次（索引復帰の実験）**
+- `MemopediaIndexSection.render` に**深さ制限の目次**を実装（カテゴリ＋上位N階層タイトル＋件数、開いているページと is_important に印。Metabolism のみ更新は既に `refresh_on_events=∅` で整合）
+- **opt-in 実験**: 既存の per-persona フラグ `MEMOPEDIA_INDEX_ENABLED` を再利用し、まずエアだけ ON で観察（per-persona 恒常フラグは (persona,model) 固定の head 規律を壊さない）。weave 側の索引 `_list_pages` は目次 section へ**一本化**（二重掲示を作らない）
+
+**順序: P4-0 → P4-c → P4-a → P4-b → P4-d**（レジストリと地均しを先に、本丸、命名、最後に目次実験）
+
+### レビュー論点（まはー判断）
+
+- (a) P4-0 としてカテゴリレジストリを先にやる（issue の発火条件が来たという判断）——OK か
+- (b) 裁定の verdict は approve / skip の2値で始める（modify は構造化出力で表現しづらく、見送り→翌日再提示で回る）——OK か
+- (c) 「睡眠中」の解釈＝就寝判断適用直後の背景ジョブで即実行（真夜中まで待たない）——OK か
+- (d) 目次実験の opt-in に既存フラグ MEMOPEDIA_INDEX_ENABLED を再利用、まずエアだけ ON——OK か
+- (e) 命名の写真航跡クラスタは後回し（完了ノード・休眠欲求クラスタ先行）——OK か
+- (f) 庭仕事の実行結果を新聞（day_report）に「棚の整理」欄として載せる——OK か
+
 ### 次アクション
 
-P3c①②（Note→テーマノード移行 + task:N 机開閉）実装完了・追修正2件（UI テーマ表示 / 開く＝読む）済み・pytest 全通過 → まはー実機再確認 → P4 代謝配線 → ①自律行動v2 実機テスト。
+P4 設計 v0.1 のまはーレビュー → 実装（P4-0 → c → a → b → d）→ ①自律行動v2 実機テスト（Atlas と合流して一度だけ）＝ v0.3.0 本線。
 
 ---
 
