@@ -273,6 +273,32 @@ class NoteThemeMigrationTests(unittest.TestCase):
         expected = int(datetime.fromisoformat("2026-04-30 20:09:38.498838").timestamp())
         self.assertEqual(page.created_at, expected)
 
+    def test_theme_pages_visible_in_memopedia_tree(self):
+        """移行後のテーマページが Memopedia.get_tree() の 'theme' カテゴリに現れる。
+
+        実機検証 (2026-07-11) で発覚した回帰: get_tree / build_tree がカテゴリ
+        固定列挙のため、移行は成功してもメモリタブ UI に一切表示されなかった。
+        """
+        from saiverse.note_theme_migration import migrate_persona_notes_to_theme_pages
+        from sai_memory.memopedia import Memopedia
+
+        self._insert_note("note-1", "エアの存在哲学", note_type="vocation",
+                          description="AIとパートナーシップの記録")
+        migrate_persona_notes_to_theme_pages(self.manager, "air")
+
+        tree = Memopedia(self.adapter.conn).get_tree()
+        self.assertIn("theme", tree)
+        self.assertEqual(len(tree["theme"]), 1)  # trunk root_theme
+        trunk = tree["theme"][0]
+        self.assertEqual(trunk["id"], "root_theme")
+        titles = [c["title"] for c in trunk["children"]]
+        self.assertEqual(titles, ["エアの存在哲学"])
+
+        # ペルソナ向けのツリー表示 (memopedia_get_tree スペル経由) にも現れる
+        md = Memopedia(self.adapter.conn).get_tree_markdown()
+        self.assertIn("テーマ", md)
+        self.assertIn("エアの存在哲学", md)
+
     def test_missing_adapter_skips_gracefully(self):
         from saiverse.note_theme_migration import migrate_persona_notes_to_theme_pages
 

@@ -18,6 +18,7 @@ from sai_memory.memopedia.storage import (
     CATEGORY_TERMS,
     CATEGORY_PLANS,
     CATEGORY_EVENTS,
+    CATEGORY_THEME,
     build_tree,
     create_page,
     get_page,
@@ -113,6 +114,8 @@ class Memopedia:
             "terms": [_annotate(p) for p in tree.get(CATEGORY_TERMS, [])],
             "plans": [_annotate(p) for p in tree.get(CATEGORY_PLANS, [])],
             "events": [_annotate(p) for p in tree.get(CATEGORY_EVENTS, [])],
+            # テーマ (旧 Note、P3c①)。抽出4カテゴリと違い本人が立てる地図
+            "theme": [_annotate(p) for p in tree.get(CATEGORY_THEME, [])],
         }
 
     def get_tree_markdown(
@@ -144,6 +147,7 @@ class Memopedia:
             "terms": "用語",
             "plans": "予定",
             "events": "出来事",
+            "theme": "テーマ",
         }
 
         def _render_page(page: Dict[str, Any], depth: int = 0, current_depth: int = 0) -> None:
@@ -187,7 +191,7 @@ class Memopedia:
                 for child in children:
                     _render_page(child, depth + 1, current_depth + 1)
 
-        for category_key in ["people", "terms", "plans", "events"]:
+        for category_key in ["people", "terms", "plans", "events", "theme"]:
             category_name = category_names.get(category_key, category_key)
             pages = tree.get(category_key, [])
             if pages:
@@ -722,6 +726,7 @@ class Memopedia:
             CATEGORY_TERMS: "用語",
             CATEGORY_PLANS: "予定",
             CATEGORY_EVENTS: "出来事",
+            CATEGORY_THEME: "テーマ",
         }
 
         sections: List[str] = ["# Memopedia\n"]
@@ -739,7 +744,7 @@ class Memopedia:
                 lines.extend(_render_page(child, level + 1))
             return lines
 
-        for category in [CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS, CATEGORY_EVENTS]:
+        for category in [CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS, CATEGORY_EVENTS, CATEGORY_THEME]:
             category_name = category_names.get(category, category)
             pages = tree.get(category, [])
             if not pages:

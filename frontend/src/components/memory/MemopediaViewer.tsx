@@ -22,6 +22,7 @@ interface TreeStructure {
     terms: MemopediaPage[];
     plans: MemopediaPage[];
     events: MemopediaPage[];
+    theme: MemopediaPage[];
 }
 
 interface EditHistoryEntry {
@@ -126,7 +127,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     useEffect(() => {
         if (tree) {
             const allExpandable = new Set<string>();
-            [tree.people, tree.terms, tree.plans, tree.events].forEach(pages => {
+            [tree.people, tree.terms, tree.plans, tree.events, tree.theme].forEach(pages => {
                 collectExpandableIds(pages).forEach(id => allExpandable.add(id));
             });
             setExpandedIds(allExpandable);
@@ -151,6 +152,8 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 const data = await res.json();
                 // Ensure events array exists (backend may not have root_events yet)
                 if (!data.events) data.events = [];
+                // Ensure theme array exists (P3c①: 移行前のペルソナは root_theme を持たない)
+                if (!data.theme) data.theme = [];
                 setTree(data);
             }
         } catch (error) {
@@ -203,7 +206,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Edit mode handlers
     const startEditing = () => {
         if (!selectedPageId || !tree) return;
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events];
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events, ...tree.theme];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -650,7 +653,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Helper to find selected page and get its keywords
     const getSelectedPageKeywords = (): string[] => {
         if (!tree || !selectedPageId) return [];
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events];
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events, ...tree.theme];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -676,7 +679,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Helper to find selected page and get its vividness
     const getSelectedPageVividness = (): string => {
         if (!tree || !selectedPageId) return 'rough';
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events];
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events, ...tree.theme];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -692,7 +695,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Helper to find selected page and get its is_trunk
     const getSelectedPageIsTrunk = (): boolean => {
         if (!tree || !selectedPageId) return false;
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events];
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events, ...tree.theme];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -708,7 +711,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Helper to find selected page and get its is_important
     const getSelectedPageIsImportant = (): boolean => {
         if (!tree || !selectedPageId) return false;
-        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events];
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans, ...tree.events, ...tree.theme];
         const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
             for (const p of pages) {
                 if (p.id === selectedPageId) return p;
@@ -749,6 +752,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             terms: sortPages(tree.terms),
             plans: sortPages(tree.plans),
             events: sortPages(tree.events),
+            theme: sortPages(tree.theme),
         };
     }, [tree]);
 
@@ -766,6 +770,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         tree.terms.forEach(collect);
         tree.plans.forEach(collect);
         tree.events.forEach(collect);
+        tree.theme.forEach(collect);
         // Sort by most recently referenced/updated (newest first)
         const freshness = (p: MemopediaPage) => Math.max(p.last_referenced_at || 0, p.updated_at || 0);
         pages.sort((a, b) => freshness(b) - freshness(a));
@@ -818,6 +823,13 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
                             <div className={styles.categoryTitle}>出来事 / Events</div>
                             {sortedTree.events.map(p => <TreeItem key={p.id} page={p} />)}
+
+                            {sortedTree.theme.length > 0 && (
+                                <>
+                                    <div className={styles.categoryTitle}>テーマ / Themes</div>
+                                    {sortedTree.theme.map(p => <TreeItem key={p.id} page={p} />)}
+                                </>
+                            )}
                         </>
                     ) : (
                         <>

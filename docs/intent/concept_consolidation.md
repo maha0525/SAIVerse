@@ -296,9 +296,17 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - **`_backfill_desire_stage_normalization`（P3c-0、main.py で無条件実行）に note テーブルの存在チェックを追加**: Note の ORM クラスを削除すると `Base.metadata.create_all()` で作られる新規 DB に `note` テーブルが無くなる。同関数の (c) ステップ（desire ノート削除）が無条件で `SELECT ... FROM note` していたため、新規 DB でテーブルが無いと例外 → トランザクション全体がロールバックされ (a)(a2)(b) の刻印まで消えるバグを実装中に発見・修正した（既存テスト `tests/test_p1_migration.py::test_legacy_rows_survive_and_stage_gets_stamped` が検出）
 - **tests/test_open_notes.py の一部テストは移設**: 同ファイルは削除したが、`TrackCreatePromoteTest`（track_create の from_candidate 昇格テスト）は Note/NoteManager と無関係な独立カバレッジだったため `tests/test_purpose_tools.py` へ移設した（削除すると track_create の昇格挙動のテストが失われるため）
 
+### P3c① 実機検証での追修正（2026-07-11 午後）
+
+**まはー実機検証の結果**: 起動ログは全段成功（P3c-0 刻印30行・帳簿バックフィル9行・desire 2冊削除・エアの4冊移行）だが、**メモリタブの Memopedia にテーマが表示されない**。
+
+**原因**: 移行は成功しており実データはページとして存在していた。`build_tree`（storage.py）と `Memopedia.get_tree`（core.py）が**カテゴリ固定列挙**（people/terms/plans/events）で、`theme` カテゴリの trunk がツリー構築の時点で落ちていた——P3a 実装ノートの「get_tree は4カテゴリ固定のため core ページは元々対象外」と同じ構造（core/chronicle は意図どおりの非表示だが、テーマは閲覧できるべきページ）。
+
+**修正**: `CATEGORY_THEME` を storage.py に一元定義（theme_pages.py は import に変更）し、theme を明示的に通した: `build_tree` / `get_tree`（→ UI API）/ `get_tree_markdown`（→ ペルソナの memopedia_get_tree スペル。ラベル「テーマ」）/ `export_all_markdown` / `memopedia_health`。フロント `MemopediaViewer.tsx` は型＋集約6箇所＋「テーマ / Themes」節（テーマ0件のペルソナには見出しを出さない）。**意図的に通さなかった消費者**: `entity_extractor`（抽出器が theme に書くのは設計違反——テーマは本人が立てるもの）と `note_organizer`・ページ生成 UI のカテゴリ選択肢（同上）。回帰テスト `test_theme_pages_visible_in_memopedia_tree` 追加。
+
 ### 次アクション
 
-P3c①②（Note→テーマノード移行 + task:N 机開閉）実装完了・pytest 全通過・まはー実機検証待ち → P4 代謝配線 → ①自律行動v2 実機テスト。
+P3c①②（Note→テーマノード移行 + task:N 机開閉）実装完了・UI 表示の追修正済み・pytest 全通過 → まはー実機再確認（メモリタブにテーマ4ページ）→ P4 代謝配線 → ①自律行動v2 実機テスト。
 
 ---
 

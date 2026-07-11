@@ -64,7 +64,7 @@ def memopedia_health() -> str:
             if children:
                 _scan(children, category, depth + 1)
 
-    for cat_key in ("people", "terms", "plans", "events"):
+    for cat_key in ("people", "terms", "plans", "events", "theme"):
         _scan(tree.get(cat_key, []), cat_key)
 
     lines = ["## Memopedia ヘルスレポート", f"総ページ数: {total_pages}"]

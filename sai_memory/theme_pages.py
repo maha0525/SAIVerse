@@ -25,8 +25,12 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Dict, Optional
 
+from sai_memory.memopedia.storage import CATEGORY_THEME
+
 ROOT_THEME_ID = "root_theme"
-CATEGORY_THEME = "theme"
+
+__all__ = ["ROOT_THEME_ID", "CATEGORY_THEME", "ensure_root_theme",
+           "find_theme_page_by_legacy_note_id", "migrate_note_to_theme_page"]
 
 
 def ensure_root_theme(conn: sqlite3.Connection) -> None:

@@ -16,6 +16,10 @@ CATEGORY_PEOPLE = "people"
 CATEGORY_TERMS = "terms"
 CATEGORY_PLANS = "plans"
 CATEGORY_EVENTS = "events"
+# テーマ (旧 Note の後継、P3c①)。entity_extractor の抽出対象4カテゴリには
+# 含めない — テーマは本人が立てるもので、抽出で自動生成しない
+# (新規テーマの命名は P4 代謝の領分。sai_memory/theme_pages.py 参照)。
+CATEGORY_THEME = "theme"
 
 INITIAL_ROOTS = [
     {
@@ -733,11 +737,14 @@ def build_tree(conn: sqlite3.Connection) -> Dict[str, List[MemopediaPage]]:
         _attach_children(root)
 
     # Organize by category
+    # (core / chronicle カテゴリの trunk は意図的に含めない — コア記憶は
+    #  常時開の head 常設、Chronicle は時間の地図として別導線を持つ)
     result: Dict[str, List[MemopediaPage]] = {
         CATEGORY_PEOPLE: [],
         CATEGORY_TERMS: [],
         CATEGORY_PLANS: [],
         CATEGORY_EVENTS: [],
+        CATEGORY_THEME: [],
     }
     for root in roots:
         if root.category in result:
