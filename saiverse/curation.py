@@ -7,7 +7,10 @@ P4-a の三層（検知 → 裁定 → 実行）のうち「検知」を担う�
 実際の分割・統合（書き換え）は P4-a2 で実装する `sai_memory/curation_ops.py`
 の領分——**このモジュールでは一切実行しない**。
 
-設計詳細: ``docs/intent/concept_consolidation.md`` §P4-a 検知節
+P4-b 命名（テーマ立て）の検知も本モジュールが担う。
+``detect_naming_candidates`` を参照。
+
+設計詳細: ``docs/intent/concept_consolidation.md`` §P4-b 命名節
 """
 from __future__ import annotations
 
@@ -40,6 +43,13 @@ SIMILAR_MIN_KEYWORDS: int = 3
 
 #: 状況テキストに提示する候補の最大件数（ノイズ制御）。
 MAX_CANDIDATES: int = 3
+
+#: P4-b 命名: 同 desire_type を持つ完了/休眠ノードの最小クラスタ件数。
+#: この件数以上のクラスタが 1 テーマ候補になる。
+NAMING_CLUSTER_MIN: int = 3
+
+#: P4-b 命名: 1回の就寝判断に提示するテーマ候補の最大件数（ノイズ制御）。
+NAMING_MAX_CANDIDATES: int = 1
 
 #: memopedia_health.py の注意ゾーン境界（2000〜OVERSIZED の間）。
 #: health レポートで「注意 (2000〜OVERSIZED 字)」セクションに使う。
@@ -376,5 +386,153 @@ def detect_curation_candidates(
         len(similar),
         len(undersized),
         len(candidates),
+    )
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# P4-b: 命名候補の検知（決定論・ゼロ LLM コール）
+# ---------------------------------------------------------------------------
+
+
+def _fetch_existing_theme_member_refs(conn: Any) -> set:
+    """既存テーマページの member_refs に含まれる task ref を収集して返す。
+
+    root_theme 配下のページの metadata.member_refs から task:N を取り出す。
+    冪等除外に使用する。
+
+    ``conn`` は SQLAlchemy Session ではなく sqlite3.Connection として扱う試みは
+    しない——persona DB (memory.db) は sqlite3.Connection。main DB (persona_task)
+    は manager 経由の SQLAlchemy 世界で別物。ここでは memory.db 側で
+    root_theme ページの metadata を読む。
+    """
+    result: set = set()
+    try:
+        cur = conn.execute(
+            "SELECT metadata FROM memopedia_pages "
+            "WHERE parent_id = 'root_theme' AND COALESCE(is_deleted, 0) = 0"
+        )
+        for (meta_json,) in cur.fetchall():
+            if not meta_json:
+                continue
+            try:
+                meta = json.loads(meta_json)
+            except Exception:
+                continue
+            for ref in meta.get("member_refs") or []:
+                if isinstance(ref, str):
+                    result.add(ref)
+    except Exception:
+        pass
+    return result
+
+
+def detect_naming_candidates(
+    manager: Any,
+    persona_id: str,
+) -> List[Dict[str, Any]]:
+    """命名（テーマ立て）の候補を検知して最大 NAMING_MAX_CANDIDATES 件返す。
+
+    対象: persona の main DB 上の persona_task で stage が 'completed' または
+    'dormant' のノード。同一 desire_type を持つノードが NAMING_CLUSTER_MIN 件
+    以上あればそれが 1 クラスタ（テーマ候補）。既にテーマページの member_refs に
+    含まれている task:N は除外する（冪等）。
+
+    ``manager``: SAIVerseManager インスタンス（manager.SessionLocal と
+    ``personas`` dict を持つことを前提とする）。memory.db への conn は
+    personas[persona_id].sai_memory.conn から取る。
+
+    返す dict のキー:
+        ``cluster_id``:   "naming:<desire_type>" 形式の一意文字列
+        ``kind``:         "naming"
+        ``member_refs``:  ["task:N", ...]
+        ``line``:         状況テキスト 1 行
+
+    実装制約:
+        - **LLM 呼び出しは一切しない**
+        - **ページの書き換えは一切しない**
+        - 命名の実行（create_theme_page 呼び出し）は judgment_finalize の領分
+    """
+    from saiverse.persona_task_manager import (
+        PersonaTaskManager,
+        STAGE_COMPLETED,
+        STAGE_DORMANT,
+    )
+
+    ptm = PersonaTaskManager(manager.SessionLocal)
+
+    # 完了・休眠ノードを取得
+    try:
+        completed = ptm.list_tasks(
+            persona_id,
+            stage=STAGE_COMPLETED,
+            include_steps=False,
+        )
+        dormant = ptm.list_tasks(
+            persona_id,
+            stage=STAGE_DORMANT,
+            include_steps=False,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[curation/naming] failed to list tasks (persona=%s)",
+            persona_id, exc_info=True,
+        )
+        return []
+
+    all_tasks = completed + dormant
+
+    # 既にテーマ化済みの task ref を取得（冪等除外）
+    existing_refs: set = set()
+    try:
+        persona_obj = (getattr(manager, "personas", None) or {}).get(persona_id)
+        mem_conn = getattr(getattr(persona_obj, "sai_memory", None), "conn", None)
+        if mem_conn is not None:
+            existing_refs = _fetch_existing_theme_member_refs(mem_conn)
+    except Exception:
+        LOGGER.debug(
+            "[curation/naming] could not read existing theme member_refs (persona=%s)",
+            persona_id,
+        )
+
+    # desire_type がある行だけクラスタリング（NULL は対象外にする）
+    by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for task in all_tasks:
+        dtype = task.get("desire_type")
+        if not dtype:
+            continue
+        task_ref = task.get("task_ref")
+        if not task_ref:
+            continue
+        if task_ref in existing_refs:
+            continue
+        by_type.setdefault(str(dtype), []).append(task)
+
+    # NAMING_CLUSTER_MIN 件以上のクラスタだけ候補化
+    candidates: List[Dict[str, Any]] = []
+    for dtype, tasks in by_type.items():
+        if len(tasks) < NAMING_CLUSTER_MIN:
+            continue
+        member_refs = [t["task_ref"] for t in tasks]
+        refs_display = ", ".join(member_refs[:6])
+        if len(member_refs) > 6:
+            refs_display += f"…（他 {len(member_refs) - 6} 件）"
+        candidates.append({
+            "cluster_id": f"naming:{dtype}",
+            "kind": "naming",
+            "member_refs": member_refs,
+            "line": (
+                f"[テーマ候補] 「{dtype}」の完了・休眠ノード {len(member_refs)} 件"
+                f" ({refs_display})"
+                " — 名前を与えるとテーマとして棚に立ちます"
+            ),
+        })
+
+    # 最大 NAMING_MAX_CANDIDATES 件（ノイズ制御。P4-b: 就寝判断が重くならないように）
+    candidates = candidates[:NAMING_MAX_CANDIDATES]
+
+    LOGGER.debug(
+        "[curation/naming] persona=%s: %d naming candidates detected",
+        persona_id, len(candidates),
     )
     return candidates

@@ -38,6 +38,11 @@ LOGGER = logging.getLogger(__name__)
 # 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
 # で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
+    # 注意: Section を新設して head に描画させる場合、ここと
+    # sea/runtime_context.py の enabled_sections の**両方**に名前を足すこと。
+    # 片方でも漏れると「登録済みなのに一度も描画されない」silent 故障になる
+    # (DeskSection P2a〜P3c① / MemopediaIndexSection P4-d で二度起きた実績)。
+    # tests/test_head_section_wiring.py が両点の整合を機械検査する。
     "common_prompt",
     "persona_self",
     "core_memory",
@@ -47,6 +52,9 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "life_purpose",
     "spell_list",
     "desk",
+    # P4-d: Memopedia 目次 (opt-in 実験。per-persona フラグ MEMOPEDIA_INDEX_ENABLED
+    # が render 内でゲートするので、ここは無条件で列挙してよい — OFF なら None render)
+    "memopedia_index",
 )
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
 VISUAL_CONTEXT_SECTION_NAME = "visual_context"

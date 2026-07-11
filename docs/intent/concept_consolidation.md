@@ -352,7 +352,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 3. **実行**（睡眠中バッチ）: maintain の実行部を `sai_memory/curation_ops.py` へライブラリ化（merge 2ページ / split 1ページ単位の関数、edit_source="curation"）。day_close 適用後に**背景スレッドの一回きりジョブ**で承認分だけ実行（LIGHTWEIGHT モデル）。結果は event_message で翌朝に届く——「寝ている間に記憶が整理される」の人間対応と、裁定が自分の決定である自己著者性
    - **タイミングの注記（まはー 2026-07-11）**: そもそも生活リズムを1日単位で回す前提自体に将来課題がある（1回しか喋らない日・自律行動を使わず会話だけのユーザー）。編纂の起動点は就寝判断に固定せず、将来のリズム再設計で動かせる形にしておく（新聞欄が窓方式〔下記 (f)〕なのはこの布石でもある）
 
-**P4-b: 命名（テーマ立て）**
+**P4-b: 命名（テーマ立て）** ✅ **実装済**（2026-07-11。検知=desire_type クラスタ 3件以上・既テーマ化除外・最大1件/日、裁定=naming_reviews〔cluster_id enum + verdict name/skip + 自由記述 name〕、実行=finalize でその場作成〔全段ゼロコール〕。`theme_pages.create_theme_page` が root_theme 配下に member_refs 付きで立てる——移行専用でなかった最初の住人）
 - 検知カウンタ: 完了ノード・休眠欲求の desire_type／キーワード共起クラスタ（決定論）。**写真の航跡クラスタは見送り確定**（まはー 2026-07-11「今はピンとこない」。pasted_to/時刻はあるがタグも無く材料が薄い）
 - 裁定: 就寝判断に「テーマ候補」を提示 → ペルソナが承認＋**名を与える**（自由記述フィールド）→ `theme_pages.create_theme_page`（新設）で root_theme 配下にページ化＋構成ノードの ref を本文に記録。P3c① で立てた root_theme の「移行専用でない最初の住人」
 
@@ -366,7 +366,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - 実データ確認済み（2026-07-11）: air=vivid 1枚（content 空）/ quon=0。本番の重みは外部ユーザーのデータ側
 - **新規の常設メモ導線（裁定 g＝(i) 採用）**: メモリタブに**「机に開く / 閉じる」ボタン**を追加（vividness 編集 UI の後継。API は open_page / close_page ファサードを叩く薄いエンドポイント）。ユーザーが「これを常に見えるように」と置く導線を UI に残す
 
-**P4-d: head 目次（索引復帰の実験）**
+**P4-d: head 目次（索引復帰の実験）** ✅ **実装済**（2026-07-11。MemopediaIndexSection.render に目次〔カテゴリ+上位2階層タイトル・summary なし・★=重要・[OPEN]=**机**〕、MEMOPEDIA_INDEX_ENABLED で opt-in・既定 OFF、weave の旧索引は除去し一本化。memory_architecture_v2 §7.1 に改訂注記。**検収での発見2つ**: ①**DeskSection と同じ配線漏れの再演**——SYSTEM_PROMPT_SECTION_NAMES / enabled_sections の両点に未登録で、単体テストは通るのに本番の head 合成に一度も乗らない状態だった。配線した上で、**両点の整合を機械検査する恒久テスト `tests/test_head_section_wiring.py` を新設**〔三度目を型で封じた〕 ②[OPEN] が旧 PageState〔thread 単位・事実上死んだ機構〕由来で永遠に点かない実装だった → 机〔desk_items〕基準に修正）
 - `MemopediaIndexSection.render` に**深さ制限の目次**を実装（カテゴリ＋上位N階層タイトル＋件数、開いているページと is_important に印。Metabolism のみ更新は既に `refresh_on_events=∅` で整合）
 - **opt-in 実験**: 既存の per-persona フラグ `MEMOPEDIA_INDEX_ENABLED` を再利用し、まずエアだけ ON で観察（per-persona 恒常フラグは (persona,model) 固定の head 規律を壊さない）。weave 側の索引 `_list_pages` は目次 section へ**一本化**（二重掲示を作らない）
 
@@ -387,7 +387,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 ### 次アクション
 
-P4 設計 v0.2（裁定反映済み）→ 実装（P4-0 → c → a → b → d）→ ①自律行動v2 実機テスト（Atlas と合流して一度だけ）＝ v0.3.0 本線。
+**P4 全片（0/c/a/b/d）実装完了（2026-07-11）** → まはー実機検証（就寝判断に「棚の乱れ」「テーマの芽」が出る・承認→朝の報告・エアで MEMOPEDIA_INDEX_ENABLED ON にして目次観察）→ ①自律行動v2 実機テスト（Atlas と合流して一度だけ）＝ v0.3.0 本線。
 
 ---
 

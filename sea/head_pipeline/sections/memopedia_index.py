@@ -1,4 +1,5 @@
-"""MemopediaIndexSection — Memopedia ページの created / updated / deleted 差分検知。
+"""MemopediaIndexSection — Memopedia ページの created / updated / deleted 差分検知
+と、opt-in head 目次（索引復帰の実験 P4-d）。
 
 旧 ``DynamicStateManager`` の memopedia 差分計算ロジックを Section interface に
 移植。head には何も render しない (= MemoryWeaveSection が中身を担当する)。
@@ -6,7 +7,18 @@
 タイムスタンプベース判定で、b.captured_at 以降に変化したページのみ通知する。
 全件比較ではないので memopedia 規模に依存しない。
 
-詳細: docs/intent/cached_head_architecture.md §5.1 / dynamic_state_sync.md
+P4-d: ``AI.MEMOPEDIA_INDEX_ENABLED`` フラグが ON のペルソナに限り、
+Metabolism のみで更新される**深さ制限の目次スナップショット**を head に render する。
+
+設計の「(persona,model) 固定」head 規律との整合:
+- enabled_sections 登録は固定 (on/off ゲートは per-persona DB フラグで、
+  Section の登録自体を切り替えない)。
+- ON の場合のみ toc_markdown を snapshot に保持し、render がテキストを返す。
+- OFF の場合は toc_markdown=None で render が None を返す。
+- refresh_on_events = frozenset() = Metabolism のみ更新——キャッシュ整合を守る。
+
+詳細: docs/intent/concept_consolidation.md §P4-d
+旧詳細: docs/intent/cached_head_architecture.md §5.1 / dynamic_state_sync.md
 """
 from __future__ import annotations
 
@@ -24,6 +36,10 @@ from sea.head_pipeline.types import (
 
 LOGGER = logging.getLogger(__name__)
 
+# P4-d: 目次に含める最大階層深さ（カテゴリ trunk = 深さ 0、その直下 = 深さ 1 等）。
+# summary は出さない（design: タイトル・件数・印のみ）。
+_TOC_MAX_DEPTH = 2
+
 
 @dataclass(frozen=True)
 class MemopediaPageEntry:
@@ -38,6 +54,95 @@ class MemopediaPageEntry:
 class MemopediaIndexSnapshot:
     captured_at: float                            # epoch seconds (= since の基準)
     pages: tuple[MemopediaPageEntry, ...]         # captured_at 以降に変化したページのみ
+    # P4-d: opt-in 目次。None = flag OFF または capture 失敗。
+    index_enabled: bool = False
+    toc_markdown: Optional[str] = None
+
+
+def _build_toc_markdown(conn) -> Optional[str]:
+    """目次 Markdown を組み立てる（決定論・LLM ゼロ）。
+
+    - カテゴリ＋上位 _TOC_MAX_DEPTH 階層のタイトル＋各 trunk の総ページ数
+    - [OPEN] と ★(is_important) の印
+    - summary は載せない（設計の「summary は載せない」指示を遵守）
+    """
+    try:
+        from sai_memory.memopedia import Memopedia, init_memopedia_tables
+        from sai_memory.memopedia.storage import category_keys, category_label
+
+        init_memopedia_tables(conn)
+        mem = Memopedia(conn)
+        tree = mem.get_tree(thread_id=None)
+
+        # [OPEN] は**机 (desk_items)** を見る。get_tree の is_open は旧 PageState
+        # (thread 単位の開閉、机に置き換えられて事実上未使用) 由来で、
+        # thread_id=None では常に False — 机こそが現行の「開いている」の実体。
+        try:
+            from sai_memory import desk as _desk
+            open_refs = {item.ref for item in _desk.list_open(conn)}
+        except Exception:
+            open_refs = set()
+
+        lines: list[str] = []
+
+        def _count_all(pages: list) -> int:
+            """ページリスト（children 含む再帰）の総数を返す。trunk は除く。"""
+            total = 0
+            for p in pages:
+                if not p.get("id", "").startswith("root_") and not p.get("is_trunk"):
+                    total += 1
+                total += _count_all(p.get("children") or [])
+            return total
+
+        def _render_page(page: dict, depth: int = 0) -> None:
+            if depth > _TOC_MAX_DEPTH:
+                return
+            # trunk（root_ ページ）はスキップ、子は処理する
+            if page.get("is_trunk") or page.get("id", "").startswith("root_"):
+                for child in page.get("children") or []:
+                    _render_page(child, depth)
+                return
+
+            indent = "  " * depth
+            sid = page.get("short_id")
+            id_part = f" [m:{sid}]" if sid is not None else ""
+            title = page.get("title") or "(無題)"
+
+            # [OPEN] マーカー (机に開いているページ)
+            page_ref = f"m:{sid}" if sid is not None else None
+            open_mark = " [OPEN]" if page_ref and page_ref in open_refs else ""
+            # ★ important マーカー
+            star_mark = " ★" if page.get("is_important") else ""
+
+            # 子の総数（このページの下の全ページ数）
+            children = page.get("children") or []
+            child_total = _count_all(children)
+            count_part = f" ({child_total})" if child_total > 0 else ""
+
+            lines.append(
+                f"{indent}- {title}{id_part}{open_mark}{star_mark}{count_part}"
+            )
+
+            # depth < _TOC_MAX_DEPTH なら子も描画
+            for child in children:
+                _render_page(child, depth + 1)
+
+        for cat_key in category_keys("in_tree"):
+            cat_label = category_label(cat_key)
+            pages = tree.get(cat_key) or []
+            if not pages:
+                continue
+            total = _count_all(pages)
+            lines.append(f"\n### {cat_label}（{total} ページ）")
+            for p in pages:
+                _render_page(p, depth=0)
+
+        if not lines:
+            return None
+        return "\n".join(lines)
+    except Exception:
+        LOGGER.warning("memopedia_index: failed to build toc_markdown", exc_info=True)
+        return None
 
 
 class MemopediaIndexSection:
@@ -54,6 +159,9 @@ class MemopediaIndexSection:
         if not sai_mem or not getattr(sai_mem, "conn", None):
             return MemopediaIndexSnapshot(captured_at=time.time(), pages=())
 
+        # P4-d: opt-in フラグを読む
+        index_enabled = self._resolve_memopedia_index_enabled(ctx)
+
         # Metabolism / 初回 capture 時は「これ以降の変化」を追うための基準 timestamp。
         # ここでは since=time.time() を渡すと事実上空 list が返るので、capture では
         # 全ページのインデックスを取らずに「baseline」だけ確立する形にする。
@@ -62,10 +170,30 @@ class MemopediaIndexSection:
         # → 本 Section の capture は **空 list の baseline** だけ返し、
         # diff_to_notifications で old.captured_at 以降の変化を SQL で問い合わせる。
         now = time.time()
-        return MemopediaIndexSnapshot(captured_at=now, pages=())
+
+        # P4-d: flag ON のときのみ目次を構築する
+        toc_markdown: Optional[str] = None
+        if index_enabled:
+            toc_markdown = _build_toc_markdown(sai_mem.conn)
+
+        return MemopediaIndexSnapshot(
+            captured_at=now,
+            pages=(),
+            index_enabled=index_enabled,
+            toc_markdown=toc_markdown,
+        )
 
     def render(self, snapshot: MemopediaIndexSnapshot) -> Optional[RenderedSection]:
-        return None
+        # P4-d: flag OFF / 目次なし → None を返す（既存の「何も render しない」挙動を維持）
+        if not snapshot.index_enabled or not snapshot.toc_markdown:
+            return None
+        text = (
+            "## 記憶の目次（Memopedia Index）\n"
+            "以下は地図帳の目次です。[OPEN] は机に開いているページ、★ は重要ページです。"
+            "summary は省略しています — ページの中身は memory_read で読んでください。\n"
+            + snapshot.toc_markdown
+        )
+        return RenderedSection(text=text)
 
     def diff_to_notifications(
         self,
@@ -149,6 +277,8 @@ class MemopediaIndexSection:
             {
                 "captured_at": snapshot.captured_at,
                 "pages": [asdict(p) for p in snapshot.pages],
+                "index_enabled": snapshot.index_enabled,
+                "toc_markdown": snapshot.toc_markdown,
             },
             ensure_ascii=False,
         )
@@ -161,4 +291,35 @@ class MemopediaIndexSection:
         return MemopediaIndexSnapshot(
             captured_at=float(payload.get("captured_at", 0.0)),
             pages=pages,
+            index_enabled=bool(payload.get("index_enabled", False)),
+            toc_markdown=payload.get("toc_markdown"),
         )
+
+    # ---- 内部ヘルパー ----
+
+    def _resolve_memopedia_index_enabled(self, ctx: LineHeadInput) -> bool:
+        """per-persona DB フラグ ``AI.MEMOPEDIA_INDEX_ENABLED`` を読む。
+
+        P4-d: weave 側が持っていた ``_resolve_memopedia_index_enabled`` と同じ
+        実装——フラグの意味を「weave 内掲示」から「head 目次セクション」へ付け替え。
+        """
+        manager = ctx.manager
+        persona_id = ctx.persona_id
+        if not manager or not persona_id:
+            return False
+        session_factory = getattr(manager, "SessionLocal", None)
+        if not session_factory:
+            return False
+        db = session_factory()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return bool(ai.MEMOPEDIA_INDEX_ENABLED) if ai else False
+        except Exception:
+            LOGGER.warning(
+                "memopedia_index: failed to resolve MEMOPEDIA_INDEX_ENABLED "
+                "persona=%s", persona_id, exc_info=True,
+            )
+            return False
+        finally:
+            db.close()

@@ -1105,6 +1105,126 @@ def _apply_curation_reviews(
 
 
 # ---------------------------------------------------------------------------
+# naming_reviews (P4-b 命名裁定)
+# ---------------------------------------------------------------------------
+
+
+def _apply_naming_reviews(
+    manager: Any,
+    persona_id: str,
+    output: Dict[str, Any],
+    ctx: Dict[str, Any],
+    lines: List[str],
+    warnings: List[str],
+) -> bool:
+    """naming_reviews → verdict=name の候補をテーマページとして即時作成する (P4-b)。
+
+    - name: create_theme_page を即時呼び出しテーマページを作成する（ゼロコール）。
+      name フィールドが欠落 / 空なら warning + skip。
+    - skip: 何もしない（条件が続けば翌日以降に再提示）。
+    """
+    raw = output.get("naming_reviews")
+    if not raw:
+        return False
+    if not isinstance(raw, list):
+        warnings.append(
+            f"naming_reviews rejected: 配列が必要 (got {type(raw).__name__})"
+        )
+        return False
+
+    # ctx に格納された候補リストから有効な cluster_id を収集
+    candidates = ctx.get("naming_candidates") or []
+    valid_clusters: Dict[str, Any] = {}  # cluster_id → candidate dict
+    for c in candidates:
+        cid = c.get("cluster_id")
+        if cid:
+            valid_clusters[cid] = c
+
+    if not valid_clusters:
+        warnings.append(
+            "naming_reviews: 候補が不明のため適用できません (judgment_context に "
+            "naming_candidates がありません)"
+        )
+        return False
+
+    # adapter / conn の取得
+    persona_obj = (getattr(manager, "personas", None) or {}).get(persona_id)
+    adapter = getattr(persona_obj, "sai_memory", None) if persona_obj else None
+    mem_conn = getattr(adapter, "conn", None) if adapter else None
+    if mem_conn is None:
+        warnings.append(
+            "naming_reviews: 記憶アダプタが利用できないためテーマページを作成できません"
+        )
+        return False
+
+    from sai_memory.theme_pages import create_theme_page
+
+    applied = False
+    for i, review in enumerate(raw):
+        if not isinstance(review, dict):
+            warnings.append(f"naming_reviews[{i}] rejected: not a dict")
+            continue
+        cluster_id = str(review.get("cluster_id") or "").strip()
+        verdict = str(review.get("verdict") or "").strip()
+        if cluster_id not in valid_clusters:
+            warnings.append(
+                f"naming_reviews[{i}] rejected: cluster_id={cluster_id!r} は"
+                "今日のテーマ候補にありません"
+            )
+            continue
+        if verdict not in ("name", "skip"):
+            warnings.append(
+                f"naming_reviews[{i}] rejected: verdict={verdict!r} は"
+                " name または skip が必要です"
+            )
+            continue
+        if verdict == "skip":
+            LOGGER.debug(
+                "[judgment_finalize] naming_reviews: cluster_id=%r skipped (persona=%s)",
+                cluster_id, persona_id,
+            )
+            continue
+
+        # verdict=name → テーマページを即時作成
+        name = str(review.get("name") or "").strip()
+        if not name:
+            warnings.append(
+                f"naming_reviews[{i}] rejected: verdict=name のとき name フィールドが必要です"
+                f" (cluster_id={cluster_id!r})"
+            )
+            continue
+
+        cand = valid_clusters[cluster_id]
+        member_refs = list(cand.get("member_refs") or [])
+        try:
+            page_id = create_theme_page(
+                mem_conn,
+                title=name,
+                member_refs=member_refs,
+                origin="naming",
+            )
+            applied = True
+            lines.append(
+                f"テーマ「{name}」が棚に立ちました（{len(member_refs)} 件まとめて, page_id={page_id[:8]}）"
+            )
+            LOGGER.info(
+                "[judgment_finalize] naming_reviews: theme page created "
+                "cluster_id=%r name=%r page_id=%s (persona=%s)",
+                cluster_id, name, page_id, persona_id,
+            )
+        except Exception as exc:
+            LOGGER.exception(
+                "[judgment_finalize] naming_reviews: create_theme_page raised "
+                "(cluster_id=%r, persona=%s)", cluster_id, persona_id,
+            )
+            warnings.append(
+                f"naming_reviews[{i}] テーマページの作成に失敗: {exc}"
+            )
+
+    return applied
+
+
+# ---------------------------------------------------------------------------
 # day_close
 # ---------------------------------------------------------------------------
 
@@ -1216,6 +1336,11 @@ def _finalize_day_close(
 
     # --- curation_reviews → 承認分を編纂プランとして永続化 (P4-a) ----------
     applied |= _apply_curation_reviews(
+        manager, persona_id, output, ctx, lines, warnings,
+    )
+
+    # --- naming_reviews → verdict=name の候補をテーマページとして即時作成 (P4-b) --
+    applied |= _apply_naming_reviews(
         manager, persona_id, output, ctx, lines, warnings,
     )
 

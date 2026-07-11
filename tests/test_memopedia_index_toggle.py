@@ -1,13 +1,18 @@
-"""MEMOPEDIA_INDEX_ENABLED 後方互換トグルの回帰テスト。
+"""MEMOPEDIA_INDEX_ENABLED トグルの回帰テスト。
 
 記憶アーキv2 §7.1 (2026-07-04) で Memopedia 索引の head 常時掲示は廃止されたが、
-per-persona トグル ``MEMOPEDIA_INDEX_ENABLED`` (database/models.py) で旧方式を
-復活できるようにした (後方互換)。
+per-persona トグル ``MEMOPEDIA_INDEX_ENABLED`` (database/models.py) で
+MemopediaIndexSection (P4-d) が目次を head に render できる。
 
-このテストは2つの関所を検証する:
-1. ``get_memory_weave_context(include_memopedia=...)`` — capture が呼ぶ実処理側。
-   ON/OFF で memopedia entry の有無が切り替わることを直接確認する。
-2. ``MemoryWeaveSection._resolve_memopedia_index_enabled`` — DB 列の解決ロジック。
+P4-d (2026-07-11) でフラグの解決先を MemoryWeaveSection → MemopediaIndexSection
+に一本化した。MemoryWeaveSection は include_memopedia=False 固定。
+
+このテストは3つの関所を検証する:
+1. ``get_memory_weave_context(include_memopedia=...)`` — 後方互換 API の直接呼び出し。
+   ON/OFF で memopedia entry の有無が切り替わることを確認する。
+2. ``MemoryWeaveSection.capture`` — include_memopedia=False 固定 (P4-d)。
+   weave snapshot に memopedia entry が含まれないことを確認する。
+3. ``MemopediaIndexSection._resolve_memopedia_index_enabled`` — DB 列の解決ロジック。
    AI レコードの値をそのまま bool として読み出せることを確認する。
 
 ``_compose_messages`` (sea/head_pipeline/integration.py) は snapshot.entries を
@@ -20,7 +25,6 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
 from sai_memory.memopedia import Memopedia, init_memopedia_tables
@@ -81,11 +85,25 @@ class MemopediaIndexToggleTest(unittest.TestCase):
 
 
 class ResolveMemopediaIndexEnabledTest(unittest.TestCase):
-    """MemoryWeaveSection._resolve_memopedia_index_enabled の DB 列解決を検証する。"""
+    """MemopediaIndexSection._resolve_memopedia_index_enabled の DB 列解決を検証する。
+
+    P4-d: フラグ解決ロジックは MemoryWeaveSection から MemopediaIndexSection に移った。
+    """
 
     def _make_section(self):
-        from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
-        return MemoryWeaveSection()
+        from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
+        return MemopediaIndexSection()
+
+    def _make_ctx(self, manager, persona_id):
+        """LineHeadInput の最小 duck-type mock を返す。"""
+        class FakeCtx:
+            pass
+
+        ctx = FakeCtx()
+        ctx.manager = manager
+        ctx.persona_id = persona_id
+        ctx.persona = None
+        return ctx
 
     def test_resolves_true_when_column_set(self):
         section = self._make_section()
@@ -111,9 +129,8 @@ class ResolveMemopediaIndexEnabledTest(unittest.TestCase):
             def SessionLocal(self):
                 return FakeDB()
 
-        self.assertTrue(
-            section._resolve_memopedia_index_enabled(FakeManager(), "test_persona")
-        )
+        ctx = self._make_ctx(FakeManager(), "test_persona")
+        self.assertTrue(section._resolve_memopedia_index_enabled(ctx))
 
     def test_resolves_false_by_default(self):
         section = self._make_section()
@@ -139,9 +156,8 @@ class ResolveMemopediaIndexEnabledTest(unittest.TestCase):
             def SessionLocal(self):
                 return FakeDB()
 
-        self.assertFalse(
-            section._resolve_memopedia_index_enabled(FakeManager(), "test_persona")
-        )
+        ctx = self._make_ctx(FakeManager(), "test_persona")
+        self.assertFalse(section._resolve_memopedia_index_enabled(ctx))
 
     def test_resolves_false_when_persona_not_found(self):
         section = self._make_section()
@@ -164,9 +180,8 @@ class ResolveMemopediaIndexEnabledTest(unittest.TestCase):
             def SessionLocal(self):
                 return FakeDB()
 
-        self.assertFalse(
-            section._resolve_memopedia_index_enabled(FakeManager(), "test_persona")
-        )
+        ctx = self._make_ctx(FakeManager(), "test_persona")
+        self.assertFalse(section._resolve_memopedia_index_enabled(ctx))
 
 
 if __name__ == "__main__":

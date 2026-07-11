@@ -123,18 +123,21 @@ class Memopedia:
         include_keywords: bool = False,
         max_depth: Optional[int] = None,
         show_markers: bool = True,
+        include_summary: bool = True,
     ) -> str:
         """
         Get the page tree as a Markdown outline.
 
         This is the unified method for formatting Memopedia content for LLM contexts.
-        
+
         Args:
             thread_id: Optional thread ID to include open/close states
             include_keywords: If True, include keywords in output (default: False for lighter context)
             max_depth: Maximum tree depth to include (None = unlimited, 0 = root only, 1 = root + children, etc.)
             show_markers: If True, show [OPEN]/[-] markers (default: True for chat, False for analysis scripts)
-        
+            include_summary: If False, omit page summaries (default: True). P4-d head 目次は
+                summary を省いて title + markers + count のみを出す。
+
         Returns:
             Formatted Markdown string of the page tree
         """
@@ -145,16 +148,16 @@ class Memopedia:
             # Check depth limit
             if max_depth is not None and current_depth > max_depth:
                 return
-            
+
             # Skip root pages
             if page.get("id", "").startswith("root_"):
                 # Still process children of root pages
                 for child in page.get("children", []):
                     _render_page(child, depth, current_depth)
                 return
-            
+
             indent = "  " * depth
-            
+
             # Build line content
             sid = page.get("short_id")
             id_suffix = f" [id: m:{sid}]" if sid else ""
@@ -163,19 +166,25 @@ class Memopedia:
                 title_part = f"{marker} **{page['title']}**{id_suffix}"
             else:
                 title_part = f"{page['title']}{id_suffix}"
-            
-            summary = page.get("summary", "")
-            summary_part = f": {summary}" if summary else ""
-            
+
+            # important flag (★)
+            if page.get("is_important"):
+                title_part += " ★"
+
+            summary_part = ""
+            if include_summary:
+                summary = page.get("summary", "")
+                summary_part = f": {summary}" if summary else ""
+
             # Add keywords if enabled
             if include_keywords:
                 keywords = page.get("keywords", [])
                 if keywords:
                     kw_str = f" [キーワード: {', '.join(keywords)}]"
                     summary_part += kw_str
-            
+
             lines.append(f"{indent}- {title_part}{summary_part}")
-            
+
             # Process children (if within depth limit)
             children = page.get("children", [])
             if children and (max_depth is None or current_depth + 1 <= max_depth):
