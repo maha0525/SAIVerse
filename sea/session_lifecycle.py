@@ -942,8 +942,12 @@ class SessionLifecycle:
                     history_manager = getattr(persona, "history_manager", None)
 
                     for occupant_id in building_occupants:
-                        # Skip self and users
-                        if occupant_id == persona_id_str or occupant_id.startswith("user_"):
+                        # 自分自身のみスキップ。ユーザーは意図的に含める (まはー裁定
+                        # 2026-07-11: 対ペルソナと同様にユーザーのページも持つ)。
+                        # 旧ガード `startswith("user_")` はユーザーの occupant id が
+                        # 素の数値 (例: "1") のため一度もマッチしていなかった —
+                        # 事故的に正しく動いていた挙動を正式仕様化した。
+                        if occupant_id == persona_id_str:
                             continue
 
                         # Get persona name from id_to_name_map

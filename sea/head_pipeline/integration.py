@@ -215,7 +215,12 @@ def _inject_persona_recall_on_enter(
             continue
         occupant_id = label.metadata.get("occupant_id")
         occupant_kind = label.metadata.get("occupant_kind")
-        if not occupant_id or occupant_kind != "persona":
+        # ユーザーも対ペルソナと同様に想起する (まはー裁定 2026-07-11)。
+        # 従来はユーザーページの肥大化に打つ手が無く persona 限定だったが、
+        # 編纂の分割 (P4-a) が肥大を受けられるようになったため前提が変わった。
+        # 過去会話の検索 (audience) も個人ページの解決 (metadata.persona_id) も
+        # ユーザー ID でそのまま機能する。
+        if not occupant_id or occupant_kind not in ("persona", "user"):
             continue
 
         try:
