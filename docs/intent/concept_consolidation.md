@@ -325,8 +325,8 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 ### 実装片と順序（提案）
 
-**P4-0: カテゴリレジストリ**（[memopedia_category_hardcoding](../issues/memopedia_category_hardcoding.md) の prep-refactor）
-issue の発火条件「カテゴリ機構を触る前」が来た——庭仕事は「どのカテゴリが代謝対象か」（people/terms/plans/events は対象、theme/core/chronicle は対象外）をレジストリの役割フラグで引くべきで、ハードコード列挙をこれ以上増やせない。storage.py に `CATEGORY_DEFS`（名前・ラベル・in_tree / extractable / writable / **metabolizable**）を一元化し、既存列挙を導出に置換＋build_tree にレジストリ外カテゴリの WARN。terms/events 漏れの実バグもここで治る
+**P4-0: カテゴリレジストリ** ✅ **実装済**（2026-07-11、コミット bf983a0。issue は [archive へ](../issues/archive/memopedia_category_hardcoding.md)）
+`CATEGORY_DEFS`（storage.py、役割: in_tree / hide_when_empty / extractable / writable / metabolizable）一元化・全列挙の役割導出化・build_tree の WARN・フロント動的化（ツリー API の categories メタ）。terms/events 漏れ修正に加え**プロンプト文字列に第4・第5のドリフト**（extraction に events 無し / system 抽出に terms 無し）を発見・修正。ラベル「予定/計画」揺れは「計画」に統一（既存 DB trunk は既定名の場合のみ冪等リネーム）。pytest 2025 passed・tsc clean。**実装補足**: worktree 隔離の孫エージェント実装 → レート制限死 → メイン直接検収（残骸検収の運用どおり）で回収
 
 **P4-a: 編纂の三層配線**（本丸。**命名確定 2026-07-11**: 旧称「庭仕事」は Atlas の命名体系とズレるため廃語。「編纂」は Atlas 命名時から「地図帳を作る動詞」として確定済みで、分割・統合・命名こそその本体——Metabolism の Chronicle 生成・entity 抽出は「自動編纂」と呼び分ける。実装名は curation）
 1. **検知**（決定論・ゼロコール、新設 `saiverse/curation.py`）: 肥大（文字数閾値。memopedia_health の 2000/3000 と maintain の 5000 に散在する閾値もレジストリへ）／過小（短小＋last_referenced 古。**統合先は実親に限定**〔parent_id を読むだけ＝決定論〕。親が trunk 直下の過小ページには決定論の統合先が無いため、類似検知が相手を見つけた時だけ類似枠で候補化し、見つからなければ乱れに数えない——「どこかいい所へ」を実行 LLM に選ばせると、ペルソナが行き先を知らずに構造変更を承認することになり自己著者性が壊れる〔まはー指摘 2026-07-11〕）／類似（タイトル・キーワード共起。**LLM 発見は廃止**——発見まで LLM の現行 merge-similar と違い、決定論候補＋判断材料だけ組む。統合の向きは「古い/大きい方が残る」の決定論規則）。提示は最大3件（ノイズ制御）。**新しい親を発明して束ねる操作（旧 maintain の group-shallow）は編纂の裁定枠では扱わない**——決定論で行き先を作れないケースの塊であり、後継は P4-b 命名（クラスタ検知 → ペルソナが名を与えて束ねる）

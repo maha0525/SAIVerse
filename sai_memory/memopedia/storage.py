@@ -448,6 +448,12 @@ def _seed_root_pages(conn: sqlite3.Connection) -> None:
                 """,
                 (root["id"], root["title"], root["summary"], root["content"], root["category"], now, now),
             )
+    # P4-0 ラベル統一 (予定→計画) の既存 DB 追従: trunk タイトルはデータなので
+    # INITIAL_ROOTS の変更だけでは新規 DB にしか効かない。既定名のまま
+    # (=ユーザーがリネームしていない) 場合のみ冪等に揃える。
+    conn.execute(
+        "UPDATE memopedia_pages SET title = '計画' WHERE id = 'root_plans' AND title = '予定'"
+    )
     conn.commit()
 
 

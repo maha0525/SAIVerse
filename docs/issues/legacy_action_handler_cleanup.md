@@ -1,117 +1,226 @@
-# Issue: ActionHandler / 旧会話フロー周辺の旧仕様コード一括整理
+# Issue: ActionHandler / 旧会話フローの最終残骸を撤去する
 
-**ステータス**: 🔲 未着手
-**優先度**: medium
+**ステータス**: 🔲 再検証済み・最終撤去は未着手 (2026-07-10)
+**優先度**: low（挙動影響なし・完全 dead code の整理）
 **作成日**: 2026-05-09
-**関連**: `saiverse/action_handler.py`, `persona/mixins/generation.py`, `persona/mixins/movement.py`, `manager/background.py`, [`building_auto_interval_setting_removal.md`](building_auto_interval_setting_removal.md)
+**再検証日**: 2026-07-10
+**関連**: `saiverse/action_handler.py`, `persona/core.py`, `persona/bootstrap.py`,
+`manager/persona.py`, `manager/blueprints.py`,
+[`building_auto_interval_setting_removal.md`](building_auto_interval_setting_removal.md)
 
-## 背景
+## 結論（2026-07-10 再検証）
 
-ユーザー会話フローが SEA Runtime に移行した結果、`::act ... ::end` ブロックを解釈する `ActionHandler` ベースの旧フロー周辺が大量の dead/no-op コードとして残存している。
+起票時に想定していた大部分は、2026-06-06 の commit `f915bf2`
+（`refactor: pre-SEA 旧 LLM パスを撤去 (-1260 行)`）で既に撤去済み。
 
-memory の `Architecture Notes` には長らく「`action_handler.py` is legacy — SEA runtime replaces conversation flow」と書かれていたが、実調査の結果:
+当時「唯一生きているため要設計」としていた inter-city ThinkingRequest も、現在は
+`manager/background.py` から `persona.llm_client.generate(messages, tools=[])` を直接呼ぶ。
+`ActionHandler`、旧 `_generate()`、callback 群を通らない。
 
-- **完全 dead code が 4 メソッド以上ある** (どこからも呼ばれていない)
-- **実質 dead な経路がさらに広い** (経路はあるが Building 設定が空のため即 return)
-- **唯一生きているのは inter-city ThinkingRequest 経路だけ** (`manager/background.py:59` の `persona._generate(...)`)
-- DB スキーマからすでに削除済みのカラムに対応する Python 属性が残骸として残っている (`run_auto_llm` / `run_entry_llm`)
+したがって、残作業に inter-city 再設計や Building schema migration は不要。
+**現在残っているのは完全 dead code だけ**であり、最終撤去は独立した低リスク cleanup として
+実施できる。
 
-inter-city 経路は SEA Runtime ベースに作り直すか、当面残すかの設計判断が要るので、整理は段階的に進めるのが安全。
+## 既に完了している範囲（commit `f915bf2`）
 
-## 完全 dead code (即削除候補)
+### 旧 Persona 生成・会話入口
 
-呼び出し元なしを確認済み:
+以下は現コードに存在しない:
 
-- `PersonaCore.handle_user_input` (`persona/mixins/generation.py:694`)
-- `PersonaCore.handle_user_input_stream` (`persona/mixins/generation.py:717`)
-- `PersonaCore._generate_stream` (`persona/mixins/generation.py:472`) — `handle_user_input_stream` からのみ
-- `PersonaCore.summon_to_user_room` (`persona/mixins/movement.py:186`)
+- `PersonaCore._generate`
+- `PersonaCore._build_messages`
+- `PersonaCore._generate_stream`
+- `PersonaCore.handle_user_input`
+- `PersonaCore.handle_user_input_stream`
+- `_process_generation_result`
 
-> 注: `manager.handle_user_input` / `manager.handle_user_input_stream` は **Manager 側の同名別実装** (`manager/runtime.py:370, 453`) で、`run_sea_user` を呼んで SEA Runtime に流している。PersonaCore の同名メソッドには到達しない。
+Manager側の `handle_user_input` / `handle_user_input_stream` は同名の別実装で、現在も SEA Runtime
+入口として現役。削除対象ではない。
 
-## 実質 dead (経路はあるが no-op)
+### 旧移動・自律会話経路
 
-ガード条件で空返却される:
+以下も撤去済み:
 
-- `run_auto_conversation` (`movement.py:135`) — `building.entry_prompt` / `building.auto_prompt` が空なら全分岐スキップ
-  - 呼び出し元: `manager/runtime.py:327` `summon_persona` 経由 (UI から呼ばれる API ルート `api/routes/people/summon.py:104` あり、ただし召喚先 building の prompt が空なので無動作)
-- `run_scheduled_prompt` (`movement.py:169`) — `auto_prompt` が空または `auto_interval_sec <= 0` なら return []
-  - 呼び出し元: `_db_polling_tick` (`manager/background.py:22`) → `run_scheduled_prompts` (`manager/runtime.py:663`)
+- `run_auto_conversation`
+- `run_scheduled_prompt` / `run_scheduled_prompts`
+- `summon_to_user_room`
+- `_handle_movement`
+- `_handle_exploration`
+- `_handle_creation`
 
-裏付け:
-- `Building.AUTO_PROMPT` / `Building.ENTRY_PROMPT` は DB スキーマに残るが `default=""`
-- `builtin_data/` 配下に `auto_prompt` / `entry_prompt` を seed する記述なし
-- `frontend/src/components/BuildingSettingsModal.tsx` でこれらフィールドの編集 UI なし
-- `RUN_AUTO_LLM` / `RUN_ENTRY_LLM` カラムは既に DB スキーマから削除済み (`saiverse/buildings.py:14-15` の Python デフォルト True で動的に True 扱いされているだけ)
+`persona/mixins/movement.py` は、旧経路撤去済みであることを明記した空の
+`PersonaMovementMixin` だけになっている。
 
-連鎖して以下も実質 dead:
+### ThinkingRequest の ActionHandler 依存
 
-- `_generate` (`generation.py:347`) — 上記から呼ばれる + 後述の inter-city 経路のみ
-- `_process_generation_result` (`generation.py:263`)
-- `_handle_movement` / `_handle_exploration` / `_handle_creation` (`movement.py:26, 91, 106`)
-- `ActionHandler` クラス全体 (`saiverse/action_handler.py`)
-- callback 群: `move_callback`, `dispatch_callback`, `explore_callback`, `create_persona_callback`
-  - 初期化箇所: `manager/persona.py:199-202, 442-445`, `manager/blueprints.py:275-278`
-  - PersonaCore 受け口: `persona/core.py:63-66, 157-160`
+起票時は `manager/background.py` の `persona._generate(...)` が唯一の生存経路だった。
+現在は次の直呼びへ置換済み:
 
-## 唯一生きている経路
+```python
+response_text = persona.llm_client.generate(messages, tools=[])
+```
 
-`manager/background.py:59` の `persona._generate(...)` — リモート都市からの ThinkingRequest 処理 (`/persona-proxy/{id}/think` 経由で DB に積まれた要求を `_db_polling_tick` で消化)。
+この経路自体を将来 SEA Runtime 化するかは inter-city の別設計課題だが、
+`ActionHandler` を残す理由にはならない。
 
-ここだけが ActionHandler を実際に通す。マルチ City 運用していなければ発火しない。
+## ActionHandler cleanup として確認済みの dead code
 
-## 解決案候補
+### 1. `ActionHandler` 本体
 
-### 案 A: 完全 dead code のみ削除 (低リスク・最小着手)
+`saiverse/action_handler.py` の `ActionHandler` クラス。
 
-呼び出し元なしを確認済みの 4 メソッドだけ削除:
-- `PersonaCore.handle_user_input` / `handle_user_input_stream` / `_generate_stream` / `summon_to_user_room`
+- `::act ... ::end` JSON ブロックの抽出
+- action priority 順の並べ替え
+- `think` / `emotion_shift` / `move` の取り出し
 
-これだけでも generation.py / movement.py から数百行落ちる。inter-city 経路と Building.entry_prompt 経路は触らないので影響なし。
+リポジトリ内に import・インスタンス化・メソッド呼び出しは無い。ファイルごと削除可能。
 
-### 案 B: 案 A + 実質 dead の整理
+### 2. action priority 設定一式
 
-ガード条件で no-op になっている経路も削除:
-- `run_auto_conversation` / `run_scheduled_prompt` 廃止
-- `manager/runtime.py:327` の `persona.run_auto_conversation(initial=True)` 削除 (summon_persona 内)
-- `manager/background.py:22` の `self.run_scheduled_prompts()` 呼び出し削除
-- `manager/runtime.py:663-672` の `run_scheduled_prompts` 削除
-- `saiverse/saiverse_manager.py:1272-1280` の同名 wrapper 削除
+- `builtin_data/action_priority.json`
+- `persona/bootstrap.py::load_action_priority`
+- `PersonaCore.__init__(action_priority_path=...)`
+- `PersonaCore.self.action_priority`
+- PersonaCore 構築3箇所から渡す `action_priority_path`
 
-DB カラム / Python 属性の残骸も整理:
-- migration で `Building.AUTO_PROMPT` / `Building.ENTRY_PROMPT` / `Building.AUTO_INTERVAL_SEC` 削除 ([`building_auto_interval_setting_removal.md`](building_auto_interval_setting_removal.md) と統合)
-- `saiverse/buildings.py` から `run_auto_llm` / `run_entry_llm` / `auto_interval_sec` / `entry_prompt` / `auto_prompt` パラメータ削除
-- `tests/test_buildings.py` / `tests/test_persona_mixins.py` の該当部分整理
+`self.action_priority` は代入後にどこからも読まれない。`ActionHandler` 削除と同時に一式削除可能。
 
-inter-city ThinkingRequest 経路は当面残す (案 C で別途対応)。
+### 3. PersonaCore の未参照 callback 4本
 
-### 案 C: 案 B + ActionHandler 自体の廃止 (要設計)
+Constructor 引数と同名属性:
 
-`manager/background.py:59` の `persona._generate(...)` を SEA Runtime ベースに置き換え:
-- リモート都市から来た ThinkingRequest を SEA Runtime の入口に流す形に再設計
-- 完了後 `_generate` / `_process_generation_result` / `_handle_*` / `ActionHandler` / callback 群を全廃
-- `persona/core.py` の callback 引数も削除
+- `move_callback`
+- `dispatch_callback`
+- `explore_callback`
+- `create_persona_callback`
 
-inter-city 関連の整備全体 (memory にあるとおり「だいぶ整備していない」状態) と一緒にやるのが筋。`v0.4` 以降向け。
+現在の参照は次の2種類だけ:
 
-### 推奨進行
+1. `manager/persona.py` / `manager/blueprints.py` から PersonaCore 構築時に渡す
+2. `persona/core.py` で `self.*` に保存する
 
-1. **まず案 A** — リスクなしで明らかな dead code を削る
-2. **次に案 B** — `building_auto_interval_setting_removal` と統合実施 (Building 設定 UI / migration / Python オブジェクト整合を一括で)
-3. **案 C は別 issue 化** — inter-city 整備全体の中で取り扱う
+保存後に読むコードは0件。引数・属性・構築側の注入を同時に削除できる。
 
-## 関連リソース
+callback 4本の削除と、接続先になっていた Manager メソッド本体の削除は分けて判断する。
 
-- `persona/mixins/generation.py` (action_handler を呼ぶ層)
-- `persona/mixins/movement.py` (`run_auto_conversation` / `run_scheduled_prompt` / `_handle_*`)
-- `saiverse/action_handler.py` (本体)
-- `manager/background.py` (`_db_polling_tick`, `_process_thinking_requests`)
-- `manager/runtime.py` (`summon_persona`, `run_scheduled_prompts`, Manager 側 `handle_user_input_stream`)
-- `saiverse/buildings.py` (Python 属性の残骸)
-- `database/models.py` (Building テーブル: AUTO_PROMPT/ENTRY_PROMPT/AUTO_INTERVAL_SEC は残骸)
-- `frontend/src/components/BuildingSettingsModal.tsx` (これらフィールドの UI なし)
-- 関連 issue: [`building_auto_interval_setting_removal.md`](building_auto_interval_setting_removal.md)
+- `_move_persona` と `_create_persona` は現行の別経路から呼ばれているため残す
+- `dispatch_persona` は直接の呼び出し元を発見できなかったが、`VisitingAI` の状態監視など
+  inter-city dispatch の周辺機能は残っている。本 issue の callback 撤去だけを根拠に削除しない
+- `_explore_city` / `RuntimeService.explore_city` は、下記のとおり追加の dead code 候補
+
+### 4. 追加発見: 旧 city exploration 経路（要最終確認）
+
+静的検索では、探索経路の参照は次の3種類だけだった。
+
+1. PersonaCore の未参照 `explore_callback` への注入
+2. `SAIVerseManager._explore_city` から `RuntimeService.explore_city` への wrapper
+3. `AdminService.__init__` の `self._explore_city = runtime.explore_city` alias
+
+`_explore_city(...)` / `explore_city(...)` の実呼び出しは見つからないため、旧 ActionHandler の
+`explore_city` action とともに入口を失った残骸である可能性が高い。ただし Manager 公開面は
+外部・動的参照の余地があるため、最終撤去時に API / addon / expansion の消費者が無いことを
+もう一度確認してから、次を同一 cleanup に含めるか決める。
+
+- `saiverse/saiverse_manager.py::_explore_city`
+- `manager/runtime.py::RuntimeService.explore_city`
+- `manager/admin.py` の `_explore_city` alias
+
+## PersonaCore 構築箇所（全3箇所）
+
+リポジトリ本体とローカル `expansion_data` を検索し、直接構築は次の3箇所だけと確認:
+
+- `manager/persona.py` — 起動時ロード
+- `manager/persona.py` — 新規ペルソナ作成
+- `manager/blueprints.py` — Blueprint 経由作成
+
+この3箇所を Constructor signature と同じ commit で更新すれば、呼び出し側の取りこぼしはない。
+
+## 最終撤去の変更ファイル
+
+### 削除
+
+- `saiverse/action_handler.py`
+- `builtin_data/action_priority.json`
+
+### 編集
+
+- `persona/bootstrap.py`
+  - `load_action_priority` を削除
+  - それ専用になった `Path` / `Dict` import を削除
+- `persona/core.py`
+  - `load_action_priority` import、`action_priority_path` 引数、代入を削除
+  - callback 4引数と属性代入を削除
+  - 不要になった `Tuple` import（および実使用の無い import）を整理
+- `manager/persona.py`
+  - PersonaCore 構築2箇所から action priority と callback 5引数を削除
+- `manager/blueprints.py`
+  - PersonaCore 構築1箇所から同じ引数を削除
+
+上記「旧 city exploration 経路」は要最終確認の候補であり、この確定変更一覧にはまだ含めない。
+
+## 明示的にスコープ外
+
+### Building の旧自律設定 / ConversationManager
+
+以下は ActionHandler とは独立して残っている:
+
+- `Building.ENTRY_PROMPT` / `AUTO_PROMPT` / `AUTO_INTERVAL_SEC`
+- `saiverse/buildings.py` の対応属性
+- Building設定UI / WorldEditor
+- no-op `ConversationManager` の生成・start/stop wrapper
+- `global_auto_enabled` の旧UI/状態
+
+これらは [`building_auto_interval_setting_removal.md`](building_auto_interval_setting_removal.md)
+と ConversationManager cleanup で扱う。本 issue に混ぜない。
+
+### inter-city ThinkingRequest の SEA Runtime 化
+
+現在の LLM 直呼びは ActionHandler 非依存。SEA Runtime 化の是非は multi-city 復活時の別課題。
+本 cleanup のブロッカーではない。
+
+`dispatch_persona` 自体も静的な直接呼び出し元は見つからないが、dispatch 状態監視・訪問者処理を
+含む inter-city 機能全体の生死を確認してから扱う。本 issue では callback 注入だけを外す。
+
+### Emotion / Blueprint 概念そのもの
+
+ActionHandler は `emotion_shift` / `create_persona` action を扱っていたが、クラスが未使用なので
+撤去しても現行 Emotion / Blueprint の挙動は変わらない。両概念自体の整理は landscape §9 の
+別 cleanup。
+
+## リスク評価
+
+**低**。実行経路の変更ではなく、未参照の定義・引数・代入だけを削る。
+
+注意点は PersonaCore Constructor の引数を5本削るため、3つの構築箇所を同時に直すこと。
+特に、現役の `_move_persona` / `_create_persona` 本体まで誤って消さないこと。
+旧 city exploration 経路も同時に消す場合は、外部・動的消費者の確認を追加する。
+
+## 検証
+
+最低限:
+
+1. `rg "ActionHandler|action_handler|action_priority|move_callback|dispatch_callback|explore_callback|create_persona_callback"`
+   で意図しない残存がない（歴史docを除く）
+2. exploration も撤去する場合は `rg "_explore_city|explore_city"` と API / addon / expansion の
+   公開・動的参照を再確認
+3. `ruff check` を変更Pythonファイルに実行
+4. `python -m pytest tests/test_persona_mixins.py`
+5. PersonaCore 構築を通る既存の persona/blueprint 系テストを実行
+
+安全側の追加確認:
+
+- テスト環境起動 → 既存Personaロード
+- 新規Persona作成
+- Blueprint経由作成（Blueprintを残している間）
+- ThinkingRequest の既存テストがあれば実行（ActionHandler非依存の確認）
 
 ## ログ
 
-- 2026-05-09: issue 起票。memory の「action_handler is legacy」記述が実態と乖離していた件をきっかけに、コールグラフを遡って旧仕様コード群の全体像を整理。
+- 2026-05-09: issue 起票。旧 pre-SEA 経路を段階削除する計画を記録。
+- 2026-06-06: `f915bf2` で旧生成・移動・自律会話経路1260行を撤去。
+  ThinkingRequest は LLM 直呼びへ変更。issue 本文は未追従のまま残った。
+- 2026-07-10: 現コードを再検証。`ActionHandler` import/instance 0件、callback は注入と代入のみ、
+  action priority は未参照属性のみと確認。最終撤去を独立low-risk cleanupとして再スコープ。
+  あわせて `_explore_city` / `RuntimeService.explore_city` に静的な実呼び出しが無いことを確認し、
+  外部・動的参照の最終確認が必要な追加候補として記録。`dispatch_persona` は inter-city 全体の
+  監査なしには削除しない。

@@ -30,7 +30,7 @@ def memopedia_save_page(
     - title: page title
     - summary: 1-2 sentence summary
     - content: full page content (Markdown)
-    - category: one of 'people', 'terms', 'plans', 'events'
+    - category: CATEGORY_DEFS の writable キーのいずれか
     - keywords: list of keywords for search
     """
     persona_id = get_active_persona_id()

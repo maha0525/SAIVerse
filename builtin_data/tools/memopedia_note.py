@@ -35,7 +35,7 @@ def memopedia_note(
     - content: the fact or note to record (one concise statement)
     - title: page (entity) title — required for new pages, optional when page_id given
     - summary: 1-2 sentence page summary (optional, updates page-level summary)
-    - category: one of 'people', 'terms', 'plans', 'events' (default: terms)
+    - category: CATEGORY_DEFS の writable キーのいずれか (default: terms)
     - keywords: list of keywords for search (optional)
     - page_id: existing page ID or saiverse:// URI to write to (optional)
 

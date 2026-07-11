@@ -88,3 +88,9 @@ grep -rn "\"people\".*\"terms\"\|'people'.*'terms'\|people.*terms.*plans" --incl
 grep -rn "people.*events.*plans" --include=*.py scripts/
 grep -rn "tree.people\|tree\.terms" frontend/src/
 ```
+
+---
+
+## 解決（2026-07-11、P4-0 カテゴリレジストリ）
+
+`CATEGORY_DEFS`（storage.py、役割フラグ: in_tree / hide_when_empty / extractable / writable / metabolizable）に一元化し、台帳 A〜D の全列挙を役割導出に置換。build_tree にレジストリ外カテゴリの WARN。フロントはツリー API の categories メタで動的化。**実装中に第4・第5のドリフトも発見・修正**: extraction プロンプトに events が無い／system 抽出プロンプトに terms が無い（プロンプト文字列の列挙は台帳の想定以上に腐っていた）。「予定」「計画」のラベル表記揺れも「計画」に統一（既存 DB の root_plans trunk タイトルは既定名の場合のみ冪等リネーム）。再監査 grep の残存はレジストリ本体・例示・無関係の "people" ルータタグ, いずれも良性。コミット bf983a0 ほか。
