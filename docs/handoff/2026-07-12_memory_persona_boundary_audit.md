@@ -35,6 +35,7 @@
 - 影響: SCENE（人格の口調・関係性アンカー）や範囲写真へ別threadの会話が「過去の実際のやり取り」として刻まれる。人格境界と土地参照の正確性を同時に破る。
 - 修正方針: アンカー（範囲は両端）の thread_id を取得し、同一threadでなければ拒否する。前後・範囲SQLへ `thread_id = ?` を必須条件として加える。
 - 必要な回帰: 交互に挿入された2threadで、window/rangeの双方がアンカーthreadだけを返す。異なるthreadの両端指定は `None` または明示エラーになる。
+- **修正済み (2026-07-12)**: 窓・範囲SQLに `thread_id = ?` 必須化。異thread両端は `None` (呼び出し元 memory_atlas が「区間は現在読み出せません」に落とす既存経路)。回帰は test_core_memory_scene.py::ConversationThreadBoundaryTest。
 
 ### [P1] 「不変の土地」である messages をUI/APIから直接改変・削除でき、派生記憶との参照整合も更新されない
 
@@ -55,6 +56,7 @@
 - 影響: typoや古いIDへのAPI呼び出しが「404」ではなく、人格本体の無い孤児memory.dbを生成する。persona_idの形式・解決先が検証されないため、ファイル境界の責務もhelperごとに不統一になる。
 - 修正方針: 通常API用helperは `manager.personas` またはmain DBのAI実在を必須にし、不在なら404。オフライン保守で未ロードpersonaのDBを開く用途は、検証済みcanonical pathを使う別helperへ分離する。persona IDを単一のvalidatorで検証し、解決後パスがpersonas root配下であることを確認する。
 - 必要な回帰: 不明IDでディレクトリが作成されず404になる。ロード済み・DBに実在するオフラインpersonaの扱いを仕様どおり固定する。`..`、区切り文字、絶対パス風IDを拒否する。
+- **修正済み (2026-07-12、コミット c1bb7c4)**: validate_persona_id 単一 validator + get_adapter の実在必須化 (404) + helper 非経由の import 系3エンドポイントにも同関所。保守経路 (scripts/bootstrap/ツール) は現状維持。回帰 `tests/test_people_get_adapter.py`。
 
 ## Findings（第2片: 自動想起 / head snapshot）
 
@@ -83,6 +85,7 @@
 - 影響: ユーザーまたはペルソナが「ごみ箱へ移した」知識が、自動想起として本人のtailへ再注入される。削除の意味論・訂正導線・プライバシー期待を破り、削除済みページURIへの壊れた深掘り導線も生成する。
 - 修正方針: Fragment検索は `memopedia_pages` を必須JOINし、`COALESCE(p.is_deleted,0)=0` をkeyword/embedding両経路へ共通適用する。孤児Fragmentの扱いも明示する（通常想起から除外を推奨）。復元すれば親フラグが戻り、自然に再び検索対象になる。
 - 必要な回帰: active→soft-delete→restoreの各段階で、page hitとfragment hitが同じ可視性になる。keyword/embedding双方を固定する。
+- **修正済み (2026-07-12)**: 共有SQL断片 `_FRAGMENT_VISIBILITY_JOIN/WHERE` を keyword/embedding 両経路に適用。INNER JOIN 化で孤児 Fragment も除外。embedding 行は削除中も保持 (復元時に再計算不要)。回帰は test_unified_recall.py::TestFragmentVisibilityFollowsPage。
 
 ### [P1] 自動想起のmessage経路がline/scope/tag境界を無視し、内部ログをメイン会話へ戻し得る
 
@@ -96,6 +99,7 @@
 - 判断が必要な点: 自動想起のmessageソースを「実会話のみ」にするか、内部ログも由来ラベル付きで想起可能にするか。**推奨は実会話のみ**。内部ログを想起させたい用途は、別source_typeと明示ラベルを持つ経路に分けるべきで、本人の会話記憶へ混ぜない。
 - 修正方針: Chronicle/SCENEで共有している実会話フィルタを、埋め込み・keywordの両message検索へ適用する。embedding自体を全行分保持することは他用途のため許容できるが、自動想起の取得時scopeは必須。
 - 必要な回帰: 同じ語を含むmain_line、sub_line、meta_judgment/discardable、event_messageを並べ、自動想起のmessage hitがmain_line実会話だけになることをkeyword/embedding双方で固定する。
+- **修正済み (2026-07-12、裁定=実会話のみ)**: storage.py に `real_conversation_filter()` を新設 (SCENE の `_conversation_exclusion()` + 通常履歴の discardable 除外の合成、一点管理) し、message keyword/embedding 両経路に適用。副作用として UI の統合検索・scene 検索も実会話のみになる (意図どおり)。回帰は test_unified_recall.py::TestMessageSearchRealConversationOnly。
 
 ### [P1] sticky自動想起の台帳がthreadを跨ぎ、別threadへ直前の想起を持ち込む
 
@@ -108,6 +112,7 @@
 - 影響: 独立した会話threadの最初の数ターンへ、直前threadの話題・人物・生ログ断片が「ふと浮かんだ記憶」として混入する。threadを文脈分離面として使うStelisや手動thread切替で、粘着仕様が逆に境界漏れになる。
 - 修正方針: 台帳キーを少なくとも `(persona_id, thread_id)` にする。将来CONVERSATION root lineが同一thread内で複数並走し得るなら `(persona_id, thread_id, line_id)` まで持つ。`run_auto_recall()` の呼び出し側はadapterから取得したcanonical thread_idを明示的に渡し、thread終了時または切替時の台帳破棄も用意する。
 - 必要な回帰: thread Aでhitを採用後、同一personaのthread Bへ切り替えて検索hitを空にし、Aの項目がBへ注入されないこと。Aへ戻った場合に台帳を復元するか捨てるかは仕様を決めて固定する。
+- **修正済み (2026-07-12)**: `_LEDGERS` を `(persona_id, thread_id)` キーに変更。呼び出し側が adapter の canonical thread_id 解決 (`_thread_id(None)`) を明示的に渡し、解決不能時は注入スキップ (安全側)。**仕様固定: A へ戻れば台帳は自然復元 (B 滞在中は老化しない)、明示リセットは全 thread 破棄、上限/掃除は設けない**。intent (memory_architecture_v2.md §4.3) に実装ノート追記済み。回帰は test_auto_recall.py::TestThreadLedgerIsolation。
 
 ## 未確定の調査メモ（finding未昇格）
 
