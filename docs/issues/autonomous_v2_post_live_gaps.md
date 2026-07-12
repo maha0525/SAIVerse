@@ -299,6 +299,59 @@ A/B とは別に浮いた第3の根。まはーの整理から立った。
   Track に残った「今の目的の指し示し」役割の**意味論（いつ切り替わるか）**がまだ整理されて
   いない。ここが束C。
 
+### C2. 現状の Track 遷移経路 洗い出し（実装確認、2026-07-13）
+
+状態語彙: `unstarted → running → {pending / alert / completed / aborted}`。running＝いま動いて
+いる目的（1ペルソナ1本）、pending＝待機、alert＝呼びかけ待ち（pause で戻せない中間状態）。
+
+**核心2つ（先に結論）**:
+1. **コマ発火は Track を切り替えない**。`day_plan._handle_worker_slot` は `run_work_session`
+   （WORKER アスペクト）を呼ぶだけで、コマが `task:N` を指してもその Track は running にならない。
+   時間割と Track の running は直接連動していない。
+2. **「時間で勝手に pending」は user_conversation Track 限定**。wait_response 30分自動 pause は
+   provider が非会話 Track に `None` を返すため会話 Track にしか掛からない。**自律 Track は時間で
+   勝手に pending しない**。
+→ まはーの「時間で勝手に pending されるべきでない」は*会話 Track にだけ残っている現象*
+   （redundant issue そのもの）。逆に「さあ時間割の行動をしよう → その Track が running」という
+   連動は**そもそも存在しない**。
+
+**① 自動（時間/イベント駆動・LLM 指示なし）**:
+
+| 遷移 | トリガ | 対象 | 実装 |
+|---|---|---|---|
+| running→pending | 30分無応答（`AI.USER_CONV_TIMEOUT_MINUTES`） | **会話 Track 限定** | `track_manager._handle_wait_response_timeout`→`pause`、provider=`saiverse_manager._wait_response_timeout_provider` |
+| running→pending（displaced） | 別 Track が activate された副作用 | 既存 running 全部 | `activate()` L557-559 |
+| pending/unstarted→alert | 自律先制: Track param が閾値超過 | 自律 Track | `internal_alert_poller:197` |
+| pending→alert | ユーザー発話＋別 running と衝突→MetaLayer 仲裁 | 会話 Track | `user_conversation_handler:566` |
+| pending/unstarted→running | ユーザー発話＋running 衝突なし→直接 activate | 会話 Track | `user_conversation_handler:545` |
+
+**② 構造化出力の指示（判断点/メタ判断の LLM が Track op → deferred → Pulse 完了時に適用）**:
+トリガ（判断点起動）は自動だが Track を動かす指示元は LLM 構造化出力。
+
+| 遷移 | 指示元 | 実装 |
+|---|---|---|
+| running→completed | セッション終了判断 `track_op='complete'`（全タスク消化時） | `judgment_finalize`→`track_complete` |
+| →unstarted(create) | 会話終了判断 `picked_tasks track_ref='new'` | `judgment_finalize:728` |
+| →unstarted(create) | 起床判断 `promotions`（欲求→関心昇格） | `judgment_finalize`→`track_create` |
+| activate/pause/complete/abort/create | **メタ判断** `meta_judgment_finalize` の構造化出力→内部/spell | `_apply_deferred_track_ops`（meta_layer/runtime_runner） |
+
+deferred な理由: Pulse 中の直接切替は LLM が次 Track 作業を今のキャッシュに書き続けるため
+（`DeferredTrackOp` 設計）。
+
+**③ 完全手動スペル（平文で撃つ・CONVERSATION/META アスペクトのみ許可）**:
+`track_create / track_activate / track_complete / track_abort / track_pause / track_parameter_set`
+（`_track_common`→`enqueue_track_op`→deferred。create のみ即時）。
+
+**④ ユーザー手動（REST/UI）**: `api/routes/people/tracks.py` `activate`(L250)/`pause`(L207)。
+**⑤ 起動時復元**: `ensure_wait_response_timeout`（会話 Track のタイマー張り直し。状態遷移ではない）。
+（`saiverse/day_scenario.py` の create/pause/complete は DaySimulator 上のシム専用・本番外。）
+
+**束Cへの含意**: 時間で勝手に動かしてるのは wait_response 30分 pause だけ（会話 Track 限定）＝
+redundant issue の芯。自律 Track は既に「時間で勝手に pending しない」設計（切替は②/③/displaced
+のみ）＝まはーの理想に近い。ギャップは逆側で「時間割の行動を始める → その Track が running」の
+連動が無いこと（コマ発火が Track を動かさない）。ライフ/コマと Track running をどう繋ぐかが
+束C＋ライフ設計の論点。
+
 ---
 
 ## 概念再編（⑥）の残件との合流 — 棚卸し結果（2026-07-12）
