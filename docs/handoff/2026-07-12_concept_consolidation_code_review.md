@@ -40,3 +40,18 @@
 2. merge/split を1プラン1トランザクションにする。
 3. split を lossless block 化し、文字列完全一致テストを追加する。
 4. 関連テストと全体 pytest、変更Pythonへの `ruff check` を通してから実機検証へ戻す。
+
+## 修正記録（2026-07-12、レビュー当日）
+
+**P1×3 すべて修正済み・回帰固定済み**（コミット 2faf7b2）。実装はサブエージェント委譲＋メイン検収。
+
+- **fold**: 検知が `refs: [parent_label, label]` を生成（survivor=実親）。親未解決ページは候補にしない防御を追加。検知→enqueue→実行の統合テストで固定。
+- **原子性**: commit を保留するプロキシ conn（storage.py 無変更・他呼び出し元の即 commit は構造的に無傷）＋ `_plan_transaction` で 1プラン=1トランザクション。**done status の書き込みも同一トランザクションに同梱**（ページ変更だけ確定して pending が残る二重実行窓も閉鎖）。merge/split の各段階への例外注入テストで「失敗後の DB 状態＝実行前」を固定。
+- **lossless split**: `_split_into_blocks` を「ブロック=元本文の連続スライス」に再設計（`"".join(blocks) == content` が不変条件）。検証は番号集合（補助）＋文字レベル復元（本則）の二段。あわせて split を `plan_split`（読取+LLM、**ロック外**）と `apply_split`（書込のみ、適用前に本文再検証）に二段化——LLM コール中に db_lock を保持しない。
+- テスト: 編纂系 71 passed / 記憶系近隣 188 passed / 全体スイート 2168 passed。ruff clean。
+
+**修正中の副産物（エージェント報告→メイン裏取り）**:
+
+1. **カテゴリルートの is_trunk 播種漏れ → 修正済み**(コミット 63d3a63): `_seed_root_pages` が is_trunk を立てず、実 DB（air で実測: root_people/root_terms/root_plans/root_events が is_trunk=0、直下計157ページ）で trunk 除外フィルタ（編纂検知・想起・目次）がルートに効いていなかった。fold 修正によりルートへの統合が実行可能になるため初夜前に修正。新規播種 is_trunk=1 ＋既存 DB 冪等バックフィル（updated_at 不変）。
+2. **`storage.get_page` が `is_deleted` を見ない → 未対応・課題**: soft-delete 済みページも取得できる。編纂の二重実行はトランザクション同梱で実質塞いだが、open_page 等の他経路は残る。境界監査の「削除済Fragment想起」と同族として境界系修正 wave で扱う。
+3. **`get_children` 等の手書き列リスト（short_id/metadata 欠落）→ 未対応・課題**: `_PAGE_SELECT_COLS` 未使用の箇所が複数残存（`find_page_by_title` は P2c-2 で対応済み）。今回の経路では実害なし。
