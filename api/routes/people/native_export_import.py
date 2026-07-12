@@ -17,6 +17,7 @@ from fastapi.responses import Response
 
 from api.deps import get_manager
 from .models import NativeImportStatusResponse
+from .utils import ensure_persona_exists
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
@@ -143,6 +144,10 @@ async def import_native(
     Replaces existing threads with the same thread_id.
     Runs as a background task with progress tracking.
     """
+    # import_threads_native() mkdirs personas/<id>/ unconditionally, so gate
+    # unknown/malformed IDs here (no orphan personas/<id>/memory.db creation).
+    ensure_persona_exists(persona_id, manager)
+
     # Check if an import is already running
     with _native_import_lock:
         status = _native_import_status.get(persona_id, {})

@@ -4,6 +4,7 @@ from .models import (
     ConversationSummary, PreviewResponse, ImportRequest,
     OfficialImportStatusResponse, ExtensionImportStatusResponse
 )
+from .utils import ensure_persona_exists
 import shutil
 import tempfile
 from pathlib import Path
@@ -125,7 +126,6 @@ def _run_official_import_task(
             return
         
         export = cached["export"]
-        tmp_path = cached["tmp_path"]
         records = export.conversations
         
         # 2. Resolve selected records
@@ -280,6 +280,9 @@ def import_official_chatgpt(
     manager = Depends(get_manager)
 ):
     """Import selected ChatGPT conversations from a previously previewed export (background)."""
+    # The background task builds SAIMemoryAdapter(persona_id) directly, so gate
+    # unknown/malformed IDs here (no orphan personas/<id>/memory.db creation).
+    ensure_persona_exists(persona_id, manager)
     cache_key = request.cache_key
     conversation_ids = request.conversation_ids
     skip_embedding = request.skip_embedding
@@ -357,7 +360,11 @@ def import_extension_export(
 ):
     """Import Chrome extension export (JSON or Markdown) in background."""
     from fastapi import BackgroundTasks as BT
-    
+
+    # The background task builds SAIMemoryAdapter(persona_id) directly, so gate
+    # unknown/malformed IDs here (no orphan personas/<id>/memory.db creation).
+    ensure_persona_exists(persona_id, manager)
+
     # Check if already running
     with _extension_import_lock:
         status = _extension_import_status.get(persona_id, {})
