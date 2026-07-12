@@ -40,7 +40,7 @@ def memopedia_delete_fragment(
             conn.execute("DELETE FROM memopedia_fragments WHERE id = ?", (fid,))
             conn.commit()
 
-    return f"���除しました: {content_preview}"
+    return f"削除しました: {content_preview}"
 
 
 def schema() -> ToolSchema:
