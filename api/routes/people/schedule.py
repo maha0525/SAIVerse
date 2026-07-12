@@ -12,6 +12,22 @@ _log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+def _as_utc_aware(dt):
+    """DB から読んだ naive datetime を UTC-aware にして返す。
+
+    SCHEDULED_DATETIME / LAST_EXECUTED_AT は UTC 基準で保存されている
+    (create/update で JST→UTC 変換済み、発火側も naive を UTC とみなす) が、
+    Column(DateTime) は tz を持たないため naive で読み戻る。そのまま Pydantic が
+    シリアライズすると ``2025-12-07T00:00:00`` (オフセット無し) になり、
+    フロントの ``new Date()`` がローカル時刻と誤読して UTC→JST 変換が効かない。
+    ここで明示的に UTC を付与し、``...+00:00`` を出させることで表示を正す。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
 def _get_persona_timezone(manager, persona_id: str) -> ZoneInfo:
     session = manager.SessionLocal()
     try:
@@ -65,9 +81,9 @@ def list_schedules(persona_id: str, manager = Depends(get_manager)):
                 enabled=s.ENABLED,
                 days_of_week=days,
                 time_of_day=s.TIME_OF_DAY,
-                scheduled_datetime=s.SCHEDULED_DATETIME,
+                scheduled_datetime=_as_utc_aware(s.SCHEDULED_DATETIME),
                 interval_seconds=s.INTERVAL_SECONDS,
-                last_executed_at=s.LAST_EXECUTED_AT,
+                last_executed_at=_as_utc_aware(s.LAST_EXECUTED_AT),
                 completed=s.COMPLETED,
                 args=parsed_args
             ))
