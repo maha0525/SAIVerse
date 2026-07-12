@@ -5,8 +5,7 @@ from __future__ import annotations
 import datetime
 from typing import Optional
 
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -51,23 +50,20 @@ def messagelog_get_around(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
     from sai_memory.memory.storage import get_messages_around_timestamp
 
-    messages = get_messages_around_timestamp(
-        adapter.conn,
-        timestamp=ts,
-        count=count,
-        thread_id=thread_id,
-    )
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+
+        # 生 conn の直接読みなので共有 adapter ではロックを取る
+        with adapter._db_lock:
+            messages = get_messages_around_timestamp(
+                adapter.conn,
+                timestamp=ts,
+                count=count,
+                thread_id=thread_id,
+            )
 
     if not messages:
         dt_str = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")

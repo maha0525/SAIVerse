@@ -11,11 +11,10 @@ P3c①②で対応)。コア記憶は常時開のシステム常設ピンなの�
 from __future__ import annotations
 
 from saiverse import memory_atlas
-from saiverse_memory import SAIMemoryAdapter
 from tools.context import (
     get_active_manager,
     get_active_persona_id,
-    get_active_persona_path,
+    open_persona_memory,
 )
 from tools.core import ToolSchema
 
@@ -26,21 +25,17 @@ def memory_close(ref: str) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
     # manager は task:N (目的ノード = main DB 在住) の解決にのみ使われる
     manager = get_active_manager()
-    try:
-        return memory_atlas.close_page(adapter, ref, manager=manager)
-    except memory_atlas.AtlasRefError as exc:
-        return f"Error: {exc}"
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        try:
+            # close_page は ref 正規化で生 conn を読むため外側でロック
+            with adapter._db_lock:
+                return memory_atlas.close_page(adapter, ref, manager=manager)
+        except memory_atlas.AtlasRefError as exc:
+            return f"Error: {exc}"
 
 
 def schema() -> ToolSchema:

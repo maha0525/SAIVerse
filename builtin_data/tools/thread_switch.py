@@ -7,7 +7,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memory.storage import get_messages_last
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import (
+    get_active_persona_id,
+    get_active_persona_path,
+    open_persona_memory,
+)
 from tools.core import ToolResult, ToolSchema
 
 
@@ -24,70 +28,87 @@ def switch_active_thread(
     """Switch persona focus to another thread while carrying recent context metadata."""
 
     persona_id = _resolve_persona_id()
-    adapter = _build_adapter(persona_id, persona_path)
-    if not adapter.is_ready():
-        adapter.close()
-        raise RuntimeError(f"SAIMemory adapter is not ready for persona '{persona_id}'")
+    if persona_path:
+        # 明示的なディレクトリ上書き: 本体 adapter と別の DB を指しうるので、
+        # 従来どおり専用 adapter を作り、終わったら必ず閉じる
+        adapter = _build_adapter(persona_id, persona_path)
+        try:
+            if not adapter.is_ready():
+                raise RuntimeError(f"SAIMemory adapter is not ready for persona '{persona_id}'")
+            return _perform_switch(adapter, persona_id, target_thread, summary, range_before)
+        finally:
+            adapter.close()
 
-    try:
-        target_full, target_suffix = _normalise_thread_id(persona_id, target_thread)
-        origin_full = _resolve_origin_thread(adapter, persona_id)
-        if target_suffix == "":
-            raise ValueError("target_thread must not be empty")
-        if target_full == origin_full:
-            raise ValueError(f"Target thread '{target_full}' is already active.")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory adapter is not ready for persona '{persona_id}'")
+        return _perform_switch(adapter, persona_id, target_thread, summary, range_before)
 
-        anchor_msg = _resolve_anchor_message(adapter, origin_full)
-        link_range_before = max(0, int(range_before if range_before is not None else DEFAULT_RANGE_BEFORE))
-        link_range_after = DEFAULT_RANGE_AFTER
 
-        iso_timestamp = _normalise_timestamp(None)
-        note = summary.strip() if summary and summary.strip() else f"[thread switch] moved from {origin_full}"
+def _perform_switch(
+    adapter: SAIMemoryAdapter,
+    persona_id: str,
+    target_thread: str,
+    summary: Optional[str],
+    range_before: Optional[int],
+) -> Tuple[str, ToolResult, None]:
+    target_full, target_suffix = _normalise_thread_id(persona_id, target_thread)
+    origin_full = _resolve_origin_thread(adapter, persona_id)
+    if target_suffix == "":
+        raise ValueError("target_thread must not be empty")
+    if target_full == origin_full:
+        raise ValueError(f"Target thread '{target_full}' is already active.")
 
-        message_payload = {
-            "role": "system",
-            "content": note,
-            "timestamp": iso_timestamp,
-            "embedding_chunks": 0,
+    anchor_msg = _resolve_anchor_message(adapter, origin_full)
+    link_range_before = max(0, int(range_before if range_before is not None else DEFAULT_RANGE_BEFORE))
+    link_range_after = DEFAULT_RANGE_AFTER
+
+    iso_timestamp = _normalise_timestamp(None)
+    note = summary.strip() if summary and summary.strip() else f"[thread switch] moved from {origin_full}"
+
+    message_payload = {
+        "role": "system",
+        "content": note,
+        "timestamp": iso_timestamp,
+        "embedding_chunks": 0,
+    }
+    if anchor_msg is not None:
+        message_payload["metadata"] = {
+            "other_thread_messages": [
+                {
+                    "thread_id": origin_full,
+                    "message_id": anchor_msg.id,
+                    "range_before": link_range_before,
+                    "range_after": link_range_after,
+                }
+            ]
         }
-        if anchor_msg is not None:
-            message_payload["metadata"] = {
-                "other_thread_messages": [
-                    {
-                        "thread_id": origin_full,
-                        "message_id": anchor_msg.id,
-                        "range_before": link_range_before,
-                        "range_after": link_range_after,
-                    }
-                ]
-            }
-        adapter.append_persona_message(message_payload, thread_suffix=target_suffix)
+    # append_persona_message は adapter 内部で _db_lock を取る
+    adapter.append_persona_message(message_payload, thread_suffix=target_suffix)
 
-        _write_active_state(adapter.persona_dir / adapter._ACTIVE_STATE_FILENAME, target_suffix, iso_timestamp)
+    _write_active_state(adapter.persona_dir / adapter._ACTIVE_STATE_FILENAME, target_suffix, iso_timestamp)
 
-        if anchor_msg is not None:
-            result = (
-                f"Switched active thread to {target_full}. "
-                f"Linked origin {origin_full} @ {anchor_msg.id} "
-                f"(range_before={link_range_before}, range_after={link_range_after})."
-            )
-            snippet_payload = {
-                "source_thread": origin_full,
-                "target_thread": target_full,
-                "anchor_message": anchor_msg.id,
-                "range_before": link_range_before,
-                "range_after": link_range_after,
-                "timestamp": iso_timestamp,
-            }
-        else:
-            result = f"Switched active thread to {target_full}. No origin messages available to link."
-            raise ValueError(
-                f"Origin thread '{origin_full}' has no messages to reference."
-            )
-        snippet = ToolResult(history_snippet=json.dumps(snippet_payload, ensure_ascii=False))
-        return result, snippet, None
-    finally:
-        adapter.close()
+    if anchor_msg is not None:
+        result = (
+            f"Switched active thread to {target_full}. "
+            f"Linked origin {origin_full} @ {anchor_msg.id} "
+            f"(range_before={link_range_before}, range_after={link_range_after})."
+        )
+        snippet_payload = {
+            "source_thread": origin_full,
+            "target_thread": target_full,
+            "anchor_message": anchor_msg.id,
+            "range_before": link_range_before,
+            "range_after": link_range_after,
+            "timestamp": iso_timestamp,
+        }
+    else:
+        result = f"Switched active thread to {target_full}. No origin messages available to link."
+        raise ValueError(
+            f"Origin thread '{origin_full}' has no messages to reference."
+        )
+    snippet = ToolResult(history_snippet=json.dumps(snippet_payload, ensure_ascii=False))
+    return result, snippet, None
 
 
 def schema() -> ToolSchema:

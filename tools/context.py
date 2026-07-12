@@ -128,6 +128,65 @@ def set_active_message_id(message_id: Optional[str]) -> None:
 
 
 @contextmanager
+def open_persona_memory() -> Iterator[Any]:
+    """Yield the acting persona's SAIMemoryAdapter for tool execution.
+
+    Prefers the live adapter already attached to the loaded persona
+    (``manager.personas[persona_id].sai_memory``). memory.db は SQLite WAL の
+    単一 writer なので、ツール呼び出しごとに新しい接続 (= 新品 adapter) を
+    開くと、初期化時の書き込み (DDL/シード/移行) が本体 adapter のトランザク
+    ションと衝突して ``database is locked`` の玉突きを起こす (P1: memory 系
+    スペルの DB ロック玉突き)。live adapter は close しない (所有権は
+    ペルソナ側)。
+
+    Falls back to a fresh temporary adapter only when no live adapter is
+    available (persona 未ロード / adapter 未 ready — CLI スクリプトやテスト
+    経路)。The temporary adapter is closed when the context exits.
+
+    Note: the yielded adapter's readiness (``is_ready()`` / ``can_embed()``)
+    is NOT checked here — callers keep their own checks so per-tool error
+    behaviour (raise vs. error string) is preserved.
+
+    共有した live adapter の生 ``conn`` を直接触る場合、呼び出し側は
+    ``with adapter._db_lock:`` を保持すること (adapter のメソッド呼び出し
+    だけなら内部でロックを取る)。ロックを LLM コール等の長時間処理を跨いで
+    保持しないこと。
+
+    Raises:
+        RuntimeError: no active persona is set, or the fallback adapter
+            could not be constructed.
+    """
+    persona_id = get_active_persona_id()
+    if not persona_id:
+        raise RuntimeError("Active persona is not set")
+
+    manager = get_active_manager()
+    personas = getattr(manager, "personas", None) or {}
+    persona = personas.get(persona_id)
+    live = getattr(persona, "sai_memory", None) if persona is not None else None
+    if live is not None and live.is_ready():
+        yield live
+        return
+
+    # Fallback: build a dedicated adapter and close it on exit. Lazy import
+    # keeps this module importable without the memory stack and lets tests
+    # patch ``saiverse_memory.SAIMemoryAdapter``.
+    from saiverse_memory import SAIMemoryAdapter
+
+    persona_dir = get_active_persona_path()
+    try:
+        adapter = SAIMemoryAdapter(
+            persona_id, persona_dir=persona_dir, resource_id=persona_id
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    try:
+        yield adapter
+    finally:
+        adapter.close()
+
+
+@contextmanager
 def persona_context(
     persona_id: str,
     persona_path: Path | str,

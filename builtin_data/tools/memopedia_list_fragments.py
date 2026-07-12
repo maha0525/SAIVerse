@@ -10,8 +10,7 @@ from typing import Optional
 
 from sai_memory.memopedia.storage import resolve_page_ref
 from saiverse.references import to_short_ref
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -27,27 +26,24 @@ def memopedia_list_fragments(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        from sai_memory.memopedia import Memopedia
 
-    from sai_memory.memopedia import Memopedia
+        memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
 
-    memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
+        # resolve_page_ref は生 conn の直接読みなのでロックを取る
+        with adapter._db_lock:
+            resolved_id = resolve_page_ref(adapter.conn, page_id)
+        page = memopedia.get_page(resolved_id) if resolved_id else None
+        if page is None:
+            return f"ページが見つかりません: {page_id}"
 
-    resolved_id = resolve_page_ref(adapter.conn, page_id)
-    page = memopedia.get_page(resolved_id) if resolved_id else None
-    if page is None:
-        return f"ページが見つかりません: {page_id}"
-
-    fragments = memopedia.get_fragments(resolved_id)
-    if not fragments:
-        return f"'{page.title}' にフラグメントはありません。"
+        fragments = memopedia.get_fragments(resolved_id)
+        if not fragments:
+            return f"'{page.title}' にフラグメントはありません。"
 
     short_ref = to_short_ref("memopedia", page.short_id) if page.short_id else resolved_id[:8]
     lines = [f"'{page.title}' ({short_ref}) のフラグメント一覧 ({len(fragments)}件):\n"]

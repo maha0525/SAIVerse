@@ -8,8 +8,7 @@ concept_consolidation.md「P2: 統一スペル動詞 v0.2」の search。Memoped
 from __future__ import annotations
 
 from saiverse import memory_atlas
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -19,16 +18,12 @@ def memory_search(query: str) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
-    return memory_atlas.search_pages(adapter, query)
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        # search_pages は Chronicle 検索で生 conn を無ロックで読むため外側でロック
+        with adapter._db_lock:
+            return memory_atlas.search_pages(adapter, query)
 
 
 def schema() -> ToolSchema:

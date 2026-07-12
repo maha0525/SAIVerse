@@ -5,8 +5,7 @@ P4 庭仕事ワーカーの素材として内部専用化 (concept_consolidation
 
 from __future__ import annotations
 
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -21,30 +20,25 @@ def memopedia_delete_fragment(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
     fid = fragment_id.strip()
-    conn = adapter.conn
-    with adapter._db_lock:
-        cur = conn.execute(
-            "SELECT id, content, entity_id FROM memopedia_fragments WHERE id = ?",
-            (fid,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return f"フラグメントが見つかりません: {fid}"
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-        content_preview = row[1][:60] if row[1] else ""
-        conn.execute("DELETE FROM memopedia_fragment_embeddings WHERE fragment_id = ?", (fid,))
-        conn.execute("DELETE FROM memopedia_fragments WHERE id = ?", (fid,))
-        conn.commit()
+        conn = adapter.conn
+        with adapter._db_lock:
+            cur = conn.execute(
+                "SELECT id, content, entity_id FROM memopedia_fragments WHERE id = ?",
+                (fid,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return f"フラグメントが見つかりません: {fid}"
+
+            content_preview = row[1][:60] if row[1] else ""
+            conn.execute("DELETE FROM memopedia_fragment_embeddings WHERE fragment_id = ?", (fid,))
+            conn.execute("DELETE FROM memopedia_fragments WHERE id = ?", (fid,))
+            conn.commit()
 
     return f"���除しました: {content_preview}"
 

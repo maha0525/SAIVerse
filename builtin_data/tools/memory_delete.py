@@ -12,8 +12,7 @@ concept_consolidation.md P2c-0 決定1: core + Memopedia の soft-delete を統�
 from __future__ import annotations
 
 from saiverse import memory_atlas
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -23,19 +22,15 @@ def memory_delete(ref: str) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
-    try:
-        return memory_atlas.delete_page(adapter, ref)
-    except memory_atlas.AtlasRefError as exc:
-        return f"Error: {exc}"
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        try:
+            # delete_page は生 conn を部分的に無ロックで触るため外側でロック
+            with adapter._db_lock:
+                return memory_atlas.delete_page(adapter, ref)
+        except memory_atlas.AtlasRefError as exc:
+            return f"Error: {exc}"
 
 
 def schema() -> ToolSchema:

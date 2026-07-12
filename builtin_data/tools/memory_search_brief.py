@@ -6,14 +6,13 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memory.recall import semantic_recall_groups
 from sai_memory.memory.storage import (
     get_all_messages_for_search,
     get_messages_last,
     Message,
 )
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -75,15 +74,6 @@ def memory_search_brief(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.can_embed():
-        raise RuntimeError(f"SAIMemory semantic search not available for {persona_id} (embedding model may be missing)")
-
     if not query and not keywords:
         return "(no query or keywords provided)"
 
@@ -105,71 +95,75 @@ def memory_search_brief(
     message_scores: Dict[str, float] = defaultdict(float)
     message_data: Dict[str, Message] = {}
 
-    # Guard: exclude recent messages
-    thread_id = adapter._thread_id(None)
-    guard_ids: set = set()
-    guard_count = max(0, adapter.settings.last_messages)
-    if guard_count > 0:
-        with adapter._db_lock:
-            recent_msgs = get_messages_last(adapter.conn, thread_id, guard_count)
-            guard_ids = {m.id for m in recent_msgs}
+    with open_persona_memory() as adapter:
+        if not adapter.can_embed():
+            raise RuntimeError(f"SAIMemory semantic search not available for {persona_id} (embedding model may be missing)")
 
-    # 1. Keyword search
-    keyword_matches: Dict[str, List[str]] = {}  # msg_id -> matched keywords
-    if keywords:
-        with adapter._db_lock:
-            all_msgs = get_all_messages_for_search(
-                adapter.conn,
-                required_tags=["conversation"],
-            )
-        keyword_scored = []
-        for msg in all_msgs:
-            if msg.id in guard_ids:
-                continue
-            if start_ts and msg.created_at < start_ts:
-                continue
-            if end_ts and msg.created_at > end_ts:
-                continue
-            content_lower = (msg.content or "").lower()
-            matched = [kw for kw in keywords if kw.lower() in content_lower]
-            if matched:
-                keyword_scored.append((msg, len(matched)))
-                keyword_matches[msg.id] = matched
+        # Guard: exclude recent messages
+        thread_id = adapter._thread_id(None)
+        guard_ids: set = set()
+        guard_count = max(0, adapter.settings.last_messages)
+        if guard_count > 0:
+            with adapter._db_lock:
+                recent_msgs = get_messages_last(adapter.conn, thread_id, guard_count)
+                guard_ids = {m.id for m in recent_msgs}
 
-        keyword_scored.sort(key=lambda x: x[1], reverse=True)
-        for rank, (msg, _count) in enumerate(keyword_scored[:topk * 2], start=1):
-            if msg.id not in message_data:
-                message_data[msg.id] = msg
-            message_scores[msg.id] += 1.0 / (rrf_k + rank)
+        # 1. Keyword search
+        keyword_matches: Dict[str, List[str]] = {}  # msg_id -> matched keywords
+        if keywords:
+            with adapter._db_lock:
+                all_msgs = get_all_messages_for_search(
+                    adapter.conn,
+                    required_tags=["conversation"],
+                )
+            keyword_scored = []
+            for msg in all_msgs:
+                if msg.id in guard_ids:
+                    continue
+                if start_ts and msg.created_at < start_ts:
+                    continue
+                if end_ts and msg.created_at > end_ts:
+                    continue
+                content_lower = (msg.content or "").lower()
+                matched = [kw for kw in keywords if kw.lower() in content_lower]
+                if matched:
+                    keyword_scored.append((msg, len(matched)))
+                    keyword_matches[msg.id] = matched
 
-    # 2. Semantic search
-    if query and query.strip():
-        search_topk = topk * 2 + len(guard_ids)
-        with adapter._db_lock:
-            groups_raw = semantic_recall_groups(
-                adapter.conn,
-                adapter.embedder,
-                query,
-                thread_id=None,
-                resource_id=None,
-                topk=search_topk,
-                range_before=0,
-                range_after=0,
-                scope=adapter.settings.scope,
-                exclude_message_ids=guard_ids,
-                required_tags=["conversation"],
-                exclude_tags=["handy_tool", "spell"],
-            )
-        rank_counter = 0
-        for seed, _bundle, _score in groups_raw:
-            if start_ts and seed.created_at < start_ts:
-                continue
-            if end_ts and seed.created_at > end_ts:
-                continue
-            rank_counter += 1
-            if seed.id not in message_data:
-                message_data[seed.id] = seed
-            message_scores[seed.id] += 1.0 / (rrf_k + rank_counter)
+            keyword_scored.sort(key=lambda x: x[1], reverse=True)
+            for rank, (msg, _count) in enumerate(keyword_scored[:topk * 2], start=1):
+                if msg.id not in message_data:
+                    message_data[msg.id] = msg
+                message_scores[msg.id] += 1.0 / (rrf_k + rank)
+
+        # 2. Semantic search
+        if query and query.strip():
+            search_topk = topk * 2 + len(guard_ids)
+            with adapter._db_lock:
+                groups_raw = semantic_recall_groups(
+                    adapter.conn,
+                    adapter.embedder,
+                    query,
+                    thread_id=None,
+                    resource_id=None,
+                    topk=search_topk,
+                    range_before=0,
+                    range_after=0,
+                    scope=adapter.settings.scope,
+                    exclude_message_ids=guard_ids,
+                    required_tags=["conversation"],
+                    exclude_tags=["handy_tool", "spell"],
+                )
+            rank_counter = 0
+            for seed, _bundle, _score in groups_raw:
+                if start_ts and seed.created_at < start_ts:
+                    continue
+                if end_ts and seed.created_at > end_ts:
+                    continue
+                rank_counter += 1
+                if seed.id not in message_data:
+                    message_data[seed.id] = seed
+                message_scores[seed.id] += 1.0 / (rrf_k + rank_counter)
 
     if not message_scores:
         return "(no results found)"

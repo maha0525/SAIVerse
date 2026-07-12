@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 from sai_memory.memopedia.storage import category_keys
 from saiverse.curation import HEALTH_LARGE_THRESHOLD, HEALTH_OVERSIZED_THRESHOLD
@@ -27,18 +27,17 @@ def memopedia_health() -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    from saiverse_memory import SAIMemoryAdapter
-    persona_dir = get_active_persona_path()
-    adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            return "Memopedia: データベースにアクセスできません"
 
-    if not adapter.is_ready():
-        return "Memopedia: データベースにアクセスできません"
+        from sai_memory.memopedia import Memopedia
 
-    from sai_memory.memopedia import Memopedia, init_memopedia_tables
-    init_memopedia_tables(adapter.conn)
-    memopedia = Memopedia(adapter.conn)
+        # Memopedia.__init__ が db_lock の下で init_memopedia_tables を実行する
+        # (単独の init 呼び出しは無ロックの生 conn 書き込みになるため廃止)
+        memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
 
-    tree = memopedia.get_tree()
+        tree = memopedia.get_tree()
 
     total_pages = 0
     oversized = []       # > HEALTH_OVERSIZED_THRESHOLD chars

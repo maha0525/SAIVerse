@@ -83,7 +83,17 @@ class SAIMemoryAdapter:
         persona_dir: Optional[Path] = None,
         resource_id: Optional[str] = None,
         settings: Optional[Settings] = None,
+        startup_backup: bool = False,
     ) -> None:
+        """Create an adapter bound to ``personas/<persona_id>/memory.db``.
+
+        ``startup_backup``: opt-in for the automatic startup backup thread.
+        ペルソナ登録経路 (persona/bootstrap.py の initialise_memory_adapter)
+        だけが True を渡す。ツール・API・スクリプトの使い捨て adapter が
+        呼び出しごとに DB バックアップを走らせないための門 (P1: memory 系
+        スペルの DB ロック玉突き)。環境変数 SAIMEMORY_BACKUP_ON_START との
+        AND で最終判定する。
+        """
         base_settings = settings or load_settings()
         self.persona_id = persona_id
         if persona_dir:
@@ -167,6 +177,14 @@ class SAIMemoryAdapter:
             init_curation_tables(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
+            # init 途中で失敗したら開きかけの接続を閉じてから raise する
+            # (未コミットのトランザクションが SQLite ロックを握り続けるのを防ぐ)
+            half_open = getattr(self, "conn", None)
+            if half_open is not None:
+                try:
+                    half_open.close()
+                except Exception:
+                    LOGGER.warning("Failed to close half-initialised SAIMemory connection", exc_info=True)
             self.conn = None
             self.embedder = None
             raise exc
@@ -198,7 +216,7 @@ class SAIMemoryAdapter:
             self.settings.resource_id,
         )
 
-        if _auto_backup_enabled():
+        if startup_backup and _auto_backup_enabled():
             threading.Thread(target=self._run_startup_backup, daemon=True).start()
 
     # ------------------------------------------------------------------

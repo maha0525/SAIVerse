@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -36,54 +36,49 @@ def memory_recall_unified(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
+    with open_persona_memory() as adapter:
+        if not adapter.can_embed():
+            raise RuntimeError("Semantic search not available (embedding model may be missing)")
 
-    from saiverse_memory import SAIMemoryAdapter
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+        from sai_memory.unified_recall import unified_recall
+        from sai_memory.arasuji.storage import get_entry
+        from sai_memory.memopedia.storage import get_page
 
-    if not adapter.can_embed():
-        raise RuntimeError("Semantic search not available (embedding model may be missing)")
+        # unified_recall は生 conn を直接読むため、共有 adapter では外側でロック
+        with adapter._db_lock:
+            hits = unified_recall(
+                adapter.conn,
+                adapter.embedder,
+                query,
+                focus=focus or None,
+                search_chronicle=search_chronicle,
+                search_memopedia=search_memopedia,
+                search_fragments=search_fragments,
+                # 生メッセージは検索対象にしない。このツールの契約は Chronicle /
+                # Memopedia / Fragment（要約・整理済みの記憶）で、生メッセージは
+                # Chronicle が要約形で既にカバーしている。search_messages はデフォルト
+                # True なので明示的に False を渡さないと、検索を発行した spell 行その
+                # もの（自メッセージ）を拾う自己ヒットが起きる。生メッセージの vivid
+                # recall が要る自動想起 (sea/auto_recall.py) だけが True を渡す。
+                search_messages=False,
+                persona_id=persona_id,
+            )
 
-    from sai_memory.unified_recall import unified_recall
-    from sai_memory.arasuji.storage import get_entry
-    from sai_memory.memopedia.storage import get_page
+        if not hits:
+            return "関連する記憶が見つかりませんでした。"
 
-    hits = unified_recall(
-        adapter.conn,
-        adapter.embedder,
-        query,
-        focus=focus or None,
-        search_chronicle=search_chronicle,
-        search_memopedia=search_memopedia,
-        search_fragments=search_fragments,
-        # 生メッセージは検索対象にしない。このツールの契約は Chronicle /
-        # Memopedia / Fragment（要約・整理済みの記憶）で、生メッセージは
-        # Chronicle が要約形で既にカバーしている。search_messages はデフォルト
-        # True なので明示的に False を渡さないと、検索を発行した spell 行その
-        # もの（自メッセージ）を拾う自己ヒットが起きる。生メッセージの vivid
-        # recall が要る自動想起 (sea/auto_recall.py) だけが True を渡す。
-        search_messages=False,
-        persona_id=persona_id,
-    )
-
-    if not hits:
-        return "関連する記憶が見つかりませんでした。"
-
-    # Enrich hits with full content
-    with adapter._db_lock:
-        for hit in hits:
-            if hit.source_type == "chronicle":
-                entry = get_entry(adapter.conn, hit.source_id)
-                if entry:
-                    hit.content = entry.content
-            elif hit.source_type == "memopedia":
-                page = get_page(adapter.conn, hit.source_id)
-                if page:
-                    hit.content = page.summary or ""
-            # fragment hits keep their original content (the matched fragment text)
+        # Enrich hits with full content
+        with adapter._db_lock:
+            for hit in hits:
+                if hit.source_type == "chronicle":
+                    entry = get_entry(adapter.conn, hit.source_id)
+                    if entry:
+                        hit.content = entry.content
+                elif hit.source_type == "memopedia":
+                    page = get_page(adapter.conn, hit.source_id)
+                    if page:
+                        hit.content = page.summary or ""
+                # fragment hits keep their original content (the matched fragment text)
 
     lines = [f"記憶検索結果: {len(hits)}件\n"]
     for i, hit in enumerate(hits, 1):

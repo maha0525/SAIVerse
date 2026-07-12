@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -40,57 +40,58 @@ def memopedia_manage(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    from saiverse_memory import SAIMemoryAdapter
-    persona_dir = get_active_persona_path()
-    adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            return "Memopedia: データベースにアクセスできません"
 
-    if not adapter.is_ready():
-        return "Memopedia: データベースにアクセスできません"
+        from sai_memory.memopedia import Memopedia
 
-    from sai_memory.memopedia import Memopedia, init_memopedia_tables
-    init_memopedia_tables(adapter.conn)
-    memopedia = Memopedia(adapter.conn)
+        # Memopedia.__init__ が db_lock の下で init_memopedia_tables を実行する
+        # (単独の init 呼び出しは無ロックの生 conn 書き込みになるため廃止)
+        memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
 
-    # Verify page exists (resolve m:N / UUID / URI)
-    page = memopedia.get_page(page_id)
-    if not page:
-        return f"ページが見つかりません: {page_id}"
-    resolved_id = page.id
+        # Verify page exists (resolve m:N / UUID / URI)
+        page = memopedia.get_page(page_id)
+        if not page:
+            return f"ページが見つかりません: {page_id}"
+        resolved_id = page.id
 
-    if action == "delete":
-        if page.parent_id and page.parent_id.startswith("root_"):
-            children = page.children if hasattr(page, "children") else []
-            if children:
-                return (
-                    f"警告: '{page.title}' には子ページがあります。"
-                    f"削除すると子ページも全て削除されます。"
-                    f"本当に削除する場合はもう一度このツールを呼んでください。"
-                )
-        result = memopedia.delete_page(
-            resolved_id,
-            edit_source="autonomy_manage",
-        )
-        if result:
-            return f"ページ '{page.title}' を削除しました"
-        return f"ページ '{page.title}' の削除に失敗しました"
+        if action == "delete":
+            if page.parent_id and page.parent_id.startswith("root_"):
+                children = page.children if hasattr(page, "children") else []
+                if children:
+                    return (
+                        f"警告: '{page.title}' には子ページがあります。"
+                        f"削除すると子ページも全て削除されます。"
+                        f"本当に削除する場合はもう一度このツールを呼んでください。"
+                    )
+            result = memopedia.delete_page(
+                resolved_id,
+                edit_source="autonomy_manage",
+            )
+            if result:
+                return f"ページ '{page.title}' を削除しました"
+            return f"ページ '{page.title}' の削除に失敗しました"
 
-    elif action == "move":
-        if not new_parent_id:
-            return "move アクションには new_parent_id が必要です"
-        from sai_memory.memopedia.storage import move_pages_to_parent
-        count = move_pages_to_parent(adapter.conn, [resolved_id], new_parent_id)
-        if count > 0:
-            return f"ページ '{page.title}' を移動しました (新しい親: {new_parent_id})"
-        return f"ページ '{page.title}' の移動に失敗しました"
+        elif action == "move":
+            if not new_parent_id:
+                return "move アクションには new_parent_id が必要です"
+            from sai_memory.memopedia.storage import move_pages_to_parent
+            # move_pages_to_parent は生 conn の直接書き込みなのでロックを取る
+            with adapter._db_lock:
+                count = move_pages_to_parent(adapter.conn, [resolved_id], new_parent_id)
+            if count > 0:
+                return f"ページ '{page.title}' を移動しました (新しい親: {new_parent_id})"
+            return f"ページ '{page.title}' の移動に失敗しました"
 
-    elif action == "set_important":
-        if is_important is None:
-            return "set_important には is_important パラメータ (true/false) が必要です"
-        result = memopedia.set_important(resolved_id, is_important)
-        if result:
-            flag = "重要" if is_important else "通常"
-            return f"ページ '{page.title}' を{flag}に設定しました"
-        return "重要フラグの変更に失敗しました"
+        elif action == "set_important":
+            if is_important is None:
+                return "set_important には is_important パラメータ (true/false) が必要です"
+            result = memopedia.set_important(resolved_id, is_important)
+            if result:
+                flag = "重要" if is_important else "通常"
+                return f"ページ '{page.title}' を{flag}に設定しました"
+            return "重要フラグの変更に失敗しました"
 
     return f"未実装のアクション: {action}"
 

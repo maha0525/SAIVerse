@@ -12,8 +12,7 @@ from typing import List, Optional
 
 from sai_memory.memopedia.storage import resolve_page_ref, category_keys
 from saiverse.references import to_short_ref, to_uri
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -47,73 +46,68 @@ def memopedia_note(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(
-            persona_id, persona_dir=persona_dir, resource_id=persona_id
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        from sai_memory.memopedia import Memopedia
 
-    from sai_memory.memopedia import Memopedia
+        memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
+        today = date.today().isoformat()
 
-    memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
-    today = date.today().isoformat()
+        # --- Resolve target page ---
+        target_page = None
 
-    # --- Resolve target page ---
-    target_page = None
-
-    if page_id:
-        resolved_id = resolve_page_ref(adapter.conn, page_id)
-        target_page = memopedia.get_page(resolved_id) if resolved_id else None
-        if target_page is None:
-            return f"Page not found: {page_id}"
-    else:
-        if not title:
-            return "Error: title is required when creating a new page (no page_id given)"
-
-        cat = category.lower().strip()
-        if cat not in _CATEGORY_ROOT_MAP:
-            cat = "terms"
-
-        existing = memopedia.find_by_title(title, category=cat)
-        if existing:
-            target_page = existing
+        if page_id:
+            # resolve_page_ref は生 conn の直接読みなのでロックを取る
+            with adapter._db_lock:
+                resolved_id = resolve_page_ref(adapter.conn, page_id)
+            target_page = memopedia.get_page(resolved_id) if resolved_id else None
+            if target_page is None:
+                return f"Page not found: {page_id}"
         else:
-            parent_id = _CATEGORY_ROOT_MAP[cat]
-            target_page = memopedia.create_page(
-                parent_id=parent_id,
-                title=title,
-                summary=summary or "",
-                content="",
-                keywords=keywords,
+            if not title:
+                return "Error: title is required when creating a new page (no page_id given)"
+
+            cat = category.lower().strip()
+            if cat not in _CATEGORY_ROOT_MAP:
+                cat = "terms"
+
+            existing = memopedia.find_by_title(title, category=cat)
+            if existing:
+                target_page = existing
+            else:
+                parent_id = _CATEGORY_ROOT_MAP[cat]
+                target_page = memopedia.create_page(
+                    parent_id=parent_id,
+                    title=title,
+                    summary=summary or "",
+                    content="",
+                    keywords=keywords,
+                    edit_source="ai_conversation",
+                )
+
+        # --- Update page metadata if provided ---
+        meta_updates = {}
+        if summary:
+            meta_updates["summary"] = summary
+        if keywords:
+            meta_updates["keywords"] = keywords
+        if title and target_page.title != title:
+            meta_updates["title"] = title
+        if meta_updates:
+            memopedia.update_page(
+                target_page.id,
                 edit_source="ai_conversation",
+                **meta_updates,
             )
 
-    # --- Update page metadata if provided ---
-    meta_updates = {}
-    if summary:
-        meta_updates["summary"] = summary
-    if keywords:
-        meta_updates["keywords"] = keywords
-    if title and target_page.title != title:
-        meta_updates["title"] = title
-    if meta_updates:
-        memopedia.update_page(
-            target_page.id,
-            edit_source="ai_conversation",
-            **meta_updates,
+        # --- Create fragment ---
+        memopedia.create_fragment(
+            entity_id=target_page.id,
+            content=content,
+            source_date=today,
         )
-
-    # --- Create fragment ---
-    memopedia.create_fragment(
-        entity_id=target_page.id,
-        content=content,
-        source_date=today,
-    )
 
     if target_page.short_id is not None:
         short_ref = to_short_ref("memopedia", target_page.short_id)

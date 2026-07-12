@@ -8,8 +8,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from saiverse.references import to_short_ref
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 from sai_memory.memopedia.storage import category_keys
 
@@ -37,54 +36,49 @@ def memopedia_save_page(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        from sai_memory.memopedia import Memopedia
 
-    from sai_memory.memopedia import Memopedia
+        memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
 
-    memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
+        # Normalize category
+        cat = category.lower().strip()
+        if cat not in _CATEGORY_ROOT_MAP:
+            cat = "terms"
 
-    # Normalize category
-    cat = category.lower().strip()
-    if cat not in _CATEGORY_ROOT_MAP:
-        cat = "terms"
+        # Check if page already exists by title
+        existing = memopedia.find_by_title(title, category=cat)
 
-    # Check if page already exists by title
-    existing = memopedia.find_by_title(title, category=cat)
-
-    if existing:
-        # Update existing page
-        page = memopedia.update_page(
-            existing.id,
-            summary=summary,
-            content=content,
-            keywords=keywords,
-            edit_source="ai_conversation",
-        )
-        if page:
-            ex_ref = to_short_ref("memopedia", existing.short_id) if existing.short_id else existing.id[:8]
-            action = f"Updated page '{title}' ({ex_ref})"
+        if existing:
+            # Update existing page
+            page = memopedia.update_page(
+                existing.id,
+                summary=summary,
+                content=content,
+                keywords=keywords,
+                edit_source="ai_conversation",
+            )
+            if page:
+                ex_ref = to_short_ref("memopedia", existing.short_id) if existing.short_id else existing.id[:8]
+                action = f"Updated page '{title}' ({ex_ref})"
+            else:
+                return f"Failed to update page '{title}'"
         else:
-            return f"Failed to update page '{title}'"
-    else:
-        # Create new page under the appropriate root
-        parent_id = _CATEGORY_ROOT_MAP[cat]
-        page = memopedia.create_page(
-            parent_id=parent_id,
-            title=title,
-            summary=summary,
-            content=content,
-            keywords=keywords,
-            edit_source="ai_conversation",
-        )
-        pg_ref = to_short_ref("memopedia", page.short_id) if page.short_id else page.id[:8]
-        action = f"Created page '{title}' ({pg_ref}, category: {cat})"
+            # Create new page under the appropriate root
+            parent_id = _CATEGORY_ROOT_MAP[cat]
+            page = memopedia.create_page(
+                parent_id=parent_id,
+                title=title,
+                summary=summary,
+                content=content,
+                keywords=keywords,
+                edit_source="ai_conversation",
+            )
+            pg_ref = to_short_ref("memopedia", page.short_id) if page.short_id else page.id[:8]
+            action = f"Created page '{title}' ({pg_ref}, category: {cat})"
 
     # Return the full page content so the persona can see what was saved
     kw_str = ", ".join(keywords) if keywords else "(none)"

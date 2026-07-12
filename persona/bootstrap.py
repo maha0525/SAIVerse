@@ -72,6 +72,9 @@ def initialise_memory_adapter(persona) -> Optional[SAIMemoryAdapter]:
             persona_id=persona.persona_id,
             persona_dir=persona.persona_log_path.parent,
             resource_id=persona.persona_id,
+            # ペルソナ登録経路 = 起動時自動バックアップを起こす正規の1点。
+            # ツール・API 経路の使い捨て adapter はデフォルト False のまま。
+            startup_backup=True,
         )
         if adapter.is_ready():
             logging.info("SAIMemory ready for persona %s", persona.persona_id)

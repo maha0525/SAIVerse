@@ -6,8 +6,7 @@ from datetime import datetime
 
 from sai_memory.arasuji.storage import get_entry, get_children
 from saiverse.references import to_uri
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -37,54 +36,49 @@ def chronicle_context_up(entry_id: str) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        with adapter._db_lock:
+            entry = get_entry(adapter.conn, entry_id)
 
-    with adapter._db_lock:
-        entry = get_entry(adapter.conn, entry_id)
+        if not entry:
+            return f"(Chronicle entry が見つかりません: {entry_id})"
 
-    if not entry:
-        return f"(Chronicle entry が見つかりません: {entry_id})"
+        entry_uri = to_uri("chronicle", entry.id)
+        lines = [
+            "【Chronicle上流参照】",
+            f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
+            f"URI: {entry_uri}",
+            "",
+        ]
 
-    entry_uri = to_uri("chronicle", entry.id)
-    lines = [
-        "【Chronicle上流参照】",
-        f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
-        f"URI: {entry_uri}",
-        "",
-    ]
+        if not entry.parent_id:
+            lines.append("(このエントリはまだ上位Chronicleにまとめられていません)")
+            return "\n".join(lines)
 
-    if not entry.parent_id:
-        lines.append("(このエントリはまだ上位Chronicleにまとめられていません)")
-        return "\n".join(lines)
+        with adapter._db_lock:
+            parent = get_entry(adapter.conn, entry.parent_id)
 
-    with adapter._db_lock:
-        parent = get_entry(adapter.conn, entry.parent_id)
+        if not parent:
+            lines.append(f"(親エントリの取得に失敗しました: {entry.parent_id})")
+            return "\n".join(lines)
 
-    if not parent:
-        lines.append(f"(親エントリの取得に失敗しました: {entry.parent_id})")
-        return "\n".join(lines)
+        parent_uri = to_uri("chronicle", parent.id)
+        lines += [
+            f"--- 親エントリ (Lv{parent.level}) ---",
+            f"URI: {parent_uri}",
+            f"期間: {_fmt_time(parent.start_time)} ~ {_fmt_time(parent.end_time)} | {parent.message_count}件",
+            "",
+            "```",
+            parent.content,
+            "```",
+            "",
+        ]
 
-    parent_uri = to_uri("chronicle", parent.id)
-    lines += [
-        f"--- 親エントリ (Lv{parent.level}) ---",
-        f"URI: {parent_uri}",
-        f"期間: {_fmt_time(parent.start_time)} ~ {_fmt_time(parent.end_time)} | {parent.message_count}件",
-        "",
-        "```",
-        parent.content,
-        "```",
-        "",
-    ]
-
-    with adapter._db_lock:
-        siblings = get_children(adapter.conn, parent.id)
+        with adapter._db_lock:
+            siblings = get_children(adapter.conn, parent.id)
 
     # Remove self from siblings display to avoid duplication
     siblings = [s for s in siblings if s.id != entry.id]

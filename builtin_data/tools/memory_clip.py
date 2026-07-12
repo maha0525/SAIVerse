@@ -18,8 +18,7 @@ from __future__ import annotations
 from typing import Optional
 
 from saiverse import memory_atlas
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 from builtin_data.tools._core_memory_common import (
@@ -47,26 +46,20 @@ def memory_clip(
     if not mid:
         return f"Error: anchor を解釈できませんでした: {anchor}"
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
     persona_name = resolve_persona_display_name(persona_id)
     budget = resolve_core_memory_budget(persona_id)
-    try:
-        with adapter._db_lock:
-            return memory_atlas.clip_photo(
-                adapter, mid,
-                quote=quote, rounds=rounds, paste_to=paste_to,
-                persona_name=persona_name, mode=mode, core_budget=budget,
-            )
-    except memory_atlas.AtlasRefError as exc:
-        return f"Error: {exc}"
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        try:
+            with adapter._db_lock:
+                return memory_atlas.clip_photo(
+                    adapter, mid,
+                    quote=quote, rounds=rounds, paste_to=paste_to,
+                    persona_name=persona_name, mode=mode, core_budget=budget,
+                )
+        except memory_atlas.AtlasRefError as exc:
+            return f"Error: {exc}"
 
 
 def schema() -> ToolSchema:

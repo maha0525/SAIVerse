@@ -6,8 +6,7 @@ from datetime import datetime
 
 from sai_memory.arasuji.storage import get_entry, get_children
 from saiverse.references import to_uri
-from saiverse_memory import SAIMemoryAdapter
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -36,78 +35,73 @@ def chronicle_context_down(entry_id: str) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
-
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
-
-    with adapter._db_lock:
-        entry = get_entry(adapter.conn, entry_id)
-
-    if not entry:
-        return f"(Chronicle entry が見つかりません: {entry_id})"
-
-    entry_uri = to_uri("chronicle", entry.id)
-    lines = [
-        "【Chronicle下流参照】",
-        f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
-        f"URI: {entry_uri}",
-        "",
-        "```",
-        entry.content,
-        "```",
-        "",
-    ]
-
-    if not entry.source_ids:
-        lines.append("(ソースが見つかりません)")
-        return "\n".join(lines)
-
-    if entry.level == 1:
-        # Raw messages
-        from sai_memory.memory.storage import get_message
-        lines.append(f"--- 元のメッセージ ({len(entry.source_ids)}件) ---")
-        lines.append("```")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
         with adapter._db_lock:
-            messages = []
-            for msg_id in entry.source_ids:
-                msg = get_message(adapter.conn, msg_id)
-                if msg:
-                    messages.append(msg)
+            entry = get_entry(adapter.conn, entry_id)
 
-        messages.sort(key=lambda m: m.created_at)
-        for msg in messages:
-            ts = datetime.fromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M:%S")
-            role = msg.role if msg.role != "model" else "assistant"
-            content = (msg.content or "").strip()
-            lines.append(f"[{ts}] [{role}]: {content}")
+        if not entry:
+            return f"(Chronicle entry が見つかりません: {entry_id})"
 
-        if not messages:
-            lines.append("(元のメッセージを取得できませんでした)")
-        lines.append("```")
+        entry_uri = to_uri("chronicle", entry.id)
+        lines = [
+            "【Chronicle下流参照】",
+            f"参照元: Lv{entry.level} | {_fmt_time(entry.start_time)} ~ {_fmt_time(entry.end_time)} | {entry.message_count}件",
+            f"URI: {entry_uri}",
+            "",
+            "```",
+            entry.content,
+            "```",
+            "",
+        ]
 
-    else:
-        # Child Chronicle entries
-        with adapter._db_lock:
-            children = get_children(adapter.conn, entry.id)
+        if not entry.source_ids:
+            lines.append("(ソースが見つかりません)")
+            return "\n".join(lines)
 
-        lines.append(f"--- 子エントリ (Lv{entry.level - 1}, {len(children)}件) ---")
-        if not children:
-            lines.append("(子エントリが見つかりません)")
+        if entry.level == 1:
+            # Raw messages
+            from sai_memory.memory.storage import get_message
+            lines.append(f"--- 元のメッセージ ({len(entry.source_ids)}件) ---")
+            lines.append("```")
+
+            with adapter._db_lock:
+                messages = []
+                for msg_id in entry.source_ids:
+                    msg = get_message(adapter.conn, msg_id)
+                    if msg:
+                        messages.append(msg)
+
+            messages.sort(key=lambda m: m.created_at)
+            for msg in messages:
+                ts = datetime.fromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M:%S")
+                role = msg.role if msg.role != "model" else "assistant"
+                content = (msg.content or "").strip()
+                lines.append(f"[{ts}] [{role}]: {content}")
+
+            if not messages:
+                lines.append("(元のメッセージを取得できませんでした)")
+            lines.append("```")
+
         else:
-            for child in children:
-                child_uri = to_uri("chronicle", child.id)
-                lines.append(f"[{child.id}] {_fmt_time(child.start_time)} ~ {_fmt_time(child.end_time)} | {child.message_count}件")
-                lines.append(f"URI: {child_uri}")
-                lines.append("```")
-                lines.append(child.content)
-                lines.append("```")
-                lines.append("")
+            # Child Chronicle entries
+            with adapter._db_lock:
+                children = get_children(adapter.conn, entry.id)
+
+            lines.append(f"--- 子エントリ (Lv{entry.level - 1}, {len(children)}件) ---")
+            if not children:
+                lines.append("(子エントリが見つかりません)")
+            else:
+                for child in children:
+                    child_uri = to_uri("chronicle", child.id)
+                    lines.append(f"[{child.id}] {_fmt_time(child.start_time)} ~ {_fmt_time(child.end_time)} | {child.message_count}件")
+                    lines.append(f"URI: {child_uri}")
+                    lines.append("```")
+                    lines.append(child.content)
+                    lines.append("```")
+                    lines.append("")
 
     return "\n".join(lines)
 

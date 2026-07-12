@@ -5,12 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memory.storage import (
     get_message,
     get_messages_around,
 )
-from tools.context import get_active_persona_id, get_active_persona_path
+from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
 
 
@@ -30,31 +29,26 @@ def memory_read_around(
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    persona_dir = get_active_persona_path()
-    try:
-        adapter = SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
+    with open_persona_memory() as adapter:
+        if not adapter.is_ready():
+            raise RuntimeError(f"SAIMemory not ready for {persona_id}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+        # Get the anchor message
+        with adapter._db_lock:
+            anchor = get_message(adapter.conn, message_id)
 
-    # Get the anchor message
-    with adapter._db_lock:
-        anchor = get_message(adapter.conn, message_id)
+        if not anchor:
+            return f"(message not found: {message_id})"
 
-    if not anchor:
-        return f"(message not found: {message_id})"
-
-    # Get surrounding messages using efficient rowid-based query
-    with adapter._db_lock:
-        surrounding = get_messages_around(
-            adapter.conn,
-            thread_id=anchor.thread_id,
-            message_id=message_id,
-            before=window,
-            after=window,
-        )
+        # Get surrounding messages using efficient rowid-based query
+        with adapter._db_lock:
+            surrounding = get_messages_around(
+                adapter.conn,
+                thread_id=anchor.thread_id,
+                message_id=message_id,
+                before=window,
+                after=window,
+            )
 
     # surrounding does NOT include the anchor; insert it at the right position
     # Find where to insert: after all "before" messages (those with created_at <= anchor)
