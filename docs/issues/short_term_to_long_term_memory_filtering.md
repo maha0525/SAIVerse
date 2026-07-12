@@ -1,6 +1,6 @@
 # Issue: 短期記憶 → 長期記憶の選別（システム通知を入口で止める）
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🔲 未着手 → **解決設計は [episode.md](../intent/episode.md) §5.4 に統合（2026-07-13、レビュー中）**: ムダ通知の根絶（life.md 束C）＋残る通知はエピソード畳みに乗る——入口遮断の特別機構は作らない方向
 **優先度**: medium
 **作成日**: 2026-05-29
 **関連**: `docs/overview/landscape.md` §6、`docs/intent/session.md`、Chronicle 生成（`sea/runtime.py` の Metabolism 経路）

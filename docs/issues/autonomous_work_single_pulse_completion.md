@@ -1,6 +1,6 @@
 # Issue: 自律作業が 1 Pulse で完結したがる / 複数 Pulse にまたがる作業設計
 
-**ステータス**: 🔲 未着手 (低優先 — 動作優先で今は許容)
+**ステータス**: 🔲 未着手 (低優先 — 動作優先で今は許容) → **解決設計は [episode.md](../intent/episode.md) §10 に統合（2026-07-13、レビュー中）**: エピソードが「複数 Pulse にまたがる作業」の型を与える
 **優先度**: low
 **作成日**: 2026-06-29
 **関連**: `builtin_data/playbooks/public/track_autonomous.json` (自律メインライン), `saiverse/persona_task_manager.py` (task ライフサイクル), `docs/intent/persona_cognition/autonomous_desire.md` §11 (候補補充 Track)

@@ -420,7 +420,8 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 4. ~~パッケージング（Fable 検分 2026-07-13）~~ 完了 — 先行独立2件（B4 / redundant 症状止め）＋
    intent 二本（**一本目「ライフ」= A3/A4＋束C** / **二本目「エピソードの記憶と見せ方」= A1/A2＋B1/X1**）。
    未決の世界観判断は二本目に集約し、待ちの少ない一本目から進める。
-5. ~~intent 一本目の起草~~ 完了 — [life.md](../intent/life.md) v0.1（session.md 吸収・束C 案 Y・予算世代交代）。
-6. **（次）life.md まはーレビュー → 二本目 intent 起草 → 実装**。個別 issue は intent 側から参照して束ねる。
+5. ~~intent 一本目の起草~~ 完了 — [life.md](../intent/life.md) v0.2（session.md 吸収・束C 案 Y・予算世代交代。**v0.1 レビュー済: 案 Y 承認＋裁定 3 件反映**）。
+6. ~~intent 二本目の起草~~ 完了 — [episode.md](../intent/episode.md) v0.1（三つの顔＝記憶 LoD / 世界への露出 / 監査。概要＝Lv1 Chronicle 共有部品化・AUTONOMOUS 化・監査役＋危険マーク・チャット三段露出・Beat 型化・既存 issue 6 本吸収）。
+7. **（次）episode.md まはーレビュー → 両 intent の実装順確定 → 実装**。
 
 **現時点で実装には入らない。** 先行独立2件（B4 / redundant 症状止め）はレビューと並行して着手可。

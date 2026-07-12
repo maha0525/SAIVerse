@@ -1,6 +1,6 @@
 # Issue: spell round 上限到達時の挙動を line 別に再設計する
 
-**ステータス**: 🔲 未着手 (低優先 — 現状実害なし)
+**ステータス**: 🔲 未着手 (低優先 — 現状実害なし) → **前提変更を [episode.md](../intent/episode.md) §10 が記録（2026-07-13、レビュー中）**: 自律セッションの AUTONOMOUS 化で sub_line 持ち越し設計の前提が変わる。main_line 会話側（棄却）は不変
 **優先度**: low
 **作成日**: 2026-05-25
 **関連**: `sea/runtime_llm.py:_run_spell_loop` (L911 `while loop_count < _MAX_SPELL_LOOPS`), `SAIVERSE_SPELL_MAX_ROUNDS` (.env, 現状 10), `sea/pulse_context.py:current_line_metadata`

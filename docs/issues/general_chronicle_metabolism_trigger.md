@@ -1,6 +1,6 @@
 # Issue: General Chronicle 生成 trigger を Metabolism 押し出し対象判定に変更
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🔲 未着手 → **解決設計は [episode.md](../intent/episode.md) §6.1 に統合（2026-07-13、レビュー中）**: 生成 trigger＝エピソード close（範囲指定）、畳み＝Metabolism（ライフ終端）の別操作
 **優先度**: low
 **作成日**: 2026-05-09
 **関連**: Track Chronicle 設計議論 (`docs/intent/persona_cognition/`), `sea/runtime.py:_generate_chronicle`

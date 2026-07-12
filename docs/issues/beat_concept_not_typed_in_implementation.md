@@ -1,6 +1,6 @@
 # Issue: Beat 概念が実装に型として存在しない
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🔲 未着手 → **表示面の解決設計は [episode.md](../intent/episode.md) §9 に統合（2026-07-13、レビュー中）**: 型は runtime_llm 分割 Phase 1 の BeatExecution をそのまま採用、バブル区切りは episode.md の時間階層入れ子に乗る
 **優先度**: medium
 **作成日**: 2026-05-29
 **関連**: `docs/overview/landscape.md` §4、`sea/runtime_llm.py` `_run_spell_loop`、memory `project_beat_concept`
