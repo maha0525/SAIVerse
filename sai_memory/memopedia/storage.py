@@ -446,8 +446,8 @@ def _seed_root_pages(conn: sqlite3.Connection) -> None:
         if cur.fetchone() is None:
             conn.execute(
                 """
-                INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, is_trunk)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (root["id"], root["title"], root["summary"], root["content"], root["category"], now, now),
             )
@@ -456,6 +456,18 @@ def _seed_root_pages(conn: sqlite3.Connection) -> None:
     # (=ユーザーがリネームしていない) 場合のみ冪等に揃える。
     conn.execute(
         "UPDATE memopedia_pages SET title = '計画' WHERE id = 'root_plans' AND title = '予定'"
+    )
+    # カテゴリルートは trunk (カテゴリコンテナ)。旧 seed が is_trunk を立てて
+    # いなかったため既存 DB を冪等にバックフィルする (新しい root_core /
+    # root_theme と同じ扱いに揃える)。trunk 除外フィルタ (編纂検知・想起・
+    # 目次) がルートに効くための前提。updated_at は変えない — 編集来歴の
+    # 窓集計 (新聞) に「編集」として現れないように。
+    root_ids = [root["id"] for root in INITIAL_ROOTS]
+    placeholders = ",".join("?" for _ in root_ids)
+    conn.execute(
+        f"UPDATE memopedia_pages SET is_trunk = 1 "
+        f"WHERE id IN ({placeholders}) AND (is_trunk = 0 OR is_trunk IS NULL)",
+        root_ids,
     )
     conn.commit()
 
