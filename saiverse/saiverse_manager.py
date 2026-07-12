@@ -617,6 +617,20 @@ class SAIVerseManager(
             return
         self._persona_cache_overrides[persona_id] = {"enabled": bool(enabled), "ttl": ttl or "5m"}
 
+    def clear_persona_cache_override(self, persona_id: str) -> None:
+        """persona の cache override を削除し、global 既定 (manager.state) へ戻す。
+
+        life.md §5.1 / §6.2 (Phase 3): 均等モードのライフが自分で設定した
+        TTL=1h override を、ライフ終端から anchor validity 秒後の遅延解除で
+        外すために使う (即時に外すと anchor の生存評価が実キャッシュの寿命と
+        ズレる)。ユーザーが人設定タブから明示設定した override も同じ辞書に
+        入るため、呼び出し側は「自分が設定したものかどうか」を確認してから
+        呼ぶこと (day_plan._clear_life_ttl_override の厳密一致チェック)。
+        """
+        if not persona_id:
+            return
+        self._persona_cache_overrides.pop(persona_id, None)
+
     def resolve_persona_cache(self, persona_id: Optional[str]) -> tuple[bool, str]:
         """persona の実効 ``(enabled, ttl)`` を返す。
 

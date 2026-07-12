@@ -1629,6 +1629,28 @@ class SEARuntime:
             # ここで砂金採り (セッションクローズ) を別スレッドに委譲する。
             self._spawn_session_close(persona_id)
             return False
+
+        # life.md §5.2: keep-alive 連鎖はライフに従属する。その日 lives が宣言
+        # されている場合、現在時刻がいずれかのライフ区間内でなければ (= 谷)
+        # touch せず連鎖を自然停止する — ここで return するため、この後の
+        # schedule_cache_ttl_pulse への再予約にも到達しない (二重管理を避ける
+        # 単一の集約点)。lives 未宣言の日 / ペルソナは常に許可 (完全後方互換)。
+        # 判定失敗時は許可側にフォールバックする (安全側は「温め続ける」— 谷
+        # 判定の誤りで温もりを止めてしまう方が実害が大きい)。
+        try:
+            from saiverse.day_plan import is_keepalive_allowed
+            if not is_keepalive_allowed(manager, persona_id):
+                LOGGER.debug(
+                    "[keepalive] skipped (persona=%s outside declared life; valley)",
+                    persona_id,
+                )
+                return False
+        except Exception:
+            LOGGER.warning(
+                "[keepalive] life gate check failed (persona=%s); defaulting to allow",
+                persona_id, exc_info=True,
+            )
+
         model_key = getattr(persona, "model", None)
         if not model_key:
             return False

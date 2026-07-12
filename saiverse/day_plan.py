@@ -700,6 +700,32 @@ def get_life_for_time(lives: List[Dict[str, Any]], hhmm: str) -> Optional[int]:
     return None
 
 
+def is_keepalive_allowed(manager: Any, persona_id: str) -> bool:
+    """keep-alive 連鎖のライフ従属ゲート (life.md §5.2)。
+
+    その日 lives が宣言されていれば、現在時刻がいずれかのライフ区間内のときだけ
+    True (谷では False = keep-alive を止める)。lives 未宣言の日 / ペルソナは
+    常に True (旧挙動のまま — 完全後方互換)。判定失敗時は True にフォールバック
+    する (安全側は「温め続ける」— keep-alive を止める方向に倒さない)。
+
+    ``sea.runtime.SEARuntime.run_cache_keepalive`` が唯一の呼び出し元
+    (keep-alive 連鎖の判定を 1 箇所に集約する設計、life.md Phase3)。
+    """
+    try:
+        plan_date_str = _resolve_current_plan_date(manager, persona_id)
+        lives = get_lives(manager, persona_id, plan_date_str)
+        if not lives:
+            return True
+        hhmm = clock.now().strftime("%H:%M")
+        return get_life_for_time(lives, hhmm) is not None
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] is_keepalive_allowed failed (persona=%s); defaulting to allow",
+            persona_id, exc_info=True,
+        )
+        return True
+
+
 def _check_slots_within_lives(
     manager: Any, persona_id: str, plan_date_str: str, slots: List[Dict[str, Any]]
 ) -> None:
@@ -1065,6 +1091,195 @@ def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> None:
         )
 
 
+#: 均等モード中に運転する explicit cache TTL (life.md §5.1)。均等モードの
+#: 最大コマ間隔 (:data:`LIFE_EVEN_MAX_GAP_MINUTES` 既定 50 分) は TTL=1h を
+#: 前提に設計されている — global 既定の "5m" のままだと keep-alive が
+#: 3〜4 分おきに artificial touch を打ち続けることになり、意図した「実パルス
+#: 自身がキャッシュを繋ぐ」設計にならない。
+_EVEN_MODE_CACHE_TTL = "1h"
+
+
+def _life_ttl_clear_key(persona_id: str) -> str:
+    """均等モードの TTL override 遅延解除の EventScheduler 予約 key。"""
+    return f"life_ttl_clear:{persona_id}"
+
+
+def _resolve_ttl_clear_delay_seconds(manager: Any, persona_id: str) -> int:
+    """TTL override 遅延解除の待ち秒数 (= anchor validity 秒) を解決する。
+
+    ``SessionLifecycle.get_anchor_validity_seconds`` は anchor の生存を
+    「**現在の** TTL 設定」で評価する — override (1h) がまだ生きている
+    ライフ終端のこの瞬間に読めば、実キャッシュの寿命評価と同じ 3600 秒が
+    返る。runtime / model が引けない異常系は 3600 秒 (Anthropic explicit 1h
+    相当) にフォールバックする (長すぎる側に倒す — 早すぎる clear が
+    「実キャッシュは生きているのに anchor は失効扱い」の欠陥の源)。
+    """
+    default = 3600
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    model_key = getattr(persona, "model", None) if persona is not None else None
+    runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    lifecycle = getattr(runtime, "session_lifecycle", None)
+    if not model_key or lifecycle is None:
+        return default
+    try:
+        seconds = int(lifecycle.get_anchor_validity_seconds(model_key, persona_id))
+        return seconds if seconds > 0 else default
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to resolve TTL clear delay (persona=%s); using %ds",
+            persona_id, default, exc_info=True,
+        )
+        return default
+
+
+def _clear_life_ttl_override(manager: Any, persona_id: str) -> None:
+    """遅延解除の発火体: ライフが設定した TTL override を厳密一致チェック付きで外す。
+
+    現在の override が「ライフが設定した値」({"enabled": True, "ttl": "1h"}) と
+    厳密一致するときだけ clear する — 予約〜発火の間にユーザーが人設定タブで
+    別の値へ明示的に変更していた場合はそれを尊重して触らない。
+    """
+    get_override = getattr(manager, "get_persona_cache_override", None)
+    clear_override = getattr(manager, "clear_persona_cache_override", None)
+    if get_override is None or clear_override is None:
+        return
+    try:
+        current = get_override(persona_id)
+        if current == {"enabled": True, "ttl": _EVEN_MODE_CACHE_TTL}:
+            clear_override(persona_id)
+            LOGGER.info(
+                "[day_plan] life TTL override cleared (delayed, persona=%s)",
+                persona_id,
+            )
+        else:
+            LOGGER.debug(
+                "[day_plan] life TTL clear fired but override does not match "
+                "life-set value; leaving as-is (persona=%s current=%r)",
+                persona_id, current,
+            )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to clear life TTL override (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
+def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str, Any]) -> None:
+    """life.md §5.1: 均等モードのライフ中は persona の explicit cache TTL を
+    1h override する。
+
+    前のライフの遅延解除予約 (:func:`_sync_cache_ttl_for_life_end`) が残って
+    いれば先に cancel する — TTL 経過前に次のライフが始まったケースで、
+    ライフの最中に解除が発火して override が外れる事故を防ぐ。
+
+    persona に既存の cache override (人設定タブでユーザーが明示設定したもの、
+    または前のライフが設定してまだ解除されていない 1h) があればそのまま触ら
+    ない — ライフの宣言は既定値の補完であって、明示指定を上書きしない (前の
+    ライフの 1h が残っている場合は望む値が既に入っているので set 不要)。
+    自由モードのライフでは何もしない (間隔制約が無いので TTL を強制する理由
+    がない)。
+    """
+    if life.get("mode") != LIFE_MODE_EVEN:
+        return
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is not None:
+        try:
+            if scheduler.cancel(_life_ttl_clear_key(persona_id)):
+                LOGGER.info(
+                    "[day_plan] pending life TTL clear cancelled by next life "
+                    "start (persona=%s)", persona_id,
+                )
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] failed to cancel pending life TTL clear (persona=%s)",
+                persona_id, exc_info=True,
+            )
+    get_override = getattr(manager, "get_persona_cache_override", None)
+    set_override = getattr(manager, "set_persona_cache_override", None)
+    if get_override is None or set_override is None:
+        return
+    try:
+        if get_override(persona_id) is not None:
+            LOGGER.debug(
+                "[day_plan] life start (mode=even): existing cache override "
+                "present; not forcing TTL=%s (persona=%s)",
+                _EVEN_MODE_CACHE_TTL, persona_id,
+            )
+            return
+        set_override(persona_id, enabled=True, ttl=_EVEN_MODE_CACHE_TTL)
+        LOGGER.info(
+            "[day_plan] life start (mode=even): cache TTL set to %s (persona=%s)",
+            _EVEN_MODE_CACHE_TTL, persona_id,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to apply even-mode cache TTL (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
+def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, Any]) -> None:
+    """ライフ終端で TTL override の**遅延**解除を予約する (life.md §6.2 v0.4)。
+
+    即時に clear してはいけない: anchor の生存判定
+    (``SessionLifecycle.get_anchor_validity_seconds``) は「**現在の** TTL 設定」
+    で評価されるため、終端で即時に global 既定 (5m) へ戻すと、実キャッシュは
+    1h 生きているのに anchor は 5m で失効扱いになり、惜しい谷 (終了直後〜TTL
+    内) の再訪が Case 3 に落ちて生きたキャッシュを捨てる。終端 + anchor
+    validity 秒 (= 実キャッシュが確実に切れた後) に発火する予約を入れ、発火体
+    (:func:`_clear_life_ttl_override`) が厳密一致チェック付きで clear する。
+
+    次のライフが TTL 経過前に始まる場合は :func:`_sync_cache_ttl_for_life_start`
+    が同 key の予約を cancel する。
+    """
+    if life.get("mode") != LIFE_MODE_EVEN:
+        return
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return
+    try:
+        delay = _resolve_ttl_clear_delay_seconds(manager, persona_id)
+        fire_at = clock.now() + timedelta(seconds=delay)
+        scheduler.schedule(
+            fire_at=fire_at,
+            callback=lambda: _clear_life_ttl_override(manager, persona_id),
+            key=_life_ttl_clear_key(persona_id),
+        )
+        LOGGER.info(
+            "[day_plan] life end (mode=even): TTL override clear scheduled in "
+            "%ds (persona=%s)", delay, persona_id,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to schedule life TTL clear (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
+def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> None:
+    """ライフ終端で keep-alive 予約 (``ttl:{persona_id}``) を cancel する (谷では温めない)。
+
+    ``sea.session_lifecycle.SessionLifecycle.schedule_cache_ttl_pulse`` /
+    ``_schedule_session_watchdog`` が使う予約 key と共通 (1 ペルソナ 1 予約)。
+    ライフ中に未発火の予約が残っていても、この cancel で確実に止まる —
+    :func:`is_keepalive_allowed` による発火時ゲートは二重の安全網。
+    """
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return
+    try:
+        if scheduler.cancel(f"ttl:{persona_id}"):
+            LOGGER.info(
+                "[day_plan] keep-alive reservation cancelled at life end (persona=%s)",
+                persona_id,
+            )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to cancel keep-alive reservation at life end (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
 def _handle_life_start(
     manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
 ) -> None:
@@ -1074,6 +1289,19 @@ def _handle_life_start(
         persona_id, plan_date_str, index, life["start"], life["end"],
         life["budget_pulses"], life["mode"],
     )
+    # life.md §6.1 / Phase3 調査: 「ライフ開始 = 新しい Session 開始」は既存
+    # 機構が自然に満たす。前のライフの終端で keep-alive が止まっていれば
+    # anchor は TTL で自然失効しており、次の Pulse の prepare_context
+    # (sea/runtime_context.py Case 3) が resolve_metabolism_anchor で有効な
+    # anchor を見つけられず、その場で新しい anchor (= 新しい Session の起点)
+    # を張り直す。谷が TTL より短く anchor がまだ生きていれば、同じ Session
+    # の続きとしてキャッシュヒットで再開する (惜しい谷、life.md §8.3)。
+    # ここで明示的に head capture 等を行う必要は無い — ログのみ残す。
+    LOGGER.info(
+        "[day_plan] session boundary: next pulse continues or freshly starts "
+        "a session depending on anchor TTL (persona=%s)", persona_id,
+    )
+    _sync_cache_ttl_for_life_start(manager, persona_id, life)
     _notify_life_boundary(
         manager, persona_id,
         f"(ライフ開始) {life['start']}〜{life['end']} の活動を始めます。",
@@ -1090,8 +1318,16 @@ def _handle_life_end(
         persona_id, plan_date_str, index, life["start"], life["end"],
         consumed, life["budget_pulses"],
     )
-    # TODO(life.md Phase3): Metabolism 連動 (ライフ終端での代謝台帳締め・畳み) は
-    # ここに接続する。本フェーズでは台帳締めログ + 通知のみ。
+    # ライフ終端の節目 (life.md §6.2 v0.4): 終端が能動的に行うのは
+    # keep-alive の停止 (予約 cancel) と TTL override の遅延解除予約だけ。
+    # anchor は**触らない** — touch が止まれば TTL で自然失効し、Metabolism
+    # 本体 (Chronicle 化・eviction) は失効後の最初の活動の既存経路
+    # (runtime_context.py Case 3) が行う。anchor を即時失効させると、惜しい谷
+    # (終了直後〜TTL 内の再訪、実キャッシュはまだ生きている) の最初の Pulse が
+    # Case 3 で履歴を組み替え、生きたキャッシュを捨ててしまう (§8.3 裁定と
+    # 矛盾。v0.3 の「即時失効」は v0.4 で誤りと訂正済み)。
+    _cancel_keepalive_reservation(manager, persona_id)
+    _sync_cache_ttl_for_life_end(manager, persona_id, life)
     _notify_life_boundary(
         manager, persona_id,
         f"(ライフ終了) {life['start']}〜{life['end']} の活動を終えました。",
