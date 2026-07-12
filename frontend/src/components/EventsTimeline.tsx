@@ -28,6 +28,8 @@ import {
 
 interface EpisodeItem extends EpisodeForText {
     episode_id: string;
+    episode_ref: string | null;         // "episode:N" (ペルソナ内連番。親子解決に使う)
+    origin_ref: string | null;          // 親のできごと ("episode:N")。work_session→slot 等
     status: 'open' | 'closed';
     building_id: string | null;
     persona_name: string;
@@ -103,24 +105,67 @@ function formatDateLabel(dateStr: string): string {
     return `${y}年${m}月${d}日 (${wd})`;
 }
 
+/** できごとを表示カード単位に束ねる。
+ *
+ * 2 つの軸で束ねる:
+ * 1. **occurrence 束ね (§8.1 複数主観)**: 同じ world event を複数ペルソナが
+ *    見ていれば group_key (= occurrence_id) が同じ → 1 カードにアバターを重ねる。
+ * 2. **親子畳み込み**: work_session は origin_ref でコマ (slot) を指す親子
+ *    (day_plan が slot を開き、その中で work_session が走る)。同時刻に slot と
+ *    work_session の 2 カードが並ぶのを防ぐため、work_session を親 slot と同じ
+ *    グループへ畳む。slot が primary になり (開始が先)、コマの表題・kind バッジ・
+ *    成果物が 1 枚に集約される。
+ *
+ * episode_ref / origin_ref はペルソナ内連番なので、親解決は必ず persona_id 込みで
+ * 引く (別ペルソナの同じ episode:N に誤ってぶら下げない)。
+ */
 function groupEpisodes(episodes: EpisodeItem[]): EpisodeGroup[] {
-    const groups: EpisodeGroup[] = [];
+    // (persona_id, episode_ref) → episode。親 (origin) 解決用。
+    const byRef = new Map<string, EpisodeItem>();
     for (const ep of episodes) {
-        const last = groups[groups.length - 1];
-        if (last && last.key === ep.group_key) {
-            last.episodes.push(ep);
-            if (!last.members.some(mem => mem.id === ep.persona_id)) {
-                last.members.push({ id: ep.persona_id, name: ep.persona_name, avatar: ep.persona_avatar_url });
-            }
-        } else {
-            groups.push({
-                key: ep.group_key,
-                episodes: [ep],
-                members: [{ id: ep.persona_id, name: ep.persona_name, avatar: ep.persona_avatar_url }],
-                timeLabel: isoClock(ep.started_at_iso),
-            });
-        }
+        if (ep.episode_ref) byRef.set(`${ep.persona_id}::${ep.episode_ref}`, ep);
     }
+    const effectiveKey = (ep: EpisodeItem): string => {
+        if (ep.kind === 'work_session' && ep.origin_ref) {
+            const parent = byRef.get(`${ep.persona_id}::${ep.origin_ref}`);
+            if (parent && parent.kind === 'slot') return parent.group_key;
+        }
+        return ep.group_key;
+    };
+
+    const byKey = new Map<string, EpisodeItem[]>();
+    for (const ep of episodes) {
+        const k = effectiveKey(ep);
+        const arr = byKey.get(k);
+        if (arr) arr.push(ep);
+        else byKey.set(k, [ep]);
+    }
+
+    const groups: EpisodeGroup[] = [];
+    byKey.forEach((eps, key) => {
+        // グループ内の primary はアンカー (自分の group_key がグループキーと一致する
+        // 行 = 畳み先の親 slot)。仮想クロック下では子 work_session が親と同秒/僅かに
+        // 先に開くことがあり、started_at 順では親を primary にできないため、
+        // アンカーかどうかを第一キーにする。occurrence 束ね (全行が同じ group_key) の
+        // ときは全員アンカー扱いで、従来どおり started_at 順になる。
+        eps.sort((a, b) => {
+            const aAnchor = a.group_key === key ? 0 : 1;
+            const bAnchor = b.group_key === key ? 0 : 1;
+            if (aAnchor !== bAnchor) return aAnchor - bAnchor;
+            return a.started_at - b.started_at || (a.episode_id < b.episode_id ? -1 : 1);
+        });
+        const members: { id: string; name: string; avatar: string | null }[] = [];
+        for (const ep of eps) {
+            if (!members.some(mem => mem.id === ep.persona_id)) {
+                members.push({ id: ep.persona_id, name: ep.persona_name, avatar: ep.persona_avatar_url });
+            }
+        }
+        groups.push({ key, episodes: eps, members, timeLabel: isoClock(eps[0].started_at_iso) });
+    });
+    // グループ間は先頭時刻順 (バックエンドの group_start 相当)。
+    groups.sort((a, b) =>
+        a.episodes[0].started_at - b.episodes[0].started_at
+        || (a.key < b.key ? -1 : 1));
     return groups;
 }
 
