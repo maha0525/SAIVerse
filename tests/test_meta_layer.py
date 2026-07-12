@@ -444,6 +444,83 @@ def test_state_message_omits_race_block_when_not_already_running(tm, db_persona)
 
 
 # ---------------------------------------------------------------------------
+# life.md §7 案 Y (2026-07-13): wait_response タイムアウトの自己ゲート化回避
+#
+# TrackManager がタイムアウトで Track を pause しなくなったため、social 等
+# (user_conversation 以外) の wait_response Track は自分自身のタイムアウトで
+# on_periodic_tick を呼んだ時点でもまだ running のまま。on_periodic_tick の
+# 「running Track が wait_response 型なら抑止する」ゲートが素朴だと、この
+# 自分自身の呼び出しまでブロックしてしまう (社交 Track の判断が二度と
+# 起動できなくなる自己ゲート化)。context の trigger/track_id が「自分自身の
+# タイムアウト」を示す場合だけ例外的にゲートを通す。
+# ---------------------------------------------------------------------------
+
+def test_periodic_tick_not_self_gated_by_own_wait_response_timeout(
+    tm, db_persona, session_factory, monkeypatch,
+):
+    """自分自身の wait_response タイムアウト起因の tick は抑止されない。"""
+    from types import SimpleNamespace
+
+    track_id = tm.create(
+        db_persona, "social", is_persistent=True, initial_status="running",
+    )
+
+    persona = FakePersona(db_persona, FakeLLMClient(["dummy"]))
+    persona.activity_state = "Active"
+    manager = FakeManager(tm, {db_persona: persona})
+    manager.SessionLocal = session_factory
+    meta = MetaLayer(manager)
+
+    calls = []
+    monkeypatch.setattr(
+        meta, "_run_judgment_via_playbook",
+        lambda p, atid, ctx: calls.append(ctx),
+    )
+    monkeypatch.setattr(
+        meta, "_get_handler_for_track",
+        lambda track: SimpleNamespace(post_complete_behavior="wait_response"),
+    )
+
+    meta.on_periodic_tick(
+        db_persona,
+        context={"trigger": "wait_response_timeout", "track_id": track_id},
+    )
+    assert len(calls) == 1
+    assert calls[0]["trigger"] == "wait_response_timeout"
+
+
+def test_periodic_tick_still_gated_for_unrelated_trigger(
+    tm, db_persona, session_factory, monkeypatch,
+):
+    """通常の定期 tick (自分自身のタイムアウトでない) は従来どおり抑止される
+    (退行防止 — 自己ゲート回避の例外を広げすぎていないことの確認)。"""
+    from types import SimpleNamespace
+
+    tm.create(
+        db_persona, "social", is_persistent=True, initial_status="running",
+    )
+
+    persona = FakePersona(db_persona, FakeLLMClient(["dummy"]))
+    persona.activity_state = "Active"
+    manager = FakeManager(tm, {db_persona: persona})
+    manager.SessionLocal = session_factory
+    meta = MetaLayer(manager)
+
+    calls = []
+    monkeypatch.setattr(
+        meta, "_run_judgment_via_playbook",
+        lambda p, atid, ctx: calls.append(ctx),
+    )
+    monkeypatch.setattr(
+        meta, "_get_handler_for_track",
+        lambda track: SimpleNamespace(post_complete_behavior="wait_response"),
+    )
+
+    meta.on_periodic_tick(db_persona, context={"cycle_id": "x"})
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # Per-persona 直列化 Lock (handoff_2026-04-30 Part 1)
 # ---------------------------------------------------------------------------
 

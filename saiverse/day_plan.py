@@ -18,11 +18,13 @@
 ``consume_budget`` が実測値で積算する。台帳の無い日 (day_open 前 / 旧データ)
 はゲート無効 = 従来挙動 (後方互換)。
 
-「ユーザー会話中」の判定は running Track が user_conversation 種別であること
-(``TrackManager.get_running``)。対ユーザー Track は wait_response 型で、会話が
-続く間 running を保ち、無応答タイムアウト (既定 30 分、AI.USER_CONV_TIMEOUT_MINUTES)
-で pending に落ちる — その pending 遷移が v2 の「会話終了」に相当するため、
-running user_conversation = 会話中 が最も設計に整合する述語である。
+「ユーザー会話中」の判定は開いている kind='conversation' の出来事 (Episode)
+の有無 (``saiverse.episodes.get_open_episode``)。無応答タイムアウト (既定 30 分、
+AI.USER_CONV_TIMEOUT_MINUTES) が会話の出来事を閉じる瞬間が v2 の「会話終了」に
+相当する (life.md §7 案 Y, 2026-07-13)。旧実装は running Track が
+user_conversation 種別かで判定していたが、Track はもう時間経過で状態を
+動かさない (running のまま残り続けうる) ため、この述語には使えなくなった —
+「いま」の真実は Track ではなく開いている出来事が持つ。
 
 kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。本モジュールが
 組み込みで登録するのは:
@@ -885,25 +887,27 @@ def replace_remaining_slots(
 
 
 def _is_in_user_conversation(manager: Any, persona_id: str) -> bool:
-    """ユーザー会話中か。running Track が user_conversation 種別なら True。
+    """ユーザー会話中か。開いている kind='conversation' の出来事があれば True。
 
-    対ユーザー Track は wait_response 型で、会話継続中は running を保ち、
-    無応答タイムアウトで pending に落ちる (saiverse_manager.py
-    ``_wait_response_timeout_provider``)。running でなくなった瞬間が v2 の
-    「会話終了」に相当するため、この述語が設計に最も整合する。
+    life.md §7 案 Y (2026-07-13): 「いま」の真実は開いているエピソードが持つ。
+    無応答タイムアウトが会話の出来事を閉じた瞬間が v2 の「会話終了」に相当する
+    (``autonomy_wiring.handle_conversation_end``)。旧実装 (running Track が
+    user_conversation 種別か) は、Track がもう時間経過で pending に落ちない
+    (running のまま残り続けうる) ため使えない。
     """
-    track_manager = getattr(manager, "track_manager", None)
-    if track_manager is None:
-        return False
     try:
-        running = track_manager.get_running(persona_id)
+        from saiverse import episodes
+
+        ep = episodes.get_open_episode(
+            manager, persona_id, kind=episodes.KIND_CONVERSATION,
+        )
     except Exception:
         LOGGER.warning(
-            "[day_plan] get_running failed (persona=%s); treating as not in conversation",
+            "[day_plan] get_open_episode failed (persona=%s); treating as not in conversation",
             persona_id, exc_info=True,
         )
         return False
-    return running is not None and getattr(running, "track_type", None) == "user_conversation"
+    return ep is not None
 
 
 def _building_display_name(manager: Any, building_id: Any) -> str:

@@ -376,7 +376,12 @@ class MetaLayer:
         発火しない。加えて、現在 running の Track の Handler が
         ``post_complete_behavior == 'wait_response'`` を持つ場合、相手の応答待ち
         中にメタ判断を割り込ませると自然な対話を壊すため、抑止する
-        (intent B v0.8 §"post_complete_behavior 列挙")。
+        (intent B v0.8 §"post_complete_behavior 列挙")。ただし
+        ``context={"trigger": "wait_response_timeout", "track_id": <その Track>}``
+        で呼ばれた場合 (= まさにその Track 自身のタイムアウトが本 tick の起点)
+        は抑止しない — life.md §7 案 Y でタイムアウトは Track を pause しなく
+        なったため、対象 Track は running のまま残っており、素朴なチェックでは
+        自分自身をブロックしてしまう。
 
         per-persona Lock で `on_track_alert` と直列化する。alert 経由判断が
         走行中なら完了まで wait する (skip しない: TTL 切れを避けるため)。
@@ -421,12 +426,25 @@ class MetaLayer:
                     )
                     return
 
-                # post_complete_behavior 抑止: 応答待ち型の Track は割り込まない
+                # post_complete_behavior 抑止: 応答待ち型の Track は割り込まない。
+                # 例外: この定期 tick そのものが「その Track の wait_response
+                # タイムアウト発火」である場合 (context.trigger ==
+                # 'wait_response_timeout' かつ対象 track_id が一致)。
+                # life.md §7 案 Y (2026-07-13) で TrackManager がタイムアウト時に
+                # Track を pause しなくなったため、その Track は依然 running の
+                # まま本メソッドに辿り着く。ここで自分自身を止めてしまうと
+                # social 等 (user_conversation 以外) の wait_response Track が
+                # 二度と判断を起動できなくなる (自己ゲート化)。
                 running_track = self._get_running_track(persona_id)
                 if running_track is not None:
                     handler = self._get_handler_for_track(running_track)
                     behavior = getattr(handler, "post_complete_behavior", None) if handler else None
-                    if behavior == "wait_response" and not force:
+                    is_own_timeout = (
+                        (context or {}).get("trigger") == "wait_response_timeout"
+                        and (context or {}).get("track_id")
+                        == getattr(running_track, "track_id", None)
+                    )
+                    if behavior == "wait_response" and not force and not is_own_timeout:
                         logging.debug(
                             "[meta-layer] periodic tick skipped (running Track wait_response): persona=%s track=%s",
                             persona_id, getattr(running_track, "track_id", "?"),

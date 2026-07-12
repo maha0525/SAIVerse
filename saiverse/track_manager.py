@@ -111,8 +111,11 @@ class TrackManager:
         #   - base_time は最終メッセージの created_at 想定。NULL ならスケジュール側で
         #     ``datetime.now()`` にフォールバックする (= ペルソナが activate した
         #     直後の Track が即タイムアウトする事故を回避)。
-        # callback: タイムアウト発火 + pause 完了後に呼ばれる。
-        #   - 用途: メタ判断 Pulse の起動 (MetaLayer.on_periodic_tick) と
+        # callback: タイムアウト発火後に呼ばれる。Track の状態はもう動かさない
+        # (life.md §7 案 Y, 2026-07-13): 「いま」の真実は開いているエピソードが持つ。
+        #   - 用途: 会話 Track なら会話の出来事 close + post_conversation 判断
+        #     (autonomy_wiring.handle_wait_response_timeout)、それ以外は従来通り
+        #     メタ判断 Pulse の起動 (MetaLayer.on_periodic_tick) と
         #     AutonomyManager の interval 再開要求。
         # どちらも None の場合はタイマー機構が完全に無効化される (テスト容易性)。
         self.wait_response_timeout_provider = wait_response_timeout_provider
@@ -625,8 +628,12 @@ class TrackManager:
     # ------------------------------------------------------------------
 
     def ensure_wait_response_timeout(self, persona_id: str) -> None:
-        """ペルソナの現在 running な Track に wait_response 自動 pause タイマーを
+        """ペルソナの現在 running な Track に wait_response タイムアウトタイマーを
         張り直す (冪等)。
+
+        タイマーの仕事は「Track を pause する」ではなく「会話出来事を閉じ、
+        判断 (post_conversation / メタ判断) を起動する」こと (life.md §7 案 Y、
+        2026-07-13 — Track の状態は時間経過で動かさない)。
 
         wait_response タイマーは Track が running に遷移する瞬間 (activate /
         create(initial_status=running)) にしか予約されず、EventScheduler は
@@ -647,7 +654,10 @@ class TrackManager:
         return f"wait_response_timeout:{track_id}"
 
     def _schedule_wait_response_timeout(self, track: Any) -> None:
-        """running になった Track が wait_response 型なら自動 pause タイマーを予約する。
+        """running になった Track が wait_response 型ならタイムアウトタイマーを予約する。
+
+        タイマー発火時の仕事は「会話出来事を閉じて判断を起動する」こと
+        (life.md §7 案 Y) — Track の状態遷移はもう起こさない。
 
         ``wait_response_timeout_provider`` で「対象か / タイマー基準は」を SAIVerseManager
         に委ねる。本メソッドはスケジューリングのみを行う。
@@ -658,9 +668,11 @@ class TrackManager:
         - **base_time が現在時刻より過去**: activate 時点が事実上の「ユーザー宛て呼びかけ」
           開始なので、``now`` を基準にしてフレッシュな N 分の猶予を与える
           (2026-05-10 修正)。これがないと、長期 idle Track をペルソナが
-          自律 activate するたびに「即タイムアウト → 即 pause → メタ判断 → 再 activate」
-          のタイトループが起きる (メタ判断 v2 で構造化出力が Track 操作を強制する
-          ようになったことで顕在化した既存設計の欠陥)。
+          自律 activate するたびに「即タイムアウト → 即判断発火 → 再 activate」の
+          タイトループが起きる (メタ判断 v2 で構造化出力が Track 操作を強制する
+          ようになったことで顕在化した既存設計の欠陥。2026-05-10 時点は
+          「即 pause」も伴っていたが、その pause は life.md §7 案 Y で撤去した
+          — フォールバック自体の必要性は変わらない)。
 
         基底時刻が条件未達の場合の race は、_handle_wait_response_timeout 側で
         provider を再呼び出しして idle_for を見て再評価する。
@@ -727,7 +739,18 @@ class TrackManager:
         - Track が既に running でなければ: 何もしない (ユーザー発話等で抜けた)
         - provider が None を返す (= もう wait_response 対象でない): 何もしない
         - 最終メッセージから N 分未満しか経過していない: 再スケジュール
-        - 上記をクリアしたら: pause → callback (メタ判断発火 / autonomy 再開)
+        - 上記をクリアしたら: callback を呼ぶ (会話出来事の close / メタ判断発火)
+
+        life.md §7 案 Y (2026-07-13): このタイムアウトはもう Track の状態を
+        動かさない (running のまま)。「いま何をしているか」の真実は開いている
+        エピソードが持つため、時間経過で Track を pending に落とす操作
+        (旧: ``self.pause(track_id)``) は死んだ。残る仕事は callback 起動のみ —
+        会話 Track なら出来事の close + post_conversation 判断
+        (``autonomy_wiring.handle_wait_response_timeout``)、それ以外は従来通り
+        MetaLayer の定期判断。Track が同一のまま残るため、次のユーザー発話は
+        ``on_user_utterance`` の「running のまま直接応答」経路に乗り、
+        activate に伴う「Track 切替通知」は注入されない
+        (docs/issues/redundant_track_switch_notification_on_reactivation.md の根治)。
         """
         try:
             current = self.get(track_id)
@@ -790,19 +813,11 @@ class TrackManager:
                 )
                 return
 
-        # 条件成立 → pause + callback
+        # 条件成立 → callback (Track の状態は動かさない — life.md §7 案 Y)
         logging.info(
             "[track] wait_response timeout reached: track=%s persona=%s timeout_min=%s",
             track_id, persona_id, minutes,
         )
-        try:
-            self.pause(track_id)
-        except (InvalidTrackStateError, TrackNotFoundError) as exc:
-            logging.warning(
-                "[track] wait_response timeout pause failed: track=%s err=%s",
-                track_id, exc,
-            )
-            return
 
         if self.wait_response_timeout_callback is not None:
             try:

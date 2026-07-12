@@ -491,10 +491,13 @@ def test_external_event_not_active_goes_direct(session_factory, monkeypatch):
 
 
 def test_external_event_in_conversation_goes_direct(session_factory, monkeypatch):
+    """会話中判定は開いている kind='conversation' の出来事 (life.md §7 案 Y)。
+
+    旧実装は running Track の種別で判定していたが、Track はもう時間経過で
+    状態を動かさないため出来事の open/close が「会話中」の唯一の真実になった。
+    """
     manager, _ = _make_manager(session_factory)
-    manager.track_manager.running = SimpleNamespace(
-        track_type="user_conversation", track_id="t-conv",
-    )
+    _open_conversation_episode(manager)
     calls = _fake_fire(monkeypatch, {"submitted": True})
     dispatched: List[str] = []
     route = wiring.handle_external_event(

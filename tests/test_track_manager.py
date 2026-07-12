@@ -283,8 +283,12 @@ def test_wait_response_timeout_canceled_on_other_activate(session_factory, perso
         scheduler.stop()
 
 
-def test_wait_response_timeout_fires_pause_and_callback(session_factory, persona):
-    """タイムアウト発火で Track が pending に落ち、callback が呼ばれる。
+def test_wait_response_timeout_fires_callback_without_pausing(session_factory, persona):
+    """タイムアウト発火で callback は呼ばれるが、Track は running のまま動かない。
+
+    life.md §7 案 Y (2026-07-13): Track の状態遷移は時間経過では起きない。
+    「いま」の真実は開いているエピソードが持つため、wait_response タイムアウトの
+    仕事は callback 起動 (会話出来事の close / メタ判断) のみに縮退した。
 
     activate 時の schedule は `base_time < now` フォールバック (2026-05-10) で
     `now + minutes` にずらされるため即時 fire しない。代わりに `_handle_…` を
@@ -300,7 +304,7 @@ def test_wait_response_timeout_fires_pause_and_callback(session_factory, persona
     def callback(persona_id, track_id):
         callback_calls.append((persona_id, track_id))
 
-    # base_time=2分前 + minutes=1 → 再評価時に idle_for >= 1min が成立 → pause + callback
+    # base_time=2分前 + minutes=1 → 再評価時に idle_for >= 1min が成立 → callback
     def provider(track):
         return (1, _dt.now() - _td(minutes=2))
 
@@ -316,8 +320,8 @@ def test_wait_response_timeout_fires_pause_and_callback(session_factory, persona
         # 再評価ルートを直接走らせる (schedule 側は now+1min まで動かない)
         tm_with_sched._handle_wait_response_timeout(t, persona)
         assert callback_calls == [(persona, t)]
-        # Track は pending に落ちている
-        assert tm_with_sched.get(t).status == STATUS_PENDING
+        # Track は running のまま (時間経過は目的を動かさない — 不変条件 4)
+        assert tm_with_sched.get(t).status == STATUS_RUNNING
     finally:
         scheduler.stop()
 

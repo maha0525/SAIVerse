@@ -224,6 +224,90 @@ def test_subsequent_utterance_on_running_track_uses_invoke_main_line(handler, tm
 
 
 # ---------------------------------------------------------------------------
+# life.md §7 案 Y (2026-07-13): wait_response タイムアウトは Track を pause
+# しなくなった。「同一 Track への再 activate」という事象自体が消え、
+# redundant_track_switch_notification_on_reactivation.md が構造的に根治する。
+# ---------------------------------------------------------------------------
+
+def test_reactivation_after_wait_response_timeout_no_longer_injects_notice(
+    handler, tm, persona, manager_stub
+):
+    """wait_response タイムアウト後の再発話は running のまま直接応答 → 通知は注入されない。
+
+    根治の証明: 旧実装はタイムアウトで running→pending に落ち、再発話のたびに
+    activate → Track 切替通知が積もっていた (issue の実測 7 件)。
+    ``TrackManager._handle_wait_response_timeout`` はもう Track を pause しない
+    ため、この経路そのものが無くなる。
+    """
+    mgr, history_manager = manager_stub
+    track, _ = handler.get_or_create_track(persona, "1")
+    history_manager.reset_mock()  # 初回注入をクリア
+    mgr.run_sea_user.reset_mock()
+
+    # wait_response タイムアウト相当を直接叩く (base_time=None → 即時判定)。
+    timeout_calls = []
+    tm.wait_response_timeout_provider = lambda t: (30, None)
+    tm.wait_response_timeout_callback = (
+        lambda pid, tid: timeout_calls.append((pid, tid))
+    )
+    tm._handle_wait_response_timeout(track.track_id, persona)
+    assert timeout_calls == [(persona, track.track_id)]
+    # Track は running のまま (時間経過は目的を動かさない)
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+
+    invoked = []
+    handler.on_user_utterance(
+        persona_id=persona,
+        user_id="1",
+        event={"role": "user", "content": "戻ってきた"},
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
+    )
+    # running のまま直接経路 (1-A) → invoke_main_line 直呼び、hook は走らない
+    assert invoked == [True]
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    history_manager.add_to_persona_only.assert_not_called()
+    mgr.run_sea_user.assert_not_called()
+
+
+def test_reactivation_after_real_track_switch_still_activates_and_notifies(
+    handler, tm, persona, manager_stub
+):
+    """本物の Track 切替 (別 Track の activate による displacement) の後の
+    会話再開は、従来どおり pending→activate→Track 切替通知が出る。
+
+    根治するのは「同一 Track への再 activate」のみ — ペルソナが実際に別の
+    目的へ移った（そして戻ってきた）場合の通知は正しい情報であり、消さない。
+    """
+    mgr, history_manager = manager_stub
+    track, _ = handler.get_or_create_track(persona, "1")
+    history_manager.reset_mock()
+    mgr.run_sea_user.reset_mock()
+
+    # 自律 Track の activate が本物の displacement を起こす (時間経過由来ではない)。
+    other_id = tm.create(
+        persona_id=persona, track_type="autonomous",
+        title="別の目的", initial_status=STATUS_RUNNING,
+    )
+    assert tm.get(track.track_id).status == STATUS_PENDING
+    tm.complete(other_id)  # 自律 Track が完了して running 衝突が消える
+
+    invoked = []
+    handler.on_user_utterance(
+        persona_id=persona,
+        user_id="1",
+        event={"role": "user", "content": "戻ってきた"},
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
+    )
+    # 衝突なし → 直接 activate → hook 経由で通知 + main_line Pulse 起動
+    assert tm.get(track.track_id).status == STATUS_RUNNING
+    history_manager.add_to_persona_only.assert_called_once()
+    args, _kwargs = history_manager.add_to_persona_only.call_args
+    assert "Track 切替通知" in args[0]["content"]
+    mgr.run_sea_user.assert_called_once()
+    assert invoked == []  # hook 経由 (invoke_main_line ハードコードは呼ばれない)
+
+
+# ---------------------------------------------------------------------------
 # on_user_utterance: pending + running 衝突なし → 直接 activate (2026-07-07 改訂)
 # ---------------------------------------------------------------------------
 

@@ -1182,7 +1182,7 @@ class SAIVerseManager(
                 persona_id,
             )
 
-        # 3. (C) wait_response 自動 pause タイマーの再確立。
+        # 3. (C) wait_response タイムアウトタイマーの再確立。
         #    タイマーは activate 時にしか張られず EventScheduler はインメモリの
         #    ため再起動で失われる。ロード済みの running Track へ張り直す。
         #    Idle ペルソナは provider の ACTIVITY_STATE ゲート (A) で skip される
@@ -1581,7 +1581,9 @@ class SAIVerseManager(
         }
 
     # ------------------------------------------------------------------
-    # wait_response Track の自動 pause タイマー (handoff_2026-05-09.md §4)
+    # wait_response Track のタイムアウトタイマー (handoff_2026-05-09.md §4)。
+    # 発火時の仕事は Track の pause ではなく会話出来事の close + 判断起動
+    # (life.md §7 案 Y, 2026-07-13)。
     # ------------------------------------------------------------------
 
     _DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES = 30
@@ -1603,8 +1605,8 @@ class SAIVerseManager(
         本 provider は schedule 時 (``_schedule_wait_response_timeout``) と
         発火時 re-eval (``_handle_wait_response_timeout``) の両方から呼ばれる
         単一ゲート。ACTIVITY_STATE 判定もここに置くことで、Idle ペルソナでは
-        「予約しない」「(Active→Idle に落ちていたら) 発火時に pause しない」
-        の両方が一箇所で効く。
+        「予約しない」「(Active→Idle に落ちていたら) 発火時の callback を
+        起動しない」の両方が一箇所で効く。
         """
         # デバッグ完全手動モード: 対象ペルソナは wait_response timeout を予約しない
         # (debug_controller.md)。None を返すと _schedule_wait_response_timeout が skip。
@@ -1624,16 +1626,18 @@ class SAIVerseManager(
             if persona is None:
                 return None
 
-            # (A) ACTIVITY_STATE ゲート: Idle ペルソナでは wait_response の
-            # 自動 pause を予約しない。schedule 時は予約 skip、発火時 re-eval では
-            # None 返却で _handle_wait_response_timeout が pause せず early return。
+            # (A) ACTIVITY_STATE ゲート: Idle ペルソナでは wait_response タイマーを
+            # 予約しない。schedule 時は予約 skip、発火時 re-eval では None 返却で
+            # _handle_wait_response_timeout が何もせず early return。
             #
             # ただし user_conversation は例外 (2026-07-07): 会話 episode の close
             # (A1 配線) がこのタイマーに乗っており、記録系は「認知不変・全ペルソナ」
             # が原則 (life_concept_map.md §8)。Idle のまま会話が永遠に「いま」に
-            # 残る実害をまはーが観測。タイマー・pause・close は全員に、
+            # 残る実害をまはーが観測。タイマー・close は全員に、
             # post_conversation 判断は fire_judgment_point 内の Active ゲートが
-            # 従来通り絞る (Idle は close のみで判断は走らない)。
+            # 従来通り絞る (Idle は close のみで判断は走らない)。Track の pause は
+            # life.md §7 案 Y (2026-07-13) で撤去済み — Track はもう時間経過で
+            # 状態を動かさない。
             activity_state = getattr(persona, "activity_state", "Idle")
             if (
                 activity_state != "Active"
@@ -1686,13 +1690,15 @@ class SAIVerseManager(
     def _wait_response_timeout_callback(self, persona_id: str, track_id: str) -> None:
         """TrackManager から呼ばれる timeout 発火後 callback。
 
-        ``TrackManager._handle_wait_response_timeout`` がペルソナの Track を既に
-        pending に落とした後に呼ばれる。実体は
+        ``TrackManager._handle_wait_response_timeout`` はもう Track の状態を
+        動かさない (life.md §7 案 Y, 2026-07-13: 「いま」の真実は開いている
+        エピソードが持つ。Track は判断だけが動かす)。Track は running のまま
+        本 callback が呼ばれる。実体は
         ``saiverse.autonomy_wiring.handle_wait_response_timeout``:
 
         1. 対ユーザー会話 Track なら、開いている会話の出来事 (Episode) を閉じ、
            **会話終了判断 (post_conversation)** を撃つ — v2 の「会話終了」=
-           wait_response タイムアウトによる pending 遷移 (intent v2 §10-5)。
+           wait_response タイムアウトによる会話出来事の close (intent v2 §10-5)。
            1 往復も成立しなかった会話では撃たない (作話防止)
         2. それ以外の wait_response Track (social 等) は従来どおり
            ``MetaLayer.on_periodic_tick`` (イベント駆動メタ判断)

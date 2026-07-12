@@ -319,8 +319,15 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
 
 
 def _start_user_conversation(manager) -> str:
-    """running な対ユーザー会話 Track を作る (= 会話中の状態)。"""
-    return manager.track_manager.create(
+    """対ユーザー会話 Track を running で作り、会話の出来事も開く (= 会話中の状態)。
+
+    「ユーザー会話中」の判定は開いている kind='conversation' の出来事の有無
+    (life.md §7 案 Y、``day_plan._is_in_user_conversation``)。Track の running
+    状態だけでは「会話中」と判定されなくなったため、出来事も明示的に開く。
+    """
+    from saiverse import episodes
+
+    track_id = manager.track_manager.create(
         persona_id=PERSONA_ID,
         track_type="user_conversation",
         title="対 tester 会話",
@@ -329,6 +336,22 @@ def _start_user_conversation(manager) -> str:
         metadata=json.dumps({"user_id": "1"}),
         initial_status=STATUS_RUNNING,
     )
+    episodes.open_conversation_episode(
+        manager, PERSONA_ID, building_id="alice_room", participants=[PERSONA_ID, "1"],
+    )
+    return track_id
+
+
+def _end_user_conversation(manager) -> None:
+    """会話終了 (wait_response タイムアウト相当): 会話の出来事を閉じる。
+
+    life.md §7 案 Y 以降、タイムアウトは Track を pause しない (running のまま)。
+    「会話中」判定に効くのは出来事の close だけなので、ここでも Track の pause
+    ではなく出来事の close で会話終了を再現する。
+    """
+    from saiverse import episodes
+
+    episodes.close_conversation_episode(manager, PERSONA_ID)
 
 
 def test_slot_deferred_three_times_then_skipped(manager, task_refs):
@@ -360,7 +383,7 @@ def test_slot_deferred_three_times_then_skipped(manager, task_refs):
 
 
 def test_deferred_slot_fires_after_conversation_ends(manager, task_refs):
-    track_id = _start_user_conversation(manager)
+    _start_user_conversation(manager)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
@@ -380,8 +403,9 @@ def test_deferred_slot_fires_after_conversation_ends(manager, task_refs):
         assert slots[0]["status"] == "deferred"
         assert slots[0]["defer_count"] == 1
 
-        # 会話終了 (wait_response timeout 相当: running → pending)
-        manager.track_manager.pause(track_id)
+        # 会話終了 (wait_response timeout 相当: Track は running のまま、
+        # 会話の出来事だけが閉じる — life.md §7 案 Y)
+        _end_user_conversation(manager)
 
         # 9:10 の再発火で実行される
         DaySimulator(
