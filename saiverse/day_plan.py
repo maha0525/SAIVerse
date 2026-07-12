@@ -625,7 +625,7 @@ def get_budget_state(
     lives = get_lives(manager, persona_id, plan_date_str)
     if lives:
         total = sum(int(life.get("budget_pulses") or 0) for life in lives)
-        used = sum(_life_consumed(life) for life in lives)
+        used = sum(life_consumed(life) for life in lives)
         return {"total": total, "used": used, "remaining": max(0.0, total - used)}
     meta = load_plan_meta(manager, persona_id, plan_date_str)
     total_rounds = _read_nonneg_int(meta.get(META_BUDGET_TOTAL))
@@ -724,6 +724,56 @@ def is_keepalive_allowed(manager: Any, persona_id: str) -> bool:
             persona_id, exc_info=True,
         )
         return True
+
+
+def get_life_status_now(manager: Any, persona_id: str) -> Dict[str, Any]:
+    """現在時刻のライフ状態 — life.md §9.1「話しかけやすさ」表示の唯一の判定源。
+
+    試金石「エアは今話しかけて大丈夫か」への機械回答。API 層 (occupants の
+    常在インジケータ / day-plan のライフ状態) はどちらもこの関数を呼び、
+    判定ロジックを二重化しない。
+
+    Returns:
+        {
+          "lives_declared": bool,   # その営業日にライフが宣言されているか
+          "in_life": bool,          # lives_declared かつ現在時刻がいずれかの区間内
+          "life_index": int | None, # in_life なら対象ライフの index (get_lives の並び)
+          "life": dict | None,      # in_life なら対象ライフの宣言 dict そのもの
+          "plan_date": str | None,  # 判定に使った営業日 ("YYYY-MM-DD")
+        }
+
+        判定失敗時は lives_declared=False 側にフォールバックする——「未宣言」
+        表示 (何も出さない) の方が「熱くないのに熱いと見せる」より安全
+        (不変条件5)。is_keepalive_allowed の「失敗時は許可側 (True)」とは
+        安全方向が逆であることに注意 (あちらは延命を止めない方が安全、
+        こちらは嘘の「話しかけやすい」を出さない方が安全)。
+    """
+    try:
+        plan_date_str = _resolve_current_plan_date(manager, persona_id)
+        lives = get_lives(manager, persona_id, plan_date_str)
+        if not lives:
+            return {
+                "lives_declared": False, "in_life": False,
+                "life_index": None, "life": None, "plan_date": plan_date_str,
+            }
+        hhmm = clock.now().strftime("%H:%M")
+        idx = get_life_for_time(lives, hhmm)
+        return {
+            "lives_declared": True,
+            "in_life": idx is not None,
+            "life_index": idx,
+            "life": lives[idx] if idx is not None else None,
+            "plan_date": plan_date_str,
+        }
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] get_life_status_now failed (persona=%s); "
+            "defaulting to lives_declared=False", persona_id, exc_info=True,
+        )
+        return {
+            "lives_declared": False, "in_life": False,
+            "life_index": None, "life": None, "plan_date": None,
+        }
 
 
 def _check_slots_within_lives(
@@ -995,8 +1045,12 @@ def consume_life_rounds(
     return lives[idx]
 
 
-def _life_consumed(life: Dict[str, Any]) -> float:
-    """ライフ 1 件の消費量 (パルス換算): used_pulses + used_rounds × κ。"""
+def life_consumed(life: Dict[str, Any]) -> float:
+    """ライフ 1 件の消費量 (パルス換算): used_pulses + used_rounds × κ。
+
+    公開関数 (Phase 4 の見せ方 API がライフごとの消費/残高を表示するために使う。
+    life.md §9.2)。
+    """
     used_pulses = int(life.get("used_pulses") or 0)
     used_rounds = int(life.get("used_rounds") or 0)
     return used_pulses + used_rounds * LIFE_ROUND_BUDGET_FACTOR
@@ -1034,7 +1088,7 @@ def _apply_life_budget_gate(
         )
         return slot
     life = lives[idx]
-    remaining = int(life.get("budget_pulses") or 0) - _life_consumed(life)
+    remaining = int(life.get("budget_pulses") or 0) - life_consumed(life)
     if remaining <= 0:
         _update_slot(
             manager, persona_id, plan_date_str, index,
@@ -1311,7 +1365,7 @@ def _handle_life_start(
 def _handle_life_end(
     manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
 ) -> None:
-    consumed = _life_consumed(life)
+    consumed = life_consumed(life)
     LOGGER.info(
         "[day_plan] life ended: persona=%s date=%s index=%d %s-%s "
         "(消費 %.1f/%d パルス)",

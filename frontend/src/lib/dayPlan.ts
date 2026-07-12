@@ -17,3 +17,30 @@ export interface DayPlanSlot {
     status: string;
     result_label: string;
 }
+
+/**
+ * ライフ宣言 1 件 (life.md §4.1) の表示用整形。
+ * source of truth は `api/routes/people/life.py:LifeItem`。
+ * ライフビューの帯描画 (§9.2) で使う。
+ */
+export interface LifeItem {
+    index: number;
+    start: string;           // "HH:MM"
+    end: string;              // "HH:MM"
+    mode: string;              // "even" (均等) / "free" (自由)
+    budget_pulses: number;
+    used_pulses: number;
+    used_rounds: number;
+    consumed: number;          // used_pulses + used_rounds × κ
+    remaining: number;
+}
+
+/**
+ * 「いま」のライフ状態 (life.md §9.1 試金石の判定結果)。
+ * 見ている日が「いま」の営業日と一致しないときは day-plan 応答で null。
+ */
+export interface LifeStatus {
+    lives_declared: boolean;
+    in_life: boolean;
+    life_index: number | null;
+}

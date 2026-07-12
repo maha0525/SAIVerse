@@ -18,6 +18,10 @@ class OccupantInfo(BaseModel):
     # AI persona のみ設定される。users 配列では常に None。
     activity_state: Optional[str] = None  # Stop / Sleep / Idle / Active
     activity_label: Optional[str] = None  # running 自律 Track 由来の短い活動ラベル
+    # 「話しかけやすさ」表示 (life.md §9.1)。AI persona のみ設定される。
+    # None = lives 未宣言 (何も出さない。誤情報を出さないため)。
+    life_state: Optional[str] = None      # "in_life" (活動中) / "valley" (休憩中)
+    life_until: Optional[str] = None      # in_life のときだけ "HH:MM" (現在ライフの終了時刻)
 
 class ItemInfo(BaseModel):
     id: str
@@ -131,12 +135,33 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
                         "[info] Failed to build activity label for %s", oid, exc_info=True,
                     )
 
+                # 「話しかけやすさ」表示 (life.md §9.1): 既存の occupants ポーリング
+                # (10 秒) に相乗りし、新しい高頻度ポーリングは作らない。
+                life_state = None
+                life_until = None
+                try:
+                    from saiverse.day_plan import get_life_status_now
+                    status = get_life_status_now(manager, oid)
+                    if status["lives_declared"]:
+                        if status["in_life"]:
+                            life_state = "in_life"
+                            life = status.get("life") or {}
+                            life_until = life.get("end")
+                        else:
+                            life_state = "valley"
+                except Exception:
+                    LOGGER.warning(
+                        "[info] Failed to compute life state for %s", oid, exc_info=True,
+                    )
+
                 occupants_list.append({
                     "id": oid,
                     "name": persona.persona_name,
                     "avatar": avatar,
                     "activity_state": getattr(persona, "activity_state", None),
                     "activity_label": activity_label,
+                    "life_state": life_state,
+                    "life_until": life_until,
                 })
             elif oid == user_id_str:
                 # SAIVerse は現状単一ユーザー (USERID=1) 想定なので

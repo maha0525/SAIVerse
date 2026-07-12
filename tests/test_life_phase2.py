@@ -777,3 +777,71 @@ def test_day_open_finalize_missing_lives_is_harmless(manager, finalize_mod, tmp_
         )
     assert "applied=True" in summary
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
+
+
+# ---------------------------------------------------------------------------
+# get_life_status_now: 「話しかけやすさ」表示の唯一の判定源 (life.md §9.1, Phase4)
+# ---------------------------------------------------------------------------
+
+
+def test_life_status_now_undeclared(manager):
+    """lives 未宣言の日は lives_declared=False (「休止中」と嘘の表示をしない)。"""
+    clock.enable_virtual(BASE + timedelta(hours=15))
+    status = day_plan.get_life_status_now(manager, PERSONA_ID)
+    assert status["lives_declared"] is False
+    assert status["in_life"] is False
+    assert status["life_index"] is None
+    assert status["life"] is None
+
+
+def test_life_status_now_in_life(manager):
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
+    status = day_plan.get_life_status_now(manager, PERSONA_ID)
+    assert status["lives_declared"] is True
+    assert status["in_life"] is True
+    assert status["life_index"] == 0
+    assert status["life"]["start"] == "09:00"
+    assert status["life"]["end"] == "11:00"
+
+
+def test_life_status_now_in_valley(manager):
+    """宣言はあるが区間外 (谷) は in_life=False で「未宣言」と区別される。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=12))
+    status = day_plan.get_life_status_now(manager, PERSONA_ID)
+    assert status["lives_declared"] is True
+    assert status["in_life"] is False
+    assert status["life_index"] is None
+    assert status["life"] is None
+
+
+def test_life_status_now_reflects_budget_consumption(manager):
+    """予算値 (budget_pulses/used_pulses/used_rounds) がライフ状態にそのまま乗る。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    day_plan.consume_life_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="09:30")
+    day_plan.consume_life_rounds(manager, PERSONA_ID, PLAN_DATE, 2, at_time="09:30")
+    clock.enable_virtual(BASE + timedelta(hours=9, minutes=45))
+    status = day_plan.get_life_status_now(manager, PERSONA_ID)
+    assert status["life"]["used_pulses"] == 1
+    assert status["life"]["used_rounds"] == 2
+    assert status["life"]["budget_pulses"] == 4
+
+
+def test_life_status_now_defaults_undeclared_on_lookup_failure():
+    """異常系 (SessionLocal を持たない manager) は lives_declared=False にフォールバック。
+
+    is_keepalive_allowed の失敗時フォールバック (許可側=True) とは安全方向が
+    逆——話しかけやすさ表示は「無い」方が「熱くないのに熱いと見せる」より安全
+    (life.md 不変条件5)。
+    """
+    broken_manager = SimpleNamespace()
+    status = day_plan.get_life_status_now(broken_manager, PERSONA_ID)
+    assert status["lives_declared"] is False
+    assert status["in_life"] is False

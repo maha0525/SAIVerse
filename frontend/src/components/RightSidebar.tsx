@@ -50,6 +50,9 @@ interface Occupant {
     // ライフビューの常在インジケータ (persona_activity_view.md §4.2)。AI のみ。
     activity_state?: string | null;  // Stop / Sleep / Idle / Active
     activity_label?: string | null;  // running 自律 Track 由来の短い活動ラベル
+    // 「話しかけやすさ」表示 (life.md §9.1)。AI のみ。null = lives 未宣言 (非表示)。
+    life_state?: string | null;      // "in_life" (活動中) / "valley" (休憩中)
+    life_until?: string | null;      // in_life のときだけ "HH:MM" (現在ライフの終了時刻)
 }
 
 // 状態ドットの色 (LifeView 側のバッジと同じ対応)
@@ -59,6 +62,26 @@ const ACTIVITY_DOT_COLORS: Record<string, string> = {
     Sleep: '#3b82f6',
     Stop: '#6b7280',
 };
+
+// 「話しかけやすさ」ドットの色・文言 (life.md §9.1)。実装名 (ライフ/lives) は
+// 出さず、日常語で「気軽に話しかけられます」の意味が伝わる表現にする。
+const LIFE_STATE_DOT_COLORS: Record<string, string> = {
+    in_life: '#22c55e',
+    valley: '#9ca3af',
+};
+
+function lifeStateTooltip(state: string, until?: string | null): string {
+    if (state === 'in_life') {
+        return until
+            ? `活動中 (${until} まで) — 気軽に話しかけられます`
+            : '活動中 — 気軽に話しかけられます';
+    }
+    return '休憩中 — 話しかけると起きます';
+}
+
+function lifeStateLabel(state: string): string {
+    return state === 'in_life' ? '活動中' : '休憩中';
+}
 
 interface Item {
     id: string;
@@ -442,6 +465,27 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                                         <span className={styles.activityLabel}>
                                                             {user.activity_label
                                                                 || (user.activity_state === 'Active' ? '活動中' : '')}
+                                                        </span>
+                                                    </button>
+                                                )}
+                                                {/* 「話しかけやすさ」表示 (life.md §9.1)。lives 未宣言
+                                                    (life_state が null) のときは何も出さない — 誤情報を
+                                                    出さないための沈黙 (試金石: 嘘なく即答できるか)。 */}
+                                                {user.life_state && (
+                                                    <button
+                                                        className={styles.lifeStateChip}
+                                                        title={lifeStateTooltip(user.life_state, user.life_until)}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setLifeViewPersona(user);
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className={styles.lifeStateDot}
+                                                            style={{ backgroundColor: LIFE_STATE_DOT_COLORS[user.life_state] || '#9ca3af' }}
+                                                        />
+                                                        <span className={styles.lifeStateLabel}>
+                                                            {lifeStateLabel(user.life_state)}
                                                         </span>
                                                     </button>
                                                 )}

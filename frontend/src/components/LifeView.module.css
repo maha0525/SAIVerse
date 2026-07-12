@@ -142,6 +142,60 @@
     color: var(--text-secondary);
 }
 
+/* ライフの層 (life.md §9.2): 当日の各ライフを区間帯として括る外枠。
+   帯の中に既存の planStrip (コマ一覧) がそのまま入る — 大改修ではなく
+   「くくりの追加」であることを見た目でも表す。 */
+.lifeBands {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.lifeBand {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+    /* 帯自体にうっすら色を敷き、谷 (帯の無い時間) との違いを視覚化する */
+    background-color: rgba(6, 182, 212, 0.04);
+}
+
+.lifeBandHeader {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background-color: rgba(6, 182, 212, 0.1);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.lifeBandTime {
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.lifeBandBudget {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.lifeBandEmpty {
+    padding: 0.55rem 0.7rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    background-color: var(--bg-tertiary);
+}
+
+/* ライフ帯の中では外枠が二重線にならないよう、内側の planStrip の枠を消す */
+.lifeBand > .planStrip {
+    border: none;
+    border-radius: 0;
+}
+
 /* 今日の予定 (時間割メタファーの縦帯) */
 .planStrip {
     display: flex;

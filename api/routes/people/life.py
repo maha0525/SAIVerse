@@ -16,7 +16,14 @@ from pydantic import BaseModel
 
 from api.deps import get_manager
 from saiverse import clock
-from saiverse.day_plan import get_budget_state, load_day_plan, slot_result_label
+from saiverse.day_plan import (
+    get_budget_state,
+    get_life_status_now,
+    get_lives,
+    life_consumed,
+    load_day_plan,
+    slot_result_label,
+)
 
 from .utils import get_adapter
 
@@ -72,11 +79,38 @@ class DayPlanBudget(BaseModel):
     remaining: int
 
 
+class LifeItem(BaseModel):
+    """ライフ宣言 1 件 (life.md §4.1) の表示用整形。ライフビューの帯描画に使う。"""
+    index: int                      # get_lives の並び順 (安定キー)
+    start: str                      # "HH:MM"
+    end: str                        # "HH:MM"
+    mode: str                       # "even" (均等) / "free" (自由)
+    budget_pulses: int
+    used_pulses: int
+    used_rounds: int
+    consumed: float                 # used_pulses + used_rounds × κ (life_consumed)
+    remaining: float                # budget_pulses − consumed (0 未満には丸めない)
+
+
+class LifeStatus(BaseModel):
+    """「いま」のライフ状態 — life.md §9.1 試金石の判定結果。
+
+    ``date`` クエリが今日 (営業日) 以外を指しているときは day-plan 応答に
+    含めない (None) — 過去日を眺めているのに「いま話しかけやすい」を
+    出すのは嘘になるため。
+    """
+    lives_declared: bool
+    in_life: bool
+    life_index: Optional[int] = None
+
+
 class DayPlanResponse(BaseModel):
     persona_id: str
     date: str                       # "YYYY-MM-DD"
     slots: List[DayPlanSlot]        # plan の無い日は空配列
     budget: Optional[DayPlanBudget]
+    lives: List[LifeItem] = []      # 宣言が無い日は空配列 (life.md §9.2 帯描画用)
+    life_status: Optional[LifeStatus] = None
 
 
 @router.get("/{persona_id}/day-plan", response_model=DayPlanResponse)
@@ -117,11 +151,42 @@ def get_day_plan(
         for i, slot in enumerate(slots or [])
     ]
     budget = get_budget_state(manager, persona_id, plan_date)
+
+    # ライフ (life.md §9.2 帯描画): 宣言が無い日は空配列 (従来表示のまま)
+    lives_raw = get_lives(manager, persona_id, plan_date)
+    life_items = [
+        LifeItem(
+            index=i,
+            start=str(life.get("start") or ""),
+            end=str(life.get("end") or ""),
+            mode=str(life.get("mode") or ""),
+            budget_pulses=int(life.get("budget_pulses") or 0),
+            used_pulses=int(life.get("used_pulses") or 0),
+            used_rounds=int(life.get("used_rounds") or 0),
+            consumed=life_consumed(life),
+            remaining=max(0.0, int(life.get("budget_pulses") or 0) - life_consumed(life)),
+        )
+        for i, life in enumerate(lives_raw)
+    ]
+
+    # 「いま」のライフ状態 (§9.1): 見ている日が現在の営業日と一致するときのみ
+    # 付与する。過去日ブラウズ中に「いま話しかけやすい」を出すと嘘になるため。
+    life_status: Optional[LifeStatus] = None
+    now_status = get_life_status_now(manager, persona_id)
+    if now_status.get("plan_date") == plan_date:
+        life_status = LifeStatus(
+            lives_declared=now_status["lives_declared"],
+            in_life=now_status["in_life"],
+            life_index=now_status["life_index"],
+        )
+
     return DayPlanResponse(
         persona_id=persona_id,
         date=plan_date,
         slots=slot_items,
         budget=DayPlanBudget(**budget) if budget else None,
+        lives=life_items,
+        life_status=life_status,
     )
 
 

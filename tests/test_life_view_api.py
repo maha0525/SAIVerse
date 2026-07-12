@@ -315,6 +315,113 @@ class LifeViewApiTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
+    # B-2: lives / life_status (life.md §9.1/§9.2, Phase4 見せ方)
+    # ------------------------------------------------------------------
+
+    def test_day_plan_lives_and_life_status_in_life(self):
+        from saiverse import clock
+        from saiverse.day_plan import consume_life_pulse, save_day_plan, save_lives
+
+        save_day_plan(self.manager, "air", TEST_DATE, [
+            {"start": "08:00", "kind": "作る", "ref": "none", "facility": "own_room",
+             "budget_rounds": 4, "title": "詩を書く", "note": ""},
+            {"start": "15:00", "kind": "知る", "ref": "none", "facility": "cafe",
+             "budget_rounds": 4, "title": "調べ物", "note": ""},
+        ])
+        save_lives(self.manager, "air", TEST_DATE, [
+            {"start": "07:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
+            {"start": "14:00", "end": "20:00", "budget_pulses": 8, "mode": "free"},
+        ])
+        consume_life_pulse(self.manager, "air", TEST_DATE, at_time="08:00")
+
+        clock.enable_virtual(datetime(2026, 7, 6, 9, 30))  # ライフ0の区間内
+        try:
+            resp = self.client.get(
+                "/api/people/air/day-plan", params={"date": TEST_DATE},
+            )
+        finally:
+            clock.disable_virtual()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+
+        lives = body["lives"]
+        self.assertEqual(len(lives), 2)
+        self.assertEqual(lives[0]["start"], "07:00")
+        self.assertEqual(lives[0]["end"], "12:00")
+        self.assertEqual(lives[0]["mode"], "free")
+        self.assertEqual(lives[0]["budget_pulses"], 6)
+        self.assertEqual(lives[0]["used_pulses"], 1)
+        self.assertEqual(lives[0]["used_rounds"], 0)
+        self.assertEqual(lives[0]["consumed"], 1.0)
+        self.assertEqual(lives[0]["remaining"], 5.0)
+
+        self.assertEqual(body["life_status"], {
+            "lives_declared": True, "in_life": True, "life_index": 0,
+        })
+
+    def test_day_plan_life_status_in_valley(self):
+        from saiverse import clock
+        from saiverse.day_plan import save_day_plan, save_lives
+
+        save_day_plan(self.manager, "air", TEST_DATE, [
+            {"start": "08:00", "kind": "作る", "ref": "none", "facility": "own_room",
+             "budget_rounds": 4, "title": "詩を書く", "note": ""},
+            {"start": "15:00", "kind": "知る", "ref": "none", "facility": "cafe",
+             "budget_rounds": 4, "title": "調べ物", "note": ""},
+        ])
+        save_lives(self.manager, "air", TEST_DATE, [
+            {"start": "07:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
+            {"start": "14:00", "end": "20:00", "budget_pulses": 8, "mode": "free"},
+        ])
+
+        clock.enable_virtual(datetime(2026, 7, 6, 13, 0))  # 二つのライフの間 (谷)
+        try:
+            resp = self.client.get(
+                "/api/people/air/day-plan", params={"date": TEST_DATE},
+            )
+        finally:
+            clock.disable_virtual()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["lives"]), 2)
+        # 谷 = 宣言はあるが in_life=False (「未宣言」とは区別される)
+        self.assertEqual(body["life_status"], {
+            "lives_declared": True, "in_life": False, "life_index": None,
+        })
+
+    def test_day_plan_life_status_undeclared(self):
+        """lives 未宣言の日は lives_declared=False (life_status 自体は省略しない)。"""
+        from saiverse import clock
+
+        clock.enable_virtual(datetime(2026, 7, 6, 9, 30))
+        try:
+            resp = self.client.get(
+                "/api/people/air/day-plan", params={"date": TEST_DATE},
+            )
+        finally:
+            clock.disable_virtual()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["lives"], [])
+        self.assertEqual(body["life_status"], {
+            "lives_declared": False, "in_life": False, "life_index": None,
+        })
+
+    def test_day_plan_life_status_none_for_non_current_date(self):
+        """過去日を眺めているときは life_status 自体を返さない (嘘の「いま」を出さない)。"""
+        from saiverse import clock
+
+        clock.enable_virtual(datetime(2026, 7, 6, 9, 30))  # 「いま」= 2026-07-06
+        try:
+            resp = self.client.get(
+                "/api/people/air/day-plan", params={"date": "2026-01-01"},
+            )
+        finally:
+            clock.disable_virtual()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["life_status"])
+
+    # ------------------------------------------------------------------
     # C: GET /api/people/{id}/photos
     # ------------------------------------------------------------------
 

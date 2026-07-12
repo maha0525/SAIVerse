@@ -1,6 +1,6 @@
 # Intent: ライフ — 活動区間の宣言と時間の階層
 
-**ステータス**: 実装中 (v0.4, 2026-07-13)。**案 Y Phase 1（§7 の手術）実装済**（コミット 6257b6a: pause 撤去・会話中判定のエピソード移管・meta_layer 自己ゲート例外。対象テスト 194 passed）。**Phase 2（ライフの器: lives 永続化・day_open 宣言・境界イベント・台帳世代交代）実装完了・検証待ち**（`saiverse/day_plan.py` / `saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `builtin_data/tools/judgment_finalize.py`、新規 `tests/test_life_phase2.py` 42 件 + 既存系全緑。まはー実機検証はまだ）。**Phase 3（キャッシュ連動: keep-alive のライフ従属・ライフ終端の節目・均等モード TTL 運転）実装完了・検証待ち**（`saiverse/day_plan.py`（`is_keepalive_allowed` / `_handle_life_end` の keep-alive cancel + TTL override の遅延解除予約。anchor は触らない — §6.2 v0.4）/ `sea/runtime.py`（`run_cache_keepalive` の life ゲート）/ `saiverse/saiverse_manager.py`（`clear_persona_cache_override`）、新規 `tests/test_life_phase3.py` 18 件 + 既存系全緑。まはー実機検証はまだ）。残: Phase 4=見せ方（話しかけやすさ表示・ライフビュー括り直し）。
+**ステータス**: 実装中 (v0.4, 2026-07-13)。**案 Y Phase 1（§7 の手術）実装済**（コミット 6257b6a: pause 撤去・会話中判定のエピソード移管・meta_layer 自己ゲート例外。対象テスト 194 passed）。**Phase 2（ライフの器: lives 永続化・day_open 宣言・境界イベント・台帳世代交代）実装完了・検証待ち**（`saiverse/day_plan.py` / `saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `builtin_data/tools/judgment_finalize.py`、新規 `tests/test_life_phase2.py` 42 件 + 既存系全緑。まはー実機検証はまだ）。**Phase 3（キャッシュ連動: keep-alive のライフ従属・ライフ終端の節目・均等モード TTL 運転）実装完了・検証待ち**（`saiverse/day_plan.py`（`is_keepalive_allowed` / `_handle_life_end` の keep-alive cancel + TTL override の遅延解除予約。anchor は触らない — §6.2 v0.4）/ `sea/runtime.py`（`run_cache_keepalive` の life ゲート）/ `saiverse/saiverse_manager.py`（`clear_persona_cache_override`）、新規 `tests/test_life_phase3.py` 18 件 + 既存系全緑。まはー実機検証はまだ）。**Phase 4（見せ方: 話しかけやすさ表示・ライフビュー括り直し）実装完了・検証待ち**（判定源 `saiverse.day_plan.get_life_status_now` を新設し occupants の常在インジケータ（`api/routes/info.py`）と day-plan API（`api/routes/people/life.py` の `lives`/`life_status`）が共有。フロントは `RightSidebar.tsx`（話しかけやすさチップ）/ `LifeView.tsx`（ライフ帯の括り直し）。新規 `tests/test_info_life_state.py` 3 件 + `tests/test_life_phase2.py` 追加 5 件 + `tests/test_life_view_api.py` 追加 4 件 + 既存系全緑。まはー実機検証はまだ）。4 フェーズとも実装完了、残るはまはーの実機検証のみ。
 **親**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md)（三本柱） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（哲学層。§8 出来事・§10 Track 再解釈は本書の前提）
 **吸収対象**: [`session.md`](session.md)（v0.1 起草中のまま停滞。§6 未確定事項に本書が回答し、Session を「ライフが目標を与える機構層」として位置づけ直す）
 **経緯**: [実機初日の前提レベル設計課題](../issues/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。
@@ -295,6 +295,32 @@ alert は本書のスコープ外（呼びかけへの分化は life_concept_map
 
 ## 改訂履歴
 
+- Phase 4 実装 (2026-07-13): 見せ方 (§9.1/§9.2)。①**判定源の一本化**:
+  `saiverse.day_plan.get_life_status_now(manager, persona_id)` を新設し、
+  「エアは今話しかけて大丈夫か」の判定 (lives_declared / in_life / 対象ライフ)
+  を 1 箇所に集約。occupants の常在インジケータと day-plan API はどちらも
+  この関数を呼ぶ (二重実装しない)。`_life_consumed` は公開関数
+  `life_consumed` に改名 (Phase 4 の表示 API が使うため)。②**話しかけやすさ
+  表示**: `api/routes/info.py` の `OccupantInfo` に `life_state`
+  ("in_life"/"valley"/None) と `life_until` ("HH:MM"、in_life のときのみ) を
+  追加し、既存の occupants 10 秒ポーリングに相乗り (新しい高頻度ポーリングは
+  作らない)。lives 未宣言のペルソナは両方 None のまま (何も出さない — 誤情報
+  を出さない不変条件5)。フロントは `RightSidebar.tsx` の常在インジケータ
+  (activityChip) の隣に別チップ (lifeStateChip) を追加——概念が違う (Track の
+  running 状態 vs キャッシュの温度) ので同じチップに混ぜず、日常語
+  (「活動中」/「休憩中」) + native title tooltip で表示する。③**ライフビュー
+  の括り直し**: `api/routes/people/life.py` の day-plan レスポンスに
+  `lives` (LifeItem 配列: start/end/mode/budget_pulses/used_pulses/
+  used_rounds/consumed/remaining) と `life_status` (LifeStatus: 見ている日
+  が「いま」の営業日と一致するときだけ非 null) を追加。フロントは
+  `LifeView.tsx` の「今日の予定」セクションで、lives が宣言されている日は
+  各ライフを区間帯 (lifeBand) として描画し、既存の planStrip (コマ一覧) を
+  帯の中に入れ子にする。谷 (ライフの間) は帯を作らない。lives 未宣言の日は
+  従来のフラット表示のまま (帯なし、変化なし)。新規テスト:
+  `tests/test_info_life_state.py` (3 件: 未宣言/in_life/谷)、
+  `tests/test_life_phase2.py` に `get_life_status_now` の単体テスト 5 件追加、
+  `tests/test_life_view_api.py` に day-plan の `lives`/`life_status` 統合
+  テスト 4 件追加。既存系全緑。まはー実機検証はまだ。
 - Phase 3 実装 (2026-07-13, v0.4 準拠に差し戻し修正済): キャッシュ連動を実装。①**keep-alive のライフ従属** (§5.2) — 判定は ``day_plan.is_keepalive_allowed`` に集約し、唯一の呼び出し元 ``sea.runtime.SEARuntime.run_cache_keepalive`` の Active チェック直後 (schedule_cache_ttl_pulse への再予約より前) でゲートすることで、谷では touch も再予約もされず連鎖が自然停止する。lives 未宣言は常に許可 (後方互換)、判定失敗は許可側にフォールバック。②**ライフ終端の節目** (§6.2 v0.4) — ``day_plan._handle_life_end`` が能動的に行うのは keep-alive 予約 (``ttl:{persona_id}``) の cancel と TTL override の遅延解除予約だけ。**anchor は触らない** — touch が止まれば TTL で自然失効し、Metabolism は失効後の最初の活動の既存 Case 3 経路 (``sea/runtime_context.py``) が行う。③**均等モードの cache TTL 運転** (§5.1) — ライフ開始 (mode=even) で persona の cache override を TTL=1h に設定し (人設定タブの明示 override があれば触らない)、終端では即時 clear せず「終端 + anchor validity 秒」の遅延解除 (``life_ttl_clear:{persona_id}``) を EventScheduler に予約する (即時に 5m へ戻すと anchor の生存評価が実キャッシュの寿命とズレるため)。発火体は厳密一致チェック付きで clear (``saiverse_manager.clear_persona_cache_override`` 新設)。次のライフが TTL 経過前に始まれば開始側が予約を cancel する。global 既定 TTL が "5m" のままだと均等モードの間隔上限 (50 分) を大きく下回り、artificial keep-alive が 3〜4 分おきに連発する調査結果を受けての配線。④ライフ開始時の Session 境界は既存機構 (anchor の TTL 自然失効 → 次 Pulse の Case 3) が自然に満たすことを確認し、ログ追加のみ。新規 `tests/test_life_phase3.py` 18 件 + 既存系 (test_life_phase2 / test_cache_keepalive / test_cache_lifecycle 等) 全緑。
 - v0.4 (2026-07-13): 検収差し戻しによる訂正——**v0.3 の「anchor 即時失効」は誤り**。①anchor を即時失効させると、惜しい谷 (終了直後〜TTL 内の再訪、実キャッシュは生きている) の最初の Pulse が Case 3 で履歴を組み替えて生きたキャッシュを捨てる (§8.3 裁定と矛盾)。keep-alive を止めれば anchor は TTL で自然失効するので即時失効はそもそも不要。②TTL override (均等モードの 1h) の即時解除も同型のズレ——anchor validity は「現在の TTL 設定」で評価されるため、終端で即時に 5m へ戻すと実キャッシュ (1h) と評価がズレて TTL 内の再訪が Case 3 に落ちる。解除は終端 + TTL 経過後へ遅延する。§6.2 の表を訂正。
 - v0.3 (2026-07-13): §6.2 の境界実行形を明確化——ライフ終端は **anchor の即時失効のみ**とし、Metabolism 本体（Chronicle 化＋履歴縮小）は次の活動開始時の既存経路（Case 3）へ遅延する、とした（**この「即時失効」は v0.4 で誤りと訂正**）。

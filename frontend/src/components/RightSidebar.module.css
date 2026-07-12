@@ -190,6 +190,41 @@
     text-overflow: ellipsis;
 }
 
+/* 「話しかけやすさ」表示 (life.md §9.1)。activityChip と同じ操作感
+   (クリックでライフビューを開く) だが、別概念 (キャッシュの熱さ) なので
+   見た目を分けた別チップにする。lives 未宣言のペルソナには表示されない。 */
+.lifeStateChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    align-self: flex-start;
+    padding: 0.1rem 0.4rem 0.1rem 0.25rem;
+    background: none;
+    border: none;
+    border-radius: 9999px;
+    cursor: pointer;
+    max-width: 100%;
+}
+
+.lifeStateChip:hover {
+    background: rgba(34, 197, 94, 0.15);
+}
+
+.lifeStateDot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.lifeStateLabel {
+    font-size: 0.7rem;
+    color: #9ca3af;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .empty {
     font-size: 0.9rem;
     color: #6b7280;

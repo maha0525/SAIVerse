@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Play, Square, Star } from 'lucide-react';
 import styles from './LifeView.module.css';
 import { isWorkSlotKind } from '@/lib/episodeText';
-import type { DayPlanSlot } from '@/lib/dayPlan';
+import type { DayPlanSlot, LifeItem, LifeStatus } from '@/lib/dayPlan';
 
 /**
  * ライフビュー: ペルソナの自律行動の観察面 (サイドパネル)。
@@ -50,6 +50,15 @@ interface DayPlanData {
     date: string;
     slots: DayPlanSlot[];
     budget: { total: number; used: number; remaining: number } | null;
+    // ライフの層 (life.md §9.2)。宣言の無い日は空配列 (従来どおり帯なし表示)
+    lives: LifeItem[];
+    life_status: LifeStatus | null;
+}
+
+/** ライフの消費量表示: 整数ならそのまま、端数があれば小数第1位まで
+    (used_pulses + used_rounds×κ の合成値なので端数が出うる)。 */
+function fmtLifeConsumed(n: number): string {
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
 interface LifeViewProps {
@@ -164,6 +173,33 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
     }, [isOpen, personaId]);
 
     if (!isOpen) return null;
+
+    /** コマ 1 行分の描画 (ライフ帯の中でも、帯なし時の従来表示でも共有する)。 */
+    const renderPlanRow = (slot: DayPlanSlot) => (
+        <div key={slot.index} className={styles.planRow}>
+            <span className={styles.planTime}>{slot.start || '--:--'}</span>
+            <div className={styles.planBody}>
+                <span className={styles.planTitle}>
+                    {/* kind バッジ: この時間に作業セッションが走るのか
+                        (作業系6種=アクセント色)、静かに過ごすだけなのか
+                        (暮らし/休む=ミュート色) を常時見せる */}
+                    {slot.kind && (
+                        <span
+                            className={`${styles.kindBadge} ${
+                                isWorkSlotKind(slot.kind) ? styles.kindWork : styles.kindQuiet
+                            }`}
+                        >
+                            {slot.kind}
+                        </span>
+                    )}
+                    {slot.title}
+                </span>
+                {slot.result_label && (
+                    <span className={styles.planResult}>{slot.result_label}</span>
+                )}
+            </div>
+        </div>
+    );
 
     const isActive = data?.activity_state === 'Active';
     const badge = STATE_BADGES[data?.activity_state ?? ''] ?? { dot: '#9ca3af', label: data?.activity_state ?? '…' };
@@ -302,34 +338,47 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
                             <div className={styles.muted}>予定表を取得できませんでした</div>
                         ) : dayPlan == null ? (
                             <div className={styles.muted}>読み込み中...</div>
+                        ) : dayPlan.lives && dayPlan.lives.length > 0 ? (
+                            <>
+                                {/* ライフの層 (life.md §9.2): 当日の各ライフを区間帯として
+                                    見せ、そのライフに属するコマを帯の中に括る。谷 (ライフと
+                                    ライフの間) は帯を作らない。 */}
+                                <div className={styles.lifeBands}>
+                                    {dayPlan.lives.map(life => {
+                                        const slotsInLife = dayPlan.slots.filter(
+                                            slot => slot.start >= life.start && slot.start < life.end
+                                        );
+                                        return (
+                                            <div key={life.index} className={styles.lifeBand}>
+                                                <div className={styles.lifeBandHeader}>
+                                                    <span className={styles.lifeBandTime}>
+                                                        {life.start}〜{life.end}
+                                                    </span>
+                                                    <span className={styles.lifeBandBudget}>
+                                                        {fmtLifeConsumed(life.consumed)} / {life.budget_pulses}
+                                                    </span>
+                                                </div>
+                                                {slotsInLife.length > 0 ? (
+                                                    <div className={styles.planStrip}>
+                                                        {slotsInLife.map(renderPlanRow)}
+                                                    </div>
+                                                ) : (
+                                                    <div className={styles.lifeBandEmpty}>まだ予定がありません</div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                {dayPlan.budget && (
+                                    <div className={styles.planBudget}>
+                                        作業にあてられる回数: のこり {dayPlan.budget.remaining} / {dayPlan.budget.total}
+                                    </div>
+                                )}
+                            </>
                         ) : dayPlan.slots.length > 0 ? (
                             <>
                                 <div className={styles.planStrip}>
-                                    {dayPlan.slots.map(slot => (
-                                        <div key={slot.index} className={styles.planRow}>
-                                            <span className={styles.planTime}>{slot.start || '--:--'}</span>
-                                            <div className={styles.planBody}>
-                                                <span className={styles.planTitle}>
-                                                    {/* kind バッジ: この時間に作業セッションが走るのか
-                                                        (作業系6種=アクセント色)、静かに過ごすだけなのか
-                                                        (暮らし/休む=ミュート色) を常時見せる */}
-                                                    {slot.kind && (
-                                                        <span
-                                                            className={`${styles.kindBadge} ${
-                                                                isWorkSlotKind(slot.kind) ? styles.kindWork : styles.kindQuiet
-                                                            }`}
-                                                        >
-                                                            {slot.kind}
-                                                        </span>
-                                                    )}
-                                                    {slot.title}
-                                                </span>
-                                                {slot.result_label && (
-                                                    <span className={styles.planResult}>{slot.result_label}</span>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
+                                    {dayPlan.slots.map(renderPlanRow)}
                                 </div>
                                 {dayPlan.budget && (
                                     <div className={styles.planBudget}>
