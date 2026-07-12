@@ -52,9 +52,13 @@ from saiverse.day_plan import (
     FACILITY_OWN_ROOM,
     KIND_LIVING,
     KIND_REST,
+    LIFE_EVEN_MAX_GAP_MINUTES,
+    LIFE_MODE_EVEN,
+    LIFE_MODES,
     REF_NONE,
     STATUS_DEFERRED,
     STATUS_PENDING,
+    derive_default_life_mode,
     load_day_plan,
     load_plan_meta,
 )
@@ -456,6 +460,32 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
     }
 
 
+def _build_life_schema() -> Dict[str, Any]:
+    """ライフ (活動区間) 1 件の共通スキーマ部品 (life.md §4.1 / §11.2)。"""
+    return {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "description": "ライフの開始時刻 HH:MM (24時間制)"},
+            "end": {"type": "string", "description": "ライフの終了時刻 HH:MM (24時間制)"},
+            "budget_pulses": {
+                "type": "integer",
+                "description": "このライフのコマ予算 (標準モデルのパルス回数の目安)",
+            },
+            "mode": {
+                "type": "string",
+                "enum": list(LIFE_MODES),
+                "description": (
+                    "均等(even): ライフ内でコマの間隔を"
+                    f"{LIFE_EVEN_MAX_GAP_MINUTES}分以内に保つ"
+                    "(標準モデルのキャッシュを繋ぎ続ける)。"
+                    "自由(free): 間隔の制約なし"
+                ),
+            },
+        },
+        "required": ["start", "end", "budget_pulses", "mode"],
+    }
+
+
 def _new_desires_schema() -> Dict[str, Any]:
     """new_desires 共通フィールド (judgment_points.md §3.1)。"""
     return {
@@ -506,9 +536,18 @@ def build_day_open_schema(manager: Any, persona_id: str) -> Dict[str, Any]:
         "type": "object",
         "properties": {
             "monologue": {"type": "string"},
+            "lives": {
+                "type": "array",
+                "minItems": 1,
+                "items": _build_life_schema(),
+                "description": (
+                    "今日の活動区間 (ライフ)。1日に複数あってよい。"
+                    "すべてのコマはいずれかのライフの中に置くこと"
+                ),
+            },
             "timetable": {"type": "array", "minItems": 1, "items": slot},
         },
-        "required": ["monologue", "timetable"],
+        "required": ["monologue", "lives", "timetable"],
     }
     promo_refs = collect_promotion_refs(manager, persona_id)
     if promo_refs:
@@ -1023,6 +1062,16 @@ def build_day_open_situation_text(
         "コマの ref には具体的なタスク (task:N) のほか、関心そのもの (track:N) も"
         "指せます — その場合、何をするかはコマが始まる時にその関心の状況を見て"
         "決めます。",
+        "時間割をライフ (活動区間) でくくってください — 各ライフは開始・終了"
+        "時刻とコマ予算 (標準パルス回数の目安) を持つ区間です。1日に複数あって"
+        "よく、すべてのコマはいずれかのライフの中に置いてください "
+        "(ライフの外にコマは置けません)。",
+        f"均等(even) モードのライフでは、ライフ開始→最初のコマ→隣接コマ間→"
+        f"最後のコマ→ライフ終了の間隔をそれぞれ{LIFE_EVEN_MAX_GAP_MINUTES}分以内に"
+        "保ってください。自由(free) モードでは間隔の制約はありません。",
+        f"あなたの標準モデルでは既定で「"
+        f"{'均等' if derive_default_life_mode(manager, persona_id) == LIFE_MODE_EVEN else '自由'}"
+        "」が向いています (ライフごとに上書き可能)。",
         "",
         "[昨日の自分からのメモ]",
         memo or "(メモはありません)",
@@ -1332,10 +1381,20 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
 
     budget_state = get_budget_state(manager, persona_id, plan_date)
     if budget_state is not None:
-        lines.append(
-            f"日次予算（実測）: {budget_state['used']} / {budget_state['total']} "
-            f"ラウンド消費 (残り {budget_state['remaining']})"
-        )
+        from saiverse.day_plan import get_lives
+
+        if get_lives(manager, persona_id, plan_date):
+            # ライフ宣言がある日: 単位はラウンドでなく標準パルス換算
+            # (life.md Phase2 §7、get_budget_state がライフ由来に切り替わる)。
+            lines.append(
+                f"日次予算（実測）: {budget_state['used']:.1f} / {budget_state['total']} "
+                f"パルス消費 (残り {budget_state['remaining']:.1f})"
+            )
+        else:
+            lines.append(
+                f"日次予算（実測）: {budget_state['used']} / {budget_state['total']} "
+                f"ラウンド消費 (残り {budget_state['remaining']})"
+            )
     digests = _collect_today_session_digests(manager, persona_id, plan_date)
     if digests:
         lines.append("")
@@ -1924,6 +1983,88 @@ def sanitize_timetable(
             continue
         seen.add(slot["start"])
         deduped.append(slot)
+    return deduped, warnings
+
+
+def sanitize_lives(
+    manager: Any, persona_id: str, raw_lives: Any
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """LLM が返した lives を検証し、:func:`~saiverse.day_plan.save_lives` 形式へ
+    正規化する (life.md Phase2 §11.2)。
+
+    ``sanitize_timetable`` と同じ設計原理 — **該当ライフだけ棄却** して警告に
+    積む (判断全体を落とさない):
+
+    - dict でない / start・end が HH:MM でない / end が start 以前 → ライフ棄却
+    - budget_pulses が正の整数でない → 既定値 (4) に矯正 (ライフは残す)
+    - mode が不正 → :func:`~saiverse.day_plan.derive_default_life_mode` に矯正
+      (ライフは残す)
+    - 重なり (start 昇順に整列後、直前ライフの end より前に始まる) →
+      後のライフを棄却
+
+    残る検証 (谷にコマは置けない / 均等モードの間隔) は
+    :func:`~saiverse.day_plan.save_lives` の構造検証 (raise) に委ねる —
+    ここで先取りすると二重にエラーメッセージが割れるため、フォーマットの
+    緩い矯正のみに留める。
+
+    Returns:
+        (正規化済みライフ配列 [start 昇順], 警告メッセージのリスト)
+    """
+    warnings: List[str] = []
+    if not isinstance(raw_lives, list):
+        if raw_lives is not None:
+            warnings.append(f"lives is not a list (got {type(raw_lives).__name__})")
+        return [], warnings
+
+    default_mode = derive_default_life_mode(manager, persona_id)
+    cleaned: List[Dict[str, Any]] = []
+    for i, life in enumerate(raw_lives):
+        if not isinstance(life, dict):
+            warnings.append(f"lives[{i}] rejected: not a dict")
+            continue
+        start = life.get("start")
+        if not isinstance(start, str) or not _TIME_RE.match(start):
+            warnings.append(f"lives[{i}] rejected: start={start!r} is not 'HH:MM'")
+            continue
+        end = life.get("end")
+        if not isinstance(end, str) or not _TIME_RE.match(end):
+            warnings.append(f"lives[{i}] rejected: end={end!r} is not 'HH:MM'")
+            continue
+        if end <= start:
+            warnings.append(
+                f"lives[{i}] rejected: end={end!r} is not after start={start!r}"
+            )
+            continue
+
+        budget = life.get("budget_pulses", 0)
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget < 1:
+            warnings.append(
+                f"lives[{i}]: budget_pulses={budget!r} は正の整数でないため 4 に矯正"
+            )
+            budget = 4
+        budget = int(budget)
+
+        mode = life.get("mode")
+        if mode not in LIFE_MODES:
+            warnings.append(
+                f"lives[{i}]: mode={mode!r} は不正なため既定 ({default_mode}) に矯正"
+            )
+            mode = default_mode
+
+        cleaned.append({"start": start, "end": end, "budget_pulses": budget, "mode": mode})
+
+    # start 昇順に整列し、重なりは後のライフを棄却する (save_lives の重なり
+    # 禁止と対称。谷コマ・均等モード間隔は save_lives の構造検証に委ねる)。
+    cleaned.sort(key=lambda life: life["start"])
+    deduped: List[Dict[str, Any]] = []
+    for life in cleaned:
+        if deduped and life["start"] < deduped[-1]["end"]:
+            warnings.append(
+                f"life start={life['start']} が直前のライフ "
+                f"({deduped[-1]['start']}-{deduped[-1]['end']}) と重なるため棄却"
+            )
+            continue
+        deduped.append(life)
     return deduped, warnings
 
 

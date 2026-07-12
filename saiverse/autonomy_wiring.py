@@ -259,7 +259,21 @@ def fire_judgment_point(
                 )
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False, "reason": "precondition not met"}
-        return run_judgment_point(manager, persona_id, kind, context)
+        result = run_judgment_point(manager, persona_id, kind, context)
+
+    # ライフのパルス消費 (life.md Phase2 §7): 判断点の発火 = 標準パルス 1 回。
+    # lives の無い日は no-op (consume_life_pulse 内で判定)。ロックの外で行って
+    # よい (メタ判断の直列化とは無関係な帳簿処理)。
+    if result.get("submitted"):
+        try:
+            from saiverse import day_plan
+            day_plan.consume_life_pulse(manager, persona_id)
+        except Exception:
+            LOGGER.warning(
+                "[autonomy-wiring] consume_life_pulse failed (persona=%s kind=%s)",
+                persona_id, kind, exc_info=True,
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -718,12 +732,26 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         return {"action": "day_open_refire", "result": result}
 
     lost = day_plan.find_lost_slot_reservations(manager, persona_id, today)
-    if lost:
-        LOGGER.info(
-            "[watchdog] %d slot reservation(s) lost; re-scheduling pending slots "
-            "(persona=%s date=%s indices=%s)", len(lost), persona_id, today, lost,
-        )
-        pushed = day_plan.reschedule_pending_slots(manager, persona_id, plan_date)
-        return {"action": "reschedule", "pushed": pushed, "lost": lost}
+    lost_lives = day_plan.find_lost_life_reservations(manager, persona_id, today)
+    if lost or lost_lives:
+        pushed = 0
+        if lost:
+            LOGGER.info(
+                "[watchdog] %d slot reservation(s) lost; re-scheduling pending slots "
+                "(persona=%s date=%s indices=%s)", len(lost), persona_id, today, lost,
+            )
+            pushed = day_plan.reschedule_pending_slots(manager, persona_id, plan_date)
+        lives_pushed = 0
+        if lost_lives:
+            LOGGER.info(
+                "[watchdog] %d life boundary reservation(s) lost; re-scheduling "
+                "(persona=%s date=%s boundaries=%s)",
+                len(lost_lives), persona_id, today, lost_lives,
+            )
+            lives_pushed = day_plan.schedule_lives(manager, persona_id, plan_date)
+        return {
+            "action": "reschedule", "pushed": pushed, "lost": lost,
+            "lives_pushed": lives_pushed, "lost_lives": lost_lives,
+        }
 
     return {"action": "none"}

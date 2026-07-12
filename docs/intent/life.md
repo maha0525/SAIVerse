@@ -1,6 +1,6 @@
 # Intent: ライフ — 活動区間の宣言と時間の階層
 
-**ステータス**: 実装中 (v0.2, 2026-07-13)。**案 Y Phase 1（§7 の手術）実装済**（コミット 6257b6a: pause 撤去・会話中判定のエピソード移管・meta_layer 自己ゲート例外。対象テスト 194 passed）。Phase 2（ライフの器）以降進行中。
+**ステータス**: 実装中 (v0.2, 2026-07-13)。**案 Y Phase 1（§7 の手術）実装済**（コミット 6257b6a: pause 撤去・会話中判定のエピソード移管・meta_layer 自己ゲート例外。対象テスト 194 passed）。**Phase 2（ライフの器: lives 永続化・day_open 宣言・境界イベント・台帳世代交代）実装完了・検証待ち**（`saiverse/day_plan.py` / `saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `builtin_data/tools/judgment_finalize.py`、新規 `tests/test_life_phase2.py` 42 件 + 既存系全緑。まはー実機検証はまだ）。残: Phase 3=キャッシュ連動（keep-alive のライフ従属・均等間隔・Session 終端） / Phase 4=見せ方（話しかけやすさ表示・ライフビュー括り直し）。
 **親**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md)（三本柱） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（哲学層。§8 出来事・§10 Track 再解釈は本書の前提）
 **吸収対象**: [`session.md`](session.md)（v0.1 起草中のまま停滞。§6 未確定事項に本書が回答し、Session を「ライフが目標を与える機構層」として位置づけ直す）
 **経緯**: [実機初日の前提レベル設計課題](../issues/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。

@@ -57,6 +57,7 @@ from saiverse.judgment_points import (
     collect_promotion_refs,
     insert_timetable_slot,
     normalize_task_ref,
+    sanitize_lives,
     sanitize_timetable,
     save_desk_memo,
 )
@@ -287,6 +288,38 @@ def _finalize_day_open(
             "from_candidate": normalize_task_ref(desire_ref),
         }, spells_record)
         applied = True
+
+    # --- lives: 検証 → save_lives (life.md Phase2「ライフの器」) ------------
+    # 保存済みタイムテーブル (slots) に対して谷コマ・均等モード間隔を検証する
+    # ため、timetable セクションの後に置く (slots がまだ無い/古いままの新規
+    # plan_date では谷コマ検証は自明に通る)。
+    raw_lives = output.get("lives")
+    lives_cleaned, lives_warnings = sanitize_lives(manager, persona_id, raw_lives)
+    warnings.extend(lives_warnings)
+    if lives_cleaned:
+        try:
+            saved_lives = day_plan_mod.save_lives(manager, persona_id, plan_date, lives_cleaned)
+        except ValueError as exc:
+            warnings.append(f"ライフの保存に失敗: {exc}")
+            lines.append(f"（ライフは保存されませんでした（{exc}））")
+        else:
+            pushed_lives = day_plan_mod.schedule_lives(manager, persona_id, plan_date)
+            applied = True
+            lines.append(
+                f"（今日のライフを編成: {len(saved_lives)} 区間、"
+                f"{pushed_lives} 件の境界イベントを予約）"
+            )
+            for life in saved_lives:
+                mode_label = "均等" if life["mode"] == "even" else "自由"
+                lines.append(
+                    f"  {life['start']}–{life['end']} "
+                    f"予算{life['budget_pulses']}パルス [{mode_label}]"
+                )
+    elif raw_lives:
+        # 全滅 (フォーマット不正のみ) — 保存しない。黙って捨てない。
+        lines.append(
+            "（ライフは保存されませんでした: 提出されたライフがすべて無効でした）"
+        )
 
     return applied
 

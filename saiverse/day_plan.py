@@ -165,6 +165,30 @@ DEFAULT_BUDGET_ROUNDS = 8
 META_BUDGET_TOTAL = "budget_total_rounds"
 META_BUDGET_USED = "budget_used_rounds"
 
+# ---------------------------------------------------------------------------
+# ライフ (life.md Phase 2「ライフの器」)
+# ---------------------------------------------------------------------------
+
+#: ライフのモード (life.md §5.1): 均等 = 標準パルスの間隔を TTL 内に保つ
+#: (Anthropic/OpenAI 系のキャッシュ延命に最適)。自由 = 間隔制約なし (Gemini 等)。
+LIFE_MODE_EVEN = "even"
+LIFE_MODE_FREE = "free"
+LIFE_MODES = (LIFE_MODE_EVEN, LIFE_MODE_FREE)
+
+#: 均等モードで許容するコマ間隔の上限 (分)。TTL (Anthropic 1h) ちょうどは
+#: 遅延で割れるため安全マージンを引いた初期値 (life.md §12-2)。
+LIFE_EVEN_MAX_GAP_MINUTES = 50
+
+#: ラウンド消費 → パルス予算換算の減衰係数 κ (life.md §8.1)。
+#: 消費 = used_pulses + used_rounds × LIFE_ROUND_BUDGET_FACTOR。
+LIFE_ROUND_BUDGET_FACTOR = 0.2
+
+#: persona_day_plan.meta_json の lives 配列のキー (life.md §11.2)。
+META_LIVES = "lives"
+
+#: DEFAULT_MODEL の provider がこの集合に属せば既定モードは均等 (life.md §5.1)。
+_EVEN_MODE_PROVIDERS = frozenset({"anthropic", "openai"})
+
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 # コマは目的ノードを任意階層で指せる (P5, life_concept_map.md §3.1):
 # task:N (採用済み) / desire:N (候補=お試し採用) / track:N (大枝=関心そのもの)
@@ -353,12 +377,15 @@ def save_day_plan(manager: Any, persona_id: str, plan_date: Any, slots: List[Dic
     """時間割を検証して upsert する (1 ペルソナ 1 日 1 行)。
 
     Raises:
-        ValueError: persona_id 空 / plan_date 不正 / コマ配列の検証失敗。
+        ValueError: persona_id 空 / plan_date 不正 / コマ配列の検証失敗 /
+            宣言済みライフの外にコマがある場合 (life.md §4.3「谷にコマは置けない」。
+            ライフが宣言されていない日は skip = 後方互換)。
     """
     if not persona_id:
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
     normalized = _validate_and_normalize_slots(slots)
+    _check_slots_within_lives(manager, persona_id, plan_date_str, normalized)
     _upsert_plan_slots(manager, persona_id, plan_date_str, normalized)
 
 
@@ -585,18 +612,30 @@ def init_budget_ledger(
 
 def get_budget_state(
     manager: Any, persona_id: str, plan_date: Any
-) -> Optional[Dict[str, int]]:
+) -> Optional[Dict[str, Any]]:
     """日次予算の残高 ``{"total", "used", "remaining"}`` を返す。
 
-    台帳が無い日 (day_open がまだ走っていない / 本機能より前のデータ) は
-    None — 予算ゲートは無効 = 従来挙動 (後方互換)。
+    ライフ宣言がある日 (life.md Phase2 §7「ライフの世代交代」): 標準パルス予算
+    (Σ lives.budget_pulses) を単位とし、消費はΣ (used_pulses + used_rounds ×
+    :data:`LIFE_ROUND_BUDGET_FACTOR`)。**ライフの無い日は台帳が無ければ None**
+    (:data:`META_BUDGET_TOTAL` 未設定) — 旧実装 (日次ラウンド台帳) にそのまま
+    フォールバックする (後方互換。既存シグネチャ・呼び出し元は不変)。
     """
-    meta = load_plan_meta(manager, persona_id, plan_date)
-    total = _read_nonneg_int(meta.get(META_BUDGET_TOTAL))
-    if total is None:
+    plan_date_str = _normalize_plan_date(plan_date)
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if lives:
+        total = sum(int(life.get("budget_pulses") or 0) for life in lives)
+        used = sum(_life_consumed(life) for life in lives)
+        return {"total": total, "used": used, "remaining": max(0.0, total - used)}
+    meta = load_plan_meta(manager, persona_id, plan_date_str)
+    total_rounds = _read_nonneg_int(meta.get(META_BUDGET_TOTAL))
+    if total_rounds is None:
         return None
-    used = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
-    return {"total": total, "used": used, "remaining": max(0, total - used)}
+    used_rounds = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
+    return {
+        "total": total_rounds, "used": used_rounds,
+        "remaining": max(0, total_rounds - used_rounds),
+    }
 
 
 def consume_budget(
@@ -629,6 +668,525 @@ def consume_budget(
         state["remaining"] if state else "?",
     )
     return state
+
+
+# ---------------------------------------------------------------------------
+# ライフ (life.md Phase 2 §11.2「新設」): 宣言の永続化・予算台帳・境界イベント
+# ---------------------------------------------------------------------------
+
+
+def _life_minutes(hhmm: str) -> int:
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def get_lives(manager: Any, persona_id: str, plan_date: Any) -> List[Dict[str, Any]]:
+    """保存済みライフ宣言 (meta_json.lives) を返す。無ければ空リスト。
+
+    「lives が無い日 (旧データ・宣言なし) は検証もゲートも従来挙動」の判定は
+    すべてこの関数の戻り値が空かどうかで行う (life.md §4.1)。
+    """
+    meta = load_plan_meta(manager, persona_id, plan_date)
+    lives = meta.get(META_LIVES)
+    if not isinstance(lives, list):
+        return []
+    return [life for life in lives if isinstance(life, dict)]
+
+
+def get_life_for_time(lives: List[Dict[str, Any]], hhmm: str) -> Optional[int]:
+    """hhmm ("HH:MM") が属するライフの index を返す (無ければ None)。"""
+    for i, life in enumerate(lives):
+        if life.get("start") <= hhmm < life.get("end"):
+            return i
+    return None
+
+
+def _check_slots_within_lives(
+    manager: Any, persona_id: str, plan_date_str: str, slots: List[Dict[str, Any]]
+) -> None:
+    """全コマの start が宣言済みライフ区間内にあることを検証する (raise ValueError)。
+
+    ライフが宣言されていない日 (:func:`get_lives` が空) は検証しない
+    (旧データ・宣言なしの日は「谷」の概念自体が無い — 後方互換最優先)。
+    ``save_day_plan`` / ``replace_remaining_slots`` の両方が呼ぶことで、
+    起床判断以外の経路 (会話終了判断の残り時間割編集等) からの保存も守る。
+    """
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if not lives:
+        return
+    for idx, slot in enumerate(slots):
+        start = slot.get("start")
+        if get_life_for_time(lives, start) is None:
+            raise ValueError(
+                f"slot[{idx}] (start={start!r}) はどのライフ区間にも属していません "
+                f"(谷にコマは置けません。宣言済みライフ: "
+                f"{[(l.get('start'), l.get('end')) for l in lives]})"
+            )
+
+
+def _validate_and_normalize_lives(
+    lives: Any, slots: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """ライフ配列を検証し、正規化したコピーを返す (bookkeeping フィールドは含まない)。
+
+    検証項目 (life.md §4.1 / §5.1 / §4.3):
+    - start/end は "HH:MM" で end が start より後 (深夜跨ぎのライフは未対応)
+    - budget_pulses は正の int
+    - mode は "even" / "free" のみ
+    - ライフ同士は時間帯が重ならない (start 昇順に整列して隣接判定)
+    - 全コマの start がいずれかのライフ区間内にあること (谷にコマは置けない)
+    - mode="even" のライフはコマ間隔がすべて :data:`LIFE_EVEN_MAX_GAP_MINUTES`
+      (既定 50 分) 以内であること (ライフ開始→最初のコマ→隣接コマ間→
+      最後のコマ→ライフ終了)
+
+    Raises:
+        ValueError: 上記いずれかの違反。
+    """
+    if not isinstance(lives, list):
+        raise ValueError(f"lives must be a list (got {type(lives).__name__})")
+    if not lives:
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for i, life in enumerate(lives):
+        if not isinstance(life, dict):
+            raise ValueError(f"lives[{i}] must be a dict (got {type(life).__name__})")
+        start = life.get("start")
+        if not isinstance(start, str) or not _TIME_RE.match(start):
+            raise ValueError(f"lives[{i}].start must be 'HH:MM' (got {start!r})")
+        end = life.get("end")
+        if not isinstance(end, str) or not _TIME_RE.match(end):
+            raise ValueError(f"lives[{i}].end must be 'HH:MM' (got {end!r})")
+        if _life_minutes(end) <= _life_minutes(start):
+            raise ValueError(
+                f"lives[{i}]: end={end!r} must be after start={start!r} "
+                "(深夜跨ぎのライフは未対応)"
+            )
+        budget = life.get("budget_pulses")
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+            raise ValueError(
+                f"lives[{i}].budget_pulses must be a positive int (got {budget!r})"
+            )
+        mode = life.get("mode")
+        if mode not in LIFE_MODES:
+            raise ValueError(f"lives[{i}].mode must be one of {LIFE_MODES} (got {mode!r})")
+        normalized.append({"start": start, "end": end, "budget_pulses": budget, "mode": mode})
+
+    # start 昇順に整列し、隣接ライフの重なりを検証する (§4.1)。
+    normalized.sort(key=lambda life: life["start"])
+    for i in range(1, len(normalized)):
+        if normalized[i]["start"] < normalized[i - 1]["end"]:
+            raise ValueError(
+                f"lives[{i}] ({normalized[i]['start']}-{normalized[i]['end']}) が "
+                f"直前のライフ ({normalized[i - 1]['start']}-{normalized[i - 1]['end']}) "
+                "と重なっています"
+            )
+
+    # 谷にコマは置けない (§4.3)。
+    for idx, slot in enumerate(slots):
+        start = slot.get("start")
+        if not isinstance(start, str):
+            continue
+        if get_life_for_time(normalized, start) is None:
+            raise ValueError(
+                f"slot[{idx}] (start={start!r}) はどのライフ区間にも属していません "
+                "(谷にコマは置けません)"
+            )
+
+    # 均等モードの間隔検証 (§5.1、LIFE_EVEN_MAX_GAP_MINUTES 既定 50 分)。
+    for life in normalized:
+        if life["mode"] != LIFE_MODE_EVEN:
+            continue
+        in_life_starts = sorted(
+            slot["start"] for slot in slots
+            if isinstance(slot.get("start"), str)
+            and life["start"] <= slot["start"] < life["end"]
+        )
+        checkpoints = [life["start"], *in_life_starts, life["end"]]
+        for a, b in zip(checkpoints, checkpoints[1:]):
+            gap = _life_minutes(b) - _life_minutes(a)
+            if gap > LIFE_EVEN_MAX_GAP_MINUTES:
+                raise ValueError(
+                    f"life ({life['start']}-{life['end']}, 均等モード): "
+                    f"{a}→{b} の間隔が {gap} 分で上限 "
+                    f"{LIFE_EVEN_MAX_GAP_MINUTES} 分を超えています"
+                )
+
+    return normalized
+
+
+def save_lives(
+    manager: Any, persona_id: str, plan_date: Any, lives: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """ライフ宣言を検証して保存する (起床判断 day_open の finalize が呼ぶ)。
+
+    既存ライフと (start, end) が一致する行は積算済み消費 (used_pulses /
+    used_rounds) と境界発火済みフラグ (start_fired / end_fired) を引き継ぐ
+    (init_budget_ledger が used を保持するのと同じ思想 — 起床判断のやり直しで
+    消費や通知の重複を作らない)。一致しない (新規・時刻変更の) ライフは
+    0/False から始まる。
+
+    Raises:
+        ValueError: :func:`_validate_and_normalize_lives` の検証失敗。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    slots = load_day_plan(manager, persona_id, plan_date_str) or []
+    normalized = _validate_and_normalize_lives(lives, slots)
+
+    existing = {
+        (life.get("start"), life.get("end")): life
+        for life in get_lives(manager, persona_id, plan_date_str)
+    }
+    for life in normalized:
+        prev = existing.get((life["start"], life["end"]))
+        if prev is not None:
+            life["used_pulses"] = int(prev.get("used_pulses") or 0)
+            life["used_rounds"] = int(prev.get("used_rounds") or 0)
+            life["start_fired"] = bool(prev.get("start_fired"))
+            life["end_fired"] = bool(prev.get("end_fired"))
+        else:
+            life["used_pulses"] = 0
+            life["used_rounds"] = 0
+            life["start_fired"] = False
+            life["end_fired"] = False
+
+    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: normalized})
+    LOGGER.info(
+        "[day_plan] lives saved: persona=%s date=%s lives=%d",
+        persona_id, plan_date_str, len(normalized),
+    )
+    return normalized
+
+
+def derive_default_life_mode(manager: Any, persona_id: str) -> str:
+    """ペルソナの標準モデル (DEFAULT_MODEL) の provider からライフモードの既定を導出する。
+
+    Anthropic/OpenAI 系は均等 (explicit/implicit cache の TTL 再送延命が効く)、
+    それ以外 (Gemini/Ollama 等) は自由 (life.md §5.1)。モデル未解決・provider
+    不明時は安全側 (自由 = 間隔制約なし) に倒す。
+    """
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    model = getattr(persona, "model", None)
+    if not model:
+        return LIFE_MODE_FREE
+    try:
+        from saiverse.model_configs import get_model_config
+        provider = str(get_model_config(model).get("provider") or "")
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to resolve provider for model=%r (persona=%s); "
+            "defaulting life mode to free", model, persona_id, exc_info=True,
+        )
+        return LIFE_MODE_FREE
+    return LIFE_MODE_EVEN if provider in _EVEN_MODE_PROVIDERS else LIFE_MODE_FREE
+
+
+def _resolve_current_plan_date(manager: Any, persona_id: str) -> str:
+    """いま現在時刻が属する営業日 (plan_date) を解決する (深夜跨ぎ対応の自己解決)。"""
+    try:
+        from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
+        sched = _find_day_schedules(manager, persona_id)
+        return effective_plan_date(
+            clock.now(), sched.get("wake"), sched.get("close"),
+        ).isoformat()
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to resolve current plan_date (persona=%s); "
+            "using calendar date", persona_id, exc_info=True,
+        )
+        return clock.now().date().isoformat()
+
+
+def consume_life_pulse(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any = None,
+    *,
+    at_time: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """標準パルス 1 回をその時刻が属するライフへ積算する (life.md Phase2 §7)。
+
+    判断点発火 (autonomy_wiring.fire_judgment_point) と暮らしコマ・セッション系
+    コマの発火 (:func:`_fire_slot`) の両方が呼ぶ。lives が無い日 / パルス時刻が
+    どのライフにも属さない場合は no-op (None、後方互換)。
+
+    Args:
+        plan_date: 省略時は現在時刻が属する営業日を自己解決する。
+        at_time: パルス時刻 "HH:MM"。省略時は ``clock.now()``。
+    """
+    plan_date_str = (
+        _normalize_plan_date(plan_date) if plan_date is not None
+        else _resolve_current_plan_date(manager, persona_id)
+    )
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if not lives:
+        return None
+    hhmm = at_time or clock.now().strftime("%H:%M")
+    idx = get_life_for_time(lives, hhmm)
+    if idx is None:
+        LOGGER.info(
+            "[day_plan] pulse at %s does not belong to any declared life "
+            "(persona=%s date=%s); not counted",
+            hhmm, persona_id, plan_date_str,
+        )
+        return None
+    lives[idx]["used_pulses"] = int(lives[idx].get("used_pulses") or 0) + 1
+    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: lives})
+    return lives[idx]
+
+
+def consume_life_rounds(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    rounds: int,
+    *,
+    at_time: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """作業ラウンドの実測値をその時刻が属するライフへ積算する (life.md Phase2 §7)。
+
+    κ 減衰 (:data:`LIFE_ROUND_BUDGET_FACTOR`) は保存時でなく消費計算時
+    (:func:`get_budget_state` / ゲート判定) に適用する — ここには生のラウンド数を
+    積算する。lives が無い日は no-op (None)。
+    """
+    inc = _read_nonneg_int(rounds)
+    if not inc:
+        return None
+    plan_date_str = _normalize_plan_date(plan_date)
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if not lives:
+        return None
+    hhmm = at_time or clock.now().strftime("%H:%M")
+    idx = get_life_for_time(lives, hhmm)
+    if idx is None:
+        LOGGER.info(
+            "[day_plan] work rounds at %s do not belong to any declared life "
+            "(persona=%s date=%s); not counted",
+            hhmm, persona_id, plan_date_str,
+        )
+        return None
+    lives[idx]["used_rounds"] = int(lives[idx].get("used_rounds") or 0) + inc
+    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: lives})
+    return lives[idx]
+
+
+def _life_consumed(life: Dict[str, Any]) -> float:
+    """ライフ 1 件の消費量 (パルス換算): used_pulses + used_rounds × κ。"""
+    used_pulses = int(life.get("used_pulses") or 0)
+    used_rounds = int(life.get("used_rounds") or 0)
+    return used_pulses + used_rounds * LIFE_ROUND_BUDGET_FACTOR
+
+
+def _apply_life_budget_gate(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    slot: Dict[str, Any],
+    lives: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """ライフ単位の予算ゲート (life.md Phase2 §7)。
+
+    旧ゲート (:func:`_apply_budget_gate` の日次ラウンド台帳) と異なり、ラウンド数
+    の切り詰めはしない二値判定 — そのコマが属するライフの残
+    (budget_pulses − 消費) が 0 以下なら skip、それ以外はコマをそのまま通す
+    (パルスとラウンドは単位が異なり、ラウンド予算をパルス残高で比例配分しても
+    意味を持たないため)。
+
+    Returns:
+        通す場合は slot をそのまま返す。skip する場合は None
+        (呼び出し側の :func:`_fire_slot` が status=skipped を永続化する)。
+    """
+    idx = get_life_for_time(lives, slot["start"])
+    if idx is None:
+        # 谷にコマは置けない検証 (save_lives/save_day_plan) を通っていれば
+        # 起こらないはずだが、保存後にライフだけ組み替わった場合の防御。
+        LOGGER.warning(
+            "[day_plan] slot start=%s doesn't belong to any declared life "
+            "(persona=%s date=%s index=%d); life budget gate skipped "
+            "(allowing through)",
+            slot["start"], persona_id, plan_date_str, index,
+        )
+        return slot
+    life = lives[idx]
+    remaining = int(life.get("budget_pulses") or 0) - _life_consumed(life)
+    if remaining <= 0:
+        _update_slot(
+            manager, persona_id, plan_date_str, index,
+            status=STATUS_SKIPPED, skip_reason=SKIP_REASON_BUDGET_EXHAUSTED,
+        )
+        LOGGER.warning(
+            "[day_plan] slot skipped: life budget exhausted (persona=%s date=%s "
+            "index=%d life=%s-%s used_pulses=%s used_rounds=%s budget_pulses=%s)",
+            persona_id, plan_date_str, index, life.get("start"), life.get("end"),
+            life.get("used_pulses"), life.get("used_rounds"), life.get("budget_pulses"),
+        )
+        return None
+    return slot
+
+
+def _life_key(persona_id: str, plan_date_str: str, index: int, boundary: str) -> str:
+    return f"life:{persona_id}:{plan_date_str}:{index}:{boundary}"
+
+
+def _life_fire_at(
+    plan_date_str: str, life: Dict[str, Any], boundary: str, *, wake: Optional[str] = None
+) -> datetime:
+    """ライフ境界 (start/end) の発火時刻 (naive datetime)。深夜跨ぎ対応は
+    コマ予約 (:func:`_slot_fire_at`) と同じ規則。"""
+    d = date.fromisoformat(plan_date_str)
+    hhmm = life[boundary]
+    if wake and hhmm < wake:
+        d = d + timedelta(days=1)
+    hh, mm = hhmm.split(":")
+    return datetime.combine(d, dt_time(int(hh), int(mm)))
+
+
+def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> None:
+    """ライフ境界のシステム通知を tail (末尾イベント) として SAIMemory へ書く。
+
+    Track 切替通知と同じ様式 (``<system>`` ラップの user メッセージ、
+    event_message タグ、キャッシュ無破壊 — life.md §9.3)。
+    """
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    if adapter is None or not hasattr(adapter, "append_persona_message"):
+        return
+    message = {
+        "role": "user",
+        "content": f"<system>[システム通知] {text}</system>",
+        "metadata": {"tags": ["internal", "event_message", "day_plan"]},
+    }
+    try:
+        adapter.append_persona_message(message)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to record life boundary notice (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
+def _handle_life_start(
+    manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
+) -> None:
+    LOGGER.info(
+        "[day_plan] life started: persona=%s date=%s index=%d %s-%s "
+        "(budget=%dパルス mode=%s)",
+        persona_id, plan_date_str, index, life["start"], life["end"],
+        life["budget_pulses"], life["mode"],
+    )
+    _notify_life_boundary(
+        manager, persona_id,
+        f"(ライフ開始) {life['start']}〜{life['end']} の活動を始めます。",
+    )
+
+
+def _handle_life_end(
+    manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
+) -> None:
+    consumed = _life_consumed(life)
+    LOGGER.info(
+        "[day_plan] life ended: persona=%s date=%s index=%d %s-%s "
+        "(消費 %.1f/%d パルス)",
+        persona_id, plan_date_str, index, life["start"], life["end"],
+        consumed, life["budget_pulses"],
+    )
+    # TODO(life.md Phase3): Metabolism 連動 (ライフ終端での代謝台帳締め・畳み) は
+    # ここに接続する。本フェーズでは台帳締めログ + 通知のみ。
+    _notify_life_boundary(
+        manager, persona_id,
+        f"(ライフ終了) {life['start']}〜{life['end']} の活動を終えました。",
+    )
+
+
+def _fire_life_boundary(
+    manager: Any, persona_id: str, plan_date_str: str, index: int, boundary: str
+) -> None:
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if index >= len(lives):
+        LOGGER.warning(
+            "[day_plan] life boundary fire: life not found (persona=%s date=%s index=%d)",
+            persona_id, plan_date_str, index,
+        )
+        return
+    life = lives[index]
+    if life.get(f"{boundary}_fired"):
+        LOGGER.info(
+            "[day_plan] life boundary already fired; ignoring "
+            "(persona=%s date=%s index=%d boundary=%s)",
+            persona_id, plan_date_str, index, boundary,
+        )
+        return
+    life[f"{boundary}_fired"] = True
+    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: lives})
+    if boundary == "start":
+        _handle_life_start(manager, persona_id, plan_date_str, index, life)
+    else:
+        _handle_life_end(manager, persona_id, plan_date_str, index, life)
+
+
+def schedule_lives(
+    manager: Any, persona_id: str, plan_date: Any, *, wake: Optional[str] = None
+) -> int:
+    """未発火のライフ境界イベント (start/end) を EventScheduler に push する。
+
+    key は ``life:{persona_id}:{plan_date}:{index}:{start|end}``。同 key の
+    再 push は EventScheduler の既存挙動 (cancel + 上書き) に従うため冪等
+    (:func:`schedule_day_plan` と同じ規律)。既に発火済み (``{boundary}_fired``)
+    の境界は push しない。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    if wake is None:
+        wake = _resolve_wake(manager, persona_id)
+    lives = get_lives(manager, persona_id, plan_date_str)
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None or not lives:
+        return 0
+
+    pushed = 0
+    for index, life in enumerate(lives):
+        for boundary in ("start", "end"):
+            if life.get(f"{boundary}_fired"):
+                continue
+            fire_at = _life_fire_at(plan_date_str, life, boundary, wake=wake)
+            scheduler.schedule(
+                fire_at=fire_at,
+                callback=(
+                    lambda idx=index, b=boundary: _fire_life_boundary(
+                        manager, persona_id, plan_date_str, idx, b,
+                    )
+                ),
+                key=_life_key(persona_id, plan_date_str, index, boundary),
+            )
+            pushed += 1
+    if pushed:
+        LOGGER.info(
+            "[day_plan] life events scheduled: persona=%s date=%s pushed=%d",
+            persona_id, plan_date_str, pushed,
+        )
+    return pushed
+
+
+def find_lost_life_reservations(
+    manager: Any, persona_id: str, plan_date: Any
+) -> List[Any]:
+    """EventScheduler 予約が消えている (未発火の) ライフ境界の ``(index, boundary)`` を返す。
+
+    watchdog (:func:`~saiverse.autonomy_wiring.watchdog_tick`) の見張り対象
+    (:func:`find_lost_slot_reservations` と対称)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return []
+    lives = get_lives(manager, persona_id, plan_date_str)
+    lost: List[Any] = []
+    for index, life in enumerate(lives):
+        for boundary in ("start", "end"):
+            if life.get(f"{boundary}_fired"):
+                continue
+            if not scheduler.has_key(_life_key(persona_id, plan_date_str, index, boundary)):
+                lost.append((index, boundary))
+    return lost
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +1432,7 @@ def replace_remaining_slots(
     ]
     # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)
     normalized = _validate_and_normalize_slots(candidate, ascending_from=len(kept))
+    _check_slots_within_lives(manager, persona_id, plan_date_str, normalized)
 
     # 検証が通ってから旧予約を落とし、保存 → 再 push する。
     cancel_scheduled_slots(manager, persona_id, plan_date_str)
@@ -1122,12 +1681,20 @@ def _close_slot_episode(
 def _apply_budget_gate(
     manager: Any, persona_id: str, plan_date_str: str, index: int, slot: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    """予算ゲート (v2 §4.5)。切り詰め後の slot を返す。残高 0 なら None (発火中止)。
+    """予算ゲート (v2 §4.5 / life.md Phase2 §7)。切り詰め後の slot を返す。
+    発火中止なら None。
 
-    - 台帳が無い日 (day_open 前 / 旧データ) はゲート無効 = slot をそのまま返す
-    - 残高 < 実効予算 → 残高まで切り詰め (slots_json に永続化) + WARN
-    - 残高 0 → status='skipped' + WARN、ハンドラは実行しない
+    - ライフが宣言されている日 (:func:`get_lives` 非空): そのコマが属する
+      ライフの残 (budget_pulses − 消費) を見る二値ゲート
+      (:func:`_apply_life_budget_gate`)。ラウンド数のクランプはしない —
+      パルスとラウンドは単位が異なるため
+    - ライフの無い日: 旧ゲート (台帳が無ければ無効 = slot をそのまま返す。
+      残高 < 実効予算 → 残高まで切り詰め + WARN。残高 0 → skipped + WARN)
     """
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if lives:
+        return _apply_life_budget_gate(manager, persona_id, plan_date_str, index, slot, lives)
+
     requested = _effective_budget_rounds(slot)
     state = get_budget_state(manager, persona_id, plan_date_str)
     if state is None:
@@ -1253,6 +1820,16 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         persona_id, plan_date_str, index, kind, slot.get("ref"), slot.get("facility"),
     )
 
+    # ライフのパルス消費 (life.md Phase2 §7): このコマの発火 = 標準パルス 1 回。
+    # lives の無い日は no-op (consume_life_pulse 内で判定)。
+    try:
+        consume_life_pulse(manager, persona_id, plan_date_str)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] consume_life_pulse failed (persona=%s date=%s index=%d); continuing",
+            persona_id, plan_date_str, index, exc_info=True,
+        )
+
     # コマの実行区間を出来事として開く (skip 済み経路はここに到達しない =
     # skip されたコマは出来事を作らない。life_concept_map.md §8.1)
     episode_ref = _open_slot_episode(manager, persona_id, plan_date_str, slot, index)
@@ -1290,7 +1867,7 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         _close_slot_episode(manager, persona_id, episode_ref, None)
         return
 
-    # (e) 実測の消費ラウンドを日次予算台帳へ積算する (v2 §4.5)
+    # (e) 実測の消費ラウンドを日次予算台帳へ積算する (v2 §4.5 / life.md Phase2 §7)
     if gated and isinstance(used_rounds, int) and not isinstance(used_rounds, bool) \
             and used_rounds > 0:
         try:
@@ -1298,6 +1875,16 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         except Exception:
             LOGGER.exception(
                 "[day_plan] consume_budget failed (persona=%s date=%s index=%d); "
+                "continuing",
+                persona_id, plan_date_str, index,
+            )
+        try:
+            consume_life_rounds(
+                manager, persona_id, plan_date_str, used_rounds, at_time=slot.get("start"),
+            )
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] consume_life_rounds failed (persona=%s date=%s index=%d); "
                 "continuing",
                 persona_id, plan_date_str, index,
             )
