@@ -185,6 +185,35 @@
     word-break: break-word;
 }
 
+/* コマの型 (kind) バッジ: その時間に作業セッション Pulse が走るのか、
+   静かに過ごすだけなのかを一目で伝える。作業系6種はアクセント色、
+   暮らし/休む (と未知の kind) はミュート色。
+   色は globals.css のセマンティックトークン + 半透明アクセント
+   (.tagTrack / .tagMeta と同流儀) で、ライト/ダーク両テーマに自動追従する。
+   EventsTimeline.module.css の同名クラスと見た目を揃えること。 */
+.kindBadge {
+    display: inline-block;
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1.5;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    white-space: nowrap;
+    margin-right: 0.4rem;
+    vertical-align: 0.08em;
+}
+
+.kindWork {
+    background-color: rgba(6, 182, 212, 0.15);
+    color: var(--accent-primary);
+}
+
+.kindQuiet {
+    background-color: var(--bg-hover);
+    color: var(--text-secondary);
+}
+
 .planResult {
     font-size: 0.72rem;
     color: var(--text-secondary);

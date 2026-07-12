@@ -266,6 +266,40 @@
     text-decoration: underline;
 }
 
+/* コマの型 (kind) バッジ: その時間に作業セッション Pulse が走るのか、
+   静かに過ごすだけなのかを一目で伝える。作業系6種はアクセント色、
+   暮らし/休む (と未知の kind) はミュート色。
+   色はこのファイル冒頭コメントの流儀どおりセマンティックトークン +
+   半透明アクセント (.chipActive と同系) で、ライト/ダーク両テーマに
+   自動追従する。LifeView.module.css の同名クラスと見た目を揃えること。 */
+.kindBadge {
+    display: inline-block;
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1.5;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    white-space: nowrap;
+    vertical-align: 0.08em;
+}
+
+.kindWork {
+    background-color: rgba(6, 182, 212, 0.15);
+    color: var(--accent-primary);
+}
+
+.kindQuiet {
+    background-color: var(--bg-hover);
+    color: var(--text-secondary);
+}
+
+/* ゴースト行では表題テキストの直前に付くので右に隙間を空ける
+   (カードヘッダー内では flex の gap が隙間を持つため不要) */
+.ghostTitle .kindBadge {
+    margin-right: 0.4rem;
+}
+
 /* 予定のゴースト行 (淡い枠線のみ) */
 .ghostCard {
     flex: 1;

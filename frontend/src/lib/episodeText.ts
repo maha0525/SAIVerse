@@ -41,6 +41,29 @@ export function episodeTitle(meta: Record<string, unknown> | null): string | nul
     return null;
 }
 
+/** 作業セッション Pulse が走るコマ種別 (saiverse/day_plan.py の SIX_KINDS と同値)。
+    kind バッジの 2 トーン判定に使う: この 6 種はアクセント色、
+    暮らし / 休む (と未知の kind) はミュート色。 */
+const WORK_SLOT_KINDS = new Set([
+    '話す', '聞く', '作る', '知る', '経験する', '自分を更新する',
+]);
+
+/** kind が「作業セッション Pulse が走るコマ」かどうか。
+    未知の kind は false (= ミュート側の色でそのまま表示する) */
+export function isWorkSlotKind(kind: string): boolean {
+    return WORK_SLOT_KINDS.has(kind);
+}
+
+/** meta からコマの型 (slot_kind) を取り出す (無ければ null)。
+    コマ由来の出来事は day_plan._open_slot_episode が meta['slot_kind'] に
+    書く。会話由来など slot_kind を持たない出来事は null。 */
+export function episodeSlotKind(meta: Record<string, unknown> | null): string | null {
+    if (!meta) return null;
+    const v = meta['slot_kind'];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    return null;
+}
+
 /** meta から成果物 (Item ID) のリストを取り出す (無ければ空配列) */
 export function episodeArtifacts(meta: Record<string, unknown> | null): string[] {
     if (!meta) return [];

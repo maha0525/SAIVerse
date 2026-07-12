@@ -21,6 +21,8 @@ import styles from './EventsTimeline.module.css';
 import {
     buildEpisodeSentence,
     episodeArtifacts,
+    episodeSlotKind,
+    isWorkSlotKind,
     type EpisodeForText,
 } from '@/lib/episodeText';
 
@@ -288,8 +290,21 @@ export default function EventsTimeline({ initialPersonaId = null, onOpenLifeView
         if (id === null) setShowPlan(false);
     };
 
+    /** kind バッジ: コマの型 (作業系6種=アクセント色 / 暮らし・休む=ミュート色)。
+        「この時間に作業セッションが走るか、静かに過ごすか」を一目で伝える */
+    const renderKindBadge = (kind: string) => (
+        <span
+            className={`${styles.kindBadge} ${isWorkSlotKind(kind) ? styles.kindWork : styles.kindQuiet}`}
+        >
+            {kind}
+        </span>
+    );
+
     const renderGroupCard = (group: EpisodeGroup, ongoing: boolean) => {
         const primary = group.episodes[0];
+        // コマ由来のできごとは meta.slot_kind を持つ (day_plan._open_slot_episode)。
+        // 会話由来などは持たない → バッジなし
+        const slotKind = episodeSlotKind(primary.meta);
         const groupIds = group.members.map(m => m.id);
         // 「いま」行のペルソナ名はライフビュー (生中継) への入口にする。
         // 閉じた行は過去のできごとなので生中継に繋がず、そのまま。
@@ -335,6 +350,7 @@ export default function EventsTimeline({ initialPersonaId = null, onOpenLifeView
                                 </span>
                             ))}
                         </span>
+                        {slotKind && renderKindBadge(slotKind)}
                         {ongoing && <span className={styles.liveDot} />}
                     </div>
                     <div className={styles.cardBody}>{sentence}</div>
@@ -452,7 +468,8 @@ export default function EventsTimeline({ initialPersonaId = null, onOpenLifeView
                                         <div className={styles.ghostCard}>
                                             <div className={styles.ghostLabel}>よてい</div>
                                             <div className={styles.ghostTitle}>
-                                                {slot.title || slot.kind}
+                                                {slot.kind && renderKindBadge(slot.kind)}
+                                                {slot.title}
                                             </div>
                                             {slot.result_label && (
                                                 <div className={styles.ghostResult}>{slot.result_label}</div>

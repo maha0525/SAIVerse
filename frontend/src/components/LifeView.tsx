@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Play, Square, Star } from 'lucide-react';
 import styles from './LifeView.module.css';
+import { isWorkSlotKind } from '@/lib/episodeText';
 
 /**
  * ライフビュー: ペルソナの自律行動の観察面 (サイドパネル)。
@@ -317,7 +318,19 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
                                             <span className={styles.planTime}>{slot.start || '--:--'}</span>
                                             <div className={styles.planBody}>
                                                 <span className={styles.planTitle}>
-                                                    {slot.title || slot.kind}
+                                                    {/* kind バッジ: この時間に作業セッションが走るのか
+                                                        (作業系6種=アクセント色)、静かに過ごすだけなのか
+                                                        (暮らし/休む=ミュート色) を常時見せる */}
+                                                    {slot.kind && (
+                                                        <span
+                                                            className={`${styles.kindBadge} ${
+                                                                isWorkSlotKind(slot.kind) ? styles.kindWork : styles.kindQuiet
+                                                            }`}
+                                                        >
+                                                            {slot.kind}
+                                                        </span>
+                                                    )}
+                                                    {slot.title}
                                                 </span>
                                                 {slot.result_label && (
                                                     <span className={styles.planResult}>{slot.result_label}</span>
