@@ -1,8 +1,9 @@
 # Issue: 同一 Track への復帰で「Track 切替通知」が毎回注入される
 
-**ステータス**: 🔲 未着手 (設計検討待ち)
-**優先度**: medium
+**ステータス**: 🔲 未着手 (設計検討待ち — **束C の一症状として整理された 2026-07-13**)
+**優先度**: medium（表面化しており早め対応をまはー希望）
 **作成日**: 2026-07-08
+**上位**: この症状の根は「Track が進行状態管理から目的の指し示しに変質したのに、時間経過での自動 pause が古い意味論を引きずっている」こと。設計の親は [autonomous_v2_post_live_gaps.md](autonomous_v2_post_live_gaps.md) の**束C（Track の意味論の再整理）**。個別の通知出し分け修正だけで閉じず、束C の裁定と足並みを揃える。
 **関連**: `saiverse/track_manager.py` `activate`、`saiverse/track_handlers/user_conversation_handler.py` `on_track_activated` / `_inject_track_context`、`docs/intent/persona_cognition/pulse_dispatch.md` §5
 
 ## 症状
