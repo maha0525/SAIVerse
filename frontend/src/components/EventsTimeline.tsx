@@ -25,6 +25,7 @@ import {
     isWorkSlotKind,
     type EpisodeForText,
 } from '@/lib/episodeText';
+import type { DayPlanSlot } from '@/lib/dayPlan';
 
 interface EpisodeItem extends EpisodeForText {
     episode_id: string;
@@ -47,15 +48,6 @@ interface EpisodesResponse {
     day_start: number;
     day_end: number;
     episodes: EpisodeItem[];
-}
-
-interface DayPlanSlot {
-    index: number;
-    start: string;          // "HH:MM"
-    kind: string;
-    title: string;
-    status: string;
-    result_label: string;
 }
 
 interface DayPlanResponse {

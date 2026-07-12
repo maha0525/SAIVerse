@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Play, Square, Star } from 'lucide-react';
 import styles from './LifeView.module.css';
 import { isWorkSlotKind } from '@/lib/episodeText';
+import type { DayPlanSlot } from '@/lib/dayPlan';
 
 /**
  * ライフビュー: ペルソナの自律行動の観察面 (サイドパネル)。
@@ -42,15 +43,6 @@ interface ActivityViewData {
     intervals: { review_minutes: number; pulse_seconds: number };
     next_meta_tick_eta_seconds: number | null;
     next_wait_response_timeout_seconds: number | null;
-}
-
-interface DayPlanSlot {
-    index: number;
-    start: string;          // "HH:MM"
-    kind: string;
-    title: string;
-    status: string;
-    result_label: string;
 }
 
 interface DayPlanData {
