@@ -1,6 +1,7 @@
 # SAIVerse コードレビュー台帳
 
 > **目的**: SAIVerse の各サブシステムを、ファイル単位ではなく不変条件と実行経路の単位で継続監査する。レビュー結果を一度きりの所感にせず、再現テストと修正状況まで追跡する。
+> **運用体制 (2026-07-12 まはー)**: 一次監査の実施は Codex (GPT-5.6 Sol)、設計・実装指揮・指摘の裏取りと修正は Claude (Fable/メティス) の役割分担。レビュー指摘は head のコードで裏取りしてから台帳・修正に反映する。
 
 ## 状態
 
@@ -25,7 +26,7 @@
 
 | 優先 | サブシステム | 状態 | 最終監査 | 結果 / 次アクション | 記録 |
 |---|---|---|---|---|---|
-| P0 | 記憶・人格境界 | **指摘あり（一次監査継続）** | 2026-07-12 | 第1〜2片で P1×5、P2×1。thread境界・生ログ不変性・persona DB取得・headのmodel分離・削除済Fragment想起・内部lineのmessage想起混入を確認。次はsticky想起とMetabolism、移行経路を続査 | [一次監査](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Atlasレビュー](../handoff/2026-07-12_concept_consolidation_code_review.md) |
+| P0 | 記憶・人格境界 | **指摘あり（一次監査継続）** | 2026-07-12 | 第1〜3片で P1×6、P2×1。thread境界・生ログ不変性・persona DB取得・headのmodel分離・削除済Fragment想起・内部lineのmessage想起混入・sticky台帳のthread越境を確認。**仕分け済 (まはー裁定 2026-07-12)**: 生ログ直接改変・headのmodel非分離の2件は「現状は仕様」として後回し（課題として保持）。修正待ち=SCENE窓のthread混入 / 削除済Fragment想起 / 内部line想起混入 / sticky台帳thread越境 / get_adapter孤児DB(P2)。次はMetabolismの並走結果と移行経路を続査 | [一次監査](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Atlasレビュー](../handoff/2026-07-12_concept_consolidation_code_review.md) |
 | P0 | migration / upgrade / backup | 未監査 | — | 記憶境界の次。冪等性、削除、バックアップ復元、部分適用を監査 | — |
 | P0 | 自律行動・判断点・schedule | 未監査 | — | 発火重複、日付境界、予算、本人裁定との一致を監査 | — |
 | P1 | SEA runtime / Session / head-tail | 未監査 | — | line/model/thread隔離、cache snapshot、Metabolism境界を監査 | — |

@@ -46,6 +46,7 @@
   - 「生ログは不変の地面」「地図は土地を偽造しない」という Atlas の根本規律が、通常UI操作で破れる。
 - 修正方針: 生ログの通常編集・物理削除を停止する。訂正が必要なら、元行を保存したまま correction/tombstone を別層に記録し、表示・想起側で適用する。既存利用者の意図（インポート修正、誤記訂正、プライバシー削除）を分類してから代替導線を設計する。法的・プライバシー上の完全削除は、参照グラフを含む明示的な破棄操作として通常訂正と分離する。
 - 必要な回帰: 通常訂正後も元本文と写真の由来が保存されること。完全削除時は全参照先を列挙し、孤児参照を残さないこと。
+- **まはー裁定 (2026-07-12)**: 現状は仕様として後回し。課題として保持し、修正には着手しない。
 
 ### [P2] 共通 `get_adapter()` が存在しない・未ロードの persona ID を受け入れて memory.db を新規作成する
 
@@ -72,6 +73,7 @@
 - 判断が必要な点: 本当にheadをmodel別に持つか、全model共有へ設計を改めるか。**推奨はmodel別**。anchor・cache TTL・Sessionが既にmodel別であり、headだけ共有すると寿命境界が一致しない。
 - 修正方針（model別を採る場合）: pipeline/store/DBの物理キーを `(persona_id, model_key, line_id)` にする。全アクセサへmodel_keyを通し、既存行は記録済み `MODEL_KEY` を新主キーへ移行する。
 - 必要な回帰: 同一persona/lineのmodel A/Bが異なるsnapshot/version/TTLを保持し、片方のcapture・discard・diff通知が他方を変えない。
+- **まはー裁定 (2026-07-12)**: 現状は仕様として後回し。課題として保持し、修正には着手しない。
 
 ### [P1] ごみ箱へ移したMemopediaページのFragmentが自動想起に残り続ける
 
@@ -95,6 +97,18 @@
 - 修正方針: Chronicle/SCENEで共有している実会話フィルタを、埋め込み・keywordの両message検索へ適用する。embedding自体を全行分保持することは他用途のため許容できるが、自動想起の取得時scopeは必須。
 - 必要な回帰: 同じ語を含むmain_line、sub_line、meta_judgment/discardable、event_messageを並べ、自動想起のmessage hitがmain_line実会話だけになることをkeyword/embedding双方で固定する。
 
+### [P1] sticky自動想起の台帳がthreadを跨ぎ、別threadへ直前の想起を持ち込む
+
+- 場所: `sea/auto_recall.py:121-168,698-863`, `sea/runtime_context.py:464-501`, `saiverse_memory/adapter.py:1418-1444`, `api/routes/people/memory.py:211-221`
+- 事実:
+  - intentはsticky台帳を「ライン単位のインメモリ状態」と定義しているが、実装の `_LEDGERS` は `persona_id` だけをキーにする。
+  - コメントは「CONVERSATIONメインラインはpersona単位で1本」と置く一方、実装にはactive thread切替APIとStelisのthread切替が存在する。
+  - thread切替時に `reset_ledger()` を呼ぶ経路はない。リセットされるのは自動想起をOFFにした場合とテストだけである。
+  - そのためthread Aで採用された項目は、thread Bで検索に再採用されなくても `stale_turns <= sticky_turns` の間は台帳に残り、thread Bの末尾へ全件注入される。
+- 影響: 独立した会話threadの最初の数ターンへ、直前threadの話題・人物・生ログ断片が「ふと浮かんだ記憶」として混入する。threadを文脈分離面として使うStelisや手動thread切替で、粘着仕様が逆に境界漏れになる。
+- 修正方針: 台帳キーを少なくとも `(persona_id, thread_id)` にする。将来CONVERSATION root lineが同一thread内で複数並走し得るなら `(persona_id, thread_id, line_id)` まで持つ。`run_auto_recall()` の呼び出し側はadapterから取得したcanonical thread_idを明示的に渡し、thread終了時または切替時の台帳破棄も用意する。
+- 必要な回帰: thread Aでhitを採用後、同一personaのthread Bへ切り替えて検索hitを空にし、Aの項目がBへ注入されないこと。Aへ戻った場合に台帳を復元するか捨てるかは仕様を決めて固定する。
+
 ## 未確定の調査メモ（finding未昇格）
 
 - Metabolism本体は通常PulseではMetaLayerのper-persona直列化下にある。一方、cache TTL由来のsession closeはdaemon threadで走り、`_gold_panning_close_inflight` はclose同士だけを防ぐ。通常Metabolism・UIの`organize-memory`との共通排他、および共有SQLite connectionの`adapter._db_lock`適用は確認できていない。実際に並走可能な発火系列とDB操作を次片で追い、再現できた場合のみfindingへ昇格する。
@@ -108,6 +122,6 @@ Memory Atlas P4-a には別文書で P1×3（fold契約不一致、split本文�
 
 ## 次の監査片
 
-1. 自動想起のsticky台帳について、thread/model切替時の寿命を追う。
-2. MetabolismからChronicle・Fragment・core memoryへ書く主体と、同時実行時の原子性を追う。
-3. import/export・backup/restore・各migrationで、人格IDと保存先の対応が崩れないかを追う。
+1. Metabolism通常実行・session close・`organize-memory`・Chronicle手動生成の並走結果を、独立した再現ハーネスで追う。
+2. import/export・backup/restore・各migrationで、人格IDと保存先の対応が崩れないかを追う。
+3. sticky台帳のmodel切替影響は、thread越境修正のキー設計にmodelを含めるべきかという設計判断として追う。
