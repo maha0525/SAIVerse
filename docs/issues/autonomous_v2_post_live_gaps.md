@@ -9,9 +9,9 @@
 > 共通根 **A / B** の2本で束ね、[概念再編](../intent/concept_consolidation.md)の残件と
 > 合流させるためのハブ。
 >
-> **状態**: 発散完了・本書でドキュメント化。**次 = 概念再編の残件棚卸し → 本書との合流**。
-> ここに載っているのは *問題の同定* であって解決設計ではない。各節の「未決の論点」は
-> まはーの世界観判断待ち。**実装には入らない。**
+> **状態**: 発散完了・ドキュメント化・**概念再編残件の棚卸し＋合流も完了**（下部参照）。
+> **次 = A / B それぞれを intent（解決設計）に落とす段**。ここに載っているのは *問題の同定* で
+> あって解決設計ではない。各節の「未決の論点」はまはーの世界観判断待ち。**実装には入らない。**
 
 ---
 
@@ -156,26 +156,62 @@
 
 ---
 
-## 概念再編（⑥）の残件との合流 — 次ステップ（未着手）
+## 概念再編（⑥）の残件との合流 — 棚卸し結果（2026-07-12）
 
-本書の次の作業は、[concept_consolidation.md](../intent/concept_consolidation.md) の残件を棚卸しし、
-上の A/B に合流させること。**まだやっていない**（プレースホルダ）。棚卸しの入口候補:
+**⑥ umbrella の現況**: [concept_consolidation.md](../intent/concept_consolidation.md) は P4 まで
+実装完了・**まはー実機検証待ち**。Memory Atlas（土地＝生ログ / 地図帳＝編纂物 / 写真＝統一参照）
+＋目的の木（`persona_task`）＋Note→テーマノード移行は landed。**⑥ 本体の「残件」は実機検証で
+あって新規設計ではない**——A/B は⑥の *次* であって蒸し返しではない。
 
-- 概念再編 P4 完了後の**まはー実機検証待ち**（就寝判断の棚の乱れ・テーマの芽・朝の報告・目次）
-- **P3c の可搬性 issue**（[persona_memory_not_self_contained.md](persona_memory_not_self_contained.md)）
-- **Track 解体 = 目的の木**（[concept_map_purpose_tree の整理](../overview/) 系、intent 化前）
-- **landscape §9 の死んだ概念 / 宙に浮いた概念**
+棚卸しの本命は **既存 open issue のうち、実は A/B の一面だったもの**を掘り出し、個別修正でなく
+統合設計に引き込むこと。読んで裏取りした結果:
 
-特に **A2（できごと単位の LoD）は Chronicle の圧縮粒度**と、**B は Memory Atlas の
-「地図帳＝編纂物 / 写真＝統一参照」**と交差する見込み。合流時にここを詰める。
+### 束A に合流する既存 issue（＝半年かけて別々に起票された単位・記憶詳細度の課題）
+
+| issue | A のどれ | 中身 |
+|---|---|---|
+| [general_chronicle_metabolism_trigger](general_chronicle_metabolism_trigger.md) | **A2 の実装レバー** | 「Chronicle 生成 trigger を Metabolism 押し出し対象判定に変更。今コンテキストに残っているもののあらすじは不要（LLM が直接読める）」＝A2 の「近い＝詳細 / Metabolism で畳む / できごと単位 LoD」そのもの |
+| [short_term_to_long_term_memory_filtering](short_term_to_long_term_memory_filtering.md) | A1 / A2 | 短期記憶（Session）→長期記憶の選別（システム通知を入口で止める）。何を committed に残すか＝A1「何が正史か」の入口側 |
+| [spell_round_limit_redesign](spell_round_limit_redesign.md) | A3 / A4 | round 上限到達時の line 別挙動（main＝棄却 / sub＝残 spell 実行＋次 Pulse 継続）。まはー設計済。予算・ラウンドの意味論 |
+| [autonomous_work_single_pulse_completion](autonomous_work_single_pulse_completion.md) | A（単位） | 「1 Pulse で作業を完結したがる / 複数 Pulse にまたがる作業設計」。**実例が実機と同じ task:4「やりたいこと候補の洗い出しと desire プールへの蓄積」**＝この issue(2026-06-29) は実機挙動を予言していた |
+| [beat_concept_not_typed_in_implementation](beat_concept_not_typed_in_implementation.md) | A（単位） | 最小行動単位 Beat が実装に型として無い。単位の語彙整備 |
+| landscape §9: working_memory → Session | A（単位） | 短期記憶の単位＝Session 概念（working_memory テーブルは死亡） |
+
+→ **A は「新規の思いつき」ではなく、優先度低で個別放置されてきた課題群の共通根**（Pulse→できごと
+/コマ/日 の世代交代）が棚卸しで浮いた。統合設計で一度に解くべきもの。
+
+### 束B に合流する既存 issue（＝これまで誰も起票していなかった盲点）
+
+| issue | B のどれ | 中身 |
+|---|---|---|
+| [map_click_move_sidebar_not_updated](map_click_move_sidebar_not_updated.md) | B3（近縁） | 移動時の UI 同期。会話導線・居場所表示に隣接 |
+| （B1 / B2 / B4 に直接対応する既存 issue は無い） | — | チャット可視化・Item Open 共有・型→施設は本書が初出。B4 の調査事実（resolve_facility 未配線・施設タグ0）はここが起点 |
+
+→ **B は既存 issue が薄い＝盲点だった**。世界に向く last mile は「作ったが繋いでいない/そもそも
+無い」ので、これまで issue にすらなっていなかった。実機で初めて症状として見えた。
+
+### 横断（A/B どちらの束でもない負債）
+
+- [persona_memory_not_self_contained](persona_memory_not_self_contained.md)（**P3c 可搬性**）:
+  ペルソナ記憶が main DB に散在し丸ごと持ち運べない。⑥ P3c X案裁定に伴う既知の後回し負債。
+  A/B の再設計で記憶の単位・保存先を触るなら、可搬性も同時に視野に入る接点。
+
+### 棚卸しの結論
+
+1. **⑥ 本体（Memory Atlas / 目的の木 / Note移行）は landed、残は実機検証**。A/B はその次。
+2. **A は既存 issue 6本が束なる**——共通根が見えたので、バラで着手せず統合設計で一度に解く。
+3. **B は既存 issue が薄い盲点**——新規に設計が要る（特に B4 の resolver 配線 + 施設タグ、B1 の
+   チャット可視化）。
+4. 次: A / B それぞれを **intent（解決設計）に落とす段**。ここで初めて実装。**個別 issue は
+   intent 側から参照して束ねる**（バラで着手しない）。
 
 ---
 
 ## 進め方
 
 1. ~~発散（前提の疑いを全部出す）~~ 完了。
-2. ~~それぞれドキュメント化~~ 本書（A1–A4 / B1–B4）。
-3. **概念再編残件の棚卸し → 本書 A/B への合流**（次）。
-4. 合流後、A/B それぞれを「解決設計」に落とす段（intent 化）。ここで初めて実装の話。
+2. ~~それぞれドキュメント化~~ 完了（A1–A4 / B1–B4）。
+3. ~~概念再編残件の棚卸し → 本書 A/B への合流~~ 完了（既存 issue 6本が A に、B は盲点と判明）。
+4. **（次）A / B それぞれを「解決設計」に落とす段（intent 化）**。ここで初めて実装の話。個別 issue は intent 側から参照して束ねる。
 
 **現時点で実装には入らない。** 各節の「未決の論点」はまはーの世界観判断が先。
