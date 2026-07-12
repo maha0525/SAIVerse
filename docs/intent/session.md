@@ -1,6 +1,6 @@
 # Intent Document: Session
 
-**ステータス**: 起草中 (v0.1, 2026-05-28)
+**ステータス**: 起草中 (v0.1, 2026-05-28)。**2026-07-13: [life.md](life.md) が本書 §6 未確定事項に回答**——ライフ（活動区間の宣言）＝制御プレーン / Session＝データプレーンの関係で位置づけ直し、life.md レビュー通過後に本書を吸収改訂する。均等モードではライフ終端が Session 終了の第一基準になる（安全弁基準は存置）。
 **位置付け**: Metabolism / head 安定化 / Chronicle 生成 / prompt cache TTL / anchor 管理 を「セッション」という単一概念に統合し、世代の取り残しを解消する。
 **前提**: [`cached_head_architecture.md`](cached_head_architecture.md) (head 安定性) / [`line_tag_responsibility.md §10`](persona_cognition/line_tag_responsibility.md) (aspect 統合の手本) / [`cache_lifecycle_control.md`](cache_lifecycle_control.md) (TTL 戦略)
 
