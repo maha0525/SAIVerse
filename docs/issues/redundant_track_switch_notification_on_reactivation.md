@@ -1,6 +1,6 @@
 # Issue: 同一 Track への復帰で「Track 切替通知」が毎回注入される
 
-**ステータス**: 🔲 未着手 (解決設計確定 — **[life.md](../intent/life.md) §7 案 Y が根治設計、2026-07-13**)
+**ステータス**: 🟣 実装済・実機検証待ち (2026-07-13、コミット 6257b6a — life.md §7 案 Y Phase 1。wait_response タイムアウトから pause を撤去し、同一 Track 再 activate という事象ごと消滅。回帰テストで根治＋本物切替の通知維持を固定)
 **優先度**: medium（表面化しており早め対応をまはー希望）
 **作成日**: 2026-07-08
 **上位**: この症状の根は「Track が進行状態管理から目的の指し示しに変質したのに、時間経過での自動 pause が古い意味論を引きずっている」こと。設計の親は [autonomous_v2_post_live_gaps.md](autonomous_v2_post_live_gaps.md) の**束C（Track の意味論の再整理）** → 解決設計は **[life.md](../intent/life.md) §7（案 Y）**: wait_response タイムアウトから pause を抜き「いま」の読み出しを開いているエピソードへ一本化することで、同一 Track 再 activate という事象ごと消滅させる（通知の出し分け修正は不要になる）。

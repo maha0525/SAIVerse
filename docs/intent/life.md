@@ -1,6 +1,6 @@
 # Intent: ライフ — 活動区間の宣言と時間の階層
 
-**ステータス**: 設計中 (v0.2, 2026-07-13)。**v0.1 レビュー済（まはー）: 案 Y 承認・§5.2 keep-alive ライフ従属 GO・未決 3 件裁定**。実装待ちへの昇格は二本目 intent との線引き確認後。
+**ステータス**: 実装中 (v0.2, 2026-07-13)。**案 Y Phase 1（§7 の手術）実装済**（コミット 6257b6a: pause 撤去・会話中判定のエピソード移管・meta_layer 自己ゲート例外。対象テスト 194 passed）。Phase 2（ライフの器）以降進行中。
 **親**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md)（三本柱） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（哲学層。§8 出来事・§10 Track 再解釈は本書の前提）
 **吸収対象**: [`session.md`](session.md)（v0.1 起草中のまま停滞。§6 未確定事項に本書が回答し、Session を「ライフが目標を与える機構層」として位置づけ直す）
 **経緯**: [実機初日の前提レベル設計課題](../issues/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。
