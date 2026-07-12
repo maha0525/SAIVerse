@@ -213,6 +213,10 @@ class TestDetectUndersized:
         assert "m:2" in c["op_id"]
         assert "[過小]" in c["line"]
         assert "統合" in c["line"]
+        # 実行契約 (run_pending_plans): refs[0]=survivor(親), refs[1]=absorbed(過小ページ)
+        assert c["refs"] == ["m:1", "m:2"], (
+            f"fold の refs は [親, 過小ページ] の 2 件が必要: {c['refs']}"
+        )
 
     def test_trunk_direct_child_not_undersized_candidate(self):
         """trunk 直下の過小ページは候補にしない（決定論の統合先が無い）。"""

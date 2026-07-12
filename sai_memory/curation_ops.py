@@ -10,10 +10,18 @@ P4-a の三層（検知 → 裁定 → 実行）のうち「裁定から実行�
 実行関数（P4-a2 実装）:
     execute_merge(conn, survivor_page_id, absorbed_page_id, memopedia) -> dict
         完全決定論・LLM ゼロ。残す側本文 ＋ 区切り ＋ 吸収側本文の逐語連結。
+    plan_split(conn, page_id, llm_client) -> dict
+        split の前段（読み取り＋LLM のみ・書き込みなし）。LLM はブロック割当
+        ラベルのみ。保存則の機械検証あり（番号集合＋文字レベル復元。違反は棄却）。
+    apply_split(conn, memopedia, split_plan) -> dict
+        split の後段（書き込みのみ・LLM なし）。
     execute_split(conn, page_id, memopedia, llm_client) -> dict
-        LLM はブロック割当ラベルのみ。保存則の機械検証あり（違反は棄却）。
+        plan_split → apply_split の一括実行（直接呼び出し用）。
     run_pending_plans(manager, persona_id) -> dict
         pending プランを全実行。個々の失敗は他を止めない。
+        **1 プラン = 1 トランザクション**: 編纂経路には commit を保留する
+        プロキシ conn を渡し、プラン成功時のみ commit / 失敗時は rollback
+        する（途中失敗で部分変更が残らない）。
 
 テーブル定義（冪等）:
     id          TEXT PRIMARY KEY         -- UUID
@@ -33,6 +41,7 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
@@ -208,40 +217,117 @@ def _update_plan_status(
 
 
 def _split_into_blocks(content: str) -> List[str]:
-    """本文を段落ブロックのリストに分割する（決定論）。
+    """本文を lossless な段落ブロックのリストに分割する（決定論）。
+
+    **本文保存則の土台**: 各ブロックは元本文の連続スライスであり、
+    全ブロックをこの順で連結すると元本文に文字レベルで完全一致する
+    （``"".join(blocks) == content``）。先頭・末尾の空白、空白のみの行、
+    3 個以上の連続改行も一切失わない。
 
     規則:
-    - 空行（空白のみを含む行も含む）でブロックを区切る。
-    - 見出し行（# で始まる行）は次のブロックの先頭に付ける——
-      見出しがブロック末に孤立しないようにする。
-    - 空ブロック（空文字列）は除去する。
-
-    この分割は可逆であること（ブロックを連結すれば元に戻る）が重要。
-    空行の完全復元には join("\n\n") を使う。
+    - 2 個以上連続する改行をブロック境界とみなし、境界の改行列は
+      **直前のブロックの末尾**に帰属させる。
+    - 空白のみのブロックは前のブロックに併合する（前が無ければ次の
+      ブロックの先頭に併合）——LLM に空ブロックを見せない。
+    - 見出し行（# で始まる行）だけのブロックは次のブロックの先頭へ
+      繰り越す——見出しがブロック末に孤立しないようにする。
+      繰り越しはスライス境界の移動であり、文字は失わない。
     """
-    # まず空行（連続した改行）で粗く分割
-    raw_blocks: List[str] = re.split(r"\n{2,}", content)
-    # 空ブロックは除去
-    raw_blocks = [b.strip() for b in raw_blocks if b.strip()]
+    if content == "":
+        return []
 
-    # 見出し行が前のブロックの末尾になっていたら次のブロックへ移す
-    result: List[str] = []
-    pending_heading: Optional[str] = None
-    for block in raw_blocks:
-        lines = block.split("\n")
-        if pending_heading is not None:
-            block = pending_heading + "\n" + block
-            pending_heading = None
-        # ブロックが見出し行のみなら、次のブロックへ繰り越す
-        non_empty = [l for l in lines if l.strip()]
-        if len(non_empty) == 1 and non_empty[0].startswith("#"):
-            pending_heading = non_empty[0]
+    # 1. 区切り（連続改行）を保持したまま分割し、区切りを直前のチャンクの
+    #    末尾に付ける（全文字がちょうど 1 つのチャンクに属する）。
+    pieces = re.split(r"(\n{2,})", content)
+    chunks: List[str] = []
+    for i in range(0, len(pieces), 2):
+        text = pieces[i]
+        sep = pieces[i + 1] if i + 1 < len(pieces) else ""
+        chunk = text + sep
+        if chunk:
+            chunks.append(chunk)
+
+    # 2. 空白のみのチャンクは隣へ併合する（文字は必ずどこかのブロックに残す）
+    merged: List[str] = []
+    pending_prefix = ""
+    for chunk in chunks:
+        if not chunk.strip():
+            if merged:
+                merged[-1] += chunk
+            else:
+                pending_prefix += chunk
             continue
-        result.append(block)
+        merged.append(pending_prefix + chunk)
+        pending_prefix = ""
+    if pending_prefix:
+        # 本文全体が空白のみ——保存則を優先して 1 ブロックとして返す
+        merged.append(pending_prefix)
+
+    # 3. 見出し行のみのブロックは次のブロックの先頭へ繰り越す
+    result: List[str] = []
+    pending_heading = ""
+    for chunk in merged:
+        if pending_heading:
+            chunk = pending_heading + chunk
+            pending_heading = ""
+        non_empty = [ln for ln in chunk.split("\n") if ln.strip()]
+        if len(non_empty) == 1 and non_empty[0].strip().startswith("#"):
+            pending_heading = chunk
+            continue
+        result.append(chunk)
     # 最後に見出し行が余ったらそのままブロックとして追加
-    if pending_heading is not None:
+    if pending_heading:
         result.append(pending_heading)
     return result
+
+
+# ---------------------------------------------------------------------------
+# トランザクション制御 — 1 プラン = 1 トランザクション
+# ---------------------------------------------------------------------------
+
+
+class _NonCommittingConnection:
+    """commit() を保留する sqlite3.Connection の薄いプロキシ。
+
+    storage 層 (sai_memory/memopedia/storage.py) は各操作で conn.commit()
+    する規約だが、編纂プランを 1 トランザクションで実行するため、
+    編纂経路にはこのプロキシを渡して段階 commit を無効化する。
+    トランザクション境界（commit / rollback）は呼び出し元
+    (run_pending_plans) が実 conn で握る。storage 層の他の呼び出し元の
+    挙動（即 commit）は変えない。
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def commit(self) -> None:
+        """段階 commit を保留する（トランザクション終端でのみ実 conn を commit）。"""
+        pass
+
+    def rollback(self) -> None:
+        """明示 rollback は設計外の呼び出しだが、意図を尊重して実 conn に委譲する。"""
+        self._conn.rollback()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+@contextmanager
+def _plan_transaction(conn: sqlite3.Connection):
+    """1 プラン = 1 トランザクション。
+
+    ブロック内の書き込みは _NonCommittingConnection 経由で行われる前提
+    （storage 層の段階 commit が保留されている）。正常終了時のみ実 conn を
+    commit し、例外時は rollback して DB をプラン実行前と同一の状態に戻す。
+    呼び出し元は db_lock を保持したまま使うこと（トランザクション全体が
+    ロック内にあることが必須）。
+    """
+    try:
+        yield
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -374,31 +460,38 @@ def execute_merge(
     }
 
 
-def execute_split(
+def plan_split(
     conn: sqlite3.Connection,
     page_id: str,
-    memopedia: Any,
     llm_client: Any,
 ) -> Dict[str, Any]:
-    """split 実行（LLM はブロック割当ラベルのみ、保存則の機械検証あり）。
+    """split の前段（読み取り＋LLM 呼び出しのみ。DB 書き込みなし）。
 
     **本文保存則**: LLM はブロックの「どの子に割り当てるか」だけを返し、
-    本文テキストは一切出力させない。コードがブロックを逐語で移動する。
+    本文テキストは一切出力させない。割当を受けて子ページ本文・親の残り本文を
+    逐語で構成し、保存則を機械検証してから割当案を返す。
 
-    保存則の機械検証: 子ページ全部＋親の残りブロック集合 ＝ 元の全ブロック
-    （各ブロックがちょうど一度）でなければ、その分割を**棄却**して ValueError を
-    送出する（fail-safe、plan は "failed" になる）。
+    保存則の機械検証（どちらか一方でも通らなければ ValueError で棄却。
+    fail-safe、plan は "failed" になる）:
+    1. 番号集合（補助）: 全ブロックがちょうど一度使われている
+       （重複・漏れ・範囲外なし）
+    2. 文字レベル復元（本則）: 全出力（子ページ本文＋親の残り本文）から
+       元本文を機械的に復元して完全一致する
 
     Returns:
-        dict: {
+        dict: apply_split に渡す割当案 {
             "page_id": str,
-            "sections": [{"title": str, "child_id": str, "block_count": int}],
-            "remaining_block_count": int,
+            "title": str,
+            "content": str,             # 割当時点の本文スナップショット（検証用）
+            "sections": [{"title": str, "indices": [int], "content": str}],
+            "remaining_indices": [int],
+            "remaining_content": str,
             "total_blocks": int,
         }
 
     Raises:
-        ValueError: ページが見つからない、保存則違反、LLM 応答不正
+        ValueError: ページが見つからない、本文が空、ブロックが 1 つ、
+            LLM 応答不正、保存則違反
     """
     import json as _json
     from sai_memory.memopedia.storage import get_page
@@ -420,8 +513,9 @@ def execute_split(
         )
 
     # --- LLM へのプロンプト（ブロック割当ラベルのみ要求。本文を出力させない） ---
+    # 表示は strip して整える（プロンプト表示のみ。割当・移動は原文ブロック）。
     numbered_blocks = "\n\n".join(
-        f"[ブロック{i}]\n{b}" for i, b in enumerate(blocks)
+        f"[ブロック{i}]\n{b.strip()}" for i, b in enumerate(blocks)
     )
     prompt = (
         f"以下のページ「{page.title}」の内容を、内容のまとまりに応じて"
@@ -476,7 +570,7 @@ def execute_split(
     if not sections and not remaining_indices:
         raise ValueError("execute_split: LLM の応答に sections も remaining も含まれていません")
 
-    # --- 保存則の機械検証 ---
+    # --- 保存則の機械検証 (1): 番号集合（補助） ---
     all_assigned: List[int] = []
     for sec in sections:
         indices = [int(i) for i in (sec.get("block_indices") or [])]
@@ -491,35 +585,119 @@ def execute_split(
             "この分割を棄却します。"
         )
 
-    # --- 逐語でブロックを移動して子ページを作成 ---
-    created_sections: List[Dict[str, Any]] = []
+    # --- 逐語でブロックから子ページ本文・親の残り本文を構成 ---
+    # ブロックは lossless（区切りの改行列を自身の末尾に含む）なので、
+    # index 順の素の連結（"".join）で原文が保たれる。
+    section_plans: List[Dict[str, Any]] = []
     for sec in sections:
         sec_title = str(sec.get("title") or "").strip() or "(無題)"
-        indices = [int(i) for i in (sec.get("block_indices") or [])]
+        indices = sorted(int(i) for i in (sec.get("block_indices") or []))
         if not indices:
             continue
-        # ブロックを index 順に並べて連結（保存則: 逐語）
-        child_content = "\n\n".join(blocks[i] for i in sorted(indices))
+        section_plans.append({
+            "title": sec_title,
+            "indices": indices,
+            "content": "".join(blocks[i] for i in indices),
+        })
+    remaining_sorted = sorted(remaining_indices)
+    remaining_content = "".join(blocks[i] for i in remaining_sorted)
+
+    # --- 保存則の機械検証 (2): 文字レベルの復元（本則） ---
+    # 復元規則: 各ブロックは割当先ページの本文中に index 昇順で連続して並ぶ。
+    # よって元の index 順に、各出力本文を先頭から切り出して繋げば元本文に戻る。
+    # 全出力が過不足なく消費され、復元結果が元本文と完全一致しなければ棄却。
+    owner: Dict[int, int] = {}  # block index → section_plans の位置（-1 = 親の残り）
+    for si, sp in enumerate(section_plans):
+        for i in sp["indices"]:
+            owner[i] = si
+    for i in remaining_sorted:
+        owner[i] = -1
+    outputs: Dict[int, str] = {si: sp["content"] for si, sp in enumerate(section_plans)}
+    outputs[-1] = remaining_content
+    cursors: Dict[int, int] = {key: 0 for key in outputs}
+    rebuilt_parts: List[str] = []
+    for i in range(total_blocks):
+        key = owner[i]
+        start = cursors[key]
+        end = start + len(blocks[i])
+        rebuilt_parts.append(outputs[key][start:end])
+        cursors[key] = end
+    reconstructed = "".join(rebuilt_parts)
+    fully_consumed = all(cursors[key] == len(outputs[key]) for key in outputs)
+    if reconstructed != content or not fully_consumed:
+        raise ValueError(
+            "execute_split: 保存則違反。子ページ全本文＋親の残り本文から"
+            "元本文を復元できません（文字レベル不一致）。この分割を棄却します。"
+        )
+
+    return {
+        "page_id": page.id,
+        "title": page.title,
+        "content": content,
+        "sections": section_plans,
+        "remaining_indices": remaining_sorted,
+        "remaining_content": remaining_content,
+        "total_blocks": total_blocks,
+    }
+
+
+def apply_split(
+    conn: sqlite3.Connection,
+    memopedia: Any,
+    split_plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    """split の後段（DB 書き込みのみ。LLM なし）。
+
+    plan_split が返した割当案を適用する——子ページを作成し、親を
+    残りブロック＋子への導線に更新する。トランザクション境界とロックは
+    呼び出し元（run_pending_plans）が握る。
+
+    防御: 割当案の作成（LLM 呼び出し）と適用の間に本文が変わっていたら
+    ValueError で棄却する（別スレッドの編集との競合で保存則が壊れるのを防ぐ）。
+
+    Returns:
+        dict: {
+            "page_id": str,
+            "sections": [{"title": str, "child_id": str, "block_count": int}],
+            "remaining_block_count": int,
+            "total_blocks": int,
+        }
+
+    Raises:
+        ValueError: ページが見つからない、割当案作成後に本文が変更された
+    """
+    from sai_memory.memopedia.storage import get_page
+
+    page_id = split_plan["page_id"]
+    page = get_page(conn, page_id)
+    if page is None:
+        raise ValueError(f"execute_split: ページが見つかりません: {page_id}")
+    if (page.content or "") != split_plan["content"]:
+        raise ValueError(
+            f"execute_split: 割当案の作成後に本文が変更されています: {page_id}。"
+            "この分割を棄却します。"
+        )
+
+    # --- 逐語でブロックを移動して子ページを作成 ---
+    created_sections: List[Dict[str, Any]] = []
+    for sec in split_plan["sections"]:
         child_page = memopedia.create_page(
             parent_id=page_id,
-            title=sec_title,
-            content=child_content,
+            title=sec["title"],
+            content=sec["content"],
             edit_source="curation",
         )
         created_sections.append({
-            "title": sec_title,
+            "title": sec["title"],
             "child_id": child_page.id,
-            "block_count": len(indices),
+            "block_count": len(sec["indices"]),
         })
         LOGGER.debug(
             "[curation_ops] split: created child page id=%s title=%r block_count=%d",
-            child_page.id, sec_title, len(indices),
+            child_page.id, sec["title"], len(sec["indices"]),
         )
 
     # --- 親は remaining ブロック ＋ 子への導線 ---
-    remaining_content = "\n\n".join(
-        blocks[i] for i in sorted(remaining_indices)
-    ) if remaining_indices else ""
     guide_lines: List[str] = []
     for sec in created_sections:
         guide_lines.append(f"- [{sec['title']}]（子ページ）")
@@ -527,7 +705,7 @@ def execute_split(
         guide_section = "\n\n## 分割された節\n\n" + "\n".join(guide_lines)
     else:
         guide_section = ""
-    new_parent_content = remaining_content + guide_section
+    new_parent_content = split_plan["remaining_content"] + guide_section
 
     memopedia.update_page(
         page_id,
@@ -538,14 +716,34 @@ def execute_split(
     LOGGER.info(
         "[curation_ops] split done: page_id=%s total_blocks=%d "
         "sections=%d remaining_blocks=%d",
-        page_id, total_blocks, len(created_sections), len(remaining_indices),
+        page_id, split_plan["total_blocks"],
+        len(created_sections), len(split_plan["remaining_indices"]),
     )
     return {
         "page_id": page_id,
         "sections": created_sections,
-        "remaining_block_count": len(remaining_indices),
-        "total_blocks": total_blocks,
+        "remaining_block_count": len(split_plan["remaining_indices"]),
+        "total_blocks": split_plan["total_blocks"],
     }
+
+
+def execute_split(
+    conn: sqlite3.Connection,
+    page_id: str,
+    memopedia: Any,
+    llm_client: Any,
+) -> Dict[str, Any]:
+    """split 実行（plan_split → apply_split の一括実行）。
+
+    直接呼び出し用の後方互換 API。run_pending_plans は LLM 呼び出しを
+    ロック・トランザクションの外に出すため、plan_split / apply_split を
+    個別に呼ぶ（この関数は経由しない）。
+
+    Raises:
+        ValueError: ページが見つからない、保存則違反、LLM 応答不正
+    """
+    split_plan = plan_split(conn, page_id, llm_client)
+    return apply_split(conn, memopedia, split_plan)
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +769,11 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
     """pending の編纂プランを全実行する。
 
     - 各プランを順に実行し、status を done/failed に更新する。
+    - **1 プラン = 1 トランザクション**: プラン内の全書き込み（ページ変更＋
+      status=done）は成功時のみ commit され、途中失敗時は rollback されて
+      DB はプラン実行前と同一の状態に戻る（翌朝報告の「ページは変更されて
+      いません」が事実と一致する）。
+    - split の LLM 呼び出し（plan_split）はロック・トランザクションの外で行う。
     - 個々のプランの失敗は他のプランを止めない（fail-safe）。
     - 実行後、翌朝のペルソナへの報告を event_message 形式で SAIMemory に書く。
     - desk 上の吸収側ページは既存の dropped_missing 機構が次の Metabolism
@@ -599,16 +802,11 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
         )
         return {"done": [], "failed": [], "report_lines": []}
 
-    # Memopedia インスタンスを取得（adapter が持つ場合 / なければ直接生成）。
     # 背景スレッドから走るため、メインスレッドの書き込み (adapter._db_lock 経由)
     # と同じロックを共有することが必須 — 別ロックの Memopedia を作ると
     # 同一 sqlite conn 上でトランザクションが交錯する。
     import threading as _threading
     db_lock = getattr(adapter, "_db_lock", None) or _threading.RLock()
-    memopedia = getattr(adapter, "memopedia", None)
-    if memopedia is None:
-        from sai_memory.memopedia.core import Memopedia
-        memopedia = Memopedia(mem_conn, db_lock=db_lock)
 
     plans = list_pending(mem_conn)
     if not plans:
@@ -616,6 +814,18 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
             "[curation_ops] run_pending_plans: no pending plans (persona=%s)", persona_id,
         )
         return {"done": [], "failed": [], "report_lines": []}
+
+    # 編纂は 1 プラン = 1 トランザクションで実行する。storage 層は各操作で
+    # commit() する規約のため、編纂経路には commit を保留するプロキシ conn
+    # （とそれに束ねた Memopedia）を渡し、_plan_transaction が成功時のみ
+    # 実 conn を commit / 失敗時は rollback する。
+    tx_conn = _NonCommittingConnection(mem_conn)
+    from sai_memory.memopedia.core import Memopedia
+    with db_lock:
+        tx_memopedia = Memopedia(tx_conn, db_lock=db_lock)
+        # Memopedia.__init__ の冪等初期化（DDL / seed）がプラン本体の
+        # トランザクションに混ざらないよう、ここで確定しておく。
+        mem_conn.commit()
 
     done_ids: List[str] = []
     failed_ids: List[str] = []
@@ -678,7 +888,14 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
                 if absorbed_id is None:
                     raise ValueError(f"absorbed ページが見つかりません: {absorbed_ref}")
                 with db_lock:
-                    result = execute_merge(mem_conn, survivor_id, absorbed_id, memopedia)
+                    with _plan_transaction(mem_conn):
+                        result = execute_merge(
+                            tx_conn, survivor_id, absorbed_id, tx_memopedia,
+                        )
+                        # プラン状態の done も同一トランザクションで確定する
+                        # （ページ変更だけ確定して状態が pending のまま残り、
+                        # 次回バッチで二重実行される窓を無くす）。
+                        _update_plan_status(tx_conn, plan_id, STATUS_DONE, result)
                 report_lines.append(
                     f"- [{kind}] {refs[0]}「{result['survivor_title']}」に {refs[1]}「{result['absorbed_title']}」を"
                     f"統合しました（{result['merged_content_len']:,}字、"
@@ -695,7 +912,13 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
                 llm = _get_llm_client()
                 if llm is None:
                     raise RuntimeError("LLM クライアントの初期化に失敗しました")
-                result = execute_split(mem_conn, page_id_resolved, memopedia, llm)
+                # LLM 呼び出し（plan_split）はロック・トランザクションの外。
+                # ロックを LLM コール中に保持してはいけない。
+                split_plan = plan_split(mem_conn, page_id_resolved, llm)
+                with db_lock:
+                    with _plan_transaction(mem_conn):
+                        result = apply_split(tx_conn, tx_memopedia, split_plan)
+                        _update_plan_status(tx_conn, plan_id, STATUS_DONE, result)
                 section_names = [s["title"] for s in result.get("sections", [])]
                 report_lines.append(
                     f"- [split] {page_ref} を {len(section_names)} 件の子ページに分割しました"
@@ -705,8 +928,6 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
             else:
                 raise ValueError(f"未知の kind: {kind!r}")
 
-            with db_lock:
-                _update_plan_status(mem_conn, plan_id, STATUS_DONE, result)
             done_ids.append(plan_id)
             LOGGER.info(
                 "[curation_ops] run_pending_plans: plan_id=%s done", plan_id,
@@ -718,6 +939,17 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
                 plan_id, exc, exc_info=True,
             )
             with db_lock:
+                # トランザクション内の失敗は _plan_transaction が rollback 済み。
+                # ここでの rollback はトランザクション前段（refs 解決・LLM 等）の
+                # 失敗時は no-op だが、「failed 状態の commit が部分変更を道連れに
+                # 確定する」事故を構造的に塞ぐ保険として置く。
+                try:
+                    mem_conn.rollback()
+                except Exception:
+                    LOGGER.warning(
+                        "[curation_ops] run_pending_plans: rollback failed "
+                        "(plan_id=%s)", plan_id, exc_info=True,
+                    )
                 _update_plan_status(mem_conn, plan_id, STATUS_FAILED, {"error": str(exc)})
             failed_ids.append(plan_id)
             report_lines.append(

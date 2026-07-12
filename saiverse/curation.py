@@ -222,19 +222,22 @@ def _detect_undersized(
         # trunk 直下（実親なし）は候補にしない
         if not _has_real_parent(p, page_map):
             continue
-        label = _short_id_label(p.get("short_id"), p["id"])
         pid = p.get("parent_id")
         parent = page_map.get(pid) if pid else None
-        parent_label = (
-            _short_id_label(parent.get("short_id"), parent["id"])
-            if parent else "親"
-        )
-        parent_title = parent["title"] if parent else "親"
+        if parent is None:
+            # 防御: _has_real_parent() で除外済みのはずだが、親が解決できない
+            # ページは実行契約 (refs=[survivor, absorbed]) を満たせないため
+            # 候補にしない。
+            continue
+        label = _short_id_label(p.get("short_id"), p["id"])
+        parent_label = _short_id_label(parent.get("short_id"), parent["id"])
+        parent_title = parent["title"]
         stale_days = (_now_epoch() - last_activity) // 86400 if last_activity else STALE_DAYS
         candidates.append({
             "op_id": f"fold:{label}",
             "kind": "fold",
-            "refs": [label],
+            # 実行契約 (run_pending_plans): refs[0]=survivor(親), refs[1]=absorbed(過小ページ)
+            "refs": [parent_label, label],
             "content_len": clen,
             "line": (
                 f"[過小] {label}「{p['title']}」 {clen}字・"

@@ -100,6 +100,12 @@ def _make_full_conn() -> sqlite3.Connection:
         """
     )
     init_curation_tables(conn)
+    # 実 storage 層の残りテーブル作成＋ルートページ seed（冪等）。
+    # run_pending_plans は実 Memopedia を初期化する（seed が走る）ため、
+    # テスト前後のスナップショット比較が seed 差分で汚れないよう
+    # ここで先に済ませておく。
+    from sai_memory.memopedia.storage import init_memopedia_tables
+    init_memopedia_tables(conn)
     conn.commit()
     return conn
 
@@ -120,6 +126,9 @@ def _insert_page(
     is_trunk: bool = False,
     is_deleted: bool = False,
     short_id: Optional[int] = None,
+    created_at: Optional[int] = None,
+    updated_at: Optional[int] = None,
+    last_referenced_at: Optional[int] = None,
 ) -> None:
     now = int(time.time())
     if short_id is None:
@@ -138,7 +147,9 @@ def _insert_page(
             json.dumps(keywords or []),
             1 if is_trunk else 0,
             1 if is_deleted else 0,
-            now - 3600, now - 3600, now - 3600,
+            created_at if created_at is not None else now - 3600,
+            updated_at if updated_at is not None else now - 3600,
+            last_referenced_at if last_referenced_at is not None else now - 3600,
             short_id,
         ),
     )
@@ -283,13 +294,26 @@ class TestSplitIntoBlocks:
         assert any("## 章タイトル" in b and "本文" in b for b in blocks)
 
     def test_roundtrip_reconstruction(self):
-        """ブロックを連結すれば元の本文の全テキストが復元できる（保存則の基礎）。"""
+        """全ブロックの素の連結が元本文に文字レベルで完全一致する（本文保存則の基礎）。"""
         content = "段落A\n\n段落B\n\n段落C"
         blocks = _split_into_blocks(content)
-        all_text = "\n\n".join(blocks)
-        # 各段落のテキストが含まれること（空白の扱いは許容）
-        for para in ["段落A", "段落B", "段落C"]:
-            assert para in all_text
+        assert "".join(blocks) == content
+
+    def test_lossless_on_whitespace_edge_cases(self):
+        """先頭末尾空白・空白のみの行・3個以上の連続改行も失わない（修正3の回帰）。"""
+        cases = [
+            "  A  \n\n\nB  \n",               # 先頭末尾空白・3連改行・末尾改行
+            "A\n\n\n\nB",                      # 4連改行
+            "\n\nA\n\nB\n\n",                  # 先頭・末尾が区切り
+            "前書き\n\n## 章タイトル\n\n本文",  # 見出し繰り越し
+            "   \n\n  \n\nA",                  # 空白のみのチャンク
+            "単一段落",
+        ]
+        for content in cases:
+            blocks = _split_into_blocks(content)
+            assert "".join(blocks) == content, (
+                f"lossless 違反: {content!r} → {blocks!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -912,3 +936,297 @@ class TestExecuteMergeMetadata:
         # survivor のキーも absorbed のキーも残る
         assert meta.get("foo") == "survivor_foo"
         assert meta.get("bar") == "absorbed_bar"
+
+
+# ---------------------------------------------------------------------------
+# 修正1の回帰: fold の検知 → enqueue → run_pending_plans 統合
+# ---------------------------------------------------------------------------
+
+
+class TestFoldIntegration:
+    """fold の refs 契約 (refs=[親, 過小ページ]) が検知から実行まで通ることを固定する。
+
+    レビュー指摘 [P1]: 検知が refs 1 件で候補を作り、実行が 2 件を要求するため
+    fold は承認しても必ず失敗していた。
+    """
+
+    def test_detect_enqueue_run_fold_succeeds(self):
+        from saiverse.curation import STALE_DAYS, detect_curation_candidates
+
+        conn = _make_full_conn()
+        stale = int(time.time()) - (STALE_DAYS + 1) * 86400
+        _insert_page(
+            conn, page_id="trunk", title="トランク", category="people",
+            is_trunk=True, short_id=0,
+        )
+        # 実親（非 trunk）
+        _insert_page(
+            conn, page_id="p_parent", title="週の記録", category="people",
+            content="親ページの本文" * 40, parent_id="trunk", short_id=1,
+        )
+        # 過小・低参照の子ページ
+        _insert_page(
+            conn, page_id="p_small", title="金曜日のメモ", category="people",
+            content="小さなメモ", parent_id="p_parent", short_id=2,
+            updated_at=stale, last_referenced_at=stale,
+        )
+
+        # 検知: fold 候補の refs は [survivor=親, absorbed=過小ページ]
+        candidates = detect_curation_candidates(conn, "alice")
+        fold = [c for c in candidates if c["kind"] == "fold"]
+        assert len(fold) == 1, f"fold 候補が検知されない: {candidates}"
+        cand = fold[0]
+        assert cand["refs"] == ["m:1", "m:2"], (
+            f"fold の refs 契約違反 (survivor=親, absorbed=過小ページ): {cand['refs']}"
+        )
+
+        # enqueue → 実行
+        enqueue_plan(conn, kind=cand["kind"], op_id=cand["op_id"], refs=cand["refs"])
+        manager, messages = _make_run_manager(conn)
+        result = run_pending_plans(manager, "alice")
+
+        assert result["failed"] == [], f"fold プランが失敗した: {result['report_lines']}"
+        assert len(result["done"]) == 1
+
+        from sai_memory.memopedia.storage import get_page
+        # survivor=親: 過小ページの本文が親へ逐語で統合されている
+        parent_after = get_page(conn, "p_parent")
+        assert "小さなメモ" in parent_after.content
+        assert "金曜日のメモ" in parent_after.content  # 区切り見出しに旧タイトル
+        # absorbed=過小ページ: soft-delete されている
+        row = conn.execute(
+            "SELECT is_deleted FROM memopedia_pages WHERE id = 'p_small'"
+        ).fetchone()
+        assert row[0] == 1, "過小ページが soft-delete されていない"
+
+
+# ---------------------------------------------------------------------------
+# 修正2の回帰: 1 プラン = 1 トランザクション（失敗時に部分変更が残らない）
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_state(conn: sqlite3.Connection) -> tuple:
+    """pages（親子関係含む全列）と編集来歴のスナップショット。"""
+    pages = conn.execute(
+        "SELECT * FROM memopedia_pages ORDER BY id"
+    ).fetchall()
+    history = conn.execute(
+        "SELECT * FROM memopedia_page_edit_history ORDER BY id"
+    ).fetchall()
+    return pages, history
+
+
+class TestPlanAtomicity:
+    """merge/split の各段階に例外を注入し、失敗後の pages・親子関係・編集来歴が
+    プラン実行前と完全一致する（rollback される）ことを固定する。
+    """
+
+    def _setup_merge(self) -> sqlite3.Connection:
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="p_s", title="残る", content="本文A", parent_id="root", short_id=1,
+        )
+        _insert_page(
+            conn, page_id="p_a", title="消える", content="本文B", parent_id="root", short_id=2,
+        )
+        # absorbed の子ページ（付け替えの rollback を検証するため）
+        _insert_page(
+            conn, page_id="child1", title="子1", content="C", parent_id="p_a", short_id=3,
+        )
+        enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
+        return conn
+
+    def test_merge_failure_at_last_stage_rolls_back_everything(self):
+        """最終段階 (absorbed soft-delete) の失敗で、それ以前の変更
+        （子の付け替え・survivor 本文更新・編集来歴）が全て巻き戻る。"""
+        from sai_memory.memopedia.core import Memopedia
+
+        conn = self._setup_merge()
+        before = _snapshot_state(conn)
+        manager, messages = _make_run_manager(conn)
+
+        with patch.object(
+            Memopedia, "delete_page", side_effect=RuntimeError("boom: delete"),
+        ):
+            result = run_pending_plans(manager, "alice")
+
+        assert len(result["failed"]) == 1
+        assert result["done"] == []
+        assert _snapshot_state(conn) == before, "失敗後に部分変更が残っている"
+        # 翌朝報告の「ページは変更されていません」が事実と一致する
+        assert any(
+            "ページは変更されていません" in line for line in result["report_lines"]
+        )
+
+    def test_merge_failure_at_survivor_update_rolls_back(self):
+        """中間段階 (survivor 本文更新) の失敗でも、先行する子の付け替えが巻き戻る。"""
+        from sai_memory.memopedia.core import Memopedia
+
+        conn = self._setup_merge()
+        before = _snapshot_state(conn)
+        manager, messages = _make_run_manager(conn)
+
+        with patch.object(
+            Memopedia, "update_page", side_effect=RuntimeError("boom: update"),
+        ):
+            result = run_pending_plans(manager, "alice")
+
+        assert len(result["failed"]) == 1
+        assert _snapshot_state(conn) == before, (
+            "子の付け替え (move_pages_to_parent) が rollback されていない"
+        )
+
+    def test_merge_success_commits(self):
+        """（対照）正常系は commit され、変更が確定して残る。"""
+        conn = self._setup_merge()
+        before = _snapshot_state(conn)
+        manager, messages = _make_run_manager(conn)
+        result = run_pending_plans(manager, "alice")
+        assert len(result["done"]) == 1
+        assert _snapshot_state(conn) != before
+
+    # ----- split -----
+
+    def _setup_split(self) -> sqlite3.Connection:
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="target", title="大きなページ",
+            content="ブロック0\n\nブロック1\n\nブロック2",
+            parent_id="root", short_id=1,
+        )
+        enqueue_plan(conn, kind="split", op_id="split:m:1", refs=["m:1"])
+        return conn
+
+    def _run_with_mock_llm(self, manager: Any, llm_response: Dict[str, Any]) -> Dict[str, Any]:
+        """run_pending_plans の LLM クライアント取得経路を mock で固定する。"""
+        mock_llm = _make_mock_llm(llm_response)
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model",
+                {"model": "mock-model", "context_length": 1000, "provider": "mock"},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client",
+            return_value=mock_llm,
+        ):
+            return run_pending_plans(manager, "alice")
+
+    def test_split_failure_on_second_child_rolls_back_first_child(self):
+        """2 枚目の子ページ作成の失敗で、作成済みの 1 枚目も巻き戻る。"""
+        from sai_memory.memopedia.core import Memopedia
+
+        conn = self._setup_split()
+        before = _snapshot_state(conn)
+        manager, messages = _make_run_manager(conn)
+
+        orig_create = Memopedia.create_page
+        calls = {"n": 0}
+
+        def flaky_create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise RuntimeError("boom: 2nd child")
+            return orig_create(self, **kwargs)
+
+        llm_response = {
+            "sections": [
+                {"title": "子A", "block_indices": [0]},
+                {"title": "子B", "block_indices": [1]},
+            ],
+            "remaining_block_indices": [2],
+        }
+        with patch.object(Memopedia, "create_page", flaky_create):
+            result = self._run_with_mock_llm(manager, llm_response)
+
+        assert calls["n"] == 2, "2枚目の作成まで到達していない"
+        assert len(result["failed"]) == 1
+        assert _snapshot_state(conn) == before, "1枚目の子ページが残っている"
+
+    def test_split_failure_on_parent_update_rolls_back_children(self):
+        """最終段階 (親の残り本文更新) の失敗で、作成済みの子ページが全て巻き戻る。"""
+        from sai_memory.memopedia.core import Memopedia
+
+        conn = self._setup_split()
+        before = _snapshot_state(conn)
+        manager, messages = _make_run_manager(conn)
+
+        llm_response = {
+            "sections": [{"title": "子A", "block_indices": [0, 1]}],
+            "remaining_block_indices": [2],
+        }
+        with patch.object(
+            Memopedia, "update_page", side_effect=RuntimeError("boom: parent update"),
+        ):
+            result = self._run_with_mock_llm(manager, llm_response)
+
+        assert len(result["failed"]) == 1
+        assert _snapshot_state(conn) == before, "作成済み子ページが残っている"
+
+
+# ---------------------------------------------------------------------------
+# 修正3の回帰: split の文字レベル本文保存則
+# ---------------------------------------------------------------------------
+
+
+class TestSplitLossless:
+    """split 後に「子ページ全本文＋親の残り本文」から元本文が文字レベルで
+    完全一致で復元できることを固定する（intent の本文保存則が正）。
+    """
+
+    _GUIDE_MARKER = "\n\n## 分割された節"
+
+    def _split_and_reconstruct(
+        self, content: str, llm_response: Dict[str, Any],
+    ) -> tuple:
+        """execute_split を実行し、(子ページ list, 親の残り本文) を返す。"""
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="target", title="対象ページ",
+            content=content, parent_id="root", short_id=1,
+        )
+        memopedia = _make_memopedia_stub(conn)
+        llm = _make_mock_llm(llm_response)
+        execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children, get_page
+        children = get_children(conn, "target")
+        parent = get_page(conn, "target")
+        idx = parent.content.find(self._GUIDE_MARKER)
+        assert idx >= 0, f"親に子への導線が無い: {parent.content!r}"
+        remaining_out = parent.content[:idx]
+        return children, remaining_out
+
+    def test_review_minimal_repro_is_preserved(self):
+        """レビュー指摘の最小再現: 先頭末尾空白・3連改行・末尾改行を含む本文。"""
+        content = "  A  \n\n\nB  \n"
+        children, remaining_out = self._split_and_reconstruct(content, {
+            "sections": [{"title": "子A", "block_indices": [0]}],
+            "remaining_block_indices": [1],
+        })
+        assert len(children) == 1
+        reconstructed = children[0].content + remaining_out
+        assert reconstructed == content, (
+            f"本文保存則違反: {reconstructed!r} != {content!r}"
+        )
+
+    def test_three_blocks_exact_reconstruction(self):
+        """複数子ページ＋残りの構成でも文字レベルで完全一致する。"""
+        content = "  冒頭A  \n\n\n中間B  \n\n末尾C  \n"
+        children, remaining_out = self._split_and_reconstruct(content, {
+            "sections": [
+                {"title": "子A", "block_indices": [0]},
+                {"title": "子B", "block_indices": [1]},
+            ],
+            "remaining_block_indices": [2],
+        })
+        assert len(children) == 2
+        child_a = next(c for c in children if c.title == "子A")
+        child_b = next(c for c in children if c.title == "子B")
+        reconstructed = child_a.content + child_b.content + remaining_out
+        assert reconstructed == content, (
+            f"本文保存則違反: {reconstructed!r} != {content!r}"
+        )
