@@ -186,6 +186,66 @@ class GetConversationWindowAroundTest(unittest.TestCase):
         self.assertEqual(window[0].content, tricky)
 
 
+class ConversationThreadBoundaryTest(unittest.TestCase):
+    """thread 境界 (2026-07-12 監査 P1): SCENE 窓・範囲写真が thread を跨がない。
+
+    rowid は thread を跨いで単調なので、rowid 前後・範囲条件だけだと交互挿入
+    された別 thread の会話が「過去の実際のやり取り」として混入する。窓・範囲の
+    双方がアンカー (範囲は両端) の thread だけを返すことを固定する。
+    """
+
+    def setUp(self):
+        self.conn = init_db(":memory:")
+        get_or_create_thread(self.conn, "thread-a", resource_id="tester")
+        get_or_create_thread(self.conn, "thread-b", resource_id="tester")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _add(self, thread_id: str, role: str, content: str) -> str:
+        return add_message(
+            self.conn, thread_id=thread_id, role=role, content=content,
+            resource_id="tester",
+        )
+
+    def test_window_stays_in_anchor_thread(self):
+        # 交互挿入 (rowid 順): A1, B1, A2, B2, A3。アンカー A2 の窓は thread-a のみ。
+        self._add("thread-a", "user", "A1")
+        self._add("thread-b", "user", "B1")
+        a2 = self._add("thread-a", "model", "A2")
+        self._add("thread-b", "model", "B2")
+        self._add("thread-a", "user", "A3")
+        window = get_conversation_window_around(self.conn, a2, rounds=3)
+        self.assertEqual([m.content for m in window], ["A1", "A2", "A3"])
+        self.assertTrue(all(m.thread_id == "thread-a" for m in window))
+
+    def test_window_around_first_message_excludes_other_thread(self):
+        # 監査の最小再現: A1 周辺窓が [A1, B1, A2] にならないこと。
+        a1 = self._add("thread-a", "user", "A1")
+        self._add("thread-b", "user", "B1")
+        self._add("thread-a", "model", "A2")
+        window = get_conversation_window_around(self.conn, a1, rounds=3)
+        self.assertEqual([m.content for m in window], ["A1", "A2"])
+
+    def test_range_stays_in_endpoint_thread(self):
+        from sai_memory.memory.storage import get_conversation_messages_between
+        a1 = self._add("thread-a", "user", "A1")
+        self._add("thread-b", "user", "B1")
+        a2 = self._add("thread-a", "model", "A2")
+        messages = get_conversation_messages_between(self.conn, a1, a2)
+        self.assertEqual([m.content for m in messages], ["A1", "A2"])
+        self.assertTrue(all(m.thread_id == "thread-a" for m in messages))
+
+    def test_range_with_cross_thread_endpoints_returns_none(self):
+        # 異 thread の両端は範囲として不正 → None (呼び出し元 memory_atlas は
+        # 「区間は現在読み出せません」表示に落とす)。両方向とも固定する。
+        from sai_memory.memory.storage import get_conversation_messages_between
+        a1 = self._add("thread-a", "user", "A1")
+        b1 = self._add("thread-b", "user", "B1")
+        self.assertIsNone(get_conversation_messages_between(self.conn, a1, b1))
+        self.assertIsNone(get_conversation_messages_between(self.conn, b1, a1))
+
+
 class AddCoreMemoryKindMetadataTest(unittest.TestCase):
     """sai_memory/core_memory.py の kind/metadata 拡張。"""
 

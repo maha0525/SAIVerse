@@ -14,7 +14,8 @@
 ``aspect_from_pulse_type(pulse_type) == Aspect.CONVERSATION`` を確認してから呼ぶ。
 
 粘着ウィンドウ (§4.3): 一度浮かんだ記憶は類似度がしきい値を割っても N ターン残す。
-プロセス内メモリ (``_LEDGERS``) で持ち、再起動で消えて構わない。
+プロセス内メモリ (``_LEDGERS``、(persona_id, thread_id) キー) で持ち、再起動で
+消えて構わない。
 """
 
 from __future__ import annotations
@@ -116,11 +117,21 @@ def get_vivid_char_budget() -> int:
 
 
 # ---------------------------------------------------------------------------
-# 粘着ウィンドウ台帳 (ライン単位のインメモリ状態)
+# 粘着ウィンドウ台帳 ((persona, thread) 単位のインメモリ状態)
 # ---------------------------------------------------------------------------
 
-# item_key = (source_type, source_id)。CONVERSATION メインラインは persona 単位で
-# 1 本なので ledger は persona_id で引く (§4.3 「ライン単位のインメモリ状態」)。
+# item_key = (source_type, source_id)。ledger のキーは (persona_id, thread_id)
+# (2026-07-12 監査 P1: persona 単位キーだと thread 切替時に直前 thread で浮かんだ
+# 記憶が新 thread の冒頭へ全件注入され、thread の文脈分離が破れていた)。
+# CONVERSATION メインラインは現状 persona 単位 1 本なので line_id までは持たない。
+#
+# 仕様 (2026-07-12 裁定):
+# - thread A → B → A と戻った場合、A の台帳が残っていれば自然に復元される
+#   (キー分離による継続)。B 滞在中に A の台帳は老化しない (stale_turns は
+#   その thread 自身のターンでのみ進む)。
+# - 明示リセット (自動想起 OFF 時) は当該 persona の全 thread 分を破棄する。
+# - 台帳数は persona あたり thread 数 (建物 + persona 既定 + 少数) で有限、
+#   各台帳の中身も sticky_turns 超過で自然に空になるため、上限や掃除は設けない。
 
 
 @dataclass
@@ -150,23 +161,25 @@ class _LineLedger:
     items: Dict[Tuple[str, str], _LedgerItem] = field(default_factory=dict)
 
 
-_LEDGERS: Dict[str, _LineLedger] = {}
+_LEDGERS: Dict[Tuple[str, str], _LineLedger] = {}
 _LEDGERS_LOCK = threading.Lock()
 
 
-def _get_ledger(persona_id: str) -> _LineLedger:
+def _get_ledger(persona_id: str, thread_id: str) -> _LineLedger:
+    key = (persona_id, thread_id)
     with _LEDGERS_LOCK:
-        led = _LEDGERS.get(persona_id)
+        led = _LEDGERS.get(key)
         if led is None:
             led = _LineLedger()
-            _LEDGERS[persona_id] = led
+            _LEDGERS[key] = led
         return led
 
 
 def reset_ledger(persona_id: str) -> None:
-    """テスト用 / 明示リセット用。当該ペルソナの台帳を捨てる。"""
+    """テスト用 / 明示リセット用。当該ペルソナの台帳を全 thread 分捨てる。"""
     with _LEDGERS_LOCK:
-        _LEDGERS.pop(persona_id, None)
+        for key in [k for k in _LEDGERS if k[0] == persona_id]:
+            _LEDGERS.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +714,7 @@ def run_auto_recall(
     messages: List[Dict[str, Any]],
     *,
     persona_id: str,
+    thread_id: str,
 ) -> AutoRecallResult:
     """自動想起を 1 ターン分実行し、注入ブロック (あれば) を返す。
 
@@ -712,7 +726,10 @@ def run_auto_recall(
         embedder: Embedder インスタンス (adapter.embedder)。
         messages: prepare_context が組み立てた message 列 (head + 履歴)。クエリ生成と
             「既にコンテキストにある内容」の除外に使う。注入位置の決定は呼び出し側。
-        persona_id: 台帳キー。
+        persona_id: 台帳キーの第1要素。
+        thread_id: 台帳キーの第2要素。呼び出し側が adapter から取得した canonical
+            thread_id (メインライン履歴の読み書きと同じ解決) を明示的に渡す。
+            thread を跨いで粘着記憶が持ち込まれない境界 (2026-07-12 監査 P1)。
 
     Returns:
         AutoRecallResult。``injected`` が True のとき ``block`` を末尾注入する。
@@ -729,7 +746,7 @@ def run_auto_recall(
     topk = get_topk()
 
     context_ids = _context_message_ids(messages)
-    ledger = _get_ledger(persona_id)
+    ledger = _get_ledger(persona_id, thread_id)
 
     # --- エンティティトリガー経路 (決定論・埋め込み検索と並行) ---
     accepted_keys: set = set()
@@ -932,9 +949,9 @@ def run_auto_recall(
     block = f"<system>{body}</system>"
 
     LOGGER.info(
-        "[auto_recall] injecting %d memories (persona=%s, %d chars, %d accepted this turn, "
-        "ledger=%d, query=%r)",
-        len(lines), persona_id, len(block), accepted_count, len(ledger.items),
+        "[auto_recall] injecting %d memories (persona=%s, thread=%s, %d chars, "
+        "%d accepted this turn, ledger=%d, query=%r)",
+        len(lines), persona_id, thread_id, len(block), accepted_count, len(ledger.items),
         query[:60],
     )
 

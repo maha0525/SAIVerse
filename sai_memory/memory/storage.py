@@ -1826,6 +1826,32 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     return clause, CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
 
 
+def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:
+    """message 検索 (unified_recall / 自動想起) 用の「実会話」フィルタ共有 SQL 断片。
+
+    2026-07-12 監査 P1: 自動想起の message 経路が line/scope/tag 境界を無視して
+    サブラインの試行錯誤・破棄されたメタ判断・システム通知を「本人の過去の会話」
+    としてメインラインへ再注入していた。想起の message ソースは「実会話のみ」。
+
+    定義は一点管理の合成:
+    - ``_conversation_exclusion()`` — SCENE / 範囲写真と同じ実会話定義
+      (Stelis スレッド除外・handy_tool/spell/event_message タグ除外・
+      sub_line/meta_judgment/nested line_role 除外・role は user/model/assistant
+      のみ・'<system>' 始まり本文の除外)
+    - 通常履歴 (``get_messages_last``) と同じ ``scope='discardable'`` 除外
+
+    列は messages の非修飾列名で参照する。JOIN 先で使う場合は、相手側に
+    thread_id/role/content/metadata/line_role/scope と同名の列が無いこと
+    (message_embeddings は message_id/chunk_index/vector のみなので安全)。
+
+    Returns:
+        ``(clause, params)`` — WHERE 句に AND で埋め込める断片とバインド値。
+    """
+    clause, params = _conversation_exclusion()
+    clause = f"({clause}) AND (scope IS NULL OR scope != 'discardable')"
+    return clause, params
+
+
 def get_conversation_messages_between(
     conn: sqlite3.Connection,
     start_message_id: str,
@@ -1838,17 +1864,31 @@ def get_conversation_messages_between(
     する — SCENE 由来の範囲写真は clip 時と同じ窓が再現され、区間内に後から
     混ざったツール実行ログ等は範囲写真の読み出しにも混入しない。
 
+    thread 境界 (2026-07-12 監査 P1): 区間の中身は両端と同一 thread の行に限定
+    する。rowid は thread を跨いで単調なので、範囲条件だけだと交互挿入された
+    別 thread の会話が「過去の実際のやり取り」として混入していた。両端が異なる
+    thread を指す場合、その範囲は文脈として不正なので ``None`` を返す (呼び出し
+    元 ``saiverse/memory_atlas.py`` は None を「区間は現在読み出せません」表示に
+    落とす — 端メッセージ欠落と同じ扱い)。
+
     どちらかの端メッセージが存在しなければ ``None``。端の順序は rowid で正規化
     する (逆順で渡されても動く)。戻り値は時系列 (rowid 昇順)。
     """
     start_row = conn.execute(
-        "SELECT rowid FROM messages WHERE id=?", (start_message_id,)
+        "SELECT rowid, thread_id FROM messages WHERE id=?", (start_message_id,)
     ).fetchone()
     end_row = conn.execute(
-        "SELECT rowid FROM messages WHERE id=?", (end_message_id,)
+        "SELECT rowid, thread_id FROM messages WHERE id=?", (end_message_id,)
     ).fetchone()
     if not start_row or not end_row:
         return None
+    if start_row[1] != end_row[1]:
+        debug(
+            "get_conversation_messages_between: cross-thread endpoints rejected "
+            f"({start_row[1]!r} != {end_row[1]!r})"
+        )
+        return None
+    thread_id = start_row[1]
     lo, hi = sorted((int(start_row[0]), int(end_row[0])))
 
     exclusion_clause, exclusion_params = _conversation_exclusion()
@@ -1856,10 +1896,10 @@ def get_conversation_messages_between(
         f"""
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
-        WHERE rowid BETWEEN ? AND ? AND {exclusion_clause}
+        WHERE rowid BETWEEN ? AND ? AND thread_id = ? AND {exclusion_clause}
         ORDER BY rowid ASC
         """,
-        (lo, hi, *exclusion_params),
+        (lo, hi, thread_id, *exclusion_params),
     )
     return [_row_to_message(r) for r in cur.fetchall()]
 
@@ -1882,17 +1922,22 @@ def get_conversation_window_around(
     上で前後に最大 rounds*2 件)。会話の端では自然に短くなる (それ以上前/後が
     存在しないだけで、エラーにはしない)。
 
+    thread 境界 (2026-07-12 監査 P1): 窓はアンカーと同一 thread の行だけで作る。
+    rowid は thread を跨いで単調なので、rowid 前後だけだと交互挿入された別 thread
+    の会話が SCENE (人格の口調・関係性アンカー) に混入していた。
+
     アンカーが見つからない、またはアンカー自体が除外対象 (ツール実行ログ等) の
     場合は ``None`` を返す。
 
     戻り値は created_at 昇順 (時系列) のメッセージ一覧。
     """
     anchor_row = conn.execute(
-        "SELECT rowid FROM messages WHERE id=?", (message_id,)
+        "SELECT rowid, thread_id FROM messages WHERE id=?", (message_id,)
     ).fetchone()
     if not anchor_row:
         return None
     anchor_rowid = int(anchor_row[0])
+    anchor_thread_id = anchor_row[1]
 
     exclusion_clause, exclusion_params = _conversation_exclusion()
 
@@ -1912,10 +1957,10 @@ def get_conversation_window_around(
             f"""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
-            WHERE rowid < ? AND {exclusion_clause}
+            WHERE rowid < ? AND thread_id = ? AND {exclusion_clause}
             ORDER BY rowid DESC LIMIT ?
             """,
-            (anchor_rowid, *exclusion_params, window),
+            (anchor_rowid, anchor_thread_id, *exclusion_params, window),
         )
         before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
 
@@ -1932,10 +1977,10 @@ def get_conversation_window_around(
             f"""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
-            WHERE rowid > ? AND {exclusion_clause}
+            WHERE rowid > ? AND thread_id = ? AND {exclusion_clause}
             ORDER BY rowid ASC LIMIT ?
             """,
-            (anchor_rowid, *exclusion_params, window),
+            (anchor_rowid, anchor_thread_id, *exclusion_params, window),
         )
         after_rows = [_row_to_message(r) for r in cur.fetchall()]
 

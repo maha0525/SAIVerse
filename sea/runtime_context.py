@@ -496,9 +496,32 @@ def _maybe_inject_auto_recall(
         )
         return
 
+    # 粘着台帳のキー用 canonical thread_id (2026-07-12 監査 P1: thread 跨ぎ防止)。
+    # メインライン履歴の読み書きと同じ解決 (_thread_id(None) = active thread または
+    # 既定 persona thread) を adapter から取得して明示的に渡す。解決できなければ
+    # 注入をスキップする (persona 単位に落として thread を混ぜるより安全側)。
+    thread_id: Optional[str] = None
+    thread_resolver = getattr(sai_mem, "_thread_id", None)
+    if callable(thread_resolver):
+        try:
+            thread_id = thread_resolver(None)
+        except Exception:
+            LOGGER.warning(
+                "[sea][auto_recall] failed to resolve canonical thread_id (persona=%s)",
+                persona_id, exc_info=True,
+            )
+    if not thread_id:
+        LOGGER.debug(
+            "[sea][auto_recall] skip: canonical thread_id unavailable (persona=%s)",
+            persona_id,
+        )
+        return
+
     from sea.auto_recall import run_auto_recall
 
-    result = run_auto_recall(conn, embedder, messages, persona_id=persona_id)
+    result = run_auto_recall(
+        conn, embedder, messages, persona_id=persona_id, thread_id=thread_id,
+    )
     if not result.injected or not result.block:
         return
 

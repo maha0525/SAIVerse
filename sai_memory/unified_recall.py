@@ -200,6 +200,18 @@ def get_memopedia_pages_without_embeddings(conn: sqlite3.Connection) -> List[tup
 # Embedding storage: Memopedia Fragments
 # ---------------------------------------------------------------------------
 
+# Fragment 可視性の共有 SQL 断片 (2026-07-12 監査 P1)。Fragment はページ削除
+# (soft-delete) 後も行として保存されるが、想起の可視性は親ページに従う:
+# - 親ページが is_deleted=1 (ごみ箱) の間は keyword / embedding どちらの検索
+#   からも出さない。復元 (is_deleted=0) すれば自然に再び検索対象になる。
+# - 孤児 Fragment (親ページ行そのものが無い) も通常想起から除外する (INNER JOIN)。
+# 検索経路 (unified_recall keyword / get_fragment_embeddings) が共通で使う。
+# embedding の生成・保存側 (embed_memopedia_fragments 等) は変更しない —
+# 削除中もベクトルは保持し、復元時に再計算なしで検索へ戻れるようにする。
+_FRAGMENT_VISIBILITY_JOIN = "JOIN memopedia_pages p ON f.entity_id = p.id"
+_FRAGMENT_VISIBILITY_WHERE = "COALESCE(p.is_deleted, 0) = 0"
+
+
 def store_fragment_embedding(
     conn: sqlite3.Connection,
     fragment_id: str,
@@ -214,19 +226,24 @@ def store_fragment_embedding(
 
 
 def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
-    """Get all fragment embeddings with metadata.
+    """Get fragment embeddings with metadata for unified search.
+
+    可視性 (2026-07-12 監査 P1): 親ページが soft-delete 済み (ごみ箱) の Fragment
+    と、親ページ行が無い孤児 Fragment は返さない (``_FRAGMENT_VISIBILITY_*``)。
+    ごみ箱へ移した知識が自動想起でペルソナの tail へ再注入されるのを防ぐ。
 
     Returns:
         List of (fragment_id, vector, content, entity_id, chronicle_entry_id,
                  source_date, entity_title, entity_category, entity_short_id)
     """
     cur = conn.execute(
-        """
+        f"""
         SELECT e.fragment_id, e.vector, f.content, f.entity_id,
                f.chronicle_entry_id, f.source_date, p.title, p.category, p.short_id
         FROM memopedia_fragment_embeddings e
         JOIN memopedia_fragments f ON e.fragment_id = f.id
-        LEFT JOIN memopedia_pages p ON f.entity_id = p.id
+        {_FRAGMENT_VISIBILITY_JOIN}
+        WHERE {_FRAGMENT_VISIBILITY_WHERE}
         """,
     )
     result = []
@@ -268,20 +285,31 @@ def get_fragments_without_embeddings(conn: sqlite3.Connection) -> List[tuple]:
 # ---------------------------------------------------------------------------
 
 def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
-    """Get all message embeddings for unified search (excluding system messages).
+    """Get message embeddings of real conversation rows for unified search.
+
+    取得時フィルタ (2026-07-12 監査 P1): 「実会話」のみ返す —
+    ``real_conversation_filter()`` (storage.py で一点管理。Stelis スレッド・
+    handy_tool/spell/event_message タグ・sub_line/meta_judgment/nested line_role・
+    scope='discardable'・'<system>' 始まり本文を除外し、role は
+    user/model/assistant に限定) を適用する。embedding の書き込み側は全行分
+    保持のまま (他用途) — 境界は取得時に引く。
 
     Returns best-scoring chunk per message later; here we return all chunks.
 
     Returns:
         List of (message_id, vector, chunk_index, content, role, created_at)
     """
+    from sai_memory.memory.storage import real_conversation_filter
+
+    clause, params = real_conversation_filter()
     cur = conn.execute(
-        """
+        f"""
         SELECT e.message_id, e.vector, e.chunk_index, m.content, m.role, m.created_at
         FROM message_embeddings e
         JOIN messages m ON e.message_id = m.id
-        WHERE m.role != 'system'
+        WHERE {clause}
         """,
+        params,
     )
     result = []
     for row in cur.fetchall():
@@ -751,8 +779,12 @@ def unified_recall(
     if search_fragments:
         kw_id_sets = []
         for kw in query_keywords:
+            # 可視性は embedding 経路 (get_fragment_embeddings) と共通:
+            # 親ページがごみ箱 (is_deleted=1) / 孤児の Fragment は検索に出さない。
             cur = conn.execute(
-                "SELECT id FROM memopedia_fragments WHERE content LIKE ?",
+                f"SELECT f.id FROM memopedia_fragments f "
+                f"{_FRAGMENT_VISIBILITY_JOIN} "
+                f"WHERE f.content LIKE ? AND {_FRAGMENT_VISIBILITY_WHERE}",
                 (f"%{kw}%",),
             )
             kw_id_sets.append({row[0] for row in cur.fetchall()})
@@ -791,11 +823,16 @@ def unified_recall(
                 )
 
     if search_messages:
+        # 「実会話」のみを対象にする (embedding 経路 get_message_embeddings と
+        # 同じ real_conversation_filter を共有。2026-07-12 監査 P1)。
+        from sai_memory.memory.storage import real_conversation_filter
+
+        msg_clause, msg_params = real_conversation_filter()
         kw_id_sets = []
         for kw in query_keywords:
             cur = conn.execute(
-                "SELECT id FROM messages WHERE content LIKE ? AND role != 'system'",
-                (f"%{kw}%",),
+                f"SELECT id FROM messages WHERE content LIKE ? AND {msg_clause}",
+                (f"%{kw}%", *msg_params),
             )
             kw_id_sets.append({row[0] for row in cur.fetchall()})
 

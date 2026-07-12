@@ -40,6 +40,7 @@ def _msgs(*pairs):
 
 class AutoRecallBase(unittest.TestCase):
     PERSONA = "test_persona"
+    THREAD = "test_persona:__persona__"
 
     def setUp(self):
         auto_recall.reset_ledger(self.PERSONA)
@@ -67,7 +68,7 @@ class AutoRecallBase(unittest.TestCase):
         with patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             return auto_recall.run_auto_recall(
                 conn=object(), embedder=object(), messages=messages,
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
 
 
@@ -262,7 +263,7 @@ class TestNoOp(AutoRecallBase):
     def test_none_conn_embedder(self):
         res = auto_recall.run_auto_recall(
             conn=None, embedder=None, messages=_msgs(("user", "hi")),
-            persona_id=self.PERSONA,
+            persona_id=self.PERSONA, thread_id=self.THREAD,
         )
         self.assertFalse(res.injected)
 
@@ -284,7 +285,7 @@ class TestEntityTrigger(AutoRecallBase):
         with self._titles(rows), patch("sai_memory.unified_recall.unified_recall", return_value=[]):
             res = auto_recall.run_auto_recall(
                 conn=object(), embedder=object(), messages=messages,
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertIn("アイフィ", res.block)
@@ -305,7 +306,7 @@ class TestEntityTrigger(AutoRecallBase):
         with self._titles(rows), patch("sai_memory.unified_recall.unified_recall", return_value=[]):
             res = auto_recall.run_auto_recall(
                 conn=object(), embedder=object(), messages=messages,
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertFalse(res.injected)
 
@@ -316,7 +317,7 @@ class TestEntityTrigger(AutoRecallBase):
         with self._titles(rows), patch("sai_memory.unified_recall.unified_recall", return_value=[]):
             res = auto_recall.run_auto_recall(
                 conn=object(), embedder=object(), messages=messages,
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertFalse(res.injected)
 
@@ -326,7 +327,7 @@ class TestEntityTrigger(AutoRecallBase):
         with self._titles(rows), patch("sai_memory.unified_recall.unified_recall", return_value=[]):
             res = auto_recall.run_auto_recall(
                 conn=object(), embedder=object(), messages=messages,
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertFalse(res.injected)
 
@@ -425,7 +426,7 @@ class TestVividRecall(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "感情パラメータの話")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertIn("そのときの会話", res.block)
@@ -453,7 +454,7 @@ class TestVividRecall(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "話題")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)  # フラグメント自体は注入される
         self.assertNotIn("そのときの会話", res.block)  # vivid だけスキップ
@@ -466,7 +467,7 @@ class TestVividRecall(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "話題")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertNotIn("そのときの会話", res.block)
@@ -479,7 +480,7 @@ class TestVividRecall(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "話題")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertNotIn("そのときの会話", res.block)
@@ -504,7 +505,7 @@ class TestVividRecall(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "話題")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         # 予算 40 字では1行しか入らない (先頭候補は必ず1行入るガードがあるため)。
@@ -584,7 +585,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "アイフィの話")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertEqual(res.block.count("そのときの会話"), 2)
@@ -616,7 +617,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "話題")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         # f2 (非先頭) は候補2件あっても1行のみ採用される。
@@ -645,7 +646,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "話題")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         # 予算を先頭項目でほぼ使い切るため、後続項目の vivid サブ行は付かない。
@@ -669,7 +670,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "アイフィ")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertIn("アイフィについての大事な一言", res.block)
@@ -693,7 +694,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "アイフィ")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)
         self.assertIn("そのときの会話", res.block)
@@ -715,7 +716,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
              patch("sai_memory.unified_recall.unified_recall", return_value=hits):
             res = auto_recall.run_auto_recall(
                 conn=conn, embedder=object(), messages=_msgs(("user", "アイフィ")),
-                persona_id=self.PERSONA,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
             )
         self.assertTrue(res.injected)  # fragment 自体は注入される
         self.assertNotIn("そのときの会話", res.block)  # vivid だけスキップ
@@ -730,6 +731,71 @@ class TestQueryDefaults(AutoRecallBase):
     def test_build_query_uses_last_message_only(self):
         messages = _msgs(("user", "1つ目"), ("assistant", "2つ目"), ("user", "3つ目"))
         self.assertEqual(auto_recall.build_query(messages), "3つ目")
+
+
+class TestThreadLedgerIsolation(AutoRecallBase):
+    """sticky 台帳の thread 分離 (2026-07-12 監査 P1)。
+
+    固定する不変条件:
+    - thread A で採用された粘着記憶は、thread B へ切り替えた後の (検索 hit ゼロの)
+      ターンに注入されない (thread 跨ぎの持ち込み禁止)。
+    - B 滞在中に A の台帳は老化せず、A へ戻れば残存分が自然に復元される
+      (キー分離による継続 — 2026-07-12 裁定で仕様として固定)。
+    - reset_ledger(persona_id) は全 thread 分を破棄する。
+    """
+
+    THREAD_A = "test_persona:building_a"
+    THREAD_B = "test_persona:building_b"
+
+    def _run_in(self, thread_id, hits, messages):
+        with patch("sai_memory.unified_recall.unified_recall", return_value=hits), \
+             patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]):
+            return auto_recall.run_auto_recall(
+                conn=object(), embedder=object(), messages=messages,
+                persona_id=self.PERSONA, thread_id=thread_id,
+            )
+
+    def test_ledger_does_not_leak_into_other_thread(self):
+        good = [_hit("fragment", "f1", embed_score=0.9, title="記憶A", content="Aで浮かんだ内容")]
+        r_a = self._run_in(self.THREAD_A, good, _msgs(("user", "Aの話")))
+        self.assertTrue(r_a.injected)
+        # thread B: 検索 hit ゼロ → A の粘着分が持ち込まれず、注入なし。
+        r_b = self._run_in(self.THREAD_B, [], _msgs(("user", "Bでの新しい会話")))
+        self.assertFalse(r_b.injected)
+        self.assertIsNone(r_b.block)
+
+    def test_returning_to_thread_restores_its_ledger(self):
+        import os
+        os.environ["SAIVERSE_AUTO_RECALL_STICKY_TURNS"] = "2"
+        good = [_hit("fragment", "f1", embed_score=0.9, title="記憶A", content="Aで浮かんだ内容")]
+        self._run_in(self.THREAD_A, good, _msgs(("user", "Aの話")))
+        # B で sticky_turns を超える回数のターンを回しても、A の台帳は老化しない。
+        for i in range(5):
+            self._run_in(self.THREAD_B, [], _msgs(("user", f"Bの話 {i}")))
+        # A へ戻ると台帳が生きている (stale_turns=1 で粘着継続)。
+        r_back = self._run_in(self.THREAD_A, [], _msgs(("user", "Aに戻ってきた")))
+        self.assertTrue(r_back.injected)
+        self.assertIn("Aで浮かんだ内容", r_back.block)
+
+    def test_reset_ledger_discards_all_threads(self):
+        good_a = [_hit("fragment", "f1", embed_score=0.9, title="記憶A")]
+        good_b = [_hit("fragment", "f2", embed_score=0.9, title="記憶B")]
+        self._run_in(self.THREAD_A, good_a, _msgs(("user", "A")))
+        self._run_in(self.THREAD_B, good_b, _msgs(("user", "B")))
+        self.assertTrue(any(k[0] == self.PERSONA for k in auto_recall._LEDGERS))
+        auto_recall.reset_ledger(self.PERSONA)
+        self.assertFalse(any(k[0] == self.PERSONA for k in auto_recall._LEDGERS))
+
+    def test_reset_ledger_leaves_other_personas_untouched(self):
+        other_key = ("other_persona", "other_persona:__persona__")
+        auto_recall._LEDGERS[other_key] = auto_recall._LineLedger()
+        try:
+            good = [_hit("fragment", "f1", embed_score=0.9, title="記憶A")]
+            self._run_in(self.THREAD_A, good, _msgs(("user", "A")))
+            auto_recall.reset_ledger(self.PERSONA)
+            self.assertIn(other_key, auto_recall._LEDGERS)
+        finally:
+            auto_recall._LEDGERS.pop(other_key, None)
 
 
 class TestPersonaToggleGate(unittest.TestCase):
@@ -751,7 +817,11 @@ class TestPersonaToggleGate(unittest.TestCase):
         return SimpleNamespace(
             persona_id=self.PERSONA,
             persona_name="ゲートテスト",
-            sai_memory=SimpleNamespace(conn=object(), embedder=object()),
+            sai_memory=SimpleNamespace(
+                conn=object(), embedder=object(),
+                # canonical thread_id の解決 (SAIMemoryAdapter._thread_id(None) 相当)
+                _thread_id=lambda building_id=None: f"{self.PERSONA}:__persona__",
+            ),
         )
 
     def test_disabled_skips_injection_without_calling_run_auto_recall(self):
@@ -775,8 +845,10 @@ class TestPersonaToggleGate(unittest.TestCase):
         from sea.runtime_context import _maybe_inject_auto_recall
         from sea.auto_recall import _LineLedger, _LEDGERS
 
-        # 事前に台帳へエントリを積んでおく (中身の型は問わないので空 _LineLedger で足りる)
-        _LEDGERS[self.PERSONA] = _LineLedger()
+        # 事前に複数 thread の台帳を積んでおく (中身の型は問わないので空 _LineLedger
+        # で足りる)。明示リセットは当該 persona の全 thread 分を破棄する仕様。
+        _LEDGERS[(self.PERSONA, f"{self.PERSONA}:__persona__")] = _LineLedger()
+        _LEDGERS[(self.PERSONA, f"{self.PERSONA}:building_x")] = _LineLedger()
 
         runtime = SimpleNamespace(
             manager=None,
@@ -786,7 +858,7 @@ class TestPersonaToggleGate(unittest.TestCase):
             runtime, self._persona(), _msgs(("user", "こんにちは")),
             pulse_type="user",
         )
-        self.assertNotIn(self.PERSONA, _LEDGERS)
+        self.assertFalse(any(k[0] == self.PERSONA for k in _LEDGERS))
 
     def test_enabled_proceeds_to_run_auto_recall(self):
         from sea.runtime_context import _maybe_inject_auto_recall
