@@ -115,6 +115,73 @@ def _fire_spell(
 
 
 # ---------------------------------------------------------------------------
+# 表示用ヘルパ (番号だけの参照/コマに人が読める表題を添える)
+# ---------------------------------------------------------------------------
+
+# episode は title 列を持たない (kind + 出来事)。棚入れ記録では kind を添える。
+_EPISODE_KIND_LABELS = {
+    "conversation": "会話",
+    "work_session": "作業セッション",
+    "slot": "コマ",
+    "presence": "在室",
+    "stroll": "散策",
+    "other": "その他",
+}
+
+
+def _ref_label(manager: Any, persona_id: str, ref: str) -> str:
+    """統一参照 (track:N / task:N / episode:N) に人が読める表題を添える。
+
+    「番号だけ」の参照 (task:4) を独白/適用サマリに残すと、あとで読むまはーにも
+    ペルソナ自身にも中身が分からない (ユーザー向け表示の原則)。解決できたら
+    ``task:4「タスク名」`` の形に、失敗したら素の ref を返す (表題は装飾であって
+    記録の骨は ref — 解決失敗で記録を落とさない)。
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return ref
+    try:
+        if ref.startswith("track:"):
+            tm = getattr(manager, "track_manager", None)
+            if tm is not None:
+                track = tm.get(tm.resolve_track_ref(persona_id, ref))
+                title = (getattr(track, "title", None) or "").strip()
+                if title:
+                    return f"{ref}「{title}」"
+        elif ref.startswith("task:"):
+            ptm = PersonaTaskManager(manager.SessionLocal)
+            task = ptm.get_task(
+                ptm.resolve_task_ref(persona_id, normalize_task_ref(ref)),
+                persona_id=persona_id,
+            )
+            title = (task.get("title") or "").strip()
+            if title:
+                return f"{ref}「{title}」"
+        elif ref.startswith("episode:"):
+            from saiverse import episodes as _episodes
+            ep = _episodes.get_by_ref(manager, persona_id, ref)
+            label = _EPISODE_KIND_LABELS.get(ep.get("kind"))
+            if label:
+                return f"{ref}（{label}）"
+    except Exception:
+        LOGGER.debug(
+            "[judgment_finalize] _ref_label failed for %r", ref, exc_info=True,
+        )
+    return ref
+
+
+def _format_slot_line(s: Dict[str, Any]) -> str:
+    """時間割コマ 1 行の表示 (day_open / remaining_timetable で共通)。"""
+    return (
+        f"  {s['start']} {s['kind']}"
+        + (f"「{s['title']}」" if s.get("title") else "")
+        + (f" {s['ref']}" if s["ref"] != "none" else "")
+        + f" @{s['facility']}"
+        + (f"（{s['note']}）" if s["note"] else "")
+    )
+
+
+# ---------------------------------------------------------------------------
 # day_open
 # ---------------------------------------------------------------------------
 
@@ -178,13 +245,7 @@ def _finalize_day_open(
                 f"（今日の時間割を編成: {len(slots)} コマ、{pushed} コマを予約）"
             )
             for s in slots:
-                lines.append(
-                    f"  {s['start']} {s['kind']}"
-                    + (f"「{s['title']}」" if s.get("title") else "")
-                    + (f" {s['ref']}" if s["ref"] != "none" else "")
-                    + f" @{s['facility']}"
-                    + (f"（{s['note']}）" if s["note"] else "")
-                )
+                lines.append(_format_slot_line(s))
             # 日次予算台帳の初期化 (v2 §4.5)。total を書き、消費済み (used) は
             # 保持する — 発火時の予算ゲートがこの残高でラウンドを切り詰める。
             try:
@@ -271,8 +332,12 @@ def _write_shelving_tags(
                 f"episode_purposes: タグの保存に失敗 ({episode_ref} → {purpose_ref})"
             )
     for episode_ref, purposes in by_episode.items():
+        ep_label = _ref_label(manager, persona_id, episode_ref)
+        purpose_labels = ", ".join(
+            _ref_label(manager, persona_id, p) for p in purposes
+        )
         lines.append(
-            f"（この出来事 {episode_ref} を {', '.join(purposes)} の棚に入れた）"
+            f"（この出来事 {ep_label} を {purpose_labels} の棚に入れた）"
         )
     return applied
 
@@ -448,6 +513,8 @@ def _apply_remaining_timetable(
                     lines.append(
                         f"（残りの時間割を組み替えた: {len(slots)} コマ、{pushed} コマを予約）"
                     )
+                    for s in slots:
+                        lines.append(_format_slot_line(s))
                     dropped = len(rt) - len(slots)
                     if dropped > 0:
                         lines.append(

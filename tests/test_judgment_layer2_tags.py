@@ -264,6 +264,36 @@ def test_finalize_post_conversation_writes_layer2_tags(
     assert "棚に入れた" in adapter.messages[0]["content"]
 
 
+def test_shelving_line_includes_purpose_title(
+    manager, finalize_mod, tmp_path, running_track,
+):
+    """棚入れの適用エコーに purpose の表題が載る (task:N/track:N を番号だけにしない)。
+
+    「episode:3 を track:1 の棚に入れた」だと、あとで読むまはーにもペルソナ自身
+    にも中身が分からない (ユーザー向け表示の原則)。track:1「言葉の標本集」の形で
+    表題を添える。episode:3 は実在しないので素の ref に落ちる (解決失敗で記録を
+    落とさない — 表題は装飾)。
+    """
+    output = {
+        "monologue": "この会話は標本集の話だった。",
+        "picked_tasks": [],
+        "new_desires": [],
+        "remaining_timetable": None,
+        "episode_purposes": ["track:1"],
+    }
+    import json
+    ctx = json.dumps({
+        "plan_date": "2026-07-04", "track_refs": ["track:1"],
+        "episode_ref": "episode:3", "purpose_refs": ["track:1"],
+    })
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_conversation", judgment_context=ctx,
+        )
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "track:1「言葉の標本集」" in content
+
+
 def test_finalize_rejects_out_of_enum_purpose(
     manager, finalize_mod, tmp_path, running_track,
 ):

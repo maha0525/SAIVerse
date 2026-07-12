@@ -704,6 +704,10 @@ def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
     ]
     content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
     assert "残りの時間割を組み替えた" in content
+    # 組み替え後の各コマが対象/場所付きで載る (番号だけの「N コマ」で終わらせない)。
+    # task:2 は独白に出てこないので、コマ明細が追記されたことの判別材料になる。
+    assert "task:2" in content
+    assert "@workshop" in content
 
 
 def test_post_session_remaining_timetable_rejection_reaches_persona(
