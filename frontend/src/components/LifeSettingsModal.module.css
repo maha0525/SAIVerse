@@ -1,0 +1,254 @@
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal {
+    background: var(--background, #fff);
+    width: 480px;
+    max-width: 92vw;
+    max-height: 88vh;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+    color: var(--foreground, #000);
+}
+
+.header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.title {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.5rem;
+    color: inherit;
+    opacity: 0.7;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.closeButton:hover {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.description {
+    font-size: 0.85rem;
+    color: #666;
+    line-height: 1.5;
+}
+
+.section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.section:last-of-type {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.sectionTitle {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #555;
+}
+
+.row {
+    display: flex;
+    gap: 1rem;
+}
+
+.row .formGroup {
+    flex: 1;
+}
+
+.formGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.label {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #666;
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+}
+
+.optionalTag {
+    font-size: 0.75rem;
+    font-weight: 400;
+    color: #999;
+}
+
+.input,
+.select {
+    padding: 0.6rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #ddd;
+    background: var(--background, #fff);
+    color: inherit;
+    font-family: inherit;
+    font-size: 0.9rem;
+}
+
+.inputError {
+    border-color: #e03131;
+}
+
+.select {
+    cursor: pointer;
+}
+
+.hint {
+    font-size: 0.78rem;
+    color: #888;
+    line-height: 1.4;
+}
+
+.hintError {
+    font-size: 0.78rem;
+    color: #e03131;
+    line-height: 1.4;
+}
+
+.advancedToggle {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0.15rem 0;
+    font-size: 0.8rem;
+    color: #2563eb;
+    cursor: pointer;
+}
+
+.noteBox {
+    font-size: 0.8rem;
+    color: #888;
+    padding: 0.6rem 0.75rem;
+    background: rgba(0, 0, 0, 0.04);
+    border-radius: 6px;
+}
+
+.footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.1);
+    display: flex;
+    justify-content: flex-end;
+    gap: 1rem;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.cancelBtn {
+    padding: 0.5rem 1rem;
+    border: 1px solid #ddd;
+    background: transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    color: inherit;
+    font-weight: 500;
+}
+
+.saveBtn {
+    padding: 0.5rem 1.5rem;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.saveBtn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+:global([data-theme="dark"]) .modal {
+    background: #1e1e1e;
+    color: #fff;
+}
+
+:global([data-theme="dark"]) .section {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .sectionTitle {
+    color: #ccc;
+}
+
+:global([data-theme="dark"]) .label {
+    color: #aaa;
+}
+
+:global([data-theme="dark"]) .input,
+:global([data-theme="dark"]) .select {
+    background: #2d2d2d;
+    border-color: #444;
+    color: white;
+}
+
+:global([data-theme="dark"]) .inputError {
+    border-color: #ff6b6b;
+}
+
+:global([data-theme="dark"]) .noteBox {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .cancelBtn {
+    border-color: #444;
+}
+
+:global([data-theme="dark"]) .header,
+:global([data-theme="dark"]) .footer {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+}

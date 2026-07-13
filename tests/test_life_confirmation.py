@@ -256,6 +256,73 @@ def test_confirm_life_for_today_overnight_window(manager):
     assert day_plan.get_life_for_time(lives, "03:00") is None
 
 
+def test_confirm_life_for_today_mode_override_wins_over_provider(manager):
+    """life.md v0.5 §5.1: mode_override (ユーザー設定) は provider 自動判定より優先。"""
+    manager.personas[PERSONA_ID].model = "gemini-2.5-flash"  # 自由モードのはず
+    life = day_plan.confirm_life_for_today(
+        manager, PERSONA_ID, PLAN_DATE, "07:00", "13:00",
+        requested_budget_pulses=None, mode_override="even",
+    )
+    assert life["mode"] == day_plan.LIFE_MODE_EVEN
+    # 均等モードの最低値 (ceil(360/50)=8) が適用される (自由モードの1でない)
+    assert life["budget_pulses"] == 8
+
+
+def test_confirm_life_for_today_invalid_mode_override_falls_back_to_auto(manager):
+    """LIFE_MODES 外の値は無視して自動判定にフォールバックする (書ける口をなくす)。"""
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"  # 均等モードのはず
+    life = day_plan.confirm_life_for_today(
+        manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
+        requested_budget_pulses=None, mode_override="bogus",
+    )
+    assert life["mode"] == day_plan.LIFE_MODE_EVEN
+
+
+# ---------------------------------------------------------------------------
+# life_mode_and_min_budget: ライフ設定 API 向けプレビュー計算 (副作用なし)
+# ---------------------------------------------------------------------------
+
+
+def test_life_mode_and_min_budget_even_mode(manager):
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    info = day_plan.life_mode_and_min_budget(manager, PERSONA_ID, "07:00", "13:00")
+    assert info["derived_mode"] == day_plan.LIFE_MODE_EVEN
+    assert info["effective_mode"] == day_plan.LIFE_MODE_EVEN
+    assert info["window_minutes"] == 360
+    assert info["min_budget_pulses"] == 8  # ceil(360/50)
+
+
+def test_life_mode_and_min_budget_override(manager):
+    manager.personas[PERSONA_ID].model = "gemini-2.5-flash"  # 自由が自動判定
+    info = day_plan.life_mode_and_min_budget(
+        manager, PERSONA_ID, "07:00", "13:00", mode_override="even",
+    )
+    assert info["derived_mode"] == day_plan.LIFE_MODE_FREE
+    assert info["effective_mode"] == day_plan.LIFE_MODE_EVEN
+    assert info["min_budget_pulses"] == 8
+
+
+def test_life_mode_and_min_budget_no_window_without_wake_or_close(manager):
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    info = day_plan.life_mode_and_min_budget(manager, PERSONA_ID, "07:00", None)
+    assert info["window_minutes"] is None
+    assert info["min_budget_pulses"] is None
+
+
+# ---------------------------------------------------------------------------
+# is_valid_hhmm
+# ---------------------------------------------------------------------------
+
+
+def test_is_valid_hhmm():
+    assert day_plan.is_valid_hhmm("07:00") is True
+    assert day_plan.is_valid_hhmm("23:59") is True
+    assert day_plan.is_valid_hhmm("24:00") is False
+    assert day_plan.is_valid_hhmm("7:00") is False
+    assert day_plan.is_valid_hhmm(None) is False
+    assert day_plan.is_valid_hhmm(123) is False
+
+
 # ---------------------------------------------------------------------------
 # fire_judgment_point (day_open): PersonaSchedule からのライフ確定
 # ---------------------------------------------------------------------------
@@ -292,6 +359,29 @@ def test_day_open_confirms_life_from_persona_schedule(manager, session_factory):
     # manager が cache override メソッドを持つ場合のみ (このスタブは持たない
     # — _sync_cache_ttl_for_life_start は getattr で安全に no-op する)。
     assert any("活動開始" in t for t in _messages(manager))
+
+
+def test_day_open_confirms_life_with_mode_override_end_to_end(manager, session_factory):
+    """handle_scheduled_judgment → fire_judgment_point → confirm_life_for_today の
+    全経路で life_mode_override (PersonaSchedule.PLAYBOOK_PARAMS 由来) が反映される。"""
+    manager.personas[PERSONA_ID].model = "gemini-2.5-flash"  # 自動判定なら自由モード
+    _import_judgment_playbooks(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00",
+                       playbook_params={"life_mode_override": "even"})
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    result = wiring.handle_scheduled_judgment(
+        manager, PERSONA_ID, "judgment_day_open",
+        params={"life_mode_override": "even"},
+    )
+    assert result["submitted"] is True
+
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert len(lives) == 1
+    assert lives[0]["mode"] == day_plan.LIFE_MODE_EVEN
+    # 均等モードの最低値 (07:00-22:00 = 900分 → ceil(900/50)=18) が適用される
+    assert lives[0]["budget_pulses"] == 18
 
 
 def test_day_open_life_start_fires_only_once_across_refires(manager, session_factory):

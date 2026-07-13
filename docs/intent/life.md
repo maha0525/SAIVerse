@@ -1,6 +1,6 @@
 # Intent: ライフ — 活動区間と時間の階層
 
-**ステータス**: 検証待ち (v0.5, 2026-07-13)。**実機初日（2026-07-13 夜）で v0.4 の「ペルソナがライフを宣言する」設計が破綻**——過去起点・予算不整合のライフが宣言され、AI を呼ばない暮らしコマの発火が予算を食い潰した（「4 / 4」）。まはー裁定で**責任分界を全面改訂**: ライフ＝ユーザーが設定する起床・就寝の区間（PersonaSchedule が器）／予算＝ライフの長さに対する最低値制約付きでユーザー設定／ペルソナは時間割だけ／モードはモデルの物理から自動。§3・§4・§5.2-5.3・§8・§9.2・§11.2 を v0.5 で書き直し。**「改修A」(宣言の巻き戻し・システムによるライフ確定・消費点の作り直し・境界イベント統合・遅発 day_open 対策) 実装完了 (2026-07-13)、まはー実機検証待ち**（Phase 1 案 Y と Phase 3 物理層は無傷のまま活用。宣言まわりの巻き戻し明細は §11.2）。残る「改修B」(§9.2 ライフ設定画面新設・v1 亡霊の掃除・暮らし Pulse の実体化・判断点回数のフロント別枠表示) は未着手。v0.4 までの実装経緯は改訂履歴を参照。
+**ステータス**: 検証待ち (v0.5, 2026-07-13)。**実機初日（2026-07-13 夜）で v0.4 の「ペルソナがライフを宣言する」設計が破綻**——過去起点・予算不整合のライフが宣言され、AI を呼ばない暮らしコマの発火が予算を食い潰した（「4 / 4」）。まはー裁定で**責任分界を全面改訂**: ライフ＝ユーザーが設定する起床・就寝の区間（PersonaSchedule が器）／予算＝ライフの長さに対する最低値制約付きでユーザー設定／ペルソナは時間割だけ／モードはモデルの物理から自動。§3・§4・§5.2-5.3・§8・§9.2・§11.2 を v0.5 で書き直し。**「改修A」(宣言の巻き戻し・システムによるライフ確定・消費点の作り直し・境界イベント統合・遅発 day_open 対策) 実装完了 (2026-07-13)、まはー実機検証待ち**（Phase 1 案 Y と Phase 3 物理層は無傷のまま活用。宣言まわりの巻き戻し明細は §11.2）。「改修B」のうち **UI 側 (§9.2 ライフ設定画面新設・v1 亡霊の掃除・判断点回数のフロント別枠表示) は実装完了 (2026-07-14)、まはー実機検証待ち**（明細は改訂履歴）。**暮らし Pulse の実体化 (§5.2-1) のみ引き続き未着手**（プロンプト設計がまはーレビュー必須のため改修Bの他項目とは別に切り出し済み）。v0.4 までの実装経緯は改訂履歴を参照。
 **親**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md)（三本柱） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（哲学層。§8 出来事・§10 Track 再解釈は本書の前提）
 **吸収対象**: [`session.md`](session.md)（v0.1 起草中のまま停滞。§6 未確定事項に本書が回答し、Session を「ライフが目標を与える機構層」として位置づけ直す）
 **経緯**: [実機初日の前提レベル設計課題](../issues/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。
@@ -337,6 +337,52 @@ v0.4 までの実装（Phase 1〜4、コミット 6257b6a / 072ea78 / d55c5f3 / 
 
 ## 改訂履歴
 
+- v0.5「改修B (UI側)」実装 (2026-07-14): §9.2 のうち UI 再構築 3 点を実装 (暮らし Pulse の
+  実体化 §5.2-1 は対象外、プロンプト設計のまはーレビューが要るため別途)。
+  ①**ライフ設定画面の新設**: `frontend/src/components/LifeSettingsModal.tsx` (新規)。
+  起床・就寝・予算 (作業ラウンド/標準パルス)・モード上書きを 1 画面にまとめる。
+  ScheduleModal (任意 Playbook を扱う汎用スケジュールエディタ) への機能追加ではなく、
+  PersonaMenu から独立した兄弟モーダルとして新設 (既存の「Schedule/Settings/Tasks が
+  それぞれ独立モーダル」という構造に合わせた。理由の詳細は改修B完了報告を参照)。
+  予算欄はライフの長さとモードから計算した最低値をフロントでライブ計算しガイド表示
+  (`day_plan.LIFE_EVEN_MAX_GAP_MINUTES` と同じ式を JS 側にも複製。権威はバックエンドの
+  400 検証)。モードは自動判定を表示のみ、上書きは「高度な設定」の折り畳みに格納。
+  バックエンドに新設 `api/routes/people/life_settings.py` (GET/PUT
+  `/{persona_id}/life-settings`)。保存は既存の PersonaSchedule
+  (judgment_day_open/judgment_day_close 行) への upsert — 新しい永続化層は作らない。
+  モード上書きは `daily_budget_pulses` と同じ経路 (day_open スケジュール行の
+  PLAYBOOK_PARAMS の `life_mode_override`) で `autonomy_wiring._confirm_life_at_day_open`
+  / `handle_scheduled_judgment` / `watchdog_tick` の 3 発火経路すべてを通し、
+  `day_plan.confirm_life_for_today` に新設 `mode_override` 引数として渡す
+  (§5.1 の「上書きは設定 UI からの脱出口のみ」の実装)。
+  ②**v1 亡霊の掃除**: `frontend/src/components/SettingsModal.tsx` の「自律行動マネージャー」
+  間隔入力 (interval_minutes) を削除 (state・POST body は既存値のまま裏で使うが編集 UI は
+  無し。start/stop ボタンと状態表示は残す — ACTIVITY_STATE との二重仕様だが明示指示外の
+  ため保守的に残置、報告に記載)。メタ判断 Pulse 設定の説明文言から「自律行動マネージャーの
+  『間隔』ぴったりに走ります」記述とコスト警告ブロックを削除 (`session_lifecycle.py` 実装
+  読み: keep_cache_alive=False は前倒しを単に行わないだけで periodic tick が代替駆動する
+  という記述自体が誤りだったため訂正)。応答待ち Track 自動 pause 閾値の説明文言を実装
+  (`track_manager._handle_wait_response_timeout`、案 Y 実装済) に追従させ「自動的に
+  pending に落とし」→「会話の区切りとして扱い、ふりかえりの判断を行います（ペルソナの
+  状態は変わりません）」に修正。`frontend/src/components/LifeView.tsx` 最下部の間隔 2 種
+  フォーム (review_minutes/pulse_seconds) を削除し、対応バックエンド
+  (`api/routes/people/activity.py` の `PUT /activity/intervals` エンドポイントと
+  `ActivityViewResponse.intervals` フィールド) も退役。`frontend/src/components/
+  DebugPanel.tsx` の「自律 Pulse を 1 回」ボタンと SubLine on/off トグルを削除
+  (自律行動 v2 で SubLineScheduler ごと廃止済みで、バックエンドは既に no-op — 純粋な
+  dead UI だった)。バックエンドの watchdog 機構 (AutonomyManager) と既定値運用自体は
+  変更していない。
+  ③**表示ラベル**: ライフビューのライフ帯を「{consumed}/{budget}」の無ラベル数字から
+  「活動 {consumed}/{budget}回」に変更し、`judgment_pulses` (判断点回数、API は Phase 4
+  で追加済みだったがフロント型・表示が欠けていた) を「ふりかえり・判断: N回」として別枠
+  表示。tail 通知文言 (`day_plan._handle_life_start`/`_handle_life_end`、改修Aの暫定 TODO)
+  を「（活動開始）今日は HH:MM〜HH:MM。」「（活動終了）今日の活動時間はここまで。」に確定。
+  `judgment_finalize.py` の宣言口残骸は改修Aで既に削除済みで残骸なしを確認。
+  新規 `tests/test_life_settings_api.py` (10件)、`tests/test_life_confirmation.py` に
+  mode_override 系 7 件追加、`tests/test_autonomy_wiring.py` に life_mode_override
+  伝播系 3 件追加。既存系全緑 (pre-existing failure の avatar_pipeline 118 件 /
+  addon_config_mcp_reconnect 8 件のみ、それ以外ゼロ)。フロント `tsc --noEmit` /
+  `next lint` (0 errors) / `next build` 成功。まはー実機検証はまだ。
 - v0.5「改修A」実装 (2026-07-13): v0.5 で確定した責任分界のうち §11.2 の巻き戻し明細を実装。
   ①**LLM 宣言口の削除**: `judgment_points.py` の `_build_life_schema`/day_open スキーマの `lives`
   フィールド/`sanitize_lives`、`judgment_finalize.py` の lives 保存ブロックを削除。`day_plan.py` の

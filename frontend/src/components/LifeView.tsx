@@ -9,10 +9,11 @@ import type { DayPlanSlot, LifeItem, LifeStatus } from '@/lib/dayPlan';
  * ライフビュー: ペルソナの自律行動の観察面 (サイドパネル)。
  *
  * - 「いま」「最近」は読み取り専用の観察 (LLM コールなし、テンプレート整形のみ)
- * - 操作は再生/停止トグルと間隔 2 種だけ (生活リズム層)
+ * - 操作は再生/停止トグルだけ (v0.5 改修B: 間隔 2 種フォームは v1 の
+ *   主駆動設定だったため退役。life.md v0.5 §9.2-2)
  * - 深掘りはメモリーモーダルの Pulse タイムラインへリンクで接続
  *
- * 詳細: docs/intent/persona_activity_view.md
+ * 詳細: docs/intent/persona_activity_view.md, docs/intent/life.md
  */
 
 interface ActivityNowItem {
@@ -40,7 +41,6 @@ interface ActivityViewData {
     building: { id: string | null; name: string | null };
     now: ActivityNowItem[];
     recent: ActivityRecentItem[];
-    intervals: { review_minutes: number; pulse_seconds: number };
     next_meta_tick_eta_seconds: number | null;
     next_wait_response_timeout_seconds: number | null;
 }
@@ -112,10 +112,6 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
     const [dayPlan, setDayPlan] = useState<DayPlanData | null>(null);
     const [dayPlanFailed, setDayPlanFailed] = useState(false);
     const [toggleBusy, setToggleBusy] = useState(false);
-    // 間隔フォーム (空文字列 = 未編集でサーバー値を表示)
-    const [reviewMinutes, setReviewMinutes] = useState<string>('');
-    const [pulseSeconds, setPulseSeconds] = useState<string>('');
-    const [intervalsSaving, setIntervalsSaving] = useState(false);
 
     const fetchData = useCallback(async () => {
         try {
@@ -134,8 +130,6 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
     useEffect(() => {
         if (!isOpen) {
             setData(null);
-            setReviewMinutes('');
-            setPulseSeconds('');
             return;
         }
         fetchData();
@@ -221,47 +215,6 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
             alert('サーバーとの通信に失敗しました');
         } finally {
             setToggleBusy(false);
-        }
-    };
-
-    const intervalsDirty =
-        (reviewMinutes !== '' && data != null && parseInt(reviewMinutes) !== data.intervals.review_minutes) ||
-        (pulseSeconds !== '' && data != null && parseInt(pulseSeconds) !== data.intervals.pulse_seconds);
-
-    const handleSaveIntervals = async () => {
-        if (!data || intervalsSaving) return;
-        const body: Record<string, number> = {};
-        if (reviewMinutes !== '') {
-            const v = parseInt(reviewMinutes);
-            if (Number.isNaN(v) || v < 1) { alert('行動を見直す間隔は 1 分以上で指定してください'); return; }
-            body.review_minutes = v;
-        }
-        if (pulseSeconds !== '') {
-            const v = parseInt(pulseSeconds);
-            if (Number.isNaN(v) || v < 5) { alert('作業のテンポは 5 秒以上で指定してください'); return; }
-            body.pulse_seconds = v;
-        }
-        if (Object.keys(body).length === 0) return;
-        setIntervalsSaving(true);
-        try {
-            const res = await fetch(`/api/people/${personaId}/activity/intervals`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            if (res.ok) {
-                setReviewMinutes('');
-                setPulseSeconds('');
-                await fetchData();
-            } else {
-                const err = await res.json().catch(() => null);
-                alert(`保存に失敗しました: ${err?.detail ?? res.status}`);
-            }
-        } catch (err) {
-            console.error('[LifeView] intervals save error:', err);
-            alert('サーバーとの通信に失敗しました');
-        } finally {
-            setIntervalsSaving(false);
         }
     };
 
@@ -355,9 +308,14 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
                                                         {life.start}〜{life.end}
                                                     </span>
                                                     <span className={styles.lifeBandBudget}>
-                                                        {fmtLifeConsumed(life.consumed)} / {life.budget_pulses}
+                                                        活動 {fmtLifeConsumed(life.consumed)}/{life.budget_pulses}回
                                                     </span>
                                                 </div>
+                                                {life.judgment_pulses > 0 && (
+                                                    <div className={styles.lifeBandJudgment}>
+                                                        ふりかえり・判断: {life.judgment_pulses}回
+                                                    </div>
+                                                )}
                                                 {slotsInLife.length > 0 ? (
                                                     <div className={styles.planStrip}>
                                                         {slotsInLife.map(renderPlanRow)}
@@ -457,54 +415,6 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
                                         ? '止めると進行中の作業を中断し、あなたの言葉を待つ状態に戻ります'
                                         : '始めると、何をするかを本人が考えて動き出します'}
                                 </div>
-
-                                {isActive && (
-                                    <div className={styles.intervals}>
-                                        <div className={styles.intervalRow}>
-                                            <label className={styles.intervalLabel}>
-                                                行動を見直す間隔
-                                                <span className={styles.intervalHint}>
-                                                    この間隔で、今の行動を続けるか・別のことをするかを本人が判断します
-                                                </span>
-                                            </label>
-                                            <div className={styles.intervalInput}>
-                                                <input
-                                                    type="number"
-                                                    min={1}
-                                                    value={reviewMinutes !== '' ? reviewMinutes : String(data.intervals.review_minutes)}
-                                                    onChange={e => setReviewMinutes(e.target.value)}
-                                                />
-                                                <span>分</span>
-                                            </div>
-                                        </div>
-                                        <div className={styles.intervalRow}>
-                                            <label className={styles.intervalLabel}>
-                                                作業のテンポ
-                                                <span className={styles.intervalHint}>
-                                                    行動中、この間隔で作業を一歩ずつ進めます
-                                                </span>
-                                            </label>
-                                            <div className={styles.intervalInput}>
-                                                <input
-                                                    type="number"
-                                                    min={5}
-                                                    value={pulseSeconds !== '' ? pulseSeconds : String(data.intervals.pulse_seconds)}
-                                                    onChange={e => setPulseSeconds(e.target.value)}
-                                                />
-                                                <span>秒</span>
-                                            </div>
-                                        </div>
-                                        {intervalsDirty && (
-                                            <button
-                                                className={styles.applyBtn}
-                                                onClick={handleSaveIntervals}
-                                                disabled={intervalsSaving}
-                                            >
-                                                {intervalsSaving ? '保存中...' : '適用'}
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
                             </>
                         )}
                     </div>

@@ -1,7 +1,7 @@
 # Intent: 自律稼働デバッグコントローラー
 
 **親**: [README.md](README.md)
-**ステータス**: v0.1 起草 (2026-05-25)
+**ステータス**: v0.1 起草 (2026-05-25)。**v0.2 (2026-07-13, life.md v0.5 §9.2-2 改修B)**: 自律行動 v2 で SubLineScheduler (running autonomous Track への 30 秒間隔 sub_line Pulse) 自体が廃止されたため、UI の「sub_line Pulse を 1 回」ボタンと「SubLineScheduler on/off」トグルを `frontend/src/components/DebugPanel.tsx` から削除した。バックエンド (`api/routes/people/debug.py` の `fire-subline-pulse` / `scheduler.subline`) は互換のため no-op のまま残存 (触る意味は無い)。以下 §「発火項目」「タイマー制御」の該当行は歴史的記録として残す。
 **関連**: [pulse_dispatch.md](pulse_dispatch.md), [04_handlers.md](04_handlers.md), `saiverse/pulse_scheduler.py`, `saiverse/meta_layer.py`, `saiverse/autonomy_manager.py`
 
 ## これは何か

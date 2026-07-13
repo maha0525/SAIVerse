@@ -62,10 +62,6 @@ const META_JUDGMENT_DEFAULTS = {
     keep_cache_alive: true,
 };
 
-// 自動発話間隔がこれを超えていてかつ keep_cache_alive が ON だと、cache 維持で
-// 高頻度に LLM が走るためコスト警告を出す
-const KEEP_CACHE_ALIVE_WARNING_INTERVAL_MINUTES = 60;
-
 interface ChronicleCostEstimate {
     total_messages: number;
     processed_messages: number;
@@ -703,29 +699,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             {autonomyStatus?.state || 'stopped'}
                                         </span>
 
-                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
-                                            間隔:
-                                            <input
-                                                type="number"
-                                                min={1}
-                                                max={120}
-                                                step={1}
-                                                value={autonomyInterval}
-                                                onChange={(e) => setAutonomyInterval(Number(e.target.value))}
-                                                disabled={autonomyStatus?.state !== 'stopped'}
-                                                style={{
-                                                    width: '4rem',
-                                                    padding: '2px 6px',
-                                                    borderRadius: '4px',
-                                                    border: '1px solid #444',
-                                                    background: 'transparent',
-                                                    color: 'inherit',
-                                                    textAlign: 'center',
-                                                }}
-                                            />
-                                            分
-                                        </label>
-
                                         {(!autonomyStatus || autonomyStatus.state === 'stopped') ? (
                                             <button
                                                 onClick={handleAutonomyStart}
@@ -770,6 +743,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         </div>
                                     )}
                                 </div>
+                                <div className={styles.description}>
+                                    自律稼働の見張りタイマー（watchdog）の状態です。通常は上の「アクティビティ状態」（Active ⇔ それ以外）と連動して自動的に開始・停止するため、ここを直接操作する必要はありません。
+                                </div>
                             </div>
 
                             <DebugPanel personaId={personaId} />
@@ -781,10 +757,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     const effectiveKeepCache = metaKeepCacheAlive === 'default'
                                         ? META_JUDGMENT_DEFAULTS.keep_cache_alive
                                         : metaKeepCacheAlive === 'on';
-                                    // 自動発話間隔は自律行動マネージャー UI で編集する (autonomyInterval が source of truth)
-                                    const intervalNum = autonomyInterval;
-                                    const showCostWarning = effectiveKeepCache &&
-                                        intervalNum > KEEP_CACHE_ALIVE_WARNING_INTERVAL_MINUTES;
                                     return (
                                         <>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -868,21 +840,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                 )}
                                             </div>
                                             <div className={styles.description}>
-                                                メインモデルのキャッシュ TTL 残り割合が「キャッシュ閾値」を下回ると、メタ判断 Pulse を前倒しで発火します。Pulse が失敗した場合は「失敗時リトライ回数」の上限まで「リトライ待機秒数」を空けて再試行します。「キャッシュ維持」を OFF にすると TTL 接近時の前倒しを行わず、自律行動マネージャーの「間隔」ぴったりに走ります (24 時間間隔等の低頻度ペルソナ向け)。空欄の項目は既定値が適用されます。
+                                                メインモデルのキャッシュ TTL 残り割合が「キャッシュ閾値」を下回ると、メタ判断 Pulse を前倒しで発火します。Pulse が失敗した場合は「失敗時リトライ回数」の上限まで「リトライ待機秒数」を空けて再試行します。「キャッシュ維持」を OFF にすると TTL 接近時の前倒しを行いません（低頻度運用向け。キャッシュが切れることを許容します）。空欄の項目は既定値が適用されます。
                                             </div>
-                                            {showCostWarning && (
-                                                <div style={{
-                                                    marginTop: '0.5rem',
-                                                    padding: '0.5rem 0.75rem',
-                                                    background: 'rgba(255, 200, 0, 0.12)',
-                                                    border: '1px solid rgba(255, 200, 0, 0.4)',
-                                                    borderRadius: '4px',
-                                                    fontSize: '0.85em',
-                                                    color: '#bf8700',
-                                                }}>
-                                                    ⚠ 自律行動マネージャーの間隔が長く ({intervalNum}分) かつキャッシュ維持が ON のため、TTL ベースで頻繁にメタ判断が走り API コストが増える可能性があります。低頻度運用が目的なら「キャッシュ維持」を OFF にしてください。
-                                                </div>
-                                            )}
                                         </>
                                     );
                                 })()}
@@ -906,7 +865,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </span>
                                 </div>
                                 <div className={styles.description}>
-                                    対ユーザー会話 Track のような応答待ち型 Track が、最終メッセージからこの分数以上 idle になると自動的に pending に落とし、メタ判断 Pulse を発火します。長期 idle で自律稼働が止まる事故の脱出経路として動作します。軽量モデルなら短く (10〜15 分)、重量級モデルや人間の応答間隔が長い運用なら長く (60 分以上) 設定してください。
+                                    対ユーザー会話 Track のような応答待ち型 Track が、最終メッセージからこの分数以上 idle になると、会話の区切りとして扱い、ふりかえりの判断を行います（ペルソナの状態は変わりません）。長期 idle で自律稼働が止まる事故の脱出経路として動作します。軽量モデルなら短く (10〜15 分)、重量級モデルや人間の応答間隔が長い運用なら長く (60 分以上) 設定してください。
                                 </div>
                             </div>
 

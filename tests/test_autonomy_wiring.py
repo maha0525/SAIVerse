@@ -254,6 +254,38 @@ def test_scheduled_judgment_day_open_passes_budget(session_factory, monkeypatch)
     assert fired == [("day_open", {"daily_budget_rounds": 24})]
 
 
+def test_scheduled_judgment_day_open_passes_life_mode_override(session_factory, monkeypatch):
+    """life.md v0.5 §5.1: life_mode_override (even/free) が context に透過される。"""
+    manager, _ = _make_manager(session_factory)
+    fired: List[Any] = []
+    monkeypatch.setattr(
+        wiring, "fire_judgment_point",
+        lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
+        or {"submitted": True},
+    )
+    wiring.handle_scheduled_judgment(
+        manager, PERSONA_ID, "judgment_day_open",
+        params={"life_mode_override": "even", "other": "x"},
+    )
+    assert fired == [("day_open", {"life_mode_override": "even"})]
+
+
+def test_scheduled_judgment_day_open_rejects_invalid_life_mode_override(session_factory, monkeypatch):
+    """LIFE_MODES 外の値は無視される (書ける口をなくす、life.md v0.5 §3)。"""
+    manager, _ = _make_manager(session_factory)
+    fired: List[Any] = []
+    monkeypatch.setattr(
+        wiring, "fire_judgment_point",
+        lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
+        or {"submitted": True},
+    )
+    wiring.handle_scheduled_judgment(
+        manager, PERSONA_ID, "judgment_day_open",
+        params={"life_mode_override": "bogus"},
+    )
+    assert fired == [("day_open", {})]
+
+
 def test_scheduled_judgment_rejects_non_schedulable_kind(session_factory, caplog):
     manager, _ = _make_manager(session_factory)
     with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
@@ -613,6 +645,21 @@ def test_watchdog_refires_day_open_when_plan_missing(session_factory, monkeypatc
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["action"] == "day_open_refire"
     assert calls == [("day_open", {"daily_budget_rounds": 16})]
+
+
+def test_watchdog_refire_passes_life_mode_override(session_factory, monkeypatch):
+    """再起動後の watchdog day_open 再発火経路でも life_mode_override が透過される。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(
+        session_factory, "judgment_day_open", "08:00",
+        params={"life_mode_override": "free"},
+    )
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["action"] == "day_open_refire"
+    assert calls == [("day_open", {"life_mode_override": "free"})]
 
 
 def test_watchdog_respects_waking_window(session_factory, monkeypatch):

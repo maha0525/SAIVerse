@@ -1,6 +1,6 @@
 # Intent: ペルソナライフビュー (Persona Activity View)
 
-- Status: v0.3 (2026-06-12 起草 → 2026-06-13 実装完了、実機検証待ち。§11 実装記録)
+- Status: v0.3 (2026-06-12 起草 → 2026-06-13 実装完了、実機検証待ち。§11 実装記録)。**v0.4 (2026-07-13, life.md v0.5 §9.2-2 改修B)**: §7 の「間隔 2 種」設定 UI (行動を見直す間隔 / 作業のテンポ) と対応 API (`PUT /activity/intervals`) は v1 (50分 tick 主駆動・連続 sub_line Pulse) 時代の設定として退役した。現行の自律駆動は時間割のコマ発火 + 判断点 (`docs/intent/life.md`)。§4.1 の UI 図・§8.1 の JSON 例は当時のまま残すが、実装は反映されていない (歴史的record)。
 - 関連 Intent:
   - `docs/intent/autonomous_living.md` (思想的な親。既知の課題「ユーザー帰還時の体験」への部分回答)
   - `docs/intent/persona_cognition/pulse_dispatch.md` (§5 on_track_activated hook — 停止パッケージが触る)
@@ -39,7 +39,7 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 2. **LLM コールゼロ**: 表示内容は既存データ (Track / pulse-logs / ACTIVITY_STATE) のテンプレート整形のみで作る。観察のために LLM を呼ばない
 3. **デバッグ面との役割分担**: ライフビューは生活が見える窓、メモリーモーダルは点検面。深掘りはライフビューから Pulse タイムラインへのリンク 1 本で接続し、ライフビューに pulse_id・line_role 等の内部語彙を露出しない
 4. **停止操作は予期しない自動発言を起こさない**: 停止トグルを押した瞬間にペルソナが喋り出してはならない (§6.3)
-5. **開示は生活リズム層のみ**: ライフビューに出す操作は再生/停止トグルと間隔 2 種だけ。ACTIVITY_STATE 4 値の直接変更・Track 個別の pause/resume・META_JUDGMENT_CONFIG 詳細・Track metadata の間隔上書きは点検・調律層として既存のデバッグ UI (SettingsModal / DebugPanel / scripts) に残留する
+5. **開示は生活リズム層のみ**: ライフビューに出す操作は再生/停止トグルだけ (v0.4: 間隔 2 種は退役、§7)。ACTIVITY_STATE 4 値の直接変更・Track 個別の pause/resume・META_JUDGMENT_CONFIG 詳細・Track metadata の間隔上書きは点検・調律層として既存のデバッグ UI (SettingsModal / DebugPanel / scripts) に残留する
 
 ## 4. UI 設計
 
@@ -131,9 +131,18 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 
 既存の `/autonomy/start|stop|config` (`api/routes/people/autonomy.py`) は AutonomyManager 単体の操作としてデバッグ層に残す。`autonomy_manager.py` の docstring にある「将来 META_JUDGMENT_CONFIG 経由に統合する想定」とは独立 (本 Intent は統合を前提にしない)。
 
-## 7. 間隔設定 — 二層を隠さない
+## 7. 間隔設定 — 二層を隠さない (v0.4: 退役)
 
-「行動間隔」は一語にまとめると嘘になる二層構造を持つ:
+> **退役 (2026-07-13, life.md v0.5 §9.2-2)**: 以下は v1 (50分 tick 主駆動・連続
+> sub_line Pulse) 時代の設計。現行の自律駆動は時間割のコマ発火 + 判断点であり、
+> 「行動を見直す間隔」も「作業のテンポ」もユーザーが触る意味のある設定では
+> なくなった。UI (LifeView.tsx 最下部フォーム・SettingsModal.tsx の間隔入力)
+> と対応 API (`PUT /activity/intervals`) は削除した。バックエンドの
+> AutonomyManager watchdog 機構と既定値運用 (`periodic_interval_minutes` の
+> 既定 50 分) 自体は生きている——ユーザー設定の意味が無くなっただけ。
+> 以下は歴史的記録として残す。
+
+「行動間隔」は一語にまとめると嘘になる二層構造を持つ (旧設計):
 
 | UI ラベル | 実体 | デフォルト | 意味 |
 |---|---|---|---|

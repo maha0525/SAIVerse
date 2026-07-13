@@ -308,8 +308,9 @@ def _confirm_life_at_day_open(
     """day_open 発火経路でのライフ確定 (life.md v0.5 §4/§11.2)。
 
     区間はユーザーが設定した起床・就寝 (PersonaSchedule、
-    :func:`_find_day_schedules` が解決)、予算は ``context`` 経由のユーザー
-    設定値 (``daily_budget_pulses``、無ければ最低値)。冪等
+    :func:`_find_day_schedules` が解決)、予算とモード上書きは ``context``
+    経由のユーザー設定値 (``daily_budget_pulses``・``life_mode_override``、
+    無ければそれぞれ最低値・自動判定)。冪等
     (:func:`~saiverse.day_plan.confirm_life_for_today` が既存確定を保持する)
     — 当日はじめての確定のときだけライフ開始の節目処理
     (:func:`~saiverse.day_plan._handle_life_start`) を呼ぶ (再確定での
@@ -321,11 +322,13 @@ def _confirm_life_at_day_open(
     already_confirmed = bool(day_plan.get_lives(manager, persona_id, plan_date))
     sched = _find_day_schedules(manager, persona_id)
     budget = context.get("daily_budget_pulses") if isinstance(context, dict) else None
+    mode_override = context.get("life_mode_override") if isinstance(context, dict) else None
     try:
         life = day_plan.confirm_life_for_today(
             manager, persona_id, plan_date,
             sched.get("wake"), sched.get("close"),
             requested_budget_pulses=budget,
+            mode_override=mode_override,
         )
     except Exception:
         LOGGER.warning(
@@ -394,7 +397,9 @@ def handle_scheduled_judgment(
             ``daily_budget_rounds`` (正整数、作業ラウンドの日次予算) と
             ``daily_budget_pulses`` (正整数、ライフの標準パルス予算 —
             ユーザー設定。未設定/最低値未満は最低値へ切り上げ。
-            life.md v0.5 §4.2) を context に透過する。
+            life.md v0.5 §4.2) と ``life_mode_override``
+            ("even"/"free"、モードの明示上書き。ライフ設定 UI の高度な設定
+            からの脱出口。§5.1) を context に透過する。
     """
     kind = PLAYBOOK_TO_KIND.get(playbook_name)
     if kind is None:
@@ -413,6 +418,8 @@ def handle_scheduled_judgment(
 
     context: Dict[str, Any] = {}
     if kind == KIND_DAY_OPEN and isinstance(params, dict):
+        from saiverse.day_plan import LIFE_MODES
+
         budget = params.get("daily_budget_rounds")
         if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
             context["daily_budget_rounds"] = budget
@@ -420,6 +427,9 @@ def handle_scheduled_judgment(
         if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
                 and budget_pulses >= 1:
             context["daily_budget_pulses"] = budget_pulses
+        mode_override = params.get("life_mode_override")
+        if isinstance(mode_override, str) and mode_override in LIFE_MODES:
+            context["life_mode_override"] = mode_override
 
     LOGGER.info(
         "[autonomy-wiring] scheduled judgment firing: kind=%s persona=%s",
@@ -819,6 +829,8 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         context: Dict[str, Any] = {}
         params = sched.get("day_open_params")
         if isinstance(params, dict):
+            from saiverse.day_plan import LIFE_MODES
+
             budget = params.get("daily_budget_rounds")
             if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
                 context["daily_budget_rounds"] = budget
@@ -826,6 +838,9 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
                     and budget_pulses >= 1:
                 context["daily_budget_pulses"] = budget_pulses
+            mode_override = params.get("life_mode_override")
+            if isinstance(mode_override, str) and mode_override in LIFE_MODES:
+                context["life_mode_override"] = mode_override
         result = fire_judgment_point(
             manager, persona_id, KIND_DAY_OPEN, context,
             # Lock 待ちの間に本物の day_open が済んでいたら撃たない (二重編成防止)

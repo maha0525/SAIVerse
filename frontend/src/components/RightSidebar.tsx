@@ -26,6 +26,7 @@ import MemoryModal from './MemoryModal';
 import ScheduleModal from './ScheduleModal';
 import TasksModal from './TasksModal';
 import SettingsModal from './SettingsModal';
+import LifeSettingsModal from './LifeSettingsModal';
 import InventoryModal from './InventoryModal';
 import BuildingSettingsModal from './BuildingSettingsModal';
 
@@ -126,6 +127,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     const [showSchedule, setShowSchedule] = useState(false);
     const [showTasks, setShowTasks] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [showLifeSettings, setShowLifeSettings] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
     const [showProfile, setShowProfile] = useState(false);
     const [showBuildingSettings, setShowBuildingSettings] = useState(false);
@@ -272,13 +274,13 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // activeModalPersonaId だけが上書きされ、対象モーダルは開いたまま personaId プロパティ
     // だけが切り替わる現象が起きる。このとき「フォームの中身は古いまま、保存先 ID だけ新しい」
     // という極めて危険な状態になりうるため、いったんすべてのモーダルを閉じてから開き直す。
-    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'inventory' | 'profile') => {
+    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'lifeSettings' | 'inventory' | 'profile') => {
         if (!selectedPersona) return;
         const newId = selectedPersona.id;
         const newName = selectedPersona.name;
         const newAvatar = selectedPersona.avatar ?? null;
 
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory || showProfile;
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showInventory || showProfile;
         const sameTarget = anyOpen && activeModalPersonaId === newId;
 
         const applyOpen = () => {
@@ -289,6 +291,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             if (type === 'schedule') setShowSchedule(true);
             if (type === 'tasks') setShowTasks(true);
             if (type === 'settings') setShowSettings(true);
+            if (type === 'lifeSettings') setShowLifeSettings(true);
             if (type === 'inventory') setShowInventory(true);
             if (type === 'profile') setShowProfile(true);
         };
@@ -304,6 +307,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             setShowSchedule(false);
             setShowTasks(false);
             setShowSettings(false);
+            setShowLifeSettings(false);
             setShowInventory(false);
             setShowProfile(false);
             // 次の tick で開く: state 反映と useEffect cleanup を間に挟むため
@@ -318,7 +322,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // openModal と同じ ID 整合性対策 (feedback_modal_id_integrity.md): 別ペルソナの
     // モーダルが開いていたら全部閉じてから次 tick で開き直す。
     const openMemoryFor = (target: Occupant) => {
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory || showProfile;
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showInventory || showProfile;
         const sameTarget = anyOpen && activeModalPersonaId === target.id;
 
         const applyOpen = () => {
@@ -333,6 +337,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             setShowSchedule(false);
             setShowTasks(false);
             setShowSettings(false);
+            setShowLifeSettings(false);
             setShowInventory(false);
             setShowProfile(false);
             setTimeout(applyOpen, 0);
@@ -631,6 +636,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenTasks={() => openModal('tasks')}
                         onOpenSettings={() => openModal('settings')}
+                        onOpenLifeSettings={() => openModal('lifeSettings')}
                         onOpenInventory={() => openModal('inventory')}
                         onDismissed={() => {
                             // dismiss 成功 → details を即時 refetch して滞在ペルソナ表示を更新。
@@ -664,6 +670,12 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             isOpen={showSettings}
                             onClose={() => setShowSettings(false)}
                             personaId={activeModalPersonaId}
+                        />
+                        <LifeSettingsModal
+                            isOpen={showLifeSettings}
+                            onClose={() => setShowLifeSettings(false)}
+                            personaId={activeModalPersonaId}
+                            personaName={activeModalPersonaName || undefined}
                         />
                         <InventoryModal
                             isOpen={showInventory}

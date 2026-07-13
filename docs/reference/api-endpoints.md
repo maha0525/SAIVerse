@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 345（tag グループ: 23）
+**エンドポイント数**: 346（tag グループ: 23）
 
 ## addon
 
@@ -213,7 +213,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/summon/{persona_id}` | Summon a persona to the target building. |
 | GET | `/api/people/summonable` | List personas that can be summoned (not in current room, not dispatched). |
 | GET | `/api/people/{persona_id}/activity-view` | ライフビューの集約データ (いま / 最近 / 設定) を返す。 |
-| PUT | `/api/people/{persona_id}/activity/intervals` | 間隔 2 種を更新する (persona_activity_view.md §7)。 |
 | POST | `/api/people/{persona_id}/activity/start` | 再生: 自律行動を始めさせる (persona_activity_view.md §6.1)。 |
 | POST | `/api/people/{persona_id}/activity/stop` | 停止: 「いつもの、プロンプトを静かに待っている AI」に戻す |
 | GET | `/api/people/{persona_id}/arasuji` | List Chronicle entries for a persona (part of Memory Weave). |
@@ -263,6 +262,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/import/official/preview` | Preview ChatGPT export file and return conversation list for selection. |
 | GET | `/api/people/{persona_id}/import/official/status` | Get the status of official import task. |
 | GET | `/api/people/{persona_id}/items` | List items held by a persona. |
+| GET | `/api/people/{persona_id}/life-settings` | 現在のライフ設定 + 自動判定モード + 最低予算ガイドをまとめて返す。 |
+| PUT | `/api/people/{persona_id}/life-settings` | 起床・就寝・予算・モード上書きを 1 リクエストで保存する。 |
 | POST | `/api/people/{persona_id}/memopedia/build-from-logs` | Start building Memopedia pages from chat logs as a background job. |
 | GET | `/api/people/{persona_id}/memopedia/export` | Export all Memopedia pages as JSON. |
 | POST | `/api/people/{persona_id}/memopedia/generate` | Start Memopedia page generation as a background job. |

@@ -8,6 +8,7 @@ import MemoryModal from './MemoryModal';
 import ScheduleModal from './ScheduleModal';
 import TasksModal from './TasksModal';
 import SettingsModal from './SettingsModal';
+import LifeSettingsModal from './LifeSettingsModal';
 import InventoryModal from './InventoryModal';
 
 interface Occupant {
@@ -114,6 +115,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     const [showSchedule, setShowSchedule] = useState(false);
     const [showTasks, setShowTasks] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [showLifeSettings, setShowLifeSettings] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
 
     const cancelledRef = useRef(false);
@@ -619,12 +621,12 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     };
 
     // RightSidebar と同様: 別ペルソナのモーダルが既に開いていたら閉じてから開き直す
-    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'inventory') => {
+    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'lifeSettings' | 'inventory') => {
         if (!selectedPersona) return;
         const newId = selectedPersona.id;
         const newName = selectedPersona.name;
 
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory;
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showInventory;
         const sameTarget = anyOpen && activeModalPersonaId === newId;
 
         const applyOpen = () => {
@@ -634,6 +636,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             if (type === 'schedule') setShowSchedule(true);
             if (type === 'tasks') setShowTasks(true);
             if (type === 'settings') setShowSettings(true);
+            if (type === 'lifeSettings') setShowLifeSettings(true);
             if (type === 'inventory') setShowInventory(true);
         };
 
@@ -644,6 +647,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             setShowSchedule(false);
             setShowTasks(false);
             setShowSettings(false);
+            setShowLifeSettings(false);
             setShowInventory(false);
             setTimeout(applyOpen, 0);
             return;
@@ -943,6 +947,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                     onOpenSchedule={() => openModal('schedule')}
                     onOpenTasks={() => openModal('tasks')}
                     onOpenSettings={() => openModal('settings')}
+                    onOpenLifeSettings={() => openModal('lifeSettings')}
                     onOpenInventory={() => openModal('inventory')}
                 />
             )}
@@ -969,6 +974,12 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                         isOpen={showSettings}
                         onClose={() => setShowSettings(false)}
                         personaId={activeModalPersonaId}
+                    />
+                    <LifeSettingsModal
+                        isOpen={showLifeSettings}
+                        onClose={() => setShowLifeSettings(false)}
+                        personaId={activeModalPersonaId}
+                        personaName={activeModalPersonaName || undefined}
                     />
                     <InventoryModal
                         isOpen={showInventory}

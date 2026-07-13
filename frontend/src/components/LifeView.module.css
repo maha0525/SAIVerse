@@ -183,6 +183,12 @@
     white-space: nowrap;
 }
 
+.lifeBandJudgment {
+    padding: 0.3rem 0.7rem 0;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
 .lifeBandEmpty {
     padding: 0.55rem 0.7rem;
     font-size: 0.78rem;
@@ -404,71 +410,6 @@
     font-size: 0.73rem;
     color: var(--text-secondary);
     line-height: 1.5;
-}
-
-.intervals {
-    margin-top: 0.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.7rem;
-}
-
-.intervalRow {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.6rem;
-}
-
-.intervalLabel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    font-size: 0.82rem;
-    color: var(--text-primary);
-}
-
-.intervalHint {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    line-height: 1.45;
-}
-
-.intervalInput {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    flex-shrink: 0;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-}
-
-.intervalInput input {
-    width: 64px;
-    padding: 0.3rem 0.4rem;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background-color: var(--background);
-    color: var(--text-primary);
-    font-size: 0.85rem;
-    text-align: right;
-}
-
-.applyBtn {
-    align-self: flex-end;
-    padding: 0.35rem 1rem;
-    border-radius: 8px;
-    border: none;
-    background-color: var(--accent-primary);
-    color: #ffffff;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-}
-
-.applyBtn:disabled {
-    opacity: 0.6;
-    cursor: default;
 }
 
 /* モバイル: ほぼ全幅のパネル */

@@ -207,6 +207,11 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _REF_RE = re.compile(r"^(task|desire|track):(\d+)$")
 _TRACK_REF_RE = re.compile(r"^track:(\d+)$")
 
+
+def is_valid_hhmm(value: Any) -> bool:
+    """"HH:MM" 形式の妥当性チェック (ライフ設定 API 等、保存前バリデーションの共用口)。"""
+    return isinstance(value, str) and bool(_TIME_RE.match(value))
+
 # ---------------------------------------------------------------------------
 # kind 別ハンドラのレジストリ
 # ---------------------------------------------------------------------------
@@ -1010,6 +1015,44 @@ def _min_life_budget(mode: str, window_minutes: int) -> int:
     return 1
 
 
+def life_mode_and_min_budget(
+    manager: Any,
+    persona_id: str,
+    wake: Optional[str],
+    close: Optional[str],
+    mode_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    """ライフ設定 UI (life.md v0.5 §9.2-1) 向け: 実効モードと最低予算をまとめて
+    計算する副作用なしの読み取り専用ヘルパ。
+
+    :func:`confirm_life_for_today` と同じ「モード決定」「最低予算」ロジックを
+    共有するが、DB へは何も書かない (プレビュー・バリデーション専用)。
+
+    Args:
+        wake/close: "HH:MM"。どちらか欠けていれば窓長・最低予算は計算できない
+            ( ``window_minutes`` / ``min_budget_pulses`` は None)。
+        mode_override: ユーザーによる明示上書き ("even"/"free")。
+            :data:`LIFE_MODES` に無い値は無視して自動判定にフォールバックする
+            (life.md §5.1: 上書きは設定 UI からの脱出口のみ)。
+
+    Returns:
+        ``{"derived_mode", "effective_mode", "window_minutes", "min_budget_pulses"}``
+    """
+    derived = derive_default_life_mode(manager, persona_id)
+    effective = mode_override if mode_override in LIFE_MODES else derived
+    window_minutes: Optional[int] = None
+    min_budget: Optional[int] = None
+    if wake and close and is_valid_hhmm(wake) and is_valid_hhmm(close):
+        window_minutes = _life_window_minutes(wake, close)
+        min_budget = _min_life_budget(effective, window_minutes)
+    return {
+        "derived_mode": derived,
+        "effective_mode": effective,
+        "window_minutes": window_minutes,
+        "min_budget_pulses": min_budget,
+    }
+
+
 def confirm_life_for_today(
     manager: Any,
     persona_id: str,
@@ -1017,6 +1060,7 @@ def confirm_life_for_today(
     wake: Optional[str],
     close: Optional[str],
     requested_budget_pulses: Optional[int] = None,
+    mode_override: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """起床判断 (day_open) 発火時、ユーザー設定 (PersonaSchedule の起床・就寝 +
     予算) から今日のライフを確定して meta_json.lives に焼く
@@ -1024,8 +1068,11 @@ def confirm_life_for_today(
     :func:`saiverse.autonomy_wiring.fire_judgment_point`。
 
     - **区間**: wake〜close をそのまま使う (深夜跨ぎも正常形)
-    - **モード**: :func:`derive_default_life_mode` (provider 導出、ペルソナは
-      選ばない)
+    - **モード**: ``mode_override`` (ユーザー設定、"even"/"free") が
+      :data:`LIFE_MODES` に入っていればそれを、無ければ
+      :func:`derive_default_life_mode` (provider 導出) を使う。上書きは
+      ライフ設定 UI からの明示的な脱出口のみ (life.md §5.1) —
+      ペルソナ自身は選ばない
     - **予算**: ``requested_budget_pulses`` (ユーザー設定、PersonaSchedule の
       PLAYBOOK_PARAMS.daily_budget_pulses 由来) が最低値
       (:func:`_min_life_budget`) 以上ならそれを、未設定/最低値未満なら
@@ -1059,7 +1106,14 @@ def confirm_life_for_today(
         )
         return None
 
-    mode = derive_default_life_mode(manager, persona_id)
+    if mode_override in LIFE_MODES:
+        mode = mode_override
+        LOGGER.info(
+            "[day_plan] life mode overridden by user setting: persona=%s mode=%s",
+            persona_id, mode,
+        )
+    else:
+        mode = derive_default_life_mode(manager, persona_id)
     window_minutes = _life_window_minutes(wake, close)
     min_budget = _min_life_budget(mode, window_minutes)
 
@@ -1540,12 +1594,10 @@ def _handle_life_start(
         "a session depending on anchor TTL (persona=%s)", persona_id,
     )
     _sync_cache_ttl_for_life_start(manager, persona_id, life)
-    # TODO(life.md §9.2-3): 厳密な文言はライフ設定画面の実装時に詰める。
-    # 実装語 ("ライフ") を排して日常語で伝える (実機初日の反省)。
+    # life.md §9.2-3 (改修B): 実装語 ("ライフ") を排した確定文言。
     _notify_life_boundary(
         manager, persona_id,
-        f"（活動開始）今日は {life['start']}〜{life['end']} 、"
-        "のんびり〜集中まで、活動ができます。",
+        f"（活動開始）今日は {life['start']}〜{life['end']}。",
     )
 
 
@@ -1576,10 +1628,10 @@ def _handle_life_end(
     # 矛盾。v0.3 の「即時失効」は v0.4 で誤りと訂正済み)。
     _cancel_keepalive_reservation(manager, persona_id)
     _sync_cache_ttl_for_life_end(manager, persona_id, life)
-    # TODO(life.md §9.2-3): 厳密な文言はライフ設定画面の実装時に詰める。
+    # life.md §9.2-3 (改修B): 実装語 ("ライフ") を排した確定文言。
     _notify_life_boundary(
         manager, persona_id,
-        "（活動終了）今日の活動を終えました。",
+        "（活動終了）今日の活動時間はここまで。",
     )
 
 

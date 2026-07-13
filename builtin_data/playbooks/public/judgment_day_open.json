@@ -37,6 +37,15 @@
       "required": false,
       "default": null,
       "user_configurable": true
+    },
+    {
+      "name": "life_mode_override",
+      "description": "ライフの駆動モードを手動で指定する場合の値。空欄なら使用モデルの提供元から自動判定します（ローカルモデル等、自動判定できない構成向けの上書き）。",
+      "param_type": "enum",
+      "enum_values": ["even", "free"],
+      "required": false,
+      "default": null,
+      "user_configurable": true
     }
   ],
   "router_callable": false,

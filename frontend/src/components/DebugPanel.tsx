@@ -1,24 +1,22 @@
 import { useState, useEffect, useCallback } from 'react';
 
 // 自律稼働デバッグコントローラー (設計: docs/intent/persona_cognition/debug_controller.md)
-// タイマーを無視してメタ判断 / 自律 Pulse を手動発火し、タイマーを止めて
-// 完全手動でペルソナを駆動する。UC-2「割り込みと復帰」等の検証用。
+// タイマーを無視してメタ判断を手動発火し、タイマーを止めて完全手動でペルソナを
+// 駆動する。UC-2「割り込みと復帰」等の検証用。
+//
+// v0.5 改修B (life.md §9.2-2, 2026-07-13): 「自律 Pulse を 1 回」
+// (sub_line Pulse 手動発火) と SubLine タイマートグルは、自律行動 v2 で
+// 旧 SubLineScheduler (running autonomous Track への連続 Pulse) ごと廃止
+// された機能だったため削除した。バックエンド (api/routes/people/debug.py)
+// は互換のため no-op のまま残っている。
 
 interface DebugPanelProps {
     personaId: string;
 }
 
 interface SchedulerStatus {
-    subline_running: boolean;
     autonomy_state: string;
     manual_mode: boolean;
-}
-
-interface RunningTrack {
-    track_id: string;
-    title: string | null;
-    track_type: string;
-    status: string;
 }
 
 const btnStyle: React.CSSProperties = {
@@ -33,31 +31,14 @@ const btnStyle: React.CSSProperties = {
 
 export default function DebugPanel({ personaId }: DebugPanelProps) {
     const [status, setStatus] = useState<SchedulerStatus | null>(null);
-    const [tracks, setTracks] = useState<RunningTrack[]>([]);
-    const [selectedTrack, setSelectedTrack] = useState<string>('');
     const [force, setForce] = useState(false);
     const [busy, setBusy] = useState(false);
     const [msg, setMsg] = useState<string>('');
 
     const refresh = useCallback(async () => {
         try {
-            const [sRes, tRes] = await Promise.all([
-                fetch(`/api/people/${personaId}/debug/scheduler`),
-                fetch(`/api/people/${personaId}/tracks?status=running`),
-            ]);
+            const sRes = await fetch(`/api/people/${personaId}/debug/scheduler`);
             if (sRes.ok) setStatus(await sRes.json());
-            if (tRes.ok) {
-                const data = await tRes.json();
-                const auto: RunningTrack[] = (data.items || []).filter(
-                    (t: RunningTrack) => t.track_type === 'autonomous'
-                );
-                setTracks(auto);
-                setSelectedTrack((prev) =>
-                    prev && auto.some((t) => t.track_id === prev)
-                        ? prev
-                        : auto[0]?.track_id ?? ''
-                );
-            }
         } catch (e) {
             console.error('[DebugPanel] refresh failed', e);
         }
@@ -89,9 +70,9 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
     const toggleManual = () => {
         const goingManual = !status?.manual_mode;
         if (goingManual) {
-            post('scheduler', { subline: false, autonomy: false, manual_mode: true });
+            post('scheduler', { autonomy: false, manual_mode: true });
         } else {
-            post('scheduler', { subline: true, manual_mode: false });
+            post('scheduler', { manual_mode: false });
         }
     };
 
@@ -128,39 +109,6 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
                     </label>
                 </div>
 
-                {/* 発火: 自律 Pulse */}
-                <div style={rowStyle}>
-                    <button
-                        style={btnStyle}
-                        disabled={busy || !selectedTrack}
-                        onClick={() => post('fire-subline-pulse', { track_id: selectedTrack })}
-                    >
-                        自律 Pulse を 1 回
-                    </button>
-                    <select
-                        value={selectedTrack}
-                        onChange={(e) => setSelectedTrack(e.target.value)}
-                        style={{
-                            padding: '2px 6px',
-                            borderRadius: '4px',
-                            border: '1px solid #444',
-                            background: 'transparent',
-                            color: 'inherit',
-                            maxWidth: '14rem',
-                        }}
-                    >
-                        {tracks.length === 0 ? (
-                            <option value="">(running な autonomous Track なし)</option>
-                        ) : (
-                            tracks.map((t) => (
-                                <option key={t.track_id} value={t.track_id}>
-                                    {t.title || t.track_id.slice(0, 8)}
-                                </option>
-                            ))
-                        )}
-                    </select>
-                </div>
-
                 {/* 発火: 会話切り上げ */}
                 <div style={rowStyle}>
                     <button style={btnStyle} disabled={busy} onClick={() => post('wrap-up-conversation')}>
@@ -183,12 +131,6 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
 
                 {/* タイマー制御 */}
                 <div style={{ ...rowStyle, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.5rem' }}>
-                    <span style={{ fontSize: '0.8rem' }}>
-                        SubLine: <strong>{status?.subline_running ? 'ON' : 'OFF'}</strong>
-                    </span>
-                    <button style={btnStyle} disabled={busy} onClick={() => post('scheduler', { subline: !status?.subline_running })}>
-                        切替
-                    </button>
                     <span style={{ fontSize: '0.8rem' }}>
                         Autonomy: <strong>{status?.autonomy_state ?? '?'}</strong>
                     </span>

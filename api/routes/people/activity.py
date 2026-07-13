@@ -1,15 +1,21 @@
 """ライフビュー (Persona Activity View) API。
 
-ペルソナの自律行動の観察面 + 再生/停止トグル + 間隔設定を提供する。
-表示データは既存の Track / pulse_logs / messages のテンプレート整形のみで作り、
-LLM は呼ばない (persona_activity_view.md 不変条件 2)。
+ペルソナの自律行動の観察面 + 再生/停止トグルを提供する。表示データは既存の
+Track / pulse_logs / messages のテンプレート整形のみで作り、LLM は呼ばない
+(persona_activity_view.md 不変条件 2)。
 
 エンドポイント:
-- GET  /{persona_id}/activity-view     : 集約ビュー (いま / 最近 / 設定)
+- GET  /{persona_id}/activity-view     : 集約ビュー (いま / 最近)
 - POST /{persona_id}/activity/start    : 再生 (Active 化 + 即時メタ判断 tick)
 - POST /{persona_id}/activity/stop     : 停止 (自律 Track pause + Idle +
                                           対ユーザー Track のサイレント activate)
-- PUT  /{persona_id}/activity/intervals: 間隔 2 種の更新
+
+v0.5 (life.md §9.2-2, 改修B): 「間隔 2 種」(review_minutes/pulse_seconds) の
+設定 UI と対応 API (``PUT /activity/intervals``) は v1 (50分 tick 主駆動・
+連続 sub_line Pulse) 時代のものとして退役した。現行の自律駆動は時間割の
+コマ発火 + 判断点 (autonomy_wiring.py) — ユーザーが触る意味のある間隔設定は
+残っていない。バックエンドの watchdog 機構 (AutonomyManager) と既定値運用は
+引き続き生きている。
 
 詳細: docs/intent/persona_activity_view.md §6, §8
 """
@@ -25,7 +31,6 @@ from pydantic import BaseModel
 from api.deps import get_manager
 from database.models import AI, Playbook
 from saiverse.activity_view import (
-    AUTONOMOUS_PULSE_INTERVAL_KEY,
     build_digest_label,
     parse_tool_calls_json,
     resolve_autonomous_pulse_interval,
@@ -74,11 +79,6 @@ class ActivityRecentItem(BaseModel):
     is_meta_judgment: bool = False
 
 
-class ActivityIntervals(BaseModel):
-    review_minutes: int
-    pulse_seconds: int
-
-
 class ActivityBuildingInfo(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
@@ -91,7 +91,6 @@ class ActivityViewResponse(BaseModel):
     building: ActivityBuildingInfo
     now: List[ActivityNowItem]
     recent: List[ActivityRecentItem]
-    intervals: ActivityIntervals
     # 次に自発行動が起きうるタイミング (秒)。各トリガーの ETA を個別に返し、
     # フロントで状況に応じた表示を組み立てる。
     next_meta_tick_eta_seconds: Optional[int] = None
@@ -103,11 +102,6 @@ class ActivityToggleResponse(BaseModel):
     message: str
     activity_state: str
     autonomy_running: bool
-
-
-class ActivityIntervalsRequest(BaseModel):
-    review_minutes: Optional[int] = None
-    pulse_seconds: Optional[int] = None
 
 
 # ----------------------------------------------------------------------
@@ -135,45 +129,6 @@ def _load_judgment_config(manager, persona) -> Dict[str, Any]:
             getattr(persona, "persona_id", "?"),
         )
         return {}
-
-
-def _merge_judgment_config(manager, persona_id: str, updates: Dict[str, Any]) -> None:
-    """AI.META_JUDGMENT_CONFIG (JSON) に updates をマージして永続化する。
-
-    autonomy.py の _persist_interval_to_judgment_config と同じ方式の汎用版。
-    既存キーは保持し、updates のキーだけ上書きする。
-    """
-    db = manager.SessionLocal()
-    try:
-        ai = db.query(AI).filter(AI.AIID == persona_id).first()
-        if ai is None:
-            raise HTTPException(status_code=404, detail="Persona not found in DB")
-        config_dict: Dict[str, Any] = {}
-        if ai.META_JUDGMENT_CONFIG:
-            try:
-                parsed = json.loads(ai.META_JUDGMENT_CONFIG)
-                if isinstance(parsed, dict):
-                    config_dict = parsed
-            except (json.JSONDecodeError, TypeError):
-                LOGGER.warning(
-                    "[activity] Existing META_JUDGMENT_CONFIG for %s is invalid JSON; rebuilding",
-                    persona_id,
-                )
-        config_dict.update(updates)
-        ai.META_JUDGMENT_CONFIG = json.dumps(config_dict, ensure_ascii=False)
-        db.commit()
-        LOGGER.info(
-            "[activity] Persisted META_JUDGMENT_CONFIG updates for %s: %s",
-            persona_id, updates,
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        db.rollback()
-        LOGGER.exception("[activity] Failed to persist config for %s", persona_id)
-        raise HTTPException(status_code=500, detail="Failed to persist config")
-    finally:
-        db.close()
 
 
 def _set_activity_state(manager, persona_id: str, persona, state: str) -> None:
@@ -507,10 +462,6 @@ def get_activity_view(persona_id: str, manager=Depends(get_manager)):
         building=ActivityBuildingInfo(id=building_id, name=building_name),
         now=now_items,
         recent=recent_items,
-        intervals=ActivityIntervals(
-            review_minutes=int(config.get("periodic_interval_minutes", 50)),
-            pulse_seconds=int(config.get(AUTONOMOUS_PULSE_INTERVAL_KEY, 30)),
-        ),
         next_meta_tick_eta_seconds=am.get_next_tick_eta_seconds(),
         next_wait_response_timeout_seconds=_get_wait_response_timeout_eta(manager, persona_id),
     )
@@ -576,40 +527,3 @@ def stop_activity(persona_id: str, manager=Depends(get_manager)):
     )
 
 
-@router.put("/{persona_id}/activity/intervals", response_model=ActivityIntervals)
-def update_activity_intervals(
-    persona_id: str,
-    request: ActivityIntervalsRequest,
-    manager=Depends(get_manager),
-):
-    """間隔 2 種を更新する (persona_activity_view.md §7)。
-
-    - review_minutes: 行動を見直す間隔 (メタ判断 periodic tick)
-    - pulse_seconds: 作業のテンポ (自律 Track の Pulse 間隔のペルソナ既定値)
-    """
-    persona = _get_persona_or_404(manager, persona_id)
-
-    updates: Dict[str, Any] = {}
-    if request.review_minutes is not None:
-        if request.review_minutes < 1:
-            raise HTTPException(status_code=400, detail="review_minutes must be >= 1")
-        updates["periodic_interval_minutes"] = int(request.review_minutes)
-    if request.pulse_seconds is not None:
-        if request.pulse_seconds < 5:
-            raise HTTPException(status_code=400, detail="pulse_seconds must be >= 5")
-        updates[AUTONOMOUS_PULSE_INTERVAL_KEY] = int(request.pulse_seconds)
-
-    if updates:
-        _merge_judgment_config(manager, persona_id, updates)
-        # メタ判断間隔は AutonomyManager に即時反映 (稼働中の再スケジュール)
-        if "periodic_interval_minutes" in updates:
-            am = _get_or_create_autonomy(persona_id, manager)
-            am.set_interval(float(updates["periodic_interval_minutes"]))
-        # pulse_seconds は旧・自律 Track の Pulse 間隔 (v2 で連続 Pulse 廃止に
-        # 伴い駆動には使われない。設定値としては保存され UI 表示互換を保つ)
-
-    config = _load_judgment_config(manager, persona)
-    return ActivityIntervals(
-        review_minutes=int(config.get("periodic_interval_minutes", 50)),
-        pulse_seconds=int(config.get(AUTONOMOUS_PULSE_INTERVAL_KEY, 30)),
-    )

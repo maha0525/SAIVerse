@@ -33,6 +33,9 @@ export interface LifeItem {
     used_rounds: number;
     consumed: number;          // used_pulses + used_rounds × κ
     remaining: number;
+    // 判断点 (起床・会話終了・セッション終了・イベント・就寝) の発火回数。
+    // 予算 (budget_pulses/consumed) には含めない別枠の観測値 (life.md v0.5 §5.3/§8.2)。
+    judgment_pulses: number;
 }
 
 /**
