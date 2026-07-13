@@ -1,17 +1,23 @@
-"""ライフ Phase 2「ライフの器」のテスト (docs/intent/life.md §4/§5/§7/§11.2)。
+"""ライフ Phase 2「ライフの器」のテスト (docs/intent/life.md v0.5 §4/§5/§7/§11.2)。
+
+v0.4 まではペルソナ (LLM) が起床判断でライフを「宣言」していたが、実機初日
+(2026-07-13) の破綻を受けてまはー裁定で責任分界を全面改訂した——ライフは
+ユーザー設定 (PersonaSchedule の起床・就寝) からシステムが確定する。宣言口・
+重なり検証・谷コマ検証・均等モード間隔検証は書ける口ごと廃止した (v0.5 改修A)。
+本ファイルは生き残った「ライフの器」(永続化・台帳・予算ゲート) のテスト。
+システムによるライフ確定 (confirm_life_for_today) や判断点発火まわりの新規
+テストは ``tests/test_life_confirmation.py`` を参照。
 
 一時 DB (in-memory SQLite) + 仮想クロックで検証する:
 
 - lives の永続化 (get_lives/save_lives の round trip、bookkeeping フィールドの
   既定値・再宣言時の引き継ぎ)
-- 検証: フォーマット不正・ライフ同士の重なり・谷にコマ (両方向: save_lives が
-  既存コマを見る / save_day_plan・replace_remaining_slots が既存ライフを見る)・
-  均等モードの間隔違反 (LIFE_EVEN_MAX_GAP_MINUTES)
+- 検証: フォーマットのみ (v0.5 で重なり・谷コマ・均等モード間隔検証は廃止)
 - mode の既定導出 (derive_default_life_mode): DEFAULT_MODEL の provider から
 - 予算台帳のライフ世代交代: consume_life_pulse / consume_life_rounds の積算、
   get_budget_state のライフ由来導出、ライフ単位ゲート (二値・クランプしない)
-- ライフ境界イベント: schedule_lives の push、発火時の通知 (event_message タグ)
-  と start_fired/end_fired の永続化、watchdog による途絶再 push
+- 判断点発火 (fire_judgment_point) は used_pulses でなく judgment_pulses を
+  別枠で記帳する (v0.5 §5.3/§8.2)
 - 後方互換: lives が無い日は全経路 (get_budget_state/_apply_budget_gate/
   save_day_plan/replace_remaining_slots) が従来挙動のまま (既存テスト群
   test_day_plan.py / test_budget_gate.py が無宣言のまま緑であることも参照)
@@ -31,7 +37,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import AI, Base, City, PersonaSchedule, Playbook, User
+from database.models import AI, Base, City, Playbook, User
 from saiverse import autonomy_wiring as wiring
 from saiverse import clock
 from saiverse import day_plan
@@ -149,12 +155,21 @@ def _slot(start, *, kind="知る", ref="task:1", facility="library",
 
 
 def _default_lives():
-    # mode は両方 "free" にしておく (均等モードの間隔検証は専用テストで扱う。
-    # ここでは round trip / 重なり / フォーマット検証だけが関心事)。
+    # mode は両方 "free" にしておく (round trip / 重なり無しの共存だけが関心事)。
     return [
         {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
         {"start": "14:00", "end": "20:00", "budget_pulses": 8, "mode": "free"},
     ]
+
+
+def _import_judgment_playbooks(session_factory):
+    db = session_factory()
+    try:
+        for name in wiring.JUDGMENT_PLAYBOOK_NAMES:
+            db.add(Playbook(name=name, schema_json="{}", nodes_json="{}"))
+        db.commit()
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +193,7 @@ def test_save_and_get_lives_round_trip(manager, task_ref):
     for life in saved:
         assert life["used_pulses"] == 0
         assert life["used_rounds"] == 0
-        assert life["start_fired"] is False
-        assert life["end_fired"] is False
+        assert life["judgment_pulses"] == 0
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == saved
 
 
@@ -198,11 +212,14 @@ def test_save_lives_redeclare_preserves_bookkeeping_by_start_end(manager, task_r
         manager, PERSONA_ID, PLAN_DATE, 3, at_time="09:00",
     )
     assert life["used_rounds"] == 3
+    life = day_plan.record_judgment_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="09:00")
+    assert life["judgment_pulses"] == 1
 
     # 起床判断のやり直し: 同じ (start, end) のライフを再宣言 → 消費は引き継がれる
     resaved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, _default_lives())
     assert resaved[0]["used_pulses"] == 1
     assert resaved[0]["used_rounds"] == 3
+    assert resaved[0]["judgment_pulses"] == 1
 
     # 時刻が変わったライフは別物 (0 から)
     changed = [
@@ -211,10 +228,11 @@ def test_save_lives_redeclare_preserves_bookkeeping_by_start_end(manager, task_r
     resaved2 = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, changed)
     assert resaved2[0]["used_pulses"] == 0
     assert resaved2[0]["used_rounds"] == 0
+    assert resaved2[0]["judgment_pulses"] == 0
 
 
 # ---------------------------------------------------------------------------
-# 検証: フォーマット・重なり・谷コマ・均等モード間隔
+# 検証: フォーマットのみ (v0.5: 重なり・谷コマ・均等モード間隔検証は廃止)
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +240,8 @@ def test_save_lives_redeclare_preserves_bookkeeping_by_start_end(manager, task_r
     "mutate, match",
     [
         (lambda l: l.__setitem__(0, {**l[0], "start": "8:00"}), "HH:MM"),
-        (lambda l: l.__setitem__(0, {**l[0], "end": "07:00"}), "must be after start"),
+        (lambda l: l.__setitem__(0, {**l[0], "start": "08:00", "end": "08:00"}),
+         "start と end が同一"),
         (lambda l: l.__setitem__(0, {**l[0], "budget_pulses": 0}), "budget_pulses"),
         (lambda l: l.__setitem__(0, {**l[0], "budget_pulses": -1}), "budget_pulses"),
         (lambda l: l.__setitem__(0, {**l[0], "mode": "chaotic"}), "mode"),
@@ -235,37 +254,79 @@ def test_save_lives_rejects_invalid_format(manager, mutate, match):
         day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, lives)
 
 
-def test_save_lives_rejects_overlap(manager):
+def test_save_lives_accepts_overlapping_lives(manager):
+    """v0.5: ライフ同士の重なり検証は廃止 (システムが 1 日 1 窓を確定するため
+    通常は起きないが、書ける口として禁止する理由も無くなった)。"""
     lives = [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
         {"start": "11:00", "end": "15:00", "budget_pulses": 4, "mode": "free"},
     ]
-    with pytest.raises(ValueError, match="重なっています"):
-        day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, lives)
+    saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, lives)
+    assert len(saved) == 2
 
 
-def test_save_lives_rejects_slot_in_valley(manager, task_ref):
+def test_save_lives_accepts_overnight_life(manager):
+    """v0.5: 深夜跨ぎ (end <= start) は異常ではなく正常形 (life.md §4.1)。"""
+    saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"},
+    ])
+    assert saved[0]["start"] == "07:00"
+    assert saved[0]["end"] == "01:00"
+    assert day_plan.get_life_for_time(saved, "23:30") == 0
+    assert day_plan.get_life_for_time(saved, "03:00") is None
+    assert day_plan.get_life_for_time(saved, "07:00") == 0
+    assert day_plan.get_life_for_time(saved, "01:00") is None  # end は排他的
+
+
+def test_save_lives_no_longer_inspects_slots(manager, task_ref):
+    """v0.5: save_lives はもう day_plan の既存コマを見ない (谷コマ検証の廃止)。
+
+    かつては save_day_plan で置いたコマ (13:00) がライフの外にあると
+    save_lives 自体が拒否したが、今はライフの確定と時間割の整合は
+    save_day_plan/replace_remaining_slots 側 (_check_slots_within_organized_range)
+    だけが見る。
+    """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("13:00")])
-    with pytest.raises(ValueError, match="谷にコマは置けません"):
-        day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
-        ])
+    saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    assert len(saved) == 1
 
 
-def test_save_day_plan_rejects_slot_outside_declared_lives(manager, task_ref):
-    """save_day_plan 自身が既存ライフを見て谷コマを拒否する (life.md §4.3)。"""
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00")])
+def test_save_day_plan_rejects_slot_outside_life_window(manager, task_ref):
+    """save_day_plan は既存ライフの外 (谷) のコマを拒否する (life.md v0.5 §4.4)。"""
+    clock.enable_virtual(BASE + timedelta(hours=8))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
     ])
-    with pytest.raises(ValueError, match="谷にコマは置けません"):
+    with pytest.raises(ValueError, match="どのライフ区間にも属していません"):
         day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            _slot("09:00"), _slot("13:00", ref="none", kind="休む",
-                                   facility="own_room", budget_rounds=0),
+            _slot("13:00", ref="none", kind="休む", facility="own_room",
+                  budget_rounds=0),
         ])
-    # 拒否された保存は既存 plan を壊さない
+    # save_lives が meta 行 (slots_json="[]") を既に作っているため空配列
+    # (行そのものが無い None ではない — save_day_plan は失敗して何も書かない)。
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == []
+
+
+def test_save_day_plan_rejects_slot_before_current_time(manager, task_ref):
+    """遅発 day_open 対策 (life.md v0.5 §11.2): ライフの中でも「今より前」の
+    コマは選択肢として存在しない。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 10, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=21))  # 21 時起動 (遅発)
+    with pytest.raises(ValueError, match="現在時刻"):
+        day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+            _slot("08:00", ref="none", kind="休む", facility="own_room",
+                  budget_rounds=0),
+        ])
+    # 現在時刻以降のコマは通る
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        _slot("21:30", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+    ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [s["start"] for s in slots] == ["09:00"]
+    assert [s["start"] for s in slots] == ["21:30"]
 
 
 def test_save_day_plan_allows_slot_when_no_lives_declared(manager, task_ref):
@@ -275,43 +336,14 @@ def test_save_day_plan_allows_slot_when_no_lives_declared(manager, task_ref):
     assert slots[0]["start"] == "23:50"
 
 
-def test_save_lives_rejects_even_mode_gap_violation(manager, task_ref):
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("08:10"), _slot("10:00", ref="none", kind="休む",
-                                facility="own_room", budget_rounds=0),
-    ])
-    with pytest.raises(ValueError, match="上限 50 分を超えています"):
-        day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "even"},
-        ])
-
-
-def test_save_lives_rejects_even_mode_gap_violation_with_no_slots(manager):
-    """コマが 1 つも無いライフ (start→end 直結) も間隔検証の対象。"""
-    with pytest.raises(ValueError, match="上限 50 分を超えています"):
-        day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "08:00", "end": "09:00", "budget_pulses": 2, "mode": "even"},
-        ])
-
-
-def test_save_lives_accepts_even_mode_within_gap(manager, task_ref):
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("08:30"),
-        _slot("09:10", ref="none", kind="休む", facility="own_room", budget_rounds=0),
-    ])
-    saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "end": "09:40", "budget_pulses": 6, "mode": "even"},
-    ])
-    assert saved[0]["mode"] == "even"
-
-
-def test_replace_remaining_slots_rejects_valley_slot(manager, task_ref):
-    """日中の残り時間割の全置換 (post_conversation 等) も谷コマを拒否する。"""
+def test_replace_remaining_slots_rejects_slot_outside_life_window(manager, task_ref):
+    """日中の残り時間割の全置換 (post_conversation 等) も編成できる範囲を守る。"""
+    clock.enable_virtual(BASE + timedelta(hours=8))
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00")])
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
     ])
-    with pytest.raises(ValueError, match="谷にコマは置けません"):
+    with pytest.raises(ValueError, match="どのライフ区間にも属していません"):
         day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
             _slot("15:00", ref="none", kind="休む", facility="own_room",
                   budget_rounds=0),
@@ -437,9 +469,10 @@ def test_life_budget_gate_does_not_clamp_rounds(manager, task_ref):
         ).run()
 
     assert calls == [20]  # 残高わずか (パルス予算 1) でもラウンドは切り詰めない
-    # 発火後、そのライフのパルス消費・ラウンド消費が両方積算される
+    # 発火後、そのライフのラウンド消費が積算される (v0.5: コマ発火自体は
+    # 標準パルスを消費しない — used_pulses は不変)
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert lives[0]["used_pulses"] == 1
+    assert lives[0]["used_pulses"] == 0
     assert lives[0]["used_rounds"] == 20
 
 
@@ -449,11 +482,12 @@ def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, tas
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
     ])
-    # ライフを谷検証をバイパスして直接組み替える (異常系の再現)
+    # ライフを直接組み替える (異常系の再現 — 発火時に slot がどのライフにも
+    # 属さない状態を作る)。
     day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {
         day_plan.META_LIVES: [
             {"start": "13:00", "end": "18:00", "budget_pulses": 4, "mode": "free",
-             "used_pulses": 0, "used_rounds": 0, "start_fired": False, "end_fired": False},
+             "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
         ],
     })
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -470,147 +504,13 @@ def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, tas
 
 
 # ---------------------------------------------------------------------------
-# ライフ境界イベント: schedule / 発火 / 通知
+# fire_judgment_point: 判断点発火のライフ「別枠」記帳 (used_pulses は不変)
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_lives_pushes_start_and_end(manager):
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
-    ])
-    pushed = day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert pushed == 2
-    assert manager.event_scheduler.has_key(day_plan._life_key(PERSONA_ID, PLAN_DATE, 0, "start"))
-    assert manager.event_scheduler.has_key(day_plan._life_key(PERSONA_ID, PLAN_DATE, 0, "end"))
-
-
-def test_schedule_lives_without_lives_is_noop(manager):
-    assert day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE) == 0
-
-
-def test_life_boundary_events_fire_and_notify(manager):
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
-    ])
-    pushed = day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert pushed == 2
-
-    DaySimulator(
-        manager.event_scheduler,
-        start=BASE + timedelta(hours=8), end=BASE + timedelta(hours=24),
-    ).run()
-
-    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert lives[0]["start_fired"] is True
-    assert lives[0]["end_fired"] is True
-
-    messages = manager.personas[PERSONA_ID].sai_memory.messages
-    texts = [m["content"] for m in messages]
-    assert any("ライフ開始" in t and "09:00" in t for t in texts)
-    assert any("ライフ終了" in t and "11:00" in t for t in texts)
-    for m in messages:
-        assert m["metadata"]["tags"] == ["internal", "event_message", "day_plan"]
-        assert m["role"] == "user"
-        assert m["content"].startswith("<system>") and m["content"].endswith("</system>")
-
-    # 発火済みの境界は再発火しても no-op (二重通知しない)
-    day_plan._fire_life_boundary(manager, PERSONA_ID, PLAN_DATE, 0, "start")
-    assert len(manager.personas[PERSONA_ID].sai_memory.messages) == 2
-
-
-def test_schedule_lives_does_not_repush_already_fired_boundary(manager):
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
-    ])
-    day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE)
-    day_plan._fire_life_boundary(manager, PERSONA_ID, PLAN_DATE, 0, "start")
-
-    # 再起動を模して EventScheduler を新規化 (インメモリ予約が失われる)。
-    manager.event_scheduler = EventScheduler()
-    assert day_plan.find_lost_life_reservations(manager, PERSONA_ID, PLAN_DATE) == [
-        (0, "end"),
-    ]
-    # 発火済み (start) は再 push されない
-    assert day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE) == 1
-
-
-# ---------------------------------------------------------------------------
-# watchdog: 予約途絶の再 push (autonomy_wiring.watchdog_tick)
-# ---------------------------------------------------------------------------
-
-
-def _add_day_schedule(session_factory, playbook_name, time_of_day):
-    db = session_factory()
-    try:
-        db.add(PersonaSchedule(
-            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
-            META_PLAYBOOK=playbook_name, ENABLED=True, TIME_OF_DAY=time_of_day,
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-
-def _import_judgment_playbooks(session_factory):
-    db = session_factory()
-    try:
-        for name in wiring.JUDGMENT_PLAYBOOK_NAMES:
-            db.add(Playbook(name=name, schema_json="{}", nodes_json="{}"))
-        db.commit()
-    finally:
-        db.close()
-
-
-def test_watchdog_reschedules_lost_life_reservations(manager, session_factory, task_ref):
-    manager.personas[PERSONA_ID].activity_state = "Active"
-    _import_judgment_playbooks(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    manager.pulse_controller = SimpleNamespace(
-        submit_meta_judgment=lambda **kwargs: None,
-    )
-    clock.enable_virtual(BASE + timedelta(hours=9))
-
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:30")])
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
-    ])
-    # あえて schedule_day_plan / schedule_lives を呼ばない
-    # (再起動直後のインメモリ予約消失を模す)。
-    assert day_plan.find_lost_life_reservations(manager, PERSONA_ID, PLAN_DATE) == [
-        (0, "start"), (0, "end"),
-    ]
-
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "reschedule"
-    assert out["lives_pushed"] == 2
-    assert day_plan.find_lost_life_reservations(manager, PERSONA_ID, PLAN_DATE) == []
-
-
-def test_watchdog_noop_when_life_reservations_intact(manager, session_factory, task_ref):
-    manager.personas[PERSONA_ID].activity_state = "Active"
-    _import_judgment_playbooks(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    clock.enable_virtual(BASE + timedelta(hours=9))
-
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:30")])
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
-    ])
-    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE)
-
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none"}
-
-
-# ---------------------------------------------------------------------------
-# fire_judgment_point: 判断点発火のライフパルス積算
-# ---------------------------------------------------------------------------
-
-
-def test_fire_judgment_point_consumes_life_pulse(manager, session_factory):
+def test_fire_judgment_point_records_judgment_pulse_separately(manager, session_factory):
+    """判断点の発火は judgment_pulses だけを積む — used_pulses (予算) には
+    触れない (life.md v0.5 §5.3/§8.2、実機初日の教訓)。"""
     manager.personas[PERSONA_ID].activity_state = "Active"
     _import_judgment_playbooks(session_factory)
     manager.pulse_controller = SimpleNamespace(
@@ -625,10 +525,11 @@ def test_fire_judgment_point_consumes_life_pulse(manager, session_factory):
     assert result["submitted"] is True
 
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert lives[0]["used_pulses"] == 1
+    assert lives[0]["judgment_pulses"] == 1
+    assert lives[0]["used_pulses"] == 0
 
 
-def test_fire_judgment_point_noop_life_pulse_without_lives(manager, session_factory):
+def test_fire_judgment_point_noop_life_bookkeeping_without_lives(manager, session_factory):
     """lives が無い日は判断点発火してもライフ台帳に触らない (後方互換)。"""
     manager.personas[PERSONA_ID].activity_state = "Active"
     _import_judgment_playbooks(session_factory)
@@ -643,7 +544,7 @@ def test_fire_judgment_point_noop_life_pulse_without_lives(manager, session_fact
 
 
 # ---------------------------------------------------------------------------
-# day_open スキーマ: lives フィールド (judgment_points.build_day_open_schema)
+# day_open スキーマ: v0.5 では lives フィールドが無い (LLM 宣言口の巻き戻し)
 # ---------------------------------------------------------------------------
 
 
@@ -663,7 +564,8 @@ class FakePulseController:
         return None
 
 
-def test_day_open_schema_includes_lives_field(manager):
+def test_day_open_schema_has_no_lives_field(manager):
+    """v0.5: lives は LLM の response_schema から消えている (宣言口の廃止)。"""
     manager.pulse_controller = FakePulseController()
     clock.enable_virtual(datetime(2026, 7, 4, 7, 0, 0))
     result = jp.run_judgment_point(manager, PERSONA_ID, "day_open")
@@ -671,29 +573,38 @@ def test_day_open_schema_includes_lives_field(manager):
 
     args = manager.pulse_controller.submissions[0]["args"]
     schema = args["response_schema"]
-    assert "lives" in schema["properties"]
-    assert "lives" in schema["required"]
-    life_schema = schema["properties"]["lives"]["items"]
-    assert set(life_schema["required"]) == {"start", "end", "budget_pulses", "mode"}
-    assert life_schema["properties"]["mode"]["enum"] == ["even", "free"]
-
-    text = args["situation_text"]
-    assert "ライフ" in text
-    assert "50分以内" in text
-    assert "自由」が向いています" in text  # model=None → 既定は自由
+    assert "lives" not in schema["properties"]
+    assert "lives" not in schema["required"]
+    assert set(schema["required"]) == {"monologue", "timetable"}
 
 
-def test_day_open_situation_text_recommends_even_for_anthropic_model(manager):
-    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+def test_day_open_situation_text_shows_current_time_without_life(manager):
+    """ライフ未確定の日は現在時刻だけを示す (活動時間の案内は出さない)。"""
     manager.pulse_controller = FakePulseController()
-    clock.enable_virtual(datetime(2026, 7, 4, 7, 0, 0))
+    clock.enable_virtual(datetime(2026, 7, 4, 21, 0, 0))
     jp.run_judgment_point(manager, PERSONA_ID, "day_open")
     text = manager.pulse_controller.submissions[0]["args"]["situation_text"]
-    assert "均等」が向いています" in text
+    assert "現在 21:00" in text
+    assert "活動時間" not in text
+
+
+def test_day_open_situation_text_shows_confirmed_life_window(manager):
+    """遅発 day_open 対策 (life.md v0.5 §11.2): 確定済みライフがあれば
+    現在時刻と編成範囲を確定情報として明記する。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "23:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    manager.pulse_controller = FakePulseController()
+    clock.enable_virtual(datetime(2026, 7, 4, 21, 0, 0))  # 21 時起動 (遅発)
+    jp.run_judgment_point(manager, PERSONA_ID, "day_open")
+    text = manager.pulse_controller.submissions[0]["args"]["situation_text"]
+    assert "07:00〜23:00" in text
+    assert "現在 21:00" in text
+    assert "今この時刻から就寝までの範囲で" in text
 
 
 # ---------------------------------------------------------------------------
-# day_open finalize: lives の保存 (judgment_finalize ツール, life.md Phase2)
+# day_open finalize: LLM 出力に紛れ込んだ lives は無視する (巻き戻しの回帰確認)
 # ---------------------------------------------------------------------------
 
 
@@ -707,7 +618,9 @@ def _persona_ctx(manager, tmp_path):
     return persona_context(PERSONA_ID, tmp_path, manager=manager)
 
 
-def test_day_open_finalize_saves_and_schedules_lives(manager, finalize_mod, tmp_path):
+def test_day_open_finalize_ignores_llm_provided_lives(manager, finalize_mod, tmp_path):
+    """v0.5: LLM が (不正な口を通じて、または旧クライアントが) "lives" を出力
+    に含めても、finalize はそれを一切処理しない — 宣言口は構造ごと無い。"""
     output = {
         "monologue": "……",
         "lives": [
@@ -722,60 +635,7 @@ def test_day_open_finalize_saves_and_schedules_lives(manager, finalize_mod, tmp_
             judgment_output=output, kind="day_open",
             judgment_context=ctx, situation_text="[起床判断] ...",
         )
-    assert "applied=True" in summary
-
-    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert len(lives) == 1
-    assert lives[0]["mode"] == "free"
-    assert lives[0]["budget_pulses"] == 6
-    # 境界イベントは finalize が schedule_lives まで済ませている (途絶なし)
-    assert day_plan.find_lost_life_reservations(manager, PERSONA_ID, PLAN_DATE) == []
-
-
-def test_day_open_finalize_lives_failure_does_not_block_timetable(
-    manager, finalize_mod, tmp_path, caplog
-):
-    """ライフの均等モード間隔違反は timetable の保存を巻き込まない (分離された失敗)。"""
-    output = {
-        "monologue": "……",
-        "lives": [
-            {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "even"},
-        ],
-        "timetable": [
-            _slot("08:10", ref="none", kind="休む", facility="own_room", budget_rounds=0),
-            _slot("10:30", ref="none", kind="休む", facility="own_room", budget_rounds=0),
-        ],
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "daily_budget_rounds": 40})
-    with caplog.at_level("WARNING"):
-        with _persona_ctx(manager, tmp_path):
-            finalize_mod.judgment_finalize(
-                judgment_output=output, kind="day_open",
-                judgment_context=ctx, situation_text="[起床判断] ...",
-            )
-
-    # timetable は保存される (140分 > 50分 のライフ間隔違反とは独立)
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [s["start"] for s in slots] == ["08:10", "10:30"]
-    # ライフは保存されない
-    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
-    assert any("上限 50 分を超えています" in r.message for r in caplog.records)
-
-
-def test_day_open_finalize_missing_lives_is_harmless(manager, finalize_mod, tmp_path):
-    """lives キーが無い出力 (旧 LLM 応答) でも timetable 保存は動く (後方互換)。"""
-    output = {
-        "monologue": "……",
-        "timetable": [_slot("09:00", ref="none", kind="休む", facility="own_room",
-                             budget_rounds=0)],
-    }
-    ctx = json.dumps({"plan_date": PLAN_DATE, "daily_budget_rounds": 40})
-    with _persona_ctx(manager, tmp_path):
-        summary, _, _ = finalize_mod.judgment_finalize(
-            judgment_output=output, kind="day_open",
-            judgment_context=ctx, situation_text="[起床判断] ...",
-        )
-    assert "applied=True" in summary
+    assert "applied=True" in summary  # timetable の保存自体は適用される
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
 
 

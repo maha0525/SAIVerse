@@ -80,7 +80,7 @@ class DayPlanBudget(BaseModel):
 
 
 class LifeItem(BaseModel):
-    """ライフ宣言 1 件 (life.md §4.1) の表示用整形。ライフビューの帯描画に使う。"""
+    """ライフ 1 件 (life.md v0.5 §4.1) の表示用整形。ライフビューの帯描画に使う。"""
     index: int                      # get_lives の並び順 (安定キー)
     start: str                      # "HH:MM"
     end: str                        # "HH:MM"
@@ -90,6 +90,10 @@ class LifeItem(BaseModel):
     used_rounds: int
     consumed: float                 # used_pulses + used_rounds × κ (life_consumed)
     remaining: float                # budget_pulses − consumed (0 未満には丸めない)
+    # 判断点 (起床・会話終了・セッション終了・イベント・就寝) の発火回数。
+    # 予算 (budget_pulses/used_pulses) には含めない別枠の観測値 (life.md v0.5
+    # §5.3/§8.2)。改修B でライフビューの別枠表示に使う。
+    judgment_pulses: int = 0
 
 
 class LifeStatus(BaseModel):
@@ -165,6 +169,7 @@ def get_day_plan(
             used_rounds=int(life.get("used_rounds") or 0),
             consumed=life_consumed(life),
             remaining=max(0.0, int(life.get("budget_pulses") or 0) - life_consumed(life)),
+            judgment_pulses=int(life.get("judgment_pulses") or 0),
         )
         for i, life in enumerate(lives_raw)
     ]

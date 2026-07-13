@@ -1,6 +1,6 @@
 # Intent: ライフ — 活動区間と時間の階層
 
-**ステータス**: 設計中 (v0.5, 2026-07-13)。**実機初日（2026-07-13 夜）で v0.4 の「ペルソナがライフを宣言する」設計が破綻**——過去起点・予算不整合のライフが宣言され、AI を呼ばない暮らしコマの発火が予算を食い潰した（「4 / 4」）。まはー裁定で**責任分界を全面改訂**: ライフ＝ユーザーが設定する起床・就寝の区間（PersonaSchedule が器）／予算＝ライフの長さに対する最低値制約付きでユーザー設定／ペルソナは時間割だけ／モードはモデルの物理から自動。§3・§4・§5.2-5.3・§8・§9.2・§11.2 を v0.5 で書き直し。**まはーレビュー待ち → 実装やり直し**（Phase 1 案 Y と Phase 3 物理層は無傷で生きる。宣言まわりの巻き戻し明細は §11.2）。v0.4 までの実装経緯は改訂履歴を参照。
+**ステータス**: 検証待ち (v0.5, 2026-07-13)。**実機初日（2026-07-13 夜）で v0.4 の「ペルソナがライフを宣言する」設計が破綻**——過去起点・予算不整合のライフが宣言され、AI を呼ばない暮らしコマの発火が予算を食い潰した（「4 / 4」）。まはー裁定で**責任分界を全面改訂**: ライフ＝ユーザーが設定する起床・就寝の区間（PersonaSchedule が器）／予算＝ライフの長さに対する最低値制約付きでユーザー設定／ペルソナは時間割だけ／モードはモデルの物理から自動。§3・§4・§5.2-5.3・§8・§9.2・§11.2 を v0.5 で書き直し。**「改修A」(宣言の巻き戻し・システムによるライフ確定・消費点の作り直し・境界イベント統合・遅発 day_open 対策) 実装完了 (2026-07-13)、まはー実機検証待ち**（Phase 1 案 Y と Phase 3 物理層は無傷のまま活用。宣言まわりの巻き戻し明細は §11.2）。残る「改修B」(§9.2 ライフ設定画面新設・v1 亡霊の掃除・暮らし Pulse の実体化・判断点回数のフロント別枠表示) は未着手。v0.4 までの実装経緯は改訂履歴を参照。
 **親**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md)（三本柱） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（哲学層。§8 出来事・§10 Track 再解釈は本書の前提）
 **吸収対象**: [`session.md`](session.md)（v0.1 起草中のまま停滞。§6 未確定事項に本書が回答し、Session を「ライフが目標を与える機構層」として位置づけ直す）
 **経緯**: [実機初日の前提レベル設計課題](../issues/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。
@@ -337,6 +337,44 @@ v0.4 までの実装（Phase 1〜4、コミット 6257b6a / 072ea78 / d55c5f3 / 
 
 ## 改訂履歴
 
+- v0.5「改修A」実装 (2026-07-13): v0.5 で確定した責任分界のうち §11.2 の巻き戻し明細を実装。
+  ①**LLM 宣言口の削除**: `judgment_points.py` の `_build_life_schema`/day_open スキーマの `lives`
+  フィールド/`sanitize_lives`、`judgment_finalize.py` の lives 保存ブロックを削除。`day_plan.py` の
+  `_validate_and_normalize_lives` から重なり検証・谷コマ検証・均等モード間隔検証を除去し、フォーマット
+  検証のみに縮小（深夜跨ぎ `end <= start` は正常形として許容）。
+  ②**ライフの確定**: 新設 `day_plan.confirm_life_for_today(manager, persona_id, plan_date, wake,
+  close, requested_budget_pulses)` が PersonaSchedule の起床・就寝 + `daily_budget_pulses`（day_open
+  スケジュール行の PLAYBOOK_PARAMS、`daily_budget_rounds` と同じ流儀で追加）から確定。モードは既存
+  `derive_default_life_mode` のまま。最低予算 = 均等 `ceil(窓/50分)` / 自由 `1`（新設
+  `_min_life_budget`/`_life_window_minutes`）。冪等（当日確定済みなら再確認のみ）。呼び出し元は
+  `autonomy_wiring.fire_judgment_point` の day_open 経路 1 箇所（`handle_scheduled_judgment` と
+  watchdog の day_open 再発火の両方をカバー）。
+  ③**跨ぎ判定の書き直し**: `get_life_for_time` を `_life_extended_minutes`/`_life_span_minutes`
+  （ライフ開始を 0 とした延長分・`autonomy_wiring.in_waking_window` と同じ意味論）で再実装。
+  ④**消費点の作り直し**: `_fire_slot` の `consume_life_pulse` 呼び出しを削除（コマ発火は数えない）。
+  `fire_judgment_point` 末尾の記帳を新設 `record_judgment_pulse`（`judgment_pulses` フィールド、
+  予算 `used_pulses` には触れない別枠）に置換。`consume_life_pulse` 自体は暮らし Pulse 実装待ちの
+  台帳プリミティブとして温存。API (`api/routes/people/life.py` の `LifeItem`) に `judgment_pulses`
+  を追加（フロント別枠表示は改修B）。
+  ⑤**境界イベントの統合**: 専用予約 `schedule_lives`/`_fire_life_boundary`/`find_lost_life_reservations`
+  を削除。`_handle_life_start`（TTL override・tail 通知）は day_open 発火直後（当日はじめての確定
+  のときだけ、二重通知防止）、`_handle_life_end`（keep-alive cancel・TTL 遅延解除・tail 通知）は
+  day_close 発火直下に統合（`autonomy_wiring._confirm_life_at_day_open`/`_apply_life_end_at_day_close`）。
+  watchdog のライフ境界見張り（`lost_lives`/`lives_pushed`）も削除——コマ予約の途絶監視のみ残す。
+  tail 通知文言から実装語「ライフ」を排除（「（活動開始）」「（活動終了）」、厳密な文言はライフ設定
+  画面実装時に詰める TODO）。
+  ⑥**遅発 day_open 対策**: 状況テキストに確定済みライフの区間・現在時刻・残り予算を明記。
+  `save_day_plan`/`replace_remaining_slots` に新設 `_check_slots_within_organized_range`（旧
+  `_check_slots_within_lives` を置換）で「コマの start は max(現在時刻, ライフ開始) 〜 ライフ終了」
+  の範囲外を保存時エラーにする検証を追加。
+  新規 `tests/test_life_confirmation.py`（15 件、confirm_life_for_today 単体・day_open/day_close の
+  発火経路・遅発シナリオ・watchdog 再発火・判断点別枠カウント）。`tests/test_life_phase2.py` を v0.5
+  向けに全面書き換え（宣言口検証系のテストを削除し、フォーマット検証・組織化範囲検証・判断点別枠記帳の
+  テストに置換、39 件）。`tests/test_life_phase3.py` は `_handle_life_start`/`_handle_life_end` の
+  呼び出し元変更（DaySimulator 経由の境界発火 → 直接呼び出し）に合わせて 1 件更新、通知文言アサーション
+  を新文言に追従（18 件）。既存系全緑（pre-existing failure の test_avatar_pipeline.py 118 件 /
+  test_addon_config_mcp_reconnect.py 8 件 / test_slots_fire_on_real_dispatch_thread 間欠 1 件は無視）。
+  暮らし Pulse の実体化・ライフ設定画面・v1 亡霊の掃除は「改修B」として持ち越し。
 - v0.5 (2026-07-13 夜): **実機初日の破綻を受けた全面改訂（責任分界）**。破綻の内実: ①エアに現在時刻を渡さず 21 時に朝からの時間割を編成させた ②過去コマ 3 つが即時発火し、AI を呼ばない暮らしコマの発火が予算を 1 ずつ食って「4 / 4」——予算が「コマが始まった回数」を数えていた（正しくは「標準 LLM が実際に呼ばれた回数」）③コマ間隔 50 分検証はコマが実パルスを撃たないため空回り（Anthropic ならキャッシュは切れていた）④「予算 4 だから 4 コマ」と編成しても判断点が同じ財布から引くため構造的に不足。まはー裁定: **ライフはユーザーが設定する起床・就寝の区間**（既にあった器＝PersonaSchedule。ペルソナの宣言口は廃止——不正な値は検証でなく口をなくして排除）・**予算はライフの長さの最低値制約付きでユーザー設定**・**ペルソナは時間割だけ**・**モードは物理から自動**・**UX 最優先で再構築**（ライフ設定画面新設・v1 亡霊掃除同梱・Phase 1 追従漏れの文言修正）。暮らしコマの実体化（暮らし Pulse）・判断点の予算外し・keep-alive の保険格下げを §5.2-5.3 に正式化。巻き戻し明細は §11.2。
 - Phase 4 実装 (2026-07-13): 見せ方 (§9.1/§9.2)。①**判定源の一本化**:
   `saiverse.day_plan.get_life_status_now(manager, persona_id)` を新設し、

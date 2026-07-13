@@ -29,6 +29,14 @@
       "required": false,
       "default": null,
       "user_configurable": true
+    },
+    {
+      "name": "daily_budget_pulses",
+      "description": "今日のライフ（活動時間）の標準パルス予算。起床・就寝時刻から計算される最低値未満は自動的に切り上げられます。空欄なら最低値。",
+      "param_type": "number",
+      "required": false,
+      "default": null,
+      "user_configurable": true
     }
   ],
   "router_callable": false,

@@ -7,7 +7,9 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
 - :func:`fire_judgment_point` — 本番共通の起動ゲート。ACTIVITY_STATE=Active の
   ペルソナのみ発火し (既存の自律ゲートの流儀)、判断点 Playbook が DB に無ければ
   エラーでなく WARNING + スキップ。MetaLayer の per-persona Lock で他のメタ判断
-  (alert 即応等) と直列化する
+  (alert 即応等) と直列化する。day_open/day_close ではここでライフ (活動区間)
+  の確定・終了処理も行う (life.md v0.5 §4/§6.2 — ライフはユーザー設定から
+  システムが確定し、ペルソナは宣言しない)
 - :func:`handle_scheduled_judgment` — PersonaSchedule (META_PLAYBOOK=
   ``judgment_day_open`` / ``judgment_day_close``) の発火を判断点起動へ変換する
   (ScheduleManager._execute_schedule から呼ばれる)。起床・就寝時刻の出所は
@@ -215,6 +217,22 @@ def fire_judgment_point(
     4. ``precondition`` (あれば) を **Lock 取得後に** 再評価 — watchdog の
        day_open 再発火が、待っている間に済んだ本物の day_open と二重にならない
 
+    v0.5 (life.md §3/§4/§6.2): ``kind`` が day_open / day_close のときは、
+    ``run_judgment_point`` の前にライフ (活動区間) まわりのシステム処理を行う
+    (両方とも本番の day_open / day_close 発火経路はここ 1 箇所に集約される —
+    ``handle_scheduled_judgment`` と watchdog の day_open 再発火の両方が
+    この関数を通る):
+
+    - **day_open**: :func:`saiverse.day_plan.confirm_life_for_today` で
+      ユーザー設定 (PersonaSchedule の起床・就寝 + ``context`` 経由の
+      ``daily_budget_pulses``) から今日のライフを確定する (冪等 — 既に
+      確定済みなら何もしない)。**当日はじめての確定のときだけ**
+      :func:`saiverse.day_plan._handle_life_start` を呼ぶ (TTL override・
+      tail 通知。再確定では二重通知しない)
+    - **day_close**: その日の確定済みライフがあれば
+      :func:`saiverse.day_plan._handle_life_end` を呼ぶ (keep-alive 予約
+      cancel・TTL 遅延解除予約・tail 通知)
+
     Returns:
         ``run_judgment_point`` の結果 dict (``submitted`` / ``reason`` /
         ``applied_events`` 等)。ゲートで止まった場合は ``submitted=False`` +
@@ -259,21 +277,96 @@ def fire_judgment_point(
                 )
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False, "reason": "precondition not met"}
+
+        if kind == KIND_DAY_OPEN:
+            _confirm_life_at_day_open(manager, persona_id, context or {})
+        elif kind == KIND_DAY_CLOSE:
+            _apply_life_end_at_day_close(manager, persona_id)
+
         result = run_judgment_point(manager, persona_id, kind, context)
 
-    # ライフのパルス消費 (life.md Phase2 §7): 判断点の発火 = 標準パルス 1 回。
-    # lives の無い日は no-op (consume_life_pulse 内で判定)。ロックの外で行って
-    # よい (メタ判断の直列化とは無関係な帳簿処理)。
+    # 判断点の発火回数を「別枠」で記帳する (life.md v0.5 §5.3/§8.2)。予算
+    # (used_pulses) には触れない — 判断点はペルソナが編成でコントロールできない
+    # 発火 (会話がいつ終わるかはペルソナ次第ではない) であり、同じ財布に
+    # 入れると構造矛盾が生じる (実機初日の教訓)。lives の無い日は no-op。
+    # ロックの外で行ってよい (メタ判断の直列化とは無関係な帳簿処理)。
     if result.get("submitted"):
         try:
             from saiverse import day_plan
-            day_plan.consume_life_pulse(manager, persona_id)
+            day_plan.record_judgment_pulse(manager, persona_id)
         except Exception:
             LOGGER.warning(
-                "[autonomy-wiring] consume_life_pulse failed (persona=%s kind=%s)",
+                "[autonomy-wiring] record_judgment_pulse failed (persona=%s kind=%s)",
                 persona_id, kind, exc_info=True,
             )
     return result
+
+
+def _confirm_life_at_day_open(
+    manager: Any, persona_id: str, context: Dict[str, Any]
+) -> None:
+    """day_open 発火経路でのライフ確定 (life.md v0.5 §4/§11.2)。
+
+    区間はユーザーが設定した起床・就寝 (PersonaSchedule、
+    :func:`_find_day_schedules` が解決)、予算は ``context`` 経由のユーザー
+    設定値 (``daily_budget_pulses``、無ければ最低値)。冪等
+    (:func:`~saiverse.day_plan.confirm_life_for_today` が既存確定を保持する)
+    — 当日はじめての確定のときだけライフ開始の節目処理
+    (:func:`~saiverse.day_plan._handle_life_start`) を呼ぶ (再確定での
+    二重 TTL 設定・二重 tail 通知を避ける)。
+    """
+    from saiverse import day_plan
+
+    plan_date = clock.now().date().isoformat()
+    already_confirmed = bool(day_plan.get_lives(manager, persona_id, plan_date))
+    sched = _find_day_schedules(manager, persona_id)
+    budget = context.get("daily_budget_pulses") if isinstance(context, dict) else None
+    try:
+        life = day_plan.confirm_life_for_today(
+            manager, persona_id, plan_date,
+            sched.get("wake"), sched.get("close"),
+            requested_budget_pulses=budget,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] failed to confirm today's life at day_open "
+            "(persona=%s date=%s)", persona_id, plan_date, exc_info=True,
+        )
+        return
+    if life is not None and not already_confirmed:
+        try:
+            day_plan._handle_life_start(manager, persona_id, plan_date, 0, life)
+        except Exception:
+            LOGGER.warning(
+                "[autonomy-wiring] life-start processing failed "
+                "(persona=%s date=%s)", persona_id, plan_date, exc_info=True,
+            )
+
+
+def _apply_life_end_at_day_close(manager: Any, persona_id: str) -> None:
+    """day_close 発火経路でのライフ終了処理 (life.md v0.5 §4.1/§11.2)。
+
+    「ライフ終了 = 就寝判断 (day_close) の発火」そのもの — 専用のライフ境界
+    イベント予約は v0.5 で廃止した。営業日 (覚醒日) の算出は
+    ``judgment_points.build_judgment_args`` の KIND_DAY_CLOSE 分岐と同じ規則
+    (深夜跨ぎリズムでは 01:00 発火の day_close は前日が営業日)。
+    """
+    from saiverse import day_plan
+
+    sched = _find_day_schedules(manager, persona_id)
+    plan_date = effective_plan_date(
+        clock.now(), sched.get("wake"), sched.get("close"),
+    ).isoformat()
+    lives = day_plan.get_lives(manager, persona_id, plan_date)
+    if not lives:
+        return
+    try:
+        day_plan._handle_life_end(manager, persona_id, plan_date, 0, lives[0])
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] life-end processing failed (persona=%s date=%s)",
+            persona_id, plan_date, exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +391,10 @@ def handle_scheduled_judgment(
 
     Args:
         params: PersonaSchedule.PLAYBOOK_PARAMS (パース済み dict)。day_open は
-            ``daily_budget_rounds`` (正整数) を context に透過する。
+            ``daily_budget_rounds`` (正整数、作業ラウンドの日次予算) と
+            ``daily_budget_pulses`` (正整数、ライフの標準パルス予算 —
+            ユーザー設定。未設定/最低値未満は最低値へ切り上げ。
+            life.md v0.5 §4.2) を context に透過する。
     """
     kind = PLAYBOOK_TO_KIND.get(playbook_name)
     if kind is None:
@@ -320,6 +416,10 @@ def handle_scheduled_judgment(
         budget = params.get("daily_budget_rounds")
         if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
             context["daily_budget_rounds"] = budget
+        budget_pulses = params.get("daily_budget_pulses")
+        if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
+                and budget_pulses >= 1:
+            context["daily_budget_pulses"] = budget_pulses
 
     LOGGER.info(
         "[autonomy-wiring] scheduled judgment firing: kind=%s persona=%s",
@@ -722,6 +822,10 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             budget = params.get("daily_budget_rounds")
             if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
                 context["daily_budget_rounds"] = budget
+            budget_pulses = params.get("daily_budget_pulses")
+            if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
+                    and budget_pulses >= 1:
+                context["daily_budget_pulses"] = budget_pulses
         result = fire_judgment_point(
             manager, persona_id, KIND_DAY_OPEN, context,
             # Lock 待ちの間に本物の day_open が済んでいたら撃たない (二重編成防止)
@@ -731,27 +835,16 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         )
         return {"action": "day_open_refire", "result": result}
 
+    # v0.5 (life.md §11.2): 専用のライフ境界イベント予約は廃止した — ライフの
+    # 開始/終了処理は day_open/day_close の発火経路 (fire_judgment_point) に
+    # 統合済みのため、ここで見張るのはコマ予約の途絶だけでよい。
     lost = day_plan.find_lost_slot_reservations(manager, persona_id, today)
-    lost_lives = day_plan.find_lost_life_reservations(manager, persona_id, today)
-    if lost or lost_lives:
-        pushed = 0
-        if lost:
-            LOGGER.info(
-                "[watchdog] %d slot reservation(s) lost; re-scheduling pending slots "
-                "(persona=%s date=%s indices=%s)", len(lost), persona_id, today, lost,
-            )
-            pushed = day_plan.reschedule_pending_slots(manager, persona_id, plan_date)
-        lives_pushed = 0
-        if lost_lives:
-            LOGGER.info(
-                "[watchdog] %d life boundary reservation(s) lost; re-scheduling "
-                "(persona=%s date=%s boundaries=%s)",
-                len(lost_lives), persona_id, today, lost_lives,
-            )
-            lives_pushed = day_plan.schedule_lives(manager, persona_id, plan_date)
-        return {
-            "action": "reschedule", "pushed": pushed, "lost": lost,
-            "lives_pushed": lives_pushed, "lost_lives": lost_lives,
-        }
+    if lost:
+        LOGGER.info(
+            "[watchdog] %d slot reservation(s) lost; re-scheduling pending slots "
+            "(persona=%s date=%s indices=%s)", len(lost), persona_id, today, lost,
+        )
+        pushed = day_plan.reschedule_pending_slots(manager, persona_id, plan_date)
+        return {"action": "reschedule", "pushed": pushed, "lost": lost}
 
     return {"action": "none"}

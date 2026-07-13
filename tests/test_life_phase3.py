@@ -211,7 +211,7 @@ def test_life_end_notifies_boundary(manager):
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
     day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
     texts = [m["content"] for m in manager.personas[PERSONA_ID].sai_memory.messages]
-    assert any("ライフ終了" in t and "11:00" in t for t in texts)
+    assert any("活動終了" in t for t in texts)
 
 
 def test_life_end_without_session_lifecycle_does_not_crash(manager):
@@ -222,7 +222,7 @@ def test_life_end_without_session_lifecycle_does_not_crash(manager):
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
     day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
     texts = [m["content"] for m in manager.personas[PERSONA_ID].sai_memory.messages]
-    assert any("ライフ終了" in t for t in texts)
+    assert any("活動終了" in t for t in texts)
     assert manager.event_scheduler.has_key(TTL_CLEAR_KEY)
 
 
@@ -407,29 +407,30 @@ def test_keepalive_without_lives_declared_is_unaffected(_mock_cache, manager):
 
 
 def test_life_boundary_simulation_end_behavior(manager):
-    """even モードのライフを DaySimulator で通しで発火:
+    """even モードのライフ開始・終了処理を通しで確認:
     - 終端で anchor は不変 (惜しい谷でキャッシュヒット再開できる)
     - 終端直後は TTL override が残り、遅延解除予約がある
-    - 遅延経過後に override が global 既定へ戻る
+    - 遅延経過後 (DaySimulator で予約を発火) に override が global 既定へ戻る
+
+    v0.5 (life.md §11.2): 専用のライフ境界イベント予約 (``schedule_lives``)
+    は廃止され、ライフ開始/終了処理は day_open/day_close の発火経路
+    (``autonomy_wiring.fire_judgment_point``) 直下で呼ばれる。ここではその
+    呼び出し方 (``_handle_life_start``/``_handle_life_end`` を直接呼ぶ) を
+    模して統合挙動を確認する — TTL 遅延解除の予約だけは引き続き
+    EventScheduler 経由なので DaySimulator で発火させる。
     """
     persona = manager.personas[PERSONA_ID]
     lifecycle = manager.sea_runtime.session_lifecycle
     anchors = _live_anchors(updated_at=BASE + timedelta(hours=9, minutes=30))
     lifecycle.save_anchors(persona, anchors)
 
-    _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
-    pushed = day_plan.schedule_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert pushed == 2
+    clock.enable_virtual(BASE + timedelta(hours=9))
+    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 
-    # 終端直後 (09:50) まで進める
-    DaySimulator(
-        manager.event_scheduler,
-        start=BASE + timedelta(hours=8), end=BASE + timedelta(hours=9, minutes=50),
-    ).run()
-
-    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
-    assert lives[0]["start_fired"] is True
-    assert lives[0]["end_fired"] is True
+    clock.advance_to(BASE + timedelta(hours=9, minutes=40))
+    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
 
     # anchor は不変 — 惜しい谷の再訪は生きたキャッシュで再開できる
     assert lifecycle.load_anchors(persona) == anchors
@@ -440,7 +441,7 @@ def test_life_boundary_simulation_end_behavior(manager):
     # 遅延経過後 (一日の終わりまで) 進めると override は解除される
     DaySimulator(
         manager.event_scheduler,
-        start=BASE + timedelta(hours=9, minutes=50), end=BASE + timedelta(hours=24),
+        start=BASE + timedelta(hours=9, minutes=40), end=BASE + timedelta(hours=24),
     ).run()
     assert manager.get_persona_cache_override(PERSONA_ID) is None
     # anchor は依然不変 (解除は override の話で、anchor には触らない)
