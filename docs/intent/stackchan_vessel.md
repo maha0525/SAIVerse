@@ -1,6 +1,6 @@
 # Intent: スタックチャン Vessel 統合（saiverse-stackchan-addon）
 
-**ステータス**: v0.10（2026-06-30 改訂、複数機体の同時稼働対応を設計。Phase 1'〜3' は実機検証込みで完了済み）
+**ステータス**: v0.14（2026-07-11 改訂、内蔵 IMU の解釈済み身体感覚スペルを追加。生の9軸スナップショットは維持し、首角度を使った脚側基準の加速度と磁気方位を別スペルで返す）
 
 ## v0.4 → v0.5 の主要変更（路線変更）
 
@@ -290,6 +290,27 @@ SAIVerse のユーザー層（AITuber 運用者・創作者中心）が組み込
 
 「全 Vessel Building の無条件和集合」で可視性を決めてはならない（= capability の差を潰すため）。詳細は「設計 K-5. capability カタログ」を参照。
 
+### 15. 内蔵センサーは専用 tool で読み、内部 I2C bus を汎用公開しない（v0.11 追加）
+
+CoreS3 / StackChan 本体に標準搭載された IMU 等のセンサーは、Vessel の身体感覚として pull 型のスナップショット tool から読む。電源管理 IC、音声 codec、タッチ controller 等と共有する内部 I2C bus（GPIO 12/11）を raw read/write tool として公開してはならない。各センサー専用 driver が必要な register だけを扱い、PMIC 等へ到達できない tool surface を保つ。
+
+IMU の最初の契約は 9 軸スナップショット（BMI270 の加速度・角速度 + BMM150 の磁束密度）で、物理単位（g / dps / µT）と検証用 raw 値を同時に返す。連続姿勢ストリームや Shake / PickUp / PutDown の event push は別機能として扱い、単発読取 tool に暗黙の background task や会話注入を持ち込まない。
+
+LTR-553ALS-WA は `read_environment` で、環境光の 2 ADC channel と近接値（ともに count）、data-ready / saturation status を返す。距離への換算や常時監視は含めない。ST25R3916 は `scan_nfc` で、呼出し中だけRF fieldを有効にして ISO 14443A tag の UID / ATQA / SAK、または NFC-F（FeliCa）の IDm / PMm を返す。タグの内容読取り・書込み、認証、エミュレーション、常時ポーリングは含めない。UID と IDm は利用者が明示的に呼び出した結果にだけ返し、ファームウェアログには記録しない。
+
+stackchan-mcp gateway の生 tool は非公開とし、SAIVerse addon の native wrapper が「現在 Building → vessel → gateway instance」を解決して現在の身体へ転送する（K-4 と同じ規則）。
+
+### 16. IMU は生データと身体感覚の二層で提供する（v0.14 追加）
+
+`read_imu` は診断・検証用の生スナップショットとして残す。一方、ペルソナが身体の状況を読むための `read_imu_context` は、同じ機体の `read_imu` と `get_head_angles` を組み合わせて次を返す:
+
+- 加速度を首の yaw / pitch で脚側（胴体）基準へ回転し、水平面の方向・水平加速度・傾き・全体の大きさを示す。
+- 磁力計を同じ基準へ回転し、磁気北を 0° とする推定方位（16方位を含む）を示す。BMM150 のハードアイアン / ソフトアイアン校正、磁気偏角補正、機体ロール補正は別機能であり、未補正であることを注記する。
+- 角速度は dps の x / y / z をそのまま返す。角速度に方角の解釈は加えない。
+- CoreS3 のセンサー軸は初期契約では `x=右 / y=脚から頭 / z=カメラ前方` とし、首 pitch の正面基準を 45°、正の yaw を左向きとして扱う。これは実機の静止姿勢で検証し、必要なら機体別の軸校正へ置き換える。
+
+成功時は `sensor` / address / timestamp / raw / `ok` 等の診断メタデータを返さない。センサー欠落、データ未準備、首角度取得失敗、未校正など、解釈に影響する状態だけを `notes` に注記する。座標系と「加速度ベクトルが指す向き」の定義は出力説明に明示し、将来の実機校正で置き換えられるようにする。
+
 ### 廃止された不変条件（v0.4 まで）
 
 以下は自前ファーム特有の制約で、stackchan-mcp 採用により無効化された。本節で記録する理由は、将来別の vessel が出てきた時に「これらの罠が再発する可能性」を思い出すため。
@@ -577,6 +598,12 @@ stackchan__set_led({"index": 0, "r": 255, "g": 0, "b": 0})
 native wrap (= addon 側 `tools/stackchan_*.py`) は **作らない**。Vessel チェック / 切断ハンドリングは Phase 4' の本体改修 A-3-c (`spell_tools` の Building 単位 visibility) で対応する。それまでは「Vessel Building 外でもツールが見える / 呼べる」状態だが、Phase 4' で `building_ids` フィルタを足すことで物理身体ツールが Vessel Building 内でのみ visible になる。
 
 タッチ知覚は別経路。`get_touch_state` MCP tool は polling 型なので、device からの push 通知（= "撫でられた瞬間に SAIVerse 側に通知") を扱うには gateway 側に push hook を追加する必要がある（Phase 5' 着手前に検証、必要なら upstream PR）。
+
+#### C-4. 内蔵センサー（pull 型身体感覚）
+
+内蔵 IMU の値は stackchan-mcp firmware の専用 tool → gateway の MCP relay → addon native wrapper の 3 層で取得する。firmware は内部 I2C bus handle を driver にだけ渡し、gateway / addon には sensor 値だけを返す。addon wrapper は K-4 の dispatcher を使って現在の Vessel に対応する gateway instance を選ぶ。
+
+初期実装は単発の 9 軸読取に限定する。静止時の重力軸（約 ±1g）と、機体を上下反転した時の符号反転を実機検証の主判定にする。BMM150 は StackChan のサーボ磁石・周辺磁場の影響を受けるため、初期検証では有限値を取得できることを確認し、方位精度までは合否条件に含めない。
 
 ### D. gateway のライフサイクル
 

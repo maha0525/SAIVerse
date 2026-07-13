@@ -1,7 +1,8 @@
 # 記憶・人格境界 一次監査
 
-**開始日**: 2026-07-12  
-**状態**: 指摘あり・一次監査継続  
+**開始日**: 2026-07-12
+
+**状態**: 指摘あり・一次監査完了（2026-07-13）
 **監査軸**: 生ログの不変性 / persona・thread境界 / 自己著者性 / 参照整合性 / 可逆性
 
 ## 今回の coverage（第1片）
@@ -21,6 +22,8 @@
 - Metabolism / Chronicle / entity extraction の書き込み主体と二重実行
 - import/export、backup/restore、note/theme/desire migration の全経路
 - RemotePersonaProxy、他ペルソナ発話の取り込み、Building共有履歴から個人記憶への転記
+
+上記の続査対象は第2〜6片ですべて確認済み。一次監査は「全行読破」ではなく、記憶の生成・検索・退役・移植・共有転記を跨ぐ境界と主要実行入口のcoverageを完了した、という意味で2026-07-13に閉じた。
 
 ## Findings
 
@@ -116,8 +119,125 @@
 
 ## 未確定の調査メモ（finding未昇格）
 
-- Metabolism本体は通常PulseではMetaLayerのper-persona直列化下にある。一方、cache TTL由来のsession closeはdaemon threadで走り、`_gold_panning_close_inflight` はclose同士だけを防ぐ。通常Metabolism・UIの`organize-memory`との共通排他、および共有SQLite connectionの`adapter._db_lock`適用は確認できていない。実際に並走可能な発火系列とDB操作を次片で追い、再現できた場合のみfindingへ昇格する。
-- `run_metabolism()` はChronicle無効・生成失敗時にもanchorを進め、完了通知を「Chronicleに圧縮」と表現する。生ログは残るためデータ欠落とは断定しないが、通知と実状態の不一致として別途確認する。
+- sticky台帳のmodel切替影響は、thread越境修正のキー設計にmodelを含めるべきかという設計判断として追う。
+
+## Findings（第4片: Metabolism並走・生ログ退役）
+
+### [P1] Chronicle生成にpersona単位の共通排他がなく、同じ土地を重複編纂できる
+
+- 場所: `sea/session_lifecycle.py:619-698,742-1008,1232-1244`, `sea/runtime_context.py:147-205`, `sea/gold_panning.py:588-705`, `api/routes/people/config.py:180-257`, `api/routes/people/arasuji.py:731-935`, `sai_memory/arasuji/generator.py:1158-1312`, `sai_memory/arasuji/storage.py:393-462`
+- 事実:
+  - Chronicle生成には、通常Pulse後のMetabolism、anchor失効時のpre-response生成、TTL session-closeのdaemon thread、UIの`organize-memory`、Chronicle生成APIのbackground jobという独立した入口がある。
+  - session-closeの`_gold_panning_close_inflight`はclose同士だけを抑止する。通常Metabolism・手動整理・background jobとの共通排他はない。
+  - `generate_unprocessed()`は既存Lv1の`source_ids`を先に読み、その後LLMを呼び、最後に新規行を作るcheck-then-insertである。土地の同一source集合に対するUNIQUE制約もない。
+  - lifecycle系は共有`adapter.conn`を直接使い、Chronicle生成全体を`adapter._db_lock`で囲まない。Chronicle生成APIは同じmemory.dbへの別connectionを開くため、adapterのRLockだけを足しても全入口は直列化されない。
+- 最小再現: 一時memory.dbへ同じ`source_ids=['m1','m2']`でLv1を2回`create_entry()`すると、例外なく2行が保存された（実測: `first`/`second`の2行）。並走する2生成器が双方とも事前readで未処理と判定すれば、この状態へ到達できる。
+- 影響: 同じ生ログから内容の異なるChronicle/Fragmentが複数生成され、以後の統合・自動想起・写真参照が二重化する。並走時の共有connection操作は、重複以外にtransaction state競合を起こす可能性もある。
+- 修正方針: memory.db単位（実質persona単位）の編纂coordinatorを設け、全入口を同じ排他へ通す。プロセス内Lockだけでなく、別connection/background jobも含むDB leaseまたはSQLite上の原子的claimを使う。source集合の重複をDB側でも拒否できる冪等キーを持たせる。
+- 必要な回帰: 通常Metabolism・session-close・`organize-memory`・生成APIをbarrierで同時開始し、同じmessage IDが複数のGeneral Lv1へ所属しないこと。失敗したclaimが再試行を塞がないこと。
+
+### [P1] Chronicleが無効・失敗・拒否でもanchorを進め、生ログだけをコンテキストから退役させる
+
+- 場所: `sea/session_lifecycle.py:619-698,742-914`, `tests/test_gold_panning.py:415-442`
+- 事実: `run_metabolism()`はChronicleトグルOFF、Memory Weave無効、生成例外、ユーザー拒否/timeoutのいずれでも、生成結果を確認せずstep 3でanchorをlow watermark位置へ進める。その後の完了通知は常に「N件の会話をChronicleに圧縮」と表現する。既存テストもChronicleを無効化した状態でanchorが`m3`へ進むことを実測・固定している。
+- 影響: 生ログ自体はmemory.dbに残るため物理欠落ではない。しかし、まはーが指摘した「自動的に生ログがコンテキストから抜ける唯一の経路」で、代替地図が作られないまま土地だけが通常Sessionから不可視になる。通知は実状態と一致しない。
+- 修正方針: 「編纂成功」と「Session窓の退役」を別結果として記録し、通常は必要な地図生成が成功したbatchだけを退役させる。Chronicleを意図的に無効化した仕様を維持するなら、非圧縮退役を明示的な別モード・別通知として扱い、後から未編纂範囲を追跡できるマーカーを残す。
+- 必要な回帰: 成功・toggle OFF・LLM例外・拒否・cancelの各ケースで、anchor、未処理source、通知内容が一致すること。失敗後の再試行で退役範囲を取り戻せること。
+
+### [P1] TTL失効時のminimal load後に旧anchorを再touchし、実際に送ったprefixと永続anchorが食い違う
+
+- 場所: `sea/runtime_context.py:134-217`, `sea/session_lifecycle.py:109-171,237-307`
+- 事実: `resolve_metabolism_anchor()`が有効anchorを見つけられないCase 3では、minimal tailを読み込むが`history_manager.metabolism_anchor_message_id`を新しいtail先頭へ更新もclearもしない。直後のLLM成功時、`touch_anchor_after_llm_call()`はhistory managerに残る旧anchorを読み、implicit cache（またはcache read/writeが観測されたexplicit cache）ではその旧IDを新しい時刻でDBへ保存する。
+- 最小再現: history managerを旧anchor=`old`、DB anchorを期限切れにしてresolveすると`(None, 'minimal')`になり、in-memory値は`old`のまま。その後touchを呼ぶと更新対象IDは`old`になる（コード経路上決定的）。
+- 影響: 当該callはminimal tailで新しいprefixを作ったのに、次回は古いanchorから長い履歴を読む。prompt cacheの寿命境界とSessionの生ログ窓が一致せず、一度退役した範囲が不意に復帰するほか、head snapshotのcache判定も誤る。
+- 修正方針: minimal loadで実際に採用した最古message IDをそのmodelの新anchorとして確定し、LLM成功時は「今回組成したprefixのanchor」をcall-localに渡してtouchする。personaの可変フィールドから後読みにしない。
+- 必要な回帰: 期限切れanchor→minimal load→LLM成功後、永続anchorがminimal tail先頭になること。並走model/callが互いのcall-local anchorをtouchしないこと。
+
+## Findings（第5片: import / snapshot restore / migration）
+
+### [P1] native importがtarget personaへthread identityを写し替えず、source persona名義を別人格DBへ保存する
+
+- 場所: `api/routes/people/native_export_import.py:135-187`, `saiverse_memory/native_export.py:272-386`, `scripts/import_saimemory_native.py:78-151`
+- 事実:
+  - APIはURLの`persona_id`をtarget DBの選択にだけ使い、upload内の`persona_id`との一致を検証しない。
+  - `import_threads_native()`は各`thread_data['thread_id']`と`resource_id`を無加工でtarget DBへ保存する。CLIもsource/target不一致を警告するだけで、`--new-thread`を指定しない限り同じ挙動になる。
+  - 実測: source=`alice`の`alice:main`をtarget=`bob`へimportすると、bobのmemory.db内にthread/messageが`alice:main`名義のまま保存された。
+- 影響: target personaのcanonical thread解決（通常`bob:*`）からimport済み会話が外れ、人格DBの中に別人格名義の土地が同居する。export元へ戻したように見えるthread IDが、実際には別personaの物理DBにあるという二重の不整合になる。
+- 修正方針: native formatの「同一personaへの復元」と「別personaへの移植」を分離する。同一persona復元はsource/target不一致を拒否。移植はthread ID・resource ID・Stelis parent IDなどpersona prefixを原子的にtargetへ写像し、元IDをprovenance metadataへ保持する。
+- 必要な回帰: alice→alice復元、alice→bob移植、Stelis親子を含む複数threadで、target DB内の全identityがbobへ閉じ、source provenanceだけが別欄に残ること。
+
+### [P1] native importのreplaceがmessage単位commitで、失敗時に旧threadを失った部分適用を残す
+
+- 場所: `saiverse_memory/native_export.py:272-386`
+- 事実: replaceは最初に既存threadをDELETEし、その後thread作成、overview、Stelis、各messageを個別commitする。import全体を囲むtransaction/stagingはない。
+- 最小再現: 既存`alice:main`に`OLD`を保存し、1件目は正常、2件目のmetadataをJSON化不能にしたarchiveをreplace importした。実測結果は`TypeError`で失敗し、`OLD`は消失、1件目`NEW1`だけが残った。
+- 影響: statusは失敗を返すが実DBは元状態でも完成状態でもない。再実行できれば最終的に収束する場合はあるが、元threadは既に失われており、upload自体に欠陥があると回復できない。
+- 修正方針: upload全体を事前validateし、target DB内のstaging tableまたは単一transactionへ全threadを書き、全件成功後にreplaceをcommitする。embedding生成はcommit後の再構築可能な派生工程へ分離する。
+- 必要な回帰: 2件目・2thread目・Stelis復元・embeddingでそれぞれ失敗させ、既存targetがbyte/row単位で不変であること。成功時だけ全threadが一度に切り替わること。
+
+### [P2] native importのembedding準備がarchive先頭threadからpersona IDを推測し、別personaのmemory.dbを生成し得る
+
+- 場所: `saiverse_memory/native_export.py:389-438`, `saiverse_memory/adapter.py:82-111`
+- 事実: `_regenerate_embeddings()`はtarget `persona_id`を引数で受けず、先頭`thread_id`のコロン前をpersona IDとみなして`SAIMemoryAdapter(persona_id)`を新規作成する。Adapter初期化はそのIDのpersona directoryとmemory.dbを作る。
+- 影響: alice archiveをbobへimportすると、embedding用設定を得るだけのために`personas/alice/memory.db`を作成し得る。aliceが実在してもbobのimportがalice側DBを初期化・migrationし、実在しなければ孤児persona directoryを残す。
+- 修正方針: target側の既存Adapter/embedderを明示的に渡すか、target persona IDと検証済みpathから非生成的にembedderだけを構築する。thread IDからpersona IDを推測しない。
+- 必要な回帰: cross-persona import後にtarget以外のfilesystem treeが一切変化しないこと。悪意ある/壊れたthread IDでもworkspace外・personas root外へ書かないこと。
+
+### [P1] snapshot restoreがarchive全体の検証・staging前に現状態を消し、展開失敗で部分復元を残す
+
+- 場所: `scripts/snapshot.py:241-263,398-477`
+- 事実: restoreは`clear_for_restore(home)`で現状態を削除してから、ZIP memberをhomeへ直接逐次extractする。事前に読むのは`snapshot.json`だけで、全memberのCRC/readability・必要ファイル・展開完了は検証しない。失敗時の自動rollbackもない（既定では復元前snapshotへの手動復旧手段は作る）。
+- 最小再現: 現状態に`personas/current/memory.db`を置き、2 memberのsnapshotを復元中、2件目extractを失敗させた。実測: return code 1、current DBは消失、1件目だけ展開された部分状態が残った。
+- 影響: 復元失敗の直後にSAIVerseを起動すると、欠けたworld/persona集合を正規状態としてmigration・初期化する可能性がある。auto snapshotは回復材料だが、失敗したrestore自体の原子性は保証しない。
+- 修正方針: archiveを別staging directoryへ全展開し、CRC・manifest件数/サイズ・必須DBのSQLite integrityを確認してから、homeの対象集合と原子的にswapする。swap失敗時は旧treeへ自動rollbackする。
+- 必要な回帰: CRC破損、途中I/O例外、容量不足、必須DB欠落、swap失敗で、旧homeが不変または自動復帰すること。成功時に除外対象logs/backups/snapshotsが保持されること。
+
+### 移行経路で確認済み（新規findingなし）
+
+- `Note → Theme page`は旧note UUIDを新ページID/metadataへ刻み、page作成済み・main DB削除失敗からの再実行も冪等に収束する。未移行noteが残る間は旧4テーブルをDROPしない。
+- `vivid → desk`は同一memory.db transaction内でdesk追加とvivid印の解除をcommitし、本人が後で閉じたページを再起動時に開き直さない。
+- 回帰実測: `python -m unittest tests.test_note_theme_migration tests.test_p4c_vividness_removal` — 27件成功。pytestは当該Python環境に未導入だったためunittestで実行した。
+
+## Findings（第6片: sticky model境界 / RemotePersonaProxy / Building転記）
+
+### [P1] Building→個人記憶の転記がcursorを先行確定し、memory.db書き込み失敗後に再試行されない
+
+- 場所: `builtin_data/tools/get_building_messages.py:299-445`, `sea/runtime.py:137-143`
+- 事実:
+  - `auto_ingest_building_messages()`は未読候補を集めた直後、各messageを個人記憶へ書く前に`pulse_cursors[building_id] = max_seen_seq`を実行する。
+  - その後の`history_manager.add_to_persona_only()`や`_mark_ingested()`はmessage単位の`try/except`内にあり、失敗をDEBUGログだけで握り潰して処理を継続する。cursorの巻き戻し・pending marker・再試行キューはない。
+- 最小再現: seq=1の他persona発話をheard_by=`listener`で用意し、`add_to_persona_only()`を意図的に例外化した。初回はingest 0件だがcursorは`room:1`へ前進。2回目は`seq <= last_cursor`で除外され、書き込み関数自体が再度呼ばれなかった（実測: call数は1のまま）。
+- 影響: Buildingの土地には残るが、そのpersonaのmemory.dbと以後の通常Sessionから発話が永久に欠落する。Metabolism以前の入口で起きるため、Chronicle/Fragmentにも編纂されない。
+- 修正方針: messageごとに「個人memory.dbへのappend成功→Building側ingested marker成功」を確認してから、連続成功した最大seqまでcursorを進める。失敗seq以降は次回再試行する。より堅牢にはbuilding message IDを個人messageのprovenance/idempotency keyとして保存し、append成功・marker失敗後の再試行でも重複しないようにする。
+- 必要な回帰: 途中messageのappend失敗、mark失敗、DB lock、プロセス再起動で、欠落も重複もなく最終的に全heard messageが取り込まれること。
+
+### [P1] RemotePersonaProxyの思考転送が本番経路へ接続されず、訪問personaが応答・記憶形成できない
+
+- 場所: `saiverse/remote_persona_proxy.py:1-32`, `manager/runtime.py:365-395`, `sea/pulse_controller.py:278-326,452-464`, `database/api_server.py:104-153`, `manager/background.py:23-74`
+- 事実:
+  - concept (`docs/concepts/sds.md`) は「Proxyがhome cityの`/persona-proxy/{id}/think`へ転送」と定義するが、`RemotePersonaProxy`は属性を置くだけで転送/thinkメソッドを持たない。
+  - repository内で`/persona-proxy/{id}/think`へrequestを送る本番callsiteは0件。存在するのはAPI定義だけである。
+  - user入力の`_build_responding_personas()`は`self.personas`（resident）だけを引き、`visiting_personas`を除外する。PulseControllerの`all_personas`経路へ直接proxyを渡しても、SEARuntimeが要求する`history_manager`、model、system instruction等を持たないためresident経路は成立しない。
+  - home側のthinking request processorもSEA/HistoryManagerを通さず`persona.llm_client.generate()`を直接呼び、request/responseをpersona memoryへ保存しない。
+- 影響: multi-cityを有効化して移動自体が成功しても、訪問personaは到着先の会話へ応答できず、仮にAPIを外部から直接呼んでも遠隔経験は本人のmemory.dbへ残らない。設計上の「同じ人格が別Cityを訪れる」が、現在は占有表示だけのproxyになる。
+- 修正方針: visitor専用の明示的なPulse transportを作り、destinationで収集したcanonical contextをhomeのPulseController/SEAへ渡す。home側で本人のthreadへ入力・応答・訪問先provenanceを保存し、返答はdestination Building履歴へpersona ID付きで一度だけ書く。resident用PersonaCore interfaceへ不完全proxyを紛れ込ませない。
+- 必要な回帰: City AのpersonaをCity Bへ派遣し、Bのuser発話→AでのSEA実行→Aのmemory.db保存→BのBuilding発話保存→再起動後の継続を2City test DBで固定する。timeout/重複pollでも返答を二重保存しないこと。
+
+### [P1] destination Buildingのheard_by生成からvisitorが除外され、訪問中の土地自体にもaudience記録されない
+
+- 場所: `manager/runtime.py:365-395,428-444,549-569`, `manager/visitors.py:292-316`, `builtin_data/tools/get_building_messages.py:299-445`
+- 事実:
+  - visitor IDは`occupants`には追加されるが、user発話保存時の`heard_by`は`responding_personas`（residentのみ）から作られる。
+  - residentが一人以上いればuser発話はBuildingへ保存されるがvisitor IDはheard_byに入らない。visitorしかいなければ`responding_personas`が空なので、user発話そのものをBuildingへ保存しない。
+  - residentのAI発話はemittersが`occupants`全体をheard_byに使うためvisitor IDも入るが、proxyにはHistoryManager/auto-ingestがなくhome memoryへ転記されない。この非対称により「聞いた」土地と「本人が保持した」記憶が一致しない。
+- 影響: 将来transportだけを復活させても、destination contextをheard_by基準で組むとuser側の発話がvisitorから欠落する。セッションログのviewer filter上も、その場にいたvisitorが聞いていない扱いになる。
+- 修正方針: Buildingへの事実記録のaudienceは応答能力ではなくoccupancy snapshotから作る。誰が応答するか（resident/visitor transport可否）と、誰がその場で聞いたかを別集合にする。visitorだけの部屋でもuser発話をBuildingの土地へ一度保存する。
+- 必要な回帰: resident+visitor、visitorのみ、transport timeoutの各ケースでheard_byが実occupantsと一致し、Building messageが欠落しないこと。
+
+### 確認済み（新規findingなし）
+
+- sticky自動想起の台帳は`(persona_id, thread_id)`共有のままでよい。内容はmodel固有のcache/snapshotではなく、同じpersonaが同じthreadで直近に想起した土地/地図の集合であり、通常のdefault model切替後も会話の認知的連続性を保つ。現行はCONVERSATION root lineもpersona単位1本で、model同時並走の独立会話Sessionは実装されていない。将来同一threadで複数CONVERSATION Sessionを真に並走させる場合だけsession key追加を再検討する。
+- Building→resident個人記憶の正常系では、他personaのassistant発話をlistener側へ`role='user'`＋話者名prefix＋`metadata.with=[speaker_id]`として保存する。listener本人名義のassistant発話には変形せず、自己著者性は保たれている。
 
 ## 直前レビューから継続する関連指摘
 
@@ -127,6 +247,4 @@ Memory Atlas P4-a には別文書で P1×3（fold契約不一致、split本文�
 
 ## 次の監査片
 
-1. Metabolism通常実行・session close・`organize-memory`・Chronicle手動生成の並走結果を、独立した再現ハーネスで追う。
-2. import/export・backup/restore・各migrationで、人格IDと保存先の対応が崩れないかを追う。
-3. sticky台帳のmodel切替影響は、thread越境修正のキー設計にmodelを含めるべきかという設計判断として追う。
+一次監査完了。集計は **P1×18 / P2×2**（直結するAtlas編纂レビューP1×3を含む）。うち **P1×7 / P2×1 は修正・回帰固定済み**、P1×2はまはー裁定で現状仕様として保留、残りは修正待ち。次はP0サブシステム `migration / upgrade / backup` へ移る。

@@ -26,8 +26,8 @@
 
 | 優先 | サブシステム | 状態 | 最終監査 | 結果 / 次アクション | 記録 |
 |---|---|---|---|---|---|
-| P0 | 記憶・人格境界 | **回帰固定済み（一次監査継続）** | 2026-07-12 | 第1〜3片で P1×6、P2×1。**機械修正5件＋Atlas編纂 P1×3 は全て修正・回帰固定済み**(2026-07-12): SCENE窓thread混入 / 削除済Fragment想起 / 内部line想起混入(実会話のみ) / sticky台帳thread越境((persona,thread)キー) / get_adapter孤児DB(c1bb7c4) / 編纂3件(2faf7b2+63d3a63)。**仕分け済 (まはー裁定)**: 生ログ直接改変・headのmodel非分離の2件は「現状は仕様」として後回し（課題として保持）。次はMetabolismの並走結果と移行経路を続査 | [一次監査](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Atlasレビュー](../handoff/2026-07-12_concept_consolidation_code_review.md) |
-| P0 | migration / upgrade / backup | 未監査 | — | 記憶境界の次。冪等性、削除、バックアップ復元、部分適用を監査 | — |
+| P0 | 記憶・人格境界 | **指摘あり（一次監査完了）** | 2026-07-13 | 合計 **P1×18 / P2×2**（Atlas編纂P1×3含む）。P1×7 / P2×1は修正・回帰固定済み、P1×2はまはー裁定で現状仕様として保留。残りはMetabolism、native import/snapshot、Building/Remote境界。主要入口coverageを完了し、以後は修正追跡 | [一次監査](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Atlasレビュー](../handoff/2026-07-12_concept_consolidation_code_review.md) |
+| P0 | migration / upgrade / backup | **指摘あり（一次監査完了）** | 2026-07-13 | 合計 **P1×20 / P2×6**。retentionがmtimeだけで正常backupを削除し破損fileを保持する問題を追加。snapshot除外領域上書きは既出P1へ追加実証、標準`..` traversalはhome内正規化を確認。主要migration/upgrade/backup/updater経路のcoverageを完了し、以後は修正追跡 | [一次監査](../handoff/2026-07-13_migration_upgrade_backup_audit.md) |
 | P0 | 自律行動・判断点・schedule | 未監査 | — | 発火重複、日付境界、予算、本人裁定との一致を監査 | — |
 | P1 | SEA runtime / Session / head-tail | 未監査 | — | line/model/thread隔離、cache snapshot、Metabolism境界を監査 | — |
 | P1 | Spell / Tool / Playbook 権限 | 未監査 | — | visible/spell権限、contextvars、引数解決、内部ツール露出を監査 | — |
