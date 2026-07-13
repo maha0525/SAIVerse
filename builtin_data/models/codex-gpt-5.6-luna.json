@@ -1,0 +1,9 @@
+{
+  "model": "gpt-5.6-luna",
+  "system_prompt": "現在の使用モデルはGPT-5.6-Luna（OpenAI Codex backend / ChatGPTサブスクリプション経由）です。\n\n[Model info]\n- Fast and affordable agentic coding model\n- Codex backend 経由のため context window は 372K\n- temperature / top_p などのサンプリングパラメータは非対応",
+  "display_name": "GPT-5.6 Luna Codex",
+  "provider": "openai_codex",
+  "context_length": 372000,
+  "supports_images": true,
+  "parameters": {}
+}
