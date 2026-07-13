@@ -293,13 +293,18 @@ def test_save_lives_no_longer_inspects_slots(manager, task_ref):
     assert len(saved) == 1
 
 
-def test_save_day_plan_rejects_slot_outside_life_window(manager, task_ref):
-    """save_day_plan は既存ライフの外 (谷) のコマを拒否する (life.md v0.5 §4.4)。"""
+def test_save_day_plan_excludes_slot_outside_life_window_when_sole_slot(manager, task_ref):
+    """save_day_plan は既存ライフの外 (谷) のコマを丸めようが無ければ除外する。
+
+    v0.5 追補 (2026-07-14): 唯一のコマが除外されると生き残りが 0 件になり、
+    「編成できる範囲に収まるコマが無かった」として raise する (旧「どのライフ
+    区間にも属していません」相当。3 分のズレで全滅させない設計であって、
+    範囲外そのものを許すわけではない)。"""
     clock.enable_virtual(BASE + timedelta(hours=8))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
     ])
-    with pytest.raises(ValueError, match="どのライフ区間にも属していません"):
+    with pytest.raises(ValueError, match="活動時間の外"):
         day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
             _slot("13:00", ref="none", kind="休む", facility="own_room",
                   budget_rounds=0),
@@ -309,41 +314,107 @@ def test_save_day_plan_rejects_slot_outside_life_window(manager, task_ref):
     assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == []
 
 
-def test_save_day_plan_rejects_slot_before_current_time(manager, task_ref):
-    """遅発 day_open 対策 (life.md v0.5 §11.2): ライフの中でも「今より前」の
-    コマは選択肢として存在しない。"""
+def test_save_day_plan_rounds_slot_before_current_time_to_now(manager, task_ref):
+    """v0.5 追補 (2026-07-14、実機初日の破綻の再現): 遅発 day_open でライフの
+    中でも「今より前」のコマは、拒否するのでなく現在時刻へ丸めて保存する
+    (life.md §3「不正な値は弾くのでなく解釈で正規化する」)。旧挙動 (raise) は
+    3 分のズレで一日の時間割を全滅させていた。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "07:00", "end": "22:00", "budget_pulses": 10, "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=21))  # 21 時起動 (遅発)
-    with pytest.raises(ValueError, match="現在時刻"):
-        day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            _slot("08:00", ref="none", kind="休む", facility="own_room",
-                  budget_rounds=0),
-        ])
-    # 現在時刻以降のコマは通る
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        _slot("08:00", ref="none", kind="休む", facility="own_room",
+              budget_rounds=0),
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["21:00"]  # 現在時刻へ丸め
+    assert notes == ["（1番目の予定は開始時刻を21:00に調整しました）"]
+
+    # 現在時刻以降のコマはそのまま通る (無調整)
+    notes2 = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         _slot("21:30", ref="none", kind="休む", facility="own_room", budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["start"] for s in slots] == ["21:30"]
+    assert notes2 == []
+
+
+def test_save_day_plan_rounds_multiple_past_slots_keeping_ascending_order(manager, task_ref):
+    """実機ケースの再現: ライフ 01:00〜02:00・現在 01:03・slot[0]=01:00 が
+    01:03 へ丸められる。複数コマが丸めで同時刻に競合する場合は元の順序を
+    保ったまま 1 分ずつ後ろへずらし、厳密昇順を保つ (life.md §3 追補)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "01:00", "end": "02:00", "budget_pulses": 4, "mode": "even"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=1, minutes=3))  # 01:03
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        _slot("01:00", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("01:02", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["01:03", "01:04"]
+    assert notes == [
+        "（1番目の予定は開始時刻を01:03に調整しました）",
+        "（2番目の予定は開始時刻を01:04に調整しました）",
+    ]
+
+
+def test_save_day_plan_partial_rescue_excludes_unroundable_slot(manager, task_ref):
+    """部分救済: 丸めても範囲に入らないコマ (就寝後) だけを個別に除外し、
+    残りは保存する (life.md §3 追補)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "end": "12:00", "budget_pulses": 8, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=8, minutes=5))  # 08:05
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        _slot("08:00", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("10:00"),
+        _slot("13:00", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    # 1番目は丸め、2番目はそのまま、3番目 (就寝後) だけ除外される
+    assert [s["start"] for s in slots] == ["08:05", "10:00"]
+    assert notes == [
+        "（1番目の予定は開始時刻を08:05に調整しました）",
+        "（3番目の予定は活動時間の外のため外しました）",
+    ]
+
+
+def test_save_day_plan_rounds_across_overnight_life(manager, task_ref):
+    """深夜跨ぎライフ (07:00〜01:00) での丸め判定: 深夜帯の過去コマも現在時刻
+    へ丸められる (life.md §3 追補)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=24, minutes=10))  # 翌日 00:10 (深夜帯)
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        _slot("23:50", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["00:10"]
+    assert notes == ["（1番目の予定は開始時刻を00:10に調整しました）"]
 
 
 def test_save_day_plan_allows_slot_when_no_lives_declared(manager, task_ref):
     """ライフ宣言の無い日は谷の概念自体が無い (後方互換)。"""
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("23:50")])
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("23:50")])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["start"] == "23:50"
+    assert notes == []
 
 
-def test_replace_remaining_slots_rejects_slot_outside_life_window(manager, task_ref):
-    """日中の残り時間割の全置換 (post_conversation 等) も編成できる範囲を守る。"""
+def test_replace_remaining_slots_excludes_slot_outside_life_window_when_sole_slot(
+    manager, task_ref,
+):
+    """日中の残り時間割の全置換 (post_conversation 等) も編成できる範囲を守る。
+    唯一の新コマが除外されると raise する (旧「どのライフ区間にも属していません」相当)。"""
     clock.enable_virtual(BASE + timedelta(hours=8))
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00")])
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
     ])
-    with pytest.raises(ValueError, match="どのライフ区間にも属していません"):
+    with pytest.raises(ValueError, match="活動時間の外"):
         day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
             _slot("15:00", ref="none", kind="休む", facility="own_room",
                   budget_rounds=0),

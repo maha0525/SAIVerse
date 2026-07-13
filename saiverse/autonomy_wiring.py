@@ -26,8 +26,9 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
   engage_now を選んだときだけ従来の応対 Pulse を起動する。非 Active ペルソナは
   従来どおり直接応対 (非自律ペルソナのイベント応答を壊さない)
 - :func:`watchdog_tick` — AutonomyManager の定期 tick の縮退先 (v2 §4.2)。
-  正常時は何もしない。「Active・起床時間帯・今日の day_plan が無い or コマ予約が
-  途絶」のときだけ day_open の火入れ直し / コマ予約の再 push を行う保守的な見張り
+  正常時は何もしない。「Active・起床時間帯・今日の day_plan が無い (行が無い、
+  または行はあってもコマが 0 件) or コマ予約が途絶」のときだけ day_open の
+  火入れ直し / コマ予約の再 push を行う保守的な見張り
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 """
@@ -764,8 +765,12 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     正常時は何もしない。以下のときだけ火を入れ直す (判定は保守側):
 
     - Active・起床時間帯 (day_open スケジュールの時刻〜day_close の時刻)・
-      **今日の day_plan 行が無い** → day_open を発火し直す
-      (起床時刻にサーバーが落ちていた / 途中で Active 化された等)
+      **今日の day_plan 行が無い、または行はあるがコマが 1 件も無い**
+      → day_open を発火し直す (起床時刻にサーバーが落ちていた / 途中で
+      Active 化された等に加え、``confirm_life_for_today`` がライフ確定で
+      day_plan 行を先に作った後、day_open の時間割編成が全滅してコマ 0 件の
+      まま終わったケースも含む — 行の有無だけでは「未編成」を見落とす
+      2026-07-14 実機の教訓)
     - plan はあるが pending / deferred コマの EventScheduler 予約が消えている
       (再起動等でインメモリ予約が失われた) → コマ予約を再 push する
 
@@ -810,7 +815,13 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     plan_date = effective_plan_date(now, wake, close)
     today = plan_date.isoformat()
     plan = day_plan.load_day_plan(manager, persona_id, today)
-    if plan is None:
+    if not plan:
+        # 行そのものが無い (None) だけでなく、行はあるがコマ 0 件 ([]) も
+        # 「未編成」— confirm_life_for_today がライフ確定時に meta 行を先に
+        # 作るため、day_open の時間割編成が (丸めても救済できず) 全滅した日は
+        # 行が存在したまま slots_json="[]" で残る。plan is None だけを見ると
+        # この日は永久にリカバリ経路が無くなる (2026-07-14 実機の教訓)。
+        #
         # day_open 再発火の制約: hhmm >= wake の帯 (起床後の通常帯) でのみ撃つ。
         # 深夜帯 (跨ぎの尻尾、hhmm < wake) は「前日の覚醒日に plan が無い」状態
         # だが、ここで新しい day_open を 00:30 に撃つのは誤り — 起きなかった日に
@@ -823,8 +834,9 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             return {"action": "none", "reason": "overnight tail: no refire in midnight zone"}
 
         LOGGER.info(
-            "[watchdog] no day plan for today; re-firing day_open "
-            "(persona=%s date=%s wake=%s)", persona_id, today, wake,
+            "[watchdog] no day plan (or zero organized slots) for today; "
+            "re-firing day_open (persona=%s date=%s wake=%s)",
+            persona_id, today, wake,
         )
         context: Dict[str, Any] = {}
         params = sched.get("day_open_params")
@@ -843,10 +855,11 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
                 context["life_mode_override"] = mode_override
         result = fire_judgment_point(
             manager, persona_id, KIND_DAY_OPEN, context,
-            # Lock 待ちの間に本物の day_open が済んでいたら撃たない (二重編成防止)
-            precondition=lambda: day_plan.load_day_plan(
+            # Lock 待ちの間に本物の day_open が済んでいたら撃たない (二重編成防止)。
+            # ここも「行が無い」でなく「コマが無い」で判定する (上と同じ理由)。
+            precondition=lambda: not day_plan.load_day_plan(
                 manager, persona_id, today,
-            ) is None,
+            ),
         )
         return {"action": "day_open_refire", "result": result}
 

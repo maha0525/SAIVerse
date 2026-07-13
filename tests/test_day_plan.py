@@ -830,13 +830,14 @@ def test_replace_remaining_allows_restart_at_consumed_slot_time(manager, task_re
         {"start": "15:30", "kind": "休む", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
-    pushed = day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+    pushed, notes = day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "13:30", "kind": "作る", "ref": task_refs["desire"],
          "facility": "workshop", "budget_rounds": 4, "note": "ref を直してやり直す"},
         {"start": "15:30", "kind": "休む", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     assert pushed == 2
+    assert notes == []
 
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [(s["start"], s["status"]) for s in slots] == [

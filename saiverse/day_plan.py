@@ -58,7 +58,7 @@ import logging
 import math
 import re
 from datetime import date, datetime, time as dt_time, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from saiverse import clock
 
@@ -390,21 +390,43 @@ def _validate_and_normalize_slots(
     return normalized
 
 
-def save_day_plan(manager: Any, persona_id: str, plan_date: Any, slots: List[Dict[str, Any]]) -> None:
+def save_day_plan(
+    manager: Any, persona_id: str, plan_date: Any, slots: List[Dict[str, Any]]
+) -> List[str]:
     """時間割を検証して upsert する (1 ペルソナ 1 日 1 行)。
 
+    ライフが宣言されている日 (life.md v0.5 §4.4/§11.2/§3 追補) は、保存前に
+    :func:`_normalize_slots_within_organized_range` でコマを「今〜就寝」の
+    編成できる範囲へ正規化する — 過去開始のコマは現在時刻へ丸め (クランプ)、
+    丸めてもなお範囲外のコマだけを個別に除外する (部分救済。3 分のズレで
+    一日を全滅させない)。ライフが宣言されていない日は skip = 後方互換。
+
+    Returns:
+        調整メモ (List[str])。丸め・除外が起きた場合の日常語の説明
+        (「n番目の予定は開始時刻を...に調整しました」等)。無調整なら空リスト。
+
     Raises:
-        ValueError: persona_id 空 / plan_date 不正 / コマ配列の検証失敗 /
-            コマが「今〜就寝」の編成できる範囲の外にある場合
-            (life.md v0.5 §4.4/§11.2。ライフが宣言されていない日は
-            skip = 後方互換)。
+        ValueError: persona_id 空 / plan_date 不正 / コマ配列の書式検証失敗 /
+            正規化後に編成できる範囲へ収まるコマが 1 件も残らなかった場合
+            (旧「時間割なし」相当。理由は調整メモを埋め込んだメッセージに残す)。
     """
     if not persona_id:
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
     normalized = _validate_and_normalize_slots(slots)
-    _check_slots_within_organized_range(manager, persona_id, plan_date_str, normalized)
-    _upsert_plan_slots(manager, persona_id, plan_date_str, normalized)
+    kept, notes = _normalize_slots_within_organized_range(
+        manager, persona_id, plan_date_str, normalized,
+    )
+    if not kept:
+        reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
+        raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
+    _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
+    if notes:
+        LOGGER.info(
+            "[day_plan] slots adjusted to organized range: persona=%s date=%s notes=%s",
+            persona_id, plan_date_str, notes,
+        )
+    return notes
 
 
 def _upsert_plan_slots(
@@ -745,6 +767,18 @@ def _life_span_minutes(life: Dict[str, Any]) -> int:
     return end_min - start_min
 
 
+def _hhmm_from_life_extended(life: Dict[str, Any], ext: int) -> str:
+    """:func:`_life_extended_minutes` の逆変換: ライフ開始からの経過分を
+    "HH:MM" に戻す (深夜跨ぎで 24:00 を超えても暦日内の時刻へ mod する)。
+
+    コマの丸め (:func:`_normalize_slots_within_organized_range`) が、拡張分
+    単位でクランプした後の値を保存用の "HH:MM" へ戻すために使う。
+    """
+    start_min = _life_minutes(life["start"])
+    total = (start_min + ext) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
 def get_life_for_time(lives: List[Dict[str, Any]], hhmm: str) -> Optional[int]:
     """hhmm ("HH:MM") が属するライフの index を返す (無ければ None)。
 
@@ -835,47 +869,109 @@ def get_life_status_now(manager: Any, persona_id: str) -> Dict[str, Any]:
         }
 
 
-def _check_slots_within_organized_range(
+def _organized_range_exclude_note(position: int) -> str:
+    return f"（{position}番目の予定は活動時間の外のため外しました）"
+
+
+def _organized_range_clamp_note(position: int, new_start: str) -> str:
+    return f"（{position}番目の予定は開始時刻を{new_start}に調整しました）"
+
+
+def _normalize_slots_within_organized_range(
     manager: Any, persona_id: str, plan_date_str: str, slots: List[Dict[str, Any]]
-) -> None:
-    """全コマの start が「編成できる範囲」にあることを検証する (raise ValueError)。
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """コマ配列を「編成できる範囲」に正規化する (life.md v0.5 §3 の丸め方針)。
 
-    life.md v0.5 §4.4/§11.2 (遅発 day_open 対策): 編成できる範囲は
-    **max(現在時刻, ライフ開始) 〜 ライフ終了**。ライフの外 (谷) はもちろん、
-    ライフの中でも「今より前」の時刻は選択肢として存在しない — 起床判断が
-    遅発 (例: サーバー障害明けの 21 時起動) しても、朝からの時間割を編成させて
-    しまう構造そのものを塞ぐ (実機初日の破綻点)。
+    v0.5 追補 (2026-07-14): 実機で「01:03 起床判断が 01:00〜02:00 のライフを
+    見て slot[0]=01:00 の時間割を編成 → 過去時刻が保存時に raise → 時間割が
+    1 件も保存されない」という全滅事故が起きた。**不正な値は弾くのでなく
+    解釈で正規化する** (life.md §3) — 3 分のズレで一日を全滅させない。
 
-    ライフが宣言されていない日 (:func:`get_lives` が空) は検証しない
-    (旧データ・宣言なしの日は「編成できる範囲」の概念自体が無い —
-    後方互換最優先)。``save_day_plan`` / ``replace_remaining_slots`` の両方が
-    呼ぶことで、起床判断以外の経路 (会話終了判断の残り時間割編集等) からの
-    保存も守る。
+    正規化方針 (旧 ``_check_slots_within_organized_range`` の raise を置換):
+
+    - コマの start が「今」が属するライフ (``now_life``) より前なら、start を
+      現在時刻へ丸める (クランプ)。``now_life`` に属さない (谷・就寝後等の)
+      コマも、丸め先である ``now_life`` の拡張分に投影して同じ判定にかける —
+      それでも「今より前」にならない (=後ろにありすぎる) ものは丸めようが
+      ないので除外する
+    - 複数コマが丸めで同時刻に競合する場合は、元の順序を保ったまま 1 分ずつ
+      後ろへずらし、``_validate_and_normalize_slots`` が要求する「開始時刻の
+      厳密昇順」と整合させる
+    - ずらしてもなお ``now_life`` の範囲 (今〜就寝) をはみ出すコマは、
+      そのコマだけ除外する (部分救済 — 1 コマの異常で時間割全体を潰さない)
+    - ``now_life`` 以外の (将来の窓の) コマはそのまま通す (v0.4 まで同様、
+      1 日 1 窓の初期実装では実質常に素通り)
+    - 「今」自体がどのライフにも属さない (谷) 場合、丸め先が無いので該当
+      コマは全て除外する
+    - ライフが宣言されていない日 (:func:`get_lives` が空) は何もしない
+      (旧データ・宣言なしの日は「編成できる範囲」の概念自体が無い —
+      後方互換最優先)
+
+    ``save_day_plan`` / ``replace_remaining_slots`` の両方が呼ぶことで、
+    起床判断以外の経路 (会話終了判断の残り時間割編集等) からの保存も守る。
+
+    Args:
+        slots: ``_validate_and_normalize_slots`` 済みのコマ配列 (書式は保証
+            済み)。この関数は書式検証をしない — 呼び出し元が先に済ませること。
+
+    Returns:
+        ``(kept, notes)``。``kept`` は生き残ったコマ (丸めた分は start を
+        更新したコピー)。``notes`` は日常語の調整メモ (「n番目の予定は...」、
+        n は ``slots`` 内の 1-based 位置)。無調整なら空リスト。
     """
     lives = get_lives(manager, persona_id, plan_date_str)
     if not lives:
-        return
+        return list(slots), []
+
     now_hhmm = clock.now().strftime("%H:%M")
     now_life_idx = get_life_for_time(lives, now_hhmm)
-    for idx, slot in enumerate(slots):
+    now_life = lives[now_life_idx] if now_life_idx is not None else None
+    now_ext = _life_extended_minutes(now_life, now_hhmm) if now_life is not None else None
+
+    kept: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    # now_life 内で丸めた直前のコマの拡張分 (昇順維持のための下限)。
+    floor_ext: Optional[int] = None
+
+    for i, slot in enumerate(slots):
+        position = i + 1
         start = slot.get("start")
         life_idx = get_life_for_time(lives, start)
-        if life_idx is None:
-            raise ValueError(
-                f"slot[{idx}] (start={start!r}) はどのライフ区間にも属していません "
-                f"(コマは「今〜就寝」の範囲にだけ置けます。今日のライフ: "
-                f"{[(l.get('start'), l.get('end')) for l in lives]})"
-            )
-        if life_idx == now_life_idx:
-            # 「今」が属するライフに置くコマだけ、開始時刻が現在時刻以降か
-            # 追加で確認する (未来の別ライフのコマにこの制約は適用しない —
-            # 初期実装は 1 日 1 窓のため実質常にこの分岐)。
-            life = lives[life_idx]
-            if _life_extended_minutes(life, start) < _life_extended_minutes(life, now_hhmm):
-                raise ValueError(
-                    f"slot[{idx}] (start={start!r}) は現在時刻 ({now_hhmm}) より"
-                    "前です (時間割は「今〜就寝」の範囲で組んでください)"
-                )
+
+        if life_idx is not None and life_idx != now_life_idx:
+            # 「今」以外の (将来の) 窓に属するコマ — 手を加えず通す。
+            kept.append(slot)
+            continue
+
+        if now_life is None:
+            # 「今」がどのライフにも属していない (谷) — 丸め先が無い。
+            notes.append(_organized_range_exclude_note(position))
+            continue
+
+        ext = _life_extended_minutes(now_life, start)
+        clamped = False
+        if ext < now_ext:
+            # 過去開始 (今より前) — 現在時刻へ丸める。
+            ext = now_ext
+            clamped = True
+        if floor_ext is not None and ext <= floor_ext:
+            # 丸め済みの直前コマと同時刻以下になる衝突 — 1 分ずらす。
+            ext = floor_ext + 1
+            clamped = True
+
+        if ext >= _life_span_minutes(now_life):
+            # 丸めて (ずらして) もなお活動時間の外 — このコマだけ除外。
+            notes.append(_organized_range_exclude_note(position))
+            continue
+
+        floor_ext = ext
+        new_start = _hhmm_from_life_extended(now_life, ext)
+        if clamped and new_start != start:
+            notes.append(_organized_range_clamp_note(position, new_start))
+            slot = {**slot, "start": new_start}
+        kept.append(slot)
+
+    return kept, notes
 
 
 def _validate_and_normalize_lives(lives: Any) -> List[Dict[str, Any]]:
@@ -1850,7 +1946,7 @@ def cancel_scheduled_slots(manager: Any, persona_id: str, plan_date: Any) -> int
 
 def replace_remaining_slots(
     manager: Any, persona_id: str, plan_date: Any, new_slots: List[Dict[str, Any]]
-) -> int:
+) -> Tuple[int, List[str]]:
     """残りコマ (pending / deferred) を new_slots で全置換する (judgment_points.md §3.3)。
 
     消化済みコマ (fired / done / skipped) は帳簿として残し、残りコマだけを
@@ -1864,26 +1960,50 @@ def replace_remaining_slots(
     (2026-07-05 実 LLM シム 3回目の不具合)。過去時刻の新コマは
     EventScheduler が即時扱いする。
 
+    ライフが宣言されている日の組織化範囲の正規化 (丸め・部分救済。
+    :func:`_normalize_slots_within_organized_range`) は **new_slots の区間のみ**
+    に適用する — 消化済みコマは既に確定した過去であり、丸め・除外の対象では
+    ない (昇順検証と同じ「歴史は保護する」思想)。
+
     Returns:
-        置換後に EventScheduler へ push した pending コマ数。
+        ``(置換後に EventScheduler へ push した pending コマ数, 調整メモ)``。
+        調整メモは丸め・除外が起きた場合の日常語の説明 (無調整なら空リスト)。
+
+    Raises:
+        ValueError: 書式検証失敗、または正規化後に new_slots 側が 1 件も
+            残らなかった場合 (plan も予約も一切変更しない)。
     """
     plan_date_str = _normalize_plan_date(plan_date)
     current = load_day_plan(manager, persona_id, plan_date_str) or []
-    kept = [
+    kept_history = [
         s for s in current
         if s.get("status") not in (STATUS_PENDING, STATUS_DEFERRED)
     ]
-    candidate = kept + [
+    candidate = kept_history + [
         {**slot, "status": STATUS_PENDING, "defer_count": 0} for slot in new_slots
     ]
     # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)
-    normalized = _validate_and_normalize_slots(candidate, ascending_from=len(kept))
-    _check_slots_within_organized_range(manager, persona_id, plan_date_str, normalized)
+    normalized = _validate_and_normalize_slots(candidate, ascending_from=len(kept_history))
+    history_part = normalized[:len(kept_history)]
+    new_part = normalized[len(kept_history):]
+    kept_new, notes = _normalize_slots_within_organized_range(
+        manager, persona_id, plan_date_str, new_part,
+    )
+    if not kept_new:
+        reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
+        raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
 
     # 検証が通ってから旧予約を落とし、保存 → 再 push する。
+    final_slots = history_part + kept_new
     cancel_scheduled_slots(manager, persona_id, plan_date_str)
-    _upsert_plan_slots(manager, persona_id, plan_date_str, normalized)
-    return schedule_day_plan(manager, persona_id, plan_date_str)
+    _upsert_plan_slots(manager, persona_id, plan_date_str, final_slots)
+    if notes:
+        LOGGER.info(
+            "[day_plan] remaining slots adjusted to organized range: "
+            "persona=%s date=%s notes=%s", persona_id, plan_date_str, notes,
+        )
+    pushed = schedule_day_plan(manager, persona_id, plan_date_str)
+    return pushed, notes
 
 
 # ---------------------------------------------------------------------------

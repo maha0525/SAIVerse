@@ -475,10 +475,11 @@ def test_judgment_pulses_accumulate_separately_from_budget(manager, session_fact
 # ---------------------------------------------------------------------------
 
 
-def test_delayed_day_open_confirms_full_window_and_rejects_past_slots(manager, session_factory):
+def test_delayed_day_open_confirms_full_window_and_rounds_past_slots(manager, session_factory):
     """21 時起動の遅発 day_open でも、ライフは設定どおりの窓 (07:00〜22:00) で
-    焼かれる。過去時刻 (08:00) のコマは保存時に拒否され、現在時刻以降
-    (21:30) のコマは通る——「編成直後の過去コマ即時発火」が構造ごと消える。"""
+    焼かれる。過去時刻 (08:00) のコマは保存時に現在時刻へ丸められ、現在時刻
+    以降 (21:30) のコマはそのまま通る——「編成直後の過去コマ即時発火」が
+    構造ごと消える (v0.5 追補、2026-07-14: 拒否でなく丸めで全滅を防ぐ)。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     _import_judgment_playbooks(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "07:00",
@@ -493,11 +494,13 @@ def test_delayed_day_open_confirms_full_window_and_rejects_past_slots(manager, s
     assert lives[0]["start"] == "07:00"
     assert lives[0]["end"] == "22:00"  # 起床からの窓そのまま (今からではない)
 
-    with pytest.raises(ValueError, match="現在時刻"):
-        day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "08:00", "kind": "休む", "ref": "none", "facility": "own_room",
-             "budget_rounds": 0, "title": "", "note": ""},
-        ])
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "kind": "休む", "ref": "none", "facility": "own_room",
+         "budget_rounds": 0, "title": "", "note": ""},
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["21:00"]  # 過去時刻は現在時刻へ丸め
+    assert notes == ["（1番目の予定は開始時刻を21:00に調整しました）"]
 
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "21:30", "kind": "休む", "ref": "none", "facility": "own_room",

@@ -365,6 +365,43 @@ def test_day_open_finalize_empty_timetable_saves_nothing(
     assert manager.personas[PERSONA_ID].sai_memory.messages[0]["scope"] == "discardable"
 
 
+def test_day_open_finalize_rounds_and_excludes_slots_with_life_declared(
+    manager, task_refs, finalize_mod, tmp_path,
+):
+    """life.md §3 追補 (2026-07-14 実機の破綻の回帰): ライフが宣言されている日、
+    過去開始のコマは現在時刻へ丸め、丸めても活動時間の外 (就寝後) のコマだけを
+    除外する部分救済。旧挙動 (全体 raise) は 3 分のズレで時間割を全滅させた。
+    調整が起きたことは judgment_finalize の適用エコー (SAIMemory 記録) に
+    日常語で明示される。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=1))  # 08:00 (起床から少し遅れて編成)
+
+    output = {
+        "monologue": "今日は記事の続きから入って、夜は休もう。",
+        "timetable": [
+            {"start": "07:30", "kind": "知る", "ref": task_refs["task"],
+             "facility": "library", "budget_rounds": 5, "note": "", "title": "記事の続き"},
+            _rest_slot("12:00"),
+            _rest_slot("23:00"),  # ライフ終了 (22:00) より後 — 丸めようが無い
+        ],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "daily_budget_rounds": 40})
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="day_open",
+            judgment_context=ctx, situation_text="[起床判断] ...",
+        )
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["08:00", "12:00"]
+
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "（1番目の予定は開始時刻を08:00に調整しました）" in content
+    assert "（3番目の予定は活動時間の外のため外しました）" in content
+
+
 def test_day_open_finalize_promotions_fire_track_create(
     manager, task_refs, finalize_mod, tmp_path, caplog
 ):
@@ -708,6 +745,46 @@ def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
     # task:2 は独白に出てこないので、コマ明細が追記されたことの判別材料になる。
     assert "task:2" in content
     assert "@workshop" in content
+
+
+def test_post_session_remaining_timetable_rounds_and_excludes_with_life_declared(
+    manager, task_refs, finalize_mod, tmp_path,
+):
+    """life.md §3 追補: 残りコマの全置換 (post_session 経由) でも、ライフが
+    宣言されている日は丸め・部分救済が効き、調整はエコーに明示される。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {**_rest_slot("09:00"), "status": "done"},
+        _rest_slot("20:00"),
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    clock.enable_virtual(BASE + timedelta(hours=7))  # 14:00
+    output = {
+        "monologue": "夕方は早めに休もう。",
+        "remaining_timetable": [
+            {"start": "13:00", "kind": "作る", "ref": "task:1",
+             "facility": "workshop", "budget_rounds": 4, "note": "続き"},
+            _rest_slot("18:00"),
+            _rest_slot("23:00"),  # ライフ終了 (22:00) より後 — 丸めようが無い
+        ],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": []})
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [
+        ("09:00", "done"), ("14:00", "pending"), ("18:00", "pending"),
+    ]
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "（1番目の予定は開始時刻を14:00に調整しました）" in content
+    assert "（3番目の予定は活動時間の外のため外しました）" in content
+    assert "うち 1 コマは無効または活動時間の外のため除外されました" in content
 
 
 def test_post_session_remaining_timetable_rejection_reaches_persona(

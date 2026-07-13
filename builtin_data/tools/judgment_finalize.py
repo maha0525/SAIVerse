@@ -231,7 +231,7 @@ def _finalize_day_open(
         # 全置換: 旧 plan の予約 (index ベースの key) を先に落としてから保存する。
         day_plan_mod.cancel_scheduled_slots(manager, persona_id, plan_date)
         try:
-            day_plan_mod.save_day_plan(manager, persona_id, plan_date, slots)
+            range_notes = day_plan_mod.save_day_plan(manager, persona_id, plan_date, slots)
         except ValueError as exc:
             warnings.append(f"時間割の保存に失敗: {exc}")
             lines.append(
@@ -239,13 +239,19 @@ def _finalize_day_open(
                 "今日の時間割は編成されていません）"
             )
         else:
+            # ライフの組織化範囲による丸め・部分救済 (life.md §3) で実際に
+            # 保存されたコマ数・内容が sanitize 直後の slots と異なりうる —
+            # 一覧は必ず保存済みの実データから組む (捏造を防ぐ)。
+            saved_slots = day_plan_mod.load_day_plan(manager, persona_id, plan_date) or slots
             pushed = day_plan_mod.schedule_day_plan(manager, persona_id, plan_date)
             applied = True
             lines.append(
-                f"（今日の時間割を編成: {len(slots)} コマ、{pushed} コマを予約）"
+                f"（今日の時間割を編成: {len(saved_slots)} コマ、{pushed} コマを予約）"
             )
-            for s in slots:
+            for s in saved_slots:
                 lines.append(_format_slot_line(s))
+            for note in range_notes:
+                lines.append(note)
             # 日次予算台帳の初期化 (v2 §4.5)。total を書き、消費済み (used) は
             # 保持する — 発火時の予算ゲートがこの残高でラウンドを切り詰める。
             try:
@@ -504,7 +510,7 @@ def _apply_remaining_timetable(
                 )
             else:
                 try:
-                    pushed = day_plan_mod.replace_remaining_slots(
+                    pushed, range_notes = day_plan_mod.replace_remaining_slots(
                         manager, persona_id, plan_date, slots
                     )
                 except ValueError as exc:
@@ -516,15 +522,27 @@ def _apply_remaining_timetable(
                         "今日の残りのコマは元のままです）"
                     )
                 else:
+                    # ライフの組織化範囲による丸め・部分救済 (life.md §3) で
+                    # 実際に保存された内容が sanitize 直後の slots と異なりうる —
+                    # 一覧・件数は保存済みの実データ (status=pending 分) から組む。
+                    saved_plan = day_plan_mod.load_day_plan(manager, persona_id, plan_date) or []
+                    saved_new = [
+                        s for s in saved_plan
+                        if s.get("status") == day_plan_mod.STATUS_PENDING
+                    ] or slots
                     lines.append(
-                        f"（残りの時間割を組み替えた: {len(slots)} コマ、{pushed} コマを予約）"
+                        f"（残りの時間割を組み替えた: {len(saved_new)} コマ、"
+                        f"{pushed} コマを予約）"
                     )
-                    for s in slots:
+                    for s in saved_new:
                         lines.append(_format_slot_line(s))
-                    dropped = len(rt) - len(slots)
+                    for note in range_notes:
+                        lines.append(note)
+                    dropped = len(rt) - len(saved_new)
                     if dropped > 0:
                         lines.append(
-                            f"（うち {dropped} コマは無効のため除外されました）"
+                            f"（うち {dropped} コマは無効または活動時間の外のため"
+                            "除外されました）"
                         )
                     return True
     elif rt is not None:

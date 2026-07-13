@@ -2031,10 +2031,11 @@ def insert_timetable_slot(
     from saiverse.day_plan import replace_remaining_slots
 
     try:
-        pushed = replace_remaining_slots(manager, persona_id, plan_date, merged)
+        pushed, range_notes = replace_remaining_slots(manager, persona_id, plan_date, merged)
     except ValueError as exc:
         warnings.append(f"コマの挿入に失敗 (時間割は不変): {exc}")
         return None, warnings
+    warnings.extend(range_notes)
     return pushed, warnings
 
 

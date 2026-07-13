@@ -647,6 +647,42 @@ def test_watchdog_refires_day_open_when_plan_missing(session_factory, monkeypatc
     assert calls == [("day_open", {"daily_budget_rounds": 16})]
 
 
+def test_watchdog_refires_when_plan_row_exists_but_slots_are_empty(
+    session_factory, monkeypatch,
+):
+    """2026-07-14 実機の教訓の回帰: confirm_life_for_today がライフ確定で
+    day_plan 行を先に作るため、day_open の時間割編成が (丸めても救済できず)
+    全滅した日は、行はあるが slots_json="[]" のまま残る。``plan is None`` だけ
+    を見ていた旧 watchdog はこの日を永久にリカバリできなかった——行の有無で
+    なくコマの有無で判定することを確認する (main check + precondition の
+    両方)。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+
+    # 実際の破綻を再現: ライフだけ確定させ、時間割 (slots) は空のまま残す。
+    day_plan.confirm_life_for_today(
+        manager, PERSONA_ID, PLAN_DATE, "08:00", "22:00",
+        requested_budget_pulses=10,
+    )
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == []
+
+    captured: Dict[str, Any] = {}
+
+    def _fake(mgr, pid, kind, context=None, **kw):
+        captured["kind"] = kind
+        captured["precondition"] = kw.get("precondition")
+        return {"submitted": True}
+
+    monkeypatch.setattr(wiring, "fire_judgment_point", _fake)
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["action"] == "day_open_refire"
+    assert captured["kind"] == "day_open"
+    # precondition も「行はあるがコマが無い」を正しく「まだ必要」と判定する。
+    assert captured["precondition"]() is True
+
+
 def test_watchdog_refire_passes_life_mode_override(session_factory, monkeypatch):
     """再起動後の watchdog day_open 再発火経路でも life_mode_override が透過される。"""
     manager, _ = _make_manager(session_factory)
