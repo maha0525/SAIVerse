@@ -423,9 +423,18 @@ def build_digest_label(
     return "考えごとをしていた"
 
 
-def build_activity_label(track_title: Optional[str], track_intent: Optional[str]) -> str:
-    """常在インジケータ用の短い活動ラベル (running 自律 Track から)。"""
+def build_activity_label(
+    track_title: Optional[str], track_intent: Optional[str]
+) -> Optional[str]:
+    """常在インジケータ用の短い活動ラベル (running 自律 Track から)。「何をして
+    いるか」を出すもので、「話しかけてよいか」(ライフ由来の活動中/休憩中) とは別。
+
+    題名も意図も空なら **None** を返す (2026-07-14)。かつては "活動中" を返して
+    いたが、その文言はライフ由来の「活動中」チップと丸かぶりし、滞在ペルソナ欄で
+    緑ドット＋「活動中」が 2 つ並ぶ実機バグの原因になっていた。中身を言えない
+    ときは名乗らず黙る — 呼び出し側は None なら何も表示しない。
+    """
     base = (track_title or "").strip() or (track_intent or "").strip()
     if not base:
-        return "活動中"
+        return None
     return _truncate(base, 12)

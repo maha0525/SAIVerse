@@ -52,7 +52,7 @@ interface AI {
     HOME_CITYID: number;
     DEFAULT_MODEL: string;
     LIGHTWEIGHT_MODEL: string;
-    ACTIVITY_STATE: string;
+    AUTONOMY_ENABLED: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     AVATAR_IMAGE: string;
     APPEARANCE_IMAGE_PATH?: string;  // Persona appearance image for visual context
     IS_DISPATCHED: boolean;
@@ -264,7 +264,7 @@ export default function WorldEditor() {
         setFormData({
             name: ai.AINAME, description: ai.DESCRIPTION, system_prompt: ai.SYSTEMPROMPT,
             home_city_id: ai.HOME_CITYID, default_model: ai.DEFAULT_MODEL, lightweight_model: ai.LIGHTWEIGHT_MODEL,
-            activity_state: ai.ACTIVITY_STATE, avatar_path: ai.AVATAR_IMAGE,
+            autonomy_enabled: ai.AUTONOMY_ENABLED, avatar_path: ai.AVATAR_IMAGE,
             appearance_image_path: ai.APPEARANCE_IMAGE_PATH || ''
         });
     };
@@ -495,7 +495,7 @@ export default function WorldEditor() {
                         <div className={styles.list}>
                             <h3>ペルソナ一覧</h3>
                             {ais.map(a => <div key={a.AIID} className={`${styles.item} ${selectedAI?.AIID === a.AIID ? styles.selected : ''}`} onClick={() => handleAISelect(a)}>{a.AINAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ activity_state: 'Idle' }); }}>+ 新規作成</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ autonomy_enabled: true }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
@@ -518,9 +518,16 @@ export default function WorldEditor() {
                                     )}
                                     {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
-                                <Field label="アクティビティ状態"><Select value={formData.activity_state || 'Idle'} onChange={(e: any) => setFormData({ ...formData, activity_state: e.target.value })}>
-                                    <option value="Active">🟢 Active</option><option value="Idle">🟡 Idle</option><option value="Sleep">🔵 Sleep</option><option value="Stop">⚫ Stop</option>
-                                </Select></Field>
+                                <Field label="自律行動">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={formData.autonomy_enabled ?? true}
+                                            onChange={(e: any) => setFormData({ ...formData, autonomy_enabled: e.target.checked })}
+                                        />
+                                        {(formData.autonomy_enabled ?? true) ? '有効（自分から考えて動く）' : '無効（話しかけられるまで待機）'}
+                                    </label>
+                                </Field>
                                 <Field label="アバター">
                                     <ImageUpload
                                         value={formData.avatar_path || ''}

@@ -116,7 +116,7 @@ class MetaLayer:
 
         # Phase 4 案C: メタ判断 Pulse の連続失敗回数 (persona_id -> count)。
         # リトライ枯渇のたびに加算、成功でリセット。`max_consecutive_failures`
-        # に達したら ACTIVITY_STATE を Idle に降格して自律稼働の無音スピンを止め、
+        # に達したら AUTONOMY_ENABLED を False にして自律稼働の無音スピンを止め、
         # host イベントで通知する (phase4_meta_judgment_recovery.md 案C)。
         # Lock 入口 (_get_lock) と同じく per-persona 直列化下で触るので素の dict で十分。
         self._consecutive_failures: Dict[str, int] = {}
@@ -242,7 +242,7 @@ class MetaLayer:
     ) -> Optional[Dict[str, Any]]:
         """指定ペルソナにメタ判断 Pulse を発火すべきかを再評価する。
 
-        EventScheduler の callback (TTL 接近 / interval 経過 / Active 化など) から
+        EventScheduler の callback (TTL 接近 / interval 経過 / 自律 ON 化など) から
         呼ばれる。callback が schedule された時点と発火時点で状態が変わっている
         可能性があるため、発火直前にここで再評価する。
 
@@ -256,7 +256,7 @@ class MetaLayer:
             発火すべきなら trigger context dict、不要なら None。
 
         判定ルール (intent A v0.9 / v0.10 を踏襲):
-        1. ペルソナが見つからない / ACTIVITY_STATE != Active → None
+        1. ペルソナが見つからない / AUTONOMY_ENABLED=False → None
         2. 現在 running の Track の Handler が ``post_complete_behavior=='wait_response'``
            → None (相手の応答待ち中はメタ判断を割り込ませない)
         3. 上記をクリアしたら ``{"trigger": trigger_kind}`` を返す
@@ -274,11 +274,11 @@ class MetaLayer:
             )
             return None
 
-        activity_state = getattr(persona, "activity_state", "Idle")
-        if activity_state != "Active":
+        autonomy_enabled = bool(getattr(persona, "autonomy_enabled", False))
+        if not autonomy_enabled:
             logging.debug(
-                "[meta-layer] should_fire: skipped (activity_state=%s != Active): persona=%s trigger=%s",
-                activity_state, persona_id, trigger_kind,
+                "[meta-layer] should_fire: skipped (autonomy_enabled=%s): persona=%s trigger=%s",
+                autonomy_enabled, persona_id, trigger_kind,
             )
             return None
 
@@ -372,8 +372,8 @@ class MetaLayer:
         - alert 入口: ``context = {"trigger": "user_utterance", ...}`` 等
         - 定期入口:  ``context = {"trigger": "periodic_tick", ...}``
 
-        intent A v0.9 の ACTIVITY_STATE 表に従い、Active 以外のペルソナでは
-        発火しない。加えて、現在 running の Track の Handler が
+        AUTONOMY_ENABLED=False のペルソナでは発火しない。加えて、現在 running
+        の Track の Handler が
         ``post_complete_behavior == 'wait_response'`` を持つ場合、相手の応答待ち
         中にメタ判断を割り込ませると自然な対話を壊すため、抑止する
         (intent B v0.8 §"post_complete_behavior 列挙")。ただし
@@ -400,12 +400,12 @@ class MetaLayer:
                 if persona is None:
                     return
 
-                # ACTIVITY_STATE 抑止: Active のみ定期発火 (intent A v0.9 表)
-                activity_state = getattr(persona, "activity_state", "Idle")
-                if activity_state != "Active" and not force:
+                # AUTONOMY_ENABLED 抑止: True のみ定期発火
+                autonomy_enabled = bool(getattr(persona, "autonomy_enabled", False))
+                if not autonomy_enabled and not force:
                     logging.debug(
-                        "[meta-layer] periodic tick skipped (activity_state=%s != Active): persona=%s",
-                        activity_state, persona_id,
+                        "[meta-layer] periodic tick skipped (autonomy_enabled=%s): persona=%s",
+                        autonomy_enabled, persona_id,
                     )
                     return
 
@@ -737,7 +737,7 @@ class MetaLayer:
             persona.persona_id, alert_track_id, last_failure_reason,
         )
 
-        # 案C: 連続失敗を加算。閾値到達で ACTIVITY_STATE を Idle に降格 + 通知。
+        # 案C: 連続失敗を加算。閾値到達で AUTONOMY_ENABLED を False にして通知。
         consecutive = self._consecutive_failures.get(persona.persona_id, 0) + 1
         self._consecutive_failures[persona.persona_id] = consecutive
         try:
@@ -750,7 +750,7 @@ class MetaLayer:
             self._handle_persistent_failure(
                 persona, building_id, consecutive, last_failure_reason
             )
-            # 降格後はカウンタをリセット (再 Active 化したらまた 0 から数える)
+            # 停止後はカウンタをリセット (再度自律 ON にしたらまた 0 から数える)
             self._consecutive_failures.pop(persona.persona_id, None)
 
     def _handle_persistent_failure(
@@ -762,19 +762,19 @@ class MetaLayer:
     ) -> None:
         """連続失敗が閾値に達したとき、自律稼働を止めてまはーに気づかせる (案C)。
 
-        - ACTIVITY_STATE を Idle に降格する (定期 tick が止まり、無音スピンを断つ)。
+        - AUTONOMY_ENABLED を False にする (定期 tick が止まり、無音スピンを断つ)。
         - host イベントで Building に通知する (event_message タグでペルソナ + UI に届く)。
         どちらかが失敗しても他方は試みる (best-effort)。
         """
         persona_id = persona.persona_id
         logging.warning(
             "[meta-layer] meta_judgment failed %d times consecutively for persona=%s; "
-            "downgrading ACTIVITY_STATE to Idle and notifying. last_error=%s",
+            "disabling AUTONOMY_ENABLED and notifying. last_error=%s",
             consecutive, persona_id, last_failure_reason,
         )
-        # 1. 自律行動を実効的に停止する。ACTIVITY_STATE=Idle にするだけでは
+        # 1. 自律行動を実効的に停止する。AUTONOMY_ENABLED=False にするだけでは
         #    AutonomyManager (watchdog) の tick 予約が残る。停止ボタンと同じ経路
-        #    (manager.stop_autonomy) に集約して、AM 停止 + Track pause + Idle +
+        #    (manager.stop_autonomy) に集約して、AM 停止 + Track pause + OFF +
         #    対ユーザー Track 復帰を揃える。
         try:
             self.manager.stop_autonomy(persona_id)

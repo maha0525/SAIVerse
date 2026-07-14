@@ -13,6 +13,7 @@ import {
     Video,
     Anchor,
     Activity,
+    PauseCircle,
     X,
 } from 'lucide-react';
 import ItemModal from './ItemModal';
@@ -48,21 +49,19 @@ interface Occupant {
     id: string;
     name: string;
     avatar?: string;
-    // ライフビューの常在インジケータ (persona_activity_view.md §4.2)。AI のみ。
-    activity_state?: string | null;  // Stop / Sleep / Idle / Active
-    activity_label?: string | null;  // running 自律 Track 由来の短い活動ラベル
+    // 自律行動 (自分から考えて動くこと) の ON/OFF。ブレーカーと同じ発想で、
+    // 入っているのが当たり前の ON は常時表示しない。false のときだけ
+    // 「止めています」の控えめな表示を出す (owner裁定、2026-07-14)。
+    // 未設定 (null/undefined) は「不明」扱いで何も出さない。
+    autonomy_enabled?: boolean | null;
+    // 「いま何をしているか」— running な自律 Track の題名から作る短いラベル。
+    // 話しかけやすさ (life_state) とは別概念。中身を言えないときは
+    // バックエンドが null を返すので何も表示しない (build_activity_label)。
+    activity_label?: string | null;
     // 「話しかけやすさ」表示 (life.md §9.1)。AI のみ。null = lives 未宣言 (非表示)。
     life_state?: string | null;      // "in_life" (活動中) / "valley" (休憩中)
     life_until?: string | null;      // in_life のときだけ "HH:MM" (現在ライフの終了時刻)
 }
-
-// 状態ドットの色 (LifeView 側のバッジと同じ対応)
-const ACTIVITY_DOT_COLORS: Record<string, string> = {
-    Active: '#22c55e',
-    Idle: '#eab308',
-    Sleep: '#3b82f6',
-    Stop: '#6b7280',
-};
 
 // 「話しかけやすさ」ドットの色・文言 (life.md §9.1)。実装名 (ライフ/lives) は
 // 出さず、日常語で「気軽に話しかけられます」の意味が伝わる表現にする。
@@ -452,30 +451,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                             </div>
                                             <div className={styles.occupantInfo}>
                                                 <span className={styles.occupantName}>{user.name}</span>
-                                                {/* 常在インジケータ: 状態ドット + 活動ラベル。
-                                                    クリックでライフビューを直接開く (persona_activity_view.md §4.2) */}
-                                                {user.activity_state && (
-                                                    <button
-                                                        className={styles.activityChip}
-                                                        title="ライフビューを開く"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setLifeViewPersona(user);
-                                                        }}
-                                                    >
-                                                        <span
-                                                            className={styles.activityDot}
-                                                            style={{ backgroundColor: ACTIVITY_DOT_COLORS[user.activity_state] || '#9ca3af' }}
-                                                        />
-                                                        <span className={styles.activityLabel}>
-                                                            {user.activity_label
-                                                                || (user.activity_state === 'Active' ? '活動中' : '')}
-                                                        </span>
-                                                    </button>
-                                                )}
-                                                {/* 「話しかけやすさ」表示 (life.md §9.1)。lives 未宣言
-                                                    (life_state が null) のときは何も出さない — 誤情報を
-                                                    出さないための沈黙 (試金石: 嘘なく即答できるか)。 */}
+                                                {/* 常時表示する唯一の状態表示: 「話しかけやすさ」(life.md §9.1)。
+                                                    lives 未宣言 (life_state が null) のときは何も出さない —
+                                                    誤情報を出さないための沈黙 (試金石: 嘘なく即答できるか)。 */}
                                                 {user.life_state && (
                                                     <button
                                                         className={styles.lifeStateChip}
@@ -492,6 +470,41 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                                         <span className={styles.lifeStateLabel}>
                                                             {lifeStateLabel(user.life_state)}
                                                         </span>
+                                                    </button>
+                                                )}
+                                                {/* 「いま何をしているか」(running 自律 Track の題名から作る短いラベル)。
+                                                    話しかけやすさとは別の情報なので併記する。中身を言えないとき
+                                                    (Track なし / 題名も意図も空) はバックエンドが null を返すので
+                                                    何も出ない — ライフ由来の「活動中」と文言が重複しない。 */}
+                                                {user.activity_label && (
+                                                    <button
+                                                        className={styles.activityLabelChip}
+                                                        title={`いま: ${user.activity_label}`}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setLifeViewPersona(user);
+                                                        }}
+                                                    >
+                                                        <Activity size={12} className={styles.activityLabelIcon} />
+                                                        <span className={styles.activityLabelText}>
+                                                            {user.activity_label}
+                                                        </span>
+                                                    </button>
+                                                )}
+                                                {/* 自律行動 OFF の控えめな表示 (ブレーカー方式)。入っているのが
+                                                    当たり前の ON は常時表示せず、明示的に止めているときだけ
+                                                    知らせる。クリックでライフビューを開く (owner裁定、2026-07-14)。 */}
+                                                {user.autonomy_enabled === false && (
+                                                    <button
+                                                        className={styles.autonomyOffChip}
+                                                        title="自律行動を止めています（話しかければ通常どおり応答します）"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setLifeViewPersona(user);
+                                                        }}
+                                                    >
+                                                        <PauseCircle size={12} className={styles.autonomyOffIcon} />
+                                                        <span className={styles.autonomyOffLabel}>自律行動を止めています</span>
                                                     </button>
                                                 )}
                                             </div>

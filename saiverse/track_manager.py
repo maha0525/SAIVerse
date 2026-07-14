@@ -640,7 +640,7 @@ class TrackManager:
         インメモリのため**再起動で失われる**。起動時に DB からロードした
         running Track にはタイマーが無い状態になる。本メソッドはそれを補う。
 
-        対象外判定 (wait_response 以外 / ACTIVITY_STATE != Active /
+        対象外判定 (wait_response 以外 / AUTONOMY_ENABLED=False /
         ペルソナ unloaded 等) はすべて ``wait_response_timeout_provider`` に
         委ねる (= activate 時と同じ単一ゲート)。同 key で再 schedule しても
         EventScheduler が上書きするので冪等。

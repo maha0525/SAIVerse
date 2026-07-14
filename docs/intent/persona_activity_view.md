@@ -36,10 +36,10 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 ## 3. 守るべき不変条件
 
 1. **観察の受動性**: 様子ビューは読み取り専用の表示であり、開いても閉じてもペルソナの認知・行動・記憶に一切影響しない
-2. **LLM コールゼロ**: 表示内容は既存データ (Track / pulse-logs / ACTIVITY_STATE) のテンプレート整形のみで作る。観察のために LLM を呼ばない
+2. **LLM コールゼロ**: 表示内容は既存データ (Track / pulse-logs / 自律フラグ・ライフ) のテンプレート整形のみで作る。観察のために LLM を呼ばない
 3. **デバッグ面との役割分担**: ライフビューは生活が見える窓、メモリーモーダルは点検面。深掘りはライフビューから Pulse タイムラインへのリンク 1 本で接続し、ライフビューに pulse_id・line_role 等の内部語彙を露出しない
 4. **停止操作は予期しない自動発言を起こさない**: 停止トグルを押した瞬間にペルソナが喋り出してはならない (§6.3)
-5. **開示は生活リズム層のみ**: ライフビューに出す操作は再生/停止トグルだけ (v0.4: 間隔 2 種は退役、§7)。ACTIVITY_STATE 4 値の直接変更・Track 個別の pause/resume・META_JUDGMENT_CONFIG 詳細・Track metadata の間隔上書きは点検・調律層として既存のデバッグ UI (SettingsModal / DebugPanel / scripts) に残留する
+5. **開示は生活リズム層のみ**: ライフビューに出す操作は再生/停止トグルだけ (v0.4: 間隔 2 種は退役、§7)。Track 個別の pause/resume・META_JUDGMENT_CONFIG 詳細・Track metadata の間隔上書きは点検・調律層として既存のデバッグ UI (SettingsModal / DebugPanel / scripts) に残留する (ACTIVITY_STATE 4 値の直接変更は 2026-07-14 の解体で**選択肢ごと消滅**した — 自律フラグ 1 本になり、そのトグルがまさに本ビューの再生/停止)
 
 ## 4. UI 設計
 
@@ -93,11 +93,13 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 
 ## 6. 再生/停止トグルのパッケージング
 
-ユーザーの本質的なニーズは 2 つだけ: **自律行動を始めさせること**と、**今やっている自律行動をすぐ止めて「いつもの、自分のプロンプトを静かに待っている AI」に戻すこと**。状態 4 値 (Stop/Sleep/Idle/Active) の直接操作はデバッグ的であり、ユーザー面はトグル 1 つに畳む。
+ユーザーの本質的なニーズは 2 つだけ: **自律行動を始めさせること**と、**今やっている自律行動をすぐ止めて「いつもの、自分のプロンプトを静かに待っている AI」に戻すこと**。
+
+> **2026-07-14 追記**: この「トグル 1 つに畳む」判断は、後に **DB 側の解体として実現した**。当時デバッグ的として退けた状態 4 値 (Stop/Sleep/Idle/Active) は、調査の結果**実装上「Active か否か」しか効いていなかった**ため列ごと廃止され、`AI.AUTONOMY_ENABLED` (真偽値・既定 ON) 1 本になった。つまり本節のトグルが、そのまま唯一のモデルになっている ([landscape §9](../overview/landscape.md))。以下の記述は新フラグに読み替え済み。
 
 ### 6.1 ▶ 再生
 
-1. ACTIVITY_STATE → `Active` — 元の状態が Idle / Sleep / Stop のいずれであっても Active に起こす (トグルは Idle ↔ Active の往復に限定しない)
+1. `AUTONOMY_ENABLED` → `True`
 2. `AutonomyManager.start()` (`saiverse/autonomy_manager.py:126`) — 仕様上 start 直後に即時メタ判断 tick が走るため、「押したら本人が何をするか考え始める」体験になる
 3. **何をするかは指定しない**。再生ボタンは活動を命じるのではなく目を覚まさせるだけで、活動の選択はメタ判断 (= AI 自身) が行う
 4. 停止時に pause した autonomous Track があっても自動 resume はしない。即時 tick がそれを見て resume するか別のことを始めるかを決める (自律性の所在を AI 側に保つ)
@@ -105,11 +107,11 @@ SAIVerse が目指すのは、AI 自身の自律性を実現しユーザーと�
 ### 6.2 ⏹ 停止
 
 1. `AutonomyManager.stop()` — 定期 tick の予約 cancel
-2. running な autonomous Track を全て pause — **これが実効的な停止**。SubLineScheduler は現状 ACTIVITY_STATE を見ていない (`saiverse/pulse_scheduler.py:162-164`、Phase C-3b 最小実装でフィルタ未実装) ため、Idle にするだけでは Pulse は止まらない。`scripts/debug_track.py` の pause-all-autonomous の製品化に相当する。将来 Phase C-3c で Active フィルタが入っても、この pause は「行動の中断状態を明示的に残す」意味で冗長にならない
-3. ACTIVITY_STATE → `Idle`
+2. running な autonomous Track を全て pause — Track の帳簿を待機状態に揃える。**当初これが「実効的な停止」だった**理由は、v1 の SubLineScheduler が ACTIVITY_STATE を見ずに Pulse を打ち続けていたため。その SubLineScheduler は自律行動 v2 で**モジュールごと削除済み** (landscape §9) なので、現在の停止の実効はフラグ側 (次項) が握る。この pause は「running のまま残すと `get_running` / メタ判断の状況分類が『作業中』と誤認する」ために続けている (`saiverse/saiverse_manager.py` の stop-autonomy)
+3. `AUTONOMY_ENABLED` → `False` — 判断点・watchdog のゲートが全て閉じる
 4. 対ユーザー Track (user_conversation) を**サイレント activate** (§6.3) — running 化してユーザー発話に即応できる状態に戻す
 
-停止の対象は autonomous 種別の Track のみ。social Track 等は本トグルのスコープ外 (現状 SubLineScheduler の対象も autonomous のみ)。
+停止の対象は autonomous 種別の Track のみ。social Track 等は本トグルのスコープ外。
 
 ### 6.3 サイレント activate (pulse_dispatch.md §5 との整合)
 

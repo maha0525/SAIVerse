@@ -92,10 +92,9 @@ PERSISTENT_COLUMNS = [
     # METABOLISM_ANCHORS の anchor_id は memory.db 内を指す。memory.db を
     # バイト単位で複製するため anchor は複製先でも有効 — 対で複製する
     "METABOLISM_ANCHORS",
-    # 活動モード (Stop/Sleep/Idle/Active) は運用設定。本番で Active なら
-    # 複製も Active — 自律行動テストの目的に合致するため複製する
-    "ACTIVITY_STATE",
-    "SLEEP_ON_CACHE_EXPIRE",
+    # 自律行動の ON/OFF は運用設定。本番で ON なら複製も ON —
+    # 自律行動テストの目的に合致するため複製する
+    "AUTONOMY_ENABLED",
     # 複製直後にバージョンアップグレード通知が走らないよう本番の値を引き継ぐ
     "LAST_KNOWN_VERSION",
     "META_JUDGMENT_CONFIG",

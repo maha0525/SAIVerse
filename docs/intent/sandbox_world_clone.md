@@ -69,7 +69,7 @@ world clone は `setup_test_env.py` を前提にしない (dest 構造を自分�
 - `logs/` (本番のログはノイズ)、`backups/`
 - `addon_data/` (外部サービスの状態・認証情報を含みうる。§3-3 と同根)
 - 非対象ペルソナの `personas/<id>/` ディレクトリ (サイズ対策。
-  DB には AI 行が残るが ACTIVITY_STATE=Stop なので動かない)
+  DB には AI 行が残るが自律行動 OFF なので動かない)
 
 ### リセット (dest 側で実行)
 
@@ -77,7 +77,7 @@ world clone は `setup_test_env.py` を前提にしない (dest 構造を自分�
 |---|---|---|
 | `ai.IS_DISPATCHED` | 全行 0 | 派遣中フラグは他 City との関係 = 写しでは無効 |
 | `ai.AUTO_COUNT` / `ai.LAST_AUTO_PROMPT_TIMES` | 0 / NULL | 実行時カウンタ |
-| `ai.ACTIVITY_STATE` | **非対象ペルソナのみ 'Stop'** | 起動時に全員が動き出すとコスト暴発 + memory.db 不在ペルソナの誤動作。対象ペルソナは本番の状態を保つ |
+| `ai.AUTONOMY_ENABLED` | **非対象ペルソナのみ `False`** | 起動時に全員が動き出すとコスト暴発 + memory.db 不在ペルソナの誤動作。対象ペルソナは本番の値を保つ。(2026-07-14 以前は `ACTIVITY_STATE='Stop'`。当時から実効は「自律が止まる」ことだけで、Stop と Idle に実装上の差は無かった — 置換後も安全機構としての意味は同一) |
 | `city.UI_PORT` / `API_PORT` | テスト用ポート | 本番と同時起動 (§3-4) |
 | `city.START_IN_ONLINE_MODE` | 0 | §3-3 |
 | `visiting_ai` / `thinking_request` | 全消去 | §3-3 |

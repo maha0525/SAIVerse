@@ -145,7 +145,7 @@ class AIConfigResponse(BaseModel):
     audio_model: Optional[str] = None
     video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
-    activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
+    autonomy_enabled: bool = True
     chronicle_enabled: bool = True
     autonomous_chronicle_enabled: bool = True
     auto_recall_enabled: bool = True
@@ -170,7 +170,7 @@ class UpdateAIConfigRequest(BaseModel):
     audio_model: Optional[str] = None
     video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
-    activity_state: Optional[str] = None  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
+    autonomy_enabled: Optional[bool] = None
     chronicle_enabled: Optional[bool] = None
     autonomous_chronicle_enabled: Optional[bool] = None
     auto_recall_enabled: Optional[bool] = None
@@ -198,7 +198,7 @@ class UpdateAIConfigRequest(BaseModel):
 
 class AutonomousStatusResponse(BaseModel):
     persona_id: str
-    activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
+    autonomy_enabled: bool
     system_running: bool
     is_active: bool  # True if actually doing autonomous conversation
 

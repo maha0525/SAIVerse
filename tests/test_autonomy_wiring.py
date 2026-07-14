@@ -2,13 +2,13 @@
 
 活性化配線の検証項目:
 
-- fire_judgment_point: Active ゲート / Playbook 欠如の WARNING スキップ /
+- fire_judgment_point: 自律 ON ゲート / Playbook 欠如の WARNING スキップ /
   precondition (Lock 下の再評価)
 - handle_scheduled_judgment: 判断点スケジュール (day_open / day_close) の変換と
   時刻駆動できない kind の棄却。ScheduleManager からの経路分岐
 - handle_wait_response_timeout / handle_conversation_end: 会話終了 →
   post_conversation の発火 / 0 往復会話の抑止 / social Track の従来経路温存
-- handle_external_event: on_event 判断の経路判断基準 (Active / 会話中 /
+- handle_external_event: on_event 判断の経路判断基準 (自律 ON / 会話中 /
   engage_now の応対起動 / フォールバック)
 - watchdog_tick: 正常時 no-op / plan 欠如時のみ day_open 再発火 /
   コマ予約の途絶検知
@@ -131,7 +131,7 @@ def _make_manager(session_factory, *, active=True, with_playbooks=True):
         persona_name="Alice",
         current_building_id="alice_room",
         private_room_id="alice_room",
-        activity_state="Active" if active else "Idle",
+        autonomy_enabled=active,
     )
     manager = SimpleNamespace(
         SessionLocal=session_factory,
@@ -174,7 +174,7 @@ def test_fire_judgment_point_skips_non_active_persona(session_factory):
     manager, _ = _make_manager(session_factory, active=False)
     result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
     assert result["submitted"] is False
-    assert result["reason"] == "persona not Active"
+    assert result["reason"] == "persona autonomy disabled"
     assert manager.pulse_controller.calls == []
 
 
@@ -517,7 +517,7 @@ def test_external_event_not_active_goes_direct(session_factory, monkeypatch):
         manager, PERSONA_ID, "掲示板の告知",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
-    assert route == wiring.ROUTE_DIRECT_NOT_ACTIVE
+    assert route == wiring.ROUTE_DIRECT_AUTONOMY_DISABLED
     assert dispatched == ["direct"]
     assert calls == []
 

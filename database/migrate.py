@@ -320,11 +320,17 @@ def migrate_database_in_place(db_path: str):
 
         logging.info("すべてのテーブルのデータ移行が正常に完了しました。")
 
-        # Post-migration: convert legacy INTERACTION_MODE values to ACTIVITY_STATE.
+        # Post-migration: convert legacy AI state columns into AUTONOMY_ENABLED.
         # The column-copy phase above only carries over columns that exist in the
-        # new schema, so when INTERACTION_MODE is dropped its values are lost
-        # without an explicit translation step.
-        _migrate_interaction_mode_to_activity_state(source_engine, target_engine)
+        # new schema, so when INTERACTION_MODE / ACTIVITY_STATE are dropped their
+        # values are lost without an explicit translation step. Two historical
+        # source columns are possible depending on DB age (INTERACTION_MODE was
+        # replaced by ACTIVITY_STATE, which is in turn replaced by
+        # AUTONOMY_ENABLED here, 2026-07-14) — run both; each no-ops if its
+        # source column is absent. Order: legacy INTERACTION_MODE first, then
+        # the more recent ACTIVITY_STATE so it wins if a DB somehow has both.
+        _migrate_interaction_mode_to_autonomy_enabled(source_engine, target_engine)
+        _migrate_activity_state_to_autonomy_enabled(source_engine, target_engine)
 
         # Post-migration: assign slot numbers to existing items (in order of CREATED_AT)
         _assign_initial_slot_numbers(target_engine)
@@ -366,20 +372,23 @@ def migrate_database_in_place(db_path: str):
         except Exception as rb_e:
             logging.error(f"ロールバックに失敗しました: {rb_e}", exc_info=True)
 
-def _migrate_interaction_mode_to_activity_state(source_engine, target_engine) -> None:
-    """Map legacy AI.INTERACTION_MODE values to AI.ACTIVITY_STATE.
+def _migrate_interaction_mode_to_autonomy_enabled(source_engine, target_engine) -> None:
+    """Map ultra-legacy AI.INTERACTION_MODE values directly to AI.AUTONOMY_ENABLED.
 
-    Mapping (Intent A v0.9 / Intent B v0.6):
-    - 'auto'   -> 'Active' (自律行動含めて全動作)
-    - 'user'   -> 'Idle'   (起きてるが自発的には行動しない)
-    - 'manual' -> 'Idle'   (実装上の "auto OFF" 状態。Idle と同義)
-    - 'sleep'  -> 'Sleep'  (寝てる、ユーザー発言で起きる)
-    - その他    -> 'Idle'   (フォールバック)
+    Historical chain: INTERACTION_MODE (retired) -> ACTIVITY_STATE (retired
+    2026-07-14) -> AUTONOMY_ENABLED (current). ACTIVITY_STATE no longer exists
+    in the target schema, so a DB old enough to still carry INTERACTION_MODE
+    is translated straight to AUTONOMY_ENABLED (skipping the now-removed
+    intermediate column) using the same equivalence the old two-step mapping
+    implied ('auto' was the only mode that mapped to the equivalent of
+    ACTIVITY_STATE='Active'; everything else mapped to a non-Active state):
 
-    Runs only when the source DB still has INTERACTION_MODE; otherwise no-op.
-    Existing ACTIVITY_STATE values from rows that already had a non-default
-    state are overwritten — INTERACTION_MODE is the prior source of truth so
-    we honor it during the one-shot migration.
+    - 'auto'          -> True  (自律行動含めて全動作)
+    - 'user'/'manual'/'sleep'/other -> False
+
+    Runs only when the source DB still has INTERACTION_MODE; otherwise no-op
+    (the mainstream case today: real DBs carry ACTIVITY_STATE instead — see
+    :func:`_migrate_activity_state_to_autonomy_enabled`).
     """
     try:
         source_inspector = inspect(source_engine)
@@ -396,27 +405,74 @@ def _migrate_interaction_mode_to_activity_state(source_engine, target_engine) ->
         if not rows:
             return
 
-        mapping = {
-            "auto": "Active",
-            "user": "Idle",
-            "manual": "Idle",
-            "sleep": "Sleep",
-        }
         with target_engine.begin() as tgt:
             converted = 0
             for ai_id, legacy_mode in rows:
-                new_state = mapping.get((legacy_mode or "").strip(), "Idle")
+                enabled = (legacy_mode or "").strip() == "auto"
                 tgt.execute(
-                    text('UPDATE "AI" SET ACTIVITY_STATE = :state WHERE AIID = :id'),
-                    {"state": new_state, "id": ai_id},
+                    text('UPDATE "AI" SET AUTONOMY_ENABLED = :enabled WHERE AIID = :id'),
+                    {"enabled": enabled, "id": ai_id},
                 )
                 converted += 1
         logging.info(
-            "INTERACTION_MODE -> ACTIVITY_STATE 変換完了: %d 件のレコードを更新しました。",
+            "INTERACTION_MODE -> AUTONOMY_ENABLED 変換完了: %d 件のレコードを更新しました。",
             converted,
         )
     except Exception as exc:
-        logging.warning("INTERACTION_MODE -> ACTIVITY_STATE 変換に失敗しました: %s", exc, exc_info=True)
+        logging.warning("INTERACTION_MODE -> AUTONOMY_ENABLED 変換に失敗しました: %s", exc, exc_info=True)
+
+
+def _migrate_activity_state_to_autonomy_enabled(source_engine, target_engine) -> None:
+    """Map legacy AI.ACTIVITY_STATE values to AI.AUTONOMY_ENABLED (2026-07-14).
+
+    ACTIVITY_STATE was a 4-state column ('Stop'/'Sleep'/'Idle'/'Active') but
+    every real gate in the codebase only ever tested ``== 'Active'`` /
+    ``!= 'Active'`` — Stop/Sleep/Idle were never actually distinguished, and
+    'Stop' (meant to mean "fully halted") was never implemented. Replacing the
+    column with a plain boolean makes that reality explicit:
+
+    - 'Active'               -> True
+    - 'Stop'/'Sleep'/'Idle'/other/NULL -> False
+
+    This is the mainstream migration path today (real DBs carry
+    ACTIVITY_STATE, not the older INTERACTION_MODE — see
+    :func:`_migrate_interaction_mode_to_autonomy_enabled` for that older
+    case). Runs only when the source DB still has ACTIVITY_STATE; otherwise
+    no-op. Without this step, the column-copy phase in
+    :func:`migrate_database_in_place` would silently leave every persona's
+    AUTONOMY_ENABLED at the new column's default (True) — turning every
+    previously-Idle persona's autonomous behavior on.
+    """
+    try:
+        source_inspector = inspect(source_engine)
+        if not source_inspector.has_table("AI"):
+            return
+        source_cols = {c["name"] for c in source_inspector.get_columns("AI")}
+        if "ACTIVITY_STATE" not in source_cols:
+            logging.info("ACTIVITY_STATE が source DB に存在しないため、変換をスキップします。")
+            return
+
+        with source_engine.connect() as src:
+            rows = src.execute(text('SELECT AIID, ACTIVITY_STATE FROM "AI"')).fetchall()
+
+        if not rows:
+            return
+
+        with target_engine.begin() as tgt:
+            converted = 0
+            for ai_id, legacy_state in rows:
+                enabled = (legacy_state or "").strip() == "Active"
+                tgt.execute(
+                    text('UPDATE "AI" SET AUTONOMY_ENABLED = :enabled WHERE AIID = :id'),
+                    {"enabled": enabled, "id": ai_id},
+                )
+                converted += 1
+        logging.info(
+            "ACTIVITY_STATE -> AUTONOMY_ENABLED 変換完了: %d 件のレコードを更新しました。",
+            converted,
+        )
+    except Exception as exc:
+        logging.warning("ACTIVITY_STATE -> AUTONOMY_ENABLED 変換に失敗しました: %s", exc, exc_info=True)
 
 
 def _migrate_track_tasks_json_to_persona_task(source_engine, target_engine) -> None:

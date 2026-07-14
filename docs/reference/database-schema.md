@@ -236,8 +236,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `SPELL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `REALTIME_INFO_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `METABOLISM_ANCHORS` | TEXT | — |  |
-| `ACTIVITY_STATE` | VARCHAR(32) | NOT NULL, default='Idle' |  |
-| `SLEEP_ON_CACHE_EXPIRE` | BOOLEAN | NOT NULL, default=True |  |
+| `AUTONOMY_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `LAST_KNOWN_VERSION` | VARCHAR(64) | — |  |
 | `META_JUDGMENT_CONFIG` | TEXT | — |  |
 | `PERSONA_ROLE` | VARCHAR(32) | — |  |

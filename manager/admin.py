@@ -985,7 +985,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AUDIO_MODEL": ai.AUDIO_MODEL,
                 "VIDEO_MODEL": ai.VIDEO_MODEL,
                 "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
-                "ACTIVITY_STATE": ai.ACTIVITY_STATE,
+                "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
                 "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
@@ -1031,7 +1031,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str],
-        activity_state: str,
+        autonomy_enabled: bool,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
@@ -1076,66 +1076,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            original_state = ai.ACTIVITY_STATE
-            state_changed = original_state != activity_state
-            move_feedback = ""
+            original_autonomy = ai.AUTONOMY_ENABLED
+            state_changed = original_autonomy != autonomy_enabled
 
-            VALID_STATES = {"Stop", "Sleep", "Idle", "Active"}
             if state_changed:
-                if activity_state not in VALID_STATES:
-                    logging.warning(
-                        "Invalid activity_state '%s' requested for AI '%s'. No change made.",
-                        activity_state,
-                        name,
-                    )
-                else:
-                    ai.ACTIVITY_STATE = activity_state
-                    if activity_state == "Sleep":
-                        logging.info(
-                            "AI '%s' state changed to 'Sleep'. Attempting to move to private room.",
-                            name,
-                        )
-
-                        private_room_id = ai.PRIVATE_ROOM_ID
-                        if not private_room_id or private_room_id not in self.building_map:
-                            move_feedback = (
-                                " Note: Could not move to private room because it is not "
-                                "configured or invalid."
-                            )
-                            logging.warning(
-                                "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
-                                name,
-                                private_room_id,
-                            )
-                        else:
-                            current_building_id = self.personas[ai_id].current_building_id
-                            if current_building_id != private_room_id:
-                                success, reason = self._move_persona(
-                                    ai_id,
-                                    current_building_id,
-                                    private_room_id,
-                                    db_session=db,
-                                )
-                                if success:
-                                    self.personas[ai_id].current_building_id = private_room_id
-                                    move_feedback = (
-                                        " Moved to private room "
-                                        f"'{self.building_map[private_room_id].name}'."
-                                    )
-                                    logging.info(
-                                        "Successfully moved AI '%s' to their private room '%s'.",
-                                        name,
-                                        private_room_id,
-                                    )
-                                else:
-                                    move_feedback = (
-                                        f" Note: Failed to move to private room: {reason}."
-                                    )
-                                    logging.error(
-                                        "Failed to move AI '%s' to private room: %s",
-                                        name,
-                                        reason,
-                                    )
+                ai.AUTONOMY_ENABLED = autonomy_enabled
 
             ai.AINAME = name
             ai.DESCRIPTION = description
@@ -1200,15 +1145,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona = self.personas[ai_id]
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
-                persona.activity_state = ai.ACTIVITY_STATE
+                persona.autonomy_enabled = ai.AUTONOMY_ENABLED
                 persona.lightweight_model = lightweight_model
                 persona.vision_model = vision_model
                 persona.audio_model = audio_model
                 persona.video_model = video_model
                 persona.memory_weave_model = memory_weave_model
 
-                # Phase C-2: ACTIVITY_STATE 変更を AutonomyManager に反映
-                # (Active なら起動、Active 以外なら停止)。
+                # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
+                # (True なら起動、False なら停止)。
                 # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
                 # AdminService からは ``self.manager`` 経由で呼び出す。
                 if state_changed:
@@ -1291,9 +1236,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 status_message += " [WARNING:LLM] " + "; ".join(llm_warnings)
             if state_changed:
                 status_message += (
-                    f" State changed from '{original_state}' to '{activity_state}'."
+                    f" Autonomy changed from {original_autonomy} to {autonomy_enabled}."
                 )
-            return status_message + move_feedback
+            return status_message
         except Exception as exc:
             db.rollback()
             logging.error("Failed to update AI '%s': %s", ai_id, exc, exc_info=True)

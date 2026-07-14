@@ -215,7 +215,7 @@ class PersonaMixin:
             context_length=persona_context_length,
             user_room_id=self.user_room_id,
             provider=persona_provider,
-            activity_state=(db_ai.ACTIVITY_STATE or "Idle"),
+            autonomy_enabled=bool(db_ai.AUTONOMY_ENABLED),
             is_dispatched=db_ai.IS_DISPATCHED,
             timezone_info=self.timezone_info,
             timezone_name=self.timezone_name,
@@ -362,7 +362,12 @@ class PersonaMixin:
                 SYSTEMPROMPT=system_prompt,
                 DESCRIPTION=f"A new persona named {name}.",
                 AUTO_COUNT=0,
-                ACTIVITY_STATE="Idle",
+                # 既定 ON (owner 裁定 2026-07-14)。旧 ACTIVITY_STATE 時代の既定は
+                # "Idle" (自律 OFF) だったが、ライフ (PersonaSchedule の起床・就寝) が
+                # 未設定なら自律 ON でも発火しない (watchdog が "no day_open schedule"
+                # で skip) ため暴走しない。「止めたいものをピンポイントで止める」
+                # 設計に合わせ、既定は ON。
+                AUTONOMY_ENABLED=True,
                 IS_DISPATCHED=False,
                 DEFAULT_MODEL=self.model,
                 CHRONICLE_ENABLED=False,
@@ -517,7 +522,7 @@ class PersonaMixin:
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
-                "ACTIVITY_STATE": ai.ACTIVITY_STATE,
+                "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
             }
         finally:
@@ -541,7 +546,7 @@ class PersonaMixin:
         system_prompt: str,
         home_city_id: int,
         default_model: Optional[str],
-        activity_state: str,
+        autonomy_enabled: bool,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         chronicle_enabled: Optional[bool] = None,
@@ -581,66 +586,11 @@ class PersonaMixin:
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            original_state = ai.ACTIVITY_STATE
-            state_changed = original_state != activity_state
-            move_feedback = ""
+            original_autonomy = ai.AUTONOMY_ENABLED
+            state_changed = original_autonomy != autonomy_enabled
 
-            VALID_STATES = {"Stop", "Sleep", "Idle", "Active"}
             if state_changed:
-                if activity_state not in VALID_STATES:
-                    logging.warning(
-                        "Invalid activity_state '%s' requested for AI '%s'. No change made.",
-                        activity_state,
-                        name,
-                    )
-                else:
-                    ai.ACTIVITY_STATE = activity_state
-                    if activity_state == "Sleep":
-                        logging.info(
-                            "AI '%s' state changed to 'Sleep'. Attempting to move to private room.",
-                            name,
-                        )
-
-                        private_room_id = ai.PRIVATE_ROOM_ID
-                        if not private_room_id or private_room_id not in self.building_map:
-                            move_feedback = (
-                                " Note: Could not move to private room because it is not "
-                                "configured or invalid."
-                            )
-                            logging.warning(
-                                "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
-                                name,
-                                private_room_id,
-                            )
-                        else:
-                            current_building_id = self.personas[ai_id].current_building_id
-                            if current_building_id != private_room_id:
-                                success, reason = self._move_persona(
-                                    ai_id,
-                                    current_building_id,
-                                    private_room_id,
-                                    db_session=db,
-                                )
-                                if success:
-                                    self.personas[ai_id].current_building_id = private_room_id
-                                    move_feedback = (
-                                        " Moved to private room "
-                                        f"'{self.building_map[private_room_id].name}'."
-                                    )
-                                    logging.info(
-                                        "Successfully moved AI '%s' to their private room '%s'.",
-                                        name,
-                                        private_room_id,
-                                    )
-                                else:
-                                    move_feedback = (
-                                        f" Note: Failed to move to private room: {reason}."
-                                    )
-                                    logging.error(
-                                        "Failed to move AI '%s' to private room: %s",
-                                        name,
-                                        reason,
-                                    )
+                ai.AUTONOMY_ENABLED = autonomy_enabled
 
             ai.AINAME = name
             ai.DESCRIPTION = description
@@ -679,7 +629,7 @@ class PersonaMixin:
                 persona = self.personas[ai_id]
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
-                persona.activity_state = ai.ACTIVITY_STATE
+                persona.autonomy_enabled = ai.AUTONOMY_ENABLED
                 if default_model is not None and hasattr(persona, "model"):
                     persona.model = default_model or None
                 if lightweight_model is not None and hasattr(persona, "lightweight_model"):
@@ -698,9 +648,9 @@ class PersonaMixin:
             status_message = f"AI '{name}' updated successfully."
             if state_changed:
                 status_message += (
-                    f" State changed from '{original_state}' to '{activity_state}'."
+                    f" Autonomy changed from {original_autonomy} to {autonomy_enabled}."
                 )
-            return status_message + move_feedback
+            return status_message
         except Exception as exc:
             db.rollback()
             logging.error("Failed to update AI '%s': %s", ai_id, exc, exc_info=True)

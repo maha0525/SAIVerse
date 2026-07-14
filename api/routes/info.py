@@ -16,7 +16,7 @@ class OccupantInfo(BaseModel):
     avatar: Optional[str] = None
     # ライフビューの常在インジケータ (persona_activity_view.md §4.2)。
     # AI persona のみ設定される。users 配列では常に None。
-    activity_state: Optional[str] = None  # Stop / Sleep / Idle / Active
+    autonomy_enabled: Optional[bool] = None
     activity_label: Optional[str] = None  # running 自律 Track 由来の短い活動ラベル
     # 「話しかけやすさ」表示 (life.md §9.1)。AI persona のみ設定される。
     # None = lives 未宣言 (何も出さない。誤情報を出さないため)。
@@ -158,7 +158,7 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
                     "id": oid,
                     "name": persona.persona_name,
                     "avatar": avatar,
-                    "activity_state": getattr(persona, "activity_state", None),
+                    "autonomy_enabled": getattr(persona, "autonomy_enabled", None),
                     "activity_label": activity_label,
                     "life_state": life_state,
                     "life_until": life_until,

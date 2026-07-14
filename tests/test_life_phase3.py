@@ -101,7 +101,7 @@ def manager(session_factory):
 
     persona = SimpleNamespace(
         persona_id=PERSONA_ID,
-        activity_state="Active",
+        autonomy_enabled=True,
         model="claude-x",
         current_building_id="alice_room",
         private_room_id="alice_room",

@@ -94,7 +94,7 @@ def _make_runtime(persona, *, meta_layer=None, scheduler=None):
 def _persona(**over):
     base = dict(
         persona_id="air",
-        activity_state="Active",
+        autonomy_enabled=True,
         model="claude-x",
         current_building_id="room",
         history_manager=None,
@@ -198,7 +198,7 @@ def test_keepalive_touches_cache_without_writing_memory(_mock_cache):
 
 
 def test_keepalive_skips_when_not_active():
-    persona = _persona(activity_state="Idle")
+    persona = _persona(autonomy_enabled=False)
     runtime, _ = _make_runtime(persona)
     client = FakeLLMClient()
     _wire_keepalive(runtime, persona, client)

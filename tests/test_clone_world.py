@@ -3,7 +3,7 @@
 world clone の中核性質を検証する:
 - 世界の全体 (Building / Item / persona_task / playbooks 相当) が dest に写る
 - 実行時状態のリセット (ポート / オンラインモード / addon / visiting_ai /
-  thinking_request / 非対象ペルソナ Stop) が intent doc §4 の表どおり
+  thinking_request / 非対象ペルソナの自律行動 OFF) が intent doc §4 の表どおり
 - source (本番) は一切変更されない (バイト列比較)
 - 前提未達 (dest==source / 不在ペルソナ) は CloneError
 """
@@ -41,11 +41,11 @@ def _make_source_db(path: Path) -> None:
         session.add(Building(BUILDINGID="quon_room", CITYID=1,
                              BUILDINGNAME="クオンの部屋", CAPACITY=2))
         session.add(AI(AIID="quon", AINAME="クオン", HOME_CITYID=1,
-                       ACTIVITY_STATE="Active", PRIVATE_ROOM_ID="quon_room",
+                       AUTONOMY_ENABLED=True, PRIVATE_ROOM_ID="quon_room",
                        IS_DISPATCHED=True, AUTO_COUNT=5,
                        LAST_AUTO_PROMPT_TIMES='["x"]'))
         session.add(AI(AIID="other", AINAME="他の子", HOME_CITYID=1,
-                       ACTIVITY_STATE="Active"))
+                       AUTONOMY_ENABLED=True))
         session.add(BuildingOccupancyLog(
             CITYID=1, BUILDINGID="quon_room", AIID="quon",
             ENTRY_TIMESTAMP=datetime(2026, 7, 5, 9, 0), EXIT_TIMESTAMP=None,
@@ -137,12 +137,12 @@ class CloneWorldTest(unittest.TestCase):
         conn = self._dest_conn()
         try:
             quon = conn.execute("SELECT * FROM ai WHERE AIID='quon'").fetchone()
-            self.assertEqual(quon["ACTIVITY_STATE"], "Active")  # 対象は本番の状態を保つ
+            self.assertEqual(quon["AUTONOMY_ENABLED"], 1)  # 対象は本番の状態を保つ
             self.assertEqual(quon["IS_DISPATCHED"], 0)
             self.assertEqual(quon["AUTO_COUNT"], 0)
             self.assertIsNone(quon["LAST_AUTO_PROMPT_TIMES"])
             other = conn.execute("SELECT * FROM ai WHERE AIID='other'").fetchone()
-            self.assertEqual(other["ACTIVITY_STATE"], "Stop")  # 非対象は停止
+            self.assertEqual(other["AUTONOMY_ENABLED"], 0)  # 非対象は自律行動 OFF
             city = conn.execute("SELECT * FROM city").fetchone()
             self.assertEqual(city["UI_PORT"], 18000)
             self.assertEqual(city["API_PORT"], 18001)
@@ -153,7 +153,7 @@ class CloneWorldTest(unittest.TestCase):
             self.assertEqual(addon[0], 0)
         finally:
             conn.close()
-        self.assertEqual(summary["reset"]["stopped_personas"], 1)
+        self.assertEqual(summary["reset"]["autonomy_disabled_personas"], 1)
 
     def test_keep_addons(self):
         self._clone(keep_addons=True)

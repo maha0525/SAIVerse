@@ -73,7 +73,7 @@ class AutonomyManager:
 
     自律行動 v2 で tick の中身は watchdog (autonomy_wiring.watchdog_tick) に
     縮退した — 正常時は何もしない見張り。start/stop は従来どおり
-    ACTIVITY_STATE 同期 (ensure_autonomy_for) が握る。
+    AUTONOMY_ENABLED 同期 (ensure_autonomy_for) が握る。
     """
 
     def __init__(

@@ -15,8 +15,6 @@ Usage:
 前提:
     - テスト環境 (clone_world_to_test_env.py 推奨) が test_data/ にあること。
       SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR 未設定時は自動で test_data/ を指す
-    - 対象ペルソナが ACTIVITY_STATE != 'Stop' であること (world clone の --persona
-      で指定した写し身)
     - **実 LLM を呼ぶ (実コスト発生)**。API キーは .env から読む
 
 安全性:

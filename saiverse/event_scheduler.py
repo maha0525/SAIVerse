@@ -7,7 +7,7 @@ Intent A v0.10 / Intent B v0.7 の「メタレイヤーの定期実行入口」�
 集約対象 (Phase 4-e で統合):
 - メタ判断 Pulse の TTL 接近前倒し (anchor touch から push)
 - メタ判断 Pulse の interval 経過 (judgment 完了から push)
-- ACTIVITY_STATE=Active 化時の即時発火
+- AUTONOMY_ENABLED=True 化時の即時発火
 - ペルソナスケジュール (PersonaSchedule の発火時刻)
 - 内部 alert (Track 状態の遅延通知)
 - inter-city DB poll (VisitingAI / ThinkingRequest)

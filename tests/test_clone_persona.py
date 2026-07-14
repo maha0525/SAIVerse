@@ -105,7 +105,7 @@ class CloneTestBase(unittest.TestCase):
                 DEFAULT_MODEL="my-local-model",
                 LIGHTWEIGHT_MODEL="claude-haiku-4-5",
                 PRIVATE_ROOM_ID="prod_private_room",
-                ACTIVITY_STATE="Active",
+                AUTONOMY_ENABLED=True,
                 LIFE_PURPOSE='{"purpose": "live"}',
             ))
             # 開いている occupancy 行 (現在位置): dest に同名 Building がある "Test Lobby"
@@ -161,7 +161,7 @@ class TestCloneBasics(CloneTestBase):
             self.assertEqual(row.SYSTEMPROMPT, "you are air")
             self.assertEqual(row.EMOTION, '{"joy": 0.5}')
             self.assertEqual(row.DEFAULT_MODEL, "my-local-model")
-            self.assertEqual(row.ACTIVITY_STATE, "Active")
+            self.assertEqual(row.AUTONOMY_ENABLED, True)
             self.assertEqual(row.LIFE_PURPOSE, '{"purpose": "live"}')
             # HOME_CITYID は dest の City に再マップ
             self.assertEqual(row.HOME_CITYID, 1)

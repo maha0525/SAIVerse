@@ -1039,7 +1039,9 @@ ALTER TABLE AI ADD COLUMN SLEEP_ON_CACHE_EXPIRE BOOLEAN NOT NULL DEFAULT TRUE;
 
 #### 状態の可視性
 
-`ACTIVITY_STATE` は他ペルソナからも見える（既存 API で公開）:
+> **⚠️ 2026-07-14: 以下は実装されなかった設計。** 「他ペルソナからの呼びかけ」機能そのものが未実装で、届く/届かないの分岐は存在しない。前提だった `ACTIVITY_STATE` も解体済み ([landscape §9](../overview/landscape.md))。他ペルソナ発言への返答 ON/OFF は、**機能を実装するときに同時に**スイッチを作る方針 (効かないスイッチを UI に並べないため)。
+
+（当時の構想）`ACTIVITY_STATE` は他ペルソナからも見える（既存 API で公開）:
 - ペルソナ A が B に話しかけたい時、B の状態を確認
 - `Stop` / `Sleep` なら届かない（または届いても起きない）
 - `Idle` / `Active` なら届く
@@ -1239,10 +1241,11 @@ SAIVerseManager の background loop に「ペルソナごとのタイマー」�
 - 各ペルソナの最終メタレイヤー実行時刻を記録
 - `SAIVERSE_META_LAYER_INTERVAL_SECONDS` (デフォルト 3000 = 50 分) 経過したら `on_periodic_tick` 発火
 
-ACTIVITY_STATE による分岐:
-- `Active`: 定期発火 ON
-- `Idle`: 定期発火 OFF (Sleep への自動遷移は SLEEP_ON_CACHE_EXPIRE フラグで別途制御)
-- `Sleep`/`Stop`: 定期発火 OFF
+自律フラグによる分岐:
+- `AUTONOMY_ENABLED=True`: 発火 ON
+- `AUTONOMY_ENABLED=False`: 発火 OFF
+
+> **2026-07-14 追記 (二重に古い節)**: ①この分岐は当時 `ACTIVITY_STATE` 4 値 (Active のみ ON / Idle・Sleep・Stop は OFF、Sleep への自動遷移は `SLEEP_ON_CACHE_EXPIRE`) で書かれていたが、両列とも**解体・削除**され自律フラグ 1 本になった (`SLEEP_ON_CACHE_EXPIRE` に至っては一度も実装されていなかった)。②そもそも**この 50 分 tick による定期ディスパッチ自体が停止済み**で、tick は watchdog (時間割発火の途絶検知) へ縮退している。いずれも [landscape §9](../overview/landscape.md) 参照。
 
 ## Track 種別ごとの専用 Playbook 設計方針 （v0.8 で新規）
 
@@ -1895,7 +1898,7 @@ Pulse 階層に対応して、スケジューラも 2 系統に分ける:
 
 メインライン Pulse の起動を管理する background loop:
 
-- **対象**: ACTIVITY_STATE=Active なペルソナ
+- **対象**: 自律行動が ON のペルソナ (`AUTONOMY_ENABLED=True`。2026-07-14 以前は `ACTIVITY_STATE=Active`)
 - **トリガ条件**:
   - メインモデルのキャッシュ TTL 接近 (`SAIVERSE_META_LAYER_INTERVAL_SECONDS` 経過、または cache_ttl_seconds 経過の早い方)
   - 外部イベント駆動 (alert 発生時、即時)

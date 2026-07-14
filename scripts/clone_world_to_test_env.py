@@ -124,13 +124,13 @@ def _reset_runtime_state(
         conn.execute(
             "UPDATE ai SET IS_DISPATCHED = 0, AUTO_COUNT = 0, LAST_AUTO_PROMPT_TIMES = NULL"
         )
-        # AI: 非対象ペルソナは停止 (コスト暴発 + memory.db 不在ペルソナの誤動作防止)
+        # AI: 非対象ペルソナは自律行動 OFF (コスト暴発 + memory.db 不在ペルソナの誤動作防止)
         placeholders = ",".join("?" for _ in target_personas) or "''"
         cur = conn.execute(
-            f"UPDATE ai SET ACTIVITY_STATE = 'Stop' WHERE AIID NOT IN ({placeholders})",
+            f"UPDATE ai SET AUTONOMY_ENABLED = 0 WHERE AIID NOT IN ({placeholders})",
             target_personas,
         )
-        report["stopped_personas"] = cur.rowcount
+        report["autonomy_disabled_personas"] = cur.rowcount
 
         # City: ポート書き換え + オンラインモード解除 (複数 City は +10 ずつ)
         city_rows = conn.execute("SELECT CITYID, CITYNAME FROM city ORDER BY CITYID").fetchall()
@@ -162,13 +162,13 @@ def _reset_runtime_state(
     return report
 
 
-def _read_source_personas(source_db: Path) -> Dict[str, str]:
-    """source の全ペルソナ {AIID: ACTIVITY_STATE} を読む (存在検証用)。"""
+def _read_source_personas(source_db: Path) -> Dict[str, bool]:
+    """source の全ペルソナ {AIID: AUTONOMY_ENABLED} を読む (存在検証用)。"""
     conn = sqlite3.connect(f"file:{source_db.as_posix()}?mode=ro", uri=True)
     try:
         return {
-            row[0]: row[1]
-            for row in conn.execute("SELECT AIID, ACTIVITY_STATE FROM ai")
+            row[0]: bool(row[1])
+            for row in conn.execute("SELECT AIID, AUTONOMY_ENABLED FROM ai")
         }
     finally:
         conn.close()
@@ -358,7 +358,7 @@ def _print_summary(summary: Dict[str, Any]) -> None:
     LOGGER.info("世界複製完了 — 対象ペルソナ: %s", ", ".join(summary["targets"]) or "(なし)")
     LOGGER.info("-" * 64)
     LOGGER.info("City ポート: %s", reset["city_ports"])
-    LOGGER.info("停止した非対象ペルソナ: %d 体", reset["stopped_personas"])
+    LOGGER.info("自律行動を止めた非対象ペルソナ: %d 体", reset["autonomy_disabled_personas"])
     LOGGER.info("アドオン無効化: %s / visiting_ai 消去: %d / thinking_request 消去: %d",
                 reset["addons_disabled"], reset["visiting_ai_deleted"],
                 reset["thinking_request_deleted"])
@@ -384,7 +384,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         epilog=__doc__,
     )
     parser.add_argument("--persona", action="append", default=[],
-                        help="動かす対象ペルソナ ID (複数指定可)。指定外は ACTIVITY_STATE=Stop")
+                        help="動かす対象ペルソナ ID (複数指定可)。指定外は AUTONOMY_ENABLED=OFF")
     parser.add_argument("--source-db", type=Path, default=None)
     parser.add_argument("--source-home", type=Path, default=None)
     parser.add_argument("--dest-db", type=Path,

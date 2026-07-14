@@ -86,7 +86,7 @@ class ActivityBuildingInfo(BaseModel):
 
 class ActivityViewResponse(BaseModel):
     persona_id: str
-    activity_state: str
+    autonomy_enabled: bool
     autonomy_running: bool
     building: ActivityBuildingInfo
     now: List[ActivityNowItem]
@@ -100,7 +100,7 @@ class ActivityViewResponse(BaseModel):
 class ActivityToggleResponse(BaseModel):
     success: bool
     message: str
-    activity_state: str
+    autonomy_enabled: bool
     autonomy_running: bool
 
 
@@ -131,25 +131,25 @@ def _load_judgment_config(manager, persona) -> Dict[str, Any]:
         return {}
 
 
-def _set_activity_state(manager, persona_id: str, persona, state: str) -> None:
-    """ACTIVITY_STATE を DB + メモリ上の persona の両方で更新する。"""
+def _set_autonomy_enabled(manager, persona_id: str, persona, enabled: bool) -> None:
+    """AUTONOMY_ENABLED を DB + メモリ上の persona の両方で更新する。"""
     db = manager.SessionLocal()
     try:
         ai = db.query(AI).filter(AI.AIID == persona_id).first()
         if ai is None:
             raise HTTPException(status_code=404, detail="Persona not found in DB")
-        ai.ACTIVITY_STATE = state
+        ai.AUTONOMY_ENABLED = enabled
         db.commit()
     except HTTPException:
         raise
     except Exception:
         db.rollback()
-        LOGGER.exception("[activity] Failed to set ACTIVITY_STATE for %s", persona_id)
-        raise HTTPException(status_code=500, detail="Failed to update activity state")
+        LOGGER.exception("[activity] Failed to set AUTONOMY_ENABLED for %s", persona_id)
+        raise HTTPException(status_code=500, detail="Failed to update autonomy state")
     finally:
         db.close()
-    persona.activity_state = state
-    LOGGER.info("[activity] ACTIVITY_STATE=%s for %s", state, persona_id)
+    persona.autonomy_enabled = enabled
+    LOGGER.info("[activity] AUTONOMY_ENABLED=%s for %s", enabled, persona_id)
 
 
 def _track_metadata_dict(track) -> Dict[str, Any]:
@@ -483,7 +483,7 @@ def get_activity_view(persona_id: str, manager=Depends(get_manager)):
 
     return ActivityViewResponse(
         persona_id=persona_id,
-        activity_state=getattr(persona, "activity_state", "Idle"),
+        autonomy_enabled=bool(getattr(persona, "autonomy_enabled", True)),
         autonomy_running=am.is_running,
         building=ActivityBuildingInfo(id=building_id, name=building_name),
         now=now_items,
@@ -497,7 +497,7 @@ def get_activity_view(persona_id: str, manager=Depends(get_manager)):
 def start_activity(persona_id: str, manager=Depends(get_manager)):
     """再生: 自律行動を始めさせる (persona_activity_view.md §6.1)。
 
-    1. ACTIVITY_STATE → Active (Idle / Sleep / Stop のどこからでも起こす)
+    1. AUTONOMY_ENABLED → True
     2. AutonomyManager.start() — 即時に watchdog チェックが走る (自律行動 v2)。
        起床時間帯で今日の day_plan が無ければ、その場で起床判断 (day_open) が
        火入れされ、時間割の編成から一日が始まる。pause 済み Track の自動
@@ -505,7 +505,7 @@ def start_activity(persona_id: str, manager=Depends(get_manager)):
     """
     persona = _get_persona_or_404(manager, persona_id)
 
-    _set_activity_state(manager, persona_id, persona, "Active")
+    _set_autonomy_enabled(manager, persona_id, persona, True)
 
     # 候補補充 Track (autonomous_desire.md §11) は _on_persona_registered で
     # 起動時/作成時に常設済みなので、ここでの ensure は不要。
@@ -518,7 +518,7 @@ def start_activity(persona_id: str, manager=Depends(get_manager)):
     return ActivityToggleResponse(
         success=True,
         message="自律行動を開始しました" if started else "自律行動は既に動いています",
-        activity_state="Active",
+        autonomy_enabled=True,
         autonomy_running=am.is_running,
     )
 
@@ -530,14 +530,14 @@ def stop_activity(persona_id: str, manager=Depends(get_manager)):
 
     1. AutonomyManager.stop() — watchdog tick の予約 cancel
     2. running な autonomous Track を全て pause (帳簿を待機状態に揃える)
-    3. ACTIVITY_STATE → Idle (判断点・watchdog の Active ゲートが閉じる)
+    3. AUTONOMY_ENABLED → False (判断点・watchdog のゲートが閉じる)
     4. 対ユーザー Track をサイレント activate (suppress_pulse=True —
        停止ボタンで自動発言させない、不変条件 4)
     """
     # 存在確認のみ (実処理は manager.stop_autonomy に集約)。
     _get_persona_or_404(manager, persona_id)
 
-    # 停止の 4 ステップ (AM 停止 / Track pause / Idle / 対ユーザー Track 復帰) は
+    # 停止の 4 ステップ (AM 停止 / Track pause / OFF / 対ユーザー Track 復帰) は
     # manager.stop_autonomy に集約。メタ判断連続失敗リカバリと同じ経路を通す。
     result = manager.stop_autonomy(persona_id)
 
@@ -548,7 +548,7 @@ def stop_activity(persona_id: str, manager=Depends(get_manager)):
     return ActivityToggleResponse(
         success=True,
         message="自律行動を停止して待機に戻しました",
-        activity_state="Idle",
+        autonomy_enabled=False,
         autonomy_running=result["autonomy_running"],
     )
 

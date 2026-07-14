@@ -158,7 +158,7 @@ def collect_personas(db_path: Path) -> List[Dict[str, Any]]:
     conn = _open_ro(db_path)
     try:
         rows = conn.execute(
-            "SELECT AIID, AINAME, ACTIVITY_STATE, DEFAULT_MODEL, LIGHTWEIGHT_MODEL,"
+            "SELECT AIID, AINAME, AUTONOMY_ENABLED, DEFAULT_MODEL, LIGHTWEIGHT_MODEL,"
             " IS_DISPATCHED, HOME_CITYID, PRIVATE_ROOM_ID FROM ai ORDER BY AIID"
         ).fetchall()
         occupancy = {
@@ -181,7 +181,7 @@ def collect_personas(db_path: Path) -> List[Dict[str, Any]]:
         result.append({
             "persona_id": r["AIID"],
             "name": r["AINAME"],
-            "activity_state": r["ACTIVITY_STATE"],
+            "autonomy_enabled": bool(r["AUTONOMY_ENABLED"]),
             "default_model": r["DEFAULT_MODEL"],
             "lightweight_model": r["LIGHTWEIGHT_MODEL"],
             "is_dispatched": bool(r["IS_DISPATCHED"]),
@@ -203,7 +203,8 @@ def format_personas(rows: List[Dict[str, Any]]) -> str:
             loc += f" ({r['current_building_name']})"
         dispatched = " [派遣中]" if r["is_dispatched"] else ""
         lines.append(
-            f"{r['persona_id']}  {r['name']}  state={r['activity_state']}{dispatched}\n"
+            f"{r['persona_id']}  {r['name']}  "
+            f"autonomy={'ON' if r['autonomy_enabled'] else 'OFF'}{dispatched}\n"
             f"    model={r['default_model']} / lite={r['lightweight_model']}\n"
             f"    city={r['home_city']}  現在地={loc}  私室={r['private_room'] or '-'}"
         )

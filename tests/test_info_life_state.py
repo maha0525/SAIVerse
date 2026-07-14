@@ -59,7 +59,7 @@ class InfoLifeStateTest(unittest.TestCase):
             persona_id=PERSONA_ID,
             persona_name="エア",
             avatar_image=None,
-            activity_state="Active",
+            autonomy_enabled=True,
         )
         self.manager = SimpleNamespace(
             SessionLocal=self.Session,

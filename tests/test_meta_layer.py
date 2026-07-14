@@ -466,7 +466,7 @@ def test_periodic_tick_not_self_gated_by_own_wait_response_timeout(
     )
 
     persona = FakePersona(db_persona, FakeLLMClient(["dummy"]))
-    persona.activity_state = "Active"
+    persona.autonomy_enabled = True
     manager = FakeManager(tm, {db_persona: persona})
     manager.SessionLocal = session_factory
     meta = MetaLayer(manager)
@@ -501,7 +501,7 @@ def test_periodic_tick_still_gated_for_unrelated_trigger(
     )
 
     persona = FakePersona(db_persona, FakeLLMClient(["dummy"]))
-    persona.activity_state = "Active"
+    persona.autonomy_enabled = True
     manager = FakeManager(tm, {db_persona: persona})
     manager.SessionLocal = session_factory
     meta = MetaLayer(manager)
@@ -558,10 +558,10 @@ def test_alert_and_periodic_tick_are_serialized_per_persona(
         with body_lock:
             in_progress.remove(context.get("trigger", "?"))
 
-    # ACTIVITY_STATE が 'Active' でないと periodic_tick は skip される。
+    # AUTONOMY_ENABLED が False だと periodic_tick は skip される。
     # 判断本体スタブがその先で動くよう FakePersona に属性を生やす。
     persona = FakePersona(db_persona, FakeLLMClient(["dummy"]))
-    persona.activity_state = "Active"
+    persona.autonomy_enabled = True
     manager = FakeManager(tm, {db_persona: persona})
     meta = MetaLayer(manager)
 

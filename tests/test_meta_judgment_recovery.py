@@ -1,7 +1,7 @@
 """メタ判断 Pulse 失敗時リカバリ (案C) のテスト。
 
-phase4_meta_judgment_recovery.md 案C: 連続失敗が閾値に達したら ACTIVITY_STATE を
-Idle に降格 + host イベント通知する挙動を検証する。
+phase4_meta_judgment_recovery.md 案C: 連続失敗が閾値に達したら AUTONOMY_ENABLED を
+False にする + host イベント通知する挙動を検証する。
 """
 import unittest
 from unittest.mock import MagicMock
@@ -88,10 +88,10 @@ class TestStopAutonomy(unittest.TestCase):
 
         result = SAIVerseManager.stop_autonomy(mgr, "p1")
 
-        # 1. AM 停止 / 2. autonomous Track pause / 3. Idle / 4. 対ユーザー Track 復帰
+        # 1. AM 停止 / 2. autonomous Track pause / 3. AUTONOMY_ENABLED=False / 4. 対ユーザー Track 復帰
         am.stop.assert_called_once()
         tm.pause.assert_called_once_with("t:1")
-        self.assertEqual(persona.activity_state, "Idle")
+        self.assertEqual(persona.autonomy_enabled, False)
         tm.activate.assert_called_once_with("t:2", suppress_pulse=True)
         self.assertEqual(result["paused_tracks"], ["t:1"])
         self.assertTrue(result["user_track_activated"])

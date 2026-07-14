@@ -1,7 +1,8 @@
 """Phase A schema tests for cognitive model (Intent A v0.9 / Intent B v0.6).
 
-Verifies that the new tables (action_track) and the new AI columns
-(ACTIVITY_STATE, SLEEP_ON_CACHE_EXPIRE) exist with the expected defaults and
+Verifies that the new tables (action_track) and the AI.AUTONOMY_ENABLED
+column (2026-07-14: replaces the retired ACTIVITY_STATE 4-state /
+SLEEP_ON_CACHE_EXPIRE columns) exist with the expected defaults and
 constraints.
 
 Note / NotePage / NoteMessage / TrackOpenNote の ORM クラスは P3c①
@@ -61,19 +62,19 @@ def test_new_tables_exist(session):
     assert expected.issubset(set(inspector.get_table_names()))
 
 
-def test_ai_has_new_activity_columns(session):
-    """AI gains ACTIVITY_STATE and SLEEP_ON_CACHE_EXPIRE columns."""
+def test_ai_has_autonomy_enabled_column(session):
+    """AI gains the AUTONOMY_ENABLED column."""
     inspector = inspect(session.bind)
     cols = {c["name"] for c in inspector.get_columns("ai")}
-    assert "ACTIVITY_STATE" in cols
-    assert "SLEEP_ON_CACHE_EXPIRE" in cols
+    assert "AUTONOMY_ENABLED" in cols
+    assert "ACTIVITY_STATE" not in cols
+    assert "SLEEP_ON_CACHE_EXPIRE" not in cols
 
 
-def test_ai_activity_state_defaults_to_idle(session, persona):
-    """New personas default to ACTIVITY_STATE='Idle' and SLEEP_ON_CACHE_EXPIRE=True."""
+def test_ai_autonomy_enabled_defaults_to_true(session, persona):
+    """New personas default to AUTONOMY_ENABLED=True."""
     refreshed = session.query(AI).filter_by(AIID="test_persona").first()
-    assert refreshed.ACTIVITY_STATE == "Idle"
-    assert refreshed.SLEEP_ON_CACHE_EXPIRE is True
+    assert refreshed.AUTONOMY_ENABLED is True
 
 
 def test_action_track_defaults(session, persona):

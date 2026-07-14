@@ -138,8 +138,8 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `action_tracks` テーブル | ✅ | `database/models.py:395` | C-1 |
 | `notes` / `note_pages` / `note_messages` / `track_open_notes` テーブル | ✅ | `database/models.py:436-506` | C-1 |
 | `track_*` ツール群 (create/activate/pause/wait/resume/complete/abort/forget/recall/list) | ✅ | `builtin_data/tools/track_*.py` | C-1 |
-| `AI.ACTIVITY_STATE` カラム | ✅ | `database/models.py:56` | C-1 |
-| `AI.SLEEP_ON_CACHE_EXPIRE` カラム | ✅ | `database/models.py:59` | C-1 |
+| ~~`AI.ACTIVITY_STATE` カラム~~ → `AI.AUTONOMY_ENABLED` | 🔄 | `database/models.py` | **2026-07-14 解体**: 4 値は実装上「Active か否か」しか効いておらず、真偽値 1 本 (自律行動の ON/OFF) へ置換し列は削除 ([landscape §9](../../overview/landscape.md)) |
+| ~~`AI.SLEEP_ON_CACHE_EXPIRE` カラム~~ | ❌ | — | **2026-07-14 削除**: 列は掘られたが**本体コードから一度も読まれず**、機能は実装されていなかった (Sleep 消滅で存在理由も消滅) |
 | Pulse-root context 構築機構 (`pulse_root_context.py`) | ✅ | (Phase 1.1 マージ済み) | Phase 1.1 |
 | Handler に `track_specific_guidance` 属性追加 | ✅ | `track_handlers/*` | Phase 1.1 |
 | `AI.current_active_track_id` カラム | 🔲 | 運用上は不影響だが計画上は予定あり | C-1 残件 |

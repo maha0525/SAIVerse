@@ -423,7 +423,8 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 - **User**: login state, current location
 - **City**: UI_PORT, API_PORT, online mode flag
 - **Building**: capacity, system prompt, auto pulse interval
-- **AI**: home city, system prompt, emotion state, ACTIVITY_STATE (Stop/Sleep/Idle/Active), IS_DISPATCHED flag, DEFAULT_MODEL
+- **AI**: home city, system prompt, emotion state, AUTONOMY_ENABLED (bool, default True — 自律行動の ON/OFF **だけ**。会話への返答は止めない。「いま活動時間か」は別概念のライフが持つ), IS_DISPATCHED flag, DEFAULT_MODEL
+  - ⚠️ 旧 `ACTIVITY_STATE` (Stop/Sleep/Idle/Active) は 2026-07-14 に解体・列ごと削除。実装上は「Active か否か」しか効いておらず、残り 3 値は名前だけだった (`docs/overview/landscape.md` §9)
 - **BuildingOccupancyLog**: tracks entry/exit timestamps
 - **VisitingAI**: manages inter-city move transactions (status: requested/accepted/rejected)
 - **ThinkingRequest**: queues remote thinking calls (status: pending/processed/error)

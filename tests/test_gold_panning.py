@@ -660,12 +660,12 @@ class SessionCloseTest(unittest.TestCase):
 
 
 class KeepaliveSessionCloseHookTest(unittest.TestCase):
-    """run_cache_keepalive の not-Active 分岐がセッションクローズを spawn すること。"""
+    """run_cache_keepalive の自律 OFF 分岐がセッションクローズを spawn すること。"""
 
     def test_not_active_branch_spawns_session_close(self):
         from sea.runtime import SEARuntime
 
-        persona = SimpleNamespace(activity_state="Idle")
+        persona = SimpleNamespace(autonomy_enabled=False)
         rt = SimpleNamespace(manager=SimpleNamespace(personas={"tester": persona}))
         spawned = []
         rt._spawn_session_close = lambda pid: spawned.append(pid)
@@ -760,12 +760,12 @@ class SessionWatchdogScheduleTest(unittest.TestCase):
 
 
 class KeepaliveNonExplicitBranchTest(unittest.TestCase):
-    """run_cache_keepalive: Active + 非 explicit は LLM を呼ばず見張りだけ再予約。"""
+    """run_cache_keepalive: 自律 ON + 非 explicit は LLM を呼ばず見張りだけ再予約。"""
 
     def test_active_non_explicit_reschedules_without_llm(self):
         from sea.runtime import SEARuntime
 
-        persona = SimpleNamespace(activity_state="Active", model="gem")
+        persona = SimpleNamespace(autonomy_enabled=True, model="gem")
         rescheduled = []
         session_lifecycle = SimpleNamespace(
             schedule_cache_ttl_pulse=lambda p, mk, ct: rescheduled.append((mk, ct)),
@@ -786,10 +786,10 @@ class KeepaliveNonExplicitBranchTest(unittest.TestCase):
         self.assertEqual(rescheduled, [("gem", "gemini_explicit")])
 
     def test_not_active_non_explicit_spawns_session_close(self):
-        """not-Active 分岐は cache 型非依存でクローズ spawn (gemini でも同じ)。"""
+        """自律 OFF 分岐は cache 型非依存でクローズ spawn (gemini でも同じ)。"""
         from sea.runtime import SEARuntime
 
-        persona = SimpleNamespace(activity_state="Idle", model="gem")
+        persona = SimpleNamespace(autonomy_enabled=False, model="gem")
         rt = SimpleNamespace(manager=SimpleNamespace(personas={"air": persona}))
         spawned = []
         rt._spawn_session_close = lambda pid: spawned.append(pid)

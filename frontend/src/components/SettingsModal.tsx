@@ -38,7 +38,7 @@ interface AIConfig {
     audio_model: string | null;
     video_model: string | null;
     memory_weave_model: string | null;
-    activity_state: string;  // 'Stop' / 'Sleep' / 'Idle' / 'Active'
+    autonomy_enabled: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     chronicle_enabled: boolean;
     autonomous_chronicle_enabled: boolean;
     auto_recall_enabled: boolean;
@@ -84,15 +84,8 @@ interface ModelChoice {
     name: string;
 }
 
-const ACTIVITY_STATES = [
-    { value: 'Active', label: '🟢 Active - 活発に自律稼働' },
-    { value: 'Idle', label: '🟡 Idle - 起きてるが自発的には行動しない' },
-    { value: 'Sleep', label: '🔵 Sleep - 寝てる (ユーザー発言で起きる)' },
-    { value: 'Stop', label: '⚫ Stop - 機能停止' },
-];
-
 interface AutonomousStatus {
-    activity_state: string;
+    autonomy_enabled: boolean;
     system_running: boolean;
     is_active: boolean;
 }
@@ -134,7 +127,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [audioModel, setAudioModel] = useState<string>('');
     const [videoModel, setVideoModel] = useState<string>('');
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
-    const [activityState, setActivityState] = useState<string>('Idle');
+    const [autonomyEnabled, setAutonomyEnabled] = useState<boolean>(true);
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
@@ -256,7 +249,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAudioModel(data.audio_model || '');
                 setVideoModel(data.video_model || '');
                 setMemoryWeaveModel(data.memory_weave_model || '');
-                setActivityState(data.activity_state || 'Idle');
+                setAutonomyEnabled(data.autonomy_enabled ?? true);
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
@@ -389,7 +382,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     audio_model: audioModel,
                     video_model: videoModel,
                     memory_weave_model: memoryWeaveModel,
-                    activity_state: activityState,
+                    autonomy_enabled: autonomyEnabled,
                     chronicle_enabled: chronicleEnabled,
                     autonomous_chronicle_enabled: autonomousChronicleEnabled,
                     auto_recall_enabled: autoRecallEnabled,
@@ -641,16 +634,20 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>アクティビティ状態</label>
-                                <select
-                                    className={styles.select}
-                                    value={activityState}
-                                    onChange={(e) => setActivityState(e.target.value)}
-                                >
-                                    {ACTIVITY_STATES.map(m => (
-                                        <option key={m.value} value={m.value}>{m.label}</option>
-                                    ))}
-                                </select>
+                                <label className={styles.label}>自律行動</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={autonomyEnabled}
+                                            onChange={(e) => setAutonomyEnabled(e.target.checked)}
+                                        />
+                                        <span>{autonomyEnabled ? '有効（自分から考えて動きます）' : '無効（話しかけられるまで待機します）'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    オフにしても、話しかければ通常どおり応答します。自分から発言・行動することだけを止めます。
+                                </div>
                                 {autonomousStatus && (
                                     <div className={styles.description} style={{
                                         marginTop: '0.5rem',
@@ -659,9 +656,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         borderRadius: '4px'
                                     }}>
                                         {autonomousStatus.is_active ? (
-                                            <span>✅ <strong>Active</strong> - このペルソナは自発的に発言します。</span>
+                                            <span>✅ このペルソナは自発的に発言します。</span>
                                         ) : autonomousStatus.system_running ? (
-                                            <span>⏸️ 自律システムは動作中ですが、このペルソナは {activityState} 状態です。</span>
+                                            <span>⏸️ 自律システムは動作中ですが、このペルソナは自律行動オフの状態です。</span>
                                         ) : (
                                             <span>⚠️ 自律システムは動作していません。</span>
                                         )}
@@ -744,7 +741,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     )}
                                 </div>
                                 <div className={styles.description}>
-                                    自律稼働の見張りタイマー（watchdog）の状態です。通常は上の「アクティビティ状態」（Active ⇔ それ以外）と連動して自動的に開始・停止するため、ここを直接操作する必要はありません。
+                                    自律稼働の見張りタイマー（watchdog）の状態です。通常は上の「自律行動」トグル（有効⇔無効）と連動して自動的に開始・停止するため、ここを直接操作する必要はありません。
                                 </div>
                             </div>
 

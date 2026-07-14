@@ -649,7 +649,7 @@ def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, tas
 def test_fire_judgment_point_records_judgment_pulse_separately(manager, session_factory):
     """判断点の発火は judgment_pulses だけを積む — used_pulses (予算) には
     触れない (life.md v0.5 §5.3/§8.2、実機初日の教訓)。"""
-    manager.personas[PERSONA_ID].activity_state = "Active"
+    manager.personas[PERSONA_ID].autonomy_enabled = True
     _import_judgment_playbooks(session_factory)
     manager.pulse_controller = SimpleNamespace(
         submit_meta_judgment=lambda **kwargs: None,
@@ -669,7 +669,7 @@ def test_fire_judgment_point_records_judgment_pulse_separately(manager, session_
 
 def test_fire_judgment_point_noop_life_bookkeeping_without_lives(manager, session_factory):
     """lives が無い日は判断点発火してもライフ台帳に触らない (後方互換)。"""
-    manager.personas[PERSONA_ID].activity_state = "Active"
+    manager.personas[PERSONA_ID].autonomy_enabled = True
     _import_judgment_playbooks(session_factory)
     manager.pulse_controller = SimpleNamespace(
         submit_meta_judgment=lambda **kwargs: None,

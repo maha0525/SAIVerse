@@ -1608,7 +1608,7 @@ class SEARuntime:
         - **キャッシュ経済**: 共有 prefix が cache read でヒットし、プロバイダ側の
           TTL ウィンドウが更新される。成功時は ``SessionLifecycle.touch_anchor_after_llm_call``
           が anchor を touch → 次回 keep-alive が再予約される (従来と同じ連鎖)
-        - **自然停止**: 失効済み (温め直しても意味がない) / Active でない /
+        - **自然停止**: 失効済み (温め直しても意味がない) / 自律 OFF /
           呼び出し失敗のときは touch しない → 連鎖は止まり、次の本物の呼び出し
           まで keep-alive は走らない
 
@@ -1620,11 +1620,11 @@ class SEARuntime:
         if persona is None:
             LOGGER.debug("[keepalive] persona not found: %s", persona_id)
             return False
-        if getattr(persona, "activity_state", "Idle") != "Active":
+        if not bool(getattr(persona, "autonomy_enabled", False)):
             LOGGER.debug(
-                "[keepalive] skipped (persona=%s not Active)", persona_id,
+                "[keepalive] skipped (persona=%s autonomy disabled)", persona_id,
             )
-            # ペルソナが Active でない = セッションが閉じた瞬間で、anchor がまだ
+            # ペルソナの自律行動が OFF = セッションが閉じた瞬間で、anchor がまだ
             # 温かい可能性が高い唯一の停止分岐 (docs/intent/gold_panning.md §3.6)。
             # ここで砂金採り (セッションクローズ) を別スレッドに委譲する。
             self._spawn_session_close(persona_id)

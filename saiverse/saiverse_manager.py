@@ -1176,7 +1176,7 @@ class SAIVerseManager(
             )
 
         # 1b. 候補補充 Track 確保 (冪等, autonomous_desire.md §11)。
-        #     ACTIVITY_STATE に依らず全ペルソナへ常設する。これにより起動 (再起動含む)
+        #     AUTONOMY_ENABLED に依らず全ペルソナへ常設する。これにより起動 (再起動含む)
         #     と動的作成の両方で「やりたいことを探す」永続 Track が必ず 1 本付く。
         try:
             self.track_manager.ensure_desire_refill_track(persona_id)
@@ -1186,8 +1186,8 @@ class SAIVerseManager(
                 persona_id,
             )
 
-        # 2. AutonomyManager を ACTIVITY_STATE に同期
-        #    (Active なら起動、Active 以外なら何もしない)
+        # 2. AutonomyManager を AUTONOMY_ENABLED に同期
+        #    (True なら起動、False なら何もしない)
         try:
             self.ensure_autonomy_for(persona_id)
         except Exception:
@@ -1199,9 +1199,9 @@ class SAIVerseManager(
         # 3. (C) wait_response タイムアウトタイマーの再確立。
         #    タイマーは activate 時にしか張られず EventScheduler はインメモリの
         #    ため再起動で失われる。ロード済みの running Track へ張り直す。
-        #    Idle ペルソナは provider の ACTIVITY_STATE ゲート (A) で skip される
-        #    ので、ここで全ペルソナを処理しても大量発火しない
-        #    (例外: user_conversation は Idle でも張る — episode close のため。
+        #    自律 OFF のペルソナは provider の AUTONOMY_ENABLED ゲート (A) で
+        #    skip されるので、ここで全ペルソナを処理しても大量発火しない
+        #    (例外: user_conversation は自律 OFF でも張る — episode close のため。
         #    provider の 2026-07-07 例外条項を参照)。
         #    (新規作成経路では running Track がまだ無いので実質 no-op。)
         try:
@@ -1214,13 +1214,13 @@ class SAIVerseManager(
 
         # 4. (自律行動 v2) 当日 day_plan のコマ予約を再確立 (冪等)。
         #    コマの EventScheduler 予約はインメモリで、再起動で失われる。
-        #    Active なペルソナの pending / deferred コマを同 key で再 push する
+        #    自律 ON なペルソナの pending / deferred コマを同 key で再 push する
         #    (同 key 上書きなので二重発火しない。過去時刻は即時扱い —
-        #    起床済みの一日を再起動後に続きから駆動する)。Idle ペルソナは
-        #    再開 (Active 化) 後の watchdog が拾う。
+        #    起床済みの一日を再起動後に続きから駆動する)。自律 OFF のペルソナは
+        #    再開 (自律 ON 化) 後の watchdog が拾う。
         try:
             persona = self.personas.get(persona_id)
-            if persona is not None and getattr(persona, "activity_state", "Idle") == "Active":
+            if persona is not None and bool(getattr(persona, "autonomy_enabled", False)):
                 from saiverse.day_plan import reschedule_pending_slots
 
                 reschedule_pending_slots(self, persona_id)
@@ -1448,18 +1448,18 @@ class SAIVerseManager(
             persona.apply_parameter_overrides(self.model_parameter_overrides)
 
     # ------------------------------------------------------------------
-    # AutonomyManager <-> ACTIVITY_STATE 同期 (Phase C-2)
+    # AutonomyManager <-> AUTONOMY_ENABLED 同期 (Phase C-2)
     # ------------------------------------------------------------------
 
     def ensure_autonomy_for(self, persona_id: str) -> None:
-        """指定ペルソナの AutonomyManager を ACTIVITY_STATE に同期する。
+        """指定ペルソナの AutonomyManager を AUTONOMY_ENABLED に同期する。
 
-        intent A v0.9: Active のみ定期発火 ON。それ以外 (Stop/Sleep/Idle) は
-        起動しない。既に起動中で Active 以外になった場合は停止する。
+        AUTONOMY_ENABLED=True のみ定期発火 ON。False なら起動しない。
+        既に起動中で False になった場合は停止する。
         """
         from saiverse.autonomy_manager import AutonomyManager
 
-        # 起動前 (start() 前) は AutonomyManager スレッドを立てない。起動時の全 Active
+        # 起動前 (start() 前) は AutonomyManager スレッドを立てない。起動時の全 ON
         # ペルソナぶんは start() がまとめて同期する。動的作成 / Blueprint 経路は
         # start() 後 (=_started True) に呼ばれるので通常どおり即時同期される。
         if not getattr(self, "_started", False):
@@ -1472,25 +1472,25 @@ class SAIVerseManager(
         if persona is None:
             return
 
-        state = getattr(persona, "activity_state", "Idle")
+        enabled = bool(getattr(persona, "autonomy_enabled", False))
         am = self._autonomy_managers.get(persona_id)
 
-        if state == "Active":
+        if enabled:
             if am is None:
                 am = AutonomyManager(persona_id=persona_id, manager=self)
                 self._autonomy_managers[persona_id] = am
             if not am.is_running:
                 am.start()
                 logging.info(
-                    "[autonomy-sync] Started AutonomyManager for active persona '%s'",
+                    "[autonomy-sync] Started AutonomyManager for autonomy-enabled persona '%s'",
                     persona_id,
                 )
         else:
             if am is not None and am.is_running:
                 am.stop()
                 logging.info(
-                    "[autonomy-sync] Stopped AutonomyManager for non-active persona '%s' (state=%s)",
-                    persona_id, state,
+                    "[autonomy-sync] Stopped AutonomyManager for autonomy-disabled persona '%s'",
+                    persona_id,
                 )
 
     # NOTE: _ensure_autonomy_for_active_personas は _run_persona_post_registration
@@ -1507,8 +1507,8 @@ class SAIVerseManager(
           2. running な autonomous Track を全 pause — Track の帳簿を待機状態に
              揃える（旧 SubLineScheduler は v2 で廃止済みだが、running のまま
              残すと get_running / メタ判断の状況分類が「作業中」と誤認する）
-          3. ACTIVITY_STATE → Idle（DB + in-memory）— 判断点・watchdog の
-             Active ゲートが全て閉じる
+          3. AUTONOMY_ENABLED → False（DB + in-memory）— 判断点・watchdog の
+             ゲートが全て閉じる
           4. 対ユーザー Track をサイレント activate — プロンプト待ちに戻す
 
         Returns:
@@ -1548,23 +1548,23 @@ class SAIVerseManager(
                     "[stop-autonomy] failed to pause track %s: %s", track.track_id, exc,
                 )
 
-        # 3. ACTIVITY_STATE → Idle（DB + in-memory）
+        # 3. AUTONOMY_ENABLED → False（DB + in-memory）
         db = self.SessionLocal()
         try:
             from database.models import AI as AIModel
             ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
             if ai is not None:
-                ai.ACTIVITY_STATE = "Idle"
+                ai.AUTONOMY_ENABLED = False
                 db.commit()
         except Exception:
             db.rollback()
             logging.exception(
-                "[stop-autonomy] failed to set ACTIVITY_STATE=Idle for %s", persona_id,
+                "[stop-autonomy] failed to set AUTONOMY_ENABLED=False for %s", persona_id,
             )
         finally:
             db.close()
         if persona is not None:
-            persona.activity_state = "Idle"
+            persona.autonomy_enabled = False
 
         # 4. 対ユーザー Track をサイレント activate（プロンプト待ちに戻す）
         user_track_activated = False
@@ -1609,7 +1609,7 @@ class SAIVerseManager(
             (timeout_minutes, last_message_time) — 対象 Track が
                 ``post_complete_behavior=='wait_response'`` の場合
             None — Handler 不明 / wait_response 以外 / ペルソナ unloaded /
-                ACTIVITY_STATE != Active
+                AUTONOMY_ENABLED=False
 
         ``last_message_time`` は SAIMemory の ``MAX(messages.created_at) WHERE
         origin_track_id=...`` から取る (Track 紐付きメッセージの最新)。
@@ -1618,9 +1618,9 @@ class SAIVerseManager(
 
         本 provider は schedule 時 (``_schedule_wait_response_timeout``) と
         発火時 re-eval (``_handle_wait_response_timeout``) の両方から呼ばれる
-        単一ゲート。ACTIVITY_STATE 判定もここに置くことで、Idle ペルソナでは
-        「予約しない」「(Active→Idle に落ちていたら) 発火時の callback を
-        起動しない」の両方が一箇所で効く。
+        単一ゲート。AUTONOMY_ENABLED 判定もここに置くことで、自律 OFF の
+        ペルソナでは「予約しない」「(ON→OFF に落ちていたら) 発火時の
+        callback を起動しない」の両方が一箇所で効く。
         """
         # デバッグ完全手動モード: 対象ペルソナは wait_response timeout を予約しない
         # (debug_controller.md)。None を返すと _schedule_wait_response_timeout が skip。
@@ -1640,21 +1640,21 @@ class SAIVerseManager(
             if persona is None:
                 return None
 
-            # (A) ACTIVITY_STATE ゲート: Idle ペルソナでは wait_response タイマーを
-            # 予約しない。schedule 時は予約 skip、発火時 re-eval では None 返却で
-            # _handle_wait_response_timeout が何もせず early return。
+            # (A) AUTONOMY_ENABLED ゲート: 自律 OFF のペルソナでは wait_response
+            # タイマーを予約しない。schedule 時は予約 skip、発火時 re-eval では
+            # None 返却で _handle_wait_response_timeout が何もせず early return。
             #
             # ただし user_conversation は例外 (2026-07-07): 会話 episode の close
             # (A1 配線) がこのタイマーに乗っており、記録系は「認知不変・全ペルソナ」
-            # が原則 (life_concept_map.md §8)。Idle のまま会話が永遠に「いま」に
+            # が原則 (life_concept_map.md §8)。自律 OFF のまま会話が永遠に「いま」に
             # 残る実害をまはーが観測。タイマー・close は全員に、
-            # post_conversation 判断は fire_judgment_point 内の Active ゲートが
-            # 従来通り絞る (Idle は close のみで判断は走らない)。Track の pause は
-            # life.md §7 案 Y (2026-07-13) で撤去済み — Track はもう時間経過で
-            # 状態を動かさない。
-            activity_state = getattr(persona, "activity_state", "Idle")
+            # post_conversation 判断は fire_judgment_point 内の AUTONOMY_ENABLED
+            # ゲートが従来通り絞る (自律 OFF は close のみで判断は走らない)。
+            # Track の pause は life.md §7 案 Y (2026-07-13) で撤去済み — Track は
+            # もう時間経過で状態を動かさない。
+            autonomy_enabled = bool(getattr(persona, "autonomy_enabled", False))
             if (
-                activity_state != "Active"
+                not autonomy_enabled
                 and getattr(track, "track_type", None) != "user_conversation"
             ):
                 return None
@@ -2309,7 +2309,7 @@ class SAIVerseManager(
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str] = None,
-        activity_state: str = "Idle",
+        autonomy_enabled: bool = True,
         avatar_path: Optional[str] = None,
         avatar_upload: Optional[str] = None,
         appearance_image_path: Optional[str] = None,
@@ -2337,7 +2337,7 @@ class SAIVerseManager(
             home_city_id,
             default_model,
             lightweight_model,
-            activity_state,
+            autonomy_enabled,
             avatar_path,
             avatar_upload,
             appearance_image_path,

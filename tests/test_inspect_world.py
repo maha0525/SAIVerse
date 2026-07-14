@@ -58,7 +58,7 @@ def _make_world_db(path: Path) -> None:
         session.add(Building(BUILDINGID="lobby", CITYID=1, BUILDINGNAME="ロビー", CAPACITY=10))
         session.add(AI(
             AIID="alice", AINAME="アリス", HOME_CITYID=1,
-            ACTIVITY_STATE="Active", DEFAULT_MODEL="model-x",
+            AUTONOMY_ENABLED=True, DEFAULT_MODEL="model-x",
             PRIVATE_ROOM_ID="lobby",
         ))
         session.add(BuildingOccupancyLog(

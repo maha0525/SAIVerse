@@ -14,7 +14,7 @@
 
 - コード上は `PersonaCore`（`persona/core.py`）、DB では `ai` テーブル
 - 文字列 ID（`AIID`）で識別。現在位置は `current_building_id`
-- 自律性は **`ACTIVITY_STATE`** で外部に宣言される: **Stop / Sleep / Idle / Active** の4段階
+- 自律行動の ON/OFF は **`AUTONOMY_ENABLED`**（真偽値・既定 ON）の 1 本だけ。OFF にすると時間割も判断点も発火しない（会話への返答は止まらない）。「いま活動時間か休憩中か」は別概念の [ライフ](../intent/life.md) が持つ — スイッチは「動かしてよいか」、ライフは「いまその時間か」<br>※ 旧 `ACTIVITY_STATE`（Stop / Sleep / Idle / Active の 4 値）は 2026-07-14 に解体。実装上は「Active か否か」しか効いておらず、残り 3 値は名前だけだった（[landscape §9](../overview/landscape.md)）
 - 使用モデルは `DEFAULT_MODEL`（通常）と `LIGHTWEIGHT_MODEL`（軽量・任意）の2系統
 - 他都市へ渡っている間は `IS_DISPATCHED=True`（→ inter-city travel）
 

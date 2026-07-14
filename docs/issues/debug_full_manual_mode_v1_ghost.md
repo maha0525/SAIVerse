@@ -17,7 +17,9 @@
 
 ## 対応方向（次セッションで裁定）
 
-1. **丸ごと退役**: v2 のデバッグは ACTIVITY_STATE（Stop/Idle/Active）とライフ設定で足りるなら、モードごと削除（UI・API・provider 分岐・debug_controller.md 改訂）
+1. **丸ごと退役**: v2 のデバッグは自律行動トグル（`AUTONOMY_ENABLED`）とライフ設定で足りるなら、モードごと削除（UI・API・provider 分岐・debug_controller.md 改訂）
 2. **実態縮退**: 「会話の応答待ちタイマーを止める」という現役の一機能に名前と文言を合わせて残す
 
 まはーのデバッグ実需（まだ使う場面があるか）を聞いてから決める。
+
+> **2026-07-14 追記**: 同日に `ACTIVITY_STATE`（Stop/Sleep/Idle/Active）が**解体**され、`AUTONOMY_ENABLED`（真偽値・既定 ON）1 本になった（[landscape §9](../overview/landscape.md)）。案 1 の「ACTIVITY_STATE で足りるなら」は自律トグルに読み替え済み。この解体は本 issue の追い風になる — 4 値のうち 3 値が名前だけの飾りだったのと同じ構図（**UI に名前があるのに実態が伴わない**）が、この「完全手動モード」にもある。

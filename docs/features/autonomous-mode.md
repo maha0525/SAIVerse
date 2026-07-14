@@ -12,22 +12,22 @@
 
 - **時間割（day plan）** — 起床判断（`judgment_day_open`）でペルソナ自身が今日のコマを編成し、各コマが `PersonaSchedule` / スケジューラに予約される。コマ発火で予算付きの作業セッションが走る
 - **判断点（judgment points）** — 起床・就寝はスケジュール駆動（`judgment_day_open` / `judgment_day_close`）、会話終了・セッション終了・イベント到着は文脈駆動で発火する（`saiverse/autonomy_wiring.py`）
-- **AutonomyManager**（`saiverse/autonomy_manager.py`）— 定期 tick は watchdog に縮退。正常時は何もせず、「Active・起床時間帯なのに今日の時間割が無い / コマ予約が途絶」のときだけ火入れし直す
+- **AutonomyManager**（`saiverse/autonomy_manager.py`）— 定期 tick は watchdog に縮退。正常時は何もせず、「自律 ON・起床時間帯なのに今日の時間割が無い / コマ予約が途絶」のときだけ火入れし直す
 
 これらが [PulseController](../concepts/pulse.md) に Pulse を投げ、優先度（USER > SCHEDULE > AUTO）で捌かれる。
 
 Building 側の自動 pulse 間隔は `AUTO_INTERVAL_SEC` カラム（既定 10 秒）で持つ。
 
-## ACTIVITY_STATE（自律性の宣言）
+## AUTONOMY_ENABLED（自律行動の ON/OFF）
 
-各ペルソナは `ACTIVITY_STATE`（`ai` テーブル、既定 `Idle`）で自律性を外部に宣言する。
+各ペルソナは `AUTONOMY_ENABLED`（`ai` テーブル、真偽値、既定 ON）だけを持つ。意味は「自律行動を動かしてよいか」の一点。
 
-| 状態 | 説明 |
-|---|---|
-| `Active` | アクティブに活動中 |
-| `Idle` | 待機（応答可能、次の起動を待つ） |
-| `Sleep` | 休眠 |
-| `Stop` | 停止 |
+- **ON（既定）** — 時間割・判断点が発火する。ただし起床・就寝が未設定なら何も起きない（[ライフ](../intent/life.md)が確定しないため）。つまり実質の起動条件は「生きる時間を決めること」
+- **OFF** — 自律行動が一切起きない。会話への返答は**止まらない**（話しかければ返事する）
+
+「いま活動時間か、休憩中か」は自律スイッチではなく**ライフ**が持つ。スイッチは元栓（動かしてよいか）、ライフは蛇口（いまその時間か）。
+
+> ⚠️ 旧 `ACTIVITY_STATE`（Stop / Sleep / Idle / Active）は 2026-07-14 に**解体**。実装を追うと全ゲートが「Active か否か」しか見ておらず 3 値は名前だけの飾りで、さらに「Stop＝機能停止」「Sleep＝ユーザー発言で起きる」はコードが存在しなかった（Stop でも返答していた）。経緯は [landscape §9](../overview/landscape.md)。
 
 ## 自律行動の中身
 

@@ -27,7 +27,7 @@ UC-2「割り込みと復帰」のような往復シナリオを検証すると�
 | sub_line Pulse を 1 回 | 選択した running autonomous Track に `manager.pulse_dispatcher.dispatch_subline_poll(...)` | 30 秒間隔を無視 |
 | 会話を切り上げ | running の wait_response Track を pause → メタ判断発火 | `TrackManager._handle_wait_response_timeout` 相当を即時 |
 
-**`force` トグル**: OFF = 本番同様の抑止 (ACTIVITY_STATE != Active / running が wait_response 型なら skip)。ON = 抑止無視で強制発火。`on_periodic_tick` に `force: bool = False` 引数を足し、True のとき 2 つの抑止 (`meta_layer.py:379`, `391`) をスキップする。
+**`force` トグル**: OFF = 本番同様の抑止 (自律行動が OFF / running が wait_response 型なら skip。2026-07-14 以前は `ACTIVITY_STATE != Active` 判定)。ON = 抑止無視で強制発火。`on_periodic_tick` に `force: bool = False` 引数を足し、True のとき 2 つの抑止 (`meta_layer.py:379`, `391`) をスキップする。
 
 ## タイマー制御 (UI トグル)
 

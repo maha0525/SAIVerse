@@ -482,7 +482,7 @@ def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
     """Set developer mode status.
 
     When turning OFF, also disables global auto mode and
-    sets all personas' activity_state to 'Idle' (起きてるが自発しない).
+    disables all personas' AUTONOMY_ENABLED (自発的な自律行動を停止)。
     """
     manager.state.developer_mode = req.enabled
 
@@ -490,23 +490,23 @@ def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
         # Disable global auto mode
         manager.state.global_auto_enabled = False
 
-        # Set all personas to Idle (自発的な自律行動を停止)
+        # 全ペルソナの自律行動を OFF (自発的な自律行動を停止)
         from database.session import SessionLocal
         from database.models import AI
         db = SessionLocal()
         try:
-            db.query(AI).update({AI.ACTIVITY_STATE: "Idle"})
+            db.query(AI).update({AI.AUTONOMY_ENABLED: False})
             db.commit()
         except Exception:
-            _log.warning("Failed to reset activity states", exc_info=True)
+            _log.warning("Failed to reset autonomy states", exc_info=True)
             db.rollback()
         finally:
             db.close()
 
         # Update in-memory persona objects + sync AutonomyManager (stop running ones)
         for persona in manager.state.personas.values():
-            if hasattr(persona, "activity_state"):
-                persona.activity_state = "Idle"
+            if hasattr(persona, "autonomy_enabled"):
+                persona.autonomy_enabled = False
         ensure_autonomy = getattr(manager, "ensure_autonomy_for", None)
         if callable(ensure_autonomy):
             for persona_id in list(manager.state.personas.keys()):

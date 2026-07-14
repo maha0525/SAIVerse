@@ -235,9 +235,9 @@ Track へ戻りがち**で、自律が続かない。
 - **全ペルソナ共通・永続**（`is_persistent=True`、complete/abort 不可）。**get-or-create
   で 1 本 ensure**（desire ノートと対）。ensure 箇所は **`SAIVerseManager._on_persona_registered`
   の 1 点のみ**（交流 Track と同じ統一フック）。これは起動時・再起動時・動的作成・Blueprint
-  spawn のすべてで全ペルソナに走るため、`ACTIVITY_STATE` に依らず必ず 1 本付く。
-  （初期実装では `start_activity` ＋ Active 時の periodic tick の 2 点だったが、再起動で
-  ACTIVITY_STATE が Idle に戻ると両方発火せず Track が消えるように見える問題があったため、
+  spawn のすべてで全ペルソナに走るため、**自律行動の ON/OFF に依らず**必ず 1 本付く。
+  （初期実装では `start_activity` ＋ 自律 ON 時の periodic tick の 2 点だったが、再起動で
+  自律が OFF 相当に戻ると両方発火せず Track が消えるように見える問題があったため、
   登録フック 1 点に集約した。idempotent なので重複しない。）
 - **`track_type='autonomous'`**（新 type を作らない）。`entry_line_role='sub_line'`
   （AUTONOMOUS = 軽量モデルの作業）。専用 Playbook は作らず既存 `track_autonomous`

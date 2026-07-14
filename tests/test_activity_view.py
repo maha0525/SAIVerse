@@ -382,5 +382,12 @@ def test_activity_label_truncated():
     assert label.endswith("…")
 
 
-def test_activity_label_empty_fallback():
-    assert build_activity_label(None, None) == "活動中"
+def test_activity_label_returns_none_when_nothing_to_say():
+    """題名も意図も無いときは None (何も表示しない)。
+
+    2026-07-14: かつて "活動中" を返していたが、ライフ由来の「活動中」チップと
+    文言が丸かぶりし、滞在ペルソナ欄で同じ緑ドット＋「活動中」が 2 つ並ぶ
+    実機バグになっていた。中身を言えないなら黙る。
+    """
+    assert build_activity_label(None, None) is None
+    assert build_activity_label("", "   ") is None

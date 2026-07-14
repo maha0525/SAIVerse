@@ -36,7 +36,7 @@ interface ActivityRecentItem {
 
 interface ActivityViewData {
     persona_id: string;
-    activity_state: string;
+    autonomy_enabled: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     autonomy_running: boolean;
     building: { id: string | null; name: string | null };
     now: ActivityNowItem[];
@@ -74,12 +74,14 @@ interface LifeViewProps {
     onOpenEvents?: () => void;
 }
 
-const STATE_BADGES: Record<string, { dot: string; label: string }> = {
-    Active: { dot: '#22c55e', label: 'アクティブ' },
-    Idle: { dot: '#eab308', label: '待機中' },
-    Sleep: { dot: '#3b82f6', label: 'おやすみ' },
-    Stop: { dot: '#6b7280', label: '停止' },
-};
+// 自律行動 ON/OFF のバッジ (4値の ACTIVITY_STATE から真偽値へ移行、2026-07-14)
+// 「オン/オフ」であって「〜中」ではない: これは自分から動くことを許可して
+// いるかどうか (元栓) で、いま実際に動いているか (蛇口 = ライフの活動中/休憩中)
+// とは別。オンでもライフの谷では動かないため、「中」だと嘘になる。
+const AUTONOMY_BADGES = {
+    on: { dot: '#22c55e', label: '自律行動 オン' },
+    off: { dot: '#6b7280', label: '自律行動 オフ' },
+} as const;
 
 function fmtClock(epoch: number | null): string {
     if (epoch == null) return '--:--';
@@ -195,8 +197,10 @@ export default function LifeView({ isOpen, onClose, personaId, personaName, onOp
         </div>
     );
 
-    const isActive = data?.activity_state === 'Active';
-    const badge = STATE_BADGES[data?.activity_state ?? ''] ?? { dot: '#9ca3af', label: data?.activity_state ?? '…' };
+    const isActive = data?.autonomy_enabled ?? false;
+    const badge = data == null
+        ? { dot: '#9ca3af', label: '…' }
+        : (isActive ? AUTONOMY_BADGES.on : AUTONOMY_BADGES.off);
 
     const handleToggle = async () => {
         if (!data || toggleBusy) return;

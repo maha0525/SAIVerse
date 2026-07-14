@@ -115,13 +115,12 @@ class AI(Base):
     # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
     REALTIME_INFO_ENABLED = Column(Boolean, default=True, nullable=False)
     METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
-    # Cognitive model (Intent A v0.9 / Intent B v0.6): ACTIVITY_STATE 4-state
-    # 'Stop' (機能停止) / 'Sleep' (寝てる、ユーザー発言で起きる) /
-    # 'Idle' (起きてるが自発的には行動しない) / 'Active' (活発に自律稼働)
-    ACTIVITY_STATE = Column(String(32), default='Idle', nullable=False)
-    # When TRUE, an Idle persona transitions to Sleep automatically once the heavyweight
-    # model cache TTL has elapsed. Protects against runaway API costs on idle personas.
-    SLEEP_ON_CACHE_EXPIRE = Column(Boolean, default=True, nullable=False)
+    # 自律行動の ON/OFF (2026-07-14: ACTIVITY_STATE 4値 'Stop'/'Sleep'/'Idle'/'Active' を
+    # 廃止し1本化。旧実装は全ゲートが == 'Active' の二値判定のみで、Stop/Sleep/Idle は
+    # 実装上区別されておらず、Stop=機能停止も未実装 (ユーザー発言への応答は常に素通り)
+    # だった。既定 True。スケジュール未設定のペルソナは autonomy_wiring.watchdog_tick /
+    # day_plan.confirm_life_for_today が skip するため ON でも動かない (安全)。
+    AUTONOMY_ENABLED = Column(Boolean, default=True, nullable=False)
     # Last SAIVerse version this persona was successfully running on. NULL means
     # the persona predates the version-aware system (treat as v0.3.0 or earlier).
     # 新規作成時は現行バージョンを刻む (_current_saiverse_version) ことで、作成直後の

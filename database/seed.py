@@ -165,7 +165,15 @@ def _create_city_data(db, city_name: str, city_id: int, city_config: dict, usern
             SYSTEMPROMPT=p_def.get("system_prompt", ""),
             DESCRIPTION=p_def.get("description", ""),
             AUTO_COUNT=0,
-            ACTIVITY_STATE=p_def.get("activity_state", "Idle"),
+            # 旧 ACTIVITY_STATE 時代の既定 "Idle" (自律 OFF) を踏襲。列自体の
+            # 既定は True (docs: database/models.py) だが、新規 seed 世界で
+            # 全ペルソナが自律稼働を始めてしまわないよう明示的に False にする。
+            # 既定 ON (owner 裁定 2026-07-14)。旧実装は ACTIVITY_STATE='Idle' 固定
+            # (= 自律 OFF) で作っていたが、ライフ (PersonaSchedule の起床・就寝) が
+            # 未設定のペルソナは自律 ON でも発火しない (watchdog が "no day_open
+            # schedule" で skip / confirm_life_for_today がライフを作らない) ため、
+            # ON で作っても暴走しない。実質の起動条件はライフの設定側にある。
+            AUTONOMY_ENABLED=p_def.get("autonomy_enabled", True),
             DEFAULT_MODEL=p_def.get("default_model"),
         )
         ai_objects.append((ai, p_def))

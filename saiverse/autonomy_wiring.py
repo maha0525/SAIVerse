@@ -4,7 +4,7 @@
 Playbook 起動) を持つが、**自動起動の配線は持たない** (中間起動の空打ち防止)。
 本モジュールがその配線を担う:
 
-- :func:`fire_judgment_point` — 本番共通の起動ゲート。ACTIVITY_STATE=Active の
+- :func:`fire_judgment_point` — 本番共通の起動ゲート。AUTONOMY_ENABLED の
   ペルソナのみ発火し (既存の自律ゲートの流儀)、判断点 Playbook が DB に無ければ
   エラーでなく WARNING + スキップ。MetaLayer の per-persona Lock で他のメタ判断
   (alert 即応等) と直列化する。day_open/day_close ではここでライフ (活動区間)
@@ -22,11 +22,11 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
   それ以外の wait_response Track (social 等) は従来どおり MetaLayer の
   イベント駆動メタ判断に委ねる (v2 判断点の対ペルソナ社交は未設計)
 - :func:`handle_external_event` — 実イベント (inject_persona_event) の入口。
-  Active かつユーザー会話中でなければ **on_event** 判断を撃ち、判断が
-  engage_now を選んだときだけ従来の応対 Pulse を起動する。非 Active ペルソナは
+  自律 ON かつユーザー会話中でなければ **on_event** 判断を撃ち、判断が
+  engage_now を選んだときだけ従来の応対 Pulse を起動する。自律 OFF のペルソナは
   従来どおり直接応対 (非自律ペルソナのイベント応答を壊さない)
 - :func:`watchdog_tick` — AutonomyManager の定期 tick の縮退先 (v2 §4.2)。
-  正常時は何もしない。「Active・起床時間帯・今日の day_plan が無い (行が無い、
+  正常時は何もしない。「自律 ON・起床時間帯・今日の day_plan が無い (行が無い、
   または行はあってもコマが 0 件) or コマ予約が途絶」のときだけ day_open の
   火入れ直し / コマ予約の再 push を行う保守的な見張り
 
@@ -126,7 +126,7 @@ PLAYBOOK_TO_KIND: Dict[str, str] = {v: k for k, v in JUDGMENT_PLAYBOOK_MAP.items
 _SCHEDULABLE_KINDS = (KIND_DAY_OPEN, KIND_DAY_CLOSE)
 
 #: handle_external_event の経路ラベル (テスト・ログの観察用)
-ROUTE_DIRECT_NOT_ACTIVE = "direct:not_active"
+ROUTE_DIRECT_AUTONOMY_DISABLED = "direct:autonomy_disabled"
 ROUTE_DIRECT_IN_CONVERSATION = "direct:in_conversation"
 ROUTE_DIRECT_JUDGMENT_UNAVAILABLE = "direct:judgment_unavailable"
 ROUTE_JUDGED_ENGAGE_NOW = "judged:engage_now"
@@ -143,11 +143,11 @@ def _get_persona(manager: Any, persona_id: str) -> Optional[Any]:
 
 
 def _is_active(manager: Any, persona_id: str) -> bool:
-    """ACTIVITY_STATE=Active か (既存ゲートの流儀: 属性欠落は Idle 扱い)。"""
+    """AUTONOMY_ENABLED か (属性欠落は False 扱い)。"""
     persona = _get_persona(manager, persona_id)
     if persona is None:
         return False
-    return getattr(persona, "activity_state", "Idle") == "Active"
+    return bool(getattr(persona, "autonomy_enabled", False))
 
 
 def playbook_available(manager: Any, playbook_name: str) -> bool:
@@ -210,7 +210,7 @@ def fire_judgment_point(
     """判断点を本番ゲート付きで 1 回起動する。
 
     ゲート (順に):
-    1. ACTIVITY_STATE=Active のペルソナのみ (既存の自律ゲートの流儀)
+    1. AUTONOMY_ENABLED のペルソナのみ (既存の自律ゲートの流儀)
     2. 判断点 Playbook が DB に無ければ WARNING + スキップ (エラーにしない。
        import は運用手順: ``python scripts/import_playbook.py --file
        builtin_data/playbooks/public/judgment_*.json``)
@@ -245,10 +245,10 @@ def fire_judgment_point(
 
     if not _is_active(manager, persona_id):
         LOGGER.debug(
-            "[autonomy-wiring] %s skipped (persona=%s not Active)", kind, persona_id,
+            "[autonomy-wiring] %s skipped (persona=%s autonomy disabled)", kind, persona_id,
         )
         return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "persona not Active"}
+                "reason": "persona autonomy disabled"}
 
     if not playbook_available(manager, playbook_name):
         LOGGER.warning(
@@ -617,13 +617,13 @@ def handle_external_event(
 
     経路の判断基準:
 
-    - **Active でないペルソナ**: 従来どおり即応対 (``dispatch_direct``)。
+    - **自律 OFF のペルソナ**: 従来どおり即応対 (``dispatch_direct``)。
       非自律ペルソナのイベント応答 (X メンション等) は v2 の管轄外で、
       従来挙動を壊さない
     - **ユーザー会話中**: on_event は撃たない (会話の至上性、judgment_points.md
       §7)。イベントは従来経路で応対 Pulse として submit され、PulseController の
       priority 制御 (user 優先) に従う
-    - **Active かつ手すき**: on_event 判断を撃つ。判断が ``engage_now`` を
+    - **自律 ON かつ手すき**: on_event 判断を撃つ。判断が ``engage_now`` を
       選んだときだけ従来の応対 Pulse を起動する。insert_slot / note_only /
       ignore は finalize が適用済みなので応対は起動しない
     - 判断が起動できなかった (Playbook 未 import 等) 場合はイベントを落とさない
@@ -636,7 +636,7 @@ def handle_external_event(
     """
     if not _is_active(manager, persona_id):
         dispatch_direct()
-        return ROUTE_DIRECT_NOT_ACTIVE
+        return ROUTE_DIRECT_AUTONOMY_DISABLED
 
     try:
         from saiverse.day_plan import _is_in_user_conversation
@@ -764,10 +764,10 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
 
     正常時は何もしない。以下のときだけ火を入れ直す (判定は保守側):
 
-    - Active・起床時間帯 (day_open スケジュールの時刻〜day_close の時刻)・
+    - 自律 ON・起床時間帯 (day_open スケジュールの時刻〜day_close の時刻)・
       **今日の day_plan 行が無い、または行はあるがコマが 1 件も無い**
       → day_open を発火し直す (起床時刻にサーバーが落ちていた / 途中で
-      Active 化された等に加え、``confirm_life_for_today`` がライフ確定で
+      自律 ON になった等に加え、``confirm_life_for_today`` がライフ確定で
       day_plan 行を先に作った後、day_open の時間割編成が全滅してコマ 0 件の
       まま終わったケースも含む — 行の有無だけでは「未編成」を見落とす
       2026-07-14 実機の教訓)
@@ -782,7 +782,7 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         (観察・テスト用)。
     """
     if not _is_active(manager, persona_id):
-        return {"action": "skip", "reason": "not Active"}
+        return {"action": "skip", "reason": "autonomy disabled"}
 
     sched = _find_day_schedules(manager, persona_id)
     wake = sched.get("wake")
