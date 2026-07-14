@@ -55,6 +55,7 @@ from saiverse.day_plan import (
     REF_NONE,
     STATUS_DEFERRED,
     STATUS_PENDING,
+    day_order_minutes,
     get_lives,
     life_consumed,
     load_day_plan,
@@ -1830,7 +1831,7 @@ def run_judgment_point(
 
 
 def sanitize_timetable(
-    manager: Any, persona_id: str, raw_slots: Any
+    manager: Any, persona_id: str, raw_slots: Any, plan_date: Any = None
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """LLM が返した timetable を検証し、save_day_plan 形式へ正規化する。
 
@@ -1843,8 +1844,14 @@ def sanitize_timetable(
     - facility が実在しない → 'own_room' に矯正 (コマは残す)
     - 時刻の重複 → 後のコマを棄却 (ソート後に判定)
 
+    Args:
+        plan_date: 並び順の基準にするライフを引くための日付。省略すると暦の
+            時刻順に退化する (ライフ未宣言の日と同じ後方互換の挙動)。深夜跨ぎ
+            のライフがある日は **必ず渡すこと** — 渡さないと就寝コマが先頭に
+            並び、保存時の丸めが一日を潰す (:func:`day_order_minutes`)。
+
     Returns:
-        (正規化済みコマ配列 [start 昇順], 警告メッセージのリスト)
+        (正規化済みコマ配列 [一日の流れ順], 警告メッセージのリスト)
     """
     warnings: List[str] = []
     if not isinstance(raw_slots, list):
@@ -1949,8 +1956,12 @@ def sanitize_timetable(
             "note": note,
         })
 
-    # start 昇順に整列し、重複時刻は後のコマを棄却する (save_day_plan の厳密昇順要件)。
-    cleaned.sort(key=lambda s: s["start"])
+    # 「一日の流れ」順に整列し、重複時刻は後のコマを棄却する
+    # (save_day_plan の厳密昇順要件)。深夜跨ぎのライフ (例: 07:00〜01:00) では
+    # 暦の時刻順が一日の前後関係と一致しない — 就寝 "00:30" を暦順で先頭に
+    # 置くと、以降の丸めが後続コマを 1 分刻みに潰す (day_order_minutes 参照)。
+    lives = get_lives(manager, persona_id, plan_date) if plan_date is not None else []
+    cleaned.sort(key=lambda s: day_order_minutes(lives, s["start"]))
     deduped: List[Dict[str, Any]] = []
     seen: set = set()
     for slot in cleaned:

@@ -200,7 +200,10 @@ def _finalize_day_open(
     plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
 
     # --- timetable: 検証 → save_day_plan + schedule_day_plan -------------
-    slots, tt_warnings = sanitize_timetable(manager, persona_id, output.get("timetable"))
+    # plan_date を渡すのは並び順をライフ基準にするため (深夜跨ぎ対応)。
+    slots, tt_warnings = sanitize_timetable(
+        manager, persona_id, output.get("timetable"), plan_date
+    )
     warnings.extend(tt_warnings)
 
     # 予算合計の検証はソフト制約 (judgment_points.md §3.2)。超過は WARN のみで
@@ -498,7 +501,7 @@ def _apply_remaining_timetable(
                 "置き換えられません。今日の残りのコマは元のままです）"
             )
         else:
-            slots, rt_warnings = sanitize_timetable(manager, persona_id, rt)
+            slots, rt_warnings = sanitize_timetable(manager, persona_id, rt, plan_date)
             warnings.extend(rt_warnings)
             if not slots:
                 warnings.append(

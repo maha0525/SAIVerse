@@ -268,12 +268,15 @@ def _normalize_plan_date(plan_date: Any) -> str:
 
 
 def _validate_and_normalize_slots(
-    slots: Any, *, ascending_from: int = 0
+    slots: Any, *, ascending_from: int = 0,
+    order_key: Optional[Callable[[str], int]] = None,
 ) -> List[Dict[str, Any]]:
     """コマ配列を検証し、正規化したコピーを返す。不正は ValueError。
 
     検証項目 (judgment_points.md §3.2 の finalize 検証のうち保存時に決まるもの):
-    - start は "HH:MM" で厳密に昇順 (同時刻も不可)
+    - start は "HH:MM" で、一日の流れ順に厳密昇順 (同時刻も不可)。
+      「流れ順」の基準は ``order_key`` が決める — 深夜跨ぎのライフでは暦の
+      時刻順と一致しないため (:func:`day_order_minutes` 参照)
     - kind は六型 + 暮らし/休む のみ
     - ref は "task:N" / "desire:N" / "none"。暮らし/休む は "none" 必須
     - facility は非空文字列 (building_id or "own_room")
@@ -291,7 +294,13 @@ def _validate_and_normalize_slots(
             index < ascending_from のコマもフィールド検証は全て受ける。
             2026-07-05 実 LLM シム 3回目: 消化済み 13:30 コマの直後に 13:30 の
             新コマを置く組み替えが「昇順でない」で全却下された不具合の修正。
+        order_key: "HH:MM" を並び順の数値へ変換する関数。省略時は暦の時刻順
+            (ライフ未宣言の日の後方互換)。ライフのある日は呼び出し元が
+            :func:`day_order_minutes` を束ねて渡し、深夜跨ぎでも「一日の流れ」
+            の順で検証させる。
     """
+    if order_key is None:
+        order_key = _life_minutes
     if not isinstance(slots, list) or not slots:
         raise ValueError("slots must be a non-empty list")
 
@@ -305,11 +314,11 @@ def _validate_and_normalize_slots(
         if not isinstance(start, str) or not _TIME_RE.match(start):
             raise ValueError(f"slot[{i}].start must be 'HH:MM' (got {start!r})")
         if i >= ascending_from:
-            minutes = int(start[:2]) * 60 + int(start[3:])
+            minutes = order_key(start)
             if minutes <= prev_minutes:
                 raise ValueError(
                     f"slot[{i}].start={start!r} is not strictly ascending "
-                    "(slots must be sorted by start time)"
+                    "(slots must be sorted in the order of the day)"
                 )
             prev_minutes = minutes
 
@@ -413,7 +422,12 @@ def save_day_plan(
     if not persona_id:
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
-    normalized = _validate_and_normalize_slots(slots)
+    # 昇順検証は「一日の流れ」の順で行う — 深夜跨ぎのライフでは暦の時刻順と
+    # 一致しない (:func:`day_order_minutes`)。ライフ未宣言の日は暦順に退化する。
+    lives = get_lives(manager, persona_id, plan_date_str)
+    normalized = _validate_and_normalize_slots(
+        slots, order_key=lambda h: day_order_minutes(lives, h)
+    )
     kept, notes = _normalize_slots_within_organized_range(
         manager, persona_id, plan_date_str, normalized,
     )
@@ -777,6 +791,31 @@ def _hhmm_from_life_extended(life: Dict[str, Any], ext: int) -> str:
     start_min = _life_minutes(life["start"])
     total = (start_min + ext) % (24 * 60)
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def day_order_minutes(lives: List[Dict[str, Any]], hhmm: str) -> int:
+    """コマの並び順キー: 「一日の始まり」を 0 とした経過分 (0..1439)。
+
+    深夜跨ぎのライフ (例: 07:00〜01:00) では、**暦の時刻の大小が一日の
+    前後関係と一致しない** — 就寝の "00:30" は朝の "07:30" より数字は
+    小さいが、一日の流れでは後に来る。時刻の文字列で並べると就寝が先頭に
+    立ち、以降の丸め・重複判定が全て狂う。
+
+    2026-07-14 実機 (air_city_a, ライフ 07:00〜01:00): 就寝コマ "00:30" が
+    暦順ソートで先頭に固定され、:func:`_normalize_slots_within_organized_range`
+    がそれをライフ内の最後尾 (経過分 1050) と解釈した結果、後続コマが全て
+    「直前のコマと衝突」と判定されて 00:31, 00:32... へ 1 分ずつ押し込まれ、
+    一日の時間割が 00:30〜00:35 の 6 分間に潰れた。
+
+    そこで**最初のライフの開始時刻をその日の起点 (0)** とし、そこからの
+    経過分で並べる。ライフが宣言されていない日 (旧データ・宣言なし) は
+    起点の概念が無いので暦の時刻をそのまま返す (後方互換)。
+    """
+    target = _life_minutes(hhmm)
+    if not lives or not lives[0].get("start"):
+        return target
+    origin = _life_minutes(lives[0]["start"])
+    return (target - origin) % (24 * 60)
 
 
 def get_life_for_time(lives: List[Dict[str, Any]], hhmm: str) -> Optional[int]:
@@ -1982,8 +2021,13 @@ def replace_remaining_slots(
     candidate = kept_history + [
         {**slot, "status": STATUS_PENDING, "defer_count": 0} for slot in new_slots
     ]
-    # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)
-    normalized = _validate_and_normalize_slots(candidate, ascending_from=len(kept_history))
+    # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)。
+    # 順序の基準は save_day_plan と同じ「一日の流れ」順 (深夜跨ぎ対応)。
+    lives = get_lives(manager, persona_id, plan_date_str)
+    normalized = _validate_and_normalize_slots(
+        candidate, ascending_from=len(kept_history),
+        order_key=lambda h: day_order_minutes(lives, h),
+    )
     history_part = normalized[:len(kept_history)]
     new_part = normalized[len(kept_history):]
     kept_new, notes = _normalize_slots_within_organized_range(

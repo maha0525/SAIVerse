@@ -396,6 +396,73 @@ def test_save_day_plan_rounds_across_overnight_life(manager, task_ref):
     assert notes == ["（1番目の予定は開始時刻を00:10に調整しました）"]
 
 
+def test_day_order_minutes_puts_bedtime_last_in_overnight_life(manager):
+    """深夜跨ぎライフでは「一日の流れ」順が暦の時刻順と一致しない。
+
+    2026-07-14 実機事故の核: 就寝 "00:30" は朝 "07:30" より数字が小さいが、
+    一日の流れでは**後**に来る。
+    """
+    lives = [{"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"}]
+    assert day_plan.day_order_minutes(lives, "07:00") == 0
+    assert day_plan.day_order_minutes(lives, "07:30") == 30
+    assert day_plan.day_order_minutes(lives, "00:30") == 1050
+    # 暦順では逆転するが、一日の流れ順では就寝が最後になる。
+    assert "00:30" < "07:30"
+    assert day_plan.day_order_minutes(lives, "00:30") > day_plan.day_order_minutes(lives, "07:30")
+    # ライフ未宣言の日は暦の時刻順へ退化する (後方互換)。
+    assert day_plan.day_order_minutes([], "00:30") == 30
+    assert day_plan.day_order_minutes([], "07:30") == 450
+
+
+def test_save_day_plan_keeps_overnight_timetable_intact(manager, task_ref):
+    """2026-07-14 実機事故の再現防止 (air_city_a, ライフ 07:00〜01:00)。
+
+    起床直後 (07:00) に「朝 → 日中 → 深夜の就寝」という一日の流れ順の時間割を
+    保存する。事故当時は暦の時刻順を強制していたため、就寝 "00:30" を先頭に
+    置かないと保存が通らず、先頭に置くと丸めが後続コマを 1 分刻みに押し込んで
+    一日が 00:30〜00:35 に潰れた。修正後は流れ順のまま素通りし、**一切丸め
+    られない**こと。
+    """
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=7))  # 07:00 = 起床判断の時刻
+    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        _slot("07:30", kind="暮らし", ref="none", facility="own_room"),
+        _slot("09:00"),
+        _slot("13:00"),
+        _slot("00:30", kind="休む", ref="none", facility="own_room", budget_rounds=0),
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["07:30", "09:00", "13:00", "00:30"]
+    assert notes == []
+
+
+def test_sanitize_timetable_sorts_bedtime_last_in_overnight_life(manager, task_ref):
+    """事故の入口: LLM が就寝を暦順で先頭に置いて返しても、一日の流れ順に直す。
+
+    2026-07-14 実機では sanitize_timetable が時刻の文字列でソートしていたため、
+    就寝 "00:30" が先頭に固定され、後段の丸めが一日を潰した。
+    """
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"},
+    ])
+    raw = [
+        {"start": "00:30", "kind": "休む", "ref": "none", "facility": "own_room",
+         "budget_rounds": 0, "title": "眠る"},
+        {"start": "07:30", "kind": "暮らし", "ref": "none", "facility": "own_room",
+         "budget_rounds": 1, "title": "朝のルーティン"},
+        {"start": "13:00", "kind": "知る", "ref": "task:1", "facility": "own_room",
+         "budget_rounds": 3, "title": "調べる"},
+    ]
+    slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, raw, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["07:30", "13:00", "00:30"]
+    assert warnings == []
+    # plan_date を渡さない場合は暦順に退化する (ライフ未宣言の日と同じ後方互換)。
+    legacy, _ = jp.sanitize_timetable(manager, PERSONA_ID, raw)
+    assert [s["start"] for s in legacy] == ["00:30", "07:30", "13:00"]
+
+
 def test_save_day_plan_allows_slot_when_no_lives_declared(manager, task_ref):
     """ライフ宣言の無い日は谷の概念自体が無い (後方互換)。"""
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("23:50")])
