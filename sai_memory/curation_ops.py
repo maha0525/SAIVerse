@@ -469,21 +469,29 @@ def plan_split(
 
     **本文保存則**: LLM はブロックの「どの子に割り当てるか」だけを返し、
     本文テキストは一切出力させない。割当を受けて子ページ本文・親の残り本文を
-    逐語で構成し、保存則を機械検証してから割当案を返す。
+    逐語で構成する。
 
-    保存則の機械検証（どちらか一方でも通らなければ ValueError で棄却。
-    fail-safe、plan は "failed" になる）:
-    1. 番号集合（補助）: 全ブロックがちょうど一度使われている
-       （重複・漏れ・範囲外なし）
-    2. 文字レベル復元（本則）: 全出力（子ページ本文＋親の残り本文）から
-       元本文を機械的に復元して完全一致する
+    保存則は**棄却ではなく構造で**満たす。LLM の応答は正規化して必ず受け入れ、
+    各ブロックの行き先はコードが一意に決める（`claims` → `owner`）。したがって
+    重複・漏れ・範囲外を含む応答でも「子ページ全部＋親の残り＝元本文」は常に
+    成立する——不正な応答は存在しない。
+
+    **仕様と安全網の区別**: LLM に伝えてある契約は「同じブロックを複数の子に
+    挙げない」「どの子にも当てはまらないブロックは挙げなくてよい（親に残る）」
+    の 2 つ。前者に違反した重複の親送りと範囲外の無視は**安全網**であって仕様
+    ではない——プロンプトでフォールバック挙動を説明すると「迷ったら両方に挙げて
+    親に流す」という使い方を教えることになるので、単に禁止として伝える
+    （まはー裁定 2026-07-15）。
+
+    残りブロックは補集合として導出するので、LLM には出力させない（導出可能な
+    情報を書かせると、子にも残りにも入る矛盾が生まれるだけ）。
 
     Returns:
         dict: apply_split に渡す割当案 {
             "page_id": str,
             "title": str,
             "content": str,             # 割当時点の本文スナップショット（検証用）
-            "sections": [{"title": str, "indices": [int], "content": str}],
+            "sections": [{"title": str, "summary": str, "indices": [int], "content": str}],
             "remaining_indices": [int],
             "remaining_content": str,
             "total_blocks": int,
@@ -491,7 +499,7 @@ def plan_split(
 
     Raises:
         ValueError: ページが見つからない、本文が空、ブロックが 1 つ、
-            LLM 応答不正、保存則違反
+            LLM 呼び出しの失敗、応答に sections が無い
     """
     import json as _json
     from sai_memory.memopedia.storage import get_page
@@ -520,14 +528,42 @@ def plan_split(
     prompt = (
         f"以下のページ「{page.title}」の内容を、内容のまとまりに応じて"
         f"子ページへ分割してください。\n"
-        f"各子ページのタイトルと、そのページに含めるブロックの番号リストを返してください。\n"
-        f"全部で {total_blocks} 個のブロックがあります（番号は 0 始まり）。\n"
+        f"全部で {total_blocks} 個のブロックがあります（番号は 0 始まり）。\n\n"
+        f"手順:\n"
+        f"1. child_pages: 作る子ページのタイトルと概要を**先に全部**挙げてください。\n"
+        f"   概要は、そのページを開かなくても何が書かれているか分かる 1〜2 文。\n"
+        f"2. sections: 1 で挙げたタイトルごとに、そのページに含めるブロックの"
+        f"番号リストを返してください。\n\n"
+        f"同じブロックを複数の子ページに挙げないでください。\n"
+        f"どの子ページにも当てはまらないブロックは、挙げなくて構いません"
+        f"（親ページの本文に残ります）。\n"
         f"本文テキストは出力しないでください。ブロック番号の割り当てのみ出力してください。\n\n"
         f"本文:\n{numbered_blocks}"
     )
+    # プロパティの定義順がそのまま Gemini の property_ordering になる＝生成順になる。
+    # child_pages を先頭に置き、**どういう子ページを作るかを全部宣言させてから**
+    # ブロックを振り分けさせる。順序が逆（タイトル→そのブロック群、を繰り返す）だと、
+    # 1 枚目のタイトルを宣言した時点で 2 枚目以降が想定できておらず、「いま宣言した
+    # タイトルに関連する」で全ブロックを 1 枚目に流し込む応答が出る
+    # （実機 2026-07-14/15: m:34 が 163 ブロック全部を 1 枚に入れ、後から空セクション
+    # 「残りのブロック」を足して辻褄を合わせた。肥大が解消しないので翌晩また検知され、
+    # 毎晩 1 段ずつ入れ子が深くなるループになっていた。まはー指摘 2026-07-15）。
+    # 概要も宣言側で書かせる: 「どういうページを作るか」の宣言が具体的なほど、
+    # 後続の振り分けがその設計に条件づけられる。
     response_schema = {
         "type": "object",
         "properties": {
+            "child_pages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["title", "summary"],
+                },
+            },
             "sections": {
                 "type": "array",
                 "items": {
@@ -542,12 +578,8 @@ def plan_split(
                     "required": ["title", "block_indices"],
                 },
             },
-            "remaining_block_indices": {
-                "type": "array",
-                "items": {"type": "integer"},
-            },
         },
-        "required": ["sections", "remaining_block_indices"],
+        "required": ["child_pages", "sections"],
     }
 
     try:
@@ -565,53 +597,88 @@ def plan_split(
         raise ValueError(f"execute_split: LLM 呼び出しに失敗: {exc}") from exc
 
     sections = parsed.get("sections") or []
-    remaining_indices = [int(i) for i in (parsed.get("remaining_block_indices") or [])]
 
-    if not sections and not remaining_indices:
-        raise ValueError("execute_split: LLM の応答に sections も remaining も含まれていません")
+    if not sections:
+        raise ValueError("execute_split: LLM の応答に sections が含まれていません")
 
-    # --- 保存則の機械検証 (1): 番号集合（補助） ---
-    all_assigned: List[int] = []
-    for sec in sections:
-        indices = [int(i) for i in (sec.get("block_indices") or [])]
-        all_assigned.extend(indices)
-    all_used = sorted(all_assigned + remaining_indices)
-    expected = list(range(total_blocks))
-
-    if all_used != expected:
-        # 重複・漏れ・範囲外のいずれかがある → 棄却
-        raise ValueError(
-            f"execute_split: 保存則違反。元ブロック={expected} / 使用ブロック={all_used}。"
-            "この分割を棄却します。"
+    # child_pages は「先に全部の子ページを宣言させる」ための足場であって、割当の
+    # 本体は sections。宣言された概要はタイトルで引いて子ページに渡す（概要は本文
+    # ではないので、保存則が禁じる「本文の生成」には当たらない）。
+    declared_summary: Dict[str, str] = {}
+    declared_titles: List[str] = []
+    for cp in (parsed.get("child_pages") or []):
+        if not isinstance(cp, dict):
+            continue
+        t = str(cp.get("title") or "").strip()
+        if not t:
+            continue
+        declared_titles.append(t)
+        declared_summary[t] = str(cp.get("summary") or "").strip()
+    assigned_titles = [str(sec.get("title") or "").strip() for sec in sections]
+    if declared_titles and declared_titles != assigned_titles:
+        # 宣言が効いていない兆候。割当は sections をそのまま使う（棄却はしない）が、
+        # 概要が引けない子ページが出るので観測できるようにする。
+        LOGGER.warning(
+            "[curation_ops] plan_split: child_pages と sections のタイトルが不一致 "
+            "(page=%s declared=%r assigned=%r)", page_id, declared_titles, assigned_titles,
         )
+
+    # --- 割当の正規化: LLM の応答をそのまま受け入れ、行き先を機械が一意に決める ---
+    # 保存則は「棄却」でなく「構造」で満たす。LLM が何を返しても行き先の決定は
+    # ここで一意に閉じる——不正な応答が存在しない。
+    #   - ちょうど 1 つの子が挙げた → その子へ移動
+    #   - どの子も挙げなかった      → 親に残す（**仕様**。remaining を LLM に
+    #     出力させない代わりで、プロンプトでもそう伝えてある）
+    #   - 2 つ以上の子が挙げた      → 親に残す（**安全網**。重複はプロンプトで
+    #     禁じてあり、これは守られなかった場合の受け皿。仕様として当てにしない
+    #     ——「迷ったら両方に挙げれば親に残る」という使い方はさせない）
+    #   - 範囲外の番号              → 無視（同上、安全網）
+    claims: Dict[int, List[int]] = {}  # block index → 挙げた section の位置（重複含む）
+    for si, sec in enumerate(sections):
+        for raw in (sec.get("block_indices") or []):
+            try:
+                i = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < total_blocks:
+                claims.setdefault(i, []).append(si)
+
+    owner: Dict[int, int] = {}  # block index → section の位置（-1 = 親の残り）
+    for i in range(total_blocks):
+        claimed_by = set(claims.get(i) or ())
+        owner[i] = claimed_by.pop() if len(claimed_by) == 1 else -1
 
     # --- 逐語でブロックから子ページ本文・親の残り本文を構成 ---
     # ブロックは lossless（区切りの改行列を自身の末尾に含む）なので、
     # index 順の素の連結（"".join）で原文が保たれる。
     section_plans: List[Dict[str, Any]] = []
-    for sec in sections:
-        sec_title = str(sec.get("title") or "").strip() or "(無題)"
-        indices = sorted(int(i) for i in (sec.get("block_indices") or []))
+    section_pos_map: Dict[int, int] = {}  # 元の section 位置 → section_plans の位置
+    for si, sec in enumerate(sections):
+        indices = sorted(i for i in range(total_blocks) if owner[i] == si)
         if not indices:
+            # 挙げたブロックが全て他の子と競合した／範囲外だった子は作らない
             continue
+        raw_title = str(sec.get("title") or "").strip()
+        sec_title = raw_title or "(無題)"
+        section_pos_map[si] = len(section_plans)
         section_plans.append({
             "title": sec_title,
+            "summary": declared_summary.get(raw_title, ""),
             "indices": indices,
             "content": "".join(blocks[i] for i in indices),
         })
-    remaining_sorted = sorted(remaining_indices)
+    # 捨てた子を指していた owner を親の残りへ寄せ、位置を section_plans 基準へ詰め直す
+    owner = {i: section_pos_map.get(si, -1) for i, si in owner.items()}
+
+    remaining_sorted = sorted(i for i in range(total_blocks) if owner[i] == -1)
     remaining_content = "".join(blocks[i] for i in remaining_sorted)
 
-    # --- 保存則の機械検証 (2): 文字レベルの復元（本則） ---
+    # --- 保存則の機械検証: 文字レベルの復元 ---
+    # 割当の正規化により保存則は構造的に成立しているので、これは LLM 応答の
+    # 検査ではなく、この関数自身のリグレッション検査（ブロック分割・連結・
+    # 正規化のいずれかを壊したら気付く）。
     # 復元規則: 各ブロックは割当先ページの本文中に index 昇順で連続して並ぶ。
     # よって元の index 順に、各出力本文を先頭から切り出して繋げば元本文に戻る。
-    # 全出力が過不足なく消費され、復元結果が元本文と完全一致しなければ棄却。
-    owner: Dict[int, int] = {}  # block index → section_plans の位置（-1 = 親の残り）
-    for si, sp in enumerate(section_plans):
-        for i in sp["indices"]:
-            owner[i] = si
-    for i in remaining_sorted:
-        owner[i] = -1
     outputs: Dict[int, str] = {si: sp["content"] for si, sp in enumerate(section_plans)}
     outputs[-1] = remaining_content
     cursors: Dict[int, int] = {key: 0 for key in outputs}
@@ -684,6 +751,7 @@ def apply_split(
         child_page = memopedia.create_page(
             parent_id=page_id,
             title=sec["title"],
+            summary=sec.get("summary", ""),
             content=sec["content"],
             edit_source="curation",
         )

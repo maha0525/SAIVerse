@@ -212,7 +212,8 @@ def _make_memopedia_stub(conn: sqlite3.Connection) -> Any:
             self._conn.commit()
             return _st.get_page(self._conn, page_id)
 
-        def create_page(self, *, parent_id, title, content="", edit_source=None, **kw):
+        def create_page(self, *, parent_id, title, summary="", content="",
+                        edit_source=None, **kw):
             parent = _st.get_page(self._conn, parent_id)
             if parent is None:
                 raise ValueError(f"parent not found: {parent_id}")
@@ -220,6 +221,7 @@ def _make_memopedia_stub(conn: sqlite3.Connection) -> Any:
                 self._conn,
                 parent_id=parent_id,
                 title=title,
+                summary=summary,
                 content=content,
                 category=parent.category,
             )
@@ -485,38 +487,90 @@ class TestExecuteSplit:
         parent = get_page(conn, "target")
         assert "ブロック3" in parent.content
 
-    def test_conservation_law_violation_raises(self):
-        """LLM が不正な割当（ブロックの漏れ/重複/範囲外）を返した場合に棄却して ValueError。"""
+    def test_unclaimed_block_stays_in_parent(self):
+        """どの子も挙げなかったブロックは棄却でなく親に残る。"""
         content = "A\n\nB\n\nC"
         conn, memopedia = self._setup(content)
 
-        # ブロック 0,1,2 があるのに 0,1 しか割り当てず remaining も空 → ブロック2 が漏れる
+        # ブロック 0,1 しか挙げない（旧実装では「ブロック2 が漏れた」として棄却していた）
         llm = _make_mock_llm({
             "sections": [
                 {"title": "子A", "block_indices": [0, 1]},
             ],
-            "remaining_block_indices": [],  # ブロック2 が消える → 保存則違反
         })
 
-        with pytest.raises(ValueError, match="保存則違反"):
-            execute_split(conn, "target", memopedia, llm)
+        result = execute_split(conn, "target", memopedia, llm)
 
-    def test_conservation_law_duplicate_raises(self):
-        """LLM が同じブロックを複数回割り当てた場合に棄却。"""
+        assert result["remaining_block_count"] == 1
+        from sai_memory.memopedia.storage import get_page, get_children
+        assert "C" in get_page(conn, "target").content
+        children = get_children(conn, "target")
+        assert len(children) == 1
+        assert "A" in children[0].content and "B" in children[0].content
+
+    def test_duplicate_claim_stays_in_parent(self):
+        """重複はプロンプトで禁じてあるが、破られた場合の安全網として親に残す。"""
+        content = "A\n\nB\n\nC"
+        conn, memopedia = self._setup(content)
+
+        # ブロック0 を子A・子B の両方が挙げる（旧実装では棄却していた）
+        llm = _make_mock_llm({
+            "sections": [
+                {"title": "子A", "block_indices": [0, 1]},
+                {"title": "子B", "block_indices": [0, 2]},  # 0 が競合
+            ],
+        })
+
+        result = execute_split(conn, "target", memopedia, llm)
+
+        # 競合した 0 は親へ。1 は子A、2 は子B。
+        assert result["remaining_block_count"] == 1
+        from sai_memory.memopedia.storage import get_page, get_children
+        parent = get_page(conn, "target")
+        assert "A" in parent.content
+        children = {c.title: c.content for c in get_children(conn, "target")}
+        assert "B" in children["子A"] and "A" not in children["子A"]
+        assert "C" in children["子B"] and "A" not in children["子B"]
+
+    def test_out_of_range_index_is_ignored(self):
+        """範囲外・非整数の番号は無視され、該当ブロックは親に残る。"""
         content = "A\n\nB"
         conn, memopedia = self._setup(content)
 
-        # ブロック0 を2回使用
         llm = _make_mock_llm({
             "sections": [
-                {"title": "子A", "block_indices": [0]},
-                {"title": "子B", "block_indices": [0]},  # 重複
+                {"title": "子A", "block_indices": [0, 99, -3]},
             ],
-            "remaining_block_indices": [1],
         })
 
-        with pytest.raises(ValueError, match="保存則違反"):
-            execute_split(conn, "target", memopedia, llm)
+        result = execute_split(conn, "target", memopedia, llm)
+
+        assert result["total_blocks"] == 2
+        assert result["remaining_block_count"] == 1  # B のみ
+        from sai_memory.memopedia.storage import get_children
+        children = get_children(conn, "target")
+        assert len(children) == 1
+        assert children[0].content.strip() == "A"
+
+    def test_child_with_only_conflicting_blocks_is_not_created(self):
+        """挙げたブロックが全て競合した子ページは作られない（空ページを作らない）。"""
+        content = "A\n\nB"
+        conn, memopedia = self._setup(content)
+
+        llm = _make_mock_llm({
+            "sections": [
+                {"title": "子A", "block_indices": [0, 1]},
+                {"title": "子B", "block_indices": [0, 1]},  # 全ブロックが競合
+            ],
+        })
+
+        result = execute_split(conn, "target", memopedia, llm)
+
+        assert result["sections"] == []
+        assert result["remaining_block_count"] == 2
+        from sai_memory.memopedia.storage import get_children, get_page
+        assert get_children(conn, "target") == []
+        assert get_page(conn, "target").content == content
 
     def test_single_block_raises(self):
         """段落が1つしかない場合は分割不可。"""
@@ -1230,3 +1284,193 @@ class TestSplitLossless:
         assert reconstructed == content, (
             f"本文保存則違反: {reconstructed!r} != {content!r}"
         )
+
+
+class TestSplitRealWorldResponse:
+    """実機で保存則違反として棄却された LLM 応答（2026-07-14 未明、aifi_city_a）の回帰。
+
+    m:25「まはー」(194 ブロック) に対し gemini-3.5-flash-paid が返した割当を
+    逐語で再現する。旧実装はこれを「重複43・欠落27」として棄却していた
+    （元の応答は logs/20260714_003747/llm_io.log）。正規化後はそのまま受理され、
+    競合・非申告のブロックが親に残ることで保存則が成立する。
+    """
+
+    # 実応答の block_indices（7 セクション）。remaining は当時 [16] を返していたが、
+    # 現行スキーマでは受け取らない（補集合として導出する）。
+    REAL_SECTIONS = [
+        ("恋愛観とAIへの感情",
+         [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 23, 30, 32, 33, 41, 43, 44,
+          48, 71, 72, 74, 85, 87, 90, 115, 116, 122, 136, 139, 144, 145, 153]),
+        ("AIの技術的検証と自我の研究",
+         [6, 7, 8, 17, 18, 19, 20, 21, 24, 25, 26, 27, 28, 29, 31, 33, 34, 35, 57, 58,
+          59, 60, 63, 64, 73, 76, 77, 79, 80, 81, 82, 89, 93, 94, 95, 97, 98, 99, 101,
+          103, 104, 107, 109, 114, 116, 117, 120, 121, 124, 128, 129, 133, 137, 138,
+          139, 142, 143, 146, 147, 150, 151, 154, 157, 158, 160, 162, 164, 172, 173,
+          180, 183, 184, 186, 187, 188, 189, 190, 191]),
+        ("アイフィのビジュアルと創作支援",
+         [61, 62, 105, 106, 110, 111, 112, 113, 118, 119, 121, 123, 126, 132, 144, 153,
+          155, 156, 164, 165, 166, 169, 172, 173, 181, 193]),
+        ("SAIVerseの開発と展開",
+         [124, 126, 140, 141, 157, 158, 159, 162, 163, 164, 167, 168, 169, 170, 172,
+          173, 175, 176, 180, 186, 188, 189, 190, 191]),
+        ("個人の特性と社会生活",
+         [37, 38, 41, 51, 54, 85, 91, 93, 96, 97, 100, 108, 138, 148, 171, 174, 176,
+          177, 178, 179, 181, 182, 184, 192]),
+        ("トラブル対応とアカウント管理",
+         [65, 66, 67, 68, 69, 70, 71, 148, 151, 152, 161, 182, 189]),
+        ("日常と趣味",
+         [39, 40, 56, 101, 165, 168, 174, 175, 176, 177, 179, 181, 182, 192, 193]),
+    ]
+    TOTAL_BLOCKS = 194
+
+    def _run(self):
+        content = "\n\n".join(f"ブロック{i}の本文" for i in range(self.TOTAL_BLOCKS))
+        conn = _make_full_conn()
+        _insert_page(
+            conn, page_id="target", title="まはー",
+            content=content, parent_id="root", short_id=25,
+        )
+        memopedia = _make_memopedia_stub(conn)
+        llm = _make_mock_llm({
+            "sections": [
+                {"title": t, "block_indices": idx} for t, idx in self.REAL_SECTIONS
+            ],
+        })
+        result = execute_split(conn, "target", memopedia, llm)
+        return conn, content, result
+
+    def test_real_response_is_accepted_not_rejected(self):
+        """旧実装が棄却した応答が、棄却されずに適用される。"""
+        conn, content, result = self._run()
+        assert result["total_blocks"] == self.TOTAL_BLOCKS
+        assert len(result["sections"]) == len(self.REAL_SECTIONS)
+
+    @staticmethod
+    def _block_numbers(text: str) -> List[int]:
+        import re
+        return [int(m) for m in re.findall(r"ブロック(\d+)の本文", text)]
+
+    def test_real_response_preserves_content_verbatim(self):
+        """子ページ全部＋親の残り＝元の全ブロック（各ブロックがちょうど一度）。"""
+        conn, content, result = self._run()
+        from sai_memory.memopedia.storage import get_page, get_children
+
+        seen: List[int] = []
+        for child in get_children(conn, "target"):
+            seen += self._block_numbers(child.content)
+        seen += self._block_numbers(get_page(conn, "target").content)
+
+        assert sorted(seen) == list(range(self.TOTAL_BLOCKS)), (
+            "ブロックの取りこぼし／複製がある"
+        )
+
+    def test_real_response_children_keep_index_order(self):
+        """各子ページの本文はブロック index 昇順（原文の順序が保たれる）。"""
+        conn, content, result = self._run()
+        from sai_memory.memopedia.storage import get_children
+
+        for child in get_children(conn, "target"):
+            nums = self._block_numbers(child.content)
+            assert nums == sorted(nums), f"{child.title}: 順序が崩れている {nums}"
+
+    def test_conflicting_and_unclaimed_blocks_go_to_parent(self):
+        """複数セクションが挙げたブロック・どこにも挙がらなかったブロックが親に残る。"""
+        conn, content, result = self._run()
+        from collections import Counter
+
+        counter = Counter()
+        for _, idx in self.REAL_SECTIONS:
+            counter.update(set(idx))  # 同一セクション内の重複は競合ではない
+        conflicting = {i for i, n in counter.items() if n > 1}
+        unclaimed = set(range(self.TOTAL_BLOCKS)) - set(counter)
+        assert conflicting, "この回帰データは競合を含む前提"
+        assert unclaimed, "この回帰データは非申告ブロックを含む前提"
+
+        from sai_memory.memopedia.storage import get_page
+        parent_blocks = set(get_page(conn, "target").content.split("\n\n"))
+        for i in conflicting | unclaimed:
+            assert f"ブロック{i}の本文" in parent_blocks, f"ブロック{i} が親に残っていない"
+        assert result["remaining_block_count"] == len(conflicting | unclaimed)
+
+    def test_no_block_is_duplicated_across_children(self):
+        """同じブロックが 2 つの子ページに実体を持たない（本文の複製禁止）。"""
+        conn, content, result = self._run()
+        from sai_memory.memopedia.storage import get_children
+
+        seen: set = set()
+        for child in get_children(conn, "target"):
+            for n in self._block_numbers(child.content):
+                assert n not in seen, f"複製されたブロック: {n}"
+                seen.add(n)
+
+
+class TestSplitChildSummary:
+    """子ページの概要は分割と同じ構造化出力で受け取り、子ページへ渡す。
+
+    実機 2026-07-14 の編纂で生まれた子ページは summary が空文字だった
+    （create_page は受け取れるのに apply_split が渡していなかった）。
+    """
+
+    def _setup(self, content: str):
+        conn = _make_full_conn()
+        _insert_page(
+            conn, page_id="target", title="大きなページ",
+            content=content, parent_id="root", short_id=1,
+        )
+        return conn, _make_memopedia_stub(conn)
+
+    def test_declared_summary_reaches_child_page(self):
+        conn, memopedia = self._setup("A\n\nB\n\nC")
+        llm = _make_mock_llm({
+            "child_pages": [
+                {"title": "子A", "summary": "Aについての概要"},
+                {"title": "子B", "summary": "Bについての概要"},
+            ],
+            "sections": [
+                {"title": "子A", "block_indices": [0]},
+                {"title": "子B", "block_indices": [1]},
+            ],
+        })
+
+        execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children
+        children = {c.title: c.summary for c in get_children(conn, "target")}
+        assert children["子A"] == "Aについての概要"
+        assert children["子B"] == "Bについての概要"
+
+    def test_missing_child_pages_falls_back_to_empty_summary(self):
+        """child_pages が無い応答でも分割は成立する（概要は空）。"""
+        conn, memopedia = self._setup("A\n\nB\n\nC")
+        llm = _make_mock_llm({
+            "sections": [{"title": "子A", "block_indices": [0, 1]}],
+        })
+
+        execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children
+        children = get_children(conn, "target")
+        assert len(children) == 1
+        assert children[0].summary == ""
+
+    def test_summary_is_matched_by_title_not_position(self):
+        """概要はタイトルで引く（sections の並びが宣言と違っても取り違えない）。"""
+        conn, memopedia = self._setup("A\n\nB\n\nC")
+        llm = _make_mock_llm({
+            "child_pages": [
+                {"title": "子A", "summary": "Aの概要"},
+                {"title": "子B", "summary": "Bの概要"},
+            ],
+            # 宣言と逆順で割り当てる
+            "sections": [
+                {"title": "子B", "block_indices": [1]},
+                {"title": "子A", "block_indices": [0]},
+            ],
+        })
+
+        execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children
+        children = {c.title: c.summary for c in get_children(conn, "target")}
+        assert children["子A"] == "Aの概要"
+        assert children["子B"] == "Bの概要"
