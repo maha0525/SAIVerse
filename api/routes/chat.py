@@ -480,8 +480,16 @@ def _store_image_attachment(
     building_id: str,
     user_message: str = "",
     prev_ai_message: str = "",
+    sync_summary: bool = False,
 ) -> Dict[str, Any]:
-    """Store image and create picture Item."""
+    """Store image and create picture Item.
+
+    ``sync_summary`` (グローバル設定「添付したメディアの内容を自動想起に使う」ON 時):
+    contextual description の生成をバックグラウンドスレッドでなく同期実行し、
+    返り値の ``summary`` に載せる (呼び出し側が metadata に反映して
+    sea/auto_recall.py の build_query から拾えるようにするため)。OFF 時は従来
+    どおりバックグラウンド生成のみで、summary は常に None。
+    """
     dest_dir = get_saiverse_home() / "image"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -511,24 +519,36 @@ def _store_image_attachment(
     except Exception as e:
         logging.warning("Failed to create picture item: %s", e, exc_info=True)
 
-    # Generate contextual description in background
+    summary: Optional[str] = None
     if item_id and (user_message or prev_ai_message):
-        import threading
-        _path = dest_path
-        _mime = att.mime_type
-        _item_id = item_id
-
-        def _generate_description():
+        if sync_summary:
             try:
                 from saiverse.media_summary import generate_contextual_image_description
-                desc = generate_contextual_image_description(_path, _mime, user_message, prev_ai_message)
+                desc = generate_contextual_image_description(dest_path, att.mime_type, user_message, prev_ai_message)
                 if desc:
-                    manager.update_item_description(_item_id, desc)
-                    logging.info("Generated contextual description for item %s", _item_id)
+                    manager.update_item_description(item_id, desc)
+                    summary = desc
+                    logging.info("Generated contextual description for item %s (sync, media recall)", item_id)
             except Exception as e:
-                logging.warning("Background description generation failed for item %s: %s", _item_id, e)
+                logging.warning("Synchronous description generation failed for item %s: %s", item_id, e)
+        else:
+            # Generate contextual description in background (default; unchanged behavior)
+            import threading
+            _path = dest_path
+            _mime = att.mime_type
+            _item_id = item_id
 
-        threading.Thread(target=_generate_description, daemon=True).start()
+            def _generate_description():
+                try:
+                    from saiverse.media_summary import generate_contextual_image_description
+                    desc = generate_contextual_image_description(_path, _mime, user_message, prev_ai_message)
+                    if desc:
+                        manager.update_item_description(_item_id, desc)
+                        logging.info("Generated contextual description for item %s", _item_id)
+                except Exception as e:
+                    logging.warning("Background description generation failed for item %s: %s", _item_id, e)
+
+            threading.Thread(target=_generate_description, daemon=True).start()
 
     return {
         "type": "image",
@@ -536,7 +556,8 @@ def _store_image_attachment(
         "mime_type": att.mime_type,
         "source": "user_upload",
         "path": str(dest_path),
-        "item_id": item_id
+        "item_id": item_id,
+        "summary": summary,
     }
 
 def _store_document_attachment(
@@ -610,10 +631,17 @@ def _store_audio_attachment(
     att: AttachmentData,
     manager,
     building_id: str,
+    sync_summary: bool = False,
 ) -> Dict[str, Any]:
     """Normalize audio with ffmpeg and create an audio Item.
 
     Raises RuntimeError on ffmpeg unavailable or normalization failure (e.g. duration exceeded).
+
+    ``sync_summary`` (グローバル設定「添付したメディアの内容を自動想起に使う」ON 時):
+    ``ensure_audio_summary`` を同期実行し、返り値の ``summary`` に載せる。この
+    関数は ``.summary.txt`` サイドカーにキャッシュするので、後で
+    ``llm_clients/gemini.py`` 側 (モデルが音声非対応のとき) が同じ関数を呼んでも
+    二重生成にはならない。OFF 時は呼ばない (従来どおり概要は生成されない)。
     """
     import tempfile
     from saiverse.ffmpeg_runner import is_ffmpeg_available, normalize_audio
@@ -658,6 +686,14 @@ def _store_audio_attachment(
     except Exception as e:
         logging.warning("Failed to create audio item: %s", e, exc_info=True)
 
+    summary: Optional[str] = None
+    if sync_summary:
+        try:
+            from saiverse.media_summary import ensure_audio_summary
+            summary = ensure_audio_summary(dest_path, "audio/ogg")
+        except Exception as e:
+            logging.warning("Synchronous audio summary generation failed for %s: %s", dest_path, e)
+
     return {
         "type": "audio",
         "uri": f"saiverse://audio/{dest_name}",
@@ -665,6 +701,7 @@ def _store_audio_attachment(
         "source": "user_upload",
         "path": str(dest_path),
         "item_id": item_id,
+        "summary": summary,
     }
 
 
@@ -673,10 +710,14 @@ def _store_video_attachment(
     att: AttachmentData,
     manager,
     building_id: str,
+    sync_summary: bool = False,
 ) -> Dict[str, Any]:
     """Normalize video with ffmpeg and create a video Item.
 
     Raises RuntimeError on ffmpeg unavailable or normalization failure.
+
+    ``sync_summary``: 音声と同様、ON 時のみ ``ensure_video_summary`` を同期実行
+    する。``.summary.txt`` キャッシュを共用するため二重生成にはならない。
     """
     import tempfile
     from saiverse.ffmpeg_runner import is_ffmpeg_available, normalize_video
@@ -720,6 +761,14 @@ def _store_video_attachment(
     except Exception as e:
         logging.warning("Failed to create video item: %s", e, exc_info=True)
 
+    summary: Optional[str] = None
+    if sync_summary:
+        try:
+            from saiverse.media_summary import ensure_video_summary
+            summary = ensure_video_summary(dest_path, "video/mp4")
+        except Exception as e:
+            logging.warning("Synchronous video summary generation failed for %s: %s", dest_path, e)
+
     return {
         "type": "video",
         "uri": f"saiverse://video/{dest_name}",
@@ -727,6 +776,7 @@ def _store_video_attachment(
         "source": "user_upload",
         "path": str(dest_path),
         "item_id": item_id,
+        "summary": summary,
     }
 
 
@@ -734,6 +784,7 @@ def _register_uploaded_video_by_uri(
     att: AttachmentData,
     manager,
     building_id: str,
+    sync_summary: bool = False,
 ) -> Dict[str, Any]:
     """Register a video that was already uploaded + normalized via /api/media/upload-video.
 
@@ -741,6 +792,9 @@ def _register_uploaded_video_by_uri(
     in-memory ballooning, then references the saved file by saiverse:// URI here.
     No re-decode / re-normalize; we just locate the existing file and create
     the video Item.
+
+    ``sync_summary``: same as ``_store_video_attachment`` — synchronous
+    ``ensure_video_summary`` only when the global option is ON.
     """
     if not att.uri or not att.uri.startswith("saiverse://video/"):
         raise RuntimeError(f"Invalid video URI: {att.uri!r}")
@@ -766,6 +820,14 @@ def _register_uploaded_video_by_uri(
     except Exception as e:
         logging.warning("Failed to create video item: %s", e, exc_info=True)
 
+    summary: Optional[str] = None
+    if sync_summary:
+        try:
+            from saiverse.media_summary import ensure_video_summary
+            summary = ensure_video_summary(dest_path, "video/mp4")
+        except Exception as e:
+            logging.warning("Synchronous video summary generation failed for %s: %s", dest_path, e)
+
     return {
         "type": "video",
         "uri": att.uri,
@@ -773,6 +835,7 @@ def _register_uploaded_video_by_uri(
         "source": "user_upload",
         "path": str(dest_path),
         "item_id": item_id,
+        "summary": summary,
     }
 
 
@@ -782,14 +845,20 @@ def _store_uploaded_attachment_v2(
     building_id: str,
     user_message: str = "",
     prev_ai_message: str = "",
+    sync_summary: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Process attachment and create appropriate Item type."""
+    """Process attachment and create appropriate Item type.
+
+    ``sync_summary``: グローバル設定「添付したメディアの内容を自動想起に使う」
+    (``manager.state.media_recall_enabled``) が ON のとき True。ON 時のみ
+    画像/音声/動画の概要生成を同期実行し、返り値の ``summary`` に載せる。
+    """
     try:
         # URI-mode: file already uploaded via /api/media/upload-video.
         # Skip base64 decode entirely. Only video uses this path today.
         if att.uri and not att.data:
             if att.type == "video":
-                return _register_uploaded_video_by_uri(att, manager, building_id)
+                return _register_uploaded_video_by_uri(att, manager, building_id, sync_summary=sync_summary)
             raise RuntimeError(f"URI-mode attachments not supported for type {att.type!r}")
 
         if not att.data:
@@ -800,27 +869,27 @@ def _store_uploaded_attachment_v2(
         data = base64.b64decode(encoded)
 
         if att.type == 'image':
-            return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
+            return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message, sync_summary=sync_summary)
         elif att.type == 'document':
             return _store_document_attachment(data, att, manager, building_id)
         elif att.type == 'audio':
-            return _store_audio_attachment(data, att, manager, building_id)
+            return _store_audio_attachment(data, att, manager, building_id, sync_summary=sync_summary)
         elif att.type == 'video':
-            return _store_video_attachment(data, att, manager, building_id)
+            return _store_video_attachment(data, att, manager, building_id, sync_summary=sync_summary)
         else:
             # Unknown type: determine from extension
             ext = Path(att.filename).suffix.lower().lstrip('.')
             if ext in IMAGE_EXTENSIONS:
-                return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
+                return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message, sync_summary=sync_summary)
             elif ext in AUDIO_EXTENSIONS:
-                return _store_audio_attachment(data, att, manager, building_id)
+                return _store_audio_attachment(data, att, manager, building_id, sync_summary=sync_summary)
             elif ext in VIDEO_EXTENSIONS:
-                return _store_video_attachment(data, att, manager, building_id)
+                return _store_video_attachment(data, att, manager, building_id, sync_summary=sync_summary)
             elif ext in TEXT_EXTENSIONS:
                 return _store_document_attachment(data, att, manager, building_id)
             else:
                 # Default to image for compatibility
-                return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
+                return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message, sync_summary=sync_summary)
     except RuntimeError as e:
         # User-facing error (e.g. duration exceeded, ffmpeg failed) — surface message
         logging.warning("Attachment rejected: %s", e)
@@ -861,6 +930,11 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     except Exception:
         pass
 
+    # グローバル設定「添付したメディアの内容を自動想起に使う」(既定 OFF)。ON 時のみ
+    # 画像/音声/動画の概要生成を同期実行し、この送信リクエストの遅延と引き換えに
+    # sea/auto_recall.py の build_query が拾える summary を metadata に載せる。
+    media_recall_enabled = bool(getattr(manager.state, "media_recall_enabled", False))
+
     # Handle new multi-attachment format
     if req.attachments:
         images = []
@@ -871,16 +945,20 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 att, manager, building_id,
                 user_message=req.message or "",
                 prev_ai_message=prev_ai_message,
+                sync_summary=media_recall_enabled,
             )
             if result:
                 if result["type"] == "image":
-                    images.append({
+                    entry = {
                         "uri": result["uri"],
                         "path": result["path"],
                         "mime_type": result["mime_type"],
                         "item_id": result.get("item_id"),
                         "item_name": att.filename  # For history context
-                    })
+                    }
+                    if result.get("summary"):
+                        entry["summary"] = result["summary"]
+                    images.append(entry)
                 elif result["type"] == "document":
                     documents.append({
                         "uri": result["uri"],
@@ -891,14 +969,17 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                         "content_preview": result.get("content_preview")
                     })
                 elif result["type"] in ("audio", "video"):
-                    media_entries.append({
+                    entry = {
                         "type": result["type"],
                         "uri": result["uri"],
                         "path": result["path"],
                         "mime_type": result["mime_type"],
                         "item_id": result.get("item_id"),
                         "item_name": att.filename,
-                    })
+                    }
+                    if result.get("summary"):
+                        entry["summary"] = result["summary"]
+                    media_entries.append(entry)
         if images:
             metadata["images"] = images
         if documents:

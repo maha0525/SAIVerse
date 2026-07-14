@@ -92,6 +92,16 @@ def get_topk() -> int:
     return _env_int("SAIVERSE_AUTO_RECALL_TOPK", 8)
 
 
+# 添付メディア (画像/音声/動画) の概要を自動想起クエリに使うか (グローバル設定)。
+# 既定 OFF。ON 時は chat.py が同期生成した概要 (metadata["images"]/["media"] の
+# 各エントリの "summary" キー) を build_query が拾ってクエリに足す。書き込み側
+# (api/routes/config.py set_media_recall) が write_env_updates() で os.environ
+# にも即時反映するため、他パラメータと同様に env を都度読むだけで再起動なしに
+# 反映される。docs/intent/memory_architecture_v2.md §4.1 参照。
+def is_media_recall_enabled() -> bool:
+    return os.getenv("SAIVERSE_MEDIA_RECALL_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+
 # message ソースのヒットに加算するしきい値オフセット (raw cosine similarity)。
 #
 # 実測: message ソースは長文同士の類似度インフレが起きやすく、無関係な組み合わせ
@@ -211,17 +221,80 @@ def _is_conversational_message(msg: Dict[str, Any]) -> bool:
     return isinstance(content, str) and bool(content.strip())
 
 
+def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """直近の user ターンのメッセージ dict を返す (本文の有無は問わない)。
+
+    添付だけで本文が空のメッセージも拾えるよう、``_is_conversational_message``
+    (content 非空必須) より緩い判定にする。head 由来の合成メッセージ
+    (``__visual_context__`` 等) は除外する。
+    """
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        metadata = m.get("metadata") or {}
+        if (
+            metadata.get("__memory_weave_context__")
+            or metadata.get("__visual_context__")
+            or metadata.get("__realtime_context__")
+            or metadata.get("__auto_recall__")
+        ):
+            continue
+        return m
+    return None
+
+
+def _current_attachment_summaries(messages: List[Dict[str, Any]]) -> List[str]:
+    """最新 user メッセージに添付された画像/音声/動画の概要を集める。
+
+    「今添付されたものだけ」をクエリに反映するため、最新の1件のメッセージだけを
+    見る (過去メッセージの添付概要は拾わない)。概要は ``api/routes/chat.py`` が
+    ``SAIVERSE_MEDIA_RECALL_ENABLED`` ON 時に同期生成して
+    ``metadata["images"]`` / ``metadata["media"]`` の各エントリへ ``summary``
+    キーで載せたもの (OFF 時はキー自体が存在しないので何も拾わない)。
+    """
+    msg = _latest_user_message(messages)
+    if msg is None:
+        return []
+    metadata = msg.get("metadata") or {}
+    summaries: List[str] = []
+    for key in ("images", "media"):
+        entries = metadata.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            summary = entry.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                summaries.append(summary.strip())
+    return summaries
+
+
 def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> str:
     """直近 n 件の会話本文を連結してクエリ文字列にする。
 
     埋め込みの ``query:`` プレフィックス付与は unified_recall/embedder 側 (is_query=True)
     が行うので、ここでは生テキストの連結だけを返す。
+
+    ``SAIVERSE_MEDIA_RECALL_ENABLED`` (グローバル設定) が ON のときは、最新
+    user メッセージに添付された画像/音声/動画の概要 (chat.py が同期生成済み)
+    をクエリ末尾に足す。OFF (既定) では何も足さず、従来どおりの挙動になる。
     """
     if n is None:
         n = get_query_message_count()
     convo = [m for m in messages if _is_conversational_message(m)]
     tail = convo[-n:] if n > 0 else convo
-    return "\n".join(str(m.get("content", "")).strip() for m in tail).strip()
+    text_query = "\n".join(str(m.get("content", "")).strip() for m in tail).strip()
+
+    if not is_media_recall_enabled():
+        return text_query
+
+    attachment_summaries = _current_attachment_summaries(messages)
+    if not attachment_summaries:
+        return text_query
+
+    attachment_query = "\n".join(attachment_summaries)
+    return f"{text_query}\n{attachment_query}".strip() if text_query else attachment_query
 
 
 def _last_user_utterance(messages: List[Dict[str, Any]]) -> Optional[str]:

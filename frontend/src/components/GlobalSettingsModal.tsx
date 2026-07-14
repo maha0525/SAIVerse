@@ -71,6 +71,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Image default quality
     const [imageDefaultQuality, setImageDefaultQuality] = useState<'low' | 'medium' | 'high'>('high');
 
+    // Media recall (attached image/audio/video summaries feed auto-recall search)
+    const [mediaRecallEnabled, setMediaRecallEnabled] = useState(false);
+
     // Collapsible sections
     const [envSectionOpen, setEnvSectionOpen] = useState(false);
 
@@ -143,6 +146,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadUpdateCheckState();
             loadAnnouncementsState();
             loadImageDefaultQuality();
+            loadMediaRecallState();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -234,6 +238,34 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to set image default quality", e);
+        }
+    };
+
+    const loadMediaRecallState = async () => {
+        try {
+            const res = await fetch('/api/config/media-recall');
+            if (res.ok) {
+                const data = await res.json();
+                setMediaRecallEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load media recall state", e);
+        }
+    };
+
+    const toggleMediaRecall = async () => {
+        const newState = !mediaRecallEnabled;
+        try {
+            const res = await fetch('/api/config/media-recall', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setMediaRecallEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle media recall", e);
         }
     };
 
@@ -699,6 +731,22 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     <div
                                         className={`${styles.toggle} ${announcementsEnabled ? styles.active : ''}`}
                                         onClick={toggleAnnouncements}
+                                    />
+                                </div>
+
+                                {/* Media Recall Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            添付したメディアの内容を自動想起に使う
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            オンにすると、画像・音声・動画を添付したときに内容を読み取ってから思い出しに使います。読み取りの分だけ返信が数秒遅くなります。
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${mediaRecallEnabled ? styles.active : ''}`}
+                                        onClick={toggleMediaRecall}
                                     />
                                 </div>
 

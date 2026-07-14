@@ -20,6 +20,15 @@ def _default_image_quality() -> str:
     return "high"
 
 
+def _default_media_recall_enabled() -> bool:
+    """添付メディア (画像/音声/動画) の概要を自動想起クエリに使うかの既定値。
+
+    既定 OFF (概要生成を待つのはオプション扱い)。ON にすると添付があるとき
+    数秒待って内容を読み取ってから応答を生成する (sea/auto_recall.py 参照)。
+    """
+    return os.environ.get("SAIVERSE_MEDIA_RECALL_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+
 @dataclass
 class CoreState:
     """Shared mutable state for runtime/admin services."""
@@ -87,3 +96,6 @@ class CoreState:
 
     # Image generation defaults
     image_default_quality: str = field(default_factory=_default_image_quality)
+
+    # 添付メディア (画像/音声/動画) の概要を自動想起の検索クエリに使うか (既定 OFF)。
+    media_recall_enabled: bool = field(default_factory=_default_media_recall_enabled)

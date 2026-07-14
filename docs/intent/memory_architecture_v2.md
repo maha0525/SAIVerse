@@ -76,6 +76,8 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 
 **経路2: 埋め込み検索（意味的連想）**
 1. **クエリ生成**: 最新の会話本文1件のみ（rev1 の「直近4件連結」は長い発話で固有名詞が埋没し、ジャンクが 0.87〜0.91 でしきい値を通過する失敗が実測された）。ローカル埋め込み（E5 `query:` プレフィックス）、LLM 呼び出しなし
+
+**添付メディアの概要をクエリに使う（2026-07-14 追加、グローバル設定オプション）**: Memopedia に載っている物を写真に撮って見せても、テキストのクエリだけでは（画像の概要は visual_context 経由でプロンプトには載るが）自動想起には一切効かず初見リアクションになる問題への対処。グローバル設定「添付したメディアの内容を自動想起に使う」（既定 OFF、env `SAIVERSE_MEDIA_RECALL_ENABLED`）を ON にすると、`api/routes/chat.py` の添付処理が画像は `generate_contextual_image_description`（会話文脈つき）、音声/動画は既存の `ensure_audio_summary` / `ensure_video_summary`（文脈なし、メディア自体が語るため揃える必要がない）を**同期実行**し、結果を `metadata["images"]`/`["media"]` の各エントリへ `summary` キーで載せる。`sea/auto_recall.py` の `build_query` は最新 user メッセージ（＝今回の添付）の `summary` だけを拾ってクエリに追加する（過去メッセージの添付は拾わない＝「今」だけに限定）。OFF（既定）では画像の概要生成は従来どおりバックグラウンドのままで metadata に summary が乗らず、挙動は完全に不変。音声/動画の `.summary.txt` サイドカーキャッシュは `llm_clients/gemini.py` 側（モデルが非対応時に同じ関数を呼ぶ経路）と共用されるため、二重生成にはならない。
 2. **検索**: `unified_recall`（`sai_memory/unified_recall.py:452`）を流用。**Memopedia ページ / Fragment / 生メッセージの3コーパス**（Chronicle は 2026-07-08 に自動想起から除外 →後述）
 3. **フィルタ**: 類似度しきい値（下回れば浮かべない）。message ソースは長文類似度インフレ（ジャンクでも 0.89〜0.91）があるため +0.02 のオフセットを課す。直近コンテキスト内に既に存在する内容の除外
 

@@ -742,6 +742,30 @@ def set_image_default_quality(req: ImageDefaultQualityRequest, manager=Depends(g
     return {"success": True, "quality": req.quality}
 
 
+class MediaRecallRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/media-recall")
+def get_media_recall(manager=Depends(get_manager)):
+    """Get whether attached media (image/audio/video) summaries feed the auto-recall query."""
+    return {"enabled": manager.state.media_recall_enabled}
+
+
+@router.post("/media-recall")
+def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
+    """Toggle attached-media auto-recall and persist to .env.
+
+    ON にすると、添付 (画像/音声/動画) がある送信時に内容の読み取りを同期実行して
+    自動想起のクエリに使う (数秒待ちが発生する)。OFF (既定) では従来どおり
+    バックグラウンド生成のみで、クエリには反映しない。
+    """
+    manager.state.media_recall_enabled = req.enabled
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_MEDIA_RECALL_ENABLED": "true" if req.enabled else "false"})
+    return {"success": True, "enabled": req.enabled}
+
+
 class MaxHistoryMessagesRequest(BaseModel):
     value: Optional[int] = None
 

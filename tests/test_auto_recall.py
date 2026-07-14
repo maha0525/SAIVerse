@@ -4,6 +4,7 @@
 コンテキスト内除外・文字数上限のコアロジックのみを検証する (埋め込み / DB は使わない)。
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -796,6 +797,91 @@ class TestThreadLedgerIsolation(AutoRecallBase):
             self.assertIn(other_key, auto_recall._LEDGERS)
         finally:
             auto_recall._LEDGERS.pop(other_key, None)
+
+
+class TestMediaRecallQuery(unittest.TestCase):
+    """添付メディア (画像/音声/動画) 概要を自動想起クエリに使うグローバル設定。
+
+    設定は env `SAIVERSE_MEDIA_RECALL_ENABLED` (既定 OFF)。ON 時は
+    api/routes/chat.py が同期生成して metadata["images"]/["media"] の各エントリに
+    載せた "summary" を、build_query が最新 user メッセージからだけ拾う。
+    """
+
+    def setUp(self):
+        self._patcher = patch.dict("os.environ", {}, clear=False)
+        self._patcher.start()
+        import os
+        os.environ.pop("SAIVERSE_MEDIA_RECALL_ENABLED", None)
+        os.environ.pop("SAIVERSE_AUTO_RECALL_QUERY_MESSAGES", None)
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    @staticmethod
+    def _msg_with_images(text, summaries):
+        return {
+            "role": "user",
+            "content": text,
+            "metadata": {"images": [{"summary": s} for s in summaries]},
+        }
+
+    def test_disabled_by_default_ignores_attachment_summary(self):
+        # SAIVERSE_MEDIA_RECALL_ENABLED 未設定 (既定 OFF) では、metadata に summary
+        # があってもクエリに一切足されない (chat.py 側もそもそも同期生成しないので
+        # 実運用では summary キー自体が乗らないが、ここでは gate 自体を検証する)。
+        messages = [self._msg_with_images("これ覚えてる？", ["猫の写真です。"])]
+        self.assertEqual(auto_recall.build_query(messages), "これ覚えてる？")
+
+    def test_enabled_appends_attachment_summary_to_query(self):
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        messages = [self._msg_with_images("これ覚えてる？", ["猫の写真です。"])]
+        query = auto_recall.build_query(messages)
+        self.assertIn("これ覚えてる？", query)
+        self.assertIn("猫の写真です。", query)
+
+    def test_enabled_with_empty_text_uses_summary_only(self):
+        # 添付のみで本文が空のメッセージでも summary は拾われる (_latest_user_message
+        # は content の有無を問わない)。
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        messages = [self._msg_with_images("", ["犬の写真です。"])]
+        self.assertEqual(auto_recall.build_query(messages), "犬の写真です。")
+
+    def test_enabled_ignores_summary_from_past_message(self):
+        # 「今添付されたものだけ」: 最新 user メッセージ以外の summary は拾わない。
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        messages = [
+            self._msg_with_images("前のメッセージ", ["古い概要"]),
+            {"role": "assistant", "content": "了解"},
+            {"role": "user", "content": "新しいメッセージ"},
+        ]
+        query = auto_recall.build_query(messages)
+        self.assertNotIn("古い概要", query)
+        self.assertIn("新しいメッセージ", query)
+
+    def test_enabled_reads_media_key_for_audio_and_video(self):
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        messages = [
+            {
+                "role": "user",
+                "content": "聞いて",
+                "metadata": {"media": [{"type": "audio", "summary": "鳥の鳴き声です。"}]},
+            },
+        ]
+        query = auto_recall.build_query(messages)
+        self.assertIn("鳥の鳴き声です。", query)
+
+    def test_enabled_without_summary_key_falls_back_to_text_only(self):
+        # OFF 時の実運用そのもの: 添付はあるが summary キーが無い (同期生成してい
+        # ない) 場合、ON でもクエリはテキストのみになる。
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        messages = [
+            {
+                "role": "user",
+                "content": "これ覚えてる？",
+                "metadata": {"images": [{"item_id": "i1", "uri": "saiverse://image/x.png"}]},
+            },
+        ]
+        self.assertEqual(auto_recall.build_query(messages), "これ覚えてる？")
 
 
 class TestPersonaToggleGate(unittest.TestCase):

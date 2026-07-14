@@ -40,6 +40,7 @@
 | `SAIVERSE_GOLD_PANNING_ENABLED` | `1` | 砂金採り（Metabolism 時のコア記憶採取）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る）。intent `gold_panning.md` |
 | `SAIVERSE_GOLD_PANNING_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
 | `SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES` | `10` | セッションクローズ時採取のスキップ下限（新規メッセージがこれ未満なら採取しない。Phase 3） |
+| `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
 
 ## バックアップ
 

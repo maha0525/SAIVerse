@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 346（tag グループ: 23）
+**エンドポイント数**: 348（tag グループ: 23）
 
 ## addon
 
@@ -102,6 +102,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/max-history-messages` | Set session override for max history messages. |
 | GET | `/api/config/max-image-embeds` | Get current max image embeds setting. |
 | POST | `/api/config/max-image-embeds` | Set session override for max image embeds. |
+| GET | `/api/config/media-recall` | Get whether attached media (image/audio/video) summaries feed the auto-recall query. |
+| POST | `/api/config/media-recall` | Toggle attached-media auto-recall and persist to .env. |
 | GET | `/api/config/metabolism` | Get current metabolism settings. |
 | POST | `/api/config/metabolism` | Set metabolism settings. |
 | POST | `/api/config/model` | Set the global model override and return updated config. |
