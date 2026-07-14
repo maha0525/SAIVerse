@@ -288,17 +288,17 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
                 if playbook_name:
                     playbooks_by_pulse.setdefault(pulse_id, []).append(playbook_name)
 
-    # meta_judgment Pulse 用: meta_judgment_log から spells_emitted を引く
+    # meta_judgment Pulse 用: メッセージ本文から spells_emitted + 判断種別を引く
     meta_pulse_ids = [s[0] for s in selected if "meta_judgment" in s[2]]
-    spells_by_pulse: Dict[str, List[Dict[str, Any]]] = {}
+    meta_details: Dict[str, Dict[str, Any]] = {}
     if meta_pulse_ids:
-        spells_by_pulse = _load_meta_judgment_spells(manager, persona_id, meta_pulse_ids)
+        meta_details = _load_meta_judgment_details(manager, persona_id, meta_pulse_ids)
 
     # Track 解決マップ: spells_emitted 内の track_id を解決するのに使う
     # (既に track_map にある + spells の中の未知 track_id を追加解決)
     all_spell_track_ids: set = set()
-    for spells in spells_by_pulse.values():
-        for spell in spells:
+    for detail in meta_details.values():
+        for spell in detail.get("spells") or []:
             args = spell.get("args", {})
             tid = args.get("track_id", "")
             if tid:
@@ -324,6 +324,7 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
     items: List[ActivityRecentItem] = []
     for pulse_id, track, line_roles, last_ca in selected:
         is_meta = "meta_judgment" in line_roles
+        detail = meta_details.get(pulse_id, {})
         label = build_digest_label(
             track_title=getattr(track, "title", None),
             track_type=getattr(track, "track_type", None),
@@ -331,8 +332,9 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
             tool_calls=tools_by_pulse.get(pulse_id, []),
             playbook_names=playbooks_by_pulse.get(pulse_id),
             playbook_display_names=pb_display_names,
-            spells_emitted=spells_by_pulse.get(pulse_id),
+            spells_emitted=detail.get("spells"),
             track_resolver=spell_track_resolver,
+            judgment_kind=detail.get("judgment_kind"),
         )
         items.append(
             ActivityRecentItem(
@@ -348,10 +350,13 @@ def _build_recent_items(manager, persona_id: str) -> List[ActivityRecentItem]:
     return items
 
 
-def _load_meta_judgment_spells(
+def _load_meta_judgment_details(
     manager, persona_id: str, pulse_ids: List[str],
-) -> Dict[str, List[Dict[str, Any]]]:
-    """meta_judgment_log.spells_emitted を pulse_id ごとに引く。
+) -> Dict[str, Dict[str, Any]]:
+    """meta_judgment 系 Pulse (MetaLayer の alert/running/idle_pending/
+    idle_empty/life_purpose と、判断点 day_open/post_conversation/
+    post_session/on_event/day_close の両方) の /spell 実行内容と判断種別を
+    pulse_id ごとに引く。
 
     meta_judgment_log には pulse_id カラムが無いため、judged_at の時系列と
     messages の created_at を突合する必要がある…のだが、judgment_id は
@@ -359,35 +364,56 @@ def _load_meta_judgment_spells(
 
     代わりに messages テーブルの content から /spell 行を直接パースする方式を取る。
     messages テーブルには line_role='meta_judgment' + pulse_id が確実に入る (§11 実装記録)。
+
+    role は意図的にフィルタしない。MetaLayer 側
+    (builtin_data/tools/meta_judgment_finalize.py) は 2026-07-07
+    (commit b07c520, few-shot 汚染回避) 以降 ``role='user'`` の
+    ``<system>…</system>`` ナレーションとして保存するのに対し、判断点側
+    (builtin_data/tools/judgment_finalize.py) は今も ``role='assistant'``。
+    この関数がかつて ``role = 'assistant'`` だけを見ていたため、MetaLayer
+    側の判断が常に 0 件になり (実際は動いていても検出できず)、ライフビュー
+    「最近」のメタ判断行が常に既定の「現状を続けることにした」に落ちる
+    バグがあった (2026-07-14 発覚)。
+
+    metadata.judgment.kind (判断点のみが埋め込む) が取れれば judgment_kind
+    として返す。MetaLayer 側にはこのタグが無いため None のままになる。
     """
     if not pulse_ids:
         return {}
-    result: Dict[str, List[Dict[str, Any]]] = {}
+    result: Dict[str, Dict[str, Any]] = {}
     try:
         from .utils import get_adapter
         thread_pattern = f"{persona_id}:%"
         with get_adapter(persona_id, manager) as adapter:
             placeholders = ",".join("?" for _ in pulse_ids)
             sql = f"""
-                SELECT pulse_id, content FROM messages
+                SELECT pulse_id, content, metadata FROM messages
                 WHERE thread_id LIKE ?
                   AND pulse_id IN ({placeholders})
                   AND line_role = 'meta_judgment'
-                  AND role = 'assistant'
                 ORDER BY created_at DESC
             """
             with adapter._db_lock:
                 cur = adapter.conn.execute(sql, [thread_pattern] + pulse_ids)
                 rows = cur.fetchall()
-        for pulse_id, content in rows:
-            if not content:
-                continue
-            spells = _parse_spell_lines(content)
-            if spells:
-                result.setdefault(pulse_id, []).extend(spells)
+        for pulse_id, content, metadata_json in rows:
+            entry = result.setdefault(pulse_id, {"spells": [], "judgment_kind": None})
+            if content:
+                spells = _parse_spell_lines(content)
+                if spells:
+                    entry["spells"].extend(spells)
+            if entry["judgment_kind"] is None and metadata_json:
+                try:
+                    meta = json.loads(metadata_json)
+                except (TypeError, ValueError):
+                    meta = None
+                if isinstance(meta, dict):
+                    kind = (meta.get("judgment") or {}).get("kind")
+                    if isinstance(kind, str) and kind:
+                        entry["judgment_kind"] = kind
     except Exception:
         LOGGER.exception(
-            "[activity] Failed to load meta judgment spells for %s", persona_id,
+            "[activity] Failed to load meta judgment details for %s", persona_id,
         )
     return result
 

@@ -231,10 +231,12 @@ def _format_meta_judgment_result(
     spells_emitted: Optional[Sequence[Dict[str, Any]]],
     track_resolver: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """メタ判断 Pulse の結果を「○○をすることにした」に詳細化する。
+    """メタ判断 (MetaLayer: alert/running/idle_pending/idle_empty/life_purpose)
+    Pulse の結果を「○○をすることにした」に詳細化する。
 
-    spells_emitted は meta_judgment_log.spells_emitted (JSON デシリアライズ済み)。
-    track_resolver は {track_id: ActionTrack} の辞書で、Track のタイトルと種別を引くのに使う。
+    spells_emitted は meta_judgment_finalize が実行した /spell の一覧
+    ([{"name":..., "args":...}, ...])。track_resolver は {track_id: ActionTrack}
+    の辞書で、Track のタイトルと種別を引くのに使う。
     """
     if not spells_emitted:
         return "次にすることを考えた → 現状を続けることにした"
@@ -270,7 +272,81 @@ def _format_meta_judgment_result(
             return "次にすることを考えた → 作業を一旦中断した"
         if name == "track_complete":
             return "次にすることを考えた → 作業を完了した"
+        if name == "track_abort":
+            return "次にすることを考えた → 作業を取りやめた"
     return "次にすることを考えた"
+
+
+# ----------------------------------------------------------------------
+# 判断点 (saiverse/judgment_points.py) の判断結果 → 生活の節目の言葉
+# ----------------------------------------------------------------------
+
+# 判断点は 1 日の生活のリズムの節目 (起床 / 会話の後 / 作業の区切り /
+# 出来事への反応 / 就寝) ごとに構造化出力で決める判断で、MetaLayer
+# (alert/running/idle_* → _format_meta_judgment_result) とは別の判断系列
+# (v0.5 「判断点」、judgment_points.md)。kind は
+# builtin_data/tools/judgment_finalize.py が messages.metadata.judgment.kind
+# に埋め込む値と対応させる (saiverse/judgment_points.py の KIND_* 定数)。
+_JUDGMENT_KIND_LABELS: Dict[str, str] = {
+    "day_open": "今日一日をどう過ごすか考えた",
+    "post_conversation": "話し終えて、次に活かせることを考えた",
+    "post_session": "作業を一区切りして、続きをどうするか決めた",
+    "on_event": "起きたことにどう向き合うか決めた",
+    "day_close": "今日一日をふりかえった",
+}
+
+
+def _format_judgment_point_result(
+    judgment_kind: str,
+    spells_emitted: Optional[Sequence[Dict[str, Any]]],
+    track_resolver: Optional[Dict[str, Any]] = None,
+) -> str:
+    """判断点 Pulse の結果を「その節目で何を考えたか」+ (分かれば) 実際に
+    動いたことの一言に詳細化する。
+
+    判断点の適用結果の大半 (時間割の編成、タスクの裁定、出来事への反応など)
+    は /spell を伴わない直接の DB 書き込みで、ここから rich な詳細は取れない
+    (builtin_data/tools/judgment_finalize.py 参照)。それでも「どの節目の
+    判断だったか」を出すだけで、旧来の一律「次にすることを考えた」よりも
+    ずっと具体的になる。/spell が伴った場合 (欲求の書き留め・Track の起動/
+    完了など) はその一言を付け足す。
+    """
+    base = _JUDGMENT_KIND_LABELS.get(judgment_kind, "考えごとをしていた")
+    detail: Optional[str] = None
+    for spell in spells_emitted or []:
+        name = spell.get("name", "")
+        args = spell.get("args", {})
+        if name == "purpose_seed":
+            title = args.get("title", "")
+            detail = (
+                f"「{_truncate(title, 24)}」をやりたいことに書き留めた"
+                if title else "やりたいことを書き留めた"
+            )
+            break
+        if name == "track_create":
+            title = args.get("title", "")
+            if args.get("from_candidate"):
+                detail = (
+                    f"やりたかった「{_truncate(title, 24)}」を始めることにした"
+                    if title else "温めていたやりたいことを始めることにした"
+                )
+            else:
+                detail = (
+                    f"「{_truncate(title, 24)}」を始めることにした"
+                    if title else "新しいことを始めることにした"
+                )
+            break
+        if name == "track_complete":
+            track = (track_resolver or {}).get(args.get("track_id", ""))
+            ttitle = getattr(track, "title", "") if track is not None else ""
+            detail = (
+                f"「{_truncate(ttitle, 24)}」を完了にした"
+                if ttitle else "作業を完了にした"
+            )
+            break
+    if detail:
+        return f"{base} → {detail}"
+    return base
 
 
 def build_digest_label(
@@ -283,23 +359,35 @@ def build_digest_label(
     playbook_display_names: Optional[Dict[str, str]] = None,
     spells_emitted: Optional[Sequence[Dict[str, Any]]] = None,
     track_resolver: Optional[Dict[str, Any]] = None,
+    judgment_kind: Optional[str] = None,
 ) -> str:
     """Pulse 1 件をダイジェスト 1 行 (生活の言葉) に変換する。
 
     playbook_display_names は {playbook_name: display_name} の辞書で、
     DB の playbooks.display_name から引いた値を渡す。
 
+    judgment_kind は判断点 (saiverse/judgment_points.py) の判断種別
+    ("day_open"/"post_conversation"/"post_session"/"on_event"/"day_close")。
+    messages.metadata.judgment.kind から解決した値で、MetaLayer 側の
+    meta_judgment (alert/running/idle_*/life_purpose) にはこのタグが無いため
+    None のまま渡ってくる。
+
     優先順:
-    1. メタ判断 Pulse → spells_emitted から遷移結果を読む
-    2. 表示対象ツールの実行があればそのフレーズ (最大 _MAX_PHRASES_PER_LINE 件連結)
-    3. 実行された playbook 名から行動種別を列挙
-    4. Track タイトルベースの汎用文
+    1. 判断点 Pulse (judgment_kind あり) → 節目の言葉 + 分かれば実施内容
+    2. メタ判断 Pulse (MetaLayer) → spells_emitted から遷移結果を読む
+    3. 表示対象ツールの実行があればそのフレーズ (最大 _MAX_PHRASES_PER_LINE 件連結)
+    4. 実行された playbook 名から行動種別を列挙
+    5. Track タイトルベースの汎用文
     """
-    # 1. メタ判断 Pulse
+    # 1. 判断点 Pulse (day_open/post_conversation/post_session/on_event/day_close)
+    if judgment_kind:
+        return _format_judgment_point_result(judgment_kind, spells_emitted, track_resolver)
+
+    # 2. メタ判断 Pulse (MetaLayer: alert/running/idle_pending/idle_empty/life_purpose)
     if "meta_judgment" in line_roles:
         return _format_meta_judgment_result(spells_emitted, track_resolver)
 
-    # 2. ツール実行
+    # 3. ツール実行
     phrases: List[str] = []
     for name, args in tool_calls:
         phrase = format_tool_phrase(name, args)
@@ -310,7 +398,7 @@ def build_digest_label(
     if phrases:
         return "、".join(phrases)
 
-    # 3. Playbook 名から行動種別 (display_name は呼び出し元が DB から解決して渡す)
+    # 4. Playbook 名から行動種別 (display_name は呼び出し元が DB から解決して渡す)
     if playbook_names:
         pb_labels: List[str] = []
         seen: set = set()
@@ -326,7 +414,7 @@ def build_digest_label(
         if pb_labels:
             return " / ".join(pb_labels) + " を行った"
 
-    # 4. 汎用
+    # 5. 汎用
     title = (track_title or "").strip()
     if title:
         return f"「{_truncate(title, 30)}」を進めた"

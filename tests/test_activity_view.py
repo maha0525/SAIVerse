@@ -259,6 +259,65 @@ def test_digest_meta_judgment_track_pause():
     assert "中断" in label
 
 
+def test_digest_meta_judgment_track_abort():
+    """track_abort (running_active で action='abort') → 「取りやめた」"""
+    label = build_digest_label(
+        track_title=None, track_type=None,
+        line_roles=["meta_judgment"], tool_calls=[],
+        spells_emitted=[{"name": "track_abort", "args": {"track_id": "t:3"}}],
+    )
+    assert "取りやめ" in label
+
+
+# ---------------------------------------------------------------------------
+# 判断点 (day_open/post_conversation/post_session/on_event/day_close) の表示
+# ---------------------------------------------------------------------------
+
+def test_digest_judgment_point_day_open_no_detail():
+    """spell を伴わない判断点 (時間割の直接保存など) でも節目の言葉が出る
+    (旧来は judgment_kind が無く、常に「次にすることを考えた」に落ちていた)。"""
+    label = build_digest_label(
+        track_title=None, track_type=None,
+        line_roles=["meta_judgment"], tool_calls=[],
+        spells_emitted=None,
+        judgment_kind="day_open",
+    )
+    assert label == "今日一日をどう過ごすか考えた"
+
+
+def test_digest_judgment_point_day_close():
+    label = build_digest_label(
+        track_title=None, track_type=None,
+        line_roles=["meta_judgment"], tool_calls=[],
+        spells_emitted=None,
+        judgment_kind="day_close",
+    )
+    assert label == "今日一日をふりかえった"
+
+
+def test_digest_judgment_point_post_conversation_with_desire():
+    """post_conversation で purpose_seed が発火 → 節目の言葉 + 具体的な一言"""
+    label = build_digest_label(
+        track_title=None, track_type=None,
+        line_roles=["meta_judgment"], tool_calls=[],
+        spells_emitted=[{"name": "purpose_seed", "args": {"title": "短歌を詠む"}}],
+        judgment_kind="post_conversation",
+    )
+    assert "話し終えて" in label
+    assert "短歌を詠む" in label
+
+
+def test_digest_judgment_point_unknown_kind_falls_back():
+    """未知の judgment_kind でも汎用文言に落ちる (握り潰さない)"""
+    label = build_digest_label(
+        track_title=None, track_type=None,
+        line_roles=["meta_judgment"], tool_calls=[],
+        spells_emitted=None,
+        judgment_kind="some_future_kind",
+    )
+    assert label == "考えごとをしていた"
+
+
 # ---------------------------------------------------------------------------
 # Playbook 名ベースの行動種別表示
 # ---------------------------------------------------------------------------
