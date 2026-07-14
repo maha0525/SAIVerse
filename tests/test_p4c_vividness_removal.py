@@ -2,14 +2,12 @@
 
 検証内容:
 1. migrate_vivid_pages_to_desk — 冪等性、対象条件フィルタ
-2. get_memory_weave_context — 以前 buried は skip されていたが、
+2. MemopediaIndexSection の目次 — 以前 buried は skip されていたが、
    P4-c 以降は全ページを平等に描画するか
 3. memopedia_manage スキーマに set_vividness が無いこと
 """
 import sqlite3
-import tempfile
 import unittest
-from pathlib import Path
 
 from sai_memory.memopedia import Memopedia, init_memopedia_tables
 from sai_memory.desk import init_desk_tables
@@ -174,19 +172,20 @@ class VividToDeskMigrationTest(unittest.TestCase):
 
 
 class WeaveContextBuriedRenderTest(unittest.TestCase):
-    """P4-c: buried ページが weave context に表示されるか検証。
+    """P4-c: buried ページが記憶目次に表示されるか検証。
 
     以前は buried は skip されていたが、P4-c 以降は全ページを平等に描画する。
+
+    2026-07-14: 描画の実体が ``get_memory_weave_context._get_memopedia_context``
+    (削除済み・本番未使用の死にコードだった) から
+    ``MemopediaIndexSection._build_toc_markdown`` に一本化されたため、
+    検証先をそちらに合わせた。
     """
 
     def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.persona_dir = self._tmpdir.name
-        self.db_path = Path(self.persona_dir) / "memory.db"
-
-        conn = sqlite3.connect(str(self.db_path))
-        init_memopedia_tables(conn)
-        mem = Memopedia(conn)
+        self.mem_conn = sqlite3.connect(":memory:")
+        init_memopedia_tables(self.mem_conn)
+        mem = Memopedia(self.mem_conn)
         # buried ページを作成
         mem.create_page(
             parent_id="root_terms",
@@ -195,7 +194,7 @@ class WeaveContextBuriedRenderTest(unittest.TestCase):
             content="buried 本文",
         )
         # vividness を buried に直接書く (廃止カラムのテスト用操作)
-        conn.execute(
+        self.mem_conn.execute(
             "UPDATE memopedia_pages SET vividness='buried' WHERE title='BuriedPage'"
         )
         # rough ページも作成
@@ -205,27 +204,48 @@ class WeaveContextBuriedRenderTest(unittest.TestCase):
             summary="rough の概要",
             content="rough 本文",
         )
-        conn.commit()
-        conn.close()
+        self.mem_conn.commit()
 
-    def tearDown(self):
-        self._tmpdir.cleanup()
+    def test_buried_page_is_rendered_in_toc(self):
+        """P4-c: buried ページが目次に表示されること（以前は skip されていた）。"""
+        from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 
-    def test_buried_page_is_rendered_in_weave(self):
-        """P4-c: buried ページが weave に表示されること（以前は skip されていた）。"""
-        from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
+        class FakeSAIMem:
+            conn = self.mem_conn
 
-        messages = get_memory_weave_context(
-            persona_id="test_persona",
-            persona_dir=self.persona_dir,
-            include_memopedia=True,
-        )
-        memopedia_messages = [
-            m for m in messages
-            if m["metadata"]["__memory_weave_type__"] == "memopedia"
-        ]
-        self.assertEqual(len(memopedia_messages), 1)
-        content = memopedia_messages[0]["content"]
+        class FakePersona:
+            sai_memory = FakeSAIMem()
+
+        class FakeAI:
+            MEMOPEDIA_INDEX_ENABLED = True
+
+        class FakeQuery:
+            def filter_by(self, **kwargs):
+                return self
+
+            def first(self):
+                return FakeAI()
+
+        class FakeDB:
+            def query(self, *a, **kw):
+                return FakeQuery()
+
+            def close(self):
+                pass
+
+        class FakeManager:
+            def SessionLocal(self):
+                return FakeDB()
+
+        class FakeCtx:
+            manager = FakeManager()
+            persona_id = "test_persona"
+            persona = FakePersona()
+
+        section = MemopediaIndexSection()
+        snap = section.capture(FakeCtx())
+        self.assertIsNotNone(snap.toc_markdown)
+        content = snap.toc_markdown
         # buried ページのタイトルと概要が表示されていること
         self.assertIn("BuriedPage", content)
         self.assertIn("buried の概要", content)

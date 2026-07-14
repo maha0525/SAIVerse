@@ -1,5 +1,5 @@
 """MemopediaIndexSection — Memopedia ページの created / updated / deleted 差分検知
-と、opt-in head 目次（索引復帰の実験 P4-d）。
+と、opt-in head 目次（``AI.MEMOPEDIA_INDEX_ENABLED`` トグル、旧方式の後方互換復元）。
 
 旧 ``DynamicStateManager`` の memopedia 差分計算ロジックを Section interface に
 移植。head には何も render しない (= MemoryWeaveSection が中身を担当する)。
@@ -8,7 +8,17 @@
 全件比較ではないので memopedia 規模に依存しない。
 
 P4-d: ``AI.MEMOPEDIA_INDEX_ENABLED`` フラグが ON のペルソナに限り、
-Metabolism のみで更新される**深さ制限の目次スナップショット**を head に render する。
+Metabolism のみで更新される**目次スナップショット**を head に render する。
+
+このトグルは「Memopedia 全ページ一覧の常時表示（旧方式）」への後方互換として
+2026-07-04 に作られたもの (旧実装: ``builtin_data/tools/get_memory_weave_context.py``
+の ``_get_memopedia_context``、summary あり・深さ制限なし)。P4-d (2026-07-11) は
+器をこの Section に一本化する際に描画内容を「summary なし・深さ2階層まで」に
+すり替えてしまい、トグルの意味（旧方式復元）が失われる回帰を生んでいた。
+2026-07-14 の裁定でこれを修正し、summary 表示・深さ無制限の旧方式相当に戻した
+（[OPEN]（机基準）・★（is_important）・件数は P4-d の改善なので残す）。
+旧実装 ``_get_memopedia_context`` / ``include_memopedia`` 引数は本 Section への
+一本化に伴い削除済み（本番から呼ばれない死にコードだったため）。
 
 設計の「(persona,model) 固定」head 規律との整合:
 - enabled_sections 登録は固定 (on/off ゲートは per-persona DB フラグで、
@@ -36,10 +46,6 @@ from sea.head_pipeline.types import (
 
 LOGGER = logging.getLogger(__name__)
 
-# P4-d: 目次に含める最大階層深さ（カテゴリ trunk = 深さ 0、その直下 = 深さ 1 等）。
-# summary は出さない（design: タイトル・件数・印のみ）。
-_TOC_MAX_DEPTH = 2
-
 
 @dataclass(frozen=True)
 class MemopediaPageEntry:
@@ -62,9 +68,20 @@ class MemopediaIndexSnapshot:
 def _build_toc_markdown(conn) -> Optional[str]:
     """目次 Markdown を組み立てる（決定論・LLM ゼロ）。
 
-    - カテゴリ＋上位 _TOC_MAX_DEPTH 階層のタイトル＋各 trunk の総ページ数
-    - [OPEN] と ★(is_important) の印
-    - summary は載せない（設計の「summary は載せない」指示を遵守）
+    旧方式（``_get_memopedia_context``、Memory Atlas 以前）を本 Section へ
+    一本化した実装。旧方式の忠実な復元として:
+
+    - 各ページに summary を表示する（旧: ``- {title}{id_suffix}: {summary}``）
+    - 深さ制限なし（全階層を表示）
+    - カテゴリは ``category_keys("extractable")``（旧実装が使っていた集合。
+      ``category_keys("in_tree")`` との差分は "theme" のみで、旧方式は
+      theme トランクを掲示していなかったため後方互換のためこちらを踏襲する）
+
+    P4-d で追加された改善はそのまま残す:
+
+    - [OPEN] マーカー（机 (desk_items) 基準）
+    - ★(is_important) マーカー
+    - 各カテゴリ／各 trunk の総ページ数
     """
     try:
         from sai_memory.memopedia import Memopedia, init_memopedia_tables
@@ -95,8 +112,6 @@ def _build_toc_markdown(conn) -> Optional[str]:
             return total
 
         def _render_page(page: dict, depth: int = 0) -> None:
-            if depth > _TOC_MAX_DEPTH:
-                return
             # trunk（root_ ページ）はスキップ、子は処理する
             if page.get("is_trunk") or page.get("id", "").startswith("root_"):
                 for child in page.get("children") or []:
@@ -119,15 +134,18 @@ def _build_toc_markdown(conn) -> Optional[str]:
             child_total = _count_all(children)
             count_part = f" ({child_total})" if child_total > 0 else ""
 
+            # summary（旧方式の復元。空文字列でも ": " を出す旧実装の挙動を踏襲）
+            summary = page.get("summary") or ""
+
             lines.append(
-                f"{indent}- {title}{id_part}{open_mark}{star_mark}{count_part}"
+                f"{indent}- {title}{id_part}{open_mark}{star_mark}{count_part}: {summary}"
             )
 
-            # depth < _TOC_MAX_DEPTH なら子も描画
+            # 深さ制限なし。全階層を描画する（旧方式の復元）。
             for child in children:
                 _render_page(child, depth + 1)
 
-        for cat_key in category_keys("in_tree"):
+        for cat_key in category_keys("extractable"):
             cat_label = category_label(cat_key)
             pages = tree.get(cat_key) or []
             if not pages:
@@ -189,8 +207,9 @@ class MemopediaIndexSection:
             return None
         text = (
             "## 記憶の目次（Memopedia Index）\n"
-            "以下は地図帳の目次です。[OPEN] は机に開いているページ、★ は重要ページです。"
-            "summary は省略しています — ページの中身は memory_read で読んでください。\n"
+            "以下は地図帳の目次です。各ページの概要 (summary) を示しています。"
+            "[OPEN] は机に開いているページ、★ は重要ページです。"
+            "ページの本文まで読みたい場合は memory_read で読んでください。\n"
             + snapshot.toc_markdown
         )
         return RenderedSection(text=text)

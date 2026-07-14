@@ -14,8 +14,10 @@ composition (integration.py) 側でそれぞれ別 message として展開する
 
 P4-d (2026-07-11): Memopedia 索引は MemopediaIndexSection に一本化した。
 ``MEMOPEDIA_INDEX_ENABLED`` トグルは MemopediaIndexSection 側で読む。
-WeaveSection は Memopedia 索引を一切掲示しない (include_memopedia=False 固定)。
-旧後方互換経路 (_resolve_memopedia_index_enabled / include_memopedia=True) は廃止。
+WeaveSection は Memopedia 索引を一切掲示しない。旧後方互換経路
+(WeaveSection 側の _resolve_memopedia_index_enabled / include_memopedia 引数) は
+廃止済み——2026-07-14 に get_memory_weave_context 自体から
+include_memopedia 引数と _get_memopedia_context を削除し、死にコードを一掃した。
 
 refresh_on_events は空 (Metabolism のみ)。Chronicle / Memopedia の動的更新は
 将来 dynamic_state 連携で末尾通知に流す前提。
@@ -85,13 +87,14 @@ class MemoryWeaveSection:
         history_mgr = getattr(persona, "history_manager", None)
         anchor_id = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
 
-        # P4-d: Memopedia 索引は MemopediaIndexSection が担当するため、
-        # WeaveSection では include_memopedia=False 固定とする。
+        # P4-d: Memopedia 索引は MemopediaIndexSection が担当する。
+        # get_memory_weave_context 自体が Memopedia 索引に一切関与しなくなった
+        # (2026-07-14、include_memopedia 引数ごと削除) ため、ここでは
+        # Chronicle / Track Chronicle のみを取得する。
         try:
             with persona_context(ctx.persona_id, persona_dir, manager):
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
-                    include_memopedia=False,
                     history_anchor_message_id=anchor_id,
                 )
         except Exception:

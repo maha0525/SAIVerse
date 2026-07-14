@@ -2,24 +2,22 @@
 
 記憶アーキv2 §7.1 (2026-07-04) で Memopedia 索引の head 常時掲示は廃止されたが、
 per-persona トグル ``MEMOPEDIA_INDEX_ENABLED`` (database/models.py) で
-MemopediaIndexSection (P4-d) が目次を head に render できる。
+MemopediaIndexSection (P4-d) が目次を head に render できる。このトグルは
+「Memopedia 全ページ一覧の常時表示（旧方式）」への後方互換として作られたもの。
 
 P4-d (2026-07-11) でフラグの解決先を MemoryWeaveSection → MemopediaIndexSection
-に一本化した。MemoryWeaveSection は include_memopedia=False 固定。
+に一本化した際、旧経路 ``get_memory_weave_context`` の ``include_memopedia`` /
+``_get_memopedia_context`` (summary あり・深さ制限なし) が本番未使用の死にコード
+として残っていた。2026-07-14 にこれらを削除し、``MemopediaIndexSection`` の
+目次描画を summary あり・深さ制限なしの旧方式相当へ修正した（[OPEN]/★/件数の
+P4-d 改善は残す）。旧経路を直接叩いていた本ファイルのテストは
+``tests/test_p4d_memopedia_index_section.py`` へ実質的に統合済みのため、
+本ファイルは以下2つの関所のみを検証する:
 
-このテストは3つの関所を検証する:
-1. ``get_memory_weave_context(include_memopedia=...)`` — 後方互換 API の直接呼び出し。
-   ON/OFF で memopedia entry の有無が切り替わることを確認する。
-2. ``MemoryWeaveSection.capture`` — include_memopedia=False 固定 (P4-d)。
-   weave snapshot に memopedia entry が含まれないことを確認する。
-3. ``MemopediaIndexSection._resolve_memopedia_index_enabled`` — DB 列の解決ロジック。
+1. ``get_memory_weave_context`` — Memopedia 索引に一切関与しないこと
+   (include_memopedia 引数はもう存在しない。渡すと TypeError になる)。
+2. ``MemopediaIndexSection._resolve_memopedia_index_enabled`` — DB 列の解決ロジック。
    AI レコードの値をそのまま bool として読み出せることを確認する。
-
-``_compose_messages`` (sea/head_pipeline/integration.py) は snapshot.entries を
-kind 問わず展開する汎用実装であり、memopedia 固有の分岐は無い (8fb7449 でも
-残存を確認済み)。そのため本テストでは capture 側の memopedia entry 生成のみを
-対象とし、composition 側は別途 test_memory_weave_track_dump.py 等の既存カバレッジ
-に委ねる。
 """
 import sqlite3
 import tempfile
@@ -30,7 +28,10 @@ from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
 from sai_memory.memopedia import Memopedia, init_memopedia_tables
 
 
-class MemopediaIndexToggleTest(unittest.TestCase):
+class MemopediaIndexNotInWeaveContextTest(unittest.TestCase):
+    """get_memory_weave_context は Memopedia 索引の掲示にもう一切関与しない
+    (2026-07-14: P4-d 一本化に伴い include_memopedia 引数ごと削除)。"""
+
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.persona_dir = self._tmpdir.name
@@ -51,37 +52,23 @@ class MemopediaIndexToggleTest(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def test_include_memopedia_false_omits_memopedia_entry(self):
-        messages = get_memory_weave_context(
-            persona_id="test_persona",
-            persona_dir=self.persona_dir,
-            include_memopedia=False,
-        )
-        kinds = {m["metadata"]["__memory_weave_type__"] for m in messages}
-        self.assertNotIn("memopedia", kinds)
-
-    def test_include_memopedia_true_includes_memopedia_entry(self):
-        messages = get_memory_weave_context(
-            persona_id="test_persona",
-            persona_dir=self.persona_dir,
-            include_memopedia=True,
-        )
-        memopedia_messages = [
-            m for m in messages
-            if m["metadata"]["__memory_weave_type__"] == "memopedia"
-        ]
-        self.assertEqual(len(memopedia_messages), 1)
-        self.assertIn("テストページ", memopedia_messages[0]["content"])
-        self.assertIn("テスト用の概要", memopedia_messages[0]["content"])
-
-    def test_default_include_memopedia_is_false(self):
-        # デフォルト引数のみで呼んだ場合、記憶アーキv2 §7.1 の既定 (廃止) に従う。
+    def test_no_memopedia_kind_in_messages(self):
         messages = get_memory_weave_context(
             persona_id="test_persona",
             persona_dir=self.persona_dir,
         )
         kinds = {m["metadata"]["__memory_weave_type__"] for m in messages}
         self.assertNotIn("memopedia", kinds)
+
+    def test_include_memopedia_kwarg_no_longer_accepted(self):
+        """旧引数 include_memopedia は削除済み。渡すと TypeError になることを
+        明示的に確認する (呼び出し元が誤って復活させないための回帰)。"""
+        with self.assertRaises(TypeError):
+            get_memory_weave_context(
+                persona_id="test_persona",
+                persona_dir=self.persona_dir,
+                include_memopedia=True,
+            )
 
 
 class ResolveMemopediaIndexEnabledTest(unittest.TestCase):

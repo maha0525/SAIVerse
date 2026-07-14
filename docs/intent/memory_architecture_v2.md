@@ -192,7 +192,9 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 
 ### 7.1 索引の head 掲示をデフォルト廃止（後方互換トグルあり）
 
-> **改訂（2026-07-11、Memory Atlas P4-d）**: `MEMOPEDIA_INDEX_ENABLED` トグルの意味を「weave 内の旧式全列挙」から **head 目次セクション（MemopediaIndexSection.render）** に付け替えた。復活するのは旧実装そのままではなく**目次形式**——カテゴリ＋上位2階層のタイトルのみ・summary なし・vivid 全文展開なし（vividness 自体 P4-c で廃止）・[OPEN]=机・★=重要。本節が挙げた「全列挙＋全文展開で5千トークン」の実害は目次形式では発生しない。デフォルト OFF は維持（opt-in 実験、まずエアで観察）。なお §2 の症状リストにあった「まはー」と「まはー (1)」の重複は、P4-a 編纂の類似検知が発見し統合で治せるようになった（重複の根因＝再会システムの衝突回避作成も同日修正済み）。
+> **改訂（2026-07-11、Memory Atlas P4-d）**: `MEMOPEDIA_INDEX_ENABLED` トグルの器を「weave 内の旧式全列挙」から **head 目次セクション（MemopediaIndexSection.render）** に付け替えた。vivid 全文展開は無い（vividness 自体 P4-c で廃止）。[OPEN]=机・★=重要のマーカーを追加。デフォルト OFF は維持（opt-in 実験、まずエアで観察）。なお §2 の症状リストにあった「まはー」と「まはー (1)」の重複は、P4-a 編纂の類似検知が発見し統合で治せるようになった（重複の根因＝再会システムの衝突回避作成も同日修正済み）。
+>
+> **再改訂（2026-07-14）**: 器の付け替え作業中に描画内容まで「カテゴリ＋上位2階層のタイトルのみ・summary なし」にすり替わっており、トグル本来の目的（全ページ一覧・summary ありの旧方式への後方互換）を満たせていなかった。意図しない回帰と裁定し、**summary 表示・深さ無制限**の旧方式相当に戻した（[OPEN]/★/件数は残す）。旧実装 `_get_memopedia_context`（本節が元々指していた復元先）は本番未使用の死にコードだったため削除し、`MemopediaIndexSection` に実装を一本化した。詳細: `docs/intent/concept_consolidation.md` §P4-d 追補。
 
 - weave の Memopedia エントリ（全ページ列挙＋vivid 全文展開）を**デフォルトで廃止**する。`MemoryWeaveSection` の capture/render から memopedia 部を除去。
 - **後方互換**（2026-07-04 まはー要望）: Memopedia を能動的なメモ帳として使い、「全ページ一覧が常にペルソナの頭にある」ことに依存しているユーザーのため、ペルソナ単位トグル `MEMOPEDIA_INDEX_ENABLED`（デフォルト OFF）で旧方式を復活できる。復元される挙動は旧実装そのまま（index_limit 未適用の既知の乖離も互換性優先で温存）。自動想起と併用可。この「常に覚えておくこと」の需要は、ゾーン A（コア記憶、Phase 2）が本物の需要であることの裏付けでもある。

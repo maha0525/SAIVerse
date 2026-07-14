@@ -3,11 +3,13 @@
 検証スコープ:
 1. flag OFF → capture は index_enabled=False を返し、render は None
 2. flag ON → capture は toc_markdown を持ち、render はテキストを返す
-3. TOC に summary が含まれない（include_summary=False 相当）
+3. TOC に summary が含まれる（2026-07-14: 旧方式の後方互換復元。
+   P4-d 実装時に summary 非表示へすり替わっていた回帰の修正）
 4. ★(is_important) マーカーが出る
 5. diff 通知（capture_changes_since）
 6. serialize / deserialize のラウンドトリップ
-7. MemoryWeaveSection が include_memopedia=False 固定で呼ぶことを確認 (P4-d 移行検証)
+7. MemoryWeaveSection が Memopedia 索引に一切関与しないことを確認
+   (2026-07-14: get_memory_weave_context から include_memopedia 引数ごと削除)
 """
 from __future__ import annotations
 
@@ -132,14 +134,14 @@ class MemopediaIndexSectionOnTest(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertIn("テスト人物", rendered.text)
 
-    def test_toc_does_not_contain_summary_text(self):
-        """P4-d 設計: summary は載せない。"""
+    def test_toc_contains_summary_text(self):
+        """2026-07-14 裁定: トグルは旧方式 (summary あり) への後方互換のため、
+        summary を表示する。"""
         from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
         section = MemopediaIndexSection()
         ctx = _make_ctx(index_enabled=True, mem_conn=self.mem_conn)
         snap = section.capture(ctx)
-        # summary "テスト概要" は目次には含まれない
-        self.assertNotIn("テスト概要", snap.toc_markdown or "")
+        self.assertIn("テスト概要", snap.toc_markdown or "")
 
 
 # ---------------------------------------------------------------------------
@@ -285,14 +287,19 @@ class SerializeRoundtripTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. MemoryWeaveSection は include_memopedia=False 固定 (P4-d 移行)
+# 6. MemoryWeaveSection は Memopedia 索引に一切関与しない (P4-d 移行)
 # ---------------------------------------------------------------------------
 
 class MemoryWeaveP4dMigrationTest(unittest.TestCase):
-    """P4-d: MemoryWeaveSection の capture が include_memopedia=False で
-    get_memory_weave_context を呼ぶことを確認する。"""
+    """P4-d: MemoryWeaveSection の capture が get_memory_weave_context を
+    include_memopedia 引数なしで呼ぶことを確認する。
 
-    def test_weave_capture_calls_get_memory_weave_context_with_false(self):
+    2026-07-14: get_memory_weave_context から include_memopedia 引数自体を
+    削除した (Memopedia 索引描画は MemopediaIndexSection に一本化済みで、
+    この引数は死にコードだったため)。本テストはその整合を検証する。
+    """
+
+    def test_weave_capture_calls_get_memory_weave_context_without_include_memopedia(self):
         from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
 
         section = MemoryWeaveSection()
@@ -348,8 +355,8 @@ class MemoryWeaveP4dMigrationTest(unittest.TestCase):
             mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
             section.capture(FakeCtx())
 
-        # P4-d: include_memopedia は常に False
-        self.assertFalse(called_args.get("include_memopedia", "NOT_SET"))
+        # 2026-07-14: include_memopedia 引数はもう存在しないため、渡されないことを確認
+        self.assertNotIn("include_memopedia", called_args)
 
 
 if __name__ == "__main__":

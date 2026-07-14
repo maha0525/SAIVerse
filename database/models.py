@@ -89,12 +89,17 @@ class AI(Base):
     # には影響しない。デフォルト ON (2026-07-04 決定)。
     AUTO_RECALL_ENABLED = Column(Boolean, default=True, nullable=False)
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
-    MEMOPEDIA_INDEX_LIMIT = Column(Integer, nullable=True)  # Max pages per category in Memory Weave index (NULL → default 100)
+    # 2026-07-14: MEMOPEDIA_INDEX_LIMIT を読むコードは存在しない (get_memory_weave_context
+    # の memopedia_index_limit 引数は死にコードだったため、MEMOPEDIA_INDEX_ENABLED の
+    # 一本化と合わせて削除済み)。カラム自体は死置き。
+    MEMOPEDIA_INDEX_LIMIT = Column(Integer, nullable=True)  # Unused as of 2026-07-14 (dead column)
     # Memopedia 索引の head 常時表示 (旧方式) を per-persona で復活させる後方互換トグル。
     # 記憶アーキv2 §7.1 (2026-07-04) で自動想起 (ゾーンC) + 深掘りスペルに一本化した際、
     # head への Memopedia 全ページ一覧の常時掲示は廃止された。本トグルを True にすると、
-    # MemoryWeaveSection.capture が旧実装 (_get_memopedia_context) を呼び、Memopedia 索引を
-    # 独立 user メッセージとして head に含める。メモ帳として能動的に Memopedia を使う
+    # MemopediaIndexSection.capture (sea/head_pipeline/sections/memopedia_index.py) が
+    # 目次 (summary あり・深さ無制限・旧方式相当) を組み立て、head に含める。P4-d
+    # (2026-07-11) で器を MemoryWeaveSection からこちらへ一本化、2026-07-14 に描画内容の
+    # 回帰 (summary 欠落・深さ制限) を修正済み。メモ帳として能動的に Memopedia を使う
     # ユーザー向けの脱出経路。デフォルト OFF (トークン消費増のため既定は新方式に従う)。
     MEMOPEDIA_INDEX_ENABLED = Column(Boolean, default=False, nullable=False)
     # コア記憶 (記憶アーキv2 ゾーン A, docs/intent/memory_architecture_v2.md §5) の

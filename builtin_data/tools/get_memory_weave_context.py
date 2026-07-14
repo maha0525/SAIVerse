@@ -19,8 +19,6 @@ def get_memory_weave_context(
     persona_id: Optional[str] = None,
     persona_dir: Optional[str] = None,
     max_chronicle_entries: int = 50,
-    memopedia_index_limit: int = 100,
-    include_memopedia: bool = False,
     history_anchor_message_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Build Memory Weave context messages containing Chronicle (General + Track).
@@ -28,14 +26,14 @@ def get_memory_weave_context(
     This provides the persona with:
     - Chronicle: Recent events in detail, older events in summary (hierarchical)
     - Track Chronicle: work history for the active track
-    - Memopedia: page titles, keywords, summaries (``include_memopedia=True`` の場合のみ)
 
     記憶アーキv2 §7.1 (2026-07-04): Memopedia 索引の head 常時掲示は**廃止**し、
     知識への接触はゾーン C の自動想起 (sea/auto_recall.py) + 深掘りスペルに一本化した。
-    ただし Memopedia を能動的なメモ帳として使うユーザー向けに、per-persona トグル
-    ``MEMOPEDIA_INDEX_ENABLED`` (database/models.py) で旧方式 (全ページ一覧の常時表示)
-    を復活できる後方互換経路を用意している。``include_memopedia`` はそのゲート引数で、
-    呼び出し元 (MemoryWeaveSection.capture) がトグルを解決して渡す。
+    Memopedia を能動的なメモ帳として使うユーザー向けの後方互換 (per-persona トグル
+    ``MEMOPEDIA_INDEX_ENABLED``、database/models.py) は、2026-07-14 に
+    ``sea/head_pipeline/sections/memopedia_index.py`` の ``MemopediaIndexSection``
+    へ一本化された（旧実装 ``_get_memopedia_context`` / ``include_memopedia`` 引数は
+    本番から呼ばれない死にコードだったため削除済み）。
     ペルソナが明示的に開いたページ (memory_open → get_open_pages_content) は
     別機構なので、このトグルの影響を受けない。
 
@@ -48,11 +46,6 @@ def get_memory_weave_context(
         max_chronicle_entries: Max Chronicle entries. General Chronicle は §6.2
             の文字数予算制に移行したためこの値は安全弁の下限として扱われる (予算が
             主制御)。Track Chronicle 側では従来どおり件数上限として効く。
-        memopedia_index_limit: Max pages per category in the Memopedia index
-            (``include_memopedia=True`` の場合のみ使用。旧実装からの既知の乖離として、
-            この limit は実際には _get_memopedia_context 内で適用されない。後方互換
-            優先のため、あえて修正せず旧実装のまま復元している)
-        include_memopedia: True の場合のみ Memopedia 索引を組み立てて含める
 
     Returns:
         List of messages to insert into context.
@@ -99,15 +92,8 @@ def get_memory_weave_context(
         )
 
         # 記憶アーキv2 §7.1: Memopedia 索引の head 常時掲示は既定で廃止 (自動想起 +
-        # 深掘りスペルに一本化)。ただし MEMOPEDIA_INDEX_ENABLED トグル (後方互換) が
-        # ON のペルソナだけは旧方式で組み立てる。
-        memopedia_text = ""
-        if include_memopedia:
-            memopedia_text = _get_memopedia_context(conn, index_limit=memopedia_index_limit)
-            LOGGER.info("get_memory_weave_context: Memopedia text length=%d", len(memopedia_text))
-            if not memopedia_text:
-                LOGGER.warning("get_memory_weave_context: Memopedia context is empty")
-
+        # 深掘りスペルに一本化)。MEMOPEDIA_INDEX_ENABLED トグル (後方互換) の描画は
+        # MemopediaIndexSection に一本化されているため、本関数はもう関与しない。
         conn.close()
 
         # Build separate messages for Chronicle / Track Chronicle / Memopedia
@@ -135,28 +121,11 @@ def get_memory_weave_context(
                     "__memory_weave_type__": "track_chronicle",
                 },
             })
-        if memopedia_text:
-            memopedia_intro = (
-                "以下は、あなたの長期記憶（Memopedia: 記憶ベース）です。\n"
-                "タイトルと概要のみが表示されているページは、ここに載っている以上の詳細な内容を持っています。"
-                "特定のページの詳細を確認したい場合は、memory_read スペル（例: m:3）で本文を読んでください。"
-                "常に見ておきたいページは memory_open で机に開いておけます。"
-            )
-            messages.append({
-                "role": "user",
-                "content": f"{memopedia_intro}\n\n{memopedia_text}",
-                "metadata": {
-                    MEMORY_WEAVE_CONTEXT_MARKER: True,
-                    "__memory_weave_type__": "memopedia",
-                },
-            })
-
         total_chars = sum(len(m["content"]) for m in messages)
         LOGGER.info(
-            "get_memory_weave_context: Generated %d messages (%d chars total, track_chronicle=%s, memopedia=%s)",
+            "get_memory_weave_context: Generated %d messages (%d chars total, track_chronicle=%s)",
             len(messages), total_chars,
             "yes" if track_chronicle_text else "no",
-            "yes" if memopedia_text else "no",
         )
         return messages
 
@@ -352,77 +321,6 @@ def _get_track_unprocessed_messages_text(
         lines.append(f"- [{ts}] {role_label}: {content_clean}")
     lines.append("```")
     return "\n".join(lines)
-
-
-def _get_memopedia_context(
-    conn: sqlite3.Connection,
-    *,
-    index_limit: int = 100,
-) -> str:
-    """Get Memopedia context (page titles, summaries, optionally content for vivid pages).
-
-    後方互換トグル (MEMOPEDIA_INDEX_ENABLED) 専用の経路。記憶アーキv2 §7.1 で
-    既定の head 常時掲示からは外れたが、旧実装を忠実に復元して残す。
-
-    Args:
-        conn: Database connection to memory.db
-        index_limit: Max pages per category to include (sorted by most recently
-                     referenced/updated). 0 = unlimited.
-
-    Note:
-        旧実装の時点で ``index_limit`` は ``_list_pages`` に一切渡されておらず、
-        実際には適用されていなかった (既知の乖離)。後方互換を優先し、あえて
-        修正せずそのまま復元している。
-    """
-    try:
-        from sai_memory.memopedia import Memopedia, init_memopedia_tables
-        from sai_memory.memopedia.storage import category_keys, category_label
-
-        init_memopedia_tables(conn)
-        memopedia = Memopedia(conn)
-
-        tree = memopedia.get_tree()
-        LOGGER.info("_get_memopedia_context: tree keys=%s", list(tree.keys()))
-        lines: List[str] = []
-
-        def _sort_key(page: Dict) -> int:
-            return max(
-                page.get("last_referenced_at") or 0,
-                page.get("updated_at") or 0,
-            )
-
-        def _list_pages(pages: List[Dict], prefix: str = "") -> None:
-            for page in pages:
-                if not page["id"].startswith("root_"):
-                    sid = page.get("short_id")
-                    id_suffix = f" [id: m:{sid}]" if sid else ""
-                    # P4-c: vividness 廃止 — 全ページを平等掲示 (rough 描画を適用)。
-                    # buried/faint スキップと vivid 全内容展開は廃止。
-                    lines.append(f"{prefix}- {page['title']}{id_suffix}: {page['summary']}")
-
-                children = page.get("children", [])
-                if children:
-                    _list_pages(children, prefix + "  ")
-
-        for category in category_keys("extractable"):
-            pages = tree.get(category, [])
-            LOGGER.debug("_get_memopedia_context: category=%s, pages count=%d", category, len(pages))
-            if pages:
-                # Sort by most recently referenced/updated, apply limit
-                lines.append(f"\n### {category_label(category)}")
-                _list_pages(pages)
-
-        LOGGER.info("_get_memopedia_context: Generated %d lines", len(lines))
-        if not lines:
-            return ""
-
-        return "\n".join(lines)
-    except ImportError:
-        LOGGER.debug("Memopedia module not available")
-        return ""
-    except Exception as exc:
-        LOGGER.warning("Failed to get Memopedia context: %s", exc)
-        return ""
 
 
 # Tool definition for registry (optional, mainly used via runtime.py)
