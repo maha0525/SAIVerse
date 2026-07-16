@@ -232,7 +232,6 @@ CREATE TABLE execution_outbox (
 3. 保持期間の既定値（30 日仮置き）
 4. `prepared` の回収規則・実行期限の既定値（kind ごと。Phase 1 で判断点 5 種ぶんを確定）
 
-5. Beat ロックの実装点 — SEA runtime 内の Beat 境界（spell ループ 1 周）への型付けと、PulseController の main/META 並行 submit の直列化方式。柱 2（model 別 Session）・S4（Stelis）の議論と合流して Phase 0 実装前に確定する
-
+解決済み（v0.3 後続）: ~~Beat ロックの実装点~~ → 柱 2（model 別 Session）・S4（Stelis）と合流した統合工事 intent [`beat_execution_context.md`](beat_execution_context.md) として起草（2026-07-16）。Beat ロックと関所の配置は同 intent §3.4。
 解決済み（v0.2）: ~~回復 tick の住処~~ → 独立の世界レベル定期ジョブ（§2.4。watchdog 相乗りは自律 OFF ペルソナへの配送が死ぬため不採用）。~~配送遅延の時系列~~ → Pulse 前 flush の必須関所化で構造的に消滅（§2.2 / 不変条件 8）。
 解決済み（v0.3）: ~~並行実行と配送失敗の合成による過去挿入~~ / ~~「配送時刻の位置に書く」案~~ → 後者は「遅れて届いた過去が今記録されるのは不自然」として却下（まはー）。persona 内の生成処理を Beat 単位で直列化することで、並行書き込みそのものを全廃（§2.3 / 不変条件 9）。実行時刻のまま刻んで矛盾が生じない。
