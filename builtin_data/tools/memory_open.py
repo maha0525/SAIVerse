@@ -55,7 +55,7 @@ def schema() -> ToolSchema:
             "「開く」は以後の思考で常に見える状態が続きますが、机の広さ"
             "（文字数予算）を消費します。机が溢れると、長く触っていない"
             "ページから自動的に棚へ戻ります。"
-            "参照は m:N（Memopedia）/ ch:N（Chronicle）/ task:N（目的ノード）"
+            "参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）/ task:N（目的ノード）"
             "の形式です（コア記憶は常時開のため対象外です）。"
         ),
         parameters={

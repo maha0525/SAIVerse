@@ -2,7 +2,7 @@
 
 コア記憶＝ペルソナが**自分で選んで刻む恒常知識**。head (システムプロンプト部) に
 常駐し、Metabolism 時のみ更新が反映される。編集主体はペルソナ自身 (memory_write /
-memory_delete スペル。宛先 core / c:N でコア記憶を指す。旧専用スペル
+memory_delete スペル。宛先 core / core:N でコア記憶を指す。旧専用スペル
 core_memory_add / core_memory_update / core_memory_remove は P2c-4a で撤去)。
 システムは容量目安を超過しても絶対に切り詰めない (通知のみ)。
 
@@ -14,13 +14,13 @@ core_memory_add / core_memory_update / core_memory_remove は P2c-4a で撤去)�
 trunk ``root_core`` (category ``core``・is_trunk・title「コア記憶」) 配下の
 子ページで、``c:N`` の N は metadata JSON の ``core_id`` (Memopedia の ``m:N``
 採番とは独立の連番、max+1)。soft-delete は memopedia の ``is_deleted`` と
-metadata の ``deleted_at`` を両方刻む (m:N 経由で触られた場合の整合のため)。
+metadata の ``deleted_at`` を両方刻む (memopedia:N 経由で触られた場合の整合のため)。
 ページ作成・更新は memopedia storage の生成 diff / 編集来歴 (page_edit_history)
 を経由し、``edit_source="core_memory"`` で識別できるようにする。
 
 旧 ``core_memories`` テーブルは ``init_core_memory_table`` 内の一回きり冪等
-migration でページへ写し切ってから DROP する (``sai_memory/photos.py`` の
-marks→photos と同じ流儀。旧 path は残さない)。
+migration でページへ写し切ってから DROP する (``sai_memory/clips.py`` の
+marks→clips と同じ流儀。旧 path は残さない)。
 
 テーブルはペルソナの memory.db に同居する (Memopedia / Chronicle と同じ conn)。
 ``init_core_memory_table`` は SAIMemoryAdapter の初期化時に冪等に呼ばれる。
@@ -57,8 +57,13 @@ class CoreMemory:
 
     @property
     def ref(self) -> str:
-        """ペルソナ提示用の参照 (例: ``c:3``)。"""
-        return f"c:{self.id}"
+        """ペルソナ提示用の参照 (例: ``core:3``)。
+
+        書式は統一グラマー (``saiverse/references.py``) が単一真実源。
+        """
+        from saiverse import references
+
+        return references.to_short_ref("core", self.id)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +166,7 @@ def _migrate_legacy_core_memories_table(conn: sqlite3.Connection) -> None:
         page = create_page(
             conn,
             parent_id=ROOT_CORE_ID,
-            title=f"コア記憶 c:{old_id}",
+            title=f"コア記憶 core:{old_id}",
             content=content or "",
             category=CATEGORY_CORE,
             is_trunk=False,
@@ -340,7 +345,7 @@ def remove_core_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
     物理削除しないのは、gold_panning の自動 remove やペルソナの誤削除を
     ユーザーが後から復元できるようにするため (restore_core_memory)。
     memopedia の ``is_deleted`` と metadata の ``deleted_at`` を両方刻む
-    (m:N 経由でこのページに触れた場合の整合を保つ)。
+    (memopedia:N 経由でこのページに触れた場合の整合を保つ)。
     """
     row = _fetch_core_row_by_core_id(conn, memory_id, include_deleted=False)
     if row is None:
@@ -536,17 +541,17 @@ def create_scene_core_memory(
 
     new_id = add_core_memory(conn, transcript, kind="scene", metadata=metadata)
 
-    # 由来参照を範囲写真として撮り、このコア記憶へ貼る (土地参照の統一
-    # プリミティブ、concept_consolidation.md「写真」)。正リンクは写真側の
-    # pasted_to = "c:{id}" 一本。写真が撮れなくても scene 本体は生かす
-    # (由来参照は本体より優先度が低い — adapter.add_photos と同じ姿勢)。
+    # 由来参照を範囲クリップとして切り出し、このコア記憶へ貼る (土地参照の統一
+    # プリミティブ、concept_consolidation.md「クリップ」)。正リンクはクリップ側の
+    # pasted_to = "c:{id}" 一本。クリップが撮れなくても scene 本体は生かす
+    # (由来参照は本体より優先度が低い — adapter.add_clips と同じ姿勢)。
     try:
-        from sai_memory.photos import add_photo
-        add_photo(
+        from sai_memory.clips import add_clip
+        add_clip(
             conn,
             message_id=message_ids[0],
             message_id_end=message_ids[-1],
-            pasted_to=f"c:{new_id}",
+            pasted_to=f"core:{new_id}",
         )
     except Exception:
         pass

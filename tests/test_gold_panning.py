@@ -191,7 +191,7 @@ class GoldPanningRunTest(unittest.TestCase):
         self.assertEqual(scope, "committed")
         self.assertEqual(line_role, "main_line")
         self.assertIn("赴任のことを覚えておく", content)
-        self.assertIn(f"c:{cores[0].id}", content)
+        self.assertIn(f"core:{cores[0].id}", content)
 
     # -- case 1b: 記録は event_message 形式のシステム通知 (role=user) ------
 

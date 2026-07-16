@@ -653,7 +653,7 @@ class TestRunPendingPlans:
             conn, page_id="p_a", title="消える", content="本文B", parent_id="root", short_id=2,
         )
         # enqueue
-        enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
+        enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
         assert len(list_pending(conn)) == 1
 
         manager, messages = _make_run_manager(conn)
@@ -665,7 +665,7 @@ class TestRunPendingPlans:
         # plan は done になっている
         cur = conn.execute(
             "SELECT status FROM curation_plans WHERE op_id = ?",
-            ("merge:m:1+m:2",),
+            ("merge:memopedia:1+memopedia:2",),
         )
         row = cur.fetchone()
         assert row is not None
@@ -686,9 +686,9 @@ class TestRunPendingPlans:
         )
 
         # 1番目: 存在しないページを参照 → 失敗
-        enqueue_plan(conn, kind="merge", op_id="merge:no_such+m:2", refs=["m:999", "m:2"])
+        enqueue_plan(conn, kind="merge", op_id="merge:no_such+memopedia:2", refs=["memopedia:999", "memopedia:2"])
         # 2番目: 正常
-        enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
+        enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
 
         manager, messages = _make_run_manager(conn)
         result = run_pending_plans(manager, "alice")
@@ -706,7 +706,7 @@ class TestRunPendingPlans:
         _insert_page(
             conn, page_id="p_a", title="消える", content="本文B", parent_id="root", short_id=2,
         )
-        enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
+        enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
 
         manager, messages = _make_run_manager(conn)
         run_pending_plans(manager, "alice")
@@ -1030,7 +1030,7 @@ class TestFoldIntegration:
         fold = [c for c in candidates if c["kind"] == "fold"]
         assert len(fold) == 1, f"fold 候補が検知されない: {candidates}"
         cand = fold[0]
-        assert cand["refs"] == ["m:1", "m:2"], (
+        assert cand["refs"] == ["memopedia:1", "memopedia:2"], (
             f"fold の refs 契約違反 (survivor=親, absorbed=過小ページ): {cand['refs']}"
         )
 
@@ -1088,7 +1088,7 @@ class TestPlanAtomicity:
         _insert_page(
             conn, page_id="child1", title="子1", content="C", parent_id="p_a", short_id=3,
         )
-        enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
+        enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
         return conn
 
     def test_merge_failure_at_last_stage_rolls_back_everything(self):
@@ -1150,7 +1150,7 @@ class TestPlanAtomicity:
             content="ブロック0\n\nブロック1\n\nブロック2",
             parent_id="root", short_id=1,
         )
-        enqueue_plan(conn, kind="split", op_id="split:m:1", refs=["m:1"])
+        enqueue_plan(conn, kind="split", op_id="split:memopedia:1", refs=["memopedia:1"])
         return conn
 
     def _run_with_mock_llm(self, manager: Any, llm_response: Dict[str, Any]) -> Dict[str, Any]:
@@ -1289,7 +1289,7 @@ class TestSplitLossless:
 class TestSplitRealWorldResponse:
     """実機で保存則違反として棄却された LLM 応答（2026-07-14 未明、aifi_city_a）の回帰。
 
-    m:25「まはー」(194 ブロック) に対し gemini-3.5-flash-paid が返した割当を
+    memopedia:25「まはー」(194 ブロック) に対し gemini-3.5-flash-paid が返した割当を
     逐語で再現する。旧実装はこれを「重複43・欠落27」として棄却していた
     （元の応答は logs/20260714_003747/llm_io.log）。正規化後はそのまま受理され、
     競合・非申告のブロックが親に残ることで保存則が成立する。

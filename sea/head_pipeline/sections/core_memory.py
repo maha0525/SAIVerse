@@ -70,7 +70,7 @@ def _render_scene(item: "CoreMemoryItem") -> str:
         except (json.JSONDecodeError, TypeError, AttributeError):
             LOGGER.debug("core_memory: failed to parse scene metadata for c:%s", item.memory_id)
     return (
-        f"- [c:{item.memory_id}] 会話の記憶{date_label} — 過去の実際のやり取りの記録:\n"
+        f"- [core:{item.memory_id}] 会話の記憶{date_label} — 過去の実際のやり取りの記録:\n"
         f"  ```\n"
         f"{_indent_block(item.content, '  ')}\n"
         f"  ```"
@@ -130,7 +130,7 @@ class CoreMemorySection:
             if item.kind == "scene":
                 lines.append(_render_scene(item))
             else:
-                lines.append(f"- [c:{item.memory_id}] {item.content}")
+                lines.append(f"- [core:{item.memory_id}] {item.content}")
         return RenderedSection(text="\n".join(lines))
 
     def diff_to_notifications(

@@ -100,7 +100,7 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
                     },
                     "memory_id": {
                         "type": "integer",
-                        "description": "update / remove 対象の c:N の N。",
+                        "description": "update / remove 対象の core:N の N。",
                     },
                 },
                 "required": ["op"],
@@ -145,7 +145,7 @@ def _build_panning_prompt(persona: Any) -> str:
                 body = mem.content or ""
                 if mem.kind == "scene":
                     body = _truncate(body.replace("\n", " "), _SCENE_PREVIEW_CHARS)
-                core_lines.append(f"- [c:{mem.id}] {body}")
+                core_lines.append(f"- [core:{mem.id}] {body}")
         except Exception:
             LOGGER.warning("[gold_panning] failed to list core memories for prompt", exc_info=True)
 
@@ -227,7 +227,7 @@ def _apply_ops(
                 # 記録は <system> 包みのシステム通知として SAIMemory に残る
                 # (_persist_record 参照)。省略・切り詰めは採取事実の改変になるため、
                 # 本文は全文を書く (不変条件 §5-8 / 2026-07-07 まはー指摘)。
-                lines.append(f"コア記憶 c:{new_id} に採取: {content}")
+                lines.append(f"コア記憶 core:{new_id} に採取: {content}")
 
             elif kind == "update":
                 memory_id = op.get("memory_id")
@@ -238,7 +238,7 @@ def _apply_ops(
                     continue
                 if not content:
                     failed += 1
-                    lines.append(f"update 失敗: c:{memory_id} の新しい本文が空でした。")
+                    lines.append(f"update 失敗: core:{memory_id} の新しい本文が空でした。")
                     continue
                 with adapter._db_lock:
                     ok = update_core_memory(
@@ -246,10 +246,10 @@ def _apply_ops(
                     )
                 if ok:
                     applied += 1
-                    lines.append(f"コア記憶 c:{memory_id} を更新: {content}")
+                    lines.append(f"コア記憶 core:{memory_id} を更新: {content}")
                 else:
                     failed += 1
-                    lines.append(f"update 失敗: c:{memory_id} が見つかりませんでした。")
+                    lines.append(f"update 失敗: core:{memory_id} が見つかりませんでした。")
 
             elif kind == "remove":
                 memory_id = op.get("memory_id")
@@ -261,10 +261,10 @@ def _apply_ops(
                     ok = remove_core_memory(adapter.conn, int(memory_id))
                 if ok:
                     applied += 1
-                    lines.append(f"コア記憶 c:{memory_id} を削除しました。")
+                    lines.append(f"コア記憶 core:{memory_id} を削除しました。")
                 else:
                     failed += 1
-                    lines.append(f"remove 失敗: c:{memory_id} が見つかりませんでした。")
+                    lines.append(f"remove 失敗: core:{memory_id} が見つかりませんでした。")
 
             else:
                 failed += 1

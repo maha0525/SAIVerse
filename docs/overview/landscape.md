@@ -55,7 +55,7 @@ graph TD
 
 **4つのハブ概念**（線が集中する中心）:
 - **Pulse** — 駆動の中心。時間割・Playbook・土地・Session すべてに接続する
-- **土地と Memory Atlas（§5）** — 記録の中心。**土地**＝生ログ（実際に起きたことの不変の地面）、**Memory Atlas（地図帳）**＝土地から編纂される三種の地図（時間＝Chronicle / 意味＝Memopedia・コア記憶 / 目的＝目的の木）。土地参照は**写真**（p:N）に統一
+- **土地と Memory Atlas（§5）** — 記録の中心。**土地**＝生ログ（実際に起きたことの不変の地面）、**Memory Atlas（地図帳）**＝土地から編纂される三種の地図（時間＝Chronicle / 意味＝Memopedia・コア記憶 / 目的＝目的の木）。土地参照は**クリップ**（clip:N）に統一
 - **Playbook** — 行動の中心。Beat が生成され、Spell を介して Tool やサブライン Playbook に繋がる
 - **Session（短期記憶）** — 認知の中心。土地の末尾・head（目次・机・コア記憶を含む）・進行中の Beat・外界入力を集約し、**すべての LLM 判断（判断点 / Beat 生成）に供給する**。継続不能になると Metabolism を発火し、新 Session が始まる
 
@@ -245,8 +245,8 @@ graph TD
 
 | 地図 | 派生方式 | 実体 |
 |---|---|---|
-| **時間の地図** | 時間的要約（本を章・部に区切る） | Chronicle（`arasuji_entries`、`ch:N`） |
-| **意味の地図** | 意味の抽出（固有名詞の辞書） | Memopedia・Fragment（`m:N`）＋ コア記憶（常時開の特殊ページ、`c:N`） |
+| **時間の地図** | 時間的要約（本を章・部に区切る） | Chronicle（`arasuji_entries`、`chronicle:N`） |
+| **意味の地図** | 意味の抽出（固有名詞の辞書） | Memopedia・Fragment（`memopedia:N`）＋ コア記憶（常時開の特殊ページ、`core:N`） |
 | **目的の地図** | 文脈的分類（クエストライン） | 目的の木（`persona_task`、`task:N`。旧 Track/Task/Desire/Note の統合先） |
 
 **三地図共通の法則**: **ノード状態が構造の代謝（分割・統合）を駆動する**。時間の地図は自動（Lv1→Lv2 統合）、意味・目的の地図はペルソナの自己著者性を通す（判断点で提案 → 本人が裁定 → 睡眠中バッチで実行 ＝ **編纂**〔旧称・庭仕事、P4 設計 v0.2 で改名〕）。
@@ -255,15 +255,15 @@ graph TD
 
 > ⚠️ **注意**: SAIMemory は **DB（容れ物）の名前**であって、生ログそのものではない。
 
-### 写真 — 土地参照の統一プリミティブ
+### クリップ — 土地参照の統一プリミティブ
 
-地図が土地を指す方法は**写真**（`photos` テーブル、`p:N`）に統一されている。**点写真**＝1メッセージ内の逐語引用（旧 mark・観測点。`==語句==` マーカーや `memory_clip` で撮られる）、**範囲写真**＝メッセージ区間（SCENE の由来参照・切り抜き）。`pasted_to` でどの地図に貼られたかの来歴を持ち、未貼り付けの写真の集合が**土壌プール**（候補の種、収穫待ち）。ページに貼られた写真の描画は常に**抜粋**で、全文は `memory_read p:N`（写真を読む＝その写真が写す土地を見に行く）。
+地図が土地を指す方法は**クリップ**（`clips` テーブル、`clip:N`）に統一されている。**点クリップ**＝1メッセージ内の逐語引用（旧 mark・観測点。`==語句==` マーカーや `memory_clip` で切り出される）、**範囲クリップ**＝メッセージ区間（SCENE の由来参照・切り抜き）。`pasted_to` でどの地図に貼られたかの来歴を持ち、未貼り付けのクリップの集合が**土壌プール**（候補の種、収穫待ち）。ページに貼られたクリップの描画は常に**抜粋**で、全文は `memory_read clip:N`（クリップを読む＝そのクリップが写す土地を見に行く）。
 
 ### 統一スペル — ペルソナが地図帳を触る動詞
 
 全地図を統一動詞で触れる（`saiverse/memory_atlas.py` ファサード、2026-07-11 旧スペル群から一本化完了）:
 
-- **memory_read** — 読む（tail に流れる。机の場所を取らない）/ **memory_open / memory_close** — 机に開く／棚に戻す / **memory_search** — 検索 / **memory_write** — 書く（追記・コア記憶・新規ページ作成）/ **memory_clip** — 写真を撮って貼る（参照貼り／転写）/ **memory_delete** — ごみ箱へ（soft-delete）
+- **memory_read** — 読む（tail に流れる。机の場所を取らない）/ **memory_open / memory_close** — 机に開く／棚に戻す / **memory_search** — 検索 / **memory_write** — 書く（追記・コア記憶・新規ページ作成）/ **memory_clip** — クリップを切り出して貼る（参照貼り／転写）/ **memory_delete** — ごみ箱へ（soft-delete）
 - **purpose_seed**（候補を生む）/ **purpose_adopt**（木に接ぐ）/ **purpose_decompose・purpose_step**（細分化・進行）/ **purpose_close**（完了・中止・休眠）
 
 ### 生ログ（Thread / Message）＝土地
@@ -272,7 +272,7 @@ graph TD
 
 ### Chronicle（時間の地図）
 
-蓄積された Message は、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに Lv2+ へ統合される。`short_id`（`ch:N`）で参照でき、`memory_read ch:N` で読める（読みは tail に流れるので圧縮の意味は死なない）。編纂はシステム側の仕事で、ペルソナ向けの書き込み動詞はない。
+蓄積された Message は、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに Lv2+ へ統合される。`short_id`（`chronicle:N`）で参照でき、`memory_read chronicle:N` で読める（読みは tail に流れるので圧縮の意味は死なない）。編纂はシステム側の仕事で、ペルソナ向けの書き込み動詞はない。
 
 ### Memopedia とコア記憶（意味の地図）
 
@@ -290,11 +290,11 @@ graph TD
 graph TD
     Land["土地: 生ログ (Thread ⊃ Message)"]
     subgraph Atlas["Memory Atlas (地図帳)"]
-        TimeMap["時間の地図: Chronicle (ch:N)"]
-        MeaningMap["意味の地図: Memopedia (m:N) + コア記憶 (c:N 常時開)"]
+        TimeMap["時間の地図: Chronicle (chronicle:N)"]
+        MeaningMap["意味の地図: Memopedia (memopedia:N) + コア記憶 (core:N 常時開)"]
         PurposeMap["目的の地図: 目的の木 (task:N)"]
     end
-    Photo["写真 (p:N): 点=引用 / 範囲=区間"]
+    Photo["クリップ (clip:N): 点=引用 / 範囲=区間"]
     Pulse -->|記録| Land
     Metabolism -->|"時間的要約 (ArasujiGenerator)"| TimeMap
     Metabolism -->|"意味の抽出 (entity_extractor 相乗り)"| MeaningMap
@@ -408,10 +408,11 @@ graph TD
 | **Blueprint** | `blueprint` テーブルは実在するが（ペルソナ生成テンプレート）、現状は運用されていない |
 | **Emotion** | PersonaCore の感情モジュールとして存在するが、実質未活用 |
 | **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。persona_task 自体は目的の木として現役（§5） |
-| **mark（観測点）** | **写真 (photo) に一般化**（2026-07-10）。`marks` テーブルは `photos` へ移行済み（点写真＝旧 mark）。mark は「まだどの地図にも貼られていない写真」という状態の呼び名として残る |
+| **mark（観測点）** | **クリップ (clip) に一般化**（2026-07-10）。`marks` テーブルは `clips` へ移行済み（点クリップ＝旧 mark）。mark は「まだどの地図にも貼られていないクリップ」という状態の呼び名として残る |
+| **クリップ (photo)** | **クリップ (clip) に改名**（2026-07-15）。カメラで撮った画像と紛らわしく、`photo:3` のような参照をペルソナが打つと誤読を招くため。比喩を捨てたのではなく抽象化した — クリップは「地図に留める」行為と「切り出した一片」(video clip) の両義を持ち、クリップが担っていた意味を内包する。スペル `memory_clip` は 2026-07-11 に先にこの語を採っており（`memory_photo` は「画像系に見える」で却下済み）、名詞側が 4 日遅れて追いついた形。`photos` テーブル → `clips`、`p:N` → `clip:N`。**この語をペルソナに見える場所へ戻さないこと**（却下の射程はスペル名ではなく「ペルソナの目に触れる語」全体） |
 | **vividness（Memopedia 鮮度減衰）** | **廃止確定**（2026-07-10）。減衰の発動が観測されたことがなく（バグ疑い）、head 索引廃止で効果もなかった。「見えなくするだけで生産性がない」— 置換は構造状態（肥大/過小 → 分割/統合の代謝、P4） |
 | **旧記憶・タスクスペル群** | core_memory_add/add_scene/update/remove・task_add/decompose/done/update_step・desire_add・memopedia_get_page/open_page/close_page/search の 13 本は **memory_*/purpose_* 12 本に一本化され削除**（2026-07-11 P2c-4a）。memopedia_note/save_page/get_tree/health/manage・fragment 3本・get_task_summary は spell=False の内部専用（P4 編纂の素材） |
-| **Note (NoteManager) / note スペル4本 / open_notes section / TrackOpenNote** | Note（person/project/vocation。desire は P3c-0 で先行撤去）は per-persona memory.db 側のテーマノードページ（trunk `root_theme`、参照は通常の `m:N`）へ物理統合され、`saiverse/note_manager.py`・note_create/note_open/note_close/note_search スペル4本・`sea/head_pipeline/sections/open_notes.py` は**モジュールごと削除**（2026-07-11 P3c①）。後継は統一 Atlas 動詞（memory_write/memory_open/memory_close/memory_search）と `DeskSection`（開きっぱなし制御の一本化）。main DB の `note`/`note_page`/`note_message`/`track_open_note` テーブルは persona 単位の扇形移行（`SAIVerseManager._on_persona_registered` → `saiverse/note_theme_migration.py`）で空になり次第 `database/migrate.py:_drop_empty_legacy_note_tables` が DROP する。`persona_task.note_id` は死カラムとして残置（FK 宣言のみ撤去）。task:N（目的ノード）の机開閉も同時に実装（P3c②） |
+| **Note (NoteManager) / note スペル4本 / open_notes section / TrackOpenNote** | Note（person/project/vocation。desire は P3c-0 で先行撤去）は per-persona memory.db 側のテーマノードページ（trunk `root_theme`、参照は通常の `memopedia:N`）へ物理統合され、`saiverse/note_manager.py`・note_create/note_open/note_close/note_search スペル4本・`sea/head_pipeline/sections/open_notes.py` は**モジュールごと削除**（2026-07-11 P3c①）。後継は統一 Atlas 動詞（memory_write/memory_open/memory_close/memory_search）と `DeskSection`（開きっぱなし制御の一本化）。main DB の `note`/`note_page`/`note_message`/`track_open_note` テーブルは persona 単位の扇形移行（`SAIVerseManager._on_persona_registered` → `saiverse/note_theme_migration.py`）で空になり次第 `database/migrate.py:_drop_empty_legacy_note_tables` が DROP する。`persona_task.note_id` は死カラムとして残置（FK 宣言のみ撤去）。task:N（目的ノード）の机開閉も同時に実装（P3c②） |
 | **working_memory** | `working_memory` テーブルは存在するが、ワーキングメモリ実装は死亡。短期記憶は §6 Session 概念へ |
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
 | **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。クラス削除は別タスク |
@@ -459,13 +460,13 @@ graph TD
 | aspect | 導出元 | line + scope + model | 4分類を導出 |
 | Phenomena | 起動 | Pulse | 外部イベントが新 Pulse を起動 |
 | 土地（生ログ） | 編纂元 | Memory Atlas | 三種の地図（時間/意味/目的）が土地から編まれる |
-| 写真 (p:N) | 指す | 土地 | 点=逐語引用 / 範囲=区間。全地図共用の統一参照 |
-| Memory Atlas | 貼る | 写真 | pasted_to で来歴、未貼り＝土壌プール |
+| クリップ (clip:N) | 指す | 土地 | 点=逐語引用 / 範囲=区間。全地図共用の統一参照 |
+| Memory Atlas | 貼る | クリップ | pasted_to で来歴、未貼り＝土壌プール |
 | Pulse | 記録 | 土地(Thread) | Message を `messages` に追記 |
 | 土地(Thread) | 末尾を供給 | Session | 最近の Message が短期記憶へ |
 | Chronicle（時間の地図） | 圧縮元 | 土地 | Message を「あらすじ」へ時間的要約 |
 | Memopedia（意味の地図） | 抽出元 | 土地 | エンティティ知識を Fragment 化。コア記憶＝常時開ページ |
-| 目的の木（目的の地図） | 分類元 | 土地 | 接地の証跡（写真・origin_quote）で土地に係留 |
+| 目的の木（目的の地図） | 分類元 | 土地 | 接地の証跡（クリップ・origin_quote）で土地に係留 |
 | 机（desk） | head に載せる | Atlas のページ | memory_open で開く。予算制 LRU、閉じてもフェードアウト |
 | Session | 継続不能で発火 | Metabolism | Session が続けられなくなると節目が起きる |
 | Anchor | TTL 切れで判定 | Metabolism | cache 継続不能の予兆を検知 |
@@ -484,9 +485,9 @@ graph TD
 | 短期記憶 / ワーキングメモリ | Session | 統一制御は未実装（起草中） |
 | 土地 | 生ログ = Thread（⊃ Message） | `threads` / `messages` テーブル（memory.db） |
 | 地図帳 / 記憶の地図帳 | Memory Atlas（時間/意味/目的の三地図） | `saiverse/memory_atlas.py` ファサード + memory_*/purpose_* スペル12本 |
-| 写真 | 土地参照の統一プリミティブ（旧 mark を包含） | `photos` テーブル（`p:N`） |
+| クリップ | 土地参照の統一プリミティブ（旧 mark を包含） | `clips` テーブル（`clip:N`） |
 | 机 | head の開きっぱなし領域（memory_open の行き先） | `desk_items` テーブル + `DeskSection` |
-| コア記憶 | 意味の地図の常時開特殊ページ | `core_memories` テーブル（`c:N` / `core`） |
+| コア記憶 | 意味の地図の常時開特殊ページ | `core_memories` テーブル（`core:N` / `core`） |
 | 目的の木 | 目的の地図（旧 Track/Task/Desire の統合先） | `persona_task`（main DB、`task:N`） |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
 | 自律駆動 | 時間割 + 判断点（+ watchdog） | `saiverse/day_plan.py` / `autonomy_wiring.py`（旧2層リズムは廃止 §9） |

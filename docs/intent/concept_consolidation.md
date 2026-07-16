@@ -22,7 +22,7 @@
 
 | 主張 | 裏取り |
 |---|---|
-| 「ページは既に色々パラメータ持ってる」→ 状態遷移が載る | `MemopediaPage`: `parent_id`(階層)・`category`・`vividness`(vivid/rough/faint/buried)・`is_important`・`created_at`/`updated_at`/`last_referenced_at`・`metadata`(JSON)・`short_id`(m:N)。stage/nature 追加は core_memory と同じ追加系 migration |
+| 「ページは既に色々パラメータ持ってる」→ 状態遷移が載る | `MemopediaPage`: `parent_id`(階層)・`category`・`vividness`(vivid/rough/faint/buried)・`is_important`・`created_at`/`updated_at`/`last_referenced_at`・`metadata`(JSON)・`short_id`(memopedia:N)。stage/nature 追加は core_memory と同じ追加系 migration |
 | コア記憶＝常時開の特殊ページ | `PageState.is_open`/`opened_at` が既存。コア記憶＝`is_open` 常時True ＋ `is_important`。NOTE→Fragment、SCENE→メッセージ参照 |
 | SCENE→メッセージ参照 | `PageEditHistory.ref_start_message_id`/`ref_end_message_id` が既存。`MemopediaFragment` は "optionally linked to a Chronicle entry" |
 | Chronicle も Memopedia の一種に畳める | `ArasujiEntry` と `MemopediaPage` の列がほぼ一致（下記） |
@@ -46,10 +46,10 @@
 | **意味の地図** | 意味の抽出 | 固有名詞の辞書（地名辞典） | Memopedia・Fragment・コア記憶 |
 | **目的の地図** | 文脈的分類 | クエストライン（道順書き） | 目的の木[Track/Task/Desire]・Note |
 
-**写真 — 土地参照の汎用プリミティブ**（まはー再定義 2026-07-10）: **mark は三地図のどれにも属さない**。この中で唯一「生ログから切り出したそのまま」＝土地の範囲をそのまま写す**写真**であり、全地図が共用する参照プリミティブ。origin_quote・Chronicle の `source_ids`・SCENE のメッセージ参照・`PageEditHistory.ref_*` は全部写真の変種 → **土地参照の規格を写真一本に統一する**。どの地図も写真を貼って土地を指す。旧「土壌プール」は「まだどの地図にも貼られていない写真の箱」と言い直せる（`pasted_to`＝どの地図に貼られたかの来歴、旧 harvested_to）。
-**→ P1 実装済（2026-07-10）**: `sai_memory/photos.py`（点写真＝旧 mark／範囲写真、旧 marks テーブルから一回きり移行）。SCENE は範囲写真の最初の利用者（`pasted_to="c:{id}"` で撮った瞬間に貼る）。連想歩行の辺 `mark`→`photo`、adapter.add_photos、life API 内部も追従済み（ルート `/marks` の改称は P2）。pytest 104 passed。
+**クリップ — 土地参照の汎用プリミティブ**（まはー再定義 2026-07-10）: **mark は三地図のどれにも属さない**。この中で唯一「生ログから切り出したそのまま」＝土地の範囲をそのまま写す**クリップ**であり、全地図が共用する参照プリミティブ。origin_quote・Chronicle の `source_ids`・SCENE のメッセージ参照・`PageEditHistory.ref_*` は全部クリップの変種 → **土地参照の規格をクリップ一本に統一する**。どの地図もクリップを貼って土地を指す。旧「土壌プール」は「まだどの地図にも貼られていないクリップの箱」と言い直せる（`pasted_to`＝どの地図に貼られたかの来歴、旧 harvested_to）。
+**→ P1 実装済（2026-07-10）**: `sai_memory/clips.py`（点クリップ＝旧 mark／範囲クリップ、旧 marks テーブルから一回きり移行）。SCENE は範囲クリップの最初の利用者（`pasted_to="c:{id}"` で切り出した瞬間に貼る）。連想歩行の辺 `mark`→`clip`、adapter.add_clips、life API 内部も追従済み（ルート `/marks` の改称は P2）。pytest 104 passed。
 
-外に残る2つ: **Line**（読み出しの色）/ **知覚バッファ**（土地になる前の入口）。→ **九龍城 → 土地＋地図帳＋写真＋外構2つ。**
+外に残る2つ: **Line**（読み出しの色）/ **知覚バッファ**（土地になる前の入口）。→ **九龍城 → 土地＋地図帳＋クリップ＋外構2つ。**
 
 **引き受ける歪み**: `parent_id` が地図の種類によって意味が変わる（時間=統合 / 意味=主題包含 / 目的=細分化）。lifecycle も違う（時間=追記統合 / 意味=鮮度減衰 / 目的=状態遷移）。→ **「地図の種類（派生方式）がノードの振る舞いを規定する」設計を明示的に引き受けるのが畳む条件**。category の最上位軸は ad hoc な列挙でなく**派生方式**になる。
 
@@ -63,24 +63,24 @@
 | **構造軸（parent_id の意味）** | 時間の入れ子（章 ⊂ 部） | 主題包含（子エンティティ ⊂ 親） | 目的の細分化（大枝→task→step、フラクタル） |
 | **ノード状態（代謝の駆動因）** | `is_incomplete` / `is_consolidated`（**既存列**） | **肥大化 / 過小・低重要**（新設。vividness の置換） | stage（candidate/adopted/dormant/completed/aborted）＋ nature ＋ クラスタ検知カウンタ |
 | **構造の代謝: 分割** | 不要（章は小さく生まれる） | 肥大ページ → 子ページ分割 | 細分化（task→step。実装済） |
-| **構造の代謝: 統合** | Lv1→Lv2 統合（実装済・自動） | 小ページの親下収容・類似統合 | **命名**＝完了ノード・休眠欲求・写真の航跡クラスタに事後命名してテーマを立てる（life_concept_map §3.1 設計済・実装要確認） |
-| **土地への参照様式** | **写真**（範囲） | **写真**（点〜引用） | **写真**（origin_quote 等）＋ artifact_refs |
+| **構造の代謝: 統合** | Lv1→Lv2 統合（実装済・自動） | 小ページの親下収容・類似統合 | **命名**＝完了ノード・休眠欲求・クリップの航跡クラスタに事後命名してテーマを立てる（life_concept_map §3.1 設計済・実装要確認） |
+| **土地への参照様式** | **クリップ**（範囲） | **クリップ**（点〜引用） | **クリップ**（origin_quote 等）＋ artifact_refs |
 | **開閉** | **ページ開閉に移植**（読み出し経路を Memopedia 開閉に揃える——ここだけ開閉無関係だとペルソナが触る時に困る。直近章は既定で開く等の既定則が要る） | open/close per thread（`PageState`）。**コア記憶＝常時開＋`is_important`** | 「開いている目的」＝出来事側の性質（旧 TrackOpenNote） |
 | **既存 root との対応** | （新設） | people / terms / events / **plans** | （新設。plans からの自動昇格はしない、下記） |
-| **編纂の担い手** | Metabolism バッチ（ArasujiGenerator） | 同バッチ相乗り（entity_extractor）＋ gold_panning ＋ ペルソナ自身のスペル | 判断点（起床・就寝の接ぎ直し）＋ 収穫（写真→candidate） |
+| **編纂の担い手** | Metabolism バッチ（ArasujiGenerator） | 同バッチ相乗り（entity_extractor）＋ gold_panning ＋ ペルソナ自身のスペル | 判断点（起床・就寝の接ぎ直し）＋ 収穫（クリップ→candidate） |
 
 - **vividness は廃止確定**（まはー 2026-07-10）: 減衰未発動（バグ疑い）＋ head 索引廃止で効果なし、に加えて**「見えなくするだけで生産性がない」＝lifecycle として不成立**。置換は構造状態（肥大化/過小）——見えなくする代わりに、分割・統合という生産的な代謝を駆動する。
 - **意味の地図の代謝は半分実装済み**（事実確認 2026-07-10）: `scripts/maintain_memopedia.py` が `merge-similar`（LLM類似統合）/ `split-large`（5000字超分割）を持つ。ただし**手動スクリプトで lifecycle 未配線**——「操作は在るが代謝になっていない」。Atlas 化＝これをノード状態駆動で判断点/Metabolism に配線する話。`note_organizer.py`（目標2000字・圧縮閾値3000字の配置計画）にも同じ思想の閾値がある（生死未確認）。
 - **head 索引の復帰が選択肢に戻る**: 代謝が木をコンパクトに保てるなら Memopedia 索引の head 表示 ON を再検討できる（自動想起でしか辿れない＝手がかりの無いページは不健全）。索引廃止は memory_architecture_v2 の決定だったため、同 doc の改訂点として扱う。キャッシュとは両立（head snapshot は元々 Metabolism 時のみ更新、索引も同じ律で凍る）。
-- **参照様式は写真一本に統一**（上記プリミティブ）。表のこの行の乖離が v0.1 → v0.2 で消えた＝スキーマ収束の実利。
-- **コア記憶の SCENE**: 写真（範囲）として実装 → Chronicle の `source_ids` と同型であることが「Chronicle も Atlas に畳める」根拠。
+- **参照様式はクリップ一本に統一**（上記プリミティブ）。表のこの行の乖離が v0.1 → v0.2 で消えた＝スキーマ収束の実利。
+- **コア記憶の SCENE**: クリップ（範囲）として実装 → Chronicle の `source_ids` と同型であることが「Chronicle も Atlas に畳める」根拠。
 - **plans root の正体**（事実確認済 2026-07-10）: `entity_extractor` の4分類（people/terms/plans/events）の一つで「会話から抽出された計画・プロジェクトの知識ページ」。**時間割とは無関係**。抽出された知識（意味の地図）であり、ペルソナが意志で採用した目的（目的の地図）とは**所有が違う**——自動昇格は自己著者性（life_concept_map §15）を壊すのでしない。plans ページは目的候補の**材料**にはなる。
 
 ### 統一スペル層 — この統合の最大の受益者はペルソナ（まはー 2026-07-10）
 
 統一の本命の恩恵は**ペルソナが統一スペルで全地図を触れる**こと。現状は core_memory_* / memopedia_* / task_* / note 系がバラバラに生えている——これを Atlas 動詞に統一すれば **head スペル一覧ダイエット**（進行中案件）にも直結する。
 
-- **二層設計**: 共通動詞（開く/閉じる/読む/検索/書く/写真を貼る）＋ 地図別拡張動詞（目的=採用/完了、時間=（編纂はシステム側）等）
+- **二層設計**: 共通動詞（開く/閉じる/読む/検索/書く/クリップを貼る）＋ 地図別拡張動詞（目的=採用/完了、時間=（編纂はシステム側）等）
 - **課題2つ**: ①スキーマの乖離（v0.2 表で収束中）②地図ごとの挙動の乖離。**各地図の役割を壊さない範囲で規格を最大限揃える**のが設計方針
 
 ### 第四の地図（構想・未設計）— 「現在」の地図
@@ -97,8 +97,8 @@
 
 | 段 | 内容 | 検証手段 |
 |---|---|---|
-| **P1: 写真プリミティブ** | 統一土地参照の型と保存（`marks` テーブルの一般化が土台）。SCENE・origin_quote・source_ids の新規書き込みを写真形式に寄せる | pytest のみ（決定論・LLM 不要） |
-| **P2: Atlas ファサード + 統一スペル** | 開く/閉じる/読む/検索/書く/写真を貼る を既存4ストレージ（memopedia / core_memories / arasuji / persona_task+note）へのアダプタで実装。旧スペル群（core_memory_* / memopedia_* / task_*）を Atlas 動詞に置換（head ダイエット直結）。Chronicle 開閉移植もここ（直近章の既定開） | pytest ＋ ペルソナ実機1巡 |
+| **P1: クリッププリミティブ** | 統一土地参照の型と保存（`marks` テーブルの一般化が土台）。SCENE・origin_quote・source_ids の新規書き込みをクリップ形式に寄せる | pytest のみ（決定論・LLM 不要） |
+| **P2: Atlas ファサード + 統一スペル** | 開く/閉じる/読む/検索/書く/クリップを貼る を既存4ストレージ（memopedia / core_memories / arasuji / persona_task+note）へのアダプタで実装。旧スペル群（core_memory_* / memopedia_* / task_*）を Atlas 動詞に置換（head ダイエット直結）。Chronicle 開閉移植もここ（直近章の既定開） | pytest ＋ ペルソナ実機1巡 |
 | **P3: 物理統合（ファサードの下で1枚ずつ）** | 3a: コア記憶 → 常時開ページ（最小・実証台）→ 3b: Chronicle → 時間の地図ページ → 3c: 目的の木 → 目的の地図ページ（**最重量: persona_task/note は main DB、memopedia は per-persona memory.db の cross-DB 移行**） | 回帰: ファサード出力の前後同一性 |
 | **P4: 代謝の配線** | ノード状態（肥大/過小）検知 → maintain_memopedia の分割/統合を判断点・Metabolism に配線。**命名**（目的の統合）実装。vividness 除去。head 索引復帰の実験 | サンドボックス一日シム（inspect_world / 新聞・タイムライン）＋まはー観察 |
 
@@ -116,13 +116,13 @@
 | `memory_open` / `memory_close` | ページを**机に開いておく／棚に戻す** — Metabolism を跨いで head に残り続ける。高価で明示的な行為（机の物理、下記） | 旧 Note の「開きっぱなし」制御 |
 | `memory_search` | 地図帳を検索（タイトル/全文。裏で連想歩行 recall_walk に接続可） | memory_recall は**残す**（随意想起＝行為。検索と想起は別） |
 | `memory_write` | ページに書く（本文/Fragment 追記。地図別制約は category が規定）。**宛先に `"core"` を指定するとコア記憶（常時開ページ）に書ける** — core_memory_* スペルは完全に畳む | memopedia_save_page / core_memory_add / core_memory_update |
-| `memory_clip` | 写真を撮って**クリップで貼る**（点=引用 / 範囲=切り抜き。video clip の切り抜き義も掛かる）。貼り先指定で即貼り | core_memory_add_scene（==語句== マーカーは非スペル経路として存続）。旧称 memory_photo は分かりづらく却下 |
+| `memory_clip` | クリップを**切り出して貼る**（点=引用 / 範囲=切り抜き。video clip の切り抜き義も掛かる）。貼り先指定で即貼り | core_memory_add_scene（==語句== マーカーは非スペル経路として存続）。旧称 memory_clip は分かりづらく却下 |
 
 **地図別動詞**（目的の地図のみ。時間の地図の編纂はシステム側なので動詞なし）:
 
 | 動詞 | 意味 | 置換する既存スペル |
 |---|---|---|
-| `purpose_adopt` | 候補を木に接ぐ（採用。写真→candidate の収穫もここ） | task_request_creation 系 |
+| `purpose_adopt` | 候補を木に接ぐ（採用。クリップ→candidate の収穫もここ） | task_request_creation 系 |
 | `purpose_step` | 目的の細分化・step 更新 | task_update_step |
 | `purpose_close` | 完了/中止/休眠（stage 遷移） | task_close / task_change_active |
 
@@ -161,16 +161,16 @@
 
 | 片 | 内容 | 担当 |
 |---|---|---|
-| **P2a** ✅ | 机ストア（desk.py・LRU 追い出し）＋ Atlas ファサード（memory_atlas.py、m:N / core / c:N / ch:N。task:N は P2b stub）＋ read/open/close/search スペル4本。**実装済 2026-07-10**（サブエージェント実装＋メイン検収: read の touch 欠落と keep_ref を修正。Chronicle に short_id 追加・ch:N。Memopedia search の short_id 欠落バグをついで修正。pytest 223 passed） | サブエージェント＋メイン検収 |
-| **P2b** | write/clip/purpose 動詞 ＋ 旧スペル撤去 ＋ head 机セクション描画 ＋ Metabolism 追い出しフック ＋ task:N 解決 ＋ life API /marks→/photos 改称。積み残し: memopedia storage の `search_pages_filtered`/`get_children` にも SELECT 列 short_id 欠落が残存（P2a で発見・範囲外として未修正） | head/Metabolism 配線はキャッシュ感応部＝メイン直接。残りは委譲 |
+| **P2a** ✅ | 机ストア（desk.py・LRU 追い出し）＋ Atlas ファサード（memory_atlas.py、memopedia:N / core / core:N / chronicle:N。task:N は P2b stub）＋ read/open/close/search スペル4本。**実装済 2026-07-10**（サブエージェント実装＋メイン検収: read の touch 欠落と keep_ref を修正。Chronicle に short_id 追加・chronicle:N。Memopedia search の short_id 欠落バグをついで修正。pytest 223 passed） | サブエージェント＋メイン検収 |
+| **P2b** | write/clip/purpose 動詞 ＋ 旧スペル撤去 ＋ head 机セクション描画 ＋ Metabolism 追い出しフック ＋ task:N 解決 ＋ life API /marks→/clips 改称。積み残し: memopedia storage の `search_pages_filtered`/`get_children` にも SELECT 列 short_id 欠落が残存（P2a で発見・範囲外として未修正） | head/Metabolism 配線はキャッシュ感応部＝メイン直接。残りは委譲 |
 
-### clip と写真の見え方 — 抜粋は写真の性質、全文は読む行為、常駐は転写（2026-07-10 まはー合意・確定）
+### clip とクリップの見え方 — 抜粋はクリップの性質、全文は読む行為、常駐は転写（2026-07-10 まはー合意・確定）
 
-「貼った範囲写真がページを読んだ時にどう見えるか」の解。折り畳み ON/OFF という**新しい状態は作らない**:
+「貼った範囲クリップがページを読んだ時にどう見えるか」の解。折り畳み ON/OFF という**新しい状態は作らない**:
 
-1. **写真は参照であって内容の運搬手段ではない** → 貼られた写真の描画は**常に抜粋**（点=引用全文〔元々短い〕/ 範囲=先頭数行＋「全Nメッセージ・M字、前後省略」）。丸ごと載せるとページが写真に食われる
-2. **全文は写真そのものを読む** → 写真に short_id（`p:N`）を与え、`memory_read p:N` で範囲の生ログ全文がその場（tail）に流れる。**写真を読む＝その写真が写す土地を見に行く**。read の意味論なので机も head も太らない
-3. **コア記憶 SCENE は例外でなく貼り方の違い** → 貼り方は二種: **参照貼り**（既定・抜粋）と**転写**（本文に焼き込み・常に生で見える）。SCENE は現行実装が既に転写（transcript が content、写真は由来参照）。普通のページへの全文常駐も転写で可能——肥大すれば代謝の肥大検知が拾う（自己調整）
+1. **クリップは参照であって内容の運搬手段ではない** → 貼られたクリップの描画は**常に抜粋**（点=引用全文〔元々短い〕/ 範囲=先頭数行＋「全Nメッセージ・M字、前後省略」）。丸ごと載せるとページがクリップに食われる
+2. **全文はクリップそのものを読む** → クリップに short_id（`clip:N`）を与え、`memory_read clip:N` で範囲の生ログ全文がその場（tail）に流れる。**クリップを読む＝そのクリップが写す土地を見に行く**。read の意味論なので机も head も太らない
+3. **コア記憶 SCENE は例外でなく貼り方の違い** → 貼り方は二種: **参照貼り**（既定・抜粋）と**転写**（本文に焼き込み・常に生で見える）。SCENE は現行実装が既に転写（transcript が content、クリップは由来参照）。普通のページへの全文常駐も転写で可能——肥大すれば代謝の肥大検知が拾う（自己調整）
 4. 畳まれているのは状態でなく**参照貼りの性質**、開くのは状態でなく**読む行為** → 状態を増やさない（⑥は概念を減らす工事。head に折り畳み状態を持つとキャッシュも荒れる）
 
 `memory_clip` の引数は両対応: 点=逐語引用＋貼り先 / 範囲=アンカー＋往復数（SCENE と同じ操作感）。
@@ -187,16 +187,16 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 
 ### P3 物理統合 — 写像設計 v0.1（2026-07-11 メイン起草）
 
-**戦略: モジュール API を互換層にする（strangler-fig の完成形）。** 各ストレージモジュール（core_memory.py / arasuji/storage.py / persona_task_manager）の**関数シグネチャと dataclass を変えず、中身だけ memopedia_pages 実装に差し替える**。消費者（head section・API routes・gold_panning・ファサード・判断点）は無変更、既存テストがそのまま挙動契約になる。データ移行は adapter init の一回きり冪等 migration（marks→photos と同じ流儀）で、**旧テーブルは移行後 DROP**（旧 path を残さない）。
+**戦略: モジュール API を互換層にする（strangler-fig の完成形）。** 各ストレージモジュール（core_memory.py / arasuji/storage.py / persona_task_manager）の**関数シグネチャと dataclass を変えず、中身だけ memopedia_pages 実装に差し替える**。消費者（head section・API routes・gold_panning・ファサード・判断点）は無変更、既存テストがそのまま挙動契約になる。データ移行は adapter init の一回きり冪等 migration（marks→clips と同じ流儀）で、**旧テーブルは移行後 DROP**（旧 path を残さない）。
 
 **共通不変条件**:
-1. 既存 ref（`c:N` / `ch:N` / `task:N`、写真の pasted_to 文字列を含む）は**移行後も同じ実体に解決される**——土地（生ログ・写真）は書き換えない
+1. 既存 ref（`core:N` / `chronicle:N` / `task:N`、クリップの pasted_to 文字列を含む）は**移行後も同じ実体に解決される**——土地（生ログ・クリップ）は書き換えない
 2. head の render 文字列は移行前後で同一（キャッシュ整合・スナップショット互換）
 3. 既存テストは無変更で通る（モジュール API が契約）＋ 移行テストを追加
 
 **P3a: コア記憶 → 常時開ページ** ✅ **実装済**（2026-07-11。API 完全維持・書き換えテスト1件のみ〔物理格納の直接検査〕・移行テスト2件・266 passed。観察: `get_tree`/maintain_memopedia は4カテゴリ固定のため core ページは元々対象外、`Memopedia.search` には現れる〔望ましい〕、`get_trunks(category=None)` に root_core が出る可能性は未確認）
-- ページ化: trunk `root_core`（category `core`・is_trunk）配下の子ページ。content=本文、title=`コア記憶 c:N`、metadata JSON に `{core_id, kind, confirmed, scene由来参照, deleted_at}`。`is_important=1`
-- `c:N` 解決: metadata.core_id で引く（m:N の採番とは独立。既存の pasted_to="c:N" がそのまま生きる）。採番は max(core_id)+1
+- ページ化: trunk `root_core`（category `core`・is_trunk）配下の子ページ。content=本文、title=`コア記憶 core:N`、metadata JSON に `{core_id, kind, confirmed, scene由来参照, deleted_at}`。`is_important=1`
+- `core:N` 解決: metadata.core_id で引く（memopedia:N の採番とは独立。既存の pasted_to="core:N" がそのまま生きる）。採番は max(core_id)+1
 - ごみ箱: memopedia の is_deleted ＋ metadata.deleted_at（トラッシュ UI の削除時刻順を維持）
 - 常時開: category `core` は desk 対象外・PageState 不要（既存のファサードガードのまま）
 - 移行: `core_memories` テーブル → ページ生成 → DROP（冪等・一回きり）
@@ -216,7 +216,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 **監査の副産物（P3c 実装に効く事実）**: `note_page`/`note_message`（Note↔ページ/メッセージの多対多）は**本番消費者ゼロ**（設計されたが配線されなかった）→ Note 畳みは note 本体テーブルと open_notes section・note スペル4本・meta_layer が主戦場。desire ノート（persona_task の parent_kind='note' の親）の扱いは life_concept_map §10.1 の「stage=候補への正規化」と絡む——**Note 畳みの着手前にここだけ設計が要る**（扇形移行の置き場は `_on_persona_registered` フック＝manager と adapter が揃う点）。
 
 **(A) 同一実体の便益は、物理テーブルの一本化ではなく「単一アドレス空間＋統一ファサード＋ページ機構の ref 適用」で既にほぼ回収済み**という読み:
-- task:N は memory_read で読める（P2c-1）/ 写真は pasted_to="task:N" で貼れる（ref 文字列ベース）/ purpose 動詞で操作できる
+- task:N は memory_read で読める（P2c-1）/ クリップは pasted_to="task:N" で貼れる（ref 文字列ベース）/ purpose 動詞で操作できる
 - 残っていた「ページ機構の恩恵」= 机の開閉・編集来歴 — **机は ref ベースなので物理移動なしで対応可能**
 
 **再定義後の P3c スコープ案**:
@@ -321,7 +321,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - **睡眠中バッチの既存フックは無い**（day_close 適用は全て同期）
 - **vividness**: 減衰コードは**そもそも存在しない**（未実装のまま廃止確定に）。書き手3（save_page=vivid / note=rough / manage の set_vividness）・読み手2（weave の buried スキップ等4分岐 / UI の編集・CSS・ラベル）・運搬（API・get_tree annotate）
 - **head 索引**: `MemopediaIndexSection` は実在するが **render なし・差分通知専用**。目次の実描画は weave ツール内 `_list_pages`（per-persona DB フラグ `MEMOPEDIA_INDEX_ENABLED` 配下、既定 OFF）に眠っている
-- **命名の素材**: persona_task の stage/desire_type/touch_count・photos の pasted_to/時刻はあるが、クラスタカウンタは未実装。root_theme への新規ページ作成 API は移行専用（`migrate_note_to_theme_page`）しかない
+- **命名の素材**: persona_task の stage/desire_type/touch_count・clips の pasted_to/時刻はあるが、クラスタカウンタは未実装。root_theme への新規ページ作成 API は移行専用（`migrate_note_to_theme_page`）しかない
 
 ### 実装片と順序（提案）
 
@@ -334,9 +334,9 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 2. **裁定**（就寝判断相乗り）: desire_reviews と同じ3点セットで `curation_reviews` を追加。**ペルソナが何を見るか**（状況テキスト、候補1件＝1行＋根拠）:
    ```
    ## 今日の棚の乱れ（承認したものだけ、眠っている間に整理されます）
-   - [肥大] m:12「まはーとの技術対話」 5,800字 — 子ページへの分割を提案
-   - [類似] m:5「SAIVerse」と m:31「SAIVerseの構造」 — キーワード4語共起（SEA/Playbook/City/Persona）。統合を提案
-   - [過小] m:44「金曜日のメモ」 60字・42日間参照なし — 親ページ「週の記録」への統合を提案
+   - [肥大] memopedia:12「まはーとの技術対話」 5,800字 — 子ページへの分割を提案
+   - [類似] memopedia:5「SAIVerse」と memopedia:31「SAIVerseの構造」 — キーワード4語共起（SEA/Playbook/City/Persona）。統合を提案
+   - [過小] memopedia:44「金曜日のメモ」 60字・42日間参照なし — 親ページ「週の記録」への統合を提案
    ```
    verdict は approve / skip の2値（skip は翌日以降、条件が続く限り再提示）。**approve すると何が起きるか**: 分割＝既存の段落ブロックを子ページ数枚へ**逐語で移動**し、親には残り本文と子への導線が残る／統合＝残る側の本文に消える側の本文を**逐語で機械結合**（区切り見出しつき）し、消える側は子ページを付け替えた上で閉架（soft-delete、ごみ箱から戻せる）。**いずれも本文は編集来歴（PageEditHistory）に刻まれ、diff で遡れる**——消えるものはない。finalize は承認分を**編纂プラン**として永続化するだけ（実行はしない）
 
@@ -345,7 +345,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
    - **分割＝LLM はラベル付けのみ**: 既存段落ブロックの「どの子に割り当てるか」だけを LLM が返し（本文は出力させない）、移動はコードが逐語で行う
    - **保存則は棄却でなく構造で満たす（まはー裁定 2026-07-15）**: 応答を検証して弾くのではなく、**違反が存在しえない形に出力を設計する**。LLM の応答は必ず受理し、各ブロックの行き先はコードが一意に決める——ちょうど 1 つの子が挙げたブロックだけがその子へ移動し、それ以外は親に残る。残りブロックは補集合として導出するので LLM には出力させない（導出可能な情報を書かせると、子にも残りにも入る矛盾が生まれるだけ）。重複・漏れ・範囲外を含む応答でも「子ページ全部＋親の残り＝元本文」は常に成立する
    - **子ページは「全部宣言してから振り分ける」（まはー裁定 2026-07-15）**: 構造化出力のプロパティ定義順がそのまま Gemini の `property_ordering` ＝**生成順**になる（`llm_clients/gemini.py` が `properties` の dict 順から生成）。`child_pages`（タイトル＋概要）を先頭に置き、**どういう子ページを作るかを全部宣言させてから** `sections` でブロックを振り分けさせる。「タイトル → そのブロック群」を繰り返す順序だと、1 枚目のタイトルを宣言した時点で 2 枚目以降が想定できておらず、「いま宣言したタイトルに関連する」で全ブロックを 1 枚目に流し込む応答になる
-     - 実機の症状（2026-07-14/15、aifi_city_a）: m:34「アイフィ」が 163 ブロック全部を 1 枚の子へ移し、後から空セクション「残りのブロック」を足して辻褄を合わせた。**肥大が一切解消しないので翌晩また肥大検知され、毎晩 1 段ずつ入れ子が深くなるループ**になっていた（`アイフィ` → `アイフィの誕生と基本特性` → `アイフィの定義と名前の由来`、本文 23,572 字は毎晩最深部へ。タイトルだけが具体的になり実態から乖離していく）。保存則は完全に成立しているため「完了」と報告され、通知からは見えなかった
+     - 実機の症状（2026-07-14/15、aifi_city_a）: memopedia:34「アイフィ」が 163 ブロック全部を 1 枚の子へ移し、後から空セクション「残りのブロック」を足して辻褄を合わせた。**肥大が一切解消しないので翌晩また肥大検知され、毎晩 1 段ずつ入れ子が深くなるループ**になっていた（`アイフィ` → `アイフィの誕生と基本特性` → `アイフィの定義と名前の由来`、本文 23,572 字は毎晩最深部へ。タイトルだけが具体的になり実態から乖離していく）。保存則は完全に成立しているため「完了」と報告され、通知からは見えなかった
      - 実物検証: 同じ本文・同じモデル（gemini-3.5-flash-paid）で、宣言先行にすると 6 枚（各 2,300〜8,100 字）に分割された。5,000 字超の 1 枚は翌晩さらに分割されるが、これは実際に細分化が進む正常な代謝であって入れ子ループではない
    - **子ページの概要は同じ構造化出力で受け取る（まはー指摘 2026-07-15）**: 概要は本文ではないので保存則の「本文を生成しない」には抵触しない。別コールにすると本文全体をもう一度読ませることになるし、`child_pages` の宣言が具体的なほど後続の振り分けがその設計に条件づけられる。旧実装は `create_page` が `summary` を受け取れるのに `apply_split` が渡しておらず、**編纂で生まれた子ページだけ概要が空**だった
    - **仕様と安全網を混ぜない（まはー裁定 2026-07-15）**: ペルソナに伝える契約は「**同じブロックを複数の子に挙げない**」「どの子にも当てはまらないブロックは挙げなくてよい（親に残る）」の 2 つ。後者は remaining を廃した代わりの**仕様**だから伝えるが、前者に違反した重複の親送り・範囲外の無視は**安全網**であって仕様ではない——プロンプトでフォールバック挙動を説明すると「迷ったら両方に挙げて親に流す」という使い方を教えることになる。**非明示的なフォールバックは説明せず、単に禁止として伝える**（物理拘束が守らせ、プロンプトは意図を伝える。役割が違うので二重化ではない）
@@ -360,12 +360,12 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
    - **タイミングの注記（まはー 2026-07-11）**: そもそも生活リズムを1日単位で回す前提自体に将来課題がある（1回しか喋らない日・自律行動を使わず会話だけのユーザー）。編纂の起動点は就寝判断に固定せず、将来のリズム再設計で動かせる形にしておく（新聞欄が窓方式〔下記 (f)〕なのはこの布石でもある）
 
 **P4-b: 命名（テーマ立て）** ✅ **実装済**（2026-07-11。検知=desire_type クラスタ 3件以上・既テーマ化除外・最大1件/日、裁定=naming_reviews〔cluster_id enum + verdict name/skip + 自由記述 name〕、実行=finalize でその場作成〔全段ゼロコール〕。`theme_pages.create_theme_page` が root_theme 配下に member_refs 付きで立てる——移行専用でなかった最初の住人）
-- 検知カウンタ: 完了ノード・休眠欲求の desire_type／キーワード共起クラスタ（決定論）。**写真の航跡クラスタは見送り確定**（まはー 2026-07-11「今はピンとこない」。pasted_to/時刻はあるがタグも無く材料が薄い）
+- 検知カウンタ: 完了ノード・休眠欲求の desire_type／キーワード共起クラスタ（決定論）。**クリップの航跡クラスタは見送り確定**（まはー 2026-07-11「今はピンとこない」。pasted_to/時刻はあるがタグも無く材料が薄い）
 - 裁定: 就寝判断に「テーマ候補」を提示 → ペルソナが承認＋**名を与える**（自由記述フィールド）→ `theme_pages.create_theme_page`（新設）で root_theme 配下にページ化＋構成ノードの ref を本文に記録。P3c① で立てた root_theme の「移行専用でない最初の住人」
 
-**P4-c: vividness 除去 ＋ vivid→机 移行** ✅ **実装済**（2026-07-11。書き手3/読み手2/運搬/UI 全除去・adapter init の冪等移行・desk API `POST /memopedia/pages/{id}/desk`・メモリタブ「机に開く/閉じる」ボタン・テスト13件・pytest 2038 passed・エア実データ予行済〔m:169→机〕。**検収での発見2つ**: ①冪等チェックが「いま机にあるか」だけだと、本人が閉じたページを次の起動で移行が開き直す——移行時に vivid の印を rough へ落とすことで一回きり性を担保〔行為の上書き防止、回帰テスト付き〕 ②旧 vivid 描画は weave にページ全文を展開していた＝「鮮明メモ」体験の実体。移行後は机が全文を head に載せるので**フラグでなく体験が後継に移る**）
+**P4-c: vividness 除去 ＋ vivid→机 移行** ✅ **実装済**（2026-07-11。書き手3/読み手2/運搬/UI 全除去・adapter init の冪等移行・desk API `POST /memopedia/pages/{id}/desk`・メモリタブ「机に開く/閉じる」ボタン・テスト13件・pytest 2038 passed・エア実データ予行済〔memopedia:169→机〕。**検収での発見2つ**: ①冪等チェックが「いま机にあるか」だけだと、本人が閉じたページを次の起動で移行が開き直す——移行時に vivid の印を rough へ落とすことで一回きり性を担保〔行為の上書き防止、回帰テスト付き〕 ②旧 vivid 描画は weave にページ全文を展開していた＝「鮮明メモ」体験の実体。移行後は机が全文を head に載せるので**フラグでなく体験が後継に移る**）
 - **まはー指摘（2026-07-11）で移行を追加**: vivid（鮮明）をメモ＝常設掲示として使う実ユーザーがいる。「鮮明にする」は机が生まれる前から存在した**「開きっぱなしにしたい」需要の先行表現**——データに込められた意図を机へ連れて行く
-- **移行**: per-persona memory.db 内の一回きり冪等 migration（marks→photos / P3a と同じ adapter init 流儀。机と同じ DB 内なので扇形にならない）: `vividness='vivid'` かつ未削除のページを `desk_items` に open（opened_at / last_touched_at＝移行時刻、purpose_ref なし）
+- **移行**: per-persona memory.db 内の一回きり冪等 migration（marks→clips / P3a と同じ adapter init 流儀。机と同じ DB 内なので扇形にならない）: `vividness='vivid'` かつ未削除のページを `desk_items` に open（opened_at / last_touched_at＝移行時刻、purpose_ref なし）
 - **裁定 (b)「移行は机に置かない」との整合**: あちらは TrackOpenNote＝Track 文脈の付随状態で、開き直しは本人の行為に委ねた。こちらは**「常に見えるように」と明示的に刻まれた意図そのもの**の移行——意味論が一致する後継へ運ぶのは代筆でなく継承（vividness の意図データはこの移行を最後に消えるので、逃すと二度と回収できない点も違う）
 - **予算との整合**: 机は 8000 字予算＋LRU。vivid が多い/大きいユーザーでは溢れる → 次の Metabolism snapshot が正直な通知つきで LRU 追い出し（移行を特別扱いせず机の物理にそのまま従う）
 - faint / buried: 索引が消えた今は単なる通常ページ——**何もしない**（「隠したい」を削除に読み替える等の破壊的再解釈はしない）
@@ -387,7 +387,7 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - (b) 裁定の詳細確認 → **P4-a の 2. に「何を見るか（状況テキスト例）」「approve すると何が起きるか」を明文化**して回答。verdict 2値は維持
 - (c) 就寝判断適用直後の背景ジョブで即実行 → **承認**。ただし**生活リズムの1日単位前提そのものが将来再検討**（1回しか喋らない日・会話だけのユーザー）——P4-a 3. に注記
 - (d) MEMOPEDIA_INDEX_ENABLED 再利用・エアから → **承認**
-- (e) 写真航跡クラスタ → **見送り確定**（「今はピンとこない」）
+- (e) クリップ航跡クラスタ → **見送り確定**（「今はピンとこない」）
 - (f) 新聞掲載 → **承認、ただし方式変更**: バッチ結果を直結せず、**「前回の新聞〜今回の新聞」の窓で PageEditHistory を集計**する形に。編纂がどのタイミングで走っても、手作業（maintain スクリプト・UI 操作）の編集も漏れなく載る。edit_source（curation / auto_maintenance / 手作業系）でグルーピング、日常の本文追記（会話由来）はセッションダイジェスト欄と重複するため対象外。実装検討点: 窓の起点＝前回新聞の生成時刻の記録
 - (g) 常設メモ導線 → **(i) メモリタブに「机に開く / 閉じる」ボタン**で確定（P4-c に反映）
 - **命名（追加裁定）**: 「庭仕事」は Atlas の命名体系とズレるため**「編纂」に改名**（まはー発案）。編纂は Atlas 命名時から「地図帳を作る動詞」として使用中だが、分割・統合・命名こそその本体であり衝突でなく帰還。自動系（Chronicle 生成・entity 抽出）は「自動編纂」と呼び分け。実装名は curation

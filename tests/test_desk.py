@@ -199,5 +199,69 @@ class DeskTests(unittest.TestCase):
         self.assertEqual(D.resolve_desk_budget_chars(), D.DEFAULT_DESK_BUDGET_CHARS)
 
 
+class LegacyRefBackfillTest(unittest.TestCase):
+    """旧 prefix の ref を正典形へ寄せる移行 (2026-07-15 統一グラマー吸収)。
+
+    机の ref は主キー。旧表記を残すと同じページが二枚の紙として並ぶ。
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self._tmpdir.name) / "memory.db")
+        self.conn = sqlite3.connect(self.db_path)
+        D.init_desk_tables(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        gc.collect()
+        self._tmpdir.cleanup()
+
+    def _insert(self, ref, opened_at, touched_at):
+        self.conn.execute(
+            "INSERT INTO desk_items (ref, opened_at, last_touched_at, purpose_ref) "
+            "VALUES (?, ?, ?, NULL)",
+            (ref, opened_at, touched_at),
+        )
+        self.conn.commit()
+
+    def _refs(self):
+        return {r[0] for r in self.conn.execute("SELECT ref FROM desk_items")}
+
+    def test_legacy_refs_become_canonical(self):
+        self._insert("m:2", 100, 200)
+        self._insert("ch:7", 100, 200)
+        D._backfill_canonical_refs(self.conn)
+        self.assertEqual(self._refs(), {"memopedia:2", "chronicle:7"})
+
+    def test_canonical_refs_are_left_alone(self):
+        self._insert("memopedia:2", 100, 200)
+        self.assertEqual(D._backfill_canonical_refs(self.conn), 0)
+        self.assertEqual(self._refs(), {"memopedia:2"})
+
+    def test_collision_merges_into_one_sheet_keeping_desk_semantics(self):
+        # 同じページを新旧表記で開いていた場合、一枚に畳む。
+        # opened_at = 早い方 (いつから開いているか) / last_touched_at = 遅い方
+        self._insert("m:2", 100, 500)
+        self._insert("memopedia:2", 300, 900)
+        D._backfill_canonical_refs(self.conn)
+
+        rows = self.conn.execute(
+            "SELECT ref, opened_at, last_touched_at FROM desk_items"
+        ).fetchall()
+        self.assertEqual(rows, [("memopedia:2", 100, 900)])
+
+    def test_unparseable_ref_is_left_untouched(self):
+        # 未知の値を移行が壊さない (正規化ループの安全性)
+        self._insert("なんだこれ", 100, 200)
+        D._backfill_canonical_refs(self.conn)
+        self.assertEqual(self._refs(), {"なんだこれ"})
+
+    def test_backfill_is_idempotent(self):
+        self._insert("m:2", 100, 200)
+        self.assertEqual(D._backfill_canonical_refs(self.conn), 1)
+        self.assertEqual(D._backfill_canonical_refs(self.conn), 0)
+        self.assertEqual(self._refs(), {"memopedia:2"})
+
+
 if __name__ == "__main__":
     unittest.main()

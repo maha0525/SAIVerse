@@ -1,16 +1,16 @@
 """Memory Atlas ファサード saiverse/memory_atlas.py のテスト (concept_consolidation.md)。
 
 検証項目:
-- ref 解決 (m:N / core / c:N / ch:N / p:N / task:N stub / 不正形式)
-- read_page: Memopedia / コア記憶(全件・1件) / Chronicle の内容整形、貼られた写真の表示
+- ref 解決 (memopedia:N / core / core:N / chronicle:N / clip:N / task:N stub / 不正形式)
+- read_page: Memopedia / コア記憶(全件・1件) / Chronicle の内容整形、貼られたクリップの表示
 - open_page/close_page: コア記憶は常時開で拒否、Memopedia/Chronicle は desk.py に委譲、
   机が溢れたときの LRU 追い出し通知
 - search_pages: Memopedia + Chronicle 横断検索、0 件フォールバック
 - Chronicle の short_id backfill (legacy DB からの一回きり移行、新規行の自動採番)
-- P2b: 写真の読み出し (p:N — 点=対象メッセージ+引用箇所 / 範囲=生ログ全文)、
-  貼られた写真の抜粋描画 (常に抜粋 + memory_read p:N への誘導)、
-  write_page (m:N 追記・core 新規・c:N 上書き・ch/p 拒否)、
-  clip_photo (点=逐語引用の実在検証 / 範囲=SCENE と同じ窓 / 参照貼りのみ / touch)
+- P2b: クリップの読み出し (clip:N — 点=対象メッセージ+引用箇所 / 範囲=生ログ全文)、
+  貼られたクリップの抜粋描画 (常に抜粋 + memory_read clip:N への誘導)、
+  write_page (memopedia:N 追記・core 新規・core:N 上書き・ch/p 拒否)、
+  make_clip (点=逐語引用の実在検証 / 範囲=SCENE と同じ窓 / 参照貼りのみ / touch)
 
 実 DB (一時ディレクトリの memory.db) を使い、Embedder だけ patch する
 (tests/test_marker_store_memory.py の流儀)。
@@ -105,24 +105,24 @@ class _AtlasTestBase(unittest.TestCase):
 
 class RefParsingTests(unittest.TestCase):
     def test_parses_memopedia_ref(self):
-        self.assertEqual(atlas._parse_ref("m:5"), ("memopedia", "5"))
+        self.assertEqual(atlas._parse_ref("memopedia:5"), ("memopedia", "5"))
 
     def test_parses_core_all(self):
         self.assertEqual(atlas._parse_ref("core"), ("core_all", None))
         self.assertEqual(atlas._parse_ref("CORE"), ("core_all", None))
 
     def test_parses_core_one(self):
-        self.assertEqual(atlas._parse_ref("c:3"), ("core_one", "3"))
+        self.assertEqual(atlas._parse_ref("core:3"), ("core_one", "3"))
 
     def test_parses_chronicle_ref_distinct_from_core(self):
-        # "ch:" は "c:" と衝突しない (2 文字プレフィックスの境界)
-        self.assertEqual(atlas._parse_ref("ch:7"), ("chronicle", "7"))
+        # "chronicle:" は "core:" と衝突しない (2 文字プレフィックスの境界)
+        self.assertEqual(atlas._parse_ref("chronicle:7"), ("chronicle", "7"))
 
     def test_parses_task_stub_ref(self):
         self.assertEqual(atlas._parse_ref("task:2"), ("task", "2"))
 
-    def test_parses_photo_ref(self):
-        self.assertEqual(atlas._parse_ref("p:4"), ("photo", "4"))
+    def test_parses_clip_ref(self):
+        self.assertEqual(atlas._parse_ref("clip:4"), ("clip", "4"))
 
     def test_unrecognized_ref_raises(self):
         with self.assertRaises(atlas.AtlasRefError):
@@ -144,42 +144,42 @@ class ReadPageTests(_AtlasTestBase):
         add_core_memory(self.adapter.conn, "1件目")
         add_core_memory(self.adapter.conn, "2件目")
         result = atlas.read_page(self.adapter, "core")
-        self.assertIn("c:1", result)
+        self.assertIn("core:1", result)
         self.assertIn("1件目", result)
-        self.assertIn("c:2", result)
+        self.assertIn("core:2", result)
         self.assertIn("2件目", result)
 
     def test_read_core_one_found(self):
         from sai_memory.core_memory import add_core_memory
 
         new_id = add_core_memory(self.adapter.conn, "刻んだ内容")
-        result = atlas.read_page(self.adapter, f"c:{new_id}")
+        result = atlas.read_page(self.adapter, f"core:{new_id}")
         self.assertIn("刻んだ内容", result)
-        self.assertIn(f"c:{new_id}", result)
+        self.assertIn(f"core:{new_id}", result)
 
     def test_read_core_one_not_found(self):
-        result = atlas.read_page(self.adapter, "c:999")
+        result = atlas.read_page(self.adapter, "core:999")
         self.assertIn("見つかりません", result)
 
     def test_read_memopedia_page(self):
         page = self._make_memopedia_page(title="桃太郎", content="鬼退治に行った")
-        result = atlas.read_page(self.adapter, f"m:{page.short_id}")
+        result = atlas.read_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertIn("桃太郎", result)
         self.assertIn("鬼退治に行った", result)
-        self.assertIn(f"m:{page.short_id}", result)
+        self.assertIn(f"memopedia:{page.short_id}", result)
 
     def test_read_memopedia_page_not_found(self):
-        result = atlas.read_page(self.adapter, "m:999")
+        result = atlas.read_page(self.adapter, "memopedia:999")
         self.assertIn("見つかりません", result)
 
     def test_read_chronicle_entry(self):
         entry = self._make_chronicle_entry(content="祭りに参加した")
-        result = atlas.read_page(self.adapter, f"ch:{entry.short_id}")
+        result = atlas.read_page(self.adapter, f"chronicle:{entry.short_id}")
         self.assertIn("祭りに参加した", result)
-        self.assertIn(f"ch:{entry.short_id}", result)
+        self.assertIn(f"chronicle:{entry.short_id}", result)
 
     def test_read_chronicle_entry_not_found(self):
-        result = atlas.read_page(self.adapter, "ch:999")
+        result = atlas.read_page(self.adapter, "chronicle:999")
         self.assertIn("見つかりません", result)
 
     def test_read_task_without_manager_reports_missing_context(self):
@@ -188,26 +188,26 @@ class ReadPageTests(_AtlasTestBase):
         result = atlas.read_page(self.adapter, "task:1")
         self.assertIn("world 文脈", result)
 
-    def test_read_page_shows_pasted_photos(self):
+    def test_read_page_shows_pasted_clips(self):
         from sai_memory.core_memory import add_core_memory
-        from sai_memory.photos import add_photo
+        from sai_memory.clips import add_clip
 
-        new_id = add_core_memory(self.adapter.conn, "写真つきの記憶")
-        ref = f"c:{new_id}"
-        photo = add_photo(
+        new_id = add_core_memory(self.adapter.conn, "クリップつきの記憶")
+        ref = f"core:{new_id}"
+        clip = add_clip(
             self.adapter.conn, message_id="m1", quote="根拠の一言", pasted_to=ref
         )
 
         result = atlas.read_page(self.adapter, ref)
-        self.assertIn(f"[写真 p:{photo.short_id}]", result)
+        self.assertIn(f"[クリップ clip:{clip.short_id}]", result)
         self.assertIn("根拠の一言", result)
 
-    def test_read_page_without_photos_omits_photo_section(self):
+    def test_read_page_without_clips_omits_clip_section(self):
         from sai_memory.core_memory import add_core_memory
 
-        new_id = add_core_memory(self.adapter.conn, "写真なし")
-        result = atlas.read_page(self.adapter, f"c:{new_id}")
-        self.assertNotIn("[写真", result)
+        new_id = add_core_memory(self.adapter.conn, "クリップなし")
+        result = atlas.read_page(self.adapter, f"core:{new_id}")
+        self.assertNotIn("[クリップ", result)
 
 
 class OpenClosePageTests(_AtlasTestBase):
@@ -217,20 +217,20 @@ class OpenClosePageTests(_AtlasTestBase):
         self.assertEqual(self._desk_refs(), set())
 
     def test_open_core_one_is_rejected(self):
-        result = atlas.open_page(self.adapter, "c:1")
+        result = atlas.open_page(self.adapter, "core:1")
         self.assertIn("常時開いています", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_close_core_is_rejected(self):
-        result = atlas.close_page(self.adapter, "c:1")
+        result = atlas.close_page(self.adapter, "core:1")
         self.assertIn("閉じられません", result)
 
     def test_open_memopedia_page_registers_desk_item(self):
         page = self._make_memopedia_page()
-        result = atlas.open_page(self.adapter, f"m:{page.short_id}")
-        self.assertIn(f"m:{page.short_id}", result)
+        result = atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
+        self.assertIn(f"memopedia:{page.short_id}", result)
         self.assertIn("机に開きました", result)
-        self.assertIn(f"m:{page.short_id}", self._desk_refs())
+        self.assertIn(f"memopedia:{page.short_id}", self._desk_refs())
 
     def test_open_returns_page_content_inline(self):
         """開く＝読む行為を兼ねる: 結果にページ本文が含まれる (2026-07-11 まはー指摘)。
@@ -239,50 +239,50 @@ class OpenClosePageTests(_AtlasTestBase):
         返さないと「開いたのに中身が見えず read を撃ち直す二度手間」になる。
         """
         page = self._make_memopedia_page(title="琥珀色の聖域", content="温かみのある光")
-        result = atlas.open_page(self.adapter, f"m:{page.short_id}")
+        result = atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertIn("琥珀色の聖域", result)
         self.assertIn("温かみのある光", result)
 
     def test_open_unknown_memopedia_ref_reports_not_found(self):
-        result = atlas.open_page(self.adapter, "m:999")
+        result = atlas.open_page(self.adapter, "memopedia:999")
         self.assertIn("見つかりません", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_open_chronicle_entry_registers_desk_item(self):
         entry = self._make_chronicle_entry()
-        result = atlas.open_page(self.adapter, f"ch:{entry.short_id}")
-        self.assertIn(f"ch:{entry.short_id}", self._desk_refs())
+        result = atlas.open_page(self.adapter, f"chronicle:{entry.short_id}")
+        self.assertIn(f"chronicle:{entry.short_id}", self._desk_refs())
         self.assertIn("机に開きました", result)
 
     def test_open_task_without_manager_reports_not_found(self):
         # task:N (目的の地図) は main DB 在住 — manager (world 文脈) を渡さない
-        # 呼び出しでは解決できず、m:N の未知参照と同じ「見つかりません」を返す
+        # 呼び出しでは解決できず、memopedia:N の未知参照と同じ「見つかりません」を返す
         # (P3c①② で task:N の開閉は実装済み。manager 込みの動作は
         # TaskDeskTests でカバーする)。
         result = atlas.open_page(self.adapter, "task:1")
         self.assertIn("見つかりません", result)
         self.assertEqual(self._desk_refs(), set())
 
-    def test_open_photo_is_rejected_with_read_hint(self):
-        # 写真は机の対象外 (参照であってページではない)。read への誘導を返す
-        result = atlas.open_page(self.adapter, "p:1")
-        self.assertIn("memory_read p:1", result)
+    def test_open_clip_is_rejected_with_read_hint(self):
+        # クリップは机の対象外 (参照であってページではない)。read への誘導を返す
+        result = atlas.open_page(self.adapter, "clip:1")
+        self.assertIn("memory_read clip:1", result)
         self.assertEqual(self._desk_refs(), set())
 
-    def test_close_photo_reports_not_applicable(self):
-        result = atlas.close_page(self.adapter, "p:1")
+    def test_close_clip_reports_not_applicable(self):
+        result = atlas.close_page(self.adapter, "clip:1")
         self.assertIn("机の対象外", result)
 
     def test_close_after_open_removes_desk_item(self):
         page = self._make_memopedia_page()
-        atlas.open_page(self.adapter, f"m:{page.short_id}")
-        result = atlas.close_page(self.adapter, f"m:{page.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
+        result = atlas.close_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertIn("机から閉じました", result)
         self.assertEqual(self._desk_refs(), set())
 
     def test_close_not_open_reports_message(self):
         page = self._make_memopedia_page()
-        result = atlas.close_page(self.adapter, f"m:{page.short_id}")
+        result = atlas.close_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertIn("開かれていません", result)
 
     def test_open_evicts_lru_when_budget_exceeded(self):
@@ -292,17 +292,17 @@ class OpenClosePageTests(_AtlasTestBase):
         page1 = self._make_memopedia_page(title="A", content="あ" * 50)
         page2 = self._make_memopedia_page(title="B", content="い" * 50)
 
-        atlas.open_page(self.adapter, f"m:{page1.short_id}")
-        result = atlas.open_page(self.adapter, f"m:{page2.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{page1.short_id}")
+        result = atlas.open_page(self.adapter, f"memopedia:{page2.short_id}")
 
         self.assertIn("棚に戻しました", result)
         # 予算超過で最も古く触られていた A が追い出され、B だけが机に残る
-        self.assertEqual(self._desk_refs(), {f"m:{page2.short_id}"})
+        self.assertEqual(self._desk_refs(), {f"memopedia:{page2.short_id}"})
 
     def test_reopen_same_page_does_not_duplicate(self):
         page = self._make_memopedia_page()
-        atlas.open_page(self.adapter, f"m:{page.short_id}")
-        atlas.open_page(self.adapter, f"m:{page.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertEqual(len(self._desk_refs()), 1)
 
     def test_read_touches_open_page(self):
@@ -313,7 +313,7 @@ class OpenClosePageTests(_AtlasTestBase):
 
         clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
         page = self._make_memopedia_page()
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.open_page(self.adapter, ref)
         opened = list_open(self.adapter.conn)[0]
 
@@ -327,12 +327,12 @@ class OpenClosePageTests(_AtlasTestBase):
         self.assertEqual(touched.opened_at, opened.opened_at)
 
     def test_read_chronicle_touches_open_page(self):
-        # chronicle 経路 (ch:N) でも read が touch になる
+        # chronicle 経路 (chronicle:N) でも read が touch になる
         from sai_memory.desk import list_open
 
         clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
         entry = self._make_chronicle_entry()
-        ref = f"ch:{entry.short_id}"
+        ref = f"chronicle:{entry.short_id}"
         atlas.open_page(self.adapter, ref)
         opened = list_open(self.adapter.conn)[0]
 
@@ -345,7 +345,7 @@ class OpenClosePageTests(_AtlasTestBase):
     def test_read_does_not_open_closed_page(self):
         # read は既定の行為 — 机の場所は取らない (勝手に開かない)
         page = self._make_memopedia_page()
-        atlas.read_page(self.adapter, f"m:{page.short_id}")
+        atlas.read_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertEqual(self._desk_refs(), set())
 
     def test_open_oversized_page_is_not_self_evicted(self):
@@ -353,7 +353,7 @@ class OpenClosePageTests(_AtlasTestBase):
         # (「開きました」と「棚に戻しました」の同居矛盾の回帰テスト、メイン修正)
         os.environ["SAIVERSE_DESK_BUDGET_CHARS"] = "10"
         page = self._make_memopedia_page(title="巨大", content="あ" * 100)
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
 
         result = atlas.open_page(self.adapter, ref)
 
@@ -367,12 +367,12 @@ class OpenClosePageTests(_AtlasTestBase):
         small = self._make_memopedia_page(title="小", content="い" * 30)
         big = self._make_memopedia_page(title="大", content="あ" * 100)
 
-        atlas.open_page(self.adapter, f"m:{small.short_id}")
-        result = atlas.open_page(self.adapter, f"m:{big.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{small.short_id}")
+        result = atlas.open_page(self.adapter, f"memopedia:{big.short_id}")
 
         self.assertIn("机に開きました", result)
-        self.assertIn(f"m:{small.short_id}", result)  # 追い出し通知は先客
-        self.assertEqual(self._desk_refs(), {f"m:{big.short_id}"})
+        self.assertIn(f"memopedia:{small.short_id}", result)  # 追い出し通知は先客
+        self.assertEqual(self._desk_refs(), {f"memopedia:{big.short_id}"})
 
     def _desk_refs(self):
         from sai_memory.desk import list_open
@@ -395,112 +395,112 @@ class SearchPagesTests(_AtlasTestBase):
 
         result = atlas.search_pages(self.adapter, "花火大会")
         self.assertIn("Memopedia", result)
-        self.assertIn(f"m:{page.short_id}", result)
+        self.assertIn(f"memopedia:{page.short_id}", result)
         self.assertIn("Chronicle", result)
-        self.assertIn(f"ch:{entry.short_id}", result)
+        self.assertIn(f"chronicle:{entry.short_id}", result)
 
 
-class ReadPhotoTests(_AtlasTestBase):
-    """p:N — 写真を読む＝その写真が写す土地 (生ログ) を見に行く。"""
+class ReadClipTests(_AtlasTestBase):
+    """clip:N — クリップを読む＝そのクリップが写す土地 (生ログ) を見に行く。"""
 
-    def test_read_point_photo_shows_message_and_quote(self):
-        from sai_memory.photos import add_photo
+    def test_read_point_clip_shows_message_and_quote(self):
+        from sai_memory.clips import add_clip
 
         ids = self._add_conversation(["今日は晴れだった", "いい天気でしたね"])
-        photo = add_photo(self.adapter.conn, message_id=ids[0], quote="晴れだった")
+        clip = add_clip(self.adapter.conn, message_id=ids[0], quote="晴れだった")
 
-        result = atlas.read_page(self.adapter, photo.ref)
-        self.assertIn(f"p:{photo.short_id}", result)
+        result = atlas.read_page(self.adapter, clip.ref)
+        self.assertIn(f"clip:{clip.short_id}", result)
         self.assertIn("引用箇所: 「晴れだった」", result)
         # 対象メッセージの本文全体が読める
         self.assertIn("今日は晴れだった", result)
 
-    def test_read_range_photo_shows_full_transcript(self):
-        from sai_memory.photos import add_photo
+    def test_read_range_clip_shows_full_transcript(self):
+        from sai_memory.clips import add_clip
 
         texts = [f"発言その{i}" for i in range(1, 7)]
         ids = self._add_conversation(texts)
-        photo = add_photo(
+        clip = add_clip(
             self.adapter.conn, message_id=ids[0], message_id_end=ids[-1]
         )
 
-        result = atlas.read_page(self.adapter, photo.ref)
+        result = atlas.read_page(self.adapter, clip.ref)
         self.assertIn(f"全{len(texts)}メッセージ", result)
         # 範囲の生ログ全文 — 先頭も末尾も省略されない
         for text in texts:
             self.assertIn(text, result)
 
-    def test_read_photo_not_found(self):
-        result = atlas.read_page(self.adapter, "p:999")
+    def test_read_clip_not_found(self):
+        result = atlas.read_page(self.adapter, "clip:999")
         self.assertIn("見つかりません", result)
 
-    def test_read_photo_invalid_key(self):
-        result = atlas.read_page(self.adapter, "p:abc")
+    def test_read_clip_invalid_key(self):
+        result = atlas.read_page(self.adapter, "clip:abc")
         self.assertIn("不正", result)
 
-    def test_read_photo_does_not_touch_desk(self):
-        # 写真を読んでも机は動かない (読んだのは土地であってページではない)
+    def test_read_clip_does_not_touch_desk(self):
+        # クリップを読んでも机は動かない (読んだのは土地であってページではない)
         from sai_memory.desk import list_open
-        from sai_memory.photos import add_photo
+        from sai_memory.clips import add_clip
 
         ids = self._add_conversation(["ひとこと", "ふたこと"])
-        photo = add_photo(self.adapter.conn, message_id=ids[0], quote="ひとこと")
-        atlas.read_page(self.adapter, photo.ref)
+        clip = add_clip(self.adapter.conn, message_id=ids[0], quote="ひとこと")
+        atlas.read_page(self.adapter, clip.ref)
         self.assertEqual(list_open(self.adapter.conn), [])
 
 
-class PhotoExcerptRenderingTests(_AtlasTestBase):
-    """貼られた写真の描画は常に抜粋 (ページが写真に食われない)。"""
+class ClipExcerptRenderingTests(_AtlasTestBase):
+    """貼られたクリップの描画は常に抜粋 (ページがクリップに食われない)。"""
 
-    def _paste_range_photo_to_core(self, n_messages=8):
+    def _paste_range_clip_to_core(self, n_messages=8):
         from sai_memory.core_memory import add_core_memory
-        from sai_memory.photos import add_photo
+        from sai_memory.clips import add_clip
 
         texts = [f"長い会話の発言{i}" for i in range(1, n_messages + 1)]
         ids = self._add_conversation(texts)
-        core_id = add_core_memory(self.adapter.conn, "写真つきの記憶")
-        photo = add_photo(
+        core_id = add_core_memory(self.adapter.conn, "クリップつきの記憶")
+        clip = add_clip(
             self.adapter.conn, message_id=ids[0], message_id_end=ids[-1],
-            pasted_to=f"c:{core_id}",
+            pasted_to=f"core:{core_id}",
         )
-        return core_id, photo, texts
+        return core_id, clip, texts
 
-    def test_range_photo_excerpt_truncates_and_points_to_read(self):
-        core_id, photo, texts = self._paste_range_photo_to_core()
+    def test_range_clip_excerpt_truncates_and_points_to_read(self):
+        core_id, clip, texts = self._paste_range_clip_to_core()
 
-        result = atlas.read_page(self.adapter, f"c:{core_id}")
+        result = atlas.read_page(self.adapter, f"core:{core_id}")
         # 抜粋: 先頭数行は見える
         self.assertIn(texts[0], result)
         # 末尾は省略される (丸ごと載せない)
         self.assertNotIn(texts[-1], result)
-        # 「全Nメッセージ・M字、前後省略 — memory_read p:N で全文」の案内
+        # 「全Nメッセージ・M字、前後省略 — memory_read clip:N で全文」の案内
         self.assertIn(f"全{len(texts)}メッセージ", result)
         self.assertIn("前後省略", result)
-        self.assertIn(f"memory_read p:{photo.short_id} で全文", result)
+        self.assertIn(f"memory_read clip:{clip.short_id} で全文", result)
 
-    def test_range_photo_excerpt_shows_label(self):
+    def test_range_clip_excerpt_shows_label(self):
         from sai_memory.core_memory import add_core_memory
-        from sai_memory.photos import add_photo
+        from sai_memory.clips import add_clip
 
         ids = self._add_conversation(["最初の一言", "返事"])
         core_id = add_core_memory(self.adapter.conn, "ラベルつき")
-        add_photo(
+        add_clip(
             self.adapter.conn, message_id=ids[0], message_id_end=ids[-1],
-            quote="初対面の夜", pasted_to=f"c:{core_id}",
+            quote="初対面の夜", pasted_to=f"core:{core_id}",
         )
-        result = atlas.read_page(self.adapter, f"c:{core_id}")
+        result = atlas.read_page(self.adapter, f"core:{core_id}")
         self.assertIn("ラベル: 初対面の夜", result)
 
-    def test_range_photo_with_lost_endpoints_degrades_gracefully(self):
+    def test_range_clip_with_lost_endpoints_degrades_gracefully(self):
         from sai_memory.core_memory import add_core_memory
-        from sai_memory.photos import add_photo
+        from sai_memory.clips import add_clip
 
-        core_id = add_core_memory(self.adapter.conn, "端が失われた写真")
-        add_photo(
+        core_id = add_core_memory(self.adapter.conn, "端が失われたクリップ")
+        add_clip(
             self.adapter.conn, message_id="gone-1", message_id_end="gone-2",
-            pasted_to=f"c:{core_id}",
+            pasted_to=f"core:{core_id}",
         )
-        result = atlas.read_page(self.adapter, f"c:{core_id}")
+        result = atlas.read_page(self.adapter, f"core:{core_id}")
         self.assertIn("読み出せません", result)
 
 
@@ -509,7 +509,7 @@ class WritePageTests(_AtlasTestBase):
         from sai_memory.core_memory import list_core_memories
 
         result = atlas.write_page(self.adapter, "core", "恒常知識その1")
-        self.assertIn("c:1", result)
+        self.assertIn("core:1", result)
         self.assertIn("常時開", result)
         items = list_core_memories(self.adapter.conn)
         self.assertEqual([cm.content for cm in items], ["恒常知識その1"])
@@ -524,19 +524,19 @@ class WritePageTests(_AtlasTestBase):
         from sai_memory.core_memory import add_core_memory, get_core_memory
 
         mid = add_core_memory(self.adapter.conn, "古い内容")
-        result = atlas.write_page(self.adapter, f"c:{mid}", "新しい内容")
+        result = atlas.write_page(self.adapter, f"core:{mid}", "新しい内容")
         self.assertIn("上書きしました", result)
         self.assertEqual(get_core_memory(self.adapter.conn, mid).content, "新しい内容")
 
     def test_write_core_one_not_found(self):
-        result = atlas.write_page(self.adapter, "c:999", "内容")
+        result = atlas.write_page(self.adapter, "core:999", "内容")
         self.assertIn("見つかりません", result)
 
     def test_write_memopedia_appends_with_edit_history(self):
         from sai_memory.memopedia import Memopedia
 
         page = self._make_memopedia_page(title="覚え書き", content="最初の本文")
-        result = atlas.write_page(self.adapter, f"m:{page.short_id}", "追記した一文")
+        result = atlas.write_page(self.adapter, f"memopedia:{page.short_id}", "追記した一文")
         self.assertIn("追記しました", result)
         self.assertIn("覚え書き", result)
 
@@ -554,7 +554,7 @@ class WritePageTests(_AtlasTestBase):
 
         clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
         page = self._make_memopedia_page()
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.open_page(self.adapter, ref)
         opened = list_open(self.adapter.conn)[0]
 
@@ -565,15 +565,15 @@ class WritePageTests(_AtlasTestBase):
         self.assertGreater(touched.last_touched_at, opened.last_touched_at)
 
     def test_write_memopedia_not_found(self):
-        result = atlas.write_page(self.adapter, "m:999", "内容")
+        result = atlas.write_page(self.adapter, "memopedia:999", "内容")
         self.assertIn("見つかりません", result)
 
     def test_write_chronicle_is_rejected(self):
-        result = atlas.write_page(self.adapter, "ch:1", "内容")
+        result = atlas.write_page(self.adapter, "chronicle:1", "内容")
         self.assertIn("書けません", result)
 
-    def test_write_photo_is_rejected(self):
-        result = atlas.write_page(self.adapter, "p:1", "内容")
+    def test_write_clip_is_rejected(self):
+        result = atlas.write_page(self.adapter, "clip:1", "内容")
         self.assertIn("書けません", result)
 
     def test_write_task_returns_stub(self):
@@ -585,92 +585,92 @@ class WritePageTests(_AtlasTestBase):
         self.assertIn("空にできません", result)
 
 
-class ClipPhotoTests(_AtlasTestBase):
-    def test_clip_point_photo_with_valid_quote(self):
-        from sai_memory.photos import list_photos
+class MakeClipTests(_AtlasTestBase):
+    def test_clip_point_clip_with_valid_quote(self):
+        from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["大事な一言があった", "そうですね"])
-        result = atlas.clip_photo(self.adapter, ids[0], quote="大事な一言")
+        result = atlas.make_clip(self.adapter, ids[0], quote="大事な一言")
 
-        photos = list_photos(self.adapter.conn)
-        self.assertEqual(len(photos), 1)
-        self.assertEqual(photos[0].quote, "大事な一言")
-        self.assertFalse(photos[0].is_range)
-        self.assertIsNone(photos[0].pasted_to)  # 貼り先未指定 = 土壌プール
-        self.assertIn(f"p:{photos[0].short_id}", result)
+        clips = list_clips(self.adapter.conn)
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0].quote, "大事な一言")
+        self.assertFalse(clips[0].is_range)
+        self.assertIsNone(clips[0].pasted_to)  # 貼り先未指定 = 土壌プール
+        self.assertIn(f"clip:{clips[0].short_id}", result)
         self.assertIn("「大事な一言」", result)
 
-    def test_clip_point_photo_quote_mismatch_rejected(self):
-        from sai_memory.photos import list_photos
+    def test_clip_point_clip_quote_mismatch_rejected(self):
+        from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["本文はこれだけ", "はい"])
-        result = atlas.clip_photo(self.adapter, ids[0], quote="本文に無い言葉")
+        result = atlas.make_clip(self.adapter, ids[0], quote="本文に無い言葉")
 
         self.assertIn("見つかりませんでした", result)
-        self.assertEqual(list_photos(self.adapter.conn), [])  # 撮られない
+        self.assertEqual(list_clips(self.adapter.conn), [])  # 撮られない
 
-    def test_clip_point_photo_message_not_found(self):
-        result = atlas.clip_photo(self.adapter, "no-such-message", quote="何か")
+    def test_clip_point_clip_message_not_found(self):
+        result = atlas.make_clip(self.adapter, "no-such-message", quote="何か")
         self.assertIn("見つかりません", result)
 
-    def test_clip_range_photo_around_anchor(self):
-        from sai_memory.photos import list_photos
+    def test_clip_range_clip_around_anchor(self):
+        from sai_memory.clips import list_clips
 
         texts = [f"会話{i}" for i in range(1, 8)]
         ids = self._add_conversation(texts)
         anchor = ids[3]  # 中央
-        result = atlas.clip_photo(self.adapter, anchor, rounds=1)
+        result = atlas.make_clip(self.adapter, anchor, rounds=1)
 
-        photos = list_photos(self.adapter.conn)
-        self.assertEqual(len(photos), 1)
-        self.assertTrue(photos[0].is_range)
+        clips = list_clips(self.adapter.conn)
+        self.assertEqual(len(clips), 1)
+        self.assertTrue(clips[0].is_range)
         # rounds=1 → アンカー±2件 = 全5メッセージ
         self.assertIn("全5メッセージ", result)
-        self.assertIn(f"p:{photos[0].short_id}", result)
+        self.assertIn(f"clip:{clips[0].short_id}", result)
 
     def test_clip_with_paste_to_memopedia_normalizes_and_pastes(self):
-        from sai_memory.photos import list_photos
+        from sai_memory.clips import list_clips
 
         page = self._make_memopedia_page()
         ids = self._add_conversation(["貼る対象の発言", "了解"])
-        result = atlas.clip_photo(
-            self.adapter, ids[0], quote="貼る対象", paste_to=f"m:{page.short_id}",
+        result = atlas.make_clip(
+            self.adapter, ids[0], quote="貼る対象", paste_to=f"memopedia:{page.short_id}",
         )
-        photos = list_photos(self.adapter.conn)
-        self.assertEqual(photos[0].pasted_to, f"m:{page.short_id}")
+        clips = list_clips(self.adapter.conn)
+        self.assertEqual(clips[0].pasted_to, f"memopedia:{page.short_id}")
         self.assertIn("貼りました", result)
 
     def test_clip_with_paste_to_core_memory(self):
         from sai_memory.core_memory import add_core_memory
-        from sai_memory.photos import list_photos
+        from sai_memory.clips import list_clips
 
         core_id = add_core_memory(self.adapter.conn, "貼り先のコア記憶")
         ids = self._add_conversation(["根拠になる発言", "なるほど"])
-        atlas.clip_photo(
-            self.adapter, ids[0], quote="根拠になる発言", paste_to=f"c:{core_id}",
+        atlas.make_clip(
+            self.adapter, ids[0], quote="根拠になる発言", paste_to=f"core:{core_id}",
         )
-        photos = list_photos(self.adapter.conn)
-        self.assertEqual(photos[0].pasted_to, f"c:{core_id}")
+        clips = list_clips(self.adapter.conn)
+        self.assertEqual(clips[0].pasted_to, f"core:{core_id}")
 
     def test_clip_paste_to_unknown_page_rejected_without_saving(self):
-        from sai_memory.photos import list_photos
+        from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["発言", "返事"])
-        result = atlas.clip_photo(
-            self.adapter, ids[0], quote="発言", paste_to="m:999",
+        result = atlas.make_clip(
+            self.adapter, ids[0], quote="発言", paste_to="memopedia:999",
         )
         self.assertIn("見つかりません", result)
-        self.assertEqual(list_photos(self.adapter.conn), [])
+        self.assertEqual(list_clips(self.adapter.conn), [])
 
     def test_clip_paste_to_task_is_p2c_stub_without_saving(self):
-        from sai_memory.photos import list_photos
+        from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["発言", "返事"])
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, ids[0], quote="発言", paste_to="task:1",
         )
         self.assertIn("今後対応予定", result)
-        self.assertEqual(list_photos(self.adapter.conn), [])
+        self.assertEqual(list_clips(self.adapter.conn), [])
 
     def test_clip_touches_open_paste_target(self):
         # clip も touch (touch の定義 = read/write/clip)
@@ -678,26 +678,26 @@ class ClipPhotoTests(_AtlasTestBase):
 
         clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
         page = self._make_memopedia_page()
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.open_page(self.adapter, ref)
         opened = list_open(self.adapter.conn)[0]
 
         clock.advance_to(datetime(2026, 7, 6, 10, 0, 0))
         ids = self._add_conversation(["触る発言", "返事"])
-        atlas.clip_photo(self.adapter, ids[0], quote="触る発言", paste_to=ref)
+        atlas.make_clip(self.adapter, ids[0], quote="触る発言", paste_to=ref)
 
         touched = list_open(self.adapter.conn)[0]
         self.assertGreater(touched.last_touched_at, opened.last_touched_at)
 
     def test_clip_range_anchor_not_conversation_rejected(self):
-        # 実会話でないアンカー (ツール実行ログ相当) は範囲写真にできない
+        # 実会話でないアンカー (ツール実行ログ相当) は範囲クリップにできない
         from sai_memory.memory.storage import add_message
 
         mid = add_message(
             self.adapter.conn, "main", "user", "spellの結果ログ",
             metadata={"tags": ["spell"]},
         )
-        result = atlas.clip_photo(self.adapter, mid)
+        result = atlas.make_clip(self.adapter, mid)
         self.assertIn("実会話ではありません", result)
 
 
@@ -708,21 +708,21 @@ class DeletePageTests(_AtlasTestBase):
         from sai_memory.core_memory import add_core_memory, list_deleted_core_memories
 
         mid = add_core_memory(self.adapter.conn, "消される恒常知識")
-        result = atlas.delete_page(self.adapter, f"c:{mid}")
+        result = atlas.delete_page(self.adapter, f"core:{mid}")
 
         self.assertIn("ごみ箱", result)
         # soft-delete: read は「見つかりません」だが行はごみ箱に残る
-        self.assertIn("見つかりません", atlas.read_page(self.adapter, f"c:{mid}"))
+        self.assertIn("見つかりません", atlas.read_page(self.adapter, f"core:{mid}"))
         trash = list_deleted_core_memories(self.adapter.conn)
         self.assertEqual([cm.id for cm in trash], [mid])
 
     def test_delete_core_memory_not_found(self):
-        result = atlas.delete_page(self.adapter, "c:999")
+        result = atlas.delete_page(self.adapter, "core:999")
         self.assertIn("見つかりません", result)
 
     def test_delete_memopedia_page_soft_deletes(self):
         page = self._make_memopedia_page(title="消される本", content="消える中身")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         result = atlas.delete_page(self.adapter, ref)
 
         self.assertIn("ごみ箱", result)
@@ -738,7 +738,7 @@ class DeletePageTests(_AtlasTestBase):
         from sai_memory.desk import list_open
 
         page = self._make_memopedia_page(title="机の上で消える本")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.open_page(self.adapter, ref)
 
         result = atlas.delete_page(self.adapter, ref)
@@ -747,23 +747,23 @@ class DeletePageTests(_AtlasTestBase):
 
     def test_delete_memopedia_not_on_desk_omits_desk_note(self):
         page = self._make_memopedia_page(title="棚のまま消える本")
-        result = atlas.delete_page(self.adapter, f"m:{page.short_id}")
+        result = atlas.delete_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertNotIn("机からも", result)
 
     def test_delete_already_deleted_page_reports_not_found(self):
         page = self._make_memopedia_page(title="二度消される本")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.delete_page(self.adapter, ref)
         result = atlas.delete_page(self.adapter, ref)
         self.assertIn("見つかりません", result)
 
     def test_delete_rejects_chronicle(self):
         entry = self._make_chronicle_entry()
-        result = atlas.delete_page(self.adapter, f"ch:{entry.short_id}")
+        result = atlas.delete_page(self.adapter, f"chronicle:{entry.short_id}")
         self.assertIn("消せません", result)
 
-    def test_delete_rejects_photo(self):
-        result = atlas.delete_page(self.adapter, "p:1")
+    def test_delete_rejects_clip(self):
+        result = atlas.delete_page(self.adapter, "clip:1")
         self.assertIn("消せません", result)
         self.assertIn("歴史", result)
 
@@ -783,7 +783,7 @@ class ClipTranscribeTests(_AtlasTestBase):
         # 旧 core_memory_add_scene にあった budget 超過通知を範囲転写でも出す
         # (P2c-4a: memory_write(core) にはあったが clip transcribe(core) に無かった)。
         ids = self._add_conversation([f"発言{i}" for i in range(1, 6)])
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, ids[2], paste_to="core", mode="transcribe",
             core_budget=10,
         )
@@ -791,7 +791,7 @@ class ClipTranscribeTests(_AtlasTestBase):
 
     def test_transcribe_point_to_core_shows_budget_note_when_exceeded(self):
         ids = self._add_conversation(["刻みたい一言があった", "そうですね"])
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, ids[0], quote="刻みたい一言",
             paste_to="core", mode="transcribe", core_budget=5,
         )
@@ -802,11 +802,11 @@ class ClipTranscribeTests(_AtlasTestBase):
         # (create_scene_core_memory)。transcript が完全一致すること
         from sai_memory.core_memory import format_scene_transcript, list_core_memories
         from sai_memory.memory.storage import get_conversation_window_around
-        from sai_memory.photos import list_photos_pasted_to
+        from sai_memory.clips import list_clips_pasted_to
 
         ids = self._add_conversation([f"発言{i}" for i in range(1, 6)])
         anchor = ids[2]
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, anchor, paste_to="core", mode="transcribe",
         )
 
@@ -819,40 +819,40 @@ class ClipTranscribeTests(_AtlasTestBase):
             "tester",
         )
         self.assertEqual(items[0].content, expected)
-        # 転写でも写真 (由来参照) は撮られる
-        photos = list_photos_pasted_to(self.adapter.conn, f"c:{items[0].id}")
-        self.assertEqual(len(photos), 1)
-        self.assertTrue(photos[0].is_range)
-        self.assertIn(photos[0].ref, result)
+        # 転写でもクリップ (由来参照) は撮られる
+        clips = list_clips_pasted_to(self.adapter.conn, f"core:{items[0].id}")
+        self.assertEqual(len(clips), 1)
+        self.assertTrue(clips[0].is_range)
+        self.assertIn(clips[0].ref, result)
 
     def test_transcribe_point_to_core_creates_core_memory(self):
         from sai_memory.core_memory import list_core_memories
-        from sai_memory.photos import list_photos
+        from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["刻みたい一言があった", "そうですね"])
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, ids[0], quote="刻みたい一言",
             paste_to="core", mode="transcribe",
         )
         self.assertIn("転写しました", result)
         items = list_core_memories(self.adapter.conn)
         self.assertEqual([cm.content for cm in items], ["刻みたい一言"])
-        photos = list_photos(self.adapter.conn)
-        self.assertEqual(photos[0].pasted_to, f"c:{items[0].id}")
-        self.assertFalse(photos[0].is_range)
+        clips = list_clips(self.adapter.conn)
+        self.assertEqual(clips[0].pasted_to, f"core:{items[0].id}")
+        self.assertFalse(clips[0].is_range)
 
     def test_transcribe_range_to_memopedia_burns_transcript(self):
         from sai_memory.core_memory import format_scene_transcript
         from sai_memory.memopedia import Memopedia
         from sai_memory.memory.storage import get_conversation_window_around
-        from sai_memory.photos import list_photos_pasted_to
+        from sai_memory.clips import list_clips_pasted_to
 
         page = self._make_memopedia_page(title="転写先", content="既存の本文")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         ids = self._add_conversation([f"会話{i}" for i in range(1, 6)])
         anchor = ids[2]
 
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, anchor, paste_to=ref, mode="transcribe",
         )
         self.assertIn("転写しました", result)
@@ -868,46 +868,46 @@ class ClipTranscribeTests(_AtlasTestBase):
         # 編集来歴が残る append 経路
         history = memopedia.get_page_edit_history(page.id)
         self.assertIn("append", [h.edit_type for h in history])
-        # 写真 (由来参照) も撮られて貼られる
-        photos = list_photos_pasted_to(self.adapter.conn, ref)
-        self.assertEqual(len(photos), 1)
-        self.assertTrue(photos[0].is_range)
+        # クリップ (由来参照) も撮られて貼られる
+        clips = list_clips_pasted_to(self.adapter.conn, ref)
+        self.assertEqual(len(clips), 1)
+        self.assertTrue(clips[0].is_range)
 
     def test_transcribe_point_to_memopedia_burns_quote(self):
         from sai_memory.memopedia import Memopedia
-        from sai_memory.photos import list_photos_pasted_to
+        from sai_memory.clips import list_clips_pasted_to
 
         page = self._make_memopedia_page(title="引用の転写先", content="本文")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         ids = self._add_conversation(["残したい言葉が出た", "はい"])
 
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, ids[0], quote="残したい言葉",
             paste_to=ref, mode="transcribe",
         )
         self.assertIn("転写しました", result)
         memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
         self.assertIn("残したい言葉", memopedia.get_page(page.id).content)
-        photos = list_photos_pasted_to(self.adapter.conn, ref)
-        self.assertFalse(photos[0].is_range)
-        self.assertEqual(photos[0].quote, "残したい言葉")
+        clips = list_clips_pasted_to(self.adapter.conn, ref)
+        self.assertFalse(clips[0].is_range)
+        self.assertEqual(clips[0].quote, "残したい言葉")
 
     def test_transcribe_point_quote_mismatch_rejected(self):
         from sai_memory.core_memory import list_core_memories
-        from sai_memory.photos import list_photos
+        from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["本文はこれだけ", "はい"])
-        result = atlas.clip_photo(
+        result = atlas.make_clip(
             self.adapter, ids[0], quote="本文に無い言葉",
             paste_to="core", mode="transcribe",
         )
         self.assertIn("見つかりませんでした", result)
         self.assertEqual(list_core_memories(self.adapter.conn), [])
-        self.assertEqual(list_photos(self.adapter.conn), [])
+        self.assertEqual(list_clips(self.adapter.conn), [])
 
     def test_transcribe_requires_paste_to(self):
         ids = self._add_conversation(["何か", "はい"])
-        result = atlas.clip_photo(self.adapter, ids[0], mode="transcribe")
+        result = atlas.make_clip(self.adapter, ids[0], mode="transcribe")
         self.assertIn("Error", result)
         self.assertIn("paste_to", result)
 
@@ -916,15 +916,15 @@ class ClipTranscribeTests(_AtlasTestBase):
 
         mid = add_core_memory(self.adapter.conn, "既存のコア記憶")
         ids = self._add_conversation(["何か", "はい"])
-        result = atlas.clip_photo(
-            self.adapter, ids[0], paste_to=f"c:{mid}", mode="transcribe",
+        result = atlas.make_clip(
+            self.adapter, ids[0], paste_to=f"core:{mid}", mode="transcribe",
         )
         self.assertIn("できません", result)
         self.assertIn("core", result)  # 新規に刻む "core" への誘導
 
     def test_invalid_mode_rejected(self):
         ids = self._add_conversation(["何か", "はい"])
-        result = atlas.clip_photo(self.adapter, ids[0], mode="burn")
+        result = atlas.make_clip(self.adapter, ids[0], mode="burn")
         self.assertIn("Error", result)
 
     def test_attach_default_does_not_burn_content(self):
@@ -933,7 +933,7 @@ class ClipTranscribeTests(_AtlasTestBase):
 
         page = self._make_memopedia_page(title="参照貼り先", content="元の本文")
         ids = self._add_conversation([f"会話{i}" for i in range(1, 6)])
-        atlas.clip_photo(self.adapter, ids[2], paste_to=f"m:{page.short_id}")
+        atlas.make_clip(self.adapter, ids[2], paste_to=f"memopedia:{page.short_id}")
 
         memopedia = Memopedia(self.adapter.conn, db_lock=self.adapter._db_lock)
         self.assertEqual(memopedia.get_page(page.id).content, "元の本文")
@@ -974,7 +974,7 @@ class WriteCreatePageTests(_AtlasTestBase):
             self.adapter, content="本文", title="既にある本",
         )
         self.assertIn("既にあります", result)
-        self.assertIn(f"m:{page.short_id}", result)  # 追記への誘導
+        self.assertIn(f"memopedia:{page.short_id}", result)  # 追記への誘導
 
     def test_title_invalid_category_rejected(self):
         result = atlas.write_page(
@@ -985,7 +985,7 @@ class WriteCreatePageTests(_AtlasTestBase):
     def test_ref_and_title_are_mutually_exclusive(self):
         page = self._make_memopedia_page()
         both = atlas.write_page(
-            self.adapter, f"m:{page.short_id}", "本文", title="両方指定",
+            self.adapter, f"memopedia:{page.short_id}", "本文", title="両方指定",
         )
         neither = atlas.write_page(self.adapter, content="本文だけ")
         self.assertIn("Error", both)
@@ -1048,18 +1048,18 @@ class TaskReadTests(_AtlasTestBase):
         self.assertIn("下調べ", result)
         self.assertIn("清書", result)
 
-    def test_read_task_shows_pasted_photos(self):
-        from sai_memory.photos import add_photo
+    def test_read_task_shows_pasted_clips(self):
+        from sai_memory.clips import add_clip
 
         task = self._make_task()
-        add_photo(
+        add_clip(
             self.adapter.conn, message_id="m1", quote="きっかけの一言",
             pasted_to=task["task_ref"],
         )
         result = atlas.read_page(
             self.adapter, task["task_ref"], manager=self.manager,
         )
-        self.assertIn("[写真", result)
+        self.assertIn("[クリップ", result)
         self.assertIn("きっかけの一言", result)
 
     def test_read_task_not_found(self):
@@ -1082,7 +1082,7 @@ class TaskDeskTests(TaskReadTests):
         self.assertIn(ref, self._desk_refs())
 
     def test_open_task_returns_content_inline(self):
-        # 開く＝読む行為を兼ねる (m:N と同じ)。task の整形は _read_task と共通
+        # 開く＝読む行為を兼ねる (memopedia:N と同じ)。task の整形は _read_task と共通
         task = self._make_task()
         result = atlas.open_page(self.adapter, task["task_ref"], manager=self.manager)
         self.assertIn(task["title"], result)
@@ -1158,7 +1158,7 @@ class SnapshotDeskTests(_AtlasTestBase):
 
     def test_snapshot_returns_desk_page_views(self):
         page = self._make_memopedia_page(title="開いた本", content="開いた中身")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.open_page(self.adapter, ref, purpose_ref="task:2")
 
         pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
@@ -1177,14 +1177,14 @@ class SnapshotDeskTests(_AtlasTestBase):
         clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
         first = self._make_memopedia_page(title="先")
         second = self._make_memopedia_page(title="後")
-        atlas.open_page(self.adapter, f"m:{first.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{first.short_id}")
         clock.advance_to(datetime(2026, 7, 6, 9, 20, 0))
-        atlas.open_page(self.adapter, f"m:{second.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{second.short_id}")
 
         pages, _, _ = atlas.snapshot_desk(self.adapter)
         self.assertEqual(
             [p.ref for p in pages],
-            [f"m:{first.short_id}", f"m:{second.short_id}"],
+            [f"memopedia:{first.short_id}", f"memopedia:{second.short_id}"],
         )
 
     def test_snapshot_does_not_touch(self):
@@ -1194,7 +1194,7 @@ class SnapshotDeskTests(_AtlasTestBase):
 
         clock.enable_virtual(datetime(2026, 7, 6, 9, 0, 0))
         page = self._make_memopedia_page()
-        atlas.open_page(self.adapter, f"m:{page.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
         before = list_open(self.adapter.conn)[0]
 
         clock.advance_to(datetime(2026, 7, 6, 10, 0, 0))
@@ -1211,27 +1211,27 @@ class SnapshotDeskTests(_AtlasTestBase):
         os.environ["SAIVERSE_DESK_BUDGET_CHARS"] = "10000"  # 開く時は余裕
         old_page = self._make_memopedia_page(title="古", content="あ" * 50)
         new_page = self._make_memopedia_page(title="新", content="い" * 50)
-        atlas.open_page(self.adapter, f"m:{old_page.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{old_page.short_id}")
         clock.advance_to(datetime(2026, 7, 6, 9, 10, 0))
-        atlas.open_page(self.adapter, f"m:{new_page.short_id}")
+        atlas.open_page(self.adapter, f"memopedia:{new_page.short_id}")
 
         os.environ["SAIVERSE_DESK_BUDGET_CHARS"] = "60"  # 節目には溢れている
         pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
 
-        self.assertEqual(evicted, [f"m:{old_page.short_id}"])  # LRU 最古から
+        self.assertEqual(evicted, [f"memopedia:{old_page.short_id}"])  # LRU 最古から
         self.assertEqual(dropped, [])  # 溢れは dropped に混ざらない
-        self.assertEqual([p.ref for p in pages], [f"m:{new_page.short_id}"])
+        self.assertEqual([p.ref for p in pages], [f"memopedia:{new_page.short_id}"])
 
     def test_snapshot_drops_lost_entity_refs(self):
         # 実体が消えたページ (不正 ref を直接挿入して再現) → dropped に入る
         from sai_memory.desk import list_open, open_item
 
-        open_item(self.adapter.conn, "m:999")  # 存在しないページ
+        open_item(self.adapter.conn, "memopedia:999")  # 存在しないページ
         pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
 
         self.assertEqual(pages, [])
         self.assertEqual(evicted, [])  # 実体消失は evicted に混ざらない
-        self.assertIn("m:999", dropped)
+        self.assertIn("memopedia:999", dropped)
         self.assertEqual(list_open(self.adapter.conn), [])  # 机からも下りている
 
     def test_snapshot_drops_unparseable_refs_defensively(self):
@@ -1249,13 +1249,13 @@ class SnapshotDeskTests(_AtlasTestBase):
         from sai_memory.desk import open_item
 
         page = self._make_memopedia_page(title="生存")
-        atlas.open_page(self.adapter, f"m:{page.short_id}")
-        open_item(self.adapter.conn, "m:999")
+        atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
+        open_item(self.adapter.conn, "memopedia:999")
 
         pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
-        self.assertEqual([p.ref for p in pages], [f"m:{page.short_id}"])
+        self.assertEqual([p.ref for p in pages], [f"memopedia:{page.short_id}"])
         self.assertEqual(evicted, [])
-        self.assertEqual(dropped, ["m:999"])
+        self.assertEqual(dropped, ["memopedia:999"])
 
     def test_snapshot_empty_desk(self):
         pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
@@ -1283,7 +1283,7 @@ class SoftDeletedPageDeskTests(_AtlasTestBase):
         page = self._make_memopedia_page(title="消される本")
         self._delete_page(page)
 
-        result = atlas.open_page(self.adapter, f"m:{page.short_id}")
+        result = atlas.open_page(self.adapter, f"memopedia:{page.short_id}")
         self.assertIn("見つかりません", result)
         self.assertEqual(list_open(self.adapter.conn), [])
 
@@ -1293,7 +1293,7 @@ class SoftDeletedPageDeskTests(_AtlasTestBase):
         from sai_memory.desk import list_open
 
         page = self._make_memopedia_page(title="開いてから消える本", content="消える中身")
-        ref = f"m:{page.short_id}"
+        ref = f"memopedia:{page.short_id}"
         atlas.open_page(self.adapter, ref)
         self._delete_page(page)
 
@@ -1397,7 +1397,7 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
     P3a の CoreMemoryLegacyMigrationTest (tests/test_core_memory_storage.py)
     と同型: Lv1/Lv2 の親子・incomplete・Track Chronicle・short_id 付き/無し
     の行を含む legacy テーブルを仕込み、init_arasuji_tables 後にページ化・
-    親子逆写像・ch:N 解決・旧テーブル DROP・冪等性を検証する。
+    親子逆写像・chronicle:N 解決・旧テーブル DROP・冪等性を検証する。
     """
 
     def setUp(self):
@@ -1508,7 +1508,7 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
         self.assertEqual(trk.origin_track_id, "track-1")
         self.assertTrue(trk.is_incomplete)
 
-        # ch:N (short_id) 解決で lv1-a を引ける。
+        # chronicle:N (short_id) 解決で lv1-a を引ける。
         by_short = get_entry_by_short_id(self.conn, entry_a.short_id)
         self.assertEqual(by_short.id, "lv1-a")
 
@@ -1529,6 +1529,56 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
         )
         existing_short_ids = {e.short_id for e in get_entries_by_level(self.conn, 1)}
         self.assertNotIn(new_entry.short_id, existing_short_ids - {new_entry.short_id})
+
+
+class RefGrammarAcceptanceTests(_AtlasTestBase):
+    """A1「入口は広く、出口は一本」の恒久検査 (2026-07-15)。
+
+    発端: 自動想起が流す ``saiverse://self/memopedia/45`` を統一グラマーの不変条件
+    I2 に従って ``memopedia:45`` へ正しく変換したペルソナを、Atlas が自前パースで
+    蹴っていた。Atlas が書式を自前で持つ限り同じ乖離がまた生えるため、「旧 prefix も
+    正典単語も URI も同じページに着く」ことをここで固定する。
+    """
+
+    def _page(self):
+        return self._make_memopedia_page()
+
+    def test_all_notations_reach_the_same_page(self):
+        page = self._page()
+        sid = page.short_id
+        canonical = atlas.read_page(self.adapter, f"memopedia:{sid}")
+        for notation in (
+            f"m:{sid}",                              # 旧 prefix (ペルソナの記憶に焼き付いている)
+            f"saiverse://self/memopedia/{sid}",      # URI (自動想起が最も多く流す形)
+            f"  memopedia:{sid}  ",                  # 前後空白
+        ):
+            with self.subTest(notation=notation):
+                self.assertEqual(atlas.read_page(self.adapter, notation), canonical)
+
+    def test_output_uses_canonical_word_only(self):
+        # 旧 prefix で入力しても、返る文字列は正典単語に揃う (出口は一本)
+        page = self._page()
+        result = atlas.read_page(self.adapter, f"m:{page.short_id}")
+        self.assertIn(f"memopedia:{page.short_id}", result)
+        self.assertNotIn(f"m:{page.short_id}", result)
+
+    def test_other_persona_uri_is_refused_not_misread(self):
+        # 他ペルソナの URI を自分の番号として読んでしまう取り違えを防ぐ
+        page = self._page()
+        with self.assertRaises(atlas.AtlasRefError):
+            atlas._parse_ref(f"saiverse://city_a/someone/memopedia/{page.short_id}")
+
+    def test_unknown_notation_error_teaches_the_format(self):
+        # 蹴るときは書式を教える (発端の事故では例示が無く、ペルソナは直せなかった)
+        with self.assertRaises(atlas.AtlasRefError) as ctx:
+            atlas._parse_ref("memopedeia:45")
+        self.assertIn("memopedia:", str(ctx.exception))
+
+    def test_valid_grammar_but_not_an_atlas_page_is_refused(self):
+        # track:2 は文法としては正しいが地図帳のページではない
+        with self.assertRaises(atlas.AtlasRefError) as ctx:
+            atlas._parse_ref("track:2")
+        self.assertIn("track", str(ctx.exception))
 
 
 if __name__ == "__main__":

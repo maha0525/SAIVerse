@@ -8,7 +8,7 @@ P4-c (concept_consolidation.md「P4-c: vividness 除去＋vivid→机移行」) 
 その意図を desk に継承する。P4-c 除去後、vividness カラムは読み書きが止まる
 （死置き）ため、この移行を逃すと二度と回収できない。
 
-流儀は marks→photos / P3a / P3c と同じ adapter init の一回きり冪等 migration:
+流儀は marks→clips / P3a / P3c と同じ adapter init の一回きり冪等 migration:
 - desk_items に既に該当 ref があれば触らない（冪等）
 - trunk / 削除済み / category='core' は対象外
 - 予算超過は移行では気にしない（次の Metabolism の LRU に委ねる）
@@ -74,7 +74,7 @@ def migrate_vivid_pages_to_desk(conn: sqlite3.Connection) -> int:
             # 印を残して次回 init で再試行する
             LOGGER.debug("vivid_to_desk: page %s has no short_id, skip", page_id)
             continue
-        ref = f"m:{short_id}"
+        ref = f"memopedia:{short_id}"
         migrated_ids.append(page_id)
 
         # 既に机に開いていれば挿入不要 (意図は既に満たされている)

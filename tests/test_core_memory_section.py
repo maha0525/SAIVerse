@@ -69,8 +69,8 @@ class CoreMemorySectionTest(unittest.TestCase):
         rendered = CoreMemorySection().render(snap)
         self.assertIsNotNone(rendered)
         self.assertIn("## コア記憶", rendered.text)
-        self.assertIn("- [c:1] まはーの誕生日は1月14日", rendered.text)
-        self.assertIn("- [c:2] 私は「エア」という名前", rendered.text)
+        self.assertIn("- [core:1] まはーの誕生日は1月14日", rendered.text)
+        self.assertIn("- [core:2] 私は「エア」という名前", rendered.text)
 
     def test_diff_never_notifies(self):
         old = CoreMemorySnapshot(items=())

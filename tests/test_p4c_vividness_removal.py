@@ -47,7 +47,7 @@ class VividToDeskMigrationTest(unittest.TestCase):
         count = migrate_vivid_pages_to_desk(conn)
         self.assertEqual(count, 1)
         refs = self._get_desk_refs(conn)
-        self.assertIn(f"m:{row[0]}", refs)
+        self.assertIn(f"memopedia:{row[0]}", refs)
 
     def test_idempotent(self):
         """2 回実行しても 2 回目は 0 件追加 (冪等)。"""
@@ -81,7 +81,7 @@ class VividToDeskMigrationTest(unittest.TestCase):
         row = conn.execute(
             "SELECT short_id FROM memopedia_pages WHERE id=?", (page.id,)
         ).fetchone()
-        ref = f"m:{row[0]}"
+        ref = f"memopedia:{row[0]}"
 
         self.assertEqual(migrate_vivid_pages_to_desk(conn), 1)
         # 本人が机から閉じる
@@ -139,7 +139,7 @@ class VividToDeskMigrationTest(unittest.TestCase):
         row = conn.execute(
             "SELECT short_id FROM memopedia_pages WHERE id=?", (page.id,)
         ).fetchone()
-        ref = f"m:{row[0]}"
+        ref = f"memopedia:{row[0]}"
 
         # 先に desk に追加しておく
         now = 1000000
@@ -172,7 +172,7 @@ class VividToDeskMigrationTest(unittest.TestCase):
 
 
 class WeaveContextBuriedRenderTest(unittest.TestCase):
-    """P4-c: buried ページが記憶目次に表示されるか検証。
+    """P4-core: buried ページが記憶目次に表示されるか検証。
 
     以前は buried は skip されていたが、P4-c 以降は全ページを平等に描画する。
 
@@ -207,7 +207,7 @@ class WeaveContextBuriedRenderTest(unittest.TestCase):
         self.mem_conn.commit()
 
     def test_buried_page_is_rendered_in_toc(self):
-        """P4-c: buried ページが目次に表示されること（以前は skip されていた）。"""
+        """P4-core: buried ページが目次に表示されること（以前は skip されていた）。"""
         from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 
         class FakeSAIMem:

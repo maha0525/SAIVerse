@@ -10,7 +10,7 @@
 
 main DB 在住のペルソナ帰属データ（2026-07-11 時点の主なもの）:
 
-- **目的の木**: `persona_task` / `persona_task_step` / `persona_task_history`（P3c X 案裁定により物理格納は main DB のまま。task:N 参照・ファサード・写真・机は memory.db 側の機構と ref 文字列で接続）
+- **目的の木**: `persona_task` / `persona_task_step` / `persona_task_history`（P3c X 案裁定により物理格納は main DB のまま。task:N 参照・ファサード・クリップ・机は memory.db 側の機構と ref 文字列で接続）
 - **Note 系**: `note` / `note_page` / `note_message` / `track_open_note`（P3c で Note→テーマノードページ移行後は縮小見込み）
 - **Track**: `action_track`
 - **出来事**: `episode`

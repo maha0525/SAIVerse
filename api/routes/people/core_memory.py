@@ -363,7 +363,7 @@ class CreateSceneRequest(BaseModel):
 
 class CreateSceneResponse(BaseModel):
     memory_id: int
-    ref: str          # "c:N"
+    ref: str          # "core:N"
     message_count: int
     char_count: int   # この切り抜き単体の文字数
     total_chars: int  # 追加後のコア記憶合計文字数
@@ -417,7 +417,7 @@ def create_scene(
     budget = _resolve_budget(manager, persona_id)
     return CreateSceneResponse(
         memory_id=result.memory_id,
-        ref=f"c:{result.memory_id}",
+        ref=f"core:{result.memory_id}",
         message_count=result.message_count,
         char_count=result.char_count,
         total_chars=result.total_chars,
@@ -434,7 +434,7 @@ def create_scene(
 
 class CoreMemoryListItem(BaseModel):
     id: int
-    ref: str          # "c:N"
+    ref: str          # "core:N"
     kind: str         # "note" | "scene"
     preview: str      # 内容の先頭 80 字 (既存 UI 互換のため残置)
     content: str      # 全文 (UI の展開表示用)
@@ -597,7 +597,7 @@ def confirm_core_memory_item(
             if not ok:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"c:{memory_id} が見つからないか、既に削除されています。",
+                    detail=f"core:{memory_id} が見つからないか、既に削除されています。",
                 )
             return _mutation_response(adapter, manager, persona_id)
 
@@ -627,15 +627,15 @@ def update_core_memory_item(
             if not ok:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"c:{memory_id} が見つかりません。",
+                    detail=f"core:{memory_id} が見つかりません。",
                 )
             resp = _mutation_response(adapter, manager, persona_id)
         # 仮想センサー: 内容が書き換わった事実をペルソナへ通知 (ロック外)。
         _notify_persona_correction(
             adapter,
-            f"ユーザーがあなたのコア記憶 c:{memory_id} の内容を書き換えました。\n"
+            f"ユーザーがあなたのコア記憶 core:{memory_id} の内容を書き換えました。\n"
             f"新しい内容:\n{content}",
-            reduce_key=f"c:{memory_id}",
+            reduce_key=f"core:{memory_id}",
         )
         return resp
 
@@ -665,16 +665,16 @@ def delete_core_memory_item(
             if not ok:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"c:{memory_id} が見つからないか、既に削除されています。",
+                    detail=f"core:{memory_id} が見つからないか、既に削除されています。",
                 )
             resp = _mutation_response(adapter, manager, persona_id)
         removed = item.content if item else ""
         # 仮想センサー: 削除された事実と内容をペルソナへ通知 (ロック外)。
         _notify_persona_correction(
             adapter,
-            f"ユーザーがあなたのコア記憶 c:{memory_id} を削除しました（ごみ箱へ移動。復元可能）。\n"
+            f"ユーザーがあなたのコア記憶 core:{memory_id} を削除しました（ごみ箱へ移動。復元可能）。\n"
             f"削除された内容:\n{removed}",
-            reduce_key=f"c:{memory_id}",
+            reduce_key=f"core:{memory_id}",
         )
         return resp
 
@@ -702,7 +702,7 @@ def restore_core_memory_item(
             if not ok:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"c:{memory_id} はごみ箱にありません。",
+                    detail=f"core:{memory_id} はごみ箱にありません。",
                 )
             item = get_core_memory(adapter.conn, memory_id)
             resp = _mutation_response(adapter, manager, persona_id)
@@ -710,8 +710,8 @@ def restore_core_memory_item(
         # 仮想センサー: 復元された事実をペルソナへ通知 (ロック外)。
         _notify_persona_correction(
             adapter,
-            f"ユーザーがあなたのコア記憶 c:{memory_id} をごみ箱から復元しました。\n"
+            f"ユーザーがあなたのコア記憶 core:{memory_id} をごみ箱から復元しました。\n"
             f"内容:\n{restored}",
-            reduce_key=f"c:{memory_id}",
+            reduce_key=f"core:{memory_id}",
         )
         return resp

@@ -12,9 +12,9 @@ concept_consolidation.md「開閉制御 — 机の物理」の実装。Memory At
 - **touch の定義は決定論**: そのページを対象にした read / write / clip /
   参照が触った扱い (呼び出し側が ``touch_item`` を呼ぶ)。
 - **コア記憶は机の予算外**のシステム常設ピン — 本ストアの対象外 (Atlas
-  ファサード側が core / c:N を desk に一切触れさせない)。
+  ファサード側が core / core:N を desk に一切触れさせない)。
 
-保存先は memory.db 相乗り (Memopedia / Chronicle / 写真と同じ conn)。
+保存先は memory.db 相乗り (Memopedia / Chronicle / クリップと同じ conn)。
 ``ref`` は Memory Atlas の参照書式 (``m:N`` / ``ch:N`` 等) をそのまま主キーに
 使う。時刻は必ず ``saiverse.clock.now()`` 経由で刻む (仮想クロック尊重、
 autonomous_behavior_v2.md §12)。
@@ -63,6 +63,47 @@ def resolve_desk_budget_chars() -> int:
     return DEFAULT_DESK_BUDGET_CHARS
 
 
+def _backfill_canonical_refs(conn: sqlite3.Connection) -> int:
+    """旧 prefix の ref を正典形へ寄せる (冪等)。2026-07-15 の統一グラマー吸収の移行。
+
+    机の ``ref`` は主キーで、開く側は正規形 (``memopedia:2``) を渡すようになった。
+    旧表記 (``m:2``) の行を残すと**同じページが二枚の紙として机に並ぶ**ため、
+    ここで揃える。
+
+    正規化先が既に在る場合 (同じページを新旧表記で開いていた) は、古い行を捨てて
+    新しい行に寄せる — ただし机の意味論を守り、``opened_at`` は早い方 (いつから
+    開いているか)、``last_touched_at`` は遅い方 (最後に触ったのはいつか) を残す。
+
+    Returns: 書き換えた行数。
+    """
+    from saiverse import references
+
+    rows = conn.execute("SELECT ref, opened_at, last_touched_at FROM desk_items").fetchall()
+    changed = 0
+    for ref, opened_at, touched_at in rows:
+        canonical = references.normalize_short_ref(ref)
+        if canonical == ref:
+            continue
+        existing = conn.execute(
+            "SELECT opened_at, last_touched_at FROM desk_items WHERE ref = ?", (canonical,)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "UPDATE desk_items SET ref = ? WHERE ref = ?", (canonical, ref)
+            )
+        else:
+            conn.execute(
+                "UPDATE desk_items SET opened_at = ?, last_touched_at = ? WHERE ref = ?",
+                (min(opened_at, existing[0]), max(touched_at, existing[1]), canonical),
+            )
+            conn.execute("DELETE FROM desk_items WHERE ref = ?", (ref,))
+        changed += 1
+    if changed:
+        conn.commit()
+        LOGGER.info("desk: normalized %d legacy ref(s) to canonical form", changed)
+    return changed
+
+
 def init_desk_tables(conn: sqlite3.Connection) -> None:
     """desk_items テーブルを初期化する (冪等)。"""
     conn.execute(
@@ -79,6 +120,7 @@ def init_desk_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_desk_items_touched ON desk_items(last_touched_at)"
     )
     conn.commit()
+    _backfill_canonical_refs(conn)
 
 
 _DESK_COLS = "ref, opened_at, last_touched_at, purpose_ref"

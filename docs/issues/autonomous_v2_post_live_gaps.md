@@ -364,7 +364,7 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 ## 概念再編（⑥）の残件との合流 — 棚卸し結果（2026-07-12）
 
 **⑥ umbrella の現況**: [concept_consolidation.md](../intent/concept_consolidation.md) は P4 まで
-実装完了・**まはー実機検証待ち**。Memory Atlas（土地＝生ログ / 地図帳＝編纂物 / 写真＝統一参照）
+実装完了・**まはー実機検証待ち**。Memory Atlas（土地＝生ログ / 地図帳＝編纂物 / クリップ＝統一参照）
 ＋目的の木（`persona_task`）＋Note→テーマノード移行は landed。**⑥ 本体の「残件」は実機検証で
 あって新規設計ではない**——A/B は⑥の *次* であって蒸し返しではない。
 

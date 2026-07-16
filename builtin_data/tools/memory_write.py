@@ -54,12 +54,12 @@ def schema() -> ToolSchema:
         name="memory_write",
         description=(
             "記憶の地図帳（Memory Atlas）のページに書きます。"
-            "宛先 m:N は Memopedia ページ本文への追記（編集来歴が残ります）。"
+            "宛先 memopedia:N は Memopedia ページ本文への追記（編集来歴が残ります）。"
             "宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで、"
-            "system プロンプトに常駐し続けます。宛先 c:N は既存コア記憶の上書きです。"
+            "system プロンプトに常駐し続けます。宛先 core:N は既存コア記憶の上書きです。"
             "ref の代わりに title（と category）を指定すると、Memopedia に新しい"
             "ページを作ります。ref と title はどちらか一方だけ指定してください。"
-            "Chronicle（ch:N）には書けません（時間の地図の編纂はシステムが行います）。"
+            "Chronicle（chronicle:N）には書けません（時間の地図の編纂はシステムが行います）。"
         ),
         parameters={
             "type": "object",

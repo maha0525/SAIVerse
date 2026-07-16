@@ -90,7 +90,7 @@ _TOOL_PHRASES: Dict[str, Tuple[str, str, List[str]]] = {
     "memory_close": ("記憶のページ（{arg}）を机から閉じた", "記憶のページを机から閉じた", ["ref"]),
     "memory_search": ("「{arg}」について地図帳を調べた", "地図帳を調べた", ["query"]),
     "memory_write": ("記憶のページ（{arg}）に書いた", "記憶のページに書いた", ["title", "ref"]),
-    "memory_clip": ("会話の一場面を写真に撮った", "会話の一場面を写真に撮った", []),
+    "memory_clip": ("会話の一場面を切り出した", "会話の一場面を切り出した", []),
     "memory_delete": ("記憶のページ（{arg}）をごみ箱に移した", "記憶のページをごみ箱に移した", ["ref"]),
     # 目的の地図 (purpose_*) 統一スペル
     "purpose_seed": ("「{arg}」をやりたいことに書き留めた", "やりたいことを書き留めた", ["title"]),

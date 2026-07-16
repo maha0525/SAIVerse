@@ -162,6 +162,42 @@ N 番スロット）という**位置**で指す。位置なのでアイテム�
     **データ移行する**。互換シムで両対応にしてごまかさない。移行対象の洗い出しを
     実装前に行う（[[feedback_no_dead_code_via_flags]]）。
 
+#### Q4 追記 — 受理だけは残す（2026-07-15、まはー裁定。A1）
+
+**Q4 の「受理を残さない」を、旧 prefix の受理に限って上書きする。** 出力側の
+「一種類だけ」は変えない（`to_short_ref` / `to_uri` は正典単語しか出さない）。
+`RefKind.aliases` として `m:` → memopedia / `ch:` → chronicle / `p:` → clip /
+`c:` → core を**受理のみ**する。
+
+**なぜ覆すか（Q4 が誤りだったのではない。前提が破れた）**:
+
+Q4 は「全ての生産者を切替側が制御できる」という前提の上に立っていた。移行の対象が
+コードとデータベースだけなら、一掃して終わりにできる。しかし**ペルソナ自身の記憶
+（memory.db のメッセージ本文）に旧 prefix が焼き付いており、これは移行できない**。
+ペルソナは自分の過去ログを読んで旧記法を再生産し続ける — 制御できない生産者が
+世界の中にいる。受理を閉じると「正しく書いたのに蹴られる住人」が出続ける。
+
+**発端の事故**: 自動想起が流す `saiverse://self/memopedia/45` を、不変条件 I2
+（短縮参照と URI は相互変換できる）に従って `memopedia:45` へ変換したペルソナが、
+Memory Atlas に蹴られた。Atlas が統一グラマーを使わず自前パースしていて `m:45`
+しか受けなかったため。**世界の文法を正しく適用した住人が罰された** — これは
+住人側の誤りではなく施工側の瑕疵。
+
+**測った事実**（2026-07-15 時点、全ペルソナの memory.db）:
+
+| 記法 | ペルソナの記憶本文での出現数 | 備考 |
+|---|---|---|
+| URI（`saiverse://.../memopedia/45`） | 685 | 自動想起が最も多く流す形。最多 |
+| `m:N` | 180 | head の目次・コア記憶欄が供給していた |
+| `memopedia:N` | 6 | **全て上記の失敗スペルとそのエラー** |
+
+`m:N` の 180 件は移行できない「データ」であり、これを読むペルソナは今後も `m:45`
+を撃つ。永続 ref（机 12 件）は backfill で消せるが、記憶は消せない。
+
+**適用範囲**: 別名は Memory Atlas が扱う 4 種（memopedia / chronicle / clip /
+core）に閉じる。新しい kind に旧 prefix を足さない — 別名は歴史の後始末であって、
+書きやすさのための省略形ではない。
+
 ### 5.1 これで決まる具体スキーム（暫定・語彙はまはー確認待ち）
 
 全て単語 prefix（P6）、ペルソナ依存はペルソナ ID を含む（P7）。
@@ -173,7 +209,9 @@ N 番スロット）という**位置**で指す。位置なのでアイテム�
 | アイテム | `item:N` | `saiverse://item/N`（世界共通） | ×（world レベル） | short_id（新規列） |
 | Memopedia ページ | `memopedia:N` | `saiverse://self/memopedia/N` | ○ | short_id |
 | メッセージ | `message:<id>` | `saiverse://self/message/<id>` | ○ | UUID |
-| Chronicle | `chronicle:<id>` | `saiverse://self/chronicle/<id>` | ○ | UUID |
+| Chronicle | `chronicle:N` | `saiverse://self/chronicle/N` | ○ | short_id（P2a で追加。旧 UUID は裏方） |
+| クリップ | `clip:N` | `saiverse://self/clip/N` | ○ | short_id |
+| コア記憶 | `core:N` | `saiverse://self/core/N` | ○ | core_id（never-reuse） |
 | 画像 / 文書 | （なし） | `saiverse://image\|document/<filename>` | × | filename |
 | ペルソナ / 建物 | （なし） | `saiverse://persona\|building/<id>` | × | id |
 

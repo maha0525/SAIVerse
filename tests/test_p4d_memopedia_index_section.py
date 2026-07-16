@@ -185,7 +185,7 @@ class ImportantMarkerTest(unittest.TestCase):
             parent_id="root_terms", title="机の上のページ", summary="s", content="本文",
         )
         desk_mod.init_desk_tables(mem_conn)
-        desk_mod.open_item(mem_conn, f"m:{page.short_id}")
+        desk_mod.open_item(mem_conn, f"memopedia:{page.short_id}")
         mem_conn.commit()
 
         from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection

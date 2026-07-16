@@ -151,7 +151,7 @@ class TestDetectOversized:
         assert len(candidates) == 1
         c = candidates[0]
         assert c["kind"] == "split"
-        assert "m:1" in c["op_id"]
+        assert "memopedia:1" in c["op_id"]
         assert "[肥大]" in c["line"]
         assert "分割" in c["line"]
 
@@ -210,11 +210,11 @@ class TestDetectUndersized:
         fold_candidates = [c for c in candidates if c["kind"] == "fold"]
         assert len(fold_candidates) == 1
         c = fold_candidates[0]
-        assert "m:2" in c["op_id"]
+        assert "memopedia:2" in c["op_id"]
         assert "[過小]" in c["line"]
         assert "統合" in c["line"]
         # 実行契約 (run_pending_plans): refs[0]=survivor(親), refs[1]=absorbed(過小ページ)
-        assert c["refs"] == ["m:1", "m:2"], (
+        assert c["refs"] == ["memopedia:1", "memopedia:2"], (
             f"fold の refs は [親, 過小ページ] の 2 件が必要: {c['refs']}"
         )
 
@@ -276,11 +276,11 @@ class TestDetectSimilar:
         c = merge_candidates[0]
         assert "[類似]" in c["line"]
         assert "統合" in c["line"]
-        # 残す側 = 古い方 = m:1
-        assert "m:1" in c["refs"]
-        assert "m:2" in c["refs"]
+        # 残す側 = 古い方 = memopedia:1
+        assert "memopedia:1" in c["refs"]
+        assert "memopedia:2" in c["refs"]
         # op_id は古い方が先
-        assert c["op_id"].startswith("merge:m:1")
+        assert c["op_id"].startswith("merge:memopedia:1")
 
     def test_title_inclusion_produces_merge_candidate(self):
         conn = _make_conn()
@@ -458,10 +458,10 @@ class TestDayCloseSchema:
         manager = self._make_manager()
         candidates = [
             {
-                "op_id": "split:m:1",
+                "op_id": "split:memopedia:1",
                 "kind": "split",
-                "refs": ["m:1"],
-                "line": "[肥大] m:1「大きいページ」 5,100字 — 子ページへの分割を提案",
+                "refs": ["memopedia:1"],
+                "line": "[肥大] memopedia:1「大きいページ」 5,100字 — 子ページへの分割を提案",
             }
         ]
         schema = jp.build_day_close_schema(
@@ -474,7 +474,7 @@ class TestDayCloseSchema:
         cr = schema["properties"]["curation_reviews"]
         # op_id の enum に候補の op_id が含まれる
         item_props = cr["items"]["properties"]
-        assert "split:m:1" in item_props["op_id"]["enum"]
+        assert "split:memopedia:1" in item_props["op_id"]["enum"]
         assert set(item_props["verdict"]["enum"]) == {"approve", "skip"}
 
     def test_schema_has_no_curation_reviews_when_no_candidates(self):
@@ -546,15 +546,15 @@ class TestCurationReviewsFinalize:
     def test_approve_creates_pending_plan(self, mem_conn):
         candidates = [
             {
-                "op_id": "split:m:5",
+                "op_id": "split:memopedia:5",
                 "kind": "split",
-                "refs": ["m:5"],
-                "line": "[肥大] m:5「技術の記録」 5,100字 — 子ページへの分割を提案",
+                "refs": ["memopedia:5"],
+                "line": "[肥大] memopedia:5「技術の記録」 5,100字 — 子ページへの分割を提案",
             }
         ]
         output = {
             "curation_reviews": [
-                {"op_id": "split:m:5", "verdict": "approve"},
+                {"op_id": "split:memopedia:5", "verdict": "approve"},
             ]
         }
         applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
@@ -562,7 +562,7 @@ class TestCurationReviewsFinalize:
         assert warnings == []
         pending = list_pending(mem_conn)
         assert len(pending) == 1
-        assert pending[0]["op_id"] == "split:m:5"
+        assert pending[0]["op_id"] == "split:memopedia:5"
         assert pending[0]["kind"] == "split"
         # list_pending は WHERE status='pending' で絞り込み済みなので
         # status キーは返さない設計。存在を確認するには件数で十分。
@@ -570,15 +570,15 @@ class TestCurationReviewsFinalize:
     def test_skip_creates_no_plan(self, mem_conn):
         candidates = [
             {
-                "op_id": "fold:m:12",
+                "op_id": "fold:memopedia:12",
                 "kind": "fold",
-                "refs": ["m:12"],
-                "line": "[過小] m:12「金曜日のメモ」 60字 — 統合を提案",
+                "refs": ["memopedia:12"],
+                "line": "[過小] memopedia:12「金曜日のメモ」 60字 — 統合を提案",
             }
         ]
         output = {
             "curation_reviews": [
-                {"op_id": "fold:m:12", "verdict": "skip"},
+                {"op_id": "fold:memopedia:12", "verdict": "skip"},
             ]
         }
         applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
@@ -589,15 +589,15 @@ class TestCurationReviewsFinalize:
         """同じ op_id の approve を2度送っても pending 行は 1 件のまま。"""
         candidates = [
             {
-                "op_id": "merge:m:1+m:2",
+                "op_id": "merge:memopedia:1+memopedia:2",
                 "kind": "merge",
-                "refs": ["m:1", "m:2"],
+                "refs": ["memopedia:1", "memopedia:2"],
                 "line": "[類似] ...",
             }
         ]
         output = {
             "curation_reviews": [
-                {"op_id": "merge:m:1+m:2", "verdict": "approve"},
+                {"op_id": "merge:memopedia:1+memopedia:2", "verdict": "approve"},
             ]
         }
         # 1 回目
@@ -611,9 +611,9 @@ class TestCurationReviewsFinalize:
     def test_invalid_op_id_rejected(self, mem_conn):
         candidates = [
             {
-                "op_id": "split:m:5",
+                "op_id": "split:memopedia:5",
                 "kind": "split",
-                "refs": ["m:5"],
+                "refs": ["memopedia:5"],
                 "line": "...",
             }
         ]
@@ -634,7 +634,7 @@ class TestCurationReviewsFinalize:
 
     def test_empty_reviews_list_returns_false(self, mem_conn):
         output = {"curation_reviews": []}
-        candidates = [{"op_id": "split:m:5", "kind": "split", "refs": ["m:5"], "line": "..."}]
+        candidates = [{"op_id": "split:memopedia:5", "kind": "split", "refs": ["memopedia:5"], "line": "..."}]
         applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
         assert applied is False
 
@@ -674,17 +674,17 @@ class TestCurationOps:
     def test_enqueue_and_list(self):
         conn = sqlite3.connect(":memory:", check_same_thread=False)
         init_curation_tables(conn)
-        plan_id = enqueue_plan(conn, kind="split", op_id="split:m:1", refs=["m:1"])
+        plan_id = enqueue_plan(conn, kind="split", op_id="split:memopedia:1", refs=["memopedia:1"])
         assert isinstance(plan_id, str)
         pending = list_pending(conn)
         assert len(pending) == 1
-        assert pending[0]["op_id"] == "split:m:1"
+        assert pending[0]["op_id"] == "split:memopedia:1"
         assert pending[0]["kind"] == "split"
 
     def test_enqueue_idempotent_on_same_op_id(self):
         conn = sqlite3.connect(":memory:", check_same_thread=False)
         init_curation_tables(conn)
-        id1 = enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
-        id2 = enqueue_plan(conn, kind="merge", op_id="merge:m:1+m:2", refs=["m:1", "m:2"])
+        id1 = enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
+        id2 = enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
         assert id1 == id2
         assert len(list_pending(conn)) == 1

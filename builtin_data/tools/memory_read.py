@@ -5,8 +5,8 @@ concept_consolidation.md「P2: 統一スペル動詞 v0.2」の read。中身が
 取らない、既定の行為。常に見える状態を保ちたいときは ``memory_open`` を使う。
 
 対応 ref: ``m:N`` (Memopedia) / ``core`` (コア記憶全件) / ``c:N`` (コア記憶1件)
-/ ``ch:N`` (Chronicle) / ``p:N`` (写真 — 写真が写す生ログの全文) / ``task:N``
-(目的ノード — 段階・状態・ステップ・貼られた写真。P2c-1 で解決)。
+/ ``ch:N`` (Chronicle) / ``p:N`` (クリップ — クリップが写す生ログの全文) / ``task:N``
+(目的ノード — 段階・状態・ステップ・貼られたクリップ。P2c-1 で解決)。
 """
 from __future__ import annotations
 
@@ -52,9 +52,9 @@ def schema() -> ToolSchema:
             "読んだ内容は会話の流れに残り、時間とともに流れていきます"
             "（机の場所は取りません）。常に見える状態を保ちたい場合は "
             "memory_open を使ってください。"
-            "参照は m:N（Memopedia）/ core（コア記憶全件）/ c:N（コア記憶1件）/ "
-            "ch:N（Chronicle）/ p:N（写真 — その写真が写す会話の生ログ全文）/ "
-            "task:N（目的ノード — 段階・ステップ・貼られた写真）の形式です。"
+            "参照は memopedia:N（Memopedia）/ core（コア記憶全件）/ core:N（コア記憶1件）/ "
+            "chronicle:N（Chronicle）/ clip:N（クリップ — そのクリップが写す会話の生ログ全文）/ "
+            "task:N（目的ノード — 段階・ステップ・貼られたクリップ）の形式です。"
         ),
         parameters={
             "type": "object",

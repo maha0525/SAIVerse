@@ -32,7 +32,7 @@ def schema() -> ToolSchema:
         description=(
             "記憶の地図帳（Memopedia のページ・Chronicle の章）をキーワードで"
             "検索します。タイトル・本文に含まれる語句で照合し、一致したページを "
-            "参照（m:N / ch:N）と一行プレビューで一覧します。"
+            "参照（memopedia:N / chronicle:N）と一行プレビューで一覧します。"
         ),
         parameters={
             "type": "object",

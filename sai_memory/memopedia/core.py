@@ -160,7 +160,7 @@ class Memopedia:
 
             # Build line content
             sid = page.get("short_id")
-            id_suffix = f" [id: m:{sid}]" if sid else ""
+            id_suffix = f" [id: memopedia:{sid}]" if sid else ""
             if show_markers:
                 marker = "[OPEN]" if page.get("is_open") else "[-]"
                 title_part = f"{marker} **{page['title']}**{id_suffix}"

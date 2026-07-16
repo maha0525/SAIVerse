@@ -26,8 +26,8 @@ sea/head_pipeline/ など変更禁止領域)。物理格納を変えつつこれ
 (SQLite はビューへの直接 UPDATE/DELETE を許さない) — 実際に確認済み。
 
 旧 ``arasuji_entries`` テーブルは ``init_arasuji_tables`` 内の一回きり冪等
-migration でページへ写し切ってから DROP する (``sai_memory/photos.py`` の
-marks→photos や ``sai_memory/core_memory.py`` の core_memories→pages と同じ流儀)。
+migration でページへ写し切ってから DROP する (``sai_memory/clips.py`` の
+marks→clips や ``sai_memory/core_memory.py`` の core_memories→pages と同じ流儀)。
 
 詳細設計: docs/intent/memory_architecture_v2.md / docs/intent/concept_consolidation.md
 「P3b: Chronicle → 時間の地図ページ」
@@ -217,7 +217,7 @@ def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
             "thread_id": rec.get("thread_id"),
             "short_id": short_id,
         }
-        title = f"ch:{short_id}" if short_id is not None else _fallback_chronicle_title(rec)
+        title = f"chronicle:{short_id}" if short_id is not None else _fallback_chronicle_title(rec)
 
         page = create_page(
             conn,
@@ -436,7 +436,7 @@ def create_entry(
     page = create_page(
         conn,
         parent_id=ROOT_CHRONICLE_ID,
-        title=f"ch:{sid}",
+        title=f"chronicle:{sid}",
         content=content,
         category=CATEGORY_CHRONICLE,
         is_trunk=False,

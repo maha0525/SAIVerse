@@ -44,7 +44,7 @@ def schema() -> ToolSchema:
         description=(
             "机に開いた記憶の地図帳のページを閉じ、棚に戻します。"
             "閉じても目次（検索・想起）からは消えません。必要ならまた開けます。"
-            "参照は m:N（Memopedia）/ ch:N（Chronicle）/ task:N（目的ノード）"
+            "参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）/ task:N（目的ノード）"
             "の形式です（コア記憶は常時開のため対象外です）。"
         ),
         parameters={

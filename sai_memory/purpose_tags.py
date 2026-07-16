@@ -4,7 +4,7 @@ life_concept_map.md §9「タグは多対多・後付け」/ §9.1「目的タ�
 の受け皿。タグは「target (メッセージ・出来事・アイテム等) がこの目的に属する」
 という後付けの所属宣言で、想起 (§9.2 随意側) が目的を鍵に過去を引き戻す橋になる。
 
-保存先は photos (sai_memory/photos.py) と同じく **memory.db 相乗り**:
+保存先は clips (sai_memory/clips.py) と同じく **memory.db 相乗り**:
 タグの target の主流はSAIMemory メッセージであり、注釈は注釈対象と同じファイルに
 置く (アクセス・バックアップ・整合)。``init_purpose_tags_tables(conn)`` 冪等 +
 memopedia 流儀の migration スタイルに倣う。adapter への組み込みは P4 時点では

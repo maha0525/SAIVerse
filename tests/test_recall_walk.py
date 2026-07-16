@@ -31,7 +31,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database.models import Base
-from sai_memory import photos as photos_store
+from sai_memory import clips as clips_store
 from sai_memory import purpose_tags as tags_store
 from sai_memory.memopedia import storage as memopedia_storage
 from saiverse import clock
@@ -145,9 +145,9 @@ class RecallWalkTests(unittest.TestCase):
             persona_id=self.PERSONA, title="draft anthology",
             parent_kind="track", track_id=track_id, auto_activate=False,
         )
-        # photo 辺の材料: purpose_ref 一致・未貼り付け
+        # clip 辺の材料: purpose_ref 一致・未貼り付け
         with self.adapter._db_lock:
-            photos_store.add_photo(
+            clips_store.add_clip(
                 self.adapter.conn, message_id="m-mark-1",
                 quote="the sound of rain", purpose_ref="track:1",
             )
@@ -166,7 +166,7 @@ class RecallWalkTests(unittest.TestCase):
         # 他の辺も網に入っている
         kinds = {item.kind for item in result.items}
         self.assertIn("tree", kinds)
-        self.assertIn("photo", kinds)
+        self.assertIn("clip", kinds)
         # 種そのものは items に載らない
         self.assertNotIn("track:1", [item.ref for item in result.items])
 

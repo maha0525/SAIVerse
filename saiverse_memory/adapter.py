@@ -139,12 +139,12 @@ class SAIMemoryAdapter:
             from sai_memory.core_memory import init_core_memory_table
             init_core_memory_table(self.conn)
 
-            # Initialize photos table (土地参照の統一プリミティブ, 冪等)。旧 marks
-            # (層1 観測点) は点写真として photos に一般化・移行される。写真の
+            # Initialize clips table (土地参照の統一プリミティブ, 冪等)。旧 marks
+            # (層1 観測点) は点クリップとして clips に一般化・移行される。クリップの
             # アンカーは SAIMemory メッセージなので memory.db に相乗りする
-            # (sai_memory/photos.py の module docstring 参照)。
-            from sai_memory.photos import init_photos_tables
-            init_photos_tables(self.conn)
+            # (sai_memory/clips.py の module docstring 参照)。
+            from sai_memory.clips import init_clips_tables
+            init_clips_tables(self.conn)
 
             # Initialize purpose_tags table (層2〜4 目的タグ, life_concept_map.md
             # §9.1, 冪等)。タグの target の主流は SAIMemory メッセージ・出来事
@@ -479,24 +479,24 @@ class SAIMemoryAdapter:
             delete_perceptions(self.conn, [it.id for it in items])
         return True
 
-    def add_photos(self, message_id: str, spans) -> int:
-        """層1マーカー (``==語句==``) から抽出された観測点を点写真として保存する。
+    def add_clips(self, message_id: str, spans) -> int:
+        """層1マーカー (``==語句==``) から抽出された観測点を点クリップとして保存する。
 
         ``spans`` は ``saiverse.marker_parser.MarkSpan`` 互換 (``quote`` /
         ``purpose_ref`` 属性を持つ) の列。保存経路 (_store_memory) から
         メッセージ insert の直後に呼ばれる想定で、失敗しても例外を上げず
-        WARNING に落とす (写真はメッセージ本体より優先度が低い)。
+        WARNING に落とす (クリップはメッセージ本体より優先度が低い)。
 
-        Returns: 保存できた写真の枚数。
+        Returns: 保存できたクリップの枚数。
         """
         if not self._ready or not message_id or not spans:
             return 0
-        from sai_memory.photos import add_photo
+        from sai_memory.clips import add_clip
         saved = 0
         with self._db_lock:
             for span in spans:
                 try:
-                    add_photo(
+                    add_clip(
                         self.conn,
                         message_id=message_id,
                         quote=span.quote,
@@ -505,7 +505,7 @@ class SAIMemoryAdapter:
                     saved += 1
                 except Exception:
                     LOGGER.warning(
-                        "Failed to add photo for message=%s quote=%r",
+                        "Failed to add clip for message=%s quote=%r",
                         message_id, getattr(span, "quote", None), exc_info=True,
                     )
         return saved
@@ -516,7 +516,7 @@ class SAIMemoryAdapter:
         層2 棚入れ (judgment_finalize) 等の書き込み口。同一 (target, purpose)
         ペアは sai_memory/purpose_tags.py の add_tag が再訪として同じ行に
         濃さを積む。失敗しても例外を上げず WARNING に落とす (タグは
-        メッセージ本体より優先度が低い — add_photos と同じ姿勢)。
+        メッセージ本体より優先度が低い — add_clips と同じ姿勢)。
 
         Returns: 保存 (upsert) できたら True。
         """

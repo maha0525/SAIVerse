@@ -1,6 +1,6 @@
-"""Memory Atlas ファサード — ref (``m:N`` / ``core`` / ``c:N`` / ``ch:N``) を
-既存4ストレージ (Memopedia / core_memory / Chronicle / 目的の木) へディスパッチ
-する読み側 API。
+"""Memory Atlas ファサード — ref (``memopedia:N`` / ``core`` / ``core:N`` /
+``chronicle:N`` / ``clip:N`` / ``task:N``) を既存4ストレージ (Memopedia /
+core_memory / Chronicle / 目的の木) へディスパッチする読み側 API。
 
 concept_consolidation.md「土地と地図帳モデル」「P2: Atlas ファサード + 統一
 スペル」(実装分割 P2a) の実装。ペルソナ向けスペル (``builtin_data/tools/
@@ -10,33 +10,48 @@ memory_read.py`` 等) から呼ばれる薄い変換層で、地図の実体に�
 
 **対応する ref 形式**:
 
-- ``m:N``  — Memopedia ページ (short_id)
-- ``core`` — コア記憶全件 (常時開・机の予算外の特殊ページ)
-- ``c:N``  — コア記憶 1 件
-- ``ch:N`` — Chronicle エントリ (short_id)
-- ``p:N``  — 写真 (short_id)。「写真を読む＝その写真が写す土地を見に行く」—
-  範囲写真は区間の生ログ全文、点写真は対象メッセージ本文＋引用箇所が tail に
-  流れる (机にも head にも触らない。concept_consolidation.md「clip と写真の見え方」)
+- ``memopedia:N`` — Memopedia ページ (short_id)
+- ``core`` — コア記憶全件 (常時開・机の予算外の特殊ページ)。kind:key 形では
+  ないので参照ではなく、本モジュール固有の特殊ページ扱い
+- ``core:N``  — コア記憶 1 件
+- ``chronicle:N`` — Chronicle エントリ (short_id)
+- ``clip:N``  — クリップ (short_id)。「クリップを読む＝それが写す土地を見に行く」—
+  範囲クリップは区間の生ログ全文、点クリップは対象メッセージ本文＋引用箇所が
+  tail に流れる (机にも head にも触らない。concept_consolidation.md
+  「クリップの見え方」)
 - ``task:N`` — 目的の地図 (目的ノード)。read は解決済み (P2c-1)、開閉も
   P3c①②で対応済み — 実体は main DB (persona_task) なので ``manager``
-  (world 文脈) を追加で受ける。書く (memory_write) / 撮って貼る
+  (world 文脈) を追加で受ける。書く (memory_write) / 切り出して貼る
   (memory_clip) は引き続き未対応 (purpose 動詞の領分)
 
-**書く (memory_write) / 撮って貼る (memory_clip)**: 書き先は Memopedia 本文
+いずれも旧 prefix (``m:`` / ``c:`` / ``ch:`` / ``p:``) と ``saiverse://`` URI
+形式でも書ける — 書式の受理は統一グラマー (``saiverse/references.py``) が
+一手に引き受ける (下記)。
+
+**書く (memory_write) / 切り出して貼る (memory_clip)**: 書き先は Memopedia 本文
 への追記 (編集来歴が残る) / コア記憶の新規・上書き。clip は**参照貼り**のみ
-(photos に pasted_to 付きで保存) — 本文への転写は既存 SCENE
+(clips に pasted_to 付きで保存) — 本文への転写は既存 SCENE
 (core_memory_add_scene) の役割のままで、本モジュールは触らない。
 
-**貼られた写真の描画は常に抜粋** (写真は参照であって内容の運搬手段ではない):
+**貼られたクリップの描画は常に抜粋** (クリップは参照であって内容の運搬手段ではない):
 点=引用全文 (元々短い) / 範囲=先頭数行＋「全Nメッセージ・M字、前後省略 —
-memory_read p:N で全文」。折り畳み状態のような新しい状態は作らない。
+memory_read clip:N で全文」。折り畳み状態のような新しい状態は作らない。
 
-この ``m:N`` / ``c:N`` / ``ch:N`` という軽量プレフィックス表記は、
-``saiverse/references.py`` の RefKind システム (``track:2`` のようなフルワード
-短縮参照や ``saiverse://`` URI grammar) とは別の系列。m:N / c:N は元々
-RefKind に未登録のまま各ストレージモジュール内で扱われてきた慣行で
-(``sai_memory/memopedia/storage.py`` の ``resolve_page_ref`` 等)、ch:N も
-その慣行に揃える — Atlas の ref はこのモジュールが直接文字列パースする。
+**書式の受理は自前でやらない** — ``_parse_ref`` は ``saiverse/references.py``
+(統一グラマー) に委譲し、本モジュールは kind → ストレージの振り分けだけを持つ。
+旧 prefix (``m:`` / ``ch:`` / ``p:`` / ``c:``) は向こうの ``RefKind.aliases``
+として受理され、``saiverse://`` URI もそのまま通る。
+
+**来歴** (2026-07-15): 本モジュールは当初 ``m:N`` / ``c:N`` / ``ch:N`` を
+「RefKind とは別の軽量プレフィックス系列」として自前パースしていた。その根拠は
+「memopedia:N は各ストレージで扱われてきた慣行 (``resolve_page_ref`` 等)」だったが、
+**この前提は書かれた時点で既に誤りだった** — 参照アドレッシング統一の一括切替
+(2026-07-06、コミット 6ea9d44「m: 残存も一掃」) が 4 日前に ``m:`` を
+``memopedia:`` へ移行済みで、Atlas は消えた慣行を復活させていた。結果、統一
+グラマーの不変条件 I2 (短縮参照と URI は相互変換できる) が Atlas 上でだけ破れ、
+自動想起が流す ``saiverse://self/memopedia/45`` を正しく ``memopedia:45`` へ
+変換したペルソナが蹴られる事故が起きた。委譲はその修復であって、新しい設計判断
+ではない (docs/intent/reference_addressing.md の Q4 追記も参照)。
 
 **開閉 (机の物理)**: ``open_page`` / ``close_page`` は ``sai_memory/desk.py``
 に委譲する。コア記憶 (``core`` / ``c:N``) は常時開のシステム常設ピンなので
@@ -52,14 +67,15 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from sai_memory import desk
+from sai_memory.clips import Clip, get_clip_by_short_id, list_clips_pasted_to
 from sai_memory.core_memory import get_core_memory, list_core_memories
 from sai_memory.memopedia.storage import category_keys
-from sai_memory.photos import Photo, get_photo_by_short_id, list_photos_pasted_to
+from saiverse import references
 
 LOGGER = logging.getLogger(__name__)
 
-# 範囲写真の抜粋描画で見せる先頭行数 (トランスクリプトの行 = 発言)
-RANGE_PHOTO_EXCERPT_LINES = 3
+# 範囲クリップの抜粋描画で見せる先頭行数 (トランスクリプトの行 = 発言)
+RANGE_CLIP_EXCERPT_LINES = 3
 
 
 class AtlasRefError(ValueError):
@@ -69,28 +85,57 @@ class AtlasRefError(ValueError):
 # ----- ref 解析 -----
 
 
+#: 統一グラマーの kind → Atlas 内部の分岐名。ここに載っていない kind は書式と
+#: しては正しくても地図帳のページではない (``track:2`` / ``item:5`` 等)。
+_KIND_TO_ATLAS = {
+    "core": "core_one",
+    "memopedia": "memopedia",
+    "chronicle": "chronicle",
+    "clip": "clip",
+    "task": "task",
+}
+
+#: ペルソナに ref 形式を教えるための例示 (エラーメッセージ用)。
+_REF_EXAMPLES = "memopedia:3 / core / core:2 / chronicle:5 / clip:1 / task:4"
+
+
 def _parse_ref(ref: str) -> Tuple[str, Optional[str]]:
     """Atlas の ref 文字列を ``(kind, key)`` に分解する。
 
+    書式の受理は統一グラマー (``saiverse.references``) に委譲する — 旧 prefix
+    (``m:`` / ``ch:`` / ``p:`` / ``c:``) も ``saiverse://`` URI もここで通る。
+    本関数が持つのは「その kind を Atlas が扱うか」の判断だけ。
+
     kind: ``core_all`` / ``core_one`` / ``memopedia`` / ``chronicle`` /
-    ``photo`` / ``task``
+    ``clip`` / ``task``
     """
     text = (ref or "").strip()
     if not text:
         raise AtlasRefError("ref が空です")
+    # ``core`` (全件) は kind:key 形ではないので文法層の管轄外 — Atlas 固有の
+    # 特殊ページとしてここで拾う。
     if text.lower() == "core":
         return ("core_all", None)
-    if text.startswith("m:"):
-        return ("memopedia", text[2:].strip())
-    if text.startswith("ch:"):
-        return ("chronicle", text[3:].strip())
-    if text.startswith("c:"):
-        return ("core_one", text[2:].strip())
-    if text.startswith("p:"):
-        return ("photo", text[2:].strip())
-    if text.startswith("task:"):
-        return ("task", text[5:].strip())
-    raise AtlasRefError(f"認識できない ref 形式です: {ref!r}")
+    try:
+        parsed = references.parse_ref(text)
+    except ValueError:
+        raise AtlasRefError(
+            f"認識できない ref 形式です: {ref!r} (例: {_REF_EXAMPLES})"
+        ) from None
+    # 他ペルソナの URI (``saiverse://city_a/air/memopedia/45``) は書式としては
+    # 正しいが、Atlas が読むのは adapter が指す自分の memory.db 一つ。素通しすると
+    # 他人の番号で自分のページを読む「取り違え」になるため、ここで断る。
+    if parsed.persona is not None and not parsed.is_self:
+        raise AtlasRefError(
+            f"他のペルソナの記憶は読めません: {ref!r}"
+        )
+    atlas_kind = _KIND_TO_ATLAS.get(parsed.kind)
+    if atlas_kind is None:
+        raise AtlasRefError(
+            f"記憶の地図帳のページではありません: {ref!r} "
+            f"(種別「{parsed.kind}」。例: {_REF_EXAMPLES})"
+        )
+    return (atlas_kind, parsed.key.strip())
 
 
 def _parse_int(key: Optional[str]) -> Optional[int]:
@@ -103,10 +148,10 @@ def _parse_int(key: Optional[str]) -> Optional[int]:
     return value if value > 0 else None
 
 
-def _range_photo_transcript(
-    conn, photo: Photo, persona_name: str
+def _range_clip_transcript(
+    conn, clip: Clip, persona_name: str
 ) -> Optional[Tuple[str, int]]:
-    """範囲写真が写す区間の実会話を (トランスクリプト, メッセージ数) にする。
+    """範囲クリップが写す区間の実会話を (トランスクリプト, メッセージ数) にする。
 
     整形は SCENE と同じ (``format_scene_transcript``)。端メッセージが失われて
     いる等で区間が取れなければ None。
@@ -115,48 +160,48 @@ def _range_photo_transcript(
     from sai_memory.memory.storage import get_conversation_messages_between
 
     messages = get_conversation_messages_between(
-        conn, photo.message_id, photo.message_id_end
+        conn, clip.message_id, clip.message_id_end
     )
     if not messages:
         return None
     return format_scene_transcript(messages, persona_name), len(messages)
 
 
-def _format_photos(conn, photos: List[Photo], persona_name: str) -> str:
-    """ページに貼られた写真の一覧を**抜粋**で描画する。
+def _format_clips(conn, clips: List[Clip], persona_name: str) -> str:
+    """ページに貼られたクリップの一覧を**抜粋**で描画する。
 
-    写真は参照であって内容の運搬手段ではない — 丸ごと載せるとページが写真に
-    食われるため、描画は常に抜粋 (concept_consolidation.md「clip と写真の
+    クリップは参照であって内容の運搬手段ではない — 丸ごと載せるとページがクリップに
+    食われるため、描画は常に抜粋 (concept_consolidation.md「クリップの
     見え方」):
 
-    - 点写真: 引用全文 (元々短い)
-    - 範囲写真: トランスクリプト先頭数行 ＋「全Nメッセージ・M字、前後省略 —
-      memory_read p:N で全文」
+    - 点クリップ: 引用全文 (元々短い)
+    - 範囲クリップ: トランスクリプト先頭数行 ＋「全Nメッセージ・M字、前後省略 —
+      memory_read clip:N で全文」
 
-    全文が要るときはペルソナが ``memory_read p:N`` で写真そのものを読む。
+    全文が要るときはペルソナが ``memory_read clip:N`` でクリップそのものを読む。
     """
-    if not photos:
+    if not clips:
         return ""
-    lines = ["### 貼られた写真"]
-    for p in photos:
+    lines = ["### 貼られたクリップ"]
+    for p in clips:
         if not p.is_range:
-            lines.append(f"- [写真 {p.ref}] 引用: 「{p.quote}」")
+            lines.append(f"- [クリップ {p.ref}] 引用: 「{p.quote}」")
             continue
         label = f" ラベル: {p.quote}" if p.quote else ""
-        result = _range_photo_transcript(conn, p, persona_name)
+        result = _range_clip_transcript(conn, p, persona_name)
         if result is None:
             lines.append(
-                f"- [写真 {p.ref}] 範囲:{label} "
+                f"- [クリップ {p.ref}] 範囲:{label} "
                 f"(区間 {p.message_id}〜{p.message_id_end} は現在読み出せません)"
             )
             continue
         transcript, message_count = result
         t_lines = transcript.splitlines()
-        excerpt = t_lines[:RANGE_PHOTO_EXCERPT_LINES]
-        lines.append(f"- [写真 {p.ref}] 範囲:{label}")
+        excerpt = t_lines[:RANGE_CLIP_EXCERPT_LINES]
+        lines.append(f"- [クリップ {p.ref}] 範囲:{label}")
         for ln in excerpt:
             lines.append(f"  {ln}")
-        if len(t_lines) > RANGE_PHOTO_EXCERPT_LINES:
+        if len(t_lines) > RANGE_CLIP_EXCERPT_LINES:
             lines.append(
                 f"  (全{message_count}メッセージ・{len(transcript):,}字、前後省略 — "
                 f"memory_read {p.ref} で全文)"
@@ -167,11 +212,11 @@ def _format_photos(conn, photos: List[Photo], persona_name: str) -> str:
 def _ensure_chronicle_ready(conn) -> None:
     """Chronicle (arasuji_entries) テーブルの存在を保証する (冪等)。
 
-    SAIMemoryAdapter は Memopedia/core_memory/photos と違い arasuji テーブルを
+    SAIMemoryAdapter は Memopedia/core_memory/clips と違い arasuji テーブルを
     __init__ で eager 初期化しない (Chronicle に触れる各呼び出し元が都度
     ``init_arasuji_tables`` を呼ぶ既存の遅延初期化パターン — 例:
     ``api/routes/people/recall.py`` / ``sea/session_lifecycle.py``)。
-    Atlas の ch:N 経路もこの流儀に合わせ、触る直前に一度呼ぶ。
+    Atlas の chronicle:N 経路もこの流儀に合わせ、触る直前に一度呼ぶ。
     """
     from sai_memory.arasuji.storage import init_arasuji_tables
 
@@ -203,7 +248,7 @@ def read_page(
     触った扱い、sai_memory/desk.py)。読んでいる最中のページが LRU に追い出され
     るのを防ぐ。
 
-    ``persona_name`` は写真のトランスクリプト描画でペルソナ応答に付ける表示名
+    ``persona_name`` はクリップのトランスクリプト描画でペルソナ応答に付ける表示名
     (スペル層が AINAME を解決して渡す)。未指定は persona_id で代替。
 
     ``manager`` は ``task:N`` (目的ノード) の解決にのみ要る world 文脈
@@ -226,20 +271,20 @@ def read_page(
         text = _read_chronicle(conn, key, name)
         _touch_if_open(adapter, kind, key)
         return text
-    if kind == "photo":
-        # 写真を読む＝その写真が写す土地を見に行く。机にも head にも触らない
+    if kind == "clip":
+        # クリップを読む＝そのクリップが写す土地を見に行く。机にも head にも触らない
         # (貼り先ページの touch もしない — 読んだのは土地であってページではない)
-        return _read_photo(conn, key, name)
+        return _read_clip(conn, key, name)
     if kind == "task":
         return _read_task(adapter, key, manager, name)
     raise AtlasRefError(f"未対応の ref kind: {kind}")
 
 
 def _read_task(adapter, key: Optional[str], manager, persona_name: str) -> str:
-    """目的ノード (task:N) を読む — title / goal / stage / status / steps / 写真。
+    """目的ノード (task:N) を読む — title / goal / stage / status / steps / クリップ。
 
     実体は main DB の persona_task (PersonaTaskManager)。旧 task ツール群と同じ
-    DB アクセスパターン (SessionLocal factory) を踏襲する。貼られた写真
+    DB アクセスパターン (SessionLocal factory) を踏襲する。貼られたクリップ
     (pasted_to="task:N") はペルソナの memory.db 側 (adapter.conn) にある。
     """
     from saiverse.persona_task_manager import PersonaTaskManager, TaskNotFoundError
@@ -285,52 +330,52 @@ def _read_task(adapter, key: Optional[str], manager, persona_name: str) -> str:
             note = f" — {st['notes']}" if st.get("notes") else ""
             lines.append(f"{idx}. [{mark}] {st.get('title')} ({st.get('status')}){note}")
 
-    photos_text = _format_photos(
+    clips_text = _format_clips(
         adapter.conn,
-        list_photos_pasted_to(adapter.conn, task_ref),
+        list_clips_pasted_to(adapter.conn, task_ref),
         persona_name,
     )
-    if photos_text:
+    if clips_text:
         lines.append("")
-        lines.append(photos_text)
+        lines.append(clips_text)
     return "\n".join(lines)
 
 
-def _read_photo(conn, key: Optional[str], persona_name: str) -> str:
-    """写真 1 枚を読む — 範囲写真は区間の生ログ全文、点写真は対象メッセージ本文。"""
+def _read_clip(conn, key: Optional[str], persona_name: str) -> str:
+    """クリップ 1 枚を読む — 範囲クリップは区間の生ログ全文、点クリップは対象メッセージ本文。"""
     sid = _parse_int(key)
     if sid is None:
-        return f"写真の参照が不正です: p:{key}"
-    photo = get_photo_by_short_id(conn, sid)
-    if photo is None:
-        return f"写真が見つかりません: p:{sid}"
+        return f"クリップの参照が不正です: clip:{key}"
+    clip = get_clip_by_short_id(conn, sid)
+    if clip is None:
+        return f"クリップが見つかりません: clip:{sid}"
 
-    if photo.is_range:
-        result = _range_photo_transcript(conn, photo, persona_name)
+    if clip.is_range:
+        result = _range_clip_transcript(conn, clip, persona_name)
         if result is None:
             return (
-                f"写真 p:{sid} の区間 ({photo.message_id}〜{photo.message_id_end}) "
+                f"クリップ clip:{sid} の区間 ({clip.message_id}〜{clip.message_id_end}) "
                 "を読み出せませんでした。端のメッセージが失われている可能性があります。"
             )
         transcript, message_count = result
-        header = [f"# 写真 p:{sid} (範囲・全{message_count}メッセージ)"]
-        if photo.quote:
-            header.append(f"ラベル: {photo.quote}")
-        if photo.pasted_to:
-            header.append(f"貼り先: {photo.pasted_to}")
+        header = [f"# クリップ clip:{sid} (範囲・全{message_count}メッセージ)"]
+        if clip.quote:
+            header.append(f"ラベル: {clip.quote}")
+        if clip.pasted_to:
+            header.append(f"貼り先: {clip.pasted_to}")
         return "\n".join(header) + "\n\n" + transcript
 
     from sai_memory.core_memory import format_scene_transcript
     from sai_memory.memory.storage import get_message
 
-    message = get_message(conn, photo.message_id)
+    message = get_message(conn, clip.message_id)
     if message is None:
         return (
-            f"写真 p:{sid} の対象メッセージ ({photo.message_id}) が見つかりません。"
+            f"クリップ clip:{sid} の対象メッセージ ({clip.message_id}) が見つかりません。"
         )
-    lines = [f"# 写真 p:{sid} (点・引用)", f"引用箇所: 「{photo.quote}」"]
-    if photo.pasted_to:
-        lines.append(f"貼り先: {photo.pasted_to}")
+    lines = [f"# クリップ clip:{sid} (点・引用)", f"引用箇所: 「{clip.quote}」"]
+    if clip.pasted_to:
+        lines.append(f"貼り先: {clip.pasted_to}")
     lines.append("")
     lines.append(format_scene_transcript([message], persona_name))
     return "\n".join(lines)
@@ -362,28 +407,28 @@ def _read_core_all(conn, persona_name: str) -> str:
     for cm in items:
         lines.append(f"\n## {cm.ref}")
         lines.append(cm.content)
-        photos_text = _format_photos(
-            conn, list_photos_pasted_to(conn, cm.ref), persona_name
+        clips_text = _format_clips(
+            conn, list_clips_pasted_to(conn, cm.ref), persona_name
         )
-        if photos_text:
-            lines.append(photos_text)
+        if clips_text:
+            lines.append(clips_text)
     return "\n".join(lines)
 
 
 def _read_core_one(conn, key: Optional[str], persona_name: str) -> str:
     mid = _parse_int(key)
     if mid is None:
-        return f"コア記憶の参照が不正です: c:{key}"
+        return f"コア記憶の参照が不正です: core:{key}"
     cm = get_core_memory(conn, mid)
     if cm is None:
-        return f"コア記憶が見つかりません: c:{mid}"
+        return f"コア記憶が見つかりません: core:{mid}"
     lines = [f"# {cm.ref}", "", cm.content]
-    photos_text = _format_photos(
-        conn, list_photos_pasted_to(conn, cm.ref), persona_name
+    clips_text = _format_clips(
+        conn, list_clips_pasted_to(conn, cm.ref), persona_name
     )
-    if photos_text:
+    if clips_text:
         lines.append("")
-        lines.append(photos_text)
+        lines.append(clips_text)
     return "\n".join(lines)
 
 
@@ -397,24 +442,24 @@ def _read_memopedia(adapter, key: Optional[str], persona_name: str) -> str:
     memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
     page = memopedia.get_page(resolved) if resolved else None
     if page is None:
-        return f"ページが見つかりません: m:{key}"
+        return f"ページが見つかりません: memopedia:{key}"
     # soft-delete 済みページは「無い」扱い (resolve_page_ref / get_page は
     # is_deleted を見ないため、Atlas の読み口でも弾く。desk と同じガード)
     if _is_memopedia_page_deleted(adapter.conn, page.id):
-        return f"ページが見つかりません: m:{key}"
+        return f"ページが見つかりません: memopedia:{key}"
 
-    ref = f"m:{page.short_id}" if page.short_id else page.id
+    ref = f"memopedia:{page.short_id}" if page.short_id else page.id
     body = memopedia.render_page_body(page.id)
     lines = [f"# {page.title} ({ref})"]
     if page.summary:
         lines.append(f"\n*{page.summary}*")
     lines.append(f"\n{body or '(内容なし)'}")
-    photos_text = _format_photos(
-        adapter.conn, list_photos_pasted_to(adapter.conn, ref), persona_name
+    clips_text = _format_clips(
+        adapter.conn, list_clips_pasted_to(adapter.conn, ref), persona_name
     )
-    if photos_text:
+    if clips_text:
         lines.append("")
-        lines.append(photos_text)
+        lines.append(clips_text)
     return "\n".join(lines)
 
 
@@ -424,18 +469,18 @@ def _read_chronicle(conn, key: Optional[str], persona_name: str) -> str:
     _ensure_chronicle_ready(conn)
     sid = _parse_int(key)
     if sid is None:
-        return f"Chronicle の参照が不正です: ch:{key}"
+        return f"Chronicle の参照が不正です: chronicle:{key}"
     entry = get_entry_by_short_id(conn, sid)
     if entry is None:
-        return f"Chronicle エントリが見つかりません: ch:{sid}"
-    ref = f"ch:{entry.short_id}"
+        return f"Chronicle エントリが見つかりません: chronicle:{sid}"
+    ref = f"chronicle:{entry.short_id}"
     lines = [f"# {ref} (レベル{entry.level})", "", entry.content]
-    photos_text = _format_photos(
-        conn, list_photos_pasted_to(conn, ref), persona_name
+    clips_text = _format_clips(
+        conn, list_clips_pasted_to(conn, ref), persona_name
     )
-    if photos_text:
+    if clips_text:
         lines.append("")
-        lines.append(photos_text)
+        lines.append(clips_text)
     return "\n".join(lines)
 
 
@@ -445,7 +490,7 @@ def _read_chronicle(conn, key: Optional[str], persona_name: str) -> str:
 def _normalize_ref_for_desk(
     adapter, kind: str, key: Optional[str], manager=None,
 ) -> Optional[str]:
-    """desk.py の主キーに使う正規形 (``m:{short_id}`` / ``ch:{short_id}`` /
+    """desk.py の主キーに使う正規形 (``memopedia:{short_id}`` / ``chronicle:{short_id}`` /
     ``task:{short_id}``) に揃える。
 
     呼び出し側が UUID や別表記の key を渡しても、常に short_id ベースの一意な
@@ -473,7 +518,7 @@ def _normalize_ref_for_desk(
         # 机に居座って本文を head に描画し続ける (P2b テストで発見)
         if _is_memopedia_page_deleted(adapter.conn, page.id):
             return None
-        return f"m:{page.short_id}" if page.short_id else f"m:{page.id}"
+        return f"memopedia:{page.short_id}" if page.short_id else f"memopedia:{page.id}"
     if kind == "chronicle":
         from sai_memory.arasuji.storage import get_entry_by_short_id
 
@@ -484,7 +529,7 @@ def _normalize_ref_for_desk(
         entry = get_entry_by_short_id(adapter.conn, sid)
         if entry is None:
             return None
-        return f"ch:{entry.short_id}"
+        return f"chronicle:{entry.short_id}"
     if kind == "task":
         return _resolve_task_ref_for_desk(adapter, key, manager)
     return None
@@ -535,11 +580,12 @@ def _size_of_ref(adapter, ref: str, manager=None) -> int:
     ``manager`` は ``task:N`` の解決にのみ要る world 文脈 (main DB 在住)。
     """
     try:
-        if ref.startswith("m:"):
+        kind, key = _parse_ref(ref)
+        if kind == "memopedia":
             from sai_memory.memopedia import Memopedia
             from sai_memory.memopedia.storage import resolve_page_ref
 
-            resolved = resolve_page_ref(adapter.conn, ref[2:])
+            resolved = resolve_page_ref(adapter.conn, key)
             if resolved is None:
                 return 0
             memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
@@ -548,17 +594,16 @@ def _size_of_ref(adapter, ref: str, manager=None) -> int:
                 return 0
             body = memopedia.render_page_body(page.id)
             return len(page.title or "") + len(page.summary or "") + len(body or "")
-        if ref.startswith("ch:"):
+        if kind == "chronicle":
             from sai_memory.arasuji.storage import get_entry_by_short_id
 
             _ensure_chronicle_ready(adapter.conn)
-            sid = _parse_int(ref[3:])
+            sid = _parse_int(key)
             if sid is None:
                 return 0
             entry = get_entry_by_short_id(adapter.conn, sid)
             return len(entry.content) if entry else 0
-        if ref.startswith("task:"):
-            key = ref[5:]
+        if kind == "task":
             if _resolve_task_ref_for_desk(adapter, key, manager) is None:
                 return 0
             name = _resolve_persona_name(adapter, None)
@@ -592,10 +637,10 @@ def open_page(
     kind, key = _parse_ref(ref)
     if kind in ("core_all", "core_one"):
         return "コア記憶は常時開いています。open は不要です。"
-    if kind == "photo":
+    if kind == "clip":
         return (
-            "写真は机に開けません（写真は土地への参照です）。"
-            f"memory_read p:{key} でその場で読めます。"
+            "クリップは机に開けません（クリップは土地への参照です）。"
+            f"memory_read clip:{key} でその場で読めます。"
         )
     if kind not in ("memopedia", "chronicle", "task"):
         raise AtlasRefError(f"未対応の ref kind: {kind}")
@@ -648,8 +693,8 @@ def close_page(adapter, ref: str, manager=None) -> str:
     kind, key = _parse_ref(ref)
     if kind in ("core_all", "core_one"):
         return "コア記憶は閉じられません(常時開です)。"
-    if kind == "photo":
-        return "写真は机の対象外です（開閉はありません）。"
+    if kind == "clip":
+        return "クリップは机の対象外です（開閉はありません）。"
     if kind not in ("memopedia", "chronicle", "task"):
         raise AtlasRefError(f"未対応の ref kind: {kind}")
 
@@ -691,14 +736,14 @@ def search_pages(adapter, query: str, limit: int = 8) -> str:
     if pages:
         lines.append("## Memopedia")
         for p in pages:
-            ref = f"m:{p.short_id}" if p.short_id else p.id
+            ref = f"memopedia:{p.short_id}" if p.short_id else p.id
             preview = (p.summary or p.content or "").strip().splitlines()
             preview_text = preview[0] if preview else ""
             lines.append(f"- {p.title} ({ref}): {preview_text}")
     if entries:
         lines.append("## Chronicle" if not lines else "\n## Chronicle")
         for e in entries:
-            ref = f"ch:{e.short_id}" if e.short_id else e.id
+            ref = f"chronicle:{e.short_id}" if e.short_id else e.id
             preview = (e.content or "").strip().splitlines()
             preview_text = preview[0] if preview else ""
             lines.append(f"- {ref}: {preview_text}")
@@ -734,7 +779,7 @@ def write_page(
     - ``ref`` の代わりに ``title`` (+ ``category``): Memopedia に**新規ページ作成**
       (P2c-0 決定3)。構造編集 (移動・統合・分割・summary/keywords 更新) は
       日常動詞にしない — 庭仕事モードの遅延開示 (別仕様・後回し) の領分。
-    - ``ch:N`` / ``p:N``: 書けない (Chronicle の編纂はシステム側 / 写真は参照)。
+    - ``ch:N`` / ``p:N``: 書けない (Chronicle の編纂はシステム側 / クリップは参照)。
     - ``task:N``: purpose 動詞の領分 (P3c まで stub)。
 
     ``core_budget`` はコア記憶の容量目安 (per-persona 設定)。スペル層が解決して
@@ -768,12 +813,12 @@ def write_page(
         return result
     if kind == "chronicle":
         return (
-            f"ch:{key} には書けません。"
+            f"chronicle:{key} には書けません。"
             "時間の地図（Chronicle）の編纂はシステムが行います。"
         )
-    if kind == "photo":
+    if kind == "clip":
         return (
-            f"p:{key} には書けません。写真は土地（生ログ）への参照です。"
+            f"clip:{key} には書けません。クリップは土地（生ログ）への参照です。"
         )
     if kind == "task":
         return _task_stub_message(key, action="への書き込み")
@@ -797,7 +842,7 @@ def _write_core_new(conn, text: str, core_budget: Optional[int]) -> str:
     new_id = add_core_memory(conn, text)
     note = _core_budget_note(conn, core_budget)
     return (
-        f"コア記憶 c:{new_id} に書きました（常時開の特殊ページです）。{note}"
+        f"コア記憶 core:{new_id} に書きました（常時開の特殊ページです）。{note}"
         "head への反映は次の記憶整理（Metabolism）からです。"
     )
 
@@ -809,12 +854,12 @@ def _write_core_update(
 
     mid = _parse_int(key)
     if mid is None:
-        return f"コア記憶の参照が不正です: c:{key}"
+        return f"コア記憶の参照が不正です: core:{key}"
     if not update_core_memory(conn, mid, text):
-        return f"コア記憶が見つかりません: c:{mid}"
+        return f"コア記憶が見つかりません: core:{mid}"
     note = _core_budget_note(conn, core_budget)
     return (
-        f"コア記憶 c:{mid} を上書きしました。{note}"
+        f"コア記憶 core:{mid} を上書きしました。{note}"
         "head への反映は次の記憶整理（Metabolism）からです。"
     )
 
@@ -830,7 +875,7 @@ def _write_memopedia_append(adapter, key: Optional[str], text: str) -> str:
     memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
     page = memopedia.get_page(resolved) if resolved else None
     if page is None:
-        return f"ページが見つかりません: m:{key}"
+        return f"ページが見つかりません: memopedia:{key}"
 
     # 編集来歴 (PageEditHistory) が残る append 経路。由来メッセージ参照は
     # スペル実行中の contextvar から取れる場合のみ付く (CLI 直叩き等は None)。
@@ -844,7 +889,7 @@ def _write_memopedia_append(adapter, key: Optional[str], text: str) -> str:
         ref_start_message_id=msg_id, ref_end_message_id=msg_id,
         edit_source="ai_conversation",
     )
-    ref = f"m:{page.short_id}" if page.short_id else page.id
+    ref = f"memopedia:{page.short_id}" if page.short_id else page.id
     return f"{ref}「{page.title}」に追記しました。"
 
 
@@ -875,7 +920,7 @@ def _write_memopedia_create(
     memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
     existing = memopedia.find_by_title(title)
     if existing is not None and not _is_memopedia_page_deleted(adapter.conn, existing.id):
-        ex_ref = f"m:{existing.short_id}" if existing.short_id else existing.id
+        ex_ref = f"memopedia:{existing.short_id}" if existing.short_id else existing.id
         return (
             f"同名のページが既にあります: {ex_ref}「{existing.title}」。"
             f"追記するには memory_write の ref に {ex_ref} を指定してください。"
@@ -890,7 +935,7 @@ def _write_memopedia_create(
         ref_end_message_id=msg_id,
         edit_source="ai_conversation",
     )
-    ref = f"m:{page.short_id}" if page.short_id else page.id
+    ref = f"memopedia:{page.short_id}" if page.short_id else page.id
     return f"新しいページを作りました: {ref}「{title}」（カテゴリ: {cat}）"
 
 
@@ -903,7 +948,7 @@ def delete_page(adapter, ref: str) -> str:
     - ``c:N``: コア記憶の soft-delete (``deleted_at`` 刻印。旧 core_memory_remove
       と同じ経路 — 復元可能)
     - ``m:N``: Memopedia の soft-delete (``is_deleted``。復元は後回しのごみ箱仕様)
-    - ``ch:N`` (編纂はシステム側) / ``p:N`` (写真は歴史として残す §5.1) /
+    - ``ch:N`` (編纂はシステム側) / ``p:N`` (クリップは歴史として残す §5.1) /
       ``core`` 全体 / ``task:N`` (purpose_close の領分) は消せない
 
     削除したページが机に開いていたら desk からも即時クローズする (放置しても
@@ -913,15 +958,15 @@ def delete_page(adapter, ref: str) -> str:
     conn = adapter.conn
 
     if kind == "core_all":
-        return "コア記憶全体は消せません。1件ずつ c:N で指定してください。"
+        return "コア記憶全体は消せません。1件ずつ core:N で指定してください。"
     if kind == "chronicle":
         return (
-            f"ch:{key} は消せません。"
+            f"chronicle:{key} は消せません。"
             "時間の地図（Chronicle）の編纂はシステムが行います。"
         )
-    if kind == "photo":
+    if kind == "clip":
         return (
-            f"p:{key} は消せません。写真は撮られた歴史としてそのまま残ります。"
+            f"clip:{key} は消せません。クリップは切り出された歴史としてそのまま残ります。"
         )
     if kind == "task":
         return (
@@ -934,13 +979,13 @@ def delete_page(adapter, ref: str) -> str:
 
         mid = _parse_int(key)
         if mid is None:
-            return f"コア記憶の参照が不正です: c:{key}"
+            return f"コア記憶の参照が不正です: core:{key}"
         with adapter._db_lock:
             ok = remove_core_memory(conn, mid)
         if not ok:
-            return f"コア記憶が見つかりません: c:{mid}"
+            return f"コア記憶が見つかりません: core:{mid}"
         return (
-            f"コア記憶 c:{mid} をごみ箱に移しました（完全に消えるわけでは"
+            f"コア記憶 core:{mid} をごみ箱に移しました（完全に消えるわけでは"
             "ありません）。head への反映は次の記憶整理（Metabolism）からです。"
         )
 
@@ -954,9 +999,9 @@ def delete_page(adapter, ref: str) -> str:
         memopedia = Memopedia(conn, db_lock=adapter._db_lock)
         page = memopedia.get_page(resolved) if resolved else None
         if page is None or _is_memopedia_page_deleted(conn, page.id):
-            return f"ページが見つかりません: m:{key}"
+            return f"ページが見つかりません: memopedia:{key}"
 
-        norm_ref = f"m:{page.short_id}" if page.short_id else f"m:{page.id}"
+        norm_ref = f"memopedia:{page.short_id}" if page.short_id else f"memopedia:{page.id}"
         msg_id = _active_message_id()
         if not memopedia.delete_page(
             page.id,
@@ -978,7 +1023,7 @@ def delete_page(adapter, ref: str) -> str:
     raise AtlasRefError(f"未対応の ref kind: {kind}")
 
 
-# ----- clip_photo -----
+# ----- make_clip -----
 
 
 def _normalize_paste_target(adapter, paste_to: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -987,7 +1032,7 @@ def _normalize_paste_target(adapter, paste_to: Optional[str]) -> Tuple[Optional[
     - None → (None, None): 貼り先なし = 土壌プールに置く
     - ``m:N``: ページの実在を確認し short_id 正規形へ
     - ``c:N``: コア記憶の実在を確認
-    - ``task:N``: P2c まで未対応 (エラーメッセージを返し、写真は撮らない)
+    - ``task:N``: P2c まで未対応 (エラーメッセージを返し、クリップは切り出さない)
     """
     if paste_to is None or not str(paste_to).strip():
         return None, None
@@ -1006,9 +1051,9 @@ def _normalize_paste_target(adapter, paste_to: Optional[str]) -> Tuple[Optional[
         mid = _parse_int(key)
         if mid is None or get_core_memory(adapter.conn, mid) is None:
             return None, f"貼り先のコア記憶が見つかりません: {text}"
-        return f"c:{mid}", None
+        return f"core:{mid}", None
     if kind == "task":
-        # TODO(P2c): 目的ノードへの貼り付け (収穫 = 写真 → candidate) は
+        # TODO(P2c): 目的ノードへの貼り付け (収穫 = クリップ → candidate) は
         # purpose 動詞と合わせて実装する。
         return None, (
             f"目的ノード ({text}) への貼り付けは今後対応予定です。"
@@ -1017,7 +1062,7 @@ def _normalize_paste_target(adapter, paste_to: Optional[str]) -> Tuple[Optional[
     return None, f"この種類のページには貼れません: {text}"
 
 
-def clip_photo(
+def make_clip(
     adapter,
     message_id: str,
     *,
@@ -1028,27 +1073,27 @@ def clip_photo(
     mode: str = "attach",
     core_budget: Optional[int] = None,
 ) -> str:
-    """写真を撮ってクリップで貼る (concept_consolidation.md P2 memory_clip)。
+    """クリップを切り出して貼る (concept_consolidation.md P2 memory_clip)。
 
-    - ``quote`` あり → **点写真**: 対象メッセージ本文からの逐語引用。実在検証
-      (引用が本文に含まれるか) を行い、不一致なら撮らずにエラーを返す。
-    - ``quote`` なし → **範囲写真**: ``message_id`` をアンカーに前後 ``rounds``
-      往復の実会話窓 (SCENE と同じ窓切り出し) を範囲として撮る。
+    - ``quote`` あり → **点クリップ**: 対象メッセージ本文からの逐語引用。実在検証
+      (引用が本文に含まれるか) を行い、不一致なら切り出さずにエラーを返す。
+    - ``quote`` なし → **範囲クリップ**: ``message_id`` をアンカーに前後 ``rounds``
+      往復の実会話窓 (SCENE と同じ窓切り出し) を範囲として切り出す。
 
     貼り方は 2 種 (P2c-0 決定2):
 
-    - ``mode='attach'`` (既定): **参照貼り** — photos に pasted_to 付きで保存し、
-      ページには抜粋が表示される (全文は memory_read p:N)。
+    - ``mode='attach'`` (既定): **参照貼り** — clips に pasted_to 付きで保存し、
+      ページには抜粋が表示される (全文は memory_read clip:N)。
     - ``mode='transcribe'``: **転写** — 本文に焼き込み、常に生で見える。
       貼り先必須。core 宛の範囲転写は旧 SCENE (create_scene_core_memory) と
-      同一の共有ロジックを通す。転写でも写真は撮って由来参照を残す
+      同一の共有ロジックを通す。転写でもクリップは切り出して由来参照を残す
       (SCENE の現行流儀と同じ)。paste_to='core' のときは memory_write と同じ
       容量目安 (``core_budget``) 超過通知を添える (P2c-4a: 旧 core_memory_add_scene
       にあった budget 通知の欠落を埋める)。
 
     貼り先が机に開かれていれば touch する (touch の定義に clip が含まれる)。
     """
-    from sai_memory.photos import add_photo
+    from sai_memory.clips import add_clip
 
     conn = adapter.conn
     name = _resolve_persona_name(adapter, persona_name)
@@ -1076,7 +1121,7 @@ def clip_photo(
         return paste_err
 
     if quote is not None and str(quote).strip():
-        # --- 点写真: 逐語引用の実在検証 ---
+        # --- 点クリップ: 逐語引用の実在検証 ---
         from sai_memory.memory.storage import get_message
 
         quote_text = str(quote).strip()
@@ -1086,15 +1131,15 @@ def clip_photo(
         if quote_text not in (message.content or ""):
             return (
                 "引用が対象メッセージの本文に見つかりませんでした。"
-                "写真は土地（生ログ）をそのまま写すものなので、"
+                "クリップは土地（生ログ）をそのまま写すものなので、"
                 "本文にある言葉を一字一句そのまま指定してください。"
             )
-        photo = add_photo(
+        clip = add_clip(
             conn, message_id=message_id, quote=quote_text, pasted_to=norm_paste,
         )
-        lines = [f"写真 {photo.ref} を撮りました（点・引用）。", f"引用: 「{quote_text}」"]
+        lines = [f"クリップ {clip.ref} を切り出しました（点・引用）。", f"引用: 「{quote_text}」"]
     else:
-        # --- 範囲写真: SCENE と同じ実会話窓の切り出し ---
+        # --- 範囲クリップ: SCENE と同じ実会話窓の切り出し ---
         from sai_memory.memory.storage import get_conversation_window_around
 
         try:
@@ -1109,42 +1154,45 @@ def clip_photo(
                 f"メッセージ {message_id} が見つからないか、実会話ではありません"
                 "（ツール実行ログ等は切り抜き対象外です）。"
             )
-        photo = add_photo(
+        clip = add_clip(
             conn,
             message_id=window[0].id,
             message_id_end=window[-1].id,
             pasted_to=norm_paste,
         )
-        result = _range_photo_transcript(conn, photo, name)
-        lines = [f"写真 {photo.ref} を撮りました（範囲・全{len(window)}メッセージ）。"]
+        result = _range_clip_transcript(conn, clip, name)
+        lines = [f"クリップ {clip.ref} を切り出しました（範囲・全{len(window)}メッセージ）。"]
         if result is not None:
             transcript, message_count = result
             t_lines = transcript.splitlines()
-            for ln in t_lines[:RANGE_PHOTO_EXCERPT_LINES]:
+            for ln in t_lines[:RANGE_CLIP_EXCERPT_LINES]:
                 lines.append(f"  {ln}")
-            if len(t_lines) > RANGE_PHOTO_EXCERPT_LINES:
+            if len(t_lines) > RANGE_CLIP_EXCERPT_LINES:
                 lines.append(
                     f"  (全{message_count}メッセージ・{len(transcript):,}字、前後省略 — "
-                    f"memory_read {photo.ref} で全文)"
+                    f"memory_read {clip.ref} で全文)"
                 )
 
     if norm_paste:
         lines.append(f"{norm_paste} に貼りました。")
-        if norm_paste.startswith("m:"):
-            _touch_if_open(adapter, "memopedia", norm_paste[2:])
+        # 貼り先が机に開かれていれば touch (コア記憶は常時開なので机の対象外)。
+        # prefix を手で切ると書式変更で静かに空振りするため必ず _parse_ref を通す。
+        paste_kind, paste_key = _parse_ref(norm_paste)
+        if paste_kind == "memopedia":
+            _touch_if_open(adapter, paste_kind, paste_key)
     else:
         lines.append("貼り先は未指定です（あとから貼れます）。")
     return "\n".join(lines)
 
 
-def _latest_photo_ref_pasted_to(conn, pasted_to: str) -> Optional[str]:
-    """貼り先 ref に貼られた最新の写真の p:N を返す (無ければ None)。
+def _latest_clip_ref_pasted_to(conn, pasted_to: str) -> Optional[str]:
+    """貼り先 ref に貼られた最新のクリップの clip:N を返す (無ければ None)。
 
-    create_scene_core_memory (共有ロジック) は写真を撮るが Photo を返さない
-    ため、結果テキストに p:N を載せるための読み口。
+    create_scene_core_memory (共有ロジック) はクリップを切り出すが Clip を返さない
+    ため、結果テキストに clip:N を載せるための読み口。
     """
-    photos = list_photos_pasted_to(conn, pasted_to)
-    return photos[-1].ref if photos else None
+    clips = list_clips_pasted_to(conn, pasted_to)
+    return clips[-1].ref if clips else None
 
 
 def _clip_transcribe(
@@ -1157,15 +1205,15 @@ def _clip_transcribe(
     persona_name: str,
     core_budget: Optional[int] = None,
 ) -> str:
-    """転写 (mode='transcribe'): 本文に焼き込み + 写真で由来参照を残す。
+    """転写 (mode='transcribe'): 本文に焼き込み + クリップで由来参照を残す。
 
     - 範囲 + ``paste_to='core'``: 旧 SCENE と**同一の共有ロジック**
       (``create_scene_core_memory``) を通す — 窓切り出し・トランスクリプト整形・
-      写真 (pasted_to="c:{id}") まで全部同じ。旧 core_memory_add_scene スペルと
+      クリップ (pasted_to="core:{id}") まで全部同じ。旧 core_memory_add_scene スペルと
       挙動が割れない (言い換えドリフト防止の一点管理)。
-    - 点 + ``paste_to='core'``: 引用を新しいコア記憶として刻む + 点写真。
-    - ``paste_to='m:N'``: トランスクリプト / 引用をページ本文に追記
-      (編集来歴つき append 経路) + 写真。
+    - 点 + ``paste_to='core'``: 引用を新しいコア記憶として刻む + 点クリップ。
+    - ``paste_to='memopedia:N'``: トランスクリプト / 引用をページ本文に追記
+      (編集来歴つき append 経路) + クリップ。
     - ``c:N`` (既存コア記憶への焼き込み) は非対応 — 共有ロジックが無く挙動が
       割れるため、新しいコア記憶として刻む ``paste_to='core'`` に誘導する。
 
@@ -1173,7 +1221,7 @@ def _clip_transcribe(
     通知 (write_page と同じ ``_core_budget_note``)。旧 core_memory_add_scene /
     core_memory_add にあった budget 超過警告を、転写でも同じように出す。
     """
-    from sai_memory.photos import add_photo
+    from sai_memory.clips import add_clip
 
     conn = adapter.conn
     is_point = bool(quote and str(quote).strip())
@@ -1200,19 +1248,19 @@ def _clip_transcribe(
                     f"メッセージ {message_id} が見つからないか、実会話ではありません"
                     "（ツール実行ログ等は切り抜き対象外です）。"
                 )
-            photo_ref = _latest_photo_ref_pasted_to(conn, f"c:{result.memory_id}")
+            clip_ref = _latest_clip_ref_pasted_to(conn, f"core:{result.memory_id}")
             lines = [
-                f"会話の切り抜きをコア記憶 c:{result.memory_id} に転写しました"
+                f"会話の切り抜きをコア記憶 core:{result.memory_id} に転写しました"
                 f"（{result.message_count} 発言・{result.char_count:,}字、"
                 f"{result.date_start}〜{result.date_end}）。",
             ]
-            if photo_ref:
-                lines.append(f"由来参照として写真 {photo_ref} も貼りました。")
+            if clip_ref:
+                lines.append(f"由来参照としてクリップ {clip_ref} も貼りました。")
             note = _core_budget_note(conn, core_budget)
             lines.append(f"head への反映は次の記憶整理（Metabolism）からです。{note}")
             return "\n".join(lines)
 
-        # 点転写 = 引用を新しいコア記憶として刻む + 点写真
+        # 点転写 = 引用を新しいコア記憶として刻む + 点クリップ
         from sai_memory.core_memory import add_core_memory
         from sai_memory.memory.storage import get_message
 
@@ -1223,19 +1271,19 @@ def _clip_transcribe(
         if quote_text not in (message.content or ""):
             return (
                 "引用が対象メッセージの本文に見つかりませんでした。"
-                "写真は土地（生ログ）をそのまま写すものなので、"
+                "クリップは土地（生ログ）をそのまま写すものなので、"
                 "本文にある言葉を一字一句そのまま指定してください。"
             )
         with adapter._db_lock:
             new_id = add_core_memory(conn, quote_text)
-            photo = add_photo(
+            clip = add_clip(
                 conn, message_id=message_id, quote=quote_text,
-                pasted_to=f"c:{new_id}",
+                pasted_to=f"core:{new_id}",
             )
         note = _core_budget_note(conn, core_budget)
         return (
-            f"引用をコア記憶 c:{new_id} に転写しました。\n"
-            f"由来参照として写真 {photo.ref} も貼りました。\n"
+            f"引用をコア記憶 core:{new_id} に転写しました。\n"
+            f"由来参照としてクリップ {clip.ref} も貼りました。\n"
             f"head への反映は次の記憶整理（Metabolism）からです。{note}"
         )
 
@@ -1255,10 +1303,10 @@ def _clip_transcribe(
     if kind != "memopedia":
         return (
             f"この宛先には転写できません: {paste_to}"
-            "（転写先は m:N または core です）"
+            "（転写先は memopedia:N または core です）"
         )
 
-    # --- 宛先: m:N (Memopedia ページ本文への焼き込み) ---------------------
+    # --- 宛先: memopedia:N (Memopedia ページ本文への焼き込み) ---------------------
     norm_ref = _normalize_ref_for_desk(adapter, "memopedia", key)
     if norm_ref is None:
         return f"転写先のページが見つかりません: {paste_to}"
@@ -1273,7 +1321,7 @@ def _clip_transcribe(
         if quote_text not in (message.content or ""):
             return (
                 "引用が対象メッセージの本文に見つかりませんでした。"
-                "写真は土地（生ログ）をそのまま写すものなので、"
+                "クリップは土地（生ログ）をそのまま写すものなので、"
                 "本文にある言葉を一字一句そのまま指定してください。"
             )
         burned_text = quote_text
@@ -1294,7 +1342,9 @@ def _clip_transcribe(
     from sai_memory.memopedia import Memopedia
     from sai_memory.memopedia.storage import resolve_page_ref
 
-    resolved = resolve_page_ref(conn, norm_ref[2:])
+    # norm_ref は正規形 (``memopedia:N``)。prefix を手で切らず文法層に解かせる。
+    _, page_key = _parse_ref(norm_ref)
+    resolved = resolve_page_ref(conn, page_key)
     memopedia = Memopedia(conn, db_lock=adapter._db_lock)
     page = memopedia.get_page(resolved)
     if page is None:
@@ -1305,7 +1355,7 @@ def _clip_transcribe(
         edit_source="ai_conversation",
     )
     with adapter._db_lock:
-        photo = add_photo(
+        clip = add_clip(
             conn,
             message_id=ref_start,
             quote=(str(quote).strip() if is_point else None),
@@ -1317,7 +1367,7 @@ def _clip_transcribe(
     what = "引用" if is_point else "会話の切り抜き"
     return (
         f"{what}を {norm_ref}「{page.title}」の本文に転写しました。\n"
-        f"由来参照として写真 {photo.ref} も貼りました。"
+        f"由来参照としてクリップ {clip.ref} も貼りました。"
     )
 
 
@@ -1328,8 +1378,8 @@ def _clip_transcribe(
 class DeskPageView:
     """机に開いている 1 ページの描画済みビュー (head 机セクションの材料)。"""
 
-    ref: str                    # 正規形 (m:N / ch:N)
-    text: str                   # read_page と同じ整形の本文 (写真は抜粋)
+    ref: str                    # 正規形 (memopedia:N / chronicle:N)
+    text: str                   # read_page と同じ整形の本文 (クリップは抜粋)
     purpose_ref: Optional[str]  # この開きが紐づく目的 (無ければ None)
 
 

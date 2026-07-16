@@ -59,7 +59,7 @@ class CoreMemoryStorageTest(unittest.TestCase):
         # 既定 kind は 'note'、metadata は None。
         self.assertEqual(items[0].kind, "note")
         self.assertIsNone(items[0].metadata)
-        self.assertEqual(items[0].ref, "c:1")
+        self.assertEqual(items[0].ref, "core:1")
 
     def test_update_existing(self):
         mid = add_core_memory(self.conn, "旧い内容")
@@ -183,7 +183,7 @@ class CoreMemoryLegacyMigrationTest(unittest.TestCase):
         ).fetchone()
         self.assertIsNone(legacy)
 
-        # c:N 解決・件数・created_at/updated_at が忠実に写っている。
+        # core:N 解決・件数・created_at/updated_at が忠実に写っている。
         items = list_core_memories(self.conn)
         self.assertEqual([i.id for i in items], [1, 2, 3])  # 4 は削除済みなので生存一覧に出ない
         self.assertEqual(items[0].content, "普通のメモ")
@@ -208,7 +208,7 @@ class CoreMemoryLegacyMigrationTest(unittest.TestCase):
         self.assertEqual(trash[0].deleted_at, 4500)
         self.assertEqual(trash[0].updated_at, 4500)
 
-        # get_core_memory (c:N) も移行後のページを正しく引ける。
+        # get_core_memory (core:N) も移行後のページを正しく引ける。
         self.assertEqual(get_core_memory(self.conn, 1).content, "普通のメモ")
         self.assertIsNone(get_core_memory(self.conn, 4))  # 削除済みは既定で見えない
         self.assertIsNotNone(get_core_memory(self.conn, 4, include_deleted=True))

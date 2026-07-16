@@ -1,11 +1,11 @@
 """ペルソナの暮らしビュー API (life_concept_map.md の読み出し面)。
 
-画面 B (今日の予定表) / C (会話バブルの点写真ハイライト) /
+画面 B (今日の予定表) / C (会話バブルの点クリップハイライト) /
 D (プロフィール) 用の読み取り専用エンドポイント群。全て決定論
 (SELECT + 整形のみ) で LLM は呼ばない。
 
 - GET /{persona_id}/day-plan      : 時間割のコマ一覧 (saiverse/day_plan.py)
-- GET /{persona_id}/photos        : メッセージに付いた観測点＝点写真 (sai_memory/photos.py)
+- GET /{persona_id}/clips        : メッセージに付いた観測点＝点クリップ (sai_memory/clips.py)
 - GET /{persona_id}/profile-tree  : 目的の木の第一階層 + 候補 (§15 の随意アクセス面)
 """
 import logging
@@ -31,8 +31,8 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
-#: /photos の message_ids 一括指定の上限 (チャット 1 画面分を想定)
-PHOTOS_BATCH_LIMIT = 100
+#: /clips の message_ids 一括指定の上限 (チャット 1 画面分を想定)
+CLIPS_BATCH_LIMIT = 100
 
 
 def _require_persona(manager: Any, persona_id: str) -> None:
@@ -196,38 +196,38 @@ def get_day_plan(
 
 
 # ---------------------------------------------------------------------------
-# C: 点写真 (観測点) のバッチ取得
+# C: 点クリップ (観測点) のバッチ取得
 # ---------------------------------------------------------------------------
 
 
-class PhotoItem(BaseModel):
-    photo_id: str                   # フロントの key 用
+class ClipItem(BaseModel):
+    clip_id: str                   # フロントの key 用
     message_id: str                 # SAIMemory (memory.db) の message id
     quote: str                      # 本文からの逐語引用 (ハイライト対象)
     purpose_ref: Optional[str]      # 目的ノード参照 ("task:N" 等)。素の予約は None
     created_at: int                 # epoch 秒
 
 
-class PhotosResponse(BaseModel):
+class ClipsResponse(BaseModel):
     persona_id: str
-    photos: List[PhotoItem]         # message_id 昇順ではなく created_at 昇順 (撮られた順)
+    clips: List[ClipItem]         # message_id 昇順ではなく created_at 昇順 (切り出された順)
 
 
-@router.get("/{persona_id}/photos", response_model=PhotosResponse)
-def list_message_photos(
+@router.get("/{persona_id}/clips", response_model=ClipsResponse)
+def list_message_clips(
     persona_id: str,
     message_ids: str,
     manager=Depends(get_manager),
-) -> PhotosResponse:
-    """メッセージ群に付いた観測点 (点写真) をバッチで返す (画面 C: ハイライト)。
+) -> ClipsResponse:
+    """メッセージ群に付いた観測点 (点クリップ) をバッチで返す (画面 C: ハイライト)。
 
     ``message_ids`` はカンマ区切りの SAIMemory message id (上限
-    :data:`PHOTOS_BATCH_LIMIT`)。**建物履歴 (building_messages) の message_id
+    :data:`CLIPS_BATCH_LIMIT`)。**建物履歴 (building_messages) の message_id
     とは別体系** — memory.db の messages.id を渡すこと (記憶ブラウズ API
     ``GET /{persona_id}/threads/{thread_id}/messages`` が返す ``id`` と同じ体系)。
 
     memory.db へのアクセスは記憶ブラウズ系と同じ ``get_adapter`` 経由
-    (adapter.conn + adapter._db_lock)。photos テーブルは adapter 初期化時に
+    (adapter.conn + adapter._db_lock)。clips テーブルは adapter 初期化時に
     冪等作成されるため、観測点ゼロのペルソナでも空リストで正しく返る。
     """
     _require_persona(manager, persona_id)
@@ -240,30 +240,30 @@ def list_message_photos(
             ids.append(mid)
     if not ids:
         raise HTTPException(status_code=400, detail="message_ids is empty")
-    if len(ids) > PHOTOS_BATCH_LIMIT:
+    if len(ids) > CLIPS_BATCH_LIMIT:
         raise HTTPException(
             status_code=400,
-            detail=f"too many message_ids: {len(ids)} (max {PHOTOS_BATCH_LIMIT})",
+            detail=f"too many message_ids: {len(ids)} (max {CLIPS_BATCH_LIMIT})",
         )
 
-    from sai_memory.photos import list_photos
+    from sai_memory.clips import list_clips
 
-    items: List[PhotoItem] = []
+    items: List[ClipItem] = []
     with get_adapter(persona_id, manager) as adapter:
         with adapter._db_lock:
             for mid in ids:
-                for photo in list_photos(adapter.conn, message_id=mid):
-                    if not photo.quote:
-                        continue  # ハイライトは引用アンカーを持つ点写真のみ対象
-                    items.append(PhotoItem(
-                        photo_id=photo.photo_id,
-                        message_id=photo.message_id,
-                        quote=photo.quote,
-                        purpose_ref=photo.purpose_ref,
-                        created_at=photo.created_at,
+                for clip in list_clips(adapter.conn, message_id=mid):
+                    if not clip.quote:
+                        continue  # ハイライトは引用アンカーを持つ点クリップのみ対象
+                    items.append(ClipItem(
+                        clip_id=clip.clip_id,
+                        message_id=clip.message_id,
+                        quote=clip.quote,
+                        purpose_ref=clip.purpose_ref,
+                        created_at=clip.created_at,
                     ))
-    items.sort(key=lambda p: (p.created_at, p.photo_id))
-    return PhotosResponse(persona_id=persona_id, photos=items)
+    items.sort(key=lambda p: (p.created_at, p.clip_id))
+    return ClipsResponse(persona_id=persona_id, clips=items)
 
 
 # ---------------------------------------------------------------------------

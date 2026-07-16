@@ -187,7 +187,7 @@ class GetConversationWindowAroundTest(unittest.TestCase):
 
 
 class ConversationThreadBoundaryTest(unittest.TestCase):
-    """thread 境界 (2026-07-12 監査 P1): SCENE 窓・範囲写真が thread を跨がない。
+    """thread 境界 (2026-07-12 監査 P1): SCENE 窓・範囲クリップが thread を跨がない。
 
     rowid は thread を跨いで単調なので、rowid 前後・範囲条件だけだと交互挿入
     された別 thread の会話が「過去の実際のやり取り」として混入する。窓・範囲の
@@ -360,7 +360,7 @@ class CoreMemoryAddSceneToolTest(unittest.TestCase):
                 anchor=ids[1], rounds=2, paste_to="core", mode="transcribe",
             )
         self.assertIn("転写しました", out)
-        self.assertIn("c:1", out)
+        self.assertIn("core:1", out)
 
         from saiverse_memory import SAIMemoryAdapter
         adapter = SAIMemoryAdapter("tester", persona_dir=self.persona_path, resource_id="tester")
@@ -439,13 +439,13 @@ class CoreMemorySceneRenderTest(unittest.TestCase):
         self.assertIn("2025-01-12", text)
         self.assertIn("過去の実際のやり取りの記録", text)
         self.assertIn("ソフィーーーー！！！いけたーーーー！！", text)
-        self.assertIn("[c:5]", text)
+        self.assertIn("[core:5]", text)
 
     def test_render_note_unchanged(self):
         item = CoreMemoryItem(memory_id=1, content="普通のメモ")
         snap = CoreMemorySnapshot(items=(item,))
         rendered = CoreMemorySection().render(snap)
-        self.assertIn("- [c:1] 普通のメモ", rendered.text)
+        self.assertIn("- [core:1] 普通のメモ", rendered.text)
         self.assertNotIn("```", rendered.text)
 
     def test_snapshot_roundtrip_with_scene_kind(self):

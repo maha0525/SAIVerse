@@ -83,7 +83,7 @@ def _stale_cutoff() -> int:
 def _short_id_label(short_id: Optional[int], page_id: str) -> str:
     """m:N 形式の参照ラベル。short_id が無ければ page_id 先頭8文字。"""
     if short_id is not None:
-        return f"m:{short_id}"
+        return f"memopedia:{short_id}"
     return page_id[:8]
 
 

@@ -120,11 +120,11 @@ def _build_toc_markdown(conn) -> Optional[str]:
 
             indent = "  " * depth
             sid = page.get("short_id")
-            id_part = f" [m:{sid}]" if sid is not None else ""
+            id_part = f" [memopedia:{sid}]" if sid is not None else ""
             title = page.get("title") or "(無題)"
 
             # [OPEN] マーカー (机に開いているページ)
-            page_ref = f"m:{sid}" if sid is not None else None
+            page_ref = f"memopedia:{sid}" if sid is not None else None
             open_mark = " [OPEN]" if page_ref and page_ref in open_refs else ""
             # ★ important マーカー
             star_mark = " ★" if page.get("is_important") else ""

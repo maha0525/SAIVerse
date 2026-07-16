@@ -39,8 +39,8 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class DeskPageItem:
     """机に開いているページ 1 件のスナップショット。"""
-    ref: str                          # 正規形 (m:N / ch:N)
-    text: str                         # 描画済み本文 (写真は抜粋)
+    ref: str                          # 正規形 (memopedia:N / chronicle:N)
+    text: str                         # 描画済み本文 (クリップは抜粋)
     purpose_ref: Optional[str] = None
 
 

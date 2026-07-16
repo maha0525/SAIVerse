@@ -29,36 +29,36 @@ interface MemoryBrowserProps {
     personaId: string;
 }
 
-/** ペルソナがメッセージ中で気に留めた言葉 = 点写真 (GET /api/people/{id}/photos) */
-interface PhotoItem {
-    photo_id: string;
+/** ペルソナがメッセージ中で気に留めた言葉 = 点クリップ (GET /api/people/{id}/clips) */
+interface ClipItem {
+    clip_id: string;
     message_id: string;
     quote: string;
     purpose_ref: string | null;
     created_at: number;
 }
 
-/** photos API のバッチ上限 (api/routes/people/life.py PHOTOS_BATCH_LIMIT と同値) */
-const PHOTOS_BATCH_LIMIT = 100;
+/** clips API のバッチ上限 (api/routes/people/life.py CLIPS_BATCH_LIMIT と同値) */
+const CLIPS_BATCH_LIMIT = 100;
 
 /**
  * 本文中の quote の最初の出現を蛍光ペン風の <mark> で強調して描画する。
  * quote が本文に見つからない場合は無視 (エラーにしない)。
- * photos が空なら本文文字列をそのまま返す (DOM 加工なし)。
+ * clips が空なら本文文字列をそのまま返す (DOM 加工なし)。
  */
-function renderContentWithPhotos(content: string, photos: PhotoItem[] | undefined): React.ReactNode {
-    if (!photos || photos.length === 0) return content;
+function renderContentWithClips(content: string, clips: ClipItem[] | undefined): React.ReactNode {
+    if (!clips || clips.length === 0) return content;
 
     // 各 quote の最初の出現位置を集め、重複・重なりは先勝ちで除外する
-    const ranges: { start: number; end: number; photo: PhotoItem }[] = [];
-    for (const photo of photos) {
-        const quote = photo.quote;
+    const ranges: { start: number; end: number; clip: ClipItem }[] = [];
+    for (const clip of clips) {
+        const quote = clip.quote;
         if (!quote) continue;
         const idx = content.indexOf(quote);
         if (idx < 0) continue;
         const end = idx + quote.length;
         if (ranges.some(r => idx < r.end && end > r.start)) continue; // 重なりはスキップ
-        ranges.push({ start: idx, end, photo });
+        ranges.push({ start: idx, end, clip });
     }
     if (ranges.length === 0) return content;
     ranges.sort((a, b) => a.start - b.start);
@@ -69,10 +69,10 @@ function renderContentWithPhotos(content: string, photos: PhotoItem[] | undefine
         if (r.start > cursor) parts.push(content.slice(cursor, r.start));
         parts.push(
             <mark
-                key={r.photo.photo_id}
+                key={r.clip.clip_id}
                 className={styles.markHighlight}
-                title={r.photo.purpose_ref
-                    ? `ペルソナが気に留めた言葉 (${r.photo.purpose_ref})`
+                title={r.clip.purpose_ref
+                    ? `ペルソナが気に留めた言葉 (${r.clip.purpose_ref})`
                     : 'ペルソナが気に留めた言葉'}
             >
                 {content.slice(r.start, r.end)}
@@ -143,8 +143,8 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         });
     };
 
-    // ペルソナが気に留めた言葉 = 点写真 (message_id → photos)。表示中ページの分だけ保持
-    const [photosByMessage, setPhotosByMessage] = useState<Record<string, PhotoItem[]>>({});
+    // ペルソナが気に留めた言葉 = 点クリップ (message_id → clips)。表示中ページの分だけ保持
+    const [clipsByMessage, setClipsByMessage] = useState<Record<string, ClipItem[]>>({});
 
     // Add message state
     const [showAddForm, setShowAddForm] = useState(false);
@@ -158,33 +158,33 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         loadThreads();
     }, [personaId]);
 
-    // 表示中メッセージの点写真 (気に留めた言葉) をバッチ取得する。
-    // photos はあくまで装飾 — 取得失敗は無視し、本文表示には影響させない。
+    // 表示中メッセージの点クリップ (気に留めた言葉) をバッチ取得する。
+    // clips はあくまで装飾 — 取得失敗は無視し、本文表示には影響させない。
     useEffect(() => {
         const ids = messages.map(m => m.id).filter(Boolean);
         if (ids.length === 0) {
-            setPhotosByMessage({});
+            setClipsByMessage({});
             return;
         }
         let cancelled = false;
         (async () => {
-            const collected: Record<string, PhotoItem[]> = {};
-            for (let i = 0; i < ids.length; i += PHOTOS_BATCH_LIMIT) {
-                const chunk = ids.slice(i, i + PHOTOS_BATCH_LIMIT);
+            const collected: Record<string, ClipItem[]> = {};
+            for (let i = 0; i < ids.length; i += CLIPS_BATCH_LIMIT) {
+                const chunk = ids.slice(i, i + CLIPS_BATCH_LIMIT);
                 try {
                     const res = await fetch(
-                        `/api/people/${personaId}/photos?message_ids=${encodeURIComponent(chunk.join(','))}`
+                        `/api/people/${personaId}/clips?message_ids=${encodeURIComponent(chunk.join(','))}`
                     );
                     if (!res.ok) continue;
                     const data = await res.json();
-                    for (const photo of (data.photos ?? []) as PhotoItem[]) {
-                        (collected[photo.message_id] = collected[photo.message_id] || []).push(photo);
+                    for (const clip of (data.clips ?? []) as ClipItem[]) {
+                        (collected[clip.message_id] = collected[clip.message_id] || []).push(clip);
                     }
                 } catch {
-                    // photos が取れなくても閲覧は続行
+                    // clips が取れなくても閲覧は続行
                 }
             }
-            if (!cancelled) setPhotosByMessage(collected);
+            if (!cancelled) setClipsByMessage(collected);
         })();
         return () => { cancelled = true; };
     }, [messages, personaId]);
@@ -846,7 +846,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         </div>
                                     ) : (
                                         <>
-                                            {renderContentWithPhotos(msg.content, photosByMessage[msg.id])}
+                                            {renderContentWithClips(msg.content, clipsByMessage[msg.id])}
                                             {overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && (
                                                 <div className={styles.contentFade} />
                                             )}

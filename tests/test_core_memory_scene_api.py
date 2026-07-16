@@ -196,7 +196,7 @@ class CoreMemorySceneApiTest(unittest.TestCase):
     def test_create_scene(self):
         req = CreateSceneRequest(anchor_id=self.ids[1], rounds=2)
         resp = create_scene("tester", req, manager=self.manager)
-        self.assertEqual(resp.ref, f"c:{resp.memory_id}")
+        self.assertEqual(resp.ref, f"core:{resp.memory_id}")
         self.assertEqual(resp.message_count, 3)
         self.assertGreater(resp.char_count, 0)
         self.assertEqual(resp.total_chars, resp.char_count)
@@ -209,15 +209,15 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(listing.items[0].kind, "scene")
         self.assertIn("ソフィー", listing.items[0].preview)
 
-        # 由来参照が範囲写真として撮られ、このコア記憶に貼られている
-        # (土地参照の統一プリミティブ、concept_consolidation.md「写真」)
-        from sai_memory.photos import list_photos
+        # 由来参照が範囲クリップとして撮られ、このコア記憶に貼られている
+        # (土地参照の統一プリミティブ、concept_consolidation.md「クリップ」)
+        from sai_memory.clips import list_clips
         with self.adapter._db_lock:
-            photos = [p for p in list_photos(self.adapter.conn) if p.is_range]
-        self.assertEqual(len(photos), 1)
-        self.assertEqual(photos[0].pasted_to, f"c:{resp.memory_id}")
-        self.assertEqual(photos[0].message_id, self.ids[0])
-        self.assertEqual(photos[0].message_id_end, self.ids[2])
+            clips = [p for p in list_clips(self.adapter.conn) if p.is_range]
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0].pasted_to, f"core:{resp.memory_id}")
+        self.assertEqual(clips[0].message_id, self.ids[0])
+        self.assertEqual(clips[0].message_id_end, self.ids[2])
 
     def test_create_scene_missing_anchor_404(self):
         from fastapi import HTTPException
@@ -375,7 +375,7 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         pending = self._pending_perceptions()
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0].kind, "core_memory_correction")
-        self.assertEqual(pending[0].reduce_key, f"c:{mid}")
+        self.assertEqual(pending[0].reduce_key, f"core:{mid}")
         self.assertIn("ユーザーが直した新しい本文", pending[0].content)
 
         # 消費 (Pulse 相当) すると 1 メッセージで SAIMemory に入り、バッファは空になる。
@@ -384,7 +384,7 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         n = notices[0]
         self.assertIn("ユーザーが直した新しい本文", n["content"])
-        self.assertIn(f"c:{mid}", n["content"])
+        self.assertIn(f"core:{mid}", n["content"])
         self.assertEqual(n["role"], "user")
         self.assertEqual(n["line_role"], "main_line")
         self.assertEqual(n["scope"], "committed")

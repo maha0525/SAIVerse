@@ -1475,10 +1475,13 @@ class SEARuntime:
         try:
             thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
             inserted_id = adapter.append_persona_message(message, thread_suffix=thread_suffix)
-            # 層1マーカー由来の観測点を点写真として保存 (アンカー = 挿入されたメッセージ)。
-            # hasattr ガードはテストのスタブ adapter (add_photos 未実装) 対策。
-            if mark_spans and inserted_id and hasattr(adapter, "add_photos"):
-                adapter.add_photos(inserted_id, mark_spans)
+            # 層1マーカー由来の観測点を点クリップとして保存 (アンカー = 挿入されたメッセージ)。
+            # hasattr ガードはテストのスタブ adapter (add_clips 未実装) 対策。
+            # 注意: このガードは綴りが違えば黙って no-op になる — メソッド名を変える
+            # ときは必ず両方を揃えること (2026-07-15 の写真→クリップ改名で、ここが
+            # add_photos のまま残りクリップが 1 枚も保存されなくなった)。
+            if mark_spans and inserted_id and hasattr(adapter, "add_clips"):
+                adapter.add_clips(inserted_id, mark_spans)
             if return_message_id:
                 return inserted_id or ""
             return True

@@ -1808,7 +1808,7 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     口調のアンカー (scene) にシステム通知が混入すると手本として劣化するため。
 
     ``get_conversation_window_around`` (コア記憶 scene) と
-    ``get_conversation_messages_between`` (範囲写真の読み出し) が共用する
+    ``get_conversation_messages_between`` (範囲クリップの読み出し) が共用する
     (同じ「実会話」定義を一点管理)。
     """
     tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
@@ -1834,7 +1834,7 @@ def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:
     としてメインラインへ再注入していた。想起の message ソースは「実会話のみ」。
 
     定義は一点管理の合成:
-    - ``_conversation_exclusion()`` — SCENE / 範囲写真と同じ実会話定義
+    - ``_conversation_exclusion()`` — SCENE / 範囲クリップと同じ実会話定義
       (Stelis スレッド除外・handy_tool/spell/event_message タグ除外・
       sub_line/meta_judgment/nested line_role 除外・role は user/model/assistant
       のみ・'<system>' 始まり本文の除外)
@@ -1857,12 +1857,12 @@ def get_conversation_messages_between(
     start_message_id: str,
     end_message_id: str,
 ) -> Optional[List[Message]]:
-    """範囲写真が指す [start, end] 区間 (両端含む) の実会話メッセージを返す。
+    """範囲クリップが指す [start, end] 区間 (両端含む) の実会話メッセージを返す。
 
-    Memory Atlas の ``memory_read p:N`` (範囲写真の全文読み出し) が使う。区間の
+    Memory Atlas の ``memory_read p:N`` (範囲クリップの全文読み出し) が使う。区間の
     中身には ``get_conversation_window_around`` と同一の「実会話」フィルタを適用
-    する — SCENE 由来の範囲写真は clip 時と同じ窓が再現され、区間内に後から
-    混ざったツール実行ログ等は範囲写真の読み出しにも混入しない。
+    する — SCENE 由来の範囲クリップは clip 時と同じ窓が再現され、区間内に後から
+    混ざったツール実行ログ等は範囲クリップの読み出しにも混入しない。
 
     thread 境界 (2026-07-12 監査 P1): 区間の中身は両端と同一 thread の行に限定
     する。rowid は thread を跨いで単調なので、範囲条件だけだと交互挿入された
