@@ -148,3 +148,8 @@
 
 - **P1×7 / P2×2**
 - 一次監査は完了。以後は修正追跡と回帰固定へ移る。
+
+## 裁定（2026-07-16・まはー）
+
+- **multi-city は凍結**: 「City dispatch の確定処理未実装」「来訪 profile の署名 token」の 2 finding は、state machine / 署名 handshake の実装ではなく**機能凍結 + 入口封鎖**で対応する。実装タスク: inter-city move-in API と VisitingAI polling の明示無効化（黙って動かないのではなく、封鎖されている旨を返す）。SDS は元より冬眠中。復活は複数インスタンス需要が実体化した時に、本監査の修正方針（dispatch ID の state machine・冪等 handshake・署名 binding）を正典として再設計する。
+- version 完全一致要求（第二陣で実装済み）は凍結後も入口封鎖の一部として維持する。

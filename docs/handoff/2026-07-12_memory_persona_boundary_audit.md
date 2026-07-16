@@ -249,3 +249,8 @@ Memory Atlas P4-a には別文書で P1×3（fold契約不一致、split本文�
 ## 次の監査片
 
 一次監査完了。集計は **P1×18 / P2×2**（直結するAtlas編纂レビューP1×3を含む）。うち **P1×8 / P2×1 は修正・回帰固定済み**（2026-07-16: snapshot restoreのstaging/rollback化を第二陣で消し込み）、P1×2はまはー裁定で現状仕様として保留、残りは修正待ち（Metabolism×3、native import×2+P2×1、Building転記/RemoteProxy/heard_by×3）。次はP0サブシステム `migration / upgrade / backup` へ移る。
+
+**裁定追記（2026-07-16・まはー）**:
+- 第6片の RemoteProxy 思考転送・visitor heard_by の P1×2 は **multi-city 凍結**スコープへ（Persona/City/Building 監査の裁定と同一。入口封鎖で対応、修正はしない）。
+- 第5片の native import P1×2 / P2×1 は監査の修正方針どおり**「同一 persona への復元」と「別 persona への移植」の分離**で修正する（復元は source/target 不一致を拒否、移植は thread/resource/Stelis ID を原子的に写像して元 ID を provenance に保持）。
+- 第4片の Metabolism×3 は Beat/ExecutionContext 統合工事（`docs/intent/beat_execution_context.md` §3.2）で対応する。
