@@ -6,7 +6,7 @@
 
 SAIVerseでは、複数のCityを独立したインスタンスとして起動し、ネットワーク経由で連携させることができます。ペルソナは他のCityに「訪問」し、そこで活動することが可能です。
 
-> ⚠️ **現状は冬眠中**: 都市間連携（SDS）はデフォルト無効で、単一 City 運用が通常。使うには City を online mode（`START_IN_ONLINE_MODE`、既定 off）にした上で SDS を別プロセスで起動する必要がある（→ [SDS](../concepts/sds.md) / [landscape §8](../overview/landscape.md)）。以下は将来 multi-city を復活させる際の仕様。
+> 🧊 **凍結中（2026-07-16 裁定）・入口封鎖済み**: multi-city 機能は凍結が確定し、入口は明示的に封鎖されている — `/inter-city/*` と `/persona-proxy/{id}/think` API は 503 + 凍結メッセージを返し、`VisitingAI` / `ThinkingRequest` の DB polling は起動しない。dispatch 確定処理が未実装のまま二 City 同時 presence を作る欠陥が一次監査で判明したため（→ [landscape §8](../overview/landscape.md) / [SDS](../concepts/sds.md)）。復活時は監査の修正方針を正典に再設計する。以下は凍結前の仕様の記録。
 
 ## アーキテクチャ
 

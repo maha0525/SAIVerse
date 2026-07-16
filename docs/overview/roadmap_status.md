@@ -114,7 +114,7 @@
 
 ## 8. 復活予定
 
-- 💤 **SDS / multi-city**（現状単一 City 運用のため停止中。将来 inter-city travel を復活させる際に再起動）
+- 🧊 **SDS / multi-city**（**2026-07-16 まはー裁定で凍結・入口封鎖済み** — inter-city API は 503、VisitingAI/ThinkingRequest polling は不起動。dispatch 確定処理未実装の欠陥が一次監査で判明したため。復活時は [persona_city_building 監査](../handoff/2026-07-15_persona_city_building_separation_audit.md)の修正方針を正典に再設計。SDS 自体は元より冬眠中 → [landscape §8](landscape.md)）
 
 ---
 

@@ -169,7 +169,7 @@ SAIVerseManager の Mixin クラス群。
 ```
 manager/
 ├── admin.py          # 管理機能
-├── background.py     # バックグラウンド処理
+├── background.py     # バックグラウンド処理（inter-city DB polling — multi-city 凍結で不起動）
 ├── blueprints.py     # ブループリント
 ├── gateway.py        # Gateway 連携
 ├── history.py        # 履歴管理
@@ -179,7 +179,7 @@ manager/
 ├── runtime.py        # ランタイム
 ├── sds.py            # SDS 連携
 ├── state.py / user_state.py # 状態管理
-└── visitors.py       # 訪問者管理（inter-city）
+└── visitors.py       # 訪問者管理（inter-city — multi-city 凍結で入口封鎖済み）
 ```
 
 ### sai_memory/
@@ -225,7 +225,7 @@ tools/
 ```
 database/
 ├── models.py         # SQLAlchemy モデル
-├── api_server.py     # DB API サーバー
+├── api_server.py     # DB API サーバー（inter-city / persona-proxy ルートは凍結封鎖: 503）
 ├── db_manager.py     # DB マネージャ
 ├── migrate.py        # マイグレーション（自動バックアップ付き）
 ├── seed.py           # 初期データ（⚠️ 全データ削除）

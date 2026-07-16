@@ -8,7 +8,13 @@ class DatabasePollingMixin:
     """Background database polling helpers for SAIVerseManager.
 
     Phase 4-e: 旧 ``_db_polling_loop`` (固定 3 秒 sleep ループ) は廃止。
-    EventScheduler.schedule_periodic 経由で ``_db_polling_tick`` を呼ぶ。
+    EventScheduler.schedule_periodic 経由で ``_db_polling_tick`` を呼ぶ設計だった。
+
+    ⚠️ multi-city 凍結 (2026-07-16 まはー裁定): 現在このポーリングは
+    EventScheduler に**登録されない** (SAIVerseManager.__init__ 参照)。
+    関数本体は復活時の参考のため残置している。復活時は
+    docs/handoff/2026-07-15_persona_city_building_separation_audit.md の
+    修正方針を正典に再設計する。
     """
 
     def _db_polling_tick(self):

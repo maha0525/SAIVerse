@@ -190,7 +190,7 @@ python scripts/migrate_to_user_data.py             # Execute
 **SAIVerseManager** (`saiverse/saiverse_manager.py`)
 - Central orchestrator for the entire world
 - Manages all PersonaCore and Building instances in memory
-- Polls `VisitingAI` and `ThinkingRequest` tables for inter-city coordination
+- ~~Polls `VisitingAI` and `ThinkingRequest` tables for inter-city coordination~~ — **frozen 2026-07-16** (multi-city 凍結、polling は起動しない)
 - Delegates movement operations to OccupancyManager
 - Handles SDS registration and heartbeat
 
@@ -218,9 +218,9 @@ python scripts/migrate_to_user_data.py             # Execute
 **ConversationManager** (`saiverse/conversation_manager.py`) — **legacy / no-op**
 - Old autonomous-conversation driver, no-op since the 2026-05-01 cognitive-model migration. Its v1 successors — `SubLineScheduler` (`saiverse/pulse_scheduler.py`, ~5s poll) and the `track_autonomous` playbook — are themselves **removed** as part of the autonomous-behavior-v2 migration (module deleted 2026-07-06, playbook retired 2026-07-10). Current autonomous driving is the **time-table + judgment points** (`saiverse/autonomy_wiring.py`; `AutonomyManager` now runs a watchdog-only tick). Class removal of `ConversationManager` itself is still a pending cleanup (see landscape §9).
 
-**RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`)
+**RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`) — **frozen (multi-city 凍結)**
 - Lightweight proxy for visiting personas from other cities
-- Delegates thinking to home city via `/persona-proxy/{id}/think` API
+- Delegates thinking to home city via `/persona-proxy/{id}/think` API (API は凍結封鎖済みで 503 を返す)
 
 ### Data Flow
 
@@ -228,7 +228,7 @@ python scripts/migrate_to_user_data.py             # Execute
 
 **Autonomous Pulse**: Time-table (day plan) + judgment points (`saiverse/autonomy_wiring.py`) / `AutonomyManager` watchdog → PulseController → SEARuntime → think/speak nodes → SAIMemory
 
-**Inter-City Travel** (DB-mediated, not direct API calls):
+**Inter-City Travel** — **🧊 frozen 2026-07-16 (まはー裁定)・入口封鎖済み**: `/inter-city/*` と `/persona-proxy/{id}/think` API は 503 + 凍結メッセージ、VisitingAI/ThinkingRequest polling は不起動、`dispatch_persona`/`return_visiting_persona` は封鎖メッセージを返す。復活時は `docs/handoff/2026-07-15_persona_city_building_separation_audit.md` の修正方針を正典に再設計（→ landscape §8）。凍結前の仕様 (DB-mediated, not direct API calls):
 1. Source city writes `VisitingAI` record with status='requested'
 2. Destination city polls DB, finds request, creates RemotePersonaProxy, updates status='accepted'/'rejected'
 3. Source city polls DB, sees acceptance, sets persona IS_DISPATCHED=True
@@ -426,8 +426,8 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 - **AI**: home city, system prompt, emotion state, AUTONOMY_ENABLED (bool, default True — 自律行動の ON/OFF **だけ**。会話への返答は止めない。「いま活動時間か」は別概念のライフが持つ), IS_DISPATCHED flag, DEFAULT_MODEL
   - ⚠️ 旧 `ACTIVITY_STATE` (Stop/Sleep/Idle/Active) は 2026-07-14 に解体・列ごと削除。実装上は「Active か否か」しか効いておらず、残り 3 値は名前だけだった (`docs/overview/landscape.md` §9)
 - **BuildingOccupancyLog**: tracks entry/exit timestamps
-- **VisitingAI**: manages inter-city move transactions (status: requested/accepted/rejected)
-- **ThinkingRequest**: queues remote thinking calls (status: pending/processed/error)
+- **VisitingAI**: manages inter-city move transactions (status: requested/accepted/rejected) — **frozen** (multi-city 凍結、polling 不起動でテーブルは処理されない)
+- **ThinkingRequest**: queues remote thinking calls (status: pending/processed/error) — **frozen** (同上)
 - **Tool** + **BuildingToolLink**: legacy table for associating tools with buildings — **currently unused**. Tools reach personas via Spell (`spell=True`) or Playbook TOOL nodes, not this table.
 - **Blueprint**: templates for creating new personas
 - **Playbook**: stores SEA playbook schemas and nodes

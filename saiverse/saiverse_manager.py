@@ -476,15 +476,19 @@ class SAIVerseManager(
         self.world_items = self.item_service.world_items
         self.item_registry = self.items  # Alias for UI compatibility
 
-        # Phase 4-e: DB polling を EventScheduler に push (旧: 専用 thread + 3s sleep ループ)。
-        # ``self.db_polling_stop_event`` は外部 (例: shutdown 経路) からの停止フラグ
-        # 互換のため残す。EventScheduler 側は schedule_periodic で処理。
+        # multi-city 凍結 (2026-07-16 まはー裁定): inter-city DB polling
+        # (VisitingAI / ThinkingRequest、旧 key="db_polling") は起動しない。
+        # dispatch 確定処理が未実装のまま二 City 同時 presence を作る欠陥があり
+        # (docs/handoff/2026-07-15_persona_city_building_separation_audit.md)、
+        # 修正ではなく機能凍結 + 入口封鎖で対応した。ポーリング関数本体
+        # (manager/background.py) は残すが、EventScheduler への登録は行わない。
+        # 環境変数等での再有効化の口は意図的に作らない — 復活時は上記監査の
+        # 修正方針を正典に git から再設計する。
+        # ``self.db_polling_stop_event`` は shutdown 経路の互換のため残す。
         self.db_polling_stop_event = threading.Event()
-        self.event_scheduler.schedule_periodic(
-            interval_seconds=3,
-            callback=self._db_polling_tick,
-            key="db_polling",
-            first_fire_immediate=True,
+        logging.info(
+            "multi-city 機能は凍結中のため、inter-city DB polling "
+            "(VisitingAI / ThinkingRequest) は起動しません (2026-07-16 裁定)。"
         )
 
         # NOTE: 自律会話マネージャ・AutonomyManager (Active ペルソナ)・server_start

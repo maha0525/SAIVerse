@@ -391,11 +391,15 @@ graph TD
 
 ---
 
-## 8. 冬眠中
+## 8. 冬眠中・凍結
+
+### multi-city / inter-city travel（凍結・入口封鎖済み）
+
+ペルソナが別の SAIVerse インスタンス（City）へ出張する機構（`VisitingAI` / `ThinkingRequest` テーブル仲介 + `RemotePersonaProxy`）。一次監査（[persona_city_building 監査](../handoff/2026-07-15_persona_city_building_separation_audit.md)）で dispatch 確定処理（`_finalize_dispatch`）が呼ばれず、Proxy の思考転送も本番経路に未接続で**実質機能していない**ことが判明し、**2026-07-16 まはー裁定で凍結**が確定した（死んだのではなく、複数インスタンス需要が実体化するまで意図的に止める）。凍結は黙って動かない状態ではなく**入口の明示封鎖**: `/inter-city/*`・`/persona-proxy/{id}/think` API は 503 + 凍結メッセージを返し（`database/api_server.py`）、VisitingAI / ThinkingRequest の DB polling は起動せず（`SAIVerseManager.__init__`）、`dispatch_persona` / `return_visiting_persona` は封鎖メッセージを返す（`manager/visitors.py`）。version 完全一致要求（`place_visiting_persona`）は封鎖の一部として維持。再有効化フラグは意図的に無い — 復活時は同監査の修正方針（dispatch ID の state machine・冪等 handshake・署名 binding）を正典に git から再設計する。
 
 ### SDS (SAIVerse Directory Service)
 
-複数の City プロセスを発見・追跡するインメモリ・レジストリ（`sds_server.py`、port 8080）。各 City が起動時に `/register`、`/heartbeat` で生存通知し、他 City は `/cities` で一覧を取得する。inter-city travel の前提機構として作られたが、**現状はデフォルト無効**（City の online mode `START_IN_ONLINE_MODE` が既定 off のため SDS 登録が走らない。別プロセスで SDS 起動 + City を online mode 化が必要）で、単一 City 運用に止まっているため**実質冬眠中**。将来 multi-city を復活させる際に再起動する想定。
+複数の City プロセスを発見・追跡するインメモリ・レジストリ（`sds_server.py`、port 8080）。各 City が起動時に `/register`、`/heartbeat` で生存通知し、他 City は `/cities` で一覧を取得する。inter-city travel の前提機構として作られたが、**現状はデフォルト無効**（City の online mode `START_IN_ONLINE_MODE` が既定 off のため SDS 登録が走らない。別プロセスで SDS 起動 + City を online mode 化が必要）で、単一 City 運用に止まっているため**実質冬眠中**。multi-city 本体は上記の通り凍結済みで、復活させる際に SDS も再起動する想定。
 
 ---
 

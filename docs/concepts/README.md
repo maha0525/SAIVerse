@@ -47,9 +47,9 @@ SAIVerse の中核概念を「**何で・どう動き・どこに実装され・
 - [Addon](addon.md) — 拡張点を束ねる配布・導入単位
 - [MCP / Elicitation](mcp.md) — 外部ツールサーバー接続
 
-## 冬眠中（landscape §8）
+## 冬眠中・凍結（landscape §8）
 
-- [SDS](sds.md) — 複数 City を発見するレジストリ（inter-city travel の前提）
+- [SDS](sds.md) — 複数 City を発見するレジストリ（inter-city travel の前提。multi-city 本体は 2026-07-16 裁定で凍結・入口封鎖済み）
 
 ---
 

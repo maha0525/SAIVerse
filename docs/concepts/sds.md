@@ -2,6 +2,8 @@
 
 > 開発者向け概念リファレンス。**全体の位置づけ**は [landscape §8](../overview/landscape.md) を参照。**現状は冬眠中**。
 
+> 🧊 **multi-city 機能は凍結（2026-07-16 まはー裁定）**: SDS が前提とする inter-city travel は、dispatch 確定処理が未実装のまま二 City 同時 presence を作る欠陥が一次監査で判明し（[persona_city_building 監査](../handoff/2026-07-15_persona_city_building_separation_audit.md)）、修正ではなく凍結が確定した。**入口は封鎖済み**: `/inter-city/*`・`/persona-proxy/{id}/think` API は 503 + 凍結メッセージを返し、VisitingAI / ThinkingRequest の DB polling は起動せず、`dispatch_persona` / `return_visiting_persona` は封鎖メッセージを返す。SDS は元より冬眠中。復活時は同監査の修正方針（dispatch state machine・冪等 handshake・署名 binding）を正典に再設計する。
+
 ## 一言で
 
 複数の [City](building-city.md) プロセスを発見・追跡するインメモリ・レジストリ。
