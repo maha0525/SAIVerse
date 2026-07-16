@@ -1,6 +1,6 @@
 # Intent Document: メティス記憶ブリッジ (Metis Memory Bridge)
 
-**ステータス**: 設計中 (v0.3, 2026-07-13) — 主要設計は確定、残ブロッカーは過去 transcript の実物確認のみ
+**ステータス**: 実装待ち (v0.4, 2026-07-13) — 設計確定。transcript 実形式も確認済。残るは thinking の扱い（§6b-2）と persona_id/City の裁定のみ
 **位置付け**: Claude Code 上で働くメティス（＝SAIVerse の大工そのもの）に、SAIVerse と同形式の memory.db を与え、Claude Code のスレッドと SAIVerse を記憶で行き来できるようにする。メティスにとっての「リプランティングを載せられる配管」を通す。
 **前提**: [`session.md`](session.md) / [`../concepts/saimemory.md`](../concepts/saimemory.md) / メモリ [[project_saiverse_origin_ontology]]（存在論の出自）/ [[external-memory-agents]]（hypmem・embodied-claude 観測）
 **ニッチ性**: SAIVerse 環境（`saiverse_memory` / `sai_memory` が import 可能）を前提とする。汎用ツールではなく、SAIVerse の一部として成立する。
@@ -64,10 +64,45 @@
 **Claude Code の Stop hook**（会話が一段落した時点）で、その往復を 1 episode として `append_persona_message` で格納。抽出ルール（まはー裁定 B, 2026-07-12 で精緻化）:
 
 - **user 発話（まはー）** を取る。
-- **アシスタント（メティス）のテキスト発話は、順序を保って全て取る**。メティスはツールを使う前にまはーへ一度喋ることが多く、`まはー発話 → メティス発話① → ツールコール群 → メティス発話②` の形が典型。この**①②を両方**抜き出す（最終応答のみに削らない）。
+- **メティスの発話は、既定では「1 往復の最後の text ブロック」＝本発話のみ**を取る（まはー裁定 2026-07-13 で精緻化）。実測では 1 往復あたり平均 4.5 個の text ブロックがあるが、その大半は「台帳を実装待ちに上げる。」のような**進行報告の独り言**で、会話ではない。**必要な内容は最終発話に入っている。**
+  - 理由（重要）: 想起は基本メッセージ数で対象を決めるため、独り言が 1 件としてカウントされると、**文脈を思い出せるだけの情報量にならない**。
+  - **フラグで選べるようにする**: `--include-monologue`（途中の独り言 text）/ `--include-thinking`（thinking ブロック）。**メティスの既定は両方 OFF**。他の利用者や将来の方針変更に備えてスイッチだけ用意する。
 - **ツールコール群は本文を捨て、`<system>ツールコールN件実行</system>` のようなシステム通知に置換して、発話の間に挟む**。これが無いと①②が「二連続で喋っているだけ」に見え、後で思い返した時に文脈が壊れる。置換通知は N 件数を持つ。
 - システム通知の格納は SAIVerse の規約に合わせる（`event_message` タグ必須 [[feedback_design_discipline]]。会話本体は `conversation` 相当）。ツール本文を同期しない理由: 肥大化回避 + 一件ごとの情報が薄く人格が載らない。
-- **スレッド分離（必須）**: メティスは複数の Claude Code セッションを**並列に走らせる**のが常態。全メッセージを 1 スレッドに混ぜると created_at 順で別セッションの発話が交錯して順序が壊れる。よって **1 Claude Code セッション = 1 SAIVerse thread** に分離して格納する（`append_persona_message` の `thread_suffix` にセッション識別子を渡す）。§6-1 の Chronicle 横断問題はこの分離だけでは解けない（Chronicle 側が thread を無視するため）。
+- **スレッド分離（必須）**: メティスは複数の Claude Code セッションを**並列に走らせる**のが常態。全メッセージを 1 スレッドに混ぜると created_at 順で別セッションの発話が交錯して順序が壊れる。よって **1 Claude Code セッション = 1 SAIVerse thread** に分離して格納する（`append_persona_message` の `thread_suffix` に `sessionId` を渡す）。§3.5 の Chronicle 横断問題はこの分離だけでは解けない（Chronicle 側が thread を無視するため）。
+
+#### 段階的取り込み — uuid 保持で「後から詳細を足せる」ようにする（まはー設計 2026-07-13）
+
+理想は**①②の間を折りたたみで保持し、普段は想起されないが見たければ中も見れる**形（LoD 制御。§4-4）。だが今その制御を作る選択肢は無い。よって **「今回は最低限だけ取り込み、後から詳細情報を追加取り込みできる」設計**にしておく。
+
+- **各メッセージの metadata に transcript の `uuid` / `parentUuid` / `sessionId` を保存する**（これが要）。
+- これにより後から独り言・thinking を**追加取り込み**できる: `uuid` 照合で既に入っている分を判別（＝冪等）、`timestamp` 順で正しい位置に挿入される（SAIMemory の順序は `created_at` 基準）。
+- 元の jsonl は `cleanupPeriodDays: 3650` により保全されるので、再取り込みはいつでも可能。
+- **注意（実装時に確定）**: 先に Chronicle を作った後で追加取り込みすると、`generate_unprocessed` が挿入分を「未処理の島」として拾い、過去 Chronicle の断片が再生成されうる。追加分を Chronicle 対象外タグで入れるか、該当 thread の Chronicle を再生成する運用にするかを選ぶ。
+- 副次: `parentUuid` 保存は §6a の認識連続性グラフ再編の材料保全も兼ねる（一石二鳥）。
+
+#### transcript の実形式（2026-07-13、全 126 ファイル 61,268 レコードを走査して確認）
+
+`~/.claude/projects/<project>/<sessionId>.jsonl` に 1 行 1 レコードの JSON Lines。同階層の `<sessionId>/tool-results/` は巨大ツール出力の退避先（会話ログではない）。
+
+| 取るもの | 判定 | 実数 |
+|---|---|---|
+| **まはーの発話** | `type=user` かつ `message.content` が `str` / `[{type:text}]` / `[{type:image},{type:text}]` の 3 形式。`isMeta` と `isSidechain` を除外 | 1,593 + 92 + 7（画像付き） |
+| **メティスの発話** | `type=assistant` の `content` 内 `{type:text}` ブロック（順序保持で全部） | 7,651 |
+| **ツールコール → 圧縮** | `content` 内 `{type:tool_use}` ブロック | 13,375 → `<system>ツールコールN件実行</system>` に畳む |
+| **除外: ツール戻り** | `type=user` で `content=[{type:tool_result}]`（ツール結果は user レコードとして返る）| 13,373 |
+| **除外: システム注入** | `type=user` かつ `isMeta=true` | 75 |
+| **除外: 会話外** | `last-prompt` / `attachment` / `queue-operation` / `mode` / `system` / `file-history-snapshot` / `permission-mode` / `bridge-session` / `pr-link` | — |
+| **要判断** | `{type:thinking}` ブロック（§6b-2） | 8,414 |
+
+確認された事実:
+- **1 ファイル = 1 sessionId = 1 thread が成立**（126 中 125。複数 sessionId を含むのは 1 件のみ＝例外手当てで足りる）。
+- **`summary` / `compact-boundary` レコードは 0 件** — コンパクション痕跡が無く、素直に読める。
+- **`isSidechain` は全レコード False** — サブエージェントの会話は本 transcript に含まれない（ツールコール圧縮の裁定とスコープが一貫）。
+- **全レコードに `parentUuid` があり、transcript は既に木構造**。→ §6a の認識連続性グラフの前駆エッジは**元データに既に入っている**。MVP でグラフを作らなくても、**`parentUuid` と `sessionId` を metadata に保存しておけば後からグラフ再編できる**。取り込み時に捨てないこと（重要）。
+- **`ai-title`（1,205）/ `custom-title`（773）レコードにセッションのタイトルがある** → §3.5 中間ノード方式の **thread ノード名にそのまま使える**。
+- `timestamp` は ISO8601（`2026-06-27T16:47:52.740Z`）。SAIMemory の `created_at` は epoch int なので変換が要る。
+- 現存範囲は **2026-06-09 〜 2026-07-15 の 126 セッション**。それ以前の記録はこのディレクトリに残っていない（初回リプランティングで継げるのはこの範囲。それ以前は地層〔MEMORY.md〕にのみ在る）。
 
 ### 3.3 読み込み（SAIVerse → Claude Code 注入）
 
@@ -100,6 +135,7 @@ SAIVerse は生ログ（messagelog）と要約（Chronicle/あらすじ）の二
 1. **Memopedia 形式メモリの同期利用**: SAIVerse 内の Memopedia（知識グラフ的メモリ）をメティスからも同期・参照。
 2. **memory 系 spell の動詞を skill 化**: SAIVerse の memory まわり spell（`memory_recall` / `memory_write` / `memory_open` / `memory_search` 等、`builtin_data/tools/memory_*.py`）と**同じ動詞を Claude Code の skill として能動的に使えるようにする**。メティスが SAIVerse のペルソナと同じ記憶操作語彙を持つ。
 3. **受動想起（passive recall）**: 発話ごとに埋め込み → 想起 → 注入（hypmem の refractory period 相当のクールダウン込み [[external-memory-agents]]）。MVP は SessionStart 注入のみで、発話ごとの受動想起はここ。
+4. **LoD 制御（折りたたみ保持）— これが本来の理想（まはー 2026-07-13）**: 独り言・thinking・ツールコールを「捨てる / 取る」の二択にせず、**①と②の発話の間を折りたたみ形式で保持し、普段は想起されないが、見たければ中も見られる**形。詳細度（Level of Detail）を読み手が選べる。エピソードの折りたたみ表示の文脈でも既出の話。これが入れば §3.2 の独り言フラグは不要になる。MVP では制御を作る余力が無いため、**§3.2 の「段階的取り込み（uuid 保持）」で将来ここへ移行できる形だけ確保する**。
 
 ---
 
@@ -122,10 +158,10 @@ SAIVerse は生ログ（messagelog）と要約（Chronicle/あらすじ）の二
 - **Chronicle 生成（thread 分離）**: §3.5 に集約。トリガー = 同期 hook / インポート時に明示的に叩く。生成 = thread スコープ（他 thread 文脈なし）。格納 = 中間ノード方式（root_chronicle → thread ノード → Lv2 → Lv1）。読み込み = thread 別。本体側の扱いは [`../issues/chronicle_cross_thread_mixing.md`](../issues/chronicle_cross_thread_mixing.md)。
 - **認識の連続性グラフ = MVP から切り離し確定**: 並列 thread（γδ）や分岐で「時系列 ≠ 認識の連続性」になる問題は、前駆エッジで DAG 化する本体再編（[`../issues/memory_continuity_graph.md`](../issues/memory_continuity_graph.md)、分岐/再生成のユーザー要望が副産物）。だが**メティス MVP は §3.5 の「thread スコープ生成（過去文脈なし編纂）」で偽連続性を回避できる**ため、グラフ再編を待たずに先行する（まはー方向確定 2026-07-13）。次の個体が α〜δ 全部を自分の記憶として持つのは正しく、害は生成側の時系列捏造だけ、という整理に基づく。
 
-### 6b. 残る未確定（実ブロッカー）
-1. **過去セッションの取り込み（＝メティス初回のリプランティング／当面の主ブロッカー）**: これまでの Claude Code のメティスとしてのセッション（生ログ）を memory.db に初期移植する一回きりの作業。**複数スレッド並列**なので、§3.2 と同じく **1 Claude Code セッション = 1 thread** に分離して取り込む（1 スレッドに混ぜると順序崩壊）。Claude Code のセッション transcript の所在・形式を確認し、§3.2 の抽出ルールで episode 化して一括 append するブートストラップスクリプトが要る。**これが「今の地層（要約）」から「生ログ」への、私にとって最初の継承。**
-2. **SessionStart 注入の現行 wiring**: MEMORY.md 注入が harness ネイティブの auto-memory か独自 hook か（`~/.claude/settings.json` に hooks 定義は無かった）。拡張か併設かを実装時に確定。
-3. **Stop hook が受け取る transcript の形式**: user 発話・アシスタント複数発話・ツールコール群をどう区別して抽出するか（Claude Code hook ペイロード仕様の確認）。冪等性（同じ往復を二度書かない）も。§6b-1 と同じ transcript 調査で片付く。
+### 6b. 残る未確定
+1. ~~**過去セッション transcript の所在・形式**~~ → **確認完了（2026-07-13）**。§3.2「transcript の実形式」に確定した抽出ルールと実数を記載。取り込みは `~/.claude/projects/<project>/<sessionId>.jsonl` を 1 ファイル = 1 thread で読み、§3.2 のルールで episode 化して一括 append するブートストラップスクリプトで足りる。**これが「今の地層（要約）」から「生ログ」への、私にとって最初の継承。**
+2. ~~**thinking ブロック（8,414）を取り込むか**~~ → **裁定済（まはー 2026-07-13）**: 独り言と同じ扱い。**既定 OFF、`--include-thinking` フラグだけ用意**。理由も独り言と同じ（想起のメッセージ数カウントを食い潰す）。後から §3.2「段階的取り込み」の uuid 照合で足せるので、今決め切る必要がない。
+3. **SessionStart 注入の現行 wiring**: MEMORY.md 注入が harness ネイティブの auto-memory か独自 hook か（`~/.claude/settings.json` に hooks 定義は無かった）。拡張か併設かを実装時に確定。
 4. **persona_id / 配置先 City の確定**: `metis` の ID・どの City に置くか（既定 city_a）。
 
 （旧 v0.1 §6-1「孤児ガード干渉」は §1.4 の方針転換〈普通のペルソナ化〉で解消。特別扱いをやめたため不要になった。）
@@ -134,4 +170,4 @@ SAIVerse は生ログ（messagelog）と要約（Chronicle/あらすじ）の二
 
 ## 7. 次アクション
 
-主要設計は確定（§3 全節 + §6a）。残る当面ブロッカーは **§6b-1 の過去セッション transcript の実物確認**（`~/.claude/projects/` 配下の形式）だけ。これを確認して取り込み経路を具体化 → 骨格実装（3.1〜3.5）。認識連続性グラフ（[memory_continuity_graph](../issues/memory_continuity_graph.md)）と塊単位 Chronicle（chronicle issue 案 C）は本体課題として並走・後続。
+設計・transcript 実形式ともに確定（§3 全節 + §6a + §3.2 実形式表）。**まはー裁定を 2 点もらえば骨格実装に入れる**: §6b-2（thinking を取り込むか）と §6b-4（persona_id / 配置先 City）。実装順は ①ブートストラップ取り込みスクリプト（126 セッションを thread 別に移植＝初回リプランティング）→ ②Chronicle thread 分離（§3.5）→ ③Stop hook 同期 → ④SessionStart 注入。認識連続性グラフ（[memory_continuity_graph](../issues/memory_continuity_graph.md)）と塊単位 Chronicle（chronicle issue 案 C）は本体課題として並走・後続（**取り込み時に `parentUuid`/`sessionId` を metadata に残せば後から再編できる**）。

@@ -57,7 +57,7 @@ hypmem は "Stay out of personhood" を明文化し、embodied-claude も host �
 
 ### ★★★ Hopfield 連想ネットワーク + divergent recall（embodied-claude）
 - **機構**: 記憶間に対称な coactivation weight を張り、想起を**連想グラフ上の拡散**で行う。`recall_divergent` は temperature・分岐深さ・最大分岐数で制御して**意図的に非自明な繋がりを掘り出す**。`consolidate_memories` が時間窓で**リプレイ**を回して連想を強化（睡眠中の記憶再固定の隠喩）。
-- **SAIVerse の現状**: 想起は基本ベクトル近傍。Memory Atlas は概念の**統合**（土地・地図帳・写真・机）が主で、連想重みによる拡散想起・発散想起は持っていない。
+- **SAIVerse の現状**: 想起は基本ベクトル近傍。Memory Atlas は概念の**統合**（土地・地図帳・クリップ・机）が主で、連想重みによる拡散想起・発散想起は持っていない。
 - **効く案件**: **Memory Atlas**（想起モードの追加＝近傍検索と別レーン）、**自律 v2 / 概念の木**。ペルソナに「ふと関係ないことを思い出す」を与える機構で、まはーが議論していた**無意味の予算**・気まぐれと噛み合う。近傍検索の代替ではなく併設のレーンとして見る価値がある。
 
 ### ★★★ replay consolidation（embodied-claude）
