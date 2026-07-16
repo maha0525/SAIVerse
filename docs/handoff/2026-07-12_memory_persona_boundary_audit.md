@@ -165,6 +165,7 @@
 - 影響: target personaのcanonical thread解決（通常`bob:*`）からimport済み会話が外れ、人格DBの中に別人格名義の土地が同居する。export元へ戻したように見えるthread IDが、実際には別personaの物理DBにあるという二重の不整合になる。
 - 修正方針: native formatの「同一personaへの復元」と「別personaへの移植」を分離する。同一persona復元はsource/target不一致を拒否。移植はthread ID・resource ID・Stelis parent IDなどpersona prefixを原子的にtargetへ写像し、元IDをprovenance metadataへ保持する。
 - 必要な回帰: alice→alice復元、alice→bob移植、Stelis親子を含む複数threadで、target DB内の全identityがbobへ閉じ、source provenanceだけが別欄に残ること。
+- **修正済み (2026-07-17、柱4)**: 復元 (既定) は `_ensure_restore_identity` が persona_id / 全 thread prefix の不一致を**書き込み前に**拒否 (API は background task 開始前に 400、CLI は「警告+続行確認」を廃止して即エラー)。移植は明示フラグ (`transplant=True` / `--transplant`) で `_remap_archive_for_transplant` が thread/resource/Stelis parent を原子写像し、各 message の `metadata.transplanted_from` に {persona_id, thread_id} を保持。写像不能 thread が 1 つでも archive 全体を拒否。回帰: `tests/test_native_import_separation.py` (identity 写像・provenance・prefix 漏れ全テーブル走査)。
 
 ### [P1] native importのreplaceがmessage単位commitで、失敗時に旧threadを失った部分適用を残す
 
@@ -174,6 +175,7 @@
 - 影響: statusは失敗を返すが実DBは元状態でも完成状態でもない。再実行できれば最終的に収束する場合はあるが、元threadは既に失われており、upload自体に欠陥があると回復できない。
 - 修正方針: upload全体を事前validateし、target DB内のstaging tableまたは単一transactionへ全threadを書き、全件成功後にreplaceをcommitする。embedding生成はcommit後の再構築可能な派生工程へ分離する。
 - 必要な回帰: 2件目・2thread目・Stelis復元・embeddingでそれぞれ失敗させ、既存targetがbyte/row単位で不変であること。成功時だけ全threadが一度に切り替わること。
+- **修正済み (2026-07-17、柱4)**: 事前検証 (`_validate_native_format` が metadata の JSON 化可能性まで検証) → 単一トランザクション (`_write_thread_in_txn` / `_delete_thread_in_txn` は commit しない契約、成功時に一度だけ commit・失敗は rollback) → embedding は commit 後の派生工程 (成否は戻り値 `embeddings: generated/skipped/failed` で報告、import の成否に関与しない)。内部 commit を持つ storage helper (delete_thread / get_or_create_thread / add_message) は import 経路から排除。回帰: 同テストファイル (事前検証拒否・2 thread 目 rollback で旧 target 行単位不変・成功時一括切替・embedding 失敗でも commit 済み)。
 
 ### [P2] native importのembedding準備がarchive先頭threadからpersona IDを推測し、別personaのmemory.dbを生成し得る
 
@@ -182,6 +184,7 @@
 - 影響: alice archiveをbobへimportすると、embedding用設定を得るだけのために`personas/alice/memory.db`を作成し得る。aliceが実在してもbobのimportがalice側DBを初期化・migrationし、実在しなければ孤児persona directoryを残す。
 - 修正方針: target側の既存Adapter/embedderを明示的に渡すか、target persona IDと検証済みpathから非生成的にembedderだけを構築する。thread IDからpersona IDを推測しない。
 - 必要な回帰: cross-persona import後にtarget以外のfilesystem treeが一切変化しないこと。悪意ある/壊れたthread IDでもworkspace外・personas root外へ書かないこと。
+- **修正済み (2026-07-17、柱4)**: `_regenerate_embeddings` は SAIMemoryAdapter を作らず、設定から Embedder だけを非生成的に構築。persona ID の thread ID からの推測を全廃し、書き込み先は呼び出し元が開いた target conn に閉じる。回帰: 同テストファイル (transplant + embedding 有効経路で source persona の DB/directory 不生成・SAIMemoryAdapter 未生成を spy で固定)。
 
 ### [P1] snapshot restoreがarchive全体の検証・staging前に現状態を消し、展開失敗で部分復元を残す
 
@@ -248,7 +251,7 @@ Memory Atlas P4-a には別文書で P1×3（fold契約不一致、split本文�
 
 ## 次の監査片
 
-一次監査完了。集計は **P1×18 / P2×2**（直結するAtlas編纂レビューP1×3を含む）。うち **P1×8 / P2×1 は修正・回帰固定済み**（2026-07-16: snapshot restoreのstaging/rollback化を第二陣で消し込み）、P1×2はまはー裁定で現状仕様として保留、残りは修正待ち（Metabolism×3、native import×2+P2×1、Building転記/RemoteProxy/heard_by×3）。次はP0サブシステム `migration / upgrade / backup` へ移る。
+一次監査完了。集計は **P1×18 / P2×2**（直結するAtlas編纂レビューP1×3を含む）。うち **P1×10 / P2×2 は修正・回帰固定済み**（2026-07-16: snapshot restoreのstaging/rollback化を第二陣で消し込み / 2026-07-17: native import×2+P2×1を柱4=復元/移植分離で消し込み）、P1×2はまはー裁定で現状仕様として保留、RemoteProxy/heard_by×2はmulti-city凍結スコープへ、残りは修正待ち（Metabolism×3=Beat/ExecutionContext統合工事、Building転記×1）。次はP0サブシステム `migration / upgrade / backup` へ移る。
 
 **裁定追記（2026-07-16・まはー）**:
 - 第6片の RemoteProxy 思考転送・visitor heard_by の P1×2 は **multi-city 凍結**スコープへ（Persona/City/Building 監査の裁定と同一。入口封鎖で対応、修正はしない）。

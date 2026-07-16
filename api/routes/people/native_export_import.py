@@ -80,6 +80,7 @@ def _run_native_import_task(
     persona_id: str,
     data: Dict[str, Any],
     skip_embedding: bool,
+    transplant: bool,
 ) -> None:
     """Background task to import native JSON."""
     from saiverse_memory.native_export import import_threads_native
@@ -108,6 +109,7 @@ def _run_native_import_task(
             replace=True,
             skip_embed=skip_embedding,
             progress_callback=progress_callback,
+            transplant=transplant,
         )
         with _native_import_lock:
             _native_import_status[persona_id] = {
@@ -139,12 +141,18 @@ async def import_native(
     persona_id: str,
     file: UploadFile = File(...),
     skip_embedding: bool = Form(False),
+    transplant: bool = Form(False),
     manager=Depends(get_manager),
 ):
     """Import native SAIVerse JSON.
 
     Replaces existing threads with the same thread_id.
     Runs as a background task with progress tracking.
+
+    - transplant=False (default): restore — the archive must belong to the
+      target persona. A mismatched persona_id is rejected with 400.
+    - transplant=True: explicitly transplant another persona's archive.
+      All identities are remapped to the target inside import_threads_native.
     """
     # import_threads_native() mkdirs personas/<id>/ unconditionally, so gate
     # unknown/malformed IDs here (no orphan personas/<id>/memory.db creation).
@@ -171,13 +179,27 @@ async def import_native(
             detail=f"Unsupported format: {fmt!r} (expected 'saiverse_saimemory_v1')",
         )
 
+    # Fail fast before starting the background task: restoring (no transplant)
+    # another persona's archive is always rejected. Deep identity checks
+    # (thread prefixes etc.) run inside import_threads_native.
+    source_persona = data.get("persona_id")
+    if not transplant and source_persona and source_persona != persona_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Restore rejected: archive belongs to persona "
+                f"'{source_persona}', not '{persona_id}'. To move memories "
+                "to another persona, set transplant=true explicitly."
+            ),
+        )
+
     threads = data.get("threads", [])
     total_msgs = sum(len(t.get("messages", [])) for t in threads)
 
     # Start background task
     thread = threading.Thread(
         target=_run_native_import_task,
-        args=(persona_id, data, skip_embedding),
+        args=(persona_id, data, skip_embedding, transplant),
         daemon=True,
     )
     thread.start()
