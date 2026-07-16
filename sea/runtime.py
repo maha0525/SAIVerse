@@ -19,6 +19,7 @@ from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
+from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
 from sea.runtime_context import prepare_context as prepare_context_impl
 from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
@@ -51,9 +52,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _get_default_lightweight_model() -> str:
-    """Get the default lightweight model from environment or fallback."""
-    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+    """Get the default lightweight model from environment or fallback.
+
+    実体は ``sea.pulse_context.default_lightweight_model`` に一本化
+    (resolve_execution_context と選択結果を一致させるため)。
+    """
+    return default_lightweight_model()
 
 
 
@@ -460,23 +464,45 @@ class SEARuntime:
         except Exception as exc:
             LOGGER.debug("[sea] _ensure_llama_server check failed (non-fatal): %s", exc)
 
-    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False, state: Optional[Dict[str, Any]] = None) -> Any:
-        """Select the appropriate LLM client based on node's model_type and structured output needs.
+    def select_llm_client(
+        self,
+        node_def: Any,
+        persona: Any,
+        execution_context: Optional[ExecutionContext] = None,
+        needs_structured_output: bool = False,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Any, str]:
+        """Select the LLM client for one Beat and return ``(client, model_key)``.
+
+        ExecutionContext 経由が主経路 (beat_execution_context §2.1): tier は
+        ``execution_context.aspect``、model は Beat 開始時に一度だけ解決した
+        ``execution_context.model_key`` を使い、persona の可変属性を再推測しない。
+        ``execution_context=None`` の legacy 経路では従来どおり state の
+        PulseContext / フラグから導出する (挙動は同一)。
+
+        戻り値の model は「実際に使う client の model」。structured-output
+        fallback 等で ``execution_context.model_key`` と異なる model になった
+        場合、呼び出し側は ``execution_context.with_model()`` で差し替える。
 
         Args:
             node_def: Node definition from playbook
             persona: Persona object
+            execution_context: Beat 開始点で解決した実行の身分証 (推奨経路)
             needs_structured_output: Whether this node requires structured output
-            state: Current execution state. Used to detect line='sub' (force lightweight) flag
-                   set by run_playbook (Phase C-2a, Intent B v0.9).
+            state: Current execution state. legacy 経路の tier 導出
+                   (_force_lightweight_model / _pulse_type=='auto') に使う。
         """
         # 軽量モデル判定 (認知モデル v0.2 §10.3):
-        # active LineFrame のアスペクトから model tier を導出する。
+        # ExecutionContext があればその aspect、無ければ active LineFrame の
+        # アスペクトから model tier を導出する。
         # WORKER (run_playbook サブライン) / AUTONOMOUS (自律) → lightweight、
         # CONVERSATION / META → standard。aspect の無い legacy frame では従来の
         # _force_lightweight_model / pulse_type=='auto' フォールバックで判定する。
         _aspect_tier: Optional[str] = None
-        if state:
+        if execution_context is not None:
+            if execution_context.aspect is not None:
+                _aspect_tier = execution_context.aspect.model_tier
+        elif state:
             _pc = state.get("_pulse_context")
             if _pc is not None:
                 try:
@@ -496,19 +522,24 @@ class SEARuntime:
 
         LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
 
-        # First, select base client based on model_type
+        # First, select base client based on model_type.
+        # model 名は ExecutionContext があればその解決値 (resolve_execution_context
+        # が同じチェーンで導出済み)、無ければ従来チェーンで導出する。
         if model_type == "lightweight":
             # Try persona's lightweight_llm_client first
             lightweight_client = getattr(persona, "lightweight_llm_client", None)
             LOGGER.info("[sea] lightweight_client exists: %s", lightweight_client is not None)
+            lightweight_model_name = (
+                execution_context.model_key if execution_context is not None
+                else getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+            )
             if lightweight_client:
                 LOGGER.info("[sea] Using persona's lightweight_llm_client")
                 base_client = lightweight_client
-                base_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                base_model = lightweight_model_name
             else:
                 # Fallback: create a temporary lightweight client
                 LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
-                lightweight_model_name = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
                 LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
                 try:
                     from llm_clients import get_llm_client
@@ -525,7 +556,10 @@ class SEARuntime:
             # Default: use normal client
             LOGGER.info("[sea] Using normal llm_client")
             base_client = persona.llm_client
-            base_model = getattr(persona, "model", "unknown")
+            base_model = (
+                execution_context.model_key if execution_context is not None
+                else getattr(persona, "model", "unknown")
+            )
             LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
 
         # Ensure llama.cpp server is running (may have been stopped by idle timeout)
@@ -560,13 +594,27 @@ class SEARuntime:
                     from llm_clients import get_llm_client
                     lw_context = get_context_length(lw_model)
                     lw_provider = get_model_provider(lw_model)
-                    return get_llm_client(lw_model, lw_provider, lw_context)
+                    return get_llm_client(lw_model, lw_provider, lw_context), lw_model
                 except Exception as exc:
                     LOGGER.warning("[sea] Failed to create lightweight client for structured output: %s; "
                                    "using base client", exc)
-                    return base_client
+                    return base_client, base_model
 
-        return base_client
+        return base_client, base_model
+
+    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False, state: Optional[Dict[str, Any]] = None, execution_context: Optional[ExecutionContext] = None) -> Any:
+        """後方互換ラッパー — client のみ返す。実体は ``select_llm_client``。
+
+        新しい呼び出しは Beat 開始点で ``resolve_execution_context`` した
+        ExecutionContext を ``select_llm_client`` へ渡し、実 model 名も受け取ること。
+        """
+        client, _model = self.select_llm_client(
+            node_def, persona,
+            execution_context=execution_context,
+            needs_structured_output=needs_structured_output,
+            state=state,
+        )
+        return client
 
     def _build_tools_spec(self, tool_names: List[str], llm_client: Any) -> List[Any]:
         """Build tools spec for LLM based on available tool names and llm_client type."""
@@ -1729,7 +1777,13 @@ class SEARuntime:
             )
             messages.append({"role": "user", "content": self._KEEPALIVE_TAIL})
             node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
-            llm_client = self._select_llm_client(node_def, persona)  # standard tier
+            # Beat 相当の開始点 — Pulse 外なので pulse_context=None (standard tier)。
+            execution_context = resolve_execution_context(persona, None)
+            llm_client, _ka_model = self.select_llm_client(
+                node_def, persona, execution_context=execution_context,
+            )
+            if _ka_model != execution_context.model_key:
+                execution_context = execution_context.with_model(_ka_model)
             llm_client.generate(
                 messages,
                 tools=[],

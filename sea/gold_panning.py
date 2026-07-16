@@ -439,7 +439,16 @@ def run_gold_panning(
 
     node_def = SimpleNamespace(id="gold_panning", memorize=None, speak=False)
     # standard tier (default モデル固定)。lightweight への分岐は書かない (intent §5-7)。
-    llm_client = runtime._select_llm_client(node_def, persona, needs_structured_output=True)
+    # Beat 相当の開始点 — Pulse 外なので pulse_context=None (beat_execution_context §2.1)。
+    from sea.pulse_context import resolve_execution_context
+    execution_context = resolve_execution_context(persona, None)
+    llm_client, _gp_model = runtime.select_llm_client(
+        node_def, persona, execution_context=execution_context,
+        needs_structured_output=True,
+    )
+    if _gp_model != execution_context.model_key:
+        # structured-output fallback で実 model が変わった場合の差し替え
+        execution_context = execution_context.with_model(_gp_model)
 
     result = llm_client.generate(
         messages,

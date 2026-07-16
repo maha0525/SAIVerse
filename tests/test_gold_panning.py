@@ -68,6 +68,11 @@ class FakeRuntime:
     def _select_llm_client(self, node_def, persona, needs_structured_output=False, state=None):
         return self.client
 
+    def select_llm_client(self, node_def, persona, execution_context=None,
+                          needs_structured_output=False, state=None):
+        model = execution_context.model_key if execution_context is not None else "fake-model"
+        return self.client, model
+
     def _default_temperature(self, persona):
         return 0.7
 

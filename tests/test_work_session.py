@@ -101,6 +101,16 @@ class FakeRuntime:
         self.selected_aspects.append(aspect)
         return self.llm_client
 
+    def select_llm_client(self, node_def, persona, execution_context=None,
+                          needs_structured_output=False, state=None):
+        # 実 SEARuntime と同じ (client, model_key) を返す新経路 (ExecutionContext 化)
+        client = self._select_llm_client(
+            node_def, persona,
+            needs_structured_output=needs_structured_output, state=state,
+        )
+        model = execution_context.model_key if execution_context is not None else "fake-model"
+        return client, model
+
     def _default_temperature(self, persona):
         return None
 

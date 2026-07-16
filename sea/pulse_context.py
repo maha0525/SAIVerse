@@ -13,13 +13,24 @@ source for ``pulse_logs`` DB persistence.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger("saiverse.pulse_context")
+
+
+def default_lightweight_model() -> str:
+    """軽量モデル未設定時のフォールバックチェーン (env → builtin 既定)。
+
+    ``sea/runtime.py`` の LLM 選択と ``resolve_execution_context`` の双方が
+    同じ解決結果になるよう、供給源をここに一本化している。
+    """
+    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
 
 class Aspect(str, Enum):
@@ -193,6 +204,117 @@ class LineFrame:
     def is_nested(self) -> bool:
         """True when this line was spawned by another line within the Pulse."""
         return self.parent_id is not None
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """実行の身分証 — Beat 開始時に一度だけ解決する不変の器。
+
+    intent: docs/intent/beat_execution_context.md §2.1。「今この実行が何者か」
+    (誰の・どの thread の・どの line の・どの model の実行か) を一箇所に集め、
+    各層が persona の可変属性から都度推測するのをやめるための器。
+
+    本段階 (移行手順 1「挙動不変の置換」) では LLM client 選択まわりの結線のみで、
+    解決される値は従来の暗黙推測と同一。execution_id (実行台帳, 柱1) は常に None。
+
+    Attributes:
+        persona_id: 誰の実行か。
+        thread_id: どの thread に記録するか (Beat 時点の adapter
+            ``get_current_thread()`` の解決値。Stelis push/pop 化は後続の段)。
+        line_id: 実行中ラインの ``LineFrame.line_id``。frame の無い実行
+            (keepalive / gold_panning 等の Pulse 外呼び出し) では空文字。
+        aspect: このラインのアスペクト (§10)。legacy frame / frame 無しでは None。
+        model_key: この Beat で実行する model の解決値 (aspect の tier から導出)。
+        pulse_id: 所属 Pulse。Pulse 外の実行では空文字。
+        execution_id: 実行台帳に載る実行のみ (柱1)。本段階では常に None。
+    """
+
+    persona_id: str
+    thread_id: str
+    line_id: str
+    aspect: Optional[Aspect]
+    model_key: str
+    pulse_id: str
+    execution_id: Optional[str] = None
+
+    def with_model(self, actual_model: str) -> "ExecutionContext":
+        """実行 model が選択後に変わった場合の差し替え (frozen なので新インスタンス)。
+
+        structured-output fallback (sea/runtime.py の select_llm_client) 等で
+        実際に呼ぶ model が解決値と異なった時、呼び出し側がこれで差し替える。
+        """
+        return replace(self, model_key=actual_model)
+
+
+def resolve_execution_context(
+    persona: Any,
+    pulse_context: Optional["PulseContext"],
+    state: Optional[Dict[str, Any]] = None,
+    execution_id: Optional[str] = None,
+) -> ExecutionContext:
+    """Beat 開始点で ExecutionContext を解決する (beat_execution_context §2.1)。
+
+    挙動不変の原則: model_key の導出は ``sea/runtime.py`` の従来の LLM 選択
+    (aspect.model_tier → lightweight/standard、legacy frame では
+    ``_force_lightweight_model`` / ``_pulse_type=='auto'`` フォールバック) と
+    同じ結果になるように写している。値を変える変更は後続の段で行う。
+
+    Args:
+        persona: PersonaCore (またはテスト用の互換オブジェクト)。
+        pulse_context: 現在の PulseContext。Pulse 外の実行 (keepalive /
+            gold_panning) では None。
+        state: 実行 state。legacy frame (aspect 無し) の tier フォールバック
+            フラグと ``_pulse_id`` の供給源。無ければ standard 扱い。
+        execution_id: 実行台帳の ID (柱1)。本段階では常に None。
+    """
+    frame: Optional[LineFrame] = None
+    if pulse_context is not None:
+        try:
+            frame = pulse_context.current_line()
+        except Exception:
+            frame = None
+    aspect = frame.aspect if frame is not None else None
+
+    # ── model tier: aspect が唯一の供給源。無ければ legacy フラグ (従来どおり) ──
+    tier = aspect.model_tier if aspect is not None else None
+    if tier is None:
+        force_lightweight = bool(state and (
+            state.get("_force_lightweight_model")
+            or state.get("_pulse_type") == "auto"
+        ))
+        tier = "lightweight" if force_lightweight else "standard"
+
+    if tier == "lightweight":
+        model_key = getattr(persona, "lightweight_model", None) or default_lightweight_model()
+    else:
+        model_key = getattr(persona, "model", "unknown")
+
+    # ── thread_id: adapter の現在値が正 (S4 の push/pop 化は後続の段) ──
+    thread_id = ""
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is not None:
+        try:
+            thread_id = adapter.get_current_thread() or ""
+        except Exception:
+            LOGGER.debug("[execution_context] get_current_thread failed", exc_info=True)
+            thread_id = ""
+    if not thread_id and pulse_context is not None:
+        thread_id = pulse_context.thread_id or ""
+
+    if pulse_context is not None:
+        pulse_id = pulse_context.pulse_id or ""
+    else:
+        pulse_id = str(state.get("_pulse_id") or "") if state else ""
+
+    return ExecutionContext(
+        persona_id=str(getattr(persona, "persona_id", "") or ""),
+        thread_id=thread_id,
+        line_id=frame.line_id if frame is not None else "",
+        aspect=aspect,
+        model_key=str(model_key),
+        pulse_id=pulse_id,
+        execution_id=execution_id,
+    )
 
 
 @dataclass

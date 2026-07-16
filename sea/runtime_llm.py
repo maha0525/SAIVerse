@@ -16,6 +16,7 @@ from llm_clients.exceptions import LLMError
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
+from sea.pulse_context import resolve_execution_context
 from saiverse.usage_tracker import get_usage_tracker
 # Module-level imports for tools registry symbols.
 #
@@ -2275,7 +2276,21 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
             # Select LLM client based on model_type and structured output needs
             needs_structured_output = response_schema is not None
-            llm_client = runtime._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output, state=state)
+            # Beat 相当の開始点 (beat_execution_context §2.1): 実行の身分証を
+            # ここで一度だけ解決し、下流は state["_execution_context"] を読む
+            # (後続工事の結線点)。解決値は従来の暗黙推測と同一 (挙動不変)。
+            execution_context = resolve_execution_context(
+                persona, state.get("_pulse_context"), state=state,
+            )
+            state["_execution_context"] = execution_context
+            llm_client, _selected_model = runtime.select_llm_client(
+                node_def, persona, execution_context=execution_context,
+                needs_structured_output=needs_structured_output, state=state,
+            )
+            if _selected_model != execution_context.model_key:
+                # structured-output fallback 等で実 model が変わった → 差し替え
+                execution_context = execution_context.with_model(_selected_model)
+                state["_execution_context"] = execution_context
 
             # Inject model-specific system prompt if configured
             _model_config_key = getattr(llm_client, "config_key", None)

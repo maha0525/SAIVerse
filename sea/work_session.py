@@ -196,7 +196,7 @@ def run_work_session(
         adapter = getattr(persona, "sai_memory", None)
         thread_id = adapter.get_current_thread() if adapter else None
         pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, thread_id or "")
-        from sea.pulse_context import Aspect, PulseLogEntry
+        from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
 
         pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=track_id)
         frame_pushed = True
@@ -253,8 +253,16 @@ def run_work_session(
                 persona_id,
             )
 
-        # WORKER フレームが active な状態で選ぶ → 軽量モデルが導出される
-        llm_client = runtime._select_llm_client(node_def, persona, state=state)
+        # WORKER フレームが active な状態で解決 → 軽量モデルが導出される
+        # (Beat 相当の開始点、beat_execution_context §2.1。挙動不変の置換)。
+        execution_context = resolve_execution_context(persona, pulse_ctx, state=state)
+        state["_execution_context"] = execution_context
+        llm_client, _selected_model = runtime.select_llm_client(
+            node_def, persona, execution_context=execution_context, state=state,
+        )
+        if _selected_model != execution_context.model_key:
+            execution_context = execution_context.with_model(_selected_model)
+            state["_execution_context"] = execution_context
 
         pulse_ctx.append(PulseLogEntry(
             role="user", content=instruction_content,
