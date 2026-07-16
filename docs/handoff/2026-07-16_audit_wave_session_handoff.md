@@ -17,6 +17,8 @@
 
 ## 2. 走行中のサブエージェント (セッション断で報告が消える。成果物はメインツリーに残る)
 
+> **決着 (2026-07-17 継続セッション)**: 当初のサブエージェント2体は読み取り段階で脱落し成果物ゼロだった。タスクA'はメインセッションが直接実装・検収 (コミット `a96bf13`)、タスクB'は核心部をメイン実装 + 入口/テストをサブエージェント再委譲で完成・検収済み。以下の記述は履歴として残す。
+
 ### タスクA': 実行台帳の覚醒 (§6-2 前半)
 - **スコープ**: manager への `self.execution_ledger` 配線 / 起動時 `recover_stale_running(all_running=True)` + 全persona flush / EventScheduler 定期 tick (key=`execution_ledger_recovery`、60秒、掃除のみ=manual modeでも止めない) / 実ハンドラ2種 (`saimemory.append`=execution_id を metadata に刻む冪等、`perception.push`) / tests/test_execution_ledger_wiring.py
 - **触るファイル**: saiverse/saiverse_manager.py (または manager mixin)、tests/。migrate 配線は「確認のみでよい」と指示済み
