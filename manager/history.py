@@ -198,12 +198,13 @@ class HistoryMixin:
 
     # --- World Editor: Backup/Restore Methods ---
 
-    def backup_world(self, backup_name: str) -> str:
+    def _legacy_backup_world_disabled(self, backup_name: str) -> str:
         """
         Creates a backup of the entire world state, including the database and all log files,
         into a single .zip archive.
         """
-        if not backup_name or not backup_name.isalnum():
+        raise RuntimeError("Legacy world backup is disabled; use scripts.snapshot")
+        if not backup_name or not backup_name.isalnum():  # pragma: no cover
             return "Error: Backup name must be alphanumeric and not empty."
 
         backup_zip_path = self.backup_dir / f"{backup_name}.zip"
@@ -251,12 +252,13 @@ class HistoryMixin:
             logging.error("Failed to create backup: %s", exc, exc_info=True)
             return f"Error: {exc}"
 
-    def restore_world(self, backup_name: str) -> str:
+    def _legacy_restore_world_disabled(self, backup_name: str) -> str:
         """
         Restores the entire world state from a .zip archive.
         This operation is destructive and requires an application restart.
         """
-        backup_zip_path = self.backup_dir / f"{backup_name}.zip"
+        raise RuntimeError("Legacy world restore is disabled; use scripts.snapshot")
+        backup_zip_path = self.backup_dir / f"{backup_name}.zip"  # pragma: no cover
         if not backup_zip_path.exists():
             return f"Error: Backup '{backup_name}' not found."
 
@@ -318,7 +320,7 @@ class HistoryMixin:
                 "It is recommended to restore another backup or re-seed the database."
             )
 
-    def delete_backup(self, backup_name: str) -> str:
+    def _legacy_delete_backup_disabled(self, backup_name: str) -> str:
         """Deletes a specific backup file (.zip)."""
         backup_path = self.backup_dir / f"{backup_name}.zip"
         if not backup_path.exists():
@@ -330,3 +332,43 @@ class HistoryMixin:
         except Exception as exc:
             logging.error("Failed to delete backup: %s", exc, exc_info=True)
             return f"Error: {exc}"
+
+    def backup_world(self, backup_name: str) -> str:
+        """Use the canonical stopped-world snapshot engine."""
+        import argparse
+
+        from scripts.snapshot import cmd_save
+
+        rc = cmd_save(argparse.Namespace(name=backup_name, note="World Editor snapshot", force=False))
+        if rc == 0:
+            return f"Snapshot '{backup_name}' created successfully."
+        return "Error: Stop SAIVerse and create the snapshot with scripts/snapshot.py save."
+
+    def restore_world(self, backup_name: str) -> str:
+        """Refuse online restore; canonical restore owns validation and rollback."""
+        import argparse
+
+        from scripts.snapshot import cmd_restore
+
+        rc = cmd_restore(
+            argparse.Namespace(
+                name=backup_name,
+                yes=True,
+                force=False,
+                no_auto_snapshot=False,
+            )
+        )
+        if rc == 0:
+            return f"Snapshot '{backup_name}' restored successfully."
+        return "Error: World restore requires SAIVerse to be fully stopped."
+
+    def delete_backup(self, backup_name: str) -> str:
+        """Delete from the canonical world snapshot store."""
+        import argparse
+
+        from scripts.snapshot import cmd_delete
+
+        rc = cmd_delete(argparse.Namespace(name=backup_name, yes=True))
+        if rc == 0:
+            return f"Snapshot '{backup_name}' deleted successfully."
+        return f"Error: Snapshot '{backup_name}' not found."

@@ -394,6 +394,45 @@ class RuntimeService(
                 personas = [ruler] + [p for p in personas if p.persona_id != ruler.persona_id]
         return personas
 
+    def _persist_user_utterance(
+        self,
+        building_id: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]],
+        responding_personas: Sequence[Any],
+        client_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Durably store a user command before any Pulse or side effect starts."""
+        from database.building_messages import insert_building_message
+
+        canonical_bid = self._canonical_building_id(building_id)
+        heard = [
+            *[str(persona.persona_id) for persona in responding_personas],
+            str(self.state.user_id),
+        ]
+        entry: Dict[str, Any] = {
+            "role": "user",
+            "content": message,
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "heard_by": sorted(set(heard)),
+            "ingested_by": [],
+        }
+        if metadata:
+            entry["metadata"] = dict(metadata)
+        if client_message_id:
+            entry["client_message_id"] = client_message_id
+
+        saved = insert_building_message(self.SessionLocal, canonical_bid, entry)
+        if saved is None or not saved.get("message_id"):
+            logging.error(
+                "[runtime] Refusing user dispatch because durable insert failed: "
+                "building=%s client_message_id=%s",
+                canonical_bid,
+                client_message_id,
+            )
+            return None
+        return saved
+
     def handle_user_input(
         self, message: str, metadata: Optional[Dict[str, Any]] = None
     ) -> List[str]:
@@ -425,23 +464,22 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
-        # ユーザーメッセージを building_histories へ1回だけ記録（全ペルソナ heard_by 付き）
-        # 各ペルソナの auto_ingest がこれを時系列順に取り込む。
-        # 発話者 (ユーザー) 自身も heard_by に含める: heard_by は「その場に居た者」の
-        # 記録であり、セッションログビュー等の閲覧者フィルタが参照する
-        if responding_personas:
-            all_pids = [p.persona_id for p in responding_personas]
-            heard = all_pids + [str(self.state.user_id)]
-            canonical_bid = self._canonical_building_id(building_id)
-            bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
-            if metadata:
-                bh_user_entry["metadata"] = dict(metadata)
-            try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    canonical_bid, bh_user_entry, heard_by=heard
-                )
-            except Exception:
-                logging.exception("[runtime] Failed to pre-add user message to building_histories")
+        # Durable insert is a hard precondition for cognition and side effects.
+        # This also records the utterance in an empty room.
+        try:
+            saved_user_message = self._persist_user_utterance(
+                building_id,
+                message,
+                metadata,
+                responding_personas,
+            )
+        except Exception:
+            logging.exception("[runtime] Failed to persist user utterance")
+            saved_user_message = None
+        if saved_user_message is None:
+            return [
+                '<div class="note-box">発言を保存できなかったため、処理を開始しませんでした。再送してください。</div>'
+            ]
 
         # 対ユーザー Track のイベント受け口 (Phase C-1)
         # Handler が Track の取得 / 状態判定 / alert 遷移 (→ MetaLayer 起動) を行い、
@@ -546,27 +584,44 @@ class RuntimeService(
 
         def backend_worker():
             try:
-                # ユーザーメッセージを building_histories へ1回だけ記録（全ペルソナ heard_by 付き）
-                # 発話者 (ユーザー) 自身も heard_by に含める (セッションログビューの
-                # 閲覧者フィルタが「その場に居た者」として参照する)
-                if responding_personas:
-                    all_pids = [p.persona_id for p in responding_personas]
-                    heard = all_pids + [str(self.state.user_id)]
-                    canonical_bid = self._canonical_building_id(building_id)
-                    bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
-                    if metadata:
-                        bh_user_entry["metadata"] = dict(metadata)
-                    if client_message_id:
-                        bh_user_entry["client_message_id"] = client_message_id
-                    try:
-                        bm = responding_personas[0].history_manager.add_to_building_only(
-                            canonical_bid, bh_user_entry, heard_by=heard
-                        )
-                        user_msg_id = bm.get("message_id") if bm else None
-                        if user_msg_id:
-                            _enrich_event({"type": "user_message_id", "message_id": str(user_msg_id)})
-                    except Exception:
-                        logging.exception("[runtime] Failed to pre-add user message to building_histories")
+                try:
+                    saved_user_message = self._persist_user_utterance(
+                        building_id,
+                        message,
+                        metadata,
+                        responding_personas,
+                        client_message_id,
+                    )
+                except Exception:
+                    logging.exception("[runtime] Failed to persist user utterance")
+                    saved_user_message = None
+
+                if saved_user_message is None:
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "persistence_failed",
+                        "content": (
+                            "発言を保存できなかったため、応答処理を開始しませんでした。"
+                            "同じ内容を再送できます。"
+                        ),
+                        "retryable": True,
+                    })
+                    return
+
+                user_msg_id = str(saved_user_message["message_id"])
+                _enrich_event({"type": "user_message_id", "message_id": user_msg_id})
+
+                # A duplicate idempotency key is the same utter command, not a
+                # new request.  Never restart LLM/tool side effects; clients can
+                # refresh history using the returned canonical message id.
+                if saved_user_message.get("_was_inserted") is False:
+                    _enrich_event({
+                        "type": "duplicate_command",
+                        "message_id": user_msg_id,
+                        "client_message_id": client_message_id,
+                        "content": "同じ送信IDの発言は既に受理されています。",
+                    })
+                    return
 
                 for persona in responding_personas:
                     if stop_event.is_set():

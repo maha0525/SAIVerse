@@ -211,8 +211,7 @@ def migrate_database_in_place(db_path: str):
     # --- 1. Validate paths and create backup ---
     if not os.path.exists(db_path):
         logging.error(f"データベースファイルが見つかりません: {db_path}")
-        logging.info("データベースファイルが存在しないため、マイグレーションは不要です。")
-        return
+        raise FileNotFoundError(f"マイグレーション対象DBが存在しません: {db_path}")
 
     # リネームを先に解消しておかないと「削除 + 追加」として扱われ、
     # 列名一致コピーのデータ移行で旧列のデータが失われる
@@ -363,6 +362,7 @@ def migrate_database_in_place(db_path: str):
         # DB接続を一度閉じてからファイル操作を行う
         source_engine.dispose()
         target_engine.dispose()
+        rollback_error = None
         try:
             if os.path.exists(backup_path):
                 if os.path.exists(db_path):
@@ -371,6 +371,21 @@ def migrate_database_in_place(db_path: str):
                 logging.info("ロールバックが完了しました。元のデータベースが復元されました。")
         except Exception as rb_e:
             logging.error(f"ロールバックに失敗しました: {rb_e}", exc_info=True)
+            rollback_error = rb_e
+
+        if rollback_error is not None:
+            raise RuntimeError(
+                "DBマイグレーションとロールバックの両方に失敗しました。"
+                f" original={db_path}, backup={backup_path}, "
+                f"migration_error={type(e).__name__}: {e}, "
+                f"rollback_error={type(rollback_error).__name__}: {rollback_error}"
+            ) from rollback_error
+        raise RuntimeError(
+            f"DBマイグレーションに失敗し、元DBへロールバックしました: {db_path}"
+        ) from e
+    finally:
+        source_engine.dispose()
+        target_engine.dispose()
 
 def _migrate_interaction_mode_to_autonomy_enabled(source_engine, target_engine) -> None:
     """Map ultra-legacy AI.INTERACTION_MODE values directly to AI.AUTONOMY_ENABLED.
@@ -419,7 +434,12 @@ def _migrate_interaction_mode_to_autonomy_enabled(source_engine, target_engine) 
             converted,
         )
     except Exception as exc:
-        logging.warning("INTERACTION_MODE -> AUTONOMY_ENABLED 変換に失敗しました: %s", exc, exc_info=True)
+        logging.error(
+            "INTERACTION_MODE -> AUTONOMY_ENABLED 変換に失敗しました: %s",
+            exc,
+            exc_info=True,
+        )
+        raise
 
 
 def _migrate_activity_state_to_autonomy_enabled(source_engine, target_engine) -> None:
@@ -472,7 +492,12 @@ def _migrate_activity_state_to_autonomy_enabled(source_engine, target_engine) ->
             converted,
         )
     except Exception as exc:
-        logging.warning("ACTIVITY_STATE -> AUTONOMY_ENABLED 変換に失敗しました: %s", exc, exc_info=True)
+        logging.error(
+            "ACTIVITY_STATE -> AUTONOMY_ENABLED 変換に失敗しました: %s",
+            exc,
+            exc_info=True,
+        )
+        raise
 
 
 def _migrate_track_tasks_json_to_persona_task(source_engine, target_engine) -> None:
@@ -535,17 +560,24 @@ def _migrate_track_tasks_json_to_persona_task(source_engine, target_engine) -> N
                     continue
                 try:
                     items = _json.loads(tasks_json)
-                except (TypeError, ValueError):
-                    logging.warning("  - Track %s の tasks_json をパースできずスキップ", track_id)
-                    continue
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Track {track_id} の tasks_json を解析できません"
+                    ) from exc
                 if not isinstance(items, list):
-                    continue
-                for item in items:
+                    raise ValueError(
+                        f"Track {track_id} の tasks_json は配列ではありません"
+                    )
+                for item_index, item in enumerate(items):
                     if not isinstance(item, dict):
-                        continue
+                        raise ValueError(
+                            f"Track {track_id} の tasks_json[{item_index}] はobjectではありません"
+                        )
                     title = (item.get("title") or "").strip()
                     if not title:
-                        continue
+                        raise ValueError(
+                            f"Track {track_id} の tasks_json[{item_index}] にtitleがありません"
+                        )
                     done = bool(item.get("done"))
                     status = "completed" if done else "pending"
                     tgt.execute(text(
@@ -583,7 +615,12 @@ def _migrate_track_tasks_json_to_persona_task(source_engine, target_engine) -> N
             migrated_tracks, migrated_tasks,
         )
     except Exception as exc:
-        logging.warning("track_task -> persona_task 移行に失敗しました: %s", exc, exc_info=True)
+        logging.error(
+            "track_task -> persona_task 移行に失敗しました: %s",
+            exc,
+            exc_info=True,
+        )
+        raise
 
 
 def _demote_legacy_waiting_tracks(engine) -> None:
@@ -606,9 +643,8 @@ def _demote_legacy_waiting_tracks(engine) -> None:
                     result.rowcount,
                 )
     except Exception as exc:
-        logging.warning(
-            "legacy waiting Track の降ろし処理に失敗しました（スキップ）: %s", exc,
-        )
+        logging.error("legacy waiting Track の降ろし処理に失敗しました: %s", exc)
+        raise
 
 
 def _backfill_track_short_ids(engine) -> None:
@@ -647,7 +683,8 @@ def _backfill_track_short_ids(engine) -> None:
 
             logging.info("short_id を %d 件の Track に割り当てました。", len(rows))
     except Exception as e:
-        logging.warning("Track short_id バックフィルに失敗しました（スキップ）: %s", e)
+        logging.error("Track short_id バックフィルに失敗しました: %s", e)
+        raise
 
 
 def backfill_track_short_ids(db_path: str) -> None:
@@ -689,7 +726,8 @@ def _backfill_item_short_ids(engine) -> None:
 
             logging.info("short_id を %d 件の item に割り当てました。", len(rows))
     except Exception as e:
-        logging.warning("Item short_id バックフィルに失敗しました（スキップ）: %s", e)
+        logging.error("Item short_id バックフィルに失敗しました: %s", e)
+        raise
 
 
 def backfill_item_short_ids(db_path: str) -> None:
@@ -851,7 +889,8 @@ def _backfill_desire_stage_normalization(engine) -> None:
                     len(desire_note_ids),
                 )
     except Exception as e:
-        logging.warning("desire 正規化マイグレーションに失敗しました（スキップ）: %s", e)
+        logging.error("desire 正規化マイグレーションに失敗しました: %s", e)
+        raise
 
 
 def backfill_desire_stage_normalization(db_path: str) -> None:
@@ -941,7 +980,8 @@ def _assign_initial_slot_numbers(engine) -> None:
 
             logging.info("スロット番号を %d 件のアイテムに割り当てました。", len(rows))
     except Exception as e:
-        logging.warning("スロット番号の割り当てに失敗しました（スキップ）: %s", e)
+        logging.error("スロット番号の割り当てに失敗しました: %s", e)
+        raise
 
 
 if __name__ == "__main__":
@@ -960,6 +1000,9 @@ if __name__ == "__main__":
 
     db_path = args.db or str(default_db_path())
     logging.info(f"対象データベース: {db_path}")
+
+    if args.db is not None and not os.path.isfile(db_path):
+        parser.error(f"明示されたマイグレーション対象DBが存在しません: {db_path}")
 
     if not args.force and not needs_migration(db_path):
         logging.info("スキーマに変更はありません。マイグレーションは不要です。")

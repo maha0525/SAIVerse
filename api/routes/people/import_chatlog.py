@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from api.deps import get_manager
+from api.file_safety import safe_upload_suffix, write_upload_bounded
 from .models import (
     ConversationSummary, PreviewResponse, ImportRequest,
     OfficialImportStatusResponse, ExtensionImportStatusResponse
 )
 from .utils import ensure_persona_exists
-import shutil
 import tempfile
 from pathlib import Path
 import threading
@@ -15,6 +15,7 @@ from typing import List
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
+CHATLOG_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 # Store parsed exports temporarily (in-memory cache for preview -> import flow)
 _chatgpt_export_cache: dict = {}
@@ -212,7 +213,7 @@ def _run_official_import_task(
                     pass
 
 @router.post("/{persona_id}/import/official/preview", response_model=PreviewResponse)
-def preview_official_chatgpt(
+async def preview_official_chatgpt(
     persona_id: str,
     file: UploadFile = File(...),
     manager = Depends(get_manager)
@@ -220,10 +221,11 @@ def preview_official_chatgpt(
     """Preview ChatGPT export file and return conversation list for selection."""
     
     # 1. Save upload to temp file
-    suffix = Path(file.filename).suffix if file.filename else ".tmp"
+    suffix = safe_upload_suffix(file.filename)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
         tmp_path = Path(tmp.name)
+    tmp_path.unlink()
+    await write_upload_bounded(file, tmp_path, CHATLOG_IMPORT_MAX_BYTES)
 
     try:
         # 2. Parse using ChatGPTExport
@@ -351,7 +353,7 @@ def get_official_import_status(persona_id: str, manager = Depends(get_manager)):
     return OfficialImportStatusResponse(**status)
 
 @router.post("/{persona_id}/import/extension")
-def import_extension_export(
+async def import_extension_export(
     persona_id: str,
     file: UploadFile = File(...),
     skip_embedding: bool = Form(False),
@@ -372,10 +374,11 @@ def import_extension_export(
             raise HTTPException(status_code=409, detail="Import already in progress.")
     
     # 1. Save upload to temp file (will be deleted by background task)
-    suffix = Path(file.filename).suffix if file.filename else ".tmp"
+    suffix = safe_upload_suffix(file.filename)
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
         tmp_path = Path(tmp.name)
+    tmp_path.unlink()
+    await write_upload_bounded(file, tmp_path, CHATLOG_IMPORT_MAX_BYTES)
 
     # 2. Validate file can be parsed (quick check)
     try:

@@ -1,6 +1,7 @@
 """System-level API endpoints: version check, update trigger, announcements."""
 
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -90,6 +91,11 @@ def _fetch_latest_release() -> Optional[dict]:
 async def get_version():
     """Return current version and check for updates."""
     current = app_state.version
+    manager = app_state.manager
+    db_identity = None
+    if manager is not None:
+        resolved_db = str(Path(manager.db_path).resolve())
+        db_identity = hashlib.sha256(resolved_db.encode("utf-8")).hexdigest()
 
     release = _fetch_latest_release()
     if release:
@@ -97,6 +103,8 @@ async def get_version():
         update_available = _compare_versions(current, latest_tag)
         return {
             "version": current,
+            "city_name": app_state.city_name,
+            "db_identity": db_identity,
             "latest_version": latest_tag,
             "update_available": update_available,
             "latest_release_url": release["html_url"],
@@ -106,6 +114,8 @@ async def get_version():
 
     return {
         "version": current,
+        "city_name": app_state.city_name,
+        "db_identity": db_identity,
         "latest_version": None,
         "update_available": None,
         "latest_release_url": None,
@@ -342,13 +352,20 @@ async def trigger_update():
 
     project_path = Path(project_dir)
     config_path = project_path / ".update_config.json"
-    updater_script = project_path / "scripts" / "self_update.py"
+    updater_script = project_path / "scripts" / "update_engine.py"
 
     if not updater_script.exists():
         raise HTTPException(status_code=500, detail="Update script not found")
 
-    # Detect environment
-    has_git = shutil.which("git") is not None and (project_path / ".git").is_dir()
+    # Refuse before shutdown if update cannot preserve local work. The engine
+    # repeats this check after shutdown to close the race.
+    try:
+        from scripts.update_engine import UpdateError, assert_git_update_ready
+
+        assert_git_update_ready(project_path)
+    except UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     manager = app_state.manager
     backend_port = manager.ui_port if manager else 8000
 
@@ -358,22 +375,55 @@ async def trigger_update():
     else:
         venv_python = str(project_path / ".venv" / "bin" / "python")
 
-    # Write update config
+    try:
+        import psutil
+
+        main_process_created_at = float(psutil.Process(os.getpid()).create_time())
+    except Exception:
+        main_process_created_at = None
+
+    listen_host = os.getenv("SAIVERSE_API_HOST", "127.0.0.1")
+    if "--listen-host" in sys.argv:
+        index = sys.argv.index("--listen-host")
+        if index + 1 < len(sys.argv):
+            listen_host = sys.argv[index + 1]
+
+    child_processes = []
+    for process in app_state.child_processes:
+        try:
+            import psutil
+
+            created_at = float(psutil.Process(process.pid).create_time())
+        except Exception:
+            created_at = None
+        child_processes.append({"pid": process.pid, "process_created_at": created_at})
+
+    # Write an atomic, exact restart contract.
     config = {
+        "format_version": 2,
         "project_dir": str(project_path),
         "city_name": app_state.city_name,
         "backend_port": backend_port,
-        "frontend_port": 3000,
+        "listen_host": listen_host,
         "main_pid": os.getpid(),
+        "main_process_created_at": main_process_created_at,
+        "main_args": list(sys.argv[1:]),
+        "resolved_db_path": str(Path(manager.db_path).resolve()) if manager else None,
+        "db_identity": (
+            hashlib.sha256(str(Path(manager.db_path).resolve()).encode("utf-8")).hexdigest()
+            if manager
+            else None
+        ),
+        "child_processes": child_processes,
         "venv_python": venv_python,
-        "has_git": has_git,
-        "platform": sys.platform,
     }
-    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    config_tmp = config_path.with_suffix(config_path.suffix + ".tmp")
+    config_tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    os.replace(config_tmp, config_path)
     LOGGER.info("Written update config to %s", config_path)
 
     # Spawn detached updater
-    cmd = [venv_python, str(updater_script)]
+    cmd = [venv_python, str(updater_script), "--config", str(config_path)]
     LOGGER.info("Spawning detached updater: %s", cmd)
     if sys.platform == "win32":
         DETACHED_PROCESS = 0x00000008

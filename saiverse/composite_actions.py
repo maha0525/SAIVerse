@@ -506,8 +506,8 @@ def _make_call_awaitable(
     ``run_coroutine_threadsafe(...).result()`` でブロックする (env3 / move_head
     と同形)。 ``_execute_action_async`` 自体がその同じループ上で動くため、 ここで
     inline 呼び出しするとデッドロックする。 よって同期 native tool は
-    ``run_in_executor`` でワーカースレッドに逃がす。 また ``__wrapped__`` で
-    building-gate ラッパを外す: このステップを保持するアクション spell 自体が
+    ``run_in_executor`` でワーカースレッドに逃がす。 building-gate の印が付いた
+    ラッパだけを外す: このステップを保持するアクション spell 自体が
     既に vessel building gate 済みで、 ワーカースレッドには persona context が
     伝播しないため、 内側で再度ゲートを通すと誤判定で弾かれる。
     """
@@ -515,7 +515,11 @@ def _make_call_awaitable(
 
     func = TOOL_REGISTRY.get(tool)
     if func is not None:
-        target = getattr(func, "__wrapped__", func)  # building-gate ラッパを外す
+        target = (
+            getattr(func, "__wrapped__", func)
+            if getattr(func, "_saiverse_building_gate", False)
+            else func
+        )
         if inspect.iscoroutinefunction(target):
             # async native は _execute_action_async の Task 文脈 (persona_context
             # 伝播済み) で await されるので、 そのまま返せば文脈が乗る。
@@ -647,6 +651,19 @@ def execute_action(
     テスト実行が「どの機体で試すか」をユーザーに選ばせるために使う。 スペル経路
     (ペルソナ駆動) では None のまま呼び、 従来通り現在機体へ解決する。
     """
+    from saiverse.addon_config import is_addon_enabled
+
+    if not is_addon_enabled(addon_name):
+        raise RuntimeError(
+            f"アドオン '{addon_name}' は無効化されているためアクションを実行できません"
+        )
+
+    # Stored JSON and API test payloads both pass through the same allowlist
+    # immediately before execution.  Validation at save time alone is not a
+    # security boundary because files can be edited while SAIVerse is stopped.
+    allowed_tools = get_available_tools(addon_name)
+    validate_action(action.to_dict(), allowed_tools=allowed_tools)
+
     import tools.mcp_client as _mcp
 
     loop = _mcp._loop

@@ -1,7 +1,9 @@
 from fastapi import APIRouter
 from api.routes import chat, config, providers, user, info, people
+from api.owner_auth import router as owner_auth_router
 
 api_router = APIRouter()
+api_router.include_router(owner_auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(config.router, prefix="/config", tags=["config"])
 api_router.include_router(providers.router, prefix="/providers", tags=["providers"])
@@ -34,4 +36,3 @@ api_router.include_router(addon_actions.router, prefix="/addon", tags=["addon-ac
 api_router.include_router(addon.router, prefix="/addon", tags=["addon"])
 api_router.include_router(addon_catalog.router, prefix="/addon-catalog", tags=["addon-catalog"])
 api_router.include_router(oauth.router, prefix="/oauth", tags=["oauth"])
-

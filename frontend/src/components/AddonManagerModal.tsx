@@ -440,7 +440,11 @@ function FileParamControl({
         if (!fileApiBase) return;
         setError(null);
         try {
-            await fetch(fileApiBase, { method: 'DELETE' });
+            const res = await fetch(fileApiBase, { method: 'DELETE' });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({ detail: res.statusText }));
+                throw new Error(body.detail || `Delete failed: ${res.status}`);
+            }
             onChange(schema.key, undefined);
             setPreviewUrl(null);
         } catch (err) {
@@ -612,11 +616,17 @@ function ParamsSection({
     const saveGlobal = useCallback(async (params: Record<string, unknown>) => {
         setSaving(true);
         try {
-            await fetch(`/api/addon/${addon.addon_name}/config`, {
+            const res = await fetch(`/api/addon/${addon.addon_name}/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ params }),
             });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Save failed: ${res.status}`);
+            }
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Addon config save failed');
         } finally {
             setSaving(false);
         }
@@ -648,11 +658,19 @@ function ParamsSection({
      * 既存の他キー (OAuth トークン等) は破壊されない。
      */
     const savePersona = async (personaId: string, partial: Record<string, unknown>) => {
-        await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ params: partial }),
-        });
+        try {
+            const res = await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ params: partial }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Save failed: ${res.status}`);
+            }
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Persona config save failed');
+        }
     };
 
     const handlePersonaChange = (personaId: string, key: string, val: unknown) => {
@@ -797,12 +815,20 @@ function AddonCard({
 
     const handleToggle = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const enabled = e.target.checked;
-        await fetch(`/api/addon/${addon.addon_name}/enabled`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ is_enabled: enabled }),
-        });
-        onToggleEnabled(addon.addon_name, enabled);
+        try {
+            const res = await fetch(`/api/addon/${addon.addon_name}/enabled`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_enabled: enabled }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Toggle failed: ${res.status}`);
+            }
+            onToggleEnabled(addon.addon_name, enabled);
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Addon toggle failed');
+        }
     };
 
     return (

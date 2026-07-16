@@ -430,7 +430,9 @@ def insert_building_message(
                         "insert_building_message: duplicate client_message_id=%s → returning existing seq=%d",
                         cmid, existing.seq,
                     )
-                    return deserialize_building_message(existing)
+                    result = deserialize_building_message(existing)
+                    result["_was_inserted"] = False
+                    return result
 
             max_seq = db.query(sa_func.coalesce(sa_func.max(BuildingMessage.seq), 0)).filter_by(
                 building_id=building_id
@@ -456,9 +458,13 @@ def insert_building_message(
                             "insert_building_message: race-resolved duplicate cmid=%s → existing seq=%d",
                             cmid, existing.seq,
                         )
-                        return deserialize_building_message(existing)
+                        result = deserialize_building_message(existing)
+                        result["_was_inserted"] = False
+                        return result
                 raise
-            return deserialize_building_message(obj)
+            result = deserialize_building_message(obj)
+            result["_was_inserted"] = True
+            return result
         except Exception as exc:
             try:
                 db.rollback()

@@ -436,6 +436,15 @@ LM Studio は OpenAI 互換 API を提供するため `openai_compat` で扱え�
 
 ### 将来 Phase（範囲外、メモのみ）
 
+- **モデル単位の任意fallback chain**（2026-07-16、まはー構想）:
+  - 各model configから、障害時に切り替える別modelを順序付きで指定できるようにする。
+  - fallback先は同一provider・paid modelに限定しない。free→paid、重量級→軽量、remote→local、別providerへの切替を同じ仕組みで表現する。
+  - 現行routerのように「free失敗時は固定paid clientへ切替」「一度成功するとprocess全体をpaidへ固定」する暗黙policyは廃止し、requestごとにmodel configの明示chainを評価する。
+  - failure分類は例外文字列substringではなくproviderの型付きstatus/retry metadataを使う。認証・入力不正・content policy等、fallbackしても解決しない失敗はchainを進めない。
+  - streaming開始後や外部tool副作用後にはmodel fallbackでrequest全体を再実行しない。fallback可能なのはLLM出力・副作用がまだ確定していない境界だけとする。
+  - chainの循環、存在しないmodel、利用不能credential、最大段数をload時に検証する。実行logには元model、選択先、分類済み理由を本文なしで残す。
+  - paid modelを含むchainは明示opt-inとし、将来はbudget/cost ceilingもchain policyへ持たせる。
+  - **今回（監査第二陣）は新規実装しない**。まず暗黙のprocess-global paid固定を停止し、明示設定なしではfallbackしない安全な暫定形へ直す。その後、本項を正典としてUI・schema・runtimeを設計する。
 - `llm_clients/factory.py` の各 `if protocol == ...` 分岐を `_build_*_client()` 関数に分割するリファクタ（Phase 1 では分岐条件の変更のみで保留）
 - Anthropic 互換プロトコル（DeepSeek-Anthropic 互換等）対応
 - Gemini 互換プロトコル対応

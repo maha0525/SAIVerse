@@ -71,15 +71,15 @@ def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
         # Return default or 404. For now default host
         return FileResponse("builtin_data/icons/host.png")
     
-    # Check if absolute path
+    from api.file_safety import ensure_allowed_path
+    from saiverse.data_paths import PROJECT_ROOT
+
     path = Path(persona.avatar_image)
     if not path.is_absolute():
-        # Assume relative to workspace root or handled by manager
-        # But commonly it might be in assets/avatars
-        pass 
+        path = PROJECT_ROOT / path
     
     if path.exists():
-        return FileResponse(path)
+        return FileResponse(ensure_allowed_path(path, home=manager.saiverse_home))
     return FileResponse("builtin_data/icons/host.png")
 
 import logging

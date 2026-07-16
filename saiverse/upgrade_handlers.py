@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
+def _no_op_city_upgrade(*, session: "Session", city) -> None:
+    """Explicit edge for releases that changed persona state but not City state."""
+    del session, city
+
+
 # ---- v0.3.0 第1号: dynamic_state captured_at リセット ----
 
 def _v0_3_0_dynamic_state_reset(*, session: "Session", ai: "AI") -> None:
@@ -62,14 +67,9 @@ def _v0_3_0_dynamic_state_reset(*, session: "Session", ai: "AI") -> None:
         try:
             data = json.loads(row.LAST_NOTIFIED_JSON)
         except json.JSONDecodeError as exc:
-            # データ破損ケース。スキップして他を続ける（このハンドラ単体は失敗扱いにしない）
-            LOGGER.warning(
-                "[handler:v0_3_0_dynamic_state_reset] persona=%s building=%s: "
-                "malformed LAST_NOTIFIED_JSON, skipping: %s",
-                persona_id, row.BUILDING_ID, exc,
-            )
-            skipped_count += 1
-            continue
+            raise ValueError(
+                f"persona={persona_id} building={row.BUILDING_ID} has malformed LAST_NOTIFIED_JSON"
+            ) from exc
 
         old_captured_at = data.get("captured_at")
         old_pages_count = len(data.get("memopedia_pages") or [])
@@ -95,30 +95,21 @@ def _v0_3_0_dynamic_state_reset(*, session: "Session", ai: "AI") -> None:
 
 def _insert_upgrade_notification(persona_id: str) -> None:
     """ペルソナの SAIMemory にアップデート検知通知を1件挿入する。"""
-    try:
-        from saiverse_memory.adapter import SAIMemoryAdapter
-    except ImportError as exc:
-        LOGGER.warning(
-            "[handler] cannot import SAIMemoryAdapter, skipping notification for %s: %s",
-            persona_id, exc, exc_info=True,
-        )
-        return
+    from saiverse_memory.adapter import SAIMemoryAdapter
 
-    try:
-        adapter = SAIMemoryAdapter(persona_id)
-    except Exception as exc:
-        LOGGER.warning(
-            "[handler] failed to initialise SAIMemory adapter for %s, "
-            "skipping notification: %s",
-            persona_id, exc, exc_info=True,
-        )
-        return
+    adapter = SAIMemoryAdapter(persona_id)
 
     if not adapter.is_ready():
-        LOGGER.warning(
-            "[handler] SAIMemory not ready for %s, skipping notification",
-            persona_id,
-        )
+        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+
+    upgrade_id = f"v0_3_0_dynamic_state_reset:{persona_id}:0.3.0.dev0"
+    with adapter._db_lock:
+        existing = adapter.conn.execute(
+            "SELECT 1 FROM messages WHERE json_extract(metadata, '$.upgrade_id') = ? LIMIT 1",
+            (upgrade_id,),
+        ).fetchone()
+    if existing:
+        LOGGER.info("[handler] upgrade notification already exists for %s", persona_id)
         return
 
     # `event_message` タグがペルソナの会話コンテキストに取り込まれるキー
@@ -134,19 +125,16 @@ def _insert_upgrade_notification(persona_id: str) -> None:
         ),
         "metadata": {
             "tags": ["internal", "event_message", "system_event", "version_upgrade"],
+            "upgrade_id": upgrade_id,
         },
     }
-    try:
-        adapter.append_persona_message(message)
-        LOGGER.info(
-            "[handler] inserted v0.3.0 upgrade notification into SAIMemory for %s",
-            persona_id,
-        )
-    except Exception as exc:
-        LOGGER.warning(
-            "[handler] failed to insert notification for %s: %s",
-            persona_id, exc, exc_info=True,
-        )
+    message_id = adapter.append_persona_message(message)
+    if not message_id:
+        raise RuntimeError(f"Failed to insert upgrade notification for {persona_id}")
+    LOGGER.info(
+        "[handler] inserted v0.3.0 upgrade notification into SAIMemory for %s",
+        persona_id,
+    )
 
 
 # ---- v0.3.0.dev1: 削除済み Playbook 名のスケジュール書き換え ----
@@ -263,12 +251,9 @@ def _v0_3_0_dev2_legacy_schedule_selected_playbook(*, session: "Session", ai: "A
         try:
             params = json.loads(params_raw)
         except (json.JSONDecodeError, TypeError) as exc:
-            LOGGER.warning(
-                "[handler:v0_3_0_dev2_legacy_schedule_selected_playbook] persona=%s "
-                "schedule_id=%s: malformed PLAYBOOK_PARAMS, skipping: %s",
-                persona_id, row.SCHEDULE_ID, exc,
-            )
-            continue
+            raise ValueError(
+                f"persona={persona_id} schedule={row.SCHEDULE_ID} has malformed PLAYBOOK_PARAMS"
+            ) from exc
         if not isinstance(params, dict):
             continue
         if "selected_playbook" not in params:
@@ -443,6 +428,38 @@ def _v0_3_0_dev4_retired_autonomy_selected_playbook(*, session: "Session", city)
 # 各ハンドラは to_version の昇順に書くと読みやすい（実行順は upgrade.py 側で
 # select_handlers() がソートする）。
 HANDLERS: List[UpgradeHandler] = [
+    UpgradeHandler(
+        name="city_noop_v0_3_0_dev0",
+        scope="city",
+        from_version="0.0.0",
+        to_version="0.3.0.dev0",
+        run=_no_op_city_upgrade,
+        description="Explicit no-op City edge for the v0.3.0.dev0 persona migration.",
+    ),
+    UpgradeHandler(
+        name="city_noop_v0_3_0_dev1",
+        scope="city",
+        from_version="0.3.0.dev0",
+        to_version="0.3.0.dev1",
+        run=_no_op_city_upgrade,
+        description="Explicit no-op City edge for v0.3.0.dev1.",
+    ),
+    UpgradeHandler(
+        name="city_noop_v0_3_0_dev2",
+        scope="city",
+        from_version="0.3.0.dev1",
+        to_version="0.3.0.dev2",
+        run=_no_op_city_upgrade,
+        description="Explicit no-op City edge for v0.3.0.dev2.",
+    ),
+    UpgradeHandler(
+        name="city_noop_v0_3_0_dev3",
+        scope="city",
+        from_version="0.3.0.dev2",
+        to_version="0.3.0.dev3",
+        run=_no_op_city_upgrade,
+        description="Explicit no-op City edge for v0.3.0.dev3.",
+    ),
     UpgradeHandler(
         name="v0_3_0_dynamic_state_reset",
         scope="ai",

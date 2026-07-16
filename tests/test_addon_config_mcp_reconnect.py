@@ -29,7 +29,7 @@ class ReconnectAddonMcpServersTests(unittest.TestCase):
     """``tools.mcp_client.reconnect_addon_mcp_servers`` behavior."""
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_filters_servers_by_addon_name(self):
         """Only servers whose meta['addon_name'] matches are reconnected."""
@@ -120,7 +120,7 @@ class AddonConfigEndpointsTriggerReconnectTests(unittest.TestCase):
     """
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def setUp(self):
         # Bypass the real DB by patching _get_session with a MagicMock

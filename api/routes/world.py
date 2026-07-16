@@ -487,6 +487,10 @@ def delete_tool(tool_id: int, manager: SAIVerseManager = Depends(get_manager)):
 def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
     description = i.description
     file_path = i.file_path
+    if file_path:
+        from api.file_safety import resolve_allowed_path
+
+        resolve_allowed_path(file_path, home=manager.saiverse_home)
     
     # Auto-generate description if empty and file_path is provided
     if not description.strip() and file_path:
@@ -499,6 +503,9 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
                 from saiverse.data_paths import get_saiverse_home
                 full_path = get_saiverse_home() / file_path
             
+            from api.file_safety import ensure_allowed_path
+
+            full_path = ensure_allowed_path(full_path, home=saiverse_home)
             if full_path.exists():
                 item_type = i.item_type.lower()
                 if item_type == "picture":
@@ -521,6 +528,10 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.put("/items/{item_id}")
 def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager)):
+    if i.file_path:
+        from api.file_safety import resolve_allowed_path
+
+        resolve_allowed_path(i.file_path, home=manager.saiverse_home)
     return _check_result(manager.update_item(item_id, i.name, i.item_type, i.description, i.owner_kind, i.owner_id, i.state_json, i.file_path))
 
 @router.get("/items/{item_id}")
@@ -866,4 +877,3 @@ def delete_building_realtime_spell(
         return {"status": "ok"}
     finally:
         db.close()
-

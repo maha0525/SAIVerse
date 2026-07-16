@@ -105,6 +105,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
                     protocol,
                     base_url: baseUrl || null,
                     api_key_env: apiKeyEnv || null,
+                    provider_id: id || null,
                 }),
             });
             const data: ConnectionTestResult = await res.json();

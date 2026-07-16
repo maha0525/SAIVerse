@@ -77,9 +77,8 @@ def _load_default_handlers() -> None:
     try:
         from saiverse import upgrade_handlers
     except ImportError as exc:
-        LOGGER.warning("[upgrade] failed to import upgrade_handlers: %s", exc, exc_info=True)
-        _handlers_loaded = True
-        return
+        LOGGER.error("[upgrade] failed to import upgrade_handlers: %s", exc, exc_info=True)
+        raise RuntimeError("Default upgrade handler registry could not be loaded") from exc
     registered = list(getattr(upgrade_handlers, "HANDLERS", []))
     HANDLERS.extend(registered)
     _handlers_loaded = True
@@ -89,17 +88,14 @@ def _load_default_handlers() -> None:
 # ---- バージョン解析 ----
 
 def parse_version(value: Optional[str]) -> Version:
-    """LAST_KNOWN_VERSION 文字列を Version に。NULL/不正値は最古として扱う。"""
+    """LAST_KNOWN_VERSION 文字列を Version に。NULLだけを最古として扱う。"""
     if not value:
         return PRE_VERSION_AWARE
     try:
         return Version(value)
-    except InvalidVersion as exc:
-        LOGGER.warning(
-            "Invalid version string %r found in DB, treating as pre-version-aware: %s",
-            value, exc,
-        )
-        return PRE_VERSION_AWARE
+    except InvalidVersion:
+        LOGGER.error("Invalid version string %r found in DB", value, exc_info=True)
+        raise
 
 
 def current_version() -> Version:
@@ -125,23 +121,41 @@ def select_handlers(
     ``from_version < handler.to_version <= to_version`` を満たすものが対象。
     結果は ``handler.to_version`` の昇順でソートされる（中間バージョンを順次適用）。
     """
-    selected: List[UpgradeHandler] = []
+    selected: List[tuple[Version, Version, UpgradeHandler]] = []
+    seen_edges: set[tuple[Version, Version]] = set()
     for handler in HANDLERS:
         if handler.scope != scope:
             continue
         try:
+            h_from = Version(handler.from_version)
             h_to = Version(handler.to_version)
-        except InvalidVersion:
-            LOGGER.warning(
-                "Skipping handler %r with invalid to_version %r",
-                handler.name, handler.to_version,
-            )
-            continue
+        except InvalidVersion as exc:
+            raise ValueError(f"Handler {handler.name!r} has an invalid version") from exc
+        if h_from >= h_to:
+            raise ValueError(f"Handler {handler.name!r} has a non-forward edge")
         if from_version < h_to <= to_version:
-            selected.append(handler)
+            edge = (h_from, h_to)
+            if edge in seen_edges:
+                raise ValueError(f"Duplicate {scope} upgrade edge {h_from} -> {h_to}")
+            seen_edges.add(edge)
+            selected.append((h_from, h_to, handler))
 
-    selected.sort(key=lambda h: Version(h.to_version))
-    return selected
+    selected.sort(key=lambda item: item[1])
+    cursor = from_version
+    for index, (h_from, h_to, handler) in enumerate(selected):
+        if index == 0:
+            if not (h_from <= cursor < h_to):
+                raise ValueError(
+                    f"Upgrade chain gap before {handler.name}: current={cursor}, edge={h_from}->{h_to}"
+                )
+        elif h_from != cursor:
+            raise ValueError(
+                f"Upgrade chain gap before {handler.name}: expected from_version={cursor}, got {h_from}"
+            )
+        cursor = h_to
+    if cursor != to_version:
+        raise ValueError(f"Upgrade chain ends at {cursor}, target is {to_version}")
+    return [item[2] for item in selected]
 
 
 # ---- 単一エンティティのアップグレード ----
@@ -160,8 +174,22 @@ def _run_handlers_for_entity(
         全ハンドラ成功で LAST_KNOWN_VERSION を更新できれば True。
         どこかで失敗すれば False（バージョンは未更新のまま残る）。
     """
-    current = parse_version(getattr(entity, "LAST_KNOWN_VERSION", None))
-    if current >= target:
+    try:
+        current = parse_version(getattr(entity, "LAST_KNOWN_VERSION", None))
+    except InvalidVersion:
+        return False
+    if current > target:
+        LOGGER.error(
+            "[upgrade] %s/%s has future version %s (running code target %s); "
+            "refusing to open newer persistent state with older code",
+            scope,
+            entity_id,
+            current,
+            target,
+        )
+        return False
+
+    if current == target:
         LOGGER.debug(
             "[upgrade] %s/%s already at %s (target %s), no-op",
             scope, entity_id, current, target,
@@ -176,7 +204,11 @@ def _run_handlers_for_entity(
             )
         return True
 
-    handlers = select_handlers(scope, current, target)
+    try:
+        handlers = select_handlers(scope, current, target)
+    except ValueError as exc:
+        LOGGER.error("[upgrade] invalid %s handler chain: %s", scope, exc)
+        return False
     LOGGER.info(
         "[upgrade] %s/%s upgrading from %s to %s (%d handlers)",
         scope, entity_id, current, target, len(handlers),
@@ -237,7 +269,10 @@ def run_startup_upgrade(session: "Session") -> bool:
         )
         return True
 
-    _load_default_handlers()
+    try:
+        _load_default_handlers()
+    except RuntimeError:
+        return False
 
     try:
         target = current_version()

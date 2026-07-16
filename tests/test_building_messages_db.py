@@ -200,6 +200,20 @@ class TestInsertHelper(unittest.TestCase):
         self.assertEqual(result["message_id"], "room:1")
         self.assertEqual(result["role"], "host")
         self.assertEqual(result["metadata"]["event"]["action"], "leave")
+        self.assertIs(result["_was_inserted"], True)
+
+    def test_duplicate_client_message_id_reports_existing_row(self) -> None:
+        msg = {
+            "role": "user",
+            "content": "hello",
+            "client_message_id": "command-1",
+        }
+        first = insert_building_message(self.SessionLocal, "room", msg)
+        second = insert_building_message(self.SessionLocal, "room", msg)
+
+        self.assertIs(first["_was_inserted"], True)
+        self.assertIs(second["_was_inserted"], False)
+        self.assertEqual(second["message_id"], first["message_id"])
 
     def test_insert_with_none_session_factory_is_noop(self) -> None:
         msg = {"role": "user", "content": "x"}

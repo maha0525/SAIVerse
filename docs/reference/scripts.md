@@ -74,8 +74,9 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 | スクリプト | 用途 |
 |---|---|
-| `self_update.py` | セルフアップデート（`update.bat`/`update.sh` と同じフロー） |
+| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback |
+| `self_update.py` | 旧セルフアップデート入口から `update_engine.py` への互換wrapper |
 | `set_version.py` | バージョン刻印 |
-| `snapshot.py` | スナップショット取得（ルートに `snapshot.bat`） |
+| `snapshot.py` | world snapshot format v2のsave/list/inspect/restore/delete。restoreは停止状態だけで実行 |
 | `run_discord_gateway_tests.py` | Discord Gateway テスト |
 | `download_searxng_source.py` / `merge_searxng_settings.py` | SearXNG セットアップ |

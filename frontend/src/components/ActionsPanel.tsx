@@ -154,9 +154,15 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
     const handleDelete = async (actionId: string) => {
         if (!confirm(`アクション「${actionId}」を削除しますか？`)) return;
         try {
-            await fetch(`${API_BASE}/${addonName}/actions/${actionId}`, { method: 'DELETE' });
+            const res = await fetch(`${API_BASE}/${addonName}/actions/${actionId}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.detail || `Delete failed: ${res.status}`);
+            }
             fetchActions();
-        } catch { /* ignore */ }
+        } catch (e) {
+            setTestResult({ ok: false, text: String(e) });
+        }
     };
 
     const handleTest = async (action: ActionDef) => {

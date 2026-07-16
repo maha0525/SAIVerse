@@ -721,7 +721,9 @@ class TestLLMClients(unittest.TestCase):
 
         client = GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]
-        response_generator = client.generate_stream(messages)
+        # An explicit empty list selects no-tool mode and must not invoke the
+        # process-global Gemini tool router (or a real external API).
+        response_generator = client.generate_stream(messages, tools=[])
 
         outputs = list(response_generator)
         mock_start_stream.assert_called_once()

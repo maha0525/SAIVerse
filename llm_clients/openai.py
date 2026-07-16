@@ -367,11 +367,19 @@ class OpenAIClient(LLMClient):
                         return parsed
                     logging.warning("[openai] Structured output missing required keys")
             except json.JSONDecodeError as e:
-                preview = candidate.replace("\n", "\\n")[:300]
-                logging.warning("[openai] Failed to parse structured output: %s (candidate=%r)", e, preview)
+                logging.warning(
+                    "[openai] Failed to parse structured output: %s "
+                    "(candidate_chars=%d)",
+                    e,
+                    len(candidate),
+                )
                 if not candidate:
                     message_dict = choice.message.model_dump() if hasattr(choice.message, "model_dump") else {}
-                    logging.warning("[openai] Structured output empty candidate. message=%s", message_dict)
+                    logging.warning(
+                        "[openai] Structured output empty candidate "
+                        "(message_fields=%s)",
+                        sorted(message_dict.keys()),
+                    )
                 raise InvalidRequestError(
                     "Failed to parse JSON response from structured output",
                     e,

@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from saiverse import provider_configs
+from saiverse.provider_security import validate_provider_config
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
@@ -96,6 +97,7 @@ class InlineConnectionTestRequest(BaseModel):
     protocol: str
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    provider_id: Optional[str] = None
 
 
 def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
@@ -157,6 +159,7 @@ def create_provider(req: ProviderCreateRequest):
         )
     payload = req.model_dump(exclude={"id"}, exclude_none=True)
     try:
+        validate_provider_config(req.id, payload)
         provider_configs.save_provider(req.id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -190,6 +193,7 @@ def update_provider(provider_id: str, req: ProviderUpdateRequest):
         )
 
     try:
+        validate_provider_config(provider_id, merged)
         provider_configs.save_provider(provider_id, merged)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -235,7 +239,14 @@ def reload_providers():
     ]
 
 
-def _run_connection_test(protocol: str, base_url: Optional[str], api_key_env: Optional[str]) -> ConnectionTestResponse:
+def _run_connection_test(
+    protocol: str,
+    base_url: Optional[str],
+    api_key_env: Optional[str],
+    *,
+    provider_id: Optional[str] = None,
+    builtin: bool = False,
+) -> ConnectionTestResponse:
     """Execute the actual connection probe. Shared by inline and saved-provider routes."""
     base_url = (base_url or "").rstrip("/")
     if not base_url:
@@ -243,6 +254,18 @@ def _run_connection_test(protocol: str, base_url: Optional[str], api_key_env: Op
             success=False,
             error="base_url が設定されていません",
         )
+
+    try:
+        validate_provider_config(
+            provider_id or "inline",
+            {
+                "base_url": base_url,
+                "api_key_env": api_key_env,
+                "builtin": builtin,
+            },
+        )
+    except ValueError as exc:
+        return ConnectionTestResponse(success=False, error=str(exc))
 
     start = time.monotonic()
 
@@ -323,7 +346,14 @@ def test_inline_connection(req: InlineConnectionTestRequest):
     Note: must be registered BEFORE /{provider_id}/test so FastAPI does not
     treat "test" as a path parameter.
     """
-    return _run_connection_test(req.protocol, req.base_url, req.api_key_env)
+    existing = provider_configs.get_provider(req.provider_id) if req.provider_id else None
+    return _run_connection_test(
+        req.protocol,
+        req.base_url,
+        req.api_key_env,
+        provider_id=req.provider_id,
+        builtin=bool(existing and existing.get("builtin")),
+    )
 
 
 @router.post("/{provider_id}/test", response_model=ConnectionTestResponse)
@@ -336,4 +366,6 @@ def test_provider_connection(provider_id: str):
         protocol=cfg.get("protocol", ""),
         base_url=cfg.get("base_url"),
         api_key_env=cfg.get("api_key_env"),
+        provider_id=provider_id,
+        builtin=bool(cfg.get("builtin")),
     )

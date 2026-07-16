@@ -471,6 +471,7 @@ def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager
     path = Path(file_path)
     LOGGER.debug("Checking path: %s", path)
     
+    home = getattr(manager, "saiverse_home", None)
     if not path.exists():
         # Attempt recovery for legacy/WSL paths or relative paths
         # The DB might contain:
@@ -541,6 +542,10 @@ def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager
     
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"File not found on server: {path}")
+
+    from api.file_safety import ensure_allowed_path
+
+    path = ensure_allowed_path(path, home=home)
 
     if item_type == "document":
         try:
@@ -672,6 +677,9 @@ def update_item_content(item_id: str, body: DocumentContentUpdate, manager = Dep
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
+    from api.file_safety import ensure_allowed_path
+
+    path = ensure_allowed_path(path, home=getattr(manager, "saiverse_home", None))
     try:
         path.write_text(body.content, encoding="utf-8")
         return {"success": True, "message": "Content updated successfully"}

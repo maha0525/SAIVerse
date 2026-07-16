@@ -147,6 +147,55 @@ class MCPServerConnectionOwnerTaskTests(unittest.TestCase):
 
         self._run(scenario())
 
+    def test_startup_timeout_cancels_owner_and_returns_control(self):
+        async def scenario():
+            conn = MCPServerConnection(
+                "never-ready",
+                {"command": "noop", "startup_timeout": 0.01},
+            )
+
+            async def never_ready():
+                await asyncio.Event().wait()
+
+            with patch.object(conn, "_run_connection", never_ready):
+                with self.assertRaises(TimeoutError):
+                    await conn.connect()
+
+            self.assertFalse(conn.connected)
+            self.assertIsNone(conn._owner_task)
+            self.assertIsNone(conn._ready_future)
+
+        self._run(scenario())
+
+    def test_stdio_start_log_does_not_expose_env_values_or_args(self):
+        transport = _ScopedTransport()
+
+        def fake_stdio_client(server_params, errlog=None):
+            return transport
+
+        async def scenario():
+            conn = MCPServerConnection(
+                "redacted",
+                {
+                    "command": "noop",
+                    "args": ["--token", "ARG_SECRET_VALUE"],
+                    "env": {"API_TOKEN": "ENV_SECRET_VALUE"},
+                },
+            )
+            await conn.connect()
+            await conn.disconnect()
+
+        with patch("mcp.client.stdio.stdio_client", fake_stdio_client), patch(
+            "mcp.ClientSession", _FakeSession
+        ), self.assertLogs("tools.mcp_client", level="INFO") as captured:
+            self._run(scenario())
+
+        output = "\n".join(captured.output)
+        self.assertIn("env_keys=['API_TOKEN']", output)
+        self.assertIn("arg_count=2", output)
+        self.assertNotIn("ENV_SECRET_VALUE", output)
+        self.assertNotIn("ARG_SECRET_VALUE", output)
+
 
 if __name__ == "__main__":
     unittest.main()

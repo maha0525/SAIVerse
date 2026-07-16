@@ -264,6 +264,20 @@ class RuntimeEngine:
                     self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
                     return state
 
+                if perm == "user_only":
+                    denial_msg = (
+                        f"Playbook '{clean_name}' is user-only and cannot be started "
+                        "by a persona or autonomous execution."
+                    )
+                    self.runtime._notify_persona_permission_result(
+                        state,
+                        persona,
+                        clean_name,
+                        denial_msg,
+                        event_callback,
+                    )
+                    return state
+
                 if perm == "ask_every_time":
                     if auto_mode:
                         denial_msg = f"Playbook '{clean_name}' requires user permission but running in auto mode. Skipped."

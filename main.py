@@ -298,7 +298,24 @@ def main():
     )
     default_sds_url = os.getenv("SDS_URL", "http://127.0.0.1:8080")
     parser.add_argument("--sds-url", type=str, default=default_sds_url, help="URL of the SAIVerse Directory Service (or from .env).")
+    parser.add_argument(
+        "--listen-host",
+        default=os.getenv("SAIVERSE_API_HOST", "127.0.0.1"),
+        help=(
+            "Backend listen address (default: 127.0.0.1). Non-loopback values "
+            "require SAIVERSE_OWNER_TOKEN and SAIVERSE_ALLOWED_ORIGINS."
+        ),
+    )
     args = parser.parse_args()
+
+    listen_host = str(args.listen_host).strip()
+    loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    lan_mode = listen_host not in loopback_hosts
+    if lan_mode:
+        if not os.getenv("SAIVERSE_OWNER_TOKEN"):
+            parser.error("LAN公開には SAIVERSE_OWNER_TOKEN が必要です")
+        if not os.getenv("SAIVERSE_ALLOWED_ORIGINS"):
+            parser.error("LAN公開には SAIVERSE_ALLOWED_ORIGINS が必要です")
 
     if args.db_file:
         provided_path = Path(args.db_file)
@@ -312,6 +329,25 @@ def main():
                 db_path = (root_dir / provided_path).resolve()
     else:
         db_path = default_db_path()
+
+    from saiverse.runtime_marker import acquire_runtime_marker, release_runtime_marker
+
+    try:
+        runtime_marker_token = acquire_runtime_marker(
+            city_name=args.city_name,
+            db_path=db_path,
+            argv=list(sys.argv),
+        )
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    atexit.register(release_runtime_marker, runtime_marker_token)
+
+    # Every startup mutation (schema, data backfill, version handler) is preceded
+    # by a synchronous, integrity-checked restore point. Failure is startup-fatal.
+    if db_path.exists():
+        from database.backup import backup_saiverse_db
+
+        backup_saiverse_db(db_path, kind="pre_upgrade")
 
     # Auto-migrate database schema if needed (must run before backup to avoid file lock conflicts).
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
@@ -514,14 +550,29 @@ def main():
 
     app = FastAPI()
 
-    # CORS settings (Allow frontend access)
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    allowed_origins.extend(
+        origin.strip().rstrip("/")
+        for origin in os.getenv("SAIVERSE_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip().startswith(("http://", "https://"))
+    )
+
+    # CORS settings (Allow the configured frontend origins only)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Development only: allow all
+        allow_origins=sorted(set(allowed_origins)),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    if lan_mode:
+        from api.owner_auth import OwnerAuthMiddleware
+
+        app.add_middleware(OwnerAuthMiddleware)
 
     # Mount uploads directory for user-attached images FIRST (more specific path)
     # Access via /api/static/uploads/filename.png
@@ -564,8 +615,8 @@ def main():
         from saiverse.addon_events import set_event_loop
         set_event_loop(asyncio.get_event_loop())
 
-    logging.info(f"Starting SAIVerse backend on http://0.0.0.0:{manager.ui_port}")
-    logging.info(f"API endpoints available at http://0.0.0.0:{manager.ui_port}/api")
+    logging.info(f"Starting SAIVerse backend on http://{listen_host}:{manager.ui_port}")
+    logging.info(f"API endpoints available at http://{listen_host}:{manager.ui_port}/api")
     logging.info("")
     logging.info("To use the UI, start the Next.js frontend:")
     logging.info("  cd frontend && npm run dev")
@@ -573,7 +624,7 @@ def main():
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host=listen_host,
         port=manager.ui_port,
         log_level="info",
         timeout_graceful_shutdown=5,

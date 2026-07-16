@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 348（tag グループ: 23）
+**エンドポイント数**: 350（tag グループ: 24）
 
 ## addon
 
@@ -67,6 +67,13 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/admin/env` | Get environment variables from .env file. |
 | POST | `/api/admin/env` | Update environment variables in .env file and runtime os.environ. |
 | POST | `/api/admin/restart` | Restart the server process. |
+
+## auth
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/auth/login` |  |
+| POST | `/api/auth/login` |  |
 
 ## chat
 
@@ -239,6 +246,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/autonomy/stop` | Stop autonomous behavior for a persona. |
 | POST | `/api/people/{persona_id}/cache-config` | persona の cache 設定 ("off"/"5m"/"1h") を設定する (Phase 2、in-memory・非永続)。 |
 | GET | `/api/people/{persona_id}/cache-status` | 指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。 |
+| GET | `/api/people/{persona_id}/clips` | メッセージ群に付いた観測点 (点クリップ) をバッチで返す (画面 C: ハイライト)。 |
 | GET | `/api/people/{persona_id}/config` | Get persona configuration. |
 | PATCH | `/api/people/{persona_id}/config` | Update persona configuration. |
 | GET | `/api/people/{persona_id}/core-memory` | 生存中のコア記憶を一覧する (未確認フラグ付き)。訂正・確認・削除は各変更系 API で。 |
@@ -295,7 +303,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | POST | `/api/people/{persona_id}/organize-memory` | Clear all metabolism anchors and trigger metabolism (Chronicle generation + anchor reset). |
-| GET | `/api/people/{persona_id}/photos` | メッセージ群に付いた観測点 (点写真) をバッチで返す (画面 C: ハイライト)。 |
 | GET | `/api/people/{persona_id}/profile-tree` | ペルソナのプロフィール用の目的の木 (画面 D)。読み取り専用の集約。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |

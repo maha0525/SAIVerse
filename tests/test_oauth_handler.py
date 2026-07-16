@@ -44,7 +44,11 @@ class OAuthHandlerTests(unittest.TestCase):
 
         self._home = Path(self._tmp.name) / ".saiverse"
         self._expansion = Path(self._tmp.name) / "expansion_data"
-        os.environ["SAIVERSE_HOME"] = str(self._home)
+        self._env_patch = patch.dict(
+            os.environ,
+            {"SAIVERSE_HOME": str(self._home)},
+        )
+        self._env_patch.start()
 
         # Patch EXPANSION_DATA_DIR (module-level constant in data_paths)
         from saiverse import data_paths
@@ -128,7 +132,7 @@ class OAuthHandlerTests(unittest.TestCase):
         for p in reversed(self._patches):
             p.stop()
         self._session_patch.stop()
-        os.environ.pop("SAIVERSE_HOME", None)
+        self._env_patch.stop()
         # Dispose engine BEFORE temp dir cleanup so SQLite handles release.
         self._engine.dispose()
 

@@ -77,8 +77,12 @@ saiverse/
 ├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了の動的スキーマ + 起動、judgment_points.md）
 ├── internal_alert_poller.py# 内部 alert ポーリング
 ├── llm_router.py           # ツール呼び出し判定
+├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル
+├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
+├── file_policy.py          # persisted pathのmanaged root境界
+├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
 ├── meta_layer.py           # メタ判断まわり
 ├── buildings.py            # Building モデルヘルパ
 ├── data_paths.py           # パス管理（user_data/builtin_data）
@@ -97,6 +101,8 @@ FastAPI のエンドポイント。ルートは `routes/` サブパッケージ�
 api/
 ├── main.py           # FastAPI アプリ生成
 ├── deps.py           # 依存性注入
+├── owner_auth.py     # LAN公開時の単一owner認証・Origin検査
+├── file_safety.py    # upload hard limit・filename・path共通境界
 ├── routes/           # エンドポイント群
 │   ├── chat.py       #   チャット（NDJSON ストリーミング）
 │   ├── config.py     #   設定
@@ -105,6 +111,18 @@ api/
 │   ├── admin.py      #   管理機能
 │   └── ...
 └── utils/
+```
+
+### scripts/
+
+保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。
+
+```
+scripts/
+├── snapshot.py             # world snapshot format v2のsave/inspect/restore/delete
+├── update_engine.py        # fail-closed共通updater（snapshot・phase停止・rollback・health）
+├── self_update.py          # 旧入口互換wrapper
+└── gen_reference_docs.py   # 自動生成reference docs
 ```
 
 ### persona/
@@ -175,7 +193,7 @@ sai_memory/
 ├── memopedia/        # Memopedia（知識グラフ。core/storage/generator）
 ├── core_memory.py    # コア記憶（記憶アーキv2 ゾーンA。memory.db 同居）
 ├── perception_buffer.py # 知覚バッファ（未消費知覚を溜め Pulse 消費で放出。memory.db 同居）
-├── photos.py / purpose_tags.py # 写真（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
+├── clips.py / purpose_tags.py # クリップ（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
 ├── backup.py         # rdiff-backup
 ├── config.py / cli.py / logging_utils.py
@@ -253,7 +271,9 @@ builtin_data/
 ├── personas/<id>/          # ペルソナ別記憶（memory.db / tasks.db）
 ├── cities/<city>/          # 都市・建物のログ
 ├── image/ documents/       # アップロード画像・文書
-└── backups/                # DB・記憶バックアップ
+├── snapshots/              # 検証済みworld snapshot ZIP（restore/update正典）
+├── backups/                # persona memory.db個別backup（world snapshotとは独立）
+└── .runtime/               # 稼働Cityごとのprocess identity marker
 ```
 
 **移行**: 起動時に `main.py` が旧 `user_data/`（リポジトリ内）を `~/.saiverse/user_data/` へ自動移行する。テスト時は `SAIVERSE_USER_DATA_DIR` で上書きできる。

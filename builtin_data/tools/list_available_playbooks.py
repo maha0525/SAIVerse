@@ -33,6 +33,35 @@ _CREDENTIAL_CHECKERS: dict[str, "callable[[str], bool]"] = {
 }
 
 
+def has_required_playbook_credentials(
+    required_credentials: object,
+    persona_id: Optional[str],
+) -> bool:
+    """Return whether every declared credential is available to the persona.
+
+    DB rows store JSON text while ``PlaybookSchema`` stores a list.  Keeping
+    both representations behind one helper prevents the prompt listing and
+    execute-time ``run_playbook`` gate from drifting apart.
+    """
+    if not required_credentials:
+        return True
+    try:
+        required = (
+            json.loads(required_credentials)
+            if isinstance(required_credentials, str)
+            else required_credentials
+        )
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(required, list) or not persona_id:
+        return False
+    for credential_type in required:
+        checker = _CREDENTIAL_CHECKERS.get(str(credential_type))
+        if checker is None or not checker(persona_id):
+            return False
+    return True
+
+
 def list_available_playbooks(persona_id: Optional[str] = None, building_id: Optional[str] = None) -> str:
     """List playbooks available for router selection.
 
@@ -105,17 +134,11 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
                 include = False
 
             # Check required credentials
-            if include and pb.required_credentials:
-                try:
-                    req_creds = json.loads(pb.required_credentials)
-                    if req_creds and persona_id:
-                        for cred_type in req_creds:
-                            checker = _CREDENTIAL_CHECKERS.get(cred_type)
-                            if checker is None or not checker(persona_id):
-                                include = False
-                                break
-                except (json.JSONDecodeError, TypeError):
-                    _log.warning("Invalid required_credentials JSON for playbook %s", pb.name)
+            if include and not has_required_playbook_credentials(
+                pb.required_credentials,
+                persona_id,
+            ):
+                include = False
 
             # Check city-scoped permission
             if include:

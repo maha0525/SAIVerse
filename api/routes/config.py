@@ -1108,6 +1108,15 @@ def _strip_runtime_fields(config: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in config.items() if k != "builtin"}
 
 
+def _validate_model_connection(key: str, config: Dict[str, Any]) -> None:
+    from saiverse.provider_security import validate_model_config_connection
+
+    try:
+        validate_model_config_connection(key, config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class ModelFileCreateRequest(BaseModel):
     key: str  # filename stem (no extension)
     config: Dict[str, Any]
@@ -1197,6 +1206,7 @@ def create_model_file(req: ModelFileCreateRequest):
         )
 
     payload = _strip_runtime_fields(req.config)
+    _validate_model_connection(req.key, payload)
     user_path.parent.mkdir(parents=True, exist_ok=True)
     user_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -1223,6 +1233,7 @@ def update_model_file(key: str, req: ModelFileUpdateRequest):
         raise HTTPException(status_code=404, detail=f"Model not found: {key}")
 
     payload = _strip_runtime_fields(req.config)
+    _validate_model_connection(key, payload)
     user_path = _model_user_path(key)
     user_path.parent.mkdir(parents=True, exist_ok=True)
     was_user_data = user_path.exists()

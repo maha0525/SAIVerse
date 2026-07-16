@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _SAFE_RELPATH_RE = re.compile(r"^[A-Za-z0-9_\-./]+$")
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-_GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _validate_safe_relpath(value: str, field_name: str) -> str:
@@ -138,14 +138,14 @@ class RemoveDirStep(_StepBase):
 class GitCloneStep(_StepBase):
     type: Literal["git_clone"]
     url: str = Field(..., description="clone する Git リポジトリ URL (https 推奨)")
-    commit: str = Field(..., description="checkout する commit SHA (7-40 hex 必須、HEAD 追従不可)")
+    commit: str = Field(..., description="checkout する full commit SHA (40 hex 必須、HEAD 追従不可)")
     dest: str = Field(..., description="addon ディレクトリ相対の clone 先パス")
 
     @field_validator("url")
     @classmethod
     def _check_url(cls, v: str) -> str:
-        if not (v.startswith("https://") or v.startswith("http://")):
-            raise ValueError(f"git_clone.url must start with http(s):// ({v!r})")
+        if not v.startswith("https://"):
+            raise ValueError(f"git_clone.url must use HTTPS ({v!r})")
         return v
 
     @field_validator("commit")
@@ -153,7 +153,7 @@ class GitCloneStep(_StepBase):
     def _check_commit(cls, v: str) -> str:
         if not _GIT_SHA_RE.match(v):
             raise ValueError(
-                f"git_clone.commit must be 7-40 hex chars (SHA), got {v!r}. "
+                f"git_clone.commit must be a full lowercase 40-character SHA, got {v!r}. "
                 "Branch / tag names are not allowed (HEAD 追従禁止)."
             )
         return v
@@ -179,8 +179,8 @@ class DownloadFileStep(_StepBase):
     @field_validator("url")
     @classmethod
     def _check_url(cls, v: str) -> str:
-        if not (v.startswith("https://") or v.startswith("http://")):
-            raise ValueError(f"download_file.url must start with http(s):// ({v!r})")
+        if not v.startswith("https://"):
+            raise ValueError(f"download_file.url must use HTTPS ({v!r})")
         return v
 
     @field_validator("sha256")

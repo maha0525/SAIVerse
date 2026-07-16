@@ -310,17 +310,29 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const handleToggle = async (id: number) => {
         try {
-            await fetch(`/api/people/${personaId}/schedules/${id}/toggle`, { method: 'POST' });
+            const res = await fetch(`/api/people/${personaId}/schedules/${id}/toggle`, { method: 'POST' });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Toggle failed: ${res.status}`);
+            }
             loadSchedules();
-        } catch (e) { console.error(e); }
+        } catch (e) {
+            alert(e instanceof Error ? e.message : 'Schedule toggle failed');
+        }
     };
 
     const handleDelete = async (id: number) => {
         if (!confirm('このスケジュールを削除しますか？')) return;
         try {
-            await fetch(`/api/people/${personaId}/schedules/${id}`, { method: 'DELETE' });
+            const res = await fetch(`/api/people/${personaId}/schedules/${id}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Delete failed: ${res.status}`);
+            }
             loadSchedules();
-        } catch (e) { console.error(e); }
+        } catch (e) {
+            alert(e instanceof Error ? e.message : 'Schedule delete failed');
+        }
     };
 
     const formatDetail = (s: ScheduleItem) => {

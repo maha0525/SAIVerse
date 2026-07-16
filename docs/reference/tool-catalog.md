@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 129（うち Spell 化: 85）
+**登録ツール数**: 126（うち Spell 化: 84）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -15,7 +15,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | ツール名 | 説明 | 引数 | Spell |
 |---|---|---|---|
 | `addon_spell_help` | アドオンが提供する追加スペルの一覧とその使い方を返します。投稿・検索など詳細な操作を行う前に呼んでください。addon引数でアドオン名を絞り込めます（省略時は全アドオン、近い名前を渡せばファジーマッチします）。 | `addon`: string | アドオンスペル一覧 |
-| `calculate_expression` | Evaluate arithmetic expression with ^ (power) and ! (factorial). | `expression*`: string | — |
 | `call_playbook` | Call another playbook to perform a specialized task. Use this when you need to execute a specific capability (like se… | `playbook_name*`: string | — |
 | `chronicle_context_down` | 指定したChronicleエントリの下流コンテンツを取得します。Lv1エントリに対して使うと、そのChronicleがまとめている生のメッセージ全件を返します。Lv2以上に対して使うと、子ChronicleエントリのURIと全文を返し… | `entry_id*`: string | Chronicle下流参照 |
 | `chronicle_context_up` | 指定したChronicleエントリの上流コンテキストを取得します。親エントリ（上位レベルの要約）の全文と、同じ親に属する兄弟エントリ全件の全文とURIを返します。周辺の状況を把握し、さらに上位や横のエントリへナビゲートするための足がか… | `entry_id*`: string | Chronicle上流参照 |
@@ -57,17 +56,17 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `memopedia_manage` | Memopediaページの管理操作を行います。ページの削除、移動（親ページ変更）、重要フラグの設定が可能です。常に見えるようにしたい場合は memory_open で机に開いてください。 | `action*`: string, `page_id*`: string, `new_parent_id`: string, `is_important`: boolean | — |
 | `memopedia_note` | Write a knowledge fragment to a Memopedia page. Each call creates one fragment (a single fact or note) linked to the … | `content*`: string, `title`: string, `summary`: string, `category`: string, `keywords`: array, `page_id`: string | — |
 | `memopedia_save_page` | Save a Memopedia knowledge page. If a page with the same title exists, it is updated. Otherwise a new page is created… | `title*`: string, `summary`: string, `content`: string, `category`: string, `keywords`: array | — |
-| `memory_clip` | 会話の生ログから写真を撮り、記憶の地図帳のページに貼ります。quote を指定すると点写真（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲写真（anchor の前後 rounds 往復の会話の切… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | 写真を撮って貼る |
-| `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は m:N（Memopedia）/ ch:N（Chronicle）/ task:N（目的ノード）の形式です（コア… | `ref*`: string | 記憶のページを机から閉じる |
-| `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は c:N（コア記憶1件）と m:N（Memopedia ページ）です。Chronicle（ch:N）と写真（p:N）は消せま… | `ref*`: string | 記憶のページをごみ箱へ |
+| `memory_clip` | 会話の生ログからクリップを切り出し、記憶の地図帳のページに貼ります。quote を指定すると点クリップ（そのメッセージ内の逐語引用。本文と一字一句一致している必要があります）、省略すると範囲クリップ（anchor の前後 rounds… | `anchor*`: string, `quote`: string, `rounds`: integer, `paste_to`: string, `mode`: string | クリップを切り出して貼る |
+| `memory_close` | 机に開いた記憶の地図帳のページを閉じ、棚に戻します。閉じても目次（検索・想起）からは消えません。必要ならまた開けます。参照は memopedia:N（Memopedia）/ chronicle:N（Chronicle）/ task:N… | `ref*`: string | 記憶のページを机から閉じる |
+| `memory_delete` | 記憶の地図帳（Memory Atlas）のページをごみ箱に移動します（完全に消えるわけではありません）。対象は core:N（コア記憶1件）と memopedia:N（Memopedia ページ）です。Chronicle（chroni… | `ref*`: string | 記憶のページをごみ箱へ |
 | `memory_open` | 記憶の地図帳（Memory Atlas）の1ページを机に開いたままにします。開くと、そのページの現在の内容が結果に表示されます（読む行為を兼ねるため、memory_read を続けて撃つ必要はありません）。「読む（memory_rea… | `ref*`: string, `purpose_ref`: string | 記憶のページを机に開く |
 | `memory_read` | 記憶の地図帳（Memory Atlas）の1ページをその場で読みます。読んだ内容は会話の流れに残り、時間とともに流れていきます（机の場所は取りません）。常に見える状態を保ちたい場合は memory_open を使ってください。参照は … | `ref*`: string | 記憶のページを読む |
 | `memory_read_around` | Read the conversation context around a specific message. Use this after memory_search_brief to expand context around … | `message_id*`: string, `window`: integer | — |
 | `memory_recall` | Recall relevant past messages from long-term memory. Use 'query' for semantic (meaning-based) search and 'keywords' f… | `query`: string, `keywords`: array, `max_chars`: integer, `topk`: integer, `start_date`: string, `end_date`: string | — |
 | `memory_recall_unified` | ChronicleとMemopediaを横断してセマンティック検索を行います。Chronicleはあらすじ全文、MemopediaはページのURIと概要を返します。取得したURIを使って chronicle_context_up/do… | `query*`: string, `focus`: string, `search_chronicle`: boolean, `search_memopedia`: boolean, `search_fragments`: boolean | 記憶想起 |
-| `memory_search` | 記憶の地図帳（Memopedia のページ・Chronicle の章）をキーワードで検索します。タイトル・本文に含まれる語句で照合し、一致したページを 参照（m:N / ch:N）と一行プレビューで一覧します。 | `query*`: string | 記憶の地図帳を検索する |
+| `memory_search` | 記憶の地図帳（Memopedia のページ・Chronicle の章）をキーワードで検索します。タイトル・本文に含まれる語句で照合し、一致したページを 参照（memopedia:N / chronicle:N）と一行プレビューで一覧します。 | `query*`: string | 記憶の地図帳を検索する |
 | `memory_search_brief` | Search memory and return brief snippets with message IDs. Use this for finding relevant messages before reading full … | `query`: string, `keywords`: array, `topk`: integer, `max_snippet_chars`: integer, `start_date`: string, `end_date`: string | — |
-| `memory_write` | 記憶の地図帳（Memory Atlas）のページに書きます。宛先 m:N は Memopedia ページ本文への追記（編集来歴が残ります）。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで、system … | `ref`: string, `content*`: string, `title`: string, `category`: string | 記憶のページに書く |
+| `memory_write` | 記憶の地図帳（Memory Atlas）のページに書きます。宛先 memopedia:N は Memopedia ページ本文への追記（編集来歴が残ります）。宛先 core は新しいコア記憶を刻みます — コア記憶は常時開の特殊ページで… | `ref`: string, `content*`: string, `title`: string, `category`: string | 記憶のページに書く |
 | `messagelog_get_around` | Retrieve chat messages around a specific timestamp. Accepts Unix epoch (integer) or ISO 8601 string (e.g. '2026-04-14… | `timestamp*`: string, `count`: integer, `thread_id`: string | 特定時刻のログ取得 |
 | `meta_judgment_finalize` | Internal tool for meta_judgment v2 Playbooks only. Receives the judge node's structured output (dict), formats /spell… | `judgment_output*`: object, `situation_kind*`: string, `running_track_id`: string, `trigger_type`: string, `trigger_context`: string, `track_at_judgment_id`: string, `situation_text`: string, `recent_judgments`: string | — |
 | `move_persona` | Move the active persona to another building. (When called in persona context, persona_id must match the active persona.) | `building_id*`: string, `persona_id`: string | — |
@@ -78,7 +77,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `purpose_decompose` | 目的ノード（task:N）をステップに分解します。steps 配列の各要素は title（と任意の description）を持つオブジェクトで、既存のステップはすべて置き換えられます。1つのステップの進捗を更新するには purpos… | `node_ref*`: string, `steps*`: array | 目的をステップに分解 |
 | `purpose_seed` | 「いつかやりたい」と思いついたことを、候補として書き留めます（seed = 候補を生む。木に接ぐ = 採用は purpose_adopt が担います）。候補はやりたいことの候補プールに保管され、後から採用されて目的の木に接がれます。1… | `title*`: string, `goal`: string, `type`: string, `source*`: string | やりたいことを書き留める |
 | `purpose_step` | 目的ノード（task:N）の中の1ステップの状態とメモを更新します。ステップへの分解（全置換）は purpose_decompose を使ってください。 | `node_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | 目的のステップを更新 |
-| `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
 | `read_url_section` | URLのページ内から、見出し名やキーワードで指定した節だけを抽出して読み込みます。 read_url_outline で長文と判定されたページの深掘り用です。 まず見出し（h1〜h4）の部分一致を試み、見つからなければ本文キーワード一… | `url*`: string, `section_query*`: string, `around`: integer | ページ節読み込み |
 | `record_wait` | Record a wait action. Consolidates consecutive waits into a single message. | `reason`: string | — |
@@ -89,7 +87,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `schedule_delete` | 指定されたIDのスケジュールを削除する。自分のスケジュールのみ削除できる。 | `schedule_id*`: integer | — |
 | `schedule_list` | 自分のスケジュール一覧を取得する。スケジュールIDや設定内容を確認したいときに使う。 | (なし) | — |
 | `searxng_search` | Search the web via SearXNG and return concise results. | `query*`: string, `max_results`: integer, `category`: string, `engines`: string, `language`: string, `safe`: integer | — |
-| `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
 | `track_abort` | Abort a track without completion. Use when giving up on the work. Persistent core tracks (user_conversation, social) … | `track_id*`: string | トラック中止 |
 | `track_activate` | Activate a track (set its status to 'running'). If another track was running, it is automatically moved to 'pending'.… | `track_id*`: string | トラック起動 |

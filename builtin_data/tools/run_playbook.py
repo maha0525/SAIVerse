@@ -22,14 +22,16 @@ Phase 3 段階 4-C 後の中核 Spell。メインライン (or 親サブライ�
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Tuple, Union
 
 from tools.context import (
     get_active_llm_messages,
     get_active_manager,
     get_active_persona_id,
     get_active_pulse_context,
+    get_event_callback,
 )
 from tools.core import ToolSchema
 
@@ -110,13 +112,27 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
         return f"[run_playbook error] Failed to load playbook '{name}': {type(exc).__name__}: {exc}"
 
     if playbook is None:
-        return _not_found_message(sea_runtime, name)
+        return _not_found_message(name, persona_id, building_id)
 
     if not _is_router_callable(playbook):
         return (
             f"[run_playbook error] Playbook '{name}' is not callable from spell "
             f"(router_callable=false). Internal sub_play only."
         )
+
+    credential_error = _check_required_credentials(playbook, persona_id)
+    if credential_error is not None:
+        return credential_error
+
+    permission_error = _check_playbook_permission(
+        sea_runtime,
+        manager,
+        playbook,
+        persona_obj,
+        pulse_ctx,
+    )
+    if permission_error is not None:
+        return permission_error
 
     # Build a minimal parent_state. Sub-line execution will:
     # - copy parent_state["_messages"] as base_messages (= snapshot of caller's
@@ -203,32 +219,122 @@ def _is_router_callable(playbook: object) -> bool:
     return bool(val)
 
 
-def _not_found_message(sea_runtime: object, requested_name: str) -> str:
-    """Build an error message that lists available router-callable playbooks."""
-    try:
-        # Best-effort enumeration: grab all loaded playbooks from the runtime
-        # cache plus DB. The exact API surface varies by sea_runtime
-        # implementation; degrade gracefully when missing.
-        cached = getattr(sea_runtime, "_playbook_cache", {}) or {}
-        names = sorted(
-            n for n, pb in cached.items() if _is_router_callable(pb)
+def _check_required_credentials(playbook: object, persona_id: str) -> str | None:
+    from builtin_data.tools.list_available_playbooks import (
+        has_required_playbook_credentials,
+    )
+
+    required = getattr(playbook, "required_credentials", None)
+    if has_required_playbook_credentials(required, persona_id):
+        return None
+    LOGGER.warning(
+        "[run_playbook] Required credentials unavailable: persona=%s playbook=%s required=%s",
+        persona_id,
+        getattr(playbook, "name", "<unknown>"),
+        required,
+    )
+    return (
+        f"[run_playbook error] Playbook '{getattr(playbook, 'name', '<unknown>')}' "
+        "requires credentials that are not configured for this persona."
+    )
+
+
+def _check_playbook_permission(
+    sea_runtime: object,
+    manager: object,
+    playbook: object,
+    persona_obj: object,
+    pulse_ctx: object,
+) -> str | None:
+    """Recheck city permission at the exact ``run_playbook`` execution point."""
+    city_id = getattr(manager, "city_id", None)
+    get_permission = getattr(sea_runtime, "_get_playbook_permission", None)
+    if city_id is None or not callable(get_permission):
+        return None
+
+    playbook_name = str(getattr(playbook, "name", ""))
+    permission = get_permission(city_id, playbook_name)
+    LOGGER.info(
+        "[run_playbook] Execute-time permission: playbook=%s city=%s permission=%s",
+        playbook_name,
+        city_id,
+        permission,
+    )
+    if permission in {"blocked", "user_only"}:
+        return (
+            f"[run_playbook error] Playbook '{playbook_name}' is not available "
+            f"(permission: {permission})."
         )
-        if not names:
-            # Fallback: try DB
-            try:
-                from database.session import SessionLocal
-                from database.models import Playbook as PlaybookRow
-                with SessionLocal() as db:
-                    rows = db.query(PlaybookRow).filter(PlaybookRow.ROUTER_CALLABLE == 1).all()
-                    names = sorted(r.NAME for r in rows)
-            except Exception:
-                names = []
+    if permission != "ask_every_time":
+        return None
+
+    active_line = pulse_ctx.current_line()
+    active_aspect = getattr(active_line, "aspect", None)
+    from sea.pulse_context import Aspect
+
+    event_callback = get_event_callback()
+    request_permission = getattr(sea_runtime, "_request_playbook_permission", None)
+    if (
+        active_aspect is not Aspect.CONVERSATION
+        or event_callback is None
+        or not callable(request_permission)
+    ):
+        return (
+            f"[run_playbook error] Playbook '{playbook_name}' requires explicit "
+            "user permission and cannot be started from this execution context."
+        )
+
+    response = request_permission(playbook_name, persona_obj, event_callback)
+    if response == "always_allow":
+        set_permission = getattr(sea_runtime, "_set_playbook_permission", None)
+        if callable(set_permission):
+            set_permission(city_id, playbook_name, "auto_allow")
+        return None
+    if response == "allow":
+        return None
+    if response == "never_use":
+        set_permission = getattr(sea_runtime, "_set_playbook_permission", None)
+        if callable(set_permission):
+            set_permission(city_id, playbook_name, "user_only")
+    reason = "timed out" if response == "timeout" else "was denied"
+    return (
+        f"[run_playbook error] User permission for Playbook '{playbook_name}' "
+        f"{reason}."
+    )
+
+
+def _not_found_message(
+    requested_name: str,
+    persona_id: str,
+    building_id: str,
+) -> str:
+    """List only playbooks authorized by the canonical availability gate."""
+    try:
+        from builtin_data.tools.list_available_playbooks import (
+            list_available_playbooks,
+        )
+
+        available = json.loads(
+            list_available_playbooks(
+                persona_id=persona_id,
+                building_id=building_id,
+            )
+        )
+        names = sorted(
+            item["name"]
+            for item in available
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
         listing = ", ".join(names) if names else "(none discovered)"
         return (
             f"[run_playbook error] Playbook '{requested_name}' not found. "
-            f"Available router_callable playbooks: {listing}"
+            f"Available authorized playbooks: {listing}"
         )
     except Exception:
+        LOGGER.warning(
+            "[run_playbook] Failed to build authorized not-found candidates",
+            exc_info=True,
+        )
         return f"[run_playbook error] Playbook '{requested_name}' not found."
 
 

@@ -484,8 +484,11 @@ class AnthropicClient(LLMClient):
 
         last_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
+            outward_chunk_yielded = False
             try:
-                yield from self._iter_stream(request_params, use_tools, cache_ttl)
+                for chunk in self._iter_stream(request_params, use_tools, cache_ttl):
+                    outward_chunk_yielded = True
+                    yield chunk
                 return
             except anthropic.BadRequestError as e:
                 logging.error("[anthropic] Bad request: %s", e)
@@ -498,6 +501,15 @@ class AnthropicClient(LLMClient):
                 raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
             except Exception as e:
                 last_error = e
+                if outward_chunk_yielded:
+                    logging.error(
+                        "[anthropic] Streaming failed after output was committed; "
+                        "refusing automatic regeneration"
+                    )
+                    raise _convert_to_llm_error(
+                        e,
+                        "streaming API call after partial output",
+                    ) from e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
                     backoff = INITIAL_BACKOFF * (2 ** attempt)
                     logging.warning(

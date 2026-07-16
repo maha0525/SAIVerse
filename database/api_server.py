@@ -29,6 +29,7 @@ class VisitingPersonaProfile(BaseModel):
     avatar_image: Optional[str] = Field(None, description="A base64 encoded avatar image or a URL.")
     emotion: Optional[Dict[str, Any]] = Field({}, description="The current emotional state of the persona.")
     source_city_id: Optional[str] = Field(None, description="The name of the city the persona is coming from.")
+    saiverse_version: str = Field(..., description="Exact SAIVerse protocol version.")
 
 class ThinkingRequestContext(BaseModel):
     """Context required for a remote persona to think."""

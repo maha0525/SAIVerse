@@ -42,6 +42,7 @@ from tools.context import get_active_manager, get_active_persona_id
 LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 120
+_DEFAULT_STARTUP_TIMEOUT_SECONDS = 30.0
 
 
 def check_building_gate(
@@ -354,6 +355,21 @@ class MCPServerConnection:
         # 明示 stop 後に (reconnect_server 等で) 意図的に繋ぎ直す場合は復活を許す。
         self._closed = False
 
+        try:
+            startup_timeout = float(
+                self.config.get(
+                    "startup_timeout", _DEFAULT_STARTUP_TIMEOUT_SECONDS
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"MCP server '{self.server_name}' startup_timeout must be a number"
+            ) from exc
+        if startup_timeout <= 0:
+            raise ValueError(
+                f"MCP server '{self.server_name}' startup_timeout must be positive"
+            )
+
         loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
         self._ready_future = loop.create_future()
@@ -361,7 +377,29 @@ class MCPServerConnection:
         # 開閉する。connect() は所有タスクが「接続完了」か「失敗」を通知
         # するまで待つだけ (実害のある作業は所有タスク側でやる)。
         self._owner_task = loop.create_task(self._run_connection())
-        await self._ready_future
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._ready_future),
+                timeout=startup_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            LOGGER.error(
+                "MCP server '%s' did not become ready within %.1fs; aborting startup",
+                self.server_name,
+                startup_timeout,
+            )
+            # Cancelling the owner is safe: its transport context is unwound by
+            # the same owner task, preserving the anyio cancel-scope invariant.
+            task = self._owner_task
+            if task is not None and not task.done():
+                task.cancel()
+            if self._ready_future is not None and not self._ready_future.done():
+                self._ready_future.cancel()
+            await self.disconnect()
+            raise TimeoutError(
+                f"MCP server '{self.server_name}' startup timed out after "
+                f"{startup_timeout:.1f}s"
+            ) from exc
 
     async def _run_connection(self) -> None:
         """所有タスク本体: transport/session を開き、shutdown 要求まで保持する。
@@ -487,11 +525,12 @@ class MCPServerConnection:
         errlog_handle = self._open_subprocess_errlog(stack)
 
         LOGGER.info(
-            "MCP subprocess starting: server=%s command=%s args=%s env=%s errlog=%s",
+            "MCP subprocess starting: server=%s command=%s arg_count=%d "
+            "env_keys=%s errlog=%s",
             self.server_name,
             server_params.command,
-            server_params.args,
-            server_params.env,
+            len(server_params.args or []),
+            sorted((server_params.env or {}).keys()),
             getattr(errlog_handle, "name", "<unknown>"),
         )
         read_stream, write_stream = await stack.enter_async_context(
@@ -546,23 +585,16 @@ class MCPServerConnection:
                 read_timeout_seconds=timedelta(seconds=timeout_seconds),
             )
         except Exception as exc:
-            if self._closed:
-                # 管理側が意図的に stop 済み。 ここで再接続すると停止したはずの
-                # subprocess を蘇生させ、 port を掴む孤児になる。 素通しで raise。
-                raise
             LOGGER.warning(
-                "MCP tool call '%s__%s' failed (%s). Reconnecting once...",
+                "MCP tool call '%s__%s' failed after dispatch (%s). "
+                "The result is uncertain; refusing automatic replay.",
                 self.server_name,
                 tool_name,
                 exc,
             )
-            await self.disconnect()
-            await self.connect()
-            result = await self.session.call_tool(
-                name=tool_name,
-                arguments=arguments,
-                read_timeout_seconds=timedelta(seconds=timeout_seconds),
-            )
+            if not self._closed:
+                await self.disconnect()
+            raise
 
         if getattr(result, "isError", False):
             LOGGER.warning("MCP tool '%s__%s' returned an error", self.server_name, tool_name)
@@ -592,6 +624,10 @@ class MCPServerConnection:
                     self.server_name,
                 )
                 task.cancel()
+            except asyncio.CancelledError:
+                # Startup timeout deliberately cancels the owner task after
+                # asking it to unwind its own transport context.
+                pass
             except Exception as exc:
                 LOGGER.debug(
                     "MCP server '%s' owner task ended with: %s", self.server_name, exc,
@@ -1163,6 +1199,7 @@ class MCPClientManager:
                 tool_def,
                 spell_config,
             )
+            schema.addon_name = connection.config.get("_addon_name")
             wrapper = _make_mcp_tool_wrapper(self, qualified_name, tool_name, scope)
             if register_external_tool(namespaced_name, schema, wrapper):
                 self._registered_tools[namespaced_name] = {

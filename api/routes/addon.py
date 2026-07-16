@@ -173,6 +173,7 @@ class AddonInfo(BaseModel):
     is_enabled: bool
     params_schema: List[AddonParamSchema]
     params: Dict[str, Any]
+    secret_is_set: Dict[str, bool] = {}
     ui_extensions: AddonUiExtensions
     oauth_flows: List[AddonOAuthFlow] = []
 
@@ -210,6 +211,39 @@ def _load_manifest(addon_dir: Path) -> Optional[AddonManifest]:
 
 def _get_addon_dir(addon_name: str) -> Path:
     return _get_expansion_data_dir() / addon_name
+
+
+def _secret_param_keys(
+    manifest: AddonManifest | None,
+    param_keys: set[str] | None = None,
+) -> set[str]:
+    keys: set[str] = set()
+    if manifest is not None:
+        keys.update(schema.key for schema in manifest.params_schema if schema.type == "password")
+        for flow in manifest.oauth_flows:
+            if flow.client_secret_param:
+                keys.add(flow.client_secret_param)
+            keys.update(flow.result_mapping.values())
+    for key in param_keys or set():
+        normalized = key.lower()
+        if normalized in {"token", "secret", "password", "api_key"} or normalized.endswith(
+            ("_token", "_secret", "_password", "_api_key")
+        ):
+            keys.add(key)
+    return keys
+
+
+def _redact_params(
+    manifest: AddonManifest | None,
+    params: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, bool]]:
+    safe = dict(params)
+    is_set: Dict[str, bool] = {}
+    for key in _secret_param_keys(manifest, set(params)):
+        is_set[key] = bool(params.get(key))
+        if key in safe:
+            safe[key] = "********" if is_set[key] else ""
+    return safe, is_set
 
 
 async def _reconnect_addon_mcp(addon_name: str) -> None:
@@ -320,6 +354,7 @@ def list_addons(_manager=Depends(get_manager)):
             db.commit()
 
             params = _resolve_effective_params(manifest, config.params_json)
+            params, secret_is_set = _redact_params(manifest, params)
 
             results.append(AddonInfo(
                 addon_name=addon_name,
@@ -329,6 +364,7 @@ def list_addons(_manager=Depends(get_manager)):
                 is_enabled=config.is_enabled,
                 params_schema=manifest.params_schema,
                 params=params,
+                secret_is_set=secret_is_set,
                 ui_extensions=manifest.ui_extensions,
                 oauth_flows=manifest.oauth_flows,
             ))
@@ -354,6 +390,7 @@ def get_addon(addon_name: str, _manager=Depends(get_manager)):
         db.commit()
 
         params = _resolve_effective_params(manifest, config.params_json)
+        params, secret_is_set = _redact_params(manifest, params)
 
         return AddonInfo(
             addon_name=addon_name,
@@ -363,6 +400,7 @@ def get_addon(addon_name: str, _manager=Depends(get_manager)):
             is_enabled=config.is_enabled,
             params_schema=manifest.params_schema,
             params=params,
+            secret_is_set=secret_is_set,
             ui_extensions=manifest.ui_extensions,
             oauth_flows=manifest.oauth_flows,
         )
@@ -484,7 +522,11 @@ def get_addon_config(addon_name: str, _manager=Depends(get_manager)):
                 params = json.loads(config.params_json)
             except (json.JSONDecodeError, TypeError):
                 pass
-        return {"addon_name": addon_name, "params": params}
+        manifest = _load_manifest(_get_addon_dir(addon_name))
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="Addon not found")
+        safe, secret_is_set = _redact_params(manifest, params)
+        return {"addon_name": addon_name, "params": safe, "secret_is_set": secret_is_set}
     finally:
         db.close()
 
@@ -499,9 +541,19 @@ async def update_addon_config(addon_name: str, body: UpdateParamsRequest, _manag
     kill + respawn しないと反映されない。
     """
     db = _get_session()
+    manifest = _load_manifest(_get_addon_dir(addon_name))
     try:
         config = _get_or_create_config(db, addon_name)
-        config.params_json = json.dumps(body.params, ensure_ascii=False)
+        existing = json.loads(config.params_json) if config.params_json else {}
+        merged = dict(body.params)
+        secret_keys = _secret_param_keys(manifest, set(existing) | set(merged))
+        for key in secret_keys:
+            if merged.get(key) in (None, "", "********"):
+                if key in existing:
+                    merged[key] = existing[key]
+                else:
+                    merged.pop(key, None)
+        config.params_json = json.dumps(merged, ensure_ascii=False)
         db.commit()
         LOGGER.info("addon: updated config for %s", addon_name)
     except Exception:
@@ -511,7 +563,8 @@ async def update_addon_config(addon_name: str, body: UpdateParamsRequest, _manag
         db.close()
 
     await _reconnect_addon_mcp(addon_name)
-    return {"addon_name": addon_name, "params": body.params}
+    safe, secret_is_set = _redact_params(manifest, merged)
+    return {"addon_name": addon_name, "params": safe, "secret_is_set": secret_is_set}
 
 
 @router.get("/{addon_name}/config/persona/{persona_id}")
@@ -534,7 +587,16 @@ def get_addon_persona_config(addon_name: str, persona_id: str, _manager=Depends(
                 params = json.loads(row.params_json)
             except (json.JSONDecodeError, TypeError):
                 pass
-        return {"addon_name": addon_name, "persona_id": persona_id, "params": params}
+        manifest = _load_manifest(_get_addon_dir(addon_name))
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="Addon not found")
+        safe, secret_is_set = _redact_params(manifest, params)
+        return {
+            "addon_name": addon_name,
+            "persona_id": persona_id,
+            "params": safe,
+            "secret_is_set": secret_is_set,
+        }
     finally:
         db.close()
 
@@ -556,6 +618,8 @@ async def update_addon_persona_config(
     body.params に値 ``None`` を渡すとそのキーは削除される。
     """
     from database.models import AddonPersonaConfig
+
+    manifest = _load_manifest(_get_addon_dir(addon_name))
 
     db = _get_session()
     try:
@@ -579,6 +643,8 @@ async def update_addon_persona_config(
 
         merged = dict(existing)
         for k, v in body.params.items():
+            if k in _secret_param_keys(manifest, set(existing) | set(body.params)) and v in ("", "********"):
+                continue
             if v is None:
                 merged.pop(k, None)
             else:
@@ -607,7 +673,13 @@ async def update_addon_persona_config(
         db.close()
 
     await _reconnect_addon_mcp(addon_name)
-    return {"addon_name": addon_name, "persona_id": persona_id, "params": merged}
+    safe, secret_is_set = _redact_params(manifest, merged)
+    return {
+        "addon_name": addon_name,
+        "persona_id": persona_id,
+        "params": safe,
+        "secret_is_set": secret_is_set,
+    }
 
 
 @router.delete("/{addon_name}/config/persona/{persona_id}")
@@ -785,12 +857,7 @@ async def upload_persona_file(
     max_bytes = min(max_bytes, _SYSTEM_MAX_SIZE_BYTES)
 
     # Read file with size check
-    content = await file.read()
-    if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large ({len(content)} bytes). Max: {max_bytes} bytes ({max_bytes / 1024 / 1024:.0f} MB)",
-        )
+    from api.file_safety import write_upload_bounded
 
     # Determine extension and save
     ext = _ext_from_content_type(ct)
@@ -801,11 +868,15 @@ async def upload_persona_file(
     # Atomic write: temp file then rename
     tmp_file = dest_file.with_suffix(dest_file.suffix + ".tmp")
     try:
-        tmp_file.write_bytes(content)
-        shutil.move(str(tmp_file), str(dest_file))
+        tmp_file.unlink(missing_ok=True)
+        size = await write_upload_bounded(file, tmp_file, max_bytes)
+        tmp_file.replace(dest_file)
     except Exception as exc:
         tmp_file.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {exc}")
+        if isinstance(exc, HTTPException):
+            raise
+        LOGGER.exception("Failed to save addon file")
+        raise HTTPException(status_code=500, detail="Failed to save file") from exc
 
     # Update AddonPersonaConfig.params_json
     from database.models import AddonPersonaConfig
@@ -847,11 +918,11 @@ async def upload_persona_file(
 
     LOGGER.info(
         "addon file uploaded: addon=%s persona=%s key=%s size=%d path=%s",
-        addon_name, persona_id, param_key, len(content), dest_file,
+        addon_name, persona_id, param_key, size, dest_file,
     )
     return {
         "path": str(dest_file),
-        "size": len(content),
+        "size": size,
         "content_type": ct,
     }
 

@@ -47,6 +47,7 @@ def _wrap_with_building_gate(name: str, building_ids: List[str], func: Callable)
             return await func(**kwargs)
 
         _async_gated.__wrapped__ = func  # type: ignore[attr-defined]
+        _async_gated._saiverse_building_gate = True  # type: ignore[attr-defined]
         return _async_gated
 
     def _sync_gated(**kwargs: Any) -> Any:
@@ -57,14 +58,100 @@ def _wrap_with_building_gate(name: str, building_ids: List[str], func: Callable)
         return func(**kwargs)
 
     _sync_gated.__wrapped__ = func  # type: ignore[attr-defined]
+    _sync_gated._saiverse_building_gate = True  # type: ignore[attr-defined]
     return _sync_gated
+
+
+def _tool_authorization_error(name: str, schema: ToolSchema) -> Optional[str]:
+    """Return an execute-time denial message, or ``None`` when authorized.
+
+    This is the final common gate immediately in front of every registered
+    native/MCP callable.  Prompt visibility is advisory; callers such as
+    Playbook TOOL/TOOL_CALL nodes, realtime spells, and admin integrations must
+    not be able to bypass the same policy by reaching ``TOOL_REGISTRY`` through
+    a different route.
+    """
+    from tools.context import get_active_persona_id, get_active_pulse_context
+
+    persona_id = get_active_persona_id()
+
+    addon_name = getattr(schema, "addon_name", None)
+    if addon_name:
+        try:
+            from saiverse.addon_config import is_addon_enabled
+
+            if not is_addon_enabled(addon_name):
+                return (
+                    f"ツール '{name}' は無効化されているアドオン "
+                    f"'{addon_name}' に属するため実行できません。"
+                )
+        except Exception:
+            LOGGER.exception(
+                "Tool authorization failed while checking addon state: tool=%s addon=%s",
+                name,
+                addon_name,
+            )
+            return f"ツール '{name}' のアドオン有効状態を確認できないため実行を拒否しました。"
+
+    availability_check = getattr(schema, "availability_check", None)
+    if availability_check is not None:
+        try:
+            if not availability_check(persona_id):
+                return f"ツール '{name}' は現在のペルソナでは利用できません。"
+        except Exception:
+            LOGGER.exception(
+                "Tool authorization availability_check failed: tool=%s persona=%s",
+                name,
+                persona_id,
+            )
+            return f"ツール '{name}' の利用条件を確認できないため実行を拒否しました。"
+
+    pulse_context = get_active_pulse_context()
+    active_line = pulse_context.current_line() if pulse_context is not None else None
+    active_aspect = getattr(active_line, "aspect", None)
+    from sea.mode_spell_permissions import check_spell_permission
+
+    return check_spell_permission(name, active_aspect)
+
+
+def _wrap_with_authorization_gate(name: str, schema: ToolSchema, func: Callable) -> Callable:
+    """Wrap a registered callable with the common execute-time policy gate."""
+    if inspect.iscoroutinefunction(func):
+        async def _async_authorized(**kwargs: Any) -> Any:
+            denial = _tool_authorization_error(name, schema)
+            if denial is not None:
+                LOGGER.warning("Tool execution denied: tool=%s reason=%s", name, denial)
+                return denial
+            return await func(**kwargs)
+
+        _async_authorized.__wrapped__ = func  # type: ignore[attr-defined]
+        _async_authorized._saiverse_authorization_gate = True  # type: ignore[attr-defined]
+        return _async_authorized
+
+    def _sync_authorized(**kwargs: Any) -> Any:
+        denial = _tool_authorization_error(name, schema)
+        if denial is not None:
+            LOGGER.warning("Tool execution denied: tool=%s reason=%s", name, denial)
+            return denial
+        return func(**kwargs)
+
+    _sync_authorized.__wrapped__ = func  # type: ignore[attr-defined]
+    _sync_authorized._saiverse_authorization_gate = True  # type: ignore[attr-defined]
+    return _sync_authorized
+
+
+def _wrap_registered_callable(name: str, schema: ToolSchema, func: Callable) -> Callable:
+    """Apply every execute-time policy shared by native tools and aliases."""
+    wrapped = _wrap_with_authorization_gate(name, schema, func)
+    schema_building_ids = getattr(schema, "building_ids", None)
+    if schema_building_ids:
+        wrapped = _wrap_with_building_gate(name, list(schema_building_ids), wrapped)
+    return wrapped
 
 
 def _add_registered_tool(name: str, schema: ToolSchema, func: Callable) -> None:
     """Register a tool into all in-memory registries."""
-    schema_building_ids = getattr(schema, "building_ids", None)
-    if schema_building_ids:
-        func = _wrap_with_building_gate(name, list(schema_building_ids), func)
+    func = _wrap_registered_callable(name, schema, func)
     # Build the provider function-calling specs defensively. A single tool
     # whose JSON schema a provider SDK rejects (e.g. an MCP tool whose schema
     # uses a construct google-genai forbids) must NOT abort registration of
@@ -187,7 +274,11 @@ def _register_tool(module: Any, addon_name: Optional[str] = None) -> bool:
             for alt_name, alt_impl_name in alias.items():
                 function_ref = getattr(module, alt_impl_name, None)
                 if callable(function_ref):
-                    TOOL_REGISTRY[alt_name] = function_ref
+                    TOOL_REGISTRY[alt_name] = _wrap_registered_callable(
+                        alt_name,
+                        meta,
+                        function_ref,
+                    )
         
         return True
     except Exception as e:

@@ -21,6 +21,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sea.pulse_context import Aspect
+
 # Tool は importlib で動的ロードしているのでパスから直接読み込む
 TOOL_PATH = (
     Path(__file__).resolve().parent.parent
@@ -150,6 +152,22 @@ def test_run_playbook_returns_error_when_playbook_not_found():
     assert "nonexistent_playbook" in result
 
 
+def test_not_found_lists_only_canonical_authorized_candidates():
+    authorized = '[{"name": "allowed", "description": ""}]'
+    with patch(
+        "builtin_data.tools.list_available_playbooks.list_available_playbooks",
+        return_value=authorized,
+    ):
+        result = run_playbook_module._not_found_message(
+            "missing",
+            "air_city_a",
+            "b1",
+        )
+
+    assert "allowed" in result
+    assert "private_hidden" not in result
+
+
 # ---------------------------------------------------------------------------
 # 正常系: sub-line で _run_playbook が呼ばれる
 # ---------------------------------------------------------------------------
@@ -235,6 +253,105 @@ def test_run_playbook_returns_error_on_subline_exception():
         result = run_playbook(name="memory_research")
     assert "Sub-line failed" in result
     assert "LLM provider unreachable" in result
+
+
+@pytest.mark.parametrize("permission", ["blocked", "user_only"])
+def test_run_playbook_rechecks_denied_city_permission(permission):
+    pulse_ctx = SimpleNamespace(
+        _line_stack=[object()],
+        pulse_id="p1",
+        current_line=lambda: SimpleNamespace(aspect=Aspect.CONVERSATION),
+    )
+    sea_runtime = MagicMock()
+    sea_runtime._load_playbook_for.return_value = SimpleNamespace(
+        name="memory_research",
+        router_callable=True,
+    )
+    sea_runtime._get_playbook_permission.return_value = permission
+    manager = SimpleNamespace(
+        city_id="city-a",
+        sea_runtime=sea_runtime,
+        personas={"air_city_a": SimpleNamespace(current_building_id="b1")},
+    )
+    with (
+        patch.object(run_playbook_module, "get_active_persona_id", return_value="air_city_a"),
+        patch.object(run_playbook_module, "get_active_manager", return_value=manager),
+        patch.object(run_playbook_module, "get_active_pulse_context", return_value=pulse_ctx),
+    ):
+        result = run_playbook(name="memory_research")
+
+    assert permission in result
+    sea_runtime._run_playbook.assert_not_called()
+
+
+def test_run_playbook_ask_every_time_requires_interactive_conversation():
+    pulse_ctx = SimpleNamespace(
+        _line_stack=[object()],
+        pulse_id="p1",
+        current_line=lambda: SimpleNamespace(aspect=Aspect.WORKER),
+    )
+    sea_runtime = MagicMock()
+    sea_runtime._load_playbook_for.return_value = SimpleNamespace(
+        name="memory_research",
+        router_callable=True,
+    )
+    sea_runtime._get_playbook_permission.return_value = "ask_every_time"
+    manager = SimpleNamespace(
+        city_id="city-a",
+        sea_runtime=sea_runtime,
+        personas={"air_city_a": SimpleNamespace(current_building_id="b1")},
+    )
+    with (
+        patch.object(run_playbook_module, "get_active_persona_id", return_value="air_city_a"),
+        patch.object(run_playbook_module, "get_active_manager", return_value=manager),
+        patch.object(run_playbook_module, "get_active_pulse_context", return_value=pulse_ctx),
+    ):
+        result = run_playbook(name="memory_research")
+
+    assert "requires explicit user permission" in result
+    sea_runtime._request_playbook_permission.assert_not_called()
+    sea_runtime._run_playbook.assert_not_called()
+
+
+def test_run_playbook_ask_every_time_executes_after_allow():
+    pulse_ctx = SimpleNamespace(
+        _line_stack=[object()],
+        pulse_id="p1",
+        current_line=lambda: SimpleNamespace(aspect=Aspect.CONVERSATION),
+    )
+    sea_runtime = MagicMock()
+    sea_runtime._load_playbook_for.return_value = SimpleNamespace(
+        name="memory_research",
+        router_callable=True,
+    )
+    sea_runtime._get_playbook_permission.return_value = "ask_every_time"
+    sea_runtime._request_playbook_permission.return_value = "allow"
+    sea_runtime._run_playbook.side_effect = (
+        lambda *args, **kwargs: kwargs["parent_state"].update(
+            {"report_to_parent": "allowed"}
+        )
+    )
+    manager = SimpleNamespace(
+        city_id="city-a",
+        sea_runtime=sea_runtime,
+        personas={"air_city_a": SimpleNamespace(current_building_id="b1")},
+    )
+    callback = MagicMock()
+    with (
+        patch.object(run_playbook_module, "get_active_persona_id", return_value="air_city_a"),
+        patch.object(run_playbook_module, "get_active_manager", return_value=manager),
+        patch.object(run_playbook_module, "get_active_pulse_context", return_value=pulse_ctx),
+        patch.object(run_playbook_module, "get_event_callback", return_value=callback),
+    ):
+        result = run_playbook(name="memory_research")
+
+    assert result == ("allowed", {})
+    sea_runtime._request_playbook_permission.assert_called_once_with(
+        "memory_research",
+        manager.personas["air_city_a"],
+        callback,
+    )
+    sea_runtime._run_playbook.assert_called_once()
 
 
 if __name__ == "__main__":

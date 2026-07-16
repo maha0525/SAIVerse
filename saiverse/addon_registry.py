@@ -18,6 +18,7 @@ SAIVerse 本体は起動時 / ユーザー要求時にこれを fetch して、U
 from __future__ import annotations
 
 import json
+import base64
 import logging
 import os
 import time
@@ -33,6 +34,8 @@ DEFAULT_REGISTRY_URL = (
     "https://raw.githubusercontent.com/maha0525/saiverse-addon-registry/main/registry.json"
 )
 ENV_REGISTRY_URL = "SAIVERSE_ADDON_REGISTRY_URL"
+ENV_REGISTRY_PUBLIC_KEY = "SAIVERSE_ADDON_REGISTRY_PUBLIC_KEY"
+ENV_ALLOW_UNSIGNED_REGISTRY = "SAIVERSE_ALLOW_UNSIGNED_ADDON_REGISTRY"
 _DEFAULT_TTL_SECONDS = 300  # 5 分
 _FETCH_TIMEOUT_SECONDS = 15
 SUPPORTED_SCHEMA_VERSION = 1
@@ -63,7 +66,7 @@ class RegistryVersionEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     version: str = Field(..., description="セマンティックバージョン (例: '0.5.0')")
-    commit: str = Field(..., description="checkout 対象 commit SHA (7-40 hex)")
+    commit: str = Field(..., description="checkout 対象 full commit SHA (40 hex)")
     setup_version: int = Field(
         1,
         description=(
@@ -85,9 +88,9 @@ class RegistryVersionEntry(BaseModel):
     @classmethod
     def _check_commit(cls, v: str) -> str:
         import re
-        if not re.match(r"^[0-9a-f]{7,40}$", v):
+        if not re.fullmatch(r"[0-9a-f]{40}", v):
             raise ValueError(
-                f"commit must be 7-40 hex chars, got {v!r} (branch/tag names not allowed)"
+                f"commit must be a full 40-character lowercase SHA, got {v!r}"
             )
         return v
 
@@ -122,8 +125,8 @@ class RegistryAddonEntry(BaseModel):
     @field_validator("repo_url")
     @classmethod
     def _check_repo_url(cls, v: str) -> str:
-        if not (v.startswith("https://") or v.startswith("http://")):
-            raise ValueError(f"repo_url must start with http(s):// ({v!r})")
+        if not v.startswith("https://"):
+            raise ValueError(f"repo_url must use HTTPS ({v!r})")
         return v
 
     def model_post_init(self, _ctx) -> None:  # type: ignore[override]
@@ -153,6 +156,11 @@ class Registry(BaseModel):
     schema_version: int = Field(..., description="registry.json スキーマバージョン")
     updated_at: Optional[str] = Field(None, description="最終更新日時 (ISO 8601)")
     addons: List[RegistryAddonEntry] = Field(default_factory=list)
+    trust_level: str = Field(
+        "unsigned",
+        description="Runtime verification result: official, verified, or unsigned.",
+    )
+    publisher_key_id: Optional[str] = None
 
     @field_validator("schema_version")
     @classmethod
@@ -213,12 +221,66 @@ def _read_local_registry(url: str) -> dict:
 
 
 def _http_fetch_registry(url: str) -> dict:
+    if not url.startswith("https://"):
+        raise ValueError("Remote addon registry URL must use HTTPS")
     req = urllib.request.Request(
         url, headers={"User-Agent": "SAIVerse-addon-registry-client/1.0"}
     )
     with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT_SECONDS) as resp:  # noqa: S310 - URL は env で固定
+        if not resp.geturl().startswith("https://"):
+            raise ValueError("Addon registry redirected to a non-HTTPS URL")
         body = resp.read().decode("utf-8")
     return json.loads(body)
+
+
+def _canonical_registry_payload(payload: dict) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _verify_registry_document(data: dict, source_url: str) -> tuple[dict, str, str | None]:
+    """Return payload and trust provenance after Ed25519 verification."""
+    signed_payload = data.get("signed")
+    signature = data.get("signature")
+    if isinstance(signed_payload, dict) and isinstance(signature, dict):
+        if signature.get("algorithm") != "ed25519":
+            raise ValueError("Addon registry signature algorithm must be ed25519")
+        public_key_raw = os.getenv(ENV_REGISTRY_PUBLIC_KEY, "").strip()
+        if not public_key_raw:
+            raise ValueError(
+                f"Signed addon registry requires pinned {ENV_REGISTRY_PUBLIC_KEY}"
+            )
+        try:
+            public_key_bytes = base64.b64decode(public_key_raw, validate=True)
+            signature_bytes = base64.b64decode(signature["value"], validate=True)
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+            public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+            public_key.verify(signature_bytes, _canonical_registry_payload(signed_payload))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid addon registry signature encoding: {exc}") from exc
+        except Exception as exc:
+            raise ValueError("Addon registry signature verification failed") from exc
+        key_id = signature.get("key_id")
+        if not isinstance(key_id, str) or not key_id:
+            raise ValueError("Addon registry signature is missing key_id")
+        trust = "official" if source_url == DEFAULT_REGISTRY_URL else "verified"
+        return signed_payload, trust, key_id
+
+    if source_url == DEFAULT_REGISTRY_URL:
+        raise ValueError("Official addon registry must be signed")
+    if not _is_local_file_url(source_url):
+        allow_unsigned = os.getenv(ENV_ALLOW_UNSIGNED_REGISTRY, "").strip().lower()
+        if allow_unsigned not in {"1", "true", "yes", "on"}:
+            raise ValueError(
+                "Unsigned third-party addon registry requires explicit "
+                f"{ENV_ALLOW_UNSIGNED_REGISTRY}=true"
+            )
+    return data, "unsigned", None
 
 
 def fetch_registry(
@@ -249,7 +311,11 @@ def fetch_registry(
             data = _read_local_registry(effective_url)
         else:
             data = _http_fetch_registry(effective_url)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        payload, trust_level, publisher_key_id = _verify_registry_document(
+            data,
+            effective_url,
+        )
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
         if _cache.registry is not None:
             LOGGER.warning(
                 "addon_registry: fetch failed (%s), returning stale cache", e
@@ -258,7 +324,12 @@ def fetch_registry(
         raise RuntimeError(f"failed to fetch registry from {effective_url}: {e}") from e
 
     try:
-        registry = Registry.model_validate(data)
+        registry = Registry.model_validate(payload).model_copy(
+            update={
+                "trust_level": trust_level,
+                "publisher_key_id": publisher_key_id,
+            }
+        )
     except ValidationError as e:
         if _cache.registry is not None:
             LOGGER.warning(
@@ -285,5 +356,7 @@ __all__ = [
     "get_registry_url",
     "DEFAULT_REGISTRY_URL",
     "ENV_REGISTRY_URL",
+    "ENV_REGISTRY_PUBLIC_KEY",
+    "ENV_ALLOW_UNSIGNED_REGISTRY",
     "SUPPORTED_SCHEMA_VERSION",
 ]

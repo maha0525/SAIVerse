@@ -62,11 +62,7 @@ def get_env_vars():
         if key and key not in seen_keys:
             vars_list.append(EnvVar(
                 key=key,
-                value=value, # Frontend should mask if sensitive, or we mask here? 
-                             # Strategy: Send real value but flag it. 
-                             # Security risk? Usually admin needs to see value to edit.
-                             # But `ui/env_settings.py` masked it.
-                             # Let's mask it here for safety, and only support overwriting logic.
+                value="********" if is_sensitive(key) and value else value,
                 is_sensitive=is_sensitive(key)
             ))
             seen_keys.add(key)

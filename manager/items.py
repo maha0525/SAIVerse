@@ -14,6 +14,7 @@ from database.models import (
     ItemLocation as ItemLocationModel,
 )
 from saiverse.references import parse_ref
+from saiverse.file_policy import enforce_allowed_file_path
 
 if TYPE_CHECKING:
     from manager.state import CoreState
@@ -61,17 +62,17 @@ class ItemService:
         """
         path = Path(file_path_str)
         
-        if path.exists():
-            return path
-        
         home = self.manager.saiverse_home
+        if path.exists():
+            return enforce_allowed_file_path(path, home=home)
+
         parts = path.parts
         
         # Strategy 0: Handle relative paths (new format)
         if not path.is_absolute():
             candidate = home / file_path_str
             if candidate.exists():
-                return candidate
+                return enforce_allowed_file_path(candidate, home=home)
         
         # Strategy 1a: strict 'documents' match (legacy WSL paths)
         if 'documents' in parts:
@@ -79,7 +80,7 @@ class ItemService:
             rel = Path(*parts[idx:])
             candidate = home / rel
             if candidate.exists():
-                return candidate
+                return enforce_allowed_file_path(candidate, home=home)
         
         # Strategy 1b: strict 'image' match (legacy WSL paths for picture items)
         if 'image' in parts:
@@ -87,7 +88,7 @@ class ItemService:
             rel = Path(*parts[idx:])
             candidate = home / rel
             if candidate.exists():
-                return candidate
+                return enforce_allowed_file_path(candidate, home=home)
 
         # Strategy 1c: audio/video subdirs (added for audio/video item support)
         for sub in ('audio', 'video'):
@@ -96,20 +97,20 @@ class ItemService:
                 rel = Path(*parts[idx:])
                 candidate = home / rel
                 if candidate.exists():
-                    return candidate
+                    return enforce_allowed_file_path(candidate, home=home)
 
         # Strategy 2a: just filename in documents (fallback)
         candidate = home / "documents" / path.name
         if candidate.exists():
-            return candidate
+            return enforce_allowed_file_path(candidate, home=home)
         
         # Strategy 2b: just filename in image (fallback for picture items)
         candidate = home / "image" / path.name
         if candidate.exists():
-            return candidate
+            return enforce_allowed_file_path(candidate, home=home)
         
         # Return original path if no recovery worked
-        return path
+        return enforce_allowed_file_path(path, home=home)
 
     def load_items_from_db(self) -> None:
         """Load items and their locations from the database into memory."""

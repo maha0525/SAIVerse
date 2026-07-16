@@ -64,6 +64,11 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     if config is None:
         config = get_model_config(model)
         logging.info("[factory] Loaded config for model '%s': %s", model, "found" if config else "NOT FOUND")
+
+    if isinstance(config, dict):
+        from saiverse.provider_security import validate_model_config_connection
+
+        validate_model_config_connection(model, config)
     
     # Use the actual API model name from config if available
     # This is important because 'model' might be the config key (filename)

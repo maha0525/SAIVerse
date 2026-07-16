@@ -199,9 +199,8 @@ def test_native_tool_registration_wraps_with_gate(monkeypatch):
         tools_module.SPELL_TOOL_NAMES.update(saved_names)
 
 
-def test_native_tool_without_building_ids_not_wrapped():
-    """Tools without building_ids should NOT be wrapped (= original callable
-    is stored as-is in TOOL_REGISTRY)."""
+def test_native_tool_without_building_ids_still_has_authorization_gate():
+    """Unrestricted placement must not bypass the common authorization gate."""
     import tools as tools_module
 
     def _impl(**kwargs: Any) -> str:
@@ -214,7 +213,10 @@ def test_native_tool_without_building_ids_not_wrapped():
     saved_names = tools_module.SPELL_TOOL_NAMES.copy()
     try:
         tools_module._add_registered_tool("test_unrestricted_tool", schema, _impl)
-        assert tools_module.TOOL_REGISTRY["test_unrestricted_tool"] is _impl
+        registered = tools_module.TOOL_REGISTRY["test_unrestricted_tool"]
+        assert registered is not _impl
+        assert registered.__wrapped__ is _impl
+        assert registered._saiverse_authorization_gate is True
     finally:
         tools_module.TOOL_REGISTRY.clear()
         tools_module.TOOL_REGISTRY.update(saved_registry)

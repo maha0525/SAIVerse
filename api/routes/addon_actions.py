@@ -84,7 +84,7 @@ def create_action(addon_name: str, body: ActionBody):
         if existing.id == body.id:
             raise HTTPException(status_code=409, detail=f"アクション '{body.id}' は既に存在します")
 
-    allowed = get_available_tools(addon_name) or None
+    allowed = get_available_tools(addon_name)
     try:
         action = validate_action(body.model_dump(), allowed_tools=allowed)
     except ValueError as exc:
@@ -107,7 +107,7 @@ def update_action(addon_name: str, action_id: str, body: ActionBody):
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"アクション '{action_id}' が見つかりません")
 
-    allowed = get_available_tools(addon_name) or None
+    allowed = get_available_tools(addon_name)
     try:
         action = validate_action(body.model_dump(), allowed_tools=allowed)
     except ValueError as exc:
@@ -151,7 +151,11 @@ def test_action(
         ),
     ),
 ):
-    from saiverse.composite_actions import validate_action, execute_action
+    from saiverse.composite_actions import (
+        execute_action,
+        get_available_tools,
+        validate_action,
+    )
 
     # テスト実行はステップの動作確認が目的。 id / display_name はまだ未入力でも
     # ステップを試せるよう、 空ならプレースホルダを補ってから検証する (保存時の
@@ -163,7 +167,10 @@ def test_action(
         data["display_name"] = "テスト実行"
 
     try:
-        action = validate_action(data)
+        action = validate_action(
+            data,
+            allowed_tools=get_available_tools(addon_name),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

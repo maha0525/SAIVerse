@@ -7,6 +7,12 @@ import mimetypes
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
+from api.file_safety import (
+    read_upload_bounded,
+    safe_filename,
+    safe_upload_suffix,
+    write_upload_bounded,
+)
 
 LOGGER = logging.getLogger(__name__)
 from saiverse.media_utils import (
@@ -33,6 +39,8 @@ AUDIO_INPUT_MAX_BYTES = 100 * 1024 * 1024   # 100 MB raw
 VIDEO_INPUT_MAX_BYTES = 500 * 1024 * 1024   # 500 MB raw
 AUDIO_MAX_DURATION_SEC = 300.0  # 5 minutes
 VIDEO_MAX_DURATION_SEC = 90.0   # 90 seconds
+IMAGE_INPUT_MAX_BYTES = 25 * 1024 * 1024
+DOCUMENT_INPUT_MAX_BYTES = 25 * 1024 * 1024
 
 router = APIRouter()
 
@@ -42,11 +50,11 @@ async def upload_image(file: UploadFile = File(...)):
     Upload an image file. Resizes to max 768px long edge for LLM optimization.
     Returns: {"url": "/api/media/images/..."}
     """
-    if not file.content_type.startswith("image/"):
+    if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     try:
-        content = await file.read()
+        content = await read_upload_bounded(file, IMAGE_INPUT_MAX_BYTES)
         
         # Step 1: Resize for LLM context (max long edge = 768px for optimal tokenization)
         resized_content, mime_type = resize_image_for_llm_context(
@@ -77,9 +85,11 @@ async def upload_image(file: UploadFile = File(...)):
             "relative_path": f"image/{filename}"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         LOGGER.error("Upload failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
 
 @router.post("/upload-hires")
 async def upload_image_hires(file: UploadFile = File(...)):
@@ -90,11 +100,11 @@ async def upload_image_hires(file: UploadFile = File(...)):
     *displayed* at full size (City map background, future wallpapers, etc.)
     Returns: {"url": "/api/media/images/..."}
     """
-    if not file.content_type.startswith("image/"):
+    if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     try:
-        content = await file.read()
+        content = await read_upload_bounded(file, IMAGE_INPUT_MAX_BYTES)
 
         converted, mime_type = convert_image_to_webp(content, file.content_type, quality=90)
 
@@ -118,9 +128,11 @@ async def upload_image_hires(file: UploadFile = File(...)):
             "relative_path": f"image/{filename}"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         LOGGER.error("Hi-res upload failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
 
 
 @router.post("/upload-document")
@@ -136,16 +148,18 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="File must be a text document or PDF")
 
     try:
-        content = await file.read()
+        content = await read_upload_bounded(file, DOCUMENT_INPUT_MAX_BYTES)
         
         dest_dir = _ensure_document_dir()
         
         # Determine extension from original filename or content type
-        original_ext = Path(file.filename or "").suffix if file.filename else ""
-        if not original_ext:
-            ext = mimetypes.guess_extension(content_type) or ".txt"
-        else:
-            ext = original_ext
+        original_ext = safe_upload_suffix(file.filename, fallback="")
+        allowed_extensions = {".txt", ".md", ".csv", ".json", ".xml", ".pdf"}
+        ext = (
+            original_ext
+            if original_ext in allowed_extensions
+            else (mimetypes.guess_extension(content_type) or ".txt")
+        )
         
         from datetime import datetime
         from uuid import uuid4
@@ -161,9 +175,11 @@ async def upload_document(file: UploadFile = File(...)):
             "relative_path": f"documents/{filename}"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         LOGGER.error("Upload failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
 
 @router.post("/upload-audio")
 async def upload_audio(file: UploadFile = File(...)):
@@ -182,20 +198,17 @@ async def upload_audio(file: UploadFile = File(...)):
             detail="ffmpeg is not available in this environment; audio upload is disabled.",
         )
 
-    content = await file.read()
-    if len(content) > AUDIO_INPUT_MAX_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Audio file too large ({len(content)} bytes > {AUDIO_INPUT_MAX_BYTES} bytes).",
-        )
-
     tmp_input: Path | None = None
     try:
         # Persist upload to a temp file for ffmpeg input
-        original_ext = Path(file.filename or "").suffix or mimetypes.guess_extension(content_type) or ".bin"
+        original_ext = safe_upload_suffix(
+            file.filename,
+            fallback=mimetypes.guess_extension(content_type) or ".bin",
+        )
         with tempfile.NamedTemporaryFile(suffix=original_ext, delete=False) as tmp:
-            tmp.write(content)
             tmp_input = Path(tmp.name)
+        tmp_input.unlink()
+        await write_upload_bounded(file, tmp_input, AUDIO_INPUT_MAX_BYTES)
 
         # Normalize directly to the destination so we don't leave intermediate files
         dest_dir = _ensure_audio_dir()
@@ -223,7 +236,7 @@ async def upload_audio(file: UploadFile = File(...)):
         raise
     except Exception as e:
         LOGGER.error("Audio upload failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
     finally:
         if tmp_input is not None and tmp_input.exists():
             try:
@@ -249,19 +262,16 @@ async def upload_video(file: UploadFile = File(...)):
             detail="ffmpeg is not available in this environment; video upload is disabled.",
         )
 
-    content = await file.read()
-    if len(content) > VIDEO_INPUT_MAX_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Video file too large ({len(content)} bytes > {VIDEO_INPUT_MAX_BYTES} bytes).",
-        )
-
     tmp_input: Path | None = None
     try:
-        original_ext = Path(file.filename or "").suffix or mimetypes.guess_extension(content_type) or ".bin"
+        original_ext = safe_upload_suffix(
+            file.filename,
+            fallback=mimetypes.guess_extension(content_type) or ".bin",
+        )
         with tempfile.NamedTemporaryFile(suffix=original_ext, delete=False) as tmp:
-            tmp.write(content)
             tmp_input = Path(tmp.name)
+        tmp_input.unlink()
+        await write_upload_bounded(file, tmp_input, VIDEO_INPUT_MAX_BYTES)
 
         dest_dir = _ensure_video_dir()
         filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}.mp4"
@@ -287,7 +297,7 @@ async def upload_video(file: UploadFile = File(...)):
         raise
     except Exception as e:
         LOGGER.error("Video upload failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
     finally:
         if tmp_input is not None and tmp_input.exists():
             try:
@@ -325,18 +335,18 @@ async def upload_file(file: UploadFile = File(...)):
 async def serve_image(filename: str):
     """Serve an uploaded image."""
     dest_dir = _ensure_image_dir()
-    path = dest_dir / filename
+    path = dest_dir / safe_filename(filename)
     
     if not path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
         
-    return FileResponse(path)
+    return FileResponse(path, filename=path.name)
 
 @router.get("/documents/{filename}")
 async def serve_document(filename: str):
     """Serve an uploaded document."""
     dest_dir = _ensure_document_dir()
-    path = dest_dir / filename
+    path = dest_dir / safe_filename(filename)
 
     if not path.exists():
         raise HTTPException(status_code=404, detail="Document not found")
@@ -348,7 +358,7 @@ async def serve_document(filename: str):
 async def serve_audio(filename: str):
     """Serve a normalized audio file."""
     dest_dir = _ensure_audio_dir()
-    path = dest_dir / filename
+    path = dest_dir / safe_filename(filename)
 
     if not path.exists():
         raise HTTPException(status_code=404, detail="Audio not found")
@@ -360,7 +370,7 @@ async def serve_audio(filename: str):
 async def serve_video(filename: str):
     """Serve a normalized video file."""
     dest_dir = _ensure_video_dir()
-    path = dest_dir / filename
+    path = dest_dir / safe_filename(filename)
 
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")

@@ -16,11 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 
 from api.deps import get_manager
+from api.file_safety import read_upload_bounded
 from .models import NativeImportStatusResponse
 from .utils import ensure_persona_exists
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
+NATIVE_IMPORT_MAX_BYTES = 256 * 1024 * 1024
 
 # Track import status per persona
 _native_import_status: Dict[str, Dict[str, Any]] = {}
@@ -156,7 +158,7 @@ async def import_native(
 
     # Read and parse the uploaded file
     try:
-        raw = await file.read()
+        raw = await read_upload_bounded(file, NATIVE_IMPORT_MAX_BYTES)
         data = json.loads(raw.decode("utf-8-sig"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON file: {e}")
@@ -214,7 +216,7 @@ async def preview_native_import(
     Returns thread summaries and message counts without modifying the database.
     """
     try:
-        raw = await file.read()
+        raw = await read_upload_bounded(file, NATIVE_IMPORT_MAX_BYTES)
         data = json.loads(raw.decode("utf-8-sig"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON file: {e}")

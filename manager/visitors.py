@@ -5,6 +5,8 @@ from typing import Tuple
 
 import requests
 
+from saiverse import __version__ as SAIVERSE_VERSION
+
 from database.models import AI as AIModel, BuildingOccupancyLog, VisitingAI
 from saiverse.remote_persona_proxy import RemotePersonaProxy
 
@@ -47,6 +49,7 @@ class VisitorMixin:
             "avatar_image": persona.avatar_image,
             "emotion": persona.emotion,
             "source_city_id": self.city_name,
+            "saiverse_version": SAIVERSE_VERSION,
         }
 
         db = self.SessionLocal()
@@ -153,6 +156,7 @@ class VisitorMixin:
             "avatar_image": visitor.avatar_image,
             "emotion": visitor.emotion,
             "source_city_id": self.city_name,
+            "saiverse_version": SAIVERSE_VERSION,
         }
 
         target_api_url = f"{target_city_info['api_base_url']}/inter-city/request-move-in"
@@ -195,6 +199,17 @@ class VisitorMixin:
         and places them in the target building.
         """
         try:
+            # Inter-City API profiles are schema-required to carry this field.
+            # Internal gateway profiles do not use the City movement protocol,
+            # so absence is accepted while an explicitly mismatched version is
+            # always rejected.
+            remote_version = profile.get("saiverse_version")
+            if remote_version is not None and remote_version != SAIVERSE_VERSION:
+                return (
+                    False,
+                    "City間移動のSAIVerse versionが一致しません "
+                    f"(source={remote_version!r}, destination={SAIVERSE_VERSION!r})。",
+                )
             pid = profile["persona_id"]
             pname = profile["persona_name"]
             target_bid = profile["target_building_id"]

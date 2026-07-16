@@ -50,8 +50,9 @@ class PeopleGetAdapterTest(unittest.TestCase):
         self.addCleanup(self._cleanup_temp)
 
         # get_personas_dir() / SAIMemoryAdapter の解決先を temp に向ける
-        os.environ["SAIVERSE_HOME"] = str(self.home)
-        self.addCleanup(os.environ.pop, "SAIVERSE_HOME", None)
+        home_env = patch.dict(os.environ, {"SAIVERSE_HOME": str(self.home)})
+        home_env.start()
+        self.addCleanup(home_env.stop)
         os.environ["SAIMEMORY_MEMORY"] = "1"
         self.addCleanup(os.environ.pop, "SAIMEMORY_MEMORY", None)
         # 起動時バックアップの背景スレッドはテストでは不要 (temp 掃除の邪魔)
