@@ -93,6 +93,8 @@
 - **会話エクスポートを ChatGPT 公式 JSON 互換に** — 現状 SAIVerse ネイティブ JSON 専用なのが気に掛かる。ChatGPT 公式エクスポート JSON 互換で出せれば、他の場所への引っ越しがしやすくなる。 `2026-07-08`
 - **インポート時に zip 内画像をアイテム化 → 私室に配置** — ChatGPT 公式エクスポートは zip に画像も入っている。インポート時にその画像をアイテム化し、丸ごと私室内に配置できるとよさそう。 ↳ 上のエクスポート互換と一組。 `2026-07-08`
 - **Gemini AUTO_CACHE の保持時間を可変に** — `SAIVERSE_GEMINI_AUTO_CACHE` を「発言完了後に即削除するか?」の二択でなく、「発言完了後の保持時間」を設定できる形に。0 にすると現在の `=1`(即削除)相当。自由度を上げる。隣接: Gemini キャッシュ戦略。 `2026-07-08`
+- **CLIProxyAPI レシピの doc 化 (サブスク枠でペルソナと話す)** — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) は Codex/Claude Code 等の OAuth をラップしてローカルに OpenAI 互換 API を生やすプロキシ。OpenAI 側はプロダクト責任者 (Tibo) がレシピ公認+公式プラグインまで存在 (2026-07)。本体は openai_compat プロバイダで、SAIVerse Lite は互換URL口+Tailscale で今日から刺さる — 「上級者レシピ」として docs/custom_providers.md 系に書く価値。注意: Claude Code 側ラップは Anthropic 未公認のグレー残り。初心者ガイドには載せない (Lite 設計判断済)。 `2026-07-16`
+- **Codex App Server 統合の調査** — [公式ブログ](https://openai.com/index/unlocking-the-codex-harness/)によると全 Codex サーフェス共通の双方向 JSON-RPC (stdio/WebSocket、常駐・マルチクライアント)。現行 `llm_clients/openai_codex.py` のバックエンド直叩きに対し「公式に第三者サーフェス向け」と宣言された将来の正式ルート候補。中身はコーディングエージェント操縦 (セッション/承認/diff) なので素のチャット背骨には不向き、エージェント統合向け。 `2026-07-16`
 
 ## 未分類 (迷ったらここ)
 

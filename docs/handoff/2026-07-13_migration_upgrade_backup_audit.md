@@ -304,3 +304,31 @@
 
 - git/ZIP code、dependency、DB migration、playbook import、frontend installを一つのrollback unitへ戻す機構はない。これは第1片のphase失敗後の混在restartと第2片のZIP部分上書きで既に計上済みである。
 - git stash pop conflict時はworking treeを`reset --hard HEAD`するが、conflictしたstash entry自体はGit仕様上保持される実装意図で、少なくとも当該経路は「local変更の唯一copyも削除する」とは確認されなかった。回復が手動である点は既出updater運用問題の範囲に留める。
+
+## 修正追跡（2026-07-16・第一陣）
+
+以下を修正・回帰固定した（合計 **P1×4 / P2×4**）。finding総数は履歴として減算しない。
+
+- [P1] full rewrite失敗をrollback後も必ず例外化し、rollback失敗時はoriginal/backup/partial pathと両例外をfatal errorへ残す。
+- [P1] 削除旧列を写すpost-hookをstrict化し、壊れた`tasks_json`、state変換、INSERT等の失敗でfull rewrite全体をrollbackする。
+- [P1] DB entity versionが実行codeより新しい場合は変更せずstartup upgradeを失敗扱いにする。
+- [P1] 必須desire正規化backfillの例外をstartupへ伝播する。
+- [P2] SQLite backupのsource/destination connectionを`closing()`で明示closeする。
+- [P2] backup名をfull microseconds＋UUID＋衝突guardにし、同一時刻・複数processで別世代を上書きしない。
+- [P2] snapshot同名更新を旧fileの先行unlinkから`os.replace()`へ変更し、publish失敗時に旧archiveを保持する。
+- [P2] 明示`--db`の不存在をCLI error（非0）にし、migration関数自体も`FileNotFoundError`にする。
+
+回帰: `tests/test_audit_batch_one_safety.py`でWindows handle解放、同一時刻backup、full rewrite rollback＋raise、malformed旧tasks、desire失敗伝播、future version、snapshot replace失敗、CLI不存在を固定した。
+
+## 修正追跡（2026-07-16・第二陣）
+
+- mutation前に同期・integrity検証済み `pre_upgrade` backupを作り、通常startup世代とは独立retentionにした。manifest不在・size不一致・`integrity_check`失敗世代はkeep/list対象にしない。
+- 停止状態専用のmain DB restore entrypointを `python -m database.backup --db <path> restore <backup>` として追加し、source DB identity、pre-restore世代、staging、main DB＋WAL/SHM rollbackを実装した。
+- world snapshotをformat v2へ上げ、SHA-256/size manifest、CRC、member境界、必須main DB、全SQLite integrityをmutation前に検証する。restoreはstaging treeをswapし、失敗時に旧worldを戻す。
+- process-owned markerは同じhome内の複数Cityを許容しつつ、一つでも稼働中またはidentity不明ならsnapshot/restoreを拒否する。`--force`での稼働中bypassは廃止した。
+- World Editorのbackup/restore/deleteはcanonical snapshot engineへの薄い入口にし、旧raw copy/delete実装を無効化した。`backups/`はsnapshot/swap対象外なのでpersona `memory.db`個別backupは維持される。
+- updaterはbat/sh/PowerShell/UIを `scripts/update_engine.py` へ集約した。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一argv/City/DB identity再起動、health確認、code rollbackを共通contractにし、port listenerの一括killを撤去した。
+- unsafeなZIP overlayはfail-closedで廃止した。非Git配布を戻すには署名済みrelease manifestによるstaging/mirror swapが必要。
+- upgrade registry import、handler chain gap/overlap/逆向きedge、malformed data、未来versionをfail-closedにした。external `memory.db`通知はdeterministic upgrade idで冪等化し、City移動profileは完全一致SAIVerse versionを要求する。
+
+回帰: `tests/test_audit_second_batch_world.py`、`tests/test_update_engine_safety.py`、既存upgrade handler suiteで固定した。

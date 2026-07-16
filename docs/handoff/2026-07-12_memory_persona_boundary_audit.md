@@ -191,6 +191,7 @@
 - 影響: 復元失敗の直後にSAIVerseを起動すると、欠けたworld/persona集合を正規状態としてmigration・初期化する可能性がある。auto snapshotは回復材料だが、失敗したrestore自体の原子性は保証しない。
 - 修正方針: archiveを別staging directoryへ全展開し、CRC・manifest件数/サイズ・必須DBのSQLite integrityを確認してから、homeの対象集合と原子的にswapする。swap失敗時は旧treeへ自動rollbackする。
 - 必要な回帰: CRC破損、途中I/O例外、容量不足、必須DB欠落、swap失敗で、旧homeが不変または自動復帰すること。成功時に除外対象logs/backups/snapshotsが保持されること。
+- **修正済み (2026-07-16、第二陣)**: world snapshot format v2 — 全memberのSHA-256/sizeマニフェスト・CRC・必須main DB・SQLite `integrity_check` をstaging treeで事前検証してから、rollback treeを確保した上でswapする（`scripts/snapshot.py` の staging / rollback 実装）。回帰: `tests/test_audit_second_batch_world.py::test_snapshot_validation_failure_does_not_mutate_current_world` ほか。
 
 ### 移行経路で確認済み（新規findingなし）
 
@@ -247,4 +248,4 @@ Memory Atlas P4-a には別文書で P1×3（fold契約不一致、split本文�
 
 ## 次の監査片
 
-一次監査完了。集計は **P1×18 / P2×2**（直結するAtlas編纂レビューP1×3を含む）。うち **P1×7 / P2×1 は修正・回帰固定済み**、P1×2はまはー裁定で現状仕様として保留、残りは修正待ち。次はP0サブシステム `migration / upgrade / backup` へ移る。
+一次監査完了。集計は **P1×18 / P2×2**（直結するAtlas編纂レビューP1×3を含む）。うち **P1×8 / P2×1 は修正・回帰固定済み**（2026-07-16: snapshot restoreのstaging/rollback化を第二陣で消し込み）、P1×2はまはー裁定で現状仕様として保留、残りは修正待ち（Metabolism×3、native import×2+P2×1、Building転記/RemoteProxy/heard_by×3）。次はP0サブシステム `migration / upgrade / backup` へ移る。

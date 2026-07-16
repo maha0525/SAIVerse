@@ -26,14 +26,14 @@
 
 | 優先 | サブシステム | 状態 | 最終監査 | 結果 / 次アクション | 記録 |
 |---|---|---|---|---|---|
-| P0 | 記憶・人格境界 | **指摘あり（一次監査完了）** | 2026-07-13 | 合計 **P1×18 / P2×2**（Atlas編纂P1×3含む）。P1×7 / P2×1は修正・回帰固定済み、P1×2はまはー裁定で現状仕様として保留。残りはMetabolism、native import/snapshot、Building/Remote境界。主要入口coverageを完了し、以後は修正追跡 | [一次監査](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Atlasレビュー](../handoff/2026-07-12_concept_consolidation_code_review.md) |
-| P0 | migration / upgrade / backup | **指摘あり（一次監査完了）** | 2026-07-13 | 合計 **P1×20 / P2×6**。retentionがmtimeだけで正常backupを削除し破損fileを保持する問題を追加。snapshot除外領域上書きは既出P1へ追加実証、標準`..` traversalはhome内正規化を確認。主要migration/upgrade/backup/updater経路のcoverageを完了し、以後は修正追跡 | [一次監査](../handoff/2026-07-13_migration_upgrade_backup_audit.md) |
-| P0 | 自律行動・判断点・schedule | 未監査 | — | 発火重複、日付境界、予算、本人裁定との一致を監査 | — |
-| P1 | SEA runtime / Session / head-tail | 未監査 | — | line/model/thread隔離、cache snapshot、Metabolism境界を監査 | — |
-| P1 | Spell / Tool / Playbook 権限 | 未監査 | — | visible/spell権限、contextvars、引数解決、内部ツール露出を監査 | — |
-| P1 | Persona / City / Building 分離 | 未監査 | — | DB検索条件、移動、RemotePersonaProxy、占有状態を監査 | — |
-| P2 | API / frontend | 未監査 | — | backend契約、破壊操作、エラー表示、配線漏れを監査 | — |
-| P2 | 外部連携（LLM / Addon / MCP / Discord） | 未監査 | — | 秘密情報、scope、失敗時fallback、外部入力境界を監査 | — |
+| P0 | 記憶・人格境界 | **指摘あり（一次監査完了）** | 2026-07-16 | 合計 **P1×18 / P2×2**（Atlas編纂P1×3含む）。P1×8 / P2×1は修正・回帰固定済み（snapshot restore staging/rollback化は第二陣）、P1×2はまはー裁定で現状仕様として保留。残りはMetabolism、native import、Building/Remote境界 | [一次監査](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Atlasレビュー](../handoff/2026-07-12_concept_consolidation_code_review.md) |
+| P0 | migration / upgrade / backup | **第二陣修正・回帰固定済み** | 2026-07-16 | 第一陣に加え、mutation前pre-upgrade世代、検証済み独立retention、停止状態DB restore、upgrade chain fail-closed、world snapshot v2/staging rollback、process marker、全updater共通engine、同一argv/City/DB再起動healthまで固定。persona `memory.db`個別backupは独立維持 | [一次監査](../handoff/2026-07-13_migration_upgrade_backup_audit.md) / [第二陣Intent](../intent/audit_second_batch_hardening.md) |
+| P0 | 自律行動・判断点・schedule | **指摘あり（一次監査完了）** | 2026-07-15 | 現行HEAD `113567e` で **P1×13 / P2×1**（P1×1は`e3c78cb`で回帰固定済み）。全起動入口、life/budget/slot/Episode、5種finalize、manual、schedule CRUD/発火失敗までcoverageを完了。以後は修正追跡 | [一次監査](../handoff/2026-07-14_autonomy_judgment_schedule_audit.md) |
+| P1 | SEA runtime / Session / head-tail | **指摘あり（一次監査完了）** | 2026-07-15 | 現行HEAD `113567e` で **P1×6 / P2×3**。model別Session、Metabolism/Chronicle原子性、head/tail配送、Stelis thread、anchor順序・並列更新、token triggerまで一次監査完了 | [一次監査](../handoff/2026-07-15_sea_runtime_session_head_tail_audit.md) |
+| P1 | Spell / Tool / Playbook 権限 | **指摘あり（一次監査完了）** | 2026-07-16 | 現行HEAD `113567e` で **P1×5 / P2×2**。うち **P2×1**（`run_playbook`候補名漏洩）は第一陣、**P1×3**（run_playbook city権限 / Aspect権限のtool node迂回 / disabled addon）は第二陣の共通実行時認可gateで修正・回帰固定済み。P1×1（realtime spell）は部分修正（`SPELL_ENABLED`迂回・auto_mode固定が残存）。残: `_`予約namespace、入力contract | [一次監査](../handoff/2026-07-15_spell_tool_playbook_permission_audit.md) |
+| P1 | Persona / City / Building 分離 | **指摘あり・version境界は修正済み** | 2026-07-16 | City移動profileへSAIVerse versionを必須化し、完全一致しないinter-City移動を拒否。その他findingは一次監査記録どおり修正追跡を継続 | [一次監査](../handoff/2026-07-15_persona_city_building_separation_audit.md) |
+| P2 | API / frontend | **第二陣境界修正・回帰固定済み** | 2026-07-16 | 第一陣に加え、LAN owner認証/CORS/Origin、secret write-only応答、managed path、bounded/streaming upload、model/provider credential接続先束縛、user utterance先行永続化・idempotencyを共通境界へ実装 | [一次監査](../handoff/2026-07-15_api_frontend_audit.md) / [第二陣Intent](../intent/audit_second_batch_hardening.md) |
+| P2 | 外部連携（LLM / Addon / MCP / Discord） | **第二陣境界修正・Discord保留** | 2026-07-16 | 実行時中央認可、stream commit point、結果不明MCP callの再送禁止、暗黙paid fallback撤去、provider接続先束縛、Addon HTTPS/full SHA/署名検証を固定。公式署名鍵のpublishは運用側必須作業。Discordはまはー判断どおり対象外 | [一次監査](../handoff/2026-07-15_external_integration_audit.md) / [第二陣Intent](../intent/audit_second_batch_hardening.md) |
 
 ## 運用
 

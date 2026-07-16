@@ -2,8 +2,8 @@
 
 **開始日**: 2026-07-14
 
-**状態**: 指摘あり・一次監査中
-**監査基準**: 開始 `2dda6ab`（2026-07-14 02:39 JST）、直近再確認 `e076918`
+**状態**: 指摘あり・一次監査完了
+**監査基準**: 開始 `2dda6ab`（2026-07-14 02:39 JST）、直近再確認 `113567e`
 **監査軸**: 発火重複 / 日付・ライフ境界 / 予算 / 判断適用の原子性 / 失敗時再試行 / 本人裁定との一致
 
 ## 現行実装の再確認
@@ -20,8 +20,26 @@
 - `saiverse/autonomy_wiring.py` の判断点直列化・watchdog
 - `saiverse/autonomy_manager.py` の EventScheduler 駆動 watchdog
 - `saiverse/day_plan.py` の保存・全置換・予約・発火・予算ゲート
-- `builtin_data/tools/judgment_finalize.py` の起床判断適用
+- `builtin_data/tools/judgment_finalize.py` の5種判断適用（day_open / post_conversation / post_session / on_event / day_close）
 - 直近改修 `96062ce`（時間割保存の丸め・部分救済、空plan watchdog回復）
+
+## Coverage
+
+一次監査で確認した実行境界:
+
+- 起動入口: 定刻PersonaSchedule、day_open watchdog、会話終了/wait-response、作業session終了、外部event、debug manual発火。
+- 直列化・重複: persona lock、watchdogと定刻の競合、重複schedule行、day_open/day_close境界副作用。
+- 時間境界: City timezone、host clock復帰、通常日/深夜跨ぎの営業日、lifeの半開区間、overnight時間割順序。
+- 費用と実行状態: life予算ゲート、旧日次台帳との二重書込み、slot pending/deferred/fired/done、EventScheduler予約、WorkSession結果、Episode open/closeとorigin継承。
+- 判断適用: 5種finalize、時間割全置換、task完了＋artifact、desire/Track spell、event memo、SAIMemory判断行、`judgment_applied` callback。
+- 制御・運用: Active gate、完全手動mode、life設定と一般schedule CRUD、register/unregister、oneshot/interval/periodicの発火後更新。
+- 障害注入: DB保存・budget記帳・slot terminal化・artifact追記・SAIMemory保存・spell・runtime・scheduler同期・Pulse dispatchの各失敗、および同一入力の再試行。
+
+この監査で直接の主対象にしなかったもの:
+
+- SEA runtime内部のline/model/thread/cache session隔離とhead-tail組立は、次行「SEA runtime / Session / head-tail」で監査する。
+- LLM provider固有のretry・外部API受付判定は「外部連携」で監査する。ここではPulseController/ScheduleManagerが受け取る例外・outcome境界までを対象にした。
+- curation/namingのアルゴリズム本体とmemory.db内部整合は既存の記憶・Memory Atlas監査を正とし、本監査ではday_closeからの起動・部分適用境界だけを確認した。
 
 ## Findings
 
@@ -228,7 +246,251 @@
   - 精算再試行を複数回行ってもusedが一度だけ増え、slotが一度だけdoneになること。
   - プロセス停止を予約前・予約後/handler前・handler後/精算前・精算後の各点で再現し、LLM二重実行と予算消失の双方が起きないこと。
 
+### [P1] handler成功後のdone保存失敗がslot Episodeを永久openにし、後続ログの出自を汚染する
+
+- 場所: `saiverse/day_plan.py:1878-1960,2230-2285,2345-2500`, `saiverse/event_scheduler.py:275-304`, `saiverse/episodes.py:182-221,229-294`, `sea/runtime.py:1446-1468`, `docs/intent/life.md:61-66,164-172`
+- 事実:
+  - `_fire_slot()` はhandler実行前にslotを `fired` へ保存し、kind=`slot`（暮らし/休むはpresence）のEpisodeをopenする。handler成功後は予算記帳、slotの `done` 保存、Episode closeの順で処理する。
+  - `done` の `_update_slot()` が例外を投げると、直後の `_close_slot_episode()`へ到達しない。例外はEventSchedulerが最外周で捕捉して予約keyをdropし、domain側の再試行状態は残さない。
+  - watchdogの予約消失検査・再接続は `pending/deferred` だけを対象にし、二重実行防止のため `fired` を意図的に無視する。このためhandler成功済みのslotは `fired`、Episodeは `open` のまま自動回復対象から永久に外れる。
+  - open Episodeはlife Intentで「いま何をしているか」の唯一の正典である。さらにSEAの全メッセージ保存は、最後に開いているEpisodeを `origin_episode` として自動継承する。open行はDB永続化され、プロセス再起動後も初回読出しで復元される。
+  - 逆側の `fired` 保存失敗はhandler前に例外で止まり、slotがpendingのままなので、DB復旧後はwatchdogが再接続できる。破綻するのは不可逆処理後のdone/close境界である。
+- 最小再現:
+  1. 09:00の作業コマを予約し、作業handler自体は3ラウンド成功させる。
+  2. 最初の `fired` 保存は成功させ、handler後の `status=done` 更新だけDB commit失敗相当の例外にする。
+  3. EventScheduler callback終了後、slotは `fired`、対応するslot Episodeは `open` のまま残った。
+  4. `find_lost_slot_reservations()` は空、`reschedule_pending_slots()` は0件で、watchdog・再接続のどちらも回復しなかった。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_day_plan.py` に追加して実行し、壊れた収束状態を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-done-failure-state tests/test_day_plan.py::test_audit_done_persistence_failure_leaves_open_episode_unrecoverable`
+  - 結果: `1 passed`（slot fired、Episode open、lost予約なし、再接続0件を確認）。
+- 影響:
+  - 実際には終了した作業が「いま」の正典上では継続中になり、その後の発話・生ログが完了済みslotの `origin_episode` へ誤帰属する。新しいEpisodeが一時的に上へ積まれても、それを閉じると古いopen slotが再び最新openとして露出する。
+  - 就寝判断・出来事タイムラインでは当該slotの完了区間が閉じず、終了時刻・digest参照を持つ正しい出来事として扱えない。単なる表示の遅れではなく、以後の記憶来歴を誤った出来事へ接続する。
+  - slot側は「実行した（完了記録なし）」という保守的な表示に留まるが、Episode側のopen状態と分裂し、どちらを正典とするかというIntentの答え（Episode）を壊す。
+- 修正方針:
+  - handler実行を `execution_id` 付きの永続実行台帳にし、slot phase、対応Episode、予算予約、handler結果を同じ実行単位へ結びつける。`fired` 一語だけで「実行中」と「handler成功・精算待ち」を兼用しない。
+  - handler終了後は、実測結果の保存・slot terminal化・Episode closeを一つのunit-of-workとして確定する。少なくともdone保存が失敗してもEpisode closeはfinallyで必ず試行し、どちらかが失敗した実行をreconciliation queueへ永続化する。
+  - watchdog/startup recoveryはstale `fired` をLLM再実行せず、execution_idとWorkSessionのdigest/終了記録から精算・closeだけを冪等再試行する。結果不明時は自動再実行せず、open Episodeを無期限に正典化しない明示的な異常状態へ閉じる。
+  - EventSchedulerの汎用的な「例外はdrop」は維持可能だが、不可逆callback側がdrop前にdomain retry/reconciliationを確立する契約を必須にする。
+- 必要な回帰:
+  - handler成功後、done保存・Episode closeの片方ずつ、および両方を失敗させても、再起動後のrecoveryで一度だけdone/closedへ収束すること。
+  - recovery中に同じ実行を複数回処理しても、handler再実行・予算二重消費・Episode二重closeが起きないこと。
+  - 異常なstale fired/open Episodeがある間と回復後で、後続メッセージの `origin_episode` が完了済みslotへ誤帰属しないこと。
+  - fired保存失敗（handler未実行）とdone保存失敗（handler実行済み）を区別し、前者だけが安全に実行予約へ戻ること。
+
+### [P1] メタ判断runtime例外を空結果へ変換し、判断成功扱いで外部イベントを破棄する
+
+- 場所: `sea/pulse_controller.py:470-534`, `saiverse/judgment_points.py:1714-1825`, `saiverse/autonomy_wiring.py:210-301,600-685`, `saiverse/day_plan.py:1343-1386`
+- 事実:
+  - `PulseController._submit_meta_lane()` は `LLMError` 以外のruntime例外をLOGGERへ出した後、例外を再送出せず空リスト `[]` を返す。呼出元の `event_callback` へerror eventも通知しない。
+  - `run_judgment_point()` が失敗と判定するのは、`submit_meta_judgment()` が例外を投げた場合か、callbackで `type=error` を受け取った場合だけである。空リストは検査せず、`submitted=True / errors=[] / applied_events=[]` を返す。
+  - `fire_judgment_point()` は `submitted=True` だけを見て `judgment_pulses` を記帳するため、判断Playbookがruntime例外で完走していなくても判断済み回数が増える。
+  - `handle_external_event()` は `submitted=False` のときだけ直接応対へfallbackする。偽の `submitted=True` ではreactionが無いので「判断は走ったが読めなかった」と解釈し、二重応対防止を理由に直接応対を起動しない。
+  - generic MetaLayer側にはretryがあるが、判断点 (`run_judgment_point`) は単発submitであり、しかもPulseControllerが例外を隠すため呼出側でのretry判断もできない。
+- 最小再現:
+  1. 実 `PulseController` と、`run_meta_user()` が `RuntimeError` を投げるruntimeを接続する。
+  2. `on_event` 判断を発火するとruntimeは落ちたが、戻り値は `submitted=True / errors=[] / applied_events=[]` になった。
+  3. 同じ構成で外部イベント入口を通すと経路は `judged:unknown`、`dispatch_direct` は0回となり、イベントが応対されず終了した。
+  4. 08:00〜12:00のlife内で直接発火と外部イベント発火を行うと、失敗した2回とも `judgment_pulses` に記帳された。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_autonomy_wiring.py` に追加して実行し、壊れた戻り値・イベント経路・計数を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-judgment-submit-count tests/test_autonomy_wiring.py::test_audit_meta_lane_runtime_exception_is_reported_as_submitted_and_drops_event`
+  - 結果: `1 passed`（runtime例外2回、submitted true、error/applied event無し、direct dispatch 0回、judgment_pulses 2を確認）。
+- 影響:
+  - Xメンション、alert等の実イベントが、判断も直接応対もされないまま失われる。ログにはPulseControllerの例外が残るが、上位層は成功扱いなのでdomain retry・fallback・ユーザー通知のいずれも起動しない。
+  - day_close等の判断点でもruntime失敗を判断済みとして計数し、その日のふりかえり・明日へのメモ・欲求レビュー等を欠落させたまま次の定刻まで進む。境界副作用だけ先に実行済みになる種類では、判断本体との状態分裂も生じる。
+  - `submitted` が「受付」「実行完了」「finalize完了」の三状態を潰したboolになっており、呼出側が安全な再試行可否を判定できない。
+- 修正方針:
+  - PulseControllerはruntime例外を成功値へ変換せず、型付き `ExecutionOutcome`（accepted/completed/error/cancelled、execution_id）で返すか、少なくともerror event通知後に例外を再送出する。
+  - 判断点側は「例外が無かった」ではなくfinalize完了の永続証跡を成功条件にする。best-effort callbackだけを唯一の証跡にせず、execution_idに紐づく完了台帳を持つ。
+  - `submitted` を受付、runtime完了、finalize適用へ分解し、judgment回数・LLM利用量・適用回数も同じboolから派生させない。何を1回と数えるかを別々に定義する。
+  - on_eventが完了証跡を得られなかった場合は、イベントをdurable queueへ戻して冪等再判断するか、明示的に直接応対へfallbackする。少なくとも偽成功によるdropを無くす。
+- 必要な回帰:
+  - runtime例外、Playbook不在、judge node失敗、finalize tool失敗、完了通知失敗の各段階で、呼出側がaccepted/completed/finalizedを正しく区別できること。
+  - on_event失敗時に実イベントが一度だけretryまたはdirect dispatchされ、無処理drop・二重応対の双方が起きないこと。
+  - 失敗した判断を再試行して成功した場合、判断適用とjudgment計数が定義どおり一度だけ記録されること。
+  - day_open/day_closeの境界副作用と判断本体が、片方だけ成功した状態から再起動後に一貫して回復すること。
+
+### [P1] 判断適用後のSAIMemory保存失敗を成功扱いにし、再試行で副作用を二重適用する
+
+- 場所: `builtin_data/tools/judgment_finalize.py:987-1002,1005-1075,1513-1643`
+- 事実:
+  - `judgment_finalize()` は各kindの `_finalize_*()` を先に呼び、時間割・タスク・欲求・event memo等の世界状態を更新した後で、本人の判断独白と適用結果をSAIMemoryへ保存する。
+  - `append_persona_message()` の例外はLOGGERへ記録するだけで握りつぶし、warning数・`committed`・ToolResultへ反映しない。そのまま `Judgment finalized (... applied=True, warnings=0 ...)` を返し、`judgment_applied` callbackも成功時と同じ内容で発火する。
+  - 適用操作全体に判断実行IDや冪等性keyはない。`on_event.note_only` は既存配列へ無条件appendするため、同じ判断を再度finalizeすると同一memoがもう一件増える。他kindにもtask/desire作成、時間割置換、spell実行等の非冪等な副作用がある。
+  - SAIMemoryの判断行は本人が何を考え、何を適用したかを結ぶ唯一の恒久履歴だが、その保存失敗と世界更新成功を原子的に扱わず、上位層へ部分成功を通知する経路もない。
+- 最小再現:
+  1. `on_event` の `note_only` 出力を用意し、SAIMemory adapterの `append_persona_message()` だけをDB障害相当の例外にする。
+  2. 1回目のfinalizeでevent memoは1件保存された一方、判断行は保存されず、戻り値は `applied=True / warnings=0` だった。
+  3. 同じ判断出力を再度finalizeすると、同一textのevent memoが2件へ増えた。2回目も成功扱いだった。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_judgment_points.py` に追加して実行し、壊れた成功報告と二重適用を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-finalize-memory tests/test_judgment_points.py::test_audit_on_event_memory_failure_reports_success_and_retry_duplicates_memo`
+  - 結果: `1 passed`（1回目memo 1件、2回目memo 2件、両方 `applied=True`、warning 0を確認）。
+- 影響:
+  - 本人の裁定だけが記憶から欠け、世界には裁定結果だけが残る。「なぜこの状態になったか」を本人の発話として辿れず、自己著者性と監査可能性を同時に失う。
+  - 上位層はfinalize完了と誤認するため、障害として再試行・保留できない。外部監視等から欠落を検出して再試行した場合は、今度はtask/desire/memo/spell等を二重適用し得る。
+  - `judgment_applied` も発火するため、on_eventの `engage_now` では判断履歴が無いまま直接応対だけが開始される。履歴保存失敗と応対起動の境界も分裂する。
+- 修正方針:
+  - 判断ごとに永続 `judgment_execution_id` と状態（prepared/applied/recorded/completed/failed）を持ち、世界更新・本人判断行・完了通知を同一実行へ結びつける。各副作用はexecution IDを冪等性keyとして一度だけ適用する。
+  - 単一DBトランザクションにできないSAIMemoryとworld DBの間はoutbox/sagaにし、判断行保存失敗時は「適用済み・記録待ち」としてdurable retryする。判断LLMや世界副作用を最初から再実行しない。
+  - ToolResultとcallbackはpartial/failedを明示し、`judgment_applied` をcompletedの証拠にしない。保存失敗をwarning 0の成功として返さない。
+  - 判断行を先に保存するだけでは、逆に未適用の裁定をcommittedとして記録するため不十分。prepared記録とcompleted記録を区別する。
+- 必要な回帰:
+  - 各kindについて、世界更新前・途中・更新後、判断行保存、callback発火の各点を失敗させ、再起動後に同一executionが一度だけcompletedへ収束すること。
+  - task/desire/memo/time slot/spellがretry回数にかかわらず一度だけ適用され、判断行も一行だけ残ること。
+  - 記録待ち状態では上位層がcompletedと数えず、on_eventを無処理drop・二重応対のどちらにもせず回復できること。
+  - adapter不在・persona不在も黙って成功にせず、判断履歴を保持できない構成として明示的に扱うこと。
+
+### [P1] post-session完了を先にcommitし、成果物参照失敗後は再試行でも接地を回復できない
+
+- 場所: `builtin_data/tools/judgment_finalize.py:563-664`, `saiverse/persona_task_manager.py:573-624,807-846`
+- 事実:
+  - `task_verdict.status=done` は成果物refが当該セッションのartifact一覧に存在することを確認した後、`update_task_status(... completed)` と `append_artifact_ref()` を順に呼ぶ。
+  - 両APIはそれぞれ独立したSessionを開き、履歴行を含めて個別にcommitする。二つを包むunit-of-workはない。
+  - `append_artifact_ref()` が失敗すると例外は `_apply_task_verdict()` / `_finalize_post_session()` / `judgment_finalize()` を抜ける。この時点でcompleted遷移は既にcommit済みだが、成果物ref・本人判断行・適用完了通知は残らない。
+  - 同じ判断を再試行しても、finalize冒頭の終了済みタスクガードがcompletedを検出し、再裁定全体を棄却する。このため本来「やったフリ」を防ぐための接地証跡を、通常経路では後から補修できない。
+- 最小再現:
+  1. pendingの `task:1` と、セッション成果物 `item-abc` を含む正当なdone裁定を用意する。
+  2. `update_task_status()` は通常どおり成功させ、直後の `append_artifact_ref()` だけをDB障害相当の例外にする。
+  3. finalizeは例外で終了し、タスクは `completed`、`artifact_refs=[]`、SAIMemory判断行0件になった。
+  4. 障害を解除して同じ判断を再試行しても `applied=False` となり、`artifact_refs` は空のまま残った。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_judgment_points.py` に追加して実行し、壊れた永続状態と再試行不能を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-artifact-partial tests/test_judgment_points.py::test_audit_post_session_artifact_failure_strands_completed_task`
+  - 結果: `1 passed`（初回は例外、completedかつartifact空・判断行0、再試行後もartifact空かつ `applied=False` を確認）。
+- 影響:
+  - 成果物実在の接地を完了条件として掲げながら、永続状態には証拠のないcompletedが作られる。翌朝のバックログ・Atlas/机・履歴から成果物へ辿れず、「完了したが何を作ったか分からない」状態が確定する。
+  - completed_atと完了履歴だけは残る一方、本人の完了裁定そのものはSAIMemoryに無い。タスク台帳・成果物来歴・本人記憶の三者が分裂する。
+  - PulseController経由では外側のgeneric例外握りつぶしと合成し、上位層からはsubmitted成功に見えるため、自動補修の契機も失う。
+- 修正方針:
+  - 完了status、artifact_refs、両履歴をPersonaTaskManager内の単一トランザクションで更新する `complete_with_artifact()` に集約する。呼出側で二つの公開APIを順番に組み立てない。
+  - optimistic versionを同じ更新へ含め、同一judgment execution IDで冪等にする。既にcompletedでも、同じexecutionがartifact未記帳なら補修だけを許可する。
+  - SAIMemoryとの原子性は前項のoutbox/sagaで扱い、task DB commit後に記録待ち状態を失わない。
+- 必要な回帰:
+  - status更新・artifact更新・各履歴insert・commitの各失敗で、全項目が未変更か全項目が一度だけ更新済みのどちらかになること。
+  - commit応答喪失を含む再試行でcompleted_at、version、履歴、artifact refが二重化せず、一回で収束すること。
+  - 旧バージョンで既に生じたcompleted＋artifact空を検出し、セッション実績から安全にbackfillできるmigration/repairを用意すること。
+
+### [P1] 「完全手動モード」がscheduleと時間割予約を止めず、自動LLM発火を継続する
+
+- 場所: `api/routes/people/debug.py:188-222`, `frontend/src/components/DebugPanel.tsx:69-78,146-155`, `saiverse/autonomy_manager.py:132-171`, `saiverse/schedule_manager.py:66-188,330-365,423-475`, `saiverse/autonomy_wiring.py:202-298,381-439`, `saiverse/day_plan.py:1922-2001`, `docs/intent/persona_cognition/debug_controller.md:11-16,40-52`
+- 事実:
+  - UIのボタンは「全タイマー停止して手動へ」、Intentは「完全手動モードONのとき自動発火はゼロ」と定義する。
+  - 実装は `{autonomy:false, manual_mode:true}` を送り、backendはAutonomyManagerのwatchdog予約をstopし、`_debug_manual_mode_personas` を立ててrunning Trackのwait_response timeoutだけをcancelする。
+  - PersonaScheduleを担うScheduleManager、EventScheduler上の `schedule:*` 予約、day planのslot予約は停止・cancelされない。scheduled judgmentのゲートもDBの `AI.AUTONOMY_ENABLED` 相当であり、AutonomyManagerのrunning stateやdebug manual flagを見ない。
+  - 解除側はwait_response timeoutだけを再予約する。手動化で止めていないschedule/slotはON中も継続し、AutonomyManagerは自動再開しないため、状態名と実際に動くタイマーの組合せも非対称になる。
+- 最小再現:
+  1. `autonomy_enabled=True` のpersonaでdebug controllerへ `{autonomy:false, manual_mode:true}` を送る。
+  2. responseは成功しmanual flagもONになる。
+  3. 直後にPersonaSchedule由来の `judgment_day_open` 発火経路を通すと、`submitted=True` となりPulseControllerへ1回submitされた。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_autonomy_wiring.py` に追加して実行し、完全手動ON後のscheduled day_open submitを確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-manual-mode tests/test_autonomy_wiring.py::test_audit_complete_manual_mode_still_allows_scheduled_day_open`
+  - 結果: `1 passed`（manual flag ON、scheduled day_open `submitted=True`、PulseController呼出1回を確認）。
+- 影響:
+  - 決定論的な手動検証中に、起床・就寝判断、時間割の作業セッション、一般scheduleが割り込み、LLMコスト・タスク状態・記憶・時間割を裏で変更する。まさにこの機能が防ぐべき非決定論が残る。
+  - UIとAPIは成功を返し「完全手動」と表示するため、利用者は自動発火が無いという誤った前提で観測結果を解釈する。検証結果の信頼性を壊すだけでなく、操作対象personaが本人の裁定なく活動する。
+  - `autonomy_enabled` 自体をOFFにしていないので、schedule以外の判断入口もmanual flagを見なければ通過し得る。停止対象を個別列挙する現在方式では、新しいタイマー追加のたびに再発する。
+- 修正方針:
+  - per-personaの単一 `execution_gate` をEventScheduler callbackの実行直前に置き、manual modeではデバッグ明示発火以外の全persona起動を抑止する。timer種類ごとのcancelだけに依存しない。
+  - manual ON時はAutonomyManager、wait-response、PersonaSchedule、day-plan slot、TTL/keepalive等の「personaの行動を生む予約」を分類してpauseする。単なる削除ではなく、解除時に元のfire_at/意味を安全に復元するpause契約が要る。
+  - UI/APIは停止対象と残る世界共通タイマーを明示し、manual状態とAutonomyManagerの元状態を保存して解除時に対称復帰する。
+- 必要な回帰:
+  - manual ON中にwatchdog、day_open/day_close、一般schedule、day-plan slot、wait-response、external eventの各入口が自動Pulseを0回にすること。
+  - debugの明示ボタンだけはforce設定どおり一回発火できること。
+  - ON直前・callback dequeue直後・callback実行直前の各競合で、ON完了後に自動処理が開始されないこと。
+  - OFF後はON前に稼働していたものだけが一度だけ復帰し、期限切れslot/scheduleを遅れて一斉発火しないこと。
+
+### [P1] spell実行失敗をcommitted成功として、本人の記憶に未実行の行為を記録する
+
+- 場所: `builtin_data/tools/judgment_finalize.py:80-115,443-475,1513-1643`
+- 事実:
+  - `_fire_spell()` はtool不在と実行例外を `spells_record[].result` に格納するだけで、成功/失敗を返さずwarningsにも追加しない。
+  - 呼出側のpromotion/new_desire/track completeは `_fire_spell()` の結果を検査せず、常に `applied=True` にする。`spells_record` が1件でもあればscopeもcommittedになる。
+  - SAIMemoryへ整形する `_spell_to_text()` はnameとargsだけを出力し、`result` を完全に捨てる。このため実行が失敗した場合も、本人の判断行には成功時と同じ `/spell ...` が残る。
+  - summaryのspell数も「試行数」であって成功数ではないが、失敗warningは0になり得る。上位層・本人・後続文脈のどこからも、その行為が実在しないことを判別できない。
+- 最小再現:
+  1. post-session判断に正当な `new_desires` 1件だけを含め、`purpose_seed` toolを例外にする。
+  2. 欲求作成は失敗したが、戻り値は `applied=True / warnings=0 / spells=1`、SAIMemory scopeはcommittedだった。
+  3. 保存された本人のcontentには、例外や失敗表示のない `/spell name='purpose_seed' args=...` が記録された。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_judgment_points.py` に追加して実行し、偽成功と記録内容を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-spell-failure tests/test_judgment_points.py::test_audit_failed_desire_spell_is_recorded_as_committed_success`
+  - 結果: `1 passed`（tool例外、summary `applied=True/warnings=0/spells=1`、scope committed、成功形spell行を確認）。
+- 影響:
+  - 本人は「やりたいことを作った」「関心へ昇格した」「Trackを完了した」と記憶する一方、実世界には存在しない。次の起床判断・机・タスク一覧がその対象を提示せず、本人の自己像と世界状態をシステムが分裂させる。
+  - `track_complete` 等の操作では未完了状態が残るのに完了したという履歴が残り、後続判断が誤った前提で計画を組む。ログを見ない通常利用では原因を追えない。
+  - spell tool自身が「エラー文字列を正常returnする」型でも、現契約は結果の意味を判定しないため同型の偽成功が広がる。
+- 修正方針:
+  - tool実行結果を型付き `SpellOutcome(success, changed, summary, error)` に統一し、`_fire_spell()` は呼出側へ返す。例外・tool不在・失敗ToolResultをすべてfailureとして扱う。
+  - `applied` は成功かつ実変更があった操作だけで立て、warningsとcallbackへ失敗を構造化して渡す。attempted/succeeded/failedの件数を分離する。
+  - 本人の記憶には、成功したspellだけを正準 `/spell` として載せる。失敗はシステム名義の適用失敗行として明示し、本人が実行した事実に変換しない。
+- 必要な回帰:
+  - registry不在、tool例外、失敗ToolResult、deferred適用失敗の各場合に `applied=False`、warningあり、成功形spell行なしとなること。
+  - 複数spellの一部だけ成功した場合、実際に成功した行だけがcommittedとして記録され、失敗項目が個別に識別できること。
+  - deferred Track操作はenqueue成功ではなくPulse終端の適用成功まで完了状態を分け、後段失敗を判断executionへ返せること。
+
+### [P1] schedule設定のDB commit後に予約同期失敗を握りつぶし、有効表示のまま発火しなくなる
+
+- 場所: `api/routes/people/life_settings.py:238-284`, `api/routes/people/schedule.py:83-131,133-168,170-245,247-276`, `saiverse/schedule_manager.py:66-188`
+- 事実:
+  - life設定と一般schedule CRUDは、PersonaScheduleのDB commitを先に完了してからScheduleManagerのregister/unregisterを呼ぶ。
+  - 予約同期の例外はLOGGERへ出すだけで、DBをpending/retry状態にせず、API responseにも反映しない。create/update/life PUTは成功を返す。
+  - ScheduleManagerがDB全件とEventSchedulerを照合するのは `start()` 時だけで、稼働中の定期reconciliationはない。register失敗後に自動再試行するdurable queueもない。
+  - create/enable/life PUT失敗では有効なDB行だけが残り予約が無い。update失敗では旧時刻の予約が同じkeyで残り、旧時刻に一度発火してから次回registerで新設定へ追いつく。delete/disableのunregister失敗はcallback側のDB再読みによりLLM実行は防ぐが、不要callbackは残る。
+- 最小再現:
+  1. life設定PUTでwake 07:00 / close 22:00を保存し、ScheduleManagerの `register_schedule()` を2回とも例外にする。
+  2. APIはHTTP 200で新設定を返し、DBにはenabledなday_open/day_closeが2行commitされた。
+  3. EventSchedulerへの登録試行は両方失敗しており、稼働中にそれを再試行する経路は無い。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_life_settings_api.py` に追加して実行し、成功responseとDB/予約同期の分裂を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-schedule-sync tests/test_life_settings_api.py::LifeSettingsApiTest::test_audit_put_reports_success_when_both_scheduler_pushes_fail`
+  - 結果: `1 passed`（HTTP 200、DB 2行、register試行2回とも例外を確認）。
+- 影響:
+  - UIには起床・就寝時刻が正常保存済みと見えるのにday_open/day_closeが発火しない。時間割編成、life確定、就寝ふりかえり、欲求レビュー等が丸ごと欠落する。
+  - 一般oneshot/intervalも作成・有効化成功に見えたまま無期限に発火しない。ユーザーは設定値を再編集するまで障害を知る手段がログしかない。
+  - update時は変更前時刻に一度発火するため、単純な欠落だけでなく「変更したはずの時間に旧判断が走る」誤実行になる。
+- 修正方針:
+  - DBをscheduleの正典とし、EventScheduler登録をdurable outbox/reconciliation対象にする。commitと同時に同期世代を増やし、scheduler側が世代一致まで再試行する。
+  - APIは少なくとも `saved_but_not_scheduled` を明示し、完全成功と同じresponseにしない。同期完了を要求する操作ではregister失敗を5xxへ返し、DB側にretry状態を残す。
+  - EventSchedulerのkeyへschedule IDとgenerationを結び、旧予約callbackは発火直前に世代不一致なら行為を起こさず最新予約へ置換する。
+- 必要な回帰:
+  - create/update/enable/life PUTのregister失敗後、プロセスを再起動せずreconciliationで最新時刻へ一度だけ登録されること。
+  - update競合で旧generation callbackがLLMを起動せず、最新generationだけが発火すること。
+  - delete/disableのunregister失敗でもcallbackが行為を起こさず、reconciliationでheapから除去されること。
+  - API responseがDB保存とscheduler同期の状態を正確に区別すること。
+
+### [P1] schedule dispatch失敗後も実行済みに更新し、oneshotを再試行不能にする
+
+- 場所: `saiverse/schedule_manager.py:330-365,423-534`
+- 事実:
+  - `_handle_fire()` は `_execute_schedule()`、`_update_schedule_after_execution()`、次回registerを無条件に順番実行する。
+  - `_execute_schedule()` は通常Playbookの `dispatch_schedule_fire()` 例外をLOGGERへ出して握りつぶし、成功可否を返さない。判断点専用経路の戻り値 `submitted=False` も検査せずreturnする。
+  - その後oneshotは `COMPLETED=True`、intervalは `LAST_EXECUTED_AT=now` をcommitする。oneshotの次回fireは無いものとしてcancelされ、intervalは失敗時点から丸々1 interval後まで再試行されない。periodicも当該周期は実行済み同然に次周期へ進む。
+  - callback自体が `_execute_schedule()` の外で例外を投げた場合はEventSchedulerの最外周が予約をdropするため、どちらの失敗形にもdurable retryはない。
+- 最小再現:
+  1. enabledなoneshot scheduleをDBへ作り、`pulse_dispatcher.dispatch_schedule_fire()` を例外にする。
+  2. ScheduleManagerの実発火callbackを呼ぶと、Pulse dispatchは失敗した。
+  3. DB行は `COMPLETED=True` になり、`schedule:{id}` の予約は存在しなくなった。
+- 実行確認:
+  - 上記を監査用の一時回帰として `tests/test_autonomy_wiring.py` に追加して実行し、失敗後のcompleted化と予約消失を確認後にテスト自体は削除した。
+  - コマンド: `.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider --basetemp .\\temp\\audit-pytest-oneshot-failure tests/test_autonomy_wiring.py::test_audit_failed_oneshot_dispatch_is_marked_completed`
+  - 結果: `1 passed`（dispatch例外、DB `COMPLETED=True`、EventScheduler予約なしを確認）。
+- 影響:
+  - 一度きりの予定がLLMへ届かないまま履行済みとして永久消失する。ユーザー・personaの双方からはenabled/completedな正常履歴に見え、retry操作の対象にもならない。
+  - interval/periodicの定期処理も障害中の実行を欠落させる。day_open/day_close専用経路がpreconditionやPlaybook不在で `submitted=False` を返した場合も同じで、起床・就寝判断を一周期失う。
+  - 外部dispatchが「受付後に例外」の場合、単純な再試行は二重実行の危険があるが、現状はexecution IDも受付証跡も無いため、安全側の照合すらできない。
+- 修正方針:
+  - `_execute_schedule()` は型付きoutcome（accepted/completed/failed/unknown、execution_id）を返し、成功時だけscheduleの実行済み状態を進める。
+  - oneshot/intervalの発火を永続execution行でclaimし、dispatch前・受付後・完了後を区別する。失敗はbackoff付きretryへ残し、unknownは同一execution IDで照合・冪等再送する。
+  - 判断点の `submitted=False` とfinalize未完了をschedule成功に変換しない。schedule起点とjudgment executionを同じIDで結ぶ。
+- 必要な回帰:
+  - dispatch前例外、受付拒否、受付後応答喪失、runtime/finalize失敗の各段階でoneshotがcompletedにならず、安全に一度だけ回復すること。
+  - intervalの失敗時にLAST_EXECUTED_ATを成功時刻として更新せず、backoff retry後に次周期基準が定義どおりになること。
+  - periodic day_open/day_closeが失敗時に当日中のretry対象へ残り、翌日まで欠落しないこと。
+
 ## 次の監査片
 
-- `fired` / `done` 永続化失敗と、watchdog・手動回復時のslot再試行方針
-- 判断submit後のfinalize失敗・永続化失敗と、成功/再試行の境界
+- `SEA runtime / Session / head-tail` のline/model/thread隔離、cache snapshot、Metabolism境界
