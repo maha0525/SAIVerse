@@ -141,6 +141,11 @@ class MockWorkRuntime:
                            state=None):
         return self.llm_client
 
+    def select_llm_client(self, node_def, persona, execution_context=None,
+                          needs_structured_output=False, state=None):
+        model = execution_context.model_key if execution_context is not None else "mock-model"
+        return self.llm_client, model
+
     def _default_temperature(self, persona):
         return None
 

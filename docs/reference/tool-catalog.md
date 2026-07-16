@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 126（うち Spell 化: 84）
+**登録ツール数**: 129（うち Spell 化: 85）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -15,6 +15,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | ツール名 | 説明 | 引数 | Spell |
 |---|---|---|---|
 | `addon_spell_help` | アドオンが提供する追加スペルの一覧とその使い方を返します。投稿・検索など詳細な操作を行う前に呼んでください。addon引数でアドオン名を絞り込めます（省略時は全アドオン、近い名前を渡せばファジーマッチします）。 | `addon`: string | アドオンスペル一覧 |
+| `calculate_expression` | Evaluate arithmetic expression with ^ (power) and ! (factorial). | `expression*`: string | — |
 | `call_playbook` | Call another playbook to perform a specialized task. Use this when you need to execute a specific capability (like se… | `playbook_name*`: string | — |
 | `chronicle_context_down` | 指定したChronicleエントリの下流コンテンツを取得します。Lv1エントリに対して使うと、そのChronicleがまとめている生のメッセージ全件を返します。Lv2以上に対して使うと、子ChronicleエントリのURIと全文を返し… | `entry_id*`: string | Chronicle下流参照 |
 | `chronicle_context_up` | 指定したChronicleエントリの上流コンテキストを取得します。親エントリ（上位レベルの要約）の全文と、同じ親に属する兄弟エントリ全件の全文とURIを返します。周辺の状況を把握し、さらに上位や横のエントリへナビゲートするための足がか… | `entry_id*`: string | Chronicle上流参照 |
@@ -77,6 +78,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `purpose_decompose` | 目的ノード（task:N）をステップに分解します。steps 配列の各要素は title（と任意の description）を持つオブジェクトで、既存のステップはすべて置き換えられます。1つのステップの進捗を更新するには purpos… | `node_ref*`: string, `steps*`: array | 目的をステップに分解 |
 | `purpose_seed` | 「いつかやりたい」と思いついたことを、候補として書き留めます（seed = 候補を生む。木に接ぐ = 採用は purpose_adopt が担います）。候補はやりたいことの候補プールに保管され、後から採用されて目的の木に接がれます。1… | `title*`: string, `goal`: string, `type`: string, `source*`: string | やりたいことを書き留める |
 | `purpose_step` | 目的ノード（task:N）の中の1ステップの状態とメモを更新します。ステップへの分解（全置換）は purpose_decompose を使ってください。 | `node_ref*`: string, `step_position*`: integer, `status*`: string, `notes`: string, `auto_advance`: boolean | 目的のステップを更新 |
+| `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
 | `read_url_section` | URLのページ内から、見出し名やキーワードで指定した節だけを抽出して読み込みます。 read_url_outline で長文と判定されたページの深掘り用です。 まず見出し（h1〜h4）の部分一致を試み、見つからなければ本文キーワード一… | `url*`: string, `section_query*`: string, `around`: integer | ページ節読み込み |
 | `record_wait` | Record a wait action. Consolidates consecutive waits into a single message. | `reason`: string | — |
@@ -87,6 +89,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `schedule_delete` | 指定されたIDのスケジュールを削除する。自分のスケジュールのみ削除できる。 | `schedule_id*`: integer | — |
 | `schedule_list` | 自分のスケジュール一覧を取得する。スケジュールIDや設定内容を確認したいときに使う。 | (なし) | — |
 | `searxng_search` | Search the web via SearXNG and return concise results. | `query*`: string, `max_results`: integer, `category`: string, `engines`: string, `language`: string, `safe`: integer | — |
+| `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
 | `track_abort` | Abort a track without completion. Use when giving up on the work. Persistent core tracks (user_conversation, social) … | `track_id*`: string | トラック中止 |
 | `track_activate` | Activate a track (set its status to 'running'). If another track was running, it is automatically moved to 'pending'.… | `track_id*`: string | トラック起動 |

@@ -1,6 +1,6 @@
 # Intent: Beat と ExecutionContext — SEA 実行基盤の一本化
 
-**ステータス**: 実装待ち (v0.2, 2026-07-16) — まはーレビュー 1 巡で全論点解決（知覚バッファ経由の明記・常時通知への単純化・割り込みは Beat 境界待ち・Metabolism 閾値はモデル依存・未整理 section も本工事に包含）
+**ステータス**: 実装中 (v0.2, 2026-07-16) — §6-1 ExecutionContext 導入 (挙動不変) 実装済み・全体スイート2474 passed。§6-2 (Beatロック+関所+main/META解体) が次段。まはーレビュー 1 巡で全論点解決済み（知覚バッファ経由・常時通知・割り込みは Beat 境界待ち・Metabolism 閾値はモデル依存・未整理 section も包含）
 **位置付け**: [`execution_ledger.md`](execution_ledger.md)（柱1）と対を成す SEA 側の工事。同じ場所（SEA runtime の実行単位）に住む 4 つの問題を、一度の掘り返しで解く。
 **前提**: [`session.md`](session.md)（正典: Session 粒度は (persona, model)。**本 intent は同 doc の「head は line×model」記述を改訂する**）/ [`cached_head_architecture.md`](cached_head_architecture.md) / [`dynamic_state_sync.md`](dynamic_state_sync.md)（B = A + Σ(events)。**本 intent は通知を操作ラベル型から内容型へ改める**）/ [`persona_cognition/line_tag_responsibility.md`](persona_cognition/line_tag_responsibility.md) §10 aspect
 **監査対応**: SEA 監査 S1（実行 model 無視の Session/anchor 更新）・S4（Stelis thread 復元漏れ）・S8（anchor 並列 RMW）・S2/M1（Metabolism、実行台帳と共同）/ issue [`head_mutation_notification_gap.md`](../issues/head_mutation_notification_gap.md)

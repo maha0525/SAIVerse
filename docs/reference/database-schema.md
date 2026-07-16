@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 41
+**テーブル数**: 43
 
 ## addon_config
 
@@ -44,6 +44,21 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `HOST_AVATAR_IMAGE` | VARCHAR(255) | — |  |
 | `MAP_BACKGROUND_IMAGE` | VARCHAR(512) | — |  |
 | `LAST_KNOWN_VERSION` | VARCHAR(64) | — |  |
+
+## execution_ledger
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `EXECUTION_ID` | VARCHAR(36) | PK, NOT NULL |  |
+| `KIND` | VARCHAR(255) | NOT NULL |  |
+| `IDEMPOTENCY_KEY` | VARCHAR(255) | — |  |
+| `PERSONA_ID` | VARCHAR(255) | — |  |
+| `STATUS` | VARCHAR(16) | NOT NULL |  |
+| `PAYLOAD_JSON` | TEXT | — |  |
+| `RESULT_JSON` | TEXT | — |  |
+| `ERROR` | TEXT | — |  |
+| `CREATED_AT` | INTEGER | NOT NULL |  |
+| `UPDATED_AT` | INTEGER | NOT NULL |  |
 
 ## item
 
@@ -130,6 +145,21 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
 | `BASE_SYSTEM_PROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
 | `BASE_AVATAR` | VARCHAR(255) | — |  |
+
+## execution_outbox
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `OUTBOX_ID` | INTEGER | PK, NOT NULL |  |
+| `EXECUTION_ID` | VARCHAR(36) | FK→execution_ledger.EXECUTION_ID, NOT NULL |  |
+| `TARGET` | VARCHAR(255) | NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | — |  |
+| `PAYLOAD_JSON` | TEXT | NOT NULL |  |
+| `STATUS` | VARCHAR(16) | NOT NULL |  |
+| `ATTEMPTS` | INTEGER | NOT NULL, default=0 |  |
+| `LAST_ERROR` | TEXT | — |  |
+| `CREATED_AT` | INTEGER | NOT NULL |  |
+| `DELIVERED_AT` | INTEGER | — |  |
 
 ## item_location
 
