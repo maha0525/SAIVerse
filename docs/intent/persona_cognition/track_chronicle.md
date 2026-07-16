@@ -289,7 +289,7 @@ Track Chronicle 実装に伴って撤去する dead / 旧仕様コード:
 | `pause_summary` カラム | `database/models.py` action_tracks | Track Chronicle で完全に置き換わる |
 | `pause_summary_updated_at` カラム | 同上 | 同上 |
 | `track.pause_summary` API 露出 | `api/routes/people/tracks.py:57-58`, `api/routes/people/models.py` | 同上 |
-| `pause_summary` 表示 | `frontend/src/components/memory/TracksViewer.tsx` | 同上 |
+| `pause_summary` 表示 | 旧 `frontend/src/components/memory/TracksViewer.tsx` (UI 自体も 2026-07-16 退役) | 同上 |
 | `meta_layer.py:28` の「責務外」コメント | `saiverse/meta_layer.py` | 旧仕様の宙ぶらりんコメント、書き込み責務が確定したため不要 |
 
 撤去は migration ファイルを書いて DB 側もクリーンに削除する。

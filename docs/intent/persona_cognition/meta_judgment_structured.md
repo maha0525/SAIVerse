@@ -330,7 +330,7 @@ LLM 応答 (JSON) を受け取った MetaLayer が以下を行う:
 
 #### 残タスク
 
-- [ ] 汚染ログ (旧仕様で蓄積された応答調独白) の DB 除去 (7層ストレージタブの新規削除UI から、または DB 直接)
+- [ ] 汚染ログ (旧仕様で蓄積された応答調独白) の DB 除去 (保守用 DELETE API または DB 直接。7層ストレージタブは 2026-07-16 退役)
 - [ ] 実機検証 2 回目: 各状況 B/C/D/E が期待通り発火するか + 上記 2 修正でループ解消されているかを確認
 - [ ] LLM プロバイダ動作確認 (Anthropic / Gemini / OpenAI で anyOf field-level discriminator + enum 動的注入が通ること)
 - [ ] xAI / Ollama / llama_cpp の挙動確認 ([issue](../../issues/llm_provider_anyof_support.md))
@@ -345,6 +345,7 @@ LLM 応答 (JSON) を受け取った MetaLayer が以下を行う:
   - バックエンド側に `DELETE /people/{id}/meta-judgment/{judgment_id}` + `bulk-delete` 追加 (`storage_layers.py`)
   - 同様に `track-logs` も追加
   - main_cache / sub_cache (SAIMemory messages) は既存の `DELETE /messages/{id}` を流用
+  - **2026-07-16**: 正規の観察面 (Pulse タイムライン / Profile / ライフビュー) が揃ったためタブと専用コンポーネントを退役。上記 API は保守経路として残す。判断記録: [memory_modal_legacy_tabs_retirement.md](../memory_modal_legacy_tabs_retirement.md)
 
 ---
 
