@@ -1,6 +1,6 @@
 # Intent: Beat と ExecutionContext — SEA 実行基盤の一本化
 
-**ステータス**: 設計中 (v0.1, 2026-07-16) — まはー承認済みの方向（統合工事化・head キー = (persona, model)・Metabolism 二層分離・head 操作の内容型通知）。詳細レビュー待ち
+**ステータス**: 実装待ち (v0.2, 2026-07-16) — まはーレビュー 1 巡で全論点解決（知覚バッファ経由の明記・常時通知への単純化・割り込みは Beat 境界待ち・Metabolism 閾値はモデル依存・未整理 section も本工事に包含）
 **位置付け**: [`execution_ledger.md`](execution_ledger.md)（柱1）と対を成す SEA 側の工事。同じ場所（SEA runtime の実行単位）に住む 4 つの問題を、一度の掘り返しで解く。
 **前提**: [`session.md`](session.md)（正典: Session 粒度は (persona, model)。**本 intent は同 doc の「head は line×model」記述を改訂する**）/ [`cached_head_architecture.md`](cached_head_architecture.md) / [`dynamic_state_sync.md`](dynamic_state_sync.md)（B = A + Σ(events)。**本 intent は通知を操作ラベル型から内容型へ改める**）/ [`persona_cognition/line_tag_responsibility.md`](persona_cognition/line_tag_responsibility.md) §10 aspect
 **監査対応**: SEA 監査 S1（実行 model 無視の Session/anchor 更新）・S4（Stelis thread 復元漏れ）・S8（anchor 並列 RMW）・S2/M1（Metabolism、実行台帳と共同）/ issue [`head_mutation_notification_gap.md`](../issues/head_mutation_notification_gap.md)
@@ -59,16 +59,18 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 - **編纂（Chronicle 生成）**: persona 共有の土地の仕事。冪等キー `(metabolism.run, persona:窓)` で実行台帳に claim し、全入口（各 model の Metabolism・session close・手動整理・API）が同じ排他を通る（M1 の解）。
 - **退役（anchor 前進）**: model ごと。自 model の窓が節目を迎えた時だけ、**退役範囲の編纂が済んでいることを確認してから** anchor を進める（S2 の解 — 編纂失敗時は据え置いて次回再試行）。
 - **可視化は model の節目ごと**: 各 model のコンテキストに入る Chronicle 集合は、その model の anchor 更新時に確定する。他 model の編纂で新しい Chronicle ができても、自分の節目までは prefix に入れない（prefix cache 保護）。窓が生ログでカバーしている間は情報欠落はなく、退役の瞬間に退役分の Chronicle が入れ替わりに見える。
+- **Metabolism の閾値（watermark / token threshold）はモデル依存**（まはー確認 2026-07-16）: standard/lightweight という区別ではなく、実行 model のモデル設定（context_length 等）から導出する。各 Session は自分の model の閾値で自分の窓を管理する。
 - `history_manager.metabolism_anchor_message_id`（persona 単一可変属性）は廃止し、ExecutionContext 経由で解決した model 別 anchor を使う。TTL 失効時の minimal load 後に旧 anchor を touch する事故（記憶監査第 4 片）も、call-local に「今回組成した prefix の anchor」を渡すことで消す。
 
 ### 3.3 head 操作の内容型通知（issue `head_mutation_notification_gap` の解）
 
-> **head の元データへの操作は、その操作の生ログが見えないすべての Session 窓へ、「head に入るときと同一の render 断片」を内容型通知として配送する。**
+> **head の元データへの操作は、常に、その persona の全 Session 窓へ「head に入るときと同一の render 断片」を内容型通知として配送する。**
 
 - **内容忠実性の構造的保証**: 通知本文は section の render と同一の関数から生成する。「head で見える内容」と「tail 通知で届く内容」の文面を別々に書かない（書き分けた瞬間からドリフトが始まる）。
-- **通知要否の判定**: 操作側の ExecutionContext（model, line）と読み手 Session（model, main line）を比較し、「読み手の履歴窓にこの操作の生ログが残るか」で決める。同一 Session・main line 内の操作は従来どおり生ログが証跡なので通知しない。**判定が際どいケースは通知する側に倒す**（重複はノイズ、欠落は記憶の穴）。
-- **配送**: 実行台帳の outbox に載せる（S3 の「配送前に last_notified 前進」も、outbox の ack 後に進める形へ同時に修正）。
-- 対象 section: コア記憶・机・生きる目的・Memopedia 目次（opt-in 時）。先例は visual_context（2026-07-09 の「中身ごと届ける」改修）と building（system_prompt 全文同梱）。
+- **通知要否の判定は持たない — 常に通知する**（まはー裁定 2026-07-16）: 「読み手の窓に操作の生ログが残るか」という判定は作らない。main 以外の line での操作は、操作した本人にも結局通知が届く — そのペルソナ体験を判定ロジックで完璧に対策しきれない以上、無理に効率化しない。安全と単純を優先する。main line で撃った直後は spell 結果の生ログと通知が二重に見えるが、これも引き受ける。
+- **操作起点の push 型**: 判定を持たないため、通知は snapshot 差分の検出（flush_diffs）に依存せず、**操作したツール（memory_write / memory_open / life_purpose_set 等）が成功時に自分で発行**する（execution の副作用の一つとして outbox へ）。snapshot 差分比較は、ツールを経由しない変化（ユーザーの UI 編集・migration 等）を拾う backstop に退く。
+- **配送経路は「outbox → 知覚バッファ → tail」の二段**（まはー確認 2026-07-16）: outbox は配達保証の層（world DB、柱 1）、知覚バッファ（`push_perception` / adapter の durable buffer）はペルソナの知覚の入口という既存の正典で、既存 diff 通知もここを通っている。本通知も同じ入口を通す。S5（知覚バッファの flush 失敗で全消失）・S3（配送前の last_notified 前進）の修正と同一経路がまとめて堅牢化される。通知の既読状態（last_notified）は (persona, model) 分離 — フルキー化の一部。
+- 対象 section: コア記憶・机・生きる目的・Memopedia 目次（opt-in 時）・**memory_weave・chronicle_index**（旧 Phase 3 積み残しの diff 未整理も本工事で潰す。まはー裁定:「後に残してもあんま良いこと無い。結局全部やる作業なんだから分かってる時点で潰す」）。先例は visual_context（2026-07-09 の「中身ごと届ける」改修）と building（system_prompt 全文同梱）。
 - head 本体の凍結（`refresh_on_events` 空 = Metabolism まで再 capture しない）は**変えない**。凍結は cache 経済の意図された設計であり、欠けていたのは凍結を補う通知の側。
 
 ### 3.4 Beat ロックと関所の配置
@@ -76,13 +78,14 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 - Beat ロックの取得点 = PulseController が Beat を開始する位置。取得直後に execution_ledger の関所（pending flush）を実行する。
 - ロックの解放は Beat の記録書き込み完了後（例外・cancel 時も `finally` で解放）。
 - 作業セッション（WORKER）の連続 Beat は、Beat 境界ごとにロックを解放・再取得する。会話 Beat が間に挟まれることを設計上許可する（「作業中に話しかけたら応答」の土台）。
+- **ユーザー割り込みも Beat 境界で効く**（まはー裁定 2026-07-16）: 実行中の Beat は課金と生成が進んでいる可能性があるため、割り込みで中断せず完了を待つ。cancel 要求は Beat 境界で評価し、次の Beat を開始しない形で効かせる。「実行中の Beat を即時中断して応答させる」明示操作は将来オプションとして残す（本工事では作らない）。
 
 ## 4. 不変条件
 
 1. **実行の身分は一度だけ解決する** — Beat 内のどの層も ExecutionContext を読み、persona の可変属性から model/thread/line を再推測しない。
 2. **記帳は実 model へ** — anchor・TTL・使用量・token threshold の更新先は、実際に応答した model の Session。呼んでいない model の Session 状態を動かさない。
 3. **head は (persona, model) に一つ** — 用途・line で出し分けない（[[feedback_head_fixed_per_persona_model_no_gating]] と同じ根）。
-4. **窓の外の head 操作は内容ごと届く** — 操作ラベルではなく render 同一断片。「head に入ったときに見える内容と寸分たがわず同じ内容」（まはー 2026-07-16）。
+4. **head 操作は常に内容ごと届く** — 操作ラベルではなく render 同一断片を、判定なしで全 Session 窓へ。「head に入ったときに見える内容と寸分たがわず同じ内容」（まはー 2026-07-16）。経路は outbox → 知覚バッファ → tail。
 5. **編纂は persona に一度、退役・可視化は model の節目に** — どの model も「自分の anchor 以前は編纂済み」が常に成立する。
 6. **thread は実行の属性** — persona のグローバル可変状態ではない。Beat が終われば必ず親 thread へ戻る。
 
@@ -92,7 +95,7 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 |---|---|
 | ExecutionContext の解決（aspect→model 導出含む） | **基盤**（Beat 開始点で一度） |
 | head のキー・凍結・再 capture のタイミング | **基盤**（(persona, model) + Metabolism 時のみ） |
-| 通知要否（窓に生ログが残るか） | **基盤**（判定規則は本 intent。際どければ通知に倒す） |
+| 通知要否 | **判定なし・常に通知**（まはー裁定。基盤は配送だけを保証する） |
 | 通知の本文 | **各 section**（render と同一関数から。基盤は運ぶだけ） |
 | Chronicle をいつ・どの範囲で編纂するか | **基盤**（未編纂範囲 + 実行台帳の冪等 claim） |
 | どの model の窓をいつ縮めるか | **基盤**（各 model の閾値。ペルソナの意志は関与しない） |
@@ -110,13 +113,18 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 ## 7. 引き受ける歪み
 
 1. **META 判断のレイテンシ** — main と並行できなくなるため、会話の Beat が続く間はメタ判断が Beat 境界を待つ（最大 1 Beat）。判断の即時性より記憶の一直線性を優先する（まはー裁定）。
-2. **通知の重複ノイズ** — 「際どければ通知に倒す」ため、まれに読み手が既に知っている変化の通知が届く。欠落より安全側。
+2. **通知の重複ノイズ** — 常時通知のため、操作した本人の窓にも通知が届く（main line で撃った直後は spell 結果の生ログと二重に見える）。判定ロジックの複雑さより、欠落の無さと単純さを取った（まはー裁定）。
 3. **migration の一回コスト** — head snapshot / anchor の物理キー変更。既存データは MODEL_KEY 記録から機械的に移行できる見込み。
 4. **lightweight Session の新規コスト** — いままで「存在しなかった」lightweight 側の head capture・anchor 管理が実際に走るようになる。capture は Metabolism 時のみなので増分は小さい見込みだが、Phase 実装時に計測する。
+5. **割り込みの即時性** — 実行中の Beat は割り込みでも完了まで待つ（課金と生成の保護）。体感の即応性は「次の Beat を開始しない」ことで確保し、即時中断は将来の明示操作に譲る。
 
 ## 8. 未確定・レビュー待ち
 
-1. Beat ロックの粒度の例外 — ストリーミング応答中のユーザー割り込み（cancel）はロック解放を待たず割り込めるべきか（UC-2 の割り込み設計と合流）
-2. 通知要否判定の具体実装 — 「窓に生ログが残るか」の判定を、実装では「操作の line_id ≠ main または model ≠ 読み手 model なら通知」まで単純化してよいか
-3. lightweight Session の Metabolism 閾値の既定値（standard と別に持つか、共通か）
-4. `memory_weave` / `chronicle_index` section の diff 未整理（Phase 3 積み残しコメント）の扱い — 本工事 §3.3 に含めるか別 wave か
+なし（v0.2 で全点解決）。
+
+解決済み（v0.2、まはーレビュー 1 巡 2026-07-16）:
+
+1. ~~ストリーミング応答中の割り込みと Beat ロック~~ → 実行中の Beat は完了を待つ（お金をかけて動いている可能性があるため）。cancel は Beat 境界で評価。「中断してすぐ応答させる」操作は将来オプション（§3.4）
+2. ~~通知要否判定の単純化~~ → **判定なし・常に通知**。ペルソナ体験（自分の操作の通知が届く）を判定で対策しきれない以上、無理に効率化しない。操作起点の push 型へ（§3.3）
+3. ~~lightweight Session の Metabolism 閾値~~ → 普通にモデル依存。実行 model のモデル設定から導出（§3.2）
+4. ~~memory_weave / chronicle_index の diff 未整理~~ → 本工事に含める。「後に残してもあんま良いこと無い。結局全部やる作業なんだから分かってる時点で潰す」（§3.3）

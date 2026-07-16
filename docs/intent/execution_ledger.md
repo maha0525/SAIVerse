@@ -1,6 +1,6 @@
 # Intent: 実行台帳 (Execution Ledger) — 不可逆な実行と記録の分裂を防ぐ共通基盤
 
-**ステータス**: 設計中 (v0.3, 2026-07-16) — まはー承認済み: 基盤化 + world DB 配置 + 記憶の順序一貫性 (v0.2) + **記憶書き込みの Beat 単位直列化 (persona 内の並行書き込みの全廃、v0.3)**。残レビューは §11
+**ステータス**: 実装待ち (v0.3, 2026-07-16) — まはー承認済み: 基盤化 + world DB 配置 + 記憶の順序一貫性 (v0.2) + **記憶書き込みの Beat 単位直列化 (persona 内の並行書き込みの全廃、v0.3)**。§11 の小物 4 点は Phase 1 実装時に確定 (まはー了承済み)。実装点の詳細は対の [`beat_execution_context.md`](beat_execution_context.md)
 **位置付け**: 2026-07-12〜15 の一次監査で見つかった「偽成功・不可逆先行」型 P1×16 への共通の答え。個別の穴塞ぎではなく、副作用のある実行すべてが従う世界側の物理法則を一つ増やす。
 **前提**: [`audit_second_batch_hardening.md`](audit_second_batch_hardening.md)（第二陣の不変条件「外部mutatorを推測で再実行しない」「user utteranceのdurabilityはPulseより先」は本基盤の先行例）/ [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md) / [`life.md`](life.md) / 監査記録: [自律行動](../handoff/2026-07-14_autonomy_judgment_schedule_audit.md) / [SEA runtime](../handoff/2026-07-15_sea_runtime_session_head_tail_audit.md) / [記憶・人格境界](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Persona/City/Building](../handoff/2026-07-15_persona_city_building_separation_audit.md)
 
