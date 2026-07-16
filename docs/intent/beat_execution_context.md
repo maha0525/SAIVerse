@@ -51,6 +51,7 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 - **head snapshot**: 物理キーを `(persona_id, model_key)` にする（in-memory / DB とも）。既存行は記録済みの `MODEL_KEY` 列を新キーへ migration。
 - **head のキーに line は含めない**（まはー裁定 2026-07-16）: line で head を分けると prefix cache の共用という head の存在意義が死ぬ。サブラインも同じ model なら同じ head を共有する。`session.md` の「設計上は line×model」記述はこの裁定に合わせて改訂する。line 隔離で生じる情報格差は §3.3 の内容型通知が埋める。
 - **anchor / TTL / token threshold**: `(persona_id, model_key)` の行へ正規化し、model 単位 upsert にする（S8 の JSON 全体 read-modify-write を廃止）。Beat 直列化により並列競合自体も消えるが、構造として行単位を正とする。
+  - **実装帰結（§6-3 設計 2026-07-17）**: (a) migration は PK 書き換え型の全書換ではなく**新テーブル + 冪等 backfill + 旧読み口の廃止**（note→theme 移行の先例。全書換は Windows のファイルハンドル risk があり、追加系パスで表現できる）。(b) 記帳先 model の正は **usage.model（実際に応答した model、`UsageInfo.model`）** — ExecutionContext.model_key は「宣言」であり、structured-output fallback 等で実行 model が変わった場合も usage が真実を運ぶ（§2.1 の「実 model 側の Session に記帳」の実装形）。
 - **TTL/keep-alive watchdog の予約キー**にも model を含め、Session ごとに独立監視する。
 - **diff 通知の既読状態（last_notified）**も `(persona_id, model_key)` で分離する — 各 Session が「自分がまだ知らない変化」を独立に受け取るため。
 
