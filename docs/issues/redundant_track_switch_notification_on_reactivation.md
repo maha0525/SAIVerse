@@ -1,6 +1,6 @@
 # Issue: 同一 Track への復帰で「Track 切替通知」が毎回注入される
 
-**ステータス**: 🟣 実装済・実機検証待ち (2026-07-13、コミット 6257b6a — life.md §7 案 Y Phase 1。wait_response タイムアウトから pause を撤去し、同一 Track 再 activate という事象ごと消滅。回帰テストで根治＋本物切替の通知維持を固定)
+**ステータス**: 🟣 追補修正済・実機検証待ち (2026-07-16 — life.md §7 案 Y Phase 1 の実機追跡で、既存 running Track の直接応答経路が一回限りの wait_response タイマーを再装填していない回帰を確認・修正。二度目の会話 Episode が timeout で閉じる回帰テストを追加)
 **優先度**: medium（表面化しており早め対応をまはー希望）
 **作成日**: 2026-07-08
 **上位**: この症状の根は「Track が進行状態管理から目的の指し示しに変質したのに、時間経過での自動 pause が古い意味論を引きずっている」こと。設計の親は [autonomous_v2_post_live_gaps.md](autonomous_v2_post_live_gaps.md) の**束C（Track の意味論の再整理）** → 解決設計は **[life.md](../intent/life.md) §7（案 Y）**: wait_response タイムアウトから pause を抜き「いま」の読み出しを開いているエピソードへ一本化することで、同一 Track 再 activate という事象ごと消滅させる（通知の出し分け修正は不要になる）。
@@ -14,6 +14,24 @@ sophie_city_a の SAIMemory に、**同じ対ユーザー会話 Track (track:2�
 実測 (2026-07-08): 該当 Track 宛ての切替通知は全履歴で 7 件。すべて「30 分以上空けて会話に戻ったタイミング」と 1 対 1 で一致。タイトループではなく、**会話を再開するたびに 1 件ずつ積もる**構造。
 
 ## 原因
+
+### 2026-07-16 実機追跡で判明した追補回帰
+
+life.md §7 案 Y Phase 1 (コミット `6257b6a`) で wait_response タイムアウトから
+Track の pause を撤去した結果、同一 Track の再 activate と通知重複は設計どおり
+消滅した。一方、タイムアウト予約は一度発火すると消費される一回限りの予約であり、
+タイムアウト後も Track が running のままなので、次のユーザー発話は activate を
+通らず `on_user_utterance` の直接応答経路へ入る。この経路は新しい conversation
+Episode を開いていたが、タイムアウトを再装填していなかった。
+
+air_city_a では 2026-07-15 13:36 開始の Episode 39 が閉じないまま残り、
+2026-07-16 の日計画は「会話中」と判定され続けた。その結果、00:30 以外の全コマが
+3 回延期後に `deferral_limit` でスキップされた。
+
+修正は、既存 running Track の同期メインライン応答完了後に
+`ensure_wait_response_timeout(persona_id)` を呼び、一回限りの予約を毎回再装填する。
+応答本体が失敗した場合でも開いた Episode を放置しないよう `finally` で実行し、
+再装填自体の失敗は二重応答を避けるためログへ記録して吸収する。
 
 ### 発火点
 

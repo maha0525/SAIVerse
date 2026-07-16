@@ -520,7 +520,27 @@ class UserConversationTrackHandler:
                 track.track_id,
             )
             self._open_conversation_episode(persona_id, track)
-            invoke_main_line(track.track_id)
+            try:
+                invoke_main_line(track.track_id)
+            finally:
+                # wait_response timeout は一度発火すると消費される一回限りの予約。
+                # life.md §7 案 Y では発火後も Track は running のままなので、
+                # 二度目以降の会話は activate を通らず、ここで明示的に張り直さない
+                # 限り新しく開いた conversation Episode が永久に閉じなくなる。
+                # 同期応答後に呼ぶことで、provider が参照する最終メッセージ時刻を
+                # 今回の応答まで進めた上でタイムアウトを再装填する。
+                try:
+                    self.track_manager.ensure_wait_response_timeout(persona_id)
+                except Exception:
+                    # タイマー再装填の失敗だけを理由に dispatcher 側で応答を再試行
+                    # すると二重発話になり得る。応答本体の例外は外へ保ったまま、
+                    # housekeeping の失敗はログへ残して吸収する。
+                    logging.exception(
+                        "[user-conv-handler] Failed to re-arm wait_response timeout "
+                        "after direct response: track=%s persona=%s",
+                        track.track_id,
+                        persona_id,
+                    )
         else:
             # running 以外 (pending / alert / unstarted)。別の running Track と
             # 衝突しているかで経路を分ける (2026-07-07 改訂、pulse_dispatch.md §4.2):

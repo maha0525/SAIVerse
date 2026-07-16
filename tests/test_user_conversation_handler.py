@@ -15,6 +15,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import AI, Base, City, User
+from saiverse import episodes
+from saiverse.event_scheduler import EventScheduler
 from saiverse.track_handlers import UserConversationTrackHandler
 from saiverse.track_manager import (
     STATUS_ALERT,
@@ -267,6 +269,77 @@ def test_reactivation_after_wait_response_timeout_no_longer_injects_notice(
     assert tm.get(track.track_id).status == STATUS_RUNNING
     history_manager.add_to_persona_only.assert_not_called()
     mgr.run_sea_user.assert_not_called()
+
+
+def test_second_conversation_rearms_timeout_and_closes_new_episode(
+    session_factory, persona, manager_stub
+):
+    """一度 timeout を消費した running Track でも、次の会話を再び閉じられる。
+
+    life.md §7 案 Y では timeout 後も Track は running のまま残る。そのため
+    二度目の発話は activate を通らず、直接応答経路自身が一回限りの timeout を
+    再装填しなければ、新しい conversation Episode が永久に open のままになる。
+    """
+    scheduler = EventScheduler()
+    mgr, _history_manager = manager_stub
+    # MagicMock の動的属性では Episode キャッシュとして振る舞わないため、
+    # 本番 manager と同じ実 dict を明示する。
+    mgr._open_episode_cache = {}
+
+    tm_with_scheduler = TrackManager(
+        session_factory=session_factory,
+        event_scheduler=scheduler,
+        wait_response_timeout_provider=lambda _track: (30, None),
+        wait_response_timeout_callback=(
+            lambda pid, _tid: episodes.close_conversation_episode(mgr, pid)
+        ),
+    )
+    handler_with_scheduler = UserConversationTrackHandler(
+        track_manager=tm_with_scheduler,
+        manager=mgr,
+    )
+    tm_with_scheduler.add_track_activated_observer(
+        handler_with_scheduler.on_track_activated
+    )
+
+    track, was_new = handler_with_scheduler.get_or_create_track(persona, "1")
+    assert was_new is True
+    first_episode = episodes.get_open_episode(
+        mgr, persona, kind=episodes.KIND_CONVERSATION
+    )
+    assert first_episode is not None
+
+    timeout_key = f"wait_response_timeout:{track.track_id}"
+    assert scheduler.has_key(timeout_key)
+    first_fire_at = scheduler.next_fire_time()
+    assert first_fire_at is not None
+    assert scheduler.run_due(first_fire_at) == 1
+    assert episodes.get_open_episode(
+        mgr, persona, kind=episodes.KIND_CONVERSATION
+    ) is None
+    assert not scheduler.has_key(timeout_key)
+
+    invoked = []
+    handler_with_scheduler.on_user_utterance(
+        persona_id=persona,
+        user_id="1",
+        event={"role": "user", "content": "もう一度話そう"},
+        invoke_main_line=lambda *_a, **_kw: invoked.append(True),
+    )
+    assert invoked == [True]
+    second_episode = episodes.get_open_episode(
+        mgr, persona, kind=episodes.KIND_CONVERSATION
+    )
+    assert second_episode is not None
+    assert second_episode["episode_id"] != first_episode["episode_id"]
+    assert scheduler.has_key(timeout_key)
+
+    second_fire_at = scheduler.next_fire_time()
+    assert second_fire_at is not None
+    assert scheduler.run_due(second_fire_at) == 1
+    assert episodes.get_open_episode(
+        mgr, persona, kind=episodes.KIND_CONVERSATION
+    ) is None
 
 
 def test_reactivation_after_real_track_switch_still_activates_and_notifies(
