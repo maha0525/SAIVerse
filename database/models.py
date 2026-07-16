@@ -1046,3 +1046,80 @@ class Episode(Base):
         Index("idx_episodes_occurrence", "OCCURRENCE_ID"),
     )
 
+
+# ============================================================================
+# 実行台帳 (Execution Ledger) — 不可逆な実行と記録の分裂を防ぐ共通基盤
+# docs/intent/execution_ledger.md (v0.3, Phase 0)
+# ============================================================================
+
+class ExecutionLedgerEntry(Base):
+    """実行台帳: 一回の不可逆な実行 (LLM 実行・世界状態の変更) の identity と状態。
+
+    状態機械 (intent §2.1):
+    ``prepared → running → applied → completed`` / ``failed`` / ``unknown``。
+    遷移の合法性は saiverse/execution_ledger.py のヘルパーが強制する —
+    生 SQL で STATUS を書き換えないこと (intent §5 責任分界表)。
+
+    - ``(KIND, IDEMPOTENCY_KEY)`` の UNIQUE 制約が境界イベントの二重発火を
+      一意に収束させる (§2.1 冪等キー)。IDEMPOTENCY_KEY は NULL 可 —
+      SQLite は UNIQUE 制約で NULL 同士を衝突させないため、一意性不要な
+      実行は素通りする (意図どおり)。
+    - PERSONA_ID に FK は張らない (intent §4 スキーマ案どおり。世界横断の
+      実行は NULL、LLMUsageLog と同じ判断)。
+    - 時刻は epoch 秒 int。刻印は必ず ``saiverse.clock.now()`` 経由
+      (仮想クロック尊重、Episode / PersonaDayPlan と同じ判断で
+      server_default は使わない)。
+    """
+    __tablename__ = "execution_ledger"
+    EXECUTION_ID = Column(String(36), primary_key=True)  # uuid4
+    # 'judgment.day_open' / 'judgment.on_event' / 'slot.fire' / 'metabolism.run' 等
+    KIND = Column(String(255), nullable=False)
+    # kind 内の境界イベント一意キー。NULL 可 (一意性不要な実行)
+    IDEMPOTENCY_KEY = Column(String(255), nullable=True)
+    PERSONA_ID = Column(String(255), nullable=True)  # 対象ペルソナ (世界横断は NULL)
+    # prepared / running / applied / completed / failed / unknown
+    STATUS = Column(String(16), nullable=False)
+    PAYLOAD_JSON = Column(Text, nullable=True)  # 実行の入力文脈 (再開・照合に必要な最小限)
+    RESULT_JSON = Column(Text, nullable=True)   # 実行結果の要約 (精算ラウンド数、生成物 ref 等)
+    ERROR = Column(Text, nullable=True)         # 最後の失敗理由 / unknown 化の理由
+    CREATED_AT = Column(Integer, nullable=False)  # epoch 秒
+    UPDATED_AT = Column(Integer, nullable=False)  # epoch 秒
+    __table_args__ = (
+        UniqueConstraint("KIND", "IDEMPOTENCY_KEY", name="uq_execution_kind_idem"),
+        # 回復処理の走査 (running の期限監視 / unknown・dead の観測) 用
+        Index("idx_execution_ledger_status", "STATUS", "UPDATED_AT"),
+        Index("idx_execution_ledger_persona", "PERSONA_ID", "STATUS"),
+    )
+
+
+class ExecutionOutboxItem(Base):
+    """送信トレイ: world DB と memory.db を跨ぐ書き込みの配達保証 (intent §2.2)。
+
+    「memory.db にこれを書く」というやること自体を、世界側の適用 (applied) と
+    **同一トランザクション**で world DB に書く。配送は persona 単位 FIFO
+    (OUTBOX_ID 昇順) — 先頭が失敗している間、後続は試行しない (記憶の順序
+    一貫性、不変条件 8)。dead (再試行上限超過) は人裁定に回す終端で、
+    黙って捨てない。FIFO 上は「先頭」とみなさず飛ばす (後続をブロックしない)。
+
+    PAYLOAD_JSON は配送内容 (本文・タグ・名義・実行時刻) を**実行時点で凍結**
+    したもの。配送遅延があっても変形しない (不変条件 6)。
+    """
+    __tablename__ = "execution_outbox"
+    OUTBOX_ID = Column(Integer, primary_key=True, autoincrement=True)
+    EXECUTION_ID = Column(String(36), ForeignKey("execution_ledger.EXECUTION_ID"), nullable=False)
+    # 'saimemory.append' / 'perception.push' / 'building.ingest_mark' 等
+    TARGET = Column(String(255), nullable=False)
+    PERSONA_ID = Column(String(255), nullable=True)  # 配送先 persona (FIFO 順序の単位)
+    PAYLOAD_JSON = Column(Text, nullable=False)      # 配送内容 (実行時点で凍結)
+    STATUS = Column(String(16), nullable=False)      # pending / delivered / dead
+    ATTEMPTS = Column(Integer, nullable=False, default=0)
+    LAST_ERROR = Column(Text, nullable=True)
+    CREATED_AT = Column(Integer, nullable=False)     # epoch 秒
+    DELIVERED_AT = Column(Integer, nullable=True)    # epoch 秒
+    __table_args__ = (
+        # persona 単位 FIFO の pending 走査 (関所 flush) 用
+        Index("idx_execution_outbox_persona_status", "PERSONA_ID", "STATUS"),
+        # execution 単位の全配送確認 (applied → completed の証跡) 用
+        Index("idx_execution_outbox_execution", "EXECUTION_ID", "STATUS"),
+    )
+

@@ -1,0 +1,745 @@
+"""実行台帳 (Execution Ledger) — 不可逆な実行と記録の分裂を防ぐ共通基盤 (Phase 0)。
+
+docs/intent/execution_ledger.md の §2 (解の骨格) / §3 (不変条件) の実装。
+台帳 API は本モジュールに閉じ、生 SQL を各所に書かせない (intent §4 設計メモ)。
+
+部品は 2 つ + 原則 1 つ:
+
+1. **実行台帳** (``execution_ledger`` テーブル): 一回の不可逆な実行に
+   execution_id を採番し、状態機械
+   ``prepared → running → applied → completed / failed / unknown``
+   を強制する。``(kind, idempotency_key)`` の UNIQUE 制約で境界イベントの
+   二重発火を一意に収束させる。
+2. **送信トレイ** (``execution_outbox`` テーブル): world DB と memory.db を
+   跨ぐ書き込みの配達保証。「memory.db にこれを書く」というやること自体を、
+   世界側の適用と同一トランザクションで world DB に書く (:meth:`mark_applied`)。
+   配送は persona 単位 FIFO。関所 (:meth:`flush_pending_for_persona`) が
+   fail-closed で「pending が残ったまま新しい記憶が書かれる」状態を構造的に
+   排除する (不変条件 8)。
+3. **大原則**: LLM は自動再実行しない (intent §2.5)。本基盤が再試行するのは
+   「結果の記録」(= outbox の配送) だけ。``unknown`` (LLM が動いたか不明) は
+   照合対象として残し、決して自動再実行しない。
+
+設計上の約束:
+
+- **時刻は必ず ``saiverse.clock.now()`` 経由** (epoch 秒 int)。一日シミュレータ
+  の仮想クロックを尊重する (autonomous_behavior_v2.md §12、episodes.py と同じ)。
+- DB access は session_factory (``manager.SessionLocal`` 相当) → try/finally
+  close の既存流儀。ORM オブジェクトは外に出さず dict に直列化して返す。
+- 台帳はシステム側の器であり、ペルソナからは見えない (intent §5)。
+
+プロセス世代照合について (intent §2.4 #4):
+``saiverse/runtime_marker.py`` の process identity (pid + create_time + token)
+は「いま生きている SAIVerse プロセス」の検証には使えるが、台帳 v0.1 スキーマは
+行ごとの実行主プロセス identity を持たないため、「この running 行はどの世代の
+プロセスが開始したか」を行単位で照合することはできない。世代照合は
+**起動時の一括 sweep** (:meth:`recover_stale_running` の ``all_running=True``)
+として表現する — プロセス起動直後なら running 行は定義上すべて前世代のもの
+(呼び出し側が runtime_marker で同一 DB を共有する他 City プロセスの不在を
+確認してから呼ぶ。その配線は Phase 0 のスコープ外で次タスク)。
+
+Phase 0 時点では本モジュールはどこからも呼ばれない (休眠)。EventScheduler への
+回復 tick 配線・Pulse 前関所の結線・実ハンドラ登録は次タスク。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import uuid
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from database.models import ExecutionLedgerEntry, ExecutionOutboxItem
+from saiverse import clock
+
+LOGGER = logging.getLogger(__name__)
+
+# --- 台帳の状態語彙 (intent §2.1) ---
+STATUS_PREPARED = "prepared"
+STATUS_RUNNING = "running"
+STATUS_APPLIED = "applied"
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+STATUS_UNKNOWN = "unknown"
+
+# --- 送信トレイの状態語彙 (intent §4) ---
+OUTBOX_PENDING = "pending"
+OUTBOX_DELIVERED = "delivered"
+OUTBOX_DEAD = "dead"
+
+#: 配送再試行の既定上限。超過で dead (人裁定に回す終端、黙って捨てない)。
+DEFAULT_MAX_ATTEMPTS = 20
+
+#: 合法遷移 (intent §2.1 の状態遷移図)。
+#: - prepared → running (不可逆処理の開始) / failed (期限切れ・破棄)
+#: - running  → applied (世界適用 commit) / unknown (観測途絶) /
+#:              failed (適用前の検証棄却のみ — 適用後の failed は存在しない)
+#: - applied  → completed (outbox 全配送)
+#: - unknown  → applied (外部証跡との照合で復元。LLM 再実行ではない)
+_LEGAL_TRANSITIONS: Dict[str, frozenset] = {
+    STATUS_PREPARED: frozenset({STATUS_RUNNING, STATUS_FAILED}),
+    STATUS_RUNNING: frozenset({STATUS_APPLIED, STATUS_UNKNOWN, STATUS_FAILED}),
+    STATUS_APPLIED: frozenset({STATUS_COMPLETED}),
+    STATUS_UNKNOWN: frozenset({STATUS_APPLIED}),
+    STATUS_COMPLETED: frozenset(),
+    STATUS_FAILED: frozenset(),
+}
+
+
+class ExecutionLedgerError(Exception):
+    """Base error for execution ledger operations."""
+
+
+class ExecutionNotFoundError(ExecutionLedgerError):
+    """Raised when an execution_id does not exist in the ledger."""
+
+
+class IllegalTransitionError(ExecutionLedgerError):
+    """Raised on a state transition not allowed by the state machine."""
+
+
+def _now_epoch() -> int:
+    """現在時刻 (epoch 秒)。仮想クロック尊重のため必ず clock.now() を通す。"""
+    return int(clock.now().timestamp())
+
+
+def _entry_to_dict(entry: ExecutionLedgerEntry) -> Dict[str, Any]:
+    """台帳行を detached な dict に直列化する (ORM オブジェクトを外に出さない)。"""
+    def _load(raw: Optional[str], label: str) -> Any:
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            LOGGER.warning("[ledger] %s is not valid JSON: %r", label, raw)
+            return None
+
+    return {
+        "execution_id": entry.EXECUTION_ID,
+        "kind": entry.KIND,
+        "idempotency_key": entry.IDEMPOTENCY_KEY,
+        "persona_id": entry.PERSONA_ID,
+        "status": entry.STATUS,
+        "payload": _load(entry.PAYLOAD_JSON, "PAYLOAD_JSON"),
+        "result": _load(entry.RESULT_JSON, "RESULT_JSON"),
+        "error": entry.ERROR,
+        "created_at": entry.CREATED_AT,
+        "updated_at": entry.UPDATED_AT,
+    }
+
+
+def _outbox_to_dict(item: ExecutionOutboxItem) -> Dict[str, Any]:
+    """送信トレイ行を detached な dict に直列化する。"""
+    try:
+        payload = json.loads(item.PAYLOAD_JSON) if item.PAYLOAD_JSON else None
+    except (TypeError, ValueError):
+        LOGGER.warning("[ledger] outbox PAYLOAD_JSON is not valid JSON: %r", item.PAYLOAD_JSON)
+        payload = None
+    return {
+        "outbox_id": item.OUTBOX_ID,
+        "execution_id": item.EXECUTION_ID,
+        "target": item.TARGET,
+        "persona_id": item.PERSONA_ID,
+        "payload": payload,
+        "status": item.STATUS,
+        "attempts": item.ATTEMPTS,
+        "last_error": item.LAST_ERROR,
+        "created_at": item.CREATED_AT,
+        "delivered_at": item.DELIVERED_AT,
+    }
+
+
+class ExecutionLedger:
+    """実行台帳 + 送信トレイの操作を一手に引き受けるヘルパー。
+
+    世界に 1 インスタンス (manager 所有を想定。配線は次タスク)。テストは
+    一時 DB の sessionmaker を渡して独立に使える。
+
+    Args:
+        session_factory: SQLAlchemy Session を返す callable
+            (``manager.SessionLocal`` / ``sessionmaker(bind=engine)``)。
+        max_attempts: outbox 配送の再試行上限。超過で dead。
+    """
+
+    def __init__(
+        self,
+        session_factory: Callable[[], Session],
+        *,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        self._session_factory = session_factory
+        self._max_attempts = max_attempts
+        self._handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+        self._handlers_lock = threading.Lock()
+        # persona 単位 FIFO を並行 flush から守る (Phase 0 は単一ロックで十分。
+        # persona 別ロックへの細粒度化は実測で必要になってから)。
+        self._delivery_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # 台帳: 登録と状態遷移
+    # ------------------------------------------------------------------
+
+    def begin_execution(
+        self,
+        kind: str,
+        idempotency_key: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, bool]:
+        """実行を台帳に登録する (status=prepared。副作用はまだ何も無い区間)。
+
+        冪等 INSERT: ``(kind, idempotency_key)`` が既存行と衝突した場合、新規行を
+        作らず既存行の ``(execution_id, False)`` を返す — 既存行の状態は問わない
+        (「既に走った/走っている」の判定は kind ごとの回収規則の仕事、Phase 1)。
+        ``idempotency_key=None`` は一意性不要な実行で、常に新規行を作る。
+
+        Returns:
+            ``(execution_id, created)``。``created=False`` は冪等キー衝突で
+            既存の実行に合流したことを意味する。
+        """
+        if not kind:
+            raise ValueError("kind is required")
+        execution_id = str(uuid.uuid4())
+        now = _now_epoch()
+        db = self._session_factory()
+        try:
+            entry = ExecutionLedgerEntry(
+                EXECUTION_ID=execution_id,
+                KIND=kind,
+                IDEMPOTENCY_KEY=idempotency_key,
+                PERSONA_ID=persona_id,
+                STATUS=STATUS_PREPARED,
+                PAYLOAD_JSON=(
+                    json.dumps(payload, ensure_ascii=False) if payload is not None else None
+                ),
+                CREATED_AT=now,
+                UPDATED_AT=now,
+            )
+            db.add(entry)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                if idempotency_key is None:
+                    # uuid4 PK 衝突は実質あり得ない — 別種の整合性違反を隠さない
+                    raise
+                existing = (
+                    db.query(ExecutionLedgerEntry)
+                    .filter(
+                        ExecutionLedgerEntry.KIND == kind,
+                        ExecutionLedgerEntry.IDEMPOTENCY_KEY == idempotency_key,
+                    )
+                    .first()
+                )
+                if existing is None:
+                    raise
+                LOGGER.info(
+                    "[ledger] begin_execution dedup: kind=%s key=%s -> existing %s (status=%s)",
+                    kind, idempotency_key, existing.EXECUTION_ID, existing.STATUS,
+                )
+                return existing.EXECUTION_ID, False
+            LOGGER.info(
+                "[ledger] prepared %s kind=%s key=%s persona=%s",
+                execution_id, kind, idempotency_key, persona_id,
+            )
+            return execution_id, True
+        finally:
+            db.close()
+
+    def _get_entry(self, db: Session, execution_id: str) -> ExecutionLedgerEntry:
+        entry = (
+            db.query(ExecutionLedgerEntry)
+            .filter(ExecutionLedgerEntry.EXECUTION_ID == execution_id)
+            .first()
+        )
+        if entry is None:
+            raise ExecutionNotFoundError(f"execution not found: {execution_id}")
+        return entry
+
+    def _transition(
+        self,
+        db: Session,
+        execution_id: str,
+        new_status: str,
+        *,
+        error: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionLedgerEntry:
+        """状態遷移の合法性を強制する唯一の口。不正遷移は IllegalTransitionError。"""
+        entry = self._get_entry(db, execution_id)
+        allowed = _LEGAL_TRANSITIONS.get(entry.STATUS, frozenset())
+        if new_status not in allowed:
+            raise IllegalTransitionError(
+                f"illegal transition {entry.STATUS} -> {new_status} "
+                f"(execution={execution_id}, kind={entry.KIND})"
+            )
+        entry.STATUS = new_status
+        entry.UPDATED_AT = _now_epoch()
+        if error is not None:
+            entry.ERROR = error
+        if result is not None:
+            entry.RESULT_JSON = json.dumps(result, ensure_ascii=False)
+        return entry
+
+    def mark_running(self, execution_id: str) -> None:
+        """不可逆処理 (LLM 等) の開始を宣言する (prepared → running)。
+
+        この遷移**後**に不可逆処理を開始すること (不変条件 1)。
+        """
+        db = self._session_factory()
+        try:
+            entry = self._transition(db, execution_id, STATUS_RUNNING)
+            db.commit()
+            LOGGER.info("[ledger] running %s kind=%s", execution_id, entry.KIND)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def mark_applied(
+        self,
+        execution_id: str,
+        *,
+        result: Optional[Dict[str, Any]] = None,
+        outbox_items: Optional[Sequence[Dict[str, Any]]] = None,
+        session: Optional[Session] = None,
+        deliver: bool = True,
+    ) -> None:
+        """世界への適用を宣言し、outbox 積みを**同一トランザクション**で行う。
+
+        running → applied (通常) / unknown → applied (照合復元、intent §2.4 #5)。
+
+        Args:
+            result: RESULT_JSON に刻む実行結果の要約。
+            outbox_items: 配送予約の列。各要素は
+                ``{"target": str, "payload": dict, "persona_id": str | None}``。
+                payload は実行時点の内容をそのまま凍結する (不変条件 6)。
+            session: 呼び出し元が開いている Session。**指定した場合、本メソッドは
+                commit しない** — 世界側の適用 (呼び出し元の書き込み) と台帳更新・
+                outbox 積みが呼び出し元の 1 commit に同梱される (これが「world 側の
+                適用と outbox 積みを同一トランザクションにする口」)。配送は
+                呼び出し元 commit 後に関所 / 回復 tick が行う。
+            deliver: 自前 session (``session=None``) のとき、commit 直後に対象
+                persona の pending を即時配送するか (intent §2.2「適用 commit の
+                直後に即時配送を試みる」)。配送失敗は applied を巻き戻さない
+                (pending に残り、関所・回復 tick が引き継ぐ)。
+        """
+        if session is not None:
+            self._apply_in_session(session, execution_id, result, outbox_items)
+            return
+
+        db = self._session_factory()
+        personas: List[Optional[str]] = []
+        try:
+            personas = self._apply_in_session(db, execution_id, result, outbox_items)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        LOGGER.info(
+            "[ledger] applied %s (outbox=%d)", execution_id,
+            len(outbox_items) if outbox_items else 0,
+        )
+        if deliver:
+            for pid in personas:
+                try:
+                    self.flush_pending_for_persona(pid)
+                except Exception:
+                    # 適用は committed 済み。配送失敗は pending に残るだけで、
+                    # 関所 / 回復 tick が引き継ぐ (intent §2.2)。
+                    LOGGER.error(
+                        "[ledger] immediate delivery failed after apply "
+                        "(execution=%s persona=%s); left pending",
+                        execution_id, pid, exc_info=True,
+                    )
+
+    def _apply_in_session(
+        self,
+        db: Session,
+        execution_id: str,
+        result: Optional[Dict[str, Any]],
+        outbox_items: Optional[Sequence[Dict[str, Any]]],
+    ) -> List[Optional[str]]:
+        """applied 遷移 + outbox INSERT を与えられた session 上で行う (commit しない)。
+
+        Returns:
+            outbox_items に現れた persona_id の列 (重複除去、出現順)。
+        """
+        entry = self._transition(db, execution_id, STATUS_APPLIED, result=result)
+        now = _now_epoch()
+        personas: List[Optional[str]] = []
+        for index, item in enumerate(outbox_items or []):
+            target = item.get("target")
+            if not target:
+                raise ValueError(f"outbox item [{index}] requires 'target'")
+            payload = item.get("payload")
+            if payload is None:
+                raise ValueError(f"outbox item [{index}] requires 'payload'")
+            persona_id = item.get("persona_id")
+            db.add(ExecutionOutboxItem(
+                EXECUTION_ID=execution_id,
+                TARGET=target,
+                PERSONA_ID=persona_id,
+                PAYLOAD_JSON=json.dumps(payload, ensure_ascii=False),
+                STATUS=OUTBOX_PENDING,
+                ATTEMPTS=0,
+                CREATED_AT=now,
+            ))
+            if persona_id not in personas:
+                personas.append(persona_id)
+        LOGGER.debug(
+            "[ledger] apply staged: %s kind=%s outbox=%d (commit is caller's)",
+            execution_id, entry.KIND, len(outbox_items or []),
+        )
+        return personas
+
+    def mark_completed(self, execution_id: str) -> None:
+        """終端遷移 (applied → completed)。
+
+        成功報告は証跡から導出する (不変条件 4): outbox に未配送 (pending / dead)
+        の行が 1 件でも残っていれば completed を許さず例外を投げる。outbox を
+        持たない実行はそのまま閉じられる。
+
+        NOTE: outbox を持つ実行は、配送器が全配送を確認した時点で自動的に
+        completed へ遷移させる (:meth:`flush_pending_for_persona`) ため、
+        通常は本メソッドを明示的に呼ぶ必要はない。
+        """
+        db = self._session_factory()
+        try:
+            undelivered = (
+                db.query(ExecutionOutboxItem)
+                .filter(
+                    ExecutionOutboxItem.EXECUTION_ID == execution_id,
+                    ExecutionOutboxItem.STATUS != OUTBOX_DELIVERED,
+                )
+                .count()
+            )
+            if undelivered:
+                raise ExecutionLedgerError(
+                    f"cannot complete {execution_id}: "
+                    f"{undelivered} undelivered outbox item(s) remain"
+                )
+            entry = self._transition(db, execution_id, STATUS_COMPLETED)
+            db.commit()
+            LOGGER.info("[ledger] completed %s kind=%s", execution_id, entry.KIND)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def mark_failed(self, execution_id: str, error: str) -> None:
+        """明示失敗 (prepared → failed = 副作用ゼロ / running → failed = 適用前の検証棄却)。
+
+        failed は「安全に再試行・破棄できる」状態 (intent §2.1)。running からの
+        failed は**世界適用前の検証棄却のみ**に使うこと — 適用後に失敗を宣言する
+        経路は存在しない (適用済みなら applied、結果不明なら unknown)。
+        """
+        db = self._session_factory()
+        try:
+            entry = self._transition(db, execution_id, STATUS_FAILED, error=error)
+            db.commit()
+            LOGGER.info(
+                "[ledger] failed %s kind=%s error=%s", execution_id, entry.KIND, error,
+            )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def mark_unknown(self, execution_id: str, reason: Optional[str] = None) -> None:
+        """結果不明 (running → unknown)。**自動再実行禁止**の最重要状態 (intent §2.5)。
+
+        回復処理は外部証跡との照合だけを行い、裁定できれば
+        :meth:`mark_applied` (unknown → applied) で復元する。
+        """
+        db = self._session_factory()
+        try:
+            entry = self._transition(
+                db, execution_id, STATUS_UNKNOWN,
+                error=reason or "observation lost while running",
+            )
+            db.commit()
+            LOGGER.warning(
+                "[ledger] unknown %s kind=%s reason=%s",
+                execution_id, entry.KIND, reason,
+            )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
+    # 送信トレイ: 配送器と関所
+    # ------------------------------------------------------------------
+
+    def register_outbox_handler(
+        self, target: str, fn: Callable[[Dict[str, Any]], Any]
+    ) -> None:
+        """TARGET 名 → 配送 handler を登録する。
+
+        handler は配送 1 件ぶんの dict
+        ``{outbox_id, execution_id, target, persona_id, payload, created_at}``
+        を受け取り、失敗は例外で表明する (戻り値は見ない)。配送先の書き込みは
+        execution_id を冪等キーとして刻むこと (再配送しても二重にならない —
+        不変条件 3。強制は配送先の実装の責務)。
+        """
+        if not target:
+            raise ValueError("target is required")
+        if not callable(fn):
+            raise ValueError("handler must be callable")
+        with self._handlers_lock:
+            if target in self._handlers:
+                LOGGER.warning("[ledger] outbox handler for %r is being replaced", target)
+            self._handlers[target] = fn
+
+    def flush_pending_for_persona(self, persona_id: Optional[str]) -> bool:
+        """関所 (intent §2.2): 対象 persona の pending を FIFO で全量配送試行する。
+
+        - 配送は OUTBOX_ID 昇順 (= 実行時刻順)。先頭が失敗したら後続は試行しない
+          (記憶の順序一貫性、不変条件 8)。別 persona のキューは独立。
+        - 失敗が再試行上限に達した行は dead に落ちる。dead は「先頭」とみなさず
+          飛ばす (後続をブロックしない) — 人裁定待ちとして :meth:`list_dead` に残る。
+        - 全配送済みになった execution (status=applied) は completed へ自動遷移
+          (「completed の根拠は outbox の全 delivered」不変条件 4)。
+
+        Returns:
+            True — その persona の pending が残っていない (実行を開始してよい)。
+            False — 1 件でも pending が残った (fail-closed: 実行を開始しない)。
+        """
+        with self._delivery_lock:
+            return self._flush_queue(persona_id)
+
+    def _flush_queue(self, persona_id: Optional[str]) -> bool:
+        db = self._session_factory()
+        try:
+            persona_filter = (
+                ExecutionOutboxItem.PERSONA_ID.is_(None)
+                if persona_id is None
+                else ExecutionOutboxItem.PERSONA_ID == persona_id
+            )
+            rows = (
+                db.query(ExecutionOutboxItem)
+                .filter(persona_filter, ExecutionOutboxItem.STATUS == OUTBOX_PENDING)
+                .order_by(ExecutionOutboxItem.OUTBOX_ID.asc())
+                .all()
+            )
+            delivered_executions: List[str] = []
+            for row in rows:
+                if self._deliver_one(db, row):
+                    delivered_executions.append(row.EXECUTION_ID)
+                    continue
+                if row.STATUS == OUTBOX_DEAD:
+                    # dead は先頭とみなさず飛ばす (後続をブロックしない)
+                    continue
+                # pending のままの失敗 = FIFO 先頭ブロック。後続は試行しない
+                break
+            for execution_id in dict.fromkeys(delivered_executions):
+                self._maybe_complete(db, execution_id)
+            remaining = (
+                db.query(ExecutionOutboxItem)
+                .filter(persona_filter, ExecutionOutboxItem.STATUS == OUTBOX_PENDING)
+                .count()
+            )
+            if remaining:
+                LOGGER.warning(
+                    "[ledger] flush persona=%s: %d pending item(s) remain (gate closed)",
+                    persona_id, remaining,
+                )
+            return remaining == 0
+        finally:
+            db.close()
+
+    def _deliver_one(self, db: Session, row: ExecutionOutboxItem) -> bool:
+        """outbox 1 行の配送を試みる。成功で delivered、失敗で ATTEMPTS++/dead。
+
+        handler 未登録は「環境不備」であって配送の実試行ではないため、
+        ATTEMPTS は増やさない (dead に数えない) — ただし FIFO はブロックする
+        (fail-closed。起動順の隙間で正当な記録が dead に焼かれるのを防ぐ)。
+        """
+        with self._handlers_lock:
+            handler = self._handlers.get(row.TARGET)
+        if handler is None:
+            row.LAST_ERROR = f"no handler registered for target '{row.TARGET}'"
+            db.commit()
+            LOGGER.warning(
+                "[ledger] no outbox handler for target=%s (outbox_id=%s execution=%s); "
+                "delivery blocked (attempts not counted)",
+                row.TARGET, row.OUTBOX_ID, row.EXECUTION_ID,
+            )
+            return False
+        try:
+            payload = json.loads(row.PAYLOAD_JSON)
+            handler({
+                "outbox_id": row.OUTBOX_ID,
+                "execution_id": row.EXECUTION_ID,
+                "target": row.TARGET,
+                "persona_id": row.PERSONA_ID,
+                "payload": payload,
+                "created_at": row.CREATED_AT,
+            })
+        except Exception as exc:
+            row.ATTEMPTS = (row.ATTEMPTS or 0) + 1
+            row.LAST_ERROR = str(exc) or type(exc).__name__
+            if row.ATTEMPTS >= self._max_attempts:
+                row.STATUS = OUTBOX_DEAD
+                LOGGER.error(
+                    "[ledger] outbox item dead after %d attempts: outbox_id=%s "
+                    "target=%s execution=%s persona=%s",
+                    row.ATTEMPTS, row.OUTBOX_ID, row.TARGET,
+                    row.EXECUTION_ID, row.PERSONA_ID, exc_info=True,
+                )
+            else:
+                LOGGER.warning(
+                    "[ledger] outbox delivery failed (attempt %d/%d): outbox_id=%s "
+                    "target=%s execution=%s: %s",
+                    row.ATTEMPTS, self._max_attempts, row.OUTBOX_ID,
+                    row.TARGET, row.EXECUTION_ID, exc,
+                )
+            db.commit()
+            return False
+        row.STATUS = OUTBOX_DELIVERED
+        row.DELIVERED_AT = _now_epoch()
+        db.commit()
+        LOGGER.info(
+            "[ledger] delivered outbox_id=%s target=%s execution=%s persona=%s",
+            row.OUTBOX_ID, row.TARGET, row.EXECUTION_ID, row.PERSONA_ID,
+        )
+        return True
+
+    def _maybe_complete(self, db: Session, execution_id: str) -> None:
+        """applied な実行の outbox が全 delivered なら completed へ自動遷移する。
+
+        dead が 1 件でも残る実行は completed にしない (配送されなかった記録が
+        ある以上「outbox まで全配送済み」ではない) — applied のまま観測面に残る。
+        """
+        entry = (
+            db.query(ExecutionLedgerEntry)
+            .filter(ExecutionLedgerEntry.EXECUTION_ID == execution_id)
+            .first()
+        )
+        if entry is None or entry.STATUS != STATUS_APPLIED:
+            return
+        undelivered = (
+            db.query(ExecutionOutboxItem)
+            .filter(
+                ExecutionOutboxItem.EXECUTION_ID == execution_id,
+                ExecutionOutboxItem.STATUS != OUTBOX_DELIVERED,
+            )
+            .count()
+        )
+        if undelivered:
+            return
+        entry.STATUS = STATUS_COMPLETED
+        entry.UPDATED_AT = _now_epoch()
+        db.commit()
+        LOGGER.info("[ledger] completed %s kind=%s (all outbox delivered)", execution_id, entry.KIND)
+
+    # ------------------------------------------------------------------
+    # 回復骨格 (intent §2.4)
+    # ------------------------------------------------------------------
+
+    def recover_stale_running(
+        self,
+        *,
+        max_age_seconds: Optional[float] = None,
+        all_running: bool = False,
+    ) -> List[str]:
+        """観測が途絶えた running を unknown へ落とす (自動再実行はしない)。
+
+        Args:
+            max_age_seconds: UPDATED_AT がこの秒数より古い running を unknown 化
+                (回復 tick の期限監視、intent §2.4 #3)。
+            all_running: True なら running 全件を unknown 化 (起動時の世代 sweep、
+                intent §2.4 #4)。台帳 v0.1 スキーマは行ごとのプロセス identity を
+                持たないため、世代照合は「プロセス起動直後の running は定義上すべて
+                前世代」という一括 sweep で表現する。同一 DB を共有する他 City
+                プロセスの不在確認 (saiverse/runtime_marker.py) は呼び出し側の責務。
+
+        Returns:
+            unknown 化した execution_id のリスト。
+        """
+        if max_age_seconds is None and not all_running:
+            raise ValueError("specify max_age_seconds and/or all_running")
+        now = _now_epoch()
+        db = self._session_factory()
+        try:
+            query = db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.STATUS == STATUS_RUNNING
+            )
+            if not all_running:
+                cutoff = now - int(max_age_seconds)
+                query = query.filter(ExecutionLedgerEntry.UPDATED_AT <= cutoff)
+            rows = query.all()
+            recovered: List[str] = []
+            for entry in rows:
+                entry.STATUS = STATUS_UNKNOWN
+                entry.UPDATED_AT = now
+                entry.ERROR = (
+                    "recovered: running at process startup (previous generation)"
+                    if all_running
+                    else f"recovered: running exceeded {int(max_age_seconds)}s deadline"
+                )
+                recovered.append(entry.EXECUTION_ID)
+            if recovered:
+                db.commit()
+                LOGGER.warning(
+                    "[ledger] recovered %d stale running execution(s) to unknown: %s",
+                    len(recovered), recovered,
+                )
+            return recovered
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
+    # 観測面
+    # ------------------------------------------------------------------
+
+    def get_execution(self, execution_id: str) -> Dict[str, Any]:
+        """台帳 1 行を dict で返す (観測・テスト用)。無ければ ExecutionNotFoundError。"""
+        db = self._session_factory()
+        try:
+            return _entry_to_dict(self._get_entry(db, execution_id))
+        finally:
+            db.close()
+
+    def list_unknown(self) -> List[Dict[str, Any]]:
+        """unknown の実行一覧 (照合・裁定の観測面。intent §2.4 #5)。UPDATED_AT 昇順。"""
+        db = self._session_factory()
+        try:
+            rows = (
+                db.query(ExecutionLedgerEntry)
+                .filter(ExecutionLedgerEntry.STATUS == STATUS_UNKNOWN)
+                .order_by(ExecutionLedgerEntry.UPDATED_AT.asc())
+                .all()
+            )
+            return [_entry_to_dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def list_dead(self) -> List[Dict[str, Any]]:
+        """dead の outbox 一覧 (人裁定待ちの観測面。intent §2.4 #6)。OUTBOX_ID 昇順。"""
+        db = self._session_factory()
+        try:
+            rows = (
+                db.query(ExecutionOutboxItem)
+                .filter(ExecutionOutboxItem.STATUS == OUTBOX_DEAD)
+                .order_by(ExecutionOutboxItem.OUTBOX_ID.asc())
+                .all()
+            )
+            return [_outbox_to_dict(r) for r in rows]
+        finally:
+            db.close()

@@ -984,6 +984,36 @@ def _assign_initial_slot_numbers(engine) -> None:
         raise
 
 
+def _ensure_execution_ledger_tables(engine) -> None:
+    """実行台帳 2 テーブル (execution_ledger / execution_outbox) を軽量パスで揃える。
+
+    docs/intent/execution_ledger.md Phase 0。新規テーブルは needs_migration →
+    try_additive_migration の汎用パス (missing_tables → CREATE TABLE) でも作られる
+    が、Building Memory (ensure_building_memory_tables) と同様に「テーブル追加は
+    素早く確実に適用したい」ため、CREATE TABLE IF NOT EXISTS 相当の冪等な
+    軽量シンク経路を別途持つ (schema_sync.ensure_table_columns_indexes に委譲:
+    未作成なら CREATE / 列不足なら ALTER / インデックス不足なら CREATE INDEX)。
+    """
+    try:
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import ExecutionLedgerEntry, ExecutionOutboxItem
+        # FK (execution_outbox → execution_ledger) があるため ledger を先に作る
+        ensure_table_columns_indexes(engine, ExecutionLedgerEntry.__table__)
+        ensure_table_columns_indexes(engine, ExecutionOutboxItem.__table__)
+    except Exception as e:
+        logging.error("実行台帳テーブルの作成に失敗しました: %s", e, exc_info=True)
+        raise
+
+
+def ensure_execution_ledger_tables(db_path: str) -> None:
+    """実行台帳テーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_execution_ledger_tables(engine)
+    finally:
+        engine.dispose()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")
     parser.add_argument(
