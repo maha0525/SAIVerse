@@ -13,6 +13,8 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_clients.exceptions import LLMError
+from sea.beat_gate import BeatGateClosedError
+from sea.cancellation import ExecutionCancelledException
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
@@ -1248,6 +1250,15 @@ async def _run_spell_loop(
     merged_parts: List[str] = []
     _spell_origin_id: Optional[str] = None
 
+    # Beat 境界の材料 (beat_execution_context.md §2.2/§3.4)。取得 (hold) は
+    # 呼び出し元 (run_meta_user / run_work_session 等) で済んでいる前提で、
+    # このループは「周の切れ目でロックを手放して別 Beat を挟ませる + cancel
+    # 評価」だけを担う。gate が無い環境 (テスト) では boundary は skip され、
+    # 周間の cancel チェックだけが効く。
+    _beat_gate = getattr(getattr(runtime, "manager", None), "beat_gate", None)
+    _beat_persona_id = getattr(persona, "persona_id", None)
+    _beat_cancel_token = state.get("_cancellation_token")
+
     # メタ判断 Pulse のとき、判断 LLM の独白 + 発動 spell + 結果を
     # PulseContext.meta_judgment_buffer に蓄積する (Phase 2 / handoff Part 2)。
     # Pulse 完了時に MetaLayer がここから meta_judgment_log を書く。
@@ -1265,6 +1276,17 @@ async def _run_spell_loop(
     # system hit an internal error is too aggressive.
     try:
         while loop_count < _effective_max_rounds:
+            # 周間の cancel 評価点 (beat_execution_context.md §3.4): 実行中の
+            # Beat は完了を待ち、cancel は Beat 境界で効かせる。非ストリーミング
+            # 経路には従来この評価点が無く、cancel された Pulse がラウンドを
+            # 走り切っていた。ExecutionCancelledException は下の包括 except で
+            # 握り潰さず re-raise される (caller = PulseController が中断記録を書く)。
+            if _beat_cancel_token is not None and _beat_cancel_token.is_cancelled():
+                raise ExecutionCancelledException(
+                    message="Execution interrupted between spell rounds",
+                    interrupted_by=_beat_cancel_token.interrupted_by,
+                )
+
             # Parse all spells from current text (canonical + fuzzy), then split
             # into registered (executable) and unknown (misfired) invocations.
             # Canonical-form lines whose args failed to parse (even after the
@@ -1559,6 +1581,17 @@ async def _run_spell_loop(
             if text_after:
                 merged_parts.append(text_after)
 
+            # ---- Beat 境界 (beat_execution_context.md §2.2 / §3.4) ----
+            # ここが Beat の切れ目: この周の生成と spell 結果の記録 (上の
+            # _store_memory) が完了し、次の生成 (= 次の Beat のコンテキスト
+            # 読み) はまだ始まっていない。ロックを一度手放して待機中の別 Beat
+            # (META 判断 / user 会話) を挟ませ、cancel を評価し、再取得時に
+            # 関所 (pending flush) を通す。boundary が投げる
+            # ExecutionCancelledException / BeatGateClosedError はそのまま伝播
+            # する (Pulse は中断、記録済み分は正)。
+            if _beat_gate is not None and _beat_persona_id:
+                _beat_gate.boundary(_beat_persona_id, _beat_cancel_token)
+
             # Re-invoke LLM once for the entire round.
             # Pipeline Streaming で呼ばれた時 (= pipeline_streaming_state が
             # 非 None) は generate_stream + helper 経由で chunk を流しながら
@@ -1689,6 +1722,11 @@ async def _run_spell_loop(
         if final_continuation:
             merged_parts.append(final_continuation)
         return "\n".join(merged_parts), final_continuation, loop_count
+    except (ExecutionCancelledException, BeatGateClosedError):
+        # Beat 境界の中断 / 関所 fail-closed は「spell 系の内部エラー」ではなく
+        # 実行制御の正規イベント。partial 保存へ降格せずそのまま伝播する
+        # (caller = PulseController / run_meta_user が型別に処理する)。
+        raise
     except Exception as exc:
         # Any unhandled error in the spell pipeline: log with traceback,
         # inject a system-visible error note for the next LLM turn, and

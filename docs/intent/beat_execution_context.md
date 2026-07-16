@@ -1,6 +1,6 @@
 # Intent: Beat と ExecutionContext — SEA 実行基盤の一本化
 
-**ステータス**: 実装中 (v0.2, 2026-07-16) — §6-1 ExecutionContext 導入 (挙動不変) 実装済み・全体スイート2474 passed。§6-2 (Beatロック+関所+main/META解体) が次段。まはーレビュー 1 巡で全論点解決済み（知覚バッファ経由・常時通知・割り込みは Beat 境界待ち・Metabolism 閾値はモデル依存・未整理 section も包含）
+**ステータス**: 実装中 (v0.2, 2026-07-17) — §6-1 ExecutionContext 導入 (挙動不変) 実装済み (77e81e6)。**§6-2 Beatロック+関所+main/META解体も実装済み (2026-07-17)**: `sea/beat_gate.py` (persona 単位 RLock + 最外周のみ関所 flush + Beat 境界の解放/再取得) + 取得点4系統 (run_meta_user / work_session / metabolism / gold_panning セッションクローズ) + spell ループの周境界結線 + PulseController 並列レーン意味論の解体。スレッドモデルの実測帰結は §3.4 末尾を参照。次段: §6-3 (persona, model) フルキー化 + migration。まはーレビュー 1 巡で全論点解決済み（知覚バッファ経由・常時通知・割り込みは Beat 境界待ち・Metabolism 閾値はモデル依存・未整理 section も包含）
 **位置付け**: [`execution_ledger.md`](execution_ledger.md)（柱1）と対を成す SEA 側の工事。同じ場所（SEA runtime の実行単位）に住む 4 つの問題を、一度の掘り返しで解く。
 **前提**: [`session.md`](session.md)（正典: Session 粒度は (persona, model)。**本 intent は同 doc の「head は line×model」記述を改訂する**）/ [`cached_head_architecture.md`](cached_head_architecture.md) / [`dynamic_state_sync.md`](dynamic_state_sync.md)（B = A + Σ(events)。**本 intent は通知を操作ラベル型から内容型へ改める**）/ [`persona_cognition/line_tag_responsibility.md`](persona_cognition/line_tag_responsibility.md) §10 aspect
 **監査対応**: SEA 監査 S1（実行 model 無視の Session/anchor 更新）・S4（Stelis thread 復元漏れ）・S8（anchor 並列 RMW）・S2/M1（Metabolism、実行台帳と共同）/ issue [`head_mutation_notification_gap.md`](../issues/head_mutation_notification_gap.md)
@@ -80,6 +80,7 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 - 作業セッション（WORKER）の連続 Beat は、Beat 境界ごとにロックを解放・再取得する。会話 Beat が間に挟まれることを設計上許可する（「作業中に話しかけたら応答」の土台）。
 - **ユーザー割り込みも Beat 境界で効く**（まはー裁定 2026-07-16）: 実行中の Beat は課金と生成が進んでいる可能性があるため、割り込みで中断せず完了を待つ。cancel 要求は Beat 境界で評価し、次の Beat を開始しない形で効かせる。「実行中の Beat を即時中断して応答させる」明示操作は将来オプションとして残す（本工事では作らない）。
 - **Beat ロックは再入可能（RLock）**（実装調査の帰結 2026-07-16）: spell は `run_playbook` 等で WORKER 子ラインを**同期実行**し、子が親より先に記録を書く既存構造がある。子ラインの生成・記録は親 Beat の実行スタック内で走るため、「親の直列域を継承する」と定義する — 同一実行スタック内の子は別 Beat ではなく親 Beat の一部であり、記憶の一直線性（子の記録も直前の記録を踏まえる）は保たれる。ロック競合の対象は**別の実行スタック**（別 Pulse / META / schedule 発火）だけ。
+- **スレッドモデルの実測帰結（§6-2 実装時 2026-07-17）**: RLock はスレッド束縛なので、Beat 境界（`boundary`）の解放は「取得スレッド＝実行スレッド」のときだけ有効。実測では **主要経路はすべて同一スレッド** — チャットは `backend_worker` 専用スレッド → `asyncio.run` 直呼び → async ノード（`lg_llm_node`）はそのループスレッドで走る（LangGraph の sync ノードは executor に逃げるが、本体ノードは async）。work_session / EventScheduler / alert observer 経路も同様。**例外は「呼び出し元に running loop がある」レガシー分岐**（`runtime_graph.py` の executor 退避）で、そこでは boundary が no-op になり META の待ちが最大 1 Pulse に劣化する（直列性・関所は無傷）。逆に spell ツールの executor スレッドから走る**子ラインの boundary が no-op になるのは正しい保護**（子が親のロックを手放さない）。ロック所有をスレッドでなく実行トークン（ExecutionContext）に付け替える恒久化は §6-6（thread の ExecutionContext 化）と同じ配管なので、そこで扱う。
 - **PulseContext.thread_id は廃止対象**（実装調査の帰結）: 生成時に一度だけ解決され Stelis 切替を反映しない「死んだ値」であることが判明。thread の正は ExecutionContext（Beat 時点の解決値）へ移す。
 
 ## 4. 不変条件

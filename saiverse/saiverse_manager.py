@@ -223,6 +223,13 @@ class SAIVerseManager(
         self.execution_ledger = build_execution_ledger(self)
         logging.info("Initialized ExecutionLedger (handlers registered; recovery starts at start()).")
 
+        # Beat ロック + 関所 (beat_execution_context.md §2.2/§3.4): persona の
+        # 記憶に書く生成処理を persona 単位で直列化し、Beat 開始時に台帳の
+        # pending flush (fail-closed) を通す。構築のみ (スレッド無し)。
+        from sea.beat_gate import BeatGate
+        self.beat_gate = BeatGate(self)
+        logging.info("Initialized BeatGate (per-persona Beat lock + ledger gate).")
+
         # --- Initialize cognitive-model managers (Phase B-5) ---
         # Track / Note の永続化を扱う純粋ロジックレイヤー。
         # Intent A v0.9 / Intent B v0.6 参照。

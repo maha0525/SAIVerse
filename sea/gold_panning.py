@@ -597,6 +597,15 @@ def run_session_close(lifecycle: Any, persona: Any) -> Dict[str, Any]:
     Chronicle 前倒しは採取の成否と独立に実行し、採取はマーカーガードを通過し、かつ
     キャッシュが熱いときだけ走る (不変条件 §5-1: クローズはコールド例外を作らない)。
 
+    Beat ロック (beat_execution_context.md §3.4): この経路は
+    SEARuntime._spawn_session_close の**別スレッド**で走り、persona の記憶
+    (Chronicle / 採取判断の記録) に書くため、最外周をここで
+    beat_gate.hold(purpose="gold_panning") に入れる。Pulse 内 (run_meta_user →
+    Metabolism → run_gold_panning) の実行は呼び出し元の hold の同一スレッド
+    再入で自動カバーされる (このエントリは通らない)。関所 fail-closed は
+    skipped_reason='gate_closed' として静かに見送る (クローズ採取は best-effort。
+    pending の配送は回復 tick が引き継ぐ)。
+
     Returns:
         {"panned": bool, "chronicle": bool, "skipped_reason": str|None}
     """
@@ -617,98 +626,118 @@ def run_session_close(lifecycle: Any, persona: Any) -> Dict[str, Any]:
         return {"panned": False, "chronicle": False, "skipped_reason": "inflight"}
 
     persona._gold_panning_close_inflight = True
+    try:
+        from sea.beat_gate import BeatGateClosedError, hold_beat
+        try:
+            with hold_beat(
+                getattr(lifecycle, "manager", None), persona_id,
+                purpose="gold_panning",
+            ):
+                return _run_session_close_locked(lifecycle, persona, persona_id)
+        except BeatGateClosedError as exc:
+            LOGGER.warning(
+                "[gold_panning] session close skipped: Beat gate closed "
+                "(persona=%s): %s", persona_id, exc,
+            )
+            return {"panned": False, "chronicle": False, "skipped_reason": "gate_closed"}
+    finally:
+        persona._gold_panning_close_inflight = False
+
+
+def _run_session_close_locked(
+    lifecycle: Any, persona: Any, persona_id: Optional[str],
+) -> Dict[str, Any]:
+    """:func:`run_session_close` の本体 (Beat ロック保持下で実行される)。"""
     panned = False
     chronicle_done = False
     skipped_reason: Optional[str] = None
-    try:
-        # window の起点は gold_panning 自身の pan マーカー (前回処理した末尾)。
-        # metabolism anchor は cache TTL 都合で動く点 (失効すると張り直る) なので採取
-        # 範囲の起点には使わない — キャッシュが切れただけで未採取メッセージが範囲外へ
-        # 落ちる (2026-07-08 sophie 実機で判明: anchor が当日リセットされ window が
-        # main_line/committed/現スレッド絞りで 4 件に縮んでいた)。初回 (マーカー無し) は
-        # 「今コンテキストに載っている生履歴の先頭」として metabolism anchor を起点に使う
-        # (この時 anchor は読んでいる範囲の先頭を表す)。
-        # 性質フィルタ (main_line/committed) は付けない: 読んでいる生履歴全体を範囲に取る
-        # (main_line 限定は metabolism のカウント用で、gold_panning の範囲とは別軸)。
-        history_mgr = getattr(persona, "history_manager", None)
-        if not history_mgr:
-            return {"panned": False, "chronicle": False, "skipped_reason": "no_history"}
 
-        pan_marker = _load_pan_marker(persona)
-        window_start = pan_marker or getattr(history_mgr, "metabolism_anchor_message_id", None)
-        if not window_start:
-            LOGGER.info(
-                "[gold_panning] session close: no window start; skipping (persona=%s)", persona_id,
-            )
-            return {"panned": False, "chronicle": False, "skipped_reason": "no_anchor"}
+    # window の起点は gold_panning 自身の pan マーカー (前回処理した末尾)。
+    # metabolism anchor は cache TTL 都合で動く点 (失効すると張り直る) なので採取
+    # 範囲の起点には使わない — キャッシュが切れただけで未採取メッセージが範囲外へ
+    # 落ちる (2026-07-08 sophie 実機で判明: anchor が当日リセットされ window が
+    # main_line/committed/現スレッド絞りで 4 件に縮んでいた)。初回 (マーカー無し) は
+    # 「今コンテキストに載っている生履歴の先頭」として metabolism anchor を起点に使う
+    # (この時 anchor は読んでいる範囲の先頭を表す)。
+    # 性質フィルタ (main_line/committed) は付けない: 読んでいる生履歴全体を範囲に取る
+    # (main_line 限定は metabolism のカウント用で、gold_panning の範囲とは別軸)。
+    history_mgr = getattr(persona, "history_manager", None)
+    if not history_mgr:
+        return {"panned": False, "chronicle": False, "skipped_reason": "no_history"}
 
-        current_messages = history_mgr.get_history_from_anchor(window_start) or []
+    pan_marker = _load_pan_marker(persona)
+    window_start = pan_marker or getattr(history_mgr, "metabolism_anchor_message_id", None)
+    if not window_start:
+        LOGGER.info(
+            "[gold_panning] session close: no window start; skipping (persona=%s)", persona_id,
+        )
+        return {"panned": False, "chronicle": False, "skipped_reason": "no_anchor"}
 
-        # マーカーガード: 新規件数 (マーカー以降。初回は全件) が close_min 未満なら採取
-        # スキップ (Chronicle は実行してよい)。
-        new_count = _count_new_since_marker(current_messages, pan_marker)
-        close_min = get_close_min_messages()
-        pan_allowed = new_count >= close_min
-        if not pan_allowed:
-            skipped_reason = "below_min"
-            LOGGER.info(
-                "[gold_panning] session close: new messages below close_min "
-                "(persona=%s new=%d min=%d); skipping pan", persona_id, new_count, close_min,
-            )
+    current_messages = history_mgr.get_history_from_anchor(window_start) or []
 
-        # Chronicle 前倒し (採取の成否と独立)。run_metabolism と同じゲート。
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        if memory_weave_enabled and lifecycle.is_chronicle_enabled_for_persona(persona):
-            try:
-                # force=True: 確認ダイアログ・pulse_type 判定を回避 (persona._current_pulse_type
-                # は前回 Pulse の残留値で不定。session_lifecycle.generate_chronicle docstring)。
-                lifecycle.generate_chronicle(persona, force=True)
-                chronicle_done = True
-            except Exception:
-                LOGGER.exception(
-                    "[gold_panning] session close: generate_chronicle failed (persona=%s)", persona_id,
-                )
-            try:
-                lifecycle.generate_track_chronicle(persona)
-            except Exception:
-                LOGGER.exception(
-                    "[gold_panning] session close: generate_track_chronicle failed (persona=%s)", persona_id,
-                )
-        # ensure_recall_embeddings はゲート外で必ず実行 (run_metabolism と同じ思想:
-        # ローカル・無料で、Chronicle 生成の成否・トグルに相乗りさせない)。
+    # マーカーガード: 新規件数 (マーカー以降。初回は全件) が close_min 未満なら採取
+    # スキップ (Chronicle は実行してよい)。
+    new_count = _count_new_since_marker(current_messages, pan_marker)
+    close_min = get_close_min_messages()
+    pan_allowed = new_count >= close_min
+    if not pan_allowed:
+        skipped_reason = "below_min"
+        LOGGER.info(
+            "[gold_panning] session close: new messages below close_min "
+            "(persona=%s new=%d min=%d); skipping pan", persona_id, new_count, close_min,
+        )
+
+    # Chronicle 前倒し (採取の成否と独立)。run_metabolism と同じゲート。
+    memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+    if memory_weave_enabled and lifecycle.is_chronicle_enabled_for_persona(persona):
         try:
-            lifecycle.ensure_recall_embeddings(persona)
+            # force=True: 確認ダイアログ・pulse_type 判定を回避 (persona._current_pulse_type
+            # は前回 Pulse の残留値で不定。session_lifecycle.generate_chronicle docstring)。
+            lifecycle.generate_chronicle(persona, force=True)
+            chronicle_done = True
         except Exception:
             LOGGER.exception(
-                "[gold_panning] session close: ensure_recall_embeddings failed (persona=%s)", persona_id,
+                "[gold_panning] session close: generate_chronicle failed (persona=%s)", persona_id,
             )
-
-        # 採取 (マーカーガード通過時のみ、かつ hot のときだけ)。
-        if pan_allowed:
-            building_id = getattr(persona, "current_building_id", None)
-            if not building_id:
-                skipped_reason = "no_building"
-                LOGGER.info(
-                    "[gold_panning] session close: no current_building_id (persona=%s); skipping pan",
-                    persona_id,
-                )
-            elif not lifecycle._is_cache_hot(persona):
-                skipped_reason = "cold"
-                LOGGER.info(
-                    "[gold_panning] session close: cache cold (persona=%s); skipping pan. "
-                    "Chronicle already done, so invariant §5-1 (no cold exception) holds", persona_id,
-                )
-            else:
-                run_gold_panning(
-                    lifecycle, persona, building_id, current_messages,
-                    evict_count=0, event_callback=None,
-                )
-                panned = True
-
-        LOGGER.info(
-            "[gold_panning] session close done: persona=%s panned=%s chronicle=%s skipped_reason=%s",
-            persona_id, panned, chronicle_done, skipped_reason,
+        try:
+            lifecycle.generate_track_chronicle(persona)
+        except Exception:
+            LOGGER.exception(
+                "[gold_panning] session close: generate_track_chronicle failed (persona=%s)", persona_id,
+            )
+    # ensure_recall_embeddings はゲート外で必ず実行 (run_metabolism と同じ思想:
+    # ローカル・無料で、Chronicle 生成の成否・トグルに相乗りさせない)。
+    try:
+        lifecycle.ensure_recall_embeddings(persona)
+    except Exception:
+        LOGGER.exception(
+            "[gold_panning] session close: ensure_recall_embeddings failed (persona=%s)", persona_id,
         )
-        return {"panned": panned, "chronicle": chronicle_done, "skipped_reason": skipped_reason}
-    finally:
-        persona._gold_panning_close_inflight = False
+
+    # 採取 (マーカーガード通過時のみ、かつ hot のときだけ)。
+    if pan_allowed:
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            skipped_reason = "no_building"
+            LOGGER.info(
+                "[gold_panning] session close: no current_building_id (persona=%s); skipping pan",
+                persona_id,
+            )
+        elif not lifecycle._is_cache_hot(persona):
+            skipped_reason = "cold"
+            LOGGER.info(
+                "[gold_panning] session close: cache cold (persona=%s); skipping pan. "
+                "Chronicle already done, so invariant §5-1 (no cold exception) holds", persona_id,
+            )
+        else:
+            run_gold_panning(
+                lifecycle, persona, building_id, current_messages,
+                evict_count=0, event_callback=None,
+            )
+            panned = True
+
+    LOGGER.info(
+        "[gold_panning] session close done: persona=%s panned=%s chronicle=%s skipped_reason=%s",
+        persona_id, panned, chronicle_done, skipped_reason,
+    )
+    return {"panned": panned, "chronicle": chronicle_done, "skipped_reason": skipped_reason}

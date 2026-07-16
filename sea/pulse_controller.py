@@ -14,6 +14,7 @@ from queue import Queue
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
 
 from llm_clients.exceptions import LLMError
+from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 
 if TYPE_CHECKING:
@@ -67,9 +68,13 @@ EXECUTION_TYPES: Dict[str, ExecutionType] = {
         same_priority_policy="first",
         on_blocked="skip",
     ),
-    # pulse_dispatch.md §4.3 / §6: メタ判断は priority 体系外の並列レーン。
-    # 他 Pulse と並列で動き、中断対象にならず、他 Pulse を中断もしない。
-    # 同一ペルソナ内の直列化は MetaLayer の per-persona Lock が担う。
+    # pulse_dispatch.md §4.3 / §6: メタ判断は priority 体系外のレーン。
+    # 中断対象にならず、他 Pulse を中断もしない (この点は不変)。
+    # ただし「並列レーン」の並列性の保証は解体済み (beat_execution_context.md
+    # §2.2): 実際の直列化は run_meta_user 内の Beat ロック (persona 単位) が
+    # 担い、メタ判断は main レーンの Beat 境界に挟まる直列 Beat になった。
+    # 同一ペルソナ内のメタ判断同士の直列化は従来どおり MetaLayer の
+    # per-persona Lock (ロック順序: MetaLayer Lock → Beat ロックの一方向)。
     # priority / same_priority_policy / on_blocked のフィールドはダミー値
     # (submit() が type=meta_judgment を別レーンで処理するため未使用)。
     "meta_judgment": ExecutionType(
@@ -144,10 +149,11 @@ class PulseController:
         self._current: Dict[str, ExecutionRequest] = {}  # persona_id -> running request
         self._queues: Dict[str, List[ExecutionRequest]] = {}  # persona_id -> pending queue
         self._locks: Dict[str, threading.RLock] = {}  # persona_id -> lock
-        # メタ判断レーン (META_JUDGMENT): pulse_dispatch.md §4.3 / §6 の並列レーン。
-        # メインレーンと並列で動き、中断対象外 / 他を中断しない。
-        # 同一ペルソナ内の直列化は MetaLayer の per-persona Lock に委ねる
-        # (PulseController レベルでは並列性を保証するだけ)。
+        # メタ判断レーン (META_JUDGMENT): priority 体系外のレーン (中断対象外 /
+        # 他を中断しない)。旧「並列レーン」の並列性の保証は解体済み
+        # (beat_execution_context.md §2.2): 直列化は run_meta_user 内の Beat
+        # ロックが担い、メタ判断は main の Beat 境界に挟まる直列 Beat になった。
+        # _current_meta は観測用の記帳として残す。
         self._current_meta: Dict[str, ExecutionRequest] = {}
 
         # Interrupt callbacks: called when auto execution is interrupted by user
@@ -189,8 +195,9 @@ class PulseController:
         actual LLM execution. This allows higher priority requests to send
         cancellation signals immediately.
         """
-        # pulse_dispatch.md §4.3 / §6: メタ判断は並列レーンで処理する。
-        # priority 体系をスキップして他 Pulse と独立に走る。
+        # pulse_dispatch.md §4.3 / §6: メタ判断は priority 体系外のレーンで
+        # 処理する (中断しない / されない)。実際の実行タイミングは
+        # run_meta_user 内の Beat ロックが直列化する (main の Beat 境界に挟まる)。
         if request.type == "meta_judgment":
             return self._submit_meta_lane(request)
 
@@ -314,6 +321,19 @@ class PulseController:
         try:
             result = self._do_execute(request)
             return result
+        except BeatGateClosedError as e:
+            # 関所 fail-closed (execution_ledger.md §2.2): この persona 宛の
+            # pending が配送できず、実行は開始されていない (副作用ゼロ)。
+            # user はエラーとして API まで伝播しユーザーに見せる。
+            # auto / schedule 等は WARNING + 空で落とす — 台帳に prepared で
+            # 残る実行は回復処理 (execution_ledger_wiring) が拾う。
+            if request.type == "user":
+                raise
+            LOGGER.warning(
+                "[PulseController] Beat gate closed for persona %s (type=%s): %s",
+                persona_id, request.type, e,
+            )
+            return []
         except ExecutionCancelledException as e:
             LOGGER.info(
                 "[PulseController] Execution cancelled for persona %s, interrupted_by=%s",
@@ -471,11 +491,14 @@ class PulseController:
     # ------------------------------------------------------------------
 
     def _submit_meta_lane(self, request: ExecutionRequest) -> Optional[List[str]]:
-        """メタ判断レーン: priority 体系外の並列実行。
+        """メタ判断レーン: priority 体系外の直列 Beat。
 
-        メインレーンと独立に走り、中断対象外 / 他 Pulse を中断もしない。
-        同一ペルソナの直列化は MetaLayer の per-persona Lock が担う前提で、
-        ここでは並列性 (= メインレーンを止めない) を保証するだけ。
+        中断対象外 / 他 Pulse を中断もしない (不変)。旧「並列レーン」の並列性の
+        保証は解体済み (beat_execution_context.md §2.2): 直列化は run_meta_user
+        内の Beat ロックが担い、メタ判断 Beat は main レーンの Beat 境界に
+        挟まって走る。メタ判断同士の直列化は MetaLayer の per-persona Lock
+        (ロック順序は MetaLayer Lock → Beat ロックの一方向)。_current_meta は
+        観測用の記帳。
         """
         persona_id = request.persona_id
         # 念のため簡易な多重防御 (MetaLayer Lock とは独立)。先行メタ判断が
@@ -490,6 +513,15 @@ class PulseController:
 
         try:
             return self._do_execute(request)
+        except BeatGateClosedError as e:
+            # 関所 fail-closed: 実行は始まっていない (副作用ゼロ)。メタ判断
+            # レーンに user は来ないので常に WARNING + 空 — 台帳に prepared で
+            # 残る実行は回復処理が拾う。
+            LOGGER.warning(
+                "[PulseController] Beat gate closed for persona %s (type=%s): %s",
+                persona_id, request.type, e,
+            )
+            return []
         except ExecutionCancelledException as e:
             LOGGER.info(
                 "[PulseController] Meta-judgment cancelled for persona %s, interrupted_by=%s",
@@ -516,11 +548,12 @@ class PulseController:
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[List[str]]:
-        """メタ判断 Pulse を並列レーンで起動する。
+        """メタ判断 Pulse をメタ判断レーンで起動する。
 
         priority 体系の外側で動くので、メインレーンの Pulse を中断しない。
-        MetaLayer から呼ばれる前提 (pulse_dispatch.md §6.3 案 A: PulseController
-        経由で統一)。
+        実行は run_meta_user 内の Beat ロックで直列化され、main の Beat 境界に
+        挟まる (beat_execution_context.md §2.2)。MetaLayer から呼ばれる前提
+        (pulse_dispatch.md §6.3 案 A: PulseController 経由で統一)。
         """
         request = ExecutionRequest(
             type="meta_judgment",

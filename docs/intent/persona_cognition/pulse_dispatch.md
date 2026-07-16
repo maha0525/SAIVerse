@@ -147,6 +147,16 @@ PulseController.submit_xxx で Pulse 起動 (or 起動しない)
 
 ### 4.3 メタ判断並列レーン (Meta-Judgment Parallel Lane)
 
+> **改訂 (2026-07-17、beat_execution_context.md §2.2)**: 「並列に動く」の部分は
+> **解体済み**。記憶の一直線性 (execution_ledger.md 不変条件 9) のため、persona の
+> 記憶に書く生成処理は persona 単位の Beat ロック (`sea/beat_gate.py`) で直列化され、
+> メタ判断は **main レーンの Beat 境界 (spell ループの周の切れ目) に挟まる直列 Beat**
+> になった。本節の残りの性質は不変: メタ判断は priority 体系外で、他 Pulse を
+> 中断せず・中断されず、緊急時は判断結果が進行中 Pulse を `cancel()` で止める
+> (cancel は Beat 境界で効く)。下の「理由」にある『必ず Track Pulse 完了後に走ると
+> 緊急 alert に間に合わない』への答えは、並列実行から **Beat 境界での挟み込み**
+> (待ちは最大 1 Beat) に置き換えられた。
+
 メタ判断 Pulse 自身は他 Pulse と **並列に動く独立レーン** として位置付ける。
 
 理由:

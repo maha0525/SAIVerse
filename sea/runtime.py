@@ -107,6 +107,50 @@ class SEARuntime:
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
 
+        # Beat ロック + 関所 (beat_execution_context.md §3.4 / execution_ledger.md
+        # §2.2-2.3): Pulse 本体 (playbook 実行 + 応答後 Metabolism まで) を
+        # persona 単位で直列化する。関所 (pending flush) が通らない場合は
+        # hold が BeatGateClosedError を投げ、そのまま呼び出し側
+        # (PulseController) へ伝播する — 実行は始まっておらず副作用ゼロ。
+        # spell → run_playbook の子ライン、Pulse 内の Metabolism / gold_panning
+        # は同一スレッド再入 (RLock) で親 Beat の直列域を継承する。
+        # manager に beat_gate が無い環境 (テストの SimpleNamespace 等) では
+        # hold_beat が nullcontext を返して no-op。
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            self.manager,
+            getattr(persona, "persona_id", None),
+            purpose=pulse_type or "pulse",
+        ):
+            return self._run_meta_user_locked(
+                persona,
+                user_input,
+                building_id,
+                metadata=metadata,
+                meta_playbook=meta_playbook,
+                args=args,
+                event_callback=event_callback,
+                cancellation_token=cancellation_token,
+                pulse_type=pulse_type,
+                pre_spells=pre_spells,
+                origin_track_id=origin_track_id,
+            )
+
+    def _run_meta_user_locked(
+        self,
+        persona,
+        user_input: str,
+        building_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "user",
+        pre_spells: Optional[List[str]] = None,
+        origin_track_id: Optional[str] = None,
+    ) -> List[str]:
+        """:meth:`run_meta_user` の本体 (Beat ロック保持下で実行される)。"""
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
 
@@ -1656,6 +1700,9 @@ class SEARuntime:
 
         - **判断はしない**: playbook もスペルも走らず、応答は破棄される
         - **記憶に残らない**: SAIMemory へは一切書かない (discardable ですらない)
+        - **Beat ロック対象外**: 生成はするが記憶に書かない軽量 Beat のため、
+          beat_gate.hold は取らない (直列化の目的 = 記憶の一直線性に関与しない。
+          beat_execution_context.md §2.2 の工事で意図的に対象外とした)
         - **キャッシュ経済**: 共有 prefix が cache read でヒットし、プロバイダ側の
           TTL ウィンドウが更新される。成功時は ``SessionLifecycle.touch_anchor_after_llm_call``
           が anchor を touch → 次回 keep-alive が再予約される (従来と同じ連鎖)

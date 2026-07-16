@@ -624,7 +624,35 @@ class SessionLifecycle:
         keep_count: int,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
-        """Execute history metabolism: Chronicle generation + anchor update."""
+        """Execute history metabolism: Chronicle generation + anchor update.
+
+        Beat ロック (beat_execution_context.md §3.4): Metabolism は persona の
+        記憶 (Chronicle / gold_panning のコア記憶採取記録) に書くため、入口で
+        beat_gate.hold(purpose="metabolism") を通す。Pulse 内 (run_meta_user
+        経由) の呼び出しは同一スレッドの RLock 再入で無害 (関所も再実行され
+        ない)。API の手動整理 (api/routes/people/config.py → organize-memory)
+        からの呼び出しは独立 Beat として直列化され、関所 fail-closed
+        (BeatGateClosedError) はそのまま API へ伝播する。
+        """
+        from sea.beat_gate import hold_beat
+        with hold_beat(
+            self.manager,
+            getattr(persona, "persona_id", None),
+            purpose="metabolism",
+        ):
+            self._run_metabolism_locked(
+                persona, building_id, current_messages, keep_count, event_callback,
+            )
+
+    def _run_metabolism_locked(
+        self,
+        persona,
+        building_id: str,
+        current_messages: List[Dict[str, Any]],
+        keep_count: int,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。"""
         evict_count = len(current_messages) - keep_count
 
         # 1. Notify start

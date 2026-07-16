@@ -293,109 +293,119 @@ def run_work_session(
             LOGGER.warning("[work_session] failed to dump initial LLM I/O", exc_info=True)
 
         # ---- act→observe ループ (予算付き) ----
+        # Beat ロック (beat_execution_context.md §3.4): セッションの連続 Beat を
+        # persona の直列域に入れる。ループ内の boundary が周ごとにロックを
+        # 手放すため、会話 Beat が間に挟まれる (「作業中に話しかけたら応答」の
+        # 土台)。締めの生ログ保存〜ダイジェスト生成・保存も最後の Beat の
+        # 記録として同じ hold 内で行う (記録はロック下で、の不変条件)。
+        # 関所 fail-closed (BeatGateClosedError) は下の except Exception が
+        # 拾い ended_reason='error' の結果になる (run_work_session は raise
+        # しない契約)。manager に beat_gate が無いテスト環境では no-op。
+        from sea.beat_gate import hold_beat
         from sea.runtime_llm import _parse_spell_lines, _run_spell_loop
 
-        merged_text, continuation, rounds_used = _run_coro_sync(_run_spell_loop(
-            text=text,
-            spell_enabled=spell_enabled,
-            llm_client=llm_client,
-            runtime=runtime,
-            persona=persona,
-            building_id=building_id,
-            state=state,
-            messages=messages,
-            playbook=playbook_ref,
-            event_callback=None,
-            node_def=node_def,
-            action_text=instruction_content,
-            max_rounds=budget_rounds,
-        ))
+        with hold_beat(manager, persona_id, purpose="work_session"):
+            merged_text, continuation, rounds_used = _run_coro_sync(_run_spell_loop(
+                text=text,
+                spell_enabled=spell_enabled,
+                llm_client=llm_client,
+                runtime=runtime,
+                persona=persona,
+                building_id=building_id,
+                state=state,
+                messages=messages,
+                playbook=playbook_ref,
+                event_callback=None,
+                node_def=node_def,
+                action_text=instruction_content,
+                max_rounds=budget_rounds,
+            ))
 
-        # 予算切れ判定: ループが予算上限に達し、かつ最終応答にまだ spell が
-        # 残っている (= 続きをやりたがっていた) とき budget_exhausted。
-        # 予算内で spell の無い応答が来た場合は自然終了 (finished)。
-        budget_exhausted = False
-        if rounds_used >= budget_rounds and continuation:
-            try:
-                budget_exhausted = bool(_parse_spell_lines(continuation, quiet=True))
-            except Exception:
-                LOGGER.warning(
-                    "[work_session] failed to parse final continuation for "
-                    "budget-exhaustion check", exc_info=True,
+            # 予算切れ判定: ループが予算上限に達し、かつ最終応答にまだ spell が
+            # 残っている (= 続きをやりたがっていた) とき budget_exhausted。
+            # 予算内で spell の無い応答が来た場合は自然終了 (finished)。
+            budget_exhausted = False
+            if rounds_used >= budget_rounds and continuation:
+                try:
+                    budget_exhausted = bool(_parse_spell_lines(continuation, quiet=True))
+                except Exception:
+                    LOGGER.warning(
+                        "[work_session] failed to parse final continuation for "
+                        "budget-exhaustion check", exc_info=True,
+                    )
+            ended_reason = ENDED_BUDGET_EXHAUSTED if budget_exhausted else ENDED_FINISHED
+
+            # 締めの発話 (spell を含まない最終 continuation) も生ログの一部として
+            # volatile で保存する (WORKER フレームが active なので scope は
+            # volatile に解決される)。ラウンド途中の発話は _run_spell_loop が
+            # 同様に保存済み。
+            if continuation and continuation.strip():
+                runtime._store_memory(
+                    persona, continuation, role="assistant",
+                    tags=[RAW_LOG_TAG], pulse_id=pulse_id,
+                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                    pulse_context=pulse_ctx,
                 )
-        ended_reason = ENDED_BUDGET_EXHAUSTED if budget_exhausted else ENDED_FINISHED
+                pulse_ctx.append(PulseLogEntry(
+                    role="assistant", content=continuation,
+                    node_id="work_session_final",
+                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                ))
 
-        # 締めの発話 (spell を含まない最終 continuation) も生ログの一部として
-        # volatile で保存する (WORKER フレームが active なので scope は
-        # volatile に解決される)。ラウンド途中の発話は _run_spell_loop が
-        # 同様に保存済み。
-        if continuation and continuation.strip():
-            runtime._store_memory(
-                persona, continuation, role="assistant",
-                tags=[RAW_LOG_TAG], pulse_id=pulse_id,
-                playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-                pulse_context=pulse_ctx,
-            )
-            pulse_ctx.append(PulseLogEntry(
-                role="assistant", content=continuation,
-                node_id="work_session_final",
-                playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-            ))
+            # ---- artifacts: 終了時点との差分 ----
+            artifacts = _collect_new_item_ids(manager, persona_id, items_before)
 
-        # ---- artifacts: 終了時点との差分 ----
-        artifacts = _collect_new_item_ids(manager, persona_id, items_before)
+            # ---- digest: 軽量 1 コールで「実際に起きたことだけ」を要約 ----
+            digest = ""
+            digest_error: Optional[str] = None
+            try:
+                digest = _generate_digest(
+                    runtime, state, llm_client, persona, building_id,
+                    messages, rounds_used, budget_rounds, artifacts,
+                )
+            except Exception as exc:
+                LOGGER.exception(
+                    "[work_session] digest generation failed (persona=%s pulse_id=%s)",
+                    persona_id, pulse_id,
+                )
+                digest_error = f"digest failed: {type(exc).__name__}: {exc}"
 
-        # ---- digest: 軽量 1 コールで「実際に起きたことだけ」を要約 ----
-        digest = ""
-        digest_error: Optional[str] = None
-        try:
-            digest = _generate_digest(
-                runtime, state, llm_client, persona, building_id,
-                messages, rounds_used, budget_rounds, artifacts,
-            )
-        except Exception as exc:
-            LOGGER.exception(
-                "[work_session] digest generation failed (persona=%s pulse_id=%s)",
-                persona_id, pulse_id,
-            )
-            digest_error = f"digest failed: {type(exc).__name__}: {exc}"
-
-        ended_at = clock.now()
-        digest_ref: Optional[str] = None
-        if digest:
-            ws_meta: Dict[str, Any] = {
-                "work_session": {
-                    "task_ref": task_ref,
-                    "artifacts": list(artifacts),
-                    "rounds_used": rounds_used,
-                    "budget_rounds": budget_rounds,
-                    "ended_reason": ended_reason,
-                    "started_at": started_at.isoformat(timespec="seconds"),
-                    "ended_at": ended_at.isoformat(timespec="seconds"),
-                },
-            }
-            if metadata:
-                ws_meta["work_session"]["extra"] = dict(metadata)
-            # committed はこの 1 件のみ。WORKER フレームの volatile 解決を
-            # 明示引数で上書きし、メインライン context に乗る形で保存する。
-            # message id は出来事の digest_ref (再訪の鍵 §9) に使う。
-            digest_msg_id = runtime._store_memory(
-                persona, digest, role="assistant",
-                tags=[DIGEST_TAG], pulse_id=pulse_id,
-                metadata=ws_meta,
-                playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-                line_role="main_line",
-                scope="committed",
-                origin_track_id=track_id,
-                return_message_id=True,
-            )
-            if isinstance(digest_msg_id, str) and digest_msg_id:
-                digest_ref = f"message:{digest_msg_id}"
-            pulse_ctx.append(PulseLogEntry(
-                role="assistant", content=digest,
-                node_id="work_session_digest",
-                playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-            ))
+            ended_at = clock.now()
+            digest_ref: Optional[str] = None
+            if digest:
+                ws_meta: Dict[str, Any] = {
+                    "work_session": {
+                        "task_ref": task_ref,
+                        "artifacts": list(artifacts),
+                        "rounds_used": rounds_used,
+                        "budget_rounds": budget_rounds,
+                        "ended_reason": ended_reason,
+                        "started_at": started_at.isoformat(timespec="seconds"),
+                        "ended_at": ended_at.isoformat(timespec="seconds"),
+                    },
+                }
+                if metadata:
+                    ws_meta["work_session"]["extra"] = dict(metadata)
+                # committed はこの 1 件のみ。WORKER フレームの volatile 解決を
+                # 明示引数で上書きし、メインライン context に乗る形で保存する。
+                # message id は出来事の digest_ref (再訪の鍵 §9) に使う。
+                digest_msg_id = runtime._store_memory(
+                    persona, digest, role="assistant",
+                    tags=[DIGEST_TAG], pulse_id=pulse_id,
+                    metadata=ws_meta,
+                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                    line_role="main_line",
+                    scope="committed",
+                    origin_track_id=track_id,
+                    return_message_id=True,
+                )
+                if isinstance(digest_msg_id, str) and digest_msg_id:
+                    digest_ref = f"message:{digest_msg_id}"
+                pulse_ctx.append(PulseLogEntry(
+                    role="assistant", content=digest,
+                    node_id="work_session_digest",
+                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                ))
 
         # ---- 出来事を閉じる (meta 書式契約: title / artifacts + digest_ref) ----
         _close_ws_episode(
