@@ -479,6 +479,158 @@ class SAIMemoryAdapter:
             delete_perceptions(self.conn, [it.id for it in items])
         return True
 
+    # ------------------------------------------------------------------
+    # 実行台帳の配送口 (Execution Ledger outbox delivery)
+    # docs/intent/execution_ledger.md §2.2 / 不変条件 3 —
+    # 配送先の書き込みは execution_id を冪等キーとして刻み、再配送しても
+    # 二重にならない。冪等性の強制は配送先 (= 本 adapter) の責務。
+    #
+    # 通常の append_* / push_perception と違い、失敗は**例外で表明する**。
+    # 送信トレイの配送器 (saiverse/execution_ledger.py) は handler の例外で
+    # 失敗を数え、握り潰された失敗は「配送成功の偽装」= 記録の消失になるため。
+    # ------------------------------------------------------------------
+
+    #: 台帳配送で messages.metadata / perception_buffer.metadata に刻む冪等キー名。
+    #: outbox_id は world DB 側で一意 (AUTOINCREMENT) なので、1 実行が複数の
+    #: 配送を持っても衝突しない。execution_id は照合・監査用に併記する。
+    LEDGER_OUTBOX_META_KEY = "ledger_outbox_id"
+
+    def append_ledger_message(
+        self,
+        message: dict,
+        *,
+        execution_id: str,
+        outbox_id: int,
+        building_id: Optional[str] = None,
+        thread_suffix: Optional[str] = None,
+    ) -> str:
+        """outbox 配送 (target='saimemory.append') 専用の厳格な書き込み口。
+
+        - 冪等: metadata.ledger_outbox_id が同じ既存行があれば追記せず既存 id を
+          返す (配送成功→delivered 記帳前のクラッシュによる再配送で二重にしない)。
+        - 本文・名義・実行時刻は payload のまま変形しない (不変条件 6)。刻むのは
+          metadata の冪等キーだけ。
+        - 失敗は例外 (_append_message の「None を返して握る」流儀を踏襲しない)。
+
+        Returns: 書き込んだ (または既存の) message id。
+        """
+        if not self._ready:
+            raise RuntimeError(
+                f"SAIMemory adapter not ready (resource={self.settings.resource_id})"
+            )
+        if not isinstance(message, dict):
+            raise ValueError("message must be a dict")
+        existing = self._find_ledger_message(outbox_id)
+        if existing is not None:
+            LOGGER.info(
+                "[ledger-delivery] duplicate append suppressed: outbox_id=%s "
+                "already stored as message=%s", outbox_id, existing,
+            )
+            return existing
+        msg = dict(message)
+        metadata = msg.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata[self.LEDGER_OUTBOX_META_KEY] = int(outbox_id)
+        metadata["execution_id"] = str(execution_id)
+        msg["metadata"] = metadata
+        mid = self._append_message(
+            building_id=building_id, message=msg, thread_suffix=thread_suffix
+        )
+        if not mid:
+            raise RuntimeError(
+                f"SAIMemory append failed (outbox_id={outbox_id}, "
+                f"execution={execution_id}, resource={self.settings.resource_id})"
+            )
+        return mid
+
+    def _find_ledger_message(self, outbox_id: int) -> Optional[str]:
+        """metadata に同じ ledger_outbox_id を刻んだ既存メッセージの id を返す。
+
+        LIKE でキー名を含む行 (= 台帳配送された行だけ。通常メッセージは含まない)
+        に絞ってから JSON 照合する — 直列化の空白差に依存する文字列一致を避ける。
+        """
+        with self._db_lock:
+            rows = self.conn.execute(
+                "SELECT id, metadata FROM messages WHERE metadata LIKE ?",
+                (f"%{self.LEDGER_OUTBOX_META_KEY}%",),
+            ).fetchall()
+        for row in rows:
+            try:
+                meta = json.loads(row[1]) if row[1] else None
+            except (TypeError, ValueError):
+                continue
+            if isinstance(meta, dict) and meta.get(self.LEDGER_OUTBOX_META_KEY) == int(outbox_id):
+                return str(row[0])
+        return None
+
+    def push_ledger_perception(
+        self,
+        *,
+        execution_id: str,
+        outbox_id: int,
+        kind: str,
+        content: str,
+        reduce_key: Optional[str] = None,
+        salient: bool = False,
+        media: Optional[list] = None,
+        metadata: Optional[str] = None,
+    ) -> bool:
+        """outbox 配送 (target='perception.push') 専用の厳格な書き込み口。
+
+        - 冪等: 未消費バッファに同じ ledger_outbox_id が既在なら積まない (False)。
+          消費済み分との照合は構造上できないが、Pulse 前関所 (pending flush) が
+          消費 (Pulse) より先に必ず走る順序保証 (intent §2.2 fail-closed) により、
+          「配送成功 → 消費 → 再配送」の並びは起こらない。
+        - 失敗は例外 (push_perception の「未 ready なら黙って return」を踏襲しない)。
+
+        Returns: 積んだら True、冪等スキップなら False。
+        """
+        if not self._ready:
+            raise RuntimeError(
+                f"SAIMemory adapter not ready (resource={self.settings.resource_id})"
+            )
+        if not kind or content is None:
+            raise ValueError("perception delivery requires kind and content")
+        marker = {
+            self.LEDGER_OUTBOX_META_KEY: int(outbox_id),
+            "execution_id": str(execution_id),
+        }
+        # 送り主 (各処理) の metadata は変形せず持ち越す。dict-JSON なら
+        # 冪等キーをマージ、それ以外は producer_metadata として包む。
+        if metadata:
+            try:
+                parsed = json.loads(metadata)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                parsed.update(marker)
+                marker = parsed
+            else:
+                marker["producer_metadata"] = metadata
+        from sai_memory.perception_buffer import push_perception
+        with self._db_lock:
+            rows = self.conn.execute(
+                "SELECT metadata FROM perception_buffer WHERE metadata LIKE ?",
+                (f"%{self.LEDGER_OUTBOX_META_KEY}%",),
+            ).fetchall()
+            for row in rows:
+                try:
+                    meta = json.loads(row[0]) if row[0] else None
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(meta, dict) and meta.get(self.LEDGER_OUTBOX_META_KEY) == int(outbox_id):
+                    LOGGER.info(
+                        "[ledger-delivery] duplicate perception suppressed: outbox_id=%s",
+                        outbox_id,
+                    )
+                    return False
+            push_perception(
+                self.conn, kind, content,
+                reduce_key=reduce_key, salient=salient, media=media,
+                metadata=json.dumps(marker, ensure_ascii=False),
+            )
+        return True
+
     def add_clips(self, message_id: str, spans) -> int:
         """層1マーカー (``==語句==``) から抽出された観測点を点クリップとして保存する。
 

@@ -35,11 +35,12 @@ docs/intent/execution_ledger.md の §2 (解の骨格) / §3 (不変条件) の�
 プロセスが開始したか」を行単位で照合することはできない。世代照合は
 **起動時の一括 sweep** (:meth:`recover_stale_running` の ``all_running=True``)
 として表現する — プロセス起動直後なら running 行は定義上すべて前世代のもの
-(呼び出し側が runtime_marker で同一 DB を共有する他 City プロセスの不在を
-確認してから呼ぶ。その配線は Phase 0 のスコープ外で次タスク)。
+(main.py が runtime_marker を取得してから manager.start() を呼ぶ順序が
+「同一 DB を共有する他 City プロセスの不在」を保証する)。
 
-Phase 0 時点では本モジュールはどこからも呼ばれない (休眠)。EventScheduler への
-回復 tick 配線・Pulse 前関所の結線・実ハンドラ登録は次タスク。
+世界への結線 (manager 所有・起動時回復・60 秒掃除 tick・実ハンドラ 2 種) は
+``saiverse/execution_ledger_wiring.py``。Pulse 前関所 (Beat ロックとの結線) は
+beat_execution_context.md §3.4 の工事で入る (§6-2 後半)。
 """
 from __future__ import annotations
 
@@ -727,6 +728,26 @@ class ExecutionLedger:
                 .all()
             )
             return [_entry_to_dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def list_pending_personas(self) -> List[Optional[str]]:
+        """pending の outbox 行を 1 件以上持つ persona_id の列 (重複なし)。
+
+        起動時回復・定期 tick の flush 対象列挙に使う。メモリ上にロード済みの
+        persona 集合ではなく DB の実態から取る — 削除済み persona 宛の pending も
+        配送試行 → 再試行上限 → dead (人裁定) の正規経路に乗せるため。
+        世界横断 (persona_id=NULL) の pending は None として現れる。
+        """
+        db = self._session_factory()
+        try:
+            rows = (
+                db.query(ExecutionOutboxItem.PERSONA_ID)
+                .filter(ExecutionOutboxItem.STATUS == OUTBOX_PENDING)
+                .distinct()
+                .all()
+            )
+            return [row[0] for row in rows]
         finally:
             db.close()
 

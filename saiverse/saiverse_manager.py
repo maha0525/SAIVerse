@@ -215,6 +215,14 @@ class SAIVerseManager(
         from saiverse.event_scheduler import EventScheduler
         self.event_scheduler = EventScheduler()
 
+        # 実行台帳 (docs/intent/execution_ledger.md): 不可逆な実行と記録の分裂を
+        # 防ぐ世界側の共通基盤。ここでは構築 (インスタンス化 + 配送ハンドラ登録)
+        # のみ — 前世代 running の回復 sweep と掃除 tick の起動は start() で行う
+        # (構築 / 起動分離の不変条件)。
+        from saiverse.execution_ledger_wiring import build_execution_ledger
+        self.execution_ledger = build_execution_ledger(self)
+        logging.info("Initialized ExecutionLedger (handlers registered; recovery starts at start()).")
+
         # --- Initialize cognitive-model managers (Phase B-5) ---
         # Track / Note の永続化を扱う純粋ロジックレイヤー。
         # Intent A v0.9 / Intent B v0.6 参照。
@@ -521,6 +529,19 @@ class SAIVerseManager(
             logging.warning("SAIVerseManager.start() called twice; ignoring.")
             return
         self._started = True
+
+        # 0. 実行台帳の起動時回復 (execution_ledger.md §2.4 #1/#4)。
+        #    前世代 running の unknown 化と滞留 outbox の配送を、pulse を生む
+        #    背景ループが 1 本も動き出す前に同期で済ませる (pending より新しい
+        #    記憶を書かせない — 記憶の順序一貫性)。runtime_marker は main.py が
+        #    取得済み (同一 DB を共有する他プロセスの不在確認)。
+        #    掃除 tick (60 秒周期) の発火は下の event_scheduler.start() 以降。
+        from saiverse.execution_ledger_wiring import (
+            run_startup_recovery,
+            schedule_recovery_tick,
+        )
+        run_startup_recovery(self)
+        schedule_recovery_tick(self)
 
         # 1. 背景スケジューラ / ポーラ群 (構築は __init__ 済み)。
         self.schedule_manager.start()
