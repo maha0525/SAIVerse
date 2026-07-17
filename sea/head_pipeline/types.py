@@ -69,15 +69,21 @@ class NotificationLabel:
 class LineHeadInput:
     """Section.capture に渡される world アクセサ。
 
+    head の同定キーは ``(persona_id, model_key)`` (beat_execution_context.md §3.1)。
+    line はキーに含めない — line で分けると prefix cache の共用という head の
+    存在意義が死ぬため (まはー裁定 2026-07-16)。
+
     Phase 1 段階では生の ``manager`` 参照を許容する (各 Section が必要とする
     accessor の最小集合は Phase 2 移植時に Section ごとに確定する)。
     将来的に method ベースの限定 surface にして「live state 直参照」を物理的に
     封じる方針。詳細: docs/intent/cached_head_architecture.md §8.1
     """
     persona_id: str
-    line_id: str
-    line_role: str        # "main_line" | "sub_line" | "meta_judgment" | "nested"
-    model_key: str        # per-model anchor 紐付け用 (例: "claude-opus-4-7", "gemini-2.5-flash")
+    model_key: str        # Session の同定キー後半 (実行 model。例: "claude-opus-4-7")
+    line_role: str = "main_line"  # capture したラインの役割の記録 (参考情報、キーではない)
+    # ⚠️ legacy: head のキーから line は外れた (§3.1)。pipeline はこの値を参照しない。
+    # 既存の構築側 (テスト等) の互換のためだけに残しており、後続の掃除 wave で撤去する。
+    line_id: str = "main"
     current_building_id: Optional[str] = None
     persona: Any = None   # 一時、Phase 2 で accessor 化
     manager: Any = None   # 一時、Phase 2 で accessor 化
@@ -92,17 +98,18 @@ class LineHeadInput:
 
 @dataclass
 class LineHeadSnapshot:
-    """ライン単位の凍結 head 状態。
+    """Session (persona, model) 単位の凍結 head 状態。
 
     Section.name → SectionSnapshot の dict を保持する。snapshot 更新は
     Metabolism / refresh_on_events のみで起きる (= 平時は frozen)。
 
-    永続化: 1 行 = 1 ペルソナの 1 ライン。``sections`` 全体を JSON 化して保存。
+    永続化: 1 行 = 1 (persona, model) の Session (session_head_snapshot テーブル、
+    beat_execution_context.md §3.1)。``sections`` 全体を JSON 化して保存。
+    クラス名の "Line" は歴史的名称 (旧キーが (persona, line) だった頃の名残)。
     """
     persona_id: str
-    line_id: str
-    line_role: str
     model_key: str
+    line_role: str
     captured_at: float       # epoch seconds
     snapshot_version: int    # 監査用、capture 毎に bump
     sections: dict[str, Any] = field(default_factory=dict)  # name -> SectionSnapshot

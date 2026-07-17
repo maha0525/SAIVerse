@@ -560,22 +560,52 @@ class PersonaBuildingState(Base):
 
 
 class LineHeadSnapshot(Base):
-    """Cached Head Architecture: ライン単位の head snapshot 永続化。
+    """⚠️ legacy: head snapshot は session_head_snapshot テーブル (PK=(PERSONA_ID,
+    MODEL_KEY)) へ移行済み (beat_execution_context.md §3.1、2026-07-17)。
 
-    1 行 = 1 ペルソナ × 1 ライン (line_id)。SECTIONS_JSON は全 Section の
-    snapshot を section.name -> serialized JSON の dict として保持する
-    (= Section ごとの serialize_snapshot 出力をまとめた構造)。
+    このテーブルは backfill_session_head_snapshots (database/migrate.py) の
+    変換元としてのみ残存し、読み書きの現役経路はない (store の読み口は
+    SessionHeadSnapshot へ切り替え済み)。テーブル DROP は後続の掃除 wave
+    (drop_empty_legacy_note_tables の先例に倣う)。
 
-    LAST_NOTIFIED_JSON は B 相当 (= 最後に末尾通知済みの各 Section snapshot)。
-    diff チェック時に SECTIONS_JSON とではなくこちらと比較する。
-
-    詳細: docs/intent/cached_head_architecture.md §3.3
+    旧キーは (PERSONA_ID, LINE_ID) だったが、LINE_ID は実質常に 'main' で、
+    MODEL_KEY 列は非キーの参考値 (実装バグで常に 'default' が入っていた —
+    backfill が ai.DEFAULT_MODEL から実 model 名へ解決して移行する)。
     """
     __tablename__ = "line_head_snapshot"
     PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
     LINE_ID = Column(String(255), primary_key=True)
     LINE_ROLE = Column(String(32), nullable=False)
     MODEL_KEY = Column(String(128), nullable=False)
+    SECTIONS_JSON = Column(Text, nullable=False)        # A: section.name -> serialized snapshot
+    LAST_NOTIFIED_JSON = Column(Text, nullable=False)   # B: 最後に通知済みの各 Section snapshot
+    SNAPSHOT_VERSION = Column(Integer, default=1, nullable=False)
+    CAPTURED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class SessionHeadSnapshot(Base):
+    """Cached Head Architecture: Session (persona, model) 単位の head snapshot 永続化。
+
+    beat_execution_context.md §3.1: head は (persona_id, model_key) に一つ。
+    line はキーに含めない (まはー裁定 2026-07-16 — line で分けると prefix cache の
+    共用という head の存在意義が死ぬ。サブラインも同じ model なら同じ head を共有)。
+    旧 line_head_snapshot (キー=(PERSONA_ID, LINE_ID)) からの移行は
+    database/migrate.py の backfill_session_head_snapshots (冪等、起動時に実行)。
+
+    - SECTIONS_JSON: A 相当。全 Section の snapshot を section.name ->
+      serialized JSON の dict として保持 (Section ごとの serialize_snapshot 出力)。
+    - LAST_NOTIFIED_JSON: B 相当 (= 最後に末尾通知済みの各 Section snapshot)。
+      diff 既読状態も (persona, model) で分離される — 各 Session が「自分がまだ
+      知らない変化」を独立に受け取るため (§3.1)。
+    - LINE_ROLE: capture したラインの役割の記録 (参考情報、キーではない)。
+
+    詳細: docs/intent/cached_head_architecture.md §3.3 / beat_execution_context.md §3.1
+    """
+    __tablename__ = "session_head_snapshot"
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    MODEL_KEY = Column(String(128), primary_key=True)
+    LINE_ROLE = Column(String(32), nullable=False)
     SECTIONS_JSON = Column(Text, nullable=False)        # A: section.name -> serialized snapshot
     LAST_NOTIFIED_JSON = Column(Text, nullable=False)   # B: 最後に通知済みの各 Section snapshot
     SNAPSHOT_VERSION = Column(Integer, default=1, nullable=False)

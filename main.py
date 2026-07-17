@@ -353,7 +353,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -379,6 +379,12 @@ def main():
     # AI.METABOLISM_ANCHORS (単一 JSON) → session_anchor テーブルへの移行。冪等
     # (変換後は旧列を NULL 化し、非 NULL 行が無ければ no-op) なので毎起動で呼ぶ。
     backfill_session_anchors(str(db_path))
+
+    # head snapshot + last_notified の (persona, model) キー化 (同 §3.1、§6-3b):
+    # line_head_snapshot (キー=(persona, line)) → session_head_snapshot
+    # (PK=(persona, model)) への移行。INSERT OR IGNORE の冪等移行で、既存の
+    # 新テーブル行は上書きしない。旧テーブルの DROP は後続の掃除 wave。
+    backfill_session_head_snapshots(str(db_path))
 
     # Note → テーマノード移行 (P3c①) の後始末: note テーブルが (ペルソナ単位の
     # 扇形移行完了により) 空になったら note/note_page/note_message/track_open_note

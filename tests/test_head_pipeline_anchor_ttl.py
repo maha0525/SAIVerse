@@ -65,8 +65,6 @@ def pipeline():
 def _make_ctx(*, anchor_updated_at=None, cache_ttl_seconds=None):
     return LineHeadInput(
         persona_id="air",
-        line_id="main",
-        line_role="main_line",
         model_key="claude-opus-4-7",
         current_building_id="b_lobby",
         anchor_updated_at=anchor_updated_at,

@@ -1822,9 +1822,14 @@ class SEARuntime:
         try:
             # メインラインと同じ既定 requirements で context を組む — 共有 prefix
             # (head + main_line 履歴) が前回の本物の呼び出しと一致することが
-            # キャッシュヒットの条件。
+            # キャッシュヒットの条件。head は (persona, model) の Session ごとに
+            # 一つ (beat_execution_context.md §3.1) なので、見張り対象 model の
+            # head を明示で指定する (lightweight Session を default の head で
+            # 温めると別 prefix になりキャッシュを壊す)。
             messages = list(
-                self._prepare_context(persona, building_id, None) or []
+                self._prepare_context(
+                    persona, building_id, None, model_key=model_key,
+                ) or []
             )
             messages.append({"role": "user", "content": self._KEEPALIVE_TAIL})
             node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
@@ -1954,7 +1959,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -1967,6 +1972,7 @@ class SEARuntime:
             event_callback=event_callback,
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
+            model_key=model_key,
         )
 
     # ---- Context Preview (read-only, no side effects) ----

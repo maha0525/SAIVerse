@@ -201,6 +201,12 @@ def run_work_session(
         pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=track_id)
         frame_pushed = True
 
+        # WORKER フレームが active な状態で解決 → 軽量モデルが導出される
+        # (Beat 相当の開始点、beat_execution_context §2.1。挙動不変の置換)。
+        # _prepare_context より先に解決するのは、head を同じ model の Session
+        # (persona, model) に向けて render するため (§3.1)。
+        execution_context = resolve_execution_context(persona, pulse_ctx)
+
         # ---- context: head (既存 sub_line と同じペルソナ head) + 指示書 ----
         # 履歴 / Memory Weave / visual は載せない: セッションは指示書と世界の
         # 返事 (spell 結果) だけを文脈に進む。必要な記憶は指示書が
@@ -220,6 +226,7 @@ def run_work_session(
         )
         base_messages = runtime._prepare_context(
             persona, building_id, None, requirements, pulse_id=pulse_id,
+            model_key=execution_context.model_key,
         )
         instruction_content = _build_instruction_message(
             str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
@@ -253,9 +260,7 @@ def run_work_session(
                 persona_id,
             )
 
-        # WORKER フレームが active な状態で解決 → 軽量モデルが導出される
-        # (Beat 相当の開始点、beat_execution_context §2.1。挙動不変の置換)。
-        execution_context = resolve_execution_context(persona, pulse_ctx, state=state)
+        # 上で解決済みの ExecutionContext を state へ載せる (下流は state 経由で読む)。
         state["_execution_context"] = execution_context
         llm_client, _selected_model = runtime.select_llm_client(
             node_def, persona, execution_context=execution_context, state=state,

@@ -12,7 +12,8 @@ Memopedia/Chronicle の差分通知を担当していたが、Phase 3-e で実�
 
 旧 `PersonaBuildingState` テーブルは saiverse.upgrade_handlers が触る経路が残っている
 ため、モデル定義 (`database.models.PersonaBuildingState`) はしばらく残す。新しい
-read/write はすべて `line_head_snapshot` (LineHeadSnapshot テーブル) 側に流れる。
+read/write はすべて `session_head_snapshot` (SessionHeadSnapshot テーブル、
+PK=(persona, model) — beat_execution_context.md §3.1) 側に流れる。
 
 詳細: docs/intent/cached_head_architecture.md / dynamic_state_sync.md
 """

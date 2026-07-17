@@ -197,6 +197,20 @@ def run_playbook(
         # ノードまで運ぶ設計は reasoning の _reasoning_text と同じ、docs/intent/
         # memory_architecture_v2.md §4.5)。
         persona._pending_auto_recall_text = None
+        # head はこの Pulse を実行する model の Session (persona, model) に向けて
+        # render する (beat_execution_context.md §3.1)。実行 model は LLM ノードが
+        # resolve_execution_context で解決する値と同じ導出をここで先取りする —
+        # フレームはまだ push されていないため legacy フォールバック
+        # (_pulse_type=='auto' / _force_lightweight_model → lightweight) を通すが、
+        # これは Pulse-root aspect の tier (AUTONOMOUS=lightweight /
+        # CONVERSATION・META=standard) と一致する。
+        from sea.pulse_context import resolve_execution_context
+        _ec_probe_state = dict(parent)
+        if pulse_type is not None:
+            _ec_probe_state.setdefault("_pulse_type", pulse_type)
+        _prepared_model_key = resolve_execution_context(
+            persona, None, state=_ec_probe_state,
+        ).model_key
         base_messages = runtime._prepare_context(
             persona,
             building_id,
@@ -207,6 +221,7 @@ def run_playbook(
             event_callback=wrapped_event_callback,
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
+            model_key=_prepared_model_key,
         )
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         _auto_recall_text = getattr(persona, "_pending_auto_recall_text", None)

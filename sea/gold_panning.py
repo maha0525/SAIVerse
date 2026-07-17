@@ -431,17 +431,22 @@ def run_gold_panning(
         except Exception:
             LOGGER.debug("[gold_panning] start event_callback raised", exc_info=True)
 
+    # standard tier (default モデル固定)。lightweight への分岐は書かない (intent §5-7)。
+    # Beat 相当の開始点 — Pulse 外なので pulse_context=None (beat_execution_context §2.1)。
+    # _prepare_context より先に解決するのは、head を同じ model の Session
+    # (persona, model) に向けて render するため (§3.1)。
+    from sea.pulse_context import resolve_execution_context
+    execution_context = resolve_execution_context(persona, None)
+
     # 1. メインラインと同じ context を組み、末尾に注入プロンプトを 1 つ足す。
     #    直前の応答コールで prefix が温まっている前提 (defer-to-hot が保証)。
-    messages = list(runtime._prepare_context(persona, building_id, None) or [])
+    messages = list(runtime._prepare_context(
+        persona, building_id, None, model_key=execution_context.model_key,
+    ) or [])
     prompt = _build_panning_prompt(persona)
     messages.append({"role": "user", "content": prompt})
 
     node_def = SimpleNamespace(id="gold_panning", memorize=None, speak=False)
-    # standard tier (default モデル固定)。lightweight への分岐は書かない (intent §5-7)。
-    # Beat 相当の開始点 — Pulse 外なので pulse_context=None (beat_execution_context §2.1)。
-    from sea.pulse_context import resolve_execution_context
-    execution_context = resolve_execution_context(persona, None)
     llm_client, _gp_model = runtime.select_llm_client(
         node_def, persona, execution_context=execution_context,
         needs_structured_output=True,

@@ -1112,6 +1112,132 @@ def backfill_session_anchors(db_path: str) -> None:
         engine.dispose()
 
 
+def _backfill_session_head_snapshots(engine) -> None:
+    """line_head_snapshot → session_head_snapshot の (persona, model) キー化移行 (冪等)。
+
+    beat_execution_context.md §3.1 (§6-3b)。旧テーブルはキー (PERSONA_ID, LINE_ID)
+    で LINE_ID は実質常に 'main'。新テーブルは PK=(PERSONA_ID, MODEL_KEY)。規則:
+
+    - **model_key の解決**: 旧行の MODEL_KEY 列は実装バグで常に 'default' が
+      入っていた (integration.py が存在しない persona.default_model 属性を引いて
+      いた) ため、'default' / 空は ai.DEFAULT_MODEL (そのペルソナの標準 model) へ
+      解決する。ai.DEFAULT_MODEL も NULL なら実行 model を特定できないので
+      その行はスキップ (head は cache 状態で損失許容 — 次回 capture_all で再構築)。
+    - **集約衝突** (複数の旧行が同一 (persona, model) に写る場合):
+      LINE_ID='main' の行を優先、無ければ UPDATED_AT 最新。
+    - **既に session_head_snapshot に行がある (persona, model) は上書きしない**
+      (INSERT OR IGNORE — 新形式が正)。
+    - 旧テーブルの行は残す (読み口は store から撤去済みで害がない。テーブル
+      DROP ごと後続の掃除 wave で行う)。schema 変更を伴わないデータ移行なので
+      needs_migration では拾えず、起動時に無条件で呼ぶ (対象が無ければ no-op)。
+    """
+    try:
+        # テーブル存在の軽量シンク (呼び出し順への依存を消す。冪等)。
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import SessionHeadSnapshot
+        ensure_table_columns_indexes(engine, SessionHeadSnapshot.__table__)
+
+        with engine.begin() as conn:
+            legacy = conn.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='line_head_snapshot'"
+            )).fetchone()
+            if legacy is None:
+                return
+            rows = conn.execute(text(
+                "SELECT PERSONA_ID, LINE_ID, LINE_ROLE, MODEL_KEY, SECTIONS_JSON, "
+                "LAST_NOTIFIED_JSON, SNAPSHOT_VERSION, CAPTURED_AT, UPDATED_AT "
+                "FROM line_head_snapshot"
+            )).fetchall()
+            if not rows:
+                return
+
+            default_models = {
+                aiid: model
+                for aiid, model in conn.execute(
+                    text("SELECT AIID, DEFAULT_MODEL FROM ai")
+                ).fetchall()
+            }
+
+            # (persona, model) ごとの勝者を選ぶ: line='main' 優先 > UPDATED_AT 最新。
+            # UPDATED_AT は 'YYYY-MM-DD HH:MM:SS[.ffffff]' 形式の TEXT なので
+            # 辞書順比較 = 時刻順比較になる。
+            candidates: dict = {}
+            skipped = 0
+            for row in rows:
+                raw_model = (row.MODEL_KEY or "").strip()
+                if not raw_model or raw_model == "default":
+                    resolved = (default_models.get(row.PERSONA_ID) or "").strip()
+                    if not resolved:
+                        logging.warning(
+                            "session_head_snapshot バックフィル: %s/%s の実行 model を"
+                            "特定できないためスキップします (MODEL_KEY=%r, "
+                            "ai.DEFAULT_MODEL 未設定)",
+                            row.PERSONA_ID, row.LINE_ID, row.MODEL_KEY,
+                        )
+                        skipped += 1
+                        continue
+                    model_key = resolved
+                else:
+                    model_key = raw_model
+
+                key = (row.PERSONA_ID, model_key)
+                prev = candidates.get(key)
+                if prev is None:
+                    candidates[key] = row
+                    continue
+
+                def _rank(r):
+                    return (1 if r.LINE_ID == "main" else 0, str(r.UPDATED_AT or ""))
+
+                if _rank(row) > _rank(prev):
+                    candidates[key] = row
+
+            inserted = 0
+            for (persona_id, model_key), row in candidates.items():
+                result = conn.execute(
+                    text(
+                        "INSERT OR IGNORE INTO session_head_snapshot "
+                        "(PERSONA_ID, MODEL_KEY, LINE_ROLE, SECTIONS_JSON, "
+                        "LAST_NOTIFIED_JSON, SNAPSHOT_VERSION, CAPTURED_AT, UPDATED_AT) "
+                        "VALUES (:p, :m, :lr, :s, :n, :v, :c, :u)"
+                    ),
+                    {
+                        "p": persona_id,
+                        "m": model_key,
+                        "lr": row.LINE_ROLE or "main_line",
+                        "s": row.SECTIONS_JSON or "{}",
+                        "n": row.LAST_NOTIFIED_JSON or "{}",
+                        "v": row.SNAPSHOT_VERSION or 1,
+                        "c": row.CAPTURED_AT,
+                        "u": row.UPDATED_AT,
+                    },
+                )
+                inserted += result.rowcount if result.rowcount and result.rowcount > 0 else 0
+
+            # 旧テーブルの行は DROP まで残るため毎起動ここを通る。実際に新規行を
+            # 書いた起動だけ info、以降の no-op 起動は debug に落とす。
+            log = logging.info if (inserted or skipped) else logging.debug
+            log(
+                "session_head_snapshot バックフィル: 旧 %d 行 → %d Session 行を移行"
+                "しました (新規 %d 行 / スキップ %d 行)。",
+                len(rows), len(candidates), inserted, skipped,
+            )
+    except Exception as e:
+        # head snapshot は cache 状態でスキップ許容 (次回 capture_all で再構築)。
+        # 失敗しても次回起動で再試行される。
+        logging.warning("session_head_snapshot バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_session_head_snapshots(db_path: str) -> None:
+    """line_head_snapshot → session_head_snapshot 移行を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_session_head_snapshots(engine)
+    finally:
+        engine.dispose()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")
     parser.add_argument(

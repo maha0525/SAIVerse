@@ -27,7 +27,17 @@
 - 実装レベルの設計裁定2つは intent §3.1 に記録済み: 新テーブル+backfill 方式 (全書換 migration 不使用) / 記帳先の正= usage.model
 - 旧 `AI.METABOLISM_ANCHORS` 列は backfill の変換元としてのみ残存 (常に NULL)。列 DROP は後続の掃除 wave
 
-## 3. §6-3b の確定済み設計 (次タスク。この設計で委譲してよい)
+## 3. §6-3b — 実装・検収済み・コミット済み (2026-07-17 セッション3)
+
+下記の確定設計どおり委譲→検収で完了。設計どおりの実装に加えて、検収で確認した逸脱3点 (いずれも妥当と裁定):
+
+1. **結線はスコープ外5ファイルに波及** (runtime_context / runtime / work_session / gold_panning / runtime_runner) — head render が ExecutionContext 解決より前に走るため、`prepare_context` に `model_key` kwarg を通し、呼び出し側が解決を前倒しした。work_session の早期解決は WORKER フレーム push 済みのため挙動不変。runtime_runner の probe (legacy state 経由) は pulse_type 3 分類すべてで root aspect の tier と一致することを検収で照合済み
+2. **フォールバックの正は `persona.model`** — 設計記載の `persona.default_model` は存在しない属性で、旧実装は全行 MODEL_KEY='default' に落ちていた実バグ (実 DB で確認)。anchor-TTL 失効時の snapshot 再 capture がこの修正で初めて実ペルソナで機能する
+3. **backfill は 'default' → ai.DEFAULT_MODEL 解決を追加** (上記バグの帰結。解決不能行はスキップ = head は損失許容)
+
+留意 (次 wave への引き継ぎ): diff flush 経路の Session 窓ごと配送は §6-4、Metabolism dispatch の lightweight 側節目は §6-5 の領分として据え置き。
+
+### 確定済み設計 (記録)
 
 head snapshot + last_notified の (persona, model) キー化。調査済みの現状 (§6-3 調査エージェント報告、要点):
 

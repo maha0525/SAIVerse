@@ -36,10 +36,10 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class _LineState:
-    """1 ライン分の in-memory state。pipeline が保持する。
+    """1 Session (persona, model) 分の in-memory state。pipeline が保持する。
 
     永続化される snapshot とは別に、dirty フラグ・最後の通知済み snapshot・
-    backstop タイマーを持つ。
+    backstop タイマーを持つ。クラス名の "Line" は歴史的名称。
     """
     snapshot: LineHeadSnapshot                                 # A 相当 (frozen until refresh)
     last_notified_sections: dict[str, object] = field(default_factory=dict)  # B 相当 (section.name -> snapshot)
@@ -53,8 +53,9 @@ class HeadPipeline:
     Phase 1 段階: in-memory のみ。DB 永続化は Phase 1-d で外部 store を inject する形に
     拡張する (= ここでは load / save の hook を空実装で持っておく)。
 
-    複数ライン (= 複数 persona × line_id) の state を 1 つの pipeline で保持する。
-    key は ``(persona_id, line_id)``。
+    複数 Session (= 複数 persona × model_key) の state を 1 つの pipeline で保持する。
+    key は ``(persona_id, model_key)`` (beat_execution_context.md §3.1 —
+    head は (persona, model) に一つ。line で分けない)。
     """
 
     # periodic backstop の最低間隔 (= 全 Section の capture+diff を回す保険)。
@@ -95,8 +96,8 @@ class HeadPipeline:
                 sections_dict[section.name] = section.capture(ctx)
             except Exception:
                 LOGGER.exception(
-                    "head_pipeline: capture failed for section=%s persona=%s line=%s",
-                    section.name, ctx.persona_id, ctx.line_id,
+                    "head_pipeline: capture failed for section=%s persona=%s model=%s",
+                    section.name, ctx.persona_id, ctx.model_key,
                 )
                 # capture 失敗時は既存値を使う (なければ None)。pipeline 全体を止めない。
                 existing = self._existing_section_snapshot(ctx, section.name)
@@ -104,9 +105,8 @@ class HeadPipeline:
 
         snapshot = LineHeadSnapshot(
             persona_id=ctx.persona_id,
-            line_id=ctx.line_id,
-            line_role=ctx.line_role,
             model_key=ctx.model_key,
+            line_role=ctx.line_role,
             captured_at=time.time(),
             snapshot_version=self._next_version(ctx),
             sections=sections_dict,
@@ -119,11 +119,11 @@ class HeadPipeline:
                 dirty_sections=set(),
                 last_backstop_check=time.time(),
             )
-            self._states[(ctx.persona_id, ctx.line_id)] = state
+            self._states[(ctx.persona_id, ctx.model_key)] = state
 
         LOGGER.info(
-            "head_pipeline: captured all sections persona=%s line=%s version=%d sections=%d",
-            ctx.persona_id, ctx.line_id, snapshot.snapshot_version, len(sections_dict),
+            "head_pipeline: captured all sections persona=%s model=%s version=%d sections=%d",
+            ctx.persona_id, ctx.model_key, snapshot.snapshot_version, len(sections_dict),
         )
         self._persist_snapshot(snapshot, dict(sections_dict))
         return snapshot
@@ -142,7 +142,7 @@ class HeadPipeline:
             return None
 
         with self._lock:
-            state = self._states.get((ctx.persona_id, ctx.line_id))
+            state = self._states.get((ctx.persona_id, ctx.model_key))
             if state is None:
                 # snapshot 不在なら丸ごと作り直す方が安全 (event を Metabolism として扱う)
                 LOGGER.debug(
@@ -164,9 +164,8 @@ class HeadPipeline:
 
             new_snapshot = LineHeadSnapshot(
                 persona_id=state.snapshot.persona_id,
-                line_id=state.snapshot.line_id,
-                line_role=state.snapshot.line_role,
                 model_key=state.snapshot.model_key,
+                line_role=state.snapshot.line_role,
                 captured_at=time.time(),
                 snapshot_version=state.snapshot.snapshot_version + 1,
                 sections=new_sections,
@@ -175,8 +174,8 @@ class HeadPipeline:
             notified_snapshot_copy = dict(state.last_notified_sections)
 
         LOGGER.info(
-            "head_pipeline: captured event=%s sections=%s persona=%s line=%s",
-            event.value, [s.name for s in sections], ctx.persona_id, ctx.line_id,
+            "head_pipeline: captured event=%s sections=%s persona=%s model=%s",
+            event.value, [s.name for s in sections], ctx.persona_id, ctx.model_key,
         )
         self._persist_snapshot(new_snapshot, notified_snapshot_copy)
         return new_snapshot
@@ -207,20 +206,20 @@ class HeadPipeline:
         # Section が refresh_on_events に列挙しなくても、live state の変化を
         # 次回 flush_diffs で拾えるように dirty マークだけはする。
         with self._lock:
-            state = self._states.get((ctx.persona_id, ctx.line_id))
+            state = self._states.get((ctx.persona_id, ctx.model_key))
             if state is not None:
                 state.dirty_sections.update(s.name for s in self._registry.all_sections())
         return None
 
     # ---- dirty 制御 + diff チェック ----
 
-    def mark_dirty(self, persona_id: str, line_id: str, section_name: str) -> None:
+    def mark_dirty(self, persona_id: str, model_key: str, section_name: str) -> None:
         """指定 Section を dirty にマーク (= 次回 flush_diffs で diff チェック対象)。
 
         refresh_on_events の hook 等が個別 Section の dirty 化を伝えるのに使う。
         """
         with self._lock:
-            state = self._states.get((persona_id, line_id))
+            state = self._states.get((persona_id, model_key))
             if state is not None:
                 state.dirty_sections.add(section_name)
 
@@ -239,9 +238,11 @@ class HeadPipeline:
 
         この戻り値を呼び出し側 (= runtime 経路) が末尾通知メッセージとして注入する。
         diff 検出後は last_notified を新 capture に進める (= 同じ差分を二重通知しない)。
+        既読状態 (B) は (persona, model) の Session ごとに独立
+        (beat_execution_context.md §3.1 — 「line ごとの diff 既読」→「model ごと」)。
         """
         with self._lock:
-            state = self._states.get((ctx.persona_id, ctx.line_id))
+            state = self._states.get((ctx.persona_id, ctx.model_key))
             if state is None:
                 return []  # snapshot 不在 = 初回 capture 前、diff チェックの対象なし
 
@@ -303,13 +304,13 @@ class HeadPipeline:
             notified_snapshot_copy = dict(state.last_notified_sections)
 
         if labels:
-            self._persist_last_notified(ctx.persona_id, ctx.line_id, notified_snapshot_copy)
+            self._persist_last_notified(ctx.persona_id, ctx.model_key, notified_snapshot_copy)
         return labels
 
     # ---- render ----
 
     def render_head(
-        self, persona_id: str, line_id: str
+        self, persona_id: str, model_key: str
     ) -> list[tuple[str, RenderedSection]]:
         """現在の snapshot から head の ``(section_name, RenderedSection)`` 列を作る。
 
@@ -322,7 +323,7 @@ class HeadPipeline:
         欠落する)。名前を一緒に返して位置依存を排除する。
         """
         with self._lock:
-            state = self._states.get((persona_id, line_id))
+            state = self._states.get((persona_id, model_key))
             if state is None:
                 return []
             snapshot = state.snapshot
@@ -336,8 +337,8 @@ class HeadPipeline:
                 result = section.render(section_snapshot)
             except Exception:
                 LOGGER.exception(
-                    "head_pipeline: render failed for section=%s persona=%s line=%s",
-                    section.name, persona_id, line_id,
+                    "head_pipeline: render failed for section=%s persona=%s model=%s",
+                    section.name, persona_id, model_key,
                 )
                 continue
             if result is not None:
@@ -346,35 +347,35 @@ class HeadPipeline:
 
     # ---- アクセサ ----
 
-    def get_snapshot(self, persona_id: str, line_id: str) -> Optional[LineHeadSnapshot]:
+    def get_snapshot(self, persona_id: str, model_key: str) -> Optional[LineHeadSnapshot]:
         with self._lock:
-            state = self._states.get((persona_id, line_id))
+            state = self._states.get((persona_id, model_key))
             return state.snapshot if state is not None else None
 
-    def has_snapshot(self, persona_id: str, line_id: str) -> bool:
-        return self.get_snapshot(persona_id, line_id) is not None
+    def has_snapshot(self, persona_id: str, model_key: str) -> bool:
+        return self.get_snapshot(persona_id, model_key) is not None
 
-    def discard_line(self, persona_id: str, line_id: str, *, delete_persisted: bool = False) -> None:
-        """指定ラインの in-memory state を破棄 (= 入れ子ライン完了時等の cleanup)。
+    def discard_session(self, persona_id: str, model_key: str, *, delete_persisted: bool = False) -> None:
+        """指定 Session の in-memory state を破棄 (= cleanup 用)。
 
-        ``delete_persisted=True`` のときは store 側のレコードも削除する (= 入れ子
-        ラインの片付け等で永続化も不要な場合に使う)。デフォルトは in-memory のみで、
-        次回 startup 時に DB から復元できるようにしておく。
+        ``delete_persisted=True`` のときは store 側のレコードも削除する。
+        デフォルトは in-memory のみで、次回 startup 時に DB から復元できるように
+        しておく。(旧名 ``discard_line`` — (persona, model) キー化で改名。)
         """
         with self._lock:
-            self._states.pop((persona_id, line_id), None)
+            self._states.pop((persona_id, model_key), None)
         if delete_persisted and self._store is not None:
             try:
-                self._store.delete(persona_id, line_id)
+                self._store.delete(persona_id, model_key)
             except Exception:
                 LOGGER.exception(
-                    "head_pipeline: store.delete failed persona=%s line=%s",
-                    persona_id, line_id,
+                    "head_pipeline: store.delete failed persona=%s model=%s",
+                    persona_id, model_key,
                 )
 
     # ---- 永続化との同期 ----
 
-    def load_from_store(self, persona_id: str, line_id: str) -> bool:
+    def load_from_store(self, persona_id: str, model_key: str) -> bool:
         """DB から state を復元して in-memory に積む。snapshot が無ければ False。
 
         startup 時 / 再起動後の状態復旧に使う。snapshot 復元後は last_notified も
@@ -382,19 +383,19 @@ class HeadPipeline:
         """
         if self._store is None:
             return False
-        stored = self._store.load(persona_id, line_id)
+        stored = self._store.load(persona_id, model_key)
         if stored is None:
             return False
         with self._lock:
-            self._states[(persona_id, line_id)] = _LineState(
+            self._states[(persona_id, model_key)] = _LineState(
                 snapshot=stored.snapshot,
                 last_notified_sections=dict(stored.last_notified_sections),
                 dirty_sections=set(),
                 last_backstop_check=time.time(),
             )
         LOGGER.info(
-            "head_pipeline: loaded snapshot from store persona=%s line=%s version=%d",
-            persona_id, line_id, stored.snapshot.snapshot_version,
+            "head_pipeline: loaded snapshot from store persona=%s model=%s version=%d",
+            persona_id, model_key, stored.snapshot.snapshot_version,
         )
         return True
 
@@ -409,38 +410,38 @@ class HeadPipeline:
             self._store.save(snapshot, last_notified_sections)
         except Exception:
             LOGGER.exception(
-                "head_pipeline: store.save failed persona=%s line=%s",
-                snapshot.persona_id, snapshot.line_id,
+                "head_pipeline: store.save failed persona=%s model=%s",
+                snapshot.persona_id, snapshot.model_key,
             )
 
     def _persist_last_notified(
         self,
         persona_id: str,
-        line_id: str,
+        model_key: str,
         last_notified_sections: dict[str, object],
     ) -> None:
         if self._store is None:
             return
         try:
-            self._store.save_last_notified(persona_id, line_id, last_notified_sections)
+            self._store.save_last_notified(persona_id, model_key, last_notified_sections)
         except Exception:
             LOGGER.exception(
-                "head_pipeline: store.save_last_notified failed persona=%s line=%s",
-                persona_id, line_id,
+                "head_pipeline: store.save_last_notified failed persona=%s model=%s",
+                persona_id, model_key,
             )
 
     # ---- 内部ヘルパー ----
 
     def _existing_section_snapshot(self, ctx: LineHeadInput, section_name: str) -> object:
         with self._lock:
-            state = self._states.get((ctx.persona_id, ctx.line_id))
+            state = self._states.get((ctx.persona_id, ctx.model_key))
             if state is None:
                 return None
             return state.snapshot.sections.get(section_name)
 
     def _next_version(self, ctx: LineHeadInput) -> int:
         with self._lock:
-            state = self._states.get((ctx.persona_id, ctx.line_id))
+            state = self._states.get((ctx.persona_id, ctx.model_key))
             return (state.snapshot.snapshot_version + 1) if state is not None else 1
 
 

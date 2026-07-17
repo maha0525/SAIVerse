@@ -43,7 +43,12 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
     return result
 
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    # model_key: この context を届ける Session (persona, model) の実行 model
+    # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
+    # ExecutionContext が届いている呼び出し元 (work_session / gold_panning /
+    # keepalive / run_playbook の Pulse-root) が execution_context.model_key を
+    # 渡す。None なら persona の標準 model にフォールバック (preview 等)。
     from sea.playbook_models import ContextRequirements
 
     # Use provided requirements or default to full context
@@ -78,6 +83,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             head_messages = render_head_messages(
                 persona, runtime.manager, building_id,
                 enabled_sections=enabled_sections,
+                model_key=model_key,
             )
             if head_messages:
                 messages.extend(head_messages)

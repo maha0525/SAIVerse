@@ -129,13 +129,14 @@ def pipeline(registry):
     return HeadPipeline(registry=registry)
 
 
+MODEL = "claude-opus-4-7"
+
+
 @pytest.fixture
 def ctx():
     return LineHeadInput(
         persona_id="air",
-        line_id="main",
-        line_role="main_line",
-        model_key="claude-opus-4-7",
+        model_key=MODEL,
         current_building_id="b_lobby",
     )
 
@@ -173,12 +174,12 @@ def test_capture_all_creates_snapshot_for_all_sections(pipeline, ctx):
     assert set(snapshot.sections.keys()) == {"spell_list", "building"}
     assert snapshot.snapshot_version == 1
     assert snapshot.persona_id == "air"
-    assert snapshot.line_id == "main"
+    assert snapshot.model_key == MODEL
 
 
 def test_render_head_outputs_in_order(pipeline, ctx):
     pipeline.capture_all(ctx)
-    rendered = pipeline.render_head("air", "main")
+    rendered = pipeline.render_head("air", MODEL)
     assert len(rendered) == 2
     assert rendered[0][0] == "building"
     assert rendered[0][1].text.startswith("## Building:")
@@ -200,7 +201,7 @@ def test_render_head_carries_names_past_none_section(ctx):
     pipeline = HeadPipeline(registry=r)
     pipeline.capture_all(ctx)
 
-    rendered = pipeline.render_head("air", "main")
+    rendered = pipeline.render_head("air", MODEL)
     # empty は除外され、building / spell_list が正しい名前で残る
     assert [name for name, _ in rendered] == ["building", "spell_list"]
     by_name = dict(rendered)
@@ -209,7 +210,7 @@ def test_render_head_carries_names_past_none_section(ctx):
 
 
 def test_render_head_returns_empty_when_no_snapshot(pipeline):
-    rendered = pipeline.render_head("nobody", "main")
+    rendered = pipeline.render_head("nobody", MODEL)
     assert rendered == []
 
 
@@ -223,7 +224,7 @@ def test_flush_diffs_detects_change_after_mark_dirty(pipeline, ctx, registry):
     pipeline.capture_all(ctx)
     spell_section = registry.by_name("spell_list")
     spell_section.live_spells = ["spell_a", "spell_c"]
-    pipeline.mark_dirty("air", "main", "spell_list")
+    pipeline.mark_dirty("air", MODEL, "spell_list")
     labels = pipeline.flush_diffs(ctx)
     kinds = sorted(label.kind for label in labels)
     assert kinds == ["spell_added", "spell_removed"]
@@ -233,10 +234,10 @@ def test_flush_diffs_does_not_double_notify(pipeline, ctx, registry):
     pipeline.capture_all(ctx)
     spell_section = registry.by_name("spell_list")
     spell_section.live_spells = ["spell_a", "spell_c"]
-    pipeline.mark_dirty("air", "main", "spell_list")
+    pipeline.mark_dirty("air", MODEL, "spell_list")
     first = pipeline.flush_diffs(ctx)
     assert first  # 1 回目は出る
-    pipeline.mark_dirty("air", "main", "spell_list")  # dirty 再マーク
+    pipeline.mark_dirty("air", MODEL, "spell_list")  # dirty 再マーク
     second = pipeline.flush_diffs(ctx)
     assert second == []  # 内容変わってないので 2 回目は空
 
@@ -269,11 +270,11 @@ def test_capture_for_event_metabolism_recaptures_everything(pipeline, ctx, regis
     assert new_snapshot.sections["building"]["name"] == "NewBuilding"
 
 
-def test_discard_line_removes_state(pipeline, ctx):
+def test_discard_session_removes_state(pipeline, ctx):
     pipeline.capture_all(ctx)
-    assert pipeline.has_snapshot("air", "main")
-    pipeline.discard_line("air", "main")
-    assert not pipeline.has_snapshot("air", "main")
+    assert pipeline.has_snapshot("air", MODEL)
+    pipeline.discard_session("air", MODEL)
+    assert not pipeline.has_snapshot("air", MODEL)
 
 
 def test_serialize_deserialize_roundtrip_per_section(registry):
@@ -295,7 +296,7 @@ def test_serialize_deserialize_roundtrip_per_section(registry):
 
 @pytest.fixture
 def isolated_db_session_factory(request):
-    """テンポラリ SQLite で AI + LineHeadSnapshot テーブルを作って session_factory を返す。
+    """テンポラリ SQLite で AI + SessionHeadSnapshot テーブルを作って session_factory を返す。
 
     cleanup は addCleanup 相当で LIFO に走らせる (tests/conftest 既存原則と整合)。
     """
@@ -340,17 +341,17 @@ def test_store_save_and_load_roundtrip(registry, isolated_db_session_factory):
     )
     pipeline = HeadPipeline(registry=registry, store=store)
     ctx = LineHeadInput(
-        persona_id="air", line_id="main", line_role="main_line",
-        model_key="claude-opus-4-7", current_building_id="b_lobby",
+        persona_id="air", model_key=MODEL, current_building_id="b_lobby",
     )
     pipeline.capture_all(ctx)
 
     # 新しい pipeline を作って load -> snapshot が復元できる
     pipeline2 = HeadPipeline(registry=registry, store=store)
-    assert pipeline2.load_from_store("air", "main")
-    snapshot = pipeline2.get_snapshot("air", "main")
+    assert pipeline2.load_from_store("air", MODEL)
+    snapshot = pipeline2.get_snapshot("air", MODEL)
     assert snapshot is not None
     assert snapshot.persona_id == "air"
+    assert snapshot.model_key == MODEL
     assert set(snapshot.sections.keys()) == {"spell_list", "building"}
 
 
@@ -360,8 +361,7 @@ def test_store_save_after_capture_for_event(registry, isolated_db_session_factor
     )
     pipeline = HeadPipeline(registry=registry, store=store)
     ctx = LineHeadInput(
-        persona_id="air", line_id="main", line_role="main_line",
-        model_key="claude-opus-4-7", current_building_id="b_lobby",
+        persona_id="air", model_key=MODEL, current_building_id="b_lobby",
     )
     pipeline.capture_all(ctx)
 
@@ -369,8 +369,8 @@ def test_store_save_after_capture_for_event(registry, isolated_db_session_factor
     pipeline.capture_for_event(ctx, EventType.BUILDING_ENTERED)
 
     pipeline2 = HeadPipeline(registry=registry, store=store)
-    pipeline2.load_from_store("air", "main")
-    snapshot = pipeline2.get_snapshot("air", "main")
+    pipeline2.load_from_store("air", MODEL)
+    snapshot = pipeline2.get_snapshot("air", MODEL)
     assert snapshot.sections["building"]["name"] == "Vessel"
 
 
@@ -380,20 +380,19 @@ def test_store_save_last_notified_after_flush_diffs(registry, isolated_db_sessio
     )
     pipeline = HeadPipeline(registry=registry, store=store)
     ctx = LineHeadInput(
-        persona_id="air", line_id="main", line_role="main_line",
-        model_key="claude-opus-4-7", current_building_id="b_lobby",
+        persona_id="air", model_key=MODEL, current_building_id="b_lobby",
     )
     pipeline.capture_all(ctx)
 
     registry.by_name("spell_list").live_spells = ["spell_a", "spell_c"]
-    pipeline.mark_dirty("air", "main", "spell_list")
+    pipeline.mark_dirty("air", MODEL, "spell_list")
     labels = pipeline.flush_diffs(ctx)
     assert labels  # 1 度通知が走る
 
     # 別 pipeline で load して、再 flush しても通知が出ない (= B が永続化されている)
     pipeline2 = HeadPipeline(registry=registry, store=store)
-    pipeline2.load_from_store("air", "main")
-    pipeline2.mark_dirty("air", "main", "spell_list")
+    pipeline2.load_from_store("air", MODEL)
+    pipeline2.mark_dirty("air", MODEL, "spell_list")
     labels2 = pipeline2.flush_diffs(ctx)
     assert labels2 == []
 
@@ -429,17 +428,16 @@ def test_dispatch_event_unmatched_marks_dirty(pipeline, ctx, registry):
     assert kinds == ["spell_added", "spell_removed"]
 
 
-def test_store_delete_via_discard_line(registry, isolated_db_session_factory):
+def test_store_delete_via_discard_session(registry, isolated_db_session_factory):
     store = LineHeadSnapshotStore(
         session_factory=isolated_db_session_factory, registry=registry,
     )
     pipeline = HeadPipeline(registry=registry, store=store)
     ctx = LineHeadInput(
-        persona_id="air", line_id="main", line_role="main_line",
-        model_key="claude-opus-4-7", current_building_id="b_lobby",
+        persona_id="air", model_key=MODEL, current_building_id="b_lobby",
     )
     pipeline.capture_all(ctx)
-    pipeline.discard_line("air", "main", delete_persisted=True)
+    pipeline.discard_session("air", MODEL, delete_persisted=True)
 
     pipeline2 = HeadPipeline(registry=registry, store=store)
-    assert not pipeline2.load_from_store("air", "main")
+    assert not pipeline2.load_from_store("air", MODEL)

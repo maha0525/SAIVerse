@@ -59,10 +59,25 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
 VISUAL_CONTEXT_SECTION_NAME = "visual_context"
 
-# Phase 2 段階では line_id は単一の "main" 固定 (= メインライン 1 本想定)。
-# Phase 3+ でサブライン対応する際に呼び出し側から line_id を渡せるようにする。
-_DEFAULT_LINE_ID = "main"
 _DEFAULT_LINE_ROLE = "main_line"
+
+
+def resolve_default_model_key(persona: Any) -> str:
+    """ExecutionContext が届かない経路の model_key フォールバック。
+
+    ペルソナの標準 (default) model を返す。実属性は ``persona.model``
+    (persona/core.py) — 旧実装は存在しない ``persona.default_model`` を先に
+    引いていたため、実ペルソナでは常に "default" 文字列に落ちていた
+    (line_head_snapshot の MODEL_KEY が全行 'default' だった実バグ)。
+    ``default_model`` はテストスタブ互換のため第 2 候補として残す。
+    """
+    model_key = (
+        getattr(persona, "model", None)
+        or getattr(persona, "default_model", None)
+        or getattr(persona, "DEFAULT_MODEL", None)
+        or "default"
+    )
+    return str(model_key)
 
 
 def build_line_head_input(
@@ -70,17 +85,20 @@ def build_line_head_input(
     manager: Any,
     building_id: str,
     *,
-    line_id: str = _DEFAULT_LINE_ID,
+    model_key: Optional[str] = None,
     line_role: str = _DEFAULT_LINE_ROLE,
 ) -> LineHeadInput:
-    """prepare_context の引数から LineHeadInput を組み立てる。"""
+    """prepare_context の引数から LineHeadInput を組み立てる。
+
+    head の同定キーは (persona_id, model_key) (beat_execution_context.md §3.1)。
+    ``model_key`` は「この head をどの Session (persona, model) に向けて
+    組むか」— ExecutionContext が届いている呼び出し元 (LLM node / work_session /
+    gold_panning / keepalive) は ``execution_context.model_key`` を明示で渡す。
+    None なら persona の標準 model にフォールバックする (起動時 capture /
+    dynamic_state の world イベント dispatch 等、実行の身分が無い経路)。
+    """
     persona_id = getattr(persona, "persona_id", "") or ""
-    model_key = (
-        getattr(persona, "default_model", None)
-        or getattr(persona, "DEFAULT_MODEL", None)
-        or "default"
-    )
-    model_key_str = str(model_key)
+    model_key_str = str(model_key) if model_key else resolve_default_model_key(persona)
 
     anchor_updated_at, cache_ttl_seconds = _resolve_anchor_ttl_state(
         persona, manager, model_key_str,
@@ -88,9 +106,8 @@ def build_line_head_input(
 
     return LineHeadInput(
         persona_id=persona_id,
-        line_id=line_id,
-        line_role=line_role,
         model_key=model_key_str,
+        line_role=line_role,
         current_building_id=building_id,
         persona=persona,
         manager=manager,
@@ -152,6 +169,7 @@ def inject_diff_notifications(
     building_id: str,
     *,
     pipeline: HeadPipeline | None = None,
+    model_key: str | None = None,
 ) -> bool:
     """全 Section の diff を検知し、知覚バッファへ型付き項目として push する (消費はしない)。
 
@@ -168,11 +186,15 @@ def inject_diff_notifications(
     入室想起 (persona_recall) も同じくバッファへ push する。詳細:
     docs/intent/perception_buffer.md §4.5 / §5.1。
 
+    ``model_key`` を省略した場合は persona の標準 model の Session に対して
+    diff チェックする (= 従来の単一窓挙動と同じ)。既読状態 (last_notified) は
+    (persona, model) ごとに独立 (beat_execution_context.md §3.1)。
+
     Returns:
         ラベルが 1 件以上 push された場合 True、差分なしなら False。
     """
     pipeline = pipeline or get_default_pipeline()
-    ctx = build_line_head_input(persona, manager, building_id)
+    ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
     labels = pipeline.flush_diffs(ctx, all_sections=True)
     if not labels:
@@ -269,12 +291,12 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
     prompt cache TTL が切れたタイミングでは「head 不変による cache hit」 の根拠が
     消えるので、 cache hit を諦めて最新状態を反映する方が情報量で勝る。
     """
-    if pipeline.has_snapshot(ctx.persona_id, ctx.line_id):
-        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.line_id)
+    if pipeline.has_snapshot(ctx.persona_id, ctx.model_key):
+        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
         if _is_anchor_ttl_expired(ctx):
             LOGGER.info(
-                "head_pipeline: anchor TTL expired (in-memory snapshot), recapturing persona=%s line=%s",
-                ctx.persona_id, ctx.line_id,
+                "head_pipeline: anchor TTL expired (in-memory snapshot), recapturing persona=%s model=%s",
+                ctx.persona_id, ctx.model_key,
             )
             pipeline.capture_all(ctx)
             return
@@ -283,12 +305,12 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
         if expected_names - actual_names:
             pipeline.capture_all(ctx)
         return
-    if pipeline.load_from_store(ctx.persona_id, ctx.line_id):
-        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.line_id)
+    if pipeline.load_from_store(ctx.persona_id, ctx.model_key):
+        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
         if _is_anchor_ttl_expired(ctx):
             LOGGER.info(
-                "head_pipeline: anchor TTL expired (loaded snapshot), recapturing persona=%s line=%s",
-                ctx.persona_id, ctx.line_id,
+                "head_pipeline: anchor TTL expired (loaded snapshot), recapturing persona=%s model=%s",
+                ctx.persona_id, ctx.model_key,
             )
             pipeline.capture_all(ctx)
             return
@@ -320,11 +342,16 @@ def render_head_messages(
     *,
     enabled_sections: set[str] | None = None,
     pipeline: HeadPipeline | None = None,
+    model_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """pipeline 経由で head の message 列を組み立てる。
 
     snapshot 不在なら自動で capture_all する (= 初回呼び出し / 再起動後)。
     snapshot が既にあれば render するだけで cache 安定する。
+
+    ``model_key`` はこの head を届ける Session (persona, model) の model
+    (beat_execution_context.md §3.1)。ExecutionContext が届いている呼び出し元は
+    ``execution_context.model_key`` を渡す。None なら persona の標準 model。
 
     ``enabled_sections`` を渡すと、その名前の Section のみを composition 対象に
     する (= 旧 ``reqs.system_prompt`` / ``reqs.memory_weave`` / ``reqs.visual_context``
@@ -335,13 +362,13 @@ def render_head_messages(
     部分の置き換えとして使う。
     """
     pipeline = pipeline or get_default_pipeline()
-    ctx = build_line_head_input(persona, manager, building_id)
+    ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
 
     # render_head は (section_name, RenderedSection) を返すので、名前で直接
     # enabled フィルタできる。位置依存の zip は廃止 (None render セクションで
     # 名前がズレて内容が欠落するバグの根治)。
-    rendered = pipeline.render_head(ctx.persona_id, ctx.line_id)
+    rendered = pipeline.render_head(ctx.persona_id, ctx.model_key)
     rendered_by_name = {
         name: section
         for name, section in rendered
@@ -374,7 +401,7 @@ def _compose_messages(
     # は metadata.__memory_weave_type__ で section ラベルを切り替えるため、
     # 1 つにまとめずに 3 つの message を保つ必要がある。
     if MEMORY_WEAVE_SECTION_NAME in rendered_by_name:
-        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.line_id)
+        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
         mw_section_snapshot = (
             snapshot.sections.get(MEMORY_WEAVE_SECTION_NAME)
             if snapshot is not None else None
