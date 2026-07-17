@@ -21,7 +21,7 @@ def _schema(name: str, **kwargs) -> ToolSchema:
 
 
 def _pulse(aspect: Aspect) -> PulseContext:
-    pulse = PulseContext(pulse_id="p1", thread_id="t1")
+    pulse = PulseContext(pulse_id="p1")
     pulse.push_line(aspect=aspect)
     return pulse
 

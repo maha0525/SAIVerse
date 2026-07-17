@@ -199,6 +199,11 @@ def _normalise_timestamp(ts: Optional[str]) -> str:
 
 
 def _write_active_state(path: Path, suffix: str, iso_timestamp: str) -> None:
+    # 恒久切替はファイルを丸ごと書き直す = pulse_scoped_parent (Stelis/subagent の
+    # クラッシュ復旧マーカー、S4) を意図的に消す。Stelis 中に恒久切替が起きた後
+    # プロセスが死んだ場合、「Stelis 前の親」へ巻き戻すとペルソナの恒久選択を
+    # 打ち消すため、マーカーは残さない。プロセス内の Pulse 終端復元
+    # (PulseContext.pop_thread / unwind_threads) は従来どおりスタック記録の親へ戻る。
     payload = {"active_thread_id": suffix, "updated_at": iso_timestamp}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

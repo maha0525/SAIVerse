@@ -193,9 +193,7 @@ def run_work_session(
 
         # ---- PulseContext + WORKER ライン ----
         pulse_id = str(uuid.uuid4())
-        adapter = getattr(persona, "sai_memory", None)
-        thread_id = adapter.get_current_thread() if adapter else None
-        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, thread_id or "")
+        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
         from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
 
         pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=track_id)

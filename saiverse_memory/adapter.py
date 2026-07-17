@@ -75,6 +75,7 @@ class SAIMemoryAdapter:
 
     _PERSONA_THREAD_SUFFIX = "__persona__"
     _ACTIVE_STATE_FILENAME = "active_state.json"
+    _PULSE_SCOPED_PARENT_KEY = "pulse_scoped_parent"
 
     def __init__(
         self,
@@ -84,6 +85,7 @@ class SAIMemoryAdapter:
         resource_id: Optional[str] = None,
         settings: Optional[Settings] = None,
         startup_backup: bool = False,
+        recover_orphaned_thread: bool = False,
     ) -> None:
         """Create an adapter bound to ``personas/<persona_id>/memory.db``.
 
@@ -93,6 +95,14 @@ class SAIMemoryAdapter:
         呼び出しごとに DB バックアップを走らせないための門 (P1: memory 系
         スペルの DB ロック玉突き)。環境変数 SAIMEMORY_BACKUP_ON_START との
         AND で最終判定する。
+
+        ``recover_orphaned_thread``: opt-in for pulse-scoped thread orphan
+        recovery (S4, beat_execution_context.md 不変条件6)。Stelis/subagent の
+        thread 切替中にプロセスが死ぬと ``active_state.json`` に
+        ``pulse_scoped_parent`` が残る — このフラグが True の初期化時にそれを
+        検出して親 thread へ復元する。startup_backup と同じくペルソナ登録経路
+        だけが True を渡す。ツール・API の使い捨て adapter が「走行中の
+        Stelis」を誤って巻き戻さないための門。
         """
         base_settings = settings or load_settings()
         self.persona_id = persona_id
@@ -102,6 +112,12 @@ class SAIMemoryAdapter:
             from saiverse.data_paths import get_saiverse_home
             self.persona_dir = get_saiverse_home() / "personas" / persona_id
         self.persona_dir.mkdir(parents=True, exist_ok=True)
+
+        if recover_orphaned_thread:
+            # プロセス死で孤児化した Pulse スコープ thread (Stelis/subagent) の
+            # 自然回復。active_state.json のみを触るので conn 構築より前に行う。
+            self._recover_orphaned_pulse_thread()
+
         db_path = self.persona_dir / "memory.db"
 
         resolved_resource = resource_id or (base_settings.resource_id or persona_id)
@@ -1623,6 +1639,91 @@ class SAIMemoryAdapter:
         if suffix:
             return f"{self.persona_id}:{suffix}"
         return None
+
+    # ------------------------------------------------------------------
+    # Pulse-scoped thread marker (S4, beat_execution_context.md 不変条件6)
+    # ------------------------------------------------------------------
+
+    def _read_active_state(self) -> Dict[str, Any]:
+        """Read ``active_state.json`` as a dict (missing / broken file → {})."""
+        path = self.persona_dir / self._ACTIVE_STATE_FILENAME
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            LOGGER.warning("Invalid JSON in %s: %s", path, exc)
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_active_state_dict(self, data: Dict[str, Any]) -> bool:
+        path = self.persona_dir / self._ACTIVE_STATE_FILENAME
+        try:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except OSError as exc:
+            LOGGER.warning("Failed to write active state for %s: %s", self.persona_id, exc)
+            return False
+
+    def set_pulse_scoped_parent(self, parent_thread_id: str) -> bool:
+        """Record that the current active thread is a pulse-scoped switch.
+
+        Stelis / subagent の thread push 中であることを ``active_state.json``
+        の ``pulse_scoped_parent`` キー (最外周の親 thread の suffix) として
+        書き残す。書き手は ``PulseContext.push_thread`` / ``pop_thread`` のみ。
+        プロセス死で pop が走らなかった場合、次回のペルソナ登録
+        (``recover_orphaned_thread=True``) がこのキーを見て親へ復元する。
+
+        Note: ``set_active_thread`` はファイルを丸ごと書き直すため、恒久切替
+        (thread_switch ツール / API) はこのマーカーを自然に消す — それが正しい
+        意味論 (恒久切替後にクラッシュ復旧で古い親へ巻き戻さない)。
+        """
+        if not parent_thread_id:
+            return False
+        suffix = parent_thread_id.split(":", 1)[1] if ":" in parent_thread_id else parent_thread_id
+        data = self._read_active_state()
+        data[self._PULSE_SCOPED_PARENT_KEY] = suffix
+        return self._write_active_state_dict(data)
+
+    def clear_pulse_scoped_parent(self) -> None:
+        """Remove the pulse-scoped marker (no-op when absent)."""
+        data = self._read_active_state()
+        if self._PULSE_SCOPED_PARENT_KEY not in data:
+            return
+        data.pop(self._PULSE_SCOPED_PARENT_KEY, None)
+        self._write_active_state_dict(data)
+
+    def _recover_orphaned_pulse_thread(self) -> None:
+        """Restore the parent thread when a pulse-scoped switch was orphaned.
+
+        呼び出しはペルソナ登録経路の初期化 (``recover_orphaned_thread=True``)
+        のみ。その時点で当該ペルソナの Pulse は走っていないため、マーカーが
+        残っている = 前プロセスが Stelis/subagent 区間内で死んだ、と確定できる。
+        """
+        data = self._read_active_state()
+        parent = data.get(self._PULSE_SCOPED_PARENT_KEY)
+        if not isinstance(parent, str) or not parent.strip():
+            return
+        parent_suffix = parent.strip()
+        orphaned = data.get("active_thread_id")
+        data["active_thread_id"] = parent_suffix
+        data.pop(self._PULSE_SCOPED_PARENT_KEY, None)
+        data["updated_at"] = datetime.now().isoformat()
+        if not self._write_active_state_dict(data):
+            LOGGER.warning(
+                "[thread-recovery] persona=%s: failed to restore orphaned pulse-scoped "
+                "thread (active=%s, parent=%s)",
+                self.persona_id, orphaned, parent_suffix,
+            )
+            return
+        LOGGER.warning(
+            "[thread-recovery] persona=%s: pulse_scoped_parent が残っていたため、"
+            "孤児化した Stelis/subagent thread (%s) から親 thread (%s) へ復元しました "
+            "(前プロセスの復元漏れの自然回復)",
+            self.persona_id, orphaned, parent_suffix,
+        )
 
     # ------------------------------------------------------------------
     # Pulse Logs

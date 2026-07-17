@@ -45,7 +45,8 @@ aspect = WORKER (サブライン) は親 (CONVERSATION / AUTONOMOUS) の中で�
 - WORKER 終了時、親 head は触らない → 親は WORKER 呼ぶ前と完全に同じ状態
 - 親に渡るのは aspect v0.2 既存の `report_to_parent` だけ
 
-WORKER は構造上サブライン (別 line_id) なので、親と独立した head / cache を自然に持つ。
+head の同定キーは (persona, model) であり line を含まない ([`beat_execution_context.md`](beat_execution_context.md) §3.1、まはー裁定 2026-07-16 — line で分けると prefix cache の共用という head の存在意義が死ぬ)。WORKER が親と別の head / cache を持つのは「サブラインだから」ではなく **実行 model が違う (WORKER=軽量 tier) から** — 同じ model なら同じ head を共有する。
+(旧記述「別 line_id なので独立した head を自然に持つ」は §6-3b の (persona, model) キー化で改訂済み。)
 
 ---
 
@@ -105,16 +106,16 @@ aspect (v0.2: `line_tag_responsibility.md §10`) は (line_role, scope, model_ti
 
 セッション粒度との関係は以下:
 
-| aspect | line_id | セッションへの影響 |
+| aspect | line_role | セッションへの影響 |
 |---|---|---|
-| CONVERSATION | "main" | メインラインで動く、同 model なら同 head 共有 |
-| AUTONOMOUS | "main" | 同上 |
-| META | "main" | 同上 |
-| WORKER | サブライン (別 line_id) | 親に閉じる子セッション (§2.4) |
+| CONVERSATION | main_line | 標準 tier — persona の標準 model のセッションに属する |
+| AUTONOMOUS | main_line | 軽量 tier — lightweight model のセッションに属する |
+| META | meta_judgment | 標準 tier — 標準 model のセッションに属する |
+| WORKER | sub_line | 軽量 tier — 親に閉じる子セッション (§2.4)、head は同 model の Session と共有 |
 
-メインラインで動く 3 つの aspect (CONVERSATION / AUTONOMOUS / META) は line_id を共有するため、同じ (persona, model) を使う限り同じ head を共有し、同じセッションに属する。aspect そのものはセッション粒度に影響しない。
+セッションと head の同定キーはどちらも (persona, model) であり、line はキーに含まれない (§6-3b で実装追従済み)。aspect がセッションに影響するのは **model tier の導出を通じてだけ** — 同じ (persona, model) に解決される限り、どの aspect も同じ head・同じセッションを共有する。
 
-WORKER だけが構造上サブラインなので、必然的に子セッションを形成する。
+WORKER が子セッションを形成するのは、履歴を持たない (history_depth=0) 指示書駆動の実行であり、かつ通常 lightweight model = 親と別セッションに解決されるため。
 
 aspect は「ペルソナの状態の一側面」を表す呼び出し時の分類であり、セッションは「その活動が連続する区間」を表す時間概念で、両者は直交する。
 

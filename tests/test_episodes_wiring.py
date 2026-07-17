@@ -324,8 +324,8 @@ class FakeRuntime:
                           cost_usd, cached_tokens=0, cache_write_tokens=0):
         return None
 
-    def _get_or_create_pulse_context(self, pulse_id, thread_id):
-        return PulseContext(pulse_id=pulse_id, thread_id=thread_id)
+    def _get_or_create_pulse_context(self, pulse_id):
+        return PulseContext(pulse_id=pulse_id)
 
     def _flush_pulse_logs(self, persona, pulse_context):
         return None

@@ -321,7 +321,9 @@ class RuntimeEngine:
 
             if execution == "subagent":
                 label = f"Subagent: {sub_name}"
-                subagent_thread_id, subagent_parent_id = self.runtime._start_subagent_thread(persona, label=label)
+                subagent_thread_id, subagent_parent_id = self.runtime._start_subagent_thread(
+                    persona, label=label, pulse_context=state.get("_pulse_context"),
+                )
                 if not subagent_thread_id:
                     LOGGER.warning("[sea][exec] Failed to start subagent thread for '%s', falling back to inline", sub_name)
                     execution = "inline"  # Fallback
@@ -342,7 +344,7 @@ class RuntimeEngine:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
                 # End subagent thread on error (no chronicle)
                 if execution == "subagent" and subagent_thread_id:
-                    self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                    self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
                 error_msg = f"Sub-playbook error: {type(exc).__name__}: {exc}"
                 state["last"] = error_msg
                 state["_exec_error"] = True
@@ -384,7 +386,7 @@ class RuntimeEngine:
             # End subagent thread on success
             if execution == "subagent" and subagent_thread_id:
                 gen_chronicle = getattr(node_def, "subagent_chronicle", True)
-                chronicle = self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
+                chronicle = self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle, pulse_context=state.get("_pulse_context"))
                 state["_subagent_chronicle"] = chronicle or ""
                 log_sea_trace(playbook.name, node_id, "EXEC", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
 

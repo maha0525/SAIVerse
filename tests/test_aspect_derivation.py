@@ -67,7 +67,7 @@ class TestLineFrameAspect(unittest.TestCase):
 
 class TestPushLineMetadata(unittest.TestCase):
     def test_push_aspect_exposes_line_role_and_scope(self):
-        pc = PulseContext(pulse_id="p1", thread_id="t1")
+        pc = PulseContext(pulse_id="p1")
         pc.push_line(aspect=Aspect.WORKER, track_id="trk")
         meta = pc.current_line_metadata()
         self.assertEqual(meta["line_role"], "sub_line")
@@ -76,7 +76,7 @@ class TestPushLineMetadata(unittest.TestCase):
 
     def test_autonomous_root_then_worker_subline(self):
         # Pulse-root = AUTONOMOUS (main_line/committed), その下に WORKER サブライン
-        pc = PulseContext(pulse_id="p1", thread_id="t1")
+        pc = PulseContext(pulse_id="p1")
         pc.push_line(aspect=Aspect.AUTONOMOUS, track_id="trk")
         root_meta = pc.current_line_metadata()
         self.assertEqual(root_meta["line_role"], "main_line")
@@ -95,12 +95,12 @@ class TestPushLineMetadata(unittest.TestCase):
         self.assertEqual(pc.current_line_metadata()["scope"], "committed")
 
     def test_legacy_metadata_scope_none(self):
-        pc = PulseContext(pulse_id="p1", thread_id="t1")
+        pc = PulseContext(pulse_id="p1")
         pc.push_line(role="main_line")   # legacy: aspect なし
         self.assertIsNone(pc.current_line_metadata()["scope"])
 
     def test_empty_stack_metadata(self):
-        pc = PulseContext(pulse_id="p1", thread_id="t1")
+        pc = PulseContext(pulse_id="p1")
         meta = pc.current_line_metadata()
         self.assertIsNone(meta["line_role"])
         self.assertIsNone(meta["scope"])

@@ -844,11 +844,7 @@ class MetaLayer:
 
         from sea.pulse_context import PulseContext
 
-        adapter = getattr(persona, "sai_memory", None)
-        thread_id = adapter.get_current_thread() if adapter else None
-        pulse_ctx = PulseContext(
-            pulse_id=str(uuid.uuid4()), thread_id=thread_id or ""
-        )
+        pulse_ctx = PulseContext(pulse_id=str(uuid.uuid4()))
 
         # Phase 2: meta_judgment_log への書き込み用の蓄積バッファ。
         # legacy path は runtime を経由しないため、ここで自前で集める。

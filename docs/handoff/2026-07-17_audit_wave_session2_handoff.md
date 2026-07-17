@@ -89,14 +89,43 @@ Metabolism 二層分離 (intent §3.2)。調査で確定した現状: 編纂と�
 6. **weave/chronicle diff 整理** (§6-4 からの宿題): chronicle_index の件数ラベル diff (sections/chronicle_index.py:77-97) を退役 ([] に) — 可視化は節目の構造交換 (退役の瞬間に Chronicle が生ログと入れ替わりで見える、intent §3.2) が担保するのでラベルは重複ノイズ。memory_weave diff は [] のまま。これが intent §3.3 の「未整理も本工事で潰す」の実装形
 7. **Case 3 (会話前) は claim だけ足して挙動維持**: anchor 前進が絡まないので S2 の対象外。編纂失敗しても生ログは SAIMemory に残り次回編纂で自然回復
 
-## 6. 次の走路 (§6-5 完了後)
+## 6. §6-6a — 実装・検収済み・コミット済み / §6-6b — 分離して後続へ
 
-1. §6-6: thread の ExecutionContext 化 (S4、Stelis push/pop)。**Beat ロックのスレッド束縛→実行トークン化もここ** (intent §3.4 末尾の実測帰結参照 — running-loop レガシー分岐の boundary no-op の恒久解)
+§6-6a は下記設計どおり委譲→検収で完了。逸脱2点 (いずれも妥当と裁定): (1) 孤児復旧は adapter 初期化全般でなく**ペルソナ登録経路の opt-in** (`recover_orphaned_thread=True` は persona/bootstrap.py のみ — 使い捨て adapter が走行中 Stelis を誤って巻き戻さない門、startup_backup と同じ規律) (2) マーカー書き込みは set_active_thread 拡張でなく**別メソッド** (恒久切替がマーカーを自然に消す意味論がデフォルト成立 — クラッシュ復旧が恒久選択を打ち消さない)。`stelis_parent_thread_id` state は読み手が複数いるため維持 (復元の正は pulse_ctx スタック)。§6-7 (正典改訂) も同コミット: session.md ×2 / dynamic_state_sync.md 改訂注記+3箇所 / concepts/metabolism.md。
+
+### 元の設計 (記録) — a/b 分割裁定
+
+調査で確定した現状: thread の正は `active_state.json` (persona 共有可変ファイル、プロセス内キャッシュなし)。Stelis (sea/runtime_nodes.py:329-405) は start で子へ切替・end で親復元するが、**復元は end ノードにしか無く**、例外/cancel で end 不達だと以後の全 Pulse が子 thread へ保存され続ける (S4、監査原文 = docs/handoff/2026-07-15_sea_runtime_session_head_tail_audit.md:108-126)。`PulseContext.thread_id` は生成時固定の死に値 (読み手2箇所のみ)。`ExecutionContext.thread_id` は解決済みだが**消費者ゼロの飾り**。beat_gate は RLock + threading.local 深度でスレッド束縛 (boundary は非所有スレッドで no-op — runtime_graph.py:225-230 の running-loop executor 分岐で劣化)。
+
+**分割裁定 (私=Fable)**: §6-6a = S4 根治 (今 wave)。§6-6b = Beat ロックの実行トークン化は**分離して後続へ** — 理由: 現状の劣化は「レガシー分岐で META の待ちが最大1 Pulse」という軽微なもの (直列性・関所は無傷) に対し、トークン化はトークン伝播漏れ = デッドロック新設のリスクを持つロック層の作り直しで、半端な状態を残せない。§6-2 の Beat 直列化により S4 の「並列 Pulse が汚染値を読む」経路は既に消えており、残る実害 (例外時復元漏れ / クラッシュ孤児) は 6-6a で閉じる。
+
+### §6-6a の設計 (S4 根治)
+
+前提裁定: **`active_state.json` は「直列に一人ずつ触る台帳」として生かす** (Beat 直列化下では、保証された復元があれば「thread は実行の属性」の意味論が成立する)。adapter 読み口全部の contextvar 化は追わない — 高リスク低便益。
+
+1. **PulseContext に thread スタック**: `push_thread(child_thread_id)` (親 = 現在のファイル値を記録して `set_active_thread(child)`) / `pop_thread()` (親へ復元) / `unwind_threads(depth)` (指定深さまで一括復元)。Stelis start/end ノードと subagent 経路 (runtime.py:1157/1206) をこれ経由に置換
+2. **保証された復元**: run_playbook (または graph 実行の finally — 現物で最適点を確認) が入口で thread スタック深さを記録し、finally で `unwind_threads(その深さ)` — 例外/cancel/正常終了すべてで親へ戻る
+3. **クラッシュ孤児の復旧**: push 時に active_state.json へ `pulse_scoped_parent` を書き、pop/unwind で消す。adapter 初期化 (起動時) に `pulse_scoped_parent` が残っていたら親へ復元して WARN (プロセス死で孤児化した Stelis の自然回復)
+4. **死に値の廃止**: `PulseContext.thread_id` フィールドを削除。読み手2箇所の置換 — runtime.py:1378 (_flush_pulse_logs) は flush 時点の adapter 現在値、pulse_context.py:302 (resolve_execution_context のフォールバック) は削除
+5. **ExecutionContext.thread_id が実消費者を得る**: Beat 開始時点の解決値として維持 (今回は消費者追加なし — _store_memory の live 読みは stack-mirror されたファイルが正しく反映するため現状維持が正)
+
+### §6-6b の材料 (後続 wave 用の記録)
+
+- depths (threading.local、beat_gate.py:85) → persona→保持トークンスタックへ。トークンは Beat 単位の新規発番 id (execution_id は現状常に None で使えない)
+- 再入判定は「同一スレッド」→「親トークン継承」に変わる。子 Beat への伝播は state 経由 (`_pulse_context` 継承と同型、runtime_graph.py:176)。**伝播漏れ = デッドロック** (現 RLock は同一スレッド再入を自動許容するが、トークンは明示継承が必須) — 全子 acquire 経路 (metabolism 再入 / work_session / spell executor) の伝播マップを作ってから着手
+- ロック順序不変条件 (MetaLayer Lock → Beat ロック の一方向) は維持
+
+## 7. 次の走路 (§6-6a 完了後)
+
+1. §6-7: session.md / dynamic_state_sync.md の正典改訂 — 対象確定済み: session.md :48 (WORKER の「別 line_id で独立 head」→ (persona,model) 共有へ) / :113,115 (同)。dynamic_state_sync.md :56-60 (操作ラベル型の例 → 内容型) / :162-163 (差分検出の不変条件 → 操作起点 push + backstop) / :133-140 (Metabolism 統合フックの差分駆動前提)
+2. §6-6b: Beat ロックの実行トークン化 (上記材料)
+3. 台帳 Phase 1 (判断点 A2/A7/A8/A9/A11) → Phase 2〜5
+4. 柱5〜8
 2. §6-7: session.md / dynamic_state_sync.md の正典改訂
 3. 台帳 Phase 1 (判断点 A2/A7/A8/A9/A11) → Phase 2〜5
 4. 柱5〜8
 
-## 7. 運用メモ (このセッションで確立・確認したこと)
+## 8. 運用メモ (このセッションで確立・確認したこと)
 
 - **委譲→検収の型で回す** (まはー指示の再確認 2026-07-17。私が A' を直接実装して「一人で動きすぎ」と止められた)。調査(Explore)→設計(メイン)→実装(general-purpose)→検収(メイン)。委譲プロンプトには毎回: メインツリー直接 / worktree・再委譲禁止 / git 操作禁止 / 触ってよいファイル明示 / venv python / pytest パイプ禁止
 - **検収は設計検証の第二パス** (memory 更新済み: feedback_delegate_impl_to_subagents)。実装の前提が本番経路で成立するかを疑う — 今回はスレッドモデルをプローブ2本で実測した

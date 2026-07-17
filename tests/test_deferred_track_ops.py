@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "builtin_data" / "t
 class PulseContextEnqueueTests(unittest.TestCase):
     def setUp(self) -> None:
         from sea.pulse_context import PulseContext
-        self.ctx = PulseContext(pulse_id="test_pulse", thread_id="test_thread")
+        self.ctx = PulseContext(pulse_id="test_pulse")
 
     def test_empty_queue(self):
         self.assertFalse(self.ctx.has_deferred_track_ops())
@@ -78,7 +78,7 @@ class SpellEnqueueWithPulseContextTests(unittest.TestCase):
         from sea.pulse_context import PulseContext
         from tools.context import persona_context
 
-        self.ctx = PulseContext(pulse_id="test_pulse", thread_id="test_thread")
+        self.ctx = PulseContext(pulse_id="test_pulse")
         self._persona_cm = persona_context(
             persona_id="persona_test",
             persona_path=str(Path.cwd()),
@@ -143,7 +143,7 @@ class ApplyDeferredOpsTests(unittest.TestCase):
         from sea.pulse_context import PulseContext
         from sea.runtime_runner import _apply_deferred_track_ops
 
-        ctx = PulseContext(pulse_id="p1", thread_id="t1")
+        ctx = PulseContext(pulse_id="p1")
         ctx.enqueue_track_op("pause", track_id="A")
         ctx.enqueue_track_op("activate", track_id="B")
         ctx.enqueue_track_op("complete", track_id="C")
@@ -167,7 +167,7 @@ class ApplyDeferredOpsTests(unittest.TestCase):
         from sea.pulse_context import PulseContext
         from sea.runtime_runner import _apply_deferred_track_ops
 
-        ctx = PulseContext(pulse_id="p1", thread_id="t1")
+        ctx = PulseContext(pulse_id="p1")
         track_manager = MagicMock()
         persona = MagicMock(manager_ref=MagicMock(track_manager=track_manager))
 
@@ -181,7 +181,7 @@ class ApplyDeferredOpsTests(unittest.TestCase):
         from sea.pulse_context import PulseContext
         from sea.runtime_runner import _apply_deferred_track_ops
 
-        ctx = PulseContext(pulse_id="p1", thread_id="t1")
+        ctx = PulseContext(pulse_id="p1")
         ctx.enqueue_track_op("activate", track_id="Z")
 
         # Persona without manager_ref / track_manager — must drop ops, not crash
@@ -196,7 +196,7 @@ class ApplyDeferredOpsTests(unittest.TestCase):
         from sea.pulse_context import PulseContext
         from sea.runtime_runner import _apply_deferred_track_ops
 
-        ctx = PulseContext(pulse_id="p1", thread_id="t1")
+        ctx = PulseContext(pulse_id="p1")
         ctx.enqueue_track_op("pause", track_id="A")
         ctx.enqueue_track_op("activate", track_id="B")
 

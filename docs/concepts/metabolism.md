@@ -41,18 +41,19 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 
 Metabolism の起点を指すマーカー。
 
-- `METABOLISM_ANCHORS` は **per-model dict** として persona に紐付き、各 model ごとに `{anchor_id, updated_at, ttl_seconds}` を持つ
-- `updated_at` は prompt cache write 時刻で、LLM コール後に `_touch_anchor_after_llm_call` で touch される
-- `anchor_updated_at + ttl < now` で TTL 切れ（= Session 継続不能の予兆）と判定 → 次の context 構築時に Metabolism が自動 trigger される
+- anchor は **`session_anchor` テーブル**（1 行 = 1 (persona, model)、列 = `ANCHOR_MESSAGE_ID / TTL_SECONDS / UPDATED_AT`）に持つ（§6-3a、2026-07-17。旧 `AI.METABOLISM_ANCHORS` 単一 JSON 列は backfill の変換元としてのみ残存）
+- `UPDATED_AT` は prompt cache write 時刻で、LLM コール成功後に `touch_anchor_after_llm_call` で touch される。記帳先は **usage.model（実際に応答した model）**、touch する anchor は prefix 組成時の値を `state["_prefix_anchor_id"]` で call-local に運ぶ（persona 属性経由は廃止 — §6-5）
+- `UPDATED_AT + ttl < now` で TTL 切れ（= Session 継続不能の予兆）と判定 → 次の context 構築時に Metabolism が自動 trigger される
+- **二層分離（§6-5、2026-07-17）**: 編纂（Chronicle 生成）は persona に一度（実行台帳の冪等 claim `metabolism.run`）、退役（anchor 前進）は model ごと。**退役は編纂の成功（status ok / disabled）でゲート**され、編纂失敗時は据え置き → 次回自然再試行（S2 根治）
 
 **実装済**。
 
 ## 実装
 
-- 発火・アンカー解決: `sea/runtime.py` / `sea/runtime_context.py`（`_resolve_metabolism_anchor` / `_touch_anchor_after_llm_call`）
-- head 再構築: `sea/head_pipeline/integration.py`
-- 結晶化: `sai_memory/arasuji/generator.py`（`ArasujiGenerator` + `entity_extractor` の相乗り）
-- Anchor 状態: persona の `METABOLISM_ANCHORS`（per-model dict）
+- 発火・アンカー解決: `sea/runtime.py` / `sea/runtime_context.py` / `sea/session_lifecycle.py`（`resolve_metabolism_anchor` / `touch_anchor_after_llm_call` / `maybe_run_metabolism`）
+- head 再構築: `sea/head_pipeline/integration.py`（可視化は anchor を進めた model の (persona, model) snapshot のみ — §6-5）
+- 結晶化: `sai_memory/arasuji/generator.py`（`ArasujiGenerator` + `entity_extractor` の相乗り）。冪等 claim は実行台帳（`saiverse/execution_ledger.py`）
+- Anchor 状態: `session_anchor` テーブル（1 行 = 1 (persona, model)）
 
 ## 関連概念
 

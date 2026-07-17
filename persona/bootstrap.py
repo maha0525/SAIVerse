@@ -75,6 +75,10 @@ def initialise_memory_adapter(persona) -> Optional[SAIMemoryAdapter]:
             # ペルソナ登録経路 = 起動時自動バックアップを起こす正規の1点。
             # ツール・API 経路の使い捨て adapter はデフォルト False のまま。
             startup_backup=True,
+            # プロセス死で孤児化した Stelis/subagent thread の復旧も登録経路
+            # だけで行う (S4)。使い捨て adapter に許すと走行中の Stelis を
+            # 誤って巻き戻すため。
+            recover_orphaned_thread=True,
         )
         if adapter.is_ready():
             logging.info("SAIMemory ready for persona %s", persona.persona_id)

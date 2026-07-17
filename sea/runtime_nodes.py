@@ -175,7 +175,9 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         subagent_thread_id = None
         subagent_parent_id = None
         if execution == "subagent":
-            subagent_thread_id, subagent_parent_id = runtime._start_subagent_thread(persona, label=f"Subagent: {sub_name}")
+            subagent_thread_id, subagent_parent_id = runtime._start_subagent_thread(
+                persona, label=f"Subagent: {sub_name}", pulse_context=state.get("_pulse_context"),
+            )
             if not subagent_thread_id:
                 LOGGER.warning("[sea][subplay] Failed to start subagent thread for '%s', falling back to inline", sub_name)
                 execution = "inline"
@@ -207,12 +209,12 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         except LLMError:
             LOGGER.exception("[sea][subplay] LLM error in subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:
-                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             raise
         except Exception as exc:
             LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:
-                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             state["last"] = f"Sub-playbook error: {exc}"
             return state
         finally:
@@ -224,7 +226,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                     state.pop("_force_lightweight_model", None)
         if execution == "subagent" and subagent_thread_id:
             gen_chronicle = getattr(node_def, "subagent_chronicle", True)
-            chronicle = runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
+            chronicle = runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle, pulse_context=state.get("_pulse_context"))
             state["_subagent_chronicle"] = chronicle or ""
             log_sea_trace(playbook.name, node_id, "SUBPLAY", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
         last_text = sub_outputs[-1] if sub_outputs else ""
@@ -356,7 +358,15 @@ def lg_stelis_start_node(runtime: Any, node_def: Any, persona: Any, playbook: An
             return state
         anchor_message = {"role": "system", "content": "", "metadata": {"type": "stelis_anchor", "stelis_thread_id": stelis.thread_id, "stelis_label": label, "created_at": int(time.time())}, "embedding_chunks": 0}
         memory_adapter.append_persona_message(anchor_message, thread_suffix=parent_thread_id.split(":")[-1] if ":" in parent_thread_id else parent_thread_id)
-        memory_adapter.set_active_thread(stelis.thread_id)
+        # S4 (thread push/pop): 親 thread は PulseContext のスタック +
+        # active_state.json の pulse_scoped_parent に記録され、end ノード不達
+        # (例外/cancel) でも graph 実行の finally (unwind_threads) が復元する。
+        pulse_ctx = state.get("_pulse_context")
+        if pulse_ctx is not None and callable(getattr(pulse_ctx, "push_thread", None)):
+            pulse_ctx.push_thread(memory_adapter, stelis.thread_id, parent_thread_id=parent_thread_id)
+        else:
+            # pulse_ctx の無い legacy/テスト経路: 従来どおり直接切替 (復元保証なし)
+            memory_adapter.set_active_thread(stelis.thread_id)
         log_sea_trace(playbook.name, node_id, "STELIS_START", f"thread={stelis.thread_id} label=\"{label}\"")
         state.update({"stelis_thread_id": stelis.thread_id, "stelis_parent_thread_id": parent_thread_id, "stelis_depth": stelis.depth, "stelis_window_ratio": window_ratio, "stelis_label": label, "stelis_available": True})
         if event_callback:
@@ -390,7 +400,23 @@ def lg_stelis_end_node(runtime: Any, node_def: Any, persona: Any, playbook: Any,
             return state
         chronicle_summary = runtime._generate_stelis_chronicle(persona, current_thread_id, stelis_info.chronicle_prompt) if generate_chronicle else None
         memory_adapter.end_stelis_thread(thread_id=current_thread_id, status="completed", chronicle_summary=chronicle_summary)
-        memory_adapter.set_active_thread(parent_thread_id)
+        # S4: start が push した親を pop で復元する。pop の記録値が state の
+        # 親と食い違ったら WARN (入れ子の pop 漏れの兆候)。push を経ていない
+        # legacy/テスト経路 (pulse_ctx なし or スタック空) は従来の直接復元。
+        pulse_ctx = state.get("_pulse_context")
+        if (
+            pulse_ctx is not None
+            and callable(getattr(pulse_ctx, "pop_thread", None))
+            and pulse_ctx.thread_stack_depth() > 0
+        ):
+            restored = pulse_ctx.pop_thread(memory_adapter)
+            if restored and restored != parent_thread_id:
+                LOGGER.warning(
+                    "[stelis] Restored thread %s differs from recorded stelis parent %s",
+                    restored, parent_thread_id,
+                )
+        else:
+            memory_adapter.set_active_thread(parent_thread_id)
         if chronicle_summary:
             state["stelis_chronicle"] = chronicle_summary
         state["stelis_thread_id"] = None

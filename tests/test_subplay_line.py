@@ -170,7 +170,7 @@ def _make_subplay_test_env(report_value=None, sub_line="sub"):
     # runtime mock
     runtime = MagicMock()
     runtime._effective_building_id = lambda persona, building_id: building_id
-    runtime._start_subagent_thread = lambda persona, label: (None, None)
+    runtime._start_subagent_thread = lambda persona, label, pulse_context=None: (None, None)
 
     # _run_playbook の副作用として state に report_to_parent を入れる
     def fake_run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, record_history,
@@ -204,7 +204,7 @@ def _make_subplay_test_env(report_value=None, sub_line="sub"):
     runtime._load_playbook_for = lambda name, p, b: SimpleNamespace(name=name, output_schema=["report_to_parent"])
 
     # state
-    pulse_ctx = PulseContext(pulse_id="test-pulse", thread_id="test-thread")
+    pulse_ctx = PulseContext(pulse_id="test-pulse")
     state = {
         "_messages": [{"role": "user", "content": "initial"}],
         "_pulse_context": pulse_ctx,
@@ -247,7 +247,7 @@ def test_subplay_line_sub_stores_report_to_saimemory_with_main_line_metadata():
 
     runtime = MagicMock()
     runtime._effective_building_id = lambda persona, building_id: building_id
-    runtime._start_subagent_thread = lambda persona, label: (None, None)
+    runtime._start_subagent_thread = lambda persona, label, pulse_context=None: (None, None)
 
     def fake_run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, record_history,
                          state, event_callback, **kwargs):
@@ -268,7 +268,7 @@ def test_subplay_line_sub_stores_report_to_saimemory_with_main_line_metadata():
         execution="inline", isolate_pulse_context=False, args=None,
         propagate_output=False, subagent_chronicle=False,
     )
-    pulse_ctx = PulseContext(pulse_id="test-pulse-xyz", thread_id="test-thread")
+    pulse_ctx = PulseContext(pulse_id="test-pulse-xyz")
     state = {
         "_messages": [],
         "_pulse_context": pulse_ctx,
@@ -303,7 +303,7 @@ def test_subplay_line_main_does_not_call_store_memory():
 
     runtime = MagicMock()
     runtime._effective_building_id = lambda persona, building_id: building_id
-    runtime._start_subagent_thread = lambda persona, label: (None, None)
+    runtime._start_subagent_thread = lambda persona, label, pulse_context=None: (None, None)
 
     def fake_run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, record_history,
                          state, event_callback, **kwargs):
@@ -324,7 +324,7 @@ def test_subplay_line_main_does_not_call_store_memory():
         execution="inline", isolate_pulse_context=False, args=None,
         propagate_output=False, subagent_chronicle=False,
     )
-    pulse_ctx = PulseContext(pulse_id="p1", thread_id="t1")
+    pulse_ctx = PulseContext(pulse_id="p1")
     state = {
         "_messages": [],
         "_pulse_context": pulse_ctx,

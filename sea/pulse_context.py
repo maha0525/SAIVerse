@@ -220,7 +220,8 @@ class ExecutionContext:
     Attributes:
         persona_id: 誰の実行か。
         thread_id: どの thread に記録するか (Beat 時点の adapter
-            ``get_current_thread()`` の解決値。Stelis push/pop 化は後続の段)。
+            ``get_current_thread()`` の解決値。Stelis / subagent の切替は
+            ``PulseContext.push_thread`` / ``pop_thread`` が adapter と同期する)。
         line_id: 実行中ラインの ``LineFrame.line_id``。frame の無い実行
             (keepalive / gold_panning 等の Pulse 外呼び出し) では空文字。
         aspect: このラインのアスペクト (§10)。legacy frame / frame 無しでは None。
@@ -289,7 +290,8 @@ def resolve_execution_context(
     else:
         model_key = getattr(persona, "model", "unknown")
 
-    # ── thread_id: adapter の現在値が正 (S4 の push/pop 化は後続の段) ──
+    # ── thread_id: adapter の現在値が正 (Stelis/subagent の push/pop は
+    #    PulseContext.push_thread / pop_thread が adapter と同期する) ──
     thread_id = ""
     adapter = getattr(persona, "sai_memory", None)
     if adapter is not None:
@@ -298,8 +300,6 @@ def resolve_execution_context(
         except Exception:
             LOGGER.debug("[execution_context] get_current_thread failed", exc_info=True)
             thread_id = ""
-    if not thread_id and pulse_context is not None:
-        thread_id = pulse_context.thread_id or ""
 
     if pulse_context is not None:
         pulse_id = pulse_context.pulse_id or ""
@@ -360,12 +360,20 @@ class PulseContext:
     The ``deferred_track_ops`` queue holds Track operations issued by spell
     invocations during the Pulse; the runtime applies them at Pulse completion
     so Track switches never interrupt the current Pulse's content generation.
+
+    The ``_thread_stack`` field (S4, beat_execution_context.md 不変条件6) records
+    parent thread ids for Stelis / subagent thread switches performed during
+    this Pulse. ``push_thread`` / ``pop_thread`` keep the persona's
+    ``active_state.json`` in sync, and the graph runner's ``finally``
+    (sea/runtime_graph.py) calls ``unwind_threads`` back to the entry depth so
+    the parent thread is restored even when an end node is never reached
+    (exception / cancel).
     """
 
     pulse_id: str
-    thread_id: str
     logs: List[PulseLogEntry] = field(default_factory=list)
     _line_stack: List[LineFrame] = field(default_factory=list)
+    _thread_stack: List[str] = field(default_factory=list)
     deferred_track_ops: List[DeferredTrackOp] = field(default_factory=list)
     # メタ判断 Pulse 用バッファ (Intent A v0.15 + Phase 2)。
     # pulse_type == 'meta_judgment' の Pulse でのみ populate される。
@@ -457,6 +465,166 @@ class PulseContext:
             "scope": current.scope,
             "aspect": current.aspect.value if current.aspect is not None else None,
         }
+
+    # ------------------------------------------------------------------
+    # Thread push/pop (S4 — beat_execution_context.md §2.1 / 不変条件6)
+    # ------------------------------------------------------------------
+
+    def push_thread(
+        self,
+        adapter: Any,
+        child_thread_id: str,
+        parent_thread_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Switch the persona's active thread to ``child_thread_id``, recording
+        the parent on this Pulse's thread stack.
+
+        「thread は実行の属性」(不変条件6) の実装点。Stelis start / subagent
+        start はこれを経由することで、end ノード不達 (例外 / cancel) でも
+        graph 実行の ``finally`` (``unwind_threads``) が親 thread を復元できる。
+        push 時には ``active_state.json`` へ ``pulse_scoped_parent`` (最外周の
+        親) も書き込み、プロセス死で孤児化した場合の起動時復旧
+        (adapter の ``recover_orphaned_thread``) の手がかりにする。
+
+        Args:
+            adapter: SAIMemoryAdapter (またはテスト用の互換オブジェクト)。
+            child_thread_id: 切替先の thread id。
+            parent_thread_id: 呼び出し側が既に解決した親 thread id。``None``
+                なら ``adapter.get_current_thread()`` (無ければ既定 thread) を使う。
+
+        Returns:
+            記録した親 thread id。親が解決できなかった場合は空文字を記録した
+            うえで空文字を返す (pop 時は active thread を動かさない)。adapter
+            が無い場合は何もせず ``None``。
+        """
+        if adapter is None:
+            LOGGER.warning(
+                "[pulse_context] push_thread called without adapter — thread not switched "
+                "(pulse_id=%s child=%s)", self.pulse_id, child_thread_id,
+            )
+            return None
+        parent = parent_thread_id
+        if not parent:
+            try:
+                parent = adapter.get_current_thread()
+            except Exception:
+                LOGGER.debug("[pulse_context] get_current_thread failed during push_thread", exc_info=True)
+                parent = None
+        if not parent:
+            fallback = getattr(adapter, "_thread_id", None)
+            if callable(fallback):
+                try:
+                    parent = fallback(None)
+                except Exception:
+                    parent = None
+        parent = parent or ""
+        if not parent:
+            LOGGER.warning(
+                "[pulse_context] push_thread: no parent thread resolvable for child=%s — "
+                "pop will leave the active thread unchanged (pulse_id=%s)",
+                child_thread_id, self.pulse_id,
+            )
+        self._thread_stack.append(parent)
+        adapter.set_active_thread(child_thread_id)
+        self._write_orphan_marker(adapter)
+        LOGGER.debug(
+            "[pulse_context] Pushed thread: %s -> %s (depth=%d, pulse_id=%s)",
+            parent, child_thread_id, len(self._thread_stack), self.pulse_id,
+        )
+        return parent
+
+    def pop_thread(self, adapter: Any) -> Optional[str]:
+        """Pop the most recent thread push and restore the recorded parent.
+
+        Returns the restored parent thread id. スタックが空なら WARN + no-op
+        (``None``)。adapter が無い場合はスタックだけ縮めて記録値を返す
+        (active thread は復元できない)。
+        """
+        if not self._thread_stack:
+            LOGGER.warning(
+                "[pulse_context] pop_thread on empty thread stack — no-op (pulse_id=%s)",
+                self.pulse_id,
+            )
+            return None
+        parent = self._thread_stack.pop()
+        if adapter is None:
+            LOGGER.warning(
+                "[pulse_context] pop_thread without adapter — active thread not restored "
+                "(parent=%s, pulse_id=%s)", parent, self.pulse_id,
+            )
+            return parent
+        if parent:
+            try:
+                adapter.set_active_thread(parent)
+            except Exception:
+                LOGGER.warning(
+                    "[pulse_context] Failed to restore parent thread %s (pulse_id=%s)",
+                    parent, self.pulse_id, exc_info=True,
+                )
+        else:
+            LOGGER.warning(
+                "[pulse_context] pop_thread: recorded parent was empty — active thread "
+                "left unchanged (pulse_id=%s)", self.pulse_id,
+            )
+        self._write_orphan_marker(adapter)
+        LOGGER.debug(
+            "[pulse_context] Popped thread back to %s (depth=%d, pulse_id=%s)",
+            parent, len(self._thread_stack), self.pulse_id,
+        )
+        return parent
+
+    def thread_stack_depth(self) -> int:
+        """Current depth of the thread push stack."""
+        return len(self._thread_stack)
+
+    def unwind_threads(self, adapter: Any, depth: int) -> int:
+        """Pop thread pushes until the stack is back at ``depth``.
+
+        graph 実行の ``finally`` から呼ばれる非常口。正常系 (Stelis end /
+        subagent end がすべて pop 済み) では no-op。巻き戻しが起きた場合は
+        「end ノード不達で親 thread へ戻れていなかった」ことを意味するので
+        WARN を出す。Returns the number of pops performed.
+        """
+        target = max(0, int(depth))
+        popped = 0
+        while len(self._thread_stack) > target:
+            self.pop_thread(adapter)
+            popped += 1
+        if popped:
+            LOGGER.warning(
+                "[pulse_context] Unwound %d dangling thread push(es) to depth=%d "
+                "(pulse_id=%s) — a Stelis/subagent section exited without reaching "
+                "its end node; parent thread restored by the graph finally",
+                popped, target, self.pulse_id,
+            )
+        return popped
+
+    def _write_orphan_marker(self, adapter: Any) -> None:
+        """Sync ``pulse_scoped_parent`` in ``active_state.json`` with the stack.
+
+        スタックが空でなければ最外周の親 (``stack[0]``) を書き、空になったら
+        消す。adapter 側のメソッドが無い (テストスタブ等) 場合は黙って skip —
+        マーカーはクラッシュ復旧専用で、プロセス内の復元はスタックが正。
+        ``set_active_thread`` はファイルを丸ごと書き直す (未知キーを保持しない)
+        ため、push/pop で thread を切り替えた直後に毎回ここで書き直す。
+        """
+        if self._thread_stack:
+            outermost = self._thread_stack[0]
+            if not outermost:
+                return
+            setter = getattr(adapter, "set_pulse_scoped_parent", None)
+            if callable(setter):
+                try:
+                    setter(outermost)
+                except Exception:
+                    LOGGER.debug("[pulse_context] set_pulse_scoped_parent failed", exc_info=True)
+        else:
+            clearer = getattr(adapter, "clear_pulse_scoped_parent", None)
+            if callable(clearer):
+                try:
+                    clearer()
+                except Exception:
+                    LOGGER.debug("[pulse_context] clear_pulse_scoped_parent failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Deferred Track operations (Intent A v0.14, Intent B v0.11)

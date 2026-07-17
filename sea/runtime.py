@@ -1117,11 +1117,15 @@ class SEARuntime:
     def _eval_arithmetic_expression(self, expr: str, state: Dict[str, Any]) -> Any:
         return eval_arithmetic_expression(expr, state)
 
-    def _start_subagent_thread(self, persona, label: Optional[str] = None):
+    def _start_subagent_thread(self, persona, label: Optional[str] = None, pulse_context: Optional[Any] = None):
         """Create a temporary Stelis thread and switch the active thread to it.
 
         Used by subplay/exec nodes with execution='subagent' to isolate
         sub-playbook execution in a temporary thread.
+
+        ``pulse_context``: 呼び出しノードの PulseContext (state["_pulse_context"])。
+        渡されると thread 切替は push_thread 経由になり、end 不達 (例外/cancel)
+        でも graph 実行の finally が親 thread を復元する (S4)。
 
         Returns:
             (thread_id, parent_thread_id) on success, (None, None) on failure.
@@ -1153,8 +1157,12 @@ class SEARuntime:
             LOGGER.error("[subagent] Failed to create subagent thread for persona %s", persona.persona_id)
             return None, None
 
-        # Switch to the new thread
-        memory_adapter.set_active_thread(stelis.thread_id)
+        # Switch to the new thread (S4: pulse_context があれば push_thread 経由で
+        # 親を記録し、復元を graph finally に保証させる)
+        if pulse_context is not None and callable(getattr(pulse_context, "push_thread", None)):
+            pulse_context.push_thread(memory_adapter, stelis.thread_id, parent_thread_id=parent_thread_id)
+        else:
+            memory_adapter.set_active_thread(stelis.thread_id)
         LOGGER.info(
             "[subagent] Started subagent thread %s (parent=%s, label=%s)",
             stelis.thread_id, parent_thread_id, label,
@@ -1167,11 +1175,14 @@ class SEARuntime:
         thread_id: str,
         parent_thread_id: str,
         generate_chronicle: bool = True,
+        pulse_context: Optional[Any] = None,
     ) -> Optional[str]:
         """End a subagent thread and switch back to the parent thread.
 
         Args:
             generate_chronicle: If True, generate a Chronicle summary before ending.
+            pulse_context: start 側で push_thread した PulseContext。渡されると
+                復元は pop_thread 経由になる (S4)。
 
         Returns:
             Chronicle summary string if generated, else None.
@@ -1202,8 +1213,20 @@ class SEARuntime:
         if not success:
             LOGGER.error("[subagent] Failed to end subagent thread %s", thread_id)
 
-        # Switch back to parent thread
-        memory_adapter.set_active_thread(parent_thread_id)
+        # Switch back to parent thread (S4: push した親を pop で復元)
+        if (
+            pulse_context is not None
+            and callable(getattr(pulse_context, "pop_thread", None))
+            and pulse_context.thread_stack_depth() > 0
+        ):
+            restored = pulse_context.pop_thread(memory_adapter)
+            if restored and restored != parent_thread_id:
+                LOGGER.warning(
+                    "[subagent] Restored thread %s differs from recorded parent %s",
+                    restored, parent_thread_id,
+                )
+        else:
+            memory_adapter.set_active_thread(parent_thread_id)
         LOGGER.info(
             "[subagent] Ended subagent thread %s, returned to parent %s",
             thread_id, parent_thread_id,
@@ -1347,13 +1370,13 @@ class SEARuntime:
     # PulseContext management
     # ------------------------------------------------------------------
 
-    def _get_or_create_pulse_context(self, pulse_id: str, thread_id: str) -> Any:
+    def _get_or_create_pulse_context(self, pulse_id: str) -> Any:
         """Get an existing PulseContext or create a new one for this pulse_id."""
         from sea.pulse_context import PulseContext
         if pulse_id not in self._pulse_contexts:
-            ctx = PulseContext(pulse_id=pulse_id, thread_id=thread_id)
+            ctx = PulseContext(pulse_id=pulse_id)
             self._pulse_contexts[pulse_id] = ctx
-            LOGGER.debug("[sea] Created PulseContext for pulse_id=%s thread_id=%s", pulse_id, thread_id)
+            LOGGER.debug("[sea] Created PulseContext for pulse_id=%s", pulse_id)
         return self._pulse_contexts[pulse_id]
 
     def _cleanup_pulse_context(self, pulse_id: str) -> None:
@@ -1370,12 +1393,20 @@ class SEARuntime:
             LOGGER.warning("[sea] Cannot flush pulse_logs: SAIMemory adapter unavailable for persona=%s",
                            getattr(persona, "persona_id", None))
             return
+        # thread の記帳は flush 時点の adapter 現在値。旧 PulseContext.thread_id は
+        # 生成時に一度だけ解決され Stelis 切替を反映しない死に値だったため廃止
+        # (beat_execution_context.md §3.4)。
+        try:
+            flush_thread_id = adapter.get_current_thread()
+        except Exception:
+            LOGGER.debug("[sea] get_current_thread failed at pulse_log flush", exc_info=True)
+            flush_thread_id = None
         count = 0
         for entry in pulse_context.logs:
             tool_calls_json = _json.dumps(entry.tool_calls, ensure_ascii=False) if entry.tool_calls else None
             adapter.append_pulse_log(
                 pulse_id=pulse_context.pulse_id,
-                thread_id=pulse_context.thread_id,
+                thread_id=flush_thread_id,
                 role=entry.role,
                 content=entry.content,
                 node_id=entry.node_id,

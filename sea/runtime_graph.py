@@ -118,14 +118,19 @@ def compile_with_langgraph(
         # Create a fresh, empty PulseContext (bypasses the cache so prior entries
         # such as router I/O are not visible to this sub-playbook).
         from sea.pulse_context import PulseContext
-        _adapter = getattr(persona, "sai_memory", None)
-        _thread_id = _adapter.get_current_thread() if _adapter else None
-        pulse_ctx = PulseContext(pulse_id=pulse_id, thread_id=_thread_id or "")
+        pulse_ctx = PulseContext(pulse_id=pulse_id)
     else:
         # Create new PulseContext for this pulse (or get existing one from cache)
-        _adapter = getattr(persona, "sai_memory", None)
-        _thread_id = _adapter.get_current_thread() if _adapter else None
-        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")
+        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
+
+    # S4 (thread push/pop): この graph 実行の入口での thread スタック深さを記録。
+    # 実行中に push された Stelis/subagent 切替は正常系ではノード自身が pop する。
+    # 例外/cancel で pop 不達のときは finally で入口深さまで巻き戻し、「Beat が
+    # 終われば必ず親 thread へ戻る」(beat_execution_context.md 不変条件6) を保証
+    # する。入れ子 Playbook (pulse_ctx 共有) も各実行が自分の入口深さへ戻すだけ
+    # なので、親の push を巻き戻すことはない。
+    _thread_adapter = getattr(persona, "sai_memory", None)
+    _thread_depth_entry = pulse_ctx.thread_stack_depth()
 
     # Pulse-root only: push the entry-line frame onto the line stack so messages
     # produced during this Pulse get the right line_role / line_id / origin_track_id
@@ -257,6 +262,15 @@ def compile_with_langgraph(
             user_message=f"プレイブックの実行中にエラーが発生しました: {exc}",
         ) from exc
     finally:
+        # S4: thread スタックを入口深さへ巻き戻す (正常終了では no-op)。
+        # 例外/cancel で Stelis end / subagent end が走らなかった場合の非常口。
+        try:
+            pulse_ctx.unwind_threads(_thread_adapter, _thread_depth_entry)
+        except Exception:
+            LOGGER.exception(
+                "[runtime_graph] Failed to unwind thread stack for pulse_id=%s", pulse_id,
+            )
+
         # Pop the Pulse-root line frame we pushed before LangGraph execution.
         # Done before flush so the PulseContext.deferred_track_ops apply step
         # below sees a clean stack — though current ops don't read line state

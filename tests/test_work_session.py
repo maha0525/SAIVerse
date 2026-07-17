@@ -129,8 +129,8 @@ class FakeRuntime:
         return None
 
     # --- pulse context / memory --------------------------------------------
-    def _get_or_create_pulse_context(self, pulse_id, thread_id):
-        return PulseContext(pulse_id=pulse_id, thread_id=thread_id)
+    def _get_or_create_pulse_context(self, pulse_id):
+        return PulseContext(pulse_id=pulse_id)
 
     def _flush_pulse_logs(self, persona, pulse_context):
         self.flushed.append(pulse_context)

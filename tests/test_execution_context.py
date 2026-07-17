@@ -41,7 +41,7 @@ def _persona(**over):
 
 
 def _pulse_ctx(aspect=None, role="main_line"):
-    ctx = PulseContext(pulse_id="pulse-1", thread_id="p1:persona_main")
+    ctx = PulseContext(pulse_id="pulse-1")
     if aspect is not None:
         ctx.push_line(aspect=aspect)
     else:
@@ -139,11 +139,13 @@ class TestResolveLegacyFallback:
         )
         assert ec.model_key == "lite-model"
 
-    def test_thread_id_falls_back_to_pulse_context(self):
+    def test_thread_id_empty_without_adapter(self):
+        # PulseContext.thread_id (生成時固定の死に値) は廃止 — adapter が無い
+        # 実行では thread_id は空になる (beat_execution_context.md §3.4)。
         persona = _persona(sai_memory=None)
         ctx = _pulse_ctx(Aspect.CONVERSATION)
         ec = resolve_execution_context(persona, ctx)
-        assert ec.thread_id == "p1:persona_main"  # PulseContext.thread_id から
+        assert ec.thread_id == ""
 
 
 # ---------------------------------------------------------------------------
