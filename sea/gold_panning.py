@@ -440,8 +440,11 @@ def run_gold_panning(
 
     # 1. メインラインと同じ context を組み、末尾に注入プロンプトを 1 つ足す。
     #    直前の応答コールで prefix が温まっている前提 (defer-to-hot が保証)。
+    #    context_meta: 今回の prefix の anchor を call-local で受け取る (§3.2)。
+    context_meta: Dict[str, Any] = {}
     messages = list(runtime._prepare_context(
         persona, building_id, None, model_key=execution_context.model_key,
+        context_meta=context_meta,
     ) or [])
     prompt = _build_panning_prompt(persona)
     messages.append({"role": "user", "content": prompt})
@@ -484,7 +487,9 @@ def run_gold_panning(
         except Exception:
             LOGGER.warning("[gold_panning] usage tracking failed (persona=%s)", persona_id, exc_info=True)
         try:
-            lifecycle.touch_anchor_after_llm_call(persona, usage)
+            lifecycle.touch_anchor_after_llm_call(
+                persona, usage, anchor_id=context_meta.get("prefix_anchor_id"),
+            )
         except Exception:
             LOGGER.warning("[gold_panning] anchor touch failed (persona=%s)", persona_id, exc_info=True)
 
@@ -671,7 +676,24 @@ def _run_session_close_locked(
         return {"panned": False, "chronicle": False, "skipped_reason": "no_history"}
 
     pan_marker = _load_pan_marker(persona)
-    window_start = pan_marker or getattr(history_mgr, "metabolism_anchor_message_id", None)
+    window_start = pan_marker
+    if not window_start:
+        # 初回 (マーカー無し) のみ metabolism anchor を起点に使う。正は
+        # session_anchor 行 (persona, model) — gold_panning は standard tier
+        # (persona.model) 固定 (intent §5-7) なのでその行を読む。旧
+        # history_manager.metabolism_anchor_message_id (persona 単一可変属性)
+        # は廃止 (beat_execution_context.md §3.2)。
+        _load_entry = getattr(lifecycle, "load_anchor_entry", None)
+        _model = getattr(persona, "model", None)
+        if callable(_load_entry) and _model:
+            try:
+                _entry = _load_entry(persona_id, str(_model))
+                window_start = _entry.get("anchor_id") if _entry else None
+            except Exception:
+                LOGGER.warning(
+                    "[gold_panning] session close: anchor row read failed (persona=%s)",
+                    persona_id, exc_info=True,
+                )
     if not window_start:
         LOGGER.info(
             "[gold_panning] session close: no window start; skipping (persona=%s)", persona_id,
@@ -698,8 +720,10 @@ def _run_session_close_locked(
         try:
             # force=True: 確認ダイアログ・pulse_type 判定を回避 (persona._current_pulse_type
             # は前回 Pulse の残留値で不定。session_lifecycle.generate_chronicle docstring)。
-            lifecycle.generate_chronicle(persona, force=True)
-            chronicle_done = True
+            # §6-5: 生成失敗は raise でなく status "failed" で返るようになったため、
+            # 成否は戻り値で判定する ("deferred" = 別入口が同じ窓を編纂中/済み)。
+            _chronicle_status = lifecycle.generate_chronicle(persona, force=True)
+            chronicle_done = _chronicle_status == "ok"
         except Exception:
             LOGGER.exception(
                 "[gold_panning] session close: generate_chronicle failed (persona=%s)", persona_id,

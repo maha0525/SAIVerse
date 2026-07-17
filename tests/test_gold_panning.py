@@ -79,7 +79,7 @@ class FakeRuntime:
     def _get_cache_kwargs(self, persona_id=None):
         return {"enable_cache": True, "cache_ttl": "5m"}
 
-    def touch_anchor_after_llm_call(self, persona, usage):
+    def touch_anchor_after_llm_call(self, persona, usage, anchor_id=None):
         self.touched.append(usage)
 
 
@@ -328,19 +328,24 @@ class DeferToHotTest(unittest.TestCase):
         runtime = SimpleNamespace()
         lifecycle = SessionLifecycle(runtime, manager)
 
-        history_mgr = SimpleNamespace(metabolism_anchor_message_id="anchor")
+        history_mgr = SimpleNamespace()
         messages = [{"id": f"m{i}", "content": "x"} for i in range(messages_count)]
         history_mgr.get_history_from_anchor = (
             lambda anchor, required_line_roles=None, required_scopes=None: messages
         )
         persona = SimpleNamespace(persona_id="tester", model="claude-x", history_manager=history_mgr)
 
-        # 依存メソッドをスタブ (watermark / hot 判定 / 実行)。
-        lifecycle.get_high_watermark = lambda p: 20
-        lifecycle.get_low_watermark = lambda p: 10
-        lifecycle._is_cache_hot = lambda p: hot
+        # 依存メソッドをスタブ (anchor 行 / watermark / hot 判定 / 実行)。
+        # 発火判定の anchor は session_anchor 行 (persona, model) から読まれる
+        # (§6-5 で persona 属性は廃止)。
+        lifecycle.load_anchor_entry = lambda pid, mk: {"anchor_id": "anchor"}
+        lifecycle.get_high_watermark = lambda p, mk=None: 20
+        lifecycle.get_low_watermark = lambda p, mk=None: 10
+        lifecycle._is_cache_hot = lambda p, mk=None: hot
         ran = []
-        lifecycle.run_metabolism = lambda p, b, msgs, keep, cb=None: ran.append((len(msgs), keep))
+        lifecycle.run_metabolism = (
+            lambda p, b, msgs, keep, cb=None, model_key=None: ran.append((len(msgs), keep))
+        )
         return lifecycle, persona, ran
 
     def test_cold_defers_and_sets_pending(self):
@@ -417,34 +422,81 @@ class LlmFailureIsolationTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gold_panning.run_gold_panning(lifecycle, persona, "b", [], 0)
 
-    def test_run_metabolism_isolates_llm_failure_and_updates_anchor(self):
+    def _make_metabolism_lifecycle(self, client):
+        """run_metabolism 検証用の SessionLifecycle (重い経路をスタブ)。"""
         from sea.session_lifecycle import SessionLifecycle
 
-        client = FakeLLMClient(RuntimeError("boom"))
         runtime = FakeRuntime(client)
         manager = SimpleNamespace()
         lifecycle = SessionLifecycle(runtime, manager)
-
-        # 重い経路をスタブ (Chronicle / embedding / anchor 永続化 / dynamic state)。
-        lifecycle.is_chronicle_enabled_for_persona = lambda p: False
         lifecycle.ensure_recall_embeddings = lambda p: None
         anchor_updates = []
-        lifecycle.update_anchor_for_model = lambda p, m, aid, ttl=None: anchor_updates.append(aid)
+        lifecycle.update_anchor_for_model = lambda p, m, aid, ttl=None: anchor_updates.append((m, aid))
+        return lifecycle, anchor_updates
 
-        history_mgr = SimpleNamespace(metabolism_anchor_message_id="old")
-        persona = SimpleNamespace(
+    def _make_metabolism_persona(self):
+        return SimpleNamespace(
             persona_id="tester", persona_name="エア", model="claude-x",
-            sai_memory=self.adapter, history_manager=history_mgr,
+            sai_memory=self.adapter, history_manager=SimpleNamespace(),
         )
+
+    def test_run_metabolism_gold_panning_failure_still_updates_anchor(self):
+        """gold_panning の LLM 例外は隔離され、anchor 更新は実行される (失敗隔離、
+        gold_panning intent §5-2)。Chronicle トグル OFF = status 'disabled' なので
+        S2 ガードは前進を許す。"""
+        client = FakeLLMClient(RuntimeError("boom"))
+        lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: False
+        persona = self._make_metabolism_persona()
 
         current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
         # keep_count=2 → evict_count=3 → new anchor = m3
         with patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism", lambda *a, **k: None):
             lifecycle.run_metabolism(persona, "b", current_messages, 2, None)
 
-        # gold_panning が LLM 例外で死んでも anchor 更新は実行される (失敗隔離)。
-        self.assertEqual(history_mgr.metabolism_anchor_message_id, "m3")
-        self.assertEqual(anchor_updates, ["m3"])
+        self.assertEqual(anchor_updates, [("claude-x", "m3")])
+
+    def test_run_metabolism_chronicle_failure_holds_anchor_back(self):
+        """Chronicle 編纂が失敗 (LLM 失敗等) したら anchor は据え置き (SEA 監査 S2)。
+        watermark 超過が残るため次の maybe_run_metabolism で自然再試行される。"""
+        client = FakeLLMClient({"reflection": "x", "ops": []})
+        lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: (_ for _ in ()).throw(RuntimeError("llm down"))
+        lifecycle.generate_track_chronicle = lambda p: None
+        persona = self._make_metabolism_persona()
+
+        current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        dispatched = []
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: dispatched.append(k)):
+            lifecycle.run_metabolism(persona, "b", current_messages, 2, None)
+
+        # anchor 据え置き + 可視化 (head 再 capture) も走らない。
+        self.assertEqual(anchor_updates, [])
+        self.assertEqual(dispatched, [])
+
+    def test_run_metabolism_chronicle_ok_advances_specified_model_only(self):
+        """編纂 'ok' なら渡された model の行だけが前進し、可視化もその model で dispatch。"""
+        client = FakeLLMClient({"reflection": "x", "ops": []})
+        lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
+        lifecycle.generate_track_chronicle = lambda p: None
+        persona = self._make_metabolism_persona()
+
+        current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        dispatched = []
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda p, m, model_key=None: dispatched.append(model_key)):
+            lifecycle.run_metabolism(
+                persona, "b", current_messages, 2, None, model_key="light-model",
+            )
+
+        self.assertEqual(anchor_updates, [("light-model", "m3")])
+        self.assertEqual(dispatched, ["light-model"])
 
 
 class SessionCloseTest(unittest.TestCase):
@@ -490,14 +542,17 @@ class SessionCloseTest(unittest.TestCase):
 
         lifecycle = SimpleNamespace(runtime=FakeRuntime(client))
         lifecycle.is_chronicle_enabled_for_persona = lambda p: chronicle_enabled
-        lifecycle.generate_chronicle = MagicMock()
+        lifecycle.generate_chronicle = MagicMock(return_value="ok")
         lifecycle.generate_track_chronicle = MagicMock()
         lifecycle.ensure_recall_embeddings = MagicMock()
         lifecycle._is_cache_hot = lambda p: hot
+        # 初回 (pan マーカー無し) の window 起点は session_anchor 行から読まれる
+        # (§6-5 で persona 属性は廃止)。
+        lifecycle.load_anchor_entry = lambda pid, mk: {"anchor_id": "cache_anchor"}
         return lifecycle
 
     def _make_persona(self, messages, *, last_pan_id=None, building_id="b"):
-        history_mgr = SimpleNamespace(metabolism_anchor_message_id="anchor")
+        history_mgr = SimpleNamespace()
         history_mgr.get_history_from_anchor = (
             lambda anchor, required_line_roles=None, required_scopes=None: messages
         )
@@ -555,7 +610,7 @@ class SessionCloseTest(unittest.TestCase):
             calls.append((anchor, required_line_roles, required_scopes))
             return messages
 
-        history_mgr = SimpleNamespace(metabolism_anchor_message_id="cache_anchor")
+        history_mgr = SimpleNamespace()
         history_mgr.get_history_from_anchor = fake_get
         persona = SimpleNamespace(
             persona_id="tester", persona_name="エア", model="claude-x",
@@ -891,7 +946,7 @@ class PanMarkerPersistenceTest(unittest.TestCase):
         self._run_pan(self._fresh_persona(), msgs)  # marker → m11
 
         # 再起動相当の fresh persona (属性キャッシュ無し) で run_session_close。
-        history_mgr = SimpleNamespace(metabolism_anchor_message_id="anchor")
+        history_mgr = SimpleNamespace()
         history_mgr.get_history_from_anchor = (
             lambda anchor, required_line_roles=None, required_scopes=None: msgs
         )

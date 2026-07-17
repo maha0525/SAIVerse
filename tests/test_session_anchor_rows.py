@@ -207,11 +207,8 @@ def test_update_anchor_for_model_delegates_to_row_upsert(session_factory):
 
 
 def _touch_persona(model="std-model"):
-    return SimpleNamespace(
-        persona_id=PERSONA_ID,
-        model=model,
-        history_manager=SimpleNamespace(metabolism_anchor_message_id="anchor-1"),
-    )
+    # anchor は call-local 引数で渡す (§6-5 で persona 属性は廃止)。
+    return SimpleNamespace(persona_id=PERSONA_ID, model=model)
 
 
 def _usage(model="light-model"):
@@ -237,7 +234,7 @@ def test_touch_routes_to_actual_usage_model(_mock_cache, session_factory):
     scheduled = _wire_touch(lc)
     persona = _touch_persona(model="std-model")
 
-    lc.touch_anchor_after_llm_call(persona, _usage(model="light-model"))
+    lc.touch_anchor_after_llm_call(persona, _usage(model="light-model"), anchor_id="anchor-1")
 
     light = lc.load_anchor_entry(PERSONA_ID, "light-model")
     assert light is not None and light["anchor_id"] == "anchor-1"
@@ -252,7 +249,7 @@ def test_touch_falls_back_to_persona_model_when_usage_model_empty(_mock_cache, s
     scheduled = _wire_touch(lc)
     persona = _touch_persona(model="std-model")
 
-    lc.touch_anchor_after_llm_call(persona, _usage(model=""))
+    lc.touch_anchor_after_llm_call(persona, _usage(model=""), anchor_id="anchor-1")
 
     std = lc.load_anchor_entry(PERSONA_ID, "std-model")
     assert std is not None and std["anchor_id"] == "anchor-1"
@@ -267,7 +264,7 @@ def test_touch_explicit_cache_miss_does_not_write_row(_mock_cache, session_facto
     _wire_touch(lc)
     persona = _touch_persona(model="std-model")
 
-    lc.touch_anchor_after_llm_call(persona, _usage(model="claude-x"))
+    lc.touch_anchor_after_llm_call(persona, _usage(model="claude-x"), anchor_id="anchor-1")
 
     assert lc.load_anchor_entries(PERSONA_ID) == {}
 

@@ -20,7 +20,7 @@ PK=(persona, model) — beat_execution_context.md §3.1) 側に流れる。
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -142,21 +142,27 @@ class DynamicStateManager:
         _dispatch_head_event(persona, manager, building_id, "building_entered")
 
     @staticmethod
-    def on_metabolism(persona: Any, manager: Any) -> None:
+    def on_metabolism(persona: Any, manager: Any, model_key: Optional[str] = None) -> None:
         """Metabolism 発火時の hook。
 
         Phase 3-e: METABOLISM イベントを head_pipeline に dispatch。
         全 Section の snapshot を再構築 + last_notified を A にリセット
         (= 末尾通知の窓を最新でリスタート)。
+
+        ``model_key``: 可視化は model の節目 (beat_execution_context.md §3.2) —
+        anchor を進めた model の (persona, model) snapshot だけを再 capture する。
+        None は従来どおり persona の標準 model (organize-memory の全 model
+        リセット経路など、節目の主が特定 model でない呼び出し)。
         """
         building_id = getattr(persona, "current_building_id", None)
         if not getattr(persona, "persona_id", None) or not building_id:
             return
-        _dispatch_head_event(persona, manager, building_id, "metabolism")
+        _dispatch_head_event(persona, manager, building_id, "metabolism", model_key=model_key)
 
 
 def _dispatch_head_event(
     persona: Any, manager: Any, building_id: str, event_value: str,
+    model_key: Optional[str] = None,
 ) -> None:
     """Cached Head Architecture pipeline に world イベントを通知する。
 
@@ -184,7 +190,7 @@ def _dispatch_head_event(
         LOGGER.debug("dynamic_state: unknown head event %s", event_value)
         return
 
-    ctx = build_line_head_input(persona, manager, building_id)
+    ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     try:
         pipeline.dispatch_event(ctx, event)
     except Exception:

@@ -254,11 +254,25 @@ class SEARuntime:
         finally:
             persona._current_pulse_origin_track_id = prev_pulse_track
 
-        # Post-response metabolism check (DB ベースで件数比較)
+        # Post-response metabolism check (DB ベースで件数比較)。
+        # model_key = この Pulse の実行 model (beat_execution_context.md §3.2 —
+        # 閾値と退役は model ごと)。run_meta_user は ExecutionContext を保持しない
+        # (解決は _run_playbook 内で完結する) ため、runtime_runner の probe と同じ
+        # 導出 (pulse_type → legacy tier フォールバック) をここで行う。root aspect
+        # の tier (AUTONOMOUS=lightweight / CONVERSATION・META=standard) と一致する
+        # ことは §6-3b 検収で照合済み。
         from database.building_messages import fetch_max_seq
         bh_before = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         try:
-            self.session_lifecycle.maybe_run_metabolism(persona, building_id, event_callback)
+            _mk_probe_state: Dict[str, Any] = {}
+            if pulse_type is not None:
+                _mk_probe_state["_pulse_type"] = pulse_type
+            _metabolism_model_key = resolve_execution_context(
+                persona, None, state=_mk_probe_state,
+            ).model_key
+            self.session_lifecycle.maybe_run_metabolism(
+                persona, building_id, event_callback, model_key=_metabolism_model_key,
+            )
         except Exception:
             LOGGER.exception("[metabolism] Post-response metabolism failed")
         bh_after = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
@@ -1903,7 +1917,10 @@ class SEARuntime:
                     persona_id, exc_info=True,
                 )
             # 成功 = anchor touch → 次の keep-alive が再予約される。
-            self.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
+            # anchor_id は生存確認で読んだ「見張り対象 model の行」の値 (call-local)。
+            self.session_lifecycle.touch_anchor_after_llm_call(
+                persona, usage, anchor_id=entry.get("anchor_id"),
+            )
         LOGGER.info(
             "[keepalive] cache keep-alive completed (persona=%s model=%s "
             "cache_read=%s cache_write=%s)",
@@ -1959,7 +1976,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -1973,6 +1990,7 @@ class SEARuntime:
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
             model_key=model_key,
+            context_meta=context_meta,
         )
 
     # ---- Context Preview (read-only, no side effects) ----

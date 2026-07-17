@@ -25,27 +25,39 @@ class SessionLifecycle:
         self.runtime = runtime      # 過渡期の後方参照 (設計書 §4 で削減)
         self.manager = manager_ref
 
-    def get_high_watermark(self, persona) -> Optional[int]:
-        """Get the high watermark (max history messages) for metabolism."""
+    def get_high_watermark(self, persona, model_key: Optional[str] = None) -> Optional[int]:
+        """Get the high watermark (max history messages) for metabolism.
+
+        閾値はモデル依存 (beat_execution_context.md §3.2 — 各 Session は自分の
+        model の閾値で自分の窓を管理する)。``model_key`` は実行 model。None なら
+        従来どおり ``persona.model`` にフォールバックする。
+        """
         override = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
         if override is not None:
             return override
         from saiverse.model_configs import get_default_max_history_messages
-        persona_model = getattr(persona, "model", None)
+        persona_model = model_key or getattr(persona, "model", None)
         if persona_model:
-            return get_default_max_history_messages(persona_model)
+            return get_default_max_history_messages(str(persona_model))
         return None
 
-    def get_low_watermark(self, persona) -> Optional[int]:
-        """Get the low watermark (keep messages after metabolism) for metabolism."""
+    def get_low_watermark(self, persona, model_key: Optional[str] = None) -> Optional[int]:
+        """Get the low watermark (keep messages after metabolism) for metabolism.
+
+        ``model_key`` の意味は :meth:`get_high_watermark` と同じ。
+        """
         override = getattr(self.manager, "metabolism_keep_messages_override", None) if self.manager else None
         if override is not None:
             return override
         from saiverse.model_configs import get_metabolism_keep_messages
-        persona_model = getattr(persona, "model", None)
+        persona_model = model_key or getattr(persona, "model", None)
         if persona_model:
-            return get_metabolism_keep_messages(persona_model)
+            return get_metabolism_keep_messages(str(persona_model))
         return None
+
+    def _get_ledger(self):
+        """実行台帳 (manager.execution_ledger)。無い環境 (旧テスト等) は None。"""
+        return getattr(self.manager, "execution_ledger", None) if self.manager else None
 
     # ------------------------------------------------------------------
     # Session anchor 行 API (beat_execution_context.md §3.1、SEA 監査 S8)
@@ -341,7 +353,7 @@ class SessionLifecycle:
             return int(stored)
         return self.get_anchor_validity_seconds(model_key, persona_id)
 
-    def touch_anchor_after_llm_call(self, persona, usage) -> None:
+    def touch_anchor_after_llm_call(self, persona, usage, anchor_id: Optional[str] = None) -> None:
         """LLM 呼び出し成功後に session_anchor 行の updated_at を touch する (Phase 4-e)。
 
         旧実装は ``runtime_context.py`` の prepare_context 内で touch していたが、
@@ -364,11 +376,17 @@ class SessionLifecycle:
         structured-output fallback で実行 model が ``persona.model`` と違っても、
         呼んでいない model の Session 状態を動かさない (不変条件 §4-2)。
         usage.model が空のときだけ ``persona.model`` にフォールバックする。
+
+        ``anchor_id`` は **今回の呼び出しで実際に組成した prefix の anchor**
+        (call-local。beat_execution_context.md §3.2)。prepare_context が解決した
+        値を ``state["_prefix_anchor_id"]`` 経由で呼び出し元が渡す。None なら
+        touch しない — 旧実装の「persona 属性 (単一可変値) からの読み」は
+        TTL 失効後に旧 anchor を touch する事故 (記憶監査第 4 片) の源だったため
+        廃止した。prefix に anchor を含まない呼び出し (work_session の
+        history_depth=0 等) も自然に touch なしになる。
         """
         if persona is None or usage is None:
             return
-        history_mgr = getattr(persona, "history_manager", None)
-        anchor_id = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
         if not anchor_id:
             return
         persona_model = getattr(persona, "model", None)
@@ -635,13 +653,26 @@ class SessionLifecycle:
         persona,
         building_id: str,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
     ) -> None:
-        """Check if metabolism is needed after response and run if so."""
+        """Check if metabolism is needed after response and run if so.
+
+        ``model_key`` はこの Pulse の実行 model (beat_execution_context.md §3.2 —
+        閾値・窓・退役は model ごと)。None なら従来どおり ``persona.model``。
+        発火判定の anchor は session_anchor 行 (persona, model) から読む —
+        旧 ``history_manager.metabolism_anchor_message_id`` (persona 単一可変
+        属性) は廃止した。
+        """
         if not getattr(self.manager, "metabolism_enabled", False):
             return
 
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
+        if not model_key:
+            return
+
         history_mgr = getattr(persona, "history_manager", None)
-        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
+        anchor_entry = self.load_anchor_entry(getattr(persona, "persona_id", None), model_key)
+        anchor = anchor_entry.get("anchor_id") if anchor_entry else None
         if not history_mgr or not anchor:
             return
 
@@ -654,7 +685,7 @@ class SessionLifecycle:
         # OR 参加する)。docs/intent/gold_panning.md §3.7
         pending = getattr(persona, "_metabolism_pending", False)
 
-        high_wm = self.get_high_watermark(persona)
+        high_wm = self.get_high_watermark(persona, model_key)
         if high_wm is None:
             return
 
@@ -688,7 +719,7 @@ class SessionLifecycle:
         if not should_run:
             return
 
-        low_wm = self.get_low_watermark(persona)
+        low_wm = self.get_low_watermark(persona, model_key)
         if low_wm is None or len(current_messages) - low_wm < 10:
             return
 
@@ -707,7 +738,7 @@ class SessionLifecycle:
                     "(persona=%s, %d messages > high_wm=%d * cap=%.2f)",
                     getattr(persona, "persona_id", "?"), len(current_messages), high_wm, cap,
                 )
-            elif not self._is_cache_hot(persona):
+            elif not self._is_cache_hot(persona, model_key):
                 persona._metabolism_pending = True
                 LOGGER.info(
                     "[gold_panning] deferring metabolism (cache cold) for %s; pending set",
@@ -722,7 +753,10 @@ class SessionLifecycle:
             "[metabolism] Running metabolism: %d messages, will keep %d",
             len(current_messages), low_wm,
         )
-        self.run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
+        self.run_metabolism(
+            persona, building_id, current_messages, low_wm, event_callback,
+            model_key=model_key,
+        )
 
     def _is_cache_hot(self, persona, model_key: Optional[str] = None) -> bool:
         """指定 model (既定: persona.model) の anchor 行が生存しているか (= 直前 prefix が温かい)。
@@ -758,8 +792,14 @@ class SessionLifecycle:
         current_messages: List[Dict[str, Any]],
         keep_count: int,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
     ) -> None:
         """Execute history metabolism: Chronicle generation + anchor update.
+
+        ``model_key`` はこの Metabolism を発火させた Pulse の実行 model。退役
+        (anchor 前進) は「渡された model の session_anchor 行」だけを進める
+        (beat_execution_context.md §3.2 — 編纂は persona に一度、退役は model
+        ごと)。None なら従来どおり ``persona.model``。
 
         Beat ロック (beat_execution_context.md §3.4): Metabolism は persona の
         記憶 (Chronicle / gold_panning のコア記憶採取記録) に書くため、入口で
@@ -777,6 +817,7 @@ class SessionLifecycle:
         ):
             self._run_metabolism_locked(
                 persona, building_id, current_messages, keep_count, event_callback,
+                model_key=model_key,
             )
 
     def _run_metabolism_locked(
@@ -786,8 +827,10 @@ class SessionLifecycle:
         current_messages: List[Dict[str, Any]],
         keep_count: int,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
     ) -> None:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。"""
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
         evict_count = len(current_messages) - keep_count
 
         # 1. Notify start
@@ -798,17 +841,26 @@ class SessionLifecycle:
                 "content": f"記憶を整理しています（{len(current_messages)}件 → {keep_count}件）...",
             })
 
-        # 2. Chronicle generation (only if Memory Weave is enabled AND per-persona toggle is on)
+        # 2. Chronicle generation (only if Memory Weave is enabled AND per-persona toggle is on)。
+        # 二層分離 (beat_execution_context.md §3.2): 編纂の成否 (status) を持ち、
+        # 退役 (step 3 の anchor 前進) を「編纂が済んだ」ときだけ許す (SEA 監査 S2)。
+        # "disabled" (トグル OFF / weave 無効) で前進するのは設計判断 — Chronicle を
+        # 切った persona は「編纂なしで忘れる」を選んでおり、前進を止めると
+        # metabolism が永久デッドロックする。
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+        chronicle_status = "disabled"
         if memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona):
             try:
-                self.generate_chronicle(persona, event_callback)
+                chronicle_status = self.generate_chronicle(persona, event_callback)
             except Exception as exc:
                 LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
+                chronicle_status = "failed"
 
         # 2.5. Track Chronicle generation (v0.32, 2026-05-09)。
         # General Chronicle と独立に走る。pulse_type 制限なし、確認 dialog 不要、
         # バッチ未満許容 (incomplete Lv1)、1000 字未満ならスキップ。
+        # Track Chronicle は anchor 退役のゲートに参加しない (退役対象の main_line
+        # 窓とは別軸の編纂のため、失敗しても生ログから次回自然回復する)。
         # 詳細は docs/intent/persona_cognition/track_chronicle.md
         if memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona):
             try:
@@ -832,31 +884,49 @@ class SessionLifecycle:
         except Exception:
             LOGGER.exception("[gold_panning] failed; metabolism continues")
 
-        # 3. Update anchor to new window start
-        new_anchor_id = current_messages[evict_count].get("id")
-        if new_anchor_id:
-            persona.history_manager.metabolism_anchor_message_id = new_anchor_id
-            persona_model = getattr(persona, "model", None)
-            if persona_model:
-                self.update_anchor_for_model(persona, persona_model, new_anchor_id)
-            LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
+        # 3. Update anchor to new window start — S2 ガード: 編纂が済んだ
+        # ("ok") か編纂を持たない設計 ("disabled") のときだけ退役する。
+        # failed / deferred は据え置き — watermark 超過が残るので、次の
+        # maybe_run_metabolism が自然に再試行する (beat_execution_context.md §3.2)。
+        if chronicle_status in ("ok", "disabled"):
+            new_anchor_id = current_messages[evict_count].get("id")
+            if new_anchor_id and model_key:
+                self.update_anchor_for_model(persona, model_key, new_anchor_id)
+                LOGGER.info(
+                    "[metabolism] Updated anchor to %s for model=%s (evicted %d, kept %d)",
+                    new_anchor_id, model_key, evict_count, keep_count,
+                )
 
-        # 4. Dynamic State Sync: AをCで更新し、ビジュアルコンテキストキャッシュを無効化
-        try:
-            from saiverse.dynamic_state import DynamicStateManager
-            DynamicStateManager.on_metabolism(persona, self.manager)
-        except Exception:
-            LOGGER.exception("[dynamic_state] on_metabolism failed")
+            # 4. Dynamic State Sync: 可視化は model の節目 — anchor を進めた model の
+            # (persona, model) snapshot だけを再 capture する (§3.2。他 model の窓は
+            # 自分の節目まで prefix を変えない = prefix cache 保護)。
+            try:
+                from saiverse.dynamic_state import DynamicStateManager
+                DynamicStateManager.on_metabolism(persona, self.manager, model_key=model_key)
+            except Exception:
+                LOGGER.exception("[dynamic_state] on_metabolism failed")
 
-        # 5. Notify completion
-        if event_callback:
-            event_callback({
-                "type": "metabolism",
-                "status": "completed",
-                "content": f"記憶の整理が完了しました（{evict_count}件の会話をChronicleに圧縮）",
-                "evicted": evict_count,
-                "kept": keep_count,
-            })
+            # 5. Notify completion
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "completed",
+                    "content": f"記憶の整理が完了しました（{evict_count}件の会話をChronicleに圧縮）",
+                    "evicted": evict_count,
+                    "kept": keep_count,
+                })
+        else:
+            LOGGER.warning(
+                "[metabolism] anchor held back (chronicle_status=%s, model=%s); "
+                "will retry on next maybe_run_metabolism",
+                chronicle_status, model_key,
+            )
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "completed",
+                    "content": "記憶の整理を見送りました（Chronicle生成が完了しなかったため、次回に再試行します）",
+                })
 
     def is_chronicle_enabled_for_persona(self, persona) -> bool:
         """Check per-persona Chronicle auto-generation toggle from DB."""
@@ -908,7 +978,7 @@ class SessionLifecycle:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         force: bool = False,
-    ) -> None:
+    ) -> str:
         """Generate Chronicle entries from all unprocessed messages.
 
         ``force=True`` は確認ダイアログ・pulse_type 判定を経ずに即生成する。
@@ -916,6 +986,24 @@ class SessionLifecycle:
         時点でユーザーが既に明示的に同意しているケース専用。Pulse の外から
         呼ばれるため ``persona._current_pulse_type`` は前回 Pulse の残留値で
         あてにならない — force はその不定性を回避する意味もある。
+
+        全入口 (①応答後 Metabolism ②会話前 anchor 失効 ③手動 organize-memory
+        ④session close ⑤①内 gold_panning) が合流する一点のため、編纂の冪等
+        claim (実行台帳 kind="metabolism.run"、M1 の解) はここで行う
+        (beat_execution_context.md §3.2 — 編纂は persona に一度)。
+
+        Returns:
+            status 文字列。呼び出し元 (_run_metabolism_locked) が anchor 退役の
+            ゲートに使う (SEA 監査 S2):
+
+            - "ok": 編纂成功、または編纂対象なし (退役してよい)
+            - "disabled": ここでは返さない (Chronicle トグルの評価は呼び出し元
+              _run_metabolism_locked が行い、OFF なら本関数を呼ばない)。ただし
+              非 user Pulse で AUTONOMOUS_CHRONICLE_ENABLED=False の確認スキップは
+              「編纂しないことを選んでいる」ポリシー OFF なのでこれに該当する
+            - "failed": 例外・LLM 失敗・環境不備 (anchor 据え置き → 次回再試行)
+            - "deferred": 確認 timeout/拒否、または claim 競合 (別入口が同じ窓を
+              編纂中/編纂済み。anchor 据え置き → 次回再試行)
         """
         from llm_clients.factory import get_llm_client
         from sai_memory.arasuji import init_arasuji_tables
@@ -928,7 +1016,7 @@ class SessionLifecycle:
         model_id, model_config = find_model_config(model_name)
         if not model_config:
             LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
-            return
+            return "failed"
 
         provider = model_config.get("provider")
         context_length = model_config.get("context_length", 128000)
@@ -938,7 +1026,7 @@ class SessionLifecycle:
         adapter = getattr(persona, "sai_memory", None)
         if not adapter or not adapter.is_ready():
             LOGGER.warning("[metabolism] SAIMemory not available for Chronicle generation")
-            return
+            return "failed"
 
         init_arasuji_tables(adapter.conn)
 
@@ -947,7 +1035,7 @@ class SessionLifecycle:
         all_messages = get_messages_for_chronicle(adapter.conn)
 
         if not all_messages:
-            return
+            return "ok"
 
         batch_size_for_estimate = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
 
@@ -987,10 +1075,18 @@ class SessionLifecycle:
                 "(%d unprocessed messages in %d runs, all < batch_size %d)",
                 total_unprocessed, len(_runs), batch_size_for_estimate,
             )
-            return
+            # 編纂対象なし = claim せず no-op (退役は許す)。
+            return "ok"
 
         unprocessed_count = qualifying_batches * batch_size_for_estimate
         estimated_llm_calls = qualifying_batches
+
+        # 冪等 claim 用の窓の同定: 窓末尾 ID = 編纂対象 (qualifying run) の
+        # 時系列末尾のメッセージ ID (all_messages は created_at 昇順)。
+        # 会話が進んで窓が伸びれば ID が変わり新しい claim になる — 失敗した窓の
+        # 再試行はこの自然な鍵の更新で成立する (failed 行は終端で再 claim 不可)。
+        _qualifying_runs = [r for r in _runs if len(r) >= batch_size_for_estimate]
+        _window_end_id = _qualifying_runs[-1][-1].id
 
         # Request user confirmation before generating.
         # Only valid when the current Pulse is a user-driven request — only
@@ -1056,18 +1152,52 @@ class SessionLifecycle:
                         "warning_code": "chronicle_skipped",
                         "display": "toast",
                     })
-                return
+                return "deferred"
             LOGGER.info("[metabolism] Chronicle generation approved by user")
         else:
             # No interactive route available and AUTONOMOUS_CHRONICLE_ENABLED is
             # False (or no event_callback/manager) — skip without waiting.
             # (auto / schedule / meta_judgment pulses, or pure CLI runs)
+            # 「編纂しない」ポリシー選択 = disabled 相当。deferred にすると
+            # 自律 Pulse しか走らない persona の anchor が永久に据え置かれる
+            # (押し出された生ログは SAIMemory に残り、後続の user Pulse /
+            # session close (force=True) で編纂される)。
             LOGGER.info(
                 "[metabolism] Skipping Chronicle generation confirmation "
                 "(pulse_type=%s, event_callback=%s, %d unprocessed)",
                 pulse_type, event_callback is not None, unprocessed_count,
             )
-            return
+            return "disabled"
+
+        # ---- 冪等 claim (実行台帳、M1 の解) ----
+        # 確認ゲート通過後・LLM 実行前に claim する。(kind, idempotency_key) の
+        # UNIQUE で全入口が同じ排他を通り、同じ窓の二重編纂 (二重 LLM コスト) を
+        # 収束させる。台帳が無い環境 (旧テスト / 単体実行) は claim なしで従来
+        # どおり実行する (degrade)。claim 自体の失敗も degrade (編纂を止めない —
+        # arasuji の source_ids スキップが事後冪等の安全網として残る)。
+        ledger = self._get_ledger()
+        execution_id: Optional[str] = None
+        if ledger is not None:
+            try:
+                execution_id, created = ledger.begin_execution(
+                    kind="metabolism.run",
+                    idempotency_key=f"{getattr(persona, 'persona_id', None)}:{_window_end_id}",
+                    persona_id=getattr(persona, "persona_id", None),
+                )
+                if not created:
+                    LOGGER.info(
+                        "[metabolism] Chronicle generation skipped: window already "
+                        "claimed by another entrance (persona=%s window_end=%s execution=%s)",
+                        getattr(persona, "persona_id", "?"), _window_end_id, execution_id,
+                    )
+                    return "deferred"
+                ledger.mark_running(execution_id)
+            except Exception:
+                LOGGER.warning(
+                    "[metabolism] ledger claim failed; proceeding without claim",
+                    exc_info=True,
+                )
+                execution_id = None
 
         # Notify frontend that generation is starting
         if event_callback:
@@ -1151,16 +1281,38 @@ class SessionLifecycle:
         except Exception as exc:
             LOGGER.warning("[metabolism] Entity extraction setup failed: %s", exc)
 
-        level1, consolidated = generator.generate_unprocessed(
-            all_messages,
-            progress_callback=progress_fn,
-            cancel_check=cancel_fn,
-            batch_callback=note_callback,
-        )
+        try:
+            level1, consolidated = generator.generate_unprocessed(
+                all_messages,
+                progress_callback=progress_fn,
+                cancel_check=cancel_fn,
+                batch_callback=note_callback,
+            )
+        except Exception as exc:
+            LOGGER.exception("[metabolism] Chronicle generation raised")
+            if ledger is not None and execution_id:
+                try:
+                    # 部分生成 (途中バッチまで適用済み) はあり得るが、生成済み
+                    # エントリは source_ids で冪等スキップされるため再試行は安全。
+                    ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
+                except Exception:
+                    LOGGER.warning("[metabolism] ledger mark_failed failed", exc_info=True)
+            return "failed"
+
         LOGGER.info(
             "[metabolism] Chronicle generation complete: %d level1, %d consolidated entries",
             len(level1), len(consolidated),
         )
+        if ledger is not None and execution_id:
+            try:
+                ledger.mark_applied(
+                    execution_id,
+                    result={"level1": len(level1), "consolidated": len(consolidated)},
+                )
+                # outbox を積まない実行なので completed へ明示遷移して閉じる。
+                ledger.mark_completed(execution_id)
+            except Exception:
+                LOGGER.warning("[metabolism] ledger apply/complete failed", exc_info=True)
 
         # Notify frontend that generation is complete
         if event_callback:
@@ -1169,6 +1321,7 @@ class SessionLifecycle:
                 "status": "completed",
                 "content": f"Chronicle生成完了: {len(level1)}件のエントリを作成しました。",
             })
+        return "ok"
 
     def ensure_recall_embeddings(self, persona) -> None:
         """Chronicle / Memopedia ページ / Fragment の未埋め込み分を全件埋める。
@@ -1292,6 +1445,45 @@ class SessionLifecycle:
         for row in cur.fetchall():
             processed_by_track[row[0]].add(row[1])
 
+        # ---- 冪等 claim (実行台帳 kind="metabolism.run_track"、M1 の解) ----
+        # 窓の同定は「全 Track の未処理メッセージの時系列末尾 ID」。新規 Track
+        # メッセージが増えない限り同じ鍵になり、二重実行 (per-track の delete &
+        # regen を含む) が claim で収束する。対象なしなら claim せず no-op。
+        persona_id = getattr(persona, "persona_id", None)
+        unprocessed_all = [
+            m for tid, msgs in by_track.items()
+            for m in msgs if m.id not in processed_by_track.get(tid, set())
+        ]
+        if not unprocessed_all:
+            LOGGER.debug("[metabolism][track] No unprocessed track messages")
+            return
+        _window_end_id = max(
+            unprocessed_all, key=lambda m: (m.created_at, str(m.id)),
+        ).id
+        ledger = self._get_ledger()
+        execution_id: Optional[str] = None
+        if ledger is not None:
+            try:
+                execution_id, created = ledger.begin_execution(
+                    kind="metabolism.run_track",
+                    idempotency_key=f"{persona_id}:{_window_end_id}",
+                    persona_id=persona_id,
+                )
+                if not created:
+                    LOGGER.info(
+                        "[metabolism][track] skipped: window already claimed "
+                        "(persona=%s window_end=%s execution=%s)",
+                        persona_id, _window_end_id, execution_id,
+                    )
+                    return
+                ledger.mark_running(execution_id)
+            except Exception:
+                LOGGER.warning(
+                    "[metabolism][track] ledger claim failed; proceeding without claim",
+                    exc_info=True,
+                )
+                execution_id = None
+
         # 既存 incomplete Lv1 の end_time を Track 別に取得 (新規メッセージなし判定用)。
         # 起動直後の anchor TTL 切れ pre-response 経路で本関数が再呼び出しされたとき、
         # Track にメッセージが追加されていなければ delete & regen は同じ内容を作り直す
@@ -1307,7 +1499,6 @@ class SessionLifecycle:
 
         # 各 Track ごとに処理
         track_manager = getattr(self.manager, "track_manager", None)
-        persona_id = getattr(persona, "persona_id", None)
         batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
         # 1000 字未満スキップ閾値
         min_chars_threshold = 1000
@@ -1391,6 +1582,20 @@ class SessionLifecycle:
             "[metabolism][track] Track Chronicle complete: %d tracks processed, %d lv1 entries",
             total_tracks_processed, total_lv1_created,
         )
+        if ledger is not None and execution_id:
+            try:
+                ledger.mark_applied(
+                    execution_id,
+                    result={
+                        "tracks_processed": total_tracks_processed,
+                        "level1": total_lv1_created,
+                    },
+                )
+                ledger.mark_completed(execution_id)
+            except Exception:
+                LOGGER.warning(
+                    "[metabolism][track] ledger apply/complete failed", exc_info=True,
+                )
 
     def run_session_close_for(self, persona_id: str) -> None:
         """persona_id からペルソナを引いて gold_panning のセッションクローズを走らせる。

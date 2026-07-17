@@ -540,7 +540,7 @@ def test_keepalive_prepares_context_for_watched_model(_mock_cache):
     )
     touched: List[Any] = []
     runtime.session_lifecycle.touch_anchor_after_llm_call = (
-        lambda p, usage: touched.append(usage)
+        lambda p, usage, anchor_id=None: touched.append(usage)
     )
 
     captured: List[Any] = []

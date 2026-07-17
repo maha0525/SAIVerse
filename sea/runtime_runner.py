@@ -211,6 +211,10 @@ def run_playbook(
         _prepared_model_key = resolve_execution_context(
             persona, None, state=_ec_probe_state,
         ).model_key
+        # call-local anchor (beat_execution_context.md §3.2): _prepare_context が
+        # 今回の prefix に採用した anchor を out-param で受け取り、state 経由で
+        # LLM 成功後の touch_anchor_after_llm_call(anchor_id=...) まで運ぶ。
+        _context_meta: Dict[str, Any] = {}
         base_messages = runtime._prepare_context(
             persona,
             building_id,
@@ -222,7 +226,9 @@ def run_playbook(
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
             model_key=_prepared_model_key,
+            context_meta=_context_meta,
         )
+        parent["_prefix_anchor_id"] = _context_meta.get("prefix_anchor_id")
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         _auto_recall_text = getattr(persona, "_pending_auto_recall_text", None)
         if _auto_recall_text:

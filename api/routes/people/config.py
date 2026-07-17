@@ -201,10 +201,8 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
     except Exception as exc:
         LOGGER.warning("[organize-memory] Failed to clear anchors: %s", exc)
 
-    # 2. Clear in-memory anchor
-    history_mgr = getattr(persona, "history_manager", None)
-    if history_mgr:
-        history_mgr.metabolism_anchor_message_id = None
+    # (旧 step 2「in-memory anchor clear」は属性ごと廃止 — anchor の正は
+    #  session_anchor 行のみで、step 1 の clear_anchor_entries が全てを消す。)
 
     # 3. Generate Chronicle for unprocessed messages
     chronicle_generated = False
@@ -225,8 +223,11 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
     sea_runtime = getattr(manager, "sea_runtime", None)
     if memory_weave_enabled and sea_runtime:
         try:
-            sea_runtime.session_lifecycle.generate_chronicle(persona, force=True)
-            chronicle_generated = True
+            # §6-5: 生成失敗は raise でなく status "failed" で返る。成否は戻り値で判定。
+            _status = sea_runtime.session_lifecycle.generate_chronicle(persona, force=True)
+            chronicle_generated = _status == "ok"
+            if _status not in ("ok",):
+                LOGGER.warning("[organize-memory] Chronicle generation status=%s", _status)
         except Exception as exc:
             LOGGER.warning("[organize-memory] Chronicle generation failed: %s", exc)
 

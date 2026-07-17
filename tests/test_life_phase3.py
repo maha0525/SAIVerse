@@ -375,7 +375,9 @@ def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
     )
     runtime.select_llm_client = lambda node_def, p, **k: (client, "claude-x")
     touched: List[Any] = []
-    runtime.session_lifecycle.touch_anchor_after_llm_call = lambda p, usage: touched.append(usage)
+    runtime.session_lifecycle.touch_anchor_after_llm_call = (
+        lambda p, usage, anchor_id=None: touched.append(usage)
+    )
     return touched
 
 

@@ -326,7 +326,7 @@ class MemoryWeaveP4dMigrationTest(unittest.TestCase):
             conn = None
 
         class FakeHistoryMgr:
-            metabolism_anchor_message_id = None
+            pass  # 旧 metabolism_anchor_message_id は廃止 (§6-5、anchor の正は session_anchor 行)
 
         class FakePersona:
             sai_memory = FakeSAIMem()

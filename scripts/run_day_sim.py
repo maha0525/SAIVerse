@@ -130,7 +130,7 @@ class MockWorkRuntime:
     def __init__(self, llm_client: MockSessionLLMClient):
         self.llm_client = llm_client
         self.session_lifecycle = SimpleNamespace(
-            touch_anchor_after_llm_call=lambda persona, usage: None,
+            touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
         )
 
     def _prepare_context(self, persona, building_id, user_input, requirements,

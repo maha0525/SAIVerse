@@ -81,7 +81,7 @@ class FakeRuntime:
         self.selected_aspects: List[Any] = []
         self._store_seq = 0
         self.session_lifecycle = SimpleNamespace(
-            touch_anchor_after_llm_call=lambda persona, usage: None,
+            touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
         )
 
     # --- context / client -------------------------------------------------

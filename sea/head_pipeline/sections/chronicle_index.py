@@ -79,22 +79,14 @@ class ChronicleIndexSection:
         old: Optional[ChronicleIndexSnapshot],
         new: Optional[ChronicleIndexSnapshot],
     ) -> list[NotificationLabel]:
-        if old is None or new is None:
-            return []
-        cutoff = old.captured_at
-        new_entries = [e for e in new.entries if e.created_at > cutoff]
-        if not new_entries:
-            return []
-        by_level: dict[int, int] = {}
-        for entry in new_entries:
-            by_level[entry.level] = by_level.get(entry.level, 0) + 1
-        level_str = "、".join(
-            f"Level {lv} × {cnt}件" for lv, cnt in sorted(by_level.items())
-        )
-        return [NotificationLabel(
-            kind="chronicle_added",
-            label=f"Chronicleに新しいエントリが追加されました（{level_str}）",
-        )]
+        # 件数ラベル diff は退役 (beat_execution_context.md §3.2 / §3.3、§6-5)。
+        # Chronicle の可視化は「model の節目の構造交換」が担保する — 退役 (anchor
+        # 前進) の瞬間に、その model の head 再 capture で Chronicle が生ログと
+        # 入れ替わりに見える (intent §3.2)。窓が生ログでカバーしている間は情報
+        # 欠落がないため、「新しいエントリが追加されました (Level N × M件)」の
+        # 操作ラベル通知は重複ノイズでしかない。intent §3.3 の「memory_weave /
+        # chronicle_index の diff 未整理も本工事で潰す」の実装形。
+        return []
 
     def serialize_snapshot(self, snapshot: ChronicleIndexSnapshot) -> str:
         return json.dumps(

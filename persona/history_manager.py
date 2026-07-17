@@ -40,7 +40,9 @@ class HistoryManager:
         self.memory_adapter = memory_adapter
         # 隔離フラグ参照 (= 防御的にしか使わないが互換のため保持)
         self._quarantined_buildings = quarantined_buildings if quarantined_buildings is not None else {}
-        self.metabolism_anchor_message_id: Optional[str] = None
+        # NOTE: 旧 metabolism_anchor_message_id (persona 単一可変属性) は廃止。
+        # anchor の正は session_anchor 行 (persona, model)、prefix 組成時の値は
+        # state["_prefix_anchor_id"] で call-local に運ぶ (beat_execution_context.md §3.2)。
         # building_messages テーブルアクセス用 SessionLocal。 None なら no-op
         # (= 既存 MagicMock テスト互換のフォールバック)。 本番では PersonaCore が必須で渡す。
         self._db_session_factory = db_session_factory

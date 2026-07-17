@@ -224,9 +224,11 @@ def run_work_session(
             working_memory=False,
             realtime_context=True,
         )
+        _context_meta: Dict[str, Any] = {}
         base_messages = runtime._prepare_context(
             persona, building_id, None, requirements, pulse_id=pulse_id,
             model_key=execution_context.model_key,
+            context_meta=_context_meta,
         )
         instruction_content = _build_instruction_message(
             str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
@@ -242,6 +244,8 @@ def run_work_session(
             "_activity_trace": [],
             "_cancellation_token": None,
             "_messages": messages,
+            # call-local anchor (§3.2)。history_depth=0 のため通常 None (= touch なし)。
+            "_prefix_anchor_id": _context_meta.get("prefix_anchor_id"),
         }
         # node_def / playbook は _run_spell_loop・_store_memory が参照する
         # 最小属性 (memorize.tags / name) だけを持つ軽量スタブ。
@@ -711,7 +715,12 @@ def _record_llm_usage(
         usage.cached_tokens, usage.cache_write_tokens,
     )
     try:
-        runtime.session_lifecycle.touch_anchor_after_llm_call(persona, usage)
+        # anchor は call-local (§3.2)。work_session の prefix は history_depth=0 で
+        # anchor を含まないため、通常 None = touch なしになる (旧: persona 属性の
+        # 残留値を touch していた — その挙動は事故源なので引き継がない)。
+        runtime.session_lifecycle.touch_anchor_after_llm_call(
+            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
+        )
     except Exception:
         LOGGER.debug("[work_session] anchor touch failed (non-fatal)", exc_info=True)
 

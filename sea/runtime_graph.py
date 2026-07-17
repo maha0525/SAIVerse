@@ -184,6 +184,11 @@ def compile_with_langgraph(
         # ノードが state.pop() で取り出し、応答メッセージの metadata["auto_recall"]
         # に載せる (reasoning と同じ運搬パターン)。未注入なら None。
         "_auto_recall_text": parent.get("_auto_recall_text"),
+        # call-local anchor (beat_execution_context.md §3.2): _prepare_context が
+        # 今回の prefix に採用した anchor の ID。LLM 成功後の anchor touch は
+        # この値だけを使う (persona 属性フォールバックは廃止)。サブライン
+        # (line='sub') は親の prefix をコピーするため親の値をそのまま継承する。
+        "_prefix_anchor_id": parent.get("_prefix_anchor_id"),
         # UI-triggered pre-spells: executed once at the entry of the first LLM node.
         # Only seeded for top-level Pulses; sub-pulses (sub_play / run_playbook)
         # must not re-execute UI choices. Top-level is detected by absence of

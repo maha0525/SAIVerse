@@ -43,12 +43,20 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
     return result
 
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
     # ExecutionContext が届いている呼び出し元 (work_session / gold_panning /
     # keepalive / run_playbook の Pulse-root) が execution_context.model_key を
     # 渡す。None なら persona の標準 model にフォールバック (preview 等)。
+    #
+    # context_meta: 呼び出し元が渡す out-param dict (§3.2 の call-local anchor)。
+    # この呼び出しで prefix に採用した anchor の ID を
+    # ``context_meta["prefix_anchor_id"]`` に書き戻す (anchor を使わない組成では
+    # 書かない)。呼び出し元は state["_prefix_anchor_id"] に載せ、LLM 成功後の
+    # ``touch_anchor_after_llm_call(anchor_id=...)`` に渡す。旧実装の
+    # ``history_manager.metabolism_anchor_message_id`` (persona 単一可変属性) は
+    # 廃止した — TTL 失効後に旧 anchor を touch する事故 (記憶監査第 4 片) の根治。
     from sea.playbook_models import ContextRequirements
 
     # Use provided requirements or default to full context
@@ -138,8 +146,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                     metabolism_enabled = getattr(runtime.manager, "metabolism_enabled", False) if runtime.manager else False
 
                     if metabolism_enabled and not preview_only:
-                        # Persistent anchor resolution with 3-level fallback
-                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(persona)
+                        # Persistent anchor resolution with 3-level fallback。
+                        # 「自 model」は実行 model (model_key)。None なら
+                        # resolve 側が persona.model にフォールバックする。
+                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
+                            persona, model_key=model_key,
+                        )
 
                         if anchor_id:
                             # Case 1 or 2: valid anchor found
@@ -152,7 +164,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             if recent_from_anchor:
                                 recent = recent_from_anchor
                                 used_anchor = True
-                                history_mgr.metabolism_anchor_message_id = anchor_id
+                                if context_meta is not None:
+                                    # call-local: 今回の prefix の anchor を呼び出し元へ返す
+                                    context_meta["prefix_anchor_id"] = anchor_id
                                 LOGGER.debug(
                                     "[sea][prepare-context] Anchor-based retrieval (%s): %d messages from anchor %s",
                                     resolution, len(recent), anchor_id,
@@ -210,8 +224,8 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                         "content": "Chronicle生成が完了しました",
                                     })
 
-                            # Load minimal history (low watermark)
-                            low_wm = runtime.session_lifecycle.get_low_watermark(persona)
+                            # Load minimal history (low watermark、実行 model の閾値)
+                            low_wm = runtime.session_lifecycle.get_low_watermark(persona, model_key)
                             limit_value = low_wm if low_wm and low_wm > 0 else 20
                             use_message_count = True
                             LOGGER.debug(
@@ -221,7 +235,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                     elif metabolism_enabled and preview_only:
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
-                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(persona)
+                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
+                            persona, model_key=model_key,
+                        )
                         if anchor_id:
                             recent_from_anchor = history_mgr.get_history_from_anchor(
                                 anchor_id,
@@ -233,7 +249,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 recent = recent_from_anchor
                                 used_anchor = True
                         if not used_anchor:
-                            low_wm = runtime.session_lifecycle.get_low_watermark(persona)
+                            low_wm = runtime.session_lifecycle.get_low_watermark(persona, model_key)
                             limit_value = low_wm if low_wm and low_wm > 0 else 20
                             use_message_count = True
 
@@ -309,15 +325,17 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                     # Set metabolism anchor on first count-based retrieval (skip in preview).
                     # Phase 4-e: DB への永続化 (updated_at 書き込み) は LLM 呼び出し成功後に行う。
-                    # ここで anchor を立てたまま LLM 失敗 → DB 未書き込み → 次回も Case 3 fallback
-                    # → minimal load、という挙動になる。新規 anchor が永続化されないこと自体は
-                    # Case 3 を毎回繰り返すだけで致命的ではない (まはー確認済 2026-05-08)。
+                    # ここで anchor 候補を立てたまま LLM 失敗 → DB 未書き込み → 次回も Case 3
+                    # fallback → minimal load、という挙動になる。新規 anchor が永続化されない
+                    # こと自体は Case 3 を毎回繰り返すだけで致命的ではない (まはー確認済 2026-05-08)。
+                    # §3.2: 候補は persona 属性ではなく context_meta (call-local) で運ぶ。
                     metabolism_enabled_for_anchor = getattr(runtime.manager, "metabolism_enabled", False) if runtime.manager else False
                     if metabolism_enabled_for_anchor and recent and not preview_only:
                         oldest_id = recent[0].get("id")
                         if oldest_id:
-                            history_mgr.metabolism_anchor_message_id = oldest_id
-                            LOGGER.debug("[sea][prepare-context] Set metabolism anchor (in-memory) to %s; DB persist deferred to post-LLM-success", oldest_id)
+                            if context_meta is not None:
+                                context_meta["prefix_anchor_id"] = oldest_id
+                            LOGGER.debug("[sea][prepare-context] Resolved count-based metabolism anchor %s (call-local); DB persist deferred to post-LLM-success", oldest_id)
 
                 LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                 # Enrich messages with attachment context

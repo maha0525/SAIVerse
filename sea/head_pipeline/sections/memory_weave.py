@@ -84,8 +84,24 @@ class MemoryWeaveSection:
 
         # metabolism anchor を渡して、track_chronicle の生メッセージダンプから
         # 「履歴 (anchor 以降) に既に載っている分」を除外させる (重複トークン削減)。
-        history_mgr = getattr(persona, "history_manager", None)
-        anchor_id = getattr(history_mgr, "metabolism_anchor_message_id", None) if history_mgr else None
+        # 正は session_anchor 行 (persona, ctx.model_key) — 旧
+        # history_manager.metabolism_anchor_message_id (persona 単一可変属性) は
+        # 廃止 (beat_execution_context.md §3.2)。読めない環境 (テストスタブ等) は
+        # None = 除外なし (従来のフォールバックと同じ縮退)。
+        anchor_id = None
+        try:
+            sea_runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+            lifecycle = getattr(sea_runtime, "session_lifecycle", None)
+            load_entry = getattr(lifecycle, "load_anchor_entry", None)
+            model_key = getattr(ctx, "model_key", None)
+            if callable(load_entry) and model_key:
+                entry = load_entry(ctx.persona_id, str(model_key))
+                anchor_id = entry.get("anchor_id") if entry else None
+        except Exception:
+            LOGGER.debug(
+                "memory_weave: anchor row read failed persona=%s", ctx.persona_id,
+                exc_info=True,
+            )
 
         # P4-d: Memopedia 索引は MemopediaIndexSection が担当する。
         # get_memory_weave_context 自体が Memopedia 索引に一切関与しなくなった

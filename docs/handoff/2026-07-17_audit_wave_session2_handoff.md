@@ -69,15 +69,34 @@ head操作の内容型通知 (issue head_mutation_notification_gap 解消)。調
 5. **S5/S3 も同時に閉じる**: inject_diff_notifications の直接 `push_perception("world_state", ...)` (integration.py:213 付近) を outbox 経由に統一し、flush_diffs の B 前進を outbox mark_applied (durable 確定) 後に移す
 6. **life_purpose の diff ラベル (内容なし) は render 断片同梱に改める** (§3.3 不変条件「操作ラベルでなく render 同一断片」への追従)
 
-## 5. 次の走路 (§6-4 完了後)
+## 5. §6-5 — 実装・検収済み・コミット済み (2026-07-17 セッション3)
 
-1. §6-5: Metabolism 二層分離 (S2/M1。台帳の冪等 claim `(metabolism.run, persona:窓)` を使う)。**memory_weave / chronicle_index の diff 整理もここ** (§6-4 設計裁定 1 参照)
-2. §6-6: thread の ExecutionContext 化 (S4、Stelis push/pop)。**Beat ロックのスレッド束縛→実行トークン化もここ** (intent §3.4 末尾の実測帰結参照 — running-loop レガシー分岐の boundary no-op の恒久解)
-3. §6-7: session.md / dynamic_state_sync.md の正典改訂
-4. 台帳 Phase 1 (判断点 A2/A7/A8/A9/A11) → Phase 2〜5
-5. 柱5〜8
+下記の確定設計どおり委譲→検収で完了 (実装エージェントはレート制限で落ちたが実装は完遂しており、検収で全項目・全テスト緑を確認)。**逸脱1点 (妥当と裁定)**: 非対話の確認スキップ (自律 Pulse で AUTONOMOUS_CHRONICLE_ENABLED=False) は設計の "deferred" でなく **"disabled"** (= 退役許可) に分類 — deferred にすると自律 Pulse しか走らない persona の anchor が永久据え置きになるため。押し出された生ログは SAIMemory に残り、後続の user Pulse / session close (force=True) で編纂される。
 
-## 6. 運用メモ (このセッションで確立・確認したこと)
+検収メモ: call-local anchor は `prepare_context(context_meta=)` out-param → `state["_prefix_anchor_id"]` → `touch_anchor_after_llm_call(anchor_id=)` の3点で運ぶ。runtime_llm の touch 4箇所 + keepalive (見張り対象行の値) + gold_panning + work_session (history_depth=0 → None = touch なし、旧「WORKER 実行中に main-line anchor を誤 touch」も同時に消滅) 全結線を確認。claim は確認ゲート通過後・LLM 前 (mark_failed で失敗表明、対象なしは claim せず ok)。
+
+### 確定設計 (記録)
+
+Metabolism 二層分離 (intent §3.2)。調査で確定した現状: 編纂と退役は同一経路に混在、入口は5つ (①応答後 maybe_run_metabolism ②会話前 Case 3 = runtime_context.py:165-211 ③手動 organize-memory ④gold_panning session close ⑤①内の gold_panning)、全て `session_lifecycle.generate_chronicle` に合流。**S2 実在**: `_run_metabolism_locked` は編纂例外を warning で握り潰し anchor を無条件前進 (tests/test_gold_panning.py:420 がこの挙動を固定→期待値逆転が必要)。**M1**: 編纂に冪等 claim なし (arasuji の source_ids スキップは事後冪等のみ)、Beat ロックが唯一の防壁。
+
+設計 (私=Fable の裁定):
+
+1. **編纂の冪等 claim (M1)**: `generate_chronicle` 内部を実行台帳で包む (全入口が合流する一点)。kind="metabolism.run"、idempotency_key = f"{persona_id}:{窓末尾ID}" (窓末尾ID = 編纂対象 qualifying run の最大メッセージ ID。対象なしなら claim せず no-op)。begin_execution が created=False を返したら編纂スキップ (別入口が同じ窓を claim 済み)。generate_track_chronicle も同様 (kind="metabolism.run_track")
+2. **S2 ガード**: generate_chronicle が status を返す — "ok" (成功 or 対象なし) / "disabled" (トグル OFF) / "failed" (例外) / "deferred" (確認待ち・拒否)。anchor 前進は ok / disabled のときだけ。failed / deferred は据え置き = watermark 超過が残るので次の maybe_run で自然再試行。**disabled で前進するのは設計判断** (Chronicle を切った persona は「編纂なしで忘れる」を選んでいる — 前進を止めると metabolism が永久デッドロック)
+3. **`history_manager.metabolism_anchor_message_id` 廃止 (全8箇所)**: 正 = session_anchor 行 (persona, model)。(a) 退役書き session_lifecycle.py:838 → ExecutionContext.model_key の行へ、in-memory 属性は削除 (b) Case 1/2 の解決値 (runtime_context.py:155/319) → **call-local 化**: 解決した anchor_id を state["_prefix_anchor_id"] に載せ、touch_anchor_after_llm_call が引数で受ける (persona 属性経由をやめる = 記憶監査第4片「TTL 失効後に旧 anchor を touch」の根治) (c) 読み3点 (発火判定 :644 / gold_panning:674 / memory_weave.py:88) → load_anchor_entry(persona_id, model_key) (d) config.py:207 の in-memory clear は属性ごと消滅
+4. **閾値と退役の model 化**: get_high_watermark / get_low_watermark / maybe_run_metabolism / run_metabolism に ExecutionContext 由来の model_key を通す (呼び出し元 runtime.py:261 は Pulse の実行 model を渡す)。退役は「その model の窓」だけ進める
+5. **可視化 = model の節目**: on_metabolism の head 再 capture (session_lifecycle.py:846-849 / config.py:245) を「anchor を進めた model の (persona, model) だけ」に絞る (§6-3b で head は model 別キー済み)
+6. **weave/chronicle diff 整理** (§6-4 からの宿題): chronicle_index の件数ラベル diff (sections/chronicle_index.py:77-97) を退役 ([] に) — 可視化は節目の構造交換 (退役の瞬間に Chronicle が生ログと入れ替わりで見える、intent §3.2) が担保するのでラベルは重複ノイズ。memory_weave diff は [] のまま。これが intent §3.3 の「未整理も本工事で潰す」の実装形
+7. **Case 3 (会話前) は claim だけ足して挙動維持**: anchor 前進が絡まないので S2 の対象外。編纂失敗しても生ログは SAIMemory に残り次回編纂で自然回復
+
+## 6. 次の走路 (§6-5 完了後)
+
+1. §6-6: thread の ExecutionContext 化 (S4、Stelis push/pop)。**Beat ロックのスレッド束縛→実行トークン化もここ** (intent §3.4 末尾の実測帰結参照 — running-loop レガシー分岐の boundary no-op の恒久解)
+2. §6-7: session.md / dynamic_state_sync.md の正典改訂
+3. 台帳 Phase 1 (判断点 A2/A7/A8/A9/A11) → Phase 2〜5
+4. 柱5〜8
+
+## 7. 運用メモ (このセッションで確立・確認したこと)
 
 - **委譲→検収の型で回す** (まはー指示の再確認 2026-07-17。私が A' を直接実装して「一人で動きすぎ」と止められた)。調査(Explore)→設計(メイン)→実装(general-purpose)→検収(メイン)。委譲プロンプトには毎回: メインツリー直接 / worktree・再委譲禁止 / git 操作禁止 / 触ってよいファイル明示 / venv python / pytest パイプ禁止
 - **検収は設計検証の第二パス** (memory 更新済み: feedback_delegate_impl_to_subagents)。実装の前提が本番経路で成立するかを疑う — 今回はスレッドモデルをプローブ2本で実測した
