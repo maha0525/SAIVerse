@@ -42,6 +42,18 @@ def life_purpose_set(
         parts.append(f"趣味 {len(data['interests'])} 件")
     if data.get("vocations"):
         parts.append(f"仕事 {len(data['vocations'])} 件")
+
+    # head 操作の内容型通知 (§6-4): 生きる目的 (life_purpose) の render 断片を
+    # 全 Session 窓へ届ける。META 判断の finalize (meta_judgment_finalize) も
+    # TOOL_REGISTRY 経由で本関数を叩くため、この一点で自動カバーされる
+    # (issue head_mutation_notification_gap の中核解消)。ヘルパー側は決して
+    # raise しない (通知はツール本体の結果を壊さない)。
+    from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
+
+    notify_head_mutation_from_tool_context(
+        "life_purpose",
+        operation_label="生きる目的を更新しました",
+    )
     return "生きる目的を保存しました: " + "、".join(parts)
 
 

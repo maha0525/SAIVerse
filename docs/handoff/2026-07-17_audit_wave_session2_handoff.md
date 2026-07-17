@@ -52,16 +52,32 @@ head snapshot + last_notified の (persona, model) キー化。調査済みの�
 5. 壊れる候補テスト: tests/test_head_pipeline.py (直撃)、test_head_pipeline_anchor_ttl.py。恒久検査 test_head_section_wiring.py はキー構造非依存 (緑維持のみ)
 6. 意味変化として引き受けるもの: 「line ごとの diff 既読」→「model ごと」(サブラインも同 model なら head 共有 — intent §3.1 まはー裁定と整合)
 
-## 4. 次の走路 (§6-3 完了後)
+## 4. §6-4 — 実装・検収済み・コミット済み (2026-07-17 セッション3)
 
-1. §6-4: head操作の内容型通知 (issue head_mutation_notification_gap 解消。経路= outbox→知覚バッファ→tail、§6-2 の台帳ハンドラ2種が土台として結線済み)
-2. §6-5: Metabolism 二層分離 (S2/M1。台帳の冪等 claim `(metabolism.run, persona:窓)` を使う)
-3. §6-6: thread の ExecutionContext 化 (S4、Stelis push/pop)。**Beat ロックのスレッド束縛→実行トークン化もここ** (intent §3.4 末尾の実測帰結参照 — running-loop レガシー分岐の boundary no-op の恒久解)
-4. §6-7: session.md / dynamic_state_sync.md の正典改訂
-5. 台帳 Phase 1 (判断点 A2/A7/A8/A9/A11) → Phase 2〜5
-6. 柱5〜8
+下記の確定設計どおり委譲→検収で完了。逸脱なし。実装の要点: `sea/head_pipeline/notify.py` (決して raise しない2層ヘルパー + tools/context contextvars 解決の便宜口) / `HeadPipeline.advance_last_notified` (全 model 行の B 前進 + dirty 除去 + persist) / `flush_diffs(advance=False)` が `(labels, {section: new_snapshot})` を返す分離形 (配送失敗時は dirty 据え置き = 次回再検出) / ツール結線は Error 文字列ガード + `memory_atlas._parse_ref` での宛先 section 振り分け + DB ロック外での発火。issue `head_mutation_notification_gap` は実装済み・実機検証待ちに更新済み。
 
-## 5. 運用メモ (このセッションで確立・確認したこと)
+### 確定設計 (記録)
+
+head操作の内容型通知 (issue head_mutation_notification_gap 解消)。調査で確定した構造事実: **`section.render(snapshot)` は snapshot のみに依存** (DB 非参照) — `section.capture(ctx)` → `render` の2ステップで head と寸分たがわぬ断片が得られ、head 本体の凍結は維持できる。
+
+設計 (私=Fable の裁定、intent §3.3 の確定裁定からの演繹):
+
+1. **操作起点 push の対象 = tool 書き込み経路がある 4 section**: core_memory (memory_write/delete/clip) / desk (memory_open/close) / life_purpose (life_purpose_set — META finalize は TOOL_REGISTRY 経由で同ツールを叩くため自動カバー、issue の中核解消) / memopedia_index (memory_write/delete、opt-in OFF なら push しない)。**memory_weave / chronicle_index は書き手がシステム編纂のみなので §6-5 (Metabolism 節目の可視化) の領分に送る** (intent の「未整理も本工事で潰す」はこの2つの diff 整理を指す — §6-5 で扱う旨を intent に記録済み)
+2. **通知本文 = capture→render の text そのもの** + 操作ラベル (何をしたか1行)。ヘルパー `notify_head_mutation(persona, manager, building_id, section_name)` を head_pipeline に新設し、各 tool の成功点から呼ぶ。model_key は resolve_default_model_key フォールバックでよい (capture/render は model 非依存、ctx の anchor-TTL メタは通知生成に効かない)
+3. **配送 = outbox 経由** (§6-2 の台帳ハンドラが土台): begin_execution(kind="head.mutation_notify") → mark_applied(outbox_items=[{target: "perception.push", payload: {kind: "head_mutation", content, reduce_key: f"head_mutation:{section}"}}], deliver=True)。台帳が無い環境 (旧テスト) は直接 push_perception に degrade + warning
+4. **二重通知の防ぎ方 = push 成功後に B (last_notified) を該当 section だけ全 Session 行で前進** (diff は消さない — UI 編集など tool 外の変化は backstop diff が拾い続ける)。根拠: 知覚バッファ→SAIMemory は persona 共有の履歴ストリームで、push は全 Session の窓に届く。pipeline に `advance_last_notified(persona_id, section_name, new_section_snapshot)` (全 model 行) を新設
+5. **S5/S3 も同時に閉じる**: inject_diff_notifications の直接 `push_perception("world_state", ...)` (integration.py:213 付近) を outbox 経由に統一し、flush_diffs の B 前進を outbox mark_applied (durable 確定) 後に移す
+6. **life_purpose の diff ラベル (内容なし) は render 断片同梱に改める** (§3.3 不変条件「操作ラベルでなく render 同一断片」への追従)
+
+## 5. 次の走路 (§6-4 完了後)
+
+1. §6-5: Metabolism 二層分離 (S2/M1。台帳の冪等 claim `(metabolism.run, persona:窓)` を使う)。**memory_weave / chronicle_index の diff 整理もここ** (§6-4 設計裁定 1 参照)
+2. §6-6: thread の ExecutionContext 化 (S4、Stelis push/pop)。**Beat ロックのスレッド束縛→実行トークン化もここ** (intent §3.4 末尾の実測帰結参照 — running-loop レガシー分岐の boundary no-op の恒久解)
+3. §6-7: session.md / dynamic_state_sync.md の正典改訂
+4. 台帳 Phase 1 (判断点 A2/A7/A8/A9/A11) → Phase 2〜5
+5. 柱5〜8
+
+## 6. 運用メモ (このセッションで確立・確認したこと)
 
 - **委譲→検収の型で回す** (まはー指示の再確認 2026-07-17。私が A' を直接実装して「一人で動きすぎ」と止められた)。調査(Explore)→設計(メイン)→実装(general-purpose)→検収(メイン)。委譲プロンプトには毎回: メインツリー直接 / worktree・再委譲禁止 / git 操作禁止 / 触ってよいファイル明示 / venv python / pytest パイプ禁止
 - **検収は設計検証の第二パス** (memory 更新済み: feedback_delegate_impl_to_subagents)。実装の前提が本番経路で成立するかを疑う — 今回はスレッドモデルをプローブ2本で実測した

@@ -224,8 +224,8 @@ class HeadPipeline:
                 state.dirty_sections.add(section_name)
 
     def flush_diffs(
-        self, ctx: LineHeadInput, *, all_sections: bool = False,
-    ) -> list[NotificationLabel]:
+        self, ctx: LineHeadInput, *, all_sections: bool = False, advance: bool = True,
+    ) -> list[NotificationLabel] | tuple[list[NotificationLabel], dict[str, object]]:
         """dirty Section + periodic backstop 対象 Section の diff をチェックし、
         差分があれば NotificationLabel 列を返す。
 
@@ -240,11 +240,20 @@ class HeadPipeline:
         diff 検出後は last_notified を新 capture に進める (= 同じ差分を二重通知しない)。
         既読状態 (B) は (persona, model) の Session ごとに独立
         (beat_execution_context.md §3.1 — 「line ごとの diff 既読」→「model ごと」)。
+
+        ``advance=False`` (S3 修正、統合工事 §6-4): **検出だけ行い B を進めない**。
+        戻り値は ``(labels, {section_name: new_snapshot})`` のタプルになり、呼び出し側
+        (integration.inject_diff_notifications) が配送を durable に確定
+        (outbox mark_applied) した後に :meth:`advance_last_notified` で B を進める。
+        配送前に B を進めると、配送失敗時に差分が永久に失われる (SEA 監査 S3)。
+        差分が出た section の dirty マークも据え置く (= 配送失敗時は次回 flush で
+        再検出される)。
         """
         with self._lock:
             state = self._states.get((ctx.persona_id, ctx.model_key))
             if state is None:
-                return []  # snapshot 不在 = 初回 capture 前、diff チェックの対象なし
+                # snapshot 不在 = 初回 capture 前、diff チェックの対象なし
+                return [] if advance else ([], {})
 
             now = time.time()
             do_backstop = (now - state.last_backstop_check) >= self.BACKSTOP_INTERVAL_SECONDS
@@ -256,9 +265,10 @@ class HeadPipeline:
                 target_names.update(s.name for s in self._registry.all_sections())
 
             if not target_names:
-                return []
+                return [] if advance else ([], {})
 
             labels: list[NotificationLabel] = []
+            detected: dict[str, object] = {}
             for section in self._registry.all_sections():
                 if section.name not in target_names:
                     continue
@@ -297,15 +307,51 @@ class HeadPipeline:
 
                 if section_labels:
                     labels.extend(section_labels)
-                    state.last_notified_sections[section.name] = new_snapshot
+                    detected[section.name] = new_snapshot
+                    if advance:
+                        state.last_notified_sections[section.name] = new_snapshot
+                    else:
+                        # 検出のみ: B も dirty も据え置き (配送確定後に
+                        # advance_last_notified が進める)。
+                        continue
 
                 state.dirty_sections.discard(section.name)
 
             notified_snapshot_copy = dict(state.last_notified_sections)
 
+        if not advance:
+            return labels, detected
         if labels:
             self._persist_last_notified(ctx.persona_id, ctx.model_key, notified_snapshot_copy)
         return labels
+
+    def advance_last_notified(
+        self,
+        persona_id: str,
+        section_name: str,
+        new_section_snapshot: object,
+    ) -> None:
+        """該当 persona の**全 (persona, model) 行**の B (last_notified) を、
+        指定 section だけ ``new_section_snapshot`` に前進させる (+ store 永続化)。
+
+        head 操作の内容型通知 (§6-4) / outbox 化された diff 通知 (S3) の
+        「push 確定後の B 前進」に使う。根拠: 知覚バッファ → SAIMemory は persona
+        共有の履歴ストリームで、push は全 Session の窓に届く — 前進させないと
+        backstop flush_diffs が同じ変化を model ごとに再通知する。
+        dirty マークも該当 section だけ除去する。
+        """
+        persist_targets: list[tuple[str, dict[str, object]]] = []
+        with self._lock:
+            for (pid, model_key), state in self._states.items():
+                if pid != persona_id:
+                    continue
+                state.last_notified_sections[section_name] = new_section_snapshot
+                state.dirty_sections.discard(section_name)
+                persist_targets.append(
+                    (model_key, dict(state.last_notified_sections))
+                )
+        for model_key, notified in persist_targets:
+            self._persist_last_notified(persona_id, model_key, notified)
 
     # ---- render ----
 

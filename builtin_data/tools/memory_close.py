@@ -33,9 +33,20 @@ def memory_close(ref: str) -> str:
         try:
             # close_page は ref 正規化で生 conn を読むため外側でロック
             with adapter._db_lock:
-                return memory_atlas.close_page(adapter, ref, manager=manager)
+                result = memory_atlas.close_page(adapter, ref, manager=manager)
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"
+
+    # head 操作の内容型通知 (§6-4): 机 (desk) の render 断片を全 Session 窓へ。
+    # 失敗 (Error 文字列) 時は通知しない。ヘルパー側は決して raise しない。
+    if not (result or "").startswith("Error"):
+        from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
+
+        notify_head_mutation_from_tool_context(
+            "desk",
+            operation_label=f"ページを机から閉じました ({ref})",
+        )
+    return result
 
 
 def schema() -> ToolSchema:

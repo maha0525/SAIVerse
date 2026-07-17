@@ -41,12 +41,48 @@ def memory_write(
             raise RuntimeError(f"SAIMemory not ready for {persona_id}")
         try:
             with adapter._db_lock:
-                return memory_atlas.write_page(
+                result = memory_atlas.write_page(
                     adapter, ref, content,
                     title=title, category=category, core_budget=budget,
                 )
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"
+
+    _notify_mutation(ref, title, result)
+    return result
+
+
+def _notify_mutation(ref: Optional[str], title: Optional[str], result: str) -> None:
+    """head 操作の内容型通知 (§6-4): 成功時に該当 section の render 断片を全 Session 窓へ。
+
+    宛先 core/c:N → core_memory、m:N / title 新規 → memopedia_index。失敗
+    (Error 文字列) や head 非対象の ref は通知しない。ヘルパー側は決して raise
+    しない (通知はツール本体の結果を壊さない)。
+    """
+    if (result or "").startswith("Error"):
+        return
+    from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
+
+    if title and str(title).strip():
+        notify_head_mutation_from_tool_context(
+            "memopedia_index",
+            operation_label=f"Memopedia に新しいページを作成しました（{title}）",
+        )
+        return
+    try:
+        kind, _key = memory_atlas._parse_ref(ref or "")
+    except Exception:
+        return
+    if kind in ("core_all", "core_one"):
+        notify_head_mutation_from_tool_context(
+            "core_memory",
+            operation_label=f"コア記憶を更新しました ({ref})",
+        )
+    elif kind == "memopedia":
+        notify_head_mutation_from_tool_context(
+            "memopedia_index",
+            operation_label=f"Memopedia ページに追記しました ({ref})",
+        )
 
 
 def schema() -> ToolSchema:

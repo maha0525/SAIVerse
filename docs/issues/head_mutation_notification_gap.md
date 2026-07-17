@@ -1,8 +1,9 @@
 # head 表示物への操作が、操作元の窓の外にいる読み手へ内容ごと届かない
 
-**登録**: 2026-07-16（メティス）
+**登録**: 2026-07-16（メティス)
 **種別**: 既存欠陥（model 分離とは独立に、line 隔離だけで現行発生しうる）
 **修正先**: 統合工事 intent [`beat_execution_context.md`](../intent/beat_execution_context.md) の「head 操作の内容型通知」
+**状態**: **実装済み・実機検証待ち (2026-07-17、統合工事 §6-4)** — 操作起点 push 型 (`sea/head_pipeline/notify.py`、通知本文 = section.render と同一 text、outbox 配送、B 全 Session 行前進)。core_memory / desk / life_purpose / memopedia_index の 4 section をツール成功点から結線 (META finalize は TOOL_REGISTRY 経由で自動カバー)。memory_weave / chronicle_index の可視化は §6-5 (Metabolism 節目) の領分。実機検証後に archive へ
 
 ## 症状
 

@@ -173,9 +173,19 @@ class LifePurposeSection:
         if old is None or new is None:
             return []
         if old.purpose_text != new.purpose_text and new.purpose_text:
+            # 通知本文に new snapshot の render 断片を同梱する (§3.3 不変条件
+            # 「操作ラベルでなく render 同一断片」。building.py の
+            # building_changed が system_prompt 全文を同梱するのと同じ先例)。
+            # 旧実装は「生きる目的が更新されました」の一行のみで内容が
+            # 届かなかった (issue head_mutation_notification_gap)。
+            lines = ["生きる目的が更新されました"]
+            rendered = self.render(new)
+            if rendered is not None and rendered.text:
+                lines.append("")
+                lines.append(rendered.text)
             return [NotificationLabel(
                 kind="life_purpose_set",
-                label="生きる目的が更新されました",
+                label="\n".join(lines),
             )]
         return []
 

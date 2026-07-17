@@ -190,12 +190,92 @@ def inject_diff_notifications(
     diff チェックする (= 従来の単一窓挙動と同じ)。既読状態 (last_notified) は
     (persona, model) ごとに独立 (beat_execution_context.md §3.1)。
 
+    【outbox 経由に変更 (2026-07-17, 統合工事 §6-4 / SEA 監査 S5・S3)】
+    manager が execution_ledger を持つ環境では、ラベル群を実行台帳の outbox
+    (target='perception.push') で配送する — 知覚バッファの flush 失敗で通知が
+    全消失する穴 (S5) を配達保証で塞ぐ。B (last_notified) の前進は outbox 積みの
+    durable 確定 (mark_applied) **後** に行う (S3: 配送前に B を進めると配送失敗時に
+    差分が永久に失われる)。B は persona の全 (persona, model) 行を前進させる —
+    知覚バッファ → SAIMemory は persona 共有の履歴ストリームで、push は全 Session
+    の窓に届くため。台帳が無い環境 (旧テスト等) は従来どおり直接 push +
+    flush_diffs 内での B 前進に degrade する。
+
     Returns:
         ラベルが 1 件以上 push された場合 True、差分なしなら False。
     """
     pipeline = pipeline or get_default_pipeline()
     ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
+
+    ledger = getattr(manager, "execution_ledger", None)
+    if ledger is None:
+        return _inject_diff_notifications_direct(persona, pipeline, ctx, building_id)
+
+    labels, detected = pipeline.flush_diffs(ctx, all_sections=True, advance=False)
+    if not labels:
+        return False
+
+    try:
+        execution_id, _created = ledger.begin_execution(
+            "head.diff_notify", idempotency_key=None, persona_id=ctx.persona_id,
+        )
+        ledger.mark_running(execution_id)
+        outbox_items = [
+            {
+                "target": "perception.push",
+                "persona_id": ctx.persona_id,
+                "payload": {
+                    "kind": "world_state",
+                    "content": label.label,
+                    "reduce_key": None,
+                    "salient": False,
+                    "media": [],
+                    "metadata": None,
+                },
+            }
+            for label in labels
+        ]
+        ledger.mark_applied(
+            execution_id,
+            result={"labels": len(labels), "sections": sorted(detected.keys())},
+            outbox_items=outbox_items,
+            deliver=True,
+        )
+    except Exception:
+        # 配送予約に失敗 = 通知は届いていない。B は据え置き (次回 flush で再検出)。
+        LOGGER.exception(
+            "head_pipeline: failed to queue diff notifications via ledger "
+            "persona=%s (labels left for retry)", ctx.persona_id,
+        )
+        return False
+
+    # outbox 積みが durable に確定した後で B を前進 (S3 の修正)。
+    for section_name, new_snapshot in detected.items():
+        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+
+    LOGGER.info(
+        "head_pipeline: queued %d world_state notification(s) via ledger "
+        "for persona=%s building=%s", len(labels), ctx.persona_id, building_id,
+    )
+
+    # 入室想起は head 操作でも diff でもないので outbox 化の対象外 (従来どおり)。
+    sai_mem = getattr(persona, "sai_memory", None)
+    if sai_mem is not None and sai_mem.is_ready():
+        _inject_persona_recall_on_enter(persona, labels, sai_mem)
+
+    return True
+
+
+def _inject_diff_notifications_direct(
+    persona: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+) -> bool:
+    """台帳が無い環境の degrade 経路 (= 従来挙動そのまま)。
+
+    直接 push_perception + flush_diffs 内での B 前進 (配達保証なし)。
+    """
     labels = pipeline.flush_diffs(ctx, all_sections=True)
     if not labels:
         return False

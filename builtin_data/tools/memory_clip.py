@@ -53,13 +53,39 @@ def memory_clip(
             raise RuntimeError(f"SAIMemory not ready for {persona_id}")
         try:
             with adapter._db_lock:
-                return memory_atlas.make_clip(
+                result = memory_atlas.make_clip(
                     adapter, mid,
                     quote=quote, rounds=rounds, paste_to=paste_to,
                     persona_name=persona_name, mode=mode, core_budget=budget,
                 )
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"
+
+    _notify_mutation(paste_to, result)
+    return result
+
+
+def _notify_mutation(paste_to: Optional[str], result: str) -> None:
+    """head 操作の内容型通知 (§6-4): コア記憶へ貼った場合のみ core_memory の
+    render 断片を全 Session 窓へ届ける。失敗 (Error 文字列) や core 以外の
+    貼り先は通知しない。ヘルパー側は決して raise しない。
+    """
+    if (result or "").startswith("Error"):
+        return
+    if not paste_to or not str(paste_to).strip():
+        return
+    try:
+        kind, _key = memory_atlas._parse_ref(str(paste_to).strip())
+    except Exception:
+        return
+    if kind not in ("core_all", "core_one"):
+        return
+    from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
+
+    notify_head_mutation_from_tool_context(
+        "core_memory",
+        operation_label=f"クリップをコア記憶に貼りました ({paste_to})",
+    )
 
 
 def schema() -> ToolSchema:
