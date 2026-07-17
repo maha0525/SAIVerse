@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 43
+**テーブル数**: 45
 
 ## addon_config
 
@@ -123,6 +123,16 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `PRIORITY` | INTEGER | NOT NULL, default=0 |  |
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
+
+## session_anchor
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `PERSONA_ID` | VARCHAR | PK, NOT NULL |  |
+| `MODEL_KEY` | VARCHAR(128) | PK, NOT NULL |  |
+| `ANCHOR_MESSAGE_ID` | VARCHAR | — |  |
+| `TTL_SECONDS` | INTEGER | — |  |
+| `UPDATED_AT` | INTEGER | NOT NULL |  |
 
 ## tool
 
@@ -529,6 +539,19 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `source_hash` | VARCHAR(64) | — |  |
 | `created_at` | DATETIME | NOT NULL |  |
 | `updated_at` | DATETIME | NOT NULL |  |
+
+## session_head_snapshot
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `PERSONA_ID` | VARCHAR(255) | PK, FK→ai.AIID, NOT NULL |  |
+| `MODEL_KEY` | VARCHAR(128) | PK, NOT NULL |  |
+| `LINE_ROLE` | VARCHAR(32) | NOT NULL |  |
+| `SECTIONS_JSON` | TEXT | NOT NULL |  |
+| `LAST_NOTIFIED_JSON` | TEXT | NOT NULL |  |
+| `SNAPSHOT_VERSION` | INTEGER | NOT NULL, default=1 |  |
+| `CAPTURED_AT` | DATETIME | NOT NULL |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
 
 ## thinking_request
 
