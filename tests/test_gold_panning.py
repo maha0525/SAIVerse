@@ -717,7 +717,7 @@ class SessionWatchdogScheduleTest(unittest.TestCase):
         lc.schedule_cache_ttl_pulse(persona, "gem", "gemini_explicit")
         self.assertEqual(len(scheduled), 1)
         fire_at, _callback, key = scheduled[0]
-        self.assertEqual(key, "ttl:air")
+        self.assertEqual(key, "ttl:air:gem")
         # anchor validity 1200 × (1 - 0.3) = 840s
         self.assertAlmostEqual((fire_at - before).total_seconds(), 840, delta=5)
 
@@ -738,7 +738,7 @@ class SessionWatchdogScheduleTest(unittest.TestCase):
             lc.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
         self.assertEqual(len(scheduled), 1)
         fire_at, _callback, key = scheduled[0]
-        self.assertEqual(key, "ttl:air")
+        self.assertEqual(key, "ttl:air:claude-x")
 
     def test_explicit_keep_cache_alive_false_cancels(self):
         """explicit の keep_cache_alive=False ゲートは無変更 (見張りには波及しない)。"""
@@ -761,7 +761,7 @@ class SessionWatchdogScheduleTest(unittest.TestCase):
         lc.schedule_cache_ttl_pulse = SessionLifecycle.schedule_cache_ttl_pulse.__get__(lc)
         persona = SimpleNamespace(persona_id="air", model="claude-x")
         lc.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
-        self.assertEqual(scheduled, [("cancel", "ttl:air")])
+        self.assertEqual(scheduled, [("cancel", "ttl:air:claude-x")])
 
 
 class KeepaliveNonExplicitBranchTest(unittest.TestCase):

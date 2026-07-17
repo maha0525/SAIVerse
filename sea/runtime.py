@@ -1691,12 +1691,15 @@ class SEARuntime:
             name=f"gold-panning-close-{persona_id}",
         ).start()
 
-    def run_cache_keepalive(self, persona_id: str) -> bool:
+    def run_cache_keepalive(self, persona_id: str, model_key: Optional[str] = None) -> bool:
         """メインキャッシュの keep-alive: 意味的に不活性な極小 LLM コール 1 回。
 
         TTL 接近時 (:meth:`SessionLifecycle.schedule_cache_ttl_pulse` の予約) に呼ばれる。
+        予約は (persona, model) ごとに独立で (beat_execution_context.md §3.1)、
+        ``model_key`` は「どの model の Session を守るか」。None (レガシー呼び出し)
+        なら ``persona.model`` にフォールバックする。
         メインラインと同じ context (head + 履歴) を組み、末尾に不活性な 1 文を
-        足して standard tier のモデルを 1 回だけ呼ぶ:
+        足して当該 model を 1 回だけ呼ぶ:
 
         - **判断はしない**: playbook もスペルも走らず、応答は破棄される
         - **記憶に残らない**: SAIMemory へは一切書かない (discardable ですらない)
@@ -1749,9 +1752,11 @@ class SEARuntime:
                 persona_id, exc_info=True,
             )
 
-        model_key = getattr(persona, "model", None)
+        if not model_key:
+            model_key = getattr(persona, "model", None)
         if not model_key:
             return False
+        model_key = str(model_key)
 
         # 非 explicit キャッシュ (gemini_explicit / implicit 等): keep-alive LLM は
         # 呼ばない。見張りとしてタイマーだけ再予約し、次の TTL 接近まで待つ。
@@ -1780,8 +1785,7 @@ class SEARuntime:
         # anchor の生存確認: 既に失効しているキャッシュは温め直さない
         # (全額書き直しになるだけ。次の本物の呼び出しが自然に張り直す)。
         try:
-            anchors = self.session_lifecycle.load_anchors(persona) or {}
-            entry = anchors.get(str(model_key))
+            entry = self.session_lifecycle.load_anchor_entry(persona_id, model_key)
             if not entry or not entry.get("updated_at"):
                 LOGGER.debug(
                     "[keepalive] no anchor entry; skipping (persona=%s model=%s)",
@@ -1790,7 +1794,7 @@ class SEARuntime:
                 return False
             updated_at = datetime.fromisoformat(entry["updated_at"])
             ttl_seconds = self.session_lifecycle.anchor_entry_ttl_seconds(
-                entry, str(model_key), persona_id,
+                entry, model_key, persona_id,
             )
             if datetime.now() >= updated_at + timedelta(seconds=ttl_seconds):
                 LOGGER.info(
@@ -1826,11 +1830,35 @@ class SEARuntime:
             node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
             # Beat 相当の開始点 — Pulse 外なので pulse_context=None (standard tier)。
             execution_context = resolve_execution_context(persona, None)
-            llm_client, _ka_model = self.select_llm_client(
-                node_def, persona, execution_context=execution_context,
-            )
-            if _ka_model != execution_context.model_key:
-                execution_context = execution_context.with_model(_ka_model)
+            if model_key == execution_context.model_key:
+                # 従来経路: persona.model の Session を守る keep-alive。
+                llm_client, _ka_model = self.select_llm_client(
+                    node_def, persona, execution_context=execution_context,
+                )
+                if _ka_model != execution_context.model_key:
+                    execution_context = execution_context.with_model(_ka_model)
+            else:
+                # (persona, model) 独立監視 (beat_execution_context.md §3.1):
+                # 見張り対象の Session が persona.model 以外 (自律 Pulse 等の
+                # lightweight main-line Session) の場合は、その model の client
+                # で温める。呼んでいない model の cache を触らない (不変条件 §4-2)。
+                execution_context = execution_context.with_model(model_key)
+                lightweight_model = (
+                    getattr(persona, "lightweight_model", None)
+                    or _get_default_lightweight_model()
+                )
+                if model_key == lightweight_model and getattr(persona, "lightweight_llm_client", None):
+                    llm_client = persona.lightweight_llm_client
+                else:
+                    from llm_clients import get_llm_client
+                    from saiverse.model_configs import get_context_length, get_model_provider
+                    llm_client = get_llm_client(
+                        model_key, get_model_provider(model_key), get_context_length(model_key),
+                    )
+                LOGGER.debug(
+                    "[keepalive] warming non-default model session (persona=%s model=%s)",
+                    persona_id, model_key,
+                )
             llm_client.generate(
                 messages,
                 tools=[],

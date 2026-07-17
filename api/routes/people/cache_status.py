@@ -1,8 +1,8 @@
 """Cache Lifecycle Control Phase 1: read-only キャッシュタイマー status endpoint。
 
 prompt cache が「効いているか / 残り時間」をリアルタイム表示するための read-only
-endpoint。state を持たず、``METABOLISM_ANCHORS[model].updated_at`` (= cache 書き込み
-の真の起点) と per-model TTL から算出する。累計ヒット / 節約額は載せない
+endpoint。state を持たず、session_anchor 行 (persona, model) の updated_at (= cache
+書き込みの真の起点) と per-model TTL から算出する。累計ヒット / 節約額は載せない
 (即時性がないため Usage ページの領分 — docs/intent/cache_lifecycle_control.md §1)。
 
 Phase 1 は Anthropic explicit cache のみ ``supported=true``。implicit (Gemini 等) は
@@ -31,7 +31,7 @@ router = APIRouter()
 def get_cache_status(persona_id: str, manager=Depends(get_manager)) -> dict[str, Any]:
     """指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。
 
-    実体は ``METABOLISM_ANCHORS[model].updated_at`` + per-model TTL からの算出で、
+    実体は session_anchor 行の updated_at + per-model TTL からの算出で、
     新規 state は持たない。anchor が無い (まだ cache 書き込みが起きていない) / TTL
     切れ / explicit 非対応モデルの場合は ``active=false`` で返す。
     """

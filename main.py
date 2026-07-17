@@ -353,7 +353,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -374,6 +374,11 @@ def main():
     # ノート削除。同じく schema 変更を伴わないデータ移行で、各ステップが実行後は
     # 対象行を残さないため起動ごとに無条件で呼んで問題ない。
     backfill_desire_stage_normalization(str(db_path))
+
+    # Session anchor の (persona, model) 行分離 (beat_execution_context.md §3.1):
+    # AI.METABOLISM_ANCHORS (単一 JSON) → session_anchor テーブルへの移行。冪等
+    # (変換後は旧列を NULL 化し、非 NULL 行が無ければ no-op) なので毎起動で呼ぶ。
+    backfill_session_anchors(str(db_path))
 
     # Note → テーマノード移行 (P3c①) の後始末: note テーブルが (ペルソナ単位の
     # 扇形移行完了により) 空になったら note/note_page/note_message/track_open_note

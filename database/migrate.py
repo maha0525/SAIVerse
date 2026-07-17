@@ -1014,6 +1014,104 @@ def ensure_execution_ledger_tables(db_path: str) -> None:
         engine.dispose()
 
 
+def _backfill_session_anchors(engine) -> None:
+    """AI.METABOLISM_ANCHORS (単一 JSON) → session_anchor 行分離の移行 (冪等)。
+
+    beat_execution_context.md §3.1 / SEA 監査 S8。旧列の JSON
+    ``{model_key: {anchor_id, updated_at(iso), ttl_seconds?}}`` を 1 行 =
+    1 (persona, model) に展開する。規則:
+
+    - **既に session_anchor に行がある (persona, model) は上書きしない**
+      (INSERT OR IGNORE — 新形式が正)。
+    - 変換に成功した persona の AI.METABOLISM_ANCHORS は NULL にする
+      (旧経路の読み口は撤去済みで、旧データを残すと二重の真実になる)。
+      JSON が壊れている場合も NULL 化する (anchor はキャッシュ状態で損失許容 —
+      最悪でも次の会話が一度コールドになるだけ)。
+    - schema 変更を伴わないデータ移行なので needs_migration では拾えず、
+      起動時に無条件で呼ぶ。変換対象 (非 NULL 行) が無ければ no-op。
+    """
+    import json
+    from datetime import datetime as _dt
+    try:
+        # テーブル存在の軽量シンク (呼び出し順への依存を消す。冪等)。
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import SessionAnchor
+        ensure_table_columns_indexes(engine, SessionAnchor.__table__)
+
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                "SELECT AIID, METABOLISM_ANCHORS FROM ai "
+                "WHERE METABOLISM_ANCHORS IS NOT NULL"
+            )).fetchall()
+            if not rows:
+                return
+
+            converted_rows = 0
+            converted_personas = 0
+            for aiid, raw in rows:
+                anchors = None
+                try:
+                    anchors = json.loads(raw)
+                except (ValueError, TypeError):
+                    logging.warning(
+                        "session_anchor バックフィル: %s の METABOLISM_ANCHORS が "
+                        "JSON として読めないため破棄します", aiid,
+                    )
+                if isinstance(anchors, dict):
+                    for model_key, entry in anchors.items():
+                        if not model_key or not isinstance(entry, dict):
+                            continue
+                        anchor_id = entry.get("anchor_id")
+                        updated_raw = entry.get("updated_at")
+                        try:
+                            updated_epoch = int(_dt.fromisoformat(updated_raw).timestamp())
+                        except (ValueError, TypeError):
+                            logging.warning(
+                                "session_anchor バックフィル: %s/%s の updated_at "
+                                "(%r) が読めないためこの entry をスキップします",
+                                aiid, model_key, updated_raw,
+                            )
+                            continue
+                        ttl_raw = entry.get("ttl_seconds")
+                        try:
+                            ttl_seconds = int(ttl_raw) if ttl_raw else None
+                        except (ValueError, TypeError):
+                            ttl_seconds = None
+                        conn.execute(
+                            text(
+                                "INSERT OR IGNORE INTO session_anchor "
+                                "(PERSONA_ID, MODEL_KEY, ANCHOR_MESSAGE_ID, TTL_SECONDS, UPDATED_AT) "
+                                "VALUES (:p, :m, :a, :t, :u)"
+                            ),
+                            {"p": aiid, "m": str(model_key), "a": anchor_id,
+                             "t": ttl_seconds, "u": updated_epoch},
+                        )
+                        converted_rows += 1
+                conn.execute(
+                    text("UPDATE ai SET METABOLISM_ANCHORS = NULL WHERE AIID = :p"),
+                    {"p": aiid},
+                )
+                converted_personas += 1
+
+            logging.info(
+                "session_anchor バックフィル: %d ペルソナ / %d entry を行分離しました。",
+                converted_personas, converted_rows,
+            )
+    except Exception as e:
+        # 失敗時は旧列を NULL 化しない (engine.begin のロールバック) ので、
+        # 次回起動で再試行される。anchor はキャッシュ状態でスキップ許容。
+        logging.warning("session_anchor バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_session_anchors(db_path: str) -> None:
+    """METABOLISM_ANCHORS → session_anchor 行分離を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_session_anchors(engine)
+    finally:
+        engine.dispose()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")
     parser.add_argument(

@@ -87,6 +87,27 @@ class EventSchedulerTest(unittest.TestCase):
     def test_cancel_returns_false_for_unknown_key(self) -> None:
         self.assertFalse(self.scheduler.cancel("nonexistent"))
 
+    def test_cancel_prefix_removes_matching_entries_only(self) -> None:
+        """prefix 一致の予約だけを一括 cancel し、他 persona の予約は残す
+        (ライフ終端の keep-alive 一括 cancel 用、beat_execution_context.md §3.1)。"""
+        cb, log, _ = self._make_recorder()
+        target = datetime.now() + timedelta(milliseconds=200)
+        self.scheduler.schedule(target, cb, key="ttl:air:claude-x")
+        self.scheduler.schedule(target, cb, key="ttl:air:light-model")
+        self.scheduler.schedule(target, cb, key="ttl:noa:claude-x")
+
+        cancelled = self.scheduler.cancel_prefix("ttl:air:")
+        self.assertEqual(sorted(cancelled), ["ttl:air:claude-x", "ttl:air:light-model"])
+        self.assertFalse(self.scheduler.has_key("ttl:air:claude-x"))
+        self.assertFalse(self.scheduler.has_key("ttl:air:light-model"))
+        self.assertTrue(self.scheduler.has_key("ttl:noa:claude-x"))
+
+        time.sleep(0.5)
+        self.assertEqual(len(log), 1, "only the non-matching reservation should fire")
+
+    def test_cancel_prefix_returns_empty_for_no_match(self) -> None:
+        self.assertEqual(self.scheduler.cancel_prefix("ttl:nonexistent:"), [])
+
     def test_callback_exception_is_swallowed(self) -> None:
         """例外を投げる callback の後でも、別の予約が正常に発火すること。"""
         evt_after = threading.Event()

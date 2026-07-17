@@ -46,7 +46,7 @@ sys.path.insert(0, str(ROOT))
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from database.models import AI, Building, BuildingOccupancyLog, City
+from database.models import AI, Building, BuildingOccupancyLog, City, SessionAnchor
 
 LOGGER = logging.getLogger("scripts.clone_persona_to_test_env")
 
@@ -89,8 +89,9 @@ PERSISTENT_COLUMNS = [
     "CORE_MEMORY_CHAR_BUDGET",
     "SPELL_ENABLED",
     "REALTIME_INFO_ENABLED",
-    # METABOLISM_ANCHORS の anchor_id は memory.db 内を指す。memory.db を
-    # バイト単位で複製するため anchor は複製先でも有効 — 対で複製する
+    # ⚠️ legacy 列 (行分離後は常に NULL)。anchor 本体は session_anchor テーブル
+    # 行として _clone_session_anchor_rows が対で複製する (anchor_id は memory.db
+    # 内を指し、memory.db をバイト単位で複製するため複製先でも有効)
     "METABOLISM_ANCHORS",
     # 自律行動の ON/OFF は運用設定。本番で ON なら複製も ON —
     # 自律行動テストの目的に合致するため複製する
@@ -270,6 +271,51 @@ def _remap_building(
         label, fallback.BUILDINGID, fallback.BUILDINGNAME,
     )
     return fallback.BUILDINGID
+
+
+def _clone_session_anchor_rows(source_db: Path, dest_db: Path, persona_id: str) -> int:
+    """session_anchor 行 (全 model 分) を dest へ複製し、複製した行数を返す。
+
+    anchor の ANCHOR_MESSAGE_ID は memory.db 内を指す。memory.db をバイト単位で
+    複製するため anchor は複製先でも有効 — AI 行・memory.db と対で複製する
+    (旧 AI.METABOLISM_ANCHORS 列時代からの規則。行分離は
+    beat_execution_context.md §3.1)。dest 側の既存行 (前回複製の残り) は
+    persona 単位で入れ替える。
+    """
+    session, engine = _open_source_session(source_db)
+    try:
+        rows = (
+            session.query(SessionAnchor)
+            .filter(SessionAnchor.PERSONA_ID == persona_id)
+            .all()
+        )
+        entries = [
+            {name: getattr(row, name) for name in SessionAnchor.__table__.columns.keys()}
+            for row in rows
+        ]
+    except Exception:
+        LOGGER.warning(
+            "source の session_anchor 読み取りに失敗しました (テーブル未作成の旧 DB?)。"
+            "anchor 無しで続行します。", exc_info=True,
+        )
+        entries = []
+    finally:
+        session.close()
+        engine.dispose()
+
+    session, engine = _open_dest_session(dest_db)
+    try:
+        SessionAnchor.__table__.create(engine, checkfirst=True)
+        session.query(SessionAnchor).filter(
+            SessionAnchor.PERSONA_ID == persona_id
+        ).delete()
+        for values in entries:
+            session.add(SessionAnchor(**values))
+        session.commit()
+    finally:
+        session.close()
+        engine.dispose()
+    return len(entries)
 
 
 def _clone_ai_row(
@@ -609,6 +655,7 @@ def clone_persona(
     remap_report = _clone_ai_row(
         source_values, source_occupancy, building_names, dest_db, persona_id,
     )
+    anchor_rows = _clone_session_anchor_rows(source_db, dest_db, persona_id)
 
     # --- 2. ペルソナディレクトリの複製 ---
     if source_persona_dir.is_dir():
@@ -629,6 +676,7 @@ def clone_persona(
     summary = {
         "persona_id": persona_id,
         "remap": remap_report,
+        "anchor_rows": anchor_rows,
         "reset_columns": dict(RUNTIME_RESET_COLUMNS),
         "persona_dir_files": file_count,
         "persona_dir_bytes": total_bytes,

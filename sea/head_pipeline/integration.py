@@ -102,7 +102,7 @@ def build_line_head_input(
 def _resolve_anchor_ttl_state(
     persona: Any, manager: Any, model_key: str,
 ) -> tuple[Optional[float], Optional[int]]:
-    """``METABOLISM_ANCHORS[model_key].updated_at`` を epoch seconds として取得、
+    """session_anchor 行 (persona, model_key) の updated_at を epoch seconds として取得、
     同 model の cache TTL (秒) と組で返す。
 
     LLM 呼び出し成功後に ``SessionLifecycle.touch_anchor_after_llm_call`` が touch する updated_at が

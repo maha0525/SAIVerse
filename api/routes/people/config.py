@@ -191,18 +191,15 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not loaded")
 
-    # 1. Clear all anchors from DB
-    db = manager.SessionLocal()
+    # 1. Clear all anchors from DB — session_anchor 行 (全 model 分) を削除する。
+    #    旧 AI.METABOLISM_ANCHORS 列は行分離 (beat_execution_context.md §3.1) で
+    #    廃止済み (backfill 後は常に NULL)。
     try:
-        ai_row = db.query(AI).filter_by(AIID=persona_id).first()
-        if ai_row:
-            ai_row.METABOLISM_ANCHORS = None
-            db.commit()
+        lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
+        if lifecycle is not None:
+            lifecycle.clear_anchor_entries(persona_id)
     except Exception as exc:
         LOGGER.warning("[organize-memory] Failed to clear anchors: %s", exc)
-        db.rollback()
-    finally:
-        db.close()
 
     # 2. Clear in-memory anchor
     history_mgr = getattr(persona, "history_manager", None)

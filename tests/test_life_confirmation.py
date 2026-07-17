@@ -422,17 +422,18 @@ def test_day_close_ends_life_and_cancels_keepalive(manager, session_factory):
     clock.enable_virtual(BASE + timedelta(hours=7))
     wiring.handle_scheduled_judgment(manager, PERSONA_ID, "judgment_day_open")
 
-    # keep-alive の予約を人工的に立てておく (通常は SessionLifecycle が張る)
+    # keep-alive の予約を人工的に立てておく (通常は SessionLifecycle が
+    # (persona, model) 単位の key で張る)
     manager.event_scheduler.schedule(
         fire_at=BASE + timedelta(hours=10), callback=lambda: None,
-        key=f"ttl:{PERSONA_ID}",
+        key=f"ttl:{PERSONA_ID}:claude-sonnet-5",
     )
 
     clock.advance_to(BASE + timedelta(hours=22))
     result = wiring.handle_scheduled_judgment(manager, PERSONA_ID, "judgment_day_close")
     assert result["submitted"] is True
 
-    assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}")
+    assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}:claude-sonnet-5")
     assert any("活動終了" in t for t in _messages(manager))
 
 

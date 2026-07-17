@@ -7,8 +7,12 @@
   判定失敗時は許可側にフォールバック
 - ライフ終端の節目 (``day_plan._handle_life_end``、§6.2 v0.4): 終端が能動的に
   行うのは keep-alive 予約 (``ttl:{persona_id}``) の cancel と TTL override の
-  遅延解除予約だけ。**anchor は触らない** (METABOLISM_ANCHORS 不変) — touch が
-  止まれば TTL で自然失効する。即時失効は惜しい谷 (終了直後〜TTL 内の再訪、
+  遅延解除予約だけ。**anchor は触らない** (session_anchor 行は不変) — touch が
+  止まれば TTL で自然失効する。
+  ※ (persona, model) 行分離 (beat_execution_context.md §3.1) で予約 key は
+  ``ttl:{persona_id}:{model_key}`` になり、終端の cancel は prefix 一括
+  (``EventScheduler.cancel_prefix``) で全 model 分を止める。
+  即時失効は惜しい谷 (終了直後〜TTL 内の再訪、
   実キャッシュがまだ生きている) の再訪を Case 3 に落として生きたキャッシュを
   捨てるため誤り (v0.3→v0.4 で訂正)
 - 均等モードの cache TTL 運転 (``day_plan._sync_cache_ttl_for_life_start`` /
@@ -134,13 +138,22 @@ def _save_life(manager, *, start="09:00", end="11:00", budget=4, mode="free"):
 
 
 def _live_anchors(anchor_id="abc123", ttl_seconds=3600, updated_at=None):
+    # session_anchor テーブルは updated_at を epoch 秒で持つため、往復比較が
+    # 成立するよう秒精度に丸めた時刻を使う。
+    updated = (updated_at or datetime.now()).replace(microsecond=0)
     return {
         "claude-x": {
             "anchor_id": anchor_id,
-            "updated_at": (updated_at or datetime.now()).isoformat(),
+            "updated_at": updated.isoformat(),
             "ttl_seconds": ttl_seconds,
         },
     }
+
+
+def _save_anchor_rows(lifecycle, anchors):
+    """行単位 API (upsert_anchor_entry) で anchors dict を保存するヘルパ。"""
+    for model_key, entry in anchors.items():
+        lifecycle.upsert_anchor_entry(PERSONA_ID, model_key, entry)
 
 
 # ---------------------------------------------------------------------------
@@ -178,11 +191,11 @@ def test_keepalive_allowed_defaults_true_on_lookup_failure():
 
 def test_life_end_does_not_touch_anchor(manager):
     """終端は anchor を触らない — 惜しい谷 (TTL 内の再訪) でキャッシュヒット
-    再開できるよう、METABOLISM_ANCHORS は不変のまま TTL の自然失効に任せる。"""
+    再開できるよう、session_anchor 行は不変のまま TTL の自然失効に任せる。"""
     persona = manager.personas[PERSONA_ID]
     lifecycle = manager.sea_runtime.session_lifecycle
     anchors = _live_anchors()
-    lifecycle.save_anchors(persona, anchors)
+    _save_anchor_rows(lifecycle, anchors)
 
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
     day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
@@ -195,16 +208,23 @@ def test_life_end_does_not_touch_anchor(manager):
 
 
 def test_life_end_cancels_keepalive_reservation(manager):
+    """終端は (persona, model) 単位の keep-alive 予約を全 model 分 prefix 一括で止める。
+    他 persona の予約には触れない。"""
+    for key in (f"ttl:{PERSONA_ID}:claude-x", f"ttl:{PERSONA_ID}:light-model"):
+        manager.event_scheduler.schedule(
+            fire_at=BASE + timedelta(hours=5), callback=lambda: None, key=key,
+        )
     manager.event_scheduler.schedule(
         fire_at=BASE + timedelta(hours=5), callback=lambda: None,
-        key=f"ttl:{PERSONA_ID}",
+        key="ttl:other_persona:claude-x",
     )
-    assert manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}")
 
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
     day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
 
-    assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}")
+    assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}:claude-x")
+    assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}:light-model")
+    assert manager.event_scheduler.has_key("ttl:other_persona:claude-x")
 
 
 def test_life_end_notifies_boundary(manager):
@@ -347,9 +367,9 @@ def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
     # anchor の生存判定 (run_cache_keepalive 内) は実時刻 (datetime.now()) を
     # 見る — 仮想クロックの対象外 (cache lifecycle は clock モジュール導入前
     # からの独立した機構、docs/intent/autonomous_behavior_v2.md §12 の対象外)。
-    runtime.session_lifecycle.load_anchors = lambda p: (
-        anchors if anchors is not None else _live_anchors(anchor_id="a1")
-    )
+    # 読み口は行単位 API (load_anchor_entry、S8 根治後)。
+    _anchors = anchors if anchors is not None else _live_anchors(anchor_id="a1")
+    runtime.session_lifecycle.load_anchor_entry = lambda pid, mk: _anchors.get(mk)
     runtime._prepare_context = (
         lambda p, b, u, *a, **k: list(messages or [{"role": "user", "content": "履歴"}])
     )
@@ -422,7 +442,7 @@ def test_life_boundary_simulation_end_behavior(manager):
     persona = manager.personas[PERSONA_ID]
     lifecycle = manager.sea_runtime.session_lifecycle
     anchors = _live_anchors(updated_at=BASE + timedelta(hours=9, minutes=30))
-    lifecycle.save_anchors(persona, anchors)
+    _save_anchor_rows(lifecycle, anchors)
 
     clock.enable_virtual(BASE + timedelta(hours=9))
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")

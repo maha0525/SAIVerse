@@ -1675,10 +1675,12 @@ def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, 
 
 
 def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> None:
-    """ライフ終端で keep-alive 予約 (``ttl:{persona_id}``) を cancel する (谷では温めない)。
+    """ライフ終端で keep-alive 予約を全 model 分 cancel する (谷では温めない)。
 
     ``sea.session_lifecycle.SessionLifecycle.schedule_cache_ttl_pulse`` /
-    ``_schedule_session_watchdog`` が使う予約 key と共通 (1 ペルソナ 1 予約)。
+    ``_schedule_session_watchdog`` の予約 key は (persona, model) 単位の
+    ``ttl:{persona_id}:{model_key}`` (beat_execution_context.md §3.1)。終端側は
+    どの model の Session が見張り中か列挙できないため prefix で一括 cancel する。
     ライフ中に未発火の予約が残っていても、この cancel で確実に止まる —
     :func:`is_keepalive_allowed` による発火時ゲートは二重の安全網。
     """
@@ -1686,10 +1688,11 @@ def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> None:
     if scheduler is None:
         return
     try:
-        if scheduler.cancel(f"ttl:{persona_id}"):
+        cancelled = scheduler.cancel_prefix(f"ttl:{persona_id}:")
+        if cancelled:
             LOGGER.info(
-                "[day_plan] keep-alive reservation cancelled at life end (persona=%s)",
-                persona_id,
+                "[day_plan] keep-alive reservations cancelled at life end (persona=%s, keys=%s)",
+                persona_id, ", ".join(sorted(cancelled)),
             )
     except Exception:
         LOGGER.warning(

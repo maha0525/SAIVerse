@@ -82,7 +82,7 @@ class LineHeadInput:
     persona: Any = None   # 一時、Phase 2 で accessor 化
     manager: Any = None   # 一時、Phase 2 で accessor 化
     # Phase 4-e cache TTL 連携 (= prompt cache の真の起点との同期):
-    # ``METABOLISM_ANCHORS[model_key].updated_at`` を epoch seconds に変換して持つ。
+    # session_anchor 行 (persona, model_key) の updated_at を epoch seconds に変換して持つ。
     # ``ensure_snapshot`` で「anchor TTL 切れたら snapshot も再 capture」 判定に使う。
     # どちらか片方でも None の場合は判定スキップ (= 従来挙動)。
     # 詳細: docs/intent/cached_head_architecture.md (anchor-TTL 連携)

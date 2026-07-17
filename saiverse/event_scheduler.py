@@ -176,6 +176,30 @@ class EventScheduler:
             # 起きてからスキップして次のエントリを見るだけなので問題なし。
             return True
 
+    def cancel_prefix(self, prefix: str) -> list[str]:
+        """key が prefix で始まる有効な予約を全てキャンセルし、key のリストを返す。
+
+        (persona, model) 単位の予約 key (例 ``ttl:{persona_id}:{model_key}``) を
+        「その persona の全 model 分」まとめて止めるための入口。呼び出し側が
+        model を列挙できない (どの model の Session が見張り中か知らない) 場面で
+        使う — 例: ライフ終端の keep-alive 一括 cancel
+        (``saiverse.day_plan._cancel_keepalive_reservation``)。
+        """
+        with self._cond:
+            keys = [
+                key for key, entry in self._entries_by_key.items()
+                if key.startswith(prefix) and not entry.cancelled
+            ]
+            for key in keys:
+                entry = self._entries_by_key.pop(key)
+                entry.cancelled = True
+            if keys:
+                LOGGER.debug(
+                    "[event_scheduler] cancel_prefix=%s: %s",
+                    prefix, ", ".join(sorted(keys)),
+                )
+            return keys
+
     def cancel_all(self) -> list[str]:
         """有効な予約を全てキャンセルし、キャンセルした key のリストを返す。
 

@@ -114,6 +114,9 @@ class AI(Base):
     # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
     # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
     REALTIME_INFO_ENABLED = Column(Boolean, default=True, nullable=False)
+    # ⚠️ legacy: anchor 状態は session_anchor テーブルへ行分離済み (beat_execution_context.md §3.1)。
+    # この列は backfill_session_anchors (database/migrate.py) の変換元としてのみ残存 (変換後は常に NULL)。
+    # 列 DROP は後続の掃除 wave (破壊的 migration になるため)。
     METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
     # 自律行動の ON/OFF (2026-07-14: ACTIVITY_STATE 4値 'Stop'/'Sleep'/'Idle'/'Active' を
     # 廃止し1本化。旧実装は全ゲートが == 'Active' の二値判定のみで、Stop/Sleep/Idle は
@@ -143,6 +146,30 @@ class AI(Base):
     # JSON {"purpose": str, "interests": [str], "vocations": [str]}。NULL = 未設定
     # (= 聞き取り未実施)。AUTONOMOUS / META プロンプトに常駐注入される (§4.5)。
     LIFE_PURPOSE = Column(Text, nullable=True)
+
+
+class SessionAnchor(Base):
+    """Session anchor / TTL の (persona, model) 行分離 (beat_execution_context.md §3.1)。
+
+    旧形式は AI.METABOLISM_ANCHORS (単一 JSON テキスト列に全 model 分) で、更新が
+    JSON 全体の read-modify-write になっていた (SEA 監査 S8)。本テーブルは 1 行 =
+    1 (persona, model) の Session anchor 状態で、更新は行単位 upsert。旧列からの
+    移行は database/migrate.py の backfill_session_anchors (冪等、起動時に実行)。
+
+    - ANCHOR_MESSAGE_ID: SAIMemory messages 内の anchor メッセージ ID (窓の起点)。
+    - TTL_SECONDS: この anchor を最後に書いた時点の cache TTL (書き込み時 TTL 固定
+      評価、docs/intent/cache_lifecycle_control.md §5.4)。NULL = 旧 anchor / TTL
+      不明 (読み出し側が現行設定から算出する後方互換)。
+    - UPDATED_AT: 最終 touch 時刻 (epoch 秒)。LLM 呼び出し成功時にのみ前進する
+      prompt cache 書き込みの真の起点。
+    """
+    __tablename__ = "session_anchor"
+    PERSONA_ID = Column(String, primary_key=True)
+    MODEL_KEY = Column(String(128), primary_key=True)
+    ANCHOR_MESSAGE_ID = Column(String, nullable=True)
+    TTL_SECONDS = Column(Integer, nullable=True)
+    UPDATED_AT = Column(Integer, nullable=False)  # epoch 秒
+
 
 class Building(Base):
     __tablename__ = "building"

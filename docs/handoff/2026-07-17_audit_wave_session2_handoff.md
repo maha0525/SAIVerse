@@ -15,13 +15,17 @@
 
 全体スイート基準数: **2517 passed** (`--ignore=tests/test_avatar_pipeline.py`)。avatar 118件の失敗は外部 stackchan addon の checkout 版ずれ (既知、台帳の第二陣行に記録済み)。
 
-## 2. 走行中のサブエージェント: §6-3a (anchor行分離 + 実model記帳)
+## 2. §6-3a (anchor行分離 + 実model記帳) — 検収済み・コミット済み
 
-- **スコープ**: 監査 S1/S8 根治。新テーブル `session_anchor` (PK=PERSONA_ID+MODEL_KEY) / 冪等 backfill (AI.METABOLISM_ANCHORS JSON→行、変換後に旧列 NULL 化・読み口廃止) / session_lifecycle.py の JSON 全体 RMW を行 upsert に置換 (TTL 延命規則は挙動不変で移植) / touch_anchor_after_llm_call の記帳先を **usage.model** に (persona.model は空フォールバックのみ) / TTL watchdog 予約キー `ttl:{persona}:{model}` 化 / tests/test_session_anchor_rows.py
-- **触るファイル**: database/models.py, database/migrate.py, main.py (backfill 1行), sea/session_lifecycle.py, sea/runtime.py, sea/runtime_llm.py, sea/work_session.py, sea/gold_panning.py, sea/runtime_context.py, tests/ (新規1 + 既存追従)
-- **git add/commit 禁止で委譲済み** — 成果は作業ツリーに未コミットで残る
-- **検収手順**: ①git status でスコープ外汚染がないか ②diff 精読 — 特に (a) TTL 延命規則 (旧 update_anchor_for_model 190-219 の prev 比較) が挙動不変か (b) `grep METABOLISM_ANCHORS` で旧読み書き経路が backfill 以外から消えているか (c) watchdog の cancel 経路 (旧 `ttl:{persona}` 396付近 / shutdown 系) の追従漏れ ③新規+影響域テスト再実行 (cache_keepalive / cache_lifecycle / gold_panning / life_phase3 / life_confirmation / beat_gate / execution_context / work_session / episodes_wiring) ④ruff ⑤全体スイート (基準 2517+新規分) → コミット
+サブエージェント (レート制限死) の成果を 2026-07-17 のセッション3で検収し、残骸3件を潰してコミットした。
+
+- **本体 (サブエージェント実装、検収で挙動不変を確認)**: 新テーブル `session_anchor` / 冪等 backfill / 行 upsert 化 (TTL 延命規則は upsert_anchor_entry へ挙動不変で移植) / usage.model 記帳 / watchdog 予約キー `ttl:{persona}:{model}` 化 / tests/test_session_anchor_rows.py (13件)
+- **検収で拾った残骸 (サブエージェントが「別 wave」送り or 結線忘れしたもの、同コミットで修正)**:
+  1. `day_plan._cancel_keepalive_reservation` が旧 key `ttl:{persona}` を cancel し続けていた → `EventScheduler.cancel_prefix` を新設して prefix 一括 cancel に (発火時ゲート is_keepalive_allowed は安全網として健在だった)
+  2. organize-memory API (`api/routes/people/config.py`) が旧列 NULL 化のみで session_anchor 行を消さない機能退行 → `clear_anchor_entries` を結線
+  3. `scripts/clone_persona_to_test_env.py` が anchor を複製しなくなっていた → `_clone_session_anchor_rows` を追加 (AI 行・memory.db と対で複製する規則の維持)
 - 実装レベルの設計裁定2つは intent §3.1 に記録済み: 新テーブル+backfill 方式 (全書換 migration 不使用) / 記帳先の正= usage.model
+- 旧 `AI.METABOLISM_ANCHORS` 列は backfill の変換元としてのみ残存 (常に NULL)。列 DROP は後続の掃除 wave
 
 ## 3. §6-3b の確定済み設計 (次タスク。この設計で委譲してよい)
 

@@ -124,19 +124,20 @@ def test_ttl_callback_does_not_fire_v1_meta_judgment():
     runtime, _ = _make_runtime(persona, meta_layer=meta_layer, scheduler=scheduler)
     runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
 
-    keepalive_calls: List[str] = []
-    runtime.run_cache_keepalive = lambda pid: keepalive_calls.append(pid)
+    keepalive_calls: List[Any] = []
+    runtime.run_cache_keepalive = lambda pid, mk=None: keepalive_calls.append((pid, mk))
 
     runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
-    assert "ttl:air" in scheduler.scheduled
+    # 予約 key は (persona, model) 単位 (beat_execution_context.md §3.1)
+    assert "ttl:air:claude-x" in scheduler.scheduled
 
-    scheduler.scheduled["ttl:air"]["callback"]()
+    scheduler.scheduled["ttl:air:claude-x"]["callback"]()
 
     # 旧経路 (v1 状況分類) は一切呼ばれない
     assert meta_layer.periodic_ticks == []
     assert meta_layer.should_fire_calls == []
-    # 置き換え先の keep-alive が呼ばれる
-    assert keepalive_calls == ["air"]
+    # 置き換え先の keep-alive が model 付きで呼ばれる
+    assert keepalive_calls == [("air", "claude-x")]
 
 
 def test_ttl_schedule_respects_keep_cache_alive_off():
@@ -152,7 +153,7 @@ def test_ttl_schedule_respects_keep_cache_alive_off():
     )
     runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
     runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
-    assert "ttl:air" not in scheduler.scheduled
+    assert "ttl:air:claude-x" not in scheduler.scheduled
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +162,9 @@ def test_ttl_schedule_respects_keep_cache_alive_off():
 
 
 def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
-    runtime.session_lifecycle.load_anchors = lambda p: anchors if anchors is not None else {
-        "claude-x": _live_anchor_entry(),
-    }
+    # anchor は行単位 API (load_anchor_entry) で読まれる (S8 根治後)
+    _anchors = anchors if anchors is not None else {"claude-x": _live_anchor_entry()}
+    runtime.session_lifecycle.load_anchor_entry = lambda pid, mk: _anchors.get(mk)
     runtime._prepare_context = (
         lambda p, b, u, *a, **k: list(messages or [{"role": "user", "content": "履歴"}])
     )
@@ -262,4 +263,4 @@ def test_keepalive_non_explicit_reschedules_watchdog_without_llm(_mock_enabled, 
     # 温め直す実キャッシュがないので LLM は呼ばない
     assert client.calls == []
     # 見張りとしてタイマーだけ再予約される (次の TTL 接近でクローズ採取を試みる)
-    assert "ttl:air" in scheduler.scheduled
+    assert "ttl:air:claude-x" in scheduler.scheduled

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import uuid
@@ -48,41 +47,170 @@ class SessionLifecycle:
             return get_metabolism_keep_messages(persona_model)
         return None
 
-    def load_anchors(self, persona) -> Dict[str, Any]:
-        """Load per-model metabolism anchors from DB (AI.METABOLISM_ANCHORS)."""
+    # ------------------------------------------------------------------
+    # Session anchor 行 API (beat_execution_context.md §3.1、SEA 監査 S8)
+    #
+    # 旧形式 (AI.METABOLISM_ANCHORS 単一 JSON の全体 read-modify-write) は撤去
+    # 済み。永続化先は session_anchor テーブル (1 行 = 1 (persona, model))。
+    # entry の dict 形は旧 JSON の値と同じ:
+    #   {"anchor_id": str, "updated_at": iso文字列, "ttl_seconds": int (省略可)}
+    # (updated_at は DB では epoch 秒 int。API 境界で iso 文字列に往復変換する —
+    #  読み手 (api/routes/people/cache_status.py / sea/head_pipeline/integration.py)
+    #  の互換のため。秒未満の精度は落ちる。)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_entry(row) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {
+            "anchor_id": row.ANCHOR_MESSAGE_ID,
+            "updated_at": datetime.fromtimestamp(int(row.UPDATED_AT)).isoformat(),
+        }
+        if row.TTL_SECONDS:
+            entry["ttl_seconds"] = int(row.TTL_SECONDS)
+        return entry
+
+    def load_anchor_entry(self, persona_id: Optional[str], model_key: Optional[str]) -> Optional[Dict[str, Any]]:
+        """(persona, model) 1 行の anchor entry を読む。無ければ None。"""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return None
+        if not persona_id or not model_key:
+            return None
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            row = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
+            ).first()
+            if row is not None:
+                return self._row_to_entry(row)
+        except Exception as exc:
+            LOGGER.warning(
+                "[metabolism] Failed to load anchor entry for %s/%s: %s",
+                persona_id, model_key, exc,
+            )
+        finally:
+            db.close()
+        return None
+
+    def load_anchor_entries(self, persona_id: Optional[str]) -> Dict[str, Any]:
+        """persona の全 model 分の anchor entry を {model_key: entry} で読む (read-only)。
+
+        Case 2 fallback (resolve_metabolism_anchor の他 model 探索) と外部の
+        read-only 消費者のための一括読み。書き込みは常に行単位
+        (:meth:`upsert_anchor_entry`) で行い、この dict を書き戻す API は無い。
+        """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return {}
-        persona_id = getattr(persona, "persona_id", None)
         if not persona_id:
             return {}
         db = self.manager.SessionLocal()
         try:
-            from database.models import AI
-            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
-            if ai_row and ai_row.METABOLISM_ANCHORS:
-                return json.loads(ai_row.METABOLISM_ANCHORS)
+            from database.models import SessionAnchor
+            rows = db.query(SessionAnchor).filter_by(PERSONA_ID=persona_id).all()
+            return {row.MODEL_KEY: self._row_to_entry(row) for row in rows}
         except Exception as exc:
             LOGGER.warning("[metabolism] Failed to load anchors for %s: %s", persona_id, exc)
         finally:
             db.close()
         return {}
 
-    def save_anchors(self, persona, anchors: Dict[str, Any]) -> None:
-        """Persist per-model metabolism anchors to DB."""
+    def load_anchors(self, persona) -> Dict[str, Any]:
+        """read-only 互換ビュー: persona オブジェクトから全 model 分の entry を読む。
+
+        旧 JSON 経路の読み手 (api/routes/people/cache_status.py /
+        sea/head_pipeline/integration.py) が getattr 経由でこの名前を参照する
+        ための互換シム。実体は session_anchor テーブル (:meth:`load_anchor_entries`)。
+        書き込み側の対 (save_anchors) は存在しない — 更新は行単位 upsert のみ。
+        """
+        return self.load_anchor_entries(getattr(persona, "persona_id", None))
+
+    def upsert_anchor_entry(
+        self, persona_id: Optional[str], model_key: Optional[str], entry: Dict[str, Any],
+    ) -> None:
+        """(persona, model) 1 行の anchor entry を upsert する (行単位、S8 根治)。
+
+        TTL 延命規則 (旧 update_anchor_for_model の prev 比較) は行内の前回値との
+        比較としてここに移植した。Anthropic 実機観測 (2026-05-25) に整合する
+        更新規則 (モデルB):
+
+        - 生存中のキャッシュは短い TTL の書き込みで「短縮されない」(max を維持)
+        - 加えて、短い書き込みは expiry ウィンドウを **スライドさせない**。1h を
+          5m 書き込みで延命できると過大表示になるため (1h ウィンドウは「1h を
+          確立した時刻」起点で減り続ける)。
+        - 同じか長い TTL の書き込みのときだけ updated_at を entry の時刻に
+          リフレッシュ (= 使用でウィンドウが延びる、keep-awake の前提)。
+        - 完全失効後の書き込みは新しい TTL/時刻でリセット。
+        - entry に ttl_seconds が無い書き込み (metabolism の anchor 前進等) は
+          規則を通さずそのまま書く (旧挙動: 前回の ttl_seconds は引き継がない)。
+
+        docs/intent/cache_lifecycle_control.md §5.2
+        """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return
-        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not model_key:
+            return
+
+        try:
+            new_updated = datetime.fromisoformat(entry["updated_at"])
+        except (KeyError, ValueError, TypeError):
+            new_updated = datetime.now()
+        requested_ttl: Optional[int] = None
+        raw_ttl = entry.get("ttl_seconds")
+        if raw_ttl is not None:
+            try:
+                requested_ttl = int(raw_ttl)
+            except (ValueError, TypeError):
+                requested_ttl = None
+
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            row = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
+            ).first()
+
+            effective_ttl = requested_ttl
+            effective_updated = new_updated
+            if requested_ttl is not None and row is not None and row.TTL_SECONDS:
+                try:
+                    prev_updated = datetime.fromtimestamp(int(row.UPDATED_AT))
+                    prev_ttl_int = int(row.TTL_SECONDS)
+                    if new_updated < prev_updated + timedelta(seconds=prev_ttl_int):  # 生存中
+                        effective_ttl = max(prev_ttl_int, requested_ttl)
+                        if requested_ttl < prev_ttl_int:
+                            # 短い書き込み: 短縮も延命もしない (起点を維持)
+                            effective_updated = prev_updated
+                except (ValueError, TypeError):
+                    pass
+
+            if row is None:
+                row = SessionAnchor(PERSONA_ID=persona_id, MODEL_KEY=str(model_key))
+                db.add(row)
+            row.ANCHOR_MESSAGE_ID = entry.get("anchor_id")
+            row.TTL_SECONDS = effective_ttl
+            row.UPDATED_AT = int(effective_updated.timestamp())
+            db.commit()
+        except Exception as exc:
+            LOGGER.warning(
+                "[metabolism] Failed to upsert anchor entry for %s/%s: %s",
+                persona_id, model_key, exc,
+            )
+        finally:
+            db.close()
+
+    def clear_anchor_entries(self, persona_id: Optional[str]) -> None:
+        """persona の anchor 行を全 model 分削除する (記憶の整理 = anchor リセット用)。"""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return
         if not persona_id:
             return
         db = self.manager.SessionLocal()
         try:
-            from database.models import AI
-            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
-            if ai_row:
-                ai_row.METABOLISM_ANCHORS = json.dumps(anchors, ensure_ascii=False)
-                db.commit()
+            from database.models import SessionAnchor
+            db.query(SessionAnchor).filter_by(PERSONA_ID=persona_id).delete()
+            db.commit()
         except Exception as exc:
-            LOGGER.warning("[metabolism] Failed to save anchors for %s: %s", persona_id, exc)
+            LOGGER.warning("[metabolism] Failed to clear anchors for %s: %s", persona_id, exc)
         finally:
             db.close()
 
@@ -106,19 +234,26 @@ class SessionLifecycle:
             LOGGER.warning("Failed to resolve cache TTL for model %s", model_key, exc_info=True)
         return 1200  # 20 minutes default
 
-    def resolve_metabolism_anchor(self, persona) -> tuple:
+    def resolve_metabolism_anchor(self, persona, model_key: Optional[str] = None) -> tuple:
         """Resolve the best metabolism anchor using 3-level fallback.
+
+        Args:
+            model_key: 「自 model」として扱う model。ExecutionContext が届いている
+                呼び出し元は ``execution_context.model_key`` を明示で渡す
+                (beat_execution_context.md §3.1)。None なら従来どおり
+                ``persona.model`` (読み側の全面 model 化は §6-5 のスコープ)。
 
         Returns:
             (anchor_id, resolution_type) where resolution_type is
             "self" | "other" | "minimal".
             anchor_id is None for "minimal" (no valid anchor found).
         """
-        persona_model = getattr(persona, "model", None)
+        persona_model = model_key or getattr(persona, "model", None)
         if not persona_model:
             return (None, "minimal")
+        persona_model = str(persona_model)
 
-        anchors = self.load_anchors(persona)
+        anchors = self.load_anchor_entries(getattr(persona, "persona_id", None))
         now = datetime.now()
 
         # Case 1: self model's anchor exists and is valid
@@ -182,43 +317,15 @@ class SessionLifecycle:
         """
         if not model_key or not anchor_id:
             return
-        anchors = self.load_anchors(persona)
-        now = datetime.now()
-        effective_ttl = int(ttl_seconds) if ttl_seconds is not None else None
-        effective_updated = now
-
-        # Anthropic 実機観測 (2026-05-25) に整合する更新規則 (モデルB):
-        # - 生存中のキャッシュは短い TTL の書き込みで「短縮されない」(max を維持)
-        # - 加えて、短い書き込みは expiry ウィンドウを **スライドさせない**。1h を
-        #   5m 書き込みで延命できると過大表示になるため (1h ウィンドウは「1h を
-        #   確立した時刻」起点で減り続ける)。
-        # - 同じか長い TTL の書き込みのときだけ updated_at を now にリフレッシュ
-        #   (= 使用でウィンドウが延びる、keep-awake の前提)。
-        # - 完全失効後の書き込みは新しい TTL/now でリセット。
-        # docs/intent/cache_lifecycle_control.md §5.2
-        if effective_ttl is not None:
-            prev = anchors.get(model_key)
-            prev_ttl = (prev or {}).get("ttl_seconds")
-            if prev and prev_ttl:
-                try:
-                    prev_updated = datetime.fromisoformat(prev["updated_at"])
-                    prev_ttl_int = int(prev_ttl)
-                    if now < prev_updated + timedelta(seconds=prev_ttl_int):  # 生存中
-                        effective_ttl = max(prev_ttl_int, effective_ttl)
-                        if int(ttl_seconds) < prev_ttl_int:
-                            # 短い書き込み: 短縮も延命もしない (起点を維持)
-                            effective_updated = prev_updated
-                except (KeyError, ValueError, TypeError):
-                    pass
-
-        entry = {
+        # TTL 延命規則 (生存中は max 維持 / 短い書き込みは非スライド) は
+        # upsert_anchor_entry が行内の前回値と比較して適用する。
+        entry: Dict[str, Any] = {
             "anchor_id": anchor_id,
-            "updated_at": effective_updated.isoformat(),
+            "updated_at": datetime.now().isoformat(),
         }
-        if effective_ttl is not None:
-            entry["ttl_seconds"] = effective_ttl
-        anchors[model_key] = entry
-        self.save_anchors(persona, anchors)
+        if ttl_seconds is not None:
+            entry["ttl_seconds"] = int(ttl_seconds)
+        self.upsert_anchor_entry(getattr(persona, "persona_id", None), model_key, entry)
 
     def anchor_entry_ttl_seconds(
         self, entry: Dict[str, Any], model_key: str, persona_id: Optional[str] = None,
@@ -235,7 +342,7 @@ class SessionLifecycle:
         return self.get_anchor_validity_seconds(model_key, persona_id)
 
     def touch_anchor_after_llm_call(self, persona, usage) -> None:
-        """LLM 呼び出し成功後に METABOLISM_ANCHORS の updated_at を touch する (Phase 4-e)。
+        """LLM 呼び出し成功後に session_anchor 行の updated_at を touch する (Phase 4-e)。
 
         旧実装は ``runtime_context.py`` の prepare_context 内で touch していたが、
         その方式だと「context 組成は走ったが LLM 呼び出しが失敗した」ケースで
@@ -251,6 +358,12 @@ class SessionLifecycle:
         - implicit / no cache モデル (Gemini implicit cache, Ollama 等): 呼び出し
           成功 = touch。プロバイダ側で cache 状態を直接観測できないため、
           ``get_anchor_validity_seconds`` が返す既定値 (1200s) を起点として扱う。
+
+        記帳先 model は **usage.model (実際に応答した model)** で解決する
+        (beat_execution_context.md §2.1 / SEA 監査 S1 の根治)。lightweight 実行や
+        structured-output fallback で実行 model が ``persona.model`` と違っても、
+        呼んでいない model の Session 状態を動かさない (不変条件 §4-2)。
+        usage.model が空のときだけ ``persona.model`` にフォールバックする。
         """
         if persona is None or usage is None:
             return
@@ -259,17 +372,33 @@ class SessionLifecycle:
         if not anchor_id:
             return
         persona_model = getattr(persona, "model", None)
-        if not persona_model:
-            return
+        usage_model = getattr(usage, "model", None)
+        if usage_model:
+            model_key = str(usage_model)
+            if persona_model and str(persona_model) != model_key:
+                LOGGER.debug(
+                    "[metabolism] anchor touch routed to actual model (S1): "
+                    "persona=%s persona.model=%s -> usage.model=%s",
+                    getattr(persona, "persona_id", "?"), persona_model, model_key,
+                )
+        else:
+            if not persona_model:
+                return
+            model_key = str(persona_model)
+            LOGGER.warning(
+                "[metabolism] usage.model is empty; falling back to persona.model=%s "
+                "for anchor touch (persona=%s)",
+                model_key, getattr(persona, "persona_id", "?"),
+            )
 
         try:
             from saiverse.model_configs import get_cache_config
-            cache_config = get_cache_config(persona_model)
+            cache_config = get_cache_config(model_key)
             cache_type = (cache_config or {}).get("type", "implicit")
         except Exception:
             LOGGER.warning(
                 "[metabolism] Failed to resolve cache type for %s; assuming implicit",
-                persona_model, exc_info=True,
+                model_key, exc_info=True,
             )
             cache_type = "implicit"
 
@@ -281,35 +410,35 @@ class SessionLifecycle:
                     "[metabolism] anchor touch skipped (explicit cache miss): "
                     "persona=%s model=%s anchor=%s — cache breakpoint may be misconfigured "
                     "or TTL already expired before this call",
-                    getattr(persona, "persona_id", "?"), persona_model, anchor_id,
+                    getattr(persona, "persona_id", "?"), model_key, anchor_id,
                 )
                 return
 
         # この書き込みで実際に使った TTL (= 現行設定) を anchor に記録する。
         # 以後この cache の残り寿命はこの値で評価され、設定変更の影響を受けない。
         write_ttl_seconds = self.get_anchor_validity_seconds(
-            persona_model, getattr(persona, "persona_id", None),
+            model_key, getattr(persona, "persona_id", None),
         )
-        self.update_anchor_for_model(persona, persona_model, anchor_id, write_ttl_seconds)
+        self.update_anchor_for_model(persona, model_key, anchor_id, write_ttl_seconds)
         LOGGER.debug(
             "[metabolism] anchor touched after LLM success: persona=%s model=%s anchor=%s cache_type=%s ttl=%ds",
-            getattr(persona, "persona_id", "?"), persona_model, anchor_id, cache_type, write_ttl_seconds,
+            getattr(persona, "persona_id", "?"), model_key, anchor_id, cache_type, write_ttl_seconds,
         )
 
-        # Phase 4-e: touch した時刻を起点に「TTL 接近で前倒し meta_judgment Pulse」
-        # を EventScheduler に予約する。同じペルソナ・モデルで再 touch されると
-        # 古い予約は cancel される (key 上書き)。失敗時は touch されないので
-        # 予約も更新されず、自然と TTL 切れ判定経路に乗る。
+        # Phase 4-e: touch した時刻を起点に「セッションの見張り (keep-alive /
+        # watchdog)」を EventScheduler に予約する。同じペルソナ・モデルで再 touch
+        # されると古い予約は cancel される (key 上書き)。失敗時は touch されない
+        # ので予約も更新されず、自然と TTL 切れ判定経路に乗る。
         try:
-            self.schedule_cache_ttl_pulse(persona, persona_model, cache_type)
+            self.schedule_cache_ttl_pulse(persona, model_key, cache_type)
         except Exception:
             LOGGER.exception(
                 "[metabolism] Failed to schedule cache TTL pulse for persona=%s model=%s",
-                getattr(persona, "persona_id", "?"), persona_model,
+                getattr(persona, "persona_id", "?"), model_key,
             )
 
         # Token-based metabolism trigger: flag persona if input_tokens exceeds threshold
-        self.check_token_threshold(persona, persona_model, usage)
+        self.check_token_threshold(persona, model_key, usage)
 
     def check_token_threshold(self, persona, model_key: str, usage) -> None:
         """Flag persona for metabolism if input_tokens exceeds configured threshold."""
@@ -393,7 +522,7 @@ class SessionLifecycle:
         # keep_cache_alive=False のペルソナは TTL 接近の前倒しを行わない。
         # 念のため既存予約があれば cancel する (設定変更で OFF になったケース対応)。
         if not keep_cache_alive:
-            scheduler.cancel(f"ttl:{persona_id}")
+            scheduler.cancel(f"ttl:{persona_id}:{model_key}")
             LOGGER.debug(
                 "[metabolism] cache TTL pulse skipped (keep_cache_alive=False): persona=%s model=%s",
                 persona_id, model_key,
@@ -406,14 +535,18 @@ class SessionLifecycle:
 
         wait_seconds = ttl_seconds * (1.0 - threshold_ratio)
         fire_at = datetime.now() + timedelta(seconds=wait_seconds)
-        key = f"ttl:{persona_id}"
+        # (persona, model) ごとに独立予約 (beat_execution_context.md §3.1 —
+        # Session ごとに独立監視)。旧 key f"ttl:{persona_id}" の 1 ペルソナ 1 予約
+        # 上書きは廃止した。
+        key = f"ttl:{persona_id}:{model_key}"
 
         def _fire_callback() -> None:
             try:
-                self.runtime.run_cache_keepalive(persona_id)
+                self.runtime.run_cache_keepalive(persona_id, model_key)
             except Exception:
                 LOGGER.exception(
-                    "[keepalive] cache keep-alive raised: persona=%s", persona_id,
+                    "[keepalive] cache keep-alive raised: persona=%s model=%s",
+                    persona_id, model_key,
                 )
 
         scheduler.schedule(fire_at=fire_at, callback=_fire_callback, key=key)
@@ -439,8 +572,8 @@ class SessionLifecycle:
         (``SAIVERSE_GOLD_PANNING_ENABLED``) を切り替えても既に入っている予約は生き
         続け、次の予約 (再発火 → 再予約の輪) から反映される。
 
-        予約 key は explicit と共通の ``f"ttl:{persona_id}"`` (1 ペルソナ 1 予約の
-        上書き挙動を維持)。
+        予約 key は explicit と共通の ``f"ttl:{persona_id}:{model_key}"``
+        ((persona, model) ごとに独立予約 — beat_execution_context.md §3.1)。
         """
         from sea.gold_panning import is_enabled
 
@@ -480,14 +613,15 @@ class SessionLifecycle:
 
         wait_seconds = ttl_seconds * (1.0 - threshold_ratio)
         fire_at = datetime.now() + timedelta(seconds=wait_seconds)
-        key = f"ttl:{persona_id}"
+        key = f"ttl:{persona_id}:{model_key}"
 
         def _fire_callback() -> None:
             try:
-                self.runtime.run_cache_keepalive(persona_id)
+                self.runtime.run_cache_keepalive(persona_id, model_key)
             except Exception:
                 LOGGER.exception(
-                    "[watchdog] session watchdog raised: persona=%s", persona_id,
+                    "[watchdog] session watchdog raised: persona=%s model=%s",
+                    persona_id, model_key,
                 )
 
         scheduler.schedule(fire_at=fire_at, callback=_fire_callback, key=key)
@@ -590,18 +724,19 @@ class SessionLifecycle:
         )
         self.run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
 
-    def _is_cache_hot(self, persona) -> bool:
-        """persona.model の anchor エントリが生存しているか (= 直前 prefix が温かい)。
+    def _is_cache_hot(self, persona, model_key: Optional[str] = None) -> bool:
+        """指定 model (既定: persona.model) の anchor 行が生存しているか (= 直前 prefix が温かい)。
 
         run_cache_keepalive の生存判定と同じロジック (キャッシュ書き込み時 TTL で評価)。
         docs/intent/gold_panning.md §3.7
         """
-        model_key = getattr(persona, "model", None)
+        model_key = model_key or getattr(persona, "model", None)
         if not model_key:
             return False
         try:
-            anchors = self.load_anchors(persona) or {}
-            entry = anchors.get(str(model_key))
+            entry = self.load_anchor_entry(
+                getattr(persona, "persona_id", None), str(model_key),
+            )
             if not entry or not entry.get("updated_at"):
                 return False
             updated_at = datetime.fromisoformat(entry["updated_at"])
