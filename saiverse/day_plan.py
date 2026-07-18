@@ -2573,9 +2573,14 @@ def _build_track_instruction(
     """track:N コマの指示書を Track の文脈 (title・机メモ・配下の生存タスク) から組む。
 
     大枝コマの実行意味 (§3.1「中身はその場の判断」): 発火時に Track の状況を
-    見てセッション 1 本を回す。**中身が空の Track** (配下に生存タスクが無く
-    机メモも無い) は presence 相当に縮退する — 充填生成でセッションを回すと
-    v1 の空回りに逆戻りするため (§6 無意味の予算の注意)。
+    見てセッション 1 本を回す。**中身が空の Track** (配下に生存タスク・机メモ・
+    コマの覚え書き (note) のいずれも無い) は presence 相当に縮退する — 充填生成で
+    セッションを回すと v1 の空回りに逆戻りするため (§6 無意味の予算の注意)。
+
+    ただし note があれば縮退しない: ペルソナが編成時に書いた覚え書き
+    (「構想を練る」等) はこのコマの意図そのものなので、生存タスクが無くても
+    それを目標にセッションを回す — day_open の約束「関心を指せば開始時に状況を
+    見て決める」との整合 (issue track_slot_empty_degradation)。
 
     Returns:
         ``(instruction, track_id)``。縮退時は ``(None, track_id)``。
@@ -2598,6 +2603,7 @@ def _build_track_instruction(
     title = getattr(track, "title", None) or "(無題)"
     intent = (getattr(track, "intent", None) or "").strip()
     memo = _read_track_desk_memo(track)
+    note = (slot.get("note") or "").strip()
 
     from saiverse.persona_task_manager import PersonaTaskManager
 
@@ -2614,11 +2620,11 @@ def _build_track_instruction(
         )
         live_tasks = []
 
-    if not live_tasks and not memo:
-        # 中身が空 → presence 縮退 (呼び出し側が record_level を刻む)
+    if not live_tasks and not memo and not note:
+        # 中身が空 (生存タスク・机メモ・コマの覚え書きのいずれも無い) →
+        # presence 縮退 (呼び出し側が record_level を刻む)
         return None, track_id
 
-    note = (slot.get("note") or "").strip()
     parts = [f"目的: 関心「{title}」を前に進める。"]
     if intent:
         parts.append(f"この関心の意図: {intent}")
@@ -2639,9 +2645,17 @@ def _build_track_instruction(
                 + (f"（目標: {goal}）" if goal else "")
             )
         parts.append("\n".join(lines))
+        opening = "この中から今のコマで実際に進められることを選んで取り組むこと。"
+    else:
+        # 生存タスク一覧が無い (note / 机メモだけで回る大枝) — 指示語の指す先が
+        # 無いので、意図と覚え書きに沿って取り組ませる。
+        opening = (
+            "この関心の意図とこのコマの覚え書きに沿って、今のコマで実際に"
+            "進められることに取り組むこと。"
+        )
     parts.append(
-        "この中から今のコマで実際に進められることを選んで取り組むこと。"
-        "スペルで実際に実行・確認できたことだけを行い、成果は document_create 等の"
+        opening
+        + "スペルで実際に実行・確認できたことだけを行い、成果は document_create 等の"
         "スペルで実際に残すこと。"
         "完成条件: 実際にやったことが読み返せる形で残っていること。"
         "実際にやったこと以外を「やった」と書かないこと。"
@@ -2724,10 +2738,11 @@ def run_worker_slot_session(
     - task:N / desire:N / none — 型別テンプレートの指示書 (従来どおり。
       desire コマ = お試し採用: 発火時にそのまま欲求を生きる。採用への昇格は
       しない — それは判断点の仕事)
-    - track:N (大枝) — Track の title・机メモ・配下の生存タスクから指示書を
-      組む (:func:`_build_track_instruction`)。**中身が空の Track は presence
-      相当に縮退** し、セッションを回さず ``None`` を返す (呼び出し側は
-      判断点を撃たず予算も消費しない)
+    - track:N (大枝) — Track の title・机メモ・コマの note・配下の生存タスクから
+      指示書を組む (:func:`_build_track_instruction`)。**生存タスク・机メモ・note が
+      すべて空の Track だけ presence 相当に縮退** し、セッションを回さず ``None``
+      を返す (呼び出し側は判断点を撃たず予算も消費しない)。note があれば縮退せず、
+      それを目標にセッションを回す (issue track_slot_empty_degradation)
 
     Returns:
         ``sea.work_session.WorkSessionResult`` (raise しない契約)。

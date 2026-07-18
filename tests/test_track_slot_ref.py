@@ -244,8 +244,9 @@ def test_track_slot_post_session_context_has_no_task_ref(manager, running_track)
 
 
 def test_empty_track_slot_degrades_to_presence(manager, empty_track):
-    """中身が空の Track コマ: セッションも判断も走らず presence 縮退する。"""
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_track_slot()])
+    """真に空の Track コマ (生存タスク・机メモ・note すべて無し): セッションも
+    判断も走らず presence 縮退する。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_track_slot(note="")])
     judged: List[Any] = []
 
     with patch("sea.work_session.run_work_session") as mock_ws, \
@@ -261,6 +262,37 @@ def test_empty_track_slot_degrades_to_presence(manager, empty_track):
     assert judged == []                   # 偽前提の判断を撃たない
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0].get("record_level") == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+
+
+def test_empty_track_slot_with_note_runs_session(manager, empty_track):
+    """空 Track でもコマの note があればセッションを回す (縮退しない)。
+
+    issue track_slot_empty_degradation: ペルソナが「構想を練る」と note に意図を
+    書いて置いたコマが、生存タスク不在だけを理由に無音縮退していた実害の回帰。
+    """
+    calls: List[Dict[str, Any]] = []
+
+    def fake_ws(persona_id, instruction, budget_rounds, task_ref=None,
+                metadata=None, *, manager=None, track_id=None, title=None):
+        calls.append({"instruction": instruction, "track_id": track_id})
+        return _mock_ws_result(track_id=track_id)
+
+    slot = _track_slot(note="スタックチャンのランダム動作生成について構想を練る")
+    with patch("sea.work_session.run_work_session", side_effect=fake_ws):
+        result = day_plan.run_worker_slot_session(
+            manager, PERSONA_ID, PLAN_DATE, slot, 0,
+        )
+
+    assert result is not None             # 縮退せずセッションが回った
+    assert len(calls) == 1
+    inst = calls[0]["instruction"]
+    # 指示書に Track title と note の意図が乗る
+    assert "なんとなく気になること" in inst
+    assert "スタックチャンのランダム動作生成について構想を練る" in inst
+    # 生存タスク一覧が無い経路の締め文言 (「この中から」は使わない)
+    assert "この中から" not in inst
+    assert "意図とこのコマの覚え書きに沿って" in inst
+    assert calls[0]["track_id"] == empty_track
 
 
 def test_task_ref_slot_still_uses_template_path(manager, running_track):
