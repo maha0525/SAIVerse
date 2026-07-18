@@ -73,10 +73,16 @@ class DayPlanSlot(BaseModel):
 
 
 class DayPlanBudget(BaseModel):
-    """日次の作業ラウンド予算 (v2 §4.5)。台帳の無い日は day-plan 応答で None。"""
+    """日次の作業ラウンド予算 (v2 §4.5)。台帳の無い日は day-plan 応答で None。
+
+    ライフ宣言がある日の消費は used_pulses + used_rounds × κ (day_plan.
+    life_consumed) で小数になるため used / remaining は float。int のままだと
+    Pydantic の応答検証が 0.4 → int 変換を拒否して 500 になる (2026-07-18 実バグ:
+    ライフビューの「今日の予定」が air だけ取得失敗)。
+    """
     total: int
-    used: int
-    remaining: int
+    used: float
+    remaining: float
 
 
 class LifeItem(BaseModel):
@@ -189,7 +195,13 @@ def get_day_plan(
         persona_id=persona_id,
         date=plan_date,
         slots=slot_items,
-        budget=DayPlanBudget(**budget) if budget else None,
+        # used は κ 積算の float — 二進小数の桁あふれ (0.6000000000000001 等) を
+        # UI にそのまま見せないよう表示層のここで丸める
+        budget=DayPlanBudget(
+            total=budget["total"],
+            used=round(budget["used"], 2),
+            remaining=round(budget["remaining"], 2),
+        ) if budget else None,
         lives=life_items,
         life_status=life_status,
     )

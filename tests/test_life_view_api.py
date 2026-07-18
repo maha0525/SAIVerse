@@ -297,6 +297,38 @@ class LifeViewApiTest(unittest.TestCase):
         self.assertEqual(slots[2]["skip_reason"], "budget_exhausted")
         self.assertIn("予算切れ", slots[2]["result_label"])
 
+    def test_day_plan_budget_fractional_used_returns_200(self):
+        """ライフ宣言日の予算消費は used_rounds × κ で小数になる (2026-07-18 実バグ)。
+
+        DayPlanBudget.used が int 宣言だと Pydantic の応答検証が 0.4 → int を
+        拒否して 500 になり、ライフビューの「今日の予定」が取得失敗になる。
+        """
+        from saiverse.day_plan import (
+            LIFE_ROUND_BUDGET_FACTOR,
+            consume_life_rounds,
+            save_day_plan,
+            save_lives,
+        )
+
+        save_day_plan(self.manager, "air", TEST_DATE, [
+            {"start": "08:00", "kind": "作る", "ref": "none", "facility": "own_room",
+             "budget_rounds": 4, "title": "詩を書く", "note": ""},
+        ])
+        save_lives(self.manager, "air", TEST_DATE, [
+            {"start": "07:00", "end": "12:00", "budget_pulses": 18, "mode": "free"},
+        ])
+        # air の実バグ再現: 2 ラウンド消費 → used = 2 × κ (端数)
+        consume_life_rounds(self.manager, "air", TEST_DATE, 2, at_time="08:00")
+
+        resp = self.client.get(
+            "/api/people/air/day-plan", params={"date": TEST_DATE},
+        )
+        self.assertEqual(resp.status_code, 200)
+        budget = resp.json()["budget"]
+        expected_used = 2 * LIFE_ROUND_BUDGET_FACTOR
+        self.assertAlmostEqual(budget["used"], expected_used)
+        self.assertAlmostEqual(budget["remaining"], 18 - expected_used)
+
     def test_day_plan_empty_day(self):
         resp = self.client.get(
             "/api/people/air/day-plan", params={"date": "2026-01-01"},
