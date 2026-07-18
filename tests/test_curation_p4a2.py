@@ -634,7 +634,7 @@ def _make_run_manager(conn: sqlite3.Connection) -> Any:
     adapter = _FakeAdapter(conn)
     persona_obj = SimpleNamespace(
         sai_memory=adapter,
-        LIGHTWEIGHT_MODEL=None,
+        memory_weave_model=None,
     )
     return SimpleNamespace(
         personas={"alice": persona_obj},

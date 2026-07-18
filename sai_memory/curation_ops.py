@@ -907,26 +907,14 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
         if _llm_client is not None:
             return _llm_client
         try:
-            # ペルソナの LIGHTWEIGHT_MODEL を優先
-            lite_model = None
+            # 編纂は Memory weave 級の記憶仕事 — Chronicle と同じ解決チェーン
+            # (persona.memory_weave_model → env MEMORY_WEAVE_MODEL → 組み込み
+            # 既定) を saiverse.memory_weave_llm 経由で使う。ここに独自解決を
+            # 書かないこと (2026-07-18: 存在しない persona.LIGHTWEIGHT_MODEL の
+            # getattr でペルソナ設定が素通りし、グローバル既定へ貫通していた)。
+            from saiverse.memory_weave_llm import get_memory_weave_client
             persona_obj = (getattr(manager, "personas", None) or {}).get(persona_id)
-            if persona_obj is not None:
-                lite_model = getattr(persona_obj, "LIGHTWEIGHT_MODEL", None)
-            if not lite_model:
-                import os
-                lite_model = os.environ.get("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL")
-            if not lite_model:
-                from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-                lite_model = BUILTIN_DEFAULT_LITE_MODEL
-            from saiverse.model_configs import find_model_config
-            resolved_model_id, model_config = find_model_config(lite_model)
-            if resolved_model_id is None:
-                raise RuntimeError(f"モデル設定が見つかりません: {lite_model}")
-            actual_model = model_config.get("model", resolved_model_id)
-            context_length = model_config.get("context_length", 32768)
-            provider = model_config.get("provider", "gemini")
-            from llm_clients.factory import get_llm_client
-            _llm_client = get_llm_client(actual_model, provider, context_length, config=model_config)
+            _llm_client = get_memory_weave_client(persona_obj, purpose="curation")
         except Exception as exc:
             LOGGER.warning(
                 "[curation_ops] run_pending_plans: failed to init LLM client: %s", exc,

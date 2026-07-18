@@ -32,7 +32,7 @@
 | `SAIMEMORY_MEMORY_RANGE_BEFORE` / `_AFTER` | `2` | 想起ヒット前後の取得件数 |
 | `SAIMEMORY_MEMORY_CHUNK_MIN_CHARS` / `_MAX_CHARS` | `120` / `480` | チャンク文字数 |
 | `SAIVERSE_RECALL_SNIPPET_MAX_CHARS` 他 | `8000` | 想起スニペットの最大文字数（通常/stream/pulse） |
-| `MEMORY_WEAVE_MODEL` | `gemini-3.1-flash-lite-preview` | Chronicle/Memopedia 生成モデル |
+| `MEMORY_WEAVE_MODEL` | `gemini-3.1-flash-lite-preview` | Chronicle/Memopedia 生成・編纂 (curation) モデル。ペルソナ別 `MEMORY_WEAVE_MODEL` (DB) が優先 (`saiverse/memory_weave_llm.py`) |
 | `MEMORY_WEAVE_BATCH_SIZE` | `20` | あらすじ生成のバッチ件数 |
 | `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | あらすじ統合の閾値 |
 | `MEMORY_WEAVE_MAINTAIN_INTERVAL` | `200` | メンテ間隔 |

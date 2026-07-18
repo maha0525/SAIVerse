@@ -1005,22 +1005,22 @@ class SessionLifecycle:
             - "deferred": 確認 timeout/拒否、または claim 競合 (別入口が同じ窓を
               編纂中/編纂済み。anchor 据え置き → 次回再試行)
         """
-        from llm_clients.factory import get_llm_client
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
         from sai_memory.memory.storage import Message, get_messages_paginated
-        from saiverse.model_configs import find_model_config
+        from saiverse.memory_weave_llm import (
+            build_memory_weave_client,
+            resolve_memory_weave_config,
+        )
 
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        model_name = getattr(persona, "memory_weave_model", None) or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_id, model_config = find_model_config(model_name)
-        if not model_config:
-            LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
+        try:
+            model_id, model_config, _weave_source = resolve_memory_weave_config(
+                persona, purpose="chronicle"
+            )
+        except LookupError as exc:
+            LOGGER.warning("[metabolism] %s (Chronicle generation)", exc)
             return "failed"
-
-        provider = model_config.get("provider")
-        context_length = model_config.get("context_length", 128000)
-        client = get_llm_client(model_id, provider, context_length, config=model_config)
+        client = build_memory_weave_client(model_id, model_config)
 
         # Initialize arasuji tables and fetch all messages
         adapter = getattr(persona, "sai_memory", None)
@@ -1121,7 +1121,7 @@ class SessionLifecycle:
             self.manager._pending_permission_requests[request_id] = confirm_event
 
             persona_name = getattr(persona, "persona_name", None)
-            display_model = model_config.get("display_name", model_name)
+            display_model = model_config.get("display_name", model_id)
 
             event_callback({
                 "type": "chronicle_confirm",
@@ -1380,23 +1380,18 @@ class SessionLifecycle:
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
         from sai_memory.memory.storage import Message
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        from saiverse.model_configs import find_model_config
-        from llm_clients.factory import get_llm_client
+        from saiverse.memory_weave_llm import get_memory_weave_client
 
         adapter = getattr(persona, "sai_memory", None)
         if not adapter or not adapter.is_ready():
             LOGGER.warning("[metabolism][track] SAIMemory not available for Track Chronicle")
             return
 
-        model_name = getattr(persona, "memory_weave_model", None) or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_id, model_config = find_model_config(model_name)
-        if not model_config:
-            LOGGER.warning("[metabolism][track] Model '%s' not found for Track Chronicle", model_name)
+        try:
+            client = get_memory_weave_client(persona, purpose="track_chronicle")
+        except LookupError as exc:
+            LOGGER.warning("[metabolism][track] %s (Track Chronicle)", exc)
             return
-        provider = model_config.get("provider")
-        context_length = model_config.get("context_length", 128000)
-        client = get_llm_client(model_id, provider, context_length, config=model_config)
 
         init_arasuji_tables(adapter.conn)
 
