@@ -1,6 +1,6 @@
 # Intent: 判断点の入出力仕様 (自律行動 v2)
 
-**ステータス**: draft v0.1 (2026-07-04)。レビュー待ち
+**ステータス**: 実装済み・実機検証待ち (2026-07-19、W1)。5 種 finalize と on_event 入口を実行台帳に載せ (A2/A7/A8/A9/A11)、§6 の digest 統合 (a') も実装完了 (コミット 3f76619 / 7b2436c / e0ee4ff)。工程は [完了計画書](../../overview/audit_remediation_plan.md) W1
 **親 Intent**: [`../autonomous_behavior_v2.md`](../autonomous_behavior_v2.md)（三本柱の骨格。本書はその §4.2 判断点の詳細仕様）
 **様式の継承元**: [`meta_judgment_structured.md`](meta_judgment_structured.md)（構造化出力＋finalize ツール＋メインキャッシュ JSON 非混入）
 
@@ -190,6 +190,17 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 ## 6. セッション終了判断 (post_session)
 
+> **実装済み (2026-07-19、W1 Chunk C)**: 下記の改定を実装した。work_session の
+> digest 専用コール (`_generate_digest`) を削除しコール数を 3→2 に、post_session の
+> response_schema に `digest` (required) を追加、状況文の「ダイジェスト:」欄をセッション
+> 原本 (全文・上限なし) に置換、原本注入をコールローカル化 (LLM に渡る situation_text
+> のみ原本を含み、保存用 `paired_situation_text` は episode 参照 + `/spell episode_read`
+> の一行)、digest は finalize から outbox 第 1 項目 (`saimemory.append_digest`) で配送し
+> 配送成功時に `episodes.set_digest_ref` で再訪の鍵を後段確定。(a') 読み口 = 新設
+> `episode_read` スペル (origin_episode 専用列 + `get_messages_by_origin_episode`)。
+> 副産物: `_collect_today_session_digests` が created_at epoch を ISO 前提で前方一致し
+> day_close の digest 収集が全件落ちしていた既存欠陥も修正。
+>
 > **改定決定 (2026-07-18 まはー裁定・実装は W1 と同工区)**: digest 生成を post_session に統合する。
 > 現行構造は「digest 専用コール（セッション文脈・軽量）→ post_session（メインライン文脈・標準）が
 > **自己申告のダイジェストだけ**を根拠に裁定」で、①同じ事実が最終発話・digest・独白・作業メモの

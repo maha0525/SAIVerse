@@ -11,13 +11,13 @@
 
 ---
 
-## 現在地 (2026-07-17 更新)
+## 現在地 (2026-07-19 更新)
 
 ```
 一次監査     ████████ 完了 (全8サブシステム、2026-07-16)
 柱の裁定     ████████ 完了 (8柱すべて方針確定、2026-07-16)
 基盤工事     ████████ 完了 (実行台帳 Phase 0 + 統合工事 §6 ※§6-6bのみ分離)
-実装 wave    ██░░░░░░ W1〜W12 のうち 0 完了 (これから)
+実装 wave    ██▓░░░░░ W1 実装済み (実機検証待ち) / W2〜W14 未着手
 実機検証     █░░░░░░░ ライフ一日検証を実施中 (まはー、2026-07-17〜)
 ```
 
@@ -26,7 +26,7 @@
 - 柱3 (multi-city) = 凍結・入口封鎖済み / 柱4 (native import) = 復元/移植分離済み
 - 実行台帳 Phase 0 (器 + Beat ロック + 関所 + 配送ハンドラ) = 完了・休眠解除済み
 
-**次にやる wave**: W1 (台帳 Phase 1 = 判断点 5種 + 体験の構造 工程(1))。
+**次にやる wave**: W2 (台帳 Phase 2 = 時間割と予算)。**W1 は実装済み・実機検証待ち** (2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff)。
 
 **一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
@@ -36,13 +36,14 @@
 
 順序は依存関係順。各 wave は「調査 (Explore) → 設計 (メイン) → 実装 (委譲) → 検収 (メイン) → コミット」の型で回す。**状態**: ☐ 未着手 / ▶ 進行中 / ☑ 実装済み (実機検証待ち) / ✅ 完了。
 
-### W1 ☐ 実行台帳 Phase 1 — 判断点 (柱1 の核)
+### W1 ☑ 実行台帳 Phase 1 — 判断点 (柱1 の核) — 実装済み・実機検証待ち (2026-07-19)
 
 - **スコープ**: 5種 finalize と on_event 入口を実行台帳に載せる。A2 (day_open/close 同日重複 → `(kind, persona:営業日)` UNIQUE) / A7 (メタ判断例外→空成功・イベント消失 → 成功=finalize 完了の永続証跡、on_event は prepared が durable queue) / A8 (finalize 保存失敗→成功扱い・二重適用 → 世界更新=applied + 判断行=outbox、副作用は execution_id で冪等) / A9 (post-session の completed 先行 → task 完了+artifact ref の単一トランザクション化) / A11 (spell 失敗を committed 成功で記録 → 失敗はシステム名義の失敗行)
 - **同時に確定**: intent §11 の小物4点 (RESULT_JSON 標準列 / prepared 回収規則・期限の kind 別既定値ほか — Phase 1 実装時確定でまはー了承済み)
 - **同工区で実施 (2026-07-18 裁定)**: post_session×digest 統合 — digest 専用コール廃止、状況文にセッション原本 (コールローカル注入)、digest は post_session の出力欄に + **episode 読み口スペル新設** (詳細は [judgment_points.md](../intent/persona_cognition/judgment_points.md) §6 冒頭の改定決定)。A9 と同じ finalize 経路を触るため同時に。**= [体験の構造](../intent/experience_structure.md) 実装工程(1)** (2026-07-19 一本化裁定)
-- **参照**: [execution_ledger.md](../intent/execution_ledger.md) §7 / [自律行動監査](../handoff/2026-07-14_autonomy_judgment_schedule_audit.md)
+- **参照**: [execution_ledger.md](../intent/execution_ledger.md) §7 / [自律行動監査](../handoff/2026-07-14_autonomy_judgment_schedule_audit.md) / [走行メモ](../handoff/2026-07-19_w1_judgment_ledger_handoff.md) (設計 D1〜D10)
 - **完了条件**: A2/A7/A8/A9/A11 が回帰固定済み、レビュー台帳の自律行動行を消し込み更新
+- **実装済み (2026-07-19、コミット 3f76619 Chunk A / 7b2436c Chunk B / e0ee4ff Chunk C)**: A2/A7/A8/A9/A11 を回帰固定 (追加テスト計 41 件)、§11 小物4点確定、digest 統合 (a') + `episode_read` スペル実装、本体スイート 2666 passed 全緑。**残 = まはー実機検証** (判断点の重複抑止・偽成功 drop なし・digest 一本化の観測)。検証通過で ✅ + レビュー台帳の A2/A7/A8/A9/A11 を実機確認済みに
 
 ### W2 ☐ 実行台帳 Phase 2 — 時間割と予算
 

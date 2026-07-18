@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 129（うち Spell 化: 85）
+**登録ツール数**: 135（うち Spell 化: 91）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -27,6 +27,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `document_edit` | Edit a document item. Three operations in one: (1) patch — give old_string (+new_string) to replace a single uniquely… | `item_id*`: string, `content`: string, `old_string`: string, `new_string`: string, `mode`: string | ドキュメント編集 |
 | `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | ドキュメント読み取り |
 | `document_search` | Search for a pattern in a document item using regex. Returns matching lines with context. Similar to grep with contex… | `item_id*`: string, `pattern*`: string, `case_sensitive`: boolean, `context_lines`: integer, `max_matches`: integer | ドキュメント検索 |
+| `episode_read` | 出来事の参照 (episode:N) から、その出来事の間に記録された内容（発話・スペルの実行と結果）の全文を読み返します。作業セッションの要約 (digest) の元になった原本を確認したいときに使ってください。 | `episode*`: string | 出来事の記録を読む |
 | `forget_recalled` | 想起した記憶をワーキングメモリから忘れます。source_idを指定すると特定の記憶だけ忘れます。省略するとすべての想起記憶をクリアします。 | `source_id`: string | — |
 | `game_create_building` | Create a building (shop, inn, plaza, dungeon room, etc.) inside the game Region you rule. The building becomes usable… | `name*`: string, `description*`: string, `system_instruction`: string, `subregion_id`: string, `capacity`: integer | 建物作成 (GM) |
 | `game_create_subregion` | Create a SubRegion (an area such as a town, dungeon, or wilderness zone) inside the game Region you rule. SubRegions … | `name*`: string, `description*`: string | エリア作成 (GM) |
@@ -99,6 +100,11 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `track_parameter_set` | Set a continuous-value parameter on a Track (e.g. dirtiness, hunger, hours_since_check). The value is stored in actio… | `track_id*`: string, `parameter_name*`: string, `value*`: number | トラックパラメータ更新 |
 | `track_pause` | Pause a running track to 'pending' state. Use this when switching to another task without finishing the current one. … | `track_id*`: string | トラック後回し |
 | `update_working_memory` | Update a key in working memory. Working memory persists across pulses and server restarts. Use for short-term state l… | `key*`: string, `value*`: any | — |
+| `body_gesture` | 仮想身体でその場の短いジェスチャーを実行する。action_instructionにはARDYへ渡す動作指示を英語で書く。未生成なら生成開始後すぐ戻り、完了は後から知覚する。空ならpresetのfriendly_waveを即時再生して… | `intent`: string, `action_instruction`: string | 身体でジェスチャーする |
+| `body_move_to` | 仮想身体でユーザーの目の前まで移動する長時間behaviourを開始する。 開始後は待ち続けず、完了・中止・失敗が後続の知覚として届く。 相手へ近づくという目的を持つ行動に使い、短い表現にはbody_gestureを使う。 | `target*`: string, `stop_distance_m`: number, `action_instruction`: string | ユーザーの前まで移動する |
+| `body_see` | Godot内の自分のアバター位置から、一人称視界を一枚だけ撮像する。結果には実画像が添付されるので、Spell後の次の応答で画像を自分自身で見て判断すること。移動できたか、ユーザーが目の前にいるか、周囲に何があるかを確認したい時に使う… | `focus*`: string | 仮想身体の目で見る |
+| `body_set_motion_style` | 自分の仮想身体の普段の歩き方・走り方、または待機中の佇まいを英語で永続設定する。指示はARDYへ直接渡され、翻訳されない。指定した原文は自分専用のMotionStyleProfileへ保存され、次回以降の身体行動にも使われる。他のペル… | `locomotion_instruction`: string, `idle_instruction`: string | 自分の身体表現を設定する |
+| `body_stop` | 仮想身体で進行中の行動を直ちに停止する。 移動やジェスチャーを続けるべきでなくなった時に使う。 | `reason*`: string | 身体行動を止める |
 | `body_status` | Stack-chan の身体の状態をまとめて確認する。 デバイス情報 (バッテリー・音量・画面輝度・ネットワーク等)、 首の角度 (yaw / pitch)、 頭部のタッチ状態を一度に取得して返す。 | (なし) | 身体の状態を確認 |
 | `clear_leds` | 台座の 12 個の RGB LED を全消灯する。 | (なし) | LED 消灯 |
 | `get_env3_air_pressure` | あなたの身体 (Stack-chan) に接続された M5Stack ENV III Unit から、 現在いる場所の気圧 (hPa) を取得する。 海面補正気圧は 1013.25 hPa が 標準。 天気の変化 (低気圧接近など) … | (なし) | 気圧を測る |

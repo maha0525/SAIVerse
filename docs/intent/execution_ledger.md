@@ -1,6 +1,6 @@
 # Intent: 実行台帳 (Execution Ledger) — 不可逆な実行と記録の分裂を防ぐ共通基盤
 
-**ステータス**: 実装中 (v0.3, 2026-07-16) — Phase 0 の器 (テーブル2 + 状態機械 + FIFO配送器 + 関所 + 回復骨格) 実装済み・回帰25件。**結線前半も実装済み (2026-07-16)**: manager 所有 (`saiverse/execution_ledger_wiring.py`) + 起動時回復 (前世代 running sweep + pending 全量配送、`start()` 冒頭で pulse 前に同期実行) + 60秒掃除 tick (EventScheduler key=`execution_ledger_recovery`、掃除のみ=手動モードでも止めない) + 実ハンドラ2種 (`saimemory.append` / `perception.push`、冪等キー=outbox_id を配送先 metadata に刻印)・回帰15件。**Beat関所も結線済み (2026-07-17、§6-2 後半)**: `sea/beat_gate.py` が Beat 開始 (最外周ロック取得) 時に `flush_pending_for_persona` を fail-closed で実行 — Phase 0 (基盤 + Beat ロック + 全結線) はこれで完了。次は Phase 1 (判断点 5 種)。まはー承認済み: 基盤化 + world DB 配置 + 記憶の順序一貫性 (v0.2) + 記憶書き込みの Beat 単位直列化 (v0.3)。§11 の小物 4 点は Phase 1 実装時に確定 (了承済み)。実装点の詳細は対の [`beat_execution_context.md`](beat_execution_context.md)
+**ステータス**: 実装中 (v0.3, 2026-07-16) — Phase 0 完了。**Phase 1 (判断点) = 実装済み・実機検証待ち (2026-07-19、W1)**: claim_execution による境界 claim (A2 の重複抑止)、判断点 finalize の mark_applied + outbox 化 (A8)、complete_with_artifact の単一トランザクション (A9)、SpellOutcome (A11)、`_submit_meta_lane` の例外再送出 + 証跡ベース成功判定 (A7)、回復 tick #2 (prepared 回収)。§11 の小物 4 点も確定 (下記)。コミット 3f76619 / 7b2436c / e0ee4ff。次は Phase 2 (時間割と予算、計画書 W2)。Phase 0 の器 (テーブル2 + 状態機械 + FIFO配送器 + 関所 + 回復骨格) 実装済み・回帰25件。**結線前半も実装済み (2026-07-16)**: manager 所有 (`saiverse/execution_ledger_wiring.py`) + 起動時回復 (前世代 running sweep + pending 全量配送、`start()` 冒頭で pulse 前に同期実行) + 60秒掃除 tick (EventScheduler key=`execution_ledger_recovery`、掃除のみ=手動モードでも止めない) + 実ハンドラ2種 (`saimemory.append` / `perception.push`、冪等キー=outbox_id を配送先 metadata に刻印)・回帰15件。**Beat関所も結線済み (2026-07-17、§6-2 後半)**: `sea/beat_gate.py` が Beat 開始 (最外周ロック取得) 時に `flush_pending_for_persona` を fail-closed で実行 — Phase 0 (基盤 + Beat ロック + 全結線) はこれで完了。次は Phase 1 (判断点 5 種)。まはー承認済み: 基盤化 + world DB 配置 + 記憶の順序一貫性 (v0.2) + 記憶書き込みの Beat 単位直列化 (v0.3)。§11 の小物 4 点は Phase 1 実装時に確定 (了承済み)。実装点の詳細は対の [`beat_execution_context.md`](beat_execution_context.md)
 **位置付け**: 2026-07-12〜15 の一次監査で見つかった「偽成功・不可逆先行」型 P1×16 への共通の答え。個別の穴塞ぎではなく、副作用のある実行すべてが従う世界側の物理法則を一つ増やす。
 **前提**: [`audit_second_batch_hardening.md`](audit_second_batch_hardening.md)（第二陣の不変条件「外部mutatorを推測で再実行しない」「user utteranceのdurabilityはPulseより先」は本基盤の先行例）/ [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md) / [`life.md`](life.md) / 監査記録: [自律行動](../handoff/2026-07-14_autonomy_judgment_schedule_audit.md) / [SEA runtime](../handoff/2026-07-15_sea_runtime_session_head_tail_audit.md) / [記憶・人格境界](../handoff/2026-07-12_memory_persona_boundary_audit.md) / [Persona/City/Building](../handoff/2026-07-15_persona_city_building_separation_audit.md)
 
@@ -227,10 +227,10 @@ CREATE TABLE execution_outbox (
 
 ## 11. 未確定・レビュー待ち
 
-1. スキーマの列構成（特に RESULT_JSON に何を標準で入れるか — 精算・照合に足る最小集合の確定は Phase 1 実装時）
-2. `unknown` の UI 表出（ライフビューに出すか、デバッグパネル止まりか）
-3. 保持期間の既定値（30 日仮置き）
-4. `prepared` の回収規則・実行期限の既定値（kind ごと。Phase 1 で判断点 5 種ぶんを確定）
+1. ~~スキーマの列構成（特に RESULT_JSON に何を標準で入れるか）~~ → **確定 (2026-07-19、W1)**: RESULT_JSON 標準 = `{kind, committed, scope, spells:{attempted,succeeded,failed}, warnings}` + kind 固有 (`reaction` = on_event / `episode_ref` = post_session)。照合 (#5) と呼び出し側読み出しに足る最小。
+2. `unknown` の UI 表出（ライフビューに出すか、デバッグパネル止まりか） — 未確定 (観測面 `list_unknown` / `list_dead` は実装済み、UI 配置は保留)
+3. 保持期間の既定値（30 日仮置き） — 未確定 (prune 未実装)
+4. ~~`prepared` の回収規則・実行期限の既定値（kind ごと）~~ → **確定 (2026-07-19、W1)**: on_event / post_session = 120 秒経過で refire (`resume_execution_id`)、day_open / day_close / post_conversation = 1800 秒経過で `mark_failed("expired")`。running 期限は全 kind 共通 3600 秒仮置き。手動モード persona は「行動を生む」refire をスキップ (掃除は止めない)。実装 = `execution_ledger_wiring._collect_prepared_judgments`。
 
 解決済み（v0.3 後続）: ~~Beat ロックの実装点~~ → 柱 2（model 別 Session）・S4（Stelis）と合流した統合工事 intent [`beat_execution_context.md`](beat_execution_context.md) として起草（2026-07-16）。Beat ロックと関所の配置は同 intent §3.4。
 解決済み（v0.2）: ~~回復 tick の住処~~ → 独立の世界レベル定期ジョブ（§2.4。watchdog 相乗りは自律 OFF ペルソナへの配送が死ぬため不採用）。~~配送遅延の時系列~~ → Pulse 前 flush の必須関所化で構造的に消滅（§2.2 / 不変条件 8）。
