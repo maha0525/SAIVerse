@@ -88,13 +88,23 @@ def _virtual_clock():
 
 
 class FakeAdapter:
-    """SAIMemory adapter の最小スタブ (append_persona_message の記録のみ)。"""
+    """SAIMemory adapter の最小スタブ (append_persona_message の記録 +
+    W1 Chunk C: get_messages_by_origin_episode の canned 応答)。"""
 
     def __init__(self):
         self.messages: List[Dict[str, Any]] = []
+        # get_messages_by_origin_episode が返す原本行 (テストが仕込む)
+        self.transcript_rows: List[Dict[str, Any]] = []
+        self.transcript_queries: List[str] = []
 
     def append_persona_message(self, payload):
         self.messages.append(payload)
+        # 実 adapter と同じく message id を返す (digest 直書き経路が使う)
+        return f"m{len(self.messages)}"
+
+    def get_messages_by_origin_episode(self, episode_ref):
+        self.transcript_queries.append(episode_ref)
+        return list(self.transcript_rows)
 
 
 class FakePulseController:
@@ -464,7 +474,6 @@ def test_day_open_finalize_promotions_fire_track_create(
 def _session_result(**over):
     from sea.work_session import WorkSessionResult
     base = dict(
-        digest="記事を読んで要点を 3 つ覚え書きにした。",
         artifacts=[], rounds_used=4, ended_reason="finished", task_ref="task:1",
     )
     base.update(over)
@@ -2229,3 +2238,242 @@ def test_complete_with_artifact_rejects_other_execution(
         )
     task = ptm.get_task(task_id, persona_id=PERSONA_ID)
     assert task["artifact_refs"] == ["item-abc"]
+
+
+# ---------------------------------------------------------------------------
+# W1 Chunk C / D9: digest 統合 (post_session が原本を見て digest を書く)
+# ---------------------------------------------------------------------------
+
+
+def _ws_episode(manager):
+    """work_session の出来事を開いて閉じる (digest_ref=None のまま)。"""
+    from saiverse import episodes as ep_mod
+    ep = ep_mod.open_episode(
+        manager, PERSONA_ID, ep_mod.KIND_WORK_SESSION, building_id="alice_room",
+    )
+    ep_mod.close_episode(manager, PERSONA_ID, ep["episode_ref"])
+    return ep["episode_ref"]
+
+
+def _ws_meta_fixture():
+    return {
+        "task_ref": "task:1", "artifacts": [], "rounds_used": 4,
+        "budget_rounds": 8, "ended_reason": "finished",
+        "started_at": "2026-07-04T10:00:00", "ended_at": "2026-07-04T10:30:00",
+    }
+
+
+def test_post_session_schema_requires_digest(manager, task_refs):
+    ctx = {"session_result": _session_result(artifacts=[]), "task_ref": "task:1"}
+    result = jp.run_judgment_point(manager, PERSONA_ID, "post_session", ctx)
+    schema = result["args"]["response_schema"]
+    _assert_no_additional_properties(schema)
+    assert "digest" in schema["properties"]
+    assert schema["properties"]["digest"]["type"] == "string"
+    assert "digest" in schema["required"]
+    # 指示部に digest の出典の規律 (実際に起きたことだけ) がある
+    assert "digest 欄には" in result["args"]["situation_text"]
+
+
+def test_post_session_transcript_is_call_local(manager, task_refs):
+    """原本は situation_text だけに載る (D9-2/3)。
+
+    - situation_text: 「セッションの記録 (原本):」+ 原本全文
+    - paired_situation_text (保存用): episode 参照 + /spell episode_read の
+      一行のみ — 原本を含まない (コールローカル注入)
+    - ws_meta / episode_ref が judgment_context で finalize まで届く
+    """
+    episode_ref = _ws_episode(manager)
+    adapter = manager.personas[PERSONA_ID].sai_memory
+    adapter.transcript_rows = [
+        {"role": "assistant",
+         "content": (
+             "本文を書く。\n"
+             "/spell name='document_create' args={\"title\": \"下書き\"}"
+         ),
+         "created_at": int(BASE.timestamp())},
+        {"role": "system",
+         "content": "文書「下書き」を作成しました。",
+         "created_at": int(BASE.timestamp())},
+    ]
+    ctx = {"session_result": _session_result(episode_ref=episode_ref),
+           "task_ref": "task:1", "budget_rounds": 8}
+    result = jp.run_judgment_point(manager, PERSONA_ID, "post_session", ctx)
+
+    args = result["args"]
+    text = args["situation_text"]
+    assert "セッションの記録 (原本):" in text
+    assert "本文を書く。" in text
+    assert "文書「下書き」を作成しました。" in text
+    assert "ダイジェスト:" not in text  # 旧欄は廃止
+    assert adapter.transcript_queries == [episode_ref]
+
+    jctx = json.loads(args["judgment_context"])
+    paired = jctx["paired_situation_text"]
+    assert episode_ref in paired
+    assert "episode_read" in paired
+    assert "本文を書く。" not in paired          # 原本は保存側に載らない
+    assert "文書「下書き」" not in paired
+
+    # digest 配送の材料が finalize まで届く
+    assert jctx["episode_ref"] == episode_ref
+    assert jctx["ws_meta"]["rounds_used"] == 4
+    assert jctx["ws_meta"]["budget_rounds"] == 8
+    assert jctx["ws_meta"]["ended_reason"] == "finished"
+
+
+def test_post_session_transcript_unavailable_is_explicit(manager, task_refs):
+    """原本が引けない (0 件 / 読み口なし) ときは取得不能を明示する。"""
+    episode_ref = _ws_episode(manager)
+    # FakeAdapter の transcript_rows は空のまま = 原本 0 件
+    ctx = {"session_result": _session_result(episode_ref=episode_ref),
+           "task_ref": "task:1"}
+    result = jp.run_judgment_point(manager, PERSONA_ID, "post_session", ctx)
+    assert "(セッション原本を取得できませんでした)" in result["args"]["situation_text"]
+
+
+def test_post_session_finalize_writes_digest_untracked(
+    manager, ptm, task_refs, finalize_mod, tmp_path, session_factory,
+):
+    """untracked degrade: digest 直書き (判断行より先) + set_digest_ref 直呼び。"""
+    from database.models import Episode
+    from sea.work_session import DIGEST_TAG
+
+    episode_ref = _ws_episode(manager)
+    ws_meta = _ws_meta_fixture()
+    output = {
+        "monologue": "一区切り。",
+        "digest": "下書きを 1 本書いた。",
+        "task_verdict": {"status": "continue", "desk_memo": "続きは明日"},
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({
+        "plan_date": PLAN_DATE, "artifacts": [], "task_ref": "task:1",
+        "episode_ref": episode_ref, "ws_meta": ws_meta,
+    })
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+
+    msgs = manager.personas[PERSONA_ID].sai_memory.messages
+    assert len(msgs) == 2
+    digest_msg, judgment_msg = msgs  # digest が先 (tracked の FIFO と同順)
+    assert digest_msg["content"] == "下書きを 1 本書いた。"
+    assert DIGEST_TAG in digest_msg["metadata"]["tags"]
+    assert digest_msg["scope"] == "committed"
+    assert digest_msg["line_role"] == "main_line"
+    assert digest_msg["metadata"]["work_session"] == ws_meta
+    assert digest_msg["metadata"]["origin_episode"] == episode_ref
+    assert "meta_judgment" in judgment_msg["metadata"]["tags"]
+
+    # episode の再訪の鍵が message:{id} で後段確定 (FakeAdapter は m1 を返す)
+    db = session_factory()
+    try:
+        ep = db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).first()
+        assert ep.DIGEST_REF == "message:m1"
+    finally:
+        db.close()
+
+
+def test_post_session_finalize_empty_digest_warns(
+    manager, ptm, task_refs, finalize_mod, tmp_path, session_factory, caplog,
+):
+    """digest 欠落 (スキーマ違反相当) は WARN + digest なしで判断行のみ。"""
+    from database.models import Episode
+
+    episode_ref = _ws_episode(manager)
+    output = {
+        "monologue": "終えた。",
+        "task_verdict": {"status": "continue", "desk_memo": "続きは明日"},
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({
+        "plan_date": PLAN_DATE, "artifacts": [], "task_ref": "task:1",
+        "episode_ref": episode_ref, "ws_meta": _ws_meta_fixture(),
+    })
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            finalize_mod.judgment_finalize(
+                judgment_output=output, kind="post_session", judgment_context=ctx,
+            )
+    assert any("digest が空です" in r.message for r in caplog.records)
+    msgs = manager.personas[PERSONA_ID].sai_memory.messages
+    assert len(msgs) == 1  # 判断行のみ
+    assert "meta_judgment" in msgs[0]["metadata"]["tags"]
+    db = session_factory()
+    try:
+        ep = db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).first()
+        assert ep.DIGEST_REF is None
+    finally:
+        db.close()
+
+
+def test_post_session_finalize_tracked_digest_outbox_first(
+    manager, task_refs, finalize_mod, tmp_path, session_factory,
+):
+    """tracked: digest outbox が第 1 項目 (判断行より前 = FIFO で digest が先)。
+
+    配送後: digest が DIGEST_TAG committed で書かれ、RESULT_JSON に
+    episode_ref が載り、再 finalize は無効 (二重 digest なし)。
+    """
+    from saiverse import execution_ledger as XL
+    from saiverse import execution_ledger_wiring as xlw
+    from sea.work_session import DIGEST_TAG
+
+    episode_ref = _ws_episode(manager)
+    ledger, eid = _tracked_execution(manager, "post_session")
+    adapter = manager.personas[PERSONA_ID].sai_memory
+    output = {
+        "monologue": "終えた。",
+        "digest": "資料を 3 件読んだ。",
+        "task_verdict": {"status": "continue", "desk_memo": "続き"},
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({
+        "plan_date": PLAN_DATE, "artifacts": [], "task_ref": "task:1",
+        "episode_ref": episode_ref, "ws_meta": _ws_meta_fixture(),
+        "execution_id": eid,
+    })
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+
+    entry = ledger.get_execution(eid)
+    assert entry["status"] in (XL.STATUS_APPLIED, XL.STATUS_COMPLETED)
+    assert entry["result"]["episode_ref"] == episode_ref
+
+    # outbox の並び: digest → 判断行 (OUTBOX_ID 昇順 = FIFO)
+    db = session_factory()
+    try:
+        rows = (
+            db.query(ExecutionOutboxItem)
+            .filter(ExecutionOutboxItem.EXECUTION_ID == eid)
+            .order_by(ExecutionOutboxItem.OUTBOX_ID.asc())
+            .all()
+        )
+        targets = [r.TARGET for r in rows]
+    finally:
+        db.close()
+    assert targets == [
+        xlw.TARGET_SAIMEMORY_APPEND_DIGEST, xlw.TARGET_SAIMEMORY_APPEND,
+    ]
+
+    # 配送 (mark_applied(deliver=True) が即時配送済みなら flush は no-op)
+    ledger.flush_pending_for_persona(PERSONA_ID)
+    assert len(adapter.ledger_messages) == 2
+    digest_delivered = adapter.ledger_messages[0][1]
+    assert digest_delivered["content"] == "資料を 3 件読んだ。"
+    assert DIGEST_TAG in digest_delivered["metadata"]["tags"]
+    assert digest_delivered["scope"] == "committed"
+    judgment_delivered = adapter.ledger_messages[1][1]
+    assert judgment_delivered["line_role"] == "meta_judgment"
+
+    # 再 finalize は無効 (二重 digest なし)
+    with _persona_ctx(manager, tmp_path):
+        summary2, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+    assert "already finalized" in summary2
+    assert len(adapter.ledger_messages) == 2

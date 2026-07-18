@@ -102,7 +102,12 @@ class RecordingAdapter:
         created = payload.get("created_at")
         if isinstance(created, str):
             payload["created_at"] = int(datetime.fromisoformat(created).timestamp())
+        mid = f"msg-{len(self.messages) + 1}"
+        payload["id"] = mid
         self.messages.append(payload)
+        # 実 adapter と同じく message id を返す (digest 直書き経路が
+        # episodes.set_digest_ref の鍵に使う)
+        return mid
 
     def recent_persona_messages_by_count(self, max_messages, *, required_tags=None,
                                          required_line_roles=None,
@@ -323,12 +328,19 @@ def _standard_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"monologue": "今日は午前に調べ物、午後に共有文を仕上げる。",
                 "timetable": [dict(s) for s in _TIMETABLE]}
     if kind == "post_session":
+        artifacts = ctx.get("artifacts") or []
+        # digest 統合 (W1 Chunk C / D9): post_session 自身が実績要約を書く
         output: Dict[str, Any] = {
             "monologue": "セッションを終えた。",
+            "digest": (
+                "共有文の下書きを書いた。『検査に行け』ではなく"
+                "『一緒に見に行こう』に直した。"
+                if artifacts else
+                "記事を 3 件確認して、標本集に使えそうな言い回しを頭に留めた。"
+            ),
             "new_desires": [],
             "remaining_timetable": None,
         }
-        artifacts = ctx.get("artifacts") or []
         if ctx.get("task_ref"):
             if artifacts:
                 output["task_verdict"] = {
@@ -354,16 +366,15 @@ def _standard_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
     raise AssertionError(f"unexpected judgment kind: {kind}")
 
 
-#: 作業セッションの mock LLM 応答 (発火順):
-#: セッション 1 (知る): searxng スペル → 締め → ダイジェスト
-#: セッション 2 (作る): document_create スペル → 締め → ダイジェスト
+#: 作業セッションの mock LLM 応答 (発火順)。digest 専用コールは廃止 (D9) —
+#: ダイジェストは _standard_judge の post_session 出力が書く:
+#: セッション 1 (知る): searxng スペル → 締め
+#: セッション 2 (作る): document_create スペル → 締め
 _SESSION_RESPONSES = [
     "まず記事を探す。\n/spell name='searxng_search' args={\"query\": \"言葉 標本 蒸留\"}",
     "めぼしい記事を確認した。今日はここまでにする。",
-    "記事を 3 件確認して、標本集に使えそうな言い回しを頭に留めた。",
     "本文を書く。\n/spell name='document_create' args={\"title\": \"共有文の下書き\"}",
     "書き上げて読み直した。命令調を誘い口調に直してある。",
-    "共有文の下書きを書いた。『検査に行け』ではなく『一緒に見に行こう』に直した。",
 ]
 
 _STANDARD_SCENARIO = {
@@ -586,7 +597,10 @@ def test_standard_day_episodes_recorded(standard_run):
     meta_ws_create = json.loads(rows[3].META_JSON)
     assert meta_ws_create["title"] == "共有文の下書きを書く"
     assert meta_ws_create["artifacts"] == created_item_ids
-    assert rows[3].DIGEST_REF == "message:msg-x"  # FakeWorkRuntime の返す固定 id
+    # digest 統合 (D9): work_session は digest_ref=None で閉じ、post_session
+    # finalize の digest 直書き (untracked degrade) が set_digest_ref で後段確定
+    assert rows[3].DIGEST_REF is not None
+    assert rows[3].DIGEST_REF.startswith("message:msg-")
 
     # 会話出来事: 15:00 開始 / 15:30 終了 (仮想クロック経由の epoch)
     conv = rows[4]

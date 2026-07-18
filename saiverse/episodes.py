@@ -361,6 +361,66 @@ def close_episode(
         db.close()
 
 
+def set_digest_ref(
+    manager: Any,
+    persona_id: str,
+    ref: str,
+    digest_ref: str,
+) -> Dict[str, Any]:
+    """出来事の DIGEST_REF を後段確定する (W1 Chunk C / D9-5)。
+
+    digest 統合 (judgment_points.md §6 改定) で digest は post_session 判断が
+    書き、実行台帳の配送 handler (``saimemory.append_digest``) が SAIMemory へ
+    届いた後にここで episode に再訪の鍵を刻む。配送までの間 DIGEST_REF が
+    NULL の closed episode = 「適用済み・記録待ち」の観測可能状態。
+
+    冪等: 既に同値なら no-op。既に**別値**が入っている場合は WARN して
+    上書きしない (再配送や二重 finalize で鍵をすり替えない)。
+
+    Raises:
+        EpisodeNotFoundError: 出来事が見つからない (配送 handler は例外で
+            配送失敗を表明する契約 — 握り潰さない)。
+    """
+    if not digest_ref:
+        raise ValueError("digest_ref is required")
+    db = manager.SessionLocal()
+    try:
+        episode_id = _resolve_episode_id(db, persona_id, ref)
+        ep = (
+            db.query(Episode)
+            .filter(Episode.EPISODE_ID == episode_id, Episode.PERSONA_ID == persona_id)
+            .first()
+        )
+        if ep is None:
+            raise EpisodeNotFoundError(f"episode not found: {episode_id}")
+        if ep.DIGEST_REF == digest_ref:
+            LOGGER.debug(
+                "[episode] set_digest_ref no-op (already set): %s digest=%s",
+                episode_id, digest_ref,
+            )
+            return _to_dict(ep)
+        if ep.DIGEST_REF:
+            LOGGER.warning(
+                "[episode] digest_ref already set to %r; not overwriting with %r "
+                "(episode=%s persona=%s)",
+                ep.DIGEST_REF, digest_ref, episode_id, persona_id,
+            )
+            return _to_dict(ep)
+        ep.DIGEST_REF = digest_ref
+        db.commit()
+        db.refresh(ep)
+        LOGGER.info(
+            "[episode] digest_ref set: %s persona=%s digest=%s",
+            episode_id, persona_id, digest_ref,
+        )
+        return _to_dict(ep)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def list_today(
     manager: Any,
     persona_id: str,

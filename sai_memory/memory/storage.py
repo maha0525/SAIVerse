@@ -134,6 +134,13 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     _ensure_column(conn, "messages", "spell_origin_id", "TEXT")
     # spell_seq: spell loop 内のラウンド番号 (1, 2, 3...)。
     _ensure_column(conn, "messages", "spell_seq", "INTEGER")
+    # origin_episode: 層0タグ (metadata.origin_episode = メッセージ生成時に開いて
+    # いた出来事の episode_ref) の専用列昇格 (W1 Chunk C / D10, 2026-07-19)。
+    # episode 読み口 (episode_read スペル / post_session の原本注入) が
+    # json_each スキャンなしで引けるようにする。書き込みは add_message が
+    # metadata dict から転記する (書き手 = sea/runtime.py は不変)。
+    # 列を新規追加したときだけ一度、既存 metadata からバックフィルする。
+    _origin_episode_added = _ensure_column(conn, "messages", "origin_episode", "TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_track_line "
         "ON messages(origin_track_id, line_role, line_id)"
@@ -144,7 +151,13 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_pulse_id ON messages(pulse_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_origin_episode "
+        "ON messages(origin_episode)"
+    )
     _backfill_messages_pulse_id(conn)
+    if _origin_episode_added:
+        _backfill_messages_origin_episode(conn)
 
     # Stelis threads table for hierarchical context management
     conn.execute(
@@ -230,12 +243,15 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     return conn
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> bool:
+    """列が無ければ追加する。追加したとき True (一回限りのバックフィル判定用)。"""
     cur = conn.execute(f"PRAGMA table_info({table})")
     existing = {row[1] for row in cur.fetchall()}
     if column not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         conn.commit()
+        return True
+    return False
 
 
 def _backfill_messages_pulse_id(conn: sqlite3.Connection) -> None:
@@ -278,6 +294,41 @@ def _backfill_messages_pulse_id(conn: sqlite3.Connection) -> None:
         import logging
         logging.getLogger(__name__).warning(
             "[storage] Failed to backfill messages.pulse_id from metadata.tags",
+            exc_info=True,
+        )
+        conn.rollback()
+
+
+def _backfill_messages_origin_episode(conn: sqlite3.Connection) -> None:
+    """metadata JSON の ``origin_episode`` から専用列を埋める一回限りの移行。
+
+    列を新規追加した直後 (init_db) にのみ呼ばれる。LIKE で対象行を絞り、
+    既存 DB の全行 UPDATE は走らせない。べき等 (origin_episode IS NULL の
+    行のみ) — 失敗しても列は残り、以後の新規行は add_message が転記する。
+    """
+    try:
+        cur = conn.execute(
+            """
+            UPDATE messages
+            SET origin_episode = json_extract(metadata, '$.origin_episode')
+            WHERE origin_episode IS NULL
+              AND metadata IS NOT NULL
+              AND metadata LIKE '%origin_episode%'
+              AND json_extract(metadata, '$.origin_episode') IS NOT NULL
+            """
+        )
+        if cur.rowcount > 0:
+            import logging
+            logging.getLogger(__name__).info(
+                "[storage] Backfilled origin_episode on %d existing message(s) "
+                "from metadata JSON",
+                cur.rowcount,
+            )
+        conn.commit()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "[storage] Failed to backfill messages.origin_episode from metadata",
             exc_info=True,
         )
         conn.rollback()
@@ -335,6 +386,9 @@ class Message:
     paired_action_text: Optional[str] = None
     spell_origin_id: Optional[str] = None
     spell_seq: Optional[int] = None
+    # W1 Chunk C (2026-07-19): 層0タグ (metadata.origin_episode) の専用列。
+    # メッセージ生成時に開いていた出来事の episode_ref。
+    origin_episode: Optional[str] = None
 
 
 def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
@@ -357,7 +411,7 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
 # Column suffix for SELECTs that want line metadata. Append after the 7 base
 # columns (id, thread_id, role, content, resource_id, created_at, metadata).
 # v0.32 (2026-05-09): origin_track_id を末尾に追加。
-_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature, paired_action_text, spell_origin_id, spell_seq"
+_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature, paired_action_text, spell_origin_id, spell_seq, origin_episode"
 
 
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
@@ -378,6 +432,7 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
         paired_action_text=row[13] if len(row) > 13 else None,
         spell_origin_id=row[14] if len(row) > 14 else None,
         spell_seq=int(row[15]) if len(row) > 15 and row[15] is not None else None,
+        origin_episode=row[16] if len(row) > 16 else None,
     )
 
 
@@ -418,27 +473,35 @@ def add_message(
     mid = str(uuid.uuid4())
     ts = int(time.time()) if created_at is None else int(created_at)
     meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+    # W1 Chunk C (D10): metadata JSON 内の origin_episode を専用列へ転記する。
+    # 書き手 (sea/runtime.py の層0タグ付与) は metadata dict に載せるだけで、
+    # 列への昇格は INSERT のこの一点で行う (origin_track_id と同じ流儀)。
+    origin_episode: Optional[str] = None
+    if isinstance(metadata, dict):
+        _oe = metadata.get("origin_episode")
+        if isinstance(_oe, str) and _oe.strip():
+            origin_episode = _oe.strip()
     # ``scope`` is NOT NULL with DEFAULT 'committed' at the schema level;
     # passing None here lets the DB apply the default.
     if scope is None:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
             "origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature, "
-            "spell_origin_id, spell_seq) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "spell_origin_id, spell_seq, origin_episode) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
              origin_track_id, line_role, line_id, paired_action_text, pulse_id, thought_signature,
-             spell_origin_id, spell_seq),
+             spell_origin_id, spell_seq, origin_episode),
         )
     else:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
             "origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature, "
-            "spell_origin_id, spell_seq) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "spell_origin_id, spell_seq, origin_episode) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
              origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature,
-             spell_origin_id, spell_seq),
+             spell_origin_id, spell_seq, origin_episode),
         )
     conn.commit()
     return mid

@@ -2297,6 +2297,61 @@ class SAIMemoryAdapter:
             return None
         return row is not None
 
+    def get_messages_by_origin_episode(self, episode_ref: str) -> List[Dict[str, Any]]:
+        """出来事 (``episode:N``) の原本行を時系列で返す (W1 Chunk C / D10)。
+
+        層0タグの専用列 ``messages.origin_episode`` で直接引く
+        (:meth:`has_track_assistant_message_since` と同じ直 SQL 流儀)。
+        episode 読み口 (post_session の原本注入 / episode_read スペル) の
+        原始関数。volatile も含む全行 — 原本は生ログそのもの。
+
+        Returns:
+            時系列 (created_at 昇順、同秒は挿入順 = rowid 昇順) の dict リスト。
+            各 dict は原本レンダリングに足る列 (role / content / created_at /
+            line_role / scope / metadata / spell 関連) を持つ。adapter 未 ready /
+            クエリ失敗は空リスト。
+        """
+        if not self._ready or not episode_ref:
+            return []
+        try:
+            with self._db_lock:
+                rows = self.conn.execute(
+                    "SELECT id, thread_id, role, content, created_at, metadata, "
+                    "line_role, scope, pulse_id, origin_track_id, "
+                    "paired_action_text, spell_origin_id, spell_seq "
+                    "FROM messages WHERE origin_episode = ? "
+                    "ORDER BY created_at ASC, rowid ASC",
+                    (str(episode_ref),),
+                ).fetchall()
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to query messages by origin_episode %s: %s",
+                episode_ref, exc,
+            )
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row[5]) if row[5] else None
+            except (TypeError, ValueError):
+                metadata = None
+            out.append({
+                "id": row[0],
+                "thread_id": row[1],
+                "role": row[2],
+                "content": row[3],
+                "created_at": int(row[4]) if row[4] is not None else None,
+                "metadata": metadata if isinstance(metadata, dict) else None,
+                "line_role": row[6],
+                "scope": row[7],
+                "pulse_id": row[8],
+                "origin_track_id": row[9],
+                "paired_action_text": row[10],
+                "spell_origin_id": row[11],
+                "spell_seq": row[12],
+            })
+        return out
+
     def get_track_last_message_times(
         self, track_ids: Iterable[str]
     ) -> Dict[str, datetime]:

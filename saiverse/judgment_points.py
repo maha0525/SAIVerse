@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from saiverse import clock
@@ -560,6 +560,18 @@ def build_post_session_schema(
     )
     props: Dict[str, Any] = {"monologue": {"type": "string"}}
     required = ["monologue"]
+
+    # digest 統合 (§6 改定 2026-07-18 / W1 Chunk C D9-4): post_session 自身が
+    # セッションの記録 (原本) から実績要約を書く。required — digest 専用コールは
+    # 廃止されており、この欄が唯一の生成点。
+    props["digest"] = {
+        "type": "string",
+        "description": (
+            "このセッションで実際に起きたことだけの短い要約"
+            "（セッションの記録に基づく実績。確認できていない成果は書かない）"
+        ),
+    }
+    required.append("digest")
 
     if task_ref and _task_ref_status(manager, persona_id, task_ref) in TERMINAL_TASK_STATUSES:
         LOGGER.info(
@@ -1086,25 +1098,103 @@ def _ws_get(session_result: Any, key: str, default: Any = None) -> Any:
     return getattr(session_result, key, default)
 
 
+def _resolve_session_episode_ref(context: Dict[str, Any]) -> Optional[str]:
+    """post_session 文脈からセッションの episode_ref を読む (context 明示が優先)。"""
+    episode_ref = context.get("episode_ref")
+    if not episode_ref:
+        episode_ref = _ws_get(context.get("session_result"), "episode_ref", None)
+    return str(episode_ref) if episode_ref else None
+
+
+def _render_session_transcript(
+    manager: Any, persona_id: str, episode_ref: Optional[str]
+) -> Optional[str]:
+    """セッション原本 (origin_episode で引ける生ログ) の時系列レンダリング (D9-2)。
+
+    発話者・時刻・内容 (スペル行と結果を含む) を素直な形式で並べる。
+    **文字数上限は設けない** (まはー裁定 2026-07-18: セッションが走れた時点で
+    サイズは実証済み — 原本 = セッションのモデルが実際にコンテキストに載せた
+    内容)。adapter が読み口を持たない環境 (テストスタブ等) や原本 0 件は
+    None を返し、呼び出し側が「取得できませんでした」を明示する。
+    """
+    if not episode_ref:
+        return None
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    fetch = getattr(adapter, "get_messages_by_origin_episode", None)
+    if not callable(fetch):
+        return None
+    try:
+        rows = fetch(str(episode_ref))
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to fetch session transcript for %s (%s)",
+            persona_id, episode_ref, exc_info=True,
+        )
+        return None
+    if not rows:
+        return None
+    persona_name = str(
+        getattr(persona, "persona_name", None) or persona_id
+    )
+    lines: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        role = str(row.get("role") or "")
+        if role in ("assistant", "model"):
+            speaker = persona_name
+        elif role == "system":
+            speaker = "システム"
+        elif role == "user":
+            speaker = "ユーザー"
+        else:
+            speaker = role or "?"
+        created = row.get("created_at")
+        stamp = ""
+        if isinstance(created, int):
+            try:
+                stamp = datetime.fromtimestamp(created).strftime("%H:%M")
+            except (OverflowError, OSError, ValueError):
+                stamp = ""
+        prefix = f"[{stamp}] " if stamp else ""
+        lines.append(f"{prefix}{speaker}:\n{content}")
+    if not lines:
+        return None
+    return "\n\n".join(lines)
+
+
 def build_post_session_situation_text(
     manager: Any,
     persona_id: str,
     context: Dict[str, Any],
     shelving: bool = False,
+    *,
+    embed_transcript: bool = True,
 ) -> str:
     """セッション終了判断の tail 注入テキスト (judgment_points.md §6「見るもの」)。
 
     ``shelving=True`` のとき、層2 棚入れ (episode_purposes) を促す一文を添える。
+
+    digest 統合 (§6 改定 2026-07-18 / W1 Chunk C D9): 旧「ダイジェスト:」欄は
+    **セッションの記録 (原本)** に置き換わった。``embed_transcript=True``
+    (LLM に渡る situation_text) では原本全文を埋め込み、``False`` (保存用の
+    paired_situation_text — adapter の paired_action 展開で以後の Pulse 文脈に
+    載り続けるため原本を含めない**コールローカル注入**) では episode 参照 +
+    読み口 (/spell episode_read) の一行に留める。
     """
     now = clock.now()
     today = now.date().isoformat()
     sr = context.get("session_result")
 
-    digest = str(_ws_get(sr, "digest", "") or "").strip()
     artifacts = list(_ws_get(sr, "artifacts", None) or [])
     rounds_used = _ws_get(sr, "rounds_used", 0) or 0
     ended_reason = _ws_get(sr, "ended_reason", "") or "?"
     budget_rounds = context.get("budget_rounds") or _ws_get(sr, "budget_rounds", None)
+    episode_ref = _resolve_session_episode_ref(context)
 
     task_ref = context.get("task_ref") or _ws_get(sr, "task_ref", None)
     task_line = "(対象タスクなし)"
@@ -1123,6 +1213,20 @@ def build_post_session_situation_text(
     budget_text = (
         f"{rounds_used}/{budget_rounds}" if budget_rounds else f"{rounds_used}"
     )
+    if embed_transcript:
+        transcript = _render_session_transcript(manager, persona_id, episode_ref)
+        record_lines = [
+            "セッションの記録 (原本):",
+            transcript or "(セッション原本を取得できませんでした)",
+        ]
+    else:
+        if episode_ref:
+            record_lines = [
+                f"セッションの記録: {episode_ref} "
+                "(原本は /spell episode_read で読めます)",
+            ]
+        else:
+            record_lines = ["セッションの記録: (出来事参照なし)"]
     parts = [
         "[セッション終了判断]",
         "作業セッションが終わりました。実際に起きたことに基づいて、"
@@ -1130,12 +1234,15 @@ def build_post_session_situation_text(
         "独白・裁定・メモで出典を挙げるときは、このセッションで実際に参照・"
         "取得した情報源に限ってください。このセッションで取得していない文献・"
         "サイト・ガイドライン名を根拠として書いてはいけません。",
+        "digest 欄には、セッションの記録に基づき、このセッションで実際に"
+        "起きたこと（スペルの実行結果で確認できたこと）だけを短く要約して"
+        "ください。実行していない作業や、確認できていない成果を書いては"
+        "いけません。成果物を作った場合は、その名前に触れてください。",
         "",
         "[セッションの実績]",
         f"対象タスク: {task_line}",
         f"使用ラウンド: {budget_text} (終了理由: {ended_reason})",
-        "ダイジェスト:",
-        digest or "(ダイジェストはありません)",
+        *record_lines,
         "",
         "[このセッションで実際に作った成果物]",
     ]
@@ -1304,7 +1411,18 @@ def _collect_today_session_digests(
         return []
     out: List[str] = []
     for payload in payloads:
-        created = str(payload.get("created_at") or "")
+        # 実 adapter の payload は created_at が epoch int (ISO 文字列は mock /
+        # 旧形式)。epoch を日付文字列へ直してから plan_date と突き合わせる —
+        # 従来は str(epoch) が plan_date と前方一致せず全件落ちていた
+        # (W1 Chunk C で判明した既存欠陥の修正)。
+        created_raw = payload.get("created_at")
+        if isinstance(created_raw, (int, float)) and not isinstance(created_raw, bool):
+            try:
+                created = datetime.fromtimestamp(int(created_raw)).date().isoformat()
+            except (OverflowError, OSError, ValueError):
+                created = ""
+        else:
+            created = str(created_raw or "")
         if created and not created.startswith(plan_date):
             continue
         content = str(payload.get("content") or "").strip()
@@ -1534,13 +1652,20 @@ def build_judgment_args(
         artifacts = [str(a) for a in (_ws_get(sr, "artifacts", None) or [])]
         task_ref = context.get("task_ref") or _ws_get(sr, "task_ref", None)
         track_id = context.get("track_id") or _ws_get(sr, "track_id", None)
-        # 層2 棚入れ (§9.1): 対象の出来事 = このセッションの出来事。
+        # 層2 棚入れ (§9.1) と digest 配送 (D9-5) の対象 = このセッションの出来事。
         # WorkSessionResult.episode_ref が主経路 (呼び出し側 context の明示指定が優先)。
-        episode_ref = context.get("episode_ref") or _ws_get(sr, "episode_ref", None)
+        episode_ref = _resolve_session_episode_ref(context)
         purpose_refs = collect_purpose_refs(manager, persona_id) if episode_ref else []
         shelving = bool(episode_ref and purpose_refs)
+        # コールローカル注入 (D9-3): LLM に渡る situation_text だけが原本を含む。
+        # 保存用 (paired_situation_text) は episode 参照 + 読み口の一行に留める
+        # (adapter の paired_action 展開で以後の Pulse 文脈に載り続けるため)。
         situation_text = build_post_session_situation_text(
             manager, persona_id, context, shelving=shelving,
+        )
+        paired_situation_text = build_post_session_situation_text(
+            manager, persona_id, context, shelving=shelving,
+            embed_transcript=False,
         )
         response_schema = build_post_session_schema(
             manager, persona_id, artifacts,
@@ -1553,9 +1678,31 @@ def build_judgment_args(
             "artifacts": artifacts,
             "task_ref": str(task_ref) if task_ref else None,
             "track_id": str(track_id) if track_id else None,
+            "paired_situation_text": paired_situation_text,
+            # digest メッセージの work_session metadata (finalize が復元する
+            # ws_meta。旧 work_session 直書きの同形を保つ — day_close の収集と
+            # 一日新聞が読む)。
+            "ws_meta": {
+                "task_ref": str(task_ref) if task_ref else None,
+                "artifacts": artifacts,
+                "rounds_used": _ws_get(sr, "rounds_used", 0) or 0,
+                "budget_rounds": (
+                    context.get("budget_rounds")
+                    or _ws_get(sr, "budget_rounds", None)
+                ),
+                "ended_reason": _ws_get(sr, "ended_reason", None),
+                "started_at": _ws_get(sr, "started_at", None),
+                "ended_at": _ws_get(sr, "ended_at", None),
+            },
         }
-        if shelving:
+        ws_extra = _ws_get(sr, "extra", None)
+        if isinstance(ws_extra, dict) and ws_extra:
+            judgment_context["ws_meta"]["extra"] = dict(ws_extra)
+        # episode_ref は shelving に関係なく載せる (digest 配送の set_digest_ref
+        # と RESULT_JSON が読む)。purpose_refs は shelving 時のみ。
+        if episode_ref:
             judgment_context["episode_ref"] = str(episode_ref)
+        if shelving:
             judgment_context["purpose_refs"] = purpose_refs
     elif kind == KIND_POST_CONVERSATION:
         track_refs = collect_pickable_track_refs(manager, persona_id)

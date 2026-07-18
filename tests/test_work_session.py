@@ -8,7 +8,9 @@ test_pre_spells_dynamic_args.py と同じ流儀)。
 - 予算上限で打ち切られ ended_reason='budget_exhausted'
 - スペルなし応答で自然終了 ended_reason='finished'
 - mock ツールが作った Item の ref が artifacts に入る (既存 Item は入らない)
-- ダイジェスト 1 件だけ committed、生ログのラウンドは committed に入らない
+- digest 統合 (W1 Chunk C / D9): digest 専用コールは**呼ばれない**、
+  committed は 1 件も作られない (digest は post_session 判断が書く)、
+  episode は digest_ref=None で閉じる
 - 例外時 ended_reason='error' で結果が返る (LOGGER に残る)
 """
 from __future__ import annotations
@@ -260,7 +262,6 @@ def test_budget_exhausted(session_factory, persona):
         _spell_line("草稿1"),   # 初回応答 (round 1 の spell)
         _spell_line("草稿2"),   # round 1 retry → round 2 の spell
         _spell_line("草稿3"),   # round 2 retry → まだ spell (= 続きをやりたがっている)
-        "ここまでで一区切り。",  # digest コール
     ]
     manager, runtime, client = _make_env(session_factory, persona, responses)
     created_ids: List[str] = []
@@ -273,8 +274,11 @@ def test_budget_exhausted(session_factory, persona):
     assert result.rounds_used == 2
     # spell は 2 ラウンド分 (草稿1, 草稿2) だけ実行された
     assert len(created_ids) == 2
-    assert result.digest == "ここまでで一区切り。"
     assert result.error is None
+    # digest 専用コールは廃止 (D9): スクリプト応答は全消費されている
+    # (残っていれば digest コールが呼ばれなかった証明にならない)
+    assert client.responses == []
+    assert result.budget_rounds == 2
 
 
 def test_natural_finish(session_factory, persona):
@@ -282,7 +286,6 @@ def test_natural_finish(session_factory, persona):
     responses = [
         _spell_line("草稿"),      # round 1
         "できたよ。読み返しても大丈夫そう。",  # spell なし → 自然終了
-        "草稿を 1 本書いた。",     # digest
     ]
     manager, runtime, client = _make_env(session_factory, persona, responses)
     created_ids: List[str] = []
@@ -293,7 +296,9 @@ def test_natural_finish(session_factory, persona):
 
     assert result.ended_reason == ENDED_FINISHED
     assert result.rounds_used == 1
-    assert result.digest == "草稿を 1 本書いた。"
+    # digest 専用コールが無い = LLM 呼び出しはラウンド分だけ (初回 + retry 1)
+    assert len(client.calls) == 2
+    assert client.responses == []
     # LLM クライアントは WORKER アスペクトのフレームが active な状態で選ばれた
     assert runtime.selected_aspects == [Aspect.WORKER]
     assert result.started_at is not None and result.ended_at is not None
@@ -309,7 +314,6 @@ def test_artifacts_captured(session_factory, persona):
     responses = [
         _spell_line("新しい文書"),
         "終わり。",
-        "新しい文書を作った。",
     ]
     manager, runtime, client = _make_env(session_factory, persona, responses)
     created_ids: List[str] = []
@@ -322,20 +326,19 @@ def test_artifacts_captured(session_factory, persona):
     assert result.artifacts == created_ids
     assert pre_existing not in result.artifacts
     assert result.task_ref == "task:1"
-    # ダイジェストの metadata にも成果物 ref が乗る
-    digest_records = [r for r in runtime.stored if "session_digest" in r["tags"]]
-    assert len(digest_records) == 1
-    ws_meta = (digest_records[0]["metadata"] or {}).get("work_session")
-    assert ws_meta and ws_meta["artifacts"] == created_ids
 
 
-def test_digest_is_the_only_committed_record(session_factory, persona):
-    """committed はダイジェスト 1 件のみ。生ログのラウンドは volatile。"""
+def test_no_committed_record_and_no_digest_call(session_factory, persona):
+    """digest 統合 (D9): work_session は committed を 1 件も作らない。
+
+    - digest 専用コールは呼ばれない (LLM 呼び出し回数 = ラウンド分のみ)
+    - 生ログ (spell ラウンドの発話・結果・締めの言葉) は volatile のまま
+    - WorkSessionResult に digest フィールドは無い
+    """
     round_text = _spell_line("草稿")
     responses = [
         round_text,
         "締めの言葉。",
-        "実際にやったことの要約。",
     ]
     manager, runtime, client = _make_env(session_factory, persona, responses)
     created_ids: List[str] = []
@@ -347,20 +350,20 @@ def test_digest_is_the_only_committed_record(session_factory, persona):
     committed = [r for r in runtime.stored if r["scope"] == "committed"]
     volatile = [r for r in runtime.stored if r["scope"] == "volatile"]
 
-    # committed はダイジェスト 1 件のみ
-    assert len(committed) == 1
-    assert committed[0]["text"] == result.digest == "実際にやったことの要約。"
-    assert "session_digest" in committed[0]["tags"]
-    assert committed[0]["line_role"] == "main_line"
+    # committed は 1 件も作られない (digest は post_session 判断が書く)
+    assert committed == []
+    assert not any("session_digest" in r["tags"] for r in runtime.stored)
 
-    # 生ログ (spell ラウンドの発話・結果・締めの言葉) は volatile 側にあり、
-    # committed には一切入っていない
+    # digest 専用コールが無い = 呼び出しはラウンド分のみ (初回 + retry 1)
+    assert len(client.calls) == 2
+
+    # WorkSessionResult から digest フィールドが消えている (旧 path を残さない)
+    assert not hasattr(result, "digest")
+
+    # 生ログは volatile 側に残る
     assert volatile, "spell ラウンドの生ログが volatile で保存されているはず"
     assert any("/spell" in r["text"] for r in volatile)
     assert any(r["text"] == "締めの言葉。" for r in volatile)
-    for r in committed:
-        assert "/spell" not in r["text"]
-        assert r["text"] != "締めの言葉。"
     for r in volatile:
         assert r["line_role"] == "sub_line"
 
@@ -383,7 +386,6 @@ def test_multiline_args_are_rescued_and_executed(session_factory, persona):
     responses = [
         raw_newline_spell,
         "できた。読み直しても問題ない。",   # round 1 retry → spell なし
-        "文書を 1 本作った。",              # digest
     ]
     manager, runtime, client = _make_env(session_factory, persona, responses)
     created_ids: List[str] = []
@@ -419,7 +421,6 @@ def test_malformed_args_fed_back_and_retried(session_factory, persona):
         _spell_line("草稿"),
         # round 2 retry: spell なし → 自然終了
         "今度はできた。",
-        "書式を直して文書を作った。",  # digest
     ]
     manager, runtime, client = _make_env(session_factory, persona, responses)
     created_ids: List[str] = []
@@ -447,6 +448,37 @@ def test_malformed_args_fed_back_and_retried(session_factory, persona):
     )
 
 
+def test_episode_closed_with_null_digest_ref(session_factory, persona):
+    """出来事は digest_ref=None で閉じる (D9-1)。
+
+    digest_ref は後段の配送 handler (saimemory.append_digest →
+    episodes.set_digest_ref) が確定する — セッション終了時点では NULL が正
+    (「適用済み・記録待ち」の観測可能状態)。
+    """
+    from database.models import Episode
+
+    responses = [
+        _spell_line("草稿"),
+        "終わり。",
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=3)
+
+    assert result.episode_ref, "セッションの出来事が開かれているはず"
+    db = session_factory()
+    try:
+        ep = db.query(Episode).filter(Episode.PERSONA_ID == "p1").first()
+        assert ep is not None
+        assert ep.STATUS == "closed"
+        assert ep.DIGEST_REF is None
+    finally:
+        db.close()
+
+
 def test_error_returns_error_result(session_factory, persona, caplog):
     """LLM 呼び出しの例外は握り潰さず LOGGER に残し、error 結果として返す。"""
     responses = [RuntimeError("boom: provider down")]
@@ -459,7 +491,6 @@ def test_error_returns_error_result(session_factory, persona, caplog):
 
     assert result.ended_reason == ENDED_ERROR
     assert result.error is not None and "boom" in result.error
-    assert result.digest == ""
     assert result.rounds_used == 0
     # committed は 1 件も作られない
     assert not [r for r in runtime.stored if r["scope"] == "committed"]

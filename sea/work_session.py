@@ -13,20 +13,25 @@ act→observe ループを、ラウンド予算付きで運転する。実体は
   sub_line と同じくペルソナの (persona, model) 固定 head をそのまま使う。
 - **ラウンド予算**: ``budget_rounds`` を ``_run_spell_loop(max_rounds=...)``
   に渡す。env グローバル ``SAIVERSE_SPELL_MAX_ROUNDS`` の既存挙動は不変。
-- **終了時の三点セットのうち 2 点** (アーティファクト収集 + ダイジェスト):
-  - アーティファクト: セッション前後の Item テーブル差分
-    (CREATOR_ID = ペルソナ) で「このセッションが実際に作ったもの」を収集。
-  - ダイジェスト: 締めに軽量モデル 1 コールで「実際に起きたことだけ」の
-    短い要約を生成し、これ 1 件のみを committed (main_line) で SAIMemory に
-    書く。セッションの生ログ (各ラウンドのやり取り) は WORKER アスペクト
+- **終了時のアーティファクト収集**: セッション前後の Item テーブル差分
+  (CREATOR_ID = ペルソナ) で「このセッションが実際に作ったもの」を収集。
+  - ダイジェストは本モジュールでは**生成しない** (W1 Chunk C / D9,
+    judgment_points.md §6 改定 2026-07-18)。セッション終了判断 (post_session)
+    が原本 (origin_episode で引ける生ログ) を見て digest 欄に書き、
+    judgment_finalize → 実行台帳の配送 handler (``saimemory.append_digest``)
+    が committed (main_line, :data:`DIGEST_TAG`) で SAIMemory に届ける。
+    出来事 (Episode) は ``digest_ref=None`` で閉じ、配送成功時に handler が
+    ``episodes.set_digest_ref`` で再訪の鍵を後段確定する。
+  - セッションの生ログ (各ラウンドのやり取り) は WORKER アスペクト
     由来の scope='volatile' で保存され、メインライン context には乗らない
     (sea/runtime_context.py: required_scopes=['committed'])。
   - 作業メモ (desk_memo — Track への状態メモ) は呼び出し側 (セッション終了判断,
     judgment_points.md §6) の責務であり本モジュールでは扱わない。
 
 記憶の接地原則 (autonomous_behavior_v2.md §3-1, §8-5):
-committed されるのはダイジェスト 1 件のみ。ダイジェストのプロンプトは
-「この会話の中で実際に起きたことだけを書く」ことを明示する。
+committed される要約は post_session 判断が書く digest 1 件のみで、その
+状況テキストは「セッションの記録に基づき、実際に起きたことだけを書く」
+ことを明示する (旧 digest 専用コールの規律を判断点へ移植)。
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 """
@@ -53,7 +58,10 @@ WORK_SESSION_PLAYBOOK_NAME = "work_session"
 #: context 制御は line_role / scope 側が担う (Phase 3 段階 4-C の責務分離)。
 RAW_LOG_TAG = "work_session"
 
-#: committed されるダイジェスト 1 件の意味分類タグ。
+#: committed されるダイジェスト 1 件の意味分類タグ。生成は post_session 判断
+#: (builtin_data/tools/judgment_finalize.py)、配送は台帳 handler
+#: (saiverse/execution_ledger_wiring.py の ``saimemory.append_digest``)。
+#: 読み手 (day_close の収集 / 一日新聞) はこのタグ定数を参照し続ける。
 DIGEST_TAG = "session_digest"
 
 ENDED_FINISHED = "finished"
@@ -65,8 +73,10 @@ ENDED_ERROR = "error"
 class WorkSessionResult:
     """作業セッション 1 本の結果 (セッション終了判断への入力契約)。
 
+    digest フィールドは W1 Chunk C (D9) で廃止 — digest は post_session 判断が
+    原本から書く (本 dataclass はセッションの機械的事実だけを運ぶ)。
+
     Attributes:
-        digest: committed されたダイジェスト本文 (エラー時は空文字)。
         artifacts: このセッション中に作られた成果物の ref (Item ID) リスト。
         rounds_used: 実際に消費したラウンド数 (spell 実行→再呼び出しの往復)。
         ended_reason: ``finished`` (スペルなし応答で自然終了) /
@@ -79,12 +89,16 @@ class WorkSessionResult:
             (P5 コマ参照の任意階層化) では判断点がここから desk_memo /
             track_op の対象を読む。
         episode_ref: このセッションの出来事 (kind='work_session') の参照。
-            セッション終了判断の層2 棚入れ (episode_purposes) の対象。
+            セッション終了判断の層2 棚入れ (episode_purposes) と原本注入
+            (D9-2) の対象。
         error: ended_reason='error' のときの ``型名: メッセージ``。
         started_at / ended_at: ISO 形式時刻 (saiverse.clock.now() 由来)。
+        budget_rounds: 呼び出し時のラウンド予算 (透過)。digest メッセージの
+            work_session metadata (判断点が復元する ws_meta) に載る。
+        extra: 呼び出し時に渡された追加 metadata (透過。day_plan のコマ情報等)。
+            旧 digest 保存の ``metadata.work_session.extra`` と同じ内容。
     """
 
-    digest: str
     artifacts: List[str]
     rounds_used: int
     ended_reason: str
@@ -95,6 +109,8 @@ class WorkSessionResult:
     error: Optional[str] = None
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
+    budget_rounds: Optional[int] = None
+    extra: Optional[Dict[str, Any]] = None
 
 
 def run_work_session(
@@ -303,7 +319,7 @@ def run_work_session(
         # Beat ロック (beat_execution_context.md §3.4): セッションの連続 Beat を
         # persona の直列域に入れる。ループ内の boundary が周ごとにロックを
         # 手放すため、会話 Beat が間に挟まれる (「作業中に話しかけたら応答」の
-        # 土台)。締めの生ログ保存〜ダイジェスト生成・保存も最後の Beat の
+        # 土台)。締めの生ログ保存〜成果物収集も最後の Beat の
         # 記録として同じ hold 内で行う (記録はロック下で、の不変条件)。
         # 関所 fail-closed (BeatGateClosedError) は下の except Exception が
         # 拾い ended_reason='error' の結果になる (run_work_session は raise
@@ -362,73 +378,22 @@ def run_work_session(
             # ---- artifacts: 終了時点との差分 ----
             artifacts = _collect_new_item_ids(manager, persona_id, items_before)
 
-            # ---- digest: 軽量 1 コールで「実際に起きたことだけ」を要約 ----
-            digest = ""
-            digest_error: Optional[str] = None
-            try:
-                digest = _generate_digest(
-                    runtime, state, llm_client, persona, building_id,
-                    messages, rounds_used, budget_rounds, artifacts,
-                )
-            except Exception as exc:
-                LOGGER.exception(
-                    "[work_session] digest generation failed (persona=%s pulse_id=%s)",
-                    persona_id, pulse_id,
-                )
-                digest_error = f"digest failed: {type(exc).__name__}: {exc}"
-
             ended_at = clock.now()
-            digest_ref: Optional[str] = None
-            if digest:
-                ws_meta: Dict[str, Any] = {
-                    "work_session": {
-                        "task_ref": task_ref,
-                        "artifacts": list(artifacts),
-                        "rounds_used": rounds_used,
-                        "budget_rounds": budget_rounds,
-                        "ended_reason": ended_reason,
-                        "started_at": started_at.isoformat(timespec="seconds"),
-                        "ended_at": ended_at.isoformat(timespec="seconds"),
-                    },
-                }
-                if metadata:
-                    ws_meta["work_session"]["extra"] = dict(metadata)
-                # committed はこの 1 件のみ。WORKER フレームの volatile 解決を
-                # 明示引数で上書きし、メインライン context に乗る形で保存する。
-                # message id は出来事の digest_ref (再訪の鍵 §9) に使う。
-                digest_msg_id = runtime._store_memory(
-                    persona, digest, role="assistant",
-                    tags=[DIGEST_TAG], pulse_id=pulse_id,
-                    metadata=ws_meta,
-                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-                    line_role="main_line",
-                    scope="committed",
-                    origin_track_id=track_id,
-                    return_message_id=True,
-                )
-                if isinstance(digest_msg_id, str) and digest_msg_id:
-                    digest_ref = f"message:{digest_msg_id}"
-                pulse_ctx.append(PulseLogEntry(
-                    role="assistant", content=digest,
-                    node_id="work_session_digest",
-                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-                ))
 
-        # ---- 出来事を閉じる (meta 書式契約: title / artifacts + digest_ref) ----
+        # ---- 出来事を閉じる (meta 書式契約: title / artifacts) ----
+        # digest は本モジュールでは生成しない (D9)。digest_ref=None で閉じ、
+        # post_session 判断→配送 handler が set_digest_ref で後段確定する。
         _close_ws_episode(
             manager, persona_id, episode_ref,
             title=title, artifacts=artifacts,
-            ended_reason=ended_reason, digest_ref=digest_ref,
+            ended_reason=ended_reason, digest_ref=None,
         )
 
         LOGGER.info(
-            "[work_session] end: persona=%s ended_reason=%s rounds=%d/%d "
-            "artifacts=%d digest_len=%d",
-            persona_id, ended_reason, rounds_used, budget_rounds,
-            len(artifacts), len(digest),
+            "[work_session] end: persona=%s ended_reason=%s rounds=%d/%d artifacts=%d",
+            persona_id, ended_reason, rounds_used, budget_rounds, len(artifacts),
         )
         return WorkSessionResult(
-            digest=digest,
             artifacts=artifacts,
             rounds_used=rounds_used,
             ended_reason=ended_reason,
@@ -436,9 +401,11 @@ def run_work_session(
             task_ref=task_ref,
             track_id=track_id,
             episode_ref=episode_ref,
-            error=digest_error,
+            error=None,
             started_at=started_at.isoformat(timespec="seconds"),
             ended_at=ended_at.isoformat(timespec="seconds"),
+            budget_rounds=budget_rounds,
+            extra=dict(metadata) if metadata else None,
         )
     except Exception as exc:
         LOGGER.exception(
@@ -461,7 +428,6 @@ def run_work_session(
             ended_reason=ENDED_ERROR, digest_ref=None,
         )
         return WorkSessionResult(
-            digest="",
             artifacts=artifacts,
             rounds_used=rounds_used,
             ended_reason=ENDED_ERROR,
@@ -472,6 +438,8 @@ def run_work_session(
             error=f"{type(exc).__name__}: {exc}",
             started_at=started_at.isoformat(timespec="seconds"),
             ended_at=clock.now().isoformat(timespec="seconds"),
+            budget_rounds=budget_rounds if isinstance(budget_rounds, int) else None,
+            extra=dict(metadata) if metadata else None,
         )
     finally:
         if pulse_ctx is not None:
@@ -603,63 +571,6 @@ def _build_instruction_message(
         "- 実行していない作業を「やった」と書かないでください。\n"
         "</system>"
     )
-
-
-def _build_digest_prompt(rounds_used: int, budget_rounds: int) -> str:
-    """締めのダイジェスト生成プロンプト。実際に起きたこと以外を書かせない。"""
-    return (
-        "<system>"
-        f"作業セッションはここで終了です（使用ラウンド: {rounds_used}/{budget_rounds}）。\n"
-        "このセッションであなたが実際に行ったこと・作ったもの・途中のままのことを、"
-        "あなた自身の内なる声で短く要約してください。\n"
-        "- この会話の中で実際に起きたこと（スペルの実行結果で確認できたこと）だけを書いてください。\n"
-        "- 実行していない作業や、確認できていない成果を書いてはいけません。\n"
-        "- 成果物を作った場合は、その名前に触れてください。\n"
-        "- 要約の本文だけを書いてください。"
-        "</system>"
-    )
-
-
-def _generate_digest(
-    runtime: Any,
-    state: Dict[str, Any],
-    llm_client: Any,
-    persona: Any,
-    building_id: str,
-    messages: List[Dict[str, Any]],
-    rounds_used: int,
-    budget_rounds: int,
-    artifacts: List[str],
-) -> str:
-    """セッションの会話にダイジェスト指示を足して軽量モデルで 1 コール。"""
-    digest_messages = list(messages)
-    digest_messages.append({
-        "role": "user",
-        "content": _build_digest_prompt(rounds_used, budget_rounds),
-    })
-    result = llm_client.generate(
-        digest_messages,
-        tools=[],
-        temperature=runtime._default_temperature(persona),
-        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-    )
-    _record_llm_usage(
-        runtime, state, llm_client, persona, building_id, "llm_work_session_digest"
-    )
-    digest = _extract_text(result).strip()
-    try:
-        runtime._dump_llm_io(
-            WORK_SESSION_PLAYBOOK_NAME, "work_session_digest", persona,
-            digest_messages, digest,
-        )
-    except Exception:
-        LOGGER.warning("[work_session] failed to dump digest LLM I/O", exc_info=True)
-    if not digest:
-        LOGGER.warning(
-            "[work_session] digest LLM call returned empty text (persona=%s)",
-            getattr(persona, "persona_id", None),
-        )
-    return digest
 
 
 def _extract_text(result: Any) -> str:

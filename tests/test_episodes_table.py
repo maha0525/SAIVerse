@@ -170,6 +170,50 @@ class EpisodesTests(unittest.TestCase):
         # STARTED_AT 昇順
         self.assertLess(today[0]["started_at"], today[1]["started_at"])
 
+    # ---- set_digest_ref (W1 Chunk C / D9-5: 再訪の鍵の後段確定) ----
+
+    def test_set_digest_ref_fills_null(self):
+        ep = E.open_episode(self.manager, "p1", E.KIND_WORK_SESSION)
+        E.close_episode(self.manager, "p1", ep["episode_ref"])
+        updated = E.set_digest_ref(
+            self.manager, "p1", ep["episode_ref"], "message:abc",
+        )
+        self.assertEqual(updated["digest_ref"], "message:abc")
+        self.assertEqual(
+            E.get_by_ref(self.manager, "p1", ep["episode_ref"])["digest_ref"],
+            "message:abc",
+        )
+
+    def test_set_digest_ref_same_value_is_noop(self):
+        ep = E.open_episode(self.manager, "p1", E.KIND_WORK_SESSION)
+        E.close_episode(self.manager, "p1", ep["episode_ref"])
+        E.set_digest_ref(self.manager, "p1", ep["episode_ref"], "message:abc")
+        updated = E.set_digest_ref(
+            self.manager, "p1", ep["episode_ref"], "message:abc",
+        )
+        self.assertEqual(updated["digest_ref"], "message:abc")
+
+    def test_set_digest_ref_does_not_overwrite_different_value(self):
+        ep = E.open_episode(self.manager, "p1", E.KIND_WORK_SESSION)
+        E.close_episode(
+            self.manager, "p1", ep["episode_ref"], digest_ref="message:first",
+        )
+        with self.assertLogs("saiverse.episodes", level="WARNING") as logs:
+            updated = E.set_digest_ref(
+                self.manager, "p1", ep["episode_ref"], "message:second",
+            )
+        self.assertEqual(updated["digest_ref"], "message:first")  # 上書きしない
+        self.assertTrue(any("not overwriting" in m for m in logs.output))
+
+    def test_set_digest_ref_unknown_episode_raises(self):
+        with self.assertRaises(E.EpisodeNotFoundError):
+            E.set_digest_ref(self.manager, "p1", "episode:99", "message:abc")
+
+    def test_set_digest_ref_requires_value(self):
+        ep = E.open_episode(self.manager, "p1", E.KIND_WORK_SESSION)
+        with self.assertRaises(ValueError):
+            E.set_digest_ref(self.manager, "p1", ep["episode_ref"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

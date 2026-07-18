@@ -274,6 +274,9 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         artifacts = ctx.get("artifacts") or []
         output: Dict[str, Any] = {
             "monologue": "セッションを終えた (mock 裁定)。",
+            # digest 統合 (W1 Chunk C / D9): post_session 自身が実績要約を書く
+            # (response_schema で required)。
+            "digest": "指示書のとおりに作業した (mock 裁定の実績要約)。",
             "new_desires": [],
             "remaining_timetable": None,
         }

@@ -402,9 +402,9 @@ def test_work_session_episode_open_close_with_meta_contract(session_factory):
     assert meta["title"] == "草稿づくり"
     assert meta["artifacts"] == created_ids
     assert meta["ended_reason"] == ENDED_FINISHED
-    # digest_ref = committed ダイジェストの message 参照
-    assert ep.DIGEST_REF is not None
-    assert ep.DIGEST_REF.startswith("message:")
+    # digest 統合 (W1 Chunk C / D9): digest_ref=None で閉じる。再訪の鍵は
+    # post_session 判断 → 配送 handler (episodes.set_digest_ref) が後段確定する。
+    assert ep.DIGEST_REF is None
 
 
 def test_work_session_episode_origin_is_open_slot_episode(session_factory):

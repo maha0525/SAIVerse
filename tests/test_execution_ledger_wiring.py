@@ -247,6 +247,156 @@ class TestSaimemoryAppendDelivery:
 
 
 # ---------------------------------------------------------------------------
+# saimemory.append_digest (W1 Chunk C / D9-5)
+# ---------------------------------------------------------------------------
+
+
+class TestSaimemoryAppendDigestDelivery:
+    def _digest_payload(self, episode_ref):
+        from sea.work_session import DIGEST_TAG
+        return {
+            "message": {
+                "role": "assistant",
+                "content": "資料を 3 件読んで覚え書きにした。",
+                "timestamp": "2026-07-16T10:00:00+00:00",
+                "metadata": {
+                    "tags": [DIGEST_TAG],
+                    "work_session": {"rounds_used": 3, "ended_reason": "finished"},
+                    "origin_episode": episode_ref,
+                },
+                "line_role": "main_line",
+                "scope": "committed",
+            },
+            "episode_ref": episode_ref,
+        }
+
+    def _make_episode(self, manager):
+        from saiverse import episodes as ep_mod
+        ep = ep_mod.open_episode(
+            manager, PERSONA_ID, ep_mod.KIND_WORK_SESSION,
+        )
+        ep_mod.close_episode(manager, PERSONA_ID, ep["episode_ref"])
+        return ep["episode_ref"]
+
+    def test_delivery_appends_digest_and_sets_episode_digest_ref(
+        self, manager, adapter, session_factory,
+    ):
+        from database.models import Episode
+        from sea.work_session import DIGEST_TAG
+
+        episode_ref = self._make_episode(manager)
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
+            payload=self._digest_payload(episode_ref),
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+
+        rows = _persona_messages(adapter)
+        assert len(rows) == 1
+        mid, content, meta_raw = rows[0]
+        assert "資料を 3 件読んで" in content
+        meta = json.loads(meta_raw)
+        assert DIGEST_TAG in meta["tags"]
+        assert meta["origin_episode"] == episode_ref
+        # episode の再訪の鍵が message:{id} で確定している
+        db = session_factory()
+        try:
+            ep = db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).first()
+            assert ep.DIGEST_REF == f"message:{mid}"
+        finally:
+            db.close()
+        assert ledger.get_execution(execution_id)["status"] == XL.STATUS_COMPLETED
+
+    def test_redelivery_does_not_duplicate_and_keeps_digest_ref(
+        self, manager, adapter, session_factory,
+    ):
+        """append 済み→delivered 記帳前クラッシュの再配送: 二重 append なし +
+        digest_ref は同値のまま (set_digest_ref の冪等)。"""
+        from database.models import Episode
+
+        episode_ref = self._make_episode(manager)
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
+            payload=self._digest_payload(episode_ref),
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+        db = session_factory()
+        try:
+            db.query(ExecutionOutboxItem).filter(
+                ExecutionOutboxItem.EXECUTION_ID == execution_id
+            ).update({"STATUS": XL.OUTBOX_PENDING, "DELIVERED_AT": None})
+            db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.EXECUTION_ID == execution_id
+            ).update({"STATUS": XL.STATUS_APPLIED})
+            db.commit()
+        finally:
+            db.close()
+
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+        rows = _persona_messages(adapter)
+        assert len(rows) == 1  # 二重にならない
+        db = session_factory()
+        try:
+            ep = db.query(Episode).filter(Episode.PERSONA_ID == PERSONA_ID).first()
+            assert ep.DIGEST_REF == f"message:{rows[0][0]}"
+        finally:
+            db.close()
+
+    def test_delivered_digest_is_read_by_day_close_collection(
+        self, manager, adapter,
+    ):
+        """day_close の _collect_today_session_digests が handler 経由の digest を
+        読める (DIGEST_TAG + committed の形の保存則)。"""
+        from saiverse.judgment_points import _collect_today_session_digests
+
+        episode_ref = self._make_episode(manager)
+        ledger = manager.execution_ledger
+        payload = self._digest_payload(episode_ref)
+        # 「今日」の日付で書かれた digest (実配送は now の tz-aware ISO)
+        payload["message"]["timestamp"] = datetime.now().astimezone().isoformat()
+        _applied_with_outbox(
+            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
+            payload=payload,
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+
+        plan_date = datetime.now().date().isoformat()
+        digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
+        assert digests == ["資料を 3 件読んで覚え書きにした。"]
+
+    def test_missing_episode_is_delivery_failure(
+        self, manager, adapter, session_factory,
+    ):
+        """episode 不在は例外 = 配送失敗 (pending 残存)。append は冪等なので
+        再配送で二重にならない。"""
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
+            payload=self._digest_payload("episode:999"),
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        row = _outbox_rows(session_factory, execution_id)[0]
+        assert row.STATUS == XL.OUTBOX_PENDING
+        assert "episode" in (row.LAST_ERROR or "")
+        # digest 自体は append 済み (再配送は冪等スキップ → set_digest_ref 再試行)
+        assert len(_persona_messages(adapter)) == 1
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        assert len(_persona_messages(adapter)) == 1
+
+    def test_malformed_payload_is_delivery_failure(self, manager, session_factory):
+        ledger = manager.execution_ledger
+        execution_id = _applied_with_outbox(
+            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
+            payload={"episode_ref": "episode:1"},
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is False
+        row = _outbox_rows(session_factory, execution_id)[0]
+        assert "message" in (row.LAST_ERROR or "")
+
+
+# ---------------------------------------------------------------------------
 # perception.push
 # ---------------------------------------------------------------------------
 

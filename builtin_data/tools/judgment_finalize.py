@@ -36,8 +36,15 @@ W1 Chunk B (A8/A9/A11): ``manager.execution_ledger`` と
 通知 (``perception.push``, kind=judgment_apply_failure) で本人に届ける。
 どちらかが無い環境 (台帳なし・旧テスト) は従来の直書きに degrade する。
 
+W1 Chunk C (D9): post_session は digest 統合 (judgment_points.md §6 改定) —
+judge の構造化出力 ``digest`` 欄 (required) から SAIMemory ダイジェスト行
+(``sea.work_session.DIGEST_TAG`` / main_line / committed) を組み、tracked では
+outbox の**第 1 項目** (``saimemory.append_digest``、判断行より先) として配送、
+配送成功時に handler が ``episodes.set_digest_ref`` で出来事の再訪の鍵を後段
+確定する。untracked は直書き + set_digest_ref 直呼びに degrade する。
+
 詳細: ``docs/intent/persona_cognition/judgment_points.md`` /
-``docs/handoff/2026-07-19_w1_judgment_ledger_handoff.md`` D6〜D8
+``docs/handoff/2026-07-19_w1_judgment_ledger_handoff.md`` D6〜D10
 """
 from __future__ import annotations
 
@@ -1595,6 +1602,92 @@ def _resolve_tracked_ledger(
     return ledger, execution_id, status
 
 
+def _build_session_digest_message(
+    ctx: Dict[str, Any], digest_text: str
+) -> Dict[str, Any]:
+    """post_session の digest 欄から SAIMemory ダイジェスト行を組む (D9-5)。
+
+    旧 work_session 直書き (削除済み ``sea.work_session`` の digest 保存) と
+    同形: tags=[DIGEST_TAG] / line_role='main_line' / scope='committed' /
+    origin_track_id / metadata.work_session (ws_meta を judgment_context から
+    復元) / metadata.origin_episode / tz-aware timestamp。day_close の
+    ``_collect_today_session_digests`` (DIGEST_TAG + committed) と一日新聞
+    (metadata.work_session) が読む形を必ず保つ。
+    """
+    from sea.work_session import DIGEST_TAG
+
+    metadata: Dict[str, Any] = {"tags": [DIGEST_TAG]}
+    ws_meta = ctx.get("ws_meta")
+    if isinstance(ws_meta, dict) and ws_meta:
+        metadata["work_session"] = dict(ws_meta)
+    episode_ref = str(ctx.get("episode_ref") or "").strip() or None
+    if episode_ref:
+        metadata["origin_episode"] = episode_ref
+    message: Dict[str, Any] = {
+        "role": "assistant",
+        "content": digest_text,
+        # tz-aware UTC ISO (naive は adapter 側で ±9h ずれる — 判断行と同じ規律)
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": metadata,
+        "line_role": "main_line",
+        "scope": "committed",
+    }
+    track_id = str(ctx.get("track_id") or "").strip() or None
+    if track_id:
+        message["origin_track_id"] = track_id
+    return message
+
+
+def _write_session_digest_direct(
+    manager: Any,
+    persona_id: str,
+    digest_message: Dict[str, Any],
+    episode_ref: Optional[str],
+) -> None:
+    """untracked degrade 経路の digest 直書き + digest_ref 直呼び (D9-5)。
+
+    台帳の無い環境 (旧テスト・mock シム) でも digest は残す。message id が
+    取れれば episodes.set_digest_ref で再訪の鍵も刻む (mock adapter が id を
+    返さない場合は digest_ref なしのまま — WARN のみ)。
+    """
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    if adapter is None:
+        LOGGER.warning(
+            "[judgment_finalize] no adapter for %s; session digest not stored",
+            persona_id,
+        )
+        return
+    try:
+        mid = adapter.append_persona_message(digest_message)
+    except Exception:
+        LOGGER.exception(
+            "[judgment_finalize] failed to append session digest (persona=%s)",
+            persona_id,
+        )
+        return
+    if not (isinstance(mid, str) and mid):
+        LOGGER.warning(
+            "[judgment_finalize] session digest stored without message id; "
+            "episode digest_ref not set (persona=%s episode=%s)",
+            persona_id, episode_ref,
+        )
+        return
+    if not episode_ref:
+        return
+    try:
+        from saiverse import episodes as episodes_mod
+
+        episodes_mod.set_digest_ref(
+            manager, persona_id, episode_ref, f"message:{mid}"
+        )
+    except Exception:
+        LOGGER.warning(
+            "[judgment_finalize] failed to set episode digest_ref "
+            "(persona=%s episode=%s)", persona_id, episode_ref, exc_info=True,
+        )
+
+
 def _build_judgment_message(
     manager: Any,
     kind: str,
@@ -1664,6 +1757,7 @@ def judgment_finalize(
     from saiverse.execution_ledger_wiring import (
         TARGET_PERCEPTION_PUSH,
         TARGET_SAIMEMORY_APPEND,
+        TARGET_SAIMEMORY_APPEND_DIGEST,
     )
 
     ledger, execution_id, ledger_status = _resolve_tracked_ledger(manager, ctx, kind)
@@ -1708,6 +1802,23 @@ def judgment_finalize(
         LOGGER.warning("[judgment_finalize] unknown kind=%r; nothing applied", kind)
         warnings.append(f"unknown judgment kind: {kind!r}")
         committed = False
+
+    # --- digest 統合 (D9-5): post_session の digest 欄 → SAIMemory ダイジェスト行 ---
+    # tracked では outbox の第 1 項目 (判断行より前 = FIFO で digest が先) に
+    # 積み、配送 handler (saimemory.append_digest) が append + set_digest_ref を
+    # 行う。untracked は直書き + set_digest_ref 直呼び (degrade でも digest は残す)。
+    digest_message: Optional[Dict[str, Any]] = None
+    digest_episode_ref: Optional[str] = None
+    if kind == KIND_POST_SESSION:
+        digest_text = str(output.get("digest") or "").strip()
+        if digest_text:
+            digest_message = _build_session_digest_message(ctx, digest_text)
+            digest_episode_ref = str(ctx.get("episode_ref") or "").strip() or None
+        else:
+            # スキーマ required なので通常は入る — 空は観測に残す (黙らせない)
+            warnings.append(
+                "digest が空です (このセッションのダイジェストは記録されません)"
+            )
 
     for w in warnings:
         LOGGER.warning("[judgment_finalize] (%s/%s) %s", persona_id, kind, w)
@@ -1757,7 +1868,18 @@ def judgment_finalize(
         # {"message": {...}, "building_id": ..., "thread_suffix": ...}。
         # 現行 append_persona_message(message) は building_id=None /
         # thread_suffix=None 相当 (persona スレッド直書き) — それを正確に写す。
-        outbox_items: List[Dict[str, Any]] = [{
+        outbox_items: List[Dict[str, Any]] = []
+        if digest_message is not None:
+            # D9-5: digest は第 1 項目 (FIFO で判断行より先に記憶へ届く)。
+            outbox_items.append({
+                "target": TARGET_SAIMEMORY_APPEND_DIGEST,
+                "persona_id": persona_id,
+                "payload": {
+                    "message": digest_message,
+                    "episode_ref": digest_episode_ref,
+                },
+            })
+        outbox_items.append({
             "target": TARGET_SAIMEMORY_APPEND,
             "persona_id": persona_id,
             "payload": {
@@ -1765,7 +1887,7 @@ def judgment_finalize(
                 "building_id": None,
                 "thread_suffix": None,
             },
-        }]
+        })
         if spells_failed:
             # 失敗 spell はシステム名義の適用失敗通知 (perception.push) で本人に
             # 届ける — 本人の行為に変換しない (不変条件 7)。客観+丁寧語。
@@ -1796,6 +1918,11 @@ def judgment_finalize(
         )
     else:
         # --- 従来経路 (台帳なし環境・旧テスト): SAIMemory 直書き -----------
+        # digest は判断行より先に書く (tracked の FIFO と同順)。
+        if digest_message is not None:
+            _write_session_digest_direct(
+                manager, persona_id, digest_message, digest_episode_ref,
+            )
         persona = (getattr(manager, "personas", None) or {}).get(persona_id)
         if persona is not None:
             adapter = getattr(persona, "sai_memory", None)

@@ -49,6 +49,9 @@ RUNNING_DEADLINE_SECONDS = 3600.0
 # 送信トレイの TARGET 名 (intent §4 スキーマ例)。
 TARGET_SAIMEMORY_APPEND = "saimemory.append"
 TARGET_PERCEPTION_PUSH = "perception.push"
+#: W1 Chunk C (D9-5): 作業セッション digest の配送。saimemory.append の変種で、
+#: 冪等 append 後に episode の digest_ref (再訪の鍵) を後段確定する。
+TARGET_SAIMEMORY_APPEND_DIGEST = "saimemory.append_digest"
 
 #: 判断点 kind の台帳 KIND 前綴り (autonomy_wiring.fire_judgment_point が刻む)。
 JUDGMENT_KIND_PREFIX = "judgment."
@@ -86,6 +89,10 @@ def build_execution_ledger(manager: "SAIVerseManager") -> ExecutionLedger:
     )
     ledger.register_outbox_handler(
         TARGET_PERCEPTION_PUSH, _make_perception_push_handler(manager)
+    )
+    ledger.register_outbox_handler(
+        TARGET_SAIMEMORY_APPEND_DIGEST,
+        _make_saimemory_append_digest_handler(manager),
     )
     return ledger
 
@@ -329,6 +336,49 @@ def _make_saimemory_append_handler(
             building_id=payload.get("building_id"),
             thread_suffix=payload.get("thread_suffix"),
         )
+    return handler
+
+
+def _make_saimemory_append_digest_handler(
+    manager: "SAIVerseManager",
+) -> Callable[[Dict[str, Any]], None]:
+    """target='saimemory.append_digest' — 作業セッション digest の配送 (D9-5)。
+
+    payload 契約 (積む側 = judgment_finalize の post_session):
+        {"message": {...DIGEST_TAG / main_line / committed のダイジェスト行...},
+         "episode_ref": str | None}
+    冪等 append (adapter.append_ledger_message — 再配送は既存 message id を
+    返す) の後、``episodes.set_digest_ref`` で出来事の再訪の鍵
+    (``message:{id}``) を確定する。set_digest_ref も冪等 (同値 no-op / 別値は
+    WARN + 非上書き) なので、append 済み→digest_ref 前のクラッシュ再配送でも
+    二重にならない。set_digest_ref の失敗は例外 = 配送失敗 (pending 残存 →
+    次 tick / 関所が引き継ぐ)。
+    """
+    def handler(item: Dict[str, Any]) -> None:
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("saimemory.append_digest payload must be a dict")
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            raise ValueError(
+                "saimemory.append_digest payload requires 'message' dict"
+            )
+        persona_id = item.get("persona_id")
+        adapter = _resolve_adapter(manager, persona_id)
+        mid = adapter.append_ledger_message(
+            message,
+            execution_id=item["execution_id"],
+            outbox_id=item["outbox_id"],
+            building_id=None,
+            thread_suffix=None,
+        )
+        episode_ref = payload.get("episode_ref")
+        if episode_ref:
+            from saiverse import episodes
+
+            episodes.set_digest_ref(
+                manager, persona_id, str(episode_ref), f"message:{mid}"
+            )
     return handler
 
 
