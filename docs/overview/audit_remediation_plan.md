@@ -26,7 +26,9 @@
 - 柱3 (multi-city) = 凍結・入口封鎖済み / 柱4 (native import) = 復元/移植分離済み
 - 実行台帳 Phase 0 (器 + Beat ロック + 関所 + 配送ハンドラ) = 完了・休眠解除済み
 
-**次にやる wave**: W1 (台帳 Phase 1 = 判断点 5種)。
+**次にやる wave**: W1 (台帳 Phase 1 = 判断点 5種 + 体験の構造 工程(1))。
+
+**一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
 ---
 
@@ -38,7 +40,7 @@
 
 - **スコープ**: 5種 finalize と on_event 入口を実行台帳に載せる。A2 (day_open/close 同日重複 → `(kind, persona:営業日)` UNIQUE) / A7 (メタ判断例外→空成功・イベント消失 → 成功=finalize 完了の永続証跡、on_event は prepared が durable queue) / A8 (finalize 保存失敗→成功扱い・二重適用 → 世界更新=applied + 判断行=outbox、副作用は execution_id で冪等) / A9 (post-session の completed 先行 → task 完了+artifact ref の単一トランザクション化) / A11 (spell 失敗を committed 成功で記録 → 失敗はシステム名義の失敗行)
 - **同時に確定**: intent §11 の小物4点 (RESULT_JSON 標準列 / prepared 回収規則・期限の kind 別既定値ほか — Phase 1 実装時確定でまはー了承済み)
-- **同工区で実施 (2026-07-18 裁定)**: post_session×digest 統合 — digest 専用コール廃止、状況文にセッション原本、digest は post_session の出力欄に (詳細は [judgment_points.md](../intent/persona_cognition/judgment_points.md) §6 冒頭の改定決定)。A9 と同じ finalize 経路を触るため同時に
+- **同工区で実施 (2026-07-18 裁定)**: post_session×digest 統合 — digest 専用コール廃止、状況文にセッション原本 (コールローカル注入)、digest は post_session の出力欄に + **episode 読み口スペル新設** (詳細は [judgment_points.md](../intent/persona_cognition/judgment_points.md) §6 冒頭の改定決定)。A9 と同じ finalize 経路を触るため同時に。**= [体験の構造](../intent/experience_structure.md) 実装工程(1)** (2026-07-19 一本化裁定)
 - **参照**: [execution_ledger.md](../intent/execution_ledger.md) §7 / [自律行動監査](../handoff/2026-07-14_autonomy_judgment_schedule_audit.md)
 - **完了条件**: A2/A7/A8/A9/A11 が回帰固定済み、レビュー台帳の自律行動行を消し込み更新
 
@@ -52,10 +54,11 @@
 - **スコープ**: 発火 claim と reconciliation (A12, A13)
 - **完了条件**: 同上
 
-### W4 ☐ 実行台帳 Phase 4 — Metabolism 残片
+### W4 ☐ 実行台帳 Phase 4 — Metabolism 残片 = 体験の構造 工程(2) と統合
 
 - **スコープ**: M2 (Chronicle 生成の残る原子性課題)。**S2/M1 は統合工事 §6-5 で先取り済み** — 差分を調査してから着手 (残量は小さい可能性が高い)
-- **完了条件**: 記憶監査・SEA 監査の Metabolism 系 finding が全消し込み
+- **統合裁定 (2026-07-19)**: Chronicle 生成は [体験の構造](../intent/experience_structure.md) 工程(2) で episode 整列 (サイズ+帯あふれ束ね・バッチ降格・恒等圧縮) に世代交代する。**旧バッチ生成経路に hardening を入れない** (捨てる経路を固めるのは二度手間) — 新設経路を最初から原子的に作り、M2 はそこで消化する
+- **完了条件**: 記憶監査・SEA 監査の Metabolism 系 finding が全消し込み + 体験の構造 §4 の圧縮七原則が生成経路の回帰で固定される
 
 ### W5 ☐ 実行台帳 Phase 5 — 配送系と移動
 
@@ -95,7 +98,17 @@
 - **参照**: [handoff §6](../handoff/2026-07-17_audit_wave_session2_handoff.md) に調査材料一式
 - **完了条件**: running-loop レガシー分岐でも boundary が有効 + デッドロック回帰なし
 
-### W12 ☐ 仕上げ
+### W13 ☐ 体験の構造 工程(3) — 継承エッジの器 (監査外)
+
+- **スコープ**: 継承 DAG のテーブル + 範囲オープン時の機械的記帳 ([experience_structure.md](../intent/experience_structure.md) §3.3)。分岐・再生成 / メティス取り込みの前提。他 wave と独立 — 空きに挟んでよい
+- **完了条件**: 事実層/咀嚼層エッジの記帳が回帰固定、既存データはエッジなしで無害
+
+### W14 ☐ 体験の構造 工程(4) — 知覚レンダリング (監査外)
+
+- **スコープ**: [perception_buffer.md](../intent/perception_buffer.md) 後続 Phase として。experience_structure §7 の原則 (翻訳のみ・直挿し段階的廃止) に従う。詳細設計はこの wave 着手時
+- **完了条件**: event_message 直挿しの段階的廃止が始まり、通知洪水が観測面で解消
+
+### W12 ☐ 仕上げ (常に最終)
 
 - **スコープ**: gen_reference_docs 一括再実行 / 解決済み issue の archive 移動 / レビュー台帳の全行を最終照合して状態更新 / in_flight から監査系の行を退役 / memory 更新
 - **完了条件**: レビュー台帳の全行が「回帰固定済み以上 or 保留裁定記録済み or 凍結」
