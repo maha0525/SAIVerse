@@ -1,6 +1,6 @@
 # Intent: 体験の構造 — 包含の木・digest・継承 DAG
 
-**ステータス**: 設計中 (v0.2 2026-07-18 — 裁定点 2/3/4/5/7 解決、§4 に第六原則追加。次: 束ねアルゴリズムのモック可視化 (air 実ログ・予算可変) → 本実装)
+**ステータス**: 設計中 (v0.3 2026-07-19 — **束ねアルゴリズム確定** (air 実ログのモック可視化でまはー検証済み)。残る裁定点は §11 の 1 (知覚側スコープ)・6 (memory_architecture_v2 との関係) のみ)
 **位置付け**: 記憶系の最上位 intent。生ログ・Chronicle・Memopedia・episode・知覚バッファ・メティス記憶ブリッジの取り込みを **一つの構造** の下に束ねる。個別文書はここを指す参照に格下げされる (§10)。
 **前提**: [concept_consolidation.md](concept_consolidation.md) (Memory Atlas) / [persona_cognition/judgment_points.md](persona_cognition/judgment_points.md) §6 ((a') 統合) / [metis_memory_bridge.md](metis_memory_bridge.md) / [../issues/chronicle_cross_thread_mixing.md](../issues/chronicle_cross_thread_mixing.md) / [../issues/memory_continuity_graph.md](../issues/memory_continuity_graph.md)
 
@@ -132,11 +132,13 @@ head は capture→store→render で既にこの規律を卒業している (�
 5. **時代の生成 = 個数/期間ルールでなくサイズ+あふれ駆動** (§4-6 に一般化して反映)。life 層は必須の床ではない
 7. **単位=文字数・級の底=10 は暫定 OK** (モックで検証)
 
+8. **束ねアルゴリズム = モック検証済み・確定** (2026-07-19 まはー裁定): air_city_a の実ログ (messages 2,698 / episodes 60 / 旧Lv1×188・Lv2×15・Lv3×1) を予算可変のインタラクティブ可視化で確認。U=1万字・B=10 で更地から 32 提示ノード (束ね191回)、「現状から」でも旧 depth-1 ノードの時代化 (同級束ね) が正しく発動。豆粒が連なるケースは 28 ノードで 1 チャンク (個数でなくサイズ判定の効果が可視で確認された)。この仕様で本実装へ。既存 Lv 中央値 (9,708字 / 11.4万字 / 136万字) が U=1万・B=10 をほぼ実測支持している点も記録
+
 **未確定**:
 
 1. **スコープ**: §7 (知覚側) を本 intent で薄く持つ形でよいか、子 intent に分けるか — 考え中
 6. **memory_architecture_v2 との関係**: 本 intent が上位となり吸収するか、並置か
-8. **束ねアルゴリズムのモック検証** (本実装前の必須ステップ): air_city_a の実ログで束ね部分だけ動かしてグラフ可視化、提示予算を増減させて挙動確認。問題はここで露見させる
+9. **presence 等の極小 episode の窓占有** (モックで観測): サイズ 1 字の presence episode が class0 窓のノード枠を食う。実装時に「ラベル digest は窓予算に数えない」か「窓予算を字数ベースにする」かを決める (小物)
 
 ## 12. 実装順の見立て (参考 — 工程の真実は audit_remediation_plan / in_flight が持つ)
 
