@@ -23,11 +23,21 @@ judgment_post_session / judgment_on_event / judgment_day_close) の最終ノー�
    - day_close: tomorrow_memo + day_theme + day_digest (実績の決定論要約) +
      user_report_seeds → plan meta / desire_reviews → apply_desire_reviews
      (今日触れた欲求のみ)
-3. 整形済みテキスト ``monologue + 適用結果の要約行 + /spell 行`` を SAIMemory に
-   ``role='assistant', line_role='meta_judgment'`` で保存する。
+3. 整形済みテキスト ``monologue + 適用結果の要約行 + /spell 行 (成功分のみ)`` を
+   SAIMemory に ``role='assistant', line_role='meta_judgment'`` で保存する。
    メインキャッシュに LLM の生 JSON は残らない (不変条件 v2-A 継承)。
 
-詳細: ``docs/intent/persona_cognition/judgment_points.md``
+W1 Chunk B (A8/A9/A11): ``manager.execution_ledger`` と
+``judgment_context.execution_id`` が両方あるとき (tracked) は実行台帳フロー —
+入口で台帳 status=running を検査して再 finalize の二重適用を封じ、SAIMemory
+判断行は直書きでなく ``mark_applied`` の outbox (``saimemory.append``) に凍結
+する (配送失敗は「適用済み・記録待ち」として pending に残り関所/回復 tick が
+引き継ぐ)。失敗した spell は本人の /spell 行にせず、システム名義の適用失敗
+通知 (``perception.push``, kind=judgment_apply_failure) で本人に届ける。
+どちらかが無い環境 (台帳なし・旧テスト) は従来の直書きに degrade する。
+
+詳細: ``docs/intent/persona_cognition/judgment_points.md`` /
+``docs/handoff/2026-07-19_w1_judgment_ledger_handoff.md`` D6〜D8
 """
 from __future__ import annotations
 
@@ -76,6 +86,15 @@ from tools.core import ToolResult, ToolSchema
 
 LOGGER = logging.getLogger("saiverse.tools.judgment_finalize")
 
+# 適用失敗のシステム通知 (perception.push) で使う、ユーザー向けの判断名。
+_KIND_LABELS = {
+    KIND_DAY_OPEN: "起床判断",
+    KIND_POST_CONVERSATION: "会話終了判断",
+    KIND_POST_SESSION: "セッション終了判断",
+    KIND_ON_EVENT: "イベント到着判断",
+    KIND_DAY_CLOSE: "就寝判断",
+}
+
 
 def _spell_to_text(name: str, args: Dict[str, Any]) -> str:
     """記録用の /spell 行 (正準形式。実行は args dict で直接渡る)。"""
@@ -83,12 +102,24 @@ def _spell_to_text(name: str, args: Dict[str, Any]) -> str:
 
 
 def _fire_spell(
-    name: str, args: Dict[str, Any], spells_record: List[Dict[str, Any]]
-) -> None:
+    name: str,
+    args: Dict[str, Any],
+    spells_record: List[Dict[str, Any]],
+    warnings: List[str],
+) -> bool:
     """TOOL_REGISTRY 経由でスペルを実行する (meta_judgment_finalize と同じ経路)。
 
     Track 系スペルは PulseContext の deferred-track-ops に enqueue され、Pulse
-    完了時に適用される。失敗は記録 + WARN (判断全体は落とさない)。
+    完了時に適用される。
+
+    A11 (SpellOutcome): 成功/失敗を戻り値と record の ``success`` で表明する。
+    tool 不在・実行例外は failure = warnings 追加 + False (呼び出し側は
+    committed への寄与にしないこと)。ToolResult がエラー文字列を**正常 return
+    する**型 (戻り値 str が "Error"/"エラー" 始まり等) の判定は今回のスコープ外
+    — 例外と不在のみを failure と扱う (2026-07-19 審査済みスコープ)。
+
+    Returns:
+        True = 実行成功 (committed へ寄与してよい) / False = 失敗。
     """
     from tools import TOOL_REGISTRY
 
@@ -96,22 +127,31 @@ def _fire_spell(
     if tool_func is None:
         LOGGER.warning("[judgment_finalize] spell %r not found in registry", name)
         spells_record.append({
-            "name": name, "args": dict(args),
+            "name": name, "args": dict(args), "success": False,
             "result": "tool not found in registry",
         })
-        return
+        warnings.append(
+            f"スペル {name} の適用に失敗: ツールが見つかりません (未実行)"
+        )
+        return False
     try:
         result = tool_func(**args)
         if isinstance(result, tuple):
             result_str = str(result[0]) if result else ""
         else:
             result_str = str(result)
-        spells_record.append({"name": name, "args": dict(args), "result": result_str})
+        spells_record.append({
+            "name": name, "args": dict(args), "success": True, "result": result_str,
+        })
+        return True
     except Exception as exc:
         LOGGER.exception("[judgment_finalize] spell %r raised", name)
         spells_record.append({
-            "name": name, "args": dict(args), "result": f"error: {exc}",
+            "name": name, "args": dict(args), "success": False,
+            "result": f"error: {exc}",
         })
+        warnings.append(f"スペル {name} の適用に失敗: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +329,13 @@ def _finalize_day_open(
         if not title:
             warnings.append(f"promotions[{i}] rejected: title が空です")
             continue
-        _fire_spell("track_create", {
+        # A11: 失敗した昇格は committed への寄与にしない (warnings は _fire_spell が積む)
+        applied |= _fire_spell("track_create", {
             "track_type": "autonomous",
             "title": title,
             "intent": str(promo.get("intent") or ""),
             "from_candidate": normalize_task_ref(desire_ref),
-        }, spells_record)
-        applied = True
+        }, spells_record, warnings)
 
     # v0.5 (life.md §3/§11.2): ライフはもう LLM が宣言しない — ユーザー設定
     # (PersonaSchedule の起床・就寝) からシステムが day_open 発火時に確定して
@@ -463,12 +503,12 @@ def _apply_new_desires(
         if not title:
             warnings.append(f"new_desires[{i}] rejected: title が空です")
             continue
-        _fire_spell("purpose_seed", {
+        # A11: 失敗した欲求作成は committed への寄与にしない
+        applied |= _fire_spell("purpose_seed", {
             "title": title,
             "type": dtype,
             "source": source_quote,
-        }, spells_record)
-        applied = True
+        }, spells_record, warnings)
     return applied
 
 
@@ -607,20 +647,31 @@ def _apply_task_verdict(
     if status == "done":
         artifact_ref = str(verdict.get("artifact_ref") or "")
         if artifact_ref and artifact_ref in session_artifacts:
-            # 接地検証 OK: 完了 + 成果物参照をタスクに刻む
-            ptm.update_task_status(
-                task_id, status=STATUS_COMPLETED, actor="judgment_post_session",
-                persona_id=persona_id,
-                reason=f"session verdict: done (artifact={artifact_ref})",
-            )
-            ptm.append_artifact_ref(
-                task_id, artifact_ref,
-                persona_id=persona_id, actor="judgment_post_session",
-            )
-            lines.append(
-                f"（タスク {task_ref} を完了にした。成果物: {artifact_ref}）"
-            )
-            applied = True
+            # 接地検証 OK: 完了 + 成果物参照を**単一トランザクション**でタスクに
+            # 刻む (A9/D7: 旧 update_task_status → append_artifact_ref の 2 連
+            # commit は後段失敗で「証拠のない completed」を確定させていた)。
+            execution_id = str(ctx.get("execution_id") or "") or None
+            try:
+                ptm.complete_with_artifact(
+                    task_id, artifact_ref,
+                    persona_id=persona_id, actor="judgment_post_session",
+                    execution_id=execution_id,
+                    reason=f"session verdict: done (artifact={artifact_ref})",
+                )
+            except Exception as exc:
+                # 全か無か: 失敗時はタスク不変 (completed になっていない)。
+                # 該当項目だけ棄却 + WARN の原則で判断全体は落とさない。
+                LOGGER.exception(
+                    "[judgment_finalize] complete_with_artifact raised"
+                )
+                warnings.append(
+                    f"タスク {task_ref} の完了適用に失敗 (タスクは不変): {exc}"
+                )
+            else:
+                lines.append(
+                    f"（タスク {task_ref} を完了にした。成果物: {artifact_ref}）"
+                )
+                applied = True
         else:
             # やったフリの棄却: 成果物リストに無い ref は完了させない。
             # continue 相当に降格 (タスクは動かさず、作業メモだけ残す)。
@@ -691,8 +742,11 @@ def _finalize_post_session(
                     f"track_op 'complete' rejected: 未消化のタスクが残っています ({refs})"
                 )
             else:
-                _fire_spell("track_complete", {"track_id": str(track_id)}, spells_record)
-                applied = True
+                # A11: 失敗した Track 完了は committed への寄与にしない
+                applied |= _fire_spell(
+                    "track_complete", {"track_id": str(track_id)},
+                    spells_record, warnings,
+                )
     elif track_op not in (None, "none"):
         warnings.append(f"track_op rejected: 未知の値 {track_op!r}")
 
@@ -1512,6 +1566,72 @@ def _maybe_launch_curation_batch(manager: Any, persona_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_tracked_ledger(
+    manager: Any, ctx: Dict[str, Any], kind: str,
+) -> Tuple[Any, Optional[str], Optional[str]]:
+    """台帳フローで走るか (tracked) を判定する (D6 の degrade 分岐)。
+
+    tracked = ``manager.execution_ledger`` と ``judgment_context.execution_id``
+    (Chunk A の run_judgment_point が同乗させる) が**両方**あるとき。どちらかが
+    無い環境 (台帳なし・旧テスト) は従来挙動 (SAIMemory 直書き) に degrade する。
+    台帳 status の読み取り失敗も WARN + degrade (可用性優先、従来挙動)。
+
+    Returns:
+        ``(ledger, execution_id, status)``。untracked なら ``(None, None, None)``。
+    """
+    execution_id = str(ctx.get("execution_id") or "").strip() or None
+    ledger = getattr(manager, "execution_ledger", None)
+    if ledger is None or execution_id is None:
+        return None, None, None
+    try:
+        status = ledger.get_execution(execution_id).get("status")
+    except Exception:
+        LOGGER.warning(
+            "[judgment_finalize] ledger status read failed; degrading to "
+            "untracked finalize (kind=%s execution=%s)", kind, execution_id,
+            exc_info=True,
+        )
+        return None, None, None
+    return ledger, execution_id, status
+
+
+def _build_judgment_message(
+    manager: Any,
+    kind: str,
+    ctx: Dict[str, Any],
+    final_text: str,
+    monologue: str,
+    scope: str,
+    situation_text: str,
+) -> Dict[str, Any]:
+    """SAIMemory 判断行の message dict (tracked/untracked 共通の凍結形)。"""
+    pulse_ctx = get_active_pulse_context()
+    pulse_id = getattr(pulse_ctx, "pulse_id", None) if pulse_ctx else None
+    # Chunk C (digest コールローカル注入) の受け口: 保存用の状況テキストが
+    # 別携帯されていればそれを使う (今は常に situation_text)。
+    paired = str(ctx.get("paired_situation_text") or "").strip() or situation_text.strip()
+    return {
+        "role": "assistant",
+        "content": final_text,
+        # tz-aware UTC ISO で渡す (naive ISO は adapter 側で ±9h ずれる。
+        # docs/issues/history_manager_timestamp_tz_drift.md と同根)。
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        # metadata.judgment: 独白本文を適用エコー行と構造的に分離して
+        # 持つ。一日新聞 (saiverse/day_report.py) が「就寝のふりかえり」
+        # に独白だけを載せるための読み口 (content は従来どおり
+        # 独白+要約行の全文 — ペルソナの文脈に乗る内容は変えない)。
+        "metadata": {
+            "tags": ["meta_judgment", f"judgment:{kind}"],
+            "judgment": {"kind": kind, "monologue": monologue},
+        },
+        "line_role": "meta_judgment",
+        "scope": scope,
+        "pulse_id": str(pulse_id) if pulse_id is not None else None,
+        # 判断時に渡された状況テキストを Pulse タイムラインで見えるようにする。
+        "paired_action_text": paired or None,
+    }
+
+
 def judgment_finalize(
     judgment_output: Optional[Dict[str, Any]] = None,
     kind: str = "",
@@ -1538,6 +1658,25 @@ def judgment_finalize(
         ctx = {}
     if not isinstance(ctx, dict):
         ctx = {}
+
+    # --- 実行単位の冪等 (A8/D6): tracked で running でなければ再適用しない ----
+    from saiverse.execution_ledger import STATUS_RUNNING
+    from saiverse.execution_ledger_wiring import (
+        TARGET_PERCEPTION_PUSH,
+        TARGET_SAIMEMORY_APPEND,
+    )
+
+    ledger, execution_id, ledger_status = _resolve_tracked_ledger(manager, ctx, kind)
+    tracked = ledger is not None
+    if tracked and ledger_status != STATUS_RUNNING:
+        # 再 finalize (適用済み/終端) — 世界更新の二重適用の口を閉じる。
+        msg = (
+            f"Judgment already finalized (execution={execution_id}, "
+            f"status={ledger_status}); nothing applied"
+        )
+        LOGGER.info("[judgment_finalize] %s (persona=%s kind=%s)",
+                    msg, persona_id, kind)
+        return msg, ToolResult(history_snippet=msg), None
 
     lines: List[str] = []
     warnings: List[str] = []
@@ -1574,47 +1713,104 @@ def judgment_finalize(
         LOGGER.warning("[judgment_finalize] (%s/%s) %s", persona_id, kind, w)
 
     # --- 整形済みテキスト (JSON 非混入; 不変条件 v2-A) --------------------
-    spell_lines = [_spell_to_text(s["name"], s["args"]) for s in spells_record]
+    # A11: 本人記憶の判断行には**成功した spell だけ**を正準形で載せる。
+    # 失敗した行為を本人名義の /spell 行にしない (未実行の行為の捏造防止)。
+    spells_ok = [s for s in spells_record if s.get("success")]
+    spells_failed = [s for s in spells_record if not s.get("success")]
+    spell_lines = [_spell_to_text(s["name"], s["args"]) for s in spells_ok]
     body_parts = [p for p in (monologue, "\n".join(lines), "\n".join(spell_lines)) if p]
     final_text = "\n\n".join(body_parts) or "(empty judgment)"
-    scope = "committed" if committed or spells_record else "discardable"
+    # A11: scope への寄与も成功 spell のみ。
+    scope = "committed" if committed or spells_ok else "discardable"
 
-    # --- SAIMemory への保存 (meta_judgment_finalize と同形式) --------------
-    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
-    if persona is not None:
-        adapter = getattr(persona, "sai_memory", None)
-        if adapter is not None:
-            pulse_ctx = get_active_pulse_context()
-            pulse_id = getattr(pulse_ctx, "pulse_id", None) if pulse_ctx else None
-            try:
-                adapter.append_persona_message({
-                    "role": "assistant",
-                    "content": final_text,
-                    # tz-aware UTC ISO で渡す (naive ISO は adapter 側で ±9h ずれる。
-                    # docs/issues/history_manager_timestamp_tz_drift.md と同根)。
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    # metadata.judgment: 独白本文を適用エコー行と構造的に分離して
-                    # 持つ。一日新聞 (saiverse/day_report.py) が「就寝のふりかえり」
-                    # に独白だけを載せるための読み口 (content は従来どおり
-                    # 独白+要約行の全文 — ペルソナの文脈に乗る内容は変えない)。
-                    "metadata": {
-                        "tags": ["meta_judgment", f"judgment:{kind}"],
-                        "judgment": {"kind": kind, "monologue": monologue},
-                    },
-                    "line_role": "meta_judgment",
-                    "scope": scope,
-                    "pulse_id": pulse_id,
-                    # 判断時に渡された状況テキストを Pulse タイムラインで見えるようにする。
-                    "paired_action_text": situation_text.strip() or None,
-                })
-            except Exception:
-                LOGGER.exception(
-                    "[judgment_finalize] Failed to append persona message"
-                )
+    message = _build_judgment_message(
+        manager, kind, ctx, final_text, monologue, scope, situation_text,
+    )
+
+    if tracked:
+        # --- 台帳化 (A8/D6): 直書きを廃し mark_applied + outbox に載せ替え ---
+        # RESULT_JSON 標準 (D6/§11-1): 照合 (#5) と呼び出し側読み出しに足る最小。
+        result_json: Dict[str, Any] = {
+            "kind": kind,
+            "committed": committed,
+            "scope": scope,
+            "spells": {
+                "attempted": len(spells_record),
+                "succeeded": len(spells_ok),
+                "failed": len(spells_failed),
+            },
+            "warnings": len(warnings),
+        }
+        if kind == KIND_ON_EVENT:
+            reaction_type = next(
+                (e.split("=", 1)[1] for e in summary_extras
+                 if e.startswith("reaction=")),
+                None,
+            )
+            if reaction_type:
+                result_json["reaction"] = reaction_type
+        elif kind == KIND_POST_SESSION and ctx.get("episode_ref"):
+            result_json["episode_ref"] = str(ctx["episode_ref"])
+
+        # wiring の saimemory.append handler の payload 契約
+        # (execution_ledger_wiring._make_saimemory_append_handler):
+        # {"message": {...}, "building_id": ..., "thread_suffix": ...}。
+        # 現行 append_persona_message(message) は building_id=None /
+        # thread_suffix=None 相当 (persona スレッド直書き) — それを正確に写す。
+        outbox_items: List[Dict[str, Any]] = [{
+            "target": TARGET_SAIMEMORY_APPEND,
+            "persona_id": persona_id,
+            "payload": {
+                "message": message,
+                "building_id": None,
+                "thread_suffix": None,
+            },
+        }]
+        if spells_failed:
+            # 失敗 spell はシステム名義の適用失敗通知 (perception.push) で本人に
+            # 届ける — 本人の行為に変換しない (不変条件 7)。客観+丁寧語。
+            failed_desc = "、".join(
+                f"{s['name']} (エラー: {s['result']})" for s in spells_failed
+            )
+            kind_label = _KIND_LABELS.get(kind, kind)
+            outbox_items.append({
+                "target": TARGET_PERCEPTION_PUSH,
+                "persona_id": persona_id,
+                "payload": {
+                    "kind": "judgment_apply_failure",
+                    "content": (
+                        f"{kind_label}の適用のうち、次の操作が失敗しました: "
+                        f"{failed_desc}。世界には反映されていません。"
+                    ),
+                    "reduce_key": f"judgment_apply_failure:{kind}",
+                    "salient": True,
+                },
+            })
+        # mark_applied の失敗 (台帳遷移例外) は素直に raise する: 世界更新は
+        # 済み・台帳は running のまま → run_judgment_point が unknown 化 →
+        # 照合対象として観測面に残る (intent の「分裂を見えるようにする」)。
+        # 配送失敗は mark_applied 内で処理される (pending 残存 → 関所/回復 tick)。
+        ledger.mark_applied(
+            execution_id, result=result_json,
+            outbox_items=outbox_items, deliver=True,
+        )
+    else:
+        # --- 従来経路 (台帳なし環境・旧テスト): SAIMemory 直書き -----------
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        if persona is not None:
+            adapter = getattr(persona, "sai_memory", None)
+            if adapter is not None:
+                try:
+                    adapter.append_persona_message(message)
+                except Exception:
+                    LOGGER.exception(
+                        "[judgment_finalize] Failed to append persona message"
+                    )
 
     summary = (
         f"Judgment finalized (kind={kind}, applied={committed}, "
-        f"spells={len(spells_record)}, warnings={len(warnings)}, scope={scope})"
+        f"spells={len(spells_record)}/{len(spells_ok)}/{len(spells_failed)}, "
+        f"warnings={len(warnings)}, scope={scope})"
     )
     if summary_extras:
         # on_event の reaction 等、呼び出し側が読む判断結果。
@@ -1635,6 +1831,12 @@ def judgment_finalize(
                 "kind": kind,
                 "applied": committed,
                 "extras": list(summary_extras),
+                # A11/D8: 失敗を構造化して渡す (attempted/succeeded/failed)。
+                "spells": {
+                    "attempted": len(spells_record),
+                    "succeeded": len(spells_ok),
+                    "failed": len(spells_failed),
+                },
             })
     except Exception:
         LOGGER.debug(

@@ -35,12 +35,24 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database.models import AI, Base, City, PersonaTask, User
+from database.models import (
+    AI,
+    Base,
+    City,
+    ExecutionOutboxItem,
+    PersonaTask,
+    PersonaTaskHistory,
+    User,
+)
 from saiverse import clock
 from saiverse import day_plan
 from saiverse import judgment_points as jp
 from saiverse.event_scheduler import EventScheduler
-from saiverse.persona_task_manager import STAGE_CANDIDATE, PersonaTaskManager
+from saiverse.persona_task_manager import (
+    STAGE_CANDIDATE,
+    PersonaTaskManager,
+    TaskConflictError,
+)
 from saiverse.track_manager import TrackManager
 from tool_loader import load_builtin_tool
 
@@ -1691,22 +1703,26 @@ def test_run_judgment_embeds_execution_id_in_context(manager, session_factory):
     assert ctx["execution_id"] == eid
 
 
-def test_run_judgment_transitional_running_counts_as_submitted(
+def test_run_judgment_no_finalize_evidence_marks_unknown(
     manager, session_factory,
 ):
-    """経過措置の固定: 正常 return で台帳が running のままでも submitted=True。
-
-    TODO(W1 Chunk B): finalize が mark_applied を呼ぶようになったら、この
-    テストは running→unknown + submitted=False の検証に置き換える。
-    """
+    """Chunk B: finalize が mark_applied を呼ばずにメタレーンが戻る (この
+    FakePulseController は finalize を実行しない) → running のままの実行は
+    unknown 化 + submitted=False (「成功 = finalize 完了の永続証跡」A7)。"""
     from saiverse import execution_ledger as XL
 
     ledger, eid = _ledgered_execution(manager, session_factory)
     result = jp.run_judgment_point(
         manager, PERSONA_ID, "day_close", execution_id=eid,
     )
-    assert result["submitted"] is True
-    assert ledger.get_execution(eid)["status"] == XL.STATUS_RUNNING
+    assert result["submitted"] is False
+    entry = ledger.get_execution(eid)
+    assert entry["status"] == XL.STATUS_UNKNOWN
+    assert "finalize evidence" in entry["error"]
+    assert any(
+        "no finalize evidence" in (e.get("message") or "")
+        for e in result["errors"]
+    )
 
 
 def test_run_judgment_runtime_error_marks_unknown(manager, session_factory):
@@ -1792,3 +1808,424 @@ def test_run_judgment_without_ledger_degrades(manager):
     assert result["execution_id"] is None
     args = manager.pulse_controller.submissions[0]["args"]
     assert "execution_id" not in json.loads(args["judgment_context"])
+
+
+# ---------------------------------------------------------------------------
+# 実行台帳フロー (W1 Chunk B / A8: finalize の台帳化 = outbox 経由の判断行)
+# ---------------------------------------------------------------------------
+
+
+class LedgerFakeAdapter(FakeAdapter):
+    """台帳配送 (append_ledger_message / push_ledger_perception) 対応のスタブ。
+
+    - ``fail_append=True`` で配送失敗 (例外) を注入できる (A8 の再現)。
+    - 冪等: 同じ outbox_id の再配送は積まない (実 adapter の契約を忠実化)。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.ledger_messages: List[tuple] = []  # (outbox_id, message dict)
+        self.perceptions: List[Dict[str, Any]] = []
+        self.fail_append = False
+
+    def append_ledger_message(self, message, *, execution_id, outbox_id,
+                              building_id=None, thread_suffix=None):
+        if self.fail_append:
+            raise RuntimeError("memory.db down (injected)")
+        for oid, _m in self.ledger_messages:
+            if oid == outbox_id:
+                return f"msg-{oid}"
+        self.ledger_messages.append((outbox_id, dict(message)))
+        return f"msg-{outbox_id}"
+
+    def push_ledger_perception(self, *, execution_id, outbox_id, kind, content,
+                               reduce_key=None, salient=False, media=None,
+                               metadata=None):
+        if any(p["outbox_id"] == outbox_id for p in self.perceptions):
+            return False
+        self.perceptions.append({
+            "outbox_id": outbox_id, "execution_id": execution_id,
+            "kind": kind, "content": content, "reduce_key": reduce_key,
+            "salient": salient,
+        })
+        return True
+
+
+def _tracked_execution(manager, kind: str):
+    """実ハンドラ付きの台帳を manager に取り付け、running まで進めた実行を返す。"""
+    from saiverse import execution_ledger_wiring as xlw
+
+    manager.personas[PERSONA_ID].sai_memory = LedgerFakeAdapter()
+    ledger = xlw.build_execution_ledger(manager)
+    manager.execution_ledger = ledger
+    eid, runnable, _st = ledger.claim_execution(
+        f"judgment.{kind}", idempotency_key=None, persona_id=PERSONA_ID,
+    )
+    assert runnable
+    ledger.mark_running(eid)
+    return ledger, eid
+
+
+def _pending_outbox(session_factory, eid):
+    db = session_factory()
+    try:
+        return (
+            db.query(ExecutionOutboxItem)
+            .filter(
+                ExecutionOutboxItem.EXECUTION_ID == eid,
+                ExecutionOutboxItem.STATUS == "pending",
+            )
+            .count()
+        )
+    finally:
+        db.close()
+
+
+def test_finalize_tracked_delivery_failure_keeps_applied_then_repairs(
+    manager, task_refs, finalize_mod, tmp_path, session_factory,
+):
+    """A8: (1) 世界更新後の配送失敗 → applied 維持 + pending 残存 + 直書きなし、
+    (2) 修復後 flush → 判断行 1 件だけ + completed、(3) 再 finalize は無効。"""
+    from saiverse import execution_ledger as XL
+
+    ledger, eid = _tracked_execution(manager, "on_event")
+    adapter = manager.personas[PERSONA_ID].sai_memory
+    adapter.fail_append = True
+
+    output = {
+        "monologue": "今すぐでなくていい。覚えておこう。",
+        "reaction": {"type": "note_only", "memo": "新しい展示が始まったらしい"},
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "掲示板の告知", "execution_id": eid})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+
+    # (1) 世界更新 (event memo) は 1 回だけ適用され、summary は applied を維持
+    assert "applied=True" in summary
+    memos = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)["event_memos"]
+    assert len(memos) == 1
+    # 台帳は applied (「適用済み・記録待ち」)、判断行は pending に凍結
+    entry = ledger.get_execution(eid)
+    assert entry["status"] == XL.STATUS_APPLIED
+    assert entry["result"]["kind"] == "on_event"
+    assert entry["result"]["reaction"] == "note_only"
+    assert _pending_outbox(session_factory, eid) == 1
+    # 直書き経路は使われていない
+    assert adapter.messages == []
+    assert adapter.ledger_messages == []
+
+    # (2) 配送修復後 flush → 判断行が 1 件だけ書かれ completed
+    adapter.fail_append = False
+    assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+    assert len(adapter.ledger_messages) == 1
+    msg = adapter.ledger_messages[0][1]
+    assert msg["line_role"] == "meta_judgment"
+    assert msg["scope"] == "committed"
+    assert "覚え書きに留める" in msg["content"]
+    assert ledger.get_execution(eid)["status"] == XL.STATUS_COMPLETED
+
+    # (3) 同じ execution_id で再 finalize → 世界更新は走らない
+    with _persona_ctx(manager, tmp_path):
+        summary2, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    assert "already finalized" in summary2
+    memos = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)["event_memos"]
+    assert len(memos) == 1
+    assert len(adapter.ledger_messages) == 1
+
+
+def test_finalize_untracked_with_ledger_but_no_execution_id(
+    manager, task_refs, finalize_mod, tmp_path, session_factory,
+):
+    """A8 (4): execution_id が無い呼び出しは台帳があっても従来挙動 (直書き)。"""
+    ledger, eid = _tracked_execution(manager, "on_event")
+    adapter = manager.personas[PERSONA_ID].sai_memory
+    output = {"monologue": "関係のない通知だ。", "reaction": {"type": "ignore"}}
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "無関係な通知"})  # execution_id なし
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    assert "applied=False" in summary
+    assert len(adapter.messages) == 1  # 直書き
+    assert adapter.ledger_messages == []
+    assert _pending_outbox(session_factory, eid) == 0
+
+
+# ---------------------------------------------------------------------------
+# 実行台帳フロー (W1 Chunk B / A11: SpellOutcome)
+# ---------------------------------------------------------------------------
+
+
+def _desire_output(*titles):
+    return {
+        "monologue": "やりたいことが増えた。",
+        "task_verdict": None,
+        "new_desires": [
+            {"type": "作る", "title": t, "source_quote": "会話の引用"}
+            for t in titles
+        ],
+        "remaining_timetable": None,
+    }
+
+
+def test_spell_failure_is_not_committed_and_notifies(
+    manager, task_refs, finalize_mod, tmp_path, session_factory, caplog,
+):
+    """A11 (1): tool 例外 → applied=False / 正準 /spell 行なし /
+    judgment_apply_failure が outbox に積まれ perception へ届く。"""
+    from saiverse import execution_ledger as XL
+
+    ledger, eid = _tracked_execution(manager, "post_session")
+    adapter = manager.personas[PERSONA_ID].sai_memory
+
+    def broken_purpose_seed(**kwargs):
+        raise RuntimeError("seed store down")
+
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
+                      "task_ref": "task:1", "execution_id": eid})
+    import tools as tools_pkg
+    with caplog.at_level("WARNING"):
+        with patch.dict(tools_pkg.TOOL_REGISTRY,
+                        {"purpose_seed": broken_purpose_seed}):
+            with _persona_ctx(manager, tmp_path):
+                summary, _, _ = finalize_mod.judgment_finalize(
+                    judgment_output=_desire_output("語源メモ"),
+                    kind="post_session", judgment_context=ctx,
+                )
+
+    assert "applied=False" in summary
+    assert "spells=1/0/1" in summary
+    assert "scope=discardable" in summary
+    assert any("purpose_seed" in r.message for r in caplog.records)
+
+    entry = ledger.get_execution(eid)
+    assert entry["result"]["spells"] == {
+        "attempted": 1, "succeeded": 0, "failed": 1,
+    }
+    assert entry["result"]["committed"] is False
+
+    # 配送: 判断行 (成功形 /spell なし) + システム名義の適用失敗通知
+    assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+    assert len(adapter.ledger_messages) == 1
+    content = adapter.ledger_messages[0][1]["content"]
+    assert "/spell" not in content
+    assert adapter.ledger_messages[0][1]["scope"] == "discardable"
+    assert len(adapter.perceptions) == 1
+    notice = adapter.perceptions[0]
+    assert notice["kind"] == "judgment_apply_failure"
+    assert notice["reduce_key"] == "judgment_apply_failure:post_session"
+    assert notice["salient"] is True
+    assert "purpose_seed" in notice["content"]
+    assert "世界には反映されていません" in notice["content"]
+
+
+def test_spell_partial_success_separates_counts_and_lines(
+    manager, task_refs, finalize_mod, tmp_path, session_factory,
+):
+    """A11 (2): 一部成功 → 成功分だけ正準 /spell 形、件数は attempted/succeeded/
+    failed に分離、scope は committed (成功 spell あり)。"""
+    ledger, eid = _tracked_execution(manager, "post_session")
+    adapter = manager.personas[PERSONA_ID].sai_memory
+
+    def flaky_purpose_seed(**kwargs):
+        if kwargs.get("title") == "壊れる方":
+            raise RuntimeError("boom")
+        return "added"
+
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
+                      "task_ref": "task:1", "execution_id": eid})
+    import tools as tools_pkg
+    with patch.dict(tools_pkg.TOOL_REGISTRY,
+                    {"purpose_seed": flaky_purpose_seed}):
+        with _persona_ctx(manager, tmp_path):
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=_desire_output("成功する方", "壊れる方"),
+                kind="post_session", judgment_context=ctx,
+            )
+
+    assert "applied=True" in summary
+    assert "spells=2/1/1" in summary
+    assert "scope=committed" in summary
+    entry = ledger.get_execution(eid)
+    assert entry["result"]["spells"] == {
+        "attempted": 2, "succeeded": 1, "failed": 1,
+    }
+
+    assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+    content = adapter.ledger_messages[0][1]["content"]
+    assert content.count("/spell") == 1
+    assert "成功する方" in content
+    # 失敗した方は /spell 行に載らず、通知に載る
+    spell_line = [ln for ln in content.splitlines() if ln.startswith("/spell")][0]
+    assert "壊れる方" not in spell_line
+    assert len(adapter.perceptions) == 1
+    assert "壊れる方" in adapter.perceptions[0]["content"] or \
+        "purpose_seed" in adapter.perceptions[0]["content"]
+
+
+def test_spell_tool_not_found_untracked_warns_without_spell_line(
+    manager, task_refs, finalize_mod, tmp_path, caplog,
+):
+    """A11 (3): tool 不在も failure。untracked では warnings ログのみ
+    (perception 通知なし) で、判断行に成功形 /spell は残らない。"""
+    output = _desire_output("行き場のない欲求")
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [],
+                      "task_ref": "task:1"})
+    import tools as tools_pkg
+    with caplog.at_level("WARNING"):
+        with patch.dict(tools_pkg.TOOL_REGISTRY, {}, clear=True):
+            with _persona_ctx(manager, tmp_path):
+                summary, _, _ = finalize_mod.judgment_finalize(
+                    judgment_output=output, kind="post_session",
+                    judgment_context=ctx,
+                )
+    assert "applied=False" in summary
+    assert "spells=1/0/1" in summary
+    assert any("ツールが見つかりません" in r.message for r in caplog.records)
+    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
+    assert recorded["scope"] == "discardable"
+    assert "/spell" not in recorded["content"]
+
+
+# ---------------------------------------------------------------------------
+# W1 Chunk B / A9: complete_with_artifact (単一トランザクションの完了+接地)
+# ---------------------------------------------------------------------------
+
+
+def _task_history(session_factory, task_id):
+    db = session_factory()
+    try:
+        rows = (
+            db.query(PersonaTaskHistory)
+            .filter(PersonaTaskHistory.task_id == task_id)
+            .order_by(PersonaTaskHistory.created_at.asc(),
+                      PersonaTaskHistory.id.asc())
+            .all()
+        )
+        return [
+            (r.event_type, json.loads(r.payload) if r.payload else {})
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+def test_complete_with_artifact_single_commit(
+    manager, ptm, task_refs, session_factory,
+):
+    """A9 (1): 正常系 — 単一 commit で completed + artifact + 履歴 2 件。"""
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    task = ptm.complete_with_artifact(
+        task_id, "item-abc", persona_id=PERSONA_ID, actor="judgment_post_session",
+        execution_id="exec-1", reason="session verdict: done",
+    )
+    assert task["status"] == "completed"
+    assert task["artifact_refs"] == ["item-abc"]
+    assert task["completed_at"] is not None
+    assert task["stage"] == "completed"
+
+    history = _task_history(session_factory, task_id)
+    events = {(e, p.get("execution_id"), p.get("via")) for e, p in history
+              if e in ("update_task_status", "append_artifact_ref")}
+    # 2 行とも同一 commit のため created_at が同時刻 — 順序は問わない
+    assert events == {
+        ("update_task_status", "exec-1", "complete_with_artifact"),
+        ("append_artifact_ref", "exec-1", "complete_with_artifact"),
+    }
+
+
+def test_complete_with_artifact_is_atomic_on_failure(
+    manager, ptm, task_refs, session_factory, monkeypatch,
+):
+    """A9 (2): commit 前の例外で全項目未変更 (completed になっていない)。"""
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    original = PersonaTaskManager._insert_history
+
+    def failing_insert(self, db, *, task_id, step_id, event_type, payload, actor):
+        if event_type == "append_artifact_ref":
+            raise RuntimeError("history table down (injected)")
+        return original(self, db, task_id=task_id, step_id=step_id,
+                        event_type=event_type, payload=payload, actor=actor)
+
+    monkeypatch.setattr(PersonaTaskManager, "_insert_history", failing_insert)
+    with pytest.raises(RuntimeError):
+        ptm.complete_with_artifact(
+            task_id, "item-abc", persona_id=PERSONA_ID, actor="t",
+            execution_id="exec-1",
+        )
+    monkeypatch.undo()
+
+    task = ptm.get_task(task_id, persona_id=PERSONA_ID)
+    assert task["status"] == "pending", "部分 commit で completed が確定している"
+    assert task["artifact_refs"] == []
+    assert task["completed_at"] is None
+    history = _task_history(session_factory, task_id)
+    assert all(e not in ("update_task_status", "append_artifact_ref")
+               for e, _p in history)
+
+
+def test_complete_with_artifact_repairs_same_execution(
+    manager, ptm, task_refs, session_factory,
+):
+    """A9 (3): 同一 execution の補修 — completed + artifact 空の状態から
+    artifact だけ追記。全部済みなら no-op 成功。"""
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    ptm.complete_with_artifact(
+        task_id, "item-abc", persona_id=PERSONA_ID, actor="t",
+        execution_id="exec-1",
+    )
+    # 旧 2 連 commit 時代の座礁状態を再現: artifact だけ剥がす
+    db = session_factory()
+    try:
+        row = db.query(PersonaTask).filter(PersonaTask.id == task_id).first()
+        row.artifact_refs = None
+        db.commit()
+    finally:
+        db.close()
+
+    repaired = ptm.complete_with_artifact(
+        task_id, "item-abc", persona_id=PERSONA_ID, actor="t",
+        execution_id="exec-1",
+    )
+    assert repaired["status"] == "completed"
+    assert repaired["artifact_refs"] == ["item-abc"]
+    history = _task_history(session_factory, task_id)
+    repair_rows = [(e, p) for e, p in history if p.get("repair")]
+    assert [e for e, _p in repair_rows] == ["append_artifact_ref"]
+
+    # 全部済み → no-op 成功 (履歴も増えない)
+    before = len(_task_history(session_factory, task_id))
+    again = ptm.complete_with_artifact(
+        task_id, "item-abc", persona_id=PERSONA_ID, actor="t",
+        execution_id="exec-1",
+    )
+    assert again["artifact_refs"] == ["item-abc"]
+    assert len(_task_history(session_factory, task_id)) == before
+
+
+def test_complete_with_artifact_rejects_other_execution(
+    manager, ptm, task_refs,
+):
+    """A9 (4): 別 execution / execution_id なしからの再 done は棄却。"""
+    task_id = ptm.resolve_task_ref(PERSONA_ID, "task:1")
+    ptm.complete_with_artifact(
+        task_id, "item-abc", persona_id=PERSONA_ID, actor="t",
+        execution_id="exec-1",
+    )
+    with pytest.raises(TaskConflictError):
+        ptm.complete_with_artifact(
+            task_id, "item-xyz", persona_id=PERSONA_ID, actor="t",
+            execution_id="exec-2",
+        )
+    with pytest.raises(TaskConflictError):
+        ptm.complete_with_artifact(
+            task_id, "item-xyz", persona_id=PERSONA_ID, actor="t",
+        )
+    task = ptm.get_task(task_id, persona_id=PERSONA_ID)
+    assert task["artifact_refs"] == ["item-abc"]

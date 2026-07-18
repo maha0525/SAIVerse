@@ -847,6 +847,163 @@ class PersonaTaskManager:
             db.close()
         return self.get_task(task_id, persona_id=persona_id)
 
+    def complete_with_artifact(
+        self,
+        task_id: str,
+        artifact_ref: str,
+        *,
+        persona_id: Optional[str] = None,
+        actor: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """完了 status + completed_at + artifact_refs 追記 + 履歴 2 行を
+        **単一 Session/commit** で行う (A9/D7)。
+
+        旧 ``update_task_status`` → ``append_artifact_ref`` の 2 連 commit は
+        後段失敗で「証拠のない completed」(completed かつ成果物なし) を確定させ、
+        終了済みガードにより通常経路では補修不能だった (2026-07-14 監査 A9)。
+        本メソッドは全か無か — 失敗時はタスクは一切変更されない。
+
+        冪等/補修 (audit 修正方針):
+        - 既に completed で、履歴に**同一 execution_id** の complete_with_artifact
+          記録がある場合: artifact_ref が未記帳なら補修 (追記だけ) を行い、
+          記帳済みなら no-op 成功。
+        - 別 execution (または execution_id なし) からの completed への再完了、
+          および cancelled への適用は :class:`TaskConflictError` で棄却する。
+
+        履歴は既存様式 (update_task_status 相当 + append_artifact_ref 相当) の
+        2 行で、payload に ``execution_id`` と ``via='complete_with_artifact'``
+        マーカーを含める (補修判定の読み口)。
+        """
+        if not artifact_ref:
+            raise ValueError("artifact_ref is required")
+        now = _now()
+        db = self.SessionLocal()
+        try:
+            task = self._fetch_task_or_raise(db, task_id, persona_id)
+            if task.status in TERMINAL_TASK_STATUSES:
+                if task.status != STATUS_COMPLETED:
+                    raise TaskConflictError(
+                        f"task {task_id} is {task.status}; "
+                        "complete_with_artifact rejected"
+                    )
+                if not (execution_id and self._history_has_completion_by(
+                        db, task_id, execution_id)):
+                    raise TaskConflictError(
+                        f"task {task_id} is already completed by another "
+                        "execution; re-completion rejected"
+                    )
+                refs = self._parse_artifact_refs(task.artifact_refs)
+                if artifact_ref in refs:
+                    # 同一 execution で全部済み — no-op 成功 (冪等)
+                    LOGGER.info(
+                        "[task] complete_with_artifact no-op: %s already has "
+                        "artifact %r (execution=%s)",
+                        task_id, artifact_ref, execution_id,
+                    )
+                else:
+                    # 補修: 同一 execution が artifact 未記帳 → 追記だけを許可
+                    refs.append(artifact_ref)
+                    task.artifact_refs = json.dumps(refs, ensure_ascii=False)
+                    task.updated_at = now
+                    task.last_actor = actor
+                    task.version = task.version + 1
+                    self._insert_history(
+                        db,
+                        task_id=task_id,
+                        step_id=None,
+                        event_type="append_artifact_ref",
+                        payload={
+                            "artifact_ref": artifact_ref,
+                            "execution_id": execution_id,
+                            "via": "complete_with_artifact",
+                            "repair": True,
+                        },
+                        actor=actor,
+                    )
+                    db.commit()
+                    LOGGER.info(
+                        "[task] complete_with_artifact repaired %s: appended "
+                        "artifact %r (execution=%s)",
+                        task_id, artifact_ref, execution_id,
+                    )
+            else:
+                task.status = STATUS_COMPLETED
+                task.stage = STAGE_COMPLETED
+                task.completed_at = now
+                task.updated_at = now
+                task.last_actor = actor
+                task.version = task.version + 1
+                refs = self._parse_artifact_refs(task.artifact_refs)
+                if artifact_ref not in refs:
+                    refs.append(artifact_ref)
+                task.artifact_refs = json.dumps(refs, ensure_ascii=False)
+                self._insert_history(
+                    db,
+                    task_id=task_id,
+                    step_id=None,
+                    event_type="update_task_status",
+                    payload={
+                        "status": STATUS_COMPLETED,
+                        "reason": reason,
+                        "execution_id": execution_id,
+                        "via": "complete_with_artifact",
+                    },
+                    actor=actor,
+                )
+                self._insert_history(
+                    db,
+                    task_id=task_id,
+                    step_id=None,
+                    event_type="append_artifact_ref",
+                    payload={
+                        "artifact_ref": artifact_ref,
+                        "execution_id": execution_id,
+                        "via": "complete_with_artifact",
+                    },
+                    actor=actor,
+                )
+                db.commit()
+                LOGGER.info(
+                    "[task] complete_with_artifact %s: completed + artifact %r "
+                    "(execution=%s, single commit)",
+                    task_id, artifact_ref, execution_id,
+                )
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.get_task(task_id, persona_id=persona_id)
+
+    @staticmethod
+    def _history_has_completion_by(
+        db: Session, task_id: str, execution_id: str
+    ) -> bool:
+        """この task を complete_with_artifact で完了させた履歴に、指定の
+        execution_id が記録されているか (補修判定の読み口)。"""
+        rows = (
+            db.query(PersonaTaskHistory)
+            .filter(
+                PersonaTaskHistory.task_id == task_id,
+                PersonaTaskHistory.event_type == "update_task_status",
+            )
+            .all()
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row.payload) if row.payload else {}
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and payload.get("via") == "complete_with_artifact"
+                and payload.get("execution_id") == execution_id
+            ):
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # 親バインド: 昇格 (候補 → Track)
     # ------------------------------------------------------------------

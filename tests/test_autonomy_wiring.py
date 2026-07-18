@@ -245,6 +245,41 @@ def _attach_ledger(manager, session_factory):
     return manager.execution_ledger
 
 
+class FinalizingPulseController(RecordingPulseController):
+    """finalize 相当 (mark_applied) まで進める tracked テスト用フェイク。
+
+    Chunk B 以降、finalize が mark_applied を呼ばずに戻る tracked 実行は
+    unknown + submitted=False になる (証跡ベース成功判定)。tracked の正常系を
+    検証するテストは、args の judgment_context に同乗した execution_id を
+    finalize と同じように applied へ遷移させる必要がある。
+    """
+
+    def __init__(self, ledger):
+        super().__init__()
+        self._ledger = ledger
+
+    def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
+                             args=None, event_callback=None):
+        super().submit_meta_judgment(
+            persona_id, building_id, meta_playbook,
+            args=args, event_callback=event_callback,
+        )
+        import json as _json
+
+        ctx = _json.loads((args or {}).get("judgment_context") or "{}")
+        eid = ctx.get("execution_id")
+        if eid:
+            self._ledger.mark_applied(eid, result={"finalized": True})
+        return None
+
+
+def _attach_finalizing_ledger(manager, session_factory):
+    """台帳 + finalize 相当まで進める pulse_controller を取り付ける。"""
+    ledger = _attach_ledger(manager, session_factory)
+    manager.pulse_controller = FinalizingPulseController(ledger)
+    return ledger
+
+
 def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatch):
     """A2: 定刻 (schedule) → watchdog の順でも day_open の submit は 1 回だけ。
 
@@ -252,7 +287,7 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
     precondition の評価にも境界副作用 (ライフ確定) にも到達しない。
     """
     manager, _ = _make_manager(session_factory)
-    ledger = _attach_ledger(manager, session_factory)
+    ledger = _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
     confirmed: List[str] = []
@@ -266,8 +301,8 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
     assert first["execution_id"] is not None
     assert len(manager.pulse_controller.calls) == 1
     assert confirmed == [PERSONA_ID]
-    # Chunk B (finalize の台帳化) 前は running のまま = 経過措置で成功扱い
-    assert ledger.get_execution(first["execution_id"])["status"] == XL.STATUS_RUNNING
+    # Chunk B: finalize (フェイクが代行) の mark_applied 証跡で成功と判定
+    assert ledger.get_execution(first["execution_id"])["status"] == XL.STATUS_APPLIED
 
     precondition_evals: List[bool] = []
 
@@ -279,7 +314,7 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
         manager, PERSONA_ID, "day_open", precondition=_precondition,
     )
     assert second["submitted"] is False
-    assert second["reason"] == f"duplicate:{XL.STATUS_RUNNING}"
+    assert second["reason"] == f"duplicate:{XL.STATUS_APPLIED}"
     assert second["execution_id"] == first["execution_id"]
     # 判断 Pulse は増えず、precondition も境界副作用も走っていない
     assert len(manager.pulse_controller.calls) == 1
@@ -290,7 +325,7 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
 def test_fire_day_open_dedup_watchdog_then_scheduled(session_factory, monkeypatch):
     """A2: watchdog (precondition 付き) → 定刻の逆順でも submit は 1 回だけ。"""
     manager, _ = _make_manager(session_factory)
-    _attach_ledger(manager, session_factory)
+    _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
     confirmed: List[str] = []
@@ -319,7 +354,7 @@ def test_fire_precondition_rejection_marks_failed_and_next_claim_runs(
     """precondition 却下は claim 済みの席を failed に落とし、次の fire は
     failed キー退避で再び走れる (D2/D3)。"""
     manager, _ = _make_manager(session_factory)
-    ledger = _attach_ledger(manager, session_factory)
+    ledger = _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
     rejected = wiring.fire_judgment_point(
@@ -339,7 +374,7 @@ def test_fire_precondition_rejection_marks_failed_and_next_claim_runs(
 def test_fire_force_bypasses_idempotency_key(session_factory):
     """force=True はキーを None に落とし、debug 明示発火が duplicate に阻まれない。"""
     manager, _ = _make_manager(session_factory)
-    _attach_ledger(manager, session_factory)
+    _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
     first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")

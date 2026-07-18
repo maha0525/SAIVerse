@@ -1882,16 +1882,30 @@ def run_judgment_point(
         if status in (STATUS_APPLIED, STATUS_COMPLETED):
             submitted = True
         elif status == STATUS_RUNNING:
-            # TODO(W1 Chunk B): finalize が mark_applied を呼ぶようになったら
-            # running→unknown+False に切替 (「meta lane returned without
-            # finalize evidence」)。それまでは finalize が台帳統合前なので、
-            # 従来の成功判定 (例外なし=True) に倒す経過措置。
-            LOGGER.debug(
-                "[judgment] %s returned with ledger still running "
-                "(finalize not ledger-integrated yet); treating as submitted "
+            # finalize が mark_applied を呼ばずにメタレーンが戻った = 証跡なし。
+            # 「成功 = finalize 完了の永続証跡」(A7 修正方針) に従い unknown 化
+            # (自動再実行はされず、照合対象として観測面に残る)。
+            submitted = False
+            LOGGER.warning(
+                "[judgment] %s returned without finalize evidence "
+                "(ledger still running); marking unknown "
                 "(persona=%s execution=%s)", kind, persona_id, execution_id,
             )
-            submitted = True
+            try:
+                ledger.mark_unknown(
+                    execution_id, "meta lane returned without finalize evidence",
+                )
+            except Exception:
+                LOGGER.warning(
+                    "[judgment] mark_unknown failed after missing finalize "
+                    "evidence (persona=%s execution=%s)",
+                    persona_id, execution_id, exc_info=True,
+                )
+            errors.append({
+                "type": "error",
+                "message": "no finalize evidence: ledger still running "
+                           "after meta lane return",
+            })
         elif status == STATUS_FAILED:
             submitted = False
         elif status is not None:
