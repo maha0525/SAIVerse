@@ -173,9 +173,17 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 
 ## 6. ゾーン B: Chronicle
 
+> **移管注記 (2026-07-19、まはー裁定=両 intent 並置)**: Chronicle の**生成の単位とトリガー**は
+> [experience_structure.md](experience_structure.md) へ移管された (episode 整列・サイズ+帯あふれ駆動・
+> Lv 廃止・digest 統合)。本節 §6.1 の「生成フローを変えない」は同 intent により上書きされる。
+> ただし §6.1 が守ろうとした本質 — **産物のフラクタル性 (粗い過去+詳細な直近) と既存生成済み
+> データの非破壊 (追加系のみ)** — は experience_structure でも不変条件として維持される。
+> §6.2 の読み込み予算制は「粗いノードがまだ存在しない土地」のフォールバックとして共存。
+> ゾーン A / C・Memopedia 再編・インポート (§7〜§8) は引き続き本 intent の管轄。
+
 ### 6.1 変えないもの
 
-- `arasuji_entries` の形式・生成フロー（20メッセージ→Lv1、10件→上位統合の FIFO、Track 別キュー）・軽量モデル利用。既存ユーザーの生成済み Chronicle はそのまま資産として生きる。
+- `arasuji_entries` の形式・生成フロー（20メッセージ→Lv1、10件→上位統合の FIFO、Track 別キュー）・軽量モデル利用。既存ユーザーの生成済み Chronicle はそのまま資産として生きる。（→ 生成フローは上記移管注記のとおり experience_structure が世代交代する）
 
 ### 6.2 読み込みを件数上限から予算制へ
 
