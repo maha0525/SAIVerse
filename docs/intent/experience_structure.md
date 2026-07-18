@@ -137,10 +137,11 @@ head は capture→store→render で既にこの規律を卒業している (�
 
 6. **memory_architecture_v2 との関係 = 並置** (2026-07-19 まはー裁定)。境界線: ゾーン A (コア記憶)・ゾーン C (自動想起)・Memopedia 再編・インポート・農園は MAv2 の管轄のまま。**Chronicle の生成の単位とトリガーは本 intent へ移管** (MAv2 §6.1 に移管注記済み — 産物のフラクタル性と既存データ非破壊は両文書共通の不変)。MAv2 §6.2 の読み込み予算制は「粗いノードが無い土地」のフォールバックとして共存。3 ゾーンモデルは不変 — 本 intent のコンテキスト帯はゾーン B の中身の世代交代 (位置=head・更新契機=Metabolism/anchor 量子化・キャッシュ安定性は不変)。MAv2 不変条件 §10-4 を本 intent §4 に輸入 (下記 7 原則目)
 
+10. **Track Chronicle = 廃止方向** (2026-07-19 まはー裁定): 独立生成キューとしての Track Chronicle は完全廃止の直感、廃止は早めでよい。ただしそれが解こうとしていた本丸 —「同一 Track の episode 間で『この前は何やったんだっけ』を即座に思い出す」— は未解決のまま残る (机メモは前日つなぎで実質機能していない)。この再訪問題は別 issue [track_episode_continuity.md](../issues/track_episode_continuity.md) で扱う (episode digest 正準化後の purpose 射影読み口が有力候補)
+
 **未確定**:
 
 1. **スコープ**: §7 (知覚側) を本 intent で薄く持つ形でよいか、子 intent に分けるか — 考え中
-10. **Track Chronicle の据わり**: origin_track_id スコープの独立生成キューとして残すか、「同じ地層を purpose タグで絞った射影」(目的の地図側の読み口) に再定義するか。後者が「木は一本、地図は射影」に忠実だが、独立した Track 別あらすじの生成物が要るかは世界観判断。MAv2 冒頭の「track_chronicle.md は変更しない」宣言とも交差
 9. **presence 等の極小 episode の窓占有** (モックで観測): サイズ 1 字の presence episode が class0 窓のノード枠を食う。実装時に「ラベル digest は窓予算に数えない」か「窓予算を字数ベースにする」かを決める (小物)
 
 ## 12. 実装順の見立て (参考 — 工程の真実は audit_remediation_plan / in_flight が持つ)
