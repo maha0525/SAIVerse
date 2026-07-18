@@ -491,14 +491,15 @@ def _apply_remaining_timetable(
     if isinstance(rt, list):
         plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
         if not rt:
-            # 空配列は「残りを全部無くす」とも読めるが、空の時間割は保存できない
-            # (最低 1 コマ要件) ため変更なし扱いにする。
-            warnings.append(
-                "remaining_timetable が空配列のため、時間割は変更しません"
-            )
-            lines.append(
-                "（時間割の変更は適用されませんでした: 空の時間割には"
-                "置き換えられません。今日の残りのコマは元のままです）"
+            # 空配列は null と同じ「変更なし」として黙って扱う。空の時間割は
+            # 不変条件 (最低 1 コマ) で保存できず、[] が有効な変更要求で
+            # ありうる余地がゼロのため、この読み替えは無損失。実データでは
+            # [] は「残りコマが現実に無い時点の判断」で事実の記述として
+            # 出てくる (2026-07-18 観測: 却下 6 件全件がこのケース) — それを
+            # 却下エコーで咎めるとペルソナの記憶に無意味な失敗文が積もる。
+            LOGGER.debug(
+                "[judgment_finalize] remaining_timetable=[] treated as no-change "
+                "(persona=%s)", persona_id,
             )
         else:
             slots, rt_warnings = sanitize_timetable(manager, persona_id, rt, plan_date)

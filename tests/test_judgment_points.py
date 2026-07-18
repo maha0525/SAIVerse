@@ -819,6 +819,36 @@ def test_post_session_remaining_timetable_rejection_reaches_persona(
     assert any("task:99" in r.message for r in caplog.records)
 
 
+def test_post_session_empty_remaining_timetable_is_silent_no_change(
+    manager, task_refs, finalize_mod, tmp_path
+):
+    """remaining_timetable=[] は null と同じ「変更なし」— 却下エコーを書かない。
+
+    空の時間割は不変条件 (最低 1 コマ) で保存できず、[] が有効な変更要求で
+    ありうる余地がない。実データでは [] は「残りコマが現実に無い時点の判断」
+    の事実記述として出る (2026-07-18 観測: 却下 6 件全件) — 却下エコーで
+    咎めるとペルソナの記憶に無意味な失敗文が積もるため、黙って変更なし扱い。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_rest_slot("17:00")])
+    output = {
+        "monologue": "残りの予定はこのままでいい。",
+        "remaining_timetable": [],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": []})
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+
+    # 時間割は不変
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["start"], s["status"]) for s in slots] == [("17:00", "pending")]
+    # 却下エコーはペルソナの記録に載らない
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "時間割の変更は適用されませんでした" not in content
+    assert "空の時間割" not in content
+
+
 # ---------------------------------------------------------------------------
 # post_session: 終了済みタスクの再裁定封じ (シム 3回目 異常③)
 # ---------------------------------------------------------------------------
