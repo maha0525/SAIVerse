@@ -1716,6 +1716,7 @@ def run_judgment_point(
     persona_id: str,
     kind: str,
     context: Optional[Dict[str, Any]] = None,
+    execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """判断点を 1 回起動する (状況テキスト組み立て → 動的スキーマ → Playbook 起動)。
 
@@ -1723,6 +1724,13 @@ def run_judgment_point(
     (pulse_type="meta_judgment" → META アスペクト → standard モデル)。
     Playbook 内の judge ノードが構造化出力を生成し、``judgment_finalize`` ツールが
     検証・適用・SAIMemory 書き込みを行う。
+
+    W1 Chunk A (A7): ``execution_id`` と ``manager.execution_ledger`` が両方
+    あるときは台帳フロー — submit 直前に ``mark_running``、例外は
+    BeatGateClosedError / LLMError → failed (適用前・副作用ゼロ)、
+    Cancelled / その他 → unknown (LLM が動いたか不明) に分類し、正常 return
+    後は台帳 status の証跡で成功を判定する。どちらかが無ければ従来挙動に
+    degrade する (WARN は発火側 ``autonomy_wiring.fire_judgment_point`` が出す)。
 
     Args:
         context: 判断点ごとの入力。
@@ -1742,7 +1750,8 @@ def run_judgment_point(
               DB から収集する)
 
     Returns:
-        ``{"kind", "playbook", "args", "submitted": bool, "errors": [...]}``。
+        ``{"kind", "playbook", "args", "submitted": bool, "errors": [...],
+        "execution_id": str | None}``。
         起動できなかった場合は ``submitted=False`` + ``reason``。
     """
     context = context or {}
@@ -1758,7 +1767,7 @@ def run_judgment_point(
             "[judgment] persona %s not loaded; cannot run %s", persona_id, kind,
         )
         return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "persona not loaded"}
+                "reason": "persona not loaded", "execution_id": execution_id}
 
     building_id = getattr(persona, "current_building_id", None)
     if not building_id:
@@ -1767,7 +1776,7 @@ def run_judgment_point(
             persona_id, kind,
         )
         return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "no current building"}
+                "reason": "no current building", "execution_id": execution_id}
 
     pulse_controller = getattr(manager, "pulse_controller", None)
     if pulse_controller is None:
@@ -1776,9 +1785,21 @@ def run_judgment_point(
             kind, persona_id,
         )
         return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "no pulse_controller"}
+                "reason": "no pulse_controller", "execution_id": execution_id}
+
+    ledger = getattr(manager, "execution_ledger", None)
+    tracked = ledger is not None and execution_id is not None
 
     args = build_judgment_args(manager, persona_id, kind, context)
+    if execution_id is not None:
+        # execution_id を judgment_context に同乗させ finalize へ届ける
+        # (playbook JSON は不変 — judgment_context は既に args で渡っている)。
+        try:
+            jctx = json.loads(args.get("judgment_context") or "{}")
+        except (TypeError, ValueError):
+            jctx = {}
+        jctx["execution_id"] = execution_id
+        args["judgment_context"] = json.dumps(jctx, ensure_ascii=False)
 
     errors: List[Dict[str, Any]] = []
     applied_events: List[Dict[str, Any]] = []
@@ -1795,9 +1816,24 @@ def run_judgment_point(
             applied_events.append(ev)
 
     LOGGER.info(
-        "[judgment] dispatching %s: persona=%s playbook=%s", kind, persona_id,
-        playbook_name,
+        "[judgment] dispatching %s: persona=%s playbook=%s execution=%s",
+        kind, persona_id, playbook_name, execution_id,
     )
+    if tracked:
+        # 不変条件 1: 不可逆処理 (LLM) の開始「前」に running を宣言する。
+        # 遷移に失敗したら実行しない (二重開始・別プロセス競合を疑う状態)。
+        try:
+            ledger.mark_running(execution_id)
+        except Exception:
+            LOGGER.warning(
+                "[judgment] ledger mark_running failed; not dispatching %s "
+                "(persona=%s execution=%s)", kind, persona_id, execution_id,
+                exc_info=True,
+            )
+            return {"kind": kind, "playbook": playbook_name, "args": args,
+                    "submitted": False, "reason": "ledger transition failed",
+                    "errors": errors, "applied_events": applied_events,
+                    "execution_id": execution_id}
     try:
         pulse_controller.submit_meta_judgment(
             persona_id=persona_id,
@@ -1811,9 +1847,12 @@ def run_judgment_point(
             "[judgment] %s Playbook raised: persona=%s error=%r",
             kind, persona_id, exc,
         )
+        if tracked:
+            _classify_runtime_failure(ledger, execution_id, exc)
         return {"kind": kind, "playbook": playbook_name, "args": args,
                 "submitted": False, "reason": f"runtime exception: {exc!r}",
-                "errors": errors, "applied_events": applied_events}
+                "errors": errors, "applied_events": applied_events,
+                "execution_id": execution_id}
 
     if errors:
         for err in errors:
@@ -1821,8 +1860,81 @@ def run_judgment_point(
                 "[judgment] %s Playbook emitted error: persona=%s error=%s",
                 kind, persona_id, err,
             )
+
+    submitted = True
+    if tracked:
+        # A7: 成功 = finalize 完了の永続証跡 (台帳 status) から導出する。
+        status: Optional[str] = None
+        try:
+            status = ledger.get_execution(execution_id)["status"]
+        except Exception:
+            LOGGER.warning(
+                "[judgment] failed to read ledger status after %s "
+                "(persona=%s execution=%s); keeping legacy success verdict",
+                kind, persona_id, execution_id, exc_info=True,
+            )
+        from saiverse.execution_ledger import (
+            STATUS_APPLIED,
+            STATUS_COMPLETED,
+            STATUS_FAILED,
+            STATUS_RUNNING,
+        )
+        if status in (STATUS_APPLIED, STATUS_COMPLETED):
+            submitted = True
+        elif status == STATUS_RUNNING:
+            # TODO(W1 Chunk B): finalize が mark_applied を呼ぶようになったら
+            # running→unknown+False に切替 (「meta lane returned without
+            # finalize evidence」)。それまでは finalize が台帳統合前なので、
+            # 従来の成功判定 (例外なし=True) に倒す経過措置。
+            LOGGER.debug(
+                "[judgment] %s returned with ledger still running "
+                "(finalize not ledger-integrated yet); treating as submitted "
+                "(persona=%s execution=%s)", kind, persona_id, execution_id,
+            )
+            submitted = True
+        elif status == STATUS_FAILED:
+            submitted = False
+        elif status is not None:
+            # unknown 等 (回復 tick との競合)。finalize 証跡なし = 成功と言えない。
+            submitted = False
+            errors.append({
+                "type": "error",
+                "message": f"ledger status {status} after meta lane return",
+            })
+
     return {"kind": kind, "playbook": playbook_name, "args": args,
-            "submitted": True, "errors": errors, "applied_events": applied_events}
+            "submitted": submitted, "errors": errors,
+            "applied_events": applied_events, "execution_id": execution_id}
+
+
+def _classify_runtime_failure(ledger: Any, execution_id: str, exc: Exception) -> None:
+    """submit_meta_judgment の例外を台帳の終端状態へ分類する (A7、D4)。
+
+    - BeatGateClosedError: 実行は始まっていない (副作用ゼロ) → failed
+    - LLMError: 出力なし = 世界適用前 → failed
+    - ExecutionCancelledException / その他: LLM が動いたか不明 → unknown
+      (自動再実行禁止の対象、intent §2.5)
+
+    台帳遷移自体の例外は握らず WARN に留める (二重障害でクラッシュさせない)。
+    """
+    from llm_clients.exceptions import LLMError
+    from sea.beat_gate import BeatGateClosedError
+    from sea.cancellation import ExecutionCancelledException
+
+    try:
+        if isinstance(exc, BeatGateClosedError):
+            ledger.mark_failed(execution_id, f"beat gate closed: {exc}")
+        elif isinstance(exc, LLMError):
+            ledger.mark_failed(execution_id, f"llm error: {exc}")
+        elif isinstance(exc, ExecutionCancelledException):
+            ledger.mark_unknown(execution_id, f"cancelled: {exc}")
+        else:
+            ledger.mark_unknown(execution_id, str(exc) or type(exc).__name__)
+    except Exception:
+        LOGGER.warning(
+            "[judgment] ledger transition failed after runtime error "
+            "(execution=%s original=%r)", execution_id, exc, exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

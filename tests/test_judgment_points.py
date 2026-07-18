@@ -1659,3 +1659,136 @@ def test_day_close_finalize_empty_memo_warns_but_saves_digest(
     meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
     assert "tomorrow_memo" not in meta
     assert meta["day_digest"] == "今日の時間割はありませんでした。"
+
+
+# ---------------------------------------------------------------------------
+# 実行台帳フロー (W1 Chunk A / A7: 証跡ベース成功判定)
+# ---------------------------------------------------------------------------
+
+
+def _ledgered_execution(manager, session_factory, kind="day_close"):
+    """実台帳を manager に取り付け、claim 済みの prepared 行を返す。"""
+    from saiverse import execution_ledger as XL
+
+    ledger = XL.ExecutionLedger(session_factory)
+    manager.execution_ledger = ledger
+    eid, runnable, _st = ledger.claim_execution(
+        f"judgment.{kind}", idempotency_key=None, persona_id=PERSONA_ID,
+    )
+    assert runnable
+    return ledger, eid
+
+
+def test_run_judgment_embeds_execution_id_in_context(manager, session_factory):
+    """execution_id が judgment_context JSON に同乗して finalize へ届く (D4)。"""
+    ledger, eid = _ledgered_execution(manager, session_factory)
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["execution_id"] == eid
+    args = manager.pulse_controller.submissions[0]["args"]
+    ctx = json.loads(args["judgment_context"])
+    assert ctx["execution_id"] == eid
+
+
+def test_run_judgment_transitional_running_counts_as_submitted(
+    manager, session_factory,
+):
+    """経過措置の固定: 正常 return で台帳が running のままでも submitted=True。
+
+    TODO(W1 Chunk B): finalize が mark_applied を呼ぶようになったら、この
+    テストは running→unknown + submitted=False の検証に置き換える。
+    """
+    from saiverse import execution_ledger as XL
+
+    ledger, eid = _ledgered_execution(manager, session_factory)
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["submitted"] is True
+    assert ledger.get_execution(eid)["status"] == XL.STATUS_RUNNING
+
+
+def test_run_judgment_runtime_error_marks_unknown(manager, session_factory):
+    """汎用例外 (LLM が動いたか不明) → mark_unknown + submitted=False (D4)。"""
+    from saiverse import execution_ledger as XL
+
+    ledger, eid = _ledgered_execution(manager, session_factory)
+
+    def _boom(**kwargs):
+        raise RuntimeError("meta lane down")
+
+    manager.pulse_controller.submit_meta_judgment = _boom
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["submitted"] is False
+    assert result["execution_id"] == eid
+    assert ledger.get_execution(eid)["status"] == XL.STATUS_UNKNOWN
+
+
+def test_run_judgment_beat_gate_closed_marks_failed(manager, session_factory):
+    """BeatGateClosedError (実行未開始・副作用ゼロ) → mark_failed (refire 安全)。"""
+    from saiverse import execution_ledger as XL
+    from sea.beat_gate import BeatGateClosedError
+
+    ledger, eid = _ledgered_execution(manager, session_factory)
+
+    def _gate(**kwargs):
+        raise BeatGateClosedError(PERSONA_ID, "meta_judgment")
+
+    manager.pulse_controller.submit_meta_judgment = _gate
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["submitted"] is False
+    entry = ledger.get_execution(eid)
+    assert entry["status"] == XL.STATUS_FAILED
+    assert "beat gate closed" in entry["error"]
+
+
+def test_run_judgment_llm_error_marks_failed(manager, session_factory):
+    """LLMError (出力なし = 適用前) → mark_failed (D4)。"""
+    from llm_clients.exceptions import LLMError
+    from saiverse import execution_ledger as XL
+
+    ledger, eid = _ledgered_execution(manager, session_factory)
+
+    def _llm_down(**kwargs):
+        raise LLMError("provider exploded")
+
+    manager.pulse_controller.submit_meta_judgment = _llm_down
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["submitted"] is False
+    entry = ledger.get_execution(eid)
+    assert entry["status"] == XL.STATUS_FAILED
+    assert "llm error" in entry["error"]
+
+
+def test_run_judgment_cancelled_marks_unknown(manager, session_factory):
+    """ExecutionCancelledException → mark_unknown (LLM が動いたか不明)。"""
+    from saiverse import execution_ledger as XL
+    from sea.cancellation import ExecutionCancelledException
+
+    ledger, eid = _ledgered_execution(manager, session_factory)
+
+    def _cancel(**kwargs):
+        raise ExecutionCancelledException(interrupted_by="user")
+
+    manager.pulse_controller.submit_meta_judgment = _cancel
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["submitted"] is False
+    assert ledger.get_execution(eid)["status"] == XL.STATUS_UNKNOWN
+
+
+def test_run_judgment_without_ledger_degrades(manager):
+    """台帳の無い manager では従来挙動 (execution_id=None、遷移なし)。"""
+    result = jp.run_judgment_point(manager, PERSONA_ID, "day_close")
+    assert result["submitted"] is True
+    assert result["execution_id"] is None
+    args = manager.pulse_controller.submissions[0]["args"]
+    assert "execution_id" not in json.loads(args["judgment_context"])

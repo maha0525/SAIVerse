@@ -34,6 +34,7 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from contextlib import nullcontext
@@ -47,10 +48,15 @@ from saiverse.judgment_points import (
     KIND_DAY_OPEN,
     KIND_ON_EVENT,
     KIND_POST_CONVERSATION,
+    KIND_POST_SESSION,
     run_judgment_point,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+#: manager に execution_ledger が無い環境 (旧テストスタブ等) への WARN を
+#: persona ごとに一度だけ出すための既知セット (台帳なし degrade は許すが黙らせない)。
+_LEDGER_MISSING_WARNED: set = set()
 
 # ---------------------------------------------------------------------------
 # 一日リズムの深夜跨ぎ (overnight) ヘルパ
@@ -199,6 +205,95 @@ def _judgment_lock(manager: Any, persona_id: str):
     return nullcontext()
 
 
+# ---------------------------------------------------------------------------
+# 実行台帳との結線 (W1 Chunk A: A2 の重複抑止 + A7 の durable queue)
+# ---------------------------------------------------------------------------
+
+
+def _day_open_plan_date() -> str:
+    """day_open の plan_date (暦日)。ライフ確定 (:func:`_confirm_life_at_day_open`)
+    と冪等キー (:func:`_judgment_idempotency_key`) で必ず同源を使う (D1)。"""
+    return clock.now().date().isoformat()
+
+
+def _day_close_plan_date(manager: Any, persona_id: str) -> str:
+    """day_close の営業日 (覚醒日)。ライフ終了 (:func:`_apply_life_end_at_day_close`)
+    と冪等キーで同源。judgment_points.build_judgment_args の KIND_DAY_CLOSE 分岐と
+    同じ規則 (深夜跨ぎリズムでは 01:00 発火の day_close は前日が営業日)。"""
+    sched = _find_day_schedules(manager, persona_id)
+    return effective_plan_date(
+        clock.now(), sched.get("wake"), sched.get("close"),
+    ).isoformat()
+
+
+def _judgment_idempotency_key(
+    manager: Any, persona_id: str, kind: str, context: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    """判断点 kind ごとの冪等キー (D1 の表)。None = 一意性なし (毎回新規行)。
+
+    - day_open:  ``{persona}:{plan_date}`` (暦日)
+    - day_close: ``{persona}:{effective_plan_date}`` (営業日)
+    - post_session / post_conversation: ``{persona}:{episode_ref}``。
+      episode_ref が無ければ None (一意性なし)
+    - on_event: None — 毎イベント新規行。**prepared 行が durable queue** (A7/D5)
+    """
+    if kind == KIND_DAY_OPEN:
+        return f"{persona_id}:{_day_open_plan_date()}"
+    if kind == KIND_DAY_CLOSE:
+        return f"{persona_id}:{_day_close_plan_date(manager, persona_id)}"
+    if kind in (KIND_POST_SESSION, KIND_POST_CONVERSATION):
+        episode_ref = None
+        if isinstance(context, dict):
+            episode_ref = context.get("episode_ref")
+            if not episode_ref:
+                sr = context.get("session_result")
+                if isinstance(sr, dict):
+                    episode_ref = sr.get("episode_ref")
+                elif sr is not None:
+                    episode_ref = getattr(sr, "episode_ref", None)
+        if episode_ref:
+            return f"{persona_id}:{episode_ref}"
+        return None
+    return None
+
+
+def _serialize_judgment_context(
+    context: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """context を JSON 化可能な形に正規化して台帳 payload に凍結する (D3)。
+
+    dataclass (WorkSessionResult 等) は asdict、シリアライズ不能値は str() に
+    落とす。回復 refire はこの dict をそのまま context として復元する
+    (judgment_points 側の ``_ws_get`` は dict も読める)。
+    """
+    if not isinstance(context, dict) or not context:
+        return None
+
+    def _norm(value: Any) -> Any:
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return _norm(dataclasses.asdict(value))
+        if isinstance(value, dict):
+            return {str(k): _norm(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_norm(v) for v in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    return _norm(dict(context))
+
+
+def _safe_mark_failed(ledger: Any, execution_id: str, reason: str) -> None:
+    """台帳 failed 化 (遷移例外は WARN に留め、発火経路をクラッシュさせない)。"""
+    try:
+        ledger.mark_failed(execution_id, reason)
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] ledger mark_failed(%s) failed (execution=%s)",
+            reason, execution_id, exc_info=True,
+        )
+
+
 def fire_judgment_point(
     manager: Any,
     persona_id: str,
@@ -206,6 +301,8 @@ def fire_judgment_point(
     context: Optional[Dict[str, Any]] = None,
     *,
     precondition: Optional[Callable[[], bool]] = None,
+    force: bool = False,
+    resume_execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """判断点を本番ゲート付きで 1 回起動する。
 
@@ -215,8 +312,16 @@ def fire_judgment_point(
        import は運用手順: ``python scripts/import_playbook.py --file
        builtin_data/playbooks/public/judgment_*.json``)
     3. MetaLayer の per-persona Lock で直列化 (alert 即応メタ判断と同じ列)
-    4. ``precondition`` (あれば) を **Lock 取得後に** 再評価 — watchdog の
-       day_open 再発火が、待っている間に済んだ本物の day_open と二重にならない
+    4. **実行台帳の claim** (W1 Chunk A / A2): Lock 内・precondition と境界
+       副作用より前に ``(judgment.{kind}, 冪等キー)`` の席を取る。既存
+       running/applied/completed/unknown なら ``duplicate:<status>`` で即
+       return — 境界副作用 (ライフ確定/終了) も走らない。``force=True`` は
+       キーを None に落とす (debug 明示発火の口)。``resume_execution_id`` は
+       回復 refire 用 — claim せず既存 prepared 行を使う。台帳の無い manager
+       (旧テストスタブ) は WARN 一回で従来挙動に degrade
+    5. ``precondition`` (あれば) を **Lock 取得後に** 再評価 — watchdog の
+       day_open 再発火が、待っている間に済んだ本物の day_open と二重にならない。
+       失敗時は claim 済みの席を failed に落とす
 
     v0.5 (life.md §3/§4/§6.2): ``kind`` が day_open / day_close のときは、
     ``run_judgment_point`` の前にライフ (活動区間) まわりのシステム処理を行う
@@ -261,6 +366,65 @@ def fire_judgment_point(
                 "reason": "playbook not imported"}
 
     with _judgment_lock(manager, persona_id):
+        # --- 実行台帳の claim (precondition・境界副作用より前、A2/D3) ---
+        ledger = getattr(manager, "execution_ledger", None)
+        execution_id: Optional[str] = None
+        if ledger is None:
+            if persona_id not in _LEDGER_MISSING_WARNED:
+                _LEDGER_MISSING_WARNED.add(persona_id)
+                LOGGER.warning(
+                    "[autonomy-wiring] manager has no execution_ledger; "
+                    "judgment points run without ledger tracking (persona=%s)",
+                    persona_id,
+                )
+            execution_id = resume_execution_id
+        elif resume_execution_id is not None:
+            # 回復 refire (D5): claim せず既存 prepared 行を使う
+            try:
+                row = ledger.get_execution(resume_execution_id)
+            except Exception:
+                LOGGER.warning(
+                    "[autonomy-wiring] resume target %s could not be read; "
+                    "skipping %s (persona=%s)",
+                    resume_execution_id, kind, persona_id, exc_info=True,
+                )
+                return {"kind": kind, "playbook": playbook_name,
+                        "submitted": False,
+                        "reason": "resume execution not found",
+                        "execution_id": resume_execution_id}
+            if row.get("status") != "prepared":
+                LOGGER.info(
+                    "[autonomy-wiring] resume target %s is %s (not prepared); "
+                    "skipping %s (persona=%s)",
+                    resume_execution_id, row.get("status"), kind, persona_id,
+                )
+                return {"kind": kind, "playbook": playbook_name,
+                        "submitted": False,
+                        "reason": f"resume target not prepared: {row.get('status')}",
+                        "execution_id": resume_execution_id}
+            execution_id = resume_execution_id
+        else:
+            idempotency_key = (
+                None if force
+                else _judgment_idempotency_key(manager, persona_id, kind, context)
+            )
+            execution_id, runnable, existing_status = ledger.claim_execution(
+                f"judgment.{kind}",
+                idempotency_key=idempotency_key,
+                persona_id=persona_id,
+                payload=_serialize_judgment_context(context),
+            )
+            if not runnable:
+                LOGGER.info(
+                    "[autonomy-wiring] %s duplicate (status=%s); skipping "
+                    "(persona=%s execution=%s)",
+                    kind, existing_status, persona_id, execution_id,
+                )
+                return {"kind": kind, "playbook": playbook_name,
+                        "submitted": False,
+                        "reason": f"duplicate:{existing_status}",
+                        "execution_id": execution_id}
+
         if precondition is not None:
             try:
                 still_needed = bool(precondition())
@@ -269,22 +433,30 @@ def fire_judgment_point(
                     "[autonomy-wiring] precondition for %s raised; skipping "
                     "(persona=%s)", kind, persona_id, exc_info=True,
                 )
+                if ledger is not None and execution_id is not None:
+                    _safe_mark_failed(ledger, execution_id, "precondition raised")
                 return {"kind": kind, "playbook": playbook_name,
-                        "submitted": False, "reason": "precondition raised"}
+                        "submitted": False, "reason": "precondition raised",
+                        "execution_id": execution_id}
             if not still_needed:
                 LOGGER.info(
                     "[autonomy-wiring] %s no longer needed at dispatch; skipping "
                     "(persona=%s)", kind, persona_id,
                 )
+                if ledger is not None and execution_id is not None:
+                    _safe_mark_failed(ledger, execution_id, "precondition rejected")
                 return {"kind": kind, "playbook": playbook_name,
-                        "submitted": False, "reason": "precondition not met"}
+                        "submitted": False, "reason": "precondition not met",
+                        "execution_id": execution_id}
 
         if kind == KIND_DAY_OPEN:
             _confirm_life_at_day_open(manager, persona_id, context or {})
         elif kind == KIND_DAY_CLOSE:
             _apply_life_end_at_day_close(manager, persona_id)
 
-        result = run_judgment_point(manager, persona_id, kind, context)
+        result = run_judgment_point(
+            manager, persona_id, kind, context, execution_id=execution_id,
+        )
 
     # 判断点の発火回数を「別枠」で記帳する (life.md v0.5 §5.3/§8.2)。予算
     # (used_pulses) には触れない — 判断点はペルソナが編成でコントロールできない
@@ -319,7 +491,7 @@ def _confirm_life_at_day_open(
     """
     from saiverse import day_plan
 
-    plan_date = clock.now().date().isoformat()
+    plan_date = _day_open_plan_date()
     already_confirmed = bool(day_plan.get_lives(manager, persona_id, plan_date))
     sched = _find_day_schedules(manager, persona_id)
     budget = context.get("daily_budget_pulses") if isinstance(context, dict) else None
@@ -357,10 +529,7 @@ def _apply_life_end_at_day_close(manager: Any, persona_id: str) -> None:
     """
     from saiverse import day_plan
 
-    sched = _find_day_schedules(manager, persona_id)
-    plan_date = effective_plan_date(
-        clock.now(), sched.get("wake"), sched.get("close"),
-    ).isoformat()
+    plan_date = _day_close_plan_date(manager, persona_id)
     lives = day_plan.get_lives(manager, persona_id, plan_date)
     if not lives:
         return
@@ -605,6 +774,38 @@ def _extract_reaction(result: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _reaction_from_ledger(manager: Any, execution_id: Optional[str]) -> Optional[str]:
+    """callback で reaction が読めなかったときのフォールバック: 台帳 RESULT_JSON。
+
+    D6 の RESULT_JSON 標準 (on_event は ``reaction`` を含む) を読む口。
+    NOTE: finalize の台帳化 (W1 Chunk B) までは RESULT_JSON は常に None なので、
+    実際に値が返るのは Chunk B 以降 — ここは分岐だけ先に用意しておく。
+    """
+    if not execution_id:
+        return None
+    ledger = getattr(manager, "execution_ledger", None)
+    if ledger is None:
+        return None
+    try:
+        row = ledger.get_execution(execution_id)
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] failed to read ledger result for reaction "
+            "fallback (execution=%s)", execution_id, exc_info=True,
+        )
+        return None
+    result = row.get("result")
+    if isinstance(result, dict):
+        reaction = result.get("reaction")
+        if isinstance(reaction, str) and reaction:
+            LOGGER.info(
+                "[autonomy-wiring] reaction read from ledger RESULT_JSON "
+                "fallback: %s (execution=%s)", reaction, execution_id,
+            )
+            return reaction
+    return None
+
+
 def handle_external_event(
     manager: Any,
     persona_id: str,
@@ -666,6 +867,9 @@ def handle_external_event(
         return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
 
     reaction = _extract_reaction(result)
+    if reaction is None:
+        # callback 消失時のフォールバック (D6): 台帳 RESULT_JSON から読む
+        reaction = _reaction_from_ledger(manager, result.get("execution_id"))
     if reaction == "engage_now":
         LOGGER.info(
             "[autonomy-wiring] on_event judged engage_now; dispatching response "

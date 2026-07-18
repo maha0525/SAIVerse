@@ -205,6 +205,128 @@ class IdempotencyTests(ExecutionLedgerTestBase):
         self.assertNotEqual(e1, e2)
 
 
+class ClaimExecutionTests(ExecutionLedgerTestBase):
+    """claim_execution (Phase 1 API — 判断点の重複抑止、W1 Chunk A / D2)。"""
+
+    KIND = "judgment.day_open"
+    KEY = "p1:2026-07-19"
+
+    def _ledger_rows(self, kind=None):
+        db = self.SessionLocal()
+        try:
+            q = db.query(ExecutionLedgerEntry)
+            if kind is not None:
+                q = q.filter(ExecutionLedgerEntry.KIND == kind)
+            return [
+                {
+                    "execution_id": r.EXECUTION_ID,
+                    "idempotency_key": r.IDEMPOTENCY_KEY,
+                    "status": r.STATUS,
+                    "payload": r.PAYLOAD_JSON,
+                }
+                for r in q.order_by(ExecutionLedgerEntry.CREATED_AT.asc()).all()
+            ]
+        finally:
+            db.close()
+
+    def test_claim_without_key_always_creates_new(self):
+        e1, runnable1, st1 = self.ledger.claim_execution(
+            "judgment.on_event", idempotency_key=None, persona_id="p1",
+        )
+        e2, runnable2, st2 = self.ledger.claim_execution(
+            "judgment.on_event", idempotency_key=None, persona_id="p1",
+        )
+        self.assertTrue(runnable1)
+        self.assertTrue(runnable2)
+        self.assertIsNone(st1)
+        self.assertIsNone(st2)
+        self.assertNotEqual(e1, e2)
+        self.assertEqual(self._status(e1), XL.STATUS_PREPARED)
+        self.assertEqual(self._status(e2), XL.STATUS_PREPARED)
+
+    def test_claim_new_key_creates_prepared(self):
+        eid, runnable, st = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+            payload={"budget": 3},
+        )
+        self.assertTrue(runnable)
+        self.assertIsNone(st)
+        entry = self.ledger.get_execution(eid)
+        self.assertEqual(entry["status"], XL.STATUS_PREPARED)
+        self.assertEqual(entry["idempotency_key"], self.KEY)
+        self.assertEqual(entry["payload"], {"budget": 3})
+
+    def test_claim_reuses_prepared_and_keeps_frozen_payload(self):
+        e1, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+            payload={"budget": 3},
+        )
+        e2, runnable, st = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+            payload={"budget": 99},  # 上書きされないこと
+        )
+        self.assertEqual(e2, e1)
+        self.assertTrue(runnable)
+        self.assertEqual(st, XL.STATUS_PREPARED)
+        self.assertEqual(self.ledger.get_execution(e1)["payload"], {"budget": 3})
+        self.assertEqual(len(self._ledger_rows(self.KIND)), 1)
+
+    def test_claim_retires_failed_key_and_creates_new(self):
+        e1, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+        )
+        self.ledger.mark_failed(e1, "precondition rejected")
+
+        e2, runnable, st = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+        )
+        self.assertNotEqual(e2, e1)
+        self.assertTrue(runnable)
+        self.assertEqual(st, XL.STATUS_FAILED)
+        self.assertEqual(self._status(e2), XL.STATUS_PREPARED)
+        # 旧 failed 行のキーは {key}#failed-{id先頭8字} に退避され、新行が正キーを持つ
+        old = self.ledger.get_execution(e1)
+        self.assertEqual(
+            old["idempotency_key"], f"{self.KEY}#failed-{e1[:8]}",
+        )
+        self.assertEqual(
+            self.ledger.get_execution(e2)["idempotency_key"], self.KEY,
+        )
+
+    def test_claim_blocked_by_running_applied_completed(self):
+        eid, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+        )
+        self.ledger.mark_running(eid)
+        got = self.ledger.claim_execution(self.KIND, idempotency_key=self.KEY)
+        self.assertEqual(got, (eid, False, XL.STATUS_RUNNING))
+
+        self.ledger.mark_applied(eid)
+        got = self.ledger.claim_execution(self.KIND, idempotency_key=self.KEY)
+        self.assertEqual(got, (eid, False, XL.STATUS_APPLIED))
+
+        self.ledger.mark_completed(eid)
+        got = self.ledger.claim_execution(self.KIND, idempotency_key=self.KEY)
+        self.assertEqual(got, (eid, False, XL.STATUS_COMPLETED))
+        # 新規行は作られていない
+        self.assertEqual(len(self._ledger_rows(self.KIND)), 1)
+
+    def test_claim_blocked_by_unknown_with_explicit_log(self):
+        eid, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, persona_id="p1",
+        )
+        self.ledger.mark_running(eid)
+        self.ledger.mark_unknown(eid, "process died")
+
+        with self.assertLogs("saiverse.execution_ledger", level="WARNING") as logs:
+            got = self.ledger.claim_execution(self.KIND, idempotency_key=self.KEY)
+        self.assertEqual(got, (eid, False, XL.STATUS_UNKNOWN))
+        self.assertTrue(
+            any("自動再実行" in m for m in logs.output),
+            f"no explicit no-auto-rerun log: {logs.output}",
+        )
+
+
 class MarkAppliedAtomicityTests(ExecutionLedgerTestBase):
     def test_midway_failure_rolls_back_ledger_and_outbox(self):
         execution_id = self._begin_running(persona_id="p1")

@@ -301,12 +301,17 @@ def test_pulse_controller_returns_empty_for_auto_gate_closed():
     assert result == []
 
 
-def test_pulse_controller_meta_lane_returns_empty_on_gate_closed():
+def test_pulse_controller_meta_lane_reraises_gate_closed():
+    # W1 Chunk A (A7): メタ判断レーンは gate closed を [] に変換せず再送出する。
+    # 呼び出し側 (run_judgment_point) が台帳の failed 分類に使う。
     pc = _make_controller(BeatGateClosedError("p1", "meta_judgment"))
-    result = pc.submit_meta_judgment(
-        "p1", "b1", meta_playbook="meta_judgment_running",
-    )
-    assert result == []
+    events: list = []
+    with pytest.raises(BeatGateClosedError):
+        pc.submit_meta_judgment(
+            "p1", "b1", meta_playbook="meta_judgment_running",
+            event_callback=events.append,
+        )
+    assert events and events[0].get("type") == "error"
 
 
 # ---------------------------------------------------------------------------

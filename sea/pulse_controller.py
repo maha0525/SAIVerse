@@ -511,34 +511,55 @@ class PulseController:
             )
         self._current_meta[persona_id] = request
 
+        # A7 (W1 Chunk A): 例外は [] に変換せず再送出する — 呼び出し側
+        # (judgment_points.run_judgment_point) が台帳の failed/unknown 分類に
+        # 使う。「正常 return = 成功」の偽装をここで作らない。ログは従来どおり
+        # 残し、event_callback には error event を通知する。
         try:
             return self._do_execute(request)
         except BeatGateClosedError as e:
             # 関所 fail-closed: 実行は始まっていない (副作用ゼロ)。メタ判断
-            # レーンに user は来ないので常に WARNING + 空 — 台帳に prepared で
+            # レーンに user は来ないので常に WARNING — 台帳に prepared で
             # 残る実行は回復処理が拾う。
             LOGGER.warning(
                 "[PulseController] Beat gate closed for persona %s (type=%s): %s",
                 persona_id, request.type, e,
             )
-            return []
+            self._notify_meta_error(request, e)
+            raise
         except ExecutionCancelledException as e:
             LOGGER.info(
                 "[PulseController] Meta-judgment cancelled for persona %s, interrupted_by=%s",
                 persona_id, e.interrupted_by,
             )
-            return []
+            self._notify_meta_error(request, e)
+            raise
         except LLMError:
             raise
-        except Exception:
+        except Exception as e:
             LOGGER.exception(
                 "[PulseController] Meta-judgment error for persona %s",
                 persona_id,
             )
-            return []
+            self._notify_meta_error(request, e)
+            raise
         finally:
             if self._current_meta.get(persona_id) is request:
                 del self._current_meta[persona_id]
+
+    @staticmethod
+    def _notify_meta_error(request: ExecutionRequest, exc: BaseException) -> None:
+        """メタ判断レーンの失敗を event_callback に通知する (通知の失敗は握る)。"""
+        callback = request.event_callback
+        if callback is None:
+            return
+        try:
+            callback({"type": "error", "message": str(exc)})
+        except Exception:
+            LOGGER.exception(
+                "[PulseController] meta-judgment error callback failed for persona %s",
+                request.persona_id,
+            )
 
     def submit_meta_judgment(
         self,

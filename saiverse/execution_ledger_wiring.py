@@ -15,18 +15,20 @@ SAIVerseManager の構築 / 起動分離の不変条件に従う:
 - :func:`schedule_recovery_tick` — ``start()`` 段。60 秒周期の掃除 tick を
   EventScheduler に予約する (#1/#3/#6)。
 
-回復 tick は「掃除」のみで行動を生まない (intent §2.4 の二分)。したがって
-完全手動モード (debug_controller) の対象ペルソナに対しても止めない —
+回復 tick の基本は「掃除」で行動を生まない (intent §2.4 の二分)。したがって
+完全手動モード (debug_controller) の対象ペルソナに対しても掃除は止めない —
 手動検証中こそ記録は正確であるべきで、掃除は自律行動ではない。
-「行動を生む」側 (#2 prepared の回収 / #7 schedule reconciliation) は
-kind ごとの回収規則が要るため Phase 1 以降。
+「行動を生む」側のうち **#2 (prepared の回収) は W1 Chunk A で実装済み**
+(:func:`_collect_prepared_judgments` — kind 別規則は D5 の表。refire は行動を
+生むため、手動モード対象ペルソナはスキップする)。#7 (schedule reconciliation)
+は未実装のまま残る。
 """
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
-from saiverse.execution_ledger import ExecutionLedger
+from saiverse.execution_ledger import STATUS_PREPARED, ExecutionLedger
 
 if TYPE_CHECKING:
     from saiverse.saiverse_manager import SAIVerseManager
@@ -47,6 +49,29 @@ RUNNING_DEADLINE_SECONDS = 3600.0
 # 送信トレイの TARGET 名 (intent §4 スキーマ例)。
 TARGET_SAIMEMORY_APPEND = "saimemory.append"
 TARGET_PERCEPTION_PUSH = "perception.push"
+
+#: 判断点 kind の台帳 KIND 前綴り (autonomy_wiring.fire_judgment_point が刻む)。
+JUDGMENT_KIND_PREFIX = "judgment."
+
+#: prepared 回収 (#2、D5 の表): refire する kind と待機秒数。
+#: on_event / post_session はイベント/セッションの収穫が判断に依存するため
+#: 回収価値が高い。refire は一度 running に入れば terminal に落ちるので
+#: 試行回数の管理は不要。
+PREPARED_REFIRE_AFTER_SECONDS = 120.0
+PREPARED_REFIRE_KINDS = (
+    f"{JUDGMENT_KIND_PREFIX}on_event",
+    f"{JUDGMENT_KIND_PREFIX}post_session",
+)
+
+#: prepared 回収 (#2): 期限切れで failed に落とす kind と期限秒数。
+#: day_open / day_close は watchdog が自然再発火する (claim が failed キーを
+#: 退避して回る)。post_conversation は会話の瞬間が過ぎており refire しない。
+PREPARED_EXPIRE_AFTER_SECONDS = 1800.0
+PREPARED_EXPIRE_KINDS = (
+    f"{JUDGMENT_KIND_PREFIX}day_open",
+    f"{JUDGMENT_KIND_PREFIX}day_close",
+    f"{JUDGMENT_KIND_PREFIX}post_conversation",
+)
 
 
 def build_execution_ledger(manager: "SAIVerseManager") -> ExecutionLedger:
@@ -105,7 +130,8 @@ def schedule_recovery_tick(manager: "SAIVerseManager") -> None:
 
 
 def _recovery_tick(manager: "SAIVerseManager") -> None:
-    """定期掃除の 1 周: running 期限監視 (#3) + pending 配送 (#1、dead 化 #6 は配送器内)。
+    """定期掃除の 1 周: running 期限監視 (#3) + prepared 回収 (#2) +
+    pending 配送 (#1、dead 化 #6 は配送器内)。
 
     EventScheduler.schedule_periodic は callback 例外で周期を止める契約なので、
     一度の DB エラーで掃除が永久停止しないよう、ここで例外を吸収してログに残す。
@@ -116,9 +142,117 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: running-deadline sweep failed")
     try:
+        _collect_prepared_judgments(manager)
+    except Exception:
+        LOGGER.exception("[ledger-wiring] recovery tick: prepared collection failed")
+    try:
         _flush_all_pending(manager)
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: pending flush failed")
+
+
+def _collect_prepared_judgments(manager: "SAIVerseManager") -> None:
+    """回復 #2: 走り出せなかった prepared 判断の回収 (intent §2.4 #2、D5)。
+
+    refire 対象は **prepared のみ** — fallback 済みの実行は failed/unknown
+    終端なので refire されない (二重応対なし)。refire は「行動を生む」ため、
+    完全手動モード (``manager._debug_manual_mode_personas``) の対象ペルソナは
+    スキップする。個別の例外は tick を殺さない。
+    """
+    ledger = manager.execution_ledger
+    try:
+        rows = ledger.list_prepared(JUDGMENT_KIND_PREFIX)
+    except Exception:
+        LOGGER.exception("[ledger-wiring] failed to list prepared judgments")
+        return
+    if not rows:
+        return
+    from saiverse import clock
+
+    now = int(clock.now().timestamp())
+    manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
+    for row in rows:
+        try:
+            _collect_one_prepared(manager, row, now, manual_personas)
+        except Exception:
+            LOGGER.exception(
+                "[ledger-wiring] prepared collection failed (execution=%s kind=%s)",
+                row.get("execution_id"), row.get("kind"),
+            )
+
+
+def _collect_one_prepared(
+    manager: "SAIVerseManager",
+    row: Dict[str, Any],
+    now: int,
+    manual_personas: Any,
+) -> None:
+    """prepared 1 行に kind 別回収規則 (D5 の表) を適用する。"""
+    ledger = manager.execution_ledger
+    kind = row.get("kind") or ""
+    execution_id = row.get("execution_id")
+    persona_id = row.get("persona_id")
+    created_at = row.get("created_at")
+    if not execution_id or not isinstance(created_at, int):
+        return
+    age = now - created_at
+
+    if kind in PREPARED_REFIRE_KINDS:
+        if age < PREPARED_REFIRE_AFTER_SECONDS:
+            return
+        if persona_id in manual_personas:
+            LOGGER.debug(
+                "[ledger-wiring] prepared %s refire skipped: persona %s is in "
+                "manual mode (execution=%s)", kind, persona_id, execution_id,
+            )
+            return
+        judgment_kind = kind[len(JUDGMENT_KIND_PREFIX):]
+        payload = row.get("payload")
+        context = payload if isinstance(payload, dict) else None
+        LOGGER.info(
+            "[ledger-wiring] re-firing prepared %s (execution=%s persona=%s age=%ds)",
+            kind, execution_id, persona_id, age,
+        )
+        # 遅延 import (wiring は autonomy_wiring から独立に import され得る)
+        from saiverse import autonomy_wiring
+
+        result = autonomy_wiring.fire_judgment_point(
+            manager, persona_id, judgment_kind,
+            context=context, resume_execution_id=execution_id,
+        )
+        if not result.get("submitted"):
+            # ゲートで止まった refire (自律 OFF / Playbook 欠如等) が prepared の
+            # まま毎 tick 回り続けないよう terminal に落とす (D5: refire 失敗は
+            # terminal に落ちて終わり)。run 側が既に failed/unknown へ遷移させた
+            # 場合はもう prepared ではないので触らない。
+            try:
+                current = ledger.get_execution(execution_id).get("status")
+            except Exception:
+                LOGGER.warning(
+                    "[ledger-wiring] could not re-read refired execution %s",
+                    execution_id, exc_info=True,
+                )
+                return
+            if current == STATUS_PREPARED:
+                ledger.mark_failed(
+                    execution_id, f"refire failed: {result.get('reason')}"
+                )
+        return
+
+    if kind in PREPARED_EXPIRE_KINDS:
+        if age < PREPARED_EXPIRE_AFTER_SECONDS:
+            return
+        LOGGER.info(
+            "[ledger-wiring] expiring prepared %s (execution=%s persona=%s age=%ds)",
+            kind, execution_id, persona_id, age,
+        )
+        ledger.mark_failed(execution_id, "expired: prepared not executed")
+        return
+
+    LOGGER.debug(
+        "[ledger-wiring] prepared %s has no collection rule; leaving as-is "
+        "(execution=%s)", kind, execution_id,
+    )
 
 
 def _flush_all_pending(manager: "SAIVerseManager") -> None:

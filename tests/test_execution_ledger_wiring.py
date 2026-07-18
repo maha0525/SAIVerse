@@ -13,6 +13,9 @@
 - list_pending_personas: メモリ上の personas でなく DB 実態から列挙する
 - _recovery_tick: running 期限監視 + 配送。内部例外を吸収して周期を殺さない
 - schedule_recovery_tick: EventScheduler に key=execution_ledger_recovery で予約
+- prepared 回収 (#2、W1 Chunk A / D5): on_event・post_session は 120 秒経過で
+  refire (resume_execution_id 経由)、day_open 等は 1800 秒で expired 化。
+  手動モード persona は refire スキップ。gate で止まった refire は failed 終端
 
 DB は in-memory SQLite (StaticPool)、記憶側は実 memory.db + Embedder patch
 (test_episodes_wiring.py の流儀)。
@@ -20,6 +23,7 @@ DB は in-memory SQLite (StaticPool)、記憶側は実 memory.db + Embedder patc
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -392,3 +396,150 @@ class TestRecoveryTick:
     def test_schedule_recovery_tick_registers_key(self, manager):
         wiring.schedule_recovery_tick(manager)
         assert manager.event_scheduler.has_key(wiring.RECOVERY_TICK_KEY)
+
+
+# ---------------------------------------------------------------------------
+# prepared 回収 (#2、W1 Chunk A / D5)
+# ---------------------------------------------------------------------------
+
+
+class TestPreparedCollection:
+    BASE = datetime(2026, 7, 19, 9, 0, 0)
+
+    def _claim_prepared(self, ledger, kind, persona_id=PERSONA_ID, payload=None):
+        eid, runnable, _st = ledger.claim_execution(
+            kind, idempotency_key=None, persona_id=persona_id, payload=payload,
+        )
+        assert runnable
+        return eid
+
+    def _patch_fire(self, monkeypatch, result=None):
+        from saiverse import autonomy_wiring
+
+        calls = []
+
+        def _fake(mgr, pid, kind, context=None, resume_execution_id=None, **kw):
+            calls.append({
+                "persona_id": pid, "kind": kind, "context": context,
+                "resume_execution_id": resume_execution_id,
+            })
+            return result if result is not None else {"submitted": True}
+
+        monkeypatch.setattr(autonomy_wiring, "fire_judgment_point", _fake)
+        return calls
+
+    def test_on_event_prepared_refired_after_delay(self, manager, monkeypatch):
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        payload = {"event_text": "掲示板の告知", "is_alert": False}
+        eid = self._claim_prepared(ledger, "judgment.on_event", payload=payload)
+        calls = self._patch_fire(monkeypatch)
+
+        # 60 秒: まだ回収しない
+        clock.advance_to(datetime(2026, 7, 19, 9, 1, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert calls == []
+
+        # 120 秒経過: refire (payload から context 復元 + resume_execution_id)
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert calls == [{
+            "persona_id": PERSONA_ID, "kind": "on_event",
+            "context": payload, "resume_execution_id": eid,
+        }]
+
+    def test_post_session_prepared_refired(self, manager, monkeypatch):
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        payload = {"task_ref": "task:1", "session_result": {"episode_ref": "episode:7"}}
+        eid = self._claim_prepared(ledger, "judgment.post_session", payload=payload)
+        calls = self._patch_fire(monkeypatch)
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 1
+        assert calls[0]["kind"] == "post_session"
+        assert calls[0]["resume_execution_id"] == eid
+
+    def test_day_open_prepared_expires_via_recovery_tick(self, manager, monkeypatch):
+        """day_open は refire せず 1800 秒で expired 化 (watchdog が自然再発火する)。
+        _recovery_tick 経由で回収が配線されていることも同時に確認する。"""
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(ledger, "judgment.day_open")
+        calls = self._patch_fire(monkeypatch)
+
+        # 10 分: まだ期限内
+        clock.advance_to(datetime(2026, 7, 19, 9, 10, 0))
+        wiring._recovery_tick(manager)
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+
+        # 40 分: expired
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._recovery_tick(manager)
+        entry = ledger.get_execution(eid)
+        assert entry["status"] == XL.STATUS_FAILED
+        assert "expired" in entry["error"]
+        assert calls == []  # refire はされない
+
+    def test_post_conversation_prepared_expires(self, manager, monkeypatch):
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(ledger, "judgment.post_conversation")
+        calls = self._patch_fire(monkeypatch)
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_FAILED
+        assert calls == []
+
+    def test_manual_mode_persona_skips_refire(self, manager, monkeypatch):
+        """refire は「行動を生む」ので手動モード persona はスキップ (prepared 温存)。"""
+        clock.enable_virtual(self.BASE)
+        manager._debug_manual_mode_personas = {PERSONA_ID}
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        calls = self._patch_fire(monkeypatch)
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert calls == []
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+
+    def test_refire_gate_failure_falls_to_failed(self, manager, monkeypatch):
+        """gate で止まった refire (自律 OFF 等) は prepared のまま毎 tick 回り
+        続けず failed 終端に落ちる (D5: refire 失敗は terminal)。"""
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        self._patch_fire(monkeypatch, result={
+            "submitted": False, "reason": "persona autonomy disabled",
+        })
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        entry = ledger.get_execution(eid)
+        assert entry["status"] == XL.STATUS_FAILED
+        assert "refire failed" in entry["error"]
+
+    def test_unknown_judgment_kind_left_as_is(self, manager, monkeypatch):
+        """回収規則の無い judgment.* kind は触らない (安全側)。"""
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(ledger, "judgment.someday_new_kind")
+        calls = self._patch_fire(monkeypatch)
+        clock.advance_to(datetime(2026, 7, 19, 10, 0, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert calls == []
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+
+    def test_non_judgment_prepared_not_collected(self, manager, monkeypatch):
+        """judgment. 前綴り以外の prepared は回収対象外 (list_prepared の絞り)。"""
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid, _ = ledger.begin_execution("metabolism.run", persona_id=PERSONA_ID)
+        calls = self._patch_fire(monkeypatch)
+        clock.advance_to(datetime(2026, 7, 19, 10, 0, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert calls == []
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED

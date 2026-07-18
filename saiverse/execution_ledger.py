@@ -252,6 +252,146 @@ class ExecutionLedger:
         finally:
             db.close()
 
+    def claim_execution(
+        self,
+        kind: str,
+        idempotency_key: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[str], bool, Optional[str]]:
+        """実行の「席」を取る (Phase 1 API — 判断点の重複抑止、intent §11-3)。
+
+        :meth:`begin_execution` (冪等 INSERT のみ) と違い、既存行の**状態を見て**
+        「いま走ってよいか」まで判定する:
+
+        - 既存なし / ``idempotency_key=None`` → 新規 prepared → runnable
+        - 既存 prepared → その行を再利用して runnable (payload は既存の凍結値を
+          維持する — 上書きしない)
+        - 既存 failed → キーを ``{key}#failed-{id先頭8字}`` に退避して新規
+          prepared → runnable (failed は副作用ゼロ保証なので再実行安全、
+          intent §2.1)
+        - 既存 running / applied / completed → runnable=False (既に走った /
+          走っている)
+        - 既存 unknown → runnable=False。**自動再実行禁止** (intent §2.5) —
+          裁定 (list_unknown → 照合) まで同キーの実行はブロックする
+
+        競合 (同時 INSERT) は :meth:`begin_execution` の IntegrityError 流儀に
+        倣い、rollback → 再読で既存行へ収束させる。
+
+        Returns:
+            ``(execution_id, runnable, existing_status)``。``runnable=True`` の
+            とき execution_id は実行に使ってよい prepared 行。
+            ``existing_status`` は既存行に合流/退避したときの元の状態
+            (新規作成なら None)。
+        """
+        if not kind:
+            raise ValueError("kind is required")
+        if idempotency_key is None:
+            execution_id, _created = self.begin_execution(
+                kind, idempotency_key=None, persona_id=persona_id, payload=payload,
+            )
+            return execution_id, True, None
+
+        for _attempt in range(2):
+            db = self._session_factory()
+            try:
+                existing = (
+                    db.query(ExecutionLedgerEntry)
+                    .filter(
+                        ExecutionLedgerEntry.KIND == kind,
+                        ExecutionLedgerEntry.IDEMPOTENCY_KEY == idempotency_key,
+                    )
+                    .first()
+                )
+                now = _now_epoch()
+                if existing is None:
+                    execution_id = str(uuid.uuid4())
+                    db.add(ExecutionLedgerEntry(
+                        EXECUTION_ID=execution_id,
+                        KIND=kind,
+                        IDEMPOTENCY_KEY=idempotency_key,
+                        PERSONA_ID=persona_id,
+                        STATUS=STATUS_PREPARED,
+                        PAYLOAD_JSON=(
+                            json.dumps(payload, ensure_ascii=False)
+                            if payload is not None else None
+                        ),
+                        CREATED_AT=now,
+                        UPDATED_AT=now,
+                    ))
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        # 競合: 別スレッド/プロセスが先に INSERT — 再読で収束
+                        db.rollback()
+                        continue
+                    LOGGER.info(
+                        "[ledger] claimed %s kind=%s key=%s persona=%s",
+                        execution_id, kind, idempotency_key, persona_id,
+                    )
+                    return execution_id, True, None
+
+                status = existing.STATUS
+                if status == STATUS_PREPARED:
+                    LOGGER.info(
+                        "[ledger] claim reuses prepared %s kind=%s key=%s "
+                        "(payload frozen, not overwritten)",
+                        existing.EXECUTION_ID, kind, idempotency_key,
+                    )
+                    return existing.EXECUTION_ID, True, STATUS_PREPARED
+                if status == STATUS_FAILED:
+                    retired_key = (
+                        f"{idempotency_key}#failed-{existing.EXECUTION_ID[:8]}"
+                    )
+                    existing.IDEMPOTENCY_KEY = retired_key
+                    execution_id = str(uuid.uuid4())
+                    db.add(ExecutionLedgerEntry(
+                        EXECUTION_ID=execution_id,
+                        KIND=kind,
+                        IDEMPOTENCY_KEY=idempotency_key,
+                        PERSONA_ID=persona_id,
+                        STATUS=STATUS_PREPARED,
+                        PAYLOAD_JSON=(
+                            json.dumps(payload, ensure_ascii=False)
+                            if payload is not None else None
+                        ),
+                        CREATED_AT=now,
+                        UPDATED_AT=now,
+                    ))
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        db.rollback()
+                        continue
+                    LOGGER.info(
+                        "[ledger] claim retired failed %s (key -> %s) and "
+                        "claimed %s kind=%s key=%s",
+                        existing.EXECUTION_ID, retired_key,
+                        execution_id, kind, idempotency_key,
+                    )
+                    return execution_id, True, STATUS_FAILED
+
+                if status == STATUS_UNKNOWN:
+                    LOGGER.warning(
+                        "[ledger] claim blocked by unknown execution %s "
+                        "(kind=%s key=%s): 自動再実行は禁止 (intent §2.5)。"
+                        "list_unknown で照合・裁定するまで同キーの実行は"
+                        "ブロックされます",
+                        existing.EXECUTION_ID, kind, idempotency_key,
+                    )
+                else:
+                    LOGGER.info(
+                        "[ledger] claim dedup: kind=%s key=%s -> existing %s "
+                        "(status=%s, not runnable)",
+                        kind, idempotency_key, existing.EXECUTION_ID, status,
+                    )
+                return existing.EXECUTION_ID, False, status
+            finally:
+                db.close()
+        raise ExecutionLedgerError(
+            f"claim_execution did not converge (kind={kind}, key={idempotency_key})"
+        )
+
     def _get_entry(self, db: Session, execution_id: str) -> ExecutionLedgerEntry:
         entry = (
             db.query(ExecutionLedgerEntry)
@@ -725,6 +865,30 @@ class ExecutionLedger:
                 db.query(ExecutionLedgerEntry)
                 .filter(ExecutionLedgerEntry.STATUS == STATUS_UNKNOWN)
                 .order_by(ExecutionLedgerEntry.UPDATED_AT.asc())
+                .all()
+            )
+            return [_entry_to_dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def list_prepared(self, kind_prefix: str) -> List[Dict[str, Any]]:
+        """prepared の実行一覧 (回復 #2「prepared の回収」の観測面)。CREATED_AT 昇順。
+
+        Args:
+            kind_prefix: KIND の前方一致 (例 ``"judgment."``)。LIKE の
+                ワイルドカード文字 (``%`` / ``_``) を含む prefix は想定しない。
+        """
+        if not kind_prefix:
+            raise ValueError("kind_prefix is required")
+        db = self._session_factory()
+        try:
+            rows = (
+                db.query(ExecutionLedgerEntry)
+                .filter(
+                    ExecutionLedgerEntry.STATUS == STATUS_PREPARED,
+                    ExecutionLedgerEntry.KIND.like(f"{kind_prefix}%"),
+                )
+                .order_by(ExecutionLedgerEntry.CREATED_AT.asc())
                 .all()
             )
             return [_entry_to_dict(r) for r in rows]

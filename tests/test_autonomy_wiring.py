@@ -32,6 +32,7 @@ from database.models import AI, Base, City, Playbook, PersonaSchedule, User
 from saiverse import autonomy_wiring as wiring
 from saiverse import clock
 from saiverse import day_plan
+from saiverse import execution_ledger as XL
 from saiverse.event_scheduler import EventScheduler
 
 PERSONA_ID = "alice"
@@ -232,6 +233,136 @@ def test_fire_judgment_point_uses_meta_layer_lock(session_factory):
     result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
     assert result["submitted"] is True
     assert acquired == ["enter", "exit"]
+
+
+# ---------------------------------------------------------------------------
+# fire_judgment_point × 実行台帳 (W1 Chunk A: A2 の重複抑止)
+# ---------------------------------------------------------------------------
+
+
+def _attach_ledger(manager, session_factory):
+    manager.execution_ledger = XL.ExecutionLedger(session_factory)
+    return manager.execution_ledger
+
+
+def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatch):
+    """A2: 定刻 (schedule) → watchdog の順でも day_open の submit は 1 回だけ。
+
+    2 回目 (watchdog 相当、precondition 付き) は claim で duplicate になり、
+    precondition の評価にも境界副作用 (ライフ確定) にも到達しない。
+    """
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+
+    confirmed: List[str] = []
+    monkeypatch.setattr(
+        wiring, "_confirm_life_at_day_open",
+        lambda mgr, pid, ctx: confirmed.append(pid),
+    )
+
+    first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    assert first["submitted"] is True
+    assert first["execution_id"] is not None
+    assert len(manager.pulse_controller.calls) == 1
+    assert confirmed == [PERSONA_ID]
+    # Chunk B (finalize の台帳化) 前は running のまま = 経過措置で成功扱い
+    assert ledger.get_execution(first["execution_id"])["status"] == XL.STATUS_RUNNING
+
+    precondition_evals: List[bool] = []
+
+    def _precondition():
+        precondition_evals.append(True)
+        return True
+
+    second = wiring.fire_judgment_point(
+        manager, PERSONA_ID, "day_open", precondition=_precondition,
+    )
+    assert second["submitted"] is False
+    assert second["reason"] == f"duplicate:{XL.STATUS_RUNNING}"
+    assert second["execution_id"] == first["execution_id"]
+    # 判断 Pulse は増えず、precondition も境界副作用も走っていない
+    assert len(manager.pulse_controller.calls) == 1
+    assert precondition_evals == []
+    assert confirmed == [PERSONA_ID]
+
+
+def test_fire_day_open_dedup_watchdog_then_scheduled(session_factory, monkeypatch):
+    """A2: watchdog (precondition 付き) → 定刻の逆順でも submit は 1 回だけ。"""
+    manager, _ = _make_manager(session_factory)
+    _attach_ledger(manager, session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+
+    confirmed: List[str] = []
+    monkeypatch.setattr(
+        wiring, "_confirm_life_at_day_open",
+        lambda mgr, pid, ctx: confirmed.append(pid),
+    )
+
+    first = wiring.fire_judgment_point(
+        manager, PERSONA_ID, "day_open", precondition=lambda: True,
+    )
+    assert first["submitted"] is True
+    assert len(manager.pulse_controller.calls) == 1
+    assert confirmed == [PERSONA_ID]
+
+    second = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    assert second["submitted"] is False
+    assert second["reason"].startswith("duplicate:")
+    assert len(manager.pulse_controller.calls) == 1
+    assert confirmed == [PERSONA_ID]
+
+
+def test_fire_precondition_rejection_marks_failed_and_next_claim_runs(
+    session_factory,
+):
+    """precondition 却下は claim 済みの席を failed に落とし、次の fire は
+    failed キー退避で再び走れる (D2/D3)。"""
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+
+    rejected = wiring.fire_judgment_point(
+        manager, PERSONA_ID, "day_open", precondition=lambda: False,
+    )
+    assert rejected["submitted"] is False
+    assert rejected["reason"] == "precondition not met"
+    assert ledger.get_execution(rejected["execution_id"])["status"] == XL.STATUS_FAILED
+    assert manager.pulse_controller.calls == []
+
+    retried = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    assert retried["submitted"] is True
+    assert retried["execution_id"] != rejected["execution_id"]
+    assert len(manager.pulse_controller.calls) == 1
+
+
+def test_fire_force_bypasses_idempotency_key(session_factory):
+    """force=True はキーを None に落とし、debug 明示発火が duplicate に阻まれない。"""
+    manager, _ = _make_manager(session_factory)
+    _attach_ledger(manager, session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+
+    first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    assert first["submitted"] is True
+    forced = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open", force=True)
+    assert forced["submitted"] is True
+    assert forced["execution_id"] != first["execution_id"]
+    assert len(manager.pulse_controller.calls) == 2
+
+
+def test_fire_without_ledger_degrades_with_single_warning(session_factory, caplog):
+    """台帳の無い manager (旧テストスタブ) は WARN 一回で従来挙動に degrade する。"""
+    wiring._LEDGER_MISSING_WARNED.discard(PERSONA_ID)
+    manager, _ = _make_manager(session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+    with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
+        r1 = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+        r2 = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+    assert r1["submitted"] is True
+    assert r2["submitted"] is True  # 台帳なし = dedup も無し (従来挙動)
+    assert r1["execution_id"] is None
+    warns = [m for m in caplog.messages if "no execution_ledger" in m]
+    assert len(warns) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +740,63 @@ def test_external_event_unknown_reaction_avoids_double_handling(
         )
     assert route == wiring.ROUTE_JUDGED_UNKNOWN
     assert dispatched == []
+
+
+def test_external_event_runtime_error_marks_unknown_and_falls_back_once(
+    session_factory,
+):
+    """A7: メタレーンの例外が [] に偽装されず submitted=False になり、
+    direct dispatch fallback が 1 回だけ起きる。台帳は unknown 終端
+    (prepared ではないので回復 tick の refire 対象にならない)。"""
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+
+    class _BoomController:
+        def __init__(self):
+            self.calls = 0
+
+        def submit_meta_judgment(self, **kwargs):
+            self.calls += 1
+            raise RuntimeError("meta lane down")
+
+    manager.pulse_controller = _BoomController()
+    dispatched: List[str] = []
+    route = wiring.handle_external_event(
+        manager, PERSONA_ID, "掲示板の告知",
+        dispatch_direct=lambda: dispatched.append("direct"),
+    )
+    assert route == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
+    assert dispatched == ["direct"]  # fallback は 1 回だけ
+    assert manager.pulse_controller.calls == 1
+    unknown = ledger.list_unknown()
+    assert len(unknown) == 1
+    assert unknown[0]["kind"] == "judgment.on_event"
+
+
+def test_external_event_reaction_falls_back_to_ledger_result(
+    session_factory, monkeypatch,
+):
+    """D6 の分岐: callback で reaction が読めなくても台帳 RESULT_JSON の
+    reaction から応対を起動できる (Chunk B で finalize が result を刻む前提の口)。"""
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    eid, runnable, _ = ledger.claim_execution(
+        "judgment.on_event", idempotency_key=None, persona_id=PERSONA_ID,
+    )
+    assert runnable
+    ledger.mark_running(eid)
+    ledger.mark_applied(eid, result={"reaction": "engage_now"})
+
+    _fake_fire(monkeypatch, {
+        "submitted": True, "applied_events": [], "execution_id": eid,
+    })
+    dispatched: List[str] = []
+    route = wiring.handle_external_event(
+        manager, PERSONA_ID, "呼びかけ",
+        dispatch_direct=lambda: dispatched.append("direct"),
+    )
+    assert route == wiring.ROUTE_JUDGED_ENGAGE_NOW
+    assert dispatched == ["direct"]
 
 
 # ---------------------------------------------------------------------------
