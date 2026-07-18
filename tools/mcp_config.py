@@ -125,7 +125,11 @@ def _resolve_placeholder(
     if len(parts) == 2 and parts[0] == "instance":
         key = parts[1]
         if instance_context is None:
-            LOGGER.warning(
+            # 名前付きインスタンス外の interpolate (テンプレート一覧・グローバル
+            # reload 等) では ${instance.*} が未解決なのは正常 — WARNING だと
+            # 呼ばれるたびに error.log を洪水させる (2026-07-19 実測 11,181 行で
+            # 実エラーが埋没)。実起動時の鍵違いは下の WARNING が引き続き担う。
+            LOGGER.debug(
                 "MCP config: placeholder '${%s}' requires named-instance "
                 "context but none provided",
                 placeholder,

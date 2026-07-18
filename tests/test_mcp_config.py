@@ -227,6 +227,34 @@ class MCPConfigTestCase(unittest.TestCase):
         # Without instance context, an ${instance.*} placeholder stays unresolved.
         self.assertIsNone(_resolve_placeholder("instance.ws_port"))
 
+    def test_missing_instance_context_does_not_warn(self) -> None:
+        """インスタンス外の interpolate で WARNING を出さない (DEBUG のみ)。
+
+        名前付きインスタンス構成のテンプレートは非インスタンス文脈でも
+        interpolate されるのが正常で、WARNING だと呼ばれるたびに error.log を
+        洪水させる (2026-07-19 実測 11,181 行)。
+        """
+        import logging
+
+        logger = logging.getLogger("tools.mcp_config")
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Capture(level=logging.DEBUG)
+        logger.addHandler(handler)
+        old_level = logger.level
+        logger.setLevel(logging.DEBUG)
+        try:
+            self.assertIsNone(_resolve_placeholder("instance.ws_port"))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+        warn_or_above = [r for r in records if r.levelno >= logging.WARNING]
+        self.assertEqual(warn_or_above, [])
+
     def test_resolve_placeholder_instance_missing_key_returns_none(self) -> None:
         self.assertIsNone(
             _resolve_placeholder("instance.nope", instance_context={"ws_port": "1"})

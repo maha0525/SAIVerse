@@ -242,6 +242,28 @@ def test_diff_notifies_when_spell_system_toggles():
     assert labels[0].kind == "spell_system_disabled"
 
 
+def test_stale_spell_set_raises_snapshot_stale_error():
+    """スペルセット変化の失効は SnapshotStaleError で表明する。
+
+    store 側はこの型を破損 (ERROR+traceback) と区別して INFO で扱う —
+    想定内の再 capture 経路が error 面を汚さないための契約 (2026-07-19)。
+    """
+    from sea.head_pipeline.types import SnapshotStaleError
+
+    section = SpellListSection()
+    snap = SpellListSnapshot(
+        enabled=True,
+        entries=(),
+        addon_manifests=(),
+        registered_names=frozenset({"__definitely_not_a_live_spell__"}),
+    )
+    data = section.serialize_snapshot(snap)
+    with pytest.raises(SnapshotStaleError):
+        section.deserialize_snapshot(data)
+    # 後方互換: ValueError を期待していた既存の呼び手も壊れない
+    assert issubclass(SnapshotStaleError, ValueError)
+
+
 def test_serialize_deserialize_roundtrip():
     section = SpellListSection()
     snap = SpellListSnapshot(

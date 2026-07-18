@@ -19,6 +19,7 @@ from sea.head_pipeline.types import (
     LineHeadInput,
     NotificationLabel,
     RenderedSection,
+    SnapshotStaleError,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -310,7 +311,7 @@ class SpellListSection:
                 "triggering recapture",
                 added or "{}", removed or "{}",
             )
-            raise ValueError("spell set changed since snapshot was stored")
+            raise SnapshotStaleError("spell set changed since snapshot was stored")
 
     # ---- 内部ヘルパー ----
 

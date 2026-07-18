@@ -13,6 +13,16 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
+class SnapshotStaleError(ValueError):
+    """保存済み snapshot が意図的に無効 (再 capture が正) であることを表明する。
+
+    Section.deserialize_snapshot が「壊れている」のではなく「古いので作り直す
+    べき」と判断したときに投げる。store 側はこれを ERROR (破損) と区別して
+    静かに扱う — 想定内の再 capture 経路を traceback 付き ERROR で記録しない
+    (2026-07-19、spell_list のスペルセット変化 ×10 が error 面を汚した実害)。
+    """
+
+
 class EventType(enum.Enum):
     """snapshot 再構築 / dirty マークを引き起こすイベント種別。
 

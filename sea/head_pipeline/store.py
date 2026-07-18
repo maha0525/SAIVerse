@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy.orm import Session
 
 from sea.head_pipeline.registry import HeadSectionRegistry
-from sea.head_pipeline.types import LineHeadSnapshot
+from sea.head_pipeline.types import LineHeadSnapshot, SnapshotStaleError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -214,6 +214,14 @@ class LineHeadSnapshotStore:
                 if data is not None:
                     try:
                         sections[section.name] = section.deserialize_snapshot(data)
+                    except SnapshotStaleError:
+                        # 意図的な失効 (Section が再 capture を要求) — 破損では
+                        # ないので ERROR/traceback にしない。詳細は Section 側が
+                        # INFO で記録済み。
+                        LOGGER.info(
+                            "head_pipeline_store: snapshot stale (recapture) section=%s",
+                            section.name,
+                        )
                     except Exception:
                         LOGGER.exception(
                             "head_pipeline_store: deserialize failed (snapshot) section=%s",
@@ -226,6 +234,11 @@ class LineHeadSnapshotStore:
                 if data is not None:
                     try:
                         last_notified[section.name] = section.deserialize_snapshot(data)
+                    except SnapshotStaleError:
+                        LOGGER.info(
+                            "head_pipeline_store: snapshot stale (recapture) section=%s (notified)",
+                            section.name,
+                        )
                     except Exception:
                         LOGGER.exception(
                             "head_pipeline_store: deserialize failed (notified) section=%s",
