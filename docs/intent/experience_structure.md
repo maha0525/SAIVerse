@@ -1,6 +1,6 @@
 # Intent: 体験の構造 — 包含の木・digest・継承 DAG
 
-**ステータス**: 設計中 (v0.3 2026-07-19 — **束ねアルゴリズム確定** (air 実ログのモック可視化でまはー検証済み)。残る裁定点は §11 の 1 (知覚側スコープ)・6 (memory_architecture_v2 との関係) のみ)
+**ステータス**: 実装待ち (v0.4 2026-07-19 — 全主要裁定完了: 束ねアルゴリズム=モック検証済み確定・digest正準=咀嚼層・移行=再生成なし帰化・継承エッジ=アクティブスレッド選択型・MAv2=並置・Track Chronicle=廃止方向・知覚側=薄く保持し実装分離。実装順は §12、第一号=(a') W1 同工区)
 **位置付け**: 記憶系の最上位 intent。生ログ・Chronicle・Memopedia・episode・知覚バッファ・メティス記憶ブリッジの取り込みを **一つの構造** の下に束ねる。個別文書はここを指す参照に格下げされる (§10)。
 **前提**: [concept_consolidation.md](concept_consolidation.md) (Memory Atlas) / [persona_cognition/judgment_points.md](persona_cognition/judgment_points.md) §6 ((a') 統合) / [metis_memory_bridge.md](metis_memory_bridge.md) / [../issues/chronicle_cross_thread_mixing.md](../issues/chronicle_cross_thread_mixing.md) / [../issues/memory_continuity_graph.md](../issues/memory_continuity_graph.md)
 
@@ -138,10 +138,9 @@ head は capture→store→render で既にこの規律を卒業している (�
 6. **memory_architecture_v2 との関係 = 並置** (2026-07-19 まはー裁定)。境界線: ゾーン A (コア記憶)・ゾーン C (自動想起)・Memopedia 再編・インポート・農園は MAv2 の管轄のまま。**Chronicle の生成の単位とトリガーは本 intent へ移管** (MAv2 §6.1 に移管注記済み — 産物のフラクタル性と既存データ非破壊は両文書共通の不変)。MAv2 §6.2 の読み込み予算制は「粗いノードが無い土地」のフォールバックとして共存。3 ゾーンモデルは不変 — 本 intent のコンテキスト帯はゾーン B の中身の世代交代 (位置=head・更新契機=Metabolism/anchor 量子化・キャッシュ安定性は不変)。MAv2 不変条件 §10-4 を本 intent §4 に輸入 (下記 7 原則目)
 
 10. **Track Chronicle = 廃止方向** (2026-07-19 まはー裁定): 独立生成キューとしての Track Chronicle は完全廃止の直感、廃止は早めでよい。ただしそれが解こうとしていた本丸 —「同一 Track の episode 間で『この前は何やったんだっけ』を即座に思い出す」— は未解決のまま残る (机メモは前日つなぎで実質機能していない)。この再訪問題は別 issue [track_episode_continuity.md](../issues/track_episode_continuity.md) で扱う (episode digest 正準化後の purpose 射影読み口が有力候補)
+1. **知覚側のスコープ = 本 intent に薄く保持、実装は分離** (2026-07-19 まはー裁定): §7 は診断と原則 (翻訳のみ・直挿し段階的廃止) を持つに留め、詳細設計と実装は [perception_buffer.md](perception_buffer.md) の後続 Phase に置く (子 intent 新設なし)。実装は圧縮側と完全分離 — event_message は既に Chronicle 材料から除外されており、帯レンダラは現行の直挿しと共存できる (構造的依存なし・手戻りなし)。intent の肥大回避も理由の一つ
 
-**未確定**:
-
-1. **スコープ**: §7 (知覚側) を本 intent で薄く持つ形でよいか、子 intent に分けるか — 考え中
+(残る未確定は §11-9 = presence 極小 episode の窓占有のみ — 実装時の小物)
 9. **presence 等の極小 episode の窓占有** (モックで観測): サイズ 1 字の presence episode が class0 窓のノード枠を食う。実装時に「ラベル digest は窓予算に数えない」か「窓予算を字数ベースにする」かを決める (小物)
 
 ## 12. 実装順の見立て (参考 — 工程の真実は audit_remediation_plan / in_flight が持つ)

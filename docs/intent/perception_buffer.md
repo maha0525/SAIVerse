@@ -1,6 +1,6 @@
 # Intent Document: 知覚バッファ (Perception Buffer)
 
-**ステータス**: Phase 1a/2a/3＋移動時拡充まで**実機検証済み・完了** (quon で確認、ペルソナ側評判も良好, 2026-07-09)。残 (いずれも後回し): Phase 4=凍結概念の一般化 (独立着手可)、Phase 1b/2b=起動力ディスパッチャ＋会話統合 (Phase 5 UC-2 と重なる)、Phase 3 の項目編集。
+**ステータス**: Phase 1a/2a/3＋移動時拡充まで**実機検証済み・完了** (quon で確認、ペルソナ側評判も良好, 2026-07-09)。残 (いずれも後回し): Phase 4=凍結概念の一般化 (独立着手可)、Phase 1b/2b=起動力ディスパッチャ＋会話統合 (Phase 5 UC-2 と重なる)、Phase 3 の項目編集。**後続 Phase の方向は [experience_structure.md](experience_structure.md) §7 の原則に従う** (2026-07-19 裁定: コンテキストに載るのは翻訳のみ・event_message 直挿しの段階的廃止。詳細設計は本 intent の後続 Phase として置く)。
 **位置付け**: 「ペルソナが発話していない間に外界から得る知覚」を統一的に扱う永続バッファ。現在バラバラに実装されている世界状態の差分通知・メタ記憶訂正通知・入室時想起・他ペルソナ発話取り込みを、一つの時間モデルの派生として畳む横断基盤。
 **前提**: `cached_head_architecture.md` (Section / 差分通知 / 末尾注入)、`persona_cognition/pulse_dispatch.md` (Pulse 起動契機)、`memory_architecture_v2.md` §5.1 (コア記憶訂正 = 知覚バッファの一利用者)
 
