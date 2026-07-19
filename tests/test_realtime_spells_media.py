@@ -82,7 +82,12 @@ class RealtimeSpellMediaTest(unittest.TestCase):
         runtime = SimpleNamespace(manager=SimpleNamespace(SessionLocal=lambda: session))
         persona = SimpleNamespace(persona_id="air_test")
 
+        # This test fully controls SPELL_TOOL_NAMES with a narrowed set, so
+        # short-circuit addon-name canonicalization (which consults the real
+        # tool registry) — its behavior is pinned in
+        # tests/test_native_tool_addon_prefix.py.
         with mock.patch.object(runtime_llm, "SPELL_TOOL_NAMES", {"see"}), \
+             mock.patch.object(runtime_llm, "canonicalize_spell_name", lambda n: n), \
              mock.patch.object(runtime_llm, "_run_spell_tool_async", fake_spell):
             asyncio.run(
                 runtime_llm._execute_realtime_spells(

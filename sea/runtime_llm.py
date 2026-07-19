@@ -33,7 +33,7 @@ from saiverse.usage_tracker import get_usage_tracker
 # binding these names at module import time, we freeze the references to
 # the real SAIVerse ``tools`` package regardless of later sys.modules
 # manipulation. See memory/project_tts_import_pollution.md.
-from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
+from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY, canonicalize_spell_name
 from tools.core import parse_tool_result
 from tools.context import persona_context
 from sea.mode_spell_permissions import check_spell_permission
@@ -1295,13 +1295,20 @@ async def _run_spell_loop(
             # (2026-07-05 実 LLM シム 異常 #2).
             malformed_spells: List[Tuple[str, str, Any]] = []
             all_parsed = _parse_spell_lines(text, malformed_out=malformed_spells)
+            # Canonicalize each parsed name so a bare addon spell name (e.g.
+            # ``see``) resolves to its namespaced key (``stackchan__see``) when
+            # unambiguous. Ambiguous/unknown names are left unchanged and fall
+            # into unknown_spells below. The span (m) and normalized echo (norm)
+            # keep the persona's original text.
+            _classified = [
+                (canonicalize_spell_name(name), args, m, norm)
+                for name, args, m, norm in all_parsed
+            ]
             valid_spells = [
-                (name, args, m, norm) for name, args, m, norm in all_parsed
-                if name in SPELL_TOOL_NAMES
+                t for t in _classified if t[0] in SPELL_TOOL_NAMES
             ]
             unknown_spells = [
-                (name, args, m, norm) for name, args, m, norm in all_parsed
-                if name not in SPELL_TOOL_NAMES
+                t for t in _classified if t[0] not in SPELL_TOOL_NAMES
             ]
 
             # Nothing spell-like at all → normal speech, exit the loop. Unknown
@@ -1884,6 +1891,9 @@ async def _execute_pre_spells(
         parsed = _parse_spell_lines(entry)
         if parsed:
             for name, args, _, normalized in parsed:
+                # Bare addon spell names persisted before namespacing (or written
+                # without the prefix) resolve to their <addon>__<name> key here.
+                name = canonicalize_spell_name(name)
                 if name not in SPELL_TOOL_NAMES:
                     LOGGER.warning("[sea][pre_spells] Unknown spell '%s', skipping", name)
                     continue
@@ -1892,7 +1902,7 @@ async def _execute_pre_spells(
         # Try args-omitted form
         m = _SPELL_PATTERN_NO_ARGS.search(entry)
         if m:
-            spell_name = m.group(1)
+            spell_name = canonicalize_spell_name(m.group(1))
             if spell_name not in SPELL_TOOL_NAMES:
                 LOGGER.warning("[sea][pre_spells] Unknown spell '%s' (no-args form), skipping", spell_name)
                 continue
@@ -2086,7 +2096,9 @@ async def _execute_realtime_spells(
     result_sections: List[str] = []
     aggregated_media: List[Dict[str, Any]] = []
     for binding in bindings:
-        spell_name = binding.SPELL_NAME
+        # Bindings persist a bare SPELL_NAME; canonicalize so bindings saved
+        # before native addon tools were namespaced still resolve.
+        spell_name = canonicalize_spell_name(binding.SPELL_NAME)
         if spell_name not in SPELL_TOOL_NAMES:
             LOGGER.warning("[sea][realtime_spells] Unknown spell '%s', skipping", spell_name)
             continue

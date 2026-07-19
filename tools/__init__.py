@@ -200,6 +200,47 @@ def _remove_registered_tool(name: str) -> None:
     SPELL_TOOL_SCHEMAS.pop(name, None)
 
 
+def _registry_key(schema: ToolSchema) -> str:
+    """Compute the registry key for a native tool.
+
+    Native tools loaded from ``expansion_data/<addon>/tools/`` carry a resolved
+    ``addon_name`` (see ``_infer_addon_name``) and are registered under the
+    namespaced key ``<addon>__<tool>`` — mirroring how MCP tools are already
+    keyed (``<qualified>__<tool>``). Without this, two addons that both ship a
+    native tool with the same name (e.g. ``see``) silently overwrote each other
+    (last loader wins). builtin_data/ and user_data/ tools have no addon_name
+    and keep their bare name (docs/issues/native_tool_addon_prefix_missing.md).
+    """
+    addon = getattr(schema, "addon_name", None)
+    if addon:
+        return f"{addon}__{schema.name}"
+    return schema.name
+
+
+def canonicalize_spell_name(name: str) -> str:
+    """Map a possibly-bare spell name to its actual registered key.
+
+    Resolution order:
+      1. Exact match — ``name`` is already a registered key → returned as-is.
+      2. Unique addon-prefixed match — exactly one registered spell has the
+         form ``<addon>__<name>`` → returned (backward compat for bare names
+         persisted before native addon tools were namespaced, e.g. old
+         ``realtime_spell_binding.SPELL_NAME`` / ``PersonaSchedule.pre_spells``
+         entries, and for personas that drop the addon prefix when it is
+         unambiguous).
+      3. Otherwise (unknown, or ambiguous because two addons expose the same
+         bare name) → returned unchanged, so the caller reports it as an
+         unknown spell rather than firing the wrong one.
+    """
+    if name in TOOL_REGISTRY:
+        return name
+    suffix = "__" + name
+    matches = [key for key in SPELL_TOOL_NAMES if key.endswith(suffix)]
+    if len(matches) == 1:
+        return matches[0]
+    return name
+
+
 def _register_multiple_tools(module: Any, addon_name: Optional[str] = None) -> bool:
     """Register multiple tools from a module with schemas() function.
 
@@ -218,18 +259,20 @@ def _register_multiple_tools(module: Any, addon_name: Optional[str] = None) -> b
                 LOGGER.warning("Tool '%s' has schema but no implementation function", meta.name)
                 continue
 
-            # Skip if already registered (user_data takes priority)
-            if meta.name in TOOL_REGISTRY:
-                LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
-                continue
-
             if addon_name and not getattr(meta, "addon_name", None):
                 meta.addon_name = addon_name
 
-            _add_registered_tool(meta.name, meta, impl)
+            reg_key = _registry_key(meta)
+
+            # Skip if already registered (user_data takes priority)
+            if reg_key in TOOL_REGISTRY:
+                LOGGER.debug("Tool '%s' already registered, skipping", reg_key)
+                continue
+
+            _add_registered_tool(reg_key, meta, impl)
             registered = True
             LOGGER.debug("Registered tool '%s' from schemas() (spell=%s addon=%s)",
-                         meta.name, getattr(meta, "spell", False), meta.addon_name)
+                         reg_key, getattr(meta, "spell", False), meta.addon_name)
 
         return registered
     except Exception as e:
@@ -258,24 +301,29 @@ def _register_tool(module: Any, addon_name: Optional[str] = None) -> bool:
             LOGGER.warning("Tool '%s' has schema but no implementation function", meta.name)
             return False
 
-        # Skip if already registered (user_data takes priority)
-        if meta.name in TOOL_REGISTRY:
-            LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
-            return False
-
         if addon_name and not getattr(meta, "addon_name", None):
             meta.addon_name = addon_name
 
-        _add_registered_tool(meta.name, meta, impl)
+        reg_key = _registry_key(meta)
 
-        # Handle aliases
+        # Skip if already registered (user_data takes priority)
+        if reg_key in TOOL_REGISTRY:
+            LOGGER.debug("Tool '%s' already registered, skipping", reg_key)
+            return False
+
+        _add_registered_tool(reg_key, meta, impl)
+
+        # Handle aliases. Addon aliases live in the addon namespace too
+        # (``<addon>__<alias>``) so they can't collide across addons.
         alias = getattr(module, "ALIASES", None)
         if isinstance(alias, dict):
+            addon_prefix = getattr(meta, "addon_name", None)
             for alt_name, alt_impl_name in alias.items():
                 function_ref = getattr(module, alt_impl_name, None)
                 if callable(function_ref):
-                    TOOL_REGISTRY[alt_name] = _wrap_registered_callable(
-                        alt_name,
+                    alias_key = f"{addon_prefix}__{alt_name}" if addon_prefix else alt_name
+                    TOOL_REGISTRY[alias_key] = _wrap_registered_callable(
+                        alias_key,
                         meta,
                         function_ref,
                     )
