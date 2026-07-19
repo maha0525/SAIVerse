@@ -44,7 +44,11 @@ ignore = ["E501", "UP017"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-ra"
+# --ignore=temp: temp/ holds gitignored vendored third-party code (e.g. the
+# LVGL test suite under stackchan-mcp firmware) whose test files run real
+# build steps / call sys.exit() at import, which aborts the whole pytest
+# session with INTERNALERROR during collection. Never collect it.
+addopts = "-ra --ignore=temp"
 
 [tool.setuptools]
 packages = ["saiverse"]
