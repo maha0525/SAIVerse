@@ -46,6 +46,21 @@ RECOVERY_TICK_INTERVAL_SECONDS = 60.0
 #: 仮置き。長い作業セッションでも 1 時間更新が無い running は観測途絶とみなす。
 RUNNING_DEADLINE_SECONDS = 3600.0
 
+#: コマ発火 (:func:`saiverse.day_plan._fire_slot`) の台帳 KIND。
+SLOT_FIRE_KIND = "slot.fire"
+
+#: slot.fire の精算 settle-close deadline (W2 D5)。
+#: 根拠: EventScheduler は単一 dispatch スレッドで全 callback を直列実行する
+#: (saiverse/event_scheduler.py の _dispatch_loop / run_due)。コマ発火
+#: (_fire_slot) も回復 tick (schedule_periodic) も同じスレッドの callback なので、
+#: **同一プロセス内では tick とハンドラが同時に走らない** — tick が見る running
+#: slot.fire は「ハンドラは既に return したが精算 tx が転けた / プロセスが跨いだ」
+#: もので、稼働中ハンドラを誤 settle するリスクは構造的に低い。それでも
+#: 保守側に倒し、長い作業セッションの実行時間 (RUNNING_DEADLINE_SECONDS 未満)
+#: を十分に上回らない範囲で 15 分を置く — 万一ハンドラが別スレッドへ処理を逃がす
+#: 将来変更が入っても、稼働中ハンドラを settle しないための余裕。
+SLOT_SETTLE_DEADLINE_SECONDS = 900.0
+
 # 送信トレイの TARGET 名 (intent §4 スキーマ例)。
 TARGET_SAIMEMORY_APPEND = "saimemory.append"
 TARGET_PERCEPTION_PUSH = "perception.push"
@@ -109,7 +124,11 @@ def run_startup_recovery(manager: "SAIVerseManager") -> None:
     """
     ledger = manager.execution_ledger
     try:
-        recovered = ledger.recover_stale_running(all_running=True)
+        # slot.fire は汎用 sweep から除外する (unknown 化すると episode が永久
+        # open のまま照合待ちになる) — 代わりに下の settle-close で拾う。
+        recovered = ledger.recover_stale_running(
+            all_running=True, exclude_kinds=(SLOT_FIRE_KIND,),
+        )
         if recovered:
             LOGGER.warning(
                 "[ledger-wiring] startup sweep: %d 件の前世代 running を "
@@ -120,6 +139,14 @@ def run_startup_recovery(manager: "SAIVerseManager") -> None:
         # sweep 失敗でも起動は止めない (unknown 化は次の tick でも再試行される
         # 掃除)。ただし黙らせない。
         LOGGER.exception("[ledger-wiring] startup running-sweep failed")
+    # 前世代の running slot.fire を settle-close する。起動直後の running slot.fire は
+    # 定義上すべて前世代 (単一 dispatch スレッドのハンドラは起動前に途絶している)
+    # なので、deadline を課さず (older_than_seconds=None) 全件を掃除する — 稼働中
+    # ハンドラ誤 settle の懸念は起動時には存在しない (前世代確定)。
+    try:
+        _collect_stale_slot_executions(manager, older_than_seconds=None)
+    except Exception:
+        LOGGER.exception("[ledger-wiring] startup slot.fire settle-close failed")
     _flush_all_pending(manager)
 
 
@@ -144,8 +171,17 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
     一度の DB エラーで掃除が永久停止しないよう、ここで例外を吸収してログに残す。
     """
     ledger = manager.execution_ledger
+    # slot.fire の settle-close を汎用 sweep より前に行う (slot.fire は汎用 sweep
+    # から除外するので順序に依存はしないが、コマ回復を先に置く方が安全)。
     try:
-        ledger.recover_stale_running(max_age_seconds=RUNNING_DEADLINE_SECONDS)
+        _collect_stale_slot_executions(manager)
+    except Exception:
+        LOGGER.exception("[ledger-wiring] recovery tick: slot.fire settle-close failed")
+    try:
+        ledger.recover_stale_running(
+            max_age_seconds=RUNNING_DEADLINE_SECONDS,
+            exclude_kinds=(SLOT_FIRE_KIND,),
+        )
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: running-deadline sweep failed")
     try:
@@ -156,6 +192,82 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
         _flush_all_pending(manager)
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: pending flush failed")
+
+
+def _collect_stale_slot_executions(
+    manager: "SAIVerseManager", *, older_than_seconds: Any = SLOT_SETTLE_DEADLINE_SECONDS
+) -> None:
+    """回復: 精算が転けて running のまま残ったコマ発火を settle-close する (W2 D5)。
+
+    slot.fire は「行動を生む」判断点ではなく「実行した記録の締め」(episode close +
+    slot done + 台帳 applied) なので、LLM 再実行を伴わない掃除である — したがって
+    完全手動モードのペルソナに対しても止めない (掃除は自律行動ではない)。
+
+    Args:
+        older_than_seconds: :meth:`ExecutionLedger.list_running` に渡す deadline。
+            None (起動時) は前世代確定の全 running slot.fire を対象にする。
+            個別の例外は tick を殺さない (:func:`_collect_prepared_judgments` の
+            防御に倣う)。
+    """
+    ledger = manager.execution_ledger
+    try:
+        rows = ledger.list_running(SLOT_FIRE_KIND, older_than_seconds=older_than_seconds)
+    except Exception:
+        LOGGER.exception("[ledger-wiring] failed to list running slot.fire executions")
+        return
+    if not rows:
+        return
+    for row in rows:
+        try:
+            _settle_one_stale_slot(manager, row)
+        except Exception:
+            LOGGER.exception(
+                "[ledger-wiring] slot.fire settle-close failed (execution=%s)",
+                row.get("execution_id"),
+            )
+
+
+def _settle_one_stale_slot(manager: "SAIVerseManager", row: Dict[str, Any]) -> None:
+    """running な slot.fire 1 行を settle-close する (D5)。
+
+    台帳 payload の slot 座標 (persona/plan_date/index) から origin_ref を
+    再構成して開いている出来事を逆引きし、:func:`saiverse.day_plan.settle_stale_slot`
+    に委ねる (episode close + slot done + 台帳 applied/completed、予算は予約額のまま)。
+    """
+    # 遅延 import (wiring は day_plan / episodes から独立に import され得る)。
+    from saiverse import day_plan, episodes
+
+    ledger = manager.execution_ledger
+    execution_id = row.get("execution_id")
+    payload = row.get("payload")
+    if not execution_id or not isinstance(payload, dict):
+        LOGGER.warning(
+            "[ledger-wiring] stale slot.fire has no usable payload; skipping "
+            "(execution=%s)", execution_id,
+        )
+        return
+    persona_id = payload.get("persona_id")
+    plan_date = payload.get("plan_date")
+    index = payload.get("index")
+    if (
+        not persona_id
+        or not plan_date
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+    ):
+        LOGGER.warning(
+            "[ledger-wiring] stale slot.fire payload incomplete "
+            "(execution=%s persona=%s date=%s index=%r); skipping",
+            execution_id, persona_id, plan_date, index,
+        )
+        return
+
+    origin_ref = day_plan._slot_origin_ref(persona_id, plan_date, index)
+    open_ep = episodes.get_open_episode_by_origin(manager, persona_id, origin_ref)
+    episode_ref = open_ep.get("episode_ref") if open_ep else None
+    day_plan.settle_stale_slot(
+        manager, ledger, execution_id, persona_id, plan_date, index, episode_ref,
+    )
 
 
 def _collect_prepared_judgments(manager: "SAIVerseManager") -> None:

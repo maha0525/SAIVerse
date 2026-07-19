@@ -387,6 +387,52 @@ def test_day_open_finalize_empty_timetable_saves_nothing(
     assert manager.personas[PERSONA_ID].sai_memory.messages[0]["scope"] == "discardable"
 
 
+def test_day_open_finalize_all_excluded_keeps_existing_plan_atomically(
+    manager, task_refs, finalize_mod, tmp_path,
+):
+    """A1 (原子的全置換): 提出コマがライフ範囲で全除外 → replace_day_plan が
+    ValueError。旧 plan・旧予約とも一切変更されず、エコーは「既存を維持」と
+    実状態に一致する (旧実装は「先に cancel → save が raise」で予約だけ孤児化し、
+    報告も「編成されていません」と実状態に反していた)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    # 既存 plan (09:00 のコマ) を編成して予約まで作る
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "旧予定"},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert manager.event_scheduler.has_key(
+        day_plan._slot_key(PERSONA_ID, PLAN_DATE, 0)
+    )
+
+    output = {
+        "monologue": "全部夜更かしの予定にしてしまった。",
+        # 23:00 は就寝 (22:00) より後 — 丸めようが無く全除外
+        "timetable": [_rest_slot("23:00")],
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "daily_budget_rounds": 40})
+    with _persona_ctx(manager, tmp_path):
+        summary, _, _ = finalize_mod.judgment_finalize(
+            judgment_output=output, kind="day_open",
+            judgment_context=ctx, situation_text="[起床判断] ...",
+        )
+
+    # 旧 plan / 旧予約とも不変
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
+    assert manager.event_scheduler.has_key(
+        day_plan._slot_key(PERSONA_ID, PLAN_DATE, 0)
+    )
+    # timetable 由来では applied=True にならない (promotions も無い)
+    assert "applied=True" not in summary
+    # エコーが実状態 (維持) に一致
+    content = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "既存の時間割を維持しました" in content
+    assert "編成されていません" not in content
+
+
 def test_day_open_finalize_rounds_and_excludes_slots_with_life_declared(
     manager, task_refs, finalize_mod, tmp_path,
 ):

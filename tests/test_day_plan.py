@@ -955,3 +955,354 @@ def test_schedule_resolves_wake_for_overnight_slot(manager, monkeypatch):
     assert fire_by_index[1] == d.replace(hour=9, minute=0)
     # 深夜コマ (start < wake) は翌暦日 (同じ営業日の尻尾) として予約される
     assert fire_by_index[0] == (d + timedelta(days=1)).replace(hour=0, minute=30)
+
+
+# ---------------------------------------------------------------------------
+# 実行台帳で包む三区間発火 (W2 Chunk B, A5/A6) — 予約 / ハンドラ / 精算の原子性
+#
+# 台帳付き manager で _fire_slot を同期直呼びし、予約 tx・精算 tx の各段で障害を
+# 注入して、A5 (予算精算の非原子性) と A6 (done 保存失敗で episode 永久 open) が
+# 単一患部で解けていることを確認する。ライフ正典まわりの A5 は test_life_phase2.py。
+# ---------------------------------------------------------------------------
+
+
+def _attach_ledger(manager):
+    """manager に実行台帳を結線して返す (autonomy_wiring テストと同じ流儀)。"""
+    from saiverse import execution_ledger as XL
+
+    manager.execution_ledger = XL.ExecutionLedger(manager.SessionLocal)
+    return manager.execution_ledger
+
+
+def _slot_exec_id(manager, kind="slot.fire"):
+    """台帳に採番された slot.fire 実行の execution_id を取り出す (無ければ None)。"""
+    from database.models import ExecutionLedgerEntry
+
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(ExecutionLedgerEntry)
+            .filter(ExecutionLedgerEntry.KIND == kind)
+            .order_by(ExecutionLedgerEntry.CREATED_AT.desc())
+            .first()
+        )
+        return row.EXECUTION_ID if row is not None else None
+    finally:
+        db.close()
+
+
+def _save_single_gated_slot(manager, task_refs, *, budget_rounds=5):
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": budget_rounds, "note": "調べもの"},
+    ])
+
+
+def test_reservation_tx_failure_skips_handler_and_leaves_state_unchanged(manager, task_refs):
+    """A5: 予約 tx が転けたら handler は 0 回・slot pending・予算不変・台帳 prepared。"""
+    _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("saiverse.episodes.open_episode", side_effect=RuntimeError("db down")), \
+            patch("sea.work_session.run_work_session") as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 0  # 不可逆処理 (ハンドラ) は始まっていない
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "pending"  # fired にならない (全ロールバック)
+    # 予算は不変 (予約分も巻き戻る)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 0
+    # 台帳は prepared のまま (mark_running が同 tx で巻き戻る) — 安全に再実行できる
+    assert len(manager.execution_ledger.list_prepared("slot.fire")) == 1
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None
+
+
+def test_settlement_failure_leaves_fired_open_running_with_reserved_budget(manager, task_refs):
+    """A6/A5: 精算 tx (episode close) 失敗 → slot=fired・episode=open・台帳=running・
+    予算は予約額のまま (返金されない)。回復で拾える状態に収束する。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws, \
+            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("commit fail")):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 1  # ハンドラは走った
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "fired"  # done に進まない (精算ロールバック)
+    from saiverse import episodes
+    open_ep = episodes.get_open_episode(manager, PERSONA_ID)
+    assert open_ep is not None and open_ep["status"] == "open"  # 出来事は開いたまま
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "running"
+    # 予算は予約額 (5) のまま — 実測 3 への精算 (返金) は適用されない (A5 の安全側)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
+
+
+def test_settlement_failure_via_mark_applied_is_also_atomic(manager, task_refs):
+    """A6: 精算 tx 内の台帳 applied 書き込み失敗でも done/episode/予算が全ロールバック。
+
+    done 保存・episode close・予算調整・applied は単一 tx なので、どの書き込みが
+    転けても収束状態は同じ (fired・open・running・予約額保持)。
+    """
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    def _boom(*a, **k):
+        raise RuntimeError("applied write fail")
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)), \
+            patch.object(ledger, "mark_applied", side_effect=_boom):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "fired"
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is not None
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "running"
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
+
+
+def test_successful_fire_settles_once_then_double_fire_is_ignored(manager, task_refs):
+    """A5/A6: 正常発火で used が一度だけ増え slot が一度だけ done・台帳 completed。
+    同 index の再発火は二重発火ガード (claim not runnable) で handler を呼ばない。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    # 予約 5 → 実測 3 に精算 (返金 -2) されて used == 実測 3
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None  # 閉じている
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+
+    # 二重発火: 同 index を再度 fire しても claim not runnable で handler は呼ばれない
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=99)) as mock_ws2:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    assert mock_ws2.call_count == 0
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"  # 依然 done (二重に何も起きない)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3  # 不変
+
+
+def test_handler_raise_marks_unknown_closes_episode_retains_reservation(manager, task_refs):
+    """防御経路: ハンドラ例外 → 台帳 unknown・episode close (best-effort)・slot fired・
+    予約額保持 (LLM が動いたか不明なので自動再実行しない照合対象にする)。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session", side_effect=RuntimeError("boom")):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "fired"  # 「実行したが完了記録なし」
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None  # best-effort close 済み
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "unknown"
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5  # 予約保持
+
+
+def test_no_ledger_manager_falls_back_to_legacy_fire(manager, task_refs):
+    """縮退: execution_ledger を持たない manager では従来経路で done へ到達する。"""
+    assert getattr(manager, "execution_ledger", None) is None
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    # 旧経路: consume_budget が実測 3 を積む
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
+
+
+# ---------------------------------------------------------------------------
+# A1: replace_day_plan — 起床判断 day_open の原子的全置換
+#
+# 検証失敗時に「旧予約だけ先に消えて plan が孤児化する」旧順序を断ち、旧 plan・
+# 旧予約とも一切変更しないことを確認する (監査 A1)。
+# ---------------------------------------------------------------------------
+
+
+def _slot_keys_present(manager, plan_date=PLAN_DATE):
+    """現在 EventScheduler に有効な当該 plan のコマ index 集合。"""
+    present = set()
+    for i in range(10):
+        if manager.event_scheduler.has_key(day_plan._slot_key(PERSONA_ID, plan_date, i)):
+            present.add(i)
+    return present
+
+
+def _seed_two_slot_plan(manager, task_refs):
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "13:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 3, "note": "旧1"},
+        {"start": "15:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+
+def test_replace_day_plan_success_swaps_reservations(manager, task_refs):
+    """成功時: 旧 index の予約が残らず、新 plan の pending だけが予約される。"""
+    _seed_two_slot_plan(manager, task_refs)
+    assert _slot_keys_present(manager) == {0, 1}
+
+    pushed, notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "18:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    assert pushed == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["18:00"]
+    # 旧 index 1 の予約は残らない (index ベース key の残留による誤発火を防ぐ)
+    assert _slot_keys_present(manager) == {0}
+
+
+def test_replace_day_plan_format_failure_leaves_plan_and_reservations(manager, task_refs):
+    """書式検証失敗 (ValueError) — 旧 plan・旧予約とも一切変更されない。"""
+    _seed_two_slot_plan(manager, task_refs)
+    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with pytest.raises(ValueError):
+        day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "9時", "kind": "休む", "ref": "none",  # start 書式不正
+             "facility": "own_room", "budget_rounds": 0, "note": ""},
+        ])
+
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
+    assert _slot_keys_present(manager) == {0, 1}  # 予約も無傷
+
+
+def test_replace_day_plan_all_excluded_by_life_leaves_plan_and_reservations(manager, task_refs):
+    """ライフ範囲で全除外 (ValueError) — 旧 plan・旧予約とも不変。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=12))  # 12:00
+    _seed_two_slot_plan(manager, task_refs)
+    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with pytest.raises(ValueError):
+        # 23:00 は就寝 (22:00) より後 — 丸めようが無く全除外 → kept 空
+        day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "23:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": ""},
+        ])
+
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
+    assert _slot_keys_present(manager) == {0, 1}
+
+
+# ---------------------------------------------------------------------------
+# D5: 精算失敗で running のまま残ったコマ発火の settle-close 回復
+#
+# test_settlement_failure_...（上）が作る収束状態 (fired/open/running/予約額保持)
+# を、deadline 超過後に回復 tick の _collect_stale_slot_executions が一度だけ
+# settle-close することを統合的に確認する。
+# ---------------------------------------------------------------------------
+
+
+def _age_execution(manager, execution_id, seconds):
+    """台帳行の UPDATED_AT を seconds 秒だけ過去へずらす (deadline 超過を作る)。"""
+    from database.models import ExecutionLedgerEntry
+
+    db = manager.SessionLocal()
+    try:
+        db.query(ExecutionLedgerEntry).filter(
+            ExecutionLedgerEntry.EXECUTION_ID == execution_id
+        ).update({"UPDATED_AT": ExecutionLedgerEntry.UPDATED_AT - int(seconds)})
+        db.commit()
+    finally:
+        db.close()
+
+
+def _make_stale_settled_slot(manager, task_refs):
+    """精算 tx (episode close) を壊して fired/open/running/予約額保持 に収束させる。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)), \
+            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("commit fail")):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    return ledger, _slot_exec_id(manager)
+
+
+def test_recovery_settle_closes_stale_running_slot(manager, task_refs):
+    """回復: deadline 超過の running slot.fire が settle-close される
+    (episode closed・slot done・台帳 completed・予算は予約額 5 のまま)。"""
+    from saiverse import episodes, execution_ledger_wiring as wiring
+
+    ledger, exec_id = _make_stale_settled_slot(manager, task_refs)
+    # 収束状態の確認
+    assert ledger.get_execution(exec_id)["status"] == "running"
+    assert episodes.get_open_episode(manager, PERSONA_ID) is not None
+
+    # deadline (900s) 超過へ (仮想時計を 20 分進める)
+    clock.advance_to(BASE + timedelta(hours=9, minutes=20))
+    wiring._collect_stale_slot_executions(manager)
+
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None  # 閉じた
+    # 予算は予約額のまま (返金しない保守精算)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
+
+
+def test_recovery_is_idempotent_on_double_tick(manager, task_refs):
+    """二度目の tick は running でない (= 既に completed) ので何もしない。"""
+    from saiverse import execution_ledger_wiring as wiring
+
+    ledger, exec_id = _make_stale_settled_slot(manager, task_refs)
+    clock.advance_to(BASE + timedelta(hours=9, minutes=20))
+    wiring._collect_stale_slot_executions(manager)
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+    used_after_first = day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"]
+
+    # 2 本目: no-op (list_running が completed を返さない + settle のガード)
+    clock.advance_to(BASE + timedelta(hours=9, minutes=40))
+    wiring._collect_stale_slot_executions(manager)
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "done"
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == used_after_first
+
+
+def test_recovery_deadline_spares_fresh_running_slot(manager, task_refs):
+    """deadline 未満の running slot.fire は settle されない (稼働中の誤 settle 回避)。"""
+    from saiverse import execution_ledger_wiring as wiring
+
+    ledger, exec_id = _make_stale_settled_slot(manager, task_refs)
+    # まだ deadline (900s) 未満 (5 分しか経っていない)
+    clock.advance_to(BASE + timedelta(hours=9, minutes=5))
+    wiring._collect_stale_slot_executions(manager)
+    assert ledger.get_execution(exec_id)["status"] == "running"  # 触られない

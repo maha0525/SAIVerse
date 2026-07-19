@@ -427,11 +427,28 @@ class ExecutionLedger:
             entry.RESULT_JSON = json.dumps(result, ensure_ascii=False)
         return entry
 
-    def mark_running(self, execution_id: str) -> None:
+    def mark_running(
+        self, execution_id: str, *, session: Optional[Session] = None
+    ) -> None:
         """不可逆処理 (LLM 等) の開始を宣言する (prepared → running)。
 
         この遷移**後**に不可逆処理を開始すること (不変条件 1)。
+
+        Args:
+            session: 呼び出し元が開いている Session。**指定した場合、本メソッドは
+                commit しない** — prepared→running 遷移が呼び出し元の 1 commit に
+                同梱される (:meth:`mark_applied` の session 分岐と対称。予約 tx で
+                slot 状態・予算・episode open と running 遷移を単一トランザクションに
+                束ねる口)。指定なしなら自前 Session で即 commit する (従来挙動)。
         """
+        if session is not None:
+            entry = self._transition(session, execution_id, STATUS_RUNNING)
+            LOGGER.debug(
+                "[ledger] running staged: %s kind=%s (commit is caller's)",
+                execution_id, entry.KIND,
+            )
+            return
+
         db = self._session_factory()
         try:
             entry = self._transition(db, execution_id, STATUS_RUNNING)
@@ -795,6 +812,7 @@ class ExecutionLedger:
         *,
         max_age_seconds: Optional[float] = None,
         all_running: bool = False,
+        exclude_kinds: Optional[Sequence[str]] = None,
     ) -> List[str]:
         """観測が途絶えた running を unknown へ落とす (自動再実行はしない)。
 
@@ -806,6 +824,10 @@ class ExecutionLedger:
                 持たないため、世代照合は「プロセス起動直後の running は定義上すべて
                 前世代」という一括 sweep で表現する。同一 DB を共有する他 City
                 プロセスの不在確認 (saiverse/runtime_marker.py) は呼び出し側の責務。
+            exclude_kinds: これらの KIND を持つ running を sweep 対象から除外する。
+                自前の期限・回復規則を持つ kind (例 ``slot.fire`` — 作業コマは
+                固有の settle-close 回復を回復 tick 側で持つ) を汎用 unknown 化から
+                守るため。除外された行は本メソッドが一切触らない。
 
         Returns:
             unknown 化した execution_id のリスト。
@@ -818,6 +840,10 @@ class ExecutionLedger:
             query = db.query(ExecutionLedgerEntry).filter(
                 ExecutionLedgerEntry.STATUS == STATUS_RUNNING
             )
+            if exclude_kinds:
+                query = query.filter(
+                    ~ExecutionLedgerEntry.KIND.in_(tuple(exclude_kinds))
+                )
             if not all_running:
                 cutoff = now - int(max_age_seconds)
                 query = query.filter(ExecutionLedgerEntry.UPDATED_AT <= cutoff)
@@ -891,6 +917,44 @@ class ExecutionLedger:
                 .order_by(ExecutionLedgerEntry.CREATED_AT.asc())
                 .all()
             )
+            return [_entry_to_dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def list_running(
+        self,
+        kind_prefix: str,
+        *,
+        older_than_seconds: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """running の実行一覧 (kind 固有の settle-close 回復の観測面)。UPDATED_AT 昇順。
+
+        :meth:`list_prepared` の running 版。自前の期限・回復規則を持つ kind
+        (例 ``slot.fire`` — 作業コマの精算失敗を settle-close で拾う) が、汎用の
+        :meth:`recover_stale_running` 一括 unknown 化とは別に「まだ精算されていない
+        running」を列挙するための口。
+
+        Args:
+            kind_prefix: KIND の前方一致 (例 ``"slot.fire"``)。LIKE の
+                ワイルドカード文字 (``%`` / ``_``) を含む prefix は想定しない。
+            older_than_seconds: 指定時は ``UPDATED_AT <= now - older_than_seconds``
+                の行だけを返す (稼働中ハンドラの誤 settle を避ける deadline)。
+                None なら期限で絞らず全 running を返す (起動時 = 前世代確定の
+                一括 settle-close 用)。
+        """
+        if not kind_prefix:
+            raise ValueError("kind_prefix is required")
+        now = _now_epoch()
+        db = self._session_factory()
+        try:
+            query = db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.STATUS == STATUS_RUNNING,
+                ExecutionLedgerEntry.KIND.like(f"{kind_prefix}%"),
+            )
+            if older_than_seconds is not None:
+                cutoff = now - int(older_than_seconds)
+                query = query.filter(ExecutionLedgerEntry.UPDATED_AT <= cutoff)
+            rows = query.order_by(ExecutionLedgerEntry.UPDATED_AT.asc()).all()
             return [_entry_to_dict(r) for r in rows]
         finally:
             db.close()

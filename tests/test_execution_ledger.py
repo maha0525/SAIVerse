@@ -394,6 +394,52 @@ class MarkAppliedAtomicityTests(ExecutionLedgerTestBase):
         self.assertEqual(self._status(execution_id), XL.STATUS_RUNNING)
 
 
+class MarkRunningSessionTests(ExecutionLedgerTestBase):
+    """mark_running(session=) が呼び出し元の 1 commit に prepared→running を同梱する
+    (W2 Chunk A / D2 — 予約 tx を単一トランザクションにする口)。
+    """
+
+    def test_session_riding_commit_includes_running_transition(self):
+        execution_id, _ = self.ledger.begin_execution(
+            "slot.fire", idempotency_key="p1:2026-07-20:0", persona_id="p1",
+        )
+        # 呼び出し元が同一 Session で「台帳の running 遷移」+「別の書き込み」を
+        # 1 commit する。ここでは同じ台帳行の payload 相当を別行で書く代わりに、
+        # running 遷移が commit に乗ることだけを確認する。
+        session = self.SessionLocal()
+        try:
+            self.ledger.mark_running(execution_id, session=session)
+            # commit 前は別 Session から running が見えない (未コミット)
+            self.assertEqual(self._status(execution_id), XL.STATUS_PREPARED)
+            session.commit()
+        finally:
+            session.close()
+        self.assertEqual(self._status(execution_id), XL.STATUS_RUNNING)
+
+    def test_session_riding_rollback_drops_running_transition(self):
+        execution_id, _ = self.ledger.begin_execution(
+            "slot.fire", idempotency_key="p1:2026-07-20:1", persona_id="p1",
+        )
+        session = self.SessionLocal()
+        try:
+            self.ledger.mark_running(execution_id, session=session)
+            session.rollback()
+        finally:
+            session.close()
+        # rollback で遷移は残らない — prepared のまま
+        self.assertEqual(self._status(execution_id), XL.STATUS_PREPARED)
+
+    def test_session_riding_illegal_transition_raises(self):
+        # prepared 以外からの running は session モードでも不法遷移で raise
+        execution_id = self._begin_running("slot.fire", persona_id="p1")
+        session = self.SessionLocal()
+        try:
+            with self.assertRaises(XL.IllegalTransitionError):
+                self.ledger.mark_running(execution_id, session=session)
+        finally:
+            session.close()
+
+
 class OutboxDeliveryTests(ExecutionLedgerTestBase):
     def setUp(self):
         super().setUp()
@@ -598,6 +644,69 @@ class RecoveryTests(ExecutionLedgerTestBase):
     def test_recover_requires_criteria(self):
         with self.assertRaises(ValueError):
             self.ledger.recover_stale_running()
+
+    def test_exclude_kinds_spares_matching_running(self):
+        # W2 Chunk A / D5: slot.fire は固有の settle-close 回復を持つので
+        # 汎用 unknown sweep から除外できる。
+        clock.enable_virtual(datetime(2026, 7, 20, 9, 0, 0))
+        slot_id = self._begin_running("slot.fire", persona_id="p1")
+        judgment_id = self._begin_running("judgment.on_event", persona_id="p2")
+
+        clock.advance_to(datetime(2026, 7, 20, 11, 0, 0))
+        recovered = self.ledger.recover_stale_running(
+            max_age_seconds=1800, exclude_kinds=("slot.fire",),
+        )
+        # 除外 kind (slot.fire) は running のまま、他 kind のみ unknown 化
+        self.assertEqual(recovered, [judgment_id])
+        self.assertEqual(self._status(slot_id), XL.STATUS_RUNNING)
+        self.assertEqual(self._status(judgment_id), XL.STATUS_UNKNOWN)
+
+    def test_exclude_kinds_also_applies_to_startup_sweep(self):
+        slot_id = self._begin_running("slot.fire", persona_id="p1")
+        other_id = self._begin_running("metabolism.run", persona_id="p2")
+        recovered = self.ledger.recover_stale_running(
+            all_running=True, exclude_kinds=("slot.fire",),
+        )
+        self.assertEqual(recovered, [other_id])
+        self.assertEqual(self._status(slot_id), XL.STATUS_RUNNING)
+        self.assertEqual(self._status(other_id), XL.STATUS_UNKNOWN)
+
+
+class ListRunningTests(ExecutionLedgerTestBase):
+    """list_running (W2 D5): kind 前方一致 + 期限フィルタで running を列挙する。"""
+
+    def test_lists_only_running_matching_prefix(self):
+        run_slot = self._begin_running("slot.fire", persona_id="p1")
+        # prefix 不一致 (judgment.*) は対象外
+        self._begin_running("judgment.on_event", persona_id="p2")
+        # prepared / applied は running でないので対象外
+        prep_id, _ = self.ledger.begin_execution("slot.fire", idempotency_key="k-prep")
+        applied = self._begin_running("slot.fire", persona_id="p3", key="k-appl")
+        self.ledger.mark_applied(applied)
+
+        rows = self.ledger.list_running("slot.fire")
+        self.assertEqual([r["execution_id"] for r in rows], [run_slot])
+        self.assertEqual(prep_id and self._status(prep_id), XL.STATUS_PREPARED)
+
+    def test_older_than_seconds_filters_and_orders_by_updated_at(self):
+        clock.enable_virtual(datetime(2026, 7, 20, 9, 0, 0))
+        old_id = self._begin_running("slot.fire", persona_id="p1", key="k-old")
+
+        clock.advance_to(datetime(2026, 7, 20, 9, 50, 0))
+        fresh_id = self._begin_running("slot.fire", persona_id="p2", key="k-fresh")
+
+        clock.advance_to(datetime(2026, 7, 20, 10, 0, 0))
+        # deadline 1800s: 60 分前開始の old だけが該当、10 分前の fresh は外れる
+        stale = self.ledger.list_running("slot.fire", older_than_seconds=1800)
+        self.assertEqual([r["execution_id"] for r in stale], [old_id])
+
+        # deadline なしなら両方 (UPDATED_AT 昇順)
+        allrows = self.ledger.list_running("slot.fire")
+        self.assertEqual([r["execution_id"] for r in allrows], [old_id, fresh_id])
+
+    def test_requires_kind_prefix(self):
+        with self.assertRaises(ValueError):
+            self.ledger.list_running("")
 
 
 class MigrationLightweightPathTests(unittest.TestCase):

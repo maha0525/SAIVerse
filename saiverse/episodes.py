@@ -179,6 +179,22 @@ def _cache_drop(manager: Any, persona_id: str) -> None:
         _open_cache(manager).pop(persona_id, None)
 
 
+def invalidate_open_cache(manager: Any, persona_id: str) -> None:
+    """open-episode キャッシュの persona エントリを落とす (次回読みで DB 復元)。
+
+    session モードの :func:`open_episode` / :func:`close_episode` は自分では
+    キャッシュを触らない — 呼び出し元の commit がまだなので、未コミット状態を
+    キャッシュに映すと rollback で残骸が居座り、逆に stale な ``None`` を
+    残したまま新 open を映さないと :func:`get_open_episode` (``kind=None`` の
+    cache **hit** は DB フォールバックしない) が古い値を返し続ける。
+    呼び出し元は自分の commit **成功後**に本関数を呼び、次の
+    ``get_open_episode(kind=None)`` が DB から現在の open 状態を読み直すように
+    する。**commit 前に呼ぶと DB がまだ未コミットで stale が復活しうる** —
+    必ず commit 後に呼ぶこと。
+    """
+    _cache_drop(manager, persona_id)
+
+
 def _query_latest_open(
     db: Session, persona_id: str, kind: Optional[str] = None
 ) -> Optional[Episode]:
@@ -236,6 +252,7 @@ def open_episode(
     origin_ref: Optional[str] = None,
     occurrence_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
+    session: Optional[Session] = None,
 ) -> Dict[str, Any]:
     """出来事を開く (life_concept_map.md §8「いまとは開いている出来事の先端」)。
 
@@ -244,6 +261,15 @@ def open_episode(
         origin_ref: 出自 (コマ・呼びかけ等) への参照。**None = 自発** —
             無計画の出来事は出自なしが合法 (§6「事後に偽のコマを起こさない」)。
         occurrence_id: 同一の世界的出来事を束ねる相関 ID (§8.1 複数主観)。
+        session: 呼び出し元が開いている Session。**指定した場合、本関数は
+            commit も close もしない** — Episode 行 INSERT が呼び出し元の
+            1 commit に同梱される (予約 tx で slot 状態・予算・台帳 running と
+            episode open を束ねる口)。採番と制約検査を確定させるため INSERT 後に
+            ``flush`` する (SHORT_ID / EPISODE_ID は本関数が明示採番するので
+            ``refresh`` は不要)。**open キャッシュは触らない** — 呼び出し元が
+            commit 後に :func:`invalidate_open_cache` で整合を負う契約
+            (未コミット状態を映さないため)。指定なしなら自前 Session で
+            commit + キャッシュ更新する (従来挙動、無傷)。
 
     Returns:
         直列化した出来事 dict (episode_ref = ``episode:N`` を含む)。
@@ -255,8 +281,8 @@ def open_episode(
 
     episode_id = str(uuid.uuid4())
     now_epoch = _now_epoch()
-    db = manager.SessionLocal()
-    try:
+
+    def _build(db: Session) -> Episode:
         short_id = _next_short_id(db, persona_id)
         ep = Episode(
             EPISODE_ID=episode_id,
@@ -277,6 +303,24 @@ def open_episode(
             META_JSON=json.dumps(meta, ensure_ascii=False) if meta else None,
         )
         db.add(ep)
+        db.flush()
+        return ep
+
+    if session is not None:
+        ep = _build(session)
+        result = _to_dict(ep)
+        # session モードではキャッシュを触らない (未コミット状態を映さない)。
+        # 呼び出し元が commit 後に invalidate_open_cache() で整合を負う。
+        LOGGER.info(
+            "[episode] opened(staged) %s (episode:%d) persona=%s kind=%s origin=%s "
+            "(commit is caller's)",
+            episode_id, ep.SHORT_ID, persona_id, kind, origin_ref,
+        )
+        return result
+
+    db = manager.SessionLocal()
+    try:
+        ep = _build(db)
         db.commit()
         db.refresh(ep)
         result = _to_dict(ep)
@@ -284,7 +328,7 @@ def open_episode(
         _cache_set_open(manager, persona_id, result)
         LOGGER.info(
             "[episode] opened %s (episode:%d) persona=%s kind=%s origin=%s",
-            episode_id, short_id, persona_id, kind, origin_ref,
+            episode_id, ep.SHORT_ID, persona_id, kind, origin_ref,
         )
         return result
     except Exception:
@@ -301,6 +345,7 @@ def close_episode(
     *,
     digest_ref: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
+    session: Optional[Session] = None,
 ) -> Dict[str, Any]:
     """出来事を閉じる (ENDED_AT を刻み status='closed')。
 
@@ -313,9 +358,15 @@ def close_episode(
         meta: META_JSON へ浅くマージする追加情報 (例: 作業セッションの
             ``title`` / ``artifacts`` — meta 書式契約 life_concept_map.md §14)。
             事実の記録のみを書くこと (意味づけは書かない)。
+        session: 呼び出し元が開いている Session。**指定した場合、本関数は
+            commit も close もしない** — Episode 行 UPDATE が呼び出し元の
+            1 commit に同梱される (精算 tx で slot done・予算調整・台帳 applied と
+            episode close を束ねる口)。**open キャッシュは触らない** — 呼び出し元が
+            commit 後に :func:`invalidate_open_cache` で整合を負う契約。指定なしなら
+            自前 Session で commit + キャッシュ無効化する (従来挙動、無傷)。
     """
-    db = manager.SessionLocal()
-    try:
+
+    def _apply(db: Session) -> Dict[str, Any]:
         episode_id = _resolve_episode_id(db, persona_id, ref)
         ep = (
             db.query(Episode)
@@ -343,15 +394,30 @@ def close_episode(
                 existing = {}
             existing.update(meta)
             ep.META_JSON = json.dumps(existing, ensure_ascii=False)
+        db.flush()
+        return _to_dict(ep)
+
+    if session is not None:
+        result = _apply(session)
+        # session モードではキャッシュを触らない。呼び出し元が commit 後に
+        # invalidate_open_cache() で無効化する契約。
+        LOGGER.info(
+            "[episode] closed(staged) %s persona=%s digest=%s (commit is caller's)",
+            result.get("episode_id"), persona_id, digest_ref,
+        )
+        return result
+
+    db = manager.SessionLocal()
+    try:
+        result = _apply(db)
         db.commit()
-        db.refresh(ep)
-        result = _to_dict(ep)
         # 閉じたものがキャッシュ中の「最後に開いた open」だったかに依らず、
         # エントリごと落として次回読み出しで DB から引き直す (外側でまだ開いて
         # いる出来事があればそれが復元される)。
         _cache_drop(manager, persona_id)
         LOGGER.info(
-            "[episode] closed %s persona=%s digest=%s", episode_id, persona_id, digest_ref,
+            "[episode] closed %s persona=%s digest=%s",
+            result.get("episode_id"), persona_id, digest_ref,
         )
         return result
     except Exception:
@@ -472,6 +538,35 @@ def get_latest_closed_episode(
         if kind is not None:
             q = q.filter(Episode.KIND == kind)
         ep = q.order_by(Episode.SHORT_ID.desc()).first()
+        return _to_dict(ep) if ep is not None else None
+    finally:
+        db.close()
+
+
+def get_open_episode_by_origin(
+    manager: Any, persona_id: str, origin_ref: str
+) -> Optional[Dict[str, Any]]:
+    """出自 (origin_ref) で開いている出来事を引く (無ければ None)。
+
+    コマ発火の回復 (day_plan の settle-close) が、台帳 payload の slot 座標から
+    :func:`saiverse.day_plan._slot_origin_ref` で再構成した origin_ref で「その
+    コマが開いた出来事」を逆引きするための口。同一 origin_ref に複数 open が
+    ありうる異常系では最後に開いた 1 件 (SHORT_ID 最大) を返す。
+    """
+    if not persona_id or not origin_ref:
+        return None
+    db = manager.SessionLocal()
+    try:
+        ep = (
+            db.query(Episode)
+            .filter(
+                Episode.PERSONA_ID == persona_id,
+                Episode.STATUS == STATUS_OPEN,
+                Episode.ORIGIN_REF == origin_ref,
+            )
+            .order_by(Episode.SHORT_ID.desc())
+            .first()
+        )
         return _to_dict(ep) if ep is not None else None
     finally:
         db.close()

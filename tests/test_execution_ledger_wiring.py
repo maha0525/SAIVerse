@@ -693,3 +693,90 @@ class TestPreparedCollection:
         wiring._collect_prepared_judgments(manager)
         assert calls == []
         assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+
+
+# ---------------------------------------------------------------------------
+# slot.fire の settle-close 回復 (#D5)
+# ---------------------------------------------------------------------------
+
+
+class TestSlotFireRecovery:
+    """running のまま残った slot.fire を回復 tick が settle-close する。
+
+    plan 行 / episode を伴わない最小構成でも settle が完了する (欠損は防御的に
+    skip)。統合的な収束状態 (fired/open/running) からの回復は test_day_plan.py。
+    """
+
+    def _running_slot_fire(self, ledger, *, index=0, plan_date="2026-07-20"):
+        eid, _ = ledger.begin_execution(
+            wiring.SLOT_FIRE_KIND,
+            idempotency_key=f"{PERSONA_ID}:{plan_date}:{index}",
+            persona_id=PERSONA_ID,
+            payload={
+                "persona_id": PERSONA_ID, "plan_date": plan_date,
+                "index": index, "slot_kind": "知る", "reserved_rounds": 5,
+            },
+        )
+        ledger.mark_running(eid)
+        return eid
+
+    def _age(self, session_factory, execution_id, seconds):
+        db = session_factory()
+        try:
+            db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.EXECUTION_ID == execution_id
+            ).update({"UPDATED_AT": ExecutionLedgerEntry.UPDATED_AT - int(seconds)})
+            db.commit()
+        finally:
+            db.close()
+
+    def test_stale_slot_fire_settled_and_not_unknown_swept(self, manager, session_factory):
+        """回復 tick: deadline 超過の slot.fire は settle-close (completed) され、
+        汎用 unknown sweep に掴まれない。並走の generic running は unknown 化される。"""
+        ledger = manager.execution_ledger
+        slot_id = self._running_slot_fire(ledger)
+        generic_id, _ = ledger.begin_execution("metabolism.run", persona_id=PERSONA_ID)
+        ledger.mark_running(generic_id)
+        # slot.fire を settle deadline 超過、generic を running deadline 超過へ
+        self._age(session_factory, slot_id, int(wiring.SLOT_SETTLE_DEADLINE_SECONDS) + 60)
+        self._age(session_factory, generic_id, int(wiring.RUNNING_DEADLINE_SECONDS) + 60)
+
+        wiring._recovery_tick(manager)
+
+        # slot.fire は settle-close 経路で completed (unknown ではない)
+        assert ledger.get_execution(slot_id)["status"] == XL.STATUS_COMPLETED
+        # generic は汎用 sweep で unknown
+        assert ledger.get_execution(generic_id)["status"] == XL.STATUS_UNKNOWN
+
+    def test_fresh_slot_fire_within_deadline_is_untouched(self, manager, session_factory):
+        """deadline 未満の running slot.fire は settle も unknown もされない。"""
+        ledger = manager.execution_ledger
+        slot_id = self._running_slot_fire(ledger)
+        wiring._recovery_tick(manager)
+        assert ledger.get_execution(slot_id)["status"] == XL.STATUS_RUNNING
+
+    def test_startup_recovery_settles_previous_generation_slot_fire(self, manager, session_factory):
+        """起動時: deadline を課さず全 running slot.fire を settle-close する
+        (前世代確定)。generic running は従来どおり unknown 化。"""
+        ledger = manager.execution_ledger
+        slot_id = self._running_slot_fire(ledger)  # aging しない (deadline 課さない)
+        generic_id, _ = ledger.begin_execution("judgment.day_open", persona_id=PERSONA_ID)
+        ledger.mark_running(generic_id)
+
+        wiring.run_startup_recovery(manager)
+
+        assert ledger.get_execution(slot_id)["status"] == XL.STATUS_COMPLETED
+        assert ledger.get_execution(generic_id)["status"] == XL.STATUS_UNKNOWN
+
+    def test_incomplete_payload_is_skipped(self, manager, session_factory):
+        """payload に座標が欠ける running slot.fire は skip (tick を殺さない)。"""
+        ledger = manager.execution_ledger
+        eid, _ = ledger.begin_execution(
+            wiring.SLOT_FIRE_KIND, idempotency_key="x", persona_id=PERSONA_ID,
+            payload={"persona_id": PERSONA_ID},  # plan_date / index 欠損
+        )
+        ledger.mark_running(eid)
+        self._age(session_factory, eid, int(wiring.SLOT_SETTLE_DEADLINE_SECONDS) + 60)
+        wiring._collect_stale_slot_executions(manager)
+        # settle されず running のまま (次段の裁定に委ねる)
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_RUNNING

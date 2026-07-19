@@ -135,6 +135,36 @@ class EpisodesTests(unittest.TestCase):
         with self.assertRaises(E.EpisodeNotFoundError):
             E.get_by_ref(self.manager, "p1", "not-a-ref")
 
+    # ---- get_open_episode_by_origin (W2 D5) ----
+
+    def test_get_open_episode_by_origin_returns_open_match(self):
+        ep = E.open_episode(
+            self.manager, "p1", E.KIND_SLOT, origin_ref="day_plan:p1:2026-07-20:0",
+        )
+        found = E.get_open_episode_by_origin(
+            self.manager, "p1", "day_plan:p1:2026-07-20:0",
+        )
+        self.assertIsNotNone(found)
+        self.assertEqual(found["episode_id"], ep["episode_id"])
+
+    def test_get_open_episode_by_origin_ignores_closed_and_other(self):
+        ep = E.open_episode(
+            self.manager, "p1", E.KIND_SLOT, origin_ref="day_plan:p1:2026-07-20:1",
+        )
+        E.close_episode(self.manager, "p1", ep["episode_ref"])
+        # 閉じた出来事は返らない
+        self.assertIsNone(
+            E.get_open_episode_by_origin(self.manager, "p1", "day_plan:p1:2026-07-20:1")
+        )
+        # 別 persona / 別 origin / 空 origin は None
+        E.open_episode(
+            self.manager, "p2", E.KIND_SLOT, origin_ref="day_plan:p2:2026-07-20:0",
+        )
+        self.assertIsNone(
+            E.get_open_episode_by_origin(self.manager, "p1", "day_plan:p2:2026-07-20:0")
+        )
+        self.assertIsNone(E.get_open_episode_by_origin(self.manager, "p1", ""))
+
     # ---- list_today ----
 
     def test_list_today_overlap_semantics(self):
@@ -213,6 +243,85 @@ class EpisodesTests(unittest.TestCase):
         ep = E.open_episode(self.manager, "p1", E.KIND_WORK_SESSION)
         with self.assertRaises(ValueError):
             E.set_digest_ref(self.manager, "p1", ep["episode_ref"], "")
+
+    # ---- session モード (W2 Chunk A / D3: 予約 tx / 精算 tx への同梱) ----
+
+    def test_open_session_mode_not_visible_before_commit(self):
+        db = self.manager.SessionLocal()
+        try:
+            ep = E.open_episode(self.manager, "p1", E.KIND_SLOT, session=db)
+            # 呼び出し元 commit 前は別 Session から見えない
+            with self.assertRaises(E.EpisodeNotFoundError):
+                E.get_by_ref(self.manager, "p1", ep["episode_ref"])
+            db.commit()
+        finally:
+            db.close()
+        # commit 後は見える
+        fetched = E.get_by_ref(self.manager, "p1", ep["episode_ref"])
+        self.assertEqual(fetched["episode_id"], ep["episode_id"])
+        self.assertEqual(fetched["status"], E.STATUS_OPEN)
+        self.assertEqual(ep["short_id"], 1)
+
+    def test_open_session_mode_rollback_leaves_nothing(self):
+        db = self.manager.SessionLocal()
+        try:
+            ep = E.open_episode(self.manager, "p1", E.KIND_SLOT, session=db)
+            db.rollback()
+        finally:
+            db.close()
+        with self.assertRaises(E.EpisodeNotFoundError):
+            E.get_by_ref(self.manager, "p1", ep["episode_ref"])
+
+    def test_close_session_mode_not_visible_before_commit(self):
+        # まず通常経路で open (commit 済み)
+        ep = E.open_episode(self.manager, "p1", E.KIND_SLOT)
+        db = self.manager.SessionLocal()
+        try:
+            E.close_episode(self.manager, "p1", ep["episode_ref"], session=db)
+            # commit 前: 別 Session からはまだ open
+            self.assertEqual(
+                E.get_by_ref(self.manager, "p1", ep["episode_ref"])["status"],
+                E.STATUS_OPEN,
+            )
+            db.commit()
+        finally:
+            db.close()
+        # commit 後: closed
+        self.assertEqual(
+            E.get_by_ref(self.manager, "p1", ep["episode_ref"])["status"],
+            E.STATUS_CLOSED,
+        )
+
+    def test_session_mode_does_not_mutate_open_cache_until_invalidated(self):
+        # キャッシュ整合の契約: session モードはキャッシュを触らず、呼び出し元が
+        # commit 後に invalidate_open_cache() を呼ぶまで stale hit が残る。
+        # まずキャッシュに None を焼く (open が無い状態を読む)
+        self.assertIsNone(E.get_open_episode(self.manager, "p1"))
+
+        db = self.manager.SessionLocal()
+        try:
+            ep = E.open_episode(self.manager, "p1", E.KIND_SLOT, session=db)
+            db.commit()
+        finally:
+            db.close()
+        # 未 invalidate: stale な None が cache hit で返り続ける (DB フォールバック
+        # しないことの確認)
+        self.assertIsNone(E.get_open_episode(self.manager, "p1"))
+        # invalidate 後: DB から現在の open を読み直す
+        E.invalidate_open_cache(self.manager, "p1")
+        restored = E.get_open_episode(self.manager, "p1")
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["episode_id"], ep["episode_id"])
+
+    def test_session_none_path_updates_cache_as_before(self):
+        # session=None の従来経路はキャッシュを更新する (無傷であること)
+        opened = E.open_episode(self.manager, "p1", E.KIND_CONVERSATION)
+        # open 直後、キャッシュ経由で読める (DB を再度引かずとも最後の open)
+        cached = E.get_open_episode(self.manager, "p1")
+        self.assertEqual(cached["episode_id"], opened["episode_id"])
+        # close (session=None) はキャッシュを落とす → 次回 DB フォールバックで None
+        E.close_episode(self.manager, "p1", opened["episode_ref"])
+        self.assertIsNone(E.get_open_episode(self.manager, "p1"))
 
 
 if __name__ == "__main__":

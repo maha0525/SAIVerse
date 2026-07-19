@@ -60,6 +60,8 @@ import re
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from sqlalchemy.orm import Session
+
 from saiverse import clock
 
 LOGGER = logging.getLogger(__name__)
@@ -225,6 +227,11 @@ _SLOT_HANDLERS: Dict[str, SlotHandler] = {}
 
 #: 予算ゲート (v2 §4.5) の対象 kind (register_slot_handler の consumes_budget)
 _BUDGET_GATED_KINDS: set = set()
+
+#: manager に execution_ledger が無い環境 (旧テストスタブ等) への WARN を
+#: persona ごと一度だけに抑える (autonomy_wiring._LEDGER_MISSING_WARNED と同流儀)。
+#: 台帳が無ければ :func:`_fire_slot` は従来挙動 (:func:`_fire_slot_legacy`) に縮退する。
+_LEDGER_MISSING_WARNED: set = set()
 
 
 def register_slot_handler(kind: str, fn: SlotHandler, *, consumes_budget: bool = False) -> None:
@@ -399,6 +406,38 @@ def _validate_and_normalize_slots(
     return normalized
 
 
+def _validate_and_normalize_for_save(
+    manager: Any, persona_id: str, plan_date_str: str, slots: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """保存前の検証 + ライフ範囲正規化 (``save_day_plan`` / ``replace_day_plan`` 共通)。
+
+    純粋な読み取り + 計算のみ (DB もスケジューラも一切変更しない) — 呼び出し元が
+    「検証を先に済ませてから (cancel を含む) 破壊的操作に入る」原子性を組み立てる
+    ための土台。書式検証は「一日の流れ」の順で昇順を見る (深夜跨ぎのライフでは
+    暦の時刻順と一致しない :func:`day_order_minutes`。ライフ未宣言の日は暦順に
+    退化する)。続けてライフ宣言日は :func:`_normalize_slots_within_organized_range`
+    で「今〜就寝」の編成できる範囲へ丸め・部分救済する。
+
+    Returns:
+        ``(kept, notes)``。``kept`` は生き残ったコマ、``notes`` は日常語の調整メモ。
+
+    Raises:
+        ValueError: コマ配列の書式検証失敗 / 正規化後にコマが 1 件も残らなかった
+            場合。
+    """
+    lives = get_lives(manager, persona_id, plan_date_str)
+    normalized = _validate_and_normalize_slots(
+        slots, order_key=lambda h: day_order_minutes(lives, h)
+    )
+    kept, notes = _normalize_slots_within_organized_range(
+        manager, persona_id, plan_date_str, normalized,
+    )
+    if not kept:
+        reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
+        raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
+    return kept, notes
+
+
 def save_day_plan(
     manager: Any, persona_id: str, plan_date: Any, slots: List[Dict[str, Any]]
 ) -> List[str]:
@@ -422,18 +461,9 @@ def save_day_plan(
     if not persona_id:
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
-    # 昇順検証は「一日の流れ」の順で行う — 深夜跨ぎのライフでは暦の時刻順と
-    # 一致しない (:func:`day_order_minutes`)。ライフ未宣言の日は暦順に退化する。
-    lives = get_lives(manager, persona_id, plan_date_str)
-    normalized = _validate_and_normalize_slots(
-        slots, order_key=lambda h: day_order_minutes(lives, h)
+    kept, notes = _validate_and_normalize_for_save(
+        manager, persona_id, plan_date_str, slots,
     )
-    kept, notes = _normalize_slots_within_organized_range(
-        manager, persona_id, plan_date_str, normalized,
-    )
-    if not kept:
-        reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
-        raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
     _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
     if notes:
         LOGGER.info(
@@ -2053,6 +2083,49 @@ def replace_remaining_slots(
     return pushed, notes
 
 
+def replace_day_plan(
+    manager: Any, persona_id: str, plan_date: Any, new_slots: List[Dict[str, Any]]
+) -> Tuple[int, List[str]]:
+    """時間割を ``new_slots`` で原子的に全置換する (A1、起床判断 day_open の finalize)。
+
+    :func:`replace_remaining_slots` (残りコマの置換) の全置換版。消化済みコマの
+    帳簿を残さない — day_open は一日の最初の編成なので、旧 plan (前回の day_open
+    のやり直し等) はまるごと ``new_slots`` に差し替える。
+
+    **原子性 (A1 の是正)**: :func:`save_day_plan` と同一の検証・ライフ範囲正規化を
+    **先に** 済ませ、通ってから ``cancel_scheduled_slots`` → ``_upsert_plan_slots``
+    → ``schedule_day_plan`` の順で進める。検証が失敗して ``ValueError`` を投げる
+    場合、**plan も EventScheduler 予約も一切変更しない** — 旧実装が「先に旧予約を
+    cancel してから save が raise」する順序で、plan は残るが自動発火予約だけ消えた
+    孤児 (「plan は見えるが自動発火しない」) を作っていたのを構造的に断つ。
+
+    Returns:
+        ``(置換後に EventScheduler へ push した pending コマ数, 調整メモ)``。
+
+    Raises:
+        ValueError: persona_id 空 / コマ配列の書式検証失敗 / 正規化後にコマが
+            1 件も残らなかった場合 (この時点で DB もスケジューラも未変更)。
+    """
+    if not persona_id:
+        raise ValueError("persona_id is required")
+    plan_date_str = _normalize_plan_date(plan_date)
+    # 1. 検証・正規化を先に。ここで raise してもこの時点まで DB / スケジューラは
+    #    一切変更されていない (原子性の要)。
+    kept, notes = _validate_and_normalize_for_save(
+        manager, persona_id, plan_date_str, new_slots,
+    )
+    # 2. 検証が通ってから旧予約を落とし、保存 → 再 push する。
+    cancel_scheduled_slots(manager, persona_id, plan_date_str)
+    _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
+    if notes:
+        LOGGER.info(
+            "[day_plan] day plan replaced within organized range: "
+            "persona=%s date=%s notes=%s", persona_id, plan_date_str, notes,
+        )
+    pushed = schedule_day_plan(manager, persona_id, plan_date_str)
+    return pushed, notes
+
+
 # ---------------------------------------------------------------------------
 # コマ発火 (LLM を呼ばない決定論処理)
 # ---------------------------------------------------------------------------
@@ -2422,33 +2495,160 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     # (c) 施設へ移動 (型 → 行き先の実行。移動自体が接地した行動 — v2 §6.1)
     _move_to_facility(manager, persona_id, slot)
 
-    # (d) kind 別ハンドラ実行。fired を先に永続化することで、ハンドラ実行中の
-    # クラッシュ後に watchdog (reschedule_pending_slots) が同じコマを二重発火
-    # させない (pending/deferred のみ再 push されるため)。
+    # (d) コマ発火を実行台帳で包む (A5/A6, W2 Chunk B)。台帳の無い環境
+    # (旧テストスタブ) は従来挙動へ縮退する。
+    ledger = getattr(manager, "execution_ledger", None)
+    if ledger is None:
+        if persona_id not in _LEDGER_MISSING_WARNED:
+            _LEDGER_MISSING_WARNED.add(persona_id)
+            LOGGER.warning(
+                "[day_plan] manager has no execution_ledger; slot firing runs "
+                "without ledger tracking / atomic settlement (persona=%s)",
+                persona_id,
+            )
+        _fire_slot_legacy(manager, persona_id, plan_date_str, index, slot, kind, gated, handler)
+        return
+
+    # 予約する実効ラウンド (ゲート後の clamped slot に対して算出)。非 gated は 0。
+    reserved = _effective_budget_rounds(slot) if gated else 0
+    payload = {
+        "persona_id": persona_id,
+        "plan_date": plan_date_str,
+        "index": index,
+        "slot_kind": kind,
+        "reserved_rounds": reserved,
+    }
+    exec_id, runnable, _existing = ledger.claim_execution(
+        "slot.fire",
+        idempotency_key=f"{persona_id}:{plan_date_str}:{index}",
+        persona_id=persona_id,
+        payload=payload,
+    )
+    if not runnable:
+        # 既に発火済み (running/applied/completed) or unknown ブロック。二重発火
+        # ガード — EventScheduler 二重発火・watchdog 再 push の重複を吸収する。
+        LOGGER.info(
+            "[day_plan] slot.fire not runnable (already fired / blocked); skipping "
+            "double-fire (persona=%s date=%s index=%d kind=%s exec=%s status=%s)",
+            persona_id, plan_date_str, index, kind, exec_id, _existing,
+        )
+        return
+
+    # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
+    # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。ハンドラの成否に
+    # 依らず「取り組みに向かった」事実を記録するため、ハンドラ前に付ける。
+    ref = slot.get("ref") or REF_NONE
+    if ref != REF_NONE and ref.startswith("task:"):
+        try:
+            from saiverse.desire_engine import touch_desire
+            touch_desire(manager, persona_id, ref)
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] touch_desire failed (persona=%s ref=%s); continuing",
+                persona_id, ref, exc_info=True,
+            )
+
+    # --- 予約 tx (単一 commit): running + slot fired + 予算予約 + episode open ---
+    # v0.5 (life.md §5.3): コマの発火そのものは標準パルスの消費に数えない
+    # (暮らし/休む スタブの発火が予算を食い潰した実機初日の破綻を避ける)。数える
+    # のは gated な作業コマの実効ラウンド予約だけ。
+    try:
+        episode_ref = _reserve_slot_tx(
+            manager, ledger, exec_id, persona_id, plan_date_str, index, slot,
+            gated, reserved,
+        )
+    except Exception:
+        # 予約 tx は全ロールバック済み: slot pending・予算不変・episode 無し・
+        # 台帳は prepared のまま。ハンドラは呼ばない (watchdog が pending を
+        # 再 push、claim が prepared を再利用して安全再実行)。
+        LOGGER.exception(
+            "[day_plan] slot.fire reservation tx failed; handler NOT called, slot "
+            "left pending, budget unchanged (persona=%s date=%s index=%d kind=%s exec=%s)",
+            persona_id, plan_date_str, index, kind, exec_id,
+        )
+        return
+
+    LOGGER.info(
+        "[day_plan] slot fired: persona=%s date=%s index=%d kind=%s ref=%s "
+        "facility=%s reserved=%d exec=%s",
+        persona_id, plan_date_str, index, kind, slot.get("ref"),
+        slot.get("facility"), reserved, exec_id,
+    )
+
+    # --- ハンドラ (running 区間) ---
+    try:
+        used_rounds = handler(manager, persona_id, plan_date_str, slot, index)
+    except Exception:
+        # 防御経路 (run_work_session は raise しない契約)。LLM が動いたか不明な
+        # ので mark_unknown (自動再実行禁止の照合対象)。slot は fired のまま
+        # (「実行したが完了記録なし」の観察)、予約額は保持。出来事は best-effort
+        # で閉じる (実行区間は終わった)。
+        LOGGER.exception(
+            "[day_plan] slot handler raised (persona=%s date=%s index=%d kind=%s exec=%s); "
+            "slot left 'fired', budget reservation retained, marking execution unknown",
+            persona_id, plan_date_str, index, kind, exec_id,
+        )
+        _close_slot_episode(manager, persona_id, episode_ref, None)
+        try:
+            ledger.mark_unknown(exec_id, "slot.fire handler raised")
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] failed to mark slot.fire execution unknown after handler "
+                "raise (persona=%s exec=%s)", persona_id, exec_id,
+            )
+        return
+
+    # --- 精算 tx (単一 commit): 予算調整 + slot done + episode close + applied ---
+    try:
+        _settle_slot_tx(
+            manager, ledger, exec_id, persona_id, plan_date_str, index, slot,
+            episode_ref, gated, reserved, used_rounds,
+        )
+    except Exception:
+        # 精算 tx は全ロールバック: slot fired・episode open・台帳 running・予算は
+        # 予約額のまま (予約 tx で確定済み)。→ 後続コマは予約額を消費済みとして
+        # 見る (A5「精算失敗時も予約額を残す」)。回復 tick が settle-close する
+        # (Chunk C)。EventScheduler callback を殺さないため再送出はしない。
+        LOGGER.exception(
+            "[day_plan] slot.fire settlement tx failed; slot left 'fired', episode "
+            "open, ledger 'running', reserved budget retained — recovery will "
+            "settle-close (persona=%s date=%s index=%d kind=%s exec=%s)",
+            persona_id, plan_date_str, index, kind, exec_id,
+        )
+        return
+
+
+def _fire_slot_legacy(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    slot: Dict[str, Any],
+    kind: Any,
+    gated: bool,
+    handler: SlotHandler,
+) -> None:
+    """台帳の無い環境向けの発火経路 (三区間化前の従来挙動そのまま)。
+
+    :func:`_fire_slot` が ``manager.execution_ledger`` を持たない旧テストスタブ
+    で呼ばれたときの縮退。予約/精算の原子性 (A5/A6) は無いが、台帳を前提に
+    しない既存テストを壊さないための後方互換経路 (WARN は persona 一度だけ)。
+    """
+    # fired を先に永続化することで、ハンドラ実行中のクラッシュ後に watchdog
+    # (reschedule_pending_slots) が同じコマを二重発火させない
+    # (pending/deferred のみ再 push されるため)。
     updated = _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_FIRED)
     if updated is not None:
         slot = updated
     LOGGER.info(
-        "[day_plan] slot fired: persona=%s date=%s index=%d kind=%s ref=%s facility=%s",
+        "[day_plan] slot fired (no-ledger): persona=%s date=%s index=%d kind=%s "
+        "ref=%s facility=%s",
         persona_id, plan_date_str, index, kind, slot.get("ref"), slot.get("facility"),
     )
 
-    # v0.5 (life.md §5.3): コマの発火 (開始時刻が来ただけ) は標準パルスの
-    # 消費として数えない — AI を呼ばないコマ (暮らし/休む のスタブ等) の発火が
-    # 予算を食い潰した実機初日の破綻の直接原因だったため、この記帳点は廃止した。
-    # 予算を数える実体 (暮らし Pulse) は未実装 (life.md §5.2-1)。
-
-    # コマの実行区間を出来事として開く (skip 済み経路はここに到達しない =
-    # skip されたコマは出来事を作らない。life_concept_map.md §8.1)
     episode_ref = _open_slot_episode(manager, persona_id, plan_date_str, slot, index)
 
-    # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
-    # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。ハンドラの成否に
-    # 依らず「取り組みに向かった」事実を記録するため、実行前に付ける。
     ref = slot.get("ref") or REF_NONE
-    # 欲求コマ発火 = 再訪記録。参照アドレッシング統一 (Q2) で全 ref が task:N に
-    # なり prefix では desire を判別できないが、touch_desire は stage='candidate'
-    # でなければ安全に no-op するので、task ref すべてに対して呼ぶ。
     if ref != REF_NONE and ref.startswith("task:"):
         try:
             from saiverse.desire_engine import touch_desire
@@ -2462,20 +2662,14 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     try:
         used_rounds = handler(manager, persona_id, plan_date_str, slot, index)
     except Exception:
-        # 失敗コマは fired のまま残す (再発火しない安全側)。就寝判断の
-        # 予定 vs 実績で「実行したが完了記録が無い」として観察できる。
-        # NOTE: raise 経路では消費ラウンドが不明のため台帳へ積算できない
-        # (run_work_session は raise しない契約なので、通常この経路は通らない)。
         LOGGER.exception(
             "[day_plan] slot handler failed (persona=%s date=%s index=%d kind=%s); "
             "slot left as 'fired'",
             persona_id, plan_date_str, index, kind,
         )
-        # 実行区間は終わった (異常終了) — 出来事は閉じる (事実の記録)。
         _close_slot_episode(manager, persona_id, episode_ref, None)
         return
 
-    # (e) 実測の消費ラウンドを日次予算台帳へ積算する (v2 §4.5 / life.md Phase2 §7)
     if gated and isinstance(used_rounds, int) and not isinstance(used_rounds, bool) \
             and used_rounds > 0:
         try:
@@ -2497,9 +2691,359 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
                 persona_id, plan_date_str, index,
             )
     done_slot = _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_DONE)
-    # 出来事を閉じる。record_level (presence_only 等、ハンドラが永続化した
-    # 完了記録の詳しさ) は DONE 更新後の slot から透過する。
     _close_slot_episode(manager, persona_id, episode_ref, done_slot)
+
+
+# ---------------------------------------------------------------------------
+# コマ発火の予約 / 精算トランザクション (A5/A6, W2 Chunk B)
+#
+# slots_json と meta_json は同じ PersonaDayPlan 行。台帳遷移・slot 状態・予算・
+# episode を単一 manager.SessionLocal() の 1 commit に束ねることで、
+# 「予算記帳の非原子性 (A5)」と「done 保存失敗で episode 永久 open (A6)」を
+# 同一患部で解く。予算計算 (κ・ライフ判定) は既存関数を流用し、負 delta (返金)
+# を許す点だけ独自 (既存 consume_* は _read_nonneg_int で負を弾くため)。
+# ---------------------------------------------------------------------------
+
+
+def _load_plan_row(db: Session, persona_id: str, plan_date_str: str) -> Any:
+    """PersonaDayPlan 行を与えられた Session で読む (無ければ None)。"""
+    from database.models import PersonaDayPlan
+
+    return (
+        db.query(PersonaDayPlan)
+        .filter_by(persona_id=persona_id, plan_date=plan_date_str)
+        .first()
+    )
+
+
+def _row_slots(row: Any) -> List[Dict[str, Any]]:
+    """行の slots_json を list に読む (不正/空は空リスト)。"""
+    try:
+        slots = json.loads(row.slots_json) if row.slots_json else []
+    except (TypeError, ValueError):
+        LOGGER.warning("[day_plan] slots_json is not valid JSON: %r", row.slots_json)
+        return []
+    return slots if isinstance(slots, list) else []
+
+
+def _row_meta(row: Any) -> Dict[str, Any]:
+    """行の meta_json を dict に読む (不正/空は空 dict)。"""
+    try:
+        meta = json.loads(row.meta_json) if row.meta_json else {}
+    except (TypeError, ValueError):
+        LOGGER.warning("[day_plan] meta_json is not valid JSON: %r", row.meta_json)
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _apply_budget_delta_in_session(row: Any, slot: Dict[str, Any], delta: int) -> None:
+    """予算消費を ``delta`` だけ調整して行の meta_json へ書く (commit は呼び出し元)。
+
+    lives のある日は ``lives[idx].used_rounds`` (生ラウンド。κ は消費計算時に
+    :func:`get_budget_state` が掛ける) が正典、無い日は ``META_BUDGET_USED``。
+    idx は :func:`get_life_for_time` で流用。**delta は負 = 返金になりうる**ため
+    ``max(0, cur + delta)`` でクランプする (既存 consume_* は負を弾くのでここでは
+    使えない)。lives のある日は旧 ``META_BUDGET_USED`` を書かない (A5 の二重台帳
+    廃止・lives 正典一本化)。
+    """
+    if not delta:
+        return
+    meta = _row_meta(row)
+    raw_lives = meta.get(META_LIVES)
+    lives = [life for life in raw_lives if isinstance(life, dict)] \
+        if isinstance(raw_lives, list) else []
+    if lives:
+        idx = get_life_for_time(lives, slot.get("start"))
+        if idx is None:
+            # 谷にコマは置けない検証を通っていれば起こらないが、保存後にライフだけ
+            # 組み替わった場合の防御 (積算先が無いので no-op)。
+            LOGGER.warning(
+                "[day_plan] budget delta %+d has no owning life for start=%s; skipped",
+                delta, slot.get("start"),
+            )
+            return
+        cur = int(lives[idx].get("used_rounds") or 0)
+        lives[idx]["used_rounds"] = max(0, cur + delta)
+        meta[META_LIVES] = lives
+    else:
+        cur = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
+        meta[META_BUDGET_USED] = max(0, cur + delta)
+    row.meta_json = json.dumps(meta, ensure_ascii=False)
+
+
+def _reserve_slot_tx(
+    manager: Any,
+    ledger: Any,
+    exec_id: str,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    slot: Dict[str, Any],
+    gated: bool,
+    reserved: int,
+) -> Optional[str]:
+    """予約 tx: 台帳 running + slot fired + 予算予約 + episode open を単一 commit。
+
+    Returns:
+        開いた出来事の episode_ref (episodes.open_episode の戻り)。
+
+    例外時は全ロールバック (slot pending・予算不変・episode 無し・台帳 prepared の
+    まま) して再送出する — 呼び出し元がハンドラを呼ばずに return する契約。
+    """
+    from saiverse import episodes
+
+    db = manager.SessionLocal()
+    try:
+        # 台帳 prepared → running (同 tx。不変条件 1)
+        ledger.mark_running(exec_id, session=db)
+
+        row = _load_plan_row(db, persona_id, plan_date_str)
+        if row is None:
+            raise RuntimeError(
+                f"plan row missing during reservation (persona={persona_id} "
+                f"date={plan_date_str})"
+            )
+        slots = _row_slots(row)
+        if index >= len(slots):
+            raise RuntimeError(
+                f"slot index {index} out of range during reservation "
+                f"(persona={persona_id} date={plan_date_str} len={len(slots)})"
+            )
+        # slot pending/deferred → fired
+        slots[index]["status"] = STATUS_FIRED
+        row.slots_json = json.dumps(slots, ensure_ascii=False)
+
+        # 予算予約 (gated のみ、実効ラウンド分を先取り消費)
+        if gated and reserved:
+            _apply_budget_delta_in_session(row, slot, int(reserved))
+
+        row.updated_at = clock.now()
+
+        # 出来事を開く (同 session。skip 済み経路はここに来ない = 出来事を作らない)
+        persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+        building_id = getattr(persona, "current_building_id", None)
+        ep_meta: Dict[str, Any] = {"slot_kind": str(slot.get("kind") or "")}
+        title = str(slot.get("title") or "").strip()
+        if title:
+            ep_meta["title"] = title
+        ep = episodes.open_episode(
+            manager, persona_id,
+            _episode_kind_for_slot(slot.get("kind")),
+            building_id=building_id,
+            participants=[persona_id],
+            origin_ref=_slot_origin_ref(persona_id, plan_date_str, index),
+            meta=ep_meta,
+            session=db,
+        )
+        episode_ref = ep.get("episode_ref")
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # commit 成功後: open キャッシュを無効化 (未コミット状態を映さない契約)。
+    episodes.invalidate_open_cache(manager, persona_id)
+    return episode_ref
+
+
+def _settle_slot_tx(
+    manager: Any,
+    ledger: Any,
+    exec_id: str,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    slot: Dict[str, Any],
+    episode_ref: Optional[str],
+    gated: bool,
+    reserved: int,
+    used_rounds: Any,
+) -> None:
+    """精算 tx: 予算調整 + slot done + episode close + 台帳 applied を単一 commit。
+
+    ``used_rounds`` が非負 int でない (None 等) なら delta=0 (予約額をそのまま
+    消費として残す安全側)。delta は負 = 返金になりうる。例外時は全ロールバック
+    (slot fired・episode open・台帳 running・予算は予約額のまま) して再送出する。
+    """
+    from saiverse import episodes
+
+    if gated and isinstance(used_rounds, int) and not isinstance(used_rounds, bool):
+        delta = int(used_rounds) - int(reserved)
+        used_for_result: Optional[int] = int(used_rounds)
+    else:
+        delta = 0
+        used_for_result = (
+            int(used_rounds)
+            if isinstance(used_rounds, int) and not isinstance(used_rounds, bool)
+            else None
+        )
+
+    db = manager.SessionLocal()
+    try:
+        row = _load_plan_row(db, persona_id, plan_date_str)
+        if row is None:
+            raise RuntimeError(
+                f"plan row missing during settlement (persona={persona_id} "
+                f"date={plan_date_str})"
+            )
+
+        # 予算の精算 (予約 → 実測。通常は返金の負 delta)
+        if gated and delta:
+            _apply_budget_delta_in_session(row, slot, delta)
+
+        # slot fired → done (record_level はハンドラが別 tx で永続化済み)
+        slots = _row_slots(row)
+        done_slot: Optional[Dict[str, Any]] = None
+        if index < len(slots):
+            slots[index]["status"] = STATUS_DONE
+            row.slots_json = json.dumps(slots, ensure_ascii=False)
+            done_slot = slots[index]
+        else:
+            LOGGER.warning(
+                "[day_plan] slot index %d out of range during settlement "
+                "(persona=%s date=%s len=%d); done not written",
+                index, persona_id, plan_date_str, len(slots),
+            )
+        row.updated_at = clock.now()
+
+        # 出来事を閉じる (同 session。record_level を meta へ透過)
+        if episode_ref:
+            close_meta: Optional[Dict[str, Any]] = None
+            record_level = str((done_slot or {}).get("record_level") or "")
+            if record_level:
+                close_meta = {"record_level": record_level}
+            episodes.close_episode(
+                manager, persona_id, episode_ref, meta=close_meta, session=db,
+            )
+
+        # 台帳 running → applied (outbox 無し。memory.db を跨ぐ書き込みは精算段階に
+        # 無い — ハンドラが memory.db に書くのは running 区間)
+        ledger.mark_applied(exec_id, session=db, result={
+            "kind": "slot.fire",
+            "reserved": int(reserved),
+            "used_rounds": used_for_result,
+            "gated": bool(gated),
+        })
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # commit 成功後: open キャッシュ無効化 → 台帳 completed (outbox 無しなので
+    # applied → completed が通る。別 commit でよい)。
+    if episode_ref:
+        episodes.invalidate_open_cache(manager, persona_id)
+    ledger.mark_completed(exec_id)
+
+
+def settle_stale_slot(
+    manager: Any,
+    ledger: Any,
+    execution_id: str,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    episode_ref: Optional[str],
+) -> None:
+    """精算 tx が転けて running のまま残ったコマ発火を保守的に settle-close する (A6 回復)。
+
+    回復 tick (:func:`saiverse.execution_ledger_wiring._collect_stale_slot_executions`)
+    から呼ばれる。精算 tx (:func:`_settle_slot_tx`) と同形の単一 commit だが、
+    **LLM を再実行しない掃除** なので:
+
+    - **予算は調整しない** — 予約額 (= 実効予算 = 使える上限) をそのまま消費として
+      残す (実測が不明な crash 回復では返金しない保守側。A5 の設計思想)。
+    - **episode_ref は逆引き結果** (origin_ref からの :func:`get_open_episode_by_origin`)
+      を使う。無ければ close を省く。
+    - slot は ``fired → done`` (既に done 等なら触らない)。
+    - 台帳は ``running → applied`` (result に ``recovered: True``)、commit 後に
+      ``completed``。
+
+    冪等: 実行が running でなければ (= 既に別 tick が settle 済み) 何もしない。
+    ``mark_applied`` は running→applied の合法遷移なので、二重 tick の 2 本目が
+    IllegalTransitionError で落ちる前に status を確認して skip する。
+    """
+    from saiverse import episodes
+    from saiverse.execution_ledger import STATUS_RUNNING as _LEDGER_RUNNING
+
+    # 冪等ガード: running でなければ触らない (二重 tick の 2 本目は既に applied)。
+    try:
+        current_status = ledger.get_execution(execution_id).get("status")
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] settle_stale_slot: could not read execution %s; skipping",
+            execution_id, exc_info=True,
+        )
+        return
+    if current_status != _LEDGER_RUNNING:
+        LOGGER.debug(
+            "[day_plan] settle_stale_slot: execution %s is %s (not running); "
+            "skipping (already settled)", execution_id, current_status,
+        )
+        return
+
+    db = manager.SessionLocal()
+    closed_episode = False
+    try:
+        row = _load_plan_row(db, persona_id, plan_date_str)
+        # slot fired → done (既に done/skipped 等なら触らない — 帳簿を上書きしない)
+        if row is not None:
+            slots = _row_slots(row)
+            if index < len(slots) and slots[index].get("status") == STATUS_FIRED:
+                slots[index]["status"] = STATUS_DONE
+                row.slots_json = json.dumps(slots, ensure_ascii=False)
+                row.updated_at = clock.now()
+        else:
+            LOGGER.warning(
+                "[day_plan] settle_stale_slot: plan row missing "
+                "(persona=%s date=%s index=%d); settling ledger/episode only",
+                persona_id, plan_date_str, index,
+            )
+
+        # 出来事を閉じる (逆引き結果、同 session)。既に閉じていれば close は no-op。
+        if episode_ref:
+            try:
+                episodes.close_episode(
+                    manager, persona_id, episode_ref, session=db,
+                )
+                closed_episode = True
+            except episodes.EpisodeNotFoundError:
+                LOGGER.warning(
+                    "[day_plan] settle_stale_slot: episode %s not found "
+                    "(persona=%s); closing ledger without it",
+                    episode_ref, persona_id,
+                )
+
+        # 台帳 running → applied (outbox 無し。予算は予約額のまま = 保守精算)
+        ledger.mark_applied(execution_id, session=db, result={
+            "kind": "slot.fire",
+            "recovered": True,
+            "index": index,
+            "note": "settle-close after settlement tx failure (budget kept at reserved)",
+        })
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # commit 成功後: open キャッシュ無効化 → 台帳 completed。
+    if closed_episode:
+        episodes.invalidate_open_cache(manager, persona_id)
+    ledger.mark_completed(execution_id)
+    LOGGER.info(
+        "[day_plan] settle_stale_slot: recovered slot.fire settled "
+        "(persona=%s date=%s index=%d exec=%s episode=%s)",
+        persona_id, plan_date_str, index, execution_id, episode_ref,
+    )
 
 
 # ---------------------------------------------------------------------------

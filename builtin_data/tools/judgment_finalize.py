@@ -278,22 +278,31 @@ def _finalize_day_open(
             "今日の時間割は編成されていません）"
         )
     else:
-        # 全置換: 旧 plan の予約 (index ベースの key) を先に落としてから保存する。
-        day_plan_mod.cancel_scheduled_slots(manager, persona_id, plan_date)
+        # 全置換を原子的に (A1、docs/handoff/..._audit.md): 検証・ライフ範囲正規化を
+        # 先に済ませ、通ってから旧予約 cancel → 保存 → 再 push する。検証が失敗
+        # (ValueError) する場合は plan も EventScheduler 予約も一切変更されない
+        # (旧実装の「先に cancel してから save が raise」で孤児化する順序を断つ)。
         try:
-            range_notes = day_plan_mod.save_day_plan(manager, persona_id, plan_date, slots)
+            pushed, range_notes = day_plan_mod.replace_day_plan(
+                manager, persona_id, plan_date, slots,
+            )
         except ValueError as exc:
-            warnings.append(f"時間割の保存に失敗: {exc}")
+            # 何も変更されていない — 旧 plan / 旧予約はそのまま残る。applied は
+            # timetable 由来で True にしない。エコーを実状態 (既存を維持) に合わせる
+            # (監査 A1「報告と実状態が一致しない」の是正)。
+            warnings.append(
+                f"提出された時間割が編成範囲に収まらなかったため既存の時間割を"
+                f"維持しました（{exc}）"
+            )
             lines.append(
-                f"（時間割は保存されませんでした（{exc}）。"
-                "今日の時間割は編成されていません）"
+                "（既存の時間割を維持しました（提出されたコマが編成範囲に"
+                "収まりませんでした））"
             )
         else:
             # ライフの組織化範囲による丸め・部分救済 (life.md §3) で実際に
             # 保存されたコマ数・内容が sanitize 直後の slots と異なりうる —
             # 一覧は必ず保存済みの実データから組む (捏造を防ぐ)。
             saved_slots = day_plan_mod.load_day_plan(manager, persona_id, plan_date) or slots
-            pushed = day_plan_mod.schedule_day_plan(manager, persona_id, plan_date)
             applied = True
             lines.append(
                 f"（今日の時間割を編成: {len(saved_slots)} コマ、{pushed} コマを予約）"

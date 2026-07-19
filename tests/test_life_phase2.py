@@ -843,3 +843,81 @@ def test_life_status_now_defaults_undeclared_on_lookup_failure():
     status = day_plan.get_life_status_now(broken_manager, PERSONA_ID)
     assert status["lives_declared"] is False
     assert status["in_life"] is False
+
+
+# ---------------------------------------------------------------------------
+# 実行台帳で包む発火の予算精算 (W2 Chunk B, A5) — ライフのある日は
+# lives[].used_rounds 正典に一本化し、旧 budget_used_rounds を書かない。
+# ---------------------------------------------------------------------------
+
+
+def _attach_ledger(manager):
+    from saiverse import execution_ledger as XL
+
+    manager.execution_ledger = XL.ExecutionLedger(manager.SessionLocal)
+    return manager.execution_ledger
+
+
+def _slot_exec_id(manager):
+    from database.models import ExecutionLedgerEntry
+
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(ExecutionLedgerEntry)
+            .filter(ExecutionLedgerEntry.KIND == "slot.fire")
+            .first()
+        )
+        return row.EXECUTION_ID if row is not None else None
+    finally:
+        db.close()
+
+
+def test_lives_day_settlement_writes_only_lives_canon(manager, task_ref):
+    """A5: ライフのある日は精算で lives[].used_rounds のみ更新し、旧 budget_used_rounds
+    (二重台帳) を書かない。予約 5 → 実測 3 の返金精算で used_rounds == 実測 3。"""
+    ledger = _attach_ledger(manager)
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00", budget_rounds=5)])
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_result(rounds_used=3)) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["used_rounds"] == 3           # 予約 5 → 精算 -2 で実測 3
+    assert lives[0]["used_pulses"] == 0           # コマ発火は標準パルスを食わない
+    # 旧日次台帳 (二重書き) は一切書かれない
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert day_plan.META_BUDGET_USED not in meta
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+
+
+def test_lives_day_settlement_failure_retains_reserved_rounds(manager, task_ref):
+    """A5: ライフのある日で精算 tx が転けたら、予約額 (5) が lives.used_rounds に残り、
+    実測 (3) への返金は適用されない (後続コマが未消費扱いで超過実行しない安全側)。"""
+    ledger = _attach_ledger(manager)
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00", budget_rounds=5)])
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_result(rounds_used=3)), \
+            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("commit fail")):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "fired"          # done に進まない
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["used_rounds"] == 5           # 予約額のまま (返金なし)
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "running"
