@@ -252,6 +252,66 @@
     justify-content: flex-start;
 }
 
+/* System notices — world events (item/document/move), warnings, info.
+   These are NOT AI utterances, so they drop the avatar + author name + heavy
+   card chrome and render author-less, compact and centered. The slight
+   negative margin tightens the chatArea 1rem gap around these slim rows so
+   they don't float in a big empty band. */
+.systemNotice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    width: 100%;
+    margin: -0.35rem 0;
+}
+
+.systemNoticeInner {
+    max-width: 640px;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    text-align: center;
+    word-break: break-word;
+}
+
+/* note-box content ships its own muted box styling (globals.css); just strip
+   its default margin and keep its text left-aligned inside the centered row. */
+.systemNoticeInner :global(.note-box) {
+    margin: 0;
+    text-align: left;
+}
+
+.systemNoticeWarning,
+.systemNoticeInfo {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    padding: 0.35em 0.7em;
+    border-radius: 6px;
+    color: var(--foreground);
+    text-align: left;
+    white-space: pre-wrap;
+}
+
+.systemNoticeWarning {
+    background-color: rgba(240, 173, 78, 0.1);
+}
+
+.systemNoticeInfo {
+    background-color: rgba(91, 192, 222, 0.1);
+}
+
+.systemNoticeIcon {
+    flex-shrink: 0;
+}
+
+.systemNoticeTime {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    opacity: 0.55;
+}
+
 .bubble {
     display: none;
 }

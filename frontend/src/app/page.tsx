@@ -118,7 +118,7 @@ interface MessageLLMUsageTotal {
 
 interface Message {
     id?: string;
-    role: 'user' | 'assistant' | 'system';
+    role: 'user' | 'assistant' | 'system' | 'host';
     content: string;
     timestamp?: string; // ISO string
     avatar?: string;
@@ -2546,9 +2546,43 @@ export default function Home() {
                     onScroll={handleScroll}
                 >
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
-                    {messages.map((msg, idx) => (
+                    {messages.map((msg, idx) => {
+                        // System notices (world events / warnings / info) are NOT AI utterances:
+                        // render them author-less and compact, distinct from user/assistant bubbles.
+                        // Errors stay as assistant cards (role 'assistant', has retry/detail affordances).
+                        const isSystemNotice = (msg.role === 'host' || msg.role === 'system') && !msg.isError;
+                        if (isSystemNotice) {
+                            return (
+                                <div key={msg.id || idx} className={styles.systemNotice}>
+                                    {msg.isWarning ? (
+                                        <div className={`${styles.systemNoticeInner} ${styles.systemNoticeWarning}`}>
+                                            <span className={styles.systemNoticeIcon}>⚠️</span>
+                                            <span>{msg.content}</span>
+                                        </div>
+                                    ) : msg.isInfo ? (
+                                        <div className={`${styles.systemNoticeInner} ${styles.systemNoticeInfo}`}>
+                                            <span className={styles.systemNoticeIcon}>ℹ️</span>
+                                            <span>{msg.content}</span>
+                                        </div>
+                                    ) : (
+                                        <div className={styles.systemNoticeInner}>
+                                            <ReactMarkdown
+                                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                                                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                                                urlTransform={markdownUrlTransform}
+                                                components={markdownComponents}
+                                            >{stripUserOnlyTags(msg.content)}</ReactMarkdown>
+                                        </div>
+                                    )}
+                                    {msg.timestamp && (
+                                        <span className={styles.systemNoticeTime}>{new Date(msg.timestamp).toLocaleString()}</span>
+                                    )}
+                                </div>
+                            );
+                        }
+                        return (
                         <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
-                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isWarning ? styles.warningCard : ''} ${msg.isInfo ? styles.infoCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
+                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
                                 <div className={styles.cardHeader}>
                                     <img
                                         src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
@@ -2626,15 +2660,6 @@ export default function Home() {
                                                     <pre>{msg.errorDetail}</pre>
                                                 </details>
                                             )}
-                                        </div>
-                                    ) : msg.isWarning ? (
-                                        <div className={styles.warningContent}>
-                                            <span className={styles.warningMessage}>{msg.content}</span>
-                                        </div>
-                                    ) : msg.isInfo ? (
-                                        <div className={styles.infoContent}>
-                                            <span className={styles.infoIcon}>ℹ️</span>
-                                            <span className={styles.infoMessage}>{msg.content}</span>
                                         </div>
                                     ) : (
                                         <>
@@ -2771,7 +2796,8 @@ export default function Home() {
                                 </div>
                             </div>
                         </div>
-                    ))}
+                        );
+                    })}
                     {loadingStatus && (
                         <div className={styles.loading} role="status" aria-label={loadingStatus}>
                             <span className={styles.loadingSpinner} aria-hidden="true" />
