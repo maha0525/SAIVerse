@@ -9,6 +9,36 @@ import pytest
 from scripts import update_engine
 
 
+def _make_portable_git(project_dir: Path) -> Path:
+    portable_cmd = project_dir / ".git-portable" / "cmd"
+    portable_cmd.mkdir(parents=True)
+    (portable_cmd / "git.exe").write_text("")
+    return portable_cmd
+
+
+def test_portable_git_is_prepended_to_path_when_present(tmp_path: Path) -> None:
+    portable_cmd = _make_portable_git(tmp_path)
+    with patch.dict(update_engine.os.environ, {"PATH": "/usr/bin"}, clear=False):
+        update_engine._ensure_portable_git_on_path(tmp_path)
+        entries = update_engine.os.environ["PATH"].split(update_engine.os.pathsep)
+        assert entries[0] == str(portable_cmd)
+
+
+def test_portable_git_absent_is_noop(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()  # a checkout but no portable git
+    with patch.dict(update_engine.os.environ, {"PATH": "/usr/bin"}, clear=False):
+        update_engine._ensure_portable_git_on_path(tmp_path)
+        assert update_engine.os.environ["PATH"] == "/usr/bin"
+
+
+def test_portable_git_prepend_is_idempotent(tmp_path: Path) -> None:
+    portable_cmd = _make_portable_git(tmp_path)
+    seeded = str(portable_cmd) + update_engine.os.pathsep + "/usr/bin"
+    with patch.dict(update_engine.os.environ, {"PATH": seeded}, clear=False):
+        update_engine._ensure_portable_git_on_path(tmp_path)
+        assert update_engine.os.environ["PATH"] == seeded
+
+
 def test_dirty_worktree_is_rejected_without_stash_or_reset(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     results = [

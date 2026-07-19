@@ -121,6 +121,29 @@ def wait_for_owned_process_exit(
         raise UpdateError(f"Verified main process PID {pid} could not be stopped: {exc}") from exc
 
 
+def _ensure_portable_git_on_path(project_dir: Path) -> None:
+    """Make a setup-installed PortableGit visible to this (separate) session.
+
+    ``setup.bat`` installs PortableGit into ``.git-portable/`` and prepends
+    ``.git-portable\\cmd`` to PATH within its own session. ``update.bat`` runs in
+    a *later* session that does not inherit that PATH, so a user who has only
+    PortableGit (no system / winget Git) would otherwise fail the git readiness
+    check below. Prepend the portable ``cmd`` dir so ``shutil.which('git')`` and
+    the ``git`` subprocess calls resolve. No-op when the binary is absent
+    (non-Windows setups never create it) or the dir is already on PATH.
+    See docs/issues/git_required_for_zip_install.md.
+    """
+    portable_cmd = project_dir / ".git-portable" / "cmd"
+    if not (portable_cmd / "git.exe").exists():
+        return
+    portable_str = str(portable_cmd)
+    current = os.environ.get("PATH", "")
+    if portable_str in current.split(os.pathsep):
+        return
+    os.environ["PATH"] = portable_str + os.pathsep + current
+    LOGGER.info("Using setup-installed PortableGit at %s", portable_cmd)
+
+
 def assert_git_update_ready(project_dir: Path) -> str:
     if not (project_dir / ".git").is_dir() or shutil.which("git") is None:
         raise UpdateError(
@@ -293,6 +316,7 @@ def _terminate_spawned(process: subprocess.Popen[Any]) -> None:
 
 def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
     python = str(config.get("venv_python", sys.executable)) if config else sys.executable
+    _ensure_portable_git_on_path(project_dir)
     old_revision = assert_git_update_ready(project_dir)
 
     if config:

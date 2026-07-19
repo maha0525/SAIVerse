@@ -63,12 +63,12 @@ Pure Python 実装の `dulwich` で clone/pull を Python 側で完結させる�
 
 ## 残タスク
 
-- **クリーン環境での実機テスト**:
+- **クリーン環境での実機テスト** (← まはー領域、要クリーン Windows):
   - Windows: Git 未インストール環境で `setup.bat` を実行し、winget 経路 / PortableGit fallback 経路の両方を確認
   - winget が使えない古い Windows での PortableGit fallback 動作確認
   - 既に Git インストール済み環境で再実行しても無害なこと
 - **`git reset origin/main` 後の `git status`** が clean になるか確認 (`.gitattributes` の line ending 規則と ZIP 展開時の line ending が衝突しないか)
-- update.bat / update.sh / scripts/self_update.py 側で `.git-portable/cmd` を PATH に通す処理が必要か検討 (setup.bat と異なるセッションで起動される場合)
+- ~~update.bat / update.sh / scripts/self_update.py 側で `.git-portable/cmd` を PATH に通す処理が必要か検討 (setup.bat と異なるセッションで起動される場合)~~ → **✅ 対応済 (2026-07-19、下記ログ)**
 - README の導入手順を「Git 不要」前提に書き直す
 
 ## 関連リソース
@@ -80,3 +80,4 @@ Pure Python 実装の `dulwich` で clone/pull を Python 側で完結させる�
 ## ログ
 
 - 2026-05-23: issue 起票。案 1 を実装 (Windows 自動インストール + .gitattributes 追加)。実機テスト未実施。
+- 2026-07-19: **update 経路の PortableGit 断線を修正**。`setup.bat` は自身のセッション内で `.git-portable\cmd` を PATH に前置きするが、`update.bat` / `update.sh` は**別セッション**で起動され、実体の `scripts/update_engine.py` は `shutil.which("git")` と `["git", ...]` を直接叩く。よって「PortableGit しか無い (システム/winget Git 無し)」ユーザーは、後日 update を回すと git 未検出で `assert_git_update_ready` が中断していた。修正: `update_engine._ensure_portable_git_on_path(project_dir)` を新設し `run_update()` 冒頭 (git readiness チェック前) で呼ぶ。`<project>/.git-portable/cmd/git.exe` が在れば同 cmd ディレクトリを PATH 先頭へ前置き (既存なら no-op、非 Windows は `.git-portable` 自体が無いので no-op)。update.bat/update.sh/self_update.py は 3 者とも update_engine.py に委譲するので単一箇所の修正で parity 維持。回帰 `tests/test_update_engine_safety.py` に 3 件追加 (存在時前置き / 不在時 no-op / 冪等)。**setup 経路の自動インストール自体は 2026-05-23 実装のまま。残るはクリーン環境実機テスト (まはー) と README 書き直し。**
