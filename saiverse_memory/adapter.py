@@ -70,6 +70,30 @@ def _auto_backup_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _coerce_content_to_text(content: Any) -> str:
+    """Normalize a message ``content`` to text for the TEXT column.
+
+    A memorize node whose upstream produced structured output (a dict/list)
+    used to pass that object straight through to the SQLite bind, which raised
+    ``type 'dict' is not supported`` — swallowed as a WARNING, so the memorize
+    was silently lost (observed 2026-07-18, sophie_city_a). Normalizing at this
+    single write entry (``_append_message``) fulfills the "record this" intent
+    for every caller rather than each producer having to remember to stringify.
+    dict/list become JSON (readable, round-trippable); other non-str values
+    fall back to ``str()``. See docs/issues/memorize_dict_content_silently_dropped.md.
+    """
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    if isinstance(content, (dict, list)):
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(content)
+    return str(content)
+
+
 class SAIMemoryAdapter:
     """Thin integration layer that lets SAIVerse talk to SAIMemory storage."""
 
@@ -2450,7 +2474,10 @@ class SAIMemoryAdapter:
             return None
         try:
             role = message.get("role", "system")
-            content = message.get("content", "")
+            # Normalize non-str content (structured output dict/list) to text so
+            # it survives the TEXT-column bind instead of failing and being
+            # swallowed as a WARNING (docs/issues/memorize_dict_content_silently_dropped.md).
+            content = _coerce_content_to_text(message.get("content", ""))
             timestamp = message.get("timestamp")
             created_at = self._timestamp_to_epoch(timestamp)
             thread_id = self._thread_id(building_id, thread_suffix=thread_suffix)
