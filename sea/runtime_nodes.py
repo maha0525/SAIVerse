@@ -13,6 +13,7 @@ LOGGER = logging.getLogger(__name__)
 def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
     from tools import TOOL_REGISTRY
     from tools.context import persona_context
+    from tools.core import parse_tool_result
     from tools.mcp_client import maybe_await_tool_result
 
     call_source = getattr(node_def, "call_source", "fc") or "fc"
@@ -66,7 +67,15 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                     result = await maybe_await_tool_result(tool_func, **tool_args)
             else:
                 result = await maybe_await_tool_result(tool_func, **tool_args)
-            result_str = str(result)
+            # A native tool returning a tuple ``(content, snippet, file_path,
+            # metadata)`` (or the 2-/3-tuple forms) must NOT leak its raw repr
+            # into state["last"] (→ MEMORIZE / SAIMemory), the tool_result
+            # message, or PulseContext — only its text belongs there. Normalize
+            # tuples via the canonical parser; the raw ``result`` is still stored
+            # under output_key below. Non-tuple returns (str / dict / ToolResult)
+            # keep str() so a bare dict is not lossily collapsed to "".
+            # See docs/issues/native_tool_return_4tuple_bug.md.
+            result_str = parse_tool_result(result)[0] if isinstance(result, tuple) else str(result)
             result_preview = result_str[:500] + "..." if len(result_str) > 500 else result_str
             LOGGER.info("[sea][tool_call] RESULT %s -> %s", tool_name, result_preview)
             log_sea_trace(playbook.name, node_id, "TOOL_CALL", f"action={tool_name} args={tool_args} → {result_str}")

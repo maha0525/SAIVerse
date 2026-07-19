@@ -10,6 +10,7 @@ from sea.playbook_models import PlaybookSchema
 from sea.runtime_utils import _format, _resolve_template_arg
 from tools import TOOL_REGISTRY
 from tools.context import persona_context
+from tools.core import parse_tool_result
 from tools.mcp_client import maybe_await_tool_result
 
 LOGGER = logging.getLogger(__name__)
@@ -89,8 +90,16 @@ class RuntimeEngine:
                 else:
                     result = await maybe_await_tool_result(tool_func, **kwargs)
 
-                # Log tool result
-                result_str = str(result)
+                # A native tool returning a tuple ``(content, snippet, file_path,
+                # metadata)`` (or the 2-/3-tuple forms) must NOT leak its raw
+                # repr into the trace, PulseContext, SAIMemory, or the LLM
+                # message — only its text belongs there. Normalize tuples via the
+                # canonical parser (the raw ``result`` is still used below for
+                # output_keys / output_key, the explicit multi-value contract).
+                # Non-tuple returns (str / dict / ToolResult) keep str() so a
+                # bare dict is not lossily collapsed to "".
+                # See docs/issues/native_tool_return_4tuple_bug.md.
+                result_str = parse_tool_result(result)[0] if isinstance(result, tuple) else str(result)
                 result_preview = result_str[:200] + "..." if len(result_str) > 200 else result_str
                 LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
                 log_sea_trace(playbook.name, node_id, "TOOL", f"action={tool_name} → {result_str}")
