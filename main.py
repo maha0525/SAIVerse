@@ -633,11 +633,18 @@ def main():
     logging.info("  cd frontend && npm run dev")
     logging.info("  Then open http://localhost:3000 in your browser")
 
+    # log_config=None: skip uvicorn's own logging setup so that the uvicorn /
+    # uvicorn.error / uvicorn.access loggers keep default propagation and flow
+    # into the root TeeHandler (console + backend.log). Without this, uvicorn
+    # attaches its own stderr-only handlers with propagate=False, and the
+    # "Exception in ASGI application" tracebacks for 500 errors never reach
+    # backend.log (see docs/issues/uvicorn_traceback_not_in_logs.md).
     uvicorn.run(
         app,
         host=listen_host,
         port=manager.ui_port,
         log_level="info",
+        log_config=None,
         timeout_graceful_shutdown=5,
     )
 

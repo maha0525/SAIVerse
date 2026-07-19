@@ -157,6 +157,16 @@ def configure_logging(level_name: Optional[str] = None) -> Path:
     # Configure error-only log (WARNING and above)
     _configure_error_logger()
 
+    # Configure the remaining file loggers eagerly so that all session log files
+    # (backend / llm_io / error / sea_trace / timeout_diagnostics) are created in
+    # the SAME session directory at startup. Previously these two were only
+    # initialised lazily on first use, which left a timing window where they
+    # could resolve a different session dir than the others
+    # (see docs/issues/sea_trace_log_directory_mismatch.md). The lazy getters
+    # below still guard against un-configured use as a fallback.
+    _configure_sea_trace_logger()
+    _configure_timeout_diagnostics_logger()
+
     # Suppress overly verbose HTTP library debug logging (base64 request bodies)
     # Also suppress PIL.TiffImagePlugin which dumps EXIF tag details at DEBUG
     for noisy_logger in ("httpcore", "httpx", "openai._base_client", "anthropic._base_client", "PIL.TiffImagePlugin"):

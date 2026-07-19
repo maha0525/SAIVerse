@@ -1,6 +1,6 @@
 # Issue: uvicorn の 500 エラー Traceback が backend.log に出ない
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 解決済み (2026-07-19)
 **優先度**: medium
 **作成日**: 2026-05-08
 **関連**: `saiverse/logging_config.py`, `main.py` (uvicorn 起動箇所)
@@ -76,3 +76,4 @@ uvicorn は `--log-config <yaml>` で外部設定を読める。SAIVerse が自�
 ## ログ
 
 - 2026-05-08: issue 起票。Phase 4-e の `update_ai` フォワード漏れ事件をきっかけに、uvicorn の Traceback がファイルログに載らない問題を認識。
+- 2026-07-19: **解決**。`main.py` の `uvicorn.run(...)` に `log_config=None` を追加。これで uvicorn は自前の logging 設定 (`dictConfig`) を丸ごとスキップし、`uvicorn` / `uvicorn.error` / `uvicorn.access` ロガーは既定の伝播 (handlers 無し・propagate=True) のまま root の `TeeHandler` (console + backend.log) に流れる。案 A 相当だが、手動でハンドラを付け直すのではなく uvicorn の再設定自体を抑止する一行で達成。ASGI 例外の `Exception in ASGI application` traceback は `uvicorn.error` が `exc_info` 付きで吐くため、これで backend.log にフル traceback が残る。access / startup ログも同時に backend.log へ集約される。隔離 `SAIVERSE_USER_DATA_DIR` で uvicorn の `Config(log_config=None).configure_logging()` を実際に通し、`uvicorn.error` の traceback が backend.log に着地することを実証済み。案 B (FastAPI exception_handler) は不要と判断 (伝播経路だけで十分・uvicorn 本来の 500 ログも残せる)。
