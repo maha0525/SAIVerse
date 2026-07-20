@@ -33,9 +33,13 @@
 | `SAIMEMORY_MEMORY_CHUNK_MIN_CHARS` / `_MAX_CHARS` | `120` / `480` | チャンク文字数 |
 | `SAIVERSE_RECALL_SNIPPET_MAX_CHARS` 他 | `8000` | 想起スニペットの最大文字数（通常/stream/pulse） |
 | `MEMORY_WEAVE_MODEL` | `gemini-3.1-flash-lite-preview` | Chronicle/Memopedia 生成・編纂 (curation) モデル。ペルソナ別 `MEMORY_WEAVE_MODEL` (DB) が優先 (`saiverse/memory_weave_llm.py`) |
-| `MEMORY_WEAVE_BATCH_SIZE` | `20` | あらすじ生成のバッチ件数 |
-| `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | あらすじ統合の閾値 |
+| `MEMORY_WEAVE_BATCH_SIZE` | `20` | **廃止 (W4)** — 生成は episode 整列 + サイズ束ねに世代交代 (`SAIVERSE_CHRONICLE_BAND_BUDGET` 系へ)。設定しても無視される |
+| `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | **廃止 (W4)** — 統合は帯あふれ束ねに世代交代。設定しても無視される |
 | `MEMORY_WEAVE_MAINTAIN_INTERVAL` | `200` | メンテ間隔 |
+| `SAIVERSE_CHRONICLE_BAND_BUDGET` | `10000` | 級 1 チャンクの標準被覆字数 U (体験の構造 §4-6・§11-8 のモック検証値)。帯あふれ判定の基準単位 |
+| `SAIVERSE_CHRONICLE_BAND_BASE` | `10` | 級の底 B (幾何級数)。級 k の標準被覆 = U×B^(k-1)、帯 k の許容合計 = U×B^k |
+| `SAIVERSE_CHRONICLE_MIN_DIGEST_CHARS` | `1000` | LLM 圧縮する最小被覆字数。未満は恒等圧縮 (生のまま級 1 に置く、LLM なし) |
+| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 1 回の Metabolism で実行する帯あふれ束ねの上限 (初回帰化の LLM コスト暴走防止の安全弁) |
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。記憶アーキv2 §6.2 |
 | `SAIVERSE_GOLD_PANNING_ENABLED` | `1` | 砂金採り（Metabolism 時のコア記憶採取）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る）。intent `gold_panning.md` |
 | `SAIVERSE_GOLD_PANNING_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |

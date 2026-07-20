@@ -728,12 +728,7 @@ def _run_session_close_locked(
             LOGGER.exception(
                 "[gold_panning] session close: generate_chronicle failed (persona=%s)", persona_id,
             )
-        try:
-            lifecycle.generate_track_chronicle(persona)
-        except Exception:
-            LOGGER.exception(
-                "[gold_panning] session close: generate_track_chronicle failed (persona=%s)", persona_id,
-            )
+        # (旧 Track Chronicle 呼び出しは W4 で廃止 — experience_structure.md §11-10)
     # ensure_recall_embeddings はゲート外で必ず実行 (run_metabolism と同じ思想:
     # ローカル・無料で、Chronicle 生成の成否・トグルに相乗りさせない)。
     try:

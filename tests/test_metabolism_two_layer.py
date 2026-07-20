@@ -59,26 +59,25 @@ def _make_session_factory():
 # ---------------------------------------------------------------------------
 
 
-class FakeArasujiGenerator:
-    """generate_unprocessed の呼び出しを記録するだけの ArasujiGenerator 代替。
+class FakeExecutor:
+    """execute_plan の呼び出しを記録するだけの実行器代替 (W4 新経路)。
 
-    クラス属性 ``calls`` / ``raise_error`` をテストが操作する。
-    (arasuji_entries には書かないため、qualifying 判定は毎回同じ窓を見る —
+    クラス属性 ``calls`` / ``raise_error`` / ``report_cancelled`` をテストが
+    操作する。(arasuji_entries には書かないため、plan は毎回同じ窓を見る —
     claim の dedup だけで二重実行が止まることを検証できる。)
     """
 
     calls: list = []
     raise_error: bool = False
+    report_cancelled: bool = False
 
-    def __init__(self, client, conn, **kwargs):
-        self.kwargs = kwargs
-
-    def generate_unprocessed(self, messages, progress_callback=None,
-                             cancel_check=None, batch_callback=None):
-        FakeArasujiGenerator.calls.append(len(messages))
-        if FakeArasujiGenerator.raise_error:
+    @classmethod
+    def execute_plan(cls, plan, client, conn, **kwargs):
+        cls.calls.append(sum(len(c.messages) for c in plan.chunks))
+        if cls.raise_error:
             raise RuntimeError("llm down")
-        return (["lv1"], [])
+        from sai_memory.arasuji.executor import ExecutionResult
+        return ExecutionResult(cancelled=cls.report_cancelled)
 
 
 class ChronicleClaimTest(unittest.TestCase):
@@ -112,8 +111,9 @@ class ChronicleClaimTest(unittest.TestCase):
 
         self.session_factory, self._engine = _make_session_factory()
         self.ledger = ExecutionLedger(self.session_factory)
-        FakeArasujiGenerator.calls = []
-        FakeArasujiGenerator.raise_error = False
+        FakeExecutor.calls = []
+        FakeExecutor.raise_error = False
+        FakeExecutor.report_cancelled = False
 
     def _close_adapter(self):
         try:
@@ -152,7 +152,9 @@ class ChronicleClaimTest(unittest.TestCase):
         with patch("saiverse.model_configs.find_model_config",
                    return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
                 patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
-                patch("sai_memory.arasuji.generator.ArasujiGenerator", FakeArasujiGenerator), \
+                patch("sai_memory.arasuji.executor.execute_plan", FakeExecutor.execute_plan), \
+                patch("sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0), \
+                patch("sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0), \
                 patch("sai_memory.memory.entity_extractor.make_batch_callback",
                       side_effect=RuntimeError("skip entity extraction")):
             return lifecycle.generate_chronicle(self._persona(), force=True)
@@ -162,34 +164,31 @@ class ChronicleClaimTest(unittest.TestCase):
         lifecycle = self._make_lifecycle()
         first = self._generate(lifecycle)
         self.assertEqual(first, "ok")
-        self.assertEqual(len(FakeArasujiGenerator.calls), 1)
+        self.assertEqual(len(FakeExecutor.calls), 1)
 
-        # FakeArasujiGenerator は arasuji_entries に書かないため窓は同一のまま。
+        # FakeExecutor は arasuji_entries に書かないため窓は同一のまま。
         # 台帳の dedup だけが二重編纂 (二重 LLM コスト) を止める。
         second = self._generate(lifecycle)
         self.assertEqual(second, "deferred")
-        self.assertEqual(len(FakeArasujiGenerator.calls), 1)  # 生成は走らない
+        self.assertEqual(len(FakeExecutor.calls), 1)  # 生成は走らない
 
-    def test_failed_generation_returns_failed_and_window_growth_retries(self):
-        """② (編纂側) 生成失敗 → "failed"。同じ窓の再試行は deferred、
-        窓が伸びる (新メッセージ) と新しい claim で自然再試行される。"""
+    def test_failed_generation_returns_failed_and_same_window_retries(self):
+        """② (編纂側) 生成失敗 → "failed"。failed claim はキー退避されるため
+        **同じ窓でも**再試行できる (claim_execution の意味論 — failed は
+        副作用ゼロ保証で再実行安全。Codex W4 二巡 #6)。"""
         lifecycle = self._make_lifecycle()
-        FakeArasujiGenerator.raise_error = True
+        FakeExecutor.raise_error = True
         self.assertEqual(self._generate(lifecycle), "failed")
-        self.assertEqual(len(FakeArasujiGenerator.calls), 1)
+        self.assertEqual(len(FakeExecutor.calls), 1)
 
-        # 同じ窓: failed 行が (kind, key) を占有 → deferred (生成は走らない)
-        FakeArasujiGenerator.raise_error = False
-        self.assertEqual(self._generate(lifecycle), "deferred")
-        self.assertEqual(len(FakeArasujiGenerator.calls), 1)
-
-        # 窓が伸びる → 窓末尾 ID が変わり新しい claim → 再試行成功
-        self.adapter.append_persona_message({
-            "role": "user", "content": "新しいメッセージ",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        # 同じ窓: failed 行はキー退避 → 新しい claim で再試行成功
+        FakeExecutor.raise_error = False
         self.assertEqual(self._generate(lifecycle), "ok")
-        self.assertEqual(len(FakeArasujiGenerator.calls), 2)
+        self.assertEqual(len(FakeExecutor.calls), 2)
+
+        # 完了後の同じ窓: completed 行がブロック → deferred (二重編纂なし)
+        self.assertEqual(self._generate(lifecycle), "deferred")
+        self.assertEqual(len(FakeExecutor.calls), 2)
 
     def test_degrades_without_ledger(self):
         """⑦ 台帳が無い環境では claim なしで従来どおり実行される。"""
@@ -197,7 +196,104 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertEqual(self._generate(lifecycle), "ok")
         # dedup が無いので毎回実行される (従来挙動)
         self.assertEqual(self._generate(lifecycle), "ok")
-        self.assertEqual(len(FakeArasujiGenerator.calls), 2)
+        self.assertEqual(len(FakeExecutor.calls), 2)
+
+    def test_cancelled_returns_deferred_and_claim_not_completed(self):
+        """⑨ キャンセル = 部分適用を completed で封印しない (Codex W4 #8)。
+        status は "deferred" (anchor 据え置き)、claim は failed 終端 →
+        キー退避で**同じ窓のまま**すぐ再実行できる (二巡 #6)。"""
+        lifecycle = self._make_lifecycle()
+        FakeExecutor.report_cancelled = True
+        self.assertEqual(self._generate(lifecycle), "deferred")
+
+        # claim は completed でなく failed — 窓が伸びなくても再試行できる
+        FakeExecutor.report_cancelled = False
+        self.assertEqual(self._generate(lifecycle), "ok")
+
+    def test_band_backlog_counts_into_confirmation_gate(self):
+        """⑩ 帯あふれ backlog の統合 LLM 予測が確認ゲートの LLM 数に乗り、
+        plan が空でも帯統合だけの実行に進む (Codex W4 #3/#4)。"""
+        # 実 arasuji entries で帯 1 のあふれを作る (U=100/B=2 → cap 200)
+        from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
+        init_arasuji_tables(self.adapter.conn)
+        for i in range(4):
+            create_entry(
+                self.adapter.conn, level=1, content=f"lv1-{i}",
+                source_ids=[f"m{i}-src"],
+                start_time=100 * (i + 1), end_time=100 * (i + 1) + 99,
+                source_count=1, message_count=1,
+                extra_metadata={"digest_origin": "batch", "coverage_chars": 100},
+            )
+        # 全メッセージを processed 扱いにして plan を空にする
+        all_ids = [
+            r[0] for r in self.adapter.conn.execute("SELECT id FROM messages")
+        ]
+        create_entry(
+            self.adapter.conn, level=1, content="全編纂済み", source_ids=all_ids,
+            start_time=1, end_time=2, source_count=len(all_ids),
+            message_count=len(all_ids),
+            extra_metadata={"digest_origin": "batch", "coverage_chars": 100},
+        )
+
+        order = []
+        with patch.dict(os.environ, {
+            "SAIVERSE_CHRONICLE_BAND_BUDGET": "100",
+            "SAIVERSE_CHRONICLE_BAND_BASE": "2",
+        }), \
+                patch("saiverse.model_configs.find_model_config",
+                      return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
+                patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
+                patch("sai_memory.arasuji.executor.execute_plan", FakeExecutor.execute_plan), \
+                patch("sai_memory.arasuji.bands.backfill_coverage",
+                      lambda conn: order.append("backfill") or 0), \
+                patch("sai_memory.arasuji.bands.run_band_overflow",
+                      lambda *a, **k: order.append("band") or 1), \
+                patch("sai_memory.memory.entity_extractor.make_batch_callback",
+                      side_effect=RuntimeError("skip entity extraction")):
+            lifecycle = self._make_lifecycle(with_ledger=False)
+            status = lifecycle.generate_chronicle(self._persona(), force=True)
+        self.assertEqual(status, "ok")
+        # plan は空 (全 processed) — それでも帯統合が実行された。
+        # backfill は dry 予測より前 (Codex W4 三巡 #3 — 近似 dry と実測
+        # backfill の食い違いで早期 return が永久化する穴の閉塞)。
+        self.assertEqual(order, ["backfill", "band"])
+        # executor は plan 空 (0 メッセージ) で呼ばれるか、呼ばれても空
+        if FakeExecutor.calls:
+            self.assertEqual(FakeExecutor.calls[-1], 0)
+
+    def test_evict_boundary_limits_compile_range(self):
+        """⑧ W4 D1 (退場時圧縮 §4-1): evict_boundary_epoch より新しい
+        メッセージ (= 窓に残る範囲) は編纂対象に入らない。"""
+        lifecycle = self._make_lifecycle(with_ledger=False)
+
+        # 全量 (boundary なし) では 4 件が計画に載る
+        self.assertEqual(self._generate(lifecycle), "ok")
+        self.assertEqual(FakeExecutor.calls[-1], 4)
+
+        # boundary = 未来 (全件より新しい) → 全件対象 (同じ 4 件)
+        with patch("saiverse.model_configs.find_model_config",
+                   return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
+                patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
+                patch("sai_memory.arasuji.executor.execute_plan", FakeExecutor.execute_plan), \
+                patch("sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0), \
+                patch("sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0), \
+                patch("sai_memory.memory.entity_extractor.make_batch_callback",
+                      side_effect=RuntimeError("skip entity extraction")):
+            status = lifecycle.generate_chronicle(
+                self._persona(), force=True,
+                evict_boundary_epoch=2_000_000_000,
+            )
+            self.assertEqual(status, "ok")
+            self.assertEqual(FakeExecutor.calls[-1], 4)
+
+            # boundary = 過去 (全件より古い) → 編纂対象なし = "ok" no-op
+            calls_before = len(FakeExecutor.calls)
+            status = lifecycle.generate_chronicle(
+                self._persona(), force=True,
+                evict_boundary_epoch=1,
+            )
+            self.assertEqual(status, "ok")
+            self.assertEqual(len(FakeExecutor.calls), calls_before)  # 実行されない
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +318,6 @@ class RetirementGateTest(unittest.TestCase):
             lifecycle.generate_chronicle = _raise
         else:
             lifecycle.generate_chronicle = lambda p, cb=None, **kw: chronicle_status
-        lifecycle.generate_track_chronicle = lambda p: None
         lifecycle.ensure_recall_embeddings = lambda p: None
         return lifecycle
 
@@ -304,6 +399,99 @@ class RetirementGateTest(unittest.TestCase):
         std = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
         self.assertEqual(std["anchor_id"], "old-std")
         self.assertEqual(std["updated_at"], t0.isoformat())
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 退役境界の episode スナップ (W4 D2 — §4-1 × §4-2)
+# ---------------------------------------------------------------------------
+
+
+class EvictEpisodeSnapTest(unittest.TestCase):
+    """open episode の内部で anchor を切らない (退役でも episode は原子)。"""
+
+    def setUp(self):
+        self.session_factory, self._engine = _make_session_factory()
+        self.addCleanup(self._engine.dispose)
+        self.manager = SimpleNamespace(SessionLocal=self.session_factory)
+
+    def _make_lifecycle(self, chronicle_status="ok"):
+        lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: chronicle_status
+        lifecycle.ensure_recall_embeddings = lambda p: None
+        return lifecycle
+
+    def _persona(self):
+        return SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="エア", model="std-model",
+            sai_memory=None, history_manager=SimpleNamespace(),
+        )
+
+    def _open_episode(self):
+        from saiverse.episodes import KIND_CONVERSATION, open_episode
+        return open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)
+
+    def _run(self, lifecycle, current_messages, keep_count):
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            lifecycle.run_metabolism(
+                self._persona(), "b", current_messages, keep_count, None,
+                model_key="std-model",
+            )
+
+    def test_evict_snaps_before_open_episode(self):
+        """evict 範囲に open episode のメッセージがあれば、その最古位置の
+        手前まで縮む (anchor は open episode の手前)。"""
+        ep = self._open_episode()
+        ref = ep["episode_ref"]
+        msgs = [
+            {"id": "m0", "content": "x", "created_at": 100},
+            {"id": "m1", "content": "x", "created_at": 101},
+            {"id": "m2", "content": "x", "created_at": 102,
+             "metadata": {"origin_episode": ref}},
+            {"id": "m3", "content": "x", "created_at": 103,
+             "metadata": {"origin_episode": ref}},
+            {"id": "m4", "content": "x", "created_at": 104},
+        ]
+        lifecycle = self._make_lifecycle("ok")
+        # keep_count=1 → 素の evict_count=4 (m0..m3 退役) だが m2 が open
+        # episode → boundary は index 2 (m0/m1 だけ退役)
+        self._run(lifecycle, msgs, 1)
+        entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["anchor_id"], "m2")
+
+    def test_whole_window_open_defers_metabolism(self):
+        """open episode が evict 範囲の先頭から占める場合は見送り (anchor 不変)。"""
+        ep = self._open_episode()
+        ref = ep["episode_ref"]
+        msgs = [
+            {"id": f"m{i}", "content": "x", "created_at": 100 + i,
+             "metadata": {"origin_episode": ref}}
+            for i in range(5)
+        ]
+        lifecycle = self._make_lifecycle("ok")
+        self._run(lifecycle, msgs, 2)
+        self.assertIsNone(lifecycle.load_anchor_entry(PERSONA_ID, "std-model"))
+
+    def test_closed_episode_does_not_constrain(self):
+        """closed episode のメッセージは制約なし (どこでも切れる)。"""
+        from saiverse.episodes import close_episode
+        ep = self._open_episode()
+        ref = ep["episode_ref"]
+        close_episode(self.manager, PERSONA_ID, ep["episode_id"])
+        msgs = [
+            {"id": f"m{i}", "content": "x", "created_at": 100 + i,
+             "metadata": {"origin_episode": ref}}
+            for i in range(5)
+        ]
+        lifecycle = self._make_lifecycle("ok")
+        # keep_count=2 → evict_count=3 → anchor=m3 (スナップ発動なし)
+        self._run(lifecycle, msgs, 2)
+        entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
+        self.assertEqual(entry["anchor_id"], "m3")
 
 
 # ---------------------------------------------------------------------------

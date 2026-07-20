@@ -272,13 +272,13 @@ graph TD
 
 ### Chronicle（時間の地図）
 
-蓄積された Message は、一定数（`DEFAULT_BATCH_SIZE=20`）ごとに LLM が「あらすじ」（Lv1）へ圧縮し、古い Lv1 同士はさらに Lv2+ へ統合される。`short_id`（`chronicle:N`）で参照でき、`memory_read chronicle:N` で読める（読みは tail に流れるので圧縮の意味は死なない）。編纂はシステム側の仕事で、ペルソナ向けの書き込み動詞はない。
+Metabolism で退役する Message は **episode 整列チャンク**（W4 = [体験の構造](../intent/experience_structure.md) 工程(2)、2026-07-21）で級 1 digest へ畳まれる — digest 確定済み episode は恒等転写（LLM なし）、digest の無い範囲は episode を原子として被覆 ≒1 万字まで束ねて LLM 圧縮、1000 字未満の豆粒は恒等圧縮（生のまま）。各ノードは被覆字数（coverage_chars）を持ち、帯（同じ級のノード列）の被覆合計があふれると古い端から上位級へ束ねられる（級 k ≒ 10^k 万字、上位級ノードは壁＝再要約されない）。旧「20 件固定バッチ + 10 個統合」は廃止（§9）。`short_id`（`chronicle:N`）で参照でき、`memory_read chronicle:N` で読める（読みは tail に流れるので圧縮の意味は死なない）。編纂はシステム側の仕事で、ペルソナ向けの書き込み動詞はない。
 
 ### Memopedia とコア記憶（意味の地図）
 
 会話に登場した固有の対象（人物・AI・プロジェクト・概念）は Memopedia のページとして整理される。`entity_extractor` がエンティティを認識し、知識を **Fragment** として抽出・追記する。**コア記憶**は意味の地図の**常時開の特殊ページ**——ペルソナが自分で選んで刻む恒常知識で、head に常駐する（`memory_write ref="core"` で刻む。SCENE＝実会話の転写は `memory_clip mode='transcribe'`）。
 
-**Fragment の生成タイミング（検証済）**: Metabolism（§6）発火時に `ArasujiGenerator` の Chronicle 生成バッチへ `entity_extractor` が `batch_callback` として相乗りする——**圧縮（時間の地図）と知識化（意味の地図）は Metabolism という同じ節目で連動する**。
+**Fragment の生成タイミング（検証済）**: Metabolism（§6）発火時に Chronicle 生成チャンク（W4 で `execute_plan` に世代交代）へ `entity_extractor` が `batch_callback` として相乗りする——**圧縮（時間の地図）と知識化（意味の地図）は Metabolism という同じ節目で連動する**。
 
 > **実装状況メモ**: 意味の地図の構造代謝（肥大ページの分割・小ページの統合）は `scripts/maintain_memopedia.py` に手動操作として存在するが lifecycle 未配線（P4 で編纂（旧称・庭仕事）として配線予定）。vividness（鮮度減衰）は廃止確定（§9）。
 
@@ -426,6 +426,8 @@ graph TD
 | **メタ判断の定期ディスパッチ（状況分類）** | 50 分 tick からの `_SITUATION_PLAYBOOK_MAP` 定期起動は停止。tick は watchdog（時間割発火の途絶検知）に縮退。cache TTL keep-alive 経由の起動も 2026-07-07 に停止（意味的に不活性な極小 touch へ置換、`SEARuntime.run_cache_keepalive`）。**alert 即応（呼びかけ）経由のみ存続** |
 | **ACTIVITY_STATE 4 値（Stop / Sleep / Idle / Active）** | **解体**（2026-07-14）。`AI.ACTIVITY_STATE` は `AI.AUTONOMY_ENABLED`（真偽値・既定 ON＝自律行動の ON/OFF だけ）へ置換し、列ごと削除。調査の結果、**実装上は「Active か否か」の二値しか無かった**——全ゲート（`autonomy_wiring` / `meta_layer` / `saiverse_manager` / `sea/runtime` の keep-alive）が `== "Active"` 判定のみで、Stop / Sleep / Idle は互いに区別されていなかった。さらにコメント上の定義 2 つが**実装されていなかった**: 「Stop＝機能停止」はユーザー発言への返答経路（`run_sea_user` / chat API）にゲートが無く Stop でも返答していた、「Sleep＝ユーザー発言で起きる」も起床処理が無く実体は自室（`PRIVATE_ROOM_ID`）への移動という副作用のみ（システムが勝手に体を動かすのは設計の誤りとして削除。やるなら将来 Phenomenon）。ライフ（§ life.md）が「今日いつ生きているか」を持った時点で Sleep の意味はライフの谷と重複していた。「元栓（動かす許可）／蛇口（今その時間か）／温度計（キャッシュ）」の 3 つが 1 列に同居していた状態を、それぞれの持ち場へ返した |
 | **SLEEP_ON_CACHE_EXPIRE** | **削除**（2026-07-14、ACTIVITY_STATE 解体に同伴）。「Idle のペルソナをキャッシュ TTL 切れで Sleep へ自動遷移させ API 費用暴走を防ぐ」フラグとして intent に設計され DB 列も掘られたが、**本体コードから一行も読まれない死んだ列**だった（実装されないまま列とコメントだけが残り、後の調査を誤らせた実害あり）。Sleep 消滅により存在理由も消滅 |
+| **Track Chronicle（独立生成キュー）** | **生成廃止**（2026-07-21 W4、[体験の構造](../intent/experience_structure.md) §11-10 裁定）。`generate_track_chronicle`・incomplete Lv1 の delete&regen サイクルを撤去。既存 `origin_track_id` 付きエントリの読み込みは残存。解こうとしていた Track 再訪問題は `docs/issues/track_episode_continuity.md` が引き継ぐ |
+| **Chronicle 20 件固定バッチ + 10 個統合** | **世代交代**（2026-07-21 W4）。`ArasujiGenerator.generate_unprocessed`（20 件機械分割）・`maybe_consolidate`（10 個統合）・gap-fill/dismantle は削除。後継は episode 整列チャンク（alignment/executor）+ 帯あふれ束ね（bands）— [体験の構造](../intent/experience_structure.md) §4 の圧縮七原則。env `MEMORY_WEAVE_BATCH_SIZE` / `MEMORY_WEAVE_CONSOLIDATION_SIZE` は受理して無視 |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 

@@ -94,7 +94,12 @@ def estimate_chronicle_cost(
     consolidation_size: Optional[int] = None,
     manager=Depends(get_manager),
 ):
-    """Estimate the cost of generating Chronicle for unprocessed messages."""
+    """Estimate the cost of generating Chronicle for unprocessed messages.
+
+    W4: 見積もりは生成経路と同じ episode 整列計画 (plan_alignment) から数える。
+    ``batch_size`` / ``consolidation_size`` クエリパラメータは廃止 — 受理して
+    無視する (旧 frontend 互換)。
+    """
     import os
     from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
 
@@ -103,19 +108,25 @@ def estimate_chronicle_cost(
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        # Use query params if provided, otherwise fall back to env vars
-        batch_size = batch_size or int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", "20"))
-        consolidation_size = consolidation_size or int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", "10"))
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
         persona = manager.personas.get(persona_id) if manager else None
         model_name = (getattr(persona, "memory_weave_model", None)
                       or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL))
 
+        episode_digests = {}
+        if manager is not None:
+            try:
+                from saiverse.episodes import collect_episode_digest_index
+                episode_digests = collect_episode_digest_index(
+                    manager, persona_id, conn,
+                )
+            except Exception:
+                LOGGER.warning("[cost-estimate] episode digest index failed", exc_info=True)
+
         estimate = estimate_chronicle_generation_cost(
             conn,
-            batch_size=batch_size,
-            consolidation_size=consolidation_size,
             model_name=model_name,
+            episode_digests=episode_digests,
         )
 
         return ChronicleCostEstimate(
@@ -126,7 +137,8 @@ def estimate_chronicle_cost(
             estimated_cost_usd=estimate.estimated_cost_usd,
             model_name=estimate.model_name,
             is_free_tier=estimate.is_free_tier,
-            batch_size=estimate.batch_size,
+            chunks_identity=estimate.chunks_identity,
+            chunks_episode=estimate.chunks_episode,
             currency=estimate.currency,
         )
     finally:
@@ -197,7 +209,7 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
         else:
             lv1_actual_total = lv1_actual_avg = lv1_actual_max = lv1_actual_min = 0
 
-        # ユニーク source_ids 数（generate_unprocessed が「処理済み」とみなす件数と同じ）
+        # ユニーク source_ids 数（整列計画 plan_alignment が「処理済み」とみなす件数と同じ）
         cur = conn.execute(
             "SELECT COUNT(DISTINCT value) "
             "FROM arasuji_entries, json_each(source_ids_json) WHERE level = 1"
@@ -336,7 +348,7 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
             "last_processed_at": progress.last_processed_at if progress else None,
             # --- source_ids 実態調査 ---
             "lv1_actual_source_ids_total": lv1_actual_total,
-            "lv1_unique_source_ids": lv1_unique_source_ids,        # generate_unprocessed の processed_ids 件数と同値
+            "lv1_unique_source_ids": lv1_unique_source_ids,        # plan_alignment の processed_ids 件数と同値
             "lv1_duplicate_source_ids": lv1_duplicate_source_ids,  # 重複分（0でなければ異常）
             "lv1_orphan_source_ids": lv1_orphan_source_ids,        # 存在しないメッセージ参照数
             "lv1_mismatched_entries": lv1_mismatched_entries,      # source_count != 実際長 のエントリ数
@@ -732,19 +744,29 @@ def _run_chronicle_generation(
     job_id: str,
     persona_id: str,
     max_messages: int,
-    batch_size: int,
-    consolidation_size: int,
     model_name: Optional[str],
     with_memopedia: bool,
     include_timestamp: bool = True,
+    manager=None,
 ):
-    """Background worker for Chronicle generation."""
-    import json
+    """Background worker for Chronicle generation.
+
+    W4 (体験の構造 工程(2)): episode 整列チャンク (plan_alignment →
+    execute_plan → run_band_overflow) で生成する。Metabolism 側
+    (sea/session_lifecycle.generate_chronicle) と同じ計画・同じ実行器を使い、
+    冪等 claim (実行台帳 kind="metabolism.run"、M1) も同じキーで通す — 手動
+    生成と自動 Metabolism が同じ窓を同時に編纂する二重 LLM コストを台帳が
+    収束させる (旧実装は claim を通らない別コネクション入口だった)。
+    """
     import os
-    from pathlib import Path
-    from sai_memory.memory.storage import init_db, Message
+    from sai_memory.memory.storage import init_db
     from sai_memory.arasuji import init_arasuji_tables
-    from sai_memory.arasuji.generator import ArasujiGenerator
+    from sai_memory.arasuji.alignment import (
+        chronicle_band_budget,
+        chronicle_min_digest_chars,
+        plan_alignment,
+        truncate_plan,
+    )
     from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
 
@@ -760,16 +782,21 @@ def _run_chronicle_generation(
         conn = init_db(str(db_path), check_same_thread=False)
         init_arasuji_tables(conn)
 
+        # 帰化バックフィル — dry 予測より前 (Codex W4 三巡 #3。近似 dry と
+        # 実測 backfill の食い違いで band backlog へ永久に到達しない穴の閉塞)
+        from sai_memory.arasuji.bands import backfill_coverage
+        try:
+            backfill_coverage(conn)
+        except Exception:
+            LOGGER.exception("[Chronicle Gen] coverage backfill failed; continuing")
+
         # Fetch all messages suitable for Chronicle (shared filter logic)
         _update_job(job_id, message="Fetching messages...")
 
         from sai_memory.memory.storage import get_messages_for_chronicle
         all_messages = get_messages_for_chronicle(conn)
-
-        if not all_messages:
-            _update_job(job_id, status="completed", progress=0, total=0, entries_created=0, message="No messages found")
-            conn.close()
-            return
+        # 空でも早期 return しない — plan は空 chunks になり、帯 backlog
+        # (前回の束ね失敗の残り) の統合だけでも実行できる (Codex W4 二巡 #5)。
 
         LOGGER.info("[Chronicle Gen] Loaded %d messages (filtered by get_messages_for_chronicle)", len(all_messages))
 
@@ -813,16 +840,89 @@ def _run_chronicle_generation(
         except Exception as e:
             LOGGER.warning(f"Failed to get Memopedia context: {e}")
 
-        # Create generator
-        generator = ArasujiGenerator(
-            client,
-            conn,
-            batch_size=batch_size,
-            consolidation_size=consolidation_size,
-            include_timestamp=include_timestamp,
-            memopedia_context=memopedia_context,
-            persona_id=persona_id,
+        # Episode 整列計画 (Metabolism 側と同じ計画の一点管理)
+        _update_job(job_id, message="Planning chunks...")
+        cur = conn.execute(
+            "SELECT DISTINCT json_each.value "
+            "FROM arasuji_entries, json_each(source_ids_json) "
+            "WHERE level = 1"
         )
+        processed_ids = {row[0] for row in cur.fetchall()}
+        episode_digests = {}
+        if manager is not None:
+            try:
+                from saiverse.episodes import collect_episode_digest_index
+                episode_digests = collect_episode_digest_index(
+                    manager, persona_id, conn,
+                )
+            except Exception:
+                LOGGER.warning("[Chronicle Gen] episode digest index failed", exc_info=True)
+
+        plan = plan_alignment(
+            all_messages,
+            processed_ids,
+            episode_digests,
+            target_chars=chronicle_band_budget(),
+            min_llm_chars=chronicle_min_digest_chars(),
+        )
+        plan = truncate_plan(plan, max_messages)
+
+        # 帯あふれ backlog の dry 予測 (Codex W4 #3): 新チャンクが無くても
+        # 前回の束ね失敗の残りがあれば統合だけ実行する。
+        from sai_memory.arasuji.bands import plan_band_overflow
+        try:
+            band_plan_count = plan_band_overflow(
+                conn,
+                extra_leaves=[
+                    (
+                        c.coverage_chars,
+                        min((m.created_at for m in c.messages), default=None),
+                        max((m.created_at for m in c.messages), default=None),
+                    )
+                    for c in plan.chunks
+                ],
+            )
+        except Exception:
+            LOGGER.warning("[Chronicle Gen] band dry-plan failed", exc_info=True)
+            band_plan_count = 0
+
+        if not plan.chunks and band_plan_count == 0:
+            _update_job(
+                job_id, status="completed", progress=0, total=0,
+                entries_created=0, message="No unprocessed messages to compile",
+            )
+            conn.close()
+            return
+
+        # 冪等 claim (実行台帳 M1) — Metabolism と同じ kind・同じキー形。
+        # 台帳が無い環境 (manager なし / テスト) は claim なしで実行する
+        # (degrade — executor の重複再検査が残る)。plan 空 (帯統合のみ) も
+        # claim しない — 束ねの並走防御は bands の tx 内再検査が担う。
+        ledger = getattr(manager, "execution_ledger", None) if manager else None
+        execution_id = None
+        if ledger is not None and plan.chunks:
+            window_end_id = plan.chunks[-1].messages[-1].id
+            try:
+                # claim_execution: failed (前回失敗 / キャンセル) はキー退避で
+                # 再実行可能 (Codex W4 二巡 #6)。running / completed 等はブロック。
+                execution_id, runnable, _existing = ledger.claim_execution(
+                    kind="metabolism.run",
+                    idempotency_key=f"{persona_id}:{window_end_id}",
+                    persona_id=persona_id,
+                )
+                if runnable and not ledger.try_mark_running(execution_id):
+                    runnable = False
+                if not runnable:
+                    _update_job(
+                        job_id, status="failed",
+                        error="同じ範囲の編纂が既に実行中または実行済みです（Metabolism と競合）。しばらく待って再実行してください。",
+                        error_code="window_claimed",
+                    )
+                    conn.close()
+                    return
+            except Exception:
+                LOGGER.warning("[Chronicle Gen] ledger claim failed; proceeding without claim", exc_info=True)
+                execution_id = None
 
         # Progress callback
         def progress_callback(processed: int, total: int):
@@ -851,10 +951,6 @@ def _run_chronicle_generation(
                             episode_context_conn=conn,
                         )
                         memopedia_pages_total += len(pages)
-                        # Update Memopedia context for next batch
-                        generator.memopedia_context = memopedia.get_tree_markdown(
-                            include_keywords=False, show_markers=False
-                        )
                     except Exception as e:
                         LOGGER.error(f"Memopedia extraction failed: {e}")
 
@@ -885,27 +981,45 @@ def _run_chronicle_generation(
         except Exception as e:
             LOGGER.warning(f"Entity extraction setup failed: {e}")
 
-        # Generate using unified method (filters processed, groups into runs, generates)
+        # Execute plan (chunk 単位の単一 tx、W4 D4)
         _update_job(job_id, message="Generating Chronicle entries...")
 
         def cancel_check():
             job = _get_job(job_id)
             return job is not None and job.get("status") == "cancelling"
 
-        level1_entries, consolidated_entries = generator.generate_unprocessed(
-            all_messages,
-            max_messages=max_messages,
-            progress_callback=progress_callback,
-            batch_callback=batch_callback,
-            cancel_check=cancel_check,
-        )
+        from sai_memory.arasuji.bands import run_band_overflow
+        from sai_memory.arasuji.executor import execute_plan
 
-        total_entries = len(level1_entries) + len(consolidated_entries)
+        try:
+            exec_result = execute_plan(
+                plan, client, conn,
+                persona_id=persona_id,
+                include_timestamp=include_timestamp,
+                memopedia_context=memopedia_context,
+                progress_callback=progress_callback,
+                batch_callback=batch_callback,
+                cancel_check=cancel_check,
+            )
+        except Exception:
+            if ledger is not None and execution_id:
+                try:
+                    ledger.mark_failed(execution_id, "chronicle generation raised")
+                except Exception:
+                    LOGGER.warning("[Chronicle Gen] ledger mark_failed failed", exc_info=True)
+            raise
 
-        conn.close()
-
-        # Check if cancelled
-        if cancel_check():
+        # キャンセル = 部分適用。completed で封印すると同じ窓が window_claimed で
+        # 再実行不能になる (冪等マーカーは適用の成功だけを封印 — Codex W4 #8)。
+        # failed 終端で claim を退け、帯統合もスキップする。
+        if exec_result.cancelled:
+            if ledger is not None and execution_id:
+                try:
+                    ledger.mark_failed(execution_id, "cancelled by user")
+                except Exception:
+                    LOGGER.warning("[Chronicle Gen] ledger mark_failed failed", exc_info=True)
+            total_entries = exec_result.created_count
+            conn.close()
             _update_job(
                 job_id,
                 status="cancelled",
@@ -914,11 +1028,39 @@ def _run_chronicle_generation(
             )
             return
 
+        consolidated_count = 0
+        try:
+            consolidated_count = run_band_overflow(
+                conn, client,
+                persona_id=persona_id,
+                cancel_check=cancel_check,
+            )
+        except Exception:
+            LOGGER.exception("[Chronicle Gen] band overflow failed; continuing")
+
+        if ledger is not None and execution_id:
+            try:
+                result_payload = dict(plan.summary)
+                result_payload.update({
+                    "created": exec_result.created_count,
+                    "skipped_duplicates": exec_result.skipped_duplicates,
+                    "bands_consolidated": consolidated_count,
+                    "entrance": "api_generate",
+                })
+                ledger.mark_applied(execution_id, result=result_payload)
+                ledger.mark_completed(execution_id)
+            except Exception:
+                LOGGER.warning("[Chronicle Gen] ledger apply/complete failed", exc_info=True)
+
+        total_entries = exec_result.created_count + consolidated_count
+
+        conn.close()
+
         _update_job(
             job_id,
             status="completed",
             entries_created=total_entries,
-            message=f"Completed. Created {len(level1_entries)} level-1 + {len(consolidated_entries)} consolidated entries."
+            message=f"Completed. Created {exec_result.created_count} chunk + {consolidated_count} consolidated entries."
             + (f" Memopedia pages: {memopedia_pages_total}" if with_memopedia else "")
         )
 
@@ -960,18 +1102,19 @@ async def start_arasuji_generation(
 
     # Create job
     job_id = _create_job(persona_id)
-    
-    # Start background task
+
+    # Start background task (batch_size / consolidation_size は W4 で廃止 —
+    # チャンク分割は episode 整列 + サイズ束ねが決める。リクエストの旧
+    # フィールドは受理して無視する)
     background_tasks.add_task(
         _run_chronicle_generation,
         job_id=job_id,
         persona_id=persona_id,
         max_messages=request.max_messages,
-        batch_size=request.batch_size,
-        consolidation_size=request.consolidation_size,
         model_name=request.model,
         with_memopedia=request.with_memopedia,
         include_timestamp=request.include_timestamp,
+        manager=manager,
     )
 
     return {"job_id": job_id, "status": "started"}

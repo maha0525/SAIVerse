@@ -21,9 +21,9 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 | 実行点 | 場所 | 発火条件 | 特徴 |
 |---|---|---|---|
 | **応答後** | `sea/runtime.py` run_meta_user 末尾 → `_maybe_run_metabolism` → `_run_metabolism` | watermark 超過 / トークン閾値（`_metabolism_token_triggered`） | アンカー更新を伴う正規の eviction はここだけ |
-| **会話前（pre-response）** | `sea/runtime_context.py` 履歴取得 Case 3 | anchor が**全モデル失効**（TTL 切れ） | コンテキスト構築中に `_generate_chronicle` / `_generate_track_chronicle` を**直接**呼び、low watermark の最小履歴で会話を開始する |
+| **会話前（pre-response）** | `sea/runtime_context.py` 履歴取得 Case 3 | anchor が**全モデル失効**（TTL 切れ） | コンテキスト構築中に `generate_chronicle` を**直接**呼び、low watermark の最小履歴で会話を開始する |
 
-会話前経路は `_maybe_run_metabolism` を経由しないため、実行点を `_maybe_run_metabolism` の呼び出し元 grep で探すと**漏れる**（過去に複数回「会話前経路は無い」と誤答された経緯がある。調べるときは `_generate_chronicle` の呼び出し元まで grep すること）。また、この最小ロードはアンカー更新型の eviction を通らない**サイレント eviction** であり、旧ウィンドウは Chronicle 化はされるがそれ以外の節目処理を受けない。keepalive 連鎖は Active の間しか繋がらないため、Idle/Sleep 落ち・夜間・再起動を挟んだ最初の会話はほぼ確実に会話前経路を踏む（= 日常的なイベント）。
+会話前経路は `_maybe_run_metabolism` を経由しないため、実行点を `_maybe_run_metabolism` の呼び出し元 grep で探すと**漏れる**（過去に複数回「会話前経路は無い」と誤答された経緯がある。調べるときは `generate_chronicle` の呼び出し元まで grep すること）。また、この最小ロードはアンカー更新型の eviction を通らない**サイレント eviction** であり、旧ウィンドウは Chronicle 化はされるがそれ以外の節目処理を受けない。keepalive 連鎖は Active の間しか繋がらないため、Idle/Sleep 落ち・夜間・再起動を挟んだ最初の会話はほぼ確実に会話前経路を踏む（= 日常的なイベント）。
 
 設計上の含意と将来の扱いは intent [`gold_panning.md`](../intent/gold_panning.md) §3.1 / §3.6 を参照。
 
@@ -52,7 +52,8 @@ Metabolism の起点を指すマーカー。
 
 - 発火・アンカー解決: `sea/runtime.py` / `sea/runtime_context.py` / `sea/session_lifecycle.py`（`resolve_metabolism_anchor` / `touch_anchor_after_llm_call` / `maybe_run_metabolism`）
 - head 再構築: `sea/head_pipeline/integration.py`（可視化は anchor を進めた model の (persona, model) snapshot のみ — §6-5）
-- 結晶化: `sai_memory/arasuji/generator.py`（`ArasujiGenerator` + `entity_extractor` の相乗り）。冪等 claim は実行台帳（`saiverse/execution_ledger.py`）
+- 結晶化 (W4 で episode 整列に世代交代): `sai_memory/arasuji/alignment.py`（整列計画）+ `executor.py`（チャンク実行）+ `bands.py`（帯あふれ束ね）+ `entity_extractor` の相乗り。冪等 claim は実行台帳（`saiverse/execution_ledger.py`）。詳細は [Chronicle](chronicle.md)
+- 退役の episode スナップ (W4 D2): open episode の内部で anchor を切らない（`_snap_evict_to_episode_boundary` — 退役でも episode は原子）。編纂範囲は「新 anchor より古い未編纂」のみ（退場時圧縮 §4-1）
 - Anchor 状態: `session_anchor` テーブル（1 行 = 1 (persona, model)）
 
 ## 関連概念

@@ -1,6 +1,6 @@
 # Intent: 体験の構造 — 包含の木・digest・継承 DAG
 
-**ステータス**: 実装中 (v0.4 2026-07-19 — 全主要裁定完了。**工程(1) (a') = W1 と同工区で実装済み・実機検証待ち** (2026-07-19、コミット e0ee4ff): episode digest 生成の第一号 (post_session が原本から書く) + 読み口スペル `episode_read` + origin_episode 専用列。残る工程(2)〜(4) は計画書 W4/W13/W14。束ねアルゴリズム=モック検証済み確定・digest正準=咀嚼層・移行=再生成なし帰化・継承エッジ=アクティブスレッド選択型・MAv2=並置・Track Chronicle=廃止方向・知覚側=薄く保持し実装分離)
+**ステータス**: 実装中 (v0.5 2026-07-21 — **工程(2) = W4 実装済み・実機検証待ち**: Chronicle 生成の episode 整列化 (alignment/executor/bands)、恒等転写・恒等圧縮・サイズ束ね・帯あふれ・壁・帰化バックフィル・Track Chronicle 生成廃止。**工程(1) (a') = W1 実装済み・実機検証待ち** (2026-07-19、コミット e0ee4ff)。残る工程(3)(4) は計画書 W13/W14。束ねアルゴリズム=モック検証済み確定・digest正準=咀嚼層・移行=再生成なし帰化・継承エッジ=アクティブスレッド選択型・MAv2=並置・知覚側=薄く保持し実装分離)
 **位置付け**: 記憶系の最上位 intent。生ログ・Chronicle・Memopedia・episode・知覚バッファ・メティス記憶ブリッジの取り込みを **一つの構造** の下に束ねる。個別文書はここを指す参照に格下げされる (§10)。
 **前提**: [concept_consolidation.md](concept_consolidation.md) (Memory Atlas) / [persona_cognition/judgment_points.md](persona_cognition/judgment_points.md) §6 ((a') 統合) / [metis_memory_bridge.md](metis_memory_bridge.md) / [../issues/chronicle_cross_thread_mixing.md](../issues/chronicle_cross_thread_mixing.md) / [../issues/memory_continuity_graph.md](../issues/memory_continuity_graph.md)
 
@@ -128,7 +128,7 @@ head は capture→store→render で既にこの規律を卒業している (�
 **解決済 (2026-07-18 まはー裁定)**:
 
 2. **digest の正準の置き場 = 咀嚼層の器** (§3.2 に反映)。digest は解釈の生成物で事実ではない — messages に混ぜない
-3. **移行 = 再生成なし**。既存ユーザーの大量 Chronicle は無駄にしない — 新アーキテクチャの語彙 (サイズ値等) をバックフィルして帰化させる (被覆範囲は arasuji_progress の記録から復元 — 実装時確認)
+3. **移行 = 再生成なし**。既存ユーザーの大量 Chronicle は無駄にしない — 新アーキテクチャの語彙 (サイズ値等) をバックフィルして帰化させる。~~被覆範囲は arasuji_progress の記録から復元~~ → **実装時確定 (2026-07-21 W4)**: arasuji_progress は last_processed 一点のみで範囲を持たず不成立。coverage_chars は source_ids → messages 実測 (Lv2+ は子の合計)、欠損 source は content 長 × 10 の圧縮率近似 + `coverage_estimated` マーカー (`bands.backfill_coverage`)
 4. **継承エッジ**: ε 型は「どのスレッドを直接の元として続きを始めるか」を選ぶ (既定 = 最終発言が最新のスレッド、明示選択で上書き — ChatGPT インポートのアクティブスレッド選択と同型の前例あり)。直接継続の親 = 事実層エッジ、他の親 = 咀嚼層エッジ。選択さえあれば記帳は範囲が開いた瞬間に機械的
 5. **時代の生成 = 個数/期間ルールでなくサイズ+あふれ駆動** (§4-6 に一般化して反映)。life 層は必須の床ではない
 7. **単位=文字数・級の底=10 は暫定 OK** (モックで検証)
@@ -149,6 +149,6 @@ head は capture→store→render で既にこの規律を卒業している (�
 
 0. 束ねアルゴリズムのモック可視化 — **済** (§11-8)
 1. (a') episode digest 生成の第一号 + 読み口スペル = **計画書 W1 同工区 — 実装済み・実機検証待ち** (2026-07-19、コミット e0ee4ff)。digest 専用コール廃止 (3→2)・post_session が原本から digest 生成・原本注入コールローカル化・`saimemory.append_digest` 配送 + `set_digest_ref` 後段確定・`episode_read` スペル (origin_episode 専用列 + `get_messages_by_origin_episode`)
-2. Chronicle 生成の episode 整列化 (バッチ降格 + 束ねルール + 恒等圧縮) = **計画書 W4 に統合** (旧バッチ経路は固めず、新設経路で M2 を消化)
+2. Chronicle 生成の episode 整列化 (バッチ降格 + 束ねルール + 恒等圧縮) = **計画書 W4 — 実装済み・実機検証待ち** (2026-07-21)。整列計画 `sai_memory/arasuji/alignment.py` + チャンク実行 `executor.py` + 帯あふれ束ね・帰化 `bands.py`。旧 20 件バッチ経路 (ArasujiGenerator ほか) と Track Chronicle 生成 (§11-10) は撤去。走行メモ = [W4 handoff](../handoff/2026-07-21_w4_metabolism_ledger_handoff.md)
 3. 継承エッジの器 (テーブル + 記帳) = **計画書 W13** (独立、空きに挟める)
 4. 知覚レンダリング = **計画書 W14** (perception_buffer 後続 Phase)

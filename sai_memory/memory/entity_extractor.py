@@ -450,9 +450,10 @@ def make_batch_callback(
 ) -> Callable[[List[Message], Optional[str]], None]:
     """Create a batch callback for Chronicle generation.
 
-    Returns a callback that can be passed to ArasujiGenerator.generate_unprocessed()
-    as batch_callback. Each time a batch of messages is processed for Chronicle,
-    this callback extracts entities and reflects them to Memopedia.
+    Returns a callback that can be passed to
+    sai_memory.arasuji.executor.execute_plan() as batch_callback. Each time a
+    chunk of messages is compiled into Chronicle, this callback extracts
+    entities and reflects them to Memopedia.
 
     Args:
         client: LLM client for entity extraction.

@@ -4,7 +4,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from sea.cancellation import CancellationToken
 
@@ -785,6 +785,76 @@ class SessionLifecycle:
             )
             return False
 
+    def _open_episode_refs(self, persona) -> set:
+        """persona の open な episode_ref 集合 (W4 D2 の退役スナップ用)。
+
+        get_open_episode は「最新 1 件」のキャッシュなので使わない — 並行
+        episode (会話中に作業 episode が挟まる等) を全部見る必要がある。
+        失敗は空集合に degrade (スナップなし = 現行挙動)。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        manager = self.manager
+        if (
+            not persona_id
+            or manager is None
+            or getattr(manager, "SessionLocal", None) is None
+        ):
+            return set()
+        try:
+            from database.models import Episode
+            from saiverse.episodes import STATUS_OPEN
+            db = manager.SessionLocal()
+            try:
+                rows = (
+                    db.query(Episode.SHORT_ID)
+                    .filter(
+                        Episode.PERSONA_ID == persona_id,
+                        Episode.STATUS == STATUS_OPEN,
+                    )
+                    .all()
+                )
+            finally:
+                db.close()
+            return {f"episode:{r[0]}" for r in rows if r[0] is not None}
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] failed to query open episodes (persona=%s)",
+                persona_id, exc_info=True,
+            )
+            return set()
+
+    def _snap_evict_to_episode_boundary(
+        self,
+        persona,
+        current_messages: List[Dict[str, Any]],
+        evict_count: int,
+    ) -> int:
+        """退役境界を open episode の外へ切り詰める (W4 D2、§4-1 × §4-2)。
+
+        退役範囲 [0, evict_count) に open episode 帰属のメッセージが含まれる
+        場合、その最古位置の手前まで evict を縮める — episode は退役でも原子
+        (「窓から出たのに閉じ判断がまだ」の中間状態を作らない)。closed /
+        無帰属メッセージは制約なし。
+        """
+        if evict_count <= 0:
+            return evict_count
+        open_refs = self._open_episode_refs(persona)
+        if not open_refs:
+            return evict_count
+        for i in range(min(evict_count, len(current_messages))):
+            meta = current_messages[i].get("metadata")
+            ref = meta.get("origin_episode") if isinstance(meta, dict) else None
+            if ref and str(ref) in open_refs:
+                if i < evict_count:
+                    LOGGER.info(
+                        "[metabolism] evict snapped to open-episode boundary: "
+                        "%d -> %d (open %s at index %d, persona=%s)",
+                        evict_count, i, ref, i,
+                        getattr(persona, "persona_id", "?"),
+                    )
+                return i
+        return evict_count
+
     def run_metabolism(
         self,
         persona,
@@ -833,6 +903,22 @@ class SessionLifecycle:
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         evict_count = len(current_messages) - keep_count
 
+        # 退役境界の episode スナップ (W4 D2、§4-1 × §4-2): open episode の
+        # 内部で anchor を切らない。open episode が窓全体を占める場合は今回の
+        # Metabolism を見送る (次回 maybe_run_metabolism が自然に再試行)。
+        evict_count = self._snap_evict_to_episode_boundary(
+            persona, current_messages, evict_count,
+        )
+        if evict_count <= 0:
+            LOGGER.warning(
+                "[metabolism] deferred: open episode occupies the whole evict "
+                "range (persona=%s, %d messages); window stays large until the "
+                "episode closes",
+                getattr(persona, "persona_id", "?"), len(current_messages),
+            )
+            return
+        keep_count = len(current_messages) - evict_count
+
         # 1. Notify start
         if event_callback:
             event_callback({
@@ -847,26 +933,32 @@ class SessionLifecycle:
         # "disabled" (トグル OFF / weave 無効) で前進するのは設計判断 — Chronicle を
         # 切った persona は「編纂なしで忘れる」を選んでおり、前進を止めると
         # metabolism が永久デッドロックする。
+        # 退場時圧縮 (W4 D1、§4-1): 編纂対象を「新 anchor より古い範囲」に限る —
+        # 窓に残る (まだ提示面にいる) メッセージは圧縮しない。
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
         chronicle_status = "disabled"
         if memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona):
+            boundary_epoch: Optional[int] = None
             try:
-                chronicle_status = self.generate_chronicle(persona, event_callback)
+                boundary_epoch = int(current_messages[evict_count].get("created_at"))
+            except (TypeError, ValueError, IndexError, AttributeError):
+                LOGGER.warning(
+                    "[metabolism] could not resolve evict boundary epoch; "
+                    "compiling all unprocessed messages (persona=%s)",
+                    getattr(persona, "persona_id", "?"),
+                )
+            try:
+                chronicle_status = self.generate_chronicle(
+                    persona, event_callback,
+                    evict_boundary_epoch=boundary_epoch,
+                )
             except Exception as exc:
                 LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
                 chronicle_status = "failed"
 
-        # 2.5. Track Chronicle generation (v0.32, 2026-05-09)。
-        # General Chronicle と独立に走る。pulse_type 制限なし、確認 dialog 不要、
-        # バッチ未満許容 (incomplete Lv1)、1000 字未満ならスキップ。
-        # Track Chronicle は anchor 退役のゲートに参加しない (退役対象の main_line
-        # 窓とは別軸の編纂のため、失敗しても生ログから次回自然回復する)。
-        # 詳細は docs/intent/persona_cognition/track_chronicle.md
-        if memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona):
-            try:
-                self.generate_track_chronicle(persona)
-            except Exception as exc:
-                LOGGER.warning("[metabolism] Track Chronicle generation failed: %s", exc)
+        # (旧 2.5. Track Chronicle generation は W4 で廃止 —
+        # experience_structure.md §11-10 の裁定。既存 Track Chronicle データと
+        # 読み込み側は残る。再訪問題は docs/issues/track_episode_continuity.md)
 
         # 2.7. Recall embedding maintenance — Chronicle 生成の成否・トグルとは独立に、
         # 未埋め込みの Chronicle/ページ/Fragment を毎回埋める (ローカル・無料)。
@@ -978,14 +1070,26 @@ class SessionLifecycle:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         force: bool = False,
+        evict_boundary_epoch: Optional[int] = None,
     ) -> str:
-        """Generate Chronicle entries from all unprocessed messages.
+        """Generate Chronicle entries via episode-aligned chunk planning.
+
+        体験の構造 工程(2) (W4): 編纂は episode 整列チャンク
+        (sai_memory/arasuji/alignment.py — 恒等転写 / 恒等圧縮 / サイズ束ね)
+        で行う。旧 20 件固定バッチ (ArasujiGenerator.generate_unprocessed)
+        は本入口からは廃止された。
 
         ``force=True`` は確認ダイアログ・pulse_type 判定を経ずに即生成する。
         UI の「記憶の整理」ボタン (organize-memory API) のように、呼び出しの
         時点でユーザーが既に明示的に同意しているケース専用。Pulse の外から
         呼ばれるため ``persona._current_pulse_type`` は前回 Pulse の残留値で
         あてにならない — force はその不定性を回避する意味もある。
+
+        ``evict_boundary_epoch`` は退場時圧縮の境界 (experience_structure.md
+        §4-1、W4 D1): 指定時、この epoch **より前**のメッセージだけを編纂対象
+        にする (窓に残る = まだ提示面にいる範囲は圧縮しない)。自動経路
+        (_run_metabolism_locked) が新 anchor の created_at を渡す。force /
+        session close 等の全量整理は None (現行どおり全未編纂)。
 
         全入口 (①応答後 Metabolism ②会話前 anchor 失効 ③手動 organize-memory
         ④session close ⑤①内 gold_panning) が合流する一点のため、編纂の冪等
@@ -1006,8 +1110,11 @@ class SessionLifecycle:
               編纂中/編纂済み。anchor 据え置き → 次回再試行)
         """
         from sai_memory.arasuji import init_arasuji_tables
-        from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
-        from sai_memory.memory.storage import Message, get_messages_paginated
+        from sai_memory.arasuji.alignment import (
+            chronicle_band_budget,
+            chronicle_min_digest_chars,
+            plan_alignment,
+        )
         from saiverse.memory_weave_llm import (
             build_memory_weave_client,
             resolve_memory_weave_config,
@@ -1030,18 +1137,30 @@ class SessionLifecycle:
 
         init_arasuji_tables(adapter.conn)
 
+        # 帰化バックフィル (W4 D7): 既存 entry に coverage_chars を刻む
+        # (一回きり・冪等・LLM なし)。**dry 予測より前に**実行する — dry が
+        # 近似値で動くと実測 backfill 後の帯あふれ判定と食い違い、
+        # 「予測 0 → 早期 return → backfill に永久に到達しない」が成立する
+        # (Codex W4 三巡 #3)。帰化はメタデータ補完で確認ゲートの対象外。
+        from sai_memory.arasuji.bands import backfill_coverage
+        try:
+            backfill_coverage(adapter.conn)
+        except Exception:
+            LOGGER.exception("[metabolism] coverage backfill failed; continuing")
+
         # Fetch ALL messages suitable for Chronicle (shared filter logic).
         from sai_memory.memory.storage import get_messages_for_chronicle
         all_messages = get_messages_for_chronicle(adapter.conn)
 
-        if not all_messages:
-            return "ok"
+        # 退場時圧縮 (§4-1): 窓に残る範囲は編纂しない。境界の同秒衝突は保守側
+        # (編纂見送り → 次回) に倒れる。
+        if evict_boundary_epoch is not None:
+            all_messages = [
+                m for m in all_messages if m.created_at < evict_boundary_epoch
+            ]
 
-        batch_size_for_estimate = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
-
-        # Pre-check: replicate the same contiguous-run logic used by
-        # generate_unprocessed() so we can skip the confirmation dialog
-        # when no run is large enough to produce even one batch.
+        # Episode 整列計画 (W4 D3)。processed_ids / digest index / サイズ束ねを
+        # 純関数に集約 — コスト見積もり (estimate.py) と同じ計画を共有する。
         _cur = adapter.conn.execute(
             "SELECT DISTINCT json_each.value "
             "FROM arasuji_entries, json_each(source_ids_json) "
@@ -1049,44 +1168,57 @@ class SessionLifecycle:
         )
         _processed_ids = {row[0] for row in _cur.fetchall()}
 
-        _runs: list[list] = []
-        _current_run: list = []
-        for _msg in all_messages:
-            if _msg.id in _processed_ids:
-                if _current_run:
-                    _runs.append(_current_run)
-                    _current_run = []
-                continue
-            _current_run.append(_msg)
-        if _current_run:
-            _runs.append(_current_run)
-
-        # Count only full batches (trailing incomplete batches are skipped
-        # by generate_from_messages), matching the cost-estimate API logic.
-        qualifying_batches = sum(
-            len(r) // batch_size_for_estimate
-            for r in _runs if len(r) >= batch_size_for_estimate
+        episode_digests = self._collect_episode_digests(persona)
+        plan = plan_alignment(
+            all_messages,
+            _processed_ids,
+            episode_digests,
+            target_chars=chronicle_band_budget(),
+            min_llm_chars=chronicle_min_digest_chars(),
         )
 
-        if qualifying_batches == 0:
-            total_unprocessed = sum(len(r) for r in _runs)
+        # 帯あふれ束ねの dry 予測 (Codex W4 #3/#4): 新チャンク確定後に発生する
+        # 統合 LLM 回数を実行と同じ選定ロジックで数え、確認ゲートの LLM 数に
+        # 含める。plan が空でも帯 backlog (前回の束ね失敗の残り) があれば
+        # 実行に進む — 「新チャンクが無いと帯束ねが永久に再試行されない」穴の
+        # 閉塞。
+        from sai_memory.arasuji.bands import plan_band_overflow
+        try:
+            band_plan_count = plan_band_overflow(
+                adapter.conn,
+                extra_leaves=[
+                    (
+                        c.coverage_chars,
+                        min((m.created_at for m in c.messages), default=None),
+                        max((m.created_at for m in c.messages), default=None),
+                    )
+                    for c in plan.chunks
+                ],
+            )
+        except Exception:
+            LOGGER.warning("[metabolism] band overflow dry-plan failed", exc_info=True)
+            band_plan_count = 0
+
+        if not plan.chunks and band_plan_count == 0:
             LOGGER.info(
-                "[metabolism] No qualifying runs for Chronicle generation "
-                "(%d unprocessed messages in %d runs, all < batch_size %d)",
-                total_unprocessed, len(_runs), batch_size_for_estimate,
+                "[metabolism] Nothing to compile or consolidate "
+                "(%d unprocessed messages)", plan.total_unprocessed,
             )
             # 編纂対象なし = claim せず no-op (退役は許す)。
             return "ok"
 
-        unprocessed_count = qualifying_batches * batch_size_for_estimate
-        estimated_llm_calls = qualifying_batches
+        unprocessed_count = plan.total_unprocessed
+        estimated_llm_calls = plan.llm_calls + band_plan_count
 
-        # 冪等 claim 用の窓の同定: 窓末尾 ID = 編纂対象 (qualifying run) の
-        # 時系列末尾のメッセージ ID (all_messages は created_at 昇順)。
-        # 会話が進んで窓が伸びれば ID が変わり新しい claim になる — 失敗した窓の
-        # 再試行はこの自然な鍵の更新で成立する (failed 行は終端で再 claim 不可)。
-        _qualifying_runs = [r for r in _runs if len(r) >= batch_size_for_estimate]
-        _window_end_id = _qualifying_runs[-1][-1].id
+        # 冪等 claim 用の窓の同定: 窓末尾 ID = 編纂対象の時系列末尾の
+        # メッセージ ID (all_messages は created_at 昇順)。会話が進んで窓が
+        # 伸びれば ID が変わり新しい claim になる — 失敗した窓の再試行は
+        # この自然な鍵の更新で成立する (failed 行は終端で再 claim 不可)。
+        # plan 空 (帯束ねのみ) の実行は claim しない — 束ねの並走防御は
+        # bands の tx 内再検査が担う (並走時の +1 LLM コールは許容)。
+        _window_end_id = (
+            plan.chunks[-1].messages[-1].id if plan.chunks else None
+        )
 
         # Request user confirmation before generating.
         # Only valid when the current Pulse is a user-driven request — only
@@ -1101,7 +1233,16 @@ class SessionLifecycle:
         # AUTONOMOUS_CHRONICLE_ENABLED が True なら確認なしで生成を実行する。
         # False なら従来どおりスキップする。
         pulse_type = getattr(persona, "_current_pulse_type", None)
-        if force:
+        if estimated_llm_calls == 0:
+            # 全チャンクが恒等転写 / 恒等圧縮 (LLM コストゼロ)。確認ダイアログは
+            # LLM コストへの同意なので、コストが無ければ確認なしで直行する
+            # (W4 D3 — 恒等圧縮は「要約という儀式」ではなく置き直し §4-3)。
+            LOGGER.info(
+                "[metabolism] Generating Chronicle without confirmation "
+                "(no LLM calls needed: %d chunks, %d unprocessed messages)",
+                len(plan.chunks), unprocessed_count,
+            )
+        elif force:
             LOGGER.info(
                 "[metabolism] Generating Chronicle (forced by explicit request, "
                 "%d unprocessed messages)",
@@ -1177,21 +1318,35 @@ class SessionLifecycle:
         # arasuji の source_ids スキップが事後冪等の安全網として残る)。
         ledger = self._get_ledger()
         execution_id: Optional[str] = None
-        if ledger is not None:
+        if ledger is not None and _window_end_id is not None:
             try:
-                execution_id, created = ledger.begin_execution(
+                # claim_execution: failed 行 (前回の失敗 / キャンセル) はキーを
+                # 退避して新規 prepared を作る — キャンセル直後の同窓再実行が
+                # 永久に deferred にならない (Codex W4 二巡 #6)。running /
+                # applied / completed / unknown はブロック。
+                execution_id, runnable, existing_status = ledger.claim_execution(
                     kind="metabolism.run",
                     idempotency_key=f"{getattr(persona, 'persona_id', None)}:{_window_end_id}",
                     persona_id=getattr(persona, "persona_id", None),
                 )
-                if not created:
+                if not runnable:
                     LOGGER.info(
                         "[metabolism] Chronicle generation skipped: window already "
-                        "claimed by another entrance (persona=%s window_end=%s execution=%s)",
-                        getattr(persona, "persona_id", "?"), _window_end_id, execution_id,
+                        "claimed by another entrance (persona=%s window_end=%s "
+                        "execution=%s status=%s)",
+                        getattr(persona, "persona_id", "?"), _window_end_id,
+                        execution_id, existing_status,
                     )
                     return "deferred"
-                ledger.mark_running(execution_id)
+                # prepared 再利用の同時二重 claim は同じ execution_id を返しうる
+                # — 席取り (prepared→running の条件付き遷移) で勝者を一意化。
+                if not ledger.try_mark_running(execution_id):
+                    LOGGER.info(
+                        "[metabolism] Chronicle generation skipped: lost the "
+                        "running seat (persona=%s execution=%s)",
+                        getattr(persona, "persona_id", "?"), execution_id,
+                    )
+                    return "deferred"
             except Exception:
                 LOGGER.warning(
                     "[metabolism] ledger claim failed; proceeding without claim",
@@ -1221,7 +1376,6 @@ class SessionLifecycle:
         if cancellation_token:
             cancel_fn = lambda: cancellation_token.is_cancelled()
 
-        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
         persona_id_str = getattr(persona, "persona_id", None)
 
         # Ensure persona pages for conversation partners
@@ -1263,13 +1417,6 @@ class SessionLifecycle:
             except Exception:
                 LOGGER.exception("[metabolism] Failed to ensure persona pages for conversation partners")
 
-        generator = ArasujiGenerator(
-            client, adapter.conn,
-            batch_size=batch_size,
-            consolidation_size=10,
-            persona_id=persona_id_str,
-        )
-
         # Entity extraction callback (extracts entities → reflects to Memopedia)
         note_callback = None
         try:
@@ -1281,9 +1428,13 @@ class SessionLifecycle:
         except Exception as exc:
             LOGGER.warning("[metabolism] Entity extraction setup failed: %s", exc)
 
+        from sai_memory.arasuji.bands import run_band_overflow
+        from sai_memory.arasuji.executor import execute_plan
+
         try:
-            level1, consolidated = generator.generate_unprocessed(
-                all_messages,
+            exec_result = execute_plan(
+                plan, client, adapter.conn,
+                persona_id=persona_id_str,
                 progress_callback=progress_fn,
                 cancel_check=cancel_fn,
                 batch_callback=note_callback,
@@ -1292,23 +1443,58 @@ class SessionLifecycle:
             LOGGER.exception("[metabolism] Chronicle generation raised")
             if ledger is not None and execution_id:
                 try:
-                    # 部分生成 (途中バッチまで適用済み) はあり得るが、生成済み
-                    # エントリは source_ids で冪等スキップされるため再試行は安全。
+                    # 部分生成 (途中チャンクまで確定済み) はあり得るが、確定済み
+                    # チャンクは source_ids で冪等スキップされるため再試行は安全。
                     ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
                 except Exception:
                     LOGGER.warning("[metabolism] ledger mark_failed failed", exc_info=True)
             return "failed"
 
+        if exec_result.cancelled:
+            # キャンセル = 部分適用。completed で封印すると同じ窓が再実行不能に
+            # なる (冪等マーカーは適用の成功だけを封印する — W3 教訓③ /
+            # Codex W4 #8)。failed 終端で claim を退け、anchor は据え置く。
+            if ledger is not None and execution_id:
+                try:
+                    ledger.mark_failed(execution_id, "cancelled by user")
+                except Exception:
+                    LOGGER.warning("[metabolism] ledger mark_failed failed", exc_info=True)
+            LOGGER.info(
+                "[metabolism] Chronicle generation cancelled (%d chunks committed)",
+                exec_result.created_count,
+            )
+            return "deferred"
+
+        # 帯あふれ束ね (W4 D6): 級 k 帯の被覆合計があふれたら古い端から
+        # 級 k+1 へ束ねる。束ね失敗は編纂の成否に含めない (級 1 は確定済み =
+        # 情報の欠落はなく、次回の Metabolism の dry 予測が backlog を検出して
+        # 自然に再試行する)。
+        consolidated_count = 0
+        try:
+            consolidated_count = run_band_overflow(
+                adapter.conn, client,
+                persona_id=persona_id_str,
+                cancel_check=cancel_fn,
+            )
+        except Exception:
+            LOGGER.exception("[metabolism] band overflow consolidation failed; continuing")
+
         LOGGER.info(
-            "[metabolism] Chronicle generation complete: %d level1, %d consolidated entries",
-            len(level1), len(consolidated),
+            "[metabolism] Chronicle generation complete: %d chunks created "
+            "(%d skipped as duplicates), %d band consolidations",
+            exec_result.created_count, exec_result.skipped_duplicates,
+            consolidated_count,
         )
         if ledger is not None and execution_id:
             try:
-                ledger.mark_applied(
-                    execution_id,
-                    result={"level1": len(level1), "consolidated": len(consolidated)},
-                )
+                result_payload = dict(plan.summary)
+                result_payload.update({
+                    "created": exec_result.created_count,
+                    "skipped_duplicates": exec_result.skipped_duplicates,
+                    "cancelled": exec_result.cancelled,
+                    "bands_consolidated": consolidated_count,
+                })
+                ledger.mark_applied(execution_id, result=result_payload)
                 # outbox を積まない実行なので completed へ明示遷移して閉じる。
                 ledger.mark_completed(execution_id)
             except Exception:
@@ -1319,9 +1505,31 @@ class SessionLifecycle:
             event_callback({
                 "type": "metabolism",
                 "status": "completed",
-                "content": f"Chronicle生成完了: {len(level1)}件のエントリを作成しました。",
+                "content": f"Chronicle生成完了: {exec_result.created_count}件のエントリを作成しました。",
             })
         return "ok"
+
+    def _collect_episode_digests(self, persona) -> Dict[str, Tuple[str, str]]:
+        """digest 確定済み episode の index (W4 D3 — 恒等転写材料)。
+
+        実体は saiverse.episodes.collect_episode_digest_index (API の手動生成
+        ジョブと共有する一点管理)。失敗・環境不備は空 dict に degrade。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        adapter = getattr(persona, "sai_memory", None)
+        if not persona_id or adapter is None or not adapter.is_ready():
+            return {}
+        try:
+            from saiverse.episodes import collect_episode_digest_index
+            return collect_episode_digest_index(
+                self.manager, persona_id, adapter.conn,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] episode digest index failed (persona=%s)",
+                persona_id, exc_info=True,
+            )
+            return {}
 
     def ensure_recall_embeddings(self, persona) -> None:
         """Chronicle / Memopedia ページ / Fragment の未埋め込み分を全件埋める。
@@ -1359,238 +1567,6 @@ class SessionLifecycle:
                 )
         except Exception:
             LOGGER.exception("[metabolism] Embedding generation failed")
-
-    def generate_track_chronicle(self, persona) -> None:
-        """Track Chronicle 生成 (v0.32, 2026-05-09)。
-
-        General Chronicle (generate_chronicle) と独立に走る。設計上の特徴:
-
-        - **pulse_type 制限なし**: 自律稼働 / メタ判断 / スケジュール pulse でも走る
-        - **ユーザー確認 dialog 不要**: ペルソナの自律的な記憶整理として、自動承認
-        - **バッチ未満許容**: ArasujiGenerator(allow_incomplete=True) で incomplete Lv1
-          として保存。次回 20 件揃った時点で削除して正規 Lv1 に再生成 (Generator 側
-          が自動)
-        - **Track ごとに 1000 字未満ならスキップ**: 短すぎる範囲は要約しても情報量が
-          変わらないため、Chronicle 化せず読み込み側で生メッセージ取得経路に任せる
-        - **Track 別に独立処理**: 押し出し対象に複数 Track のメッセージが混在していて
-          も、origin_track_id でグループ化して各 Track ごとに ArasujiGenerator を回す
-
-        詳細は docs/intent/persona_cognition/track_chronicle.md
-        """
-        from sai_memory.arasuji import init_arasuji_tables
-        from sai_memory.arasuji.generator import DEFAULT_BATCH_SIZE, ArasujiGenerator
-        from sai_memory.memory.storage import Message
-        from saiverse.memory_weave_llm import get_memory_weave_client
-
-        adapter = getattr(persona, "sai_memory", None)
-        if not adapter or not adapter.is_ready():
-            LOGGER.warning("[metabolism][track] SAIMemory not available for Track Chronicle")
-            return
-
-        try:
-            client = get_memory_weave_client(persona, purpose="track_chronicle")
-        except LookupError as exc:
-            LOGGER.warning("[metabolism][track] %s (Track Chronicle)", exc)
-            return
-
-        init_arasuji_tables(adapter.conn)
-
-        # 全メッセージを取得 (handy_tool/spell/event_message タグ除外)
-        # origin_track_id IS NULL のメッセージは Track Chronicle 対象外
-        import json as _json
-        cur = adapter.conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata, origin_track_id "
-            "FROM messages "
-            "WHERE origin_track_id IS NOT NULL "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell', 'event_message')"
-            ") "
-            "ORDER BY created_at ASC"
-        )
-        all_rows = cur.fetchall()
-        if not all_rows:
-            LOGGER.debug("[metabolism][track] No track-tagged messages to process")
-            return
-
-        # origin_track_id でグループ化
-        from collections import defaultdict
-        by_track: Dict[str, List[Message]] = defaultdict(list)
-        for row in all_rows:
-            msg_id, tid, role, content, resource_id, created_at, metadata_raw, otid = row
-            metadata = None
-            if metadata_raw:
-                try:
-                    metadata = _json.loads(metadata_raw)
-                except Exception:
-                    pass
-            by_track[otid].append(Message(
-                id=msg_id, thread_id=tid, role=role, content=content,
-                resource_id=resource_id, created_at=int(created_at),
-                metadata=metadata,
-            ))
-
-        # 既処理メッセージ ID を Track 別に取得 (incomplete Lv1 は処理済みに含めない、
-        # ArasujiGenerator 側で再生成のため削除されるが念のためここでも合わせる)
-        cur = adapter.conn.execute(
-            "SELECT origin_track_id, json_each.value "
-            "FROM arasuji_entries, json_each(source_ids_json) "
-            "WHERE level = 1 AND origin_track_id IS NOT NULL AND is_incomplete = 0"
-        )
-        processed_by_track: Dict[str, set] = defaultdict(set)
-        for row in cur.fetchall():
-            processed_by_track[row[0]].add(row[1])
-
-        # ---- 冪等 claim (実行台帳 kind="metabolism.run_track"、M1 の解) ----
-        # 窓の同定は「全 Track の未処理メッセージの時系列末尾 ID」。新規 Track
-        # メッセージが増えない限り同じ鍵になり、二重実行 (per-track の delete &
-        # regen を含む) が claim で収束する。対象なしなら claim せず no-op。
-        persona_id = getattr(persona, "persona_id", None)
-        unprocessed_all = [
-            m for tid, msgs in by_track.items()
-            for m in msgs if m.id not in processed_by_track.get(tid, set())
-        ]
-        if not unprocessed_all:
-            LOGGER.debug("[metabolism][track] No unprocessed track messages")
-            return
-        _window_end_id = max(
-            unprocessed_all, key=lambda m: (m.created_at, str(m.id)),
-        ).id
-        ledger = self._get_ledger()
-        execution_id: Optional[str] = None
-        if ledger is not None:
-            try:
-                execution_id, created = ledger.begin_execution(
-                    kind="metabolism.run_track",
-                    idempotency_key=f"{persona_id}:{_window_end_id}",
-                    persona_id=persona_id,
-                )
-                if not created:
-                    LOGGER.info(
-                        "[metabolism][track] skipped: window already claimed "
-                        "(persona=%s window_end=%s execution=%s)",
-                        persona_id, _window_end_id, execution_id,
-                    )
-                    return
-                ledger.mark_running(execution_id)
-            except Exception:
-                LOGGER.warning(
-                    "[metabolism][track] ledger claim failed; proceeding without claim",
-                    exc_info=True,
-                )
-                execution_id = None
-
-        # 既存 incomplete Lv1 の end_time を Track 別に取得 (新規メッセージなし判定用)。
-        # 起動直後の anchor TTL 切れ pre-response 経路で本関数が再呼び出しされたとき、
-        # Track にメッセージが追加されていなければ delete & regen は同じ内容を作り直す
-        # だけで LLM 呼び出しが完全に無駄になる。incomplete Lv1 の end_time 以降に新規
-        # メッセージがない Track はここでスキップする。
-        cur = adapter.conn.execute(
-            "SELECT origin_track_id, MAX(end_time) "
-            "FROM arasuji_entries "
-            "WHERE level = 1 AND origin_track_id IS NOT NULL AND is_incomplete = 1 "
-            "GROUP BY origin_track_id"
-        )
-        incomplete_end_by_track: Dict[str, int] = {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
-
-        # 各 Track ごとに処理
-        track_manager = getattr(self.manager, "track_manager", None)
-        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
-        # 1000 字未満スキップ閾値
-        min_chars_threshold = 1000
-
-        total_tracks_processed = 0
-        total_lv1_created = 0
-        for track_id, msgs in by_track.items():
-            unprocessed = [m for m in msgs if m.id not in processed_by_track.get(track_id, set())]
-            if not unprocessed:
-                continue
-
-            # 既存 incomplete Lv1 のカバー範囲を超える新規メッセージがあるか判定。
-            # なければ delete & regen を回避 (同じ内容を作り直す LLM 呼び出しの無駄を防ぐ)。
-            incomplete_end = incomplete_end_by_track.get(track_id)
-            if incomplete_end is not None:
-                latest_unprocessed = max(m.created_at for m in unprocessed)
-                if latest_unprocessed <= incomplete_end:
-                    LOGGER.info(
-                        "[metabolism][track] Skipping track=%s: no new messages since incomplete Lv1 "
-                        "(incomplete_end=%s, latest_unprocessed=%s, %d msgs)",
-                        track_id, incomplete_end, latest_unprocessed, len(unprocessed),
-                    )
-                    continue
-
-            unprocessed_chars = sum(len(m.content or "") for m in unprocessed)
-            if unprocessed_chars < min_chars_threshold:
-                LOGGER.info(
-                    "[metabolism][track] Skipping track=%s: unprocessed=%d msgs, %d chars < %d threshold",
-                    track_id, len(unprocessed), unprocessed_chars, min_chars_threshold,
-                )
-                continue
-
-            # Track の title / intent 取得
-            track_title: Optional[str] = None
-            track_intent: Optional[str] = None
-            track_type_value: Optional[str] = None
-            if track_manager is not None:
-                try:
-                    track = track_manager.get(track_id)
-                    track_title = getattr(track, "title", None)
-                    track_intent = getattr(track, "intent", None)
-                    track_type_value = getattr(track, "track_type", None)
-                except Exception:
-                    LOGGER.debug("[metabolism][track] Could not fetch track meta for %s", track_id)
-
-            # ユーザー会話 Track はスキップ (v0.32, 2026-05-09)。
-            # 親スレッド保持機構が生メッセージで文脈を担保するため、Track Chronicle 化は不要。
-            # 詳細: docs/intent/persona_cognition/track_chronicle.md §11
-            if track_type_value == "user_conversation":
-                LOGGER.debug(
-                    "[metabolism][track] Skipping user_conversation track=%s (preserved by parent-thread mechanism)",
-                    track_id,
-                )
-                continue
-
-            generator = ArasujiGenerator(
-                client, adapter.conn,
-                batch_size=batch_size,
-                consolidation_size=10,
-                persona_id=persona_id,
-                origin_track_id=track_id,
-                track_title=track_title,
-                track_intent=track_intent,
-                allow_incomplete=True,
-            )
-
-            try:
-                level1, consolidated = generator.generate_unprocessed(msgs)
-                LOGGER.info(
-                    "[metabolism][track] track=%s done: %d level1, %d consolidated",
-                    track_id, len(level1), len(consolidated),
-                )
-                total_tracks_processed += 1
-                total_lv1_created += len(level1)
-            except Exception:
-                LOGGER.exception(
-                    "[metabolism][track] generate_unprocessed failed for track=%s", track_id,
-                )
-
-        LOGGER.info(
-            "[metabolism][track] Track Chronicle complete: %d tracks processed, %d lv1 entries",
-            total_tracks_processed, total_lv1_created,
-        )
-        if ledger is not None and execution_id:
-            try:
-                ledger.mark_applied(
-                    execution_id,
-                    result={
-                        "tracks_processed": total_tracks_processed,
-                        "level1": total_lv1_created,
-                    },
-                )
-                ledger.mark_completed(execution_id)
-            except Exception:
-                LOGGER.warning(
-                    "[metabolism][track] ledger apply/complete failed", exc_info=True,
-                )
 
     def run_session_close_for(self, persona_id: str) -> None:
         """persona_id からペルソナを引いて gold_panning のセッションクローズを走らせる。

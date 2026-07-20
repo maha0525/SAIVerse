@@ -192,14 +192,8 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                         event_callback=event_callback,
                                         cancellation_token=cancellation_token,
                                     )
-                                    # Track Chronicle (v0.32, 2026-05-09): General と並行で走らせる
-                                    try:
-                                        runtime.session_lifecycle.generate_track_chronicle(persona)
-                                    except Exception as exc:
-                                        LOGGER.warning(
-                                            "[metabolism] Track Chronicle generation on anchor expiry failed: %s",
-                                            exc,
-                                        )
+                                    # (旧 Track Chronicle 呼び出しは W4 で廃止 —
+                                    # experience_structure.md §11-10)
                                     # Pre-response metabolism で発生した Memopedia 変化を即座に
                                     # ペルソナに知覚させる。これがないと、続く履歴取得で拾えず、
                                     # ペルソナは「自分が直前に行った記憶整理」を同じターンの応答時に

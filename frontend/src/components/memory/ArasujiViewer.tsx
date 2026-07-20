@@ -67,13 +67,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         estimated_cost_usd: number;
         model_name: string;
         is_free_tier: boolean;
-        batch_size: number;
+        chunks_identity?: number;
+        chunks_episode?: number;
         currency?: string;
     } | null>(null);
     const [generateSettings, setGenerateSettings] = useState({
         maxMessages: 500,
-        batchSize: 20,
-        consolidationSize: 10,
         withMemopedia: false,
         includeTimestamp: true,
     });
@@ -318,14 +317,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
-    // Chronicle Generation
-    const fetchCostEstimate = useCallback(async (batchSize?: number, consolidationSize?: number) => {
+    // Chronicle Generation (W4: チャンク分割は episode 整列 + サイズ束ねが
+    // 決めるため、バッチサイズ・統合サイズの設定は廃止)
+    const fetchCostEstimate = useCallback(async () => {
         try {
-            const params = new URLSearchParams();
-            if (batchSize) params.set('batch_size', String(batchSize));
-            if (consolidationSize) params.set('consolidation_size', String(consolidationSize));
-            const qs = params.toString();
-            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate${qs ? `?${qs}` : ''}`);
+            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
             if (res.ok) {
                 setCostEstimate(await res.json());
             }
@@ -336,17 +332,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     const openGenerateModal = async () => {
         setShowGenerateModal(true);
-        await fetchCostEstimate(generateSettings.batchSize, generateSettings.consolidationSize);
+        await fetchCostEstimate();
     };
-
-    // Re-fetch cost estimate when batch/consolidation size changes while modal is open
-    useEffect(() => {
-        if (!showGenerateModal) return;
-        const timer = setTimeout(() => {
-            fetchCostEstimate(generateSettings.batchSize, generateSettings.consolidationSize);
-        }, 300);  // debounce
-        return () => clearTimeout(timer);
-    }, [showGenerateModal, generateSettings.batchSize, generateSettings.consolidationSize, fetchCostEstimate]);
 
     const startGeneration = async () => {
         setShowGenerateModal(false);
@@ -356,8 +343,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     max_messages: generateSettings.maxMessages,
-                    batch_size: generateSettings.batchSize,
-                    consolidation_size: generateSettings.consolidationSize,
                     with_memopedia: generateSettings.withMemopedia,
                     include_timestamp: generateSettings.includeTimestamp,
                 }),
@@ -1028,30 +1013,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 placeholder="500"
                             />
                             <span className={styles.hint}>未処理メッセージを古い順に最大この件数まで処理</span>
-                        </div>
-                        <div className={styles.formGroup}>
-                            <label>バッチサイズ</label>
-                            <input
-                                type="number"
-                                value={generateSettings.batchSize || ''}
-                                onChange={(e) => setGenerateSettings(s => ({ ...s, batchSize: parseInt(e.target.value) || 0 }))}
-                                min={5}
-                                max={50}
-                                placeholder="20"
-                            />
-                            <span className={styles.hint}>1つのChronicleにまとめるメッセージ数（未処理がこれ未満なら処理しない）</span>
-                        </div>
-                        <div className={styles.formGroup}>
-                            <label>統合サイズ</label>
-                            <input
-                                type="number"
-                                value={generateSettings.consolidationSize || ''}
-                                onChange={(e) => setGenerateSettings(s => ({ ...s, consolidationSize: parseInt(e.target.value) || 0 }))}
-                                min={3}
-                                max={20}
-                                placeholder="10"
-                            />
-                            <span className={styles.hint}>上位レベルにまとめるエントリ数</span>
                         </div>
                         <div className={styles.formGroup}>
                             <label className={styles.checkboxLabel}>

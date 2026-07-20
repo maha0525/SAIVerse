@@ -1,8 +1,8 @@
 # Intent: Track Chronicle (Track 内必要情報の維持機構)
 
 **親 Intent**: [README.md](README.md)
-**ステータス**: 起草 (v0.1, 2026-05-09)
-**位置付け**: Phase 3 残件 (中断・再開機構の本体)
+**ステータス**: **廃止 (2026-07-21、W4)** — 独立生成キューとしての Track Chronicle は [体験の構造](../experience_structure.md) §11-10 の裁定 (2026-07-19) に基づき生成を停止した (`generate_track_chronicle` 撤去)。既存データの読み込みは残る。本機構が解こうとしていた再訪問題 (「この前は何やったんだっけ」) は [track_episode_continuity](../../issues/track_episode_continuity.md) が引き継ぐ。以下は歴史的記録。
+**位置付け**: ~~Phase 3 残件 (中断・再開機構の本体)~~ 廃止済み
 **関連**: [revisions.md](revisions.md) v0.31〜v0.32, [phase_3_lines_playbooks.md](phases/phase_3_lines_playbooks.md), [phase_5_autonomy.md](phases/phase_5_autonomy.md), [`docs/issues/general_chronicle_metabolism_trigger.md`](../../issues/general_chronicle_metabolism_trigger.md), [`docs/issues/general_chronicle_user_pulse_only.md`](../../issues/general_chronicle_user_pulse_only.md)
 
 ---

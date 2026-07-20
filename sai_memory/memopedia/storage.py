@@ -546,8 +546,14 @@ def create_page(
     is_trunk: bool = False,
     metadata: Optional[Dict[str, Any]] = None,
     page_id: Optional[str] = None,
+    commit: bool = True,
 ) -> MemopediaPage:
-    """Create a new page."""
+    """Create a new page.
+
+    ``commit=False`` は呼び出し側が複数書き込みを単一トランザクションに
+    束ねるとき用 (Chronicle のチャンク単位 tx / 親子束ね — W4 D4/D6)。
+    その場合、呼び出し側が conn.commit() / rollback() の責任を持つ。
+    """
     pid = page_id or str(uuid.uuid4())
     now = int(time.time())
     kw_list = keywords or []
@@ -560,7 +566,8 @@ def create_page(
         """,
         (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list), vividness, int(is_trunk), 0, now, metadata_json, sid),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return MemopediaPage(
         id=pid,
         parent_id=parent_id,

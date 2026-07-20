@@ -404,6 +404,8 @@ def create_entry(
     thread_id: Optional[str] = None,
     origin_track_id: Optional[str] = None,
     is_incomplete: bool = False,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+    commit: bool = True,
 ) -> ArasujiEntry:
     """Create a new arasuji entry.
 
@@ -414,13 +416,19 @@ def create_entry(
                          NULL = General Chronicle (Track 横断)。
         is_incomplete: バッチサイズ未満で作られた一時 Lv1 (Track Chronicle 用)。
                        後で 20 件揃った時に削除して正規 Lv1 に作り直される。
+        extra_metadata: 由来メタ等の追加フィールド (digest_origin /
+                        coverage_chars / episode_refs — W4 D4)。標準キーと
+                        衝突した場合は標準キーが勝つ。
+        commit: False で呼び出し側のトランザクションに参加する (チャンク
+                単位 tx / 親子束ね tx — W4 D4/D6)。
     """
     from sai_memory.memopedia.storage import create_page
 
     _ensure_root_chronicle(conn)
     eid = entry_id or str(uuid.uuid4())
     sid = _next_chronicle_short_id(conn)
-    meta = {
+    meta = dict(extra_metadata) if extra_metadata else {}
+    meta.update({
         "level": level,
         "source_ids": source_ids,
         "start_time": start_time,
@@ -432,7 +440,7 @@ def create_entry(
         "origin_track_id": origin_track_id,
         "thread_id": thread_id,
         "short_id": sid,
-    }
+    })
     page = create_page(
         conn,
         parent_id=ROOT_CHRONICLE_ID,
@@ -442,8 +450,10 @@ def create_entry(
         is_trunk=False,
         metadata=meta,
         page_id=eid,
+        commit=False,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return ArasujiEntry(
         id=eid,
         level=level,
@@ -566,8 +576,14 @@ def mark_consolidated(
     conn: sqlite3.Connection,
     entry_ids: List[str],
     parent_id: str,
+    *,
+    commit: bool = True,
 ) -> None:
-    """Mark entries as consolidated into a parent entry."""
+    """Mark entries as consolidated into a parent entry.
+
+    ``commit=False`` は親 INSERT と子 UPDATE を単一トランザクションに束ねる
+    帯あふれ束ね (W4 D6 — M2-a の解) 用。呼び出し側が commit/rollback する。
+    """
     if not entry_ids:
         return
     for eid in entry_ids:
@@ -581,7 +597,8 @@ def mark_consolidated(
             "UPDATE memopedia_pages SET metadata = ?, parent_id = ? WHERE id = ?",
             (json.dumps(meta, ensure_ascii=False), parent_id, eid),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def update_entry_content(
@@ -605,39 +622,6 @@ def update_entry_content(
     conn.execute(
         "UPDATE memopedia_pages SET content = ? WHERE id = ?",
         (content, entry_id),
-    )
-    conn.commit()
-    return True
-
-
-def update_entry_full(
-    conn: sqlite3.Connection,
-    entry_id: str,
-    *,
-    content: str,
-    start_time: Optional[int],
-    end_time: Optional[int],
-    message_count: int,
-    source_count: int,
-) -> bool:
-    """content と時間範囲/件数メタデータを一括更新する (regenerate_consolidated_content 用)。
-
-    P3b 以前は ``UPDATE arasuji_entries SET content=?, start_time=?, end_time=?,
-    message_count=?, source_count=? WHERE id=?`` を generator.py が直接発行していたが、
-    ``arasuji_entries`` が読み取り専用 VIEW になったためこの関数を介する。
-    """
-    row = _get_chronicle_page_row(conn, entry_id)
-    if row is None:
-        return False
-    _pid, _parent, _content, meta_json, _created = row
-    meta = _parse_chronicle_meta(meta_json)
-    meta["start_time"] = start_time
-    meta["end_time"] = end_time
-    meta["message_count"] = message_count
-    meta["source_count"] = source_count
-    conn.execute(
-        "UPDATE memopedia_pages SET content = ?, metadata = ? WHERE id = ?",
-        (content, json.dumps(meta, ensure_ascii=False), entry_id),
     )
     conn.commit()
     return True
@@ -929,7 +913,7 @@ def dismantle_entry(
     existing higher-level entry's time range), the entry's summary is no
     longer representative.  This function tears it down so that its source
     entries — together with the newly generated ones — can be re-consolidated
-    from scratch via the normal ``maybe_consolidate`` path.
+    from scratch via the band-overflow consolidation path (bands.py).
 
     Steps:
         1. Reset all source children to unconsolidated

@@ -1803,7 +1803,11 @@ def count_planned_groups(conn: sqlite3.Connection) -> int:
 
 # Tags excluded from Chronicle generation. Messages with any of these tags
 # are not the persona's own experiences and should not be summarized.
-CHRONICLE_EXCLUDED_TAGS = ('handy_tool', 'spell', 'event_message')
+# 'session_digest' は W1 (D9-5) の episode digest 行 — digest を再び圧縮材料に
+# しない (experience_structure.md §4-4 同一レベルの再圧縮禁止、W4 D5)。
+# 値は sea.work_session.DIGEST_TAG と一致していること (sai_memory は sea に
+# 依存できないためリテラル。一致は test_arasuji_alignment 側で固定)。
+CHRONICLE_EXCLUDED_TAGS = ('handy_tool', 'spell', 'event_message', 'session_digest')
 
 # line_role values excluded from General Chronicle.
 # sub_line = lightweight model step execution (work logs)

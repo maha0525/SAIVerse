@@ -452,8 +452,11 @@ class SourceMessageItem(BaseModel):
 class GenerateArasujiRequest(BaseModel):
     """Chronicle生成リクエスト"""
     max_messages: int = 500  # 最大処理メッセージ数
-    batch_size: int = 20     # バッチサイズ（これ未満のメッセージは処理しない）
-    consolidation_size: int = 10  # 統合サイズ
+    # batch_size / consolidation_size は W4 (episode 整列生成) で廃止。
+    # チャンク分割は episode 境界とサイズ束ねが決める。旧 frontend からの
+    # リクエストを 422 にしないため受理して無視する (deprecated)。
+    batch_size: int = 20
+    consolidation_size: int = 10
     model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
     with_memopedia: bool = False  # Memopedia同時生成
     include_timestamp: bool = True  # 日時情報をLLMに渡すか（インポートログ等で日時が不正確な場合はFalse）
@@ -487,7 +490,11 @@ class ChronicleCostEstimate(BaseModel):
     estimated_cost_usd: float
     model_name: str
     is_free_tier: bool
-    batch_size: int
+    # W4: 固定バッチ廃止。旧 frontend 型互換のため 0 固定で残す (deprecated)。
+    batch_size: int = 0
+    # W4: LLM を使わないチャンクの内訳 (恒等圧縮 / episode digest 恒等転写)
+    chunks_identity: int = 0
+    chunks_episode: int = 0
     currency: str = "USD"
 
 

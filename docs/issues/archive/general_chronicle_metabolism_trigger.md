@@ -1,6 +1,7 @@
 # Issue: General Chronicle 生成 trigger を Metabolism 押し出し対象判定に変更
 
-**ステータス**: 🔲 未着手 → **解決設計は [episode.md](../intent/episode.md) §6.1 に統合（2026-07-13、レビュー中）**: 生成 trigger＝エピソード close（範囲指定）、畳み＝Metabolism（ライフ終端）の別操作
+**ステータス**: ✅ **解決 (2026-07-21、W4 = 体験の構造 工程(2))** — `generate_chronicle` に `evict_boundary_epoch` が入り、自動経路の編纂対象は「Metabolism で退役する新 anchor より古い未編纂」に限定された (退場時圧縮 §4-1)。コンテキスト内に残るメッセージは圧縮されない。episode digest close 時生成 (範囲指定) は W1 の (a')、押し出し時の束ねは W4 の整列チャンクが実装
+**旧ステータス**: 🔲 未着手 → 解決設計は [episode.md](../../intent/episode.md) §6.1 に統合（2026-07-13）
 **優先度**: low
 **作成日**: 2026-05-09
 **関連**: Track Chronicle 設計議論 (`docs/intent/persona_cognition/`), `sea/runtime.py:_generate_chronicle`

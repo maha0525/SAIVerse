@@ -267,16 +267,15 @@ def make_batch_callback(
     memopedia_context: str = "",
     persona_id: Optional[str] = None,
 ) -> Callable[[List[Message]], None]:
-    """Create a batch_callback for ArasujiGenerator that extracts memory notes.
+    """Create a Chronicle batch_callback that extracts memory notes.
 
     Episode context is computed per-batch from the batch's time range.
     Existing unresolved notes are fetched automatically per-batch for dedup.
 
     Usage:
-        generator = ArasujiGenerator(client, conn, ...)
         callback = make_batch_callback(note_client, conn, thread_id="main",
                                        memopedia_context=memopedia_ctx)
-        generator.generate_from_messages(messages, batch_callback=callback)
+        execute_plan(plan, client, conn, batch_callback=callback)
 
     Args:
         client: LLM client for note extraction (can be different from Chronicle client).
@@ -286,7 +285,8 @@ def make_batch_callback(
         persona_id: Optional persona ID for usage tracking.
 
     Returns:
-        A callback function compatible with ArasujiGenerator.generate_from_messages().
+        A callback compatible with sai_memory.arasuji.executor.execute_plan's
+        ``batch_callback`` (called per chunk with (messages, entry_id)).
     """
     def callback(batch_messages: List[Message], chronicle_entry_id: Optional[str] = None) -> None:
         try:

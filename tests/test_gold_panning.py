@@ -463,7 +463,6 @@ class LlmFailureIsolationTest(unittest.TestCase):
         lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: (_ for _ in ()).throw(RuntimeError("llm down"))
-        lifecycle.generate_track_chronicle = lambda p: None
         persona = self._make_metabolism_persona()
 
         current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
@@ -483,7 +482,6 @@ class LlmFailureIsolationTest(unittest.TestCase):
         lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
-        lifecycle.generate_track_chronicle = lambda p: None
         persona = self._make_metabolism_persona()
 
         current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
@@ -543,7 +541,6 @@ class SessionCloseTest(unittest.TestCase):
         lifecycle = SimpleNamespace(runtime=FakeRuntime(client))
         lifecycle.is_chronicle_enabled_for_persona = lambda p: chronicle_enabled
         lifecycle.generate_chronicle = MagicMock(return_value="ok")
-        lifecycle.generate_track_chronicle = MagicMock()
         lifecycle.ensure_recall_embeddings = MagicMock()
         lifecycle._is_cache_hot = lambda p: hot
         # 初回 (pan マーカー無し) の window 起点は session_anchor 行から読まれる
@@ -715,7 +712,6 @@ class SessionCloseTest(unittest.TestCase):
         }), patch("sea.gold_panning.run_gold_panning"):
             result = gold_panning.run_session_close(lifecycle, persona)
         lifecycle.generate_chronicle.assert_not_called()
-        lifecycle.generate_track_chronicle.assert_not_called()
         self.assertFalse(result["chronicle"])
 
 
@@ -962,7 +958,6 @@ class PanMarkerPersistenceTest(unittest.TestCase):
         )
         lifecycle.is_chronicle_enabled_for_persona = lambda p: False
         lifecycle.generate_chronicle = MagicMock()
-        lifecycle.generate_track_chronicle = MagicMock()
         lifecycle.ensure_recall_embeddings = MagicMock()
         lifecycle._is_cache_hot = lambda p: True
 
