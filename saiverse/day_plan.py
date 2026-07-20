@@ -801,46 +801,85 @@ def update_plan_meta(
     ``load_day_plan`` では空配列、``schedule_day_plan`` では push 0 件として
     無害に振る舞う (save_day_plan で本物の時間割が上書きされたら meta は残る)。
 
+    保存は「読んだ meta と同じときだけ書く」CAS — 読みと書きの間に予約/精算 tx の
+    予算書き込みが commit されても、古い meta の書き戻しでそれを消さない
+    (:func:`_mutate_slots_cas` と同じ lost update 防止。第六陣 P1 の逆方向)。
+    世代が変わっていれば最新 meta へマージし直して再試行する。
+
     Returns:
         マージ後の meta dict。
+
+    Raises:
+        RuntimeError: 再試行が枯渇した場合 (書けていない — 呼び出し元へ正直に表明)。
     """
     if not isinstance(updates, dict):
         raise ValueError(f"updates must be a dict (got {type(updates).__name__})")
     plan_date_str = _normalize_plan_date(plan_date)
+    from sqlalchemy.exc import IntegrityError
+
     from database.models import PersonaDayPlan
 
-    now = clock.now()
-    db = manager.SessionLocal()
-    try:
-        row = (
-            db.query(PersonaDayPlan)
-            .filter_by(persona_id=persona_id, plan_date=plan_date_str)
-            .first()
-        )
-        if row is None:
-            merged = dict(updates)
-            db.add(PersonaDayPlan(
-                persona_id=persona_id,
-                plan_date=plan_date_str,
-                slots_json="[]",
-                meta_json=json.dumps(merged, ensure_ascii=False),
-                created_at=now,
-                updated_at=now,
-            ))
-        else:
+    for _attempt in range(_CAS_MAX_RETRIES):
+        now = clock.now()
+        db = manager.SessionLocal()
+        try:
+            row = _load_plan_row(db, persona_id, plan_date_str)
+            if row is None:
+                merged = dict(updates)
+                db.add(PersonaDayPlan(
+                    persona_id=persona_id,
+                    plan_date=plan_date_str,
+                    slots_json="[]",
+                    meta_json=json.dumps(merged, ensure_ascii=False),
+                    created_at=now,
+                    updated_at=now,
+                ))
+                try:
+                    db.commit()
+                    return merged
+                except IntegrityError:
+                    # 並走の書き手が先に行を作った — 更新経路で再試行
+                    db.rollback()
+                    continue
+            original_meta = row.meta_json
             try:
-                merged = json.loads(row.meta_json) if row.meta_json else {}
+                merged = json.loads(original_meta) if original_meta else {}
             except (TypeError, ValueError):
                 merged = {}
             if not isinstance(merged, dict):
                 merged = {}
             merged.update(updates)
-            row.meta_json = json.dumps(merged, ensure_ascii=False)
-            row.updated_at = now
-        db.commit()
-        return merged
-    finally:
-        db.close()
+            changed = (
+                db.query(PersonaDayPlan)
+                .filter(
+                    PersonaDayPlan.persona_id == persona_id,
+                    PersonaDayPlan.plan_date == plan_date_str,
+                    PersonaDayPlan.meta_json == original_meta,
+                )
+                .update(
+                    {
+                        PersonaDayPlan.meta_json: json.dumps(
+                            merged, ensure_ascii=False,
+                        ),
+                        PersonaDayPlan.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            if changed:
+                return merged
+        finally:
+            db.close()
+        LOGGER.info(
+            "[day_plan] plan meta CAS conflict: meta changed since read; retrying "
+            "with fresh meta (persona=%s date=%s attempt=%d/%d)",
+            persona_id, plan_date_str, _attempt + 1, _CAS_MAX_RETRIES,
+        )
+    raise RuntimeError(
+        f"plan meta update kept conflicting with concurrent writes "
+        f"(persona={persona_id} date={plan_date_str} keys={sorted(updates)})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3373,26 +3412,31 @@ def _reserve_slot_tx(
         # 書く条件付き更新で同梱する (ORM 属性書き込みだと無条件 UPDATE になり、
         # 読みと commit の間に成立した置換を古い配列で消してしまう — 第五陣 P1)。
         slots[target]["status"] = STATUS_FIRED
-        new_meta_json = row.meta_json
+        world_update: Dict[Any, Any] = {
+            PersonaDayPlan.slots_json: json.dumps(slots, ensure_ascii=False),
+            PersonaDayPlan.updated_at: clock.now(),
+        }
+        conditions = [
+            PersonaDayPlan.persona_id == persona_id,
+            PersonaDayPlan.plan_date == plan_date_str,
+            PersonaDayPlan.slots_json == original_payload,
+        ]
+        # 予算予約 (gated のみ)。meta_json は**書くときだけ** SET に含め、含める
+        # ときは読んだ meta も CAS 条件へ加える — slots が無傷でも並走の
+        # update_plan_meta (明日メモ等) の commit を古い meta の書き戻しで消さない
+        # (第六陣 P1)。書かないとき meta には一切触らない。
         if gated and reserved:
+            original_meta = row.meta_json
             meta = _row_meta(row)
             _apply_budget_delta_to_meta(meta, slot, int(reserved))
-            new_meta_json = json.dumps(meta, ensure_ascii=False)
+            world_update[PersonaDayPlan.meta_json] = json.dumps(
+                meta, ensure_ascii=False,
+            )
+            conditions.append(PersonaDayPlan.meta_json == original_meta)
         changed = (
             db.query(PersonaDayPlan)
-            .filter(
-                PersonaDayPlan.persona_id == persona_id,
-                PersonaDayPlan.plan_date == plan_date_str,
-                PersonaDayPlan.slots_json == original_payload,
-            )
-            .update(
-                {
-                    PersonaDayPlan.slots_json: json.dumps(slots, ensure_ascii=False),
-                    PersonaDayPlan.meta_json: new_meta_json,
-                    PersonaDayPlan.updated_at: clock.now(),
-                },
-                synchronize_session=False,
-            )
+            .filter(*conditions)
+            .update(world_update, synchronize_session=False)
         )
         if not changed:
             raise _PlanGenerationConflict(
@@ -3507,23 +3551,28 @@ def _settle_slot_tx(
                 slot_id, persona_id, plan_date_str, len(slots),
             )
 
-        # 予算の精算 (予約 → 実測。通常は返金の負 delta)
+        # 予算の精算 (予約 → 実測。通常は返金の負 delta)。meta_json を書くときは
+        # 読んだ meta も CAS 条件へ加える — 並走の update_plan_meta (明日メモ等) の
+        # commit を古い meta の書き戻しで消さない (第六陣 P1)。
+        conditions = [
+            PersonaDayPlan.persona_id == persona_id,
+            PersonaDayPlan.plan_date == plan_date_str,
+            PersonaDayPlan.slots_json == original_payload,
+        ]
         if gated and delta:
+            original_meta = row.meta_json
             meta = _row_meta(row)
             _apply_budget_delta_to_meta(meta, slot, delta)
             world_update[PersonaDayPlan.meta_json] = json.dumps(
                 meta, ensure_ascii=False,
             )
+            conditions.append(PersonaDayPlan.meta_json == original_meta)
 
         if world_update:
             world_update[PersonaDayPlan.updated_at] = clock.now()
             changed = (
                 db.query(PersonaDayPlan)
-                .filter(
-                    PersonaDayPlan.persona_id == persona_id,
-                    PersonaDayPlan.plan_date == plan_date_str,
-                    PersonaDayPlan.slots_json == original_payload,
-                )
+                .filter(*conditions)
                 .update(world_update, synchronize_session=False)
             )
             if not changed:

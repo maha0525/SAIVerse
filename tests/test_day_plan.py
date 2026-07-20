@@ -1215,6 +1215,110 @@ def test_reserve_conflict_preserves_replacement_and_aborts_fire(manager, task_re
     assert ledger.get_execution(exec_id)["status"] == "failed"
 
 
+def test_reserve_tx_preserves_concurrent_meta_update(manager, task_refs):
+    """第六陣 P1 (Sol 再現): 予約 tx の読みと書きの間に update_plan_meta (明日メモ)
+    が commit されても、古い meta の書き戻しでメモを消さない — meta を書くときは
+    meta も CAS 条件に含め、競合時は最新 meta から予算を再計算する。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {"tomorrow_memo": "old"})
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            day_plan.update_plan_meta(
+                manager, PERSONA_ID, PLAN_DATE, {"tomorrow_memo": "new"},
+            )
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked), \
+            patch("sea.work_session.run_work_session",
+                  return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 1
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert meta.get("tomorrow_memo") == "new"  # 並走メモが消えていない
+    # 予算は最新 meta 上で予約→精算され実測 3 に収束
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+
+
+def test_settle_tx_preserves_concurrent_meta_update(manager, task_refs):
+    """第六陣 P1 の精算側: 精算 tx (返金 delta の meta 書き込み) の読み書き間に
+    commit された明日メモが消えない。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {"tomorrow_memo": "old"})
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    real_load = day_plan._load_plan_row
+    calls = {"n": 0}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        calls["n"] += 1
+        # 1 回目 = 予約 tx (素通し)。2 回目 = 精算 tx の読み — ここで割り込む
+        if calls["n"] == 2 and row is not None:
+            day_plan.update_plan_meta(
+                manager, PERSONA_ID, PLAN_DATE, {"tomorrow_memo": "new"},
+            )
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked), \
+            patch("sea.work_session.run_work_session",
+                  return_value=_mock_work_session_result(rounds_used=3)):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert meta.get("tomorrow_memo") == "new"  # 精算の書き戻しで消えていない
+    # 返金 (5 予約 → 実測 3) は最新 meta 上で再計算されて適用済み
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+
+
+def test_update_plan_meta_preserves_concurrent_budget_write(manager, task_refs):
+    """第六陣 P1 の逆方向 (transfer): update_plan_meta の読み書き間に別の meta
+    書き込み (予算等) が commit されても、古い meta のマージ書き戻しで消さない。"""
+    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {"tomorrow_memo": "old"})
+
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            # 読みの後・書きの前に、別の書き手が予算消費を commit する
+            day_plan.update_plan_meta(
+                manager, PERSONA_ID, PLAN_DATE, {day_plan.META_BUDGET_USED: 7},
+            )
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+        merged = day_plan.update_plan_meta(
+            manager, PERSONA_ID, PLAN_DATE, {"tomorrow_memo": "new"},
+        )
+
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert meta.get("tomorrow_memo") == "new"          # 自分の更新は書けている
+    assert meta.get(day_plan.META_BUDGET_USED) == 7    # 並走の予算書き込みも生存
+    assert merged.get(day_plan.META_BUDGET_USED) == 7  # 再試行は最新 meta へマージ
+
+
 def test_fire_slot_follows_identity_when_index_shifts(manager, task_refs):
     """id 照準 (第四陣 P1): 呼び出し元の index が組み替えでズレていても、
     slot_id が指すコマを発火する — _fire_slot 自身が読んだ plan で id を解決する。"""

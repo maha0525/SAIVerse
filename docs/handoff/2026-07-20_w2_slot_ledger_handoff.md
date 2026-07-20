@@ -185,3 +185,11 @@ Codex が更に 2 件。どちらも再現実験付きで、コードの構造�
 | **P1** | `_update_slot` は id 照合の**後**、`_write_slots` (別 Session) で**読んだ配列全体を無条件で書き戻す** — 読みと書きの間に `replace_remaining_slots` の置換 (A/B→C) が commit されると、古い書き戻しが C を消し A/B を復活させる (lost update = ペルソナの決定が静かに失われるデータ保全問題)。再現あり | slots_json への全書き込みを**世代 CAS** 化: 新設 `_mutate_slots_cas` (読み・変異・保存を同一 tx にまとめ、`UPDATE ... WHERE slots_json = 読んだ payload` の条件付き更新。世代が変わっていれば最新 plan で変異をやり直す、最大 5 回) に `_update_slot` / `_ensure_slot_ids` を載せ替え (`_write_slots` 廃止)。**同族の tx 側も一括閉塞**: 予約 tx / 精算 tx / 回復 settle の slots+予算書き込みを ORM 属性書き込み (無条件 UPDATE) から条件付き更新へ変更 — 世代不一致は `_PlanGenerationConflict` で全ロールバックし、呼び出し元 (`_fire_slot`) が最新 plan で id から引き直して再試行 (置換で対象が消えていれば `_SlotVanished` の既存安全経路へ自然に落ちる)。`replace_remaining_slots` 自身も CAS ループ化 (読んだ世代と同じときだけ置換を commit — 併走する fired 書き込みを消して claim 済みコマを pending 復活させる逆向きの窓も閉塞)。予算調整は `_apply_budget_delta_to_meta` (dict ベース) へ改め、条件付き更新に同梱 |
 
 回帰 +3 件 (CAS ヘルパの再試行 / Sol 再現 = `_update_slot` が置換を消さない / 予約 tx 競合の安全離脱)。本体スイート **2743 passed 全緑**、ruff clean。**残す既知の割り切り**: `replace_day_plan` (起床の全置換) の upsert は無条件のまま — 全コマを新世代 id で総入れ替えする意味論のため、旧世代への並走書き込みを消しても「消えるべきものが消えた」に一致する (併走 fire の予約額は精算側の id 逆引き空振りで安全に閉じる)。**深めた教訓**: 照準 (どのコマに書くか) を直しても**書き戻しの粒度が配列全体**なら、隣のコマの決定を消せる — 「対象の同一性」と「書き込みの世代整合」は別の不変条件で、両方に守りが要る。read-modify-write を見たら常に「この間に誰かが commit したら?」を問う。
+
+### 第六レビュー (2026-07-20、第五陣修正 023549e への再指摘)
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| **P1** | 予約/精算 tx は読んだ古い **meta_json** を書き戻すのに、CAS 条件は **slots_json しか**比較していない — コマ配列が無傷なら CAS が通り、読み書きの間に `update_plan_meta` (明日メモ等) が commit した更新を古い meta で消す (再現: tomorrow_memo="new" が "old" へ巻き戻り)。予約 tx は非 gated でも `row.meta_json` を無意味に書き戻していた | ①**meta_json は書くときだけ SET に含め、含めるときは読んだ meta も CAS 条件へ追加** (予約 = gated+reserved のみ / 精算 = gated+delta のみ。非 gated は meta に一切触らない)。競合は既存の `_PlanGenerationConflict` 再試行に乗り、**最新 meta から予算を再計算**する。②逆方向 (transfer): 独立系 meta 書き手の唯一の口 `update_plan_meta` (save_lives / consume 系 / 明日メモは全部ここを通る) も **meta CAS + 再試行**化 — メモの書き戻しが並走 tx の予算書き込みを消す鏡像も同時に閉塞。行 INSERT 競合は IntegrityError → 更新経路で再試行。再試行枯渇は RuntimeError で正直に表明 (silent 消失にしない) |
+
+回帰 +3 件 (予約 tx がメモを消さない = Sol 再現 / 精算 tx 側 / update_plan_meta の逆方向)。本体スイート **2746 passed 全緑**、ruff clean。**深めた教訓**: CAS を張るときは「**比較する列**」と「**書く列**」を突き合わせる — 書くのに比較しない列は、その列の並走更新を静かに消す口として残る。守りたい単位 (行) と守れている単位 (列) のズレを確認する。
