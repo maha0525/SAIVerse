@@ -1702,6 +1702,96 @@ def _increment_life_field(
     )
 
 
+def mark_life_ended(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    index: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """ライフ終了の節目処理が済んだことを永続マークする (``lives[index].ended``)。
+
+    day_close の節目処理 (:func:`_handle_life_end` — keep-alive cancel + TTL
+    同期 + 「（活動終了）」通知) は非冪等で、呼ぶたびに副作用が再適用される。
+    判断 runtime の失敗 → schedule 側 backoff 再試行で
+    :func:`saiverse.autonomy_wiring.fire_judgment_point` が再突入すると境界
+    副作用が重複するため (2026-07-20 Codex W3 第二陣 P1)、day_open 側の
+    「当日はじめての確定のときだけ節目処理」と対称に、**ライフ終了の節目は
+    (persona, 営業日) につき一度**を本マーカーで保証する。呼び出し元
+    (:func:`saiverse.autonomy_wiring._apply_life_end_at_day_close`) は
+    「確認 → 適用 → マーク」の順で使う (マーク先行だと適用されないまま
+    封印される)。
+
+    書き込みは :func:`mutate_plan_meta` の CAS 試行の内側で行う (第七陣 P1 の
+    契約 — 外で読んだ meta から完成値を作らない)。lives が無い日 / index 外 /
+    既にマーク済みの場合は何も書かず None (no-op)。
+
+    Returns:
+        マークを書き込んだ場合はそのライフ dict、no-op は None。
+
+    Raises:
+        RuntimeError: CAS 再試行が枯渇した場合 (:func:`mutate_plan_meta` 準拠)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+
+    def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        raw = meta.get(META_LIVES)
+        lives = (
+            [life for life in raw if isinstance(life, dict)]
+            if isinstance(raw, list) else []
+        )
+        if index >= len(lives):
+            return None
+        if lives[index].get("ended"):
+            return None  # 既にマーク済み — 書かない
+        lives[index]["ended"] = True
+        meta[META_LIVES] = lives
+        return lives[index]
+
+    return mutate_plan_meta(
+        manager, persona_id, plan_date_str, _mark, context="mark_life_ended",
+    )
+
+
+def mark_life_started(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    index: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """ライフ開始の節目処理が済んだことを永続マークする (``lives[index].started``)。
+
+    :func:`mark_life_ended` の鏡像 (Codex W3 第八陣 — day_close に入れた
+    「境界の冪等ガード + 失敗伝播」が day_open に横展開されていなかった)。
+    day_open の節目処理 (:func:`_handle_life_start` — TTL override + 「（活動
+    開始）」通知) は非冪等で、従来の「当日はじめての確定のときだけ」ガードは
+    **確定は済んだが節目が失敗した**場合に節目を永久スキップしてしまう。
+    呼び出し元 (:func:`saiverse.autonomy_wiring._confirm_life_at_day_open`) は
+    「確認 → 適用 → マーク」の順で使う。
+
+    書き込みは :func:`mutate_plan_meta` の CAS 試行の内側 (第七陣契約)。
+    lives が無い日 / index 外 / 既マークは何も書かず None。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+
+    def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        raw = meta.get(META_LIVES)
+        lives = (
+            [life for life in raw if isinstance(life, dict)]
+            if isinstance(raw, list) else []
+        )
+        if index >= len(lives):
+            return None
+        if lives[index].get("started"):
+            return None  # 既にマーク済み — 書かない
+        lives[index]["started"] = True
+        meta[META_LIVES] = lives
+        return lives[index]
+
+    return mutate_plan_meta(
+        manager, persona_id, plan_date_str, _mark, context="mark_life_started",
+    )
+
+
 def record_judgment_pulse(
     manager: Any,
     persona_id: str,
@@ -1823,7 +1913,7 @@ def _apply_life_budget_gate(
     return slot
 
 
-def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> None:
+def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> bool:
     """ライフ境界 (活動開始・終了) のシステム通知を tail (末尾イベント) として
     SAIMemory へ書く。
 
@@ -1833,11 +1923,17 @@ def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> None:
     就寝判断 (day_close) の発火経路 (:func:`_handle_life_start` /
     :func:`_handle_life_end`、呼び出し元は
     :func:`saiverse.autonomy_wiring.fire_judgment_point`)。
+
+    Returns:
+        追記に成功したか (Codex W3 第四陣 P2: day_close 側は成否で ended
+        マーカーの可否を決めるため、例外は握ったまま False を返す)。配送先が
+        無い (ペルソナ未ロード等) は従来どおりの no-op = True — 再試行しても
+        届く見込みが無く、失敗扱いにすると節目が永久に closed されない。
     """
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     adapter = getattr(persona, "sai_memory", None) if persona is not None else None
     if adapter is None or not hasattr(adapter, "append_persona_message"):
-        return
+        return True
     message = {
         "role": "user",
         "content": f"<system>[システム通知] {text}</system>",
@@ -1845,11 +1941,13 @@ def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> None:
     }
     try:
         adapter.append_persona_message(message)
+        return True
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to record life boundary notice (persona=%s)",
             persona_id, exc_info=True,
         )
+        return False
 
 
 #: 均等モード中に運転する explicit cache TTL (life.md §5.1)。均等モードの
@@ -1925,7 +2023,7 @@ def _clear_life_ttl_override(manager: Any, persona_id: str) -> None:
         )
 
 
-def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str, Any]) -> None:
+def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str, Any]) -> bool:
     """life.md §5.1: 均等モードのライフ中は persona の explicit cache TTL を
     1h override する。
 
@@ -1941,7 +2039,7 @@ def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str
     がない)。
     """
     if life.get("mode") != LIFE_MODE_EVEN:
-        return
+        return True
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is not None:
         try:
@@ -1951,14 +2049,19 @@ def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str
                     "start (persona=%s)", persona_id,
                 )
         except Exception:
+            # cancel 失敗を成功扱いにしてはならない (Codex W3 第九陣): 残った旧
+            # 解除予約がライフ中に発火して override を外すのに、直後の「既存
+            # override あり」分岐が True を返すと started マーカーで封印され、
+            # 再試行が二度と TTL 同期をやり直せない — 部分失敗の成功封印そのもの。
             LOGGER.warning(
                 "[day_plan] failed to cancel pending life TTL clear (persona=%s)",
                 persona_id, exc_info=True,
             )
+            return False
     get_override = getattr(manager, "get_persona_cache_override", None)
     set_override = getattr(manager, "set_persona_cache_override", None)
     if get_override is None or set_override is None:
-        return
+        return True
     try:
         if get_override(persona_id) is not None:
             LOGGER.debug(
@@ -1966,20 +2069,22 @@ def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str
                 "present; not forcing TTL=%s (persona=%s)",
                 _EVEN_MODE_CACHE_TTL, persona_id,
             )
-            return
+            return True
         set_override(persona_id, enabled=True, ttl=_EVEN_MODE_CACHE_TTL)
         LOGGER.info(
             "[day_plan] life start (mode=even): cache TTL set to %s (persona=%s)",
             _EVEN_MODE_CACHE_TTL, persona_id,
         )
+        return True
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to apply even-mode cache TTL (persona=%s)",
             persona_id, exc_info=True,
         )
+        return False
 
 
-def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, Any]) -> None:
+def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, Any]) -> bool:
     """ライフ終端で TTL override の**遅延**解除を予約する (life.md §6.2 v0.4)。
 
     即時に clear してはいけない: anchor の生存判定
@@ -1992,12 +2097,16 @@ def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, 
 
     次のライフが TTL 経過前に始まる場合は :func:`_sync_cache_ttl_for_life_start`
     が同 key の予約を cancel する。
+
+    Returns:
+        予約に成功したか (Codex W3 第四陣 P2)。予約が不要なケース (均等モード
+        以外 / scheduler の無い構成) は True。
     """
     if life.get("mode") != LIFE_MODE_EVEN:
-        return
+        return True
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is None:
-        return
+        return True
     try:
         delay = _resolve_ttl_clear_delay_seconds(manager, persona_id)
         fire_at = clock.now() + timedelta(seconds=delay)
@@ -2010,14 +2119,16 @@ def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, 
             "[day_plan] life end (mode=even): TTL override clear scheduled in "
             "%ds (persona=%s)", delay, persona_id,
         )
+        return True
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to schedule life TTL clear (persona=%s)",
             persona_id, exc_info=True,
         )
+        return False
 
 
-def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> None:
+def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> bool:
     """ライフ終端で keep-alive 予約を全 model 分 cancel する (谷では温めない)。
 
     ``sea.session_lifecycle.SessionLifecycle.schedule_cache_ttl_pulse`` /
@@ -2026,10 +2137,13 @@ def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> None:
     どの model の Session が見張り中か列挙できないため prefix で一括 cancel する。
     ライフ中に未発火の予約が残っていても、この cancel で確実に止まる —
     :func:`is_keepalive_allowed` による発火時ゲートは二重の安全網。
+
+    Returns:
+        cancel に成功したか (Codex W3 第四陣 P2)。scheduler の無い構成は True。
     """
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is None:
-        return
+        return True
     try:
         cancelled = scheduler.cancel_prefix(f"ttl:{persona_id}:")
         if cancelled:
@@ -2037,24 +2151,31 @@ def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> None:
                 "[day_plan] keep-alive reservations cancelled at life end (persona=%s, keys=%s)",
                 persona_id, ", ".join(sorted(cancelled)),
             )
+        return True
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to cancel keep-alive reservation at life end (persona=%s)",
             persona_id, exc_info=True,
         )
+        return False
 
 
 def _handle_life_start(
     manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
-) -> None:
+) -> bool:
     """ライフ開始の節目処理 (life.md v0.5 §4.1/§11.2)。
 
     v0.4 までは専用のライフ境界イベント (EventScheduler 予約) の発火時に
     呼ばれていたが、v0.5 でその専用予約は廃止した — 「ライフ開始 = 起床判断
     (day_open)」そのものなので、呼び出し元は
     :func:`saiverse.autonomy_wiring.fire_judgment_point` の day_open 発火経路
-    (:func:`confirm_life_for_today` でライフを確定した直後、その日はじめての
-    確定のときだけ)。
+    (:func:`confirm_life_for_today` でライフを確定した直後、started マーカーが
+    無いときだけ)。
+
+    Returns:
+        全段成功したか (:func:`_handle_life_end` の鏡像、Codex W3 第八陣)。
+        順序契約も同じ — 冪等な TTL override を先に、非冪等な通知を最後に。
+        途中失敗は通知の前に False で戻り、再試行しても通知は重複しない。
     """
     LOGGER.info(
         "[day_plan] life started: persona=%s date=%s index=%d %s-%s "
@@ -2074,9 +2195,10 @@ def _handle_life_start(
         "[day_plan] session boundary: next pulse continues or freshly starts "
         "a session depending on anchor TTL (persona=%s)", persona_id,
     )
-    _sync_cache_ttl_for_life_start(manager, persona_id, life)
+    if not _sync_cache_ttl_for_life_start(manager, persona_id, life):
+        return False
     # life.md §9.2-3 (改修B): 実装語 ("ライフ") を排した確定文言。
-    _notify_life_boundary(
+    return _notify_life_boundary(
         manager, persona_id,
         f"（活動開始）今日は {life['start']}〜{life['end']}。",
     )
@@ -2084,13 +2206,26 @@ def _handle_life_start(
 
 def _handle_life_end(
     manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
-) -> None:
+) -> bool:
     """ライフ終了の節目処理 (life.md v0.5 §4.1/§11.2)。
 
     v0.4 までは専用のライフ境界イベント (EventScheduler 予約) の発火時に
     呼ばれていたが、v0.5 でその専用予約は廃止した — 「ライフ終了 = 就寝判断
     (day_close)」そのものなので、呼び出し元は
     :func:`saiverse.autonomy_wiring.fire_judgment_point` の day_close 発火経路。
+
+    Returns:
+        全段成功したか (Codex W3 第四陣 P2)。呼び出し元は True のときだけ
+        ended マーカー (:func:`mark_life_ended`) を立てる — 下請け各段は例外を
+        内部で握るため、bool を返さないと部分失敗が「成功」として封印され、
+        失敗した節目 (例: 活動終了通知) が永久に回復されない。
+
+    順序契約: **冪等な後始末 (keep-alive cancel / TTL 解除予約) を先に、
+    非冪等な通知 (SAIMemory 追記) を最後に**。途中失敗は通知の前に False で
+    戻る — 再試行では冪等段だけが再実行され、通知はまだ一度も出ていないので
+    重複しない。通知自体の失敗も False (追記されていないので再試行安全)。
+    重複しうる窓は「通知の追記は成功したが成功報告の前に crash」だけ
+    (at-least-once、従来の毎回再適用よりはるかに狭い)。
     """
     consumed = life_consumed(life)
     LOGGER.info(
@@ -2107,10 +2242,12 @@ def _handle_life_end(
     # (終了直後〜TTL 内の再訪、実キャッシュはまだ生きている) の最初の Pulse が
     # Case 3 で履歴を組み替え、生きたキャッシュを捨ててしまう (§8.3 裁定と
     # 矛盾。v0.3 の「即時失効」は v0.4 で誤りと訂正済み)。
-    _cancel_keepalive_reservation(manager, persona_id)
-    _sync_cache_ttl_for_life_end(manager, persona_id, life)
+    if not _cancel_keepalive_reservation(manager, persona_id):
+        return False
+    if not _sync_cache_ttl_for_life_end(manager, persona_id, life):
+        return False
     # life.md §9.2-3 (改修B): 実装語 ("ライフ") を排した確定文言。
-    _notify_life_boundary(
+    return _notify_life_boundary(
         manager, persona_id,
         "（活動終了）今日の活動時間はここまで。",
     )

@@ -15,16 +15,25 @@ EventScheduler 経由で発火する。
 - ``unregister_schedule(schedule_id)``: 1 件の予約をキャンセル。
   削除・トグル OFF 時に API 層から呼ばれる
 
-発火後は callback 内で:
-  1. メタプレイブックを PulseController に投げる
-  2. 完了状態 (oneshot の COMPLETED, interval の LAST_EXECUTED_AT) を更新
-  3. 次回発火時刻を計算して EventScheduler に再 register
+register/unregister の失敗は回復 tick (execution_ledger_wiring、60 秒周期) が
+呼ぶ ``_reconcile_schedules()`` (W3 Chunk C、handoff D6) が世代照合で自己回復
+する — DB が宣言的正典で、予約 (EventScheduler) はそのキャッシュ。
+
+発火後は callback 内で (W3 Chunk B、docs/handoff/2026-07-20_w3_schedule_ledger_handoff.md D3):
+  1. 世代照合 (旧世代予約は実行せず最新 DB で再登録)
+  2. 実行台帳 ``schedule.dispatch`` の claim + 席取り (二重発火 dedup)
+  3. メタプレイブックを PulseController に投げ、型付き outcome を得る (D4)
+  4. 精算: executed/accepted/settled_skip は「schedule 状態前進 + mark_applied」を
+     単一 commit で行い、次回発火を再 register。failed は backoff 再試行 (D5)。
+     unknown は台帳に刻むだけ (LLM 自動再実行禁止、intent §2.5)
 """
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+from sqlalchemy import func
 
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
 
@@ -33,10 +42,78 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# 実行台帳の kind と冪等キー (handoff D1 + W3 Codex 第三陣):
+# key = f"{schedule_id}:{instance_token}:{occurrence_token}"
+SCHEDULE_DISPATCH_LEDGER_KIND = "schedule.dispatch"
+
+# failed (副作用ゼロ確定) の backoff 再試行 (handoff D5)
+SCHEDULE_DISPATCH_RETRY_BACKOFF_SECONDS = 120.0
+SCHEDULE_DISPATCH_MAX_ATTEMPTS = 3
+
+# reconciliation (handoff D6) で「次回 occurrence の再登録」をブロックする台帳
+# status。running = 実行中 (>60s の長 Pulse) への二重登録防止 / applied・
+# completed = 既に済んだ occurrence / unknown = 裁定待ちの自動再実行禁止
+# (intent §2.5)。prepared (claim 後 crash) と failed (backoff 尽き) は再登録して
+# 自己回復する — claim_execution が prepared を再利用し、failed キーを退避する。
+_OCCURRENCE_BLOCKING_STATUSES = frozenset(
+    {"running", "applied", "completed", "unknown"}
+)
+
 
 def _schedule_key(schedule_id: int) -> str:
     """EventScheduler に渡す key (schedule_id 単位で一意)。"""
     return f"persona_schedule:{schedule_id}"
+
+
+def _occurrence_token(schedule: PersonaSchedule, next_fire: datetime) -> str:
+    """occurrence を識別する安定トークン (Codex W3 指摘 1)。
+
+    通常は発火予定時刻の epoch 文字列。ただし interval の初回
+    (``LAST_EXECUTED_AT is None``) は ``_next_interval_fire`` が「現在時刻」を
+    返すため、再計算のたびに epoch が変わり別の冪等キーになってしまう —
+    unknown による自動再実行禁止 (intent §2.5) を reconciliation / 再起動が
+    すり抜ける穴。そこで初回 interval は安定 sentinel ``"first"`` に固定する:
+    初回が unknown で終わればキーが同一世代内でブロックされ続け、oneshot の
+    unknown と同じ「裁定待ち」挙動になる。初回成功で LAST_EXECUTED_AT が
+    入れば以後は epoch ベースに戻る。
+
+    設定世代はここではなく :func:`_occurrence_key` の独立成分 ``g{N}`` が
+    持つ (Codex W3 第七陣 — 当初は初回 interval だけ ``first@g{N}`` と
+    世代を埋めていたが、「設定変更 = 新しい論理 occurrence」は oneshot /
+    periodic / 二回目以降 interval にも等しく適用されるべき軸なので、
+    キー構造の独立成分へ昇格した)。
+    """
+    if schedule.SCHEDULE_TYPE == "interval" and schedule.LAST_EXECUTED_AT is None:
+        return "first"
+    return str(int(next_fire.timestamp()))
+
+
+def _instance_token(schedule: PersonaSchedule) -> str:
+    """行の一生に固有なトークン (W3 Codex 第三陣)。
+
+    SQLite は AUTOINCREMENT 無しの INTEGER PK で削除済み最大 ID を再利用しうる
+    ため、SCHEDULE_ID だけでは「実行済み行を削除 → 新規作成」の新旧行を台帳が
+    区別できない (旧行の completed 台帳行が新行の claim を永久ブロックする)。
+    INSTANCE_TOKEN は行作成時に書き手が採番し更新では変えない — 世代
+    (SYNC_GENERATION=設定の版) とは別概念の「行の同一性」。NULL (migration 前の
+    DB / テストの直接 INSERT) は "legacy" として扱う (backfill 後は実質 NULL 無し)。
+    """
+    return schedule.INSTANCE_TOKEN or "legacy"
+
+
+def _occurrence_key(
+    schedule_id: int, instance_token: str, generation: int, occurrence_token: str
+) -> str:
+    """台帳の冪等キー (handoff D1 + W3 Codex 第三陣・第七陣)。
+
+    同一性の軸を全て独立成分として持つ: schedule_id + instance_token
+    (どの設定**行**か — SCHEDULE_ID 再利用の新旧分離) + ``g{generation}``
+    (設定の**何版**か — 「ユーザーの設定変更 = 新しい論理 occurrence」を
+    全 schedule 種別で実装する。unknown 封印は同一世代内でのみ効き、設定
+    変更で新しいキーになる) + occurrence_token (**いつの分**か)。
+    同一世代内の再試行・再発火はここで収束する。
+    """
+    return f"{schedule_id}:{instance_token}:g{generation}:{occurrence_token}"
 
 
 class ScheduleManager:
@@ -44,9 +121,16 @@ class ScheduleManager:
 
     def __init__(self, saiverse_manager: "SAIVerseManager"):
         self.manager = saiverse_manager
-        self._registered_ids: Set[int] = set()
+        # schedule_id → 登録時の (INSTANCE_TOKEN, SYNC_GENERATION) (W3 D2)。
+        # reconciliation が「登録済みの行・世代 ≠ DB の行・世代」の検出にこの
+        # map を読む。行トークンも持つのは、削除→SCHEDULE_ID 再利用→新規作成で
+        # 新旧行の世代が偶然一致 (ともに 1 等) すると、世代だけの照合では旧予約を
+        # 「同期済み」と誤認して新行を登録しないため (Codex W3 第五陣 P1)。
+        self._registered: Dict[int, Tuple[str, int]] = {}
         # 互換性のため属性は残すが、未使用 (旧 _schedule_loop で使われていた)
         self._stop_event = None
+        # 台帳の無い manager (旧テストスタブ) への degrade WARN を一回に抑える
+        self._ledger_missing_warned = False
         LOGGER.info("[ScheduleManager] Initialized (push-driven via EventScheduler)")
 
     # ------------------------------------------------------------------
@@ -87,10 +171,10 @@ class ScheduleManager:
         """登録済み全予約を EventScheduler から cancel する。"""
         scheduler = getattr(self.manager, "event_scheduler", None)
         if scheduler is None:
-            self._registered_ids.clear()
+            self._registered.clear()
             return
 
-        for schedule_id in list(self._registered_ids):
+        for schedule_id in list(self._registered):
             try:
                 scheduler.cancel(_schedule_key(schedule_id))
             except Exception:
@@ -98,14 +182,14 @@ class ScheduleManager:
                     "[ScheduleManager] Failed to cancel schedule %d on stop",
                     schedule_id,
                 )
-        self._registered_ids.clear()
+        self._registered.clear()
         LOGGER.info("[ScheduleManager] Stopped")
 
     # ------------------------------------------------------------------
     # Public API: 個別スケジュールの register / unregister
     # ------------------------------------------------------------------
 
-    def register_schedule(self, schedule_id: int) -> bool:
+    def register_schedule(self, schedule_id: int) -> str:
         """1 件のスケジュールを (再)登録する。既存予約は上書きされる。
 
         作成・更新・トグル ON 時に API ルートから呼ばれる。スケジュールが
@@ -113,7 +197,18 @@ class ScheduleManager:
         場合は EventScheduler から cancel するだけで終わる。
 
         Returns:
-            登録できたら True、cancel のみだった or 失敗なら False。
+            tri-state の文字列 (Codex W3 指摘 2 — 「予約が無いのが正」と
+            「予約すべきなのに作れない」を呼び出し元が区別できるように):
+
+            - ``"registered"``: 予約を作った
+            - ``"no_reservation_needed"``: 予約が無いのが正しい状態
+              (行なし = 削除済み / disabled / 完了済み oneshot)
+            - ``"not_registrable"``: 有効で発火すべきなのに予約を作れない
+              (scheduler 不在・設定不備: periodic の TIME_OF_DAY 欠落、
+              oneshot の SCHEDULED_DATETIME 欠落、interval の
+              INTERVAL_SECONDS 欠落、空の DAYS_OF_WEEK 等)。
+              reconciliation でも回復できないため、API 層は
+              ``scheduler_synced=False`` として応答に明示する
         """
         session = self.manager.SessionLocal()
         try:
@@ -123,14 +218,199 @@ class ScheduleManager:
             if schedule is None:
                 # 削除されたケース: cancel のみ
                 self._do_cancel(schedule_id)
-                return False
-            return self._do_register(schedule, session)
+                return "no_reservation_needed"
+            if self._do_register(schedule, session):
+                return "registered"
+            # _do_register False の内訳分類 (判定ロジックは _do_register と
+            # 同じ入力を読むだけで、二重実装はしない)
+            if not schedule.ENABLED:
+                return "no_reservation_needed"
+            if getattr(self.manager, "event_scheduler", None) is None:
+                return "not_registrable"
+            if schedule.SCHEDULE_TYPE == "oneshot" and schedule.COMPLETED:
+                return "no_reservation_needed"
+            # 有効なのに next_fire が計算できない = 設定不備
+            return "not_registrable"
         finally:
             session.close()
+
+    def refire_occurrence(
+        self,
+        schedule_id: int,
+        instance_token: str,
+        occurrence_token: str,
+        generation: int,
+        attempt: int = 0,
+    ) -> None:
+        """prepared 残留 occurrence の再発火予約を積む (Codex W3 第六陣 P1)。
+
+        claim → try_mark_running の間でプロセスが死ぬと、`schedule.dispatch` の
+        prepared 行だけが残り予約 (in-memory) は消える。reconciliation は「現在
+        時刻から計算した次回 occurrence」しか照合しないため、periodic の当日分
+        など**過去の occurrence** はここから再発火させる必要がある。呼び出し元
+        は回復 tick の prepared 回収
+        (:func:`saiverse.execution_ledger_wiring._collect_prepared_schedule_dispatch`)
+        — payload に凍結された (行, occurrence, 世代) をそのまま運び、発火時の
+        世代照合・行同一性照合・claim の prepared 再利用が安全性を担保する。
+
+        同じ EventScheduler key を使うため、reconciliation が先に積んだ「次回」
+        の予約は上書きされるが、この occurrence の精算後の `_do_register` が
+        次回を積み直すので収束する。
+        """
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            return
+        from saiverse import clock
+
+        scheduler.schedule(
+            fire_at=clock.now(),
+            # attempt を運ぶ (Codex W3 第十陣): 既定 0 で再開すると failed 回収の
+            # refire が試行回数をリセットし、crash 窓の繰り返しで backoff 上限が
+            # 実質無制限になる。回収側が「失敗した試行 + 1」を渡す。
+            callback=lambda sid=schedule_id, tok=instance_token,
+                occ=occurrence_token, gen=generation, att=attempt:
+                self._handle_fire(sid, tok, occ, gen, att),
+            key=_schedule_key(schedule_id),
+        )
+        self._registered[schedule_id] = (instance_token, generation)
+        LOGGER.info(
+            "[ScheduleManager] refire scheduled for recovered occurrence "
+            "(schedule=%d instance=%s occurrence=%s generation=%d attempt=%d)",
+            schedule_id, instance_token, occurrence_token, generation, attempt,
+        )
 
     def unregister_schedule(self, schedule_id: int) -> None:
         """1 件の予約をキャンセル。削除・トグル OFF 時に API 層から呼ばれる。"""
         self._do_cancel(schedule_id)
+
+    # ------------------------------------------------------------------
+    # Reconciliation: 回復 tick からの世代照合ループ (W3 Chunk C / handoff D6)
+    # ------------------------------------------------------------------
+
+    def _reconcile_schedules(self) -> Dict[str, int]:
+        """DB (宣言的正典) と EventScheduler 予約の同期を照合・修復する (A12 の核)。
+
+        回復 tick (:mod:`saiverse.execution_ledger_wiring` の 60 秒周期) から
+        呼ばれる。LLM を直接起動しない — やるのは予約の登録・除去だけで、
+        register/unregister の失敗 (CRUD 側の握り潰し・callback 例外による
+        予約 drop) を再起動なしに自己回復させる。
+
+        - **復元**: ENABLED 全件について「予約が無い」または「登録世代 ≠ DB
+          世代」なら再登録候補。ただし計算した次回 occurrence が台帳で
+          ブロックされている (:data:`_OCCURRENCE_BLOCKING_STATUSES`) 間は
+          登録しない — 実行中への二重登録と unknown 裁定待ち oneshot の
+          自動再実行をここで塞ぐ。台帳の無い manager (テストスタブ) では
+          確認を飛ばして登録する (発火側の degrade と同じ流儀)。
+        - **除去**: 登録 map にあるが DB に無い / disabled の予約は cancel
+          (delete / disable 時の unregister 失敗の回復)。
+        - 手動モード persona も特別扱いしない (handoff D6-3): 予約の復元は
+          宣言的正典の同期であって発火ではない。発火時ゲートは W9 の所掌。
+
+        Returns:
+            ``{"registered": int, "cancelled": int}`` (ログ用の集計)。
+        """
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        if scheduler is None:
+            return {"registered": 0, "cancelled": 0}
+        ledger = getattr(self.manager, "execution_ledger", None)
+
+        registered = 0
+        cancelled = 0
+        session = self.manager.SessionLocal()
+        try:
+            schedules = (
+                session.query(PersonaSchedule)
+                .filter(PersonaSchedule.ENABLED == True)  # noqa: E712
+                .all()
+            )
+            enabled_ids = set()
+            for schedule in schedules:
+                schedule_id = schedule.SCHEDULE_ID
+                enabled_ids.add(schedule_id)
+                try:
+                    current_generation = schedule.SYNC_GENERATION or 0
+                    if (
+                        scheduler.has_key(_schedule_key(schedule_id))
+                        and self._registered.get(schedule_id)
+                        == (_instance_token(schedule), current_generation)
+                    ):
+                        continue  # 予約あり + 行・世代一致 = 同期済み
+
+                    next_fire = self._compute_next_fire_at(schedule, session)
+                    if next_fire is None:
+                        # 完了済み oneshot / 設定不備 — 登録すべき予約が無い。
+                        # 更新 (periodic → 日時未指定 oneshot 等) 後に register
+                        # 側が失敗すると旧時刻の予約が heap に残る — DB 正典に
+                        # 無い予約なのでここで回収する (2026-07-20 Codex W3
+                        # 第二陣 P2)。cancel は予約が無ければ False を返すだけ
+                        # なので無条件でよい — 有った場合のみ集計する。
+                        if scheduler.cancel(_schedule_key(schedule_id)):
+                            cancelled += 1
+                            LOGGER.info(
+                                "[ScheduleManager] reconcile: cancelled stale "
+                                "reservation for schedule %d (no next occurrence "
+                                "computable)",
+                                schedule_id,
+                            )
+                        self._registered.pop(schedule_id, None)
+                        continue
+
+                    if ledger is not None:
+                        key = _occurrence_key(
+                            schedule_id,
+                            _instance_token(schedule),
+                            current_generation,
+                            _occurrence_token(schedule, next_fire),
+                        )
+                        row = ledger.find_execution(
+                            SCHEDULE_DISPATCH_LEDGER_KIND, key
+                        )
+                        if (
+                            row is not None
+                            and row.get("status") in _OCCURRENCE_BLOCKING_STATUSES
+                        ):
+                            LOGGER.debug(
+                                "[ScheduleManager] reconcile: schedule %d occurrence "
+                                "%s is blocked in ledger (status=%s); not registering",
+                                schedule_id, key, row.get("status"),
+                            )
+                            continue
+
+                    if self._do_register(schedule, session):
+                        registered += 1
+                        LOGGER.info(
+                            "[ScheduleManager] reconcile: re-registered schedule %d "
+                            "(generation=%d)",
+                            schedule_id, current_generation,
+                        )
+                except Exception:
+                    LOGGER.exception(
+                        "[ScheduleManager] reconcile failed for schedule %d",
+                        schedule_id,
+                    )
+
+            # 除去: 登録 map にあるが DB に無い / disabled (delete・disable の
+            # unregister 失敗の回復)
+            for schedule_id in list(self._registered):
+                if schedule_id in enabled_ids:
+                    continue
+                try:
+                    scheduler.cancel(_schedule_key(schedule_id))
+                    self._registered.pop(schedule_id, None)
+                    cancelled += 1
+                    LOGGER.info(
+                        "[ScheduleManager] reconcile: cancelled stale reservation "
+                        "for schedule %d (deleted/disabled)",
+                        schedule_id,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "[ScheduleManager] reconcile cancel failed for schedule %d",
+                        schedule_id,
+                    )
+        finally:
+            session.close()
+        return {"registered": registered, "cancelled": cancelled}
 
     # ------------------------------------------------------------------
     # 内部: register / cancel
@@ -163,17 +443,29 @@ class ScheduleManager:
             return False
 
         schedule_id = schedule.SCHEDULE_ID
-        # callback は schedule_id だけを captureして、発火時に DB から最新状態を読む。
-        # schedule オブジェクト自体を closure に閉じ込めると ORM session の寿命とずれる。
+        # closure には (schedule_id, instance_token, occurrence_token, generation)
+        # を焼き込む (W3 D2 + Codex 第三陣)。schedule オブジェクト自体を閉じ込める
+        # と ORM session の寿命とずれるため、発火時は DB から最新状態を読み直す。
+        # instance_token はこの登録が狙う「行そのもの」の識別子 (SCHEDULE_ID
+        # 再利用との分離)、occurrence_token はこの登録が狙う occurrence の識別子
+        # (冪等キーの素材、初回 interval は世代付き sentinel "first@g{N}")、generation は
+        # 登録時の SYNC_GENERATION (旧世代予約の発火を無害化する照合トークン)。
+        instance_token = _instance_token(schedule)
+        occurrence_token = _occurrence_token(schedule, next_fire)
+        generation = schedule.SYNC_GENERATION or 0
         scheduler.schedule(
             fire_at=next_fire,
-            callback=lambda sid=schedule_id: self._handle_fire(sid),
+            callback=lambda sid=schedule_id, tok=instance_token,
+                occ=occurrence_token, gen=generation:
+                self._handle_fire(sid, tok, occ, gen),
             key=_schedule_key(schedule_id),
         )
-        self._registered_ids.add(schedule_id)
+        self._registered[schedule_id] = (instance_token, generation)
         LOGGER.debug(
-            "[ScheduleManager] Registered schedule %d (type=%s, persona=%s, fire_at=%s)",
-            schedule_id, schedule.SCHEDULE_TYPE, schedule.PERSONA_ID, next_fire.isoformat(),
+            "[ScheduleManager] Registered schedule %d (type=%s, persona=%s, fire_at=%s, "
+            "instance=%s, occurrence=%s, generation=%d)",
+            schedule_id, schedule.SCHEDULE_TYPE, schedule.PERSONA_ID,
+            next_fire.isoformat(), instance_token, occurrence_token, generation,
         )
         return True
 
@@ -182,7 +474,7 @@ class ScheduleManager:
         if scheduler is None:
             return
         scheduler.cancel(_schedule_key(schedule_id))
-        self._registered_ids.discard(schedule_id)
+        self._registered.pop(schedule_id, None)
 
     # ------------------------------------------------------------------
     # 次回発火時刻の計算 (UTC で返す)
@@ -323,12 +615,40 @@ class ScheduleManager:
     # 発火: callback 本体 (EventScheduler から呼ばれる)
     # ------------------------------------------------------------------
 
-    def _handle_fire(self, schedule_id: int) -> None:
-        """EventScheduler から呼ばれる発火 callback。
+    def _handle_fire(
+        self,
+        schedule_id: int,
+        instance_token: str,
+        occurrence_token: str,
+        generation: int,
+        attempt: int = 0,
+    ) -> None:
+        """EventScheduler から呼ばれる発火 callback (W3 D3: 台帳化)。
 
-        schedule_id だけを captureしているので、発火時に最新の DB 状態を
-        読み直して実行する。実行後は次回発火時刻を計算して再 register する。
+        closure が運ぶのは (schedule_id, instance_token, occurrence_token,
+        generation, attempt) だけで、発火時に最新の DB 状態を読み直して実行する。
+        全体を try/except で包む — EventScheduler の「callback 例外 = WARN + 予約
+        drop」に台帳化後の例外を渡すと、schedule の再登録経路ごと消えるため。
         """
+        try:
+            self._handle_fire_inner(
+                schedule_id, instance_token, occurrence_token, generation, attempt,
+            )
+        except Exception:
+            LOGGER.exception(
+                "[ScheduleManager] _handle_fire failed (schedule=%d instance=%s "
+                "occurrence=%s generation=%d attempt=%d)",
+                schedule_id, instance_token, occurrence_token, generation, attempt,
+            )
+
+    def _handle_fire_inner(
+        self,
+        schedule_id: int,
+        instance_token: str,
+        occurrence_token: str,
+        generation: int,
+        attempt: int,
+    ) -> None:
         session = self.manager.SessionLocal()
         try:
             schedule = session.query(PersonaSchedule).filter(
@@ -339,7 +659,7 @@ class ScheduleManager:
                     "[ScheduleManager] _handle_fire: schedule %d not found (deleted?)",
                     schedule_id,
                 )
-                self._registered_ids.discard(schedule_id)
+                self._registered.pop(schedule_id, None)
                 return
 
             if not schedule.ENABLED:
@@ -347,17 +667,218 @@ class ScheduleManager:
                     "[ScheduleManager] _handle_fire: schedule %d is disabled, skipping",
                     schedule_id,
                 )
-                self._registered_ids.discard(schedule_id)
+                self._registered.pop(schedule_id, None)
                 return
 
-            self._execute_schedule(schedule, session)
-            self._update_schedule_after_execution(schedule, session)
+            # --- 行同一性照合 (W3 Codex 第三陣): SCHEDULE_ID 再利用の検出 ---
+            # closure が狙った行が削除され、同じ SCHEDULE_ID で別の行が作られた
+            # 場合 (SQLite の INTEGER PK 再利用)、この予約は死んだ行のもの。
+            # 実行せず、現在の行 (新しいトークン) で再登録する。
+            current_token = _instance_token(schedule)
+            if current_token != instance_token:
+                LOGGER.info(
+                    "[ScheduleManager] _handle_fire: reservation targets a dead row "
+                    "for schedule id %d (reserved instance=%s, current=%s); "
+                    "re-registering from DB without executing",
+                    schedule_id, instance_token, current_token,
+                )
+                self._do_register(schedule, session)
+                return
 
-            # 次回 register (oneshot 完了 / interval 継続 / periodic 次回)
-            self._do_register(schedule, session)
+            # --- 世代照合 (W3 D2/A12 回帰②): 旧世代予約は実行しない ---
+            current_generation = schedule.SYNC_GENERATION or 0
+            if current_generation != generation:
+                LOGGER.info(
+                    "[ScheduleManager] _handle_fire: stale reservation for schedule %d "
+                    "(reserved generation=%d, current=%d); re-registering from DB "
+                    "without executing",
+                    schedule_id, generation, current_generation,
+                )
+                self._do_register(schedule, session)
+                return
 
+            # --- 台帳 claim (W3 D1/D3): 同一 occurrence の二重発火を dedup ---
+            ledger = getattr(self.manager, "execution_ledger", None)
+            exec_id: Optional[str] = None
+            if ledger is None:
+                if not self._ledger_missing_warned:
+                    self._ledger_missing_warned = True
+                    LOGGER.warning(
+                        "[ScheduleManager] manager has no execution_ledger; schedule "
+                        "fires run without ledger tracking (dedup/backoff degrade)",
+                    )
+            else:
+                key = _occurrence_key(
+                    schedule_id, instance_token, generation, occurrence_token
+                )
+                exec_id, runnable, existing_status = ledger.claim_execution(
+                    SCHEDULE_DISPATCH_LEDGER_KIND,
+                    key,
+                    persona_id=schedule.PERSONA_ID,
+                    payload={
+                        "schedule_id": schedule_id,
+                        "persona_id": schedule.PERSONA_ID,
+                        "schedule_type": schedule.SCHEDULE_TYPE,
+                        "instance_token": instance_token,
+                        "occurrence": occurrence_token,
+                        "generation": generation,
+                        "meta_playbook": schedule.META_PLAYBOOK,
+                        # 何回目の試行か (Codex W3 第九陣): failed 回収が
+                        # 「上限到達の意図的放棄」と「crash で retry を失った」を
+                        # 区別するための永続証跡 (予約の有無では再起動後に区別
+                        # できない — start() が翌回を先に登録するため)
+                        "attempt": attempt,
+                    },
+                )
+                if not runnable:
+                    # 二重発火 dedup。hot loop 防止: 次 occurrence がこの blocked
+                    # key と同一 (oneshot 未完了 / interval 未前進 / unknown 裁定
+                    # 待ち) なら再登録しない — 再登録すると即発火 → claim 却下 →
+                    # 再登録の空回りになる。勝者側の settle が次を register する。
+                    next_fire = self._compute_next_fire_at(schedule, session)
+                    if next_fire is not None and _occurrence_token(schedule, next_fire) != occurrence_token:
+                        LOGGER.info(
+                            "[ScheduleManager] _handle_fire: occurrence %s already "
+                            "claimed (status=%s); registering next occurrence",
+                            key, existing_status,
+                        )
+                        self._do_register(schedule, session)
+                    else:
+                        LOGGER.info(
+                            "[ScheduleManager] _handle_fire: occurrence %s already "
+                            "claimed (status=%s); not re-registering (same occurrence "
+                            "would hot-loop)",
+                            key, existing_status,
+                        )
+                    return
+
+                # --- 席取り: prepared→running の CAS。敗者は台帳に書かず離脱 ---
+                if not ledger.try_mark_running(exec_id):
+                    LOGGER.info(
+                        "[ScheduleManager] _handle_fire: lost the running seat for "
+                        "occurrence %s; leaving without ledger writes", key,
+                    )
+                    return
+
+            # --- 実行 (型付き outcome、W3 D4) ---
+            outcome_class, detail = self._execute_schedule(schedule, session)
+
+            # --- 精算 (W3 D3) ---
+            if outcome_class in ("executed", "accepted", "settled_skip"):
+                # 単一 tx: schedule 状態前進 + mark_applied を同じ session で行い
+                # commit は 1 回だけ (全 or 無 — 前進だけ残って台帳が残らない、
+                # あるいはその逆の分裂を作らない)。
+                # 状態前進は (行, 世代) 条件付き UPDATE (Codex W3 第七陣 —
+                # LLM 実行中にユーザーが行を更新していたら、旧発火の精算が
+                # 新世代の COMPLETED / LAST_EXECUTED_AT を書き換えてはならない。
+                # 実行そのものは起きたので台帳 applied は記録し、result に
+                # superseded を残す)。
+                advanced = self._update_schedule_after_execution(
+                    schedule, session, instance_token, generation,
+                )
+                if ledger is not None:
+                    ledger.mark_applied(
+                        exec_id,
+                        session=session,
+                        result={
+                            "kind": SCHEDULE_DISPATCH_LEDGER_KIND,
+                            "action": outcome_class,
+                            "reason": detail,
+                            "schedule_type": schedule.SCHEDULE_TYPE,
+                            "superseded_during_run": not advanced,
+                        },
+                    )
+                session.commit()
+                if ledger is not None:
+                    # outbox を持たないので即 completed (配送待ちなし)
+                    ledger.mark_completed(exec_id)
+                if not advanced:
+                    LOGGER.info(
+                        "[ScheduleManager] schedule %d was reconfigured during "
+                        "the run (occurrence %s); state not advanced — "
+                        "re-registering per current config",
+                        schedule_id, occurrence_token,
+                    )
+                # 次回 register (oneshot 完了で None → cancel / interval 継続 /
+                # periodic 次回)。commit 済みなので ORM の期限切れ再読込が
+                # 最新行 (実行中の再設定を含む) を反映する。
+                self._do_register(schedule, session)
+            elif outcome_class == "failed":
+                # 副作用ゼロ確定 — schedule 状態は前進させず backoff 再試行 (D5)
+                if ledger is not None:
+                    ledger.mark_failed(exec_id, detail)
+                self._retry_or_give_up(
+                    schedule, session, instance_token, occurrence_token,
+                    generation, attempt, detail,
+                )
+            else:  # unknown
+                # LLM が動いたか不明 — 前進なし・再予約なし。occurrence は
+                # unknown claim がブロックする (自動再実行禁止、intent §2.5)。
+                if ledger is not None:
+                    ledger.mark_unknown(exec_id, detail)
+                LOGGER.warning(
+                    "[ScheduleManager] schedule %d occurrence %s ended unknown (%s); "
+                    "no automatic re-execution (intent §2.5)",
+                    schedule_id, occurrence_token, detail,
+                )
         finally:
             session.close()
+
+    def _retry_or_give_up(
+        self,
+        schedule: PersonaSchedule,
+        session,
+        instance_token: str,
+        occurrence_token: str,
+        generation: int,
+        attempt: int,
+        detail: str,
+    ) -> None:
+        """failed (副作用ゼロ) の backoff 再試行 (W3 D5)。
+
+        attempt+1 が上限内なら同一 occurrence closure を backoff 後に再予約する
+        (claim が failed キーを退避するので再実行は安全)。尽きたら periodic は
+        次 occurrence (翌日) を登録し、oneshot / interval は登録せず
+        reconciliation の周期 (Chunk C、60 秒) に委ねる — 恒久故障は cadence が
+        落ちて継続する (handoff「引き受ける歪み①」)。
+        """
+        from saiverse import clock
+
+        schedule_id = schedule.SCHEDULE_ID
+        scheduler = getattr(self.manager, "event_scheduler", None)
+        next_attempt = attempt + 1
+        if next_attempt <= SCHEDULE_DISPATCH_MAX_ATTEMPTS and scheduler is not None:
+            retry_at = clock.now() + timedelta(
+                seconds=SCHEDULE_DISPATCH_RETRY_BACKOFF_SECONDS
+            )
+            scheduler.schedule(
+                fire_at=retry_at,
+                callback=lambda sid=schedule_id, tok=instance_token,
+                    occ=occurrence_token, gen=generation, att=next_attempt:
+                    self._handle_fire(sid, tok, occ, gen, att),
+                key=_schedule_key(schedule_id),
+            )
+            self._registered[schedule_id] = (instance_token, generation)
+            LOGGER.warning(
+                "[ScheduleManager] schedule %d dispatch failed (%s); retrying "
+                "occurrence %s at %s (attempt %d/%d)",
+                schedule_id, detail, occurrence_token,
+                retry_at.isoformat(timespec="seconds"),
+                next_attempt, SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+            )
+            return
+
+        LOGGER.error(
+            "[ScheduleManager] schedule %d dispatch failed (%s); retry attempts "
+            "exhausted for occurrence %s (attempt=%d, max=%d)",
+            schedule_id, detail, occurrence_token, attempt,
+            SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+        )
+        if schedule.SCHEDULE_TYPE == "periodic":
+            # periodic はこの occurrence を諦め、次回 (翌日) を登録する
+            self._do_register(schedule, session)
+        # oneshot / interval は登録しない — reconciliation (Chunk C) が 60 秒
+        # 周期で拾い、cadence を落として再試行を続ける
 
     # ------------------------------------------------------------------
     # スケジュール実行 (旧実装からほぼそのまま引き継ぎ)
@@ -420,8 +941,68 @@ class ScheduleManager:
 </system>"""
         return prompt
 
-    def _execute_schedule(self, schedule: PersonaSchedule, session) -> None:
-        """スケジュールを実行 (PulseController.submit_schedule)。
+    # 判断点経路の submitted=False reason のうち「意図して実行しない」と裁定済みの
+    # ゲート系 (handoff D4)。settled_skip = occurrence を前進させ、再試行しない。
+    # 判断点の実体回復は W1 の judgment.* 台帳 + watchdog が持つ。
+    _JUDGMENT_GATE_REASONS = frozenset({
+        "precondition not met",
+        "persona autonomy disabled",
+        "playbook not imported",
+        "not a judgment playbook",
+        "kind not schedulable",
+    })
+
+    @classmethod
+    def _classify_judgment_outcome(cls, result: Any) -> Tuple[str, str]:
+        """判断点経路 (handle_scheduled_judgment) の戻り dict → 型付き outcome。"""
+        if not isinstance(result, dict):
+            return "failed", f"judgment returned non-dict: {result!r}"
+        if result.get("submitted"):
+            return "executed", "submitted"
+        reason = str(result.get("reason") or "")
+        if (
+            reason.startswith("duplicate:")
+            or reason in cls._JUDGMENT_GATE_REASONS
+            or reason.startswith("conversation had no exchange")
+        ):
+            return "settled_skip", reason
+        # "precondition raised" / "resume execution not found" /
+        # "resume target not prepared" と未知の reason は保守的に failed
+        # (副作用ゼロで戻る経路のみ — 再試行安全)
+        return "failed", reason or "judgment not submitted (no reason)"
+
+    @staticmethod
+    def _classify_dispatch_outcome(result: Any) -> Tuple[str, str]:
+        """汎用経路 (dispatch_schedule_fire) の型付き戻り dict → 型付き outcome。
+
+        schedule は on_blocked="wait" — queued / cancelled は queue (復帰 queue)
+        に残っていて消えないため accepted (前進) とする (handoff D4)。
+        """
+        if not isinstance(result, dict):
+            return "unknown", f"dispatch returned non-dict: {result!r}"
+        action = result.get("action")
+        runtime_outcome = result.get("runtime_outcome")
+        error = result.get("error")
+        detail = f"action={action} outcome={runtime_outcome}"
+        if error:
+            detail += f" error={error}"
+        if action == "execute" and runtime_outcome == "completed":
+            return "executed", detail
+        if action == "queued" or runtime_outcome == "cancelled":
+            return "accepted", detail
+        if runtime_outcome == "gate_closed":
+            # Beat 関所閉鎖 = 副作用ゼロ確定 → 再試行安全
+            return "failed", "beat gate closed"
+        if action in ("unavailable", "error_before_submit", "skipped"):
+            # 受付裁定前 / 受付されず — LLM は動いていない → 再試行安全
+            return "failed", detail
+        if runtime_outcome == "error":
+            # 実行中の例外 (submit 例外含む) — LLM が動いたか不明
+            return "unknown", detail
+        return "unknown", detail
+
+    def _execute_schedule(self, schedule: PersonaSchedule, session) -> Tuple[str, str]:
+        """スケジュールを実行し、型付き outcome を返す (W3 D4)。
 
         META_PLAYBOOK が自律行動 v2 の判断点 Playbook (judgment_day_open /
         judgment_day_close) の場合は専用経路 —
@@ -430,6 +1011,13 @@ class ScheduleManager:
         response_schema) が必須で、通常の「<system> プロンプト + Playbook」の
         submit_schedule では起動できないため。起床・就寝時刻の出所はこの
         PersonaSchedule 行そのもの (スケジュール未設定のペルソナは発火しない)。
+
+        Returns:
+            ``(outcome_class, detail)``。outcome_class は
+            "executed" (実行完走) / "accepted" (queue 受付済みで消えない) /
+            "settled_skip" (実行しないと裁定済み) /
+            "failed" (副作用ゼロ確定 — 再試行安全) /
+            "unknown" (LLM が動いたか不明 — 自動再実行禁止)。
         """
         persona_id = schedule.PERSONA_ID
         meta_playbook = schedule.META_PLAYBOOK
@@ -464,15 +1052,18 @@ class ScheduleManager:
                 schedule.SCHEDULE_ID, persona_id, meta_playbook,
             )
             try:
-                handle_scheduled_judgment(
+                result = handle_scheduled_judgment(
                     self.manager, persona_id, meta_playbook,
                     params=parsed_params if isinstance(parsed_params, dict) else None,
                 )
-            except Exception:
+            except Exception as e:
+                # fire_judgment_point は例外を戻り dict に落とすので、ここに届く
+                # 例外は submit 前の経路 (変換・ゲート) — 副作用ゼロで再試行安全
                 LOGGER.exception(
-                    "[ScheduleManager] Judgment schedule %d failed", schedule.SCHEDULE_ID,
+                    "[ScheduleManager] Judgment schedule %d raised", schedule.SCHEDULE_ID,
                 )
-            return
+                return "failed", f"judgment raised: {e or type(e).__name__}"
+            return self._classify_judgment_outcome(result)
 
         LOGGER.info(
             "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s)",
@@ -482,18 +1073,21 @@ class ScheduleManager:
         persona = self.manager.all_personas.get(persona_id)
         if not persona:
             LOGGER.warning("[ScheduleManager] Persona %s not found in all_personas", persona_id)
-            return
+            return "failed", "persona not found"
 
         building_id = getattr(persona, "current_building_id", None)
         if not building_id:
             LOGGER.warning("[ScheduleManager] Persona %s has no current_building_id", persona_id)
-            return
+            return "failed", "persona has no current_building_id"
 
         user_input = self._generate_schedule_prompt(schedule, session, persona_id)
 
         try:
-            # pulse_dispatch.md §7: PulseDispatcher 経由で起動
-            self.manager.pulse_dispatcher.dispatch_schedule_fire(
+            # pulse_dispatch.md §7: PulseDispatcher 経由で起動。
+            # dispatch_schedule_fire は例外を再送出しない型付き dict を返す
+            # (W3 Chunk A)。ここで例外が出るのは submit 前の自前処理のみ
+            # (副作用ゼロ) → failed。
+            result = self.manager.pulse_dispatcher.dispatch_schedule_fire(
                 persona_id=persona_id,
                 building_id=building_id,
                 user_input=user_input,
@@ -502,29 +1096,87 @@ class ScheduleManager:
                 args=schedule_args,
                 pre_spells=pre_spells,
             )
-            LOGGER.info("[ScheduleManager] Schedule %d submitted via PulseDispatcher", schedule.SCHEDULE_ID)
-
-            self.manager._save_modified_buildings()
-            persona._save_session_metadata()
-
-        except Exception:
+        except Exception as e:
             LOGGER.exception(
                 "[ScheduleManager] Failed to execute schedule %d", schedule.SCHEDULE_ID,
             )
+            return "failed", f"dispatch raised before submit: {e or type(e).__name__}"
 
-    def _update_schedule_after_execution(self, schedule: PersonaSchedule, session) -> None:
-        """スケジュール実行後の状態を更新。"""
-        now = datetime.now(timezone.utc)
+        outcome_class, detail = self._classify_dispatch_outcome(result)
+        LOGGER.info(
+            "[ScheduleManager] Schedule %d dispatched via PulseDispatcher (%s: %s)",
+            schedule.SCHEDULE_ID, outcome_class, detail,
+        )
 
-        if schedule.SCHEDULE_TYPE == "oneshot":
-            schedule.COMPLETED = True
-            session.commit()
-            LOGGER.info("[ScheduleManager] Oneshot schedule %d marked as completed", schedule.SCHEDULE_ID)
-        elif schedule.SCHEDULE_TYPE == "interval":
-            schedule.LAST_EXECUTED_AT = now
-            session.commit()
-            LOGGER.info(
-                "[ScheduleManager] Interval schedule %d updated LAST_EXECUTED_AT",
-                schedule.SCHEDULE_ID,
+        if outcome_class == "executed":
+            # 実行完走時のみの後処理 (従来挙動の維持)。失敗しても outcome の
+            # 分類は覆さない (dispatch の顛末が真実)。
+            try:
+                self.manager._save_modified_buildings()
+                persona._save_session_metadata()
+            except Exception:
+                LOGGER.warning(
+                    "[ScheduleManager] post-execution save failed for schedule %d",
+                    schedule.SCHEDULE_ID, exc_info=True,
+                )
+        return outcome_class, detail
+
+    def _update_schedule_after_execution(
+        self,
+        schedule: PersonaSchedule,
+        session,
+        instance_token: str,
+        generation: int,
+    ) -> bool:
+        """スケジュール実行後の状態前進を session に書く (commit しない)。
+
+        commit は呼び出し元 (_handle_fire の精算 tx) が mark_applied と同梱で
+        1 回だけ行う (W3 D3: 状態前進と台帳 applied の全 or 無)。
+
+        前進は **(行, 世代) 条件付き UPDATE** (Codex W3 第七陣): dispatch 前の
+        世代照合から LLM 実行完了までの間にユーザーが同じ行を更新 (世代 bump)
+        していた場合、旧発火の精算が新設定の COMPLETED / LAST_EXECUTED_AT を
+        書き換えてはならない — 更新件数 0 = 「実行中に設定が置き換わった」で
+        False を返し、呼び出し元は状態を進めず最新行で再登録する。
+
+        Returns:
+            True = 前進を書いた (periodic は前進すべき状態が無いため、no-op
+            UPDATE によるフェンス照合の成立)。False = 行・世代が閉包の値と
+            一致せず、前進 (照合) を見送った。
+        """
+        schedule_id = schedule.SCHEDULE_ID
+        schedule_type = schedule.SCHEDULE_TYPE
+
+        if schedule_type == "oneshot":
+            values = {PersonaSchedule.COMPLETED: True}
+        elif schedule_type == "interval":
+            values = {PersonaSchedule.LAST_EXECUTED_AT: datetime.now(timezone.utc)}
+        else:
+            # periodic は前進すべき状態を持たない (次回発火は曜日+時刻で計算) が、
+            # 行・世代フェンスの照合だけは行う (Codex W3 第八陣) — 実行中に行が
+            # 更新・置換されていたら superseded_during_run を正しく記録するため。
+            # 照合は SELECT でなく **no-op 条件付き UPDATE** (第九陣): SELECT は
+            # 精算 commit と原子でなく、count 後・commit 前の世代 bump を見逃す。
+            # 無変更 UPDATE でも書き込みロックを取るため、並行する bump と精算が
+            # 直列化され「照合した世代のまま commit される」ことが保証される。
+            values = {PersonaSchedule.SYNC_GENERATION: PersonaSchedule.SYNC_GENERATION}
+
+        updated = (
+            session.query(PersonaSchedule)
+            .filter(
+                PersonaSchedule.SCHEDULE_ID == schedule_id,
+                func.coalesce(PersonaSchedule.INSTANCE_TOKEN, "legacy")
+                == instance_token,
+                func.coalesce(PersonaSchedule.SYNC_GENERATION, 0) == generation,
             )
-        # periodic は LAST_EXECUTED_AT を持たない (次回発火は曜日+時刻で機械的に計算)
+            .update(values, synchronize_session=False)
+        )
+        if updated:
+            LOGGER.info(
+                "[ScheduleManager] %s schedule %d %s (instance=%s generation=%d)",
+                schedule_type, schedule_id,
+                "fence verified" if schedule_type == "periodic"
+                else "state advanced",
+                instance_token, generation,
+            )
+        return updated > 0

@@ -11,13 +11,13 @@
 
 ---
 
-## 現在地 (2026-07-20 更新)
+## 現在地 (2026-07-21 更新)
 
 ```
 一次監査     ████████ 完了 (全8サブシステム、2026-07-16)
 柱の裁定     ████████ 完了 (8柱すべて方針確定、2026-07-16)
 基盤工事     ████████ 完了 (実行台帳 Phase 0 + 統合工事 §6 ※§6-6bのみ分離)
-実装 wave    ███░░░░░ W1・W2 実装済み (実機検証待ち) / W3〜W14 未着手
+実装 wave    ████░░░░ W1・W2・W3 実装済み (実機検証待ち) / W4〜W14 未着手
 実機検証     █░░░░░░░ ライフ一日検証を実施中 (まはー、2026-07-17〜)
 ```
 
@@ -26,7 +26,7 @@
 - 柱3 (multi-city) = 凍結・入口封鎖済み / 柱4 (native import) = 復元/移植分離済み
 - 実行台帳 Phase 0 (器 + Beat ロック + 関所 + 配送ハンドラ) = 完了・休眠解除済み
 
-**次にやる wave**: W3 (台帳 Phase 3 = schedule)。**W1・W2 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20)。
+**次にやる wave**: W4 (台帳 Phase 4 = Metabolism 残片、体験の構造 工程(2) と統合)。**W1・W2・W3 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21)。
 
 **一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
@@ -52,10 +52,12 @@
 - **実装済み (2026-07-20)**: Chunk A (台帳 `mark_running`/`recover_stale_running` に session=/exclude_kinds、episode open/close に session= + `invalidate_open_cache`) → B (`_fire_slot` 三区間化 + 予約/精算 tx + 予算一本化 + degrade 経路) → C (`settle_stale_slot` 回復 tick 結線 + `replace_day_plan` + finalize 差し替え)。A1/A5/A6 を回帰固定 (監査「必要な回帰」準拠、約35件追加)、本体スイート **2721 passed 全緑**、ruff clean。**残 = まはー実機検証** (予算精算の原子性・crash 後の settle-close・day_open 全置換の孤児なし)。検証通過で ✅ + レビュー台帳の A1/A5/A6 を実機確認済みに
 - **完了条件**: A1/A5/A6 を回帰固定 (監査「必要な回帰」) + 台帳消し込み ✔
 
-### W3 ☐ 実行台帳 Phase 3 — schedule
+### W3 ☑ 実行台帳 Phase 3 — schedule — 実装済み・実機検証待ち (2026-07-21)
 
 - **スコープ**: 発火 claim と reconciliation (A12, A13)
-- **完了条件**: 同上
+- **確定設計 (Fable 裁定)**: [走行メモ](../handoff/2026-07-20_w3_schedule_ledger_handoff.md)。A13 = 発火を `schedule.dispatch` 台帳実行で包む (claim → 席取り → 型付き outcome → 精算 world-DB 単一 commit、failed は backoff ×3、unknown は自動再実行禁止)。A12 = `SYNC_GENERATION` 世代列 + 行一生 `INSTANCE_TOKEN` 列 + 回復 tick #7 の reconciliation (60 秒で自己回復) + API `scheduler_synced` 明示
+- **実装済み (2026-07-21)**: Chunk A (世代列 + 観測フィールド + 型付き dispatch + find_execution) → B (`_handle_fire` 台帳化) → C (reconciliation + 結線)。Codex レビュー 10 巡 27 件消し込み (受諾 24 / 裁定却下 3 — キー三軸化 {id}:{instance}:g{世代}:{occurrence} / tri-state 同期応答 / day_open・day_close 境界の冪等マーカー + 失敗伝播 / periodic の prepared・failed 回収 / 精算フェンス / applied sweep / 世代のサーバー側インクリメント。打ち切り裁定は走行メモ末尾)。A12/A13 を回帰固定 (schedule 系テスト約 70 件追加)、本体スイート全緑、ruff clean。**残 = まはー実機検証** (dispatch 失敗時の oneshot 非消失・register 失敗の 60 秒自己回復・世代照合の旧予約空振り)。検証通過で ✅ + レビュー台帳の A12/A13 を実機確認済みに
+- **完了条件**: A12/A13 を回帰固定 (監査「必要な回帰」) + 台帳消し込み ✔
 
 ### W4 ☐ 実行台帳 Phase 4 — Metabolism 残片 = 体験の構造 工程(2) と統合
 

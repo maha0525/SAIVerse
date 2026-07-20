@@ -515,6 +515,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `INTERVAL_SECONDS` | INTEGER | — |  |
 | `LAST_EXECUTED_AT` | DATETIME | — |  |
 | `PLAYBOOK_PARAMS` | TEXT | — |  |
+| `SYNC_GENERATION` | INTEGER | NOT NULL, default=0 |  |
+| `INSTANCE_TOKEN` | VARCHAR(32) | — |  |
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 

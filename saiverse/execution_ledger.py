@@ -913,6 +913,52 @@ class ExecutionLedger:
         db.commit()
         LOGGER.info("[ledger] completed %s kind=%s (all outbox delivered)", execution_id, entry.KIND)
 
+    def sweep_applied(self, *, kind_prefix: Optional[str] = None) -> List[str]:
+        """applied 残留の照合掃除: outbox が全 delivered (または outbox 無し) の
+        applied を completed へ進める (W3 Codex 第七陣 medium)。
+
+        ``mark_applied`` の commit と ``mark_completed`` は別トランザクション
+        なので、間の crash / 呼び出し失敗で outbox を持たない実行が applied の
+        まま残りうる。applied は claim を正しくブロックする (occurrence は
+        実行済み) が、非終端のまま ``list_unknown`` にも出ず観測面に隠れる —
+        回復 tick / 起動時からこの照合で終端へ収束させる。dead が残る実行は
+        :meth:`_maybe_complete` の規則どおり completed にしない。
+
+        Returns:
+            completed へ進めた execution_id のリスト。
+        """
+        db = self._session_factory()
+        try:
+            query = db.query(ExecutionLedgerEntry.EXECUTION_ID).filter(
+                ExecutionLedgerEntry.STATUS == STATUS_APPLIED
+            )
+            if kind_prefix:
+                query = query.filter(
+                    ExecutionLedgerEntry.KIND.like(f"{kind_prefix}%")
+                )
+            ids = [row[0] for row in query.all()]
+        finally:
+            db.close()
+        completed: List[str] = []
+        for execution_id in ids:
+            db = self._session_factory()
+            try:
+                self._maybe_complete(db, execution_id)
+                entry = (
+                    db.query(ExecutionLedgerEntry.STATUS)
+                    .filter(ExecutionLedgerEntry.EXECUTION_ID == execution_id)
+                    .first()
+                )
+                if entry is not None and entry[0] == STATUS_COMPLETED:
+                    completed.append(execution_id)
+            except Exception:
+                LOGGER.exception(
+                    "[ledger] sweep_applied failed for %s", execution_id,
+                )
+            finally:
+                db.close()
+        return completed
+
     # ------------------------------------------------------------------
     # 回復骨格 (intent §2.4)
     # ------------------------------------------------------------------
@@ -993,6 +1039,34 @@ class ExecutionLedger:
         finally:
             db.close()
 
+    def find_execution(
+        self, kind: str, idempotency_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """``(kind, idempotency_key)`` で台帳 1 行を読む (読み取り専用)。無ければ None。
+
+        W3 Chunk A (schedule 台帳化 D6): reconciliation が「計算した次回
+        occurrence のキーが既に台帳でブロックされているか (running / applied /
+        completed / unknown)」を再登録前に確認するための照会口。UNIQUE 制約
+        ``(kind, idempotency_key)`` により該当行は高々 1 行。
+        """
+        if not kind:
+            raise ValueError("kind is required")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        db = self._session_factory()
+        try:
+            entry = (
+                db.query(ExecutionLedgerEntry)
+                .filter(
+                    ExecutionLedgerEntry.KIND == kind,
+                    ExecutionLedgerEntry.IDEMPOTENCY_KEY == idempotency_key,
+                )
+                .first()
+            )
+            return _entry_to_dict(entry) if entry is not None else None
+        finally:
+            db.close()
+
     def list_unknown(self) -> List[Dict[str, Any]]:
         """unknown の実行一覧 (照合・裁定の観測面。intent §2.4 #5)。UPDATED_AT 昇順。"""
         db = self._session_factory()
@@ -1027,6 +1101,45 @@ class ExecutionLedger:
                 .order_by(ExecutionLedgerEntry.CREATED_AT.asc())
                 .all()
             )
+            return [_entry_to_dict(r) for r in rows]
+        finally:
+            db.close()
+
+    def list_failed(
+        self,
+        kind_prefix: str,
+        *,
+        newer_than_seconds: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """failed の実行一覧 (W3 Codex 第八陣 — periodic の失われた retry の回収)。
+
+        failed は副作用ゼロが保証された終端 (intent §2.1) なので、回収側が
+        安全に refire を裁定できる。CREATED_AT 昇順。claim がキーを
+        ``{key}#failed-...`` へ退避した行 (後継 claim が存在する) も含めて返す —
+        除外判定は呼び出し側が IDEMPOTENCY_KEY の形で行う。
+
+        Args:
+            newer_than_seconds: 指定時、UPDATED_AT (mark_failed が刻む = 失敗
+                時刻) がこの秒数以内の行だけを DB 側で絞る (Codex W3 第九・十陣
+                — failed 履歴は再試行のたびに増えるため、無制限ロードは回復
+                tick (単一 dispatch スレッド) を劣化させる。UPDATED_AT を使う
+                のは既存の複合索引 (STATUS, UPDATED_AT) に乗せるためでもある —
+                CREATED_AT には索引が無く、履歴総量に比例する走査になる)。
+        """
+        if not kind_prefix:
+            raise ValueError("kind_prefix is required")
+        db = self._session_factory()
+        try:
+            query = db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.STATUS == STATUS_FAILED,
+                ExecutionLedgerEntry.KIND.like(f"{kind_prefix}%"),
+            )
+            if newer_than_seconds is not None:
+                query = query.filter(
+                    ExecutionLedgerEntry.UPDATED_AT
+                    >= _now_epoch() - int(newer_than_seconds)
+                )
+            rows = query.order_by(ExecutionLedgerEntry.UPDATED_AT.asc()).all()
             return [_entry_to_dict(r) for r in rows]
         finally:
             db.close()

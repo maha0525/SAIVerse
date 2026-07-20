@@ -16,12 +16,15 @@
 """
 import json
 import logging
+import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.deps import get_manager
+from sqlalchemy import func
+
 from database.models import AI as AIModel
 from database.models import PersonaSchedule
 from saiverse import day_plan
@@ -84,6 +87,10 @@ class LifeSettingsResponse(BaseModel):
     min_budget_pulses: Optional[int] = None          # wake/close 揃っているときの最低予算 (パルス)
     window_minutes: Optional[int] = None             # wake/close 揃っているときの活動時間 (分)
     default_budget_rounds: int                        # 未設定時に使われる既定の作業回数
+    # W3 A12 (D7): PUT 応答でのみセット。EventScheduler への (再) push が
+    # 成功したか (失敗しても DB が正典で reconciliation が回復するため HTTP は
+    # 200 のまま)。GET では常に None。
+    scheduler_synced: Optional[bool] = None
 
 
 class LifeSettingsRequest(BaseModel):
@@ -152,8 +159,17 @@ def _upsert_day_row(
             ENABLED=True,
             DESCRIPTION=description,
             PRIORITY=0,
+            # W3 A12 (D2): 新規行は世代 1 から始める
+            SYNC_GENERATION=1,
+            # W3 Codex 第三陣: 行一生トークン (SCHEDULE_ID 再利用との分離)。
+            # 作成時に一度だけ採番し、更新では変えない。
+            INSTANCE_TOKEN=uuid.uuid4().hex[:12],
         )
         db.add(row)
+    else:
+        # W3 A12 (D2): 発火に影響する設定変更は同一 commit で世代 +1
+        # (サーバー側インクリメント — 並行更新の世代重複を防ぐ、Codex W3 第七陣)
+        row.SYNC_GENERATION = func.coalesce(PersonaSchedule.SYNC_GENERATION, 0) + 1
     row.TIME_OF_DAY = time_of_day
     row.ENABLED = True
     if playbook_params is not None:
@@ -241,13 +257,25 @@ def update_life_settings(
     finally:
         db.close()
 
-    # Phase 4-e 流儀: 保存直後に EventScheduler へ (再) push する
+    # Phase 4-e 流儀: 保存直後に EventScheduler へ (再) push する。
+    # W3 A12 (D7): 同期失敗は scheduler_synced=False で応答に明示 (HTTP は 200
+    # のまま — DB が正典で reconciliation が回復するため)。
+    # register_schedule は tri-state: not_registrable (有効なのに予約を作れず
+    # reconciliation でも回復不能) も False に含める。
+    scheduler_synced = True
     for schedule_id in (open_id, close_id):
         if schedule_id is None:
             continue
         try:
-            manager.schedule_manager.register_schedule(schedule_id)
+            result = manager.schedule_manager.register_schedule(schedule_id)
+            if result not in ("registered", "no_reservation_needed"):
+                scheduler_synced = False
+                LOGGER.warning(
+                    "[life-settings] schedule %d is not registrable (%s)",
+                    schedule_id, result,
+                )
         except Exception:
+            scheduler_synced = False
             LOGGER.exception(
                 "[life-settings] failed to register schedule %d on EventScheduler",
                 schedule_id,
@@ -258,4 +286,6 @@ def update_life_settings(
         persona_id, request.wake, request.close,
         request.daily_budget_rounds, request.daily_budget_pulses, mode_override,
     )
-    return _build_response(manager, persona_id)
+    response = _build_response(manager, persona_id)
+    response.scheduler_synced = scheduler_synced
+    return response

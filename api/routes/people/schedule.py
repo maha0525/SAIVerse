@@ -1,9 +1,12 @@
 import json
 import logging
+import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from api.deps import get_manager
 from .models import ScheduleItem, CreateScheduleRequest, UpdateScheduleRequest
+from sqlalchemy import func
+
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -108,6 +111,11 @@ def create_schedule(
             PRIORITY=req.priority,
             ENABLED=req.enabled,
             PLAYBOOK_PARAMS=json.dumps(req.args) if req.args else None,
+            # W3 A12: 新規行は世代 1 から始める (設定変更ごとに +1)
+            SYNC_GENERATION=1,
+            # W3 Codex 第三陣: 行一生トークン (SCHEDULE_ID 再利用との分離)。
+            # 作成時に一度だけ採番し、更新では変えない。
+            INSTANCE_TOKEN=uuid.uuid4().hex[:12],
         )
 
         if req.schedule_type == "periodic":
@@ -138,12 +146,18 @@ def create_schedule(
     finally:
         session.close()
 
-    # Phase 4-e: 作成直後に EventScheduler に push (有効なら)
+    # Phase 4-e: 作成直後に EventScheduler に push (有効なら)。
+    # W3 A12 (D7): 同期失敗は握り潰さず scheduler_synced=False で応答に明示する
+    # (HTTP は 200 のまま — DB が正典で reconciliation が回復するため)。
+    # register_schedule は tri-state: not_registrable (有効なのに設定不備等で
+    # 予約を作れない = reconciliation でも回復不能) も False に含める。
     try:
-        manager.schedule_manager.register_schedule(new_schedule_id)
+        result = manager.schedule_manager.register_schedule(new_schedule_id)
+        scheduler_synced = result in ("registered", "no_reservation_needed")
     except Exception:
+        scheduler_synced = False
         _log.exception("Failed to register schedule %d on EventScheduler", new_schedule_id)
-    return {"success": True, "schedule_id": new_schedule_id}
+    return {"success": True, "schedule_id": new_schedule_id, "scheduler_synced": scheduler_synced}
 
 @router.post("/{persona_id}/schedules/{schedule_id}/toggle")
 def toggle_schedule(
@@ -162,20 +176,30 @@ def toggle_schedule(
             raise HTTPException(status_code=404, detail="Schedule not found")
         
         schedule.ENABLED = not schedule.ENABLED
+        # W3 A12 (D2): 発火に影響する設定変更は同一 commit で世代 +1。
+        # サーバー側インクリメント (Codex W3 第七陣) — read-modify-write だと
+        # 並行する二更新が同じ世代番号を得て、reconciliation が「予約=DB 世代」
+        # の偽同期判定をする (lost update)。SQL 式なら DB が直列化して必ず別番号。
+        schedule.SYNC_GENERATION = func.coalesce(PersonaSchedule.SYNC_GENERATION, 0) + 1
         session.commit()
         new_enabled = schedule.ENABLED
     finally:
         session.close()
 
-    # Phase 4-e: トグル結果に応じて EventScheduler を更新
+    # Phase 4-e: トグル結果に応じて EventScheduler を更新。
+    # W3 A12 (D7): 同期失敗は scheduler_synced=False で応答に明示 (HTTP は 200)。
+    # register_schedule は tri-state: not_registrable も False に含める。
+    scheduler_synced = True
     try:
         if new_enabled:
-            manager.schedule_manager.register_schedule(schedule_id)
+            result = manager.schedule_manager.register_schedule(schedule_id)
+            scheduler_synced = result in ("registered", "no_reservation_needed")
         else:
             manager.schedule_manager.unregister_schedule(schedule_id)
     except Exception:
+        scheduler_synced = False
         _log.exception("Failed to update EventScheduler for schedule %d", schedule_id)
-    return {"success": True, "enabled": new_enabled}
+    return {"success": True, "enabled": new_enabled, "scheduler_synced": scheduler_synced}
 
 @router.put("/{persona_id}/schedules/{schedule_id}")
 def update_schedule(
@@ -245,6 +269,9 @@ def update_schedule(
             schedule.SCHEDULED_DATETIME = None
             schedule.COMPLETED = False
 
+        # W3 A12 (D2): 発火に影響する設定変更は同一 commit で世代 +1
+        # (サーバー側インクリメント — toggle 側と同じ lost update 対策)
+        schedule.SYNC_GENERATION = func.coalesce(PersonaSchedule.SYNC_GENERATION, 0) + 1
         session.commit()
     except HTTPException:
         raise
@@ -254,12 +281,16 @@ def update_schedule(
     finally:
         session.close()
 
-    # Phase 4-e: 更新内容で次回発火時刻が変わった可能性があるので再 register
+    # Phase 4-e: 更新内容で次回発火時刻が変わった可能性があるので再 register。
+    # W3 A12 (D7): 同期失敗は scheduler_synced=False で応答に明示 (HTTP は 200)。
+    # register_schedule は tri-state: not_registrable も False に含める。
     try:
-        manager.schedule_manager.register_schedule(schedule_id)
+        result = manager.schedule_manager.register_schedule(schedule_id)
+        scheduler_synced = result in ("registered", "no_reservation_needed")
     except Exception:
+        scheduler_synced = False
         _log.exception("Failed to re-register schedule %d on EventScheduler", schedule_id)
-    return {"success": True, "schedule_id": schedule_id}
+    return {"success": True, "schedule_id": schedule_id, "scheduler_synced": scheduler_synced}
 
 @router.delete("/{persona_id}/schedules/{schedule_id}")
 def delete_schedule(
@@ -282,9 +313,12 @@ def delete_schedule(
     finally:
         session.close()
 
-    # Phase 4-e: 削除と同時に EventScheduler の予約も cancel
+    # Phase 4-e: 削除と同時に EventScheduler の予約も cancel。
+    # W3 A12 (D7): 同期失敗は scheduler_synced=False で応答に明示 (HTTP は 200)。
+    scheduler_synced = True
     try:
         manager.schedule_manager.unregister_schedule(schedule_id)
     except Exception:
+        scheduler_synced = False
         _log.exception("Failed to unregister schedule %d from EventScheduler", schedule_id)
-    return {"success": True}
+    return {"success": True, "scheduler_synced": scheduler_synced}

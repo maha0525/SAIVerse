@@ -353,7 +353,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -369,6 +369,12 @@ def main():
     # schema 変更を伴わないため needs_migration では拾えない。冪等かつ desire: を含む
     # 行だけを触るので、起動ごとに無条件で呼んで問題ない。
     backfill_day_plan_refs(str(db_path))
+
+    # persona_schedule の行一生トークン採番 (W3 Codex 第三陣): INSTANCE_TOKEN 列
+    # 追加 (追加系 ALTER) 直後の既存行は NULL — 台帳冪等キーの SCHEDULE_ID 再利用
+    # 分離を効かせるため一括採番する。NULL 行が無ければ no-op の冪等ステップ
+    # なので起動ごとに無条件で呼んで問題ない。
+    backfill_schedule_instance_tokens(str(db_path))
 
     # desire 正規化 (P3c-0): stage の物理刻印 + note 親バインドの撤去 + desire
     # ノート削除。同じく schema 変更を伴わないデータ移行で、各ステップが実行後は

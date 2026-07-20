@@ -113,7 +113,18 @@ class ExecutionRequest:
     # For schedule resumption
     is_resumption: bool = False
     original_prompt: Optional[str] = None
-    
+
+    # W3 Chunk A (schedule 台帳化 D4): 呼び出し側が submit の顛末を観測する
+    # ためのフィールド。submit() の戻り値契約 (List[str] / None) は不変のまま、
+    # request オブジェクト経由で「受付の裁定」と「実行の顛末」を運ぶ。
+    # - dispatch_action: submit() が action 決定箇所で記入
+    #   ("execute" / "queued" / "skipped")
+    # - runtime_outcome: _execute_unlocked() が各経路で記入
+    #   ("completed" / "gate_closed" / "cancelled" / "error")
+    dispatch_action: Optional[str] = None
+    runtime_outcome: Optional[str] = None
+
+
     @property
     def config(self) -> ExecutionType:
         """Get the execution type configuration."""
@@ -250,7 +261,10 @@ class PulseController:
                         request.type, persona_id, current.type
                     )
                     action = "skipped"
-        
+
+        # W3 Chunk A: 受付の裁定を request に記入 (呼び出し側の観測用)
+        request.dispatch_action = action
+
         # Phase 2: Execute WITHOUT holding lock (allows interruption)
         if action == "execute":
             return self._execute_unlocked(request)
@@ -320,6 +334,8 @@ class PulseController:
         
         try:
             result = self._do_execute(request)
+            # W3 Chunk A: 実行の顛末を request に記入 (呼び出し側の観測用)
+            request.runtime_outcome = "completed"
             return result
         except BeatGateClosedError as e:
             # 関所 fail-closed (execution_ledger.md §2.2): この persona 宛の
@@ -327,6 +343,7 @@ class PulseController:
             # user はエラーとして API まで伝播しユーザーに見せる。
             # auto / schedule 等は WARNING + 空で落とす — 台帳に prepared で
             # 残る実行は回復処理 (execution_ledger_wiring) が拾う。
+            request.runtime_outcome = "gate_closed"
             if request.type == "user":
                 raise
             LOGGER.warning(
@@ -335,6 +352,7 @@ class PulseController:
             )
             return []
         except ExecutionCancelledException as e:
+            request.runtime_outcome = "cancelled"
             LOGGER.info(
                 "[PulseController] Execution cancelled for persona %s, interrupted_by=%s",
                 persona_id, e.interrupted_by
@@ -344,8 +362,10 @@ class PulseController:
             return []
         except LLMError:
             # Propagate LLM errors to the caller for frontend display
+            request.runtime_outcome = "error"
             raise
         except Exception as e:
+            request.runtime_outcome = "error"
             LOGGER.exception(
                 "[PulseController] Error executing %s for persona %s: %s",
                 request.type, persona_id, e

@@ -20,8 +20,10 @@ SAIVerseManager の構築 / 起動分離の不変条件に従う:
 手動検証中こそ記録は正確であるべきで、掃除は自律行動ではない。
 「行動を生む」側のうち **#2 (prepared の回収) は W1 Chunk A で実装済み**
 (:func:`_collect_prepared_judgments` — kind 別規則は D5 の表。refire は行動を
-生むため、手動モード対象ペルソナはスキップする)。#7 (schedule reconciliation)
-は未実装のまま残る。
+生むため、手動モード対象ペルソナはスキップする)。**#7 (schedule
+reconciliation) は W3 Chunk C で実装済み** (:func:`_reconcile_schedules` →
+``ScheduleManager._reconcile_schedules`` — DB 正典と予約の世代照合。登録・
+除去のみで LLM を起動しないため、手動モード対象ペルソナも止めない)。
 """
 from __future__ import annotations
 
@@ -91,6 +93,30 @@ PREPARED_EXPIRE_KINDS = (
     f"{JUDGMENT_KIND_PREFIX}post_conversation",
 )
 
+#: schedule 発火の台帳 KIND (W3。ScheduleManager 側の定数と同値 — wiring は
+#: schedule_manager を遅延 import するため文字列をここにも持つ)。
+SCHEDULE_DISPATCH_KIND = "schedule.dispatch"
+
+#: prepared 回収 (#2、W3 Codex 第六陣 P1): claim → try_mark_running の間で
+#: プロセスが死んだ schedule.dispatch の prepared 残留を再発火させるまでの
+#: 待機秒数。予約は in-memory なので crash で必ず消えており、reconciliation は
+#: 「現在時刻から計算した次回 occurrence」しか照合しない — periodic の当日分
+#: など過去の occurrence はこの回収が唯一の再発火経路。
+SCHEDULE_PREPARED_REFIRE_AFTER_SECONDS = 120.0
+
+#: failed periodic 回収 (W3 Codex 第八陣): mark_failed (durable) と backoff 予約
+#: (揮発) の間で死んだ periodic occurrence を放棄するまでの上限。periodic の
+#: 「当日中に retry する」意味論に合わせ、occurrence がこれより古い failed は
+#: 回収しない (翌 occurrence が正)。
+SCHEDULE_FAILED_OCCURRENCE_MAX_AGE_SECONDS = 86400.0
+
+#: failed periodic 回収の待機猶予 (W3 Codex 第九陣)。揮発 backoff 予約が
+#: 生きていれば backoff (120 秒) + 定期 tick (60 秒) 以内に必ず発火して claim が
+#: キーを退避する — 正準キーの failed 行がこれより古い = backoff 連鎖は死んで
+#: いる (crash / schedule() 失敗)、と行齢だけで判定できる。予約の有無は使わない
+#: (再起動後は start() が翌回を先に登録するため区別にならない)。
+SCHEDULE_FAILED_RETRY_GRACE_SECONDS = 300.0
+
 
 def build_execution_ledger(manager: "SAIVerseManager") -> ExecutionLedger:
     """台帳を構築し、実ハンドラ 2 種を登録して返す (``__init__`` 段)。
@@ -151,6 +177,11 @@ def run_startup_recovery(manager: "SAIVerseManager") -> None:
         _close_orphaned_unknown_slot_episodes(manager)
     except Exception:
         LOGGER.exception("[ledger-wiring] startup orphaned-episode close failed")
+    try:
+        # applied 残留の照合掃除 (W3 Codex 第七陣 — tick と同じ)。
+        ledger.sweep_applied()
+    except Exception:
+        LOGGER.exception("[ledger-wiring] startup applied sweep failed")
     _flush_all_pending(manager)
 
 
@@ -169,7 +200,7 @@ def schedule_recovery_tick(manager: "SAIVerseManager") -> None:
 
 def _recovery_tick(manager: "SAIVerseManager") -> None:
     """定期掃除の 1 周: running 期限監視 (#3) + prepared 回収 (#2) +
-    pending 配送 (#1、dead 化 #6 は配送器内)。
+    schedule reconciliation (#7) + pending 配送 (#1、dead 化 #6 は配送器内)。
 
     EventScheduler.schedule_periodic は callback 例外で周期を止める契約なので、
     一度の DB エラーで掃除が永久停止しないよう、ここで例外を吸収してログに残す。
@@ -193,9 +224,41 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: running-deadline sweep failed")
     try:
+        # applied 残留の照合掃除 (W3 Codex 第七陣): mark_applied commit と
+        # mark_completed の間の crash で outbox の無い applied が非終端のまま
+        # 隠れるのを終端へ収束させる。
+        swept = ledger.sweep_applied()
+        if swept:
+            LOGGER.info(
+                "[ledger-wiring] recovery tick: %d applied execution(s) swept "
+                "to completed: %s", len(swept), swept,
+            )
+    except Exception:
+        LOGGER.exception("[ledger-wiring] recovery tick: applied sweep failed")
+    try:
         _collect_prepared_judgments(manager)
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: prepared collection failed")
+    try:
+        _collect_prepared_schedule_dispatch(manager)
+    except Exception:
+        LOGGER.exception(
+            "[ledger-wiring] recovery tick: schedule.dispatch prepared "
+            "collection failed"
+        )
+    try:
+        _collect_failed_periodic_schedule_dispatch(manager)
+    except Exception:
+        LOGGER.exception(
+            "[ledger-wiring] recovery tick: schedule.dispatch failed-periodic "
+            "collection failed"
+        )
+    try:
+        _reconcile_schedules(manager)
+    except Exception:
+        LOGGER.exception(
+            "[ledger-wiring] recovery tick: schedule reconciliation failed"
+        )
     try:
         _flush_all_pending(manager)
     except Exception:
@@ -440,6 +503,260 @@ def _collect_one_prepared(
         "[ledger-wiring] prepared %s has no collection rule; leaving as-is "
         "(execution=%s)", kind, execution_id,
     )
+
+
+def _collect_prepared_schedule_dispatch(manager: "SAIVerseManager") -> None:
+    """回復 #2 (W3 Codex 第六陣 P1): schedule.dispatch の prepared 残留を回収する。
+
+    claim → try_mark_running の間のプロセス死で残った prepared は、予約
+    (in-memory) が消えているため誰も発火させない。reconciliation は「次回
+    occurrence」しか見ない — periodic なら翌日分を登録してしまい、**当日分の
+    occurrence が永久に取りこぼされる**。ここが過去 occurrence の唯一の再発火
+    経路。規則:
+
+    - schedule 行が消えた / disabled / 世代・行トークンが payload と不一致
+      → prepared を failed に落とす (副作用ゼロ保証の終端化。設定変更 = 新しい
+      論理 occurrence なので旧 occurrence は放棄が正)
+    - 一致 → :meth:`ScheduleManager.refire_occurrence` で同一 occurrence の
+      予約を積み直す。発火側の claim が prepared を再利用し、二重実行は
+      try_mark_running の席取りが防ぐ
+    - refire は「行動を生む」ため、完全手動モードのペルソナはスキップ
+      (:func:`_collect_prepared_judgments` と同じ規律)
+    """
+    schedule_manager = getattr(manager, "schedule_manager", None)
+    if schedule_manager is None:
+        return
+    ledger = manager.execution_ledger
+    try:
+        rows = ledger.list_prepared(SCHEDULE_DISPATCH_KIND)
+    except Exception:
+        LOGGER.exception("[ledger-wiring] failed to list prepared schedule.dispatch")
+        return
+    if not rows:
+        return
+    from database.models import PersonaSchedule
+    from saiverse import clock
+
+    now = int(clock.now().timestamp())
+    manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
+    for row in rows:
+        execution_id = row.get("execution_id")
+        created_at = row.get("created_at")
+        payload = row.get("payload")
+        if not execution_id or not isinstance(created_at, int) \
+                or not isinstance(payload, dict):
+            continue
+        if now - created_at < SCHEDULE_PREPARED_REFIRE_AFTER_SECONDS:
+            continue
+        if row.get("persona_id") in manual_personas:
+            LOGGER.debug(
+                "[ledger-wiring] prepared schedule.dispatch refire skipped: "
+                "persona %s is in manual mode (execution=%s)",
+                row.get("persona_id"), execution_id,
+            )
+            continue
+        schedule_id = payload.get("schedule_id")
+        occurrence = payload.get("occurrence")
+        instance_token = payload.get("instance_token")
+        generation = payload.get("generation")
+        if not isinstance(schedule_id, int) or not occurrence \
+                or not instance_token or not isinstance(generation, int):
+            LOGGER.warning(
+                "[ledger-wiring] prepared schedule.dispatch payload incomplete; "
+                "marking failed (execution=%s payload=%r)", execution_id, payload,
+            )
+            try:
+                ledger.mark_failed(execution_id, "prepared payload incomplete")
+            except Exception:
+                LOGGER.exception(
+                    "[ledger-wiring] failed to fail incomplete prepared %s",
+                    execution_id,
+                )
+            continue
+        try:
+            db = manager.SessionLocal()
+            try:
+                schedule = db.query(PersonaSchedule).filter(
+                    PersonaSchedule.SCHEDULE_ID == schedule_id
+                ).first()
+                if schedule is None or not schedule.ENABLED:
+                    reason = "schedule removed or disabled"
+                elif (schedule.SYNC_GENERATION or 0) != generation:
+                    reason = "superseded by config change (generation)"
+                elif (schedule.INSTANCE_TOKEN or "legacy") != instance_token:
+                    reason = "schedule row replaced (instance token)"
+                else:
+                    reason = None
+            finally:
+                db.close()
+            if reason is not None:
+                LOGGER.info(
+                    "[ledger-wiring] abandoning prepared schedule.dispatch %s: %s",
+                    execution_id, reason,
+                )
+                ledger.mark_failed(execution_id, reason)
+                continue
+            LOGGER.info(
+                "[ledger-wiring] re-firing prepared schedule.dispatch "
+                "(execution=%s schedule=%d occurrence=%s)",
+                execution_id, schedule_id, occurrence,
+            )
+            payload_attempt = payload.get("attempt")
+            schedule_manager.refire_occurrence(
+                schedule_id, instance_token, occurrence, generation,
+                # prepared は「まだ実行していない」試行なので attempt はそのまま
+                # 運ぶ (第十陣: 既定 0 リセットは backoff 上限を迂回させる)
+                attempt=(
+                    payload_attempt
+                    if isinstance(payload_attempt, int)
+                    and not isinstance(payload_attempt, bool)
+                    and payload_attempt >= 0
+                    else 0
+                ),
+            )
+        except Exception:
+            LOGGER.exception(
+                "[ledger-wiring] prepared schedule.dispatch collection failed "
+                "(execution=%s)", execution_id,
+            )
+
+
+def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> None:
+    """回復 (W3 Codex 第八陣): failed だけ残して retry 予約を失った periodic の
+    occurrence を回収する。
+
+    `_retry_or_give_up` は mark_failed (durable) の後に backoff 予約 (揮発) を
+    積む — 間でプロセスが死ぬと failed 行だけが残る。oneshot / interval は
+    reconciliation が「同一 occurrence」を再登録して自然回復するが、**periodic
+    は時刻通過後の再計算が翌回になる**ため、当日分はここが唯一の回復経路
+    (第六陣 prepared 回収の failed 版)。規則:
+
+    - 対象 = kind `schedule.dispatch`・payload の schedule_type が periodic・
+      冪等キーが正準形 (claim がキーを ``#failed-`` へ退避した行は後継 claim が
+      既に居るので対象外)
+    - **予約の有無は判定に使わない** (Codex W3 第九陣 — 再起動後は
+      ``schedule_manager.start()`` が翌回を先に登録するため区別にならない)。
+      代わりに行齢 :data:`SCHEDULE_FAILED_RETRY_GRACE_SECONDS` で「backoff
+      連鎖が死んでいる」ことを判定し、payload の ``attempt`` で「上限到達の
+      意図的放棄」(= 回収しない) を識別する。回収の refire は同一 key の
+      翌回予約を上書きするが、精算後の `_do_register` が翌回を積み直す
+    - occurrence が :data:`SCHEDULE_FAILED_OCCURRENCE_MAX_AGE_SECONDS` より
+      古いものは放棄 (「当日中の retry」の意味論 — 長時間停止後に古い判断を
+      発火させない)
+    - 行消滅 / disabled / 世代・行トークン不一致は何もしない (failed は既に
+      副作用ゼロの終端)
+    - refire は「行動を生む」ため手動モードのペルソナはスキップ
+    """
+    schedule_manager = getattr(manager, "schedule_manager", None)
+    scheduler = getattr(manager, "event_scheduler", None)
+    if schedule_manager is None or scheduler is None:
+        return
+    ledger = manager.execution_ledger
+    try:
+        rows = ledger.list_failed(
+            SCHEDULE_DISPATCH_KIND,
+            newer_than_seconds=SCHEDULE_FAILED_OCCURRENCE_MAX_AGE_SECONDS,
+        )
+    except Exception:
+        LOGGER.exception("[ledger-wiring] failed to list failed schedule.dispatch")
+        return
+    if not rows:
+        return
+    from database.models import PersonaSchedule
+    from saiverse import clock
+    from saiverse.schedule_manager import SCHEDULE_DISPATCH_MAX_ATTEMPTS
+
+    now = int(clock.now().timestamp())
+    manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
+    for row in rows:
+        payload = row.get("payload")
+        key = row.get("idempotency_key") or ""
+        if not isinstance(payload, dict) or "#failed-" in key:
+            continue
+        if payload.get("schedule_type") != "periodic":
+            continue
+        # 猶予の起点は UPDATED_AT (= mark_failed が刻む失敗時刻、Codex W3
+        # 第十陣)。CREATED_AT は claim 時刻なので、dispatch が長引いた失敗では
+        # 「失敗直後なのに行齢が猶予超過」となり、生存中の backoff 予約を
+        # 奪ってしまう。
+        failed_at = row.get("updated_at")
+        if not isinstance(failed_at, int) \
+                or now - failed_at < SCHEDULE_FAILED_RETRY_GRACE_SECONDS:
+            continue
+        attempt = payload.get("attempt")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) \
+                or attempt < 0 or attempt >= SCHEDULE_DISPATCH_MAX_ATTEMPTS:
+            # 上限到達 = 意図的放棄 (翌回が正)、欠落・不正値 = 出所不明の行 —
+            # どちらも自動回収しない (第十陣: 緩い判定は放棄済み行まで再発火
+            # させる)
+            continue
+        occurrence = payload.get("occurrence")
+        try:
+            occurrence_epoch = int(occurrence)
+        except (TypeError, ValueError):
+            continue
+        if now - occurrence_epoch > SCHEDULE_FAILED_OCCURRENCE_MAX_AGE_SECONDS:
+            continue
+        if row.get("persona_id") in manual_personas:
+            continue
+        schedule_id = payload.get("schedule_id")
+        instance_token = payload.get("instance_token")
+        generation = payload.get("generation")
+        if not isinstance(schedule_id, int) or not instance_token \
+                or not isinstance(generation, int):
+            continue
+        try:
+            db = manager.SessionLocal()
+            try:
+                schedule = db.query(PersonaSchedule).filter(
+                    PersonaSchedule.SCHEDULE_ID == schedule_id
+                ).first()
+                fence_ok = (
+                    schedule is not None
+                    and schedule.ENABLED
+                    and (schedule.SYNC_GENERATION or 0) == generation
+                    and (schedule.INSTANCE_TOKEN or "legacy") == instance_token
+                )
+            finally:
+                db.close()
+            if not fence_ok:
+                continue
+            LOGGER.info(
+                "[ledger-wiring] re-firing failed periodic schedule.dispatch "
+                "(execution=%s schedule=%d occurrence=%s attempt=%d)",
+                row.get("execution_id"), schedule_id, occurrence, attempt + 1,
+            )
+            # 失敗した試行の「次」として再開する (attempt リセット禁止 —
+            # 第十陣。attempt+1 が上限なら _retry_or_give_up が正しく打ち切る)
+            schedule_manager.refire_occurrence(
+                schedule_id, instance_token, str(occurrence), generation,
+                attempt=attempt + 1,
+            )
+        except Exception:
+            LOGGER.exception(
+                "[ledger-wiring] failed-periodic collection failed (execution=%s)",
+                row.get("execution_id"),
+            )
+
+
+def _reconcile_schedules(manager: "SAIVerseManager") -> None:
+    """回復 #7: schedule 予約の世代照合 (W3 Chunk C / handoff D6)。
+
+    実体は ``ScheduleManager._reconcile_schedules`` — DB (宣言的正典) と
+    EventScheduler 予約の同期のみで、LLM を直接起動しない (登録・除去だけ)。
+    したがって完全手動モードのペルソナに対しても止めない (掃除は自律行動では
+    ない — 発火時ゲートの一貫化は W9 の所掌)。schedule_manager を持たない
+    manager (テストスタブ等) は no-op。
+    """
+    schedule_manager = getattr(manager, "schedule_manager", None)
+    if schedule_manager is None:
+        return
+    result = schedule_manager._reconcile_schedules()
+    if result.get("registered") or result.get("cancelled"):
+        LOGGER.info(
+            "[ledger-wiring] schedule reconciliation: registered=%d cancelled=%d",
+            result.get("registered", 0), result.get("cancelled", 0),
+        )
 
 
 def _flush_all_pending(manager: "SAIVerseManager") -> None:

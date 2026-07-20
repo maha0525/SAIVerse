@@ -739,6 +739,43 @@ def backfill_item_short_ids(db_path: str) -> None:
         engine.dispose()
 
 
+def _backfill_schedule_instance_tokens(engine) -> None:
+    """persona_schedule の NULL INSTANCE_TOKEN に行一生トークンを採番する (冪等)。
+
+    W3 Codex 第三陣: 台帳冪等キー ``{schedule_id}:{instance_token}:{occurrence}``
+    の instance_token は行作成時に書き手が採番するが、列追加 (追加系 ALTER)
+    直後の既存行は NULL のまま。NULL 行は読み手が "legacy" として扱うため
+    動作はするが、legacy 同士では SCHEDULE_ID 再利用の分離が効かない —
+    ここで一括採番して塞ぐ。randomblob(6) は SQLite が行ごとに評価するので
+    各行に異なる 12 hex 文字が入る。対象行が無ければ no-op なので起動ごとに
+    無条件で呼んで問題ない。
+    """
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(
+                "UPDATE persona_schedule "
+                "SET INSTANCE_TOKEN = lower(hex(randomblob(6))) "
+                "WHERE INSTANCE_TOKEN IS NULL"
+            ))
+            if result.rowcount:
+                logging.info(
+                    "persona_schedule の INSTANCE_TOKEN を %d 行に採番しました。",
+                    result.rowcount,
+                )
+    except Exception as e:
+        # NULL のままでも "legacy" fallback で動作は継続する (次回起動で再試行)。
+        logging.warning("INSTANCE_TOKEN バックフィルに失敗しました（スキップ）: %s", e)
+
+
+def backfill_schedule_instance_tokens(db_path: str) -> None:
+    """INSTANCE_TOKEN 採番を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _backfill_schedule_instance_tokens(engine)
+    finally:
+        engine.dispose()
+
+
 def _backfill_day_plan_refs(engine) -> None:
     """persona_day_plan.slots_json のコマ ref を ``desire:N`` → ``task:N`` に統合する。
 

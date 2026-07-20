@@ -293,7 +293,8 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
     confirmed: List[str] = []
     monkeypatch.setattr(
         wiring, "_confirm_life_at_day_open",
-        lambda mgr, pid, ctx: confirmed.append(pid),
+        # 境界決着 (True) を返す (W3 第八陣で bool 契約化 — False は判断を打ち切る)
+        lambda mgr, pid, ctx: (confirmed.append(pid), True)[1],
     )
 
     first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
@@ -331,7 +332,8 @@ def test_fire_day_open_dedup_watchdog_then_scheduled(session_factory, monkeypatc
     confirmed: List[str] = []
     monkeypatch.setattr(
         wiring, "_confirm_life_at_day_open",
-        lambda mgr, pid, ctx: confirmed.append(pid),
+        # 境界決着 (True) を返す (W3 第八陣で bool 契約化 — False は判断を打ち切る)
+        lambda mgr, pid, ctx: (confirmed.append(pid), True)[1],
     )
 
     first = wiring.fire_judgment_point(
@@ -489,10 +491,11 @@ def test_schedule_manager_routes_judgment_playbooks(session_factory, monkeypatch
         TIME_OF_DAY="08:00",
         PLAYBOOK_PARAMS='{"daily_budget_rounds": 30}',
     )
-    sm._execute_schedule(schedule, session=None)
+    outcome = sm._execute_schedule(schedule, session=None)
 
     assert routed == [(PERSONA_ID, "judgment_day_open", {"daily_budget_rounds": 30})]
     assert dispatched == []  # 通常の submit_schedule 経路は通らない
+    assert outcome[0] == "executed"
 
 
 def test_schedule_manager_normal_playbooks_untouched(session_factory, monkeypatch):
@@ -507,7 +510,9 @@ def test_schedule_manager_normal_playbooks_untouched(session_factory, monkeypatc
     )
     dispatched: List[Any] = []
     manager.pulse_dispatcher = SimpleNamespace(
-        dispatch_schedule_fire=lambda **kw: dispatched.append(kw),
+        dispatch_schedule_fire=lambda **kw: dispatched.append(kw) or {
+            "action": "execute", "runtime_outcome": "completed", "error": None,
+        },
     )
     manager.all_personas = manager.personas
     manager._save_modified_buildings = lambda: None
@@ -524,13 +529,14 @@ def test_schedule_manager_normal_playbooks_untouched(session_factory, monkeypatc
     )
     db = session_factory()
     try:
-        sm._execute_schedule(schedule, session=db)
+        outcome = sm._execute_schedule(schedule, session=db)
     finally:
         db.close()
 
     assert routed == []
     assert len(dispatched) == 1
     assert dispatched[0]["meta_playbook"] == "track_user_conversation"
+    assert outcome[0] == "executed"
 
 
 # ---------------------------------------------------------------------------

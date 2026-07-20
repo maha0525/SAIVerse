@@ -453,6 +453,24 @@ class PersonaSchedule(Base):
     # Playbook parameters (JSON)
     PLAYBOOK_PARAMS = Column(Text, nullable=True)  # JSON string: {"selected_playbook": "xxx", ...}
 
+    # 予約同期の世代トークン (W3 A12, docs/handoff/2026-07-20_w3_schedule_ledger_handoff.md D2)。
+    # 発火時刻・内容に影響する設定変更 (create / update / toggle / life PUT /
+    # schedule_add tool) が同じ commit 内で +1 する。実行簿記 (COMPLETED /
+    # LAST_EXECUTED_AT) は世代を上げない。EventScheduler の予約 closure が
+    # 登録時の世代を運び、発火時・reconciliation 時に DB の現世代と照合する。
+    # NOT NULL + scalar default 0 なので try_additive_migration の軽量 ALTER
+    # パスで既存 DB に安全に足せる (既存行は 0)。
+    SYNC_GENERATION = Column(Integer, default=0, nullable=False)
+
+    # 台帳冪等キーの行一生トークン — SCHEDULE_ID 再利用との分離 (W3 Codex 第三陣)。
+    # SQLite は AUTOINCREMENT 無しの INTEGER PK で削除済み最大 ID を再利用しうる
+    # ため、台帳キーが {schedule_id}:{occurrence} だけだと「実行済み行を削除 →
+    # 新規作成」で旧行の completed 台帳行が新行の claim を永久ブロックする。
+    # 行作成時に一度だけ採番し、更新では変えない (世代 SYNC_GENERATION=設定の版、
+    # トークン=行の同一性)。nullable — 既存行は migrate.py の backfill が埋め、
+    # 読み手は NULL を "legacy" として扱う。
+    INSTANCE_TOKEN = Column(String(32), nullable=True)
+
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

@@ -45,7 +45,10 @@ class LifeSettingsApiTest(unittest.TestCase):
             personas={
                 PERSONA_ID: SimpleNamespace(persona_id=PERSONA_ID, model="claude-sonnet-5"),
             },
-            schedule_manager=SimpleNamespace(register_schedule=lambda schedule_id: None),
+            # register_schedule は tri-state str を返す契約 (Codex W3 指摘 2)
+            schedule_manager=SimpleNamespace(
+                register_schedule=lambda schedule_id: "registered",
+            ),
         )
 
         from api.routes.people import life_settings as life_settings_route
@@ -195,6 +198,67 @@ class LifeSettingsApiTest(unittest.TestCase):
             json={"wake": "07:00", "close": "22:00", "daily_budget_rounds": 0},
         )
         self.assertEqual(resp.status_code, 400)
+
+    # ------------------------------------------------------------------
+    # W3 A12: SYNC_GENERATION の世代 bump + scheduler_synced の応答明示
+    # ------------------------------------------------------------------
+
+    def test_put_stamps_generation_1_on_create_and_bumps_on_update(self):
+        self.client.put(
+            f"/api/people/{PERSONA_ID}/life-settings",
+            json={"wake": "07:00", "close": "22:00"},
+        )
+        by_playbook = {r.META_PLAYBOOK: r for r in self._rows()}
+        self.assertEqual(by_playbook["judgment_day_open"].SYNC_GENERATION, 1)
+        self.assertEqual(by_playbook["judgment_day_close"].SYNC_GENERATION, 1)
+
+        self.client.put(
+            f"/api/people/{PERSONA_ID}/life-settings",
+            json={"wake": "08:00", "close": "23:00"},
+        )
+        by_playbook = {r.META_PLAYBOOK: r for r in self._rows()}
+        self.assertEqual(by_playbook["judgment_day_open"].SYNC_GENERATION, 2)
+        self.assertEqual(by_playbook["judgment_day_close"].SYNC_GENERATION, 2)
+
+    def test_put_reports_scheduler_synced_true_on_success(self):
+        resp = self.client.put(
+            f"/api/people/{PERSONA_ID}/life-settings",
+            json={"wake": "07:00", "close": "22:00"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.json()["scheduler_synced"], True)
+
+    def test_put_reports_scheduler_synced_false_when_register_fails(self):
+        def _boom(schedule_id):
+            raise RuntimeError("scheduler down")
+
+        self.manager.schedule_manager = SimpleNamespace(register_schedule=_boom)
+        resp = self.client.put(
+            f"/api/people/{PERSONA_ID}/life-settings",
+            json={"wake": "07:00", "close": "22:00"},
+        )
+        # HTTP は 200 のまま (DB が正典、reconciliation が回復する)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.json()["scheduler_synced"], False)
+        # DB への保存自体は成功している
+        self.assertEqual(len(self._rows()), 2)
+
+    def test_put_reports_scheduler_synced_false_when_not_registrable(self):
+        """例外なしの「登録不能」(not_registrable) も synced=False になる
+        (Codex W3 指摘 2 — 旧実装は例外時のみ False だった)。"""
+        self.manager.schedule_manager = SimpleNamespace(
+            register_schedule=lambda schedule_id: "not_registrable",
+        )
+        resp = self.client.put(
+            f"/api/people/{PERSONA_ID}/life-settings",
+            json={"wake": "07:00", "close": "22:00"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.json()["scheduler_synced"], False)
+
+    def test_get_leaves_scheduler_synced_none(self):
+        resp = self.client.get(f"/api/people/{PERSONA_ID}/life-settings")
+        self.assertIsNone(resp.json()["scheduler_synced"])
 
     # ------------------------------------------------------------------
     # PUT: モード上書き

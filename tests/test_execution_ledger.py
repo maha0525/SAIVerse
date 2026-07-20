@@ -760,6 +760,37 @@ class ListRunningTests(ExecutionLedgerTestBase):
             self.ledger.list_running("")
 
 
+class FindExecutionTests(ExecutionLedgerTestBase):
+    """find_execution (W3 Chunk A): (kind, idempotency_key) の読み取り専用照会。"""
+
+    def test_returns_row_when_exists(self):
+        execution_id, created = self.ledger.begin_execution(
+            "schedule.dispatch", idempotency_key="42:1752998400",
+            persona_id="p1", payload={"schedule_id": 42},
+        )
+        self.assertTrue(created)
+
+        row = self.ledger.find_execution("schedule.dispatch", "42:1752998400")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["execution_id"], execution_id)
+        self.assertEqual(row["status"], XL.STATUS_PREPARED)
+        self.assertEqual(row["payload"], {"schedule_id": 42})
+
+    def test_returns_none_when_absent(self):
+        self.assertIsNone(
+            self.ledger.find_execution("schedule.dispatch", "999:0")
+        )
+        # kind が違えば同キーでも見えない
+        self.ledger.begin_execution("schedule.dispatch", idempotency_key="k1")
+        self.assertIsNone(self.ledger.find_execution("other.kind", "k1"))
+
+    def test_requires_kind_and_key(self):
+        with self.assertRaises(ValueError):
+            self.ledger.find_execution("", "k1")
+        with self.assertRaises(ValueError):
+            self.ledger.find_execution("schedule.dispatch", "")
+
+
 class MigrationLightweightPathTests(unittest.TestCase):
     """migrate.py の軽量パスが旧 DB に実行台帳テーブルを作ること。"""
 
@@ -821,3 +852,40 @@ class MigrationLightweightPathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SweepAppliedTests(ExecutionLedgerTestBase):
+    """applied 残留の照合掃除 (W3 Codex 第七陣 medium)。
+
+    mark_applied (commit) と mark_completed は別トランザクションのため、間の
+    crash で outbox の無い applied が非終端のまま隠れる — sweep_applied が
+    completed へ収束させる。
+    """
+
+    def test_outboxless_applied_is_swept_to_completed(self):
+        execution_id = self._begin_running("schedule.dispatch")
+        self.ledger.mark_applied(execution_id)  # outbox なし・mark_completed 前に crash 相当
+
+        swept = self.ledger.sweep_applied()
+
+        self.assertEqual(swept, [execution_id])
+        self.assertEqual(self._status(execution_id), "completed")
+        # 二周目は no-op (冪等)
+        self.assertEqual(self.ledger.sweep_applied(), [])
+
+    def test_applied_with_pending_outbox_is_left_alone(self):
+        execution_id = self._begin_running("test.kind", persona_id="p1")
+        self.ledger.mark_applied(
+            execution_id,
+            outbox_items=[{
+                "target": "saimemory.append",
+                "persona_id": "p1",
+                "payload": {"message": {"role": "user", "content": "x"}},
+            }],
+        )
+        # ハンドラ未登録なので配送されず pending のまま
+
+        swept = self.ledger.sweep_applied()
+
+        self.assertEqual(swept, [])
+        self.assertEqual(self._status(execution_id), "applied")

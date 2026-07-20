@@ -98,34 +98,80 @@ class PulseDispatcher:
         meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None,
         pre_spells: Optional[List[str]] = None,
-    ) -> None:
-        """スケジュール時刻到来時のディスパッチ。直接経路で submit_schedule。
+    ) -> Dict[str, Any]:
+        """スケジュール時刻到来時のディスパッチ。直接経路で schedule Pulse を submit。
 
         スケジュール ↔ Track 紐付けは別 Intent doc 範疇 (pulse_dispatch.md §11)。
         現状はスケジュール定義通りの Pulse 種別で起動する。
+
+        W3 Chunk A (schedule 台帳化 D4): 旧「例外握り潰し・None 戻し」をやめ、
+        型付き outcome を返す。ExecutionRequest を自前で組んで submit し、
+        PulseController が request に記入する観測フィールド
+        (dispatch_action / runtime_outcome) から顛末を読む。例外は再送出しない
+        (呼び出し元 = ScheduleManager が台帳の failed/unknown 分類に使う)。
+
+        Returns:
+            ``{"action": str, "runtime_outcome": Optional[str], "error": Optional[str]}``
+
+            - action: "execute" / "queued" / "skipped" (submit の受付裁定) /
+              "unavailable" (pulse_controller 不在) /
+              "error_before_submit" (受付裁定前に例外)
+            - runtime_outcome: "completed" / "gate_closed" / "cancelled" /
+              "error"。queued / skipped / unavailable では None。
+            - error: 例外発生時のみ str(e)。
         """
+        # NOTE: sea.pulse_controller は saiverse 側から遅延 import する
+        # (dispatch_autonomy_tick と同じ流儀 — module 間の import 循環を避ける)
+        from sea.pulse_controller import ExecutionRequest
+
         pulse_controller = getattr(self.manager, "pulse_controller", None)
         if pulse_controller is None:
             LOGGER.warning(
                 "[dispatcher] schedule_fire: pulse_controller unavailable (persona=%s)",
                 persona_id,
             )
-            return
+            return {"action": "unavailable", "runtime_outcome": None, "error": None}
+
+        request = ExecutionRequest(
+            type="schedule",
+            persona_id=persona_id,
+            building_id=building_id,
+            user_input=user_input,
+            metadata=metadata,
+            meta_playbook=meta_playbook,
+            args=args,
+            pre_spells=pre_spells,
+        )
         try:
-            pulse_controller.submit_schedule(
-                persona_id=persona_id,
-                building_id=building_id,
-                user_input=user_input,
-                metadata=metadata,
-                meta_playbook=meta_playbook,
-                args=args,
-                pre_spells=pre_spells,
-            )
-        except Exception:
+            pulse_controller.submit(request)
+        except Exception as e:
+            # LLMError 含む。submit が受付裁定 (dispatch_action) を記入する前に
+            # 転んだ場合は "error_before_submit" とする。
             LOGGER.exception(
                 "[dispatcher] schedule_fire dispatch failed: persona=%s",
                 persona_id,
             )
+            if request.runtime_outcome == "completed":
+                # 実行は完走済み (request に記入済み) で、例外はその後の後処理
+                # (queue 処理等) のもの (Codex W3 第七陣)。完了済みの顛末を
+                # "error" で上書きすると、成功した発火が unknown 扱いになり
+                # oneshot/interval の occurrence が自動再実行禁止で封印される。
+                # 完走の事実を優先し、後処理の失敗は error に併記する。
+                return {
+                    "action": request.dispatch_action,
+                    "runtime_outcome": "completed",
+                    "error": f"post-completion: {e or type(e).__name__}",
+                }
+            return {
+                "action": request.dispatch_action or "error_before_submit",
+                "runtime_outcome": "error",
+                "error": str(e) or type(e).__name__,
+            }
+        return {
+            "action": request.dispatch_action,
+            "runtime_outcome": request.runtime_outcome,
+            "error": None,
+        }
 
     # ------------------------------------------------------------------
     # 現象 (Phenomenon) からのイベント注入 (9)
