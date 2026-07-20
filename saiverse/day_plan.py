@@ -2001,21 +2001,31 @@ def find_lost_slot_reservations(
     return lost
 
 
-def cancel_scheduled_slots(manager: Any, persona_id: str, plan_date: Any) -> int:
+def cancel_scheduled_slots(
+    manager: Any, persona_id: str, plan_date: Any, *, count: Optional[int] = None
+) -> int:
     """保存済み plan の全コマ分の EventScheduler 予約を cancel し、数を返す。
 
     時間割の全置換 (起床判断のやり直し / remaining_timetable の置換) の前処理。
     key は index ベースなので、コマ数が減る置換では旧 index の予約が残留し、
     新 plan の別コマ (または範囲外 index) を誤発火させる。置換前に旧 plan の
     全 key を cancel することでこれを防ぐ (発火済み key の cancel は no-op)。
+
+    Args:
+        count: cancel する index の上限を明示する。**保存を先に済ませてから
+            cancel する経路** (:func:`replace_day_plan`) で、現 DB plan (新 plan) の
+            コマ数より旧 plan のコマ数が多い場合に旧 index の予約を取りこぼさない
+            ため、``max(len(現 plan), count)`` の範囲を cancel する。省略時は現
+            plan のコマ数ぶんだけ cancel する (従来挙動)。
     """
     plan_date_str = _normalize_plan_date(plan_date)
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is None:
         return 0
     slots = load_day_plan(manager, persona_id, plan_date_str) or []
+    upper = len(slots) if count is None else max(len(slots), int(count))
     cancelled = 0
-    for index in range(len(slots)):
+    for index in range(upper):
         if scheduler.cancel(_slot_key(persona_id, plan_date_str, index)):
             cancelled += 1
     if cancelled:
@@ -2102,59 +2112,55 @@ def replace_day_plan(
     帳簿を残さない — day_open は一日の最初の編成なので、旧 plan (前回の day_open
     のやり直し等) はまるごと ``new_slots`` に差し替える。
 
-    **原子性 (A1 の是正)**: 二段構えで「途中どこで転んでも旧 plan / 旧予約が残る」を
-    保証する:
+    **原子性 (A1 の是正) — 保存を先に**: 「旧 plan は可視なのに予約だけ消えた」孤児を
+    どの失敗経路でも作らないため、**cancel より先に保存**する:
 
     1. :func:`save_day_plan` と同一の検証・ライフ範囲正規化を **先に** 済ませる —
-       ``ValueError`` を投げる場合、この時点まで DB / スケジューラは一切未変更
-       (旧実装の「先に cancel してから save が raise」で予約だけ孤児化する順序を断つ)。
-    2. 旧 plan を控えてから cancel → 保存 → 再 push。保存 (``_upsert_plan_slots``) や
-       再予約 (``schedule_day_plan``) が途中で失敗した場合は、部分的に張った新予約を
-       落とし、旧 plan を書き戻して旧予約を再 push して **元の状態へ復元** する
-       (監査 A1 の「DB 保存失敗・再予約途中失敗でも旧 plan / 旧予約がともに不変」)。
+       ``ValueError`` を投げる場合、DB / スケジューラは一切未変更。
+    2. 新 plan を **保存** する (``_upsert_plan_slots``)。ここで失敗した場合、旧 plan は
+       DB に残り、旧予約は **まだ cancel していない** ので無傷 — **継続的な DB 障害でも
+       孤児を作らない** (旧実装の「先に cancel → 保存 raise」も、前修正の「復元も同じ
+       保存に依存」も、継続障害で予約消失が再発した。保存先行はその依存を断つ)。
+    3. 保存成功 = 置換の durable 部分は完了。旧予約を落とし (旧・新の index 範囲を
+       網羅) 新 plan を再 push する。この張り替えが失敗しても DB は既に新 plan なので、
+       watchdog (``find_lost_slot_reservations``) が新 plan の pending 予約を回復する
+       — 例外にせず WARN で返す (収束先は新 plan。旧 plan への逆戻り孤児は起きない)。
 
     Returns:
-        ``(置換後に EventScheduler へ push した pending コマ数, 調整メモ)``。
+        ``(EventScheduler へ push した pending コマ数, 調整メモ)``。予約張り替えが
+        失敗した場合 pushed=0 (watchdog 回復に委ねる)。
 
     Raises:
         ValueError: persona_id 空 / コマ配列の書式検証失敗 / 正規化後にコマが
             1 件も残らなかった場合 (この時点で DB もスケジューラも未変更)。
-        Exception: 保存 / 再予約の失敗はそのまま再送出する (旧 plan / 旧予約へ復元
-            した後)。
+        Exception: **保存** (``_upsert_plan_slots``) の失敗はそのまま再送出する
+            (この時点で旧 plan / 旧予約はともに無傷)。
     """
     if not persona_id:
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
-    # 1. 検証・正規化を先に。ここで raise してもこの時点まで DB / スケジューラは
-    #    一切変更されていない (原子性の要)。
+    # 1. 検証・正規化を先に (raise してもこの時点まで DB / スケジューラ未変更)。
     kept, notes = _validate_and_normalize_for_save(
         manager, persona_id, plan_date_str, new_slots,
     )
-    # 2. 旧 plan を控える (置換中の失敗で旧 plan / 旧予約へ戻すため)。
-    old_slots = load_day_plan(manager, persona_id, plan_date_str) or []
-    cancel_scheduled_slots(manager, persona_id, plan_date_str)
+    old_len = len(load_day_plan(manager, persona_id, plan_date_str) or [])
+    # 2. 保存を先に。失敗すれば旧 plan は DB に残り旧予約も未 cancel = 無傷 (継続障害でも
+    #    「旧 plan 可視・予約消失」の孤児を作らない — A1 の恒久修正)。そのまま再送出。
+    _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
+    # 3. 保存成功後に旧予約を落とし (旧・新の index 範囲を網羅) 新 plan を push。ここが
+    #    失敗しても DB は新 plan なので watchdog が回復する — 例外にせず pushed=0 で返す。
     try:
-        _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
+        cancel_scheduled_slots(
+            manager, persona_id, plan_date_str, count=max(old_len, len(kept)),
+        )
         pushed = schedule_day_plan(manager, persona_id, plan_date_str)
     except Exception:
-        # 復元: 部分的に張った新予約を落とし (現 DB plan の index 範囲で cancel)、
-        # 旧 plan を書き戻して旧予約を再 push する。旧 plan が無かった日 (old_slots
-        # 空) は空 plan へ戻す (再 push なし)。復元自体の失敗も握り潰さず記録する。
         LOGGER.exception(
-            "[day_plan] replace_day_plan failed mid-replace; restoring old plan and "
-            "reservations (persona=%s date=%s)", persona_id, plan_date_str,
+            "[day_plan] replace_day_plan saved new plan but reservation swap failed; "
+            "watchdog will recover reservations (persona=%s date=%s)",
+            persona_id, plan_date_str,
         )
-        try:
-            cancel_scheduled_slots(manager, persona_id, plan_date_str)
-            _upsert_plan_slots(manager, persona_id, plan_date_str, old_slots)
-            if old_slots:
-                schedule_day_plan(manager, persona_id, plan_date_str)
-        except Exception:
-            LOGGER.exception(
-                "[day_plan] replace_day_plan restore also failed — plan/reservations "
-                "may be inconsistent (persona=%s date=%s)", persona_id, plan_date_str,
-            )
-        raise
+        pushed = 0
     if notes:
         LOGGER.info(
             "[day_plan] day plan replaced within organized range: "
@@ -2590,9 +2596,23 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     # のは gated な作業コマの実効ラウンド予約だけ。
     try:
         episode_ref = _reserve_slot_tx(
-            manager, ledger, exec_id, persona_id, plan_date_str, index, slot,
-            gated, reserved,
+            manager, ledger, exec_id, persona_id, plan_date_str, index, slot_id,
+            slot, gated, reserved,
         )
+    except _SlotVanished as exc:
+        # コマが claim 後・予約前に消えた / 発火不能になった (組み替え等)。mark_running
+        # より前に中断され副作用ゼロなので、実行を failed に落として安全に閉じる
+        # (ハンドラは呼ばない — 別コマを誤って実行しない)。
+        LOGGER.info(
+            "[day_plan] slot.fire aborted before reservation: %s (exec=%s)", exc, exec_id,
+        )
+        try:
+            ledger.mark_failed(exec_id, f"slot vanished before reservation: {exc}")
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] failed to mark vanished slot.fire failed (exec=%s)", exec_id,
+            )
+        return
     except Exception:
         # 予約 tx は全ロールバック済み: slot pending・予算不変・episode 無し・
         # 台帳は prepared のまま。ハンドラは呼ばない (watchdog が pending を
@@ -2840,6 +2860,14 @@ def _find_slot_index_by_id(
     return None
 
 
+class _SlotVanished(Exception):
+    """コマが claim 後・予約前に時間割から消えた (組み替えで除去) / 発火不能になった。
+
+    不可逆処理 (ハンドラ) を始めず、mark_running より前に中断して実行を failed へ
+    落とすためのシグナル。副作用ゼロが保証される (invariant 1)。
+    """
+
+
 def _reserve_slot_tx(
     manager: Any,
     ledger: Any,
@@ -2847,25 +2875,30 @@ def _reserve_slot_tx(
     persona_id: str,
     plan_date_str: str,
     index: int,
+    slot_id: Optional[str],
     slot: Dict[str, Any],
     gated: bool,
     reserved: int,
 ) -> Optional[str]:
     """予約 tx: 台帳 running + slot fired + 予算予約 + episode open を単一 commit。
 
+    対象コマは発火時 ``index`` ではなく不変 ``slot_id`` で **同 session 内で** 引く —
+    claim 後・予約前に別判断が :func:`replace_remaining_slots` で配列を組み替えても、
+    正しいコマを fired にする。対象が消えていれば :class:`_SlotVanished` を投げて
+    ハンドラを始めさせない (mark_running より前なので副作用ゼロ)。
+
     Returns:
         開いた出来事の episode_ref (episodes.open_episode の戻り)。
 
-    例外時は全ロールバック (slot pending・予算不変・episode 無し・台帳 prepared の
-    まま) して再送出する — 呼び出し元がハンドラを呼ばずに return する契約。
+    Raises:
+        _SlotVanished: 対象コマが消えた / 発火不能 (呼び出し元は failed に落として中断)。
+        Exception: その他の失敗は全ロールバック (slot pending・予算不変・episode 無し・
+            台帳 prepared のまま) して再送出 — 呼び出し元がハンドラを呼ばずに return する。
     """
     from saiverse import episodes
 
     db = manager.SessionLocal()
     try:
-        # 台帳 prepared → running (同 tx。不変条件 1)
-        ledger.mark_running(exec_id, session=db)
-
         row = _load_plan_row(db, persona_id, plan_date_str)
         if row is None:
             raise RuntimeError(
@@ -2873,13 +2906,25 @@ def _reserve_slot_tx(
                 f"date={plan_date_str})"
             )
         slots = _row_slots(row)
-        if index >= len(slots):
-            raise RuntimeError(
-                f"slot index {index} out of range during reservation "
-                f"(persona={persona_id} date={plan_date_str} len={len(slots)})"
+        # 発火時 index ではなく不変 id で現在位置を引く (組み替え耐性)。
+        target = _find_slot_index_by_id(slots, slot_id)
+        if target is None:
+            raise _SlotVanished(
+                f"slot id={slot_id} vanished before reservation "
+                f"(persona={persona_id} date={plan_date_str})"
             )
-        # slot pending/deferred → fired
-        slots[index]["status"] = STATUS_FIRED
+        if slots[target].get("status") not in (STATUS_PENDING, STATUS_DEFERRED):
+            # 既に別経路で発火/消化済み — claim ガードの隙を塞ぎ二重発火しない。
+            raise _SlotVanished(
+                f"slot id={slot_id} not fireable "
+                f"(status={slots[target].get('status')!r})"
+            )
+
+        # 台帳 prepared → running (同 tx。不変条件 1) — 対象確定後に行う。
+        ledger.mark_running(exec_id, session=db)
+
+        # slot pending/deferred → fired (id で引いた現在位置に対して)
+        slots[target]["status"] = STATUS_FIRED
         row.slots_json = json.dumps(slots, ensure_ascii=False)
 
         # 予算予約 (gated のみ、実効ラウンド分を先取り消費)
@@ -2888,7 +2933,8 @@ def _reserve_slot_tx(
 
         row.updated_at = clock.now()
 
-        # 出来事を開く (同 session。skip 済み経路はここに来ない = 出来事を作らない)
+        # 出来事を開く (同 session。origin_ref は発火時 index — 回復が payload の index
+        # から同じ origin_ref を再構成して逆引きするため一貫させる)。
         persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
         building_id = getattr(persona, "current_building_id", None)
         ep_meta: Dict[str, Any] = {"slot_kind": str(slot.get("kind") or "")}

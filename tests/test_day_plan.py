@@ -1467,54 +1467,76 @@ def test_negative_used_rounds_is_rejected_no_over_refund(manager, task_refs):
     assert ledger.get_execution(exec_id)["status"] == "completed"
 
 
-def test_replace_day_plan_save_failure_restores_old_plan_and_reservations(manager, task_refs):
-    """Finding 1: 検証通過後の DB 保存 (_upsert_plan_slots) が転けても、旧 plan・
-    旧予約とも復元される (cancel だけ先に走って plan が孤児化しない)。"""
+def test_replace_day_plan_persistent_save_failure_keeps_old_plan_and_reservations(manager, task_refs):
+    """Finding 1 (継続障害): 保存を先に試みるので、DB 保存が **継続的に** 失敗しても
+    旧 plan は DB に残り、旧予約は cancel 前なので無傷 — 「旧 plan 可視・予約消失」の
+    孤児を作らない (前修正の「復元も同じ保存に依存」で継続障害だと予約消失が再発した
+    のを、保存先行で恒久的に断つ)。"""
     _seed_two_slot_plan(manager, task_refs)
     before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert _slot_keys_present(manager) == {0, 1}
 
-    real_upsert = day_plan._upsert_plan_slots
-    state = {"n": 0}
-
-    def flaky_upsert(*a, **k):
-        state["n"] += 1
-        if state["n"] == 1:  # 前進の保存だけ失敗させる (復元の保存は通す)
-            raise RuntimeError("save fail")
-        return real_upsert(*a, **k)
-
-    with patch("saiverse.day_plan._upsert_plan_slots", side_effect=flaky_upsert):
+    # 継続障害 (常に失敗) — 復元経路に頼らないことを保証する。
+    with patch("saiverse.day_plan._upsert_plan_slots", side_effect=RuntimeError("save fail")):
         with pytest.raises(RuntimeError):
             day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
                 {"start": "18:00", "kind": "休む", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": "new"},
             ])
 
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
-    assert _slot_keys_present(manager) == {0, 1}  # 旧予約も復元
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before  # 旧 plan 不変
+    assert _slot_keys_present(manager) == {0, 1}  # 旧予約 無傷 (cancel 前に保存失敗)
 
 
-def test_replace_day_plan_repush_failure_restores_old_plan_and_reservations(manager, task_refs):
-    """Finding 1: 保存は通ったが再予約 (schedule_day_plan) が転けても、旧 plan・
-    旧予約へ復元される (監査 A1「再予約途中失敗時に旧 plan/旧予約へ戻る」)。"""
+def test_replace_day_plan_persistent_repush_failure_converges_to_new_plan(manager, task_refs):
+    """Finding 1 (継続障害): 保存後の再予約が **継続的に** 失敗しても、DB は既に新 plan
+    なので「旧 plan 可視・予約消失」の孤児にはならず、watchdog が回復できる状態へ収束
+    する (例外にせず pushed=0)。監査 A1「明示的な回復状態へ収束」。"""
     _seed_two_slot_plan(manager, task_refs)
-    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
 
-    real_schedule = day_plan.schedule_day_plan
-    state = {"n": 0}
+    with patch("saiverse.day_plan.schedule_day_plan", side_effect=RuntimeError("push fail")):
+        pushed, _notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "18:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": "new"},
+        ])
 
-    def flaky_schedule(*a, **k):
-        state["n"] += 1
-        if state["n"] == 1:  # 前進の再 push だけ失敗させる (復元の push は通す)
-            raise RuntimeError("push fail")
-        return real_schedule(*a, **k)
+    assert pushed == 0  # 例外にせず、予約回復は watchdog へ委ねる
+    # DB は新 plan (孤児 = 旧 plan が見えるまま、ではない)
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["start"] for s in slots] == ["18:00"]
+    # watchdog が「予約途絶」として検出でき回復できる (旧予約は cancel 済み)
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == [0]
 
-    with patch("saiverse.day_plan.schedule_day_plan", side_effect=flaky_schedule):
-        with pytest.raises(RuntimeError):
-            day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-                {"start": "18:00", "kind": "休む", "ref": "none",
-                 "facility": "own_room", "budget_rounds": 0, "note": "new"},
-            ])
 
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
-    assert _slot_keys_present(manager) == {0, 1}
+def test_reserve_aborts_when_slot_vanishes_between_claim_and_reservation(manager, task_refs):
+    """Finding 2: claim 後・予約前に別判断が replace_remaining_slots で当該コマを外すと、
+    予約 tx が id で対象消失を検知しハンドラを始めず中断・台帳 failed にする (発火時
+    index で別コマを誤って実行しない)。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    real_reserve = day_plan._reserve_slot_tx
+
+    def reshuffle_then_reserve(*a, **k):
+        # claim 後・予約 tx 実行の直前に当該コマ (pending) を時間割から外す。
+        day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "20:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": "other"},
+        ])
+        return real_reserve(*a, **k)
+
+    with patch("saiverse.day_plan._reserve_slot_tx", side_effect=reshuffle_then_reserve), \
+            patch("sea.work_session.run_work_session") as mock_ws, \
+            patch("saiverse.autonomy_wiring.fire_judgment_point",
+                  return_value={"submitted": False}):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 0  # ハンドラは始まらない (別コマを実行しない)
+    assert ledger.get_execution(_slot_exec_id(manager))["status"] == "failed"  # 副作用ゼロ中断
+    # 置換で入った別コマ (20:00) は fired にされず pending のまま
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert all(s["status"] == "pending" for s in slots)
+    # 予算も動かない (予約前に中断)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 0
