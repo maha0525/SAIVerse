@@ -57,6 +57,7 @@ import json
 import logging
 import math
 import re
+import uuid
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -385,7 +386,16 @@ def _validate_and_normalize_slots(
                 f"slot[{i}].record_level must be a string (got {type(record_level).__name__})"
             )
 
+        # 不変 ID (コマの stable identity)。既存を保持し、無ければ採番する。
+        # 配列 index はハンドラ中の時間割組み替え (post_session の
+        # replace_remaining_slots) で移動しうるため、発火・精算・回復・冪等キーは
+        # index ではなくこの ID で対象コマを一意に指す (A6 二重 done の是正)。
+        slot_id = slot.get("id")
+        if not isinstance(slot_id, str) or not slot_id:
+            slot_id = uuid.uuid4().hex[:12]
+
         normalized_slot = {
+            "id": slot_id,
             "start": start,
             "kind": kind,
             "ref": ref,
@@ -2092,12 +2102,16 @@ def replace_day_plan(
     帳簿を残さない — day_open は一日の最初の編成なので、旧 plan (前回の day_open
     のやり直し等) はまるごと ``new_slots`` に差し替える。
 
-    **原子性 (A1 の是正)**: :func:`save_day_plan` と同一の検証・ライフ範囲正規化を
-    **先に** 済ませ、通ってから ``cancel_scheduled_slots`` → ``_upsert_plan_slots``
-    → ``schedule_day_plan`` の順で進める。検証が失敗して ``ValueError`` を投げる
-    場合、**plan も EventScheduler 予約も一切変更しない** — 旧実装が「先に旧予約を
-    cancel してから save が raise」する順序で、plan は残るが自動発火予約だけ消えた
-    孤児 (「plan は見えるが自動発火しない」) を作っていたのを構造的に断つ。
+    **原子性 (A1 の是正)**: 二段構えで「途中どこで転んでも旧 plan / 旧予約が残る」を
+    保証する:
+
+    1. :func:`save_day_plan` と同一の検証・ライフ範囲正規化を **先に** 済ませる —
+       ``ValueError`` を投げる場合、この時点まで DB / スケジューラは一切未変更
+       (旧実装の「先に cancel してから save が raise」で予約だけ孤児化する順序を断つ)。
+    2. 旧 plan を控えてから cancel → 保存 → 再 push。保存 (``_upsert_plan_slots``) や
+       再予約 (``schedule_day_plan``) が途中で失敗した場合は、部分的に張った新予約を
+       落とし、旧 plan を書き戻して旧予約を再 push して **元の状態へ復元** する
+       (監査 A1 の「DB 保存失敗・再予約途中失敗でも旧 plan / 旧予約がともに不変」)。
 
     Returns:
         ``(置換後に EventScheduler へ push した pending コマ数, 調整メモ)``。
@@ -2105,6 +2119,8 @@ def replace_day_plan(
     Raises:
         ValueError: persona_id 空 / コマ配列の書式検証失敗 / 正規化後にコマが
             1 件も残らなかった場合 (この時点で DB もスケジューラも未変更)。
+        Exception: 保存 / 再予約の失敗はそのまま再送出する (旧 plan / 旧予約へ復元
+            した後)。
     """
     if not persona_id:
         raise ValueError("persona_id is required")
@@ -2114,15 +2130,36 @@ def replace_day_plan(
     kept, notes = _validate_and_normalize_for_save(
         manager, persona_id, plan_date_str, new_slots,
     )
-    # 2. 検証が通ってから旧予約を落とし、保存 → 再 push する。
+    # 2. 旧 plan を控える (置換中の失敗で旧 plan / 旧予約へ戻すため)。
+    old_slots = load_day_plan(manager, persona_id, plan_date_str) or []
     cancel_scheduled_slots(manager, persona_id, plan_date_str)
-    _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
+    try:
+        _upsert_plan_slots(manager, persona_id, plan_date_str, kept)
+        pushed = schedule_day_plan(manager, persona_id, plan_date_str)
+    except Exception:
+        # 復元: 部分的に張った新予約を落とし (現 DB plan の index 範囲で cancel)、
+        # 旧 plan を書き戻して旧予約を再 push する。旧 plan が無かった日 (old_slots
+        # 空) は空 plan へ戻す (再 push なし)。復元自体の失敗も握り潰さず記録する。
+        LOGGER.exception(
+            "[day_plan] replace_day_plan failed mid-replace; restoring old plan and "
+            "reservations (persona=%s date=%s)", persona_id, plan_date_str,
+        )
+        try:
+            cancel_scheduled_slots(manager, persona_id, plan_date_str)
+            _upsert_plan_slots(manager, persona_id, plan_date_str, old_slots)
+            if old_slots:
+                schedule_day_plan(manager, persona_id, plan_date_str)
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] replace_day_plan restore also failed — plan/reservations "
+                "may be inconsistent (persona=%s date=%s)", persona_id, plan_date_str,
+            )
+        raise
     if notes:
         LOGGER.info(
             "[day_plan] day plan replaced within organized range: "
             "persona=%s date=%s notes=%s", persona_id, plan_date_str, notes,
         )
-    pushed = schedule_day_plan(manager, persona_id, plan_date_str)
     return pushed, notes
 
 
@@ -2509,18 +2546,31 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         _fire_slot_legacy(manager, persona_id, plan_date_str, index, slot, kind, gated, handler)
         return
 
+    # 不変 ID を確保する。creation (_validate_and_normalize_slots) で採番済みの
+    # はずだが、この修正より前に保存された plan のコマには無い — その場合ここで
+    # 採番して永続化する。以降の claim / 精算 / 回復は配列 index ではなくこの ID で
+    # 対象コマを指す (ハンドラ中の時間割組み替え = post_session の
+    # replace_remaining_slots で index が移動しても正しいコマを done にするため。
+    # index ベース冪等キーの衝突 = 旧 index の別コマが誤 dedup される問題も同時に断つ)。
+    slot_id = slot.get("id")
+    if not isinstance(slot_id, str) or not slot_id:
+        slot_id = uuid.uuid4().hex[:12]
+        backfilled = _update_slot(manager, persona_id, plan_date_str, index, id=slot_id)
+        slot = backfilled if backfilled is not None else {**slot, "id": slot_id}
+
     # 予約する実効ラウンド (ゲート後の clamped slot に対して算出)。非 gated は 0。
     reserved = _effective_budget_rounds(slot) if gated else 0
     payload = {
         "persona_id": persona_id,
         "plan_date": plan_date_str,
-        "index": index,
+        "index": index,            # 発火時の index (episode origin_ref の再構成用)
+        "slot_id": slot_id,        # 不変 ID (精算・回復の対象コマ特定用)
         "slot_kind": kind,
         "reserved_rounds": reserved,
     }
     exec_id, runnable, _existing = ledger.claim_execution(
         "slot.fire",
-        idempotency_key=f"{persona_id}:{plan_date_str}:{index}",
+        idempotency_key=f"{persona_id}:{plan_date_str}:{slot_id}",
         persona_id=persona_id,
         payload=payload,
     )
@@ -2529,24 +2579,10 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         # ガード — EventScheduler 二重発火・watchdog 再 push の重複を吸収する。
         LOGGER.info(
             "[day_plan] slot.fire not runnable (already fired / blocked); skipping "
-            "double-fire (persona=%s date=%s index=%d kind=%s exec=%s status=%s)",
-            persona_id, plan_date_str, index, kind, exec_id, _existing,
+            "double-fire (persona=%s date=%s index=%d id=%s kind=%s exec=%s status=%s)",
+            persona_id, plan_date_str, index, slot_id, kind, exec_id, _existing,
         )
         return
-
-    # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
-    # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。ハンドラの成否に
-    # 依らず「取り組みに向かった」事実を記録するため、ハンドラ前に付ける。
-    ref = slot.get("ref") or REF_NONE
-    if ref != REF_NONE and ref.startswith("task:"):
-        try:
-            from saiverse.desire_engine import touch_desire
-            touch_desire(manager, persona_id, ref)
-        except Exception:
-            LOGGER.warning(
-                "[day_plan] touch_desire failed (persona=%s ref=%s); continuing",
-                persona_id, ref, exc_info=True,
-            )
 
     # --- 予約 tx (単一 commit): running + slot fired + 予算予約 + episode open ---
     # v0.5 (life.md §5.3): コマの発火そのものは標準パルスの消費に数えない
@@ -2569,11 +2605,27 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         return
 
     LOGGER.info(
-        "[day_plan] slot fired: persona=%s date=%s index=%d kind=%s ref=%s "
+        "[day_plan] slot fired: persona=%s date=%s index=%d id=%s kind=%s ref=%s "
         "facility=%s reserved=%d exec=%s",
-        persona_id, plan_date_str, index, kind, slot.get("ref"),
+        persona_id, plan_date_str, index, slot_id, kind, slot.get("ref"),
         slot.get("facility"), reserved, exec_id,
     )
+
+    # desire 参照コマの発火 = 欲求への再訪。帳簿 (touch_count / 鮮度) に記録する
+    # (v2 §5.3「何度も選ばれ再訪される欲求は関心に深まる」)。**予約 tx が成立した後**
+    # に付ける — 予約前だと episode open 失敗等で予約が転けても touch_count だけ増え、
+    # 再試行のたびに実際には取り組んでいない欲求を昇格候補に押し上げてしまう
+    # (予約成立 = 「取り組みに向かった」の確定点)。ハンドラの成否には依らない。
+    ref = slot.get("ref") or REF_NONE
+    if ref != REF_NONE and ref.startswith("task:"):
+        try:
+            from saiverse.desire_engine import touch_desire
+            touch_desire(manager, persona_id, ref)
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] touch_desire failed (persona=%s ref=%s); continuing",
+                persona_id, ref, exc_info=True,
+            )
 
     # --- ハンドラ (running 区間) ---
     try:
@@ -2601,8 +2653,8 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     # --- 精算 tx (単一 commit): 予算調整 + slot done + episode close + applied ---
     try:
         _settle_slot_tx(
-            manager, ledger, exec_id, persona_id, plan_date_str, index, slot,
-            episode_ref, gated, reserved, used_rounds,
+            manager, ledger, exec_id, persona_id, plan_date_str, index, slot_id,
+            slot, episode_ref, gated, reserved, used_rounds,
         )
     except Exception:
         # 精算 tx は全ロールバック: slot fired・episode open・台帳 running・予算は
@@ -2771,6 +2823,23 @@ def _apply_budget_delta_in_session(row: Any, slot: Dict[str, Any], delta: int) -
     row.meta_json = json.dumps(meta, ensure_ascii=False)
 
 
+def _find_slot_index_by_id(
+    slots: List[Dict[str, Any]], slot_id: Optional[str]
+) -> Optional[int]:
+    """slots から不変 ID が一致するコマの現 index を返す (無ければ None)。
+
+    配列 index はハンドラ中の時間割組み替え (post_session の
+    :func:`replace_remaining_slots`) で移動しうるため、発火時に捕捉した index では
+    なくこの逆引きで精算・回復の対象コマを特定する (A6 二重 done の是正)。
+    """
+    if not slot_id:
+        return None
+    for i, slot in enumerate(slots):
+        if slot.get("id") == slot_id:
+            return i
+    return None
+
+
 def _reserve_slot_tx(
     manager: Any,
     ledger: Any,
@@ -2856,6 +2925,7 @@ def _settle_slot_tx(
     persona_id: str,
     plan_date_str: str,
     index: int,
+    slot_id: Optional[str],
     slot: Dict[str, Any],
     episode_ref: Optional[str],
     gated: bool,
@@ -2864,22 +2934,32 @@ def _settle_slot_tx(
 ) -> None:
     """精算 tx: 予算調整 + slot done + episode close + 台帳 applied を単一 commit。
 
-    ``used_rounds`` が非負 int でない (None 等) なら delta=0 (予約額をそのまま
-    消費として残す安全側)。delta は負 = 返金になりうる。例外時は全ロールバック
-    (slot fired・episode open・台帳 running・予算は予約額のまま) して再送出する。
+    対象コマは発火時 ``index`` ではなく不変 ``slot_id`` で引く — ハンドラ中の時間割
+    組み替え (post_session の replace_remaining_slots) で index が移動しても正しい
+    コマを done にするため (A6 二重 done の是正)。
+
+    ``used_rounds`` が **非負** int でない (None・負数・非 int) なら delta=0 で予約額を
+    そのまま消費として残す (負数は旧 consume 系と同じく信頼せず弾く安全側)。有効な
+    実測なら delta は負 = 返金になりうる。例外時は全ロールバック (slot fired・episode
+    open・台帳 running・予算は予約額のまま) して再送出する。
     """
     from saiverse import episodes
 
-    if gated and isinstance(used_rounds, int) and not isinstance(used_rounds, bool):
-        delta = int(used_rounds) - int(reserved)
-        used_for_result: Optional[int] = int(used_rounds)
-    else:
-        delta = 0
-        used_for_result = (
-            int(used_rounds)
-            if isinstance(used_rounds, int) and not isinstance(used_rounds, bool)
-            else None
+    valid_used = (
+        isinstance(used_rounds, int)
+        and not isinstance(used_rounds, bool)
+        and used_rounds >= 0
+    )
+    if used_rounds is not None and not valid_used:
+        # 負数・非 int の used_rounds はハンドラのバグ。旧 consume 系 (_read_nonneg_int)
+        # と同じく弾き、予約額をそのまま消費として残す (過剰返金を防ぐ安全側、A5)。
+        LOGGER.warning(
+            "[day_plan] slot.fire settlement got invalid used_rounds=%r "
+            "(expected non-negative int); keeping reservation, no refund "
+            "(persona=%s exec=%s)", used_rounds, persona_id, exec_id,
         )
+    used_for_result: Optional[int] = int(used_rounds) if valid_used else None
+    delta = (int(used_rounds) - int(reserved)) if (gated and valid_used) else 0
 
     db = manager.SessionLocal()
     try:
@@ -2894,18 +2974,21 @@ def _settle_slot_tx(
         if gated and delta:
             _apply_budget_delta_in_session(row, slot, delta)
 
-        # slot fired → done (record_level はハンドラが別 tx で永続化済み)
+        # slot fired → done。配列 index はハンドラ中の時間割組み替えで移動しうるので
+        # 発火時 index ではなく不変 slot_id で対象コマを引く (record_level はハンドラが
+        # 別 tx で永続化済み)。
         slots = _row_slots(row)
+        target = _find_slot_index_by_id(slots, slot_id)
         done_slot: Optional[Dict[str, Any]] = None
-        if index < len(slots):
-            slots[index]["status"] = STATUS_DONE
+        if target is not None:
+            slots[target]["status"] = STATUS_DONE
             row.slots_json = json.dumps(slots, ensure_ascii=False)
-            done_slot = slots[index]
+            done_slot = slots[target]
         else:
             LOGGER.warning(
-                "[day_plan] slot index %d out of range during settlement "
-                "(persona=%s date=%s len=%d); done not written",
-                index, persona_id, plan_date_str, len(slots),
+                "[day_plan] slot id=%s not found during settlement (persona=%s "
+                "date=%s len=%d); done not written (episode/台帳 は精算する)",
+                slot_id, persona_id, plan_date_str, len(slots),
             )
         row.updated_at = clock.now()
 
@@ -2949,6 +3032,7 @@ def settle_stale_slot(
     persona_id: str,
     plan_date_str: str,
     index: int,
+    slot_id: Optional[str],
     episode_ref: Optional[str],
 ) -> None:
     """精算 tx が転けて running のまま残ったコマ発火を保守的に settle-close する (A6 回復)。
@@ -2992,18 +3076,21 @@ def settle_stale_slot(
     closed_episode = False
     try:
         row = _load_plan_row(db, persona_id, plan_date_str)
-        # slot fired → done (既に done/skipped 等なら触らない — 帳簿を上書きしない)
+        # slot fired → done (既に done/skipped 等なら触らない — 帳簿を上書きしない)。
+        # 対象は発火時 index ではなく不変 slot_id で引く (ハンドラ中の時間割組み替えで
+        # index が移動していても正しいコマを締める)。
         if row is not None:
             slots = _row_slots(row)
-            if index < len(slots) and slots[index].get("status") == STATUS_FIRED:
-                slots[index]["status"] = STATUS_DONE
+            target = _find_slot_index_by_id(slots, slot_id)
+            if target is not None and slots[target].get("status") == STATUS_FIRED:
+                slots[target]["status"] = STATUS_DONE
                 row.slots_json = json.dumps(slots, ensure_ascii=False)
                 row.updated_at = clock.now()
         else:
             LOGGER.warning(
                 "[day_plan] settle_stale_slot: plan row missing "
-                "(persona=%s date=%s index=%d); settling ledger/episode only",
-                persona_id, plan_date_str, index,
+                "(persona=%s date=%s index=%d id=%s); settling ledger/episode only",
+                persona_id, plan_date_str, index, slot_id,
             )
 
         # 出来事を閉じる (逆引き結果、同 session)。既に閉じていれば close は no-op。

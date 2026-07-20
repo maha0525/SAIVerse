@@ -1306,3 +1306,215 @@ def test_recovery_deadline_spares_fresh_running_slot(manager, task_refs):
     clock.advance_to(BASE + timedelta(hours=9, minutes=5))
     wiring._collect_stale_slot_executions(manager)
     assert ledger.get_execution(exec_id)["status"] == "running"  # 触られない
+
+
+# ---------------------------------------------------------------------------
+# Codex レビュー指摘 (2026-07-20) の回帰
+# ---------------------------------------------------------------------------
+
+
+def test_settle_marks_slot_by_id_after_midhandler_reshuffle(manager, task_refs):
+    """Finding 2: ハンドラ中に時間割が組み替わっても (post_session の
+    replace_remaining_slots)、精算は発火した当該コマ (不変 id) を done にする —
+    配列 index ではなく id で引くため、前詰めで別コマを誤って done にしない。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "defer"},
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "work"},
+    ])
+    # index 0 を deferred にして「index 0=deferred / index 1=実行中」の状況を作る。
+    day_plan._update_slot(manager, PERSONA_ID, PLAN_DATE, 0, status="deferred")
+    clock.enable_virtual(BASE + timedelta(hours=9))
+    worker_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[1]["id"]
+
+    def _reshuffle_then_return(*a, **k):
+        # ハンドラ中の残り時間割置換: 実行中コマ (fired) が index 0 へ前詰めされ、
+        # 新コマ (20:00) が index 1 に入る。
+        day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "20:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": "new"},
+        ])
+        return _mock_work_session_result(rounds_used=3)
+
+    with patch("sea.work_session.run_work_session", side_effect=_reshuffle_then_return), \
+            patch("saiverse.autonomy_wiring.fire_judgment_point",
+                  return_value={"submitted": False}):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 1)
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    by_id = {s["id"]: s for s in slots}
+    # 発火した当該コマが done (index が動いても id で正しく締まる)
+    assert by_id[worker_id]["status"] == "done"
+    # 新規に前詰めされたコマ (現 index 1) は pending のまま — 誤 done にしない
+    new_slot = next(s for s in slots if s["start"] == "20:00")
+    assert new_slot["status"] == "pending"
+    assert new_slot["id"] != worker_id
+    # 予算・台帳は当該コマぶんだけ精算 (予約 5 → 実測 3、completed)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
+    assert ledger.get_execution(_slot_exec_id(manager))["status"] == "completed"
+
+
+def test_slot_idempotency_key_is_stable_id_not_index(manager, task_refs):
+    """Finding 2: 冪等キーが不変 id ベースなので、組み替えで旧 index に来た別コマは
+    誤って二重発火扱いにならず、独立に発火できる。"""
+    _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 40)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+    first_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)), \
+            patch("saiverse.autonomy_wiring.fire_judgment_point",
+                  return_value={"submitted": False}):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "done"
+
+    # 別コマを同じ index 0 に置く (id は別) → 冪等キーが id ベースなので発火できる。
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "10:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "second"},
+    ])
+    second_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
+    assert second_id != first_id
+    clock.advance_to(BASE + timedelta(hours=10))
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=2)) as mock_ws, \
+            patch("saiverse.autonomy_wiring.fire_judgment_point",
+                  return_value={"submitted": False}):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    assert mock_ws.call_count == 1  # 別 id なので二重発火ガードに掛からない
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "done"
+
+
+def test_recovery_closes_orphaned_unknown_slot_episode(manager, task_refs):
+    """Finding 3: ハンドラ例外 + episode close 失敗が重なると episode が open のまま
+    unknown へ進む。回復がその孤児 episode を閉じる (slot/台帳の状態は保つ)。"""
+    from saiverse import episodes, execution_ledger_wiring as wiring
+
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session", side_effect=RuntimeError("boom")), \
+            patch("saiverse.episodes.close_episode", side_effect=RuntimeError("close fail")):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    exec_id = _slot_exec_id(manager)
+    assert ledger.get_execution(exec_id)["status"] == "unknown"
+    assert episodes.get_open_episode(manager, PERSONA_ID) is not None  # 孤児
+
+    wiring._close_orphaned_unknown_slot_episodes(manager)
+
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None  # 閉じた
+    # slot は fired のまま (handler 失敗なので done ではない)、台帳も unknown のまま
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "fired"
+    assert ledger.get_execution(exec_id)["status"] == "unknown"
+    # 冪等: 二度目は open episode が無いので no-op (例外を投げない)
+    wiring._close_orphaned_unknown_slot_episodes(manager)
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None
+
+
+def test_reservation_failure_does_not_touch_desire(manager, task_refs):
+    """Finding 4: 予約 tx が転けたら touch_desire は呼ばれない (取り組んでいない欲求を
+    再試行のたびに再訪記録して昇格候補へ押し上げない)。予約成立後に初めて touch する。"""
+    _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)  # ref = task:...
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("saiverse.episodes.open_episode", side_effect=RuntimeError("db down")), \
+            patch("saiverse.desire_engine.touch_desire") as mock_touch, \
+            patch("sea.work_session.run_work_session"):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    assert mock_touch.call_count == 0  # 予約が転けたので再訪も記録しない
+
+    # 予約が成立すれば touch は一度だけ呼ばれる (予約後へ移動したことの確認)
+    with patch("saiverse.desire_engine.touch_desire") as mock_touch2, \
+            patch("sea.work_session.run_work_session",
+                  return_value=_mock_work_session_result(rounds_used=3)), \
+            patch("saiverse.autonomy_wiring.fire_judgment_point",
+                  return_value={"submitted": False}):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    assert mock_touch2.call_count == 1
+
+
+def test_negative_used_rounds_is_rejected_no_over_refund(manager, task_refs):
+    """Finding 5: ハンドラが負の used_rounds を返しても返金として受理しない — 予約額を
+    そのまま消費として残し、台帳にも負値を保存しない (旧 consume 系と同じ非負要求)。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=-3)), \
+            patch("saiverse.autonomy_wiring.fire_judgment_point",
+                  return_value={"submitted": False}):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    # 予約額 5 のまま (負 delta による過剰返金なし)
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5
+    exec_id = _slot_exec_id(manager)
+    result = ledger.get_execution(exec_id)["result"]
+    assert result["used_rounds"] is None  # 負値は保存しない
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+
+
+def test_replace_day_plan_save_failure_restores_old_plan_and_reservations(manager, task_refs):
+    """Finding 1: 検証通過後の DB 保存 (_upsert_plan_slots) が転けても、旧 plan・
+    旧予約とも復元される (cancel だけ先に走って plan が孤児化しない)。"""
+    _seed_two_slot_plan(manager, task_refs)
+    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert _slot_keys_present(manager) == {0, 1}
+
+    real_upsert = day_plan._upsert_plan_slots
+    state = {"n": 0}
+
+    def flaky_upsert(*a, **k):
+        state["n"] += 1
+        if state["n"] == 1:  # 前進の保存だけ失敗させる (復元の保存は通す)
+            raise RuntimeError("save fail")
+        return real_upsert(*a, **k)
+
+    with patch("saiverse.day_plan._upsert_plan_slots", side_effect=flaky_upsert):
+        with pytest.raises(RuntimeError):
+            day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+                {"start": "18:00", "kind": "休む", "ref": "none",
+                 "facility": "own_room", "budget_rounds": 0, "note": "new"},
+            ])
+
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
+    assert _slot_keys_present(manager) == {0, 1}  # 旧予約も復元
+
+
+def test_replace_day_plan_repush_failure_restores_old_plan_and_reservations(manager, task_refs):
+    """Finding 1: 保存は通ったが再予約 (schedule_day_plan) が転けても、旧 plan・
+    旧予約へ復元される (監査 A1「再予約途中失敗時に旧 plan/旧予約へ戻る」)。"""
+    _seed_two_slot_plan(manager, task_refs)
+    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    real_schedule = day_plan.schedule_day_plan
+    state = {"n": 0}
+
+    def flaky_schedule(*a, **k):
+        state["n"] += 1
+        if state["n"] == 1:  # 前進の再 push だけ失敗させる (復元の push は通す)
+            raise RuntimeError("push fail")
+        return real_schedule(*a, **k)
+
+    with patch("saiverse.day_plan.schedule_day_plan", side_effect=flaky_schedule):
+        with pytest.raises(RuntimeError):
+            day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+                {"start": "18:00", "kind": "休む", "ref": "none",
+                 "facility": "own_room", "budget_rounds": 0, "note": "new"},
+            ])
+
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
+    assert _slot_keys_present(manager) == {0, 1}

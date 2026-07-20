@@ -128,3 +128,19 @@
 
 - **crash 回復時の予算は保守側 (返金しない)**: 精算 tx が転んで recovery が拾うと、予約額 (= コマの実効予算 = 使える上限) がそのまま消費として残る。実測が上限未満でも返金しない。予算超過を防ぐ安全側で、crash は稀なので受け入れる (A5 の設計思想と一致)。
 - **予約 = 実効予算の先取り消費**: Beat 直列化でコマは同時発火しないため「hold」は主に crash 一貫性のため。予約 tx commit 後に process が死んでも予算は減った状態で残り、再起動後の残高が「作業は行われた」を反映する (= A5 バグの逆)。
+
+---
+
+## Codex (Sol) レビュー修正 (2026-07-20、コミット eeb4ff2 に対して)
+
+初回コミット後の Codex レビューで 5 件の妥当な指摘。全て head 実コードで裏取りして修正・回帰追加した。特に **Finding 2 は私 (Fable) の検収漏れの本丸** — ハンドラ境界を跨いで可変 index を信頼していた。
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| **1** (P1) | `replace_day_plan` が cancel 後の DB 保存/再予約失敗で旧予約を孤児化 (検証前 ValueError しか塞げていなかった) | 旧 plan を控え、保存/再予約が転けたら **cancel 済み新予約を落として旧 plan/旧予約を復元** して再送出。回帰 = 保存失敗・再 push 失敗の各で旧 plan/旧予約不変 |
+| **2** (P1) | ハンドラ中の `replace_remaining_slots` (post_session が `_handle_worker_slot` 内で同期発火) で配列が前詰めされ、精算が **発火時 index で別コマを done**・冪等キーも旧 index で別コマを誤 dedup | コマに**不変 `id`** を導入 (`_validate_and_normalize_slots` で採番、既存保持)。冪等キー・payload・精算・回復を **id ベース**に (`_find_slot_index_by_id`)。旧 plan のコマは `_fire_slot` で backfill。回帰 = 前詰め後も id で正しいコマが done・別 id コマは二重発火扱いされず発火可 |
+| **3** (P1) | ハンドラ例外 + episode close 失敗が重なると episode open のまま unknown へ進み、回復 (running のみ) が拾えず永久 open | 回復 tick/起動時に `_close_orphaned_unknown_slot_episodes` を追加 — unknown な slot.fire の孤児 open episode を閉じる (slot=fired・台帳=unknown は保つ、冪等)。回帰 = 孤児 episode が閉じられ二度目は no-op |
+| **4** (P2) | `touch_desire` が予約 tx より前 → 予約失敗の再試行ごとに touch_count 増 | touch_desire を**予約 tx 成立後**へ移動 (予約成立 = 「取り組みに向かった」の確定点)。回帰 = 予約失敗で touch 0 回・成立で 1 回 |
+| **5** (P2) | 負の `used_rounds` が返金として受理され過剰返金・台帳に負値保存 | 精算で **非負 int のみ有効** (旧 consume 系と同じ)。負/非 int は delta=0 で予約額を残し、result は None + WARN。回帰 = -3 で used 不変・result None |
+
+回帰追加計 9 件 (test_day_plan.py)、本体スイート **2728 passed 全緑**、ruff clean。**教訓**: 検収の第二パスで「ハンドラ/await 境界を跨いで可変な配列 index を信頼していないか」を明示的に見る。実行単位の identity は index (位置) でなく不変 id で持つ。
