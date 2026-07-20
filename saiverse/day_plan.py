@@ -278,6 +278,7 @@ def _normalize_plan_date(plan_date: Any) -> str:
 def _validate_and_normalize_slots(
     slots: Any, *, ascending_from: int = 0,
     order_key: Optional[Callable[[str], int]] = None,
+    fresh_ids_from: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """コマ配列を検証し、正規化したコピーを返す。不正は ValueError。
 
@@ -306,6 +307,14 @@ def _validate_and_normalize_slots(
             (ライフ未宣言の日の後方互換)。ライフのある日は呼び出し元が
             :func:`day_order_minutes` を束ねて渡し、深夜跨ぎでも「一日の流れ」
             の順で検証させる。
+        fresh_ids_from: この index 以降のコマは、入力が id を持っていても**必ず
+            新しい id を採番する** (id の新世代化)。置換経路
+            (:func:`replace_day_plan` は 0 / :func:`replace_remaining_slots` は
+            消化済み区間の直後) が使う — 呼び出し元 (LLM の判断出力等) が旧コマを
+            id ごと写して渡すと、新旧の予約 key (:func:`_slot_key`) が同一になり
+            「cancel 失敗の残留予約は id 不一致で無害」という置換の安全性が
+            無効化されるため (2026-07-20 Codex レビュー第四陣 P2)。None (省略) は
+            従来どおり有効な既存 id を保持する (保存・編集経路の安定 identity)。
     """
     if order_key is None:
         order_key = _life_minutes
@@ -393,9 +402,16 @@ def _validate_and_normalize_slots(
         # EventScheduler の予約 key は index ではなくこの ID で対象コマを一意に指す
         # (A6 二重 done の是正)。plan 内での重複は許さない — id が唯一の照準に
         # なったため、複製コマ (LLM が既存コマを id ごと写した等) は後の方に
-        # 新しい id を振り直す。
+        # 新しい id を振り直す。置換経路は fresh_ids_from で世代ごと採番し直す
+        # (docstring 参照)。
         slot_id = slot.get("id")
-        if not isinstance(slot_id, str) or not slot_id or slot_id in seen_ids:
+        force_fresh = fresh_ids_from is not None and i >= fresh_ids_from
+        if (
+            force_fresh
+            or not isinstance(slot_id, str)
+            or not slot_id
+            or slot_id in seen_ids
+        ):
             slot_id = uuid.uuid4().hex[:12]
         seen_ids.add(slot_id)
 
@@ -422,7 +438,12 @@ def _validate_and_normalize_slots(
 
 
 def _validate_and_normalize_for_save(
-    manager: Any, persona_id: str, plan_date_str: str, slots: List[Dict[str, Any]]
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    slots: List[Dict[str, Any]],
+    *,
+    fresh_ids: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """保存前の検証 + ライフ範囲正規化 (``save_day_plan`` / ``replace_day_plan`` 共通)。
 
@@ -433,6 +454,12 @@ def _validate_and_normalize_for_save(
     退化する)。続けてライフ宣言日は :func:`_normalize_slots_within_organized_range`
     で「今〜就寝」の編成できる範囲へ丸め・部分救済する。
 
+    Args:
+        fresh_ids: True で全コマの id を新世代へ採番し直す (入力の id は無視)。
+            全置換 (:func:`replace_day_plan`) 用 — 旧コマの id 持ち越しによる
+            予約 key 衝突を契約レベルで封じる。保存・編集 (:func:`save_day_plan`)
+            は False で既存 id を保持する。
+
     Returns:
         ``(kept, notes)``。``kept`` は生き残ったコマ、``notes`` は日常語の調整メモ。
 
@@ -442,7 +469,8 @@ def _validate_and_normalize_for_save(
     """
     lives = get_lives(manager, persona_id, plan_date_str)
     normalized = _validate_and_normalize_slots(
-        slots, order_key=lambda h: day_order_minutes(lives, h)
+        slots, order_key=lambda h: day_order_minutes(lives, h),
+        fresh_ids_from=0 if fresh_ids else None,
     )
     kept, notes = _normalize_slots_within_organized_range(
         manager, persona_id, plan_date_str, normalized,
@@ -567,11 +595,43 @@ def _write_slots(manager: Any, persona_id: str, plan_date_str: str, slots: List[
 
 
 def _update_slot(
-    manager: Any, persona_id: str, plan_date_str: str, index: int, **changes: Any
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    *,
+    expected_id: Optional[str] = None,
+    **changes: Any,
 ) -> Optional[Dict[str, Any]]:
-    """slot[index] に changes を適用して永続化し、更新後の slot を返す。"""
+    """slot[index] に changes を適用して永続化し、更新後の slot を返す。
+
+    Args:
+        expected_id: 対象コマの不変 id。指定時、この関数が plan を読み直した
+            時点で ``slots[index]`` の id が一致しなければ **id で現在位置を
+            引き直す** — 呼び出し元が index を掴んでからこの書き込みまでの間に
+            時間割が組み替わっても、別コマを書き換えない (発火経路の照準保持、
+            2026-07-20 Codex レビュー第四陣 P1 と同族の窓)。id が plan から
+            消えていれば何も書かず None を返す。
+    """
     slots = load_day_plan(manager, persona_id, plan_date_str)
-    if slots is None or index >= len(slots):
+    if slots is None:
+        LOGGER.warning(
+            "[day_plan] cannot update slot: plan not found (persona=%s date=%s)",
+            persona_id, plan_date_str,
+        )
+        return None
+    if expected_id is not None:
+        if index >= len(slots) or slots[index].get("id") != expected_id:
+            resolved = _find_slot_index_by_id(slots, expected_id)
+            if resolved is None:
+                LOGGER.warning(
+                    "[day_plan] cannot update slot: id=%s vanished from plan "
+                    "(persona=%s date=%s stale_index=%d)",
+                    expected_id, persona_id, plan_date_str, index,
+                )
+                return None
+            index = resolved
+    elif index >= len(slots):
         LOGGER.warning(
             "[day_plan] cannot update slot: not found (persona=%s date=%s index=%d)",
             persona_id, plan_date_str, index,
@@ -1513,6 +1573,7 @@ def _apply_life_budget_gate(
     if remaining <= 0:
         _update_slot(
             manager, persona_id, plan_date_str, index,
+            expected_id=slot.get("id"),
             status=STATUS_SKIPPED, skip_reason=SKIP_REASON_BUDGET_EXHAUSTED,
         )
         LOGGER.warning(
@@ -1896,21 +1957,18 @@ def _push_slot(
 def _fire_slot_by_id(
     manager: Any, persona_id: str, plan_date_str: str, slot_id: str
 ) -> None:
-    """EventScheduler callback: 不変 id で現在の index を解決して発火する。
+    """EventScheduler callback: 不変 id を照準として発火する。
 
-    id が現 plan に見つからない = そのコマは既に置換等で消えている。旧予約の
-    残留発火 (cancel 失敗の生き残り) はここで無害に空振りする — 旧 key が新 plan
-    の別コマを誤発火させない (:func:`_slot_key` docstring 参照)。
+    id → 現在位置の解決は **ここでは行わず** :func:`_fire_slot` に id ごと渡す —
+    ここで index に変換してから渡すと、変換と ``_fire_slot`` 自身の plan 再読込の
+    間に時間割が組み替わったとき別コマを発火する (2026-07-20 Codex レビュー
+    第四陣 P1)。解決は発火に使う配列を読んだ ``_fire_slot`` 本体が行う。
+
+    id が現 plan に無い = そのコマは置換等で消えている。旧予約の残留発火
+    (cancel 失敗の生き残り) は ``_fire_slot`` 側で無害に空振りする
+    (:func:`_slot_key` docstring 参照)。
     """
-    slots = load_day_plan(manager, persona_id, plan_date_str) or []
-    index = _find_slot_index_by_id(slots, slot_id)
-    if index is None:
-        LOGGER.info(
-            "[day_plan] stale reservation fired for unknown slot id=%s; ignoring "
-            "(persona=%s date=%s)", slot_id, persona_id, plan_date_str,
-        )
-        return
-    _fire_slot(manager, persona_id, plan_date_str, index)
+    _fire_slot(manager, persona_id, plan_date_str, 0, slot_id=slot_id)
 
 
 def _ensure_slot_ids(
@@ -2156,10 +2214,15 @@ def replace_remaining_slots(
     ]
     # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)。
     # 順序の基準は save_day_plan と同じ「一日の流れ」順 (深夜跨ぎ対応)。
+    # fresh_ids_from: 新コマ区間は id を新世代へ採番し直す (消化済み区間は帳簿
+    # なので既存 id を保持 — 精算・回復が台帳 payload の slot_id で逆引きする)。
+    # 呼び出し元が置換前の pending コマを id ごと写しても旧予約 key と衝突しない
+    # (2026-07-20 Codex レビュー第四陣 P2 と同根)。
     lives = get_lives(manager, persona_id, plan_date_str)
     normalized = _validate_and_normalize_slots(
         candidate, ascending_from=len(kept_history),
         order_key=lambda h: day_order_minutes(lives, h),
+        fresh_ids_from=len(kept_history),
     )
     history_part = normalized[:len(kept_history)]
     new_part = normalized[len(kept_history):]
@@ -2225,8 +2288,13 @@ def replace_day_plan(
         raise ValueError("persona_id is required")
     plan_date_str = _normalize_plan_date(plan_date)
     # 1. 検証・正規化を先に (raise してもこの時点まで DB / スケジューラ未変更)。
+    # fresh_ids=True: 全置換は id の**新世代**を必須にする。呼び出し元が旧コマを
+    # id ごと写した入力でも、新 plan の予約 key は旧予約と必ず別物になる —
+    # 「cancel 失敗の残留予約は id 不一致で無害に空振り + watchdog が新コマの
+    # key 不在を検出」という手順 3 の安全性を、入力の形に依存させず契約で保証する
+    # (2026-07-20 Codex レビュー第四陣 P2)。
     kept, notes = _validate_and_normalize_for_save(
-        manager, persona_id, plan_date_str, new_slots,
+        manager, persona_id, plan_date_str, new_slots, fresh_ids=True,
     )
     # 旧予約 cancel 用に、置換で消える旧コマの id を保存前に控える (保存後は
     # DB から旧 plan が消えるため後からは引けない)。
@@ -2529,6 +2597,7 @@ def _apply_budget_gate(
     if remaining <= 0:
         _update_slot(
             manager, persona_id, plan_date_str, index,
+            expected_id=slot.get("id"),
             status=STATUS_SKIPPED, skip_reason=SKIP_REASON_BUDGET_EXHAUSTED,
         )
         LOGGER.warning(
@@ -2550,7 +2619,8 @@ def _apply_budget_gate(
         # 切り詰め (または既定値の具体化) を slots_json に永続化する — 就寝判断の
         # 予定 vs 実績が「実際に許可された予算」を見られるようにするため。
         updated = _update_slot(
-            manager, persona_id, plan_date_str, index, budget_rounds=requested,
+            manager, persona_id, plan_date_str, index,
+            expected_id=slot.get("id"), budget_rounds=requested,
         )
         if updated is not None:
             return updated
@@ -2558,7 +2628,13 @@ def _apply_budget_gate(
     return slot
 
 
-def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) -> None:
+def _fire_slot(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    slot_id: Optional[str] = None,
+) -> None:
     """コマ発火。判断点ではないため LLM を呼ばない (judgment_points.md §2)。
 
     1. ユーザー会話中 → 繰り下げ (10 分後に同 key 再 push、上限 3 回で skipped)
@@ -2566,9 +2642,33 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     3. facility が現在地と違えば移動 (失敗は WARN + 続行)
     4. kind 別ハンドラ実行 → 実 rounds_used を台帳へ積算 →
        status 更新 (fired → done / 未登録 kind は skipped)
+
+    Args:
+        slot_id: 発火対象コマの不変 id (EventScheduler 経由 = :func:`_fire_slot_by_id`
+            は必ず渡す)。指定時は **本関数自身が読み込んだ最新 plan** で id から
+            現在位置を解決し、``index`` は使わない — 呼び出し元の id→index 解決と
+            本関数の再読込の間に時間割が組み替わると別コマを発火する窓
+            (2026-07-20 Codex レビュー第四陣 P1) を、照準に使う配列と読んだ配列を
+            同一にすることで閉じる。id が見つからなければ無害に空振りする。
+            None はテスト等の index 直指定 (後方互換)。
     """
     slots = load_day_plan(manager, persona_id, plan_date_str)
-    if slots is None or index >= len(slots):
+    if slots is None:
+        LOGGER.warning(
+            "[day_plan] fire: plan not found (persona=%s date=%s index=%d id=%s)",
+            persona_id, plan_date_str, index, slot_id,
+        )
+        return
+    if slot_id is not None:
+        resolved = _find_slot_index_by_id(slots, slot_id)
+        if resolved is None:
+            LOGGER.info(
+                "[day_plan] fire: slot id=%s not in current plan; ignoring stale "
+                "fire (persona=%s date=%s)", slot_id, persona_id, plan_date_str,
+            )
+            return
+        index = resolved
+    elif index >= len(slots):
         LOGGER.warning(
             "[day_plan] fire: slot not found (persona=%s date=%s index=%d)",
             persona_id, plan_date_str, index,
@@ -2600,7 +2700,7 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
         defer_count = int(slot.get("defer_count", 0))
         if defer_count >= MAX_DEFERRALS:
             _update_slot(
-                manager, persona_id, plan_date_str, index,
+                manager, persona_id, plan_date_str, index, expected_id=slot_id,
                 status=STATUS_SKIPPED, skip_reason=SKIP_REASON_DEFERRAL_LIMIT,
             )
             LOGGER.info(
@@ -2609,7 +2709,7 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
             )
             return
         _update_slot(
-            manager, persona_id, plan_date_str, index,
+            manager, persona_id, plan_date_str, index, expected_id=slot_id,
             status=STATUS_DEFERRED, defer_count=defer_count + 1,
         )
         retry_at = clock.now() + timedelta(minutes=DEFER_MINUTES)
@@ -2626,7 +2726,7 @@ def _fire_slot(manager: Any, persona_id: str, plan_date_str: str, index: int) ->
     handler = _SLOT_HANDLERS.get(kind)
     if handler is None:
         _update_slot(
-            manager, persona_id, plan_date_str, index,
+            manager, persona_id, plan_date_str, index, expected_id=slot_id,
             status=STATUS_SKIPPED, skip_reason=SKIP_REASON_NO_HANDLER,
         )
         LOGGER.warning(
@@ -2821,7 +2921,10 @@ def _fire_slot_legacy(
     # fired を先に永続化することで、ハンドラ実行中のクラッシュ後に watchdog
     # (reschedule_pending_slots) が同じコマを二重発火させない
     # (pending/deferred のみ再 push されるため)。
-    updated = _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_FIRED)
+    updated = _update_slot(
+        manager, persona_id, plan_date_str, index,
+        expected_id=slot.get("id"), status=STATUS_FIRED,
+    )
     if updated is not None:
         slot = updated
     LOGGER.info(
@@ -2874,7 +2977,10 @@ def _fire_slot_legacy(
                 "continuing",
                 persona_id, plan_date_str, index,
             )
-    done_slot = _update_slot(manager, persona_id, plan_date_str, index, status=STATUS_DONE)
+    done_slot = _update_slot(
+        manager, persona_id, plan_date_str, index,
+        expected_id=slot.get("id"), status=STATUS_DONE,
+    )
     _close_slot_episode(manager, persona_id, episode_ref, done_slot)
 
 
@@ -3577,6 +3683,7 @@ def run_worker_slot_session(
             )
             _update_slot(
                 manager, persona_id, plan_date_str, index,
+                expected_id=slot.get("id"),
                 record_level=RECORD_LEVEL_PRESENCE_ONLY,
             )
             return None
@@ -3694,6 +3801,7 @@ def _handle_living_slot(
     )
     _update_slot(
         manager, persona_id, plan_date_str, index,
+        expected_id=slot.get("id"),
         record_level=RECORD_LEVEL_PRESENCE_ONLY,
     )
 
@@ -3713,6 +3821,7 @@ def _handle_rest_slot(
     )
     _update_slot(
         manager, persona_id, plan_date_str, index,
+        expected_id=slot.get("id"),
         record_level=RECORD_LEVEL_PRESENCE_ONLY,
     )
 

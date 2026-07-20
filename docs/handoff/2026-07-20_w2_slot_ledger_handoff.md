@@ -166,3 +166,14 @@ Codex が更に 2 件。どちらも再現実験付きで、コードの構造�
 | **2-cont²** (P1) | `claim_execution` の prepared 再利用は**同じ execution_id を並走発火の両方に runnable として返す**。先発が予約 commit 後、後発は `_SlotVanished` 経路で共有台帳を**無条件 mark_failed** (running→failed は合法) → 先発の精算が failed→applied の IllegalTransition で爆発 (slot=fired・予算予約済み・episode=open・台帳=failed)。両者が予約 tx へ同時進入した場合は二重実行・予算二重予約の窓もあった | prepared→running を**条件付き一括 UPDATE の早い者勝ち**に (`try_mark_running`、session= で予約 tx の 1 commit に同梱)。負けた側は `_ClaimLost` で予約 tx を全ロールバックし**台帳に一切書かず離脱**。`_SlotVanished` 離脱時の failed 落としも `abandon_prepared` (**prepared のときだけ** failed) へ変更 — 勝者所有の running 台帳を壊さない。回帰 = Sol 再現の interleaving (後発離脱中も台帳 running 維持→先発 completed 完走)・席取り敗者の副作用ゼロ・台帳プリミティブ 5 件 |
 
 回帰 +8 件 (test_day_plan 3 + test_execution_ledger 5)、テスト側の旧 index key 前提も id ベースへ更新 (test_day_plan / test_judgment_points 計 6 箇所)。本体スイート **2737 passed 全緑**、ruff clean。**深めた教訓**: ①「watchdog が回復する」と書くなら**watchdog がその異常を観測できるか**まで検証する — 回復系の前提 (key の一意性) が破れていると、回復を当てにした except 節は嘘になる。②冪等 dedup (同じ行を返す) と実行権 (走ってよいのは一人) は**別の概念** — dedup の口が実行権も配っていないか、並走で同じ id を掴んだ両者のその後を追う。
+
+### 第四レビュー (2026-07-20、第三陣修正 f2284a9 への再指摘)
+
+第三陣の id 化そのものへの詰め 2 件。どちらも「id を導入したのに、照準・世代の一貫性が経路の途中で切れている」型。
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| **P1** | `_fire_slot_by_id` が id→index を解決した**直後**に、`_fire_slot` が plan を**再読込**して index で発火する — 2 回の読込の間に時間割が組み替わると別 id のコマを実行する (再現: 13:00 の id 発火→間で 18:00 コマへ置換→18:00 コマが 13:00 に done) | `_fire_slot` に `slot_id` (照準) を渡し、**発火に使う配列を読んだ本体自身が id を解決する** — 変換と使用の間に別の読込を挟まない。`_update_slot` にも `expected_id` 照合を追加し (不一致なら id で引き直し、消えていれば書かない)、繰り下げ/skip/予算切り詰め/presence 記録/legacy fired・done の全書き込み点に配線 — 「index を掴んでから書くまで」の同族の窓を書き込み側で一括閉塞 |
+| **P2** | 検証は有効な既存 id を保持するため、呼び出し元が**旧コマを id ごと写して時刻だけ変えた**入力だと新旧の予約 key が同一 — cancel 障害時の衝突 (第三陣 P1) が復活する。現 day_open 経路は sanitize で id を落とすため直接は踏まないが、`replace_day_plan` の契約として安全性が成立していない | **置換 = id の新世代**を契約化: `_validate_and_normalize_slots` に `fresh_ids_from` を追加し、`replace_day_plan` は全コマ (`fresh_ids=True`)、`replace_remaining_slots` は新コマ区間 (消化済み帳簿は精算・回復の逆引き対象なので id 維持) を必ず採番し直す。入力の形に依存しない構造保証 |
+
+回帰 +3 件 (照準の index ズレ追従 / 消えた id の空振り / 置換の新世代化。cancel 失敗テストも「id ごと写した入力」の最悪形に強化)。本体スイート **2740 passed 全緑**、ruff clean。**深めた教訓**: ①不変 id を「持っている」ことと「解決した結果を使う瞬間まで一貫して照準にしている」ことは別 — **変換 (id→index) と使用の間に再読込を挟んだら、その変換は無効**。書き込み点ごとに「この index は今も同じコマか」を問う。②識別子で安全性を作ったら、**その識別子の供給源 (誰が採番し、誰が持ち込めるか) まで契約に含める** — 入力が旧識別子を持ち込める限り、一意性は仮定でしかない。

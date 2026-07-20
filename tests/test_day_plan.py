@@ -1106,6 +1106,50 @@ def test_successful_fire_settles_once_then_double_fire_is_ignored(manager, task_
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3  # 不変
 
 
+def test_fire_slot_follows_identity_when_index_shifts(manager, task_refs):
+    """id 照準 (第四陣 P1): 呼び出し元の index が組み替えでズレていても、
+    slot_id が指すコマを発火する — _fire_slot 自身が読んだ plan で id を解決する。"""
+    _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "X"},
+        {"start": "10:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "Y"},
+    ])
+    x_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    # 「id→index 解決後に組み替えで index がズレた」状況を、ズレた index=1 と
+    # 正しい照準 slot_id=X を渡すことで再現する
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 1, slot_id=x_id)
+
+    assert mock_ws.call_count == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"      # X (id の指すコマ) が発火した
+    assert slots[1]["status"] == "pending"   # ズレた index の Y は無傷
+
+
+def test_fire_slot_with_vanished_id_is_noop_even_if_index_valid(manager, task_refs):
+    """id 照準 (第四陣 P1 の Sol 再現): 発火直前に置換で消えた id は、渡された
+    index に有効なコマが居ても発火しない (別コマの前倒し done を防ぐ)。"""
+    _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs)  # index 0 に有効な 09:00 コマ
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0, slot_id="vanished0000")
+
+    assert mock_ws.call_count == 0
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "pending"       # index 0 のコマは撃たれていない
+    assert _slot_exec_id(manager) is None        # 台帳にも実行が採番されていない
+
+
 def test_concurrent_claim_loser_does_not_break_winners_running_ledger(manager, task_refs):
     """二重 claim の後発が離脱しても先発の running 台帳を壊さない (Codex 第三陣 [P1])。
 
@@ -1307,19 +1351,22 @@ def test_replace_cancel_failure_stale_reservation_harmless_and_watchdog_detects(
     移行でこの両方が塞がれていることの回帰。
     """
     _seed_two_slot_plan(manager, task_refs)  # 13:00 / 15:00 を予約済み
+    old_slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     old_ids = _slot_ids(manager)
 
-    # cancel が最初から失敗する状況 (Codex の再現条件)
+    # cancel が最初から失敗する状況 (Codex の再現条件)。入力は**旧コマを id ごと
+    # 写して時刻だけ変えた**最悪形 (第四陣 P2) — 全置換の id 新世代化が無いと
+    # 新旧の予約 key が同一になり、以下の (1)(2) が両方破れる。
     with patch.object(
         manager.event_scheduler, "cancel", side_effect=RuntimeError("cancel down"),
     ):
         pushed, _notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "18:00", "kind": "知る", "ref": task_refs["task"],
-             "facility": "library", "budget_rounds": 3, "note": "新1"},
-            {"start": "20:00", "kind": "休む", "ref": "none",
-             "facility": "own_room", "budget_rounds": 0, "note": ""},
+            {**old_slots[0], "start": "18:00"},
+            {**old_slots[1], "start": "20:00"},
         ])
     assert pushed == 0  # 張り替え失敗は例外にせず watchdog 回復へ委ねる
+    # 全置換は id の新世代を採番する (旧 id の持ち越し禁止 — 第四陣 P2)
+    assert set(_slot_ids(manager)).isdisjoint(set(old_ids))
 
     # 旧予約は残留している (cancel できなかった)
     for old_id in old_ids:
@@ -1339,6 +1386,26 @@ def test_replace_cancel_failure_stale_reservation_harmless_and_watchdog_detects(
     # 回復: watchdog 相当の再 push で新コマの予約が張り直され、途絶は解消する
     assert day_plan.reschedule_pending_slots(manager, PERSONA_ID, PLAN_DATE) == 2
     assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == []
+
+
+def test_replace_remaining_mints_fresh_ids_for_new_slots(manager, task_refs):
+    """残りコマ置換: 新コマ区間は入力が id を写していても新世代を採番する。
+    消化済み区間 (帳簿) は既存 id を保持する (精算・回復の逆引き対象のため)。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:30", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 4, "note": "", "status": "done"},
+        {"start": "15:30", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    history_id, old_pending_id = before[0]["id"], before[1]["id"]
+
+    day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+        {**before[1], "start": "16:00"},  # 旧 pending を id ごと写した入力
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["id"] == history_id       # 帳簿は identity 維持
+    assert slots[1]["id"] != old_pending_id   # 新コマは新世代
 
 
 def test_replace_day_plan_format_failure_leaves_plan_and_reservations(manager, task_refs):
