@@ -404,9 +404,8 @@ def test_day_open_finalize_all_excluded_keeps_existing_plan_atomically(
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
     before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert manager.event_scheduler.has_key(
-        day_plan._slot_key(PERSONA_ID, PLAN_DATE, 0)
-    )
+    slot0_key = day_plan._slot_key(PERSONA_ID, PLAN_DATE, before[0]["id"])
+    assert manager.event_scheduler.has_key(slot0_key)
 
     output = {
         "monologue": "全部夜更かしの予定にしてしまった。",
@@ -422,9 +421,7 @@ def test_day_open_finalize_all_excluded_keeps_existing_plan_atomically(
 
     # 旧 plan / 旧予約とも不変
     assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == before
-    assert manager.event_scheduler.has_key(
-        day_plan._slot_key(PERSONA_ID, PLAN_DATE, 0)
-    )
+    assert manager.event_scheduler.has_key(slot0_key)
     # timetable 由来では applied=True にならない (promotions も無い)
     assert "applied=True" not in summary
     # エコーが実状態 (維持) に一致
@@ -761,10 +758,10 @@ def test_post_session_remaining_timetable_replaces_and_cancels_stale(
     assert [(s["start"], s["status"]) for s in slots] == [
         ("09:00", "done"), ("16:00", "pending"),
     ]
-    # 新 index 1 (16:00) は予約済み、旧 index 2 の残骸は cancel 済み
-    key = f"day_plan:{PERSONA_ID}:{PLAN_DATE}:"
-    assert manager.event_scheduler.has_key(key + "1")
-    assert not manager.event_scheduler.has_key(key + "2")
+    # 新コマ (16:00) は予約済み、旧コマの残骸は cancel 済み (予約は 1 件だけ)
+    assert manager.event_scheduler.has_key(
+        day_plan._slot_key(PERSONA_ID, PLAN_DATE, slots[1]["id"])
+    )
     assert manager.event_scheduler.pending_count() == 1
 
 
@@ -1273,8 +1270,9 @@ def test_post_conversation_resume_now_inserts_immediate_slot(
     assert inserted["ref"] == "task:1"
     assert inserted["facility"] == "library"    # 元コマから引き継ぎ
     assert inserted["budget_rounds"] == 5       # 元コマから引き継ぎ
-    key = f"day_plan:{PERSONA_ID}:{PLAN_DATE}:"
-    assert manager.event_scheduler.has_key(key + "1")
+    assert manager.event_scheduler.has_key(
+        day_plan._slot_key(PERSONA_ID, PLAN_DATE, inserted["id"])
+    )
     assert "applied=True" in summary
 
 

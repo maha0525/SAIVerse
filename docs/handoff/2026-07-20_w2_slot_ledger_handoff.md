@@ -155,3 +155,14 @@
 | **2-cont** (P1) | 不変 id を claim/精算には通したが **予約 tx は発火時 index を無条件 fired** — claim 後・予約前の組み替えで別コマを fired にし元コマのハンドラが走り台帳だけ completed | 予約 tx に slot_id を渡し **同 session 内で id から現在位置を引く**。対象が消えて/発火不能なら `_SlotVanished` を投げ、**mark_running より前に中断** (副作用ゼロ) → 台帳 failed・ハンドラ不実行。回帰 = claim 後・予約前の組み替えでハンドラ 0 回・failed・別コマ pending |
 
 回帰 +3 件、本体スイート **2729 passed 全緑**、ruff clean。**深めた教訓**: ①「復元」戦略が失敗と同じ操作に依存していないか (障害は継続しうる — 一過性前提の回帰では捕まらない)。②不変 id 化は claim/精算だけでなく **状態を書く全区間 (予約含む) を貫く** — 一箇所でも位置ベースが残ると窓が開く。
+
+### 第三レビュー (2026-07-20、c321556 への再々指摘。修正セッションは別 — Opus 暴走後に Fable が引き継ぎ)
+
+Codex が更に 2 件。どちらも再現実験付きで、コードの構造と一致することを裏取りした上で受け入れた。
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| **1-cont²** (P1) | 保存先行後の cancel が**最初から**失敗すると旧時刻の予約が残留。予約 key が index ベースで新 plan と**同じ文字列**のため、(a) watchdog の `find_lost_slot_reservations` は「key の有無」しか見ず途絶を見逃し (`== []`)、(b) 旧 13:00/15:00 のイベントが新 plan の 18:00/20:00 コマを前倒しで誤発火させる (except 節の「watchdog が回復する」が成立していなかった) | **EventScheduler 予約 key を不変 slot id ベースへ移行** (`_slot_key`)。発火 callback は `_fire_slot_by_id` が現 plan から id で index を解決 — 残留予約は「その id のコマはもう無い」で**無害に空振り**し、watchdog は新コマの key 不在を正しく検出→再 push で自己回復。cancel は best-effort の掃除に格下げ (`extra_ids=` で旧 plan の id を渡す)。episode の origin_ref は**回復互換のため index 形式のまま分離凍結** (`_slot_origin_ref` は `_slot_key` を共有しない)。legacy plan (id 無し) は push 時に採番 (`_ensure_slot_ids`)、plan 内の id 重複は検証で振り直し。回帰 = cancel 全滅でも find_lost が新コマを検出・残留発火が空振り・reschedule で収束 |
+| **2-cont²** (P1) | `claim_execution` の prepared 再利用は**同じ execution_id を並走発火の両方に runnable として返す**。先発が予約 commit 後、後発は `_SlotVanished` 経路で共有台帳を**無条件 mark_failed** (running→failed は合法) → 先発の精算が failed→applied の IllegalTransition で爆発 (slot=fired・予算予約済み・episode=open・台帳=failed)。両者が予約 tx へ同時進入した場合は二重実行・予算二重予約の窓もあった | prepared→running を**条件付き一括 UPDATE の早い者勝ち**に (`try_mark_running`、session= で予約 tx の 1 commit に同梱)。負けた側は `_ClaimLost` で予約 tx を全ロールバックし**台帳に一切書かず離脱**。`_SlotVanished` 離脱時の failed 落としも `abandon_prepared` (**prepared のときだけ** failed) へ変更 — 勝者所有の running 台帳を壊さない。回帰 = Sol 再現の interleaving (後発離脱中も台帳 running 維持→先発 completed 完走)・席取り敗者の副作用ゼロ・台帳プリミティブ 5 件 |
+
+回帰 +8 件 (test_day_plan 3 + test_execution_ledger 5)、テスト側の旧 index key 前提も id ベースへ更新 (test_day_plan / test_judgment_points 計 6 箇所)。本体スイート **2737 passed 全緑**、ruff clean。**深めた教訓**: ①「watchdog が回復する」と書くなら**watchdog がその異常を観測できるか**まで検証する — 回復系の前提 (key の一意性) が破れていると、回復を当てにした except 節は嘘になる。②冪等 dedup (同じ行を返す) と実行権 (走ってよいのは一人) は**別の概念** — dedup の口が実行権も配っていないか、並走で同じ id を掴んだ両者のその後を追う。

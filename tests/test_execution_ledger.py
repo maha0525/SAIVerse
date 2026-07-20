@@ -171,6 +171,57 @@ class StateMachineTests(ExecutionLedgerTestBase):
             self.ledger.get_execution("no-such-id")
 
 
+class SingleWinnerTests(ExecutionLedgerTestBase):
+    """二重 claim の勝者一意化 (Codex レビュー第三陣, 2026-07-20)。
+
+    claim_execution は既存 prepared 行を再利用するため、ほぼ同時の二重 claim は
+    同じ execution_id を両方に runnable として返しうる。実行を一人に絞るのが
+    try_mark_running (条件付き遷移)、敗者の安全な離脱が abandon_prepared。
+    """
+
+    def test_try_mark_running_is_first_come_first_served(self):
+        execution_id, _ = self.ledger.begin_execution(
+            "slot.fire", idempotency_key="p1:2026-07-20:abc123",
+        )
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.assertEqual(self._status(execution_id), XL.STATUS_RUNNING)
+        # 同じ席への二人目は負ける (例外でなく False — 台帳は無変更)
+        self.assertFalse(self.ledger.try_mark_running(execution_id))
+        self.assertEqual(self._status(execution_id), XL.STATUS_RUNNING)
+
+    def test_try_mark_running_unknown_id_returns_false(self):
+        self.assertFalse(self.ledger.try_mark_running("no-such-id"))
+
+    def test_abandon_prepared_falls_prepared_to_failed(self):
+        execution_id, _ = self.ledger.begin_execution("slot.fire", idempotency_key="k1")
+        self.assertTrue(self.ledger.abandon_prepared(execution_id, "slot vanished"))
+        entry = self.ledger.get_execution(execution_id)
+        self.assertEqual(entry["status"], XL.STATUS_FAILED)
+        self.assertEqual(entry["error"], "slot vanished")
+
+    def test_abandon_prepared_leaves_running_winner_untouched(self):
+        # 二重 claim の敗者が離脱しても、勝者の running 台帳を failed に壊さない
+        # (壊すと勝者の精算が failed → applied の IllegalTransitionError で爆発する)
+        execution_id, _ = self.ledger.begin_execution("slot.fire", idempotency_key="k2")
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.assertFalse(self.ledger.abandon_prepared(execution_id, "loser exit"))
+        self.assertEqual(self._status(execution_id), XL.STATUS_RUNNING)
+        # 勝者はそのまま精算まで進める
+        self.ledger.mark_applied(execution_id)
+        self.assertEqual(self._status(execution_id), XL.STATUS_APPLIED)
+
+    def test_try_mark_running_session_variant_rolls_back_with_caller_tx(self):
+        # session= 指定時は呼び出し元の 1 commit に同梱 — tx が転べば席取りも巻き戻る
+        execution_id, _ = self.ledger.begin_execution("slot.fire", idempotency_key="k3")
+        session = self.SessionLocal()
+        try:
+            self.assertTrue(self.ledger.try_mark_running(execution_id, session=session))
+            session.rollback()
+        finally:
+            session.close()
+        self.assertEqual(self._status(execution_id), XL.STATUS_PREPARED)
+
+
 class IdempotencyTests(ExecutionLedgerTestBase):
     def test_duplicate_key_returns_existing_without_new_row(self):
         e1, created1 = self.ledger.begin_execution(

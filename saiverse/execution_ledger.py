@@ -266,7 +266,10 @@ class ExecutionLedger:
 
         - 既存なし / ``idempotency_key=None`` → 新規 prepared → runnable
         - 既存 prepared → その行を再利用して runnable (payload は既存の凍結値を
-          維持する — 上書きしない)
+          維持する — 上書きしない)。**注意**: ほぼ同時の二重 claim は同じ
+          execution_id を両方に runnable として返しうる — 実行を一意化するのは
+          :meth:`try_mark_running` (prepared→running の条件付き遷移) で、敗者は
+          台帳へ書かずに離脱すること (:meth:`abandon_prepared` 参照)
         - 既存 failed → キーを ``{key}#failed-{id先頭8字}`` に退避して新規
           prepared → runnable (failed は副作用ゼロ保証なので再実行安全、
           intent §2.1)
@@ -459,6 +462,113 @@ class ExecutionLedger:
             raise
         finally:
             db.close()
+
+    def try_mark_running(
+        self, execution_id: str, *, session: Optional[Session] = None
+    ) -> bool:
+        """prepared → running を**早い者勝ち**で行う条件付き遷移 (勝者の一意化)。
+
+        :meth:`claim_execution` は既存 prepared 行を再利用するため、ほぼ同時の
+        二重 claim は**同じ execution_id** を両方に runnable として返しうる。
+        本メソッドは「status が prepared のときだけ running へ」の条件付き一括
+        UPDATE で席を取り、勝者を一人に絞る — 敗者は False を受け取り、台帳に
+        **一切書かず**離脱すること (勝者の走行中台帳を failed 等へ壊さないため)。
+
+        Args:
+            session: 呼び出し元が開いている Session。指定時は commit しない
+                (:meth:`mark_running` の session 分岐と対称 — 予約 tx の 1 commit
+                に同梱され、tx が転べば席取りも巻き戻る)。
+
+        Returns:
+            True = 席が取れた (running へ遷移)。False = 既に他状態 (別の実行者が
+            走行中 / 完了済み / failed 等) — 呼び出し元は副作用を start しない。
+        """
+
+        def _cas(db: Session) -> int:
+            return (
+                db.query(ExecutionLedgerEntry)
+                .filter(
+                    ExecutionLedgerEntry.EXECUTION_ID == execution_id,
+                    ExecutionLedgerEntry.STATUS == STATUS_PREPARED,
+                )
+                .update(
+                    {
+                        ExecutionLedgerEntry.STATUS: STATUS_RUNNING,
+                        ExecutionLedgerEntry.UPDATED_AT: _now_epoch(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+
+        if session is not None:
+            won = _cas(session) > 0
+            LOGGER.debug(
+                "[ledger] running seat %s: %s (commit is caller's)",
+                "taken" if won else "lost", execution_id,
+            )
+            return won
+
+        db = self._session_factory()
+        try:
+            won = _cas(db) > 0
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        if won:
+            LOGGER.info("[ledger] running %s (seat taken)", execution_id)
+        else:
+            LOGGER.info("[ledger] running seat lost: %s", execution_id)
+        return won
+
+    def abandon_prepared(self, execution_id: str, error: str) -> bool:
+        """prepared のまま**動いていない**実行だけを failed へ落とす条件付き遷移。
+
+        二重 claim で同じ execution_id を共有した敗者が「対象コマ消失」等で離脱
+        するとき、無条件の :meth:`mark_failed` では**勝者が走行中の running 台帳**
+        まで failed に壊してしまう (勝者の精算が failed → applied の不正遷移で
+        爆発する)。本メソッドは status=prepared のときだけ failed に落とすので、
+        誰かが席を取った後 (running / applied / ...) は何もせず False を返す。
+
+        Returns:
+            True = failed へ落とした (誰も走っていなかった)。False = 既に他状態
+            (勝者の所有) — 台帳は無変更。
+        """
+        db = self._session_factory()
+        try:
+            updated = (
+                db.query(ExecutionLedgerEntry)
+                .filter(
+                    ExecutionLedgerEntry.EXECUTION_ID == execution_id,
+                    ExecutionLedgerEntry.STATUS == STATUS_PREPARED,
+                )
+                .update(
+                    {
+                        ExecutionLedgerEntry.STATUS: STATUS_FAILED,
+                        ExecutionLedgerEntry.ERROR: error,
+                        ExecutionLedgerEntry.UPDATED_AT: _now_epoch(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        if updated:
+            LOGGER.info(
+                "[ledger] abandoned prepared %s error=%s", execution_id, error,
+            )
+        else:
+            LOGGER.info(
+                "[ledger] abandon skipped (not prepared — owned by another "
+                "execution path): %s", execution_id,
+            )
+        return updated > 0
 
     def mark_applied(
         self,

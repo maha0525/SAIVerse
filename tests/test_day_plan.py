@@ -872,7 +872,7 @@ def test_replace_remaining_still_rejects_unordered_new_slots(manager, task_refs)
         ("09:30", "done"), ("15:30", "pending"),
     ]
     assert manager.event_scheduler.has_key(
-        f"day_plan:{PERSONA_ID}:{PLAN_DATE}:1"
+        day_plan._slot_key(PERSONA_ID, PLAN_DATE, slots[1]["id"])
     )
 
 
@@ -945,16 +945,17 @@ def test_schedule_resolves_wake_for_overnight_slot(manager, monkeypatch):
     captured: List[tuple] = []
     monkeypatch.setattr(
         day_plan, "_push_slot",
-        lambda mgr, pid, pdate, idx, fire_at: captured.append((idx, fire_at)),
+        lambda mgr, pid, pdate, sid, fire_at: captured.append((sid, fire_at)),
     )
     pushed = day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)  # wake 渡さない
     assert pushed == 2
 
-    fire_by_index = dict(captured)
+    fire_by_id = dict(captured)
+    ids = _slot_ids(manager)
     d = _dt.fromisoformat(PLAN_DATE)
-    assert fire_by_index[1] == d.replace(hour=9, minute=0)
+    assert fire_by_id[ids[1]] == d.replace(hour=9, minute=0)
     # 深夜コマ (start < wake) は翌暦日 (同じ営業日の尻尾) として予約される
-    assert fire_by_index[0] == (d + timedelta(days=1)).replace(hour=0, minute=30)
+    assert fire_by_id[ids[0]] == (d + timedelta(days=1)).replace(hour=0, minute=30)
 
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +1106,98 @@ def test_successful_fire_settles_once_then_double_fire_is_ignored(manager, task_
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3  # 不変
 
 
+def test_concurrent_claim_loser_does_not_break_winners_running_ledger(manager, task_refs):
+    """二重 claim の後発が離脱しても先発の running 台帳を壊さない (Codex 第三陣 [P1])。
+
+    claim_execution は既存 prepared を再利用し、並走発火の両方に同じ execution_id
+    を runnable として返す。旧実装は後発が _SlotVanished 離脱時に無条件 mark_failed
+    で共有台帳を failed へ落とし、先発の精算が failed → applied の IllegalTransition
+    で爆発した (slot=fired・予算予約済み・episode=open・台帳=failed の壊れた収束)。
+    後発の離脱は abandon_prepared (prepared のときだけ failed) に変更済み。
+    """
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    slot = slots[0]
+    slot_id = slot["id"]
+    # 後発 (B) が先に claim だけ済ませた窓を作る — 先発 (A) の claim は同じ
+    # prepared 行を再利用するので exec_id は共有される
+    exec_id, runnable, _ = ledger.claim_execution(
+        "slot.fire", idempotency_key=f"{PERSONA_ID}:{PLAN_DATE}:{slot_id}",
+        persona_id=PERSONA_ID,
+        payload={"persona_id": PERSONA_ID, "plan_date": PLAN_DATE, "index": 0,
+                 "slot_id": slot_id, "slot_kind": slot["kind"], "reserved_rounds": 5},
+    )
+    assert runnable
+
+    def handler_with_interleaved_loser(*args, **kwargs):
+        # 先発 A のハンドラ実行中に、後発 B の続き (予約 tx → 離脱) が走る:
+        # slot は A が fired 済みなので B は _SlotVanished で中断する
+        with pytest.raises(day_plan._SlotVanished):
+            day_plan._reserve_slot_tx(
+                manager, ledger, exec_id, PERSONA_ID, PLAN_DATE, 0, slot_id,
+                slot, True, 5,
+            )
+        # 離脱時、共有台帳は running (A の所有) — failed に落とせず無変更
+        assert not ledger.abandon_prepared(exec_id, "slot vanished (loser exit)")
+        assert ledger.get_execution(exec_id)["status"] == "running"
+        return _mock_work_session_result(rounds_used=3)
+
+    with patch("sea.work_session.run_work_session",
+               side_effect=handler_with_interleaved_loser) as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    # 先発の精算が爆発せず、実行は一度だけ完走する
+    assert mock_ws.call_count == 1
+    assert _slot_exec_id(manager) == exec_id  # exec_id は共有されていた
+    assert ledger.get_execution(exec_id)["status"] == "completed"
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None
+
+
+def test_reserve_tx_seat_race_loser_rolls_back_without_side_effects(manager, task_refs):
+    """席取り (prepared → running の条件付き遷移) に負けた側は _ClaimLost で全
+    ロールバックし、slot / 予算 / episode / 台帳のどれにも痕跡を残さない。
+
+    二重 claim の両方が「slot はまだ pending」を見た同着ケース — 旧実装は両方が
+    mark_running を通過しうる (二重実行・予算二重予約・出来事二重 open)。
+    """
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    slot_id = slots[0]["id"]
+    exec_id, runnable, _ = ledger.claim_execution(
+        "slot.fire", idempotency_key=f"{PERSONA_ID}:{PLAN_DATE}:{slot_id}",
+        persona_id=PERSONA_ID, payload={},
+    )
+    assert runnable
+    # 勝者が先に席を取った (running)
+    assert ledger.try_mark_running(exec_id)
+
+    # 敗者の予約 tx: slot はまだ pending に見えるが、席取り CAS で負ける
+    with pytest.raises(day_plan._ClaimLost):
+        day_plan._reserve_slot_tx(
+            manager, ledger, exec_id, PERSONA_ID, PLAN_DATE, 0, slot_id,
+            slots[0], True, 5,
+        )
+
+    # 全ロールバック: slot pending・予算不変・episode 無し・台帳は勝者の running のまま
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["status"] == "pending"
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 0
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None
+    assert ledger.get_execution(exec_id)["status"] == "running"
+
+
 def test_handler_raise_marks_unknown_closes_episode_retains_reservation(manager, task_refs):
     """防御経路: ハンドラ例外 → 台帳 unknown・episode close (best-effort)・slot fired・
     予約額保持 (LLM が動いたか不明なので自動再実行しない照合対象にする)。"""
@@ -1152,12 +1245,22 @@ def test_no_ledger_manager_falls_back_to_legacy_fire(manager, task_refs):
 
 
 def _slot_keys_present(manager, plan_date=PLAN_DATE):
-    """現在 EventScheduler に有効な当該 plan のコマ index 集合。"""
+    """現在 EventScheduler に有効な当該 plan のコマ index 集合 (key はコマ id ベース)。"""
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, plan_date) or []
     present = set()
-    for i in range(10):
-        if manager.event_scheduler.has_key(day_plan._slot_key(PERSONA_ID, plan_date, i)):
+    for i, slot in enumerate(slots):
+        sid = slot.get("id")
+        if sid and manager.event_scheduler.has_key(
+            day_plan._slot_key(PERSONA_ID, plan_date, sid)
+        ):
             present.add(i)
     return present
+
+
+def _slot_ids(manager, plan_date=PLAN_DATE):
+    """現在の plan のコマ id 列 (index 順)。"""
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, plan_date) or []
+    return [s.get("id") for s in slots]
 
 
 def _seed_two_slot_plan(manager, task_refs):
@@ -1171,9 +1274,10 @@ def _seed_two_slot_plan(manager, task_refs):
 
 
 def test_replace_day_plan_success_swaps_reservations(manager, task_refs):
-    """成功時: 旧 index の予約が残らず、新 plan の pending だけが予約される。"""
+    """成功時: 旧コマの予約が残らず、新 plan の pending だけが予約される。"""
     _seed_two_slot_plan(manager, task_refs)
     assert _slot_keys_present(manager) == {0, 1}
+    old_ids = _slot_ids(manager)
 
     pushed, notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "18:00", "kind": "休む", "ref": "none",
@@ -1182,8 +1286,59 @@ def test_replace_day_plan_success_swaps_reservations(manager, task_refs):
     assert pushed == 1
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["start"] for s in slots] == ["18:00"]
-    # 旧 index 1 の予約は残らない (index ベース key の残留による誤発火を防ぐ)
+    # 新 plan のコマだけが予約されている
     assert _slot_keys_present(manager) == {0}
+    # 旧コマ (id ベース key) の予約は cancel 済みで残らない
+    for old_id in old_ids:
+        assert not manager.event_scheduler.has_key(
+            day_plan._slot_key(PERSONA_ID, PLAN_DATE, old_id)
+        )
+
+
+def test_replace_cancel_failure_stale_reservation_harmless_and_watchdog_detects(
+    manager, task_refs,
+):
+    """cancel 失敗で旧時刻の予約が残留しても誤発火せず、watchdog が途絶を検出する
+    (Codex 第三陣 [P1])。
+
+    旧 index ベース key では、残留した旧予約 (13:00/15:00) が新 plan (18:00/20:00)
+    と同じ key 文字列を持つため、(1) watchdog は find_lost == [] で異常を見逃し、
+    (2) 旧時刻の発火が新 plan の別コマを前倒しで誤発火させた。id ベース key への
+    移行でこの両方が塞がれていることの回帰。
+    """
+    _seed_two_slot_plan(manager, task_refs)  # 13:00 / 15:00 を予約済み
+    old_ids = _slot_ids(manager)
+
+    # cancel が最初から失敗する状況 (Codex の再現条件)
+    with patch.object(
+        manager.event_scheduler, "cancel", side_effect=RuntimeError("cancel down"),
+    ):
+        pushed, _notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "18:00", "kind": "知る", "ref": task_refs["task"],
+             "facility": "library", "budget_rounds": 3, "note": "新1"},
+            {"start": "20:00", "kind": "休む", "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": ""},
+        ])
+    assert pushed == 0  # 張り替え失敗は例外にせず watchdog 回復へ委ねる
+
+    # 旧予約は残留している (cancel できなかった)
+    for old_id in old_ids:
+        assert manager.event_scheduler.has_key(
+            day_plan._slot_key(PERSONA_ID, PLAN_DATE, old_id)
+        )
+    # (1) 残留予約に隠されず、新コマ 2 件の予約途絶が検出される (旧実装は [])
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == [0, 1]
+
+    # (2) 残留した旧予約が発火しても、新 plan のコマを誤発火しない (無害な空振り)
+    with patch("sea.work_session.run_work_session") as mock_ws:
+        day_plan._fire_slot_by_id(manager, PERSONA_ID, PLAN_DATE, old_ids[0])
+    assert mock_ws.call_count == 0
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["status"] for s in slots] == ["pending", "pending"]  # 新コマは無傷
+
+    # 回復: watchdog 相当の再 push で新コマの予約が張り直され、途絶は解消する
+    assert day_plan.reschedule_pending_slots(manager, PERSONA_ID, PLAN_DATE) == 2
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == []
 
 
 def test_replace_day_plan_format_failure_leaves_plan_and_reservations(manager, task_refs):
