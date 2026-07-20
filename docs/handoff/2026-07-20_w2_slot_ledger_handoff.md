@@ -177,3 +177,11 @@ Codex が更に 2 件。どちらも再現実験付きで、コードの構造�
 | **P2** | 検証は有効な既存 id を保持するため、呼び出し元が**旧コマを id ごと写して時刻だけ変えた**入力だと新旧の予約 key が同一 — cancel 障害時の衝突 (第三陣 P1) が復活する。現 day_open 経路は sanitize で id を落とすため直接は踏まないが、`replace_day_plan` の契約として安全性が成立していない | **置換 = id の新世代**を契約化: `_validate_and_normalize_slots` に `fresh_ids_from` を追加し、`replace_day_plan` は全コマ (`fresh_ids=True`)、`replace_remaining_slots` は新コマ区間 (消化済み帳簿は精算・回復の逆引き対象なので id 維持) を必ず採番し直す。入力の形に依存しない構造保証 |
 
 回帰 +3 件 (照準の index ズレ追従 / 消えた id の空振り / 置換の新世代化。cancel 失敗テストも「id ごと写した入力」の最悪形に強化)。本体スイート **2740 passed 全緑**、ruff clean。**深めた教訓**: ①不変 id を「持っている」ことと「解決した結果を使う瞬間まで一貫して照準にしている」ことは別 — **変換 (id→index) と使用の間に再読込を挟んだら、その変換は無効**。書き込み点ごとに「この index は今も同じコマか」を問う。②識別子で安全性を作ったら、**その識別子の供給源 (誰が採番し、誰が持ち込めるか) まで契約に含める** — 入力が旧識別子を持ち込める限り、一意性は仮定でしかない。
+
+### 第五レビュー (2026-07-20、第四陣修正 1c7accc への再指摘)
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| **P1** | `_update_slot` は id 照合の**後**、`_write_slots` (別 Session) で**読んだ配列全体を無条件で書き戻す** — 読みと書きの間に `replace_remaining_slots` の置換 (A/B→C) が commit されると、古い書き戻しが C を消し A/B を復活させる (lost update = ペルソナの決定が静かに失われるデータ保全問題)。再現あり | slots_json への全書き込みを**世代 CAS** 化: 新設 `_mutate_slots_cas` (読み・変異・保存を同一 tx にまとめ、`UPDATE ... WHERE slots_json = 読んだ payload` の条件付き更新。世代が変わっていれば最新 plan で変異をやり直す、最大 5 回) に `_update_slot` / `_ensure_slot_ids` を載せ替え (`_write_slots` 廃止)。**同族の tx 側も一括閉塞**: 予約 tx / 精算 tx / 回復 settle の slots+予算書き込みを ORM 属性書き込み (無条件 UPDATE) から条件付き更新へ変更 — 世代不一致は `_PlanGenerationConflict` で全ロールバックし、呼び出し元 (`_fire_slot`) が最新 plan で id から引き直して再試行 (置換で対象が消えていれば `_SlotVanished` の既存安全経路へ自然に落ちる)。`replace_remaining_slots` 自身も CAS ループ化 (読んだ世代と同じときだけ置換を commit — 併走する fired 書き込みを消して claim 済みコマを pending 復活させる逆向きの窓も閉塞)。予算調整は `_apply_budget_delta_to_meta` (dict ベース) へ改め、条件付き更新に同梱 |
+
+回帰 +3 件 (CAS ヘルパの再試行 / Sol 再現 = `_update_slot` が置換を消さない / 予約 tx 競合の安全離脱)。本体スイート **2743 passed 全緑**、ruff clean。**残す既知の割り切り**: `replace_day_plan` (起床の全置換) の upsert は無条件のまま — 全コマを新世代 id で総入れ替えする意味論のため、旧世代への並走書き込みを消しても「消えるべきものが消えた」に一致する (併走 fire の予約額は精算側の id 逆引き空振りで安全に閉じる)。**深めた教訓**: 照準 (どのコマに書くか) を直しても**書き戻しの粒度が配列全体**なら、隣のコマの決定を消せる — 「対象の同一性」と「書き込みの世代整合」は別の不変条件で、両方に守りが要る。read-modify-write を見たら常に「この間に誰かが commit したら?」を問う。

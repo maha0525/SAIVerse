@@ -516,39 +516,87 @@ def save_day_plan(
     return notes
 
 
+_UNCONDITIONAL = object()
+
+
 def _upsert_plan_slots(
-    manager: Any, persona_id: str, plan_date_str: str, normalized: List[Dict[str, Any]]
-) -> None:
-    """検証済みコマ配列を upsert する (save_day_plan / replace_remaining_slots 共用)。"""
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    normalized: List[Dict[str, Any]],
+    *,
+    expected_payload: Any = _UNCONDITIONAL,
+) -> bool:
+    """検証済みコマ配列を upsert する (save_day_plan / replace 系共用)。
+
+    Args:
+        expected_payload: 省略 (既定) = 無条件で upsert する (全置換 =
+            :func:`replace_day_plan` / 新規保存の意味論)。文字列 = 「slots_json が
+            この値のときだけ」更新する条件付きモード (:func:`replace_remaining_slots`
+            の CAS — 読んだ世代が古ければ書かない、第五陣 P1)。None = 「行が
+            まだ無いときだけ」INSERT する。
+
+    Returns:
+        書けたら True。条件付きモードで世代が合わず書かなかったら False
+        (呼び出し元が最新 plan で再構築して再試行する)。
+    """
     from database.models import PersonaDayPlan
 
     now = clock.now()
+    payload = json.dumps(normalized, ensure_ascii=False)
+    ok = False
     db = manager.SessionLocal()
     try:
-        row = (
-            db.query(PersonaDayPlan)
-            .filter_by(persona_id=persona_id, plan_date=plan_date_str)
-            .first()
-        )
-        payload = json.dumps(normalized, ensure_ascii=False)
-        if row is None:
-            db.add(PersonaDayPlan(
-                persona_id=persona_id,
-                plan_date=plan_date_str,
-                slots_json=payload,
-                created_at=now,
-                updated_at=now,
-            ))
+        if expected_payload is _UNCONDITIONAL or expected_payload is None:
+            row = (
+                db.query(PersonaDayPlan)
+                .filter_by(persona_id=persona_id, plan_date=plan_date_str)
+                .first()
+            )
+            if row is None:
+                db.add(PersonaDayPlan(
+                    persona_id=persona_id,
+                    plan_date=plan_date_str,
+                    slots_json=payload,
+                    created_at=now,
+                    updated_at=now,
+                ))
+                db.commit()
+                ok = True
+            elif expected_payload is _UNCONDITIONAL:
+                row.slots_json = payload
+                row.updated_at = now
+                db.commit()
+                ok = True
+            else:
+                # 「行が無いときだけ」を期待したが、別の書き手が先に作っていた
+                ok = False
         else:
-            row.slots_json = payload
-            row.updated_at = now
-        db.commit()
+            changed = (
+                db.query(PersonaDayPlan)
+                .filter(
+                    PersonaDayPlan.persona_id == persona_id,
+                    PersonaDayPlan.plan_date == plan_date_str,
+                    PersonaDayPlan.slots_json == expected_payload,
+                )
+                .update(
+                    {
+                        PersonaDayPlan.slots_json: payload,
+                        PersonaDayPlan.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            db.commit()
+            ok = bool(changed)
     finally:
         db.close()
-    LOGGER.info(
-        "[day_plan] saved: persona=%s date=%s slots=%d",
-        persona_id, plan_date_str, len(normalized),
-    )
+    if ok:
+        LOGGER.info(
+            "[day_plan] saved: persona=%s date=%s slots=%d",
+            persona_id, plan_date_str, len(normalized),
+        )
+    return ok
 
 
 def load_day_plan(manager: Any, persona_id: str, plan_date: Any) -> Optional[List[Dict[str, Any]]]:
@@ -570,28 +618,90 @@ def load_day_plan(manager: Any, persona_id: str, plan_date: Any) -> Optional[Lis
         db.close()
 
 
-def _write_slots(manager: Any, persona_id: str, plan_date_str: str, slots: List[Dict[str, Any]]) -> None:
-    """コマ配列を書き戻す (行が無い場合は WARN のみ — 発火中の行削除は異常系)。"""
+_CAS_MAX_RETRIES = 5
+
+
+def _mutate_slots_cas(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    mutate: Callable[[List[Dict[str, Any]]], Optional[Any]],
+    *,
+    context: str = "",
+) -> Optional[Any]:
+    """slots_json を「読んだ世代と同じとき**だけ**」書き換える CAS 更新 (lost update 防止)。
+
+    「読む → 手元で変異 → 無条件で全体を書き戻す」という旧 ``_write_slots`` 方式は、
+    読みと書きの間に別の書き手 (:func:`replace_remaining_slots` 等) が commit すると、
+    古い配列の書き戻しが**その置換を静かに消す** (2026-07-20 Codex レビュー第五陣 P1
+    — ペルソナが決めた組み替えの喪失 = データ保全問題)。
+
+    ここでは読み・変異・保存を同一トランザクションにまとめ、保存は
+    「``UPDATE ... WHERE slots_json = 読んだ時点の payload``」の条件付き一括更新で
+    行う — 世代が変わっていれば 1 行も更新されず (rowcount 0)、最新 plan を読み
+    直して変異からやり直す (最大 ``_CAS_MAX_RETRIES`` 回)。
+
+    Args:
+        mutate: そのループ回で読んだ**最新の**コマ配列を受け取り、書くべき変更が
+            あれば配列をその場で書き換えて任意の非 None 値 (成功時に呼び出し元へ
+            返す結果) を返す。None を返すと何も書かずに全体を None で終える
+            (対象コマ消失などの中止)。再試行のたびに**新しい配列で呼び直される**
+            ため、対象の解決 (id 逆引き等) は必ずこの中で行うこと。
+        context: ログ用の呼び出し元ラベル。
+
+    Returns:
+        mutate の返した結果 (書き込み成功時) / None (行なし・中止・再試行枯渇)。
+    """
     from database.models import PersonaDayPlan
 
-    db = manager.SessionLocal()
-    try:
-        row = (
-            db.query(PersonaDayPlan)
-            .filter_by(persona_id=persona_id, plan_date=plan_date_str)
-            .first()
-        )
-        if row is None:
-            LOGGER.warning(
-                "[day_plan] cannot write slots: plan row missing (persona=%s date=%s)",
-                persona_id, plan_date_str,
+    for attempt in range(_CAS_MAX_RETRIES):
+        db = manager.SessionLocal()
+        try:
+            row = _load_plan_row(db, persona_id, plan_date_str)
+            if row is None:
+                LOGGER.warning(
+                    "[day_plan] cannot mutate slots (%s): plan row missing "
+                    "(persona=%s date=%s)", context, persona_id, plan_date_str,
+                )
+                return None
+            original_payload = row.slots_json
+            slots = _row_slots(row)
+            result = mutate(slots)
+            if result is None:
+                return None
+            changed = (
+                db.query(PersonaDayPlan)
+                .filter(
+                    PersonaDayPlan.persona_id == persona_id,
+                    PersonaDayPlan.plan_date == plan_date_str,
+                    PersonaDayPlan.slots_json == original_payload,
+                )
+                .update(
+                    {
+                        PersonaDayPlan.slots_json: json.dumps(
+                            slots, ensure_ascii=False,
+                        ),
+                        PersonaDayPlan.updated_at: clock.now(),
+                    },
+                    synchronize_session=False,
+                )
             )
-            return
-        row.slots_json = json.dumps(slots, ensure_ascii=False)
-        row.updated_at = clock.now()
-        db.commit()
-    finally:
-        db.close()
+            db.commit()
+            if changed:
+                return result
+        finally:
+            db.close()
+        LOGGER.info(
+            "[day_plan] slots CAS conflict (%s): plan changed since read; retrying "
+            "with fresh plan (persona=%s date=%s attempt=%d/%d)",
+            context, persona_id, plan_date_str, attempt + 1, _CAS_MAX_RETRIES,
+        )
+    LOGGER.error(
+        "[day_plan] slots CAS gave up after %d attempts (%s) — update NOT applied "
+        "(persona=%s date=%s)",
+        _CAS_MAX_RETRIES, context, persona_id, plan_date_str,
+    )
+    return None
 
 
 def _update_slot(
@@ -606,40 +716,43 @@ def _update_slot(
     """slot[index] に changes を適用して永続化し、更新後の slot を返す。
 
     Args:
-        expected_id: 対象コマの不変 id。指定時、この関数が plan を読み直した
-            時点で ``slots[index]`` の id が一致しなければ **id で現在位置を
-            引き直す** — 呼び出し元が index を掴んでからこの書き込みまでの間に
-            時間割が組み替わっても、別コマを書き換えない (発火経路の照準保持、
-            2026-07-20 Codex レビュー第四陣 P1 と同族の窓)。id が plan から
-            消えていれば何も書かず None を返す。
+        expected_id: 対象コマの不変 id。指定時、読み直した plan で ``slots[index]``
+            の id が一致しなければ **id で現在位置を引き直す** — 呼び出し元が
+            index を掴んでからこの書き込みまでの間に時間割が組み替わっても、
+            別コマを書き換えない (発火経路の照準保持、2026-07-20 Codex レビュー
+            第四陣 P1 と同族の窓)。id が plan から消えていれば何も書かず None を
+            返す。
+
+    保存は :func:`_mutate_slots_cas` (読んだ世代と同じときだけ書く条件付き更新) —
+    照合と保存の間に別の書き手が commit しても、その決定を古い配列で上書きしない
+    (第五陣 P1)。
     """
-    slots = load_day_plan(manager, persona_id, plan_date_str)
-    if slots is None:
-        LOGGER.warning(
-            "[day_plan] cannot update slot: plan not found (persona=%s date=%s)",
-            persona_id, plan_date_str,
-        )
-        return None
-    if expected_id is not None:
-        if index >= len(slots) or slots[index].get("id") != expected_id:
-            resolved = _find_slot_index_by_id(slots, expected_id)
-            if resolved is None:
-                LOGGER.warning(
-                    "[day_plan] cannot update slot: id=%s vanished from plan "
-                    "(persona=%s date=%s stale_index=%d)",
-                    expected_id, persona_id, plan_date_str, index,
-                )
-                return None
-            index = resolved
-    elif index >= len(slots):
-        LOGGER.warning(
-            "[day_plan] cannot update slot: not found (persona=%s date=%s index=%d)",
-            persona_id, plan_date_str, index,
-        )
-        return None
-    slots[index].update(changes)
-    _write_slots(manager, persona_id, plan_date_str, slots)
-    return slots[index]
+
+    def _apply(slots: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        target = index
+        if expected_id is not None:
+            if target >= len(slots) or slots[target].get("id") != expected_id:
+                resolved = _find_slot_index_by_id(slots, expected_id)
+                if resolved is None:
+                    LOGGER.warning(
+                        "[day_plan] cannot update slot: id=%s vanished from plan "
+                        "(persona=%s date=%s stale_index=%d)",
+                        expected_id, persona_id, plan_date_str, index,
+                    )
+                    return None
+                target = resolved
+        elif target >= len(slots):
+            LOGGER.warning(
+                "[day_plan] cannot update slot: not found (persona=%s date=%s index=%d)",
+                persona_id, plan_date_str, index,
+            )
+            return None
+        slots[target].update(changes)
+        return slots[target]
+
+    return _mutate_slots_cas(
+        manager, persona_id, plan_date_str, _apply, context="update_slot",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1982,15 +2095,28 @@ def _ensure_slot_ids(
     """
     if all(isinstance(s.get("id"), str) and s.get("id") for s in slots):
         return slots
-    for slot in slots:
-        if not (isinstance(slot.get("id"), str) and slot.get("id")):
-            slot["id"] = uuid.uuid4().hex[:12]
-    _write_slots(manager, persona_id, plan_date_str, slots)
+
+    def _backfill(fresh: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for slot in fresh:
+            if not (isinstance(slot.get("id"), str) and slot.get("id")):
+                slot["id"] = uuid.uuid4().hex[:12]
+        return fresh
+
+    result = _mutate_slots_cas(
+        manager, persona_id, plan_date_str, _backfill, context="ensure_slot_ids",
+    )
+    if result is None:
+        # 行が消えている等 — push を止めないため手元の配列だけ補填して返す
+        # (永続化されないが、予約 key の採番には足りる)。
+        for slot in slots:
+            if not (isinstance(slot.get("id"), str) and slot.get("id")):
+                slot["id"] = uuid.uuid4().hex[:12]
+        return slots
     LOGGER.info(
         "[day_plan] backfilled slot ids for legacy plan (persona=%s date=%s)",
         persona_id, plan_date_str,
     )
-    return slots
+    return result
 
 
 def schedule_day_plan(
@@ -2204,39 +2330,68 @@ def replace_remaining_slots(
             残らなかった場合 (plan も予約も一切変更しない)。
     """
     plan_date_str = _normalize_plan_date(plan_date)
-    current = load_day_plan(manager, persona_id, plan_date_str) or []
-    kept_history = [
-        s for s in current
-        if s.get("status") not in (STATUS_PENDING, STATUS_DEFERRED)
-    ]
-    candidate = kept_history + [
-        {**slot, "status": STATUS_PENDING, "defer_count": 0} for slot in new_slots
-    ]
-    # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)。
-    # 順序の基準は save_day_plan と同じ「一日の流れ」順 (深夜跨ぎ対応)。
-    # fresh_ids_from: 新コマ区間は id を新世代へ採番し直す (消化済み区間は帳簿
-    # なので既存 id を保持 — 精算・回復が台帳 payload の slot_id で逆引きする)。
-    # 呼び出し元が置換前の pending コマを id ごと写しても旧予約 key と衝突しない
-    # (2026-07-20 Codex レビュー第四陣 P2 と同根)。
-    lives = get_lives(manager, persona_id, plan_date_str)
-    normalized = _validate_and_normalize_slots(
-        candidate, ascending_from=len(kept_history),
-        order_key=lambda h: day_order_minutes(lives, h),
-        fresh_ids_from=len(kept_history),
-    )
-    history_part = normalized[:len(kept_history)]
-    new_part = normalized[len(kept_history):]
-    kept_new, notes = _normalize_slots_within_organized_range(
-        manager, persona_id, plan_date_str, new_part,
-    )
-    if not kept_new:
-        reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
-        raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
+    notes: List[str] = []
+    # CAS ループ (第五陣 P1): 「現 plan を読む → 差し替え配列を組む → 読んだ世代と
+    # 同じときだけ保存」。読みと保存の間に別の書き手 (コマ発火の fired 書き込み等)
+    # が commit していたら、最新 plan で組み直す — 古い配列の書き戻しでその決定を
+    # 消さない。
+    for _attempt in range(_CAS_MAX_RETRIES):
+        db = manager.SessionLocal()
+        try:
+            row = _load_plan_row(db, persona_id, plan_date_str)
+            current_payload = row.slots_json if row is not None else None
+            current = _row_slots(row) if row is not None else []
+        finally:
+            db.close()
+        kept_history = [
+            s for s in current
+            if s.get("status") not in (STATUS_PENDING, STATUS_DEFERRED)
+        ]
+        candidate = kept_history + [
+            {**slot, "status": STATUS_PENDING, "defer_count": 0} for slot in new_slots
+        ]
+        # 失敗時はここで raise (昇順検証は新コマ区間のみ — docstring 参照)。
+        # 順序の基準は save_day_plan と同じ「一日の流れ」順 (深夜跨ぎ対応)。
+        # fresh_ids_from: 新コマ区間は id を新世代へ採番し直す (消化済み区間は帳簿
+        # なので既存 id を保持 — 精算・回復が台帳 payload の slot_id で逆引きする)。
+        # 呼び出し元が置換前の pending コマを id ごと写しても旧予約 key と衝突しない
+        # (2026-07-20 Codex レビュー第四陣 P2 と同根)。
+        lives = get_lives(manager, persona_id, plan_date_str)
+        normalized = _validate_and_normalize_slots(
+            candidate, ascending_from=len(kept_history),
+            order_key=lambda h: day_order_minutes(lives, h),
+            fresh_ids_from=len(kept_history),
+        )
+        history_part = normalized[:len(kept_history)]
+        new_part = normalized[len(kept_history):]
+        kept_new, notes = _normalize_slots_within_organized_range(
+            manager, persona_id, plan_date_str, new_part,
+        )
+        if not kept_new:
+            reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
+            raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
 
-    # 検証が通ってから旧予約を落とし、保存 → 再 push する。
-    final_slots = history_part + kept_new
-    cancel_scheduled_slots(manager, persona_id, plan_date_str)
-    _upsert_plan_slots(manager, persona_id, plan_date_str, final_slots)
+        # 検証が通ってから旧予約を落とし、保存 (読んだ世代と同じときだけ) → 再 push。
+        # 保存が世代不一致で見送られた場合、cancel 済み予約は watchdog が回復する
+        # (id key なので途絶は正しく検出される)。
+        final_slots = history_part + kept_new
+        cancel_scheduled_slots(manager, persona_id, plan_date_str)
+        if _upsert_plan_slots(
+            manager, persona_id, plan_date_str, final_slots,
+            expected_payload=current_payload,
+        ):
+            break
+        LOGGER.info(
+            "[day_plan] replace_remaining_slots CAS conflict: plan changed since "
+            "read; rebuilding from fresh plan (persona=%s date=%s attempt=%d/%d)",
+            persona_id, plan_date_str, _attempt + 1, _CAS_MAX_RETRIES,
+        )
+    else:
+        raise RuntimeError(
+            f"remaining-slot replacement kept conflicting with concurrent plan "
+            f"writes; giving up (persona={persona_id} date={plan_date_str} — "
+            f"current plan retained, watchdog restores its reservations)"
+        )
     if notes:
         LOGGER.info(
             "[day_plan] remaining slots adjusted to organized range: "
@@ -2792,10 +2947,29 @@ def _fire_slot(
     # (暮らし/休む スタブの発火が予算を食い潰した実機初日の破綻を避ける)。数える
     # のは gated な作業コマの実効ラウンド予約だけ。
     try:
-        episode_ref = _reserve_slot_tx(
-            manager, ledger, exec_id, persona_id, plan_date_str, index, slot_id,
-            slot, gated, reserved,
-        )
+        episode_ref = None
+        for _attempt in range(_CAS_MAX_RETRIES):
+            try:
+                episode_ref = _reserve_slot_tx(
+                    manager, ledger, exec_id, persona_id, plan_date_str, index,
+                    slot_id, slot, gated, reserved,
+                )
+                break
+            except _PlanGenerationConflict as exc:
+                # 読んだ世代が置換で古くなった — 最新 plan で対象を id から引き
+                # 直して再試行 (置換で対象が消えていれば _SlotVanished へ落ちる)。
+                LOGGER.info(
+                    "[day_plan] reservation hit plan generation conflict; retrying "
+                    "(attempt=%d/%d): %s", _attempt + 1, _CAS_MAX_RETRIES, exc,
+                )
+        else:
+            LOGGER.warning(
+                "[day_plan] reservation kept conflicting with plan rewrites; "
+                "giving up this fire — slot left pending, watchdog will re-push "
+                "(persona=%s date=%s id=%s exec=%s)",
+                persona_id, plan_date_str, slot_id, exec_id,
+            )
+            return
     except _ClaimLost as exc:
         # prepared → running の席取りに負けた = 同じ exec_id を共有する並走発火の
         # 勝者が走行中 (または既に完了)。予約 tx は全ロールバック済みで副作用ゼロ。
@@ -2884,10 +3058,24 @@ def _fire_slot(
 
     # --- 精算 tx (単一 commit): 予算調整 + slot done + episode close + applied ---
     try:
-        _settle_slot_tx(
-            manager, ledger, exec_id, persona_id, plan_date_str, index, slot_id,
-            slot, episode_ref, gated, reserved, used_rounds,
-        )
+        for _attempt in range(_CAS_MAX_RETRIES):
+            try:
+                _settle_slot_tx(
+                    manager, ledger, exec_id, persona_id, plan_date_str, index,
+                    slot_id, slot, episode_ref, gated, reserved, used_rounds,
+                )
+                break
+            except _PlanGenerationConflict as exc:
+                # 読んだ世代が古い — 最新 plan で対象を id から引き直して再精算。
+                LOGGER.info(
+                    "[day_plan] settlement hit plan generation conflict; retrying "
+                    "(attempt=%d/%d): %s", _attempt + 1, _CAS_MAX_RETRIES, exc,
+                )
+        else:
+            raise _PlanGenerationConflict(
+                f"settlement kept conflicting with plan rewrites "
+                f"(persona={persona_id} date={plan_date_str} slot={slot_id})"
+            )
     except Exception:
         # 精算 tx は全ロールバック: slot fired・episode open・台帳 running・予算は
         # 予約額のまま (予約 tx で確定済み)。→ 後続コマは予約額を消費済みとして
@@ -3026,8 +3214,10 @@ def _row_meta(row: Any) -> Dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
-def _apply_budget_delta_in_session(row: Any, slot: Dict[str, Any], delta: int) -> None:
-    """予算消費を ``delta`` だけ調整して行の meta_json へ書く (commit は呼び出し元)。
+def _apply_budget_delta_to_meta(
+    meta: Dict[str, Any], slot: Dict[str, Any], delta: int
+) -> None:
+    """予算消費を ``delta`` だけ調整して ``meta`` (meta_json の dict) を書き換える。
 
     lives のある日は ``lives[idx].used_rounds`` (生ラウンド。κ は消費計算時に
     :func:`get_budget_state` が掛ける) が正典、無い日は ``META_BUDGET_USED``。
@@ -3038,7 +3228,6 @@ def _apply_budget_delta_in_session(row: Any, slot: Dict[str, Any], delta: int) -
     """
     if not delta:
         return
-    meta = _row_meta(row)
     raw_lives = meta.get(META_LIVES)
     lives = [life for life in raw_lives if isinstance(life, dict)] \
         if isinstance(raw_lives, list) else []
@@ -3058,7 +3247,6 @@ def _apply_budget_delta_in_session(row: Any, slot: Dict[str, Any], delta: int) -
     else:
         cur = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
         meta[META_BUDGET_USED] = max(0, cur + delta)
-    row.meta_json = json.dumps(meta, ensure_ascii=False)
 
 
 def _find_slot_index_by_id(
@@ -3099,6 +3287,19 @@ class _ClaimLost(Exception):
     """
 
 
+class _PlanGenerationConflict(Exception):
+    """tx が読んだ plan が、書き込むまでの間に別の書き手に置き換えられた。
+
+    予約 tx / 精算 tx / 回復 settle の slots+予算書き込みは
+    「``UPDATE ... WHERE slots_json = 読んだ payload``」の条件付き更新で行う —
+    読んだ世代が既に古ければ 1 行も更新されずこの例外で全ロールバックする
+    (古い配列の書き戻しでペルソナの組み替えを消さない — 2026-07-20 Codex
+    レビュー第五陣 P1 の tx 側)。呼び出し元は最新 plan で対象を id から引き直して
+    再試行する (置換で対象が消えていれば :class:`_SlotVanished` 等の既存安全経路へ
+    自然に落ちる)。
+    """
+
+
 def _reserve_slot_tx(
     manager: Any,
     ledger: Any,
@@ -3130,6 +3331,7 @@ def _reserve_slot_tx(
         Exception: その他の失敗は全ロールバック (slot pending・予算不変・episode 無し・
             台帳 prepared のまま) して再送出 — 呼び出し元がハンドラを呼ばずに return する。
     """
+    from database.models import PersonaDayPlan
     from saiverse import episodes
 
     db = manager.SessionLocal()
@@ -3140,6 +3342,7 @@ def _reserve_slot_tx(
                 f"plan row missing during reservation (persona={persona_id} "
                 f"date={plan_date_str})"
             )
+        original_payload = row.slots_json
         slots = _row_slots(row)
         # 発火時 index ではなく不変 id で現在位置を引く (組み替え耐性)。
         target = _find_slot_index_by_id(slots, slot_id)
@@ -3166,15 +3369,36 @@ def _reserve_slot_tx(
                 f"(persona={persona_id} date={plan_date_str} slot={slot_id})"
             )
 
-        # slot pending/deferred → fired (id で引いた現在位置に対して)
+        # slot pending/deferred → fired + 予算予約を、**読んだ世代と同じときだけ**
+        # 書く条件付き更新で同梱する (ORM 属性書き込みだと無条件 UPDATE になり、
+        # 読みと commit の間に成立した置換を古い配列で消してしまう — 第五陣 P1)。
         slots[target]["status"] = STATUS_FIRED
-        row.slots_json = json.dumps(slots, ensure_ascii=False)
-
-        # 予算予約 (gated のみ、実効ラウンド分を先取り消費)
+        new_meta_json = row.meta_json
         if gated and reserved:
-            _apply_budget_delta_in_session(row, slot, int(reserved))
-
-        row.updated_at = clock.now()
+            meta = _row_meta(row)
+            _apply_budget_delta_to_meta(meta, slot, int(reserved))
+            new_meta_json = json.dumps(meta, ensure_ascii=False)
+        changed = (
+            db.query(PersonaDayPlan)
+            .filter(
+                PersonaDayPlan.persona_id == persona_id,
+                PersonaDayPlan.plan_date == plan_date_str,
+                PersonaDayPlan.slots_json == original_payload,
+            )
+            .update(
+                {
+                    PersonaDayPlan.slots_json: json.dumps(slots, ensure_ascii=False),
+                    PersonaDayPlan.meta_json: new_meta_json,
+                    PersonaDayPlan.updated_at: clock.now(),
+                },
+                synchronize_session=False,
+            )
+        )
+        if not changed:
+            raise _PlanGenerationConflict(
+                f"plan changed during reservation (persona={persona_id} "
+                f"date={plan_date_str} slot={slot_id})"
+            )
 
         # 出来事を開く (同 session。origin_ref は発火時 index — 回復が payload の index
         # から同じ origin_ref を再構成して逆引きするため一貫させる)。
@@ -3250,6 +3474,8 @@ def _settle_slot_tx(
     used_for_result: Optional[int] = int(used_rounds) if valid_used else None
     delta = (int(used_rounds) - int(reserved)) if (gated and valid_used) else 0
 
+    from database.models import PersonaDayPlan
+
     db = manager.SessionLocal()
     try:
         row = _load_plan_row(db, persona_id, plan_date_str)
@@ -3259,27 +3485,52 @@ def _settle_slot_tx(
                 f"date={plan_date_str})"
             )
 
-        # 予算の精算 (予約 → 実測。通常は返金の負 delta)
-        if gated and delta:
-            _apply_budget_delta_in_session(row, slot, delta)
-
         # slot fired → done。配列 index はハンドラ中の時間割組み替えで移動しうるので
         # 発火時 index ではなく不変 slot_id で対象コマを引く (record_level はハンドラが
-        # 別 tx で永続化済み)。
+        # 別 tx で永続化済み)。書き込みは予算精算と合わせ、**読んだ世代と同じとき
+        # だけ**の条件付き更新で行う (古い配列の書き戻しで置換を消さない — 第五陣 P1)。
+        original_payload = row.slots_json
         slots = _row_slots(row)
         target = _find_slot_index_by_id(slots, slot_id)
         done_slot: Optional[Dict[str, Any]] = None
+        world_update: Dict[Any, Any] = {}
         if target is not None:
             slots[target]["status"] = STATUS_DONE
-            row.slots_json = json.dumps(slots, ensure_ascii=False)
             done_slot = slots[target]
+            world_update[PersonaDayPlan.slots_json] = json.dumps(
+                slots, ensure_ascii=False,
+            )
         else:
             LOGGER.warning(
                 "[day_plan] slot id=%s not found during settlement (persona=%s "
                 "date=%s len=%d); done not written (episode/台帳 は精算する)",
                 slot_id, persona_id, plan_date_str, len(slots),
             )
-        row.updated_at = clock.now()
+
+        # 予算の精算 (予約 → 実測。通常は返金の負 delta)
+        if gated and delta:
+            meta = _row_meta(row)
+            _apply_budget_delta_to_meta(meta, slot, delta)
+            world_update[PersonaDayPlan.meta_json] = json.dumps(
+                meta, ensure_ascii=False,
+            )
+
+        if world_update:
+            world_update[PersonaDayPlan.updated_at] = clock.now()
+            changed = (
+                db.query(PersonaDayPlan)
+                .filter(
+                    PersonaDayPlan.persona_id == persona_id,
+                    PersonaDayPlan.plan_date == plan_date_str,
+                    PersonaDayPlan.slots_json == original_payload,
+                )
+                .update(world_update, synchronize_session=False)
+            )
+            if not changed:
+                raise _PlanGenerationConflict(
+                    f"plan changed during settlement (persona={persona_id} "
+                    f"date={plan_date_str} slot={slot_id})"
+                )
 
         # 出来事を閉じる (同 session。record_level を meta へ透過)
         if episode_ref:
@@ -3369,12 +3620,38 @@ def settle_stale_slot(
         # 対象は発火時 index ではなく不変 slot_id で引く (ハンドラ中の時間割組み替えで
         # index が移動していても正しいコマを締める)。
         if row is not None:
+            from database.models import PersonaDayPlan
+
+            original_payload = row.slots_json
             slots = _row_slots(row)
             target = _find_slot_index_by_id(slots, slot_id)
             if target is not None and slots[target].get("status") == STATUS_FIRED:
                 slots[target]["status"] = STATUS_DONE
-                row.slots_json = json.dumps(slots, ensure_ascii=False)
-                row.updated_at = clock.now()
+                changed = (
+                    db.query(PersonaDayPlan)
+                    .filter(
+                        PersonaDayPlan.persona_id == persona_id,
+                        PersonaDayPlan.plan_date == plan_date_str,
+                        PersonaDayPlan.slots_json == original_payload,
+                    )
+                    .update(
+                        {
+                            PersonaDayPlan.slots_json: json.dumps(
+                                slots, ensure_ascii=False,
+                            ),
+                            PersonaDayPlan.updated_at: clock.now(),
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                if not changed:
+                    # 読んだ世代が古い — 古い配列で置換を消さない。全ロールバック
+                    # して raise: 台帳は running のままなので次の回復 tick が最新
+                    # plan で settle し直す (第五陣 P1 の tx 側)。
+                    raise _PlanGenerationConflict(
+                        f"plan changed during settle-close (persona={persona_id} "
+                        f"date={plan_date_str} slot={slot_id})"
+                    )
         else:
             LOGGER.warning(
                 "[day_plan] settle_stale_slot: plan row missing "

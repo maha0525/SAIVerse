@@ -1106,6 +1106,115 @@ def test_successful_fire_settles_once_then_double_fire_is_ignored(manager, task_
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3  # 不変
 
 
+def test_mutate_slots_cas_preserves_concurrent_replacement(manager, task_refs):
+    """CAS 更新 (第五陣 P1): 読みと書きの間に別の書き手が置換を commit したら、
+    古い配列を書き戻さず (= 置換を消さず)、最新 plan で変異をやり直す。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "13:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 3, "note": "A"},
+        {"start": "15:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "B"},
+    ])
+    calls = {"n": 0}
+
+    def mutate(slots):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 読みの後・書きの前に、別の書き手が A/B → C の置換を commit する
+            day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+                {"start": "18:00", "kind": "休む", "ref": "none",
+                 "facility": "own_room", "budget_rounds": 0, "note": "C"},
+            ])
+            slots[0]["status"] = "deferred"  # 古い配列への変異 — 書かれてはいけない
+            return slots[0]
+        # 再試行では置換後の最新 plan が渡される
+        assert [s["note"] for s in slots] == ["C"]
+        slots[0]["note"] = "C-touched"
+        return slots[0]
+
+    result = day_plan._mutate_slots_cas(
+        manager, PERSONA_ID, PLAN_DATE, mutate, context="test",
+    )
+    assert calls["n"] == 2                       # 1回目は世代不一致で棄却→再試行
+    assert result is not None and result["note"] == "C-touched"
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    # C は消えず (A/B が復活せず)、再試行の変異だけが乗っている
+    assert [(s["note"], s["status"]) for s in slots] == [("C-touched", "pending")]
+
+
+def test_update_slot_does_not_resurrect_replaced_plan(manager, task_refs):
+    """第五陣 P1 の Sol 再現: _update_slot の読みと書きの間に replace_remaining_slots
+    が A/B → C を commit しても、古い A/B の書き戻しで C が消えない (A の deferred
+    化は対象消失として中止される)。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "13:00", "kind": "知る", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 3, "note": "A"},
+        {"start": "15:00", "kind": "休む", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "B"},
+    ])
+    a_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
+
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+                {"start": "18:00", "kind": "休む", "ref": "none",
+                 "facility": "own_room", "budget_rounds": 0, "note": "C"},
+            ])
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+        result = day_plan._update_slot(
+            manager, PERSONA_ID, PLAN_DATE, 0, expected_id=a_id, status="deferred",
+        )
+
+    assert result is None  # A は新世代に存在しない → 何も書かず中止
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [(s["note"], s["status"]) for s in slots] == [("C", "pending")]
+
+
+def test_reserve_conflict_preserves_replacement_and_aborts_fire(manager, task_refs):
+    """第五陣 P1 の tx 側: 予約 tx の読みと書きの間に置換が commit されたら、
+    古い配列で fired を書き込まず (置換を消さず)、再試行 → 対象消失で安全に離脱する。"""
+    ledger = _attach_ledger(manager)
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    _save_single_gated_slot(manager, task_refs)  # 09:00 の gated コマ A
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+                {"start": "10:00", "kind": "休む", "ref": "none",
+                 "facility": "own_room", "budget_rounds": 0, "note": "C"},
+            ])
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked), \
+            patch("sea.work_session.run_work_session") as mock_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert mock_ws.call_count == 0  # ハンドラは走らない
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    # 置換 (C) が保存されたまま — 古い配列の fired 書き戻しで消えていない
+    assert [(s["note"], s["status"]) for s in slots] == [("C", "pending")]
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 0
+    from saiverse import episodes
+    assert episodes.get_open_episode(manager, PERSONA_ID) is None
+    # 台帳: 対象消失で prepared → failed (abandon)。走行痕跡なし
+    exec_id = _slot_exec_id(manager)
+    assert exec_id is not None
+    assert ledger.get_execution(exec_id)["status"] == "failed"
+
+
 def test_fire_slot_follows_identity_when_index_shifts(manager, task_refs):
     """id 照準 (第四陣 P1): 呼び出し元の index が組み替えでズレていても、
     slot_id が指すコマを発火する — _fire_slot 自身が読んだ plan で id を解決する。"""
