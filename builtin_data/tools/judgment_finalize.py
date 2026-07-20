@@ -1060,16 +1060,23 @@ def _append_event_memo(
     作業メモ (Track metadata) 様式の記録先だが、イベントは Track に属さないため
     「その日」の付帯情報 (persona_day_plan.meta_json) を置き場にする。
     """
-    meta = day_plan_mod.load_plan_meta(manager, persona_id, plan_date)
-    memos = meta.get("event_memos")
-    memos = list(memos) if isinstance(memos, list) else []
-    memos.append({
+    entry = {
         "text": memo_text,
         "event": str(event_text or "")[:120],
         "at": clock.now().isoformat(timespec="seconds"),
-    })
-    day_plan_mod.update_plan_meta(
-        manager, persona_id, plan_date, {"event_memos": memos},
+    }
+
+    # 追記は最新 meta の上で CAS の内側で行う (外で読んだ古い一覧に append した
+    # 完成値を書くと、並走した別のメモ追記が失われる — day_plan 第七陣 P1 と同型)
+    def _append(meta: dict) -> list:
+        memos = meta.get("event_memos")
+        memos = list(memos) if isinstance(memos, list) else []
+        memos.append(entry)
+        meta["event_memos"] = memos
+        return memos
+
+    day_plan_mod.mutate_plan_meta(
+        manager, persona_id, plan_date, _append, context="event_memo",
     )
 
 

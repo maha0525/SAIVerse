@@ -1319,6 +1319,84 @@ def test_update_plan_meta_preserves_concurrent_budget_write(manager, task_refs):
     assert merged.get(day_plan.META_BUDGET_USED) == 7  # 再試行は最新 meta へマージ
 
 
+def test_record_judgment_pulse_concurrent_increments_both_count(manager, task_refs):
+    """第七陣 P1 (Sol 再現): record_judgment_pulse を並走させても増分が失われない。
+
+    旧実装は外で読んだ lives に +1 した完成値を update_plan_meta へ渡していたため、
+    CAS が最新 meta を読み直しても古い完成値が同キーを上書きし、並走 2 本で
+    judgment_pulses が 2 でなく 1 になった。増分計算を CAS の再試行の内側へ移した
+    ことで、競合のたびに最新 meta の上へ積み直される。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            # 読みの後・書きの前に、並走のもう 1 本が commit する
+            day_plan.record_judgment_pulse(
+                manager, PERSONA_ID, PLAN_DATE, at_time="10:00",
+            )
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+        result = day_plan.record_judgment_pulse(
+            manager, PERSONA_ID, PLAN_DATE, at_time="10:00",
+        )
+
+    assert result is not None and result["judgment_pulses"] == 2
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["judgment_pulses"] == 2  # 2 本とも数えられている
+
+
+def test_consume_budget_concurrent_increments_accumulate(manager, task_refs):
+    """第七陣 P1: consume_budget の並走増分が失われず合算される (used = 4 + 3)。"""
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            day_plan.consume_budget(manager, PERSONA_ID, PLAN_DATE, 4)
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+        day_plan.consume_budget(manager, PERSONA_ID, PLAN_DATE, 3)
+
+    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 7
+
+
+def test_consume_life_rounds_concurrent_increments_accumulate(manager, task_refs):
+    """第七陣 P1: consume_life_rounds の並走増分が失われず合算される (4 + 3)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    real_load = day_plan._load_plan_row
+    state = {"fired": False}
+
+    def hooked(db, pid, pdate):
+        row = real_load(db, pid, pdate)
+        if not state["fired"] and row is not None:
+            state["fired"] = True
+            day_plan.consume_life_rounds(
+                manager, PERSONA_ID, PLAN_DATE, 4, at_time="10:00",
+            )
+        return row
+
+    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+        day_plan.consume_life_rounds(
+            manager, PERSONA_ID, PLAN_DATE, 3, at_time="10:00",
+        )
+
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["used_rounds"] == 7
+
+
 def test_fire_slot_follows_identity_when_index_shifts(manager, task_refs):
     """id 照準 (第四陣 P1): 呼び出し元の index が組み替えでズレていても、
     slot_id が指すコマを発火する — _fire_slot 自身が読んだ plan で id を解決する。"""

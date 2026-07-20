@@ -193,3 +193,11 @@ Codex が更に 2 件。どちらも再現実験付きで、コードの構造�
 | **P1** | 予約/精算 tx は読んだ古い **meta_json** を書き戻すのに、CAS 条件は **slots_json しか**比較していない — コマ配列が無傷なら CAS が通り、読み書きの間に `update_plan_meta` (明日メモ等) が commit した更新を古い meta で消す (再現: tomorrow_memo="new" が "old" へ巻き戻り)。予約 tx は非 gated でも `row.meta_json` を無意味に書き戻していた | ①**meta_json は書くときだけ SET に含め、含めるときは読んだ meta も CAS 条件へ追加** (予約 = gated+reserved のみ / 精算 = gated+delta のみ。非 gated は meta に一切触らない)。競合は既存の `_PlanGenerationConflict` 再試行に乗り、**最新 meta から予算を再計算**する。②逆方向 (transfer): 独立系 meta 書き手の唯一の口 `update_plan_meta` (save_lives / consume 系 / 明日メモは全部ここを通る) も **meta CAS + 再試行**化 — メモの書き戻しが並走 tx の予算書き込みを消す鏡像も同時に閉塞。行 INSERT 競合は IntegrityError → 更新経路で再試行。再試行枯渇は RuntimeError で正直に表明 (silent 消失にしない) |
 
 回帰 +3 件 (予約 tx がメモを消さない = Sol 再現 / 精算 tx 側 / update_plan_meta の逆方向)。本体スイート **2746 passed 全緑**、ruff clean。**深めた教訓**: CAS を張るときは「**比較する列**」と「**書く列**」を突き合わせる — 書くのに比較しない列は、その列の並走更新を静かに消す口として残る。守りたい単位 (行) と守れている単位 (列) のズレを確認する。
+
+### 第七レビュー (2026-07-20、第六陣修正 bc58a28 への再指摘)
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| **P1** | 増分系の呼び出し元 (`consume_budget` の used / `consume_life_pulse` の used_pulses / `record_judgment_pulse` の judgment_pulses / `consume_life_rounds` の used_rounds) は **CAS の外側**で古い meta から完成値を計算して `update_plan_meta` へ渡している — CAS が最新 meta を読み直しても `merged.update(完成値)` が古い完成値で同キーを上書きし、並走の積算が失われる (再現: record_judgment_pulse 2 本並走で judgment_pulses が 2 でなく 1) | **読み → 増分計算 → 保存を同じ CAS 試行の内側へ**: 新設 `mutate_plan_meta` (最新 meta dict を mutator に渡し、競合のたびに mutator を最新 meta で呼び直す。mutator None = 書かない no-op で行も作らない) に増分・引き継ぎ計算を持つ全呼び出し元を載せ替え — 4 増分関数 (ライフ 3 兄弟は共通実装 `_increment_life_field` に集約) + `init_budget_ledger` (used 引き継ぎ) + `save_lives` (消費引き継ぎ) + finalize の `_record_event_memo` (メモ一覧への append — Sol 未指摘だが同型)。`update_plan_meta` は mutate_plan_meta 上の薄い皮になり、docstring に「渡してよいのは上書きしてよい完成値だけ」の契約を明記 |
+
+回帰 +3 件 (record_judgment_pulse 並走で 2 = Sol 再現 / consume_budget 並走合算 / consume_life_rounds 並走合算)。本体スイート **2749 passed 全緑**、ruff clean。**自省**: この層は第六陣の修正中に「増分系の外側読みも同族では」と頭をよぎって**流した**箇所そのもの — 疑いが立った同族は、その巡のうちに潰すか、最低でも handoff に残す。**深めた教訓**: CAS の保護範囲は「**書き込み**」でなく「**読みから書きまでの計算全体**」 — 計算が CAS の外にある限り、何度読み直しても古い結論を書く。マージ口 (update_plan_meta) に「増分を渡してはいけない」という**入力の契約**が要る。

@@ -791,29 +791,39 @@ def load_plan_meta(manager: Any, persona_id: str, plan_date: Any) -> Dict[str, A
         db.close()
 
 
-def update_plan_meta(
-    manager: Any, persona_id: str, plan_date: Any, updates: Dict[str, Any]
-) -> Dict[str, Any]:
-    """plan 行の付帯情報 (meta_json) へ updates をマージして永続化する。
+def mutate_plan_meta(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    mutate: Callable[[Dict[str, Any]], Optional[Any]],
+    *,
+    context: str = "",
+) -> Optional[Any]:
+    """meta_json を CAS 再試行つきで変異させる — **増分・引き継ぎ計算の正しい口**。
 
-    行が無ければ meta のみの行 (slots_json="[]") を作る — 就寝判断が「時間割の
-    無かった日」にも明日の自分へのメモを残せるようにするため。slots_json="[]" は
-    ``load_day_plan`` では空配列、``schedule_day_plan`` では push 0 件として
-    無害に振る舞う (save_day_plan で本物の時間割が上書きされたら meta は残る)。
+    「外で meta を読んで完成値を作り、:func:`update_plan_meta` へ渡す」型は、
+    CAS が最新 meta を読み直しても ``merged.update(完成値)`` が古い完成値で同じ
+    キーを上書きするため、並走した積算 (judgment_pulses 等) が失われる
+    (2026-07-20 Codex レビュー第七陣 P1)。読み → 増分計算 → 保存を**同じ CAS
+    試行の内側**で行うのが本関数 — 競合のたびに ``mutate`` が**最新 meta** で
+    呼び直され、増分が最新値の上に積まれる。
 
-    保存は「読んだ meta と同じときだけ書く」CAS — 読みと書きの間に予約/精算 tx の
-    予算書き込みが commit されても、古い meta の書き戻しでそれを消さない
-    (:func:`_mutate_slots_cas` と同じ lost update 防止。第六陣 P1 の逆方向)。
-    世代が変わっていれば最新 meta へマージし直して再試行する。
+    行が無ければ ``mutate({})`` を評価し、書くもの (非 None) があれば meta のみの
+    行 (slots_json="[]") を新規作成する (:func:`update_plan_meta` の従来挙動)。
+    ``mutate`` が None を返したら何も書かず None で終える (対象なし等の no-op —
+    行も作らない)。
+
+    Args:
+        mutate: その試行で読んだ**最新の** meta dict を受け取り、書くべき変更が
+            あれば dict をその場で書き換えて任意の非 None 値 (呼び出し元へ返す
+            結果) を返す。None = 書かずに中止。
 
     Returns:
-        マージ後の meta dict。
+        mutate の返した結果 (書き込み成功時) / None (中止時)。
 
     Raises:
-        RuntimeError: 再試行が枯渇した場合 (書けていない — 呼び出し元へ正直に表明)。
+        RuntimeError: 再試行が枯渇した場合 (書けていない — silent 消失にしない)。
     """
-    if not isinstance(updates, dict):
-        raise ValueError(f"updates must be a dict (got {type(updates).__name__})")
     plan_date_str = _normalize_plan_date(plan_date)
     from sqlalchemy.exc import IntegrityError
 
@@ -825,30 +835,30 @@ def update_plan_meta(
         try:
             row = _load_plan_row(db, persona_id, plan_date_str)
             if row is None:
-                merged = dict(updates)
+                meta: Dict[str, Any] = {}
+                result = mutate(meta)
+                if result is None:
+                    return None
                 db.add(PersonaDayPlan(
                     persona_id=persona_id,
                     plan_date=plan_date_str,
                     slots_json="[]",
-                    meta_json=json.dumps(merged, ensure_ascii=False),
+                    meta_json=json.dumps(meta, ensure_ascii=False),
                     created_at=now,
                     updated_at=now,
                 ))
                 try:
                     db.commit()
-                    return merged
+                    return result
                 except IntegrityError:
                     # 並走の書き手が先に行を作った — 更新経路で再試行
                     db.rollback()
                     continue
             original_meta = row.meta_json
-            try:
-                merged = json.loads(original_meta) if original_meta else {}
-            except (TypeError, ValueError):
-                merged = {}
-            if not isinstance(merged, dict):
-                merged = {}
-            merged.update(updates)
+            meta = _row_meta(row)
+            result = mutate(meta)
+            if result is None:
+                return None
             changed = (
                 db.query(PersonaDayPlan)
                 .filter(
@@ -859,7 +869,7 @@ def update_plan_meta(
                 .update(
                     {
                         PersonaDayPlan.meta_json: json.dumps(
-                            merged, ensure_ascii=False,
+                            meta, ensure_ascii=False,
                         ),
                         PersonaDayPlan.updated_at: now,
                     },
@@ -868,18 +878,56 @@ def update_plan_meta(
             )
             db.commit()
             if changed:
-                return merged
+                return result
         finally:
             db.close()
         LOGGER.info(
-            "[day_plan] plan meta CAS conflict: meta changed since read; retrying "
-            "with fresh meta (persona=%s date=%s attempt=%d/%d)",
-            persona_id, plan_date_str, _attempt + 1, _CAS_MAX_RETRIES,
+            "[day_plan] plan meta CAS conflict (%s): meta changed since read; "
+            "retrying with fresh meta (persona=%s date=%s attempt=%d/%d)",
+            context, persona_id, plan_date_str, _attempt + 1, _CAS_MAX_RETRIES,
         )
     raise RuntimeError(
-        f"plan meta update kept conflicting with concurrent writes "
-        f"(persona={persona_id} date={plan_date_str} keys={sorted(updates)})"
+        f"plan meta mutation kept conflicting with concurrent writes "
+        f"(persona={persona_id} date={plan_date_str} context={context})"
     )
+
+
+def update_plan_meta(
+    manager: Any, persona_id: str, plan_date: Any, updates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """plan 行の付帯情報 (meta_json) へ updates をマージして永続化する。
+
+    行が無ければ meta のみの行 (slots_json="[]") を作る — 就寝判断が「時間割の
+    無かった日」にも明日の自分へのメモを残せるようにするため。slots_json="[]" は
+    ``load_day_plan`` では空配列、``schedule_day_plan`` では push 0 件として
+    無害に振る舞う (save_day_plan で本物の時間割が上書きされたら meta は残る)。
+
+    保存は :func:`mutate_plan_meta` の CAS — 読みと書きの間に別の meta 書き込みが
+    commit されても、古い meta の書き戻しでそれを消さない (第六陣 P1)。
+
+    **注意 (第七陣 P1)**: ここへ渡す updates は「上書きしてよい完成値」だけに
+    すること。既存 meta から計算した増分・引き継ぎ値を渡すと、CAS が最新 meta を
+    読み直しても古い完成値で上書きして並走の積算を消す。増分・引き継ぎは
+    :func:`mutate_plan_meta` に計算ごと渡す。
+
+    Returns:
+        マージ後の meta dict。
+
+    Raises:
+        RuntimeError: 再試行が枯渇した場合 (書けていない — 呼び出し元へ正直に表明)。
+    """
+    if not isinstance(updates, dict):
+        raise ValueError(f"updates must be a dict (got {type(updates).__name__})")
+
+    def _merge(meta: Dict[str, Any]) -> Dict[str, Any]:
+        meta.update(updates)
+        return meta
+
+    merged = mutate_plan_meta(
+        manager, persona_id, plan_date, _merge, context="update_plan_meta",
+    )
+    # _merge は常に非 None を返すので、ここで merged が None になることはない
+    return merged if merged is not None else dict(updates)
 
 
 # ---------------------------------------------------------------------------
@@ -908,12 +956,19 @@ def init_budget_ledger(
     total = _read_nonneg_int(total_rounds)
     if total is None:
         raise ValueError(f"total_rounds must be a non-negative int (got {total_rounds!r})")
-    meta = load_plan_meta(manager, persona_id, plan_date)
-    used = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
-    update_plan_meta(manager, persona_id, plan_date, {
-        META_BUDGET_TOTAL: total,
-        META_BUDGET_USED: used,
-    })
+
+    # used の引き継ぎは最新 meta から CAS の内側で計算する (外で読んだ古い used を
+    # 完成値として書くと、並走した消費の積算を巻き戻す — 第七陣 P1)。
+    def _init(meta: Dict[str, Any]) -> int:
+        used = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
+        meta[META_BUDGET_TOTAL] = total
+        meta[META_BUDGET_USED] = used
+        return used
+
+    used = mutate_plan_meta(
+        manager, persona_id, plan_date, _init, context="init_budget_ledger",
+    )
+    used = used if used is not None else 0
     LOGGER.info(
         "[day_plan] budget ledger initialized: persona=%s date=%s total=%d used=%d",
         persona_id, _normalize_plan_date(plan_date), total, used,
@@ -969,9 +1024,17 @@ def consume_budget(
         return get_budget_state(manager, persona_id, plan_date)
     if inc == 0:
         return get_budget_state(manager, persona_id, plan_date)
-    meta = load_plan_meta(manager, persona_id, plan_date)
-    used = (_read_nonneg_int(meta.get(META_BUDGET_USED)) or 0) + inc
-    update_plan_meta(manager, persona_id, plan_date, {META_BUDGET_USED: used})
+
+    # 増分は最新 meta の上で CAS の内側で積む (外で読んだ古い used + inc の完成値
+    # を書くと並走した消費が失われる — 第七陣 P1)。
+    def _add(meta: Dict[str, Any]) -> int:
+        new_used = (_read_nonneg_int(meta.get(META_BUDGET_USED)) or 0) + inc
+        meta[META_BUDGET_USED] = new_used
+        return new_used
+
+    used = mutate_plan_meta(
+        manager, persona_id, plan_date, _add, context="consume_budget",
+    )
     state = get_budget_state(manager, persona_id, plan_date)
     LOGGER.info(
         "[day_plan] budget consumed: persona=%s date=%s +%d rounds (used=%d remaining=%s)",
@@ -1339,22 +1402,31 @@ def save_lives(
     plan_date_str = _normalize_plan_date(plan_date)
     normalized = _validate_and_normalize_lives(lives)
 
-    existing = {
-        (life.get("start"), life.get("end")): life
-        for life in get_lives(manager, persona_id, plan_date_str)
-    }
-    for life in normalized:
-        prev = existing.get((life["start"], life["end"]))
-        if prev is not None:
-            life["used_pulses"] = int(prev.get("used_pulses") or 0)
-            life["used_rounds"] = int(prev.get("used_rounds") or 0)
-            life["judgment_pulses"] = int(prev.get("judgment_pulses") or 0)
-        else:
-            life["used_pulses"] = 0
-            life["used_rounds"] = 0
-            life["judgment_pulses"] = 0
+    # 消費の引き継ぎは最新 meta から CAS の内側で行う (外で読んだ古い消費を
+    # 完成値として書くと、読みと書きの間に積まれた消費が巻き戻る — 第七陣 P1)。
+    def _apply(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw = meta.get(META_LIVES)
+        existing = {
+            (life.get("start"), life.get("end")): life
+            for life in (raw if isinstance(raw, list) else [])
+            if isinstance(life, dict)
+        }
+        for life in normalized:
+            prev = existing.get((life["start"], life["end"]))
+            if prev is not None:
+                life["used_pulses"] = int(prev.get("used_pulses") or 0)
+                life["used_rounds"] = int(prev.get("used_rounds") or 0)
+                life["judgment_pulses"] = int(prev.get("judgment_pulses") or 0)
+            else:
+                life["used_pulses"] = 0
+                life["used_rounds"] = 0
+                life["judgment_pulses"] = 0
+        meta[META_LIVES] = normalized
+        return normalized
 
-    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: normalized})
+    mutate_plan_meta(
+        manager, persona_id, plan_date_str, _apply, context="save_lives",
+    )
     LOGGER.info(
         "[day_plan] lives saved: persona=%s date=%s lives=%d",
         persona_id, plan_date_str, len(normalized),
@@ -1580,21 +1652,54 @@ def consume_life_pulse(
         _normalize_plan_date(plan_date) if plan_date is not None
         else _resolve_current_plan_date(manager, persona_id)
     )
-    lives = get_lives(manager, persona_id, plan_date_str)
-    if not lives:
-        return None
     hhmm = at_time or clock.now().strftime("%H:%M")
-    idx = get_life_for_time(lives, hhmm)
-    if idx is None:
-        LOGGER.info(
-            "[day_plan] pulse at %s does not belong to any declared life "
-            "(persona=%s date=%s); not counted",
-            hhmm, persona_id, plan_date_str,
+    return _increment_life_field(
+        manager, persona_id, plan_date_str, hhmm, "used_pulses", 1, what="pulse",
+    )
+
+
+def _increment_life_field(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    hhmm: str,
+    field: str,
+    inc: int,
+    *,
+    what: str,
+) -> Optional[Dict[str, Any]]:
+    """``hhmm`` が属するライフの ``field`` へ ``inc`` を積算する共通実装。
+
+    ライフの解決と増分計算を :func:`mutate_plan_meta` の CAS 試行の**内側**で行う
+    — 外で読んだ lives に増分を足した完成値を書くと、並走した積算が失われる
+    (第七陣 P1: record_judgment_pulse 2 本並走で judgment_pulses が 2 でなく 1 に
+    なる再現)。lives が無い日 / どのライフにも属さない時刻は no-op (None、行も
+    作らない)。
+    """
+
+    def _add(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        raw = meta.get(META_LIVES)
+        lives = (
+            [life for life in raw if isinstance(life, dict)]
+            if isinstance(raw, list) else []
         )
-        return None
-    lives[idx]["used_pulses"] = int(lives[idx].get("used_pulses") or 0) + 1
-    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: lives})
-    return lives[idx]
+        if not lives:
+            return None
+        idx = get_life_for_time(lives, hhmm)
+        if idx is None:
+            LOGGER.info(
+                "[day_plan] %s at %s does not belong to any declared life "
+                "(persona=%s date=%s); not counted",
+                what, hhmm, persona_id, plan_date_str,
+            )
+            return None
+        lives[idx][field] = int(lives[idx].get(field) or 0) + inc
+        meta[META_LIVES] = lives
+        return lives[idx]
+
+    return mutate_plan_meta(
+        manager, persona_id, plan_date_str, _add, context=f"increment:{field}",
+    )
 
 
 def record_judgment_pulse(
@@ -1626,21 +1731,11 @@ def record_judgment_pulse(
         _normalize_plan_date(plan_date) if plan_date is not None
         else _resolve_current_plan_date(manager, persona_id)
     )
-    lives = get_lives(manager, persona_id, plan_date_str)
-    if not lives:
-        return None
     hhmm = at_time or clock.now().strftime("%H:%M")
-    idx = get_life_for_time(lives, hhmm)
-    if idx is None:
-        LOGGER.info(
-            "[day_plan] judgment pulse at %s does not belong to any declared life "
-            "(persona=%s date=%s); not counted",
-            hhmm, persona_id, plan_date_str,
-        )
-        return None
-    lives[idx]["judgment_pulses"] = int(lives[idx].get("judgment_pulses") or 0) + 1
-    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: lives})
-    return lives[idx]
+    return _increment_life_field(
+        manager, persona_id, plan_date_str, hhmm, "judgment_pulses", 1,
+        what="judgment pulse",
+    )
 
 
 def consume_life_rounds(
@@ -1661,21 +1756,11 @@ def consume_life_rounds(
     if not inc:
         return None
     plan_date_str = _normalize_plan_date(plan_date)
-    lives = get_lives(manager, persona_id, plan_date_str)
-    if not lives:
-        return None
     hhmm = at_time or clock.now().strftime("%H:%M")
-    idx = get_life_for_time(lives, hhmm)
-    if idx is None:
-        LOGGER.info(
-            "[day_plan] work rounds at %s do not belong to any declared life "
-            "(persona=%s date=%s); not counted",
-            hhmm, persona_id, plan_date_str,
-        )
-        return None
-    lives[idx]["used_rounds"] = int(lives[idx].get("used_rounds") or 0) + inc
-    update_plan_meta(manager, persona_id, plan_date_str, {META_LIVES: lives})
-    return lives[idx]
+    return _increment_life_field(
+        manager, persona_id, plan_date_str, hhmm, "used_rounds", inc,
+        what="work rounds",
+    )
 
 
 def life_consumed(life: Dict[str, Any]) -> float:
