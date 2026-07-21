@@ -1,6 +1,8 @@
 # Gemini 自動キャッシュモード
 
-## 状態: 実装済み (2026-05-30) — 環境変数 `SAIVERSE_GEMINI_AUTO_CACHE=1` で有効化
+## 状態: ✅ 完了 (実装済み 2026-05-30 / archive 移動 2026-07-20) — 環境変数 `SAIVERSE_GEMINI_AUTO_CACHE=1` で有効化
+
+> 2026-07-20: `llm_clients/gemini.py` に `SAIVERSE_GEMINI_AUTO_CACHE` の実装を確認。提案が実装済みのため未解決フォルダから archive へ移動。
 
 ## 背景
 

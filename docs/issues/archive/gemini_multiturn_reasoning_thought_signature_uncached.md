@@ -1,6 +1,6 @@
 # Issue: Gemini マルチターン推論 (thought signature) が cache 不可で毎ターン課金される
 
-**ステータス**: 🔲 未着手
+**ステータス**: ✅ 完了 (2026-07-20)
 **優先度**: medium
 **作成日**: 2026-05-25
 **関連**: `docs/intent/cache_lifecycle_control.md` (Gemini explicit cache / Phase 3)、`llm_clients/gemini.py` (`_store_thought_signature` / thought_signature 再送経路)
@@ -50,3 +50,7 @@ Gemini 仕様 (thought signature 非キャッシュ + デフォルト ON の tho
 ## ログ
 
 - 2026-05-25: 起票。Phase 3 (Gemini explicit cache) の実機検証で発覚。原因確定 (thought signature 非キャッシュ + preservation デフォルト ON)。current code はバグ無しと合意。トグル実装は別途。
+- 2026-07-20: 完了確認。解決案の per-model トグルが実装済みと確認し archive へ移動。
+  - `llm_clients/gemini.py`: 設定キー `multi_turn_thinking` (3.5+) / `thought_signature_echo` (<3.5) を解釈 (L602-608)。`"off"` で `self._multi_turn_thinking = False` になり、過去ターンの text part / function_call part の thought_signature echo をスキップ (L1078 ほか)。→ 非キャッシュ課金分が消える。
+  - モデルファイルで設定可能: 全 Gemini モデル JSON に `dropdown` パラメータ (`on`/`off`) として露出。`gemini-3.5-flash.json` は `default: "off"` = キャッシュ漏れがデフォルトで塞がった状態。
+  - 解決案 (過去ターン署名の clear = 唯一の公式制御手段) を per-model 粒度で実装しており、issue の要求を満たす。
