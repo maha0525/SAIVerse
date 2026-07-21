@@ -486,7 +486,21 @@ Each feature/subsystem has an **Intent Document** in `docs/intent/` that describ
    - Interview the user about unclear points
    - Revise based on the interview
    - User reviews and gives final feedback → document is finalized
-4. **Then implement** the feature with the intent document as guide
+4. **Before narrowing to a local implementation**, add or update the intent's whole-system frame. It must make the relevant parts of the following explicit:
+   - **Outcome and affected parties**: what users, personas, operators, and maintainers must ultimately be able to rely on
+   - **End-to-end journey**: the workflow and lifecycle across producers, transformations, persistence, consumers, replacement, migration, and operations; include only relevant stages, but do not stop at the file or function being edited
+   - **Invariants and ownership**: what must remain true, which boundary owns that truth, and which component is the source of truth
+   - **Change placement**: what will change locally and why that location is the correct owner rather than merely the easiest place to mask the symptom
+   - **Consequences**: effects on other consumers, the next likely work, future extension or replacement, observability, and any uncertainty or debt that would otherwise be transferred elsewhere
+   - **Verification journey**: evidence that crosses the boundaries the real outcome depends on; a local test or a good screenshot cannot by itself prove an end-to-end outcome
+   This is a reasoning frame, not a form to fill mechanically. The shape varies by subsystem, but narrowing is not allowed until the relevant whole has been stated.
+5. **For a failure caused or worsened by our own change**, record three distinct causes before calling recurrence prevention complete:
+   - the proximate technical cause
+   - the decision-making failure that made the local change appear sufficient
+   - the process or system condition that allowed that decision to pass
+   The proposed prevention must then pass a **transfer test**: it must catch at least two structurally similar failures in unrelated subsystems. A rule expressed mainly in the incident's nouns, file types, tools, or exact steps is incident cleanup, not general recurrence prevention.
+6. **Then implement** the feature or fix with the intent document as guide.
+7. **Before handoff**, compare the implementation and evidence with the whole-system frame. State which real journey was verified and which boundary remains unverified. Do not silently redefine completion to match the portion that was easiest to test.
 
 ### Purpose
 
@@ -581,6 +595,16 @@ The repository owner cannot judge *when* refactoring is due — noticing the tim
   3. **One problem at a time**: Don't switch approaches until you understand WHY the current approach failed
   4. **Ask "What don't I know?"**: If unclear, identify the missing information and how to obtain it (add logging, inspect DOM, check documentation) instead of guessing
   5. **Avoid speculative fixes**: Don't try multiple approaches hoping one works. Understand the root cause first.
+
+- **Whole-system correction and recurrence prevention (CRITICAL)**:
+  1. **Do not let the local symptom define the goal.** Before narrowing implementation scope, describe the problem at four levels: the final user/persona outcome, the end-to-end workflow or lifecycle, the responsibility/contract of each participating subsystem, and only then the local defect.
+  2. Map the relevant upstream producers, downstream consumers, operators, future replacement/migration paths, and the next work likely to build on this decision. Ask: **If the local change works perfectly, what remains wrong, what cost or ambiguity moves elsewhere, and who encounters it next?** A small blast radius is not evidence of a safe or complete design.
+  3. Identify the system invariant and its owner, then place the correction where that invariant can remain true for every consumer. A local fix is valid only when it preserves the end-to-end truth; it must not make one component look correct by concealing a broken contract or exporting cleanup to a later stage.
+  4. Verification must follow the relevant real journey across boundaries, not stop at the edited function, local test, screenshot, or immediate output. Select lifecycle stages that matter to the feature—creation, conversion, persistence, consumption, failure, recovery, replacement, migration, and final presentation—rather than applying a fixed checklist mechanically.
+  5. After a self-caused failure, record three distinct causes: **proximate technical cause**, **decision-making failure**, and **process/system condition that allowed the decision to pass**. A prevention that addresses only the proximate cause is incident cleanup, not recurrence prevention.
+  6. Before calling a measure “recurrence prevention,” perform a **transfer test**: show how the same measure would catch at least two structurally similar failures in unrelated subsystems. If it merely repeats the nouns or steps of the current incident, reject it as another local workaround.
+  7. Prefer durable enforcement—clear ownership, executable contracts, validators, tests at boundaries, and observability—over prose reminders. When only a written rule is currently possible, state that limitation instead of presenting documentation alone as a completed safeguard.
+  8. Optimize for SAIVerse as a whole: the personas who live in it, their users, future features, operators, and maintainers. Reducing risk or work inside the current agent turn by transferring uncertainty, debt, or verification to them is not optimization.
 
 - **When debugging UI issues**:
   1. **Listen carefully**: Pay close attention to what the user is actually doing (e.g., "sidebar button" vs "home screen button")
