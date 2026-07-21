@@ -16,6 +16,7 @@ from sea.head_pipeline.registry import HeadSectionRegistry, get_default_registry
 from sea.head_pipeline.store import LineHeadSnapshotStore, StoredLineState
 from sea.head_pipeline.types import (
     EventType,
+    HeadNotReadyError,
     HeadSection,
     LineHeadInput,
     LineHeadSnapshot,
@@ -26,6 +27,7 @@ from sea.head_pipeline.types import (
 
 __all__ = [
     "EventType",
+    "HeadNotReadyError",
     "HeadPipeline",
     "HeadSection",
     "HeadSectionRegistry",

@@ -84,6 +84,9 @@ def _indent_block(text: str, prefix: str) -> str:
 class CoreMemorySection:
     name = "core_memory"
     order = 250  # persona_self(200) の直後、building(300) の前
+    # 人格の同一性を担う required Section (W6 fail-closed)。capture / render /
+    # persist の失敗時は LLM を実行しない (SEA 監査 S6)。
+    required = True
     # refresh_on_events 空 = Metabolism のみ。スペルによる編集では cache を切らない
     # (open_notes / memory_weave と同じ)。反映は次の Metabolism から。
     refresh_on_events = frozenset()
@@ -98,21 +101,19 @@ class CoreMemorySection:
         conn = getattr(sai_mem, "conn", None) if sai_mem else None
         db_lock = getattr(sai_mem, "_db_lock", None) if sai_mem else None
         if conn is None:
+            # 構造的な不在 (SAIMemory 未初期化 / メモリ無しペルソナ) は空が正。
             return empty
 
-        try:
-            from sai_memory.core_memory import list_core_memories
-            if db_lock is not None:
-                with db_lock:
-                    rows = list_core_memories(conn)
-            else:
+        # 読み取り例外はここで握らない (W6 fail-closed): DB 読み失敗を空 snapshot
+        # に化けさせると「コア記憶ゼロの本人」を捏造した head で LLM が走る。
+        # 例外は pipeline.capture_all が失敗として記帳し、既存値があれば据え置き
+        # (stale-but-real)、無ければ required 欠損として LLM 実行を止める。
+        from sai_memory.core_memory import list_core_memories
+        if db_lock is not None:
+            with db_lock:
                 rows = list_core_memories(conn)
-        except Exception:
-            LOGGER.warning(
-                "core_memory: failed to list core memories persona=%s",
-                ctx.persona_id, exc_info=True,
-            )
-            return empty
+        else:
+            rows = list_core_memories(conn)
 
         items = tuple(
             CoreMemoryItem(

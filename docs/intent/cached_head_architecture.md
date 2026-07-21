@@ -310,6 +310,19 @@ Metabolism または `refresh_on_events` に列挙されたイベントでしか
 
 Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで更新。例外的に refresh する場合は明示宣言、レビュー時にも理由がわかる。
 
+### C7. required Section を欠いた head で LLM を実行しない (fail-closed、W6 / SEA 監査 S6、2026-07-21)
+
+人格の同一性を担う Section (`required = True`: common_prompt / persona_self / core_memory) の **capture 失敗 (既存値なし)・render 失敗・snapshot 永続化失敗**が残っている間は、`render_head_messages` が `HeadNotReadyError` を投げ、`prepare_context` がそれを LLM 実行前に伝播させて Pulse を中断する。人格に属さない発話が本人履歴へ確定する経路を塞ぐのが目的。運用の細目:
+
+- **失敗と空は別物**。空の snapshot を正しく capture して render が None を返すのは正規挙動 (head に出ないだけ)。fail-closed の対象は失敗のみ。
+- **capture 失敗の痕跡は None ではなく欠損**。既存値があれば据え置き (stale-but-real = 直近の正しい snapshot で走る)、無ければ key を置かず `LineHeadSnapshot.capture_failures` に理由を記帳する。`ensure_snapshot` は None 値も欠損として認識し、**欠損 Section だけ** `recapture_missing` で毎呼び出し再試行する (= 復旧後の自己修復。capture_all での全再構築は 1 Section の持続故障で毎 Pulse の head 再構築 = cache 破壊 + 通知基準リセットに化けるため禁止)。
+- **persist は commit 成否を返す** (`store.save` → bool。DB commit 失敗 / required Section の serialize 失敗 / required の実体値欠損は **DB に書き込まずに** False — 既存の正常な永続行を欠損行で上書きしない)。旧版の upsert は版条件付き UPDATE 一文で拒否 (並行保存の巻き戻り封鎖)。失敗が残る間は `ensure_persisted` が再試行し、成功するまで LLM を止める — 保存できていない head で応答を確定させると、restart 時に旧 head へ黙ってロールバックした事実と矛盾するため。ここでの不変条件は「durable な版 >= 描画する版」の**単調性**であって版の厳密一致ではない (restart が前進方向にしか動かなければ S6 の害は起きない)。optional Section の serialize 失敗は省いて保存し、restart 後の欠損再 capture で自己回復する。
+- **optional Section の失敗は degrade** (警告ログ + head から欠落) し、次 Pulse の再 capture で自動回復する。
+- required Section は capture 内で読み取り例外を握って空を返してはならない (core_memory の旧実装が該当 — DB 読み失敗が「コア記憶ゼロの本人」に化けていた)。構造的な不在 (SAIMemory 未初期化等) だけを空として返す。
+- 中断の受け皿: 会話 Pulse は呼び出し元へエラー、判断点・作業コマ・schedule は実行台帳の failed 行 (再試行あり)、gold_panning / keepalive は既存の失敗隔離で degrade。
+
+回帰: `tests/test_head_fail_closed.py`。
+
 ---
 
 ## 7. 実装方針 (Phase 分け)

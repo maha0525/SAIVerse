@@ -28,6 +28,9 @@ class CommonPromptSnapshot:
 class CommonPromptSection:
     name = "common_prompt"
     order = 100  # 一番先頭
+    # 人格の同一性を担う required Section (W6 fail-closed)。capture / render /
+    # persist の失敗時は LLM を実行しない (SEA 監査 S6)。
+    required = True
     # NOTE: BUILDING_ENTERED は意図的に含めない (= cache 中変えない原則)。
     # template に {current_building_name} 等の placeholder があると、移動後も
     # 古い名前のまま残る trade-off は許容する (= 末尾通知でペルソナに伝わる)。

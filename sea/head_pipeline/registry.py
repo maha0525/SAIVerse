@@ -83,6 +83,18 @@ class HeadSectionRegistry:
         items.sort(key=lambda pair: (pair[0].order, pair[1]))
         return [section for section, _ in items]
 
+    def required_section_names(self) -> frozenset[str]:
+        """``required = True`` を宣言した Section の名前集合 (W6 fail-closed)。
+
+        required は Protocol 外の任意属性 (未宣言 = False)。この集合に入る
+        Section の capture/render/persist 失敗は LLM 実行を止める。
+        """
+        with self._lock:
+            return frozenset(
+                name for name, s in self._sections.items()
+                if getattr(s, "required", False)
+            )
+
     def sections_for_event(self, event: EventType) -> list[HeadSection]:
         """``event`` を ``refresh_on_events`` に含む Section だけを返す。
 

@@ -11,13 +11,13 @@
 
 ---
 
-## 現在地 (2026-07-21 更新 — W5 実装済み)
+## 現在地 (2026-07-21 更新 — W6 実装済み)
 
 ```
 一次監査     ████████ 完了 (全8サブシステム、2026-07-16)
 柱の裁定     ████████ 完了 (8柱すべて方針確定、2026-07-16)
 基盤工事     ████████ 完了 (実行台帳 Phase 0 + 統合工事 §6 ※§6-6bのみ分離)
-実装 wave    ██████░░ W1〜W5 実装済み (実機検証待ち) / W6〜W14 未着手
+実装 wave    ██████░░ W1〜W6 実装済み (実機検証待ち) / W7〜W14 未着手
 実機検証     █░░░░░░░ ライフ一日検証を実施中 (まはー、2026-07-17〜)
 ```
 
@@ -25,8 +25,9 @@
 - 柱2 (model 別 Session) = 統合工事 §6-1〜§6-7 で**完結** — S1/S2/S3/S4/S8 + M1 + 記憶監査第4片を根治
 - 柱3 (multi-city) = 凍結・入口封鎖済み / 柱4 (native import) = 復元/移植分離済み
 - **実行台帳 = Phase 0〜5 全段実装済み** (器 + Beat ロック + 判断点 + 時間割/予算 + schedule + Metabolism + 配送系/移動)
+- **SEA 監査 = 非保留 finding 全消し込み** (W6 で S6 消化。残 S7/S9 は柱6/柱8 スコープ)
 
-**次にやる wave**: W6 (head の fail-closed 化 = S6)。**W1〜W5 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化)。
+**次にやる wave**: W7 (柱5 — 位置・占有)。**W1〜W6 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6)。
 
 **一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
@@ -74,11 +75,12 @@
 - **実装済み (2026-07-21)**: 上記 4 点 + `add_to_persona_only` の成否契約 (`memory_first` = 保存失敗時は in-memory にも積まない)。回帰 = S5 2 件 / M8 7 件 (append 失敗・mark 失敗・DB lock・再起動で欠落も重複もなし) / 境界 3 件 + W3 期テスト 2 件を新契約に書換 / B1 8 件 (単一 commit・全巻き戻し・後処理再配送・None キュー・縮退)。**Codex レビュー 1 巡 4 件消し込み (受諾 4 / 却下 0)**: P1×2 (`move.post_dynamic_state`/`move.post_game_lifecycle` ハンドラが誘発する再帰的 `flush_pending_for_persona` が非再入 `_delivery_lock` でデッドロック — 同一原因、`ExecutionLedger` に再入検知を追加し一括解消) / P2×2 (`on_entity_moved`/`on_building_entered` の内部失敗が outbox に伝播しない → 両関数 bool 化 + ハンドラ側で失敗を再試行対象に / Building 転記 provenance 照会の例外を「未登録」に倒すと重複保存しうる → 照会失敗はラウンド停止に変更)。回帰追加 4 件、走行メモ = [`2026-07-21_w5_delivery_ledger_handoff.md`](../handoff/2026-07-21_w5_delivery_ledger_handoff.md)。**スコープ境界**: 監査修正方針の「persona/user 属性更新の移動 service への集約」は明文契約 (`persona.current_building_id` は呼び出し側責務) と 5 呼び出し箇所に跨るため **W7 柱5 の canonical 化と同時に実施** (走行メモに記録 — 「commit 後 False」の根絶で分裂の実害は W5 で閉じる)。**残 = まはー実機検証** (移動イベントの同時確定・境界通知の一度きり配送・Building 転記の再試行)
 - **完了条件**: SEA 監査 S5・記憶監査 Building転記の消し込み ✔
 
-### W6 ☐ head の fail-closed 化 (S6)
+### W6 ☑ head の fail-closed 化 (S6) — 実装済み・実機検証待ち (2026-07-21)
 
 - **スコープ**: head capture/render/persist 失敗時に LLM を実行しない (required Section の readiness 検証、None Section を欠損と認識、store の commit 成否返却)。人格に属さない発話が本人履歴に混ざる経路を塞ぐ
-- **参照**: [SEA 監査](../handoff/2026-07-15_sea_runtime_session_head_tail_audit.md) S6
-- **完了条件**: required Section 失敗で LLM 不実行 + 復旧後再試行の回帰固定
+- **参照**: [SEA 監査](../handoff/2026-07-15_sea_runtime_session_head_tail_audit.md) S6 / [走行メモ](../handoff/2026-07-21_w6_head_fail_closed_handoff.md)
+- **実装済み (2026-07-21)**: required Section (`required=True`: common_prompt / persona_self / core_memory) の capture 失敗 (既存値なし=欠損、`capture_failures` 記帳) / render 失敗 / persist 未確認で `HeadNotReadyError` → prepare_context が LLM 実行前に Pulse 中断 (会話=正直なエラー、判断点/コマ=台帳 failed 行)。自己修復 = `ensure_snapshot` の**欠損限定** `recapture_missing` + `ensure_persisted` の再保存 (「durable 版 >= 描画版」の単調性)。store.save 成否 bool 化 + 版条件付き UPDATE。core_memory の内部握り撤去。Codex レビュー 5 巡 (受諾 9 / 裁定却下 1 — 明細は走行メモ)。回帰 = test_head_fail_closed.py 27 件、本体スイート全緑。**残 = まはー実機検証** (通常運転の無変化 / memory.db ロック時に人格なし応答でなくエラーになること / rebasing・stale save ログが平常時に出続けないこと)
+- **完了条件**: required Section 失敗で LLM 不実行 + 復旧後再試行の回帰固定 ✔
 
 ### W7 ☐ 柱5 — 位置・占有
 

@@ -30,6 +30,9 @@ class PersonaSelfSnapshot:
 class PersonaSelfSection:
     name = "persona_self"
     order = 200
+    # 人格の同一性を担う required Section (W6 fail-closed)。capture / render /
+    # persist の失敗時は LLM を実行しない (SEA 監査 S6)。
+    required = True
     refresh_on_events = frozenset({EventType.SYSTEM_PROMPT_EDITED})
 
     def capture(self, ctx: LineHeadInput) -> PersonaSelfSnapshot:

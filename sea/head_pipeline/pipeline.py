@@ -45,6 +45,14 @@ class _LineState:
     last_notified_sections: dict[str, object] = field(default_factory=dict)  # B 相当 (section.name -> snapshot)
     dirty_sections: set[str] = field(default_factory=set)      # capture を急ぐべき Section 名
     last_backstop_check: float = 0.0                           # 最後に periodic backstop が走った epoch
+    # store.save の成功を確認できた最後の snapshot_version (W6 fail-closed)。
+    # 0 = 一度も保存確認なし。bool フラグでなく version で持つのは、並行 capture
+    # (Pulse と world イベント / keepalive は別スレッド) で「旧 snapshot の保存
+    # 成功が新 snapshot の保存失敗を上書きする」競合を防ぐため — 保存結果は
+    # 「どの版を保存したか」に結び付けてしか前進させない (Codex P1, 2026-07-21)。
+    # readiness 検証 (ensure_persisted) は persisted_version >= 現行版 を要求する。
+    # store 未設定環境では検証自体がスキップされる。
+    persisted_version: int = 0
 
 
 class HeadPipeline:
@@ -91,28 +99,48 @@ class HeadPipeline:
         """
         sections = self._registry.all_sections()
         sections_dict: dict[str, object] = {}
+        capture_failures: dict[str, str] = {}
         for section in sections:
             try:
                 sections_dict[section.name] = section.capture(ctx)
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception(
                     "head_pipeline: capture failed for section=%s persona=%s model=%s",
                     section.name, ctx.persona_id, ctx.model_key,
                 )
-                # capture 失敗時は既存値を使う (なければ None)。pipeline 全体を止めない。
+                # capture 失敗時は既存値を使う (stale-but-real)。既存値も無ければ
+                # key ごと省略し capture_failures に理由を残す — None を snapshot
+                # 値として保存すると「欠損なのに存在扱い」になり fail-closed 検証
+                # (W6 / SEA 監査 S6) をすり抜けるため。
                 existing = self._existing_section_snapshot(ctx, section.name)
-                sections_dict[section.name] = existing
+                if existing is not None:
+                    sections_dict[section.name] = existing
+                else:
+                    capture_failures[section.name] = f"capture failed: {exc!r}"
+
+        # state 不在時の採番フォールバック (DB 行の版継続) はロック外で先に
+        # 引いておく — 版の**割り当て自体**は公開と同じロック区間で行う。
+        # 採番と公開が別区間だと、並行 capture_all が「同じ版番号の異なる
+        # snapshot」を作り、片方の保存成功がもう片方 (未保存) を保存済みに
+        # 見せかける (Codex 三巡 P1)。
+        stored_base = 0
+        if not self.has_snapshot(ctx.persona_id, ctx.model_key):
+            stored_base = self._stored_base_version(ctx.persona_id, ctx.model_key)
 
         snapshot = LineHeadSnapshot(
             persona_id=ctx.persona_id,
             model_key=ctx.model_key,
             line_role=ctx.line_role,
             captured_at=time.time(),
-            snapshot_version=self._next_version(ctx),
+            snapshot_version=0,  # 公開ロック内で採番する (下)
             sections=sections_dict,
+            capture_failures=capture_failures,
         )
 
         with self._lock:
+            prev = self._states.get((ctx.persona_id, ctx.model_key))
+            base = prev.snapshot.snapshot_version if prev is not None else stored_base
+            snapshot.snapshot_version = base + 1
             state = _LineState(
                 snapshot=snapshot,
                 last_notified_sections=dict(sections_dict),  # B = A reset
@@ -127,6 +155,96 @@ class HeadPipeline:
         )
         self._persist_snapshot(snapshot, dict(sections_dict))
         return snapshot
+
+    def recapture_missing(
+        self, ctx: LineHeadInput, names: set[str],
+    ) -> Optional[LineHeadSnapshot]:
+        """欠損している Section (``names``) **だけ** capture を再試行する (W6)。
+
+        ensure_snapshot の自己修復経路。capture_all で全 Section を作り直すと、
+        1 つの Section が失敗し続けるだけで毎 Pulse 全 head が再構築され、
+        「Metabolism まで凍結」の原則 (= prompt cache の安定) が壊れ、
+        last_notified (B) も毎回リセットされて差分通知の基準が消える
+        (Codex P2, 2026-07-21)。ここでは欠損分のみを埋め、他 Section の
+        snapshot / B / dirty は一切触らない。
+
+        成功した Section が 1 つでもあれば版を進めて永続化する。全滅なら
+        既存 snapshot の capture_failures に理由を追記するだけ (版は据え置き =
+        cache も B も無傷)。state 不在時は capture_all にフォールバック。
+        """
+        with self._lock:
+            state = self._states.get((ctx.persona_id, ctx.model_key))
+        if state is None:
+            return self.capture_all(ctx)
+
+        sections_by_name = {s.name: s for s in self._registry.all_sections()}
+        captured: dict[str, object] = {}
+        failures: dict[str, str] = {}
+        for name in sorted(names):
+            section = sections_by_name.get(name)
+            if section is None:
+                continue  # registry から消えた Section の残骸は無視
+            try:
+                captured[name] = section.capture(ctx)
+            except Exception as exc:
+                LOGGER.exception(
+                    "head_pipeline: recapture failed for section=%s persona=%s model=%s",
+                    name, ctx.persona_id, ctx.model_key,
+                )
+                failures[name] = f"capture failed: {exc!r}"
+
+        with self._lock:
+            state = self._states.get((ctx.persona_id, ctx.model_key))
+            if state is None:
+                return None  # 並行 discard — 呼び出し側の readiness 検証に委ねる
+
+            # ロック外 capture の間に並行 capture (Metabolism 等) が同じ Section
+            # を新値で埋めていたら、こちらの (より古い世界を見た) 結果で上書き
+            # しない — 「今も欠損している名前」だけを適用する (Codex 二巡 P2)。
+            still_missing = {
+                name for name in names
+                if state.snapshot.sections.get(name) is None
+            }
+            captured = {k: v for k, v in captured.items() if k in still_missing}
+            failures = {k: v for k, v in failures.items() if k in still_missing}
+
+            if not captured:
+                # 全滅 (or 並行 capture が全部埋めた): 失敗理由だけ追記して
+                # 据え置き (readiness 検証がこれを見て required なら止める)。
+                # 版を進めない = cache / B は無傷。
+                state.snapshot.capture_failures.update(failures)
+                return state.snapshot
+
+            new_sections = dict(state.snapshot.sections)
+            new_failures = dict(state.snapshot.capture_failures)
+            new_failures.update(failures)
+            for name, value in captured.items():
+                new_sections[name] = value
+                new_failures.pop(name, None)
+                # 欠損からの復帰は「初めて head に載る」扱い — B も新値に合わせ、
+                # 復帰直後の diff 通知スパムを防ぐ (capture_for_event と同じ規約)。
+                state.last_notified_sections[name] = value
+                state.dirty_sections.discard(name)
+
+            new_snapshot = LineHeadSnapshot(
+                persona_id=state.snapshot.persona_id,
+                model_key=state.snapshot.model_key,
+                line_role=state.snapshot.line_role,
+                captured_at=time.time(),
+                snapshot_version=state.snapshot.snapshot_version + 1,
+                sections=new_sections,
+                capture_failures=new_failures,
+            )
+            state.snapshot = new_snapshot
+            notified_snapshot_copy = dict(state.last_notified_sections)
+
+        LOGGER.info(
+            "head_pipeline: recaptured missing sections=%s persona=%s model=%s version=%d",
+            sorted(captured.keys()), ctx.persona_id, ctx.model_key,
+            new_snapshot.snapshot_version,
+        )
+        self._persist_snapshot(new_snapshot, notified_snapshot_copy)
+        return new_snapshot
 
     def capture_for_event(self, ctx: LineHeadInput, event: EventType) -> Optional[LineHeadSnapshot]:
         """``event`` を refresh_on_events に含む Section だけ capture を再実行する。
@@ -151,16 +269,23 @@ class HeadPipeline:
                 return self.capture_all(ctx)
 
             new_sections = dict(state.snapshot.sections)
+            capture_failures = dict(state.snapshot.capture_failures)
             for section in sections:
                 try:
                     new_sections[section.name] = section.capture(ctx)
+                    capture_failures.pop(section.name, None)
                     state.last_notified_sections[section.name] = new_sections[section.name]
                     state.dirty_sections.discard(section.name)
-                except Exception:
+                except Exception as exc:
                     LOGGER.exception(
                         "head_pipeline: capture failed for section=%s event=%s",
                         section.name, event.value,
                     )
+                    # 既存値があれば据え置き (stale-but-real)。無ければ欠損として
+                    # 理由を記録する (capture_all と同じ fail-closed 規約)。
+                    if new_sections.get(section.name) is None:
+                        new_sections.pop(section.name, None)
+                        capture_failures[section.name] = f"capture failed: {exc!r}"
 
             new_snapshot = LineHeadSnapshot(
                 persona_id=state.snapshot.persona_id,
@@ -169,6 +294,7 @@ class HeadPipeline:
                 captured_at=time.time(),
                 snapshot_version=state.snapshot.snapshot_version + 1,
                 sections=new_sections,
+                capture_failures=capture_failures,
             )
             state.snapshot = new_snapshot
             notified_snapshot_copy = dict(state.last_notified_sections)
@@ -356,9 +482,16 @@ class HeadPipeline:
     # ---- render ----
 
     def render_head(
-        self, persona_id: str, model_key: str
+        self, persona_id: str, model_key: str,
+        *, fail_closed_sections: frozenset[str] = frozenset(),
+        snapshot: Optional[LineHeadSnapshot] = None,
     ) -> list[tuple[str, RenderedSection]]:
-        """現在の snapshot から head の ``(section_name, RenderedSection)`` 列を作る。
+        """snapshot から head の ``(section_name, RenderedSection)`` 列を作る。
+
+        ``snapshot`` 省略時は現在の state の snapshot を読む。呼び出し側が
+        readiness 検証済みの snapshot を持っている場合は明示で渡す (pin) —
+        検証と render の間に別スレッドが未検証の新版を公開しても、検証した
+        その版を描画する (Codex 二巡 P1: 検証・永続化・描画の版一致)。
 
         snapshot 経由のみで render する (= live state 参照不可)。snapshot 不在時は
         空 list を返す (呼び出し側で capture_all を先に呼ぶこと)。
@@ -367,12 +500,22 @@ class HeadPipeline:
         ため、呼び出し側が「order 順の位置」だけから名前を復元しようとすると、None
         セクションの分だけ後続がズレる (enabled フィルタが別セクションに化け、内容が
         欠落する)。名前を一緒に返して位置依存を排除する。
+
+        ``fail_closed_sections`` に入った名前の render 例外は握らず
+        :class:`HeadNotReadyError` (stage="render") にして投げる (W6 / SEA 監査
+        S6 — required Section を黙って skip すると人格を欠いた head で LLM が
+        走る)。それ以外の render 例外は従来どおり skip + ERROR ログで degrade。
+        render が None を返すのは「空 Section」の正規挙動で、fail-closed の
+        対象ではない。
         """
-        with self._lock:
-            state = self._states.get((persona_id, model_key))
-            if state is None:
-                return []
-            snapshot = state.snapshot
+        from sea.head_pipeline.types import HeadNotReadyError
+
+        if snapshot is None:
+            with self._lock:
+                state = self._states.get((persona_id, model_key))
+                if state is None:
+                    return []
+                snapshot = state.snapshot
 
         rendered: list[tuple[str, RenderedSection]] = []
         for section in self._registry.all_sections():
@@ -381,11 +524,16 @@ class HeadPipeline:
                 continue
             try:
                 result = section.render(section_snapshot)
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception(
                     "head_pipeline: render failed for section=%s persona=%s model=%s",
                     section.name, persona_id, model_key,
                 )
+                if section.name in fail_closed_sections:
+                    raise HeadNotReadyError(
+                        persona_id, model_key, "render",
+                        {section.name: f"render failed: {exc!r}"},
+                    ) from exc
                 continue
             if result is not None:
                 rendered.append((section.name, result))
@@ -438,6 +586,8 @@ class HeadPipeline:
                 last_notified_sections=dict(stored.last_notified_sections),
                 dirty_sections=set(),
                 last_backstop_check=time.time(),
+                # store から来た snapshot は定義上 durable (= その版は保存確認済み)
+                persisted_version=stored.snapshot.snapshot_version,
             )
         LOGGER.info(
             "head_pipeline: loaded snapshot from store persona=%s model=%s version=%d",
@@ -445,20 +595,89 @@ class HeadPipeline:
         )
         return True
 
+    def ensure_persisted(
+        self, persona_id: str, model_key: str,
+        *, min_version: Optional[int] = None,
+    ) -> bool:
+        """指定版までの snapshot 保存が未確認なら再 persist を試みる (W6)。
+
+        readiness 検証 (integration.render_head_messages) が LLM 実行前に呼ぶ。
+        ``min_version`` は呼び出し側が pin した snapshot の版 — 「少なくとも
+        この版までは durable」を要求する (省略時は現行版)。戻り値 False =
+        いまもその版を永続化できていない (= restart で旧 head にロールバック
+        する状態のまま LLM を走らせてはいけない)。
+        store 未設定 / state 不在 / 保存確認済みなら True。
+
+        不変条件は **単調性** — 「durable な版 >= 描画する版」であって版の厳密
+        一致ではない (Codex 五巡の指摘に対する裁定, 2026-07-21)。pin した版が
+        未保存でも、並行 capture のより新しい版が durable なら restart は前進
+        方向にしか動かず、監査 S6 の害 (旧 head への黙った巻き戻り) は起きない。
+        厳密一致を要求すると並行 capture のたびに正当な Pulse が止まる。
+        """
+        if self._store is None:
+            return True
+        with self._lock:
+            state = self._states.get((persona_id, model_key))
+            if state is None:
+                return True
+            target = min_version if min_version is not None else state.snapshot.snapshot_version
+            if state.persisted_version >= target:
+                return True
+            snapshot = state.snapshot
+            notified = dict(state.last_notified_sections)
+        # 現行 state の snapshot を保存する (版は pin した版以上)。成功すれば
+        # persisted_version >= 現行版 >= target になる。
+        if not self._persist_snapshot(snapshot, notified):
+            # 失敗が stale 拒否 (in-memory 版 < DB 版) なら再採番して一度だけ
+            # 再試行する — capture_all 時の load_version 一時失敗で低い版から
+            # 採番してしまった state が、DB 復旧後も恒久拒否され続けるのを防ぐ
+            # (Codex 四巡 P1: 読取失敗を「行なし」と同一視した毒の自己回復)。
+            rebased = self._try_rebase_stale_version(persona_id, model_key, snapshot)
+            if rebased is None or not self._persist_snapshot(rebased, notified):
+                return False
+        with self._lock:
+            state = self._states.get((persona_id, model_key))
+            if state is None:
+                return True
+            return state.persisted_version >= target
+
     def _persist_snapshot(
         self,
         snapshot: LineHeadSnapshot,
         last_notified_sections: dict[str, object],
-    ) -> None:
+    ) -> bool:
+        """store.save を試み、成功なら「保存した版」を persisted_version に記帳する。
+
+        記帳は「保存した snapshot オブジェクトが現行 state の snapshot と同一
+        (is)」のときだけ行う: 版番号の一致では足りない — 並行 capture_all が
+        同版番号の別内容 snapshot を作った場合に、旧オブジェクトの保存成功が
+        現行 (未保存) を保存済みに見せかける (Codex 三巡 P1)。同一でなければ
+        記帳しない = 現行版は未確認のまま残り、ensure_persisted が現行を
+        保存し直す。失敗は何も進めない。
+
+        store 未設定 (テスト / startup 前) は「永続化なし」が構成上の正なので
+        True 扱い (fail-closed の対象外)。
+        """
         if self._store is None:
-            return
+            return True
         try:
-            self._store.save(snapshot, last_notified_sections)
+            ok = self._store.save(snapshot, last_notified_sections)
         except Exception:
             LOGGER.exception(
                 "head_pipeline: store.save failed persona=%s model=%s",
                 snapshot.persona_id, snapshot.model_key,
             )
+            ok = False
+        if ok:
+            with self._lock:
+                state = self._states.get((snapshot.persona_id, snapshot.model_key))
+                if (
+                    state is not None
+                    and state.snapshot is snapshot
+                    and state.persisted_version < snapshot.snapshot_version
+                ):
+                    state.persisted_version = snapshot.snapshot_version
+        return ok
 
     def _persist_last_notified(
         self,
@@ -485,10 +704,57 @@ class HeadPipeline:
                 return None
             return state.snapshot.sections.get(section_name)
 
-    def _next_version(self, ctx: LineHeadInput) -> int:
+    def _try_rebase_stale_version(
+        self, persona_id: str, model_key: str, snapshot: LineHeadSnapshot,
+    ) -> Optional[LineHeadSnapshot]:
+        """保存失敗が stale 拒否だった場合の再採番 (Codex 四巡 P1 の自己回復)。
+
+        DB の現在版を読み直し、渡された snapshot がまだ現行 state のもので、
+        かつ版が DB 以下 (= store.save の版ガードに拒否される) なら DB+1 に
+        採番し直して返す。該当しない失敗 (DB 障害そのもの / state 交代済み /
+        版はすでに新しい) は None — 呼び出し側はそのまま失敗を返し、次の
+        readiness 検証で再試行される。
+        """
+        loader = getattr(self._store, "load_version", None)
+        if not callable(loader):
+            return None
+        try:
+            stored = int(loader(persona_id, model_key) or 0)
+        except Exception:
+            return None
         with self._lock:
-            state = self._states.get((ctx.persona_id, ctx.model_key))
-            return (state.snapshot.snapshot_version + 1) if state is not None else 1
+            state = self._states.get((persona_id, model_key))
+            if state is None or state.snapshot is not snapshot:
+                return None
+            if snapshot.snapshot_version > stored:
+                return None  # stale ではない (別要因の失敗)
+            LOGGER.warning(
+                "head_pipeline: rebasing snapshot version v%d -> v%d after stale "
+                "rejection persona=%s model=%s",
+                snapshot.snapshot_version, stored + 1, persona_id, model_key,
+            )
+            snapshot.snapshot_version = stored + 1
+            return snapshot
+
+    def _stored_base_version(self, persona_id: str, model_key: str) -> int:
+        """state 不在時の採番ベース: store の既存行の SNAPSHOT_VERSION (無ければ 0)。
+
+        再起動後に load を経ずに capture_all へ来た経路 (dispatch_event の
+        Metabolism 等) で 1 から振り直すと、store.save の stale 版ガード
+        (Codex 二巡 P1) に「古い版の上書き」として永久拒否され、fail-closed が
+        解けなくなる — DB の版から採番を継続する。
+        """
+        loader = getattr(self._store, "load_version", None)
+        if not callable(loader):
+            return 0
+        try:
+            return int(loader(persona_id, model_key) or 0)
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline: load_version failed persona=%s model=%s",
+                persona_id, model_key,
+            )
+            return 0
 
 
 _default_pipeline: Optional[HeadPipeline] = None

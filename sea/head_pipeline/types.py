@@ -23,6 +23,39 @@ class SnapshotStaleError(ValueError):
     """
 
 
+class HeadNotReadyError(RuntimeError):
+    """required Section を欠いた head で LLM を実行しようとしたことを表明する。
+
+    fail-closed 化 (W6 / SEA 監査 S6) の中核例外。required Section
+    (common_prompt / persona_self / core_memory = 人格の同一性を担う Section) の
+    capture / render / persist が失敗したまま LLM を呼ぶと、人格に属さない発話が
+    本人の履歴へ確定してしまう。この例外は prepare_context から LLM 呼び出し前に
+    伝播し、Pulse を「正直な失敗」として中断する (会話は API エラー、判断点や
+    作業コマは実行台帳の failed 行になり再試行される)。
+
+    ``stage`` は破れた工程 ("capture" / "render" / "persist" / "pipeline")、
+    ``sections`` は関与した Section 名 → 理由の対応。復旧後は次の Pulse の
+    ensure_snapshot / persist 再試行が自己修復する。
+    """
+
+    def __init__(
+        self,
+        persona_id: str,
+        model_key: str,
+        stage: str,
+        sections: Optional[dict[str, str]] = None,
+    ) -> None:
+        self.persona_id = persona_id
+        self.model_key = model_key
+        self.stage = stage
+        self.sections = dict(sections or {})
+        detail = "; ".join(f"{name}: {reason}" for name, reason in self.sections.items())
+        super().__init__(
+            f"head not ready (stage={stage}) for persona={persona_id} "
+            f"model={model_key}" + (f" — {detail}" if detail else "")
+        )
+
+
 class EventType(enum.Enum):
     """snapshot 再構築 / dirty マークを引き起こすイベント種別。
 
@@ -123,6 +156,11 @@ class LineHeadSnapshot:
     captured_at: float       # epoch seconds
     snapshot_version: int    # 監査用、capture 毎に bump
     sections: dict[str, Any] = field(default_factory=dict)  # name -> SectionSnapshot
+    # capture に失敗し既存値も無かった Section の name -> 失敗理由 (W6 fail-closed)。
+    # sections には該当 key を置かない (None を snapshot 値として保存しない —
+    # 「None Section を欠損と認識しない」穴の根治)。永続化はしない: DB 上は
+    # key 不在がそのまま欠損を表し、load 後の ensure_snapshot が再 capture する。
+    capture_failures: dict[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -135,6 +173,14 @@ class HeadSection(Protocol):
 
     各 Section は自前の SectionSnapshot dataclass を定義し、capture/render/diff の
     引数・戻り値の型を一貫させる責任を持つ (Protocol 側では ``Any`` で受ける)。
+
+    任意属性 ``required: bool`` (既定 False、Protocol には含めない):
+    True の Section は人格の同一性を担う (common_prompt / persona_self /
+    core_memory)。capture / render / persist の失敗時は LLM を実行しない
+    (fail-closed、W6 / SEA 監査 S6)。False の Section の失敗は警告つきで
+    degrade し、次 Pulse の再 capture で自己回復する。
+    「空を render する」のは失敗ではない — 空の snapshot が正しく capture
+    できていれば required でも head に出ないだけで readiness は満たす。
 
     詳細: docs/intent/cached_head_architecture.md §3.1
     """

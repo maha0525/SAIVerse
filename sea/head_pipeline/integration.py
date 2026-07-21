@@ -359,12 +359,30 @@ def _inject_persona_recall_on_enter(
             )
 
 
+def _missing_section_names(pipeline: HeadPipeline, snapshot) -> set[str]:
+    """登録済み Section のうち snapshot に実体値が無い名前の集合。
+
+    value が ``None`` の Section は欠損として数える (W6 / SEA 監査 S6 —
+    旧実装は key 集合しか見ず、capture 失敗の None を「存在する」と誤認して
+    再 capture しなかった)。Section.capture が None を返す正規経路は存在しない
+    (全 Section が空でも snapshot dataclass を返す) ため、None = 失敗痕跡。
+    """
+    expected_names = {s.name for s in pipeline.registry.all_sections()}
+    sections = snapshot.sections if snapshot is not None else {}
+    actual_names = {name for name, value in sections.items() if value is not None}
+    return expected_names - actual_names
+
+
 def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
     """pipeline に snapshot が無ければ store から load、それでも無ければ capture_all。
 
     load_from_store が成功しても、登録済み Section のうち snapshot.sections に
-    入っていないものがあれば (= 旧 schema 等で deserialize が失敗した) 自己修復で
-    capture_all を走らせて欠損を埋める。
+    実体値が無いものがあれば (= 旧 schema 等で deserialize が失敗した / 前回の
+    capture が失敗した) 自己修復で **欠損分だけ** recapture_missing を走らせて
+    埋める (capture_all で全再構築すると、1 Section の持続故障が毎 Pulse の全
+    head 再構築 = cache 破壊 + B リセットに化ける — Codex P2)。この再 capture が
+    「復旧後の再試行」の実体 — 失敗が続く限り毎回試み、直れば次の Pulse から
+    head が揃う。
 
     加えて、 ctx に anchor TTL 状態 (= ``anchor_updated_at`` + ``cache_ttl_seconds``)
     が積まれていて TTL を超過していたら、 snapshot 全体を再 capture する。
@@ -380,10 +398,9 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
             )
             pipeline.capture_all(ctx)
             return
-        expected_names = {s.name for s in pipeline.registry.all_sections()}
-        actual_names = set((snapshot.sections if snapshot is not None else {}).keys())
-        if expected_names - actual_names:
-            pipeline.capture_all(ctx)
+        missing = _missing_section_names(pipeline, snapshot)
+        if missing:
+            pipeline.recapture_missing(ctx, missing)
         return
     if pipeline.load_from_store(ctx.persona_id, ctx.model_key):
         snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
@@ -394,10 +411,9 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
             )
             pipeline.capture_all(ctx)
             return
-        expected_names = {s.name for s in pipeline.registry.all_sections()}
-        actual_names = set((snapshot.sections if snapshot is not None else {}).keys())
-        if expected_names - actual_names:
-            pipeline.capture_all(ctx)
+        missing = _missing_section_names(pipeline, snapshot)
+        if missing:
+            pipeline.recapture_missing(ctx, missing)
         return
     pipeline.capture_all(ctx)
 
@@ -437,31 +453,82 @@ def render_head_messages(
     する (= 旧 ``reqs.system_prompt`` / ``reqs.memory_weave`` / ``reqs.visual_context``
     フラグ相当)。``None`` なら全 Section を render する。
 
+    fail-closed (W6 / SEA 監査 S6): enabled に含まれる required Section
+    (common_prompt / persona_self / core_memory) について、capture 失敗による
+    欠損・render 失敗・snapshot の永続化失敗が残っている場合は
+    :class:`HeadNotReadyError` を投げ、呼び出し側 (prepare_context) 経由で
+    LLM 実行前に Pulse を中断させる。人格に属さない発話を本人履歴へ確定させる
+    より、正直に失敗して次 Pulse の自己修復 (ensure_snapshot 再 capture /
+    ensure_persisted 再保存) に委ねる。
+
     戻り値は ``[{"role": ..., "content": ..., "metadata": ...}, ...]`` の標準
     message dict 列。``prepare_context`` の system / memory_weave / visual_context
     部分の置き換えとして使う。
     """
+    from sea.head_pipeline.types import HeadNotReadyError
+
     pipeline = pipeline or get_default_pipeline()
     ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     ensure_snapshot(pipeline, ctx)
 
+    # 以降の readiness 検証・render・composition は全てこの pin した snapshot
+    # に対して行う (Codex 二巡 P1): 検証と render の間に別スレッドが未保存の
+    # 新版を公開しても、「検証した版」を描画するので fail-closed が崩れない。
+    pinned = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
+
+    required_names = pipeline.registry.required_section_names()
+    if enabled_sections is not None:
+        required_names = required_names & enabled_sections
+
+    if required_names:
+        # 1) capture readiness: required Section が snapshot に実体値を持つか。
+        #    ensure_snapshot が再 capture を済ませた後なので、ここで欠けている
+        #    ものは「今回も capture に失敗した」Section。
+        sections = pinned.sections if pinned is not None else {}
+        failures = pinned.capture_failures if pinned is not None else {}
+        missing = {
+            name: failures.get(name, "section missing from snapshot")
+            for name in required_names
+            if sections.get(name) is None
+        }
+        if missing:
+            raise HeadNotReadyError(ctx.persona_id, ctx.model_key, "capture", missing)
+
+        # 2) persist readiness: pin した版までの保存が未確認なら再試行し、
+        #    それでもダメなら止める (restart で旧 head に黙ってロールバック
+        #    する状態のまま応答を確定させない)。
+        pinned_version = pinned.snapshot_version if pinned is not None else 0
+        if not pipeline.ensure_persisted(
+            ctx.persona_id, ctx.model_key, min_version=pinned_version,
+        ):
+            raise HeadNotReadyError(
+                ctx.persona_id, ctx.model_key, "persist",
+                {"__snapshot__": "store.save failing (will retry next pulse)"},
+            )
+
     # render_head は (section_name, RenderedSection) を返すので、名前で直接
     # enabled フィルタできる。位置依存の zip は廃止 (None render セクションで
-    # 名前がズレて内容が欠落するバグの根治)。
-    rendered = pipeline.render_head(ctx.persona_id, ctx.model_key)
+    # 名前がズレて内容が欠落するバグの根治)。required Section の render 例外は
+    # HeadNotReadyError (stage="render") として上がってくる。
+    rendered = pipeline.render_head(
+        ctx.persona_id, ctx.model_key,
+        fail_closed_sections=required_names, snapshot=pinned,
+    )
     rendered_by_name = {
         name: section
         for name, section in rendered
         if enabled_sections is None or name in enabled_sections
     }
-    return _compose_messages(pipeline, ctx, rendered_by_name)
+    return _compose_messages(pinned, rendered_by_name)
 
 
 def _compose_messages(
-    pipeline: HeadPipeline,
-    ctx: LineHeadInput,
+    snapshot: Any,
     rendered_by_name: dict[str, RenderedSection],
 ) -> list[dict[str, Any]]:
+    # ``snapshot`` は呼び出し側が pin した LineHeadSnapshot (None 可)。
+    # Memory Weave の entries 展開もこの pin から読む — render と別の版を
+    # 読まない (Codex 二巡 P1 と同じ版一致の原則)。
     messages: list[dict[str, Any]] = []
 
     system_parts: list[str] = []
@@ -481,7 +548,6 @@ def _compose_messages(
     # は metadata.__memory_weave_type__ で section ラベルを切り替えるため、
     # 1 つにまとめずに 3 つの message を保つ必要がある。
     if MEMORY_WEAVE_SECTION_NAME in rendered_by_name:
-        snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
         mw_section_snapshot = (
             snapshot.sections.get(MEMORY_WEAVE_SECTION_NAME)
             if snapshot is not None else None

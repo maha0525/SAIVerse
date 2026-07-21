@@ -86,8 +86,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         enabled_sections.add("visual_context")
 
     if enabled_sections:
+        from sea.head_pipeline import render_head_messages
+        from sea.head_pipeline.types import HeadNotReadyError
         try:
-            from sea.head_pipeline import render_head_messages
             head_messages = render_head_messages(
                 persona, runtime.manager, building_id,
                 enabled_sections=enabled_sections,
@@ -99,9 +100,26 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                     "[sea][prepare-context] Added %d head messages via pipeline",
                     len(head_messages),
                 )
-        except Exception:
+        except HeadNotReadyError:
+            # fail-closed (W6 / SEA 監査 S6): required Section (人格) を欠いた
+            # head で LLM を走らせない。そのまま伝播して Pulse を中断する —
+            # 会話は呼び出し元へエラー、判断点/コマは実行台帳の failed 行になり
+            # 再試行される。復旧後は次 Pulse の ensure_snapshot が自己修復する。
+            raise
+        except Exception as exc:
+            if reqs.system_prompt:
+                # 人格 head を要求した呼び出しで head pipeline 全体が死んだ場合も
+                # 同じく fail closed (旧実装は exception log だけで LLM に進み、
+                # 人格なしの応答を本人履歴へ確定し得た)。
+                raise HeadNotReadyError(
+                    getattr(persona, "persona_id", "") or "",
+                    str(model_key or ""),
+                    "pipeline",
+                    {"__pipeline__": f"head rendering failed: {exc!r}"},
+                ) from exc
+            # optional な head (memory_weave / visual_context のみ) は degrade 可。
             LOGGER.exception(
-                "[sea][prepare-context] Failed to render head via cached_head_architecture",
+                "[sea][prepare-context] Failed to render optional head sections",
             )
 
     # ---- history ----
