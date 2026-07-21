@@ -460,15 +460,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if not building:
                 return "Error: Building not found."
 
-            occupancy = (
-                db.query(BuildingOccupancyLog)
-                .filter_by(BUILDINGID=building_id, EXIT_TIMESTAMP=None)
-                .first()
-            )
-            if occupancy and building.CITYID != city_id:
+            # 分離監査 P1-7 (W7 柱5): City は通常更新では immutable。
+            # City 変更は User.CURRENT_BUILDINGID / Region 所属 / private room /
+            # tool・item link の全参照を検査・一括移送する専用 migration の領分で、
+            # multi-city 凍結中は提供しない (凍結解除時に監査の修正方針を正典と
+            # して設計する)。
+            if building.CITYID != city_id:
                 return (
-                    f"Error: Cannot change the city of '{building.BUILDINGNAME}' "
-                    "while it is occupied."
+                    f"Error: The city of '{building.BUILDINGNAME}' cannot be "
+                    "changed. (City transfer requires a dedicated migration, "
+                    "which is out of scope while multi-city is frozen.)"
                 )
 
             building.BUILDINGNAME = name
@@ -571,6 +572,17 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     return "Error: Entrance building not found."
                 if entrance.CITYID != city_id:
                     return "Error: Entrance building belongs to a different city."
+                # 入口所有は一意 (W7 柱5 / Codex 第二巡): 共有すると片方の
+                # 親変更が他方の「入口は親スコープ」不変条件を壊す
+                owner = db.query(RegionModel).filter_by(
+                    ENTRANCE_BUILDING_ID=entrance_building_id
+                ).first()
+                if owner is not None:
+                    return (
+                        f"Error: '{entrance.BUILDINGNAME}' is already the "
+                        f"entrance of region '{owner.NAME}'. An entrance "
+                        "building cannot be shared between regions."
+                    )
                 # 入口は親スコープに属する
                 entrance.REGION_ID = parent_region_id or None
                 entrance_id = entrance_building_id
@@ -655,10 +667,40 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 if has_children:
                     return "Error: Cannot make this region a SubRegion while it has SubRegions of its own."
 
+            # 分離監査 P1-6 (W7 柱5): 「入口は親スコープに属する」不変条件。
+            # parent 変更時は入口 Building の REGION_ID を同一 tx で新しい親
+            # スコープへ同期する (top 化なら City 直下 = None)。取り残すと
+            # 入口が旧スコープに残り、Region が通常移動で到達不能になる。
+            old_parent = region.PARENT_REGION_ID or None
+            new_parent = parent_region_id or None
+            if old_parent != new_parent and region.ENTRANCE_BUILDING_ID:
+                entrance = db.query(BuildingModel).filter_by(
+                    BUILDINGID=region.ENTRANCE_BUILDING_ID
+                ).first()
+                if not entrance:
+                    return (
+                        f"Error: Entrance building '{region.ENTRANCE_BUILDING_ID}' "
+                        "not found; cannot change the parent of this region."
+                    )
+                # レガシーデータで入口が共有されている場合、動かすと他 Region の
+                # 「入口は親スコープ」不変条件を壊すため拒否 (新規作成時は
+                # create_region が共有自体を拒否する)
+                other_owner = db.query(RegionModel).filter(
+                    RegionModel.ENTRANCE_BUILDING_ID == region.ENTRANCE_BUILDING_ID,
+                    RegionModel.REGION_ID != region_id,
+                ).first()
+                if other_owner is not None:
+                    return (
+                        f"Error: Entrance building '{entrance.BUILDINGNAME}' is "
+                        f"shared with region '{other_owner.NAME}'. Resolve the "
+                        "shared entrance before changing parents."
+                    )
+                entrance.REGION_ID = new_parent
+
             region.NAME = name
             region.DESCRIPTION = description
             region.REGION_TYPE = region_type
-            region.PARENT_REGION_ID = parent_region_id or None
+            region.PARENT_REGION_ID = new_parent
             db.commit()
             logging.info("Updated region '%s' (%s).", name, region_id)
             return f"Region '{name}' updated successfully."
@@ -724,6 +766,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
             if not building:
                 return "Error: Building not found."
+
+            # 分離監査 P1-6 (W7 柱5): 入口 Building の所属は「親スコープ」という
+            # 不変条件ごと Region service (create/update/delete_region) が管理する。
+            # ここで自由に付け替えられると、入口を Region 自身の内部へ入れて外から
+            # 見えなくしたり、detach で到達不能にできてしまう。
+            entrance_owner = db.query(RegionModel).filter_by(
+                ENTRANCE_BUILDING_ID=building_id
+            ).first()
+            if entrance_owner is not None:
+                return (
+                    f"Error: '{building.BUILDINGNAME}' is the entrance of region "
+                    f"'{entrance_owner.NAME}'. Its region assignment is managed by "
+                    "the region itself (change the region's parent instead)."
+                )
 
             if region_id:
                 region = db.query(RegionModel).filter_by(REGION_ID=region_id).first()
@@ -1332,8 +1388,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai_id, from_building_id, target_building_id
         )
         if success:
-            persona.current_building_id = target_building_id
-            persona.register_entry(target_building_id)
+            # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
             return (
                 f"Successfully moved '{persona.persona_name}' to "
                 f"'{self.building_map[target_building_id].name}'."

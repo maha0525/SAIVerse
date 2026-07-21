@@ -245,13 +245,15 @@ def _make_manager(session_factory, tmp_path, judge_fn, session_responses):
     personas = {PERSONA_ID: persona}
 
     class StubOccupancy:
-        # 本物と同じく persona.current_building_id は触らない
-        # (更新は day_plan._move_to_facility の責務)。
+        # 本物と同じ契約 (W7 柱5): 成功時に persona 属性を service 側で更新する。
         def __init__(self):
             self.moves: List[tuple] = []
 
         def move_entity(self, entity_id, entity_type, from_id, to_id, db_session=None):
             self.moves.append((entity_id, entity_type, from_id, to_id))
+            target = personas.get(entity_id)
+            if target is not None:
+                target.current_building_id = to_id
             return True, "ok"
 
     llm = ScriptedLLMClient(session_responses)

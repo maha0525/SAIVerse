@@ -280,6 +280,11 @@ class BuildingToolLink(Base):
     TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
 
 class BuildingOccupancyLog(Base):
+    # 不変条件 (分離監査 P1-2 / W7 柱5): AIID ごとに EXIT_TIMESTAMP IS NULL の
+    # active 行は高々 1 行。部分一意 index `uq_occupancy_active_ai` が DB 側で
+    # 強制するが、意図的にモデル metadata には載せず起動時の
+    # database/occupancy_repair.py (修復→CREATE INDEX) が冪等に作成する
+    # (全書換 migration が修復前の重複データのコピーで詰まないように)。
     __tablename__ = "building_occupancy_log"
     ID = Column(Integer, primary_key=True, autoincrement=True)
     CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)

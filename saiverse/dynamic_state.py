@@ -70,9 +70,10 @@ class DynamicStateManager:
         building_items / building_occupants 等) の snapshot が再構築される。
 
         dispatch_event の前に、新 Building の building_id を使って diff 通知を注入する。
-        この時点では persona.current_building_id がまだ旧 Building を指しているため、
-        maybe_inject_event_messages (persona.current_building_id を参照) は使えない。
-        引数の building_id (= 移動先) を直接渡す。
+        persona.current_building_id には依存しない — 呼び出しタイミングは経路で
+        異なり (W7 以降、通常経路では move_entity が配送前に属性を新 Building へ
+        sync 済み。outbox 再配送では任意のタイミングになる)、引数の building_id
+        (= 移動先) だけが常に正しい。
 
         Returns:
             全段が成功したか (2026-07-21 Codex レビュー P2)。各段はそれぞれ

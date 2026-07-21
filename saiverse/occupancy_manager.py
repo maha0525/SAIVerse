@@ -1,15 +1,47 @@
 import logging
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Callable, TYPE_CHECKING
 
+from sqlalchemy import or_, update as sa_update
 from sqlalchemy.orm import Session
 
 from database.models import BuildingOccupancyLog, User as UserModel
 
 if TYPE_CHECKING:
     from .buildings import Building
+
+
+class MoveDenialMessage(str):
+    """move_entity の拒否メッセージ。文字列として振る舞い、``code`` で型を運ぶ。
+
+    呼び出し側の ``ok, msg`` 契約 (msg は表示用文字列) は不変のまま、route 層
+    (api/routes/user.py の /move、api/routes/chat.py の /utter) が
+    ``code == "cas_conflict"`` を 409 へ変換してクライアント再同期を起動する
+    ための最小の型付け (2026-07-21 Codex レビュー P2)。
+
+    ``current_building_id`` は拒否時点の DB 確定現在地 (判明している場合)。
+    仲裁負けの直後は in-memory mirror がまだ勝者の移動を映していないことが
+    あるため、409 応答はこちらを優先する (Codex 第三巡 P2)。
+    """
+    code: str = "move_failed"
+    current_building_id: Optional[str] = None
+
+    def __new__(
+        cls,
+        text: str,
+        code: str = "move_failed",
+        current_building_id: Optional[str] = None,
+    ):
+        obj = super().__new__(cls, text)
+        obj.code = code
+        obj.current_building_id = current_building_id
+        return obj
+
+
+CAS_CONFLICT = "cas_conflict"
 
 
 class OccupancyManager:
@@ -185,10 +217,16 @@ class OccupancyManager:
            **commit 後は False を返さない** — 後処理の失敗は pending/dead に
            残る再配送状態であり、移動の失敗ではない。
 
-        persona.current_building_id / user state cache の更新は従来どおり
-        呼び出し側の責務 (完全な集約は柱5 = W7 の canonical 化と同時に行う —
-        本変更で「失敗を返したのに DB は移動済み」の分裂は消えるため、呼び出し
-        側の成功時更新は常に確定済みの遷移を映す)。
+        W7/柱5 (分離監査 P1-1 残片 + P1-2) で以下を集約:
+
+        - **属性更新の service 集約**: commit + 配送後に本メソッドが
+          `persona.current_building_id` / `_mark_entry` / `_save_session_metadata`
+          (AI) と `manager.state.user_current_building_id` (user) を一元更新する。
+          呼び出し側は位置属性を書き換えてはならない。
+        - **CAS**: active occupancy 行 (AI) / User.CURRENT_BUILDINGID (user) が
+          from_id と一致しない移動は「現在地が変わっている」として無変異で失敗
+          する。active 行の一意性は部分一意 index `uq_occupancy_active_ai`
+          (database/occupancy_repair.py) が DB 側でも強制する。
 
         旧 ``db_session`` パラメータは廃止 (実利用者ゼロの死んだ口。tx の所有は
         本メソッドに一本化)。
@@ -285,16 +323,71 @@ class OccupancyManager:
         db = self.SessionLocal()
         try:
             if entity_type == 'ai':
-                last_log = db.query(BuildingOccupancyLog).filter_by(
-                    AIID=entity_id, BUILDINGID=from_id, EXIT_TIMESTAMP=None
-                ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).first()
-                if last_log:
-                    last_log.EXIT_TIMESTAMP = now
-                new_log = BuildingOccupancyLog(
-                    CITYID=self.city_id, AIID=entity_id,
-                    BUILDINGID=to_id, ENTRY_TIMESTAMP=now,
-                )
-                db.add(new_log)
+                # CAS (P1-2): active 行を AIID だけで引き、canonical な現在地が
+                # from_id と一致するときだけ close する。stale from は無変異で失敗。
+                active_rows = db.query(BuildingOccupancyLog).filter_by(
+                    AIID=entity_id, EXIT_TIMESTAMP=None,
+                ).order_by(
+                    BuildingOccupancyLog.ENTRY_TIMESTAMP.desc(),
+                    BuildingOccupancyLog.ID.desc(),
+                ).all()
+                if len(active_rows) > 1:
+                    db.rollback()
+                    logging.error(
+                        "move_entity: duplicate active occupancy rows for %s "
+                        "(%d rows) — repair required before moving",
+                        entity_id, len(active_rows),
+                    )
+                    ledger.mark_failed(execution_id, "duplicate active occupancy")
+                    return False, (
+                        "移動失敗: 占有記録が破損しています (現在地が複数)。"
+                        "再起動時の自動修復をお試しください。"
+                    )
+                if active_rows and active_rows[0].BUILDINGID != from_id:
+                    current_bid = active_rows[0].BUILDINGID
+                    db.rollback()
+                    logging.warning(
+                        "move_entity: stale from for %s (requested from=%s, "
+                        "canonical=%s) — refusing", entity_id, from_id, current_bid,
+                    )
+                    ledger.mark_failed(execution_id, "stale from")
+                    return False, self._stale_from_message(current_bid)
+                if active_rows:
+                    # 本物の CAS: 上の SELECT は (pysqlite の autocommit 挙動で)
+                    # トランザクション外で走るため、read-then-write では並行移動を
+                    # 排除できない。close を条件付き UPDATE にし、書き込み時点の
+                    # rowcount で勝敗を確定する (unique index 不在の縮退環境でも
+                    # 成立する仲裁。2026-07-21 Codex レビュー P1 と同型)。
+                    if not self._close_active_row_cas(db, active_rows[0].ID, now):
+                        db.rollback()
+                        logging.warning(
+                            "move_entity: lost close arbitration for %s "
+                            "(row %s already closed by a concurrent move)",
+                            entity_id, active_rows[0].ID,
+                        )
+                        ledger.mark_failed(execution_id, "stale from (arbitration)")
+                        return False, self._stale_from_message(
+                            self._read_ai_location_db(db, entity_id)
+                        )
+                else:
+                    logging.warning(
+                        "move_entity: no active occupancy row for %s; "
+                        "self-healing by inserting one at %s", entity_id, to_id,
+                    )
+                # 新 active 行は guarded INSERT (WHERE NOT EXISTS 他の active 行)。
+                # active 行ゼロの自己回復経路にも書き込み時仲裁を効かせる
+                # (index 不在で並行 2 移動が両方ゼロ件を読んでも一方しか入らない。
+                # 2026-07-21 Codex 第二巡 P2)。
+                if not self._insert_active_row_cas(db, entity_id, to_id, now):
+                    db.rollback()
+                    logging.warning(
+                        "move_entity: lost insert arbitration for %s "
+                        "(another active row appeared concurrently)", entity_id,
+                    )
+                    ledger.mark_failed(execution_id, "stale from (arbitration)")
+                    return False, self._stale_from_message(
+                        self._read_ai_location_db(db, entity_id)
+                    )
                 entity_name = self.id_to_name_map.get(entity_id, entity_id)
             else:
                 user = db.query(UserModel).filter_by(USERID=int(entity_id)).first()
@@ -302,10 +395,34 @@ class OccupancyManager:
                     db.rollback()
                     ledger.mark_failed(execution_id, "user not found")
                     return False, "移動失敗: ユーザーが見つかりません。"
-                user.CURRENT_BUILDINGID = to_id
+                if user.CURRENT_BUILDINGID is not None and user.CURRENT_BUILDINGID != from_id:
+                    current_bid = user.CURRENT_BUILDINGID
+                    db.rollback()
+                    logging.warning(
+                        "move_entity: stale from for user %s (requested from=%s, "
+                        "canonical=%s) — refusing", entity_id, from_id, current_bid,
+                    )
+                    ledger.mark_failed(execution_id, "stale from")
+                    return False, self._stale_from_message(current_bid)
+                # 本物の CAS (2026-07-21 Codex レビュー P1): 条件付き UPDATE の
+                # rowcount で勝敗を確定する (上の検査だけでは並行 2 移動が両方
+                # 旧値を読んだ後に両方 commit できる)。
+                if not self._cas_update_user_location(
+                    db, int(entity_id), from_id, to_id
+                ):
+                    db.rollback()
+                    logging.warning(
+                        "move_entity: lost user location arbitration "
+                        "(user %s, from=%s) — refusing", entity_id, from_id,
+                    )
+                    ledger.mark_failed(execution_id, "stale from (arbitration)")
+                    return False, self._stale_from_message(
+                        self._read_user_location_db(db, int(entity_id))
+                    )
                 entity_name = user.USERNAME or "ユーザー"
-            # 先行の位置遷移を flush して write ロックを取る — 以降の
-            # max(seq) 読みが SQLite の単一書き手直列化に入る (採番レース防止)
+            # 位置遷移の書き込み (条件付き UPDATE / 自己回復 INSERT) を flush して
+            # write ロックを取る — 以降の max(seq) 読みが SQLite の単一書き手
+            # 直列化に入る (採番レース防止)
             db.flush()
 
             from database.building_messages import (
@@ -313,6 +430,7 @@ class OccupancyManager:
             )
             for event_building_id, event_msg in self._build_occupancy_events(
                 entity_id, entity_type, entity_name, from_id, to_id, now,
+                move_key=execution_id,
             ):
                 if event_building_id in quarantined:
                     logging.warning(
@@ -358,6 +476,13 @@ class OccupancyManager:
         self.occupants.setdefault(to_id, []).append(entity_id)
         logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
 
+        # W7/柱5: persona 属性 / user state の canonical 更新は移動 service の
+        # 責務 (呼び出し側の重複更新は撤去済み)。確定位置の公開は**配送より前**
+        # — 配送が pending や遅いハンドラで止まる間も、並行スレッド (chat 境界
+        # 照合・スケジューラ) が新所在地を見られるように (2026-07-21 Codex 第二巡
+        # P1)。配送ハンドラは payload の to_id で動くため公開順に依存しない。
+        self._sync_canonical_location(entity_id, entity_type, to_id)
+
         # 後処理 (dynamic state / addon hooks / game lifecycle) の即時配送試行。
         # 失敗しても pending に残り、Beat 関所 / 回復 tick が引き継ぐ。
         try:
@@ -378,17 +503,25 @@ class OccupancyManager:
         from_id: str,
         to_id: str,
         now: datetime,
+        move_key: Any = None,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         """leave/enter の building イベント (host message) を組み立てる。
 
         heard_by は**移動後**の占有 (leave = 残った目撃者 / enter = 移動者含む
         到着記録) — in-memory occupants は commit 後まで触らないため、ここでは
         無変異で導出する。
+
+        event_key は移動ごとの採番 ID (台帳 execution_id / legacy は uuid) を含む
+        (分離監査 P2-1: 秒精度 timestamp では同一秒の同経路移動が衝突していた)。
+        移動 tx は原子的でイベントの部分状態が残らないため、再試行時の key 再利用
+        は不要。
         """
         from_building_name = self.building_map[from_id].name if from_id in self.building_map else from_id
         to_building_name = self.building_map[to_id].name
         action_type = "AI Action" if entity_type == 'ai' else "User Action"
-        event_key = f"occupancy:{entity_id}:{from_id}:{to_id}:{int(now.timestamp())}"
+        if move_key is None:
+            move_key = uuid.uuid4().hex
+        event_key = f"occupancy:{entity_id}:{from_id}:{to_id}:{move_key}"
         timestamp = now.astimezone(timezone.utc).isoformat()
         # entity_name / building_name も event に含める (intent §E 視点別
         # レンダリング用)。 これで history_manager 側が manager_ref なし
@@ -495,6 +628,7 @@ class OccupancyManager:
 
         従来実装のまま: DB commit 後の後処理 (イベント・hook) が裸で走る。
         本番 manager は常に台帳を持つため、この経路は縮退時のみ。
+        CAS (P1-2) と canonical sync (P1-1 残片) は台帳経路と同じ規律で行う。
         """
         logging.warning(
             "move_entity: manager has no execution_ledger; running in legacy "
@@ -504,17 +638,53 @@ class OccupancyManager:
         try:
             now = datetime.now()
             if entity_type == 'ai':
-                last_log = db.query(BuildingOccupancyLog).filter_by(AIID=entity_id, BUILDINGID=from_id, EXIT_TIMESTAMP=None).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).first()
-                if last_log:
-                    last_log.EXIT_TIMESTAMP = now
-                new_log = BuildingOccupancyLog(CITYID=self.city_id, AIID=entity_id, BUILDINGID=to_id, ENTRY_TIMESTAMP=now)
-                db.add(new_log)
+                active_rows = db.query(BuildingOccupancyLog).filter_by(
+                    AIID=entity_id, EXIT_TIMESTAMP=None,
+                ).order_by(
+                    BuildingOccupancyLog.ENTRY_TIMESTAMP.desc(),
+                    BuildingOccupancyLog.ID.desc(),
+                ).all()
+                if len(active_rows) > 1:
+                    db.rollback()
+                    logging.error(
+                        "move_entity(legacy): duplicate active occupancy rows "
+                        "for %s (%d rows)", entity_id, len(active_rows),
+                    )
+                    return False, (
+                        "移動失敗: 占有記録が破損しています (現在地が複数)。"
+                        "再起動時の自動修復をお試しください。"
+                    )
+                if active_rows and active_rows[0].BUILDINGID != from_id:
+                    current_bid = active_rows[0].BUILDINGID
+                    db.rollback()
+                    return False, self._stale_from_message(current_bid)
+                if active_rows:
+                    if not self._close_active_row_cas(db, active_rows[0].ID, now):
+                        db.rollback()
+                        return False, self._stale_from_message(
+                            self._read_ai_location_db(db, entity_id)
+                        )
+                if not self._insert_active_row_cas(db, entity_id, to_id, now):
+                    db.rollback()
+                    return False, self._stale_from_message(
+                        self._read_ai_location_db(db, entity_id)
+                    )
                 entity_name = self.id_to_name_map.get(entity_id, entity_id)
             else:
                 user = db.query(UserModel).filter_by(USERID=int(entity_id)).first()
                 if not user:
                     return False, "移動失敗: ユーザーが見つかりません。"
-                user.CURRENT_BUILDINGID = to_id
+                if user.CURRENT_BUILDINGID is not None and user.CURRENT_BUILDINGID != from_id:
+                    current_bid = user.CURRENT_BUILDINGID
+                    db.rollback()
+                    return False, self._stale_from_message(current_bid)
+                if not self._cas_update_user_location(
+                    db, int(entity_id), from_id, to_id
+                ):
+                    db.rollback()
+                    return False, self._stale_from_message(
+                        self._read_user_location_db(db, int(entity_id))
+                    )
                 entity_name = user.USERNAME or "ユーザー"
 
             db.commit()
@@ -522,6 +692,10 @@ class OccupancyManager:
             if entity_id in self.occupants.get(from_id, []):
                 self.occupants[from_id].remove(entity_id)
             self.occupants.setdefault(to_id, []).append(entity_id)
+
+            # 確定位置の公開は後処理より前 (台帳経路と同じ規律 —
+            # 2026-07-21 Codex 第二巡 P1)
+            self._sync_canonical_location(entity_id, entity_type, to_id)
 
             mgr = self._manager_ref
             if mgr is not None and hasattr(mgr, "add_building_event"):
@@ -583,6 +757,183 @@ class OccupancyManager:
             return False, "データベースの更新中にエラーが発生しました。"
         finally:
             db.close()
+
+    def _stale_from_message(self, current_bid: Optional[str]) -> "MoveDenialMessage":
+        """CAS 競合 (現在地が変わっている) の拒否メッセージを組み立てる。
+
+        current_bid は DB の確定現在地 (仲裁負けの場合は rollback 後の再読値)。
+        None は再読でも特定できなかった稀ケース。
+        """
+        if current_bid is not None:
+            current_name = (
+                self.building_map[current_bid].name
+                if current_bid in self.building_map else current_bid
+            )
+            text = f"移動失敗: 現在地が変わっています (現在: {current_name})。"
+        else:
+            text = "移動失敗: 別の移動が先に確定したため、現在地が変わっています。"
+        return MoveDenialMessage(
+            text, code=CAS_CONFLICT, current_building_id=current_bid
+        )
+
+    def _read_ai_location_db(self, db: Session, entity_id: str) -> Optional[str]:
+        """rollback 後に AI の DB 確定現在地を読み直す (409 応答用)。"""
+        try:
+            row = db.query(BuildingOccupancyLog).filter_by(
+                AIID=entity_id, EXIT_TIMESTAMP=None,
+            ).order_by(
+                BuildingOccupancyLog.ENTRY_TIMESTAMP.desc(),
+                BuildingOccupancyLog.ID.desc(),
+            ).first()
+            return row.BUILDINGID if row else None
+        except Exception:
+            logging.warning(
+                "move_entity: failed to re-read AI location for %s",
+                entity_id, exc_info=True,
+            )
+            return None
+
+    def _read_user_location_db(self, db: Session, user_id: int) -> Optional[str]:
+        """rollback 後に User.CURRENT_BUILDINGID の DB 確定値を読み直す (409 応答用)。"""
+        try:
+            row = db.query(UserModel.CURRENT_BUILDINGID).filter_by(
+                USERID=user_id
+            ).first()
+            return row[0] if row else None
+        except Exception:
+            logging.warning(
+                "move_entity: failed to re-read user location for %s",
+                user_id, exc_info=True,
+            )
+            return None
+
+    def _close_active_row_cas(self, db: Session, row_id: int, now: datetime) -> bool:
+        """active 行の close を条件付き UPDATE で行い、勝敗を行数で確定する。
+
+        事前の SELECT は (pysqlite の autocommit 挙動で) トランザクション外で
+        走るため、read-then-write では並行移動を排除できない。WHERE に
+        ``EXIT_TIMESTAMP IS NULL`` を含む UPDATE の rowcount が書き込み時点の
+        仲裁になる (unique index `uq_occupancy_active_ai` の無い縮退環境でも
+        二重 presence を塞ぐ)。
+        """
+        result = db.execute(
+            sa_update(BuildingOccupancyLog)
+            .where(
+                BuildingOccupancyLog.ID == row_id,
+                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None),
+            )
+            .values(EXIT_TIMESTAMP=now)
+        )
+        return result.rowcount == 1
+
+    def _insert_active_row_cas(
+        self, db: Session, entity_id: str, to_id: str, now: datetime
+    ) -> bool:
+        """新 active 行の INSERT を guarded INSERT (NOT EXISTS) で仲裁する。
+
+        「active 行ゼロ → 自己回復 INSERT」の経路は close の条件付き UPDATE を
+        通らないため、素の INSERT だと index 不在の縮退環境で並行 2 移動が両方
+        ゼロ件を読んで二重 active 行を作れる (2026-07-21 Codex 第二巡 P2)。
+        同一 tx 内で直前に close した自分の行は (同一コネクションなので)
+        NOT EXISTS から正しく除外される。
+        """
+        from sqlalchemy import text
+        result = db.execute(
+            text(
+                "INSERT INTO building_occupancy_log "
+                "(CITYID, AIID, BUILDINGID, ENTRY_TIMESTAMP) "
+                "SELECT :city, :ai, :bid, :ts "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM building_occupancy_log "
+                "  WHERE AIID = :ai AND EXIT_TIMESTAMP IS NULL"
+                ")"
+            ),
+            {
+                "city": self.city_id, "ai": entity_id, "bid": to_id,
+                # SQLAlchemy DateTime (SQLite) と同じ表現で刻む
+                "ts": now.isoformat(sep=" "),
+            },
+        )
+        return result.rowcount == 1
+
+    def _cas_update_user_location(
+        self, db: Session, user_id: int, from_id: str, to_id: str
+    ) -> bool:
+        """User.CURRENT_BUILDINGID の遷移を条件付き UPDATE で確定する (本物の CAS)。
+
+        WHERE に現在地一致 (NULL は「未設定 = どこからでも可」) を含め、
+        rowcount==1 のときだけ勝ち。並行 2 移動が両方旧値を読んでも、
+        書き込みは一方しか成立しない (2026-07-21 Codex レビュー P1)。
+        """
+        result = db.execute(
+            sa_update(UserModel)
+            .where(
+                UserModel.USERID == user_id,
+                or_(
+                    UserModel.CURRENT_BUILDINGID.is_(None),
+                    UserModel.CURRENT_BUILDINGID == from_id,
+                ),
+            )
+            .values(CURRENT_BUILDINGID=to_id)
+        )
+        return result.rowcount == 1
+
+    def _sync_canonical_location(
+        self, entity_id: str, entity_type: str, to_id: str
+    ) -> None:
+        """確定した移動を persona 属性 / user state へ一元反映する (W7 柱5)。
+
+        DB commit 済みの遷移を映すだけなので、ここでの失敗は WARN に留めて
+        移動の成否 (True) は変えない。呼び出し側による位置属性の重複更新は
+        撤去済み (summon / end_conversation / editor / tool / day_plan /
+        move_user) — 新しい移動経路を作るときも属性を直接書かないこと。
+        """
+        mgr = self._manager_ref
+        if mgr is None:
+            logging.warning(
+                "move_entity: manager_ref unavailable; in-memory location sync "
+                "skipped for %s", entity_id,
+            )
+            return
+        if entity_type == 'ai':
+            persona = (getattr(mgr, "personas", None) or {}).get(entity_id)
+            if persona is None:
+                logging.warning(
+                    "move_entity: persona %s not in manager.personas; "
+                    "in-memory location sync skipped", entity_id,
+                )
+                return
+            persona.current_building_id = to_id
+            # cursor 儀式: 入室マーカー → session metadata 永続化。
+            # (end_conversation 等、従来 _mark_entry を省いていた経路にも
+            # 統一して適用する — cursor 会計の是正)
+            for hook_name, hook_args in (
+                ("_mark_entry", (to_id,)),
+                ("_save_session_metadata", ()),
+            ):
+                hook = getattr(persona, hook_name, None)
+                if not callable(hook):
+                    logging.warning(
+                        "move_entity: persona %s has no %s; skipped",
+                        entity_id, hook_name,
+                    )
+                    continue
+                try:
+                    hook(*hook_args)
+                except Exception:
+                    logging.warning(
+                        "move_entity: %s failed after move (persona=%s -> %s)",
+                        hook_name, entity_id, to_id, exc_info=True,
+                    )
+        else:
+            state = getattr(mgr, "state", None)
+            if state is None:
+                logging.warning(
+                    "move_entity: manager.state unavailable; user location sync "
+                    "skipped",
+                )
+                return
+            state.user_current_building_id = to_id
 
     def _is_user(self, entity_id: str) -> bool:
         return entity_id == self.user_entity_id

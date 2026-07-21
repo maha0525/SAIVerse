@@ -93,11 +93,10 @@ def manager(session_factory):
     )
 
     class StubOccupancy:
-        """本物の OccupancyManager.move_entity と同じく、persona 属性は触らない。
+        """本物の OccupancyManager.move_entity と同じ契約 (W7 柱5)。
 
-        current_building_id の更新は呼び出し側 (day_plan._move_to_facility) の
-        責務 — stub がここで代入すると本体の更新漏れがテストで見えなくなる
-        (2026-07-05 実 LLM シム 異常 #1 の温床)。
+        成功時に persona.current_building_id を service 側で更新する
+        (canonical sync)。失敗時は触らない。
         """
 
         def __init__(self, personas: Dict[str, Any]):
@@ -109,6 +108,9 @@ def manager(session_factory):
             self.moves.append((entity_id, entity_type, from_id, to_id))
             if self.fail_with is not None:
                 return False, self.fail_with
+            persona = self._personas.get(entity_id)
+            if persona is not None:
+                persona.current_building_id = to_id
             return True, "ok"
 
     personas = {PERSONA_ID: persona}

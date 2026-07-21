@@ -429,7 +429,9 @@ export default function WorldEditor() {
                                 ? <Field label="ID"><Input value={selectedBuilding.BUILDINGID} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
                                 : <Field label="ID（任意）"><Input value={formData.building_id || ''} placeholder="空欄で自動生成" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
                             }
-                            <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
+                            {/* 既存 Building の City 変更は不可 (W7 柱5: 参照 scope を跨ぐため
+                                サーバ側でも拒否する)。編集時は表示のみ。 */}
+                            <Field label="都市"><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
                                 <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
                             </Select></Field>
                             <div className={styles.row}>

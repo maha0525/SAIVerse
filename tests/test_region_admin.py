@@ -246,6 +246,143 @@ class RegionAdminTestCase(unittest.TestCase):
         self.assertIn("Error", self.svc.set_building_region("nope", None))
         self.assertIn("Error", self.svc.set_building_region("bldg_a", "nope"))
 
+    # --- W7/柱5: 入口は親スコープ (分離監査 P1-6) ---
+
+    def test_update_region_top_to_sub_moves_entrance_into_parent_scope(self):
+        self.svc.create_region("Top", "", "generic", 1, region_id="top")
+        self.svc.create_region("X", "", "generic", 1, region_id="r1")
+        result = self.svc.update_region("r1", "X", "", "generic", parent_region_id="top")
+        self.assertNotIn("Error", result)
+        # sub 化に伴い入口が親 Region スコープへ追従する
+        self.assertEqual(self._get_building("entrance_r1").REGION_ID, "top")
+
+    def test_update_region_sub_to_top_moves_entrance_to_city_scope(self):
+        self.svc.create_region("Top", "", "generic", 1, region_id="top")
+        self.svc.create_region(
+            "Sub", "", "generic", 1, parent_region_id="top", region_id="sub"
+        )
+        self.assertEqual(self._get_building("entrance_sub").REGION_ID, "top")
+        result = self.svc.update_region("sub", "Sub", "", "generic")
+        self.assertNotIn("Error", result)
+        # top 化で入口は City 直下へ
+        self.assertIsNone(self._get_building("entrance_sub").REGION_ID)
+
+    def test_update_region_without_parent_change_keeps_entrance(self):
+        self.svc.create_region("X", "", "generic", 1, region_id="r1")
+        result = self.svc.update_region("r1", "Renamed", "d", "generic")
+        self.assertNotIn("Error", result)
+        self.assertIsNone(self._get_building("entrance_r1").REGION_ID)
+
+    def test_update_region_rejects_parent_change_with_missing_entrance(self):
+        self.svc.create_region("Top", "", "generic", 1, region_id="top")
+        self.svc.create_region("X", "", "generic", 1, region_id="r1")
+        db = self.SessionLocal()
+        try:
+            db.query(BuildingModel).filter_by(BUILDINGID="entrance_r1").delete()
+            db.commit()
+        finally:
+            db.close()
+        result = self.svc.update_region("r1", "X", "", "generic", parent_region_id="top")
+        self.assertIn("Error", result)
+        # Region 側もロールバックされている (中途半端に sub 化しない)
+        self.assertIsNone(self._get_region("r1").PARENT_REGION_ID)
+
+    def test_create_region_rejects_shared_entrance(self):
+        """入口所有は一意 (Codex 第二巡): 共有すると片方の親変更が他方の
+        不変条件を壊すため、作成時に拒否する。"""
+        self.svc.create_region(
+            "X", "", "generic", 1, region_id="r1", entrance_building_id="bldg_a"
+        )
+        result = self.svc.create_region(
+            "Y", "", "generic", 1, region_id="r2", entrance_building_id="bldg_a"
+        )
+        self.assertIn("Error", result)
+        self.assertIsNone(self._get_region("r2"))
+
+    def test_update_region_rejects_parent_change_with_shared_entrance(self):
+        """レガシーデータで共有された入口は、解消するまで親変更を拒否する。"""
+        self.svc.create_region("Top", "", "generic", 1, region_id="top")
+        self.svc.create_region(
+            "X", "", "generic", 1, region_id="r1", entrance_building_id="bldg_a"
+        )
+        # 共有状態を直接 DB に作る (create_region は拒否するようになったため)
+        db = self.SessionLocal()
+        try:
+            other = RegionModel(
+                REGION_ID="r2", CITYID=1, NAME="Y", DESCRIPTION="",
+                REGION_TYPE="generic", ENTRANCE_BUILDING_ID="bldg_a",
+            )
+            db.add(other)
+            db.commit()
+        finally:
+            db.close()
+        result = self.svc.update_region("r1", "X", "", "generic", parent_region_id="top")
+        self.assertIn("Error", result)
+        self.assertIsNone(self._get_region("r1").PARENT_REGION_ID)
+
+    def test_set_building_region_rejects_entrance_building(self):
+        self.svc.create_region("X", "", "generic", 1, region_id="r1")
+        # 入口の detach / 自 Region 内取り込み / 別 Region 付け替えの全てを拒否
+        self.assertIn("Error", self.svc.set_building_region("entrance_r1", None))
+        self.assertIn("Error", self.svc.set_building_region("entrance_r1", "r1"))
+        self.svc.create_region("Y", "", "generic", 1, region_id="r2")
+        self.assertIn("Error", self.svc.set_building_region("entrance_r1", "r2"))
+        # 所属は元のまま (トップ Region の入口 = City 直下)
+        self.assertIsNone(self._get_building("entrance_r1").REGION_ID)
+
+
+class BuildingCityImmutableTestCase(unittest.TestCase):
+    """W7/柱5: Building の City は通常更新では immutable (分離監査 P1-7)。"""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.engine = create_engine(f"sqlite:///{self.db_path}")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+
+        db = self.SessionLocal()
+        try:
+            db.add(CityModel(CITYID=1, USERID=1, CITYNAME="city_a", UI_PORT=3000, API_PORT=8000))
+            db.add(CityModel(CITYID=2, USERID=1, CITYNAME="city_b", UI_PORT=3001, API_PORT=9000))
+            db.add(BuildingModel(
+                CITYID=1, BUILDINGID="bldg_a", BUILDINGNAME="A", CAPACITY=3,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        self.svc = AdminService.__new__(AdminService)
+        self.svc.SessionLocal = self.SessionLocal
+
+    def tearDown(self):
+        self.engine.dispose()
+        os.unlink(self.db_path)
+
+    def _get_building(self, building_id):
+        db = self.SessionLocal()
+        try:
+            return db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+        finally:
+            db.close()
+
+    def test_update_building_rejects_city_change(self):
+        result = self.svc.update_building(
+            "bldg_a", "A", 3, "", "", city_id=2, tool_ids=[], interval=0,
+        )
+        self.assertIn("Error", result)
+        self.assertEqual(self._get_building("bldg_a").CITYID, 1)
+
+    def test_update_building_normal_fields_still_work(self):
+        result = self.svc.update_building(
+            "bldg_a", "A改", 5, "desc", "sys", city_id=1, tool_ids=[], interval=60,
+        )
+        self.assertNotIn("Error", result)
+        building = self._get_building("bldg_a")
+        self.assertEqual(building.BUILDINGNAME, "A改")
+        self.assertEqual(building.CAPACITY, 5)
+        self.assertEqual(building.CITYID, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,7 @@ def test_stream_does_not_dispatch_when_user_insert_fails() -> None:
     persona = SimpleNamespace(persona_id="p1")
     service = _runtime([persona])
 
-    with patch("database.building_messages.insert_building_message", return_value=None):
+    with patch("database.building_messages.insert_building_message_with_location_guard", return_value=None):
         events = _events(
             service.handle_user_input_stream(
                 "hello",
@@ -58,7 +58,7 @@ def test_stream_persists_user_message_even_when_room_is_empty() -> None:
     }
 
     with patch(
-        "database.building_messages.insert_building_message",
+        "database.building_messages.insert_building_message_with_location_guard",
         return_value=saved,
     ) as insert:
         events = _events(
@@ -86,7 +86,7 @@ def test_duplicate_command_returns_canonical_id_without_redispatch() -> None:
     }
 
     with patch(
-        "database.building_messages.insert_building_message",
+        "database.building_messages.insert_building_message_with_location_guard",
         return_value=existing,
     ):
         events = _events(
@@ -108,7 +108,7 @@ def test_new_durable_command_dispatches_once() -> None:
     saved = {"message_id": "room:1", "_was_inserted": True}
 
     with patch(
-        "database.building_messages.insert_building_message",
+        "database.building_messages.insert_building_message_with_location_guard",
         return_value=saved,
     ):
         list(
@@ -126,7 +126,7 @@ def test_non_streaming_insert_failure_is_terminal() -> None:
     persona = SimpleNamespace(persona_id="p1")
     service = _runtime([persona])
 
-    with patch("database.building_messages.insert_building_message", return_value=None):
+    with patch("database.building_messages.insert_building_message_with_location_guard", return_value=None):
         replies = service.handle_user_input("hello")
 
     assert "処理を開始しませんでした" in replies[0]

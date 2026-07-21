@@ -1952,6 +1952,12 @@ export default function Home() {
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'error') {
+                            // W7: 位置競合エラー (not_in_building 等) はサーバの
+                            // 確定現在地を同期する — 放置すると次回発言の
+                            // expected_from が古いままで余分な CAS 競合になる
+                            if (event.current_building_id) {
+                                updateServerBuildingId(event.current_building_id);
+                            }
                             setMessages(prev => [...prev, {
                                 role: 'assistant',
                                 content: event.content || 'An error occurred',

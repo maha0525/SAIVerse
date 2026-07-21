@@ -88,12 +88,16 @@ class FakeAdapter:
 
 
 class StubOccupancy:
+    # 本物と同じ契約 (W7 柱5): 成功時に persona 属性を service 側で更新する。
     def __init__(self, personas):
         self.moves: List[tuple] = []
         self._personas = personas
 
     def move_entity(self, entity_id, entity_type, from_id, to_id, db_session=None):
         self.moves.append((entity_id, entity_type, from_id, to_id))
+        persona = self._personas.get(entity_id)
+        if persona is not None:
+            persona.current_building_id = to_id
         return True, "ok"
 
 

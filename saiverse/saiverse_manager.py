@@ -2232,6 +2232,9 @@ class SAIVerseManager(
         result = self.admin.update_region(region_id, name, description, region_type, parent_region_id)
         if not result.startswith("Error"):
             self._reload_regions()
+            # parent 変更は入口 Building の REGION_ID も同期する (P1-6) ため
+            # building_map 側も更新する
+            self._reload_buildings()
         return result
 
     def delete_region(self, region_id: str) -> str:

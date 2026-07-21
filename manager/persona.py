@@ -239,15 +239,69 @@ class PersonaMixin:
         self.personas[pid] = persona
 
     def _load_occupancy_from_db(self) -> None:
-        """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する"""
+        """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する。
+
+        startup consistency checker (分離監査 P2-2 / W7 柱5):
+        異常を分類して記録し、人格境界に関わる重複 active 行は「任意選択で稼働
+        継続」せず明示 tx で修復する (canonical = ENTRY_TIMESTAMP 最新。規則は
+        database/occupancy_repair.py と共通)。
+        """
         db = self.SessionLocal()
         try:
-            current_occupancy = (
-                db.query(BuildingOccupancyLog)
-                .filter(BuildingOccupancyLog.CITYID == self.city_id)
-                .filter(BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None))
-                .all()
-            )
+            # 起動前修復 (main.py の ensure_active_occupancy_unique) の明細を
+            # 監査記録へ引き継ぐ — 起動前に直された重複はここでは検出できない
+            from database.occupancy_repair import consume_startup_repairs
+            for repair in consume_startup_repairs():
+                self.startup_warnings.append({
+                    "source": "occupancy_repair",
+                    "message": (
+                        f"Occupancy repair (pre-start): AI '{repair['ai_id']}' had "
+                        f"{len(repair['closed_rows']) + 1} active rows; kept "
+                        f"'{repair['canonical_building_id']}' and closed "
+                        f"{len(repair['closed_rows'])} row(s)."
+                    ),
+                })
+
+            def _fetch_active():
+                return (
+                    db.query(BuildingOccupancyLog)
+                    .filter(BuildingOccupancyLog.CITYID == self.city_id)
+                    .filter(BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None))
+                    .all()
+                )
+
+            current_occupancy = _fetch_active()
+
+            # --- 分類 1: 重複 active 行 → 明示 tx で修復 + 監査記録 ---
+            seen_ai: set = set()
+            has_duplicates = False
+            for log in current_occupancy:
+                if log.AIID in seen_ai:
+                    has_duplicates = True
+                    break
+                seen_ai.add(log.AIID)
+            if has_duplicates:
+                from database.occupancy_repair import (
+                    repair_duplicate_active_occupancy,
+                )
+                try:
+                    repairs = repair_duplicate_active_occupancy(db)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                for repair in repairs:
+                    msg = (
+                        f"Occupancy repair: AI '{repair['ai_id']}' had "
+                        f"{len(repair['closed_rows']) + 1} active rows; kept "
+                        f"'{repair['canonical_building_id']}' and closed "
+                        f"{len(repair['closed_rows'])} row(s)."
+                    )
+                    self.startup_warnings.append({
+                        "source": "occupancy_repair",
+                        "message": msg,
+                    })
+                current_occupancy = _fetch_active()
 
             self.occupants.clear()
             for building in self.buildings:
@@ -257,10 +311,77 @@ class PersonaMixin:
                 pid = log.AIID
                 bid = log.BUILDINGID
                 if pid in self.personas and bid in self.building_map:
+                    # --- 分類 2: 派遣中 (IS_DISPATCHED) なのに active 行 ---
+                    # multi-city 凍結中は発生しない想定の異常。行は残すが記録する。
+                    if getattr(self.personas[pid], "is_dispatched", False):
+                        msg = (
+                            f"Dispatched persona '{pid}' still has an active "
+                            f"occupancy row in '{bid}'."
+                        )
+                        logging.warning(msg)
+                        self.startup_warnings.append({
+                            "source": "occupancy_load",
+                            "message": msg,
+                        })
                     self.occupants[bid].append(pid)
                     self.personas[pid].current_building_id = bid
                 else:
-                    msg = f"Invalid occupancy record: AI '{pid}' or Building '{bid}' does not exist."
+                    # --- 分類 4: 参照先不明の active 行 ---
+                    # 放置すると move_entity の CAS が常に stale 判定になり、
+                    # (一意 index で自己回復 INSERT も塞がれて) 当該ペルソナが
+                    # 移動不能になる (2026-07-21 Codex 第四巡 P2)。実体が DB に
+                    # 無い行 (AI 削除済み / Building 削除済み・別 City) は
+                    # ここで close する。ペルソナのロード失敗 (AI 行は在る) は
+                    # 位置を壊さないよう据え置き警告に留める。
+                    ai_known = pid in self.personas or (
+                        db.query(AIModel).filter_by(AIID=pid).first() is not None
+                    )
+                    building_row = (
+                        db.query(BuildingModel).filter_by(BUILDINGID=bid).first()
+                        if bid not in self.building_map else None
+                    )
+                    building_valid = bid in self.building_map or (
+                        building_row is not None
+                        and building_row.CITYID == self.city_id
+                    )
+                    if ai_known and building_valid:
+                        # ロード失敗など一時的な不整合 — 行は保全して警告のみ
+                        msg = (
+                            f"Occupancy row kept but not loaded: AI '{pid}' in "
+                            f"'{bid}' (persona/building not loaded this session)."
+                        )
+                        logging.warning(msg)
+                        self.startup_warnings.append({
+                            "source": "occupancy_load",
+                            "message": msg,
+                        })
+                    else:
+                        try:
+                            log.EXIT_TIMESTAMP = datetime.now()
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+                            raise
+                        msg = (
+                            f"Occupancy repair: closed invalid active row for "
+                            f"AI '{pid}' in '{bid}' "
+                            f"({'missing AI' if not ai_known else 'missing or cross-city building'})."
+                        )
+                        logging.warning(msg)
+                        self.startup_warnings.append({
+                            "source": "occupancy_repair",
+                            "message": msg,
+                        })
+
+            # --- 分類 3: capacity 超過 (自動退去はさせない — 記録のみ) ---
+            for bid, occupant_ids in self.occupants.items():
+                capacity = self.capacities.get(bid)
+                ai_count = sum(1 for oid in occupant_ids if oid in self.personas)
+                if capacity is not None and ai_count > capacity:
+                    msg = (
+                        f"Building '{bid}' exceeds capacity: {ai_count} AI "
+                        f"occupants (limit {capacity})."
+                    )
                     logging.warning(msg)
                     self.startup_warnings.append({
                         "source": "occupancy_load",

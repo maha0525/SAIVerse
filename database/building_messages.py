@@ -526,6 +526,110 @@ def insert_building_message(
     return None
 
 
+def insert_building_message_with_location_guard(
+    session_factory: Optional[Callable[[], "Session"]],
+    building_id: str,
+    building_msg: Dict[str, Any],
+    *,
+    user_id: Any,
+    expected_building_id: str,
+    _max_retries: int = 5,
+) -> Optional[Dict[str, Any]]:
+    """ユーザー発言の INSERT を「現在地検証と同一トランザクション」で行う。
+
+    W7 柱5 (2026-07-21 Codex 第六巡 P1): 発言境界の照合 (in-memory state) と
+    INSERT の間に別デバイスの移動が確定すると、照合済みの旧 Building へ発言が
+    永続化されその部屋のペルソナへの Pulse まで起動する。ここでは
+    **無変化 UPDATE で write ロックを先取り**してから User.CURRENT_BUILDINGID を
+    読むことで、検証〜commit の間に移動 (別の書き手) が割り込めないことを
+    SQLite の単一書き手直列化で保証する。
+
+    user 行が引けない環境 (テストスタブ等) は検証をスキップして従来どおり
+    保存する (fail-open — 単一位置モデルの執行は user 行がある本番形でのみ
+    意味を持つ)。
+
+    Returns:
+        確定行 dict (``_was_inserted`` 付き) / ``None`` (保存失敗) /
+        ``{"_location_conflict": True, "current_building_id": ...}``
+        (現在地不一致 — **何も書いていない**)。
+    """
+    if session_factory is None:
+        return None
+
+    from sqlalchemy import text as sa_text
+    from database.models import BuildingMessage
+    from sqlalchemy.exc import IntegrityError
+
+    for attempt in range(_max_retries):
+        db = session_factory()
+        try:
+            try:
+                # 無変化 UPDATE で write ロックを取る (SELECT は pysqlite の
+                # autocommit 挙動でトランザクション外に出るため、先に書き手に
+                # なっておかないと read-then-write の競合窓が残る)
+                db.execute(sa_text(
+                    "UPDATE user SET CURRENT_BUILDINGID = CURRENT_BUILDINGID "
+                    "WHERE USERID = :uid"
+                ), {"uid": user_id})
+                row = db.execute(sa_text(
+                    "SELECT CURRENT_BUILDINGID FROM user WHERE USERID = :uid"
+                ), {"uid": user_id}).fetchone()
+                if row is not None and row[0] is not None \
+                        and row[0] != expected_building_id:
+                    db.rollback()
+                    LOGGER.warning(
+                        "insert_building_message_with_location_guard: user %s "
+                        "moved to %s during dispatch (expected %s) — refusing",
+                        user_id, row[0], expected_building_id,
+                    )
+                    return {
+                        "_location_conflict": True,
+                        "current_building_id": row[0],
+                    }
+                result = insert_building_message_in_session(
+                    db, building_id, building_msg
+                )
+                if result.get("_was_inserted"):
+                    db.commit()
+                else:
+                    db.rollback()
+                return result
+            except IntegrityError:
+                db.rollback()
+                cmid = building_msg.get("client_message_id")
+                if cmid:
+                    existing = db.query(BuildingMessage).filter_by(
+                        client_message_id=cmid
+                    ).first()
+                    if existing is not None:
+                        result = deserialize_building_message(existing)
+                        result["_was_inserted"] = False
+                        return result
+                raise
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            if _is_database_locked(exc) and attempt < _max_retries - 1:
+                wait = 0.5 * (2 ** attempt)
+                LOGGER.warning(
+                    "insert_building_message_with_location_guard: database "
+                    "locked (attempt %d/%d), retrying in %.1fs: bid=%s",
+                    attempt + 1, _max_retries, wait, building_id,
+                )
+                time.sleep(wait)
+                continue
+            LOGGER.warning(
+                "Failed to insert guarded building message: building_id=%s",
+                building_id, exc_info=True,
+            )
+            return None
+        finally:
+            db.close()
+    return None
+
+
 def update_building_message_in_db(
     session_factory: Optional[Callable[[], "Session"]],
     building_id: str,

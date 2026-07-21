@@ -11,13 +11,13 @@
 
 ---
 
-## 現在地 (2026-07-21 更新 — W6 実装済み)
+## 現在地 (2026-07-21 更新 — W7 実装済み)
 
 ```
 一次監査     ████████ 完了 (全8サブシステム、2026-07-16)
 柱の裁定     ████████ 完了 (8柱すべて方針確定、2026-07-16)
 基盤工事     ████████ 完了 (実行台帳 Phase 0 + 統合工事 §6 ※§6-6bのみ分離)
-実装 wave    ██████░░ W1〜W6 実装済み (実機検証待ち) / W7〜W14 未着手
+実装 wave    ███████░ W1〜W7 実装済み (実機検証待ち) / W8〜W14 未着手
 実機検証     █░░░░░░░ ライフ一日検証を実施中 (まはー、2026-07-17〜)
 ```
 
@@ -26,8 +26,9 @@
 - 柱3 (multi-city) = 凍結・入口封鎖済み / 柱4 (native import) = 復元/移植分離済み
 - **実行台帳 = Phase 0〜5 全段実装済み** (器 + Beat ロック + 判断点 + 時間割/予算 + schedule + Metabolism + 配送系/移動)
 - **SEA 監査 = 非保留 finding 全消し込み** (W6 で S6 消化。残 S7/S9 は柱6/柱8 スコープ)
+- **柱5 (位置・占有) = W7 で分離監査の非凍結 finding 全消し込み** (2026-07-21)
 
-**次にやる wave**: W7 (柱5 — 位置・占有)。**W1〜W6 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6)。
+**次にやる wave**: W8 (柱6 — 時刻)。**W1〜W7 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6。W7: 2026-07-21 — 柱5 位置・占有の canonical 化)。
 
 **一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
@@ -82,11 +83,12 @@
 - **実装済み (2026-07-21)**: required Section (`required=True`: common_prompt / persona_self / core_memory) の capture 失敗 (既存値なし=欠損、`capture_failures` 記帳) / render 失敗 / persist 未確認で `HeadNotReadyError` → prepare_context が LLM 実行前に Pulse 中断 (会話=正直なエラー、判断点/コマ=台帳 failed 行)。自己修復 = `ensure_snapshot` の**欠損限定** `recapture_missing` + `ensure_persisted` の再保存 (「durable 版 >= 描画版」の単調性)。store.save 成否 bool 化 + 版条件付き UPDATE。core_memory の内部握り撤去。Codex レビュー 5 巡 (受諾 9 / 裁定却下 1 — 明細は走行メモ)。回帰 = test_head_fail_closed.py 27 件、本体スイート全緑。**残 = まはー実機検証** (通常運転の無変化 / memory.db ロック時に人格なし応答でなくエラーになること / rebasing・stale save ログが平常時に出続けないこと)
 - **完了条件**: required Section 失敗で LLM 不実行 + 復旧後再試行の回帰固定 ✔
 
-### W7 ☐ 柱5 — 位置・占有
+### W7 ☑ 柱5 — 位置・占有 — 実装済み・実機検証待ち (2026-07-21)
 
 - **スコープ**: 単一 City 内の移動原子性 / occupancy 一意性 / chat 境界 / Region / City 変更 (Persona/City/Building 監査の非凍結残)
-- **参照**: [分離監査](../handoff/2026-07-15_persona_city_building_separation_audit.md)
-- **完了条件**: 同監査の非凍結 finding 全消し込み
+- **参照**: [分離監査](../handoff/2026-07-15_persona_city_building_separation_audit.md) / [走行メモ](../handoff/2026-07-21_w7_location_occupancy_handoff.md)
+- **実装済み (2026-07-21)**: 分離監査の非凍結 finding 全消し込み — **P1-2** (active occupancy の部分一意 index `uq_occupancy_active_ai` + 起動時重複修復 + move_entity の書き込み時仲裁 = close の条件付き UPDATE / 新行 guarded INSERT / user 位置の条件付き UPDATE) / **P1-1残・W5委譲** (persona 属性 + cursor 儀式 + user state の更新を `move_entity._sync_canonical_location` へ集約、呼び出し側 6 箇所の重複更新撤去、公開は配送前) / **P1-3** (`/chat/send` 現在地専用化 409 + runtime 多層防御 + **発言永続化 tx 内の現在地検証** `insert_building_message_with_location_guard` + utter 意味論の正直化 + 拒否時の添付 Item cleanup と撤去補記) / **P1-6** (Region parent 変更の入口同一 tx 同期 + 入口の直接再所属拒否 + 入口所有一意 index) / **P1-7** (Building CITYID の immutable 化 + UI セレクタ disabled) / **P2-1** (event_key を台帳 execution_id 採番に) / **P2-2** (startup checker 分類化 = 重複修復 [参照整合優先]・無効行 close・派遣中/capacity 警告・pre-start 修復の監査引き継ぎ)。**Codex レビュー 9 巡 18 件消し込み (受諾 18 / 却下 0、明細は走行メモ)**。回帰 = test_location_occupancy_w7.py + test_chat_boundary_w7.py 計 47 件 (新設) + test_region_admin.py に 9 件追加 + スタブ 6 箇所の新契約化。ruff / tsc clean。**残 = まはー実機検証** (通常移動・utter の無変化 / 二重 presence の不在 / 起動時修復ログ)
+- **完了条件**: 同監査の非凍結 finding 全消し込み ✔
 
 ### W8 ☐ 柱6 — 時刻
 

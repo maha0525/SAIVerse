@@ -40,6 +40,12 @@ City は User が運営する一つの「世界」。複数の Building を束�
 
 エンティティ（ユーザー・ペルソナ・訪問者）の移動は **OccupancyManager**（`saiverse/occupancy_manager.py`）が一元管理し、`BuildingOccupancyLog` に記録する。ペルソナの移動は `OccupancyManager.move_entity(entity_id, entity_type, from_id, to_id)` を使う（PersonaCore のメソッドを直接呼ばない）。
 
+W7 柱5（2026-07-21）以降の不変条件:
+
+- **active 行の一意性**: `BuildingOccupancyLog` は AIID ごとに `EXIT_TIMESTAMP IS NULL` の行が高々 1 行（部分一意 index `uq_occupancy_active_ai`、起動時に `database/occupancy_repair.py` が重複修復 → index 作成）。
+- **移動は CAS**: `move_entity` は canonical な現在地（active 行 / `User.CURRENT_BUILDINGID`）が `from_id` と一致するときだけ遷移する。stale な from は無変異で失敗する。
+- **属性更新は移動 service の責務**: `persona.current_building_id` / cursor 儀式（`_mark_entry` + `_save_session_metadata`）/ `state.user_current_building_id` は `move_entity` が commit 後に一元更新する。呼び出し側で位置属性を書き換えないこと。
+
 ## 実装
 
 - DB: `Building` / `City` / `BuildingOccupancyLog` テーブル（`database/models.py`）

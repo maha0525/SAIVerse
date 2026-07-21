@@ -194,7 +194,8 @@ class RuntimeService(
             target_building_id,
         )
         if success:
-            self.state.user_current_building_id = target_building_id
+            # state.user_current_building_id は move_entity が canonical sync
+            # 済み (W7 柱5: 位置属性の更新は移動 service の責務)
             logging.debug("[runtime] move_user success: now %s", target_building_id)
             logging.debug("[MANAGER_MOVE] Move success. New state bid: %s", self.state.user_current_building_id)
             # Emit user_move trigger
@@ -318,9 +319,8 @@ class RuntimeService(
             persona._save_session_metadata()
             return False, reason
 
-        persona.current_building_id = target_building_id
-        persona._mark_entry(target_building_id)
-        persona._save_session_metadata()
+        # persona.current_building_id / _mark_entry / _save_session_metadata は
+        # move_entity が canonical sync 済み (W7 柱5)
         return True, None
 
     def end_conversation(
@@ -354,8 +354,7 @@ class RuntimeService(
         if not success:
             return f"Error: Failed to move: {reason}"
 
-        persona.current_building_id = private_room_id
-        persona._save_session_metadata()
+        # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
         return f"Conversation with '{persona.persona_name}' ended."
 
     # ----- Conversation handlers -----
@@ -400,8 +399,16 @@ class RuntimeService(
         responding_personas: Sequence[Any],
         client_message_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Durably store a user command before any Pulse or side effect starts."""
-        from database.building_messages import insert_building_message
+        """Durably store a user command before any Pulse or side effect starts.
+
+        現在地検証は INSERT と同一トランザクション (W7 柱5 / Codex 第六巡 P1):
+        入口の in-memory 照合の後・永続化の前に別デバイスの移動が確定しても、
+        旧 Building へ発言が残らない。競合時は ``_location_conflict`` dict を
+        返す (何も書いていない)。
+        """
+        from database.building_messages import (
+            insert_building_message_with_location_guard,
+        )
 
         canonical_bid = self._canonical_building_id(building_id)
         heard = [
@@ -420,7 +427,13 @@ class RuntimeService(
         if client_message_id:
             entry["client_message_id"] = client_message_id
 
-        saved = insert_building_message(self.SessionLocal, canonical_bid, entry)
+        saved = insert_building_message_with_location_guard(
+            self.SessionLocal, canonical_bid, entry,
+            user_id=self.state.user_id,
+            expected_building_id=building_id,
+        )
+        if saved is not None and saved.get("_location_conflict"):
+            return saved
         if saved is None or not saved.get("message_id"):
             logging.error(
                 "[runtime] Refusing user dispatch because durable insert failed: "
@@ -474,6 +487,12 @@ class RuntimeService(
         except Exception:
             logging.exception("[runtime] Failed to persist user utterance")
             saved_user_message = None
+        if saved_user_message is not None and saved_user_message.get(
+            "_location_conflict"
+        ):
+            return [
+                '<div class="note-box">送信処理中に現在地が変わったため、発言は受け付けられませんでした。</div>'
+            ]
         if saved_user_message is None:
             return [
                 '<div class="note-box">発言を保存できなかったため、処理を開始しませんでした。再送してください。</div>'
@@ -532,6 +551,24 @@ class RuntimeService(
         building_id = building_id or self.state.user_current_building_id
         if not building_id:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
+            return
+        # 分離監査 P1-3 (W7 柱5) の多層防御: HTTP 層 (/chat/send) と同じ現在地
+        # 照合。HTTP を通らない呼び出し元が別 Building へ発言を配送する経路も塞ぐ。
+        if building_id != self.state.user_current_building_id:
+            logging.warning(
+                "[runtime] refusing utterance to non-current building %s "
+                "(current=%s)", building_id, self.state.user_current_building_id,
+            )
+            # NDJSON ストリームの契約に合わせて JSON イベントで返す (生 HTML は
+            # フロントの JSON.parse で破棄され、エラーが表示されない —
+            # 2026-07-21 Codex 第五巡 P2)
+            yield json.dumps({
+                "type": "error",
+                "error_code": "not_in_building",
+                "content": "現在地ではない建物への発言はできません。",
+                "current_building_id": self.state.user_current_building_id,
+                "retryable": False,
+            }, ensure_ascii=False) + "\n"
             return
         logging.debug("[runtime] handle_user_input_stream building_id=%s", building_id)
         responding_personas = self._build_responding_personas(building_id)
@@ -593,6 +630,24 @@ class RuntimeService(
                 except Exception:
                     logging.exception("[runtime] Failed to persist user utterance")
                     saved_user_message = None
+
+                if saved_user_message is not None and saved_user_message.get(
+                    "_location_conflict"
+                ):
+                    # 永続化 tx 内の現在地検証で競合検出 (W7 / Codex 第六巡 P1)
+                    _enrich_event({
+                        "type": "error",
+                        "error_code": "not_in_building",
+                        "content": (
+                            "送信処理中に現在地が変わったため、発言は受け付け"
+                            "られませんでした。最新状態に同期します。"
+                        ),
+                        "current_building_id": saved_user_message.get(
+                            "current_building_id"
+                        ),
+                        "retryable": False,
+                    })
+                    return
 
                 if saved_user_message is None:
                     _enrich_event({

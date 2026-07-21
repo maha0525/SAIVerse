@@ -3056,17 +3056,14 @@ def _record_move_failure(
 def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> None:
     """facility が現在地と違えば OccupancyManager で移動する。
 
-    移動の実体 (occupancy / DB / host メッセージ) は ``move_entity`` に集約
-    されているが、``persona.current_building_id`` の更新は設計上 **呼び出し側の
-    責務** (manager/runtime.py summon_persona / builtin_data/tools/move_persona.py
-    と同じパターン)。ここで更新しないと、コマの作業セッション
-    (sea/work_session.py は current_building_id から head / audience を組む) と
-    成果物の配置先 (manager/items.py) が終日 stale な旧建物の文脈で走り、
-    次の head 構築時に occupancy 記録の無い幻の「戻った」diff 通知まで発生する
-    (2026-07-05 実 LLM シム 異常 #1)。
+    移動の実体 (occupancy / DB / host メッセージ) も
+    ``persona.current_building_id`` / cursor 儀式の更新も ``move_entity`` に
+    集約済み (W7 柱5: 属性更新は移動 service の責務。かつては呼び出し側責務で、
+    更新漏れがコマの作業セッションを終日 stale な旧建物の文脈で走らせた —
+    2026-07-05 実 LLM シム 異常 #1)。
 
     移動失敗 (満員等) は「移動せず現在地で実行」に倒すが、黙って現在地に
-    ならないよう、その事実を WARN + ペルソナへの system 通知で記録する。
+    ならないようその事実を WARN + ペルソナへの system 通知で記録する。
     """
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     if persona is None:
@@ -3107,20 +3104,8 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> No
         _record_move_failure(manager, persona, slot, current, target, msg)
         return
 
-    # move_entity は persona.current_building_id を書き換えない (呼び出し側責務)。
-    # on_building_entered (move_entity 内) は「属性がまだ旧 Building」を前提に
-    # 走るため、更新は必ず move_entity 成功の後に行う。
-    persona.current_building_id = target
-    for hook_name, hook_args in (("_mark_entry", (target,)), ("_save_session_metadata", ())):
-        hook = getattr(persona, hook_name, None)
-        if callable(hook):
-            try:
-                hook(*hook_args)
-            except Exception:
-                LOGGER.warning(
-                    "[day_plan] %s failed after facility move (persona=%s)",
-                    hook_name, persona_id, exc_info=True,
-                )
+    # 位置属性と cursor 儀式 (_mark_entry / _save_session_metadata) は
+    # move_entity が canonical sync 済み (W7 柱5)
     LOGGER.info(
         "[day_plan] moved for slot: persona=%s %s -> %s", persona_id, current, target
     )

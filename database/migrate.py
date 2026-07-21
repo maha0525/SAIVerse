@@ -1275,6 +1275,98 @@ def backfill_session_head_snapshots(db_path: str) -> None:
         engine.dispose()
 
 
+def _ensure_active_occupancy_unique(engine) -> None:
+    """active occupancy の重複修復 + 部分一意 index (分離監査 P1-2 / W7 柱5)。
+
+    「AIID ごとに EXIT_TIMESTAMP IS NULL は高々 1 行」を DB 制約にする。
+    重複行がある状態で index を作ると CREATE が失敗するため、**修復が先**。
+    index はモデル metadata に載せない設計 (理由は database/occupancy_repair.py
+    冒頭) なので、全書換 migration 後もここが再作成する。冪等・毎起動呼び出し。
+    """
+    try:
+        from database.occupancy_repair import (
+            repair_duplicate_active_occupancy,
+            ensure_active_occupancy_unique_index,
+            record_startup_repairs,
+        )
+        with engine.begin() as conn:
+            exists = conn.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='building_occupancy_log'"
+            )).fetchone()
+            if exists is None:
+                return
+            repairs = repair_duplicate_active_occupancy(conn)
+            ensure_active_occupancy_unique_index(conn)
+        if repairs:
+            # manager の startup_warnings へ引き継ぐ (UI の起動時警告に出す)
+            record_startup_repairs(repairs)
+    except Exception as e:
+        # 失敗しても起動は止めない (次回起動で再試行)。index が無い間も
+        # move_entity 側の書き込み時仲裁 (close の条件付き UPDATE + 新行の
+        # guarded INSERT [NOT EXISTS]) が二重 active 行を塞ぐため、index は
+        # 防御の二重化 + 手書き SQL 等の外部書き込みに対する最終防衛。
+        logging.warning("active occupancy 一意化に失敗しました（スキップ）: %s", e)
+
+
+def ensure_active_occupancy_unique(db_path: str) -> None:
+    """active occupancy の修復 + 一意 index を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_active_occupancy_unique(engine)
+    finally:
+        engine.dispose()
+
+
+def _ensure_region_entrance_unique(engine) -> None:
+    """Region 入口所有の一意性を DB でも強制する (W7 柱5 / Codex 第三巡)。
+
+    「入口 Building は高々 1 つの Region に所有される」を部分一意 index で
+    強制する (admin 層の read-before-write 検査は並行 create_region を
+    排除できない)。レガシーデータで既に共有されている場合、自動修復は
+    **しない** (どちらが入口を保持するかは人間の判断) — WARN で可視化し、
+    解消されるまで index なしで続行する (admin 層の検査が引き続き防ぐ)。
+    こちらも意図的にモデル metadata 外 (理由は uq_occupancy_active_ai と同じ)。
+    """
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='region'"
+            )).fetchone()
+            if exists is None:
+                return
+            shared = conn.execute(text(
+                "SELECT ENTRANCE_BUILDING_ID, COUNT(*) FROM region "
+                "WHERE ENTRANCE_BUILDING_ID IS NOT NULL "
+                "GROUP BY ENTRANCE_BUILDING_ID HAVING COUNT(*) > 1"
+            )).fetchall()
+            if shared:
+                logging.warning(
+                    "Region 入口が複数 Region で共有されています (%s)。"
+                    "一意 index は作成できません — Region 編集画面で共有を"
+                    "解消してください。",
+                    ", ".join(f"{bid} x{cnt}" for bid, cnt in shared),
+                )
+                return
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_region_entrance_building "
+                "ON region (ENTRANCE_BUILDING_ID) "
+                "WHERE ENTRANCE_BUILDING_ID IS NOT NULL"
+            ))
+    except Exception as e:
+        logging.warning("Region 入口一意化に失敗しました（スキップ）: %s", e)
+
+
+def ensure_region_entrance_unique(db_path: str) -> None:
+    """Region 入口一意 index を単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_region_entrance_unique(engine)
+    finally:
+        engine.dispose()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")
     parser.add_argument(

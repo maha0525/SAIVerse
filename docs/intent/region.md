@@ -55,6 +55,12 @@ Region は Building の上位空間スコープである。`City > Region > SubR
 3. **入口は常時開放**: entry policy は入口→内部の境界でのみ執行する。入口自体を閉じると境界機能 (インターホン等) に到達できなくなる
 4. **入場は入口経由のみ** (system 移動を除く)
 
+不変条件 2 の執行点 (W7 柱5 / 分離監査 P1-6、2026-07-21): `update_region` の
+parent 変更は入口 Building の REGION_ID を**同一トランザクション**で新しい親
+スコープへ同期する (top 化なら City 直下 = None)。`set_building_region` は
+対象がいずれかの Region の入口なら拒否する — 入口の所属を変えられるのは
+Region service (create/update/delete_region) だけ。回帰: tests/test_region_admin.py。
+
 ## 4. データモデル
 
 - `region.LOBBY_BUILDING_ID` → **`ENTRANCE_BUILDING_ID` にリネーム** (additive migration では済まないが SQLite の RENAME COLUMN で可)。SubRegion 行でも使用する (従来 SubRegion はこのカラムを使っていなかった)

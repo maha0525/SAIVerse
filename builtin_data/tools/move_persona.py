@@ -43,12 +43,7 @@ def move_persona(building_id: str, persona_id: Optional[str] = None) -> str:
     if not success:
         raise RuntimeError(f"移動できませんでした: {reason or '理由不明'}")
 
-    persona_obj.current_building_id = building_id
-    try:
-        persona_obj._mark_entry(building_id)
-    except Exception:
-        _log.warning("Failed to mark entry for %s in building %s", target_persona_id, building_id, exc_info=True)
-
+    # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
     src_name = getattr(manager.building_map.get(from_building), "name", from_building)
     dest_name = getattr(manager.building_map.get(building_id), "name", building_id)
     return f"{persona_obj.persona_name} を {src_name} から {dest_name} に移動しました。"

@@ -124,6 +124,24 @@ def move_user(req: MoveRequest, manager = Depends(get_manager)):
     logging.debug("[USER_MOVE] Result success=%s, msg=%s, current_bid=%s",
                  success, message, manager.user_current_building_id)
 
+    # サーバ側 CAS (move_entity の条件付き UPDATE) の競合も、クライアント CAS と
+    # 同じ 409 形式で返して再同期を起動する (W7 柱5 / 2026-07-21 Codex P2)
+    if not success and getattr(message, "code", None) == "cas_conflict":
+        # 仲裁負け直後は in-memory が勝者の移動をまだ映していないことがある。
+        # 拒否メッセージが運ぶ DB 確定現在地を優先する (Codex 第三巡 P2)
+        confirmed_bid = (
+            getattr(message, "current_building_id", None)
+            or manager.state.user_current_building_id
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cas_conflict",
+                "message": str(message),
+                "current_building_id": confirmed_bid,
+            },
+        )
+
     return {
         "success": success,
         "message": message,

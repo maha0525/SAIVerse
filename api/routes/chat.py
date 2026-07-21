@@ -5,7 +5,8 @@ from typing import List, Optional, Dict, Any
 
 router = APIRouter()
 
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+import json
 import os
 
 from saiverse.data_paths import get_saiverse_home
@@ -905,11 +906,79 @@ def stop_generation(manager = Depends(get_manager)):
     return {"cancelled": cancelled}
 
 
+def _cleanup_attachment_items(
+    manager, items: List[tuple], building_id: str, context: str
+) -> None:
+    """位置競合で拒否した発言の添付 Item を片付ける (best-effort + 失敗の記録)。
+
+    `delete_item` は失敗を例外でなく "Error: ..." 文字列で返す契約のため、
+    戻り値検査が必須 (2026-07-21 Codex 第七巡 P2)。Item 作成時に書かれた
+    「User uploaded ...」の host 履歴は削除せず、撤去の**補記**を同じ機構で
+    追記する (第八巡 P1 — 履歴が削除済み Item を指したまま残らないように。
+    削除口を新設せず追記で正直に補償する)。保存済みファイルは削除しない
+    (URI モードの動画は再送が同じファイルを参照するため)。
+
+    ``items`` は ``[(item_id, filename), ...]``。
+    """
+    removed_names: List[str] = []
+    for item_id, filename in items:
+        try:
+            result = manager.delete_item(item_id)
+        except Exception:
+            logging.warning(
+                "Failed to clean up attachment item %s (%s)",
+                item_id, context, exc_info=True,
+            )
+            continue
+        if isinstance(result, str) and result.startswith("Error"):
+            logging.warning(
+                "Attachment item %s cleanup reported failure (%s): %s",
+                item_id, context, result,
+            )
+            continue
+        removed_names.append(filename or item_id)
+    if removed_names:
+        try:
+            names = ", ".join(f'"{name}"' for name in removed_names)
+            note = (
+                '<div class="note-box">🗑 System:<br>'
+                f'<b>Upload of {names} was withdrawn (the utterance was '
+                'refused due to a location change).</b></div>'
+            )
+            manager._append_building_history_note(building_id, note)
+        except Exception:
+            logging.warning(
+                "Failed to append withdrawal note for building %s (%s)",
+                building_id, context, exc_info=True,
+            )
+
+
 @router.post("/send")
 def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
-    building_id = req.building_id or manager.user_current_building_id
+    # manager.user_current_building_id は _refresh_user_state_cache が作る遅延
+    # mirror で、移動確定 (state 更新) から wrapper 戻りまでの間 stale になる。
+    # 境界照合は canonical な state を読む (2026-07-21 Codex 第三巡 P2)。
+    current_bid = manager.state.user_current_building_id
+    building_id = req.building_id or current_bid
     if not building_id:
         raise HTTPException(status_code=400, detail="User is not in any building")
+
+    # 分離監査 P1-3 (W7 柱5): raw /send はサーバ現在地専用。別 Building への
+    # 発言は単一位置モデルの迂回 (不在の部屋に「居た」履歴が残る) なので拒否し、
+    # 発言契機入室 (/chat/utter) へ誘導する。/chat/utter は移動を確定させてから
+    # 本関数を呼ぶため、正規経路では常に一致する。
+    if req.building_id and req.building_id != current_bid:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "not_in_building",
+                "message": (
+                    "現在地ではない建物への発言はできません。"
+                    "入室を伴う発言は /chat/utter を使ってください。"
+                ),
+                "current_building_id": current_bid,
+            },
+        )
 
     if not req.message and not req.attachment and not req.attachments:
         raise HTTPException(status_code=400, detail="Message or attachment required")
@@ -935,6 +1004,12 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     # sea/auto_recall.py の build_query が拾える summary を metadata に載せる。
     media_recall_enabled = bool(getattr(manager.state, "media_recall_enabled", False))
 
+    # 添付は Item として building へ永続化されるため、処理後に現在地を再照合して
+    # 「別デバイスの移動と競合した添付だけが旧 Building に残る」経路を塞ぐ
+    # (2026-07-21 Codex 第四巡 P2)。作成 Item を (id, filename) で控えて
+    # 競合時に片付ける。
+    created_items: List[tuple] = []
+
     # Handle new multi-attachment format
     if req.attachments:
         images = []
@@ -948,6 +1023,8 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 sync_summary=media_recall_enabled,
             )
             if result:
+                if result.get("item_id"):
+                    created_items.append((result["item_id"], att.filename))
                 if result["type"] == "image":
                     entry = {
                         "uri": result["uri"],
@@ -994,18 +1071,58 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
             metadata["images"] = [
                 {"uri": attachment_info["uri"], "path": attachment_info["path"], "mime_type": attachment_info["mime_type"]}
             ]
-    
+
+    # 添付処理 (概要生成の同期実行で数秒かかりうる) の間に別デバイスが移動して
+    # いないか再照合。競合していたら作成済み Item を片付けて 409 (runtime 層の
+    # 最終照合はこの後も残る — そちらは発言を拒否するだけで Item は消せない)。
+    recheck_bid = manager.state.user_current_building_id
+    if recheck_bid != building_id:
+        _cleanup_attachment_items(
+            manager, created_items, building_id, "route recheck"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "not_in_building",
+                "message": (
+                    "送信処理中に現在地が変わったため、発言は受け付けられ"
+                    "ませんでした。最新状態に同期します。"
+                ),
+                "current_building_id": recheck_bid,
+            },
+        )
+
     # For V1, we will consume the stream and return the full response.
     # Future improvement: Use StreamingResponse
+    # NOTE: 関数内で `import logging` / `import json` すると名前が関数全体で
+    # ローカル扱いになり、それより前の分岐 (添付競合 cleanup 等) で
+    # UnboundLocalError になる (2026-07-21 Codex 第五巡 P2) — module import を使う。
     try:
-        from fastapi.responses import StreamingResponse
-        import json
-        import logging
-
         def response_generator():
             # Yield an initial status event to flush headers (with padding for buffering)
             yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
-            
+
+            # 遅延 generator 開始までにも競合窓がある (Codex 第五巡 P2):
+            # ここを通過した後の移動は runtime 層が発言を拒否するが、Item の
+            # 片付けは route 側にしかできないため、runtime 呼び出し直前にも
+            # 最終照合 + cleanup を行う。
+            live_bid = manager.state.user_current_building_id
+            if live_bid != building_id:
+                _cleanup_attachment_items(
+                    manager, created_items, building_id, "stream start recheck"
+                )
+                yield json.dumps({
+                    "type": "error",
+                    "error_code": "not_in_building",
+                    "content": (
+                        "送信処理中に現在地が変わったため、発言は受け付けられ"
+                        "ませんでした。最新状態に同期します。"
+                    ),
+                    "current_building_id": live_bid,
+                    "retryable": False,
+                }, ensure_ascii=False) + "\n"
+                return
+
             stream = manager.handle_user_input_stream(
                 req.message,
                 metadata=metadata,
@@ -1015,14 +1132,34 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 pre_spells=req.pre_spells,
                 client_message_id=req.client_message_id,
             )
-            
+
             for chunk in stream:
+                # runtime 層 (境界照合 / 永続化 tx 内検証) が位置競合で発言を
+                # 拒否した場合、Item の片付けは route にしかできない
+                # (2026-07-21 Codex 第六巡 P2)。誤爆防止に JSON parse で確認。
+                if (
+                    created_items
+                    and isinstance(chunk, str)
+                    and "not_in_building" in chunk
+                ):
+                    try:
+                        event = json.loads(chunk)
+                    except ValueError:
+                        event = None
+                    if (
+                        isinstance(event, dict)
+                        and event.get("error_code") == "not_in_building"
+                    ):
+                        _cleanup_attachment_items(
+                            manager, created_items, building_id,
+                            "runtime refusal",
+                        )
+                        created_items.clear()
                 yield chunk
 
         return StreamingResponse(response_generator(), media_type="application/x-ndjson")
 
     except Exception as e:
-        import logging
         logging.error(f"Error sending message: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1032,10 +1169,18 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
 class UtterRequest(BaseModel):
     """発言契機入室エンドポイント /chat/utter のリクエスト。
 
-    発言と入室を 1 トランザクションで扱う。 target_building_id がサーバ側の
-    current_building_id と異なれば、 まず move を実行してから通常の chat 経路
-    (= send_message 内部処理) に流す。 「閲覧モードから別建物へ発言したら
-    自動入室」 という UX を backend 側で保証する。
+    target_building_id がサーバ側の current_building_id と異なれば、 まず move を
+    実行してから通常の chat 経路 (= send_message 内部処理) に流す。 「閲覧モード
+    から別建物へ発言したら自動入室」 という UX を backend 側で保証する。
+
+    コマンドの意味論 (分離監査 P1-3 / W7 柱5 で正直化):
+    - **入室**は `move.entity` 台帳実行として原子的に確定する (W5)。
+    - **発言**は durable insert が認知開始の前提条件 (insert 失敗 = Pulse 不起動、
+      retryable エラーで返す)。
+    - 「入室成功 → 発言 insert 失敗」では入室は残る (発言契機の入室は物理事実)。
+      再送は current == target になるため move をスキップし、`client_message_id`
+      の冪等キーで発言は一度だけ載る。
+    - 並行デバイスの競合は expected_from_building_id の CAS (409) が検出する。
 
     See: docs/intent/building_memory_unified.md §C-2
     """
@@ -1085,6 +1230,21 @@ def utter_message(req: UtterRequest, manager = Depends(get_manager)):
         )
         success, msg = manager.move_user(req.target_building_id)
         if not success:
+            # サーバ側 CAS (move_entity の条件付き UPDATE) の競合は、クライアント
+            # CAS と同じ 409 で再同期を起動する (W7 柱5 / 2026-07-21 Codex P2)
+            if getattr(msg, "code", None) == "cas_conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "cas_conflict",
+                        "message": str(msg),
+                        # 拒否メッセージが運ぶ DB 確定現在地を優先 (第三巡 P2)
+                        "current_building_id": (
+                            getattr(msg, "current_building_id", None)
+                            or manager.state.user_current_building_id
+                        ),
+                    },
+                )
             raise HTTPException(
                 status_code=400,
                 detail={

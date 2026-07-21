@@ -163,15 +163,20 @@ CAS との役割分担:
 #### 新ルール
 
 - **AI**: 現状維持。明示的な物理移動 (`OccupancyManager.move_entity`) → enter/leave event 発火
-- **User**: 「発言した瞬間に入室」。Building リストクリックは「閲覧モード」(ログ subscribe のみ、CURRENT_BUILDINGID 据え置き、event 発火なし)。`POST /api/chat/send` 時、もし `building_id != CURRENT_BUILDINGID` ならサーバ側で atomic に `leave(現在地) + enter(target) + speak` を実行
+- **User**: 「発言した瞬間に入室」。Building リストクリックは「閲覧モード」(ログ subscribe のみ、CURRENT_BUILDINGID 据え置き、event 発火なし)。発言契機入室は専用エンドポイント `POST /api/chat/utter` が担う (`target_building_id != CURRENT_BUILDINGID` ならサーバ側で `move (W5 台帳実行) → speak` を実行)。raw `POST /api/chat/send` は**サーバ現在地専用**で、別 Building 指定は 409 で拒否する (W7 柱5 / 分離監査 P1-3: 単一位置モデルの API 迂回と「不在の部屋に居た履歴」の封鎖)
 
 ```
 ユーザー操作                      サーバ動作
 建物名クリック                    閲覧モード (CURRENT 据え置き、event なし)
 発言送信 (target=現在地)          発言記録のみ
-発言送信 (target!=現在地)         leave→enter→speak を 1 トランザクションで実行
+発言送信 (target!=現在地)         /chat/utter が move (原子的な台帳実行) → speak
 他建物を閲覧→閉じる               何も起きない
 ```
+
+utter のコマンド意味論 (W7 で正直化): 入室 = `move.entity` 台帳実行として原子的 /
+発言 = durable insert が認知開始の前提条件。「入室成功 → 発言 insert 失敗」では
+入室は残り (発言契機の入室は物理事実)、再送は current == target で move を
+スキップし `client_message_id` の冪等キーで発言が一度だけ載る。
 
 #### AI / user 非対称の根拠
 
