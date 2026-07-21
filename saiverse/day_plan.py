@@ -798,6 +798,7 @@ def mutate_plan_meta(
     mutate: Callable[[Dict[str, Any]], Optional[Any]],
     *,
     context: str = "",
+    in_session_extra: Optional[Callable[[Any], None]] = None,
 ) -> Optional[Any]:
     """meta_json を CAS 再試行つきで変異させる — **増分・引き継ぎ計算の正しい口**。
 
@@ -817,6 +818,13 @@ def mutate_plan_meta(
         mutate: その試行で読んだ**最新の** meta dict を受け取り、書くべき変更が
             あれば dict をその場で書き換えて任意の非 None 値 (呼び出し元へ返す
             結果) を返す。None = 書かずに中止。
+        in_session_extra: 書き込みが確定する試行 (CAS 勝ち / 新規行 INSERT) の
+            **commit 直前**に、同じ Session を渡して一度だけ呼ばれるフック
+            (W5)。meta の書き込みと追加の world-DB 書き込み (実行台帳の
+            applied 遷移 + outbox 積みなど) を**単一 commit** に同梱するための
+            口。例外は試行ごと rollback して伝播する (meta も書かれない)。
+            CAS 負け試行では呼ばれない。mutate が None (no-op) のときも
+            呼ばれない。
 
     Returns:
         mutate の返した結果 (書き込み成功時) / None (中止時)。
@@ -847,6 +855,12 @@ def mutate_plan_meta(
                     created_at=now,
                     updated_at=now,
                 ))
+                if in_session_extra is not None:
+                    try:
+                        in_session_extra(db)
+                    except Exception:
+                        db.rollback()
+                        raise
                 try:
                     db.commit()
                     return result
@@ -876,6 +890,12 @@ def mutate_plan_meta(
                     synchronize_session=False,
                 )
             )
+            if changed and in_session_extra is not None:
+                try:
+                    in_session_extra(db)
+                except Exception:
+                    db.rollback()
+                    raise
             db.commit()
             if changed:
                 return result
@@ -1702,6 +1722,31 @@ def _increment_life_field(
     )
 
 
+def _life_mark_mutator(
+    index: int, field: str
+) -> Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """lives[index] に境界マーカー (``started`` / ``ended``) を立てる mutate 閉包。
+
+    :func:`mutate_plan_meta` の CAS 試行の内側で評価される。lives が無い日 /
+    index 外 / 既マークは None (no-op — 書かない)。
+    """
+    def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        raw = meta.get(META_LIVES)
+        lives = (
+            [life for life in raw if isinstance(life, dict)]
+            if isinstance(raw, list) else []
+        )
+        if index >= len(lives):
+            return None
+        if lives[index].get(field):
+            return None  # 既にマーク済み — 書かない
+        lives[index][field] = True
+        meta[META_LIVES] = lives
+        return lives[index]
+
+    return _mark
+
+
 def mark_life_ended(
     manager: Any,
     persona_id: str,
@@ -1732,23 +1777,10 @@ def mark_life_ended(
         RuntimeError: CAS 再試行が枯渇した場合 (:func:`mutate_plan_meta` 準拠)。
     """
     plan_date_str = _normalize_plan_date(plan_date)
-
-    def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        raw = meta.get(META_LIVES)
-        lives = (
-            [life for life in raw if isinstance(life, dict)]
-            if isinstance(raw, list) else []
-        )
-        if index >= len(lives):
-            return None
-        if lives[index].get("ended"):
-            return None  # 既にマーク済み — 書かない
-        lives[index]["ended"] = True
-        meta[META_LIVES] = lives
-        return lives[index]
-
     return mutate_plan_meta(
-        manager, persona_id, plan_date_str, _mark, context="mark_life_ended",
+        manager, persona_id, plan_date_str,
+        _life_mark_mutator(index, "ended"),
+        context="mark_life_ended",
     )
 
 
@@ -1772,24 +1804,223 @@ def mark_life_started(
     lives が無い日 / index 外 / 既マークは何も書かず None。
     """
     plan_date_str = _normalize_plan_date(plan_date)
-
-    def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        raw = meta.get(META_LIVES)
-        lives = (
-            [life for life in raw if isinstance(life, dict)]
-            if isinstance(raw, list) else []
-        )
-        if index >= len(lives):
-            return None
-        if lives[index].get("started"):
-            return None  # 既にマーク済み — 書かない
-        lives[index]["started"] = True
-        meta[META_LIVES] = lives
-        return lives[index]
-
     return mutate_plan_meta(
-        manager, persona_id, plan_date_str, _mark, context="mark_life_started",
+        manager, persona_id, plan_date_str,
+        _life_mark_mutator(index, "started"),
+        context="mark_life_started",
     )
+
+
+#: ライフ境界の実行台帳 KIND (W5)。冪等キーは "{persona}:{plan_date}" —
+#: (persona, 営業日, 境界種) につき一つの実行。
+LIFE_BOUNDARY_KIND_START = "life.boundary_start"
+LIFE_BOUNDARY_KIND_END = "life.boundary_end"
+
+
+def _life_boundary_outbox_items(
+    manager: Any, persona_id: str, text: str
+) -> list:
+    """境界通知の outbox item 列を組み立てる (W5)。
+
+    配送先 (ペルソナの adapter) が無ければ空 — 旧 :func:`_notify_life_boundary`
+    の「配送先が無い場合は no-op = True」と同義 (通知なしで決着する)。
+    本文・時刻は enqueue 時点で凍結する (台帳 不変条件 6) — 配送が遅延しても
+    節目の時刻がずれない。時刻は仮想クロック (clock.now) を尊重しつつ
+    tz-aware UTC ISO にする (naive だと adapter が UTC と解釈して ±9h ずれる)。
+    """
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
+    if adapter is None or not hasattr(adapter, "append_persona_message"):
+        return []
+    from datetime import timezone
+    timestamp = clock.now().astimezone(timezone.utc).isoformat()
+    message = {
+        "role": "user",
+        "content": f"<system>[システム通知] {text}</system>",
+        "timestamp": timestamp,
+        "metadata": {"tags": ["internal", "event_message", "day_plan"]},
+    }
+    return [{
+        "target": "saimemory.append",
+        "payload": {"message": message, "building_id": None, "thread_suffix": None},
+        "persona_id": persona_id,
+    }]
+
+
+def apply_life_boundary(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    life: Dict[str, Any],
+    *,
+    boundary: str,
+    index: int = 0,
+) -> bool:
+    """ライフ境界 (開始 / 終了) の節目を実行台帳の下で決着させる (W5)。
+
+    W3 第六陣 P2 の恒久解 — 旧構造の二つの窓を閉じる:
+
+    (a) 「通知の追記成功 → 成功報告前の crash」で再試行が通知を再適用する
+        at-least-once 窓 → **マーカーと通知 outbox を world DB の単一 commit**
+        (:func:`mutate_plan_meta` の ``in_session_extra`` で
+        :meth:`~saiverse.execution_ledger.ExecutionLedger.mark_applied` を同梱)
+        にし、配送は outbox_id 冪等 (append_ledger_message) で一度きり。
+    (b) 「マーカー書き込み失敗の無条件 True + 即時リトライ 1 回」の暫定 →
+        マーカーが書けなければ台帳 failed + False で正直に失敗し、schedule 側
+        backoff が再試行する (claim は failed キーを退避して新 prepared を取る)。
+
+    順序: claim → try_mark_running → 冪等段 (keep-alive cancel / TTL 同期 —
+    すべて再試行安全) → 「マーカー + applied + 通知 outbox」単一 commit →
+    即時配送試行 (失敗しても durable、関所 / 回復 tick が引き継ぐ)。
+
+    ledger の無い環境 (旧テストスタブ等) は従来経路 (:func:`_handle_life_start`
+    / :func:`_handle_life_end` の直接通知 + マーカー) に縮退する (W2 の慣行)。
+
+    Returns:
+        境界が決着したか。True = 適用済み (今回適用 / 既に決着済み / 通知先
+        なし)。False = 今回の適用が失敗 — 呼び出し元は判断を走らせず
+        ``submitted=False`` で戻す (W3 の失敗伝播)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    if boundary == "start":
+        kind = LIFE_BOUNDARY_KIND_START
+        marker_field = "started"
+        notice = f"（活動開始）今日は {life['start']}〜{life['end']}。"
+    elif boundary == "end":
+        kind = LIFE_BOUNDARY_KIND_END
+        marker_field = "ended"
+        notice = "（活動終了）今日の活動時間はここまで。"
+    else:
+        raise ValueError(f"unknown life boundary: {boundary!r}")
+
+    ledger = getattr(manager, "execution_ledger", None)
+    if ledger is None:
+        warn_key = f"life_boundary:{persona_id}"
+        if warn_key not in _LEDGER_MISSING_WARNED:
+            _LEDGER_MISSING_WARNED.add(warn_key)
+            LOGGER.warning(
+                "[day_plan] manager has no execution_ledger; life boundary "
+                "runs in legacy direct mode (persona=%s)", persona_id,
+            )
+        handler = _handle_life_start if boundary == "start" else _handle_life_end
+        if not handler(manager, persona_id, plan_date_str, index, life):
+            return False
+        marker = (
+            mark_life_started if boundary == "start" else mark_life_ended
+        )
+        try:
+            marker(manager, persona_id, plan_date_str, index=index)
+        except Exception:
+            LOGGER.error(
+                "[day_plan] failed to persist life-%s marker (legacy mode, "
+                "persona=%s date=%s)", boundary, persona_id, plan_date_str,
+                exc_info=True,
+            )
+        return True
+
+    execution_id, runnable, existing = ledger.claim_execution(
+        kind, idempotency_key=f"{persona_id}:{plan_date_str}",
+        persona_id=persona_id,
+    )
+    if not runnable:
+        if existing in ("applied", "completed"):
+            LOGGER.info(
+                "[day_plan] life %s boundary already settled (execution=%s "
+                "persona=%s date=%s)", boundary, execution_id, persona_id,
+                plan_date_str,
+            )
+            return True
+        LOGGER.warning(
+            "[day_plan] life %s boundary claim not runnable (status=%s "
+            "persona=%s date=%s) — leaving retry to the caller",
+            boundary, existing, persona_id, plan_date_str,
+        )
+        return False
+    if not ledger.try_mark_running(execution_id):
+        # ほぼ同時の並走者が席を取った — 台帳へ書かず離脱 (敗者契約)
+        return False
+
+    if boundary == "start":
+        steps_ok = _sync_cache_ttl_for_life_start(manager, persona_id, life)
+    else:
+        steps_ok = (
+            _cancel_keepalive_reservation(manager, persona_id)
+            and _sync_cache_ttl_for_life_end(manager, persona_id, life)
+        )
+    if not steps_ok:
+        try:
+            ledger.mark_failed(
+                execution_id, f"life-{boundary} idempotent steps failed"
+            )
+        except Exception:
+            LOGGER.error(
+                "[day_plan] failed to record life-%s boundary failure "
+                "(execution=%s)", boundary, execution_id, exc_info=True,
+            )
+        return False
+
+    outbox_items = _life_boundary_outbox_items(manager, persona_id, notice)
+
+    def _extra(db: Any) -> None:
+        ledger.mark_applied(
+            execution_id,
+            result={"boundary": boundary, "notified": bool(outbox_items)},
+            outbox_items=outbox_items,
+            session=db,
+        )
+
+    try:
+        marked = mutate_plan_meta(
+            manager, persona_id, plan_date_str,
+            _life_mark_mutator(index, marker_field),
+            context=f"life_boundary_{boundary}",
+            in_session_extra=_extra,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] life %s boundary marker tx failed (persona=%s "
+            "date=%s)", boundary, persona_id, plan_date_str, exc_info=True,
+        )
+        try:
+            ledger.mark_failed(
+                execution_id, f"life-{boundary} marker tx failed"
+            )
+        except Exception:
+            LOGGER.error(
+                "[day_plan] failed to record life-%s marker tx failure "
+                "(execution=%s)", boundary, execution_id, exc_info=True,
+            )
+        return False
+    if marked is None:
+        # 並走が先にマークした / lives が消えた — 通知なしでこの実行を閉じる
+        # (境界そのものは決着済み)。
+        try:
+            ledger.mark_applied(
+                execution_id,
+                result={"boundary": boundary, "note": "marker already set"},
+            )
+            ledger.mark_completed(execution_id)
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] failed to close no-op life-%s boundary execution "
+                "(execution=%s)", boundary, execution_id, exc_info=True,
+            )
+        return True
+
+    LOGGER.info(
+        "[day_plan] life %s boundary applied: marker + %d notice outbox in "
+        "one commit (execution=%s persona=%s date=%s)",
+        boundary, len(outbox_items), execution_id, persona_id, plan_date_str,
+    )
+    try:
+        ledger.flush_pending_for_persona(persona_id)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] life boundary notice delivery deferred "
+            "(persona=%s) — outbox remains pending for the gate / recovery "
+            "tick", persona_id, exc_info=True,
+        )
+    return True
 
 
 def record_judgment_pulse(
@@ -1915,14 +2146,14 @@ def _apply_life_budget_gate(
 
 def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> bool:
     """ライフ境界 (活動開始・終了) のシステム通知を tail (末尾イベント) として
-    SAIMemory へ書く。
+    SAIMemory へ**直接** append する — **W5 以降は縮退経路のみ**。
 
-    Track 切替通知と同じ様式 (``<system>`` ラップの user メッセージ、
-    event_message タグ、キャッシュ無破壊 — life.md §9.3)。v0.5: 呼び出し元は
-    専用のライフ境界イベント (削除済み) ではなく起床判断 (day_open) /
-    就寝判断 (day_close) の発火経路 (:func:`_handle_life_start` /
-    :func:`_handle_life_end`、呼び出し元は
-    :func:`saiverse.autonomy_wiring.fire_judgment_point`)。
+    本番経路では通知は :func:`apply_life_boundary` が outbox item として
+    マーカーと同一 commit で凍結し、配送器 (append_ledger_message) が冪等に
+    届ける。本関数が呼ばれるのは execution_ledger の無い環境の縮退時
+    (:func:`_handle_life_start` / :func:`_handle_life_end`) だけ。
+    様式は Track 切替通知と同じ (``<system>`` ラップの user メッセージ、
+    event_message タグ、キャッシュ無破壊 — life.md §9.3)。
 
     Returns:
         追記に成功したか (Codex W3 第四陣 P2: day_close 側は成否で ended
@@ -2163,14 +2394,16 @@ def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> bool:
 def _handle_life_start(
     manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
 ) -> bool:
-    """ライフ開始の節目処理 (life.md v0.5 §4.1/§11.2)。
+    """ライフ開始の節目処理 — **W5 以降は縮退経路のみ**。
+
+    本番経路は :func:`apply_life_boundary` (実行台帳の claim + マーカーと通知
+    outbox の単一 commit)。本関数が直接呼ばれるのは manager に
+    execution_ledger が無い環境 (旧テストスタブ等) の縮退時だけで、そのとき
+    通知は従来どおり直接 append (:func:`_notify_life_boundary`) になる。
 
     v0.4 までは専用のライフ境界イベント (EventScheduler 予約) の発火時に
     呼ばれていたが、v0.5 でその専用予約は廃止した — 「ライフ開始 = 起床判断
-    (day_open)」そのものなので、呼び出し元は
-    :func:`saiverse.autonomy_wiring.fire_judgment_point` の day_open 発火経路
-    (:func:`confirm_life_for_today` でライフを確定した直後、started マーカーが
-    無いときだけ)。
+    (day_open)」そのもの。
 
     Returns:
         全段成功したか (:func:`_handle_life_end` の鏡像、Codex W3 第八陣)。
@@ -2207,12 +2440,15 @@ def _handle_life_start(
 def _handle_life_end(
     manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
 ) -> bool:
-    """ライフ終了の節目処理 (life.md v0.5 §4.1/§11.2)。
+    """ライフ終了の節目処理 — **W5 以降は縮退経路のみ**。
+
+    本番経路は :func:`apply_life_boundary` (実行台帳の claim + マーカーと通知
+    outbox の単一 commit)。本関数が直接呼ばれるのは manager に
+    execution_ledger が無い環境 (旧テストスタブ等) の縮退時だけ。
 
     v0.4 までは専用のライフ境界イベント (EventScheduler 予約) の発火時に
     呼ばれていたが、v0.5 でその専用予約は廃止した — 「ライフ終了 = 就寝判断
-    (day_close)」そのものなので、呼び出し元は
-    :func:`saiverse.autonomy_wiring.fire_judgment_point` の day_close 発火経路。
+    (day_close)」そのもの。
 
     Returns:
         全段成功したか (Codex W3 第四陣 P2)。呼び出し元は True のときだけ

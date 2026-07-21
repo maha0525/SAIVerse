@@ -69,6 +69,13 @@ TARGET_PERCEPTION_PUSH = "perception.push"
 #: W1 Chunk C (D9-5): 作業セッション digest の配送。saimemory.append の変種で、
 #: 冪等 append 後に episode の digest_ref (再訪の鍵) を後段確定する。
 TARGET_SAIMEMORY_APPEND_DIGEST = "saimemory.append_digest"
+#: W5/B1: 移動 (move.entity) の commit 後処理の配送。位置遷移 + building
+#: イベントは移動 tx に同居し、in-process の後処理 (dynamic state / addon
+#: hooks / game lifecycle) だけが outbox で at-least-once 実行になる —
+#: 旧実装の「commit 後の裸実行 (失敗 = 消失 or 偽の移動失敗)」の置き換え。
+TARGET_MOVE_DYNAMIC_STATE = "move.post_dynamic_state"
+TARGET_MOVE_ADDON_HOOKS = "move.post_addon_hooks"
+TARGET_MOVE_GAME_LIFECYCLE = "move.post_game_lifecycle"
 
 #: 判断点 kind の台帳 KIND 前綴り (autonomy_wiring.fire_judgment_point が刻む)。
 JUDGMENT_KIND_PREFIX = "judgment."
@@ -134,6 +141,15 @@ def build_execution_ledger(manager: "SAIVerseManager") -> ExecutionLedger:
     ledger.register_outbox_handler(
         TARGET_SAIMEMORY_APPEND_DIGEST,
         _make_saimemory_append_digest_handler(manager),
+    )
+    ledger.register_outbox_handler(
+        TARGET_MOVE_DYNAMIC_STATE, _make_move_dynamic_state_handler(manager)
+    )
+    ledger.register_outbox_handler(
+        TARGET_MOVE_ADDON_HOOKS, _make_move_addon_hooks_handler(manager)
+    )
+    ledger.register_outbox_handler(
+        TARGET_MOVE_GAME_LIFECYCLE, _make_move_game_lifecycle_handler(manager)
     )
     return ledger
 
@@ -909,4 +925,113 @@ def _make_perception_push_handler(
             media=payload.get("media"),
             metadata=payload.get("metadata"),
         )
+    return handler
+
+
+def _move_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    """move.post_* 共通の payload 検証 (W5/B1)。"""
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("move.post payload must be a dict")
+    if not payload.get("entity_id") or not payload.get("to_id"):
+        raise ValueError("move.post payload requires 'entity_id' and 'to_id'")
+    return payload
+
+
+def _make_move_dynamic_state_handler(
+    manager: "SAIVerseManager",
+) -> Callable[[Dict[str, Any]], None]:
+    """target='move.post_dynamic_state' — 入室時の Dynamic State 同期。
+
+    diff 通知の注入 + BUILDING_ENTERED の Section snapshot 再構築 (いずれも
+    現在状態からの再構築 = 再配送安全)。ペルソナ未ロードは恒久 no-op (再試行
+    しても届かない — 位置は DB 正典が持っており、次回ロード時に再構築される)。
+    例外は配送失敗 = pending 残存 → 関所 / 回復 tick が再試行。
+
+    ``on_building_entered`` 自身は内部の各段 (diff 通知 / 他ペルソナ通知 /
+    visual_context push / head event dispatch) を独立した best-effort として
+    例外を吸収する — 1 段の失敗が他段を止めない設計は変えない。ただし戻り値
+    (全段成功したか) を見て、1 段でも失敗したら例外を投げて配送失敗にする
+    (2026-07-21 Codex レビュー P2: 内部失敗を握ったまま delivered 記帳される
+    と、失敗した段が二度と再試行されなかった)。
+    """
+    def handler(item: Dict[str, Any]) -> None:
+        payload = _move_payload(item)
+        entity_id = str(payload["entity_id"])
+        if payload.get("entity_type") != "ai":
+            return
+        persona = (getattr(manager, "personas", {}) or {}).get(entity_id)
+        if persona is None:
+            LOGGER.info(
+                "[ledger] move.post_dynamic_state: persona %s not loaded; "
+                "skipping (state rebuilds on next load)", entity_id,
+            )
+            return
+        from saiverse.dynamic_state import DynamicStateManager
+        to_id = str(payload["to_id"])
+        if not DynamicStateManager.on_building_entered(persona, to_id, manager):
+            raise RuntimeError(
+                f"dynamic state sync incomplete for persona={entity_id} "
+                f"building={to_id} (see prior WARNING logs for the failing "
+                f"stage)"
+            )
+    return handler
+
+
+def _make_move_addon_hooks_handler(
+    manager: "SAIVerseManager",
+) -> Callable[[Dict[str, Any]], None]:
+    """target='move.post_addon_hooks' — 建物移動の addon hook 発火。
+
+    退室 → 入室の順序は 1 配送内で保持 (旧実装と同じ)。dispatch_hook は
+    addon ごとの例外を内部で吸収する設計のため、ここまで届いた例外だけが
+    配送失敗として再試行される。
+    """
+    def handler(item: Dict[str, Any]) -> None:
+        payload = _move_payload(item)
+        if payload.get("entity_type") != "ai":
+            return
+        from saiverse.addon_hooks import dispatch_hook
+        entity_id = str(payload["entity_id"])
+        from_id = payload.get("from_id")
+        to_id = str(payload["to_id"])
+        dispatch_hook(
+            "persona_exited_building",
+            persona_id=entity_id,
+            building_id=from_id,
+            from_building_id=from_id,
+            to_building_id=to_id,
+        )
+        dispatch_hook(
+            "persona_entered_building",
+            persona_id=entity_id,
+            building_id=to_id,
+            from_building_id=from_id,
+        )
+    return handler
+
+
+def _make_move_game_lifecycle_handler(
+    manager: "SAIVerseManager",
+) -> Callable[[Dict[str, Any]], None]:
+    """target='move.post_game_lifecycle' — game Region の自動ポーズ/再開。
+
+    on_entity_moved は現在状態を読んで判定する (再配送安全)。game_lifecycle の
+    無い manager は no-op。戻り値 (成功したか) を見て、失敗なら例外を投げて
+    配送失敗にする (2026-07-21 Codex レビュー P2: on_entity_moved は移動本体を
+    守るため内部例外を吸収する設計だが、それを outbox が「配送成功」と誤記帳
+    しないよう、握った失敗を戻り値経由でここまで引き上げる)。
+    """
+    def handler(item: Dict[str, Any]) -> None:
+        payload = _move_payload(item)
+        lifecycle = getattr(manager, "game_lifecycle", None)
+        if lifecycle is None:
+            return
+        entity_id = str(payload["entity_id"])
+        to_id = str(payload["to_id"])
+        if not lifecycle.on_entity_moved(entity_id, payload.get("from_id"), to_id):
+            raise RuntimeError(
+                f"game lifecycle sync failed for entity={entity_id} -> {to_id} "
+                f"(see prior exception log for the cause)"
+            )
     return handler

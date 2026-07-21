@@ -254,7 +254,7 @@ class GameLifecycleService:
     # 移動フック (自動ポーズ / 自動再開)
     # ------------------------------------------------------------------
 
-    def on_entity_moved(self, entity_id: str, from_id: str, to_id: str) -> None:
+    def on_entity_moved(self, entity_id: str, from_id: str, to_id: str) -> bool:
         """OccupancyManager.move_entity 成功後に呼ばれる。
 
         - playing 中に参加者が Region 外へ出たら自動ポーズ
@@ -263,6 +263,12 @@ class GameLifecycleService:
           追従移動が再帰的に連鎖することはない)
         - paused 中に参加者が戻って全員揃ったら自動再開
         移動本体を巻き込まないため、例外はここで吸収してログする。
+
+        Returns:
+            成功したか (2026-07-21 Codex レビュー P2)。outbox 配送経路
+            (move.post_game_lifecycle ハンドラ) がこの戻り値を見て失敗を
+            再試行対象にする。直接呼び出し元 (縮退経路・既存テスト) は
+            戻り値を無視してよい。
         """
         try:
             entity_id = str(entity_id)
@@ -309,11 +315,13 @@ class GameLifecycleService:
                     location_overrides={entity_id: to_id},
                 )
                 LOGGER.info("[game_lifecycle] auto-resume: %s", result)
+            return True
         except Exception:
             LOGGER.exception(
                 "[game_lifecycle] on_entity_moved failed (entity=%s, %s -> %s)",
                 entity_id, from_id, to_id,
             )
+            return False
 
     # ------------------------------------------------------------------
     # パーティー移動

@@ -253,6 +253,11 @@ def mark_ingested(
 
     Returns True if updated (= 新規追加された)、 False if skipped (= 既に登録済み /
     該当行なし / session_factory が None)。
+
+    DB エラーは **raise する** (W5/M8): マーク失敗を False に潰すと、呼び出し元
+    (Building→個人記憶の転記) が失敗を跨いで cursor を確定し、未マークの
+    メッセージが再試行されないまま取り込み済み扱いになる。「既に登録済み /
+    該当行なし」は決着 (False)、「書けなかった」は失敗 (例外) — 二つは別物。
     """
     if session_factory is None or not persona_id:
         return False
@@ -285,7 +290,7 @@ def mark_ingested(
             building_id, message_id, persona_id,
             exc_info=True,
         )
-        return False
+        raise
     finally:
         db.close()
 
@@ -393,6 +398,61 @@ def serialize_building_message(building_id: str, building_msg: Dict[str, Any]) -
     }
 
 
+def insert_building_message_in_session(
+    db: "Session",
+    building_id: str,
+    building_msg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """``building_messages`` へ 1 件 INSERT する **session 内核** (commit しない)。
+
+    呼び出し元のトランザクションに同居する (W5/B1: 移動の位置遷移と
+    leave/enter イベントを単一 commit にするための口)。seq / message_id の
+    採番規則は :func:`insert_building_message` と同一 (max(seq)+1 — 呼び出し元
+    tx が先行の書き込みで write ロックを取っていれば SQLite の単一書き手
+    直列化により採番レースは起きない)。client_message_id の重複は既存行を
+    返して INSERT しない。ロックリトライは行わない — 失敗は例外で表明し、
+    呼び出し元 tx ごと失敗させる。
+
+    Returns:
+        確定された行 dict (``_was_inserted`` True/False)。
+    """
+    from database.models import BuildingMessage
+    from sqlalchemy import func as sa_func
+
+    record = serialize_building_message(building_id, building_msg)
+    orig_seq = record.get("seq")
+    orig_message_id = record.get("message_id")
+    cmid = record.get("client_message_id")
+    if cmid:
+        existing = db.query(BuildingMessage).filter_by(
+            client_message_id=cmid
+        ).first()
+        if existing is not None:
+            LOGGER.info(
+                "insert_building_message: duplicate client_message_id=%s → returning existing seq=%d",
+                cmid, existing.seq,
+            )
+            result = deserialize_building_message(existing)
+            result["_was_inserted"] = False
+            return result
+
+    max_seq = db.query(sa_func.coalesce(sa_func.max(BuildingMessage.seq), 0)).filter_by(
+        building_id=building_id
+    ).scalar()
+    new_seq = int(max_seq or 0) + 1
+    record["legacy_seq"] = orig_seq or None
+    record["legacy_message_id"] = orig_message_id or None
+    record["seq"] = new_seq
+    record["message_id"] = f"{building_id}:{new_seq}"
+    obj = BuildingMessage(**record)
+    db.add(obj)
+    # seq/一意制約の違反 (IntegrityError) を commit 前にこの場で顕在化させる
+    db.flush()
+    result = deserialize_building_message(obj)
+    result["_was_inserted"] = True
+    return result
+
+
 def insert_building_message(
     session_factory: Optional[Callable[[], "Session"]],
     building_id: str,
@@ -405,50 +465,28 @@ def insert_building_message(
     seq / message_id は legacy_seq / legacy_message_id として保存される (= 過去
     JSON 由来の値を traceable に残す)。
 
-    ``database is locked`` 時はリトライする。
+    ``database is locked`` 時はリトライする。INSERT の中身は
+    :func:`insert_building_message_in_session` (session 内核) と共通。
     """
     if session_factory is None:
         return None
 
     from database.models import BuildingMessage
-    from sqlalchemy import func as sa_func
     from sqlalchemy.exc import IntegrityError
 
-    record = serialize_building_message(building_id, building_msg)
-    orig_seq = record.get("seq")
-    orig_message_id = record.get("message_id")
     for attempt in range(_max_retries):
         db = session_factory()
         try:
-            cmid = record.get("client_message_id")
-            if cmid:
-                existing = db.query(BuildingMessage).filter_by(
-                    client_message_id=cmid
-                ).first()
-                if existing is not None:
-                    LOGGER.info(
-                        "insert_building_message: duplicate client_message_id=%s → returning existing seq=%d",
-                        cmid, existing.seq,
-                    )
-                    result = deserialize_building_message(existing)
-                    result["_was_inserted"] = False
-                    return result
-
-            max_seq = db.query(sa_func.coalesce(sa_func.max(BuildingMessage.seq), 0)).filter_by(
-                building_id=building_id
-            ).scalar()
-            new_seq = int(max_seq or 0) + 1
-            new_message_id = f"{building_id}:{new_seq}"
-            record["legacy_seq"] = orig_seq or None
-            record["legacy_message_id"] = orig_message_id or None
-            record["seq"] = new_seq
-            record["message_id"] = new_message_id
-            obj = BuildingMessage(**record)
-            db.add(obj)
             try:
-                db.commit()
+                result = insert_building_message_in_session(
+                    db, building_id, building_msg
+                )
+                if result.get("_was_inserted"):
+                    db.commit()
+                return result
             except IntegrityError:
                 db.rollback()
+                cmid = building_msg.get("client_message_id")
                 if cmid:
                     existing = db.query(BuildingMessage).filter_by(
                         client_message_id=cmid
@@ -462,9 +500,6 @@ def insert_building_message(
                         result["_was_inserted"] = False
                         return result
                 raise
-            result = deserialize_building_message(obj)
-            result["_was_inserted"] = True
-            return result
         except Exception as exc:
             try:
                 db.rollback()

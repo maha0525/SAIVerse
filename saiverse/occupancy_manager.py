@@ -1,7 +1,7 @@
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Callable, TYPE_CHECKING
 
 from sqlalchemy.orm import Session
@@ -170,10 +170,28 @@ class OccupancyManager:
         entity_type: str,  # 'ai' or 'user'
         from_id: str,
         to_id: str,
-        db_session: Optional[Session] = None
     ) -> Tuple[bool, Optional[str]]:
-        """
-        エンティティを建物間で移動させる。移動に関するすべてのロジックをここに集約する。
+        """エンティティを建物間で移動させる。移動に関するすべてのロジックをここに集約する。
+
+        W5/B1 (分離監査「移動 DB を先に commit し、後処理失敗で失敗結果と実世界が
+        分裂する」) の構造:
+
+        1. 事前チェック — False を返してよいのはここまで (まだ何も起きていない)。
+        2. **単一 tx**: 位置遷移 (occupancy log / User.CURRENT_BUILDINGID) +
+           leave/enter の building イベント + 台帳 applied + 後処理 outbox を
+           1 commit で確定。tx が転べば全て巻き戻り、False を正直に返せる。
+        3. commit 後: in-memory occupants を確定遷移から更新し、後処理
+           (dynamic state / addon hooks / game lifecycle) を outbox 配送で実行。
+           **commit 後は False を返さない** — 後処理の失敗は pending/dead に
+           残る再配送状態であり、移動の失敗ではない。
+
+        persona.current_building_id / user state cache の更新は従来どおり
+        呼び出し側の責務 (完全な集約は柱5 = W7 の canonical 化と同時に行う —
+        本変更で「失敗を返したのに DB は移動済み」の分裂は消えるため、呼び出し
+        側の成功時更新は常に確定済みの遷移を映す)。
+
+        旧 ``db_session`` パラメータは廃止 (実利用者ゼロの死んだ口。tx の所有は
+        本メソッドに一本化)。
         """
         entity_id = str(entity_id)
 
@@ -187,8 +205,8 @@ class OccupancyManager:
         # detected as corrupted/zero-byte at startup. The user must resolve
         # via the UI (restore from backup / reset / handle manually) before
         # the building accepts new entries.
-        quarantined = getattr(self._manager_ref, "quarantined_buildings", None)
-        if quarantined and to_id in quarantined:
+        quarantined = getattr(self._manager_ref, "quarantined_buildings", None) or {}
+        if to_id in quarantined:
             logging.warning(
                 "move_entity blocked: destination %s is quarantined (corrupted log.json)",
                 to_id,
@@ -228,11 +246,261 @@ class OccupancyManager:
                     capacity_limit,
                 )
                 return False, f"{self.building_map[to_id].name}は定員オーバーです"
+        elif entity_type != 'user':
+            logging.warning("move_entity aborted: unknown entity type %s", entity_type)
+            return False, f"不明なエンティティタイプ: {entity_type}"
 
-        # 2. DBとメモリの操作
-        db = db_session if db_session else self.SessionLocal()
-        manage_session_locally = not db_session
+        ledger = getattr(self._manager_ref, "execution_ledger", None)
+        if ledger is None:
+            return self._move_entity_legacy(entity_id, entity_type, from_id, to_id)
 
+        persona_queue_id = entity_id if entity_type == 'ai' else None
+        execution_id, _created = ledger.begin_execution(
+            "move.entity",
+            persona_id=persona_queue_id,
+            payload={
+                "entity_id": entity_id, "entity_type": entity_type,
+                "from_id": from_id, "to_id": to_id,
+            },
+        )
+        try:
+            ledger.mark_running(execution_id)
+        except Exception:
+            logging.error(
+                "move_entity: failed to mark running (execution=%s)",
+                execution_id, exc_info=True,
+            )
+            try:
+                # prepared 孤児を残さない (副作用ゼロ確定なので failed が正直)
+                ledger.abandon_prepared(execution_id, "mark_running failed")
+            except Exception:
+                logging.error(
+                    "move_entity: failed to abandon prepared (execution=%s)",
+                    execution_id, exc_info=True,
+                )
+            return False, "データベースの更新中にエラーが発生しました。"
+
+        # 2. 単一 tx: 位置遷移 + leave/enter イベント + applied + 後処理 outbox
+        now = datetime.now()
+        db = self.SessionLocal()
+        try:
+            if entity_type == 'ai':
+                last_log = db.query(BuildingOccupancyLog).filter_by(
+                    AIID=entity_id, BUILDINGID=from_id, EXIT_TIMESTAMP=None
+                ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).first()
+                if last_log:
+                    last_log.EXIT_TIMESTAMP = now
+                new_log = BuildingOccupancyLog(
+                    CITYID=self.city_id, AIID=entity_id,
+                    BUILDINGID=to_id, ENTRY_TIMESTAMP=now,
+                )
+                db.add(new_log)
+                entity_name = self.id_to_name_map.get(entity_id, entity_id)
+            else:
+                user = db.query(UserModel).filter_by(USERID=int(entity_id)).first()
+                if not user:
+                    db.rollback()
+                    ledger.mark_failed(execution_id, "user not found")
+                    return False, "移動失敗: ユーザーが見つかりません。"
+                user.CURRENT_BUILDINGID = to_id
+                entity_name = user.USERNAME or "ユーザー"
+            # 先行の位置遷移を flush して write ロックを取る — 以降の
+            # max(seq) 読みが SQLite の単一書き手直列化に入る (採番レース防止)
+            db.flush()
+
+            from database.building_messages import (
+                insert_building_message_in_session,
+            )
+            for event_building_id, event_msg in self._build_occupancy_events(
+                entity_id, entity_type, entity_name, from_id, to_id, now,
+            ):
+                if event_building_id in quarantined:
+                    logging.warning(
+                        "move_entity: building %s is quarantined — occupancy "
+                        "event skipped", event_building_id,
+                    )
+                    continue
+                insert_building_message_in_session(
+                    db, event_building_id, event_msg
+                )
+
+            outbox_items = self._build_move_outbox_items(
+                entity_id, entity_type, from_id, to_id, persona_queue_id
+            )
+            ledger.mark_applied(
+                execution_id,
+                result={"from": from_id, "to": to_id},
+                outbox_items=outbox_items,
+                session=db,
+            )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logging.error(
+                f"Failed to move {entity_type} '{entity_id}' in DB: {e}",
+                exc_info=True,
+            )
+            try:
+                ledger.mark_failed(execution_id, str(e) or type(e).__name__)
+            except Exception:
+                logging.error(
+                    "move_entity: failed to record move failure (execution=%s)",
+                    execution_id, exc_info=True,
+                )
+            return False, "データベースの更新中にエラーが発生しました。"
+        finally:
+            db.close()
+
+        # 3. commit 済み — ここから先は False を返さない (B1)。
+        #    in-memory は確定した遷移をそのまま映す。
+        if entity_id in self.occupants.get(from_id, []):
+            self.occupants[from_id].remove(entity_id)
+        self.occupants.setdefault(to_id, []).append(entity_id)
+        logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
+
+        # 後処理 (dynamic state / addon hooks / game lifecycle) の即時配送試行。
+        # 失敗しても pending に残り、Beat 関所 / 回復 tick が引き継ぐ。
+        try:
+            ledger.flush_pending_for_persona(persona_queue_id)
+        except Exception:
+            logging.warning(
+                "move_entity: post-move delivery deferred (%s -> %s); outbox "
+                "remains pending for the gate / recovery tick",
+                from_id, to_id, exc_info=True,
+            )
+        return True, None
+
+    def _build_occupancy_events(
+        self,
+        entity_id: str,
+        entity_type: str,
+        entity_name: str,
+        from_id: str,
+        to_id: str,
+        now: datetime,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """leave/enter の building イベント (host message) を組み立てる。
+
+        heard_by は**移動後**の占有 (leave = 残った目撃者 / enter = 移動者含む
+        到着記録) — in-memory occupants は commit 後まで触らないため、ここでは
+        無変異で導出する。
+        """
+        from_building_name = self.building_map[from_id].name if from_id in self.building_map else from_id
+        to_building_name = self.building_map[to_id].name
+        action_type = "AI Action" if entity_type == 'ai' else "User Action"
+        event_key = f"occupancy:{entity_id}:{from_id}:{to_id}:{int(now.timestamp())}"
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        # entity_name / building_name も event に含める (intent §E 視点別
+        # レンダリング用)。 これで history_manager 側が manager_ref なし
+        # で entity_id == self.persona_id 判定 + 自然な文言生成できる。
+        left_metadata = {
+            "event": {
+                "type": "occupancy",
+                "action": "leave",
+                "entity_id": entity_id,
+                "entity_name": entity_name,
+                "entity_type": entity_type,
+                "from_building_id": from_id,
+                "from_building_name": from_building_name,
+                "to_building_id": to_id,
+                "to_building_name": to_building_name,
+                "event_key": event_key,
+            }
+        }
+        enter_metadata = {
+            "event": {
+                "type": "occupancy",
+                "action": "enter",
+                "entity_id": entity_id,
+                "entity_name": entity_name,
+                "entity_type": entity_type,
+                "from_building_id": from_id,
+                "from_building_name": from_building_name,
+                "to_building_id": to_id,
+                "to_building_name": to_building_name,
+                "event_key": event_key,
+                "recalled_by": [],
+                # auto_ingest 側がペルソナの context に Building 情報を流し込むための
+                # ペイロード。visual_context のキャッシュに頼らず、移動の瞬間に
+                # SYSTEM_PROMPT や physical_vessel_id を episodic memory へ
+                # 直接届ける経路。詳細: docs/intent/stackchan_vessel.md A-3-a
+                "building_info": self._build_building_info(to_id),
+            }
+        }
+        left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
+        entered_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
+        from_occupants_after = sorted({
+            str(eid) for eid in self.occupants.get(from_id, [])
+            if eid and str(eid) != entity_id
+        })
+        to_occupants_after = sorted({
+            str(eid) for eid in ([*self.occupants.get(to_id, []), entity_id])
+            if eid
+        })
+        return [
+            (from_id, {
+                "role": "host", "content": left_message,
+                "metadata": left_metadata, "timestamp": timestamp,
+                "heard_by": from_occupants_after, "ingested_by": [],
+            }),
+            (to_id, {
+                "role": "host", "content": entered_message,
+                "metadata": enter_metadata, "timestamp": timestamp,
+                "heard_by": to_occupants_after, "ingested_by": [],
+            }),
+        ]
+
+    def _build_move_outbox_items(
+        self,
+        entity_id: str,
+        entity_type: str,
+        from_id: str,
+        to_id: str,
+        persona_queue_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """移動後処理の outbox item 列 (dynamic state / addon hooks / game lifecycle)。
+
+        payload は移動時点の事実を凍結する。配送順は persona キュー内 FIFO
+        (OUTBOX_ID 昇順) で従来の呼び出し順 (dynamic state → hooks → lifecycle)
+        を保つ。ハンドラは execution_ledger_wiring 側。
+        """
+        payload = {
+            "entity_id": entity_id, "entity_type": entity_type,
+            "from_id": from_id, "to_id": to_id,
+        }
+        items: List[Dict[str, Any]] = []
+        if entity_type == 'ai':
+            items.append({
+                "target": "move.post_dynamic_state",
+                "payload": payload, "persona_id": persona_queue_id,
+            })
+            items.append({
+                "target": "move.post_addon_hooks",
+                "payload": payload, "persona_id": persona_queue_id,
+            })
+        items.append({
+            "target": "move.post_game_lifecycle",
+            "payload": payload, "persona_id": persona_queue_id,
+        })
+        return items
+
+    def _move_entity_legacy(
+        self,
+        entity_id: str,
+        entity_type: str,
+        from_id: str,
+        to_id: str,
+    ) -> Tuple[bool, Optional[str]]:
+        """execution_ledger の無い環境 (旧テストスタブ等) の縮退経路。
+
+        従来実装のまま: DB commit 後の後処理 (イベント・hook) が裸で走る。
+        本番 manager は常に台帳を持つため、この経路は縮退時のみ。
+        """
+        logging.warning(
+            "move_entity: manager has no execution_ledger; running in legacy "
+            "mode (%s -> %s)", from_id, to_id,
+        )
+        db = self.SessionLocal()
         try:
             now = datetime.now()
             if entity_type == 'ai':
@@ -242,92 +510,29 @@ class OccupancyManager:
                 new_log = BuildingOccupancyLog(CITYID=self.city_id, AIID=entity_id, BUILDINGID=to_id, ENTRY_TIMESTAMP=now)
                 db.add(new_log)
                 entity_name = self.id_to_name_map.get(entity_id, entity_id)
-            elif entity_type == 'user':
+            else:
                 user = db.query(UserModel).filter_by(USERID=int(entity_id)).first()
-                if not user: return False, "移動失敗: ユーザーが見つかりません。"
+                if not user:
+                    return False, "移動失敗: ユーザーが見つかりません。"
                 user.CURRENT_BUILDINGID = to_id
                 entity_name = user.USERNAME or "ユーザー"
-            else:
-                logging.warning("move_entity aborted: unknown entity type %s", entity_type)
-                return False, f"不明なエンティティタイプ: {entity_type}"
 
-            if manage_session_locally: db.commit()
+            db.commit()
 
-            if entity_id in self.occupants.get(from_id, []): self.occupants[from_id].remove(entity_id)
+            if entity_id in self.occupants.get(from_id, []):
+                self.occupants[from_id].remove(entity_id)
             self.occupants.setdefault(to_id, []).append(entity_id)
 
-            # 3. ログメッセージの生成
-            from_building_name = self.building_map[from_id].name
-            to_building_name = self.building_map[to_id].name
-            action_type = "AI Action" if entity_type == 'ai' else "User Action"
-            event_key = f"occupancy:{entity_id}:{from_id}:{to_id}:{int(now.timestamp())}"
-            # entity_name / building_name も event に含める (intent §E 視点別
-            # レンダリング用)。 これで history_manager 側が manager_ref なし
-            # で entity_id == self.persona_id 判定 + 自然な文言生成できる。
-            left_metadata = {
-                "event": {
-                    "type": "occupancy",
-                    "action": "leave",
-                    "entity_id": entity_id,
-                    "entity_name": entity_name,
-                    "entity_type": entity_type,
-                    "from_building_id": from_id,
-                    "from_building_name": from_building_name,
-                    "to_building_id": to_id,
-                    "to_building_name": to_building_name,
-                    "event_key": event_key,
-                }
-            }
-            enter_metadata = {
-                "event": {
-                    "type": "occupancy",
-                    "action": "enter",
-                    "entity_id": entity_id,
-                    "entity_name": entity_name,
-                    "entity_type": entity_type,
-                    "from_building_id": from_id,
-                    "from_building_name": from_building_name,
-                    "to_building_id": to_id,
-                    "to_building_name": to_building_name,
-                    "event_key": event_key,
-                    "recalled_by": [],
-                    # auto_ingest 側がペルソナの context に Building 情報を流し込むための
-                    # ペイロード。visual_context のキャッシュに頼らず、移動の瞬間に
-                    # SYSTEM_PROMPT や physical_vessel_id を episodic memory へ
-                    # 直接届ける経路。詳細: docs/intent/stackchan_vessel.md A-3-a
-                    "building_info": self._build_building_info(to_id),
-                }
-            }
-            left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
-            entered_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
-            # Add events through manager's add_building_event so they get proper
-            # seq / message_id / heard_by — without this, auto_ingest's
-            # ``persona_id in heard_by`` filter excludes them and personas have
-            # no episodic memory of moving (and seq corruption breaks new
-            # message numbering — see manager/history.py:add_building_event).
-            #
-            # heard_by:
-            #  - LEFT in FROM building: occupants AFTER move (= remaining ones who
-            #    "witnessed the leave")
-            #  - ENTER in TO building: occupants AFTER move (= including the moving
-            #    entity, so they have a record of arriving)
-            from_occupants = list(self.occupants.get(from_id, []))
-            to_occupants = list(self.occupants.get(to_id, []))
             mgr = self._manager_ref
             if mgr is not None and hasattr(mgr, "add_building_event"):
-                mgr.add_building_event(
-                    from_id,
-                    {"role": "host", "content": left_message, "metadata": left_metadata},
-                    heard_by=from_occupants,
-                )
-                mgr.add_building_event(
-                    to_id,
-                    {"role": "host", "content": entered_message, "metadata": enter_metadata},
-                    heard_by=to_occupants,
-                )
+                for event_building_id, event_msg in self._build_occupancy_events(
+                    entity_id, entity_type, entity_name, from_id, to_id, now,
+                ):
+                    heard_by = event_msg.pop("heard_by", [])
+                    event_msg.pop("ingested_by", None)
+                    # 上の occupants 更新後なので heard_by を再算出せずそのまま使う
+                    mgr.add_building_event(event_building_id, event_msg, heard_by=heard_by)
             else:
-                # Fallback: manager_ref が無い場合 (= 主にテスト経路)。 Phase 2+3 以降は
-                # DB 経由でしか書けないので、 何もしない (テスト側で manager_ref 必須に)。
                 logging.warning(
                     "occupancy event ignored: manager_ref unavailable for %s -> %s",
                     from_id, to_id,
@@ -335,7 +540,6 @@ class OccupancyManager:
 
             logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
 
-            # Dynamic State Sync: AIペルソナ入室時のスナップショット初期化
             if entity_type == "ai":
                 try:
                     from saiverse.dynamic_state import DynamicStateManager
@@ -347,14 +551,8 @@ class OccupancyManager:
                 except Exception:
                     logging.exception("[dynamic_state] on_building_entered failed for %s -> %s", entity_id, to_id)
 
-                # Addon hooks: ペルソナの建物移動を addon に通知する。
-                # Vessel Building に紐付くアドオンが avatar セット等の物理リソースを
-                # 切り替え / 退室時に身体を非表示にするためのフックポイント。
-                # 詳細: docs/intent/stackchan_avatar_pipeline.md
                 try:
                     from saiverse.addon_hooks import dispatch_hook
-                    # 退室イベントを先に発火 (= addon が「ペルソナ A が出た」
-                    # を処理した後に「ペルソナ B が入った」を処理できるよう)。
                     dispatch_hook(
                         "persona_exited_building",
                         persona_id=entity_id,
@@ -374,19 +572,17 @@ class OccupancyManager:
                         "for %s -> %s", entity_id, to_id,
                     )
 
-            # game Region ライフサイクル: 参加者の退出/帰還による自動ポーズ/再開。
-            # フック内部で例外を吸収するので移動本体には影響しない。
             lifecycle = getattr(self._manager_ref, "game_lifecycle", None)
             if lifecycle is not None:
                 lifecycle.on_entity_moved(entity_id, from_id, to_id)
 
             return True, None
         except Exception as e:
-            if manage_session_locally: db.rollback()
+            db.rollback()
             logging.error(f"Failed to move {entity_type} '{entity_id}' in DB: {e}", exc_info=True)
             return False, "データベースの更新中にエラーが発生しました。"
         finally:
-            if manage_session_locally: db.close()
+            db.close()
 
     def _is_user(self, entity_id: str) -> bool:
         return entity_id == self.user_entity_id

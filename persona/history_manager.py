@@ -2,7 +2,7 @@ import copy
 import json
 import logging
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, TYPE_CHECKING, Any
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING, Any
 import re
 from datetime import datetime, timezone
 
@@ -143,11 +143,24 @@ class HistoryManager:
             enriched["ingested_by"] = []
         return enriched
 
-    def _sync_to_memory(self, *, channel: str, building_id: Optional[str], message: Dict[str, str]) -> None:
+    def _sync_to_memory(
+        self, *, channel: str, building_id: Optional[str], message: Dict[str, str]
+    ) -> Tuple[str, Optional[str]]:
+        """SAIMemory への転写を試み、成否を返す (W5/M8)。
+
+        Returns:
+            ``(status, message_id)``。status は
+            ``"synced"`` (書けた) / ``"skipped"`` (書く先が無い — adapter 不在・
+            未 ready・system role・persona 以外の channel) / ``"failed"``
+            (adapter はいるのに書けなかった — 例外、または adapter が失敗を
+            None で返した)。従来この関数は成否を返さず失敗を握っていたため、
+            呼び出し元 (Building→個人記憶の転記 = 監査 M8) が保存失敗を検出
+            できなかった。既存呼び出し元は戻り値を無視してよい (挙動不変)。
+        """
         if self.memory_adapter is None or not self.memory_adapter.is_ready():
-            return
+            return ("skipped", None)
         if (message.get("role") or "").lower() == "system":
-            return
+            return ("skipped", None)
         try:
             metadata = message.setdefault("metadata", {})
             if isinstance(metadata, dict):
@@ -155,14 +168,22 @@ class HistoryManager:
                 if isinstance(tags, list) and "conversation" not in tags:
                     tags.append("conversation")
             if channel == "persona":
-                self.memory_adapter.append_persona_message(message)
+                mid = self.memory_adapter.append_persona_message(message)
+                if not mid:
+                    # adapter は例外を内部で握って None を返す (= 静かな保存失敗)。
+                    LOGGER.warning(
+                        "SAIMemory sync returned no message id for %s", self.persona_id
+                    )
+                    return ("failed", None)
                 LOGGER.debug("Synced persona message to SAIMemory for %s", self.persona_id)
-            else:
-                LOGGER.debug(
-                    "Skipped SAIMemory sync for channel=%s target=%s", channel, building_id or self.persona_id
-                )
+                return ("synced", str(mid))
+            LOGGER.debug(
+                "Skipped SAIMemory sync for channel=%s target=%s", channel, building_id or self.persona_id
+            )
+            return ("skipped", None)
         except Exception:
             LOGGER.exception("Failed to sync message to SAIMemory")
+            return ("failed", None)
 
     def add_message(
         self,
@@ -225,7 +246,8 @@ class HistoryManager:
         *,
         origin_track_id: Optional[str] = None,
         sync_to_memory: bool = True,
-    ) -> None:
+        memory_first: bool = False,
+    ) -> Tuple[str, Optional[str]]:
         """Adds a message only to the persona's main history.
 
         ``sync_to_memory`` (= 既定 True): 末尾で SAIMemory にも 1 件転写する
@@ -234,12 +256,34 @@ class HistoryManager:
         応答ではラウンドごとの記録と最終発言の単独レコードを別経路で既に
         SAIMemory に保存しているので、 ここで全文をさらに転写すると同 pulse
         内に内容完全一致の巨大重複レコードが生まれる。 それを防ぐ。
+
+        ``memory_first`` (= 既定 False、W5/M8): True で「SAIMemory へ先に転写し、
+        失敗 (status="failed") ならインメモリ履歴には積まない」。Building→個人
+        記憶の転記が使う — 従来順 (先に積む) だと保存失敗の再試行でインメモリ
+        履歴に同文が二重に積まれる。既定 False は従来順のまま (挙動不変)。
+
+        Returns:
+            ``(status, message_id)`` — :meth:`_sync_to_memory` の成否。
+            ``sync_to_memory=False`` のときは ``("skipped", None)``。
+            既存呼び出し元は戻り値を無視してよい。
         """
         prepared_msg = self._prepare_message(msg, origin_track_id=origin_track_id)
+        if memory_first and sync_to_memory:
+            status, mid = self._sync_to_memory(
+                channel="persona", building_id=None, message=prepared_msg
+            )
+            if status == "failed":
+                return (status, mid)
+            self.messages.append(prepared_msg)
+            self._ensure_size_limit(self.messages, self.persona_log_path)
+            return (status, mid)
         self.messages.append(prepared_msg)
         self._ensure_size_limit(self.messages, self.persona_log_path)
         if sync_to_memory:
-            self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
+            return self._sync_to_memory(
+                channel="persona", building_id=None, message=prepared_msg
+            )
+        return ("skipped", None)
 
     def update_building_message(
         self,

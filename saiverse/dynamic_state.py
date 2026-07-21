@@ -62,7 +62,7 @@ class DynamicStateManager:
             return False
 
     @staticmethod
-    def on_building_entered(persona: Any, building_id: str, manager: Any) -> None:
+    def on_building_entered(persona: Any, building_id: str, manager: Any) -> bool:
         """ペルソナが新しい Building に入室したときの hook。
 
         Phase 3-e: BUILDING_ENTERED イベントを head_pipeline に dispatch するだけ。
@@ -73,9 +73,17 @@ class DynamicStateManager:
         この時点では persona.current_building_id がまだ旧 Building を指しているため、
         maybe_inject_event_messages (persona.current_building_id を参照) は使えない。
         引数の building_id (= 移動先) を直接渡す。
+
+        Returns:
+            全段が成功したか (2026-07-21 Codex レビュー P2)。各段はそれぞれ
+            独立した best-effort (1 段の失敗が他段を止めない、従来どおり) だが、
+            outbox 配送経路 (move.post_dynamic_state ハンドラ) がこの戻り値を
+            見て「1 段でも失敗したら配送失敗として再試行する」ために集約する。
+            直接呼び出し元 (縮退経路・既存テスト) は戻り値を無視してよい。
         """
         if not getattr(persona, "persona_id", None):
-            return
+            return True
+        ok = True
         try:
             from sea.head_pipeline import inject_diff_notifications
             inject_diff_notifications(persona, manager, building_id)
@@ -84,6 +92,7 @@ class DynamicStateManager:
                 "[dynamic_state] pre-dispatch diff inject failed for %s -> %s",
                 getattr(persona, "persona_id", "?"), building_id, exc_info=True,
             )
+            ok = False
 
         # 既に同じ Building にいる他ペルソナにも「この入室」を検知させる。
         # 入室は客観時間のイベントなので、居合わせる全員の知覚バッファへ push して
@@ -108,6 +117,7 @@ class DynamicStateManager:
                 "[dynamic_state] notify existing occupants failed on entry -> %s",
                 building_id, exc_info=True,
             )
+            ok = False
 
         # 移動先の様子 (アイテム一覧・内装画像・居合わせる他ペルソナの外見) を、移動した
         # 本人の知覚バッファへ push する。head の visual_context は移動で refresh されない
@@ -138,8 +148,11 @@ class DynamicStateManager:
                 "[dynamic_state] surroundings push on entry failed -> %s",
                 building_id, exc_info=True,
             )
+            ok = False
 
-        _dispatch_head_event(persona, manager, building_id, "building_entered")
+        if not _dispatch_head_event(persona, manager, building_id, "building_entered"):
+            ok = False
+        return ok
 
     @staticmethod
     def on_metabolism(persona: Any, manager: Any, model_key: Optional[str] = None) -> None:
@@ -163,12 +176,19 @@ class DynamicStateManager:
 def _dispatch_head_event(
     persona: Any, manager: Any, building_id: str, event_value: str,
     model_key: Optional[str] = None,
-) -> None:
+) -> bool:
     """Cached Head Architecture pipeline に world イベントを通知する。
 
     pipeline が未初期化なら no-op (= startup 完了前のテスト経路では何もしない)。
     Phase 2-h / 3-e で挿入された統合点。
     詳細: docs/intent/cached_head_architecture.md
+
+    Returns:
+        dispatch できたか (2026-07-21 Codex レビュー P2)。head_pipeline 未導入 /
+        未初期化 / 未知イベントは「対象外」であって失敗ではないので True。
+        呼び出し元 (:meth:`DynamicStateManager.on_building_entered` /
+        :meth:`~DynamicStateManager.on_metabolism`) の大半は戻り値を無視して
+        よい — building_entered だけが outbox 再試行判定に使う。
     """
     try:
         from sea.head_pipeline import (
@@ -177,24 +197,26 @@ def _dispatch_head_event(
             get_default_pipeline,
         )
     except Exception:
-        return
+        return True
 
     pipeline = get_default_pipeline()
     if not pipeline.registry.all_sections():
         # default sections 未登録 (= 初期化前 / テスト経路) なら何もしない
-        return
+        return True
 
     try:
         event = EventType(event_value)
     except ValueError:
         LOGGER.debug("dynamic_state: unknown head event %s", event_value)
-        return
+        return True
 
     ctx = build_line_head_input(persona, manager, building_id, model_key=model_key)
     try:
         pipeline.dispatch_event(ctx, event)
+        return True
     except Exception:
         LOGGER.warning(
             "dynamic_state: head pipeline dispatch_event failed event=%s",
             event_value, exc_info=True,
         )
+        return False

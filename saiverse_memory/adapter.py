@@ -508,11 +508,22 @@ class SAIMemoryAdapter:
             "scope": "committed",
         }
         try:
-            self.append_persona_message(message)
+            mid = self.append_persona_message(message)
         except Exception:
             LOGGER.warning(
                 "[perception_buffer] flush append failed; keeping %d item(s) for retry",
                 len(items), exc_info=True,
+            )
+            return False
+        if not mid:
+            # _append_message は DB/embedding 例外を内部で握って None を返す
+            # (= 通常の保存失敗は例外として届かない)。message id が取れて
+            # いない = commit されていないので、pending を保持して次 Pulse で
+            # 再試行する (SEA 監査 S5: None を成功扱いすると知覚が不可逆に
+            # 消える)。
+            LOGGER.warning(
+                "[perception_buffer] flush append returned no message id; "
+                "keeping %d item(s) for retry", len(items),
             )
             return False
         with self._db_lock:
@@ -600,6 +611,40 @@ class SAIMemoryAdapter:
             except (TypeError, ValueError):
                 continue
             if isinstance(meta, dict) and meta.get(self.LEDGER_OUTBOX_META_KEY) == int(outbox_id):
+                return str(row[0])
+        return None
+
+    #: Building→個人記憶転記の provenance キー名 (metadata に刻む)。監査 M8。
+    BUILDING_MSG_REF_META_KEY = "building_msg_ref"
+
+    def find_message_by_building_ref(self, ref: str) -> Optional[str]:
+        """Building 転記の provenance キー (metadata.building_msg_ref) で既存
+        メッセージ id を引く (無ければ None)。
+
+        監査 M8: 「memory.db への append 成功 → Building 側 ingested marker
+        失敗」で宙に浮いた転記は、転記ループの停止規律 (失敗で即停止) により
+        常に高々 1 件で、必ず次ラウンドの最初の転記候補になる。その 1 件だけが
+        この照会を通るため、LIKE 走査はラウンドあたり最大 1 回に有界。
+        LIKE には値 (ref) そのものを使う — building message_id を含むため実質
+        その行しか当たらず、直列化の空白差にも依存しない (照合は JSON parse で
+        確定する)。
+        """
+        if not self._ready or not ref:
+            return None
+        with self._db_lock:
+            rows = self.conn.execute(
+                "SELECT id, metadata FROM messages WHERE metadata LIKE ?",
+                (f"%{ref}%",),
+            ).fetchall()
+        for row in rows:
+            try:
+                meta = json.loads(row[1]) if row[1] else None
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(meta, dict)
+                and meta.get(self.BUILDING_MSG_REF_META_KEY) == ref
+            ):
                 return str(row[0])
         return None
 

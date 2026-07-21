@@ -564,42 +564,19 @@ def _confirm_life_at_day_open(
             persona_id, plan_date,
         )
         return True
+    # W5: 節目の適用は day_plan.apply_life_boundary が実行台帳の下で決着させる
+    # — マーカーと「（活動開始）」通知 outbox が world DB の単一 commit になり、
+    # 旧「マーク失敗の無条件 True + 即時リトライ」暫定 (W3 第六陣裁定) は撤去。
     try:
-        applied = day_plan._handle_life_start(manager, persona_id, plan_date, 0, life)
+        return day_plan.apply_life_boundary(
+            manager, persona_id, plan_date, life, boundary="start",
+        )
     except Exception:
         LOGGER.warning(
             "[autonomy-wiring] life-start processing failed "
             "(persona=%s date=%s)", persona_id, plan_date, exc_info=True,
         )
         return False
-    if not applied:
-        LOGGER.warning(
-            "[autonomy-wiring] life-start boundary steps incomplete; not "
-            "marking started so a retry can recover (persona=%s date=%s)",
-            persona_id, plan_date,
-        )
-        return False
-    # マーク失敗の裁定は day_close (ended) と同じ: False で判断を打ち切ると
-    # 再試行ごとの境界重複を保証してしまうため、即時リトライ 1 回 + ERROR
-    # 表明で True (判断 claim の dedup が成功後の再突入から境界を守る)。
-    for attempt in (1, 2):
-        try:
-            day_plan.mark_life_started(manager, persona_id, plan_date, index=0)
-            break
-        except Exception:
-            if attempt == 1:
-                LOGGER.warning(
-                    "[autonomy-wiring] life-start marker write failed; retrying "
-                    "once (persona=%s date=%s)", persona_id, plan_date,
-                    exc_info=True,
-                )
-                continue
-            LOGGER.error(
-                "[autonomy-wiring] failed to persist life-start marker after "
-                "retry (persona=%s date=%s)", persona_id, plan_date,
-                exc_info=True,
-            )
-    return True
 
 
 def _apply_life_end_at_day_close(manager: Any, persona_id: str) -> bool:
@@ -610,15 +587,15 @@ def _apply_life_end_at_day_close(manager: Any, persona_id: str) -> bool:
     ``judgment_points.build_judgment_args`` の KIND_DAY_CLOSE 分岐と同じ規則
     (深夜跨ぎリズムでは 01:00 発火の day_close は前日が営業日)。
 
-    冪等ガード (2026-07-20 Codex W3 第二陣 P1): ``_handle_life_end`` は非冪等
-    (keep-alive cancel + TTL 同期 + 「（活動終了）」通知を呼ぶたびに再適用)
-    なので、day_open 側の「当日はじめての確定のときだけ節目処理」と対称に、
+    冪等ガード (2026-07-20 Codex W3 第二陣 P1 → W5 で恒久化): 節目処理は
+    非冪等 (keep-alive cancel + TTL 同期 + 「（活動終了）」通知) なので、
     lives[0] の永続マーカー ``ended`` で **(persona, 営業日) につき一度**を
-    保証する。順序は「確認 → 適用 → マーク」 — マーク先行だと適用されない
-    まま封印される。適用〜マーク間の crash では一回だけ再適用されうる
-    (at-least-once を許容 — 毎回再適用よりはるかに狭い窓)。ガードをこの関数に
-    置くのは、schedule 再試行・watchdog・手動発火のどの入口から来ても守られる
-    位置だから。
+    保証する。W5 以降、適用の実体は
+    :func:`~saiverse.day_plan.apply_life_boundary` — 実行台帳の claim の下で
+    マーカーと通知 outbox を world DB の単一 commit で確定し (旧「適用〜
+    マーク間 crash の at-least-once 窓」の解消)、配送は outbox_id 冪等。
+    fast-path ガードをこの関数に置くのは、schedule 再試行・watchdog・手動
+    発火のどの入口から来ても守られる位置だから。
 
     Returns:
         境界が決着したか (Codex W3 第五陣 P2)。True = 適用済み (今回適用 /
@@ -642,54 +619,21 @@ def _apply_life_end_at_day_close(manager: Any, persona_id: str) -> bool:
             persona_id, plan_date,
         )
         return True
+    # W5: 節目の適用は day_plan.apply_life_boundary が実行台帳の下で決着させる
+    # — マーカーと「（活動終了）」通知 outbox が world DB の単一 commit になり、
+    # W3 第六陣 P2 の恒久解 (at-least-once 窓とマーク失敗の無条件 True の撤去)。
+    # False は従来どおり呼び出し元 (day_close 分岐) が判断を打ち切って
+    # ``submitted=False`` で schedule backoff に乗せる。
     try:
-        applied = day_plan._handle_life_end(manager, persona_id, plan_date, 0, lives[0])
+        return day_plan.apply_life_boundary(
+            manager, persona_id, plan_date, lives[0], boundary="end",
+        )
     except Exception:
         LOGGER.warning(
             "[autonomy-wiring] life-end processing failed (persona=%s date=%s)",
             persona_id, plan_date, exc_info=True,
         )
         return False
-    if not applied:
-        # 部分失敗 (Codex W3 第四陣 P2): 下請け各段は例外を握るため、成否は
-        # 戻り値で受ける。ここでマークすると失敗した節目 (活動終了通知等) が
-        # 「適用済み」として封印され永久に回復されない — マークせず False を
-        # 返し、呼び出し元が判断を打ち切って schedule 側 backoff の再試行に
-        # 乗せる (非冪等な通知は最後段なので、再試行しても重複しない)。
-        LOGGER.warning(
-            "[autonomy-wiring] life-end boundary steps incomplete; not marking "
-            "ended so a retry can recover (persona=%s date=%s)",
-            persona_id, plan_date,
-        )
-        return False
-    # マーク書き込み (Codex W3 第六陣 P2 裁定): 失敗しても True を返す —
-    # False で判断を打ち切ると schedule 再試行のたびに境界が再適用され、
-    # 「（活動終了）」の重複追記を**保証**してしまう (記憶の無垢に反する)。
-    # True なら、後続の判断が成功した時点で判断 claim (persona:営業日) が
-    # terminal になり、同営業日の再突入は claim dedup (境界より前) で止まる
-    # ため、マーカー欠落は実害にならない。残る窓は「マーク失敗 + 判断も失敗」
-    # の重なりと force 発火のみ — 即時リトライ 1 回で窓を狭め、恒久解は
-    # 境界通知の outbox 配送化 (マーカーと world-DB 単一 commit + 冪等配送、
-    # W5 配送系の所掌) とする。
-    for attempt in (1, 2):
-        try:
-            day_plan.mark_life_ended(manager, persona_id, plan_date, index=0)
-            break
-        except Exception:
-            if attempt == 1:
-                LOGGER.warning(
-                    "[autonomy-wiring] life-end marker write failed; retrying "
-                    "once (persona=%s date=%s)", persona_id, plan_date,
-                    exc_info=True,
-                )
-                continue
-            LOGGER.error(
-                "[autonomy-wiring] failed to persist life-end marker after "
-                "retry (persona=%s date=%s) — 判断が後段で失敗して再試行に"
-                "乗った場合のみ境界副作用が再適用されうる (claim dedup が"
-                "成功時の再突入は防ぐ)", persona_id, plan_date, exc_info=True,
-            )
-    return True
 
 
 # ---------------------------------------------------------------------------

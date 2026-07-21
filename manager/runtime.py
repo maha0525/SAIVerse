@@ -220,14 +220,12 @@ class RuntimeService(
         persona_id: str,
         from_id: str,
         to_id: str,
-        db_session=None,
     ) -> Tuple[bool, Optional[str]]:
         result = self.occupancy_manager.move_entity(
             entity_id=persona_id,
             entity_type="ai",
             from_id=from_id,
             to_id=to_id,
-            db_session=db_session,
         )
         # Emit persona_move trigger on success
         if result[0] and TRIGGERS_AVAILABLE and hasattr(self.manager, "_emit_trigger"):

@@ -806,34 +806,107 @@ def test_life_end_notify_skipped_when_ttl_sync_fails(manager):
     assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
 
 
-def test_life_end_marker_write_retries_once_then_proceeds(manager):
-    """マーク書き込みの一時失敗は即時リトライ 1 回で回復し、境界は決着 (True)
-    のまま判断へ進む (Codex W3 第六陣 P2 の緩和)。"""
+def _attach_boundary_ledger(manager, handler=None):
+    """W5 境界テスト用: 台帳を付け、saimemory.append の配送ハンドラを登録する。"""
+    from saiverse import execution_ledger as XL
+
+    manager.execution_ledger = XL.ExecutionLedger(manager.SessionLocal)
+    delivered: List[Dict[str, Any]] = []
+    if handler is None:
+        def handler(item):
+            delivered.append(item["payload"]["message"])
+    manager.execution_ledger.register_outbox_handler("saimemory.append", handler)
+    return manager.execution_ledger, delivered
+
+
+def _boundary_end_rows(manager):
+    from database.models import ExecutionLedgerEntry
+
+    db = manager.SessionLocal()
+    try:
+        rows = (
+            db.query(ExecutionLedgerEntry)
+            .filter(ExecutionLedgerEntry.KIND == day_plan.LIFE_BOUNDARY_KIND_END)
+            .all()
+        )
+        return [(r.EXECUTION_ID, r.STATUS) for r in rows]
+    finally:
+        db.close()
+
+
+def test_life_boundary_marker_and_notice_single_commit(manager):
+    """W5 正常系: 台帳経路では直接 append (_notify_life_boundary) は使われず、
+    ended マーカー + applied + 「（活動終了）」通知 outbox が単一 commit で
+    確定し、即時配送される (実行は全配送済みで completed)。"""
+    ledger, delivered = _attach_boundary_ledger(manager)
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+    _end_test_lives(manager)
+
+    with patch.object(day_plan, "_notify_life_boundary") as legacy_notify:
+        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert legacy_notify.call_count == 0
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert len(delivered) == 1
+    msg = delivered[0]
+    assert "（活動終了）" in msg["content"]
+    assert "day_plan" in msg["metadata"]["tags"]
+    assert msg.get("timestamp")  # enqueue 時に時刻を凍結 (配送遅延でずれない)
+    assert [s for _eid, s in _boundary_end_rows(manager)] == ["completed"]
+
+
+def test_life_end_marker_tx_failure_fails_boundary_then_recovers(manager):
+    """W5: マーカー tx (マーカー + applied + outbox の単一 commit) の失敗は
+    境界 False + 台帳 failed — 旧「即時リトライ 1 回 + 無条件 True」(W3 第六陣
+    暫定) は撤去。通知はマーカーと同一 tx なので失敗時はどちらも残らず、
+    再試行 (claim の failed キー退避) で一度だけ適用される。"""
+    ledger, delivered = _attach_boundary_ledger(manager)
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     _end_test_lives(manager)
 
     with patch.object(
-        day_plan, "mark_life_ended", side_effect=[RuntimeError("boom"), None],
-    ) as mark:
-        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
-    assert mark.call_count == 2
-
-
-def test_life_end_marker_persistent_failure_still_settles_boundary(manager):
-    """マークが恒久失敗しても境界は決着 (True) — False で判断を打ち切ると
-    schedule 再試行のたびに境界通知の重複を保証してしまうため (裁定は
-    _apply_life_end_at_day_close のコメント参照。恒久解 = W5 の outbox 化)。
-    判断が成功すれば claim dedup (境界より前) が同営業日の再突入を防ぐので、
-    マーカー欠落は実害にならない。"""
-    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
-    _end_test_lives(manager)
-
-    with patch.object(
-        day_plan, "mark_life_ended", side_effect=RuntimeError("boom"),
-    ) as mark:
-        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
-    assert mark.call_count == 2  # 初回 + 即時リトライ
+        ledger, "mark_applied", side_effect=RuntimeError("tx boom"),
+    ):
+        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is False
     assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
+    assert delivered == []  # マーカーも通知も残らない (単一 tx)
+    statuses = sorted(status for _eid, status in _boundary_end_rows(manager))
+    assert statuses == ["failed"]
+
+    # 再試行: 回復 → マーカー + 通知が一度だけ
+    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert len(delivered) == 1
+    statuses = sorted(status for _eid, status in _boundary_end_rows(manager))
+    assert statuses == ["completed", "failed"]
+
+
+def test_life_end_notice_delivered_once_via_outbox(manager):
+    """W5: 配送ハンドラの一時失敗では通知は pending に残り (境界は True で
+    決着済み)、次の flush で一度だけ追記される — 「配送失敗 → 再 flush で
+    一度だけ」の固定。"""
+    fail_once = {"n": 1}
+    delivered: List[Dict[str, Any]] = []
+
+    def flaky(item):
+        if fail_once["n"] > 0:
+            fail_once["n"] -= 1
+            raise RuntimeError("delivery down")
+        delivered.append(item["payload"]["message"])
+
+    ledger, _ = _attach_boundary_ledger(manager, handler=flaky)
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+    _end_test_lives(manager)
+
+    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert delivered == []  # 一回目の即時配送は失敗 → pending 保持
+
+    assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+    assert len(delivered) == 1
+    assert "（活動終了）" in delivered[0]["content"]
+    # 追加の flush でも二重追記しない (delivered 済み)
+    ledger.flush_pending_for_persona(PERSONA_ID)
+    assert len(delivered) == 1
 
 
 def test_day_close_aborts_judgment_when_life_end_boundary_fails(manager, session_factory):
@@ -852,7 +925,9 @@ def test_day_close_aborts_judgment_when_life_end_boundary_fails(manager, session
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     _end_test_lives(manager)
 
-    with patch.object(day_plan, "_notify_life_boundary", return_value=False):
+    # W5: 台帳経路の境界失敗は冪等段 (TTL 同期等) で注入する — 通知は
+    # マーカーと同一 tx の outbox になり、直接 append は縮退経路のみ。
+    with patch.object(day_plan, "_sync_cache_ttl_for_life_end", return_value=False):
         result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
 
     assert result["submitted"] is False
@@ -1128,7 +1203,9 @@ def test_day_open_aborts_judgment_when_life_start_boundary_fails(manager, sessio
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
     _set_day_schedules(manager, session_factory)
 
-    with patch.object(day_plan, "_notify_life_boundary", return_value=False):
+    # W5: 台帳経路の境界失敗は冪等段 (TTL override) で注入する — 通知は
+    # マーカーと同一 tx の outbox になり、直接 append は縮退経路のみ。
+    with patch.object(day_plan, "_sync_cache_ttl_for_life_start", return_value=False):
         result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
 
     assert result["submitted"] is False

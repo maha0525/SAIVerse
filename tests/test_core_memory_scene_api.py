@@ -444,6 +444,47 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.adapter.flush_perception_buffer()
         self.assertEqual(self._correction_notices(), [])
 
+    # ------------------------------------------------------------------
+    # SEA 監査 S5 (W5): append の「None を返す静かな失敗」で pending を消さない
+    # ------------------------------------------------------------------
+
+    def _count_flush_messages(self, needle: str) -> int:
+        with self.adapter._db_lock:
+            row = self.adapter.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE ?",
+                (f"%{needle}%",),
+            ).fetchone()
+        return int(row[0])
+
+    def test_flush_keeps_pending_when_append_returns_none(self):
+        # _append_message は DB/embedding 例外を内部で握って None を返す —
+        # その経路で pending が全削除されると知覚が不可逆に消える (S5)。
+        self.adapter.push_perception("world_state", "S5検証: 世界が変わった")
+        with patch.object(self.adapter, "append_persona_message", return_value=None):
+            self.assertFalse(self.adapter.flush_perception_buffer())
+        pending = self._pending_perceptions()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(self._count_flush_messages("S5検証"), 0)
+        # 障害が解ければ次 Pulse の flush で一度だけ消費される。
+        self.assertTrue(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._pending_perceptions(), [])
+        self.assertEqual(self._count_flush_messages("S5検証"), 1)
+        # 再 flush しても二重にならない (pending は消費済み)。
+        self.assertFalse(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._count_flush_messages("S5検証"), 1)
+
+    def test_flush_keeps_pending_when_append_raises(self):
+        self.adapter.push_perception("world_state", "S5例外: 保存が例外で落ちた")
+        with patch.object(
+            self.adapter, "append_persona_message",
+            side_effect=RuntimeError("db down"),
+        ):
+            self.assertFalse(self.adapter.flush_perception_buffer())
+        self.assertEqual(len(self._pending_perceptions()), 1)
+        self.assertTrue(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._pending_perceptions(), [])
+        self.assertEqual(self._count_flush_messages("S5例外"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -180,6 +180,16 @@ class ExecutionLedger:
         # persona 単位 FIFO を並行 flush から守る (Phase 0 は単一ロックで十分。
         # persona 別ロックへの細粒度化は実測で必要になってから)。
         self._delivery_lock = threading.Lock()
+        # 再入検知 (W5 Codex レビュー P1): outbox handler の実行は
+        # _delivery_lock 保持下で行われる。handler が誘発した副作用 (例:
+        # move.post_dynamic_state → inject_diff_notifications →
+        # mark_applied(deliver=True)、move.post_game_lifecycle →
+        # on_entity_moved → 別 persona の move_entity) が同じスレッドから
+        # 再度 flush_pending_for_persona を呼ぶと、非再入ロックで永久待ちに
+        # なる。スレッドローカルな旗で検知し、ネストした呼び出しは配送を
+        # 試みずに即座に離脱する (次の即時配送呼び出し・Beat 関所・回復 tick
+        # が拾う — 「今回は配送されない」であって「失われる」ではない)。
+        self._flush_local = threading.local()
 
     # ------------------------------------------------------------------
     # 台帳: 登録と状態遷移
@@ -784,9 +794,32 @@ class ExecutionLedger:
         Returns:
             True — その persona の pending が残っていない (実行を開始してよい)。
             False — 1 件でも pending が残った (fail-closed: 実行を開始しない)。
+            ネストした呼び出し (下記) も False — 呼び出し元 (:meth:`mark_applied`
+            の即時配送、outbox handler 内の後続配送) はいずれも戻り値を見ない
+            void 呼び出しなので実害はない。戻り値を実際の判定に使う唯一の
+            呼び出し元 (:mod:`sea.beat_gate` の Beat 関所) は Beat 境界の
+            最外周からのみ呼ぶため、ネストされる側にはならない。
+
+        再入検知 (W5): 同一スレッドで既に flush 実行中 (= outbox handler の
+        中から呼ばれた) 場合は、ロックを取らずに False を返して離脱する。
+        handler が別の実行 (移動の誘発等) を通じて自分自身の配送を再帰的に
+        呼ぶ経路があり、非再入ロックのままだと永久待ちになるため。
         """
-        with self._delivery_lock:
-            return self._flush_queue(persona_id)
+        if getattr(self._flush_local, "active", False):
+            LOGGER.debug(
+                "[ledger] flush_pending_for_persona reentered on the same "
+                "thread (persona=%s) — an outbox handler triggered another "
+                "flush; skipping the nested call (deferred to the next "
+                "gate/recovery pass) to avoid deadlocking on _delivery_lock",
+                persona_id,
+            )
+            return False
+        self._flush_local.active = True
+        try:
+            with self._delivery_lock:
+                return self._flush_queue(persona_id)
+        finally:
+            self._flush_local.active = False
 
     def _flush_queue(self, persona_id: Optional[str]) -> bool:
         db = self._session_factory()

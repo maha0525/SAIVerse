@@ -96,6 +96,66 @@ class TestHistoryManagerPersonaLog(unittest.TestCase):
         self.history_manager.save_all()
         self.mock_path_write_text.assert_called()
 
+    # ------------------------------------------------------------------
+    # W5/M8: add_to_persona_only の成否契約と memory_first 順序
+    # ------------------------------------------------------------------
+
+    class _Adapter:
+        def __init__(self, mid="m1"):
+            self.mid = mid
+            self.calls = 0
+
+        def is_ready(self):
+            return True
+
+        def append_persona_message(self, message, **_kw):
+            self.calls += 1
+            return self.mid
+
+    def test_add_to_persona_only_returns_sync_status(self):
+        adapter = self._Adapter()
+        self.history_manager.set_memory_adapter(adapter)
+        status, mid = self.history_manager.add_to_persona_only(
+            {"role": "user", "content": "hi"}
+        )
+        self.assertEqual((status, mid), ("synced", "m1"))
+        # adapter 不在なら skipped (書く先が無いだけで失敗ではない)
+        self.history_manager.set_memory_adapter(None)
+        status, mid = self.history_manager.add_to_persona_only(
+            {"role": "user", "content": "hi2"}
+        )
+        self.assertEqual((status, mid), ("skipped", None))
+
+    def test_add_to_persona_only_legacy_order_appends_even_on_failure(self):
+        # 既定 (memory_first=False) は従来順: 保存失敗でもインメモリには積む
+        adapter = self._Adapter(mid=None)
+        self.history_manager.set_memory_adapter(adapter)
+        before = len(self.history_manager.messages)
+        status, _ = self.history_manager.add_to_persona_only(
+            {"role": "user", "content": "legacy"}
+        )
+        self.assertEqual(status, "failed")
+        self.assertEqual(len(self.history_manager.messages), before + 1)
+
+    def test_add_to_persona_only_memory_first_skips_in_memory_on_failure(self):
+        # memory_first=True (Building 転記経路): 保存失敗ならインメモリに積まない
+        # — 再試行でインメモリ履歴に同文が二重に積まれるのを防ぐ (M8)
+        adapter = self._Adapter(mid=None)
+        self.history_manager.set_memory_adapter(adapter)
+        before = len(self.history_manager.messages)
+        status, _ = self.history_manager.add_to_persona_only(
+            {"role": "user", "content": "strict"}, memory_first=True
+        )
+        self.assertEqual(status, "failed")
+        self.assertEqual(len(self.history_manager.messages), before)
+        # 成功したら積まれる
+        adapter.mid = "m9"
+        status, mid = self.history_manager.add_to_persona_only(
+            {"role": "user", "content": "strict-ok"}, memory_first=True
+        )
+        self.assertEqual((status, mid), ("synced", "m9"))
+        self.assertEqual(len(self.history_manager.messages), before + 1)
+
 
 class TestRecentEntrantEventsViaDB(unittest.TestCase):
     """get_recent_entrant_events / mark_entrant_event_recalled の DB 経由動作。"""

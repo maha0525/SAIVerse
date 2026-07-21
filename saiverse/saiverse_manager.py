@@ -1115,9 +1115,9 @@ class SAIVerseManager(
         return result
 
 
-    def _move_persona(self, persona_id: str, from_id: str, to_id: str, db_session=None) -> Tuple[bool, Optional[str]]:
+    def _move_persona(self, persona_id: str, from_id: str, to_id: str) -> Tuple[bool, Optional[str]]:
         """Moves a persona between buildings, utilizing OccupancyManager."""
-        return self.runtime._move_persona(persona_id, from_id, to_id, db_session=db_session)
+        return self.runtime._move_persona(persona_id, from_id, to_id)
 
 
     def shutdown(self):
