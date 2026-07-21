@@ -125,3 +125,7 @@ unity_client
 #discord gateway一時退避用
 discord_gateway/*.py
 discord_gateway/*/*.py
+
+# Codex CLI ローカル成果物 (マシンローカル設定・リモート添付)
+.codex/
+.codex-remote-attachments/
