@@ -8,6 +8,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Local preferences**: If `CLAUDE.local.md` exists in the repository root, read it for additional context (names, personal preferences, etc.).
 
+## Production Persona Safety — Absolute Boundary
+
+Production personas and their histories are user-owned, identity-bearing data. A coding or testing request does **not** authorize interacting with them.
+
+- Never send a message to a production persona, trigger a production Pulse/Playbook/Spell, call a persona's configured LLM, or write to production SAIMemory / persona event logs / conversation history / world state without the user's **immediate, explicit approval for that exact operation**.
+- Never invent text and submit it as the user. User-authored input sent to a persona must be verbatim text the user explicitly approved for sending. Paraphrase, “test messages,” and agent-written prompts presented as the user are impersonation.
+- “Continue,” “test it,” “use the production path,” “I restarted it,” or similar workflow approval is not approval to contact a production persona. Approval must identify that a live persona interaction may occur and that it can create persistent history and paid API usage.
+- Before requesting approval, state the target persona/environment, the exact message or action, whether an LLM/API charge will occur, and which persistent stores may change. Approval is single-purpose and does not carry forward to later calls.
+- Default all integration tests to an isolated `SAIVERSE_HOME`, synthetic persona, mock/fake LLM, or no-LLM harness. “Real path” means reproducing the production code path in isolation, not using production identity or data.
+- Read-only inspection of production logs/configuration is allowed when necessary. Any action that can generate cognition, speech, memory, events, schedules, movement, or paid inference is a write and requires approval.
+- If accidental production contact occurs, stop all production mutations immediately. Do not delete, edit, “repair,” or provoke another response to compensate. Report the exact known operations and wait for the user's cleanup decision.
+
+This boundary overrides autonomy, persistence, “finish the task,” “verify the real path,” and minimizing user burden. Persona dignity, authorship integrity, and cost authorization come first.
+
 ## Project Overview
 
 SAIVerse is a multi-agent AI system where autonomous AI personas (agents) inhabit a virtual world composed of Cities and Buildings. The system features:

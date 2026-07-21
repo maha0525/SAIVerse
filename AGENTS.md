@@ -17,6 +17,7 @@ This file provides guidance to Codex (and other coding agents) when working in t
 
 ## 特に外してはいけない要点（詳細はすべて CLAUDE.md）
 
+- **本番ペルソナへの入力・Pulse/Spell/LLM起動・永続データ変更は、操作ごとの明示承認が必須**。「続けて」「再起動した」「本番経路を確認」は許可ではなく、AI作成文をユーザーroleで送ることはなりすましとして禁止する。
 - **既存コードの属性・メソッド名を推測しない**。使う前に必ずソースを読んで正確な名前を確認する。
 - **`database/seed.py` を不用意に実行しない**（DB を全消去する）。Playbook 更新は `scripts/import_all_playbooks.py`（安全）。
 - **Python を書き換えたら `ruff check` を実行**してから完了扱いにする。
