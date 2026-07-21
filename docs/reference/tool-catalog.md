@@ -100,7 +100,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `track_parameter_set` | Set a continuous-value parameter on a Track (e.g. dirtiness, hunger, hours_since_check). The value is stored in actio… | `track_id*`: string, `parameter_name*`: string, `value*`: number | トラックパラメータ更新 |
 | `track_pause` | Pause a running track to 'pending' state. Use this when switching to another task without finishing the current one. … | `track_id*`: string | トラック後回し |
 | `update_working_memory` | Update a key in working memory. Working memory persists across pulses and server restarts. Use for short-term state l… | `key*`: string, `value*`: any | — |
-| `body_gesture` | 仮想身体でその場の短いジェスチャーを実行する。action_instructionにはARDYへ渡す動作指示を英語で書く。未生成なら生成開始後すぐ戻り、完了は後から知覚する。空ならpresetのfriendly_waveを即時再生して… | `intent`: string, `action_instruction`: string | 身体でジェスチャーする |
+| `body_gesture` | 仮想身体でその場の短いジェスチャーを実行する。action_instructionにはARDYへ渡す動作指示を英語で書く。未生成なら生成開始後すぐ戻り、完了は後から知覚する。空ならpresetのfriendly_waveを即時再生して… | `intent`: string, `action_instruction`: string, `expression_preset`: string, `expression_intensity`: number | 身体でジェスチャーする |
 | `body_move_to` | 仮想身体でユーザーの目の前まで移動する長時間behaviourを開始する。 開始後は待ち続けず、完了・中止・失敗が後続の知覚として届く。 相手へ近づくという目的を持つ行動に使い、短い表現にはbody_gestureを使う。 | `target*`: string, `stop_distance_m`: number, `action_instruction`: string | ユーザーの前まで移動する |
 | `body_see` | Godot内の自分のアバター位置から、一人称視界を一枚だけ撮像する。結果には実画像が添付されるので、Spell後の次の応答で画像を自分自身で見て判断すること。移動できたか、ユーザーが目の前にいるか、周囲に何があるかを確認したい時に使う… | `focus*`: string | 仮想身体の目で見る |
 | `body_set_motion_style` | 自分の仮想身体の普段の歩き方・走り方、または待機中の佇まいを英語で永続設定する。指示はARDYへ直接渡され、翻訳されない。指定した原文は自分専用のMotionStyleProfileへ保存され、次回以降の身体行動にも使われる。他のペル… | `locomotion_instruction`: string, `idle_instruction`: string | 自分の身体表現を設定する |

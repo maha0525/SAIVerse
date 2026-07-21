@@ -1,12 +1,18 @@
 # Intent: 身体性の表現出力レイヤー (Embodied Expression)
 
-**ステータス**: v0.2 ドラフト (2026-07-02) — v0.1 (2026-05-21) の preset 中心設計に「発声同期ツール実行」の一般化を追加。 `docs/intent/screen_avatar.md` と連携 (画面内アバターを vessel 種別として追加)。
+**ステータス**: v0.3 ドラフト (2026-07-17) — v0.2の発声同期ツール実行に、長時間Body behaviourとの責務境界を追記。 `docs/intent/screen_avatar.md` / `docs/intent/virtual_embodiment_godot.md` と連携。
 
 ## これは何か
 
 ペルソナの「表情変更 / サーボジェスチャー / LED 発光」等の**修飾的な身体表現**を、本文中インラインマーカーで**発話 (TTS) と同期して発火**する機構。stackchan に限らず Live2D / 3D モデル / 画面内アバター等に横展開できる vessel 非依存の抽象を持つ。
 
 **駆動の実体 = 発声同期ツール実行** (v0.2 一般化, 2026-07-02): マーカーは「emote 実行可能」として絞られたツール (= 修飾的な意味合いで、発声に同期して実行したい短時間の行動あるいは状態変化) を、TTS 再生のその文字位置で実行する。プリセット (後述 A) はその上に乗る「複数 vessel action を束ねた高レベルエモート表現」であり、preset 適用も emote 実行の一形態。対象ツールの絞りは **spell が spell_tools で実行可能ツールを絞るのと同型**に、emote 実行可能ツールを登録で限定する (emote ≒ 発声同期版 spell)。
+
+### Body behaviourとの境界（v0.3）
+
+`/emote`は「発話のこの位置で短い身体表現を添える」修飾層であり、目的地・継続状態・中断・非同期完了を持つ行動は扱わない。`ユーザーの前まで行く`、`嬉しそうに駆け寄る`のような行動はBody SpellからEmbodiment Gatewayへ送り、`command_id`付きbehaviourとして `accepted → generating? → ready? → playing → completed/failed/cancelled` を追跡する。
+
+両者は同じvessel executorとモーション資産を再利用できるが、behaviourはemoteの上位互換ではない。behaviourには目標と中断可能性があり、emoteには発話時刻への同期という固有の意味がある。詳細契約とGodot/ARDY実装は [`virtual_embodiment_godot.md`](virtual_embodiment_godot.md) を正典とする。
 
 ## 動機
 
