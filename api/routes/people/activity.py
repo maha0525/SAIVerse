@@ -225,7 +225,7 @@ _PULSE_TOOLS_SQL_TEMPLATE = """
     SELECT pulse_id, tool_calls, important, playbook_name
     FROM pulse_logs
     WHERE pulse_id IN ({placeholders})
-    ORDER BY created_at ASC
+    ORDER BY created_at ASC, rowid ASC
 """
 
 
@@ -391,7 +391,7 @@ def _load_meta_judgment_details(
                 WHERE thread_id LIKE ?
                   AND pulse_id IN ({placeholders})
                   AND line_role = 'meta_judgment'
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, rowid DESC
             """
             with adapter._db_lock:
                 cur = adapter.conn.execute(sql, [thread_pattern] + pulse_ids)

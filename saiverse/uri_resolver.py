@@ -343,7 +343,7 @@ class UriResolver:
                 cursor = adapter.conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE thread_id = ? AND content LIKE ? "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     (thread_id, f"%{query_text}%"),
                 )
                 row = cursor.fetchone()
@@ -426,7 +426,7 @@ class UriResolver:
                 cursor = adapter.conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE created_at >= ? AND created_at <= ? "
-                    "ORDER BY created_at ASC LIMIT 100",
+                    "ORDER BY created_at ASC, rowid ASC LIMIT 100",
                     (start_ts, end_ts),
                 )
                 from sai_memory.memory.storage import _row_to_message

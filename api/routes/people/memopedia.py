@@ -759,7 +759,7 @@ def _run_build_memopedia_from_logs(
         if start_after > 0:
             query += " AND created_at > ?"
             params.append(start_after)
-        query += " ORDER BY created_at ASC"
+        query += " ORDER BY created_at ASC, rowid ASC"
         if limit > 0:
             query += " LIMIT ?"
             params.append(limit)

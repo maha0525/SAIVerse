@@ -11,13 +11,13 @@
 
 ---
 
-## 現在地 (2026-07-21 更新 — W7 実装済み)
+## 現在地 (2026-07-22 更新 — W8 の S7 実装済み)
 
 ```
 一次監査     ████████ 完了 (全8サブシステム、2026-07-16)
 柱の裁定     ████████ 完了 (8柱すべて方針確定、2026-07-16)
 基盤工事     ████████ 完了 (実行台帳 Phase 0 + 統合工事 §6 ※§6-6bのみ分離)
-実装 wave    ███████░ W1〜W7 実装済み (実機検証待ち) / W8〜W14 未着手
+実装 wave    ███████▶ W1〜W7 実装済み (実機検証待ち) / W8 進行中 (S7 済・残A3) / W9〜W14 未着手
 実機検証     █░░░░░░░ ライフ一日検証を実施中 (まはー、2026-07-17〜)
 ```
 
@@ -28,7 +28,7 @@
 - **SEA 監査 = 非保留 finding 全消し込み** (W6 で S6 消化。残 S7/S9 は柱6/柱8 スコープ)
 - **柱5 (位置・占有) = W7 で分離監査の非凍結 finding 全消し込み** (2026-07-21)
 
-**次にやる wave**: W8 (柱6 — 時刻)。**W1〜W7 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6。W7: 2026-07-21 — 柱5 位置・占有の canonical 化)。
+**次にやる wave**: W8 残り (A3 の裁定・着手) or W9 (柱7 — 完全手動モード)。W8 の S7 は 2026-07-22 実装済み (実機検証待ち)。**W1〜W7 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6。W7: 2026-07-21 — 柱5 位置・占有の canonical 化)。
 
 **一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
@@ -90,10 +90,12 @@
 - **実装済み (2026-07-21)**: 分離監査の非凍結 finding 全消し込み — **P1-2** (active occupancy の部分一意 index `uq_occupancy_active_ai` + 起動時重複修復 + move_entity の書き込み時仲裁 = close の条件付き UPDATE / 新行 guarded INSERT / user 位置の条件付き UPDATE) / **P1-1残・W5委譲** (persona 属性 + cursor 儀式 + user state の更新を `move_entity._sync_canonical_location` へ集約、呼び出し側 6 箇所の重複更新撤去、公開は配送前) / **P1-3** (`/chat/send` 現在地専用化 409 + runtime 多層防御 + **発言永続化 tx 内の現在地検証** `insert_building_message_with_location_guard` + utter 意味論の正直化 + 拒否時の添付 Item cleanup と撤去補記) / **P1-6** (Region parent 変更の入口同一 tx 同期 + 入口の直接再所属拒否 + 入口所有一意 index) / **P1-7** (Building CITYID の immutable 化 + UI セレクタ disabled) / **P2-1** (event_key を台帳 execution_id 採番に) / **P2-2** (startup checker 分類化 = 重複修復 [参照整合優先]・無効行 close・派遣中/capacity 警告・pre-start 修復の監査引き継ぎ)。**Codex レビュー 9 巡 18 件消し込み (受諾 18 / 却下 0、明細は走行メモ)**。回帰 = test_location_occupancy_w7.py + test_chat_boundary_w7.py 計 47 件 (新設) + test_region_admin.py に 9 件追加 + スタブ 6 箇所の新契約化。ruff / tsc clean。**残 = まはー実機検証** (通常移動・utter の無変化 / 二重 presence の不在 / 起動時修復ログ)
 - **完了条件**: 同監査の非凍結 finding 全消し込み ✔
 
-### W8 ☐ 柱6 — 時刻
+### W8 ▶ 柱6 — 時刻 — S7 実装済み・実機検証待ち / 残 = A3 (2026-07-22)
 
 - **スコープ**: S7 (秒精度 timestamp による anchor 境界・履歴順の破れ → thread 内単調 sequence を正典順序キーに) + 監査横断の時刻系 finding の棚卸し
-- **完了条件**: 同一秒衝突の回帰固定 (anchor 境界 / pagination)
+- **S7 実装済み (2026-07-22)**: 正典順序キー = `(created_at, rowid)` (created_at が意味時刻でインポート履歴を尊重、rowid は同一秒内の挿入順 tie-breaker、NULL created_at は先頭側)。anchor 境界 (`get_messages_from_id`) をキーセット化、履歴・pagination・Chronicle・周辺窓・範囲クリップ・表示系 API の全 messages クエリを同一 total order に統一。native export/import は `seq` (元 rowid) を運び、往復でスレッド横断の同秒交互順序まで保存 (空きがあれば明示 rowid で完全復元・衝突時は追記フォールバック)。Codex レビュー 4 巡 (受諾 3 / スコープ外 1)。回帰 = test_time_order_canonical_w8.py 18 件 (新設) + test_native_import_separation.py に 4 件追加、本体スイート全緑。走行メモ = [`2026-07-22_w8_time_order_handoff.md`](../handoff/2026-07-22_w8_time_order_handoff.md)
+- **棚卸し結果 (2026-07-22)**: 時刻系 finding のうち S7=本 wave 消し込み / occupancy event_key 同秒衝突=W7 済 / backup 名ミリ秒衝突=第二陣済 (backup.py の uuid suffix 裏取り) / 深夜帯コマ・day_close 半開区間=消し込み済み。**残 = A3 (host/City 時差、自律行動監査 P1)** — 未修正を裏取り (autonomy_wiring に timezone 処理なし)。host=City 同一 TZ の現行構成では潜伏。共通 clock helper + persona-local 比較 + EventScheduler 直前変換の設計から必要 — **A3 の着手時期 (W8 継続 or 分離 wave) はまはー裁定待ち**
+- **完了条件**: 同一秒衝突の回帰固定 (anchor 境界 / pagination) ✔ + A3 の裁定
 
 ### W9 ☐ 柱7 — 完全手動モード
 

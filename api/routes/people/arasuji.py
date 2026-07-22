@@ -78,7 +78,7 @@ def _get_message_number_map(conn: sqlite3.Connection) -> dict:
     This ensures consistent chronological ordering where message #1 is always the oldest.
     """
     cur = conn.execute("""
-        SELECT id FROM messages ORDER BY created_at ASC
+        SELECT id FROM messages ORDER BY created_at ASC, rowid ASC
     """)
 
     msg_num_map = {}

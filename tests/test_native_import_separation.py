@@ -281,17 +281,17 @@ def test_atomicity_prevalidation_rejects_bad_metadata(memory_root):
 def test_atomicity_midwrite_failure_rolls_back(memory_root, monkeypatch):
     db_path = _seed_old_bob(memory_root)
 
-    real_write = native_export._write_thread_in_txn
+    real_insert = native_export._insert_message_in_txn
     calls = {"n": 0}
 
-    def failing_write(conn, thread_data, *, replace):
+    def failing_insert(conn, thread_id, thread_resource_id, msg, **kwargs):
         calls["n"] += 1
         if calls["n"] >= 2:
-            raise RuntimeError("boom on second thread")
-        return real_write(conn, thread_data, replace=replace)
+            raise RuntimeError("boom on second message")
+        return real_insert(conn, thread_id, thread_resource_id, msg, **kwargs)
 
     monkeypatch.setattr(
-        native_export, "_write_thread_in_txn", failing_write
+        native_export, "_insert_message_in_txn", failing_insert
     )
 
     new_archive = make_archive("bob", [
@@ -328,6 +328,140 @@ def test_success_replaces_all_threads_atomically(memory_root):
     assert [(m[0], m[1]) for m in msgs] == [("new2", "NEW other")]
     (count,) = query(db_path, "SELECT COUNT(*) FROM messages")[0]
     assert count == 2  # no OLD rows survive
+
+
+# ---------------------------------------------------------------------------
+# 6b. W8 (S7): export/import 往復でスレッド横断の同一秒順序を保存する
+# ---------------------------------------------------------------------------
+
+def test_roundtrip_preserves_cross_thread_same_second_order(memory_root):
+    """同一秒にスレッド交互 (A1, B1, A2, B2) で記録された履歴が、export →
+    import 往復後もグローバル正典順 (created_at, rowid) を保つ。
+
+    Codex W8 レビュー P2: export/import は thread 単位のため、thread 逐次
+    INSERT では復元後に A1, A2, B1, B2 へ並び替わり、`get_messages_for_chronicle`
+    等のグローバルクエリの正典順が復元前後で一致しなかった。export が元 rowid
+    を ``seq`` として運び、import が全 thread 横断の (created_at, seq) 順で
+    INSERT することで固定する。
+    """
+    from sai_memory.memory.storage import add_message
+    from sai_memory.memory.storage import init_db as init_mem_db
+
+    src_db = memory_root / "carol" / "memory.db"
+    conn = init_mem_db(str(src_db))
+    interleaved = [
+        ("carol:main", "A1"), ("carol:other", "B1"),
+        ("carol:main", "A2"), ("carol:other", "B2"),
+    ]
+    for thread_id, content in interleaved:
+        add_message(
+            conn, thread_id, "assistant", content,
+            resource_id="carol", created_at=1700000000,
+        )
+    conn.close()
+
+    archive = native_export.export_threads_native("carol")
+    assert all(
+        isinstance(m.get("seq"), int)
+        for t in archive["threads"] for m in t["messages"]
+    )
+
+    result = import_threads_native(
+        "dave", archive, skip_embed=True, transplant=True
+    )
+    assert result["messages_imported"] == 4
+
+    rows = query(
+        memory_root / "dave" / "memory.db",
+        "SELECT content FROM messages ORDER BY created_at ASC, rowid ASC",
+    )
+    assert [r[0] for r in rows] == ["A1", "B1", "A2", "B2"]
+
+
+def test_partial_reimport_preserves_order_with_retained_threads(memory_root):
+    """一部 thread だけの export → 同一 DB への replace 再 import でも、保持
+    thread の既存行との同秒相対順が変わらない (Codex W8 三巡目 P2)。
+
+    削除直後は再 import 行の元 rowid が空いているので、明示 rowid 挿入で
+    完全復元される。追記挿入だと A1, B1, A2 が B1, A1, A2 に化けていた。
+    """
+    from sai_memory.memory.storage import add_message
+    from sai_memory.memory.storage import init_db as init_mem_db
+
+    src_db = memory_root / "carol" / "memory.db"
+    conn = init_mem_db(str(src_db))
+    interleaved = [
+        ("carol:main", "A1"), ("carol:other", "B1"), ("carol:main", "A2"),
+    ]
+    for thread_id, content in interleaved:
+        add_message(
+            conn, thread_id, "assistant", content,
+            resource_id="carol", created_at=1700000000,
+        )
+    conn.close()
+
+    archive = native_export.export_threads_native("carol", thread_suffixes=["main"])
+    assert [t["thread_id"] for t in archive["threads"]] == ["carol:main"]
+
+    result = import_threads_native("carol", archive, skip_embed=True)
+    assert result["messages_imported"] == 2
+
+    rows = query(
+        src_db,
+        "SELECT content FROM messages ORDER BY created_at ASC, rowid ASC",
+    )
+    assert [r[0] for r in rows] == ["A1", "B1", "A2"]
+
+
+def test_import_seq_collision_falls_back_without_touching_existing_rows(memory_root):
+    """seq の元 rowid が移植先で埋まっている場合は追記挿入に全件フォールバック
+    し、既存の無関係な行を明示 rowid の INSERT OR REPLACE で潰さない。"""
+    from sai_memory.memory.storage import add_message
+    from sai_memory.memory.storage import init_db as init_mem_db
+
+    dst_db = memory_root / "frank" / "memory.db"
+    conn = init_mem_db(str(dst_db))
+    add_message(
+        conn, "frank:main", "assistant", "EXISTING",
+        resource_id="frank", created_at=1600000000,
+    )
+    conn.close()
+
+    # seq=1 は EXISTING の rowid と衝突する
+    archive = make_archive("frank", [
+        make_thread("frank", "other", [
+            {**make_message("x1", "X1", "frank"), "seq": 1},
+            {**make_message("x2", "X2", "frank", created_at=1700000001), "seq": 2},
+        ]),
+    ])
+    result = import_threads_native("frank", archive, skip_embed=True)
+    assert result["messages_imported"] == 2
+
+    rows = query(
+        dst_db,
+        "SELECT content FROM messages ORDER BY created_at ASC, rowid ASC",
+    )
+    assert [r[0] for r in rows] == ["EXISTING", "X1", "X2"]
+
+
+def test_import_without_seq_falls_back_to_archive_order(memory_root):
+    """seq を持たない旧形式 archive は archive 内の出現順 (thread 逐次) で
+    INSERT される — 旧 import と同じ並びで後退しない。"""
+    archive = make_archive("erin", [
+        make_thread("erin", "main", [
+            make_message("a1", "A1", "erin"),
+            make_message("a2", "A2", "erin"),
+        ]),
+        make_thread("erin", "other", [make_message("b1", "B1", "erin")]),
+    ])
+    result = import_threads_native("erin", archive, skip_embed=True)
+    assert result["messages_imported"] == 3
+
+    rows = query(
+        memory_root / "erin" / "memory.db",
+        "SELECT content FROM messages ORDER BY created_at ASC, rowid ASC",
+    )
+    assert [r[0] for r in rows] == ["A1", "A2", "B1"]
 
 
 # ---------------------------------------------------------------------------

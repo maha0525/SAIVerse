@@ -177,7 +177,7 @@ def _migrate_legacy_arasuji_table(conn: sqlite3.Connection) -> None:
 
     from sai_memory.memopedia.storage import create_page
 
-    cur = conn.execute("SELECT * FROM arasuji_entries ORDER BY created_at ASC")
+    cur = conn.execute("SELECT * FROM arasuji_entries ORDER BY created_at ASC, rowid ASC")
     col_names = [d[0] for d in cur.description]
     rows = cur.fetchall()
 

@@ -413,15 +413,63 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
 # v0.32 (2026-05-09): origin_track_id を末尾に追加。
 _LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id, origin_track_id, thought_signature, paired_action_text, spell_origin_id, spell_seq, origin_episode"
 
+# 正典順序キー (W8 / SEA 監査 S7): messages の時系列は ``(created_at, rowid)``
+# の辞書式順で決める。``created_at`` は秒精度の意味時刻 (インポート・移植で
+# 過去時刻の行が後から入っても歴史位置に並ぶ)、``rowid`` は同一秒内の挿入順
+# tie-breaker。この total order を anchor 境界・履歴・pagination・Chronicle
+# 編纂の全クエリで共有する — created_at 単独の ORDER BY は同一秒群の順序が
+# query plan 依存になり、ページ境界の重複/欠落や evicted prefix の再混入を
+# 起こす。境界 (anchor / 範囲端) は行の (created_at, rowid) キーセットで切る。
+#
+# NULL created_at (native import は欠落を許す) は「全ての実時刻より前」
+# (= SQLite の ORDER BY ASC の NULL 並びと同じ) と定義し、NULL 群の中は
+# rowid 順。境界句は下のヘルパーが NULL anchor も含めて一貫に扱う。
+
+
+def _canonical_after_clause(
+    anchor_ts: Optional[int], anchor_rowid: int, *, inclusive: bool
+) -> Tuple[str, Tuple[Any, ...]]:
+    """正典順で anchor より後 (inclusive なら anchor 含む) の WHERE 句を返す。"""
+    cmp = ">=" if inclusive else ">"
+    if anchor_ts is None:
+        # NULL anchor: 実時刻を持つ行は全て後、NULL 群の中は rowid 順。
+        return f"(created_at IS NOT NULL OR rowid {cmp} ?)", (anchor_rowid,)
+    return (
+        f"(created_at > ? OR (created_at = ? AND rowid {cmp} ?))",
+        (anchor_ts, anchor_ts, anchor_rowid),
+    )
+
+
+def _canonical_before_clause(
+    anchor_ts: Optional[int], anchor_rowid: int, *, inclusive: bool
+) -> Tuple[str, Tuple[Any, ...]]:
+    """正典順で anchor より前 (inclusive なら anchor 含む) の WHERE 句を返す。"""
+    cmp = "<=" if inclusive else "<"
+    if anchor_ts is None:
+        return f"(created_at IS NULL AND rowid {cmp} ?)", (anchor_rowid,)
+    return (
+        f"(created_at IS NULL OR created_at < ? OR (created_at = ? AND rowid {cmp} ?))",
+        (anchor_ts, anchor_ts, anchor_rowid),
+    )
+
+
+def _canonical_key_of_row(ts: Any, rowid: Any) -> Tuple[Tuple[int, int], int]:
+    """(created_at, rowid) を Python 側で比較可能な正典キーに写す (NULL = 先頭側)。"""
+    if ts is None:
+        return ((0, 0), int(rowid))
+    return ((1, int(ts)), int(rowid))
+
 
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
+    # created_at NULL (native import は欠落を許す) は 0 に写す — 正典順の
+    # 「全ての実時刻より前」の位置と整合し、datetime 変換する消費側も落ちない。
     return Message(
         id=row[0],
         thread_id=row[1],
         role=row[2],
         content=row[3],
         resource_id=row[4],
-        created_at=int(row[5]),
+        created_at=int(row[5]) if row[5] is not None else 0,
         metadata=_decode_metadata(row[6]) if len(row) > 6 else None,
         line_role=row[7] if len(row) > 7 else None,
         line_id=row[8] if len(row) > 8 else None,
@@ -550,7 +598,7 @@ def get_messages_without_embeddings(conn: sqlite3.Connection) -> List["Message"]
         FROM messages
         WHERE TRIM(COALESCE(content, '')) != ''
           AND id NOT IN (SELECT DISTINCT message_id FROM message_embeddings)
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
         """
     )
     return [_row_to_message(row) for row in cur.fetchall()]
@@ -577,7 +625,7 @@ def get_messages_last(conn: sqlite3.Connection, thread_id: str, limit: int) -> L
         "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
         "FROM messages WHERE thread_id=? "
         "AND (scope IS NULL OR scope != 'discardable') "
-        "ORDER BY created_at DESC LIMIT ?",
+        "ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (thread_id, limit),
     )
     rows = cur.fetchall()
@@ -591,7 +639,7 @@ def get_messages_paginated(conn: sqlite3.Connection, thread_id: str, page: int, 
         f"{_LINE_METADATA_COLUMNS} "
         "FROM messages WHERE thread_id=? "
         "AND (scope IS NULL OR scope != 'discardable') "
-        "ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        "ORDER BY created_at ASC, rowid ASC LIMIT ? OFFSET ?",
         (thread_id, page_size, offset),
     )
     return [_row_to_message(row) for row in cur.fetchall()]
@@ -602,24 +650,40 @@ def get_messages_from_id(
 ) -> List[Message]:
     """Fetch messages from (including) the given message_id onwards.
 
-    Uses a subquery to find the anchor message's created_at timestamp,
-    then returns all messages in the thread at or after that time.
+    W8 / SEA 監査 S7: 境界は正典順序キー ``(created_at, rowid)`` で切る。
+    旧実装は anchor の ``created_at`` 「以上」だけで切っていたため、同一秒に
+    anchor より前へ書かれた evicted prefix が窓へ再混入していた (高速な
+    tool round / perception flush では同一秒衝突は通常運転で起きる)。
+    anchor 行自身は境界に含む (``>=``)。anchor 行が存在しない場合は空を返す
+    (旧実装のサブクエリ NULL と同じ挙動)。anchor が別 thread の行でも、その
+    ``(created_at, rowid)`` を境界として要求 thread の行を返す (旧実装の
+    timestamp 境界と同じ耐性)。created_at 欠落 (NULL) の anchor は正典順の
+    先頭側 (NULL 群) の位置として扱う。
     """
+    anchor = conn.execute(
+        "SELECT created_at, rowid FROM messages WHERE id = ?",
+        (from_message_id,),
+    ).fetchone()
+    if not anchor:
+        return []
+    anchor_ts = int(anchor[0]) if anchor[0] is not None else None
+    after_sql, after_params = _canonical_after_clause(
+        anchor_ts, int(anchor[1]), inclusive=True
+    )
     cur = conn.execute(
         f"SELECT id, thread_id, role, content, resource_id, created_at, metadata, "
         f"{_LINE_METADATA_COLUMNS} "
         "FROM messages "
-        "WHERE thread_id = ? AND created_at >= ("
-        "  SELECT created_at FROM messages WHERE id = ?"
-        ") ORDER BY created_at ASC",
-        (thread_id, from_message_id),
+        f"WHERE thread_id = ? AND {after_sql} "
+        "ORDER BY created_at ASC, rowid ASC",
+        (thread_id, *after_params),
     )
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
 def get_messages_by_resource(conn: sqlite3.Connection, resource_id: str) -> List[Message]:
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE resource_id=? ORDER BY created_at ASC",
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE resource_id=? ORDER BY created_at ASC, rowid ASC",
         (resource_id,),
     )
     return [_row_to_message(row) for row in cur.fetchall()]
@@ -648,7 +712,7 @@ def get_all_messages_for_search(
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
         {tags_clause}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, rowid DESC
     """
     cur = conn.execute(query, params)
     return [_row_to_message(row) for row in cur.fetchall()]
@@ -688,13 +752,13 @@ def get_embeddings_for_scope(
     """
 
     if thread_id:
-        query = base_query + f"WHERE m.thread_id=?{tags_clause} ORDER BY m.created_at ASC, e.chunk_index ASC"
+        query = base_query + f"WHERE m.thread_id=?{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
         cur = conn.execute(query, (thread_id, *params))
     elif resource_id:
-        query = base_query + f"WHERE m.resource_id=?{tags_clause} ORDER BY m.created_at ASC, e.chunk_index ASC"
+        query = base_query + f"WHERE m.resource_id=?{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
         cur = conn.execute(query, (resource_id, *params))
     else:
-        query = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, e.chunk_index ASC"
+        query = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
         cur = conn.execute(query, tuple(params))
 
     rows = cur.fetchall()
@@ -717,31 +781,49 @@ def get_embeddings_for_scope(
 def get_messages_around(
     conn: sqlite3.Connection, thread_id: str, message_id: str, before: int, after: int
 ) -> List[Message]:
+    """anchor メッセージの前後 ``before``/``after`` 件を正典順で返す (anchor 自身は含まない)。
+
+    W8 / SEA 監査 S7: 窓の前後判定も正典順序キー ``(created_at, rowid)`` で
+    切る。旧実装は rowid 単独だったため、過去時刻で後から挿入された行
+    (インポート・移植) が「後」側に化けて履歴表示と食い違った。created_at
+    欠落 (NULL) の anchor も正典順の先頭側 (NULL 群) の位置として扱う。
+    """
     if before <= 0 and after <= 0:
         return []
 
     cur = conn.execute(
-        "SELECT rowid FROM messages WHERE id=? AND thread_id=?",
+        "SELECT created_at, rowid FROM messages WHERE id=? AND thread_id=?",
         (message_id, thread_id),
     )
     row = cur.fetchone()
     if not row:
         return []
-    anchor_rowid = int(row[0])
+    anchor_ts = int(row[0]) if row[0] is not None else None
+    anchor_rowid = int(row[1])
 
     before_rows: List[Message] = []
     if before > 0:
+        before_sql, before_params = _canonical_before_clause(
+            anchor_ts, anchor_rowid, inclusive=False
+        )
         cur = conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE thread_id=? AND rowid < ? ORDER BY rowid DESC LIMIT ?",
-            (thread_id, anchor_rowid, before),
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            f"FROM messages WHERE thread_id=? AND {before_sql} "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (thread_id, *before_params, before),
         )
         before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
 
     after_rows: List[Message] = []
     if after > 0:
+        after_sql, after_params = _canonical_after_clause(
+            anchor_ts, anchor_rowid, inclusive=False
+        )
         cur = conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE thread_id=? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
-            (thread_id, anchor_rowid, after),
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            f"FROM messages WHERE thread_id=? AND {after_sql} "
+            "ORDER BY created_at ASC, rowid ASC LIMIT ?",
+            (thread_id, *after_params, after),
         )
         after_rows = [_row_to_message(r) for r in cur.fetchall()]
 
@@ -766,18 +848,20 @@ def get_messages_around_timestamp(
     half = count // 2
 
     # --- messages AT or BEFORE the timestamp (descending) ---
+    # 境界は秒精度の timestamp 引数そのもの (行キーセットではない) なので
+    # <= / > の分割は従来どおり。同一秒群内の並びだけ正典 tie-breaker で固定。
     if thread_id:
         cur = conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
             "FROM messages WHERE thread_id=? AND created_at <= ? "
-            "ORDER BY created_at DESC LIMIT ?",
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (thread_id, timestamp, half + 1),
         )
     else:
         cur = conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
             "FROM messages WHERE created_at <= ? "
-            "ORDER BY created_at DESC LIMIT ?",
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (timestamp, half + 1),
         )
     before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
@@ -787,14 +871,14 @@ def get_messages_around_timestamp(
         cur = conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
             "FROM messages WHERE thread_id=? AND created_at > ? "
-            "ORDER BY created_at ASC LIMIT ?",
+            "ORDER BY created_at ASC, rowid ASC LIMIT ?",
             (thread_id, timestamp, count - len(before_rows)),
         )
     else:
         cur = conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
             "FROM messages WHERE created_at > ? "
-            "ORDER BY created_at ASC LIMIT ?",
+            "ORDER BY created_at ASC, rowid ASC LIMIT ?",
             (timestamp, count - len(before_rows)),
         )
     after_rows = [_row_to_message(r) for r in cur.fetchall()]
@@ -812,14 +896,14 @@ def get_messages_around_timestamp(
                 cur = conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE thread_id=? AND created_at > ? "
-                    "ORDER BY created_at ASC LIMIT ?",
+                    "ORDER BY created_at ASC, rowid ASC LIMIT ?",
                     (thread_id, last_ts, need),
                 )
             else:
                 cur = conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE created_at > ? "
-                    "ORDER BY created_at ASC LIMIT ?",
+                    "ORDER BY created_at ASC, rowid ASC LIMIT ?",
                     (last_ts, need),
                 )
             combined.extend(_row_to_message(r) for r in cur.fetchall())
@@ -831,14 +915,14 @@ def get_messages_around_timestamp(
                 cur = conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE thread_id=? AND created_at < ? "
-                    "ORDER BY created_at DESC LIMIT ?",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (thread_id, first_ts, need),
                 )
             else:
                 cur = conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
                     "FROM messages WHERE created_at < ? "
-                    "ORDER BY created_at DESC LIMIT ?",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (first_ts, need),
                 )
             extra = [_row_to_message(r) for r in cur.fetchall()][::-1]
@@ -901,7 +985,7 @@ def get_messages_with_persona_in_audience(
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
         WHERE {where_clause}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, rowid DESC
         LIMIT ?
     """
     params.append(limit)
@@ -923,7 +1007,7 @@ def count_threads(conn: sqlite3.Connection) -> int:
 
 def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages ORDER BY created_at DESC LIMIT ?",
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages ORDER BY created_at DESC, rowid DESC LIMIT ?",
         (limit,),
     )
     return [_row_to_message(row) for row in cur.fetchall()]
@@ -1064,7 +1148,7 @@ def _render_stelis_anchor_full(
         # First messages (opening context, e.g., decision phase)
         cur_first = conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            "FROM messages WHERE thread_id=? ORDER BY created_at ASC LIMIT 3",
+            "FROM messages WHERE thread_id=? ORDER BY created_at ASC, rowid ASC LIMIT 3",
             (stelis_thread_id,),
         )
         first_msgs = [_row_to_message(r) for r in cur_first.fetchall()]
@@ -1485,7 +1569,7 @@ def list_pulse_ids(
                MAX(created_at) AS latest_created_at,
                (SELECT playbook_name FROM pulse_logs p2
                 WHERE p2.pulse_id = p1.pulse_id AND p2.playbook_name IS NOT NULL
-                ORDER BY p2.created_at ASC LIMIT 1) AS first_playbook_name
+                ORDER BY p2.created_at ASC, p2.rowid ASC LIMIT 1) AS first_playbook_name
         FROM pulse_logs p1
         GROUP BY pulse_id
         ORDER BY latest_created_at DESC
@@ -1542,7 +1626,7 @@ def get_pulse_logs_by_pulse(conn: sqlite3.Connection, pulse_id: str) -> List[Tup
                important, tool_calls, tool_call_id, tool_name, created_at
         FROM pulse_logs
         WHERE pulse_id = ?
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
         """,
         (pulse_id,),
     )
@@ -1855,7 +1939,7 @@ def get_messages_for_chronicle(
             WHERE json_each.value IN ({tag_placeholders})
         )
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
         {limit_clause}
         """,
         CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES,
@@ -1938,35 +2022,50 @@ def get_conversation_messages_between(
     元 ``saiverse/memory_atlas.py`` は None を「区間は現在読み出せません」表示に
     落とす — 端メッセージ欠落と同じ扱い)。
 
-    どちらかの端メッセージが存在しなければ ``None``。端の順序は rowid で正規化
-    する (逆順で渡されても動く)。戻り値は時系列 (rowid 昇順)。
+    どちらかの端メッセージが存在しなければ ``None``。端の順序は正典順序キー
+    ``(created_at, rowid)`` で正規化する (逆順で渡されても動く)。戻り値は
+    時系列 (正典順昇順)。W8 / SEA 監査 S7: 区間判定を rowid 単独から正典順に
+    揃えた — 過去時刻で後から挿入された行 (インポート・移植) が区間の内外で
+    履歴表示と食い違わないように。
     """
     start_row = conn.execute(
-        "SELECT rowid, thread_id FROM messages WHERE id=?", (start_message_id,)
+        "SELECT created_at, rowid, thread_id FROM messages WHERE id=?",
+        (start_message_id,),
     ).fetchone()
     end_row = conn.execute(
-        "SELECT rowid, thread_id FROM messages WHERE id=?", (end_message_id,)
+        "SELECT created_at, rowid, thread_id FROM messages WHERE id=?",
+        (end_message_id,),
     ).fetchone()
     if not start_row or not end_row:
         return None
-    if start_row[1] != end_row[1]:
+    if start_row[2] != end_row[2]:
         debug(
             "get_conversation_messages_between: cross-thread endpoints rejected "
-            f"({start_row[1]!r} != {end_row[1]!r})"
+            f"({start_row[2]!r} != {end_row[2]!r})"
         )
         return None
-    thread_id = start_row[1]
-    lo, hi = sorted((int(start_row[0]), int(end_row[0])))
+    thread_id = start_row[2]
+    lo, hi = sorted(
+        (
+            _canonical_key_of_row(start_row[0], start_row[1]),
+            _canonical_key_of_row(end_row[0], end_row[1]),
+        )
+    )
+    lo_ts = lo[0][1] if lo[0][0] == 1 else None
+    hi_ts = hi[0][1] if hi[0][0] == 1 else None
+    ge_sql, ge_params = _canonical_after_clause(lo_ts, lo[1], inclusive=True)
+    le_sql, le_params = _canonical_before_clause(hi_ts, hi[1], inclusive=True)
 
     exclusion_clause, exclusion_params = _conversation_exclusion()
     cur = conn.execute(
         f"""
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
-        WHERE rowid BETWEEN ? AND ? AND thread_id = ? AND {exclusion_clause}
-        ORDER BY rowid ASC
+        WHERE {ge_sql} AND {le_sql}
+          AND thread_id = ? AND {exclusion_clause}
+        ORDER BY created_at ASC, rowid ASC
         """,
-        (lo, hi, thread_id, *exclusion_params),
+        (*ge_params, *le_params, thread_id, *exclusion_params),
     )
     return [_row_to_message(r) for r in cur.fetchall()]
 
@@ -1996,15 +2095,17 @@ def get_conversation_window_around(
     アンカーが見つからない、またはアンカー自体が除外対象 (ツール実行ログ等) の
     場合は ``None`` を返す。
 
-    戻り値は created_at 昇順 (時系列) のメッセージ一覧。
+    戻り値は正典順 ``(created_at, rowid)`` 昇順 (時系列) のメッセージ一覧。
+    W8 / SEA 監査 S7: 窓の前後判定を rowid 単独から正典順に揃えた。
     """
     anchor_row = conn.execute(
-        "SELECT rowid, thread_id FROM messages WHERE id=?", (message_id,)
+        "SELECT created_at, rowid, thread_id FROM messages WHERE id=?", (message_id,)
     ).fetchone()
     if not anchor_row:
         return None
-    anchor_rowid = int(anchor_row[0])
-    anchor_thread_id = anchor_row[1]
+    anchor_ts = int(anchor_row[0]) if anchor_row[0] is not None else None
+    anchor_rowid = int(anchor_row[1])
+    anchor_thread_id = anchor_row[2]
 
     exclusion_clause, exclusion_params = _conversation_exclusion()
 
@@ -2020,14 +2121,18 @@ def get_conversation_window_around(
 
     before_rows: List[Message] = []
     if window > 0:
+        before_sql, before_params = _canonical_before_clause(
+            anchor_ts, anchor_rowid, inclusive=False
+        )
         cur = conn.execute(
             f"""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
-            WHERE rowid < ? AND thread_id = ? AND {exclusion_clause}
-            ORDER BY rowid DESC LIMIT ?
+            WHERE {before_sql}
+              AND thread_id = ? AND {exclusion_clause}
+            ORDER BY created_at DESC, rowid DESC LIMIT ?
             """,
-            (anchor_rowid, anchor_thread_id, *exclusion_params, window),
+            (*before_params, anchor_thread_id, *exclusion_params, window),
         )
         before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
 
@@ -2040,14 +2145,18 @@ def get_conversation_window_around(
 
     after_rows: List[Message] = []
     if window > 0:
+        after_sql, after_params = _canonical_after_clause(
+            anchor_ts, anchor_rowid, inclusive=False
+        )
         cur = conn.execute(
             f"""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
-            WHERE rowid > ? AND thread_id = ? AND {exclusion_clause}
-            ORDER BY rowid ASC LIMIT ?
+            WHERE {after_sql}
+              AND thread_id = ? AND {exclusion_clause}
+            ORDER BY created_at ASC, rowid ASC LIMIT ?
             """,
-            (anchor_rowid, anchor_thread_id, *exclusion_params, window),
+            (*after_params, anchor_thread_id, *exclusion_params, window),
         )
         after_rows = [_row_to_message(r) for r in cur.fetchall()]
 
@@ -2115,7 +2224,7 @@ def search_conversation_messages(
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
         WHERE {where_clause}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, rowid DESC
         LIMIT ?
         """,
         (*params, lim),

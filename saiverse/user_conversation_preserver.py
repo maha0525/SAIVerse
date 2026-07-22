@@ -170,7 +170,7 @@ def get_supplementary_user_conversation_messages(
                 "WHERE origin_track_id = ? "
                 "AND line_role = 'main_line' AND scope = 'committed' "
                 "AND created_at < ? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (owner_track_id, int(oldest_history_ts), needed),
             )
         else:
@@ -179,7 +179,7 @@ def get_supplementary_user_conversation_messages(
                 "FROM messages "
                 "WHERE origin_track_id = ? "
                 "AND line_role = 'main_line' AND scope = 'committed' "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (owner_track_id, needed),
             )
         rows = cur.fetchall()

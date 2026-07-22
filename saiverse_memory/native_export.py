@@ -106,7 +106,7 @@ def _export_thread(
     query_parts = [
         "SELECT id, role, content, resource_id, created_at, metadata,"
         " origin_track_id, line_role, line_id, scope, paired_action_text,"
-        " pulse_id, thought_signature, spell_origin_id, spell_seq",
+        " pulse_id, thought_signature, spell_origin_id, spell_seq, rowid",
         "FROM messages WHERE thread_id=?",
     ]
     params: List[Any] = [thread_id]
@@ -116,13 +116,17 @@ def _export_thread(
     if end_epoch is not None:
         query_parts.append("AND created_at <= ?")
         params.append(end_epoch)
-    query_parts.append("ORDER BY created_at ASC")
+    # 正典順 (created_at, rowid) で書き出す — 移植先は export 順に INSERT する
+    # ため、ここが同一秒内で不定だと移植先の rowid 順 (= 正典 tie-breaker) が
+    # 元 DB の履歴順と食い違う。
+    query_parts.append("ORDER BY created_at ASC, rowid ASC")
 
     rows = conn.execute(" ".join(query_parts), params).fetchall()
     messages: List[Dict[str, Any]] = []
     for (mid, role, content, res_id, created_at, meta_raw,
          origin_track_id, line_role, line_id, scope, paired_action_text,
-         pulse_id, thought_signature, spell_origin_id, spell_seq) in rows:
+         pulse_id, thought_signature, spell_origin_id, spell_seq,
+         source_rowid) in rows:
         meta = None
         if meta_raw:
             try:
@@ -136,6 +140,10 @@ def _export_thread(
             "resource_id": res_id,
             "created_at": int(created_at) if created_at is not None else None,
             "metadata": meta,
+            # 元 DB のグローバル挿入順 (rowid)。import 側が全 thread 横断の
+            # 正典順 (created_at, seq) で INSERT し直すための順序キー —
+            # thread 単位の並びだけでは同一秒のスレッド交互順序を復元できない。
+            "seq": int(source_rowid),
         }
         if origin_track_id is not None:
             msg["origin_track_id"] = origin_track_id
@@ -430,16 +438,19 @@ def _delete_thread_in_txn(conn: sqlite3.Connection, thread_id: str) -> None:
     conn.execute("DELETE FROM threads WHERE id=?", (thread_id,))
 
 
-def _write_thread_in_txn(
+def _write_thread_scaffold_in_txn(
     conn: sqlite3.Connection,
     thread_data: Dict[str, Any],
     *,
     replace: bool,
-) -> List[Tuple[str, str]]:
-    """thread 1 本ぶんの全行を書く (呼び出し元のトランザクションに参加、commit しない)。
+) -> None:
+    """thread 1 本ぶんの器 (replace 削除 / thread 行 / overview / Stelis) を書く。
 
-    Returns:
-        書き込んだ ``(message_id, content)`` の列 (embedding 派生工程用)。
+    呼び出し元のトランザクションに参加し、commit しない。message 行は書かない —
+    それは全 thread 横断フェーズ (:func:`_canonical_import_order` の順で
+    :func:`_insert_message_in_txn`) の仕事。thread 単位で message まで書くと、
+    同一秒にスレッド交互で記録された履歴のグローバル正典順 (created_at, rowid)
+    を移植先で復元できない (Codex W8 レビュー P2)。
     """
     thread_id = thread_data["thread_id"]
     resource_id = thread_data.get("resource_id")
@@ -469,30 +480,118 @@ def _write_thread_in_txn(
     if stelis and isinstance(stelis, dict):
         _import_stelis(conn, thread_id, stelis)
 
-    written: List[Tuple[str, str]] = []
-    for msg in thread_data.get("messages", []):
-        msg_id = msg.get("id") or str(uuid.uuid4())
-        content = msg.get("content", "")
-        metadata = msg.get("metadata")
-        meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
-        conn.execute(
-            "INSERT OR REPLACE INTO messages"
-            "(id, thread_id, role, content, resource_id, created_at, metadata,"
-            " origin_track_id, line_role, line_id, scope, paired_action_text,"
-            " pulse_id, thought_signature, spell_origin_id, spell_seq)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                msg_id, thread_id, msg.get("role", "user"), content,
-                msg.get("resource_id", resource_id), msg.get("created_at"),
-                meta_json, msg.get("origin_track_id"), msg.get("line_role"),
-                msg.get("line_id"), msg.get("scope") or "committed",
-                msg.get("paired_action_text"), msg.get("pulse_id"),
-                msg.get("thought_signature"), msg.get("spell_origin_id"),
-                msg.get("spell_seq"),
-            ),
-        )
-        written.append((msg_id, content))
-    return written
+
+def _canonical_import_order(
+    threads: List[Dict[str, Any]],
+) -> List[Tuple[str, Optional[str], Dict[str, Any]]]:
+    """全 thread の message を正典順 (created_at, seq) に並べて返す。
+
+    ``seq`` は export 元 DB の rowid (グローバル挿入順)。INSERT をこの順で
+    行うことで、移植先の rowid tie-breaker が元 DB の同一秒スレッド交互
+    順序まで保存する。``seq`` を持たない旧形式 archive は archive 内の
+    出現順 (thread 逐次) を tie-breaker にする — 旧 import と同じ並びで、
+    後退はない。created_at 欠落行は SQLite の NULL 並び (先頭側) に合わせる。
+    """
+    staged: List[
+        Tuple[Tuple[Tuple[int, int], Tuple[int, int]], str, Optional[str], Dict[str, Any]]
+    ] = []
+    pos = 0
+    for thread_data in threads:
+        thread_id = thread_data["thread_id"]
+        resource_id = thread_data.get("resource_id")
+        for msg in thread_data.get("messages", []):
+            try:
+                ca_key = (1, int(msg.get("created_at")))
+            except (TypeError, ValueError):
+                ca_key = (0, 0)
+            try:
+                seq_key = (0, int(msg.get("seq")))
+            except (TypeError, ValueError):
+                seq_key = (1, pos)
+            staged.append(((ca_key, seq_key), thread_id, resource_id, msg))
+            pos += 1
+    staged.sort(key=lambda entry: entry[0])
+    return [(t, r, m) for _, t, r, m in staged]
+
+
+def _insert_message_in_txn(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    thread_resource_id: Optional[str],
+    msg: Dict[str, Any],
+    explicit_rowid: Optional[int] = None,
+) -> Tuple[str, str]:
+    """message 1 行を書く (呼び出し元のトランザクションに参加、commit しない)。
+
+    ``explicit_rowid`` 指定時は元 DB の rowid そのままで挿入する (呼び出し元が
+    空きを検証済みの場合のみ)。保持スレッドの既存行と同一秒で交互だった履歴の
+    相対順まで復元するにはこれが必要 — 追記挿入では再挿入行が必ず既存行より
+    後の rowid になる。
+
+    Returns:
+        書き込んだ ``(message_id, content)`` (embedding 派生工程用)。
+    """
+    msg_id = msg.get("id") or str(uuid.uuid4())
+    content = msg.get("content", "")
+    metadata = msg.get("metadata")
+    meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+    rowid_col = "rowid, " if explicit_rowid is not None else ""
+    rowid_ph = "?, " if explicit_rowid is not None else ""
+    rowid_val: Tuple[Any, ...] = (
+        (explicit_rowid,) if explicit_rowid is not None else ()
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO messages"
+        f"({rowid_col}id, thread_id, role, content, resource_id, created_at, metadata,"
+        " origin_track_id, line_role, line_id, scope, paired_action_text,"
+        " pulse_id, thought_signature, spell_origin_id, spell_seq)"
+        f" VALUES ({rowid_ph}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            *rowid_val,
+            msg_id, thread_id, msg.get("role", "user"), content,
+            msg.get("resource_id", thread_resource_id), msg.get("created_at"),
+            meta_json, msg.get("origin_track_id"), msg.get("line_role"),
+            msg.get("line_id"), msg.get("scope") or "committed",
+            msg.get("paired_action_text"), msg.get("pulse_id"),
+            msg.get("thought_signature"), msg.get("spell_origin_id"),
+            msg.get("spell_seq"),
+        ),
+    )
+    return (msg_id, content)
+
+
+def _seq_rowids_if_free(
+    conn: sqlite3.Connection,
+    ordered: List[Tuple[str, Optional[str], Dict[str, Any]]],
+) -> Optional[Dict[int, int]]:
+    """archive の seq (元 rowid) を明示 rowid として使えるか検査する。
+
+    全 message が相異なる正の int seq を持ち、かつそれらの rowid が移植先で
+    全て空いている (replace 削除後の同一トランザクション内で判定) ときだけ、
+    {message 位置: rowid} を返す。一つでも欠け・重複・衝突があれば None —
+    その場合は追記挿入 (archive 内の正典順は保存、保持行との相対順は
+    ベストエフォート) に全件フォールバックする。部分的な明示 rowid 挿入は
+    中途半端な並びを作るのでやらない。
+    """
+    seqs: List[int] = []
+    for _, _, msg in ordered:
+        seq = msg.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
+            return None
+        seqs.append(seq)
+    if len(set(seqs)) != len(seqs):
+        return None
+    chunk = 500
+    for i in range(0, len(seqs), chunk):
+        part = seqs[i:i + chunk]
+        placeholders = ",".join("?" for _ in part)
+        (occupied,) = conn.execute(
+            f"SELECT COUNT(*) FROM messages WHERE rowid IN ({placeholders})",
+            part,
+        ).fetchone()
+        if occupied:
+            return None
+    return {idx: seq for idx, seq in enumerate(seqs)}
 
 
 def import_threads_native(
@@ -549,22 +648,40 @@ def import_threads_native(
     try:
         # --- 関門 2: 単一トランザクションの書き込み区間 ---
         # ここから成功時の commit まで、他の commit 点は存在しない
-        # (_write_thread_in_txn 系は commit しない契約)。init_db が
-        # トランザクションを開いたまま返す場合は二重 BEGIN を避けて合流する。
+        # (_write_*_in_txn / _insert_message_in_txn は commit しない契約)。
+        # init_db がトランザクションを開いたまま返す場合は二重 BEGIN を
+        # 避けて合流する。
         if not conn.in_transaction:
             conn.execute("BEGIN")
         try:
+            # 第一段: 器 (replace 削除 / thread 行 / overview / Stelis)
             for thread_data in data["threads"]:
                 if progress_callback:
                     progress_callback(
                         imported, total_messages,
                         f"Processing thread: {thread_data['thread_id']}",
                     )
-                written = _write_thread_in_txn(conn, thread_data, replace=replace)
-                written_messages.extend(written)
-                imported += len(written)
+                _write_thread_scaffold_in_txn(conn, thread_data, replace=replace)
                 threads_imported += 1
-                if progress_callback:
+            # 第二段: message を全 thread 横断の正典順 (created_at, seq) で
+            # INSERT する — thread 逐次挿入は同一秒のスレッド交互順序を失う
+            # (Codex W8 レビュー P2)。seq の元 rowid が移植先で全て空いている
+            # とき (全 thread 復元・部分往復・空 DB への移植) は明示 rowid で
+            # 挿入し、保持スレッドの既存行との同秒相対順まで完全復元する
+            # (同三巡目 P2)。衝突があれば追記順に全件フォールバック。
+            ordered = _canonical_import_order(data["threads"])
+            explicit_rowids = _seq_rowids_if_free(conn, ordered)
+            for idx, (thread_id, resource_id, msg) in enumerate(ordered):
+                written_messages.append(
+                    _insert_message_in_txn(
+                        conn, thread_id, resource_id, msg,
+                        explicit_rowid=(
+                            explicit_rowids[idx] if explicit_rowids else None
+                        ),
+                    )
+                )
+                imported += 1
+                if progress_callback and imported % 200 == 0:
                     progress_callback(
                         imported, total_messages,
                         f"Staged {imported}/{total_messages} messages",

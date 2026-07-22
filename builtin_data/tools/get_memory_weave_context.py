@@ -298,7 +298,7 @@ def _get_track_unprocessed_messages_text(
     if anchor_cutoff is not None:
         sql += "AND created_at < ? "
         params.append(anchor_cutoff)
-    sql += f"ORDER BY created_at ASC LIMIT {int(max_messages)}"
+    sql += f"ORDER BY created_at ASC, rowid ASC LIMIT {int(max_messages)}"
     cur = conn.execute(sql, params)
     unprocessed = [
         row for row in cur.fetchall() if row[0] not in processed_ids

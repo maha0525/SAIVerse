@@ -82,7 +82,7 @@ def get_messages_around(
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
         WHERE thread_id = ?
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
     """, (center_msg.thread_id,))
 
     all_msgs = []

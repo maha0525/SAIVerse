@@ -89,7 +89,7 @@ def _fetch_messages_layer(
     if track_id:
         query += " AND origin_track_id = ?"
         params.append(track_id)
-    query += " ORDER BY created_at DESC LIMIT ?"
+    query += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
     params.append(limit)
 
     layer = "main_cache" if line_role == "main_line" else "sub_cache"

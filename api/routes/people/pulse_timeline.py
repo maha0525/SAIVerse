@@ -120,7 +120,7 @@ _DETAIL_SQL = """
            paired_action_text, spell_origin_id, spell_seq
     FROM messages
     WHERE thread_id LIKE ? AND pulse_id = ?
-    ORDER BY created_at ASC
+    ORDER BY created_at ASC, rowid ASC
 """
 
 _PREV_PULSE_MAX_CA_SQL = """
@@ -133,13 +133,13 @@ _GAP_MESSAGES_SQL = """
     SELECT id, role, content, created_at FROM messages
     WHERE thread_id LIKE ? AND pulse_id IS NULL
       AND created_at > ? AND created_at < ?
-    ORDER BY created_at ASC
+    ORDER BY created_at ASC, rowid ASC
 """
 
 _GAP_FALLBACK_SQL = """
     SELECT id, role, content, created_at FROM messages
     WHERE thread_id LIKE ? AND pulse_id IS NULL AND created_at < ?
-    ORDER BY created_at DESC LIMIT 1
+    ORDER BY created_at DESC, rowid DESC LIMIT 1
 """
 
 
