@@ -84,6 +84,17 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 
 `ChatOptions` の操作感は変えない。「別名で保存」「上書き保存」ボタンは追加するが、既存のスライダー・入力欄の挙動・即時反映は維持。詳細編集は別 UI に飛ばすことで、チャット UI 自体の情報密度を増やさない。
 
+### 9. モデル固有の API 契約をモデル定義からプロバイダ境界まで保つ
+
+モデル JSON の `parameters` は UI 表示だけでなく、実際の API request capability と一致しなければならない。上位の SEA runtime、メディア要約、keepalive などは共通 `LLMClient` 契約として `temperature` を渡すことがあるため、非対応モデルの JSON からスライダーを消すだけでは送信を防げない。
+
+- **最終結果**: ユーザーとペルソナは、選択したモデルの最新 API 契約に適合したリクエストだけが送られ、非対応パラメータや不正な会話末尾による回避可能な 400 を受けない。
+- **ライフサイクル**: builtin / expansion / user_data のモデル定義 → `model_configs` の優先解決 → factory による client 構築 → runtime からの呼び出し時 override → provider request 構築 → 外部 API、という全経路で同じ capability を維持する。
+- **責任境界**: モデル JSON は capability の正典、provider client は最終送信の番人とする。UI に項目がないことだけを安全境界にせず、直接引数や古い user override が来ても provider が非対応値を送らない。
+- **会話の完全性**: provider が不正な末尾 role を自動で user role に変えたり、架空の user message を追加したりしてはならない。API が禁止する prefilled model turn は送信前に検出し、原因が追える `invalid_request` とログで停止する。
+- **関数呼び出しの同一性**: 上流が発行した tool call ID は Gemini の `FunctionCall.id` / `FunctionResponse.id` まで同一値で運ぶ。名前だけの照合へ情報を落とさない。
+- **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
+
 ## 設計
 
 ### A. プロバイダ JSON スキーマ

@@ -54,6 +54,14 @@ def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str 
     )
 
 
+def _resolve_tool_call_id(result: Dict[str, Any]) -> str:
+    """Preserve a provider-issued function call ID or create a local fallback."""
+    provider_id = result.get("tool_call_id")
+    if isinstance(provider_id, str) and provider_id:
+        return provider_id
+    return f"tc_{uuid.uuid4().hex}"
+
+
 # ── Spell system (text-based tool invocation) ──
 
 _MAX_SPELL_LOOPS = int(os.getenv("SAIVERSE_SPELL_MAX_ROUNDS", "3"))
@@ -2796,7 +2804,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
 
                     # Record tool call info for message protocol (function calling)
-                    _tc_id = f"tc_{uuid.uuid4().hex}"
+                    _tc_id = _resolve_tool_call_id(result)
                     state["_last_tool_call_id"] = _tc_id
                     state["_last_tool_name"] = result["tool_name"]
                     state["_last_tool_args_json"] = json.dumps(
@@ -2849,7 +2857,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
 
                     # Record tool call info for message protocol (function calling)
-                    _tc_id = f"tc_{uuid.uuid4().hex}"
+                    _tc_id = _resolve_tool_call_id(result)
                     state["_last_tool_call_id"] = _tc_id
                     state["_last_tool_name"] = result["tool_name"]
                     state["_last_tool_args_json"] = json.dumps(

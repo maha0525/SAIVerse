@@ -1,0 +1,70 @@
+{
+  "model": "gemini-3.5-flash-lite",
+  "system_prompt": "",
+  "display_name": "Gemini 3.5 Flash-Lite(有料Tier)",
+  "provider": "gemini",
+  "context_length": 1048576,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
+  "supports_sampling_parameters": false,
+  "supports_model_prefill": false,
+  "prefer_paid": true,
+  "cache": {
+    "supported": true,
+    "default_enabled": false,
+    "default_ttl": "5m",
+    "ttl_options": ["5m", "15m", "30m", "1h"],
+    "type": "gemini_explicit",
+    "min_tokens": 1024
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.3,
+    "cached_input_per_1m_tokens": 0.03,
+    "output_per_1m_tokens": 2.5,
+    "cache_storage_per_1m_tokens_per_hour": 1.0,
+    "currency": "USD"
+  },
+  "parameters": {
+    "thinking_level": {
+      "type": "dropdown",
+      "options": ["minimal", "low", "medium", "high"],
+      "default": "minimal",
+      "label": "Thinking Level",
+      "description": "思考の深さ。minimalが公式既定。自律的なツール実行や多段推論ではmediumまたはhighを推奨。"
+    },
+    "multi_turn_thinking": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "off",
+      "label": "Multi-turn Thinking",
+      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率を優先。"
+    },
+    "safety_harassment": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Harassment"
+    },
+    "safety_hate_speech": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Hate Speech"
+    },
+    "safety_sexually_explicit": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Sexually Explicit"
+    },
+    "safety_dangerous_content": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Dangerous Content"
+    }
+  }
+}

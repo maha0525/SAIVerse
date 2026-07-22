@@ -85,9 +85,13 @@ python main.py <city_id> [オプション]
 - `provider`: `openai` / `anthropic` / `gemini` / `ollama`
 - `context_length`: コンテキスト長
 - `supports_images`: 画像入力対応
+- `supports_sampling_parameters`: `temperature` / `top_p` / `top_k` の送信対応（Gemini 3.6 Flash / 3.5 Flash-Lite 以降の非対応モデルでは `false`）
+- `supports_model_prefill`: 非空のモデル発話で終わるコンテキストへの対応（同モデル以降では `false`）
 - `base_url`: カスタムエンドポイント（互換API用）
 - `api_key_env`: APIキーの環境変数名
 - `parameters`: 温度・top_pなどのパラメータ制約
+
+`supports_sampling_parameters: false` のモデルでは、`parameters` に sampling 項目を載せず、上位処理から値が渡された場合もプロバイダが API request から除外します。`supports_model_prefill: false` のモデルに対して末尾が非空の model role となった場合は、role や本文を自動改変せず、送信前に `invalid_request` として停止します。
 
 > 新しいモデルは、接続情報を `provider_ref` でプロバイダ定義から参照する形が推奨（→ [reference/providers.md](../reference/providers.md)）。追加・編集は グローバル設定 > モデル管理 タブからも行える（→ [グローバル設定](../user-guide/global-settings.md)）。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -15,6 +16,7 @@ from google.genai import types
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
+    InvalidRequestError,
     LLMError,
     LLMTimeoutError,
     ModelNotFoundError,
@@ -255,6 +257,18 @@ GEMINI_ALLOWED_REQUEST_PARAMS = {
     "temperature", "top_p", "top_k", "max_output_tokens", "stop_sequences",
 }
 
+GEMINI_SAMPLING_REQUEST_PARAMS = {"temperature", "top_p", "top_k"}
+
+_GEMINI_CONTENT_PAYLOAD_FIELDS = (
+    "code_execution_result",
+    "executable_code",
+    "file_data",
+    "function_call",
+    "function_response",
+    "inline_data",
+    "text",
+)
+
 # Special parameters that need custom handling (not passed directly to API)
 GEMINI_SPECIAL_PARAMS = {
     "thinking_level", "thinking_budget", "multi_turn_thinking",
@@ -271,6 +285,36 @@ SAFETY_PARAM_TO_CATEGORY = {
 }
 
 GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
+
+
+def _uses_latest_generate_content_contract(model: str) -> bool:
+    """Return whether *model* uses the July 2026 GenerateContent restrictions.
+
+    Gemini 3.6 Flash and Gemini 3.5 Flash-Lite introduced the contract, and
+    Google documents it as applying to future Gemini releases as well.  Model
+    JSON capability flags can override this fallback for aliases or exceptions.
+    """
+    model_lower = (model or "").lower()
+    if model_lower.startswith("gemini-3.5-flash-lite"):
+        return True
+    match = re.match(r"^gemini-(\d+)(?:\.(\d+))?(?:-|$)", model_lower)
+    if not match:
+        return False
+    version = (int(match.group(1)), int(match.group(2) or 0))
+    return version >= (3, 6)
+
+
+def _content_has_payload(content: types.Content) -> bool:
+    """Whether a converted Gemini Content contains a non-empty API payload."""
+    for part in content.parts or []:
+        for field in _GEMINI_CONTENT_PAYLOAD_FIELDS:
+            value = getattr(part, field, None)
+            if isinstance(value, str):
+                if value.strip():
+                    return True
+            elif value is not None:
+                return True
+    return False
 
 
 def merge_tools_for_gemini(request_tools: Optional[List[types.Tool]]) -> List[types.Tool]:
@@ -317,6 +361,14 @@ class GeminiClient(LLMClient):
 
         # Request parameters (temperature, top_p, etc.)
         self._request_params: Dict[str, Any] = {}
+
+        latest_contract = _uses_latest_generate_content_contract(model)
+        self._supports_sampling_parameters: bool = bool(
+            cfg.get("supports_sampling_parameters", not latest_contract)
+        )
+        self._supports_model_prefill: bool = bool(
+            cfg.get("supports_model_prefill", not latest_contract)
+        )
 
         # Thinking configuration
         self._thinking_level: Optional[str] = None
@@ -582,6 +634,15 @@ class GeminiClient(LLMClient):
             return
         for key, value in parameters.items():
             if key in GEMINI_ALLOWED_REQUEST_PARAMS:
+                if key in GEMINI_SAMPLING_REQUEST_PARAMS and not self._supports_sampling_parameters:
+                    self._request_params.pop(key, None)
+                    if value is not None:
+                        logging.debug(
+                            "[gemini] Ignoring deprecated sampling parameter %s for model=%s",
+                            key,
+                            self.model,
+                        )
+                    continue
                 if value is None:
                     self._request_params.pop(key, None)
                 else:
@@ -902,8 +963,9 @@ class GeminiClient(LLMClient):
                     fn_name = fn.get("name", "")
                     fn_args_raw = fn.get("arguments", "{}")
                     fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
+                    fn_id = tc.get("id") if isinstance(tc, dict) else None
                     fc_part = types.Part(
-                        function_call=types.FunctionCall(name=fn_name, args=fn_args)
+                        function_call=types.FunctionCall(id=fn_id or None, name=fn_name, args=fn_args)
                     )
                     if self._multi_turn_thinking or self._is_gemini_3x:
                         _ts = tc.get("thought_signature") if isinstance(tc, dict) else None
@@ -917,6 +979,7 @@ class GeminiClient(LLMClient):
             # Handle tool result messages (function response)
             if role == "tool":
                 fn_name = message.get("name", "")
+                fn_id = message.get("tool_call_id")
                 fn_content = message.get("content", "")
                 # Wrap content as a dict for FunctionResponse.response
                 try:
@@ -929,6 +992,7 @@ class GeminiClient(LLMClient):
                     role="user",
                     parts=[types.Part(
                         function_response=types.FunctionResponse(
+                            id=fn_id or None,
                             name=fn_name,
                             response=response_data,
                         )
@@ -1087,6 +1151,52 @@ class GeminiClient(LLMClient):
 
         return "\n".join(system_lines), contents
 
+    def _validate_contents(self, contents: List[types.Content]) -> None:
+        """Reject requests that the selected Gemini contract cannot accept."""
+        if self._supports_model_prefill:
+            return
+        for content in reversed(contents):
+            if not _content_has_payload(content):
+                continue
+            if content.role == "model":
+                logging.warning(
+                    "[gemini] Rejecting request ending in a non-empty model turn: model=%s",
+                    self.model,
+                )
+                raise InvalidRequestError(
+                    f"Gemini model {self.model} does not accept a prefilled model turn",
+                    user_message=(
+                        "このGeminiモデルでは、会話コンテキストの末尾をモデル発話にできません。"
+                        "呼び出し元のコンテキスト構築を確認してください。"
+                    ),
+                )
+            return
+
+    def _apply_generation_parameters(
+        self,
+        cfg_kwargs: Dict[str, Any],
+        temperature: float | None,
+    ) -> None:
+        """Apply request parameters while enforcing model capabilities."""
+        if self._supports_sampling_parameters:
+            effective_temp = (
+                temperature if temperature is not None else self._request_params.get("temperature")
+            )
+            if effective_temp is not None:
+                cfg_kwargs["temperature"] = effective_temp
+            for param in ("top_p", "top_k"):
+                if param in self._request_params:
+                    cfg_kwargs[param] = self._request_params[param]
+        elif temperature is not None:
+            logging.debug(
+                "[gemini] Dropping deprecated temperature override for model=%s",
+                self.model,
+            )
+
+        for param in ("max_output_tokens", "stop_sequences"):
+            if param in self._request_params:
+                cfg_kwargs[param] = self._request_params[param]
+
     def _last_user(self, messages: List[Any]) -> str:
         for message in reversed(messages):
             if isinstance(message, dict) and message.get("role") == "user":
@@ -1104,6 +1214,7 @@ class GeminiClient(LLMClient):
         tool_cfg: Optional[types.ToolConfig],
     ):
         sys_msg, contents = self._convert_messages(messages)
+        self._validate_contents(contents)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),
@@ -1161,21 +1272,14 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         sys_msg, contents = self._convert_messages(messages)
+        self._validate_contents(contents)
         
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),
         }
 
-        # Temperature: argument > _request_params
-        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
-        if effective_temp is not None:
-            cfg_kwargs["temperature"] = effective_temp
-
-        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
-        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
-            if param in self._request_params:
-                cfg_kwargs[param] = self._request_params[param]
+        self._apply_generation_parameters(cfg_kwargs, temperature)
 
         # Tool configuration
         if use_tools:
@@ -1544,11 +1648,14 @@ class GeminiClient(LLMClient):
                 if function_call_part:
                     fcall_name = getattr(function_call_part, "name", None)
                     fcall_args = getattr(function_call_part, "args", {}) or {}
+                    fcall_id = getattr(function_call_part, "id", None)
                     _fc_base: Dict[str, Any] = {
                         "tool_name": fcall_name,
                         "tool_args": dict(fcall_args),
                         "raw_function_call": function_call_part,
                     }
+                    if fcall_id:
+                        _fc_base["tool_call_id"] = fcall_id
                     if _sync_thought_sig:
                         _fc_base["thought_signature"] = _sync_thought_sig
 
@@ -1997,12 +2104,15 @@ class GeminiClient(LLMClient):
             all_text = "".join(seen_stream_texts.values())
             fcall_name = getattr(fcall, "name", None)
             fcall_args = getattr(fcall, "args", {}) or {}
+            fcall_id = getattr(fcall, "id", None)
 
             _td_base = {
                 "tool_name": fcall_name,
                 "tool_args": dict(fcall_args),
                 "raw_function_call": fcall,
             }
+            if fcall_id:
+                _td_base["tool_call_id"] = fcall_id
             if fcall_thought_signature:
                 _td_base["thought_signature"] = fcall_thought_signature
             if all_text.strip():
@@ -2039,6 +2149,7 @@ class GeminiClient(LLMClient):
         cache_ttl: Any = None,
     ):
         sys_msg, contents = self._convert_messages(messages)
+        self._validate_contents(contents)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),
@@ -2061,15 +2172,7 @@ class GeminiClient(LLMClient):
         if thinking_config is not None:
             cfg_kwargs["thinking_config"] = thinking_config
 
-        # Temperature: argument > _request_params
-        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
-        if effective_temp is not None:
-            cfg_kwargs["temperature"] = effective_temp
-
-        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
-        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
-            if param in self._request_params:
-                cfg_kwargs[param] = self._request_params[param]
+        self._apply_generation_parameters(cfg_kwargs, temperature)
 
         # Auto cache mode / B 戦略
         _auto_cleanup_name: Optional[str] = None
