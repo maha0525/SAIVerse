@@ -150,6 +150,8 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 
 `action_track` の行データ（title・意図・机メモ）は第一階層の目的ノードとして存続し、`task:N` / `track:N` の統一参照で指せる。永続 Track（対ユーザー会話・交流）は構成系の営みノードとして残る。物理統合（persona_task と Memopedia ページの同一実体化）は P3c 予定。
 
+> **継承 DAG（範囲ノード間の認識の連続性）**: 出来事（episode）は時系列に一列で並ぶだけでなく、**継承エッジ**（`episode_inheritance` テーブル、`saiverse/experience_inheritance.py`）で「どの範囲を元に続きを始めたか」を張れる第二の関係を持つ（[体験の構造](../intent/experience_structure.md) §3.3、W13 で器を実装）。エッジは層付き（`fact`＝スレッド継続・リプランティング・分岐再生成の直接の元 / `digest`＝メモリ・digest 経由で知っている非直接親）で、1 出来事は 0..n 親を持てる（DAG）。会話の分岐・再生成・並列体験の統合（γδ→ε）・SAIVerse Lite 帰還マージ・メティス取り込みを同一機構で表す。**継承 ≠ 時刻**（created_at を継承の代用にしていたことが時系列の嘘の根本原因）。記帳は `open_episode(predecessors=...)` で範囲が開いた瞬間に機械的（選択なし＝エッジ 0 本＝直列の縮退で既存データ無害）。継承チェーンに閉じた咀嚼生成・分岐再生成 UI・メティス取り込みの配線は後続 wave。
+
 > **ペルソナ間会話の現状**: 交流（Social）Track はペルソナ同士の会話の器で、`SocialTrackHandler` と自動作成はあるが、**「他ペルソナ発話イベントの受け口」（入口）が未実装**。そのためペルソナ間会話の機序はまだ成立しておらず、この地図でも描けていない（→ [`roadmap_status.md`](roadmap_status.md) §2）。
 
 ### 判断点（旧 Meta-Judgment）

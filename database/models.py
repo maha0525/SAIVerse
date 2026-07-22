@@ -1127,6 +1127,66 @@ class Episode(Base):
     )
 
 
+class EpisodeInheritance(Base):
+    """継承エッジ (継承 DAG): 範囲ノード (出来事) 間の認識の連続性を表す第二の関係。
+
+    experience_structure.md §3.3 の「継承 DAG」の器。包含の木 (episodes の
+    kind + occurrence による親子) とは**独立**な、体験の連続性 (どの範囲を
+    直接の元として続きを始めたか / どの範囲をメモリ・digest 経由で知っているか)
+    を張る有向エッジ。1 つの子範囲ノードは 0..n 親を持てる (DAG)。
+
+    - **継承 ≠ 時刻**。従来 created_at を継承の代用にしていたことが時系列の嘘の
+      根本原因 (§3.3)。時刻は Episode の属性に降り、語り (咀嚼) の文脈は
+      このエッジに従う。
+    - エッジには**層の型** (:data:`LAYER`) がある: ``fact`` (事実層の継承 —
+      スレッド継続・リプランティング・分岐再生成の直接の元) / ``digest``
+      (咀嚼層の継承 — メモリ・digest 経由で知っている、並列体験の統合の非直接親)。
+      連続性は 0/1 でなく強度で、層はその強度の形式化 (§3.3)。
+    - 同一機構が: ①会話の分岐・再生成 (親 = 元範囲、``ANCHOR_REF`` = 分岐点の
+      pulse 関節メッセージ) ②並列体験の統合 (ε が両親を digest 層で持つ)
+      ③SAIVerse Lite への一時引っ越しと帰還マージ ④メティス取り込み
+      (transcript の parentUuid がエッジ原料) を表現する。
+    - **ネイティブ構造** — 取り込み用の特例にせず、範囲が開いた瞬間に (選択が
+      あれば) 機械的に記帳する (§11-4)。エッジが無い既存データは「直列」の
+      縮退で無害。
+
+    行はペルソナ単位 (Episode と同じ)。範囲ノードは
+    ``CHILD_EPISODE_ID`` / ``PARENT_EPISODE_ID`` で ``episodes.EPISODE_ID``
+    (UUID) を指す。episodes 行は物理削除しない運用 (SHORT_ID の単調性、
+    saiverse/episodes.py) なのでエッジの参照先は安定する。操作は
+    saiverse/experience_inheritance.py に集約する — 生 SQL で書かないこと。
+    """
+    __tablename__ = "episode_inheritance"
+    EDGE_ID = Column(String(36), primary_key=True)  # uuid4
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    # 継承する側 (新しく開いた範囲ノード) の episodes.EPISODE_ID。
+    CHILD_EPISODE_ID = Column(String(36), nullable=False)
+    # 継承元 (前駆) の範囲ノードの episodes.EPISODE_ID。
+    PARENT_EPISODE_ID = Column(String(36), nullable=False)
+    # 'fact' (事実層の継承) | 'digest' (咀嚼層の継承)。
+    LAYER = Column(String(16), nullable=False)
+    # 分岐点 = 親範囲内の特定メッセージ (pulse 関節) への参照 (例 'message:...')。
+    # NULL = 親範囲を丸ごと継承 (通常のスレッド継続・並列統合)。W13 では不透明に
+    # 保持するだけ (消費は分岐・再生成 wave)。
+    ANCHOR_REF = Column(String(255), nullable=True)
+    # エッジの由来 ('branch' | 'merge' | 'import' | 'replant' | 'continue' 等)。
+    # 観測・後段消費のヒント。NULL 可。
+    ORIGIN = Column(String(32), nullable=True)
+    CREATED_AT = Column(Integer, nullable=False)  # epoch 秒 (clock.now() 経由)
+    META_JSON = Column(Text, nullable=True)
+    __table_args__ = (
+        # 同一 (子, 親, 層) の重複エッジを禁止 (記帳を冪等に倒す土台)。
+        UniqueConstraint(
+            "CHILD_EPISODE_ID", "PARENT_EPISODE_ID", "LAYER",
+            name="uq_episode_inheritance_edge",
+        ),
+        # 子 → 親の探索 (継承祖先を遡る咀嚼生成) 用
+        Index("idx_episode_inheritance_child", "PERSONA_ID", "CHILD_EPISODE_ID"),
+        # 親 → 子の探索 (ある範囲を元にした続きの列挙) 用
+        Index("idx_episode_inheritance_parent", "PERSONA_ID", "PARENT_EPISODE_ID"),
+    )
+
+
 # ============================================================================
 # 実行台帳 (Execution Ledger) — 不可逆な実行と記録の分裂を防ぐ共通基盤
 # docs/intent/execution_ledger.md (v0.3, Phase 0)

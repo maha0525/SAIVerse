@@ -1,6 +1,6 @@
 # Intent: 体験の構造 — 包含の木・digest・継承 DAG
 
-**ステータス**: 実装中 (v0.5 2026-07-21 — **工程(2) = W4 実装済み・実機検証待ち**: Chronicle 生成の episode 整列化 (alignment/executor/bands)、恒等転写・恒等圧縮・サイズ束ね・帯あふれ・壁・帰化バックフィル・Track Chronicle 生成廃止。**工程(1) (a') = W1 実装済み・実機検証待ち** (2026-07-19、コミット e0ee4ff)。残る工程(3)(4) は計画書 W13/W14。束ねアルゴリズム=モック検証済み確定・digest正準=咀嚼層・移行=再生成なし帰化・継承エッジ=アクティブスレッド選択型・MAv2=並置・知覚側=薄く保持し実装分離)
+**ステータス**: 実装中 (v0.5 2026-07-22 — **工程(3) = W13 (継承 DAG の器 + 範囲オープン時の機械的記帳) 実装済み・実機検証待ち** (2026-07-22)。**工程(2) = W4 実装済み・実機検証待ち**: Chronicle 生成の episode 整列化 (alignment/executor/bands)、恒等転写・恒等圧縮・サイズ束ね・帯あふれ・壁・帰化バックフィル・Track Chronicle 生成廃止。**工程(1) (a') = W1 実装済み・実機検証待ち** (2026-07-19、コミット e0ee4ff)。残る工程(3)(4) は計画書 W13/W14。束ねアルゴリズム=モック検証済み確定・digest正準=咀嚼層・移行=再生成なし帰化・継承エッジ=アクティブスレッド選択型・MAv2=並置・知覚側=薄く保持し実装分離)
 **位置付け**: 記憶系の最上位 intent。生ログ・Chronicle・Memopedia・episode・知覚バッファ・メティス記憶ブリッジの取り込みを **一つの構造** の下に束ねる。個別文書はここを指す参照に格下げされる (§10)。
 **前提**: [concept_consolidation.md](concept_consolidation.md) (Memory Atlas) / [persona_cognition/judgment_points.md](persona_cognition/judgment_points.md) §6 ((a') 統合) / [metis_memory_bridge.md](metis_memory_bridge.md) / [../issues/chronicle_cross_thread_mixing.md](../issues/chronicle_cross_thread_mixing.md) / [../issues/memory_continuity_graph.md](../issues/memory_continuity_graph.md)
 
@@ -150,5 +150,5 @@ head は capture→store→render で既にこの規律を卒業している (�
 0. 束ねアルゴリズムのモック可視化 — **済** (§11-8)
 1. (a') episode digest 生成の第一号 + 読み口スペル = **計画書 W1 同工区 — 実装済み・実機検証待ち** (2026-07-19、コミット e0ee4ff)。digest 専用コール廃止 (3→2)・post_session が原本から digest 生成・原本注入コールローカル化・`saimemory.append_digest` 配送 + `set_digest_ref` 後段確定・`episode_read` スペル (origin_episode 専用列 + `get_messages_by_origin_episode`)
 2. Chronicle 生成の episode 整列化 (バッチ降格 + 束ねルール + 恒等圧縮) = **計画書 W4 — 実装済み・実機検証待ち** (2026-07-21)。整列計画 `sai_memory/arasuji/alignment.py` + チャンク実行 `executor.py` + 帯あふれ束ね・帰化 `bands.py`。旧 20 件バッチ経路 (ArasujiGenerator ほか) と Track Chronicle 生成 (§11-10) は撤去。走行メモ = [W4 handoff](../handoff/2026-07-21_w4_metabolism_ledger_handoff.md)
-3. 継承エッジの器 (テーブル + 記帳) = **計画書 W13** (独立、空きに挟める)
+3. 継承エッジの器 (テーブル + 記帳) = **計画書 W13 — 実装済み・実機検証待ち** (2026-07-22)。`episode_inheritance` テーブル (子→親 0..n、層 = fact/digest、anchor_ref = 分岐点の pulse 関節、UNIQUE(子,親,層))。`open_episode(predecessors=...)` が範囲オープンの同一 tx で機械的に記帳 (§11-4) — 選択なしはエッジ 0 本 = 直列の縮退で既存データ無害。操作は `saiverse/experience_inheritance.py` (record_edges / get_parents / get_children / get_ancestors)。回帰 = `tests/test_experience_inheritance.py` 21 件。**残 = 消費者の配線** (継承チェーン閉じ生成・分岐再生成 UI・メティス取り込み) は後続 wave
 4. 知覚レンダリング = **計画書 W14** (perception_buffer 後続 Phase)

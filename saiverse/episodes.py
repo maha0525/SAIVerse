@@ -252,6 +252,7 @@ def open_episode(
     origin_ref: Optional[str] = None,
     occurrence_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
+    predecessors: Optional[Sequence[Any]] = None,
     session: Optional[Session] = None,
 ) -> Dict[str, Any]:
     """出来事を開く (life_concept_map.md §8「いまとは開いている出来事の先端」)。
@@ -261,6 +262,13 @@ def open_episode(
         origin_ref: 出自 (コマ・呼びかけ等) への参照。**None = 自発** —
             無計画の出来事は出自なしが合法 (§6「事後に偽のコマを起こさない」)。
         occurrence_id: 同一の世界的出来事を束ねる相関 ID (§8.1 複数主観)。
+        predecessors: 継承エッジの前駆指定 (experience_structure.md §3.3、W13)。
+            各要素は ``{"parent_ref": "episode:N"|UUID, "layer": "fact"|"digest",
+            "anchor_ref"?: ..., "origin"?: ..., "meta"?: {...}}``。指定すると
+            **この出来事を開く同一トランザクション内で**継承エッジ
+            (``episode_inheritance``) を機械的に刻む — 範囲が開いた瞬間の記帳
+            (§11-4)。**None / 空 = 選択なし = 直列** (エッジ 0 本、既存挙動は
+            無変化)。分岐・再生成 / 並列統合 / メティス取り込みの前駆を渡す口。
         session: 呼び出し元が開いている Session。**指定した場合、本関数は
             commit も close もしない** — Episode 行 INSERT が呼び出し元の
             1 commit に同梱される (予約 tx で slot 状態・予算・台帳 running と
@@ -269,7 +277,8 @@ def open_episode(
             ``refresh`` は不要)。**open キャッシュは触らない** — 呼び出し元が
             commit 後に :func:`invalidate_open_cache` で整合を負う契約
             (未コミット状態を映さないため)。指定なしなら自前 Session で
-            commit + キャッシュ更新する (従来挙動、無傷)。
+            commit + キャッシュ更新する (従来挙動、無傷)。継承エッジも同じ
+            tx / 自前 commit に相乗りする。
 
     Returns:
         直列化した出来事 dict (episode_ref = ``episode:N`` を含む)。
@@ -304,6 +313,13 @@ def open_episode(
         )
         db.add(ep)
         db.flush()
+        if predecessors:
+            # 継承エッジは範囲が開いた瞬間、同一 tx で機械的に記帳する (§11-4)。
+            # 循環 import 回避のため遅延ロード。child は今 flush した episode_id。
+            from saiverse import experience_inheritance as EI
+            EI.record_edges(
+                None, persona_id, episode_id, predecessors, session=db,
+            )
         return ep
 
     if session is not None:

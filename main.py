@@ -353,7 +353,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique, ensure_episode_inheritance_table
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -400,6 +400,11 @@ def main():
     # Region 入口所有の一意 index (同 W7 柱5): 共有入口があれば WARN のみ
     # (自動修復しない — 所有の選択は人間の判断)。冪等。
     ensure_region_entrance_unique(str(db_path))
+
+    # 継承エッジ (episode_inheritance) の軽量シンク (experience_structure.md §3.3 /
+    # 完了計画書 W13): テーブル追加のみを素早く確実に適用する。既存 DB には
+    # エッジ 0 本で追加されるだけで既存行に触れない (無害)。冪等。
+    ensure_episode_inheritance_table(str(db_path))
 
     # Note → テーマノード移行 (P3c①) の後始末: note テーブルが (ペルソナ単位の
     # 扇形移行完了により) 空になったら note/note_page/note_message/track_open_note

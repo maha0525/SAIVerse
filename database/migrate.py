@@ -1051,6 +1051,34 @@ def ensure_execution_ledger_tables(db_path: str) -> None:
         engine.dispose()
 
 
+def _ensure_episode_inheritance_table(engine) -> None:
+    """継承エッジ (episode_inheritance) を軽量パスで揃える。
+
+    experience_structure.md §3.3 / 完了計画書 W13。新規テーブルは
+    needs_migration → try_additive_migration の汎用パスでも作られるが、実行台帳・
+    Building Memory と同様「テーブル追加は素早く確実に適用したい」ため
+    CREATE TABLE IF NOT EXISTS 相当の冪等な軽量シンク経路を別途持つ
+    (schema_sync.ensure_table_columns_indexes に委譲)。既存 DB に対しては
+    テーブル追加のみ (既存行に触れず、エッジ 0 本で無害)。
+    """
+    try:
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import EpisodeInheritance
+        ensure_table_columns_indexes(engine, EpisodeInheritance.__table__)
+    except Exception as e:
+        logging.error("継承エッジテーブルの作成に失敗しました: %s", e, exc_info=True)
+        raise
+
+
+def ensure_episode_inheritance_table(db_path: str) -> None:
+    """継承エッジテーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_episode_inheritance_table(engine)
+    finally:
+        engine.dispose()
+
+
 def _backfill_session_anchors(engine) -> None:
     """AI.METABOLISM_ANCHORS (単一 JSON) → session_anchor 行分離の移行 (冪等)。
 

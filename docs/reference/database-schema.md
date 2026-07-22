@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 45
+**テーブル数**: 46
 
 ## addon_config
 
@@ -390,6 +390,20 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `AIID` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
 | `ENTRY_TIMESTAMP` | DATETIME | NOT NULL |  |
 | `EXIT_TIMESTAMP` | DATETIME | — |  |
+
+## episode_inheritance
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `EDGE_ID` | VARCHAR(36) | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
+| `CHILD_EPISODE_ID` | VARCHAR(36) | NOT NULL |  |
+| `PARENT_EPISODE_ID` | VARCHAR(36) | NOT NULL |  |
+| `LAYER` | VARCHAR(16) | NOT NULL |  |
+| `ANCHOR_REF` | VARCHAR(255) | — |  |
+| `ORIGIN` | VARCHAR(32) | — |  |
+| `CREATED_AT` | INTEGER | NOT NULL |  |
+| `META_JSON` | TEXT | — |  |
 
 ## episodes
 
