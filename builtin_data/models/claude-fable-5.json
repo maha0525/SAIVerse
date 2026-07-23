@@ -2,7 +2,7 @@
   "model": "claude-fable-5",
   "system_prompt": "現在の使用モデルはClaude Fable 5です。",
   "display_name": "Claude Fable 5",
-  "provider": "anthropic",
+  "provider_ref": "anthropic",
   "context_length": 1000000,
   "default_max_history_messages": 100,
   "metabolism_keep_messages": 40,

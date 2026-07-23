@@ -28,6 +28,8 @@ _PROTOCOL_TO_LEGACY_PROVIDER = {
 _INHERITABLE_FIELDS = [
     ("base_url", "base_url"),
     ("api_key_env", "api_key_env"),
+    ("api_key_env_alternates", "api_key_env_alternates"),
+    ("api_key_required", "api_key_required"),
     ("convert_system_to_user", "default_convert_system_to_user"),
     ("max_image_bytes", "default_max_image_bytes"),
     ("supports_images", "default_supports_images"),
@@ -481,14 +483,29 @@ def _get_required_env_vars(model: str) -> list[str]:
     config = MODEL_CONFIGS.get(model, {})
     provider = config.get("provider", "")
 
+    # Providers that declare no authentication (local servers such as LM Studio
+    # or llama.cpp, which speak the OpenAI protocol but accept any key).
+    if config.get("api_key_required") is False:
+        return []
+
     # Local models need no API key
     if provider in ("ollama", "llama_cpp"):
         return []
 
-    # Explicit api_key_env in config takes priority
+    # Explicit api_key_env in config takes priority. Alternates (inherited from
+    # the provider via provider_ref, e.g. Gemini's free-tier key) are additional
+    # accepted names — the model is available if ANY of them is set, so they
+    # must be returned alongside the primary name rather than replaced by it.
     api_key_env = config.get("api_key_env")
     if api_key_env:
-        return [api_key_env]
+        names = [api_key_env]
+        alternates = config.get("api_key_env_alternates")
+        if isinstance(alternates, list):
+            names.extend(
+                alt for alt in alternates
+                if isinstance(alt, str) and alt and alt not in names
+            )
+        return names
 
     # Provider defaults
     if provider == "anthropic":

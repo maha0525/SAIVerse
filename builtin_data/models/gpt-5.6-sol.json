@@ -2,7 +2,7 @@
   "model": "gpt-5.6-sol",
   "system_prompt": "",
   "display_name": "GPT-5.6 Sol (< 1M)",
-  "provider": "openai",
+  "provider_ref": "openai",
   "context_length": 1050000,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 20,

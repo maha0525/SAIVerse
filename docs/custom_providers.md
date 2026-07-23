@@ -29,19 +29,17 @@ API キーの値そのものを設定します（プロバイダ JSON には環�
 ## ケース 1: LM Studio（ローカル）
 
 LM Studio はデスクトップアプリで、ローカルの GGUF モデルを OpenAI 互換 API
-として配信します。デフォルトでは `http://localhost:1234/v1` で動作。
+として配信します。デフォルトでは `http://127.0.0.1:1234/v1` で動作。
 
-### プロバイダ追加
+### プロバイダ追加 — 不要（同梱済み）
 
-| フィールド | 値 |
-|-----------|------|
-| ID | `lmstudio` |
-| 表示名 | `LM Studio (local)` |
-| プロトコル | `OpenAI 互換` |
-| Base URL | `http://localhost:1234/v1` |
-| API キー環境変数名 | （空欄で OK、認証不要のため） |
+`lmstudio` プロバイダは最初から入っています（`builtin_data/providers/lmstudio.json`）。
+**API キーの設定も不要**です。モデル追加に進んでください。
 
-保存後、「接続テスト」を押すと LM Studio で公開中のモデル一覧が表示されます。
+ポートを変えている場合は、モデル管理 > プロバイダタブで `lmstudio` を開き
+Base URL を書き換えて保存します（同梱の定義は変更されず、`user_data` に
+上書きが作られます）。「接続テスト」を押すと LM Studio で公開中のモデル一覧が
+表示されます。
 
 ### モデル追加
 
@@ -72,15 +70,10 @@ LM Studio はデスクトップアプリで、ローカルの GGUF モデルを 
 `llama-server`（llama.cpp 同梱）は OpenAI 互換 API を提供します。
 デフォルトでは `http://127.0.0.1:8080/v1`。
 
-### プロバイダ追加
+### プロバイダ追加 — 不要（同梱済み）
 
-| フィールド | 値 |
-|-----------|------|
-| ID | `llama-cpp-server` |
-| 表示名 | `llama.cpp Server` |
-| プロトコル | `OpenAI 互換` |
-| Base URL | `http://127.0.0.1:8080/v1` |
-| API キー環境変数名 | （空欄） |
+`llama_cpp_server` プロバイダは最初から入っています（API キーも不要）。
+ポートを変えている場合だけ、プロバイダタブで Base URL を書き換えてください。
 
 ### モデル追加
 
@@ -91,10 +84,15 @@ llama-server はサーバー起動時にロードしたモデル 1 個だけを�
 {
   "model": "loaded-model",
   "display_name": "Llama 3 70B (llama.cpp)",
-  "provider_ref": "llama-cpp-server",
+  "provider_ref": "llama_cpp_server",
   "context_length": 8192
 }
 ```
+
+SAIVerse から `llama-server` を自動起動させたい場合は、
+`builtin_data/models/llama-cpp-server-template.json` をコピーして
+`~/.saiverse/user_data/models/` に置き、`llama_server` セクションを埋めます
+（詳細は [`docs/intent/llama_server_auto_launch.md`](intent/llama_server_auto_launch.md)）。
 
 ---
 

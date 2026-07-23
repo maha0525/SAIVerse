@@ -145,6 +145,8 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **`id`**: プロバイダ一意識別子（ファイル名 stem と一致させる）
 - **`protocol`**: `openai_compat` / `ollama_compat` / `anthropic_native` / `gemini_native` / `xai_native` / `openai_codex` / `nvidia_nim`。UI 作成可能なのは前2つのみ
 - **`base_url` / `api_key_env`**: 該当プロトコルが必要とする接続情報
+- **`api_key_env_alternates`**: `api_key_env` の代わりに受け付ける環境変数名の配列。**どれか1つでも設定されていればそのモデルは利用可能**として扱う。Gemini が該当（`GEMINI_API_KEY` に加えて無料枠の `GEMINI_FREE_API_KEY`）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()` → `is_model_available()` で、`GET /api/models` がモデル一覧に出すかどうかを決める
+- **`api_key_required`**: `false` なら認証しないバックエンド（LM Studio / llama.cpp server などのローカルサーバー）。キー未設定でもモデル一覧に出し、OpenAI 互換クライアントにはプレースホルダのキーを渡す（SDK が空キーを拒否するため）。`api_key_env` が併記され、その環境変数が設定されていればそちらが優先される
 - **`default_*`**: モデル JSON 側で `request_kwargs` / `convert_system_to_user` 等が未指定の場合のフォールバック値
 - **`builtin`**: true なら UI から編集・削除不可（builtin_data 配下のものは自動的に true 扱い）
 

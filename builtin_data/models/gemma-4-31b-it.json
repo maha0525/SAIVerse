@@ -2,7 +2,7 @@
   "model": "gemma-4-31b-it",
   "system_prompt": "",
   "display_name": "Gemma 4 31B(無料枠)",
-  "provider": "gemini",
+  "provider_ref": "gemini",
   "context_length": 262144,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 40,

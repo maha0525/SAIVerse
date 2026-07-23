@@ -1,6 +1,6 @@
 # Intent: モデル定義の外部配布とカタログ
 
-**ステータス**: 設計中 (v0.1, 2026-07-23)。段階1〜2 は設計確定・実装待ち。段階3以降はまはーレビュー待ち。
+**ステータス**: 設計中 (v0.1, 2026-07-23)。段階1〜2 は実装済み・検証済み。段階3以降はまはーレビュー待ち。
 
 前提となる既存設計: [モデル＆プロバイダ管理 UI](model_provider_management.md)
 
@@ -49,9 +49,11 @@ Lite の推奨モデルは `gemini-3.5-flash` のまま固定されており、�
 | モデルID / 表示名 / context_length / 料金 / 利用制限 / キャッシュ条件 / 対応メディア | カタログ（外部でよい） | 後述のカタログ置き場 |
 | 上記すべての上書き | まはー自身 | `~/.saiverse/user_data/` |
 
-## 現状の事実 (2026-07-23 時点の実測)
+## 現状の事実
 
-プロバイダ定義とモデル定義を分ける仕組みは既にある (`saiverse/model_configs.py` の `_resolve_provider_ref`)。ただし移行がほとんど進んでいない。
+プロバイダ定義とモデル定義を分ける仕組みは既にある (`saiverse/model_configs.py` の `_resolve_provider_ref`)。
+
+**着手時 (2026-07-23 朝の実測)**: 移行がほとんど進んでいなかった。
 
 | | 件数 |
 |---|---|
@@ -60,29 +62,120 @@ Lite の推奨モデルは `gemini-3.5-flash` のまま固定されており、�
 | `base_url` を直接持つもの | 55 |
 | `api_key_env` を直接持つもの | 61 |
 
-`_resolve_provider_ref` の解決順は「モデル側の直接フィールドが常に優先」。つまり現状のままカタログを外部化すると、カタログのモデル定義が `base_url` を書くだけで接続先を乗っ取れる。**不変条件2は今は成立していない。**
+`_resolve_provider_ref` の解決順は「モデル側の直接フィールドが常に優先」。つまりこの状態でカタログを外部化すると、カタログのモデル定義が `base_url` を書くだけで接続先を乗っ取れた。**不変条件2は成立していなかった。**
 
-直接持っている61件の接続先は3種類しかない。
-
-| 接続先 | 件数 | 移行先 | プロバイダ定義 |
-|---|---|---|---|
-| `https://openrouter.ai/api/v1` | 39 | `provider_ref: openrouter` | **新規に作る必要がある** |
-| `https://integrate.api.nvidia.com/v1` | 16 | `provider_ref: nvidia_nim` | 既にあり、base_url も一致 |
-| (xAI、base_url なし・`XAI_API_KEY` のみ) | 6 | `provider_ref: xai` | 既にある |
-
-プロバイダ定義を1つ足せば、128件すべてから接続情報を消せる。
+**段階2完了後 (同日)**: `provider_ref` 128件 / 接続情報を直接持つ同梱モデル **0件**(llama.cpp テンプレートを除く)。不変条件2の前提が同梱側で成立し、恒久検査 `test_builtin_models_carry_no_connection_info` で固定した。
 
 ## 段階
 
-### 段階1: `openrouter` のプロバイダ定義を追加
+### 段階1: `openrouter` のプロバイダ定義を追加 — 完了 (2026-07-23)
 
-`builtin_data/providers/openrouter.json` を作る。`protocol` は `openai_compat`、`base_url` は `https://openrouter.ai/api/v1`、`api_key_env` は既存モデルが使っている環境変数名に合わせる。
+`builtin_data/providers/openrouter.json` を作った。`protocol` は `openai_compat`、`base_url` は `https://openrouter.ai/api/v1`、`api_key_env` は既存モデルが使っていた `OPENROUTER_API_KEY` に合わせた。
 
-### 段階2: 61件を `provider_ref` へ移行
+### 段階2: 接続情報を持つ全モデルを `provider_ref` へ移行 — 完了 (2026-07-23)
 
-各モデル定義から `base_url` / `api_key_env` / `provider` を削り、`provider_ref` を1行入れる。機械的な書き換えなので、移行前後で `get_model_config()` の解決結果が全モデルで一致することを検査しながら回せる。
+同梱モデル定義から接続情報を消し切った。3陣に分かれた。
 
-**段階1〜2 は、カタログを作るかどうかと独立して価値がある。** 外部配布をやらないと決めても、既に設計されて3%しか進んでいない移行が完了して128件が一貫した形になるだけで、無駄にならない。だから判断を先送りにしたまま着手できる。
+**第1陣 (61件)**: `base_url` / `api_key_env` を直接持っていたもの。openrouter 39件 / nvidia_nim 16件 / xai 6件。各定義から `base_url` / `api_key_env` / `provider` を削り `provider_ref` を1行入れた。
+
+**第2陣 (41件)**: 接続情報は持たず `provider` だけが旧形式だったもの。openai 24件 / anthropic 9件 / openai_codex 8件。これらは `base_url` も `api_key_env` も未設定でクライアント側の既定に依存していたため、`provider_ref` 化で「暗黙の既定」が「明示的に同じ値」へ変わるだけになる。
+
+**第3陣 (20件)**: gemini。後述の欠陥を直してから移行した。
+
+残したもの: **ollama 2件**(後述)と、`~/.saiverse/user_data/models/` にあるまはー自身の定義8件(LM Studio / koboldcpp / Moonshot / ollama)。user_data は所有者表のとおり接続情報を書いてよい層なので移行対象ではない。
+
+#### 途中で見つけた欠陥: `api_key_env_alternates` が実装されていなかった
+
+gemini 20件をそのまま移行すると **Gemini が丸ごとモデル一覧から消える** ことが分かり、原因を追って直した。
+
+`builtin_data/providers/gemini.json` には `api_key_env: "GEMINI_API_KEY"` に加えて `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]`(無料枠キー)が宣言されている。しかし **このフィールドはコードのどこからも読まれていなかった**。実際に「どちらか一方でよい」を成立させていたのは `_get_required_env_vars()` の中のプロバイダ名ハードコード表:
+
+```python
+api_key_env = config.get("api_key_env")
+if api_key_env:
+    return [api_key_env]                              # ← 単一キーで確定
+if provider == "gemini":
+    return ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"]  # ← 実質ここが alternates 役
+```
+
+移行前の gemini モデルは `api_key_env` を持たないので下の枝に落ちていた。`provider_ref` を付けるとプロバイダから `api_key_env` を継承して上の枝に入り、無料枠キーしか持たない環境で `is_model_available()` が False になる——つまり `GET /api/models` から Gemini が消える。
+
+**宣言はあるが実装がゼロ**という型で、ACTIVITY_STATE / `SLEEP_ON_CACHE_EXPIRE` の解体([landscape §9](../overview/landscape.md))とまったく同じ。あのとき intent に書いた教訓「実装しない設計を、列とコメントの形で残してはいけない」が、今度は provider 定義のフィールドで再発していた。
+
+修正は宣言側に合わせる方向で入れた。`_INHERITABLE_FIELDS` に `api_key_env_alternates` を加えて `provider_ref` 経由で継承させ、`_get_required_env_vars()` が主キーと代替キーを併せて返すようにした(重複と非文字列は落とす)。プロバイダ名ハードコード表は、`provider_ref` を持たない user_data の旧形式モデルがまだ通るので残してある。
+
+#### 途中で見つけた欠陥2: Ollama だけ接続先を UI から変えられなかった
+
+ollama 2件は当初「移行すると `OLLAMA_BASE_URL` が効かなくなる」という理由で保留にしたが、まはーの指摘で**問題設定が間違っていた**ことが分かった。守るべきは現状の動きではなく、現状の動きのほうがおかしかった。
+
+| | 接続先の変え方 |
+|---|---|
+| LM Studio / koboldcpp 等(ユーザーが自分で作るプロバイダ) | UI のプロバイダタブで `base_url` を編集 |
+| **Ollama**(同梱プロバイダ) | **環境変数だけ**。UI で編集しても効かない |
+
+同梱プロバイダのほうが融通が利かない逆転が起きていた。原因は ollama モデルが `provider_ref` を使っていないこと。`PUT /api/providers/ollama` は user_data 上書きを作る([providers.py](../../api/routes/providers.py) `update_provider`)のに、モデル側がそこを参照していないので**編集した値がどこにも届かない**。`provider_ref` 化は「環境変数を殺すもの」ではなく、**UI で設定できるようにするための前提条件**だった。
+
+対処は3点。
+
+1. **同梱の `ollama` プロバイダ定義から `base_url` を外した。** ここにアドレスを書くと全 ollama モデルが常時「設定済み」になり、環境変数と自動探索の両方が無効になる。空にしておけば、ユーザーが UI で設定したときだけ user_data 上書きに `base_url` が入り、`provider_ref` 経由で継承される
+2. **ollama モデル2件に `provider_ref` を付けた。** これで UI の編集がモデルに届く
+3. **設定されたアドレスは探索対象を「上書き」ではなく「限定」するようにした。** 従来は指定アドレスを第一候補にした上で `127.0.0.1` 等も試し、指定先が落ちていると黙って別のホストに繋がっていた。設定は指示であって助言ではないので、指定があるならそこだけを試し、応答が無ければそのアドレスを保持して警告を出す(リクエスト時に見える形で失敗させる)
+
+結果として接続先の決まり方はこうなった。
+
+| 優先度 | 出所 | 探索 |
+|---|---|---|
+| 1 | プロバイダ `base_url`(UI 編集) / モデル `base_url` / `OLLAMA_BASE_URL` / `OLLAMA_HOST` | 指定されたアドレスのみ |
+| 2 | 何も設定されていないとき | `127.0.0.1` → `localhost` → `host.docker.internal` → `172.17.0.1` を実接続で探索 |
+
+`llm_clients/ollama.py` の `_probe_base` に散らばっていた URL 正規化(スキーム補完・`0.0.0.0` → `127.0.0.1` 置換)は `_normalize_ollama_url` に括り出し、探索経路とフォールバック経路の両方から使うようにした(片方だけ正規化される状態を作らないため)。
+
+#### 派生: ローカル LLM サーバーを同梱プロバイダにする
+
+まはーの提案で `lmstudio` プロバイダを同梱した。当初「Ollama と同じ作業」と見込んだが**逆だった**。
+
+| | Ollama | LM Studio |
+|---|---|---|
+| protocol | `ollama_compat` | `openai_compat` |
+| `base_url` 未設定時 | 自動探索(正しく動く) | **OpenAI 本家へ接続**(事故) |
+| API キー | クライアントが要求しない | **`openai.py` が必ず要求**(無いと起動時 `AuthenticationError`) |
+
+つまり LM Studio は `base_url` を**書かねばならず**、そのうえでキー要求を解く必要があった。`docs/custom_providers.md` は「API キー環境変数名＝空欄で OK、認証不要のため」と案内していたが、実装はその設定で `OPENAI_API_KEY` を読みに行き、無ければ落ちる。**ドキュメントどおりに設定すると動かない**状態だった(OpenAI アカウントを持つ利用者だけが気づかない)。
+
+`ollama_compat` を別プロトコルにしている理由も確認した。Ollama 固有の必要があり、統合はできない。
+
+- **`num_ctx`** — Ollama はコンテキスト長をリクエストごとに `options.num_ctx` で渡す必要があり、渡さないとモデル既定(2048〜4096程度)に切り詰められる。OpenAI プロトコルに該当パラメータが無く、`OllamaClient` だけが `context_length` を引数に取るのはこのため
+- **パラメータの入れ物** — サンプリング設定が `options` の入れ子で、名前も `num_predict` / `repeat_penalty` / `mirostat` 系と異なる
+- **エンドポイント2系統の使い分け** — `/v1/chat/completions`(OpenAI 互換)と `/api/chat`(ネイティブ)を持ち、ツール呼び出しは `/v1` 優先、構造化出力とストリーミングは `/api/chat` 優先と**用途で逆転する**。推論モードの `think` は `/api/chat` にしか無い
+
+LM Studio はコンテキスト長をアプリ側でモデルロード時に決めるため、リクエストごとに送る必要がない。`openai_compat` のままで足りる。
+
+**`api_key_required: false` を新設した。** 認証しないバックエンドの宣言で、2箇所に効く。
+
+1. `_get_required_env_vars()` が空を返す → キー未設定でもモデル一覧に出る
+2. factory が OpenAI 互換クライアントにプレースホルダのキーを渡す(SDK が空キーを拒否するため)。ただし `api_key_env` の環境変数が設定されていればそちらを優先 — ローカルサーバーに認証を掛ける利用者を潰さないため
+
+`lmstudio` / `llama_cpp_server` の両方に付けた。同梱の `lmstudio.json` は **`api_key_env` を書いていない**。書くと、UI で編集した瞬間に user_data 上書きとなって同梱扱いが外れ、`provider_security.validate_provider_config` の資格情報束縛(カスタムプロバイダは `SAIVERSE_PROVIDER_<ID>_API_KEY` のみ許可)に弾かれて 400 になるため。この経路は回帰テストで固定した。
+
+UI(モデル管理 > プロバイダ)にも「API キーなしで接続できるサーバー」チェックボックスを追加し、自作プロバイダでも同じ宣言ができるようにした。API は `ProviderInfo` / Create / Update の3箇所に通してある(`false` は `exclude_none` で落ちないため、チェックを外す操作も保存される)。
+
+**まはーの環境での注意**: `~/.saiverse/user_data/providers/lmstudio.json` が既に存在する(表示名 `LM Studio (Local)`、`api_key_env: LMSTUDIO_API_KEY`)。3層優先で user_data が勝つため、同梱版は隠れたままになる。UI の「削除」で user_data 版を消すと同梱版が現れる。なお user_data 版は `api_key_env` を持つため、`provider_ref: "lmstudio"` を使うモデルを作ると上記の資格情報束縛で拒否される。
+
+#### 検証
+
+- 第1陣61件: 移行前後で `_resolve_provider_ref` + `factory._resolve_protocol` の解決結果(`model`/`base_url`/`api_key_env`/`provider`/`protocol`)が全件一致
+- 第2陣41件: 上記に加え、factory が補う実効 `max_image_bytes`([factory.py:142](../../llm_clients/factory.py) が `supports_images` かつ未設定なら 5MB を注入)が不変であること、および暗黙→明示になったフィールドがクライアント既定と同値であることを確認(57フィールド)
+- 全122件: `_get_required_env_vars()` の返り値が移行前後で完全一致(gemini の欠陥を捕まえたのがこの検査)
+- `tests/test_model_configs.py` に11件追加。代替キーの併記・重複排除・無料枠キー単独での可用性・「同梱モデルは接続情報を持たない」の恒久検査
+- `tests/test_ollama_endpoint.py` を新設(14件)。未設定時の探索・設定時に探索先が限定されること・**指定先が落ちていても localhost に落ちないこと**・環境変数と `base_url` の優先順位・設定済みアドレスが共有キャッシュを汚さないこと・URL 正規化
+- 既存 `test_ollama_compat_inheritance` は「`base_url` が継承される」を固定していたので、**空であることが仕様**である旨と理由を書いて更新した(期待値だけ書き換えない)
+- `TestKeylessProviders`(8件)。同梱 `lmstudio` の内容・UI 編集後も資格情報検証を通ること・フラグの継承・キー皆無でのモデル可用性・**プレースホルダキーでのクライアント生成**・実キーがプレースホルダに優先すること・API のラウンドトリップ・**通常プロバイダにフラグが漏れないこと**。同梱定義を検証する箇所は `get_provider` を builtin に固定した(user_data 上書きを持つ端末で結果が変わらないようにするため — 実際に一度これで落とした)
+- フロント: `tsc --noEmit` / eslint clean。**UI の実挙動は未確認** — 確認にはバックエンド起動が必要で、本番ペルソナが動きうるため立ち上げていない。代わりに `GET /api/providers/{id}` を TestClient で叩き、UI が読む `api_key_required` が実際に返ることを確認した
+- 全体スイート: 移行完了時点で 3111 passed、ollama 対処後 3125 passed、キー不要プロバイダ対処後に再走(増分は新規テスト、既存の回帰ゼロ) / ruff clean
+
+**成果**: `provider_ref` 採用は4件 → 128件。**同梱モデル定義から接続情報が消えた**(llama.cpp テンプレートのみ例外、ローカルポートを固定する性質上)。これは段階3の前提そのもので、テストで固定してある。
+
+**段階1〜2 は、カタログを作るかどうかと独立して価値がある。** 外部配布をやらないと決めても、既に設計されて3%しか進んでいなかった移行が完了して一貫した形になり、その過程で無料枠キーの欠陥が1つ潰れた。
 
 ### 段階3: カタログの置き場と、出所による制限
 

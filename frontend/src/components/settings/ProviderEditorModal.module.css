@@ -75,6 +75,19 @@
     color: var(--text-secondary, #777);
 }
 
+.checkboxLabel {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.checkboxLabel input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--accent-primary, #06b6d4);
+}
+
 .error {
     color: #c53030;
     font-size: 0.8rem;

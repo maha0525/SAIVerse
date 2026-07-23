@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict
 
 from saiverse.model_configs import get_model_config, get_model_parameter_defaults
@@ -18,6 +19,12 @@ from .base import LLMClient
 
 # Map legacy 'provider' field values to the new 'protocol' field. Used when
 # a model config predates the provider/protocol split (no explicit protocol).
+# Sent as the API key to local servers that declare api_key_required: false.
+# The value is never checked by those servers; the OpenAI SDK just requires
+# the field to be non-empty.
+_LOCAL_SERVER_PLACEHOLDER_KEY = "local-server-no-auth"
+
+
 _LEGACY_PROVIDER_TO_PROTOCOL = {
     "openai": "openai_compat",
     "ollama": "ollama_compat",
@@ -94,6 +101,16 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             api_key_env = config.get("api_key_env")
             if isinstance(api_key_env, str) and api_key_env.strip():
                 extra_kwargs["api_key_env"] = api_key_env.strip()
+
+            # Local OpenAI-compatible servers (LM Studio, llama.cpp server)
+            # accept any key. Without this the client would demand a real
+            # OPENAI_API_KEY and refuse to start, so supply a placeholder —
+            # but only when the user has not set a key of their own, since
+            # these servers can be put behind real auth.
+            if config.get("api_key_required") is False:
+                configured_key = os.getenv(api_key_env) if api_key_env else None
+                if not configured_key:
+                    extra_kwargs["api_key"] = _LOCAL_SERVER_PLACEHOLDER_KEY
 
             request_kwargs = config.get("request_kwargs")
             if isinstance(request_kwargs, dict):

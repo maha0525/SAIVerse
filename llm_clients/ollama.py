@@ -18,6 +18,20 @@ MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
 
 
+def _normalize_ollama_url(value: str) -> str:
+    """Make a user-supplied Ollama address connectable.
+
+    Adds a missing scheme ("0.0.0.0:11434" -> "http://0.0.0.0:11434") and
+    rewrites the wildcard listen address to a loopback one, since 0.0.0.0 is
+    something a server binds to, not something a client can connect to
+    (notably on Windows).
+    """
+    value = value.strip()
+    if not value.startswith(("http://", "https://")):
+        value = f"http://{value}"
+    return value.replace("://0.0.0.0", "://127.0.0.1")
+
+
 def _is_rate_limit_error(err: Exception) -> bool:
     """Check if the error is a rate limit that should be retried."""
     msg = str(err).lower()
@@ -112,23 +126,37 @@ class OllamaClient(LLMClient):
         self.model = model
         self.context_length = context_length
         self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
-        # Use explicit base_url parameter first, then environment variables
-        base_env = base_url or os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+        # Where the address came from decides how much freedom we have to look
+        # elsewhere. An address the user configured (provider/model JSON, or the
+        # OLLAMA_* env vars) is an instruction, not a hint: if it is unreachable
+        # we keep it and let the request fail visibly, rather than silently
+        # talking to a different Ollama on localhost. Only when nothing is
+        # configured do we go hunting for a local instance.
+        configured = base_url or os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
 
-        # Reuse cached probe result if available (class-level cache)
-        if OllamaClient._probe_done and not base_url:
+        # Reuse cached probe result if available (class-level cache). The cache
+        # only applies to the discovery path — a configured address is
+        # per-instance and must not leak into (or read from) the shared cache.
+        if OllamaClient._probe_done and not configured:
             probed = OllamaClient._probe_cache
         else:
-            probed = self._probe_base(base_env)
-            if not base_url:
+            probed = self._probe_base(configured)
+            if not configured:
                 OllamaClient._probe_cache = probed
                 OllamaClient._probe_done = True
 
-        if probed is None:
+        if probed is not None:
+            self.base = probed
+        elif configured:
+            self.base = _normalize_ollama_url(str(configured).split(",")[0])
+            logging.warning(
+                "Configured Ollama endpoint %s did not respond; using it anyway "
+                "(set OLLAMA_BASE_URL or the ollama provider's base_url to change it)",
+                self.base,
+            )
+        else:
             logging.warning("No responsive Ollama endpoint found during initialization")
             self.base = "http://127.0.0.1:11434"
-        else:
-            self.base = probed
         self.url = f"{self.base}/v1/chat/completions"
         self.chat_url = f"{self.base}/api/chat"
 
@@ -139,25 +167,27 @@ class OllamaClient(LLMClient):
         cls._probe_done = False
 
     def _probe_base(self, preferred: Optional[str]) -> Optional[str]:
-        """Pick a reachable Ollama base URL with quick connect timeouts."""
+        """Pick a reachable Ollama base URL with quick connect timeouts.
+
+        When ``preferred`` is set the search is limited to those addresses —
+        a configured endpoint must never resolve to a different host. Comma
+        separated values are still allowed and are all tried, since that form
+        is an explicit list of places to look. With nothing configured we fall
+        back to discovering a local instance.
+        """
         candidates: List[str] = []
         if preferred:
             for part in str(preferred).split(","):
                 part = part.strip()
                 if part:
-                    # Add http:// scheme if missing (e.g. "0.0.0.0:11434" -> "http://0.0.0.0:11434")
-                    if not part.startswith(("http://", "https://")):
-                        part = f"http://{part}"
-                    # 0.0.0.0 is a listen address, not connectable (especially on Windows).
-                    # Replace with 127.0.0.1 for client connections.
-                    part = part.replace("://0.0.0.0", "://127.0.0.1")
-                    candidates.append(part)
-        candidates += [
-            "http://127.0.0.1:11434",
-            "http://localhost:11434",
-            "http://host.docker.internal:11434",
-            "http://172.17.0.1:11434",
-        ]
+                    candidates.append(_normalize_ollama_url(part))
+        if not candidates:
+            candidates = [
+                "http://127.0.0.1:11434",
+                "http://localhost:11434",
+                "http://host.docker.internal:11434",
+                "http://172.17.0.1:11434",
+            ]
         seen = set()
         for base in candidates:
             if base in seen:

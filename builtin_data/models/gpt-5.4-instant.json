@@ -2,7 +2,7 @@
   "model": "gpt-5.4",
   "system_prompt": "",
   "display_name": "GPT-5.4 Instant (< 272k)",
-  "provider": "openai",
+  "provider_ref": "openai",
   "context_length": 272000,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 20,

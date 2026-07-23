@@ -13,6 +13,7 @@ export interface ProviderConfig {
     api_key_env?: string | null;
     builtin?: boolean;
     api_key_configured?: boolean | null;
+    api_key_required?: boolean | null;
 }
 
 interface ConnectionTestResult {
@@ -42,6 +43,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
     const [protocol, setProtocol] = useState('openai_compat');
     const [baseUrl, setBaseUrl] = useState('');
     const [apiKeyEnv, setApiKeyEnv] = useState('');
+    const [keylessServer, setKeylessServer] = useState(false);
     const [isBuiltin, setIsBuiltin] = useState(false);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -62,6 +64,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
             setProtocol('openai_compat');
             setBaseUrl('http://localhost:1234/v1');
             setApiKeyEnv('');
+            setKeylessServer(false);
             setIsBuiltin(false);
         }
     }, [isOpen, mode, providerId]);
@@ -80,6 +83,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
             setProtocol(data.protocol || 'openai_compat');
             setBaseUrl(data.base_url || '');
             setApiKeyEnv(data.api_key_env || '');
+            setKeylessServer(data.api_key_required === false);
             setIsBuiltin(!!data.builtin);
         } catch (e) {
             setError(`Load failed: ${e}`);
@@ -133,6 +137,9 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
             protocol,
             base_url: baseUrl || null,
             api_key_env: apiKeyEnv || null,
+            // Send false explicitly (the backend drops null/undefined fields and
+            // keeps the stored value, which would make unchecking a no-op).
+            api_key_required: keylessServer ? false : true,
         };
 
         setSaving(true);
@@ -249,16 +256,31 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
                             </div>
 
                             <div className={styles.field}>
+                                <label className={styles.checkboxLabel}>
+                                    <input
+                                        type="checkbox"
+                                        checked={keylessServer}
+                                        onChange={e => setKeylessServer(e.target.checked)}
+                                    />
+                                    API キーなしで接続できるサーバー
+                                </label>
+                                <span className={styles.hint}>
+                                    LM Studio や llama.cpp サーバーなど、認証のないローカルサーバー向け。オンにすると、API キーを設定していなくてもモデル一覧に表示されます。
+                                </span>
+                            </div>
+
+                            <div className={styles.field}>
                                 <label>API キー環境変数名（任意）</label>
                                 <input
                                     className={styles.input}
                                     type="text"
                                     value={apiKeyEnv}
                                     onChange={e => setApiKeyEnv(e.target.value)}
-                                    placeholder="例: LMSTUDIO_API_KEY"
+                                    placeholder={keylessServer ? '認証なしなら空欄のまま' : '例: KIMI_API_KEY'}
                                 />
                                 <span className={styles.hint}>
-                                    キーの値そのものではなく、環境変数の名前を入力します。値はグローバル設定の「環境変数」タブで管理してください。ローカルサーバーで認証不要なら空欄で OK。
+                                    キーの値そのものではなく、環境変数の名前を入力します。値はグローバル設定の「環境変数」タブで管理してください。
+                                    {keylessServer && 'ローカルサーバーに認証を掛けている場合だけ入力してください。'}
                                 </span>
                             </div>
 

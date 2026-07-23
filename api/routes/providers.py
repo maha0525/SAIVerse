@@ -50,6 +50,9 @@ class ProviderInfo(BaseModel):
     # Whether the api_key_env variable is set in the environment.
     # None means no api_key_env is configured (e.g., local Ollama).
     api_key_configured: Optional[bool] = None
+    # False for backends that accept any key (local servers such as LM Studio
+    # or llama.cpp). Such providers stay usable with no key configured.
+    api_key_required: Optional[bool] = None
     default_request_kwargs: Optional[dict[str, Any]] = None
     default_convert_system_to_user: Optional[bool] = None
     default_supports_images: Optional[bool] = None
@@ -62,6 +65,7 @@ class ProviderCreateRequest(BaseModel):
     protocol: str
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    api_key_required: Optional[bool] = None
     default_request_kwargs: Optional[dict[str, Any]] = None
     default_convert_system_to_user: Optional[bool] = None
     default_supports_images: Optional[bool] = None
@@ -74,6 +78,7 @@ class ProviderUpdateRequest(BaseModel):
     protocol: Optional[str] = None
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    api_key_required: Optional[bool] = None
     default_request_kwargs: Optional[dict[str, Any]] = None
     default_convert_system_to_user: Optional[bool] = None
     default_supports_images: Optional[bool] = None
@@ -113,6 +118,7 @@ def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
         api_key_env=api_key_env,
         builtin=bool(cfg.get("builtin")),
         api_key_configured=api_key_configured,
+        api_key_required=cfg.get("api_key_required"),
         default_request_kwargs=cfg.get("default_request_kwargs"),
         default_convert_system_to_user=cfg.get("default_convert_system_to_user"),
         default_supports_images=cfg.get("default_supports_images"),

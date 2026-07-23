@@ -1,5 +1,7 @@
 """Tests for model_configs.py — provider resolution, cost calculation, config lookup."""
+import os
 import unittest
+from unittest.mock import patch
 
 from saiverse import model_configs
 
@@ -111,6 +113,98 @@ class TestSupportsStructuredOutput(unittest.TestCase):
 
     def test_explicit_false(self):
         self.assertFalse(model_configs.supports_structured_output("nim-step-3.5-flash"))
+
+
+class TestRequiredEnvVars(unittest.TestCase):
+    """The availability gate behind GET /models.
+
+    A model with several accepted key names must stay available when ANY of
+    them is set. Gemini is the live case: the provider declares
+    api_key_env=GEMINI_API_KEY plus api_key_env_alternates=[GEMINI_FREE_API_KEY],
+    and a free-tier-only setup must still see Gemini models.
+    """
+
+    def _gate(self, config):
+        saved = model_configs.MODEL_CONFIGS
+        try:
+            model_configs.MODEL_CONFIGS = {"probe-model": config}
+            return model_configs._get_required_env_vars("probe-model")
+        finally:
+            model_configs.MODEL_CONFIGS = saved
+
+    def test_alternates_are_returned_alongside_primary(self):
+        names = self._gate({
+            "provider": "gemini",
+            "api_key_env": "GEMINI_API_KEY",
+            "api_key_env_alternates": ["GEMINI_FREE_API_KEY"],
+        })
+        self.assertEqual(names, ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"])
+
+    def test_primary_alone_when_no_alternates(self):
+        names = self._gate({"provider": "openai", "api_key_env": "OPENAI_API_KEY"})
+        self.assertEqual(names, ["OPENAI_API_KEY"])
+
+    def test_alternates_deduplicated_and_type_checked(self):
+        names = self._gate({
+            "provider": "gemini",
+            "api_key_env": "GEMINI_API_KEY",
+            "api_key_env_alternates": ["GEMINI_API_KEY", "", None, "OTHER_KEY"],
+        })
+        self.assertEqual(names, ["GEMINI_API_KEY", "OTHER_KEY"])
+
+    def test_local_models_need_no_key(self):
+        self.assertEqual(self._gate({"provider": "ollama"}), [])
+
+    def test_builtin_gemini_model_accepts_either_key(self):
+        # Regression guard: migrating gemini models to provider_ref must not
+        # collapse the gate down to the paid key alone.
+        names = model_configs._get_required_env_vars("gemini-3.6-flash")
+        self.assertIn("GEMINI_API_KEY", names)
+        self.assertIn("GEMINI_FREE_API_KEY", names)
+
+    def test_free_key_alone_keeps_gemini_available(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GEMINI_API_KEY", "GEMINI_FREE_API_KEY")}
+        env["GEMINI_FREE_API_KEY"] = "test-free-key"
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(model_configs.is_model_available("gemini-3.6-flash"))
+
+
+class TestProviderRefInheritance(unittest.TestCase):
+    def test_alternates_inherited_from_provider(self):
+        resolved = model_configs._resolve_provider_ref({
+            "model": "probe", "provider_ref": "gemini",
+        })
+        self.assertEqual(resolved.get("api_key_env"), "GEMINI_API_KEY")
+        self.assertEqual(
+            resolved.get("api_key_env_alternates"), ["GEMINI_FREE_API_KEY"],
+        )
+
+    def test_model_fields_win_over_provider(self):
+        resolved = model_configs._resolve_provider_ref({
+            "model": "probe",
+            "provider_ref": "gemini",
+            "api_key_env": "CUSTOM_KEY",
+        })
+        self.assertEqual(resolved.get("api_key_env"), "CUSTOM_KEY")
+
+    def test_builtin_models_carry_no_connection_info(self):
+        """Connection details belong to the provider, not the model.
+
+        builtin models must not pin base_url/api_key_env themselves — that is
+        what lets an external catalog be refused those fields later.
+        """
+        from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR
+        import json
+
+        offenders = []
+        for path in sorted((BUILTIN_DATA_DIR / MODELS_DIR).glob("*.json")):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("llama_server") or raw.get("llama_slot_save_path"):
+                continue  # local llama.cpp templates legitimately pin a port
+            if raw.get("base_url") or raw.get("api_key_env"):
+                offenders.append(path.stem)
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

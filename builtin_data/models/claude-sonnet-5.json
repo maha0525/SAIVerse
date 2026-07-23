@@ -2,7 +2,7 @@
   "model": "claude-sonnet-5",
   "system_prompt": "現在の使用モデルはClaude Sonnet 5です。\n\n[Model info]\n- 2026 Jan knowledge cutoff",
   "display_name": "Claude Sonnet 5",
-  "provider": "anthropic",
+  "provider_ref": "anthropic",
   "context_length": 1000000,
   "default_max_history_messages": 100,
   "metabolism_keep_messages": 40,
