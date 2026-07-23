@@ -238,7 +238,7 @@ python scripts/migrate_to_user_data.py             # Execute
 
 ### Data Flow
 
-**User Interaction**: UI → SAIVerseManager → PersonaCore → LLM + Tools → ActionHandler → SAIMemory + BuildingHistory
+**User Interaction**: UI → SAIVerseManager → PulseController → SEARuntime → LLM + Tools/Spell → SAIMemory + BuildingHistory
 
 **Autonomous Pulse**: Time-table (day plan) + judgment points (`saiverse/autonomy_wiring.py`) / `AutonomyManager` watchdog → PulseController → SEARuntime → think/speak nodes → SAIMemory
 
@@ -467,10 +467,6 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
   - `thread_switch.py`: switch SAIMemory active thread
   - `memory_recall.py`: semantic recall via MemoryCore
   - `save_playbook.py`: persist new playbook to DB
-
-### Action Handler (`saiverse/action_handler.py`)
-- Parses `::act ... ::end` blocks from LLM responses
-- Executes special actions: move, pickup_item, create_persona, summon, dispatch_persona, use_item
 
 ## Intent Documents
 

@@ -4,22 +4,11 @@ Bootstrapping helpers for PersonaCore initialisation.
 
 import json
 import logging
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from saiverse_memory import SAIMemoryAdapter
 from database.models import AI as AIModel
 from sqlalchemy.orm import Session
-
-
-def load_action_priority(path: Path) -> Dict[str, int]:
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return {str(k): int(v) for k, v in data.items()}
-        except Exception:
-            logging.warning("Failed to load action priority from %s", path)
-    return {"think": 1, "emotion_shift": 2, "move": 3}
 
 
 def load_session_data(persona) -> None:

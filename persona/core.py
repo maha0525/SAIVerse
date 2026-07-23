@@ -1,7 +1,7 @@
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime, timezone as dt_timezone, tzinfo, timedelta
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,6 @@ from persona.emotion_module import EmotionControlModule
 from database.models import AI as AIModel
 from persona.bootstrap import (
     initialise_memory_adapter,
-    load_action_priority,
     load_session_data,
 )
 from persona.constants import (
@@ -58,14 +57,9 @@ class PersonaCore(
         home_city_id: Optional[str] = None, # ★ 故郷のCity ID
         autonomy_enabled: bool = True, # ★ 自律行動の ON/OFF
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
-        action_priority_path: Path = Path("builtin_data/action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         occupants: Optional[Dict[str, List[str]]] = None,
         id_to_name_map: Optional[Dict[str, str]] = None,
-        move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
-        dispatch_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
-        explore_callback: Optional[Callable[[str, str], None]] = None, # New callback
-        create_persona_callback: Optional[Callable[[str, str], Tuple[bool, str]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         lightweight_model: Optional[str] = None,
@@ -114,7 +108,6 @@ class PersonaCore(
             b_id: self.saiverse_home / "buildings" / b_id / "log.json"
             for b_id in self.buildings
         }
-        self.action_priority = load_action_priority(action_priority_path)
 
         self.occupants = occupants if occupants is not None else {}
         self.id_to_name_map = id_to_name_map if id_to_name_map is not None else {}
@@ -152,10 +145,6 @@ class PersonaCore(
         initialise_pulse_state(self)
 
         # Initialize remaining attributes
-        self.move_callback = move_callback
-        self.dispatch_callback = dispatch_callback
-        self.explore_callback = explore_callback
-        self.create_persona_callback = create_persona_callback
         self.model = model
         self.lightweight_model = lightweight_model
         self.vision_model = vision_model

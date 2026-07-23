@@ -63,9 +63,7 @@ saiverse/
 ├── saiverse_manager.py     # 中央オーケストレーター（SAIVerseManager）
 ├── occupancy_manager.py    # 移動・占有管理（OccupancyManager）
 ├── conversation_manager.py # 自律会話駆動（旧プロトタイプ・実質 no-op）
-├── action_handler.py       # ::act ブロック解析・実行
 ├── autonomy_manager.py     # 自律バイオリズムの大リズム（50分 tick）
-├── pulse_scheduler.py      # SubLineScheduler（30秒ポーリングで自律 Track を回す）
 ├── event_scheduler.py      # スケジュール実行
 ├── clock.py                # 仮想クロック（時刻の一元供給源、一日シミュレータ用）
 ├── day_simulator.py        # DES ドライバ（仮想時刻でイベントキューを早回し）
@@ -255,8 +253,7 @@ builtin_data/
 ├── prompts/          # 組み込みプロンプト
 ├── icons/            # 組み込みアイコン
 ├── cities.json       # City 初期設定
-├── seed_data.json    # シード用データ
-└── action_priority.json
+└── seed_data.json    # シード用データ
 ```
 
 ## ユーザーデータ（`~/.saiverse/`）

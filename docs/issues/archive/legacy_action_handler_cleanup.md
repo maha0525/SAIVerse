@@ -1,9 +1,10 @@
 # Issue: ActionHandler / 旧会話フローの最終残骸を撤去する
 
-**ステータス**: 🔲 再検証済み・最終撤去は未着手 (2026-07-10)
+**ステータス**: ✅ 解決済み (2026-07-23 最終撤去完了)
 **優先度**: low（挙動影響なし・完全 dead code の整理）
 **作成日**: 2026-05-09
 **再検証日**: 2026-07-10
+**完了日**: 2026-07-23
 **関連**: `saiverse/action_handler.py`, `persona/core.py`, `persona/bootstrap.py`,
 `manager/persona.py`, `manager/blueprints.py`,
 [`building_auto_interval_setting_removal.md`](building_auto_interval_setting_removal.md)
@@ -157,6 +158,7 @@ callback 4本の削除と、接続先になっていた Manager メソッド本�
   - PersonaCore 構築1箇所から同じ引数を削除
 
 上記「旧 city exploration 経路」は要最終確認の候補であり、この確定変更一覧にはまだ含めない。
+→ 2026-07-23 に消費者ゼロを確認して同一 cleanup に含めた（下記「実施内容」）。
 
 ## 明示的にスコープ外
 
@@ -214,6 +216,54 @@ ActionHandler は `emotion_shift` / `create_persona` action を扱っていた�
 - Blueprint経由作成（Blueprintを残している間）
 - ThinkingRequest の既存テストがあれば実行（ActionHandler非依存の確認）
 
+## 実施内容 (2026-07-23)
+
+### 削除したファイル
+
+- `saiverse/action_handler.py`（`ActionHandler` クラス全体）
+- `builtin_data/action_priority.json`
+
+### 編集
+
+- `persona/bootstrap.py` — `load_action_priority` を削除。専用だった `Path` / `Dict` / `Any` import も整理
+- `persona/core.py` — `load_action_priority` import・`action_priority_path` 引数・`self.action_priority` 代入、
+  callback 4引数（`move_callback` / `dispatch_callback` / `explore_callback` / `create_persona_callback`）と
+  その属性代入、未使用になった `Tuple` import を削除
+- `manager/persona.py` — PersonaCore 構築2箇所から action priority と callback 4引数の注入を削除
+- `manager/blueprints.py` — 同じ注入を1箇所削除
+- `manager/runtime.py` — `RuntimeService.explore_city` を削除
+- `saiverse/saiverse_manager.py` — `_explore_city` wrapper を削除
+- `manager/admin.py` — `self._explore_city = runtime.explore_city` alias を削除
+
+`_move_persona` / `_create_persona` / `dispatch_persona` の本体は現役のため残置（issue のスコープ通り）。
+
+### 旧 city exploration 経路の最終確認
+
+撤去前に消費者を確認し、いずれもゼロだった。
+
+- リポジトリ内: 注入3箇所・wrapper・alias 以外に `explore_city(` の呼び出しなし
+- API routes / frontend: `explore` の参照なし（一致したのは `create_building.py` の説明文と
+  `snapshot.bat` の Explorer だけ）
+- `expansion_data/` / `~/.saiverse/user_data/`: 参照なし
+- 本番 DB: `building_messages.content` に2件ヒットしたが、いずれも過去のペルソナ出力に含まれる
+  文字列であり、実行経路の消費者ではない
+
+### 検証
+
+- `ruff check` — 変更した Python 7ファイルすべて pass
+- `python -m pytest tests/` — 全緑（下記ログ参照）
+- `PersonaCore(` の構築箇所はリポジトリ全体で3箇所のみと再確認し、すべて同時に更新
+
+### ドキュメント同期
+
+- `CLAUDE.md` — Data Flow の "ActionHandler" を現行経路（PulseController → SEARuntime）へ、
+  「Action Handler」節を削除
+- `docs/developer-guide/project-structure.md` — `action_handler.py` / `action_priority.json` の行を削除
+  （ついで直しで、既に削除済みの `pulse_scheduler.py` の行も除去）
+- `docs/overview/landscape.md` §9 — ActionHandler と旧 city exploration の撤去を記録
+- `docs/overview/architecture_health.md` §3.7 — 死んだ概念の残数を更新
+- `docs/concepts/item.md` — 旧 `action_handler.py` への言及を撤去済みの記述へ
+
 ## ログ
 
 - 2026-05-09: issue 起票。旧 pre-SEA 経路を段階削除する計画を記録。
@@ -224,3 +274,5 @@ ActionHandler は `emotion_shift` / `create_persona` action を扱っていた�
   あわせて `_explore_city` / `RuntimeService.explore_city` に静的な実呼び出しが無いことを確認し、
   外部・動的参照の最終確認が必要な追加候補として記録。`dispatch_persona` は inter-city 全体の
   監査なしには削除しない。
+- 2026-07-23: 最終撤去を実施。`explore_city` の消費者ゼロを確認して同一 cleanup に含めた。
+  `dispatch_persona` 本体は予定通り残置。テスト全緑・ruff pass を確認し archive へ移動。

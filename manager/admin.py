@@ -75,7 +75,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
         # Hooks back to runtime methods
         self._move_persona = runtime._move_persona
-        self._explore_city = runtime.explore_city
         self.dispatch_persona = runtime.dispatch_persona
         self.summon_persona = runtime.summon_persona
         self.end_conversation = runtime.end_conversation

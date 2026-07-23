@@ -105,6 +105,11 @@ Spell loop 接続・cache 処理・emit（発話イベント）・usage 記録�
 
 **→ 分割設計書あり**: [`docs/issues/runtime_llm_node_split_design.md`](../issues/runtime_llm_node_split_design.md)（重複インベントリ・段階手順・不変条件11項まで確定済み。実装はこれに従う）
 
+**進捗**: Phase 0（重複ヘルパ抽出）+ Phase 1（④確定部抽出 + `BeatExecution` 導入）
+実装済み（2026-07-22）— 閉包は 1,241 行に。
+本節の行数・行番号は健診時点（2026-07-06、commit `b4ca78e`）の値で据え置く。
+Beat 型の担当範囲は「中身の対」だけに縮小（設計書の Beat 節を参照）。
+
 ### 3.2 [P1] SEARuntime の二重責務 — Playbook 実行エンジンと記憶ライフサイクルの同居
 
 **症状**: `SEARuntime`（`sea/runtime.py`、2,829 行 / 90 メソッド）に、
@@ -210,9 +215,10 @@ read するか」がコードから追えない、という特性がある。Con
 
 ### 3.7 [P3] 死んだ概念の残骸 — 既知・リスト化済み
 
-landscape §9 の 8 件（ConversationManager / action_handler / BuildingToolLink / working_memory /
+landscape §9 の残り 7 件（ConversationManager / BuildingToolLink / working_memory /
 note_extractor / task / Emotion / Blueprint）+ `docs/issues/` の dead code 系
-（`legacy_action_handler_cleanup` / `phase3_4d_dead_code_removal` / `quarantine_path_dead_code_removal`）。
+（`phase3_4d_dead_code_removal` / `quarantine_path_dead_code_removal`）。
+※ `action_handler` と `legacy_action_handler_cleanup` は 2026-07-23 に撤去完了（→ `docs/issues/archive/`）。
 すべて把握済みで新規発見なし。**谷間タスクの弾倉**として機能している。掃除の際は
 `feedback_no_dead_code_via_flags`（env flag で残さない・消すなら消す）に従う。
 

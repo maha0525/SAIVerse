@@ -1045,9 +1045,6 @@ class SAIVerseManager(
             {"role": "host", "content": content},
         )
 
-    def _explore_city(self, persona_id: str, target_city_id: str):
-        self.runtime.explore_city(persona_id, target_city_id)
-
     def set_user_login_status(self, user_id: int, status: bool) -> str:
         """ユーザーのログイン状態を更新する。
 
