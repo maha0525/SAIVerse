@@ -653,6 +653,30 @@ def _periodic_schedule(env, **overrides):
     return _add_schedule(env.session_factory, **defaults)
 
 
+def _persona_tz(env):
+    """ScheduleManager が TIME_OF_DAY を解釈するタイムゾーン (ペルソナの city)。"""
+    db = env.session_factory()
+    try:
+        return env.sm._get_persona_timezone(PERSONA_ID, db)
+    finally:
+        db.close()
+
+
+def _next_daily_fire(tz, time_of_day: str) -> datetime:
+    """毎日 `time_of_day` に発火する periodic の次回発火 (aware, ペルソナ tz)。
+
+    ScheduleManager._next_periodic_fire (曜日指定なし = 毎日) の規則をテスト側で
+    独立に組み立てる。「今から N 秒以上先」のような相対条件ではなく期待値そのもの
+    を突き合わせるためのもの (相対条件はテストを回す壁時計に依存する)。
+    """
+    hour, minute = (int(part) for part in time_of_day.split(":"))
+    local_now = datetime.now(timezone.utc).astimezone(tz)
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= local_now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def test_prepared_schedule_dispatch_is_refired(env):
     """当日分 (過去 occurrence) の prepared が回収 tick で再発火予約され、
     発火 callback の claim が同じ prepared 行を再利用して一度だけ実行される。"""
@@ -913,7 +937,14 @@ def test_failed_periodic_refire_carries_next_attempt(env):
     積まれない (上限到達 → 翌回登録へ)。"""
     from saiverse.schedule_manager import SCHEDULE_DISPATCH_MAX_ATTEMPTS
 
-    sid = _periodic_schedule(env)
+    tz = _persona_tz(env)
+    # TIME_OF_DAY は「今から 6 時間後」に置く。ヘルパ既定の 09:00 固定だと、
+    # 08:00-09:00 (ペルソナ tz) にテストを回したとき次回発火が 1 時間以内に来て、
+    # backoff (今+120秒) と「遠い未来」の区別が壁時計次第になる。
+    time_of_day = (
+        datetime.now(timezone.utc).astimezone(tz) + timedelta(hours=6)
+    ).strftime("%H:%M")
+    sid = _periodic_schedule(env, TIME_OF_DAY=time_of_day)
     _fail_periodic_occurrence(env, sid, attempt=SCHEDULE_DISPATCH_MAX_ATTEMPTS - 1)
 
     wiring._collect_failed_periodic_schedule_dispatch(env.manager)
@@ -924,10 +955,11 @@ def test_failed_periodic_refire_carries_next_attempt(env):
                        "error": None}  # 再試行も失敗させる
     entry.callback()
 
-    # 上限到達 → backoff (今+120秒) ではなく翌回 (遠い未来) が登録される
+    # 上限到達 → backoff (今+120秒) ではなく翌回 (定期の次回発火そのもの) が登録される
     nxt = _entry(env, sid)
     assert nxt is not None
-    assert nxt.fire_at_ts - datetime.now(timezone.utc).timestamp() > 3600
+    expected_ts = _next_daily_fire(tz, time_of_day).timestamp()
+    assert nxt.fire_at_ts == pytest.approx(expected_ts, rel=0, abs=1.0)
 
 
 def test_failed_periodic_fresh_failure_after_long_dispatch_is_left_alone(env):
