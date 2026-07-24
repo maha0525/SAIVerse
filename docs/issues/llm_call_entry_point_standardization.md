@@ -88,7 +88,7 @@ LLM 呼び出しには性質の異なる二種類がある。
 ## 確認事項
 
 1. 23口それぞれの用途（`persona/core.py` / `manager/admin.py` / `manager/background.py` は未調査）
-2. `saiverse/meta_layer.py:874` の直接呼び出しが現役経路かどうか（メタ判断のディスパッチはコード側で決定論的に行う設計に移行済みのため、旧経路の可能性がある）。**この経路は `prepare_context` を通らないため `persona_voiced` の関所も効かず、生成した思考を `meta_judgment_log` に永続化する**（2026-07-23 Codex レビュー指摘）。現役なら関所に載せる、死んでいるなら撤去する
+2. ~~`saiverse/meta_layer.py:874` の直接呼び出しが現役経路かどうか~~ → **決着済み（2026-07-24 撤去）**。調査の結果、この legacy `_run_judgment` は本番到達不能だった: 両入口（`on_track_alert` / `on_periodic_tick`）は `_run_judgment_via_playbook` を無条件で呼び、`_run_judgment` へ至るのは同関数内の `pulse_controller is None` fallback ただ一つ。そのレースは 2026-06-29 に `pulse_controller` 初期化を tick スレッド起動前へ移す構造修正で塞がれている。切替 env `SAIVERSE_META_LAYER_USE_PLAYBOOK` も撤廃済みで、dispatch は `_SITUATION_PLAYBOOK_MAP` によるコード側決定論に一本化。よって関所に載せるのではなく撤去した（`_run_judgment` + legacy 専用ヘルパ + fallback 分岐を skip+次周期再評価へ置換）。詳細と経緯は `docs/issues/archive/meta_judgment_legacy_path_lossy_and_unreachable.md`
 3. 既存のカテゴリ2実装（画像概要 / Chronicle / 編纂）を同じ玄関に引き入れるべきか、それとも別系統のまま Usage 計上だけ揃えるか
 4. カテゴリ2の玄関がモデル解決をどう扱うか（現状3系統ある）
 5. **画像非対応モデルへの visual_context 配送**。head には Building / Persona の画像を指す `metadata.media`（ローカルパス）が載る。OpenAI / Anthropic 系は `supports_images=False` のとき画像を落としてテキスト要約に変換するが、Ollama 系の前処理は audio / video しか扱わず、画像 metadata がそのまま payload に届く（2026-07-23 Codex レビュー指摘）。**これは 2026-07-23 の head 固定化で新たに生じたものではなく、会話ラインでは以前から同じ経路が有効だった**（`_FULL_CONTEXT_REQUIREMENTS` に `visual_context=True` が入っていた）。実サーバーが未知フィールドを無視するか拒否するかの実測が要る。何を正解とするかが決まるまでテストは書かない（現状を正解として固定してしまうため）
@@ -113,3 +113,4 @@ LLM 呼び出しには性質の異なる二種類がある。
 
 - 2026-07-23: issue 起票。`work_session` の `history_depth=0` 事故調査から派生。玄関の一本化そのものは当面行わず、規格化の必要性と二カテゴリの境目を明文化。
 - 2026-07-23: 先行分として `ContextRequirements` の単純化（10項目→3項目）と印（`persona_voiced`）+ 関所を実装。カテゴリ2の玄関と Usage 一本化は未着手のまま。
+- 2026-07-24: 確認事項 #2 決着。`meta_layer.py` の legacy `_run_judgment`（直接 LLM 呼び出し）は本番到達不能かつ lossy と判定し撤去。専用ヘルパ（`_get_heavyweight_client` / `_build_system_prompt` / `_build_spells_doc` / `_extract_spells` / `_execute_spells` / `_format_spell_results` / `_build_state_message`）と定数（`_MAX_SPELL_LOOPS` / `_META_LAYER_SPELL_NAMES`）も除去、fallback 分岐は skip+次周期再評価に置換。関連 issue `meta_judgment_legacy_path_lossy_and_unreachable.md` を archive へ。`tests/test_meta_layer.py` の legacy 経路テストを撤去/移行（17 passed）。

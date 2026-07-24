@@ -306,7 +306,7 @@ LLM 応答 (JSON) を受け取った MetaLayer が以下を行う:
 ### Phase 3: legacy 経路と環境変数の整理 ✅ 完了 (2026-05-10)
 
 - [x] `SAIVERSE_META_LAYER_USE_PLAYBOOK` 環境変数撤廃 (常に Playbook path)
-- [x] legacy `_run_judgment` メソッドはそのまま残置 (緊急避難用、ただし呼び出し経路は `_run_judgment_via_playbook` の runtime=None fallback のみ)
+- [x] legacy `_run_judgment` メソッド撤去 (2026-07-24)。緊急避難用として残置していたが lossy かつ本番到達不能だったため削除。`_run_judgment_via_playbook` の `pulse_controller is None` fallback は「この tick を skip して次周期で再評価」に置換 (docs/issues/archive/meta_judgment_legacy_path_lossy_and_unreachable.md)
 - [x] 旧 `meta_judgment.json` Playbook は DB に残置 (実呼び出し経路から外す、新仕様で参照されない)
 
 ### Phase 4: 実機検証 + 旧 Doc 整理 🟡 進行中

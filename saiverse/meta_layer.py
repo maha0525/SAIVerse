@@ -1,26 +1,25 @@
 """MetaLayer: ペルソナの行動 Track の選択・切り替えを判断する観察視点。
 
-Intent A v0.9 / Intent B v0.6 で導入された Phase C-1 の最小実装に、
-Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path** を
-追加した二刀流構成。Phase C-2 完成 (2026-04-30) で Playbook path を既定に昇格:
+Intent A v0.9 / Intent B v0.6 で導入された Phase C-1 の最小実装を、
+Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path** に
+移行。Phase C-2 完成 (2026-04-30) で Playbook path を既定化し、旧
+``SAIVERSE_META_LAYER_USE_PLAYBOOK`` 環境変数による切替も撤廃した
+(meta_judgment_structured.md)。判断経路は Playbook path の一本のみ:
 
-- 既定 (Playbook path): ``meta_judgment.json`` を runtime に投げ、ペルソナが
-  内的独白の中で /spell track_pause / track_activate / track_create 等を発動
-  することで Track 操作を行う。重量級モデルのメインキャッシュに JSON を混入
-  させないため、構造化出力 (response_schema) は使わない (Intent A v0.9 不変条件 11)。
-- 緊急避難 (legacy path): 重量級モデルへ直接プロンプトを渡しスペル抽出ループ
-  (Playbook path と同じスペル方式だが、Playbook 化されていない短命経路)
+- 状況を ``_classify_situation`` でコード側決定論的に分類し、
+  ``_SITUATION_PLAYBOOK_MAP`` で状況専用の ``meta_judgment_*`` Playbook を
+  選んで PulseController 経由 (``submit_meta_judgment``) で起動する。judge
+  ノードが構造化出力 (動的 response_schema) で判断を返し、finalize ツールが
+  Spell 整形・実行・SAIMemory 保存 (line_role='meta_judgment') を行う。
+  重量級モデルのメインキャッシュに JSON を混入させない設計 (不変条件 11)。
 
-切り替えは環境変数 ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` で行う:
-
-- 未設定 / ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``: Playbook path (既定)
-- ``"0"`` / ``"false"`` / ``"no"`` / ``"off"``: legacy path (緊急避難)
+かつて緊急避難として直接 LLM を叩く legacy ``_run_judgment`` があったが、
+lossy (SAIMemory 保存を欠く) かつ本番到達不能になっていたため撤去した
+(docs/issues/archive/meta_judgment_legacy_path_lossy_and_unreachable.md, 2026-07-24)。
 
 責務:
 - TrackManager の alert observer として登録され、alert 遷移を契機に起動する
-- 上記の path に従って判断を実行
-- LLM コール時は (legacy) tools / response_schema を渡さない
-  Playbook path 側は meta_judgment.json の response_schema に従う
+- Playbook path に従って判断を実行 (dispatch は決定論的)
 
 責務外:
 - メインライン応答 (発話生成) の起動。これは呼び出し元 (Handler) が責任を持つ
@@ -51,27 +50,11 @@ from .track_manager import (
 )
 
 
-# 安全網: スペルループの最大回数。LLM が暴走した時に無限ループを防ぐ。
-_MAX_SPELL_LOOPS = 5
-
-# メタレイヤーが扱う Track 操作スペル (Phase B-3 で導入済み)。
-# 一覧は登録済みスペルから動的に拾うが、ペルソナ素体プロンプトと衝突しないよう
-# 「メタレイヤーが使ってよい」セットを明示的に絞る。
 def _short_ref(track: Any) -> str:
     """Track の短縮参照 (track:N) を返す。short_id 未設定時は UUID[:8] フォールバック。"""
     if getattr(track, "short_id", None) is not None:
         return f"track:{track.short_id}"
     return track.track_id[:8] + "…"
-
-
-_META_LAYER_SPELL_NAMES = (
-    "track_create",
-    "track_activate",
-    "track_pause",
-    "track_complete",
-    "track_abort",
-    "track_list",
-)
 
 
 class MetaLayer:
@@ -308,8 +291,8 @@ class MetaLayer:
         状態遷移処理を巻き込まないため、TrackManager 側の _notify_alert で
         も二重に保護されている)。
 
-        Phase 1.2: ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` が真なら ``meta_judgment``
-        Playbook 経由で判断する。それ以外は legacy direct-LLM スペル loop。
+        判断は ``_run_judgment_via_playbook`` で状況専用の ``meta_judgment_*``
+        Playbook 経由に一本化されている (dispatch は決定論的)。
 
         メタ判断 v2 (intent: meta_judgment_structured.md): 状況 A
         (preempt_collision、context.target_already_running == True) は
@@ -545,16 +528,16 @@ class MetaLayer:
             # 通常はここに来ない: saiverse_manager.__init__ が自律 tick スレッド起動
             # (_run_persona_post_registration) より前に pulse_controller を初期化する
             # ため、本番のレースは閉じている (2026-06-29 14:34 の起動直後レース対策)。
-            # それでも None の場合のみ、互換のためレガシー経路にフォールバックする。
-            # ⚠️ レガシー _run_judgment は line_role='meta_judgment' の SAIMemory 保存を
-            #    行わない (判断がペルソナの記憶に残らない) 既知の欠陥がある。
-            #    到達したら警告として残す。除去は docs/issues 参照。
+            # 万一 None の場合は、この tick を skip して次周期に再評価を委ねる
+            # (判断機会は失われない)。以前ここにあったレガシー _run_judgment への
+            # フォールバックは lossy (line_role='meta_judgment' の SAIMemory 保存を
+            # 行わず記憶がサイレントに落ちる) だったため撤去した
+            # (docs/issues/archive/meta_judgment_legacy_path_lossy_and_unreachable.md)。
             logging.warning(
-                "[meta-layer] No pulse_controller on manager — cannot run meta_judgment Playbook; "
-                "falling back to legacy path (lossy: no SAIMemory record). persona=%s",
+                "[meta-layer] No pulse_controller on manager — skipping meta_judgment "
+                "this tick; will re-evaluate next cycle. persona=%s",
                 persona.persona_id,
             )
-            self._run_judgment(persona, alert_track_id, context)
             return
 
         building_id = getattr(persona, "current_building_id", None)
@@ -809,157 +792,6 @@ class MetaLayer:
             )
 
     # ------------------------------------------------------------------
-    # 判断ループ (LLM + スペル)
-    # ------------------------------------------------------------------
-
-    def _run_judgment(
-        self,
-        persona: Any,
-        alert_track_id: str,
-        context: Dict[str, Any],
-    ) -> None:
-        """重量級モデルでメタ判断 LLM を呼ぶ → スペル実行 → ループ。
-
-        スペルなし応答で自然停止。
-
-        判断中に発火された Track 操作スペルは Pulse 完了時に一括適用される
-        (Intent A v0.14 / Intent B v0.11 の deferred 機構)。MetaLayer は
-        通常の Playbook ランタイムを通らないため、ここで PulseContext を
-        手動で生成してスペルに渡し、判断ループ終了時に
-        ``_apply_deferred_track_ops`` を呼ぶ必要がある。Phase 1 で
-        MetaLayer を Playbook 化した時点でこの手動配線は不要になる。
-        """
-        llm_client = self._get_heavyweight_client(persona)
-        if llm_client is None:
-            logging.warning(
-                "[meta-layer] No LLM client available for persona=%s; skipping judgment",
-                persona.persona_id,
-            )
-            return
-
-        # Track-mutating spells を deferred 化するために PulseContext を発行する。
-        # 通常の Playbook ランタイムが作るものとは別経路 (= runtime._pulse_contexts
-        # キャッシュには登録しない、flush_pulse_logs もしない短命なもの)。
-        import uuid
-
-        from sea.pulse_context import PulseContext
-
-        pulse_ctx = PulseContext(pulse_id=str(uuid.uuid4()))
-
-        # Phase 2: meta_judgment_log への書き込み用の蓄積バッファ。
-        # legacy path は runtime を経由しないため、ここで自前で集める。
-        thought_parts: List[str] = []
-        spells_record: List[Dict[str, Any]] = []
-        prompt_snapshot_text: Optional[str] = None
-        try:
-            system_prompt = self._build_system_prompt(persona)
-            user_message = self._build_state_message(
-                persona.persona_id, alert_track_id, context
-            )
-            recent_judgments_block = self._build_recent_judgments_block(
-                persona.persona_id
-            )
-            if recent_judgments_block:
-                # 過去ログは現状状態の隣に並べる (judge は両方を踏まえて判断する)
-                user_message = f"{user_message}\n\n{recent_judgments_block}"
-            prompt_snapshot_text = user_message[:2000]  # 先頭 2K でデバッグ用に十分
-            messages: List[Dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ]
-
-            for loop in range(_MAX_SPELL_LOOPS):
-                # tools / response_schema は意図的に渡さない (Intent A v0.9 / 設計議論 2026-04-28)
-                try:
-                    response = llm_client.generate(messages)
-                except Exception:
-                    logging.exception(
-                        "[meta-layer] LLM generate failed at loop=%d persona=%s",
-                        loop, persona.persona_id,
-                    )
-                    return
-
-                text = response if isinstance(response, str) else str(response)
-                thought_parts.append(text)
-                logging.info(
-                    "[meta-layer] LLM response (loop=%d, persona=%s): %s",
-                    loop, persona.persona_id, text[:300],
-                )
-
-                spells = self._extract_spells(text)
-                if not spells:
-                    # スペルなし → 自然停止。最終応答テキストはペルソナの「思考」として残す
-                    logging.info(
-                        "[meta-layer] Natural stop after %d loop(s) persona=%s",
-                        loop, persona.persona_id,
-                    )
-                    return
-
-                # スペル実行 (PulseContext を渡して Track 操作スペルを deferred 化する)
-                results = self._execute_spells(persona, spells, pulse_ctx)
-                # results は List[Tuple[str, str]] = (name, result_str)
-                for (spell_name, spell_args), (_result_name, result_str) in zip(spells, results):
-                    spells_record.append({
-                        "name": spell_name,
-                        "args": dict(spell_args),
-                        "result": result_str,
-                    })
-
-                # 次ターンに向けて assistant 応答 + ツール結果を append
-                messages.append({"role": "assistant", "content": text})
-                results_text = self._format_spell_results(results)
-                messages.append({"role": "user", "content": results_text})
-
-            logging.warning(
-                "[meta-layer] Hit max spell loops (%d) without natural stop persona=%s",
-                _MAX_SPELL_LOOPS, persona.persona_id,
-            )
-        finally:
-            # 判断ループ終了時 (例外含む) に deferred Track 操作を apply する。
-            # _apply_deferred_track_ops は同じ helper を runtime_graph.py が
-            # 通常 Pulse 完了時に呼んでおり、MetaLayer もこれを共有する。
-            committed_to_main = False
-            try:
-                from sea.runtime_runner import _apply_deferred_track_ops
-                committed_to_main = any(
-                    op.op_type == "activate" for op in pulse_ctx.deferred_track_ops
-                )
-                _apply_deferred_track_ops(
-                    {"_pulse_context": pulse_ctx}, persona
-                )
-            except Exception:
-                logging.exception(
-                    "[meta-layer] Failed to apply deferred track ops for persona=%s",
-                    persona.persona_id,
-                )
-
-            # Phase 2: meta_judgment_log に判断ターンを永続化する。
-            # 例外で握り潰さない (この記録が次回判断の参考情報になるため、
-            # 失敗が分かるよう WARN 以上で残す)。
-            try:
-                self._record_judgment_log(
-                    persona_id=persona.persona_id,
-                    trigger_type=str(context.get("trigger") or "unknown"),
-                    trigger_context=json.dumps(
-                        {
-                            k: v for k, v in (context or {}).items()
-                            if isinstance(v, (str, int, float, bool, list, dict, type(None)))
-                        },
-                        ensure_ascii=False,
-                    ),
-                    track_at_judgment_id=alert_track_id or None,
-                    thought_parts=thought_parts,
-                    spells=spells_record,
-                    committed_to_main_cache=committed_to_main,
-                    prompt_snapshot=prompt_snapshot_text,
-                )
-            except Exception:
-                logging.exception(
-                    "[meta-layer] Failed to record judgment log for persona=%s",
-                    persona.persona_id,
-                )
-
-    # ------------------------------------------------------------------
     # 最近の判断履歴の動的注入 (Phase 2 / handoff Part 2)
     # ------------------------------------------------------------------
 
@@ -1125,137 +957,6 @@ class MetaLayer:
             )
         finally:
             db.close()
-
-    # ------------------------------------------------------------------
-    # スペル抽出と実行
-    # ------------------------------------------------------------------
-
-    def _extract_spells(self, text: str) -> List[Tuple[str, Dict[str, Any]]]:
-        """応答テキストからメタレイヤーが扱う対象スペルだけを抽出する。"""
-        from sea.runtime_llm import _parse_spell_lines  # 既存パーサを再利用
-
-        try:
-            parsed = _parse_spell_lines(text)
-        except Exception:
-            logging.exception("[meta-layer] Spell parsing failed")
-            return []
-
-        result: List[Tuple[str, Dict[str, Any]]] = []
-        for name, args, _match, _normalized in parsed:
-            if name not in _META_LAYER_SPELL_NAMES:
-                logging.warning(
-                    "[meta-layer] Spell '%s' is not in meta-layer allowed set; skipping",
-                    name,
-                )
-                continue
-            result.append((name, args))
-        return result
-
-    def _execute_spells(
-        self,
-        persona: Any,
-        spells: List[Tuple[str, Dict[str, Any]]],
-        pulse_ctx: Optional[Any] = None,
-    ) -> List[Tuple[str, str]]:
-        """各スペルを順次実行。結果を (name, result_str) のリストで返す。
-
-        ``pulse_ctx`` を渡すと persona_context() で contextvar として伝播し、
-        Track 操作スペルがそこに deferred ops を enqueue する (Intent A v0.14 /
-        Intent B v0.11 の deferred 機構)。None の場合は即時実行 (旧挙動)。
-        """
-        from tools import TOOL_REGISTRY
-        from tools.context import persona_context
-
-        persona_id = persona.persona_id
-        persona_log_path = getattr(persona, "persona_log_path", None)
-        persona_dir = (
-            persona_log_path.parent if persona_log_path is not None else Path.cwd()
-        )
-        manager_ref = getattr(persona, "manager_ref", None) or self.manager
-
-        results: List[Tuple[str, str]] = []
-        for name, args in spells:
-            tool_func = TOOL_REGISTRY.get(name)
-            if tool_func is None:
-                results.append((name, f"spell '{name}' not found in registry"))
-                continue
-            try:
-                with persona_context(
-                    persona_id,
-                    persona_dir,
-                    manager_ref,
-                    playbook_name="meta_layer",
-                    auto_mode=False,
-                    event_callback=None,
-                    pulse_context=pulse_ctx,
-                ):
-                    raw = tool_func(**args)
-                result_str = str(raw) if raw is not None else "(no result)"
-                logging.info(
-                    "[meta-layer] Spell executed: %s args=%s → %s",
-                    name, args, result_str[:200],
-                )
-            except Exception as exc:
-                result_str = f"error: {type(exc).__name__}: {exc}"
-                logging.exception("[meta-layer] Spell %s failed", name)
-            results.append((name, result_str))
-        return results
-
-    def _format_spell_results(
-        self, results: List[Tuple[str, str]]
-    ) -> str:
-        lines = ["スペル実行結果:"]
-        for name, result in results:
-            lines.append(f"- {name}: {result}")
-        lines.append(
-            "\n上記の結果を踏まえて、追加で必要なスペルがあれば実行してください。"
-            "判断が完了したらスペルを含まないテキストで思考を締めくくってください。"
-        )
-        return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # プロンプト組み立て
-    # ------------------------------------------------------------------
-
-    def _build_system_prompt(self, persona: Any) -> str:
-        """ペルソナ素体 + メタレイヤー固有の指示。
-
-        ペルソナの自己認識としてのメタレイヤーは「一段引いて自分を見る視点」
-        (不変条件 11)。別人格ではないため素体プロンプトをベースにする。
-        """
-        persona_base = getattr(persona, "system_prompt", "") or ""
-        spells_doc = self._build_spells_doc()
-
-        meta_instructions = (
-            "\n\n--- メタレイヤー指示 ---\n"
-            "あなたは今、自分の行動の線（Track）を選び直す視点に立っています。\n"
-            "現在の状態と新着イベントを踏まえ、以下のいずれかを判断してください:\n"
-            "- 現在の Track をそのまま続ける (何もスペルを発行しない)\n"
-            "- 別の Track をアクティブに切り替える (track_pause で現 running を後回しにし track_activate で対象を起動)\n"
-            "- 新しい Track を作って始める (track_create)\n\n"
-            "**スペル発動形式は行頭が `/spell ` で始まる**必要があります:\n"
-            "  /spell name='スペル名' args={'引数名': '値'}\n\n"
-            "判断は自然な独白として書いてください。スペルは独白の一部として埋め込みます。\n"
-            "例: 「ユーザーから話しかけられたから、開発は一旦置いて応答に切り替える。\n"
-            "/spell name='track_pause' args={'track_id': '...'}\n"
-            "/spell name='track_activate' args={'track_id': '...'}」\n\n"
-            "判断が終わってこれ以上スペルが必要なければ、スペルを含まないテキストで思考を締めくくってください。\n\n"
-            f"{spells_doc}\n"
-        )
-        return persona_base + meta_instructions
-
-    def _build_spells_doc(self) -> str:
-        """利用可能スペルの一覧を schema から動的に生成する。"""
-        from tools import SPELL_TOOL_SCHEMAS
-
-        lines = ["利用可能なスペル (発動形式: `/spell name='ツール名' args={'引数名': '値'}`):"]
-        for name in _META_LAYER_SPELL_NAMES:
-            schema = SPELL_TOOL_SCHEMAS.get(name)
-            if schema is None:
-                continue
-            desc = schema.description or "(説明なし)"
-            lines.append(f"- {name}: {desc[:200]}")
-        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 状況分類 + 状況テキスト構築 (Playbook path / legacy path 共通)
@@ -1759,33 +1460,9 @@ class MetaLayer:
             return {}
 
     # ------------------------------------------------------------------
-    # legacy path 用エントリ (Playbook path も同じ situation_text を使う)
-    # ------------------------------------------------------------------
-
-    def _build_state_message(
-        self, persona_id: str, alert_track_id: str, context: Dict[str, Any]
-    ) -> str:
-        """legacy path 用の現状メッセージ。新しい situation_text を返す。"""
-        return self._build_situation_text(persona_id, alert_track_id, context)
-
-    # ------------------------------------------------------------------
     # ヘルパ
     # ------------------------------------------------------------------
 
     def _lookup_persona(self, persona_id: str) -> Optional[Any]:
         personas = getattr(self.manager, "personas", None) or {}
         return personas.get(persona_id)
-
-    def _get_heavyweight_client(self, persona: Any) -> Optional[Any]:
-        """ペルソナの重量級モデル LLM クライアントを返す。
-
-        Intent A v0.9 不変条件 8 のとおり、メタレイヤー判断は重量級モデルで行う。
-        """
-        try:
-            return persona.llm_client
-        except Exception:
-            logging.exception(
-                "[meta-layer] Failed to get heavyweight LLM client persona=%s",
-                persona.persona_id,
-            )
-            return None

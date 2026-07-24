@@ -1,7 +1,17 @@
 # メタ判断レガシー経路 `_run_judgment` が lossy かつ到達不能になった
 
 ## 状態
-未解決（クリーンアップ待ち）。緊急ではない（本番のバグ自体は別途修正済み）。
+✅ 解決（2026-07-24 撤去完了）。「あるべき対応」を全て実施した:
+- `_run_judgment` と legacy 専用ヘルパ（`_get_heavyweight_client` / `_build_system_prompt` /
+  `_build_spells_doc` / `_extract_spells` / `_execute_spells` / `_format_spell_results` /
+  `_build_state_message`）、定数（`_MAX_SPELL_LOOPS` / `_META_LAYER_SPELL_NAMES`）を除去。
+- `_run_judgment_via_playbook` の `pulse_controller is None` 分岐を、lossy フォールバックから
+  「この tick を skip して次周期で再評価」に置換。
+- `tests/test_meta_layer.py` の legacy 経路テストを撤去（spell loop / deferred-ops / execute_spells 系）
+  し、状況テキスト検証は `_build_situation_text` 直呼びへ移行。17 passed。
+- モジュール docstring と関連 intent doc（`persona_action_tracks.md` / `02_mechanics.md` /
+  `meta_judgment_structured.md`）を現況（Playbook path 一本）に更新。
+- 派生元 issue `llm_call_entry_point_standardization.md` の確認事項 #2 を決着済みに更新。
 
 ## 背景: 元のバグ（修正済み）
 2026-06-29、air_city_a が 14:34 に共創小説 Track を `track_create`＋`track_activate` で

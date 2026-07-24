@@ -1,13 +1,16 @@
-"""MetaLayer unit tests (Phase C-1).
+"""MetaLayer unit tests.
 
-LLM クライアントは Fake を使い、実 API を叩かずにスペルループを検証する。
+判断経路は Playbook path (``_run_judgment_via_playbook`` →
+``submit_meta_judgment``) に一本化されている。旧 legacy direct-LLM スペル
+ループ (``_run_judgment``) は撤去済み
+(docs/issues/archive/meta_judgment_legacy_path_lossy_and_unreachable.md, 2026-07-24)。
 
 検証項目:
-- alert observer エントリ → 判断ループ起動
-- スペルなし応答での自然停止
-- スペル抽出 (許可セット外は無視)
-- スペル実行 (TOOL_REGISTRY 経由)
-- ループ最大回数の安全網
+- alert / periodic tick observer エントリ → dispatch 起動 (per-persona Lock 直列化)
+- 状況テキスト構築 (``_build_situation_text``: alert marker / preempt_collision)
+- meta_judgment_log の永続化と過去ログ注入 (``_record_judgment_log`` /
+  ``_build_recent_judgments_block``)
+- Playbook path の retry 挙動 (``_FakePulseController`` 経由)
 """
 import json
 
@@ -63,9 +66,9 @@ class FakeManager:
     def __init__(self, track_manager, personas):
         self.track_manager = track_manager
         self.personas = personas
-        self.SessionLocal = None  # MetaLayer は使わないが念のため
-        # Phase 4-e: Playbook path のテスト用 (retry 検証等)。
-        # 通常 legacy path テストでは触らない。
+        self.SessionLocal = None  # meta_judgment_log を検証するテストだけ差し替える
+        # Playbook path のテスト用 (retry 検証等)。dispatch テストでは
+        # _run_judgment_via_playbook を monkeypatch するので触らない。
         self.sea_runtime = None
 
 
@@ -107,23 +110,8 @@ def _make_meta_layer(tm, persona_id, llm_responses):
 
 
 # ---------------------------------------------------------------------------
-# 自然停止
+# observer エントリ
 # ---------------------------------------------------------------------------
-
-def test_no_spell_response_stops_immediately(tm, db_persona):
-    """LLM が最初からスペルなしで応答 → 1 回の LLM 呼び出しで終了。"""
-    meta, llm, _persona = _make_meta_layer(
-        tm, db_persona, ["継続して問題なし。何も操作しない。"]
-    )
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)  # alert に遷移
-
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    assert len(llm.calls) == 1
-
 
 def test_unknown_persona_skips_silently(tm, db_persona, caplog):
     """persona が見つからない場合は警告ログだけ、例外は出ない。"""
@@ -134,104 +122,11 @@ def test_unknown_persona_skips_silently(tm, db_persona, caplog):
 
 
 # ---------------------------------------------------------------------------
-# スペル実行
-# ---------------------------------------------------------------------------
-
-def test_spell_response_triggers_second_llm_call(tm, db_persona):
-    """スペル含む応答 → 実行 (成否によらず) → 次ターン LLM 呼び出し → スペルなしで停止。
-
-    Note: 実スペル (track_activate) は production の SessionLocal を見るため、
-    テスト中の in-memory DB の Track は見えず、エラー結果が返る。MetaLayer は
-    エラー結果を受けても「次の LLM 呼び出し」に進むことを確認する
-    (スペル実行成否は track_activate 自身のテストでカバー済み)。
-    """
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    spell_response = (
-        f"対応する。\n/spell name='track_activate' args={{'track_id': '{track_id}'}}"
-    )
-    meta, llm, _persona = _make_meta_layer(
-        tm, db_persona, [spell_response, "判断完了。"]
-    )
-
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    # 2 回 LLM 呼ばれる (1: スペル発行 / 2: 結果を見て自然停止)
-    assert len(llm.calls) == 2
-    # 2 ターン目には assistant 応答 + ツール結果が積まれている
-    second_messages = llm.calls[1]["messages"]
-    assert len(second_messages) >= 4  # system + user + assistant + user(results)
-    assert second_messages[2]["role"] == "assistant"
-    assert "track_activate" in second_messages[3]["content"]
-
-
-def test_unknown_spell_is_skipped(tm, db_persona):
-    """メタレイヤー許可セット外のスペルは実行されない。"""
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    # 許可セット外スペル ("calculator") を含む応答 → 実行されないので結果ターンに進まず終了
-    response = "/spell name='calculator' args={'expression': '1+1'}"
-    meta, llm, _persona = _make_meta_layer(
-        tm, db_persona, [response]
-    )
-
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    # 許可セット外なので結果ターンに進まず、1 回の LLM 呼び出しで終了
-    assert len(llm.calls) == 1
-
-
-def test_llm_failure_is_caught(tm, db_persona):
-    """LLM が例外を投げても MetaLayer が落ちない。"""
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    class RaisingLLM:
-        def generate(self, *args, **kwargs):
-            raise RuntimeError("LLM down")
-
-    persona = FakePersona(db_persona, RaisingLLM())
-    manager = FakeManager(tm, {db_persona: persona})
-    meta = MetaLayer(manager)
-
-    # 例外が伝播しないこと
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-
-# ---------------------------------------------------------------------------
-# LLM 呼び出し時に tools / response_schema を渡さない
-# ---------------------------------------------------------------------------
-
-def test_llm_called_without_tools_or_schema(tm, db_persona):
-    """重要: tools と response_schema を一切渡さないこと (キャッシュ汚染防止)。"""
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    meta, llm, _persona = _make_meta_layer(tm, db_persona, ["終了。"])
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    assert len(llm.calls) == 1
-    call = llm.calls[0]
-    assert call["tools"] is None
-    assert call["response_schema"] is None
-
-
-# ---------------------------------------------------------------------------
-# 状態プロンプトの内容
+# 状況テキストの内容 (_build_situation_text: Playbook path が judge に渡す材料)
 # ---------------------------------------------------------------------------
 
 def test_state_message_includes_alert_marker(tm, db_persona):
-    """状態プロンプトに alert Track のマーカーが含まれる。"""
+    """状況テキストに alert Track のマーカーが含まれる。"""
     track_id = tm.create(
         db_persona, "user_conversation", title="対 user1", is_persistent=True
     )
@@ -239,131 +134,13 @@ def test_state_message_includes_alert_marker(tm, db_persona):
     tm.pause(track_id)
     tm.set_alert(track_id)
 
-    meta, llm, _persona = _make_meta_layer(tm, db_persona, ["停止"])
-    meta.on_track_alert(db_persona, track_id, {"trigger": "user_utterance"})
-
-    user_msg = llm.calls[0]["messages"][1]["content"]
-    assert "対 user1" in user_msg
+    meta, _llm, _persona = _make_meta_layer(tm, db_persona, [])
+    msg = meta._build_situation_text(
+        db_persona, track_id, {"trigger": "user_utterance"}
+    )
+    assert "対 user1" in msg
     # メタ判断 v2 状況分類で alert_present として描画される
-    assert "alert 状態" in user_msg
-
-
-# ---------------------------------------------------------------------------
-# Deferred Track ops via PulseContext (Intent A v0.14, Intent B v0.11 — case ii)
-# ---------------------------------------------------------------------------
-
-def test_metalayer_applies_deferred_track_ops_at_judgment_end(
-    tm, db_persona, monkeypatch
-):
-    """判断ループ終了時に _apply_deferred_track_ops が PulseContext を渡して呼ばれる。
-
-    MetaLayer は通常の Playbook ランタイムを通らないため、自前で PulseContext を
-    作って Track 操作スペルを deferred 化し、判断ループの finally で flush する
-    (Intent A v0.14 / Intent B v0.11 の deferred 機構を MetaLayer 経由でも動かす
-    ための短期パッチ。Phase 1 で MetaLayer 自体を Playbook 化したらこの配線は
-    不要になる)。
-    """
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    apply_calls = []
-
-    def fake_apply(state, persona):
-        apply_calls.append((state, persona))
-
-    # MetaLayer は finally 内で関数を import するため、import 元の名前空間に patch する
-    monkeypatch.setattr(
-        "sea.runtime_runner._apply_deferred_track_ops", fake_apply
-    )
-
-    meta, llm, _persona = _make_meta_layer(
-        tm, db_persona, ["継続して問題なし。"]
-    )
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    # 判断ループが完走 → finally で apply が 1 回呼ばれる
-    assert len(apply_calls) == 1
-    state, _ = apply_calls[0]
-    pulse_ctx = state["_pulse_context"]
-    assert pulse_ctx is not None
-    # PulseContext のインターフェースを持っていることを確認
-    assert hasattr(pulse_ctx, "deferred_track_ops")
-    assert hasattr(pulse_ctx, "enqueue_track_op")
-
-
-def test_metalayer_apply_runs_even_on_llm_error(
-    tm, db_persona, monkeypatch
-):
-    """LLM 呼び出しが例外を投げても finally で deferred ops が apply される。"""
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    apply_calls = []
-
-    def fake_apply(state, persona):
-        apply_calls.append((state, persona))
-
-    monkeypatch.setattr(
-        "sea.runtime_runner._apply_deferred_track_ops", fake_apply
-    )
-
-    class RaisingLLM:
-        def generate(self, *args, **kwargs):
-            raise RuntimeError("LLM down")
-
-    persona = FakePersona(db_persona, RaisingLLM())
-    manager = FakeManager(tm, {db_persona: persona})
-    meta = MetaLayer(manager)
-
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    # LLM エラーで早期 return しても finally は通るので apply は走る
-    assert len(apply_calls) == 1
-
-
-def test_metalayer_execute_spells_forwards_pulse_context(
-    tm, db_persona, monkeypatch
-):
-    """_execute_spells が persona_context に pulse_context を渡している。"""
-    from tools import context as tools_context_mod
-
-    captured_pulse_contexts = []
-    real_persona_context = tools_context_mod.persona_context
-
-    def capturing_persona_context(*args, **kwargs):
-        captured_pulse_contexts.append(kwargs.get("pulse_context"))
-        return real_persona_context(*args, **kwargs)
-
-    # MetaLayer は関数内で `from tools.context import persona_context` するため、
-    # import 元の名前空間に patch する
-    monkeypatch.setattr(
-        tools_context_mod, "persona_context", capturing_persona_context
-    )
-
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    spell_response = (
-        f"対応する。\n/spell name='track_activate' args={{'track_id': '{track_id}'}}"
-    )
-    meta, _llm, _persona = _make_meta_layer(
-        tm, db_persona, [spell_response, "判断完了。"]
-    )
-
-    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
-
-    # 1 回はスペル実行で persona_context が呼ばれている
-    assert len(captured_pulse_contexts) >= 1
-    # 渡された pulse_context は PulseContext 互換オブジェクト
-    pulse_ctx = captured_pulse_contexts[0]
-    assert pulse_ctx is not None
-    assert hasattr(pulse_ctx, "enqueue_track_op")
+    assert "alert 状態" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +184,7 @@ def test_set_alert_on_already_alert_does_not_notify(tm, db_persona):
 
 
 def test_state_message_explains_target_already_running(tm, db_persona):
-    """_build_state_message は target_already_running を自然言語で説明する。"""
+    """_build_situation_text は target_already_running を自然言語で説明する。"""
     track_id = tm.create(db_persona, "user_conversation", title="対 user1", is_persistent=True)
     tm.activate(track_id)
     tm.pause(track_id)
@@ -415,7 +192,7 @@ def test_state_message_explains_target_already_running(tm, db_persona):
 
     meta, _llm, _persona = _make_meta_layer(tm, db_persona, [])
 
-    msg = meta._build_state_message(
+    msg = meta._build_situation_text(
         db_persona, track_id,
         context={
             "trigger": "user_utterance",
@@ -437,7 +214,7 @@ def test_state_message_omits_race_block_when_not_already_running(tm, db_persona)
     tm.set_alert(track_id)
 
     meta, _llm, _persona = _make_meta_layer(tm, db_persona, [])
-    msg = meta._build_state_message(
+    msg = meta._build_situation_text(
         db_persona, track_id, context={"trigger": "user_utterance"}
     )
     assert "既に running 状態" not in msg
@@ -601,70 +378,6 @@ def _make_meta_with_db(tm, session_factory, persona_id, llm_responses):
     return MetaLayer(manager), llm, persona
 
 
-def test_legacy_path_records_meta_judgment_log(
-    tm, db_persona, session_factory
-):
-    """legacy path で判断ループが完了すると meta_judgment_log に 1 行入る。"""
-    from database.models import MetaJudgmentLog
-
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    meta, _llm, _persona = _make_meta_with_db(
-        tm, session_factory, db_persona, ["継続して問題なし。何も操作しない。"]
-    )
-    meta.on_track_alert(db_persona, track_id, {"trigger": "user_utterance"})
-
-    db = session_factory()
-    try:
-        rows = db.query(MetaJudgmentLog).all()
-    finally:
-        db.close()
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.persona_id == db_persona
-    assert row.trigger_type == "user_utterance"
-    assert row.committed_to_main_cache is False  # スペル発動なし → 継続
-    assert "継続" in (row.judgment_thought or "")
-    assert row.spells_emitted in (None, "[]")  # 0 spells
-
-
-def test_legacy_path_records_committed_when_spell_fires(
-    tm, db_persona, session_factory
-):
-    """track_activate 等が発動した判断は committed_to_main_cache=True として保存される。"""
-    from database.models import MetaJudgmentLog
-
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    spell_response = (
-        f"対応する。\n/spell name='track_activate' args={{'track_id': '{track_id}'}}"
-    )
-    meta, _llm, _persona = _make_meta_with_db(
-        tm, session_factory, db_persona, [spell_response, "判断完了。"]
-    )
-    meta.on_track_alert(db_persona, track_id, {"trigger": "user_utterance"})
-
-    db = session_factory()
-    try:
-        rows = db.query(MetaJudgmentLog).all()
-    finally:
-        db.close()
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.committed_to_main_cache is True  # track_activate が発動 → switch
-    spells = json.loads(row.spells_emitted)
-    assert len(spells) == 1
-    assert spells[0]["name"] == "track_activate"
-
-
 def test_recent_judgments_block_renders_chronologically(
     tm, db_persona, session_factory
 ):
@@ -705,40 +418,6 @@ def test_recent_judgments_empty_when_no_history(
         tm, session_factory, db_persona, []
     )
     assert meta._build_recent_judgments_block(db_persona) == ""
-
-
-def test_legacy_path_injects_recent_judgments_into_prompt(
-    tm, db_persona, session_factory
-):
-    """legacy path で過去ログがあれば user_message に注入される。"""
-    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
-    tm.activate(track_id)
-    tm.pause(track_id)
-    tm.set_alert(track_id)
-
-    meta, _llm, _persona = _make_meta_with_db(
-        tm, session_factory, db_persona, ["停止"]
-    )
-
-    # 1 件先に書く
-    meta._record_judgment_log(
-        persona_id=db_persona,
-        trigger_type="periodic_tick",
-        trigger_context=None,
-        track_at_judgment_id=None,
-        thought_parts=["前回は何もしないで継続した。"],
-        spells=[],
-        committed_to_main_cache=False,
-    )
-
-    # ここで判断を発火
-    meta.on_track_alert(db_persona, track_id, {"trigger": "user_utterance"})
-
-    # 2 回目の判断時の user メッセージに過去ログが含まれている
-    second_call = _llm.calls[0]  # まだ 1 回目だが、過去ログは入っているはず
-    user_msg = second_call["messages"][1]["content"]
-    assert "[最近のメタ判断ログ" in user_msg
-    assert "前回は何もしないで継続" in user_msg
 
 
 def test_locks_are_independent_per_persona(tm, session_factory, monkeypatch):

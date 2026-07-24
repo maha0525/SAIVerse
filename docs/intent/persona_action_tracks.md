@@ -1229,7 +1229,7 @@ class MetaLayer:
         ...
 ```
 
-両入口は **同じ判断ループ** (`_run_judgment`) を共有する。違いは context のみ:
+両入口は **同じ判断ディスパッチ** (`_run_judgment_via_playbook`) を共有する。違いは context のみ:
 - alert 入口: `context = {"trigger": "user_utterance", ...}` 等
 - 定期入口: `context = {"trigger": "periodic_tick", "interval_seconds": ...}`
 
