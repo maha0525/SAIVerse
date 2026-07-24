@@ -1,6 +1,19 @@
 # Intent Document: llama.cpp multimodal slot save/restore 実装 (SAIVerse 専用 fork)
 
-> **Scope**: 本ドキュメントは SAIVerse 本体ではなく、SAIVerse が依存する `ggml-org/llama.cpp` のマルチモーダル KV キャッシュ永続化対応の設計を記す。実装は `temp/llama-fork/` (fork: `maha0525/llama.cpp`、ブランチ: `feature/multimodal-slot-save`) で行い、**SAIVerse 専用 fork として公開**する。upstream への PR は当面投げない（§2-5 参照）。
+> **Scope**: 本ドキュメントは SAIVerse 本体ではなく、SAIVerse が依存する `ggml-org/llama.cpp` のマルチモーダル KV キャッシュ永続化対応の設計を記す。原実装は `temp/llama-fork/` (fork: `maha0525/llama.cpp`、ブランチ: `feature/multimodal-slot-save`) にあり、2026-07-23 に `TheTom/llama-cpp-turboquant` の `feature/turboquant-kv-cache` を基底とする `codex/turboquant-multimodal-slot-save` へ移植した。upstream への PR は当面投げない（§2-5 参照）。
+
+## 0. 現在の実装状態 (2026-07-23)
+
+- TurboQuant fork と画像/音声 slot cache は、同じ `maha0525/llama.cpp` リポジトリ内の専用ブランチとして共存できる。追加 fork は不要。
+- TurboQuant の checkpoint sidecar (`.ckpt`) を維持したまま、KV state (`.bin`) と multimodal sidecar (`.bin.mtmd`) を保存・復元する。
+- outer sidecar と chunk serialization の現行版は v3。原実装の v2 sidecar/chunk は読み込み互換を維持する。
+- TurboQuant 側で変わった `clip_image_f32_batch` の `unique_ptr` 所有構造、`grid_x/grid_y`、`add_viewsep/add_newline`、画像/音声フラグを v3 形式へ反映した。
+- mmproj SHA-256、サイズ上限、終端・余剰データ、media range の重複/欠落を検証し、復元失敗時は KV と media metadata を残さない。
+- CPU/CUDA Release で `llama-server` をビルド済み。`test-mtmd-c-api`、`test-mtmd-sidecar`、TurboQuant を含む `test-quantize-fns` は成功済み。
+- `gemma-4-E4B-it-UD-Q4_K_XL.gguf` + `mmproj-F32.gguf` で画像入り slot の save/erase/restore と、server プロセス再起動後の restore を実機確認済み。
+- TurboQuant の checkpoint 間隔は logical token 数で判定されるため、1 logical token が数百 position を占める media 後 checkpoint が作られない問題が実機試験で判明した。multimodal prompt では間隔制限を迂回して post-media checkpoint を作成するよう修正し、restore 後に画像 encode が再実行されないことをログで確認した。
+- SAIVerse 統合試験は未実施。
+- 変更はステージまでとし、commit/push は明示承認を待つ。
 
 ## 1. 目的
 
@@ -57,7 +70,7 @@ cache.bin.mtmd  ← 新規 sidecar (server_tokens の map_idx_to_media を seria
 
 ```
 [magic        u8[4]   ] = "MTMD"
-[version      u32     ] = 1
+[version      u32     ] = 2 or 3 (v3 が現行、v2 を読み込み可能)
 [mmproj_hash  u8[32]  ]    SHA-256 of mmproj file (互換性検証)
 [total_tokens u64     ]    server_tokens.tokens.size() at save time (KV との整合性検証)
 [n_chunks     u64     ]    map_idx_to_media のエントリ数
@@ -88,6 +101,8 @@ cache.bin.mtmd  ← 新規 sidecar (server_tokens の map_idx_to_media を seria
 [for each entry (clip_image_f32):]
   [nx       i32       ]
   [ny       i32       ]
+  [add_viewsep u8      ]  // v3
+  [add_newline u8      ]  // v3
   [buf_size u64       ]
   [buf      float[]   ]  // image: nx*ny*3, audio: nx*ny
 ```
@@ -248,6 +263,16 @@ llama.cpp の `llama_state_seq_save_file` / `load_file` は **recurrent memory**
 - ✅ Gemma 4 E4B-it (NORMAL pos_type, 通常 attention): 9127ms → 204ms (~45x)
 - ⚠️ Qwen 3.6-35B-A3B (hybrid attention): restore 自体は成功するが full re-processing 強制
 
+TurboQuant 移植後の実機検証 (2026-07-23):
+- モデル: `gemma-4-E4B-it-UD-Q4_K_XL.gguf` + `mmproj-F32.gguf`
+- GPU: NVIDIA GeForce RTX 3090
+- 初回: `cache_n=0`, `prompt_n=73`, 画像 encode 実行
+- save: `.bin` + `.bin.mtmd` + `.bin.ckpt` を生成
+- erase/restore: `n_restored=88`, `.bin + .mtmd` の `n_read=6,404,284` bytes
+- server 完全再起動後: checkpoint 3件を disk sidecar から復元
+- 再推論: `cache_n=68`, `prompt_n=5`, 画像 encode なし
+- 結果: TurboQuant checkpoint と multimodal slot cache の永続化が同居し、プロセスを跨いで画像 encode を省略できることを確認
+
 参考: ggml-org/llama.cpp PR #13194 ("kv-cache: add SWA support") のコメント欄。
 
 ## 9. テスト戦略
@@ -278,10 +303,10 @@ fork ビルドの `llama-server.exe` で SAIVerse を起動し、画像入りペ
 2. ✅ **ビルド検証**: CUDA ビルド 4分57秒
 3. ✅ **再現確認**: SAIVerse から save → HTTP 501 "not supported by multimodal"
 4. ✅ **本ドキュメント レビュー** (設計確定)
-5. **実装 (Phase 1)**: `mtmd_input_chunk` シリアライザ (mtmd.cpp/.h)
-6. **実装 (Phase 2)**: `server_tokens::save/load_mtmd_sidecar()`
-7. **実装 (Phase 3)**: SLOT_SAVE/RESTORE ハンドラ修正、`check_no_mtmd` 削除、mmproj_hash 計算追加
-8. **テスト追加**: ユニット + pos_type 実機検証 (NORMAL + MROPE)
+5. ✅ **実装 (Phase 1)**: `mtmd_input_chunk` v2/v3 シリアライザ (mtmd.cpp/.h)
+6. ✅ **実装 (Phase 2)**: `server_tokens::save/load_mtmd_sidecar()`
+7. ✅ **実装 (Phase 3)**: SLOT_SAVE/RESTORE ハンドラ修正、`check_no_mtmd` 削除、mmproj_hash 計算追加
+8. **テスト追加**: ✅ model-independent unit / ⬜ pos_type 実機検証 (NORMAL + MROPE)
 9. **SAIVerse 統合テスト**: fork ビルドで実環境確認、キャッシュ効果計測
 10. **fork のタグ付きリリース**: `v0.1-saiverse-mmcache` 的なタグでビルド成果物公開
 11. **SAIVerse README 案内更新**: 「マルチモーダルキャッシュ使う場合は fork 版を」セクション追加

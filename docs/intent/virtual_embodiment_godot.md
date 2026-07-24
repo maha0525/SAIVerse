@@ -1,9 +1,48 @@
 # Intent: Godot / ARDY 仮想身体デモ
 
-> **ステータス: v0.17 (2026-07-20) — 実装中**  
+> **ステータス: v0.24 (2026-07-23) — 実装中**
 > 2026-07-12 の「VR/3Dアバターの身体制御」構想を、Godot + OpenXR + VRM + ARDY による公開デモ計画へ昇格した。Unity は正典から外し、既存 `unity_gateway` は再利用可能な知見を回収するための旧実装として扱う。
 
 ## 実装記録
+
+### 2026-07-23: 立体SkySpark撤去と発光樹冠の復元
+
+- 全天球panorama導入前に低密度の星として配置していた`SkySpark_00`〜`SkySpark_27`は、cyan 18個・amber 10個、計28 object / 560 trianglesだった。panoramaの星と役割が重複し、近景では青橙の浮遊物として読まれていたため、Blender原本からobjectと孤立mesh dataを全て撤去した。panorama、三日月mesh、建築先端や床の意図的なcyan/amber発光は残している。
+- `Terrace_Foliage_Glow`は画像がemission colorへ接続されており発光意図は存在したが、Blender strength 0.72がGodot環境のbloom閾値0.88を下回っていた。strengthを2.4へ上げ、Godot importer後も`emission_enabled=true`、energy 2.4、emission textureありであることをfixtureで検査する。RTX 3090 / Vulkan / Forward+の近距離描画では、3.2倍repeatした葉模様を保ったまま葉脈と樹冠輪郭へcyan haloが出ることを確認した。
+- 最終GLBは材質単位10 mesh、59,024 triangles、26,627,388 bytes。fixtureはtriangle数も固定し、SkySpark 560 trianglesの再混入や予期しないtopology変化を検出する。検証中にGateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。
+
+### 2026-07-23: 発光コントラストと樹冠leaf scaleの補正
+
+- detail pass直後のcyan/amber材質は、生成画像の暗いchannelを色本体へ直接掛けていたため、黄色窓との対比で暗く半透明のgel状に見えていた。Blender原本では黄色窓のemission 2.4に対しcyan 1.38、amber 1.18だった。Godot shaderを、固有のcyan/amber色を最低輝度として保ち、texture luminanceを流れるribbonの強弱にだけ使う構成へ変更した。周期textureのlinear luminance分布を実測して判定域を0.035〜0.35へ合わせた。最初の補正では`render_mode unshaded`を残したため、energyを2.2から6.5へ上げてもPNG上の平均輝度が小数一桁まで変化せず、`EMISSION`が画面へ寄与していなかった。`unshaded`を撤去して通常のspatial emission経路へ通し、runtime energyをcyan 3.8、amber 3.6としたことでHDR haloが描画された。amber tintは黄色窓と区別できる赤寄りのorangeへ補正し、黄色窓はBlender側で1.85へ下げた。
+- 樹冠56 objectの発光葉textureは、形状を変更せず全UVを3.2倍へ拡大してrepeatさせた。Godot importer後の`Terrace_Foliage_Glow` UV spanは(3.200049, 1.51165)で、従来より細かな葉の集合として表示される。検証fixtureへcyan/amber energy値と最低UV span 3.1の回帰検査を追加した。
+- GLB再出力の途中で`export_apply=true`が中央床へmodifierを追加適用し、triangle数を59,584から61,120へ増やすことを検出した。これは見た目調整に不要なtopology変更だったため採用せず、`export_apply=false`で原本どおりの59,584 trianglesへ戻した。最終GLBは10 mesh、26,684,380 bytes。Godot 4.6.3隔離fixtureとRTX 3090 / Vulkan / Forward+のwide・近距離描画で、cyan/amber双方のHDR halo、流線、細密化した葉、既存中央床を確認した。1秒差frameではRGB差が2を超える画素が133,606（画面の6.4432%）となり、emission模様の時間変化も描画へ反映された。fixtureはenergy値・UV密度に加え、shaderへ`render_mode unshaded`が再混入しないことを検査する。Gateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。
+
+### 2026-07-23: Celestial Terraceの発光植栽・energy flow・外周床detail pass
+
+- 単色に見えていた青い樹冠へ、濃紺の葉身、青緑の縁、cyanの発光葉脈を持つ画像をalbedoと弱いemissionとして追加した。cyanとamberの発光材質には、左右方向の流線を持つ生成画像を周期化したruntime textureを導入した。3枚の生成sourceはOpenAI組み込み`image_gen`のtext-only生成であり、参照画像や外部assetを入力していない。正確なprompt、生成source、周期化手順、runtime画像は`assets/environment/textures/celestial_terrace/`に記録した。
+- 外周床が単色だった直接原因は、`Outer_Annular_Deck`だけがUVを持っていなかったことだった。既存の`Terrace_Outer_Stone`画像を推測で交換せず、同meshへ3.5m単位のXY planar UVを追加して石目を表示した。Blender原本へ3材質の画像をpackしてGLBを再出力し、材質単位10 mesh、59,584 trianglesになった。中央の直径30m歩行空間と外周装飾の配置は変更していない。
+- GodotはGLB内蔵のcyan/amber画像を入力にする専用spatial emission shaderを使い、異なるscaleと方向のUV二層を合成して時間移動させる。cyanは0.040 UV/秒、amberは0.032 UV/秒で流し、暗部も物体形状を失わない最低発光と6%の位相差pulseを持たせた。scene起動時に材質名を検証してsurface overrideを設定し、対象材質、surface数、mesh数を構造化ログへ残す。
+- Gatewayを持たないGodot 4.6.3隔離previewで、10 mesh、全10材質、画像を持つ9材質、2つのanimated surface override、sky 4096×2048、59,584 trianglesを検査した。RTX 3090 / Vulkan / Forward+の1920×1080描画では葉脈、energy模様、外周床の石目を確認し、1秒差の静止2frameで18,622 pixel（全体の0.8981%、RGB差が2を超える画素）が変化した。検証中にGateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。OpenXR runtimeは未検出で、実HMDでのanimation速度、bloom、texture filteringは未検証である。
+
+### 2026-07-23: Celestial Terraceの全天球sky panorama
+
+- 黒一色のworld背景を、OpenAI組み込み`image_gen`のtext-only生成による2:1 equirectangular panoramaへ置き換えた。生成sourceは1774×887、runtime版はLanczosで4096×2048へ拡大し、左右端の画素を平均してwrap境界を一致させた。最終画像の左右端平均差は0、境界前後の傾き差は平均0.967/255だった。生成source・4K runtime画像・promptは`assets/environment/sky/`へ置く。
+- panoramaは藍色の星空、青紫の星雲、低い地平線光、遠い浮遊観測塔だけを持ち、月・太陽・人物・近景建築を含めない。既存の三日月meshと低密度の発光星を残し、空の背景とscene geometryの役割が重複しない構成にした。
+- Godotの`main.tscn`とGatewayを持たない`environment_preview.tscn`は、同じ4K画像を`PanoramaSkyMaterial`のenergy 0.62で参照する。Blender原本も同画像をequirectangular World textureとしてpackした。Godot 4.6.3の隔離fixtureでsky背景・4096×2048・既存10 mesh・59,584 trianglesを検査し、RTX 3090 / Vulkan / Forward+で1920×1080実描画した。Blender EEVEE Nextでも同じ空を実描画した。playerの半径14.25m境界fixtureはexit 0を維持し、Gateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。OpenXR runtimeは未検出で、実HMDの天頂歪み・filtering・VRAM使用量は未検証である。
+
+### 2026-07-22: Celestial Terraceの画像テクスチャpass
+
+- low-poly形状と発光色だけの初版から、床・外周石材・濃紺建築面・真鍮・暗色葉・暖色窓へ用途別の画像テクスチャを導入した。6枚はいずれもOpenAI組み込み`image_gen`をtext-onlyで使用して生成した1254×1254 PNGで、外部assetや参照画像を入力していない。project内の正本と生成promptは`assets/environment/textures/celestial_terrace/`に置く。
+- Blender原本は画像をpackし、石材・建築・葉はalbedoと材質別のmetallic/roughness、窓はalbedoとemissionへ接続した。濃紺建築面と暗色葉には夜景で面情報が消えない範囲の弱いemissionを加えた。窓だけを`Terrace_Window_Glow`へ分離し、実行時GLBは材質単位10 mesh、59,584 triangles、20,449,144 bytesになった。
+- Godot 4.6.3で再importし、10 `MeshInstance3D`、全10材質、画像を持つ6材質、59,584 trianglesを隔離fixtureで検査した。RTX 3090 / Vulkan / Forward+で1920×1080の実描画を行い、近景の青い石床、真鍮目地、葉の表面、暖色窓を確認した。半径14.25mのplayer境界fixtureもexit 0を維持した。検証中にGateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。OpenXR runtimeは検出されず、実HMDでのtexture filtering・VRAM・可読性は未検証である。
+
+### 2026-07-22: 中央30mを歩行専用にしたCelestial Terrace環境
+
+- 最終成果を「背景meshを置くこと」ではなく、プレイヤーとペルソナが障害物に遮られず対面・移動でき、その外側には夜の幻想的なテラスが連続して見えることとした。環境assetはBlender、表示と床衝突はGodot scene、歩行可能境界は`PlayerController`が所有し、三者が同じ円形空間契約を共有する。
+- Blender 4.5.12 LTSで編集可能な`art_source/blender/celestial_terrace.blend`を作成し、Godot向け`assets/environment/celestial_terrace.glb`へ書き出した。中央床は直径30m、建物・発光樹・植え込み・テーブル・椅子・花壇・アーケードはすべて外周へ配置し、モブは含めない。三日月、低密度の星、青い発光植栽、暖色窓、ドームと尖塔により、参照画像の夜間テラスの色温度と輪郭を軽量なlow-poly表現へ落とした。外部assetサービスは使っていない。
+- Blender側の装飾collectionについてvertex・edge中点・polygon中心を検査し、最内周は半径15.825m、半径15.5m以内への侵入は0件だった。書き出し時は編集用約602 objectを材質単位の9 meshへ結合し、55,732 trianglesのGLBとした。原本の`.blend`は結合前の編集可能な構造を保持する。
+- Godotの旧8m角床を半径15mの円形collisionへ置き換え、GLBを`main.tscn`へinstance化した。プレイヤー境界は外周との安全帯75cmを残す半径14.25mのradial clampへ変更し、境界へ達した最初のframeを`movement_boundary_clamped`として記録する。これにより正方形clampの角から装飾帯へ侵入する不整合をなくした。将来NavMeshを導入する場合も、この14.25m円を初期walkable regionの正典として移行する。
+- Godot 4.6.3はGLBを9 `MeshInstance3D`として読み込み、`main.tscn`上で環境instance、円形collision、`movement_radius_m=14.25`を確認した。Gateway scriptを持たない隔離preview sceneをForward+で1920×1080実描画し、中央の無障害空間、外周建築、発光材質を確認した。controller単体fixtureは対角方向を維持したまま半径14.25mへclampしexit 0だった。検証中にGateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。現在の証拠はdesktop描画であり、実HMDの性能・見切れ・快適性は未検証である。
 
 ### 2026-07-19: `player.vrm`材質白化の根因と誤った補正の撤去
 
@@ -206,7 +245,7 @@
 
 ### 2026-07-17: プレイヤー操作と単発一人称視覚
 
-- デスクトップ時の`XROrigin3D`へプレイヤーcontrollerを追加した。WASD/矢印とgamepad左stickで移動し、Q/Eと右stickで旋回する。現在の8m四方のroom内へclampし、XR viewportがactiveになった時はdesktop入力を自動停止する。
+- デスクトップ時の`XROrigin3D`へプレイヤーcontrollerを追加した。WASD/矢印とgamepad左stickで移動し、Q/Eと右stickで旋回する。現在はCelestial Terrace中央の半径14.25m円内へclampし、XR viewportがactiveになった時はdesktop入力を自動停止する。
 - プレイヤー身体をペルソナとは別の`PlayerAvatar` slotにした。`player.vrm`があれば同じ汎用VRM loaderで読み込み、無ければ青い簡易humanoidを表示する。専用render layer 2へ置き、プレイヤー一人称カメラだけから除外し、ペルソナ視点には表示する。
 - 初期実装では`AvatarAnchor/PersonaView`を複製する512×288の`SubViewport`撮像器を追加した。Motor commandのbusy判定とは独立して一枚だけPNG化し、base64本体をログへ出さず、command ID・寸法・byte数・所要時間だけを構造化ログへ残す。撮像寸法は2026-07-19に1024×1024へ更新した。
 - native `body_see(focus)` SpellとGatewayの`capture_view` commandを追加した。返ったPNGを4 MiB上限、base64、PNG signature、寸法で検証し、既存media storeへ保存して`{"media": [...]}`として次のSpell loop LLM roundへ添付する。Spell自身はSAIMemoryや知覚bufferへ別途追記しない。
@@ -404,7 +443,7 @@ Idleも一枚の無限loopへ固定しない。呼吸・瞬き・視線は軽量
 - PNG本体やbase64を通常ログ、lifecycleログ、知覚metadataへ複製しない。ログにはcommand ID、視点、寸法、byte数、所要時間だけを残す。
 - 撮像失敗、空画像、過大payload、形式不正は画像無しの成功にせず、相関ID付きの失敗として閉じる。
 - `focus` は「何を確かめたいか」を次の思考へ残す補助文であり、カメラ映像の内容を先回りして記述しない。
-- プレイヤーの移動可能範囲は現在のデモroom内へ制限する。将来Nav/world geometryを導入した時は座標clampではなく衝突付きlocomotionへ置き換える。
+- プレイヤーの移動可能範囲はCelestial Terrace中央の半径14.25m円内へ制限する。将来Nav/world geometryを導入した時は、この円を初期walkable regionとして座標clampから衝突付きlocomotionへ置き換える。
 
 ### この段階で得る身体閉ループ
 
