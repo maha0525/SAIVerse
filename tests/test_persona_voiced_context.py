@@ -197,22 +197,40 @@ class _FakeHistoryManager:
         self._captured["limit"] = limit
         return []
 
+    def get_recent_history(self, max_chars, **_kwargs):
+        # 上限は文字数で渡る (chronicle_eviction.md §4 — 低水位 = 直近保護帯)
+        self._captured["limit"] = max_chars
+        return []
+
+
+def _runtime_without_metabolism():
+    """Metabolism 無効の runtime (履歴上限の解決に session_lifecycle が要る)。"""
+    from sea.session_lifecycle import SessionLifecycle
+
+    manager = SimpleNamespace(metabolism_enabled=False)
+    return SimpleNamespace(
+        manager=manager,
+        session_lifecycle=SessionLifecycle(SimpleNamespace(), manager),
+    )
+
 
 def test_history_limit_without_metabolism_uses_execution_model(monkeypatch):
     """Metabolism 無効時、履歴上限は persona.model でなく model_key で選ぶこと。
 
-    persona.model (標準モデル、例: 100件上限) と model_key (実行 model、例:
-    軽量モデル・20件上限) が食い違うとき、persona.model 基準で上限を選ぶと
+    persona.model (標準モデル、例: 10万字) と model_key (実行 model、例:
+    軽量モデル・2万字) が食い違うとき、persona.model 基準で上限を選ぶと
     標準モデル分の履歴を軽量クライアントへ送り、context-length error になる
     (2026-07-24 Codex レビュー指摘、work_session が軽量モデルで走ることの実害)。
+
+    上限の実体は低水位 = 直近保護帯の文字数 (chronicle_eviction.md §4)。
     """
     monkeypatch.setattr(
         "sea.head_pipeline.render_head_messages", lambda *a, **k: []
     )
     from saiverse import model_configs
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
-        "fable-5": {"default_max_history_messages": 100},
-        "ollama-20b": {"default_max_history_messages": 20},
+        "fable-5": {"metabolism_low_chars": 100_000},
+        "ollama-20b": {"metabolism_low_chars": 20_000},
     })
 
     captured: dict = {}
@@ -223,7 +241,7 @@ def test_history_limit_without_metabolism_uses_execution_model(monkeypatch):
     )
 
     prepare_context(
-        runtime=SimpleNamespace(manager=SimpleNamespace(metabolism_enabled=False)),
+        runtime=_runtime_without_metabolism(),
         persona=persona,
         building_id="air_city_a_room",
         user_input=None,
@@ -233,8 +251,8 @@ def test_history_limit_without_metabolism_uses_execution_model(monkeypatch):
         preview_only=True,
     )
 
-    assert captured.get("limit") == 20, (
-        "実行 model (ollama-20b=20件) でなく別の上限が使われた: "
+    assert captured.get("limit") == 20_000, (
+        "実行 model (ollama-20b=2万字) でなく別の上限が使われた: "
         f"{captured.get('limit')!r}"
     )
 
@@ -246,7 +264,7 @@ def test_history_limit_without_metabolism_falls_back_to_persona_model(monkeypatc
     )
     from saiverse import model_configs
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
-        "fable-5": {"default_max_history_messages": 100},
+        "fable-5": {"metabolism_low_chars": 100_000},
     })
 
     captured: dict = {}
@@ -257,7 +275,7 @@ def test_history_limit_without_metabolism_falls_back_to_persona_model(monkeypatc
     )
 
     prepare_context(
-        runtime=SimpleNamespace(manager=SimpleNamespace(metabolism_enabled=False)),
+        runtime=_runtime_without_metabolism(),
         persona=persona,
         building_id="air_city_a_room",
         user_input=None,
@@ -267,7 +285,7 @@ def test_history_limit_without_metabolism_falls_back_to_persona_model(monkeypatc
         preview_only=True,
     )
 
-    assert captured.get("limit") == 100
+    assert captured.get("limit") == 100_000
 
 
 if __name__ == "__main__":

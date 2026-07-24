@@ -63,6 +63,21 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
 })
 
 
+def _minimal_load_chars(runtime, persona: Any, model_key: Optional[str]) -> int:
+    """anchor が無い / Metabolism 無効なときに読む履歴の文字数。
+
+    低水位 (直近保護帯、docs/intent/chronicle_eviction.md §4) をそのまま使う —
+    「Metabolism 後に残っている量」と「anchor 無しで読み直す量」は同じであるべき
+    だから (再開時に窓の大きさが飛ぶと prefix が毎回作り直しになる)。
+    """
+    lifecycle = getattr(runtime, "session_lifecycle", None)
+    if lifecycle is not None:
+        watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
+        if watermarks is not None and watermarks.low > 0:
+            return watermarks.low
+    return int(getattr(persona, "context_length", 2000) or 2000)
+
+
 def history_spec_is_empty(history_depth: Any) -> bool:
     """``history_depth`` の指定が「履歴を一件も積まない」ことを意味するか。
 
@@ -215,7 +230,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 required_scopes = ["committed"]
 
                 # Parse history_depth format
-                # - "full": use max_history_messages (message count) or context_length (character limit)
+                # - "full": anchor 以降の窓、または低水位ぶんの文字数 (Metabolism 無効時)
                 # - "Nmessages" (e.g., "10messages"): message count limit
                 # - integer or numeric string: character limit
                 use_message_count = False
@@ -241,6 +256,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 required_line_roles=required_line_roles,
                                 required_scopes=required_scopes,
                                 pulse_id=pulse_id,
+                            )
+                            # 窓の途中で digest に畳まれた範囲は、元の時系列位置で
+                            # あらすじ + 圧縮マークに置き換えて見せる
+                            # (docs/intent/chronicle_eviction.md §6)。穴が無ければ素通り。
+                            recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
+                                persona, model_key, recent_from_anchor,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -299,12 +320,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                         "content": "Chronicle生成が完了しました",
                                     })
 
-                            # Load minimal history (low watermark、実行 model の閾値)
-                            low_wm = runtime.session_lifecycle.get_low_watermark(persona, model_key)
-                            limit_value = low_wm if low_wm and low_wm > 0 else 20
-                            use_message_count = True
+                            # Load minimal history (低水位 = 直近保護帯の文字数、
+                            # 実行 model の設定。chronicle_eviction.md §4)
+                            limit_value = _minimal_load_chars(runtime, persona, model_key)
+                            use_message_count = False
                             LOGGER.debug(
-                                "[sea][prepare-context] Minimal load (no valid anchor): %d messages",
+                                "[sea][prepare-context] Minimal load (no valid anchor): %d chars",
                                 limit_value,
                             )
 
@@ -320,34 +341,28 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 required_scopes=required_scopes,
                                 pulse_id=pulse_id,
                             )
+                            recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
+                                persona, model_key, recent_from_anchor,
+                            )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
                                 used_anchor = True
                         if not used_anchor:
-                            low_wm = runtime.session_lifecycle.get_low_watermark(persona, model_key)
-                            limit_value = low_wm if low_wm and low_wm > 0 else 20
-                            use_message_count = True
+                            limit_value = _minimal_load_chars(runtime, persona, model_key)
+                            use_message_count = False
 
                     if not used_anchor and not metabolism_enabled:
-                        # Metabolism disabled — traditional count/char retrieval
-                        max_hist_msgs = getattr(runtime.manager, "max_history_messages_override", None) if runtime.manager else None
-                        if max_hist_msgs is None:
-                            from saiverse.model_configs import get_default_max_history_messages
-                            # 上限は実際にこの context を受け取る model (model_key)
-                            # 基準で選ぶ。None なら persona の標準 model にフォール
-                            # バック (anchor 分岐と同じ規約、§3.1)。work_session 等の
-                            # 軽量モデル実行で、標準モデルの上限 (例: 100件) を軽量
-                            # モデルへ送るとコンテキスト長を超える
-                            # (2026-07-24 Codex レビュー指摘)。
-                            effective_model = model_key or getattr(persona, "model", None)
-                            if effective_model:
-                                max_hist_msgs = get_default_max_history_messages(effective_model)
-                        if max_hist_msgs is not None:
-                            limit_value = max_hist_msgs
-                            use_message_count = True
-                            LOGGER.debug("[sea][prepare-context] Using max_history_messages=%d", max_hist_msgs)
-                        else:
-                            limit_value = getattr(persona, "context_length", 2000)
+                        # Metabolism disabled — 低水位 (直近保護帯) の文字数で読む。
+                        # 上限は実際にこの context を受け取る model (model_key) 基準で
+                        # 選ぶ。None なら persona の標準 model にフォールバック
+                        # (anchor 分岐と同じ規約、§3.1)。work_session 等の軽量モデル
+                        # 実行で、標準モデルの上限を軽量モデルへ送るとコンテキスト長を
+                        # 超える (2026-07-24 Codex レビュー指摘)。
+                        limit_value = _minimal_load_chars(runtime, persona, model_key)
+                        LOGGER.debug(
+                            "[sea][prepare-context] Metabolism disabled; using %d chars",
+                            limit_value,
+                        )
 
                 elif isinstance(history_depth, str) and history_depth.endswith("messages"):
                     # Message count mode: "10messages", "20messages", etc.

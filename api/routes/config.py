@@ -78,11 +78,19 @@ class ModelConfigResponse(BaseModel):
     current_model: Optional[str]
     parameters: Dict[str, ParameterSpec]
     current_values: Dict[str, Any]
-    max_history_messages: Optional[int] = None
-    max_history_messages_model_default: Optional[int] = None
     metabolism_enabled: bool = True
-    metabolism_keep_messages: Optional[int] = None
-    metabolism_keep_messages_model_default: Optional[int] = None
+    # Metabolism の三水位 (文字数)。docs/intent/chronicle_eviction.md §4
+    # 実効値 / グローバル override / モデル既定を分けて返す (UI の入力欄は
+    # override を映す — 実効値だと「未設定」が表現できない)。
+    metabolism_low_chars: Optional[int] = None
+    metabolism_low_chars_override: Optional[int] = None
+    metabolism_low_chars_model_default: Optional[int] = None
+    metabolism_target_chars: Optional[int] = None
+    metabolism_target_chars_override: Optional[int] = None
+    metabolism_target_chars_model_default: Optional[int] = None
+    metabolism_high_chars: Optional[int] = None
+    metabolism_high_chars_override: Optional[int] = None
+    metabolism_high_chars_model_default: Optional[int] = None
     max_image_embeds: Optional[int] = None
     max_image_embeds_model_default: Optional[int] = None
 
@@ -287,16 +295,14 @@ def get_current_config(manager = Depends(get_manager)):
     
     # If no model selected, return empty (but still include overrides)
     if not current_model:
-        override = getattr(manager, "max_history_messages_override", None)
         return {
             "current_model": None,
             "parameters": {},
             "current_values": {},
-            "max_history_messages": override,
-            "max_history_messages_model_default": None,
             "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-            "metabolism_keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
-            "metabolism_keep_messages_model_default": None,
+            # override も同じ形で返す — UI の入力欄は override を映すので、ここで
+            # 欠けると設定済みの値が空欄に見え、次の onBlur で消えてしまう。
+            **_metabolism_watermark_payload(manager, None),
             "max_image_embeds": getattr(manager, "max_image_embeds_override", None),
             "max_image_embeds_model_default": None,
         }
@@ -337,16 +343,10 @@ def get_current_config(manager = Depends(get_manager)):
     if manager.model_parameter_overrides:
         current_values.update(manager.model_parameter_overrides)
 
-    # Max history messages
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
-    override = getattr(manager, "max_history_messages_override", None)
-    model_default = get_default_max_history_messages(current_model)
+    # Metabolism の三水位 (文字数) と画像埋め込み上限
+    from saiverse.model_configs import get_max_image_embeds
+    watermarks = _metabolism_watermark_payload(manager, current_model)
 
-    # Metabolism settings
-    metab_override = getattr(manager, "metabolism_keep_messages_override", None)
-    metab_model_default = get_metabolism_keep_messages(current_model)
-
-    # Image embeds
     img_embeds_override = getattr(manager, "max_image_embeds_override", None)
     img_embeds_model_default = get_max_image_embeds(current_model)
 
@@ -354,11 +354,8 @@ def get_current_config(manager = Depends(get_manager)):
         "current_model": current_model,
         "parameters": specs,
         "current_values": current_values,
-        "max_history_messages": override if override is not None else model_default,
-        "max_history_messages_model_default": model_default,
         "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-        "metabolism_keep_messages": metab_override if metab_override is not None else metab_model_default,
-        "metabolism_keep_messages_model_default": metab_model_default,
+        **watermarks,
         "max_image_embeds": img_embeds_override if img_embeds_override is not None else img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
     }
@@ -415,14 +412,12 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     if manager.model_parameter_overrides:
         current_values.update(manager.model_parameter_overrides)
 
-    # Max history messages (reset override on model change)
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
-    manager.max_history_messages_override = None
-    model_default = get_default_max_history_messages(current_model)
-
-    # Metabolism (reset override on model change)
-    manager.metabolism_keep_messages_override = None
-    metab_model_default = get_metabolism_keep_messages(current_model)
+    # Metabolism の三水位 (モデル変更で override はリセット)
+    from saiverse.model_configs import get_max_image_embeds
+    manager.metabolism_low_chars_override = None
+    manager.metabolism_target_chars_override = None
+    manager.metabolism_high_chars_override = None
+    watermarks = _metabolism_watermark_payload(manager, current_model)
 
     # Image embeds (reset override on model change)
     manager.max_image_embeds_override = None
@@ -434,11 +429,8 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         "current_model": current_model,
         "parameters": specs,
         "current_values": current_values,
-        "max_history_messages": model_default,
-        "max_history_messages_model_default": model_default,
         "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-        "metabolism_keep_messages": metab_model_default,
-        "metabolism_keep_messages_model_default": metab_model_default,
+        **watermarks,
         "max_image_embeds": img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
     }
@@ -766,102 +758,124 @@ def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
-class MaxHistoryMessagesRequest(BaseModel):
-    value: Optional[int] = None
+#: 三水位の (API フィールド名, manager override 属性, model config getter)。
+_WATERMARK_FIELDS = (
+    ("metabolism_low_chars", "metabolism_low_chars_override", "get_metabolism_low_chars"),
+    ("metabolism_target_chars", "metabolism_target_chars_override", "get_metabolism_target_chars"),
+    ("metabolism_high_chars", "metabolism_high_chars_override", "get_metabolism_high_chars"),
+)
 
 
-@router.get("/max-history-messages")
-def get_max_history_messages(manager=Depends(get_manager)):
-    """Get current max history messages setting.
+def _metabolism_watermark_payload(manager, current_model: Optional[str]) -> Dict[str, Any]:
+    """三水位の「実効値 + override + モデル既定」を API 応答用に組む。
 
-    Returns the session override if set, otherwise the model default.
+    ``*_override`` を分けて返すのは、UI の入力欄が **override だけ**を映すため
+    (実効値を映すと「未設定」が表現できず、別名保存でモデル既定が焼き付いて
+    以後の既定変更に追従しなくなる)。
     """
-    from saiverse.model_configs import get_default_max_history_messages
+    import saiverse.model_configs as _mc
 
-    override = getattr(manager, "max_history_messages_override", None)
-    current_model = manager.model or None
-
-    model_default = None
-    if current_model:
-        model_default = get_default_max_history_messages(current_model)
-
-    return {
-        "value": override if override is not None else model_default,
-        "override": override,
-        "model_default": model_default,
-    }
-
-
-@router.post("/max-history-messages")
-def set_max_history_messages(req: MaxHistoryMessagesRequest, manager=Depends(get_manager)):
-    """Set session override for max history messages.
-
-    Send {"value": null} to clear the override and use the model default.
-    """
-    if req.value is not None and req.value < 1:
-        raise HTTPException(status_code=400, detail="value must be >= 1 or null")
-    manager.max_history_messages_override = req.value
-    return {"success": True, "value": req.value}
+    payload: Dict[str, Any] = {}
+    for field, attr, getter in _WATERMARK_FIELDS:
+        override = getattr(manager, attr, None)
+        model_default = getattr(_mc, getter)(current_model) if current_model else None
+        payload[field] = override if override is not None else model_default
+        payload[f"{field}_override"] = override
+        payload[f"{field}_model_default"] = model_default
+    return payload
 
 
 class MetabolismConfigRequest(BaseModel):
     enabled: Optional[bool] = None
-    keep_messages: Optional[int] = None
+    # 三水位 (文字数)。**キーを送らなければ据え置き、null を明示で送れば解除**
+    # (モデル既定に戻す)。``clear=True`` は三つまとめて解除。
+    low_chars: Optional[int] = None
+    target_chars: Optional[int] = None
+    high_chars: Optional[int] = None
+    clear: bool = False
 
 
 @router.get("/metabolism")
 def get_metabolism_settings(manager=Depends(get_manager)):
-    """Get current metabolism settings."""
-    from saiverse.model_configs import get_metabolism_keep_messages, get_default_max_history_messages
+    """Metabolism の現在設定 (三水位は文字数)。
 
+    docs/intent/chronicle_eviction.md §4 — 低 = 直近保護帯 / 目標 = 削る到達点 /
+    高 = 発火。高が未設定なら文字数では発火せず token 閾値のみで動く。
+    """
     current_model = manager.model or None
-    metab_override = getattr(manager, "metabolism_keep_messages_override", None)
-    metab_model_default = None
-    high_wm = None
-    if current_model:
-        metab_model_default = get_metabolism_keep_messages(current_model)
-        high_wm = get_default_max_history_messages(current_model)
-
-    return {
-        "enabled": getattr(manager, "metabolism_enabled", True),
-        "keep_messages": metab_override if metab_override is not None else metab_model_default,
-        "keep_messages_override": metab_override,
-        "keep_messages_model_default": metab_model_default,
-        "high_watermark": high_wm,
-    }
+    payload = _metabolism_watermark_payload(manager, current_model)
+    payload["enabled"] = getattr(manager, "metabolism_enabled", True)
+    return payload
 
 
 @router.post("/metabolism")
 def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_manager)):
-    """Set metabolism settings."""
+    """Metabolism 設定を更新する (三水位は文字数、グローバル override)。"""
     if req.enabled is not None:
         manager.metabolism_enabled = req.enabled
 
-    if req.keep_messages is not None:
-        if req.keep_messages < 1:
-            raise HTTPException(status_code=400, detail="keep_messages must be >= 1")
-        # Validate: high_wm - keep_messages >= 20
-        from saiverse.model_configs import get_default_max_history_messages
+    if req.clear:
+        for _field, attr, _getter in _WATERMARK_FIELDS:
+            setattr(manager, attr, None)
+    else:
+        # 「送られなかったキー」と「明示的な null」を区別する — 前者は据え置き、
+        # 後者は override 解除 (モデル既定に戻す)。
+        sent = req.model_fields_set
+        requested = {
+            attr: getattr(req, field)
+            for field, attr in (
+                ("low_chars", "metabolism_low_chars_override"),
+                ("target_chars", "metabolism_target_chars_override"),
+                ("high_chars", "metabolism_high_chars_override"),
+            )
+            if field in sent
+        }
+        for attr, value in requested.items():
+            if value is not None and value < 1:
+                raise HTTPException(
+                    status_code=400, detail=f"{attr} must be >= 1 or null",
+                )
+        # 低 ≤ 目標 ≤ 高 を検証する。順序が崩れると「保護帯を守ると目標に届かない」が
+        # 常態化するので入口で弾く。**検証を全部通してから一括で適用する** — 途中で
+        # 400 を返すと、解除だけ済んで画面と実状態がずれる。
+        import saiverse.model_configs as _mc
+
         current_model = manager.model or None
-        high_wm_override = getattr(manager, "max_history_messages_override", None)
-        high_wm = high_wm_override
-        if high_wm is None and current_model:
-            high_wm = get_default_max_history_messages(current_model)
-        if high_wm is not None and high_wm - req.keep_messages < 20:
+        resolved: Dict[str, Any] = {}
+        for field, attr, getter in _WATERMARK_FIELDS:
+            if attr in requested:
+                value = requested[attr]
+                # 明示 null = override 解除 → 実効値はモデル既定に戻る
+                resolved[field] = (
+                    value if value is not None
+                    else (getattr(_mc, getter)(current_model) if current_model else None)
+                )
+            else:
+                override = getattr(manager, attr, None)
+                resolved[field] = (
+                    override if override is not None
+                    else (getattr(_mc, getter)(current_model) if current_model else None)
+                )
+        low = resolved["metabolism_low_chars"]
+        target = resolved["metabolism_target_chars"]
+        high = resolved["metabolism_high_chars"]
+        if low is not None and target is not None and low > target:
             raise HTTPException(
                 status_code=400,
-                detail=f"keep_messages must be at most {high_wm - 20} (high watermark {high_wm} - 20)",
+                detail=f"低水位 ({low}) は目標水位 ({target}) 以下である必要があります",
             )
-        manager.metabolism_keep_messages_override = req.keep_messages
-    elif req.keep_messages is None and req.enabled is None:
-        # Clear override
-        manager.metabolism_keep_messages_override = None
+        if target is not None and high is not None and target > high:
+            raise HTTPException(
+                status_code=400,
+                detail=f"目標水位 ({target}) は高水位 ({high}) 以下である必要があります",
+            )
+        for attr, value in requested.items():
+            setattr(manager, attr, value)
 
-    return {
-        "success": True,
-        "enabled": getattr(manager, "metabolism_enabled", True),
-        "keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
-    }
+    payload = _metabolism_watermark_payload(manager, manager.model or None)
+    payload["success"] = True
+    payload["enabled"] = getattr(manager, "metabolism_enabled", True)
+    return payload
 
 
 class MaxImageEmbedsRequest(BaseModel):
@@ -1146,7 +1160,10 @@ class SaveModelFromChatRequest(BaseModel):
     parameters: Dict[str, Any] = {}
     cache_enabled: Optional[bool] = None
     cache_ttl: Optional[str] = None
-    max_history_messages: Optional[int] = None
+    # Metabolism の三水位 (文字数)。未指定ならモデルファイルに書かない = 一律既定。
+    metabolism_low_chars: Optional[int] = None
+    metabolism_target_chars: Optional[int] = None
+    metabolism_high_chars: Optional[int] = None
     max_image_embeds: Optional[int] = None
     overwrite: bool = False
 
@@ -1357,9 +1374,13 @@ def save_model_from_chat(req: SaveModelFromChatRequest):
             cache_cfg["default_ttl"] = req.cache_ttl
         new_config["cache"] = cache_cfg
 
-    # History / image embed settings as top-level fields
-    if req.max_history_messages is not None:
-        new_config["default_max_history_messages"] = req.max_history_messages
+    # Metabolism 水位 / image embed settings as top-level fields
+    if req.metabolism_low_chars is not None:
+        new_config["metabolism_low_chars"] = req.metabolism_low_chars
+    if req.metabolism_target_chars is not None:
+        new_config["metabolism_target_chars"] = req.metabolism_target_chars
+    if req.metabolism_high_chars is not None:
+        new_config["metabolism_high_chars"] = req.metabolism_high_chars
     if req.max_image_embeds is not None:
         new_config["max_image_embeds"] = req.max_image_embeds
 

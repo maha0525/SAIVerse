@@ -184,28 +184,57 @@ def get_context_length(model: str) -> int:
     return int(config.get("context_length", 120000))
 
 
-def get_default_max_history_messages(model: str) -> int | None:
-    """Get the default maximum number of history messages for a model.
+#: Metabolism の三水位 (文字数) の組み込み既定。
+#: docs/intent/chronicle_eviction.md §4 — 全モデル一律。旧「モデルごとに
+#: バラバラなメッセージ数」は切り分けの混乱の元だったため単位ごと統一した。
+#:
+#: - low (低水位): 直近保護帯。最新から遡ってこの文字数は退場させない。
+#: - target (目標水位): Metabolism で軽くする到達点。
+#: - high (高水位): 提示コンテキストがこれを超えたら Metabolism 発火。
+#:
+#: 差分の意味: high - target = 一回で削る量 (発火頻度から逆算 ≒ 20 往復)、
+#: target - low = 退場候補帯に残してよいバッファ (U 未満で畳めない小 episode 等)。
+BUILTIN_METABOLISM_LOW_CHARS = 40_000
+BUILTIN_METABOLISM_TARGET_CHARS = 60_000
+BUILTIN_METABOLISM_HIGH_CHARS = 120_000
 
-    Returns None if not configured (falls back to character-based limit).
+
+def _metabolism_chars(model: str, key: str, builtin_default: int) -> int | None:
+    """Metabolism 水位 (文字数) を model config から読む。
+
+    キーが**無い**なら組み込み既定 (一律)。キーが有って ``null`` / 0 以下なら
+    None = その水位を持たない。high が None のとき文字数による発火は起きず、
+    ``token_triggered`` だけが Metabolism を起こす (chronicle_eviction.md §4)。
     """
     config = MODEL_CONFIGS.get(model, {})
-    val = config.get("default_max_history_messages")
-    if val is not None:
-        return int(val)
-    return None
+    if key not in config:
+        return builtin_default
+    val = config.get(key)
+    if val is None:
+        return None
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return builtin_default
+    return num if num > 0 else None
 
 
-def get_metabolism_keep_messages(model: str) -> int | None:
-    """Get the number of messages to keep after metabolism (low watermark).
+def get_metabolism_low_chars(model: str) -> int | None:
+    """低水位 = 直近保護帯の文字数 (model config ``metabolism_low_chars``)。"""
+    return _metabolism_chars(model, "metabolism_low_chars", BUILTIN_METABOLISM_LOW_CHARS)
 
-    Returns None if not configured (metabolism disabled for this model).
+
+def get_metabolism_target_chars(model: str) -> int | None:
+    """目標水位 = Metabolism 後に到達したい文字数 (``metabolism_target_chars``)。"""
+    return _metabolism_chars(model, "metabolism_target_chars", BUILTIN_METABOLISM_TARGET_CHARS)
+
+
+def get_metabolism_high_chars(model: str) -> int | None:
+    """高水位 = Metabolism 発火の文字数 (``metabolism_high_chars``)。
+
+    None は「文字数では発火しない」(token_triggered のみ) を意味する。
     """
-    config = MODEL_CONFIGS.get(model, {})
-    val = config.get("metabolism_keep_messages")
-    if val is not None:
-        return int(val)
-    return None
+    return _metabolism_chars(model, "metabolism_high_chars", BUILTIN_METABOLISM_HIGH_CHARS)
 
 
 def get_metabolism_token_threshold(model: str) -> int | None:

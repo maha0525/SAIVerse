@@ -1,6 +1,6 @@
 # Issue: Chronicle の級 1 ノードが標準被覆を大きく下回る (退場の刻み幅に持ち越しの器が無い)
 
-**ステータス**: 🟡 実装待ち — 当初の借用実装は撤回、[`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md) で再設計しレビュー通過・設計確定 (2026-07-25)
+**ステータス**: 🟡 検証待ち — 当初の借用実装は撤回、[`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md) で再設計 → 2026-07-25 実装完了。**実機で新規の級1ノードが U 級で立つことの確認待ち**（既存の小粒ノード 19 identity + 17 batch の掃除は別件・まはー承認必須 = intent §8）
 **優先度**: high (放置すると毎日ノードが増え続け、級の意味論が回復不能に崩れる)
 **作成日**: 2026-07-24
 **関連**: [`../intent/experience_structure.md`](../intent/experience_structure.md) §4-2 / §4-3 / §4-4 / §4-6 ・ W4 (`277bd8d`, 2026-07-21) ・ [`../overview/audit_remediation_plan.md`](../overview/audit_remediation_plan.md) W4 実機検証

@@ -5,8 +5,6 @@
   "provider_ref": "nvidia_nim",
   "supports_structured_output": false,
   "context_length": 120000,
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30,
   "convert_system_to_user": true,
   "parameters": {
     "temperature": {

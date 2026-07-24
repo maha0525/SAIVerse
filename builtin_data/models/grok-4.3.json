@@ -4,8 +4,6 @@
   "display_name": "Grok 4.3",
   "provider_ref": "xai",
   "context_length": 1000000,
-  "default_max_history_messages": 100,
-  "metabolism_keep_messages": 40,
   "supports_structured_output": true,
   "supports_images": true,
   "parameters": {

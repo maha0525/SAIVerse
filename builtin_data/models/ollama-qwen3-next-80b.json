@@ -4,8 +4,6 @@
   "display_name": "Qwen3 Next 80B A3B(Ollama)",
   "provider_ref": "ollama",
   "context_length": 262144,
-  "default_max_history_messages": 60,
-  "metabolism_keep_messages": 40,
   "supports_structured_output": true,
   "supports_images": false,
   "parameter_defaults": {

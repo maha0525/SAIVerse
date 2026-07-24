@@ -74,11 +74,26 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         ttl_options: [],
         cache_type: null
     });
-    const [maxHistoryMessages, setMaxHistoryMessages] = useState<number | null>(null);
-    const [maxHistoryMessagesDefault, setMaxHistoryMessagesDefault] = useState<number | null>(null);
     const [metabolismEnabled, setMetabolismEnabled] = useState<boolean>(true);
-    const [metabolismKeepMessages, setMetabolismKeepMessages] = useState<number | null>(null);
-    const [metabolismKeepMessagesDefault, setMetabolismKeepMessagesDefault] = useState<number | null>(null);
+    // Metabolism の三水位（文字数）。低=直近保護帯 / 目標=整理の到達点 / 高=発火
+    const [metabolismLowChars, setMetabolismLowChars] = useState<number | null>(null);
+    const [metabolismLowCharsDefault, setMetabolismLowCharsDefault] = useState<number | null>(null);
+    const [metabolismTargetChars, setMetabolismTargetChars] = useState<number | null>(null);
+    const [metabolismTargetCharsDefault, setMetabolismTargetCharsDefault] = useState<number | null>(null);
+    const [metabolismHighChars, setMetabolismHighChars] = useState<number | null>(null);
+    const [metabolismHighCharsDefault, setMetabolismHighCharsDefault] = useState<number | null>(null);
+
+    // /api/config と /api/config/metabolism は同じ形で三水位を返すので、取り込みを一本化する。
+    // 入力欄が映すのは **override だけ**（空欄 = モデル既定に従う）。実効値を入れると
+    // 「未設定」を表現できず、別名保存でモデル既定が焼き付いてしまう。
+    const applyMetabolismWatermarks = (data: any) => {
+        setMetabolismLowChars(data.metabolism_low_chars_override ?? null);
+        setMetabolismLowCharsDefault(data.metabolism_low_chars_model_default ?? null);
+        setMetabolismTargetChars(data.metabolism_target_chars_override ?? null);
+        setMetabolismTargetCharsDefault(data.metabolism_target_chars_model_default ?? null);
+        setMetabolismHighChars(data.metabolism_high_chars_override ?? null);
+        setMetabolismHighCharsDefault(data.metabolism_high_chars_model_default ?? null);
+    };
     const [maxImageEmbeds, setMaxImageEmbeds] = useState<number | null>(null);
     const [maxImageEmbedsDefault, setMaxImageEmbedsDefault] = useState<number | null>(null);
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
@@ -200,11 +215,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                     onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit);
                     setParamSpecs(config.parameters || {});
                     setParams(config.current_values || {});
-                    setMaxHistoryMessages(config.max_history_messages ?? null);
-                    setMaxHistoryMessagesDefault(config.max_history_messages_model_default ?? null);
                     setMetabolismEnabled(config.metabolism_enabled ?? true);
-                    setMetabolismKeepMessages(config.metabolism_keep_messages ?? null);
-                    setMetabolismKeepMessagesDefault(config.metabolism_keep_messages_model_default ?? null);
+                    applyMetabolismWatermarks(config);
                     setMaxImageEmbeds(config.max_image_embeds ?? null);
                     setMaxImageEmbedsDefault(config.max_image_embeds_model_default ?? null);
                 } catch (e) { console.error("Failed to parse config response", e); failures.push('config'); }
@@ -324,11 +336,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 const data = await res.json();
                 setParamSpecs(data.parameters || {});
                 setParams(data.current_values || {});
-                setMaxHistoryMessages(data.max_history_messages ?? null);
-                setMaxHistoryMessagesDefault(data.max_history_messages_model_default ?? null);
                 setMetabolismEnabled(data.metabolism_enabled ?? true);
-                setMetabolismKeepMessages(data.metabolism_keep_messages ?? null);
-                setMetabolismKeepMessagesDefault(data.metabolism_keep_messages_model_default ?? null);
+                applyMetabolismWatermarks(data);
                 setMaxImageEmbeds(data.max_image_embeds ?? null);
                 setMaxImageEmbedsDefault(data.max_image_embeds_model_default ?? null);
             }
@@ -348,24 +357,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         setParams(newParams);
     };
 
-    const handleMaxHistoryMessagesInput = (value: string) => {
-        const numValue = value === '' ? null : parseInt(value, 10);
-        if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
-        setMaxHistoryMessages(numValue);
-    };
-
-    const handleMaxHistoryMessagesCommit = async () => {
-        try {
-            await fetch('/api/config/max-history-messages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ value: maxHistoryMessages })
-            });
-        } catch (e) {
-            console.error("Failed to update max history messages", e);
-        }
-    };
-
     const handleMetabolismEnabledChange = async (enabled: boolean) => {
         setMetabolismEnabled(enabled);
         try {
@@ -379,37 +370,40 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
-    const handleMetabolismKeepMessagesInput = (value: string) => {
-        // Local state only — API call deferred to onBlur to avoid
-        // intermediate values (e.g. "4" while typing "40") being rejected.
+    // 三水位（低→目標→高）の入力は onBlur でまとめて送る。タイプ途中の中間値
+    // （"4" と打った時点の 4）が順序チェックで弾かれるのを避けるため。
+    const metabolismWatermarkSetters: Record<string, (v: number | null) => void> = {
+        low: setMetabolismLowChars,
+        target: setMetabolismTargetChars,
+        high: setMetabolismHighChars,
+    };
+
+    const handleWatermarkInput = (which: 'low' | 'target' | 'high', value: string) => {
         const numValue = value === '' ? null : parseInt(value, 10);
         if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
-        setMetabolismKeepMessages(numValue);
+        metabolismWatermarkSetters[which](numValue);
     };
 
-    const getMaxKeepMessages = (): number | null => {
-        const highWm = maxHistoryMessages ?? maxHistoryMessagesDefault;
-        return highWm != null ? Math.max(1, highWm - 20) : null;
-    };
-
-    const handleMetabolismKeepMessagesCommit = async () => {
-        let numValue = metabolismKeepMessages;
-
-        // Auto-clamp to max allowed value
-        const maxAllowed = getMaxKeepMessages();
-        if (numValue != null && maxAllowed != null && numValue > maxAllowed) {
-            numValue = maxAllowed;
-            setMetabolismKeepMessages(numValue);
-        }
-
+    const handleWatermarkCommit = async () => {
         try {
-            await fetch('/api/config/metabolism', {
+            const res = await fetch('/api/config/metabolism', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keep_messages: numValue })
+                body: JSON.stringify({
+                    low_chars: metabolismLowChars,
+                    target_chars: metabolismTargetChars,
+                    high_chars: metabolismHighChars,
+                })
             });
+            const data = await res.json();
+            if (!res.ok) {
+                setError(data?.detail || '記憶整理の水位を更新できませんでした');
+                return;
+            }
+            setError(null);
+            applyMetabolismWatermarks(data);
         } catch (e) {
-            console.error("Failed to update metabolism keep_messages", e);
+            console.error("Failed to update metabolism watermarks", e);
         }
     };
 
@@ -467,7 +461,9 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         parameters: params,
         cache_enabled: cacheConfig.supported ? cacheConfig.enabled : null,
         cache_ttl: cacheConfig.supported ? cacheConfig.ttl : null,
-        max_history_messages: maxHistoryMessages,
+        metabolism_low_chars: metabolismLowChars,
+        metabolism_target_chars: metabolismTargetChars,
+        metabolism_high_chars: metabolismHighChars,
         max_image_embeds: maxImageEmbeds,
         overwrite,
     });
@@ -687,27 +683,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                 {historySettingsOpen && (
                                     <>
                                         <div className={styles.formGroup}>
-                                            <label>
-                                                メッセージ数上限
-                                                {maxHistoryMessagesDefault != null && (
-                                                    <span className={styles.hint}> （モデルデフォルト: {maxHistoryMessagesDefault}）</span>
-                                                )}
-                                            </label>
-                                            <input
-                                                type="number"
-                                                className={styles.input}
-                                                min={1}
-                                                max={500}
-                                                value={maxHistoryMessages ?? ''}
-                                                placeholder={maxHistoryMessagesDefault ? `（自動: ${maxHistoryMessagesDefault}）` : '（自動）'}
-                                                onChange={(e) => handleMaxHistoryMessagesInput(e.target.value)}
-                                                onBlur={() => handleMaxHistoryMessagesCommit()}
-                                            />
-                                            <span className={styles.hint}>
-                                                LLMに送信する会話履歴の最大件数。コンテキスト超過エラーが発生する場合は値を下げてください。
-                                            </span>
-                                        </div>
-                                        <div className={styles.formGroup}>
                                             <label className={styles.checkboxLabel}>
                                                 <input
                                                     type="checkbox"
@@ -717,35 +692,75 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                                 履歴の新陳代謝
                                             </label>
                                             <span className={styles.hint}>
-                                                ON: 会話履歴のウィンドウ始点を固定しキャッシュヒット率を向上。上限到達時にバルクトリミング+Chronicle生成。OFF: 従来のスライディングウィンドウ。
+                                                ON: 会話履歴のウィンドウ始点を固定しキャッシュヒット率を向上。ふくらんだら古い出来事からあらすじに畳んで整理します。OFF: 従来のスライディングウィンドウ。
                                             </span>
                                         </div>
                                         {metabolismEnabled && (
-                                            <div className={styles.formGroup}>
-                                                <label>
-                                                    代謝後の保持件数
-                                                    {metabolismKeepMessagesDefault != null && (
-                                                        <span className={styles.hint}> （モデルデフォルト: {metabolismKeepMessagesDefault}）</span>
-                                                    )}
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    className={styles.input}
-                                                    min={1}
-                                                    max={getMaxKeepMessages() ?? 500}
-                                                    value={metabolismKeepMessages ?? ''}
-                                                    placeholder={metabolismKeepMessagesDefault ? `（自動: ${metabolismKeepMessagesDefault}）` : '（自動）'}
-                                                    onChange={(e) => handleMetabolismKeepMessagesInput(e.target.value)}
-                                                    onBlur={() => handleMetabolismKeepMessagesCommit()}
-                                                />
-                                                <span className={styles.hint}>
-                                                    上限到達時にこの件数まで古い履歴を整理します。
-                                                    {getMaxKeepMessages() != null
-                                                        ? `設定可能範囲: 1〜${getMaxKeepMessages()}（上限${maxHistoryMessages ?? maxHistoryMessagesDefault} - 20）。超過時は自動調整されます。`
-                                                        : '上限との差は20以上必要です。'
-                                                    }
-                                                </span>
-                                            </div>
+                                            <>
+                                                <div className={styles.formGroup}>
+                                                    <label>
+                                                        整理をはじめる文字数（高水位）
+                                                        {metabolismHighCharsDefault != null && (
+                                                            <span className={styles.hint}> （モデルデフォルト: {metabolismHighCharsDefault.toLocaleString()}）</span>
+                                                        )}
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        className={styles.input}
+                                                        min={1}
+                                                        step={1000}
+                                                        value={metabolismHighChars ?? ''}
+                                                        placeholder={metabolismHighCharsDefault ? `（自動: ${metabolismHighCharsDefault}）` : '（自動）'}
+                                                        onChange={(e) => handleWatermarkInput('high', e.target.value)}
+                                                        onBlur={() => handleWatermarkCommit()}
+                                                    />
+                                                    <span className={styles.hint}>
+                                                        送っている会話がこの文字数を超えたら整理を始めます。
+                                                    </span>
+                                                </div>
+                                                <div className={styles.formGroup}>
+                                                    <label>
+                                                        整理後に目指す文字数（目標水位）
+                                                        {metabolismTargetCharsDefault != null && (
+                                                            <span className={styles.hint}> （モデルデフォルト: {metabolismTargetCharsDefault.toLocaleString()}）</span>
+                                                        )}
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        className={styles.input}
+                                                        min={1}
+                                                        step={1000}
+                                                        value={metabolismTargetChars ?? ''}
+                                                        placeholder={metabolismTargetCharsDefault ? `（自動: ${metabolismTargetCharsDefault}）` : '（自動）'}
+                                                        onChange={(e) => handleWatermarkInput('target', e.target.value)}
+                                                        onBlur={() => handleWatermarkCommit()}
+                                                    />
+                                                    <span className={styles.hint}>
+                                                        ここまで軽くなるよう、古い出来事から順にあらすじへ畳みます。
+                                                    </span>
+                                                </div>
+                                                <div className={styles.formGroup}>
+                                                    <label>
+                                                        そのまま残す直近の文字数（低水位）
+                                                        {metabolismLowCharsDefault != null && (
+                                                            <span className={styles.hint}> （モデルデフォルト: {metabolismLowCharsDefault.toLocaleString()}）</span>
+                                                        )}
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        className={styles.input}
+                                                        min={1}
+                                                        step={1000}
+                                                        value={metabolismLowChars ?? ''}
+                                                        placeholder={metabolismLowCharsDefault ? `（自動: ${metabolismLowCharsDefault}）` : '（自動）'}
+                                                        onChange={(e) => handleWatermarkInput('low', e.target.value)}
+                                                        onBlur={() => handleWatermarkCommit()}
+                                                    />
+                                                    <span className={styles.hint}>
+                                                        いちばん新しい側のこの文字数分は、整理せず会話のまま残します。低 ≤ 目標 ≤ 高 の順序が必要です。
+                                                    </span>
+                                                </div>
+                                            </>
                                         )}
                                         <div className={styles.formGroup}>
                                             <label>

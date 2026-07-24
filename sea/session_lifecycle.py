@@ -7,9 +7,11 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from sea.cancellation import CancellationToken
+from sea.eviction_plan import Watermarks, message_chars, plan_eviction
 
 if TYPE_CHECKING:
     from sea.runtime import SEARuntime
+    from sea.session_window import FoldedRange, SessionWindow
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,35 +27,46 @@ class SessionLifecycle:
         self.runtime = runtime      # 過渡期の後方参照 (設計書 §4 で削減)
         self.manager = manager_ref
 
-    def get_high_watermark(self, persona, model_key: Optional[str] = None) -> Optional[int]:
-        """Get the high watermark (max history messages) for metabolism.
+    def get_metabolism_watermarks(
+        self, persona, model_key: Optional[str] = None,
+    ) -> Optional[Watermarks]:
+        """Metabolism の三水位 (文字数) を解決する。
 
-        閾値はモデル依存 (beat_execution_context.md §3.2 — 各 Session は自分の
-        model の閾値で自分の窓を管理する)。``model_key`` は実行 model。None なら
-        従来どおり ``persona.model`` にフォールバックする。
+        docs/intent/chronicle_eviction.md §4。水位はモデル依存
+        (beat_execution_context.md §3.2 — 各 Session は自分の model の閾値で
+        自分の窓を管理する)。``model_key`` は実行 model。None なら従来どおり
+        ``persona.model`` にフォールバックする。
+
+        manager の override (グローバル設定 UI) が最優先。model が解決できない
+        場合だけ None を返す (= Metabolism を回せない)。
         """
-        override = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
-        if override is not None:
-            return override
-        from saiverse.model_configs import get_default_max_history_messages
         persona_model = model_key or getattr(persona, "model", None)
-        if persona_model:
-            return get_default_max_history_messages(str(persona_model))
-        return None
+        if not persona_model:
+            return None
+        from saiverse.model_configs import (
+            get_metabolism_high_chars,
+            get_metabolism_low_chars,
+            get_metabolism_target_chars,
+        )
+        model_name = str(persona_model)
 
-    def get_low_watermark(self, persona, model_key: Optional[str] = None) -> Optional[int]:
-        """Get the low watermark (keep messages after metabolism) for metabolism.
+        def _override(name: str):
+            return getattr(self.manager, name, None) if self.manager else None
 
-        ``model_key`` の意味は :meth:`get_high_watermark` と同じ。
-        """
-        override = getattr(self.manager, "metabolism_keep_messages_override", None) if self.manager else None
-        if override is not None:
-            return override
-        from saiverse.model_configs import get_metabolism_keep_messages
-        persona_model = model_key or getattr(persona, "model", None)
-        if persona_model:
-            return get_metabolism_keep_messages(str(persona_model))
-        return None
+        low = _override("metabolism_low_chars_override")
+        if low is None:
+            low = get_metabolism_low_chars(model_name)
+        target = _override("metabolism_target_chars_override")
+        if target is None:
+            target = get_metabolism_target_chars(model_name)
+        high = _override("metabolism_high_chars_override")
+        if high is None:
+            high = get_metabolism_high_chars(model_name)
+
+        if low is None or target is None:
+            # 低・目標が無い設定は退場の量を決められない = Metabolism を持たない。
+            return None
+        return Watermarks(low=int(low), target=int(target), high=high)
 
     def _get_ledger(self):
         """実行台帳 (manager.execution_ledger)。無い環境 (旧テスト等) は None。"""
@@ -79,7 +92,57 @@ class SessionLifecycle:
         }
         if row.TTL_SECONDS:
             entry["ttl_seconds"] = int(row.TTL_SECONDS)
+        folded = getattr(row, "FOLDED_RANGES_JSON", None)
+        if folded:
+            entry["folded_ranges"] = folded
         return entry
+
+    def load_folded_ranges(
+        self, persona_id: Optional[str], model_key: Optional[str],
+    ) -> List["FoldedRange"]:
+        """(persona, model) の窓に空いている穴を読む (chronicle_eviction.md §6)。"""
+        from sea.session_window import deserialize_folds
+        entry = self.load_anchor_entry(persona_id, model_key)
+        return deserialize_folds(entry.get("folded_ranges") if entry else None)
+
+    def save_folded_ranges(
+        self,
+        persona_id: Optional[str],
+        model_key: Optional[str],
+        folds: List["FoldedRange"],
+    ) -> None:
+        """穴を session_anchor 行へ書く。anchor / TTL は触らない。"""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return
+        if not persona_id or not model_key:
+            return
+        from sea.session_window import serialize_folds
+        payload = serialize_folds(folds)
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            row = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
+            ).first()
+            if row is None:
+                # anchor 行が無い = 窓の起点が無い。穴だけ先に持っても意味がない。
+                # ただし捨てる穴があるなら黙って落とさない (提示から体験が消える)。
+                if payload:
+                    LOGGER.warning(
+                        "[metabolism] no anchor row for %s/%s; %d folded ranges were "
+                        "not persisted (the raw log stays presented)",
+                        persona_id, model_key, len(folds),
+                    )
+                return
+            row.FOLDED_RANGES_JSON = payload
+            db.commit()
+        except Exception as exc:
+            LOGGER.warning(
+                "[metabolism] Failed to save folded ranges for %s/%s: %s",
+                persona_id, model_key, exc,
+            )
+        finally:
+            db.close()
 
     def load_anchor_entry(self, persona_id: Optional[str], model_key: Optional[str]) -> Optional[Dict[str, Any]]:
         """(persona, model) 1 行の anchor entry を読む。無ければ None。"""
@@ -198,7 +261,22 @@ class SessionLifecycle:
             if row is None:
                 row = SessionAnchor(PERSONA_ID=persona_id, MODEL_KEY=str(model_key))
                 db.add(row)
-            row.ANCHOR_MESSAGE_ID = entry.get("anchor_id")
+            new_anchor_id = entry.get("anchor_id")
+            if row.ANCHOR_MESSAGE_ID != new_anchor_id and row.FOLDED_RANGES_JSON:
+                # 畳んだ範囲は「この anchor 以降の窓」に対する記録なので、anchor が
+                # 差し替わった時点で無効になる (chronicle_eviction.md §6)。退場経路
+                # 以外でも anchor は動く — TTL 失効後の最小ロードで新しい起点が立ち、
+                # LLM 成功後の touch がそれを永続化する。古い穴を残すと、窓には
+                # 出ないのに head の Chronicle 枠からは除外され続け、その体験が
+                # どこにも現れなくなる。正規の退場経路は anchor 前進の直後に
+                # 穴を書き直すので、ここでクリアしても無傷。
+                LOGGER.info(
+                    "[metabolism] anchor moved outside the eviction path "
+                    "(%s -> %s); clearing folded ranges for %s/%s",
+                    row.ANCHOR_MESSAGE_ID, new_anchor_id, persona_id, model_key,
+                )
+                row.FOLDED_RANGES_JSON = None
+            row.ANCHOR_MESSAGE_ID = new_anchor_id
             row.TTL_SECONDS = effective_ttl
             row.UPDATED_AT = int(effective_updated.timestamp())
             db.commit()
@@ -685,16 +763,17 @@ class SessionLifecycle:
         # OR 参加する)。docs/intent/gold_panning.md §3.7
         pending = getattr(persona, "_metabolism_pending", False)
 
-        high_wm = self.get_high_watermark(persona, model_key)
-        if high_wm is None:
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        if watermarks is None:
             return
 
-        # Get current message count from anchor (Phase 3 段階 4-A: line ベース)
-        current_messages = history_mgr.get_history_from_anchor(
-            anchor,
-            required_line_roles=["main_line"],
-            required_scopes=["committed"],
-        )
+        # 発火判定は**提示される窓**の文字数で行う (chronicle_eviction.md §4)。
+        # 既に畳んだ範囲は digest に置き換わって提示されるので、生ログの合計では
+        # なく置き換え後の量を数える — でないと「畳んだのに数字が減らない」で
+        # 発火し続ける。
+        window = self.get_presented_window(persona, model_key, anchor)
+        current_messages = window.presented
+        current_chars = message_chars(current_messages)
 
         should_run = False
         if token_triggered:
@@ -709,18 +788,24 @@ class SessionLifecycle:
                 "[metabolism] Resuming deferred metabolism for %s (pending flag set)",
                 getattr(persona, "persona_id", "?"),
             )
-        elif len(current_messages) > high_wm:
+        elif watermarks.high is not None and current_chars > watermarks.high:
             should_run = True
             LOGGER.info(
-                "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d",
-                getattr(persona, "persona_id", "?"), len(current_messages), high_wm,
+                "[metabolism] Triggering metabolism for %s: %d chars > high=%d",
+                getattr(persona, "persona_id", "?"), current_chars, watermarks.high,
             )
 
         if not should_run:
             return
 
-        low_wm = self.get_low_watermark(persona, model_key)
-        if low_wm is None or len(current_messages) - low_wm < 10:
+        if current_chars <= watermarks.target:
+            # 既に目標水位より軽い。削る先が無いので走らせない (token 発火でも同じ)。
+            LOGGER.debug(
+                "[metabolism] skip: window already at/below target "
+                "(persona=%s, %d chars <= target=%d)",
+                getattr(persona, "persona_id", "?"), current_chars, watermarks.target,
+            )
+            persona._metabolism_pending = False
             return
 
         # defer-to-hot (docs/intent/gold_panning.md §3.7): gold_panning は直前の
@@ -730,13 +815,17 @@ class SessionLifecycle:
         from sea.gold_panning import get_pending_cap, is_enabled
         if is_enabled():
             cap = get_pending_cap()
-            if len(current_messages) > high_wm * cap:
+            pressure_limit = (
+                watermarks.high * cap if watermarks.high is not None
+                else watermarks.target * cap
+            )
+            if current_chars > pressure_limit:
                 # 圧力弁: 繰り延べ続けて毎ターン肥大ウィンドウを読むより、一回の
                 # コールド代のほうが安い。明示ログを残す (不変条件 §5-1 の例外)。
                 LOGGER.warning(
                     "[gold_panning] pressure valve: running metabolism cold "
-                    "(persona=%s, %d messages > high_wm=%d * cap=%.2f)",
-                    getattr(persona, "persona_id", "?"), len(current_messages), high_wm, cap,
+                    "(persona=%s, %d chars > limit=%.0f)",
+                    getattr(persona, "persona_id", "?"), current_chars, pressure_limit,
                 )
             elif not self._is_cache_hot(persona, model_key):
                 persona._metabolism_pending = True
@@ -750,13 +839,119 @@ class SessionLifecycle:
         persona._metabolism_pending = False
 
         LOGGER.info(
-            "[metabolism] Running metabolism: %d messages, will keep %d",
-            len(current_messages), low_wm,
+            "[metabolism] Running metabolism: %d messages / %d chars, target=%d",
+            len(current_messages), current_chars, watermarks.target,
         )
         self.run_metabolism(
-            persona, building_id, current_messages, low_wm, event_callback,
+            persona, building_id, window, watermarks, event_callback,
             model_key=model_key,
         )
+
+    def get_presented_window(
+        self, persona, model_key: Optional[str], anchor_id: Optional[str] = None,
+    ) -> "SessionWindow":
+        """いまペルソナに提示される窓 (= anchor 以降 − 畳まれた範囲 + その digest)。
+
+        chronicle_eviction.md §6。**提示とMetabolismの勘定が同じ窓を見るための
+        一点**。退場が episode 単位になって窓の途中に穴が空くようになったため、
+        「anchor 以降を全部」は提示の真実ではなくなった。
+        """
+        from sea.session_window import SessionWindow, prune_folds
+
+        history_mgr = getattr(persona, "history_manager", None)
+        persona_id = getattr(persona, "persona_id", None)
+        if anchor_id is None:
+            entry = self.load_anchor_entry(persona_id, model_key)
+            anchor_id = entry.get("anchor_id") if entry else None
+        if history_mgr is None or not anchor_id:
+            return SessionWindow(anchor_id=anchor_id, raw=[], presented=[], folds=[])
+
+        raw = history_mgr.get_history_from_anchor(
+            anchor_id,
+            required_line_roles=["main_line"],
+            required_scopes=["committed"],
+        )
+        folds = prune_folds(
+            self.load_folded_ranges(persona_id, model_key),
+            [str(m.get("id")) for m in raw],
+        )
+        presented = self._present_with_folds(persona, raw, folds)
+        return SessionWindow(
+            anchor_id=anchor_id, raw=raw, presented=presented, folds=folds,
+        )
+
+    def _present_with_folds(
+        self, persona, messages: List[Dict[str, Any]], folds: List["FoldedRange"],
+    ) -> List[Dict[str, Any]]:
+        from sea.session_window import apply_folds
+
+        if not folds:
+            return list(messages)
+        return apply_folds(
+            messages, folds, lambda f: self._resolve_fold_digest(persona, f),
+        )
+
+    def apply_window_folds(
+        self, persona, model_key: Optional[str], messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """既に取得した窓に、畳まれた範囲の digest 置き換えを適用する (§6)。
+
+        穴が無ければ ``messages`` をそのまま返す (既存経路は無変化)。context 構築
+        (sea/runtime_context.py) が anchor 取得後に呼ぶ入口。
+        """
+        from sea.session_window import prune_folds
+
+        if not messages:
+            return messages
+        persona_id = getattr(persona, "persona_id", None)
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
+        if not persona_id or not model_key:
+            return messages
+        folds = prune_folds(
+            self.load_folded_ranges(persona_id, model_key),
+            [str(m.get("id")) for m in messages],
+        )
+        if not folds:
+            return messages
+        return self._present_with_folds(persona, messages, folds)
+
+    def _resolve_fold_digest(self, persona, fold: "FoldedRange") -> Optional[str]:
+        """畳まれた範囲のあらすじ本文を引く。引けなければ None (= 生ログのまま)。
+
+        穴は記録時に必ず級 1 エントリ id を持つ (`_apply_eviction_plan`) ので、
+        id 直引きで済む。source_ids の全走査に落ちるのは、エントリが解体・
+        再編纂されて id が変わった旧記録だけ。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return None
+        try:
+            from sai_memory.arasuji.storage import (
+                get_entries_covering_messages,
+                get_entry,
+            )
+            entries = [
+                e for e in (
+                    get_entry(adapter.conn, eid) for eid in fold.chronicle_entry_ids
+                ) if e is not None
+            ]
+            if not entries:
+                entries = get_entries_covering_messages(adapter.conn, fold.message_ids)
+        except Exception:
+            LOGGER.warning(
+                "[window] failed to look up chronicle entries for folded range "
+                "(persona=%s)", getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return None
+        texts = [e.content for e in entries if e.content]
+        if not texts:
+            LOGGER.warning(
+                "[window] folded range has no chronicle entry; keeping raw log "
+                "(persona=%s, %d messages)",
+                getattr(persona, "persona_id", "?"), len(fold.message_ids),
+            )
+            return None
+        return "\n\n".join(texts)
 
     def _is_cache_hot(self, persona, model_key: Optional[str] = None) -> bool:
         """指定 model (既定: persona.model) の anchor 行が生存しているか (= 直前 prefix が温かい)。
@@ -823,44 +1018,269 @@ class SessionLifecycle:
             )
             return set()
 
-    def _snap_evict_to_episode_boundary(
+    def _force_close_episode(self, persona, episode_ref: str) -> bool:
+        """最古の open episode を強制的に閉じる (chronicle_eviction.md §5-5)。
+
+        U 未満の open episode ばかりで退場候補帯が埋まると、どのまとまりも U に
+        届かず Metabolism が手詰まりになる。閉じれば closed 同士でまたいで束ねられ、
+        U に届いて退場できる。閉じ処理は意味を書かず再訪の鍵だけ書く規範
+        (life_concept_map.md §9) に従い、機構が閉じたことだけ meta に残す。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or self.manager is None:
+            return False
+        try:
+            from saiverse.episodes import close_episode
+            close_episode(
+                self.manager, persona_id, episode_ref,
+                meta={"closed_by": "metabolism_pressure"},
+            )
+            LOGGER.info(
+                "[metabolism] force-closed oldest open episode %s to make the "
+                "eviction band foldable (persona=%s)", episode_ref, persona_id,
+            )
+            return True
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] failed to force-close episode %s (persona=%s)",
+                episode_ref, persona_id, exc_info=True,
+            )
+            return False
+
+    def _apply_eviction_plan(
         self,
         persona,
-        current_messages: List[Dict[str, Any]],
-        evict_count: int,
-    ) -> int:
-        """退役境界を open episode の外へ切り詰める (W4 D2、§4-1 × §4-2)。
+        model_key: Optional[str],
+        window: "SessionWindow",
+        plan,
+        chronicle_status: str,
+    ) -> None:
+        """退場計画を窓へ適用する — anchor 前進と「窓の中の穴」の書き分け。
 
-        退役範囲 [0, evict_count) に open episode 帰属のメッセージが含まれる
-        場合、その最古位置の手前まで evict を縮める — episode は退役でも原子
-        (「窓から出たのに閉じ判断がまだ」の中間状態を作らない)。closed /
-        無帰属メッセージは制約なし。
+        規則は二つ (chronicle_eviction.md §2/§6):
+
+        1. **あらすじを持たない範囲は穴にしない**。穴は「生ログの代わりに digest を
+           見せる」ための記録なので、digest が無い穴はその範囲を黙って消すだけに
+           なる。引き当てられなかった fold は退場そのものを見送り、生ログのまま
+           残す — 下限「退場したものは必ず編纂されている」をここで手続きとして
+           強制する。例外は Chronicle を切っている persona (``disabled``) で、
+           これは「編纂なしで忘れる」を選んだ設計上の合意なので anchor 前進だけ
+           許し、穴は作らない (見せる digest が永久に存在しないため)。
+        2. **生ログの並びで先頭から連続して畳まれた分は anchor が飲み込み、それ以外
+           は穴として残る**。先頭を飲み込めた分は提示範囲の外に出るので、その
+           あらすじは head の Chronicle 枠が担当する (穴として持ち続けると同じ
+           あらすじが窓と head に二重で出る)。
+
+        判定に置き換え前の生ログ (``window.raw``) を使うのは、提示側は既に digest
+        へ置き換わっていて、先頭が置き換えメッセージだと「連続」を判定できないため。
         """
-        if evict_count <= 0:
-            return evict_count
-        open_refs = self._open_episode_refs(persona)
-        if not open_refs:
-            return evict_count
-        for i in range(min(evict_count, len(current_messages))):
-            meta = current_messages[i].get("metadata")
-            ref = meta.get("origin_episode") if isinstance(meta, dict) else None
-            if ref and str(ref) in open_refs:
-                if i < evict_count:
-                    LOGGER.info(
-                        "[metabolism] evict snapped to open-episode boundary: "
-                        "%d -> %d (open %s at index %d, persona=%s)",
-                        evict_count, i, ref, i,
-                        getattr(persona, "persona_id", "?"),
-                    )
-                return i
-        return evict_count
+        from sea.session_window import FoldedRange
+
+        persona_id = getattr(persona, "persona_id", None)
+        if not model_key or not window.anchor_id:
+            return
+
+        raw_ids = window.raw_ids
+        existing: List["FoldedRange"] = list(window.folds)
+        already_folded = {mid for f in existing for mid in f.message_ids}
+
+        new_folds: List["FoldedRange"] = []
+        for fold in plan.folds:
+            if any(mid in already_folded for mid in fold.message_ids):
+                # 既に穴になっている範囲を二重に記録しない (同じ範囲の穴が
+                # 積み上がって JSON と照会コストが単調増加するのを防ぐ)。
+                LOGGER.debug(
+                    "[metabolism] skipping already-folded range (persona=%s, %d messages)",
+                    persona_id, len(fold.message_ids),
+                )
+                continue
+            new_folds.append(
+                FoldedRange(
+                    message_ids=fold.message_ids,
+                    start_at=fold.start_at,
+                    end_at=fold.end_at,
+                    episode_ref=fold.open_episode_ref,
+                )
+            )
+        self._attach_chronicle_refs(persona, new_folds)
+
+        # あらすじを持たない fold は「穴」になれない。Chronicle を切っている
+        # persona (disabled) だけは例外で、anchor が飲み込める先頭連続域に限って
+        # 退場を許す (編纂なしで忘れることを選んでいるため)。それ以外は退場を
+        # 見送り、生ログのまま窓に残す。
+        candidates: List["FoldedRange"] = []
+        for fold in new_folds:
+            if fold.chronicle_entry_ids or chronicle_status == "disabled":
+                candidates.append(fold)
+            else:
+                LOGGER.warning(
+                    "[metabolism] fold has no chronicle entry; leaving it in the "
+                    "window instead of evicting (persona=%s, %d messages, %s..%s)",
+                    persona_id, len(fold.message_ids), fold.start_at, fold.end_at,
+                )
+
+        folded_ids = {mid for f in existing + candidates for mid in f.message_ids}
+        lead = 0
+        while lead < len(raw_ids) and raw_ids[lead] in folded_ids:
+            lead += 1
+        # 窓が空にならないよう、最後の 1 件は必ず残す (anchor は実在のメッセージを
+        # 指す必要がある)。
+        new_anchor_index = min(lead, len(raw_ids) - 1) if lead > 0 else 0
+        absorbed = set(raw_ids[:new_anchor_index])
+
+        # 実際に退場するのは「あらすじを持つ fold」か「anchor が丸ごと飲み込む
+        # fold」。どちらでもない fold は窓に残るので、退場した扱いの記録
+        # (子 episode) も作らない — でないと退場していないのに「部分退場した」
+        # 世界状態だけが毎ラウンド積み上がる。
+        applied = [
+            f for f in candidates
+            if f.chronicle_entry_ids or set(f.message_ids) <= absorbed
+        ]
+
+        # §6 pulse 関節細分: 実際に退場する open episode の部分だけを子 episode 化。
+        # 渡すのは refs を刻んだ側 (FoldedRange) — 子 episode の DIGEST_REF は
+        # 再訪の鍵なので、あらすじ id を持っていない計画側の Fold では空になる。
+        for fold in applied:
+            if fold.episode_ref:
+                self._record_partial_episode(persona, fold)
+
+        # 穴として持ち続けるのは「窓に残っていて、かつあらすじを引ける」範囲だけ。
+        # 飲み込まれた分のあらすじは head の Chronicle 枠が担当する。
+        folds = [
+            f for f in existing + applied
+            if f.chronicle_entry_ids and not set(f.message_ids) <= absorbed
+        ]
+
+        if new_anchor_index > 0:
+            self.update_anchor_for_model(persona, model_key, raw_ids[new_anchor_index])
+            LOGGER.info(
+                "[metabolism] anchor advanced to %s for model=%s "
+                "(absorbed %d leading messages, %d holes remain, persona=%s)",
+                raw_ids[new_anchor_index], model_key, len(absorbed), len(folds), persona_id,
+            )
+        else:
+            LOGGER.info(
+                "[metabolism] anchor held (episode-unit eviction folded the "
+                "middle of the window): %d holes, persona=%s",
+                len(folds), persona_id,
+            )
+        self.save_folded_ranges(persona_id, model_key, folds)
+
+    def _attach_chronicle_refs(self, persona, folds: List["FoldedRange"]) -> None:
+        """畳んだ範囲を覆う級 1 エントリの id / ch:N を刻む (全 fold を 1 照会で)。"""
+        if not folds:
+            return
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return
+        all_ids = [mid for f in folds for mid in f.message_ids]
+        try:
+            from sai_memory.arasuji.storage import get_entries_covering_messages
+            entries = get_entries_covering_messages(adapter.conn, all_ids)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] failed to resolve chronicle refs for folded ranges "
+                "(persona=%s)", getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return
+        # source_ids から「どのメッセージがどのエントリに入ったか」を引き直す
+        # (1 つの fold が複数エントリに分かれることがある)。
+        by_message: Dict[str, List[Any]] = {}
+        for entry in entries:
+            for mid in entry.source_ids:
+                by_message.setdefault(str(mid), []).append(entry)
+        for fold in folds:
+            seen: Dict[str, Any] = {}
+            for mid in fold.message_ids:
+                for entry in by_message.get(mid, ()):
+                    seen.setdefault(entry.id, entry)
+            fold.chronicle_entry_ids = list(seen.keys())
+            fold.chronicle_short_ids = [
+                e.short_id for e in seen.values() if e.short_id is not None
+            ]
+
+    def _record_partial_episode(self, persona, fold: "FoldedRange") -> None:
+        """open episode の部分退場を子 episode として刻む (experience_structure §6)。
+
+        長さを理由に出来事を分割はしない — 親 episode は開いたまま。退場した
+        pulse 群だけを「丸ごと退場済みの部分」として子 episode に写し、閉じて
+        digest 参照を持たせる。親から子へ digest 層の継承エッジを張り、親の
+        「その部分の記憶はあらすじ経由で持っている」を構造として残す (§3.3)。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        parent_ref = fold.episode_ref
+        if not persona_id or not parent_ref or self.manager is None:
+            return
+        try:
+            from saiverse.episodes import (
+                close_episode,
+                get_by_ref,
+                invalidate_open_cache,
+                open_episode,
+            )
+            from saiverse.experience_inheritance import record_edges
+
+            parent = get_by_ref(self.manager, persona_id, parent_ref)
+            kind = (parent or {}).get("kind") or "other"
+            digest_ref = None
+            if getattr(fold, "chronicle_entry_ids", None):
+                digest_ref = f"chronicle:{fold.chronicle_entry_ids[0]}"
+
+            # open → close → 継承エッジを**一つのトランザクション**で束ねる。
+            # 分けると close の失敗で「開きっぱなしの子」が残り、それが
+            # get_open_episode の「最後に開いた open」を奪って以後の会話が
+            # 合成 episode に付く (世界状態の破壊)。
+            db = self.manager.SessionLocal()
+            try:
+                child = open_episode(
+                    self.manager, persona_id, kind,
+                    building_id=(parent or {}).get("building_id"),
+                    origin_ref=parent_ref,
+                    meta={
+                        "partial_of": parent_ref,
+                        "partial_reason": "metabolism_eviction",
+                        "covered_messages": len(fold.message_ids),
+                    },
+                    session=db,
+                )
+                child_ref = child.get("episode_ref")
+                close_episode(
+                    self.manager, persona_id, child_ref,
+                    digest_ref=digest_ref, session=db,
+                )
+                record_edges(
+                    self.manager, persona_id, parent_ref,
+                    [{"parent_ref": child_ref, "layer": "digest",
+                      "origin": "metabolism_partial_fold"}],
+                    session=db,
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+            # session 指定時は open/close がキャッシュを触らない契約なので、
+            # commit 後に呼び出し側 (ここ) が整合を負う。
+            invalidate_open_cache(self.manager, persona_id)
+            LOGGER.info(
+                "[metabolism] partial fold of open episode %s recorded as child "
+                "%s (%d messages, persona=%s)",
+                parent_ref, child_ref, len(fold.message_ids), persona_id,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] failed to record partial episode for %s (persona=%s); "
+                "the fold itself stands (chronicle entry is the record of record)",
+                parent_ref, persona_id, exc_info=True,
+            )
 
     def run_metabolism(
         self,
         persona,
         building_id: str,
-        current_messages: List[Dict[str, Any]],
-        keep_count: int,
+        window: "SessionWindow",
+        watermarks: Watermarks,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         model_key: Optional[str] = None,
     ) -> None:
@@ -875,9 +1295,10 @@ class SessionLifecycle:
         記憶 (Chronicle / gold_panning のコア記憶採取記録) に書くため、入口で
         beat_gate.hold(purpose="metabolism") を通す。Pulse 内 (run_meta_user
         経由) の呼び出しは同一スレッドの RLock 再入で無害 (関所も再実行され
-        ない)。API の手動整理 (api/routes/people/config.py → organize-memory)
-        からの呼び出しは独立 Beat として直列化され、関所 fail-closed
-        (BeatGateClosedError) はそのまま API へ伝播する。
+        ない)。
+
+        ``window`` は発火判定側が撮った提示窓だが、**本体はロックの内側で撮り
+        直す** — ロック外の値で穴を上書きすると、先行の別入口が書いた穴が消える。
         """
         from sea.beat_gate import hold_beat
         with hold_beat(
@@ -886,7 +1307,7 @@ class SessionLifecycle:
             purpose="metabolism",
         ):
             self._run_metabolism_locked(
-                persona, building_id, current_messages, keep_count, event_callback,
+                persona, building_id, window, watermarks, event_callback,
                 model_key=model_key,
             )
 
@@ -894,29 +1315,75 @@ class SessionLifecycle:
         self,
         persona,
         building_id: str,
-        current_messages: List[Dict[str, Any]],
-        keep_count: int,
+        window: "SessionWindow",
+        watermarks: Watermarks,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         model_key: Optional[str] = None,
     ) -> None:
-        """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。"""
-        model_key = str(model_key or getattr(persona, "model", "") or "") or None
-        evict_count = len(current_messages) - keep_count
+        """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
 
-        # 退役境界の episode スナップ (W4 D2、§4-1 × §4-2): open episode の
-        # 内部で anchor を切らない。open episode が窓全体を占める場合は今回の
-        # Metabolism を見送る (次回 maybe_run_metabolism が自然に再試行)。
-        evict_count = self._snap_evict_to_episode_boundary(
-            persona, current_messages, evict_count,
-        )
-        if evict_count <= 0:
-            LOGGER.warning(
-                "[metabolism] deferred: open episode occupies the whole evict "
-                "range (persona=%s, %d messages); window stays large until the "
-                "episode closes",
-                getattr(persona, "persona_id", "?"), len(current_messages),
+        窓は**ロックの内側で撮り直す**。呼び出し元 (発火判定) が撮った窓はロックの
+        外の値で、その間に別入口 (手動の記憶整理など) が穴や anchor を書いている
+        ことがある。古い窓を土台に穴を上書き保存すると、先行の穴が消えて生ログが
+        復活し、しかもその範囲は編纂済みなので二重提示になる。
+        """
+        from sai_memory.arasuji.alignment import chronicle_band_budget
+
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
+        persona_id = getattr(persona, "persona_id", "?")
+        band_budget = chronicle_band_budget()
+        fresh = self.get_presented_window(persona, model_key)
+        if fresh.anchor_id:
+            window = fresh
+        current_messages = window.presented
+        if not current_messages:
+            LOGGER.info(
+                "[metabolism] window is empty under the beat lock; nothing to do "
+                "(persona=%s)", persona_id,
             )
             return
+
+        # 退場計画 (chronicle_eviction.md §5): 保護帯を残し、退場候補帯の中で
+        # 古い方から U に達したまとまりを、open episode は単独・closed 同士は
+        # またいで畳む。目標水位に届くまで繰り返す。
+        open_refs = self._open_episode_refs(persona)
+        plan = plan_eviction(
+            current_messages, open_refs, watermarks, target_chars=band_budget,
+        )
+        if plan.is_empty and plan.force_close_episode_ref:
+            # §5-5: U 未満の open ばかりで手詰まり → 最古を閉じて再計画。
+            # **閉じる前に「閉じたら本当に畳めるようになるか」を計画で確かめる**。
+            # episode を閉じるのはペルソナの出来事を終わらせる実質的な操作なので、
+            # 効かないと分かっている強制クローズを毎ラウンド撃たない (進行中の
+            # 会話が細切れに閉じられ続けるのを防ぐ)。
+            hypothetical = plan_eviction(
+                current_messages,
+                open_refs - {plan.force_close_episode_ref},
+                watermarks,
+                target_chars=band_budget,
+            )
+            if hypothetical.is_empty:
+                LOGGER.info(
+                    "[metabolism] skipping force-close of %s: closing it would not "
+                    "make anything foldable (persona=%s)",
+                    plan.force_close_episode_ref, persona_id,
+                )
+            elif self._force_close_episode(persona, plan.force_close_episode_ref):
+                plan = plan_eviction(
+                    current_messages, self._open_episode_refs(persona), watermarks,
+                    target_chars=band_budget,
+                )
+        if plan.is_empty:
+            LOGGER.warning(
+                "[metabolism] nothing foldable this round (persona=%s, %d chars, "
+                "target=%d, protected_from=%d); window stays large until a "
+                "foldable range reaches U=%d",
+                persona_id, plan.total_chars, watermarks.target,
+                plan.protected_from, band_budget,
+            )
+            return
+
+        evict_count = plan.evicted_count
         keep_count = len(current_messages) - evict_count
 
         # 1. Notify start
@@ -933,24 +1400,24 @@ class SessionLifecycle:
         # "disabled" (トグル OFF / weave 無効) で前進するのは設計判断 — Chronicle を
         # 切った persona は「編纂なしで忘れる」を選んでおり、前進を止めると
         # metabolism が永久デッドロックする。
-        # 退場時圧縮 (W4 D1、§4-1): 編纂対象を「新 anchor より古い範囲」に限る —
-        # 窓に残る (まだ提示面にいる) メッセージは圧縮しない。
+        # 退場時圧縮 (§4-1): 編纂対象は**今回退場させる範囲そのもの**。範囲は連続
+        # とは限らない (窓の途中を畳むため) ので、fold ごとに区切って渡し、離れた
+        # 範囲が一つのあらすじに束ねられること (§4-5 連続束ねのみ) を防ぐ。
+        #
+        # 一致するのは**Chronicle 対象の集合に限っての話**。除外タグ
+        # (handy_tool / spell / event_message / session_digest) のメッセージは
+        # fold に入っていても編纂されずに退場する — これは本設計で入った穴では
+        # なく旧実装から続く既知の欠けで、下限「退場したものは必ず編纂されている」
+        # を字義どおりには満たしていない。実際に穴が空いた範囲は
+        # `_apply_eviction_plan` が「あらすじを持たない fold は退場させない」で
+        # 拾う (退場そのものを見送るので、消えるのではなく生ログのまま残る)。
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
         chronicle_status = "disabled"
         if memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona):
-            boundary_epoch: Optional[int] = None
-            try:
-                boundary_epoch = int(current_messages[evict_count].get("created_at"))
-            except (TypeError, ValueError, IndexError, AttributeError):
-                LOGGER.warning(
-                    "[metabolism] could not resolve evict boundary epoch; "
-                    "compiling all unprocessed messages (persona=%s)",
-                    getattr(persona, "persona_id", "?"),
-                )
             try:
                 chronicle_status = self.generate_chronicle(
                     persona, event_callback,
-                    evict_boundary_epoch=boundary_epoch,
+                    compile_groups=[f.message_ids for f in plan.folds],
                 )
             except Exception as exc:
                 LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
@@ -981,13 +1448,9 @@ class SessionLifecycle:
         # failed / deferred は据え置き — watermark 超過が残るので、次の
         # maybe_run_metabolism が自然に再試行する (beat_execution_context.md §3.2)。
         if chronicle_status in ("ok", "disabled"):
-            new_anchor_id = current_messages[evict_count].get("id")
-            if new_anchor_id and model_key:
-                self.update_anchor_for_model(persona, model_key, new_anchor_id)
-                LOGGER.info(
-                    "[metabolism] Updated anchor to %s for model=%s (evicted %d, kept %d)",
-                    new_anchor_id, model_key, evict_count, keep_count,
-                )
+            self._apply_eviction_plan(
+                persona, model_key, window, plan, chronicle_status,
+            )
 
             # 4. Dynamic State Sync: 可視化は model の節目 — anchor を進めた model の
             # (persona, model) snapshot だけを再 capture する (§3.2。他 model の窓は
@@ -1070,7 +1533,7 @@ class SessionLifecycle:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         force: bool = False,
-        evict_boundary_epoch: Optional[int] = None,
+        compile_groups: Optional[List[List[str]]] = None,
     ) -> str:
         """Generate Chronicle entries via episode-aligned chunk planning.
 
@@ -1085,11 +1548,14 @@ class SessionLifecycle:
         呼ばれるため ``persona._current_pulse_type`` は前回 Pulse の残留値で
         あてにならない — force はその不定性を回避する意味もある。
 
-        ``evict_boundary_epoch`` は退場時圧縮の境界 (experience_structure.md
-        §4-1、W4 D1): 指定時、この epoch **より前**のメッセージだけを編纂対象
-        にする (窓に残る = まだ提示面にいる範囲は圧縮しない)。自動経路
-        (_run_metabolism_locked) が新 anchor の created_at を渡す。force /
-        session close 等の全量整理は None (現行どおり全未編纂)。
+        ``compile_groups`` は退場時圧縮の対象 (chronicle_eviction.md §2/§5):
+        指定時、**今回退場させる範囲そのもの**だけを編纂する。退場する集合と
+        編纂する集合を一致させることで、下限「退場したものは必ず編纂されている」
+        が手続きとして保証される。範囲は連続とは限らない (窓の途中を畳むため)
+        ので、fold ごとの message id 列を並べて渡し、離れた範囲が一つのあらすじに
+        束ねられること (§4-5 連続束ねのみ) を防ぐ。自動経路
+        (_run_metabolism_locked) が退場計画から渡す。force / session close 等の
+        全量整理は None (現行どおり全未編纂を時系列で整列)。
 
         全入口 (①応答後 Metabolism ②会話前 anchor 失効 ③手動 organize-memory
         ④session close ⑤①内 gold_panning) が合流する一点のため、編纂の冪等
@@ -1152,12 +1618,16 @@ class SessionLifecycle:
         from sai_memory.memory.storage import get_messages_for_chronicle
         all_messages = get_messages_for_chronicle(adapter.conn)
 
-        # 退場時圧縮 (§4-1): 窓に残る範囲は編纂しない。境界の同秒衝突は保守側
-        # (編纂見送り → 次回) に倒れる。
-        if evict_boundary_epoch is not None:
-            all_messages = [
-                m for m in all_messages if m.created_at < evict_boundary_epoch
-            ]
+        # 退場時圧縮 (§4-1): 編纂対象を「今回退場させる範囲そのもの」に絞る。
+        # 退場する集合と編纂する集合が一致することが、下限「退場したものは必ず
+        # 編纂されている」の手続き上の保証になる (chronicle_eviction.md §2)。
+        run_boundary_ids: Optional[set] = None
+        if compile_groups is not None:
+            wanted = {mid for group in compile_groups for mid in group}
+            all_messages = [m for m in all_messages if m.id in wanted]
+            # fold の切れ目 = run の切れ目。窓の途中を畳むと範囲は不連続になるので、
+            # 離れた範囲が一つのあらすじに束ねられないようにする (§4-5)。
+            run_boundary_ids = {group[0] for group in compile_groups if group}
 
         # Episode 整列計画 (W4 D3)。processed_ids / digest index / サイズ束ねを
         # 純関数に集約 — コスト見積もり (estimate.py) と同じ計画を共有する。
@@ -1175,6 +1645,7 @@ class SessionLifecycle:
             episode_digests,
             target_chars=chronicle_band_budget(),
             min_llm_chars=chronicle_min_digest_chars(),
+            run_boundary_ids=run_boundary_ids,
         )
 
         # 帯あふれ束ねの dry 予測 (Codex W4 #3/#4): 新チャンク確定後に発生する

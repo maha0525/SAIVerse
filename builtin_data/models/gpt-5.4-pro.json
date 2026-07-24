@@ -4,8 +4,6 @@
   "display_name": "GPT-5.4 Pro (< 272k)",
   "provider_ref": "openai",
   "context_length": 272000,
-  "default_max_history_messages": 60,
-  "metabolism_keep_messages": 20,
   "supports_images": true,
   "parameters": {
     "reasoning_effort": {

@@ -309,6 +309,7 @@ def get_episode_context(
     include_raw_messages: bool = True,
     origin_track_id: Optional[str] = None,
     char_budget: Optional[int] = None,
+    exclude_entry_ids: Optional[Set[str]] = None,
 ) -> List[ContextEntry]:
     """Get episode context using the reverse level promotion algorithm.
 
@@ -352,12 +353,18 @@ def get_episode_context(
         char_budget: ``None`` → legacy count-based behavior (no budget).
             ``USE_DEFAULT_BUDGET`` → resolve from env / default (§6.2).
             Explicit int → use that budget (0 disables → count-based).
+        exclude_entry_ids: 掲示から外すエントリ id。**提示窓の中で digest に
+            置き換えて見せている範囲**を head の Chronicle 枠から外すために使う
+            (docs/intent/chronicle_eviction.md §6)。同じあらすじが窓の中と head
+            の両方に出ると、体験が二重化して時系列の錯覚を招くため。
 
     Returns:
         List of ContextEntry objects, ordered from oldest to newest
     """
     # Get all arasuji sorted by end_time descending (Track filter applied if set)
     all_arasuji = _get_all_arasuji_sorted(conn, origin_track_id=origin_track_id)
+    if exclude_entry_ids:
+        all_arasuji = [e for e in all_arasuji if e.id not in exclude_entry_ids]
 
     if not all_arasuji:
         # No arasuji yet, return empty

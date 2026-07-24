@@ -6,7 +6,6 @@
   "provider_ref": "llama_cpp_server",
   "context_length": 80000,
   "metabolism_token_threshold": 72000,
-  "metabolism_keep_messages": 40,
   "supports_images": false,
   "supports_structured_output": true,
   "convert_system_to_user": true,

@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 350（tag グループ: 24）
+**エンドポイント数**: 348（tag グループ: 24）
 
 ## addon
 
@@ -105,14 +105,12 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/global-auto` | Set global autonomous mode status. |
 | GET | `/api/config/image-default-quality` | Get default image generation quality setting. |
 | POST | `/api/config/image-default-quality` | Set default image generation quality and persist to .env. |
-| GET | `/api/config/max-history-messages` | Get current max history messages setting. |
-| POST | `/api/config/max-history-messages` | Set session override for max history messages. |
 | GET | `/api/config/max-image-embeds` | Get current max image embeds setting. |
 | POST | `/api/config/max-image-embeds` | Set session override for max image embeds. |
 | GET | `/api/config/media-recall` | Get whether attached media (image/audio/video) summaries feed the auto-recall query. |
 | POST | `/api/config/media-recall` | Toggle attached-media auto-recall and persist to .env. |
-| GET | `/api/config/metabolism` | Get current metabolism settings. |
-| POST | `/api/config/metabolism` | Set metabolism settings. |
+| GET | `/api/config/metabolism` | Metabolism の現在設定 (三水位は文字数)。 |
+| POST | `/api/config/metabolism` | Metabolism 設定を更新する (三水位は文字数、グローバル override)。 |
 | POST | `/api/config/model` | Set the global model override and return updated config. |
 | GET | `/api/config/models` | List available LLM models. |
 | POST | `/api/config/models` | Create a new model JSON file in user_data. |

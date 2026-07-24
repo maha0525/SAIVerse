@@ -133,6 +133,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `ANCHOR_MESSAGE_ID` | VARCHAR | — |  |
 | `TTL_SECONDS` | INTEGER | — |  |
 | `UPDATED_AT` | INTEGER | NOT NULL |  |
+| `FOLDED_RANGES_JSON` | TEXT | — |  |
 
 ## tool
 

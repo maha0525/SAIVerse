@@ -20,6 +20,7 @@ def get_memory_weave_context(
     persona_dir: Optional[str] = None,
     max_chronicle_entries: int = 50,
     history_anchor_message_id: Optional[str] = None,
+    exclude_chronicle_entry_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Build Memory Weave context messages containing Chronicle (General + Track).
 
@@ -46,6 +47,10 @@ def get_memory_weave_context(
         max_chronicle_entries: Max Chronicle entries. General Chronicle は §6.2
             の文字数予算制に移行したためこの値は安全弁の下限として扱われる (予算が
             主制御)。Track Chronicle 側では従来どおり件数上限として効く。
+        exclude_chronicle_entry_ids: head の Chronicle 枠から外すエントリ id。
+            提示窓の中で元の時系列位置に digest を差し込んでいる範囲を渡す
+            (docs/intent/chronicle_eviction.md §6) — 同じあらすじが窓と head の
+            両方に出ると体験が二重化して時系列の錯覚を招くため。
 
     Returns:
         List of messages to insert into context.
@@ -82,7 +87,10 @@ def get_memory_weave_context(
         conn = sqlite3.connect(str(memory_db_path))
 
         # 1. Get Chronicle context (hierarchical episode memory)
-        chronicle_text = _get_chronicle_context(conn, max_entries=max_chronicle_entries)
+        chronicle_text = _get_chronicle_context(
+            conn, max_entries=max_chronicle_entries,
+            exclude_entry_ids=set(exclude_chronicle_entry_ids or ()),
+        )
 
         # 1.5. Get Track Chronicle context for active track (v0.32, 2026-05-09)
         # アクティブ Track が無いペルソナや track_manager 利用不可な環境では空文字
@@ -134,7 +142,11 @@ def get_memory_weave_context(
         return []
 
 
-def _get_chronicle_context(conn: sqlite3.Connection, max_entries: int = 50) -> str:
+def _get_chronicle_context(
+    conn: sqlite3.Connection,
+    max_entries: int = 50,
+    exclude_entry_ids: Optional[set] = None,
+) -> str:
     """Get General Chronicle (Arasuji) context using hierarchical algorithm.
 
     v0.32 (2026-05-09): Track Chronicle と排他にするため、内部で
@@ -162,6 +174,7 @@ def _get_chronicle_context(conn: sqlite3.Connection, max_entries: int = 50) -> s
             conn,
             max_entries=max(max_entries, 10_000),
             char_budget=USE_DEFAULT_BUDGET,
+            exclude_entry_ids=exclude_entry_ids or None,
         )
         if not context:
             return ""

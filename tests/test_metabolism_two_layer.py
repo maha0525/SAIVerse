@@ -31,9 +31,57 @@ from sqlalchemy.pool import StaticPool
 
 from database.models import Base
 from saiverse.execution_ledger import ExecutionLedger
+from sea.eviction_plan import Watermarks
 from sea.session_lifecycle import SessionLifecycle
+from sea.session_window import SessionWindow
 
 PERSONA_ID = "tester"
+
+
+def _msg(mid, created_at, *, chars=1_000, episode_ref=None, pulse_id=None):
+    """テスト用のメッセージ payload (水位は文字数基準なので実長を持たせる)。"""
+    payload = {"id": mid, "content": "x" * chars, "created_at": created_at}
+    if episode_ref:
+        payload["metadata"] = {"origin_episode": episode_ref}
+    if pulse_id:
+        payload["pulse_id"] = pulse_id
+    return payload
+
+
+def _stub_chronicle_refs(_persona, folds):
+    """編纂が済んで級 1 エントリが引けた状態を模す。
+
+    実装は「あらすじを持たない fold は退場させない」(下限の手続き強制) なので、
+    退役ゲートや退場の形を見るテストでは refs が付いた状態を前提にする。
+    """
+    for i, fold in enumerate(folds):
+        fold.chronicle_entry_ids = [f"entry-{i}"]
+        fold.chronicle_short_ids = [i + 1]
+
+
+def _window(messages, *, anchor_id=None, folds=None):
+    """穴なしの窓 (raw == presented)。"""
+    return SessionWindow(
+        anchor_id=anchor_id or (messages[0]["id"] if messages else None),
+        raw=list(messages),
+        presented=list(messages),
+        folds=list(folds or []),
+    )
+
+
+def _history_manager(messages):
+    """窓を返すだけの history_manager スタブ。
+
+    Metabolism は Beat ロックの内側で窓を撮り直す (ロック外の値で穴を上書き
+    保存すると先行の穴が消えるため) ので、anchor 行があるテストでは実際に
+    ここが呼ばれる。
+    """
+    return SimpleNamespace(
+        get_history_from_anchor=(
+            lambda anchor, required_line_roles=None, required_scopes=None,
+            pulse_id=None: list(messages)
+        )
+    )
 
 
 class DummyEmbedder:
@@ -148,6 +196,11 @@ class ChronicleClaimTest(unittest.TestCase):
             sai_memory=self.adapter,
         )
 
+    def _message_ids(self):
+        """編纂候補メッセージの id (created_at 昇順)。"""
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        return [m.id for m in get_messages_for_chronicle(self.adapter.conn)]
+
     def _generate(self, lifecycle):
         with patch("saiverse.model_configs.find_model_config",
                    return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
@@ -261,16 +314,13 @@ class ChronicleClaimTest(unittest.TestCase):
         if FakeExecutor.calls:
             self.assertEqual(FakeExecutor.calls[-1], 0)
 
-    def test_evict_boundary_limits_compile_range(self):
-        """⑧ W4 D1 (退場時圧縮 §4-1): evict_boundary_epoch より新しい
-        メッセージ (= 窓に残る範囲) は編纂対象に入らない。"""
+    def test_compile_groups_limit_compile_range(self):
+        """⑧ 退場時圧縮 (chronicle_eviction.md §2): 編纂対象は「今回退場させる
+        範囲そのもの」。退場しないメッセージは編纂に入らない。"""
         lifecycle = self._make_lifecycle(with_ledger=False)
+        all_ids = self._message_ids()
+        self.assertEqual(len(all_ids), 4)
 
-        # 全量 (boundary なし) では 4 件が計画に載る
-        self.assertEqual(self._generate(lifecycle), "ok")
-        self.assertEqual(FakeExecutor.calls[-1], 4)
-
-        # boundary = 未来 (全件より新しい) → 全件対象 (同じ 4 件)
         with patch("saiverse.model_configs.find_model_config",
                    return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
                 patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
@@ -279,21 +329,48 @@ class ChronicleClaimTest(unittest.TestCase):
                 patch("sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0), \
                 patch("sai_memory.memory.entity_extractor.make_batch_callback",
                       side_effect=RuntimeError("skip entity extraction")):
+            # 退場するのは先頭 2 件だけ → 計画に載るのも 2 件
             status = lifecycle.generate_chronicle(
-                self._persona(), force=True,
-                evict_boundary_epoch=2_000_000_000,
+                self._persona(), force=True, compile_groups=[all_ids[:2]],
             )
             self.assertEqual(status, "ok")
-            self.assertEqual(FakeExecutor.calls[-1], 4)
+            self.assertEqual(FakeExecutor.calls[-1], 2)
 
-            # boundary = 過去 (全件より古い) → 編纂対象なし = "ok" no-op
+            # 退場範囲が空 → 編纂対象なし = "ok" no-op
             calls_before = len(FakeExecutor.calls)
             status = lifecycle.generate_chronicle(
-                self._persona(), force=True,
-                evict_boundary_epoch=1,
+                self._persona(), force=True, compile_groups=[],
             )
             self.assertEqual(status, "ok")
             self.assertEqual(len(FakeExecutor.calls), calls_before)  # 実行されない
+
+    def test_compile_groups_do_not_bundle_across_holes(self):
+        """離れた範囲 (窓の途中を畳んだ結果) は 1 つのあらすじに束ねない (§4-5)。"""
+        lifecycle = self._make_lifecycle(with_ledger=False)
+        all_ids = self._message_ids()
+
+        with patch("saiverse.model_configs.find_model_config",
+                   return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
+                patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
+                patch("sai_memory.arasuji.executor.execute_plan", FakeExecutor.execute_plan), \
+                patch("sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0), \
+                patch("sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0), \
+                patch("sai_memory.memory.entity_extractor.make_batch_callback",
+                      side_effect=RuntimeError("skip entity extraction")):
+            captured = {}
+
+            def _capture(plan, *a, **k):
+                captured["chunks"] = [list(c.message_ids) for c in plan.chunks]
+                return FakeExecutor.execute_plan(plan, *a, **k)
+
+            with patch("sai_memory.arasuji.executor.execute_plan", _capture):
+                status = lifecycle.generate_chronicle(
+                    self._persona(), force=True,
+                    compile_groups=[[all_ids[0]], [all_ids[2]]],
+                )
+            self.assertEqual(status, "ok")
+            # 2 群は別チャンク (連続していないので束ねない)
+            self.assertEqual(captured["chunks"], [[all_ids[0]], [all_ids[2]]])
 
 
 # ---------------------------------------------------------------------------
@@ -319,23 +396,30 @@ class RetirementGateTest(unittest.TestCase):
         else:
             lifecycle.generate_chronicle = lambda p, cb=None, **kw: chronicle_status
         lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
         return lifecycle
 
-    def _persona(self):
+    def _persona(self, messages=()):
         return SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="エア", model="std-model",
-            sai_memory=None, history_manager=SimpleNamespace(),
+            sai_memory=None, history_manager=_history_manager(messages),
         )
 
     def _run(self, lifecycle, model_key=None):
-        current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        # 低水位 2,000字 = 末尾 2 通を保護 / 目標 2,000字 / U=2,500字。
+        # → 退場候補帯 m0..m2 が 1 束 (3,000字 ≥ U) になり、先頭から連続なので
+        #   anchor が飲み込んで m3 へ進む。
+        messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
+        window = _window(messages)
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
                 patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
-            # keep_count=2 → evict_count=3 → new anchor 候補 = m3
             lifecycle.run_metabolism(
-                self._persona(), "b", current_messages, 2, None, model_key=model_key,
+                self._persona(messages), "b", window,
+                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                model_key=model_key,
             )
 
     def test_failed_holds_anchor_and_next_run_retries(self):
@@ -406,8 +490,13 @@ class RetirementGateTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class EvictEpisodeSnapTest(unittest.TestCase):
-    """open episode の内部で anchor を切らない (退役でも episode は原子)。"""
+class EpisodeUnitEvictionTest(unittest.TestCase):
+    """退場は episode 単位 (docs/intent/chronicle_eviction.md §3/§5)。
+
+    open episode は単独でしか畳まず、U に届かないうちは生のまま残る。届いた
+    open は pulse 関節で刻んで部分退場する。closed 同士は episode をまたいで
+    束ねてよい。
+    """
 
     def setUp(self):
         self.session_factory, self._engine = _make_session_factory()
@@ -419,79 +508,247 @@ class EvictEpisodeSnapTest(unittest.TestCase):
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: chronicle_status
         lifecycle.ensure_recall_embeddings = lambda p: None
+        # 編纂参照・子 episode 記帳は別テストの守備範囲 (ここでは退場の形だけ見る)
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+        lifecycle._record_partial_episode = lambda p, f: None
         return lifecycle
 
-    def _persona(self):
+    def _persona(self, messages=()):
         return SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="エア", model="std-model",
-            sai_memory=None, history_manager=SimpleNamespace(),
+            sai_memory=None, history_manager=_history_manager(messages),
         )
 
     def _open_episode(self):
         from saiverse.episodes import KIND_CONVERSATION, open_episode
         return open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)
 
-    def _run(self, lifecycle, current_messages, keep_count):
+    def _run(self, lifecycle, messages, watermarks, *, band_budget=2_000):
+        window = _window(messages)
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
                 patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ,
+                           {"SAIVERSE_CHRONICLE_BAND_BUDGET": str(band_budget)}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: None):
             lifecycle.run_metabolism(
-                self._persona(), "b", current_messages, keep_count, None,
+                self._persona(messages), "b", window, watermarks, None,
                 model_key="std-model",
             )
+        return window
 
-    def test_evict_snaps_before_open_episode(self):
-        """evict 範囲に open episode のメッセージがあれば、その最古位置の
-        手前まで縮む (anchor は open episode の手前)。"""
-        ep = self._open_episode()
-        ref = ep["episode_ref"]
-        msgs = [
-            {"id": "m0", "content": "x", "created_at": 100},
-            {"id": "m1", "content": "x", "created_at": 101},
-            {"id": "m2", "content": "x", "created_at": 102,
-             "metadata": {"origin_episode": ref}},
-            {"id": "m3", "content": "x", "created_at": 103,
-             "metadata": {"origin_episode": ref}},
-            {"id": "m4", "content": "x", "created_at": 104},
-        ]
-        lifecycle = self._make_lifecycle("ok")
-        # keep_count=1 → 素の evict_count=4 (m0..m3 退役) だが m2 が open
-        # episode → boundary は index 2 (m0/m1 だけ退役)
-        self._run(lifecycle, msgs, 1)
+    def _anchor(self, lifecycle):
         entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry["anchor_id"], "m2")
+        return entry["anchor_id"] if entry else None
 
-    def test_whole_window_open_defers_metabolism(self):
-        """open episode が evict 範囲の先頭から占める場合は見送り (anchor 不変)。"""
-        ep = self._open_episode()
-        ref = ep["episode_ref"]
+    def test_small_open_episode_is_not_folded(self):
+        """U 未満の open episode は畳めない = 生のまま残る (会話 A が守られる)。
+
+        古い側に U 未満の open 会話、新しい側に保護帯。退場候補帯は open だけ
+        なので、どのまとまりも U に届かず今回は何も畳まない。
+        """
+        ref = self._open_episode()["episode_ref"]
+        msgs = [_msg(f"m{i}", 100 + i, chars=500, episode_ref=ref) for i in range(2)]
+        msgs += [_msg(f"n{i}", 200 + i, chars=1_000) for i in range(3)]
+        lifecycle = self._make_lifecycle("ok")
+        self._run(lifecycle, msgs, Watermarks(low=3_000, target=1_000, high=5_000))
+        # 強制クローズは事前試算で見送られる (§5-5 — 閉じても U(2,000) に届かない:
+        # open 会話は 1,000字)。anchor も動かない。
+        self.assertIsNone(self._anchor(lifecycle))
+
+    def test_large_open_episode_folds_in_pulse_units(self):
+        """U に達した open episode は pulse 関節で刻んで部分退場する (§6)。"""
+        ref = self._open_episode()["episode_ref"]
+        # pulse p1 = 2 通 (2,000字) で U 到達。p2 以降は保護帯側。
         msgs = [
-            {"id": f"m{i}", "content": "x", "created_at": 100 + i,
-             "metadata": {"origin_episode": ref}}
-            for i in range(5)
+            _msg("a0", 100, chars=1_000, episode_ref=ref, pulse_id="p1"),
+            _msg("a1", 101, chars=1_000, episode_ref=ref, pulse_id="p1"),
+            _msg("a2", 102, chars=1_000, episode_ref=ref, pulse_id="p2"),
+            _msg("a3", 103, chars=1_000, episode_ref=ref, pulse_id="p2"),
         ]
         lifecycle = self._make_lifecycle("ok")
-        self._run(lifecycle, msgs, 2)
-        self.assertIsNone(lifecycle.load_anchor_entry(PERSONA_ID, "std-model"))
+        folded = []
+        lifecycle._record_partial_episode = lambda p, f: folded.append(f.message_ids)
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
+        # p1 が丸ごと退場し、anchor は a2 へ。p2 は保護帯なので残る。
+        self.assertEqual(self._anchor(lifecycle), "a2")
+        self.assertEqual(folded, [["a0", "a1"]])
 
-    def test_closed_episode_does_not_constrain(self):
-        """closed episode のメッセージは制約なし (どこでも切れる)。"""
+    def test_closed_episodes_bundle_across_boundaries(self):
+        """closed 同士は episode をまたいで束ねて U に届かせる (§3)。"""
         from saiverse.episodes import close_episode
-        ep = self._open_episode()
-        ref = ep["episode_ref"]
-        close_episode(self.manager, PERSONA_ID, ep["episode_id"])
+        ep1 = self._open_episode()
+        close_episode(self.manager, PERSONA_ID, ep1["episode_id"])
+        ep2 = self._open_episode()
+        close_episode(self.manager, PERSONA_ID, ep2["episode_id"])
         msgs = [
-            {"id": f"m{i}", "content": "x", "created_at": 100 + i,
-             "metadata": {"origin_episode": ref}}
-            for i in range(5)
+            _msg("c0", 100, chars=1_000, episode_ref=ep1["episode_ref"]),
+            _msg("c1", 101, chars=1_000, episode_ref=ep2["episode_ref"]),
+            _msg("c2", 102, chars=1_000),
+            _msg("c3", 103, chars=1_000),
         ]
         lifecycle = self._make_lifecycle("ok")
-        # keep_count=2 → evict_count=3 → anchor=m3 (スナップ発動なし)
-        self._run(lifecycle, msgs, 2)
-        entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
-        self.assertEqual(entry["anchor_id"], "m3")
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
+        # c0 (ep1) + c1 (ep2) で U=2,000 到達 → 束ねて退場、anchor は c2。
+        self.assertEqual(self._anchor(lifecycle), "c2")
+
+    def test_protected_band_is_never_evicted(self):
+        """低水位ぶんの直近は退場させない (§5-1 — 作業の直近が守られる)。"""
+        msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(6)]
+        lifecycle = self._make_lifecycle("ok")
+        self._run(lifecycle, msgs, Watermarks(low=4_000, target=1_000, high=5_000))
+        # 末尾 4,000字 (m2..m5) は保護。候補は m0/m1 の 2,000字 = U ちょうど。
+        self.assertEqual(self._anchor(lifecycle), "m2")
+
+    def test_fold_without_chronicle_entry_is_not_evicted(self):
+        """あらすじを持たない範囲は退場させない (下限の手続き強制、§2)。
+
+        穴は「生ログの代わりに digest を見せる」記録なので、digest が無い穴は
+        その範囲を黙って消すだけになる。退場そのものを見送って生で残す。
+        """
+        msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(6)]
+        lifecycle = self._make_lifecycle("ok")
+        lifecycle._attach_chronicle_refs = lambda p, folds: None  # 引き当て失敗
+        saved = []
+        lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self.assertIsNone(self._anchor(lifecycle))
+        self.assertEqual(saved, [[]])
+
+    def test_same_range_is_not_folded_twice(self):
+        """既に穴になっている範囲を二重に記録しない。
+
+        あらすじが一時的に引けないと提示に生ログが戻る (fail-open) ため、計画は
+        同じ範囲をもう一度畳もうとする。ここで弾かないと同一範囲の穴が毎回 1 本
+        ずつ積み上がり、JSON と照会コストが単調に増える。
+        """
+        from sea.session_window import FoldedRange
+        open_ref = self._open_episode()["episode_ref"]
+        msgs = [
+            # 先頭は U 未満の open → 畳めない = anchor が動けない (穴が残る形)
+            _msg("a0", 100, chars=500, episode_ref=open_ref),
+            _msg("m1", 101, chars=1_000), _msg("m2", 102, chars=1_000),
+            _msg("m3", 103, chars=1_000), _msg("m4", 104, chars=1_000),
+            _msg("k0", 200, chars=1_000), _msg("k1", 201, chars=1_000),
+        ]
+        existing = FoldedRange(
+            message_ids=["m1", "m2"], start_at=101, end_at=102,
+            chronicle_entry_ids=["old"], chronicle_short_ids=[1],
+        )
+        window = SessionWindow(
+            anchor_id="a0", raw=list(msgs), presented=list(msgs), folds=[existing],
+        )
+        lifecycle = self._make_lifecycle("ok")
+        saved = []
+        lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            lifecycle.run_metabolism(
+                self._persona(msgs), "b", window,
+                Watermarks(low=2_000, target=1_000, high=5_000), None,
+                model_key="std-model",
+            )
+        # m1/m2 は再度記録されず、新しく畳まれるのは m3/m4 だけ
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(
+            [f.message_ids for f in saved[0]], [["m1", "m2"], ["m3", "m4"]],
+        )
+
+    def test_partial_fold_records_closed_child_episode_with_digest(self):
+        """open episode の部分退場は、閉じた子 episode + 再訪の鍵として刻まれる。
+
+        experience_structure §6 (pulse 関節細分)。open/close/継承エッジは単一
+        トランザクション — close が落ちて「開きっぱなしの子」が残ると、それが
+        `get_open_episode` の「最後に開いた open」を奪い、以後の会話が合成
+        episode に付いてしまう。
+        """
+        from saiverse.episodes import get_by_ref, get_open_episode
+        from saiverse.experience_inheritance import get_parents
+        parent = self._open_episode()
+        ref = parent["episode_ref"]
+        msgs = [
+            _msg("a0", 100, chars=1_000, episode_ref=ref, pulse_id="p1"),
+            _msg("a1", 101, chars=1_000, episode_ref=ref, pulse_id="p1"),
+            _msg("a2", 102, chars=1_000, episode_ref=ref, pulse_id="p2"),
+            _msg("a3", 103, chars=1_000, episode_ref=ref, pulse_id="p2"),
+        ]
+        lifecycle = self._make_lifecycle("ok")
+        # 子 episode の記帳だけは本物を通す (この経路が検証対象)
+        del lifecycle._record_partial_episode
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
+
+        # 親は開いたまま (長さを理由に出来事を分割しない §6)
+        self.assertEqual(get_by_ref(self.manager, PERSONA_ID, ref)["status"], "open")
+        # 子は closed + digest 参照つき
+        child = get_by_ref(self.manager, PERSONA_ID, "episode:2")
+        self.assertEqual(child["status"], "closed")
+        self.assertTrue(child["digest_ref"].startswith("chronicle:"))
+        self.assertEqual(child["meta"]["partial_of"], ref)
+        # 開きっぱなしの子は残らない (最後に開いた open は親のまま)
+        self.assertEqual(
+            get_open_episode(self.manager, PERSONA_ID)["episode_ref"], ref,
+        )
+        # 親 → 子 の継承エッジ (digest 層) が張られている
+        parents = get_parents(self.manager, PERSONA_ID, ref)
+        self.assertEqual([p["layer"] for p in parents], ["digest"])
+
+    def test_anchor_moved_outside_eviction_clears_holes(self):
+        """退場経路以外で anchor が差し替わったら穴を捨てる。
+
+        TTL 失効後の最小ロードで新しい起点が立ち、LLM 成功後の touch がそれを
+        永続化する経路がある。古い穴を残すと、その範囲は窓に出ない (anchor の
+        外) のに head の Chronicle 枠からは除外され続け、**窓にも head にも
+        現れない**体験になる。
+        """
+        from sea.session_window import FoldedRange
+        lifecycle = self._make_lifecycle("ok")
+        t0 = datetime.now().replace(microsecond=0)
+        lifecycle.upsert_anchor_entry(PERSONA_ID, "std-model", {
+            "anchor_id": "m0", "updated_at": t0.isoformat(),
+        })
+        lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
+            FoldedRange(message_ids=["m1"], chronicle_entry_ids=["e1"]),
+        ])
+        self.assertTrue(lifecycle.load_folded_ranges(PERSONA_ID, "std-model"))
+
+        # anchor だけを別経路で差し替える (touch_anchor_after_llm_call 相当)
+        lifecycle.update_anchor_for_model(persona=self._persona(), model_key="std-model",
+                                          anchor_id="z9")
+        self.assertEqual(lifecycle.load_folded_ranges(PERSONA_ID, "std-model"), [])
+
+        # 同じ anchor への再 touch では穴を消さない
+        lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
+            FoldedRange(message_ids=["z9"], chronicle_entry_ids=["e2"]),
+        ])
+        lifecycle.update_anchor_for_model(persona=self._persona(), model_key="std-model",
+                                          anchor_id="z9")
+        self.assertEqual(
+            [f.message_ids for f in lifecycle.load_folded_ranges(PERSONA_ID, "std-model")],
+            [["z9"]],
+        )
+
+    def test_middle_fold_keeps_anchor_and_records_hole(self):
+        """窓の途中を畳んだときは anchor を動かさず穴として記録する (§6)。"""
+        open_ref = self._open_episode()["episode_ref"]
+        msgs = [
+            # 先頭は U 未満の open 会話 A → 畳めない = anchor は動けない
+            _msg("a0", 100, chars=500, episode_ref=open_ref),
+            # 続く無帰属 (closed 扱い) が U に到達 → 窓の途中が畳まれる
+            _msg("b0", 101, chars=1_000),
+            _msg("b1", 102, chars=1_000),
+            _msg("k0", 200, chars=1_000),
+            _msg("k1", 201, chars=1_000),
+        ]
+        lifecycle = self._make_lifecycle("ok")
+        saved = []
+        lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self.assertIsNone(self._anchor(lifecycle))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual([f.message_ids for f in saved[0]], [["b0", "b1"]])
 
 
 # ---------------------------------------------------------------------------
@@ -582,18 +839,22 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
         lifecycle = SessionLifecycle(SimpleNamespace(), manager)
         lifecycle.is_chronicle_enabled_for_persona = lambda p: False  # → "disabled"
         lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
 
+        messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
         persona = SimpleNamespace(
             persona_id=PERSONA_ID, persona_name="エア", model="std-model",
-            sai_memory=None, history_manager=SimpleNamespace(),
+            sai_memory=None, history_manager=_history_manager(messages),
         )
         dispatched = []
+        window = _window(messages)
         with patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda p, m, model_key=None: dispatched.append(model_key)):
             lifecycle.run_metabolism(
-                persona, "b",
-                [{"id": f"m{i}", "content": "x"} for i in range(5)], 2, None,
+                persona, "b", window,
+                Watermarks(low=2_000, target=2_000, high=4_000), None,
                 model_key="light-model",
             )
         self.assertEqual(dispatched, ["light-model"])

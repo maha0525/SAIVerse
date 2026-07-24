@@ -1,8 +1,6 @@
 {
   "system_prompt": "",
   "provider_ref": "xai",
-  "default_max_history_messages": 100,
-  "metabolism_keep_messages": 40,
   "supports_structured_output": true,
   "supports_images": true,
   "parameters": {

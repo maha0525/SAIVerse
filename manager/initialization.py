@@ -296,9 +296,12 @@ class InitializationMixin:
             self.provider = get_model_provider(base_model)
         self._base_model = base_model
         self.model_parameter_overrides: Dict[str, Any] = {}
-        self.max_history_messages_override: Optional[int] = None
         self.metabolism_enabled: bool = True
-        self.metabolism_keep_messages_override: Optional[int] = None
+        # Metabolism の三水位 (文字数) のグローバル上書き。None = model 設定に従う
+        # (docs/intent/chronicle_eviction.md §4)。
+        self.metabolism_low_chars_override: Optional[int] = None
+        self.metabolism_target_chars_override: Optional[int] = None
+        self.metabolism_high_chars_override: Optional[int] = None
         self.max_image_embeds_override: Optional[int] = None
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:

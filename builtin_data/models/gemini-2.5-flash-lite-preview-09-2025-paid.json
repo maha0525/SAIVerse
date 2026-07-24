@@ -4,8 +4,6 @@
   "display_name": "Gemini 2.5 Flash Lite Preview 09 2025(有料Tier)",
   "provider_ref": "gemini",
   "context_length": 1000000,
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60,
   "supports_images": true,
   "supports_audio": true,
   "supports_video": true,

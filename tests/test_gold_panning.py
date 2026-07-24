@@ -19,6 +19,36 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sea import gold_panning
+from sea.eviction_plan import Watermarks
+from sea.session_window import SessionWindow
+
+#: run_metabolism 検証用の水位。1,000字 × 5 通の窓で、末尾 2,000字 (2 通) を
+#: 保護し、残り 3,000字を U=2,500字 で 1 束に畳む → anchor は m3 へ。
+_METABOLISM_WATERMARKS = Watermarks(low=2_000, target=2_000, high=4_000)
+
+
+def _metabolism_messages(count=5, chars=1_000):
+    return [
+        {"id": f"m{i}", "content": "x" * chars, "created_at": 100 + i}
+        for i in range(count)
+    ]
+
+
+def _metabolism_window(messages):
+    return SessionWindow(
+        anchor_id="m0", raw=list(messages), presented=list(messages), folds=[],
+    )
+
+
+def _stub_chronicle_refs(_persona, folds):
+    """編纂が済んで級 1 エントリが引けた状態を模す。
+
+    実装は「あらすじを持たない fold は退場させない」ので、退役の検証では refs が
+    付いた状態を前提にする (chronicle_eviction.md §2)。
+    """
+    for i, fold in enumerate(folds):
+        fold.chronicle_entry_ids = [f"entry-{i}"]
+        fold.chronicle_short_ids = [i + 1]
 
 
 class DummyEmbedder:
@@ -320,43 +350,55 @@ class GoldPanningRunTest(unittest.TestCase):
 class DeferToHotTest(unittest.TestCase):
     """SessionLifecycle.maybe_run_metabolism の defer-to-hot をスタブ化して検証する。"""
 
+    #: 1 通あたりの文字数 (水位は文字数基準 — chronicle_eviction.md §4)
+    CHARS_PER_MESSAGE = 1_000
+
     def _make_lifecycle(self, *, hot, messages_count):
+        from sea.eviction_plan import Watermarks
         from sea.session_lifecycle import SessionLifecycle
 
-        manager = SimpleNamespace(metabolism_enabled=True, max_history_messages_override=None,
-                                  metabolism_keep_messages_override=None)
+        manager = SimpleNamespace(
+            metabolism_enabled=True,
+            metabolism_low_chars_override=None,
+            metabolism_target_chars_override=None,
+            metabolism_high_chars_override=None,
+        )
         runtime = SimpleNamespace()
         lifecycle = SessionLifecycle(runtime, manager)
 
         history_mgr = SimpleNamespace()
-        messages = [{"id": f"m{i}", "content": "x"} for i in range(messages_count)]
+        messages = [
+            {"id": f"m{i}", "content": "x" * self.CHARS_PER_MESSAGE}
+            for i in range(messages_count)
+        ]
         history_mgr.get_history_from_anchor = (
             lambda anchor, required_line_roles=None, required_scopes=None: messages
         )
         persona = SimpleNamespace(persona_id="tester", model="claude-x", history_manager=history_mgr)
 
-        # 依存メソッドをスタブ (anchor 行 / watermark / hot 判定 / 実行)。
+        # 依存メソッドをスタブ (anchor 行 / 水位 / hot 判定 / 実行)。
         # 発火判定の anchor は session_anchor 行 (persona, model) から読まれる
         # (§6-5 で persona 属性は廃止)。
         lifecycle.load_anchor_entry = lambda pid, mk: {"anchor_id": "anchor"}
-        lifecycle.get_high_watermark = lambda p, mk=None: 20
-        lifecycle.get_low_watermark = lambda p, mk=None: 10
+        lifecycle.get_metabolism_watermarks = lambda p, mk=None: Watermarks(
+            low=10_000, target=20_000, high=20_000,
+        )
         lifecycle._is_cache_hot = lambda p, mk=None: hot
         ran = []
         lifecycle.run_metabolism = (
-            lambda p, b, msgs, keep, cb=None, model_key=None: ran.append((len(msgs), keep))
+            lambda p, b, win, wm, cb=None, model_key=None: ran.append((len(win.presented), wm))
         )
         return lifecycle, persona, ran
 
     def test_cold_defers_and_sets_pending(self):
-        # cold + high_wm(20) < count(25) <= cap(20*1.5=30) → 繰り延べ
+        # cold + high(20,000字) < 25,000字 <= cap(20,000*1.5=30,000) → 繰り延べ
         lifecycle, persona, ran = self._make_lifecycle(hot=False, messages_count=25)
         lifecycle.maybe_run_metabolism(persona, "b", None)
         self.assertEqual(ran, [])  # metabolism は走らない
         self.assertTrue(getattr(persona, "_metabolism_pending", False))
 
     def test_pressure_valve_runs_cold(self):
-        # cold だが count(40) > cap(30) → 圧力弁でコールド実行
+        # cold だが 40,000字 > cap(30,000) → 圧力弁でコールド実行
         lifecycle, persona, ran = self._make_lifecycle(hot=False, messages_count=40)
         lifecycle.maybe_run_metabolism(persona, "b", None)
         self.assertEqual(len(ran), 1)
@@ -430,14 +472,21 @@ class LlmFailureIsolationTest(unittest.TestCase):
         manager = SimpleNamespace()
         lifecycle = SessionLifecycle(runtime, manager)
         lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
         anchor_updates = []
         lifecycle.update_anchor_for_model = lambda p, m, aid, ttl=None: anchor_updates.append((m, aid))
         return lifecycle, anchor_updates
 
-    def _make_metabolism_persona(self):
+    def _make_metabolism_persona(self, messages=()):
+        history_manager = SimpleNamespace(
+            get_history_from_anchor=(
+                lambda anchor, required_line_roles=None, required_scopes=None,
+                pulse_id=None: list(messages)
+            )
+        )
         return SimpleNamespace(
             persona_id="tester", persona_name="エア", model="claude-x",
-            sai_memory=self.adapter, history_manager=SimpleNamespace(),
+            sai_memory=self.adapter, history_manager=history_manager,
         )
 
     def test_run_metabolism_gold_panning_failure_still_updates_anchor(self):
@@ -447,12 +496,13 @@ class LlmFailureIsolationTest(unittest.TestCase):
         client = FakeLLMClient(RuntimeError("boom"))
         lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
         lifecycle.is_chronicle_enabled_for_persona = lambda p: False
-        persona = self._make_metabolism_persona()
+        messages = _metabolism_messages()
+        persona = self._make_metabolism_persona(messages)
 
-        current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
-        # keep_count=2 → evict_count=3 → new anchor = m3
-        with patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism", lambda *a, **k: None):
-            lifecycle.run_metabolism(persona, "b", current_messages, 2, None)
+        window = _metabolism_window(messages)
+        with patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism", lambda *a, **k: None):
+            lifecycle.run_metabolism(persona, "b", window, _METABOLISM_WATERMARKS, None)
 
         self.assertEqual(anchor_updates, [("claude-x", "m3")])
 
@@ -463,14 +513,16 @@ class LlmFailureIsolationTest(unittest.TestCase):
         lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: (_ for _ in ()).throw(RuntimeError("llm down"))
-        persona = self._make_metabolism_persona()
+        messages = _metabolism_messages()
+        persona = self._make_metabolism_persona(messages)
 
-        current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        window = _metabolism_window(messages)
         dispatched = []
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda *a, **k: dispatched.append(k)):
-            lifecycle.run_metabolism(persona, "b", current_messages, 2, None)
+            lifecycle.run_metabolism(persona, "b", window, _METABOLISM_WATERMARKS, None)
 
         # anchor 据え置き + 可視化 (head 再 capture) も走らない。
         self.assertEqual(anchor_updates, [])
@@ -482,15 +534,17 @@ class LlmFailureIsolationTest(unittest.TestCase):
         lifecycle, anchor_updates = self._make_metabolism_lifecycle(client)
         lifecycle.is_chronicle_enabled_for_persona = lambda p: True
         lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
-        persona = self._make_metabolism_persona()
+        messages = _metabolism_messages()
+        persona = self._make_metabolism_persona(messages)
 
-        current_messages = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+        window = _metabolism_window(messages)
         dispatched = []
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2500"}), \
                 patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                       lambda p, m, model_key=None: dispatched.append(model_key)):
             lifecycle.run_metabolism(
-                persona, "b", current_messages, 2, None, model_key="light-model",
+                persona, "b", window, _METABOLISM_WATERMARKS, None, model_key="light-model",
             )
 
         self.assertEqual(anchor_updates, [("light-model", "m3")])

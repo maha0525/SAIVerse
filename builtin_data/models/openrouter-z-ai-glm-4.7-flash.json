@@ -6,8 +6,6 @@
   "group": "openrouter",
   "supports_structured_output": true,
   "context_length": 202752,
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30,
   "supports_images": false,
   "convert_system_to_user": true,
   "reasoning_passback_field": "reasoning_details",

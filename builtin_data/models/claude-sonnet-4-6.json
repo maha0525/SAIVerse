@@ -4,8 +4,6 @@
   "display_name": "Claude Sonnet 4.6",
   "provider_ref": "anthropic",
   "context_length": 200000,
-  "default_max_history_messages": 100,
-  "metabolism_keep_messages": 40,
   "thinking_type": "adaptive",
   "thinking_effort": "high",
   "supports_images": true,

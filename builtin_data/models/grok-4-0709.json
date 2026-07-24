@@ -4,8 +4,6 @@
   "display_name": "Grok 4 0709",
   "provider_ref": "xai",
   "context_length": 32768,
-  "default_max_history_messages": 40,
-  "metabolism_keep_messages": 20,
   "supports_structured_output": true,
   "supports_images": true,
   "parameters": {

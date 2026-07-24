@@ -406,8 +406,9 @@ def run_gold_panning(
 
     Args:
         lifecycle: SessionLifecycle インスタンス (lifecycle.runtime で SEARuntime)。
-        current_messages: run_metabolism の手元の履歴 (押し出し対象は [:evict_count])。
-        evict_count: 押し出される件数。
+        current_messages: run_metabolism の手元の提示窓。
+        evict_count: 今回押し出される件数 (ログ用。退場は episode 単位になったので
+            窓の先頭からの連続とは限らない — chronicle_eviction.md §5)。
 
     Returns:
         {"ops_applied": int, "ops_failed": int, "skipped": bool, "reason": str|None}

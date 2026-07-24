@@ -40,7 +40,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 @dataclass
@@ -1278,6 +1278,34 @@ def find_covering_entry(
     )
     row = cur.fetchone()
     return _row_to_entry(row) if row else None
+
+
+def get_entries_covering_messages(
+    conn: sqlite3.Connection, message_ids: Sequence[str],
+) -> List[ArasujiEntry]:
+    """指定メッセージ群を source に持つ級 1 エントリを時系列順で返す。
+
+    退場時に畳んだ範囲 (docs/intent/chronicle_eviction.md §6) から、その範囲を
+    覆うあらすじを引き当てるための照会。範囲が複数エントリに分かれている場合も
+    あるため List で返す (提示ではまとめて 1 つの圧縮マークに畳む)。
+    """
+    ids = [str(m) for m in message_ids if m]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"""
+        SELECT DISTINCT a.id, a.level, a.content, a.source_ids_json, a.start_time,
+               a.end_time, a.source_count, a.message_count, a.parent_id,
+               a.is_consolidated, a.created_at, a.origin_track_id, a.is_incomplete,
+               a.short_id
+        FROM arasuji_entries a, json_each(a.source_ids_json)
+        WHERE a.level = 1 AND json_each.value IN ({placeholders})
+        ORDER BY a.start_time ASC
+        """,
+        ids,
+    )
+    return [_row_to_entry(row) for row in cur.fetchall()]
 
 
 def search_entries(

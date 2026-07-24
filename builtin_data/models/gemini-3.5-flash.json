@@ -4,8 +4,6 @@
   "display_name": "Gemini 3.5 Flash(無料枠)",
   "provider_ref": "gemini",
   "context_length": 250000,
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60,
   "supports_images": true,
   "supports_audio": true,
   "supports_video": true,

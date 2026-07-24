@@ -151,7 +151,8 @@ META aspect の scope 変動 (試行ターン discardable → 確定ターン co
 
 セッション終了条件としてまはー提案 (議論メモ):
 
-- ① セッション開始時のメッセージ数 (Metabolism 後の keep_count、例: 40)
+- ① セッション開始時の文字数 (Metabolism 後の到達点 = 目標水位。2026-07-25 に
+  メッセージ数から文字数の三水位へ移行 — [`chronicle_eviction.md`](chronicle_eviction.md) §4)
 - ② implicit cache が必ず切れる時間 (provider 別。Anthropic=0, OpenAI=要確認, Gemini=24h)。explicit cache 効果中は無効化
 - ③ pulse 完了後の context 使用率閾値 (例: 80%、`prompt_token_count / context_length`)。モデル別に設定可能
 - 例外: context 長超過エラーが返ったら強制 Metabolism + 再送

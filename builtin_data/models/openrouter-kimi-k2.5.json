@@ -5,8 +5,6 @@
   "provider_ref": "openrouter",
   "group": "openrouter",
   "context_length": 256000,
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60,
   "convert_system_to_user": true,
   "supports_images": true,
   "max_image_bytes": 7500000,

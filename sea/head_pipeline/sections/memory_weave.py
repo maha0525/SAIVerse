@@ -89,6 +89,10 @@ class MemoryWeaveSection:
         # 廃止 (beat_execution_context.md §3.2)。読めない環境 (テストスタブ等) は
         # None = 除外なし (従来のフォールバックと同じ縮退)。
         anchor_id = None
+        # 窓の中で digest に置き換えて見せている範囲のあらすじは head から外す
+        # (chronicle_eviction.md §6 — 同じあらすじが窓と head に二重で出ると、
+        #  同じ出来事が二度あったかのような時系列の錯覚をペルソナに招く)。
+        folded_entry_ids: list[str] = []
         try:
             sea_runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
             lifecycle = getattr(sea_runtime, "session_lifecycle", None)
@@ -97,6 +101,9 @@ class MemoryWeaveSection:
             if callable(load_entry) and model_key:
                 entry = load_entry(ctx.persona_id, str(model_key))
                 anchor_id = entry.get("anchor_id") if entry else None
+                from sea.session_window import deserialize_folds
+                for fold in deserialize_folds(entry.get("folded_ranges") if entry else None):
+                    folded_entry_ids.extend(fold.chronicle_entry_ids)
         except Exception:
             LOGGER.debug(
                 "memory_weave: anchor row read failed persona=%s", ctx.persona_id,
@@ -112,6 +119,7 @@ class MemoryWeaveSection:
                 mw_messages = get_memory_weave_context(
                     persona_id=ctx.persona_id, persona_dir=persona_dir,
                     history_anchor_message_id=anchor_id,
+                    exclude_chronicle_entry_ids=folded_entry_ids or None,
                 )
         except Exception:
             LOGGER.warning(

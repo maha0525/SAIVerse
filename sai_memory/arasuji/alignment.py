@@ -164,22 +164,30 @@ def plan_alignment(
     *,
     target_chars: int = DEFAULT_TARGET_CHARS,
     min_llm_chars: int = DEFAULT_MIN_DIGEST_CHARS,
+    run_boundary_ids: Optional[Set[str]] = None,
 ) -> AlignmentPlan:
     """未編纂メッセージ列を episode 整列チャンク列に計画する。
 
     Args:
-        messages: 編纂対象候補 (created_at 昇順。除外フィルタ・evict 境界は
+        messages: 編纂対象候補 (created_at 昇順。除外フィルタ・退場範囲の絞り込みは
             呼び出し側で適用済み)。
         processed_ids: 既に級 1 ノードの source になっている message id 集合。
         episode_digests: digest 確定済み episode の
             ``episode_ref -> (digest_message_id, digest_text)``。
         target_chars: 級 1 チャンクの標準被覆 (U)。
         min_llm_chars: LLM 圧縮する最小被覆 (未満は恒等圧縮)。
+        run_boundary_ids: ここに含まれる message id の**手前で run を切る**。
+            退場が episode 単位になり、一度の編纂で時系列上離れた範囲を扱う
+            ようになったため、範囲の切れ目を明示して「離れたものを一つの
+            あらすじに束ねない」(§4-5 連続束ねのみ) を守る。None なら従来どおり
+            processed 挟みだけで run が切れる。
 
     Returns:
         AlignmentPlan。チャンクは時系列順。
     """
-    # 1. 連続 run 化 (§4-5): processed を跨ぐ束ねはしない。
+    # 1. 連続 run 化 (§4-5): processed を跨ぐ束ねはしない。呼び出し側が指定した
+    #    範囲の切れ目でも切る。
+    boundaries = run_boundary_ids or set()
     runs: List[List[Message]] = []
     current: List[Message] = []
     for msg in messages:
@@ -188,6 +196,9 @@ def plan_alignment(
                 runs.append(current)
                 current = []
             continue
+        if current and msg.id in boundaries:
+            runs.append(current)
+            current = []
         current.append(msg)
     if current:
         runs.append(current)

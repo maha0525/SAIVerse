@@ -341,6 +341,8 @@ graph TD
 
 **Session が継続不能になる**（cache TTL 切れ = Anchor 判定、context 過剰など）と発火する節目のイベント。発火すると全 Section に `capture(live_state)` を走らせて **短期記憶（head snapshot）を再構築**しつつ、同時に **長期記憶への結晶化**（履歴圧縮・Chronicle 化・Fragment 生成 §5）を束ねて実行し、**新しい Session を開始する**。つまり Metabolism は **Session を区切り直す節目**であり、同時に**短期記憶と長期記憶をつなぐ**。`_resolve_metabolism_anchor` が3段フォールバック（当該モデルの anchor → 別モデルの最新 → 最小ロード）で文脈取得を切り替える。**実装済**。
 
+**退場は episode 単位・文字数の三水位**（2026-07-25、intent [`chronicle_eviction.md`](../intent/chronicle_eviction.md)）。守るのは軽量化ではなく**記憶の連続性** — 「退場したものは必ず編纂されている」が絶対の下限。畳んでよい境界は時刻の一本線ではなく **episode の開閉状態**で引き、開いている episode は単独で（pulse 関節で刻んで）、閉じた episode 同士はまたいで束ねる。扱いを分ける根拠は会話か作業かではなく**量（U に達したか）だけ**。量の勘定は文字数（低4万＝直近保護帯 / 目標6万 / 高12万、全モデル一律）。旧「モデルごとのメッセージ数」は単位ごと廃止（§9）。窓の**途中**を畳めるようになったため、畳んだ範囲は元の時系列位置に digest ＋圧縮マークの注釈を差し込んで提示する（head の Chronicle 枠に寄せると新しい要約が古い生ログより前に立って時系列が嘘になる）。**実装済・実機検証待ち**。
+
 ### Anchor（節目のマーカー）
 
 Metabolism の起点を指すマーカー。`METABOLISM_ANCHORS` は per-model dict として persona に紐付き、各 model ごとに `{anchor_id, updated_at, ttl_seconds}` を持つ。`updated_at` は prompt cache write 時刻で、LLM コール後に `_touch_anchor_after_llm_call` で touch される。`anchor_updated_at + ttl < now` で TTL 切れ（= Session 継続不能の予兆）と判定され、True なら次の context 構築時に Metabolism が自動 trigger される。**実装済**。
@@ -432,6 +434,8 @@ graph TD
 | **SLEEP_ON_CACHE_EXPIRE** | **削除**（2026-07-14、ACTIVITY_STATE 解体に同伴）。「Idle のペルソナをキャッシュ TTL 切れで Sleep へ自動遷移させ API 費用暴走を防ぐ」フラグとして intent に設計され DB 列も掘られたが、**本体コードから一行も読まれない死んだ列**だった（実装されないまま列とコメントだけが残り、後の調査を誤らせた実害あり）。Sleep 消滅により存在理由も消滅 |
 | **Track Chronicle（独立生成キュー）** | **生成廃止**（2026-07-21 W4、[体験の構造](../intent/experience_structure.md) §11-10 裁定）。`generate_track_chronicle`・incomplete Lv1 の delete&regen サイクルを撤去。既存 `origin_track_id` 付きエントリの読み込みは残存。解こうとしていた Track 再訪問題は `docs/issues/track_episode_continuity.md` が引き継ぐ |
 | **Chronicle 20 件固定バッチ + 10 個統合** | **世代交代**（2026-07-21 W4）。`ArasujiGenerator.generate_unprocessed`（20 件機械分割）・`maybe_consolidate`（10 個統合）・gap-fill/dismantle は削除。後継は episode 整列チャンク（alignment/executor）+ 帯あふれ束ね（bands）— [体験の構造](../intent/experience_structure.md) §4 の圧縮七原則。env `MEMORY_WEAVE_BATCH_SIZE` / `MEMORY_WEAVE_CONSOLIDATION_SIZE` は受理して無視 |
+| **Metabolism の watermark（メッセージ数）** | **単位ごと廃止**（2026-07-25、[chronicle_eviction](../intent/chronicle_eviction.md) §4）。`default_max_history_messages` / `metabolism_keep_messages`（モデルごとにバラバラな件数）と、それを読む `get_default_max_history_messages` / `get_metabolism_keep_messages` / `get_high_watermark` / `get_low_watermark`、グローバル override（`max_history_messages_override` / `metabolism_keep_messages_override`）、API `GET|POST /api/config/max-history-messages` を削除。後継は**文字数の三水位**（低4万＝直近保護帯 / 目標6万 / 高12万、全モデル一律。`metabolism_low_chars` / `metabolism_target_chars` / `metabolism_high_chars` と `POST /api/config/metabolism`）。件数基準は digest 側の被覆 U（文字数）と単位が食い違い、「短文だらけだと総量が小さいのに発火する / 保護帯で U を確保できない」病理を生んでいた |
+| **退役の episode スナップ（`_snap_evict_to_episode_boundary`）** | **撤去**（2026-07-25）。「退場範囲に open episode が入るならその手前まで退場を縮める / open が窓全体を占めるなら Metabolism を見送る」という回避策で、長い会話が続くと窓が肥大し、閉じた瞬間に全部退場して**生コンテキストが急にゼロになる**欠陥があった。後継は `sea/eviction_plan.py` の `plan_eviction` — open episode を避けるのではなく、**単独で pulse 関節ごとに部分退場させる**（[chronicle_eviction](../intent/chronicle_eviction.md) §3/§5、[体験の構造](../intent/experience_structure.md) §6） |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 

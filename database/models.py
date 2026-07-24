@@ -162,6 +162,11 @@ class SessionAnchor(Base):
       不明 (読み出し側が現行設定から算出する後方互換)。
     - UPDATED_AT: 最終 touch 時刻 (epoch 秒)。LLM 呼び出し成功時にのみ前進する
       prompt cache 書き込みの真の起点。
+    - FOLDED_RANGES_JSON: 窓の**途中**で digest に畳まれた範囲のリスト (JSON)。
+      退場が episode 単位になり「古い会話を生で残したまま新しい作業の古い部分を
+      畳む」が起きるため、anchor 一点では窓を表せなくなった。窓 = anchor 以降 −
+      畳まれた範囲 + その位置の digest (docs/intent/chronicle_eviction.md §6)。
+      退役は model ごとなのでこの行が持ち主。NULL = 穴なし。
     """
     __tablename__ = "session_anchor"
     PERSONA_ID = Column(String, primary_key=True)
@@ -169,6 +174,7 @@ class SessionAnchor(Base):
     ANCHOR_MESSAGE_ID = Column(String, nullable=True)
     TTL_SECONDS = Column(Integer, nullable=True)
     UPDATED_AT = Column(Integer, nullable=False)  # epoch 秒
+    FOLDED_RANGES_JSON = Column(Text, nullable=True)
 
 
 class Building(Base):

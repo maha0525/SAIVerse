@@ -4,8 +4,6 @@
   "display_name": "Sakana Fugu Ultra",
   "provider_ref": "sakana",
   "context_length": 1000000,
-  "default_max_history_messages": 60,
-  "metabolism_keep_messages": 20,
   "supports_images": true,
   "supports_structured_output": false,
   "parameters": {

@@ -4,8 +4,6 @@
   "display_name": "Grok 4.20 Beta (Non-Reasoning)",
   "provider_ref": "xai",
   "context_length": 2000000,
-  "default_max_history_messages": 100,
-  "metabolism_keep_messages": 40,
   "supports_structured_output": true,
   "supports_images": true,
   "parameters": {
