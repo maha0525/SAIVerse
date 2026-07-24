@@ -10,6 +10,7 @@ import os
 import re
 import tokenize
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_clients.exceptions import LLMError
@@ -52,6 +53,524 @@ def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str 
         persona_id=persona_id,
         building_id=building_id,
     )
+
+
+@dataclass
+class BeatExecution:
+    """1 Beat（= LLM ノード 1 回の生成と、その記録）の実行状態。
+
+    **Beat とは**: ペルソナの最小行動単位。Pulse（認知サイクル 1 回）より小さく、
+    SAIMemory の 1 レコードとも一致しない中間単位で、「喋る」「道具を使う」
+    「内省を表出する」がどれも 1 Beat。実装では長らく閉包のローカル変数に
+    埋まっていて型が無かった（`docs/issues/beat_concept_not_typed_in_implementation.md`）。
+
+    Beat には 3 つの面があり、本クラスが受け持つのは 3 番目だけ:
+
+    - **身分** = :class:`sea.pulse_context.ExecutionContext`（誰の・どの thread /
+      line / aspect / model / pulse の実行か）— 実装済み
+    - **直列性** = :class:`sea.beat_gate.BeatGate`（persona 単位ロック + 関所）— 実装済み
+    - **中身** = 生成されたテキストと、その記録先ごとの姿 ← ここ
+
+    ⚠️ Phase 1 時点では **④確定（記録）が読むフィールドだけ**を持つ。
+    分割設計書（`docs/issues/runtime_llm_node_split_design.md`）の Phase 2 で
+    4 つの生成経路が本オブジェクトを受け取って更新する形になったとき、
+    ``display_text``（Building / UI 行きの merged 全文）・``llm_usage_metadata``・
+    ``ctx``（ExecutionContext）が加わる。読み手のいないフィールドを先に生やすと
+    「どちらが正か分からない値」が増えるので、その時点で足す。
+    """
+
+    # ── 実行文脈（Beat 開始時に決まり、以後変わらない） ──
+    persona: Any
+    node_def: Any
+    node_id: str
+    playbook: PlaybookSchema
+    state: dict
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    # ── ①準備の成果物 ──
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    prompt: Optional[str] = None
+    """action テンプレートを展開したもの（``<system>`` タグ wrap 済み）。"""
+
+    # ── ②③生成・Spell の成果物 ──
+    continuation: Any = ""
+    """記録（SAIMemory / state["last"] / PulseContext）へ行く最終テキスト。
+
+    Spell が走った Beat では **最終発言のみ**（merged 全文は Building 履歴側へ
+    別途 emit 済み。全文を保存すると内容重複 + spellResult の HTML 混入になる —
+    `docs/issues/spell_html_leak_into_saimemory.md`）。Spell が無ければ応答そのもの。
+    structured output ノードでは ``dict`` が入る。
+    """
+    schema_consumed: bool = False
+    reasoning_text: str = ""
+    reasoning_details: Any = None
+
+    @classmethod
+    def from_node_locals(
+        cls,
+        *,
+        persona,
+        node_def,
+        node_id: str,
+        playbook: PlaybookSchema,
+        state: dict,
+        event_callback,
+        messages,
+        prompt,
+        continuation,
+        schema_consumed: bool,
+    ) -> "BeatExecution":
+        """``lg_llm_node`` の閉包ローカルから Beat を組む（Phase 1 の接合点）。
+
+        reasoning は 4 経路がいずれも state へ書いてから確定部に来るため、
+        ここで一度だけ読み取って器に移す。Phase 2 で生成経路が本オブジェクトへ
+        直接書くようになったら、この読み取りは消える。
+        """
+        return cls(
+            persona=persona,
+            node_def=node_def,
+            node_id=node_id,
+            playbook=playbook,
+            state=state,
+            event_callback=event_callback,
+            messages=messages,
+            prompt=prompt,
+            continuation=continuation,
+            schema_consumed=schema_consumed,
+            reasoning_text=state.get("_reasoning_text", ""),
+            reasoning_details=state.get("_reasoning_details"),
+        )
+
+
+def _record_llm_usage(
+    runtime,
+    llm_client,
+    persona,
+    building_id: Optional[str],
+    playbook_name: str,
+    node_type: str,
+    state: dict,
+    *,
+    debug_log: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """LLM 呼び出し 1 回分の使用量記帳一式（生成 4 経路の共通処理）。
+
+    ``consume_usage`` → usage_tracker 記帳 → cache_storage 計上 → コスト計算 →
+    Pulse 累計への加算 → anchor touch まで。戻り値は message metadata に載せる
+    ``llm_usage`` 断片（usage が取れなければ ``None``）。
+
+    不変条件: **anchor touch は LLM 成功後**（Phase 4-e）。prepare_context 側の
+    先行 touch に戻さない。anchor は call-local な ``state["_prefix_anchor_id"]``
+    （docs/intent/beat_execution_context.md §3.2）。
+
+    ``debug_log`` は pipeline streaming 経路だけが出していた ``[DEBUG]`` 行を
+    再現するためのフラグ。経路ごとのログ差は Phase 0 では変えない。
+    """
+    usage = llm_client.consume_usage()
+    if debug_log:
+        LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
+    if not usage:
+        if debug_log:
+            LOGGER.warning("[DEBUG] No usage data from LLM client")
+        return None
+
+    persona_id = getattr(persona, "persona_id", None)
+    get_usage_tracker().record_usage(
+        model_id=usage.model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        cache_ttl=usage.cache_ttl,
+        persona_id=persona_id,
+        building_id=building_id,
+        node_type=node_type,
+        playbook_name=playbook_name,
+        category="persona_speak",
+    )
+    _maybe_record_cache_storage(usage, persona_id, building_id)
+    if debug_log:
+        LOGGER.info(
+            "[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d",
+            usage.model, usage.input_tokens, usage.output_tokens,
+            usage.cached_tokens, usage.cache_write_tokens,
+        )
+
+    from saiverse.model_configs import calculate_cost, get_model_display_name
+    cost = calculate_cost(
+        usage.model, usage.input_tokens, usage.output_tokens,
+        usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+    )
+    llm_usage_metadata: Dict[str, Any] = {
+        "model": usage.model,
+        "model_display_name": get_model_display_name(usage.model),
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cached_tokens": usage.cached_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "cost_usd": cost,
+    }
+    # Accumulate into pulse total
+    runtime._accumulate_usage(
+        state, usage.model, usage.input_tokens, usage.output_tokens,
+        cost, usage.cached_tokens, usage.cache_write_tokens,
+    )
+    runtime.session_lifecycle.touch_anchor_after_llm_call(
+        persona, usage, anchor_id=state.get("_prefix_anchor_id"),
+    )
+    return llm_usage_metadata
+
+
+def _store_reasoning_in_state(state: dict, reasoning_text: str, reasoning_details: Any) -> None:
+    """reasoning を後段の speak/say/memorize ノード向けに state へ残す。"""
+    if reasoning_text:
+        state["_reasoning_text"] = reasoning_text
+    if reasoning_details is not None:
+        state["_reasoning_details"] = reasoning_details
+
+
+def _consume_reasoning(llm_client, state: Optional[dict] = None) -> Tuple[str, Any]:
+    """LLM クライアントから reasoning（thinking）を回収する。
+
+    ``state`` を渡すと回収と同時に state へ格納する（tool モードの 2 経路）。
+    ツールなしモードは Spell ループ後にまとめて格納するため ``state=None`` で
+    呼び、後から :func:`_store_reasoning_in_state` を使う。
+
+    thought_signature の取得点は経路ごとに違う（stream は全 chunk 読了後）ため、
+    ここでは扱わない — docs/intent/thought_signature_persistence.md 参照。
+    """
+    entries = llm_client.consume_reasoning()
+    reasoning_text = "\n\n".join(
+        e.get("text", "") for e in entries if e.get("text")
+    ) if entries else ""
+    reasoning_details = llm_client.consume_reasoning_details()
+    if state is not None:
+        _store_reasoning_in_state(state, reasoning_text, reasoning_details)
+    return reasoning_text, reasoning_details
+
+
+def _build_say_metadata(
+    state: dict,
+    *,
+    base_metadata: Optional[Dict[str, Any]] = None,
+    llm_usage_metadata: Optional[Dict[str, Any]] = None,
+    reasoning_text: str = "",
+    reasoning_details: Any = None,
+    include_total: bool = True,
+) -> Dict[str, Any]:
+    """Building 履歴に載せる message metadata を組み立てる。
+
+    キーの挿入順は既存 6 コピーと同じ（base → llm_usage → reasoning →
+    reasoning_details → activity_trace → llm_usage_total → auto_recall）。
+
+    ⚠️ 呼び出し元ごとに含めるキーが不揃いだったため、Phase 0 では**現状構成を
+    引数で忠実に再現**している（llm_usage / reasoning を載せない経路は該当引数を
+    省略、``llm_usage_total`` を載せない経路は ``include_total=False``）。
+    統一するかどうかは別判断 — 挙動不変の原則を先に守る。
+
+    ``_auto_recall_text`` は pop（消費）である点に注意。同一ノード実行内で
+    複数回呼ばれた場合、2 回目以降は付かない（従来どおり）。
+    """
+    msg_metadata: Dict[str, Any] = {}
+    if base_metadata and isinstance(base_metadata, dict):
+        msg_metadata.update(base_metadata)
+    if llm_usage_metadata:
+        msg_metadata["llm_usage"] = llm_usage_metadata
+    if reasoning_text:
+        msg_metadata["reasoning"] = reasoning_text
+    if reasoning_details is not None:
+        msg_metadata["reasoning_details"] = reasoning_details
+    activity_trace = state.get("_activity_trace")
+    if activity_trace:
+        msg_metadata["activity_trace"] = list(activity_trace)
+    if include_total:
+        accumulator = state.get("_pulse_usage_accumulator")
+        if accumulator:
+            msg_metadata["llm_usage_total"] = dict(accumulator)
+    auto_recall = state.pop("_auto_recall_text", None)
+    if auto_recall:
+        msg_metadata["auto_recall"] = auto_recall
+    return msg_metadata
+
+
+def _emit_say_and_capture(
+    runtime,
+    persona,
+    eff_bid: Optional[str],
+    text: str,
+    state: dict,
+    *,
+    pulse_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    """``_emit_say`` して、書けた message_id を state に残す。
+
+    後続ツールが新しい persona_context 配下に入っても最新の message_id を
+    参照できるようにするため（``state["_last_message_id"]``）。
+    """
+    bmsg = runtime._emit_say(
+        persona, eff_bid, text, pulse_id=pulse_id,
+        metadata=metadata if metadata else None,
+    )
+    if isinstance(bmsg, dict):
+        message_id = bmsg.get("message_id")
+        if message_id:
+            state["_last_message_id"] = str(message_id)
+    return bmsg
+
+
+def _finalize_beat(runtime, beat: BeatExecution) -> None:
+    """④確定 — 生成し終えた Beat を記録先へ配る。
+
+    state["last"] / assistant message（tool_calls + thought_signature 同梱）/
+    PulseContext 追記 / sea trace / memorize / important dual-write。
+    生成 4 経路（tools あり・なし × streaming・sync）はすべてここへ合流する。
+
+    不変条件:
+
+    - **記録へ行くのは continuation（最終発言）だけ**。Building 履歴・UI へ出す
+      merged 全文はこの関数に来る前に emit 済み
+      （`docs/issues/spell_html_leak_into_saimemory.md`）。
+    - **thought_signature は 3 箇所へ流れる**（assistant message / memorize /
+      important dual-write）。経路ごとに取得点が違うため、ここでは
+      ``state["_last_thought_signature"]`` に集約済みの値だけを読む
+      （`docs/intent/thought_signature_persistence.md`）。
+    """
+    persona = beat.persona
+    node_def = beat.node_def
+    node_id = beat.node_id
+    playbook = beat.playbook
+    state = beat.state
+    event_callback = beat.event_callback
+    messages = beat.messages
+    prompt = beat.prompt
+    text = beat.continuation
+    schema_consumed = beat.schema_consumed
+
+    state["last"] = text
+    # Structured output may return a dict; serialise to JSON string
+    # so that subsequent LLM calls receive valid message content.
+    _msg_content = json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else text
+
+    # When tool call detected, create proper function-calling assistant message
+    if state.get("tool_called") and state.get("_last_tool_call_id"):
+        _tc_speak = _msg_content if state.get("has_speak_content") else ""
+        _tc_entry: Dict[str, Any] = {
+            "id": state["_last_tool_call_id"],
+            "type": "function",
+            "function": {
+                "name": state.get("_last_tool_name", ""),
+                "arguments": state.get("_last_tool_args_json", "{}"),
+            },
+        }
+        # Gemini thinking models require thought_signature echoed back
+        _thought_sig = state.get("_last_thought_signature")
+        if _thought_sig:
+            _tc_entry["thought_signature"] = _thought_sig
+        _assistant_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": _tc_speak,
+            "tool_calls": [_tc_entry],
+        }
+        state["_messages"] = messages + [_assistant_msg]
+        LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
+                   state["_last_tool_call_id"], state.get("_last_tool_name"))
+    else:
+        # 2026-05-20: text-only assistant message に thought_signature を乗せる。
+        # SAIMemory adapter._append_message が message.get("thought_signature")
+        # を読み取り、専用カラムへ永続化する。
+        _text_assistant_msg: Dict[str, Any] = {"role": "assistant", "content": _msg_content}
+        _text_thought_sig = state.get("_last_thought_signature")
+        if _text_thought_sig:
+            _text_assistant_msg["thought_signature"] = _text_thought_sig
+        state["_messages"] = messages + [_text_assistant_msg]
+
+    # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
+    _pulse_ctx = state.get("_pulse_context")
+    if _pulse_ctx:
+        from sea.pulse_context import PulseLogEntry
+        # Record the prompt (user message)
+        if prompt:
+            _pulse_ctx.append(PulseLogEntry(
+                role="user", content=prompt,
+                node_id=node_id, playbook_name=playbook.name))
+        # Record the assistant response (with optional tool_calls)
+        _tc_list = None
+        if state.get("tool_called") and state.get("_last_tool_call_id"):
+            _tc_entry_pc: Dict[str, Any] = {
+                "id": state["_last_tool_call_id"],
+                "type": "function",
+                "function": {
+                    "name": state.get("_last_tool_name", ""),
+                    "arguments": state.get("_last_tool_args_json", "{}"),
+                },
+            }
+            _ts_pc = state.get("_last_thought_signature")
+            if _ts_pc:
+                _tc_entry_pc["thought_signature"] = _ts_pc
+            _tc_list = [_tc_entry_pc]
+        # speak: false ノード (要約ノード等) でも実際の応答テキストはあるので
+        # 空文字列ではなく実テキストを記録する。空にする旧挙動はおそらく過去の手癖で、
+        # 後段で "空 assistant" として messages に流入する原因になっていた
+        # (まはー指摘 2026-04-28)。
+        _pulse_ctx.append(PulseLogEntry(
+            role="assistant",
+            content=_msg_content,
+            node_id=node_id, playbook_name=playbook.name,
+            tool_calls=_tc_list,
+            important=getattr(node_def, "important", False) or False))
+
+    # Trace: log prompt→response (truncation handled by log_sea_trace)
+    _prompt_str = prompt or "(no prompt)"
+    if schema_consumed:
+        _output_key = getattr(node_def, "output_key", None) or node_id
+        _out_val = state.get(_output_key, text)
+        if isinstance(_out_val, dict):
+            import json as _json
+            _resp_str = _json.dumps(_out_val, ensure_ascii=False, default=str)
+        else:
+            _resp_str = str(_out_val)
+        log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → {_resp_str}")
+    else:
+        _resp_str = str(text) if text else "(empty)"
+        log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → \"{_resp_str}\"")
+
+    # Handle memorize option - save prompt and response to SAIMemory
+    memorize_config = getattr(node_def, "memorize", None)
+    LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
+               getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
+    if memorize_config:
+        pulse_id = state.get("_pulse_id")
+        pulse_context = state.get("_pulse_context")
+        # Parse memorize config - can be True or {"tags": [...], "scope": ..., "line_role": ...}
+        if isinstance(memorize_config, dict):
+            memorize_tags = memorize_config.get("tags", [])
+            # Phase 1.3: meta-judgment ノードが分岐ターンを scope='discardable' で
+            # 保存するための明示指定経路。memorize.scope を渡すと _store_memory に
+            # そのまま転送される (None なら DB の DEFAULT 'committed' に従う)。
+            memorize_scope = memorize_config.get("scope")
+            # 同じく line_role を上書きできるようにする (既定は LineFrame 由来)。
+            memorize_line_role = memorize_config.get("line_role")
+        else:
+            memorize_tags = []
+            memorize_scope = None
+            memorize_line_role = None
+
+        # Intent A v0.14 / Intent B v0.11 (handoff route C):
+        # Skip the legacy "save prompt as user role" path. The action template
+        # (`prompt`) used to be persisted as a standalone user message, which
+        # mixed it with real user utterances on the persona's timeline.
+        # Instead, attach it to the assistant response via the
+        # `paired_action_text` column so post-hoc inspection ("why did this
+        # assistant turn happen?") still works without polluting the
+        # conversation log.
+        _memorize_ok = True
+
+        # Save response (assistant role) — paired with the prompt that
+        # produced it, so the action template lives alongside the response
+        # rather than as a separate fake-user turn.
+        if text and text != "(error in llm node)":
+            # If structured output was consumed, format as JSON string for memory
+            content_to_save = text
+            if schema_consumed and isinstance(text, dict):
+                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+                LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
+
+            # Build metadata for memorize (reasoning text + reasoning_details for multi-turn)
+            _memorize_metadata: Dict[str, Any] = {}
+            if beat.reasoning_text:
+                _memorize_metadata["reasoning"] = beat.reasoning_text
+            if beat.reasoning_details is not None:
+                _memorize_metadata["reasoning_details"] = beat.reasoning_details
+
+            _memorize_sig = state.get("_last_thought_signature")
+            LOGGER.debug(
+                "[sea][llm][sig-trace] memorize call: thought_signature = %s (%d bytes)",
+                "present" if _memorize_sig else "None",
+                len(_memorize_sig) if isinstance(_memorize_sig, (bytes, str)) else 0,
+            )
+            _spell_origin = state.get("_spell_loop_origin_id")
+            _spell_lc = state.get("_spell_loop_count")
+            _spell_final_seq = (_spell_lc + 1) if _spell_lc is not None else None
+            _memorize_pat = None if _spell_origin else prompt
+            stored_message_id = runtime._store_memory(
+                persona,
+                content_to_save,
+                role="assistant",
+                tags=list(memorize_tags),
+                pulse_id=pulse_id,
+                metadata=_memorize_metadata if _memorize_metadata else None,
+                playbook_name=playbook.name,
+                pulse_context=pulse_context,
+                paired_action_text=_memorize_pat,
+                scope=memorize_scope,
+                line_role=memorize_line_role,
+                thought_signature=_memorize_sig,
+                spell_origin_id=_spell_origin,
+                spell_seq=_spell_final_seq,
+                return_message_id=True,
+            )
+            if not stored_message_id:
+                _memorize_ok = False
+            else:
+                LOGGER.debug(
+                    "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
+                    len(_memorize_pat) if _memorize_pat else 0, memorize_scope,
+                    _spell_origin,
+                )
+                # メタ判断ターンの scope='discardable' → 'committed' 昇格は
+                # TrackManager の状態遷移 hook 経由で行う (saiverse_manager.py
+                # 内の hook が pulse_id ベースで pulse 内の line_role='meta_judgment'
+                # AND scope='discardable' を検索して UPDATE する)。
+                # ここでは何もしない: 保存は scope='discardable' のままで完了し、
+                # その Pulse 内で Track 状態遷移が起きれば後で hook が拾う。
+
+        if not _memorize_ok and event_callback:
+            event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
+
+        # Activity trace: record LLM memorize
+        if not playbook.name.startswith(("meta_", "sub_")):
+            pb_display = playbook.display_name or playbook.name
+            node_label = getattr(node_def, "label", None) or node_id
+            _at = state.get("_activity_trace")
+            if isinstance(_at, list):
+                _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
+            if event_callback:
+                event_callback({
+                    "type": "activity", "action": "memorize", "name": node_label,
+                    "playbook": pb_display, "status": "completed",
+                    "persona_id": getattr(persona, "persona_id", None),
+                    "persona_name": getattr(persona, "persona_name", None),
+                    "pulse_id": state.get("_pulse_id"),
+                })
+                LOGGER.debug(
+                    "[sea][diag] activity emitted (llm-memorize, meta/sub guarded): name=%s playbook=%s persona=%s pulse=%s",
+                    node_label, pb_display,
+                    getattr(persona, "persona_id", None),
+                    state.get("_pulse_id"),
+                )
+
+    # Important flag: dual-write to messages (long-term memory) if not already memorized
+    _is_important = getattr(node_def, "important", False)
+    if _is_important and not memorize_config and text and text != "(error in llm node)":
+        pulse_id = state.get("_pulse_id")
+        content_to_save = text
+        if schema_consumed and isinstance(text, dict):
+            content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+        if not runtime._store_memory(
+            persona, content_to_save,
+            role="assistant",
+            tags=["conversation"],
+            pulse_id=pulse_id,
+            playbook_name=playbook.name,
+            # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
+            thought_signature=state.get("_last_thought_signature"),
+        ):
+            LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
+
+    # Debug: log speak_content at end of LLM node
+    speak_content = state.get("speak_content", "")
+    LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", speak_content)
 
 
 def _resolve_tool_call_id(result: Dict[str, Any]) -> str:
@@ -2467,51 +2986,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         )
 
                     # Consume reasoning
-                    _tool_reasoning = llm_client.consume_reasoning()
-                    _tool_reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in _tool_reasoning if e.get("text")
-                    ) if _tool_reasoning else ""
-                    if _tool_reasoning_text:
-                        state["_reasoning_text"] = _tool_reasoning_text
-                    _tool_reasoning_details = llm_client.consume_reasoning_details()
-                    if _tool_reasoning_details is not None:
-                        state["_reasoning_details"] = _tool_reasoning_details
+                    _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
+                        llm_client, state,
+                    )
 
                     # Record usage
-                    usage = llm_client.consume_usage()
-                    llm_usage_metadata: Dict[str, Any] | None = None
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm_tool_stream",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
-                        from saiverse.model_configs import calculate_cost, get_model_display_name
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        llm_usage_metadata = {
-                            "model": usage.model,
-                            "model_display_name": get_model_display_name(usage.model),
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cached_tokens": usage.cached_tokens,
-                            "cache_write_tokens": usage.cache_write_tokens,
-                            "cost_usd": cost,
-                        }
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
-                        # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)。
-                        # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
-                        runtime.session_lifecycle.touch_anchor_after_llm_call(
-                            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
-                        )
+                    llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm_tool_stream", state,
+                    )
 
                     # Check tool detection — did LLM call a tool?
                     tool_detection = llm_client.consume_tool_detection()
@@ -2540,28 +3023,21 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             event_callback(completion_event)
 
                             # Record to Building history
+                            # (この経路だけ llm_usage_total を載せない — 既存挙動を維持)
                             pulse_id = state.get("_pulse_id")
-                            msg_metadata: Dict[str, Any] = {}
-                            if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                                msg_metadata.update(_speak_base_metadata)
-                            if llm_usage_metadata:
-                                msg_metadata["llm_usage"] = llm_usage_metadata
-                            if _tool_reasoning_text:
-                                msg_metadata["reasoning"] = _tool_reasoning_text
-                            if _tool_reasoning_details is not None:
-                                msg_metadata["reasoning_details"] = _tool_reasoning_details
-                            _at_both = state.get("_activity_trace")
-                            if _at_both:
-                                msg_metadata["activity_trace"] = list(_at_both)
-                            _auto_recall_both = state.pop("_auto_recall_text", None)
-                            if _auto_recall_both:
-                                msg_metadata["auto_recall"] = _auto_recall_both
+                            msg_metadata = _build_say_metadata(
+                                state,
+                                base_metadata=_speak_base_metadata,
+                                llm_usage_metadata=llm_usage_metadata,
+                                reasoning_text=_tool_reasoning_text,
+                                reasoning_details=_tool_reasoning_details,
+                                include_total=False,
+                            )
                             eff_bid = runtime._effective_building_id(persona, building_id)
-                            _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
-                            if isinstance(_last_bmsg, dict):
-                                _last_mid = _last_bmsg.get("message_id")
-                                if _last_mid:
-                                    state["_last_message_id"] = str(_last_mid)
+                            _emit_say_and_capture(
+                                runtime, persona, eff_bid, text, state,
+                                pulse_id=pulse_id, metadata=msg_metadata,
+                            )
                             LOGGER.info("[sea] 'both' response: text kept in UI and Building history (len=%d), tool call continues", len(text))
                         elif text_chunks:
                             # "tool_call" only — discard streamed text
@@ -2594,32 +3070,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                         # Record to Building history
                         pulse_id = state.get("_pulse_id")
-                        msg_metadata: Dict[str, Any] = {}
-                        if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                            msg_metadata.update(_speak_base_metadata)
-                        if llm_usage_metadata:
-                            msg_metadata["llm_usage"] = llm_usage_metadata
-                        if _tool_reasoning_text:
-                            msg_metadata["reasoning"] = _tool_reasoning_text
-                        if _tool_reasoning_details is not None:
-                            msg_metadata["reasoning_details"] = _tool_reasoning_details
-                        _at_stream = state.get("_activity_trace")
-                        if _at_stream:
-                            msg_metadata["activity_trace"] = list(_at_stream)
-                        accumulator = state.get("_pulse_usage_accumulator")
-                        if accumulator:
-                            msg_metadata["llm_usage_total"] = dict(accumulator)
-                        _auto_recall_stream = state.pop("_auto_recall_text", None)
-                        if _auto_recall_stream:
-                            msg_metadata["auto_recall"] = _auto_recall_stream
+                        msg_metadata = _build_say_metadata(
+                            state,
+                            base_metadata=_speak_base_metadata,
+                            llm_usage_metadata=llm_usage_metadata,
+                            reasoning_text=_tool_reasoning_text,
+                            reasoning_details=_tool_reasoning_details,
+                        )
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
-                        # 後続ツールが新しい persona_context 配下でも
-                        # 最新の message_id を参照できるよう state に残す。
-                        if isinstance(_last_bmsg, dict):
-                            _last_mid = _last_bmsg.get("message_id")
-                            if _last_mid:
-                                state["_last_message_id"] = str(_last_mid)
+                        _emit_say_and_capture(
+                            runtime, persona, eff_bid, text, state,
+                            pulse_id=pulse_id, metadata=msg_metadata,
+                        )
 
                 else:
                     # ── Synchronous tool mode (original) ──
@@ -2631,42 +3093,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     )
 
                     # Consume reasoning (thinking) from tool-mode LLM call
-                    _tool_reasoning = llm_client.consume_reasoning()
-                    _tool_reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in _tool_reasoning if e.get("text")
-                    ) if _tool_reasoning else ""
-                    if _tool_reasoning_text:
-                        state["_reasoning_text"] = _tool_reasoning_text
-                    _tool_reasoning_details = llm_client.consume_reasoning_details()
-                    if _tool_reasoning_details is not None:
-                        state["_reasoning_details"] = _tool_reasoning_details
+                    _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
+                        llm_client, state,
+                    )
 
                     # Record usage
-                    usage = llm_client.consume_usage()
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm_tool",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
-                        # Accumulate into pulse total
-                        from saiverse.model_configs import calculate_cost
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
-                        # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)。
-                        # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
-                        runtime.session_lifecycle.touch_anchor_after_llm_call(
-                            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
-                        )
+                    # (この経路は llm_usage_metadata を使わない — 戻り値は捨てる)
+                    _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm_tool", state,
+                    )
 
                 # ── Common tool result handling (shared by streaming & sync) ──
                 # Parse output_keys to determine where to store results
@@ -2749,13 +3185,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if _bubble1_emitted_early and _spell_emit_text.startswith(_bubble1_emitted_early):
                             _spell_emit_text = _spell_emit_text[len(_bubble1_emitted_early):].lstrip("\n")
 
-                        _spell_msg_meta: Dict[str, Any] = {}
+                        # A-sync 経由でもここへ来るため llm_usage_metadata は参照
+                        # できない（tool streaming 側にしか無い）。reasoning も
+                        # 従来から載せていない — 既存挙動を維持。
                         _spell_at = state.get("_activity_trace")
-                        if _spell_at:
-                            _spell_msg_meta["activity_trace"] = list(_spell_at)
-                        _auto_recall_spell = state.pop("_auto_recall_text", None)
-                        if _auto_recall_spell:
-                            _spell_msg_meta["auto_recall"] = _auto_recall_spell
+                        _spell_msg_meta = _build_say_metadata(state, include_total=False)
 
                         if event_callback:
                             _say_event: Dict[str, Any] = {
@@ -3041,53 +3475,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         pipeline_msg_id = None
 
                     # Record usage (even if cancelled — tokens were consumed)
-                    usage = llm_client.consume_usage()
-                    LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
-                    llm_usage_metadata: Dict[str, Any] | None = None
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm_stream",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
-                        LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
-                        # Build llm_usage metadata for message
-                        from saiverse.model_configs import calculate_cost, get_model_display_name
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        llm_usage_metadata = {
-                            "model": usage.model,
-                            "model_display_name": get_model_display_name(usage.model),
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cached_tokens": usage.cached_tokens,
-                            "cache_write_tokens": usage.cache_write_tokens,
-                            "cost_usd": cost,
-                        }
-                        # Accumulate into pulse total
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
-                        # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)。
-                        # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
-                        runtime.session_lifecycle.touch_anchor_after_llm_call(
-                            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
-                        )
-                    else:
-                        LOGGER.warning("[DEBUG] No usage data from LLM client")
+                    llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm_stream", state, debug_log=True,
+                    )
 
                     # Consume reasoning (thinking) from LLM — store as metadata, not in content
-                    reasoning_entries = llm_client.consume_reasoning()
-                    reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in reasoning_entries if e.get("text")
-                    ) if reasoning_entries else ""
-                    reasoning_details = llm_client.consume_reasoning_details()
+                    # （state への格納は Spell ループ後にまとめて行う）
+                    reasoning_text, reasoning_details = _consume_reasoning(llm_client)
 
                     # 2026-05-20: Gemini 3.x の thoughtSignature を stream 完了後に保持。
                     # ストリーム経路は最後の chunk まで読まないと signature が確定しない
@@ -3166,18 +3561,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         else:
                             pulse_id = state.get("_pulse_id")
 
-                            _spell_msg_meta_ns: Dict[str, Any] = {}
-                            if llm_usage_metadata:
-                                _spell_msg_meta_ns["llm_usage"] = llm_usage_metadata
+                            # spell 経路は従来から reasoning を載せていない
+                            # （＝ 既存挙動を維持）。
                             _spell_at_ns = state.get("_activity_trace")
-                            if _spell_at_ns:
-                                _spell_msg_meta_ns["activity_trace"] = list(_spell_at_ns)
-                            accumulator = state.get("_pulse_usage_accumulator")
-                            if accumulator:
-                                _spell_msg_meta_ns["llm_usage_total"] = dict(accumulator)
-                            _auto_recall_spell_ns = state.pop("_auto_recall_text", None)
-                            if _auto_recall_spell_ns:
-                                _spell_msg_meta_ns["auto_recall"] = _auto_recall_spell_ns
+                            _spell_msg_meta_ns = _build_say_metadata(
+                                state, llm_usage_metadata=llm_usage_metadata,
+                            )
 
                             # Pipeline Streaming finalize: placeholder を全文 (= text、
                             # merged form) で確定。 voice-tts は sub-speak 経由で
@@ -3261,25 +3650,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("_pulse_id")
-                        msg_metadata: Dict[str, Any] = {}
-                        # Merge base metadata first (e.g., media from tool execution)
-                        if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
-                            msg_metadata.update(_speak_base_metadata)
-                        if llm_usage_metadata:
-                            msg_metadata["llm_usage"] = llm_usage_metadata
-                        if reasoning_text:
-                            msg_metadata["reasoning"] = reasoning_text
-                        if reasoning_details is not None:
-                            msg_metadata["reasoning_details"] = reasoning_details
-                        _at_stream = state.get("_activity_trace")
-                        if _at_stream:
-                            msg_metadata["activity_trace"] = list(_at_stream)
-                        accumulator = state.get("_pulse_usage_accumulator")
-                        if accumulator:
-                            msg_metadata["llm_usage_total"] = dict(accumulator)
-                        _auto_recall_ns = state.pop("_auto_recall_text", None)
-                        if _auto_recall_ns:
-                            msg_metadata["auto_recall"] = _auto_recall_ns
+                        msg_metadata = _build_say_metadata(
+                            state,
+                            base_metadata=_speak_base_metadata,
+                            llm_usage_metadata=llm_usage_metadata,
+                            reasoning_text=reasoning_text,
+                            reasoning_details=reasoning_details,
+                        )
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
                         if pipeline_msg_id:
@@ -3307,11 +3684,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             LOGGER.warning(
                                 "[sea][pipeline] no placeholder msg_id — falling back to _emit_say",
                             )
-                            _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
-                            if isinstance(_last_bmsg, dict):
-                                _last_mid = _last_bmsg.get("message_id")
-                                if _last_mid:
-                                    state["_last_message_id"] = str(_last_mid)
+                            _emit_say_and_capture(
+                                runtime, persona, eff_bid, text, state,
+                                pulse_id=pulse_id, metadata=msg_metadata,
+                            )
 
                         # ── 504 DEADLINE_EXCEEDED: re-speak after partial response ──
                         _stream_err = state.pop("_stream_error", None)
@@ -3400,10 +3776,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 LOGGER.warning("[sea][llm] Re-speak after 504 returned empty response")
 
                     # Store reasoning in state for downstream speak/say nodes
-                    if reasoning_text:
-                        state["_reasoning_text"] = reasoning_text
-                    if reasoning_details is not None:
-                        state["_reasoning_details"] = reasoning_details
+                    _store_reasoning_in_state(state, reasoning_text, reasoning_details)
                 else:
                     # Non-streaming mode
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
@@ -3417,49 +3790,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
 
                     # Record usage
-                    usage = llm_client.consume_usage()
-                    llm_usage_metadata: Dict[str, Any] | None = None
-                    if usage:
-                        get_usage_tracker().record_usage(
-                            model_id=usage.model,
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                            cache_write_tokens=usage.cache_write_tokens,
-                            cache_ttl=usage.cache_ttl,
-                            persona_id=getattr(persona, "persona_id", None),
-                            building_id=building_id,
-                            node_type="llm",
-                            playbook_name=playbook.name,
-                            category="persona_speak",
-                        )
-                        _maybe_record_cache_storage(usage, getattr(persona, "persona_id", None), building_id)
-                        # Build llm_usage metadata for message
-                        from saiverse.model_configs import calculate_cost, get_model_display_name
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
-                        llm_usage_metadata = {
-                            "model": usage.model,
-                            "model_display_name": get_model_display_name(usage.model),
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cached_tokens": usage.cached_tokens,
-                            "cache_write_tokens": usage.cache_write_tokens,
-                            "cost_usd": cost,
-                        }
-                        # Accumulate into pulse total
-                        runtime._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
-                        # Phase 4-e: anchor touch を LLM 成功後に移動 (旧: prepare_context 内の先行 touch)。
-                        # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
-                        runtime.session_lifecycle.touch_anchor_after_llm_call(
-                            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
-                        )
+                    llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
+                        runtime, llm_client, persona, building_id,
+                        playbook.name, "llm", state,
+                    )
 
                     # Consume reasoning (thinking) from LLM — store as metadata
-                    reasoning_entries = llm_client.consume_reasoning()
-                    reasoning_text = "\n\n".join(
-                        e.get("text", "") for e in reasoning_entries if e.get("text")
-                    ) if reasoning_entries else ""
-                    reasoning_details = llm_client.consume_reasoning_details()
+                    # （state への格納は Spell ループ後にまとめて行う）
+                    reasoning_text, reasoning_details = _consume_reasoning(llm_client)
 
                     # ── Spell loop (parallel execution per round) ──
                     _bubble1_emitted_early_sync = ""
@@ -3517,33 +3855,19 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # Resolve metadata_key for speak (e.g., media attachments from tool execution)
                         _speak_metadata_key2 = getattr(node_def, "metadata_key", None)
                         _speak_base_metadata2 = state.get(_speak_metadata_key2) if _speak_metadata_key2 else None
-                        msg_metadata: Dict[str, Any] = {}
-                        # Merge base metadata first (e.g., media from tool execution)
-                        if _speak_base_metadata2 and isinstance(_speak_base_metadata2, dict):
-                            msg_metadata.update(_speak_base_metadata2)
-                        if llm_usage_metadata:
-                            msg_metadata["llm_usage"] = llm_usage_metadata
-                        if reasoning_text:
-                            msg_metadata["reasoning"] = reasoning_text
-                        if reasoning_details is not None:
-                            msg_metadata["reasoning_details"] = reasoning_details
                         _at_speak = state.get("_activity_trace")
-                        if _at_speak:
-                            msg_metadata["activity_trace"] = list(_at_speak)
-                        accumulator = state.get("_pulse_usage_accumulator")
-                        if accumulator:
-                            msg_metadata["llm_usage_total"] = dict(accumulator)
-                        _auto_recall_sync = state.pop("_auto_recall_text", None)
-                        if _auto_recall_sync:
-                            msg_metadata["auto_recall"] = _auto_recall_sync
+                        msg_metadata = _build_say_metadata(
+                            state,
+                            base_metadata=_speak_base_metadata2,
+                            llm_usage_metadata=llm_usage_metadata,
+                            reasoning_text=reasoning_text,
+                            reasoning_details=reasoning_details,
+                        )
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
-                        # 後続ツールが新しい persona_context 配下でも
-                        # 最新の message_id を参照できるよう state に残す。
-                        if isinstance(_last_bmsg, dict):
-                            _last_mid = _last_bmsg.get("message_id")
-                            if _last_mid:
-                                state["_last_message_id"] = str(_last_mid)
+                        _emit_say_and_capture(
+                            runtime, persona, eff_bid, text, state,
+                            pulse_id=pulse_id, metadata=msg_metadata,
+                        )
                         if event_callback is not None:
                             LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
                             say_event: Dict[str, Any] = {
@@ -3571,10 +3895,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         text = _continuation_sync
 
                     # Store remaining reasoning for say/speak node (non-speak path)
-                    if reasoning_text:
-                        state["_reasoning_text"] = reasoning_text
-                    if reasoning_details is not None:
-                        state["_reasoning_details"] = reasoning_details
+                    _store_reasoning_in_state(state, reasoning_text, reasoning_details)
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 schema_consumed = runtime._process_structured_output(node_def, text, state)
@@ -3614,232 +3935,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 f"LLM node failed: {type(exc).__name__}: {exc}",
                 original_error=exc,
             ) from exc
-        state["last"] = text
-        # Structured output may return a dict; serialise to JSON string
-        # so that subsequent LLM calls receive valid message content.
-        _msg_content = json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else text
-
-        # When tool call detected, create proper function-calling assistant message
-        if state.get("tool_called") and state.get("_last_tool_call_id"):
-            _tc_speak = _msg_content if state.get("has_speak_content") else ""
-            _tc_entry: Dict[str, Any] = {
-                "id": state["_last_tool_call_id"],
-                "type": "function",
-                "function": {
-                    "name": state.get("_last_tool_name", ""),
-                    "arguments": state.get("_last_tool_args_json", "{}"),
-                },
-            }
-            # Gemini thinking models require thought_signature echoed back
-            _thought_sig = state.get("_last_thought_signature")
-            if _thought_sig:
-                _tc_entry["thought_signature"] = _thought_sig
-            _assistant_msg: Dict[str, Any] = {
-                "role": "assistant",
-                "content": _tc_speak,
-                "tool_calls": [_tc_entry],
-            }
-            state["_messages"] = messages + [_assistant_msg]
-            LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
-                       state["_last_tool_call_id"], state.get("_last_tool_name"))
-        else:
-            # 2026-05-20: text-only assistant message に thought_signature を乗せる。
-            # SAIMemory adapter._append_message が message.get("thought_signature")
-            # を読み取り、専用カラムへ永続化する。
-            _text_assistant_msg: Dict[str, Any] = {"role": "assistant", "content": _msg_content}
-            _text_thought_sig = state.get("_last_thought_signature")
-            if _text_thought_sig:
-                _text_assistant_msg["thought_signature"] = _text_thought_sig
-            state["_messages"] = messages + [_text_assistant_msg]
-
-        # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
-        _pulse_ctx = state.get("_pulse_context")
-        if _pulse_ctx:
-            from sea.pulse_context import PulseLogEntry
-            # Record the prompt (user message)
-            if prompt:
-                _pulse_ctx.append(PulseLogEntry(
-                    role="user", content=prompt,
-                    node_id=node_id, playbook_name=playbook.name))
-            # Record the assistant response (with optional tool_calls)
-            _tc_list = None
-            if state.get("tool_called") and state.get("_last_tool_call_id"):
-                _tc_entry_pc: Dict[str, Any] = {
-                    "id": state["_last_tool_call_id"],
-                    "type": "function",
-                    "function": {
-                        "name": state.get("_last_tool_name", ""),
-                        "arguments": state.get("_last_tool_args_json", "{}"),
-                    },
-                }
-                _ts_pc = state.get("_last_thought_signature")
-                if _ts_pc:
-                    _tc_entry_pc["thought_signature"] = _ts_pc
-                _tc_list = [_tc_entry_pc]
-            # speak: false ノード (要約ノード等) でも実際の応答テキストはあるので
-            # 空文字列ではなく実テキストを記録する。空にする旧挙動はおそらく過去の手癖で、
-            # 後段で "空 assistant" として messages に流入する原因になっていた
-            # (まはー指摘 2026-04-28)。
-            _pulse_ctx.append(PulseLogEntry(
-                role="assistant",
-                content=_msg_content,
-                node_id=node_id, playbook_name=playbook.name,
-                tool_calls=_tc_list,
-                important=getattr(node_def, "important", False) or False))
-
-        # Trace: log prompt→response (truncation handled by log_sea_trace)
-        _prompt_str = prompt or "(no prompt)"
-        if schema_consumed:
-            _output_key = getattr(node_def, "output_key", None) or node_id
-            _out_val = state.get(_output_key, text)
-            if isinstance(_out_val, dict):
-                import json as _json
-                _resp_str = _json.dumps(_out_val, ensure_ascii=False, default=str)
-            else:
-                _resp_str = str(_out_val)
-            log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → {_resp_str}")
-        else:
-            _resp_str = str(text) if text else "(empty)"
-            log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_str}\" → \"{_resp_str}\"")
-
-        # Handle memorize option - save prompt and response to SAIMemory
-        memorize_config = getattr(node_def, "memorize", None)
-        LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
-                   getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
-        if memorize_config:
-            pulse_id = state.get("_pulse_id")
-            pulse_context = state.get("_pulse_context")
-            # Parse memorize config - can be True or {"tags": [...], "scope": ..., "line_role": ...}
-            if isinstance(memorize_config, dict):
-                memorize_tags = memorize_config.get("tags", [])
-                # Phase 1.3: meta-judgment ノードが分岐ターンを scope='discardable' で
-                # 保存するための明示指定経路。memorize.scope を渡すと _store_memory に
-                # そのまま転送される (None なら DB の DEFAULT 'committed' に従う)。
-                memorize_scope = memorize_config.get("scope")
-                # 同じく line_role を上書きできるようにする (既定は LineFrame 由来)。
-                memorize_line_role = memorize_config.get("line_role")
-            else:
-                memorize_tags = []
-                memorize_scope = None
-                memorize_line_role = None
-
-            # Intent A v0.14 / Intent B v0.11 (handoff route C):
-            # Skip the legacy "save prompt as user role" path. The action template
-            # (`prompt`) used to be persisted as a standalone user message, which
-            # mixed it with real user utterances on the persona's timeline.
-            # Instead, attach it to the assistant response via the
-            # `paired_action_text` column so post-hoc inspection ("why did this
-            # assistant turn happen?") still works without polluting the
-            # conversation log.
-            _memorize_ok = True
-
-            # Save response (assistant role) — paired with the prompt that
-            # produced it, so the action template lives alongside the response
-            # rather than as a separate fake-user turn.
-            if text and text != "(error in llm node)":
-                # If structured output was consumed, format as JSON string for memory
-                content_to_save = text
-                if schema_consumed and isinstance(text, dict):
-                    content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
-                    LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
-
-                # Build metadata for memorize (reasoning text + reasoning_details for multi-turn)
-                _memorize_metadata: Dict[str, Any] = {}
-                _mem_reasoning = state.get("_reasoning_text", "")
-                if _mem_reasoning:
-                    _memorize_metadata["reasoning"] = _mem_reasoning
-                _mem_rd = state.get("_reasoning_details")
-                if _mem_rd is not None:
-                    _memorize_metadata["reasoning_details"] = _mem_rd
-
-                _memorize_sig = state.get("_last_thought_signature")
-                LOGGER.debug(
-                    "[sea][llm][sig-trace] memorize call: thought_signature = %s (%d bytes)",
-                    "present" if _memorize_sig else "None",
-                    len(_memorize_sig) if isinstance(_memorize_sig, (bytes, str)) else 0,
-                )
-                _spell_origin = state.get("_spell_loop_origin_id")
-                _spell_lc = state.get("_spell_loop_count")
-                _spell_final_seq = (_spell_lc + 1) if _spell_lc is not None else None
-                _memorize_pat = None if _spell_origin else prompt
-                stored_message_id = runtime._store_memory(
-                    persona,
-                    content_to_save,
-                    role="assistant",
-                    tags=list(memorize_tags),
-                    pulse_id=pulse_id,
-                    metadata=_memorize_metadata if _memorize_metadata else None,
-                    playbook_name=playbook.name,
-                    pulse_context=pulse_context,
-                    paired_action_text=_memorize_pat,
-                    scope=memorize_scope,
-                    line_role=memorize_line_role,
-                    thought_signature=_memorize_sig,
-                    spell_origin_id=_spell_origin,
-                    spell_seq=_spell_final_seq,
-                    return_message_id=True,
-                )
-                if not stored_message_id:
-                    _memorize_ok = False
-                else:
-                    LOGGER.debug(
-                        "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
-                        len(_memorize_pat) if _memorize_pat else 0, memorize_scope,
-                        _spell_origin,
-                    )
-                    # メタ判断ターンの scope='discardable' → 'committed' 昇格は
-                    # TrackManager の状態遷移 hook 経由で行う (saiverse_manager.py
-                    # 内の hook が pulse_id ベースで pulse 内の line_role='meta_judgment'
-                    # AND scope='discardable' を検索して UPDATE する)。
-                    # ここでは何もしない: 保存は scope='discardable' のままで完了し、
-                    # その Pulse 内で Track 状態遷移が起きれば後で hook が拾う。
-
-            if not _memorize_ok and event_callback:
-                event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
-
-            # Activity trace: record LLM memorize
-            if not playbook.name.startswith(("meta_", "sub_")):
-                pb_display = playbook.display_name or playbook.name
-                node_label = getattr(node_def, "label", None) or node_id
-                _at = state.get("_activity_trace")
-                if isinstance(_at, list):
-                    _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
-                if event_callback:
-                    event_callback({
-                        "type": "activity", "action": "memorize", "name": node_label,
-                        "playbook": pb_display, "status": "completed",
-                        "persona_id": getattr(persona, "persona_id", None),
-                        "persona_name": getattr(persona, "persona_name", None),
-                        "pulse_id": state.get("_pulse_id"),
-                    })
-                    LOGGER.debug(
-                        "[sea][diag] activity emitted (llm-memorize, meta/sub guarded): name=%s playbook=%s persona=%s pulse=%s",
-                        node_label, pb_display,
-                        getattr(persona, "persona_id", None),
-                        state.get("_pulse_id"),
-                    )
-
-        # Important flag: dual-write to messages (long-term memory) if not already memorized
-        _is_important = getattr(node_def, "important", False)
-        if _is_important and not memorize_config and text and text != "(error in llm node)":
-            pulse_id = state.get("_pulse_id")
-            content_to_save = text
-            if schema_consumed and isinstance(text, dict):
-                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
-            if not runtime._store_memory(
-                persona, content_to_save,
-                role="assistant",
-                tags=["conversation"],
-                pulse_id=pulse_id,
-                playbook_name=playbook.name,
-                # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
-                thought_signature=state.get("_last_thought_signature"),
-            ):
-                LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
-
-        # Debug: log speak_content at end of LLM node
-        speak_content = state.get("speak_content", "")
-        LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", speak_content)
+        # ── ④確定: 生成し終えた Beat を記録先へ配る ──
+        _beat = BeatExecution.from_node_locals(
+            persona=persona,
+            node_def=node_def,
+            node_id=node_id,
+            playbook=playbook,
+            state=state,
+            event_callback=event_callback,
+            messages=messages,
+            prompt=prompt,
+            continuation=text,
+            schema_consumed=schema_consumed,
+        )
+        _finalize_beat(runtime, _beat)
 
         # Note: output_mapping in node definition handles state variable assignment
         # No special handling needed here anymore

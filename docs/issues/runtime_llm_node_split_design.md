@@ -1,17 +1,35 @@
 # 分割設計書: `runtime_llm.py` の巨大閉包 `node` (1,616行)
 
-**ステータス**: 🔲 設計済・実装未着手
+**ステータス**: 🟠 実装中 — **Phase 0 + Phase 1 実装済み（2026-07-22、実機スモーク待ち）**、Phase 2 以降 未着手
 **優先度**: high（自律行動 v2 で Spell loop / Beat 周りに入る前の準備リファクタ）
 **作成日**: 2026-07-06
 **関連**: `docs/overview/architecture_health.md` §3.1、[Beat 型 issue](beat_concept_not_typed_in_implementation.md)、`docs/issues/spell_html_leak_into_saimemory.md`
-**行番号の基準**: commit `b4ca78e`（branch `feature/autonomous-behavior-v2`）時点。ズレたら関数名・コメント文言で探すこと
+**行番号の基準**: commit `b4ca78e`（branch `feature/autonomous-behavior-v2`）時点。ズレたら関数名・コメント文言で探すこと。
+**⚠️ Phase 0 実装で行番号は全面的にズレた** — 以降の Phase は関数名・コメント文言で探すこと
 
 ## 目的
 
 `sea/runtime_llm.py` の `lg_llm_node`（L2141）が返す閉包 `node` は 1,616 行あり、
 Beat 生成の心臓部でありながら部分テスト不能・修正事故率が構造的に高い。
-これを**挙動不変の機械的分割**で解体する。分割の副産物として
-[Beat 概念に型を与える issue](beat_concept_not_typed_in_implementation.md) も解決する。
+これを**挙動不変の機械的分割**で解体する。
+
+### Beat との関係（2026-07-22 改訂）
+
+起草時（2026-07-06）は「分割の副産物として
+[Beat 概念に型を与える issue](beat_concept_not_typed_in_implementation.md) が解決する」と
+書いていたが、その後の統合工事（[beat_execution_context.md](../intent/beat_execution_context.md)
+§6-1 / §6-2、2026-07-17 実装済み）で **Beat の別の面が先に型になった**。整理すると：
+
+| Beat の面 | 型・機構 | 状態 |
+|---|---|---|
+| **身分**（誰の・どの thread / line / aspect / model / pulse の実行か） | `ExecutionContext`（`sea/pulse_context.py`） | ✔ 実装済み |
+| **直列性**（persona 単位のロック + 実行台帳の関所） | `BeatGate`（`sea/beat_gate.py`） | ✔ 実装済み |
+| **中身**（表示用 merged 全文 と SAIMemory 用 continuation の対） | `BeatExecution` → Phase 1 | 🔲 本設計書の担当 |
+
+つまり本設計書が残して解くのは **3 行目だけ**。したがって Phase 1 の
+`BeatExecution` は §3.1 の草案どおり persona / building_id を自前で持つのではなく、
+**`ExecutionContext` を 1 フィールドとして保持**し、身分の再宣言をしない形にする
+（不変条件「実行の身分は一度だけ解決する」= beat_execution_context.md §4-1 を破らないため）。
 
 **この設計書の読み方**: §1 で現状の地形、§2 で重複（分割の主対象）、§3 で目標構造、
 §4 で段階手順、§5 で**壊してはいけない不変条件**。実装者は §5 を最初に読むこと。
@@ -72,6 +90,10 @@ Beat 生成の心臓部でありながら部分テスト不能・修正事故率
 @dataclass
 class BeatExecution:
     # 実行文脈（不変）
+    # ⚠️ 2026-07-22 改訂: 身分（persona / thread / line / aspect / model / pulse）は
+    #    ExecutionContext が既に持つ。ここで再宣言せず保持するだけにする。
+    #    （Phase 1 では読み手が居ないため未導入。Phase 2 で入る）
+    ctx: ExecutionContext
     persona: Any; building_id: str; node_def: Any; playbook: PlaybookSchema
     state: dict; event_callback: Optional[Callable]
     # ①準備の成果物
@@ -112,7 +134,7 @@ class BeatExecution:
 
 ## 4. 段階手順（各段が独立に出荷可能・挙動不変）
 
-### Phase 0: 重複ヘルパの抽出（最小リスク・最大効果）
+### Phase 0: 重複ヘルパの抽出（最小リスク・最大効果） ✔ 実装済み 2026-07-22
 
 §2 の上位4つを関数化して 4〜6 コピーを置換する。**新ファイル不要**（runtime_llm.py 内でよい）:
 
@@ -123,11 +145,66 @@ class BeatExecution:
   — ⚠️ 現状6コピーは含めるキーが不揃い（§2）。**Phase 0 では各呼び出し元の現状キー構成を引数フラグで忠実に再現**し、統一は別判断にする（挙動不変の原則）
 - `_emit_say_and_capture(runtime, persona, eff_bid, text, state, *, pulse_id, metadata)`
 
-### Phase 1: ④確定部の抽出 + BeatExecution 導入
+#### 実装結果（2026-07-22）
+
+抽出したのは 5 関数（設計の 4 + `_store_reasoning_in_state`）:
+
+| 関数 | 置換したコピー | 設計との差 |
+|---|---|---|
+| `_record_llm_usage` | 4 | `debug_log` フラグ追加 — pipeline streaming 経路だけが出していた `[DEBUG]` 3 行を再現するため（ログも観測可能な挙動なので Phase 0 では変えない） |
+| `_consume_reasoning` | 4 | 設計の `_consume_reasoning_into_state` を改名。ツールなし 2 経路は state 格納が Spell ループ後まで遅れるため、`state` は任意引数にして「回収だけ」も選べる形にした |
+| `_store_reasoning_in_state` | 2 | 上の遅延格納点（B-stream / B-sync）用に分離 |
+| `_build_say_metadata` | 6 | 設計どおり `include_total` フラグで現状差を忠実に再現。`node_def` は取らず、呼び出し元が解決済みの `base_metadata` を渡す形（completion_event と同じ値を使い回すため） |
+| `_emit_say_and_capture` | 4 | 設計どおり |
+
+- 閉包 `node` は 1,651 行 → 1,453 行（-198）。
+- 回帰: 新設 `tests/test_runtime_llm_helpers.py` 20 件（経路ごとの metadata キー構成と挿入順、
+  auto_recall の pop 消費、anchor touch が記帳後に来る順序、message_id 捕捉の分岐）+
+  `tests/` 全体 3061 件全緑 + `ruff check sea/` clean。
+- **残: まはー実機スモーク**（§「各 Phase の検証」の 4 パターン）。Phase 1 とまとめて 1 回で済ませる設計。
+
+#### Phase 0 で見つけた非対称（直していない・Phase 2 で扱う）
+
+1. **A-common の spell emit だけ `_last_message_id` を捕捉しない**（他 4 箇所は捕捉する）。
+   spell 経由の発話の直後に走るツールが最新 message_id を引けない可能性がある。
+   バグかどうか未確定なので Phase 0 では触っていない。
+2. **metadata のキー構成が 6 経路で不揃い**（§2 の表のとおり）。フラグで現状維持した。
+   統一の是非は「'both' 応答に `llm_usage_total` を載せない」「spell 経路に reasoning を
+   載せない」に意図があったのかの確認が要る。
+
+### Phase 1: ④確定部の抽出 + BeatExecution 導入 ✔ 実装済み 2026-07-22
 
 L3529-3758（state["last"] / assistant msg / PulseContext / trace / memorize / dual-write）を
 `_finalize_beat(runtime, exec: BeatExecution) -> None` に括り出す。
 このとき BeatExecution を最小フィールド（text / continuation / prompt / messages / reasoning / usage）で導入。
+
+#### 実装結果（2026-07-22）
+
+- `BeatExecution`（dataclass）+ `_finalize_beat(runtime, beat)` を `runtime_llm.py` 内に追加。
+  閉包末尾の 226 行がまるごと関数へ移り、`node` は
+  `BeatExecution.from_node_locals(...)` → `_finalize_beat(...)` の 2 呼び出しに縮んだ。
+- **抽出の忠実性を機械的に確認**: 移した本文を旧 HEAD の同ブロックと突き合わせ、
+  差分は意図した 1 箇所（reasoning を `state.get()` でなく `beat.reasoning_text` から読む）
+  のみであることを確認済み。
+- 閉包 `node` は 1,453 行 → **1,241 行**（Phase 0 前の 1,651 から -410）。
+
+**フィールドは「④確定が読むものだけ」に絞った**（設計の最小フィールド案からの意図的な差）:
+
+| 設計案のフィールド | Phase 1 | 理由 |
+|---|---|---|
+| prompt / messages / continuation / reasoning_* | ✔ 入れた | `_finalize_beat` が読む |
+| schema_consumed / node_id | ✔ 追加 | 同上（設計案に無かったが確定部が使う） |
+| display_text（merged 全文） | ✘ Phase 2 | 確定部は読まない。生成 4 経路が beat を更新する形になって初めて書き手と読み手が揃う |
+| llm_usage_metadata | ✘ Phase 2 | 同上 |
+| ctx（ExecutionContext） | ✘ Phase 2 | 同上 |
+
+読み手のいないフィールドを先に生やすと「state と beat のどちらが正か分からない値」が
+増えるため、Phase 2 で生成経路が beat へ直接書くようになるのと同時に足す。
+したがって **Beat 型の「対」（display_text / memory_text）が揃うのは Phase 2**。
+
+- 回帰: 新設 `tests/test_beat_finalize.py` 29 件（continuation だけが記録へ行くこと /
+  thought_signature の 3 経路 / memorize と dual-write の排他 / spell 由来記録の
+  paired_action_text 抑止 / activity trace の meta_・sub_ ガード）+ `tests/` 全体 3110 件全緑。
 
 ### Phase 2: 4経路の分離
 
@@ -181,3 +258,9 @@ Branch A/B × stream/sync を §3.2 の4関数に分割。`node` 本体は
 ## ログ
 
 - 2026-07-06: アーキテクチャ健診（`architecture_health.md` §3.1）を受けて本設計書を起草（エア / Fable 5）
+- 2026-07-22: Phase 0（重複ヘルパ抽出）実装。併せて Beat 型との関係を改訂
+  （統合工事で `ExecutionContext` / `BeatGate` が先に入ったため、本設計書が担うのは
+  「Beat の中身 = 表示用 / SAIMemory 用の対」だけに縮小）。
+- 2026-07-22: Phase 1（④確定部の抽出 + `BeatExecution` 導入）実装。
+  閉包は 1,651 → 1,241 行。Beat 型は器として立ち上がったが、
+  「対」が揃うのは Phase 2（display_text の書き手が生成経路側にあるため）。
