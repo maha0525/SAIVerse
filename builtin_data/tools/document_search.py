@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Optional, List
 
-from tools.context import get_active_manager
+from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
 
@@ -18,7 +18,7 @@ def document_search(
     """Search for a pattern in a document item.
 
     Args:
-        item_id: Identifier of the document item.
+        item_id: Identifier of the document item (raw ID or ``item:N`` ref).
         pattern: Search pattern (supports regex).
         case_sensitive: Whether the search is case-sensitive. Default: False
         context_lines: Number of context lines to show before and after each match. Default: 2
@@ -27,10 +27,19 @@ def document_search(
     Returns:
         Matching lines with context and line numbers.
     """
+    persona_id = get_active_persona_id()
+    if not persona_id:
+        raise RuntimeError("Active persona context is not set.")
+
     manager = get_active_manager()
 
     if manager is None:
         raise RuntimeError("Manager context is not available.")
+
+    # ``item:N`` (安定 short_id) / 生 ID のどちらで来ても item_id に解決する。
+    # ここを通さないと、世界がペルソナに見せている ``item:N`` 参照や
+    # document_create が返した ID をそのまま渡せない。
+    item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
 
     item = manager.item_service.items.get(item_id)
     if not item:
@@ -121,7 +130,7 @@ def schema() -> ToolSchema:
             "properties": {
                 "item_id": {
                     "type": "string",
-                    "description": "Identifier of the document item to search.",
+                    "description": "Identifier of the document item to search (raw ID or 'item:N' ref).",
                 },
                 "pattern": {
                     "type": "string",

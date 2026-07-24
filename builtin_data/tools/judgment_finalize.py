@@ -176,6 +176,34 @@ _EPISODE_KIND_LABELS = {
 }
 
 
+def _normalize_artifact_ref(manager: Any, persona_id: str, ref: str) -> str:
+    """成果物参照 (``item:N`` / 生 Item ID) を Item ID に正規化する。
+
+    セッションの成果物リスト (``_collect_new_item_ids``) は生 Item ID を持つ
+    一方、ペルソナが目にする成果物参照は世界の表示語彙 ``item:N`` である
+    (document_create の戻り値・知覚通知・head の所持品欄すべて)。書式のまま
+    突き合わせると、実際に作った成果物が「やったフリ」として棄却され、
+    タスクが完了しないまま WARNING だけが残る。
+
+    解決できないときは元の文字列を返す — ここは接地検証の前処理であって
+    検証そのものではない。存在しない ref は後段の照合で落ちるべき。
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return ref
+    resolver = getattr(manager, "resolve_item_ref_for_persona", None)
+    if resolver is None:
+        return ref
+    try:
+        return resolver(persona_id, ref)
+    except Exception:
+        LOGGER.debug(
+            "[judgment_finalize] artifact_ref を解決できず素通し: persona=%s ref=%s",
+            persona_id, ref, exc_info=True,
+        )
+        return ref
+
+
 def _ref_label(manager: Any, persona_id: str, ref: str) -> str:
     """統一参照 (track:N / task:N / episode:N) に人が読める表題を添える。
 
@@ -662,6 +690,10 @@ def _apply_task_verdict(
     applied = False
     if status == "done":
         artifact_ref = str(verdict.get("artifact_ref") or "")
+        # 接地検証は「同一性」で行う。session_artifacts は生 Item ID だが、
+        # ペルソナが目にする成果物参照は世界の表示語彙 (``item:N``) なので、
+        # 書式のまま突き合わせると本物の成果物が「やったフリ」に誤判定される。
+        artifact_ref = _normalize_artifact_ref(manager, persona_id, artifact_ref)
         if artifact_ref and artifact_ref in session_artifacts:
             # 接地検証 OK: 完了 + 成果物参照を**単一トランザクション**でタスクに
             # 刻む (A9/D7: 旧 update_task_status → append_artifact_ref の 2 連

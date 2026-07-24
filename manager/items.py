@@ -896,7 +896,12 @@ class ItemService:
         )
         self.manager._append_building_history_note(building_id, note)
 
-        return f"文書「{name}」を作成しました。アイテムID: {item_id}"
+        # 返す参照は世界がペルソナに見せているのと同じ ``item:N`` 語彙に揃える。
+        # 生 UUID を返すと、ペルソナがそれを ``item:<uuid>`` の形で撃ち返して
+        # document_read / document_search が解決できない事故になる。
+        short_id = self.items[item_id].get("short_id")
+        item_ref = f"item:{short_id}" if short_id is not None else item_id
+        return f"文書「{name}」を作成しました。アイテムID: {item_ref}"
 
     def create_picture_item(
         self, persona_id: str, name: str, description: str, file_path: str,

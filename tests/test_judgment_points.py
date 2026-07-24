@@ -598,6 +598,77 @@ def test_post_session_done_completes_task_and_records_artifact(
     assert '"artifact_ref"' not in recorded["content"]
 
 
+def test_post_session_done_normalizes_persona_facing_artifact_ref(
+    manager, ptm, task_refs, finalize_mod, tmp_path
+):
+    """ペルソナが書く ``item:N`` を生 Item ID に正規化してから接地検証する。
+
+    セッションの成果物一覧は生 Item ID を持つが、ペルソナが目にする成果物参照は
+    世界の表示語彙 ``item:N``。書式のまま突き合わせると、実際に作った成果物が
+    「やったフリ」として棄却され、タスクが完了しないまま WARNING だけが残る
+    (2026-07-23、document_create の戻り値を item:N に変えた際に開いた穴)。
+    """
+    raw_id = "e6164a23-4c43-40de-8ab2-9ff428fa6f29"
+    manager.resolve_item_ref_for_persona = (
+        lambda persona_id, ref: raw_id if ref == "item:404" else ref
+    )
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    )
+    output = {
+        "monologue": "設計書を書けた。",
+        "task_verdict": {"status": "done", "artifact_ref": "item:404",
+                         "desk_memo": "設計書完成"},
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": [raw_id],
+                      "task_ref": "task:1", "track_id": track_id})
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="post_session", judgment_context=ctx,
+        )
+
+    task = ptm.get_task(ptm.resolve_task_ref(PERSONA_ID, "task:1"), persona_id=PERSONA_ID)
+    assert task["status"] == "completed", (
+        "item:N 形式の成果物参照が正規化されず、本物の成果物が棄却された"
+    )
+    assert task["artifact_refs"] == [raw_id], "台帳には生 Item ID で刻むこと"
+
+
+def test_post_session_unresolvable_artifact_ref_still_rejected(
+    manager, ptm, task_refs, finalize_mod, tmp_path, caplog
+):
+    """解決できない参照は素通しした上で、接地検証で棄却されること。
+
+    正規化はあくまで前処理であって検証ではない。解決器が例外を投げても
+    判断全体を落とさず、存在しない成果物は後段の照合で落ちる。
+    """
+    def _boom(persona_id, ref):
+        raise RuntimeError("resolver exploded")
+
+    manager.resolve_item_ref_for_persona = _boom
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
+    )
+    output = {
+        "monologue": "できたはず。",
+        "task_verdict": {"status": "done", "artifact_ref": "item:999",
+                         "desk_memo": "続きは明日"},
+        "remaining_timetable": None,
+    }
+    ctx = json.dumps({"plan_date": PLAN_DATE, "artifacts": ["item-abc"],
+                      "task_ref": "task:1", "track_id": track_id})
+    with caplog.at_level("WARNING"):
+        with _persona_ctx(manager, tmp_path):
+            finalize_mod.judgment_finalize(
+                judgment_output=output, kind="post_session", judgment_context=ctx,
+            )
+
+    task = ptm.get_task(ptm.resolve_task_ref(PERSONA_ID, "task:1"), persona_id=PERSONA_ID)
+    assert task["status"] == "pending"
+    assert task["artifact_refs"] == []
+
+
 def test_post_session_fake_artifact_ref_is_rejected(
     manager, ptm, task_refs, finalize_mod, tmp_path, caplog
 ):
