@@ -11,13 +11,13 @@
 
 ---
 
-## 現在地 (2026-07-22 更新 — W8 の S7 + W13 実装済み)
+## 現在地 (2026-07-25 更新 — W4 差し戻し (chronicle_eviction) 設計確定・実装待ち)
 
 ```
 一次監査     ████████ 完了 (全8サブシステム、2026-07-16)
 柱の裁定     ████████ 完了 (8柱すべて方針確定、2026-07-16)
 基盤工事     ████████ 完了 (実行台帳 Phase 0 + 統合工事 §6 ※§6-6bのみ分離)
-実装 wave    ███████▶ W1〜W7 + W13 実装済み (実機検証待ち) / W8 進行中 (S7 済・残A3) / W9〜W12・W14 未着手
+実装 wave    ███████▶ W1〜W7 + W13 実装済み (実機検証待ち。W4 は退場設計の差し戻しあり) / W8 進行中 (S7 済・残A3) / W9〜W12・W14 未着手
 実機検証     █░░░░░░░ ライフ一日検証を実施中 (まはー、2026-07-17〜)
 ```
 
@@ -28,7 +28,7 @@
 - **SEA 監査 = 非保留 finding 全消し込み** (W6 で S6 消化。残 S7/S9 は柱6/柱8 スコープ)
 - **柱5 (位置・占有) = W7 で分離監査の非凍結 finding 全消し込み** (2026-07-21)
 
-**次にやる wave**: W8 残り (A3 の裁定・着手) or W9 (柱7 — 完全手動モード)。W8 の S7 は 2026-07-22 実装済み (実機検証待ち)。**W1〜W7 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6。W7: 2026-07-21 — 柱5 位置・占有の canonical 化)。
+**次にやる wave**: **W4 差し戻し = chronicle_eviction 実装** (intent 2026-07-25 レビュー通過。詳細は W4 の差し戻し行)。W4 以外の実機検証 (W1〜W3 / W5〜W8) は退場経路と独立なので chronicle_eviction を待たずに消化できる。その後 W8 残り (A3 の裁定・着手) or W9 (柱7 — 完全手動モード)。W8 の S7 は 2026-07-22 実装済み (実機検証待ち)。**W1〜W7 は実装済み・実機検証待ち** (W1: 2026-07-19、コミット 3f76619 / 7b2436c / e0ee4ff。W2: 2026-07-20。W3: 2026-07-21。W4: 2026-07-21 — Chronicle 生成の episode 整列化 + M2 消化 + Track Chronicle 生成廃止。W5: 2026-07-21 — S5 完了化 / M8 / B1 / 境界通知 outbox 化。W6: 2026-07-21 — head の fail-closed 化 = S6。W7: 2026-07-21 — 柱5 位置・占有の canonical 化)。
 
 **一本化 (2026-07-19 まはー裁定)**: [体験の構造](../intent/experience_structure.md) の実装工程はこの計画書に統合された — 工程(1)=W1 同工区 / 工程(2)=W4 統合 (旧バッチ生成を固めず新設経路で M2 消化) / 工程(3)=W13 / 工程(4)=W14。**工程の真実は二重管理せずこの一枚が持つ**。
 
@@ -61,14 +61,15 @@
 - **実装済み (2026-07-21)**: Chunk A (世代列 + 観測フィールド + 型付き dispatch + find_execution) → B (`_handle_fire` 台帳化) → C (reconciliation + 結線)。Codex レビュー 10 巡 27 件消し込み (受諾 24 / 裁定却下 3 — キー三軸化 {id}:{instance}:g{世代}:{occurrence} / tri-state 同期応答 / day_open・day_close 境界の冪等マーカー + 失敗伝播 / periodic の prepared・failed 回収 / 精算フェンス / applied sweep / 世代のサーバー側インクリメント。打ち切り裁定は走行メモ末尾)。A12/A13 を回帰固定 (schedule 系テスト約 70 件追加)、本体スイート全緑、ruff clean。**残 = まはー実機検証** (dispatch 失敗時の oneshot 非消失・register 失敗の 60 秒自己回復・世代照合の旧予約空振り)。検証通過で ✅ + レビュー台帳の A12/A13 を実機確認済みに
 - **完了条件**: A12/A13 を回帰固定 (監査「必要な回帰」) + 台帳消し込み ✔
 
-### W4 ☑ 実行台帳 Phase 4 — Metabolism 残片 = 体験の構造 工程(2) と統合 — 実装済み・実機検証待ち (2026-07-21)
+### W4 ▶ 実行台帳 Phase 4 — Metabolism 残片 = 体験の構造 工程(2) と統合 — 実装済み・退場設計の差し戻しあり (2026-07-25)
 
 - **スコープ**: M2 (Chronicle 生成の残る原子性課題)。**S2/M1 は統合工事 §6-5 で先取り済み** — 差分を調査してから着手 (残量は小さい可能性が高い)
 - **統合裁定 (2026-07-19)**: Chronicle 生成は [体験の構造](../intent/experience_structure.md) 工程(2) で episode 整列 (サイズ+帯あふれ束ね・バッチ降格・恒等圧縮) に世代交代する。**旧バッチ生成経路に hardening を入れない** (捨てる経路を固めるのは二度手間) — 新設経路を最初から原子的に作り、M2 はそこで消化する
 - **確定設計 (Fable 裁定)**: [走行メモ](../handoff/2026-07-21_w4_metabolism_ledger_handoff.md)。M2 の残片を 5 欠陥 (M2-a 親子別 commit の二重生成 / M2-b 窓内圧縮 §4-1 違反 / M2-c digest 再圧縮 §4-4 違反 / M2-d source 重複無防備 / M2-e dismantle 複合更新) に具体化し、新設経路で消化
 - **実装済み (2026-07-21)**: 整列計画 `alignment.py` (純関数、見積もりと生成の一点管理) + チャンク実行 `executor.py` (チャンク単一 tx + 重複再検査 + 由来メタ) + 帯あふれ束ね `bands.py` (親子単一 tx = M2-a 根治、壁、帰化バックフィル)。D1 退場時圧縮 (evict boundary = M2-b) / D2 退役の episode スナップ (open episode の内部で切らない) / D5 session_digest 材料除外 (M2-c) / D8 Track Chronicle 生成廃止 (§11-10) / D9 API・CLI・estimate・frontend 載せ替え + API 生成ジョブに M1 claim 結線 (旧: claim 素通りの別コネクション入口)。旧経路 (ArasujiGenerator / maybe_consolidate / gap-fill / dismantle 経路) は削除。**Codex レビュー 5 巡 20 件消し込み (受諾 20 / 却下 0、10→6→3→1→0 で対象単調縮小、明細は走行メモ)**: tx 内再検査の BEGIN IMMEDIATE 原子化 / 束ね子検査の同 / dry 予測と backfill の順序 (backfill を計画前へ) / 安全弁の試行数カウント / claim を claim_execution+try_mark_running へ (failed キー退避 = キャンセル・失敗後の同窓即時再試行) / backfill 全体の単一 tx 化 (lost update 閉塞) ほか。回帰=alignment 20 / executor 10 / bands 18 / metabolism 18 計 66 件 + gold_panning 35 全緑、本体スイート全緑、ruff clean。issue 消し込み: general_chronicle_metabolism_trigger (D1 で解決)・chronicle_generation_dual_pipeline (5/28 解決の移動漏れ) を archive へ。**残 = まはー実機検証** (episode 転写の恒等性・帯束ねの初回帰化・open episode スナップの観測)
-- **実機検証で出た欠陥 (2026-07-24)**: エリスの Chronicle 一覧に単独発言のエントリが並ぶというまはーの観察から調査。**級 1 ノードが標準被覆 U=1 万字に対し実測 9〜6,344 字に崩れている** — 自動経路の evict 境界 (退場の刻み幅) は U と無関係に数件ずつ動くのに、`_plan_run` は run 末尾で `_flush_pending()` を無条件に確定するため、「まだ相手が退場していない端数」が「束ねる相手がいない豆粒」(§4-3 恒等圧縮) と同一視される。§4-4 (同一レベルの再圧縮禁止) により後から束ね直せない。級 2+ 側の `bands.py` `_select_bundle_run` には「目標未達の列は束ねず持ち越す」規律があるのに**級 1 だけ持ち越しの器が無い**という非対称 → [`chronicle_undersized_lv1_chunks`](../issues/chronicle_undersized_lv1_chunks.md) (推し = 案 A 持ち越し + 案 C identity 条件の厳格化)。なお発端の 2 エントリ自体は W4 の欠陥ではなく、W5/M8 で根治済みの `ingested_by` 非永続化バグが 7/18 に作った重複 user 行を、W4 の集合ベース未処理判定が**正しく**拾った結果 → [`chronicle_orphan_duplicate_user_messages`](../issues/chronicle_orphan_duplicate_user_messages.md) (データ掃除のみ残)
-- **完了条件**: 記憶監査・SEA 監査の Metabolism 系 finding が全消し込み + 体験の構造 §4 の圧縮七原則が生成経路の回帰で固定される ✔
+- **実機検証で出た欠陥 (2026-07-24)**: エリスの Chronicle 一覧に単独発言のエントリが並ぶというまはーの観察から調査。**級 1 ノードが標準被覆 U=1 万字に対し実測 9〜6,344 字に崩れている** — 自動経路の evict 境界 (退場の刻み幅) は U と無関係に数件ずつ動くのに、`_plan_run` は run 末尾で `_flush_pending()` を無条件に確定するため、「まだ相手が退場していない端数」が「束ねる相手がいない豆粒」(§4-3 恒等圧縮) と同一視される。§4-4 (同一レベルの再圧縮禁止) により後から束ね直せない。級 2+ 側の `bands.py` `_select_bundle_run` には「目標未達の列は束ねず持ち越す」規律があるのに**級 1 だけ持ち越しの器が無い**という非対称 → [`chronicle_undersized_lv1_chunks`](../issues/chronicle_undersized_lv1_chunks.md) (解消は下の差し戻し行へ)。なお発端の 2 エントリ自体は W4 の欠陥ではなく、W5/M8 で根治済みの `ingested_by` 非永続化バグが 7/18 に作った重複 user 行を、W4 の集合ベース未処理判定が**正しく**拾った結果 → [`chronicle_orphan_duplicate_user_messages`](../issues/chronicle_orphan_duplicate_user_messages.md) (データ掃除のみ残)
+- **差し戻し (2026-07-24→25): 退場設計の世代交代 = [chronicle_eviction.md](../intent/chronicle_eviction.md) 実装 — 実装待ち**。当初の借用案 (級1端数を提示中の生ログで最小限巻き込んで U を満たす) は Codex レビューで **open episode 分断の P1** が出て撤回。まはーとの設計対話で退場の粒度そのものを変える上流の解に到達し、intent は **2026-07-25 レビュー通過・設計確定**。スコープ = ①退場を時系列一本線→ **episode 単位** (open は単独 digest・closed 同士は束ねる) ②水位をメッセージ数→ **文字数三水位** (既定 低4万/目標6万/高12万、全モデル一律・モデルファイルでユーザー設定可) ③ experience_structure §6 **pulse 関節細分**の実装 (open episode の部分圧縮) ④ digest の**時系列位置置き換えレンダリング** + 圧縮マーク注釈 ⑤借用実装 (alignment / session_lifecycle / テスト、未コミット) の撤回。**W4 検証項目の読み替え**: evict boundary (D1) と open episode 丸ごと回避スナップ (D2) はこの実装で世代交代するため旧実装のまま検証しない。恒等転写・帯あふれ束ね (bands)・チャンク単一 tx (M2-a/c/d/e) は現行のまま有効。**上書きされる裁定**: 柱2 §6-5 の「Metabolism 閾値はモデル依存」→ 全モデル一律・文字数三水位 ([beat_execution_context.md](../intent/beat_execution_context.md) §3.2 に注記済み)。既存小粒ノードの掃除 (19 identity + 17 batch、本番記憶書き換え=まはー承認必須) と重複 user 行掃除は実装と別枠
+- **完了条件**: 記憶監査・SEA 監査の Metabolism 系 finding が全消し込み + 体験の構造 §4 の圧縮七原則が生成経路の回帰で固定される ✔ / **差し戻し後**: chronicle_eviction 実装 + 同 intent §9 の検証 (a)〜(d) が実機通過
 
 ### W5 ☑ 実行台帳 Phase 5 — 配送系と移動 — 実装済み・実機検証待ち (2026-07-21)
 

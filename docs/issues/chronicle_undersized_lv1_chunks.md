@@ -1,6 +1,6 @@
 # Issue: Chronicle の級 1 ノードが標準被覆を大きく下回る (退場の刻み幅に持ち越しの器が無い)
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🟡 実装待ち — 当初の借用実装は撤回、[`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md) で再設計しレビュー通過・設計確定 (2026-07-25)
 **優先度**: high (放置すると毎日ノードが増え続け、級の意味論が回復不能に崩れる)
 **作成日**: 2026-07-24
 **関連**: [`../intent/experience_structure.md`](../intent/experience_structure.md) §4-2 / §4-3 / §4-4 / §4-6 ・ W4 (`277bd8d`, 2026-07-21) ・ [`../overview/audit_remediation_plan.md`](../overview/audit_remediation_plan.md) W4 実機検証
@@ -87,6 +87,27 @@ Metabolism の evict 境界を「U 字分溜まってから」動かす。設計
 - 実データ: `~/.saiverse/personas/eris_city_a/memory.db` の `arasuji_entries` (short_id 497 以降)
 - ログ: `~/.saiverse/user_data/logs/20260722_023944/backend.log` の `[executor] chunk committed:` 行
 
+## 実装 (2026-07-24) — ⚠️ この借用案は撤回。新設計は [`chronicle_eviction.md`](../intent/chronicle_eviction.md)
+
+**撤回 (2026-07-24)**: 下記の「提示中の生ログを最小限巻き込む」借用案は、Codex レビューで **open episode 分断の P1** が出て行き詰まった (提示中範囲の借用が open episode に及ぶと、後から成長する episode が複数の級1ノードへ不可逆に分断され、digest の被覆と source_ids が食い違う)。まはーとの対話で、退場の粒度を **episode 単位・文字数水位**に変える上流の解に到達し、そちらを正典 ([`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md)) とした。前半で入れた借用実装 (alignment.py / session_lifecycle.py / experience_structure §4-1 改訂 / テスト) は撤回予定。以下は経緯として残す。
+
+まはーとの設計対話で、案 A+案 C を**より上流の解に発展させて**採用した。核は**不変条件の反転**:
+
+- 守るのは上限「退場したものだけ編纂」ではなく、下限「**退場したものは必ず編纂されている**」(experience_structure.md §4-1 に明文化)。
+- 退場分の端数が U 未満なら、**アンカー以降の提示中の生ログを最小限だけ巻き込んで** U に満たす (努力目標: 巻き込みは最小に。二重化は設計が意図して受容するトレードオフ)。
+- **純提示中の末尾は持ち越す** (次の退場と一緒に再計画) = 案 A の持ち越しを、退場分を含む端数だけ確定する形で実現。案 C (identity 条件の厳格化) はこの枠組みに吸収 (identity は両側編纂済みに挟まれた孤島だけ)。
+
+実装:
+
+- [`alignment.py`](../../sai_memory/arasuji/alignment.py) `plan_alignment` に任意引数 `evict_boundary` を追加。指定時、末尾の純提示中チャンク (全メッセージ `created_at >= evict_boundary`) を確定せず落とす (`_carry_pure_presented_tail`)。退場分→提示中の時系列 U 束ねで、境界をまたぐチャンクは U 到達まで = 最小巻き込みが自動成立。`None` (force/estimate 全量経路) は従来どおり全確定 = **後方互換**。
+- [`session_lifecycle.py`](../../sea/session_lifecycle.py) `generate_chronicle` の事前フィルタ (退場分だけに絞る) を撤去し、全メッセージ + `evict_boundary_epoch` を planner に渡す。冪等 claim キー `_window_end_id` は確定チャンクの末尾なので持ち越しと整合。
+- テスト: `tests/test_arasuji_alignment.py` に `TestEvictBoundaryCarry` 5 件 (持ち越し/最小巻き込み/エッジ確定/全提示中空/None 全確定)。全 25 件緑、関連スイート 115 passed、ruff clean。
+
+**残**: (1) 実機検証 — 実際の Metabolism で級 1 ノードが U 級で立つか。(2) 既に作られた小粒級 1 (19 identity + 17 batch) の掃除方針 (放置 or 削除再編纂。後者は本番ペルソナ記憶の書き換えでまはー承認必須) — 未決のまま。
+
 ## ログ
 
 - 2026-07-24: 発見・起票。エリスの Chronicle に単独発言のエントリが並んでいるという、まはーの観察から。別件の重複メッセージ調査 ([`chronicle_orphan_duplicate_user_messages.md`](chronicle_orphan_duplicate_user_messages.md)) の途中で判明した
+- 2026-07-24: 実装 (上記)。設計対話で案 A+C → 不変条件反転へ発展。純関数 + 呼び出し側 + テスト、experience_structure.md §4-1 改訂同梱
+- 2026-07-24 (同日夜): Codex レビューで借用案に open episode 分断の P1 → 借用案ごと撤回、[`chronicle_eviction.md`](../intent/chronicle_eviction.md) (episode 単位・文字数三水位) へ再設計
+- 2026-07-25: chronicle_eviction intent まはーレビュー通過・設計確定 (実装待ち)。本 issue の解消は同実装に包含 — 実装着手時に借用実装 (alignment / session_lifecycle / テスト、未コミット) を撤回してから新設計を入れる。experience_structure §4-1 は新設計の文面に書き直し済み。監査工程上は W4 の差し戻し行 ([audit_remediation_plan.md](../overview/audit_remediation_plan.md))
