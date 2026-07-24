@@ -4,7 +4,7 @@ import logging
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from sea.playbook_models import PlaybookSchema, _FULL_CONTEXT_REQUIREMENTS
+from sea.playbook_models import PlaybookSchema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -163,7 +163,13 @@ def run_playbook(
     # これによりサブラインは「呼び出し時点の親メインラインの会話履歴」を引き継ぐ。
     # See: docs/intent/persona_action_tracks.md (v0.9 サブライン分岐の messages コピー仕様)
     context_warnings: List[Dict[str, Any]] = []
-    if line == "sub" and parent.get("_messages") is not None:
+    # 親の messages が**空でない**ときだけ分岐を引き継ぐ。空リストは「親がいない」
+    # (spell loop 外からの直接呼び出し) のサインで、そのまま採用すると文脈ゼロの
+    # まま LLM を走らせ、その出力をペルソナ名義で記録することになる — work_session
+    # の history_depth=0 と同型の事故 (2026-07-23 Codex レビュー指摘)。
+    # 親がいない場合は下の else に落として通常のペルソナ文脈を組ませる
+    # (サブラインの軽量モデル強制はそちらでも維持する)。
+    if line == "sub" and parent.get("_messages"):
         parent_messages = parent.get("_messages") or []
         base_messages = list(parent_messages)  # コピー (参照共有しない)
         LOGGER.info(
@@ -174,21 +180,29 @@ def run_playbook(
         # サブラインで動かすときは軽量モデルを強制 (LLM ノードの model_type 指定を上書き)
         parent["_force_lightweight_model"] = True
     else:
-        # Playbook が context_requirements を指定していない場合は
-        # _FULL_CONTEXT_REQUIREMENTS にフォールバックする (memory_weave /
-        # visual_context / available_playbooks 等が全て True)。
-        # SAIVerse のメインライン Playbook はすべて「全部入りで喋る」前提のため、
-        # 未指定 = "Full" として扱うのが現在のスタンダード。コンテキストなしで
-        # LLM をツール的に呼びたい worker 系 Playbook が将来登場した際は、
-        # 明示的に context_requirements を絞る (history_depth=0 等) こと。
-        effective_requirements = playbook.context_requirements or _FULL_CONTEXT_REQUIREMENTS
+        if line == "sub":
+            # 親のいないサブライン。文脈は下で通常どおり組むが、サブラインである
+            # 以上モデルの tier は軽量のままにする (分岐先の挙動を親の有無で
+            # 変えない)。
+            parent["_force_lightweight_model"] = True
+            LOGGER.info(
+                "[sea][run-playbook] %s: line='sub' but no parent messages — "
+                "building a normal persona context instead of running context-free",
+                playbook.name,
+            )
+        # Playbook が context_requirements を指定していなければ何も渡さない。
+        # 「指定なし」の意味は prepare_context 側 (ContextRequirements のフィールド
+        # 既定 = 履歴フル + 固定 head) の一箇所だけで決まる。2026-07-23 以前は
+        # ここに _FULL_CONTEXT_REQUIREMENTS という第二の既定があり、フィールド既定
+        # と値が食い違っていた (docs/issues/llm_call_entry_point_standardization.md)。
+        effective_requirements = playbook.context_requirements
         LOGGER.info(
             "[sea][run-playbook] %s: calling _prepare_context with history_depth=%s, pulse_id=%s, "
             "requirements=%s",
             playbook.name,
-            effective_requirements.history_depth,
+            effective_requirements.history_depth if effective_requirements else "default",
             pulse_id,
-            "playbook-defined" if playbook.context_requirements else "FULL (default)",
+            "playbook-defined" if playbook.context_requirements else "default",
         )
         # persona._pending_auto_recall_text は _prepare_context (実体は
         # _maybe_inject_auto_recall) が「今回このメッセージ列に注入した」場合のみ
@@ -227,6 +241,8 @@ def run_playbook(
             pulse_type=pulse_type,
             model_key=_prepared_model_key,
             context_meta=_context_meta,
+            # メインラインの Playbook はペルソナ本人の発話・思考になる。
+            persona_voiced=True,
         )
         parent["_prefix_anchor_id"] = _context_meta.get("prefix_anchor_id")
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))

@@ -87,9 +87,18 @@ class FakeRuntime:
         )
 
     # --- context / client -------------------------------------------------
-    def _prepare_context(self, persona, building_id, user_input, requirements,
+    def _prepare_context(self, persona, building_id, user_input, requirements=None,
                          pulse_id=None, **kwargs):
-        assert requirements.history_depth == 0  # セッションは履歴なしで開始する
+        # 2026-07-23 以前はここで `requirements.history_depth == 0` を assert して
+        # いた = 「セッションは履歴なしで開始する」という不具合を固定していた。
+        # 作業セッションの出力はペルソナ本人の発話・思考として記録されるので、
+        # 会話履歴を外して走らせてはいけない (記憶の連続性が無い存在は別の人格)。
+        assert requirements is None, (
+            "作業セッションは文脈要件を自前で組まない (既定 = 履歴フル)"
+        )
+        assert kwargs.get("persona_voiced") is True, (
+            "作業セッションはペルソナ名義の稼働として印を付けて呼ぶこと"
+        )
         return [{"role": "system", "content": "HEAD"}]
 
     def _select_llm_client(self, node_def, persona, needs_structured_output=False,

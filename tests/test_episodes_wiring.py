@@ -295,7 +295,7 @@ class FakeRuntime:
             touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
         )
 
-    def _prepare_context(self, persona, building_id, user_input, requirements,
+    def _prepare_context(self, persona, building_id, user_input, requirements=None,
                          pulse_id=None, **kwargs):
         return [{"role": "system", "content": "HEAD"}]
 

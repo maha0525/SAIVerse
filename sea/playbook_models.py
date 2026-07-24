@@ -478,7 +478,25 @@ class InputParam(BaseModel):
 
 
 class ContextRequirements(BaseModel):
-    """Defines what context should be loaded when running a playbook."""
+    """呼び出しごとに変えてよい文脈の指定。
+
+    **head (人格・部屋・呪文一覧などの前置き) の中身はここで選べない。** head は
+    (persona, model) の Session ごとに一つで固定するのが prefix キャッシュ共有の
+    土台であり、用途やラインで章を出し入れすると同一モデルで head が変わって
+    キャッシュが壊れる (``sea/runtime_context.py`` の ``PERSONA_HEAD_SECTIONS``)。
+
+    2026-07-23 の整理で、以下のフィールドを削除した:
+
+    - ``inventory`` / ``building_items`` / ``working_memory``
+      — どこからも読まれていない残骸だった
+    - ``system_prompt`` / ``available_playbooks`` / ``visual_context`` / ``memory_weave``
+      — head の章を選ぶスイッチ。上記のとおり出し分けてはいけないので撤去し、
+        ``PERSONA_HEAD_SECTIONS`` に固定した
+
+    削除により「指定なし」の意味が一本化され、``_FULL_CONTEXT_REQUIREMENTS``
+    (フィールド既定と別物の第二の既定) も不要になったので撤去した。既定が欲しい
+    呼び出しは ``requirements`` を渡さないこと。
+    """
     history_depth: Union[int, str] = Field(
         default="full",
         description="History depth: 'full' (use persona's context_length), number (character count), "
@@ -488,36 +506,11 @@ class ContextRequirements(BaseModel):
         default=False,
         description="If True, balance history across conversation partners (user + other personas)"
     )
-    inventory: bool = Field(default=True, description="Include persona inventory in system prompt")
-    building_items: bool = Field(default=True, description="Include building items in system prompt")
-    system_prompt: bool = Field(default=True, description="Include persona and building system prompts")
-    available_playbooks: bool = Field(default=False, description="Include available playbooks list in system prompt")
-    visual_context: bool = Field(default=False, description="Include visual context (Building/Persona images) after system prompt")
-    memory_weave: bool = Field(default=False, description="Include Memory Weave context (Chronicle + Memopedia) after system prompt")
-    working_memory: bool = Field(default=False, description="Include working memory contents in system prompt")
     realtime_context: bool = Field(
         default=True,
         description="Include realtime context (current time, previous AI response time, spatial info) near end of context. "
                     "Placing time-sensitive info at the end improves LLM context caching efficiency."
     )
-
-
-# Default ContextRequirements used when a Playbook does not specify
-# `context_requirements` (= "speak with the full persona context"). All MainLine
-# Playbooks rely on this default. Worker-style Playbooks that need an isolated
-# context should set their own `context_requirements` explicitly.
-_FULL_CONTEXT_REQUIREMENTS = ContextRequirements(
-    history_depth="full",
-    history_balanced=False,
-    system_prompt=True,
-    memory_weave=True,
-    working_memory=True,
-    inventory=True,
-    building_items=True,
-    available_playbooks=True,
-    visual_context=True,
-    realtime_context=True,
-)
 
 
 class PlaybookSchema(BaseModel):

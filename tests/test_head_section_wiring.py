@@ -10,7 +10,6 @@ DeskSection (P2a〜P3c①) と MemopediaIndexSection (P4-d) で二度起きた�
 
 本テストは実物の定義を import して両点の整合を機械検査する。
 """
-import re
 import sys
 import unittest
 from pathlib import Path
@@ -22,39 +21,35 @@ from sea.head_pipeline.integration import (
     SYSTEM_PROMPT_SECTION_NAMES,
     VISUAL_CONTEXT_SECTION_NAME,
 )
-
-_RUNTIME_CONTEXT = Path(__file__).resolve().parents[1] / "sea" / "runtime_context.py"
-
-
-def _runtime_enabled_sections() -> set:
-    """runtime_context.py の恒常セクション固定集合を実ソースから抽出する。
-
-    prepare_context 内のリテラル集合なので、import しての実行では取れない。
-    `enabled_sections.update({...})` の中身を正規表現で読む (集合の書き方が
-    変わったらこのテストを追従させること)。
-    """
-    src = _RUNTIME_CONTEXT.read_text(encoding="utf-8")
-    m = re.search(r"enabled_sections\.update\(\{(.*?)\}\)", src, re.DOTALL)
-    assert m, "runtime_context.py の enabled_sections.update({...}) が見つからない"
-    return set(re.findall(r'"([a-z_]+)"', m.group(1)))
+from sea.runtime_context import PERSONA_HEAD_SECTIONS
 
 
 class HeadSectionWiringTests(unittest.TestCase):
     def test_system_prompt_sections_are_all_enabled(self):
-        """SYSTEM_PROMPT_SECTION_NAMES の全セクションが enabled_sections にも載っている。
+        """SYSTEM_PROMPT_SECTION_NAMES の全セクションが head の固定集合にも載っている。
 
-        (available_playbooks だけは条件付き有効化なので除外 — reqs 依存)
+        2026-07-23 以前は呼び出し側のフラグで章を出し入れできたため、
+        ここは「条件付き有効化 (available_playbooks) は除外」という例外を持って
+        いた。フラグを撤去して PERSONA_HEAD_SECTIONS に固定したので例外は無い —
+        全セクションが常に載る。
         """
-        enabled = _runtime_enabled_sections()
-        conditional = {"available_playbooks"}
         for name in SYSTEM_PROMPT_SECTION_NAMES:
-            if name in conditional:
-                continue
             self.assertIn(
-                name, enabled,
+                name, PERSONA_HEAD_SECTIONS,
                 f"section '{name}' は SYSTEM_PROMPT_SECTION_NAMES に居るのに "
-                "runtime_context の enabled_sections に無い — 本番で描画されない",
+                "PERSONA_HEAD_SECTIONS に無い — 本番で描画されない",
             )
+
+    def test_memory_weave_and_visual_context_are_fixed_in_head(self):
+        """memory_weave / visual_context も固定集合に含まれる。
+
+        以前はこの 2 つが呼び出し側のフラグ次第で、work_session だけ欠けた head で
+        走っていた (= 同じ (persona, model) で head が二種類あり prefix キャッシュが
+        壊れる)。visual_context には BuildingItemsSection の素材も乗るため、欠けると
+        作業セッションから部屋のアイテムが見えなくなる副作用もあった。
+        """
+        self.assertIn(MEMORY_WEAVE_SECTION_NAME, PERSONA_HEAD_SECTIONS)
+        self.assertIn(VISUAL_CONTEXT_SECTION_NAME, PERSONA_HEAD_SECTIONS)
 
     def test_rendering_sections_in_registry_are_composed(self):
         """registry 登録済みで render が実文を返しうるセクションが合成経路に居る。

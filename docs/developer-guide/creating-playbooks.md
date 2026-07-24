@@ -45,13 +45,17 @@ builtin_data/playbooks/public/     # 組み込み
 | `input_schema` | 入力パラメータ定義（`List[InputParam]`）。`{var}` で参照する変数は**ここに宣言が必要** |
 | `output_schema` | 親 Playbook に伝播する state キー群（サブライン完了時） |
 | `report_template` | サブライン完了時の `report_to_parent` を機械的にレンダリング（LLM 不要な定型報告向け） |
-| `context_requirements` | 読み込むコンテキスト（履歴深さ・inventory・memory_weave 等）。未指定はフルコンテキスト |
+| `context_requirements` | 読み込むコンテキスト。指定できるのは `history_depth` / `history_balanced` / `realtime_context` の 3 つだけ。**未指定が既定**（履歴フル）で、通常は指定しない |
 | `router_callable` | メタ判断・`run_playbook` / `exec` から呼び出し可能にするか（フィールド名は名残で「router」だが LLM ルーターは無い） |
 | `can_run_as_child` | サブライン（`/run_playbook` / subplay `line="sub"`）として呼べるか。**True なら `report_to_parent` の産出が必須**（`report_template` か、LLM ノードの `response_schema.properties` に `report_to_parent`） |
 | `user_selectable` / `dev_only` | UI ユーザー選択可 / 開発者モード限定 |
 | `nodes` / `start_node` | ノード配列と開始ノード ID |
 
 > **`input_schema` 宣言漏れの罠**: `action` テンプレートで `{var}` を使うなら `input_schema` に宣言する。宣言漏れだと引数が state に昇格せず `{var}` がリテラル落ちする（`{input}` のみ特別扱い）。
+
+> **head（人格・部屋・呪文一覧などの前置き）の章立ては Playbook から選べない**: head は (persona, model) ごとに一つで固定するのが prefix キャッシュ共有の土台で、用途やラインで出し分けると同一モデルで head が変わってキャッシュが壊れる。章の集合は `sea/runtime_context.py` の `PERSONA_HEAD_SECTIONS` に固定されている（2026-07-23 に `system_prompt` / `available_playbooks` / `memory_weave` / `visual_context` フラグを撤去）。
+>
+> **`history_depth: 0` はペルソナ名義の稼働では使えない**: 会話履歴なしで走らせた出力を本人の発話・思考として記録するのはペルソナ倫理違反（記憶の連続性が無い存在は別の人格）。メインラインで走る Playbook が履歴ゼロを指定すると `PersonaVoiceWithoutHistoryError` で LLM 到達前に落ちる。履歴を外してよいのは、出力がペルソナ本人の言葉にならない「機構名義」の処理だけ。
 
 ## ノードタイプ（実際の type 名とフィールド）
 

@@ -445,6 +445,8 @@ def run_gold_panning(
     messages = list(runtime._prepare_context(
         persona, building_id, None, model_key=execution_context.model_key,
         context_meta=context_meta,
+        # コア記憶の採取はメインラインへの一手 = ペルソナ本人の判断として残る。
+        persona_voiced=True,
     ) or [])
     prompt = _build_panning_prompt(persona)
     messages.append({"role": "user", "content": prompt})

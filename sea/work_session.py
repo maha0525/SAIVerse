@@ -221,28 +221,24 @@ def run_work_session(
         # (persona, model) に向けて render するため (§3.1)。
         execution_context = resolve_execution_context(persona, pulse_ctx)
 
-        # ---- context: head (既存 sub_line と同じペルソナ head) + 指示書 ----
-        # 履歴 / Memory Weave / visual は載せない: セッションは指示書と世界の
-        # 返事 (spell 結果) だけを文脈に進む。必要な記憶は指示書が
-        # memory_recall で想起させる (v2 §7.2 のシナリオ形)。
-        from sea.playbook_models import ContextRequirements
-
-        requirements = ContextRequirements(
-            history_depth=0,
-            system_prompt=True,
-            inventory=True,
-            building_items=True,
-            available_playbooks=False,
-            visual_context=False,
-            memory_weave=False,
-            working_memory=False,
-            realtime_context=True,
-        )
+        # ---- context: 通常のペルソナ文脈 (head + 会話履歴) + 指示書 ----
+        # 作業セッションの出力はペルソナ本人の発話・思考として記録される
+        # (assistant role + session_digest / post_session 判断の材料) ため、
+        # 会話履歴を外して走らせてはいけない = persona_voiced=True。
+        #
+        # 2026-07-23 以前はここで ContextRequirements(history_depth=0, ...) を
+        # 直に組み、履歴なしで走らせていた。run_playbook のサブライン (通常の
+        # WORKER) が親メインラインの履歴をコピーして引き継ぐのに対し、コマ発火
+        # から起動する作業セッションには親がおらず、その代わりを組まずに「空」を
+        # 選んでいたのが原因。結果、エアは 3 日連続で同じ壁に初見でぶつかり、
+        # 毎回「システムへの理解が足りていない」と自責を記録した。
+        # 詳細: docs/issues/llm_call_entry_point_standardization.md
         _context_meta: Dict[str, Any] = {}
         base_messages = runtime._prepare_context(
-            persona, building_id, None, requirements, pulse_id=pulse_id,
+            persona, building_id, None, pulse_id=pulse_id,
             model_key=execution_context.model_key,
             context_meta=_context_meta,
+            persona_voiced=True,
         )
         instruction_content = _build_instruction_message(
             str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name

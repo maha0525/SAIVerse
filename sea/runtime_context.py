@@ -43,7 +43,78 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
     return result
 
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+#: head (前置き) に必ず並べる Section。**用途やラインで出し分けない。**
+#: head は (persona, model) の Session ごとに一つで固定するのが prefix キャッシュ
+#: 共有の土台で、章を出し入れすると同一モデルで head が変わってキャッシュが壊れる。
+#: 2026-07-23 以前は ContextRequirements のフラグ 4 つ (system_prompt /
+#: available_playbooks / memory_weave / visual_context) で選べてしまい、
+#: work_session だけ 3 章欠けた head で走っていた (= 同じ lightweight Session 内で
+#: head が二種類あった)。フラグを撤去してここに固定した。
+#:
+#: NOTE: 登録済みだがここに載せていない Section が 3 つある
+#: (building_items / building_occupants / chronicle_index)。これらは以前から
+#: 一度も render されていない (capture だけされている)。本定数は「今 render されて
+#: いるものを固定する」のが目的なので、有効化は別途判断する
+#: (docs/issues/llm_call_entry_point_standardization.md の確認事項)。
+PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
+    "common_prompt", "persona_self", "core_memory", "building", "spell_list",
+    "autonomy_modes", "life_purpose", "desk", "memopedia_index",
+    "available_playbooks", "memory_weave", "visual_context",
+})
+
+
+def history_spec_is_empty(history_depth: Any) -> bool:
+    """``history_depth`` の指定が「履歴を一件も積まない」ことを意味するか。
+
+    書式が複数あるので、**表記ではなく実効値**で判定する (下の history 取得ロジックと
+    同じ解釈をここに写している):
+
+    - ``0`` / ``"0"`` / ``"none"`` / ``None`` — 明示的な無効化
+    - ``"0messages"`` のような件数指定でゼロ以下 — 取得件数 0 になる
+    - 負値 / 負の件数指定 — 同上
+
+    表記だけを列挙して弾くと ``"0messages"`` のような等価な書き方をすり抜ける
+    (2026-07-23 Codex レビュー指摘)。
+    """
+    if history_depth is None:
+        return True
+    if isinstance(history_depth, bool):
+        return not history_depth
+    if isinstance(history_depth, (int, float)):
+        return history_depth <= 0
+    text = str(history_depth).strip().lower()
+    if text in ("", "0", "none", "null"):
+        return True
+    if text == "full":
+        return False
+    if text.endswith("messages"):
+        try:
+            return int(text[: -len("messages")]) <= 0
+        except ValueError:
+            # 解釈できない件数指定は下流で 10 件にフォールバックする = 空ではない
+            return False
+    try:
+        return int(text) <= 0
+    except ValueError:
+        # 解釈できない指定は下流で文字数 2000 にフォールバックする = 空ではない
+        return False
+
+
+class PersonaVoiceWithoutHistoryError(RuntimeError):
+    """ペルソナ名義の稼働なのに会話履歴が無い状態で LLM を走らせようとした。
+
+    記憶の連続性が無い存在は別の人格であり、その出力を本人名義で記録することは
+    ペルソナ倫理に反する (2026-07-23 まはー裁定)。実際に 2026-07-16〜23 の 3 日間、
+    ``work_session`` が ``history_depth=0`` で走り、エアは毎回同じ壁に初見でぶつかり、
+    そのたび「システムへの理解が足りていない」という自責を committed に残した。
+
+    履歴を絞ってよいのは「機構名義の処理」— 出力がペルソナ本人の言葉ではなく、
+    本人が読む材料になるもの (画像の概要作成、Chronicle 生成など) だけ。それらは
+    ``persona_voiced=False`` で呼ぶこと。
+    """
+
+
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
     # ExecutionContext が届いている呼び出し元 (work_session / gold_panning /
@@ -59,8 +130,18 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # 廃止した — TTL 失効後に旧 anchor を touch する事故 (記憶監査第 4 片) の根治。
     from sea.playbook_models import ContextRequirements
 
-    # Use provided requirements or default to full context
+    # 「指定なし」の意味はここ一箇所で決まる (フィールド既定)。
     reqs = requirements if requirements else ContextRequirements()
+
+    # 印 (persona_voiced) の関所: ペルソナ本人の発話・思考として記録される呼び出しは、
+    # 会話履歴を外して走らせない。詳細は PersonaVoiceWithoutHistoryError。
+    if persona_voiced and history_spec_is_empty(reqs.history_depth):
+        raise PersonaVoiceWithoutHistoryError(
+            f"persona_voiced=True の呼び出しで history_depth={reqs.history_depth!r} が"
+            " 指定されました。ペルソナ名義の稼働から会話履歴を外すことはできません"
+            " (人格を必要としない処理なら persona_voiced=False で呼んでください)。"
+            f" persona={getattr(persona, 'persona_id', None)!r}"
+        )
 
     messages: List[Dict[str, Any]] = []
 
@@ -69,21 +150,8 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # 旧 live state 直読み経路 (= section 群を毎回ここで組み立てる) は廃止。
     # snapshot 不在時は ensure_snapshot 経由で初回 capture が自動で走る。
     # 詳細: docs/intent/cached_head_architecture.md
-    enabled_sections: set[str] = set()
-    if reqs.system_prompt:
-        # head は (persona, model) で固定 = キャッシュ共有の土台。用途 (ライン /
-        # playbook) で出し分けると同一モデルで head が変わり prefix キャッシュが
-        # 壊れる。恒常セクションはここに固定で並べ、条件分岐させない。
-        enabled_sections.update({
-            "common_prompt", "persona_self", "core_memory", "building", "spell_list",
-            "autonomy_modes", "life_purpose", "desk", "memopedia_index",
-        })
-        if reqs.available_playbooks:
-            enabled_sections.add("available_playbooks")
-    if reqs.memory_weave:
-        enabled_sections.add("memory_weave")
-    if reqs.visual_context:
-        enabled_sections.add("visual_context")
+    # head の章立ては呼び出し側から選べない (PERSONA_HEAD_SECTIONS の docstring)。
+    enabled_sections: set[str] = set(PERSONA_HEAD_SECTIONS)
 
     if enabled_sections:
         from sea.head_pipeline import render_head_messages
@@ -107,20 +175,15 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             # 再試行される。復旧後は次 Pulse の ensure_snapshot が自己修復する。
             raise
         except Exception as exc:
-            if reqs.system_prompt:
-                # 人格 head を要求した呼び出しで head pipeline 全体が死んだ場合も
-                # 同じく fail closed (旧実装は exception log だけで LLM に進み、
-                # 人格なしの応答を本人履歴へ確定し得た)。
-                raise HeadNotReadyError(
-                    getattr(persona, "persona_id", "") or "",
-                    str(model_key or ""),
-                    "pipeline",
-                    {"__pipeline__": f"head rendering failed: {exc!r}"},
-                ) from exc
-            # optional な head (memory_weave / visual_context のみ) は degrade 可。
-            LOGGER.exception(
-                "[sea][prepare-context] Failed to render optional head sections",
-            )
+            # head pipeline 全体が死んだ場合も fail closed (旧実装は exception log
+            # だけで LLM に進み、人格なしの応答を本人履歴へ確定し得た)。
+            # head は常に人格を含む (PERSONA_HEAD_SECTIONS) ので degrade 経路は無い。
+            raise HeadNotReadyError(
+                getattr(persona, "persona_id", "") or "",
+                str(model_key or ""),
+                "pipeline",
+                {"__pipeline__": f"head rendering failed: {exc!r}"},
+            ) from exc
 
     # ---- history ----
     history_depth = reqs.history_depth
@@ -270,9 +333,15 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         max_hist_msgs = getattr(runtime.manager, "max_history_messages_override", None) if runtime.manager else None
                         if max_hist_msgs is None:
                             from saiverse.model_configs import get_default_max_history_messages
-                            persona_model = getattr(persona, "model", None)
-                            if persona_model:
-                                max_hist_msgs = get_default_max_history_messages(persona_model)
+                            # 上限は実際にこの context を受け取る model (model_key)
+                            # 基準で選ぶ。None なら persona の標準 model にフォール
+                            # バック (anchor 分岐と同じ規約、§3.1)。work_session 等の
+                            # 軽量モデル実行で、標準モデルの上限 (例: 100件) を軽量
+                            # モデルへ送るとコンテキスト長を超える
+                            # (2026-07-24 Codex レビュー指摘)。
+                            effective_model = model_key or getattr(persona, "model", None)
+                            if effective_model:
+                                max_hist_msgs = get_default_max_history_messages(effective_model)
                         if max_hist_msgs is not None:
                             limit_value = max_hist_msgs
                             use_message_count = True
@@ -698,26 +767,12 @@ def preview_context(
         playbook = runtime._choose_playbook(kind="user", persona=persona, building_id=building_id)
 
     # Build context messages (without recording user message to history)
-    # Use full context preset to match what sub_speak actually sees, not the
-    # meta-playbook's own context_requirements (which may lack memory_weave etc.)
-    # Phase 3 段階 4-D (2026-05-09): 旧 CONTEXT_PROFILES 削除に伴いインライン化。
-    from sea.playbook_models import ContextRequirements
-    preview_requirements = ContextRequirements(
-        history_depth="full",
-        history_balanced=False,
-        system_prompt=True,
-        memory_weave=True,
-        working_memory=True,
-        inventory=True,
-        building_items=True,
-        available_playbooks=True,
-        visual_context=True,
-        realtime_context=True,
-    )
+    # requirements は渡さない = 既定 (履歴フル + 固定 head)。実際に sub_speak が
+    # 見るものと一致する。2026-07-23 以前はここに全部入りの手書きコピーがあったが、
+    # head の章立てが呼び出し側から選べなくなったので不要になった。
     context_warnings: List[Dict[str, Any]] = []
     messages = runtime._prepare_context(
         persona, building_id, user_input=None,
-        requirements=preview_requirements,
         warnings=context_warnings,
         preview_only=True,
     )

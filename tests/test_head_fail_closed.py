@@ -573,11 +573,9 @@ def _stub_runtime():
 
 def _reqs(**overrides):
     from sea.playbook_models import ContextRequirements
-    base = dict(
-        history_depth=0, system_prompt=True, memory_weave=False,
-        visual_context=False, available_playbooks=False, working_memory=False,
-        realtime_context=False,
-    )
+    # head の章立ては呼び出し側から選べない (PERSONA_HEAD_SECTIONS 固定) ので、
+    # ここで指定できるのは履歴と実時間情報だけ。
+    base = dict(history_depth=0, realtime_context=False)
     base.update(overrides)
     return ContextRequirements(**base)
 
@@ -615,7 +613,17 @@ def test_prepare_context_escalates_generic_head_failure_when_identity_requested(
     assert ei.value.stage == "pipeline"
 
 
-def test_prepare_context_degrades_for_optional_only_head(monkeypatch):
+def test_prepare_context_has_no_degrade_path(monkeypatch):
+    """head 構築の失敗に「人格なしで続行する」逃げ道が無いこと。
+
+    2026-07-23 以前は ``system_prompt=False`` (= 人格を要求しない head) の
+    呼び出しに限り、pipeline 失敗を握り潰して空の head で続行していた。head の
+    章立てを固定 (PERSONA_HEAD_SECTIONS) して呼び出し側から選べなくしたので、
+    「人格を要求しない呼び出し」自体が存在しなくなり、degrade 経路も消えた。
+
+    どんな呼び出しでも head が組めなければ落ちる = 人格に属さない発話を
+    本人履歴へ確定させない (W6 / SEA 監査 S6 の fail-closed)。
+    """
     import sea.head_pipeline as hp
     from sea.runtime_context import prepare_context
 
@@ -623,9 +631,9 @@ def test_prepare_context_degrades_for_optional_only_head(monkeypatch):
         raise RuntimeError("pipeline exploded")
 
     monkeypatch.setattr(hp, "render_head_messages", _raise)
-    messages = prepare_context(
-        _stub_runtime(), PERSONA, "b_lobby", None,
-        requirements=_reqs(system_prompt=False, memory_weave=True),
-        preview_only=True,
-    )
-    assert messages == []
+    with pytest.raises(HeadNotReadyError) as ei:
+        prepare_context(
+            _stub_runtime(), PERSONA, "b_lobby", None,
+            requirements=_reqs(), preview_only=True,
+        )
+    assert ei.value.stage == "pipeline"
