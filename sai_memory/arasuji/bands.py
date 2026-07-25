@@ -1,19 +1,22 @@
-"""Band-overflow consolidation — サイズ級 + 帯あふれ駆動の上位束ね (W4 D6/D7).
+"""Band-overflow consolidation — 次数 + 列のあふれ駆動の上位束ね (W4 D6/D7).
 
 体験の構造 (docs/intent/experience_structure.md) §4-6「束ねはレベルでなく
-サイズ、駆動は帯のあふれ」/ §4-7「最古が黙って落ちない」の実装。
+サイズ、駆動は列のあふれ」/ §4-7「最古が黙って落ちない」の実装。
 設計正典は docs/handoff/2026-07-21_w4_metabolism_ledger_handoff.md D6/D7。
 
-概念:
+概念 (用語は docs/handoff/2026-07-25_chronicle_eviction_handoff.md §5 で改名済み。
+「帯」は用語として廃止 — この機構自体が今後変わりうるので、名前で確定を演出しない):
 
-- **級 k ノードの標準被覆** = U × B^(k-1) 字 (U=1万・B=10 → 級1≒1万,
-  級2≒10万, 級3≒100万)。level 列 = 級 (読み込み互換の導出キャッシュ)。
-- **帯 k** = level k の未束ね (unconsolidated) General ノード列 (時系列順)。
-- **あふれ** = 帯 k の被覆合計 > U × B^k (= 級 k ノード約 B 個分)。あふれたら
-  古い端から連続ノード列を合計 U × B^k に達するまで束ね、級 k+1 の親を作る。
-- **壁** = より上位の級のノード。壁の被覆範囲の内側にある穴ノードは束ねず、
+- **次数 k のあらすじの標準被覆** = U × B^(k-1) 字 (U=1万・B=10 → 一次あらすじ≒
+  1万、二次あらすじ≒10万、三次あらすじ≒100万)。`level` 列 = 次数 (読み込み互換の
+  導出キャッシュ)。
+- **次数 k の列** = level k の未束ね (unconsolidated) General ノード列 (時系列順)。
+- **あふれ** = 次数 k の列の被覆合計 > U × B^k (= そのノード約 B 個分)。上限を
+  超えたら、古い端から連続ノード列を合計 U × B^k に達するまで束ね、次数 k+1 の
+  親を作る。
+- **壁** = より上の次数のノード。壁の被覆範囲の内側に埋もれたノードは束ねず、
   壁を時間的に跨ぐ束ねもしない。壁で打ち切られた目標未達の列は束ねず持ち越す
-  (級の意味論を保つ — 小粒親を作らない。Codex W4 #5)。旧 Lv3 等は再要約され
+  (次数の意味論を保つ — 小粒の親を作らない。Codex W4 #5)。旧 Lv3 等は再要約され
   ない (移行の約束 §4-6 の構造的保証)。
 - 判定はすべて **coverage_chars (被覆生ログ字数)** — digest 自体の長さでは
   ない (LLM 出力のブレに依存しない決定論)。
@@ -174,7 +177,7 @@ def _backfill_coverage_locked(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 帯の読み出しと束ね列の選定 (実行 / dry 共通)
+# 列の読み出しと束ね列の選定 (実行 / dry 共通)
 # ---------------------------------------------------------------------------
 
 
@@ -213,13 +216,13 @@ def _coverage_index(conn: sqlite3.Connection) -> dict:
 
 
 def _general_band(conn: sqlite3.Connection, level: int) -> List[_BandItem]:
-    """帯 k = General (track なし・incomplete なし) の未束ねノード列 (時系列順)。
+    """次数 k の列 = General (track なし・incomplete なし) の未束ねノード列 (時系列順)。
 
     coverage 未 backfill (0) の entry も列には含める (合計には 0 で参加 —
     backfill が先に走る前提)。
 
     旧 get_unconsolidated_entries は track / incomplete の混入を許していた
-    (Track 混線の親戚) — 帯は General に明示的に閉じる。
+    (Track 混線の親戚) — 列は General に明示的に閉じる。
     """
     from sai_memory.arasuji.storage import _ENTRY_COLUMNS, _row_to_entry
     rows = conn.execute(
@@ -257,7 +260,7 @@ def _walls(conn: sqlite3.Connection, above_level: int) -> List[Tuple[int, int]]:
 
 
 def _inside_wall(item: _BandItem, walls: Sequence[Tuple[int, int]]) -> bool:
-    """item が壁の被覆範囲の内側にあるか (壁内の穴ノード — 束ねない)。"""
+    """item が壁の被覆範囲の内側にあるか (壁の内側に埋もれたノード — 束ねない)。"""
     if item.start_time is None or item.end_time is None:
         return False
     return any(
@@ -285,7 +288,7 @@ def _select_bundle_run(
     """古い端から束ね列を 1 本選ぶ。
 
     **目標被覆 (target) に到達した 2 ノード以上の列だけ**を返す。壁 (内側の
-    穴 / ギャップ跨ぎ) で打ち切られた目標未達の列は破棄して次の位置から
+    壁の内側 / ギャップ跨ぎ) で打ち切られた目標未達の列は破棄して次の位置から
     集め直す — 小粒の上位ノードを作らない (Codex W4 #5、走行メモ D6 の
     「壁の手前の端数は持ち越し」)。目標到達列が無ければ None。
     """
@@ -317,15 +320,15 @@ def plan_band_overflow(
     *,
     extra_leaves: Optional[Sequence[Tuple[int, Optional[int], Optional[int]]]] = None,
 ) -> int:
-    """帯あふれ束ねの発生回数を LLM なしで予測する (Codex W4 #4/#9)。
+    """列のあふれ束ねの発生回数を LLM なしで予測する (Codex W4 #4/#9)。
 
     :func:`run_band_overflow` と同じ選定ロジック (あふれ判定・壁・安全弁) を、
-    束ね結果 (親 = 子の coverage 合計、上位帯へ追加、新親は下位帯の壁) を
+    束ね結果 (親 = 子の coverage 合計、上の次数の列へ追加、新親は下の次数の列の壁) を
     模擬適用しながら数える。
 
     Args:
         extra_leaves: これから確定する新チャンクの
-            ``(coverage_chars, start_time, end_time)`` 列。級 1 帯に加算して
+            ``(coverage_chars, start_time, end_time)`` 列。一次あらすじの列に加算して
             予測する (確認ゲートは実行前に呼ぶため)。
 
     Returns:
@@ -335,7 +338,7 @@ def plan_band_overflow(
     base = chronicle_band_base()
     max_runs = _max_consolidations_per_run()
 
-    # 帯と壁の状態をメモリへ読み、模擬適用する。
+    # 列と壁の状態をメモリへ読み、模擬適用する。
     max_level = get_max_level(conn)
     bands: dict = {}
     for level in range(1, max_level + 2):
@@ -374,7 +377,7 @@ def plan_band_overflow(
             if level > max(bands.keys(), default=1) + 1:
                 break
             continue
-        # 模擬適用: 子を帯から除き、親を上位帯へ、親の範囲を下位帯の壁へ。
+        # 模擬適用: 子を列から除き、親を上の次数の列へ、親の範囲を下の次数の列の壁へ。
         run_ids = {id(i) for i in run}
         bands[level] = [i for i in band if id(i) not in run_ids]
         starts = [i.start_time for i in run if i.start_time is not None]
@@ -396,7 +399,7 @@ def plan_band_overflow(
 
 
 # ---------------------------------------------------------------------------
-# 帯あふれ束ね (D6 — 実行)
+# 列のあふれ束ね (D6 — 実行)
 # ---------------------------------------------------------------------------
 
 
@@ -406,7 +409,7 @@ def _build_consolidation_prompt(
     *,
     include_timestamp: bool = True,
 ) -> str:
-    """級 k+1 の親 digest を子 digest 群から語り直すプロンプト (§4-4 で正当)。"""
+    """次数 k+1 の親 digest を子 digest 群から語り直すプロンプト (§4-4 で正当)。"""
     from sai_memory.arasuji.context import get_episode_context_for_timerange
     from sai_memory.arasuji.generator import _format_entries_for_prompt
 
@@ -465,7 +468,7 @@ def _consolidate_run(
     *,
     persona_id: Optional[str],
 ) -> Optional[ArasujiEntry]:
-    """束ね列 1 本を級 target_level の親に確定する (親 + 子を単一 tx)。"""
+    """束ね列 1 本を次数 target_level の親に確定する (親 + 子を単一 tx)。"""
     entries = [i.entry for i in run if i.entry is not None]
     if len(entries) != len(run):
         return None
@@ -550,9 +553,9 @@ def run_band_overflow(
     persona_id: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> int:
-    """帯あふれを検査し、あふれた帯を古い端から上位へ束ねる。
+    """列のあふれを検査し、あふれた列を古い端から上へ束ねる。
 
-    帯 1 から上へ再帰的に判定する (束ねで上の帯が増えて更にあふれうる)。
+    次数 1 の列から上へ再帰的に判定する (束ねで上の次数の列が増えて更にあふれうる)。
     1 回の呼び出しで作る親は安全弁 (既定 3) まで — 大量 backlog は複数回の
     Metabolism に分けて収束させる (初回帰化の LLM コスト暴走防止)。
 
@@ -597,8 +600,8 @@ def run_band_overflow(
                 created += 1
                 consolidated_this_band = True
         if not consolidated_this_band:
-            # この帯では束ねられない (壁だらけ / 目標到達列なし / LLM 失敗)。
-            # 上の帯へ進む (次回の Metabolism で再挑戦)。
+            # この列では束ねられない (壁だらけ / 目標到達列なし / LLM 失敗)。
+            # 上の次数の列へ進む (次回の Metabolism で再挑戦)。
             level += 1
             if level > get_max_level(conn) + 1:
                 break

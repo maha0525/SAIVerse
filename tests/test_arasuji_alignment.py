@@ -3,7 +3,7 @@
 体験の構造 (docs/intent/experience_structure.md) §4 圧縮七原則のうち、
 整列計画で固定できる §4-2 / §4-3 / §4-4 / §4-5 を原則番号つきで固定する。
 (§4-1 退場時圧縮は生成経路側 test_metabolism_two_layer、§4-6/§4-7 は
-帯あふれ側のテストが持つ。)
+列のあふれ側のテストが持つ。)
 
 設計正典: docs/handoff/2026-07-21_w4_metabolism_ledger_handoff.md D3。
 """
@@ -141,7 +141,7 @@ class TestEpisodeDigestChunks(unittest.TestCase):
 
     def test_split_episode_across_runs_transcribed_once(self):
         """processed 挟みで同じ episode が別 run に分裂しても転写は計画全体で
-        1 回だけ (Codex W4 #6 — run 毎リセットの穴)。"""
+        1 回だけ (Codex W4 #6 — run 毎リセットの抜け)。"""
         msgs = [
             _msg("m1", "a" * 30, episode="episode:1"),
             _msg("m2", "x" * 30),  # processed → run 境界

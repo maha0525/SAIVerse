@@ -3,7 +3,7 @@
 docs/intent/beat_execution_context.md §3.2:
 
 - 編纂 (Chronicle 生成) は persona に一度 — 実行台帳の冪等 claim
-  (kind="metabolism.run"、idempotency_key = persona:窓末尾ID) で全入口が
+  (kind="metabolism.run"、idempotency_key = persona:提示コンテキスト末尾ID) で全入口が
   同じ排他を通る (M1)。
 - 退役 (anchor 前進) は model ごと — 編纂が済んだ ("ok") か編纂を持たない
   設計 ("disabled") のときだけ、渡された model の session_anchor 行を進める
@@ -49,7 +49,7 @@ def _msg(mid, created_at, *, chars=1_000, episode_ref=None, pulse_id=None):
 
 
 def _stub_chronicle_refs(_persona, folds):
-    """編纂が済んで級 1 エントリが引けた状態を模す。
+    """編纂が済んで一次あらすじ エントリが引けた状態を模す。
 
     実装は「あらすじを持たない fold は退場させない」(下限の手続き強制) なので、
     退役ゲートや退場の形を見るテストでは refs が付いた状態を前提にする。
@@ -60,7 +60,7 @@ def _stub_chronicle_refs(_persona, folds):
 
 
 def _window(messages, *, anchor_id=None, folds=None):
-    """穴なしの窓 (raw == presented)。"""
+    """圧縮区間なしの提示コンテキスト (raw == presented)。"""
     return SessionWindow(
         anchor_id=anchor_id or (messages[0]["id"] if messages else None),
         raw=list(messages),
@@ -70,10 +70,10 @@ def _window(messages, *, anchor_id=None, folds=None):
 
 
 def _history_manager(messages):
-    """窓を返すだけの history_manager スタブ。
+    """提示コンテキストを返すだけの history_manager スタブ。
 
-    Metabolism は Beat ロックの内側で窓を撮り直す (ロック外の値で穴を上書き
-    保存すると先行の穴が消えるため) ので、anchor 行があるテストでは実際に
+    Metabolism は Beat ロックの内側で提示コンテキストを撮り直す (ロック外の値で圧縮区間を上書き
+    保存すると先行の圧縮区間が消えるため) ので、anchor 行があるテストでは実際に
     ここが呼ばれる。
     """
     return SimpleNamespace(
@@ -111,7 +111,7 @@ class FakeExecutor:
     """execute_plan の呼び出しを記録するだけの実行器代替 (W4 新経路)。
 
     クラス属性 ``calls`` / ``raise_error`` / ``report_cancelled`` をテストが
-    操作する。(arasuji_entries には書かないため、plan は毎回同じ窓を見る —
+    操作する。(arasuji_entries には書かないため、plan は毎回同じ提示コンテキストを見る —
     claim の dedup だけで二重実行が止まることを検証できる。)
     """
 
@@ -213,13 +213,13 @@ class ChronicleClaimTest(unittest.TestCase):
             return lifecycle.generate_chronicle(self._persona(), force=True)
 
     def test_same_window_second_begin_is_skipped(self):
-        """① 同じ窓の二重実行は claim (created=False) でスキップされる。"""
+        """① 同じ提示コンテキストの二重実行は claim (created=False) でスキップされる。"""
         lifecycle = self._make_lifecycle()
         first = self._generate(lifecycle)
         self.assertEqual(first, "ok")
         self.assertEqual(len(FakeExecutor.calls), 1)
 
-        # FakeExecutor は arasuji_entries に書かないため窓は同一のまま。
+        # FakeExecutor は arasuji_entries に書かないため提示コンテキストは同一のまま。
         # 台帳の dedup だけが二重編纂 (二重 LLM コスト) を止める。
         second = self._generate(lifecycle)
         self.assertEqual(second, "deferred")
@@ -227,19 +227,19 @@ class ChronicleClaimTest(unittest.TestCase):
 
     def test_failed_generation_returns_failed_and_same_window_retries(self):
         """② (編纂側) 生成失敗 → "failed"。failed claim はキー退避されるため
-        **同じ窓でも**再試行できる (claim_execution の意味論 — failed は
+        **同じ提示コンテキストでも**再試行できる (claim_execution の意味論 — failed は
         副作用ゼロ保証で再実行安全。Codex W4 二巡 #6)。"""
         lifecycle = self._make_lifecycle()
         FakeExecutor.raise_error = True
         self.assertEqual(self._generate(lifecycle), "failed")
         self.assertEqual(len(FakeExecutor.calls), 1)
 
-        # 同じ窓: failed 行はキー退避 → 新しい claim で再試行成功
+        # 同じ提示コンテキスト: failed 行はキー退避 → 新しい claim で再試行成功
         FakeExecutor.raise_error = False
         self.assertEqual(self._generate(lifecycle), "ok")
         self.assertEqual(len(FakeExecutor.calls), 2)
 
-        # 完了後の同じ窓: completed 行がブロック → deferred (二重編纂なし)
+        # 完了後の同じ提示コンテキスト: completed 行がブロック → deferred (二重編纂なし)
         self.assertEqual(self._generate(lifecycle), "deferred")
         self.assertEqual(len(FakeExecutor.calls), 2)
 
@@ -254,19 +254,19 @@ class ChronicleClaimTest(unittest.TestCase):
     def test_cancelled_returns_deferred_and_claim_not_completed(self):
         """⑨ キャンセル = 部分適用を completed で封印しない (Codex W4 #8)。
         status は "deferred" (anchor 据え置き)、claim は failed 終端 →
-        キー退避で**同じ窓のまま**すぐ再実行できる (二巡 #6)。"""
+        キー退避で**同じ提示コンテキストのまま**すぐ再実行できる (二巡 #6)。"""
         lifecycle = self._make_lifecycle()
         FakeExecutor.report_cancelled = True
         self.assertEqual(self._generate(lifecycle), "deferred")
 
-        # claim は completed でなく failed — 窓が伸びなくても再試行できる
+        # claim は completed でなく failed — 提示コンテキストが伸びなくても再試行できる
         FakeExecutor.report_cancelled = False
         self.assertEqual(self._generate(lifecycle), "ok")
 
     def test_band_backlog_counts_into_confirmation_gate(self):
-        """⑩ 帯あふれ backlog の統合 LLM 予測が確認ゲートの LLM 数に乗り、
-        plan が空でも帯統合だけの実行に進む (Codex W4 #3/#4)。"""
-        # 実 arasuji entries で帯 1 のあふれを作る (U=100/B=2 → cap 200)
+        """⑩ 列のあふれ backlog の統合 LLM 予測が確認ゲートの LLM 数に乗り、
+        plan が空でも列の統合だけの実行に進む (Codex W4 #3/#4)。"""
+        # 実 arasuji entries で次数 1 の列のあふれを作る (U=100/B=2 → cap 200)
         from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
         init_arasuji_tables(self.adapter.conn)
         for i in range(4):
@@ -306,9 +306,9 @@ class ChronicleClaimTest(unittest.TestCase):
             lifecycle = self._make_lifecycle(with_ledger=False)
             status = lifecycle.generate_chronicle(self._persona(), force=True)
         self.assertEqual(status, "ok")
-        # plan は空 (全 processed) — それでも帯統合が実行された。
+        # plan は空 (全 processed) — それでも列の統合が実行された。
         # backfill は dry 予測より前 (Codex W4 三巡 #3 — 近似 dry と実測
-        # backfill の食い違いで早期 return が永久化する穴の閉塞)。
+        # backfill の食い違いで早期 return が永久化する圧縮区間の閉塞)。
         self.assertEqual(order, ["backfill", "band"])
         # executor は plan 空 (0 メッセージ) で呼ばれるか、呼ばれても空
         if FakeExecutor.calls:
@@ -345,7 +345,7 @@ class ChronicleClaimTest(unittest.TestCase):
             self.assertEqual(len(FakeExecutor.calls), calls_before)  # 実行されない
 
     def test_compile_groups_do_not_bundle_across_holes(self):
-        """離れた範囲 (窓の途中を畳んだ結果) は 1 つのあらすじに束ねない (§4-5)。"""
+        """離れた範囲 (提示コンテキストの途中を畳んだ結果) は 1 つのあらすじに束ねない (§4-5)。"""
         lifecycle = self._make_lifecycle(with_ledger=False)
         all_ids = self._message_ids()
 
@@ -407,7 +407,7 @@ class RetirementGateTest(unittest.TestCase):
 
     def _run(self, lifecycle, model_key=None):
         # 低水位 2,000字 = 末尾 2 通を保護 / 目標 2,000字 / U=2,500字。
-        # → 退場候補帯 m0..m2 が 1 束 (3,000字 ≥ U) になり、先頭から連続なので
+        # → 退場候補範囲 m0..m2 が 1 束 (3,000字 ≥ U) になり、先頭から連続なので
         #   anchor が飲み込んで m3 へ進む。
         messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
         window = _window(messages)
@@ -544,7 +544,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
     def test_small_open_episode_is_not_folded(self):
         """U 未満の open episode は畳めない = 生のまま残る (会話 A が守られる)。
 
-        古い側に U 未満の open 会話、新しい側に保護帯。退場候補帯は open だけ
+        古い側に U 未満の open 会話、新しい側に保護範囲。退場候補範囲は open だけ
         なので、どのまとまりも U に届かず今回は何も畳まない。
         """
         ref = self._open_episode()["episode_ref"]
@@ -559,7 +559,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
     def test_large_open_episode_folds_in_pulse_units(self):
         """U に達した open episode は pulse 関節で刻んで部分退場する (§6)。"""
         ref = self._open_episode()["episode_ref"]
-        # pulse p1 = 2 通 (2,000字) で U 到達。p2 以降は保護帯側。
+        # pulse p1 = 2 通 (2,000字) で U 到達。p2 以降は保護範囲側。
         msgs = [
             _msg("a0", 100, chars=1_000, episode_ref=ref, pulse_id="p1"),
             _msg("a1", 101, chars=1_000, episode_ref=ref, pulse_id="p1"),
@@ -570,7 +570,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         folded = []
         lifecycle._record_partial_episode = lambda p, f: folded.append(f.message_ids)
         self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
-        # p1 が丸ごと退場し、anchor は a2 へ。p2 は保護帯なので残る。
+        # p1 が丸ごと退場し、anchor は a2 へ。p2 は保護範囲なので残る。
         self.assertEqual(self._anchor(lifecycle), "a2")
         self.assertEqual(folded, [["a0", "a1"]])
 
@@ -603,7 +603,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
     def test_fold_without_chronicle_entry_is_not_evicted(self):
         """あらすじを持たない範囲は退場させない (下限の手続き強制、§2)。
 
-        穴は「生ログの代わりに digest を見せる」記録なので、digest が無い穴は
+        圧縮区間は「生ログの代わりに digest を見せる」記録なので、digest が無い圧縮区間は
         その範囲を黙って消すだけになる。退場そのものを見送って生で残す。
         """
         msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(6)]
@@ -616,16 +616,16 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         self.assertEqual(saved, [[]])
 
     def test_same_range_is_not_folded_twice(self):
-        """既に穴になっている範囲を二重に記録しない。
+        """既に圧縮区間になっている範囲を二重に記録しない。
 
         あらすじが一時的に引けないと提示に生ログが戻る (fail-open) ため、計画は
-        同じ範囲をもう一度畳もうとする。ここで弾かないと同一範囲の穴が毎回 1 本
+        同じ範囲をもう一度畳もうとする。ここで弾かないと同一範囲の圧縮区間が毎回 1 本
         ずつ積み上がり、JSON と照会コストが単調に増える。
         """
         from sea.session_window import FoldedRange
         open_ref = self._open_episode()["episode_ref"]
         msgs = [
-            # 先頭は U 未満の open → 畳めない = anchor が動けない (穴が残る形)
+            # 先頭は U 未満の open → 畳めない = anchor が動けない (圧縮区間が残る形)
             _msg("a0", 100, chars=500, episode_ref=open_ref),
             _msg("m1", 101, chars=1_000), _msg("m2", 102, chars=1_000),
             _msg("m3", 103, chars=1_000), _msg("m4", 104, chars=1_000),
@@ -696,11 +696,11 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         self.assertEqual([p["layer"] for p in parents], ["digest"])
 
     def test_anchor_moved_outside_eviction_clears_holes(self):
-        """退場経路以外で anchor が差し替わったら穴を捨てる。
+        """退場経路以外で anchor が差し替わったら圧縮区間を捨てる。
 
         TTL 失効後の最小ロードで新しい起点が立ち、LLM 成功後の touch がそれを
-        永続化する経路がある。古い穴を残すと、その範囲は窓に出ない (anchor の
-        外) のに head の Chronicle 枠からは除外され続け、**窓にも head にも
+        永続化する経路がある。古い圧縮区間を残すと、その範囲は提示コンテキストに出ない (anchor の
+        外) のに head の Chronicle 枠からは除外され続け、**提示コンテキストにも head にも
         現れない**体験になる。
         """
         from sea.session_window import FoldedRange
@@ -719,7 +719,7 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
                                           anchor_id="z9")
         self.assertEqual(lifecycle.load_folded_ranges(PERSONA_ID, "std-model"), [])
 
-        # 同じ anchor への再 touch では穴を消さない
+        # 同じ anchor への再 touch では圧縮区間を消さない
         lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
             FoldedRange(message_ids=["z9"], chronicle_entry_ids=["e2"]),
         ])
@@ -731,12 +731,12 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         )
 
     def test_middle_fold_keeps_anchor_and_records_hole(self):
-        """窓の途中を畳んだときは anchor を動かさず穴として記録する (§6)。"""
+        """提示コンテキストの途中を畳んだときは anchor を動かさず圧縮区間として記録する (§6)。"""
         open_ref = self._open_episode()["episode_ref"]
         msgs = [
             # 先頭は U 未満の open 会話 A → 畳めない = anchor は動けない
             _msg("a0", 100, chars=500, episode_ref=open_ref),
-            # 続く無帰属 (closed 扱い) が U に到達 → 窓の途中が畳まれる
+            # 続く無帰属 (closed 扱い) が U に到達 → 提示コンテキストの途中が畳まれる
             _msg("b0", 101, chars=1_000),
             _msg("b1", 102, chars=1_000),
             _msg("k0", 200, chars=1_000),

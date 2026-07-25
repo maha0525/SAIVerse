@@ -582,7 +582,7 @@ def mark_consolidated(
     """Mark entries as consolidated into a parent entry.
 
     ``commit=False`` は親 INSERT と子 UPDATE を単一トランザクションに束ねる
-    帯あふれ束ね (W4 D6 — M2-a の解) 用。呼び出し側が commit/rollback する。
+    列のあふれ束ね (W4 D6 — M2-a の解) 用。呼び出し側が commit/rollback する。
     """
     if not entry_ids:
         return
@@ -1283,7 +1283,7 @@ def find_covering_entry(
 def get_entries_covering_messages(
     conn: sqlite3.Connection, message_ids: Sequence[str],
 ) -> List[ArasujiEntry]:
-    """指定メッセージ群を source に持つ級 1 エントリを時系列順で返す。
+    """指定メッセージ群を source に持つ一次あらすじ エントリを時系列順で返す。
 
     退場時に畳んだ範囲 (docs/intent/chronicle_eviction.md §6) から、その範囲を
     覆うあらすじを引き当てるための照会。範囲が複数エントリに分かれている場合も

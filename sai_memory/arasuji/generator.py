@@ -1,15 +1,15 @@
-"""Arasuji (Chronicle) 級 1 生成の共有部品。
+"""Arasuji (Chronicle) 一次あらすじ生成の共有部品。
 
 W4 (体験の構造 工程(2)) で旧 20 件固定バッチ経路 (ArasujiGenerator /
 maybe_consolidate / gap-fill / dismantle) は撤去された — 生成経路の後継は
 sai_memory/arasuji/alignment.py (整列計画) + executor.py (チャンク実行) +
-bands.py (帯あふれ束ね)。
+bands.py (列のあふれ束ね)。
 
 本モジュールに残るのは:
 
 - :func:`generate_level1_arasuji` — 単一エントリの再生成
   (UI の regenerate → scripts/arasuji/build_arasuji_core.regenerate_entry_from_messages)
-  が使う級 1 生成の一回分。
+  が使う一次あらすじ生成の一回分。
 - プロンプト整形・usage 記録のユーティリティ (_format_* / _record_llm_usage)
   — executor / bands / note_extractor / note_organizer と共有。
 """

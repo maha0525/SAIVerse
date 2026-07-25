@@ -353,9 +353,9 @@ def get_episode_context(
         char_budget: ``None`` → legacy count-based behavior (no budget).
             ``USE_DEFAULT_BUDGET`` → resolve from env / default (§6.2).
             Explicit int → use that budget (0 disables → count-based).
-        exclude_entry_ids: 掲示から外すエントリ id。**提示窓の中で digest に
+        exclude_entry_ids: 掲示から外すエントリ id。**提示提示コンテキストの中で digest に
             置き換えて見せている範囲**を head の Chronicle 枠から外すために使う
-            (docs/intent/chronicle_eviction.md §6)。同じあらすじが窓の中と head
+            (docs/intent/chronicle_eviction.md §6)。同じあらすじが提示コンテキストの中と head
             の両方に出ると、体験が二重化して時系列の錯覚を招くため。
 
     Returns:

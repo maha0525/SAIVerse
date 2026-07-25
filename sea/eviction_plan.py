@@ -2,7 +2,7 @@
 
 docs/intent/chronicle_eviction.md の §3 (規範) / §4 (三水位) / §5 (手続き) の実装。
 **純関数のみ** — DB も LLM も触らない。呼び出し側 (sea/session_lifecycle.py) が
-提示中の窓と open episode 集合を渡し、返った計画を適用する。
+提示中の提示コンテキストと open episode 集合を渡し、返った計画を適用する。
 
 設計の芯 (chronicle_eviction.md §1〜§3):
 
@@ -26,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
 class Watermarks:
     """Metabolism の三水位 (文字数)。chronicle_eviction.md §4。
 
-    - ``low``: 直近保護帯。最新から遡ってこの文字数は退場させない。
+    - ``low``: 直近の保護範囲。最新から遡ってこの文字数は退場させない。
     - ``target``: Metabolism で軽くする到達点。
     - ``high``: 提示コンテキストがこれを超えたら発火。None = 文字数では発火せず
       ``token_triggered`` のみ。
@@ -39,7 +39,7 @@ class Watermarks:
 
 @dataclass
 class Fold:
-    """一度に畳んで退場させる連続メッセージ列 = 級 1 ノード 1 個ぶんの範囲。"""
+    """一度に畳んで退場させる連続メッセージ列 = 一次あらすじ 1 個ぶんの範囲。"""
 
     messages: List[Dict[str, Any]]
     #: この fold が「1 つの open episode の部分退場」ならその episode_ref。
@@ -72,7 +72,7 @@ class EvictionPlan:
     #: 畳んで退場させる範囲 (時系列順、互いに重ならない)。
     folds: List[Fold] = field(default_factory=list)
     #
-    # どの fold が anchor 前進になり、どれが窓の中の穴になるかは**ここでは
+    # どの fold が anchor 前進になり、どれが提示コンテキストの中の圧縮区間になるかは**ここでは
     # 決めない** — 判定には置き換え前の生ログの並びが要り、それを持っているのは
     # 適用側 (sea/session_lifecycle.py の ``_apply_eviction_plan``) だから。
     # 同じ真実を二箇所に置かない。
@@ -84,7 +84,7 @@ class EvictionPlan:
     projected_chars: int = 0
     #: 適用前の提示文字数。
     total_chars: int = 0
-    #: 保護帯の開始インデックス (この位置以降は退場させない)。
+    #: 保護範囲の開始インデックス (この位置以降は退場させない)。
     protected_from: int = 0
 
     @property
@@ -96,7 +96,7 @@ class EvictionPlan:
         return not self.folds
 
 
-#: 畳んだ範囲が提示面に残す置き換えメッセージの見込み文字数。
+#: 畳んだ範囲が提示コンテキストに残す置き換えメッセージの見込み文字数。
 #:
 #: 畳んでも提示は 0 にならない — その位置に「あらすじ + 圧縮マークの注釈」が立つ
 #: (§6)。実際の長さは生成してみるまで分からないので、計画では固定の見込みで
@@ -143,10 +143,10 @@ def _pulse_of(msg: Dict[str, Any]) -> Optional[str]:
 def _protection_boundary(
     messages: Sequence[Dict[str, Any]], low_chars: int,
 ) -> int:
-    """直近保護帯の開始インデックスを返す (§5-1、§5-4)。
+    """直近の保護範囲の開始インデックスを返す (§5-1、§5-4)。
 
     最新側から遡って ``low_chars`` 分を保護する。境界が pulse の途中に落ちたら
-    **古い側へ** 関節まで下げる — メッセージ単位でぶつ切りにせず、保護帯を広げる
+    **古い側へ** 関節まで下げる — メッセージ単位でぶつ切りにせず、保護範囲を広げる
     方向に倒す (「刻むときは pulse を丸ごと」experience_structure.md §6)。
     """
     if low_chars <= 0:
@@ -159,9 +159,9 @@ def _protection_boundary(
             boundary = i
             break
     else:
-        # 窓全体でも低水位に届かない = 全部が保護帯。
+        # 提示コンテキスト全体でも低水位に届かない = 全部が保護範囲。
         return 0
-    # pulse 関節へスナップ (古い側 = 保護帯を広げる向き)。
+    # pulse 関節へスナップ (古い側 = 保護範囲を広げる向き)。
     pulse = _pulse_of(messages[boundary])
     if pulse is not None:
         while boundary > 0 and _pulse_of(messages[boundary - 1]) == pulse:
@@ -177,13 +177,13 @@ def _is_folded_placeholder(msg: Dict[str, Any]) -> bool:
 
 @dataclass
 class _Unit:
-    """退場候補帯を「同一 episode 帰属の連続域」で切った束ねの原子。"""
+    """退場候補範囲を「同一 episode 帰属の連続域」で切った束ねの原子。"""
 
     messages: List[Dict[str, Any]]
     ref: Optional[str]
     is_open: bool
-    #: 既に畳まれた digest = 壁。**同一レベルでは**再圧縮しないし (§4-4 — 級 1 の
-    #: digest から別の級 1 を作らない。上位級への束ねは bands.py の仕事で正当)、
+    #: 既に畳まれた digest = 壁。**同一レベルでは**再圧縮しないし (§4-4 — 一次あらすじの
+    #: digest から別の一次あらすじを作らない。上の次数への束ねは bands.py の仕事で正当)、
     #: これを跨いで前後を束ねることもしない (跨ぐと非連続な束ね §4-5 になる)。
     is_wall: bool = False
 
@@ -195,7 +195,7 @@ class _Unit:
 def _build_units(
     candidates: Sequence[Dict[str, Any]], open_refs: Set[str],
 ) -> List[_Unit]:
-    """退場候補帯を束ねの原子に割る。
+    """退場候補範囲を束ねの原子に割る。
 
     原子 = 「同一 episode 帰属の連続域」または「無帰属メッセージ 1 件」。無帰属は
     episode の制約が無いのでどこでも切れる (sai_memory/arasuji/alignment.py の
@@ -245,14 +245,14 @@ def plan_eviction(
     *,
     target_chars: int,
 ) -> EvictionPlan:
-    """提示中の窓から「今回退場させる範囲」を計画する (chronicle_eviction.md §5)。
+    """提示中の提示コンテキストから「今回退場させる範囲」を計画する (chronicle_eviction.md §5)。
 
     Args:
-        messages: 提示中の窓 (created_at 昇順、既に畳んだ穴は digest に置換済み)。
+        messages: 提示中の提示コンテキスト (created_at 昇順、既に畳んだ圧縮区間は digest に置換済み)。
         open_episode_refs: いま開いている episode_ref の集合。
-        watermarks: 三水位 (低 = 保護帯 / 目標 = 到達点 / 高 = 発火。発火判定は
+        watermarks: 三水位 (低 = 保護範囲 / 目標 = 到達点 / 高 = 発火。発火判定は
             呼び出し側の責務で、ここでは low / target だけを使う)。
-        target_chars: 級 1 の標準被覆 U。1 つの fold が目指す大きさ。
+        target_chars: 一次あらすじの標準被覆 U。1 つの fold が目指す大きさ。
 
     Returns:
         EvictionPlan。``folds`` が空で ``force_close_episode_ref`` が立っている
@@ -264,7 +264,7 @@ def plan_eviction(
         return plan
     if target_chars <= ESTIMATED_FOLD_PLACEHOLDER_CHARS:
         # U が置き換えの見込みより小さいと、1 束あたりの正味削減が常に 0 になり、
-        # 「減らないのに畳み続ける」= 候補帯を出し切る過剰退場になる。設定ミス
+        # 「減らないのに畳み続ける」= 候補範囲を出し切る過剰退場になる。設定ミス
         # (SAIVERSE_CHRONICLE_BAND_BUDGET を極端に下げた等) なので退場を見送る。
         LOGGER.warning(
             "[eviction] target_chars=%d is not larger than the fold placeholder "
@@ -276,7 +276,7 @@ def plan_eviction(
     boundary = _protection_boundary(messages, watermarks.low)
     plan.protected_from = boundary
     if boundary <= 0:
-        # 退場候補帯が無い = 直近保護帯だけで窓が埋まっている。削れない。
+        # 退場候補範囲が無い = 直近の保護範囲だけで提示コンテキストが埋まっている。削れない。
         return plan
 
     candidates = list(messages[:boundary])

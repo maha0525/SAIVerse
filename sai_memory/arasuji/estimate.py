@@ -90,8 +90,8 @@ def estimate_chronicle_generation_cost(
     summary = plan.summary
     unprocessed = plan.total_unprocessed
 
-    # 帯あふれ束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ
-    # 選定ロジックの dry 実行 — 既存の未統合帯 + 新規チャンクの実 coverage で
+    # 列のあふれ束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ
+    # 選定ロジックの dry 実行 — 既存の未統合の列 + 新規チャンクの実 coverage で
     # 判定する (Codex W4 #9。新規数だけの近似は既存 backlog を見落とす)。
     from sai_memory.arasuji.bands import plan_band_overflow
     base = chronicle_band_base()

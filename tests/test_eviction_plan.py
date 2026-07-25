@@ -14,7 +14,7 @@ from sea.eviction_plan import (
 )
 from sea.session_window import FOLDED_MARKER
 
-U = 2_000  # 級 1 の標準被覆 (テスト内での U)
+U = 2_000  # 一次あらすじの標準被覆 (テスト内での U)
 
 
 def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False):
@@ -45,7 +45,7 @@ class ProtectionBandTest(unittest.TestCase):
     def test_recent_band_is_protected(self):
         msgs = [msg(f"m{i}", 100 + i) for i in range(6)]
         result = plan(msgs, low=3_000, target=1_000)
-        # 末尾 3,000字 = m3..m5 が保護帯 → 候補は m0..m2
+        # 末尾 3,000字 = m3..m5 が保護範囲 → 候補は m0..m2
         self.assertEqual(result.protected_from, 3)
         folded = [mid for f in result.folds for mid in f.message_ids]
         self.assertNotIn("m3", folded)
@@ -59,7 +59,7 @@ class ProtectionBandTest(unittest.TestCase):
         self.assertTrue(result.is_empty)
 
     def test_boundary_snaps_back_to_pulse_joint(self):
-        """§5-4: 保護帯の境界が pulse の途中に落ちたら古い側へ下げる
+        """§5-4: 保護範囲の境界が pulse の途中に落ちたら古い側へ下げる
         (メッセージ単位でぶつ切りにしない = 保護を広げる向きに倒す)。"""
         msgs = [
             msg("a0", 100, pulse="p1"),
@@ -126,7 +126,7 @@ class ClosedBundlingTest(unittest.TestCase):
         self.assertEqual(result.folds[0].message_ids, ["c0", "c1"])
 
     def test_under_u_run_is_not_folded(self):
-        """U に届かない列は畳まない (小粒の級 1 ノードを作らない)。"""
+        """U に届かない列は畳まない (小粒の一次あらすじを作らない)。"""
         msgs = [msg("c0", 100, chars=500), msg("k0", 200), msg("k1", 201)]
         result = plan(msgs, [], low=2_000, target=0)
         self.assertTrue(result.is_empty)
@@ -151,10 +151,10 @@ class TargetWatermarkTest(unittest.TestCase):
         self.assertEqual(result.projected_chars, 8_000 - 2 * net)
 
     def test_stops_when_candidates_run_out(self):
-        """候補帯を出し切っても目標に届かないときは、そこで止まる (best-effort)。"""
+        """候補範囲を出し切っても目標に届かないときは、そこで止まる (best-effort)。"""
         msgs = [msg(f"m{i}", 100 + i) for i in range(6)]
         result = plan(msgs, [], low=2_000, target=0)
-        # 候補は m0..m3 の 2 束まで。保護帯 (m4,m5) には手を付けない。
+        # 候補は m0..m3 の 2 束まで。保護範囲 (m4,m5) には手を付けない。
         self.assertEqual(len(result.folds), 2)
         self.assertGreater(result.projected_chars, 0)
 

@@ -1,4 +1,4 @@
-"""窓の中で畳まれた範囲の提示 (sea/session_window.py) のテスト。
+"""提示コンテキストの中で畳まれた範囲の提示 (sea/session_window.py) のテスト。
 
 docs/intent/chronicle_eviction.md §6 (見せ方):
 
@@ -82,10 +82,10 @@ class ApplyFoldsTest(unittest.TestCase):
         )
 
     def test_fold_head_outside_window_still_shows_placeholder(self):
-        """範囲の先頭が窓の外に出ても、窓に残る分は置き換えとして見える。
+        """範囲の先頭が提示コンテキストの外に出ても、提示コンテキストに残る分は置き換えとして見える。
 
-        anchor が範囲の途中まで前進した穴で先頭固定にすると、置き換えも生ログも
-        出ず**体験が黙って消える**（窓にも head にも出ない）。位置は「窓に残って
+        anchor が範囲の途中まで前進した圧縮区間で先頭固定にすると、置き換えも生ログも
+        出ず**体験が黙って消える**（提示コンテキストにも head にも出ない）。位置は「提示コンテキストに残って
         いる最初のメッセージ」に取る。
         """
         fold = FoldedRange(
@@ -103,12 +103,12 @@ class ApplyFoldsTest(unittest.TestCase):
 
 class PruneFoldsTest(unittest.TestCase):
     def test_fold_outside_window_is_dropped(self):
-        """anchor が前進して窓から出た穴は落とす (head の Chronicle 枠が担当)。"""
+        """anchor が前進して提示コンテキストから出た圧縮区間は落とす (head の Chronicle 枠が担当)。"""
         folds = [FoldedRange(message_ids=["old0", "old1"])]
         self.assertEqual(prune_folds(folds, ["m0", "m1"]), [])
 
     def test_partially_live_fold_is_kept(self):
-        """一部でも窓に残っている穴は残す (消すと生ログが復活して窓が膨らむ)。"""
+        """一部でも提示コンテキストに残っている圧縮区間は残す (消すと生ログが復活して提示コンテキストが膨らむ)。"""
         folds = [FoldedRange(message_ids=["old0", "m0"])]
         self.assertEqual(len(prune_folds(folds, ["m0", "m1"])), 1)
 
@@ -132,7 +132,7 @@ class SerializationTest(unittest.TestCase):
         self.assertIsNone(serialize_folds([]))
 
     def test_broken_json_degrades_to_no_holes(self):
-        """壊れた記録は「穴なし」に縮退する = 生ログ提示 (体験を失わない側)。"""
+        """壊れた記録は「圧縮区間なし」に縮退する = 生ログ提示 (体験を失わない側)。"""
         self.assertEqual(deserialize_folds("{not json"), [])
         self.assertEqual(deserialize_folds(None), [])
 

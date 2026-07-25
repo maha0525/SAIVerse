@@ -102,7 +102,7 @@ class TestChunkKinds(ExecutorTestBase):
         self.assertEqual(meta["coverage_chars"], 5)
 
     def test_episode_digest_chunk_transcribes(self):
-        """恒等転写 (§4-4): digest 本文をそのまま級 1 ノードに置く (LLM なし)。"""
+        """恒等転写 (§4-4): digest 本文をそのまま一次あらすじに置く (LLM なし)。"""
         client = _CountingClient()
         chunk = _chunk(
             CHUNK_EPISODE_DIGEST,

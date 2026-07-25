@@ -34,7 +34,7 @@ class SessionLifecycle:
 
         docs/intent/chronicle_eviction.md §4。水位はモデル依存
         (beat_execution_context.md §3.2 — 各 Session は自分の model の閾値で
-        自分の窓を管理する)。``model_key`` は実行 model。None なら従来どおり
+        自分の提示コンテキストを管理する)。``model_key`` は実行 model。None なら従来どおり
         ``persona.model`` にフォールバックする。
 
         manager の override (グローバル設定 UI) が最優先。model が解決できない
@@ -100,7 +100,7 @@ class SessionLifecycle:
     def load_folded_ranges(
         self, persona_id: Optional[str], model_key: Optional[str],
     ) -> List["FoldedRange"]:
-        """(persona, model) の窓に空いている穴を読む (chronicle_eviction.md §6)。"""
+        """(persona, model) の提示コンテキストに空いている圧縮区間を読む (chronicle_eviction.md §6)。"""
         from sea.session_window import deserialize_folds
         entry = self.load_anchor_entry(persona_id, model_key)
         return deserialize_folds(entry.get("folded_ranges") if entry else None)
@@ -111,7 +111,7 @@ class SessionLifecycle:
         model_key: Optional[str],
         folds: List["FoldedRange"],
     ) -> None:
-        """穴を session_anchor 行へ書く。anchor / TTL は触らない。"""
+        """圧縮区間を session_anchor 行へ書く。anchor / TTL は触らない。"""
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return
         if not persona_id or not model_key:
@@ -125,8 +125,8 @@ class SessionLifecycle:
                 PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
             ).first()
             if row is None:
-                # anchor 行が無い = 窓の起点が無い。穴だけ先に持っても意味がない。
-                # ただし捨てる穴があるなら黙って落とさない (提示から体験が消える)。
+                # anchor 行が無い = 提示コンテキストの起点が無い。圧縮区間だけ先に持っても意味がない。
+                # ただし捨てる圧縮区間があるなら黙って落とさない (提示から体験が消える)。
                 if payload:
                     LOGGER.warning(
                         "[metabolism] no anchor row for %s/%s; %d folded ranges were "
@@ -263,13 +263,13 @@ class SessionLifecycle:
                 db.add(row)
             new_anchor_id = entry.get("anchor_id")
             if row.ANCHOR_MESSAGE_ID != new_anchor_id and row.FOLDED_RANGES_JSON:
-                # 畳んだ範囲は「この anchor 以降の窓」に対する記録なので、anchor が
+                # 畳んだ範囲は「この anchor 以降の提示コンテキスト」に対する記録なので、anchor が
                 # 差し替わった時点で無効になる (chronicle_eviction.md §6)。退場経路
                 # 以外でも anchor は動く — TTL 失効後の最小ロードで新しい起点が立ち、
-                # LLM 成功後の touch がそれを永続化する。古い穴を残すと、窓には
+                # LLM 成功後の touch がそれを永続化する。古い圧縮区間を残すと、提示コンテキストには
                 # 出ないのに head の Chronicle 枠からは除外され続け、その体験が
                 # どこにも現れなくなる。正規の退場経路は anchor 前進の直後に
-                # 穴を書き直すので、ここでクリアしても無傷。
+                # 圧縮区間を書き直すので、ここでクリアしても無傷。
                 LOGGER.info(
                     "[metabolism] anchor moved outside the eviction path "
                     "(%s -> %s); clearing folded ranges for %s/%s",
@@ -736,7 +736,7 @@ class SessionLifecycle:
         """Check if metabolism is needed after response and run if so.
 
         ``model_key`` はこの Pulse の実行 model (beat_execution_context.md §3.2 —
-        閾値・窓・退役は model ごと)。None なら従来どおり ``persona.model``。
+        閾値・提示コンテキスト・退役は model ごと)。None なら従来どおり ``persona.model``。
         発火判定の anchor は session_anchor 行 (persona, model) から読む —
         旧 ``history_manager.metabolism_anchor_message_id`` (persona 単一可変
         属性) は廃止した。
@@ -767,7 +767,7 @@ class SessionLifecycle:
         if watermarks is None:
             return
 
-        # 発火判定は**提示される窓**の文字数で行う (chronicle_eviction.md §4)。
+        # 発火判定は**提示される提示コンテキスト**の文字数で行う (chronicle_eviction.md §4)。
         # 既に畳んだ範囲は digest に置き換わって提示されるので、生ログの合計では
         # なく置き換え後の量を数える — でないと「畳んだのに数字が減らない」で
         # 発火し続ける。
@@ -850,10 +850,10 @@ class SessionLifecycle:
     def get_presented_window(
         self, persona, model_key: Optional[str], anchor_id: Optional[str] = None,
     ) -> "SessionWindow":
-        """いまペルソナに提示される窓 (= anchor 以降 − 畳まれた範囲 + その digest)。
+        """いまペルソナに提示される提示コンテキスト (= anchor 以降 − 畳まれた範囲 + その digest)。
 
-        chronicle_eviction.md §6。**提示とMetabolismの勘定が同じ窓を見るための
-        一点**。退場が episode 単位になって窓の途中に穴が空くようになったため、
+        chronicle_eviction.md §6。**提示とMetabolismの勘定が同じ提示コンテキストを見るための
+        一点**。退場が episode 単位になって提示コンテキストの途中に圧縮区間が空くようになったため、
         「anchor 以降を全部」は提示の真実ではなくなった。
         """
         from sea.session_window import SessionWindow, prune_folds
@@ -894,9 +894,9 @@ class SessionLifecycle:
     def apply_window_folds(
         self, persona, model_key: Optional[str], messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """既に取得した窓に、畳まれた範囲の digest 置き換えを適用する (§6)。
+        """既に取得した提示コンテキストに、畳まれた範囲の digest 置き換えを適用する (§6)。
 
-        穴が無ければ ``messages`` をそのまま返す (既存経路は無変化)。context 構築
+        圧縮区間が無ければ ``messages`` をそのまま返す (既存経路は無変化)。context 構築
         (sea/runtime_context.py) が anchor 取得後に呼ぶ入口。
         """
         from sea.session_window import prune_folds
@@ -918,7 +918,7 @@ class SessionLifecycle:
     def _resolve_fold_digest(self, persona, fold: "FoldedRange") -> Optional[str]:
         """畳まれた範囲のあらすじ本文を引く。引けなければ None (= 生ログのまま)。
 
-        穴は記録時に必ず級 1 エントリ id を持つ (`_apply_eviction_plan`) ので、
+        圧縮区間は記録時に必ず一次あらすじ エントリ id を持つ (`_apply_eviction_plan`) ので、
         id 直引きで済む。source_ids の全走査に落ちるのは、エントリが解体・
         再編纂されて id が変わった旧記録だけ。
         """
@@ -1021,7 +1021,7 @@ class SessionLifecycle:
     def _force_close_episode(self, persona, episode_ref: str) -> bool:
         """最古の open episode を強制的に閉じる (chronicle_eviction.md §5-5)。
 
-        U 未満の open episode ばかりで退場候補帯が埋まると、どのまとまりも U に
+        U 未満の open episode ばかりで退場候補範囲が埋まると、どのまとまりも U に
         届かず Metabolism が手詰まりになる。閉じれば closed 同士でまたいで束ねられ、
         U に届いて退場できる。閉じ処理は意味を書かず再訪の鍵だけ書く規範
         (life_concept_map.md §9) に従い、機構が閉じたことだけ meta に残す。
@@ -1055,21 +1055,21 @@ class SessionLifecycle:
         plan,
         chronicle_status: str,
     ) -> None:
-        """退場計画を窓へ適用する — anchor 前進と「窓の中の穴」の書き分け。
+        """退場計画を提示コンテキストへ適用する — anchor 前進と「提示コンテキストの中の圧縮区間」の書き分け。
 
         規則は二つ (chronicle_eviction.md §2/§6):
 
-        1. **あらすじを持たない範囲は穴にしない**。穴は「生ログの代わりに digest を
-           見せる」ための記録なので、digest が無い穴はその範囲を黙って消すだけに
+        1. **あらすじを持たない範囲は圧縮区間にしない**。圧縮区間は「生ログの代わりに digest を
+           見せる」ための記録なので、digest が無い圧縮区間はその範囲を黙って消すだけに
            なる。引き当てられなかった fold は退場そのものを見送り、生ログのまま
            残す — 下限「退場したものは必ず編纂されている」をここで手続きとして
            強制する。例外は Chronicle を切っている persona (``disabled``) で、
            これは「編纂なしで忘れる」を選んだ設計上の合意なので anchor 前進だけ
-           許し、穴は作らない (見せる digest が永久に存在しないため)。
+           許し、圧縮区間は作らない (見せる digest が永久に存在しないため)。
         2. **生ログの並びで先頭から連続して畳まれた分は anchor が飲み込み、それ以外
-           は穴として残る**。先頭を飲み込めた分は提示範囲の外に出るので、その
-           あらすじは head の Chronicle 枠が担当する (穴として持ち続けると同じ
-           あらすじが窓と head に二重で出る)。
+           は圧縮区間として残る**。先頭を飲み込めた分は提示範囲の外に出るので、その
+           あらすじは head の Chronicle 枠が担当する (圧縮区間として持ち続けると同じ
+           あらすじが提示コンテキストと head に二重で出る)。
 
         判定に置き換え前の生ログ (``window.raw``) を使うのは、提示側は既に digest
         へ置き換わっていて、先頭が置き換えメッセージだと「連続」を判定できないため。
@@ -1087,7 +1087,7 @@ class SessionLifecycle:
         new_folds: List["FoldedRange"] = []
         for fold in plan.folds:
             if any(mid in already_folded for mid in fold.message_ids):
-                # 既に穴になっている範囲を二重に記録しない (同じ範囲の穴が
+                # 既に圧縮区間になっている範囲を二重に記録しない (同じ範囲の圧縮区間が
                 # 積み上がって JSON と照会コストが単調増加するのを防ぐ)。
                 LOGGER.debug(
                     "[metabolism] skipping already-folded range (persona=%s, %d messages)",
@@ -1104,10 +1104,10 @@ class SessionLifecycle:
             )
         self._attach_chronicle_refs(persona, new_folds)
 
-        # あらすじを持たない fold は「穴」になれない。Chronicle を切っている
+        # あらすじを持たない fold は「圧縮区間」になれない。Chronicle を切っている
         # persona (disabled) だけは例外で、anchor が飲み込める先頭連続域に限って
         # 退場を許す (編纂なしで忘れることを選んでいるため)。それ以外は退場を
-        # 見送り、生ログのまま窓に残す。
+        # 見送り、生ログのまま提示コンテキストに残す。
         candidates: List["FoldedRange"] = []
         for fold in new_folds:
             if fold.chronicle_entry_ids or chronicle_status == "disabled":
@@ -1123,13 +1123,13 @@ class SessionLifecycle:
         lead = 0
         while lead < len(raw_ids) and raw_ids[lead] in folded_ids:
             lead += 1
-        # 窓が空にならないよう、最後の 1 件は必ず残す (anchor は実在のメッセージを
+        # 提示コンテキストが空にならないよう、最後の 1 件は必ず残す (anchor は実在のメッセージを
         # 指す必要がある)。
         new_anchor_index = min(lead, len(raw_ids) - 1) if lead > 0 else 0
         absorbed = set(raw_ids[:new_anchor_index])
 
         # 実際に退場するのは「あらすじを持つ fold」か「anchor が丸ごと飲み込む
-        # fold」。どちらでもない fold は窓に残るので、退場した扱いの記録
+        # fold」。どちらでもない fold は提示コンテキストに残るので、退場した扱いの記録
         # (子 episode) も作らない — でないと退場していないのに「部分退場した」
         # 世界状態だけが毎ラウンド積み上がる。
         applied = [
@@ -1144,7 +1144,7 @@ class SessionLifecycle:
             if fold.episode_ref:
                 self._record_partial_episode(persona, fold)
 
-        # 穴として持ち続けるのは「窓に残っていて、かつあらすじを引ける」範囲だけ。
+        # 圧縮区間として持ち続けるのは「提示コンテキストに残っていて、かつあらすじを引ける」範囲だけ。
         # 飲み込まれた分のあらすじは head の Chronicle 枠が担当する。
         folds = [
             f for f in existing + applied
@@ -1167,7 +1167,7 @@ class SessionLifecycle:
         self.save_folded_ranges(persona_id, model_key, folds)
 
     def _attach_chronicle_refs(self, persona, folds: List["FoldedRange"]) -> None:
-        """畳んだ範囲を覆う級 1 エントリの id / ch:N を刻む (全 fold を 1 照会で)。"""
+        """畳んだ範囲を覆う一次あらすじ エントリの id / ch:N を刻む (全 fold を 1 照会で)。"""
         if not folds:
             return
         adapter = getattr(persona, "sai_memory", None)
@@ -1297,8 +1297,8 @@ class SessionLifecycle:
         経由) の呼び出しは同一スレッドの RLock 再入で無害 (関所も再実行され
         ない)。
 
-        ``window`` は発火判定側が撮った提示窓だが、**本体はロックの内側で撮り
-        直す** — ロック外の値で穴を上書きすると、先行の別入口が書いた穴が消える。
+        ``window`` は発火判定側が撮った提示提示コンテキストだが、**本体はロックの内側で撮り
+        直す** — ロック外の値で圧縮区間を上書きすると、先行の別入口が書いた圧縮区間が消える。
         """
         from sea.beat_gate import hold_beat
         with hold_beat(
@@ -1322,9 +1322,9 @@ class SessionLifecycle:
     ) -> None:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
 
-        窓は**ロックの内側で撮り直す**。呼び出し元 (発火判定) が撮った窓はロックの
-        外の値で、その間に別入口 (手動の記憶整理など) が穴や anchor を書いている
-        ことがある。古い窓を土台に穴を上書き保存すると、先行の穴が消えて生ログが
+        提示コンテキストは**ロックの内側で撮り直す**。呼び出し元 (発火判定) が撮った提示コンテキストはロックの
+        外の値で、その間に別入口 (手動の記憶整理など) が圧縮区間や anchor を書いている
+        ことがある。古い提示コンテキストを土台に圧縮区間を上書き保存すると、先行の圧縮区間が消えて生ログが
         復活し、しかもその範囲は編纂済みなので二重提示になる。
         """
         from sai_memory.arasuji.alignment import chronicle_band_budget
@@ -1343,7 +1343,7 @@ class SessionLifecycle:
             )
             return
 
-        # 退場計画 (chronicle_eviction.md §5): 保護帯を残し、退場候補帯の中で
+        # 退場計画 (chronicle_eviction.md §5): 保護範囲を残し、退場候補範囲の中で
         # 古い方から U に達したまとまりを、open episode は単独・closed 同士は
         # またいで畳む。目標水位に届くまで繰り返す。
         open_refs = self._open_episode_refs(persona)
@@ -1401,14 +1401,14 @@ class SessionLifecycle:
         # 切った persona は「編纂なしで忘れる」を選んでおり、前進を止めると
         # metabolism が永久デッドロックする。
         # 退場時圧縮 (§4-1): 編纂対象は**今回退場させる範囲そのもの**。範囲は連続
-        # とは限らない (窓の途中を畳むため) ので、fold ごとに区切って渡し、離れた
+        # とは限らない (提示コンテキストの途中を畳むため) ので、fold ごとに区切って渡し、離れた
         # 範囲が一つのあらすじに束ねられること (§4-5 連続束ねのみ) を防ぐ。
         #
         # 一致するのは**Chronicle 対象の集合に限っての話**。除外タグ
         # (handy_tool / spell / event_message / session_digest) のメッセージは
-        # fold に入っていても編纂されずに退場する — これは本設計で入った穴では
+        # fold に入っていても編纂されずに退場する — これは本設計で入った圧縮区間では
         # なく旧実装から続く既知の欠けで、下限「退場したものは必ず編纂されている」
-        # を字義どおりには満たしていない。実際に穴が空いた範囲は
+        # を字義どおりには満たしていない。実際に圧縮区間が空いた範囲は
         # `_apply_eviction_plan` が「あらすじを持たない fold は退場させない」で
         # 拾う (退場そのものを見送るので、消えるのではなく生ログのまま残る)。
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
@@ -1453,7 +1453,7 @@ class SessionLifecycle:
             )
 
             # 4. Dynamic State Sync: 可視化は model の節目 — anchor を進めた model の
-            # (persona, model) snapshot だけを再 capture する (§3.2。他 model の窓は
+            # (persona, model) snapshot だけを再 capture する (§3.2。他 model の提示コンテキストは
             # 自分の節目まで prefix を変えない = prefix cache 保護)。
             try:
                 from saiverse.dynamic_state import DynamicStateManager
@@ -1551,7 +1551,7 @@ class SessionLifecycle:
         ``compile_groups`` は退場時圧縮の対象 (chronicle_eviction.md §2/§5):
         指定時、**今回退場させる範囲そのもの**だけを編纂する。退場する集合と
         編纂する集合を一致させることで、下限「退場したものは必ず編纂されている」
-        が手続きとして保証される。範囲は連続とは限らない (窓の途中を畳むため)
+        が手続きとして保証される。範囲は連続とは限らない (提示コンテキストの途中を畳むため)
         ので、fold ごとの message id 列を並べて渡し、離れた範囲が一つのあらすじに
         束ねられること (§4-5 連続束ねのみ) を防ぐ。自動経路
         (_run_metabolism_locked) が退場計画から渡す。force / session close 等の
@@ -1572,7 +1572,7 @@ class SessionLifecycle:
               非 user Pulse で AUTONOMOUS_CHRONICLE_ENABLED=False の確認スキップは
               「編纂しないことを選んでいる」ポリシー OFF なのでこれに該当する
             - "failed": 例外・LLM 失敗・環境不備 (anchor 据え置き → 次回再試行)
-            - "deferred": 確認 timeout/拒否、または claim 競合 (別入口が同じ窓を
+            - "deferred": 確認 timeout/拒否、または claim 競合 (別入口が同じ提示コンテキストを
               編纂中/編纂済み。anchor 据え置き → 次回再試行)
         """
         from sai_memory.arasuji import init_arasuji_tables
@@ -1605,7 +1605,7 @@ class SessionLifecycle:
 
         # 帰化バックフィル (W4 D7): 既存 entry に coverage_chars を刻む
         # (一回きり・冪等・LLM なし)。**dry 予測より前に**実行する — dry が
-        # 近似値で動くと実測 backfill 後の帯あふれ判定と食い違い、
+        # 近似値で動くと実測 backfill 後の列のあふれ判定と食い違い、
         # 「予測 0 → 早期 return → backfill に永久に到達しない」が成立する
         # (Codex W4 三巡 #3)。帰化はメタデータ補完で確認ゲートの対象外。
         from sai_memory.arasuji.bands import backfill_coverage
@@ -1625,7 +1625,7 @@ class SessionLifecycle:
         if compile_groups is not None:
             wanted = {mid for group in compile_groups for mid in group}
             all_messages = [m for m in all_messages if m.id in wanted]
-            # fold の切れ目 = run の切れ目。窓の途中を畳むと範囲は不連続になるので、
+            # fold の切れ目 = run の切れ目。提示コンテキストの途中を畳むと範囲は不連続になるので、
             # 離れた範囲が一つのあらすじに束ねられないようにする (§4-5)。
             run_boundary_ids = {group[0] for group in compile_groups if group}
 
@@ -1648,10 +1648,10 @@ class SessionLifecycle:
             run_boundary_ids=run_boundary_ids,
         )
 
-        # 帯あふれ束ねの dry 予測 (Codex W4 #3/#4): 新チャンク確定後に発生する
+        # 列のあふれ束ねの dry 予測 (Codex W4 #3/#4): 新チャンク確定後に発生する
         # 統合 LLM 回数を実行と同じ選定ロジックで数え、確認ゲートの LLM 数に
-        # 含める。plan が空でも帯 backlog (前回の束ね失敗の残り) があれば
-        # 実行に進む — 「新チャンクが無いと帯束ねが永久に再試行されない」穴の
+        # 含める。plan が空でも列のあふれ backlog (前回の束ね失敗の残り) があれば
+        # 実行に進む — 「新チャンクが無いと列の束ねが永久に再試行されない」抜けの
         # 閉塞。
         from sai_memory.arasuji.bands import plan_band_overflow
         try:
@@ -1681,11 +1681,11 @@ class SessionLifecycle:
         unprocessed_count = plan.total_unprocessed
         estimated_llm_calls = plan.llm_calls + band_plan_count
 
-        # 冪等 claim 用の窓の同定: 窓末尾 ID = 編纂対象の時系列末尾の
-        # メッセージ ID (all_messages は created_at 昇順)。会話が進んで窓が
-        # 伸びれば ID が変わり新しい claim になる — 失敗した窓の再試行は
+        # 冪等 claim 用の提示コンテキストの同定: 提示コンテキスト末尾 ID = 編纂対象の時系列末尾の
+        # メッセージ ID (all_messages は created_at 昇順)。会話が進んで提示コンテキストが
+        # 伸びれば ID が変わり新しい claim になる — 失敗した提示コンテキストの再試行は
         # この自然な鍵の更新で成立する (failed 行は終端で再 claim 不可)。
-        # plan 空 (帯束ねのみ) の実行は claim しない — 束ねの並走防御は
+        # plan 空 (列の束ねのみ) の実行は claim しない — 束ねの並走防御は
         # bands の tx 内再検査が担う (並走時の +1 LLM コールは許容)。
         _window_end_id = (
             plan.chunks[-1].messages[-1].id if plan.chunks else None
@@ -1783,7 +1783,7 @@ class SessionLifecycle:
 
         # ---- 冪等 claim (実行台帳、M1 の解) ----
         # 確認ゲート通過後・LLM 実行前に claim する。(kind, idempotency_key) の
-        # UNIQUE で全入口が同じ排他を通り、同じ窓の二重編纂 (二重 LLM コスト) を
+        # UNIQUE で全入口が同じ排他を通り、同じ提示コンテキストの二重編纂 (二重 LLM コスト) を
         # 収束させる。台帳が無い環境 (旧テスト / 単体実行) は claim なしで従来
         # どおり実行する (degrade)。claim 自体の失敗も degrade (編纂を止めない —
         # arasuji の source_ids スキップが事後冪等の安全網として残る)。
@@ -1792,7 +1792,7 @@ class SessionLifecycle:
         if ledger is not None and _window_end_id is not None:
             try:
                 # claim_execution: failed 行 (前回の失敗 / キャンセル) はキーを
-                # 退避して新規 prepared を作る — キャンセル直後の同窓再実行が
+                # 退避して新規 prepared を作る — キャンセル直後の同提示コンテキスト再実行が
                 # 永久に deferred にならない (Codex W4 二巡 #6)。running /
                 # applied / completed / unknown はブロック。
                 execution_id, runnable, existing_status = ledger.claim_execution(
@@ -1922,7 +1922,7 @@ class SessionLifecycle:
             return "failed"
 
         if exec_result.cancelled:
-            # キャンセル = 部分適用。completed で封印すると同じ窓が再実行不能に
+            # キャンセル = 部分適用。completed で封印すると同じ提示コンテキストが再実行不能に
             # なる (冪等マーカーは適用の成功だけを封印する — W3 教訓③ /
             # Codex W4 #8)。failed 終端で claim を退け、anchor は据え置く。
             if ledger is not None and execution_id:
@@ -1936,8 +1936,8 @@ class SessionLifecycle:
             )
             return "deferred"
 
-        # 帯あふれ束ね (W4 D6): 級 k 帯の被覆合計があふれたら古い端から
-        # 級 k+1 へ束ねる。束ね失敗は編纂の成否に含めない (級 1 は確定済み =
+        # 列のあふれ束ね (W4 D6): 次数 k の列の被覆合計が上限を超えたら古い端から
+        # 次数 k+1 へ束ねる。束ね失敗は編纂の成否に含めない (一次あらすじは確定済み =
         # 情報の欠落はなく、次回の Metabolism の dry 予測が backlog を検出して
         # 自然に再試行する)。
         consolidated_count = 0

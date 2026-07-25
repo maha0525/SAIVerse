@@ -1,6 +1,6 @@
 """Episode-aligned Chronicle chunk executor (体験の構造 工程(2)).
 
-alignment.plan_alignment が作った AlignmentPlan を実行し、級 1 ノードを
+alignment.plan_alignment が作った AlignmentPlan を実行し、一次あらすじを
 チャンク単位の単一トランザクションで確定する。設計正典は
 docs/handoff/2026-07-21_w4_metabolism_ledger_handoff.md D4。
 
@@ -57,7 +57,7 @@ def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None
 
 
 def _is_already_compiled(conn: sqlite3.Connection, first_source_id: str) -> bool:
-    """チャンク先頭 message が既に級 1 の source に含まれているか (重複再検査)。
+    """チャンク先頭 message が既に一次あらすじの source に含まれているか (重複再検査)。
 
     M1 claim (プロセス間) と adapter._db_lock (プロセス内) の背後の三段目 —
     台帳の無い degrade 環境で同一 plan が並走したときの防御 (W4 D4)。plan は
@@ -193,7 +193,7 @@ def execute_plan(
     batch_callback: Optional[Callable[[List, Optional[str]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> ExecutionResult:
-    """整列計画を実行して級 1 ノードを確定する。
+    """整列計画を実行して一次あらすじを確定する。
 
     Args:
         plan: plan_alignment の出力。

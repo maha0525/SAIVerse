@@ -1,8 +1,8 @@
-"""提示窓の「畳まれた範囲」 — 元の時系列位置で digest に置き換えて見せる。
+"""提示提示コンテキストの「畳まれた範囲」 — 元の時系列位置で digest に置き換えて見せる。
 
 docs/intent/chronicle_eviction.md §6 (見せ方) の実装。
 
-退場が episode 単位になったことで、窓の**途中**が畳まれる事態が生まれた
+退場が episode 単位になったことで、提示コンテキストの**途中**が畳まれる事態が生まれた
 (古い会話 A を生で残したまま、新しい作業 B の古い部分だけを畳む)。畳んだ範囲を
 head の Chronicle 枠に寄せると、新しい B のあらすじが古い A より前に立って時系列
 が嘘になる。だから畳んだ範囲は**元の位置**で digest に置き換えて提示する。
@@ -31,7 +31,7 @@ FOLDED_MARKER = "__folded_range__"
 
 @dataclass
 class SessionWindow:
-    """いま提示されている窓の一式。
+    """いま提示されている提示コンテキストの一式。
 
     ``raw`` (anchor 以降の生ログ) と ``presented`` (畳んだ範囲を digest に
     置き換えた実際の提示) を**両方**持つ。退場計画は提示を見て立てるが、
@@ -51,12 +51,12 @@ class SessionWindow:
 
 @dataclass
 class FoldedRange:
-    """窓の中で digest に畳まれた 1 範囲。"""
+    """提示コンテキストの中で digest に畳まれた 1 範囲。"""
 
     message_ids: List[str]
     start_at: Optional[int] = None
     end_at: Optional[int] = None
-    #: 被覆する Chronicle エントリ (級1) の id。
+    #: 被覆する Chronicle エントリ (一次あらすじ) の id。
     chronicle_entry_ids: List[str] = field(default_factory=list)
     #: 同エントリの ``ch:N`` 短縮参照の N (ペルソナへの案内に使う)。
     chronicle_short_ids: List[int] = field(default_factory=list)
@@ -116,11 +116,11 @@ def deserialize_folds(raw: Optional[str]) -> List[FoldedRange]:
 def prune_folds(
     folds: Sequence[FoldedRange], window_message_ids: Sequence[str],
 ) -> List[FoldedRange]:
-    """窓から出た (anchor より古くなった) 範囲を落とす。
+    """提示コンテキストから出た (anchor より古くなった) 範囲を落とす。
 
-    anchor が前進すると、その範囲はもう提示されない = 穴として持ち続ける意味が
-    無い。**一部でも窓に残っている範囲は残す** — 途中まで提示に効いている穴を
-    消すと、その分の生ログが復活して窓が膨らむため。
+    anchor が前進すると、その範囲はもう提示されない = 圧縮区間として持ち続ける意味が
+    無い。**一部でも提示コンテキストに残っている範囲は残す** — 途中まで提示に効いている圧縮区間を
+    消すと、その分の生ログが復活して提示コンテキストが膨らむため。
     """
     live = set(window_message_ids)
     return [f for f in folds if any(mid in live for mid in f.message_ids)]
@@ -157,10 +157,10 @@ def apply_folds(
     folds: Sequence[FoldedRange],
     resolve_digest: Callable[[FoldedRange], Optional[str]],
 ) -> List[Dict[str, Any]]:
-    """窓の生ログを、畳まれた範囲だけ digest 置き換えに差し替えて返す。
+    """提示コンテキストの生ログを、畳まれた範囲だけ digest 置き換えに差し替えて返す。
 
     Args:
-        messages: 窓のメッセージ (created_at 昇順)。
+        messages: 提示コンテキストのメッセージ (created_at 昇順)。
         folds: 畳まれた範囲。
         resolve_digest: 範囲の digest 本文を引く関数。None を返したら
             **その範囲は生ログのまま残す** — 記憶の連続性が軽量化より上位なので、
@@ -172,9 +172,9 @@ def apply_folds(
     if not folds:
         return list(messages)
 
-    # 置き換えを立てる位置は「その範囲のうち**窓に残っている最初のメッセージ**」。
+    # 置き換えを立てる位置は「その範囲のうち**提示コンテキストに残っている最初のメッセージ**」。
     # 範囲の先頭 (message_ids[0]) 固定にすると、anchor が範囲の途中まで前進した
-    # 穴で先頭が窓の外に出て、置き換えも生ログも出ない = 体験が黙って消える。
+    # 圧縮区間で先頭が提示コンテキストの外に出て、置き換えも生ログも出ない = 体験が黙って消える。
     live_ids = {str(m.get("id")) for m in messages}
     head_of: Dict[str, FoldedRange] = {}
     member_of: Dict[str, FoldedRange] = {}
@@ -226,13 +226,13 @@ def _placeholder(
 ) -> Dict[str, Any]:
     """置き換えメッセージ。
 
-    role は ``user`` + ``<system>`` 包み — SAIMemory の system メッセージが提示面へ
+    role は ``user`` + ``<system>`` 包み — SAIMemory の system メッセージが提示コンテキストへ
     出るときと同じ形 (saiverse_memory/adapter.py の payload 変換) に揃える。機構の
     声を機構の声として、ペルソナの発話と混ぜない。
     """
     return {
-        # 位置は「窓に残っている最初のメッセージ」なので id / 時刻もそれに合わせる
-        # (範囲の先頭が窓の外に出ていても、置き換えは窓の中の正しい位置に立つ)。
+        # 位置は「提示コンテキストに残っている最初のメッセージ」なので id / 時刻もそれに合わせる
+        # (範囲の先頭が提示コンテキストの外に出ていても、置き換えは提示コンテキストの中の正しい位置に立つ)。
         "id": f"folded:{first_msg.get('id')}",
         "role": "user",
         "content": _build_notice(fold, digest_text),

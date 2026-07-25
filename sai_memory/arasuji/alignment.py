@@ -49,12 +49,12 @@ CHUNK_IDENTITY = "identity"
 CHUNK_EPISODE_DIGEST = "episode"
 CHUNK_LLM_BATCH = "batch"
 
-#: 級 1 の標準被覆字数 U (§11-8 モック検証済み確定値)。
+#: 一次あらすじの標準被覆字数 U (§11-8 モック検証済み確定値)。
 DEFAULT_TARGET_CHARS = 10_000
 #: LLM 圧縮する最小被覆字数。未満は恒等圧縮 (Track Chronicle の 1000 字
 #: スキップの一般化 — §4-3)。
 DEFAULT_MIN_DIGEST_CHARS = 1_000
-#: 級の底 B (幾何級数)。帯あふれ束ね (bands.py) と共有する。
+#: 次数の底 B (幾何級数)。列のあふれ束ね (bands.py) と共有する。
 DEFAULT_BAND_BASE = 10
 
 
@@ -76,12 +76,12 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
 
 
 def chronicle_band_budget() -> int:
-    """級 1 の標準被覆字数 U (env ``SAIVERSE_CHRONICLE_BAND_BUDGET``)。"""
+    """一次あらすじの標準被覆字数 U (env ``SAIVERSE_CHRONICLE_BAND_BUDGET``)。"""
     return _env_int("SAIVERSE_CHRONICLE_BAND_BUDGET", DEFAULT_TARGET_CHARS)
 
 
 def chronicle_band_base() -> int:
-    """級の底 B (env ``SAIVERSE_CHRONICLE_BAND_BASE``)。"""
+    """次数の底 B (env ``SAIVERSE_CHRONICLE_BAND_BASE``)。"""
     return _env_int("SAIVERSE_CHRONICLE_BAND_BASE", DEFAULT_BAND_BASE, minimum=2)
 
 
@@ -109,13 +109,13 @@ def message_episode_ref(msg: Message) -> Optional[str]:
 
 
 def coverage_chars(messages: Sequence[Message]) -> int:
-    """被覆生ログ文字数 (束ね・級判定の一次データ。digest 自身の長さではない)。"""
+    """被覆生ログ文字数 (束ね・次数判定の一次データ。digest 自身の長さではない)。"""
     return sum(len(m.content or "") for m in messages)
 
 
 @dataclass
 class PlannedChunk:
-    """整列計画の 1 チャンク = 生成される級 1 ノード 1 個。"""
+    """整列計画の 1 チャンク = 生成される一次あらすじ 1 個。"""
 
     kind: str  # CHUNK_IDENTITY | CHUNK_EPISODE_DIGEST | CHUNK_LLM_BATCH
     messages: List[Message]
@@ -171,10 +171,10 @@ def plan_alignment(
     Args:
         messages: 編纂対象候補 (created_at 昇順。除外フィルタ・退場範囲の絞り込みは
             呼び出し側で適用済み)。
-        processed_ids: 既に級 1 ノードの source になっている message id 集合。
+        processed_ids: 既に一次あらすじの source になっている message id 集合。
         episode_digests: digest 確定済み episode の
             ``episode_ref -> (digest_message_id, digest_text)``。
-        target_chars: 級 1 チャンクの標準被覆 (U)。
+        target_chars: 一次あらすじ チャンクの標準被覆 (U)。
         min_llm_chars: LLM 圧縮する最小被覆 (未満は恒等圧縮)。
         run_boundary_ids: ここに含まれる message id の**手前で run を切る**。
             退場が episode 単位になり、一度の編纂で時系列上離れた範囲を扱う

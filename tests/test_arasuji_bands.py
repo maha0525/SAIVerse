@@ -1,8 +1,8 @@
-"""帯あふれ束ね (sai_memory/arasuji/bands.py) の回帰テスト (W4 D6/D7)。
+"""列のあふれ束ね (sai_memory/arasuji/bands.py) の回帰テスト (W4 D6/D7)。
 
 experience_structure.md の圧縮原則:
 
-- §4-6 束ねはサイズ・駆動は帯のあふれ。上位級のノードは壁 (再要約されない)。
+- §4-6 束ねはサイズ・駆動は列のあふれ。上の次数のノードは壁 (再要約されない)。
 - §4-7 最古が黙って落ちない — 束ねは常に古い端から。
 - M2-a: 親 INSERT + 子 mark_consolidated は単一 tx (途中状態なし)。
 """
@@ -20,7 +20,7 @@ from sai_memory.arasuji.storage import (
     init_arasuji_tables,
 )
 
-# テストの級パラメータ: U=100 / B=2 → 帯1 cap=200, 帯2 cap=400
+# テストの次数パラメータ: U=100 / B=2 → 次数1の列 cap=200, 次数2の列 cap=400
 ENV = {
     "SAIVERSE_CHRONICLE_BAND_BUDGET": "100",
     "SAIVERSE_CHRONICLE_BAND_BASE": "2",
@@ -71,7 +71,7 @@ class BandTestBase(unittest.TestCase):
 
 class TestOverflowTrigger(BandTestBase):
     def test_no_overflow_no_consolidation(self):
-        """帯 1 の被覆合計 <= cap (200) なら束ねない。"""
+        """次数 1 の列の被覆合計 <= cap (200) なら束ねない。"""
         _lv1(self.conn, 100, 199, 100)
         _lv1(self.conn, 200, 299, 100)
         client = _Client()
@@ -80,7 +80,7 @@ class TestOverflowTrigger(BandTestBase):
         self.assertEqual(client.calls, 0)
 
     def test_overflow_consolidates_from_oldest(self):
-        """§4-6/§4-7: あふれたら**古い端から**合計が次の級 (200) に達するまで束ねる。"""
+        """§4-6/§4-7: あふれたら**古い端から**合計が次の次数 (200) に達するまで束ねる。"""
         e1 = _lv1(self.conn, 100, 199, 100)
         e2 = _lv1(self.conn, 200, 299, 100)
         e3 = _lv1(self.conn, 300, 399, 100)
@@ -135,21 +135,21 @@ class TestOverflowTrigger(BandTestBase):
 
 class TestWalls(BandTestBase):
     def test_node_inside_wall_is_not_bundled(self):
-        """壁 (上位級ノード) の被覆内側の穴ノードは束ねに巻き込まない。"""
+        """壁 (上の次数ノード) の被覆内側に埋もれたノードは束ねに巻き込まない。"""
         # 壁: level 2 が [100, 399] を被覆
         create_entry(
             self.conn, level=2, content="旧Lv2", source_ids=[],
             start_time=100, end_time=399, source_count=2, message_count=40,
             extra_metadata={"coverage_chars": 200},
         )
-        # 穴: 壁の内側に後から編纂された Lv1
+        # 壁の内側に後から編纂された Lv1
         hole = _lv1(self.conn, 150, 249, 100)
         # 壁の外の Lv1 (あふれを作る)
         a = _lv1(self.conn, 400, 499, 100)
         b = _lv1(self.conn, 500, 599, 100)
         c = _lv1(self.conn, 600, 699, 100)
         self._run()
-        # 穴は束ねられていない
+        # 壁の内側のノードは束ねられていない
         self.assertFalse(get_entry(self.conn, hole.id).is_consolidated)
         # 壁の外側は束ねられる (a+b で 200 到達)
         lv2 = [e for e in get_entries_by_level(self.conn, 2, order_by_time=True)
@@ -159,7 +159,7 @@ class TestWalls(BandTestBase):
         self.assertFalse(get_entry(self.conn, c.id).is_consolidated)
 
     def test_wall_content_never_rewritten(self):
-        """移行の約束: 既存上位ノードの content は帯あふれで変化しない。"""
+        """移行の約束: 既存上位ノードの content は列のあふれで変化しない。"""
         wall = create_entry(
             self.conn, level=3, content="時代の語り (旧Lv3)", source_ids=[],
             start_time=0, end_time=10_000, source_count=10, message_count=400,
@@ -181,7 +181,7 @@ class TestWalls(BandTestBase):
         )
         a = _lv1(self.conn, 300, 399, 100)
         b = _lv1(self.conn, 400, 499, 100)
-        c = _lv1(self.conn, 500, 599, 100)  # 帯合計 400 > 200
+        c = _lv1(self.conn, 500, 599, 100)  # 列の合計 400 > 200
         self._run()
         # old は壁を跨いで a と束ねられない
         old_after = get_entry(self.conn, old.id)
@@ -258,7 +258,7 @@ class TestWallRemainder(BandTestBase):
         )
         c = _lv1(self.conn, 300, 399, 100)
         d = _lv1(self.conn, 400, 499, 100)
-        e = _lv1(self.conn, 500, 599, 100)  # 帯合計 400 > cap 200
+        e = _lv1(self.conn, 500, 599, 100)  # 列の合計 400 > cap 200
         self._run()
         # 壁前の 100 字列は親化されない
         self.assertFalse(get_entry(self.conn, a.id).is_consolidated)
@@ -286,7 +286,7 @@ class TestDryPlan(BandTestBase):
         self.assertEqual(client.calls, predicted)
 
     def test_dry_counts_extra_leaves(self):
-        """既存帯 + 新チャンク (extra_leaves) の合算であふれを予測する。"""
+        """既存の列 + 新チャンク (extra_leaves) の合算であふれを予測する。"""
         from sai_memory.arasuji.bands import plan_band_overflow
         # 既存 150 字 (cap 200 未満) — 新チャンク 100 字が来るとあふれる
         _lv1(self.conn, 100, 199, 100)
@@ -308,8 +308,8 @@ class TestDryPlan(BandTestBase):
 
 class TestRecursiveBands(BandTestBase):
     def test_band2_overflow_consolidates_to_level3(self):
-        """検算退化 (§4-6): 帯 2 もあふれたら級 3 へ (再帰)。"""
-        # 級 2 ノードを直接 5 個置く (帯 2 cap = 100×2^2 = 400 を超える計 1000)
+        """検算退化 (§4-6): 次数 2 の列もあふれたら三次あらすじへ (再帰)。"""
+        # 二次あらすじノードを直接 5 個置く (次数 2 の列 cap = 100×2^2 = 400 を超える計 1000)
         lv2_ids = []
         for i in range(5):
             e = create_entry(
