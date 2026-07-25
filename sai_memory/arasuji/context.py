@@ -25,8 +25,8 @@ MIN_ENTRIES_PER_LEVEL: int = 10
 
 # Chronicle 読み込みの文字数予算 (記憶アーキv2 §6.2, Phase 3, 不変条件 §10-4)。
 # 件数上限 (旧 max_entries=50) では超過時に最古が黙って落ちるため、文字数予算で
-# 制御し、予算内で歴史の先頭まで到達できない場合は昇格閾値 (MIN_ENTRIES_PER_LEVEL)
-# を動的に縮めて「より早く粗いレベルへ昇格」させ、全期間カバーを優先する。
+# 制御する。予算に収める手段は :func:`_compress_within_budget` (親 entry への
+# 置き換え) が担う。
 #
 # 既定 20,000 字: 現行 max_entries=50 は実質 13〜20k 字相当なので、既定で既存
 # ユーザーの weave が急に痩せないようにする (エアの実 DB で 32 entries ≒ 13k 字)。
@@ -34,19 +34,9 @@ MIN_ENTRIES_PER_LEVEL: int = 10
 # しない (§12-2)。
 DEFAULT_CHRONICLE_CHAR_BUDGET: int = 20_000
 
-# 予算超過を検知したら一段ずつ粗くして再走行する反復方式の、粗さの段列。
-# 各段は (min_entries_per_level, prefer_coarse)。
-#   1段目 = (10, False): 現行と完全に同じ挙動 (予算内ならここで確定 → legacy 一致)。
-#   2段目以降 = prefer_coarse=True で「近い細粒度より粗いレベルを優先」に切り替え、
-#             閾値も 5→3→1 と下げて昇格を早める。これで連続した Lv1 タイムラインでも
-#             Lv2/Lv3 へ実際に畳める (prefer_coarse なしだと "closest end_time wins"
-#             で細粒度が勝ち続け、閾値だけ下げても文字数が減らない)。
-_PROMOTION_LADDER: Tuple[Tuple[int, bool], ...] = (
-    (MIN_ENTRIES_PER_LEVEL, False),
-    (5, True),
-    (3, True),
-    (1, True),
-)
+# 予算圧縮の反復上限 (安全弁)。1 回の置き換えで必ず 1 個以上の entry が親へ
+# 畳まれるので、正常なデータでは entry 数を超えて回ることはない。
+_MAX_COMPRESSION_ROUNDS: int = 1000
 
 # ``char_budget`` の sentinel。呼び出し側が「予算制で読みたい (具体値は env/既定に
 # 委ねる)」と表明するときに渡す。``char_budget=None`` (未指定) は旧来の件数上限
@@ -131,53 +121,64 @@ def _find_arasuji_at_position(
     position_time: int,
     max_allowed_level: int,
     read_ids: Set[str],
-    *,
-    prefer_coarse: bool = False,
 ) -> Optional[ArasujiEntry]:
     """Find the best arasuji that ends at or before the position time.
 
-    Default selection priority (legacy):
-    1. Closest end_time to position_time (most recent)
-    2. If same end_time, prefer higher level (more compression)
+    **記憶の穴を作らないことが第一制約** (最前線への固定)。走査は
+    ``position_time`` を選んだ entry の start_time の手前へ動かしながら過去へ
+    降りていくので、「未読の entry を飛び越えて、より古い entry を選ぶ」と、
+    飛び越えた範囲は二度と候補にならない — その体験は誰にも記録されないまま
+    提示から落ちる。よって選べるのは常に **読み残しの最前線** (position_time
+    以前で end_time が最大の未読 entry) と同じ end_time を持つ entry に限る。
 
-    ``prefer_coarse=True`` (budget re-runs only): flips the priority to favor
-    compression — highest allowed level first, then closest end_time. This is
-    what lets a budget-constrained re-run actually collapse a contiguous fine
-    (Lv1) timeline onto coarser Lv2/Lv3 entries. Without it, the "closest
-    end_time wins" rule keeps picking the fine entries whenever they exist,
-    so lowering the promotion threshold alone would not reduce char volume.
+    最前線を確定したうえで、同じ end_time の候補 (= 同じ範囲をどの粒度で見るか
+    の選択肢。上位 entry は子と end_time が揃う) の中から粒度を選ぶ:
+
+    1. ``max_allowed_level`` 以下の候補があれば、その中で最も粗い (level 最大)
+       ものを採る。これが圧縮 — 同じ範囲をより少ない字数で覆う。
+    2. 一つも無ければ、昇格制限より穴回避を優先し、候補中で最も細かい
+       (level 最小) ものを採る。粒度の見た目より記憶の連続性が上位。
+
+    予算に収める圧縮はこの走査では**行わない**。読むときに飛ばす形の圧縮は、
+    飛ばした範囲が二度と拾われず記憶が黙って落ちるため、読み切ったあとの
+    :func:`_compress_within_budget` (親 entry への置き換え = 範囲を保存する
+    圧縮) に分離してある。
 
     Args:
         entries: List of arasuji entries sorted by end_time descending
         position_time: The time position to search from
         max_allowed_level: Maximum level allowed (current_level + 1)
         read_ids: Set of entry IDs that have already been read or covered
-        prefer_coarse: Prefer higher (coarser) levels over closer end_time.
     """
-    best: Optional[ArasujiEntry] = None
+    # entries は end_time 降順。最初に見つかる未読・position_time 以前の entry が
+    # 読み残しの最前線。
+    frontier: Optional[int] = None
     for entry in entries:
-        if entry.level > max_allowed_level:
-            continue
         if entry.id in read_ids:
             continue
         if entry.end_time is None or entry.end_time > position_time:
             continue
-        # Found a candidate
-        if best is None:
+        frontier = entry.end_time
+        break
+    if frontier is None:
+        return None
+
+    best: Optional[ArasujiEntry] = None
+    fallback: Optional[ArasujiEntry] = None
+    for entry in entries:
+        if entry.id in read_ids:
+            continue
+        if entry.end_time is None or entry.end_time != frontier:
+            continue
+        if entry.level > max_allowed_level:
+            # 昇格制限の外。穴回避のための最後の受け皿として最も細かいものを控える。
+            if fallback is None or entry.level < fallback.level:
+                fallback = entry
+            continue
+        # 昇格制限の内側。同じ範囲を覆う候補なので、粗いほど字数が減る。
+        if best is None or entry.level > best.level:
             best = entry
-        elif prefer_coarse:
-            # Compression-first: higher level wins, then closer end_time.
-            if entry.level > best.level:
-                best = entry
-            elif entry.level == best.level and entry.end_time > best.end_time:
-                best = entry
-        else:
-            # Legacy: closest end_time wins, then higher level on ties.
-            if entry.end_time > best.end_time:
-                best = entry
-            elif entry.end_time == best.end_time and entry.level > best.level:
-                best = entry
-    return best
+    return best if best is not None else fallback
 
 
 def _check_overlap(
@@ -205,14 +206,12 @@ def _traverse_episode(
     min_entries_per_level: int,
     max_entries: int,
     start_position_time: int,
-    prefer_coarse: bool = False,
 ) -> List[ContextEntry]:
     """Run one backward traversal of the reverse level promotion algorithm.
 
-    Extracted so the budget-driven wrapper can re-run more aggressively
-    (smaller ``min_entries_per_level`` = faster promotion, and
-    ``prefer_coarse=True`` = compression-first selection) when the char budget
-    would be exceeded → coarser levels → fewer chars.
+    走査は「読み残しの最前線」を飛び越えないので (:func:`_find_arasuji_at_position`)、
+    **提示に穴が空かない**。予算に収める圧縮は :func:`_compress_within_budget` の
+    仕事で、この走査は関与しない。
 
     The loop always runs to the beginning of history (or ``max_entries``); the
     char budget never terminates it early — that is what guarantees the oldest
@@ -233,7 +232,6 @@ def _traverse_episode(
         max_allowed_level = current_level + 1
         found_entry = _find_arasuji_at_position(
             all_arasuji, position_time, max_allowed_level, read_ids,
-            prefer_coarse=prefer_coarse,
         )
 
         if found_entry is None:
@@ -265,8 +263,38 @@ def _traverse_episode(
             current_level = found_level
         # else: stay at current_level (don't promote yet)
 
-        # Subtract 1 to move to the position just before this entry's coverage
-        position_time = (found_entry.start_time or 0) - 1
+        # 次の走査位置は原則「選んだ entry の被覆の直前」。ただし被覆が部分的に
+        # 重なっている未読 entry をそれで飛び越すと、その体験は以後どの周回でも
+        # 候補にならず黙って落ちる (選んだ entry がそれを覆っていないので、
+        #  代弁もされない)。飛び越し範囲にそういう entry が居るなら、その
+        # end_time まで戻して次の周回で拾う。戻し先は必ず現在の position_time
+        # 以下なので、走査の単調降下と結果の時系列降順は保たれる。
+        #
+        # 包含関係にある entry には戻さない。選んだ entry の内側なら代弁済み、
+        # 外側 (= 選んだ entry の親) なら子を既に読んでいるので、後から親を読むと
+        # 同じ体験が二重に出る。親の他の子は走査が更に古い側へ降りる過程で拾う。
+        next_position = (found_entry.start_time or 0) - 1
+        cover_start = found_entry.start_time
+        cover_end = found_entry.end_time
+        for other in all_arasuji:
+            if other.id in read_ids:
+                continue
+            if other.end_time is None or other.end_time > position_time:
+                continue
+            if other.end_time <= next_position:
+                continue
+            nested = (
+                cover_start is not None
+                and cover_end is not None
+                and other.start_time is not None
+                and (
+                    (cover_start <= other.start_time and other.end_time <= cover_end)
+                    or (other.start_time <= cover_start and cover_end <= other.end_time)
+                )
+            )
+            if not nested:
+                next_position = other.end_time
+        position_time = next_position
 
         if position_time <= 0:
             break
@@ -282,6 +310,77 @@ def _episode_char_count(result: List[ContextEntry]) -> int:
     ignore — the budget only needs to be monotone in content volume).
     """
     return sum(len(e.content) for e in result)
+
+
+def _compress_within_budget(
+    result: List[ContextEntry],
+    all_arasuji: List[ArasujiEntry],
+    budget: int,
+) -> List[ContextEntry]:
+    """予算に収まるまで、古い側から親 entry への置き換えで粗くする。
+
+    置き換えは**被覆範囲を保存する** (親は自分の子の全範囲を覆う) ので、粒度が
+    粗くなるだけで体験は落ちない。これが「読むときに飛ばす」形の圧縮 (旧
+    昇格 ladder) との決定的な違い — あちらは飛ばした範囲が二度と候補にならず、
+    記憶が黙って消えていた (提示の穴)。
+
+    古い側から潰すので「最近は細かく、過去は粗く」も保たれる。置き換えるのは
+    **親の子が全員、結果の中で連続して並んでいるとき**に限る。一部しか居ない
+    親で置き換えると、その親は結果に残る他の entry と範囲が重なり、同じ体験が
+    二重に出る。
+
+    Args:
+        result: 走査結果 (新しい → 古い順)
+        all_arasuji: 親を引くための全 entry
+        budget: 文字数予算
+
+    Returns:
+        置き換え後の結果 (新しい → 古い順)。予算に収めきれない場合
+        (これ以上畳める親が無い) は、収まらないまま返す — 記憶の連続性が
+        軽量化より上位なので、削って穴を作ることはしない。
+    """
+    if budget <= 0 or _episode_char_count(result) <= budget:
+        return result
+
+    # 親は source_ids の逆引きで持つ。``parent_id`` 列は束ね時にしか入らないが、
+    # 被覆の正は source_ids 側 (走査の read_ids も source_ids で潰している)。
+    parent_of: Dict[str, ArasujiEntry] = {}
+    for candidate in all_arasuji:
+        for child_id in candidate.source_ids:
+            parent_of[child_id] = candidate
+
+    for _ in range(_MAX_COMPRESSION_ROUNDS):
+        if _episode_char_count(result) <= budget:
+            break
+        replaced = False
+        # 末尾 = 最も古い側から、同じ親を持つ連続群を探す。
+        i = len(result) - 1
+        while i >= 0:
+            parent = parent_of.get(result[i].source_id)
+            if parent is None:
+                i -= 1
+                continue
+            j = i
+            while j >= 0:
+                if parent_of.get(result[j].source_id) is not parent:
+                    break
+                j -= 1
+            group_ids = {result[k].source_id for k in range(j + 1, i + 1)}
+            if set(parent.source_ids) <= group_ids:
+                result = result[:j + 1] + [ContextEntry(
+                    level=parent.level,
+                    content=parent.content,
+                    start_time=parent.start_time,
+                    end_time=parent.end_time,
+                    message_count=parent.message_count,
+                    source_id=parent.id,
+                )] + result[i + 1:]
+                replaced = True
+                break
+            i = j
+        if not replaced:
+            break
+    return result
 
 
 def _reached_oldest(result: List[ContextEntry], all_arasuji: List[ArasujiEntry]) -> bool:
@@ -394,48 +493,34 @@ def get_episode_context(
         result.reverse()
         return result
 
-    # Budget-driven: try progressively coarser runs until the rendered volume
-    # fits the budget while still reaching the oldest entry.
-    # 全 Chronicle エントリはメモリ上の走査なので、再走行コストは無視できる。
-    best_result: List[ContextEntry] = []
-    final_threshold, final_coarse = _PROMOTION_LADDER[-1]
-    for threshold, prefer_coarse in _PROMOTION_LADDER:
-        result = _traverse_episode(
-            all_arasuji,
-            min_entries_per_level=threshold,
-            max_entries=max_entries,
-            start_position_time=start_position_time,
-            prefer_coarse=prefer_coarse,
-        )
-        best_result = result
-        final_threshold, final_coarse = threshold, prefer_coarse
-        chars = _episode_char_count(result)
-        if chars <= effective_budget:
-            # Fits the budget. This is the least-coarse run that fits, so it is
-            # the most detailed acceptable context — stop here.
-            break
-        # Exceeded budget → go one step coarser and re-run. Continue.
+    # Budget-driven: 穴を作らずに読み切ってから、予算に収まるまで親へ置き換える。
+    # 走査と圧縮を分けているのが要点 — 読む側で飛ばす形の圧縮は、飛ばした範囲が
+    # 二度と拾われず記憶が黙って落ちる (提示の穴)。
+    result = _traverse_episode(
+        all_arasuji,
+        min_entries_per_level=MIN_ENTRIES_PER_LEVEL,
+        max_entries=max_entries,
+        start_position_time=start_position_time,
+    )
+    result = _compress_within_budget(result, all_arasuji, effective_budget)
 
-    result = best_result
     chars = _episode_char_count(result)
     reached_oldest = _reached_oldest(result, all_arasuji)
 
     if chars > effective_budget:
-        # Even the coarsest run exceeds the budget (extremely deep history).
-        # Accept the overflow — the oldest entry is still included — and warn so
-        # the threshold can be re-tuned from real measurements (§6.2 note 3).
+        # これ以上畳める親が無い (未束ねの一次あらすじが並んでいる等)。超過を
+        # 受け入れる — 削れば体験が落ちるので、記憶の連続性を優先する。束ねが
+        # 効いていないサインでもあるので WARNING で観測可能にする。
         LOGGER.warning(
-            "Chronicle char budget exceeded even at coarsest run: "
-            "%d chars > budget %d (entries=%d, threshold=%d, prefer_coarse=%s, "
-            "reached_oldest=%s). Oldest entry retained; consider raising "
-            "SAIVERSE_CHRONICLE_CHAR_BUDGET or adding higher-level consolidation (§6.2).",
-            chars, effective_budget, len(result), final_threshold, final_coarse,
-            reached_oldest,
+            "Chronicle char budget exceeded after parent-collapse compression: "
+            "%d chars > budget %d (entries=%d, reached_oldest=%s). Nothing was "
+            "dropped; no further parent is available to collapse into. Check "
+            "band consolidation (unconsolidated Lv1 backlog) or raise "
+            "SAIVERSE_CHRONICLE_CHAR_BUDGET (§6.2).",
+            chars, effective_budget, len(result), reached_oldest,
         )
 
-    _log_episode_run(
-        result, effective_budget, final_threshold, final_coarse, reached_oldest
-    )
+    _log_episode_run(result, effective_budget, reached_oldest)
 
     result.reverse()
     return result
@@ -444,15 +529,12 @@ def get_episode_context(
 def _log_episode_run(
     result: List[ContextEntry],
     budget: int,
-    final_threshold: int,
-    final_coarse: bool,
     reached_oldest: bool,
 ) -> None:
-    """DEBUG log of a budget-driven run for threshold tuning (§6.2 note 6).
+    """DEBUG log of a budget-driven run for budget tuning (§6.2 note 6).
 
-    Emits the adopted level distribution, char count, final promotion settings
-    and whether the oldest entry was reached — the real-measurement material for
-    tuning the budget/ladder.
+    Emits the adopted level distribution, char count and whether the oldest
+    entry was reached — the real-measurement material for tuning the budget.
     """
     if not LOGGER.isEnabledFor(logging.DEBUG):
         return
@@ -466,9 +548,9 @@ def _log_episode_run(
         newest = result[0]
         span = f"{_format_timestamp(oldest.start_time)} ~ {_format_timestamp(newest.end_time)}"
     LOGGER.debug(
-        "Chronicle budget run: entries=%d chars=%d/%d threshold=%d "
-        "prefer_coarse=%s level_dist=%s span=[%s] reached_oldest=%s",
-        len(result), chars, budget, final_threshold, final_coarse,
+        "Chronicle budget run: entries=%d chars=%d/%d level_dist=%s "
+        "span=[%s] reached_oldest=%s",
+        len(result), chars, budget,
         dict(sorted(level_dist.items())), span, reached_oldest,
     )
 

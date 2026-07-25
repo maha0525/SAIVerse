@@ -564,5 +564,148 @@ class TestChronicleCharBudget(unittest.TestCase):
         self.assertTrue(all(e.level == 1 for e in ctx))
 
 
+class TestNoPresentationGap(unittest.TestCase):
+    """提示に穴を空けないこと (2026-07-25 の実データ由来の回帰)。
+
+    実害: eris_city_a で「上位あらすじが覆っていない直近 3.7 日 (一次あらすじ
+    41 件)」が、aifi_city_a で「271 日 (98 件)」が、head の Chronicle から丸ごと
+    落ちていた。予算を 11% 超えただけで粗さの段が飛び、その段が「粗いレベル
+    優先」で上位あらすじを先に掴むと、それより新しい細かいあらすじは走査位置が
+    過去へ動いた後なので二度と候補にならず、黙って消えていた。
+
+    直し方: 走査は「読み残しの最前線」を飛び越えない。予算に収める圧縮は走査
+    後の親への置き換え (範囲を保存する) に分離した。
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        init_arasuji_tables(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_coarse_entry_must_not_skip_newer_fine_entries(self):
+        """上位あらすじの外側にある、より新しい一次あらすじを飛び越えない。"""
+        # 古い側: Lv1 10 件 → それを覆う Lv2 1 件 (time 100..1099)
+        old_ids = [
+            _create_lv1_entry(
+                self.conn, (i + 1) * 100, (i + 1) * 100 + 99,
+                content=f"O{i} " + ("x" * 200),
+            )
+            for i in range(10)
+        ]
+        _create_lv2_entry(
+            self.conn, 100, 1099, old_ids, content="OLD " + ("y" * 200),
+        )
+        # 新しい側: どの上位にも覆われていない Lv1 20 件 (time 1100..3099)
+        new_ids = [
+            _create_lv1_entry(
+                self.conn, 1100 + i * 100, 1100 + i * 100 + 99,
+                content=f"N{i} " + ("x" * 200),
+            )
+            for i in range(20)
+        ]
+
+        # 旧実装はこの予算で粗い段へ落ち、Lv2 を掴んだ拍子に新しい 20 件を
+        # まるごと落としていた。
+        ctx = get_episode_context(self.conn, max_entries=1000, char_budget=500)
+
+        shown = {e.source_id for e in ctx}
+        missing = [i for i, nid in enumerate(new_ids) if nid not in shown]
+        self.assertEqual(
+            missing, [],
+            "上位あらすじが覆っていない新しい一次あらすじが提示から落ちた "
+            f"(落ちた index={missing})",
+        )
+        # 古い側は Lv2 が代弁していてよい (圧縮は正しい)。
+        self.assertEqual(
+            ctx[0].start_time, 100, "最古が落ちてはいけない (不変条件 §10-4)",
+        )
+
+    def test_partially_overlapping_entries_are_both_kept(self):
+        """被覆が部分的に重なる entry を、片方を選んだ拍子に飛ばさない。"""
+        a = _create_lv1_entry(self.conn, 100, 500, content="A" * 100)
+        b = _create_lv1_entry(self.conn, 400, 800, content="B" * 100)
+
+        ctx = get_episode_context(self.conn, max_entries=100)
+
+        shown = {e.source_id for e in ctx}
+        self.assertIn(a, shown, "先行する重なり entry が落ちた")
+        self.assertIn(b, shown, "後続の重なり entry が落ちた")
+
+    def test_compression_preserves_the_covered_span(self):
+        """予算圧縮は粒度を粗くするだけで、被覆する時間範囲を変えない。"""
+        _build_deep_hierarchy(self.conn)
+        full = get_episode_context(
+            self.conn, max_entries=1000, char_budget=1_000_000,
+        )
+        tight = get_episode_context(self.conn, max_entries=1000, char_budget=800)
+
+        self.assertEqual(
+            full[0].start_time, tight[0].start_time,
+            "圧縮で最古の被覆開始が変わってはいけない",
+        )
+        self.assertEqual(
+            full[-1].end_time, tight[-1].end_time,
+            "圧縮で最新の被覆終了が変わってはいけない",
+        )
+        self.assertLess(
+            sum(len(e.content) for e in tight),
+            sum(len(e.content) for e in full),
+            "圧縮が効いていない",
+        )
+
+    def test_compression_never_produces_overlapping_entries(self):
+        """置き換えた親が隣の entry と範囲を重ねない (同じ体験の二重掲示)。"""
+        _build_deep_hierarchy(self.conn)
+        ctx = get_episode_context(self.conn, max_entries=1000, char_budget=800)
+
+        for older, newer in zip(ctx, ctx[1:]):
+            self.assertLessEqual(
+                older.end_time, newer.start_time,
+                "提示 entry の被覆が重なっている "
+                f"({older.start_time}~{older.end_time} と "
+                f"{newer.start_time}~{newer.end_time})",
+            )
+
+    def test_every_lv1_is_represented_by_itself_or_an_ancestor(self):
+        """全ての一次あらすじが、自身か祖先のどちらかで代弁されている。
+
+        一次あらすじは生ログを直接覆う最小粒度なので、これが成り立てば
+        「体験が黙って消える」ことはない。
+        """
+        _build_deep_hierarchy(self.conn)
+        ctx = get_episode_context(self.conn, max_entries=1000, char_budget=800)
+
+        shown = {e.source_id for e in ctx}
+        rows = self.conn.execute(
+            "SELECT id, source_ids_json, level FROM arasuji_entries"
+        ).fetchall()
+        import json as _json
+        parent_of = {}
+        lv1_ids = []
+        for entry_id, source_json, level in rows:
+            if level == 1:
+                lv1_ids.append(entry_id)
+            for child in _json.loads(source_json or "[]"):
+                parent_of[child] = entry_id
+
+        unrepresented = []
+        for lv1 in lv1_ids:
+            cursor, seen = lv1, set()
+            while cursor and cursor not in seen:
+                seen.add(cursor)
+                if cursor in shown:
+                    break
+                cursor = parent_of.get(cursor)
+            else:
+                unrepresented.append(lv1)
+
+        self.assertEqual(
+            unrepresented, [],
+            f"{len(unrepresented)} 件の一次あらすじが自身も祖先も提示されていない",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
