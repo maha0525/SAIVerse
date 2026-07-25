@@ -1,6 +1,6 @@
 # Chronicle の退場と圧縮 — episode 単位・文字数水位
 
-**ステータス**: 実装中 (2026-07-24 起草 → 2026-07-25 レビュー通過・設計確定 → 同日**下段のみ**実装完了 `e8c061d`)
+**ステータス**: 実装中 — **下段 (生ログ → 一次あらすじ) は完了・実機検証待ち**、上段 (一次 → 二次以上) は未設計 (2026-07-24 起草 → 2026-07-25 レビュー通過・設計確定 → 同日 `e8c061d` 実装 → 判断基準を改訂して `3fa2711` → コードレビュー消し込み `53448ef`。レビューは Codex 3 巡 + Claude サブエージェント 1 巡、計 7 件消し込み。うち 2 件は本設計以前からの欠陥として issue 化のみ)
 **⚠️ 上段 (二次以上のあらすじ) との接続が未設計** — 本 doc が扱うのは「生ログ → 一次あらすじ」の退場まで。一次あらすじを束ねて二次以上のあらすじを作る既存機構との噛み合わせを一切設計しておらず、**生ログの切れ目を飛び越えた偽の隣接**が生まれうる (§4-5 違反)。まはー判定 (2026-07-25) で「調査 → 案出しからやり直す案件」。詳細と入口は [走行メモ](../handoff/2026-07-25_chronicle_eviction_handoff.md) §2/§3。用語の作り直しは実施済み (同 §5 — 穴→圧縮区間 / 級→一次・二次あらすじ / 窓→提示コンテキスト / 帯→用語廃止)。
 **実装**: `sea/eviction_plan.py` (退場計画・純関数) / `sea/session_window.py` (圧縮区間と digest 置き換え) / `sea/session_lifecycle.py` (三水位・退場適用・§6 子 episode 記帳) / `saiverse/model_configs.py` (三水位の設定) / `database/models.py` (`session_anchor.FOLDED_RANGES_JSON`)。回帰は `tests/test_eviction_plan.py` / `tests/test_session_window_folds.py` / `tests/test_metabolism_two_layer.py`
 **関連**: [`experience_structure.md`](experience_structure.md) §4 / §6 ・ [`../issues/chronicle_undersized_lv1_chunks.md`](../issues/chronicle_undersized_lv1_chunks.md) ・ `sea/session_lifecycle.py` / `sai_memory/arasuji/alignment.py` / `saiverse/episodes.py`

@@ -1,6 +1,10 @@
 # Issue: Chronicle の一次あらすじが標準被覆を大きく下回る (退場の刻み幅に持ち越しの器が無い)
 
-**ステータス**: 🟠 実装中 — 当初の借用実装は撤回、[`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md) で再設計 → 2026-07-25 に**下段 (生ログ→一次あらすじ) のみ**実装 (`e8c061d`)。**上段 (二次以上のあらすじ) との接続が未設計で、生ログの切れ目を飛び越えた偽の隣接が生まれうる** → 調査・案出しからやり直し（まはー判定 2026-07-25、入口は [走行メモ](../handoff/2026-07-25_chronicle_eviction_handoff.md)）。実機検証は上段が片付いてから
+**ステータス**: 🟡 検証待ち — 当初の借用実装は撤回、[`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md) で再設計。**本 issue の範囲 (生ログ → 一次あらすじ) の実装は完了** (`e8c061d` + `3fa2711` + `53448ef`、レビュー Codex 3 巡 + サブエージェント 1 巡を消し込み済み)。残るのは**まはーの実機検証** = intent §9 の (a)「一次あらすじが U 級で立ち、9字・20字の小粒が消える」。
+
+**検証が通っても即 archive にはできない**: 既に作られてしまった小粒ノード (eris の 19 identity + 17 batch) の掃除方針が未決のまま (下記「既に作られてしまったノードの扱い」)。放置なら archive、削除再編纂ならまはーの明示承認が要る。
+
+**本 issue の範囲外** (別管轄・待たなくてよい): 上段 (一次 → 二次以上のあらすじ) の束ねとの噛み合わせは [`chronicle_eviction.md`](../intent/chronicle_eviction.md) §8 が持つ未解決。同じく編纂側の [run_boundary_lost_by_excluded_tag](chronicle_run_boundary_lost_by_excluded_tag.md) / 適用側の [applier_veto_deadlock](chronicle_eviction_applier_veto_deadlock.md) も別 issue。
 
 **⚠️ 目的の改訂 (2026-07-25 まはー裁定)**: 本 issue はもともと「U 未満の小粒な一次あらすじを作らない」を目的に掲げていた。これを **「小粒を日常経路で作らない。最後の手段としてのみ許す」** に緩める。
 
@@ -118,4 +122,6 @@ Metabolism の evict 境界を「U 字分溜まってから」動かす。設計
 - 2026-07-24: 発見・起票。エリスの Chronicle に単独発言のエントリが並んでいるという、まはーの観察から。別件の重複メッセージ調査 ([`chronicle_orphan_duplicate_user_messages.md`](chronicle_orphan_duplicate_user_messages.md)) の途中で判明した
 - 2026-07-24: 実装 (上記)。設計対話で案 A+C → 不変条件反転へ発展。純関数 + 呼び出し側 + テスト、experience_structure.md §4-1 改訂同梱
 - 2026-07-24 (同日夜): Codex レビューで借用案に open episode 分断の P1 → 借用案ごと撤回、[`chronicle_eviction.md`](../intent/chronicle_eviction.md) (episode 単位・文字数三水位) へ再設計
+- 2026-07-25: 新設計 (episode 単位・文字数三水位) を実装 (`e8c061d`)。同日、まはー裁定で**目的を改訂** — 「小粒を一切作らない」から「日常経路で作らない。最後の手段としてのみ許す」へ。理由は、先頭に U 未満の端数が居座ると anchor が永久に進まず、小粒禁止の縛りがその詰まりを永続させるため。退場計画を二段構えにした (`3fa2711`)
+- 2026-07-25: コードレビュー (Codex 3 巡 + Claude サブエージェント 1 巡) で 7 件消し込み (`53448ef`)。最後の手段の発火条件を「対象の種類」から「経路の目的 = anchor 前進」へ導き直したのが中心。サブエージェントが 93,312 通り総当たりで計画側の契約違反・偽の隣接・無限ループ 0 件を確認。**本 issue の範囲は実装完了 → 検証待ちへ**
 - 2026-07-25: chronicle_eviction intent まはーレビュー通過・設計確定 (実装待ち)。本 issue の解消は同実装に包含 — 実装着手時に借用実装 (alignment / session_lifecycle / テスト、未コミット) を撤回してから新設計を入れる。experience_structure §4-1 は新設計の文面に書き直し済み。監査工程上は W4 の差し戻し行 ([audit_remediation_plan.md](../overview/audit_remediation_plan.md))
