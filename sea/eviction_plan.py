@@ -182,8 +182,9 @@ class _Unit:
     messages: List[Dict[str, Any]]
     ref: Optional[str]
     is_open: bool
-    #: 既に畳まれた digest = 壁。再圧縮しないし (§4-4)、これを跨いで前後を
-    #: 束ねることもしない (跨ぐと非連続な束ね §4-5 になる)。
+    #: 既に畳まれた digest = 壁。**同一レベルでは**再圧縮しないし (§4-4 — 級 1 の
+    #: digest から別の級 1 を作らない。上位級への束ねは bands.py の仕事で正当)、
+    #: これを跨いで前後を束ねることもしない (跨ぐと非連続な束ね §4-5 になる)。
     is_wall: bool = False
 
     @property

@@ -16,7 +16,7 @@
 
 旧「20 件固定バッチ」は廃止。編纂対象 (退役する範囲の未編纂メッセージ) を**整列計画** (`plan_alignment`) がチャンク列に分け、チャンク単位の単一トランザクションで級 1 ノードを確定する:
 
-- **episode 転写** (`digest_origin='episode'`): digest 確定済み episode の範囲は post_session が書いた digest を**恒等転写** (LLM なし)。digest を再圧縮しない (§4-4)
+- **episode 転写** (`digest_origin='episode'`): digest 確定済み episode の範囲は post_session が書いた digest を**恒等転写** (LLM なし)。**同一レベルの** digest を再圧縮しない (§4-4 — 上位級への束ねは正当。下の「帯あふれ束ね」がそれ)
 - **LLM 束ね** (`digest_origin='batch'`): digest の無い範囲を、episode を原子として被覆合計 ≒ U (1万字) まで束ねて LLM 圧縮。episode は分割しない (§4-2)
 - **恒等圧縮** (`digest_origin='identity'`): 1000 字未満で束ねる相手のない豆粒は生のまま級 1 に置く (LLM なし、§4-3)
 
