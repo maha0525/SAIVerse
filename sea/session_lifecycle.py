@@ -1327,11 +1327,11 @@ class SessionLifecycle:
         plan = plan_eviction(
             current_messages, open_refs, watermarks, target_chars=band_budget,
         )
-        if plan.used_undersized_open_fold:
+        if plan.used_last_resort_fold:
             # 最後の手段の経路を通った = 先頭に U 未満の端数が居座って anchor が
             # 詰まっていた。定常運転になっていないかを見るために残す観測ログ。
             LOGGER.info(
-                "[metabolism] eviction used the last-resort undersized open fold "
+                "[metabolism] eviction used the last-resort undersized fold "
                 "(persona=%s)", persona_id,
             )
         if plan.is_empty:

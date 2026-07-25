@@ -77,9 +77,9 @@ class EvictionPlan:
     # 適用側 (sea/session_lifecycle.py の ``_apply_eviction_plan``) だから。
     # 同じ真実を二箇所に置かない。
     #
-    #: U 未満の open episode を「最後の手段」として畳んだか (§5-5)。
+    #: U に届かない範囲を「最後の手段」として畳んだか (§5-5)。
     #: 観測用 — この経路が定常運転になっていないかをログで見るための印。
-    used_undersized_open_fold: bool = False
+    used_last_resort_fold: bool = False
     #: 計画適用後に残る提示文字数の見込み。
     projected_chars: int = 0
     #: 適用前の提示文字数。
@@ -238,6 +238,34 @@ def _pulse_groups(messages: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any
     return groups
 
 
+def _anchor_blocked_at(units: Sequence["_Unit"], upto: int, consumed: Set[int]) -> bool:
+    """``upto`` の位置が「今回 anchor を止めている先頭」か (最後の手段の前提)。
+
+    真になる条件は二つとも要る:
+
+    - 手前が**既存の置き換え (壁) だけ**であること。畳めない生ログが手前に残って
+      いると、そこを畳んでも anchor は前進しないうえ、作った置き換えが壁になって
+      手前は以後どの束ねにも入れなくなる (新しいメッセージは末尾に来るので手前は
+      成長しない) = anchor が**恒久的に**詰まる。
+    - 手前に**今回のラウンドで畳んだものが無い**こと。既に畳めているなら anchor は
+      その分だけ前進するので、最後の手段は要らない。ここを ``consumed`` も吸収済み
+      に数えると、普通に畳めた回でも候補の末尾の端数を畳んでしまい、**日常経路で
+      小粒の一次あらすじを作る** (issue chronicle_undersized_lv1_chunks が消そうと
+      しているもの)。観測用の ``used_last_resort_fold`` も嘘になる。
+    """
+    if any(j in consumed for j in range(upto)):
+        return False
+    return all(units[j].is_wall for j in range(upto))
+
+
+def _run_ends_at(units: Sequence["_Unit"], idx: int) -> bool:
+    """``idx`` で closed の連続 run が終わるか (次が壁 / open / 末尾)。"""
+    nxt = idx + 1
+    if nxt >= len(units):
+        return True
+    return units[nxt].is_wall or units[nxt].is_open
+
+
 def plan_eviction(
     messages: Sequence[Dict[str, Any]],
     open_episode_refs: Set[str],
@@ -257,7 +285,7 @@ def plan_eviction(
     計画は二段で立てる (§5-5)。
 
     1. **U 以上のまとまりだけ**を畳んで目標水位を狙う。届いたら終わり。
-    2. 届かなければ、**U 未満の open episode も畳む**。ただし一回だけ。
+    2. 届かなければ、**未畳みの先頭にある範囲を種類も大きさも問わず畳む**。一回だけ。
 
     二段目が要る理由: 提示コンテキストの先頭に「まだ終わっていない episode の、
     U に届かない端数」が居座ると、その後ろをいくら畳んでも **anchor が永久に
@@ -302,11 +330,6 @@ def plan_eviction(
     remaining = total
     folds: List[Fold] = []
     consumed: Set[int] = set()   # 消費済み unit index
-    #: 今回の計画で **一度でも畳んだ** unit index。消費済みかどうかとは別に持つ
-    #: (open を途中まで畳んだ場合は consumed に入らないため)。畳んだ位置には
-    #: 置き換えが立つので、以後この位置は壁として扱う — 跨いで前後の closed を
-    #: 束ねると、置き換えの中身を飛び越えた偽の隣接になる (§4-5)。
-    folded_from: Set[int] = set()
     #: open episode の unit は先頭から順に食う (途中まで畳んだ位置を覚える)
     open_offset: Dict[int, int] = {}
 
@@ -315,7 +338,7 @@ def plan_eviction(
     for allow_undersized_open in (False, True):
         if remaining <= watermarks.target:
             break
-        undersized_used = False
+        last_resort_used = False
         progressed = True
         while remaining > watermarks.target and progressed:
             progressed = False
@@ -324,9 +347,12 @@ def plan_eviction(
             pending_idx: List[int] = []
 
             for idx, unit in enumerate(units):
-                if idx in consumed or idx in folded_from:
+                if idx in consumed:
                     # 既に畳んだ位置 = 置き換えが立つ = 壁。透明に素通りさせると
-                    # 前後の closed がこの位置を飛び越えて束ねられてしまう。
+                    # 前後の closed がこの位置を飛び越えて束ねられてしまう
+                    # (§4-5 偽の隣接)。**途中まで畳んだ open は consumed に入らない**
+                    # ので、そちらは is_open の分岐が同じ役目を果たす (必ず
+                    # pending をリセットする) — 残りは計画対象に残る。
                     pending, pending_refs, pending_idx = [], [], []
                     continue
 
@@ -354,13 +380,20 @@ def plan_eviction(
                             break
                     if message_chars(taken) < target_chars:
                         # U に届かない端数。一段目では畳まず次の unit を見る。
-                        if not allow_undersized_open or undersized_used:
+                        if not allow_undersized_open or last_resort_used:
+                            continue
+                        # 手前に畳めない範囲が残っているなら、ここを畳んでも
+                        # anchor は前進しない。しかも作った置き換えが壁になって
+                        # 手前の範囲は以後どことも束ねられなくなる = anchor が
+                        # **恒久的に**詰まる。端数圧縮は「手前が全部吸収済み」の
+                        # open に限る (Codex レビュー P1)。
+                        if not _anchor_blocked_at(units, idx, consumed):
                             continue
                         # 二段目 = 最後の手段。ここを畳まないと anchor が進まない。
                         # 一回だけ (先頭が畳めれば適用側の anchor 前進が後ろの
                         # 圧縮区間ごと連鎖して飲み込むので、これで足りる)。
-                        undersized_used = True
-                        plan.used_undersized_open_fold = True
+                        last_resort_used = True
+                        plan.used_last_resort_fold = True
                         LOGGER.info(
                             "[eviction] folding an undersized open episode as a last "
                             "resort (ref=%s, %d chars < U=%d): otherwise the anchor "
@@ -371,7 +404,6 @@ def plan_eviction(
                         Fold(messages=taken, open_episode_ref=unit.ref,
                              episode_refs=[unit.ref] if unit.ref else [])
                     )
-                    folded_from.add(idx)
                     open_offset[idx] = offset + len(taken)
                     if open_offset[idx] >= len(unit.messages):
                         consumed.add(idx)
@@ -384,16 +416,47 @@ def plan_eviction(
                 pending_idx.append(idx)
                 if unit.ref:
                     pending_refs.append(unit.ref)
-                if message_chars(pending) >= target_chars:
+                reached_u = message_chars(pending) >= target_chars
+                last_resort_run = (
+                    allow_undersized_open
+                    and not last_resort_used
+                    and bool(pending)
+                    and _run_ends_at(units, idx)
+                    and _anchor_blocked_at(units, pending_idx[0], consumed)
+                )
+                if reached_u or last_resort_run:
+                    if not reached_u:
+                        # U に届かない closed の run。ここが未畳みの先頭なので、
+                        # 畳まないと anchor が進まない。open だけを最後の手段に
+                        # するのは根拠のない線引きで、「先頭が U 未満の closed +
+                        # 直後が U 未満の open」で永久に手詰まりになる
+                        # (Codex レビュー二巡目 P1)。
+                        last_resort_used = True
+                        plan.used_last_resort_fold = True
+                        LOGGER.info(
+                            "[eviction] folding an undersized closed run as a last "
+                            "resort (%d chars < U=%d): otherwise the anchor cannot "
+                            "advance past it", message_chars(pending), target_chars,
+                        )
                     folds.append(
                         Fold(messages=list(pending), episode_refs=list(pending_refs))
                     )
                     consumed.update(pending_idx)
-                    folded_from.update(pending_idx)
                     remaining -= _net_reduction(pending)
                     progressed = True
                     break
 
+    # 二段構えなので **発見順 ≠ 時系列順**: 一段目で後ろの範囲を畳み、二段目で
+    # 先頭の端数を畳むと [後, 先] の順で積まれる。folds の契約は時系列順で、
+    # 適用側はこの順に子 episode を刻み short_id を採る — 逆順のまま返すと
+    # 記録の並びが体験の並びと食い違う (レビュー三巡目 P2)。元の位置で並べ直す。
+    position = {str(m.get("id")): i for i, m in enumerate(messages)}
+    folds.sort(
+        key=lambda f: min(
+            (position.get(mid, len(messages)) for mid in f.message_ids),
+            default=len(messages),
+        )
+    )
     plan.folds = folds
     plan.projected_chars = remaining
     return plan

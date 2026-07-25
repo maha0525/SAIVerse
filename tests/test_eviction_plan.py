@@ -88,7 +88,7 @@ class OpenEpisodeTest(unittest.TestCase):
         ]
         result = plan(msgs, ["episode:1"], low=0, target=2_000)
         self.assertEqual([f.message_ids for f in result.folds], [["k0", "k1"]])
-        self.assertFalse(result.used_undersized_open_fold)
+        self.assertFalse(result.used_last_resort_fold)
 
     def test_small_open_is_folded_as_last_resort(self):
         """二段目: 他に畳めるものが無いなら U 未満の open も畳む (§5-5)。
@@ -103,7 +103,7 @@ class OpenEpisodeTest(unittest.TestCase):
         result = plan(msgs, ["episode:1"], low=0, target=100)
         self.assertEqual([f.message_ids for f in result.folds], [["a0", "a1"]])
         self.assertEqual(result.folds[0].open_episode_ref, "episode:1")
-        self.assertTrue(result.used_undersized_open_fold)
+        self.assertTrue(result.used_last_resort_fold)
 
     def test_undersized_open_fold_happens_at_most_once(self):
         """二段目は一回だけ。先頭が畳めれば適用側の anchor 前進が連鎖するので足りる。"""
@@ -127,6 +127,74 @@ class OpenEpisodeTest(unittest.TestCase):
         self.assertEqual([f.message_ids for f in result.folds], [["a0"]])
         self.assertEqual(result.projected_chars, result.total_chars)  # 減っていない
 
+    def test_last_resort_targets_the_front_not_the_open(self):
+        """Sol P1: 手前に畳めない範囲が残るなら、端数を畳んでも anchor は進まない。
+
+        先頭に U 未満の closed、その後ろに U 未満の open。open を畳んでも先頭の
+        closed が残るので anchor は前進せず、しかも置き換えが壁になって先頭は
+        以後どことも束ねられなくなる = **anchor が恒久的に詰まる**。
+        だから最後の手段が撃つのは**未畳みの先頭** (ここでは closed の c0)。
+        レビュー二巡目 P1: open だけを最後の手段にすると、この並びで永久に
+        手詰まりになる。
+        """
+        msgs = [
+            msg("c0", 100, chars=500),                    # closed / 無帰属 (U 未満)
+            msg("o0", 101, chars=500, ep="episode:1"),    # open (U 未満)
+        ]
+        result = plan(msgs, ["episode:1"], low=0, target=100)
+        self.assertEqual([f.message_ids for f in result.folds], [["c0"]])
+        self.assertTrue(result.used_last_resort_fold)
+
+    def test_big_open_folds_repeatedly_within_one_plan(self):
+        """Sol P2: 一つの open に U が何個も入っているなら、一度の計画で反復して畳む。
+
+        畳んだ prefix だけを壁として扱い、``open_offset`` 以降は計画対象に残す。
+        """
+        msgs = [
+            msg(f"a{i}", 100 + i, chars=1_000, ep="episode:1", pulse=f"p{i}")
+            for i in range(6)
+        ]
+        # U=2,000 → 2 通で 1 fold。目標まで反復して 2 本以上立つこと。
+        result = plan(msgs, ["episode:1"], low=0, target=2_000)
+        self.assertGreaterEqual(len(result.folds), 2)
+        self.assertEqual(result.folds[0].message_ids, ["a0", "a1"])
+        self.assertEqual(result.folds[1].message_ids, ["a2", "a3"])
+
+    def test_last_resort_is_skipped_when_something_was_already_folded(self):
+        """最後の手段は「anchor が今回まったく進まない」ときだけ撃つ。
+
+        手前が普通に畳めていれば anchor はその分前進するので、候補の末尾に残った
+        端数まで畳む必要はない。ここを緩めると**日常経路で小粒の一次あらすじを
+        作る** (issue chronicle_undersized_lv1_chunks が消そうとしているもの) し、
+        観測用の used_last_resort_fold も嘘になる。
+        """
+        msgs = [
+            msg("c0", 100, chars=1_000),
+            msg("c1", 101, chars=1_000),   # c0+c1 で U 到達 → 普通に畳める
+            msg("c2", 102, chars=400),     # 残った端数 — 畳む必要はない
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, [], low=2_000, target=1_000)
+        self.assertEqual([f.message_ids for f in result.folds], [["c0", "c1"]])
+        self.assertFalse(result.used_last_resort_fold)
+
+    def test_folds_are_returned_in_chronological_order(self):
+        """Sol P2: 二段構えでも folds は時系列順で返す。
+
+        一段目で後ろの B、二段目で先頭の端数 A を畳むと発見順は [B, A] になる。
+        適用側はこの順に子 episode を刻んで short_id を採るので、逆順のまま
+        返すと記録の並びが体験の並びと食い違う。
+        """
+        msgs = [
+            msg("a0", 100, chars=500, ep="episode:1"),   # 先頭の open (U 未満)
+            msg("b0", 101, chars=1_000),                 # 以降で U 到達
+            msg("b1", 102, chars=1_000),
+        ]
+        result = plan(msgs, ["episode:1"], low=0, target=100)
+        self.assertEqual(
+            [f.message_ids for f in result.folds], [["a0"], ["b0", "b1"]],
+        )
+
     def test_large_open_folds_by_pulse_joint(self):
         """§6: U に達した open は pulse を丸ごと単位で刻んで部分退場する。"""
         msgs = [
@@ -140,7 +208,7 @@ class OpenEpisodeTest(unittest.TestCase):
         self.assertEqual(len(result.folds), 1)
         self.assertEqual(result.folds[0].message_ids, ["a0", "a1"])
         self.assertEqual(result.folds[0].open_episode_ref, "episode:1")
-        self.assertFalse(result.used_undersized_open_fold)
+        self.assertFalse(result.used_last_resort_fold)
 
     def test_open_never_bundles_with_neighbours(self):
         """§4-5: open を挟んで前後の closed をまたいで束ねない。
@@ -161,8 +229,9 @@ class OpenEpisodeTest(unittest.TestCase):
             if "c0" in f.message_ids and "c1" in f.message_ids
         ]
         self.assertEqual(mixed, [])
-        # 畳まれるのは最後の手段の open 単独だけ
-        self.assertEqual([f.message_ids for f in result.folds], [["o0"]])
+        # 最後の手段が撃つのは**未畳みの先頭**である c0 (open ではない) —
+        # open を畳んでも手前の c0 が残って anchor は進まないため。
+        self.assertEqual([f.message_ids for f in result.folds], [["c0"]])
 
 
 class ClosedBundlingTest(unittest.TestCase):
@@ -178,11 +247,20 @@ class ClosedBundlingTest(unittest.TestCase):
         self.assertEqual(len(result.folds), 1)
         self.assertEqual(result.folds[0].message_ids, ["c0", "c1"])
 
-    def test_under_u_run_is_not_folded(self):
-        """U に届かない列は畳まない (小粒の一次あらすじを作らない)。"""
+    def test_under_u_run_is_folded_only_as_last_resort(self):
+        """U に届かない列は日常経路では畳まない。他に手が無ければ畳む (§5-5)。
+
+        「小粒の一次あらすじを一切作らない」という旧不変条件は撤回した
+        (issue chronicle_undersized_lv1_chunks の目的改訂)。作らないのは
+        日常経路だけで、anchor が詰まるなら畳む。
+        """
         msgs = [msg("c0", 100, chars=500), msg("k0", 200), msg("k1", 201)]
+        # 目標に既に届いている → 何も畳まない
+        self.assertTrue(plan(msgs, [], low=2_000, target=10_000).is_empty)
+        # 目標に届かない → 最後の手段で先頭の小さい列を畳む
         result = plan(msgs, [], low=2_000, target=0)
-        self.assertTrue(result.is_empty)
+        self.assertEqual([f.message_ids for f in result.folds], [["c0"]])
+        self.assertTrue(result.used_last_resort_fold)
 
 
 class TargetWatermarkTest(unittest.TestCase):
@@ -240,7 +318,11 @@ class FoldedPlaceholderTest(unittest.TestCase):
         ]
         # c0 + c1 = 2,000字 (U) だが、間の digest を跨いで束ねない。
         result = plan(msgs, [], low=2_000, target=0)
-        self.assertTrue(result.is_empty)
+        mixed = [
+            f for f in result.folds
+            if "c0" in f.message_ids and "c1" in f.message_ids
+        ]
+        self.assertEqual(mixed, [])
 
 
 if __name__ == "__main__":
