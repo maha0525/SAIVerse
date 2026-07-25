@@ -755,7 +755,7 @@ def _run_chronicle_generation(
     execute_plan → run_band_overflow) で生成する。Metabolism 側
     (sea/session_lifecycle.generate_chronicle) と同じ計画・同じ実行器を使い、
     冪等 claim (実行台帳 kind="metabolism.run"、M1) も同じキーで通す — 手動
-    生成と自動 Metabolism が同じ窓を同時に編纂する二重 LLM コストを台帳が
+    生成と自動 Metabolism が同じ提示コンテキストを同時に編纂する二重 LLM コストを台帳が
     収束させる (旧実装は claim を通らない別コネクション入口だった)。
     """
     import os
@@ -867,7 +867,7 @@ def _run_chronicle_generation(
         )
         plan = truncate_plan(plan, max_messages)
 
-        # 帯あふれ backlog の dry 予測 (Codex W4 #3): 新チャンクが無くても
+        # 列のあふれ backlog の dry 予測 (Codex W4 #3): 新チャンクが無くても
         # 前回の束ね失敗の残りがあれば統合だけ実行する。
         from sai_memory.arasuji.bands import plan_band_overflow
         try:
@@ -1009,7 +1009,7 @@ def _run_chronicle_generation(
                     LOGGER.warning("[Chronicle Gen] ledger mark_failed failed", exc_info=True)
             raise
 
-        # キャンセル = 部分適用。completed で封印すると同じ窓が window_claimed で
+        # キャンセル = 部分適用。completed で封印すると同じ提示コンテキストが window_claimed で
         # 再実行不能になる (冪等マーカーは適用の成功だけを封印 — Codex W4 #8)。
         # failed 終端で claim を退け、帯統合もスキップする。
         if exec_result.cancelled:

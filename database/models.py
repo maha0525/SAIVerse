@@ -156,17 +156,17 @@ class SessionAnchor(Base):
     1 (persona, model) の Session anchor 状態で、更新は行単位 upsert。旧列からの
     移行は database/migrate.py の backfill_session_anchors (冪等、起動時に実行)。
 
-    - ANCHOR_MESSAGE_ID: SAIMemory messages 内の anchor メッセージ ID (窓の起点)。
+    - ANCHOR_MESSAGE_ID: SAIMemory messages 内の anchor メッセージ ID (提示コンテキストの起点)。
     - TTL_SECONDS: この anchor を最後に書いた時点の cache TTL (書き込み時 TTL 固定
       評価、docs/intent/cache_lifecycle_control.md §5.4)。NULL = 旧 anchor / TTL
       不明 (読み出し側が現行設定から算出する後方互換)。
     - UPDATED_AT: 最終 touch 時刻 (epoch 秒)。LLM 呼び出し成功時にのみ前進する
       prompt cache 書き込みの真の起点。
-    - FOLDED_RANGES_JSON: 窓の**途中**で digest に畳まれた範囲のリスト (JSON)。
+    - FOLDED_RANGES_JSON: 提示コンテキストの**途中**で digest に畳まれた範囲のリスト (JSON)。
       退場が episode 単位になり「古い会話を生で残したまま新しい作業の古い部分を
-      畳む」が起きるため、anchor 一点では窓を表せなくなった。窓 = anchor 以降 −
+      畳む」が起きるため、anchor 一点では提示コンテキストを表せなくなった。提示コンテキスト = anchor 以降 −
       畳まれた範囲 + その位置の digest (docs/intent/chronicle_eviction.md §6)。
-      退役は model ごとなのでこの行が持ち主。NULL = 穴なし。
+      退役は model ごとなのでこの行が持ち主。NULL = 圧縮区間なし。
     """
     __tablename__ = "session_anchor"
     PERSONA_ID = Column(String, primary_key=True)

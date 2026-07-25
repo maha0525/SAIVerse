@@ -37,7 +37,7 @@ def memory_close(ref: str) -> str:
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"
 
-    # head 操作の内容型通知 (§6-4): 机 (desk) の render 断片を全 Session 窓へ。
+    # head 操作の内容型通知 (§6-4): 机 (desk) の render 断片を全 Session 提示コンテキストへ。
     # 失敗 (Error 文字列) 時は通知しない。ヘルパー側は決して raise しない。
     if not (result or "").startswith("Error"):
         from sea.head_pipeline.notify import notify_head_mutation_from_tool_context

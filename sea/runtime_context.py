@@ -68,7 +68,7 @@ def _minimal_load_chars(runtime, persona: Any, model_key: Optional[str]) -> int:
 
     低水位 (直近保護帯、docs/intent/chronicle_eviction.md §4) をそのまま使う —
     「Metabolism 後に残っている量」と「anchor 無しで読み直す量」は同じであるべき
-    だから (再開時に窓の大きさが飛ぶと prefix が毎回作り直しになる)。
+    だから (再開時に提示コンテキストの大きさが飛ぶと prefix が毎回作り直しになる)。
     """
     lifecycle = getattr(runtime, "session_lifecycle", None)
     if lifecycle is not None:
@@ -230,7 +230,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 required_scopes = ["committed"]
 
                 # Parse history_depth format
-                # - "full": anchor 以降の窓、または低水位ぶんの文字数 (Metabolism 無効時)
+                # - "full": anchor 以降の提示コンテキスト、または低水位ぶんの文字数 (Metabolism 無効時)
                 # - "Nmessages" (e.g., "10messages"): message count limit
                 # - integer or numeric string: character limit
                 use_message_count = False
@@ -257,9 +257,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 required_scopes=required_scopes,
                                 pulse_id=pulse_id,
                             )
-                            # 窓の途中で digest に畳まれた範囲は、元の時系列位置で
+                            # 提示コンテキストの途中で digest に畳まれた範囲は、元の時系列位置で
                             # あらすじ + 圧縮マークに置き換えて見せる
-                            # (docs/intent/chronicle_eviction.md §6)。穴が無ければ素通り。
+                            # (docs/intent/chronicle_eviction.md §6)。圧縮区間が無ければ素通り。
                             recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
                                 persona, model_key, recent_from_anchor,
                             )

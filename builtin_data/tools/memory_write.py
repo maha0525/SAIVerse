@@ -53,7 +53,7 @@ def memory_write(
 
 
 def _notify_mutation(ref: Optional[str], title: Optional[str], result: str) -> None:
-    """head 操作の内容型通知 (§6-4): 成功時に該当 section の render 断片を全 Session 窓へ。
+    """head 操作の内容型通知 (§6-4): 成功時に該当 section の render 断片を全 Session 提示コンテキストへ。
 
     宛先 core/c:N → core_memory、m:N / title 新規 → memopedia_index。失敗
     (Error 文字列) や head 非対象の ref は通知しない。ヘルパー側は決して raise

@@ -48,8 +48,8 @@ def get_memory_weave_context(
             の文字数予算制に移行したためこの値は安全弁の下限として扱われる (予算が
             主制御)。Track Chronicle 側では従来どおり件数上限として効く。
         exclude_chronicle_entry_ids: head の Chronicle 枠から外すエントリ id。
-            提示窓の中で元の時系列位置に digest を差し込んでいる範囲を渡す
-            (docs/intent/chronicle_eviction.md §6) — 同じあらすじが窓と head の
+            提示コンテキストの中で元の時系列位置に digest を差し込んでいる範囲を渡す
+            (docs/intent/chronicle_eviction.md §6) — 同じあらすじが提示コンテキストと head の
             両方に出ると体験が二重化して時系列の錯覚を招くため。
 
     Returns:
@@ -298,7 +298,7 @@ def _get_track_unprocessed_messages_text(
     )
     processed_ids = {row[0] for row in cur.fetchall()}
 
-    # Track 紐付きメッセージから処理済み + 履歴窓内 (anchor 以降) を除外して取得
+    # Track 紐付きメッセージから処理済み + 履歴提示コンテキスト内 (anchor 以降) を除外して取得
     sql = (
         "SELECT id, role, content, created_at FROM messages "
         "WHERE origin_track_id = ? "

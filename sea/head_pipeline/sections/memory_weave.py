@@ -89,8 +89,8 @@ class MemoryWeaveSection:
         # 廃止 (beat_execution_context.md §3.2)。読めない環境 (テストスタブ等) は
         # None = 除外なし (従来のフォールバックと同じ縮退)。
         anchor_id = None
-        # 窓の中で digest に置き換えて見せている範囲のあらすじは head から外す
-        # (chronicle_eviction.md §6 — 同じあらすじが窓と head に二重で出ると、
+        # 提示コンテキストの中で digest に置き換えて見せている範囲のあらすじは head から外す
+        # (chronicle_eviction.md §6 — 同じあらすじが提示コンテキストと head に二重で出ると、
         #  同じ出来事が二度あったかのような時系列の錯覚をペルソナに招く)。
         folded_entry_ids: list[str] = []
         try:
