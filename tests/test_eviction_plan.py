@@ -76,15 +76,56 @@ class ProtectionBandTest(unittest.TestCase):
 class OpenEpisodeTest(unittest.TestCase):
     """§3: open episode は単独でしか畳まない。"""
 
-    def test_small_open_is_not_folded(self):
-        """U 未満の open は畳めない = 生のまま残る (小粒の会話 A が守られる)。"""
+    def test_small_open_is_skipped_while_something_else_is_foldable(self):
+        """一段目: U 未満の open は飛ばして、畳める方を先に畳む (優先度)。
+
+        U は「優先度」の材料であって「畳んでいいか」の材料ではない。U 以上が
+        残っている限り、U 未満の open には手を付けない。
+        """
         msgs = [
             msg("a0", 100, chars=500, ep="episode:1"),
-            msg("k0", 200), msg("k1", 201),
+            msg("k0", 200), msg("k1", 201),   # closed 2 通で U 到達
         ]
-        result = plan(msgs, ["episode:1"], low=2_000, target=0)
-        self.assertTrue(result.is_empty)
-        self.assertEqual(result.force_close_episode_ref, "episode:1")
+        result = plan(msgs, ["episode:1"], low=0, target=2_000)
+        self.assertEqual([f.message_ids for f in result.folds], [["k0", "k1"]])
+        self.assertFalse(result.used_undersized_open_fold)
+
+    def test_small_open_is_folded_as_last_resort(self):
+        """二段目: 他に畳めるものが無いなら U 未満の open も畳む (§5-5)。
+
+        これが無いと、提示コンテキストの先頭に U 未満の端数が居座ったとき
+        anchor が永久に進まない。
+        """
+        msgs = [
+            msg("a0", 100, chars=500, ep="episode:1"),
+            msg("a1", 101, chars=500, ep="episode:1"),
+        ]
+        result = plan(msgs, ["episode:1"], low=0, target=100)
+        self.assertEqual([f.message_ids for f in result.folds], [["a0", "a1"]])
+        self.assertEqual(result.folds[0].open_episode_ref, "episode:1")
+        self.assertTrue(result.used_undersized_open_fold)
+
+    def test_undersized_open_fold_happens_at_most_once(self):
+        """二段目は一回だけ。先頭が畳めれば適用側の anchor 前進が連鎖するので足りる。"""
+        msgs = [
+            msg("a0", 100, chars=500, ep="episode:1"),
+            msg("b0", 200, chars=500, ep="episode:2"),
+            msg("c0", 300, chars=500, ep="episode:3"),
+        ]
+        result = plan(msgs, ["episode:1", "episode:2", "episode:3"], low=0, target=100)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["a0"])
+
+    def test_undersized_open_fold_is_not_skipped_for_zero_net_reduction(self):
+        """端数は恒等圧縮で正味 0 になりうる。削減量で価値を測って飛ばさない。
+
+        目的は文字数削減ではなく anchor を進めること。
+        """
+        # 置き換えの見込み (1,200字) より小さい端数 → _net_reduction は 0
+        msgs = [msg("a0", 100, chars=300, ep="episode:1")]
+        result = plan(msgs, ["episode:1"], low=0, target=100)
+        self.assertEqual([f.message_ids for f in result.folds], [["a0"]])
+        self.assertEqual(result.projected_chars, result.total_chars)  # 減っていない
 
     def test_large_open_folds_by_pulse_joint(self):
         """§6: U に達した open は pulse を丸ごと単位で刻んで部分退場する。"""
@@ -94,13 +135,19 @@ class OpenEpisodeTest(unittest.TestCase):
             msg("a2", 102, ep="episode:1", pulse="p2"),
             msg("k0", 200), msg("k1", 201),
         ]
-        result = plan(msgs, ["episode:1"], low=2_000, target=2_000)
+        # 一段目で目標に届く水位にして、最後の手段の経路を誘発しない。
+        result = plan(msgs, ["episode:1"], low=2_000, target=4_500)
         self.assertEqual(len(result.folds), 1)
         self.assertEqual(result.folds[0].message_ids, ["a0", "a1"])
         self.assertEqual(result.folds[0].open_episode_ref, "episode:1")
+        self.assertFalse(result.used_undersized_open_fold)
 
     def test_open_never_bundles_with_neighbours(self):
-        """§4-5: open を挟んで前後の closed をまたいで束ねない。"""
+        """§4-5: open を挟んで前後の closed をまたいで束ねない。
+
+        最後の手段で open 自身が畳まれることはあっても、それを跨いで前後の
+        closed が一つの fold に入ることはない (偽の隣接を作らない)。
+        """
         msgs = [
             msg("c0", 100, ep="episode:1"),      # closed
             msg("o0", 101, chars=500, ep="episode:2"),  # open (U 未満)
@@ -109,7 +156,13 @@ class OpenEpisodeTest(unittest.TestCase):
         ]
         # c0 + c1 なら U=2,000 に届くが、間に open があるのでまたげない。
         result = plan(msgs, ["episode:2"], low=2_000, target=0)
-        self.assertTrue(result.is_empty)
+        mixed = [
+            f for f in result.folds
+            if "c0" in f.message_ids and "c1" in f.message_ids
+        ]
+        self.assertEqual(mixed, [])
+        # 畳まれるのは最後の手段の open 単独だけ
+        self.assertEqual([f.message_ids for f in result.folds], [["o0"]])
 
 
 class ClosedBundlingTest(unittest.TestCase):

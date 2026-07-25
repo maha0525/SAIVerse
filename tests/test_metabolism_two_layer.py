@@ -541,20 +541,21 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
         return entry["anchor_id"] if entry else None
 
-    def test_small_open_episode_is_not_folded(self):
-        """U 未満の open episode は畳めない = 生のまま残る (会話 A が守られる)。
+    def test_undersized_open_at_the_front_is_folded_so_the_anchor_advances(self):
+        """先頭の U 未満 open は最後の手段として畳まれ、anchor が進む (§5-5)。
 
-        古い側に U 未満の open 会話、新しい側に保護範囲。退場候補範囲は open だけ
-        なので、どのまとまりも U に届かず今回は何も畳まない。
+        古い側に U 未満の open 会話、新しい側に保護範囲。他に畳めるものが無い
+        ので、ここを畳まないと anchor が永久に進まない。**U は優先度の材料で
+        あって、畳んでいいかの材料ではない。** 強制クローズ (旧 §5-5) は撤去済み
+        — 場所が足りないという理由でペルソナの出来事を終わらせない。
         """
         ref = self._open_episode()["episode_ref"]
         msgs = [_msg(f"m{i}", 100 + i, chars=500, episode_ref=ref) for i in range(2)]
         msgs += [_msg(f"n{i}", 200 + i, chars=1_000) for i in range(3)]
         lifecycle = self._make_lifecycle("ok")
         self._run(lifecycle, msgs, Watermarks(low=3_000, target=1_000, high=5_000))
-        # 強制クローズは事前試算で見送られる (§5-5 — 閉じても U(2,000) に届かない:
-        # open 会話は 1,000字)。anchor も動かない。
-        self.assertIsNone(self._anchor(lifecycle))
+        # 先頭が畳めたので anchor が保護範囲の先頭 (n0) まで前進する。
+        self.assertEqual(self._anchor(lifecycle), "n0")
 
     def test_large_open_episode_folds_in_pulse_units(self):
         """U に達した open episode は pulse 関節で刻んで部分退場する (§6)。"""
@@ -648,7 +649,9 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
                       lambda *a, **k: None):
             lifecycle.run_metabolism(
                 self._persona(msgs), "b", window,
-                Watermarks(low=2_000, target=1_000, high=5_000), None,
+                # 一段目 (U 以上のみ) で目標に届く水位。最後の手段の経路を
+                # 誘発すると先頭も畳まれて anchor が進み、圧縮区間が残らない。
+                Watermarks(low=2_000, target=5_000, high=8_000), None,
                 model_key="std-model",
             )
         # m1/m2 は再度記録されず、新しく畳まれるのは m3/m4 だけ
@@ -745,7 +748,9 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         lifecycle = self._make_lifecycle("ok")
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        # 一段目で目標に届く水位 (4,500 → b0+b1 を畳んで 3,700)。最後の手段を
+        # 誘発しないので先頭の open 会話 A は生のまま = anchor は動けない。
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=4_000, high=5_000))
         self.assertIsNone(self._anchor(lifecycle))
         self.assertEqual(len(saved), 1)
         self.assertEqual([f.message_ids for f in saved[0]], [["b0", "b1"]])

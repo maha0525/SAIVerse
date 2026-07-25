@@ -1018,34 +1018,11 @@ class SessionLifecycle:
             )
             return set()
 
-    def _force_close_episode(self, persona, episode_ref: str) -> bool:
-        """最古の open episode を強制的に閉じる (chronicle_eviction.md §5-5)。
-
-        U 未満の open episode ばかりで退場候補範囲が埋まると、どのまとまりも U に
-        届かず Metabolism が手詰まりになる。閉じれば closed 同士でまたいで束ねられ、
-        U に届いて退場できる。閉じ処理は意味を書かず再訪の鍵だけ書く規範
-        (life_concept_map.md §9) に従い、機構が閉じたことだけ meta に残す。
-        """
-        persona_id = getattr(persona, "persona_id", None)
-        if not persona_id or self.manager is None:
-            return False
-        try:
-            from saiverse.episodes import close_episode
-            close_episode(
-                self.manager, persona_id, episode_ref,
-                meta={"closed_by": "metabolism_pressure"},
-            )
-            LOGGER.info(
-                "[metabolism] force-closed oldest open episode %s to make the "
-                "eviction band foldable (persona=%s)", episode_ref, persona_id,
-            )
-            return True
-        except Exception:
-            LOGGER.warning(
-                "[metabolism] failed to force-close episode %s (persona=%s)",
-                episode_ref, persona_id, exc_info=True,
-            )
-            return False
+    # 強制クローズ (旧 §5-5) は撤去した (2026-07-25)。U 未満の open episode を
+    # 畳めるようになったので手詰まりが起きない。そもそも「開きっぱなしの episode を
+    # 閉じる」のは提示コンテキストの都合で決める話ではなく、episode 側がタイムアウト
+    # を検知して閉じる仕事 (まはー裁定)。場所が足りないという理由でペルソナの
+    # 出来事に「終わった」と判定を下してはいけない。
 
     def _apply_eviction_plan(
         self,
@@ -1350,29 +1327,13 @@ class SessionLifecycle:
         plan = plan_eviction(
             current_messages, open_refs, watermarks, target_chars=band_budget,
         )
-        if plan.is_empty and plan.force_close_episode_ref:
-            # §5-5: U 未満の open ばかりで手詰まり → 最古を閉じて再計画。
-            # **閉じる前に「閉じたら本当に畳めるようになるか」を計画で確かめる**。
-            # episode を閉じるのはペルソナの出来事を終わらせる実質的な操作なので、
-            # 効かないと分かっている強制クローズを毎ラウンド撃たない (進行中の
-            # 会話が細切れに閉じられ続けるのを防ぐ)。
-            hypothetical = plan_eviction(
-                current_messages,
-                open_refs - {plan.force_close_episode_ref},
-                watermarks,
-                target_chars=band_budget,
+        if plan.used_undersized_open_fold:
+            # 最後の手段の経路を通った = 先頭に U 未満の端数が居座って anchor が
+            # 詰まっていた。定常運転になっていないかを見るために残す観測ログ。
+            LOGGER.info(
+                "[metabolism] eviction used the last-resort undersized open fold "
+                "(persona=%s)", persona_id,
             )
-            if hypothetical.is_empty:
-                LOGGER.info(
-                    "[metabolism] skipping force-close of %s: closing it would not "
-                    "make anything foldable (persona=%s)",
-                    plan.force_close_episode_ref, persona_id,
-                )
-            elif self._force_close_episode(persona, plan.force_close_episode_ref):
-                plan = plan_eviction(
-                    current_messages, self._open_episode_refs(persona), watermarks,
-                    target_chars=band_budget,
-                )
         if plan.is_empty:
             LOGGER.warning(
                 "[metabolism] nothing foldable this round (persona=%s, %d chars, "

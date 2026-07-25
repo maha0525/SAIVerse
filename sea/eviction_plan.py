@@ -77,9 +77,9 @@ class EvictionPlan:
     # 適用側 (sea/session_lifecycle.py の ``_apply_eviction_plan``) だから。
     # 同じ真実を二箇所に置かない。
     #
-    #: U に達するまとまりが作れず手詰まりのとき、強制クローズすべき最古の
-    #: open episode (§5-5)。呼び出し側が閉じて再計画する。
-    force_close_episode_ref: Optional[str] = None
+    #: U 未満の open episode を「最後の手段」として畳んだか (§5-5)。
+    #: 観測用 — この経路が定常運転になっていないかをログで見るための印。
+    used_undersized_open_fold: bool = False
     #: 計画適用後に残る提示文字数の見込み。
     projected_chars: int = 0
     #: 適用前の提示文字数。
@@ -254,9 +254,26 @@ def plan_eviction(
             呼び出し側の責務で、ここでは low / target だけを使う)。
         target_chars: 一次あらすじの標準被覆 U。1 つの fold が目指す大きさ。
 
+    計画は二段で立てる (§5-5)。
+
+    1. **U 以上のまとまりだけ**を畳んで目標水位を狙う。届いたら終わり。
+    2. 届かなければ、**U 未満の open episode も畳む**。ただし一回だけ。
+
+    二段目が要る理由: 提示コンテキストの先頭に「まだ終わっていない episode の、
+    U に届かない端数」が居座ると、その後ろをいくら畳んでも **anchor が永久に
+    進まない**。後ろの畳みは置き換えを残すだけなので、提示は減らないまま
+    圧縮区間が積もる。U に届いたら普通に畳むのに、届かないときだけ生で死守する
+    のは判断基準として一貫していない — **U は「優先度」の材料であって「畳んで
+    いいか」の材料ではない**。
+
+    一回だけで足りる理由: 適用側は「先頭から連続して畳まれている分」を丸ごと
+    anchor で飲み込む。だから詰まっていた先頭が畳めた瞬間、後ろに溜まっていた
+    圧縮区間ごと連鎖して提示コンテキストから出る。二段目の削減量は計画の算術に
+    は現れない (端数は恒等圧縮で正味 0 になりうる) ので、**削減量で価値を測って
+    飛ばしてはいけない**。
+
     Returns:
-        EvictionPlan。``folds`` が空で ``force_close_episode_ref`` が立っている
-        場合、呼び出し側は該当 episode を閉じてから再計画する (§5-5)。
+        EvictionPlan。
     """
     total = message_chars(messages)
     plan = EvictionPlan(total_chars=total, projected_chars=total)
@@ -285,78 +302,98 @@ def plan_eviction(
     remaining = total
     folds: List[Fold] = []
     consumed: Set[int] = set()   # 消費済み unit index
+    #: 今回の計画で **一度でも畳んだ** unit index。消費済みかどうかとは別に持つ
+    #: (open を途中まで畳んだ場合は consumed に入らないため)。畳んだ位置には
+    #: 置き換えが立つので、以後この位置は壁として扱う — 跨いで前後の closed を
+    #: 束ねると、置き換えの中身を飛び越えた偽の隣接になる (§4-5)。
+    folded_from: Set[int] = set()
     #: open episode の unit は先頭から順に食う (途中まで畳んだ位置を覚える)
     open_offset: Dict[int, int] = {}
 
-    progressed = True
-    while remaining > watermarks.target and progressed:
-        progressed = False
-        pending: List[Dict[str, Any]] = []
-        pending_refs: List[str] = []
-        pending_idx: List[int] = []
+    # 二段構え: まず U 以上だけ (allow_undersized_open=False)、それで目標に
+    # 届かなければ U 未満の open も一回だけ許す (True)。
+    for allow_undersized_open in (False, True):
+        if remaining <= watermarks.target:
+            break
+        undersized_used = False
+        progressed = True
+        while remaining > watermarks.target and progressed:
+            progressed = False
+            pending: List[Dict[str, Any]] = []
+            pending_refs: List[str] = []
+            pending_idx: List[int] = []
 
-        for idx, unit in enumerate(units):
-            if idx in consumed:
-                continue
-
-            if unit.is_wall:
-                # 畳み済みの digest は再圧縮しない (§4-4)。跨いだ束ねも作らない。
-                pending, pending_refs, pending_idx = [], [], []
-                continue
-
-            if unit.is_open:
-                # open episode は単独で畳む (§3) — ここまで貯めた closed 束ねは
-                # U 未満のまま打ち切り、捨てる。open を挟んで前後をつなぐと
-                # 非連続な束ね (§4-5 違反) になるため、またがせない。
-                pending, pending_refs, pending_idx = [], [], []
-
-                offset = open_offset.get(idx, 0)
-                rest = unit.messages[offset:]
-                if not rest:
-                    consumed.add(idx)
+            for idx, unit in enumerate(units):
+                if idx in consumed or idx in folded_from:
+                    # 既に畳んだ位置 = 置き換えが立つ = 壁。透明に素通りさせると
+                    # 前後の closed がこの位置を飛び越えて束ねられてしまう。
+                    pending, pending_refs, pending_idx = [], [], []
                     continue
-                # pulse 関節で刻む (§6): 丸ごと退場済みの pulse 群だけを畳む。
-                taken: List[Dict[str, Any]] = []
-                for group in _pulse_groups(rest):
-                    taken.extend(group)
-                    if message_chars(taken) >= target_chars:
-                        break
-                if message_chars(taken) < target_chars:
-                    # この open episode はまだ U に届かない = 畳めない。
-                    # 生のまま残して次の unit を見る (小粒の会話 A が守られる経路)。
-                    continue
-                folds.append(
-                    Fold(messages=taken, open_episode_ref=unit.ref,
-                         episode_refs=[unit.ref] if unit.ref else [])
-                )
-                open_offset[idx] = offset + len(taken)
-                if open_offset[idx] >= len(unit.messages):
-                    consumed.add(idx)
-                remaining -= _net_reduction(taken)
-                progressed = True
-                break
 
-            # closed / 無帰属: episode をまたいで束ねてよい (§3)。
-            pending.extend(unit.messages)
-            pending_idx.append(idx)
-            if unit.ref:
-                pending_refs.append(unit.ref)
-            if message_chars(pending) >= target_chars:
-                folds.append(Fold(messages=list(pending), episode_refs=list(pending_refs)))
-                consumed.update(pending_idx)
-                remaining -= _net_reduction(pending)
-                progressed = True
-                break
+                if unit.is_wall:
+                    # 畳み済みの digest は再圧縮しない (§4-4)。跨いだ束ねも作らない。
+                    pending, pending_refs, pending_idx = [], [], []
+                    continue
+
+                if unit.is_open:
+                    # open episode は単独で畳む (§3) — ここまで貯めた closed 束ねは
+                    # U 未満のまま打ち切り、捨てる。open を挟んで前後をつなぐと
+                    # 非連続な束ね (§4-5 違反) になるため、またがせない。
+                    pending, pending_refs, pending_idx = [], [], []
+
+                    offset = open_offset.get(idx, 0)
+                    rest = unit.messages[offset:]
+                    if not rest:
+                        consumed.add(idx)
+                        continue
+                    # pulse 関節で刻む (§6): 丸ごと退場済みの pulse 群だけを畳む。
+                    taken: List[Dict[str, Any]] = []
+                    for group in _pulse_groups(rest):
+                        taken.extend(group)
+                        if message_chars(taken) >= target_chars:
+                            break
+                    if message_chars(taken) < target_chars:
+                        # U に届かない端数。一段目では畳まず次の unit を見る。
+                        if not allow_undersized_open or undersized_used:
+                            continue
+                        # 二段目 = 最後の手段。ここを畳まないと anchor が進まない。
+                        # 一回だけ (先頭が畳めれば適用側の anchor 前進が後ろの
+                        # 圧縮区間ごと連鎖して飲み込むので、これで足りる)。
+                        undersized_used = True
+                        plan.used_undersized_open_fold = True
+                        LOGGER.info(
+                            "[eviction] folding an undersized open episode as a last "
+                            "resort (ref=%s, %d chars < U=%d): otherwise the anchor "
+                            "cannot advance past it",
+                            unit.ref, message_chars(taken), target_chars,
+                        )
+                    folds.append(
+                        Fold(messages=taken, open_episode_ref=unit.ref,
+                             episode_refs=[unit.ref] if unit.ref else [])
+                    )
+                    folded_from.add(idx)
+                    open_offset[idx] = offset + len(taken)
+                    if open_offset[idx] >= len(unit.messages):
+                        consumed.add(idx)
+                    remaining -= _net_reduction(taken)
+                    progressed = True
+                    break
+
+                # closed / 無帰属: episode をまたいで束ねてよい (§3)。
+                pending.extend(unit.messages)
+                pending_idx.append(idx)
+                if unit.ref:
+                    pending_refs.append(unit.ref)
+                if message_chars(pending) >= target_chars:
+                    folds.append(
+                        Fold(messages=list(pending), episode_refs=list(pending_refs))
+                    )
+                    consumed.update(pending_idx)
+                    folded_from.update(pending_idx)
+                    remaining -= _net_reduction(pending)
+                    progressed = True
+                    break
 
     plan.folds = folds
     plan.projected_chars = remaining
-
-    if not folds and remaining > watermarks.target:
-        # 手詰まり (§5-5): U に達するまとまりが作れない。最古の open episode を
-        # 強制クローズすれば closed 同士でまたいで束ねられる。
-        for unit in units:
-            if unit.is_open and unit.ref:
-                plan.force_close_episode_ref = unit.ref
-                break
-
     return plan
