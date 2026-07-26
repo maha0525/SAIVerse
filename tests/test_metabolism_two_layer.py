@@ -290,8 +290,9 @@ class ChronicleClaimTest(unittest.TestCase):
 
         order = []
         with patch.dict(os.environ, {
-            "SAIVERSE_CHRONICLE_BAND_BUDGET": "100",
-            "SAIVERSE_CHRONICLE_BAND_BASE": "2",
+            # 発火は「未束ねのあらすじ字数合計 > 提示予算/4」(chronicle_consolidation
+            # §3)。fixture の字数合計 (~25字) で発火するよう予算を 40 (X=10) に。
+            "SAIVERSE_CHRONICLE_CHAR_BUDGET": "40",
         }), \
                 patch("saiverse.model_configs.find_model_config",
                       return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \

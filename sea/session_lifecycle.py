@@ -4,7 +4,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sea.cancellation import CancellationToken
 from sea.eviction_plan import Watermarks, message_chars, plan_eviction
@@ -188,6 +188,15 @@ class SessionLifecycle:
         finally:
             db.close()
         return {}
+
+    def collect_folded_chronicle_entry_ids(
+        self, persona_id: Optional[str],
+    ) -> Optional[Set[str]]:
+        """モジュール関数 :func:`collect_folded_chronicle_entry_ids` への委譲。
+
+        ``None`` = 照会失敗 (fold の有無が不明)。呼び出し側は束ねを見送ること。
+        """
+        return collect_folded_chronicle_entry_ids(self.manager, persona_id)
 
     def load_anchors(self, persona) -> Dict[str, Any]:
         """read-only 互換ビュー: persona オブジェクトから全 model 分の entry を読む。
@@ -1615,17 +1624,45 @@ class SessionLifecycle:
         # 実行に進む — 「新チャンクが無いと列の束ねが永久に再試行されない」抜けの
         # 閉塞。
         from sai_memory.arasuji.bands import plan_band_overflow
+        # 圧縮区間として提示中の digest は列の勘定・束ね対象から外す
+        # (intent chronicle_consolidation §3 — dry と実行で同じ集合を渡す)。
+        # None = 照会失敗 = fold の有無が不明。「fold なし」と読み替えると
+        # 提示中の digest を上へ束ねて §4-1 が黙って破れるので、その回の
+        # 束ねは dry / 実行とも丸ごと見送る (Codex P1-5 — 待つのは常に安全)。
+        folded_entry_ids: Optional[Set[str]] = None
         try:
-            band_plan_count = plan_band_overflow(
+            folded_entry_ids = self.collect_folded_chronicle_entry_ids(
+                getattr(persona, "persona_id", None)
+            )
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] folded-range collection failed", exc_info=True,
+            )
+        if folded_entry_ids is None:
+            LOGGER.warning(
+                "[metabolism] folds unknown; skipping band consolidation this round",
+            )
+        try:
+            from sai_memory.arasuji.bands import estimate_leaf_chars
+            band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
                 adapter.conn,
                 extra_leaves=[
                     (
                         c.coverage_chars,
                         min((m.created_at for m in c.messages), default=None),
                         max((m.created_at for m in c.messages), default=None),
+                        # digest 字数の実測見込み (Codex P1-3 — dry の発火
+                        # 過小評価を防ぐ)
+                        estimate_leaf_chars(c.kind, c.messages, c.digest_text),
                     )
                     for c in plan.chunks
                 ],
+                excluded_entry_ids=folded_entry_ids or None,
+                # 編纂予定の生メッセージは dry の連続性判定で「未編纂」から
+                # 除外する (Codex 再レビュー 必須2 — 実行後の列を再現)
+                pending_source_ids={
+                    m.id for c in plan.chunks for m in c.messages
+                } or None,
             )
         except Exception:
             LOGGER.warning("[metabolism] band overflow dry-plan failed", exc_info=True)
@@ -1897,19 +1934,24 @@ class SessionLifecycle:
             )
             return "deferred"
 
-        # 列のあふれ束ね (W4 D6): 次数 k の列の被覆合計が上限を超えたら古い端から
-        # 次数 k+1 へ束ねる。束ね失敗は編纂の成否に含めない (一次あらすじは確定済み =
-        # 情報の欠落はなく、次回の Metabolism の dry 予測が backlog を検出して
-        # 自然に再試行する)。
+        # 束ね (chronicle_consolidation): 未束ねの字数が発火閾値を超えたら、
+        # 質量選抜 (比率・連続性・卒業) で群を束ね、束ね不能ノードは治療する。
+        # 束ね失敗は編纂の成否に含めない (一次あらすじは確定済み = 情報の欠落は
+        # なく、次回の Metabolism の dry 予測が backlog を検出して自然に再試行
+        # する)。batch_callback は恒等圧縮の子が初めて要約に変わる瞬間の
+        # Fragment 抽出 (intent §7)。
         consolidated_count = 0
-        try:
-            consolidated_count = run_band_overflow(
-                adapter.conn, client,
-                persona_id=persona_id_str,
-                cancel_check=cancel_fn,
-            )
-        except Exception:
-            LOGGER.exception("[metabolism] band overflow consolidation failed; continuing")
+        if folded_entry_ids is not None:
+            try:
+                consolidated_count = run_band_overflow(
+                    adapter.conn, client,
+                    persona_id=persona_id_str,
+                    cancel_check=cancel_fn,
+                    excluded_entry_ids=folded_entry_ids or None,
+                    batch_callback=note_callback,
+                )
+            except Exception:
+                LOGGER.exception("[bands] consolidation failed; continuing")
 
         LOGGER.info(
             "[metabolism] Chronicle generation complete: %d chunks created "
@@ -2012,3 +2054,54 @@ class SessionLifecycle:
             return
         from sea.gold_panning import run_session_close
         run_session_close(self, persona)
+
+
+def collect_folded_chronicle_entry_ids(
+    manager, persona_id: Optional[str],
+) -> Optional[Set[str]]:
+    """persona の全 model 行の圧縮区間が提示中の Chronicle entry id 集合。
+
+    束ね (sai_memory/arasuji/bands.py) は提示コンテキストに置き換え表示中の
+    digest を列の勘定・束ね対象から外す (intent chronicle_consolidation §3 —
+    提示中のものを上へ畳まない §4-1 の帰結)。head の除外 (memory_weave
+    section) が単一 model 行で読むのに対し、束ねは persona 単位の処理なので
+    全 model 行を集約する。SessionLifecycle を持たない API 生成ジョブと共有
+    するためモジュール関数 (manager 経由の read-only)。
+
+    戻り値の意味 (Codex レビュー P1-5 — 失敗を空集合に潰さない):
+
+    - ``set(...)`` = 集約に成功した (空集合 = 提示中の fold は無い)
+    - ``None`` = **照会に失敗した = fold の有無が分からない**。呼び出し側は
+      「fold なし」と読み替えず、その回の束ねを見送ること — 提示中の digest
+      を知らずに上へ束ねると §4-1 (提示中のものを畳まない) が黙って破れる。
+      待つのは常に安全。
+    - manager / world DB が無い環境 (テスト等) は「fold という概念ごと無い」
+      ので正当な空集合。
+    """
+    if manager is None or not hasattr(manager, "SessionLocal") or not persona_id:
+        return set()
+    from sea.session_window import deserialize_folds
+    ids: Set[str] = set()
+    db = manager.SessionLocal()
+    try:
+        from database.models import SessionAnchor
+        rows = db.query(SessionAnchor).filter_by(PERSONA_ID=persona_id).all()
+        for row in rows:
+            folded = getattr(row, "FOLDED_RANGES_JSON", None)
+            if not folded:
+                continue
+            # deserialize_folds は壊れた JSON を空リストへ縮退させる
+            # (test_session_window_folds で固定済み) — ここでの例外は想定外の
+            # 破損なので「分からない」に倒す。
+            for fold in deserialize_folds(folded):
+                ids.update(fold.chronicle_entry_ids)
+    except Exception as exc:
+        LOGGER.warning(
+            "[bands] folded-range collection failed for %s: %s "
+            "(folds unknown — caller must skip consolidation this round)",
+            persona_id, exc,
+        )
+        return None
+    finally:
+        db.close()
+    return ids

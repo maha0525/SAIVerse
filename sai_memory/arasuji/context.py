@@ -19,9 +19,18 @@ from sai_memory.arasuji.storage import (
 LOGGER = logging.getLogger(__name__)
 
 # Minimum number of entries to read at a given level before allowing
-# promotion to the next level.  This keeps more Lv1 ("あらすじ") entries
-# in the context instead of compressing everything to Lv2+ immediately.
+# promotion to the next level.  Legacy count-based traversal only —
+# 予算モード (head の General Chronicle) は累積質量ルール
+# (:func:`_traverse_episode_mass`) に世代交代した (2026-07-27、
+# docs/intent/chronicle_consolidation.md §6)。件数ベースは Track Chronicle
+# 等の char_budget=None 経路と get_episode_context_for_timerange に残る。
 MIN_ENTRIES_PER_LEVEL: int = 10
+
+# 累積質量ルールの下限係数: 次に見せるノードに「ここまでに見せた質量の
+# 1/MASS_DIVISOR 以上」を要求する。質量の梯子の歩幅 (B=10) と同じ。
+# 件数でなく体験量で粗さが進むので、豆粒 (質量ほぼゼロ) を何件見ても
+# 粗さが進まない = ゴミ混入に免疫がある (eris 実測ドライラン 2026-07-26)。
+MASS_DIVISOR: int = 10
 
 # Chronicle 読み込みの文字数予算 (記憶アーキv2 §6.2, Phase 3, 不変条件 §10-4)。
 # 件数上限 (旧 max_entries=50) では超過時に最古が黙って落ちるため、文字数予算で
@@ -302,6 +311,112 @@ def _traverse_episode(
     return result
 
 
+def _traverse_episode_mass(
+    all_arasuji: List[ArasujiEntry],
+    coverage: Dict[str, int],
+    *,
+    max_entries: int,
+    start_position_time: int,
+    divisor: int = MASS_DIVISOR,
+) -> Tuple[List[ContextEntry], int]:
+    """累積質量ルールの走査 (予算モードの粒度選択、intent §6)。
+
+    新しい側から遡りながら、ここまでに見せた質量の累計 M を数える。次に
+    見せるノードには質量 >= M/divisor を求め、**満たす中で最も細かいもの**
+    を採る。どの候補も満たさなければ最も粗い候補をそのまま見せる (穴回避 —
+    穴は開けない。粒度の見た目より記憶の連続性が上位)。
+
+    骨格 (最前線への固定・部分重なりの巻き戻し) は :func:`_traverse_episode`
+    と同一で、粒度の選択だけが「離散レベル + 件数」から「質量」に変わる。
+
+    Returns:
+        (entries 新しい→古い順, 穴回避で下限未満を見せた件数)。穴回避の件数は
+        「本当は粗くしたいのに親が無い」= 束ねが追いついていない度の観測
+        メトリクス。
+    """
+    result: List[ContextEntry] = []
+    read_ids: Set[str] = set()
+    hole_picks = 0
+    cumulative_mass = 0
+    position_time = start_position_time
+
+    while len(result) < max_entries:
+        # 読み残しの最前線 (position_time 以前で end_time 最大の未読)。
+        frontier: Optional[int] = None
+        for entry in all_arasuji:  # end_time 降順
+            if entry.id in read_ids:
+                continue
+            if entry.end_time is None or entry.end_time > position_time:
+                continue
+            frontier = entry.end_time
+            break
+        if frontier is None:
+            break
+
+        candidates = [
+            e for e in all_arasuji
+            if e.id not in read_ids and e.end_time == frontier
+        ]
+        # 下限は「質量 >= M/divisor」。切り捨て除算 (M // divisor) は境界を
+        # 緩める (M=101 で質量10が通る) ので、整数のまま掛け算で厳密に比較する
+        # (Codex レビュー P1-4)。
+        satisfying = [
+            e for e in candidates
+            if coverage.get(e.id, 0) * divisor >= cumulative_mass
+        ]
+        if satisfying:
+            pick = min(
+                satisfying, key=lambda e: (coverage.get(e.id, 0), e.level),
+            )
+        else:
+            pick = max(
+                candidates, key=lambda e: (coverage.get(e.id, 0), e.level),
+            )
+            hole_picks += 1
+
+        result.append(ContextEntry(
+            level=pick.level,
+            content=pick.content,
+            start_time=pick.start_time,
+            end_time=pick.end_time,
+            message_count=pick.message_count,
+            source_id=pick.id,
+        ))
+        read_ids.add(pick.id)
+        for source_id in pick.source_ids:
+            read_ids.add(source_id)
+        cumulative_mass += coverage.get(pick.id, 0)
+
+        # 次の走査位置 (部分重なりの未読を飛び越さない — _traverse_episode と同じ)。
+        next_position = (pick.start_time or 0) - 1
+        cover_start = pick.start_time
+        cover_end = pick.end_time
+        for other in all_arasuji:
+            if other.id in read_ids:
+                continue
+            if other.end_time is None or other.end_time > position_time:
+                continue
+            if other.end_time <= next_position:
+                continue
+            nested = (
+                cover_start is not None
+                and cover_end is not None
+                and other.start_time is not None
+                and (
+                    (cover_start <= other.start_time and other.end_time <= cover_end)
+                    or (other.start_time <= cover_start and cover_end <= other.end_time)
+                )
+            )
+            if not nested:
+                next_position = other.end_time
+        position_time = next_position
+
+        if position_time <= 0:
+            break
+
+    return result, hole_picks
+
+
 def _episode_char_count(result: List[ContextEntry]) -> int:
     """Approximate the rendered char cost of a set of entries.
 
@@ -424,18 +539,17 @@ def get_episode_context(
     - Distant past is compressed (high level)
     - No information gaps or duplicates
 
-    Budget control (記憶アーキv2 §6.2, Phase 3, 不変条件 §10-4):
+    Budget control (記憶アーキv2 §6.2 / intent chronicle_consolidation §6):
     When ``char_budget`` is given (or the ``SAIVERSE_CHRONICLE_CHAR_BUDGET`` env
-    is set — see :func:`_resolve_char_budget`), reading is governed by a char
-    budget instead of a pure entry count. If a full traversal would exceed the
-    budget before reaching the beginning of history, the promotion threshold
-    (``MIN_ENTRIES_PER_LEVEL``) is lowered one step (10→5→3→1) and the traversal
-    is re-run, so coarser levels are promoted to sooner and the whole timespan
-    is covered more cheaply. The traversal loop never terminates on budget — the
-    oldest entry is always reached — so "人生の冒頭が weave から消える" cannot
-    happen. If even the coarsest run (threshold 1) exceeds the budget (extremely
-    deep history), the overflow is accepted and a WARNING is logged; the oldest
-    is still included.
+    is set — see :func:`_resolve_char_budget`), granularity is chosen by the
+    **cumulative-mass rule** (:func:`_traverse_episode_mass`): walking newest to
+    oldest, the next node must carry mass >= (mass shown so far) / 10; the
+    finest satisfying candidate wins, and when none satisfies, the coarsest
+    available is shown anyway (hole avoidance — no gaps, ever). The traversal
+    never terminates on budget — the oldest entry is always reached. After the
+    walk, :func:`_compress_within_budget` collapses old entries into parents
+    until the budget is met; if no parent remains to collapse into, the
+    overflow is accepted and a WARNING is logged.
 
     Backward compatibility: ``char_budget=None`` (the default) keeps the legacy
     pure count-based behavior (used by Track Chronicle, which must not change —
@@ -493,12 +607,15 @@ def get_episode_context(
         result.reverse()
         return result
 
-    # Budget-driven: 穴を作らずに読み切ってから、予算に収まるまで親へ置き換える。
-    # 走査と圧縮を分けているのが要点 — 読む側で飛ばす形の圧縮は、飛ばした範囲が
-    # 二度と拾われず記憶が黙って落ちる (提示の穴)。
-    result = _traverse_episode(
+    # Budget-driven: 穴を作らずに累積質量ルールで読み切ってから、予算に収まる
+    # まで親へ置き換える。走査と圧縮を分けているのが要点 — 読む側で飛ばす形の
+    # 圧縮は、飛ばした範囲が二度と拾われず記憶が黙って落ちる (提示の穴)。
+    from sai_memory.arasuji.bands import _coverage_index
+
+    coverage = _coverage_index(conn)
+    result, hole_picks = _traverse_episode_mass(
         all_arasuji,
-        min_entries_per_level=MIN_ENTRIES_PER_LEVEL,
+        coverage,
         max_entries=max_entries,
         start_position_time=start_position_time,
     )
@@ -520,7 +637,7 @@ def get_episode_context(
             chars, effective_budget, len(result), reached_oldest,
         )
 
-    _log_episode_run(result, effective_budget, reached_oldest)
+    _log_episode_run(result, effective_budget, reached_oldest, hole_picks)
 
     result.reverse()
     return result
@@ -530,11 +647,13 @@ def _log_episode_run(
     result: List[ContextEntry],
     budget: int,
     reached_oldest: bool,
+    hole_picks: int = 0,
 ) -> None:
     """DEBUG log of a budget-driven run for budget tuning (§6.2 note 6).
 
-    Emits the adopted level distribution, char count and whether the oldest
-    entry was reached — the real-measurement material for tuning the budget.
+    Emits the adopted level distribution, char count, whether the oldest entry
+    was reached, and the hole-avoidance count (``hole_picks`` = 「粗くしたい
+    のに親が無い」件数 = 束ねが追いついていない度の観測メトリクス)。
     """
     if not LOGGER.isEnabledFor(logging.DEBUG):
         return
@@ -549,9 +668,9 @@ def _log_episode_run(
         span = f"{_format_timestamp(oldest.start_time)} ~ {_format_timestamp(newest.end_time)}"
     LOGGER.debug(
         "Chronicle budget run: entries=%d chars=%d/%d level_dist=%s "
-        "span=[%s] reached_oldest=%s",
+        "span=[%s] reached_oldest=%s hole_picks=%d",
         len(result), chars, budget,
-        dict(sorted(level_dist.items())), span, reached_oldest,
+        dict(sorted(level_dist.items())), span, reached_oldest, hole_picks,
     )
 
 

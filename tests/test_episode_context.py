@@ -375,18 +375,34 @@ class TestChronicleCharBudget(unittest.TestCase):
         # And it still reaches the oldest.
         self.assertEqual(self._oldest_covered(legacy), info["oldest_start"])
 
-    def test_within_budget_matches_legacy(self):
-        """A generous budget yields the same result as legacy count-based."""
-        _build_deep_hierarchy(self.conn)
-        legacy = get_episode_context(self.conn, max_entries=100, char_budget=None)
+    def test_ample_budget_keeps_full_span_and_detail(self):
+        """潤沢な予算では圧縮が掛からず、全期間を覆い最新端は細かいまま。
+
+        旧仕様の「予算モード == 件数モード」の同一性検査は、粒度選択が累積
+        質量ルールへ世代交代した際に退役した (chronicle_consolidation §6)。
+        健全な実データでは両者はほぼ一致する (2026-07-26 ドライラン: aifi /
+        quon で完全一致) が、質量の10倍境界ちょうどに置いたフィクスチャでは
+        質量ルールが一段細かい側に倒れるため、同一性はもう不変条件ではない。
+        残る不変条件は「全期間の被覆 (穴なし)」と「最新端の細かさ」。
+        """
+        info = _build_deep_hierarchy(self.conn)
         budgeted = get_episode_context(
             self.conn, max_entries=100, char_budget=1_000_000
         )
-        self.assertEqual(
-            [(e.level, e.source_id) for e in legacy],
-            [(e.level, e.source_id) for e in budgeted],
-            "Under an ample budget, budget mode must equal legacy output",
-        )
+        # 全期間: 最古が落ちない。
+        self.assertEqual(self._oldest_covered(budgeted), info["oldest_start"])
+        # 最新端は細かいまま。
+        self.assertEqual(budgeted[-1].level, 1)
+        # 穴なし: 全 Lv1 が「自身 or 祖先」で提示に代表される。
+        shown = {e.source_id for e in budgeted}
+        for i, lv1_id in enumerate(info["lv1_ids"]):
+            ancestors = {lv1_id, info["lv3_id"]}
+            if i < 50:
+                ancestors.add(info["lv2_ids"][i // 10])
+            self.assertTrue(
+                ancestors & shown,
+                f"Lv1 #{i} is not represented (itself or ancestor) in output",
+            )
 
     def test_tight_budget_promotes_early_and_keeps_oldest(self):
         """Deep hierarchy + tight budget → coarser levels, oldest retained."""

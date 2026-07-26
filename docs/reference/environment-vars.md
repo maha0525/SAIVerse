@@ -36,11 +36,11 @@
 | `MEMORY_WEAVE_BATCH_SIZE` | `20` | **廃止 (W4)** — 生成は episode 整列 + サイズ束ねに世代交代 (`SAIVERSE_CHRONICLE_BAND_BUDGET` 系へ)。設定しても無視される |
 | `MEMORY_WEAVE_CONSOLIDATION_SIZE` | `10` | **廃止 (W4)** — 統合は列のあふれ束ねに世代交代。設定しても無視される |
 | `MEMORY_WEAVE_MAINTAIN_INTERVAL` | `200` | メンテ間隔 |
-| `SAIVERSE_CHRONICLE_BAND_BUDGET` | `10000` | 一次あらすじチャンクの標準被覆字数 U (体験の構造 §4-6・§11-8 のモック検証値)。列のあふれ判定の基準単位 |
-| `SAIVERSE_CHRONICLE_BAND_BASE` | `10` | 次数の底 B (幾何級数)。次数 k の標準被覆 = U×B^(k-1)、次数 k の列の許容合計 = U×B^k |
+| `SAIVERSE_CHRONICLE_BAND_BUDGET` | `10000` | 一次あらすじチャンクの標準被覆字数 U (体験の構造 §4-6・§11-8 のモック検証値)。整列計画・退場計画の基準単位。**束ねの発火には使われない** (2026-07-27 世代交代 — 発火は `SAIVERSE_CHRONICLE_CHAR_BUDGET` の 1/4、[chronicle_consolidation](../intent/chronicle_consolidation.md) §3) |
+| `SAIVERSE_CHRONICLE_BAND_BASE` | `10` | 次数の底 B (幾何級数)。次数 k の標準被覆 = U×B^(k-1)。**束ねの発火・相手選びには使われない** (同上 — 現在はコスト概算のみが参照) |
 | `SAIVERSE_CHRONICLE_MIN_DIGEST_CHARS` | `1000` | LLM 圧縮する最小被覆字数。未満は恒等圧縮 (生のまま一次あらすじに置く、LLM なし) |
-| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 1 回の Metabolism で実行する列のあふれ束ねの上限 (初回帰化の LLM コスト暴走防止の安全弁) |
-| `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。記憶アーキv2 §6.2 |
+| `SAIVERSE_CHRONICLE_MAX_BAND_CONSOLIDATIONS_PER_RUN` | `3` | 1 回の Metabolism で実行する束ね+治療の LLM コール上限 (LLM コスト暴走防止の安全弁) |
+| `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。**この 1/4 が束ねの発火閾値 X を兼ねる** ([chronicle_consolidation](../intent/chronicle_consolidation.md) §3 — 発火と提示を同じノブに連動させる)。記憶アーキv2 §6.2 |
 | `SAIVERSE_GOLD_PANNING_ENABLED` | `1` | 砂金採り（Metabolism 時のコア記憶採取）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る）。intent `gold_panning.md` |
 | `SAIVERSE_GOLD_PANNING_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
 | `SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES` | `10` | セッションクローズ時採取のスキップ下限（新規メッセージがこれ未満なら採取しない。Phase 3） |

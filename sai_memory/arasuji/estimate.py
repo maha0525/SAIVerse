@@ -41,6 +41,7 @@ def estimate_chronicle_generation_cost(
     *,
     model_name: str,
     episode_digests: Optional[Mapping[str, Tuple[str, str]]] = None,
+    excluded_entry_ids: Optional[frozenset] = frozenset(),
 ) -> ChronicleCostEstimate:
     """未処理メッセージから Chronicle を生成した場合の費用を見積もる。
 
@@ -49,6 +50,11 @@ def estimate_chronicle_generation_cost(
     Args:
         conn: persona の memory.db 接続
         model_name: 見積もり対象モデル名（pricing 有無で is_free_tier を判定）
+        excluded_entry_ids: 圧縮区間として提示中の digest entry id 集合
+            (Codex 四巡 P1-b — 生成経路と同じ集合を渡さないと束ねコールの
+            見積もりが乖離する)。**None = 照会失敗 (fold の有無が不明)** —
+            生成経路が束ねを見送るのと同形に、束ねコールを 0 と見積もる。
+            既定の空集合は「fold という概念ごと無い環境」(CLI / テスト) 用
         episode_digests: digest 確定済み episode の index
             (session_lifecycle._collect_episode_digests と同形)。渡されない
             場合は空 — digest 済み範囲も LLM チャンクとして数えるため、
@@ -90,25 +96,37 @@ def estimate_chronicle_generation_cost(
     summary = plan.summary
     unprocessed = plan.total_unprocessed
 
-    # 列のあふれ束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ
-    # 選定ロジックの dry 実行 — 既存の未統合の列 + 新規チャンクの実 coverage で
-    # 判定する (Codex W4 #9。新規数だけの近似は既存 backlog を見落とす)。
-    from sai_memory.arasuji.bands import plan_band_overflow
+    # 束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ選定
+    # ロジックの dry 実行 — 既存の未束ねの列 + 新規チャンクの実 coverage /
+    # 実字数見込みで判定する (Codex W4 #9。新規数だけの近似は既存 backlog を
+    # 見落とす)。extra_leaves / pending_source_ids の渡し方は生成経路
+    # (session_lifecycle / API ジョブ) と同形に揃える (Codex 三巡 P1-B —
+    # 見積もり経路だけ乖離させない)。
+    from sai_memory.arasuji.bands import estimate_leaf_chars, plan_band_overflow
     base = chronicle_band_base()
-    try:
-        consolidation_calls = plan_band_overflow(
-            conn,
-            extra_leaves=[
-                (
-                    c.coverage_chars,
-                    min((m.created_at for m in c.messages), default=None),
-                    max((m.created_at for m in c.messages), default=None),
-                )
-                for c in plan.chunks
-            ],
-        )
-    except Exception:
+    if excluded_entry_ids is None:
+        # fold の有無が不明 — 生成経路は束ねを見送るので、見積もりも 0 が同形。
         consolidation_calls = 0
+    else:
+        try:
+            consolidation_calls = plan_band_overflow(
+                conn,
+                extra_leaves=[
+                    (
+                        c.coverage_chars,
+                        min((m.created_at for m in c.messages), default=None),
+                        max((m.created_at for m in c.messages), default=None),
+                        estimate_leaf_chars(c.kind, c.messages, c.digest_text),
+                    )
+                    for c in plan.chunks
+                ],
+                excluded_entry_ids=set(excluded_entry_ids) or None,
+                pending_source_ids={
+                    m.id for c in plan.chunks for m in c.messages
+                } or None,
+            )
+        except Exception:
+            consolidation_calls = 0
 
     total_calls = level1_calls + consolidation_calls
 

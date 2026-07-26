@@ -123,10 +123,22 @@ def estimate_chronicle_cost(
             except Exception:
                 LOGGER.warning("[cost-estimate] episode digest index failed", exc_info=True)
 
+        # 生成経路 (ジョブ) と同じ fold 集合で束ねコールを見積もる
+        # (Codex 四巡 P1-b)。None = 照会失敗 → 生成が束ねを見送るのと同形。
+        from sea.session_lifecycle import collect_folded_chronicle_entry_ids
+        try:
+            folded_entry_ids = collect_folded_chronicle_entry_ids(manager, persona_id)
+        except Exception:
+            LOGGER.warning("[cost-estimate] folded-range collection failed", exc_info=True)
+            folded_entry_ids = None
+
         estimate = estimate_chronicle_generation_cost(
             conn,
             model_name=model_name,
             episode_digests=episode_digests,
+            excluded_entry_ids=(
+                frozenset(folded_entry_ids) if folded_entry_ids is not None else None
+            ),
         )
 
         return ChronicleCostEstimate(
@@ -867,20 +879,43 @@ def _run_chronicle_generation(
         )
         plan = truncate_plan(plan, max_messages)
 
-        # 列のあふれ backlog の dry 予測 (Codex W4 #3): 新チャンクが無くても
-        # 前回の束ね失敗の残りがあれば統合だけ実行する。
+        # 束ね backlog の dry 予測 (Codex W4 #3): 新チャンクが無くても
+        # 前回の束ね失敗の残りがあれば統合だけ実行する。圧縮区間として提示中の
+        # digest は列から外す (dry と実行で同じ集合 — chronicle_consolidation §3)。
         from sai_memory.arasuji.bands import plan_band_overflow
+        from sea.session_lifecycle import collect_folded_chronicle_entry_ids
+        # None = 照会失敗 = fold の有無が不明 → その回の束ねは dry / 実行とも
+        # 見送る (Codex P1-5 — 提示中の digest を知らずに束ねない)。
         try:
-            band_plan_count = plan_band_overflow(
+            folded_entry_ids = collect_folded_chronicle_entry_ids(manager, persona_id)
+        except Exception:
+            LOGGER.warning("[Chronicle Gen] folded-range collection failed", exc_info=True)
+            folded_entry_ids = None
+        if folded_entry_ids is None:
+            LOGGER.warning(
+                "[Chronicle Gen] folds unknown; skipping band consolidation this round",
+            )
+        try:
+            from sai_memory.arasuji.bands import estimate_leaf_chars
+            band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
                 conn,
                 extra_leaves=[
                     (
                         c.coverage_chars,
                         min((m.created_at for m in c.messages), default=None),
                         max((m.created_at for m in c.messages), default=None),
+                        # digest 字数の実測見込み (Codex P1-3 — dry の発火
+                        # 過小評価を防ぐ)
+                        estimate_leaf_chars(c.kind, c.messages, c.digest_text),
                     )
                     for c in plan.chunks
                 ],
+                excluded_entry_ids=folded_entry_ids or None,
+                # 編纂予定の生メッセージは dry の連続性判定で「未編纂」から
+                # 除外する (Codex 再レビュー 必須2 — 実行後の列を再現)
+                pending_source_ids={
+                    m.id for c in plan.chunks for m in c.messages
+                } or None,
             )
         except Exception:
             LOGGER.warning("[Chronicle Gen] band dry-plan failed", exc_info=True)
@@ -1029,14 +1064,17 @@ def _run_chronicle_generation(
             return
 
         consolidated_count = 0
-        try:
-            consolidated_count = run_band_overflow(
-                conn, client,
-                persona_id=persona_id,
-                cancel_check=cancel_check,
-            )
-        except Exception:
-            LOGGER.exception("[Chronicle Gen] band overflow failed; continuing")
+        if folded_entry_ids is not None:
+            try:
+                consolidated_count = run_band_overflow(
+                    conn, client,
+                    persona_id=persona_id,
+                    cancel_check=cancel_check,
+                    excluded_entry_ids=folded_entry_ids or None,
+                    batch_callback=batch_callback,
+                )
+            except Exception:
+                LOGGER.exception("[Chronicle Gen] band overflow failed; continuing")
 
         if ledger is not None and execution_id:
             try:
