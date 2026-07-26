@@ -22,6 +22,8 @@
 
 ### 次数と列のあふれ束ね
 
+> ⚠️ **この束ね機構は再設計が確定している** (2026-07-27、正典 = [intent/chronicle_consolidation.md](../intent/chronicle_consolidation.md))。発火は質量 (U×B^k) から**未束ねのあらすじ字数** (提示予算連動) へ、相手選びは level 別の列から**質量の比率で集める群** (連続性・卒業条件付き) へ変わる。以下は現行実装の記述。
+
 - 各ノードは **coverage_chars** (被覆生ログ字数) を持つ。次数 k の標準被覆 = U×B^(k-1) (U=1万・B=10)
 - 次数 k の未束ね列 の被覆合計が U×B^k を超えたら、**古い端から**束ねて次数 k+1 の親を作る (`run_band_overflow`)。親 INSERT + 子 mark_consolidated は単一 tx
 - **上の次数ノードは壁** — 再要約されない (既存 Lv2/Lv3 は帰化バックフィルで coverage を得るだけで content 不変)
