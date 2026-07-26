@@ -247,6 +247,7 @@ These groups **must** stay in sync — changing one requires changing the others
 - **Gemini structured output does not support `additionalProperties`** — keep response schemas simple.
 - **Gemini's context window is 1M+ tokens.** Do not blame large context for errors; the system is designed for large histories.
 - **Playbook `next` pointers must form valid DAGs.** After editing JSON in `builtin_data/playbooks/`, run `python scripts/import_playbook.py --file <path>` to load it into the DB.
+- **Schema changes go in `database/migrate.py`**, and are tried against a copy first: `python database/migrate.py --db <path-to-copy>` (the flag is `--db`, not `--db-file`). It migrates in place, so pointing it at the live DB is how you find out the hard way.
 - **When refactoring, complete the change or revert it** — never leave the codebase in a mixed state.
 - **CSS text wrapping needs several properties together**: `word-break: break-word` + `overflow-wrap: anywhere` + `max-width: 100%` + `overflow-x: hidden` on both content and container. One property alone is usually not enough with frameworks that nest many elements.
 
