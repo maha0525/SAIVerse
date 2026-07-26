@@ -2,7 +2,7 @@
 
 **このメモの目的**: 2026-07-26 のセッションで、Chronicle の「いつ・何を・どう畳むか」の判断基準を根本から見直した。実装まで到達したのは提示側の欠陥修正だけで、圧縮基準そのものは設計途中。次セッションはここから再開する。
 
-**2026-07-27 追記: 設計の正典は [intent/chronicle_consolidation.md](../intent/chronicle_consolidation.md) へ移行した。** 本メモは設計対話の経緯の記録。§11 の合意内容に加え、正典化の際に群の**連続性条件** (壁と未編纂生ログを跨がない = 上段の偽の隣接への答え) と**卒業条件** (親の質量 ≥ 群内最大の10倍) が加わっている — 差分は intent §4 の★印。
+**2026-07-27 追記: 設計の正典は [intent/chronicle_consolidation.md](../intent/chronicle_consolidation.md) へ移行した。** 本メモは設計対話の経緯の記録。§11 の合意内容に加え、正典化の際に群の**連続性条件** (壁と未編纂生ログを跨がない = 上段の偽の隣接への答え) と**卒業条件** (親の質量 ≥ 群内最大の**5倍** — 10倍案から緩和) が加わり、どちらも同日まはーレビュー通過。
 
 **先に読むもの**: [`../intent/chronicle_eviction.md`](../intent/chronicle_eviction.md) §8 (上段との接続が未設計) ・ [`../issues/chronicle_undersized_lv1_chunks.md`](../issues/chronicle_undersized_lv1_chunks.md) ・ [`../concepts/chronicle.md`](../concepts/chronicle.md)
 
