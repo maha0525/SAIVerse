@@ -38,13 +38,14 @@ def _msg(mid, content, episode=None, created_at=None):
     )
 
 
-def _plan(messages, processed=(), digests=None):
+def _plan(messages, processed=(), digests=None, run_groups=None):
     return plan_alignment(
         messages,
         set(processed),
         digests or {},
         target_chars=TARGET,
         min_llm_chars=MIN_LLM,
+        run_groups=run_groups,
     )
 
 
@@ -84,6 +85,84 @@ class TestRunSplitting(unittest.TestCase):
         plan = _plan(msgs, processed=["m1", "m2"])
         self.assertEqual(plan.chunks, [])
         self.assertEqual(plan.total_unprocessed, 0)
+
+    def test_same_run_group_is_not_split(self):
+        """同じ群 (退場 fold) の中は連続 — 群を渡しただけでは切れない。"""
+        msgs = [_msg("m1", "a" * 30), _msg("m2", "b" * 30)]
+        plan = _plan(msgs, run_groups=[["m1", "m2"]])
+        self.assertEqual([c.message_ids for c in plan.chunks], [["m1", "m2"]])
+
+    def test_different_run_groups_split(self):
+        """別の群は別 run — 提示コンテキストの途中を畳んだ結果の飛び地を束ねない。"""
+        msgs = [_msg("m1", "a" * 30), _msg("m2", "b" * 30)]
+        plan = _plan(msgs, run_groups=[["m1"], ["m2"]])
+        self.assertEqual([c.message_ids for c in plan.chunks], [["m1"], ["m2"]])
+
+    def test_run_group_boundary_survives_missing_head(self):
+        """群の先頭が ``messages`` に居なくても境界は立つ (回帰)。
+
+        Chronicle 除外対象 (除外タグ / line_role / Stelis スレッド) の
+        メッセージは編纂対象に現れない。境界を「群の先頭 id」で表していた
+        ときは、先頭が落ちた群の境界が一度も立たず、離れた群が黙って一つの
+        あらすじに混ざっていた (§4-5 偽の隣接 = 時系列の嘘)。
+        docs/issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md
+        """
+        msgs = [_msg("m1", "a" * 30), _msg("m2", "b" * 30), _msg("m4", "d" * 30)]
+        # 群2 = [m3, m4] だが、先頭の m3 は除外されて messages に居ない
+        plan = _plan(msgs, run_groups=[["m1", "m2"], ["m3", "m4"]])
+        self.assertEqual(
+            [c.message_ids for c in plan.chunks], [["m1", "m2"], ["m4"]],
+        )
+
+    def test_message_outside_every_run_group_is_isolated(self):
+        """群を渡したのに未所属の id があったら、前後どちらとも束ねない。
+
+        契約 (編纂対象の各 id はちょうど一つの群に属する) が破れた入力。
+        束ねない側へ倒すのは、§4-5 が禁じているのが偽の隣接であって
+        余分な分割ではないから (Codex 攻撃レビュー 2026-07-27)。
+        """
+        msgs = [_msg("m1", "a" * 30), _msg("m2", "b" * 30), _msg("m3", "c" * 30)]
+        with self.assertLogs("sai_memory.arasuji.alignment", "WARNING") as logs:
+            # m2 はどの群にも属さない
+            plan = _plan(msgs, run_groups=[["m1"], ["m3"]])
+        self.assertEqual(
+            [c.message_ids for c in plan.chunks], [["m1"], ["m2"], ["m3"]],
+        )
+        self.assertTrue(any("どの群にも属さない" in line for line in logs.output))
+
+    def test_duplicate_membership_is_isolated(self):
+        """同じ id が複数の群にあったら所属を決めず孤立させる。
+
+        どちらかの群へ寄せると、寄せた先の隣と束ねてしまう。その隣が
+        本当は穴の向こう側なら偽の隣接になり、しかも群の並び順で結果が
+        変わる (Codex 攻撃レビュー 2026-07-27 の指摘)。
+        """
+        msgs = [_msg("m1", "a" * 30), _msg("m2", "b" * 30), _msg("m3", "c" * 30)]
+        with self.assertLogs("sai_memory.arasuji.alignment", "WARNING") as logs:
+            # m2 が群0 と群1 の両方にいる
+            plan = _plan(msgs, run_groups=[["m1", "m2"], ["m2", "m3"]])
+        self.assertEqual(
+            [c.message_ids for c in plan.chunks], [["m1"], ["m2"], ["m3"]],
+        )
+        self.assertTrue(any("複数の群に属している" in line for line in logs.output))
+
+    def test_isolation_splits_an_episode_when_the_contract_is_broken(self):
+        """契約違反時は §4-2 (episode 分割禁止) より §4-5 (偽の隣接の禁止) を採る。
+
+        未所属の id を孤立させると、同じ episode を割ることがある。両方は
+        満たせないので、物語の質の劣化 (分割) を受け入れて時系列の嘘
+        (偽の隣接) を出さない側へ倒す — 事故ではなく設計判断であることを
+        ここで固定する (Codex 攻撃レビュー 2026-07-27)。
+        """
+        msgs = [
+            _msg("m1", "a" * 30, episode="episode:1"),
+            _msg("m2", "b" * 30, episode="episode:1"),
+        ]
+        with self.assertLogs("sai_memory.arasuji.alignment", "WARNING"):
+            plan = _plan(msgs, run_groups=[["m1"]])  # m2 が未所属
+        self.assertEqual([c.message_ids for c in plan.chunks], [["m1"], ["m2"]])
+
+
 
 
 class TestEpisodeDigestChunks(unittest.TestCase):

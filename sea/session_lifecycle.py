@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sea.cancellation import CancellationToken
-from sea.eviction_plan import Watermarks, message_chars, plan_eviction
+from sea.eviction_plan import (
+    Watermarks,
+    compile_groups_from_folds,
+    message_chars,
+    plan_eviction,
+)
 
 if TYPE_CHECKING:
     from sea.runtime import SEARuntime
@@ -1387,7 +1392,9 @@ class SessionLifecycle:
             try:
                 chronicle_status = self.generate_chronicle(
                     persona, event_callback,
-                    compile_groups=[f.message_ids for f in plan.folds],
+                    compile_groups=compile_groups_from_folds(
+                        plan.folds, current_messages,
+                    ),
                 )
             except Exception as exc:
                 LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
@@ -1591,13 +1598,20 @@ class SessionLifecycle:
         # 退場時圧縮 (§4-1): 編纂対象を「今回退場させる範囲そのもの」に絞る。
         # 退場する集合と編纂する集合が一致することが、下限「退場したものは必ず
         # 編纂されている」の手続き上の保証になる (chronicle_eviction.md §2)。
-        run_boundary_ids: Optional[set] = None
+        run_groups: Optional[List[List[str]]] = None
         if compile_groups is not None:
             wanted = {mid for group in compile_groups for mid in group}
             all_messages = [m for m in all_messages if m.id in wanted]
-            # fold の切れ目 = run の切れ目。提示コンテキストの途中を畳むと範囲は不連続になるので、
+            # 群の切れ目 = run の切れ目。提示コンテキストの途中を畳むと範囲は不連続になるので、
             # 離れた範囲が一つのあらすじに束ねられないようにする (§4-5)。
-            run_boundary_ids = {group[0] for group in compile_groups if group}
+            # 渡すのは群の**全 id** — 「群の先頭 id の手前で切る」形は、
+            # 先頭が Chronicle 除外対象 (除外タグ / line_role / Stelis) だと
+            # その id が編纂対象に居らず、境界が一度も立たなかった
+            # (docs/issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)。
+            # 群が連続範囲であることの検算は渡す側の仕事 —
+            # eviction_plan.compile_groups_from_folds (提示コンテキストの完全な
+            # 並びを持つのはあちら側だけ)。
+            run_groups = compile_groups
 
         # Episode 整列計画 (W4 D3)。processed_ids / digest index / サイズ束ねを
         # 純関数に集約 — コスト見積もり (estimate.py) と同じ計画を共有する。
@@ -1615,7 +1629,7 @@ class SessionLifecycle:
             episode_digests,
             target_chars=chronicle_band_budget(),
             min_llm_chars=chronicle_min_digest_chars(),
-            run_boundary_ids=run_boundary_ids,
+            run_groups=run_groups,
         )
 
         # 列のあふれ束ねの dry 予測 (Codex W4 #3/#4): 新チャンク確定後に発生する

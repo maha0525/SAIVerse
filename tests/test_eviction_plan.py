@@ -9,7 +9,9 @@ import unittest
 
 from sea.eviction_plan import (
     ESTIMATED_FOLD_PLACEHOLDER_CHARS,
+    Fold,
     Watermarks,
+    compile_groups_from_folds,
     plan_eviction,
 )
 from sea.session_window import FOLDED_MARKER
@@ -323,6 +325,100 @@ class FoldedPlaceholderTest(unittest.TestCase):
             if "c0" in f.message_ids and "c1" in f.message_ids
         ]
         self.assertEqual(mixed, [])
+
+
+class CompileGroupsFromFoldsTest(unittest.TestCase):
+    """編纂へ渡す範囲は「提示コンテキストの連続区間」であることを渡す側で検算する。
+
+    experience_structure.md §4-5 連続束ねのみ — 間に退場しない生ログが残る
+    範囲を一つのあらすじにすると、時系列の嘘 (偽の隣接) になる。
+    """
+
+    def _folds(self, *id_groups):
+        return [
+            Fold(messages=[{"id": mid} for mid in ids]) for ids in id_groups
+        ]
+
+    def test_contiguous_folds_pass_through(self):
+        """正しい計画 (fold は連続・非重複) では何も割れない。"""
+        presented = [msg("m0", 100), msg("m1", 101), msg("m2", 102)]
+        groups = compile_groups_from_folds(
+            self._folds(["m0", "m1"], ["m2"]), presented,
+        )
+        self.assertEqual(groups, [["m0", "m1"], ["m2"]])
+
+    def test_fold_spanning_a_retained_message_is_split(self):
+        """fold の内側に退場しないメッセージ → その位置で割る。"""
+        presented = [msg("m0", 100), msg("m1", 101), msg("m2", 102)]
+        with self.assertLogs("sea.eviction_plan", "WARNING") as logs:
+            groups = compile_groups_from_folds(
+                self._folds(["m0", "m2"]), presented,  # m1 は退場しない
+            )
+        self.assertEqual(groups, [["m0"], ["m2"]])
+        self.assertTrue(any("またいでいる" in line for line in logs.output))
+
+    def test_retained_chronicle_excluded_message_is_a_hole(self):
+        """残るのが Chronicle 除外メッセージでも穴は穴。
+
+        編纂側は除外メッセージを落とした列しか見られないので、この形の抜けは
+        あちらでは原理的に検出できない。提示コンテキストの完全な並びを持つ
+        この層で割る (Codex 攻撃レビュー 三巡目 2026-07-27)。
+        """
+        presented = [
+            msg("m0", 100),
+            {"id": "spell0", "content": "x", "created_at": 101,
+             "metadata": {"tags": ["spell"]}},
+            msg("m2", 102),
+        ]
+        with self.assertLogs("sea.eviction_plan", "WARNING"):
+            groups = compile_groups_from_folds(
+                self._folds(["m0", "m2"]), presented,
+            )
+        self.assertEqual(groups, [["m0"], ["m2"]])
+
+    def test_excluded_message_evicted_together_is_not_a_hole(self):
+        """同じ fold で一緒に退場するなら穴ではない (提示コンテキストに何も残らない)。"""
+        presented = [
+            msg("m0", 100),
+            {"id": "spell0", "content": "x", "created_at": 101,
+             "metadata": {"tags": ["spell"]}},
+            msg("m2", 102),
+        ]
+        groups = compile_groups_from_folds(
+            self._folds(["m0", "spell0", "m2"]), presented,
+        )
+        self.assertEqual(groups, [["m0", "spell0", "m2"]])
+
+    def test_message_in_another_fold_is_not_a_hole(self):
+        """間にあるのが別 fold (今回一緒に退場する) なら割らない — 群として別なので束ねられない。"""
+        presented = [msg("m0", 100), msg("m1", 101), msg("m2", 102)]
+        groups = compile_groups_from_folds(
+            self._folds(["m0", "m2"], ["m1"]), presented,
+        )
+        self.assertEqual(groups, [["m0", "m2"], ["m1"]])
+
+    def test_unplaced_ids_are_isolated(self):
+        """提示コンテキストに居ない id は位置不明 → 1 件ずつ孤立させる。
+
+        まとめて先頭の片へ寄せると、位置の根拠が無いまま隣接を作ってしまう
+        (編纂側 _run_group_keys の「所属不明は孤立」と揃える。
+        Codex 攻撃レビュー 四巡目 2026-07-27)。
+        """
+        presented = [msg("m0", 100), msg("m1", 101)]
+        with self.assertLogs("sea.eviction_plan", "WARNING"):
+            groups = compile_groups_from_folds(
+                self._folds(["ghost1", "m0", "ghost2", "m1"]), presented,
+            )
+        self.assertEqual(groups, [["ghost1"], ["ghost2"], ["m0", "m1"]])
+
+    def test_plan_eviction_output_is_never_split(self):
+        """実際の退場計画を通した往復では割れない (契約が守られていることの検算)。"""
+        msgs = [msg(f"m{i}", 100 + i) for i in range(8)]
+        result = plan(msgs, low=2_000, target=0)
+        self.assertTrue(result.folds)
+        with self.assertNoLogs("sea.eviction_plan", "WARNING"):
+            groups = compile_groups_from_folds(result.folds, msgs)
+        self.assertEqual(groups, [f.message_ids for f in result.folds])
 
 
 if __name__ == "__main__":

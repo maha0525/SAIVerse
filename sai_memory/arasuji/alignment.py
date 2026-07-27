@@ -29,7 +29,9 @@ sai_memory は SAIVerse 本体 (world DB) に依存しない層のため、episo
 - §4-4 同一レベルの再圧縮禁止: digest 確定済み episode は episode_digest
   チャンク (恒等転写・単独) — 前後の束ねに巻き込まない。
 - §4-5 連続束ねのみ: 編纂済み (processed) メッセージを跨いだ束ねをしない
-  (run 分割)。時系列に並んだものだけを束ねる。
+  (run 分割)。時系列に並んだものだけを束ねる。呼び出し側が退場範囲を
+  ``run_groups`` で群に分けて渡した場合は、群をまたぐ束ねもしない
+  (提示コンテキストの途中を畳むと編纂範囲が不連続になるため)。
 """
 
 from __future__ import annotations
@@ -164,7 +166,7 @@ def plan_alignment(
     *,
     target_chars: int = DEFAULT_TARGET_CHARS,
     min_llm_chars: int = DEFAULT_MIN_DIGEST_CHARS,
-    run_boundary_ids: Optional[Set[str]] = None,
+    run_groups: Optional[Sequence[Sequence[str]]] = None,
 ) -> AlignmentPlan:
     """未編纂メッセージ列を episode 整列チャンク列に計画する。
 
@@ -176,30 +178,44 @@ def plan_alignment(
             ``episode_ref -> (digest_message_id, digest_text)``。
         target_chars: 一次あらすじ チャンクの標準被覆 (U)。
         min_llm_chars: LLM 圧縮する最小被覆 (未満は恒等圧縮)。
-        run_boundary_ids: ここに含まれる message id の**手前で run を切る**。
-            退場が episode 単位になり、一度の編纂で時系列上離れた範囲を扱う
-            ようになったため、範囲の切れ目を明示して「離れたものを一つの
-            あらすじに束ねない」(§4-5 連続束ねのみ) を守る。None なら従来どおり
-            processed 挟みだけで run が切れる。
+        run_groups: 編纂範囲の群 (呼び出し側の退場 fold ごとの message id 列)。
+            **別の群に属するメッセージ同士は束ねない**。退場が episode 単位に
+            なり、一度の編纂で時系列上離れた範囲を扱うようになったため、範囲の
+            切れ目を明示して「離れたものを一つのあらすじに束ねない」
+            (§4-5 連続束ねのみ) を守る。切れ目は各メッセージ**自身の所属**で
+            判定するので、群の先頭が Chronicle 除外対象 (除外タグ /
+            line_role / Stelis スレッド) で ``messages`` に居なくても境界は
+            立つ。契約は「``messages`` の各 id がちょうど一つの群に属する」で、
+            破れた入力は束ねない側へ倒して WARNING を出す (詳細は
+            :func:`_run_group_keys`)。None なら従来どおり processed 挟みだけで
+            run が切れる。
 
     Returns:
         AlignmentPlan。チャンクは時系列順。
     """
     # 1. 連続 run 化 (§4-5): processed を跨ぐ束ねはしない。呼び出し側が指定した
-    #    範囲の切れ目でも切る。
-    boundaries = run_boundary_ids or set()
+    #    範囲の群 (run_groups) が変わるところでも切る。
+    #    群は「境界になる id」ではなく **所属**で持つ — 群の先頭 id を境界に
+    #    使う形は、その先頭が Chronicle 除外対象で messages に居ないと境界が
+    #    一度も立たず、離れた範囲が黙って一つのあらすじに混ざる
+    #    (docs/issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)。
+    group_keys = _run_group_keys(messages, run_groups)
     runs: List[List[Message]] = []
     current: List[Message] = []
+    current_group: object = None
     for msg in messages:
         if msg.id in processed_ids:
             if current:
                 runs.append(current)
                 current = []
+                current_group = None
             continue
-        if current and msg.id in boundaries:
+        group = group_keys.get(msg.id)
+        if current and group != current_group:
             runs.append(current)
             current = []
         current.append(msg)
+        current_group = group
     if current:
         runs.append(current)
 
@@ -220,6 +236,77 @@ def plan_alignment(
         chunks=chunks,
         total_unprocessed=sum(len(r) for r in runs),
     )
+
+
+def _run_group_keys(
+    messages: Sequence[Message],
+    run_groups: Optional[Sequence[Sequence[str]]],
+) -> Dict[str, object]:
+    """message id -> 所属群キー (run 分割の判定材料)。
+
+    ``run_groups`` が None なら空 dict — 全メッセージが同じ「群なし」に
+    なり、群による分割は起きない (全量整理の従来経路)。
+
+    群を渡す側の契約は「編纂対象の各 id がちょうど一つの群に属する」
+    (``EvictionPlan.folds`` は時系列順・非重複、呼び出し側は群の和集合で
+    編纂対象を絞る)。契約が破れた id は**所属が決まらない** — そこで
+    どちらの群に寄せても、寄せた先の隣と束ねる根拠が無い。だから
+    **1 件ずつ孤立させ、前後のどちらとも束ねない**:
+
+    - 複数の群に現れた id (所属が二つ以上ある)
+    - どの群にも属さない id (所属が無い)
+
+    どちらも呼び出し側の欠陥なので WARNING で必ず可視化する。
+
+    倒す向きの根拠 (二つ):
+
+    - **編纂ごと止めない**。壊れた計画が出続ける限り anchor が永久に進まず、
+      「退場したものは必ず編纂されている」(§4-1 の下限) を守るための歯止めが
+      退場そのものを止めてしまう。孤立させれば下限は保たれる (孤立片も
+      恒等圧縮チャンクとして必ず編纂される)。
+    - **§4-2 (episode 分割禁止) より §4-5 (連続束ねのみ) を優先する**。孤立は
+      同一 episode を割ることがあるが、割ることは物語の質の劣化に留まる。
+      対して偽の隣接は時系列の嘘であり、ペルソナの記憶に入れてはならない。
+      契約違反時に両方は満たせないので、嘘を出さない側を採る。
+    """
+    if run_groups is None:
+        return {}
+
+    index_of: Dict[str, int] = {}
+    duplicated: Set[str] = set()
+    for index, group in enumerate(run_groups):
+        for mid in group:
+            previous = index_of.get(mid)
+            if previous is None:
+                index_of[mid] = index
+            elif previous != index:
+                duplicated.add(mid)
+
+    keys: Dict[str, object] = {}
+    unassigned: List[str] = []
+    for msg in messages:
+        if msg.id in duplicated:
+            # 所属が二つ以上 = 決められない。他のどの id とも一致しないキー。
+            keys[msg.id] = ("ambiguous", msg.id)
+        elif msg.id in index_of:
+            keys[msg.id] = index_of[msg.id]
+        else:
+            unassigned.append(msg.id)
+            keys[msg.id] = ("unassigned", msg.id)
+
+    if duplicated:
+        LOGGER.warning(
+            "[alignment] run_groups の %d 件が複数の群に属している (所属を "
+            "決められないので孤立させる): %s — 呼び出し側の退場計画が重なっている",
+            len(duplicated), sorted(duplicated)[:10],
+        )
+    if unassigned:
+        LOGGER.warning(
+            "[alignment] 編纂対象の %d 件が run_groups のどの群にも属さない "
+            "(1 件ずつ孤立させる): %s — 呼び出し側の絞り込みと群が食い違っている",
+            len(unassigned), unassigned[:10],
+        )
+    return keys
 
 
 def truncate_plan(plan: AlignmentPlan, max_messages: int) -> AlignmentPlan:

@@ -460,3 +460,78 @@ def plan_eviction(
     plan.folds = folds
     plan.projected_chars = remaining
     return plan
+
+
+def compile_groups_from_folds(
+    folds: Sequence["Fold"],
+    presented: Sequence[Dict[str, Any]],
+) -> List[List[str]]:
+    """fold 群を編纂側へ渡す「束ねてよい範囲」の列に変換する。
+
+    ``Fold`` の契約は「時系列順・互いに重ならない連続範囲」で、正しい計画なら
+    fold と範囲は一対一。この関数はその契約を**提示コンテキストの実際の並びで検算**し、
+    破れていたら範囲を割ってから渡す。
+
+    割る理由 (experience_structure.md §4-5 連続束ねのみ): fold の内側に
+    「今回退場しないメッセージ」が挟まっていると、そのメッセージは生ログの
+    まま提示コンテキストに残る。前後を一つのあらすじにすれば、間に生ログがあるのに
+    地続きに語る**偽の隣接** = 時系列の嘘になる。
+
+    検算をここで行うのは、**提示コンテキストの完全な並びを持っているのがこの層だけ**
+    だから。編纂側 (generate_chronicle) が見るのは Chronicle 除外
+    (除外タグ / line_role / Stelis) を落とした後の列で、除外メッセージが
+    退場せずに残る形の抜けは原理的に見えない。
+
+    契約違反を例外にしないのは、退場ごと止めると壊れた計画が出続ける限り
+    anchor が永久に進まないため (§4-1 の下限を守る歯止めが退場自体を止める)。
+    割れば偽の隣接は出ず、範囲は全て編纂される。
+
+    Args:
+        folds: :attr:`EvictionPlan.folds`。
+        presented: 提示コンテキストの全メッセージ (時系列順、Chronicle 除外分も含む)。
+
+    Returns:
+        編纂側へ渡す message id 群の列 (時系列順)。
+    """
+    order = [str(m.get("id")) for m in presented]
+    position = {mid: i for i, mid in enumerate(order)}
+    selected = {mid for fold in folds for mid in fold.message_ids}
+
+    # 区間 (a, b) に「退場しないメッセージ」が居るかを O(1) で引くための累積和。
+    retained = [0] * (len(order) + 1)
+    for i, mid in enumerate(order):
+        retained[i + 1] = retained[i] + (0 if mid in selected else 1)
+
+    out: List[List[str]] = []
+    for fold in folds:
+        ids = fold.message_ids
+        placed = sorted((position[mid], mid) for mid in ids if mid in position)
+        # 提示コンテキストに居ない id (契約違反) は落とさないが、並び上の位置が
+        # 分からない以上どれとも隣接の根拠が無い → 1 件ずつ独立の片にする
+        # (編纂側 _run_group_keys の「所属不明は孤立」と同じ倒し方)。
+        unplaced = [mid for mid in ids if mid not in position]
+        segments: List[List[str]] = [[mid] for mid in unplaced]
+        current: List[str] = []
+        previous: Optional[int] = None
+        for index, mid in placed:
+            if previous is not None and retained[index] > retained[previous + 1]:
+                segments.append(current)
+                current = []
+            current.append(mid)
+            previous = index
+        if current:
+            segments.append(current)
+        if unplaced:
+            LOGGER.warning(
+                "[eviction] fold に提示コンテキスト外の id が %d 件 (位置不明なので "
+                "1 件ずつ孤立させる): %s",
+                len(unplaced), unplaced[:5],
+            )
+        if len(segments) - len(unplaced) > 1:
+            LOGGER.warning(
+                "[eviction] fold が退場しないメッセージをまたいでいる: %d 片に "
+                "割って編纂へ渡す %s (計画が連続していない — §4-5 の偽の隣接を防ぐ)",
+                len(segments), [seg[:3] for seg in segments][:5],
+            )
+        out.extend(seg for seg in segments if seg)
+    return out

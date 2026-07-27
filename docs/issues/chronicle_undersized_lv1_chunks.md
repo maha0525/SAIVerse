@@ -6,7 +6,7 @@
 
 **小粒が引き金になった別の実害** (2026-07-25 判明・修正済み): 小粒が溜まって Chronicle の提示が文字数予算を超えると、旧・提示アルゴリズムは粗さの段を飛ばし、その拍子に**上位あらすじが覆っていない直近の期間を丸ごと落としていた** (eris 3.7 日 41 件 / aifi 271 日 98 件)。提示側の欠陥そのものは [chronicle_presentation_gap](chronicle_presentation_gap.md) で修正済みだが、**本 issue の小粒量産が予算超過の引き金だった**関係にある。
 
-**本 issue の範囲外** (別管轄・待たなくてよい): 上段 (一次 → 二次以上のあらすじ) の束ねとの噛み合わせは [`chronicle_eviction.md`](../intent/chronicle_eviction.md) §8 が持つ未解決。同じく編纂側の [run_boundary_lost_by_excluded_tag](chronicle_run_boundary_lost_by_excluded_tag.md) / 適用側の [applier_veto_deadlock](chronicle_eviction_applier_veto_deadlock.md) も別 issue。
+**本 issue の範囲外** (別管轄・待たなくてよい): 上段 (一次 → 二次以上のあらすじ) の束ねとの噛み合わせは [`chronicle_eviction.md`](../intent/chronicle_eviction.md) §8 が持つ未解決。同じく編纂側の [run_boundary_lost_by_excluded_tag](archive/chronicle_run_boundary_lost_by_excluded_tag.md) (2026-07-27 解決) / 適用側の [applier_veto_deadlock](chronicle_eviction_applier_veto_deadlock.md) も別 issue。
 
 **⚠️ 目的の改訂 (2026-07-25 まはー裁定)**: 本 issue はもともと「U 未満の小粒な一次あらすじを作らない」を目的に掲げていた。これを **「小粒を日常経路で作らない。最後の手段としてのみ許す」** に緩める。
 

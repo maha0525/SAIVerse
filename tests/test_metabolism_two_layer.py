@@ -373,6 +373,59 @@ class ChronicleClaimTest(unittest.TestCase):
             # 2 群は別チャンク (連続していないので束ねない)
             self.assertEqual(captured["chunks"], [[all_ids[0]], [all_ids[2]]])
 
+    def test_compile_groups_boundary_survives_excluded_head(self):
+        """群の先頭が Chronicle 除外対象でも fold 境界は立つ (§4-5 回帰)。
+
+        除外タグ (handy_tool / spell / event_message / session_digest) や
+        除外 line_role のメッセージは編纂対象に現れない。境界を「fold の
+        先頭 id」で持っていたときは、先頭が落ちた fold の境界が一度も立たず、
+        離れた fold が一つのあらすじに束ねられていた
+        (docs/issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)。
+
+        除外メッセージの時系列上の位置は問わない — フィルタで編纂対象から
+        丸ごと消えるので、計画が見るのは「残ったメッセージの所属」だけ。
+        """
+        lifecycle = self._make_lifecycle(with_ledger=False)
+        all_ids = self._message_ids()
+
+        excluded_id = self.adapter.append_persona_message({
+            "role": "assistant",
+            "content": "スペル実行ログ",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"tags": ["spell"]},
+        })
+        self.assertIsNotNone(excluded_id)
+        # 前提の確認: 除外タグは編纂対象から落ちている
+        self.assertNotIn(excluded_id, self._message_ids())
+
+        with patch("saiverse.model_configs.find_model_config",
+                   return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
+                patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
+                patch("sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0), \
+                patch("sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0), \
+                patch("sai_memory.memory.entity_extractor.make_batch_callback",
+                      side_effect=RuntimeError("skip entity extraction")):
+            captured = {}
+
+            def _capture(plan, *a, **k):
+                captured["chunks"] = [list(c.message_ids) for c in plan.chunks]
+                return FakeExecutor.execute_plan(plan, *a, **k)
+
+            with patch("sai_memory.arasuji.executor.execute_plan", _capture):
+                status = lifecycle.generate_chronicle(
+                    self._persona(), force=True,
+                    compile_groups=[
+                        [all_ids[0], all_ids[1]],
+                        # 先頭が編纂対象に居ない fold
+                        [excluded_id, all_ids[2]],
+                    ],
+                )
+            self.assertEqual(status, "ok")
+            self.assertEqual(
+                captured["chunks"], [[all_ids[0], all_ids[1]], [all_ids[2]]],
+            )
+
+
 
 # ---------------------------------------------------------------------------
 # ② S2 ガード + ③ 退役の model 行独立 (実 session_anchor 行)
@@ -864,6 +917,62 @@ class MetabolismVisualizationDispatchTest(unittest.TestCase):
                 model_key="light-model",
             )
         self.assertEqual(dispatched, ["light-model"])
+
+    def test_compile_groups_pass_through_fold_contiguity_check(self):
+        """編纂へ渡す範囲は必ず compile_groups_from_folds を通る (§4-5 の検算)。
+
+        「fold は提示コンテキストの連続区間」の検算は退場計画側の仕事 — 提示コンテキストの
+        完全な並び (Chronicle 除外メッセージ込み) を持つのがあの層だけだから。
+        ここで固定するのはその配線 (Codex 攻撃レビュー 三巡目 2026-07-27)。
+        """
+        session_factory, engine = _make_session_factory()
+        self.addCleanup(engine.dispose)
+        manager = SimpleNamespace(SessionLocal=session_factory)
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+
+        messages = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(5)]
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="エア", model="std-model",
+            sai_memory=None, history_manager=_history_manager(messages),
+        )
+        captured = {}
+
+        def _capture_groups(p, cb=None, **kwargs):
+            captured["groups"] = kwargs.get("compile_groups")
+            return "ok"
+
+        lifecycle.generate_chronicle = _capture_groups
+
+        checked = []
+        from sea.eviction_plan import compile_groups_from_folds as _real
+
+        def _spy(folds, presented):
+            checked.append([[str(m.get("id")) for m in f.messages] for f in folds])
+            checked.append([str(m.get("id")) for m in presented])
+            return _real(folds, presented)
+
+        window = _window(messages)
+        with patch.dict(os.environ, {
+            "SAIVERSE_GOLD_PANNING_ENABLED": "0",
+            "SAIVERSE_CHRONICLE_BAND_BUDGET": "2500",
+            "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
+        }), patch("sea.session_lifecycle.compile_groups_from_folds", _spy), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda p, m, model_key=None: None):
+            lifecycle.run_metabolism(
+                persona, "b", window,
+                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                model_key="light-model",
+            )
+
+        # 検算は fold 群と**提示コンテキストの全メッセージ**を見て行われた
+        self.assertTrue(checked, "compile_groups_from_folds が呼ばれていない")
+        self.assertEqual(checked[1], [m["id"] for m in messages])
+        # 正しい計画なので割れず、そのまま編纂へ渡る
+        self.assertEqual(captured["groups"], checked[0])
 
 
 # ---------------------------------------------------------------------------
