@@ -1900,6 +1900,33 @@ CHRONICLE_EXCLUDED_TAGS = ('handy_tool', 'spell', 'event_message', 'session_dige
 CHRONICLE_EXCLUDED_LINE_ROLES = ('sub_line', 'meta_judgment', 'nested')
 
 
+def chronicle_eligibility_filter() -> Tuple[str, Tuple[str, ...]]:
+    """Chronicle 編纂対象の共有 SQL 断片 ``(clause, params)`` を返す。
+
+    「どのメッセージが Chronicle に入るか」の除外規則の一点管理:
+    - Stelis スレッド (サブエージェント作業ログ) の除外
+    - ``CHRONICLE_EXCLUDED_TAGS`` タグの除外
+    - ``CHRONICLE_EXCLUDED_LINE_ROLES`` の除外 (NULL line_role は旧世代
+      メッセージなので許可)
+
+    ``get_messages_for_chronicle`` (編纂の入力) と
+    ``filter_chronicle_eligible_ids`` (退場適用側の編纂可能性判定) が共用する。
+    """
+    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
+    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
+    clause = f"""
+        thread_id NOT IN (
+            SELECT thread_id FROM stelis_threads
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM json_each(metadata, '$.tags')
+            WHERE json_each.value IN ({tag_placeholders})
+        )
+        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+    """
+    return clause, CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
+
+
 def get_messages_for_chronicle(
     conn: sqlite3.Connection,
     *,
@@ -1924,27 +1951,48 @@ def get_messages_for_chronicle(
         offset: Number of messages to skip from the beginning.
     """
     limit_clause = f"LIMIT {int(limit)} OFFSET {int(offset)}" if limit > 0 else ""
-    tag_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
-    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
+    clause, params = chronicle_eligibility_filter()
 
     cur = conn.execute(
         f"""
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
-        WHERE thread_id NOT IN (
-            SELECT thread_id FROM stelis_threads
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM json_each(metadata, '$.tags')
-            WHERE json_each.value IN ({tag_placeholders})
-        )
-        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
+        WHERE {clause}
         ORDER BY created_at ASC, rowid ASC
         {limit_clause}
         """,
-        CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES,
+        params,
     )
     return [_row_to_message(row) for row in cur.fetchall()]
+
+
+def filter_chronicle_eligible_ids(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> set:
+    """``message_ids`` のうち Chronicle 編纂の対象になれるものの id 集合。
+
+    除外規則は ``chronicle_eligibility_filter`` (= ``get_messages_for_chronicle``
+    と同一の WHERE 句) を共用する — 編纂側と判定側で規則の二枚目を作らない。
+
+    退場の適用側 (sea/session_lifecycle.py の ``_apply_eviction_plan``) が
+    「この fold にあらすじが生まれる可能性はあるか」を判定するために使う。
+    空集合 = fold 全体が編纂対象外で、あらすじは永久に生まれない。
+    """
+    ids = [str(m) for m in message_ids]
+    if not ids:
+        return set()
+    clause, params = chronicle_eligibility_filter()
+    out: set = set()
+    chunk_size = 500
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        id_placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id FROM messages WHERE id IN ({id_placeholders}) AND {clause}",
+            tuple(chunk) + params,
+        )
+        out.update(str(row[0]) for row in cur.fetchall())
+    return out
 
 
 def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:

@@ -523,9 +523,17 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         if not success:
             raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
 
+        # 圧縮区間の記録の道連れ削除: このエントリを digest として提示している
+        # 範囲の記録を残すと、提示は生ログに倒れるのに再畳みだけが永久に拒否
+        # される半端な状態になる (issue chronicle_eviction_applier_veto_deadlock
+        # 顔その2)。エントリを消す操作が記録も同時に無効化する。
+        from sea.session_lifecycle import remove_folds_referencing_entry
+        folds_removed = remove_folds_referencing_entry(manager, persona_id, entry_id)
+
         return {
             "success": True,
             "message": f"Deleted Chronicle entry {entry_id}",
+            "folded_ranges_removed": folds_removed,
         }
     except HTTPException:
         raise

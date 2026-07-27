@@ -425,6 +425,33 @@ class ChronicleClaimTest(unittest.TestCase):
                 captured["chunks"], [[all_ids[0], all_ids[1]], [all_ids[2]]],
             )
 
+    def test_filter_chronicle_eligible_ids_shares_the_compile_filter(self):
+        """filter_chronicle_eligible_ids は編纂の入力フィルタと同じ集合を返す。
+
+        退場適用側の「この fold にあらすじが生まれる可能性はあるか」判定
+        (顔その1) の土台。除外タグのメッセージは対象外、通常メッセージは対象。
+        """
+        from sai_memory.memory.storage import filter_chronicle_eligible_ids
+        all_ids = self._message_ids()
+
+        excluded_id = self.adapter.append_persona_message({
+            "role": "assistant",
+            "content": "スペル実行ログ",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"tags": ["spell"]},
+        })
+        self.assertIsNotNone(excluded_id)
+
+        eligible = filter_chronicle_eligible_ids(
+            self.adapter.conn, all_ids + [excluded_id],
+        )
+        self.assertEqual(eligible, set(all_ids))
+        # 全部が除外タグ = 空集合 (あらすじは永久に生まれない fold の形)
+        self.assertEqual(
+            filter_chronicle_eligible_ids(self.adapter.conn, [excluded_id]), set(),
+        )
+        self.assertEqual(filter_chronicle_eligible_ids(self.adapter.conn, []), set())
+
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +835,275 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         self.assertIsNone(self._anchor(lifecycle))
         self.assertEqual(len(saved), 1)
         self.assertEqual([f.message_ids for f in saved[0]], [["b0", "b1"]])
+
+
+# ---------------------------------------------------------------------------
+# ⑤b 適用側の拒否権と計画の恒久デッドロック
+#     (docs/issues/chronicle_eviction_applier_veto_deadlock.md)
+# ---------------------------------------------------------------------------
+
+
+class ApplierVetoDeadlockTest(unittest.TestCase):
+    """「計画が知らない拒否権」で anchor が恒久に詰まる二つの顔の根治を固定する。
+
+    顔その1: 全メッセージが Chronicle 除外の fold は、あらすじが永久に生まれ
+    ない。「編纂待ち」の見送りで人質に取らず、disabled と同じ吸収限定の退場を
+    許す。
+    顔その2: あらすじを恒久に失った圧縮区間の記録は Metabolism 冒頭で捨てる。
+    残すと提示 (生ログに fail-open) と二重記録判定の生死の読みが食い違い、
+    その範囲を含む束ねが毎ラウンド丸ごと拒否される。
+    """
+
+    def setUp(self):
+        self.session_factory, self._engine = _make_session_factory()
+        self.addCleanup(self._engine.dispose)
+        self.manager = SimpleNamespace(SessionLocal=self.session_factory)
+
+    def _make_lifecycle(self):
+        lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
+        lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._record_partial_episode = lambda p, f: None
+        return lifecycle
+
+    def _persona(self, messages=()):
+        return SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="エア", model="std-model",
+            sai_memory=None, history_manager=_history_manager(messages),
+        )
+
+    def _run(self, lifecycle, messages, watermarks, *, window=None):
+        window = window or _window(messages)
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch.dict(os.environ, {"SAIVERSE_GOLD_PANNING_ENABLED": "0"}), \
+                patch.dict(os.environ, {"SAIVERSE_CHRONICLE_BAND_BUDGET": "2000"}), \
+                patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                      lambda *a, **k: None):
+            lifecycle.run_metabolism(
+                self._persona(messages), "b", window, watermarks, None,
+                model_key="std-model",
+            )
+
+    def _anchor(self, lifecycle):
+        entry = lifecycle.load_anchor_entry(PERSONA_ID, "std-model")
+        return entry["anchor_id"] if entry else None
+
+    def test_excluded_only_fold_is_absorbed_instead_of_vetoed(self):
+        """顔その1: 先頭の「編纂対象ゼロ」fold は吸収され、anchor が進む。
+
+        issue の実測 r0 の形: [e0(除外タグのみ), o0(open U未満), c0, c1, 保護]。
+        旧実装は e0 を「あらすじ待ち」で見送り続け、計画が毎ラウンド同じ提案を
+        して永久ループしていた。
+        """
+        from saiverse.episodes import KIND_CONVERSATION, open_episode
+        open_ref = open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)["episode_ref"]
+        msgs = [
+            _msg("e0", 100, chars=500),                       # 除外タグのみの範囲
+            _msg("o0", 101, chars=500, episode_ref=open_ref),  # U 未満の open
+            _msg("c0", 102, chars=1_000),
+            _msg("c1", 103, chars=1_000),
+            _msg("k0", 200, chars=1_000),                      # 保護範囲
+            _msg("k1", 201, chars=1_000),
+        ]
+        lifecycle = self._make_lifecycle()
+        # e0 の fold にはあらすじが付かない (編纂対象が無いから)
+        def _attach(persona, folds):
+            for i, fold in enumerate(folds):
+                if "e0" not in fold.message_ids:
+                    fold.chronicle_entry_ids = [f"entry-{i}"]
+                    fold.chronicle_short_ids = [i + 1]
+        lifecycle._attach_chronicle_refs = _attach
+        # 編纂対象判定: e0 だけが対象ゼロ
+        lifecycle._fold_has_chronicle_material = (
+            lambda p, f: "e0" not in f.message_ids
+        )
+        saved = []
+        lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
+
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=5_000))
+
+        # e0 が吸収されて anchor は o0 へ (旧実装: None のまま永久停止)
+        self.assertEqual(self._anchor(lifecycle), "o0")
+        # e0 は圧縮区間として残らない (見せる digest が無い)。残る圧縮区間は
+        # あらすじ持ちの c0/c1 だけ。
+        self.assertEqual(len(saved), 1)
+        self.assertEqual([f.message_ids for f in saved[0]], [["c0", "c1"]])
+
+    def test_absorbed_fold_without_digest_records_no_child_episode(self):
+        """digest を持たない吸収退場 (編纂対象ゼロの open fold) は子 episode を
+        作らない。子は「その部分はあらすじ経由で持っている」の構造宣言なので、
+        digest 無しの子 + digest 層エッジは再訪先の無い嘘になる (Codex 指摘)。"""
+        from saiverse.episodes import KIND_CONVERSATION, open_episode
+        open_ref = open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)["episode_ref"]
+        msgs = [
+            _msg("e0", 100, chars=500, episode_ref=open_ref),  # 除外タグのみの open
+            _msg("c0", 102, chars=1_000),
+            _msg("c1", 103, chars=1_000),
+            _msg("k0", 200, chars=1_000),
+            _msg("k1", 201, chars=1_000),
+        ]
+        lifecycle = self._make_lifecycle()
+
+        def _attach(persona, folds):
+            for i, fold in enumerate(folds):
+                if "e0" not in fold.message_ids:
+                    fold.chronicle_entry_ids = [f"entry-{i}"]
+        lifecycle._attach_chronicle_refs = _attach
+        lifecycle._fold_has_chronicle_material = (
+            lambda p, f: "e0" not in f.message_ids
+        )
+        recorded = []
+        lifecycle._record_partial_episode = lambda p, f: recorded.append(f.message_ids)
+        lifecycle.save_folded_ranges = lambda pid, mk, folds: None
+
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=5_000))
+
+        # e0 も c0/c1 も吸収されて anchor は k0 へ。だが e0 (digest 無し) の
+        # 子 episode 記帳は行われない。
+        self.assertEqual(self._anchor(lifecycle), "k0")
+        self.assertEqual(recorded, [])
+
+    def test_fold_with_material_but_no_entry_is_still_vetoed(self):
+        """顔その1の境界: 編纂対象を**含む**のにあらすじが無い fold は従来どおり
+        見送る (LLM 失敗等の一時状態 — 下限 §2 の手続き強制は生きている)。"""
+        msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(6)]
+        lifecycle = self._make_lifecycle()
+        lifecycle._attach_chronicle_refs = lambda p, folds: None  # 引き当て失敗
+        lifecycle._fold_has_chronicle_material = lambda p, f: True
+        saved = []
+        lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+        self.assertIsNone(self._anchor(lifecycle))
+        self.assertEqual(saved, [[]])
+
+    def test_dead_fold_record_is_dropped_and_range_refolds(self):
+        """顔その2: あらすじを恒久に失った記録は Metabolism 冒頭で捨てられ、
+        その範囲は普通の材料として再畳みされる。
+
+        issue の実測 r0 の形: 既存の圧縮区間 [m2,m3] の digest が引けない状態で、
+        計画は [m0..m3] を束ねる。旧実装は重なり 1 件で束ねを丸ごと捨て、
+        m0/m1 まで道連れで永久に畳めなかった。
+        """
+        from sea.session_window import FoldedRange
+        msgs = [
+            _msg("m0", 100, chars=500), _msg("m1", 101, chars=500),
+            _msg("m2", 102, chars=500), _msg("m3", 103, chars=500),
+            _msg("k0", 200, chars=1_000), _msg("k1", 201, chars=1_000),
+        ]
+        lifecycle = self._make_lifecycle()
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+        # 実 anchor 行 + 実圧縮区間の記録 (digest は恒久に引けない)
+        t0 = datetime.now().replace(microsecond=0)
+        lifecycle.upsert_anchor_entry(PERSONA_ID, "std-model", {
+            "anchor_id": "m0", "updated_at": t0.isoformat(),
+        })
+        lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
+            FoldedRange(message_ids=["m2", "m3"], start_at=102, end_at=103,
+                        chronicle_entry_ids=["dead-entry"]),
+        ])
+        lifecycle._resolve_fold_digest_status = lambda p, f: (
+            (None, True) if "dead-entry" in f.chronicle_entry_ids
+            else ("digest", False)
+        )
+
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+
+        # [m0..m3] が一束で畳まれて anchor は保護範囲の先頭 k0 へ
+        # (旧実装: 重なり拒否で m0 のまま永久停止)
+        self.assertEqual(self._anchor(lifecycle), "k0")
+        # 死んだ記録は消え、吸収されたので新しい圧縮区間も残らない
+        self.assertEqual(lifecycle.load_folded_ranges(PERSONA_ID, "std-model"), [])
+
+    def test_transient_digest_failure_keeps_the_record(self):
+        """顔その2の境界: 照会の一時失敗 (恒久欠落でない) では記録を捨てない。
+        捨てると、DB の瞬断のたびに編纂済み範囲が生ログへ戻って再編纂される。"""
+        from sea.session_window import FoldedRange
+        msgs = [
+            _msg("m0", 100, chars=500), _msg("m1", 101, chars=500),
+            _msg("m2", 102, chars=500), _msg("m3", 103, chars=500),
+            _msg("k0", 200, chars=1_000), _msg("k1", 201, chars=1_000),
+        ]
+        lifecycle = self._make_lifecycle()
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+        t0 = datetime.now().replace(microsecond=0)
+        lifecycle.upsert_anchor_entry(PERSONA_ID, "std-model", {
+            "anchor_id": "m0", "updated_at": t0.isoformat(),
+        })
+        lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
+            FoldedRange(message_ids=["m2", "m3"], start_at=102, end_at=103,
+                        chronicle_entry_ids=["e-alive"]),
+        ])
+        # 一時失敗: digest は引けないが恒久欠落とは判定されない
+        lifecycle._resolve_fold_digest_status = lambda p, f: (None, False)
+
+        self._run(lifecycle, msgs, Watermarks(low=2_000, target=1_000, high=5_000))
+
+        # 記録は生きたまま (m2/m3 を含む束ねは従来どおり二重記録拒否で見送り)
+        self.assertEqual(
+            [f.message_ids
+             for f in lifecycle.load_folded_ranges(PERSONA_ID, "std-model")],
+            [["m2", "m3"]],
+        )
+
+
+# ---------------------------------------------------------------------------
+# ⑤c 手動削除の道連れ (remove_folds_referencing_entry)
+# ---------------------------------------------------------------------------
+
+
+class RemoveFoldsReferencingEntryTest(unittest.TestCase):
+    """あらすじエントリの手動削除は、それを指す圧縮区間の記録を道連れにする。"""
+
+    def setUp(self):
+        self.session_factory, self._engine = _make_session_factory()
+        self.addCleanup(self._engine.dispose)
+        self.manager = SimpleNamespace(SessionLocal=self.session_factory)
+        self.lifecycle = SessionLifecycle(SimpleNamespace(), self.manager)
+        t0 = datetime.now().replace(microsecond=0)
+        for model in ("std-model", "light-model"):
+            self.lifecycle.upsert_anchor_entry(PERSONA_ID, model, {
+                "anchor_id": "a0", "updated_at": t0.isoformat(),
+            })
+
+    def test_removes_whole_records_across_model_rows(self):
+        from sea.session_lifecycle import remove_folds_referencing_entry
+        from sea.session_window import FoldedRange
+        # 複数エントリを指す記録は、1 本の削除でも丸ごと外す (残りの digest が
+        # 範囲全体の顔をして、消したエントリぶんの体験が黙って隠れるため)
+        self.lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
+            FoldedRange(message_ids=["m1"], chronicle_entry_ids=["e1", "e2"]),
+            FoldedRange(message_ids=["m5"], chronicle_entry_ids=["e9"]),
+        ])
+        self.lifecycle.save_folded_ranges(PERSONA_ID, "light-model", [
+            FoldedRange(message_ids=["x1"], chronicle_entry_ids=["e1"]),
+        ])
+
+        removed = remove_folds_referencing_entry(self.manager, PERSONA_ID, "e1")
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            [f.message_ids
+             for f in self.lifecycle.load_folded_ranges(PERSONA_ID, "std-model")],
+            [["m5"]],
+        )
+        self.assertEqual(
+            self.lifecycle.load_folded_ranges(PERSONA_ID, "light-model"), [],
+        )
+
+    def test_unrelated_entry_removes_nothing(self):
+        from sea.session_lifecycle import remove_folds_referencing_entry
+        from sea.session_window import FoldedRange
+        self.lifecycle.save_folded_ranges(PERSONA_ID, "std-model", [
+            FoldedRange(message_ids=["m1"], chronicle_entry_ids=["e1"]),
+        ])
+        self.assertEqual(
+            remove_folds_referencing_entry(self.manager, PERSONA_ID, "zzz"), 0,
+        )
+        self.assertEqual(
+            [f.message_ids
+             for f in self.lifecycle.load_folded_ranges(PERSONA_ID, "std-model")],
+            [["m1"]],
+        )
 
 
 # ---------------------------------------------------------------------------

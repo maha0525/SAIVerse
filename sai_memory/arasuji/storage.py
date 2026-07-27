@@ -1039,10 +1039,19 @@ def regenerate_entry(
 
     This orchestrates the full regeneration process:
     1. Get existing entry and save parent info
-    2. Delete entry and update parent's source_ids
-    3. Get original messages
-    4. Call build_arasuji.regenerate_entry_from_messages for business logic
-    5. Restore parent relationship
+    2. Get original messages
+    3. Call build_arasuji.regenerate_entry_from_messages for business logic
+    4. Delete the old entry and update parent's source_ids
+    5. Restore parent relationship for the new entry
+
+    生成が先・削除が後 (generate-then-swap)。逆順 (削除→LLM 生成) だと、LLM
+    呼び出しの間ずっと「この範囲を覆うエントリが存在しない」空白が開く —
+    生成失敗でエントリを失うだけでなく、その空白中に Metabolism が走ると
+    圧縮区間の記録が「あらすじ恒久欠落」と誤判定されて捨てられる
+    (docs/issues/chronicle_eviction_applier_veto_deadlock.md 顔その2 の安全網)。
+    旧エントリを生かしたまま新エントリを作れば、外から見える空白は無い
+    (generate_level1_arasuji は渡されたメッセージから無条件に作るので、旧
+    エントリの存在と衝突しない)。
 
     Args:
         conn: Database connection
@@ -1059,6 +1068,11 @@ def regenerate_entry(
     if not entry:
         return None
 
+    # get_entry は短縮 id の prefix fallback を持つ。以降の再照会・削除を
+    # 短縮 id のまま行うと、旧行の消失後に同じ prefix の**別行**を拾って
+    # 消しうる (Codex レビュー 2026-07-27)。ここで完全 id に確定する。
+    entry_id = entry.id
+
     if entry.level != 1:
         raise ValueError("Only level-1 entries can be regenerated")
 
@@ -1066,12 +1080,7 @@ def regenerate_entry(
     parent_id = entry.parent_id
     source_message_ids = entry.source_ids
 
-    # 3. Delete entry and update parent
-    success, _ = delete_entry_and_update_parent(conn, entry_id)
-    if not success:
-        return None
-
-    # 4. Get original messages
+    # 3. Get original messages
     messages = []
     for msg_id in source_message_ids:
         msg = get_message(conn, msg_id)
@@ -1084,18 +1093,68 @@ def regenerate_entry(
     # Sort by created_at
     messages.sort(key=lambda m: m.created_at)
 
-    # 5. Call scripts layer for business logic
+    # 4. Generate the replacement first (LLM call — the old entry stays alive)
     from scripts.arasuji.build_arasuji_core import regenerate_entry_from_messages
     new_entry = regenerate_entry_from_messages(conn, messages, model_name, persona_id=persona_id)
 
     if not new_entry:
+        # 生成失敗: 旧エントリは無傷のまま残る (削除していないので何も失わない)
         return None
 
-    # 6. Restore parent relationship
-    if parent_id:
-        add_to_parent_source_ids(conn, new_entry.id, parent_id)
+    # 5. Swap (CAS): 旧行を再取得し、開始時のスナップショットと一致するときだけ
+    # 差し替える。LLM の間に並行操作が旧行を動かしていた場合に盲目で進むと、
+    # 明示削除された範囲が別 id で復活する / ユーザーの本文編集を LLM 出力で
+    # 黙って潰す / 束ねで変わった親関係に陳腐化した parent_id を復元する
+    # (Codex レビュー 2026-07-27)。競合時は新行を取り下げて「再生成失敗」として
+    # 返す — 並行操作の結果 (削除・編集・束ね) の方を正とする。
+    #
+    # 取り下げは delete_entry でなく delete_entry_and_update_parent で行う —
+    # 生成中の短い窓で束ねが新行を親に繋いでいた場合、親の source_ids から
+    # 外さないと宙づりの参照が残る。
+    #
+    # 検査と差し替えは別々の commit で行われるため、検査直後の並行書き込みとの
+    # 競合窓は残る (数 ms)。ここの各 storage 関数は 1 操作 1 commit の設計で、
+    # 単一トランザクション化はこの層全体の作り直しになるため、手動 UI 操作
+    # 同士の ms 級競合として受容する (issue applier_veto_deadlock に記録)。
+    import logging
 
-    return new_entry
+    def _withdraw_replacement() -> None:
+        try:
+            delete_entry_and_update_parent(conn, new_entry.id)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "[arasuji] failed to withdraw replacement entry %s after a "
+                "regeneration conflict; a duplicate row may remain",
+                new_entry.id, exc_info=True,
+            )
+
+    current = get_entry(conn, entry_id)
+    if (
+        current is None
+        or current.id != entry.id
+        or current.parent_id != parent_id
+        or current.is_consolidated != entry.is_consolidated
+        or current.content != entry.content
+        or current.source_ids != entry.source_ids
+    ):
+        _withdraw_replacement()
+        return None
+    try:
+        success, _ = delete_entry_and_update_parent(conn, entry_id)
+        if not success:
+            _withdraw_replacement()
+            return None
+        # 6. Restore parent relationship. 親が直前に消えていた場合 (False)、
+        # 旧行の子たちは root 直下の未束ね行へ戻されているので、新行も
+        # 親なし・未束ねのまま残すのが兄弟と整合する。
+        if parent_id:
+            add_to_parent_source_ids(conn, new_entry.id, parent_id)
+        return new_entry
+    except Exception:
+        # 差し替えの途中失敗で新行だけが残ると、旧新の二重被覆が永続化する。
+        # 新行を取り下げてから失敗として返す。
+        _withdraw_replacement()
+        raise
 
 
 # ----- Progress tracking -----

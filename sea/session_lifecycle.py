@@ -930,15 +930,28 @@ class SessionLifecycle:
         return self._present_with_folds(persona, messages, folds)
 
     def _resolve_fold_digest(self, persona, fold: "FoldedRange") -> Optional[str]:
-        """畳まれた範囲のあらすじ本文を引く。引けなければ None (= 生ログのまま)。
+        """畳まれた範囲のあらすじ本文を引く。引けなければ None (= 生ログのまま)。"""
+        digest, _permanently_missing = self._resolve_fold_digest_status(persona, fold)
+        return digest
+
+    def _resolve_fold_digest_status(
+        self, persona, fold: "FoldedRange",
+    ) -> Tuple[Optional[str], bool]:
+        """畳まれた範囲のあらすじ本文を引く。戻りは ``(digest, 恒久欠落か)``。
 
         圧縮区間は記録時に必ず一次あらすじ エントリ id を持つ (`_apply_eviction_plan`) ので、
         id 直引きで済む。source_ids の全走査に落ちるのは、エントリが解体・
         再編纂されて id が変わった旧記録だけ。
+
+        恒久欠落 (``True``) = **照会は成功したのにエントリが見つからない**。
+        手動削除の道連れ漏れ・DB 破損などで、あらすじが失われた確定状態。
+        照会自体の失敗 (一時障害) は ``(None, False)`` — 分からないだけで
+        失われたとは言えない。どちらも提示は生ログに倒す (fail-open) が、
+        記録を捨ててよいのは恒久欠落だけ (:meth:`_drop_dead_folds`)。
         """
         adapter = getattr(persona, "sai_memory", None)
         if not adapter or not adapter.is_ready():
-            return None
+            return None, False
         try:
             from sai_memory.arasuji.storage import (
                 get_entries_covering_messages,
@@ -956,7 +969,7 @@ class SessionLifecycle:
                 "[window] failed to look up chronicle entries for folded range "
                 "(persona=%s)", getattr(persona, "persona_id", "?"), exc_info=True,
             )
-            return None
+            return None, False
         texts = [e.content for e in entries if e.content]
         if not texts:
             LOGGER.warning(
@@ -964,8 +977,54 @@ class SessionLifecycle:
                 "(persona=%s, %d messages)",
                 getattr(persona, "persona_id", "?"), len(fold.message_ids),
             )
-            return None
-        return "\n\n".join(texts)
+            return None, True
+        return "\n\n".join(texts), False
+
+    def _drop_dead_folds(
+        self, persona, model_key: Optional[str], window: "SessionWindow",
+    ) -> "SessionWindow":
+        """あらすじを恒久に失った圧縮区間の記録を捨てる (異常系の安全網)。
+
+        「記録は生きているのに、指す先のあらすじが無い」半端な状態が残ると、
+        提示は生ログに倒れる (fail-open) 一方で、適用側の二重記録判定
+        (:meth:`_apply_eviction_plan`) は記録を生きているとみなす — 生死の読みが
+        食い違い、その範囲を含む束ねが毎ラウンド丸ごと拒否されて anchor が
+        恒久に詰まる (docs/issues/chronicle_eviction_applier_veto_deadlock.md
+        顔その2)。提示が生ログに倒れると確定した時点で記録も捨て、生死の判定を
+        一つに揃える。
+
+        捨てた範囲は普通の材料に戻り、次の計画が再畳みする。生き残っている
+        エントリがあれば :meth:`_attach_chronicle_refs` が引き当て直すので、
+        再編纂の二重被覆にはならない。
+
+        通常この状態は生まれない — 束ねは追加のみ (chronicle_consolidation
+        不変条件5) で、手動削除は API 側が記録を道連れにする
+        (:func:`remove_folds_referencing_entry`)。ここは道連れ漏れ・DB 破損
+        などに対する Metabolism 時の最後の網。
+        """
+        from sea.session_window import SessionWindow
+        dead = [
+            f for f in window.folds
+            if self._resolve_fold_digest_status(persona, f)[1]
+        ]
+        if not dead:
+            return window
+        persona_id = getattr(persona, "persona_id", None)
+        for fold in dead:
+            LOGGER.warning(
+                "[metabolism] dropping folded-range record whose chronicle "
+                "entries are permanently gone (persona=%s, %d messages, "
+                "entries=%s); the raw log returns to the window for re-folding",
+                persona_id, len(fold.message_ids), fold.chronicle_entry_ids,
+            )
+        kept = [f for f in window.folds if f not in dead]
+        self.save_folded_ranges(persona_id, model_key, kept)
+        return SessionWindow(
+            anchor_id=window.anchor_id,
+            raw=window.raw,
+            presented=self._present_with_folds(persona, window.raw, kept),
+            folds=kept,
+        )
 
     def _is_cache_hot(self, persona, model_key: Optional[str] = None) -> bool:
         """指定 model (既定: persona.model) の anchor 行が生存しているか (= 直前 prefix が温かい)。
@@ -1095,14 +1154,32 @@ class SessionLifecycle:
             )
         self._attach_chronicle_refs(persona, new_folds)
 
-        # あらすじを持たない fold は「圧縮区間」になれない。Chronicle を切っている
-        # persona (disabled) だけは例外で、anchor が飲み込める先頭連続域に限って
-        # 退場を許す (編纂なしで忘れることを選んでいるため)。それ以外は退場を
-        # 見送り、生ログのまま提示コンテキストに残す。
+        # あらすじを持たない fold は「圧縮区間」になれない。見送りの条件は
+        # カテゴリ (あらすじの有無) ではなく目的 (編纂されるはずの体験を黙って
+        # 消さない — §2 下限) から引く:
+        #
+        # - Chronicle を切っている persona (disabled) は「編纂なしで忘れる」を
+        #   選んだ設計上の合意。anchor が飲み込める先頭連続域に限って退場を許す。
+        # - **fold に編纂対象のメッセージが 1 件も無い** (全部が Chronicle 除外 —
+        #   除外タグ / line_role / Stelis) なら、あらすじは**永久に**生まれない。
+        #   「編纂待ち」で見送っても待ちが明けることはなく、anchor がこの fold の
+        #   手前で恒久に詰まるだけ (issue chronicle_eviction_applier_veto_deadlock
+        #   顔その1)。disabled と同じ扱いに落とす — 吸収の候補には入れ、圧縮区間
+        #   (digest の置き換え) としては残さない。
+        # - それ以外 (編纂対象を含むのにあらすじが無い = LLM 失敗等の一時状態) は
+        #   退場を見送り、生ログのまま提示コンテキストに残して次回再挑戦する。
         candidates: List["FoldedRange"] = []
         for fold in new_folds:
             if fold.chronicle_entry_ids or chronicle_status == "disabled":
                 candidates.append(fold)
+            elif not self._fold_has_chronicle_material(persona, fold):
+                candidates.append(fold)
+                LOGGER.info(
+                    "[metabolism] fold has no chronicle-eligible message; treating "
+                    "it as absorb-only, like a chronicle-disabled persona "
+                    "(persona=%s, %d messages, %s..%s)",
+                    persona_id, len(fold.message_ids), fold.start_at, fold.end_at,
+                )
             else:
                 LOGGER.warning(
                     "[metabolism] fold has no chronicle entry; leaving it in the "
@@ -1131,8 +1208,12 @@ class SessionLifecycle:
         # §6 pulse 関節細分: 実際に退場する open episode の部分だけを子 episode 化。
         # 渡すのは refs を刻んだ側 (FoldedRange) — 子 episode の DIGEST_REF は
         # 再訪の鍵なので、あらすじ id を持っていない計画側の Fold では空になる。
+        # あらすじを持たない吸収退場 (disabled / 編纂対象ゼロ) では子 episode を
+        # **作らない** — 子の存在は「その部分の記憶はあらすじ経由で持っている」
+        # (experience_structure §6) の構造宣言であり、digest 無しの子と digest 層の
+        # 継承エッジは再訪先の無い嘘の構造になる (Codex レビュー 2026-07-27)。
         for fold in applied:
-            if fold.episode_ref:
+            if fold.episode_ref and fold.chronicle_entry_ids:
                 self._record_partial_episode(persona, fold)
 
         # 圧縮区間として持ち続けるのは「提示コンテキストに残っていて、かつあらすじを引ける」範囲だけ。
@@ -1156,6 +1237,33 @@ class SessionLifecycle:
                 len(folds), persona_id,
             )
         self.save_folded_ranges(persona_id, model_key, folds)
+
+    def _fold_has_chronicle_material(self, persona, fold: "FoldedRange") -> bool:
+        """fold に Chronicle 編纂対象のメッセージが 1 件でもあるか。
+
+        判定は編纂側と同じ除外規則
+        (sai_memory.memory.storage.filter_chronicle_eligible_ids =
+        ``get_messages_for_chronicle`` と同一の WHERE 句) で行う — 規則の
+        二枚目を作らない。
+
+        照会できないときは True (= 編纂対象かもしれない) に倒す。誤って
+        「対象外」と判定して退場させると下限「退場したものは必ず編纂されている」
+        (chronicle_eviction.md §2) が破れるため、迷ったら退場を見送る側に立つ。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return True
+        try:
+            from sai_memory.memory.storage import filter_chronicle_eligible_ids
+            eligible = filter_chronicle_eligible_ids(adapter.conn, fold.message_ids)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] chronicle-eligibility check failed; assuming the "
+                "fold is compilable (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return True
+        return bool(eligible)
 
     def _attach_chronicle_refs(self, persona, folds: List["FoldedRange"]) -> None:
         """畳んだ範囲を覆う一次あらすじ エントリの id / ch:N を刻む (全 fold を 1 照会で)。"""
@@ -1325,7 +1433,10 @@ class SessionLifecycle:
         band_budget = chronicle_band_budget()
         fresh = self.get_presented_window(persona, model_key)
         if fresh.anchor_id:
-            window = fresh
+            # あらすじを恒久に失った圧縮区間の記録はここで捨てる — 残すと
+            # 提示 (生ログに fail-open) と適用側の二重記録判定で生死の読みが
+            # 食い違い、その範囲の再畳みが永久に拒否される (issue 顔その2)。
+            window = self._drop_dead_folds(persona, model_key, fresh)
         current_messages = window.presented
         if not current_messages:
             LOGGER.info(
@@ -2119,3 +2230,79 @@ def collect_folded_chronicle_entry_ids(
     finally:
         db.close()
     return ids
+
+
+def remove_folds_referencing_entry(
+    manager, persona_id: Optional[str], entry_id: str,
+) -> int:
+    """persona の全 model 行から、指定 Chronicle エントリを指す圧縮区間の記録を外す。
+
+    あらすじエントリの手動削除 (api/routes/people/arasuji.py) の道連れ処理。
+    エントリだけ消して記録が残ると「記録は生きているのに指す先のあらすじが無い」
+    半端な状態になり、提示は生ログに倒れる (fail-open) のに適用側の二重記録判定
+    がその範囲の再畳みを拒否して anchor が恒久に詰まる
+    (docs/issues/chronicle_eviction_applier_veto_deadlock.md 顔その2)。
+    派生状態 (圧縮区間の記録) の無効化は、元 (エントリ) を消す側が同じ操作の
+    中で行う。
+
+    記録は**丸ごと**外す (エントリ id を 1 本だけ抜いて残さない) — 複数エントリを
+    指す記録から 1 本抜くと、残りの digest が範囲全体の顔をして、消したエントリ
+    ぶんの体験が黙って隠れるため。外された範囲は生ログに戻り、次の Metabolism が
+    再畳みする (生き残ったエントリは再編纂されず引き当て直される)。
+
+    Returns:
+        外した記録の数。照会・書き込みに失敗したら 0 (Metabolism 時の安全網
+        ``SessionLifecycle._drop_dead_folds`` が後から拾う)。
+    """
+    if manager is None or not hasattr(manager, "SessionLocal") or not persona_id:
+        return 0
+    from sea.beat_gate import hold_beat
+    from sea.session_window import deserialize_folds, serialize_folds
+    removed = 0
+    try:
+        # Beat ロックで Metabolism (save_folded_ranges) と直列化する。行の
+        # FOLDED_RANGES_JSON は列まるごとの read-modify-write なので、並走
+        # すると後勝ちで一方の書き込みが黙って消える (Codex レビュー 2026-07-27)。
+        # check_gate=False: これは Beat (認知の一巡) ではなく保守書き込みなので、
+        # 関所 (pending flush) は通さずロックだけ取る。
+        with hold_beat(
+            manager, persona_id, purpose="chronicle_entry_delete",
+            check_gate=False,
+        ):
+            db = manager.SessionLocal()
+            try:
+                from database.models import SessionAnchor
+                rows = db.query(SessionAnchor).filter_by(PERSONA_ID=persona_id).all()
+                for row in rows:
+                    payload = getattr(row, "FOLDED_RANGES_JSON", None)
+                    if not payload:
+                        continue
+                    folds = deserialize_folds(payload)
+                    kept = [
+                        f for f in folds
+                        if str(entry_id) not in f.chronicle_entry_ids
+                    ]
+                    if len(kept) == len(folds):
+                        continue
+                    row.FOLDED_RANGES_JSON = serialize_folds(kept)
+                    removed += len(folds) - len(kept)
+                if removed:
+                    db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+    except Exception:
+        LOGGER.warning(
+            "[metabolism] failed to remove folded ranges referencing chronicle "
+            "entry %s (persona=%s); the metabolism-time sweep will catch them",
+            entry_id, persona_id, exc_info=True,
+        )
+        return 0
+    if removed:
+        LOGGER.info(
+            "[metabolism] removed %d folded-range record(s) referencing deleted "
+            "chronicle entry %s (persona=%s)", removed, entry_id, persona_id,
+        )
+    return removed
