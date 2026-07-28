@@ -1,6 +1,13 @@
 # Chronicle の退場と圧縮 — episode 単位・文字数水位
 
-**ステータス**: 実装中 — **下段 (生ログ → 一次あらすじ) は完了・実機検証待ち**、上段 (一次 → 二次以上) は未設計 (2026-07-24 起草 → 2026-07-25 レビュー通過・設計確定 → 同日 `e8c061d` 実装 → 判断基準を改訂して `3fa2711` → コードレビュー消し込み `53448ef`。レビューは Codex 3 巡 + Claude サブエージェント 1 巡、計 7 件消し込み。うち 2 件は本設計以前からの欠陥として issue 化のみ)
+> **⚠️ 世代交代 (2026-07-28)**: 本 doc の退場規則 (episode 単位・三水位・open 単独畳み・
+> 二段構え・恒等転写) は [arasuji_levels.md](arasuji_levels.md) (残す量より古い側を U ずつ
+> 刻んで全部畳む。エピソードに畳み拒否権なし) に置き換えられた。実装も同日差し替え済み
+> (`sea/eviction_plan.py` / `sai_memory/arasuji/alignment.py`)。§8「育った会話 A の退場を
+> 掘らない」裁定は根拠 (合いの子 digest 防止) ごと失効しており**再裁定待ち**。
+> 本 doc は経緯の記録として残す — 設計判断の参照先にしないこと。
+
+**ステータス**: 廃止 (2026-07-28、後継 = [arasuji_levels.md](arasuji_levels.md)) — 旧設計は下段完了・実機検証待ちの段階で世代交代 (2026-07-24 起草 → 2026-07-25 レビュー通過・設計確定 → 同日 `e8c061d` 実装 → 判断基準を改訂して `3fa2711` → コードレビュー消し込み `53448ef`。レビューは Codex 3 巡 + Claude サブエージェント 1 巡、計 7 件消し込み。うち 2 件は本設計以前からの欠陥として issue 化のみ)
 **上段 (二次以上のあらすじ) との接続は [chronicle_consolidation.md](chronicle_consolidation.md) が正典** (2026-07-27 設計合意・起草済み)。本 doc が扱うのは「生ログ → 一次あらすじ」の退場まで。懸念だった**生ログの切れ目を飛び越えた偽の隣接** (§4-5 違反) は、同 intent §4 の連続性条件 (束ねの群は壁も未編纂の生ログも跨がない) が答える。用語の作り直しは実施済み (走行メモ 2026-07-25 §5 — 穴→圧縮区間 / 級→一次・二次あらすじ / 窓→提示コンテキスト / 帯→用語廃止)。
 **実装**: `sea/eviction_plan.py` (退場計画・純関数) / `sea/session_window.py` (圧縮区間と digest 置き換え) / `sea/session_lifecycle.py` (三水位・退場適用・§6 子 episode 記帳) / `saiverse/model_configs.py` (三水位の設定) / `database/models.py` (`session_anchor.FOLDED_RANGES_JSON`)。回帰は `tests/test_eviction_plan.py` / `tests/test_session_window_folds.py` / `tests/test_metabolism_two_layer.py`
 **関連**: [`experience_structure.md`](experience_structure.md) §4 / §6 ・ [`../issues/chronicle_undersized_lv1_chunks.md`](../issues/chronicle_undersized_lv1_chunks.md) ・ `sea/session_lifecycle.py` / `sai_memory/arasuji/alignment.py` / `saiverse/episodes.py`

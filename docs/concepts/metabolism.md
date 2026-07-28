@@ -16,13 +16,13 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 
 **Session が継続不能になる** = cache TTL 切れ（Anchor 判定）、context 過剰など。
 
-**context 過剰の判定は文字数の三水位**（2026-07-25、intent [`chronicle_eviction.md`](../intent/chronicle_eviction.md) §4）。旧「モデルごとのメッセージ数」は単位ごと廃止した（digest 側の被覆 U は文字数なのに発火はメッセージ数、という食い違いが「短文だらけだと総量が小さいのに発火する」病理を生んでいた）。
+**context 過剰の判定は文字数の二数** = 上限と残す量（2026-07-28、intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §9）。旧「モデルごとのメッセージ数」は 2026-07-25 に単位ごと廃止（三水位へ）、三水位の低水位は 2026-07-28 に未使用化（残す量が保護を兼ねる。設定キーは掃除まで残置 — intent §12-8）。
 
-| 水位 | 意味 | 一律既定 | モデル設定キー |
+| 数 | 意味 | 一律既定 | モデル設定キー |
 |---|---|---|---|
-| 低水位 | 直近の保護範囲。最新から遡ってこの文字数は絶対に退場させない | 40,000 | `metabolism_low_chars` |
-| 目標水位 | Metabolism で軽くする到達点 | 60,000 | `metabolism_target_chars` |
-| 高水位 | これを超えたら発火（未設定 = null なら `token_triggered` のみで発火） | 120,000 | `metabolism_high_chars` |
+| 残す量 | 畳んだ後に残す直近の文字数 = 保護範囲。上限との差がバッファで、発火は「たまに・まとめて」になる（キャッシュ保護） | 60,000 | `metabolism_target_chars` |
+| 上限 | これを超えたら発火（未設定 = null なら `token_triggered` のみで発火） | 120,000 | `metabolism_high_chars` |
+| (低水位) | 旧三水位の名残り。**未使用** | 40,000 | `metabolism_low_chars` |
 
 数え方は**提示される提示コンテキストの文字数**（圧縮区間は digest に置き換わった後の量）。グローバル上書きは `POST /api/config/metabolism`（低 ≤ 目標 ≤ 高 を入口で検証）。
 
@@ -63,7 +63,7 @@ Metabolism の起点を指すマーカー。
 - 発火・アンカー解決: `sea/runtime.py` / `sea/runtime_context.py` / `sea/session_lifecycle.py`（`resolve_metabolism_anchor` / `touch_anchor_after_llm_call` / `maybe_run_metabolism`）
 - head 再構築: `sea/head_pipeline/integration.py`（可視化は anchor を進めた model の (persona, model) snapshot のみ — §6-5）
 - 結晶化 (W4 で episode 整列に世代交代): `sai_memory/arasuji/alignment.py`（整列計画）+ `executor.py`（チャンク実行）+ `bands.py`（列のあふれ束ね）+ `entity_extractor` の相乗り。冪等 claim は実行台帳（`saiverse/execution_ledger.py`）。詳細は [Chronicle](chronicle.md)
-- 退場の計画: `sea/eviction_plan.py`（純関数 `plan_eviction` — 保護範囲 → 退場候補範囲 → 古い順に U 到達のまとまり → 目標水位まで反復）。**退場は episode 単位**で、open episode は単独でしか畳まず（pulse 関節で刻む）、closed 同士は episode をまたいで束ねる。計画は**二段構え** — 一段目は U 以上だけ、目標水位に届かなければ二段目で **U 未満の open も一回だけ畳む**（先頭に U 未満の端数が居座ると anchor が永久に進まないため。U は優先度の材料であって可否の材料ではない）。強制クローズは撤去済み（intent [`chronicle_eviction.md`](../intent/chronicle_eviction.md) §3/§5）
+- 退場の計画: `sea/eviction_plan.py`（純関数 `plan_eviction` — 残す量より古い側を、古い順に U ずつ刻んで全部畳む。切り位置は pulse 関節に寄せる。**エピソードに畳みを止める権利は無く**、末尾の U 未満の端数は次回へ残す。旧 episode 単位・二段構えは 2026-07-28 世代交代 — intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §4）
 - 提示コンテキストの圧縮区間と提示: `sea/session_window.py`（`SessionWindow` = anchor + 生ログ + 提示、`apply_folds` が digest 置き換え）。圧縮区間は `session_anchor.FOLDED_RANGES_JSON` に (persona, model) 単位で持つ
 - 編纂範囲: 「今回退場させる範囲そのもの」（`generate_chronicle(compile_groups=...)`）。退場する集合と編纂する集合を一致させることが、下限「退場したものは必ず編纂されている」の手続き上の保証
 - Anchor 状態: `session_anchor` テーブル（1 行 = 1 (persona, model)）

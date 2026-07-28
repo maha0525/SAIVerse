@@ -124,6 +124,15 @@ The rule that matters: **resource loading is 3-layer — `~/.saiverse/user_data/
 
 **Tools** (`tools/`, generated catalog: `docs/reference/tool-catalog.md`) — `TOOL_REGISTRY` in `tools/__init__.py`. Tools load from `~/.saiverse/user_data/tools/` (priority) and `builtin_data/tools/`. Tools in subdirectories need a `schema.py` with `schemas()`. `tools/context.py` uses contextvars to inject persona/manager references during execution.
 
+## Comprehensibility Is a Design Constraint (把握可能性、2026-07-28 確立)
+
+**設計 (intent・概念構造・用語) とドキュメントは、リポジトリオーナーとユーザーが全体を把握できる複雑さに収まっていなければならない。** これは機能要件と同格の制約で、超えたら設計不合格。オーナーの「読んで分からない」がその判定であり、反論の対象ではない。AI (Claude) の処理能力が上がったことで、複雑さの痛みを書き手が感じなくなった — だから外部の検査で縛る。**コード内部の複雑さは対象外** (実装は AI スケールで扱ってよい)。
+
+- **健全性の検査**: そのサブシステムの芯を、専門用語なしの数行で説明できるか。できなければ設計が複雑すぎるか、書き手が理解していない。
+- **例外処理・救済機構が本体を覆い始めたら止まる**: 例外経路を精巧にする前に、供給源 (上流の欠陥) を塞いで機構ごと消せないかを先に問う。経緯の実例: `docs/handoff/2026-07-28_arasuji_pipeline_audit.md` (Chronicle の規則の大半が上流の傷への例外処理だった)。
+- **用語の新設は同族の負債**: 既存の定義済み語彙で書けるならそれが最善。新語は「今後も残る確固たる概念」にだけ与える。
+- 「読んで分からない」と言われたら、説明を直すだけでなく**設計自体が不合格の可能性**を必ず検討する。分かりにくい説明の何割かは、分かりにくい設計の正確な写しである。
+
 ## Intent Documents
 
 Each feature/subsystem has an Intent Document in `docs/intent/` recording WHY it was built and what invariants it must hold. They capture the reasoning that code cannot express — e.g. raising the Stelis anchor display to 50 messages would defeat the purpose of context isolation.
