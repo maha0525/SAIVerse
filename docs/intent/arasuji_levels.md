@@ -1,6 +1,6 @@
 # あらすじのレベル制 — 予算超過で畳む一本規則 (記憶の川の一本化)
 
-**ステータス**: 実装中 (v0.1 起草 2026-07-28 → 同日まはー承認 (§9 は上限/残す量の二数へ改訂) → 同日実装: bands.py / eviction_plan.py / alignment.py / executor.py / session_lifecycle.py / storage.py 除外タグ。残 = Codex レビュー・実機検証・§12)
+**ステータス**: 検証待ち (v0.1 起草 2026-07-28 → 同日まはー承認 (§9 は上限/残す量の二数へ改訂) → 同日実装完了 `9075a7f`。Codex 攻撃レビュー六巡 approve・全スイート 3,227 緑。残 = 実機検証 (§11-3 LLM 品質 / §11-4 エリア再生成) と §12 の未決)
 
 **置き換える正典**: [chronicle_consolidation.md](chronicle_consolidation.md) (束ね・治療) と [chronicle_eviction.md](chronicle_eviction.md) (退場) の圧縮規則部分。本 intent の承認をもって両者に継承の注記を入れる。
 **関連**: [エピソード-あらすじ分離の影響一覧](../handoff/2026-07-28_episode_arasuji_separation_impact.md) / issues: [開いてるエピソードの読み出し](../issues/open_episode_context_after_veto_removal.md)、[user 発言の帰属漏れ](../issues/user_messages_missing_episode_attribution.md)、[作業ダイジェストの道の消失](../issues/work_session_digest_never_reaches_chronicle.md)
