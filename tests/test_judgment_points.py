@@ -14,9 +14,9 @@
   track_op='complete' の全タスク消化ゲート、remaining_timetable の全置換
 - on_event: reaction の 4 分岐、alert での engage_now 縮退 (スキーマ + finalize
   二重ガード)、insert_slot の時刻整合検証、note_only の plan meta 覚え書き
-- day_close: 今日触れた欲求のみの desire_reviews enum、tomorrow_memo /
-  day_digest が翌朝 day_open の状況テキストに現れる (連結)、
-  apply_desire_reviews の適用
+- day_close: 今日触れた欲求のみの desire_reviews enum、tomorrow_memo が
+  翌朝 day_open の状況テキストに現れる (連結。生の実績表 = 旧 day_digest は
+  再供給しない、2026-07-29)、apply_desire_reviews の適用
 - 生成スキーマに additionalProperties が含まれない (プロバイダ正規化層に任せる)
 - LLM の生 JSON がメインキャッシュ (SAIMemory 記録) に混入しない (不変条件 v2-A)
 
@@ -1753,12 +1753,13 @@ def test_day_close_finalize_and_day_open_linkage(
                 judgment_context=ctx, situation_text="[就寝判断] ...",
             )
 
-    # meta_json に明日へのメモ・テーマ・報告種・実績ダイジェストが保存される
+    # meta_json に明日へのメモ・テーマ・報告種が保存される
+    # (旧 day_digest の保存コピーは 2026-07-29 撤去 — 朝はメモだけを受け取る)
     meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
     assert meta["tomorrow_memo"] == "朝一は標本集の整理から始める"
     assert meta["day_theme"] == "収集"
     assert meta["user_report_seeds"] == ["蒸留記事の要点を覚え書きにまとめた"]
-    assert "09:00" in meta["day_digest"]  # 決定論構築の実績要約
+    assert "day_digest" not in meta
 
     # desire_reviews: fulfilled は即消化 (completed)、enum 外は棄却 + WARN
     desire = ptm.get_task(
@@ -1773,28 +1774,39 @@ def test_day_close_finalize_and_day_open_linkage(
     assert "judgment:day_close" in recorded["metadata"]["tags"]
     assert "applied=True" in summary
 
-    # --- 連結: 翌朝の起床判断が昨夜のメモとダイジェストを読む -------------
+    # --- 連結: 翌朝の起床判断が受け取るのは昨夜のメモだけ (生の実績表は
+    # 再供給しない — 圧縮段の下流へ生材料を流さない、2026-07-29) -----------
     clock.advance_to(datetime(2026, 7, 5, 7, 0, 0))
     morning_text = jp.build_day_open_situation_text(manager, PERSONA_ID, {})
     assert "朝一は標本集の整理から始める" in morning_text  # tomorrow_memo
-    assert "今日の時間割（予定 → 実績）" in morning_text   # day_digest
-    assert "09:00" in morning_text
+    assert "昨日のふりかえり" not in morning_text
+    assert "今日の時間割（予定 → 実績）" not in morning_text
 
 
-def test_day_close_finalize_empty_memo_warns_but_saves_digest(
+def test_day_close_finalize_empty_memo_warns(
     manager, task_refs, finalize_mod, tmp_path, caplog
 ):
+    """メモ・テーマ・報告種が全て空のとき、偽の成功エコーを残さない。
+
+    旧実装は day_digest の保存が常に updates を非空にしていたため
+    「（今日のふりかえりを記録した）」が必ず出た。day_digest 撤去後に
+    空 updates で同じエコーを出すと、引き継ぎ消失が成功の顔で残る
+    (2026-07-29 Codex 指摘 high2)。"""
     output = {"monologue": "……", "tomorrow_memo": ""}
     ctx = json.dumps({"plan_date": PLAN_DATE, "touched_desire_refs": []})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
-            finalize_mod.judgment_finalize(
+            summary, _, _ = finalize_mod.judgment_finalize(
                 judgment_output=output, kind="day_close", judgment_context=ctx,
             )
     assert any("tomorrow_memo が空" in r.message for r in caplog.records)
     meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
     assert "tomorrow_memo" not in meta
-    assert meta["day_digest"] == "今日の時間割はありませんでした。"
+    assert "day_digest" not in meta  # 保存コピーは撤去済み (2026-07-29)
+    assert "applied=False" in summary  # 何も保存していないのに成功を名乗らない
+    recorded = manager.personas[PERSONA_ID].sai_memory.messages[0]
+    assert "今日のふりかえりを記録した" not in recorded["content"]
+    assert "明日へのメモは残さなかった" in recorded["content"]
 
 
 # ---------------------------------------------------------------------------

@@ -78,11 +78,14 @@ class ListMemoryAdapter:
 
     def recent_persona_messages_by_count(self, max_messages, *, required_tags=None,
                                          required_line_roles=None,
-                                         required_scopes=None, pulse_id=None):
+                                         required_scopes=None, pulse_id=None,
+                                         strict_tags=False):
         selected = []
         for payload in self.messages:
             tags = (payload.get("metadata") or {}).get("tags") or []
             if required_tags and not all(t in tags for t in required_tags):
+                continue
+            if required_tags and strict_tags and not tags:
                 continue
             selected.append(payload)
         return selected[-max_messages:]

@@ -108,7 +108,9 @@ class DayStandardRegressionTest(unittest.TestCase):
     def test_day_close_leaves_handoff_for_tomorrow(self):
         meta = self.plan["meta"]
         self.assertTrue(meta.get("tomorrow_memo"))
-        self.assertTrue(meta.get("day_digest"))
+        # 旧 day_digest の保存コピーは撤去済み (2026-07-29) — 明日への引き継ぎは
+        # tomorrow_memo だけが正
+        self.assertNotIn("day_digest", meta)
 
     def test_session_digests_are_committed(self):
         """作業セッションの committed ダイジェストが残る (volatile だけで消えない)。"""

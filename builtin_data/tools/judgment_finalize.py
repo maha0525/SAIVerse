@@ -20,9 +20,8 @@ judgment_post_session / judgment_on_event / judgment_day_close) の最終ノー�
      呼び出し側の責務 / insert_slot は時刻整合検証つき挿入 / note_only は
      plan meta への覚え書き / ignore は記録のみ)。alert では engage_now 以外を
      棄却 (スキーマ縮退の二重ガード)
-   - day_close: tomorrow_memo + day_theme + day_digest (実績の決定論要約) +
-     user_report_seeds → plan meta / desire_reviews → apply_desire_reviews
-     (今日触れた欲求のみ)
+   - day_close: tomorrow_memo + day_theme + user_report_seeds → plan meta /
+     desire_reviews → apply_desire_reviews (今日触れた欲求のみ)
 3. 整形済みテキスト ``monologue + 適用結果の要約行 + /spell 行 (成功分のみ)`` を
    SAIMemory に ``role='assistant', line_role='meta_judgment'`` で保存する。
    メインキャッシュに LLM の生 JSON は残らない (不変条件 v2-A 継承)。
@@ -69,7 +68,6 @@ from saiverse.judgment_points import (
     RESUME_DEFER,
     RESUME_DROP,
     RESUME_NOW,
-    build_day_results_text,
     clear_desk_memo,
     collect_promotion_refs,
     insert_timetable_slot,
@@ -1446,10 +1444,13 @@ def _finalize_day_close(
     - tomorrow_memo / day_theme / user_report_seeds → 当日 plan 行の meta_json
       (翌朝の day_open は「昨日 = この plan_date」の meta を読む —
       ``build_day_open_situation_text`` と対になる読み書き)
-    - day_digest: LLM 出力ではなく **実績の決定論要約**
-      (:func:`saiverse.judgment_points.build_day_results_text`) を保存する。
-      翌朝 day_open の「昨日のふりかえり」が最優先で読むフォールバック元
     - desire_reviews → apply_desire_reviews (今日触れた欲求のみ。enum 外は棄却)
+
+    旧 day_digest (実績の決定論要約の保存コピー) は 2026-07-29 撤去 —
+    唯一の読者だった day_open の [昨日のふりかえり] を廃止したため。昨日の
+    消化は就寝判断が済ませ、朝へは tomorrow_memo だけが渡る。実績表が要る
+    場面では :func:`saiverse.judgment_points.build_day_results_text` で
+    いつでも再構築できる (slots_json が正)。
     """
     applied = False
     plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
@@ -1488,22 +1489,26 @@ def _finalize_day_close(
     if seeds:
         updates["user_report_seeds"] = seeds
 
-    # day_digest は実績からの決定論構築 (接地保証。虚構のふりかえりが翌朝に残らない)
-    updates["day_digest"] = build_day_results_text(manager, persona_id, plan_date)
-
-    try:
-        day_plan_mod.update_plan_meta(manager, persona_id, plan_date, updates)
-        applied = True
-        lines.append("（今日のふりかえりを記録した）")
-        if tomorrow_memo:
-            lines.append(f"（明日の自分へのメモ: {tomorrow_memo}）")
-        if day_theme:
-            lines.append(f"（今日のテーマ: {day_theme}）")
-        if seeds:
-            lines.append("（ユーザーに話したいこと: " + " / ".join(seeds) + "）")
-    except Exception as exc:
-        LOGGER.exception("[judgment_finalize] update_plan_meta raised")
-        warnings.append(f"ふりかえりの保存に失敗: {exc}")
+    if updates:
+        try:
+            day_plan_mod.update_plan_meta(manager, persona_id, plan_date, updates)
+            applied = True
+            lines.append("（今日のふりかえりを記録した）")
+            if tomorrow_memo:
+                lines.append(f"（明日の自分へのメモ: {tomorrow_memo}）")
+            if day_theme:
+                lines.append(f"（今日のテーマ: {day_theme}）")
+            if seeds:
+                lines.append("（ユーザーに話したいこと: " + " / ".join(seeds) + "）")
+        except Exception as exc:
+            LOGGER.exception("[judgment_finalize] update_plan_meta raised")
+            warnings.append(f"ふりかえりの保存に失敗: {exc}")
+    else:
+        # メモ・テーマ・報告種が全て空 = 明日へ引き継ぐものが何も無い。
+        # 空の update_plan_meta を呼んで「記録した」とエコーすると、引き継ぎ
+        # 消失が成功の顔で残る (2026-07-29 Codex 指摘 high2)。保存もエコーも
+        # せず、事実を独白側の要約行に残す。
+        lines.append("（明日へのメモは残さなかった）")
 
     # --- desire_reviews → apply_desire_reviews (今日触れた欲求のみ) -------
     valid_refs = set(ctx.get("touched_desire_refs") or [])

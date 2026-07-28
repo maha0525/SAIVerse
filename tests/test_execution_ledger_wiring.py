@@ -366,6 +366,61 @@ class TestSaimemoryAppendDigestDelivery:
         digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
         assert digests == ["資料を 3 件読んで覚え書きにした。"]
 
+    def test_judgment_prompt_paired_text_does_not_leak_into_digests(
+        self, manager, adapter,
+    ):
+        """判断プロンプト (paired_action_text) がダイジェスト収集に化けない。
+
+        タグ絞り込みの legacy 救済 (タグ無し行は素通し) と paired_action 展開
+        (展開行はタグ無し) の相互作用で、過去の判断プロンプトが「今日の作業
+        セッションのダイジェスト」として就寝判断へ混入し、保存→翌日再混入の
+        日跨ぎ雪だるまになっていた (2026-07-29 実害: 就寝判断 21,369 字)。"""
+        from saiverse.judgment_points import _collect_today_session_digests
+
+        adapter.append_persona_message({
+            "role": "assistant",
+            "content": "おはよう。今日は作業を進めよう。",
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "metadata": {"tags": ["meta_judgment", "judgment:day_open"]},
+            "line_role": "meta_judgment",
+            "scope": "committed",
+            "paired_action_text": "[起床判断]\n今日の時間割を編成してください。",
+        })
+        plan_date = datetime.now().date().isoformat()
+        digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
+        assert digests == []  # 展開行も独白本文もダイジェストではない
+
+    def test_real_digest_survives_many_judgment_prompt_rows(
+        self, manager, adapter,
+    ):
+        """取得枠 (limit=12) より多い判断行が後から積もっても、本物の
+        ダイジェストが取得段階で押し出されない (strict_tags を取得側に
+        置いた理由 — 後段検査だけだと偽候補が枠を食い尽くす)。"""
+        from saiverse.judgment_points import _collect_today_session_digests
+
+        episode_ref = self._make_episode(manager)
+        ledger = manager.execution_ledger
+        payload = self._digest_payload(episode_ref)
+        payload["message"]["timestamp"] = datetime.now().astimezone().isoformat()
+        _applied_with_outbox(
+            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
+            payload=payload,
+        )
+        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
+        for i in range(13):  # 展開行 13 + 独白 13 > 枠 12
+            adapter.append_persona_message({
+                "role": "assistant",
+                "content": f"判断の独白 {i}",
+                "timestamp": datetime.now().astimezone().isoformat(),
+                "metadata": {"tags": ["meta_judgment"]},
+                "line_role": "meta_judgment",
+                "scope": "committed",
+                "paired_action_text": f"[セッション終了判断]\n状況テキスト {i}",
+            })
+        plan_date = datetime.now().date().isoformat()
+        digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
+        assert digests == ["資料を 3 件読んで覚え書きにした。"]
+
     def test_missing_episode_is_delivery_failure(
         self, manager, adapter, session_factory,
     ):

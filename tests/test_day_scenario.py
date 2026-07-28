@@ -111,7 +111,8 @@ class RecordingAdapter:
 
     def recent_persona_messages_by_count(self, max_messages, *, required_tags=None,
                                          required_line_roles=None,
-                                         required_scopes=None, pulse_id=None):
+                                         required_scopes=None, pulse_id=None,
+                                         strict_tags=False):
         expanded: List[Dict[str, Any]] = []
         for p in self.messages:
             action_text = p.get("paired_action_text")
@@ -127,6 +128,10 @@ class RecordingAdapter:
         for payload in expanded:
             tags = (payload.get("metadata") or {}).get("tags") or []
             if required_tags and tags and not all(t in tags for t in required_tags):
+                continue
+            if required_tags and strict_tags and not tags:
+                # 実 adapter の strict_tags と同じ: タグ無し行 (paired_action
+                # 展開行を含む) を legacy 救済で素通しにしない
                 continue
             selected.append(payload)
         return selected[-max_messages:]
@@ -492,12 +497,12 @@ def test_standard_day_tomorrow_memo_links_to_next_day_open(standard_run):
     assert meta["tomorrow_memo"] == "明日は標本集の整理から始める"
     assert meta["day_theme"] == "制作"
 
-    # 翌朝の起床判断の状況テキストに昨日の自分からのメモと実績ダイジェストが出る
+    # 翌朝の起床判断の状況テキストに出るのは昨日の自分からのメモだけ
+    # (生の実績表 = 旧 day_digest は再供給しない、2026-07-29)
     clock.advance_to(datetime(2026, 7, 5, 7, 0, 0))
     morning_text = jp.build_day_open_situation_text(manager, PERSONA_ID, {})
     assert "明日は標本集の整理から始める" in morning_text
-    assert "今日の時間割（予定 → 実績）" in morning_text  # day_digest (実績要約)
-    assert "10:00" in morning_text
+    assert "今日の時間割（予定 → 実績）" not in morning_text
 
 
 def test_standard_day_report_contents(standard_run, tmp_path):

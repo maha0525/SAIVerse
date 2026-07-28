@@ -984,26 +984,6 @@ def _format_remaining_timetable(manager: Any, persona_id: str, plan_date: str) -
     return "\n".join(lines)
 
 
-def _yesterday_review_text(manager: Any, persona_id: str, yesterday: str) -> str:
-    """昨日のふりかえり素材。就寝判断 (day_close) の finalize が meta_json に書く
-    day_digest (実績の決定論要約) を優先し、無ければ昨日の時間割の予定 vs 実績を
-    要約する。"""
-    meta = load_plan_meta(manager, persona_id, yesterday)
-    digest = (meta.get("day_digest") or "").strip() if isinstance(meta, dict) else ""
-    if digest:
-        return digest
-    slots = load_day_plan(manager, persona_id, yesterday)
-    if not slots:
-        return "(昨日の記録はありません)"
-    lines = ["昨日の時間割の実績:"]
-    for s in slots:
-        lines.append(
-            f"- {s.get('start')} {s.get('kind')} ref={s.get('ref')}"
-            f" → {s.get('status')}"
-        )
-    return "\n".join(lines)
-
-
 def build_day_open_situation_text(
     manager: Any, persona_id: str, context: Dict[str, Any]
 ) -> str:
@@ -1015,6 +995,11 @@ def build_day_open_situation_text(
     :func:`saiverse.autonomy_wiring.fire_judgment_point`)。ここでは確定済みの
     活動時間と現在時刻を**確定情報として明記**する — 実機初日は現在時刻を渡さず
     21 時に朝からの時間割を編成させてしまった (遅発 day_open の破綻)。
+
+    昨日の生の実績表 ([昨日のふりかえり]) は**渡さない** (2026-07-29 撤去)。
+    昨日の消化は就寝判断が済ませており、朝が受け取るのはその成果物 —
+    tomorrow_memo と、窓に残る就寝の独白 — だけ。圧縮段の下流へ生材料を
+    再供給しない (Chronicle のレベル制と同じ規律)。やり残しはタスク台帳が運ぶ。
     """
     now = clock.now()
     today = now.date().isoformat()
@@ -1056,7 +1041,7 @@ def build_day_open_situation_text(
         "[起床判断]",
         f"おはようございます。今日 ({today}) の一日が始まります。",
         life_line,
-        "昨日の自分からのメモ・昨日のふりかえり・バックログ・やりたいこと候補を"
+        "昨日の自分からのメモ・バックログ・やりたいこと候補を"
         "見て、今日の時間割を編成してください。",
         "各コマには「○○をする」という短い表題 (title) を付けてください — "
         "あなたの一日の予定表にそのまま載ります。",
@@ -1066,9 +1051,6 @@ def build_day_open_situation_text(
         "",
         "[昨日の自分からのメモ]",
         memo or "(メモはありません)",
-        "",
-        "[昨日のふりかえり]",
-        _yesterday_review_text(manager, persona_id, yesterday),
         "",
         "[進行中のことと、やりたいこと]",
         _format_track_backlog(manager, persona_id),
@@ -1402,7 +1384,10 @@ def _collect_today_session_digests(
     from sea.work_session import DIGEST_TAG
 
     try:
-        payloads = fetch(limit, required_tags=[DIGEST_TAG])
+        # strict_tags: 取得段階でタグ厳格一致にする。後段検査だけだと、
+        # タグ無しの paired_action 展開行が limit 枠を占拠し、本物の
+        # ダイジェストが取得から押し出される (2026-07-29 Codex 指摘 high1)。
+        payloads = fetch(limit, required_tags=[DIGEST_TAG], strict_tags=True)
     except Exception:
         LOGGER.warning(
             "[judgment] failed to fetch session digests for %s", persona_id,
@@ -1411,6 +1396,16 @@ def _collect_today_session_digests(
         return []
     out: List[str] = []
     for payload in payloads:
+        # required_tags の絞り込みは「タグ無し行は素通し」の legacy 救済を持つ
+        # (_payload_passes_context_filter)。paired_action 展開で生まれる判断
+        # プロンプト行はタグ無しなのでそこを素通りし、「ダイジェスト」として
+        # 就寝判断へ混入 → 保存 → 翌日また混入、と日を跨いで雪だるまになる
+        # (2026-07-29 実害: 就寝判断 21,369 字)。ここで実タグを検査して閉じる。
+        meta = payload.get("metadata")
+        raw_tags = meta.get("tags") if isinstance(meta, dict) else None
+        tags = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
+        if DIGEST_TAG not in tags:
+            continue
         # 実 adapter の payload は created_at が epoch int (ISO 文字列は mock /
         # 旧形式)。epoch を日付文字列へ直してから plan_date と突き合わせる —
         # 従来は str(epoch) が plan_date と前方一致せず全件落ちていた
@@ -1435,9 +1430,9 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
     """今日の予定 vs 実績の対照テキスト (judgment_points.md §8「見るもの」)。
 
     slots_json の status / note と予算 (計画値)、取得できれば work_session
-    ダイジェスト群を含む。就寝判断の状況テキストと、finalize が meta_json に
-    保存する ``day_digest`` (翌朝 day_open の「昨日のふりかえり」が読む) の
-    両方がこれを使う — 決定論構築なので接地が保たれる。
+    ダイジェスト群を含む。就寝判断の状況テキストが使う — 決定論構築なので
+    接地が保たれる。(旧 ``day_digest`` = 翌朝への保存コピーは 2026-07-29 撤去。
+    朝は就寝判断の成果物だけを受け取る。)
 
     実績ラベルは :func:`saiverse.day_plan.slot_result_label` — skipped は
     システム都合 (実行手段未実装 / 予算切れ / 会話優先) を明示し、本人の

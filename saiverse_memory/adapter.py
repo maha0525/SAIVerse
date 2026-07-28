@@ -868,8 +868,16 @@ class SAIMemoryAdapter:
         required_line_roles: Optional[List[str]] = None,
         required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        strict_tags: bool = False,
     ) -> List[dict]:
-        """Get recent persona messages limited by message count instead of characters."""
+        """Get recent persona messages limited by message count instead of characters.
+
+        strict_tags=True は required_tags の legacy 救済 (タグ無し行の素通し) を
+        無効化する。タグで「その種類の記録だけ」を数えたい呼び出し (作業
+        ダイジェスト収集など) は必ずこれを立てる — 素通しのままだと、
+        paired_action 展開行 (タグ無し) が取得枠 (max_messages) を占拠し、
+        本物のタグ付き行が取得段階で押し出される (2026-07-29 Codex 指摘)。
+        """
         if not self._ready:
             return []
         thread_id = self._thread_id(None)
@@ -889,6 +897,7 @@ class SAIMemoryAdapter:
                 required_line_roles=required_line_roles,
                 required_scopes=required_scopes,
                 pulse_id=pulse_id,
+                strict_tags=strict_tags,
             ):
                 continue
             selected.insert(0, payload)
@@ -2629,6 +2638,7 @@ def _payload_passes_context_filter(
     required_line_roles: Optional[List[str]] = None,
     required_scopes: Optional[List[str]] = None,
     pulse_id: Optional[str] = None,
+    strict_tags: bool = False,
 ) -> bool:
     """Decide if a payload should be included in context construction.
 
@@ -2698,6 +2708,11 @@ def _payload_passes_context_filter(
     # line-based filtering yet (e.g. search/recall paths). When line filters
     # are already in play, tag filter is typically not used.
     if required_tags:
+        if strict_tags:
+            # 厳格一致: タグを実際に持つ行だけ。legacy 救済 (下) はタグ無し行を
+            # 素通しにするため、「その種類の記録だけ数えたい」呼び出しでは
+            # paired_action 展開行 (タグ無し) が混入・枠占拠する (2026-07-29)。
+            return bool(tags) and any(tag in tags for tag in required_tags)
         if not tags:
             # legacy entries without tags: include unless caller asked for "conversation"
             return "conversation" not in required_tags
