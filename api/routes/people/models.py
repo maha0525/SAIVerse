@@ -492,9 +492,6 @@ class ChronicleCostEstimate(BaseModel):
     is_free_tier: bool
     # W4: 固定バッチ廃止。旧 frontend 型互換のため 0 固定で残す (deprecated)。
     batch_size: int = 0
-    # W4: LLM を使わないチャンクの内訳 (恒等圧縮 / episode digest 恒等転写)
-    chunks_identity: int = 0
-    chunks_episode: int = 0
     currency: str = "USD"
 
 

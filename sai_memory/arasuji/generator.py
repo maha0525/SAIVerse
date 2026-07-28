@@ -67,6 +67,21 @@ def _format_timestamp(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
+def _message_kind_label(msg: Message) -> str:
+    """材料の種別ラベル (arasuji_levels.md §3-4 — 材料には種別を明示する)。
+
+    作業セッションのダイジェスト行 (tag 'session_digest' =
+    sea.work_session.DIGEST_TAG。sai_memory は sea に依存できないため
+    リテラル) は「既に要約されたまとめ」であることを LLM に明示する —
+    生の会話と同じ扱いで再展開されたり、発言として引用されたりしないため。
+    """
+    meta = getattr(msg, "metadata", None)
+    tags = meta.get("tags") if isinstance(meta, dict) else None
+    if isinstance(tags, (list, tuple)) and "session_digest" in tags:
+        return " [作業のまとめ]"
+    return ""
+
+
 def _format_messages_for_prompt(messages: List[Message], *, include_timestamp: bool = True) -> str:
     """Format messages for the arasuji prompt.
 
@@ -82,11 +97,12 @@ def _format_messages_for_prompt(messages: List[Message], *, include_timestamp: b
         content = (msg.content or "").strip()
         if not content:
             continue
+        kind = _message_kind_label(msg)
         if include_timestamp:
             ts_str = _format_timestamp(msg.created_at)
-            lines.append(f"[{ts_str}] [{role}]: {content}")
+            lines.append(f"[{ts_str}] [{role}]{kind}: {content}")
         else:
-            lines.append(f"[{role}]: {content}")
+            lines.append(f"[{role}]{kind}: {content}")
     return "\n\n".join(lines)
 
 

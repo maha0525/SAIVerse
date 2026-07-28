@@ -1,18 +1,21 @@
-"""チャンク実行器 (sai_memory/arasuji/executor.py) の回帰テスト (W4 D4)。
+"""チャンク実行器 (sai_memory/arasuji/executor.py) の回帰テスト。
+
+docs/intent/arasuji_levels.md — レベル0 の畳みの実行側を固定する。
+旧仕様の恒等圧縮 (identity) / digest 転写 (episode) は廃止され、
+content 生成は常に LLM (小さくても要約する)。
 
 - チャンク 1 個 = 単一 tx。途中失敗しても確定済みチャンクは残り、再試行は
   重複再検査で冪等 (M2 の生成側)。
-- 恒等転写 (episode) / 恒等圧縮 (identity) は LLM を呼ばない。
-- 由来メタ (digest_origin / coverage_chars / episode_refs) が entry に刻まれる。
+- 由来メタ (digest_origin="batch" / coverage_chars / episode_refs) が entry に
+  刻まれる。
+- batch_callback (Fragment 抽出) は全チャンクで呼ばれる。
 """
 
 import sqlite3
 import unittest
-from types import SimpleNamespace
 
+from llm_clients.exceptions import LLMError
 from sai_memory.arasuji.alignment import (
-    CHUNK_EPISODE_DIGEST,
-    CHUNK_IDENTITY,
     CHUNK_LLM_BATCH,
     AlignmentPlan,
     PlannedChunk,
@@ -25,7 +28,12 @@ from sai_memory.arasuji.storage import get_entries_by_level, init_arasuji_tables
 from sai_memory.memory.storage import Message
 
 
-def _msg(mid, content, episode=None, created_at=None):
+def _msg(mid, content, episode=None, created_at=None, tags=None):
+    metadata = {}
+    if episode:
+        metadata["origin_episode"] = episode
+    if tags:
+        metadata["tags"] = list(tags)
     return Message(
         id=mid,
         thread_id="main",
@@ -33,18 +41,17 @@ def _msg(mid, content, episode=None, created_at=None):
         content=content,
         resource_id=None,
         created_at=created_at if created_at is not None else int(mid.replace("m", "")),
-        metadata={"origin_episode": episode} if episode else None,
+        metadata=metadata or None,
     )
 
 
-def _chunk(kind, messages, *, refs=(), digest_mid=None, digest_text=None):
+def _chunk(messages, *, refs=()):
+    """LLM バッチチャンク (現設計では全チャンクがこの形)。"""
     return PlannedChunk(
-        kind=kind,
+        kind=CHUNK_LLM_BATCH,
         messages=list(messages),
         episode_refs=list(refs),
         coverage_chars=sum(len(m.content or "") for m in messages),
-        digest_message_id=digest_mid,
-        digest_text=digest_text,
     )
 
 
@@ -60,11 +67,13 @@ class _CountingClient:
 
     def __init__(self, response="生成されたあらすじ。", fail_on_call=None):
         self.calls = 0
+        self.prompts = []
         self.response = response
         self.fail_on_call = fail_on_call
 
     def generate(self, messages, tools):
         self.calls += 1
+        self.prompts.append(messages[0]["content"])
         if self.fail_on_call is not None and self.calls == self.fail_on_call:
             raise RuntimeError("llm down")
         return self.response
@@ -87,66 +96,83 @@ class ExecutorTestBase(unittest.TestCase):
         return json.loads(row[0])
 
 
-class TestChunkKinds(ExecutorTestBase):
-    def test_identity_chunk_no_llm(self):
-        """恒等圧縮 (§4-3): LLM を呼ばず生ログ整形をそのまま置く。"""
-        client = _CountingClient()
-        chunk = _chunk(CHUNK_IDENTITY, [_msg("m1", "こんにちは")])
-        result = execute_plan(_plan(chunk), client, self.conn)
-        self.assertEqual(client.calls, 0)
-        self.assertEqual(result.created_count, 1)
-        entry = self._lv1_entries()[0]
-        self.assertIn("こんにちは", entry.content)
-        meta = self._entry_meta(entry.id)
-        self.assertEqual(meta["digest_origin"], "identity")
-        self.assertEqual(meta["coverage_chars"], 5)
-
-    def test_episode_digest_chunk_transcribes(self):
-        """恒等転写 (§4-4): digest 本文をそのまま一次あらすじに置く (LLM なし)。"""
-        client = _CountingClient()
-        chunk = _chunk(
-            CHUNK_EPISODE_DIGEST,
-            [_msg("m1", "a" * 30, episode="episode:1"),
-             _msg("m2", "b" * 30, episode="episode:1")],
-            refs=["episode:1"],
-            digest_mid="digest-mid",
-            digest_text="セッションの要約テキスト",
-        )
-        result = execute_plan(_plan(chunk), client, self.conn)
-        self.assertEqual(client.calls, 0)
-        self.assertEqual(result.created_count, 1)
-        entry = self._lv1_entries()[0]
-        self.assertEqual(entry.content, "セッションの要約テキスト")
-        self.assertEqual(entry.source_ids, ["m1", "m2"])
-        meta = self._entry_meta(entry.id)
-        self.assertEqual(meta["digest_origin"], "episode")
-        self.assertEqual(meta["episode_refs"], ["episode:1"])
-        self.assertEqual(meta["coverage_chars"], 60)
-
-    def test_episode_digest_empty_text_fails(self):
-        chunk = _chunk(
-            CHUNK_EPISODE_DIGEST, [_msg("m1", "x", episode="episode:1")],
-            refs=["episode:1"], digest_mid="d", digest_text="  ",
-        )
-        with self.assertRaises(ChunkExecutionError):
-            execute_plan(_plan(chunk), _CountingClient(), self.conn)
-
-    def test_llm_batch_chunk_calls_llm(self):
+class TestChunkExecution(ExecutorTestBase):
+    def test_chunk_content_is_llm_generated(self):
+        """content は LLM 生成で、由来メタが entry に刻まれる。"""
         client = _CountingClient(response="要約されたあらすじ。")
-        chunk = _chunk(CHUNK_LLM_BATCH, [_msg("m1", "a" * 50), _msg("m2", "b" * 50)])
+        chunk = _chunk(
+            [_msg("m1", "a" * 50, episode="episode:1"), _msg("m2", "b" * 50)],
+            refs=["episode:1"],
+        )
         result = execute_plan(_plan(chunk), client, self.conn)
         self.assertEqual(client.calls, 1)
         self.assertEqual(result.created_count, 1)
         entry = self._lv1_entries()[0]
         self.assertEqual(entry.content, "要約されたあらすじ。")
-        self.assertEqual(self._entry_meta(entry.id)["digest_origin"], "batch")
+        self.assertEqual(entry.source_ids, ["m1", "m2"])
+        meta = self._entry_meta(entry.id)
+        self.assertEqual(meta["digest_origin"], "batch")
+        self.assertEqual(meta["coverage_chars"], 100)
+        self.assertEqual(meta["episode_refs"], ["episode:1"])
+
+    def test_tiny_chunk_still_uses_llm(self):
+        """小さいチャンクも LLM 圧縮する (恒等圧縮の廃止 — 小さくても要約する)。"""
+        client = _CountingClient()
+        result = execute_plan(_plan(_chunk([_msg("m1", "こんにちは")])), client, self.conn)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(result.created_count, 1)
+        self.assertEqual(self._lv1_entries()[0].content, "生成されたあらすじ。")
 
     def test_llm_empty_response_raises(self):
         client = _CountingClient(response="   ")
-        chunk = _chunk(CHUNK_LLM_BATCH, [_msg("m1", "a" * 50)])
         with self.assertRaises(ChunkExecutionError):
-            execute_plan(_plan(chunk), client, self.conn)
+            execute_plan(_plan(_chunk([_msg("m1", "a" * 50)])), client, self.conn)
         self.assertEqual(self._lv1_entries(), [])
+
+    def test_llm_error_propagates_with_batch_meta(self):
+        """LLMError は文脈 (user_message / batch_meta) を付けて propagate する
+        (frontend がバッチナビゲーションに使う契約)。"""
+
+        class _FailingClient:
+            def generate(self, messages, tools):
+                raise LLMError("boom", user_message="上流のエラー")
+
+        with self.assertRaises(LLMError) as ctx:
+            execute_plan(
+                _plan(_chunk([_msg("m1", "a" * 50)])), _FailingClient(), self.conn,
+            )
+        exc = ctx.exception
+        self.assertIn("チャンク処理中", exc.user_message)
+        self.assertIn("上流のエラー", exc.user_message)
+        self.assertEqual(exc.batch_meta["message_ids"], ["m1"])
+        self.assertEqual(self._lv1_entries(), [])
+
+
+class TestSessionDigestLabel(ExecutorTestBase):
+    def test_session_digest_message_is_labeled_in_prompt(self):
+        """tags に 'session_digest' を含む行はプロンプトで [作業のまとめ] と
+        印が付き、扱い方の指示行も入る (arasuji_levels.md §3-4 種別明示)。"""
+        client = _CountingClient()
+        chunk = _chunk([
+            _msg("m1", "普通の会話"),
+            _msg("m2", "作業セッションのダイジェスト本文", tags=["session_digest"]),
+        ])
+        execute_plan(_plan(chunk), client, self.conn)
+        self.assertEqual(len(client.prompts), 1)
+        prompt = client.prompts[0]
+        self.assertIn("[作業のまとめ]", prompt)
+        self.assertIn("[作業のまとめ] と印の付いた項目は", prompt)
+
+    def test_plain_message_is_not_labeled(self):
+        client = _CountingClient()
+        execute_plan(_plan(_chunk([_msg("m1", "普通の会話")])), client, self.conn)
+        # 指示行の分は常に入るが、材料行への印は付かない
+        material_lines = [
+            line for line in client.prompts[0].splitlines()
+            if "普通の会話" in line
+        ]
+        self.assertTrue(material_lines)
+        self.assertFalse(any("[作業のまとめ]" in line for line in material_lines))
 
 
 class TestPartialFailureIdempotency(ExecutorTestBase):
@@ -154,8 +180,8 @@ class TestPartialFailureIdempotency(ExecutorTestBase):
 
     def _two_chunk_plan(self):
         return _plan(
-            _chunk(CHUNK_LLM_BATCH, [_msg("m1", "a" * 50)]),
-            _chunk(CHUNK_LLM_BATCH, [_msg("m2", "b" * 50)]),
+            _chunk([_msg("m1", "a" * 50)]),
+            _chunk([_msg("m2", "b" * 50)]),
         )
 
     def test_mid_failure_keeps_committed_and_retry_skips(self):
@@ -203,7 +229,7 @@ class TestPartialFailureIdempotency(ExecutorTestBase):
             def consume_usage(self):
                 return None
 
-        chunk = _chunk(CHUNK_LLM_BATCH, [_msg("m1", "a" * 50)])
+        chunk = _chunk([_msg("m1", "a" * 50)])
         result = execute_plan(_plan(chunk), _RacingClient(), self.conn)
         self.assertEqual(result.created_count, 0)
         self.assertEqual(result.skipped_duplicates, 1)
@@ -214,32 +240,27 @@ class TestPartialFailureIdempotency(ExecutorTestBase):
 
 
 class TestBatchCallback(ExecutorTestBase):
-    def test_callback_for_llm_and_episode_not_identity(self):
-        """Fragment 抽出は llm_batch / episode_digest のみ (identity はスキップ)。"""
+    def test_callback_called_for_every_chunk(self):
+        """Fragment 抽出の発火点は全チャンク (恒等圧縮の廃止で一本化)。"""
         seen = []
 
         def callback(messages, entry_id):
             seen.append((len(messages), entry_id is not None))
 
         plan = _plan(
-            _chunk(CHUNK_IDENTITY, [_msg("m1", "hi")]),
-            _chunk(
-                CHUNK_EPISODE_DIGEST, [_msg("m2", "a" * 30, episode="episode:1")],
-                refs=["episode:1"], digest_mid="d", digest_text="要約",
-            ),
-            _chunk(CHUNK_LLM_BATCH, [_msg("m3", "b" * 50)]),
+            _chunk([_msg("m1", "hi")]),  # 小チャンクでも呼ばれる
+            _chunk([_msg("m2", "a" * 50), _msg("m3", "b" * 50)]),
         )
-        execute_plan(_plan(*plan.chunks), _CountingClient(), self.conn,
-                     batch_callback=callback)
-        self.assertEqual(len(seen), 2)  # identity は呼ばれない
+        execute_plan(plan, _CountingClient(), self.conn, batch_callback=callback)
+        self.assertEqual(seen, [(1, True), (2, True)])
 
     def test_callback_failure_does_not_stop_execution(self):
         def bad_callback(messages, entry_id):
             raise RuntimeError("extractor down")
 
         plan = _plan(
-            _chunk(CHUNK_LLM_BATCH, [_msg("m1", "a" * 50)]),
-            _chunk(CHUNK_LLM_BATCH, [_msg("m2", "b" * 50)]),
+            _chunk([_msg("m1", "a" * 50)]),
+            _chunk([_msg("m2", "b" * 50)]),
         )
         result = execute_plan(plan, _CountingClient(), self.conn,
                               batch_callback=bad_callback)

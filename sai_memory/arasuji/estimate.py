@@ -4,17 +4,16 @@ api/routes/people/arasuji.py の GET .../arasuji/cost-estimate (UI 用) と
 scripts/arasuji/build_arasuji_core.py の --estimate (CLI 用) の両方が
 この関数を呼ぶ。計算式を2箇所で保守すると食い違うため、ロジックはここに一本化する。
 
-W4 (体験の構造 工程(2)) で生成経路が episode 整列チャンクに世代交代した:
-見積もりも同じ整列計画 (sai_memory/arasuji/alignment.plan_alignment) を dry で
-呼び、生成経路と**同じ計画**から LLM コール数を数える (一点管理)。旧 20 件
-固定バッチ (batch_size / consolidation_size) の数え方は廃止。
+見積もりは生成経路と同じ計画 (sai_memory/arasuji/alignment.plan_alignment /
+sai_memory/arasuji/bands.plan_band_overflow) を dry で呼び、**同じ計画**から
+LLM コール数を数える (一点管理)。
 """
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Mapping, Optional, Tuple
+from typing import Optional
 
 
 @dataclass
@@ -30,9 +29,6 @@ class ChronicleCostEstimate:
     estimated_cost_usd: float
     model_name: str
     is_free_tier: bool
-    # W4: チャンク内訳 (LLM を使わないチャンクは費用ゼロだが件数は見せる)
-    chunks_identity: int = 0
-    chunks_episode: int = 0
     currency: str = "USD"
 
 
@@ -40,30 +36,23 @@ def estimate_chronicle_generation_cost(
     conn: sqlite3.Connection,
     *,
     model_name: str,
-    episode_digests: Optional[Mapping[str, Tuple[str, str]]] = None,
     excluded_entry_ids: Optional[frozenset] = frozenset(),
 ) -> ChronicleCostEstimate:
     """未処理メッセージから Chronicle を生成した場合の費用を見積もる。
 
-    LLM は一切呼ばない（整列計画と既存エントリ統計から算出する）。
+    LLM は一切呼ばない（計画と既存エントリ統計から算出する）。
 
     Args:
         conn: persona の memory.db 接続
         model_name: 見積もり対象モデル名（pricing 有無で is_free_tier を判定）
         excluded_entry_ids: 圧縮区間として提示中の digest entry id 集合
-            (Codex 四巡 P1-b — 生成経路と同じ集合を渡さないと束ねコールの
-            見積もりが乖離する)。**None = 照会失敗 (fold の有無が不明)** —
-            生成経路が束ねを見送るのと同形に、束ねコールを 0 と見積もる。
-            既定の空集合は「fold という概念ごと無い環境」(CLI / テスト) 用
-        episode_digests: digest 確定済み episode の index
-            (session_lifecycle._collect_episode_digests と同形)。渡されない
-            場合は空 — digest 済み範囲も LLM チャンクとして数えるため、
-            見積もりは過大側 (安全側) に倒れる。
+            (生成経路と同じ集合を渡さないと束ねコールの見積もりが乖離する)。
+            **None = 照会失敗 (fold の有無が不明)** — 生成経路が束ねを見送る
+            のと同形に、束ねコールを 0 と見積もる。既定の空集合は
+            「fold という概念ごと無い環境」(CLI / テスト) 用
     """
     from sai_memory.arasuji.alignment import (
-        chronicle_band_base,
         chronicle_band_budget,
-        chronicle_min_digest_chars,
         plan_alignment,
     )
     from sai_memory.arasuji.storage import (
@@ -87,23 +76,15 @@ def estimate_chronicle_generation_cost(
     plan = plan_alignment(
         all_messages,
         processed_ids,
-        episode_digests or {},
         target_chars=chronicle_band_budget(),
-        min_llm_chars=chronicle_min_digest_chars(),
     )
 
     level1_calls = plan.llm_calls
-    summary = plan.summary
     unprocessed = plan.total_unprocessed
 
-    # 束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ選定
-    # ロジックの dry 実行 — 既存の未束ねの列 + 新規チャンクの実 coverage /
-    # 実字数見込みで判定する (Codex W4 #9。新規数だけの近似は既存 backlog を
-    # 見落とす)。extra_leaves / pending_source_ids の渡し方は生成経路
-    # (session_lifecycle / API ジョブ) と同形に揃える (Codex 三巡 P1-B —
-    # 見積もり経路だけ乖離させない)。
-    from sai_memory.arasuji.bands import estimate_leaf_chars, plan_band_overflow
-    base = chronicle_band_base()
+    # 束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ計画の
+    # dry 実行 — 既存のレベル別の並び + 新規チャンク (レベル1 到着) で判定する。
+    from sai_memory.arasuji.bands import EST_PARENT_CHARS, plan_band_overflow
     if excluded_entry_ids is None:
         # fold の有無が不明 — 生成経路は束ねを見送るので、見積もりも 0 が同形。
         consolidation_calls = 0
@@ -116,14 +97,11 @@ def estimate_chronicle_generation_cost(
                         c.coverage_chars,
                         min((m.created_at for m in c.messages), default=None),
                         max((m.created_at for m in c.messages), default=None),
-                        estimate_leaf_chars(c.kind, c.messages, c.digest_text),
+                        EST_PARENT_CHARS,
                     )
                     for c in plan.chunks
                 ],
                 excluded_entry_ids=set(excluded_entry_ids) or None,
-                pending_source_ids={
-                    m.id for c in plan.chunks for m in c.messages
-                } or None,
             )
         except Exception:
             consolidation_calls = 0
@@ -165,17 +143,14 @@ def estimate_chronicle_generation_cost(
         input_rate = pricing.get("input_per_1m_tokens", 0)
         output_rate = pricing.get("output_per_1m_tokens", 0)
 
-        # llm_batch チャンクの入力 = 被覆生ログ + プロンプト + 文脈 + Memopedia。
-        # チャンクは標準被覆 U 字 (端数もあるため plan から実測合計を使う)。
-        llm_chunk_chars = sum(
-            c.coverage_chars for c in plan.chunks if c.kind == "batch"
-        )
+        # チャンクの入力 = 被覆生ログ + プロンプト + 文脈 + Memopedia。
+        llm_chunk_chars = sum(c.coverage_chars for c in plan.chunks)
         avg_input_lv1_total = (
             llm_chunk_chars / 3.5
             + level1_calls * (500 + context_tokens_lv1 + memopedia_tokens)
         )
         avg_input_cons = (
-            base * avg_entry_tokens  # 束ねる子 digest 群
+            10 * avg_entry_tokens    # 束ねる子 digest 群 (束は 10 個前後)
             + 500                    # prompt instructions overhead
             + context_tokens_cons
         )
@@ -198,7 +173,5 @@ def estimate_chronicle_generation_cost(
         estimated_cost_usd=round(estimated_cost, 6),
         model_name=model_name,
         is_free_tier=is_free_tier,
-        chunks_identity=summary["chunks_identity"],
-        chunks_episode=summary["chunks_episode"],
         currency=pricing.get("currency", "USD") if pricing else "USD",
     )

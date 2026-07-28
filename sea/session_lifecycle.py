@@ -1053,44 +1053,6 @@ class SessionLifecycle:
             )
             return False
 
-    def _open_episode_refs(self, persona) -> set:
-        """persona の open な episode_ref 集合 (W4 D2 の退役スナップ用)。
-
-        get_open_episode は「最新 1 件」のキャッシュなので使わない — 並行
-        episode (会話中に作業 episode が挟まる等) を全部見る必要がある。
-        失敗は空集合に degrade (スナップなし = 現行挙動)。
-        """
-        persona_id = getattr(persona, "persona_id", None)
-        manager = self.manager
-        if (
-            not persona_id
-            or manager is None
-            or getattr(manager, "SessionLocal", None) is None
-        ):
-            return set()
-        try:
-            from database.models import Episode
-            from saiverse.episodes import STATUS_OPEN
-            db = manager.SessionLocal()
-            try:
-                rows = (
-                    db.query(Episode.SHORT_ID)
-                    .filter(
-                        Episode.PERSONA_ID == persona_id,
-                        Episode.STATUS == STATUS_OPEN,
-                    )
-                    .all()
-                )
-            finally:
-                db.close()
-            return {f"episode:{r[0]}" for r in rows if r[0] is not None}
-        except Exception:
-            LOGGER.warning(
-                "[metabolism] failed to query open episodes (persona=%s)",
-                persona_id, exc_info=True,
-            )
-            return set()
-
     # 強制クローズ (旧 §5-5) は撤去した (2026-07-25)。U 未満の open episode を
     # 畳めるようになったので手詰まりが起きない。そもそも「開きっぱなしの episode を
     # 閉じる」のは提示コンテキストの都合で決める話ではなく、episode 側がタイムアウト
@@ -1445,20 +1407,12 @@ class SessionLifecycle:
             )
             return
 
-        # 退場計画 (chronicle_eviction.md §5): 保護範囲を残し、退場候補範囲の中で
-        # 古い方から U に達したまとまりを、open episode は単独・closed 同士は
-        # またいで畳む。目標水位に届くまで繰り返す。
-        open_refs = self._open_episode_refs(persona)
+        # 退場計画 (arasuji_levels.md §3/§4): 残す量 (watermarks.target) より
+        # 古い側を、古い順に U ずつの範囲に刻んで全部畳む。エピソードに畳みを
+        # 止める権利は無い (開いているエピソードも畳む)。
         plan = plan_eviction(
-            current_messages, open_refs, watermarks, target_chars=band_budget,
+            current_messages, set(), watermarks, target_chars=band_budget,
         )
-        if plan.used_last_resort_fold:
-            # 最後の手段の経路を通った = 先頭に U 未満の端数が居座って anchor が
-            # 詰まっていた。定常運転になっていないかを見るために残す観測ログ。
-            LOGGER.info(
-                "[metabolism] eviction used the last-resort undersized fold "
-                "(persona=%s)", persona_id,
-            )
         if plan.is_empty:
             LOGGER.warning(
                 "[metabolism] nothing foldable this round (persona=%s, %d chars, "
@@ -1666,7 +1620,6 @@ class SessionLifecycle:
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.alignment import (
             chronicle_band_budget,
-            chronicle_min_digest_chars,
             plan_alignment,
         )
         from saiverse.memory_weave_llm import (
@@ -1724,7 +1677,7 @@ class SessionLifecycle:
             # 並びを持つのはあちら側だけ)。
             run_groups = compile_groups
 
-        # Episode 整列計画 (W4 D3)。processed_ids / digest index / サイズ束ねを
+        # チャンク計画 (arasuji_levels.md §4)。processed_ids / サイズ束ねを
         # 純関数に集約 — コスト見積もり (estimate.py) と同じ計画を共有する。
         _cur = adapter.conn.execute(
             "SELECT DISTINCT json_each.value "
@@ -1733,13 +1686,10 @@ class SessionLifecycle:
         )
         _processed_ids = {row[0] for row in _cur.fetchall()}
 
-        episode_digests = self._collect_episode_digests(persona)
         plan = plan_alignment(
             all_messages,
             _processed_ids,
-            episode_digests,
             target_chars=chronicle_band_budget(),
-            min_llm_chars=chronicle_min_digest_chars(),
             run_groups=run_groups,
         )
 
@@ -1768,7 +1718,7 @@ class SessionLifecycle:
                 "[metabolism] folds unknown; skipping band consolidation this round",
             )
         try:
-            from sai_memory.arasuji.bands import estimate_leaf_chars
+            from sai_memory.arasuji.bands import EST_PARENT_CHARS
             band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
                 adapter.conn,
                 extra_leaves=[
@@ -1776,18 +1726,11 @@ class SessionLifecycle:
                         c.coverage_chars,
                         min((m.created_at for m in c.messages), default=None),
                         max((m.created_at for m in c.messages), default=None),
-                        # digest 字数の実測見込み (Codex P1-3 — dry の発火
-                        # 過小評価を防ぐ)
-                        estimate_leaf_chars(c.kind, c.messages, c.digest_text),
+                        EST_PARENT_CHARS,
                     )
                     for c in plan.chunks
                 ],
                 excluded_entry_ids=folded_entry_ids or None,
-                # 編纂予定の生メッセージは dry の連続性判定で「未編纂」から
-                # 除外する (Codex 再レビュー 必須2 — 実行後の列を再現)
-                pending_source_ids={
-                    m.id for c in plan.chunks for m in c.messages
-                } or None,
             )
         except Exception:
             LOGGER.warning("[metabolism] band overflow dry-plan failed", exc_info=True)
@@ -2074,6 +2017,9 @@ class SessionLifecycle:
                     cancel_check=cancel_fn,
                     excluded_entry_ids=folded_entry_ids or None,
                     batch_callback=note_callback,
+                    # 確認ゲートに提示した dry 件数を実行の上限にする —
+                    # 実出力長のブレで連鎖が増えても承認回数を超えない。
+                    max_folds=band_plan_count,
                 )
             except Exception:
                 LOGGER.exception("[bands] consolidation failed; continuing")
@@ -2107,28 +2053,6 @@ class SessionLifecycle:
                 "content": f"Chronicle生成完了: {exec_result.created_count}件のエントリを作成しました。",
             })
         return "ok"
-
-    def _collect_episode_digests(self, persona) -> Dict[str, Tuple[str, str]]:
-        """digest 確定済み episode の index (W4 D3 — 恒等転写材料)。
-
-        実体は saiverse.episodes.collect_episode_digest_index (API の手動生成
-        ジョブと共有する一点管理)。失敗・環境不備は空 dict に degrade。
-        """
-        persona_id = getattr(persona, "persona_id", None)
-        adapter = getattr(persona, "sai_memory", None)
-        if not persona_id or adapter is None or not adapter.is_ready():
-            return {}
-        try:
-            from saiverse.episodes import collect_episode_digest_index
-            return collect_episode_digest_index(
-                self.manager, persona_id, adapter.conn,
-            )
-        except Exception:
-            LOGGER.warning(
-                "[metabolism] episode digest index failed (persona=%s)",
-                persona_id, exc_info=True,
-            )
-            return {}
 
     def ensure_recall_embeddings(self, persona) -> None:
         """Chronicle / Memopedia ページ / Fragment の未埋め込み分を全件埋める。

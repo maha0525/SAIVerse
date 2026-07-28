@@ -151,23 +151,6 @@ def print_stats(conn, persona_id: str) -> None:
     print("=" * 60)
 
 
-def _episode_digest_index_for_cli(persona_id: str, conn) -> dict:
-    """CLI 用の episode digest index (world DB へ直接接続する manager シム)。
-
-    world DB が無い standalone 実行では空 dict に degrade する (digest 済み
-    episode も通常材料として数える = 見積もり・生成とも過大側で安全)。
-    """
-    try:
-        from types import SimpleNamespace
-        from database.session import SessionLocal
-        from saiverse.episodes import collect_episode_digest_index
-        shim = SimpleNamespace(SessionLocal=SessionLocal)
-        return collect_episode_digest_index(shim, persona_id, conn)
-    except Exception:
-        LOGGER.info("world DB unavailable; proceeding without episode digest index")
-        return {}
-
-
 def print_cost_estimate(
     conn,
     persona_id: str,
@@ -184,7 +167,6 @@ def print_cost_estimate(
     estimate = estimate_chronicle_generation_cost(
         conn,
         model_name=model_name,
-        episode_digests=_episode_digest_index_for_cli(persona_id, conn),
     )
 
     print("\n" + "=" * 60)
@@ -194,7 +176,6 @@ def print_cost_estimate(
     print(f"処理済みメッセージ数:   {estimate.processed_messages}")
     print(f"未処理メッセージ数:     {estimate.unprocessed_messages}")
     print(f"圧縮チャンク (LLM):     {estimate.level1_calls}")
-    print(f"恒等チャンク (無料):    identity={estimate.chunks_identity} / episode転写={estimate.chunks_episode}")
     print(f"統合コール数 (概算):    {estimate.consolidation_calls}")
     print(f"LLM コール数合計:       {estimate.estimated_llm_calls}")
     print(f"使用モデル:             {estimate.model_name}")
@@ -695,7 +676,9 @@ def run_cli() -> None:
 
     # 実行前の見積もり表示 (LLM 呼び出しなし)。--dry-run は書き込みが起きないので
     # 確認プロンプトは不要 (見積もりだけ表示して続行)。それ以外は --yes 無しなら確認する。
-    print_cost_estimate(
+    # 見積もりは保持する — 束ねの実行は承認済みの統合コール数を上限にする
+    # (実出力長のブレで連鎖が増えても、表示・承認した件数を超えない)。
+    estimate = print_cost_estimate(
         conn,
         args.persona_id,
         model_name=actual_model_id,
@@ -724,7 +707,6 @@ def run_cli() -> None:
     # Episode 整列計画 (W4 — Metabolism / API と同じ一点管理)
     from sai_memory.arasuji.alignment import (
         chronicle_band_budget,
-        chronicle_min_digest_chars,
         plan_alignment,
         truncate_plan,
     )
@@ -737,9 +719,7 @@ def run_cli() -> None:
     plan = plan_alignment(
         messages,
         processed_ids,
-        _episode_digest_index_for_cli(args.persona_id, conn),
         target_chars=chronicle_band_budget(),
-        min_llm_chars=chronicle_min_digest_chars(),
     )
     plan = truncate_plan(plan, args.limit)
 
@@ -809,6 +789,8 @@ def run_cli() -> None:
     try:
         consolidated_count = run_band_overflow(
             conn, client, persona_id=args.persona_id,
+            # 確認時に表示した統合コール数を実行の上限にする
+            max_folds=estimate.consolidation_calls,
         )
     except Exception:
         LOGGER.exception("band overflow consolidation failed; continuing")

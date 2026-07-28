@@ -1,16 +1,20 @@
-"""退場計画 — episode 単位・文字数三水位で「何を畳んで退場させるか」を決める。
+"""退場計画 — レベル0 (生ログ) の「予算超過で古い側を畳む」を決める。
 
-docs/intent/chronicle_eviction.md の §3 (規範) / §4 (三水位) / §5 (手続き) の実装。
+docs/intent/arasuji_levels.md §3 / §4 の実装 (レベル0 の並び)。
 **純関数のみ** — DB も LLM も触らない。呼び出し側 (sea/session_lifecycle.py) が
-提示中の提示コンテキストと open episode 集合を渡し、返った計画を適用する。
+提示中の提示コンテキストを渡し、返った計画を適用する。
 
-設計の芯 (chronicle_eviction.md §1〜§3):
+設計の芯 (arasuji_levels.md):
 
-- 守るのは「軽量化」ではなく**記憶の連続性**。退場したものは必ず編纂されている
-  (下限) — だから退場は必ず digest 化とセットで計画する。
-- 混ぜてよい境界は時刻の一本線ではなく **episode の開閉状態**。open episode は
-  単独で畳み (pulse 関節で刻む §6)、closed 同士は episode をまたいで束ねてよい。
-- 扱いを分ける根拠は kind (会話か作業か) ではなく **量 (U に達したか)**。
+- 規則は全レベル共通の一本 — 「予算の上限を超えたら発火し、古い側を
+  『残す量』に収まるまで畳んで 1 つ上のレベル (一次あらすじ) へ送る」。
+- 畳み材料は約 U (一次あらすじの標準被覆、既定 1 万字) ずつに刻む。切り位置は
+  発言の切れ目 (pulse 関節) に寄せる — エピソードには**畳みを止める権利は無い**
+  (開いているエピソードも畳む。守っていた需要の引受先は
+  docs/issues/open_episode_context_after_veto_removal.md)。
+- 末尾の U に届かない端数は畳まず残す — 次の Metabolism で新しい生ログと
+  地続きのまま次の畳みに入るので、小さい一次あらすじを作らない。
+- 発火判定 (上限) は呼び出し側の責務。ここは「残す量」だけを使う。
 """
 
 from __future__ import annotations
@@ -24,12 +28,14 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Watermarks:
-    """Metabolism の三水位 (文字数)。chronicle_eviction.md §4。
+    """Metabolism の水位 (文字数)。arasuji_levels.md §9。
 
-    - ``low``: 直近の保護範囲。最新から遡ってこの文字数は退場させない。
-    - ``target``: Metabolism で軽くする到達点。
-    - ``high``: 提示コンテキストがこれを超えたら発火。None = 文字数では発火せず
-      ``token_triggered`` のみ。
+    - ``target``: **残す量** — 畳んだ後、提示コンテキストに残す直近の文字数。
+      退場はこの水準まで畳む (= 最新から遡ってこの分は退場させない)。
+    - ``high``: **上限** — 提示コンテキストがこれを超えたら発火。None = 文字数
+      では発火せず ``token_triggered`` のみ。
+    - ``low``: 旧三水位の名残り (保護範囲)。現設計では**使わない** — 残す量が
+      保護を兼ねる。モデル設定との互換のため受け取るだけ。
     """
 
     low: int
@@ -42,10 +48,11 @@ class Fold:
     """一度に畳んで退場させる連続メッセージ列 = 一次あらすじ 1 個ぶんの範囲。"""
 
     messages: List[Dict[str, Any]]
-    #: この fold が「1 つの open episode の部分退場」ならその episode_ref。
-    #: 設定されているとき、呼び出し側は §6 の pulse 関節細分 (子 episode 化) を行う。
+    #: 旧設計 (エピソード単独畳み) の名残り。現設計の計画は設定しない —
+    #: 適用側の部分エピソード記録 (_record_partial_episode) は発火しなくなる
+    #: (存廃は intent §12-5 の未決事項)。
     open_episode_ref: Optional[str] = None
-    #: 束ねた closed / 無帰属の episode_ref 一覧 (ログ・記録用)。
+    #: この範囲が覆うエピソード ref 一覧 (ログ・記録用)。
     episode_refs: List[str] = field(default_factory=list)
 
     @property
@@ -72,19 +79,19 @@ class EvictionPlan:
     #: 畳んで退場させる範囲 (時系列順、互いに重ならない)。
     folds: List[Fold] = field(default_factory=list)
     #
-    # どの fold が anchor 前進になり、どれが提示コンテキストの中の圧縮区間になるかは**ここでは
-    # 決めない** — 判定には置き換え前の生ログの並びが要り、それを持っているのは
-    # 適用側 (sea/session_lifecycle.py の ``_apply_eviction_plan``) だから。
-    # 同じ真実を二箇所に置かない。
+    # どの fold が anchor 前進になり、どれが提示コンテキストの中の圧縮区間に
+    # なるかは**ここでは決めない** — 判定には置き換え前の生ログの並びが要り、
+    # それを持っているのは適用側 (sea/session_lifecycle.py の
+    # ``_apply_eviction_plan``) だから。同じ真実を二箇所に置かない。
     #
-    #: U に届かない範囲を「最後の手段」として畳んだか (§5-5)。
-    #: 観測用 — この経路が定常運転になっていないかをログで見るための印。
+    #: 旧設計 (二段構えの最後の手段) の名残り。現設計の計画は立てない —
+    #: 常に False。観測ログの互換のため残す。
     used_last_resort_fold: bool = False
     #: 計画適用後に残る提示文字数の見込み。
     projected_chars: int = 0
     #: 適用前の提示文字数。
     total_chars: int = 0
-    #: 保護範囲の開始インデックス (この位置以降は退場させない)。
+    #: 保護範囲 (残す量) の開始インデックス (この位置以降は退場させない)。
     protected_from: int = 0
 
     @property
@@ -98,10 +105,9 @@ class EvictionPlan:
 
 #: 畳んだ範囲が提示コンテキストに残す置き換えメッセージの見込み文字数。
 #:
-#: 畳んでも提示は 0 にならない — その位置に「あらすじ + 圧縮マークの注釈」が立つ
-#: (§6)。実際の長さは生成してみるまで分からないので、計画では固定の見込みで
-#: 差し引く。**多めに見積もる**方が安全 (少なく見るとその分だけ目標に届かず、
-#: 次のターンでまた発火する)。注釈が約 150 字、あらすじ本文が U の 1 割弱。
+#: 畳んでも提示は 0 にならない — その位置に「あらすじ + 圧縮マークの注釈」が
+#: 立ちうる。実際の長さは生成してみるまで分からないので、計画では固定の見込みで
+#: 差し引く。**多めに見積もる**方が安全。
 ESTIMATED_FOLD_PLACEHOLDER_CHARS = 1_200
 
 
@@ -111,11 +117,7 @@ def message_chars(messages: Sequence[Dict[str, Any]]) -> int:
 
 
 def _net_reduction(messages: Sequence[Dict[str, Any]]) -> int:
-    """この範囲を畳んで**実際に減る**提示文字数。
-
-    畳んだ位置には置き換えが 1 通立つので、生ログの文字数まるごとは減らない。
-    見込みが元より大きい (極端に小さい範囲) 場合は 0 に丸める。
-    """
+    """この範囲を畳んで**実際に減る**提示文字数。"""
     return max(0, message_chars(messages) - ESTIMATED_FOLD_PLACEHOLDER_CHARS)
 
 
@@ -141,31 +143,42 @@ def _pulse_of(msg: Dict[str, Any]) -> Optional[str]:
 
 
 def _protection_boundary(
-    messages: Sequence[Dict[str, Any]], low_chars: int,
+    messages: Sequence[Dict[str, Any]], keep_chars: int,
 ) -> int:
-    """直近の保護範囲の開始インデックスを返す (§5-1、§5-4)。
+    """残す量 (保護範囲) の開始インデックスを返す。
 
-    最新側から遡って ``low_chars`` 分を保護する。境界が pulse の途中に落ちたら
-    **古い側へ** 関節まで下げる — メッセージ単位でぶつ切りにせず、保護範囲を広げる
-    方向に倒す (「刻むときは pulse を丸ごと」experience_structure.md §6)。
+    最新側から遡って ``keep_chars`` 分を保護する。境界が pulse の途中に落ちたら
+    **古い側へ** 関節まで下げる — メッセージ単位でぶつ切りにせず、保護範囲を
+    広げる方向に倒す (「刻むときは pulse を丸ごと」experience_structure.md §6)。
     """
-    if low_chars <= 0:
+    if keep_chars <= 0:
         return len(messages)
     acc = 0
     boundary = 0
     for i in range(len(messages) - 1, -1, -1):
         acc += len(str(messages[i].get("content") or ""))
-        if acc >= low_chars:
+        if acc >= keep_chars:
             boundary = i
             break
     else:
-        # 提示コンテキスト全体でも低水位に届かない = 全部が保護範囲。
+        # 提示コンテキスト全体でも残す量に届かない = 全部が保護範囲。
         return 0
     # pulse 関節へスナップ (古い側 = 保護範囲を広げる向き)。
+    raw_boundary = boundary
     pulse = _pulse_of(messages[boundary])
     if pulse is not None:
         while boundary > 0 and _pulse_of(messages[boundary - 1]) == pulse:
             boundary -= 1
+    if boundary <= 0 < raw_boundary:
+        # スナップで候補がゼロになった = 1 つの pulse が残す量を超えている。
+        # 関節の綺麗さより前進を優先し、素の境界で切る — でないと巨大 pulse が
+        # 居座る間、上限をどれだけ超えても退場が一切進まない
+        # (Codex レビュー 2026-07-28 medium)。
+        LOGGER.info(
+            "[eviction] a single pulse exceeds the keep amount; cutting "
+            "mid-pulse at index %d to keep eviction moving", raw_boundary,
+        )
+        return raw_boundary
     return boundary
 
 
@@ -173,52 +186,6 @@ def _is_folded_placeholder(msg: Dict[str, Any]) -> bool:
     """既に digest へ置き換わっている位置か (sea/session_window.py の置き換え)。"""
     meta = msg.get("metadata")
     return bool(isinstance(meta, dict) and meta.get("__folded_range__"))
-
-
-@dataclass
-class _Unit:
-    """退場候補範囲を「同一 episode 帰属の連続域」で切った束ねの原子。"""
-
-    messages: List[Dict[str, Any]]
-    ref: Optional[str]
-    is_open: bool
-    #: 既に畳まれた digest = 壁。**同一レベルでは**再圧縮しないし (§4-4 — 一次あらすじの
-    #: digest から別の一次あらすじを作らない。上の次数への束ねは bands.py の仕事で正当)、
-    #: これを跨いで前後を束ねることもしない (跨ぐと非連続な束ね §4-5 になる)。
-    is_wall: bool = False
-
-    @property
-    def chars(self) -> int:
-        return message_chars(self.messages)
-
-
-def _build_units(
-    candidates: Sequence[Dict[str, Any]], open_refs: Set[str],
-) -> List[_Unit]:
-    """退場候補範囲を束ねの原子に割る。
-
-    原子 = 「同一 episode 帰属の連続域」または「無帰属メッセージ 1 件」。無帰属は
-    episode の制約が無いのでどこでも切れる (sai_memory/arasuji/alignment.py の
-    ``_atoms`` と同じ規約 — 束ねの粒度を二箇所で食い違わせない)。
-    """
-    units: List[_Unit] = []
-    for msg in candidates:
-        if _is_folded_placeholder(msg):
-            units.append(_Unit(messages=[msg], ref=None, is_open=False, is_wall=True))
-            continue
-        ref = episode_ref_of(msg)
-        if (
-            ref is not None
-            and units
-            and units[-1].ref == ref
-            and not units[-1].is_wall
-        ):
-            units[-1].messages.append(msg)
-            continue
-        units.append(
-            _Unit(messages=[msg], ref=ref, is_open=bool(ref and ref in open_refs))
-        )
-    return units
 
 
 def _pulse_groups(messages: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -238,34 +205,6 @@ def _pulse_groups(messages: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any
     return groups
 
 
-def _anchor_blocked_at(units: Sequence["_Unit"], upto: int, consumed: Set[int]) -> bool:
-    """``upto`` の位置が「今回 anchor を止めている先頭」か (最後の手段の前提)。
-
-    真になる条件は二つとも要る:
-
-    - 手前が**既存の置き換え (壁) だけ**であること。畳めない生ログが手前に残って
-      いると、そこを畳んでも anchor は前進しないうえ、作った置き換えが壁になって
-      手前は以後どの束ねにも入れなくなる (新しいメッセージは末尾に来るので手前は
-      成長しない) = anchor が**恒久的に**詰まる。
-    - 手前に**今回のラウンドで畳んだものが無い**こと。既に畳めているなら anchor は
-      その分だけ前進するので、最後の手段は要らない。ここを ``consumed`` も吸収済み
-      に数えると、普通に畳めた回でも候補の末尾の端数を畳んでしまい、**日常経路で
-      小粒の一次あらすじを作る** (issue chronicle_undersized_lv1_chunks が消そうと
-      しているもの)。観測用の ``used_last_resort_fold`` も嘘になる。
-    """
-    if any(j in consumed for j in range(upto)):
-        return False
-    return all(units[j].is_wall for j in range(upto))
-
-
-def _run_ends_at(units: Sequence["_Unit"], idx: int) -> bool:
-    """``idx`` で closed の連続 run が終わるか (次が壁 / open / 末尾)。"""
-    nxt = idx + 1
-    if nxt >= len(units):
-        return True
-    return units[nxt].is_wall or units[nxt].is_open
-
-
 def plan_eviction(
     messages: Sequence[Dict[str, Any]],
     open_episode_refs: Set[str],
@@ -273,32 +212,27 @@ def plan_eviction(
     *,
     target_chars: int,
 ) -> EvictionPlan:
-    """提示中の提示コンテキストから「今回退場させる範囲」を計画する (chronicle_eviction.md §5)。
+    """提示中の提示コンテキストから「今回退場させる範囲」を計画する。
 
     Args:
-        messages: 提示中の提示コンテキスト (created_at 昇順、既に畳んだ圧縮区間は digest に置換済み)。
-        open_episode_refs: いま開いている episode_ref の集合。
-        watermarks: 三水位 (低 = 保護範囲 / 目標 = 到達点 / 高 = 発火。発火判定は
-            呼び出し側の責務で、ここでは low / target だけを使う)。
+        messages: 提示中の提示コンテキスト (created_at 昇順、既に畳んだ圧縮区間は
+            digest に置換済み)。
+        open_episode_refs: 旧設計 (エピソード単独畳み) の名残り。現設計では
+            使わない — エピソードに畳みを止める権利は無い (intent §4-1)。
+        watermarks: 水位。``target`` = 残す量だけを使う (発火判定 ``high`` は
+            呼び出し側の責務、``low`` は旧設計互換で未使用)。
         target_chars: 一次あらすじの標準被覆 U。1 つの fold が目指す大きさ。
 
-    計画は二段で立てる (§5-5)。
+    計画: 残す量より古い側を、古い順に U ずつの範囲に刻んで全部畳む。
 
-    1. **U 以上のまとまりだけ**を畳んで目標水位を狙う。届いたら終わり。
-    2. 届かなければ、**未畳みの先頭にある範囲を種類も大きさも問わず畳む**。一回だけ。
-
-    二段目が要る理由: 提示コンテキストの先頭に「まだ終わっていない episode の、
-    U に届かない端数」が居座ると、その後ろをいくら畳んでも **anchor が永久に
-    進まない**。後ろの畳みは置き換えを残すだけなので、提示は減らないまま
-    圧縮区間が積もる。U に届いたら普通に畳むのに、届かないときだけ生で死守する
-    のは判断基準として一貫していない — **U は「優先度」の材料であって「畳んで
-    いいか」の材料ではない**。
-
-    一回だけで足りる理由: 適用側は「先頭から連続して畳まれている分」を丸ごと
-    anchor で飲み込む。だから詰まっていた先頭が畳めた瞬間、後ろに溜まっていた
-    圧縮区間ごと連鎖して提示コンテキストから出る。二段目の削減量は計画の算術に
-    は現れない (端数は恒等圧縮で正味 0 になりうる) ので、**削減量で価値を測って
-    飛ばしてはいけない**。
+    - 切り位置は pulse 関節 (発言の切れ目) に寄せる — U に達したら、いまの
+      pulse を最後まで含めてそこで切る。
+    - 既に畳まれた置き換え (壁) は材料に入れない。壁の手前に U 未満の端数が
+      残る場合だけ、端数のまま畳む (残すと壁に挟まれて永久に取り残されるため。
+      旧世代データでのみ起きる — 現設計の適用は畳んだ先頭を anchor が
+      すぐ飲み込むので、新しい壁は候補範囲に現れない)。
+    - 末尾 (保護範囲の直前) の U 未満の端数は畳まず残す — 次回、新しい生ログと
+      地続きのまま畳まれる。
 
     Returns:
         EvictionPlan。
@@ -309,7 +243,7 @@ def plan_eviction(
         return plan
     if target_chars <= ESTIMATED_FOLD_PLACEHOLDER_CHARS:
         # U が置き換えの見込みより小さいと、1 束あたりの正味削減が常に 0 になり、
-        # 「減らないのに畳み続ける」= 候補範囲を出し切る過剰退場になる。設定ミス
+        # 「減らないのに畳み続ける」= 過剰退場になる。設定ミス
         # (SAIVERSE_CHRONICLE_BAND_BUDGET を極端に下げた等) なので退場を見送る。
         LOGGER.warning(
             "[eviction] target_chars=%d is not larger than the fold placeholder "
@@ -318,145 +252,47 @@ def plan_eviction(
         )
         return plan
 
-    boundary = _protection_boundary(messages, watermarks.low)
+    boundary = _protection_boundary(messages, watermarks.target)
     plan.protected_from = boundary
     if boundary <= 0:
-        # 退場候補範囲が無い = 直近の保護範囲だけで提示コンテキストが埋まっている。削れない。
+        # 退場候補範囲が無い = 残す量だけで提示コンテキストが埋まっている。
         return plan
 
     candidates = list(messages[:boundary])
-    units = _build_units(candidates, open_episode_refs)
-
-    remaining = total
     folds: List[Fold] = []
-    consumed: Set[int] = set()   # 消費済み unit index
-    #: open episode の unit は先頭から順に食う (途中まで畳んだ位置を覚える)
-    open_offset: Dict[int, int] = {}
+    remaining = total
 
-    # 二段構え: まず U 以上だけ (allow_undersized_open=False)、それで目標に
-    # 届かなければ U 未満の open も一回だけ許す (True)。
-    for allow_undersized_open in (False, True):
-        if remaining <= watermarks.target:
-            break
-        last_resort_used = False
-        progressed = True
-        while remaining > watermarks.target and progressed:
-            progressed = False
-            pending: List[Dict[str, Any]] = []
-            pending_refs: List[str] = []
-            pending_idx: List[int] = []
+    def _close(pending: List[Dict[str, Any]]) -> None:
+        nonlocal remaining
+        refs: List[str] = []
+        for m in pending:
+            ref = episode_ref_of(m)
+            if ref and ref not in refs:
+                refs.append(ref)
+        folds.append(Fold(messages=list(pending), episode_refs=refs))
+        remaining -= _net_reduction(pending)
 
-            for idx, unit in enumerate(units):
-                if idx in consumed:
-                    # 既に畳んだ位置 = 置き換えが立つ = 壁。透明に素通りさせると
-                    # 前後の closed がこの位置を飛び越えて束ねられてしまう
-                    # (§4-5 偽の隣接)。**途中まで畳んだ open は consumed に入らない**
-                    # ので、そちらは is_open の分岐が同じ役目を果たす (必ず
-                    # pending をリセットする) — 残りは計画対象に残る。
-                    pending, pending_refs, pending_idx = [], [], []
-                    continue
-
-                if unit.is_wall:
-                    # 畳み済みの digest は再圧縮しない (§4-4)。跨いだ束ねも作らない。
-                    pending, pending_refs, pending_idx = [], [], []
-                    continue
-
-                if unit.is_open:
-                    # open episode は単独で畳む (§3) — ここまで貯めた closed 束ねは
-                    # U 未満のまま打ち切り、捨てる。open を挟んで前後をつなぐと
-                    # 非連続な束ね (§4-5 違反) になるため、またがせない。
-                    pending, pending_refs, pending_idx = [], [], []
-
-                    offset = open_offset.get(idx, 0)
-                    rest = unit.messages[offset:]
-                    if not rest:
-                        consumed.add(idx)
-                        continue
-                    # pulse 関節で刻む (§6): 丸ごと退場済みの pulse 群だけを畳む。
-                    taken: List[Dict[str, Any]] = []
-                    for group in _pulse_groups(rest):
-                        taken.extend(group)
-                        if message_chars(taken) >= target_chars:
-                            break
-                    if message_chars(taken) < target_chars:
-                        # U に届かない端数。一段目では畳まず次の unit を見る。
-                        if not allow_undersized_open or last_resort_used:
-                            continue
-                        # 手前に畳めない範囲が残っているなら、ここを畳んでも
-                        # anchor は前進しない。しかも作った置き換えが壁になって
-                        # 手前の範囲は以後どことも束ねられなくなる = anchor が
-                        # **恒久的に**詰まる。端数圧縮は「手前が全部吸収済み」の
-                        # open に限る (Codex レビュー P1)。
-                        if not _anchor_blocked_at(units, idx, consumed):
-                            continue
-                        # 二段目 = 最後の手段。ここを畳まないと anchor が進まない。
-                        # 一回だけ (先頭が畳めれば適用側の anchor 前進が後ろの
-                        # 圧縮区間ごと連鎖して飲み込むので、これで足りる)。
-                        last_resort_used = True
-                        plan.used_last_resort_fold = True
-                        LOGGER.info(
-                            "[eviction] folding an undersized open episode as a last "
-                            "resort (ref=%s, %d chars < U=%d): otherwise the anchor "
-                            "cannot advance past it",
-                            unit.ref, message_chars(taken), target_chars,
-                        )
-                    folds.append(
-                        Fold(messages=taken, open_episode_ref=unit.ref,
-                             episode_refs=[unit.ref] if unit.ref else [])
+    pending: List[Dict[str, Any]] = []
+    for group in _pulse_groups(candidates):
+        if any(_is_folded_placeholder(m) for m in group):
+            # 壁 (畳み済みの置き換え)。材料に入れない。手前の端数は、残すと
+            # 壁に挟まれて永久に取り残されるので、端数のまま畳む。
+            if pending:
+                if message_chars(pending) < target_chars:
+                    LOGGER.info(
+                        "[eviction] folding an undersized run (%d chars < U=%d) "
+                        "stranded before an already-folded range (legacy wall)",
+                        message_chars(pending), target_chars,
                     )
-                    open_offset[idx] = offset + len(taken)
-                    if open_offset[idx] >= len(unit.messages):
-                        consumed.add(idx)
-                    remaining -= _net_reduction(taken)
-                    progressed = True
-                    break
+                _close(pending)
+                pending = []
+            continue
+        pending.extend(group)
+        if message_chars(pending) >= target_chars:
+            _close(pending)
+            pending = []
+    # 末尾の端数は畳まない (次回、新しい生ログと地続きで畳まれる)。
 
-                # closed / 無帰属: episode をまたいで束ねてよい (§3)。
-                pending.extend(unit.messages)
-                pending_idx.append(idx)
-                if unit.ref:
-                    pending_refs.append(unit.ref)
-                reached_u = message_chars(pending) >= target_chars
-                last_resort_run = (
-                    allow_undersized_open
-                    and not last_resort_used
-                    and bool(pending)
-                    and _run_ends_at(units, idx)
-                    and _anchor_blocked_at(units, pending_idx[0], consumed)
-                )
-                if reached_u or last_resort_run:
-                    if not reached_u:
-                        # U に届かない closed の run。ここが未畳みの先頭なので、
-                        # 畳まないと anchor が進まない。open だけを最後の手段に
-                        # するのは根拠のない線引きで、「先頭が U 未満の closed +
-                        # 直後が U 未満の open」で永久に手詰まりになる
-                        # (Codex レビュー二巡目 P1)。
-                        last_resort_used = True
-                        plan.used_last_resort_fold = True
-                        LOGGER.info(
-                            "[eviction] folding an undersized closed run as a last "
-                            "resort (%d chars < U=%d): otherwise the anchor cannot "
-                            "advance past it", message_chars(pending), target_chars,
-                        )
-                    folds.append(
-                        Fold(messages=list(pending), episode_refs=list(pending_refs))
-                    )
-                    consumed.update(pending_idx)
-                    remaining -= _net_reduction(pending)
-                    progressed = True
-                    break
-
-    # 二段構えなので **発見順 ≠ 時系列順**: 一段目で後ろの範囲を畳み、二段目で
-    # 先頭の端数を畳むと [後, 先] の順で積まれる。folds の契約は時系列順で、
-    # 適用側はこの順に子 episode を刻み short_id を採る — 逆順のまま返すと
-    # 記録の並びが体験の並びと食い違う (レビュー三巡目 P2)。元の位置で並べ直す。
-    position = {str(m.get("id")): i for i, m in enumerate(messages)}
-    folds.sort(
-        key=lambda f: min(
-            (position.get(mid, len(messages)) for mid in f.message_ids),
-            default=len(messages),
-        )
-    )
     plan.folds = folds
     plan.projected_chars = remaining
     return plan
@@ -469,22 +305,21 @@ def compile_groups_from_folds(
     """fold 群を編纂側へ渡す「束ねてよい範囲」の列に変換する。
 
     ``Fold`` の契約は「時系列順・互いに重ならない連続範囲」で、正しい計画なら
-    fold と範囲は一対一。この関数はその契約を**提示コンテキストの実際の並びで検算**し、
-    破れていたら範囲を割ってから渡す。
+    fold と範囲は一対一。この関数はその契約を**提示コンテキストの実際の並びで
+    検算**し、破れていたら範囲を割ってから渡す。
 
     割る理由 (experience_structure.md §4-5 連続束ねのみ): fold の内側に
     「今回退場しないメッセージ」が挟まっていると、そのメッセージは生ログの
-    まま提示コンテキストに残る。前後を一つのあらすじにすれば、間に生ログがあるのに
-    地続きに語る**偽の隣接** = 時系列の嘘になる。
+    まま提示コンテキストに残る。前後を一つのあらすじにすれば、間に生ログが
+    あるのに地続きに語る**偽の隣接** = 時系列の嘘になる。
 
-    検算をここで行うのは、**提示コンテキストの完全な並びを持っているのがこの層だけ**
-    だから。編纂側 (generate_chronicle) が見るのは Chronicle 除外
+    検算をここで行うのは、**提示コンテキストの完全な並びを持っているのがこの層
+    だけ**だから。編纂側 (generate_chronicle) が見るのは Chronicle 除外
     (除外タグ / line_role / Stelis) を落とした後の列で、除外メッセージが
     退場せずに残る形の抜けは原理的に見えない。
 
     契約違反を例外にしないのは、退場ごと止めると壊れた計画が出続ける限り
-    anchor が永久に進まないため (§4-1 の下限を守る歯止めが退場自体を止める)。
-    割れば偽の隣接は出ず、範囲は全て編纂される。
+    anchor が永久に進まないため。割れば偽の隣接は出ず、範囲は全て編纂される。
 
     Args:
         folds: :attr:`EvictionPlan.folds`。

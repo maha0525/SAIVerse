@@ -1,14 +1,26 @@
 """退場計画 (sea/eviction_plan.py) の純関数テスト。
 
-docs/intent/chronicle_eviction.md §3 (規範) / §4 (三水位) / §5 (手続き) と、
-docs/intent/experience_structure.md §4 の圧縮七原則を、原則番号で固定する。
+docs/intent/arasuji_levels.md §3 (一本規則) / §4 (レベル0 の特別さ) を固定する。
+
+固定する仕様の骨子:
+
+- 保護 = 残す量 (watermarks.target)。最新から遡ってこの分は退場させない。
+  境界は pulse 関節へ古い側にスナップ。
+- 保護より古い側は、古い順に U ずつの範囲に刻んで**全部**畳む。切り位置は
+  pulse 関節に寄せる (U に達したら、いまの pulse を最後まで含めて切る)。
+- エピソードに畳みを止める権利は無い — open episode も普通に畳まれる。
+- 末尾 (保護範囲の直前) の U 未満の端数は畳まず残す (次回、新しい生ログと
+  地続きで畳まれる — 小さい一次あらすじを作らない)。
+- 既に畳まれた置き換え (壁) は材料に入れない。壁の手前の端数だけは、残すと
+  永久に取り残されるので端数のまま畳む (旧世代データでのみ起きる経路)。
+- compile_groups_from_folds: fold が「退場しないメッセージ」をまたいでいたら
+  割ってから編纂へ渡す (偽の隣接の禁止)。
 """
 from __future__ import annotations
 
 import unittest
 
 from sea.eviction_plan import (
-    ESTIMATED_FOLD_PLACEHOLDER_CHARS,
     Fold,
     Watermarks,
     compile_groups_from_folds,
@@ -33,35 +45,38 @@ def msg(mid, at, *, chars=1_000, ep=None, pulse=None, folded=False):
     return payload
 
 
-def plan(messages, open_refs=(), *, low=2_000, target=2_000, high=None):
+def plan(messages, *, keep=2_000, high=None):
+    """新仕様の呼び出し: watermarks.target = 残す量。low は互換用 (未使用)。"""
     return plan_eviction(
-        messages, set(open_refs),
-        Watermarks(low=low, target=target, high=high),
+        messages, set(),
+        Watermarks(low=0, target=keep, high=high),
         target_chars=U,
     )
 
 
-class ProtectionBandTest(unittest.TestCase):
-    """§5-1: 低水位ぶんの直近は絶対に退場させない。"""
+def folded_ids(result):
+    return [mid for f in result.folds for mid in f.message_ids]
 
-    def test_recent_band_is_protected(self):
+
+class ProtectionTest(unittest.TestCase):
+    """残す量: 直近はこの字数ぶん絶対に退場させない。"""
+
+    def test_recent_keep_is_protected(self):
         msgs = [msg(f"m{i}", 100 + i) for i in range(6)]
-        result = plan(msgs, low=3_000, target=1_000)
+        result = plan(msgs, keep=3_000)
         # 末尾 3,000字 = m3..m5 が保護範囲 → 候補は m0..m2
         self.assertEqual(result.protected_from, 3)
-        folded = [mid for f in result.folds for mid in f.message_ids]
-        self.assertNotIn("m3", folded)
-        self.assertNotIn("m4", folded)
-        self.assertNotIn("m5", folded)
+        for kept in ("m3", "m4", "m5"):
+            self.assertNotIn(kept, folded_ids(result))
 
-    def test_window_smaller_than_low_is_all_protected(self):
+    def test_window_smaller_than_keep_is_all_protected(self):
         msgs = [msg("m0", 100), msg("m1", 101)]
-        result = plan(msgs, low=10_000, target=0)
+        result = plan(msgs, keep=10_000)
         self.assertEqual(result.protected_from, 0)
         self.assertTrue(result.is_empty)
 
     def test_boundary_snaps_back_to_pulse_joint(self):
-        """§5-4: 保護範囲の境界が pulse の途中に落ちたら古い側へ下げる
+        """保護範囲の境界が pulse の途中に落ちたら古い側へ下げる
         (メッセージ単位でぶつ切りにしない = 保護を広げる向きに倒す)。"""
         msgs = [
             msg("a0", 100, pulse="p1"),
@@ -69,356 +84,167 @@ class ProtectionBandTest(unittest.TestCase):
             msg("a2", 102, pulse="p2"),
             msg("a3", 103, pulse="p2"),
         ]
-        # 低水位 2,000字 → 素の境界は index 2 (a2,a3 で 2,000字) だが
+        # 残す量 2,000字 → 素の境界は index 2 (a2,a3 で 2,000字) だが
         # a1/a2/a3 は同じ pulse なので index 1 まで下がる。
-        result = plan(msgs, low=2_000, target=0)
+        result = plan(msgs, keep=2_000)
         self.assertEqual(result.protected_from, 1)
 
-
-class OpenEpisodeTest(unittest.TestCase):
-    """§3: open episode は単独でしか畳まない。"""
-
-    def test_small_open_is_skipped_while_something_else_is_foldable(self):
-        """一段目: U 未満の open は飛ばして、畳める方を先に畳む (優先度)。
-
-        U は「優先度」の材料であって「畳んでいいか」の材料ではない。U 以上が
-        残っている限り、U 未満の open には手を付けない。
-        """
+    def test_giant_single_pulse_does_not_deadlock_eviction(self):
+        """1 つの pulse が残す量を超えていても、退場は必ず前進する —
+        スナップで候補がゼロになるなら素の境界で切る
+        (Codex レビュー 2026-07-28 medium)。"""
         msgs = [
-            msg("a0", 100, chars=500, ep="episode:1"),
-            msg("k0", 200), msg("k1", 201),   # closed 2 通で U 到達
+            msg(f"g{i}", 100 + i, chars=40_000, pulse="p1") for i in range(4)
         ]
-        result = plan(msgs, ["episode:1"], low=0, target=2_000)
-        self.assertEqual([f.message_ids for f in result.folds], [["k0", "k1"]])
-        self.assertFalse(result.used_last_resort_fold)
+        result = plan(msgs, keep=60_000)
+        # 素の境界 = 新しい側 60,000字 (g2,g3) の手前 = index 2。
+        self.assertEqual(result.protected_from, 2)
+        self.assertFalse(result.is_empty)
+        self.assertEqual(folded_ids(result), ["g0", "g1"])
 
-    def test_small_open_is_folded_as_last_resort(self):
-        """二段目: 他に畳めるものが無いなら U 未満の open も畳む (§5-5)。
 
-        これが無いと、提示コンテキストの先頭に U 未満の端数が居座ったとき
-        anchor が永久に進まない。
-        """
-        msgs = [
-            msg("a0", 100, chars=500, ep="episode:1"),
-            msg("a1", 101, chars=500, ep="episode:1"),
+class FoldSlicingTest(unittest.TestCase):
+    """古い側を U ずつに刻む — 一本規則のレベル0 形。"""
+
+    def test_candidates_are_folded_in_u_sized_chunks(self):
+        # 候補 6,000字 (m0..m5) → U=2,000 ずつ 3 fold。全部畳まれる。
+        msgs = [msg(f"m{i}", 100 + i) for i in range(8)]
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(result.protected_from, 6)
+        self.assertEqual(len(result.folds), 3)
+        self.assertEqual(folded_ids(result), [f"m{i}" for i in range(6)])
+        for fold in result.folds:
+            self.assertGreaterEqual(fold.chars, U)
+
+    def test_folds_are_time_ordered_and_disjoint(self):
+        msgs = [msg(f"m{i}", 100 + i, chars=700) for i in range(12)]
+        result = plan(msgs, keep=2_000)
+        seen = []
+        for fold in result.folds:
+            for mid in fold.message_ids:
+                self.assertNotIn(mid, seen)
+                seen.append(mid)
+        order = [m["id"] for m in msgs]
+        self.assertEqual(seen, sorted(seen, key=order.index))
+
+    def test_trailing_remainder_stays_unfolded(self):
+        """末尾の U 未満の端数は畳まない — 次回、新しい生ログと地続きで
+        畳まれるので、小さい一次あらすじを作らない (豆粒の禁止)。"""
+        # 候補 5,000字 → fold 2 個 (2,000 + 2,000)、端数 1,000 は残る。
+        msgs = [msg(f"m{i}", 100 + i, chars=500) for i in range(10)] + [
+            msg("k0", 300), msg("k1", 301),
         ]
-        result = plan(msgs, ["episode:1"], low=0, target=100)
-        self.assertEqual([f.message_ids for f in result.folds], [["a0", "a1"]])
-        self.assertEqual(result.folds[0].open_episode_ref, "episode:1")
-        self.assertTrue(result.used_last_resort_fold)
-
-    def test_undersized_open_fold_happens_at_most_once(self):
-        """二段目は一回だけ。先頭が畳めれば適用側の anchor 前進が連鎖するので足りる。"""
-        msgs = [
-            msg("a0", 100, chars=500, ep="episode:1"),
-            msg("b0", 200, chars=500, ep="episode:2"),
-            msg("c0", 300, chars=500, ep="episode:3"),
-        ]
-        result = plan(msgs, ["episode:1", "episode:2", "episode:3"], low=0, target=100)
-        self.assertEqual(len(result.folds), 1)
-        self.assertEqual(result.folds[0].message_ids, ["a0"])
-
-    def test_undersized_open_fold_is_not_skipped_for_zero_net_reduction(self):
-        """端数は恒等圧縮で正味 0 になりうる。削減量で価値を測って飛ばさない。
-
-        目的は文字数削減ではなく anchor を進めること。
-        """
-        # 置き換えの見込み (1,200字) より小さい端数 → _net_reduction は 0
-        msgs = [msg("a0", 100, chars=300, ep="episode:1")]
-        result = plan(msgs, ["episode:1"], low=0, target=100)
-        self.assertEqual([f.message_ids for f in result.folds], [["a0"]])
-        self.assertEqual(result.projected_chars, result.total_chars)  # 減っていない
-
-    def test_last_resort_targets_the_front_not_the_open(self):
-        """Sol P1: 手前に畳めない範囲が残るなら、端数を畳んでも anchor は進まない。
-
-        先頭に U 未満の closed、その後ろに U 未満の open。open を畳んでも先頭の
-        closed が残るので anchor は前進せず、しかも置き換えが壁になって先頭は
-        以後どことも束ねられなくなる = **anchor が恒久的に詰まる**。
-        だから最後の手段が撃つのは**未畳みの先頭** (ここでは closed の c0)。
-        レビュー二巡目 P1: open だけを最後の手段にすると、この並びで永久に
-        手詰まりになる。
-        """
-        msgs = [
-            msg("c0", 100, chars=500),                    # closed / 無帰属 (U 未満)
-            msg("o0", 101, chars=500, ep="episode:1"),    # open (U 未満)
-        ]
-        result = plan(msgs, ["episode:1"], low=0, target=100)
-        self.assertEqual([f.message_ids for f in result.folds], [["c0"]])
-        self.assertTrue(result.used_last_resort_fold)
-
-    def test_big_open_folds_repeatedly_within_one_plan(self):
-        """Sol P2: 一つの open に U が何個も入っているなら、一度の計画で反復して畳む。
-
-        畳んだ prefix だけを壁として扱い、``open_offset`` 以降は計画対象に残す。
-        """
-        msgs = [
-            msg(f"a{i}", 100 + i, chars=1_000, ep="episode:1", pulse=f"p{i}")
-            for i in range(6)
-        ]
-        # U=2,000 → 2 通で 1 fold。目標まで反復して 2 本以上立つこと。
-        result = plan(msgs, ["episode:1"], low=0, target=2_000)
-        self.assertGreaterEqual(len(result.folds), 2)
-        self.assertEqual(result.folds[0].message_ids, ["a0", "a1"])
-        self.assertEqual(result.folds[1].message_ids, ["a2", "a3"])
-
-    def test_last_resort_is_skipped_when_something_was_already_folded(self):
-        """最後の手段は「anchor が今回まったく進まない」ときだけ撃つ。
-
-        手前が普通に畳めていれば anchor はその分前進するので、候補の末尾に残った
-        端数まで畳む必要はない。ここを緩めると**日常経路で小粒の一次あらすじを
-        作る** (issue chronicle_undersized_lv1_chunks が消そうとしているもの) し、
-        観測用の used_last_resort_fold も嘘になる。
-        """
-        msgs = [
-            msg("c0", 100, chars=1_000),
-            msg("c1", 101, chars=1_000),   # c0+c1 で U 到達 → 普通に畳める
-            msg("c2", 102, chars=400),     # 残った端数 — 畳む必要はない
-            msg("k0", 200), msg("k1", 201),
-        ]
-        result = plan(msgs, [], low=2_000, target=1_000)
-        self.assertEqual([f.message_ids for f in result.folds], [["c0", "c1"]])
-        self.assertFalse(result.used_last_resort_fold)
-
-    def test_folds_are_returned_in_chronological_order(self):
-        """Sol P2: 二段構えでも folds は時系列順で返す。
-
-        一段目で後ろの B、二段目で先頭の端数 A を畳むと発見順は [B, A] になる。
-        適用側はこの順に子 episode を刻んで short_id を採るので、逆順のまま
-        返すと記録の並びが体験の並びと食い違う。
-        """
-        msgs = [
-            msg("a0", 100, chars=500, ep="episode:1"),   # 先頭の open (U 未満)
-            msg("b0", 101, chars=1_000),                 # 以降で U 到達
-            msg("b1", 102, chars=1_000),
-        ]
-        result = plan(msgs, ["episode:1"], low=0, target=100)
-        self.assertEqual(
-            [f.message_ids for f in result.folds], [["a0"], ["b0", "b1"]],
-        )
-
-    def test_large_open_folds_by_pulse_joint(self):
-        """§6: U に達した open は pulse を丸ごと単位で刻んで部分退場する。"""
-        msgs = [
-            msg("a0", 100, ep="episode:1", pulse="p1"),
-            msg("a1", 101, ep="episode:1", pulse="p1"),
-            msg("a2", 102, ep="episode:1", pulse="p2"),
-            msg("k0", 200), msg("k1", 201),
-        ]
-        # 一段目で目標に届く水位にして、最後の手段の経路を誘発しない。
-        result = plan(msgs, ["episode:1"], low=2_000, target=4_500)
-        self.assertEqual(len(result.folds), 1)
-        self.assertEqual(result.folds[0].message_ids, ["a0", "a1"])
-        self.assertEqual(result.folds[0].open_episode_ref, "episode:1")
-        self.assertFalse(result.used_last_resort_fold)
-
-    def test_open_never_bundles_with_neighbours(self):
-        """§4-5: open を挟んで前後の closed をまたいで束ねない。
-
-        最後の手段で open 自身が畳まれることはあっても、それを跨いで前後の
-        closed が一つの fold に入ることはない (偽の隣接を作らない)。
-        """
-        msgs = [
-            msg("c0", 100, ep="episode:1"),      # closed
-            msg("o0", 101, chars=500, ep="episode:2"),  # open (U 未満)
-            msg("c1", 102),                      # 無帰属
-            msg("k0", 200), msg("k1", 201),
-        ]
-        # c0 + c1 なら U=2,000 に届くが、間に open があるのでまたげない。
-        result = plan(msgs, ["episode:2"], low=2_000, target=0)
-        mixed = [
-            f for f in result.folds
-            if "c0" in f.message_ids and "c1" in f.message_ids
-        ]
-        self.assertEqual(mixed, [])
-        # 最後の手段が撃つのは**未畳みの先頭**である c0 (open ではない) —
-        # open を畳んでも手前の c0 が残って anchor は進まないため。
-        self.assertEqual([f.message_ids for f in result.folds], [["c0"]])
-
-
-class ClosedBundlingTest(unittest.TestCase):
-    """§3: closed 同士は episode をまたいで束ねてよい。"""
-
-    def test_closed_episodes_bundle_to_reach_u(self):
-        msgs = [
-            msg("c0", 100, ep="episode:1"),
-            msg("c1", 101, ep="episode:2"),
-            msg("k0", 200), msg("k1", 201),
-        ]
-        result = plan(msgs, [], low=2_000, target=2_000)
-        self.assertEqual(len(result.folds), 1)
-        self.assertEqual(result.folds[0].message_ids, ["c0", "c1"])
-
-    def test_under_u_run_is_folded_only_as_last_resort(self):
-        """U に届かない列は日常経路では畳まない。他に手が無ければ畳む (§5-5)。
-
-        「小粒の一次あらすじを一切作らない」という旧不変条件は撤回した
-        (issue chronicle_undersized_lv1_chunks の目的改訂)。作らないのは
-        日常経路だけで、anchor が詰まるなら畳む。
-        """
-        msgs = [msg("c0", 100, chars=500), msg("k0", 200), msg("k1", 201)]
-        # 目標に既に届いている → 何も畳まない
-        self.assertTrue(plan(msgs, [], low=2_000, target=10_000).is_empty)
-        # 目標に届かない → 最後の手段で先頭の小さい列を畳む
-        result = plan(msgs, [], low=2_000, target=0)
-        self.assertEqual([f.message_ids for f in result.folds], [["c0"]])
-        self.assertTrue(result.used_last_resort_fold)
-
-
-class TargetWatermarkTest(unittest.TestCase):
-    """§5-3: 目標水位に達するまで繰り返し、達したら止める。"""
-
-    def test_repeats_until_target(self):
-        """畳んだ位置には置き換えが 1 通立つので、**減るのは差し引き**。
-
-        生ログ 2,000字を畳んでも提示は 0 にならない (あらすじ + 圧縮マークが
-        残る) ため、目標到達の判定はその見込みを差し引いた量で行う。
-        """
-        msgs = [msg(f"m{i}", 100 + i) for i in range(8)]  # 8,000字
-        net = 2 * 1_000 - ESTIMATED_FOLD_PLACEHOLDER_CHARS  # 1 束あたりの正味削減
-        # 保護 2,000字 (m6,m7) / 候補 m0..m5 / 目標 = 2 束ぶん削った量
-        result = plan(msgs, [], low=2_000, target=8_000 - 2 * net)
+        result = plan(msgs, keep=2_000)
         self.assertEqual(len(result.folds), 2)
-        self.assertEqual(result.folds[0].message_ids, ["m0", "m1"])
-        self.assertEqual(result.folds[1].message_ids, ["m2", "m3"])
-        self.assertEqual(result.projected_chars, 8_000 - 2 * net)
+        total_folded = sum(f.chars for f in result.folds)
+        self.assertEqual(total_folded, 4_000)
 
-    def test_stops_when_candidates_run_out(self):
-        """候補範囲を出し切っても目標に届かないときは、そこで止まる (best-effort)。"""
-        msgs = [msg(f"m{i}", 100 + i) for i in range(6)]
-        result = plan(msgs, [], low=2_000, target=0)
-        # 候補は m0..m3 の 2 束まで。保護範囲 (m4,m5) には手を付けない。
-        self.assertEqual(len(result.folds), 2)
-        self.assertGreater(result.projected_chars, 0)
-
-    def test_stops_when_already_at_target(self):
-        msgs = [msg(f"m{i}", 100 + i) for i in range(3)]
-        result = plan(msgs, [], low=1_000, target=5_000)
-        self.assertTrue(result.is_empty)
-
-
-class FoldedPlaceholderTest(unittest.TestCase):
-    """§4-4: 既に畳んだ digest は再圧縮しない。跨いだ束ねも作らない。"""
-
-    def test_placeholder_is_not_refolded(self):
+    def test_cut_snaps_to_pulse_joint(self):
+        """U に達しても、いまの pulse を最後まで含めてから切る (発言の
+        切れ目に寄せる)。"""
         msgs = [
-            msg("folded:x", 100, chars=300, folded=True),
+            msg("a0", 100, pulse="p1"),
+            msg("a1", 101, pulse="p2"),
+            msg("a2", 102, pulse="p2"),  # a0+a1 で U 到達だが p2 の途中
+            msg("k0", 200), msg("k1", 201), msg("k2", 202),
+        ]
+        result = plan(msgs, keep=3_000)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["a0", "a1", "a2"])
+
+
+class NoEpisodeVetoTest(unittest.TestCase):
+    """エピソードに畳みを止める権利は無い (intent §4-1)。"""
+
+    def test_open_episode_is_folded_like_anything_else(self):
+        # 旧仕様なら open episode は単独畳み・二段構えの対象だった。
+        # 新仕様では帰属も開閉も畳みに影響しない — U で刻まれるだけ。
+        msgs = [
+            msg("a0", 100, ep="episode:1"),
+            msg("b0", 101, ep="episode:2"),
+            msg("k0", 200), msg("k1", 201),
+        ]
+        result = plan(msgs, keep=2_000)
+        self.assertEqual(len(result.folds), 1)
+        self.assertEqual(result.folds[0].message_ids, ["a0", "b0"])
+        # episode_refs は記録される (被覆元の錨 — 判定には使わない)。
+        self.assertEqual(result.folds[0].episode_refs, ["episode:1", "episode:2"])
+
+    def test_open_episode_ref_is_never_set(self):
+        """旧設計の部分エピソード記録 (open_episode_ref) は立てない。"""
+        msgs = [msg("a0", 100, ep="episode:1"), msg("a1", 101, ep="episode:1"),
+                msg("k0", 200), msg("k1", 201)]
+        result = plan(msgs, keep=2_000)
+        for fold in result.folds:
+            self.assertIsNone(fold.open_episode_ref)
+        self.assertFalse(result.used_last_resort_fold)
+
+
+class WallTest(unittest.TestCase):
+    """既に畳まれた置き換え (壁) の扱い。"""
+
+    def test_wall_is_not_folded(self):
+        msgs = [
+            msg("w0", 100, folded=True),
             msg("m0", 101), msg("m1", 102),
             msg("k0", 200), msg("k1", 201),
         ]
-        result = plan(msgs, [], low=2_000, target=2_000)
-        folded_ids = [mid for f in result.folds for mid in f.message_ids]
-        self.assertNotIn("folded:x", folded_ids)
+        result = plan(msgs, keep=2_000)
+        self.assertNotIn("w0", folded_ids(result))
+        self.assertEqual(len(result.folds), 1)
         self.assertEqual(result.folds[0].message_ids, ["m0", "m1"])
 
-    def test_placeholder_blocks_bundling_across_it(self):
+    def test_stranded_remainder_before_wall_is_folded_undersized(self):
+        """壁の手前の U 未満の端数は、残すと永久に取り残される (新入りは
+        末尾にしか来ない) ので、端数のまま畳む。"""
         msgs = [
-            msg("c0", 100),
-            msg("folded:x", 101, chars=300, folded=True),
-            msg("c1", 102),
+            msg("s0", 100, chars=500),      # 端数 (U 未満)
+            msg("w0", 101, folded=True),    # 壁
+            msg("m0", 102), msg("m1", 103),
             msg("k0", 200), msg("k1", 201),
         ]
-        # c0 + c1 = 2,000字 (U) だが、間の digest を跨いで束ねない。
-        result = plan(msgs, [], low=2_000, target=0)
-        mixed = [
-            f for f in result.folds
-            if "c0" in f.message_ids and "c1" in f.message_ids
-        ]
-        self.assertEqual(mixed, [])
+        result = plan(msgs, keep=2_000)
+        ids = [f.message_ids for f in result.folds]
+        self.assertIn(["s0"], ids)
+        self.assertIn(["m0", "m1"], ids)
+        self.assertNotIn("w0", folded_ids(result))
 
 
-class CompileGroupsFromFoldsTest(unittest.TestCase):
-    """編纂へ渡す範囲は「提示コンテキストの連続区間」であることを渡す側で検算する。
+class CompileGroupsTest(unittest.TestCase):
+    """compile_groups_from_folds — 連続性の検算 (偽の隣接の禁止)。"""
 
-    experience_structure.md §4-5 連続束ねのみ — 間に退場しない生ログが残る
-    範囲を一つのあらすじにすると、時系列の嘘 (偽の隣接) になる。
-    """
+    def test_contiguous_fold_passes_through(self):
+        presented = [msg(f"m{i}", 100 + i) for i in range(4)]
+        folds = [Fold(messages=presented[:2])]
+        groups = compile_groups_from_folds(folds, presented)
+        self.assertEqual(groups, [["m0", "m1"]])
 
-    def _folds(self, *id_groups):
-        return [
-            Fold(messages=[{"id": mid} for mid in ids]) for ids in id_groups
-        ]
-
-    def test_contiguous_folds_pass_through(self):
-        """正しい計画 (fold は連続・非重複) では何も割れない。"""
-        presented = [msg("m0", 100), msg("m1", 101), msg("m2", 102)]
-        groups = compile_groups_from_folds(
-            self._folds(["m0", "m1"], ["m2"]), presented,
-        )
-        self.assertEqual(groups, [["m0", "m1"], ["m2"]])
-
-    def test_fold_spanning_a_retained_message_is_split(self):
-        """fold の内側に退場しないメッセージ → その位置で割る。"""
-        presented = [msg("m0", 100), msg("m1", 101), msg("m2", 102)]
-        with self.assertLogs("sea.eviction_plan", "WARNING") as logs:
-            groups = compile_groups_from_folds(
-                self._folds(["m0", "m2"]), presented,  # m1 は退場しない
-            )
-        self.assertEqual(groups, [["m0"], ["m2"]])
-        self.assertTrue(any("またいでいる" in line for line in logs.output))
-
-    def test_retained_chronicle_excluded_message_is_a_hole(self):
-        """残るのが Chronicle 除外メッセージでも穴は穴。
-
-        編纂側は除外メッセージを落とした列しか見られないので、この形の抜けは
-        あちらでは原理的に検出できない。提示コンテキストの完全な並びを持つ
-        この層で割る (Codex 攻撃レビュー 三巡目 2026-07-27)。
-        """
-        presented = [
-            msg("m0", 100),
-            {"id": "spell0", "content": "x", "created_at": 101,
-             "metadata": {"tags": ["spell"]}},
-            msg("m2", 102),
-        ]
-        with self.assertLogs("sea.eviction_plan", "WARNING"):
-            groups = compile_groups_from_folds(
-                self._folds(["m0", "m2"]), presented,
-            )
-        self.assertEqual(groups, [["m0"], ["m2"]])
-
-    def test_excluded_message_evicted_together_is_not_a_hole(self):
-        """同じ fold で一緒に退場するなら穴ではない (提示コンテキストに何も残らない)。"""
-        presented = [
-            msg("m0", 100),
-            {"id": "spell0", "content": "x", "created_at": 101,
-             "metadata": {"tags": ["spell"]}},
-            msg("m2", 102),
-        ]
-        groups = compile_groups_from_folds(
-            self._folds(["m0", "spell0", "m2"]), presented,
-        )
-        self.assertEqual(groups, [["m0", "spell0", "m2"]])
-
-    def test_message_in_another_fold_is_not_a_hole(self):
-        """間にあるのが別 fold (今回一緒に退場する) なら割らない — 群として別なので束ねられない。"""
-        presented = [msg("m0", 100), msg("m1", 101), msg("m2", 102)]
-        groups = compile_groups_from_folds(
-            self._folds(["m0", "m2"], ["m1"]), presented,
-        )
-        self.assertEqual(groups, [["m0", "m2"], ["m1"]])
+    def test_fold_spanning_retained_message_is_split(self):
+        presented = [msg("m0", 100), msg("r0", 101), msg("m1", 102)]
+        folds = [Fold(messages=[presented[0], presented[2]])]
+        groups = compile_groups_from_folds(folds, presented)
+        self.assertEqual(groups, [["m0"], ["m1"]])
 
     def test_unplaced_ids_are_isolated(self):
-        """提示コンテキストに居ない id は位置不明 → 1 件ずつ孤立させる。
-
-        まとめて先頭の片へ寄せると、位置の根拠が無いまま隣接を作ってしまう
-        (編纂側 _run_group_keys の「所属不明は孤立」と揃える。
-        Codex 攻撃レビュー 四巡目 2026-07-27)。
-        """
         presented = [msg("m0", 100), msg("m1", 101)]
-        with self.assertLogs("sea.eviction_plan", "WARNING"):
-            groups = compile_groups_from_folds(
-                self._folds(["ghost1", "m0", "ghost2", "m1"]), presented,
-            )
-        self.assertEqual(groups, [["ghost1"], ["ghost2"], ["m0", "m1"]])
+        folds = [Fold(messages=[presented[0], presented[1], msg("ghost", 999)])]
+        groups = compile_groups_from_folds(folds, presented)
+        self.assertIn(["ghost"], groups)
+        self.assertIn(["m0", "m1"], groups)
 
-    def test_plan_eviction_output_is_never_split(self):
-        """実際の退場計画を通した往復では割れない (契約が守られていることの検算)。"""
-        msgs = [msg(f"m{i}", 100 + i) for i in range(8)]
-        result = plan(msgs, low=2_000, target=0)
-        self.assertTrue(result.folds)
-        with self.assertNoLogs("sea.eviction_plan", "WARNING"):
-            groups = compile_groups_from_folds(result.folds, msgs)
-        self.assertEqual(groups, [f.message_ids for f in result.folds])
+
+class GuardTest(unittest.TestCase):
+    """設定ミスの歯止め。"""
+
+    def test_tiny_target_chars_skips_eviction(self):
+        """U が置き換え見込み以下だと正味削減が常に 0 — 過剰退場になるので
+        退場を見送る (WARNING)。"""
+        msgs = [msg(f"m{i}", 100 + i) for i in range(6)]
+        result = plan_eviction(
+            msgs, set(), Watermarks(low=0, target=1_000, high=None),
+            target_chars=500,
+        )
+        self.assertTrue(result.is_empty)
 
 
 if __name__ == "__main__":

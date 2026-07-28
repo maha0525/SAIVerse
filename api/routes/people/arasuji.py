@@ -113,16 +113,6 @@ def estimate_chronicle_cost(
         model_name = (getattr(persona, "memory_weave_model", None)
                       or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL))
 
-        episode_digests = {}
-        if manager is not None:
-            try:
-                from saiverse.episodes import collect_episode_digest_index
-                episode_digests = collect_episode_digest_index(
-                    manager, persona_id, conn,
-                )
-            except Exception:
-                LOGGER.warning("[cost-estimate] episode digest index failed", exc_info=True)
-
         # 生成経路 (ジョブ) と同じ fold 集合で束ねコールを見積もる
         # (Codex 四巡 P1-b)。None = 照会失敗 → 生成が束ねを見送るのと同形。
         from sea.session_lifecycle import collect_folded_chronicle_entry_ids
@@ -135,7 +125,6 @@ def estimate_chronicle_cost(
         estimate = estimate_chronicle_generation_cost(
             conn,
             model_name=model_name,
-            episode_digests=episode_digests,
             excluded_entry_ids=(
                 frozenset(folded_entry_ids) if folded_entry_ids is not None else None
             ),
@@ -149,8 +138,6 @@ def estimate_chronicle_cost(
             estimated_cost_usd=estimate.estimated_cost_usd,
             model_name=estimate.model_name,
             is_free_tier=estimate.is_free_tier,
-            chunks_identity=estimate.chunks_identity,
-            chunks_episode=estimate.chunks_episode,
             currency=estimate.currency,
         )
     finally:
@@ -783,7 +770,6 @@ def _run_chronicle_generation(
     from sai_memory.arasuji import init_arasuji_tables
     from sai_memory.arasuji.alignment import (
         chronicle_band_budget,
-        chronicle_min_digest_chars,
         plan_alignment,
         truncate_plan,
     )
@@ -868,22 +854,11 @@ def _run_chronicle_generation(
             "WHERE level = 1"
         )
         processed_ids = {row[0] for row in cur.fetchall()}
-        episode_digests = {}
-        if manager is not None:
-            try:
-                from saiverse.episodes import collect_episode_digest_index
-                episode_digests = collect_episode_digest_index(
-                    manager, persona_id, conn,
-                )
-            except Exception:
-                LOGGER.warning("[Chronicle Gen] episode digest index failed", exc_info=True)
 
         plan = plan_alignment(
             all_messages,
             processed_ids,
-            episode_digests,
             target_chars=chronicle_band_budget(),
-            min_llm_chars=chronicle_min_digest_chars(),
         )
         plan = truncate_plan(plan, max_messages)
 
@@ -904,7 +879,7 @@ def _run_chronicle_generation(
                 "[Chronicle Gen] folds unknown; skipping band consolidation this round",
             )
         try:
-            from sai_memory.arasuji.bands import estimate_leaf_chars
+            from sai_memory.arasuji.bands import EST_PARENT_CHARS
             band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
                 conn,
                 extra_leaves=[
@@ -912,18 +887,11 @@ def _run_chronicle_generation(
                         c.coverage_chars,
                         min((m.created_at for m in c.messages), default=None),
                         max((m.created_at for m in c.messages), default=None),
-                        # digest 字数の実測見込み (Codex P1-3 — dry の発火
-                        # 過小評価を防ぐ)
-                        estimate_leaf_chars(c.kind, c.messages, c.digest_text),
+                        EST_PARENT_CHARS,
                     )
                     for c in plan.chunks
                 ],
                 excluded_entry_ids=folded_entry_ids or None,
-                # 編纂予定の生メッセージは dry の連続性判定で「未編纂」から
-                # 除外する (Codex 再レビュー 必須2 — 実行後の列を再現)
-                pending_source_ids={
-                    m.id for c in plan.chunks for m in c.messages
-                } or None,
             )
         except Exception:
             LOGGER.warning("[Chronicle Gen] band dry-plan failed", exc_info=True)
@@ -1080,6 +1048,8 @@ def _run_chronicle_generation(
                     cancel_check=cancel_check,
                     excluded_entry_ids=folded_entry_ids or None,
                     batch_callback=batch_callback,
+                    # 確認ゲートに提示した dry 件数を実行の上限にする
+                    max_folds=band_plan_count,
                 )
             except Exception:
                 LOGGER.exception("[Chronicle Gen] band overflow failed; continuing")

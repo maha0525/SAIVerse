@@ -266,12 +266,13 @@ class ChronicleClaimTest(unittest.TestCase):
     def test_band_backlog_counts_into_confirmation_gate(self):
         """⑩ 列のあふれ backlog の統合 LLM 予測が確認ゲートの LLM 数に乗り、
         plan が空でも列の統合だけの実行に進む (Codex W4 #3/#4)。"""
-        # 実 arasuji entries で次数 1 の列のあふれを作る (U=100/B=2 → cap 200)
+        # 実 arasuji entries でレベル1 の並びの予算超過を作る (上限 5,000 字:
+        # 9 × 600 = 5,400 > 5,000 → 畳みが 1 件計画される)
         from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
         init_arasuji_tables(self.adapter.conn)
-        for i in range(4):
+        for i in range(9):
             create_entry(
-                self.adapter.conn, level=1, content=f"lv1-{i}",
+                self.adapter.conn, level=1, content="x" * 600,
                 source_ids=[f"m{i}-src"],
                 start_time=100 * (i + 1), end_time=100 * (i + 1) + 99,
                 source_count=1, message_count=1,
@@ -289,12 +290,7 @@ class ChronicleClaimTest(unittest.TestCase):
         )
 
         order = []
-        with patch.dict(os.environ, {
-            # 発火は「未束ねのあらすじ字数合計 > 提示予算/4」(chronicle_consolidation
-            # §3)。fixture の字数合計 (~25字) で発火するよう予算を 40 (X=10) に。
-            "SAIVERSE_CHRONICLE_CHAR_BUDGET": "40",
-        }), \
-                patch("saiverse.model_configs.find_model_config",
+        with patch("saiverse.model_configs.find_model_config",
                       return_value=("mock-model", {"provider": "mock", "context_length": 1000})), \
                 patch("llm_clients.factory.get_llm_client", return_value=SimpleNamespace()), \
                 patch("sai_memory.arasuji.executor.execute_plan", FakeExecutor.execute_plan), \
@@ -572,11 +568,12 @@ class RetirementGateTest(unittest.TestCase):
 
 
 class EpisodeUnitEvictionTest(unittest.TestCase):
-    """退場は episode 単位 (docs/intent/chronicle_eviction.md §3/§5)。
+    """退場の形 (docs/intent/arasuji_levels.md §3/§4)。
 
-    open episode は単独でしか畳まず、U に届かないうちは生のまま残る。届いた
-    open は pulse 関節で刻んで部分退場する。closed 同士は episode をまたいで
-    束ねてよい。
+    残す量 (watermarks.target) より古い側を、古い順に U ずつ刻んで全部畳む。
+    エピソードに畳みを止める権利は無い — open episode も普通に畳まれ、
+    部分エピソード記録 (open_episode_ref) は立たない。切り位置は pulse 関節に
+    寄せる。
     """
 
     def setUp(self):
@@ -623,25 +620,27 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         return entry["anchor_id"] if entry else None
 
     def test_undersized_open_at_the_front_is_folded_so_the_anchor_advances(self):
-        """先頭の U 未満 open は最後の手段として畳まれ、anchor が進む (§5-5)。
+        """先頭の U 未満 open も普通に畳まれ、anchor が進む (拒否権の廃止)。
 
-        古い側に U 未満の open 会話、新しい側に保護範囲。他に畳めるものが無い
-        ので、ここを畳まないと anchor が永久に進まない。**U は優先度の材料で
-        あって、畳んでいいかの材料ではない。** 強制クローズ (旧 §5-5) は撤去済み
-        — 場所が足りないという理由でペルソナの出来事を終わらせない。
+        旧設計は open episode を守る二段構えを持ち、それが取り残しと恒久的な
+        詰まりの温床だった。新設計では帰属も開閉も畳みに影響しない。
         """
         ref = self._open_episode()["episode_ref"]
         msgs = [_msg(f"m{i}", 100 + i, chars=500, episode_ref=ref) for i in range(2)]
         msgs += [_msg(f"n{i}", 200 + i, chars=1_000) for i in range(3)]
         lifecycle = self._make_lifecycle("ok")
-        self._run(lifecycle, msgs, Watermarks(low=3_000, target=1_000, high=5_000))
-        # 先頭が畳めたので anchor が保護範囲の先頭 (n0) まで前進する。
-        self.assertEqual(self._anchor(lifecycle), "n0")
+        # 残す量 1,000字 → 保護は n2 のみ。候補 m0,m1,n0,n1 (3,000字) のうち
+        # U=2,000 で [m0,m1,n0] が畳まれ、端数 n1 は次回へ残る。
+        self._run(lifecycle, msgs, Watermarks(low=0, target=1_000, high=5_000))
+        self.assertEqual(self._anchor(lifecycle), "n1")
 
-    def test_large_open_episode_folds_in_pulse_units(self):
-        """U に達した open episode は pulse 関節で刻んで部分退場する (§6)。"""
+    def test_open_episode_folds_at_pulse_joint_without_partial_record(self):
+        """open episode の畳みは pulse 関節で切れ、部分エピソード記録は立たない。
+
+        旧設計の pulse 関節細分 (open_episode_ref → 子 episode 化) は
+        現設計の計画からは発火しない (intent §12-5 — 機構は休眠)。
+        """
         ref = self._open_episode()["episode_ref"]
-        # pulse p1 = 2 通 (2,000字) で U 到達。p2 以降は保護範囲側。
         msgs = [
             _msg("a0", 100, chars=1_000, episode_ref=ref, pulse_id="p1"),
             _msg("a1", 101, chars=1_000, episode_ref=ref, pulse_id="p1"),
@@ -651,10 +650,11 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         lifecycle = self._make_lifecycle("ok")
         folded = []
         lifecycle._record_partial_episode = lambda p, f: folded.append(f.message_ids)
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
-        # p1 が丸ごと退場し、anchor は a2 へ。p2 は保護範囲なので残る。
+        self._run(lifecycle, msgs, Watermarks(low=0, target=2_000, high=3_000))
+        # p1 が丸ごと退場し、anchor は a2 へ。p2 は残す量の側なので残る。
         self.assertEqual(self._anchor(lifecycle), "a2")
-        self.assertEqual(folded, [["a0", "a1"]])
+        # 部分エピソード記録は呼ばれない (計画が open_episode_ref を立てない)。
+        self.assertEqual(folded, [])
 
     def test_closed_episodes_bundle_across_boundaries(self):
         """closed 同士は episode をまたいで束ねて U に届かせる (§3)。"""
@@ -675,11 +675,11 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         self.assertEqual(self._anchor(lifecycle), "c2")
 
     def test_protected_band_is_never_evicted(self):
-        """低水位ぶんの直近は退場させない (§5-1 — 作業の直近が守られる)。"""
+        """残す量ぶんの直近は退場させない (作業の直近が守られる)。"""
         msgs = [_msg(f"m{i}", 100 + i, chars=1_000) for i in range(6)]
         lifecycle = self._make_lifecycle("ok")
-        self._run(lifecycle, msgs, Watermarks(low=4_000, target=1_000, high=5_000))
-        # 末尾 4,000字 (m2..m5) は保護。候補は m0/m1 の 2,000字 = U ちょうど。
+        self._run(lifecycle, msgs, Watermarks(low=0, target=4_000, high=5_000))
+        # 末尾 4,000字 (m2..m5) は残す量。候補は m0/m1 の 2,000字 = U ちょうど。
         self.assertEqual(self._anchor(lifecycle), "m2")
 
     def test_fold_without_chronicle_entry_is_not_evicted(self):
@@ -707,7 +707,8 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
         from sea.session_window import FoldedRange
         open_ref = self._open_episode()["episode_ref"]
         msgs = [
-            # 先頭は U 未満の open → 畳めない = anchor が動けない (圧縮区間が残る形)
+            # 先頭 a0 は既存の圧縮区間 [m1,m2] と同じ畳み範囲に入る → 重なり
+            # スキップで畳まれず、anchor は動けない (圧縮区間が残る形)
             _msg("a0", 100, chars=500, episode_ref=open_ref),
             _msg("m1", 101, chars=1_000), _msg("m2", 102, chars=1_000),
             _msg("m3", 103, chars=1_000), _msg("m4", 104, chars=1_000),
@@ -730,54 +731,24 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
                       lambda *a, **k: None):
             lifecycle.run_metabolism(
                 self._persona(msgs), "b", window,
-                # 一段目 (U 以上のみ) で目標に届く水位。最後の手段の経路を
-                # 誘発すると先頭も畳まれて anchor が進み、圧縮区間が残らない。
-                Watermarks(low=2_000, target=5_000, high=8_000), None,
+                # 残す量 2,000字 → 保護は k0/k1。候補 a0,m1..m4 のうち計画は
+                # [a0,m1,m2] と [m3,m4] を畳もうとするが、前者は既存の圧縮区間
+                # [m1,m2] と重なるので二重記録スキップされる。
+                Watermarks(low=0, target=2_000, high=8_000), None,
                 model_key="std-model",
             )
-        # m1/m2 は再度記録されず、新しく畳まれるのは m3/m4 だけ
+        # m1/m2 は再度記録されず、新しく畳まれるのは m3/m4 だけ。先頭 a0 は
+        # 畳まれなかった (重なりスキップ) ので anchor は動かない。
         self.assertEqual(len(saved), 1)
         self.assertEqual(
             [f.message_ids for f in saved[0]], [["m1", "m2"], ["m3", "m4"]],
         )
+        self.assertIsNone(self._anchor(lifecycle))
 
-    def test_partial_fold_records_closed_child_episode_with_digest(self):
-        """open episode の部分退場は、閉じた子 episode + 再訪の鍵として刻まれる。
-
-        experience_structure §6 (pulse 関節細分)。open/close/継承エッジは単一
-        トランザクション — close が落ちて「開きっぱなしの子」が残ると、それが
-        `get_open_episode` の「最後に開いた open」を奪い、以後の会話が合成
-        episode に付いてしまう。
-        """
-        from saiverse.episodes import get_by_ref, get_open_episode
-        from saiverse.experience_inheritance import get_parents
-        parent = self._open_episode()
-        ref = parent["episode_ref"]
-        msgs = [
-            _msg("a0", 100, chars=1_000, episode_ref=ref, pulse_id="p1"),
-            _msg("a1", 101, chars=1_000, episode_ref=ref, pulse_id="p1"),
-            _msg("a2", 102, chars=1_000, episode_ref=ref, pulse_id="p2"),
-            _msg("a3", 103, chars=1_000, episode_ref=ref, pulse_id="p2"),
-        ]
-        lifecycle = self._make_lifecycle("ok")
-        # 子 episode の記帳だけは本物を通す (この経路が検証対象)
-        del lifecycle._record_partial_episode
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=3_000))
-
-        # 親は開いたまま (長さを理由に出来事を分割しない §6)
-        self.assertEqual(get_by_ref(self.manager, PERSONA_ID, ref)["status"], "open")
-        # 子は closed + digest 参照つき
-        child = get_by_ref(self.manager, PERSONA_ID, "episode:2")
-        self.assertEqual(child["status"], "closed")
-        self.assertTrue(child["digest_ref"].startswith("chronicle:"))
-        self.assertEqual(child["meta"]["partial_of"], ref)
-        # 開きっぱなしの子は残らない (最後に開いた open は親のまま)
-        self.assertEqual(
-            get_open_episode(self.manager, PERSONA_ID)["episode_ref"], ref,
-        )
-        # 親 → 子 の継承エッジ (digest 層) が張られている
-        parents = get_parents(self.manager, PERSONA_ID, ref)
-        self.assertEqual([p["layer"] for p in parents], ["digest"])
+    # test_partial_fold_records_closed_child_episode_with_digest は削除 (2026-07-28):
+    # 部分エピソード記録 (open_episode_ref → 子 episode 化) は新計画から発火
+    # しない休眠機構になった (arasuji_levels.md §12-5)。不発火の保証は
+    # test_open_episode_folds_at_pulse_joint_without_partial_record が固定する。
 
     def test_anchor_moved_outside_eviction_clears_holes(self):
         """退場経路以外で anchor が差し替わったら圧縮区間を捨てる。
@@ -814,27 +785,11 @@ class EpisodeUnitEvictionTest(unittest.TestCase):
             [["z9"]],
         )
 
-    def test_middle_fold_keeps_anchor_and_records_hole(self):
-        """提示コンテキストの途中を畳んだときは anchor を動かさず圧縮区間として記録する (§6)。"""
-        open_ref = self._open_episode()["episode_ref"]
-        msgs = [
-            # 先頭は U 未満の open 会話 A → 畳めない = anchor は動けない
-            _msg("a0", 100, chars=500, episode_ref=open_ref),
-            # 続く無帰属 (closed 扱い) が U に到達 → 提示コンテキストの途中が畳まれる
-            _msg("b0", 101, chars=1_000),
-            _msg("b1", 102, chars=1_000),
-            _msg("k0", 200, chars=1_000),
-            _msg("k1", 201, chars=1_000),
-        ]
-        lifecycle = self._make_lifecycle("ok")
-        saved = []
-        lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
-        # 一段目で目標に届く水位 (4,500 → b0+b1 を畳んで 3,700)。最後の手段を
-        # 誘発しないので先頭の open 会話 A は生のまま = anchor は動けない。
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=4_000, high=5_000))
-        self.assertIsNone(self._anchor(lifecycle))
-        self.assertEqual(len(saved), 1)
-        self.assertEqual([f.message_ids for f in saved[0]], [["b0", "b1"]])
+    # test_middle_fold_keeps_anchor_and_records_hole は削除 (2026-07-28):
+    # 「先頭が畳めず途中だけ畳まれる」形は、拒否権を持つ旧計画でしか発生しない。
+    # 新計画は常に先頭からの連続畳み。途中の圧縮区間の記帳
+    # (anchor を動かさず folds に残す) は test_same_range_is_not_folded_twice
+    # (重なりスキップで先頭が残る形) が引き続き固定している。
 
 
 # ---------------------------------------------------------------------------
@@ -899,11 +854,11 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
         from saiverse.episodes import KIND_CONVERSATION, open_episode
         open_ref = open_episode(self.manager, PERSONA_ID, KIND_CONVERSATION)["episode_ref"]
         msgs = [
-            _msg("e0", 100, chars=500),                       # 除外タグのみの範囲
-            _msg("o0", 101, chars=500, episode_ref=open_ref),  # U 未満の open
+            _msg("e0", 100, chars=2_000),                      # 除外タグのみの範囲 (単独で U)
+            _msg("o0", 101, chars=500, episode_ref=open_ref),
             _msg("c0", 102, chars=1_000),
             _msg("c1", 103, chars=1_000),
-            _msg("k0", 200, chars=1_000),                      # 保護範囲
+            _msg("k0", 200, chars=1_000),                      # 残す量の側
             _msg("k1", 201, chars=1_000),
         ]
         lifecycle = self._make_lifecycle()
@@ -914,21 +869,22 @@ class ApplierVetoDeadlockTest(unittest.TestCase):
                     fold.chronicle_entry_ids = [f"entry-{i}"]
                     fold.chronicle_short_ids = [i + 1]
         lifecycle._attach_chronicle_refs = _attach
-        # 編纂対象判定: e0 だけが対象ゼロ
+        # 編纂対象判定: e0 を含む fold だけが対象ゼロ
         lifecycle._fold_has_chronicle_material = (
             lambda p, f: "e0" not in f.message_ids
         )
         saved = []
         lifecycle.save_folded_ranges = lambda pid, mk, folds: saved.append(folds)
 
-        self._run(lifecycle, msgs, Watermarks(low=2_000, target=2_000, high=5_000))
+        self._run(lifecycle, msgs, Watermarks(low=0, target=2_000, high=5_000))
 
-        # e0 が吸収されて anchor は o0 へ (旧実装: None のまま永久停止)
-        self.assertEqual(self._anchor(lifecycle), "o0")
-        # e0 は圧縮区間として残らない (見せる digest が無い)。残る圧縮区間は
-        # あらすじ持ちの c0/c1 だけ。
+        # 新計画は [e0] (U 到達で単独 fold) と [o0,c0,c1] を畳む。e0 の fold は
+        # あらすじゼロだが吸収限定で退場し (旧実装: 見送りで永久停止)、後続の
+        # fold も先頭から連続なので anchor が丸ごと飲み込んで k0 へ。
+        self.assertEqual(self._anchor(lifecycle), "k0")
+        # 飲み込まれた分は圧縮区間として残らない (head の Chronicle 枠が担当)。
         self.assertEqual(len(saved), 1)
-        self.assertEqual([f.message_ids for f in saved[0]], [["c0", "c1"]])
+        self.assertEqual(saved[0], [])
 
     def test_absorbed_fold_without_digest_records_no_child_episode(self):
         """digest を持たない吸収退場 (編纂対象ゼロの open fold) は子 episode を

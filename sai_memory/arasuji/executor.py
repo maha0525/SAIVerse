@@ -1,8 +1,8 @@
-"""Episode-aligned Chronicle chunk executor (体験の構造 工程(2)).
+"""Chronicle chunk executor (arasuji_levels.md — レベル0 の畳みの実行).
 
 alignment.plan_alignment が作った AlignmentPlan を実行し、一次あらすじを
 チャンク単位の単一トランザクションで確定する。設計正典は
-docs/handoff/2026-07-21_w4_metabolism_ledger_handoff.md D4。
+docs/intent/arasuji_levels.md (旧: 2026-07-21 W4 handoff D4)。
 
 原子性の契約 (M2 の解の生成側):
 
@@ -22,9 +22,6 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from sai_memory.arasuji.alignment import (
-    CHUNK_EPISODE_DIGEST,
-    CHUNK_IDENTITY,
-    CHUNK_LLM_BATCH,
     AlignmentPlan,
     PlannedChunk,
 )
@@ -72,14 +69,6 @@ def _is_already_compiled(conn: sqlite3.Connection, first_source_id: str) -> bool
     return row is not None
 
 
-def _identity_content(chunk: PlannedChunk, *, include_timestamp: bool) -> str:
-    """恒等圧縮 (§4-3) の content — 生ログをそのまま整形して置く (LLM なし)。"""
-    from sai_memory.arasuji.generator import _format_messages_for_prompt
-    return _format_messages_for_prompt(
-        chunk.messages, include_timestamp=include_timestamp,
-    )
-
-
 def _build_batch_prompt(
     chunk: PlannedChunk,
     conn: sqlite3.Connection,
@@ -118,6 +107,8 @@ def _build_batch_prompt(
         "- 固有名詞や重要な詳細は保持する",
         "- 感情や雰囲気も含める",
         "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
+        "- [作業のまとめ] と印の付いた項目は、既に要約された作業の記録です。"
+        "発言として引用せず、出来事の流れの一部として織り込む",
         "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
         "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
         "",
@@ -135,50 +126,38 @@ def _chunk_content(
     include_timestamp: bool,
     memopedia_context: Optional[str],
 ) -> str:
-    """チャンク種別ごとの content を得る (LLM は llm_batch のみ)。"""
-    if chunk.kind == CHUNK_EPISODE_DIGEST:
-        text = (chunk.digest_text or "").strip()
-        if not text:
-            raise ChunkExecutionError(
-                f"episode digest chunk has empty digest_text "
-                f"(episode_refs={chunk.episode_refs})"
-            )
-        return text
-    if chunk.kind == CHUNK_IDENTITY:
-        return _identity_content(chunk, include_timestamp=include_timestamp)
-    if chunk.kind == CHUNK_LLM_BATCH:
-        prompt = _build_batch_prompt(
-            chunk, conn,
-            include_timestamp=include_timestamp,
-            memopedia_context=memopedia_context,
+    """チャンクの content を得る (常に LLM 圧縮 — 小さくても要約する)。"""
+    prompt = _build_batch_prompt(
+        chunk, conn,
+        include_timestamp=include_timestamp,
+        memopedia_context=memopedia_context,
+    )
+    from llm_clients.exceptions import LLMError
+    try:
+        response = client.generate(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
         )
-        from llm_clients.exceptions import LLMError
-        try:
-            response = client.generate(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-            )
-            _record_llm_usage(client, persona_id, "chronicle_level1")
-        except LLMError as exc:
-            # 現行 generator と同じ契約: LLMError は文脈を付けて propagate
-            # (frontend がバッチナビゲーションに使う)。
-            exc.user_message = (
-                f"メッセージ {len(chunk.messages)} 件のチャンク処理中: "
-                f"{exc.user_message}"
-            )
-            exc.batch_meta = {
-                "message_ids": chunk.message_ids,
-                "start_time": min(m.created_at for m in chunk.messages),
-                "end_time": max(m.created_at for m in chunk.messages),
-            }
-            raise
-        content = (response or "").strip()
-        if not content:
-            raise ChunkExecutionError(
-                f"empty LLM response for chunk ({len(chunk.messages)} messages)"
-            )
-        return content
-    raise ChunkExecutionError(f"unknown chunk kind: {chunk.kind!r}")
+        _record_llm_usage(client, persona_id, "chronicle_level1")
+    except LLMError as exc:
+        # 現行 generator と同じ契約: LLMError は文脈を付けて propagate
+        # (frontend がバッチナビゲーションに使う)。
+        exc.user_message = (
+            f"メッセージ {len(chunk.messages)} 件のチャンク処理中: "
+            f"{exc.user_message}"
+        )
+        exc.batch_meta = {
+            "message_ids": chunk.message_ids,
+            "start_time": min(m.created_at for m in chunk.messages),
+            "end_time": max(m.created_at for m in chunk.messages),
+        }
+        raise
+    content = (response or "").strip()
+    if not content:
+        raise ChunkExecutionError(
+            f"empty LLM response for chunk ({len(chunk.messages)} messages)"
+        )
+    return content
 
 
 def execute_plan(
@@ -201,9 +180,8 @@ def execute_plan(
         conn: persona memory.db の connection。
         progress_callback: callback(processed_messages, total_messages)。
         batch_callback: callback(messages, entry_id)。Fragment 抽出
-            (entity_extractor) 用。llm_batch / episode_digest チャンクで呼ぶ
-            (identity は被覆が小さく抽出 LLM コストに見合わないためスキップ —
-            W4 D4 裁定)。
+            (entity_extractor) 用。全チャンクで呼ぶ (現設計は全チャンクが
+            LLM 圧縮 — 恒等圧縮の廃止で抽出の発火点はここに一本化された)。
         cancel_check: True を返すと以降のチャンクを中断 (確定済みは残る)。
 
     Returns:
@@ -303,7 +281,7 @@ def execute_plan(
             ",".join(chunk.episode_refs) or "-", entry.id[:8],
         )
 
-        if batch_callback and chunk.kind in (CHUNK_LLM_BATCH, CHUNK_EPISODE_DIGEST):
+        if batch_callback:
             try:
                 batch_callback(chunk.messages, entry.id)
             except Exception:

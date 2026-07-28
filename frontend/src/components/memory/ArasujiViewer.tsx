@@ -67,8 +67,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         estimated_cost_usd: number;
         model_name: string;
         is_free_tier: boolean;
-        chunks_identity?: number;
-        chunks_episode?: number;
         currency?: string;
     } | null>(null);
     const [generateSettings, setGenerateSettings] = useState({
@@ -317,8 +315,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
-    // Chronicle Generation (W4: チャンク分割は episode 整列 + サイズ束ねが
-    // 決めるため、バッチサイズ・統合サイズの設定は廃止)
+    // Chronicle Generation (チャンク分割は被覆字数 U で決まるため、
+    // バッチサイズ・統合サイズの設定は廃止)
     const fetchCostEstimate = useCallback(async () => {
         try {
             const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);

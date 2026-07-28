@@ -1,37 +1,32 @@
-"""Chronicle 束ね — 字数発火・質量選抜 (docs/intent/chronicle_consolidation.md).
+"""Chronicle 束ね — レベル別の並び + 予算超過で畳む一本規則 (docs/intent/arasuji_levels.md).
 
-旧「次数 + 列のあふれ駆動」(質量 U×B^k 発火・level 別の列) を 2026-07-27 に
-世代交代した。設計正典は docs/intent/chronicle_consolidation.md。
+旧「字数発火・質量選抜」(一本の列 + 比率10倍/卒業5倍/治療/非常弁) を
+2026-07-28 に世代交代した。設計正典は docs/intent/arasuji_levels.md。
 
 概念:
 
-- **列** = 未束ね (unconsolidated) General ノードを時系列に並べた一本の列。
-  level 別の列は廃止 — 質量の違うノードが一本の列に混在する。`level` は
-  表示用の導出キャッシュ (親 = max(子)+1)。
-- **質量** = coverage_chars (被覆生ログ字数)。**あらすじの字数** = digest
-  テキスト自体の長さ。両者は比例しない (圧縮率が実測 0.10〜1.11) — これが
-  旧設計 (質量発火・字数提示) の断絶の根。
-- **発火** = 列の (束ね対象になれる) あらすじ字数合計 > X。X は提示予算
-  (SAIVERSE_CHRONICLE_CHAR_BUDGET, 既定2万字) の 1/4 — 独立ノブを作らない。
-- **群** = 束ねの単位。列の連続部分列で三条件を満たすもの:
-  ①比率 (質量 max/min ≤ 10) ②連続性 (壁も未編纂の生ログも跨がない — 偽の
-  隣接 §4-5 の禁止) ③卒業 (親質量 = 子の合算 ≥ 群内最大の 5 倍。質量が
-  伸びない束ねの忍び寄りを封じ、圧縮回数の有限性を log5 で保証する)。
-- **治療** = 卒業に到達できず軽い側で行き詰まったノード/群 (束ね不能) を、
-  比率免除で後ろ (新しい側) の隣人へ合流させる回収路。状態は単調悪化
-  (隣の質量は増える一方・新入りは最新端のみ) なので発火を待たず検知即実行。
-- **非常弁** = 発火したのに束ねも治療も打てない予見外の形に限り、最古の
-  隣接2件を比率無視で束ねる (WARNING 必須。平常発火ゼロが健全)。
+- **並び** = 同じレベルの未束ね (unconsolidated) ノードを時系列に並べたもの。
+  レベルごとに独立の並びを持つ (レベル混在の一本列は廃止)。
+- **予算** = 並びごとの「上限」と「残す量」の 2 つの数 (字数 = digest テキスト
+  自体の長さ)。合計字数が上限を超えたら発火し、古い側を「残す量」に収まる
+  まで切り取って 1 個の親に畳み、1 つ上のレベルの並びへ送る。
+  上限と残す量の差がバッファ — 発火は「たまに・まとめて」が正しい
+  (少しずつ畳む形は提示を頻繁に変えて LLM キャッシュを壊す)。
+- **レベル分離** = 畳んだ結果は自分の並びに戻らず 1 つ上へ行く。同じ内容が
+  再要約される回数はこの構造だけで log 有限になる (無限圧縮の防止)。
+- メンバーの大きさ (被覆 coverage_chars) は**判定に使わない**。被覆は
+  「あらすじ → 元の体験」を辿る錨・統計としてだけ記録し続ける (intent §3-5)。
+- 材料には各項目の**種別** (あらすじ / 生ログ断片) を明示して LLM に渡す —
+  イレギュラーな混入があっても機構も LLM も壊れないため (intent §3-4)。
 
-判定はすべて決定論 — LLM が決めるのはあらすじ本文だけ (責任分界 §2)。
+判定はすべて決定論 — LLM が決めるのはあらすじ本文だけ。
 
-原子性 (M2-a の解): 親 INSERT + 子 mark_consolidated を**単一トランザク
-ション**で確定し、tx 内で全子が未束ねのままかを再検査する (並走ジョブが
-同じ子列を束ねた場合は放棄)。
+原子性: 親 INSERT + 子 mark_consolidated を**単一トランザクション**で確定し、
+tx 内で全子が未束ねのままかを再検査する (並走ジョブが同じ子列を束ねた場合は
+放棄)。
 
 :func:`plan_band_overflow` は同じ計画ロジックの dry 実行 — LLM を呼ばずに
-束ね回数を予測する (確認ゲートの LLM 数・コスト見積もりが実行と同じ計画を
-共有する)。
+束ね回数 (連鎖含む) を予測する。
 """
 
 from __future__ import annotations
@@ -39,7 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.arasuji.storage import (
@@ -50,22 +45,18 @@ from sai_memory.arasuji.storage import (
     get_max_level,
     mark_consolidated,
 )
-from sai_memory.memory.storage import (
-    CHRONICLE_EXCLUDED_LINE_ROLES,
-    CHRONICLE_EXCLUDED_TAGS,
-)
 
 LOGGER = logging.getLogger(__name__)
 
-#: 1 回の run_band_overflow で走らせる LLM コール (束ね+治療+非常弁) の上限。
+#: 1 回の run_band_overflow で走らせる LLM コール (束ね) の上限。
 DEFAULT_MAX_CONSOLIDATIONS_PER_RUN = 3
 
-#: 群の比率条件 — 質量の最大/最小がこの倍率以内なら同じ群になれる。
-MASS_RATIO_LIMIT = 10
+#: レベル 1 以上の各並びの予算 — 上限 (これを超えたら発火)。intent §9。
+BAND_CHAR_LIMIT = 5_000
 
-#: 卒業条件 — 親質量 (子の合算) が群内最大メンバーの質量のこの倍以上のとき
-#: だけ束ねる (跳躍の下限。まはー裁定 2026-07-27 で 10→5 に緩和)。
-GRADUATION_FACTOR = 5
+#: レベル 1 以上の各並びの予算 — 残す量 (畳み後にこの字数まで残す)。
+#: 上限との差がバッファ = 発火間隔。intent §9。
+BAND_CHAR_KEEP = 2_500
 
 #: 計画時の親あらすじ字数の見込み (LLM 指示は 5〜8 文 ≒ 500 字)。
 EST_PARENT_CHARS = 500
@@ -74,26 +65,10 @@ EST_PARENT_CHARS = 500
 def estimate_leaf_chars(kind: str, messages: Sequence, digest_text) -> int:
     """extra_leaves の第4要素 (これから確定するチャンクの digest 字数見込み)。
 
-    dry 予測と実行の乖離を抑える (Codex レビュー P1-3): 恒等圧縮は content が
-    生ログ+タイムスタンプ等の装飾なので実長+装飾見込みで、episode 転写は
-    digest 本文が既知なので実長で見積もる。LLM 束ねだけが未知 (≒500字)。
-    完全一致は原理的に無理 (LLM 出力長は事前に分からない) — 見積もりの
-    ズレは発火閾値の境界でしか効かない。
+    dry 予測と実行の乖離を抑える: LLM 束ねの出力長は未知 (≒500字)。
+    完全一致は原理的に無理 — 見積もりのズレは発火閾値の境界でしか効かない。
     """
-    from sai_memory.arasuji.alignment import CHUNK_EPISODE_DIGEST, CHUNK_IDENTITY
-
-    if kind == CHUNK_IDENTITY:
-        return sum(len(m.content or "") for m in messages) + 40 * len(messages)
-    if kind == CHUNK_EPISODE_DIGEST and digest_text:
-        return len(str(digest_text).strip())
     return EST_PARENT_CHARS
-
-
-def fire_threshold() -> int:
-    """発火閾値 X = 提示予算の 1/4 (独立ノブを作らない — intent §3)。"""
-    from sai_memory.arasuji.context import USE_DEFAULT_BUDGET, _resolve_char_budget
-
-    return max(1, _resolve_char_budget(USE_DEFAULT_BUDGET) // 4)
 
 
 def _max_consolidations_per_run() -> int:
@@ -109,7 +84,7 @@ def _max_consolidations_per_run() -> int:
 
 
 # ---------------------------------------------------------------------------
-# coverage_chars — 帰化バックフィル (D7)
+# coverage_chars — 帰化バックフィル (統計・錨として維持。判定には使わない)
 # ---------------------------------------------------------------------------
 
 #: 全 source が引けないときの近似: digest は原文の約 1/10 という圧縮率仮定。
@@ -117,21 +92,20 @@ _COVERAGE_FALLBACK_RATIO = 10
 
 
 def backfill_coverage(conn: sqlite3.Connection) -> int:
-    """coverage_chars の無い既存 entry に被覆字数を刻む (帰化 §11-3)。
+    """coverage_chars の無い既存 entry に被覆字数を刻む。
 
     - level 1: source_ids → messages.content 長合計 (欠損 source は引けた分
       のみ。全滅時は content 長 × 10 の圧縮率近似)。
     - level 2+: 子 entry の coverage 合計 (level 昇順に処理するので子は先に
       埋まっている)。子欠損は同近似。
     - source / 子の**一部でも**引けなかった entry には ``coverage_estimated``
-      マーカーを付ける (過小評価の可能性を観測可能にする — Codex W4 #10)。
+      マーカーを付ける (過小評価の可能性を観測可能にする)。
 
     冪等 (coverage_chars が入っている entry はスキップ)。LLM なし。
     戻り値 = 埋めた entry 数。
 
     metadata の read-modify-write を並走書き込み (束ねの is_consolidated
-    更新等) と競合させないため、全体を **BEGIN IMMEDIATE の単一 tx** で行う
-    (Codex W4 四巡 #1)。
+    更新等) と競合させないため、全体を **BEGIN IMMEDIATE の単一 tx** で行う。
     """
     filled = 0
     if not conn.in_transaction:
@@ -212,7 +186,7 @@ def _backfill_coverage_locked(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 列の読み出し (実行 / dry 共通)
+# 並びの読み出し (実行 / dry 共通)
 # ---------------------------------------------------------------------------
 
 
@@ -220,8 +194,7 @@ def _coverage_index(conn: sqlite3.Connection) -> dict:
     """全 Chronicle entry の {id: coverage_chars}。
 
     未 backfill (coverage_chars なし) の entry は content 長 × 圧縮率近似で
-    読む — dry 予測は backfill より先に走ることがあり、0 扱いだと未帰化 DB
-    で band call をゼロ予測して確認ゲートを素通りする (Codex W4 二巡 #3)。
+    読む — dry 予測は backfill より先に走ることがあるため。
     """
     rows = conn.execute(
         "SELECT id, json_extract(metadata, '$.coverage_chars'), "
@@ -240,33 +213,37 @@ def _coverage_index(conn: sqlite3.Connection) -> dict:
 
 
 @dataclass
-class _ColumnItem:
-    """列の 1 ノード (実 entry / dry の模擬ノード共用)。"""
+class _RowItem:
+    """並びの 1 ノード (実 entry / dry の模擬ノード共用)。"""
 
     coverage: int
     chars: int
     start_time: Optional[int]
     end_time: Optional[int]
     entry: Optional[ArasujiEntry] = None  # dry の模擬ノードでは None
-    excluded: bool = False  # 圧縮区間として提示中 — 数えないが境界にはなる
+    excluded: bool = False  # 圧縮区間として提示中 — 畳まず、字数も数えない
+    #: 直前のノードとの間に「未編纂の編纂対象メッセージ」が居る = 畳み範囲は
+    #: この手前で切れる (跨ぐと偽の隣接になり、後から編纂されたあらすじが
+    #: 親の被覆範囲に内包されて孤児化する — Codex レビュー 2026-07-28 high1)。
+    gap_before: bool = False
 
     @property
     def safe_coverage(self) -> int:
         return max(1, self.coverage)
 
 
-def _load_column(
+def _load_rows(
     conn: sqlite3.Connection,
     *,
     excluded_entry_ids: Optional[Set[str]] = None,
-) -> List[_ColumnItem]:
-    """列 = 未束ね General ノードの時系列列 (level 混在の一本)。
+) -> Dict[int, List[_RowItem]]:
+    """レベル別の並び = {level: 未束ねノードの時系列列}。
 
-    - 孤児 (他 entry の被覆範囲に真に内包される未束ねノード) は列から外す —
-      回収は治療 §5-2 の管轄 (未実装の間は現状維持で残る)。
+    - 孤児 (他 entry の被覆範囲に真に内包される未束ねノード) は並びから外す —
+      畳むと同じ体験を二重に覆うため (回収は別課題、現状維持で残る)。
     - ``excluded_entry_ids`` (圧縮区間として提示コンテキストに表示中の digest)
-      は X の勘定からも束ね対象からも外すが、**列の境界としては残す**
-      (excluded マーク)。外して詰めると、その体験を跨いだ偽の隣接ができる。
+      は字数の勘定からも畳み対象からも外すが、**並びには残す** (excluded
+      マーク)。畳みの範囲はこれを跨がない。
     """
     from sai_memory.arasuji.storage import _ENTRY_COLUMNS, _row_to_entry
 
@@ -286,12 +263,12 @@ def _load_column(
     ).fetchall()
 
     excluded = excluded_entry_ids or set()
-    out: List[_ColumnItem] = []
+    out: Dict[int, List[_RowItem]] = {}
     for row in rows:
         entry = _row_to_entry(row)
         if _is_orphan(entry, ranges):
             continue
-        out.append(_ColumnItem(
+        out.setdefault(entry.level, []).append(_RowItem(
             coverage=coverage.get(entry.id, 0),
             chars=len(entry.content or ""),
             start_time=entry.start_time,
@@ -299,34 +276,22 @@ def _load_column(
             entry=entry,
             excluded=entry.id in excluded,
         ))
+    for level, level_row in out.items():
+        _mark_uncompiled_gaps(conn, level, level_row)
     return out
 
 
-def _is_orphan(entry: ArasujiEntry, ranges: Sequence[Tuple]) -> bool:
-    """他 entry の被覆範囲に真に内包されるか (少なくとも片側が strict)。"""
-    if entry.start_time is None or entry.end_time is None:
-        return False
-    for other_id, st, et in ranges:
-        if other_id == entry.id or st is None or et is None:
-            continue
-        st_i, et_i = int(st), int(et)
-        if st_i <= entry.start_time and entry.end_time <= et_i:
-            if st_i < entry.start_time or entry.end_time < et_i:
-                return True
-    return False
-
-
 def _edge_source_rowid(
-    conn: sqlite3.Connection, item: "_ColumnItem", *, newest: bool,
+    conn: sqlite3.Connection, item: "_RowItem", *, newest: bool,
 ) -> Optional[int]:
     """item の境界側 source メッセージの rowid (正典順序の端点)。
 
-    正典順序は ``(created_at, rowid)`` の辞書式なので、境界「秒」だけでは
-    端点を厳密に表せない (Codex 再レビュー 必須3)。lv1 entry なら source_ids
-    から端のメッセージの rowid を引けるので、その created_at が entry の境界
-    時刻と一致するときだけ rowid を返す (不一致 = 境界秒に source が無い =
-    秒比較へフォールバック)。上位 entry / dry の模擬ノードは None (保守側 =
-    秒の閉区間で見る)。
+    messages の正典順序は ``(created_at, rowid)`` の辞書式なので、境界「秒」
+    だけでは端点を厳密に表せない。lv1 entry なら source_ids から端の
+    メッセージの rowid を引けるので、その created_at が entry の境界時刻と
+    一致するときだけ rowid を返す (不一致 = 境界秒に source が無い = 秒比較へ
+    フォールバック)。上位 entry / dry の模擬ノードは None (保守側 = 秒の
+    閉区間で見る)。
     """
     entry = item.entry
     if entry is None or entry.level != 1 or not entry.source_ids:
@@ -346,393 +311,192 @@ def _edge_source_rowid(
     return int(row[0])
 
 
-def _uncompiled_gap(
-    conn: sqlite3.Connection,
-    prev: "_ColumnItem",
-    nxt: "_ColumnItem",
-    pending_json: Optional[str] = None,
-) -> bool:
-    """隣接ノード間のギャップに「未編纂の生ログ」が居るか (連続性条件)。
+def _mark_uncompiled_gaps(
+    conn: sqlite3.Connection, level: int, row: List[_RowItem],
+) -> None:
+    """隣接ノード間に「まだこのレベルまで上がってきていない体験」が居る境界へ
+    印を付ける。2 種類を見る:
 
-    Chronicle 対象タグのメッセージで、**どの一次あらすじの source_ids にも
-    入っていない**ものがギャップ内に存在するなら True — そこを跨ぐ束ねは
-    偽の隣接 (§4-5) になる。
+    1. **未編纂の編纂対象メッセージ** (どの一次あらすじの source にも入って
+       いない生ログ)。跨いで畳むと、親は間の体験を材料にしないまま地続きに
+       語る (偽の隣接)。さらに間の生ログが後から一次あらすじ化されると、その
+       新エントリは親の被覆時間範囲に真に内包され、孤児判定で**永久に**並び
+       から除外される (Codex レビュー 2026-07-28 high1)。
+    2. **未統合の下位レベルノード** (level < このレベル、区間に重なる範囲)。
+       レベル2 以上の並びでは、間の生ログが一次あらすじ化された「直後」も
+       まだレベル2 に上がっていない — その一次あらすじを跨いで上位親を作ると
+       同じ孤児化が起きる (同レビュー二巡 high1)。
 
-    判定は時間範囲の近似でなく source 帰属 (lv1 の source_ids 逆引き) で行う
-    (Codex レビュー P1-2, 2026-07-27): messages の正典順序は
-    ``(created_at, rowid)`` の辞書式なので、entry 境界と同じ秒に rowid 違いの
-    未編纂メッセージが挟まりうる。区間は境界の端点で見る — lv1 同士の隣接では
-    端の source の rowid まで含めた keyset 比較 (:func:`_edge_source_rowid`)、
-    rowid を引けない側は秒の閉区間 (保守側 = 偽ギャップは束ねを待たせるだけで
-    自然解消する。逆向きの誤りは偽の隣接 = 不可逆)。
+    定常運転では起きない (レベル0 は古い側から漏れなく畳む) が、手動生成の
+    途中打ち切りや旧世代の取り残しでは現実に起きる形。
 
-    ``pending_json`` (JSON 配列の文字列) は「これから編纂される予定のメッセージ
-    id」— dry 予測 (:func:`plan_band_overflow`) が新チャンク確定後の世界を
-    再現するための除外集合 (Codex 再レビュー 必須2: これが無いと dry では
-    模擬ノード自身の生ログが未編纂ギャップに見え、実行と列の形が食い違う)。
+    1 の区間の端点は正典順序 ``(created_at, rowid)`` のキーセットで見る
+    (:func:`_edge_source_rowid`)。rowid を引けない側は秒の閉区間 (保守側 =
+    偽の境界は畳みを待たせるだけで、間の体験が畳まれれば自然解消する。
+    逆向きの誤りは偽の隣接 = 不可逆)。
     """
-    prev_end, next_start = prev.end_time, nxt.start_time
-    if prev_end is None or next_start is None:
-        return False
-    if next_start < prev_end:
-        return False
-    prev_rowid = _edge_source_rowid(conn, prev, newest=True)
-    next_rowid = _edge_source_rowid(conn, nxt, newest=False)
+    from sai_memory.memory.storage import chronicle_eligibility_filter
 
-    params: List = []
-    if prev_rowid is not None:
-        lower = "(m.created_at > ? OR (m.created_at = ? AND m.rowid > ?))"
-        params += [prev_end, prev_end, prev_rowid]
-    else:
-        lower = "m.created_at >= ?"
-        params += [prev_end]
-    if next_rowid is not None:
-        upper = "(m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))"
-        params += [next_start, next_start, next_rowid]
-    else:
-        upper = "m.created_at <= ?"
-        params += [next_start]
-    pending_clause = ""
-    if pending_json:
-        pending_clause = (
-            "AND m.id NOT IN (SELECT value FROM json_each(?)) "
-        )
-        params.append(pending_json)
+    clause, params = chronicle_eligibility_filter()
+    for i in range(1, len(row)):
+        prev, nxt = row[i - 1], row[i]
+        if prev.end_time is None or nxt.start_time is None:
+            continue
+        if nxt.start_time < prev.end_time:
+            continue
+        # 1. 未編纂の生ログ (正典順序キーセット)
+        prev_rowid = _edge_source_rowid(conn, prev, newest=True)
+        next_rowid = _edge_source_rowid(conn, nxt, newest=False)
+        sql_params: List = []
+        if prev_rowid is not None:
+            lower = "(created_at > ? OR (created_at = ? AND rowid > ?))"
+            sql_params += [prev.end_time, prev.end_time, prev_rowid]
+        else:
+            lower = "created_at >= ?"
+            sql_params += [prev.end_time]
+        if next_rowid is not None:
+            upper = "(created_at < ? OR (created_at = ? AND rowid < ?))"
+            sql_params += [nxt.start_time, nxt.start_time, next_rowid]
+        else:
+            upper = "created_at <= ?"
+            sql_params += [nxt.start_time]
+        hit = conn.execute(
+            f"""
+            SELECT 1 FROM messages
+            WHERE {lower} AND {upper}
+            AND {clause}
+            AND NOT EXISTS (
+                SELECT 1 FROM arasuji_entries a, json_each(a.source_ids_json) s
+                WHERE a.level = 1 AND s.value = messages.id
+            )
+            LIMIT 1
+            """,
+            tuple(sql_params) + params,
+        ).fetchone()
+        # 2. 未統合の下位レベルノード (レベル2 以上の並びのみ)
+        if hit is None and level > 1:
+            hit = conn.execute(
+                "SELECT 1 FROM arasuji_entries "
+                "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
+                "AND (is_incomplete IS NULL OR is_incomplete = 0) "
+                "AND level < ? AND end_time >= ? AND start_time <= ? "
+                "LIMIT 1",
+                (level, prev.end_time, nxt.start_time),
+            ).fetchone()
+        if hit is not None:
+            nxt.gap_before = True
 
-    tag_ph = ",".join("?" for _ in CHRONICLE_EXCLUDED_TAGS)
-    role_ph = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
-    row = conn.execute(
-        f"""
-        SELECT 1 FROM messages m
-        WHERE {lower} AND {upper}
-        {pending_clause}
-        AND m.thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-        AND NOT EXISTS (
-            SELECT 1 FROM json_each(m.metadata, '$.tags')
-            WHERE json_each.value IN ({tag_ph})
-        )
-        AND (m.line_role IS NULL OR m.line_role NOT IN ({role_ph}))
-        AND NOT EXISTS (
-            SELECT 1
-            FROM memopedia_pages p, json_each(p.metadata, '$.source_ids') s
-            WHERE p.category = 'chronicle'
-            AND json_extract(p.metadata, '$.level') = 1
-            AND s.value = m.id
-        )
-        LIMIT 1
-        """,
-        tuple(params) + CHRONICLE_EXCLUDED_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES,
-    ).fetchone()
-    return row is not None
+
+def _is_orphan(entry: ArasujiEntry, ranges: Sequence[Tuple]) -> bool:
+    """他 entry の被覆範囲に真に内包されるか (少なくとも片側が strict)。"""
+    if entry.start_time is None or entry.end_time is None:
+        return False
+    for other_id, st, et in ranges:
+        if other_id == entry.id or st is None or et is None:
+            continue
+        st_i, et_i = int(st), int(et)
+        if st_i <= entry.start_time and entry.end_time <= et_i:
+            if st_i < entry.start_time or entry.end_time < et_i:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
-# 群の区切りと計画 (実行 / dry 共通の決定論)
+# 計画 (実行 / dry 共通の決定論)
 # ---------------------------------------------------------------------------
-
-#: 群と群の間の境界の種類。'ratio' = 質量比率で割れた (治療の対象になりうる) /
-#: 'gap' = 未編纂の生ログが挟まる (後で埋まりうる — 待つ) /
-#: 'excluded' = 提示中の圧縮区間 digest が挟まる (anchor 前進で列に来る — 待つ)
-_BOUNDARY_RATIO = "ratio"
-_BOUNDARY_GAP = "gap"
-_BOUNDARY_EXCLUDED = "excluded"
 
 
 @dataclass
-class _Run:
-    items: List[_ColumnItem] = field(default_factory=list)
-    boundary_after: Optional[str] = None  # None = 列の最新端
+class _Fold:
+    """計画された 1 畳み — level の並びの古い側 items を 1 個の親にする。"""
 
-    @property
-    def max_coverage(self) -> int:
-        return max((i.safe_coverage for i in self.items), default=0)
-
-    @property
-    def min_coverage(self) -> int:
-        return min((i.safe_coverage for i in self.items), default=0)
-
-    @property
-    def total_coverage(self) -> int:
-        return sum(i.safe_coverage for i in self.items)
-
-    @property
-    def total_chars(self) -> int:
-        return sum(i.chars for i in self.items)
+    level: int
+    items: List[_RowItem]
 
 
-def _partition_runs(
-    conn: sqlite3.Connection,
-    column: Sequence[_ColumnItem],
-    pending_json: Optional[str] = None,
-) -> List[_Run]:
-    """列を「比率10倍以内・連続」の群 (run) に区切る。
+def _plan_fold_for_level(row: Sequence[_RowItem]) -> Optional[List[_RowItem]]:
+    """並び 1 本の発火判定と畳み範囲の決定。
 
-    excluded ノードは群に入らず、境界 (excluded) として前の群を閉じる。
-    ``pending_json`` は dry 予測用の「編纂予定メッセージ id」除外
-    (:func:`_uncompiled_gap` 参照)。
+    合計字数 (excluded を除く) が上限を超えたら、新しい側に「残す量」だけを
+    残して、古い側の連続部分を畳み範囲にする。
+
+    範囲が跨げない境界は 2 種類 — excluded (提示中の圧縮区間) と gap_before
+    (間に未編纂の生ログが居る = 偽の隣接の禁止)。境界で刻んだ区間のうち、
+    **2 件以上ある最古の区間**を畳む。最古の区間が 1 件でも、その先の区間は
+    独立に畳める (先頭だけを見て打ち切ると、一時的な境界の手前 1 件が
+    その後ろの過予算区間を永久に人質に取る — Codex レビュー 2026-07-28 high3)。
+
+    どの区間も 2 件未満なら畳まない (1 個を 1 個に要約し直すのは無意味 —
+    次の到着か境界の解消を待つ)。
     """
-    runs: List[_Run] = []
-    current = _Run()
-    for item in column:
+    eligible_chars = sum(i.chars for i in row if not i.excluded)
+    if eligible_chars <= BAND_CHAR_LIMIT:
+        return None
+    # 新しい側から「残す量」ぶんを確保し、その手前までが畳み範囲の候補。
+    keep = 0
+    cut = len(row)
+    for i in range(len(row) - 1, -1, -1):
+        if row[i].excluded:
+            continue
+        if keep + row[i].chars > BAND_CHAR_KEEP:
+            break
+        keep += row[i].chars
+        cut = i
+    prefix = row[:cut]
+    # 境界 (excluded / gap_before) で連続区間に刻む。
+    segments: List[List[_RowItem]] = []
+    current: List[_RowItem] = []
+    for item in prefix:
         if item.excluded:
-            if current.items:
-                current.boundary_after = _BOUNDARY_EXCLUDED
-                runs.append(current)
-            elif runs and runs[-1].boundary_after is None:
-                runs[-1].boundary_after = _BOUNDARY_EXCLUDED
-            current = _Run()
+            if current:
+                segments.append(current)
+            current = []
             continue
-        if not current.items:
-            current.items.append(item)
-            continue
-        prev = current.items[-1]
-        if _uncompiled_gap(conn, prev, item, pending_json):
-            current.boundary_after = _BOUNDARY_GAP
-            runs.append(current)
-            current = _Run(items=[item])
-            continue
-        new_max = max(current.max_coverage, item.safe_coverage)
-        new_min = min(current.min_coverage, item.safe_coverage)
-        if new_max > new_min * MASS_RATIO_LIMIT:
-            current.boundary_after = _BOUNDARY_RATIO
-            runs.append(current)
-            current = _Run(items=[item])
-            continue
-        current.items.append(item)
-    if current.items:
-        runs.append(current)
-    return runs
-
-
-def _find_bundle_windows(items: Sequence[_ColumnItem]) -> List[List[_ColumnItem]]:
-    """卒業する束ねの窓を、連続性区間の中から重ならない形で全て列挙する。
-
-    窓の条件は群の三条件のうち②③ (①連続性は呼び出し側が区間で保証):
-    比率 (窓内の質量 max/min ≤ 10) と卒業 (合算 ≥ GRADUATION_FACTOR × 窓内最大)。
-
-    **比率の区切りより窓が先** (Codex レビュー P1-1, 2026-07-27): 先に列全体を
-    比率で群に区切ると、重い頭が射程を伸ばして軽い並びを分断し、本来卒業できる
-    窓 (例: [1000, 101×4, 99×2] の中の [101×4, 99×2]) を見落とす。窓探しは
-    区間の生の並びに対して行い、比率は窓ごとに検査する。
-
-    各開始位置で「比率が保てる限り伸ばして、卒業が成立している最長の窓」を
-    取り、見つけたら次の窓はその直後から探す (重ならない = 同一 plan 内で子を
-    取り合わない)。**全部列挙するのは、実行順の「軽い群から」を窓の発見順で
-    先取りしないため** — 同じ区間に重い窓と軽い窓が並ぶとき、どれを今回の
-    枠で使うかは :func:`_plan_actions` の並べ替えが決める。
-    2 件未満の窓は束ねにならないので対象外。
-    """
-    windows: List[List[_ColumnItem]] = []
-    n = len(items)
-    start = 0
-    while start < n - 1:
-        lo = hi = items[start].safe_coverage
-        total = items[start].safe_coverage
-        best_end: Optional[int] = None
-        for j in range(start + 1, n):
-            cov = items[j].safe_coverage
-            lo, hi = min(lo, cov), max(hi, cov)
-            if hi > lo * MASS_RATIO_LIMIT:
-                break
-            total += cov
-            if total >= GRADUATION_FACTOR * hi:
-                best_end = j
-        if best_end is not None:
-            windows.append(list(items[start:best_end + 1]))
-            start = best_end + 1
-        else:
-            start += 1
-    return windows
-
-
-#: 計画された 1 アクション。kind: 'bundle' (卒業束ね) / 'treatment' (治療合流) /
-#: 'valve' (非常弁)。
-@dataclass
-class _Action:
-    kind: str
-    items: List[_ColumnItem]
-
-    @property
-    def max_coverage(self) -> int:
-        return max((i.safe_coverage for i in self.items), default=0)
-
-    @property
-    def chars_saved(self) -> int:
-        return sum(i.chars for i in self.items) - EST_PARENT_CHARS
-
-
-def _plan_actions(
-    conn: sqlite3.Connection,
-    column: Sequence[_ColumnItem],
-    *,
-    max_actions: int,
-    pending_json: Optional[str] = None,
-) -> List[_Action]:
-    """発火判定と群の選抜 — 実行 (run) と dry 予測 (plan) が共有する決定論。
-
-    1. 治療は発火と無関係に常時 (束ね不能は単調悪化するので待つ利益がない)。
-       窓のある区間でも、窓と重ならない残余の治療は探索する (Codex 再レビュー
-       必須1 — 区間単位のスキップは治療の即時性を破る)
-    2. 発火 (字数 > X) していれば、卒業する窓 (:func:`_find_bundle_windows`) を
-       束ね候補に。区間 = 比率境界で繋がった群の並び — 窓探しは区間の生の
-       並びに対して行う (Codex レビュー P1-1)
-    3. 最新端の育ち中の群は、他のアクションで X を割れるなら猶予
-    4. 軽いアクション (最大メンバーが小さい) から、上限 max_actions 件
-    5. 発火したのに何も打てない予見外の形だけ、非常弁 (最古の隣接2件)
-    """
-    eligible_chars = sum(i.chars for i in column if not i.excluded)
-    threshold = fire_threshold()
-    fired = eligible_chars > threshold
-
-    runs = _partition_runs(conn, column, pending_json)
-    actions: List[_Action] = []
-
-    # 連続性区間 = 'ratio' 境界で繋がった run の並び。区間の切れ目は
-    # gap / excluded / 列の最新端だけ。
-    segments: List[Tuple[List[int], Optional[str]]] = []
-    seg_start = 0
-    for idx, run in enumerate(runs):
-        if run.boundary_after != _BOUNDARY_RATIO:
-            segments.append((list(range(seg_start, idx + 1)), run.boundary_after))
-            seg_start = idx + 1
-    is_open_ended = bool(runs) and runs[-1].boundary_after is None
-
-    for seg_indices, _seg_boundary in segments:
-        seg_items: List[_ColumnItem] = []
-        for ri in seg_indices:
-            seg_items.extend(runs[ri].items)
-        windows = _find_bundle_windows(seg_items)
-        for window in windows:
-            # 窓が列の末尾に届き、かつ列が開いている (最新端) なら育ち中。
-            is_newest = (
-                is_open_ended
-                and seg_indices[-1] == len(runs) - 1
-                and window[-1] is seg_items[-1]
-            )
-            actions.append(_Action(
-                kind="bundle_newest" if is_newest else "bundle",
-                items=window,
-            ))
-        # 束ね不能 (軽い側で行き詰まり) の治療 — 窓の有無に関わらず探索する
-        # (Codex 再レビュー 必須1)。窓との交差はここでは見ない — 候補の窓は
-        # 発火・上限・猶予でまだ落ちうるので、実行されない窓で治療をブロック
-        # しないよう、衝突の解決は最終選抜の後 (下の重なり除去) で行う
-        # (Codex 三巡 P1-A)。区間内の境界は全て 'ratio'。gap / excluded 境界の
-        # 先・最新端は「後で埋まる・戻ってくる・まだ育つ」ので待つ。
-        consumed = 0
-        for pos, ri in enumerate(seg_indices):
-            run = runs[ri]
-            avail = run.items[consumed:]
-            consumed = 0
-            if not avail:
-                continue
-            if pos == len(seg_indices) - 1:
-                continue  # 区間の最後の群 — 隣は gap/excluded/列端の向こう
-            next_run = runs[seg_indices[pos + 1]]
-            if not next_run.items:
-                continue
-            neighbor = next_run.items[0]
-            if neighbor.safe_coverage <= max(i.safe_coverage for i in avail):
-                continue  # 自分が重い側 — 隣が育って戻ってくるのを待つ
-            actions.append(_Action(kind="treatment", items=avail + [neighbor]))
-            consumed = 1  # 次の群の先頭を取った
-
-    # 発火していなければ束ねは落とす (治療は常時)。
-    if not fired:
-        actions = [a for a in actions if a.kind == "treatment"]
-
-    # 軽い群から (重い群が先に梯子を登ると比率差が永久に開く)。
-    actions.sort(key=lambda a: a.max_coverage)
-
-    # 選抜: 重なり除去 → 上限 → 最新端の猶予。猶予でアクションが落ちたら
-    # **候補から除いて選抜をやり直す** (Codex 四巡 P1-a — 猶予で落ちる窓は
-    # 「実行されない窓」なので、それが重なり除去で治療を負かしたままだと
-    # 治療がブロックされる。実行されないアクションは子を予約しない、を
-    # 選抜全体の不変条件にする)。猶予対象 (bundle_newest) は高々 1 系統
-    # なのでループは 2 周で必ず止まる。
-    candidates = actions
-    while True:
-        # 重なり除去 — 同じ子を二つのアクションに入れない。軽い順に先着で
-        # 確定し、負けた側は次回の Metabolism で再計画される (勝った側が
-        # 束ねられれば、負けた治療はより良い相手 = 窓の親を得る)。
-        selected: List[_Action] = []
-        used_ids: Set[int] = set()
-        for a in candidates:
-            item_ids = {id(x) for x in a.items}
-            if item_ids & used_ids:
-                continue
-            selected.append(a)
-            used_ids |= item_ids
-        selected = selected[:max_actions]
-
-        # 最新端の育ち中の群は、他のアクションで X を割れるなら猶予する。
-        newest = [a for a in selected if a.kind == "bundle_newest"]
-        if newest and fired:
-            others_saved = sum(
-                a.chars_saved for a in selected if a.kind != "bundle_newest"
-            )
-            if eligible_chars - others_saved <= threshold:
-                candidates = [
-                    a for a in candidates if a.kind != "bundle_newest"
-                ]
-                continue
-        break
-    actions = selected
-    for a in actions:
-        if a.kind == "bundle_newest":
-            a.kind = "bundle"
-
-    # 非常弁: 発火したのに何も打てない予見外の形。
-    if fired and not actions:
-        newest_ids = {id(i) for i in runs[-1].items} if runs else set()
-        pair = _oldest_adjacent_pair(conn, column, newest_ids, pending_json)
-        if pair is not None:
-            actions = [_Action(kind="valve", items=list(pair))]
-        else:
-            LOGGER.debug(
-                "[bands] fired (%d chars > %d) but no action available — "
-                "column is waiting (growing newest run / heavy heads / gaps)",
-                eligible_chars, threshold,
-            )
-    return actions
-
-
-def _oldest_adjacent_pair(
-    conn: sqlite3.Connection,
-    column: Sequence[_ColumnItem],
-    newest_run_ids: Set[int],
-    pending_json: Optional[str] = None,
-) -> Optional[Tuple[_ColumnItem, _ColumnItem]]:
-    """非常弁の対象 — 最古の隣接2件 (比率の壁だけを免除する)。
-
-    列の並びをそのまま歩き、次は跨がない:
-
-    - excluded (提示中の圧縮区間) / gap (未編纂の生ログ) — 体験が挟まっている
-    - 最新端の育ち中の群の中 — まだメンバーが増えるので待つのが正常
-    - 質量の逆転 (古い側が新しい側の10倍超) — 巨大な頭を小粒へ溶かす merge は
-      どの目的にも合わない。非常弁も「軽い側を重い側へ」だけ
-    - **U (一次あらすじの標準被覆) 以上のノード** — 非常弁は小粒の圧縮止まり。
-      重い頭 (束ね済みの親たち) は正常な待機状態でも列に並ぶので、非常弁が
-      それを溶かすと「治療が尽きた過渡期に古い記憶が余分に再要約される」。
-      歯止めは目的 (重い記憶を巻き込まない) から導く
-    """
-    from sai_memory.arasuji.alignment import chronicle_band_budget
-
-    u = chronicle_band_budget()
-    for i in range(len(column) - 1):
-        a, b = column[i], column[i + 1]
-        if a.excluded or b.excluded:
-            continue
-        if id(a) in newest_run_ids or id(b) in newest_run_ids:
-            continue
-        if a.safe_coverage >= u or b.safe_coverage >= u:
-            continue
-        if a.safe_coverage > b.safe_coverage * MASS_RATIO_LIMIT:
-            continue
-        if _uncompiled_gap(conn, a, b, pending_json):
-            continue
-        return a, b
+        if item.gap_before and current:
+            segments.append(current)
+            current = []
+        current.append(item)
+    if current:
+        segments.append(current)
+    for segment in segments:
+        if len(segment) >= 2:
+            return segment
     return None
+
+
+def _plan_folds(rows: Dict[int, List[_RowItem]]) -> List[_Fold]:
+    """全レベルの畳み計画 (連鎖含む) — 実行と dry 予測が共有する決定論。
+
+    レベル昇順に処理する。畳んだ親 (字数 EST_PARENT_CHARS 見込み) を 1 つ上の
+    並びの末尾に加えてから上のレベルを判定するので、連鎖 (レベル1 の畳みが
+    レベル2 を溢れさせる) も計画に含まれる。
+
+    rows は破壊的に更新される (呼び出し側は使い捨てにすること)。
+    """
+    folds: List[_Fold] = []
+    level = 1
+    while level <= max(rows.keys(), default=0):
+        row = rows.get(level, [])
+        while True:
+            fold = _plan_fold_for_level(row)
+            if fold is None:
+                break
+            folds.append(_Fold(level=level, items=fold))
+            starts = [i.start_time for i in fold if i.start_time is not None]
+            ends = [i.end_time for i in fold if i.end_time is not None]
+            parent = _RowItem(
+                coverage=sum(i.safe_coverage for i in fold),
+                chars=EST_PARENT_CHARS,
+                start_time=min(starts) if starts else None,
+                end_time=max(ends) if ends else None,
+            )
+            # 畳んだのは必ずしも並びの先頭ではない (境界で刻んだ最古の区間)。
+            # 同一オブジェクトを取り除く。
+            fold_ids = {id(i) for i in fold}
+            row[:] = [i for i in row if id(i) not in fold_ids]
+            rows.setdefault(level + 1, []).append(parent)
+        level += 1
+    return folds
 
 
 # ---------------------------------------------------------------------------
@@ -747,55 +511,38 @@ def plan_band_overflow(
     excluded_entry_ids: Optional[Set[str]] = None,
     pending_source_ids: Optional[Set[str]] = None,
 ) -> int:
-    """束ね (+治療) の発生回数を LLM なしで予測する。
+    """束ねの発生回数 (連鎖含む) を LLM なしで予測する。
 
-    :func:`run_band_overflow` と同じ計画 (:func:`_plan_actions`) を共有する
-    ので、予測と実行は同じアクション列になる。
+    :func:`run_band_overflow` と同じ計画 (:func:`_plan_folds`) を共有する。
 
     Args:
-        extra_leaves: これから確定する新チャンクの
-            ``(coverage_chars, start_time, end_time[, est_chars])`` 列。列に
-            加算して予測する (確認ゲートは実行前に呼ぶため)。第4要素は digest
-            字数の見込み — 恒等圧縮チャンクは content が生ログ+装飾なので、
-            呼び出し側が実長で渡さないと dry が発火を過小評価し、実行時に
-            見積もり外の LLM コールが増える (Codex レビュー P1-3)。省略時は
-            ``min(coverage, EST_PARENT_CHARS)`` で近似する。
+        extra_leaves: これから確定する新チャンク (レベル1) の
+            ``(coverage_chars, start_time, end_time[, est_chars])`` 列。
+            並びに加算して予測する (確認ゲートは実行前に呼ぶため)。
         excluded_entry_ids: 圧縮区間として提示中の digest entry id 集合。
-        pending_source_ids: extra_leaves が覆う予定の生メッセージ id 集合。
-            dry の連続性判定でこれを「未編纂」から除外し、新チャンク確定後の
-            世界を再現する (Codex 再レビュー 必須2 — 渡さないと模擬ノード
-            自身の生ログがギャップに見え、実行と列の形が食い違う)。
+        pending_source_ids: 旧設計 (連続性ギャップ判定) の名残り。現設計では
+            使わない — 呼び出し側互換のため受け取るだけ。
 
     Returns:
         予測される LLM コール回数。
     """
-    column = _load_column(conn, excluded_entry_ids=excluded_entry_ids)
+    rows = _load_rows(conn, excluded_entry_ids=excluded_entry_ids)
     if extra_leaves:
+        row1 = rows.setdefault(1, [])
         for leaf in extra_leaves:
             cov_i = int(leaf[0])
             st, et = leaf[1], leaf[2]
             chars = int(leaf[3]) if len(leaf) > 3 and leaf[3] is not None else (
                 min(cov_i, EST_PARENT_CHARS)
             )
-            column.append(_ColumnItem(
-                coverage=cov_i,
-                chars=chars,
-                start_time=st,
-                end_time=et,
+            row1.append(_RowItem(
+                coverage=cov_i, chars=chars, start_time=st, end_time=et,
             ))
-        column.sort(key=lambda i: (
+        row1.sort(key=lambda i: (
             i.end_time if i.end_time is not None else 0,
             i.start_time if i.start_time is not None else 0,
         ))
-    pending_json = (
-        json.dumps(sorted(pending_source_ids)) if pending_source_ids else None
-    )
-    actions = _plan_actions(
-        conn, column,
-        max_actions=_max_consolidations_per_run(),
-        pending_json=pending_json,
-    )
-    return len(actions)
+    return len(_plan_folds(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -805,13 +552,17 @@ def plan_band_overflow(
 
 def _build_consolidation_prompt(
     entries: List[ArasujiEntry],
+    origins: Dict[str, Optional[str]],
     conn: sqlite3.Connection,
-    *,
-    include_timestamp: bool = True,
 ) -> str:
-    """親 digest を子 digest 群から語り直すプロンプト (§4-4 で正当)。"""
+    """親 digest を子 digest 群から語り直すプロンプト。
+
+    材料には種別を明示する (intent §3-4): 通常はあらすじだが、旧設計の
+    恒等圧縮などで生ログ断片が並びに残っていても、LLM が「あらすじの列に
+    会話の断片が混ざっている」ことを理解して前後の文脈に織り込めるように。
+    """
     from sai_memory.arasuji.context import get_episode_context_for_timerange
-    from sai_memory.arasuji.generator import _format_entries_for_prompt
+    from sai_memory.arasuji.generator import _format_timestamp
 
     starts = [e.start_time for e in entries if e.start_time is not None]
     ends = [e.end_time for e in entries if e.end_time is not None]
@@ -820,17 +571,29 @@ def _build_consolidation_prompt(
         context = get_episode_context_for_timerange(
             conn, start_time=min(starts), end_time=max(ends), max_entries=10,
         )
-    entries_text = _format_entries_for_prompt(
-        entries, include_timestamp=include_timestamp,
-    )
+
+    has_fragment = False
+    lines: List[str] = []
+    for i, entry in enumerate(entries, 1):
+        start = _format_timestamp(entry.start_time)
+        end = _format_timestamp(entry.end_time)
+        if origins.get(entry.id) == "identity":
+            has_fragment = True
+            lines.append(f"### 材料 {i} 【生ログ断片】 ({start} ~ {end})")
+        else:
+            lines.append(f"### 材料 {i} 【あらすじ】 ({start} ~ {end})")
+        lines.append(entry.content)
+        lines.append("")
+    entries_text = "\n".join(lines)
+
     parts = [
-        f"以下の{len(entries)}個のあらすじを統合し、一段粗い視点の「まとめのあらすじ」を書いてください。",
+        f"以下の{len(entries)}個の材料を統合し、一段粗い視点の「まとめのあらすじ」を書いてください。",
         "",
     ]
     if context:
         parts.extend(["## さらに前の出来事（参考）", context, ""])
     parts.extend([
-        "## 統合対象のあらすじ",
+        "## 統合対象の材料",
         entries_text,
         "",
         "## 指示",
@@ -838,6 +601,13 @@ def _build_consolidation_prompt(
         "- 重要な転換点や印象的なエピソードを保持する",
         "- 個々の詳細より「どんな時期だったか」を重視する",
         "- 時系列順に書く",
+    ])
+    if has_fragment:
+        parts.append(
+            "- 【生ログ断片】は要約前の会話の断片です。前後のあらすじの流れに"
+            "自然に織り込んでください（無視しない・そのまま引用しない）"
+        )
+    parts.extend([
         "- **前置き（「以下にまとめます」等）や見出し（「【あらすじ】」等）は書かないでください**（本文のみ出力）",
         "",
         "統合されたあらすじを日本語で書いてください。",
@@ -848,7 +618,7 @@ def _build_consolidation_prompt(
 def _all_children_unconsolidated(
     conn: sqlite3.Connection, entry_ids: Sequence[str],
 ) -> bool:
-    """全子がまだ未束ねか (束ね tx 内の再検査 — Codex W4 #2)。"""
+    """全子がまだ未束ねか (束ね tx 内の再検査)。"""
     for eid in entry_ids:
         row = conn.execute(
             "SELECT json_extract(metadata, '$.is_consolidated') "
@@ -863,7 +633,7 @@ def _all_children_unconsolidated(
 def _digest_origins(
     conn: sqlite3.Connection, entry_ids: Sequence[str],
 ) -> Dict[str, Optional[str]]:
-    """{entry_id: digest_origin} — 恒等圧縮の子の判定用。"""
+    """{entry_id: digest_origin} — 恒等圧縮の子の判定用 (既存データ互換)。"""
     if not entry_ids:
         return {}
     ph = ",".join("?" for _ in entry_ids)
@@ -880,9 +650,9 @@ def _fire_identity_fragment_callbacks(
     entries: Sequence[ArasujiEntry],
     batch_callback: Optional[Callable],
 ) -> None:
-    """恒等圧縮の子の Fragment 抽出 (intent §7)。
+    """恒等圧縮の子の Fragment 抽出 (既存データ互換)。
 
-    恒等圧縮は生ログのまま一次あらすじの席にいたので、束ね/治療で**初めて
+    旧設計の恒等圧縮は生ログのまま一次あらすじの席にいたので、束ねで**初めて
     要約に変わる**この瞬間が「生ログが要約に置き換わる瞬間に一度だけ抽出」の
     実行点。LLM 束ね済みの子の範囲は既に抽出済みなので走らせない (Fragment
     の重複と参照切れを避ける)。chronicle_entry_id は恒等圧縮の子自身。
@@ -919,20 +689,23 @@ def _load_messages_by_ids(conn: sqlite3.Connection, message_ids: Sequence[str]):
     return [_row_to_message(r) for r in rows]
 
 
-def _consolidate_action(
+def _consolidate_fold(
     conn: sqlite3.Connection,
     client,
-    action: _Action,
+    fold: _Fold,
     *,
     persona_id: Optional[str],
     batch_callback: Optional[Callable] = None,
+    known_ids: Optional[Set[str]] = None,
 ) -> Optional[ArasujiEntry]:
-    """アクション 1 件 (束ね/治療/非常弁) を親ノードに確定する (親 + 子を単一 tx)。"""
-    entries = [i.entry for i in action.items if i.entry is not None]
-    if len(entries) != len(action.items) or len(entries) < 2:
+    """畳み 1 件を親ノードに確定する (親 + 子を単一 tx)。"""
+    entries = [i.entry for i in fold.items if i.entry is not None]
+    if len(entries) != len(fold.items) or len(entries) < 2:
         return None
-    target_level = max(e.level for e in entries) + 1
-    prompt = _build_consolidation_prompt(entries, conn)
+    target_level = fold.level + 1
+    child_ids = [e.id for e in entries]
+    origins = _digest_origins(conn, child_ids)
+    prompt = _build_consolidation_prompt(entries, origins, conn)
     from sai_memory.arasuji.generator import _record_llm_usage
     try:
         response = client.generate(
@@ -941,42 +714,85 @@ def _consolidate_action(
         _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
     except Exception:
         LOGGER.exception(
-            "[bands] consolidation LLM failed (kind=%s, %d entries)",
-            action.kind, len(entries),
+            "[bands] consolidation LLM failed (level=%d, %d entries)",
+            fold.level, len(entries),
         )
         return None
     content = (response or "").strip()
     if not content:
-        LOGGER.warning("[bands] empty consolidation response (kind=%s)", action.kind)
+        LOGGER.warning(
+            "[bands] empty consolidation response (level=%d)", fold.level,
+        )
         return None
 
     starts = [e.start_time for e in entries if e.start_time is not None]
     ends = [e.end_time for e in entries if e.end_time is not None]
-    total_coverage = sum(i.coverage for i in action.items)
-    child_ids = [e.id for e in entries]
+    total_coverage = sum(i.coverage for i in fold.items)
     extra_metadata = {
         "digest_origin": "band",
         "coverage_chars": total_coverage,
     }
-    if action.kind != "bundle":
-        extra_metadata["band_kind"] = action.kind
     try:
-        # tx 内再検査 (Codex W4 #2/二巡 #2/三巡 #2): BEGIN IMMEDIATE で write
-        # ロックを取ってから子の未統合を確認する — SELECT は暗黙 BEGIN を張らない
-        # ため、ロックなしでは二接続が同時に「全子未統合」を読める。
-        # 既に tx 内なら参加する (旧実装からの前提)。通常経路は backfill /
-        # execute_plan が commit 済みで clean に入る — 未確定の他所の書き込みを
-        # 抱えた conn で呼ぶと、それも巻き込んで commit/rollback される
-        # (Codex レビュー P2 で確認済みの既存性質。呼び出し側の契約)。
+        # tx 内再検査: BEGIN IMMEDIATE で write ロックを取ってから子の未統合を
+        # 確認する — SELECT は暗黙 BEGIN を張らないため、ロックなしでは二接続が
+        # 同時に「全子未統合」を読める。既に tx 内なら参加する (呼び出し側の契約)。
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
         if not _all_children_unconsolidated(conn, child_ids):
             conn.rollback()
             LOGGER.warning(
                 "[bands] consolidation abandoned: children consolidated "
-                "concurrently (kind=%s)", action.kind,
+                "concurrently (level=%d)", fold.level,
             )
             return None
+        # ギャップ不変条件の tx 内再検査 (Codex レビュー 2026-07-28 三〜四巡):
+        # 計画〜LLM 応答の間に別経路 (CLI / API / Metabolism) が畳み区間へ
+        # 挿入を行っていると、古い計画のまま確定すれば跨ぎ親 = 恒久孤児化に
+        # なる。write ロック取得後に検査し直し、増えていたら放棄する
+        # (次の発火が再計画する)。2 段:
+        #
+        # 1. 未編纂メッセージ / 下位レベルノードの境界 (計画時と同じ判定)。
+        # 2. 親の時間範囲に内包される**計画後に新規出現した未統合ノード**
+        #    (レベル不問 — 同一レベルの並走挿入は 1 に掛からない。四巡 high)。
+        #    判定は計画時スナップショット (``known_ids``) との差分 — 計画時から
+        #    居たノード (同一秒に並ぶ畳まれない兄弟や、境界の向こうの区間) を
+        #    侵入と誤認すると、状態が変わらないまま毎回 LLM 課金して放棄する
+        #    永久停止になる (五巡 high)。読み直しは孤児除外済みの _load_rows —
+        #    既存の孤児 (旧データ) を誤検知しないため。
+        for item in fold.items:
+            item.gap_before = False
+        _mark_uncompiled_gaps(conn, fold.level, list(fold.items))
+        if any(item.gap_before for item in fold.items):
+            conn.rollback()
+            LOGGER.warning(
+                "[bands] consolidation abandoned: a gap appeared inside the "
+                "fold while waiting for the LLM (level=%d)", fold.level,
+            )
+            return None
+        span_start = min(starts) if starts else None
+        span_end = max(ends) if ends else None
+        if span_start is not None and span_end is not None:
+            child_id_set = set(child_ids)
+            planned_known = known_ids or set()
+            fresh_rows = _load_rows(conn)
+            for fresh_row in fresh_rows.values():
+                for fresh in fresh_row:
+                    e = fresh.entry
+                    if (
+                        e is None or e.id in child_id_set
+                        or e.id in planned_known
+                        or e.start_time is None or e.end_time is None
+                    ):
+                        continue
+                    if span_start <= e.start_time and e.end_time <= span_end:
+                        conn.rollback()
+                        LOGGER.warning(
+                            "[bands] consolidation abandoned: an unplanned "
+                            "unconsolidated node appeared inside the fold span "
+                            "while waiting for the LLM (level=%d, intruder=%s)",
+                            fold.level, e.id[:8],
+                        )
+                        return None
         parent = create_entry(
             conn,
             level=target_level,
@@ -997,14 +813,14 @@ def _consolidate_action(
         except Exception:
             pass
         LOGGER.exception(
-            "[bands] consolidation tx failed (kind=%s); rolled back", action.kind,
+            "[bands] consolidation tx failed (level=%d); rolled back", fold.level,
         )
         return None
     LOGGER.info(
-        "[bands] %s: %d nodes -> level %d (coverage=%d chars, parent=%s)",
-        action.kind, len(entries), target_level, total_coverage, parent.id[:8],
+        "[bands] fold: %d nodes level %d -> %d (coverage=%d chars, parent=%s)",
+        len(entries), fold.level, target_level, total_coverage, parent.id[:8],
     )
-    # Fragment 抽出は commit 後 (executor.py:306 と同型の位置)。
+    # Fragment 抽出は commit 後 (executor.py の batch_callback と同型の位置)。
     _fire_identity_fragment_callbacks(conn, entries, batch_callback)
     return parent
 
@@ -1017,38 +833,59 @@ def run_band_overflow(
     cancel_check: Optional[Callable[[], bool]] = None,
     excluded_entry_ids: Optional[Set[str]] = None,
     batch_callback: Optional[Callable] = None,
+    max_folds: Optional[int] = None,
 ) -> int:
-    """列を検査し、計画されたアクション (束ね/治療/非常弁) を実行する。
+    """レベル別の並びを検査し、予算超過の畳みを実行する。
 
-    計画は :func:`_plan_actions` — dry 予測 (:func:`plan_band_overflow`) と
-    同じ決定論を共有する。1 回の呼び出しの LLM コールは安全弁 (既定 3) まで。
+    計画は :func:`_plan_folds` — dry 予測 (:func:`plan_band_overflow`) と同じ
+    決定論を共有する。実行は 1 畳みごとに DB から並びを読み直す (LLM の実際の
+    出力長が見込みとズレても、次の畳みの判定は実際の値で行われる)。
+    1 回の呼び出しの LLM コールは安全弁 (既定 3) まで。
 
     Args:
         excluded_entry_ids: 圧縮区間として提示コンテキストに表示中の digest
-            entry id 集合 (列の勘定・束ね対象から外し、境界としてだけ残す)。
+            entry id 集合 (字数の勘定・畳み対象から外し、畳み範囲は跨がない)。
         batch_callback: Fragment 抽出コールバック
             ``(List[Message], chronicle_entry_id) -> None``。恒等圧縮の子が
-            初めて要約に変わる束ね/治療でのみ、その子の生メッセージで呼ぶ。
+            初めて要約に変わる束ねでのみ、その子の生メッセージで呼ぶ。
+        max_folds: 確認ゲートで承認された dry 予測件数。指定時は実行をこの
+            件数までで止める — LLM の実出力が予測 (500字) より長いと連鎖が
+            dry より増えることがあり、承認・課金見込みを実行が超えてはいけない
+            (Codex レビュー 2026-07-28 high2)。積み残しは次回の Metabolism の
+            dry が数え直して、次の承認のもとで畳まれる (収束は崩れない)。
 
     Returns:
         作った親ノード数。
     """
-    column = _load_column(conn, excluded_entry_ids=excluded_entry_ids)
-    actions = _plan_actions(conn, column, max_actions=_max_consolidations_per_run())
     created = 0
-    for action in actions:
+    limit = _max_consolidations_per_run()
+    if max_folds is not None:
+        limit = min(limit, max(0, max_folds))
+    while created < limit:
         if cancel_check and cancel_check():
             break
-        if action.kind == "valve":
-            LOGGER.warning(
-                "[bands] last-resort valve fired: bundling oldest adjacent pair "
-                "ratio-free (column stuck above fire threshold). This should "
-                "never happen in normal operation — investigate the column shape.",
-            )
-        parent = _consolidate_action(
-            conn, client, action,
+        rows = _load_rows(conn, excluded_entry_ids=excluded_entry_ids)
+        # 計画時に見えている未統合ノードの id 集合 — tx 内再検査の
+        # 「計画後に新規出現したか」の基準 (_plan_folds は rows を消費するので
+        # 先に取る)。
+        known_ids = {
+            item.entry.id
+            for row in rows.values() for item in row
+            if item.entry is not None
+        }
+        folds = _plan_folds(rows)
+        # 計画の先頭 (最も低いレベルの最初の畳み) だけ実行して読み直す。
+        fold = next((f for f in folds if all(
+            i.entry is not None for i in f.items
+        )), None)
+        if fold is None:
+            break
+        parent = _consolidate_fold(
+            conn, client, fold,
             persona_id=persona_id, batch_callback=batch_callback,
+            known_ids=known_ids,
         )
-        if parent is not None:
-            created += 1
+        if parent is None:
+            break
+        created += 1
     return created
