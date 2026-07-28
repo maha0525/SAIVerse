@@ -163,12 +163,22 @@ def get_supplementary_user_conversation_messages(
         return [], None
 
     try:
+        # line_role / scope の空欄は legacy 行 (Phase 1 以前 + 転記経路) で、
+        # 文脈構築の絞り込み (_payload_passes_context_filter) は空欄を
+        # main_line / committed 扱いに救済する。ここだけ完全一致で書くと、
+        # 転記されたユーザー発言 (line_role 空欄) が構造的に全滅し、補完が
+        # ペルソナ側の発言だけになる (2026-07-29 実害: anchor リセット後の
+        # プレビューが「片側だけの会話」になった)。
+        legacy_main_committed = (
+            "AND (line_role = 'main_line' OR line_role IS NULL) "
+            "AND (scope = 'committed' OR scope IS NULL) "
+        )
         if oldest_history_ts is not None and oldest_history_ts > 0:
             cur = conn.execute(
                 "SELECT id, role, content, created_at, metadata "
                 "FROM messages "
                 "WHERE origin_track_id = ? "
-                "AND line_role = 'main_line' AND scope = 'committed' "
+                + legacy_main_committed +
                 "AND created_at < ? "
                 "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (owner_track_id, int(oldest_history_ts), needed),
@@ -178,7 +188,7 @@ def get_supplementary_user_conversation_messages(
                 "SELECT id, role, content, created_at, metadata "
                 "FROM messages "
                 "WHERE origin_track_id = ? "
-                "AND line_role = 'main_line' AND scope = 'committed' "
+                + legacy_main_committed +
                 "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (owner_track_id, needed),
             )
