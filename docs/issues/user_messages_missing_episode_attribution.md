@@ -1,5 +1,7 @@
 # user メッセージがエピソードに一度も帰属していない
 
+> **2026-07-29 追記 — 同じ穴の二つ目の実害**: 転記経路 (`auto_ingest_building_messages`) は `origin_episode` だけでなく **`line_role` も刻まない**。ユーザー会話の親保持機構 (`saiverse/user_conversation_preserver.py`) の補完 SQL が line_role の完全一致を要求していたため、anchor リセット後の窓で「ペルソナ側だけの会話」が補完されていた (記憶整理後のプレビューで発覚)。下流は legacy 救済で修理済み (commit 249d3e3) だが、**根は同じ「転記経路がメタ情報を刻まない」**。修正方針 1 (転記経路にタグ付けを足す) を採るなら、episode と line_role/scope を同時に刻むこと。
+
 **発見**: 2026-07-28 (あらすじ処理の総点検中、まはーの指摘「『ぎゅ……』とかのプロンプトもエピソードに入っていないのでは」が起点)
 **状態**: 未着手 (原因特定済み・修正方針はまはー裁定待ち)
 **関連**: [2026-07-28 あらすじ処理の書き起こし](../handoff/2026-07-28_arasuji_pipeline_audit.md) §3-2 / §7-3b、[chronicle_consolidation intent](../intent/chronicle_consolidation.md) §11-1 (恒等圧縮の上流削減)、[治療再設計ハンドオフ](../handoff/2026-07-28_chronicle_treatment_redesign_handoff.md)
