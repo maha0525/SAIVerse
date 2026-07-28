@@ -43,6 +43,8 @@ python scripts/tag_conversation_messages.py air --auto
 > ⚠️ Memopedia / Chronicle の生成・整理は、現在はペルソナの自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で**自動的に**行われる。`build_memopedia.py` / `maintain_memopedia.py` 等の手動構築スクリプトは**旧フロー**で、通常は使わない（`export_memopedia.py` などの export 系のみ補助的に残る）。
 >
 > `build_arasuji.py` は例外的に現役: インポート直後など、Chronicle をまとめて前倒し生成したい場合の任意ツールとして使う。`--estimate` で LLM を呼ばずに未処理メッセージ数・コール数・概算費用（pricing 設定済みモデルのみ）を表示でき、通常実行時も生成前に同じ見積もりを表示したうえで確認を求める（`--yes` でスキップ可）。
+>
+> `persona_chronicle_cleanup.py`（2026-07-29 新設）: あらすじのレベル制への移行修復 — 旧コードが作った歪み世代 Chronicle の点検と削除。既定は dry-run（読み取りのみ）、`--execute` はバックアップ・検算・実行台帳掃除込み。手順と現況は `docs/issues/air_aifi_memory_repair.md`。
 
 ## インポート（引っ越し）
 
