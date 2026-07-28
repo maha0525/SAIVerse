@@ -60,8 +60,15 @@ def _world_db() -> Path:
     return home / "user_data" / "database" / "saiverse.db"
 
 
-def select_targets(conn: sqlite3.Connection, cutover: int) -> dict:
-    """選定 (読み取りのみ)。dry-run と実行が共有する唯一のロジック。"""
+def select_targets(
+    conn: sqlite3.Connection, cutover: int, *, strict_window: bool = False,
+) -> dict:
+    """選定 (読み取りのみ)。dry-run と実行が共有する唯一のロジック。
+
+    strict_window=True は「取りこぼし拾い」の例外温存をやめ、境界〜上限の
+    窓内を全て削除対象にする (ユーザー裁定 2026-07-29: 旧コードで編纂された
+    ものは内容が本物でも新版で回し直す)。
+    """
     boundary = conn.execute(
         "SELECT MIN(created_at) FROM memopedia_pages WHERE category='chronicle' "
         "AND json_extract(metadata,'$.digest_origin') IN ('batch','identity') "
@@ -90,7 +97,8 @@ def select_targets(conn: sqlite3.Connection, cutover: int) -> dict:
     keep, delete = [], []
     for r in rows:
         st = r[4]
-        if tail is not None and st is not None and int(st) < int(tail):
+        if (not strict_window and tail is not None and st is not None
+                and int(st) < int(tail)):
             keep.append(r)
         else:
             delete.append(r)
@@ -234,7 +242,10 @@ def print_dry_run(persona_id: str, sel: dict, world: sqlite3.Connection) -> None
           f"{len(sel['delete'])},{len(sel['keep'])},{len(sel['frag_ids'])},{len(sel['page_ids'])}")
 
 
-def execute(persona_id: str, expect: tuple, db_path: Path, cutover: int) -> int:
+def execute(
+    persona_id: str, expect: tuple, db_path: Path, cutover: int,
+    *, strict_window: bool = False,
+) -> int:
     """バックアップ → 選定再計算+検算 → 単一 tx 削除 → 台帳/世界 DB 掃除。"""
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     bak = db_path.with_name(f"memory.db.bak-cleanup-{stamp}")
@@ -247,7 +258,7 @@ def execute(persona_id: str, expect: tuple, db_path: Path, cutover: int) -> int:
 
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA busy_timeout = 30000")
-    sel = select_targets(conn, cutover)
+    sel = select_targets(conn, cutover, strict_window=strict_window)
     if sel["boundary"] is None or not sel["delete_ids"]:
         print("削除対象なし — execute の出番はない (dry-run を確認)。"
               "台帳の stale マークだけが問題なら手順書の個別 SQL で。")
@@ -376,6 +387,9 @@ def main() -> int:
                     help="実行時の検算: dry-run が出した 'entries,keep,frags,pages'")
     ap.add_argument("--cutover", default=None,
                     help="新コード稼働開始 (YYYY-MM-DD HH:MM)。既定 = 2026-07-28 23:04")
+    ap.add_argument("--strict-window", action="store_true",
+                    help="「取りこぼし拾い」の例外温存をやめ、境界〜上限の窓内を"
+                         "全て削除対象にする (旧コード編纂分は新版で回し直す裁定)")
     args = ap.parse_args()
 
     cutover = DEFAULT_CUTOVER
@@ -392,7 +406,8 @@ def main() -> int:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         world = sqlite3.connect(f"file:{_world_db()}?mode=ro", uri=True)
         try:
-            print_dry_run(args.persona_id, select_targets(conn, cutover), world)
+            sel = select_targets(conn, cutover, strict_window=args.strict_window)
+            print_dry_run(args.persona_id, sel, world)
         finally:
             conn.close()
             world.close()
@@ -405,7 +420,8 @@ def main() -> int:
     if len(expect) != 4:
         print("--expect は 4 つの数字 (entries,keep,frags,pages)")
         return 1
-    return execute(args.persona_id, expect, db_path, cutover)
+    return execute(args.persona_id, expect, db_path, cutover,
+                   strict_window=args.strict_window)
 
 
 if __name__ == "__main__":
