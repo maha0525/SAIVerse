@@ -351,6 +351,12 @@ deferred な理由: Pulse 中の直接切替は LLM が次 Track 作業を今の
 
 **④ ユーザー手動（REST/UI）**: `api/routes/people/tracks.py` `activate`(L250)/`pause`(L207)。
 **⑤ 起動時復元**: `ensure_wait_response_timeout`（会話 Track のタイマー張り直し。状態遷移ではない）。
+> **追記 (2026-07-29)**: この「状態遷移ではない」という理由で案 Y の棚卸しから外したのが誤りだった。
+> ⑤ は running を**書く**側ではないが**読む**側であり、案 Y が running の意味を変えた（会話終了後も
+> running のまま残る）影響をまともに受ける。結果、再起動のたびに終わった会話へタイムアウトが発火し
+> post_conversation が空撃ちされていた（修正と実害は [life.md](../intent/life.md) §7.3 の表と改訂履歴）。
+> **教訓**: 状態の意味を変える改修の棚卸しは「その状態を書く箇所」ではなく「**読む箇所**」を数える。
+> 書き手は改修の当事者なので視界に入るが、読み手は無関係に見えて静かに壊れる。
 （`saiverse/day_scenario.py` の create/pause/complete は DaySimulator 上のシム専用・本番外。）
 
 **束Cへの含意**: 時間で勝手に動かしてるのは wait_response 30分 pause だけ（会話 Track 限定）＝

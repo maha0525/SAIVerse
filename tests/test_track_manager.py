@@ -424,6 +424,129 @@ def test_ensure_wait_response_timeout_skips_when_provider_none(session_factory, 
         scheduler.stop()
 
 
+def _armed_entry(scheduler, track_id):
+    """EventScheduler に登録されている wait_response 予約の実エントリ。"""
+    return scheduler._entries_by_key[f"wait_response_timeout:{track_id}"]
+
+
+def test_ensure_only_if_absent_preserves_the_live_reservation(session_factory, persona):
+    """復旧 (only_if_absent=True) は生きている予約を置き換えない — 実物同士の境界検証。
+
+    2026-07-29: 起動時の再確立が、待っている間に通常経路 (ユーザー発話への同期応答 /
+    activate) が張った予約を上書きすると、基準時刻が張り直しの瞬間へ丸め直されて
+    **会話終了の期限が後退する**。上書き禁止が SAIVerseManager →
+    TrackManager → EventScheduler と端まで届いていることを、fake を挟まずに固定する
+    (fake だけだと「フラグを渡したこと」しか見えず、TrackManager が通常 schedule を
+    呼ぶ・フラグを落とす・別キーを使う回帰を素通りさせる)。
+    """
+    from saiverse.event_scheduler import EventScheduler
+
+    scheduler = EventScheduler()  # start() しない (登録内容だけ見る)
+
+    def provider(track):
+        return (60, None)
+
+    tm = TrackManager(
+        session_factory=session_factory,
+        event_scheduler=scheduler,
+        wait_response_timeout_provider=provider,
+    )
+    t = tm.create(
+        persona, "user_conversation", is_persistent=True,
+        initial_status=STATUS_RUNNING,
+    )
+    original = _armed_entry(scheduler, t)
+
+    tm.ensure_wait_response_timeout(persona, only_if_absent=True)
+
+    assert _armed_entry(scheduler, t) is original, "復旧が生きている予約を置き換えた"
+    assert not original.cancelled
+
+
+def test_ensure_without_only_if_absent_replaces_the_reservation(session_factory, persona):
+    """対照: 既定 (only_if_absent 無し) は従来どおり張り直す。
+
+    上のテストが「常に何もしない」実装でも通ってしまわないための対。
+    """
+    from saiverse.event_scheduler import EventScheduler
+
+    scheduler = EventScheduler()
+
+    def provider(track):
+        return (60, None)
+
+    tm = TrackManager(
+        session_factory=session_factory,
+        event_scheduler=scheduler,
+        wait_response_timeout_provider=provider,
+    )
+    t = tm.create(
+        persona, "user_conversation", is_persistent=True,
+        initial_status=STATUS_RUNNING,
+    )
+    original = _armed_entry(scheduler, t)
+
+    tm.ensure_wait_response_timeout(persona)
+
+    assert _armed_entry(scheduler, t) is not original
+    assert original.cancelled
+
+
+def test_recovery_never_uses_the_overwriting_schedule_api(session_factory, persona):
+    """復旧経路は上書きする側の入口 (schedule) を使わない。
+
+    上の 2 本は単一スレッドで結果だけを見るため、``has_key`` で確認してから
+    ``schedule`` を呼ぶ check-then-act 実装でも通ってしまう (2026-07-29 に実測。
+    実装を差し戻しても 78 件全緑だった)。判定と登録が同一ロック区間で行われる
+    ことは EventScheduler 側の並行テストが担保するので、ここでは**復旧経路が
+    その原子的 API に到達していること**を固定する — 経路が通常 schedule に
+    落ちれば、いくら EventScheduler が原子的でも競合窓は開く。
+    """
+    from saiverse.event_scheduler import EventScheduler
+
+    class _RecordingScheduler(EventScheduler):
+        def __init__(self):
+            super().__init__()
+            self.plain_schedule_keys = []
+            self.if_absent_keys = []
+
+        def schedule(self, fire_at, callback, key):
+            self.plain_schedule_keys.append(key)
+            return super().schedule(fire_at=fire_at, callback=callback, key=key)
+
+        def schedule_if_absent(self, fire_at, callback, key):
+            self.if_absent_keys.append(key)
+            return super().schedule_if_absent(
+                fire_at=fire_at, callback=callback, key=key,
+            )
+
+    scheduler = _RecordingScheduler()
+
+    def provider(track):
+        return (60, None)
+
+    tm = TrackManager(
+        session_factory=session_factory,
+        event_scheduler=scheduler,
+        wait_response_timeout_provider=provider,
+    )
+    t = tm.create(
+        persona, "user_conversation", is_persistent=True,
+        initial_status=STATUS_RUNNING,
+    )
+    key = f"wait_response_timeout:{t}"
+    # create (通常経路) は上書きする側でよい
+    assert key in scheduler.plain_schedule_keys
+    scheduler.plain_schedule_keys.clear()
+
+    # 予約が失われた状態 = 再起動直後を再現してから復旧させる
+    scheduler.cancel(key)
+    tm.ensure_wait_response_timeout(persona, only_if_absent=True)
+
+    assert key in scheduler.if_absent_keys, "復旧が原子的 API を使っていない"
+    assert key not in scheduler.plain_schedule_keys, "復旧が上書きする側の API を使った"
+
+
 def test_ensure_wait_response_timeout_noop_without_running(session_factory, persona):
     """running Track が無ければ ensure_wait_response_timeout は no-op (例外を出さない)。"""
     from saiverse.event_scheduler import EventScheduler

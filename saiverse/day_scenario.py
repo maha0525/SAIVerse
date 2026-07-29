@@ -345,10 +345,12 @@ class UserEventDriver:
 class TrackSimUserEventDriver(UserEventDriver):
     """会話中フラグを running な user_conversation Track で表現するシム内ドライバ。
 
-    day_plan の「ユーザー会話中」判定 (``_is_in_user_conversation``) と同じ述語
-    (running Track が user_conversation 種別) を成立させるため、message で
-    running Track を作り、leave で complete する。会話本文の再生 (実 Pulse) は
-    しない — 配線テストの対象は「会話中の繰り下げ」と「会話終了判断の発火」。
+    本番の「ユーザー会話中」判定 (``day_plan.is_in_user_conversation``) が見るのは
+    **開いている kind='conversation' の出来事**であって Track の running 種別ではない
+    (life.md §7 案 Y)。そのため message では running Track を作るだけでなく会話の
+    出来事も開き (:func:`begin_conversation`)、leave で complete + close する。
+    会話本文の再生 (実 Pulse) はしない — 配線テストの対象は「会話中の繰り下げ」と
+    「会話終了判断の発火」。
     """
 
     def begin_conversation(self, manager: Any, persona_id: str, text: str) -> None:

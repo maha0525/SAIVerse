@@ -627,7 +627,9 @@ class TrackManager:
     # Phase 4-e: wait_response timeout の EventScheduler 連携
     # ------------------------------------------------------------------
 
-    def ensure_wait_response_timeout(self, persona_id: str) -> None:
+    def ensure_wait_response_timeout(
+        self, persona_id: str, *, only_if_absent: bool = False
+    ) -> None:
         """ペルソナの現在 running な Track に wait_response タイムアウトタイマーを
         張り直す (冪等)。
 
@@ -644,16 +646,25 @@ class TrackManager:
         ペルソナ unloaded 等) はすべて ``wait_response_timeout_provider`` に
         委ねる (= activate 時と同じ単一ゲート)。同 key で再 schedule しても
         EventScheduler が上書きするので冪等。
+
+        Args:
+            only_if_absent: True なら**有効な予約が無いときだけ**張る
+                (``EventScheduler.schedule_if_absent``)。起動時の復旧など
+                「失われた予約を埋める」用途で使う。上書きしてしまうと、
+                その間に通常経路 (ユーザー発話への同期応答 / activate) が
+                張った予約を潰し、基準時刻が now へ丸め直されて**期限が後退する**。
         """
         running = self.get_running(persona_id)
         if running is not None:
-            self._schedule_wait_response_timeout(running)
+            self._schedule_wait_response_timeout(running, only_if_absent=only_if_absent)
 
     @staticmethod
     def _wait_response_timeout_key(track_id: str) -> str:
         return f"wait_response_timeout:{track_id}"
 
-    def _schedule_wait_response_timeout(self, track: Any) -> None:
+    def _schedule_wait_response_timeout(
+        self, track: Any, *, only_if_absent: bool = False
+    ) -> None:
         """running になった Track が wait_response 型ならタイムアウトタイマーを予約する。
 
         タイマー発火時の仕事は「会話出来事を閉じて判断を起動する」こと
@@ -712,18 +723,33 @@ class TrackManager:
         def _on_timeout(tid: str = track_id, pid: str = persona_id) -> None:
             self._handle_wait_response_timeout(tid, pid)
 
-        self.event_scheduler.schedule(
-            fire_at=fire_at,
-            callback=_on_timeout,
-            key=self._wait_response_timeout_key(track_id),
-        )
+        key = self._wait_response_timeout_key(track_id)
+        if only_if_absent:
+            # 復旧経路: 判定と登録を EventScheduler のロック内で一息に行う。
+            # has_key で確認してから schedule する形 (check-then-act) では、
+            # その隙間に通常経路が入れた予約を上書きしうる。
+            armed = self.event_scheduler.schedule_if_absent(
+                fire_at=fire_at, callback=_on_timeout, key=key,
+            )
+            if not armed:
+                logging.info(
+                    "[track] wait_response timeout already armed: track=%s persona=%s "
+                    "(leaving the existing reservation untouched)",
+                    track_id, persona_id,
+                )
+                return
+        else:
+            self.event_scheduler.schedule(
+                fire_at=fire_at, callback=_on_timeout, key=key,
+            )
         logging.info(
             "[track] scheduled wait_response timeout: track=%s persona=%s "
-            "base=%s timeout_min=%s fire_at=%s",
+            "base=%s timeout_min=%s fire_at=%s only_if_absent=%s",
             track_id, persona_id,
             base.isoformat(timespec="seconds"),
             minutes,
             fire_at.isoformat(timespec="seconds"),
+            only_if_absent,
         )
 
     def _cancel_wait_response_timeout(self, track_id: str) -> None:

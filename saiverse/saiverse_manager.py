@@ -1233,8 +1233,11 @@ class SAIVerseManager(
         #    (例外: user_conversation は自律 OFF でも張る — episode close のため。
         #    provider の 2026-07-07 例外条項を参照)。
         #    (新規作成経路では running Track がまだ無いので実質 no-op。)
+        #    対ユーザー会話だけは「会話が開いていること」を追加条件にする
+        #    (2026-07-29、_rearm_wait_response_timeout_on_load を参照。
+        #    判定不能なら張らずに読み取りだけ再試行する)。
         try:
-            self.track_manager.ensure_wait_response_timeout(persona_id)
+            self._rearm_wait_response_timeout_on_load(persona_id)
         except Exception:
             logging.exception(
                 "[on_persona_registered] Failed to (re)schedule wait_response timeout: %s",
@@ -1630,6 +1633,140 @@ class SAIVerseManager(
     # ------------------------------------------------------------------
 
     _DEFAULT_WAIT_RESPONSE_TIMEOUT_MINUTES = 30
+
+    #: 再確立が「判定不能」だったときの読み取り再試行の間隔 (秒)。使い切ったら諦める。
+    _REARM_RETRY_DELAYS_SEC = (30, 120, 300)
+
+    def _rearm_wait_response_timeout_on_load(
+        self, persona_id: str, *, attempt: int = 0
+    ) -> None:
+        """起動時のタイマー再確立 (_on_persona_registered §3) の入口。
+
+        ``_should_rearm_wait_response_timeout`` が **判定不能 (None)** を返した場合
+        (DB の一時障害でロード出来なかった等) は、張らずに終わるのではなく
+        **読み取りだけを後で再試行する**。判断 (post_conversation) はこの経路では
+        一切撃たない — 再試行するのは「タイマーを張るべきかの読み取り」だけ。
+
+        再試行が要る理由 (2026-07-29, Codex 指摘): 判定不能を「張らない」で終わらせると、
+        正当に開いている会話がタイマーを失ったまま永久に閉じなくなりうる。当初は
+        「次のユーザー発話で UserConversationHandler が張り直す」を回復経路として
+        当てにしていたが、**別 Track が running のときユーザー発話は alert 経路に入り**、
+        メタ判断が会話 Track を activate しない限り再装填されない。回復の前提が
+        常には成立しないので、こちら側で再試行を持つ。
+        """
+        decision = self._should_rearm_wait_response_timeout(persona_id)
+        if decision is None:
+            self._schedule_rearm_retry(persona_id, attempt)
+            return
+        if not decision:
+            return
+        # only_if_absent=True: 既に有効な予約があるなら触らない。復旧は「予約が
+        # 失われていること」を埋める仕事で、生きている予約を置き換える仕事ではない。
+        # 上書きすると、待っている間に通常経路 (ユーザー発話への同期応答 / activate)
+        # が張った予約を潰し、下流が base_time を now へ丸めるぶん**期限が後退する**
+        # (再試行の遅延ぶん、最大 _REARM_RETRY_DELAYS_SEC の末尾秒)。
+        # 判定と登録は EventScheduler のロック内で一息に行う — has_key で確認して
+        # から張る形 (check-then-act) では、その隙間に通常経路が割り込める
+        # (2026-07-29 Codex 指摘。ensure_ の内側には Track と設定 DB の読み直しが
+        # あるので隙間は実在する)。
+        self.track_manager.ensure_wait_response_timeout(
+            persona_id, only_if_absent=True,
+        )
+
+    def _schedule_rearm_retry(self, persona_id: str, attempt: int) -> None:
+        """判定不能だった再確立を ``_REARM_RETRY_DELAYS_SEC`` 後にもう一度試す。"""
+        scheduler = getattr(self, "event_scheduler", None)
+        if scheduler is None:
+            return
+        if attempt >= len(self._REARM_RETRY_DELAYS_SEC):
+            logging.warning(
+                "[wait_response_timeout] giving up re-arm for %s after %d attempts; "
+                "an open conversation may stay open until the persona's conversation "
+                "Track is activated again", persona_id, attempt,
+            )
+            return
+        delay = self._REARM_RETRY_DELAYS_SEC[attempt]
+
+        def _retry(pid: str = persona_id, nxt: int = attempt + 1) -> None:
+            self._rearm_wait_response_timeout_on_load(pid, attempt=nxt)
+
+        scheduler.schedule(
+            fire_at=datetime.now() + timedelta(seconds=delay),
+            callback=_retry,
+            key=f"wait_response_rearm_retry:{persona_id}",
+        )
+        logging.warning(
+            "[wait_response_timeout] re-arm undecidable for %s; retrying the read "
+            "in %ds (attempt %d/%d)",
+            persona_id, delay, attempt + 1, len(self._REARM_RETRY_DELAYS_SEC),
+        )
+
+    def _should_rearm_wait_response_timeout(self, persona_id: str) -> Optional[bool]:
+        """起動時のタイマー再確立 (_on_persona_registered §3) を張ってよいか。
+
+        life.md §7 案 Y (2026-07-13) 以降、対ユーザー会話 Track は会話が終わっても
+        running のまま残る (永続 Track で、時間経過では状態を動かさない)。つまり
+        ``status == running`` はもう「いま会話中」を意味しない — 「いま」の真実は
+        **開いている会話の出来事 (Episode)** が持つ。
+
+        再確立の条件を running だけにすると、とっくに終わった会話に対して起動の
+        N 分後にタイムアウトが発火し、post_conversation 判断が空撃ちされる。
+        2026-07-29 実機で観測: 最終発言が 07-22 のアイフィが、起動 30 分後に
+        「会話がひと区切りつきました」の状況テキストで振り返り、1 週間前の会話を
+        たった今のこととして独白し「やりたいこと」を 1 件生成した (再起動のたびに
+        全ペルソナぶん再発する)。
+
+        Returns:
+            True  — 張ってよい
+            False — 張るべきでない (会話は既に終わっている / running Track が無い)
+            None  — **判定不能** (DB 読み取り失敗)。呼び出し元
+                    ``_rearm_wait_response_timeout_on_load`` が読み取りを再試行する。
+                    判定不能を False と混ぜないこと — 前者は「まだ分からない」で
+                    あって「張らなくてよい」ではない。
+
+        対ユーザー会話以外の Track (social 等) は Episode を持たないので従来どおり。
+
+        NOTE: この判定を ``_wait_response_timeout_provider`` や
+        ``TrackManager._schedule_wait_response_timeout`` 側へ置くことはできない。
+        create / activate は ``_schedule_wait_response_timeout`` を
+        ``on_track_activated`` hook (= 会話の出来事を開く点) より **先** に呼ぶため
+        (track_manager.py の create/activate 参照)、会話開始時に必ず「まだ開いて
+        いない」と判定され、タイマーが二度と立たなくなる。
+        """
+        try:
+            running = self.track_manager.get_running(persona_id)
+        except Exception:
+            logging.warning(
+                "[wait_response_timeout] Failed to read running track for %s; "
+                "re-arm undecidable", persona_id, exc_info=True,
+            )
+            return None
+        if running is None:
+            return False  # ensure_ 側でも no-op だが、意図を明示する
+        if getattr(running, "track_type", None) != "user_conversation":
+            return True
+
+        try:
+            from saiverse import episodes
+
+            open_conv = episodes.get_open_episode(
+                self, persona_id, kind=episodes.KIND_CONVERSATION,
+            )
+        except Exception:
+            logging.warning(
+                "[wait_response_timeout] Failed to read open conversation episode "
+                "for %s; re-arm undecidable", persona_id, exc_info=True,
+            )
+            return None
+        if open_conv is None:
+            logging.info(
+                "[wait_response_timeout] no open conversation for %s "
+                "(track=%s is running but the conversation already ended); "
+                "not re-arming the timeout",
+                persona_id, running.track_id,
+            )
+            return False
+        return True
 
     def _wait_response_timeout_provider(self, track):
         """TrackManager.activate() から呼ばれる timeout 設定 provider。

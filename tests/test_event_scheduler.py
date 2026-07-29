@@ -208,5 +208,120 @@ class EventSchedulerLifecycleTest(unittest.TestCase):
         sched.stop()  # 起動してなくても例外にならない
 
 
+class ScheduleIfAbsentTest(unittest.TestCase):
+    """schedule_if_absent の契約 (2026-07-29 追加)。
+
+    用途は「失われた予約を復旧する」操作。復旧は穴を埋める仕事であって、現に
+    生きている予約を置き換える仕事ではない。上書きしてしまうと、その間に通常経路が
+    張った予約を潰し、基準時刻が張り直しの瞬間へ丸め直されて期限が後退する。
+
+    ``has_key`` で確認してから ``schedule`` を呼ぶ形 (check-then-act) では判定と
+    登録の隙間に別スレッドが割り込めるため、同一ロック区間で行う専用 API を持つ。
+    発火まで通して lazy deletion (cancelled は heap に残し dispatch でスキップ) の
+    契約も一緒に固定する。
+
+    **原子性そのものはここでは証明していない** — 当初 barrier で 50 回競合させる
+    テストを置いたが、barrier が揃えるのは呼び出しの開始前だけで、その後どちらかが
+    丸ごと先に完了すれば非原子的実装でも期待値どおりになる (Codex が非原子的な
+    mutant で 1000 回実行し失敗 0 回と実測。私が「原子性を担保する」と書いたのは
+    誇張だった)。原子性は「判定と登録が同一ロック区間にある」という実装の形で読む。
+    回帰の歯止めは
+    ``test_track_manager.test_recovery_never_uses_the_overwriting_schedule_api``
+    が担う — 復旧経路が check-then-act に戻ると、そちらが落ちる (実測確認済み)。
+    """
+
+    def setUp(self) -> None:
+        self.scheduler = EventScheduler()  # start() しない (run_due で同期実行)
+        self.fired: list[str] = []
+
+    def _at(self, seconds: float) -> datetime:
+        return datetime.now() + timedelta(seconds=seconds)
+
+    def test_registers_and_fires_when_absent(self) -> None:
+        armed = self.scheduler.schedule_if_absent(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("new"), key="k1",
+        )
+        self.assertTrue(armed)
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 1)
+        self.assertEqual(self.fired, ["new"])
+
+    def test_existing_reservation_survives_and_fires(self) -> None:
+        """既存があれば False。**発火するのは元の callback と元の期限**。"""
+        self.scheduler.schedule(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("original"),
+            key="k1",
+        )
+        armed = self.scheduler.schedule_if_absent(
+            fire_at=self._at(600), callback=lambda: self.fired.append("intruder"),
+            key="k1",
+        )
+        self.assertFalse(armed)
+        # 元の期限 (過去) のまま生きているので、いま run_due で発火する。
+        # 上書きされていれば +600 秒になり、ここで 0 件になる。
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 1)
+        self.assertEqual(self.fired, ["original"])
+
+    def test_cancelled_entry_does_not_block_recovery(self) -> None:
+        """cancel 済みは「有効な予約」ではない → 復旧が張り直せて、一度だけ発火する。
+
+        lazy deletion で heap には cancelled エントリが残るため、二重発火や
+        取り消し済み callback の実行が起きないことも同時に確かめる。
+        """
+        self.scheduler.schedule(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("cancelled"),
+            key="k1",
+        )
+        self.scheduler.cancel("k1")
+        armed = self.scheduler.schedule_if_absent(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("recovered"),
+            key="k1",
+        )
+        self.assertTrue(armed)
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 1)
+        self.assertEqual(self.fired, ["recovered"])
+
+    def test_plain_schedule_still_replaces(self) -> None:
+        """通常の schedule は従来どおり上書きする (既存挙動を変えていない)。"""
+        self.scheduler.schedule(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("old"), key="k1",
+        )
+        self.scheduler.schedule(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("new"), key="k1",
+        )
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 1)
+        self.assertEqual(self.fired, ["new"])
+
+    def test_fires_through_the_real_dispatch_thread(self) -> None:
+        """復旧予約が **本番の dispatch スレッド経由で** 期限どおり発火する。
+
+        run_due は同期実行の別経路なので、これだけだと ``schedule_if_absent`` から
+        ``Condition.notify()`` を削っても全テストが通ってしまう。本番では dispatch
+        スレッドが「空の heap」または「遠い既存予約」で待機しており、起こさないと
+        復旧した予約が期限どおり発火しない = 会話の出来事が閉じないままになる。
+        """
+        scheduler = EventScheduler()
+        scheduler.start()
+        try:
+            # dispatch スレッドを「遠い予約で待機」させてから割り込ませる
+            scheduler.schedule(
+                fire_at=datetime.now() + timedelta(seconds=3600),
+                callback=lambda: None, key="far",
+            )
+            time.sleep(0.05)  # 待機に入らせる
+
+            fired = threading.Event()
+            armed = scheduler.schedule_if_absent(
+                fire_at=datetime.now() + timedelta(seconds=0.05),
+                callback=fired.set, key="recovered",
+            )
+            self.assertTrue(armed)
+            self.assertTrue(
+                fired.wait(timeout=3.0),
+                "schedule_if_absent が dispatch スレッドを起こしていない",
+            )
+        finally:
+            scheduler.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -934,9 +934,9 @@ def handle_external_event(
         return ROUTE_DIRECT_AUTONOMY_DISABLED
 
     try:
-        from saiverse.day_plan import _is_in_user_conversation
+        from saiverse.day_plan import is_in_user_conversation
 
-        in_conversation = _is_in_user_conversation(manager, persona_id)
+        in_conversation = is_in_user_conversation(manager, persona_id)
     except Exception:
         LOGGER.warning(
             "[autonomy-wiring] conversation check failed (persona=%s); "

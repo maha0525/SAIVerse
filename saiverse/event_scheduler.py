@@ -117,6 +117,49 @@ class EventScheduler:
     # API
     # ------------------------------------------------------------------
 
+    def schedule_if_absent(
+        self,
+        fire_at: datetime,
+        callback: Callable[[], None],
+        key: str,
+    ) -> bool:
+        """有効な予約が **無いときだけ** 登録する (既にあれば何もしない)。
+
+        :meth:`schedule` との違いは上書きしないことだけで、判定と登録を同じロック
+        区間で行う点が肝 (2026-07-29 追加)。``has_key`` で確認してから ``schedule``
+        を呼ぶ形 (check-then-act) では、その隙間に別スレッドが入れた予約を上書き
+        してしまう。用途は「失われた予約を復旧する」操作 — 復旧は穴を埋める仕事で
+        あって、現に生きている予約を置き換える仕事ではない。
+
+        Returns:
+            登録したら True、既存の有効な予約があって何もしなかったら False。
+        """
+        fire_ts = fire_at.timestamp()
+        with self._cond:
+            existing = self._entries_by_key.get(key)
+            if existing is not None and not existing.cancelled:
+                LOGGER.debug(
+                    "[event_scheduler] schedule_if_absent key=%s skipped "
+                    "(already armed)", key,
+                )
+                return False
+
+            entry = _Entry(
+                fire_at_ts=fire_ts,
+                seq=next(self._seq_counter),
+                key=key,
+                callback=callback,
+            )
+            self._entries_by_key[key] = entry
+            heapq.heappush(self._heap, entry)
+            LOGGER.debug(
+                "[event_scheduler] schedule_if_absent key=%s fire_at=%s (in %.1fs)",
+                key, fire_at.isoformat(timespec="seconds"),
+                fire_ts - clock.now().timestamp(),
+            )
+            self._cond.notify()
+            return True
+
     def schedule(
         self,
         fire_at: datetime,
@@ -132,6 +175,7 @@ class EventScheduler:
                 例外を投げてもよい (WARN ログ + 該当予約消去で吸収)。
             key: 予約識別子。同じ key で再 schedule すると古い予約は cancel される。
                 慣習: ``"<source>:<id>"`` (例 ``"ttl:air_city_a"``)。
+                **既存を残したい場合は** :meth:`schedule_if_absent` を使う。
         """
         fire_ts = fire_at.timestamp()
         with self._cond:

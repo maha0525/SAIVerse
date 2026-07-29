@@ -324,7 +324,7 @@ def _start_user_conversation(manager) -> str:
     """対ユーザー会話 Track を running で作り、会話の出来事も開く (= 会話中の状態)。
 
     「ユーザー会話中」の判定は開いている kind='conversation' の出来事の有無
-    (life.md §7 案 Y、``day_plan._is_in_user_conversation``)。Track の running
+    (life.md §7 案 Y、``day_plan.is_in_user_conversation``)。Track の running
     状態だけでは「会話中」と判定されなくなったため、出来事も明示的に開く。
     """
     from saiverse import episodes

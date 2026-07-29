@@ -189,9 +189,11 @@ provider の課金物理が逆向きだから（cache_lifecycle_control.md §1�
 |---|---|---|
 | コマ発火のユーザー会話中ガード（`day_plan` L895 付近） | `get_running()` が user_conversation か | 開いている kind='conversation' エピソードの有無 |
 | wait_response タイムアウト（`track_manager._handle_wait_response_timeout`） | pause（running→pending）＋ episode close ＋ post_conversation 判断 | **episode close ＋ post_conversation 判断のみ**（Track 不動） |
+| 起動時のタイマー再確立（`saiverse_manager._on_persona_registered` §3 → `track_manager.ensure_wait_response_timeout`） | `get_running()` が居れば張る | 対ユーザー会話は**開いている kind='conversation' エピソードがある時だけ**張る（`_should_rearm_wait_response_timeout`）。**2026-07-29 追加＝棚卸し漏れの実害**: Track 不動化により対ユーザー会話は会話終了後も running のまま残るのに条件が running のままだったため、再起動のたびに全ペルソナぶん「起動 N 分後」の空タイムアウトが発火し、何日も前に終わった会話へ post_conversation 判断が空撃ちされていた（アイフィ: 最終発言 07-22 → 07-29 の起動 30 分後に「会話がひと区切りつきました」で独白し「やりたいこと」を 1 件生成）。判定は fail-closed（読めなければ張らない）——空撃ちはペルソナ本人名義の記憶を汚すため、タイマー欠落（次のユーザー発話で回復する）より害が重い |
 | ユーザー発話時の再開（`user_conversation_handler.on_user_utterance`） | pending→activate→切替通知注入 | 会話 Track が既に「選ばれている」なら activate 不要。新しい会話エピソードを開くだけ（通知消滅） |
 | メタ判断の状況分類（`meta_layer._SITUATION_PLAYBOOK_MAP`） | running の有無で分岐 | 当面存置（判断点への統合は §9 未決に従い案 Z へ持ち越し）。ただし判定入力を「開いているエピソード」に併記し、乖離をログで観測 |
 | `activate` の displaced 押し出し＋切替通知 | 全 activate で発火 | 本物の目的切替（メタ判断・判断点・手動スペル発）に限定される——時間起因の activate が消えるため、経路はそのまま意味が正しくなる |
+| イベント到着判断の「いまの活動」（`judgment_points.build_on_event_situation_text`） | `get_running()` が user_conversation なら「ユーザーと会話中です」 | `day_plan.is_in_user_conversation`（開いている会話の出来事）。**2026-07-29 追加＝棚卸し漏れ**: 終了済みの会話について偽の現在状態を判断入力にしていた。会話が閉じているのに Track が running のまま残るのは案 Y 以降の正常形なので、「取り組んでいます」への読み替えもせず手すき扱いにする |
 | Track Chronicle の head 搭載（`get_memory_weave_context._get_track_chronicle_context`） | `get_running()` の Track のあらすじを MemoryWeave セクションが head に織る（user_conversation は除外・refresh は Metabolism のみ） | 一本目では**参照点として記録のみ**（挙動不変）。読み込み側の世代交代（head 自動搭載 → 起動時指示書＋机メモ→随意想起の二段〔life_concept_map §9.2 裁定〕）と、書き込み側（目的別あらすじ生成）のエピソード Lv1 Chronicle との統合は**二本目 intent の主題** |
 
 alert は本書のスコープ外（呼びかけへの分化は life_concept_map §5 の将来課題。現行の internal_alert_poller / on_event 経路は不変）。
@@ -448,6 +450,55 @@ v0.4 までの実装（Phase 1〜4、コミット 6257b6a / 072ea78 / d55c5f3 / 
   `tests/test_life_phase2.py` に `get_life_status_now` の単体テスト 5 件追加、
   `tests/test_life_view_api.py` に day-plan の `lives`/`life_status` 統合
   テスト 4 件追加。既存系全緑。まはー実機検証はまだ。
+- 案 Y 追従漏れの修正 (2026-07-29, 実機ログ起点): 起動時のタイマー再確立
+  (`saiverse_manager._on_persona_registered` §3) が **running Track だけを条件に
+  していた**ため、Track 不動化 (案 Y) 以降 running のまま残る対ユーザー会話
+  Track に対し、再起動のたびに「起動 + N 分」の空タイムアウトが発火していた。
+  実害: 07-29 03:44 起動 → 04:15 に aifi_city_a が最終発言 07-22 の会話を
+  「たった今ひと区切りついた会話」として振り返り (`spells=1/1/0` で「やりたい
+  こと」1 件が本人名義で生成)、同時刻に air_city_a ほか計 6 体が一斉発火。
+  前セッション (07-28 23:04 起動 → 23:34) でも同一。修正は
+  `_should_rearm_wait_response_timeout` を新設し、対ユーザー会話は**開いている
+  conversation エピソードがある時だけ**再確立する (§7.3 表に参照点として追記)。
+  判定は fail-closed。**この条件を provider や
+  `TrackManager._schedule_wait_response_timeout` 側に置くことはできない** —
+  create / activate は `_schedule_wait_response_timeout` を
+  `on_track_activated` hook (= エピソードを開く点) より先に呼ぶため、会話開始
+  時に必ず「未オープン」と判定されタイマーが立たなくなる。
+  **同型の漏れをもう 1 件同日修正**: `judgment_points.build_on_event_situation_text`
+  がイベント到着判断の「いまの活動」を running Track の種別で決めており、終了済みの
+  会話について「ユーザーと会話中です」をペルソナへ渡していた。判定を
+  `day_plan.is_in_user_conversation`（`_is_in_user_conversation` から公開名へ改称、
+  実装を 1 つに保つ）へ差し替え。会話が閉じているのに Track が running のまま残る形は
+  案 Y 以降の正常形なので「取り組んでいます」への読み替えもせず手すき扱いにする。
+  **Codex 攻撃レビューの指摘 3 件**: 判定不能（DB 読み取り失敗）を「張らない」で
+  終わらせると開いている会話が永久に閉じない件は同日修正（判定を `Optional[bool]` 化し、
+  None は判断を撃たずに読み取りのみ 30/120/300 秒でバックオフ再試行。当初あてにしていた
+  「次のユーザー発話で張り直される」は、別 Track が running のとき発話が alert 経路に
+  入るため常には成立しないと判明）。残り 2 件は issue へ分離＝
+  [open_conversation_orphaned_by_track_displacement](../issues/open_conversation_orphaned_by_track_displacement.md)（押し出された会話の出来事が孤児化）と
+  [wait_response_deadline_extends_on_every_restart](../issues/wait_response_deadline_extends_on_every_restart.md)（再起動のたび期限が 30 分延長）。
+  **再レビューでさらに 1 件**: その再試行が、待っている間にユーザー発話で張られたタイマーを
+  同じキーで上書きし、期限を最大 300 秒後退させる競合を持ち込んでいた（当初「同じ家族の穴」として
+  期限延長の issue へ先送りしたが、あちらは案 Y 以前からの `base_time` の話で別物 — 仕分けが誤り
+  だった）。`_wait_response_timer_already_armed` で「有効な予約が既にあるなら再確立しない」歯止めを
+  入れて同日に閉じた。当初のテストが `None→True` の単純経路しか踏まずこの競合を検出できなかった点も
+  指摘どおりで、ユーザー発話が割り込む筋を回帰に追加。**さらに 3 巡目**で、その歯止めが
+  `has_key` → `ensure_` の check-then-act であり隙間が残る（間に Track と設定 DB の読み直しがある）と
+  指摘され、`EventScheduler.schedule_if_absent`（判定と登録を同一ロック区間で行う。既存の
+  `schedule` は無変更）を追加して `ensure_wait_response_timeout(only_if_absent=True)` 経由で
+  復旧経路だけが使うよう配線。check-then-act の歯止めは撤去（二重判定を残さない）。
+  **復旧は「失われた予約を埋める」操作であって、生きている予約を置き換える操作ではない**が
+  この API の意味論。**4〜5 巡目の指摘は全てテストの弱さ**（実装側の破綻は 3 巡目以降ゼロ）:
+  ①単一スレッドの回帰では check-then-act 実装でも全緑になる → 実物 TrackManager × 実物
+  EventScheduler の境界テストを追加し、復旧経路が上書き側 API に落ちたら落ちることを実測確認。
+  ②`run_due` の同期発火しか通しておらず `notify()` を削っても通る → 実 dispatch スレッドで
+  発火を待つテストを追加（削ると落ちることを実測確認）。③barrier で 50 回競合させるテストは
+  **原子性を検証できていなかった**（非原子的 mutant で 1000 回失敗ゼロと Codex が実測）ため削除
+  — 「原子性を担保する」と書いたのは誇張だった。原子性は実装の形（判定と登録が同一ロック区間）で
+  読み、回帰の歯止めは境界テストが担う。
+  回帰 `tests/test_wait_response_timeout_gate.py` に 13 件、`tests/test_judgment_points.py`
+  に 2 件追加。まはー実機検証待ち。
 - Phase 3 実装 (2026-07-13, v0.4 準拠に差し戻し修正済): キャッシュ連動を実装。①**keep-alive のライフ従属** (§5.2) — 判定は ``day_plan.is_keepalive_allowed`` に集約し、唯一の呼び出し元 ``sea.runtime.SEARuntime.run_cache_keepalive`` の Active チェック直後 (schedule_cache_ttl_pulse への再予約より前) でゲートすることで、谷では touch も再予約もされず連鎖が自然停止する。lives 未宣言は常に許可 (後方互換)、判定失敗は許可側にフォールバック。②**ライフ終端の節目** (§6.2 v0.4) — ``day_plan._handle_life_end`` が能動的に行うのは keep-alive 予約 (``ttl:{persona_id}``) の cancel と TTL override の遅延解除予約だけ。**anchor は触らない** — touch が止まれば TTL で自然失効し、Metabolism は失効後の最初の活動の既存 Case 3 経路 (``sea/runtime_context.py``) が行う。③**均等モードの cache TTL 運転** (§5.1) — ライフ開始 (mode=even) で persona の cache override を TTL=1h に設定し (人設定タブの明示 override があれば触らない)、終端では即時 clear せず「終端 + anchor validity 秒」の遅延解除 (``life_ttl_clear:{persona_id}``) を EventScheduler に予約する (即時に 5m へ戻すと anchor の生存評価が実キャッシュの寿命とズレるため)。発火体は厳密一致チェック付きで clear (``saiverse_manager.clear_persona_cache_override`` 新設)。次のライフが TTL 経過前に始まれば開始側が予約を cancel する。global 既定 TTL が "5m" のままだと均等モードの間隔上限 (50 分) を大きく下回り、artificial keep-alive が 3〜4 分おきに連発する調査結果を受けての配線。④ライフ開始時の Session 境界は既存機構 (anchor の TTL 自然失効 → 次 Pulse の Case 3) が自然に満たすことを確認し、ログ追加のみ。新規 `tests/test_life_phase3.py` 18 件 + 既存系 (test_life_phase2 / test_cache_keepalive / test_cache_lifecycle 等) 全緑。
 - v0.4 (2026-07-13): 検収差し戻しによる訂正——**v0.3 の「anchor 即時失効」は誤り**。①anchor を即時失効させると、惜しい谷 (終了直後〜TTL 内の再訪、実キャッシュは生きている) の最初の Pulse が Case 3 で履歴を組み替えて生きたキャッシュを捨てる (§8.3 裁定と矛盾)。keep-alive を止めれば anchor は TTL で自然失効するので即時失効はそもそも不要。②TTL override (均等モードの 1h) の即時解除も同型のズレ——anchor validity は「現在の TTL 設定」で評価されるため、終端で即時に 5m へ戻すと実キャッシュ (1h) と評価がズレて TTL 内の再訪が Case 3 に落ちる。解除は終端 + TTL 経過後へ遅延する。§6.2 の表を訂正。
 - v0.3 (2026-07-13): §6.2 の境界実行形を明確化——ライフ終端は **anchor の即時失効のみ**とし、Metabolism 本体（Chronicle 化＋履歴縮小）は次の活動開始時の既存経路（Case 3）へ遅延する、とした（**この「即時失効」は v0.4 で誤りと訂正**）。

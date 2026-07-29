@@ -57,6 +57,7 @@ from saiverse.day_plan import (
     STATUS_PENDING,
     day_order_minutes,
     get_lives,
+    is_in_user_conversation,
     life_consumed,
     load_day_plan,
     load_plan_meta,
@@ -1331,21 +1332,34 @@ def build_on_event_situation_text(
     event_text = str(context.get("event_text") or "").strip()
     is_alert = bool(context.get("is_alert"))
 
-    # 現在の活動状態 (running Track から導出)
+    # 現在の活動状態。
+    #
+    # 「ユーザーと会話中か」の正典は**開いている会話の出来事 (Episode)** であって
+    # running Track の種別ではない (life.md §7 案 Y, 2026-07-13)。案 Y 以降、対ユーザー
+    # 会話 Track は会話が終わっても running のまま残る永続 Track なので、種別で判定すると
+    # 何日も前に終わった会話について「ユーザーと会話中です」とペルソナへ渡してしまう
+    # (2026-07-29 修正。同じ漏れの実害は起動時タイマー再確立の側で観測済み)。
+    # 判定は day_plan.is_in_user_conversation に一本化する — 二つ目の実装を作らない。
     activity = "手すきです（暮らし）。"
-    track_manager = getattr(manager, "track_manager", None)
-    if track_manager is not None:
-        try:
-            running = track_manager.get_running(persona_id)
-        except Exception:
-            LOGGER.warning(
-                "[judgment] get_running failed for %s", persona_id, exc_info=True,
-            )
-            running = None
-        if running is not None:
-            if getattr(running, "track_type", None) == "user_conversation":
-                activity = "ユーザーと会話中です。"
-            else:
+    if is_in_user_conversation(manager, persona_id):
+        activity = "ユーザーと会話中です。"
+    else:
+        track_manager = getattr(manager, "track_manager", None)
+        if track_manager is not None:
+            try:
+                running = track_manager.get_running(persona_id)
+            except Exception:
+                LOGGER.warning(
+                    "[judgment] get_running failed for %s", persona_id, exc_info=True,
+                )
+                running = None
+            # 会話が閉じているのに user_conversation が running のまま残っているのは
+            # 案 Y 以降の正常形。これを「取り組んでいます」と読み替えてもやはり嘘なので、
+            # 手すき扱いのままにする。
+            if (
+                running is not None
+                and getattr(running, "track_type", None) != "user_conversation"
+            ):
                 activity = f"「{running.title or '(無題)'}」に取り組んでいます。"
 
     parts = [

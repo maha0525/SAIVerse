@@ -1462,6 +1462,47 @@ def test_on_event_situation_shows_running_activity(manager, task_refs):
     assert "標本集の整理" in result["args"]["situation_text"]
 
 
+def _running_user_conversation_track(manager) -> str:
+    """対ユーザー会話 Track を running で作る (会話の出来事は開かない)。"""
+    return manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="user_conversation",
+        title="対 tester 会話", is_persistent=True, initial_status="running",
+    )
+
+
+def test_on_event_situation_says_in_conversation_when_episode_open(manager, task_refs):
+    """開いている会話の出来事があるときだけ「ユーザーと会話中です」と伝える。"""
+    from saiverse import episodes
+
+    _running_user_conversation_track(manager)
+    episodes.open_conversation_episode(
+        manager, PERSONA_ID, building_id="alice_room",
+        participants=[PERSONA_ID, "1"],
+    )
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
+    )
+    assert "ユーザーと会話中です" in result["args"]["situation_text"]
+
+
+def test_on_event_situation_not_in_conversation_when_episode_closed(manager, task_refs):
+    """回帰 (2026-07-29): 会話が閉じていれば running のままでも「会話中」と言わない。
+
+    案 Y (life.md §7) 以降、対ユーザー会話 Track は会話終了後も running のまま残る。
+    種別で判定していた旧実装は、何日も前に終わった会話について「ユーザーと会話中です」
+    をペルソナへ渡していた。「取り組んでいます」への読み替えもやはり嘘なので、
+    手すき扱いのままにする。
+    """
+    _running_user_conversation_track(manager)  # 会話の出来事は開かない = 終了済み
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "システム通知"},
+    )
+    situation_text = result["args"]["situation_text"]
+    assert "ユーザーと会話中です" not in situation_text
+    assert "対 tester 会話" not in situation_text
+    assert "手すきです" in situation_text
+
+
 # ---------------------------------------------------------------------------
 # on_event: finalize (4 分岐 + alert 二重ガード + 時刻整合)
 # ---------------------------------------------------------------------------

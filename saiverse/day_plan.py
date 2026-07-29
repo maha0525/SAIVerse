@@ -2985,8 +2985,13 @@ def replace_day_plan(
 # ---------------------------------------------------------------------------
 
 
-def _is_in_user_conversation(manager: Any, persona_id: str) -> bool:
+def is_in_user_conversation(manager: Any, persona_id: str) -> bool:
     """ユーザー会話中か。開いている kind='conversation' の出来事があれば True。
+
+    **「いま会話中か」を判定したい全ての箇所はこの関数を使うこと** (2026-07-29 公開化)。
+    running Track の種別を見る旧判定が `judgment_points.build_on_event_situation_text`
+    に残っており、終了済みの会話を「ユーザーと会話中です」と LLM へ渡していた
+    (案 Y の追従漏れ)。同型の再発を防ぐため、判定の実装はここ 1 つに保つ。
 
     life.md §7 案 Y (2026-07-13): 「いま」の真実は開いているエピソードが持つ。
     無応答タイムアウトが会話の出来事を閉じた瞬間が v2 の「会話終了」に相当する
@@ -3333,7 +3338,7 @@ def _fire_slot(
         slot = backfilled if backfilled is not None else {**slot, "id": slot_id}
 
     # (a) ユーザー会話中なら繰り下げ (v2 §4.2「割り込み」/ 会話の至上性)
-    if _is_in_user_conversation(manager, persona_id):
+    if is_in_user_conversation(manager, persona_id):
         defer_count = int(slot.get("defer_count", 0))
         if defer_count >= MAX_DEFERRALS:
             _update_slot(
