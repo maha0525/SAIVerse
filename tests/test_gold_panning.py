@@ -622,19 +622,20 @@ class SessionCloseTest(unittest.TestCase):
 
     # -- case 1: marker guard skips pan but Chronicle runs --------------
 
-    def test_marker_guard_skips_pan_but_chronicle_runs(self):
+    def test_marker_guard_skips_pan_without_chronicle(self):
         msgs = self._msgs(12)
         client = FakeLLMClient({"reflection": "x", "ops": []})
         lifecycle = self._make_lifecycle(client, hot=True)
         # marker が最新 id と一致 → 新規 0 件 → 採取スキップ。
+        # 編纂はどの分岐でも呼ばれない (§13: クローズは編纂しない)。
         persona = self._make_persona(msgs, last_pan_id="m11")
         with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
                 patch("sea.gold_panning.run_gold_panning") as pan:
             result = gold_panning.run_session_close(lifecycle, persona)
         pan.assert_not_called()
-        lifecycle.generate_chronicle.assert_called_once()
+        lifecycle.generate_chronicle.assert_not_called()
         self.assertFalse(result["panned"])
-        self.assertTrue(result["chronicle"])
+        self.assertFalse(result["chronicle"])
         self.assertEqual(result["skipped_reason"], "below_min")
 
     # -- case 2: enough new + hot -> pan runs, marker updates ------------
@@ -696,7 +697,8 @@ class SessionCloseTest(unittest.TestCase):
 
     # -- case 3: cold -> pan skipped, Chronicle still runs --------------
 
-    def test_cold_skips_pan_but_runs_chronicle(self):
+    def test_cold_skips_pan_and_never_generates_chronicle(self):
+        """§13 (arasuji_levels.md): クローズは編纂しない (cold は採取も skip)。"""
         msgs = self._msgs(5)
         client = FakeLLMClient({"reflection": "x", "ops": []})
         lifecycle = self._make_lifecycle(client, hot=False)
@@ -707,9 +709,9 @@ class SessionCloseTest(unittest.TestCase):
         }), patch("sea.gold_panning.run_gold_panning") as pan:
             result = gold_panning.run_session_close(lifecycle, persona)
         pan.assert_not_called()
-        lifecycle.generate_chronicle.assert_called_once()
+        lifecycle.generate_chronicle.assert_not_called()
         self.assertFalse(result["panned"])
-        self.assertTrue(result["chronicle"])
+        self.assertFalse(result["chronicle"])
         self.assertEqual(result["skipped_reason"], "cold")
 
     # -- case 4: in-flight guard + flag reset ---------------------------
@@ -753,19 +755,23 @@ class SessionCloseTest(unittest.TestCase):
         # 追加 LLM コールが起きない = 連鎖はちょうど 1 回で止まる。
         self.assertEqual(len(client.calls), 1)
 
-    # -- case 7: weave disabled -> Chronicle not generated --------------
+    # -- case 7: クローズは編纂しない (§13) — weave 有効・hot でも呼ばれない ---
 
-    def test_weave_disabled_skips_chronicle(self):
+    def test_session_close_never_generates_chronicle(self):
+        """arasuji_levels.md §13: 編纂の自動発火は予算超過の一本。クローズは
+        採取 (pan) だけを行い、weave 有効・キャッシュ hot でも編纂しない。"""
         msgs = self._msgs(5)
         client = FakeLLMClient({"reflection": "x", "ops": []})
         lifecycle = self._make_lifecycle(client, hot=True)
         persona = self._make_persona(msgs, last_pan_id=None)
         with patch.dict(os.environ, {
-            "ENABLE_MEMORY_WEAVE_CONTEXT": "false",
+            "ENABLE_MEMORY_WEAVE_CONTEXT": "true",
             "SAIVERSE_GOLD_PANNING_CLOSE_MIN_MESSAGES": "3",
-        }), patch("sea.gold_panning.run_gold_panning"):
+        }), patch("sea.gold_panning.run_gold_panning") as pan:
             result = gold_panning.run_session_close(lifecycle, persona)
+        pan.assert_called_once()
         lifecycle.generate_chronicle.assert_not_called()
+        self.assertTrue(result["panned"])
         self.assertFalse(result["chronicle"])
 
 

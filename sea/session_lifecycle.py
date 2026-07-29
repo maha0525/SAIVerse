@@ -339,7 +339,18 @@ class SessionLifecycle:
         return 1200  # 20 minutes default
 
     def resolve_metabolism_anchor(self, persona, model_key: Optional[str] = None) -> tuple:
-        """Resolve the best metabolism anchor using 3-level fallback.
+        """Resolve the window-start anchor for (persona, model).
+
+        arasuji_levels.md §13 (2026-07-29 裁定): 起点の TTL 失効は「キャッシュが
+        冷えた」という温度情報にすぎず、提示範囲 (ウィンドウ) の所属を変えない。
+        したがってここでは **TTL を読まない** — 行が在ればそれが起点、無ければ
+        ブートストラップ。温度の読み手は keep-alive / gold_panning defer
+        (:meth:`_is_cache_hot`) 側に残る。
+
+        含意: 長く使っていない model の起点行は古いままなので、その model での
+        再開一発目は大きな (冷えた) ウィンドウを送ることがある。それは §12-10
+        「冷えたウィンドウの読み直しコスト」の領分で、ここで起点を張り直して
+        提示範囲を縮める形で解決してはならない (被覆の保存 §7-1 が破れる)。
 
         Args:
             model_key: 「自 model」として扱う model。ExecutionContext が届いている
@@ -350,7 +361,7 @@ class SessionLifecycle:
         Returns:
             (anchor_id, resolution_type) where resolution_type is
             "self" | "other" | "minimal".
-            anchor_id is None for "minimal" (no valid anchor found).
+            anchor_id is None for "minimal" (この persona に起点行が一つも無い)。
         """
         persona_model = model_key or getattr(persona, "model", None)
         if not persona_model:
@@ -358,55 +369,39 @@ class SessionLifecycle:
         persona_model = str(persona_model)
 
         anchors = self.load_anchor_entries(getattr(persona, "persona_id", None))
-        now = datetime.now()
 
-        # Case 1: self model's anchor exists and is valid
+        # Case 1: 自 model の行があればそれが起点 (温度は見ない)
         self_entry = anchors.get(persona_model)
-        if self_entry:
-            try:
-                updated_at = datetime.fromisoformat(self_entry["updated_at"])
-                validity = self.anchor_entry_ttl_seconds(self_entry, persona_model, getattr(persona, "persona_id", None))
-                age = (now - updated_at).total_seconds()
-                if age <= validity:
-                    LOGGER.debug(
-                        "[metabolism] Anchor resolved: self model '%s' (age=%.0fs, validity=%ds)",
-                        persona_model, age, validity,
-                    )
-                    return (self_entry["anchor_id"], "self")
-                else:
-                    LOGGER.debug(
-                        "[metabolism] Self model anchor expired: '%s' (age=%.0fs > validity=%ds)",
-                        persona_model, age, validity,
-                    )
-            except (KeyError, ValueError, TypeError) as exc:
-                LOGGER.debug("[metabolism] Invalid self anchor entry: %s", exc)
+        if self_entry and self_entry.get("anchor_id"):
+            LOGGER.debug(
+                "[metabolism] Anchor resolved: self model '%s'", persona_model,
+            )
+            return (self_entry["anchor_id"], "self")
 
-        # Case 2: most recent valid anchor from any model
+        # Case 2: 自 model の行が無い = この model での最初の Session。
+        # 直近に更新された他 model の起点を借りると、提示範囲が model 間で
+        # おおむね揃った位置から始まる (こちらも温度は見ない)。
         best_entry = None
         best_updated = None
-        for model_key, entry in anchors.items():
-            if model_key == persona_model:
+        for other_key, entry in anchors.items():
+            if other_key == persona_model:
                 continue  # already checked
+            if not entry.get("anchor_id"):
+                continue
             try:
                 updated_at = datetime.fromisoformat(entry["updated_at"])
-                validity = self.anchor_entry_ttl_seconds(entry, model_key, getattr(persona, "persona_id", None))
-                age = (now - updated_at).total_seconds()
-                if age <= validity:
-                    if best_updated is None or updated_at > best_updated:
-                        best_entry = entry
-                        best_updated = updated_at
             except (KeyError, ValueError, TypeError):
                 continue
+            if best_updated is None or updated_at > best_updated:
+                best_entry = entry
+                best_updated = updated_at
 
         if best_entry:
-            LOGGER.debug(
-                "[metabolism] Anchor resolved: other model (age=%.0fs)",
-                (now - best_updated).total_seconds(),
-            )
+            LOGGER.debug("[metabolism] Anchor resolved: borrowed from other model")
             return (best_entry["anchor_id"], "other")
 
-        # Case 3: no valid anchor
-        LOGGER.debug("[metabolism] No valid anchor found — will use minimal load")
+        # Case 3: 起点行が一つも無い (新規ペルソナ / 修復直後) — bootstrap
+        LOGGER.debug("[metabolism] No anchor row — bootstrap minimal load")
         return (None, "minimal")
 
     def update_anchor_for_model(
@@ -1344,13 +1339,31 @@ class SessionLifecycle:
         watermarks: Watermarks,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         model_key: Optional[str] = None,
-    ) -> None:
+        chronicle_force: bool = False,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> str:
         """Execute history metabolism: Chronicle generation + anchor update.
+
+        Returns (2026-07-29、Codex 指摘「失敗の成功偽装」の根治):
+
+        - "ok": 退場計画を適用した (編纂成功、または編纂を持たない設計)
+        - "nothing": 畳むものが無かった (提示コンテキスト空 / 畳める範囲なし)
+        - "failed" / "deferred": 編纂が完了せず anchor 据え置き (次回再試行)。
+          deferred はユーザーキャンセル・確認拒否・別入口との claim 競合。
+
+        呼び出し元のうち自動発火 (maybe_run_metabolism) は戻り値を使わない
+        (次回の水位判定が自然に再試行する)。手動入口 (run_manual_compaction)
+        はこれをユーザーへの結果報告に使う — failed を「完了」と報告しない。
 
         ``model_key`` はこの Metabolism を発火させた Pulse の実行 model。退役
         (anchor 前進) は「渡された model の session_anchor 行」だけを進める
         (beat_execution_context.md §3.2 — 編纂は persona に一度、退役は model
         ごと)。None なら従来どおり ``persona.model``。
+
+        ``chronicle_force`` は手動入口 (:meth:`run_manual_compaction`) 用。
+        ボタン押下でユーザーが既に同意しているため、編纂の確認ダイアログ・
+        pulse_type 判定を経ずに生成する。False (自動発火) では従来どおり
+        generate_chronicle 側のゲートに従う。
 
         Beat ロック (beat_execution_context.md §3.4): Metabolism は persona の
         記憶 (Chronicle / gold_panning のコア記憶採取記録) に書くため、入口で
@@ -1367,10 +1380,71 @@ class SessionLifecycle:
             getattr(persona, "persona_id", None),
             purpose="metabolism",
         ):
-            self._run_metabolism_locked(
+            return self._run_metabolism_locked(
                 persona, building_id, window, watermarks, event_callback,
-                model_key=model_key,
+                model_key=model_key, chronicle_force=chronicle_force,
+                cancellation_token=cancellation_token,
             )
+
+    def run_manual_compaction(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> str:
+        """手動入口 (記憶の整理 / Chronicle タブの生成) の畳み (arasuji_levels.md §13 裁定4)。
+
+        「発火 (予算超過) を待たずに今すぐ畳む」ボタンの実体。範囲規則は自動
+        (応答後 Metabolism) と同一 — 残す量 (watermarks.target) より古い側だけを
+        畳む。起点の全消しも全量編纂もしない (それは修復スクリプトの領分)。
+
+        ``cancellation_token`` は UI の中止ボタン用 — 編纂のチャンク間で確認され、
+        中止時は "deferred" で戻る (確定済みチャンクは冪等スキップされるため
+        再実行は安全)。
+
+        Returns:
+            - "ok": 畳んで適用した
+            - "noop": 既に残す量以下、または畳める範囲が無い (何もしていない)
+            - "failed": 編纂が失敗し anchor 据え置き (再実行で再試行できる)
+            - "deferred": キャンセル、または別入口との claim 競合 (同上)
+            - "disabled": Chronicle 生成が無効 (weave env OFF / persona トグル OFF)。
+              手動入口の同意文は「Chronicle に畳む」なので、編纂なしの退場 (忘却)
+              を黙って実行しない — 何も畳まず設定の案内に倒す (Codex 再レビュー
+              2026-07-29)。自動 Metabolism の「disabled でも前進する」設計合意は
+              対象外でそのまま
+            - "unavailable": model / 水位 / 起点が解決できず、畳みを定義できない
+              (ブートストラップ前の新規ペルソナ等)
+        """
+        resolved_model = str(model_key or getattr(persona, "model", "") or "") or None
+        if not resolved_model:
+            return "unavailable"
+        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+        if not memory_weave_enabled or not self.is_chronicle_enabled_for_persona(persona):
+            return "disabled"
+        watermarks = self.get_metabolism_watermarks(persona, resolved_model)
+        if watermarks is None:
+            return "unavailable"
+        window = self.get_presented_window(persona, resolved_model)
+        if not window.anchor_id:
+            # 起点行が無い = 提示ウィンドウが未定義 (新規ペルソナ / 修復直後)。
+            # 畳む対象を決められないので何もしない。
+            return "unavailable"
+        current_chars = message_chars(window.presented)
+        if current_chars <= watermarks.target:
+            LOGGER.info(
+                "[metabolism] manual compaction: window already at/below target "
+                "(persona=%s, %d chars <= target=%d); nothing to fold",
+                getattr(persona, "persona_id", "?"), current_chars, watermarks.target,
+            )
+            return "noop"
+        building_id = getattr(persona, "current_building_id", None) or ""
+        status = self.run_metabolism(
+            persona, building_id, window, watermarks, event_callback,
+            model_key=resolved_model, chronicle_force=True,
+            cancellation_token=cancellation_token,
+        )
+        return "noop" if status == "nothing" else status
 
     def _run_metabolism_locked(
         self,
@@ -1380,7 +1454,9 @@ class SessionLifecycle:
         watermarks: Watermarks,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         model_key: Optional[str] = None,
-    ) -> None:
+        chronicle_force: bool = False,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> str:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
 
         提示コンテキストは**ロックの内側で撮り直す**。呼び出し元 (発火判定) が撮った提示コンテキストはロックの
@@ -1392,6 +1468,24 @@ class SessionLifecycle:
 
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         persona_id = getattr(persona, "persona_id", "?")
+
+        # Chronicle の有効判定は**ロックの内側で一度だけ**行い、以降はこの値を
+        # 使う。手動入口 (chronicle_force) の契約は「Chronicle に畳む」なので、
+        # 入口の事前判定とこのロックの間に設定が OFF へ反転していたら (TOCTOU,
+        # Codex 三巡 2026-07-29)、編纂なしの退場へ進ませずここで止める。
+        # 自動発火 (chronicle_force=False) は従来どおり disabled でも前進する
+        # (編纂なしで忘れる設計合意)。
+        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+        chronicle_enabled = (
+            memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona)
+        )
+        if chronicle_force and not chronicle_enabled:
+            LOGGER.info(
+                "[metabolism] manual compaction stopped: chronicle disabled "
+                "under the beat lock (persona=%s)", persona_id,
+            )
+            return "disabled"
+
         band_budget = chronicle_band_budget()
         fresh = self.get_presented_window(persona, model_key)
         if fresh.anchor_id:
@@ -1405,7 +1499,7 @@ class SessionLifecycle:
                 "[metabolism] window is empty under the beat lock; nothing to do "
                 "(persona=%s)", persona_id,
             )
-            return
+            return "nothing"
 
         # 退場計画 (arasuji_levels.md §3/§4): 残す量 (watermarks.target) より
         # 古い側を、古い順に U ずつの範囲に刻んで全部畳む。エピソードに畳みを
@@ -1421,7 +1515,7 @@ class SessionLifecycle:
                 persona_id, plan.total_chars, watermarks.target,
                 plan.protected_from, band_budget,
             )
-            return
+            return "nothing"
 
         evict_count = plan.evicted_count
         keep_count = len(current_messages) - evict_count
@@ -1451,12 +1545,13 @@ class SessionLifecycle:
         # を字義どおりには満たしていない。実際に圧縮区間が空いた範囲は
         # `_apply_eviction_plan` が「あらすじを持たない fold は退場させない」で
         # 拾う (退場そのものを見送るので、消えるのではなく生ログのまま残る)。
-        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
         chronicle_status = "disabled"
-        if memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona):
+        if chronicle_enabled:
             try:
                 chronicle_status = self.generate_chronicle(
                     persona, event_callback,
+                    force=chronicle_force,
+                    cancellation_token=cancellation_token,
                     compile_groups=compile_groups_from_folds(
                         plan.folds, current_messages,
                     ),
@@ -1512,6 +1607,7 @@ class SessionLifecycle:
                     "evicted": evict_count,
                     "kept": keep_count,
                 })
+            return "ok"
         else:
             LOGGER.warning(
                 "[metabolism] anchor held back (chronicle_status=%s, model=%s); "
@@ -1524,6 +1620,8 @@ class SessionLifecycle:
                     "status": "completed",
                     "content": "記憶の整理を見送りました（Chronicle生成が完了しなかったため、次回に再試行します）",
                 })
+            # "failed" / "deferred" をそのまま返す (手動入口が結果報告に使う)
+            return chronicle_status
 
     def is_chronicle_enabled_for_persona(self, persona) -> bool:
         """Check per-persona Chronicle auto-generation toggle from DB."""

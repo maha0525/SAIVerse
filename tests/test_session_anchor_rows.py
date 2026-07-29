@@ -19,6 +19,7 @@ SEA 監査 S1/S8 の根治を固定する:
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -398,3 +399,194 @@ def test_watchdog_callback_carries_model_key(session_factory):
     assert key in scheduled
     scheduled[key]()
     assert calls == [(PERSONA_ID, "light-model")]
+
+
+# ---------------------------------------------------------------------------
+# arasuji_levels.md §13 (2026-07-29): 起点の TTL 失効は温度情報のみ —
+# 提示範囲 (ウィンドウ) の所属を変えない
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_returns_expired_self_anchor(session_factory):
+    """TTL がとうに切れていても、自 model の行が起点として返る (§13 裁定1)。"""
+    lc = _make_lifecycle(session_factory)
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "a1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    assert lc.resolve_metabolism_anchor(persona) == ("a1", "self")
+
+
+def test_resolve_borrows_most_recent_other_model_row(session_factory):
+    """自 model の行が無ければ、直近更新の他 model の起点を借りる (温度不問)。"""
+    lc = _make_lifecycle(session_factory)
+    old = _now() - timedelta(days=7)
+    newer = _now() - timedelta(days=1)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-b", {
+        "anchor_id": "b1", "updated_at": old.isoformat(), "ttl_seconds": 300,
+    })
+    lc.upsert_anchor_entry(PERSONA_ID, "model-c", {
+        "anchor_id": "c1", "updated_at": newer.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    assert lc.resolve_metabolism_anchor(persona) == ("c1", "other")
+
+
+def test_resolve_without_rows_is_bootstrap(session_factory):
+    """起点行が一つも無い (新規ペルソナ / 修復直後) だけが minimal になる。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    assert lc.resolve_metabolism_anchor(persona) == (None, "minimal")
+
+
+# ---------------------------------------------------------------------------
+# §13 裁定4: 手動畳み (run_manual_compaction) — 範囲規則は自動と同一
+# ---------------------------------------------------------------------------
+
+
+def _window(anchor_id, presented):
+    from sea.session_window import SessionWindow
+    return SessionWindow(
+        anchor_id=anchor_id, raw=list(presented), presented=list(presented), folds=[],
+    )
+
+
+def _weave_on():
+    """手動畳みテスト用: Chronicle 生成の weave env ゲートを通す。"""
+    return patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"})
+
+
+def test_manual_compaction_runs_metabolism_with_force(session_factory):
+    """残す量超過なら run_metabolism を chronicle_force=True で一度だけ呼ぶ。"""
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+    with _weave_on(), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        assert lc.run_manual_compaction(persona) == "ok"
+    run.assert_called_once()
+    assert run.call_args.kwargs.get("chronicle_force") is True
+    assert run.call_args.kwargs.get("model_key") == "model-a"
+
+
+def test_manual_compaction_propagates_failure_and_cancel(session_factory):
+    """編纂の失敗/キャンセルを成功に偽装しない (Codex 2026-07-29 指摘の根治)。
+
+    run_metabolism の "failed" / "deferred" はそのまま呼び出し元へ返り、
+    "nothing" (畳める範囲なし) だけが "noop" に写る。cancellation_token は
+    そのまま run_metabolism へ渡る。
+    """
+    from sea.cancellation import CancellationToken
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+    token = CancellationToken()
+    for inner, expected in [
+        ("failed", "failed"), ("deferred", "deferred"), ("nothing", "noop"),
+    ]:
+        with _weave_on(), \
+                patch.object(lc, "get_metabolism_watermarks",
+                             return_value=Watermarks(low=1000, target=2000, high=4000)), \
+                patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+                patch.object(lc, "run_metabolism", return_value=inner) as run:
+            assert lc.run_manual_compaction(
+                persona, cancellation_token=token,
+            ) == expected
+        assert run.call_args.kwargs.get("cancellation_token") is token
+
+
+def test_manual_compaction_noop_at_or_below_target(session_factory):
+    """残す量以下なら畳まない — 手動でも直近の生ログには手を付けない。"""
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": "m0", "content": "x" * 100}]
+    with _weave_on(), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)), \
+            patch.object(lc, "run_metabolism") as run:
+        assert lc.run_manual_compaction(persona) == "noop"
+    run.assert_not_called()
+
+
+def test_manual_compaction_unavailable_without_anchor(session_factory):
+    """起点行が無い (ブートストラップ前) は畳みを定義できず unavailable。"""
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    with _weave_on(), \
+            patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)), \
+            patch.object(lc, "get_presented_window", return_value=_window(None, [])), \
+            patch.object(lc, "run_metabolism") as run:
+        assert lc.run_manual_compaction(persona) == "unavailable"
+    run.assert_not_called()
+
+
+def test_manual_compaction_disabled_does_not_fold(session_factory):
+    """Chronicle 無効 (weave env OFF / persona トグル OFF) は畳まず "disabled"。
+
+    手動入口の同意文は「Chronicle に畳む」— 編纂なしの退場 (忘却) を黙って
+    実行しない (Codex 再レビュー 2026-07-29)。
+    """
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    msgs = [{"id": f"m{i}", "content": "x" * 1000} for i in range(10)]
+
+    # (a) weave env が無い / OFF
+    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}),             patch.object(lc, "run_metabolism") as run:
+        assert lc.run_manual_compaction(persona) == "disabled"
+    run.assert_not_called()
+
+    # (b) env ON でも persona の Chronicle トグルが OFF
+    with _weave_on(),             patch.object(lc, "is_chronicle_enabled_for_persona", return_value=False),             patch.object(lc, "get_metabolism_watermarks",
+                         return_value=Watermarks(low=1000, target=2000, high=4000)),             patch.object(lc, "get_presented_window", return_value=_window("m0", msgs)),             patch.object(lc, "run_metabolism") as run:
+        assert lc.run_manual_compaction(persona) == "disabled"
+    run.assert_not_called()
+
+
+def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
+    """ロック内の再判定 (TOCTOU, Codex 三巡 2026-07-29): 入口の事前判定の後に
+    Chronicle が OFF へ反転しても、手動 (chronicle_force=True) は編纂なしの
+    退場へ進まず "disabled" で止まる。自動 (force=False) は従来どおり進む。"""
+    from sea.eviction_plan import Watermarks
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    wm = Watermarks(low=1000, target=2000, high=4000)
+
+    # 手動: disabled なら提示ウィンドウの取り直しにすら進まない
+    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+            patch.object(lc, "get_presented_window") as gw:
+        status = lc._run_metabolism_locked(
+            persona, "room", _window("m0", []), wm, chronicle_force=True,
+        )
+    assert status == "disabled"
+    gw.assert_not_called()
+
+    # 自動: disabled でも早期 return しない (空ウィンドウまで進み "nothing")
+    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+            patch.object(lc, "get_presented_window", return_value=_window(None, [])):
+        status = lc._run_metabolism_locked(
+            persona, "room", _window(None, []), wm, chronicle_force=False,
+        )
+    assert status == "nothing"

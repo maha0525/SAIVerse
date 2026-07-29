@@ -601,14 +601,16 @@ def _count_new_since_marker(
 
 
 def run_session_close(lifecycle: Any, persona: Any) -> Dict[str, Any]:
-    """セッションクローズ時の砂金採り + Chronicle 前倒し。
+    """セッションクローズ時の砂金採り。
 
     run_cache_keepalive の not-Active 分岐 (セッションが閉じ、anchor がまだ温かい
     可能性が高い唯一の停止点) から別スレッド経由で呼ばれる。
 
-    処理順は docs/intent/gold_panning.md §3.6 / 実装仕様 gold_panning_phase3_spec.md:
-    Chronicle 前倒しは採取の成否と独立に実行し、採取はマーカーガードを通過し、かつ
+    旧実装はここで Chronicle の前倒し全量生成も行っていたが、arasuji_levels.md
+    §13 (2026-07-29) で撤去した — 編纂の自動発火は予算超過 (応答後 Metabolism)
+    の一本で、クローズは編纂しない。採取 (pan) はマーカーガードを通過し、かつ
     キャッシュが熱いときだけ走る (不変条件 §5-1: クローズはコールド例外を作らない)。
+    戻り値の "chronicle" キーは互換のため常に False で残す。
 
     Beat ロック (beat_execution_context.md §3.4): この経路は
     SEARuntime._spawn_session_close の**別スレッド**で走り、persona の記憶
@@ -666,10 +668,11 @@ def _run_session_close_locked(
     skipped_reason: Optional[str] = None
 
     # window の起点は gold_panning 自身の pan マーカー (前回処理した末尾)。
-    # metabolism anchor は cache TTL 都合で動く点 (失効すると張り直る) なので採取
-    # 範囲の起点には使わない — キャッシュが切れただけで未採取メッセージが範囲外へ
-    # 落ちる (2026-07-08 sophie 実機で判明: anchor が当日リセットされ window が
-    # main_line/committed/現スレッド絞りで 4 件に縮んでいた)。初回 (マーカー無し) は
+    # metabolism anchor は退場 (畳み) で前進する点なので採取範囲の起点には
+    # 使わない — 畳みが走っただけで未採取メッセージが範囲外へ落ちる (旧 TTL
+    # リセット時代の実害: 2026-07-08 sophie 実機で anchor が当日リセットされ
+    # window が main_line/committed/現スレッド絞りで 4 件に縮んでいた。TTL
+    # リセット自体は arasuji_levels.md §13 で廃止)。初回 (マーカー無し) は
     # 「今コンテキストに載っている生履歴の先頭」として metabolism anchor を起点に使う
     # (この時 anchor は読んでいる範囲の先頭を表す)。
     # 性質フィルタ (main_line/committed) は付けない: 読んでいる生履歴全体を範囲に取る
@@ -717,22 +720,9 @@ def _run_session_close_locked(
             "(persona=%s new=%d min=%d); skipping pan", persona_id, new_count, close_min,
         )
 
-    # Chronicle 前倒し (採取の成否と独立)。run_metabolism と同じゲート。
-    memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-    if memory_weave_enabled and lifecycle.is_chronicle_enabled_for_persona(persona):
-        try:
-            # force=True: 確認ダイアログ・pulse_type 判定を回避 (persona._current_pulse_type
-            # は前回 Pulse の残留値で不定。session_lifecycle.generate_chronicle docstring)。
-            # §6-5: 生成失敗は raise でなく status "failed" で返るようになったため、
-            # 成否は戻り値で判定する ("deferred" = 別入口が同じ窓を編纂中/済み)。
-            _chronicle_status = lifecycle.generate_chronicle(persona, force=True)
-            chronicle_done = _chronicle_status == "ok"
-        except Exception:
-            LOGGER.exception(
-                "[gold_panning] session close: generate_chronicle failed (persona=%s)", persona_id,
-            )
-        # (旧 Track Chronicle 呼び出しは W4 で廃止 — experience_structure.md §11-10)
-    # ensure_recall_embeddings はゲート外で必ず実行 (run_metabolism と同じ思想:
+    # (旧: ここに Chronicle 前倒し全量生成があった — arasuji_levels.md §13 で
+    #  撤去。編纂の自動発火は予算超過の一本。)
+    # ensure_recall_embeddings はクローズで必ず実行 (run_metabolism と同じ思想:
     # ローカル・無料で、Chronicle 生成の成否・トグルに相乗りさせない)。
     try:
         lifecycle.ensure_recall_embeddings(persona)

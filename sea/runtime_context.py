@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Callable, Dict, List, Optional
 
 from saiverse.model_configs import (
@@ -278,54 +277,19 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 # すると、LLM 失敗時に「実際は cache 切れてるのに TTL 内」と
                                 # 誤判定して次回も長大コンテキストを送る不整合になるため。
                         else:
-                            # Case 3: no valid anchor — minimal load + Chronicle generation
-                            memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-                            if memory_weave_enabled and runtime.session_lifecycle.is_chronicle_enabled_for_persona(persona):
-                                if event_callback:
-                                    event_callback({
-                                        "type": "metabolism",
-                                        "status": "started",
-                                        "content": "Chronicleを生成しています...",
-                                    })
-                                try:
-                                    LOGGER.info("[metabolism] Triggering Chronicle generation on anchor expiry")
-                                    runtime.session_lifecycle.generate_chronicle(
-                                        persona,
-                                        event_callback=event_callback,
-                                        cancellation_token=cancellation_token,
-                                    )
-                                    # (旧 Track Chronicle 呼び出しは W4 で廃止 —
-                                    # experience_structure.md §11-10)
-                                    # Pre-response metabolism で発生した Memopedia 変化を即座に
-                                    # ペルソナに知覚させる。これがないと、続く履歴取得で拾えず、
-                                    # ペルソナは「自分が直前に行った記憶整理」を同じターンの応答時に
-                                    # 認識できない（次ターンで初めて検知）。
-                                    # Phase 2 で inject は「検知＝バッファへ push」に変わったため、
-                                    # ここでは検知 (push) の直後に flush (消費) を呼び、同一ターンでの
-                                    # 知覚を維持する。詳細: docs/intent/perception_buffer.md §4.5。
-                                    try:
-                                        from saiverse.dynamic_state import DynamicStateManager
-                                        DynamicStateManager.maybe_inject_event_messages(persona, runtime.manager)
-                                        sai_mem = getattr(persona, "sai_memory", None)
-                                        if sai_mem is not None:
-                                            sai_mem.flush_perception_buffer()
-                                    except Exception:
-                                        LOGGER.exception("[dynamic_state] Event detection/flush after pre-response metabolism failed")
-                                except Exception as exc:
-                                    LOGGER.warning("[metabolism] Chronicle generation on anchor expiry failed: %s", exc)
-                                if event_callback:
-                                    event_callback({
-                                        "type": "metabolism",
-                                        "status": "completed",
-                                        "content": "Chronicle生成が完了しました",
-                                    })
-
-                            # Load minimal history (低水位 = 直近保護帯の文字数、
-                            # 実行 model の設定。chronicle_eviction.md §4)
+                            # Case 3: 起点行が一つも無い (新規ペルソナ / 修復直後)
+                            # のブートストラップ。低水位ぶんだけ読み、下の
+                            # count-based 経路が新しい起点候補を立てる。
+                            #
+                            # 旧実装はここ (anchor TTL 失効時) で会話前の全量
+                            # Chronicle 生成を行っていたが、arasuji_levels.md §13
+                            # (2026-07-29) で撤去した — 起点失効は温度情報であって
+                            # 提示範囲を変えず、編纂の自動発火は予算超過
+                            # (maybe_run_metabolism) の一本。
                             limit_value = _minimal_load_chars(runtime, persona, model_key)
                             use_message_count = False
                             LOGGER.debug(
-                                "[sea][prepare-context] Minimal load (no valid anchor): %d chars",
+                                "[sea][prepare-context] Bootstrap minimal load (no anchor row): %d chars",
                                 limit_value,
                             )
 

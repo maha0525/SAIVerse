@@ -3,7 +3,7 @@ from typing import List, Optional
 import json
 import logging
 from api.deps import get_manager, avatar_path_to_url
-from database.models import AI, UserAiLink
+from database.models import UserAiLink
 from .models import AIConfigResponse, MetaJudgmentConfig, UpdateAIConfigRequest
 
 LOGGER = logging.getLogger(__name__)
@@ -179,76 +179,51 @@ def update_persona_config(
 
 @router.post("/{persona_id}/organize-memory")
 def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
-    """Clear all metabolism anchors and trigger metabolism (Chronicle generation + anchor reset).
+    """手動の記憶整理 — 残す量より古い側を今すぐあらすじに畳む。
 
-    This forces the persona to re-evaluate its conversation history,
-    generating Chronicle entries for any unprocessed messages and
-    resetting the metabolism anchor to a minimal window.
+    arasuji_levels.md §13 裁定4 (2026-07-29): 範囲規則は自動 (応答後 Metabolism)
+    と同一で、「発火 (予算超過) を待たずに今すぐ畳む」だけ。旧実装の「起点の
+    全消し + 全未編纂の一括編纂」は撤去した — 起点は畳みで前進するだけで
+    消えない。全量再編纂 (修復) は scripts/arasuji/ の領分。
+
+    編纂の要否 (ENABLE_MEMORY_WEAVE_CONTEXT / persona の CHRONICLE_ENABLED) は
+    畳み本体 (_run_metabolism_locked) が判定する。フロントの confirm() で同意
+    済みのため、編纂の確認ダイアログは chronicle_force で回避される。
     """
-    import os
-
     persona = manager.personas.get(persona_id)
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not loaded")
 
-    # 1. Clear all anchors from DB — session_anchor 行 (全 model 分) を削除する。
-    #    旧 AI.METABOLISM_ANCHORS 列は行分離 (beat_execution_context.md §3.1) で
-    #    廃止済み (backfill 後は常に NULL)。
-    try:
-        lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
-        if lifecycle is not None:
-            lifecycle.clear_anchor_entries(persona_id)
-    except Exception as exc:
-        LOGGER.warning("[organize-memory] Failed to clear anchors: %s", exc)
-
-    # (旧 step 2「in-memory anchor clear」は属性ごと廃止 — anchor の正は
-    #  session_anchor 行のみで、step 1 の clear_anchor_entries が全てを消す。)
-
-    # 3. Generate Chronicle for unprocessed messages
-    chronicle_generated = False
-    memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-    # Check per-persona Chronicle toggle
-    if memory_weave_enabled:
-        db2 = manager.SessionLocal()
-        try:
-            ai_check = db2.query(AI).filter_by(AIID=persona_id).first()
-            if ai_check and not ai_check.CHRONICLE_ENABLED:
-                memory_weave_enabled = False
-        finally:
-            db2.close()
     # NOTE: SEARuntime は manager.sea_runtime。manager.runtime は RuntimeService
     # (別物) で、かつて誤参照して AttributeError を握り潰し「完了しました」を
-    # 返し続けていた (2026-07-04 修正)。フロントの confirm() で同意済みのため
-    # force=True で確認ダイアログを経ずに生成する。
-    sea_runtime = getattr(manager, "sea_runtime", None)
-    if memory_weave_enabled and sea_runtime:
-        try:
-            # §6-5: 生成失敗は raise でなく status "failed" で返る。成否は戻り値で判定。
-            _status = sea_runtime.session_lifecycle.generate_chronicle(persona, force=True)
-            chronicle_generated = _status == "ok"
-            if _status not in ("ok",):
-                LOGGER.warning("[organize-memory] Chronicle generation status=%s", _status)
-        except Exception as exc:
-            LOGGER.warning("[organize-memory] Chronicle generation failed: %s", exc)
+    # 返し続けていた (2026-07-04 修正)。
+    lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
+    if lifecycle is None:
+        raise HTTPException(status_code=503, detail="SEA runtime not available")
 
-    # 3.5. Recall embedding maintenance — Chronicle 生成の成否・トグルとは独立に
-    # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料)。
-    # run_metabolism 側の step 2.7 と同じ独立ステップ。
-    if sea_runtime:
-        try:
-            sea_runtime.session_lifecycle.ensure_recall_embeddings(persona)
-        except Exception:
-            LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
+    try:
+        compaction_status = lifecycle.run_manual_compaction(persona)
+    except Exception as exc:
+        LOGGER.warning("[organize-memory] manual compaction failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Memory compaction failed: {exc}")
 
-    # 4. Dispatch METABOLISM event to head_pipeline (snapshot refresh)
+    # Recall embedding maintenance — 畳みの有無・成否と独立に未埋め込みの
+    # Chronicle/ページ/Fragment を全件埋める (ローカル・無料)。
+    try:
+        lifecycle.ensure_recall_embeddings(persona)
+    except Exception:
+        LOGGER.warning("[organize-memory] embedding maintenance failed", exc_info=True)
+
+    # Dispatch METABOLISM event to head_pipeline (snapshot refresh)
     try:
         from saiverse.dynamic_state import DynamicStateManager
         DynamicStateManager.on_metabolism(persona, manager)
     except Exception:
         LOGGER.warning("[organize-memory] on_metabolism dispatch failed", exc_info=True)
 
+    # failed / deferred は「完了」ではない (Codex 2026-07-29 指摘: 失敗の成功偽装
+    # の根治)。畳みは適用されておらず、再実行で再試行できる。
     return {
-        "success": True,
-        "anchors_cleared": True,
-        "chronicle_generated": chronicle_generated,
+        "success": compaction_status in ("ok", "noop"),
+        "compaction": compaction_status,
     }

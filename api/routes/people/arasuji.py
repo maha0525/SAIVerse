@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from typing import Dict, List, Optional
 from api.deps import get_manager
 from saiverse.data_paths import get_persona_memory_db
@@ -374,30 +374,81 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
 def list_arasuji_entries(
     persona_id: str,
     level: Optional[int] = None,
-    limit: int = 500,
+    limit: int = Query(500, ge=1, le=5000),
     manager = Depends(get_manager)
 ):
-    """List Chronicle entries for a persona (part of Memory Weave)."""
-    from sai_memory.arasuji.storage import get_entries_by_level
+    """List Chronicle entries for a persona (part of Memory Weave).
+
+    切り詰め契約 (2026-07-29、docs/issues/arasuji_modal_500_limit_truncation.md):
+    総数が ``limit`` を超えたら**古い側の L1** から隠し、``hidden_oldest`` /
+    ``total_available`` で明示する。最新のエントリは決して黙って欠けない。
+    上位レベル (L2+) は件数が log で有界な全体像の骨格なので隠さない — 上位
+    レベルだけで limit を超える異常な形は、そのまま返して WARNING を残す
+    (応答件数が limit を超えるのはこのケースのみ)。``level`` 指定時も同じ
+    「古い側から隠す」契約を適用する。
+    """
+    from sai_memory.arasuji.storage import _row_to_entry
 
     conn = _get_arasuji_db(persona_id)
     if not conn:
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
+    # 「古い側から隠す」を SQL で行う — 旧実装の ORDER BY level DESC,
+    # start_time ASC + LIMIT は末尾 (最新の L1) から黙って欠けた (2026-07-29
+    # 実害)。新しい側を DESC + LIMIT で取り、表示順 (昇順) へ反転することで、
+    # limit が DB からの読み取り量も抑える (Codex 再レビュー)。
+    _SELECT = (
+        "SELECT id, level, content, source_ids_json, start_time, end_time, "
+        "source_count, message_count, parent_id, is_consolidated, created_at "
+        "FROM arasuji_entries"
+    )
+    _NEWEST_FIRST = " ORDER BY start_time DESC, created_at DESC, id DESC"
+
     try:
+        # COUNT と行フェッチを同じ読み取りスナップショットで行う (Codex 三巡:
+        # 別スナップショットだと並行編纂の insert で hidden_oldest がずれ、
+        # 「黙った切り詰め」が再発する)。BEGIN で読み取り tx を開き、finally の
+        # rollback で閉じる (読みだけなので rollback = 終了)。
+        conn.execute("BEGIN")
+        hidden_oldest = 0
         if level is not None:
-            entries = get_entries_by_level(conn, level, order_by_time=True)
+            total_available = conn.execute(
+                "SELECT COUNT(*) FROM arasuji_entries WHERE level = ?", (level,)
+            ).fetchone()[0]
+            cur = conn.execute(
+                _SELECT + " WHERE level = ?" + _NEWEST_FIRST + " LIMIT ?",
+                (level, limit),
+            )
+            entries = [_row_to_entry(row) for row in cur.fetchall()][::-1]
+            hidden_oldest = max(0, total_available - len(entries))
         else:
-            # Get all entries ordered by level DESC, then start_time ASC
-            cur = conn.execute("""
-                SELECT id, level, content, source_ids_json, start_time, end_time,
-                       source_count, message_count, parent_id, is_consolidated, created_at
-                FROM arasuji_entries
-                ORDER BY level DESC, start_time ASC
-                LIMIT ?
-            """, (limit,))
-            from sai_memory.arasuji.storage import _row_to_entry
-            entries = [_row_to_entry(row) for row in cur.fetchall()]
+            # 上位レベル (L2+) は件数が log で有界な全体像の骨格なので全件返す。
+            # L1 だけを「古い側から隠す」対象にする。
+            l1_total = conn.execute(
+                "SELECT COUNT(*) FROM arasuji_entries WHERE level = 1"
+            ).fetchone()[0]
+            cur = conn.execute(
+                _SELECT + " WHERE level != 1 ORDER BY level DESC, start_time ASC"
+            )
+            upper = [_row_to_entry(row) for row in cur.fetchall()]
+            total_available = len(upper) + l1_total
+            if total_available <= limit:
+                l1_keep = l1_total
+            else:
+                l1_keep = max(0, limit - len(upper))
+                if len(upper) > limit:
+                    LOGGER.warning(
+                        "[arasuji-list] upper levels alone exceed limit=%d "
+                        "(persona=%s, upper=%d); returning them unhidden per contract",
+                        limit, persona_id, len(upper),
+                    )
+            cur = conn.execute(
+                _SELECT + " WHERE level = 1" + _NEWEST_FIRST + " LIMIT ?",
+                (l1_keep,),
+            )
+            level1 = [_row_to_entry(row) for row in cur.fetchall()][::-1]
+            hidden_oldest = l1_total - len(level1)
+            entries = upper + level1
 
         # Build message number map for level 1 entries
         msg_num_map = None
@@ -437,11 +488,17 @@ def list_arasuji_entries(
         return ArasujiListResponse(
             entries=items,
             total=len(items),
-            level_filter=level
+            level_filter=level,
+            total_available=total_available,
+            hidden_oldest=hidden_oldest,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list Chronicle entries: {e}")
     finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         conn.close()
 
 @router.get("/{persona_id}/arasuji/{entry_id}", response_model=ArasujiEntryItem, tags=["Chronicle"])
@@ -756,339 +813,94 @@ def _run_chronicle_generation(
     include_timestamp: bool = True,
     manager=None,
 ):
-    """Background worker for Chronicle generation.
+    """Background worker for manual Chronicle generation.
 
-    W4 (体験の構造 工程(2)): episode 整列チャンク (plan_alignment →
-    execute_plan → run_band_overflow) で生成する。Metabolism 側
-    (sea/session_lifecycle.generate_chronicle) と同じ計画・同じ実行器を使い、
-    冪等 claim (実行台帳 kind="metabolism.run"、M1) も同じキーで通す — 手動
-    生成と自動 Metabolism が同じ提示コンテキストを同時に編纂する二重 LLM コストを台帳が
-    収束させる (旧実装は claim を通らない別コネクション入口だった)。
+    arasuji_levels.md §13 裁定4 (2026-07-29): 手動生成も範囲規則を自動 (応答後
+    Metabolism) と揃える — 「発火 (予算超過) を待たずに今すぐ畳む」だけで、
+    畳む範囲は残す量より古い側。実体は :meth:`SessionLifecycle.run_manual_compaction`
+    への委譲で、③記憶の整理 (organize-memory API) と同じ一本の経路に合流する。
+
+    旧実装 (全未編纂の一括編纂 + 進捗バー + キャンセル + max_messages / model /
+    with_memopedia 指定) は「全量編纂」という仕事ごと撤去した — 全量再編纂は
+    scripts/arasuji/build_arasuji_core.py の領分。旧リクエストフィールドは
+    受理して無視する (W4 の batch_size と同じ扱い)。
     """
-    import os
-    from sai_memory.memory.storage import init_db
-    from sai_memory.arasuji import init_arasuji_tables
-    from sai_memory.arasuji.alignment import (
-        chronicle_band_budget,
-        plan_alignment,
-        truncate_plan,
-    )
-    from saiverse.model_configs import find_model_config
-    from llm_clients.factory import get_llm_client
+    del max_messages, model_name, with_memopedia, include_timestamp  # 受理して無視 (§13)
 
-    _update_job(job_id, status="running", message="Loading database...")
-
-    try:
-        # Get database path
-        db_path = get_persona_memory_db(persona_id)
-        if not db_path.exists():
-            _update_job(job_id, status="failed", error=f"Database not found: {db_path}")
-            return
-
-        conn = init_db(str(db_path), check_same_thread=False)
-        init_arasuji_tables(conn)
-
-        # 帰化バックフィル — dry 予測より前 (Codex W4 三巡 #3。近似 dry と
-        # 実測 backfill の食い違いで band backlog へ永久に到達しない穴の閉塞)
-        from sai_memory.arasuji.bands import backfill_coverage
-        try:
-            backfill_coverage(conn)
-        except Exception:
-            LOGGER.exception("[Chronicle Gen] coverage backfill failed; continuing")
-
-        # Fetch all messages suitable for Chronicle (shared filter logic)
-        _update_job(job_id, message="Fetching messages...")
-
-        from sai_memory.memory.storage import get_messages_for_chronicle
-        all_messages = get_messages_for_chronicle(conn)
-        # 空でも早期 return しない — plan は空 chunks になり、帯 backlog
-        # (前回の束ね失敗の残り) の統合だけでも実行できる (Codex W4 二巡 #5)。
-
-        LOGGER.info("[Chronicle Gen] Loaded %d messages (filtered by get_messages_for_chronicle)", len(all_messages))
-
-        # Initialize LLM client
-        _update_job(job_id, message="Initializing LLM client...")
-
-        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
-        from database.models import AI as AIModel
-        from database.session import SessionLocal
-        _db = SessionLocal()
-        try:
-            _ai = _db.query(AIModel).filter(AIModel.AIID == persona_id).first()
-            persona_mw_model = getattr(_ai, "MEMORY_WEAVE_MODEL", None) if _ai else None
-        finally:
-            _db.close()
-        env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
-        model_to_use = model_name or persona_mw_model or env_model
-
-        resolved_model_id, model_config = find_model_config(model_to_use)
-        if not resolved_model_id:
-            _update_job(job_id, status="failed", error=f"Model '{model_to_use}' not found")
-            conn.close()
-            return
-
-        actual_model_id = model_config.get("model", resolved_model_id)
-        context_length = model_config.get("context_length", 128000)
-        provider = model_config.get("provider", "gemini")
-
-        client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
-        LOGGER.info(f"[Chronicle Gen] LLM client initialized: {actual_model_id} / {provider} (config_key={resolved_model_id})")
-
-        # Get Memopedia context if available
-        memopedia_context = None
-        try:
-            from sai_memory.memopedia import Memopedia, init_memopedia_tables
-            init_memopedia_tables(conn)
-            memopedia = Memopedia(conn)
-            memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
-            if memopedia_context == "(まだページはありません)":
-                memopedia_context = None
-        except Exception as e:
-            LOGGER.warning(f"Failed to get Memopedia context: {e}")
-
-        # Episode 整列計画 (Metabolism 側と同じ計画の一点管理)
-        _update_job(job_id, message="Planning chunks...")
-        cur = conn.execute(
-            "SELECT DISTINCT json_each.value "
-            "FROM arasuji_entries, json_each(source_ids_json) "
-            "WHERE level = 1"
-        )
-        processed_ids = {row[0] for row in cur.fetchall()}
-
-        plan = plan_alignment(
-            all_messages,
-            processed_ids,
-            target_chars=chronicle_band_budget(),
-        )
-        plan = truncate_plan(plan, max_messages)
-
-        # 束ね backlog の dry 予測 (Codex W4 #3): 新チャンクが無くても
-        # 前回の束ね失敗の残りがあれば統合だけ実行する。圧縮区間として提示中の
-        # digest は列から外す (dry と実行で同じ集合 — chronicle_consolidation §3)。
-        from sai_memory.arasuji.bands import plan_band_overflow
-        from sea.session_lifecycle import collect_folded_chronicle_entry_ids
-        # None = 照会失敗 = fold の有無が不明 → その回の束ねは dry / 実行とも
-        # 見送る (Codex P1-5 — 提示中の digest を知らずに束ねない)。
-        try:
-            folded_entry_ids = collect_folded_chronicle_entry_ids(manager, persona_id)
-        except Exception:
-            LOGGER.warning("[Chronicle Gen] folded-range collection failed", exc_info=True)
-            folded_entry_ids = None
-        if folded_entry_ids is None:
-            LOGGER.warning(
-                "[Chronicle Gen] folds unknown; skipping band consolidation this round",
-            )
-        try:
-            from sai_memory.arasuji.bands import EST_PARENT_CHARS
-            band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
-                conn,
-                extra_leaves=[
-                    (
-                        c.coverage_chars,
-                        min((m.created_at for m in c.messages), default=None),
-                        max((m.created_at for m in c.messages), default=None),
-                        EST_PARENT_CHARS,
-                    )
-                    for c in plan.chunks
-                ],
-                excluded_entry_ids=folded_entry_ids or None,
-            )
-        except Exception:
-            LOGGER.warning("[Chronicle Gen] band dry-plan failed", exc_info=True)
-            band_plan_count = 0
-
-        if not plan.chunks and band_plan_count == 0:
-            _update_job(
-                job_id, status="completed", progress=0, total=0,
-                entries_created=0, message="No unprocessed messages to compile",
-            )
-            conn.close()
-            return
-
-        # 冪等 claim (実行台帳 M1) — Metabolism と同じ kind・同じキー形。
-        # 台帳が無い環境 (manager なし / テスト) は claim なしで実行する
-        # (degrade — executor の重複再検査が残る)。plan 空 (帯統合のみ) も
-        # claim しない — 束ねの並走防御は bands の tx 内再検査が担う。
-        ledger = getattr(manager, "execution_ledger", None) if manager else None
-        execution_id = None
-        if ledger is not None and plan.chunks:
-            window_end_id = plan.chunks[-1].messages[-1].id
-            try:
-                # claim_execution: failed (前回失敗 / キャンセル) はキー退避で
-                # 再実行可能 (Codex W4 二巡 #6)。running / completed 等はブロック。
-                execution_id, runnable, _existing = ledger.claim_execution(
-                    kind="metabolism.run",
-                    idempotency_key=f"{persona_id}:{window_end_id}",
-                    persona_id=persona_id,
-                )
-                if runnable and not ledger.try_mark_running(execution_id):
-                    runnable = False
-                if not runnable:
-                    _update_job(
-                        job_id, status="failed",
-                        error="同じ範囲の編纂が既に実行中または実行済みです（Metabolism と競合）。しばらく待って再実行してください。",
-                        error_code="window_claimed",
-                    )
-                    conn.close()
-                    return
-            except Exception:
-                LOGGER.warning("[Chronicle Gen] ledger claim failed; proceeding without claim", exc_info=True)
-                execution_id = None
-
-        # Progress callback
-        def progress_callback(processed: int, total: int):
-            _update_job(job_id, progress=processed, total=total, message=f"Processing... {processed}/{total}")
-
-        # Memopedia batch callback if enabled
-        batch_callback = None
-        memopedia_pages_total = 0
-
-        if with_memopedia:
-            try:
-                from scripts.build_memopedia import extract_knowledge
-
-                def memopedia_batch_callback(batch_messages, chronicle_entry_id=None):
-                    nonlocal memopedia_pages_total
-                    if not batch_messages:
-                        return
-                    try:
-                        pages = extract_knowledge(
-                            client,
-                            batch_messages,
-                            memopedia,
-                            batch_size=len(batch_messages),
-                            dry_run=False,
-                            refine_writes=True,
-                            episode_context_conn=conn,
-                        )
-                        memopedia_pages_total += len(pages)
-                    except Exception as e:
-                        LOGGER.error(f"Memopedia extraction failed: {e}")
-
-                batch_callback = memopedia_batch_callback
-            except ImportError as e:
-                LOGGER.warning(f"Memopedia modules not available: {e}")
-
-        # Entity extraction callback (runs alongside Memopedia callback)
-        entity_batches_total = 0
-        try:
-            from sai_memory.memory.entity_extractor import make_batch_callback as make_entity_callback
-            entity_callback = make_entity_callback(
-                client, conn,
-                persona_id=persona_id,
-            )
-
-            # Chain with existing batch_callback if present
-            existing_callback = batch_callback
-
-            def combined_batch_callback(batch_messages, chronicle_entry_id=None):
-                nonlocal entity_batches_total
-                if existing_callback:
-                    existing_callback(batch_messages, chronicle_entry_id)
-                entity_callback(batch_messages, chronicle_entry_id)
-                entity_batches_total += 1
-
-            batch_callback = combined_batch_callback
-        except Exception as e:
-            LOGGER.warning(f"Entity extraction setup failed: {e}")
-
-        # Execute plan (chunk 単位の単一 tx、W4 D4)
-        _update_job(job_id, message="Generating Chronicle entries...")
-
-        def cancel_check():
-            job = _get_job(job_id)
-            return job is not None and job.get("status") == "cancelling"
-
-        from sai_memory.arasuji.bands import run_band_overflow
-        from sai_memory.arasuji.executor import execute_plan
-
-        try:
-            exec_result = execute_plan(
-                plan, client, conn,
-                persona_id=persona_id,
-                include_timestamp=include_timestamp,
-                memopedia_context=memopedia_context,
-                progress_callback=progress_callback,
-                batch_callback=batch_callback,
-                cancel_check=cancel_check,
-            )
-        except Exception:
-            if ledger is not None and execution_id:
-                try:
-                    ledger.mark_failed(execution_id, "chronicle generation raised")
-                except Exception:
-                    LOGGER.warning("[Chronicle Gen] ledger mark_failed failed", exc_info=True)
-            raise
-
-        # キャンセル = 部分適用。completed で封印すると同じ提示コンテキストが window_claimed で
-        # 再実行不能になる (冪等マーカーは適用の成功だけを封印 — Codex W4 #8)。
-        # failed 終端で claim を退け、帯統合もスキップする。
-        if exec_result.cancelled:
-            if ledger is not None and execution_id:
-                try:
-                    ledger.mark_failed(execution_id, "cancelled by user")
-                except Exception:
-                    LOGGER.warning("[Chronicle Gen] ledger mark_failed failed", exc_info=True)
-            total_entries = exec_result.created_count
-            conn.close()
-            _update_job(
-                job_id,
-                status="cancelled",
-                entries_created=total_entries,
-                message=f"ユーザーにより中止されました（{total_entries}件生成済み）",
-            )
-            return
-
-        consolidated_count = 0
-        if folded_entry_ids is not None:
-            try:
-                consolidated_count = run_band_overflow(
-                    conn, client,
-                    persona_id=persona_id,
-                    cancel_check=cancel_check,
-                    excluded_entry_ids=folded_entry_ids or None,
-                    batch_callback=batch_callback,
-                    # 確認ゲートに提示した dry 件数を実行の上限にする
-                    max_folds=band_plan_count,
-                )
-            except Exception:
-                LOGGER.exception("[Chronicle Gen] band overflow failed; continuing")
-
-        if ledger is not None and execution_id:
-            try:
-                result_payload = dict(plan.summary)
-                result_payload.update({
-                    "created": exec_result.created_count,
-                    "skipped_duplicates": exec_result.skipped_duplicates,
-                    "bands_consolidated": consolidated_count,
-                    "entrance": "api_generate",
-                })
-                ledger.mark_applied(execution_id, result=result_payload)
-                ledger.mark_completed(execution_id)
-            except Exception:
-                LOGGER.warning("[Chronicle Gen] ledger apply/complete failed", exc_info=True)
-
-        total_entries = exec_result.created_count + consolidated_count
-
-        conn.close()
-
-        _update_job(
-            job_id,
-            status="completed",
-            entries_created=total_entries,
-            message=f"Completed. Created {exec_result.created_count} chunk + {consolidated_count} consolidated entries."
-            + (f" Memopedia pages: {memopedia_pages_total}" if with_memopedia else "")
-        )
-
-    except LLMError as e:
-        LOGGER.exception(f"Chronicle generation failed (LLM error): {e}")
+    persona = manager.personas.get(persona_id) if manager else None
+    lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
+    if persona is None or lifecycle is None:
         _update_job(
             job_id, status="failed",
-            error=e.user_message,
-            error_code=e.error_code,
-            error_detail=str(e),
-            error_meta=getattr(e, "batch_meta", None),
+            error="ペルソナが読み込まれていないか、SEA ランタイムが利用できません",
+            error_code="unavailable",
         )
+        return
+
+    # 中止ボタンを編纂のチャンク間チェックへ届ける。監視するのは status ではなく
+    # 単調フラグ cancel_requested — status は worker が pending→running→terminal と
+    # 上書きするため、status 監視だと pending 中のキャンセルが running 上書きで
+    # 消える (Codex 再レビュー 2026-07-29)。確定済みチャンクは冪等スキップされる
+    # ため中止後の再実行は安全 (generate_chronicle は中止を "deferred" で返す)。
+    from sea.cancellation import CancellationToken
+
+    class _JobCancellationToken(CancellationToken):
+        def is_cancelled(self) -> bool:  # type: ignore[override]
+            if super().is_cancelled():
+                return True
+            job = _get_job(job_id)
+            return job is not None and bool(job.get("cancel_requested"))
+
+    token = _JobCancellationToken()
+
+    # pending 中に既にキャンセルされていたら、LLM 処理へ進まず即終端する。
+    if token.is_cancelled():
+        _update_job(job_id, status="cancelled", message="開始前に中止されました")
+        return
+
+    _update_job(job_id, status="running", message="記憶を畳んでいます...")
+    try:
+        status = lifecycle.run_manual_compaction(persona, cancellation_token=token)
+        # 未埋め込みの Chronicle/ページ/Fragment を全件埋める (ローカル・無料、
+        # organize-memory と同じ独立ステップ)。
+        try:
+            lifecycle.ensure_recall_embeddings(persona)
+        except Exception:
+            LOGGER.warning("[Chronicle Gen] embedding maintenance failed", exc_info=True)
+
+        if status == "ok":
+            _update_job(
+                job_id, status="completed",
+                message="整理が完了しました（残す量より古い側を畳みました）",
+            )
+        elif status == "noop":
+            _update_job(
+                job_id, status="completed",
+                message="整理できる履歴がまだありません",
+            )
+        elif status == "deferred" and token.is_cancelled():
+            _update_job(
+                job_id, status="cancelled",
+                message="中止しました（畳み済みの分は確定しています）",
+            )
+        elif status == "deferred":
+            _update_job(
+                job_id, status="failed",
+                error="別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。",
+                error_code="window_claimed",
+            )
+        elif status == "disabled":
+            _update_job(
+                job_id, status="failed",
+                error="Chronicle生成が無効のため整理できません（メモリー設定でChronicleをONにしてください）。",
+                error_code="chronicle_disabled",
+            )
+        else:  # "failed" / "unavailable"
+            _update_job(
+                job_id, status="failed",
+                error="Chronicle生成が完了しませんでした。畳みは適用されていないため、再実行で再試行できます。",
+                error_code=status,
+            )
     except Exception as e:
         LOGGER.exception(f"Chronicle generation failed: {e}")
         _update_job(
@@ -1141,18 +953,24 @@ async def cancel_arasuji_generation(
     persona_id: str,
     job_id: str,
 ):
-    """Cancel a running Chronicle generation job."""
-    job = _get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    """Cancel a running Chronicle generation job.
 
-    if job.get("persona_id") != persona_id:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
-
-    if job.get("status") not in ("pending", "running", "started"):
-        return {"cancelled": False, "reason": "Job is not running"}
-
-    _update_job(job_id, status="cancelling")
+    状態確認と cancel_requested の設定は _jobs_lock の同一クリティカル
+    セクションで行う (Codex 三巡: 確認と更新が別ロックだと、間に worker が
+    終端を確定した場合に cancelling で上書きしてポーリングが終わらなくなる)。
+    cancel_requested は単調 (一度立てたら下ろさない)。終端間際の要求は間に
+    合わず completed で終わることがある (処理が実際に完了している = 表示は真実)。
+    """
+    with _jobs_lock:
+        job = _generation_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        if job.get("persona_id") != persona_id:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
+        if job.get("status") not in ("pending", "running", "started"):
+            return {"cancelled": False, "reason": "Job is not running"}
+        job["cancel_requested"] = True
+        job["status"] = "cancelling"
     return {"cancelled": True}
 
 

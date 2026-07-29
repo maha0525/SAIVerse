@@ -103,6 +103,8 @@ structured output の中身:
 
 ### 3.6 セッションクローズ（実行点 b）— 閉じるときに畳む
 
+> **⚠️ 2026-07-29 一部撤去裁定**: 本節の「Chronicle の前倒し生成」は [arasuji_levels.md](arasuji_levels.md) §13 で撤去が裁定された。前提だった「起点失効で提示範囲が縮む (Case 3)」自体が廃止され、編纂の自動発火は予算超過の一本になったため、前倒しする仕事が消滅した。セッションクローズにおける **gold_panning 本体（状態事実の採取）はこの裁定の対象外で、引き続き有効**。以下の記述は歴史的経緯として残す。
+
 §3.1 のサイレント eviction 穴を塞ぐ本命。畳む場所を「次に開くとき」（Case 3）から「閉じるとき」に移す:
 
 - keepalive 連鎖の自然停止点（persona が Active でなくなる／失効間際で温め直しをやめる判定）＝キャッシュがまだ温かい最後の瞬間に、クローズ処理として gold_panning ＋ Chronicle の前倒し生成を走らせる
@@ -173,7 +175,7 @@ gold_panning が安い条件は「直前の成功コールと同じ（main_line,
 - **Phase 0（準備リファクタ、2026-07-07 実装済み）**: SessionLifecycle 抽出（`docs/issues/session_lifecycle_extraction_design.md` Step 1。`sea/session_lifecycle.py` 新設＋SEARuntime 委譲シム、挙動不変）。`docs/concepts/metabolism.md` への実行点2つの明記
 - **Phase 1（本丸、2026-07-07 実装済み・実機検証待ち）**: 実行点 (a) — 応答後 Metabolism 内の一手（`sea/gold_panning.py`）。note の add / update / remove ＋ defer-to-hot ＋ pending 圧力弁。設定は `SAIVERSE_GOLD_PANNING_*` env（`docs/reference/environment-vars.md`）
 - **Phase 2（2026-07-07 実装済み・実機検証待ち）**: scene の指差し（NFKC 正規化部分一致 → SequenceMatcher 比率 0.8 の2段照合 → `create_scene_core_memory` 接続）
-- **Phase 3（2026-07-07 実装済み・実機検証待ち）**: 実行点 (b) — セッションクローズ。吊り位置は `run_cache_keepalive` の not-Active 分岐（§7-6 の決定参照）。クローズ処理は EventScheduler の dispatch スレッドを占有しないよう別スレッド委譲（`SEARuntime._spawn_session_close`）。本体は `sea/gold_panning.py run_session_close`（マーカーガード＋ in-flight ガード＋ Chronicle 前倒し force 生成）
+- **Phase 3（2026-07-07 実装済み・実機検証待ち）**: 実行点 (b) — セッションクローズ。吊り位置は `run_cache_keepalive` の not-Active 分岐（§7-6 の決定参照）。クローズ処理は EventScheduler の dispatch スレッドを占有しないよう別スレッド委譲（`SEARuntime._spawn_session_close`）。本体は `sea/gold_panning.py run_session_close`（マーカーガード＋ in-flight ガード＋ Chronicle 前倒し force 生成）。**2026-07-29: このうち Chronicle 前倒し force 生成は撤去裁定（§3.6 冒頭の注記参照）。採取（pan）は残る**
 
 Phase 1 単体でも「会話が続いている限りの状態変化」は守れる。Phase 3 で「会話が途切れる直前に話された状態変化」まで網が届く。
 

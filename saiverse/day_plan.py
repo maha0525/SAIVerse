@@ -2416,13 +2416,14 @@ def _handle_life_start(
         persona_id, plan_date_str, index, life["start"], life["end"],
         life["budget_pulses"], life["mode"],
     )
-    # life.md §6.1 / Phase3 調査: 「ライフ開始 = 新しい Session 開始」は既存
-    # 機構が自然に満たす。前のライフの終端で keep-alive が止まっていれば
-    # anchor は TTL で自然失効しており、次の Pulse の prepare_context
-    # (sea/runtime_context.py Case 3) が resolve_metabolism_anchor で有効な
-    # anchor を見つけられず、その場で新しい anchor (= 新しい Session の起点)
-    # を張り直す。谷が TTL より短く anchor がまだ生きていれば、同じ Session
-    # の続きとしてキャッシュヒットで再開する (惜しい谷、life.md §8.3)。
+    # life.md §6.1 / Phase3 調査 → arasuji_levels.md §13 (2026-07-29) で意味が
+    # 変わった: 「ライフ開始 = 新しい Session 開始」は**温度 (キャッシュ) の話**
+    # としては今も成り立つ — 前のライフの終端で keep-alive が止まっていれば
+    # anchor の TTL は失効しており、次の Pulse は冷えた状態から始まる。ただし
+    # §13 以降、TTL 失効は提示範囲 (ウィンドウ) を変えない — anchor は張り
+    # 直されず、前のライフからの提示コンテキストが地続きで提示される。提示が
+    # 縮むのは予算超過の畳みだけ。谷が TTL より短ければキャッシュヒットで再開
+    # する (惜しい谷、life.md §8.3)。
     # ここで明示的に head capture 等を行う必要は無い — ログのみ残す。
     LOGGER.info(
         "[day_plan] session boundary: next pulse continues or freshly starts "

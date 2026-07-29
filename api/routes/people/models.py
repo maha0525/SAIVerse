@@ -437,6 +437,12 @@ class ArasujiListResponse(BaseModel):
     entries: List[ArasujiEntryItem]
     total: int
     level_filter: Optional[int] = None
+    # 一覧の切り詰め情報 (2026-07-29, docs/issues/arasuji_modal_500_limit_truncation.md):
+    # 総数が limit を超えたときは**古い側の L1 から**隠し、その事実を明示する。
+    # 旧実装は並び (level DESC, start_time ASC) の末尾 = 最新の L1 から黙って
+    # 欠けていた。
+    total_available: int = 0   # 切り詰め前の総件数
+    hidden_oldest: int = 0     # 隠した古い側 L1 の件数 (0 = 切り詰めなし)
 
 class SourceMessageItem(BaseModel):
     id: str
@@ -450,16 +456,19 @@ class SourceMessageItem(BaseModel):
 # -----------------------------------------------------------------------------
 
 class GenerateArasujiRequest(BaseModel):
-    """Chronicle生成リクエスト"""
-    max_messages: int = 500  # 最大処理メッセージ数
-    # batch_size / consolidation_size は W4 (episode 整列生成) で廃止。
-    # チャンク分割は episode 境界とサイズ束ねが決める。旧 frontend からの
-    # リクエストを 422 にしないため受理して無視する (deprecated)。
-    batch_size: int = 20
-    consolidation_size: int = 10
-    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
-    with_memopedia: bool = False  # Memopedia同時生成
-    include_timestamp: bool = True  # 日時情報をLLMに渡すか（インポートログ等で日時が不正確な場合はFalse）
+    """Chronicle生成リクエスト。
+
+    2026-07-29 (arasuji_levels.md §13 裁定4): 手動生成は run_manual_compaction
+    (残す量より古い側だけを畳む) へ合流し、範囲・モデル・出力に関わる全フィールドが
+    廃止された。現行 frontend は空 body を送る。旧 frontend からのリクエストを
+    422 にしないため、全フィールドを受理して無視する (deprecated)。
+    """
+    max_messages: int = 500  # deprecated (§13: 範囲は残す量が決める)
+    batch_size: int = 20  # deprecated (W4: チャンク分割は episode 境界とサイズ束ね)
+    consolidation_size: int = 10  # deprecated (W4)
+    model: Optional[str] = None  # deprecated (§13: persona の MEMORY_WEAVE_MODEL 固定)
+    with_memopedia: bool = False  # deprecated (§13: Fragment 抽出は編纂に常時相乗り)
+    include_timestamp: bool = True  # deprecated (§13: executor 既定に従う)
 
 
 class GenerateMemopediaRequest(BaseModel):

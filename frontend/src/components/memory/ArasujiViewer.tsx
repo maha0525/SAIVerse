@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 import ModalOverlay from '../common/ModalOverlay';
-import { formatCost } from '@/lib/formatCost';
 
 interface ArasujiEntry {
     id: string;
@@ -48,6 +47,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [entryCache, setEntryCache] = useState<Record<string, ArasujiEntry>>({});
     const [selectedEntry, setSelectedEntry] = useState<ArasujiEntry | null>(null);
     const [levelFilter, setLevelFilter] = useState<number | null>(null);
+    // 一覧APIの切り詰め情報 (総数が上限超過時、古い側のL1が隠される)
+    const [hiddenOldest, setHiddenOldest] = useState(0);
+    const [totalAvailable, setTotalAvailable] = useState(0);
     const [isLoadingStats, setIsLoadingStats] = useState(false);
     const [isLoadingEntries, setIsLoadingEntries] = useState(false);
     const [showList, setShowList] = useState(true);
@@ -59,21 +61,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
-    const [costEstimate, setCostEstimate] = useState<{
-        total_messages: number;
-        processed_messages: number;
-        unprocessed_messages: number;
-        estimated_llm_calls: number;
-        estimated_cost_usd: number;
-        model_name: string;
-        is_free_tier: boolean;
-        currency?: string;
-    } | null>(null);
-    const [generateSettings, setGenerateSettings] = useState({
-        maxMessages: 500,
-        withMemopedia: false,
-        includeTimestamp: true,
-    });
     const [generationJob, setGenerationJob] = useState<{
         jobId: string;
         status: string;
@@ -315,22 +302,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
-    // Chronicle Generation (チャンク分割は被覆字数 U で決まるため、
-    // バッチサイズ・統合サイズの設定は廃止)
-    const fetchCostEstimate = useCallback(async () => {
-        try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
-            if (res.ok) {
-                setCostEstimate(await res.json());
-            }
-        } catch {
-            // Non-critical
-        }
-    }, [personaId]);
-
-    const openGenerateModal = async () => {
+    // Chronicle 生成 = 手動の畳み (arasuji_levels.md §13 裁定4)。
+    // 範囲は自動 Metabolism と同じ「残す量より古い側」に固定されたため、
+    // 旧設定 (最大件数 / 日時 / Memopedia) と全量前提のコスト見積もりは廃止。
+    const openGenerateModal = () => {
         setShowGenerateModal(true);
-        await fetchCostEstimate();
     };
 
     const startGeneration = async () => {
@@ -339,11 +315,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    max_messages: generateSettings.maxMessages,
-                    with_memopedia: generateSettings.withMemopedia,
-                    include_timestamp: generateSettings.includeTimestamp,
-                }),
+                body: JSON.stringify({}),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -456,6 +428,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             if (res.ok) {
                 const data = await res.json();
                 setEntries(data.entries);
+                setHiddenOldest(data.hidden_oldest ?? 0);
+                setTotalAvailable(data.total_available ?? data.entries.length);
             }
         } catch (error) {
             console.error("Failed to load arasuji entries", error);
@@ -512,6 +486,13 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         )}
                     </div>
                 </div>
+
+                {/* Truncation notice: 総数が上限を超え、古い側のL1が隠れているとき */}
+                {hiddenOldest > 0 && (
+                    <div className={styles.truncationNotice}>
+                        表示上限を超えたため、古い {hiddenOldest} 件を隠しています（全 {totalAvailable} 件）
+                    </div>
+                )}
 
                 {/* Generation Progress */}
                 {generationJob && (generationJob.status === 'running' || generationJob.status === 'started') && (
@@ -963,88 +944,22 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 </div>
             </div>
 
-            {/* Generation Settings Modal */}
+            {/* Generation Confirm Modal (§13: 手動の畳み) */}
             {showGenerateModal && (
                 <ModalOverlay onClose={() => setShowGenerateModal(false)} className={styles.modalOverlay}>
                     <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-                        <h3>Chronicle 生成設定</h3>
-                        {costEstimate && (
-                            <div style={{
-                                padding: '0.75rem',
-                                marginBottom: '1rem',
-                                background: costEstimate.unprocessed_messages === 0
-                                    ? 'rgba(100, 200, 100, 0.1)'
-                                    : costEstimate.unprocessed_messages > 500
-                                        ? 'rgba(255, 150, 0, 0.1)'
-                                        : 'rgba(100, 100, 100, 0.1)',
-                                borderRadius: '6px',
-                                fontSize: '0.85rem',
-                                lineHeight: '1.6',
-                            }}>
-                                {costEstimate.unprocessed_messages === 0 ? (
-                                    <div>生成するメッセージはありません（全て処理済み）</div>
-                                ) : (
-                                    <>
-                                        <div>未処理メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件 / 全{costEstimate.total_messages.toLocaleString()}件</div>
-                                        <div>推定LLM呼び出し: <strong>{costEstimate.estimated_llm_calls}</strong>回</div>
-                                        <div>
-                                            推定コスト: <strong>
-                                                {costEstimate.is_free_tier
-                                                    ? `${formatCost(0, costEstimate.currency)} (Free tier)`
-                                                    : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)
-                                                }
-                                            </strong>
-                                            {' '}({costEstimate.model_name})
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        )}
-                        <div className={styles.formGroup}>
-                            <label>最大処理メッセージ数</label>
-                            <input
-                                type="number"
-                                value={generateSettings.maxMessages || ''}
-                                onChange={(e) => setGenerateSettings(s => ({ ...s, maxMessages: parseInt(e.target.value) || 0 }))}
-                                min={20}
-                                step={100}
-                                placeholder="500"
-                            />
-                            <span className={styles.hint}>未処理メッセージを古い順に最大この件数まで処理</span>
-                        </div>
-                        <div className={styles.formGroup}>
-                            <label className={styles.checkboxLabel}>
-                                <input
-                                    type="checkbox"
-                                    checked={generateSettings.includeTimestamp}
-                                    onChange={(e) => setGenerateSettings(s => ({ ...s, includeTimestamp: e.target.checked }))}
-                                />
-                                日時情報を含める
-                            </label>
-                            <span className={styles.hint}>インポートしたログ等でタイムスタンプが不正確な場合はOFFにすると、日時に基づく誤った記述を防げます</span>
-                        </div>
-                        {developerMode && (
-                            <div className={styles.formGroup}>
-                                <label className={styles.checkboxLabel}>
-                                    <input
-                                        type="checkbox"
-                                        checked={generateSettings.withMemopedia}
-                                        onChange={(e) => setGenerateSettings(s => ({ ...s, withMemopedia: e.target.checked }))}
-                                    />
-                                    Memopedia も同時生成
-                                </label>
-                                <span className={styles.hint} style={{ color: '#e8a838' }}>
-                                    （非推奨：生成コストが高く、大量のページが作られます。推定コストには反映されません）
-                                </span>
-                            </div>
-                        )}
+                        <h3>記憶の整理（Chronicle 生成）</h3>
+                        <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                            古い会話履歴をあらすじ（Chronicle）に畳みます。直近の会話はそのまま残ります。
+                            畳む量に応じて軽量モデルの LLM 呼び出しが数回発生します。
+                        </p>
                         <div className={styles.modalActions}>
                             <button className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>
                                 キャンセル
                             </button>
                             <button className={styles.startBtn} onClick={startGeneration}>
                                 <Play size={14} />
-                                生成開始
+                                実行
                             </button>
                         </div>
                     </div>

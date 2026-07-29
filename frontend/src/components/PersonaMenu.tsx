@@ -64,17 +64,22 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
     };
 
     const handleOrganizeMemory = async () => {
-        if (!confirm(`${personaName}の記憶を整理しますか？\n会話履歴のキャッシュがリセットされ、Chronicleが生成されます。`)) return;
+        if (!confirm(`${personaName}の記憶を整理しますか？\n古い会話履歴があらすじ（Chronicle）に畳まれます。直近の会話はそのまま残ります。`)) return;
 
         setOrganizing(true);
         try {
             const res = await fetch(`/api/people/${personaId}/organize-memory`, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
-                const msg = data.chronicle_generated
-                    ? '記憶の整理が完了しました（Chronicle生成済み）'
-                    : '記憶の整理が完了しました';
-                alert(msg);
+                const messages: Record<string, string> = {
+                    ok: '記憶の整理が完了しました',
+                    noop: '整理できる履歴がまだありません',
+                    failed: '記憶の整理に失敗しました（あらすじ生成が完了しませんでした）。もう一度実行すると再試行できます。',
+                    deferred: '別の整理が同じ範囲を処理中または処理済みです。しばらく待って再実行してください。',
+                    disabled: 'Chronicle生成が無効のため整理できません（メモリー設定でChronicleをONにしてください）',
+                    unavailable: '整理できる状態ではありません（会話履歴がまだ無い可能性があります）',
+                };
+                alert(messages[data.compaction] ?? '記憶の整理の結果が不明です');
             } else {
                 const err = await res.json();
                 alert(`失敗: ${err.detail}`);
