@@ -165,13 +165,21 @@ def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
     # anchor は行単位 API (load_anchor_entry) で読まれる (S8 根治後)
     _anchors = anchors if anchors is not None else {"claude-x": _live_anchor_entry()}
     runtime.session_lifecycle.load_anchor_entry = lambda pid, mk: _anchors.get(mk)
-    runtime._prepare_context = (
-        lambda p, b, u, *a, **k: list(messages or [{"role": "user", "content": "履歴"}])
-    )
+
+    def _fake_prepare(p, b, u, *a, **k):
+        # 実物と同じく、組成に採用した anchor を context_meta へ書き戻す
+        # (keepalive はこれを生存確認の値と突き合わせる — 逸脱ガード)。
+        meta = k.get("context_meta")
+        if meta is not None:
+            e = _anchors.get(k.get("model_key")) or {}
+            meta["prefix_anchor_id"] = e.get("anchor_id")
+        return list(messages or [{"role": "user", "content": "履歴"}])
+
+    runtime._prepare_context = _fake_prepare
     runtime.select_llm_client = lambda node_def, p, **k: (client, "claude-x")
     touched: List[Any] = []
     runtime.session_lifecycle.touch_anchor_after_llm_call = (
-        lambda p, usage, anchor_id=None: touched.append(usage)
+        lambda p, usage, anchor_id=None, **kwargs: touched.append(usage)
     )
     return touched
 
@@ -232,6 +240,40 @@ def test_keepalive_skips_when_no_anchor(_mock_cache):
     _wire_keepalive(runtime, persona, client, anchors={})
     assert runtime.run_cache_keepalive("air") is False
     assert client.calls == []
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_aborts_when_prefix_anchor_diverges(_mock_cache):
+    """Codex 6巡目 (2026-07-30): 生存確認〜組成の間に anchor が動いたら温めない。
+
+    keepalive は Beat ロックの外を走るため、組成は persist_anchor_advance=False
+    (読みだけ) で行い、組成に採用された anchor が生存確認で読んだ行の値とズレて
+    いたら LLM を呼ばず連鎖を止める — ズレた prefix はキャッシュと一致せず温めは
+    無駄で、その後の touch は温めていない prefix の温度偽装になる。
+    """
+    persona = _persona()
+    runtime, _ = _make_runtime(persona)
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client)
+
+    prepare_kwargs: List[Any] = []
+    _orig_prepare = runtime._prepare_context
+
+    def _diverging_prepare(p, b, u, *a, **k):
+        prepare_kwargs.append(dict(k))
+        result = _orig_prepare(p, b, u, *a, **k)
+        meta = k.get("context_meta")
+        if meta is not None:
+            meta["prefix_anchor_id"] = "moved-anchor"  # 組成中に前進が挟まった形
+        return result
+
+    runtime._prepare_context = _diverging_prepare
+
+    assert runtime.run_cache_keepalive("air") is False
+    assert client.calls == []   # LLM は呼ばれない
+    assert touched == []        # touch もされない
+    # 組成は「前進を永続化しない読み」で行われている
+    assert prepare_kwargs and prepare_kwargs[0].get("persist_anchor_advance") is False
 
 
 @patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})

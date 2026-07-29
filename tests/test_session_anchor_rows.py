@@ -792,6 +792,170 @@ def test_resolve_new_model_borrow_wins_when_ahead_of_frontier(session_factory, t
     conn.close()
 
 
+def test_resolve_cold_advance_preserves_live_folds(session_factory, tmp_path):
+    """§14-2 前進は、新 anchor 以降に生きている圧縮区間 (fold) を消さない
+    (Codex 2巡目 2026-07-29)。
+
+    最前線 = 「最初の未編纂メッセージ」なので、未編纂の隙間 (m3) を跨いで先の
+    episode (m4-m5) が畳まれた形がありうる。前進の書き込みが汎用 upsert の
+    列クリアを踏むと、この fold の生ログが復活してウィンドウが再膨張する。
+
+    仕分けの基準は読み側 prune_folds と同じ「一部でも提示に残る範囲は残す」:
+    - 全体が新 anchor より手前の fold → 破棄 (Chronicle エントリは head の枠へ戻る)
+    - 末尾が新 anchor 以降の fold → 保持 (新 anchor を跨ぐものも含む)
+    """
+    from sea.session_window import FoldedRange
+
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 7):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])
+    _add_l1_entry(conn, ["m4", "m5"])  # 隙間 m3 を跨いで先が編纂済み → 最前線 = m3
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    lc.save_folded_ranges(PERSONA_ID, "model-a", [
+        FoldedRange(message_ids=["m1", "m2"]),   # 全体が m3 より手前 → 破棄
+        FoldedRange(message_ids=["m2", "m4"]),   # 末尾が m3 以降 (跨ぎ) → 保持
+        FoldedRange(message_ids=["m4", "m5"]),   # 全体が m3 以降 → 保持
+    ])
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+
+    assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
+
+    row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert row["anchor_id"] == "m3"
+    assert row["updated_at"] == stale.isoformat()  # 温度は据え置き (冷えたまま)
+    folds = lc.load_folded_ranges(PERSONA_ID, "model-a")
+    assert [f.message_ids for f in folds] == [["m2", "m4"], ["m4", "m5"]]
+    conn.close()
+
+
+def test_resolve_stays_at_self_anchor_when_advance_write_fails(session_factory, tmp_path):
+    """§14-2 前進の永続化に失敗したら前進を主張しない (Codex 5巡目 2026-07-30)。
+
+    失敗を握りつぶして frontier を返すと、後続の touch が通常 upsert で frontier
+    を書き、anchor 変更の列クリアで行に残った fold が全消えする。旧 anchor に
+    留まれば次回の resolve が前進を再試行する。
+    """
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+
+    with patch.object(lc, "_advance_anchor_preserving_folds", return_value=False):
+        assert lc.resolve_metabolism_anchor(persona) == ("m1", "self")
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m1"
+    conn.close()
+
+
+def test_touch_cas_rejects_stale_anchor_write(session_factory):
+    """Codex 3巡目 (2026-07-30): Beat ロック外の keepalive touch が anchor 前進の
+    後から届いても、行を巻き戻さず・圧縮区間を消さず・温かい行を偽造しない。
+
+    touch は CAS (require_current_anchor_id) で書く — 行の現在の anchor が
+    呼び出し時の anchor と一致するときだけ更新される。
+    """
+    from sea.session_window import FoldedRange
+
+    lc = _make_lifecycle(session_factory)
+    stale = _now() - timedelta(days=3)
+    # 前進済みの行 (anchor=m3) + 提示に生きている圧縮区間
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m3", "updated_at": stale.isoformat(),
+    })
+    lc.save_folded_ranges(PERSONA_ID, "model-a", [
+        FoldedRange(message_ids=["m4", "m5"]),
+    ])
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+
+    # keepalive が LLM 呼び出し前に読んだ古い anchor (m1) の touch が後から届く
+    lc.update_anchor_for_model(
+        persona, "model-a", "m1", 300, require_current_anchor_id="m1",
+    )
+
+    row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert row["anchor_id"] == "m3"                # 巻き戻らない
+    assert row["updated_at"] == stale.isoformat()  # 温かい行を偽造しない
+    folds = lc.load_folded_ranges(PERSONA_ID, "model-a")
+    assert [f.message_ids for f in folds] == [["m4", "m5"]]  # fold も無傷
+
+    # 一致する touch は従来どおり通る (updated_at リフレッシュ + TTL 記録)
+    lc.update_anchor_for_model(
+        persona, "model-a", "m3", 300, require_current_anchor_id="m3",
+    )
+    row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert row["anchor_id"] == "m3"
+    assert row["updated_at"] != stale.isoformat()
+    assert row["ttl_seconds"] == 300
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "implicit"})
+def test_keepalive_touch_is_cas_guarded_and_skips_reservation(_mock_cache, session_factory):
+    """keepalive の touch (only_if_anchor_unchanged=True) は stale なら何も書かず、
+    見張り予約も上書きしない (Codex 4巡目 2026-07-30 指摘1)。
+
+    stale 完了時刻を起点に予約し直すと、新 anchor の正当な touch が立てた予約が
+    後ろへずれ、発火時には現行キャッシュが失効して連鎖ごと止まるため。
+    """
+    lc = _make_lifecycle(session_factory)
+    scheduled = _wire_touch(lc)
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m3", "updated_at": stale.isoformat(),
+    })
+    persona = _touch_persona(model="model-a")
+
+    lc.touch_anchor_after_llm_call(
+        persona, _usage(model="model-a"), anchor_id="m1",
+        only_if_anchor_unchanged=True,
+    )
+
+    row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert row["anchor_id"] == "m3"
+    assert row["updated_at"] == stale.isoformat()
+    assert scheduled == []  # 見張り予約は更新されない
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "implicit"})
+def test_in_beat_touch_establishes_anchor_across_models(_mock_cache, session_factory):
+    """Beat 内の touch (既定 = CAS なし) は、実行 model 側に別 anchor の既存行が
+    あっても正当に上書きする (Codex 4巡目 2026-07-30 指摘2 の回帰固定)。
+
+    fallback / sub-line では context 組成後に実行 model が変わる — 実際に送った
+    prefix の anchor をその model の Session に確立するのが正 (S1: usage.model 記帳)。
+    Beat 内の touch は anchor 前進と Beat ロックで直列化済みなので CAS は不要。
+    """
+    lc = _make_lifecycle(session_factory)
+    scheduled = _wire_touch(lc)
+    lc.upsert_anchor_entry(PERSONA_ID, "light-model", {
+        "anchor_id": "old-anchor", "updated_at": _now().isoformat(),
+    })
+    persona = _touch_persona(model="std-model")
+
+    lc.touch_anchor_after_llm_call(
+        persona, _usage(model="light-model"), anchor_id="new-anchor",
+    )
+
+    row = lc.load_anchor_entry(PERSONA_ID, "light-model")
+    assert row["anchor_id"] == "new-anchor"
+    assert scheduled == ["light-model"]  # 見張り予約も実 model 側に入る
+
+
 def _cold_ready_lifecycle(session_factory):
     """§14-3/§14-4 テスト用: metabolism_enabled な manager を持つ lifecycle。"""
     lc = _make_lifecycle(session_factory)
@@ -870,6 +1034,51 @@ def test_run_cold_precompaction_folds_with_force(session_factory):
     assert run.call_args.kwargs.get("chronicle_force") is True
     assert run.call_args.kwargs.get("stop_when_disabled") is not True
     assert run.call_args.kwargs.get("model_key") == "model-a"
+
+
+def test_run_cold_precompaction_rechecks_under_beat_lock(session_factory):
+    """指摘3 (Codex 2巡目 2026-07-29): 発火条件の最終判定は Beat ロックの内側。
+
+    tick 側の事前判定 ("due") からロック取得までの間にユーザー Pulse が完走して
+    anchor を touch した状況を、ロック取得時に touch する fake gate で再現する。
+    ロック内の再判定が "hot" を見て、温まったキャッシュを畳まず引き返すこと。
+    """
+    import contextlib as _ctx
+
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    big = [{"id": "m1", "content": "x" * 3500}]
+
+    @_ctx.contextmanager
+    def _hold(persona_id, purpose=None, check_gate=True):
+        # ロック取得と同時に「直前にユーザー Pulse が touch した」状態にする
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "m1", "updated_at": _now().isoformat(),
+            "ttl_seconds": 3600,
+        })
+        yield
+
+    lc.manager.beat_gate = SimpleNamespace(hold=_hold)
+
+    with _weave_on(), \
+            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window", return_value=_window("m1", big)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        # 事前判定の時点では "due" 相当の条件が揃っているが、
+        # ロック内の再判定が touch 後の温度を見て "hot" で止まる
+        assert lc.run_cold_precompaction(persona) == "hot"
+    run.assert_not_called()
 
 
 def test_emergency_precompaction_skip_below_high(session_factory):

@@ -517,3 +517,52 @@ def test_manager_missing_returns_error(persona):
     result = run_work_session("p1", "何か作って", 3, manager=None)
     assert result.ended_reason == ENDED_ERROR
     assert result.error is not None
+
+
+def test_initial_llm_call_runs_inside_beat_hold(session_factory, persona):
+    """Codex 5巡目 (2026-07-30): 組成〜初回 LLM 呼び出し (と touch) は Beat ロックの内側。
+
+    ロック外に置くと、初回呼び出し中に並走 Beat が anchor を前進させたとき、
+    遅れて届く初回 touch が古い anchor へ巻き戻し、汎用 upsert の anchor 変更
+    分岐が圧縮区間 (fold) を列ごと消す。§14-2 以降は context 組成自体も anchor
+    前進という書き込みを持つため、組成もロック内に入れる。
+    """
+    import contextlib
+
+    manager, runtime, client = _make_env(session_factory, persona, ["できたよ。"])
+    events: List[str] = []
+
+    orig_generate = client.generate
+
+    def _recording_generate(*args, **kwargs):
+        events.append("generate")
+        return orig_generate(*args, **kwargs)
+
+    client.generate = _recording_generate
+
+    orig_prepare = runtime._prepare_context
+
+    def _recording_prepare(*args, **kwargs):
+        events.append("prepare_context")
+        return orig_prepare(*args, **kwargs)
+
+    runtime._prepare_context = _recording_prepare
+
+    @contextlib.contextmanager
+    def _hold(persona_id, purpose=None, check_gate=True):
+        events.append("hold_enter")
+        try:
+            yield
+        finally:
+            events.append("hold_exit")
+
+    manager.beat_gate = SimpleNamespace(hold=_hold)
+
+    result = _run(manager, budget=2)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert events.index("hold_enter") < events.index("prepare_context")
+    assert events.index("prepare_context") < events.index("generate")
+    assert events.index("generate") < events.index("hold_exit")
+    # hold は一度だけ (組成〜初回〜ループが同じ直列域)
+    assert events.count("hold_enter") == 1

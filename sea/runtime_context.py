@@ -128,7 +128,7 @@ class PersonaVoiceWithoutHistoryError(RuntimeError):
     """
 
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
     # ExecutionContext が届いている呼び出し元 (work_session / gold_panning /
@@ -244,8 +244,15 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         # Persistent anchor resolution with 3-level fallback。
                         # 「自 model」は実行 model (model_key)。None なら
                         # resolve 側が persona.model にフォールバックする。
+                        # persist_anchor_advance=False は「組成は本番と同一、
+                        # ただし §14-2 前進の永続化だけ行わない」— Beat ロックの
+                        # 外で組む keepalive 専用 (ロック外の行書き込みは並走
+                        # Beat の前進・fold 更新と競合する。Codex 6巡目
+                        # 2026-07-30)。preview_only との違いは自動想起の注入等が
+                        # 通常どおり走ること (温め直す prefix は本物と一致が命)。
                         anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
                             persona, model_key=model_key,
+                            persist_advance=persist_anchor_advance,
                         )
 
                         if anchor_id:

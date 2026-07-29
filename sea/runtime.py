@@ -1887,11 +1887,29 @@ class SEARuntime:
             # 一つ (beat_execution_context.md §3.1) なので、見張り対象 model の
             # head を明示で指定する (lightweight Session を default の head で
             # 温めると別 prefix になりキャッシュを壊す)。
+            # persist_anchor_advance=False: keepalive は Beat ロックの外を走る
+            # ため、組成中に §14-2 の anchor 前進 (行書き込み) を発火させない —
+            # ロック外の書き込みは並走 Beat の前進・fold 更新と競合する
+            # (Codex 6巡目 2026-07-30)。keepalive は touch の CAS まで一貫して
+            # 読みだけで進む。
+            _ka_meta: Dict[str, Any] = {}
             messages = list(
                 self._prepare_context(
                     persona, building_id, None, model_key=model_key,
+                    context_meta=_ka_meta, persist_anchor_advance=False,
                 ) or []
             )
+            composed_anchor = _ka_meta.get("prefix_anchor_id")
+            if composed_anchor != entry.get("anchor_id"):
+                # 生存確認から組成までの間に anchor が動いた (TTL 境界を跨いだ /
+                # 並走 Beat が前進した)。この prefix はもうキャッシュと一致しない
+                # ので温めても無駄 — LLM を呼ばず連鎖を自然停止する。
+                LOGGER.info(
+                    "[keepalive] prefix anchor diverged during composition "
+                    "(persona=%s model=%s row=%s composed=%s); skipping warm",
+                    persona_id, model_key, entry.get("anchor_id"), composed_anchor,
+                )
+                return False
             messages.append({"role": "user", "content": self._KEEPALIVE_TAIL})
             node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
             # Beat 相当の開始点 — Pulse 外なので pulse_context=None (standard tier)。
@@ -1965,8 +1983,13 @@ class SEARuntime:
                 )
             # 成功 = anchor touch → 次の keep-alive が再予約される。
             # anchor_id は生存確認で読んだ「見張り対象 model の行」の値 (call-local)。
+            # keepalive は Beat ロックの外を走る唯一の touch なので CAS で書く —
+            # LLM 呼び出し中に anchor 前進 (§14-2 / 退場) が起きていたら、この
+            # touch は捨てられた提示ウィンドウの主張であり棄却される
+            # (Codex 3〜4巡目 2026-07-30)。
             self.session_lifecycle.touch_anchor_after_llm_call(
                 persona, usage, anchor_id=entry.get("anchor_id"),
+                only_if_anchor_unchanged=True,
             )
         LOGGER.info(
             "[keepalive] cache keep-alive completed (persona=%s model=%s "
@@ -2023,7 +2046,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -2039,6 +2062,7 @@ class SEARuntime:
             model_key=model_key,
             context_meta=context_meta,
             persona_voiced=persona_voiced,
+            persist_anchor_advance=persist_anchor_advance,
         )
 
     # ---- Context Preview (read-only, no side effects) ----

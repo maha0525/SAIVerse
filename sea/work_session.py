@@ -221,109 +221,114 @@ def run_work_session(
         # (persona, model) に向けて render するため (§3.1)。
         execution_context = resolve_execution_context(persona, pulse_ctx)
 
-        # ---- context: 通常のペルソナ文脈 (head + 会話履歴) + 指示書 ----
-        # 作業セッションの出力はペルソナ本人の発話・思考として記録される
-        # (assistant role + session_digest / post_session 判断の材料) ため、
-        # 会話履歴を外して走らせてはいけない = persona_voiced=True。
-        #
-        # 2026-07-23 以前はここで ContextRequirements(history_depth=0, ...) を
-        # 直に組み、履歴なしで走らせていた。run_playbook のサブライン (通常の
-        # WORKER) が親メインラインの履歴をコピーして引き継ぐのに対し、コマ発火
-        # から起動する作業セッションには親がおらず、その代わりを組まずに「空」を
-        # 選んでいたのが原因。結果、エアは 3 日連続で同じ壁に初見でぶつかり、
-        # 毎回「システムへの理解が足りていない」と自責を記録した。
-        # 詳細: docs/issues/llm_call_entry_point_standardization.md
-        _context_meta: Dict[str, Any] = {}
-        base_messages = runtime._prepare_context(
-            persona, building_id, None, pulse_id=pulse_id,
-            model_key=execution_context.model_key,
-            context_meta=_context_meta,
-            persona_voiced=True,
-        )
-        instruction_content = _build_instruction_message(
-            str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
-        )
-        messages: List[Dict[str, Any]] = list(base_messages)
-        messages.append({"role": "user", "content": instruction_content})
-
-        state: Dict[str, Any] = {
-            "_pulse_id": pulse_id,
-            "_pulse_type": "work_session",
-            "_pulse_context": pulse_ctx,
-            "_pulse_usage_accumulator": usage_accumulator,
-            "_activity_trace": [],
-            "_cancellation_token": None,
-            "_messages": messages,
-            # call-local anchor (§3.2)。history_depth=0 のため通常 None (= touch なし)。
-            "_prefix_anchor_id": _context_meta.get("prefix_anchor_id"),
-        }
-        # node_def / playbook は _run_spell_loop・_store_memory が参照する
-        # 最小属性 (memorize.tags / name) だけを持つ軽量スタブ。
-        node_def = SimpleNamespace(
-            id="work_session_llm",
-            memorize={"tags": [RAW_LOG_TAG]},
-            speak=False,
-        )
-        playbook_ref = SimpleNamespace(name=WORK_SESSION_PLAYBOOK_NAME)
-
-        spell_enabled = bool(runtime._is_spell_enabled_for_persona(persona))
-        if not spell_enabled:
-            LOGGER.warning(
-                "[work_session] spells are disabled for persona=%s — the session "
-                "cannot act on the world and will end after one response",
-                persona_id,
-            )
-
-        # 上で解決済みの ExecutionContext を state へ載せる (下流は state 経由で読む)。
-        state["_execution_context"] = execution_context
-        llm_client, _selected_model = runtime.select_llm_client(
-            node_def, persona, execution_context=execution_context, state=state,
-        )
-        if _selected_model != execution_context.model_key:
-            execution_context = execution_context.with_model(_selected_model)
-            state["_execution_context"] = execution_context
-
-        pulse_ctx.append(PulseLogEntry(
-            role="user", content=instruction_content,
-            node_id="work_session_instruction",
-            playbook_name=WORK_SESSION_PLAYBOOK_NAME,
-        ))
-
-        # ---- 初回 LLM 呼び出し ----
-        LOGGER.info(
-            "[work_session] start: persona=%s budget=%d task_ref=%s track_id=%s pulse_id=%s",
-            persona_id, budget_rounds, task_ref, track_id, pulse_id,
-        )
-        initial_result = llm_client.generate(
-            messages,
-            tools=[],
-            temperature=runtime._default_temperature(persona),
-            **runtime._get_cache_kwargs(persona_id),
-        )
-        _record_llm_usage(
-            runtime, state, llm_client, persona, building_id, "llm_work_session"
-        )
-        text = _extract_text(initial_result)
-        try:
-            runtime._dump_llm_io(
-                WORK_SESSION_PLAYBOOK_NAME, "work_session_llm", persona, messages, text,
-            )
-        except Exception:
-            LOGGER.warning("[work_session] failed to dump initial LLM I/O", exc_info=True)
-
-        # ---- act→observe ループ (予算付き) ----
-        # Beat ロック (beat_execution_context.md §3.4): セッションの連続 Beat を
-        # persona の直列域に入れる。ループ内の boundary が周ごとにロックを
-        # 手放すため、会話 Beat が間に挟まれる (「作業中に話しかけたら応答」の
-        # 土台)。締めの生ログ保存〜成果物収集も最後の Beat の
-        # 記録として同じ hold 内で行う (記録はロック下で、の不変条件)。
-        # 関所 fail-closed (BeatGateClosedError) は下の except Exception が
-        # 拾い ended_reason='error' の結果になる (run_work_session は raise
-        # しない契約)。manager に beat_gate が無いテスト環境では no-op。
+        # Beat ロック (beat_execution_context.md §3.4): 組成〜初回 LLM〜ループを
+        # 一つの hold で persona の直列域に入れる。§14-2 以降、context 組成は
+        # anchor 前進という書き込みを持ちうるため、ロック外で組むと並走 Beat の
+        # 前進と交錯する。初回呼び出しをロック外に置くと、その touch が前進の
+        # 後から届いて anchor を巻き戻す (Codex 5巡目 2026-07-30)。ループ内の
+        # boundary が周ごとにロックを手放すため、会話 Beat は周の合間に挟まれる
+        # (「作業中に話しかけたら応答」の土台)。締めの生ログ保存〜成果物収集も
+        # 最後の Beat の記録として同じ hold 内で行う (記録はロック下で、の
+        # 不変条件)。関所 fail-closed (BeatGateClosedError) は外側の except
+        # Exception が拾い ended_reason='error' になる (関所が初回 LLM 課金より
+        # 先に来るので、閉じた関所の陰で課金だけ発生することもない)。manager に
+        # beat_gate が無いテスト環境では no-op。
         from sea.beat_gate import hold_beat
         from sea.runtime_llm import _parse_spell_lines, _run_spell_loop
 
         with hold_beat(manager, persona_id, purpose="work_session"):
+            # ---- context: 通常のペルソナ文脈 (head + 会話履歴) + 指示書 ----
+            # 作業セッションの出力はペルソナ本人の発話・思考として記録される
+            # (assistant role + session_digest / post_session 判断の材料) ため、
+            # 会話履歴を外して走らせてはいけない = persona_voiced=True。
+            #
+            # 2026-07-23 以前はここで ContextRequirements(history_depth=0, ...) を
+            # 直に組み、履歴なしで走らせていた。run_playbook のサブライン (通常の
+            # WORKER) が親メインラインの履歴をコピーして引き継ぐのに対し、コマ発火
+            # から起動する作業セッションには親がおらず、その代わりを組まずに「空」を
+            # 選んでいたのが原因。結果、エアは 3 日連続で同じ壁に初見でぶつかり、
+            # 毎回「システムへの理解が足りていない」と自責を記録した。
+            # 詳細: docs/issues/llm_call_entry_point_standardization.md
+            _context_meta: Dict[str, Any] = {}
+            base_messages = runtime._prepare_context(
+                persona, building_id, None, pulse_id=pulse_id,
+                model_key=execution_context.model_key,
+                context_meta=_context_meta,
+                persona_voiced=True,
+            )
+            instruction_content = _build_instruction_message(
+                str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
+            )
+            messages: List[Dict[str, Any]] = list(base_messages)
+            messages.append({"role": "user", "content": instruction_content})
+
+            state: Dict[str, Any] = {
+                "_pulse_id": pulse_id,
+                "_pulse_type": "work_session",
+                "_pulse_context": pulse_ctx,
+                "_pulse_usage_accumulator": usage_accumulator,
+                "_activity_trace": [],
+                "_cancellation_token": None,
+                "_messages": messages,
+                # call-local anchor (§3.2)。2026-07-23 以降 prefix は main-line
+                # 履歴を含むため、通常は実 anchor が載る (touch は Beat 内)。
+                "_prefix_anchor_id": _context_meta.get("prefix_anchor_id"),
+            }
+            # node_def / playbook は _run_spell_loop・_store_memory が参照する
+            # 最小属性 (memorize.tags / name) だけを持つ軽量スタブ。
+            node_def = SimpleNamespace(
+                id="work_session_llm",
+                memorize={"tags": [RAW_LOG_TAG]},
+                speak=False,
+            )
+            playbook_ref = SimpleNamespace(name=WORK_SESSION_PLAYBOOK_NAME)
+
+            spell_enabled = bool(runtime._is_spell_enabled_for_persona(persona))
+            if not spell_enabled:
+                LOGGER.warning(
+                    "[work_session] spells are disabled for persona=%s — the session "
+                    "cannot act on the world and will end after one response",
+                    persona_id,
+                )
+
+            # 上で解決済みの ExecutionContext を state へ載せる (下流は state 経由で読む)。
+            state["_execution_context"] = execution_context
+            llm_client, _selected_model = runtime.select_llm_client(
+                node_def, persona, execution_context=execution_context, state=state,
+            )
+            if _selected_model != execution_context.model_key:
+                execution_context = execution_context.with_model(_selected_model)
+                state["_execution_context"] = execution_context
+
+            pulse_ctx.append(PulseLogEntry(
+                role="user", content=instruction_content,
+                node_id="work_session_instruction",
+                playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+            ))
+
+            # ---- 初回 LLM 呼び出し ----
+            LOGGER.info(
+                "[work_session] start: persona=%s budget=%d task_ref=%s track_id=%s pulse_id=%s",
+                persona_id, budget_rounds, task_ref, track_id, pulse_id,
+            )
+            initial_result = llm_client.generate(
+                messages,
+                tools=[],
+                temperature=runtime._default_temperature(persona),
+                **runtime._get_cache_kwargs(persona_id),
+            )
+            _record_llm_usage(
+                runtime, state, llm_client, persona, building_id, "llm_work_session"
+            )
+            text = _extract_text(initial_result)
+            try:
+                runtime._dump_llm_io(
+                    WORK_SESSION_PLAYBOOK_NAME, "work_session_llm", persona, messages, text,
+                )
+            except Exception:
+                LOGGER.warning("[work_session] failed to dump initial LLM I/O", exc_info=True)
+
+            # ---- act→observe ループ (予算付き) ----
             merged_text, continuation, rounds_used = _run_coro_sync(_run_spell_loop(
                 text=text,
                 spell_enabled=spell_enabled,
@@ -620,9 +625,9 @@ def _record_llm_usage(
         usage.cached_tokens, usage.cache_write_tokens,
     )
     try:
-        # anchor は call-local (§3.2)。work_session の prefix は history_depth=0 で
-        # anchor を含まないため、通常 None = touch なしになる (旧: persona 属性の
-        # 残留値を touch していた — その挙動は事故源なので引き継がない)。
+        # anchor は call-local (§3.2)。2026-07-23 以降 prefix は main-line 履歴を
+        # 含むため、通常は実 anchor が載る。呼び出し面は hold_beat の内側
+        # (Codex 5巡目 2026-07-30) — Beat 内 touch は前進と直列化済みで CAS 不要。
         runtime.session_lifecycle.touch_anchor_after_llm_call(
             persona, usage, anchor_id=state.get("_prefix_anchor_id"),
         )

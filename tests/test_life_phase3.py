@@ -370,13 +370,21 @@ def _wire_keepalive(runtime, persona, client, anchors=None, messages=None):
     # 読み口は行単位 API (load_anchor_entry、S8 根治後)。
     _anchors = anchors if anchors is not None else _live_anchors(anchor_id="a1")
     runtime.session_lifecycle.load_anchor_entry = lambda pid, mk: _anchors.get(mk)
-    runtime._prepare_context = (
-        lambda p, b, u, *a, **k: list(messages or [{"role": "user", "content": "履歴"}])
-    )
+
+    def _fake_prepare(p, b, u, *a, **k):
+        # 実物と同じく、組成に採用した anchor を context_meta へ書き戻す
+        # (keepalive の逸脱ガードがこれを生存確認の値と突き合わせる)。
+        meta = k.get("context_meta")
+        if meta is not None:
+            e = _anchors.get(k.get("model_key")) or {}
+            meta["prefix_anchor_id"] = e.get("anchor_id")
+        return list(messages or [{"role": "user", "content": "履歴"}])
+
+    runtime._prepare_context = _fake_prepare
     runtime.select_llm_client = lambda node_def, p, **k: (client, "claude-x")
     touched: List[Any] = []
     runtime.session_lifecycle.touch_anchor_after_llm_call = (
-        lambda p, usage, anchor_id=None: touched.append(usage)
+        lambda p, usage, anchor_id=None, **kwargs: touched.append(usage)
     )
     return touched
 

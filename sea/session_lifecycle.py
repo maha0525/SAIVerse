@@ -224,7 +224,8 @@ class SessionLifecycle:
 
     def upsert_anchor_entry(
         self, persona_id: Optional[str], model_key: Optional[str], entry: Dict[str, Any],
-    ) -> None:
+        require_current_anchor_id: Optional[str] = None,
+    ) -> bool:
         """(persona, model) 1 行の anchor entry を upsert する (行単位、S8 根治)。
 
         TTL 延命規則 (旧 update_anchor_for_model の prev 比較) は行内の前回値との
@@ -241,12 +242,26 @@ class SessionLifecycle:
         - entry に ttl_seconds が無い書き込み (metabolism の anchor 前進等) は
           規則を通さずそのまま書く (旧挙動: 前回の ttl_seconds は引き継がない)。
 
+        ``require_current_anchor_id`` は CAS (書き込み時仲裁、Codex 3巡目
+        2026-07-30): 行が存在する場合、その現在の anchor がこの値と一致する
+        ときだけ書く (条件付き UPDATE 1 文 = 原子的)。Beat ロックの外を走る
+        keepalive の touch 専用 — 呼び出し中に起きた anchor 前進 (§14-2 / 退場)
+        の後から古い anchor の touch が届くと、書き戻しで圧縮区間の列クリア
+        まで踏み、前進が丸ごと巻き戻るため。一致しない touch は「もう捨て
+        られた提示ウィンドウのキャッシュの主張」なので棄却が正しい。行が
+        無い場合は従来どおり作成する (ブートストラップ = 「行は LLM 成功後の
+        touch が立てる」契約)。
+
+        Returns:
+            書き込みが適用されたら True。CAS 棄却・引数不足・DB 失敗は False。
+            touch 経路はこれで後続 (見張り予約の上書き) を抑止する。
+
         docs/intent/cache_lifecycle_control.md §5.2
         """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
-            return
+            return False
         if not persona_id or not model_key:
-            return
+            return False
 
         try:
             new_updated = datetime.fromisoformat(entry["updated_at"])
@@ -281,10 +296,32 @@ class SessionLifecycle:
                 except (ValueError, TypeError):
                     pass
 
+            new_anchor_id = entry.get("anchor_id")
+            if row is not None and require_current_anchor_id is not None:
+                # CAS: 条件付き UPDATE 1 文で「現在の anchor が一致する行」だけを
+                # 書き換える。読み→書きの二段にしない (その隙間に前進が挟まると
+                # 巻き戻りが復活する)。一致時は anchor が変わらないので、下の
+                # 圧縮区間クリア分岐も不要。
+                updated_count = db.query(SessionAnchor).filter_by(
+                    PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
+                    ANCHOR_MESSAGE_ID=require_current_anchor_id,
+                ).update({
+                    SessionAnchor.ANCHOR_MESSAGE_ID: new_anchor_id,
+                    SessionAnchor.TTL_SECONDS: effective_ttl,
+                    SessionAnchor.UPDATED_AT: int(effective_updated.timestamp()),
+                }, synchronize_session=False)
+                db.commit()
+                if not updated_count:
+                    LOGGER.info(
+                        "[metabolism] stale anchor touch rejected (CAS): row for "
+                        "%s/%s no longer points at %s — the warmed prefix belongs "
+                        "to an abandoned window",
+                        persona_id, model_key, require_current_anchor_id,
+                    )
+                return bool(updated_count)
             if row is None:
                 row = SessionAnchor(PERSONA_ID=persona_id, MODEL_KEY=str(model_key))
                 db.add(row)
-            new_anchor_id = entry.get("anchor_id")
             if row.ANCHOR_MESSAGE_ID != new_anchor_id and row.FOLDED_RANGES_JSON:
                 # 畳んだ範囲は「この anchor 以降の提示コンテキスト」に対する記録なので、anchor が
                 # 差し替わった時点で無効になる (chronicle_eviction.md §6)。退場経路
@@ -292,7 +329,9 @@ class SessionLifecycle:
                 # LLM 成功後の touch がそれを永続化する。古い圧縮区間を残すと、提示コンテキストには
                 # 出ないのに head の Chronicle 枠からは除外され続け、その体験が
                 # どこにも現れなくなる。正規の退場経路は anchor 前進の直後に
-                # 圧縮区間を書き直すので、ここでクリアしても無傷。
+                # 圧縮区間を書き直すので、ここでクリアしても無傷。§14-2 の最前線
+                # 前進だけは提示に残る fold を仕分けて保持する必要があるため、
+                # ここを通らず :meth:`_advance_anchor_preserving_folds` を使う。
                 LOGGER.info(
                     "[metabolism] anchor moved outside the eviction path "
                     "(%s -> %s); clearing folded ranges for %s/%s",
@@ -303,11 +342,102 @@ class SessionLifecycle:
             row.TTL_SECONDS = effective_ttl
             row.UPDATED_AT = int(effective_updated.timestamp())
             db.commit()
+            return True
         except Exception as exc:
             LOGGER.warning(
                 "[metabolism] Failed to upsert anchor entry for %s/%s: %s",
                 persona_id, model_key, exc,
             )
+            return False
+        finally:
+            db.close()
+
+    def _advance_anchor_preserving_folds(
+        self,
+        persona,
+        persona_id: Optional[str],
+        model_key: str,
+        new_anchor_id: str,
+        updated_at_iso: str,
+    ) -> bool:
+        """機構1 (§14-2) 専用の anchor 前進書き込み — 圧縮区間を仕分けて残す。
+
+        汎用 :meth:`upsert_anchor_entry` は anchor 変更時に FOLDED_RANGES_JSON を
+        列ごとクリアする。だが最前線は「最初の未編纂メッセージ」なので、その
+        後方には未編纂の隙間を跨いで畳まれた fold がまだ提示ウィンドウ内に
+        生きていることがある — クリアすると生ログが復活してウィンドウが再膨張し、
+        head の Chronicle 枠との二重提示も起こる (Codex 2巡目 2026-07-29)。
+
+        仕分けの基準は読み側 :func:`sea.session_window.prune_folds` と同じ
+        「一部でも提示に残る範囲は残す」— fold の末尾メッセージが新 anchor 以降
+        なら保持、全体が手前なら破棄 (その Chronicle エントリは head の枠へ戻る)。
+        位置が引けない fold は保持に倒す (体験を消す方向へ落とさない)。
+        anchor と圧縮区間は同一コミットで書く。TTL は従来の前進と同じく
+        引き継がない (前進はキャッシュの主張ではない)。
+
+        Returns:
+            前進を永続化できたら True。行消失・DB 失敗は False — 呼び出し側
+            (resolve) は前進を主張せず旧 anchor に留まること (Codex 5巡目
+            2026-07-30: 失敗を成功として返すと、後続の touch が通常 upsert で
+            frontier を書き、anchor 変更の列クリアで fold が全消えする)。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return False
+        if not persona_id or not model_key:
+            return False
+        from sea.session_window import deserialize_folds, serialize_folds
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            row = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
+            ).first()
+            if row is None:
+                # 自行がある Case 1 専用の経路 — 行が消えていたら前進を書く先が
+                # 無い。次の resolve が Case 2 (最前線から開始) で立て直す。
+                return False
+            kept: List["FoldedRange"] = []
+            dropped = 0
+            for fold in deserialize_folds(row.FOLDED_RANGES_JSON):
+                if not fold.message_ids:
+                    dropped += 1
+                    continue
+                cmp_result = self._compare_positions(
+                    persona, str(fold.message_ids[-1]), new_anchor_id,
+                )
+                if cmp_result is None:
+                    LOGGER.warning(
+                        "[metabolism] fold position unresolved during anchor "
+                        "advance; keeping the fold (persona=%s model=%s)",
+                        persona_id, model_key,
+                    )
+                    kept.append(fold)
+                elif cmp_result >= 0:
+                    kept.append(fold)
+                else:
+                    dropped += 1
+            try:
+                updated = datetime.fromisoformat(updated_at_iso)
+            except (TypeError, ValueError):
+                updated = datetime.now() - timedelta(days=3650)
+            row.ANCHOR_MESSAGE_ID = new_anchor_id
+            row.FOLDED_RANGES_JSON = serialize_folds(kept)
+            row.TTL_SECONDS = None
+            row.UPDATED_AT = int(updated.timestamp())
+            db.commit()
+            if dropped:
+                LOGGER.info(
+                    "[metabolism] anchor advance dropped %d fold(s) fully behind "
+                    "the new anchor (persona=%s model=%s, %d kept)",
+                    dropped, persona_id, model_key, len(kept),
+                )
+            return True
+        except Exception as exc:
+            LOGGER.warning(
+                "[metabolism] failed to advance anchor preserving folds for "
+                "%s/%s: %s", persona_id, model_key, exc,
+            )
+            return False
         finally:
             db.close()
 
@@ -409,15 +539,28 @@ class SessionLifecycle:
                 if persist_advance:
                     # 温度は据え置く — 前進はキャッシュの主張ではないので、
                     # 冷えた updated_at をそのまま書き戻し「温かい行」を偽造しない。
-                    self.upsert_anchor_entry(persona_id, persona_model, {
-                        "anchor_id": frontier,
-                        "updated_at": (
-                            self_entry.get("updated_at")
-                            # 元の時刻が無い行は「十分に過去」で冷えを表す
-                            # (epoch 0 は TZ 次第で負になり Windows で扱えない)
-                            or (datetime.now() - timedelta(days=3650)).isoformat()
-                        ),
-                    })
+                    # 書き込みは専用経路 — 汎用 upsert は anchor 変更時に圧縮区間を
+                    # 列ごとクリアするが、最前線の後方にはまだ提示に生きる fold が
+                    # ありうる (Codex 2巡目 2026-07-29)。
+                    advanced = self._advance_anchor_preserving_folds(
+                        persona, persona_id, persona_model, frontier,
+                        self_entry.get("updated_at")
+                        # 元の時刻が無い行は「十分に過去」で冷えを表す
+                        # (epoch 0 は TZ 次第で負になり Windows で扱えない)
+                        or (datetime.now() - timedelta(days=3650)).isoformat(),
+                    )
+                    if not advanced:
+                        # 永続化できなかったら前進を主張しない (Codex 5巡目
+                        # 2026-07-30)。frontier を返すと後続の touch が通常
+                        # upsert で frontier を書き、anchor 変更の列クリアで
+                        # 行に残った fold が全消えする。旧 anchor に留まれば
+                        # 次回の resolve が前進を再試行する。
+                        LOGGER.warning(
+                            "[metabolism] cold anchor advance not persisted; "
+                            "staying at current anchor (persona=%s model=%s %s)",
+                            persona_id, persona_model, self_anchor,
+                        )
+                        return (self_anchor, "self")
                     LOGGER.info(
                         "[metabolism] cold anchor advanced to chronicle frontier "
                         "(persona=%s model=%s %s -> %s)",
@@ -540,16 +683,23 @@ class SessionLifecycle:
 
     def update_anchor_for_model(
         self, persona, model_key: str, anchor_id: str, ttl_seconds: Optional[int] = None,
-    ) -> None:
+        require_current_anchor_id: Optional[str] = None,
+    ) -> bool:
         """Update the anchor for a specific model and persist to DB.
 
         ``ttl_seconds`` は **この書き込み時点の cache TTL** (= 実際に焼いたキャッシュの
         寿命)。記録しておくことで、後から設定 (5m/1h) を変えても、既に書き込み済みの
         キャッシュの残り寿命は書き込み時 TTL で評価でき、設定変更による遡及的な表示
         ズレを防ぐ (docs/intent/cache_lifecycle_control.md §5.4)。
+
+        ``require_current_anchor_id`` は :meth:`upsert_anchor_entry` の CAS へ
+        そのまま渡す (keepalive touch の stale 書き戻し防止)。
+
+        Returns:
+            書き込みが適用されたら True (:meth:`upsert_anchor_entry` の伝播)。
         """
         if not model_key or not anchor_id:
-            return
+            return False
         # TTL 延命規則 (生存中は max 維持 / 短い書き込みは非スライド) は
         # upsert_anchor_entry が行内の前回値と比較して適用する。
         entry: Dict[str, Any] = {
@@ -558,7 +708,10 @@ class SessionLifecycle:
         }
         if ttl_seconds is not None:
             entry["ttl_seconds"] = int(ttl_seconds)
-        self.upsert_anchor_entry(getattr(persona, "persona_id", None), model_key, entry)
+        return self.upsert_anchor_entry(
+            getattr(persona, "persona_id", None), model_key, entry,
+            require_current_anchor_id=require_current_anchor_id,
+        )
 
     def anchor_entry_ttl_seconds(
         self, entry: Dict[str, Any], model_key: str, persona_id: Optional[str] = None,
@@ -574,7 +727,10 @@ class SessionLifecycle:
             return int(stored)
         return self.get_anchor_validity_seconds(model_key, persona_id)
 
-    def touch_anchor_after_llm_call(self, persona, usage, anchor_id: Optional[str] = None) -> None:
+    def touch_anchor_after_llm_call(
+        self, persona, usage, anchor_id: Optional[str] = None,
+        only_if_anchor_unchanged: bool = False,
+    ) -> None:
         """LLM 呼び出し成功後に session_anchor 行の updated_at を touch する (Phase 4-e)。
 
         旧実装は ``runtime_context.py`` の prepare_context 内で touch していたが、
@@ -605,6 +761,16 @@ class SessionLifecycle:
         TTL 失効後に旧 anchor を touch する事故 (記憶監査第 4 片) の源だったため
         廃止した。prefix に anchor を含まない呼び出し (work_session の
         history_depth=0 等) も自然に touch なしになる。
+
+        ``only_if_anchor_unchanged`` は CAS ゲート (Codex 3〜4巡目 2026-07-30):
+        True なら「行の現在の anchor が ``anchor_id`` と一致するときだけ書く」。
+        **Beat ロックの外を走る keepalive 専用** — LLM 呼び出し中に anchor 前進
+        (§14-2 / 退場) が起きると、古い anchor の touch が後から届いて巻き戻しを
+        起こすため。Beat 内の touch (会話 Pulse / fallback / sub-line) は前進と
+        Beat ロックで直列化済みなので既定 False — こちらに CAS を掛けると、
+        実行 model が組成 model と違う正当な touch (usage.model 記帳、S1) が
+        「別 anchor の既存行」で誤棄却される。書き込みが棄却されたら見張り
+        予約も更新しない (stale touch が正当な予約を後ろへずらさないため)。
         """
         if persona is None or usage is None:
             return
@@ -658,7 +824,21 @@ class SessionLifecycle:
         write_ttl_seconds = self.get_anchor_validity_seconds(
             model_key, getattr(persona, "persona_id", None),
         )
-        self.update_anchor_for_model(persona, model_key, anchor_id, write_ttl_seconds)
+        applied = self.update_anchor_for_model(
+            persona, model_key, anchor_id, write_ttl_seconds,
+            require_current_anchor_id=anchor_id if only_if_anchor_unchanged else None,
+        )
+        if not applied:
+            # CAS 棄却 (keepalive の stale touch) または書き込み失敗。見張り予約を
+            # 上書きしない — stale 完了時刻を起点に予約し直すと、新 anchor の正当な
+            # touch が立てた予約が後ろへずれ、発火時には現行キャッシュが失効して
+            # 連鎖ごと止まる (Codex 4巡目 2026-07-30)。
+            LOGGER.info(
+                "[metabolism] anchor touch not applied; leaving session watch "
+                "reservation untouched (persona=%s model=%s anchor=%s)",
+                getattr(persona, "persona_id", "?"), model_key, anchor_id,
+            )
+            return
         LOGGER.debug(
             "[metabolism] anchor touched after LLM success: persona=%s model=%s anchor=%s cache_type=%s ttl=%ds",
             getattr(persona, "persona_id", "?"), model_key, anchor_id, cache_type, write_ttl_seconds,
@@ -1813,30 +1993,48 @@ class SessionLifecycle:
         追加費用は無い。放置した場合の「もうすぐ畳まれる範囲を非キャッシュ
         単価で読み、直後の畳みで捨てられるキャッシュを作る」無駄だけが消える。
 
+        発火条件の最終判定は **Beat ロックの内側**で行う — tick 側の事前判定から
+        ロック取得までの間にユーザー Pulse が完走して anchor を touch していたら、
+        温まったばかりのキャッシュを畳まず "hot" で引き返す (§14-4 の中心不変
+        条件「生きたキャッシュがあるうちは畳まない」、Codex 2巡目 2026-07-29)。
+        内側の :meth:`run_metabolism` は同一スレッドの RLock 再入で無害。
+
         Returns:
             :meth:`cold_precompaction_status` の値 (条件不成立時)、または
             run_metabolism の結果 ("ok"/"nothing"/"failed"/"deferred")。
+            関所 (pending flush) が通らないときは "deferred" (次の tick に譲る)。
         """
-        status = self.cold_precompaction_status(persona)
-        if status != "due":
-            return status
-        model_key = str(getattr(persona, "model", "") or "") or None
-        watermarks = self.get_metabolism_watermarks(persona, model_key)
-        window = self.get_presented_window(persona, model_key)
-        if watermarks is None or not window.anchor_id:
-            return "skip"
-        current_chars = message_chars(window.presented)
-        LOGGER.info(
-            "[metabolism] cold pre-compaction: all anchors cold and window past "
-            "midpoint (persona=%s model=%s %d chars, target=%d high=%s)",
-            getattr(persona, "persona_id", "?"), model_key, current_chars,
-            watermarks.target, watermarks.high,
-        )
-        building_id = getattr(persona, "current_building_id", None) or ""
-        return self.run_metabolism(
-            persona, building_id, window, watermarks, None,
-            model_key=model_key, chronicle_force=True,
-        )
+        from sea.beat_gate import BeatGateClosedError, hold_beat
+        persona_id = getattr(persona, "persona_id", None)
+        try:
+            with hold_beat(self.manager, persona_id, purpose="metabolism"):
+                status = self.cold_precompaction_status(persona)
+                if status != "due":
+                    return status
+                model_key = str(getattr(persona, "model", "") or "") or None
+                watermarks = self.get_metabolism_watermarks(persona, model_key)
+                window = self.get_presented_window(persona, model_key)
+                if watermarks is None or not window.anchor_id:
+                    return "skip"
+                current_chars = message_chars(window.presented)
+                LOGGER.info(
+                    "[metabolism] cold pre-compaction: all anchors cold and window "
+                    "past midpoint (persona=%s model=%s %d chars, target=%d high=%s)",
+                    persona_id, model_key, current_chars,
+                    watermarks.target, watermarks.high,
+                )
+                building_id = getattr(persona, "current_building_id", None) or ""
+                return self.run_metabolism(
+                    persona, building_id, window, watermarks, None,
+                    model_key=model_key, chronicle_force=True,
+                )
+        except BeatGateClosedError:
+            # 先回りは急がない — pending が残る persona は次の tick に譲る。
+            LOGGER.info(
+                "[metabolism] cold pre-compaction deferred: beat gate closed "
+                "(persona=%s)", persona_id,
+            )
+            return "deferred"
 
     def _run_metabolism_locked(
         self,

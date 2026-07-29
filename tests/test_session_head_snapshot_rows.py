@@ -540,13 +540,18 @@ def test_keepalive_prepares_context_for_watched_model(_mock_cache):
     )
     touched: List[Any] = []
     runtime.session_lifecycle.touch_anchor_after_llm_call = (
-        lambda p, usage, anchor_id=None: touched.append(usage)
+        lambda p, usage, anchor_id=None, **kwargs: touched.append(usage)
     )
 
     captured: List[Any] = []
 
     def _fake_prepare(persona, building_id, user_input, *args, **kwargs):
         captured.append(kwargs.get("model_key"))
+        # 実物と同じく、組成に採用した anchor を context_meta へ書き戻す
+        # (keepalive の逸脱ガードがこれを生存確認の値と突き合わせる)。
+        meta = kwargs.get("context_meta")
+        if meta is not None and kwargs.get("model_key") == MODEL_B:
+            meta["prefix_anchor_id"] = live_entry["anchor_id"]
         return [{"role": "user", "content": "履歴"}]
 
     runtime._prepare_context = _fake_prepare

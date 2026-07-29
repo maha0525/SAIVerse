@@ -48,7 +48,11 @@ asyncio_mode = "auto"
 # LVGL test suite under stackchan-mcp firmware) whose test files run real
 # build steps / call sys.exit() at import, which aborts the whole pytest
 # session with INTERNALERROR during collection. Never collect it.
-addopts = "-ra --ignore=temp"
+# --ignore=test_data: test_data/ is the isolated test environment's runtime
+# data (DBs, logs, caches), never test code. Collection walking it can abort
+# the whole session on an unreadable leftover directory (permission-locked
+# scratch dirs from crashed runs).
+addopts = "-ra --ignore=temp --ignore=test_data"
 
 [tool.setuptools]
 packages = ["saiverse"]
