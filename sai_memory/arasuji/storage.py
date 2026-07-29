@@ -1270,6 +1270,73 @@ def get_total_message_count(conn: sqlite3.Connection) -> int:
     return row[0] if row and row[0] is not None else 0
 
 
+def get_frontier_anchor_id(conn: sqlite3.Connection) -> Optional[str]:
+    """編纂の最前線から導出した anchor 候補を返す (arasuji_levels.md §14-2)。
+
+    「どこまで編纂が終わっているか」の真実は Chronicle 自身 (一次エントリの
+    ``source_ids``) が持つ — session_anchor 行とは独立した persona 単位の概念で、
+    別テーブルに写しは保存しない (派生状態の二枚持ちはズレる)。
+
+    返す値は「**編纂対象になれるのにまだどの一次エントリにも畳まれていない、
+    正典順 (created_at, rowid) で最初のメッセージ**」の id — つまり anchor が
+    ここに立てば、それより前の編纂対象はすべて Chronicle が覆っている
+    (被覆の保存 §7-1 が構成的に成立する)。提示コンテキストの途中に圧縮区間が
+    ある (未編纂の隙間を跨いで先の episode が畳まれている) 場合は、隙間の
+    先頭で止まる — 最前線が保守的に手前へ寄るだけで、被覆は破れない。
+
+    Returns:
+        anchor 候補の message id。一次エントリが 1 枚も無い (編纂の実績が無い)、
+        または未編纂の編纂対象メッセージが存在しない場合は None。
+    """
+    cur = conn.execute("SELECT 1 FROM arasuji_entries WHERE level = 1 LIMIT 1")
+    if cur.fetchone() is None:
+        return None
+
+    from sai_memory.memory.storage import chronicle_eligibility_filter
+    clause, params = chronicle_eligibility_filter()
+    cur = conn.execute(
+        f"""
+        SELECT id FROM messages
+        WHERE {clause}
+          AND id NOT IN (
+            SELECT je.value
+            FROM arasuji_entries a, json_each(a.source_ids_json) je
+            WHERE a.level = 1
+          )
+        ORDER BY created_at ASC, rowid ASC
+        LIMIT 1
+        """,
+        params,
+    )
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def compare_message_positions(
+    conn: sqlite3.Connection, id_a: str, id_b: str,
+) -> Optional[int]:
+    """メッセージ 2 件の正典順 ((created_at, rowid) — W8 S7) を比較する。
+
+    Returns:
+        id_a が id_b より後なら 1、前なら -1、同一なら 0。
+        どちらかが messages に存在しなければ None (比較不能)。
+    """
+    if id_a == id_b:
+        return 0
+    cur = conn.execute(
+        "SELECT id, created_at, rowid FROM messages WHERE id IN (?, ?)",
+        (str(id_a), str(id_b)),
+    )
+    positions = {str(row[0]): (row[1] or 0, row[2]) for row in cur.fetchall()}
+    pos_a = positions.get(str(id_a))
+    pos_b = positions.get(str(id_b))
+    if pos_a is None or pos_b is None:
+        return None
+    if pos_a == pos_b:
+        return 0
+    return 1 if pos_a > pos_b else -1
+
+
 def has_overlapping_entries(
     conn: sqlite3.Connection,
     start_time: int,

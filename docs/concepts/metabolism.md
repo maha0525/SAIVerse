@@ -26,12 +26,16 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 
 数え方は**提示される提示コンテキストの文字数**（圧縮区間は digest に置き換わった後の量）。グローバル上書きは `POST /api/config/metabolism`（低 ≤ 目標 ≤ 高 を入口で検証）。
 
-### 実行点（自動は一本 + 手動）
+### 実行点（予算超過の一本 + 手動 + §14 の保守経路）
 
 | 実行点 | 場所 | 発火条件 |
 |---|---|---|
 | **応答後（自動）** | `sea/runtime.py` run_meta_user 末尾 → `maybe_run_metabolism` → `run_metabolism` | watermark 超過 / トークン閾値（`_metabolism_token_triggered`） |
 | **手動** | `SessionLifecycle.run_manual_compaction`（記憶の整理ボタン / Chronicle タブの生成が合流） | ユーザーの明示操作。範囲規則は自動と同一（残す量より古い側だけ） |
+| **応答前の非常畳み**（§14-3） | `run_meta_user` 冒頭 → `maybe_run_emergency_precompaction` | 話しかけた時点で高水位を**既に**超過しているイレギュラー（休眠 model の復帰等）。原因不問の回復措置で、status イベントで通知（同意は求めない） |
+| **失効後の先回り畳み**（§14-4） | EventScheduler の定期見張り（10 分周期）→ `cold_precompaction_status` / `run_cold_precompaction` | 全 anchor 行が冷え切った + 提示ウィンドウが残す量と上限の**中間**を超過。編纂の総作業量は畳む時期によらず不変なので、前倒しで「冷えた再開時の定価読み」だけが消える。Chronicle 生成が有効（自律確認 ON）な persona のみ |
+
+範囲規則は 4 経路とも同一（残す量より古い側だけ）。§14 の 2 経路は撤去した旧②④の復活ではない — 全量掃きせず・同意を求めず・会話開始を（非常時以外）ブロックしない（intent §14-5 の検算）。
 
 **旧実行点2つは 2026-07-29（intent §13）で撤去された**: ①会話前（anchor TTL 失効時の `runtime_context.py` Case 3 での全量編纂 + 最小ロード）②セッションクローズ（gold_panning からの前倒し全量編纂）。どちらも予算超過と無関係に編纂を発火させ、「発火はたまに・まとめて」（intent §3-2）に反していた。過去に「会話前経路は grep で見落とされ続けた」経緯があるため記録しておく — 現在は `generate_chronicle` の直接呼び出しは自動経路には存在しない。
 
@@ -41,7 +45,9 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 2. 同時に**長期記憶への結晶化**（履歴圧縮・Chronicle 化・Fragment 生成）を束ねて実行
 3. **新しい Session を開始する**
 
-`resolve_metabolism_anchor` が3段フォールバック（当該モデルの anchor 行 → 別モデルの最新行を借用 → 起点行ゼロならブートストラップ最小ロード）で文脈取得を切り替える。**TTL は見ない**（§13 — 失効していても行があれば起点。最小ロードに落ちるのは新規ペルソナ / 修復直後だけ）。**実装済**。
+`resolve_metabolism_anchor` のフォールバック順（intent §14-2、2026-07-29）: 当該モデルの anchor 行（**温かければ絶対に動かさない**。冷え切っていて編纂の最前線より後ろなら、最前線まで前進して永続化 — 編纂なし・LLM なしの行更新のみ）→ 行が無ければ最前線（Chronicle の `source_ids` から導出。行は LLM 成功後の touch が立てる）→ 最前線より先の他モデル行があれば借用（編纂なしで前進する設計の persona 等）→ どれも無ければブートストラップ最小ロード。**実装済**。
+
+**編纂の最前線** = 「どこまで編纂が終わっているか」の境界。真実は Chronicle 自身（一次エントリの `source_ids`）が持ち、anchor とは独立した persona 単位の概念（`get_frontier_anchor_id`）。anchor 行が全部消えても最前線は編纂結果と一緒に生き残る。
 
 > ⚠️ **短期 → 長期の選別（要整理）**: 短期記憶に流入する情報がすべて長期記憶に残るべきとは限らない。特に**システム通知**（入室・アイテム増減など）は「その場で分かればいい」情報。現状は Chronicle 生成時に除外しているが、そもそも長期記憶（生ログ）側に渡さない入口選別の方が綺麗（→ [issue](../issues/short_term_to_long_term_memory_filtering.md)）。
 
@@ -51,7 +57,7 @@ Metabolism の起点を指すマーカー。
 
 - anchor は **`session_anchor` テーブル**（1 行 = 1 (persona, model)、列 = `ANCHOR_MESSAGE_ID / TTL_SECONDS / UPDATED_AT`）に持つ（§6-3a、2026-07-17。旧 `AI.METABOLISM_ANCHORS` 単一 JSON 列は backfill の変換元としてのみ残存）
 - `UPDATED_AT` は prompt cache write 時刻で、LLM コール成功後に `touch_anchor_after_llm_call` で touch される。記帳先は **usage.model（実際に応答した model）**、touch する anchor は prefix 組成時の値を `state["_prefix_anchor_id"]` で call-local に運ぶ（persona 属性経由は廃止 — §6-5）
-- `UPDATED_AT + ttl < now` で TTL 切れ = **キャッシュが冷えた**という温度情報。keep-alive / 見張り / gold_panning の defer 判定が読む。**提示範囲は変えない**（§13 — 旧「TTL 切れ → 次の context 構築で Metabolism trigger」は撤去）
+- `UPDATED_AT + ttl < now` で TTL 切れ = **キャッシュが冷えた**という温度情報。keep-alive / 見張り / gold_panning の defer 判定が読む。**勝手に提示範囲を縮めない**（§13 — 旧「TTL 切れ → 次の context 構築で Metabolism trigger」は撤去）。ただし冷え切った後は保守作業の解禁条件になる（§14 — 冷えた anchor の最前線への前進・先回り畳み。判定式は `_anchor_entry_is_hot` の一枚）
 - **二層分離（§6-5、2026-07-17）**: 編纂（Chronicle 生成）は persona に一度（実行台帳の冪等 claim `metabolism.run`）、退役（anchor 前進）は model ごと。**退役は編纂の成功（status ok / disabled）でゲート**され、編纂失敗時は据え置き → 次回自然再試行（S2 根治）
 
 **実装済**。

@@ -233,6 +233,22 @@ class SEARuntime:
         effective_args = dict(args or {})
         if user_input and "input" not in effective_args:
             effective_args["input"] = user_input
+        # 非常畳み (arasuji_levels.md §14-3): 話しかけた時点で提示ウィンドウが
+        # 高水位を既に超過しているイレギュラー (休眠 model の復帰等) は、応答
+        # より先に畳んで呼び出し失敗の連鎖を断つ。通常は "skip" で素通り。
+        try:
+            _pre_probe_state: Dict[str, Any] = {}
+            if pulse_type is not None:
+                _pre_probe_state["_pulse_type"] = pulse_type
+            _pre_model_key = resolve_execution_context(
+                persona, None, state=_pre_probe_state,
+            ).model_key
+            self.session_lifecycle.maybe_run_emergency_precompaction(
+                persona, building_id, event_callback, model_key=_pre_model_key,
+            )
+        except Exception:
+            LOGGER.exception("[metabolism] Emergency pre-compaction failed")
+
         # ``_root_role`` / ``_root_track_id`` were resolved up-front (above the
         # injector calls). Pulse 中に emit_speak/emit_say/emit_think などの
         # emitter 経路から書き込まれるメッセージにも origin_track_id を付与する

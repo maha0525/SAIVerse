@@ -295,8 +295,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                     elif metabolism_enabled and preview_only:
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
+                        # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)
                         anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
-                            persona, model_key=model_key,
+                            persona, model_key=model_key, persist_advance=False,
                         )
                         if anchor_id:
                             recent_from_anchor = history_mgr.get_history_from_anchor(

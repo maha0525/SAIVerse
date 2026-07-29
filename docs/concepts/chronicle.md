@@ -36,7 +36,7 @@
 
 ### 生成タイミングと原子性
 
-[Metabolism](metabolism.md) 発火時に `generate_chronicle` (sea/session_lifecycle.py) が「新 anchor より古い範囲」だけを編纂する。anchor 前進は編纂成功後のみ (S2 ゲート)。入口は自動 (予算超過の Metabolism) と手動 (organize-memory / API 生成ジョブ — どちらも `run_manual_compaction` に合流) で、いずれも実行台帳の冪等 claim `metabolism.run` を通る (M1)。旧入口 (anchor 失効時の会話前編纂 / session close の前倒し編纂) は 2026-07-29 に撤去 (intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §13)。Fragment 生成 (entity 抽出) は全チャンクに相乗りする。
+[Metabolism](metabolism.md) 発火時に `generate_chronicle` (sea/session_lifecycle.py) が「新 anchor より古い範囲」だけを編纂する。anchor 前進は編纂成功後のみ (S2 ゲート)。入口は自動 (予算超過の Metabolism)・手動 (organize-memory / API 生成ジョブ — どちらも `run_manual_compaction` に合流)・§14 の保守経路 (応答前の非常畳み / 失効後の先回り畳み — [metabolism.md](metabolism.md) 実行点表参照) で、いずれも範囲規則は「残す量より古い側だけ」、実行台帳の冪等 claim `metabolism.run` を通る (M1)。旧入口 (anchor 失効時の会話前編纂 / session close の前倒し編纂) は 2026-07-29 に撤去 (intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §13。§14 の 2 経路はその復活ではない — §14-5 の検算)。Fragment 生成 (entity 抽出) は全チャンクに相乗りする。
 
 ## 実装
 

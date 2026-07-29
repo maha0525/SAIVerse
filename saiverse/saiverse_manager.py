@@ -571,6 +571,14 @@ class SAIVerseManager(
         # Observer: Fixture/Observer の定期実行・push 受信・通知。
         self.observer_manager.start_pull_observers()
 
+        # 冷えたウィンドウの見張り (arasuji_levels.md §14-4): 全 anchor が
+        # 冷え切って提示ウィンドウが育っている persona を先回りで畳む。
+        # 検査は読みだけで、畳みは daemon スレッドへ逃がす。
+        try:
+            self.sea_runtime.session_lifecycle.schedule_cold_window_sweep()
+        except Exception:
+            logging.exception("[start] Failed to schedule cold window sweep")
+
         # 2. Active ペルソナの AutonomyManager を起動する。起動前は
         #    ensure_autonomy_for が _started ゲートで no-op にしていたぶんを、
         #    _started=True になった今ここでまとめて立てる。

@@ -473,6 +473,7 @@ def test_manual_compaction_runs_metabolism_with_force(session_factory):
         assert lc.run_manual_compaction(persona) == "ok"
     run.assert_called_once()
     assert run.call_args.kwargs.get("chronicle_force") is True
+    assert run.call_args.kwargs.get("stop_when_disabled") is True
     assert run.call_args.kwargs.get("model_key") == "model-a"
 
 
@@ -565,8 +566,8 @@ def test_manual_compaction_disabled_does_not_fold(session_factory):
 
 def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     """ロック内の再判定 (TOCTOU, Codex 三巡 2026-07-29): 入口の事前判定の後に
-    Chronicle が OFF へ反転しても、手動 (chronicle_force=True) は編纂なしの
-    退場へ進まず "disabled" で止まる。自動 (force=False) は従来どおり進む。"""
+    Chronicle が OFF へ反転しても、手動 (stop_when_disabled=True) は編纂なしの
+    退場へ進まず "disabled" で止まる。自動・§14 経路 (False) は従来どおり進む。"""
     from sea.eviction_plan import Watermarks
     lc = _make_lifecycle(session_factory)
     persona = SimpleNamespace(
@@ -578,7 +579,8 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
     with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
             patch.object(lc, "get_presented_window") as gw:
         status = lc._run_metabolism_locked(
-            persona, "room", _window("m0", []), wm, chronicle_force=True,
+            persona, "room", _window("m0", []), wm,
+            chronicle_force=True, stop_when_disabled=True,
         )
     assert status == "disabled"
     gw.assert_not_called()
@@ -590,3 +592,364 @@ def test_run_metabolism_manual_stops_when_disabled_under_lock(session_factory):
             persona, "room", _window(None, []), wm, chronicle_force=False,
         )
     assert status == "nothing"
+
+    # §14 経路 (chronicle_force=True + stop_when_disabled=False): disabled でも
+    # 止まらない — 非常畳み・先回り畳みは Chronicle 無効の persona も前進で救う。
+    with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": ""}), \
+            patch.object(lc, "get_presented_window", return_value=_window(None, [])):
+        status = lc._run_metabolism_locked(
+            persona, "room", _window(None, []), wm, chronicle_force=True,
+        )
+    assert status == "nothing"
+
+
+# ---------------------------------------------------------------------------
+# arasuji_levels.md §14 (2026-07-29): 冷えたウィンドウの保守
+# ---------------------------------------------------------------------------
+
+
+def _memory_conn(tmp_path):
+    """messages + arasuji_entries を持つ per-persona 記憶 DB (実スキーマ)。"""
+    from sai_memory.arasuji import init_arasuji_tables
+    from sai_memory.memopedia import init_memopedia_tables
+    from sai_memory.memory.storage import init_db
+
+    conn = init_db(str(tmp_path / "memory.db"), check_same_thread=False)
+    init_memopedia_tables(conn)
+    init_arasuji_tables(conn)
+    return conn
+
+
+def _add_message(conn, msg_id, created_at, line_role="main_line"):
+    conn.execute(
+        "INSERT INTO messages (id, thread_id, role, content, created_at, "
+        "metadata, line_role) VALUES (?, 't-main', 'user', 'hello', ?, NULL, ?)",
+        (msg_id, created_at, line_role),
+    )
+    conn.commit()
+
+
+def _add_l1_entry(conn, source_ids):
+    from sai_memory.arasuji.storage import create_entry
+    return create_entry(
+        conn, level=1, content="digest", source_ids=list(source_ids),
+        source_count=len(source_ids), message_count=len(source_ids),
+    )
+
+
+def _adapter(conn):
+    return SimpleNamespace(conn=conn, is_ready=lambda: True)
+
+
+def test_frontier_anchor_id_derivation(tmp_path):
+    """§14-2: 最前線 = 編纂対象なのに未編纂の、正典順で最初のメッセージ。
+
+    一次エントリが無ければ None (編纂の実績なし)、全編纂済みでも None。
+    編纂対象外 (sub_line 等) のメッセージは最前線の判定に混ざらない。
+    """
+    from sai_memory.arasuji.storage import get_frontier_anchor_id
+
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 6):
+        _add_message(conn, f"m{i}", 1000 + i)
+
+    # 一次エントリが 1 枚も無い → None
+    assert get_frontier_anchor_id(conn) is None
+
+    _add_l1_entry(conn, ["m1", "m2"])
+    assert get_frontier_anchor_id(conn) == "m3"
+
+    # 編纂対象外のメッセージ (sub_line) は飛ばされる
+    conn.execute("UPDATE messages SET line_role='sub_line' WHERE id='m3'")
+    conn.commit()
+    assert get_frontier_anchor_id(conn) == "m4"
+
+    # 全部畳まれたら None (未編纂の編纂対象が無い)
+    _add_l1_entry(conn, ["m4", "m5"])
+    assert get_frontier_anchor_id(conn) is None
+    conn.close()
+
+
+def test_compare_message_positions(tmp_path):
+    from sai_memory.arasuji.storage import compare_message_positions
+
+    conn = _memory_conn(tmp_path)
+    _add_message(conn, "m1", 1001)
+    _add_message(conn, "m2", 1002)
+    assert compare_message_positions(conn, "m2", "m1") == 1
+    assert compare_message_positions(conn, "m1", "m2") == -1
+    assert compare_message_positions(conn, "m1", "m1") == 0
+    assert compare_message_positions(conn, "m1", "ghost") is None
+    conn.close()
+
+
+def test_resolve_cold_self_anchor_advances_to_frontier(session_factory, tmp_path):
+    """§14-2 機構1: 冷え切った自行は最前線まで前進し、行が永続化される。
+
+    前進の書き込みは温度を据え置く (updated_at が古いまま = 冷えたまま) —
+    前進はキャッシュの主張ではない。
+    """
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+    assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
+
+    row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert row["anchor_id"] == "m3"
+    assert row["updated_at"] == stale.isoformat()  # 温度据え置き (冷えたまま)
+
+    # 再解決は前進済みの自行をそのまま返す (冪等)
+    assert lc.resolve_metabolism_anchor(persona) == ("m3", "self")
+    conn.close()
+
+
+def test_resolve_hot_self_anchor_never_moves(session_factory, tmp_path):
+    """生きたキャッシュがある限り、最前線が先にあっても自行は動かない (§13 裁定1)。"""
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])
+
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+    assert lc.resolve_metabolism_anchor(persona) == ("m1", "self")
+    conn.close()
+
+
+def test_resolve_cold_advance_not_persisted_in_preview(session_factory, tmp_path):
+    """preview (persist_advance=False) は本番と同じ位置を返すが、行は触らない。"""
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])
+
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+    assert lc.resolve_metabolism_anchor(
+        persona, persist_advance=False,
+    ) == ("m3", "frontier")
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "m1"
+    conn.close()
+
+
+def test_resolve_new_model_starts_at_frontier(session_factory, tmp_path):
+    """自行なし + Chronicle 実績あり → 最前線から開始。行は書かない (touch 待ち)。"""
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])
+
+    # 他 model の行が最前線より後ろ (m1) → 最前線 (m3) が勝つ
+    lc.upsert_anchor_entry(PERSONA_ID, "model-b", {
+        "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+    assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
+    assert lc.load_anchor_entry(PERSONA_ID, "model-a") is None  # 行は立てない
+    conn.close()
+
+
+def test_resolve_new_model_borrow_wins_when_ahead_of_frontier(session_factory, tmp_path):
+    """借用側が最前線より先 (編纂なしで前進する設計の persona 等) なら借用が正 —
+    忘れたはずの生ログを最前線で復活させない。"""
+    lc = _make_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 6):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    lc.upsert_anchor_entry(PERSONA_ID, "model-b", {
+        "anchor_id": "m5", "updated_at": _now().isoformat(), "ttl_seconds": 300,
+    })
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+    )
+    assert lc.resolve_metabolism_anchor(persona) == ("m5", "other")
+    conn.close()
+
+
+def _cold_ready_lifecycle(session_factory):
+    """§14-3/§14-4 テスト用: metabolism_enabled な manager を持つ lifecycle。"""
+    lc = _make_lifecycle(session_factory)
+    lc.manager.metabolism_enabled = True
+    return lc
+
+
+def test_cold_precompaction_status_conditions(session_factory):
+    """§14-4 の発火条件: 全行冷え + 中間値超過のときだけ "due"。
+
+    - 1 行でも温かければ "hot" (生きたキャッシュを畳みで壊さない)
+    - 中間値 ((target+high)/2) 以下は "cool"
+    - Chronicle 生成が無効 (自律確認 OFF 含む) は "skip"
+    """
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)  # 中間値 = 3000
+    big = [{"id": "m1", "content": "x" * 3500}]
+    small = [{"id": "m1", "content": "x" * 2500}]
+
+    with _weave_on(), \
+            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm):
+        with patch.object(lc, "get_presented_window", return_value=_window("m1", big)):
+            assert lc.cold_precompaction_status(persona) == "due"
+        with patch.object(lc, "get_presented_window", return_value=_window("m1", small)):
+            assert lc.cold_precompaction_status(persona) == "cool"
+
+        # 別 model に温かい行が 1 つでもあれば "hot"
+        lc.upsert_anchor_entry(PERSONA_ID, "model-b", {
+            "anchor_id": "b1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+        })
+        with patch.object(lc, "get_presented_window", return_value=_window("m1", big)):
+            assert lc.cold_precompaction_status(persona) == "hot"
+
+    # 自律確認 OFF の persona は先回りの対象外 (コスト最適化であって回復ではない)
+    with _weave_on(), \
+            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=False):
+        assert lc.cold_precompaction_status(persona) == "skip"
+
+
+def test_run_cold_precompaction_folds_with_force(session_factory):
+    """"due" なら run_metabolism を chronicle_force=True (確認ゲート迂回) で呼ぶ。
+    stop_when_disabled は渡さない (既定 False) — 手動入口の契約と混ぜない。"""
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    big = [{"id": "m1", "content": "x" * 3500}]
+
+    with _weave_on(), \
+            patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "is_autonomous_chronicle_enabled_for_persona", return_value=True), \
+            patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window", return_value=_window("m1", big)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        assert lc.run_cold_precompaction(persona) == "ok"
+    run.assert_called_once()
+    assert run.call_args.kwargs.get("chronicle_force") is True
+    assert run.call_args.kwargs.get("stop_when_disabled") is not True
+    assert run.call_args.kwargs.get("model_key") == "model-a"
+
+
+def test_emergency_precompaction_skip_below_high(session_factory):
+    """高水位以下なら何もしない (通知も編纂も出ない)。"""
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    small = [{"id": "m1", "content": "x" * 3000}]
+    events = []
+
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window", return_value=_window("m1", small)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        assert lc.maybe_run_emergency_precompaction(
+            persona, "room", events.append,
+        ) == "skip"
+    run.assert_not_called()
+    assert events == []
+
+
+def test_emergency_precompaction_folds_over_high_with_notice(session_factory):
+    """§14-3: 高水位超過なら応答前に畳み、status イベントで通知する
+    (同意ダイアログではない)。確認ゲートは chronicle_force=True で迂回。"""
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    big = [{"id": "m1", "content": "x" * 5000}]
+    events = []
+
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window", return_value=_window("m1", big)), \
+            patch.object(lc, "run_metabolism", return_value="ok") as run:
+        assert lc.maybe_run_emergency_precompaction(
+            persona, "room", events.append,
+        ) == "ok"
+    run.assert_called_once()
+    assert run.call_args.kwargs.get("chronicle_force") is True
+    assert run.call_args.kwargs.get("stop_when_disabled") is not True
+    assert [e["type"] for e in events] == ["status"]
+
+
+def test_emergency_precompaction_creates_row_for_rowless_model(session_factory, tmp_path):
+    """自行の無い model (最前線から始まる初回) で非常畳みが要る場合、畳みの
+    適用先となる行を冷えた温度で先に立てる。"""
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    conn = _memory_conn(tmp_path)
+    for i in range(1, 5):
+        _add_message(conn, f"m{i}", 1000 + i)
+    _add_l1_entry(conn, ["m1", "m2"])  # 最前線 = m3
+
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+        sai_memory=_adapter(conn),
+    )
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    big = [{"id": "m3", "content": "x" * 5000}]
+
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "get_presented_window", return_value=_window("m3", big)), \
+            patch.object(lc, "run_metabolism", return_value="ok"):
+        assert lc.maybe_run_emergency_precompaction(persona, "room") == "ok"
+
+    row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert row["anchor_id"] == "m3"
+    # 冷えた温度で立つ (温かい行を偽造しない)
+    assert not lc._anchor_entry_is_hot(row, "model-a", PERSONA_ID)
+    conn.close()

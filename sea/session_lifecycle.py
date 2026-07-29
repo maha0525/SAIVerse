@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
@@ -28,9 +29,17 @@ class SessionLifecycle:
     session_lifecycle_extraction_design.md Step 1 で SEARuntime から抽出した。
     """
 
+    #: §14-4 (arasuji_levels.md) の時計側見張りの間隔。失効からこの分だけ遅れて
+    #: 検知しても実害は無い — 先回り畳みは「次の会話再開より前」に済めばよい。
+    COLD_SWEEP_INTERVAL_SECONDS = 600
+    _COLD_SWEEP_KEY = "metabolism:cold_window_sweep"
+
     def __init__(self, runtime: "SEARuntime", manager_ref: Any) -> None:
         self.runtime = runtime      # 過渡期の後方参照 (設計書 §4 で削減)
         self.manager = manager_ref
+        # §14-4 先回り畳みの実行中 persona (persona ごとに同時 1 本)
+        self._cold_sweep_lock = threading.Lock()
+        self._cold_sweep_inflight: Set[str] = set()
 
     def get_metabolism_watermarks(
         self, persona, model_key: Optional[str] = None,
@@ -338,49 +347,97 @@ class SessionLifecycle:
             LOGGER.warning("Failed to resolve cache TTL for model %s", model_key, exc_info=True)
         return 1200  # 20 minutes default
 
-    def resolve_metabolism_anchor(self, persona, model_key: Optional[str] = None) -> tuple:
+    def resolve_metabolism_anchor(
+        self, persona, model_key: Optional[str] = None,
+        persist_advance: bool = True,
+    ) -> tuple:
         """Resolve the window-start anchor for (persona, model).
 
-        arasuji_levels.md §13 (2026-07-29 裁定): 起点の TTL 失効は「キャッシュが
-        冷えた」という温度情報にすぎず、提示範囲 (ウィンドウ) の所属を変えない。
-        したがってここでは **TTL を読まない** — 行が在ればそれが起点、無ければ
-        ブートストラップ。温度の読み手は keep-alive / gold_panning defer
-        (:meth:`_is_cache_hot`) 側に残る。
-
-        含意: 長く使っていない model の起点行は古いままなので、その model での
-        再開一発目は大きな (冷えた) ウィンドウを送ることがある。それは §12-10
-        「冷えたウィンドウの読み直しコスト」の領分で、ここで起点を張り直して
-        提示範囲を縮める形で解決してはならない (被覆の保存 §7-1 が破れる)。
+        arasuji_levels.md §13/§14 (2026-07-29 裁定): 起点の TTL 失効は「キャッシュが
+        冷えた」という温度情報であり、**生きたキャッシュがある限り**起点は動かない。
+        冷え切った後は保守作業が解禁される (§14-1) — 自行が編纂の最前線 (§14-2、
+        Chronicle の source_ids から導出) より後ろに取り残されていれば、最前線まで
+        前進させる (機構1)。編纂も LLM も伴わない行更新のみで、休眠 model の
+        復帰不能 (§12-10 極端形) の主対策。飛ばす範囲は最前線の定義により必ず
+        Chronicle が覆っている (被覆の保存 §7-1 は構成的に成立)。
 
         Args:
             model_key: 「自 model」として扱う model。ExecutionContext が届いている
                 呼び出し元は ``execution_context.model_key`` を明示で渡す
                 (beat_execution_context.md §3.1)。None なら従来どおり
                 ``persona.model`` (読み側の全面 model 化は §6-5 のスコープ)。
+            persist_advance: 機構1 の前進を session_anchor 行へ永続化するか。
+                preview (何も変更しない読み) は False を渡す — 返る位置は
+                本番と同じで、行だけ触らない。
 
         Returns:
             (anchor_id, resolution_type) where resolution_type is
-            "self" | "other" | "minimal".
-            anchor_id is None for "minimal" (この persona に起点行が一つも無い)。
+            "self" | "frontier" | "other" | "minimal".
+
+            - "self": 自行の anchor (温かい、または前進の必要なし)
+            - "frontier": 編纂の最前線から導出した位置。自行があれば前進を
+              永続化済み (persist_advance=True 時)。自行が無ければ候補のみ —
+              行は LLM 成功後の touch が立てる (ブートストラップと同じ規約)
+            - "other": 自行なし + 最前線より先の他 model 行を借用 (編纂なしで
+              前進する設計 (disabled) の persona 等)
+            - "minimal": 起点が定義できない — ブートストラップ最小ロード
         """
         persona_model = model_key or getattr(persona, "model", None)
         if not persona_model:
             return (None, "minimal")
         persona_model = str(persona_model)
+        persona_id = getattr(persona, "persona_id", None)
 
-        anchors = self.load_anchor_entries(getattr(persona, "persona_id", None))
+        anchors = self.load_anchor_entries(persona_id)
 
-        # Case 1: 自 model の行があればそれが起点 (温度は見ない)
+        # Case 1: 自 model の行がある。温かければそのまま (§13 裁定 1 の芯)。
         self_entry = anchors.get(persona_model)
         if self_entry and self_entry.get("anchor_id"):
+            self_anchor = self_entry["anchor_id"]
+            if self._anchor_entry_is_hot(self_entry, persona_model, persona_id):
+                LOGGER.debug(
+                    "[metabolism] Anchor resolved: self model '%s' (hot)", persona_model,
+                )
+                return (self_anchor, "self")
+            # §14-2 機構1: 冷え切った自行は最前線まで前進してよい。
+            frontier = self._resolve_frontier_anchor(persona)
+            if (
+                frontier
+                and frontier != self_anchor
+                and self._is_ahead_of(persona, frontier, self_anchor)
+            ):
+                if persist_advance:
+                    # 温度は据え置く — 前進はキャッシュの主張ではないので、
+                    # 冷えた updated_at をそのまま書き戻し「温かい行」を偽造しない。
+                    self.upsert_anchor_entry(persona_id, persona_model, {
+                        "anchor_id": frontier,
+                        "updated_at": (
+                            self_entry.get("updated_at")
+                            # 元の時刻が無い行は「十分に過去」で冷えを表す
+                            # (epoch 0 は TZ 次第で負になり Windows で扱えない)
+                            or (datetime.now() - timedelta(days=3650)).isoformat()
+                        ),
+                    })
+                    LOGGER.info(
+                        "[metabolism] cold anchor advanced to chronicle frontier "
+                        "(persona=%s model=%s %s -> %s)",
+                        persona_id, persona_model, self_anchor, frontier,
+                    )
+                return (frontier, "frontier")
             LOGGER.debug(
-                "[metabolism] Anchor resolved: self model '%s'", persona_model,
+                "[metabolism] Anchor resolved: self model '%s' (cold, no advance)",
+                persona_model,
             )
-            return (self_entry["anchor_id"], "self")
+            return (self_anchor, "self")
 
         # Case 2: 自 model の行が無い = この model での最初の Session。
-        # 直近に更新された他 model の起点を借りると、提示範囲が model 間で
-        # おおむね揃った位置から始まる (こちらも温度は見ない)。
+        # 最前線 (§14-2) があればそこから始める。行はここでは書かず、LLM 成功後の
+        # touch が立てる (候補のまま失敗すれば何も残らない)。
+        frontier = self._resolve_frontier_anchor(persona)
+
+        # 借用候補: 直近に更新された他 model の起点。Chronicle 実績の無い persona
+        # と、編纂なしで前進する設計 (disabled) の persona では、これが最前線より
+        # 先を指す正当な値になる — 忘れたはずの生ログを最前線で復活させない。
         best_entry = None
         best_updated = None
         for other_key, entry in anchors.items():
@@ -396,13 +453,90 @@ class SessionLifecycle:
                 best_entry = entry
                 best_updated = updated_at
 
+        if frontier and best_entry:
+            # 借用側が正典順で先なら借用が正。比較不能 (どちらかの位置が引けない)
+            # は最前線側へ倒す — 被覆が保証されているのは最前線だけ。
+            cmp_result = self._compare_positions(
+                persona, best_entry["anchor_id"], frontier,
+            )
+            if cmp_result is not None and cmp_result > 0:
+                LOGGER.debug(
+                    "[metabolism] Anchor resolved: borrowed from other model "
+                    "(ahead of frontier)",
+                )
+                return (best_entry["anchor_id"], "other")
+            LOGGER.debug("[metabolism] Anchor resolved: chronicle frontier")
+            return (frontier, "frontier")
+        if frontier:
+            LOGGER.debug("[metabolism] Anchor resolved: chronicle frontier")
+            return (frontier, "frontier")
         if best_entry:
             LOGGER.debug("[metabolism] Anchor resolved: borrowed from other model")
             return (best_entry["anchor_id"], "other")
 
-        # Case 3: 起点行が一つも無い (新規ペルソナ / 修復直後) — bootstrap
+        # Case 3: 起点が定義できない (新規ペルソナ等) — bootstrap
         LOGGER.debug("[metabolism] No anchor row — bootstrap minimal load")
         return (None, "minimal")
+
+    def _resolve_frontier_anchor(self, persona) -> Optional[str]:
+        """編纂の最前線から anchor 候補を導出する (arasuji_levels.md §14-2)。
+
+        真実は Chronicle 自身 (一次エントリの source_ids) が持ち、写しは保存
+        しない。導出できない環境 (adapter 無し / 未初期化 / 照会失敗) は None
+        (= 前進しない) に倒す。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return None
+        try:
+            from sai_memory.arasuji.storage import get_frontier_anchor_id
+            return get_frontier_anchor_id(adapter.conn)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] frontier derivation failed (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return None
+
+    def _compare_positions(
+        self, persona, id_a: str, id_b: str,
+    ) -> Optional[int]:
+        """メッセージ 2 件の正典順比較 (1/-1/0)。引けなければ None。"""
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return None
+        try:
+            from sai_memory.arasuji.storage import compare_message_positions
+            return compare_message_positions(adapter.conn, id_a, id_b)
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] message position comparison failed (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return None
+
+    def _is_ahead_of(self, persona, candidate_id: str, current_id: str) -> bool:
+        """candidate が current より正典順で先 (後ろの時刻) か。
+
+        current が messages から消えている (起点が指す先を失った) 場合は True —
+        壊れた起点に留まるより、被覆の保証された最前線へ逃がす。candidate 側が
+        引けない場合は False (前進しない)。
+        """
+        cmp_result = self._compare_positions(persona, candidate_id, current_id)
+        if cmp_result is not None:
+            return cmp_result > 0
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return False
+        try:
+            cur = adapter.conn.execute(
+                "SELECT id FROM messages WHERE id IN (?, ?)",
+                (str(candidate_id), str(current_id)),
+            )
+            found = {str(row[0]) for row in cur.fetchall()}
+        except Exception:
+            return False
+        return str(candidate_id) in found and str(current_id) not in found
 
     def update_anchor_for_model(
         self, persona, model_key: str, anchor_id: str, ttl_seconds: Optional[int] = None,
@@ -1034,18 +1168,34 @@ class SessionLifecycle:
             entry = self.load_anchor_entry(
                 getattr(persona, "persona_id", None), str(model_key),
             )
-            if not entry or not entry.get("updated_at"):
-                return False
-            updated_at = datetime.fromisoformat(entry["updated_at"])
-            ttl_seconds = self.anchor_entry_ttl_seconds(
+            return self._anchor_entry_is_hot(
                 entry, str(model_key), getattr(persona, "persona_id", None),
             )
-            return datetime.now() < updated_at + timedelta(seconds=ttl_seconds)
         except Exception:
             LOGGER.warning(
                 "[gold_panning] failed to read anchor state for hot check (persona=%s)",
                 getattr(persona, "persona_id", "?"), exc_info=True,
             )
+            return False
+
+    def _anchor_entry_is_hot(
+        self, entry: Optional[Dict[str, Any]], model_key: str,
+        persona_id: Optional[str],
+    ) -> bool:
+        """anchor entry 1 件の温度判定 (書き込み時 TTL で評価)。
+
+        「冷え切った」の判定式はこの一枚だけ (arasuji_levels.md §14-6-3 —
+        判定式を二枚にしない)。読み手: :meth:`_is_cache_hot` (keep-alive /
+        gold_panning defer)、:meth:`resolve_metabolism_anchor` (機構1)、
+        :meth:`cold_precompaction_status` (機構3)。
+        """
+        if not entry or not entry.get("updated_at"):
+            return False
+        try:
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+            ttl_seconds = self.anchor_entry_ttl_seconds(entry, model_key, persona_id)
+            return datetime.now() < updated_at + timedelta(seconds=ttl_seconds)
+        except (KeyError, ValueError, TypeError):
             return False
 
     # 強制クローズ (旧 §5-5) は撤去した (2026-07-25)。U 未満の open episode を
@@ -1340,6 +1490,7 @@ class SessionLifecycle:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         model_key: Optional[str] = None,
         chronicle_force: bool = False,
+        stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
     ) -> str:
         """Execute history metabolism: Chronicle generation + anchor update.
@@ -1360,10 +1511,19 @@ class SessionLifecycle:
         (beat_execution_context.md §3.2 — 編纂は persona に一度、退役は model
         ごと)。None なら従来どおり ``persona.model``。
 
-        ``chronicle_force`` は手動入口 (:meth:`run_manual_compaction`) 用。
-        ボタン押下でユーザーが既に同意しているため、編纂の確認ダイアログ・
-        pulse_type 判定を経ずに生成する。False (自動発火) では従来どおり
+        ``chronicle_force`` は編纂の確認ダイアログ・pulse_type 判定を経ずに
+        生成する (generate_chronicle force=True)。使うのは (a) 手動入口 —
+        ボタン押下でユーザーが既に同意している、(b) §14 の非常畳み / 先回り
+        畳み — Pulse の外から呼ぶため ``_current_pulse_type`` が残留値で
+        あてにならず、確認ゲートの誤発火 (60 秒ブロック / 誤 disabled 化) を
+        防ぐ必要がある。False (応答後の自動発火) では従来どおり
         generate_chronicle 側のゲートに従う。
+
+        ``stop_when_disabled`` は手動入口専用の契約 (§13 裁定 4 補遺):
+        ボタンの同意文は「Chronicle に畳む」なので、Chronicle 無効の persona
+        では編纂なしの退場 (忘却) をその名目で実行せず "disabled" で止まる。
+        False (自動・§14 経路) では従来どおり disabled でも前進する
+        (編纂なしで忘れる設計合意)。
 
         Beat ロック (beat_execution_context.md §3.4): Metabolism は persona の
         記憶 (Chronicle / gold_panning のコア記憶採取記録) に書くため、入口で
@@ -1383,6 +1543,7 @@ class SessionLifecycle:
             return self._run_metabolism_locked(
                 persona, building_id, window, watermarks, event_callback,
                 model_key=model_key, chronicle_force=chronicle_force,
+                stop_when_disabled=stop_when_disabled,
                 cancellation_token=cancellation_token,
             )
 
@@ -1442,9 +1603,240 @@ class SessionLifecycle:
         status = self.run_metabolism(
             persona, building_id, window, watermarks, event_callback,
             model_key=resolved_model, chronicle_force=True,
+            stop_when_disabled=True,
             cancellation_token=cancellation_token,
         )
         return "noop" if status == "nothing" else status
+
+    # ------------------------------------------------------------------
+    # 冷えたウィンドウの保守 (arasuji_levels.md §14)
+    # ------------------------------------------------------------------
+
+    def maybe_run_emergency_precompaction(
+        self,
+        persona,
+        building_id: str,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        model_key: Optional[str] = None,
+    ) -> str:
+        """会話応答より前の非常畳み (arasuji_levels.md §14-3)。
+
+        原因を問わず「話しかけた時点で提示ウィンドウが高水位を既に超過している」
+        イレギュラーに対する回復措置。応答より先に通常の範囲規則 (残す量より
+        古い側) で畳み、model のコンテキスト上限超過による呼び出し失敗 (§12-10
+        極端形) の連鎖を断つ。機構1 (anchor 前進)・機構3 (先回り畳み) が働いて
+        いれば通常は発火しない。
+
+        ユーザーへは status イベントで**通知**する — 同意ダイアログではない
+        (回復措置に畳まない選択肢は無い。まはー裁定 2026-07-29)。Chronicle
+        無効の persona でも前進で救う (stop_when_disabled=False)。
+
+        Returns:
+            "skip" (条件外・超過なし) / run_metabolism の結果
+            ("ok"/"nothing"/"failed"/"deferred")。
+        """
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return "skip"
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
+        if not model_key:
+            return "skip"
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        if watermarks is None or watermarks.high is None:
+            return "skip"
+        # 機構1 (§14-2) を先に適用した位置で測る — anchor 前進 (無料) で救える
+        # ケースに編纂 (有料) を撃たない。
+        anchor_id, resolution = self.resolve_metabolism_anchor(
+            persona, model_key=model_key,
+        )
+        if not anchor_id:
+            return "skip"  # ブートストラップ前 — 提示ウィンドウが未定義
+        window = self.get_presented_window(persona, model_key, anchor_id)
+        current_chars = message_chars(window.presented)
+        if current_chars <= watermarks.high:
+            return "skip"
+        persona_id = getattr(persona, "persona_id", None)
+        LOGGER.warning(
+            "[metabolism] emergency pre-compaction: window over high watermark "
+            "at conversation start (persona=%s model=%s %d chars > high=%d, "
+            "resolution=%s)",
+            persona_id, model_key, current_chars, watermarks.high, resolution,
+        )
+        if event_callback:
+            try:
+                event_callback({
+                    "type": "status",
+                    "content": "現在のコンテキストが長すぎるため、記憶の整理を行っています…",
+                })
+            except Exception:
+                LOGGER.debug(
+                    "[metabolism] emergency notice emit failed", exc_info=True,
+                )
+        # 自行がまだ無い model (最前線 / 借用から始まる初回) は、畳みの適用先と
+        # なる session_anchor 行を先に立てる — 本体はロック内で行の anchor から
+        # 提示ウィンドウを撮り直すため、行が無いと空振りする。温度は書かない。
+        if persona_id and resolution in ("frontier", "other"):
+            entry = self.load_anchor_entry(persona_id, model_key)
+            if not entry or not entry.get("anchor_id"):
+                self.upsert_anchor_entry(persona_id, model_key, {
+                    "anchor_id": anchor_id,
+                    # 「十分に過去」= 確実に冷えている温度で立てる
+                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                })
+        return self.run_metabolism(
+            persona, building_id, window, watermarks, event_callback,
+            model_key=model_key, chronicle_force=True,
+        )
+
+    def schedule_cold_window_sweep(self) -> None:
+        """§14-4 の時計側見張りを EventScheduler に予約する。
+
+        SAIVerseManager.start() から一度呼ばれ、以降は tick が自分で次回を積む
+        (再帰予約)。scheduler の無い環境 (テスト等) では何もしない。
+        """
+        scheduler = getattr(self.manager, "event_scheduler", None) if self.manager else None
+        if scheduler is None:
+            return
+        scheduler.schedule(
+            fire_at=datetime.now() + timedelta(seconds=self.COLD_SWEEP_INTERVAL_SECONDS),
+            callback=self._cold_window_sweep_tick,
+            key=self._COLD_SWEEP_KEY,
+        )
+
+    def _cold_window_sweep_tick(self) -> None:
+        """全 persona を巡回して先回り畳み (§14-4) の条件を検査する。
+
+        検査は読みだけ (安い・LLM なし)。畳みが要る persona だけ daemon
+        スレッドへ逃がす — EventScheduler の dispatch スレッドで LLM を回さない
+        (:meth:`SEARuntime._spawn_session_close` と同じ規約)。
+        """
+        try:
+            personas = dict(getattr(self.manager, "personas", None) or {})
+            for persona in personas.values():
+                try:
+                    if self.cold_precompaction_status(persona) != "due":
+                        continue
+                    self._spawn_cold_precompaction(persona)
+                except Exception:
+                    LOGGER.exception(
+                        "[metabolism] cold sweep check failed (persona=%s)",
+                        getattr(persona, "persona_id", "?"),
+                    )
+        finally:
+            self.schedule_cold_window_sweep()
+
+    def cold_precompaction_status(self, persona) -> str:
+        """先回り畳み (§14-4) の発火条件を検査する (読みだけ・LLM なし)。
+
+        条件 (まはー裁定 2026-07-29):
+
+        - 全 anchor 行が冷え切っている — 一つでも生きたキャッシュがあるうちは
+          畳まない (畳み = anchor 前進はそのキャッシュを壊す)
+        - 提示ウィンドウ (現行 model の水位で評価) が残す量と上限の中間
+          ((target + high) / 2) を超えている
+
+        加えて Chronicle 生成が有効な persona に限る — 先回りはコスト最適化で
+        あって回復措置ではないので、「編纂は都度確認したい」設定
+        (AUTONOMOUS_CHRONICLE_ENABLED=False) や「編纂なしで忘れる」設定の
+        persona の畳みを裏で前倒ししない (忘却まで早まってしまう)。
+
+        Returns: "skip" (対象外) / "hot" (生きたキャッシュあり) /
+        "cool" (中間値以下) / "due" (発火条件成立)
+        """
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return "skip"
+        persona_id = getattr(persona, "persona_id", None)
+        model_key = str(getattr(persona, "model", "") or "") or None
+        if not persona_id or not model_key:
+            return "skip"
+        memory_weave_enabled = os.getenv(
+            "ENABLE_MEMORY_WEAVE_CONTEXT", "",
+        ).lower() in ("true", "1")
+        if not memory_weave_enabled:
+            return "skip"
+        if not self.is_chronicle_enabled_for_persona(persona):
+            return "skip"
+        if not self.is_autonomous_chronicle_enabled_for_persona(persona):
+            return "skip"
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        if watermarks is None or watermarks.high is None:
+            return "skip"
+        anchors = self.load_anchor_entries(persona_id)
+        rows = {mk: e for mk, e in anchors.items() if e.get("anchor_id")}
+        if not rows:
+            return "skip"  # 起点未確立 (ブートストラップ前) — 畳む対象が無い
+        for mk, entry in rows.items():
+            if self._anchor_entry_is_hot(entry, mk, persona_id):
+                return "hot"
+        self_entry = rows.get(model_key)
+        if not self_entry:
+            # 現行 model の行が無い — 窓を定義できない。次の会話の resolve
+            # (§14-2) が最前線から立てるのを待つ。
+            return "skip"
+        window = self.get_presented_window(persona, model_key, self_entry["anchor_id"])
+        current_chars = message_chars(window.presented)
+        midpoint = (watermarks.target + watermarks.high) / 2
+        if current_chars <= midpoint:
+            return "cool"
+        return "due"
+
+    def _spawn_cold_precompaction(self, persona) -> None:
+        """先回り畳みを daemon スレッドで実行する (persona ごとに同時 1 本)。"""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+        with self._cold_sweep_lock:
+            if persona_id in self._cold_sweep_inflight:
+                return
+            self._cold_sweep_inflight.add(persona_id)
+
+        def _target() -> None:
+            try:
+                self.run_cold_precompaction(persona)
+            except Exception:
+                LOGGER.exception(
+                    "[metabolism] cold pre-compaction thread crashed (persona=%s)",
+                    persona_id,
+                )
+            finally:
+                with self._cold_sweep_lock:
+                    self._cold_sweep_inflight.discard(persona_id)
+
+        threading.Thread(
+            target=_target, daemon=True,
+            name=f"cold-precompaction-{persona_id}",
+        ).start()
+
+    def run_cold_precompaction(self, persona) -> str:
+        """先回り畳み (§14-4) の本体。条件を再検査してから通常の範囲規則で畳む。
+
+        根拠 (§14-1): 編纂の総作業量は畳む時期によらず不変なので、前倒しに
+        追加費用は無い。放置した場合の「もうすぐ畳まれる範囲を非キャッシュ
+        単価で読み、直後の畳みで捨てられるキャッシュを作る」無駄だけが消える。
+
+        Returns:
+            :meth:`cold_precompaction_status` の値 (条件不成立時)、または
+            run_metabolism の結果 ("ok"/"nothing"/"failed"/"deferred")。
+        """
+        status = self.cold_precompaction_status(persona)
+        if status != "due":
+            return status
+        model_key = str(getattr(persona, "model", "") or "") or None
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        window = self.get_presented_window(persona, model_key)
+        if watermarks is None or not window.anchor_id:
+            return "skip"
+        current_chars = message_chars(window.presented)
+        LOGGER.info(
+            "[metabolism] cold pre-compaction: all anchors cold and window past "
+            "midpoint (persona=%s model=%s %d chars, target=%d high=%s)",
+            getattr(persona, "persona_id", "?"), model_key, current_chars,
+            watermarks.target, watermarks.high,
+        )
+        building_id = getattr(persona, "current_building_id", None) or ""
+        return self.run_metabolism(
+            persona, building_id, window, watermarks, None,
+            model_key=model_key, chronicle_force=True,
+        )
 
     def _run_metabolism_locked(
         self,
@@ -1455,6 +1847,7 @@ class SessionLifecycle:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         model_key: Optional[str] = None,
         chronicle_force: bool = False,
+        stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
     ) -> str:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
@@ -1470,16 +1863,16 @@ class SessionLifecycle:
         persona_id = getattr(persona, "persona_id", "?")
 
         # Chronicle の有効判定は**ロックの内側で一度だけ**行い、以降はこの値を
-        # 使う。手動入口 (chronicle_force) の契約は「Chronicle に畳む」なので、
+        # 使う。手動入口 (stop_when_disabled) の契約は「Chronicle に畳む」なので、
         # 入口の事前判定とこのロックの間に設定が OFF へ反転していたら (TOCTOU,
         # Codex 三巡 2026-07-29)、編纂なしの退場へ進ませずここで止める。
-        # 自動発火 (chronicle_force=False) は従来どおり disabled でも前進する
-        # (編纂なしで忘れる設計合意)。
+        # 自動発火・§14 経路 (stop_when_disabled=False) は従来どおり disabled
+        # でも前進する (編纂なしで忘れる設計合意)。
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
         chronicle_enabled = (
             memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona)
         )
-        if chronicle_force and not chronicle_enabled:
+        if stop_when_disabled and not chronicle_enabled:
             LOGGER.info(
                 "[metabolism] manual compaction stopped: chronicle disabled "
                 "under the beat lock (persona=%s)", persona_id,
