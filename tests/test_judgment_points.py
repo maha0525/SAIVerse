@@ -242,13 +242,15 @@ def test_day_open_dispatch_builds_schema_and_situation(manager, ptm, task_refs, 
     assert subs[0]["building_id"] == "alice_room"
 
     args = subs[0]["args"]
-    # 状況テキスト: 昨日の自分からのメモ・バックログ・欲求・予算・施設
+    # 状況テキスト: 昨日の自分からのメモ・予算 (= その朝にしか意味がない情報)。
+    # 静的な一覧 (バックログ・欲求・施設) は head へ移設済み
+    # (docs/issues/judgment_static_lists_to_head.md、2026-07-30)。
     text = args["situation_text"]
     assert "明日は標本集の続きから" in text
-    assert "task:1" in text
-    assert "言葉の標本集" in text
     assert "日次予算: 40" in text
-    assert "library" in text and "own_room" in text
+    assert "言葉の標本集" not in text, "バックログが状況テキストに再送されている"
+    assert "- library:" not in text, "施設一覧が状況テキストに再送されている"
+    assert "やりたいこと候補:" not in text, "欲求一覧が状況テキストに再送されている"
 
     # 動的スキーマ: 実在 ref / facility の enum。期限切れ欲求は含まれない
     schema = args["response_schema"]
@@ -282,13 +284,22 @@ def test_day_open_desire_candidate_lines_match_ref_enum(manager, task_refs):
 
     回帰防止 (2026-07-05 実 LLM 一日シム): プロンプトが欲求を task:2 と生表示し、
     enum は desire:2 だったため、ペルソナの書いた task:2 が制約デコードで
-    無関係な task:1 に滑った。プロンプト表示と enum の整合そのものを固定する。
+    無関係な task:1 に滑った。表示と enum の整合そのものを固定する。
+
+    2026-07-30 の移設後、表示側は head の PurposeBacklogSection、enum 側は
+    従来どおり判断点。**別々の場所になったからこそ**この整合は壊れうるので、
+    検査は移設先を跨いで続ける。
     """
+    from sea.head_pipeline.sections.purpose_backlog import PurposeBacklogSection
+
     jp.run_judgment_point(manager, PERSONA_ID, "day_open")
     args = manager.pulse_controller.submissions[0]["args"]
-    text = args["situation_text"]
     slot = args["response_schema"]["properties"]["timetable"]["items"]
     ref_enum = set(slot["properties"]["ref"]["enum"])
+
+    section = PurposeBacklogSection()
+    ctx = SimpleNamespace(persona_id=PERSONA_ID, manager=manager)
+    text = section.render(section.capture(ctx)).text
 
     lines = text.splitlines()
     start = lines.index("やりたいこと候補:")
@@ -301,6 +312,185 @@ def test_day_open_desire_candidate_lines_match_ref_enum(manager, task_refs):
     for line in candidate_lines:
         ref = line[2:].split(" ", 1)[0]
         assert ref in ref_enum, f"表示 ref {ref!r} が enum {sorted(ref_enum)} に無い: {line}"
+
+
+def test_head_backlog_refs_are_all_selectable(manager, task_refs):
+    """head に並ぶ ref が、判断で選べる ref の集合と一致すること。
+
+    2026-07-30 Codex 指摘 high2 の回帰。**新しく立てた関心を含む**ことが要点:
+    会話終了判断の「新しい関心として立てる」で作られる Track は
+    ``track_manager.create`` の既定 = unstarted で生まれる。これが選択肢から
+    落ちると、立てたばかりの関心に翌朝コマを割り当てられない。コマの検証
+    (sanitize_timetable) は元から生きた Track を受理していたので、狭かったのは
+    選択肢の側だった。
+
+    初回の修正は逆に head を狭めて揃えてしまい、この既存の欠陥を隠していた。
+    集合の一致は「判断が指し示せるものすべて」へ揃える。
+    """
+    import re
+
+    from sea.head_pipeline.sections.purpose_backlog import PurposeBacklogSection
+
+    manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="立てたばかりの関心",
+    )
+    manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="進行中の関心",
+        initial_status="running",
+    )
+
+    section = PurposeBacklogSection()
+    text = section.render(
+        section.capture(SimpleNamespace(persona_id=PERSONA_ID, manager=manager))
+    ).text
+
+    slot_ref_enum = set(jp.collect_slot_ref_enum(manager, PERSONA_ID))
+    track_enum = set(jp.collect_pickable_track_refs(manager, PERSONA_ID))
+
+    shown = set(re.findall(r"(?:track|task):\d+", text))
+    assert shown, "head の一覧に ref が 1 つも無い (フィクスチャの前提が崩れた)"
+    for ref in shown:
+        assert ref in slot_ref_enum, f"head の {ref} がコマの ref enum に無い"
+    shown_tracks = {r for r in shown if r.startswith("track:")}
+    assert shown_tracks == track_enum, "head の Track と選べる Track が食い違う"
+
+    # 立てたばかりの関心 (unstarted) も、進行中の関心も、両方が揃う
+    assert "進行中の関心" in text
+    assert "立てたばかりの関心" in text
+
+
+def test_db_failure_while_building_args_fails_the_ledger_row(manager):
+    """引数の組み立てで DB が落ちても、例外は入口まで漏れず席が終端化すること。
+
+    2026-07-30 Codex 三巡目。判断が指し示せる Track の取得は握りつぶしを外した
+    ので、DB 障害はここまで上がってくる。この関数の契約は「起動できなければ
+    理由つきの結果 dict」で、呼び出し側 (on_event の direct fallback /
+    schedule の backoff) はその戻り値で分岐する — 例外を素通しすると席が
+    prepared のまま残り、呼び出し側の代替経路も回復 tick の再発火も両方が
+    動きうる。
+    """
+    abandoned: list = []
+    manager.execution_ledger = SimpleNamespace(
+        mark_running=lambda eid: None,
+        # 席の放棄は prepared 限定 CAS で行う (mark_failed は running を上書き
+        # しうるので LLM 開始前の離脱には使えない)
+        abandon_prepared=lambda eid, reason: (
+            abandoned.append((eid, reason)) or True
+        ),
+    )
+
+    def boom(*a, **k):
+        raise RuntimeError("db is down")
+
+    manager.track_manager = SimpleNamespace(list_for_persona=boom, get_running=boom)
+
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "post_conversation", execution_id="exec-1",
+    )
+
+    assert result["submitted"] is False
+    assert "args build failed" in result["reason"]
+    assert result["outcome"] == jp.OUTCOME_ABORTED
+    assert len(abandoned) == 1 and abandoned[0][0] == "exec-1"
+    assert "db is down" in abandoned[0][1]
+    # LLM は開始していない
+    assert manager.pulse_controller.submissions == []
+
+
+def test_seat_that_cannot_be_abandoned_is_reported_indeterminate(manager):
+    """席を放棄できなかったら「起動できなかった」ではなく結末不明として返す。
+
+    2026-07-30 Codex 四巡目。放棄に失敗した (= 別の claimant が走らせている /
+    台帳が応答しない) のに submitted=False だけを返すと、呼び出し側の代替経路と
+    回復 tick の再発火が両方走り、同じイベントが二度処理される。
+    """
+    manager.execution_ledger = SimpleNamespace(
+        mark_running=lambda eid: None,
+        abandon_prepared=lambda eid, reason: False,  # 既に他者の所有
+    )
+    manager.personas = {}  # ペルソナ未ロード = pre-dispatch の離脱
+
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "on_event", {"event_text": "来客"},
+        execution_id="exec-1",
+    )
+    assert result["submitted"] is False
+    assert result["outcome"] == jp.OUTCOME_INDETERMINATE
+
+
+def test_pre_dispatch_abort_releases_the_claimed_seat(manager):
+    """claim 済みの席は、pre-dispatch のどの離脱経路でも放棄される。
+
+    2026-07-30 Codex 四巡目 (指摘2)。ペルソナ未ロード / 現在地なし /
+    pulse_controller なしは席を prepared のまま残していたので、回復 tick の
+    再発火と呼び出し側の代替経路が二重に走りえた。
+    """
+    for setup, reason in (
+        (lambda m: setattr(m, "personas", {}), "persona not loaded"),
+        (lambda m: setattr(m.personas[PERSONA_ID], "current_building_id", None),
+         "no current building"),
+        (lambda m: setattr(m, "pulse_controller", None), "no pulse_controller"),
+    ):
+        abandoned: list = []
+        manager.execution_ledger = SimpleNamespace(
+            mark_running=lambda eid: None,
+            abandon_prepared=lambda eid, r: (abandoned.append((eid, r)) or True),
+        )
+        # フィクスチャを毎回組み直す (直前のケースの破壊を引きずらない)
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, current_building_id="alice_room",
+            private_room_id="alice_room",
+        )
+        manager.personas = {PERSONA_ID: persona}
+        manager.pulse_controller = FakePulseController()
+        setup(manager)
+
+        result = jp.run_judgment_point(
+            manager, PERSONA_ID, "on_event", {"event_text": "来客"},
+            execution_id="exec-1",
+        )
+        assert result["submitted"] is False
+        assert result["reason"] == reason
+        assert result["outcome"] == jp.OUTCOME_ABORTED
+        assert abandoned == [("exec-1", reason)]
+
+
+def test_post_session_without_session_result_raises(manager):
+    """起きていないセッションの裁定を走らせない (契約違反は畳まず上げる)。
+
+    session_result 無しで組み立てると、成果物ゼロ・0 ラウンド・終了理由不明の
+    「起きていないセッション」を前提に裁定と時間割変更が永続化される。
+    """
+    with pytest.raises(ValueError, match="session_result"):
+        jp.run_judgment_point(manager, PERSONA_ID, "post_session", {})
+
+
+def test_contract_violation_raises_even_when_persona_is_missing(manager):
+    """契約検査は環境の状態より前 — 配線ミスが環境の問題に化けて隠れない。"""
+    manager.personas = {}
+    with pytest.raises(ValueError, match="event_text"):
+        jp.run_judgment_point(manager, PERSONA_ID, "on_event", {})
+
+
+def test_new_track_from_conversation_is_selectable_for_timetable(manager):
+    """会話終了判断が立てた関心に、翌朝コマを割り当てられること。
+
+    judgment_finalize は initial_status 未指定で Track を作る (= unstarted)。
+    その Track がコマの ref enum に載らなければ、立てた関心に時間を割けない。
+    """
+    track_id = manager.track_manager.create(
+        persona_id=PERSONA_ID, track_type="autonomous", title="会話から立てた関心",
+    )
+    ref = f"track:{manager.track_manager.get(track_id).short_id}"
+    assert ref in jp.collect_slot_ref_enum(manager, PERSONA_ID)
+
+    # 検証側 (sanitize) も同じ Track を受理する = enum と検証が一致
+    slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, [{
+        "start": "10:00", "kind": "作る", "title": "関心に取り組む",
+        "ref": ref, "facility": "own_room", "note": "",
+    }])
+    assert warnings == []
+    assert slots and slots[0]["ref"] == ref
 
 
 def test_day_open_promotions_enum_present_when_candidates(manager, task_refs):
@@ -1139,9 +1329,13 @@ def test_post_conversation_dispatch_schema_and_situation(manager, task_refs):
 
     text = args["situation_text"]
     assert "07:00" in text  # 現在時刻
-    assert "track:1" in text and "調べ物" in text  # track_ref の選択材料
-    assert "task:1" in text  # 既存タスク (重複作成の抑止)
-    assert "言葉の標本集" in text  # 既存欲求 (重複作成の抑止)
+    # track_ref の選択材料 (どの track:N が何か) と既存タスク・欲求の一覧は
+    # head の PurposeBacklogSection に常駐する。一日に何度も走るこの判断が、
+    # 同じ台帳を毎回貼り直さないことを固定する (2026-07-30 移設)。
+    assert "調べ物" not in text
+    assert "言葉の標本集" not in text
+    # 一覧が消えても「重複して作るな」という要求そのものは残る
+    assert "重ねて作らないでください" in text
 
     ctx = json.loads(args["judgment_context"])
     assert ctx["plan_date"] == PLAN_DATE

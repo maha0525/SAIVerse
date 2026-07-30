@@ -494,11 +494,10 @@ def test_life_purpose_diff_label_includes_render_fragment():
     )
 
     section = LifePurposeSection()
-    old = LifePurposeSnapshot(drive_text="d", purpose_text="", first_tier_titles=[])
+    old = LifePurposeSnapshot(drive_text="d", purpose_text="")
     new = LifePurposeSnapshot(
         drive_text="d",
         purpose_text="## あなたの生きる目的\n世界を旅して回ること。",
-        first_tier_titles=["旅の準備"],
     )
 
     labels = section.diff_to_notifications(old, new)

@@ -137,26 +137,24 @@ class LifePurposeSectionTest(unittest.TestCase):
         # 記法教示
         self.assertIn("==語句==", rendered.text)
 
-    def test_first_tier_menu_in_render(self):
-        """第一階層の title がメニューとして出る。変化すると内容が変わる。"""
+    def test_track_menu_moved_to_purpose_backlog(self):
+        """Track の一覧はこの Section から出ない (2026-07-30 PurposeBacklog へ統合)。
+
+        同じ Track を head 内で二度並べないための統合。こちらのメニューは
+        差分通知を持たなかったので、残すと「通知される一覧」と「されない一覧」が
+        同じ head で食い違う。
+        """
         from saiverse.track_manager import TrackManager
 
         section = LifePurposeSection()
-        empty_snap = section.capture(self._ctx())
-        self.assertEqual(empty_snap.first_tier_titles, [])
-        empty_text = section.render(empty_snap).text
-        self.assertIn("名前のついた Track がありません", empty_text)
-
         tm = TrackManager(session_factory=self.Session)
         tm.create(persona_id="air", track_type="autonomous", title="言葉の標本集")
+
         snap = section.capture(self._ctx())
-        self.assertIn("言葉の標本集", snap.first_tier_titles)
+        self.assertFalse(hasattr(snap, "first_tier_titles"))
         text = section.render(snap).text
-        self.assertIn("- 言葉の標本集", text)
-        # 参照子 (track:N) はメニューに出さない (固有名詞 Track は出す — まはー 2026-07-07)
-        self.assertNotIn("track:", text.split("## 言葉への印（mark）")[0])
-        # 第一階層の変化でのみ render が変わる (キャッシュ再張りは稀)
-        self.assertNotEqual(empty_text, text)
+        self.assertNotIn("言葉の標本集", text)
+        self.assertNotIn("いま開いている Track", text)
 
     def test_render_is_line_role_independent(self):
         """render は snapshot のみに依存 — 用途/ラインで出し分けない (head 固定)。"""
@@ -172,18 +170,22 @@ class LifePurposeSectionTest(unittest.TestCase):
         self.assertEqual(labels[0].kind, "life_purpose_set")
 
     def test_snapshot_roundtrip(self):
-        snap = LifePurposeSnapshot(
-            drive_text="d", purpose_text="p", first_tier_titles=["a", "b"],
-        )
+        snap = LifePurposeSnapshot(drive_text="d", purpose_text="p")
         section = LifePurposeSection()
         restored = section.deserialize_snapshot(section.serialize_snapshot(snap))
         self.assertEqual(restored, snap)
 
-    def test_deserialize_old_snapshot_without_first_tier(self):
-        """旧 snapshot (first_tier_titles 無し) は default で復元できる (後方互換)。"""
+    def test_deserialize_drops_retired_fields(self):
+        """統合前に保存された行 (first_tier_titles つき) も静かに復元できる。
+
+        TypeError にすると store の load が ERROR + traceback を吐くだけで、
+        結局 recapture に落ちる — 想定内の移行を error 面に出さない。
+        """
         section = LifePurposeSection()
-        restored = section.deserialize_snapshot('{"drive_text": "d", "purpose_text": "p"}')
-        self.assertEqual(restored.first_tier_titles, [])
+        restored = section.deserialize_snapshot(
+            '{"drive_text": "d", "purpose_text": "p", "first_tier_titles": ["a"]}'
+        )
+        self.assertEqual(restored, LifePurposeSnapshot(drive_text="d", purpose_text="p"))
 
 
 class LifePurposeSetSpellTest(unittest.TestCase):

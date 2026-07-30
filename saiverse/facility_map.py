@@ -97,6 +97,33 @@ def list_tagged_buildings(manager: Any) -> List[Any]:
     return tagged
 
 
+def candidate_buildings(manager: Any) -> List[Any]:
+    """施設として提示する Building 群 (building_id 昇順の決定論順)。
+
+    公共施設タグ (FACILITY_ROLES) 付き Building が 1 つでもあればそれのみ、
+    ゼロなら後方互換で全 Building (まだ誰もタグ付けしていない DB で従来挙動を
+    壊さない — v2 §6.1)。
+
+    **供給先は 2 つあり、両方が同じ集合を見る必要がある**:
+    ``saiverse.judgment_points.collect_facility_ids`` (コマの facility enum =
+    選べる選択肢) と ``sea.head_pipeline.sections.facilities`` (head の
+    「行ける場所」= 読む情報)。片方だけ別実装にすると「head に無い場所が
+    enum にある / その逆」が起きるため、候補集合はここ 1 箇所で決める。
+
+    順序を building_id で固定するのは head の prefix キャッシュのため
+    (同じ世界なら毎回同じ文字列が出ること)。
+    """
+    tagged = list_tagged_buildings(manager)
+    if tagged:
+        return tagged
+    all_buildings = [
+        b for b in (getattr(manager, "buildings", None) or [])
+        if getattr(b, "building_id", None)
+    ]
+    all_buildings.sort(key=lambda b: b.building_id)
+    return all_buildings
+
+
 def buildings_for_role(manager: Any, role: str) -> List[Any]:
     """指定ロールを持つ Building の一覧 (building_id 昇順の決定論順)。"""
     return [b for b in list_tagged_buildings(manager) if role in building_roles(b)]

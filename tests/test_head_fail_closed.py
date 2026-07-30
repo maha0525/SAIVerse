@@ -23,6 +23,7 @@ from sea.head_pipeline import (
     HeadPipeline,
     HeadSectionRegistry,
     LineHeadInput,
+    NotificationLabel,
     RenderedSection,
 )
 from sea.head_pipeline.integration import render_head_messages
@@ -176,6 +177,41 @@ def test_required_capture_failure_with_existing_value_keeps_stale(pipeline, sect
     # stale-but-real なので LLM 実行は止めない
     messages = _render(pipeline)
     assert messages is not None
+
+
+def test_stale_reuse_does_not_roll_back_last_notified(registry):
+    """capture 失敗で A を据え置いた Section は、B (既読基準) も据え置く。
+
+    2026-07-30 Codex 指摘 high1。capture_all は B を新 A で丸ごと初期化する。
+    通常は A = 今 capture した最新なので正しいが、capture 失敗で**古い A を
+    再利用した** Section では、diff 通知で live state まで進んでいた B が
+    古い A へ巻き戻り、復旧後に「もう届けた変化」を再通知してしまう。
+    """
+    class DiffingSection(FlakySection):
+        def diff_to_notifications(self, old, new):
+            if old == new:
+                return []
+            return [NotificationLabel(kind="changed", label=f"{self.name} changed")]
+
+    section = DiffingSection("building", 300)
+    registry.unregister("building")
+    registry.register(section)
+    pipeline = HeadPipeline(registry=registry)
+    ctx = LineHeadInput(persona_id="air", model_key=MODEL, current_building_id="b_lobby")
+
+    pipeline.capture_all(ctx)                      # A = B = v1
+    section.value = "building-v2"
+    assert pipeline.flush_diffs(ctx, all_sections=True)  # 通知済み: B = v2
+
+    section.fail_capture = True
+    pipeline.capture_all(ctx)                      # A は v1 に据え置き
+    assert pipeline.get_snapshot("air", MODEL).sections["building"] == {
+        "text": "building-v1",
+    }
+
+    # 復旧。live state は v2 のまま = 既に届けた変化なので再通知しない
+    section.fail_capture = False
+    assert pipeline.flush_diffs(ctx, all_sections=True) == []
 
 
 def test_none_section_value_is_treated_as_missing(pipeline, sections):

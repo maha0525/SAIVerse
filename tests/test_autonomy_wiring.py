@@ -768,6 +768,50 @@ def test_external_event_falls_back_when_judgment_unavailable(
     assert dispatched == ["direct"]
 
 
+def test_contract_violation_is_checked_before_claiming_a_seat(session_factory):
+    """契約違反は台帳に触れる前に落とす (席を孤児化させない)。
+
+    2026-07-30 Codex 五巡目。claim の後で ValueError を出すと、その席は誰にも
+    放棄されず prepared のまま残り、回復 tick が同じ不正 payload で再発火して
+    は同じ例外を繰り返す。
+    """
+    manager, _ = _make_manager(session_factory)
+    claimed: List[str] = []
+    manager.execution_ledger = SimpleNamespace(
+        claim_execution=lambda *a, **k: (claimed.append("claimed"), ("e1", True, None))[1],
+    )
+    with pytest.raises(ValueError, match="event_text"):
+        wiring.fire_judgment_point(manager, PERSONA_ID, wiring.KIND_ON_EVENT, {})
+    assert claimed == []
+
+
+def test_external_event_indeterminate_seat_avoids_double_handling(
+    session_factory, monkeypatch,
+):
+    """席を放棄できなかった判断では代替経路を走らせない。
+
+    2026-07-30 Codex 四巡目。実行台帳の席が prepared のまま残ると回復 tick が
+    後で再発火するので、ここで応対すると同じイベントを二度処理する。
+    「起動できなかった」(= 席は確実に残っていない) との区別が要る。
+    """
+    from saiverse.judgment_points import OUTCOME_INDETERMINATE
+
+    manager, _ = _make_manager(session_factory)
+    _fake_fire(monkeypatch, {
+        "submitted": False,
+        "reason": "args build failed: RuntimeError('db is down')",
+        "outcome": OUTCOME_INDETERMINATE,
+        "execution_id": "exec-1",
+    })
+    dispatched: List[str] = []
+    route = wiring.handle_external_event(
+        manager, PERSONA_ID, "掲示板の告知",
+        dispatch_direct=lambda: dispatched.append("direct"),
+    )
+    assert route == wiring.ROUTE_NONE_INDETERMINATE
+    assert dispatched == []
+
+
 def test_external_event_unknown_reaction_avoids_double_handling(
     session_factory, monkeypatch, caplog,
 ):

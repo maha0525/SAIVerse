@@ -12,10 +12,12 @@ from sea.head_pipeline.sections.chronicle_index import ChronicleIndexSection
 from sea.head_pipeline.sections.common_prompt import CommonPromptSection
 from sea.head_pipeline.sections.core_memory import CoreMemorySection
 from sea.head_pipeline.sections.desk import DeskSection
+from sea.head_pipeline.sections.facilities import FacilitiesSection
 from sea.head_pipeline.sections.life_purpose import LifePurposeSection
 from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
 from sea.head_pipeline.sections.persona_self import PersonaSelfSection
+from sea.head_pipeline.sections.purpose_backlog import PurposeBacklogSection
 from sea.head_pipeline.sections.spell_list import SpellListSection
 from sea.head_pipeline.sections.visual_context import VisualContextSection
 
@@ -29,9 +31,11 @@ def register_default_sections(registry) -> None:
     registry.register(PersonaSelfSection())
     registry.register(CoreMemorySection())
     registry.register(BuildingSection())
+    registry.register(FacilitiesSection())
     registry.register(AvailablePlaybooksSection())
     registry.register(AutonomyModesSection())
     registry.register(LifePurposeSection())
+    registry.register(PurposeBacklogSection())
     registry.register(SpellListSection())
     registry.register(MemoryWeaveSection())
     registry.register(DeskSection())
@@ -53,10 +57,12 @@ __all__ = [
     "CommonPromptSection",
     "CoreMemorySection",
     "DeskSection",
+    "FacilitiesSection",
     "LifePurposeSection",
     "MemopediaIndexSection",
     "MemoryWeaveSection",
     "PersonaSelfSection",
+    "PurposeBacklogSection",
     "SpellListSection",
     "VisualContextSection",
     "register_default_sections",

@@ -65,7 +65,6 @@ from saiverse.day_plan import (
 from saiverse.desire_engine import (
     DESIRE_TYPES,
     decay_desires,
-    desire_summary_for_prompt,
     promotion_candidates,
 )
 from saiverse.persona_task_manager import (
@@ -111,12 +110,6 @@ REACTION_IGNORE = "ignore"
 
 #: 「中断中セッション」と見なす desk_memo.status (post_session 判断が刻む)
 DESK_MEMO_INTERRUPTED_STATUSES = ("continue", "blocked")
-
-#: picked_tasks.track_ref の enum に載せる Track status
-#: (judgment_points.md §5「active/pending Track の動的注入」。alert は
-#: 「要即応の active」なので含める。unstarted / 終了状態は含めない。
-#: 値は saiverse.track_manager の STATUS_RUNNING / STATUS_ALERT / STATUS_PENDING)
-PICKABLE_TRACK_STATUSES = ("running", "alert", "pending")
 
 #: 日次予算 (ラウンド) の既定値。予算ゲート (v2 §4.5) が乗るまでの素朴な形
 #: (セッション数 × ラウンド上限 ≒ 5 × 8)。context["daily_budget_rounds"] で上書き可。
@@ -169,28 +162,20 @@ def _task_ref_status(manager: Any, persona_id: str, ref: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _facility_candidate_buildings(manager: Any) -> List[Any]:
-    """facility enum / 状況テキストの施設一覧に載せる Building 群。
-
-    公共施設タグ (FACILITY_ROLES) 付き Building が 1 つでもあればそれのみ、
-    ゼロなら後方互換で全 Building (まだ誰もタグ付けしていない DB で従来挙動を
-    壊さない — v2 §6.1 / facility_map.py)。
-    """
-    from saiverse.facility_map import list_tagged_buildings
-
-    tagged = list_tagged_buildings(manager)
-    if tagged:
-        return tagged
-    return list(getattr(manager, "buildings", None) or [])
-
-
 def collect_facility_ids(manager: Any) -> List[str]:
     """コマの facility enum: 公共施設タグ付き Building + "own_room" (v2 §6.1)。
 
     タグ付き Building がゼロの DB では全 Building を提示する (後方互換)。
+
+    候補集合の決定は :func:`saiverse.facility_map.candidate_buildings` に一本化
+    してある — head の「行ける場所」(FacilitiesSection) が読む情報を出し、こちらが
+    選べる選択肢を出すので、二つが同じ集合を見ないと「head に無い場所が選べる /
+    head にあるのに選べない」が起きる。
     """
+    from saiverse.facility_map import candidate_buildings
+
     out: List[str] = []
-    for b in _facility_candidate_buildings(manager):
+    for b in candidate_buildings(manager):
         bid = getattr(b, "building_id", None)
         if bid:
             out.append(bid)
@@ -198,11 +183,14 @@ def collect_facility_ids(manager: Any) -> List[str]:
     return out
 
 
-def _list_backlog_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
+def list_backlog_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
     """バックログタスク (欲求候補を除く生きているタスク) の dict リスト。
 
     P3c-0 以降、欲求候補は parent_kind でなく stage='candidate' で識別する
     (候補は常に親なしで生まれるため、parent_kind だけではもう区別できない)。
+
+    公開関数なのは head の PurposeBacklogSection (= ペルソナが読む一覧) が
+    同じ供給を使うため。判断側の enum とだけ食い違う一覧を head に出さない。
     """
     ptm = PersonaTaskManager(manager.SessionLocal)
     tasks = ptm.list_tasks(
@@ -211,8 +199,12 @@ def _list_backlog_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
     return [t for t in tasks if t.get("stage") != STAGE_CANDIDATE]
 
 
-def _list_desire_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
-    """生きている欲求候補 (stage='candidate' の目的ノード) の dict リスト (P3c-0)。"""
+def list_desire_tasks(manager: Any, persona_id: str) -> List[Dict[str, Any]]:
+    """生きている欲求候補 (stage='candidate' の目的ノード) の dict リスト (P3c-0)。
+
+    :func:`list_backlog_tasks` と同じ理由で公開 (head の一覧と enum の供給を
+    一本化する)。
+    """
     ptm = PersonaTaskManager(manager.SessionLocal)
     return ptm.list_tasks(
         persona_id, stage=STAGE_CANDIDATE, include_steps=False,
@@ -227,11 +219,11 @@ def collect_slot_ref_enum(manager: Any, persona_id: str) -> List[str]:
     そのもの。中身はその場の判断)。「暮らし」「休む」は 'none'。
     """
     refs: List[str] = []
-    for t in _list_backlog_tasks(manager, persona_id):
+    for t in list_backlog_tasks(manager, persona_id):
         ref = t.get("task_ref")
         if ref:
             refs.append(ref)
-    for t in _list_desire_tasks(manager, persona_id):
+    for t in list_desire_tasks(manager, persona_id):
         ref = t.get("task_ref")
         if ref:
             refs.append(ref)
@@ -250,25 +242,50 @@ def collect_promotion_refs(manager: Any, persona_id: str) -> List[str]:
     return out
 
 
-def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
-    """picked_tasks.track_ref enum: 実在の active/pending Track (track:N 形式)。
+def list_pickable_tracks(manager: Any, persona_id: str) -> List[Any]:
+    """判断が**指し示せる** Track の行 (生きている + short_id 採番済み)。
 
-    judgment_points.md §5。short_id 未採番の行は参照子が無いため載せない。
+    参照子 (track:N) を持たない行は載せない — 参照子の無い Track は判断が
+    指し示せないため。
+
+    集合は ``track_manager.LIVE_STATUSES``。2026-07-30 まで
+    ``("running", "alert", "pending")`` で unstarted を外していたが、これは
+    目的でなく「種類」で書いた歯止めで、**達成できるのに発火しない穴**を
+    開けていた: 会話終了判断が「新しい関心として立てる」で作る Track は
+    ``track_manager.create`` の既定 = unstarted で生まれるのに、翌朝の時間割は
+    その Track を選べなかった (次の会話でタスクもぶら下げられない)。コマを
+    検証する :func:`sanitize_timetable` は元から LIVE_STATUSES で受理して
+    いたので、狭かったのは選択肢の側。
+
+    公開関数なのは head の PurposeBacklogSection (= ペルソナが読む一覧) が
+    同じ供給を使うため。**「読む情報」と「選べる選択肢」は集合が一致して
+    いなければならない** — head に選べない Track を並べると、LLM はそれを
+    picked_tasks.track_ref に書けず、構造化出力で別の Track か 'new' に滑る
+    (= 誤った関連付けと重複 Track が永続化する)。逆に head を狭めて揃えるのは
+    誤り (2026-07-30 の初回修正がこれで、新しく立てた関心を時間割に載せられない
+    という既存の欠陥を隠した)。集合の一致は**目的の側 = 判断が指し示せるもの
+    すべて**へ揃える。
+
+    取得失敗は**握らない**。head 側は pipeline に例外を届けて既存 snapshot の
+    据え置き (stale-but-real) に任せる必要があり、enum 側も同じ DB を見ている
+    以上「読めないなら判断を走らせない」で揃うのが正しい (head だけ欠けて enum
+    だけ渡ると、ref の意味が分からないまま制約デコードで確定してしまう)。
     """
     track_manager = getattr(manager, "track_manager", None)
     if track_manager is None:
         return []
-    try:
-        tracks = track_manager.list_for_persona(
-            persona_id, statuses=PICKABLE_TRACK_STATUSES,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[judgment] failed to list pickable tracks for %s", persona_id,
-            exc_info=True,
-        )
-        return []
-    return [f"track:{t.short_id}" for t in tracks if t.short_id is not None]
+    from saiverse.track_manager import LIVE_STATUSES
+
+    tracks = track_manager.list_for_persona(persona_id, statuses=LIVE_STATUSES)
+    return [t for t in tracks if t.short_id is not None]
+
+
+def collect_pickable_track_refs(manager: Any, persona_id: str) -> List[str]:
+    """コマ / picked_tasks.track_ref の enum: 実在の生きた Track (track:N 形式)。
+
+    judgment_points.md §5。中身は :func:`list_pickable_tracks` と同一集合。
+    """
+    return [f"track:{t.short_id}" for t in list_pickable_tracks(manager, persona_id)]
 
 
 def collect_purpose_refs(manager: Any, persona_id: str) -> List[str]:
@@ -278,7 +295,7 @@ def collect_purpose_refs(manager: Any, persona_id: str) -> List[str]:
     欲求候補 (desire) は木の外 (§3.1 段階の区別) なので棚には含めない。
     """
     refs: List[str] = list(collect_pickable_track_refs(manager, persona_id))
-    for t in _list_backlog_tasks(manager, persona_id):
+    for t in list_backlog_tasks(manager, persona_id):
         ref = t.get("task_ref")
         if ref:
             refs.append(ref)
@@ -390,7 +407,7 @@ def collect_today_touched_desires(
     """
     today = plan_date if plan_date is not None else clock.now().date().isoformat()
     out: List[Dict[str, Any]] = []
-    for task in _list_desire_tasks(manager, persona_id):
+    for task in list_desire_tasks(manager, persona_id):
         touched = str(task.get("last_touched_at") or "")
         created = str(task.get("created_at") or "")
         if touched.startswith(today) or created.startswith(today):
@@ -905,63 +922,15 @@ def build_day_close_schema(
 
 # ---------------------------------------------------------------------------
 # 状況テキスト (tail 注入)
+#
+# 静的な一覧 (行ける場所 / Track・タスク・やりたいこと候補) はここには無い。
+# 判断のたびに再送するものではないので head に移設した (まはー裁定 2026-07-29、
+# docs/issues/judgment_static_lists_to_head.md): 一覧の本体は
+# sea/head_pipeline/sections/{facilities,purpose_backlog}.py が head に常駐させ、
+# 凍結中の増減は同 Section の差分通知が届ける。ここに残るのは「その判断の
+# 瞬間にしか意味がない情報」だけ (現在時刻・残りの時間割・今日の予算・
+# セッションの実績など)。
 # ---------------------------------------------------------------------------
-
-
-def _format_track_backlog(manager: Any, persona_id: str) -> str:
-    track_manager = getattr(manager, "track_manager", None)
-    if track_manager is None:
-        return "(Track 情報は取得できませんでした)"
-    from saiverse.track_manager import LIVE_STATUSES
-
-    try:
-        tracks = track_manager.list_for_persona(persona_id, statuses=LIVE_STATUSES)
-    except Exception:
-        LOGGER.warning(
-            "[judgment] failed to list tracks for %s", persona_id, exc_info=True,
-        )
-        return "(Track 情報は取得できませんでした)"
-    if not tracks:
-        return "進行中の Track はありません。"
-    lines = ["Track:"]
-    for t in tracks:
-        short = f"track:{t.short_id}" if t.short_id is not None else t.track_id[:8]
-        lines.append(
-            f"- {short} [{t.track_type}/{t.status}] {t.title or '(無題)'}"
-        )
-    return "\n".join(lines)
-
-
-def _format_task_backlog(manager: Any, persona_id: str) -> str:
-    tasks = _list_backlog_tasks(manager, persona_id)
-    if not tasks:
-        return "バックログのタスクはありません。"
-    lines = ["タスクバックログ:"]
-    for t in tasks:
-        ref = t.get("task_ref") or "task:?"
-        has_artifact = "あり" if t.get("artifact_refs") else "なし"
-        lines.append(
-            f"- {ref} [{t.get('status')}] {t.get('title') or '(無題)'}"
-            f" (成果物参照: {has_artifact})"
-        )
-    return "\n".join(lines)
-
-
-def _format_facilities(manager: Any) -> str:
-    """施設一覧 (facility enum と同じ候補集合。ロールタグがあれば併記)。"""
-    from saiverse.facility_map import ROLE_LABELS, building_roles
-
-    lines = ["行ける場所:"]
-    for b in _facility_candidate_buildings(manager):
-        bid = getattr(b, "building_id", None)
-        if not bid:
-            continue
-        name = getattr(b, "name", "") or bid
-        roles = building_roles(b)
-        label = "・".join(ROLE_LABELS.get(r, r) for r in roles)
-        lines.append(f"- {bid}: {name}" + (f"（{label}）" if label else ""))
-    lines.append(f"- {FACILITY_OWN_ROOM}: 自分の部屋")
-    return "\n".join(lines)
 
 
 def _format_remaining_timetable(manager: Any, persona_id: str, plan_date: str) -> str:
@@ -1001,6 +970,12 @@ def build_day_open_situation_text(
     昨日の消化は就寝判断が済ませており、朝が受け取るのはその成果物 —
     tomorrow_memo と、窓に残る就寝の独白 — だけ。圧縮段の下流へ生材料を
     再供給しない (Chronicle のレベル制と同じ規律)。やり残しはタスク台帳が運ぶ。
+
+    [進行中のことと、やりたいこと] と [施設一覧] も**渡さない** (2026-07-30 移設)。
+    毎朝同じものを貼り直す情報なので head に常駐させた (PurposeBacklogSection /
+    FacilitiesSection)。時間割が選べる ref / facility の enum は従来どおり
+    live state から供給されるので、head が凍結して古くても実在しないものは
+    選べない。
     """
     now = clock.now()
     today = now.date().isoformat()
@@ -1042,8 +1017,8 @@ def build_day_open_situation_text(
         "[起床判断]",
         f"おはようございます。今日 ({today}) の一日が始まります。",
         life_line,
-        "昨日の自分からのメモ・バックログ・やりたいこと候補を"
-        "見て、今日の時間割を編成してください。",
+        "昨日の自分からのメモと、常に手元にある一覧 (進行中のことと、やりたいこと / "
+        "行ける場所) を見て、今日の時間割を編成してください。",
         "各コマには「○○をする」という短い表題 (title) を付けてください — "
         "あなたの一日の予定表にそのまま載ります。",
         "コマの ref には具体的なタスク (task:N) のほか、関心そのもの (track:N) も"
@@ -1053,18 +1028,8 @@ def build_day_open_situation_text(
         "[昨日の自分からのメモ]",
         memo or "(メモはありません)",
         "",
-        "[進行中のことと、やりたいこと]",
-        _format_track_backlog(manager, persona_id),
-        "",
-        _format_task_backlog(manager, persona_id),
-        "",
-        desire_summary_for_prompt(manager, persona_id),
-        "",
         "[今日の予算]",
         *budget_lines,
-        "",
-        "[施設一覧]",
-        _format_facilities(manager),
     ]
     events = (context.get("scheduled_events") or "").strip() if isinstance(
         context.get("scheduled_events"), str
@@ -1249,29 +1214,6 @@ def build_post_session_situation_text(
     return "\n".join(parts)
 
 
-def _format_pickable_tracks(manager: Any, persona_id: str) -> str:
-    """picked_tasks.track_ref の選択材料 (track:N がどの関心かを示す一覧)。"""
-    track_manager = getattr(manager, "track_manager", None)
-    if track_manager is None:
-        return "進行中の関心 (Track) はありません。"
-    try:
-        tracks = track_manager.list_for_persona(
-            persona_id, statuses=PICKABLE_TRACK_STATUSES,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[judgment] failed to list tracks for %s", persona_id, exc_info=True,
-        )
-        return "(Track 情報は取得できませんでした)"
-    live = [t for t in tracks if t.short_id is not None]
-    if not live:
-        return "進行中の関心 (Track) はありません。"
-    lines = ["進行中の関心 (Track):"]
-    for t in live:
-        lines.append(f"- track:{t.short_id} [{t.track_type}/{t.status}] {t.title or '(無題)'}")
-    return "\n".join(lines)
-
-
 def build_post_conversation_situation_text(
     manager: Any,
     persona_id: str,
@@ -1284,6 +1226,11 @@ def build_post_conversation_situation_text(
     会話本文は載せない — この判断は会話と同じ main line 文脈で走るため、
     会話はコンテキストに既に在る (メタ判断と同じ起動経路)。
     ``shelving=True`` のとき、層2 棚入れ (episode_purposes) を促す一文を添える。
+
+    [すでにあるもの] の一覧も載せない (2026-07-30 移設)。この判断は一日に何度も
+    走るので、同じ台帳の再送が最も多かった経路。一覧は head の
+    PurposeBacklogSection に常駐しており、凍結中の増減は同 Section の差分通知が
+    届ける (docs/issues/judgment_static_lists_to_head.md)。
     """
     now = clock.now()
     today = now.date().isoformat()
@@ -1292,6 +1239,8 @@ def build_post_conversation_situation_text(
         "会話がひと区切りつきました。この会話から拾うべきこと"
         "（約束・頼まれごと・やりたくなったこと）と、残りの時間の使い方を"
         "決めてください。会話の内容はこの文脈にあります。",
+        "すでに持っている関心・タスク・やりたいこと候補の一覧は常に手元にあります。"
+        "同じものを重ねて作らないでください。",
         "",
         f"現在時刻: {now.strftime('%H:%M')}",
         _format_remaining_timetable(manager, persona_id, today),
@@ -1305,15 +1254,6 @@ def build_post_conversation_situation_text(
             f"の作業メモ [{memo_label}]: {interrupted['text'] or '(記載なし)'}",
             "この作業をどうするかを resume_session で選んでください。",
         ]
-    parts += [
-        "",
-        "[すでにあるもの（重複して作らないでください）]",
-        _format_pickable_tracks(manager, persona_id),
-        "",
-        _format_task_backlog(manager, persona_id),
-        "",
-        desire_summary_for_prompt(manager, persona_id),
-    ]
     if shelving:
         parts += [
             "",
@@ -1636,6 +1576,41 @@ def build_day_close_situation_text(
 # ---------------------------------------------------------------------------
 
 
+def validate_judgment_context(kind: str, context: Optional[Dict[str, Any]]) -> None:
+    """呼び出し側が渡すべき context が揃っているかの検査 (**配線の誤り**)。
+
+    :func:`run_judgment_point` は引数の組み立てで起きた**環境の障害** (DB が
+    読めない等) を「起動できなかった」という結果へ畳むが、契約違反はそこに
+    混ぜない — 畳むと発火経路の配線ミスが submitted=False として静かに流れ、
+    誰も気づかないまま判断が起きなくなる。だから検査はここに分けて、
+    **環境の状態を見るより前**に必ず raise させる (ペルソナ未ロード等で先に
+    return してしまうと、配線ミスが環境の問題に化けて隠れる)。
+
+    - ``on_event``: ``event_text`` が要る。無ければ「何のイベントか」の無い
+      判断になる
+    - ``post_session``: ``session_result`` が要る。無いまま組み立てると成果物
+      ゼロ・0 ラウンド・終了理由不明の**起きていないセッション**を前提に裁定が
+      走り、時間割の変更まで永続化される (発火側の
+      :func:`saiverse.day_plan` も result が None のときは撃たない —
+      「偽前提の状況テキストは作話を誘発する」)
+
+    Raises:
+        ValueError: 必須の context が欠けている。
+    """
+    ctx = context or {}
+    if kind == KIND_ON_EVENT:
+        if not str(ctx.get("event_text") or "").strip():
+            raise ValueError(
+                "on_event judgment requires context['event_text'] (non-empty)"
+            )
+    elif kind == KIND_POST_SESSION:
+        if ctx.get("session_result") is None:
+            raise ValueError(
+                "post_session judgment requires context['session_result'] "
+                "(judging a session that did not run fabricates its outcome)"
+            )
+
+
 def build_judgment_args(
     manager: Any, persona_id: str, kind: str, context: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -1759,11 +1734,8 @@ def build_judgment_args(
                 "text": interrupted["text"],
             }
     elif kind == KIND_ON_EVENT:
+        validate_judgment_context(kind, context)
         event_text = str(context.get("event_text") or "").strip()
-        if not event_text:
-            raise ValueError(
-                "on_event judgment requires context['event_text'] (non-empty)"
-            )
         is_alert = bool(context.get("is_alert"))
         situation_text = build_on_event_situation_text(manager, persona_id, context)
         response_schema = build_on_event_schema(manager, persona_id, is_alert)
@@ -1867,6 +1839,45 @@ def build_judgment_args(
     }
 
 
+#: LLM 開始前に離脱したときの結末 (run_judgment_point の結果 dict ``outcome``)。
+#: ``aborted`` = 席を確実に放棄した (呼び出し側は代替経路へ進んでよい)。
+#: ``indeterminate`` = 席を放棄できなかった — 他の claimant が走らせているか、
+#: 台帳が応答しないため回復 tick に再発火されうる。**呼び出し側は代替経路を
+#: 走らせてはいけない** (同じイベントが二度処理される)。
+OUTCOME_ABORTED = "aborted"
+OUTCOME_INDETERMINATE = "indeterminate"
+
+
+def _abandon_seat(ledger: Any, execution_id: Optional[str], reason: str) -> bool:
+    """LLM 開始前の離脱で、claim 済みの席を放棄する (prepared 限定 CAS)。
+
+    ``mark_failed`` は running からの遷移も許すため、同じ execution_id を共有
+    した別の claimant が既に走らせている台帳まで failed に壊しうる。放棄には
+    :meth:`ExecutionLedger.abandon_prepared` (status=prepared のときだけ failed)
+    を使う — これがこの用途のために用意されている条件付き遷移。
+
+    Returns:
+        True = 席は残っていない (放棄した / そもそも席が無い)。
+        False = 放棄できなかった (他の claimant の所有、または台帳が応答しない)。
+    """
+    if ledger is None or execution_id is None:
+        return True
+    abandon = getattr(ledger, "abandon_prepared", None)
+    try:
+        if callable(abandon):
+            return bool(abandon(execution_id, reason))
+        # prepared 限定 CAS を持たない台帳 (旧テストスタブ) は mark_failed へ
+        # degrade する。本番台帳は abandon_prepared を持つ。
+        ledger.mark_failed(execution_id, reason)
+        return True
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to abandon prepared seat (execution=%s reason=%s)",
+            execution_id, reason, exc_info=True,
+        )
+        return False
+
+
 def run_judgment_point(
     manager: Any,
     persona_id: str,
@@ -1917,36 +1928,58 @@ def run_judgment_point(
             f"unknown judgment kind: {kind!r} (expected one of {sorted(JUDGMENT_PLAYBOOK_MAP)})"
         )
 
-    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
-    if persona is None:
-        LOGGER.warning(
-            "[judgment] persona %s not loaded; cannot run %s", persona_id, kind,
-        )
-        return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "persona not loaded", "execution_id": execution_id}
-
-    building_id = getattr(persona, "current_building_id", None)
-    if not building_id:
-        LOGGER.warning(
-            "[judgment] persona %s has no current_building_id; cannot run %s",
-            persona_id, kind,
-        )
-        return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "no current building", "execution_id": execution_id}
-
-    pulse_controller = getattr(manager, "pulse_controller", None)
-    if pulse_controller is None:
-        LOGGER.warning(
-            "[judgment] manager has no pulse_controller; cannot run %s for %s",
-            kind, persona_id,
-        )
-        return {"kind": kind, "playbook": playbook_name, "submitted": False,
-                "reason": "no pulse_controller", "execution_id": execution_id}
+    # 呼び出し側の契約違反 (必須 context の欠落) は畳まずに上げる。**環境の状態を
+    # 見るより前**に検査する — ペルソナ未ロード等で先に return すると、配線ミスが
+    # 環境の問題に化けて隠れる (2026-07-30 Codex 四巡目)。
+    validate_judgment_context(kind, context)
 
     ledger = getattr(manager, "execution_ledger", None)
     tracked = ledger is not None and execution_id is not None
 
-    args = build_judgment_args(manager, persona_id, kind, context)
+    def _abort(reason: str) -> Dict[str, Any]:
+        """LLM 開始前の離脱: 席を放棄してから「起動できなかった」を返す。
+
+        席を放棄しないまま submitted=False を返すと、呼び出し側の代替経路
+        (on_event の direct dispatch) と、回復 tick による prepared の再発火が
+        **両方**走る。放棄できなかった場合は結末を indeterminate にして、
+        呼び出し側に代替経路を走らせない (二重処理の方が害が大きい)。
+        """
+        LOGGER.warning(
+            "[judgment] %s aborted before dispatch: %s (persona=%s execution=%s)",
+            kind, reason, persona_id, execution_id,
+        )
+        released = _abandon_seat(ledger if tracked else None, execution_id, reason)
+        return {
+            "kind": kind, "playbook": playbook_name, "submitted": False,
+            "reason": reason, "execution_id": execution_id,
+            "outcome": OUTCOME_ABORTED if released else OUTCOME_INDETERMINATE,
+        }
+
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    if persona is None:
+        return _abort("persona not loaded")
+
+    building_id = getattr(persona, "current_building_id", None)
+    if not building_id:
+        return _abort("no current building")
+
+    pulse_controller = getattr(manager, "pulse_controller", None)
+    if pulse_controller is None:
+        return _abort("no pulse_controller")
+
+    # 引数の組み立て (= 状況テキストと動的スキーマの DB 収集) は LLM 開始前の
+    # 工程。ここで落ちたら副作用はゼロなので、例外でなく「起動できなかった」
+    # として返す — 呼び出し側 (on_event の direct fallback / schedule の
+    # backoff) はその戻り値で分岐する (2026-07-30 Codex 三巡目)。
+    try:
+        args = build_judgment_args(manager, persona_id, kind, context)
+    except Exception as exc:
+        LOGGER.warning(
+            "[judgment] failed to build args for %s (persona=%s execution=%s)",
+            kind, persona_id, execution_id, exc_info=True,
+        )
+        return _abort(f"args build failed: {exc!r}")
+
     if execution_id is not None:
         # execution_id を judgment_context に同乗させ finalize へ届ける
         # (playbook JSON は不変 — judgment_context は既に args で渡っている)。
@@ -1986,10 +2019,13 @@ def run_judgment_point(
                 "(persona=%s execution=%s)", kind, persona_id, execution_id,
                 exc_info=True,
             )
-            return {"kind": kind, "playbook": playbook_name, "args": args,
-                    "submitted": False, "reason": "ledger transition failed",
-                    "errors": errors, "applied_events": applied_events,
-                    "execution_id": execution_id}
+            # ここも LLM 開始前。席が残ったままなら結末は indeterminate になり、
+            # 呼び出し側の代替経路は走らない (別の claimant が走らせている、
+            # あるいは台帳が応答しない状態なので)。
+            aborted = _abort("ledger transition failed")
+            aborted.update({"args": args, "errors": errors,
+                            "applied_events": applied_events})
+            return aborted
     try:
         pulse_controller.submit_meta_judgment(
             persona_id=persona_id,

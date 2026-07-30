@@ -59,6 +59,10 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
     "common_prompt", "persona_self", "core_memory", "building", "spell_list",
     "autonomy_modes", "life_purpose", "desk", "memopedia_index",
     "available_playbooks", "memory_weave", "visual_context",
+    # 2026-07-30: 判断プロンプトが毎回貼り直していた静的な一覧の移設先
+    # (docs/issues/judgment_static_lists_to_head.md)。用途で出し分けない —
+    # 判断点だけに出すと同じ model の head が二種類になる。
+    "facilities", "purpose_backlog",
 })
 
 

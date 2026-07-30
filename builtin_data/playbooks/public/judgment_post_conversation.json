@@ -3,7 +3,7 @@
   "display_name": "会話終了判断 (post_conversation)",
   "description": "自律行動 v2 の判断点: 会話終了。会話からの収穫 (タスク・欲求) と、中断中セッションの扱い、残り時間割の整えを決める。picked_tasks は根拠となる実発言の引用 (origin_quote) が必須 (無根拠タスクの構造的封じ)。詳細は docs/intent/persona_cognition/judgment_points.md §5。",
   "input_schema": [
-    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (現在時刻 / 残り時間割 / 中断中セッションの作業メモ / 既存タスク・欲求リスト)。会話本文は main line 文脈に既にある。", "required": false, "default": ""},
+    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (現在時刻 / 残り時間割 / 中断中セッションの作業メモ)。既存タスク・欲求の一覧は head に常駐するので含まれない。会話本文は main line 文脈に既にある。", "required": false, "default": ""},
     {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / track_refs / resume)。", "required": false, "default": "{}"},
     {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (実在 Track の enum 注入済み。中断中セッションが無ければ resume_session フィールドなし)。", "required": false, "default": null}
   ],

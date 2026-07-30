@@ -157,17 +157,68 @@ def test_collect_facility_ids_falls_back_to_all_when_untagged():
     assert jp.collect_facility_ids(manager) == ["library", "workshop", FACILITY_OWN_ROOM]
 
 
-def test_format_facilities_matches_enum_and_labels_roles():
+def test_head_facilities_section_matches_enum_and_labels_roles():
+    """head の「行ける場所」が enum (collect_facility_ids) と同じ候補集合を出す。
+
+    一覧は 2026-07-30 に判断プロンプトの tail から head へ移設した
+    (docs/issues/judgment_static_lists_to_head.md)。読む情報 (head) と
+    選べる選択肢 (enum) が同じ集合を見ることが移設の前提条件。
+    """
+    from sea.head_pipeline.sections.facilities import FacilitiesSection
+
+    section = FacilitiesSection()
     manager = _manager(TAGGED)
-    text = jp._format_facilities(manager)
+    ctx = SimpleNamespace(persona_id="air", manager=manager)
+    text = section.render(section.capture(ctx)).text
     assert "- archive: 図書館（図書館）" in text
     assert "- cafe: カフェ（広場）" in text
     assert "plain" not in text  # enum と同じ候補集合 (タグ無しは載らない)
     assert f"- {FACILITY_OWN_ROOM}: 自分の部屋" in text
+    # 一覧に出る id の集合が enum と一致する
+    listed = [
+        line[2:].split(":")[0] for line in text.splitlines() if line.startswith("- ")
+    ]
+    assert listed == jp.collect_facility_ids(manager)
 
     untagged = _manager([SimpleNamespace(building_id="b1", name="部屋")])
-    text2 = jp._format_facilities(untagged)
+    text2 = section.render(
+        section.capture(SimpleNamespace(persona_id="air", manager=untagged))
+    ).text
     assert "- b1: 部屋" in text2
+
+
+def test_head_facilities_section_notifies_changes():
+    """head は凍結されるので、場所の増減・改名は差分通知で届く必要がある。
+
+    「head に静的な全体像・通知に差分」の対 — 通知が無ければ、head の一覧は
+    無くなった場所を載せ続け、新しい場所を隠し続ける。
+    """
+    from sea.head_pipeline.sections.facilities import FacilitiesSection
+
+    section = FacilitiesSection()
+
+    def snap(buildings):
+        return section.capture(
+            SimpleNamespace(persona_id="air", manager=_manager(buildings))
+        )
+
+    before = snap([_b("cafe", ["plaza"])])
+    assert section.diff_to_notifications(before, before) == []
+
+    added = snap([_b("cafe", ["plaza"]), _b("archive", ["library"])])
+    labels = section.diff_to_notifications(before, added)
+    assert len(labels) == 1 and labels[0].kind == "facilities_changed"
+    assert "増えた場所: archive" in labels[0].label
+
+    removed = section.diff_to_notifications(added, before)
+    assert "無くなった場所: archive" in removed[0].label
+
+    renamed = snap([SimpleNamespace(
+        building_id="cafe", name="喫茶室", facility_roles=["plaza"],
+    )])
+    assert "名前が変わった場所: cafe" in section.diff_to_notifications(
+        before, renamed,
+    )[0].label
 
 
 # ---------------------------------------------------------------------------

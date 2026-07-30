@@ -1,11 +1,11 @@
 {
   "name": "judgment_day_open",
   "display_name": "起床判断 (day_open)",
-  "description": "自律行動 v2 の判断点: 起床。昨夜の自分からのメモ・昨日のふりかえり・バックログ・欲求リストを見て、今日の時間割を編成する (+ 欲求→関心の昇格)。構造化出力 + judgment_finalize による検証・適用。詳細は docs/intent/persona_cognition/judgment_points.md §4。",
+  "description": "自律行動 v2 の判断点: 起床。昨夜の自分からのメモと、head に常駐する一覧 (進行中のことと、やりたいこと / 行ける場所) を見て、今日の時間割を編成する (+ 欲求→関心の昇格)。構造化出力 + judgment_finalize による検証・適用。詳細は docs/intent/persona_cognition/judgment_points.md §4。",
   "input_schema": [
     {
       "name": "situation_text",
-      "description": "judgment_points が組み立てた状況テキスト (昨日の自分からのメモ / 昨日のふりかえり / バックログ / 欲求 / 予算 / 施設一覧)。",
+      "description": "judgment_points が組み立てた状況テキスト (昨日の自分からのメモ / 今日の活動時間と現在時刻 / 予算 / 予定されたイベント)。静的な一覧 (バックログ・欲求・施設) は head に常駐するので含まれない。",
       "required": false,
       "default": ""
     },

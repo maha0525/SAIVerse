@@ -9,11 +9,16 @@ life_concept_map.md §15 の自己像四層のうち **① 常在の自己像** 
 - 共通駆動文 (autonomous_desire.md §3。全ペルソナ共通の定数)
 - 生きる目的 (AI.LIFE_PURPOSE)。**未設定でも省略しない** — 「まだ言葉に
   なっていない」という中立文を出す (欠落は自己像の穴になる)
-- 第一階層の短いメニュー (purpose_tree.list_first_tier の title のみ・
-  最大 10 行)
 - 樹皮の要旨 (§4.1 の保護対象 6 件を宣言文に圧縮。システムプロンプト遵守が
   最上位であることを含む)
 - ==語句== 記法の教示 (§9.1 層1 観測点。P3 marker_parser が実装済みの記法)
+
+第一階層の短いメニュー (旧: purpose_tree.list_first_tier の title のみ) は
+**2026-07-30 に PurposeBacklogSection (order 570、この直後) へ統合した**。
+判断プロンプトから移設した ref つきの一覧と同じ Track を二度並べることになり、
+しかもこちらのメニューは差分通知を持たなかった (= 通知される側の一覧と
+食い違う head ができる) ため。Track が何であるかの説明文も一覧と同じ場所で
+読めるよう、あちらへ移した。
 
 文面の方針 (まはー 2026-07-07):
 - **機構の固有名詞 (Track / タスク / mark / 保護対象) は隠さない**。ペルソナは
@@ -40,7 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import List, Optional
 
 from sea.head_pipeline.types import (
@@ -50,9 +55,6 @@ from sea.head_pipeline.types import (
 )
 
 LOGGER = logging.getLogger(__name__)
-
-#: 第一階層メニューの最大行数 (§15 ①「head に収まるサイズであること」)
-FIRST_TIER_MAX_LINES = 10
 
 #: 生きる目的が未設定のときの中立文 (省略しない — §15 ①)
 PURPOSE_UNSET_TEXT = (
@@ -87,7 +89,6 @@ MARK_NOTATION_TEXT = """\
 class LifePurposeSnapshot:
     drive_text: str                 # ① 共通駆動文 (定数)
     purpose_text: str               # ② 生きる目的の整形済みテキスト ("" = 未設定)
-    first_tier_titles: List[str] = field(default_factory=list)  # 第一階層 title 列
 
 
 class LifePurposeSection:
@@ -115,26 +116,9 @@ class LifePurposeSection:
                     ctx.persona_id, exc_info=True,
                 )
 
-        first_tier_titles: List[str] = []
-        if session_factory is not None:
-            try:
-                from saiverse.purpose_tree import list_first_tier
-
-                for node in list_first_tier(manager, ctx.persona_id):
-                    title = str(node.get("title") or "").strip()
-                    if title:
-                        first_tier_titles.append(title)
-                    if len(first_tier_titles) >= FIRST_TIER_MAX_LINES:
-                        break
-            except Exception:
-                LOGGER.warning(
-                    "life_purpose: failed to read first tier persona=%s",
-                    ctx.persona_id, exc_info=True,
-                )
         return LifePurposeSnapshot(
             drive_text=DESIRE_DRIVE_TEXT,
             purpose_text=purpose_text,
-            first_tier_titles=first_tier_titles,
         )
 
     def render(self, snapshot: LifePurposeSnapshot) -> Optional[RenderedSection]:
@@ -146,21 +130,6 @@ class LifePurposeSection:
         if snapshot.drive_text:
             parts.append(snapshot.drive_text)
         parts.append(snapshot.purpose_text or PURPOSE_UNSET_TEXT)
-        menu_lines = [
-            "## いま開いている Track",
-            "あなたの暮らしは Track という単位で分かれています。"
-            "人との関係や、続けている取り組みの、そのひとつひとつです。"
-            "いま開いているのは：",
-        ]
-        titles = list(snapshot.first_tier_titles or [])[:FIRST_TIER_MAX_LINES]
-        if titles:
-            menu_lines += [f"- {t}" for t in titles]
-        else:
-            menu_lines.append("（いまは、名前のついた Track がありません）")
-        menu_lines.append(
-            "Track とその中のタスクは、あなた自身がスペルで開き、進め、閉じられます。"
-        )
-        parts.append("\n".join(menu_lines))
         parts.append(BARK_TEXT)
         parts.append(MARK_NOTATION_TEXT)
         return RenderedSection(text="\n\n".join(parts))
@@ -194,5 +163,10 @@ class LifePurposeSection:
 
     def deserialize_snapshot(self, data: str) -> LifePurposeSnapshot:
         payload = json.loads(data)
-        # 旧 snapshot (first_tier_titles 無し) との後方互換は default が吸収する。
-        return LifePurposeSnapshot(**payload)
+        # 保存済み行に居る旧フィールド (first_tier_titles など) は黙って捨てる。
+        # TypeError にすると store の load が ERROR + traceback を吐くだけで、
+        # 結局 recapture に落ちる (2026-07-30 の統合で実際に旧行が残る)。
+        return LifePurposeSnapshot(
+            drive_text=payload.get("drive_text") or "",
+            purpose_text=payload.get("purpose_text") or "",
+        )

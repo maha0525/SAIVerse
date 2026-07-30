@@ -119,13 +119,24 @@ def test_context_requirements_has_no_head_section_flags():
 
 
 def test_persona_head_sections_are_fixed():
-    """head に必ず並ぶ章が、以前 run_playbook のメインラインが受け取っていた
-    12 章と一致すること (人格・コア記憶・生きる目的が落ちていないこと)。"""
-    assert PERSONA_HEAD_SECTIONS == frozenset({
+    """head に必ず並ぶ章の固定集合。
+
+    元は「以前 run_playbook のメインラインが受け取っていた 12 章」の写し
+    (人格・コア記憶・生きる目的が落ちていないこと)。章を増やすときはここも
+    同じコミットで更新する — 用途ごとに出し分けないこと自体が要件なので、
+    集合が一つであることを固定するのがこのテストの主眼。
+    """
+    original_twelve = frozenset({
         "common_prompt", "persona_self", "core_memory", "building", "spell_list",
         "autonomy_modes", "life_purpose", "desk", "memopedia_index",
         "available_playbooks", "memory_weave", "visual_context",
     })
+    assert original_twelve <= PERSONA_HEAD_SECTIONS, "既存の章が落ちている"
+    assert PERSONA_HEAD_SECTIONS == original_twelve | {
+        # 2026-07-30: 判断プロンプトが毎回貼り直していた静的な一覧の移設先
+        # (docs/issues/judgment_static_lists_to_head.md)
+        "facilities", "purpose_backlog",
+    }
 
 
 # ---------------------------------------------------------------------------

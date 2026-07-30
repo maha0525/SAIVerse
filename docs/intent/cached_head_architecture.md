@@ -276,6 +276,8 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 | (visual_context) | `VisualContextSection` | `{building_entered, appearance_changed}` |
 | (memory_weave) | `MemoryWeaveSection` | (Metabolism のみ) |
 
+**判断プロンプトからの移設 (2026-07-30)**: 判断点の状況テキスト (tail) が毎回貼り直していた静的な一覧も Section 化した — `FacilitiesSection` (## 行ける場所) と `PurposeBacklogSection` (## 進行中のことと、やりたいこと)。どちらも `refresh_on_events` は空 (Metabolism のみ) で、凍結中の増減は `diff_to_notifications` が末尾通知で届ける。**一覧を head に置くことと変動通知は必ずセット** — 通知が無ければ head は「無くなったものを載せ続け、増えたものを隠し続ける」台帳になる。DeskSection とは方針が逆で、**ペルソナ本人が増やしたものも通知する** (head が凍結している以上、本人が知っていることと head の記述が合っているかは別問題)。`PurposeBacklogSection` は旧 `LifePurposeSection` の「第一階層の短いメニュー」を吸収した (同じ Track を head 内で二度並べない。しかも旧メニューは差分通知を持たず、放置すると通知される一覧とされない一覧が同じ head で食い違う)。詳細: docs/issues/judgment_static_lists_to_head.md
+
 Phase 4' で問題になった「spell list が building 移動で変わる」は本機構では `SpellListSection.refresh_on_events` に `building_entered` を含めない限り起きない。building 単位 visibility は実行時 gate (MCP tool wrapper) で enforce、spell 一覧自体は Metabolism まで凍結。
 
 ### 5.4. METABOLISM_ANCHORS / metabolism_anchor_message_id

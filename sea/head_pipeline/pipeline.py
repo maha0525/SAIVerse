@@ -100,6 +100,9 @@ class HeadPipeline:
         sections = self._registry.all_sections()
         sections_dict: dict[str, object] = {}
         capture_failures: dict[str, str] = {}
+        # capture に失敗して既存値を再利用した Section 名。B (last_notified) の
+        # リセット対象から外すために覚えておく (下)。
+        reused_stale: set[str] = set()
         for section in sections:
             try:
                 sections_dict[section.name] = section.capture(ctx)
@@ -115,6 +118,7 @@ class HeadPipeline:
                 existing = self._existing_section_snapshot(ctx, section.name)
                 if existing is not None:
                     sections_dict[section.name] = existing
+                    reused_stale.add(section.name)
                 else:
                     capture_failures[section.name] = f"capture failed: {exc!r}"
 
@@ -141,9 +145,19 @@ class HeadPipeline:
             prev = self._states.get((ctx.persona_id, ctx.model_key))
             base = prev.snapshot.snapshot_version if prev is not None else stored_base
             snapshot.snapshot_version = base + 1
+            # B = A reset。ただし capture 失敗で**古い A を再利用した** Section は
+            # 除く — その Section の B は前回の Metabolism 以降の diff 通知で
+            # live state まで前進している。ここで古い A へ揃えると B が巻き戻り、
+            # 復旧後に「もう届けた追加・削除」をもう一度通知してしまう
+            # (2026-07-30 Codex 指摘 high1)。A が stale なら B も据え置く。
+            notified = dict(sections_dict)
+            if reused_stale and prev is not None:
+                for name in reused_stale:
+                    if name in prev.last_notified_sections:
+                        notified[name] = prev.last_notified_sections[name]
             state = _LineState(
                 snapshot=snapshot,
-                last_notified_sections=dict(sections_dict),  # B = A reset
+                last_notified_sections=notified,
                 dirty_sections=set(),
                 last_backstop_check=time.time(),
             )
@@ -153,7 +167,8 @@ class HeadPipeline:
             "head_pipeline: captured all sections persona=%s model=%s version=%d sections=%d",
             ctx.persona_id, ctx.model_key, snapshot.snapshot_version, len(sections_dict),
         )
-        self._persist_snapshot(snapshot, dict(sections_dict))
+        # 永続化する B は in-memory と同じもの (stale 再利用分は据え置いた版)。
+        self._persist_snapshot(snapshot, dict(notified))
         return snapshot
 
     def recapture_missing(

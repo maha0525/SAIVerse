@@ -50,6 +50,7 @@ from saiverse.judgment_points import (
     KIND_POST_CONVERSATION,
     KIND_POST_SESSION,
     run_judgment_point,
+    validate_judgment_context,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -137,6 +138,10 @@ ROUTE_DIRECT_IN_CONVERSATION = "direct:in_conversation"
 ROUTE_DIRECT_JUDGMENT_UNAVAILABLE = "direct:judgment_unavailable"
 ROUTE_JUDGED_ENGAGE_NOW = "judged:engage_now"
 ROUTE_JUDGED_UNKNOWN = "judged:unknown_reaction"
+#: 判断は起動できなかったが、実行台帳の席を放棄できなかった (= 回復 tick に
+#: 再発火されうる / 別の claimant が走らせている)。**代替経路を走らせない** —
+#: 二重応対の方が害が大きい (下の unknown_reaction と同じ判断)。
+ROUTE_NONE_INDETERMINATE = "none:judgment_indeterminate"
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +352,12 @@ def fire_judgment_point(
     playbook_name = JUDGMENT_PLAYBOOK_MAP.get(kind)
     if playbook_name is None:
         raise ValueError(f"unknown judgment kind: {kind!r}")
+
+    # 呼び出し側の契約検査は**席を取る前**に済ませる。claim の後で ValueError を
+    # 出すと、その席は誰にも放棄されずに prepared のまま残り、回復 tick が
+    # 同じ不正な payload で再発火しては同じ例外を繰り返す (2026-07-30 Codex
+    # 五巡目)。配線ミスは台帳に触れる前に落とす。
+    validate_judgment_context(kind, context)
 
     if not _is_active(manager, persona_id):
         LOGGER.debug(
@@ -952,6 +963,18 @@ def handle_external_event(
         {"event_text": event_text, "is_alert": is_alert},
     )
     if not result.get("submitted"):
+        from saiverse.judgment_points import OUTCOME_INDETERMINATE
+
+        if result.get("outcome") == OUTCOME_INDETERMINATE:
+            # 席を放棄できていない = 判断がこの後 (別 claimant / 回復 tick で)
+            # 走りうる。ここで応対すると同じイベントを二度処理する。
+            LOGGER.warning(
+                "[autonomy-wiring] on_event judgment left an unresolved "
+                "execution (%s); not dispatching to avoid double handling "
+                "(persona=%s execution=%s)",
+                result.get("reason"), persona_id, result.get("execution_id"),
+            )
+            return ROUTE_NONE_INDETERMINATE
         LOGGER.info(
             "[autonomy-wiring] on_event judgment unavailable (%s); "
             "falling back to direct dispatch (persona=%s)",
