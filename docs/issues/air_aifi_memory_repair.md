@@ -48,11 +48,11 @@ sophie 等の稼働ペルソナも同じドライランで点検できる (読�
 ## 実施時の注意 (エリスで踏んだ罠)
 
 1. **記憶整理の「通信に失敗しました」は誤報** — 処理は裏で完走する。完走はログ (`Chronicle generation complete`) で確認 ([issue](organize_memory_ui_timeout.md))。
-2. **あらすじ一覧は 500 件超で最新側を表示しない** — 結果確認はレベル絞り込みか API で ([issue](arasuji_list_limit_hides_newest.md))。
+2. **あらすじ一覧が 500 件超で最新側を表示しなかった** — 修正済み (`a537441`、実機検証待ち)。もし最新が見えない症状が残っていたら、結果確認はレベル絞り込みか API で ([issue](arasuji_modal_500_limit_truncation.md))。
 3. **豆粒を「残す」と判定する前に双子検査** — 重複コピーの残骸かもしれない ([記録](duplicate_message_ingestion_record.md))。
 4. 本番の記憶への削除・再編纂は**操作ごとにまはーの明示承認**を得る。
 
 ## 関連
 
 - [intent: あらすじのレベル制](../intent/arasuji_levels.md) §10-§12
-- [organize_memory_ui_timeout.md](organize_memory_ui_timeout.md) / [arasuji_list_limit_hides_newest.md](arasuji_list_limit_hides_newest.md) / [duplicate_message_ingestion_record.md](duplicate_message_ingestion_record.md)
+- [organize_memory_ui_timeout.md](organize_memory_ui_timeout.md) / [arasuji_modal_500_limit_truncation.md](arasuji_modal_500_limit_truncation.md) / [duplicate_message_ingestion_record.md](duplicate_message_ingestion_record.md)

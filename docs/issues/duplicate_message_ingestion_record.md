@@ -40,5 +40,5 @@ source_count / message_count の数字は作成時のまま残る (表示上の�
 
 ## 関連
 
-- `docs/issues/arasuji_list_limit_hides_newest.md` (表示層の罠と同夜に発見)
+- `docs/issues/arasuji_modal_500_limit_truncation.md` (表示層の罠と同夜に発見) / `docs/issues/chronicle_coverage_range_hides_gaps.md` (本件の当初の誤診断はこちらの表示の限界に帰していた)
 - `scripts/arasuji/persona_chronicle_cleanup.py` の双子検査 (dry-run 出力に含まれる)
