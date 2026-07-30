@@ -192,11 +192,14 @@ def get_context_length(model: str) -> int:
 #: - target (目標水位): Metabolism で軽くする到達点。
 #: - high (高水位): 提示コンテキストがこれを超えたら Metabolism 発火。
 #:
-#: 差分の意味: high - target = 一回で削る量 (発火頻度から逆算 ≒ 20 往復)、
-#: target - low = 退場候補帯に残してよいバッファ (U 未満で畳めない小 episode 等)。
+#: 差分の意味: high - target = 一回で削る量、target - low = 退場候補帯に残して
+#: よいバッファ (U 未満で畳めない小 episode 等)。
+#:
+#: 2026-07-30 に high 12万 → 20万・target 6万 → 10万 (まはー裁定)。12万では実運用の
+#: 会話が早々に頭打ちになっていた。一回で削る量は 6万 → 10万字。
 BUILTIN_METABOLISM_LOW_CHARS = 40_000
-BUILTIN_METABOLISM_TARGET_CHARS = 60_000
-BUILTIN_METABOLISM_HIGH_CHARS = 120_000
+BUILTIN_METABOLISM_TARGET_CHARS = 100_000
+BUILTIN_METABOLISM_HIGH_CHARS = 200_000
 
 
 def _metabolism_chars(model: str, key: str, builtin_default: int) -> int | None:
