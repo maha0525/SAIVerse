@@ -23,7 +23,7 @@ v0.34 の動作観察で、メタ判断 Pulse の `judge` ノードが `fetch_tr
 
 #### 2. Phase 3 段階 4-D 完了
 
-「`context_profile` は旧仕様」とまはー指摘 → 段階 4-D の完遂に移行。実装範囲は [`docs/issues/phase3_4d_dead_code_removal.md`](../../issues/phase3_4d_dead_code_removal.md) のログ参照。要点:
+「`context_profile` は旧仕様」とまはー指摘 → 段階 4-D の完遂に移行。実装範囲は [`docs/issues/archive/phase3_4d_dead_code_removal.md`](../../issues/archive/phase3_4d_dead_code_removal.md) のログ参照。要点:
 
 - **削除**: `LLMNodeDef.context_profile` / `LLMNodeDef.model_type` / `CONTEXT_PROFILES` / `ContextRequirements.include_internal` / `exclude_pulse_id` 全層 (4 関数) / `pulse:{uuid}` タグ併行記録 / `_warn_once_legacy_field`。
 - **集約**: `runtime_llm.py:lg_llm_node` の base_msgs は `state["_messages"]` のみを source of truth に。`runtime.py:_select_llm_client` は `_force_lightweight_model` フラグのみで判断。
@@ -41,7 +41,7 @@ v0.34 の動作観察で、メタ判断 Pulse の `judge` ノードが `fetch_tr
 #### 関連リソース
 
 - [`handoff_2026-05-09.md`](handoff_2026-05-09.md) — 元起点の handoff
-- [`docs/issues/phase3_4d_dead_code_removal.md`](../../issues/phase3_4d_dead_code_removal.md) — 4-D 削除内訳のログ
+- [`docs/issues/archive/phase3_4d_dead_code_removal.md`](../../issues/archive/phase3_4d_dead_code_removal.md) — 4-D 削除内訳のログ
 - v0.34 (本ファイル) — wait_response timeout / Track 最終メッセージ時間可視化
 
 ---

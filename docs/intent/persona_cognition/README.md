@@ -156,7 +156,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 >
 > 2026-05-09 (v0.32): v0.31 で「pause_summary 書き込み側実装」とした項目について、書き込み側設計の本質拡張に伴い **`pause_summary` を完全廃止** し **Track Chronicle** (Track 内必要情報の維持機構) に置き換えることが確定。Intent doc は [`../track_chronicle.md`](../track_chronicle.md)、整理経緯は `revisions.md` v0.32 (2026-05-09) 参照。
 >
-> 2026-05-09 (v0.35): **段階 4-D 完了**。`context_profile` / `model_type` / `CONTEXT_PROFILES` / `include_internal` / `exclude_pulse_id` / `pulse:{uuid}` タグ併行記録 を全層から削除し、最新仕様 (line ベース + state["_messages"] 単一経路) に統合。tool ノードが結果を `state["_messages"]` に append しないバグ (= meta_judgment の judge ノードが track_list 出力を読めない) を併せて修正。`model_type=lightweight` ノード単位混在の Playbook 10 件 (source_*, deep_research, memopedia_write, research_task, memory_research) は archive/ 退避 (再構築方針)。詳細は `revisions.md` v0.35 / `docs/issues/phase3_4d_dead_code_removal.md`。
+> 2026-05-09 (v0.35): **段階 4-D 完了**。`context_profile` / `model_type` / `CONTEXT_PROFILES` / `include_internal` / `exclude_pulse_id` / `pulse:{uuid}` タグ併行記録 を全層から削除し、最新仕様 (line ベース + state["_messages"] 単一経路) に統合。tool ノードが結果を `state["_messages"]` に append しないバグ (= meta_judgment の judge ノードが track_list 出力を読めない) を併せて修正。`model_type=lightweight` ノード単位混在の Playbook 10 件 (source_*, deep_research, memopedia_write, research_task, memory_research) は archive/ 退避 (再構築方針)。詳細は `revisions.md` v0.35 / `docs/issues/archive/phase3_4d_dead_code_removal.md`。
 
 | 項目 | 状態 | 実装場所 / 備考 | 旧称 |
 |------|------|----------------|------|
@@ -192,7 +192,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | Spell 結果の media を親 LLM ラウンドに attachment 転送 | ✅ | spell 戻り値を `Tuple[str, Optional[Dict]]` に拡張 (既存 str 戻り値は互換)。spell loop が全 spell の `metadata.media` を集約し次の LLM ラウンドの user message に lift。`run_playbook` が `parent_state["metadata"].media` を転送。`generate_image_playbook.json` の report に Markdown リンクリマインド追記 (v0.26, 2026-05-01) | Phase 3 新規 |
 | 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` ノード単位混在の Playbook 10 件は archive/ 退避 (v0.35, 2026-05-09) | C-2 残件 |
 | end-to-end 動作検証 (Spell loop / `/run_playbook` 1 段 / 入れ子) | ✅ | 運用で問題出ていないため完了とみなす (2026-05-10) | Phase 3 新規 |
-| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | ✅ | 段階 4-D 完了 (v0.35, 2026-05-09)。詳細は `docs/issues/phase3_4d_dead_code_removal.md` | C-2 残件 |
+| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | ✅ | 段階 4-D 完了 (v0.35, 2026-05-09)。詳細は `docs/issues/archive/phase3_4d_dead_code_removal.md` | C-2 残件 |
 | **メタ判断 Pulse の tool 結果到達バグ修正** (`lg_tool_node` で `state["_messages"]` への append 漏れ) | ✅ | `sea/runtime_engine.py:lg_tool_node` の tool 実行成功 / 失敗の両ブロックに append 経路追加。これで `meta_judgment.json` の judge ノードが `track_list` 出力 (`last_message_relative` 等) を実際に読める (v0.35, 2026-05-09) | Phase 3 新規 |
 
 **詳細**: `phases/phase_3_lines_playbooks.md`
@@ -310,7 +310,7 @@ Stelis 統合 / モニタリングライン / Note 同期 / 創発 Track。本�
 - [handoff_2026-05-08.md](handoff_2026-05-08.md) — Phase 3 A 残件 (`meta_user` 系削除 + スケジュール `pre_spells` 適用)
 - [handoff_2026-05-01.md](handoff_2026-05-01.md) — Phase 3 全体ロードマップ handoff
 - [handoff_phase3_impl.md](handoff_phase3_impl.md) — 段階 4-A〜4-D + Spell コア実装時の handoff (4-D も 2026-05-09 完了)
-- `docs/issues/phase3_4d_dead_code_removal.md` — 段階 4-D 完了ログ
+- `docs/issues/archive/phase3_4d_dead_code_removal.md` — 段階 4-D 完了ログ
 - [handoff_2026-04-30.md](handoff_2026-04-30.md) — Phase 2 / 2.5 / 2.6 完了時 handoff
 - [pulse_dispatch.md](pulse_dispatch.md) — Pulse 起動経路ディスパッチ Intent (v0.3 実装一巡完了, 2026-05-10): 直接経路 / 熟慮経路 / メタ判断並列レーンの 3 構造、`on_track_activated` hook 導入、PulseController 改修、alert 発生経路網羅。段階 1〜5 実装完了 (ケース 4 実機検証済 / ケース 5・6 は自律稼働観察中)、段階 6 (alert 経路運用化 β/γ/δ/ε) は Phase 5 範疇
 - [meta_judgment_structured.md](meta_judgment_structured.md) — メタ判断 v2 (構造化出力ベース) Intent (v0.3, 2026-05-10 実機検証 1 回目 + 関連バグ 2 件修正済、`02_mechanics.md` §「メタレイヤーの実行サイクル」の置き換え予定)

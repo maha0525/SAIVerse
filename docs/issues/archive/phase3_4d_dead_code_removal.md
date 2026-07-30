@@ -3,7 +3,7 @@
 **ステータス**: ✅ 完了 (2026-05-09)
 **優先度**: medium
 **作成日**: 2026-05-08
-**関連**: [docs/intent/persona_cognition/handoff_phase3_impl.md](../intent/persona_cognition/handoff_phase3_impl.md) §段階 4-D, [docs/intent/persona_cognition/line_tag_responsibility.md](../intent/persona_cognition/line_tag_responsibility.md)
+**関連**: [docs/intent/persona_cognition/handoff_phase3_impl.md](../../intent/persona_cognition/handoff_phase3_impl.md) §段階 4-D, [docs/intent/persona_cognition/line_tag_responsibility.md](../../intent/persona_cognition/line_tag_responsibility.md)
 
 ## 背景
 
@@ -39,10 +39,10 @@ handoff_phase3_impl.md §段階 4-D に従う:
 
 ## 関連リソース
 
-- [docs/intent/persona_cognition/handoff_phase3_impl.md](../intent/persona_cognition/handoff_phase3_impl.md) §段階 4-D — 元計画
-- [docs/intent/persona_cognition/line_tag_responsibility.md](../intent/persona_cognition/line_tag_responsibility.md) — 設計の核
-- [docs/intent/persona_cognition/revisions.md](../intent/persona_cognition/revisions.md) v0.21-v0.23 — 4-A〜4-C 実装履歴
-- 旧 handoff [docs/intent/persona_cognition/handoff_2026-05-01.md](../intent/persona_cognition/handoff_2026-05-01.md) — Phase 3 全体ロードマップ
+- [docs/intent/persona_cognition/handoff_phase3_impl.md](../../intent/persona_cognition/handoff_phase3_impl.md) §段階 4-D — 元計画
+- [docs/intent/persona_cognition/line_tag_responsibility.md](../../intent/persona_cognition/line_tag_responsibility.md) — 設計の核
+- [docs/intent/persona_cognition/revisions.md](../../intent/persona_cognition/revisions.md) v0.21-v0.23 — 4-A〜4-C 実装履歴
+- 旧 handoff [docs/intent/persona_cognition/handoff_2026-05-01.md](../../intent/persona_cognition/handoff_2026-05-01.md) — Phase 3 全体ロードマップ
 
 ## ログ
 

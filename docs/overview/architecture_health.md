@@ -217,8 +217,9 @@ read するか」がコードから追えない、という特性がある。Con
 
 landscape §9 の残り 7 件（ConversationManager / BuildingToolLink / working_memory /
 note_extractor / task / Emotion / Blueprint）+ `docs/issues/` の dead code 系
-（`phase3_4d_dead_code_removal` / `quarantine_path_dead_code_removal`）。
+（`quarantine_path_dead_code_removal`）。
 ※ `action_handler` と `legacy_action_handler_cleanup` は 2026-07-23 に撤去完了（→ `docs/issues/archive/`）。
+※ `phase3_4d_dead_code_removal` は 2026-05-09 に完了済みだったのを弾倉に載せたままだった（2026-07-28 に archive へ移動）。
 すべて把握済みで新規発見なし。**谷間タスクの弾倉**として機能している。掃除の際は
 `feedback_no_dead_code_via_flags`（env flag で残さない・消すなら消す）に従う。
 
