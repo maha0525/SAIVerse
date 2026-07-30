@@ -1954,6 +1954,10 @@ class SessionLifecycle:
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
             return "skip"
+        # 水位ゲートは resolve より**前** — 水位が定義できない model では
+        # 読み戻しの適用可否を判定できないので、resolve の副作用 (§14-2 前進の
+        # 永続化) も起こさず引き返す (Codex 指摘 2026-07-30: 切り出しで順序が
+        # 逆転し、no-op のはずの経路が anchor を書いていた)。
         watermarks = self.get_metabolism_watermarks(persona, model_key)
         if watermarks is None:
             return "skip"
@@ -1965,13 +1969,160 @@ class SessionLifecycle:
         )
         if not anchor_id:
             return "skip"  # ブートストラップ前 — 提示ウィンドウが未定義
-        window = self.get_presented_window(persona, model_key, anchor_id)
-        current_chars = message_chars(window.presented)
-        if current_chars >= watermarks.target:
-            return "skip"
         persona_id = getattr(persona, "persona_id", None)
         if not persona_id:
             return "skip"
+
+        plan = self._plan_window_refill(persona, model_key, anchor_id, watermarks)
+        if plan is None:
+            return "skip"
+
+        # 自行がまだ無い model (最前線 / 借用から始まる初回) は書き込み先の
+        # 行を先に立てる (§14-3 と同じ)。温度は「確実に冷えている」で立て、
+        # 温度の主張は下の _write_refill に一本化する。
+        if resolution in ("frontier", "other"):
+            entry = self.load_anchor_entry(persona_id, model_key)
+            if not entry or not entry.get("anchor_id"):
+                self.upsert_anchor_entry(persona_id, model_key, {
+                    "anchor_id": anchor_id,
+                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                })
+
+        if not self._write_refill(
+            persona_id, model_key, anchor_id, plan["new_anchor_id"], plan["folds"],
+        ):
+            return "skip"
+
+        # head の再 capture (退場の step 4 と同じ節目扱い)。head のあらすじ枠の
+        # 除外名簿は capture 済み snapshot に凍っているため、ここで再 capture
+        # しないと「生に開いた範囲のあらすじが head に残ったまま」の二重提示が
+        # 本番でも起こる (Codex 指摘 2026-07-30 — head は節目キャッシュ)。
+        # 失敗は 1 回だけ即時再試行し、それでも駄目なら明示 WARNING で進む —
+        # 帳簿 (窓) は正しく、head の一時的な重複表示のために成功するはずの
+        # 応答を潰さない (§14-3 fail-open と同じ裁定。残余は intent §15-4)。
+        head_refreshed = False
+        for _attempt in range(2):
+            before_weave = self._head_weave_snapshot(persona_id, model_key)
+            dispatched = False
+            try:
+                from saiverse.dynamic_state import DynamicStateManager
+                dispatched = DynamicStateManager.on_metabolism(
+                    persona, self.manager, model_key=model_key,
+                )
+            except Exception:
+                LOGGER.exception("[dynamic_state] on_metabolism failed after refill")
+            if not dispatched:
+                continue
+            # dispatch 成功でも weave が作り直された保証は無い — capture_all は
+            # section の capture 例外で**既存オブジェクトを使い回す**
+            # (stale-but-real)。使い回しなら identity が変わらないので、旧
+            # 除外名簿の weave が残ったこと (= 二重提示の継続) を検出できる
+            # (Codex 指摘 2026-07-30)。weave が元々無い環境 (head 未初期化 /
+            # weave 無効) は残りようが無いので成功扱い。
+            after_weave = self._head_weave_snapshot(persona_id, model_key)
+            if before_weave is None or after_weave is not before_weave:
+                head_refreshed = True
+                break
+        if not head_refreshed:
+            LOGGER.warning(
+                "[metabolism] head re-capture failed after refill (persona=%s "
+                "model=%s); the head chronicle frame may keep showing entries "
+                "for reopened ranges until the next capture",
+                persona_id, model_key,
+            )
+
+        LOGGER.info(
+            "[metabolism] window refill (persona=%s model=%s): %d chars -> "
+            "%d chars (verified) toward target=%d (reopened %d in-window "
+            "range(s), rewound %d message(s) across %d range(s), resolution=%s)",
+            persona_id, model_key, plan["current_chars"], plan["final_chars"],
+            plan["target"], plan["reopened"], plan["rewound_messages"],
+            plan["rewound_folds"], resolution,
+        )
+        return "ok"
+
+    def preview_refilled_history(
+        self, persona, model_key: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """§15 読み戻し後の提示を**読みだけ**で組む (context preview 用)。
+
+        実際の読み戻しは次の user Pulse の応答前に走るため、プレビューが素の
+        窓を見せると「話しかけた時に実際に見える窓」より薄い嘘になる。§14-2
+        の preview (persist_advance=False) と同じ型 — 内容は本番の読み戻しと
+        同じ計算 (最終検算まで)、行は一切触らない (§14-6-5)。
+
+        Returns:
+            読み戻しが適用されない状況 (不足なし・開ける区間なし等) は None —
+            呼び出し側は従来どおり素の窓を組む。適用されるなら::
+
+                {
+                    "presented": 読み戻し後の提示メッセージ列,
+                    "new_anchor_id": 引き戻し後の窓の始点,
+                    "fold_entry_ids": 読み戻し後の圧縮区間が持つ全あらすじ id
+                        (head のあらすじ枠の除外名簿 — プレビュー側が weave を
+                         この名簿で組み直すのに使う),
+                }
+        """
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return None
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
+        if not model_key:
+            return None
+        try:
+            watermarks = self.get_metabolism_watermarks(persona, model_key)
+            if watermarks is None:
+                return None
+            anchor_id, _resolution = self.resolve_metabolism_anchor(
+                persona, model_key=model_key, persist_advance=False,
+            )
+            if not anchor_id:
+                return None
+            plan = self._plan_window_refill(
+                persona, model_key, anchor_id, watermarks,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[metabolism] refill preview failed; falling back to the "
+                "plain window (persona=%s)",
+                getattr(persona, "persona_id", "?"), exc_info=True,
+            )
+            return None
+        if plan is None:
+            return None
+        return {
+            "presented": list(plan["presented"]),
+            "new_anchor_id": plan["new_anchor_id"],
+            "fold_entry_ids": [
+                eid for f in plan["folds"] for eid in f.chronicle_entry_ids
+            ],
+        }
+
+    def _plan_window_refill(
+        self, persona, model_key: str, anchor_id: str, watermarks: Watermarks,
+    ) -> Optional[Dict[str, Any]]:
+        """§15 読み戻しの計画 + 最終検算 (読みだけ — 行は触らない)。
+
+        :meth:`maybe_run_window_refill` (実書き込み) と
+        :meth:`preview_refilled_history` (プレビュー) の共通部。開き直しの印は
+        リクエストローカルな fold オブジェクトに付けるだけで、永続化は
+        呼び出し側の :meth:`_write_refill` が行う。
+
+        Returns:
+            適用できる読み戻しが無ければ None。あれば::
+
+                {
+                    "new_anchor_id": 引き戻し先 (引き戻し無しなら現 anchor),
+                    "folds": 書き込むべき圧縮区間の全リスト,
+                    "presented": 検算済みの最終提示メッセージ列,
+                    "current_chars" / "final_chars" / "target": 文字勘定,
+                    "reopened" / "rewound_messages" / "rewound_folds": 記録用,
+                }
+        """
+        window = self.get_presented_window(persona, model_key, anchor_id)
+        current_chars = message_chars(window.presented)
+        if current_chars >= watermarks.target:
+            return None
+        persona_id = getattr(persona, "persona_id", None)
 
         from sea.window_refill import plan_reopen, plan_rewind
 
@@ -2046,7 +2197,7 @@ class SessionLifecycle:
                     )
 
         if not reopen and rewind is None:
-            return "skip"
+            return None
 
         for fold in reopen:
             fold.presented_raw = True
@@ -2059,7 +2210,7 @@ class SessionLifecycle:
         # 生表示へ切り替わる — が混ざっても、天井 (残す量) をここで守る
         # (Codex 指摘 2026-07-30)。超えたら引き戻しを落とし、開き直しだけで
         # 再検算する。
-        final_chars = None
+        final_presented: Optional[List[Dict[str, Any]]] = None
         if rewind is not None:
             restored_index = next(
                 (
@@ -2077,62 +2228,68 @@ class SessionLifecycle:
                 rewind = None
             else:
                 final_raw = list(before[restored_index:]) + list(window.raw)
-                final_chars = message_chars(self._present_with_folds(
+                final_presented = self._present_with_folds(
                     persona, final_raw, new_folds + list(window.folds),
-                ))
-                if final_chars > watermarks.target:
+                )
+                if message_chars(final_presented) > watermarks.target:
                     LOGGER.warning(
                         "[metabolism] refill verification: rewound window "
                         "would be %d chars > target=%d; dropping the rewind "
                         "(persona=%s model=%s)",
-                        final_chars, watermarks.target, persona_id, model_key,
+                        message_chars(final_presented), watermarks.target,
+                        persona_id, model_key,
                     )
                     rewind = None
             if rewind is None:
                 new_folds = []
                 new_anchor_id = anchor_id
-                final_chars = None
+                final_presented = None
         if rewind is None:
             if not reopen:
-                return "skip"
-            final_chars = message_chars(self._present_with_folds(
+                return None
+            final_presented = self._present_with_folds(
                 persona, window.raw, list(window.folds),
-            ))
-            if final_chars > watermarks.target:
+            )
+            if message_chars(final_presented) > watermarks.target:
                 LOGGER.warning(
                     "[metabolism] refill verification: reopened window would "
                     "be %d chars > target=%d; skipping refill "
                     "(persona=%s model=%s)",
-                    final_chars, watermarks.target, persona_id, model_key,
+                    message_chars(final_presented), watermarks.target,
+                    persona_id, model_key,
                 )
-                return "skip"
+                return None
 
-        # 自行がまだ無い model (最前線 / 借用から始まる初回) は書き込み先の
-        # 行を先に立てる (§14-3 と同じ)。温度は「確実に冷えている」で立て、
-        # 温度の主張は下の _write_refill に一本化する。
-        if resolution in ("frontier", "other"):
-            entry = self.load_anchor_entry(persona_id, model_key)
-            if not entry or not entry.get("anchor_id"):
-                self.upsert_anchor_entry(persona_id, model_key, {
-                    "anchor_id": anchor_id,
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
-                })
+        return {
+            "new_anchor_id": new_anchor_id,
+            "folds": new_folds + list(window.folds),
+            "presented": final_presented,
+            "current_chars": current_chars,
+            "final_chars": message_chars(final_presented),
+            "target": watermarks.target,
+            "reopened": len(reopen),
+            "rewound_messages": rewind.restored_message_count if rewind else 0,
+            "rewound_folds": len(new_folds),
+        }
 
-        if not self._write_refill(
-            persona_id, model_key, anchor_id, new_anchor_id,
-            new_folds + list(window.folds),
-        ):
-            return "skip"
-        LOGGER.info(
-            "[metabolism] window refill (persona=%s model=%s): %d chars -> "
-            "%d chars (verified) toward target=%d (reopened %d in-window "
-            "range(s), rewound %d message(s) across %d range(s), resolution=%s)",
-            persona_id, model_key, current_chars, final_chars,
-            watermarks.target, len(reopen),
-            rewind.restored_message_count if rewind else 0,
-            len(new_folds), resolution,
-        )
-        return "ok"
+    def _head_weave_snapshot(
+        self, persona_id: Optional[str], model_key: Optional[str],
+    ) -> Optional[Any]:
+        """(persona, model) の head snapshot が持つ weave section (無ければ None)。
+
+        §15 読み戻し後の再 capture 検証用 — capture は毎回新しい section
+        オブジェクトを作るので、identity が変わらなければ stale の使い回し。
+        """
+        try:
+            from sea.head_pipeline import get_default_pipeline
+            snap = get_default_pipeline().get_snapshot(
+                str(persona_id), str(model_key),
+            )
+        except Exception:
+            return None
+        if snap is None:
+            return None
+        return getattr(snap, "sections", {}).get("memory_weave")
 
     def _write_refill(
         self,

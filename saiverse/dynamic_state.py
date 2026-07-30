@@ -156,7 +156,7 @@ class DynamicStateManager:
         return ok
 
     @staticmethod
-    def on_metabolism(persona: Any, manager: Any, model_key: Optional[str] = None) -> None:
+    def on_metabolism(persona: Any, manager: Any, model_key: Optional[str] = None) -> bool:
         """Metabolism 発火時の hook。
 
         Phase 3-e: METABOLISM イベントを head_pipeline に dispatch。
@@ -167,11 +167,18 @@ class DynamicStateManager:
         anchor を進めた model の (persona, model) snapshot だけを再 capture する。
         None は従来どおり persona の標準 model (organize-memory の全 model
         リセット経路など、節目の主が特定 model でない呼び出し)。
+
+        Returns:
+            再 capture の dispatch が成立したか (§15 読み戻しが再試行判定に
+            使う。persona/building 不明での no-op は False)。従来の呼び出し元は
+            戻り値を無視してよい。
         """
         building_id = getattr(persona, "current_building_id", None)
         if not getattr(persona, "persona_id", None) or not building_id:
-            return
-        _dispatch_head_event(persona, manager, building_id, "metabolism", model_key=model_key)
+            return False
+        return _dispatch_head_event(
+            persona, manager, building_id, "metabolism", model_key=model_key,
+        )
 
 
 def _dispatch_head_event(

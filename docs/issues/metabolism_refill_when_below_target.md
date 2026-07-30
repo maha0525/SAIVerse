@@ -30,6 +30,14 @@
 - 実装: `sea/window_refill.py` (計画の純関数) / `sea/session_lifecycle.py` (`maybe_run_window_refill` / `_write_refill` / `_refold_raw_view_folds`) / `sea/session_window.py` (`presented_raw` 印) / `sea/runtime.py` (user Pulse の応答前関門) / 遡り読み API (`get_messages_before_id` → adapter → history_manager)。テスト = `tests/test_window_refill.py` (34 件) + 隣接スイート緑。
 - Codex 敵対レビュー 7 巡 (指摘計 12 件を消し込み → approve、10 万件の組合せ反例探索で復活ゼロ確認)。主な消し込み: anchor 跨ぎエントリの二重提示 / 部分生存区間の体験消失 (開く側・提示側両方) / 天井保証 (実 placeholder 長 + 書き込み前の実提示検算) / 段統合 (source 共有の推移閉包) / digest の全件契約 (id・本文・被覆) / CAS の条件付き UPDATE 一文化 / 忘却済み領域 (編纂対象なのに未被覆) の不可侵 / 発火の user Pulse 限定。
 
+## 追補: context preview への反映 (2026-07-30、まはー指摘)
+
+発火が応答前の一点だと、メッセージ送信前のプレビュー (`POST /chat/preview`) は開き直される前の薄い窓を見せて嘘になる。→ プレビューは読み戻し後の姿を**読みだけ**で組む (`preview_refilled_history` — 計画+最終検算は本番と共通の `_plan_window_refill`、行は一切書かない。§14-6-5 の型)。実書き込みをプレビューからしないのは、温度 now 書きの正当化 (「直後に応答が来る」) が崩れて温かい行の偽造になるため。
+
+この追補のレビューで**本番側の欠け**も見つかった: head は節目キャッシュ (capture 済み snapshot) なので、読み戻しで除外名簿が変わっても head のあらすじ枠が旧 snapshot のまま = 生に開いた範囲のあらすじが head に残る二重提示が本番でも起きる状態だった。→ 読み戻しの書き込み成功後に head を再 capture (`DynamicStateManager.on_metabolism`、退場の step 4 と同じ節目扱い)。再 capture の成立は dispatch 成否 + weave section の identity 比較で検証する (capture 例外時の stale 使い回しを検出)。プレビュー側は行を触れないので、weave を読み戻し後の名簿で組み直して差し替える (`_swap_preview_weave_for_refill` — 組み立ては `raise_on_error=True` で「成功した空」と「読取失敗」を区別し、失敗時は読み戻しプレビューごと見送って素の窓に落とす)。
+
+**スコープ外の既知事項** (レビューで顔を出したが §15 以前からの挙動): 本番の `MemoryWeaveSection.capture` は内部の読取失敗を空 weave に変換する (weave が head から欠落する方向の縮退 — 二重提示は起きない)。厳格化するなら全 capture 経路 (退場・イベント・起動) に効く別件。
+
 ## 次アクション
 
-実機検証 (まはー): 水位引き上げ済みの既存ペルソナに話しかけて、①応答前に生ログが残す量まで開き直されること (`[metabolism] window refill` ログ)、②head のあらすじ枠と提示の二重表示が無いこと、③会話を続けて上限超過したとき印戻し (`refolded ... LLM-free`) が編纂なしで畳むこと。
+実機検証 (まはー): 水位引き上げ済みの既存ペルソナで、①メッセージ送信**前**のコンテキストプレビューに読み戻し後の厚い生ログが出ること、②話しかけると応答前に実際に開き直されること (`[metabolism] window refill` ログ) とプレビューが一致すること、③head のあらすじ枠と提示の二重表示が無いこと、④会話を続けて上限超過したとき印戻し (`refolded ... LLM-free`) が編纂なしで畳むこと。

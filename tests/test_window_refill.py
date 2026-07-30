@@ -443,6 +443,269 @@ def test_refill_rewinds_anchor_with_synthesized_folds(session_factory):
     assert all(f.presented_raw for f in saved)
 
 
+def test_preview_refilled_history_is_read_only(session_factory):
+    """context preview 用の読み戻しシミュレーション (§15 追補): 返る内容は
+    本番の読み戻しと同じ計算だが、anchor 行・圧縮区間・温度を一切書かない
+    (§14-6-5 の「プレビューは行を触らない」)。"""
+    lc = _make_lifecycle(session_factory)
+    before = [_msg(f"b{i}", 100 + i, 1000) for i in range(4)]
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=SimpleNamespace(
+            get_history_before_anchor=lambda *a, **k: list(before),
+        ),
+        sai_memory=SimpleNamespace(conn=object(), is_ready=lambda: True),
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(low=1000, target=5000, high=10_000)
+    window = _window("m0", [_msg("m0", 200, 1000)])
+    entries = [_entry("e1", ["b0", "b1"]), _entry("e2", ["b2", "b3"])]
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor",
+                         return_value=("m0", "self")) as resolve, \
+            patch.object(lc, "get_presented_window", return_value=window), \
+            patch("sai_memory.arasuji.storage.get_entries_covering_messages",
+                  return_value=entries):
+        plan = lc.preview_refilled_history(persona, "model-a")
+
+    # 提示は読み戻し後の姿 (b0..b3 が生で先頭に戻っている)
+    assert plan is not None
+    assert [m["id"] for m in plan["presented"]] == ["b0", "b1", "b2", "b3", "m0"]
+    # weave 組み直し用の材料 (引き戻し後の始点 + 除外名簿) も返る
+    assert plan["new_anchor_id"] == "b0"
+    assert sorted(plan["fold_entry_ids"]) == ["e1", "e2"]
+    # resolve は preview 型 (persist_advance=False) で呼ばれる
+    assert resolve.call_args.kwargs.get("persist_advance") is False
+    # 行は無傷 — anchor も圧縮区間も温度も書かれていない
+    entry = lc.load_anchor_entry(PERSONA_ID, "model-a")
+    assert entry["anchor_id"] == "m0"
+    assert not deserialize_folds(entry.get("folded_ranges"))
+    assert not lc._anchor_entry_is_hot(entry, "model-a", PERSONA_ID)
+
+
+def test_refill_without_watermarks_never_touches_rows(session_factory):
+    """水位が定義できない model では resolve (§14-2 前進の永続化を含む) を
+    呼ばずに引き返す (Codex 2026-07-30: 計画切り出しで順序が逆転し、no-op の
+    はずの経路が anchor を書いていた)。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    with patch.object(lc, "get_metabolism_watermarks", return_value=None), \
+            patch.object(lc, "resolve_metabolism_anchor") as resolve:
+        assert lc.maybe_run_window_refill(persona, "room") == "skip"
+        assert lc.preview_refilled_history(persona, "model-a") is None
+    resolve.assert_not_called()
+
+
+def test_preview_refilled_history_none_when_at_target(session_factory):
+    """不足が無ければ None — 呼び出し側は従来どおり素の窓を組む。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    window = _window("m0", [_msg("m0", 100, 2500)])
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
+            patch.object(lc, "get_presented_window", return_value=window):
+        assert lc.preview_refilled_history(persona, "model-a") is None
+
+
+def test_refill_head_recapture_failure_retries_and_warns(session_factory, caplog):
+    """head 再 capture の失敗は 1 回だけ再試行し、駄目なら WARNING で進む
+    (§14-3 fail-open と同じ裁定 — 応答は止めない)。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=SimpleNamespace(
+            get_history_before_anchor=lambda *a, **k: [],
+        ),
+        sai_memory=None,
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    raw = [_msg("m0", 100, 3000), _msg("m1", 101, 3000), _msg("m2", 102, 3000)]
+    fold = FoldedRange(message_ids=["m0", "m1"], chronicle_entry_ids=["e1"])
+    presented = [_ph("m0", chars=500), _msg("m2", 102, 3000)]
+    wm = Watermarks(low=1000, target=20_000, high=40_000)
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m0", presented, raw=raw, folds=[fold])), \
+            patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                  return_value=False) as recapture:
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    assert recapture.call_count == 2  # 1 回だけ再試行
+    assert any("head re-capture failed" in r.message for r in caplog.records)
+
+
+def test_refill_detects_stale_weave_reuse(session_factory, caplog):
+    """dispatch が成功しても weave が作り直されていなければ失敗と数える
+    (Codex 2026-07-30: capture_all は capture 例外時に既存オブジェクトを
+    使い回す = 旧除外名簿の weave が残る)。identity 不変 → 再試行 → WARNING。"""
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a",
+        history_manager=SimpleNamespace(
+            get_history_before_anchor=lambda *a, **k: [],
+        ),
+        sai_memory=None,
+    )
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    raw = [_msg("m0", 100, 3000), _msg("m1", 101, 3000), _msg("m2", 102, 3000)]
+    fold = FoldedRange(message_ids=["m0", "m1"], chronicle_entry_ids=["e1"])
+    presented = [_ph("m0", chars=500), _msg("m2", 102, 3000)]
+    wm = Watermarks(low=1000, target=20_000, high=40_000)
+    stale_weave = object()  # capture されない = 同一オブジェクトが返り続ける
+    fake_snap = SimpleNamespace(sections={"memory_weave": stale_weave})
+    fake_pipeline = SimpleNamespace(get_snapshot=lambda pid, mk: fake_snap)
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
+            patch.object(lc, "get_presented_window",
+                         return_value=_window("m0", presented, raw=raw, folds=[fold])), \
+            patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
+                  return_value=True) as recapture, \
+            patch("sea.head_pipeline.get_default_pipeline",
+                  return_value=fake_pipeline):
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            assert lc.maybe_run_window_refill(persona, "room") == "ok"
+    assert recapture.call_count == 2  # identity 不変 → 1 回だけ再試行
+    assert any("head re-capture failed" in r.message for r in caplog.records)
+
+
+def test_weave_context_raise_on_error_distinguishes_failure(tmp_path):
+    """raise_on_error=True は組み立て失敗を例外で伝える。既定は [] へ変換
+    (Codex 2026-07-30: 失敗を「成功した空」としてコミットさせない)。"""
+    from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
+
+    # 実在する db パスまで進めてから sqlite3.connect を落とす
+    (tmp_path / "memory.db").write_bytes(b"")
+    with patch("builtin_data.tools.get_memory_weave_context.sqlite3") as fake_sqlite:
+        fake_sqlite.connect.side_effect = RuntimeError("db down")
+        assert get_memory_weave_context(
+            persona_id="p1", persona_dir=str(tmp_path),
+        ) == []
+        with pytest.raises(RuntimeError):
+            get_memory_weave_context(
+                persona_id="p1", persona_dir=str(tmp_path),
+                raise_on_error=True,
+            )
+
+
+def test_weave_context_strict_propagates_inner_failures(tmp_path):
+    """strict は内側のヘルパー (Chronicle 組み立て) の読取失敗も例外で伝える
+    (Codex 2026-07-30: 外側の try だけだと内側の握り潰しが「成功した空」に化ける)。"""
+    from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
+
+    (tmp_path / "memory.db").write_bytes(b"")
+    with patch(
+        "sai_memory.arasuji.context.get_episode_context",
+        side_effect=RuntimeError("query down"),
+    ):
+        assert get_memory_weave_context(
+            persona_id="p1", persona_dir=str(tmp_path),
+        ) == []
+        with pytest.raises(RuntimeError):
+            get_memory_weave_context(
+                persona_id="p1", persona_dir=str(tmp_path),
+                raise_on_error=True,
+            )
+    # 実行時 ImportError (依存の version skew / 遅延 import 失敗) も読取失敗 —
+    # 「モジュール不在の正当な空」と混同しない (Codex 2026-07-30)
+    with patch(
+        "sai_memory.arasuji.context.get_episode_context",
+        side_effect=ImportError("runtime dependency failed"),
+    ):
+        assert get_memory_weave_context(
+            persona_id="p1", persona_dir=str(tmp_path),
+        ) == []
+        with pytest.raises(ImportError):
+            get_memory_weave_context(
+                persona_id="p1", persona_dir=str(tmp_path),
+                raise_on_error=True,
+            )
+
+
+def test_weave_context_strict_rejects_broken_import(tmp_path):
+    """export 欠落の ImportError は「モジュール不在の正当な空」ではなく読取失敗
+    (Codex 2026-07-30)。strict では再送出、既定では空へ縮退。本当に無い
+    (ModuleNotFoundError) ときだけ正当な空。"""
+    import sys
+    import types
+
+    from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
+
+    (tmp_path / "memory.db").write_bytes(b"")
+    broken = types.ModuleType("sai_memory.arasuji.context")  # export を持たない
+    with patch.dict(sys.modules, {"sai_memory.arasuji.context": broken}):
+        assert get_memory_weave_context(
+            persona_id="p1", persona_dir=str(tmp_path),
+        ) == []
+        with pytest.raises(ImportError):
+            get_memory_weave_context(
+                persona_id="p1", persona_dir=str(tmp_path),
+                raise_on_error=True,
+            )
+
+
+def test_preview_weave_swap_failure_falls_back(session_factory):
+    """weave の組み直しに失敗したら False (messages 無変更) — 呼び出し側は
+    読み戻しプレビューを見送って素の窓に落とす (二重表示より薄い方)。"""
+    from sea.runtime_context import _swap_preview_weave_for_refill
+
+    weave = {
+        "role": "user", "content": "old-weave",
+        "metadata": {"__memory_weave_context__": True, "__memory_weave_type__": "chronicle"},
+    }
+    messages = [{"role": "system", "content": "head"}, dict(weave)]
+    runtime = SimpleNamespace(manager=None)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, sai_memory=None)
+    plan = {"presented": [], "new_anchor_id": "b0", "fold_entry_ids": ["e1"]}
+    with patch(
+        "builtin_data.tools.get_memory_weave_context.get_memory_weave_context",
+        side_effect=RuntimeError("weave down"),
+    ):
+        assert _swap_preview_weave_for_refill(runtime, persona, messages, plan) is False
+    assert [m["content"] for m in messages] == ["head", "old-weave"]  # 無変更
+
+    # weave がそもそも無ければ衝突相手が居ない = True
+    no_weave = [{"role": "system", "content": "head"}]
+    assert _swap_preview_weave_for_refill(runtime, persona, no_weave, plan) is True
+
+
+def test_replace_weave_messages_swaps_in_place():
+    """preview の weave 差し替え: 位置を保って全 weave を新しい列に置き換える。
+    weave が無ければ何もしない (weave 無効設定を上書きしない)。"""
+    from sea.runtime_context import _replace_weave_messages
+
+    def _weave(mid, kind="chronicle"):
+        return {
+            "role": "user", "content": mid,
+            "metadata": {"__memory_weave_context__": True, "__memory_weave_type__": kind},
+        }
+
+    messages = [
+        {"role": "system", "content": "head"},
+        _weave("old-1"), _weave("old-2", "memopedia"),
+        {"role": "user", "content": "history"},
+    ]
+    _replace_weave_messages(messages, [_weave("new-1")])
+    assert [m["content"] for m in messages] == ["head", "new-1", "history"]
+
+    no_weave = [{"role": "system", "content": "head"}]
+    _replace_weave_messages(no_weave, [_weave("new-1")])
+    assert [m["content"] for m in no_weave] == ["head"]
+
+
 def test_write_refill_cas_rejects_moved_anchor(session_factory):
     """発火判定と書き込みの間に anchor が動いていたら棄却する (古い窓の計画)。"""
     lc = _make_lifecycle(session_factory)

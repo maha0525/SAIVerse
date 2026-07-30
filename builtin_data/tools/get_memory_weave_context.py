@@ -21,6 +21,7 @@ def get_memory_weave_context(
     max_chronicle_entries: int = 50,
     history_anchor_message_id: Optional[str] = None,
     exclude_chronicle_entry_ids: Optional[List[str]] = None,
+    raise_on_error: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build Memory Weave context messages containing Chronicle (General + Track).
 
@@ -51,6 +52,9 @@ def get_memory_weave_context(
             提示コンテキストの中で元の時系列位置に digest を差し込んでいる範囲を渡す
             (docs/intent/chronicle_eviction.md §6) — 同じあらすじが提示コンテキストと head の
             両方に出ると体験が二重化して時系列の錯覚を招くため。
+        raise_on_error: True なら組み立て失敗を例外で伝える (既定は [] へ変換)。
+            「成功した空」と「読取失敗」の区別が要る呼び出し側 (§15 preview の
+            weave 差し替え) 用。
 
     Returns:
         List of messages to insert into context.
@@ -90,6 +94,7 @@ def get_memory_weave_context(
         chronicle_text = _get_chronicle_context(
             conn, max_entries=max_chronicle_entries,
             exclude_entry_ids=set(exclude_chronicle_entry_ids or ()),
+            raise_on_error=raise_on_error,
         )
 
         # 1.5. Get Track Chronicle context for active track (v0.32, 2026-05-09)
@@ -97,6 +102,7 @@ def get_memory_weave_context(
         track_chronicle_text, track_title = _get_track_chronicle_context(
             conn, persona_id, max_entries=max_chronicle_entries,
             history_anchor_message_id=history_anchor_message_id,
+            raise_on_error=raise_on_error,
         )
 
         # 記憶アーキv2 §7.1: Memopedia 索引の head 常時掲示は既定で廃止 (自動想起 +
@@ -138,6 +144,11 @@ def get_memory_weave_context(
         return messages
 
     except Exception as exc:
+        if raise_on_error:
+            # 「成功した空」と「読取失敗」を呼び出し側が区別したい経路
+            # (§15 preview の weave 差し替え等)。既定の [] 変換は、失敗を
+            # 空 weave としてコミットさせてしまう (Codex 指摘 2026-07-30)。
+            raise
         LOGGER.warning("get_memory_weave_context: Failed to build context: %s", exc)
         return []
 
@@ -146,6 +157,7 @@ def _get_chronicle_context(
     conn: sqlite3.Connection,
     max_entries: int = 50,
     exclude_entry_ids: Optional[set] = None,
+    raise_on_error: bool = False,
 ) -> str:
     """Get General Chronicle (Arasuji) context using hierarchical algorithm.
 
@@ -160,13 +172,27 @@ def _get_chronicle_context(
     は安全弁として残す (予算制側が主制御)。Track Chronicle 側 (_get_track_chronicle_context)
     は従来どおり件数上限のまま (§6.2 item 5)。
     """
+    # import 文だけを ModuleNotFoundError で受ける — モジュール不在は
+    # 「本当に無い」= 正当な空 (strict でも空のまま)。export 欠落や依存の
+    # version skew は同じ import 文から**素の ImportError** で飛んでくるが、
+    # それは不在ではなく壊れた状態なので汎用ハンドラへ流し、strict 時に
+    # 再送出する。本体の実行中に飛ぶ ImportError も同様 (Codex 指摘
+    # 2026-07-30 ×2巡)。
     try:
         from sai_memory.arasuji.context import (
             USE_DEFAULT_BUDGET,
             format_episode_context,
             get_episode_context,
         )
-
+    except ModuleNotFoundError:
+        LOGGER.debug("Chronicle module not available")
+        return ""
+    except ImportError as exc:
+        if raise_on_error:
+            raise
+        LOGGER.warning("Chronicle module import is broken: %s", exc)
+        return ""
+    try:
         # 予算制が主制御なので max_entries は「暴走防止の安全弁」に格下げ。既定 50 の
         # ままだと 20万メッセージ級ユーザーで最古到達前に打ち切られ不変条件 §10-4 を
         # 破るため、予算制では十分大きい上限に引き上げる (件数ではなく予算で絞る)。
@@ -180,10 +206,9 @@ def _get_chronicle_context(
             return ""
 
         return format_episode_context(context, include_level_info=True)
-    except ImportError:
-        LOGGER.debug("Chronicle module not available")
-        return ""
     except Exception as exc:
+        if raise_on_error:
+            raise  # 読取失敗を「成功した空」に変換しない (strict 経路)
         LOGGER.warning("Failed to get Chronicle context: %s", exc)
         return ""
 
@@ -193,6 +218,7 @@ def _get_track_chronicle_context(
     persona_id: str,
     max_entries: int = 50,
     history_anchor_message_id: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> tuple[str, str]:
     """Get Track Chronicle context for the persona's currently active track.
 
@@ -207,8 +233,24 @@ def _get_track_chronicle_context(
     Returns:
         (formatted_text, track_title) — テキストが空なら表示不要
     """
+    # import 文だけを ModuleNotFoundError で受ける (General Chronicle 側と
+    # 同じ境界 — export 欠落等の素の ImportError と本体実行中の ImportError は
+    # 読取失敗として strict 時に再送出)。
     try:
         from tools.context import get_active_manager
+        from sai_memory.arasuji.context import (
+            format_episode_context,
+            get_episode_context,
+        )
+    except ModuleNotFoundError:
+        LOGGER.debug("Track Chronicle module not available")
+        return "", ""
+    except ImportError as exc:
+        if raise_on_error:
+            raise
+        LOGGER.warning("Track Chronicle module import is broken: %s", exc)
+        return "", ""
+    try:
         manager = get_active_manager()
         if not manager:
             return "", ""
@@ -229,7 +271,6 @@ def _get_track_chronicle_context(
         if getattr(track, "track_type", None) == "user_conversation":
             return "", ""
 
-        from sai_memory.arasuji.context import get_episode_context, format_episode_context
         context = get_episode_context(
             conn, max_entries=max_entries, origin_track_id=track_id
         )
@@ -251,10 +292,9 @@ def _get_track_chronicle_context(
         if not parts:
             return "", ""
         return "\n\n".join(parts), title
-    except ImportError:
-        LOGGER.debug("Track Chronicle module not available")
-        return "", ""
     except Exception:
+        if raise_on_error:
+            raise  # 読取失敗を「成功した空」に変換しない (strict 経路)
         LOGGER.warning("Failed to get Track Chronicle context", exc_info=True)
         return "", ""
 

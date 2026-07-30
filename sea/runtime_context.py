@@ -302,23 +302,53 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                     elif metabolism_enabled and preview_only:
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
-                        # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)
-                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
-                            persona, model_key=model_key, persist_advance=False,
-                        )
-                        if anchor_id:
-                            recent_from_anchor = history_mgr.get_history_from_anchor(
-                                anchor_id,
-                                required_line_roles=required_line_roles,
-                                required_scopes=required_scopes,
-                                pulse_id=pulse_id,
+                        # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)。
+                        # §15 の読み戻しも同じ型で反映する — 実際の読み戻しは次の
+                        # user Pulse の応答前に走るため、素の窓のままだとプレビューが
+                        # 「話しかけた時に実際に見える窓」より薄い嘘になる。読みだけ
+                        # の計算 (最終検算まで本番と同一・行は触らない) で組む。
+                        # 適用は標準の会話窓 (main_line / committed) のときだけ —
+                        # 読み戻しの文字勘定はその窓で定義されている。
+                        if (
+                            required_line_roles == ["main_line"]
+                            and required_scopes == ["committed"]
+                            and pulse_id is None
+                        ):
+                            refill_plan = runtime.session_lifecycle.preview_refilled_history(
+                                persona, model_key,
                             )
-                            recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
-                                persona, model_key, recent_from_anchor,
+                            if refill_plan:
+                                # head のあらすじ枠 (weave) は capture 済み
+                                # snapshot 由来で、読み戻し後の除外名簿を知らない
+                                # — このままだと生に戻した範囲のあらすじが head
+                                # に残り、プレビューだけ二重表示になる。読み戻し
+                                # 後の名簿で weave を組み直して差し替える (本番は
+                                # 書き込み後の再 capture が同じことをする)。
+                                # 差し替えに失敗したら読み戻しプレビューごと
+                                # 見送り、素の窓に落とす — 薄いが整合した表示は
+                                # 二重表示より嘘が小さい (Codex 指摘 2026-07-30)。
+                                if _swap_preview_weave_for_refill(
+                                    runtime, persona, messages, refill_plan,
+                                ):
+                                    recent = refill_plan["presented"]
+                                    used_anchor = True
+                        if not used_anchor:
+                            anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
+                                persona, model_key=model_key, persist_advance=False,
                             )
-                            if recent_from_anchor:
-                                recent = recent_from_anchor
-                                used_anchor = True
+                            if anchor_id:
+                                recent_from_anchor = history_mgr.get_history_from_anchor(
+                                    anchor_id,
+                                    required_line_roles=required_line_roles,
+                                    required_scopes=required_scopes,
+                                    pulse_id=pulse_id,
+                                )
+                                recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
+                                    persona, model_key, recent_from_anchor,
+                                )
+                                if recent_from_anchor:
+                                    recent = recent_from_anchor
+                                    used_anchor = True
                         if not used_anchor:
                             limit_value = _minimal_load_chars(runtime, persona, model_key)
                             use_message_count = False
@@ -727,6 +757,86 @@ def _expand_recalled_ids(
         LOGGER.debug(
             "[sea][prepare-context] Recalled memory content:\n%s", recalled_text,
         )
+
+
+def _replace_weave_messages(
+    messages: List[Dict[str, Any]], new_weave: List[Dict[str, Any]],
+) -> None:
+    """messages 内の Memory Weave メッセージ群を new_weave で置き換える (in place)。
+
+    位置は既存 weave の先頭位置を保つ (head の並び順を崩さない)。既存 weave が
+    無い場合は何もしない — weave 無効の設定を上書きしない。
+    """
+    indices = [
+        i for i, m in enumerate(messages)
+        if isinstance(m.get("metadata"), dict)
+        and m["metadata"].get("__memory_weave_context__")
+    ]
+    if not indices:
+        return
+    insert_at = indices[0]
+    for i in reversed(indices):
+        del messages[i]
+    messages[insert_at:insert_at] = list(new_weave)
+
+
+def _swap_preview_weave_for_refill(
+    runtime, persona: Any, messages: List[Dict[str, Any]],
+    refill_plan: Dict[str, Any],
+) -> bool:
+    """preview 専用: head 由来の weave を読み戻し後の除外名簿で組み直して差し替える。
+
+    head の weave は capture 済み snapshot に凍っており、読み戻しで生に開く
+    範囲のあらすじを除外できていない (本番は書き込み後の再 capture が追随する
+    — session_lifecycle.maybe_run_window_refill)。プレビューは行を触らない
+    (§14-6-5) ので、同じ組み立て (get_memory_weave_context) を読み戻し後の
+    名簿と窓の始点で読みだけ実行して差し替える。
+
+    Returns:
+        整合が取れたか。True = 差し替えた / weave がそもそも提示に無い。
+        False = 組み直しに失敗 (messages は無変更) — 呼び出し側は読み戻し
+        プレビューごと見送って素の窓に落とすこと。旧 weave のまま読み戻し後の
+        履歴を出すと、生に開いた範囲のあらすじと生ログが同時に並ぶ二重表示に
+        なる (Codex 指摘 2026-07-30)。
+    """
+    has_weave = any(
+        isinstance(m.get("metadata"), dict)
+        and m["metadata"].get("__memory_weave_context__")
+        for m in messages
+    )
+    if not has_weave:
+        return True  # weave 無し = 衝突する相手が居ない
+    try:
+        from builtin_data.tools.get_memory_weave_context import (
+            get_memory_weave_context,
+        )
+        from tools.context import persona_context
+
+        persona_id = getattr(persona, "persona_id", None)
+        sai_mem = getattr(persona, "sai_memory", None)
+        persona_dir_path = getattr(sai_mem, "persona_dir", None) if sai_mem else None
+        persona_dir = str(persona_dir_path) if persona_dir_path else None
+        exclude_ids = list(refill_plan.get("fold_entry_ids") or [])
+        with persona_context(persona_id, persona_dir, runtime.manager):
+            # raise_on_error: 既定の「失敗 → []」変換のままだと、読取失敗が
+            # 「成功した空 weave」としてコミットされ、weave を黙って失った
+            # プレビューになる (Codex 指摘 2026-07-30)。空が返るのは本当に
+            # 空のときだけにする。
+            new_weave = get_memory_weave_context(
+                persona_id=persona_id,
+                persona_dir=persona_dir,
+                history_anchor_message_id=refill_plan.get("new_anchor_id"),
+                exclude_chronicle_entry_ids=exclude_ids or None,
+                raise_on_error=True,
+            )
+        _replace_weave_messages(messages, new_weave or [])
+        return True
+    except Exception:
+        LOGGER.warning(
+            "[sea][prepare-context] preview weave swap for refill failed; "
+            "falling back to the plain (pre-refill) window", exc_info=True,
+        )
+        return False
 
 
 def preview_context(
