@@ -1,5 +1,7 @@
 # Salience Module Intent
 
+> **位置づけ (2026-07-27)**: 本書はリアルタイム処理基盤 ([realtime_foundation.md](realtime_foundation.md)) における「注意と選別の層」の**一般形の正典 (候補)**。physical_ear の判断層は本書の音声特化インスタンス、perception_buffer §4.4 の「軽量 LLM 門番」は本書の出力の受け口にあたる。実装着手時に realtime_foundation との整合で改訂する。
+
 ## 背景
 
 SAIVerse の自律行動では、単に定期実行で人格本体を起動するだけでは足りない。

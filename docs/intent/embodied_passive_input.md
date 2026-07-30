@@ -1,6 +1,6 @@
 # Intent: 身体性の受動入力レイヤー (Embodied Passive Input)
 
-**ステータス**: v0.1 ドラフト (2026-05-21)
+**ステータス**: 歴史文書 (2026-07-27 まはー裁定)。本書の構想は Fixture 型知覚 ([physical_ear.md](physical_ear.md) 等) と知覚バッファ ([perception_buffer.md](perception_buffer.md)) に昇華済みで、この文書単体で実装されることはない。全体の位置づけは [realtime_foundation.md](realtime_foundation.md) を参照。(初版: v0.1 ドラフト 2026-05-21)
 
 ## これは何か
 
