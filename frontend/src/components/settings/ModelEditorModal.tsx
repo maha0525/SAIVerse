@@ -28,6 +28,36 @@ interface Props {
 const BASIC_FIELDS = ['model', 'display_name', 'provider_ref', 'context_length'] as const;
 const DEFAULT_CONTEXT_LENGTH = 128000;
 
+// Metabolism の水位 (文字数)。キーは三値 — 無し (= 一律既定に従う) / 明示 null
+// (= その水位を持たない = Metabolism なし) / 数値。専用欄が**単独所有**し、追加設定
+// JSON からは常に除外する (二重所有だと空欄にしても JSON 側の null が復活する —
+// Codex 指摘 2026-07-30)。欄の表記: 空欄 = キー無し / "none" = null / 数字 = 数値。
+const WATERMARK_FIELDS = [
+    'metabolism_high_chars', 'metabolism_target_chars', 'metabolism_low_chars',
+] as const;
+type WatermarkField = typeof WATERMARK_FIELDS[number];
+const WATERMARK_LABELS: Record<WatermarkField, { label: string; hint: string }> = {
+    metabolism_high_chars: {
+        label: '整理をはじめる文字数 (metabolism_high_chars)',
+        hint: '会話コンテキストがこの文字数を超えたら、古い出来事からあらすじへ畳んで整理します。none にすると文字数では発火しません。',
+    },
+    metabolism_target_chars: {
+        label: '整理後に残す文字数 (metabolism_target_chars)',
+        hint: '整理はこの文字数まで畳んだら止まります。少なすぎるときは畳んだ範囲をここまで開き直します。none にするとこのモデルは履歴の自動整理を行いません。',
+    },
+    metabolism_low_chars: {
+        label: '最初に読み込む文字数 (metabolism_low_chars)',
+        hint: '会話の起点がまだ無いとき（新規ペルソナ等）に読み込む履歴の量。',
+    },
+};
+
+/** 水位欄の値: '' = キー無し (既定) / 'none' = null (持たない) / '数字' = 数値。 */
+const watermarkFieldFromConfig = (value: unknown): string => {
+    if (value === null) return 'none';
+    if (typeof value === 'number') return String(value);
+    return '';
+};
+
 export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, onClose, onSaved }: Props) {
     const [key, setKey] = useState('');
     // Basic fields (dedicated inputs)
@@ -35,6 +65,12 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
     const [displayName, setDisplayName] = useState('');
     const [providerRef, setProviderRef] = useState('');
     const [contextLength, setContextLength] = useState<number>(DEFAULT_CONTEXT_LENGTH);
+    // Metabolism 水位。'' = キー無し / 'none' = null / '数字' = 数値 (単独所有)
+    const [watermarks, setWatermarks] = useState<Record<WatermarkField, string>>({
+        metabolism_high_chars: '',
+        metabolism_target_chars: '',
+        metabolism_low_chars: '',
+    });
     // Everything else (JSON editor)
     const [extraJson, setExtraJson] = useState('{}');
     const [providers, setProviders] = useState<ProviderChoice[]>([]);
@@ -52,12 +88,22 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         setContextLength(
             typeof cfg.context_length === 'number' ? cfg.context_length : DEFAULT_CONTEXT_LENGTH,
         );
+        const wm: Record<WatermarkField, string> = {
+            metabolism_high_chars: '',
+            metabolism_target_chars: '',
+            metabolism_low_chars: '',
+        };
         const extra: Record<string, unknown> = {};
         for (const [field, value] of Object.entries(cfg)) {
-            if (!(BASIC_FIELDS as readonly string[]).includes(field)) {
-                extra[field] = value;
+            if ((BASIC_FIELDS as readonly string[]).includes(field)) continue;
+            // 水位は専用欄が単独所有 (null も 'none' として欄に写し、JSON には残さない)
+            if ((WATERMARK_FIELDS as readonly string[]).includes(field)) {
+                wm[field as WatermarkField] = watermarkFieldFromConfig(value);
+                continue;
             }
+            extra[field] = value;
         }
+        setWatermarks(wm);
         setExtraJson(JSON.stringify(extra, null, 2));
         setSource('user_data');
     };
@@ -76,6 +122,11 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             setDisplayName('');
             setProviderRef('');
             setContextLength(DEFAULT_CONTEXT_LENGTH);
+            setWatermarks({
+                metabolism_high_chars: '',
+                metabolism_target_chars: '',
+                metabolism_low_chars: '',
+            });
             setExtraJson('{}');
             setSource('user_data');
         }
@@ -177,6 +228,40 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             merged.provider_ref = providerRef;
         } else {
             delete merged.provider_ref;
+        }
+        // 水位: 専用欄が単独所有 — JSON に紛れた同名キーは欄の値で常に上書きする。
+        // 空欄 = キーを書かない (一律既定) / "none" = null (持たない) / 数字 = 数値。
+        const wmNumbers: Record<WatermarkField, number | null> = {
+            metabolism_high_chars: null,
+            metabolism_target_chars: null,
+            metabolism_low_chars: null,
+        };
+        for (const field of WATERMARK_FIELDS) {
+            const raw = watermarks[field].trim();
+            delete merged[field];
+            if (raw === '') continue;
+            if (raw.toLowerCase() === 'none') {
+                merged[field] = null;
+                continue;
+            }
+            const value = parseInt(raw, 10);
+            if (isNaN(value) || String(value) !== raw || value < 1) {
+                setSaveError(`${field} は 1 以上の整数か none を入力してください（空欄 = 標準の既定値）`);
+                return;
+            }
+            merged[field] = value;
+            wmNumbers[field] = value;
+        }
+        const wmHigh = wmNumbers.metabolism_high_chars;
+        const wmTarget = wmNumbers.metabolism_target_chars;
+        const wmLow = wmNumbers.metabolism_low_chars;
+        if (wmTarget != null && wmHigh != null && wmTarget > wmHigh) {
+            setSaveError('整理後に残す文字数は、整理をはじめる文字数以下にしてください');
+            return;
+        }
+        if (wmLow != null && wmTarget != null && wmLow > wmTarget) {
+            setSaveError('最初に読み込む文字数は、整理後に残す文字数以下にしてください');
+            return;
         }
 
         setSaving(true);
@@ -297,6 +382,24 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                     step={1}
                                 />
                             </div>
+
+                            {WATERMARK_FIELDS.map(field => (
+                                <div className={styles.field} key={field}>
+                                    <label>{WATERMARK_LABELS[field].label}</label>
+                                    <input
+                                        className={styles.input}
+                                        type="text"
+                                        inputMode="numeric"
+                                        value={watermarks[field]}
+                                        onChange={e => {
+                                            const v = e.target.value;
+                                            setWatermarks(prev => ({ ...prev, [field]: v }));
+                                        }}
+                                        placeholder="（空欄 = 標準の既定値 / none = 使わない）"
+                                    />
+                                    <span className={styles.hint}>{WATERMARK_LABELS[field].hint}</span>
+                                </div>
+                            ))}
 
                             <div className={styles.field}>
                                 <label>

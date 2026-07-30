@@ -957,10 +957,8 @@ def test_in_beat_touch_establishes_anchor_across_models(_mock_cache, session_fac
 
 
 def _cold_ready_lifecycle(session_factory):
-    """§14-3/§14-4 テスト用: metabolism_enabled な manager を持つ lifecycle。"""
-    lc = _make_lifecycle(session_factory)
-    lc.manager.metabolism_enabled = True
-    return lc
+    """§14-3/§14-4 テスト用の lifecycle (Metabolism は常時 ON — 2026-07-30 トグル撤去)。"""
+    return _make_lifecycle(session_factory)
 
 
 def test_cold_precompaction_status_conditions(session_factory):

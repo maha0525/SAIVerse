@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
 import { formatCost } from '@/lib/formatCost';
@@ -53,6 +53,19 @@ interface CacheStatus {
     cache_setting: string;             // Phase 2: 実効 cache 設定 ("off" | "5m" | "1h")
 }
 
+// 提示コンテキストの現在量と水位 (GET /api/people/{id}/context-status, read-only)
+interface ContextStatus {
+    persona_id: string;
+    model: string | null;
+    metabolism: boolean;              // 実効モデルが水位を持つか
+    low_chars: number | null;         // 最初に読み込む量
+    target_chars: number | null;      // 残す量 (整理後にここへ揃える)
+    high_chars: number | null;        // 上限 (超えたら整理)
+    presented_chars: number | null;   // 現在の提示コンテキスト文字数 (読み戻し後)
+    refill_applied: boolean;
+    measurement_failed: boolean;      // 計測失敗 (null を「起点なし」と読ませない)
+}
+
 interface ChatOptionsProps {
     isOpen: boolean;
     onClose: () => void;
@@ -74,26 +87,12 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         ttl_options: [],
         cache_type: null
     });
-    const [metabolismEnabled, setMetabolismEnabled] = useState<boolean>(true);
-    // Metabolism の三水位（文字数）。低=直近保護帯 / 目標=整理の到達点 / 高=発火
-    const [metabolismLowChars, setMetabolismLowChars] = useState<number | null>(null);
-    const [metabolismLowCharsDefault, setMetabolismLowCharsDefault] = useState<number | null>(null);
-    const [metabolismTargetChars, setMetabolismTargetChars] = useState<number | null>(null);
-    const [metabolismTargetCharsDefault, setMetabolismTargetCharsDefault] = useState<number | null>(null);
-    const [metabolismHighChars, setMetabolismHighChars] = useState<number | null>(null);
-    const [metabolismHighCharsDefault, setMetabolismHighCharsDefault] = useState<number | null>(null);
-
-    // /api/config と /api/config/metabolism は同じ形で三水位を返すので、取り込みを一本化する。
-    // 入力欄が映すのは **override だけ**（空欄 = モデル既定に従う）。実効値を入れると
-    // 「未設定」を表現できず、別名保存でモデル既定が焼き付いてしまう。
-    const applyMetabolismWatermarks = (data: any) => {
-        setMetabolismLowChars(data.metabolism_low_chars_override ?? null);
-        setMetabolismLowCharsDefault(data.metabolism_low_chars_model_default ?? null);
-        setMetabolismTargetChars(data.metabolism_target_chars_override ?? null);
-        setMetabolismTargetCharsDefault(data.metabolism_target_chars_model_default ?? null);
-        setMetabolismHighChars(data.metabolism_high_chars_override ?? null);
-        setMetabolismHighCharsDefault(data.metabolism_high_chars_model_default ?? null);
-    };
+    // データ送信量セクションの読み取り専用表示 (設定はモデル定義側 — 2026-07-30
+    // グローバル上書き廃止、docs/issues/chat_options_metabolism_section_redesign.md)
+    const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
+    const [contextStatusError, setContextStatusError] = useState(false);
+    // モデル変更後の再取得トリガー (水位はモデル依存なので旧モデルの表示が残る)
+    const [contextStatusReload, setContextStatusReload] = useState(0);
     const [maxImageEmbeds, setMaxImageEmbeds] = useState<number | null>(null);
     const [maxImageEmbedsDefault, setMaxImageEmbedsDefault] = useState<number | null>(null);
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
@@ -174,7 +173,42 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         return () => clearInterval(id);
     }, [isOpen, cacheStatus?.active, cacheStatus?.expires_at]);
 
-    const fetchData = async () => {
+    // データ送信量: 選択ペルソナの提示コンテキスト状態。開いた時・ペルソナ切替時・
+    // モデル変更後 (contextStatusReload) に取得する — 計測は読み戻しの読み取り専用
+    // 計画を再利用していて DB 読みを伴うため、cache-status のような 2 秒ポーリングは
+    // しない。切替時は前の値を即座に消す (取得失敗時に別ペルソナ/旧モデルの値を
+    // 出し続けない — Codex 指摘 2026-07-30)。
+    useEffect(() => {
+        setContextStatus(null);
+        setContextStatusError(false);
+        if (!isOpen || !selectedCachePersonaId) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`/api/people/${encodeURIComponent(selectedCachePersonaId)}/context-status`);
+                if (cancelled) return;
+                if (!res.ok) {
+                    setContextStatusError(true);
+                    return;
+                }
+                const data = await res.json();
+                if (!cancelled) setContextStatus(data);
+            } catch (e) {
+                console.error('Failed to fetch context status', e);
+                if (!cancelled) setContextStatusError(true);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isOpen, selectedCachePersonaId, contextStatusReload]);
+
+    // stillValid: 応答の**適用直前**に呼ばれる有効性チェック (省略時は常に適用)。
+    // 遅延 resync が渡す — 開始済みの fetch は clearTimeout では止まらないので、
+    // 取得中に新しいモデル選択が入った場合は結果を捨てる (Codex 指摘 2026-07-30)。
+    // onClick ハンドラから直接呼ばれると第一引数に MouseEvent が入るため、関数で
+    // ないものは無視する。
+    const fetchData = async (stillValid?: unknown) => {
+        const isStillValid: () => boolean =
+            typeof stillValid === 'function' ? (stillValid as () => boolean) : () => true;
         setLoading(true);
         setError(null);
 
@@ -189,6 +223,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 fetch('/api/config/cache', { signal: controller.signal }),
                 fetch('/api/config/favorite-models', { signal: controller.signal })
             ]);
+            if (!isStillValid()) return; // 取得中に新しい選択が入った — 結果を捨てる
 
             const failures: string[] = [];
             let fetchedModels: ModelInfo[] = [];
@@ -197,6 +232,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (results[0].status === 'fulfilled' && results[0].value.ok) {
                 try {
                     fetchedModels = await results[0].value.json();
+                    if (!isStillValid()) return; // json() の await 中の追い越しも捨てる
                     setModels(fetchedModels);
                 } catch (e) { console.error("Failed to parse models response", e); failures.push('models'); }
             } else {
@@ -209,14 +245,13 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (results[1].status === 'fulfilled' && results[1].value.ok) {
                 try {
                     const config = await results[1].value.json();
+                    if (!isStillValid()) return;
                     const modelId = config.current_model || '';
                     setCurrentModel(modelId);
                     const modelInfo = fetchedModels.find(m => m.id === modelId);
                     onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit);
                     setParamSpecs(config.parameters || {});
                     setParams(config.current_values || {});
-                    setMetabolismEnabled(config.metabolism_enabled ?? true);
-                    applyMetabolismWatermarks(config);
                     setMaxImageEmbeds(config.max_image_embeds ?? null);
                     setMaxImageEmbedsDefault(config.max_image_embeds_model_default ?? null);
                 } catch (e) { console.error("Failed to parse config response", e); failures.push('config'); }
@@ -228,7 +263,11 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
 
             // Cache
             if (results[2].status === 'fulfilled' && results[2].value.ok) {
-                try { setCacheConfig(await results[2].value.json()); }
+                try {
+                    const cacheData = await results[2].value.json();
+                    if (!isStillValid()) return;
+                    setCacheConfig(cacheData);
+                }
                 catch (e) { console.error("Failed to parse cache response", e); failures.push('cache'); }
             } else {
                 const reason = results[2].status === 'rejected' ? results[2].reason : `HTTP ${results[2].value.status}`;
@@ -240,6 +279,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (results[3].status === 'fulfilled' && results[3].value.ok) {
                 try {
                     const favData = await results[3].value.json();
+                    if (!isStillValid()) return;
                     setFavoriteModels(favData.models || []);
                 } catch (e) { console.error("Failed to parse favorites response", e); }
             }
@@ -319,92 +359,119 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         return { favorites, byGroup, sortedGroups };
     }, [models, favoriteModels]);
 
-    const handleModelChange = async (modelId: string) => {
+    // モデル変更は直列化する — 素早い A→B 切替で A の応答が後着すると、選択欄は B
+    // なのにパラメータ・水位表示が A に戻る (Codex 指摘 2026-07-30)。seq が最新で
+    // ない仕事は POST 自体を送らず、最後の選択だけをサーバーに確定させる。
+    // client_id はマウントごとの世代の名前空間 — サーバーの世代ガードはこの中で
+    // だけ効く (リロードや別タブを 409 にしない)。
+    const modelChangeSeqRef = useRef(0);
+    const modelChangeChainRef = useRef<Promise<void>>(Promise.resolve());
+    const modelChangeClientIdRef = useRef<string>(
+        `chat-options-${Math.random().toString(36).slice(2)}-${Date.now()}`,
+    );
+    const modelResyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const handleModelChange = (modelId: string) => {
         setCurrentModel(modelId);
         // Find display name from models list
         const modelInfo = models.find(m => m.id === modelId);
         onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit); // Notify parent component
-        // Save immediately
+        const seq = ++modelChangeSeqRef.current;
+        // 前の選択が予約した遅延 resync は取り消す — 古い状態で表示を巻き戻すため
+        if (modelResyncTimerRef.current) {
+            clearTimeout(modelResyncTimerRef.current);
+            modelResyncTimerRef.current = null;
+        }
+        // .catch: applyModelChange は内部で全例外を握るが、万一 reject が漏れた
+        // 場合にチェーンが死んで以後の選択が送信されなくなるのを防ぐ保険。
+        modelChangeChainRef.current = modelChangeChainRef.current
+            .then(() => applyModelChange(modelId, seq))
+            .catch(() => {});
+    };
+
+    const applyModelChange = async (modelId: string, seq: number) => {
+        if (seq !== modelChangeSeqRef.current) return; // もっと新しい選択が控えている
+        // 期限なしの POST が pending のままだとチェーン全体が永久停止し、以後の
+        // 選択がサーバーへ届かなくなる (Codex 指摘 2026-07-30) — 10 秒で中断して
+        // 失敗扱いにする (fetchData と同じ期限)。
+        const controller = new AbortController();
+        let timedOut = false;
+        const timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, 10000);
         try {
             const res = await fetch('/api/config/model', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: modelId })
+                // client_id + seq: サーバー側の世代ガード — abort した古い要求が
+                // 遅れて完了しても、同一クライアントの新しい選択を上書きしない
+                // (Codex 指摘 2026-07-30)
+                body: JSON.stringify({
+                    model: modelId, seq, client_id: modelChangeClientIdRef.current,
+                }),
+                signal: controller.signal,
             });
-            if (res.ok) {
-                // Use inline parameters from response (no separate fetch needed)
-                const data = await res.json();
-                setParamSpecs(data.parameters || {});
-                setParams(data.current_values || {});
-                setMetabolismEnabled(data.metabolism_enabled ?? true);
-                applyMetabolismWatermarks(data);
-                setMaxImageEmbeds(data.max_image_embeds ?? null);
-                setMaxImageEmbedsDefault(data.max_image_embeds_model_default ?? null);
+            if (seq !== modelChangeSeqRef.current) return; // 古い応答は適用しない
+            if (res.status === 409) {
+                // 別の (より新しい) 選択が適用済み — エラーではなく実状態に合わせる
+                await fetchData();
+                return;
             }
+            if (!res.ok) {
+                // 失敗: サーバーの実状態へ表示を合わせ直した上でエラーを出す
+                await fetchData();
+                setError('モデルの変更に失敗しました');
+                return;
+            }
+            // Use inline parameters from response (no separate fetch needed)
+            const data = await res.json();
+            // サーバー正で選択を確定する — 途中で走った resync が表示を巻き戻して
+            // いても、最新選択の成功応答が上書きして最終状態を一致させる
+            if (data.current_model) {
+                setCurrentModel(data.current_model);
+                const appliedInfo = models.find(m => m.id === data.current_model);
+                onModelChange(data.current_model, appliedInfo?.name || '', appliedInfo?.rate_limit);
+            }
+            setParamSpecs(data.parameters || {});
+            setParams(data.current_values || {});
+            setMaxImageEmbeds(data.max_image_embeds ?? null);
+            setMaxImageEmbedsDefault(data.max_image_embeds_model_default ?? null);
+            // 水位はモデル依存 — モデルが変わったら状態表示を取り直す
+            setContextStatus(null);
+            setContextStatusReload(n => n + 1);
 
             // Refetch cache config since it depends on selected model
-            const cacheRes = await fetch('/api/config/cache');
+            const cacheRes = await fetch('/api/config/cache', { signal: controller.signal });
+            if (seq !== modelChangeSeqRef.current) return;
             if (cacheRes.ok) {
                 setCacheConfig(await cacheRes.json());
             }
         } catch (e) {
             console.error("Failed to set model", e);
+            if (seq === modelChangeSeqRef.current) {
+                await fetchData();
+                setError('モデルの変更に失敗しました');
+                if (timedOut) {
+                    // abort はサーバー側の適用を止めない — 遅れて確定した状態を
+                    // 拾い直す。ただし予約後に新しい選択が入ったら実行しない
+                    // (古い状態で新選択の表示を巻き戻すため — Codex 指摘 5巡目)。
+                    // 完全な保証はサーバーの世代ガードが持つ。
+                    modelResyncTimerRef.current = setTimeout(() => {
+                        modelResyncTimerRef.current = null;
+                        // 開始前 + 応答適用直前の両方で世代を確認 — 発火済みの
+                        // resync は clearTimeout では止まらないため、適用側でも
+                        // 最新世代でなければ結果を捨てる
+                        const stillValid = () => seq === modelChangeSeqRef.current;
+                        if (stillValid()) fetchData(stillValid);
+                    }, 3000);
+                }
+            }
+        } finally {
+            clearTimeout(timeoutId);
         }
     };
 
     const handleParamChange = (key: string, value: any) => {
         const newParams = { ...params, [key]: value };
         setParams(newParams);
-    };
-
-    const handleMetabolismEnabledChange = async (enabled: boolean) => {
-        setMetabolismEnabled(enabled);
-        try {
-            await fetch('/api/config/metabolism', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled })
-            });
-        } catch (e) {
-            console.error("Failed to update metabolism settings", e);
-        }
-    };
-
-    // 三水位（低→目標→高）の入力は onBlur でまとめて送る。タイプ途中の中間値
-    // （"4" と打った時点の 4）が順序チェックで弾かれるのを避けるため。
-    const metabolismWatermarkSetters: Record<string, (v: number | null) => void> = {
-        low: setMetabolismLowChars,
-        target: setMetabolismTargetChars,
-        high: setMetabolismHighChars,
-    };
-
-    const handleWatermarkInput = (which: 'low' | 'target' | 'high', value: string) => {
-        const numValue = value === '' ? null : parseInt(value, 10);
-        if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
-        metabolismWatermarkSetters[which](numValue);
-    };
-
-    const handleWatermarkCommit = async () => {
-        try {
-            const res = await fetch('/api/config/metabolism', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    low_chars: metabolismLowChars,
-                    target_chars: metabolismTargetChars,
-                    high_chars: metabolismHighChars,
-                })
-            });
-            const data = await res.json();
-            if (!res.ok) {
-                setError(data?.detail || '記憶整理の水位を更新できませんでした');
-                return;
-            }
-            setError(null);
-            applyMetabolismWatermarks(data);
-        } catch (e) {
-            console.error("Failed to update metabolism watermarks", e);
-        }
     };
 
     const handleMaxImageEmbedsInput = (value: string) => {
@@ -461,9 +528,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         parameters: params,
         cache_enabled: cacheConfig.supported ? cacheConfig.enabled : null,
         cache_ttl: cacheConfig.supported ? cacheConfig.ttl : null,
-        metabolism_low_chars: metabolismLowChars,
-        metabolism_target_chars: metabolismTargetChars,
-        metabolism_high_chars: metabolismHighChars,
         max_image_embeds: maxImageEmbeds,
         overwrite,
     });
@@ -556,6 +620,75 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 </div>
                 <span className={styles.hint}>
                     キャッシュ有効中。残り時間内に発話すると cache hit（格安）になります。
+                </span>
+            </>
+        );
+    };
+
+    // データ送信量: 読み取り専用の状態表示。会話履歴は始点を固定したまま送られ、
+    // 上限を超えると古い順にあらすじへ畳まれる。設定はモデル定義側 (モデル編集画面)。
+    const renderContextStatusBody = () => {
+        if (!selectedCachePersonaId) {
+            return <span className={styles.hint}>ペルソナのいる建物で開くと、会話コンテキストの状態が表示されます。</span>;
+        }
+        if (contextStatusError) {
+            return <span className={styles.hint}>状態を取得できませんでした。開き直すか、ペルソナを切り替えると再試行します。</span>;
+        }
+        if (!contextStatus) {
+            return <span className={styles.hint}>読み込み中...</span>;
+        }
+        if (!contextStatus.metabolism) {
+            return (
+                <span className={styles.hint}>
+                    このモデル（{contextStatus.model || '未設定'}）は水位を持たない設定のため、履歴の自動整理は行われません。
+                </span>
+            );
+        }
+        const presented = contextStatus.presented_chars;
+        const target = contextStatus.target_chars;
+        const high = contextStatus.high_chars;
+        // バーの右端 = 上限。上限なし (文字数では整理しない) モデルは残す量の 2 倍を目安に描く。
+        const scaleMax = high ?? (target != null ? target * 2 : null);
+        return (
+            <>
+                {presented != null && scaleMax != null ? (
+                    <>
+                        <div className={styles.contextBar}>
+                            <div
+                                className={styles.contextBarFill}
+                                style={{
+                                    width: `${Math.min(100, (presented / scaleMax) * 100)}%`,
+                                    background: high != null && presented > high ? '#f87171'
+                                        : target != null && presented > target ? '#fbbf24'
+                                        : '#34d399',
+                                }}
+                            />
+                            {target != null && target <= scaleMax && (
+                                <div className={styles.contextBarMarker} style={{ left: `${(target / scaleMax) * 100}%` }} />
+                            )}
+                        </div>
+                        <div className={styles.contextStatRow}>
+                            <span>現在 {presented.toLocaleString()}字{contextStatus.refill_applied ? '（読み戻し後）' : ''}</span>
+                            <span>
+                                残す量 {target != null ? `${target.toLocaleString()}字` : '—'} ／
+                                上限 {high != null ? `${high.toLocaleString()}字` : 'なし'}
+                            </span>
+                        </div>
+                    </>
+                ) : contextStatus.measurement_failed ? (
+                    <span className={styles.hint}>現在量を測定できませんでした（水位のみ表示しています）。</span>
+                ) : (
+                    <span className={styles.hint}>まだ会話の起点がありません。最初の会話で確立されます。</span>
+                )}
+                {contextStatus.low_chars != null && (
+                    <span className={styles.hint}>
+                        最初に読み込む量（会話の起点がまだ無いとき）: {contextStatus.low_chars.toLocaleString()}字
+                    </span>
+                )}
+                <span className={styles.hint}>
+                    会話履歴は始点を固定したまま送られ、上限を超えると古い出来事から順にあらすじへ畳んで「残す量」まで整理します。
+                    畳みすぎて残す量を下回ったときは、次の会話の前に畳んだ範囲を自動で開き直します。
+                    水位を変えたいときは、設定のモデル編集から（モデルごとの設定です）。
                 </span>
             </>
         );
@@ -683,85 +816,23 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                 {historySettingsOpen && (
                                     <>
                                         <div className={styles.formGroup}>
-                                            <label className={styles.checkboxLabel}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={metabolismEnabled}
-                                                    onChange={(e) => handleMetabolismEnabledChange(e.target.checked)}
-                                                />
-                                                履歴の新陳代謝
-                                            </label>
-                                            <span className={styles.hint}>
-                                                ON: 会話履歴のウィンドウ始点を固定しキャッシュヒット率を向上。ふくらんだら古い出来事からあらすじに畳んで整理します。OFF: 従来のスライディングウィンドウ。
-                                            </span>
+                                            <label>会話コンテキストの現在量</label>
+                                            {cachePersonas.length > 1 && (
+                                                <div className={styles.cacheTimerTabs}>
+                                                    {cachePersonas.map(p => (
+                                                        <button
+                                                            key={p.id}
+                                                            type="button"
+                                                            className={`${styles.personaTab} ${p.id === selectedCachePersonaId ? styles.personaTabActive : ''}`}
+                                                            onClick={() => setSelectedCachePersonaId(p.id)}
+                                                        >
+                                                            {p.name}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {renderContextStatusBody()}
                                         </div>
-                                        {metabolismEnabled && (
-                                            <>
-                                                <div className={styles.formGroup}>
-                                                    <label>
-                                                        整理をはじめる文字数（高水位）
-                                                        {metabolismHighCharsDefault != null && (
-                                                            <span className={styles.hint}> （モデルデフォルト: {metabolismHighCharsDefault.toLocaleString()}）</span>
-                                                        )}
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        className={styles.input}
-                                                        min={1}
-                                                        step={1000}
-                                                        value={metabolismHighChars ?? ''}
-                                                        placeholder={metabolismHighCharsDefault ? `（自動: ${metabolismHighCharsDefault}）` : '（自動）'}
-                                                        onChange={(e) => handleWatermarkInput('high', e.target.value)}
-                                                        onBlur={() => handleWatermarkCommit()}
-                                                    />
-                                                    <span className={styles.hint}>
-                                                        送っている会話がこの文字数を超えたら整理を始めます。
-                                                    </span>
-                                                </div>
-                                                <div className={styles.formGroup}>
-                                                    <label>
-                                                        整理後に目指す文字数（目標水位）
-                                                        {metabolismTargetCharsDefault != null && (
-                                                            <span className={styles.hint}> （モデルデフォルト: {metabolismTargetCharsDefault.toLocaleString()}）</span>
-                                                        )}
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        className={styles.input}
-                                                        min={1}
-                                                        step={1000}
-                                                        value={metabolismTargetChars ?? ''}
-                                                        placeholder={metabolismTargetCharsDefault ? `（自動: ${metabolismTargetCharsDefault}）` : '（自動）'}
-                                                        onChange={(e) => handleWatermarkInput('target', e.target.value)}
-                                                        onBlur={() => handleWatermarkCommit()}
-                                                    />
-                                                    <span className={styles.hint}>
-                                                        ここまで軽くなるよう、古い出来事から順にあらすじへ畳みます。
-                                                    </span>
-                                                </div>
-                                                <div className={styles.formGroup}>
-                                                    <label>
-                                                        そのまま残す直近の文字数（低水位）
-                                                        {metabolismLowCharsDefault != null && (
-                                                            <span className={styles.hint}> （モデルデフォルト: {metabolismLowCharsDefault.toLocaleString()}）</span>
-                                                        )}
-                                                    </label>
-                                                    <input
-                                                        type="number"
-                                                        className={styles.input}
-                                                        min={1}
-                                                        step={1000}
-                                                        value={metabolismLowChars ?? ''}
-                                                        placeholder={metabolismLowCharsDefault ? `（自動: ${metabolismLowCharsDefault}）` : '（自動）'}
-                                                        onChange={(e) => handleWatermarkInput('low', e.target.value)}
-                                                        onBlur={() => handleWatermarkCommit()}
-                                                    />
-                                                    <span className={styles.hint}>
-                                                        いちばん新しい側のこの文字数分は、整理せず会話のまま残します。低 ≤ 目標 ≤ 高 の順序が必要です。
-                                                    </span>
-                                                </div>
-                                            </>
-                                        )}
                                         <div className={styles.formGroup}>
                                             <label>
                                                 画像埋め込み上限
@@ -887,6 +958,9 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 onSaved={() => {
                     // Reload everything since the model file changed
                     fetchData();
+                    // 水位もモデル定義由来 — 編集直後の旧値を出し続けない
+                    setContextStatus(null);
+                    setContextStatusReload(n => n + 1);
                 }}
             />
         </div>

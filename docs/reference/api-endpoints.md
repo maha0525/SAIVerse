@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 348（tag グループ: 24）
+**エンドポイント数**: 347（tag グループ: 24）
 
 ## addon
 
@@ -109,8 +109,6 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/config/max-image-embeds` | Set session override for max image embeds. |
 | GET | `/api/config/media-recall` | Get whether attached media (image/audio/video) summaries feed the auto-recall query. |
 | POST | `/api/config/media-recall` | Toggle attached-media auto-recall and persist to .env. |
-| GET | `/api/config/metabolism` | Metabolism の現在設定 (三水位は文字数)。 |
-| POST | `/api/config/metabolism` | Metabolism 設定を更新する (三水位は文字数、グローバル override)。 |
 | POST | `/api/config/model` | Set the global model override and return updated config. |
 | GET | `/api/config/models` | List available LLM models. |
 | POST | `/api/config/models` | Create a new model JSON file in user_data. |
@@ -247,6 +245,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/clips` | メッセージ群に付いた観測点 (点クリップ) をバッチで返す (画面 C: ハイライト)。 |
 | GET | `/api/people/{persona_id}/config` | Get persona configuration. |
 | PATCH | `/api/people/{persona_id}/config` | Update persona configuration. |
+| GET | `/api/people/{persona_id}/context-status` | 指定ペルソナの提示コンテキスト状態 (水位 + 現在文字数) を read-only で返す。 |
 | GET | `/api/people/{persona_id}/core-memory` | 生存中のコア記憶を一覧する (未確認フラグ付き)。訂正・確認・削除は各変更系 API で。 |
 | POST | `/api/people/{persona_id}/core-memory/scene` | アンカー周辺の会話を scene としてコア記憶に刻む。 |
 | GET | `/api/people/{persona_id}/core-memory/trash` | ごみ箱 (soft-delete 済み) のコア記憶を削除の新しい順に一覧する。 |

@@ -51,8 +51,10 @@ class SessionLifecycle:
         自分の提示コンテキストを管理する)。``model_key`` は実行 model。None なら従来どおり
         ``persona.model`` にフォールバックする。
 
-        manager の override (グローバル設定 UI) が最優先。model が解決できない
-        場合だけ None を返す (= Metabolism を回せない)。
+        水位の出所は model 定義一本 (2026-07-30、グローバル上書きは廃止 —
+        docs/issues/chat_options_metabolism_section_redesign.md)。model が
+        解決できない場合と、model 定義が水位を null にしている場合は None を
+        返す (= Metabolism を持たない。これが唯一のオプトアウト)。
         """
         persona_model = model_key or getattr(persona, "model", None)
         if not persona_model:
@@ -64,18 +66,9 @@ class SessionLifecycle:
         )
         model_name = str(persona_model)
 
-        def _override(name: str):
-            return getattr(self.manager, name, None) if self.manager else None
-
-        low = _override("metabolism_low_chars_override")
-        if low is None:
-            low = get_metabolism_low_chars(model_name)
-        target = _override("metabolism_target_chars_override")
-        if target is None:
-            target = get_metabolism_target_chars(model_name)
-        high = _override("metabolism_high_chars_override")
-        if high is None:
-            high = get_metabolism_high_chars(model_name)
+        low = get_metabolism_low_chars(model_name)
+        target = get_metabolism_target_chars(model_name)
+        high = get_metabolism_high_chars(model_name)
 
         if low is None or target is None:
             # 低・目標が無い設定は退場の量を決められない = Metabolism を持たない。
@@ -1064,9 +1057,6 @@ class SessionLifecycle:
         旧 ``history_manager.metabolism_anchor_message_id`` (persona 単一可変
         属性) は廃止した。
         """
-        if not getattr(self.manager, "metabolism_enabled", False):
-            return
-
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
             return
@@ -1873,8 +1863,6 @@ class SessionLifecycle:
             "skip" (条件外・超過なし) / run_metabolism の結果
             ("ok"/"nothing"/"failed"/"deferred")。
         """
-        if not getattr(self.manager, "metabolism_enabled", False):
-            return "skip"
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
             return "skip"
@@ -1949,8 +1937,6 @@ class SessionLifecycle:
             "skip" (条件外・不足なし・開ける区間なし・競合で見送り) /
             "ok" (開き直した)
         """
-        if not getattr(self.manager, "metabolism_enabled", False):
-            return "skip"
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
             return "skip"
@@ -2043,6 +2029,7 @@ class SessionLifecycle:
 
     def preview_refilled_history(
         self, persona, model_key: Optional[str] = None,
+        *, raise_on_error: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """§15 読み戻し後の提示を**読みだけ**で組む (context preview 用)。
 
@@ -2050,6 +2037,12 @@ class SessionLifecycle:
         窓を見せると「話しかけた時に実際に見える窓」より薄い嘘になる。§14-2
         の preview (persist_advance=False) と同じ型 — 内容は本番の読み戻しと
         同じ計算 (最終検算まで)、行は一切触らない (§14-6-5)。
+
+        ``raise_on_error=True`` は組み立て失敗を例外で伝える (既定は WARNING +
+        None へ縮退 = 会話プレビューの fail-open)。None が「適用なし (正常)」と
+        「内部失敗」の両方を意味すると、context-status のような読み手が障害を
+        正常値として表示してしまうため、区別が要る呼び出し側はこちらを使う
+        (Codex 指摘 2026-07-30。get_memory_weave_context の raise_on_error と同じ型)。
 
         Returns:
             読み戻しが適用されない状況 (不足なし・開ける区間なし等) は None —
@@ -2063,8 +2056,6 @@ class SessionLifecycle:
                          この名簿で組み直すのに使う),
                 }
         """
-        if not getattr(self.manager, "metabolism_enabled", False):
-            return None
         model_key = str(model_key or getattr(persona, "model", "") or "") or None
         if not model_key:
             return None
@@ -2081,6 +2072,8 @@ class SessionLifecycle:
                 persona, model_key, anchor_id, watermarks,
             )
         except Exception:
+            if raise_on_error:
+                raise
             LOGGER.warning(
                 "[metabolism] refill preview failed; falling back to the "
                 "plain window (persona=%s)",
@@ -2462,8 +2455,6 @@ class SessionLifecycle:
         Returns: "skip" (対象外) / "hot" (生きたキャッシュあり) /
         "cool" (中間値以下) / "due" (発火条件成立)
         """
-        if not getattr(self.manager, "metabolism_enabled", False):
-            return "skip"
         persona_id = getattr(persona, "persona_id", None)
         model_key = str(getattr(persona, "model", "") or "") or None
         if not persona_id or not model_key:

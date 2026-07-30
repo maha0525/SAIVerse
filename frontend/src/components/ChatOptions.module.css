@@ -417,3 +417,37 @@
 .cacheTtlOverrideRow .select {
     flex: 1 1 auto;
 }
+
+/* --- Context volume (データ送信量の状態表示) --- */
+.contextBar {
+    position: relative;
+    height: 16px;
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.18);
+    overflow: hidden;
+    margin: 6px 0 4px;
+}
+.contextBarFill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 8px;
+    transition: width 0.3s ease;
+}
+.contextBarMarker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: rgba(127, 127, 127, 0.85);
+}
+.contextStatRow {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 4px;
+}

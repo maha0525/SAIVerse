@@ -340,7 +340,6 @@ def _make_lifecycle(session_factory):
             }
         ),
         personas={},
-        metabolism_enabled=True,
     )
     runtime = SimpleNamespace(run_cache_keepalive=lambda pid, mk=None: None)
     return SessionLifecycle(runtime, manager)
@@ -512,6 +511,26 @@ def test_preview_refilled_history_none_when_at_target(session_factory):
             patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
             patch.object(lc, "get_presented_window", return_value=window):
         assert lc.preview_refilled_history(persona, "model-a") is None
+
+
+def test_preview_refill_raise_on_error_distinguishes_failure(session_factory):
+    """既定は fail-open (内部失敗 → None) だが、strict では例外が届くこと。
+
+    None が「適用なし (正常)」と「内部失敗」の両方を意味すると、context-status の
+    ような読み手が障害を正常値として表示する (Codex 指摘 2026-07-30)。
+    """
+    lc = _make_lifecycle(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m0", "updated_at": _now().isoformat(), "ttl_seconds": 3600,
+    })
+    wm = Watermarks(low=1000, target=2000, high=4000)
+    with patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+            patch.object(lc, "resolve_metabolism_anchor", return_value=("m0", "self")), \
+            patch.object(lc, "_plan_window_refill", side_effect=RuntimeError("boom")):
+        assert lc.preview_refilled_history(persona, "model-a") is None
+        with pytest.raises(RuntimeError):
+            lc.preview_refilled_history(persona, "model-a", raise_on_error=True)
 
 
 def test_refill_head_recapture_failure_retries_and_warns(session_factory, caplog):

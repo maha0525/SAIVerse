@@ -296,12 +296,8 @@ class InitializationMixin:
             self.provider = get_model_provider(base_model)
         self._base_model = base_model
         self.model_parameter_overrides: Dict[str, Any] = {}
-        self.metabolism_enabled: bool = True
-        # Metabolism の三水位 (文字数) のグローバル上書き。None = model 設定に従う
-        # (docs/intent/chronicle_eviction.md §4)。
-        self.metabolism_low_chars_override: Optional[int] = None
-        self.metabolism_target_chars_override: Optional[int] = None
-        self.metabolism_high_chars_override: Optional[int] = None
+        # Metabolism は常時 ON (2026-07-30 OFF トグル撤去)。水位は model 定義
+        # 一本で解決する (sea/session_lifecycle.py get_metabolism_watermarks)。
         self.max_image_embeds_override: Optional[int] = None
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:

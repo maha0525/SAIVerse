@@ -1,6 +1,8 @@
 import logging
 import os
 import json
+import threading
+import time
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -60,6 +62,13 @@ class PlaybookInfo(BaseModel):
 class UpdateModelRequest(BaseModel):
     model: str
     parameters: Optional[Dict[str, Any]] = None
+    # 選択世代 (単調増加) と、その世代の名前空間 (クライアント識別子)。abort された
+    # 古い要求の遅延完了が同じクライアントの新しい選択を上書きしないための順序
+    # トークン (Codex 指摘 2026-07-30)。世代は client_id ごとに独立 — サーバー全体で
+    # 一本にすると、カウンターがマウントごとに 0 へ戻るクライアントの再読込や別タブを
+    # 恒久的に 409 にしてしまう (Codex 指摘 5巡目)。両方揃った要求だけ検査する。
+    seq: Optional[int] = None
+    client_id: Optional[str] = None
 
 class UpdateParametersRequest(BaseModel):
     parameters: Dict[str, Any]
@@ -78,19 +87,6 @@ class ModelConfigResponse(BaseModel):
     current_model: Optional[str]
     parameters: Dict[str, ParameterSpec]
     current_values: Dict[str, Any]
-    metabolism_enabled: bool = True
-    # Metabolism の三水位 (文字数)。docs/intent/chronicle_eviction.md §4
-    # 実効値 / グローバル override / モデル既定を分けて返す (UI の入力欄は
-    # override を映す — 実効値だと「未設定」が表現できない)。
-    metabolism_low_chars: Optional[int] = None
-    metabolism_low_chars_override: Optional[int] = None
-    metabolism_low_chars_model_default: Optional[int] = None
-    metabolism_target_chars: Optional[int] = None
-    metabolism_target_chars_override: Optional[int] = None
-    metabolism_target_chars_model_default: Optional[int] = None
-    metabolism_high_chars: Optional[int] = None
-    metabolism_high_chars_override: Optional[int] = None
-    metabolism_high_chars_model_default: Optional[int] = None
     max_image_embeds: Optional[int] = None
     max_image_embeds_model_default: Optional[int] = None
 
@@ -299,10 +295,6 @@ def get_current_config(manager = Depends(get_manager)):
             "current_model": None,
             "parameters": {},
             "current_values": {},
-            "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-            # override も同じ形で返す — UI の入力欄は override を映すので、ここで
-            # 欠けると設定済みの値が空欄に見え、次の onBlur で消えてしまう。
-            **_metabolism_watermark_payload(manager, None),
             "max_image_embeds": getattr(manager, "max_image_embeds_override", None),
             "max_image_embeds_model_default": None,
         }
@@ -343,9 +335,8 @@ def get_current_config(manager = Depends(get_manager)):
     if manager.model_parameter_overrides:
         current_values.update(manager.model_parameter_overrides)
 
-    # Metabolism の三水位 (文字数) と画像埋め込み上限
+    # 画像埋め込み上限
     from saiverse.model_configs import get_max_image_embeds
-    watermarks = _metabolism_watermark_payload(manager, current_model)
 
     img_embeds_override = getattr(manager, "max_image_embeds_override", None)
     img_embeds_model_default = get_max_image_embeds(current_model)
@@ -354,17 +345,58 @@ def get_current_config(manager = Depends(get_manager)):
         "current_model": current_model,
         "parameters": specs,
         "current_values": current_values,
-        "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-        **watermarks,
         "max_image_embeds": img_embeds_override if img_embeds_override is not None else img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
     }
 
+#: モデル変更の直列化 + 世代ガード。FastAPI の同期 handler はスレッドプールで
+#: 並行実行されるため、ロック無しだと二つの set_model (全 persona の順次更新) が
+#: 交錯して manager と各 persona のモデルがばらける。世代 (client_id ごとの seq) は
+#: 同一クライアント内の選択順を保存する — abort された古い要求が遅れて到着しても
+#: 適用しない。クライアント間の順序は従来どおり到着順 (last-write-wins)。
+_MODEL_CHANGE_LOCK = threading.Lock()
+#: client_id → (最終 seq, 最終利用時刻 monotonic 秒)。
+_model_change_seqs: Dict[str, tuple[int, float]] = {}
+#: client_id 台帳の目安上限 (リロードごとに id が変わるため無限に増えないよう刈る)
+_MODEL_CHANGE_SEQS_MAX = 64
+#: 刈ってよいのは最終利用からこの秒数を過ぎた項目だけ。遅着しうるのは abort
+#: (10 秒期限) 直後の要求だけなので 10 分は桁で余裕がある — 全消しにすると
+#: 生きているクライアントの順序保証ごと消える (Codex 指摘 2026-07-30 7巡目)。
+_MODEL_CHANGE_SEQ_TTL_SECONDS = 600.0
+
+
 @router.post("/model")
 def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
-    """Set the global model override and return updated config."""
-    manager.set_model(req.model, req.parameters)
-    
+    """Set the global model override and return updated config.
+
+    ``client_id`` + ``seq`` 付きの要求は世代ガードを通す — 同じクライアントで
+    既に新しい世代が適用済みなら 409 (呼び出し側は現在状態を取り直す)。省略時は
+    従来どおり無条件適用 (他の呼び出し元との互換)。適用自体はロックで直列化する。
+    """
+    with _MODEL_CHANGE_LOCK:
+        if req.seq is not None and req.client_id:
+            now = time.monotonic()
+            last = _model_change_seqs.get(req.client_id, (0, now))[0]
+            if req.seq <= last:
+                raise HTTPException(
+                    status_code=409,
+                    detail="stale model change (a newer selection was applied)",
+                )
+            if req.client_id not in _model_change_seqs and (
+                len(_model_change_seqs) >= _MODEL_CHANGE_SEQS_MAX
+            ):
+                # 安全期間を過ぎた項目だけ刈る。全消しは生きているクライアントの
+                # 順序保証ごと失う。全項目が新しければ一時的に上限を超えて持つ —
+                # 実質、直近 10 分に操作したクライアント数でしか増えない。
+                cutoff = now - _MODEL_CHANGE_SEQ_TTL_SECONDS
+                for cid in [
+                    c for c, (_s, touched) in _model_change_seqs.items()
+                    if touched < cutoff
+                ]:
+                    del _model_change_seqs[cid]
+            _model_change_seqs[req.client_id] = (req.seq, now)
+        manager.set_model(req.model, req.parameters)
+
     # Return full config inline to avoid a separate /config fetch
     current_model = manager.model or None
     
@@ -412,14 +444,8 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     if manager.model_parameter_overrides:
         current_values.update(manager.model_parameter_overrides)
 
-    # Metabolism の三水位 (モデル変更で override はリセット)
-    from saiverse.model_configs import get_max_image_embeds
-    manager.metabolism_low_chars_override = None
-    manager.metabolism_target_chars_override = None
-    manager.metabolism_high_chars_override = None
-    watermarks = _metabolism_watermark_payload(manager, current_model)
-
     # Image embeds (reset override on model change)
+    from saiverse.model_configs import get_max_image_embeds
     manager.max_image_embeds_override = None
     img_embeds_model_default = get_max_image_embeds(current_model)
 
@@ -429,8 +455,6 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         "current_model": current_model,
         "parameters": specs,
         "current_values": current_values,
-        "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
-        **watermarks,
         "max_image_embeds": img_embeds_model_default,
         "max_image_embeds_model_default": img_embeds_model_default,
     }
@@ -756,126 +780,6 @@ def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
     from api.routes.admin import write_env_updates
     write_env_updates({"SAIVERSE_MEDIA_RECALL_ENABLED": "true" if req.enabled else "false"})
     return {"success": True, "enabled": req.enabled}
-
-
-#: 三水位の (API フィールド名, manager override 属性, model config getter)。
-_WATERMARK_FIELDS = (
-    ("metabolism_low_chars", "metabolism_low_chars_override", "get_metabolism_low_chars"),
-    ("metabolism_target_chars", "metabolism_target_chars_override", "get_metabolism_target_chars"),
-    ("metabolism_high_chars", "metabolism_high_chars_override", "get_metabolism_high_chars"),
-)
-
-
-def _metabolism_watermark_payload(manager, current_model: Optional[str]) -> Dict[str, Any]:
-    """三水位の「実効値 + override + モデル既定」を API 応答用に組む。
-
-    ``*_override`` を分けて返すのは、UI の入力欄が **override だけ**を映すため
-    (実効値を映すと「未設定」が表現できず、別名保存でモデル既定が焼き付いて
-    以後の既定変更に追従しなくなる)。
-    """
-    import saiverse.model_configs as _mc
-
-    payload: Dict[str, Any] = {}
-    for field, attr, getter in _WATERMARK_FIELDS:
-        override = getattr(manager, attr, None)
-        model_default = getattr(_mc, getter)(current_model) if current_model else None
-        payload[field] = override if override is not None else model_default
-        payload[f"{field}_override"] = override
-        payload[f"{field}_model_default"] = model_default
-    return payload
-
-
-class MetabolismConfigRequest(BaseModel):
-    enabled: Optional[bool] = None
-    # 三水位 (文字数)。**キーを送らなければ据え置き、null を明示で送れば解除**
-    # (モデル既定に戻す)。``clear=True`` は三つまとめて解除。
-    low_chars: Optional[int] = None
-    target_chars: Optional[int] = None
-    high_chars: Optional[int] = None
-    clear: bool = False
-
-
-@router.get("/metabolism")
-def get_metabolism_settings(manager=Depends(get_manager)):
-    """Metabolism の現在設定 (三水位は文字数)。
-
-    docs/intent/chronicle_eviction.md §4 — 低 = 直近保護帯 / 目標 = 削る到達点 /
-    高 = 発火。高が未設定なら文字数では発火せず token 閾値のみで動く。
-    """
-    current_model = manager.model or None
-    payload = _metabolism_watermark_payload(manager, current_model)
-    payload["enabled"] = getattr(manager, "metabolism_enabled", True)
-    return payload
-
-
-@router.post("/metabolism")
-def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_manager)):
-    """Metabolism 設定を更新する (三水位は文字数、グローバル override)。"""
-    if req.enabled is not None:
-        manager.metabolism_enabled = req.enabled
-
-    if req.clear:
-        for _field, attr, _getter in _WATERMARK_FIELDS:
-            setattr(manager, attr, None)
-    else:
-        # 「送られなかったキー」と「明示的な null」を区別する — 前者は据え置き、
-        # 後者は override 解除 (モデル既定に戻す)。
-        sent = req.model_fields_set
-        requested = {
-            attr: getattr(req, field)
-            for field, attr in (
-                ("low_chars", "metabolism_low_chars_override"),
-                ("target_chars", "metabolism_target_chars_override"),
-                ("high_chars", "metabolism_high_chars_override"),
-            )
-            if field in sent
-        }
-        for attr, value in requested.items():
-            if value is not None and value < 1:
-                raise HTTPException(
-                    status_code=400, detail=f"{attr} must be >= 1 or null",
-                )
-        # 低 ≤ 目標 ≤ 高 を検証する。順序が崩れると「保護帯を守ると目標に届かない」が
-        # 常態化するので入口で弾く。**検証を全部通してから一括で適用する** — 途中で
-        # 400 を返すと、解除だけ済んで画面と実状態がずれる。
-        import saiverse.model_configs as _mc
-
-        current_model = manager.model or None
-        resolved: Dict[str, Any] = {}
-        for field, attr, getter in _WATERMARK_FIELDS:
-            if attr in requested:
-                value = requested[attr]
-                # 明示 null = override 解除 → 実効値はモデル既定に戻る
-                resolved[field] = (
-                    value if value is not None
-                    else (getattr(_mc, getter)(current_model) if current_model else None)
-                )
-            else:
-                override = getattr(manager, attr, None)
-                resolved[field] = (
-                    override if override is not None
-                    else (getattr(_mc, getter)(current_model) if current_model else None)
-                )
-        low = resolved["metabolism_low_chars"]
-        target = resolved["metabolism_target_chars"]
-        high = resolved["metabolism_high_chars"]
-        if low is not None and target is not None and low > target:
-            raise HTTPException(
-                status_code=400,
-                detail=f"低水位 ({low}) は目標水位 ({target}) 以下である必要があります",
-            )
-        if target is not None and high is not None and target > high:
-            raise HTTPException(
-                status_code=400,
-                detail=f"目標水位 ({target}) は高水位 ({high}) 以下である必要があります",
-            )
-        for attr, value in requested.items():
-            setattr(manager, attr, value)
-
-    payload = _metabolism_watermark_payload(manager, manager.model or None)
-    payload["success"] = True
-    payload["enabled"] = getattr(manager, "metabolism_enabled", True)
-    return payload
 
 
 class MaxImageEmbedsRequest(BaseModel):
@@ -1206,6 +1110,55 @@ def get_model_file(key: str):
     return {"key": key, "config": cfg, "source": source}
 
 
+def _validate_metabolism_watermarks(config: Dict[str, Any]) -> None:
+    """水位の実効順序 (低 ≤ 目標 ≤ 高) をモデル保存の入口で検証する。
+
+    キー無しは実行時に組み込み既定へ解決される (saiverse/model_configs.py の
+    `_metabolism_chars`) ため、**実効値**で検証しないと「high=5万だけ指定 →
+    実効 target=既定10万 > high」の壊れた順序が保存できてしまう (Codex 指摘
+    2026-07-30)。明示 null / 0 以下は「その水位を持たない」= 順序制約の対象外
+    (実行時の解釈と同じ)。数値でも null でもない型はここで弾く。
+    """
+    from saiverse.model_configs import (
+        BUILTIN_METABOLISM_HIGH_CHARS,
+        BUILTIN_METABOLISM_LOW_CHARS,
+        BUILTIN_METABOLISM_TARGET_CHARS,
+    )
+
+    def _effective(key: str, builtin: int) -> Optional[int]:
+        if key not in config:
+            return builtin
+        value = config[key]
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(
+                status_code=400, detail=f"{key} は数値か null で指定してください",
+            )
+        num = int(value)
+        return num if num > 0 else None
+
+    low = _effective("metabolism_low_chars", BUILTIN_METABOLISM_LOW_CHARS)
+    target = _effective("metabolism_target_chars", BUILTIN_METABOLISM_TARGET_CHARS)
+    high = _effective("metabolism_high_chars", BUILTIN_METABOLISM_HIGH_CHARS)
+    if low is not None and target is not None and low > target:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"最初に読み込む文字数 ({low:,}) は整理後に残す文字数 ({target:,}) "
+                "以下にしてください（空欄のキーは標準の既定値で数えます）"
+            ),
+        )
+    if target is not None and high is not None and target > high:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"整理後に残す文字数 ({target:,}) は整理をはじめる文字数 ({high:,}) "
+                "以下にしてください（空欄のキーは標準の既定値で数えます）"
+            ),
+        )
+
+
 @router.post("/models", status_code=201)
 def create_model_file(req: ModelFileCreateRequest):
     """Create a new model JSON file in user_data."""
@@ -1224,6 +1177,7 @@ def create_model_file(req: ModelFileCreateRequest):
 
     payload = _strip_runtime_fields(req.config)
     _validate_model_connection(req.key, payload)
+    _validate_metabolism_watermarks(payload)
     user_path.parent.mkdir(parents=True, exist_ok=True)
     user_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -1251,6 +1205,7 @@ def update_model_file(key: str, req: ModelFileUpdateRequest):
 
     payload = _strip_runtime_fields(req.config)
     _validate_model_connection(key, payload)
+    _validate_metabolism_watermarks(payload)
     user_path = _model_user_path(key)
     user_path.parent.mkdir(parents=True, exist_ok=True)
     was_user_data = user_path.exists()
@@ -1384,6 +1339,7 @@ def save_model_from_chat(req: SaveModelFromChatRequest):
     if req.max_image_embeds is not None:
         new_config["max_image_embeds"] = req.max_image_embeds
 
+    _validate_metabolism_watermarks(new_config)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(
         json.dumps(new_config, ensure_ascii=False, indent=2),

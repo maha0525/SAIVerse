@@ -357,12 +357,7 @@ class DeferToHotTest(unittest.TestCase):
         from sea.eviction_plan import Watermarks
         from sea.session_lifecycle import SessionLifecycle
 
-        manager = SimpleNamespace(
-            metabolism_enabled=True,
-            metabolism_low_chars_override=None,
-            metabolism_target_chars_override=None,
-            metabolism_high_chars_override=None,
-        )
+        manager = SimpleNamespace()
         runtime = SimpleNamespace()
         lifecycle = SessionLifecycle(runtime, manager)
 

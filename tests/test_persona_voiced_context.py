@@ -203,26 +203,33 @@ class _FakeHistoryManager:
         return []
 
 
-def _runtime_without_metabolism():
-    """Metabolism 無効の runtime (履歴上限の解決に session_lifecycle が要る)。"""
+def _runtime_at_bootstrap():
+    """anchor 未確立 (ブートストラップ) の runtime。
+
+    Metabolism は常時 ON になった (2026-07-30 OFF トグル撤去) ため、旧「無効時の
+    スライディングウィンドウ」テストは「anchor 行が無いときの最小ロード」テストへ
+    改装した — 守りたい回帰は同じ (初期読み込み量は実行 model の低水位で選ぶ)。
+    """
     from sea.session_lifecycle import SessionLifecycle
 
-    manager = SimpleNamespace(metabolism_enabled=False)
-    return SimpleNamespace(
-        manager=manager,
-        session_lifecycle=SessionLifecycle(SimpleNamespace(), manager),
+    manager = SimpleNamespace()
+    lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+    lifecycle.resolve_metabolism_anchor = (
+        lambda persona, model_key=None, persist_advance=True: (None, "none")
     )
+    lifecycle.preview_refilled_history = lambda persona, model_key=None: None
+    return SimpleNamespace(manager=manager, session_lifecycle=lifecycle)
 
 
-def test_history_limit_without_metabolism_uses_execution_model(monkeypatch):
-    """Metabolism 無効時、履歴上限は persona.model でなく model_key で選ぶこと。
+def test_bootstrap_history_limit_uses_execution_model(monkeypatch):
+    """anchor 未確立時、履歴上限は persona.model でなく model_key で選ぶこと。
 
     persona.model (標準モデル、例: 10万字) と model_key (実行 model、例:
     軽量モデル・2万字) が食い違うとき、persona.model 基準で上限を選ぶと
     標準モデル分の履歴を軽量クライアントへ送り、context-length error になる
     (2026-07-24 Codex レビュー指摘、work_session が軽量モデルで走ることの実害)。
 
-    上限の実体は低水位 = 直近保護帯の文字数 (chronicle_eviction.md §4)。
+    上限の実体は低水位 = 初期読み込み量の文字数。
     """
     monkeypatch.setattr(
         "sea.head_pipeline.render_head_messages", lambda *a, **k: []
@@ -241,7 +248,7 @@ def test_history_limit_without_metabolism_uses_execution_model(monkeypatch):
     )
 
     prepare_context(
-        runtime=_runtime_without_metabolism(),
+        runtime=_runtime_at_bootstrap(),
         persona=persona,
         building_id="air_city_a_room",
         user_input=None,
@@ -257,7 +264,7 @@ def test_history_limit_without_metabolism_uses_execution_model(monkeypatch):
     )
 
 
-def test_history_limit_without_metabolism_falls_back_to_persona_model(monkeypatch):
+def test_bootstrap_history_limit_falls_back_to_persona_model(monkeypatch):
     """model_key 未指定 (preview 等) では persona.model にフォールバックすること。"""
     monkeypatch.setattr(
         "sea.head_pipeline.render_head_messages", lambda *a, **k: []
@@ -275,7 +282,7 @@ def test_history_limit_without_metabolism_falls_back_to_persona_model(monkeypatc
     )
 
     prepare_context(
-        runtime=_runtime_without_metabolism(),
+        runtime=_runtime_at_bootstrap(),
         persona=persona,
         building_id="air_city_a_room",
         user_input=None,
@@ -286,6 +293,73 @@ def test_history_limit_without_metabolism_falls_back_to_persona_model(monkeypatc
     )
 
     assert captured.get("limit") == 100_000
+
+
+def test_null_watermark_model_never_touches_anchor(monkeypatch):
+    """水位 null の model は Metabolism を持たない = anchor 経路に一切入らないこと。
+
+    OFF トグル撤去 (2026-07-30) 後の唯一のオプトアウト。水位が無いのに anchor
+    起点で読むと、退場が働かないまま窓の始点だけ固定され提示が際限なく伸びる。
+    また LLM 成功時の touch が anchor 行を生まないよう、count-based の anchor
+    候補 (context_meta["prefix_anchor_id"]) も立てないこと (Codex 指摘 2026-07-30)。
+    """
+    monkeypatch.setattr(
+        "sea.head_pipeline.render_head_messages", lambda *a, **k: []
+    )
+    from saiverse import model_configs
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        "no-metabolism": {
+            "metabolism_low_chars": None,
+            "metabolism_target_chars": None,
+            "metabolism_high_chars": None,
+        },
+    })
+
+    from sea.session_lifecycle import SessionLifecycle
+
+    calls: list = []
+    manager = SimpleNamespace()
+    lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+    lifecycle.resolve_metabolism_anchor = (
+        lambda *a, **k: calls.append("resolve") or (None, "none")
+    )
+    lifecycle.preview_refilled_history = (
+        lambda *a, **k: calls.append("preview") or None
+    )
+    runtime = SimpleNamespace(manager=manager, session_lifecycle=lifecycle)
+
+    captured: dict = {}
+
+    class _HistoryWithMessages(_FakeHistoryManager):
+        def get_recent_history(self, max_chars, **_kwargs):
+            self._captured["limit"] = max_chars
+            # 非空を返す — anchor 候補ゲートを実際に通過させるため
+            return [{"id": "m1", "content": "hello"}]
+
+    persona = SimpleNamespace(
+        persona_id="air_city_a",
+        model="no-metabolism",
+        context_length=30_000,
+        history_manager=_HistoryWithMessages(captured),
+    )
+    context_meta: dict = {}
+
+    prepare_context(
+        runtime=runtime,
+        persona=persona,
+        building_id="air_city_a_room",
+        user_input=None,
+        requirements=ContextRequirements(history_depth="full"),
+        model_key=None,
+        persona_voiced=True,
+        preview_only=False,
+        context_meta=context_meta,
+    )
+
+    assert calls == [], f"水位なし model が anchor 経路を触った: {calls}"
+    # 水位が無いので context_length ベースの最小ロードに落ちる
+    assert captured.get("limit") == 30_000
+    assert "prefix_anchor_id" not in context_meta
 
 
 if __name__ == "__main__":

@@ -63,15 +63,25 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
 
 
 def _minimal_load_chars(runtime, persona: Any, model_key: Optional[str]) -> int:
-    """anchor が無い / Metabolism 無効なときに読む履歴の文字数。
+    """anchor が無い (ブートストラップ / 修復直後) ときに読む履歴の文字数。
 
-    低水位 (直近保護帯、docs/intent/chronicle_eviction.md §4) をそのまま使う —
-    「Metabolism 後に残っている量」と「anchor 無しで読み直す量」は同じであるべき
-    だから (再開時に提示コンテキストの大きさが飛ぶと prefix が毎回作り直しになる)。
+    低水位 (docs/intent/chronicle_eviction.md §4) をそのまま使う — 低水位の
+    唯一の現役の役割がこの初期読み込み量 (eviction では未使用、残す量 = 目標が
+    保護を兼ねる)。再開時に提示コンテキストの大きさが飛ぶと prefix が毎回
+    作り直しになるので、控えめな量から始める。
     """
     lifecycle = getattr(runtime, "session_lifecycle", None)
     if lifecycle is not None:
-        watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
+        try:
+            watermarks = lifecycle.get_metabolism_watermarks(persona, model_key)
+        except Exception:
+            # 解決失敗はここで受けて context_length へ退避 — 外側の広い except に
+            # 抜けると履歴ゼロで応答が走る (Codex 指摘 2026-07-30)。
+            LOGGER.warning(
+                "[sea][prepare-context] Watermark resolution failed in minimal load",
+                exc_info=True,
+            )
+            watermarks = None
         if watermarks is not None and watermarks.low > 0:
             return watermarks.low
     return int(getattr(persona, "context_length", 2000) or 2000)
@@ -229,7 +239,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 required_scopes = ["committed"]
 
                 # Parse history_depth format
-                # - "full": anchor 以降の提示コンテキスト、または低水位ぶんの文字数 (Metabolism 無効時)
+                # - "full": anchor 以降の提示コンテキスト (anchor 未確立時は低水位ぶんの文字数)
                 # - "Nmessages" (e.g., "10messages"): message count limit
                 # - integer or numeric string: character limit
                 use_message_count = False
@@ -237,10 +247,38 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 used_anchor = False
                 recent = []
 
-                if history_depth == "full":
-                    metabolism_enabled = getattr(runtime.manager, "metabolism_enabled", False) if runtime.manager else False
+                # 実行 model が水位を持つか。モデル定義で水位を null にした model は
+                # Metabolism を持たない = anchor を使わない (これが唯一のオプトアウト、
+                # 2026-07-30 OFF トグル撤去)。退場が無いのに anchor 起点で読むと
+                # 提示が際限なく伸びるため、水位なし model は従来のスライディング
+                # ウィンドウで読む (Codex 指摘 2026-07-30)。
+                #
+                # 解決の失敗はここで受けて anchor 無効へ退避する — 外側の広い
+                # except に抜けると履歴ゼロで応答が走るサイレント障害になる
+                # (Codex 指摘 2巡目)。
+                _lifecycle = getattr(runtime, "session_lifecycle", None)
+                metabolism_active = False
+                if _lifecycle is not None:
+                    try:
+                        metabolism_active = (
+                            _lifecycle.get_metabolism_watermarks(persona, model_key)
+                            is not None
+                        )
+                    except Exception:
+                        LOGGER.warning(
+                            "[sea][prepare-context] Watermark resolution failed; "
+                            "falling back to sliding window",
+                            exc_info=True,
+                        )
 
-                    if metabolism_enabled and not preview_only:
+                if history_depth == "full":
+                    if not metabolism_active:
+                        limit_value = _minimal_load_chars(runtime, persona, model_key)
+                        LOGGER.debug(
+                            "[sea][prepare-context] Model has no watermarks; sliding window %d chars",
+                            limit_value,
+                        )
+                    elif not preview_only:
                         # Persistent anchor resolution with 3-level fallback。
                         # 「自 model」は実行 model (model_key)。None なら
                         # resolve 側が persona.model にフォールバックする。
@@ -300,7 +338,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 limit_value,
                             )
 
-                    elif metabolism_enabled and preview_only:
+                    else:
                         # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
                         # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)。
                         # §15 の読み戻しも同じ型で反映する — 実際の読み戻しは次の
@@ -352,19 +390,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         if not used_anchor:
                             limit_value = _minimal_load_chars(runtime, persona, model_key)
                             use_message_count = False
-
-                    if not used_anchor and not metabolism_enabled:
-                        # Metabolism disabled — 低水位 (直近保護帯) の文字数で読む。
-                        # 上限は実際にこの context を受け取る model (model_key) 基準で
-                        # 選ぶ。None なら persona の標準 model にフォールバック
-                        # (anchor 分岐と同じ規約、§3.1)。work_session 等の軽量モデル
-                        # 実行で、標準モデルの上限を軽量モデルへ送るとコンテキスト長を
-                        # 超える (2026-07-24 Codex レビュー指摘)。
-                        limit_value = _minimal_load_chars(runtime, persona, model_key)
-                        LOGGER.debug(
-                            "[sea][prepare-context] Metabolism disabled; using %d chars",
-                            limit_value,
-                        )
 
                 elif isinstance(history_depth, str) and history_depth.endswith("messages"):
                     # Message count mode: "10messages", "20messages", etc.
@@ -427,8 +452,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                     # fallback → minimal load、という挙動になる。新規 anchor が永続化されない
                     # こと自体は Case 3 を毎回繰り返すだけで致命的ではない (まはー確認済 2026-05-08)。
                     # §3.2: 候補は persona 属性ではなく context_meta (call-local) で運ぶ。
-                    metabolism_enabled_for_anchor = getattr(runtime.manager, "metabolism_enabled", False) if runtime.manager else False
-                    if metabolism_enabled_for_anchor and recent and not preview_only:
+                    # 水位なし model (Metabolism を持たない) は候補も立てない —
+                    # LLM 成功時の touch で anchor 行が生まれてしまうため。
+                    if metabolism_active and recent and not preview_only:
                         oldest_id = recent[0].get("id")
                         if oldest_id:
                             if context_meta is not None:
