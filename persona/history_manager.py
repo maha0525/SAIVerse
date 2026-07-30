@@ -462,6 +462,46 @@ class HistoryManager:
             selected.append(msg)
         return selected
 
+    def get_history_before_anchor(
+        self,
+        anchor_message_id: str,
+        *,
+        max_chars: int,
+        required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
+    ) -> List[Dict[str, str]]:
+        """anchor より前のメッセージを、合計 max_chars 分まで遡って返す (時系列昇順)。
+
+        読み戻し (arasuji_levels.md §15) の anchor 引き戻し用。
+        :meth:`get_history_from_anchor` の対。
+        """
+        if self.memory_adapter is not None and self.memory_adapter.is_ready():
+            return self.memory_adapter.persona_messages_before_anchor(
+                anchor_message_id,
+                max_chars=max_chars,
+                required_tags=required_tags,
+                required_line_roles=required_line_roles,
+                required_scopes=required_scopes,
+            )
+
+        # Fallback: scan in-memory messages before the anchor, newest first
+        anchor_index = None
+        for i, msg in enumerate(self.messages):
+            if msg.get("id") == anchor_message_id:
+                anchor_index = i
+                break
+        if anchor_index is None:
+            return []
+        selected: List[Dict[str, str]] = []
+        acc = 0
+        for msg in reversed(self.messages[:anchor_index]):
+            selected.append(msg)
+            acc += len(str(msg.get("content") or ""))
+            if acc >= max_chars:
+                break
+        return list(reversed(selected))
+
     def get_recent_history_balanced(
         self,
         max_chars: int,

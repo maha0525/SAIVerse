@@ -236,6 +236,7 @@ class SEARuntime:
         # 非常畳み (arasuji_levels.md §14-3): 話しかけた時点で提示ウィンドウが
         # 高水位を既に超過しているイレギュラー (休眠 model の復帰等) は、応答
         # より先に畳んで呼び出し失敗の連鎖を断つ。通常は "skip" で素通り。
+        _pre_model_key: Optional[str] = None
         try:
             _pre_probe_state: Dict[str, Any] = {}
             if pulse_type is not None:
@@ -248,6 +249,19 @@ class SEARuntime:
             )
         except Exception:
             LOGGER.exception("[metabolism] Emergency pre-compaction failed")
+        # 読み戻し (arasuji_levels.md §15): 非常畳みの対称。話しかけた時点で
+        # 提示ウィンドウが残す量を下回っていたら、応答より先に畳んだところを
+        # 開き直す (LLM なし・帳簿のみ)。通常は "skip" で素通り。
+        # run_meta_user は user / schedule / auto の共通入口なので、§15-4 の
+        # 「発火は user Pulse の会話開始時のみ」をここで絞る — 自律 Pulse の
+        # 軽量 model に会話用の厚い生ログを開かない。
+        if pulse_type in (None, "user"):
+            try:
+                self.session_lifecycle.maybe_run_window_refill(
+                    persona, building_id, model_key=_pre_model_key,
+                )
+            except Exception:
+                LOGGER.exception("[metabolism] window refill failed")
 
         # ``_root_role`` / ``_root_track_id`` were resolved up-front (above the
         # injector calls). Pulse 中に emit_speak/emit_say/emit_think などの

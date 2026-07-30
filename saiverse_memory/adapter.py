@@ -946,6 +946,63 @@ class SAIMemoryAdapter:
 
         return selected
 
+    def persona_messages_before_anchor(
+        self,
+        anchor_message_id: str,
+        *,
+        max_chars: int,
+        required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
+    ) -> List[dict]:
+        """anchor より正典順で前のメッセージを遡って返す (読み戻し §15 の材料読み)。
+
+        :meth:`persona_messages_from_anchor` の対。フィルタ**通過分**の content
+        合計が ``max_chars`` に達するまで新しい側から遡り、時系列昇順で返す。
+        フィルタは提示ウィンドウの読み (from_anchor) と同じ規則で適用する —
+        でないと読み戻しの文字勘定が提示の勘定とズレる。
+        """
+        if not self._ready or max_chars <= 0:
+            return []
+        thread_id = self._thread_id(None)
+        selected: List[dict] = []  # 新しい順に積む
+        acc = 0
+        boundary = anchor_message_id
+        try:
+            with self._db_lock:
+                from sai_memory.memory.storage import get_messages_before_id
+                while acc < max_chars:
+                    rows = get_messages_before_id(
+                        self.conn, thread_id, boundary, limit=500,
+                    )
+                    if not rows:
+                        break
+                    boundary = rows[0].id  # 最古行が次ページの排他境界
+                    for msg in reversed(rows):  # ページ内を新しい順に
+                        payload = self._payload_from_message_locked(
+                            msg, viewing_thread_id=thread_id,
+                        )
+                        if not _payload_passes_context_filter(
+                            payload,
+                            required_tags=required_tags,
+                            required_line_roles=required_line_roles,
+                            required_scopes=required_scopes,
+                            pulse_id=None,
+                        ):
+                            continue
+                        selected.append(payload)
+                        acc += len(str(payload.get("content") or ""))
+                        if acc >= max_chars:
+                            break
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to fetch persona messages before anchor %s: %s",
+                anchor_message_id, exc,
+            )
+            return []
+        selected.reverse()
+        return selected
+
     def recent_persona_messages_balanced(
         self,
         max_chars: int,

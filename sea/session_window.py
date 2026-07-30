@@ -62,6 +62,11 @@ class FoldedRange:
     chronicle_short_ids: List[int] = field(default_factory=list)
     #: この範囲が 1 つの open episode の部分退場だった場合の episode_ref。
     episode_ref: Optional[str] = None
+    #: 「生で見せる」印 (arasuji_levels.md §15 読み戻し)。True の範囲は digest に
+    #: 置き換えず生ログのまま提示する。**記録自体は消さない** — head のあらすじ枠の
+    #: 除外名簿 (chronicle_entry_ids) として効き続け、再畳み時は印を戻すだけで
+    #: 既存あらすじを再利用できる (編纂の書き直し不要)。
+    presented_raw: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -71,6 +76,7 @@ class FoldedRange:
             "chronicle_entry_ids": list(self.chronicle_entry_ids),
             "chronicle_short_ids": list(self.chronicle_short_ids),
             "episode_ref": self.episode_ref,
+            "presented_raw": self.presented_raw,
         }
 
     @classmethod
@@ -82,6 +88,8 @@ class FoldedRange:
             chronicle_entry_ids=[str(x) for x in (data.get("chronicle_entry_ids") or [])],
             chronicle_short_ids=[int(x) for x in (data.get("chronicle_short_ids") or [])],
             episode_ref=data.get("episode_ref"),
+            # 旧記録に無いキー → False (= digest 提示)。後方互換。
+            presented_raw=bool(data.get("presented_raw", False)),
         )
 
 
@@ -180,6 +188,17 @@ def apply_folds(
     member_of: Dict[str, FoldedRange] = {}
     for fold in folds:
         if not fold.message_ids:
+            continue
+        if fold.presented_raw and all(mid in live_ids for mid in fold.message_ids):
+            # 「生で見せる」印 (§15 読み戻し)。置き換え対象に載せない = 生のまま。
+            # 記録は head の除外名簿・再畳みの再利用のために残っているだけ。
+            #
+            # 印を尊重するのは**範囲全体が提示に居るときだけ**。anchor 前進
+            # (§14-2 等) で一部が窓の外に出た印付き区間を生扱いすると、外に
+            # 出た分が digest にも生にも現れず体験が消える (head の除外名簿は
+            # 効き続けるため)。部分生存になった区間は digest 提示に倒す —
+            # 置き換えが範囲全体を要約するので、外に出た分も digest で残る
+            # (Codex 指摘 2026-07-30)。
             continue
         for mid in fold.message_ids:
             member_of[mid] = fold

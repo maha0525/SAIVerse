@@ -158,6 +158,7 @@ sea/
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）
 ├── session_lifecycle.py  # Anchor / Metabolism / Chronicle 生成（Session の節目管理）
 ├── eviction_plan.py      # 退場計画（純関数。episode 単位・文字数三水位）
+├── window_refill.py      # 読み戻しの計画（純関数。残す量を下回る窓の開き直し — arasuji_levels §15）
 ├── session_window.py     # 提示コンテキストと圧縮区間の digest 置き換え
 ├── cancellation.py       # キャンセル
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築

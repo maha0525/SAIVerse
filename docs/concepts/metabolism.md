@@ -34,8 +34,9 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 | **手動** | `SessionLifecycle.run_manual_compaction`（記憶の整理ボタン / Chronicle タブの生成が合流） | ユーザーの明示操作。範囲規則は自動と同一（残す量より古い側だけ） |
 | **応答前の非常畳み**（§14-3） | `run_meta_user` 冒頭 → `maybe_run_emergency_precompaction` | 話しかけた時点で高水位を**既に**超過しているイレギュラー（休眠 model の復帰等）。原因不問の回復措置で、status イベントで通知（同意は求めない） |
 | **失効後の先回り畳み**（§14-4） | EventScheduler の定期見張り（10 分周期）→ `cold_precompaction_status` / `run_cold_precompaction` | 全 anchor 行が冷え切った + 提示ウィンドウが残す量と上限の**中間**を超過。編纂の総作業量は畳む時期によらず不変なので、前倒しで「冷えた再開時の定価読み」だけが消える。Chronicle 生成が有効（自律確認 ON）な persona のみ |
+| **応答前の読み戻し**（§15、2026-07-30） | `run_meta_user` 冒頭 → `maybe_run_window_refill`（非常畳みの直後） | 話しかけた時点で提示ウィンドウが**残す量を下回っている**（水位引き上げ後の既存ペルソナ / ほぼ全編纂済みでアップデートしたペルソナ）。畳んだところを開き直して残す量まで充填する — **編纂も LLM も無し**（圧縮区間に「生で見せる」印 `presented_raw` を付ける + 足りなければ一次あらすじの `source_ids` から記録を合成して anchor を引き戻す）。再畳みは印戻しだけで既存あらすじを再利用（`_refold_raw_view_folds` が退場計画より先に走る） |
 
-範囲規則は 4 経路とも同一（残す量より古い側だけ）。§14 の 2 経路は撤去した旧②④の復活ではない — 全量掃きせず・同意を求めず・会話開始を（非常時以外）ブロックしない（intent §14-5 の検算）。
+範囲規則は削る側の 4 経路とも同一（残す量より古い側だけ）。読み戻しはその対称（残す量まで開き直す。天井 = 残す量、引き戻しの梯子はあらすじの段だけ）。§14 の 2 経路は撤去した旧②④の復活ではない — 全量掃きせず・同意を求めず・会話開始を（非常時以外）ブロックしない（intent §14-5 の検算）。
 
 **旧実行点2つは 2026-07-29（intent §13）で撤去された**: ①会話前（anchor TTL 失効時の `runtime_context.py` Case 3 での全量編纂 + 最小ロード）②セッションクローズ（gold_panning からの前倒し全量編纂）。どちらも予算超過と無関係に編纂を発火させ、「発火はたまに・まとめて」（intent §3-2）に反していた。過去に「会話前経路は grep で見落とされ続けた」経緯があるため記録しておく — 現在は `generate_chronicle` の直接呼び出しは自動経路には存在しない。
 
@@ -68,7 +69,8 @@ Metabolism の起点を指すマーカー。
 - head 再構築: `sea/head_pipeline/integration.py`（可視化は anchor を進めた model の (persona, model) snapshot のみ — §6-5）
 - 結晶化 (W4 で episode 整列に世代交代): `sai_memory/arasuji/alignment.py`（整列計画）+ `executor.py`（チャンク実行）+ `bands.py`（列のあふれ束ね）+ `entity_extractor` の相乗り。冪等 claim は実行台帳（`saiverse/execution_ledger.py`）。詳細は [Chronicle](chronicle.md)
 - 退場の計画: `sea/eviction_plan.py`（純関数 `plan_eviction` — 残す量より古い側を、古い順に U ずつ刻んで全部畳む。切り位置は pulse 関節に寄せる。**エピソードに畳みを止める権利は無く**、末尾の U 未満の端数は次回へ残す。旧 episode 単位・二段構えは 2026-07-28 世代交代 — intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §4）
-- 提示コンテキストの圧縮区間と提示: `sea/session_window.py`（`SessionWindow` = anchor + 生ログ + 提示、`apply_folds` が digest 置き換え）。圧縮区間は `session_anchor.FOLDED_RANGES_JSON` に (persona, model) 単位で持つ
+- 提示コンテキストの圧縮区間と提示: `sea/session_window.py`（`SessionWindow` = anchor + 生ログ + 提示、`apply_folds` が digest 置き換え。`presented_raw` 印付きの区間は生のまま通す）。圧縮区間は `session_anchor.FOLDED_RANGES_JSON` に (persona, model) 単位で持つ
+- 読み戻しの計画: `sea/window_refill.py`（純関数 `plan_reopen` / `plan_rewind` — intent [`arasuji_levels.md`](../intent/arasuji_levels.md) §15）
 - 編纂範囲: 「今回退場させる範囲そのもの」（`generate_chronicle(compile_groups=...)`）。退場する集合と編纂する集合を一致させることが、下限「退場したものは必ず編纂されている」の手続き上の保証
 - Anchor 状態: `session_anchor` テーブル（1 行 = 1 (persona, model)）
 

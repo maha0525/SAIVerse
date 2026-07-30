@@ -1266,20 +1266,78 @@ class SessionLifecycle:
                 get_entries_covering_messages,
                 get_entry,
             )
-            entries = [
-                e for e in (
-                    get_entry(adapter.conn, eid) for eid in fold.chronicle_entry_ids
-                ) if e is not None
-            ]
-            if not entries:
+            wanted = list(dict.fromkeys(fold.chronicle_entry_ids))
+            if wanted:
+                entries = [
+                    e for e in (get_entry(adapter.conn, eid) for eid in wanted)
+                    if e is not None
+                ]
+                if len(entries) < len(wanted):
+                    # 記録された id が**全件揃わない** (一部でもゼロ件でも)。
+                    # 揃わない digest や、被覆保証の無い救済照会の結果で範囲
+                    # 全体を置き換えると、欠けたエントリだけが持つ体験が raw
+                    # からも digest からも静かに消える (Codex 指摘 2026-07-30
+                    # ×2巡)。恒久欠落扱いに倒す — 提示は生ログ (fail-open)、
+                    # 記録は _drop_dead_folds が捨て、次の畳みが
+                    # _attach_chronicle_refs で生き残りエントリを引き当て直す
+                    # (解体・再編纂で id が変わった旧記録もこの経路で自己修復
+                    # し、再編纂は走らない)。
+                    LOGGER.warning(
+                        "[window] folded range resolved only %d of %d chronicle "
+                        "entries; treating as permanently missing (persona=%s)",
+                        len(entries), len(wanted),
+                        getattr(persona, "persona_id", "?"),
+                    )
+                    return None, True
+            else:
+                # id を記録していない旧形式の記録だけ、メッセージからの
+                # 引き当てで救済する。被覆の検算つき — この照会は「どれか
+                # 1 件でも source に持つエントリ」を返すだけで範囲全体の
+                # 被覆を保証しないため、編纂対象メッセージ全件が被覆されて
+                # いることを確認する (対象判定は編纂側と同じ
+                # filter_chronicle_eligible_ids を共用 — 除外タグのメッセージ
+                # は被覆に無いのが健全)。
                 entries = get_entries_covering_messages(adapter.conn, fold.message_ids)
+                if entries:
+                    covered = {str(s) for e in entries for s in e.source_ids}
+                    try:
+                        from sai_memory.memory.storage import (
+                            filter_chronicle_eligible_ids,
+                        )
+                        required = filter_chronicle_eligible_ids(
+                            adapter.conn, fold.message_ids,
+                        )
+                    except Exception:
+                        # 判定できなければ全件要求 (体験を消さない側に倒す)
+                        required = list(fold.message_ids)
+                    if not {str(m) for m in required} <= covered:
+                        LOGGER.warning(
+                            "[window] legacy folded range is only partially "
+                            "covered by resolvable chronicle entries; treating "
+                            "as permanently missing (persona=%s)",
+                            getattr(persona, "persona_id", "?"),
+                        )
+                        return None, True
         except Exception:
             LOGGER.warning(
                 "[window] failed to look up chronicle entries for folded range "
                 "(persona=%s)", getattr(persona, "persona_id", "?"), exc_info=True,
             )
             return None, False
-        texts = [e.content for e in entries if e.content]
+        texts = [e.content for e in entries]
+        if entries and any(not t for t in texts):
+            # 本文が空のエントリ混じり。空を落として残りで置き換えると、空
+            # エントリだけが被覆する体験が raw からも digest からも静かに
+            # 消える — id の部分欠落と同じ恒久欠落扱いに倒す (Codex 指摘
+            # 2026-07-30。digest は id と本文が全件揃って初めて成立する)。
+            LOGGER.warning(
+                "[window] folded range has chronicle entries with empty "
+                "content (%d of %d); treating as permanently missing "
+                "(persona=%s)",
+                sum(1 for t in texts if not t), len(texts),
+                getattr(persona, "persona_id", "?"),
+            )
+            return None, True
         if not texts:
             LOGGER.warning(
                 "[window] folded range has no chronicle entry; keeping raw log "
@@ -1867,6 +1925,331 @@ class SessionLifecycle:
             model_key=model_key, chronicle_force=True,
         )
 
+    # ------------------------------------------------------------------
+    # 読み戻し (arasuji_levels.md §15)
+    # ------------------------------------------------------------------
+
+    def maybe_run_window_refill(
+        self,
+        persona,
+        building_id: str,
+        model_key: Optional[str] = None,
+    ) -> str:
+        """会話応答より前の読み戻し (arasuji_levels.md §15) — 非常畳みの対称。
+
+        話しかけられた時点で提示ウィンドウが残す量 (watermarks.target) を
+        下回っていたら、応答より先に畳んだところを開き直して残す量まで充填する。
+        水位引き上げ後の既存ペルソナと、旧水位でほぼ全編纂済みのままアップデート
+        したペルソナ (生ログほぼ無しで新バージョンの会話が始まる) の救済経路。
+
+        帳簿の付け替えだけで LLM は呼ばない。ユーザーへの通知もしない —
+        §14-3 の注意書きの対象は「削る」側で、開き直しに失うものは無い。
+
+        Returns:
+            "skip" (条件外・不足なし・開ける区間なし・競合で見送り) /
+            "ok" (開き直した)
+        """
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return "skip"
+        model_key = str(model_key or getattr(persona, "model", "") or "") or None
+        if not model_key:
+            return "skip"
+        watermarks = self.get_metabolism_watermarks(persona, model_key)
+        if watermarks is None:
+            return "skip"
+        # 機構1 (§14-2) を先に適用した位置から測る — 冷えた行はまず最前線へ
+        # 正規化し、そこから残す量まで引き戻す (前進と読み戻しの主導権を
+        # 混ぜない)。
+        anchor_id, resolution = self.resolve_metabolism_anchor(
+            persona, model_key=model_key,
+        )
+        if not anchor_id:
+            return "skip"  # ブートストラップ前 — 提示ウィンドウが未定義
+        window = self.get_presented_window(persona, model_key, anchor_id)
+        current_chars = message_chars(window.presented)
+        if current_chars >= watermarks.target:
+            return "skip"
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return "skip"
+
+        from sea.window_refill import plan_reopen, plan_rewind
+
+        # 1. 窓内の digest 圧縮区間を新しい方から開く。
+        reopen, projected_chars = plan_reopen(
+            window.folds, window.raw, window.presented,
+            current_chars, watermarks.target,
+        )
+
+        # 2. まだ足りなければ anchor をあらすじの段の単位で引き戻す。
+        rewind = None
+        budget = watermarks.target - projected_chars
+        history_mgr = getattr(persona, "history_manager", None)
+        adapter = getattr(persona, "sai_memory", None)
+        if budget > 0 and history_mgr is not None and adapter and adapter.is_ready():
+            before = history_mgr.get_history_before_anchor(
+                anchor_id,
+                max_chars=budget,
+                required_line_roles=["main_line"],
+                required_scopes=["committed"],
+            )
+            if before:
+                try:
+                    from sai_memory.arasuji.storage import get_entries_covering_messages
+                    entries = get_entries_covering_messages(
+                        adapter.conn, [str(m.get("id")) for m in before],
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "[metabolism] refill: failed to resolve covering entries "
+                        "(persona=%s); skipping anchor rewind", persona_id,
+                        exc_info=True,
+                    )
+                    entries = []
+                if entries:
+                    before_ids = [str(m.get("id")) for m in before]
+                    try:
+                        from sai_memory.memory.storage import (
+                            filter_chronicle_eligible_ids,
+                        )
+                        eligible = {
+                            str(m) for m in filter_chronicle_eligible_ids(
+                                adapter.conn, before_ids,
+                            )
+                        }
+                    except Exception:
+                        # 判定できなければ全件を編纂対象とみなす — 被覆の無い
+                        # 領域を跨がない側 (忘却済みの内容を復活させない側)
+                        # に倒れる。
+                        LOGGER.warning(
+                            "[metabolism] refill: chronicle-eligibility check "
+                            "failed; treating all messages as eligible "
+                            "(persona=%s)", persona_id, exc_info=True,
+                        )
+                        eligible = set(before_ids)
+                    rewind = plan_rewind(
+                        before,
+                        entries,
+                        window.raw_ids,
+                        {
+                            eid
+                            for f in window.folds
+                            for eid in f.chronicle_entry_ids
+                        },
+                        {
+                            mid
+                            for f in window.folds
+                            for mid in f.message_ids
+                        },
+                        eligible,
+                        budget,
+                    )
+
+        if not reopen and rewind is None:
+            return "skip"
+
+        for fold in reopen:
+            fold.presented_raw = True
+        new_folds = rewind.folds if rewind is not None else []
+        new_anchor_id = rewind.new_anchor_id if rewind is not None else anchor_id
+
+        # 最終検算: 書く前に「書いた後の提示」を実際に組んで実測する。計画側の
+        # 勘定 (生の合計・置き換えの実文字数) がモデル化していない増分 —
+        # 例: 部分生存の印付き区間が引き戻しで全体生存に変わり digest 表示から
+        # 生表示へ切り替わる — が混ざっても、天井 (残す量) をここで守る
+        # (Codex 指摘 2026-07-30)。超えたら引き戻しを落とし、開き直しだけで
+        # 再検算する。
+        final_chars = None
+        if rewind is not None:
+            restored_index = next(
+                (
+                    i for i, m in enumerate(before)
+                    if str(m.get("id")) == new_anchor_id
+                ),
+                None,
+            )
+            if restored_index is None:
+                LOGGER.warning(
+                    "[metabolism] refill verification could not locate the "
+                    "rewind anchor %s; dropping the rewind (persona=%s)",
+                    new_anchor_id, persona_id,
+                )
+                rewind = None
+            else:
+                final_raw = list(before[restored_index:]) + list(window.raw)
+                final_chars = message_chars(self._present_with_folds(
+                    persona, final_raw, new_folds + list(window.folds),
+                ))
+                if final_chars > watermarks.target:
+                    LOGGER.warning(
+                        "[metabolism] refill verification: rewound window "
+                        "would be %d chars > target=%d; dropping the rewind "
+                        "(persona=%s model=%s)",
+                        final_chars, watermarks.target, persona_id, model_key,
+                    )
+                    rewind = None
+            if rewind is None:
+                new_folds = []
+                new_anchor_id = anchor_id
+                final_chars = None
+        if rewind is None:
+            if not reopen:
+                return "skip"
+            final_chars = message_chars(self._present_with_folds(
+                persona, window.raw, list(window.folds),
+            ))
+            if final_chars > watermarks.target:
+                LOGGER.warning(
+                    "[metabolism] refill verification: reopened window would "
+                    "be %d chars > target=%d; skipping refill "
+                    "(persona=%s model=%s)",
+                    final_chars, watermarks.target, persona_id, model_key,
+                )
+                return "skip"
+
+        # 自行がまだ無い model (最前線 / 借用から始まる初回) は書き込み先の
+        # 行を先に立てる (§14-3 と同じ)。温度は「確実に冷えている」で立て、
+        # 温度の主張は下の _write_refill に一本化する。
+        if resolution in ("frontier", "other"):
+            entry = self.load_anchor_entry(persona_id, model_key)
+            if not entry or not entry.get("anchor_id"):
+                self.upsert_anchor_entry(persona_id, model_key, {
+                    "anchor_id": anchor_id,
+                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                })
+
+        if not self._write_refill(
+            persona_id, model_key, anchor_id, new_anchor_id,
+            new_folds + list(window.folds),
+        ):
+            return "skip"
+        LOGGER.info(
+            "[metabolism] window refill (persona=%s model=%s): %d chars -> "
+            "%d chars (verified) toward target=%d (reopened %d in-window "
+            "range(s), rewound %d message(s) across %d range(s), resolution=%s)",
+            persona_id, model_key, current_chars, final_chars,
+            watermarks.target, len(reopen),
+            rewind.restored_message_count if rewind else 0,
+            len(new_folds), resolution,
+        )
+        return "ok"
+
+    def _write_refill(
+        self,
+        persona_id: str,
+        model_key: str,
+        expected_anchor_id: str,
+        new_anchor_id: str,
+        folds: List["FoldedRange"],
+    ) -> bool:
+        """§15 読み戻しの書き込み — anchor 引き戻しと圧縮区間 (印含む) を同一コミットで。
+
+        汎用 :meth:`upsert_anchor_entry` は anchor 変更時に圧縮区間を列ごと
+        クリアするため使えない (§14-6-7 の前進と同じ理由の対側)。
+
+        CAS: 行の現在の anchor が読み戻し計画の前提 (``expected_anchor_id``) と
+        一致するときだけ書く。発火判定と書き込みの間に別入口 (手動整理 /
+        先回り畳み) が anchor を動かしていたら、この計画は古い窓のものなので
+        棄却する — 次の会話開始が再計画する。
+
+        温度は now を書く (§14-6-5 の据え置きと逆にする理由): 読み戻しは応答の
+        直前にだけ走り、開いた窓はその応答の LLM 呼び出しでそのままキャッシュ
+        される — 据え置きにすると、直後の context 構築の resolve が「冷えた行が
+        最前線より後ろ」と見て §14-2 の前進で読み戻しを即座に飲み込み、同じ
+        会話の中で開いた窓が閉じる。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return False
+        from sea.session_window import serialize_folds
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            # CAS は条件付き UPDATE 1 文 (keepalive touch の §14-6-10 と同じ型)。
+            # SELECT → 比較 → 書き込みに分けると、比較と commit の間に別接続の
+            # 前進が挟まったとき stale な巻き戻しで上書きしてしまう (Codex 指摘
+            # 2026-07-30)。
+            updated = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id,
+                MODEL_KEY=str(model_key),
+                ANCHOR_MESSAGE_ID=expected_anchor_id,
+            ).update({
+                SessionAnchor.ANCHOR_MESSAGE_ID: new_anchor_id,
+                SessionAnchor.FOLDED_RANGES_JSON: serialize_folds(folds),
+                SessionAnchor.UPDATED_AT: int(datetime.now().timestamp()),
+            }, synchronize_session=False)
+            db.commit()
+            if not updated:
+                LOGGER.info(
+                    "[metabolism] refill write skipped (CAS): anchor moved "
+                    "under us (persona=%s model=%s expected=%s)",
+                    persona_id, model_key, expected_anchor_id,
+                )
+                return False
+            return True
+        except Exception as exc:
+            LOGGER.warning(
+                "[metabolism] failed to write refill for %s/%s: %s",
+                persona_id, model_key, exc,
+            )
+            return False
+        finally:
+            db.close()
+
+    def _refold_raw_view_folds(
+        self, persona, model_key: Optional[str], window: "SessionWindow",
+        watermarks: Watermarks,
+    ) -> Optional["SessionWindow"]:
+        """§15-3 印戻し — 生に開いた圧縮区間を digest 提示へ戻す (LLM なしの畳み)。
+
+        Metabolism の退場計画より**先**に走る。読み戻しで開いた範囲は既存の
+        あらすじを記録に持っているので、印を戻すだけで畳み直せる — 開いたまま
+        計画に入れると、計画側がその範囲を未編纂の生ログと見て再編纂し、同じ
+        出来事のあらすじが二本立つ (§15-3 の禁止事項)。
+
+        古い方から、提示が残す量に収まるまで戻す。戻したら提示を組み直した
+        新しい SessionWindow を返す。戻すものが無ければ None。
+        """
+        raw_view = [f for f in window.folds if f.presented_raw]
+        if not raw_view:
+            return None
+        order = {mid: i for i, mid in enumerate(window.raw_ids)}
+
+        def _first_pos(fold: "FoldedRange") -> int:
+            positions = [order[mid] for mid in fold.message_ids if mid in order]
+            return min(positions) if positions else -1
+
+        # 継続判定は毎回**実際の提示**を組み直して実測する。見積もり
+        # (raw − 固定置き換え長) で早く止まると、実提示が残す量を超えたまま
+        # 印付き区間が退場計画に入り、既編纂範囲が生ログとして再編纂されて
+        # あらすじが二本立ちする (Codex 指摘 2026-07-30)。部分生存の印付き
+        # 区間 (提示は既に digest) の削減量も、実測なら自然にゼロと数えられる。
+        current_presented = window.presented
+        flipped = 0
+        for fold in sorted(raw_view, key=_first_pos):  # 古い方から
+            if message_chars(current_presented) <= watermarks.target:
+                break
+            fold.presented_raw = False
+            flipped += 1
+            current_presented = self._present_with_folds(
+                persona, window.raw, window.folds,
+            )
+        if not flipped:
+            return None
+        persona_id = getattr(persona, "persona_id", None)
+        self.save_folded_ranges(persona_id, model_key, window.folds)
+        LOGGER.info(
+            "[metabolism] refolded %d raw-view range(s) back to digest "
+            "(persona=%s model=%s, LLM-free; %d chars presented)",
+            flipped, persona_id, model_key, message_chars(current_presented),
+        )
+        from sea.session_window import SessionWindow
+        return SessionWindow(
+            anchor_id=window.anchor_id,
+            raw=window.raw,
+            presented=current_presented,
+            folds=window.folds,
+        )
+
     def schedule_cold_window_sweep(self) -> None:
         """§14-4 の時計側見張りを EventScheduler に予約する。
 
@@ -2091,6 +2474,30 @@ class SessionLifecycle:
                 "(persona=%s)", persona_id,
             )
             return "nothing"
+
+        # §15-3 印戻し: 読み戻しで生に開いた圧縮区間は、退場計画より先に digest
+        # 提示へ戻す (既存あらすじの再利用 = 編纂ゼロの畳み)。印戻しだけで残す量に
+        # 収まればこの Metabolism は編纂なしで完了する。
+        refolded = self._refold_raw_view_folds(persona, model_key, window, watermarks)
+        if refolded is not None:
+            window = refolded
+            current_messages = window.presented
+            if message_chars(current_messages) <= watermarks.target:
+                self.ensure_recall_embeddings(persona)
+                try:
+                    from saiverse.dynamic_state import DynamicStateManager
+                    DynamicStateManager.on_metabolism(
+                        persona, self.manager, model_key=model_key,
+                    )
+                except Exception:
+                    LOGGER.exception("[dynamic_state] on_metabolism failed")
+                if event_callback:
+                    event_callback({
+                        "type": "metabolism",
+                        "status": "completed",
+                        "content": "記憶を整理しました（開いていた範囲をあらすじ表示に戻しました）",
+                    })
+                return "ok"
 
         # 退場計画 (arasuji_levels.md §3/§4): 残す量 (watermarks.target) より
         # 古い側を、古い順に U ずつの範囲に刻んで全部畳む。エピソードに畳みを

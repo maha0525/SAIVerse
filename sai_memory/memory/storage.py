@@ -681,6 +681,44 @@ def get_messages_from_id(
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
+def get_messages_before_id(
+    conn: sqlite3.Connection, thread_id: str, before_message_id: str,
+    *, limit: int,
+) -> List[Message]:
+    """境界メッセージより正典順で**前**の行を、新しい側から最大 ``limit`` 件返す。
+
+    読み戻し (arasuji_levels.md §15) の anchor 引き戻しの材料読み。境界の規律は
+    :func:`get_messages_from_id` と同じ正典順序キー ``(created_at, rowid)``
+    (W8 / SEA 監査 S7)。境界行自身は含まない (排他)。戻り値は時系列昇順。
+    境界行が存在しない場合は空。呼び出し側は戻りの先頭 (最古) の id を次の
+    境界にしてページングできる。
+    """
+    anchor = conn.execute(
+        "SELECT created_at, rowid FROM messages WHERE id = ?",
+        (before_message_id,),
+    ).fetchone()
+    if not anchor:
+        return []
+    anchor_ts = int(anchor[0]) if anchor[0] is not None else None
+    before_sql, before_params = _canonical_before_clause(
+        anchor_ts, int(anchor[1]), inclusive=False
+    )
+    # DESC は正典順のちょうど逆 — NULL created_at (正典順の先頭側) は SQLite の
+    # DESC で末尾に並ぶので、逆順の契約と一致する。
+    cur = conn.execute(
+        f"SELECT id, thread_id, role, content, resource_id, created_at, metadata, "
+        f"{_LINE_METADATA_COLUMNS} "
+        "FROM messages "
+        f"WHERE thread_id = ? AND {before_sql} "
+        "ORDER BY created_at DESC, rowid DESC "
+        "LIMIT ?",
+        (thread_id, *before_params, int(limit)),
+    )
+    rows = [_row_to_message(row) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
+
+
 def get_messages_by_resource(conn: sqlite3.Connection, resource_id: str) -> List[Message]:
     cur = conn.execute(
         "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE resource_id=? ORDER BY created_at ASC, rowid ASC",
