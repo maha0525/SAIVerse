@@ -114,6 +114,34 @@ def marker_status() -> tuple[str, str]:
     return "stopped", "only stale runtime markers were found"
 
 
+def another_running_process_owns_db(db_path: Path | str) -> tuple[bool, str]:
+    """同じ DB を所有する「自分以外の」稼働中プロセスがいるかを返す。
+
+    City 名の異なるプロセスの並走は設計上許す (1 ホーム複数 City) が、**同じ
+    DB の同じ City 実体を二重運転する事故**の判定材料として使う — 具体的には
+    ``_init_city_config`` の CITYNAME 自動修復が、稼働中プロセスの City を
+    改名して乗っ取らないための関所 (2026-07-31 席競合案件・十巡目)。
+
+    Returns:
+        (True, 所有プロセスの説明) / (False, "")。
+    """
+    me = os.getpid()
+    try:
+        wanted = str(Path(db_path).resolve())
+    except OSError:
+        wanted = str(db_path)
+    for path in _marker_paths():
+        state, reason, data = _marker_state(path)
+        if state != "running" or not data:
+            continue
+        if data.get("pid") == me:
+            continue
+        recorded = data.get("db_path")
+        if recorded and str(recorded) == wanted:
+            return True, reason
+    return False, ""
+
+
 def acquire_runtime_marker(*, city_name: str, db_path: Path, argv: list[str]) -> str:
     """Acquire a marker for one City without excluding other City processes."""
     directory = runtime_marker_dir()

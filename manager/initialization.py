@@ -60,7 +60,34 @@ class InitializationMixin:
                 # Fallback: find by CITYID=1 and auto-repair CITYNAME.
                 # This handles cases where the tutorial overwrote the internal
                 # city identifier (e.g. with a non-ASCII display name).
-                my_city_config = db.query(CityModel).filter(CityModel.CITYID == 1).first()
+                #
+                # 関所 (2026-07-31 席競合案件・十巡目): 同じ DB を所有する別の
+                # 稼働中プロセスがいる間は修復しない。runtime marker は City 名
+                # でしか二重起動を弾かないため、稼働中の City を別名で起動する
+                # と、この修復が CITYID=1 を改名して**同じペルソナ群を 2 プロセス
+                # が同時運転する**状態を作ってしまう (判断・ライフ境界・台帳の
+                # 直列化前提が全て破れる)。修復はあくまで単一 City ホームの
+                # 改名事故の救済であって、稼働中の実体の乗っ取りではない。
+                from saiverse.runtime_marker import another_running_process_owns_db
+
+                owned, owner = another_running_process_owns_db(self.db_path)
+                if owned:
+                    raise ValueError(
+                        f"City '{city_name}' not found in the database, and a "
+                        f"running SAIVerse process already owns this database "
+                        f"({owner}). Refusing CITYNAME auto-repair — starting "
+                        f"would run the same personas in two processes. Stop "
+                        f"the running process first, or start it with its "
+                        f"registered city name."
+                    )
+                # 修復は「City が 1 行だけの DB」に限る (2026-07-31 十一巡目)。
+                # 複数 City の DB で未知名を渡された場合、それは改名事故ではなく
+                # 呼び出しの誤りなので、CITYID=1 の所属を黙って書き換えない。
+                city_count = db.query(CityModel).count()
+                my_city_config = (
+                    db.query(CityModel).filter(CityModel.CITYID == 1).first()
+                    if city_count == 1 else None
+                )
                 if my_city_config:
                     old_name = my_city_config.CITYNAME
                     LOGGER.warning(
@@ -74,6 +101,11 @@ class InitializationMixin:
                     raise ValueError(
                         f"City '{city_name}' not found in the database. "
                         "Please run 'python database/seed.py' first."
+                        + (
+                            f" ({city_count} cities exist; CITYNAME auto-repair "
+                            "only applies to a single-city database)"
+                            if city_count > 1 else ""
+                        )
                     )
             
             self.city_id = my_city_config.CITYID

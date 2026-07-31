@@ -64,6 +64,153 @@ def test_runtime_markers_allow_distinct_cities_but_reject_duplicate(
         assert runtime_marker.marker_status()[0] == "stopped"
 
 
+def test_another_running_process_owns_db_detects_foreign_owner(
+    tmp_path: Path,
+) -> None:
+    """同じ DB を所有する「自分以外の」稼働中プロセスの検出 (2026-07-31
+    席競合案件・十巡目)。自分のマーカーは所有者に数えない。別 DB のプロセスも
+    数えない。"""
+    import json as _json
+    import os as _os
+
+    home = tmp_path / "home"
+    db_path = home / "user_data" / "database" / "saiverse.db"
+    with patch.object(runtime_marker, "get_saiverse_home", return_value=home), patch.object(
+        runtime_marker,
+        "_process_create_time",
+        return_value=123.0,
+    ):
+        token = runtime_marker.acquire_runtime_marker(
+            city_name="city_a", db_path=db_path, argv=["main.py", "city_a"],
+        )
+        # 自分のマーカーしか無ければ所有者なし
+        owned, _ = runtime_marker.another_running_process_owns_db(db_path)
+        assert owned is False
+        # 別プロセスのマーカーを偽装 (pid 違い・同じ db_path)
+        foreign = dict(_json.loads(
+            runtime_marker._city_marker_path("city_a").read_text(encoding="utf-8")
+        ))
+        foreign["pid"] = _os.getpid() + 1
+        foreign["city_name"] = "city_x"
+        runtime_marker._city_marker_path("city_x").write_text(
+            _json.dumps(foreign), encoding="utf-8",
+        )
+        owned, owner = runtime_marker.another_running_process_owns_db(db_path)
+        assert owned is True
+        assert "city_x" in owner
+        # 別 DB を所有するプロセスは対象外
+        owned_other, _ = runtime_marker.another_running_process_owns_db(
+            home / "elsewhere" / "saiverse.db",
+        )
+        assert owned_other is False
+        runtime_marker.release_runtime_marker(token)
+
+
+def test_cityname_auto_repair_refused_while_db_is_owned(tmp_path: Path) -> None:
+    """CITYNAME 自動修復は、同じ DB を所有する稼働中プロセスがいる間は拒否する。
+
+    runtime marker は City 名でしか二重起動を弾かないため、稼働中の City を
+    別名 (`python main.py city_b`) で起動すると、修復が CITYID=1 を改名して
+    同一ペルソナ群の 2 プロセス同時運転を作ってしまう (2026-07-31 席競合案件・
+    十巡目 high1 の再現固定)。所有者がいなければ従来どおり修復する。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from database.models import Base, City, User
+    from manager.initialization import InitializationMixin
+
+    db_file = tmp_path / "saiverse.db"
+    engine = create_engine(f"sqlite:///{db_file}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
+        db.flush()
+        db.add(City(USERID=1, CITYNAME="city_a", UI_PORT=3001, API_PORT=8001))
+        db.commit()
+    finally:
+        db.close()
+
+    class _Manager(InitializationMixin):
+        def _update_timezone_cache(self, tz):
+            pass
+
+    m = _Manager()
+    m.SessionLocal = Session
+    m.db_path = str(db_file)
+
+    with patch(
+        "saiverse.runtime_marker.another_running_process_owns_db",
+        return_value=(True, "verified SAIVerse City 'city_a' process pid 999"),
+    ):
+        with pytest.raises(ValueError, match="Refusing CITYNAME auto-repair"):
+            m._init_city_config("city_b")
+    db = Session()
+    try:
+        assert db.query(City).filter(City.CITYID == 1).first().CITYNAME == "city_a"
+    finally:
+        db.close()
+
+    with patch(
+        "saiverse.runtime_marker.another_running_process_owns_db",
+        return_value=(False, ""),
+    ):
+        m._init_city_config("city_b")
+    db = Session()
+    try:
+        assert db.query(City).filter(City.CITYID == 1).first().CITYNAME == "city_b"
+    finally:
+        db.close()
+
+
+def test_cityname_auto_repair_refused_for_multi_city_db(tmp_path: Path) -> None:
+    """複数 City の DB で未知名を渡されたら CITYID=1 を改名しない (2026-07-31
+    十一巡目 high2)。修復は単一 City DB の改名事故の救済に限る — 複数 City で
+    未知名なのは呼び出しの誤りで、CITYID=1 の所属を黙って書き換えると建物・AI・
+    世界データを誤った City 名で運転してしまう。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from database.models import Base, City, User
+    from manager.initialization import InitializationMixin
+
+    db_file = tmp_path / "saiverse.db"
+    engine = create_engine(f"sqlite:///{db_file}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
+        db.flush()
+        db.add(City(USERID=1, CITYNAME="city_a", UI_PORT=3001, API_PORT=8001))
+        db.add(City(USERID=1, CITYNAME="city_b", UI_PORT=3002, API_PORT=8002))
+        db.commit()
+    finally:
+        db.close()
+
+    class _Manager(InitializationMixin):
+        def _update_timezone_cache(self, tz):
+            pass
+
+    m = _Manager()
+    m.SessionLocal = Session
+    m.db_path = str(db_file)
+
+    with patch(
+        "saiverse.runtime_marker.another_running_process_owns_db",
+        return_value=(False, ""),
+    ):
+        with pytest.raises(ValueError, match="single-city database"):
+            m._init_city_config("city_c")
+    db = Session()
+    try:
+        assert db.query(City).filter(City.CITYID == 1).first().CITYNAME == "city_a"
+    finally:
+        db.close()
+
+
 def test_world_snapshot_roundtrip_preserves_persona_backup_tree(tmp_path: Path) -> None:
     home = tmp_path / "home"
     snap_dir = home / "snapshots"
