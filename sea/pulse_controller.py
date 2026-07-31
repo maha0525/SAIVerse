@@ -300,7 +300,15 @@ class PulseController:
     
     def _queue_for_resumption(self, request: ExecutionRequest) -> None:
         """Queue an interrupted request for resumption."""
-        # Create a new request with resumption flag
+        # Create a new request with resumption flag.
+        # args は純粋な入力データなのでコピーする — 落とすと schedule / phenomenon
+        # 発の Pulse (inject_persona_event の playbook_args 等) が中断復帰時に
+        # 元と異なる入力で再開される (2026-07-31 Codex 六巡目)。
+        # pre_spells は**コピーしない** — これは実行前アクション (任意の Spell =
+        # メール送信・画像生成等の副作用) で、中断が起きる時点ではほぼ実行済み。
+        # 復帰 request に載せると割り込みのたびに再実行される (同七巡目)。
+        # 「未実行のまま中断された pre_spells が失われる」窓は残るが、副作用の
+        # 二重実行より害が小さい。
         resumed = ExecutionRequest(
             type=request.type,
             persona_id=request.persona_id,
@@ -308,6 +316,7 @@ class PulseController:
             user_input=request.user_input,
             metadata=request.metadata,
             meta_playbook=request.meta_playbook,
+            args=request.args,
             event_callback=request.event_callback,
             origin_track_id=request.origin_track_id,
             is_resumption=True,
