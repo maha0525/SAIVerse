@@ -2074,6 +2074,36 @@ def test_run_judgment_embeds_execution_id_in_context(manager, session_factory):
     assert ctx["execution_id"] == eid
 
 
+def test_double_claim_loser_leaves_without_ledger_writes(
+    manager, session_factory,
+):
+    """二重 claim の敗者は LLM を起動せず、台帳にも一切書かずに離脱する。
+
+    claim_execution は既存 prepared 行を再利用するため、ほぼ同時の二重 claim は
+    同じ execution_id を両方へ runnable として返す。勝者の一意化は
+    try_mark_running (prepared 限定 CAS) — 敗者も submit へ進むと有料 LLM 呼び
+    出しと finalize の適用が二重になる
+    (docs/issues/judgment_seat_contention_and_event_loss.md ①)。
+    """
+    from saiverse import execution_ledger as XL
+
+    ledger, eid = _ledgered_execution(manager, session_factory)
+    # 勝者が先に席を取った (もう一人の claimant の try_mark_running 成功)
+    assert ledger.try_mark_running(eid)
+
+    result = jp.run_judgment_point(
+        manager, PERSONA_ID, "day_close", execution_id=eid,
+    )
+    assert result["submitted"] is False
+    assert result["reason"] == "seat taken by another claimant"
+    # 勝者が同じ判断を処理するので、呼び出し側は代替経路を走らせない
+    assert result["outcome"] == jp.OUTCOME_INDETERMINATE
+    # 敗者は LLM を起動していない
+    assert manager.pulse_controller.submissions == []
+    # 勝者の running 台帳は無傷 (敗者は mark_failed 等を呼ばない)
+    assert ledger.get_execution(eid)["status"] == XL.STATUS_RUNNING
+
+
 def test_run_judgment_no_finalize_evidence_marks_unknown(
     manager, session_factory,
 ):

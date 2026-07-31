@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
-from saiverse.execution_ledger import STATUS_PREPARED, ExecutionLedger
+from saiverse.execution_ledger import ExecutionLedger
 
 if TYPE_CHECKING:
     from saiverse.saiverse_manager import SAIVerseManager
@@ -89,6 +89,21 @@ PREPARED_REFIRE_KINDS = (
     f"{JUDGMENT_KIND_PREFIX}on_event",
     f"{JUDGMENT_KIND_PREFIX}post_session",
 )
+
+#: prepared 回収 (#2): refire kind の再試行を打ち切る窓 (裁定 B、2026-07-31 —
+#: docs/issues/judgment_seat_contention_and_event_loss.md ③)。
+#: refire がゲートで止まって席が prepared のまま残った場合、一度の失敗で
+#: failed に終端化せず、この窓のあいだ毎 tick 再試行する — 一時障害 (台帳への
+#: 書き込みが一瞬転けた / persona 未ロード等) が直ればイベントは処理され、
+#: 消失しない。恒久条件 (自律 OFF / Playbook 未 import) はここで expired
+#: 終端になる。
+#:
+#: 窓の起点は行齢 (created_at) ではなく「このプロセスで最初に refire を試みた
+#: 時刻」(in-memory) — 行齢で数えると、プロセス停止が窓を消費し、長時間停止後の
+#: 再起動で一度も refire せず失効させてしまう (回収が守るはずの「停止を跨いだ
+#: イベント」を逆に殺す)。手動モード中のスキップも窓を消費しない。プロセス
+#: 再起動で窓はやり直しになるが、恒久条件でも 1 プロセスにつき窓 1 本で有限。
+PREPARED_REFIRE_EXPIRE_AFTER_SECONDS = 1800.0
 
 #: prepared 回収 (#2): 期限切れで failed に落とす kind と期限秒数。
 #: day_open / day_close は watchdog が自然再発火する (claim が failed キーを
@@ -417,6 +432,54 @@ def _close_orphaned_unknown_slot_episodes(manager: "SAIVerseManager") -> None:
             )
 
 
+def _refire_first_attempts(manager: "SAIVerseManager") -> Dict[str, int]:
+    """execution_id → このプロセスで最初に refire を試みた epoch 秒 (in-memory)。
+
+    再試行窓 (:data:`PREPARED_REFIRE_EXPIRE_AFTER_SECONDS`) の起点。manager に
+    持たせるのは、回復 tick が単一 dispatch スレッドで直列に走るため排他が
+    不要なのと、プロセス再起動で自然に窓がやり直しになるため (停止を跨いだ
+    prepared は復旧後に新しい窓をもらう — durable recovery の意味論)。
+    """
+    attempts = getattr(manager, "_judgment_refire_first_attempts", None)
+    if attempts is None:
+        attempts = {}
+        manager._judgment_refire_first_attempts = attempts
+    return attempts
+
+
+def _abandon_prepared_row(
+    ledger: ExecutionLedger, execution_id: str, reason: str
+) -> bool:
+    """回収側からの prepared 行の放棄 (prepared 限定 CAS)。
+
+    list_prepared で見た行も、mark する瞬間には別の claimant が席を取って
+    running へ進めているかもしれない — 無条件 ``mark_failed`` はその勝者の
+    走行中台帳を failed に壊す (発火側 ``fire_judgment_point`` の離脱と同じ
+    規律)。``abandon_prepared`` が False (= 席は他者の所有) なら何もしない。
+
+    Returns:
+        True = 行はもう prepared でない (放棄した / 別 claimant が遷移済み)。
+        False = 台帳の例外で放棄できず、行が prepared のまま残っている可能性 —
+        呼び出し側は初回試行時刻を保持し、次 tick で期限切れ処理を直ちに
+        再試行する (削除すると次 tick が「初回」と誤認して再試行窓を配り直す。
+        Codex 二巡目 medium)。
+    """
+    try:
+        if not ledger.abandon_prepared(execution_id, reason):
+            LOGGER.info(
+                "[ledger-wiring] prepared row %s was claimed by another "
+                "claimant before expiry; leaving it (reason=%s)",
+                execution_id, reason,
+            )
+        return True
+    except Exception:
+        LOGGER.warning(
+            "[ledger-wiring] failed to abandon prepared row %s (reason=%s)",
+            execution_id, reason, exc_info=True,
+        )
+        return False
+
+
 def _collect_prepared_judgments(manager: "SAIVerseManager") -> None:
     """回復 #2: 走り出せなかった prepared 判断の回収 (intent §2.4 #2、D5)。
 
@@ -431,6 +494,11 @@ def _collect_prepared_judgments(manager: "SAIVerseManager") -> None:
     except Exception:
         LOGGER.exception("[ledger-wiring] failed to list prepared judgments")
         return
+    # prepared でなくなった行の初回試行時刻を掃除する (辞書の無限成長防止)。
+    attempts = _refire_first_attempts(manager)
+    listed = {r.get("execution_id") for r in rows}
+    for eid in [e for e in attempts if e not in listed]:
+        attempts.pop(eid, None)
     if not rows:
         return
     from saiverse import clock
@@ -472,6 +540,30 @@ def _collect_one_prepared(
                 "manual mode (execution=%s)", kind, persona_id, execution_id,
             )
             return
+        # 再試行窓は「このプロセスで最初に refire を試みた時刻」から数える —
+        # 行齢で数えるとプロセス停止・手動モードの時間が窓を消費し、復旧後に
+        # 一度も refire しないまま失効させてしまう。初回試行前 (first is None)
+        # は失効しない = 失効の前に必ず 1 回は refire される。
+        attempts = _refire_first_attempts(manager)
+        first = attempts.get(execution_id)
+        if first is not None and now - first > PREPARED_REFIRE_EXPIRE_AFTER_SECONDS:
+            # 再試行窓を使い切った (恒久条件とみなす)。放棄は prepared 限定
+            # CAS — list_prepared 後に別の claimant が席を取っていたら触らない
+            # (無条件 mark_failed は勝者の running 台帳を壊す)。
+            LOGGER.warning(
+                "[ledger-wiring] expiring prepared %s after retry window "
+                "(execution=%s persona=%s age=%ds retry_window=%ds)",
+                kind, execution_id, persona_id, age, now - first,
+            )
+            if _abandon_prepared_row(
+                ledger, execution_id, "expired: refire retries exhausted"
+            ):
+                attempts.pop(execution_id, None)
+            # 放棄が台帳例外で失敗したら first を保持 — 次 tick は refire を
+            # 再開せず、この期限切れ処理から再試行する
+            return
+        if first is None:
+            attempts[execution_id] = now
         judgment_kind = kind[len(JUDGMENT_KIND_PREFIX):]
         payload = row.get("payload")
         context = payload if isinstance(payload, dict) else None
@@ -479,30 +571,29 @@ def _collect_one_prepared(
             "[ledger-wiring] re-firing prepared %s (execution=%s persona=%s age=%ds)",
             kind, execution_id, persona_id, age,
         )
-        # 遅延 import (wiring は autonomy_wiring から独立に import され得る)
+        # 遅延 import (wiring は autonomy_wiring から独立に import され得る)。
+        # 回収専用入口 — on_event の判断が engage_now を選んだときは、payload の
+        # 凍結 event_text から応対 Pulse まで再構成する (判断だけ成功させて
+        # 応対を落とさない。Codex 三巡目 high1)
         from saiverse import autonomy_wiring
 
-        result = autonomy_wiring.fire_judgment_point(
+        result = autonomy_wiring.refire_judgment_from_recovery(
             manager, persona_id, judgment_kind,
-            context=context, resume_execution_id=execution_id,
+            context=context, execution_id=execution_id,
         )
         if not result.get("submitted"):
-            # ゲートで止まった refire (自律 OFF / Playbook 欠如等) が prepared の
-            # まま毎 tick 回り続けないよう terminal に落とす (D5: refire 失敗は
-            # terminal に落ちて終わり)。run 側が既に failed/unknown へ遷移させた
-            # 場合はもう prepared ではないので触らない。
-            try:
-                current = ledger.get_execution(execution_id).get("status")
-            except Exception:
-                LOGGER.warning(
-                    "[ledger-wiring] could not re-read refired execution %s",
-                    execution_id, exc_info=True,
-                )
-                return
-            if current == STATUS_PREPARED:
-                ledger.mark_failed(
-                    execution_id, f"refire failed: {result.get('reason')}"
-                )
+            # 裁定 B (docs/issues/judgment_seat_contention_and_event_loss.md ③):
+            # 一度の非 submission では終端化しない。席が prepared のまま残って
+            # いれば次の tick が再試行し、一時障害 (自律 OFF の解除 / persona
+            # ロード / 台帳の回復) が直ればイベントは処理される。恒久的に
+            # 通らない refire は上の再試行窓 (PREPARED_REFIRE_EXPIRE_AFTER_
+            # SECONDS) で expired 終端になる。run 側が failed/unknown へ遷移
+            # 済みなら行はもう prepared でなく、次の tick の対象にならない。
+            LOGGER.info(
+                "[ledger-wiring] refire of %s not submitted (%s); keeping the "
+                "seat for retry (execution=%s persona=%s age=%ds)",
+                kind, result.get("reason"), execution_id, persona_id, age,
+            )
         return
 
     if kind in PREPARED_EXPIRE_KINDS:
@@ -512,7 +603,7 @@ def _collect_one_prepared(
             "[ledger-wiring] expiring prepared %s (execution=%s persona=%s age=%ds)",
             kind, execution_id, persona_id, age,
         )
-        ledger.mark_failed(execution_id, "expired: prepared not executed")
+        _abandon_prepared_row(ledger, execution_id, "expired: prepared not executed")
         return
 
     LOGGER.debug(
@@ -579,15 +670,11 @@ def _collect_prepared_schedule_dispatch(manager: "SAIVerseManager") -> None:
                 or not instance_token or not isinstance(generation, int):
             LOGGER.warning(
                 "[ledger-wiring] prepared schedule.dispatch payload incomplete; "
-                "marking failed (execution=%s payload=%r)", execution_id, payload,
+                "abandoning (execution=%s payload=%r)", execution_id, payload,
             )
-            try:
-                ledger.mark_failed(execution_id, "prepared payload incomplete")
-            except Exception:
-                LOGGER.exception(
-                    "[ledger-wiring] failed to fail incomplete prepared %s",
-                    execution_id,
-                )
+            # prepared 限定 CAS — list 後に別 claimant (揮発予約の発火) が席を
+            # 取っていたら勝者の running 台帳を触らない (Codex 三巡目 medium)
+            _abandon_prepared_row(ledger, execution_id, "prepared payload incomplete")
             continue
         try:
             db = manager.SessionLocal()
@@ -610,7 +697,9 @@ def _collect_prepared_schedule_dispatch(manager: "SAIVerseManager") -> None:
                     "[ledger-wiring] abandoning prepared schedule.dispatch %s: %s",
                     execution_id, reason,
                 )
-                ledger.mark_failed(execution_id, reason)
+                # prepared 限定 CAS (Codex 三巡目 medium — 上の payload 不備と
+                # 同じ理由)
+                _abandon_prepared_row(ledger, execution_id, reason)
                 continue
             LOGGER.info(
                 "[ledger-wiring] re-firing prepared schedule.dispatch "
@@ -680,7 +769,10 @@ def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> No
         return
     from database.models import PersonaSchedule
     from saiverse import clock
-    from saiverse.schedule_manager import SCHEDULE_DISPATCH_MAX_ATTEMPTS
+    from saiverse.schedule_manager import (
+        SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+        SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX,
+    )
 
     now = int(clock.now().timestamp())
     manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
@@ -699,12 +791,19 @@ def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> No
         if not isinstance(failed_at, int) \
                 or now - failed_at < SCHEDULE_FAILED_RETRY_GRACE_SECONDS:
             continue
+        # waiting (勝者の judgment の終端待ち) の判定は attempt 上限より先に
+        # 行う — 待機は attempt 非消費なので、通常失敗の積み上げで上限に居た
+        # 試行が waiting で crash しても「上限到達の意図的放棄」ではない
+        # (Codex 五巡目 high1)
+        error = str(row.get("error") or "")
+        is_waiting = error.startswith(SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX)
         attempt = payload.get("attempt")
-        if not isinstance(attempt, int) or isinstance(attempt, bool) \
-                or attempt < 0 or attempt >= SCHEDULE_DISPATCH_MAX_ATTEMPTS:
-            # 上限到達 = 意図的放棄 (翌回が正)、欠落・不正値 = 出所不明の行 —
-            # どちらも自動回収しない (第十陣: 緩い判定は放棄済み行まで再発火
-            # させる)
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+            # 欠落・不正値 = 出所不明の行 — 自動回収しない (第十陣)
+            continue
+        if attempt >= SCHEDULE_DISPATCH_MAX_ATTEMPTS and not is_waiting:
+            # 上限到達 = 意図的放棄 (翌回が正)。waiting は非消費なので上限値の
+            # ままでも据え置き回収する
             continue
         occurrence = payload.get("occurrence")
         try:
@@ -737,16 +836,21 @@ def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> No
                 db.close()
             if not fence_ok:
                 continue
+            # waiting (勝者の judgment の終端待ち) の failed 行は attempt を
+            # 据え置く — 待機は実処理の失敗ではないので、+1 で数えると crash の
+            # たびに上限へ近づき、勝者 failed 後の当日 occurrence を失う
+            # (Codex 四巡目 high1)。通常の失敗は「次の試行」として +1
+            # (attempt リセット禁止 — 第十陣。上限なら _retry_or_give_up が
+            # 正しく打ち切る)
+            next_attempt = attempt if is_waiting else attempt + 1
             LOGGER.info(
                 "[ledger-wiring] re-firing failed periodic schedule.dispatch "
                 "(execution=%s schedule=%d occurrence=%s attempt=%d)",
-                row.get("execution_id"), schedule_id, occurrence, attempt + 1,
+                row.get("execution_id"), schedule_id, occurrence, next_attempt,
             )
-            # 失敗した試行の「次」として再開する (attempt リセット禁止 —
-            # 第十陣。attempt+1 が上限なら _retry_or_give_up が正しく打ち切る)
             schedule_manager.refire_occurrence(
                 schedule_id, instance_token, str(occurrence), generation,
-                attempt=attempt + 1,
+                attempt=next_attempt,
             )
         except Exception:
             LOGGER.exception(

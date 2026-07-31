@@ -1878,6 +1878,24 @@ def _abandon_seat(ledger: Any, execution_id: Optional[str], reason: str) -> bool
         return False
 
 
+def _try_mark_running(ledger: Any, execution_id: str) -> bool:
+    """prepared → running の席取り (早い者勝ち CAS)。
+
+    claim_execution は既存 prepared 行を再利用するため、ほぼ同時の二重 claim は
+    同じ execution_id を両方へ runnable として返しうる — 実行を一人に絞るのは
+    :meth:`ExecutionLedger.try_mark_running` (status=prepared のときだけ running)。
+    持たない台帳 (旧テストスタブ) は無条件 ``mark_running`` へ degrade する
+    (勝者一意化なしの従来挙動。本番台帳は try_mark_running を持つ)。
+
+    台帳の例外はそのまま上げる (呼び出し側が「台帳が応答しない」として処理)。
+    """
+    try_mark = getattr(ledger, "try_mark_running", None)
+    if callable(try_mark):
+        return bool(try_mark(execution_id))
+    ledger.mark_running(execution_id)
+    return True
+
+
 def run_judgment_point(
     manager: Any,
     persona_id: str,
@@ -1893,7 +1911,8 @@ def run_judgment_point(
     検証・適用・SAIMemory 書き込みを行う。
 
     W1 Chunk A (A7): ``execution_id`` と ``manager.execution_ledger`` が両方
-    あるときは台帳フロー — submit 直前に ``mark_running``、例外は
+    あるときは台帳フロー — submit 直前に ``try_mark_running`` (prepared 限定
+    CAS。二重 claim の敗者は台帳に書かず indeterminate で離脱)、例外は
     BeatGateClosedError / LLMError → failed (適用前・副作用ゼロ)、
     Cancelled / その他 → unknown (LLM が動いたか不明) に分類し、正常 return
     後は台帳 status の証跡で成功を判定する。どちらかが無ければ従来挙動に
@@ -2010,9 +2029,11 @@ def run_judgment_point(
     )
     if tracked:
         # 不変条件 1: 不可逆処理 (LLM) の開始「前」に running を宣言する。
-        # 遷移に失敗したら実行しない (二重開始・別プロセス競合を疑う状態)。
+        # claim_execution は既存 prepared 行を再利用するため、ほぼ同時の二重
+        # claim は同じ execution_id を両方へ runnable として返しうる — 勝者を
+        # 一人に絞るのは、この prepared 限定 CAS (try_mark_running)。
         try:
-            ledger.mark_running(execution_id)
+            seat_won = _try_mark_running(ledger, execution_id)
         except Exception:
             LOGGER.warning(
                 "[judgment] ledger mark_running failed; not dispatching %s "
@@ -2026,6 +2047,24 @@ def run_judgment_point(
             aborted.update({"args": args, "errors": errors,
                             "applied_events": applied_events})
             return aborted
+        if not seat_won:
+            # 敗者: 同じ execution_id の席を別の claimant が先に running へ
+            # 進めた。判断は勝者側で走る (あるいはもう終端している) ので、
+            # 台帳には一切書かずに離脱する — mark_failed 等を呼ぶと勝者の
+            # 走行中台帳を壊す (try_mark_running の契約)。呼び出し側は代替
+            # 経路を走らせてはいけない (勝者が同じイベントを処理するため
+            # indeterminate)。
+            LOGGER.info(
+                "[judgment] %s seat already taken by another claimant; "
+                "leaving without ledger writes (persona=%s execution=%s)",
+                kind, persona_id, execution_id,
+            )
+            return {"kind": kind, "playbook": playbook_name, "args": args,
+                    "submitted": False,
+                    "reason": "seat taken by another claimant",
+                    "outcome": OUTCOME_INDETERMINATE,
+                    "errors": errors, "applied_events": applied_events,
+                    "execution_id": execution_id}
     try:
         pulse_controller.submit_meta_judgment(
             persona_id=persona_id,

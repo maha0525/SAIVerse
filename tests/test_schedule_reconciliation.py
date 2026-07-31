@@ -719,6 +719,30 @@ def test_prepared_schedule_dispatch_superseded_generation_is_failed(env):
     assert env.manager.execution_ledger.get_execution(exec_id)["status"] == "failed"
 
 
+def test_prepared_schedule_dispatch_abandon_does_not_break_running_winner(
+    env, monkeypatch,
+):
+    """設定変更で放棄する prepared も、list 後に別 claimant (揮発予約の発火) が
+    席を取って running へ進めていたら触らない — 無条件 mark_failed は合法な
+    running→failed 遷移として勝者の台帳を上書きし、勝者の mark_applied が
+    failed→applied の不正遷移で爆発する (Codex 三巡目 medium)。"""
+    sid = _periodic_schedule(env)
+    exec_id = _claim_prepared_occurrence(env, sid, generation=0)
+    _age_prepared(env, exec_id)
+    _bump_generation(env.session_factory, sid)
+    ledger = env.manager.execution_ledger
+    # list_prepared のスナップショットを固定してから勝者が席を取る = 「list と
+    # mark の間に別 claimant が running へ進めた」瞬間の再現
+    snapshot = ledger.list_prepared("schedule.dispatch")
+    assert any(r.get("execution_id") == exec_id for r in snapshot)
+    assert ledger.try_mark_running(exec_id)
+    monkeypatch.setattr(ledger, "list_prepared", lambda *a, **kw: snapshot)
+
+    wiring._collect_prepared_schedule_dispatch(env.manager)
+
+    assert ledger.get_execution(exec_id)["status"] == "running"
+
+
 def test_prepared_schedule_dispatch_removed_schedule_is_failed(env):
     """schedule 行が消えた prepared は failed 終端 (孤児の永久残留を防ぐ)。"""
     sid = _periodic_schedule(env)
@@ -825,7 +849,9 @@ def test_generation_bump_expression_survives_interleaved_sessions(env):
 # ---------------------------------------------------------------------------
 
 
-def _fail_periodic_occurrence(env, sid, *, occurrence=None, attempt=0, age=400):
+def _fail_periodic_occurrence(
+    env, sid, *, occurrence=None, attempt=0, age=400, error="dispatch failed",
+):
     """mark_failed 後・backoff 予約前に crash した状態 (failed 行のみ)。"""
     ledger = env.manager.execution_ledger
     if occurrence is None:
@@ -843,7 +869,7 @@ def _fail_periodic_occurrence(env, sid, *, occurrence=None, attempt=0, age=400):
     )
     assert runnable
     assert ledger.try_mark_running(exec_id)
-    ledger.mark_failed(exec_id, "dispatch failed")
+    ledger.mark_failed(exec_id, error)
     if age:
         _age_prepared(env, exec_id, seconds=age)  # CREATED_AT を猶予より古く
     return exec_id
@@ -890,6 +916,46 @@ def test_failed_periodic_recovered_after_restart_with_next_reservation(env):
     ledger = env.manager.execution_ledger
     assert "#failed-" in (ledger.get_execution(exec_id)["idempotency_key"] or "")
     assert _entry(env, sid) is not None  # 精算後、翌回が再登録されている
+
+
+def test_failed_waiting_periodic_is_refired_with_same_attempt(env, monkeypatch):
+    """waiting (勝者待ち) の印が付いた failed 行の crash 回収は attempt を据え置く
+    — 待機は実処理の失敗ではないので、回収の +1 で上限へ近づけない
+    (Codex 四巡目 high1)。通常の failed は従来どおり +1 (第十陣)。"""
+    from saiverse.schedule_manager import SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX
+
+    from saiverse.schedule_manager import SCHEDULE_DISPATCH_MAX_ATTEMPTS
+
+    sid_waiting = _periodic_schedule(env)
+    sid_normal = _periodic_schedule(env)
+    sid_waiting_max = _periodic_schedule(env)
+    sid_normal_max = _periodic_schedule(env)
+    _fail_periodic_occurrence(
+        env, sid_waiting, attempt=1,
+        error=f"{SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX}duplicate:running",
+    )
+    _fail_periodic_occurrence(env, sid_normal, attempt=1)
+    # 境界 (Codex 五巡目 high1): 通常失敗の積み上げで attempt=上限 に居た試行が
+    # waiting で crash — 「上限到達の意図的放棄」ではないので据え置き回収する
+    _fail_periodic_occurrence(
+        env, sid_waiting_max, attempt=SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+        error=f"{SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX}duplicate:running",
+    )
+    _fail_periodic_occurrence(
+        env, sid_normal_max, attempt=SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+    )
+    recorded = {}
+    monkeypatch.setattr(
+        env.sm, "refire_occurrence",
+        lambda sid, tok, occ, gen, attempt: recorded.__setitem__(sid, attempt),
+    )
+
+    wiring._collect_failed_periodic_schedule_dispatch(env.manager)
+
+    assert recorded[sid_waiting] == 1  # 据え置き
+    assert recorded[sid_normal] == 2   # 次の試行として +1
+    assert recorded[sid_waiting_max] == SCHEDULE_DISPATCH_MAX_ATTEMPTS  # 据え置き回収
+    assert sid_normal_max not in recorded  # 上限到達の通常失敗は放棄 (翌回が正)
 
 
 def test_failed_periodic_young_row_is_left_alone(env):

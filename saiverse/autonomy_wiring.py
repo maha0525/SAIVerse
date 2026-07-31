@@ -49,6 +49,9 @@ from saiverse.judgment_points import (
     KIND_ON_EVENT,
     KIND_POST_CONVERSATION,
     KIND_POST_SESSION,
+    OUTCOME_ABORTED,
+    OUTCOME_INDETERMINATE,
+    _abandon_seat,
     run_judgment_point,
     validate_judgment_context,
 )
@@ -288,15 +291,25 @@ def _serialize_judgment_context(
     return _norm(dict(context))
 
 
-def _safe_mark_failed(ledger: Any, execution_id: str, reason: str) -> None:
-    """台帳 failed 化 (遷移例外は WARN に留め、発火経路をクラッシュさせない)。"""
-    try:
-        ledger.mark_failed(execution_id, reason)
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] ledger mark_failed(%s) failed (execution=%s)",
-            reason, execution_id, exc_info=True,
-        )
+def _release_claimed_seat(
+    ledger: Any, execution_id: Optional[str], reason: str
+) -> str:
+    """LLM 開始前の離脱で claim 済みの席を放棄し、結末 (outcome) を返す。
+
+    放棄は prepared 限定 CAS (:func:`saiverse.judgment_points._abandon_seat`) で
+    行う — 無条件 ``mark_failed`` だと、二重 claim で同じ execution_id を共有した
+    別の claimant が既に running へ進めた勝者の台帳まで failed に壊す
+    (``run_judgment_point`` 側の離脱と同じ規律。
+    docs/issues/judgment_seat_contention_and_event_loss.md ②)。
+
+    Returns:
+        :data:`~saiverse.judgment_points.OUTCOME_ABORTED` = 席は残っていない
+        (呼び出し側は代替経路・backoff 再試行へ進んでよい)。
+        :data:`~saiverse.judgment_points.OUTCOME_INDETERMINATE` = 放棄できな
+        かった (勝者の所有 / 台帳が応答しない) — 代替経路を走らせてはいけない。
+    """
+    released = _abandon_seat(ledger, execution_id, reason)
+    return OUTCOME_ABORTED if released else OUTCOME_INDETERMINATE
 
 
 def fire_judgment_point(
@@ -326,7 +339,9 @@ def fire_judgment_point(
        (旧テストスタブ) は WARN 一回で従来挙動に degrade
     5. ``precondition`` (あれば) を **Lock 取得後に** 再評価 — watchdog の
        day_open 再発火が、待っている間に済んだ本物の day_open と二重にならない。
-       失敗時は claim 済みの席を failed に落とす
+       失敗時は claim 済みの席を放棄する (prepared 限定 CAS — 別 claimant が
+       既に走らせている running 台帳は壊さない。放棄できなければ結果の
+       ``outcome`` が indeterminate になり、呼び出し側は代替経路を走らせない)
 
     v0.5 (life.md §3/§4/§6.2): ``kind`` が day_open / day_close のときは、
     ``run_judgment_point`` の前にライフ (活動区間) まわりのシステム処理を行う
@@ -377,6 +392,15 @@ def fire_judgment_point(
                 "reason": "playbook not imported"}
 
     with _judgment_lock(manager, persona_id):
+        # 排他の層構造 (2026-07-31 席競合案件・九巡目裁定): 判断の直列化は
+        # ①この per-persona Lock (本番の判断起動は全てここを通る — 同一
+        # ペルソナの claim〜境界〜実行が interleave しない) と ②runtime_marker
+        # (同一 DB の他プロセスを起動時に排除) が担う。台帳の CAS
+        # (try_mark_running / abandon_prepared) はその下の**契約レベルの砦**
+        # (直接呼び出し・将来のマルチプロセスへの防御) であって、Lock の
+        # 代替ではない。ライフ境界処理が CAS より前にあるのはこの層構造の
+        # 帰結 — 境界は Lock が直列化し、かつ confirm_life_for_today の冪等
+        # (先勝ち) と節目の永続マーカーで多重実行にも耐える。
         # --- 実行台帳の claim (precondition・境界副作用より前、A2/D3) ---
         ledger = getattr(manager, "execution_ledger", None)
         execution_id: Optional[str] = None
@@ -444,21 +468,23 @@ def fire_judgment_point(
                     "[autonomy-wiring] precondition for %s raised; skipping "
                     "(persona=%s)", kind, persona_id, exc_info=True,
                 )
-                if ledger is not None and execution_id is not None:
-                    _safe_mark_failed(ledger, execution_id, "precondition raised")
+                outcome = _release_claimed_seat(
+                    ledger, execution_id, "precondition raised"
+                )
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False, "reason": "precondition raised",
-                        "execution_id": execution_id}
+                        "outcome": outcome, "execution_id": execution_id}
             if not still_needed:
                 LOGGER.info(
                     "[autonomy-wiring] %s no longer needed at dispatch; skipping "
                     "(persona=%s)", kind, persona_id,
                 )
-                if ledger is not None and execution_id is not None:
-                    _safe_mark_failed(ledger, execution_id, "precondition rejected")
+                outcome = _release_claimed_seat(
+                    ledger, execution_id, "precondition rejected"
+                )
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False, "reason": "precondition not met",
-                        "execution_id": execution_id}
+                        "outcome": outcome, "execution_id": execution_id}
 
         if kind == KIND_DAY_OPEN:
             if not _confirm_life_at_day_open(manager, persona_id, context or {}):
@@ -470,35 +496,34 @@ def fire_judgment_point(
                     "failed; leaving retry to the schedule backoff "
                     "(persona=%s)", persona_id,
                 )
-                if ledger is not None and execution_id is not None:
-                    _safe_mark_failed(
-                        ledger, execution_id, "life-start boundary failed"
-                    )
+                outcome = _release_claimed_seat(
+                    ledger, execution_id, "life-start boundary failed"
+                )
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False,
                         "reason": "life-start boundary failed",
-                        "execution_id": execution_id}
+                        "outcome": outcome, "execution_id": execution_id}
         elif kind == KIND_DAY_CLOSE:
             if not _apply_life_end_at_day_close(manager, persona_id):
                 # ライフ終了の節目が決着していない (Codex W3 第五陣 P2)。
                 # ここで判断を走らせて成功すると schedule と判断台帳が
                 # completed になり、同一営業日の再試行が二度と来ない —
                 # 失敗を発火結果へ伝播し、schedule 側 backoff に再試行させる。
-                # 判断行は failed (副作用ゼロ) に落とし、再試行の claim が
-                # キーを退避して新しい prepared を取れるようにする。
+                # 判断行は放棄 (prepared 限定 CAS → failed、副作用ゼロ) し、
+                # 再試行の claim がキーを退避して新しい prepared を取れるように
+                # する。
                 LOGGER.warning(
                     "[autonomy-wiring] day_close aborted: life-end boundary "
                     "failed; leaving retry to the schedule backoff "
                     "(persona=%s)", persona_id,
                 )
-                if ledger is not None and execution_id is not None:
-                    _safe_mark_failed(
-                        ledger, execution_id, "life-end boundary failed"
-                    )
+                outcome = _release_claimed_seat(
+                    ledger, execution_id, "life-end boundary failed"
+                )
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False,
                         "reason": "life-end boundary failed",
-                        "execution_id": execution_id}
+                        "outcome": outcome, "execution_id": execution_id}
 
         result = run_judgment_point(
             manager, persona_id, kind, context, execution_id=execution_id,
@@ -918,6 +943,7 @@ def handle_external_event(
     *,
     dispatch_direct: Callable[[], None],
     is_alert: bool = False,
+    dispatch_envelope: Optional[Dict[str, Any]] = None,
 ) -> str:
     """実イベントの本番入口 (inject_persona_event の既定経路)。
 
@@ -958,10 +984,14 @@ def handle_external_event(
         dispatch_direct()
         return ROUTE_DIRECT_IN_CONVERSATION
 
-    result = fire_judgment_point(
-        manager, persona_id, KIND_ON_EVENT,
-        {"event_text": event_text, "is_alert": is_alert},
-    )
+    context: Dict[str, Any] = {"event_text": event_text, "is_alert": is_alert}
+    if dispatch_envelope:
+        # 応対の材料 (user_input / meta_playbook / args / event_type) を判断の
+        # 台帳 payload に凍結する。LLM に渡る judgment_context には入らない
+        # (build_judgment_args の on_event は選別したキーだけ組む) — 回復 tick の
+        # 回収が engage_now の応対を初回と同じ入力で再構成するためだけの同乗
+        context["dispatch_envelope"] = dispatch_envelope
+    result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
     if not result.get("submitted"):
         from saiverse.judgment_points import OUTCOME_INDETERMINATE
 
@@ -1006,6 +1036,209 @@ def handle_external_event(
         reaction, persona_id,
     )
     return f"judged:{reaction}"
+
+
+#: :func:`_dispatch_recovered_event_response` の結末。再試行してよいのは
+#: SAFE_FAILURE (副作用ゼロ確定) だけ — UNKNOWN (LLM が動いたか不明) を再試行
+#: すると、発話・記憶更新まで進んだ応対をもう一度走らせて二重応対になる
+#: (Codex 六巡目 high1。台帳の unknown = 自動再実行禁止と同じ規律)。
+RECOVERED_DISPATCH_OK = "dispatched"
+RECOVERED_DISPATCH_SAFE_FAILURE = "safe_failure"
+RECOVERED_DISPATCH_UNKNOWN = "unknown"
+
+
+def _dispatch_recovered_event_response(
+    manager: Any, persona_id: str, context: Dict[str, Any]
+) -> str:
+    """回収経路で engage_now と判断されたイベントの応対 Pulse を再構成して起動する。
+
+    初回発火の応対経路 (inject_persona_event の ``_dispatch_direct`` closure) は
+    回収側に存在しない。台帳 payload に凍結された ``dispatch_envelope``
+    (組み立て済みの user_input / meta_playbook / args / event_type) をそのまま
+    再送する — 初回とまったく同じ入力で応対が走る。envelope の無い古い payload
+    (この機構の導入前の行) だけ、``event_text`` から同じ形の
+    ``<system>[外部イベント通知]`` Pulse へ縮退する。建物はペルソナの現在地 —
+    イベント到着時から移動していても、応対は「いま居る場所」で行うのが自然。
+
+    submit は型付き経路 (``dispatch_schedule_fire``) で行い、顛末を
+    ``ScheduleManager._classify_dispatch_outcome`` (確立済みの分類) で読む。
+
+    Returns:
+        :data:`RECOVERED_DISPATCH_OK` = 応対が完走した / queue に受付されて
+        消えない。:data:`RECOVERED_DISPATCH_SAFE_FAILURE` = 副作用ゼロ確定で
+        起動できなかった (dispatcher / persona / 現在地 / pulse_controller の
+        不在、Beat 関所閉鎖、受付前の例外) — 再試行してよい。
+        :data:`RECOVERED_DISPATCH_UNKNOWN` = 実行中の例外で LLM が動いたか
+        不明 — 再試行してはいけない。
+    """
+    dispatcher = getattr(manager, "pulse_dispatcher", None)
+    personas = getattr(manager, "all_personas", None) or getattr(
+        manager, "personas", None
+    ) or {}
+    persona = personas.get(persona_id)
+    building_id = getattr(persona, "current_building_id", None)
+    if dispatcher is None or persona is None or not building_id:
+        LOGGER.warning(
+            "[autonomy-wiring] recovered on_event judged engage_now but the "
+            "response could not be dispatched (dispatcher=%s persona=%s "
+            "building=%s)", dispatcher is not None, persona is not None,
+            building_id,
+        )
+        return RECOVERED_DISPATCH_SAFE_FAILURE
+    envelope = context.get("dispatch_envelope")
+    if isinstance(envelope, dict) and envelope.get("user_input"):
+        user_input = str(envelope["user_input"])
+        event_type = envelope.get("event_type")
+        meta_playbook = envelope.get("meta_playbook") or "track_user_conversation"
+        args = envelope.get("args")
+    else:
+        event_text = str(context.get("event_text") or "")
+        user_input = f"""<system>
+[外部イベント通知]
+{event_text}
+</system>"""
+        event_type = None
+        meta_playbook = "track_user_conversation"
+        args = None
+    result = dispatcher.dispatch_schedule_fire(
+        persona_id=persona_id,
+        building_id=building_id,
+        user_input=user_input,
+        metadata={"source": "external_event", "event_type": event_type,
+                  "recovered": True},
+        meta_playbook=meta_playbook,
+        args=args,
+    )
+    # 遅延 import (schedule_manager とは疎結合のまま、確立済みの分類だけ借りる)
+    from saiverse.schedule_manager import ScheduleManager
+
+    outcome, detail = ScheduleManager._classify_dispatch_outcome(result)
+    if outcome in ("executed", "accepted"):
+        return RECOVERED_DISPATCH_OK
+    if outcome == "failed":
+        LOGGER.warning(
+            "[autonomy-wiring] recovered on_event response did not start "
+            "(%s); safe to retry (persona=%s)", detail, persona_id,
+        )
+        return RECOVERED_DISPATCH_SAFE_FAILURE
+    LOGGER.error(
+        "[autonomy-wiring] recovered on_event response ended unknown (%s); "
+        "NOT retrying to avoid double handling (persona=%s)",
+        detail, persona_id,
+    )
+    return RECOVERED_DISPATCH_UNKNOWN
+
+
+#: 回収応対 (engage_now) の submit が明示失敗したときの in-process 再試行。
+#: 判断台帳は既に終端しているため prepared 回収では拾えない — 凍結 envelope を
+#: 抱えた揮発予約で再試行する (crash を跨ぐ永続化は C 案スコープの既知の限界)。
+RECOVERED_RESPONSE_RETRY_BACKOFF_SECONDS = 120.0
+RECOVERED_RESPONSE_MAX_ATTEMPTS = 3
+
+
+def _schedule_recovered_response_retry(
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    execution_id: Optional[str],
+    attempt: int,
+) -> None:
+    """回収応対の明示失敗 (dispatcher 不在 / 関所閉鎖 / submit 例外) を再試行する。
+
+    判断は completed 済みで台帳側の再試行装置が無いので、EventScheduler の揮発
+    予約で bounded backoff を回す。上限で ERROR (イベント応対の消失を黙らせない)。
+    """
+    if attempt > RECOVERED_RESPONSE_MAX_ATTEMPTS:
+        LOGGER.error(
+            "[autonomy-wiring] recovered on_event response could not be "
+            "dispatched after %d attempts; the event response is lost "
+            "(persona=%s execution=%s)",
+            RECOVERED_RESPONSE_MAX_ATTEMPTS, persona_id, execution_id,
+        )
+        return
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        LOGGER.error(
+            "[autonomy-wiring] no event_scheduler to retry recovered response; "
+            "the event response is lost (persona=%s execution=%s)",
+            persona_id, execution_id,
+        )
+        return
+
+    def _retry() -> None:
+        outcome = _dispatch_recovered_event_response(manager, persona_id, context)
+        if outcome == RECOVERED_DISPATCH_OK:
+            LOGGER.info(
+                "[autonomy-wiring] recovered on_event response dispatched on "
+                "retry %d (persona=%s execution=%s)",
+                attempt, persona_id, execution_id,
+            )
+            return
+        if outcome == RECOVERED_DISPATCH_UNKNOWN:
+            # LLM が動いたか不明 — 再試行すると二重応対になりうる。ここで打ち切る
+            # (ERROR は _dispatch_recovered_event_response が出している)
+            return
+        _schedule_recovered_response_retry(
+            manager, persona_id, context, execution_id, attempt + 1,
+        )
+
+    scheduler.schedule(
+        fire_at=clock.now() + timedelta(
+            seconds=RECOVERED_RESPONSE_RETRY_BACKOFF_SECONDS
+        ),
+        callback=_retry,
+        key=f"recovered_response:{execution_id}",
+    )
+    LOGGER.warning(
+        "[autonomy-wiring] recovered on_event response submit failed; retry "
+        "%d/%d scheduled (persona=%s execution=%s)",
+        attempt, RECOVERED_RESPONSE_MAX_ATTEMPTS, persona_id, execution_id,
+    )
+
+
+def refire_judgment_from_recovery(
+    manager: Any,
+    persona_id: str,
+    judgment_kind: str,
+    context: Optional[Dict[str, Any]],
+    execution_id: str,
+) -> Dict[str, Any]:
+    """回復 tick の prepared 回収からの refire 入口 (execution_ledger_wiring 用)。
+
+    ``fire_judgment_point`` を resume で呼び、**on_event の判断が engage_now を
+    選んだときは応対まで起動する** — 判断だけ成功させて応対を落とすと、alert
+    (engage_now しか選べない) では「回収成功に見えて通知への応答が必ず欠落する」
+    (docs/issues/judgment_seat_contention_and_event_loss.md ③、Codex 三巡目)。
+    reaction が読めなかった場合は応対を起動しない (handle_external_event の
+    unknown_reaction と同じ裁定 — 二重応対の方が害が大きい)。
+    """
+    result = fire_judgment_point(
+        manager, persona_id, judgment_kind,
+        context=context, resume_execution_id=execution_id,
+    )
+    if judgment_kind != KIND_ON_EVENT or not result.get("submitted"):
+        return result
+    reaction = _extract_reaction(result)
+    if reaction is None:
+        reaction = _reaction_from_ledger(manager, result.get("execution_id"))
+    if reaction != "engage_now":
+        return result
+    outcome = _dispatch_recovered_event_response(manager, persona_id, context or {})
+    if outcome == RECOVERED_DISPATCH_OK:
+        LOGGER.info(
+            "[autonomy-wiring] recovered on_event judged engage_now; response "
+            "re-dispatched from frozen payload (persona=%s execution=%s)",
+            persona_id, execution_id,
+        )
+    elif outcome == RECOVERED_DISPATCH_SAFE_FAILURE:
+        # 副作用ゼロ確定の明示失敗 (dispatcher 不在 / 関所閉鎖 / 受付前の例外) —
+        # 判断台帳は completed 済みで prepared 回収に戻れないため、揮発予約の
+        # bounded backoff で応対だけ再試行する (Codex 五巡目 high3)。unknown
+        # (実行中の例外) は再試行しない — 二重応対の方が害が大きい
+        _schedule_recovered_response_retry(
+            manager, persona_id, context or {}, execution_id, attempt=1,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

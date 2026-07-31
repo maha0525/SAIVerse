@@ -142,9 +142,14 @@ def inject_persona_event(
         )
     effective_playbook = meta_playbook or "track_user_conversation"
 
+    # dispatch_phenomenon_event の型付き成否 (False = Pulse が起動していない —
+    # pulse_controller 不在 / Beat 関所閉鎖 / submit 例外)。一度も呼ばれなければ
+    # True のまま (判断が note_only 等を選び、応対しないのが正の顛末)。
+    dispatch_state = {"ok": True}
+
     def _dispatch_direct() -> None:
         """従来の応対経路: イベントを <system> プロンプト付き Pulse として submit。"""
-        dispatcher.dispatch_phenomenon_event(
+        ok = dispatcher.dispatch_phenomenon_event(
             persona_id=persona_id,
             building_id=building_id,
             user_input=user_input,
@@ -152,10 +157,17 @@ def inject_persona_event(
             meta_playbook=effective_playbook,
             args=playbook_args,
         )
-        LOGGER.info(
-            "[inject_persona_event] Dispatched via PulseDispatcher: persona=%s, playbook=%s, args=%s",
-            persona_id, effective_playbook, playbook_args,
-        )
+        dispatch_state["ok"] = bool(ok)
+        if ok:
+            LOGGER.info(
+                "[inject_persona_event] Dispatched via PulseDispatcher: persona=%s, playbook=%s, args=%s",
+                persona_id, effective_playbook, playbook_args,
+            )
+        else:
+            LOGGER.warning(
+                "[inject_persona_event] dispatch did not start a pulse: "
+                "persona=%s, playbook=%s", persona_id, effective_playbook,
+            )
 
     try:
         if meta_playbook is None:
@@ -172,6 +184,15 @@ def inject_persona_event(
             route = handle_external_event(
                 _manager, persona_id, event_text,
                 dispatch_direct=_dispatch_direct,
+                # 応対の材料 (組み立て済みの実物) を判断の台帳 payload に凍結する
+                # ための envelope — 回復 tick の回収が engage_now の応対を
+                # _dispatch_direct と同じ入力で再構成できるようにする
+                dispatch_envelope={
+                    "user_input": user_input,
+                    "event_type": event_type,
+                    "meta_playbook": effective_playbook,
+                    "args": playbook_args,
+                },
             )
             LOGGER.info(
                 "[inject_persona_event] on_event route=%s (persona=%s, type=%s)",
@@ -179,6 +200,9 @@ def inject_persona_event(
             )
         else:
             _dispatch_direct()
+        if not dispatch_state["ok"]:
+            # 応対経路が呼ばれたのに Pulse が起動していない — 成功と報告しない
+            return "error: pulse submission failed"
         return "ok"
     except Exception:
         LOGGER.error(

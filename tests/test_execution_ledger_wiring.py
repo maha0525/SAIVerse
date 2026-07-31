@@ -15,7 +15,10 @@
 - schedule_recovery_tick: EventScheduler に key=execution_ledger_recovery で予約
 - prepared 回収 (#2、W1 Chunk A / D5): on_event・post_session は 120 秒経過で
   refire (resume_execution_id 経由)、day_open 等は 1800 秒で expired 化。
-  手動モード persona は refire スキップ。gate で止まった refire は failed 終端
+  手動モード persona は refire スキップ。gate で止まった refire は一度で終端化
+  せず、再試行窓 (1800 秒) のあいだ prepared を保持して毎 tick 再試行する
+  (裁定 B、2026-07-31 — judgment_seat_contention_and_event_loss ③)。放棄は
+  prepared 限定 CAS で、別 claimant の running 台帳を壊さない
 
 DB は in-memory SQLite (StaticPool)、記憶側は実 memory.db + Embedder patch
 (test_episodes_wiring.py の流儀)。
@@ -710,22 +713,249 @@ class TestPreparedCollection:
         assert calls == []
         assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
 
-    def test_refire_gate_failure_falls_to_failed(self, manager, monkeypatch):
-        """gate で止まった refire (自律 OFF 等) は prepared のまま毎 tick 回り
-        続けず failed 終端に落ちる (D5: refire 失敗は terminal)。"""
+    def test_refire_gate_failure_keeps_seat_until_retry_window(
+        self, manager, monkeypatch,
+    ):
+        """裁定 B (2026-07-31、judgment_seat_contention_and_event_loss ③):
+        gate で止まった refire は一度の失敗で終端化せず、再試行窓のあいだ
+        prepared を保持して毎 tick 再試行する。窓を使い切ったら expired 終端。"""
         clock.enable_virtual(self.BASE)
         ledger = manager.execution_ledger
         eid = self._claim_prepared(
             ledger, "judgment.on_event", payload={"event_text": "x"},
         )
-        self._patch_fire(monkeypatch, result={
+        calls = self._patch_fire(monkeypatch, result={
+            "submitted": False, "reason": "persona autonomy disabled",
+        })
+        # 1 回目の失敗: prepared のまま保持 (終端化しない)
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 1
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        # 次の tick: 再試行される
+        clock.advance_to(datetime(2026, 7, 19, 9, 4, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 2
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        # 窓 (1800 秒) 超過: refire せず expired 終端
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 2
+        entry = ledger.get_execution(eid)
+        assert entry["status"] == XL.STATUS_FAILED
+        assert "expired" in entry["error"]
+
+    def test_refire_recovers_after_transient_failure(self, manager, monkeypatch):
+        """裁定 B: 一時障害が直れば、保持していた席から判断が走る
+        (イベントは消失しない — これが B を選んだ理由そのもの)。"""
+        from saiverse import autonomy_wiring
+
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        results = [
+            {"submitted": False, "reason": "persona not loaded"},  # 一時障害
+            {"submitted": True},                                   # 回復
+        ]
+        calls = []
+
+        def _fake(mgr, pid, kind, context=None, resume_execution_id=None, **kw):
+            calls.append(resume_execution_id)
+            return results.pop(0)
+
+        monkeypatch.setattr(autonomy_wiring, "fire_judgment_point", _fake)
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        clock.advance_to(datetime(2026, 7, 19, 9, 4, 0))
+        wiring._collect_prepared_judgments(manager)
+        # 同じ席 (execution_id) への refire が 2 回、2 回目で成立した
+        assert calls == [eid, eid]
+
+    def test_old_prepared_row_gets_a_refire_after_long_downtime(
+        self, manager, monkeypatch,
+    ):
+        """再試行窓は行齢でなく「このプロセスで最初に refire を試みた時刻」から
+        数える — claim 直後にプロセスが落ちて 30 分以上たってから再起動した
+        場合でも、復旧後の最初の tick は失効させずに refire する
+        (Codex 一巡目 high2: 行齢基準は停止時間が窓を消費し、durable recovery の
+        対象だったイベントを復旧直後に破棄していた)。
+        """
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        calls = self._patch_fire(monkeypatch, result={
+            "submitted": False, "reason": "persona not loaded",
+        })
+        # 40 分停止していた想定 (このプロセスに初回試行の記録は無い)
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 1  # 失効せず refire された
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        # 初回試行からさらに窓 (1800 秒) 超過 → expired 終端
+        clock.advance_to(datetime(2026, 7, 19, 10, 15, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 1
+        entry = ledger.get_execution(eid)
+        assert entry["status"] == XL.STATUS_FAILED
+        assert "expired" in entry["error"]
+
+    def test_manual_mode_time_does_not_consume_retry_window(
+        self, manager, monkeypatch,
+    ):
+        """手動モード中のスキップは再試行窓を消費しない — 30 分以上たってから
+        手動モードを解除しても、少なくとも 1 回は refire される。"""
+        clock.enable_virtual(self.BASE)
+        manager._debug_manual_mode_personas = {PERSONA_ID}
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        calls = self._patch_fire(monkeypatch, result={
+            "submitted": False, "reason": "persona autonomy disabled",
+        })
+        # 手動モードのまま 40 分: スキップされ続け、prepared 温存
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert calls == []
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        # 手動モード解除 → 失効せず refire される
+        manager._debug_manual_mode_personas = set()
+        clock.advance_to(datetime(2026, 7, 19, 9, 41, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(calls) == 1
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+
+    def test_expiry_failure_does_not_grant_a_fresh_retry_window(
+        self, manager, monkeypatch,
+    ):
+        """期限切れの放棄が台帳例外で失敗しても、初回試行時刻は保持され、次 tick は
+        refire を再開せず期限切れ処理を直ちに再試行する (Codex 二巡目 medium:
+        失敗時に時刻を消すと次 tick が「初回」と誤認して 30 分窓を配り直し、
+        恒久ゲートの行が有限時間で終端する契約が破れる)。"""
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        calls = self._patch_fire(monkeypatch, result={
             "submitted": False, "reason": "persona autonomy disabled",
         })
         clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)  # 初回試行 (9:03)
+        assert len(calls) == 1
+        # 窓超過。放棄は一度だけ台帳例外で失敗する
+        real_abandon = ledger.abandon_prepared
+        failures = {"n": 0}
+
+        def _flaky(eid_, reason):
+            if failures["n"] == 0:
+                failures["n"] += 1
+                raise RuntimeError("database is locked (injected)")
+            return real_abandon(eid_, reason)
+
+        monkeypatch.setattr(ledger, "abandon_prepared", _flaky)
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._collect_prepared_judgments(manager)  # 期限切れ処理が失敗
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        assert len(calls) == 1  # 新しい窓で refire を再開していない
+        # 次 tick: 期限切れ処理が直ちに再試行され、今度は成功する
+        clock.advance_to(datetime(2026, 7, 19, 9, 41, 0))
         wiring._collect_prepared_judgments(manager)
         entry = ledger.get_execution(eid)
         assert entry["status"] == XL.STATUS_FAILED
-        assert "refire failed" in entry["error"]
+        assert "expired" in entry["error"]
+        assert len(calls) == 1
+
+    def test_expiry_does_not_break_a_seat_claimed_meanwhile(self, manager):
+        """期限切れの放棄は prepared 限定 CAS — 放棄する瞬間に別 claimant が
+        running へ進めていた席は触らない (勝者の台帳を壊さない)。"""
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        assert ledger.try_mark_running(eid)  # もう一人の claimant が席を取った
+        wiring._abandon_prepared_row(ledger, eid, "expired: test")
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_RUNNING
+
+    def test_recovered_on_event_engage_now_dispatches_response(
+        self, manager, monkeypatch,
+    ):
+        """回収 refire の判断が engage_now を選んだら、payload の凍結 event_text
+        から応対 Pulse を再構成して起動する — 判断だけ成功させて応対を落とすと、
+        alert (engage_now しか選べない) では回収成功に見えて通知への応答が必ず
+        欠落する (Codex 三巡目 high1)。"""
+        from saiverse import autonomy_wiring
+
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event",
+            payload={"event_text": "掲示板の告知", "is_alert": True},
+        )
+        monkeypatch.setattr(
+            autonomy_wiring, "fire_judgment_point",
+            lambda *a, **kw: {
+                "submitted": True, "execution_id": eid,
+                "applied_events": [{
+                    "type": "judgment_applied",
+                    "extras": ["reaction=engage_now"],
+                }],
+            },
+        )
+        dispatched = []
+        manager.pulse_dispatcher = SimpleNamespace(
+            dispatch_schedule_fire=lambda **kw: (dispatched.append(kw), {
+                "action": "execute", "runtime_outcome": "completed",
+                "error": None,
+            })[1],
+        )
+        manager.personas[PERSONA_ID].current_building_id = "alice_room"
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert len(dispatched) == 1
+        assert dispatched[0]["persona_id"] == PERSONA_ID
+        assert dispatched[0]["building_id"] == "alice_room"
+        assert "掲示板の告知" in dispatched[0]["user_input"]
+        assert "[外部イベント通知]" in dispatched[0]["user_input"]
+
+    def test_recovered_on_event_note_only_does_not_dispatch(
+        self, manager, monkeypatch,
+    ):
+        """engage_now 以外 (note_only 等) の回収は応対を起動しない (finalize が
+        適用済み — 従来経路の handle_external_event と同じ裁定)。"""
+        from saiverse import autonomy_wiring
+
+        clock.enable_virtual(self.BASE)
+        ledger = manager.execution_ledger
+        eid = self._claim_prepared(
+            ledger, "judgment.on_event", payload={"event_text": "x"},
+        )
+        monkeypatch.setattr(
+            autonomy_wiring, "fire_judgment_point",
+            lambda *a, **kw: {
+                "submitted": True, "execution_id": eid,
+                "applied_events": [{
+                    "type": "judgment_applied",
+                    "extras": ["reaction=note_only"],
+                }],
+            },
+        )
+        dispatched = []
+        manager.pulse_dispatcher = SimpleNamespace(
+            dispatch_schedule_fire=lambda **kw: (dispatched.append(kw), {
+                "action": "execute", "runtime_outcome": "completed",
+                "error": None,
+            })[1],
+        )
+        manager.personas[PERSONA_ID].current_building_id = "alice_room"
+        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert dispatched == []
 
     def test_unknown_judgment_kind_left_as_is(self, manager, monkeypatch):
         """回収規則の無い judgment.* kind は触らない (安全側)。"""

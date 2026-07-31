@@ -185,33 +185,38 @@ class PulseDispatcher:
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """現象システムからのイベント注入 (Kitchen 等)。直接経路で submit_schedule。
+    ) -> bool:
+        """現象システムからのイベント注入 (Kitchen 等)。直接経路で schedule Pulse。
 
         現状はスケジュールと同じ priority レーン (SCHEDULE) で起動する。
         現象種別ごとに別 priority が必要になれば将来分岐させる。
+
+        実体は :meth:`dispatch_schedule_fire` (型付き outcome) — submit が例外を
+        投げなくても Pulse が起動していないケース (Beat 関所閉鎖 / PulseController
+        内部で畳まれた例外) があるため、受付裁定と実行顛末を観測してから成否を
+        返す。
+
+        Returns:
+            True = Pulse が実行完走した、または queue に受付されて消えない
+            (action=queued / runtime_outcome=cancelled は復帰 queue に残る —
+            ScheduleManager._classify_dispatch_outcome の accepted と同じ裁定)。
+            False = 起動していない (pulse_controller 不在 / 関所閉鎖 / skipped /
+            例外)。呼び出し側が「起動できた」を前提に成功を記録しないための
+            型付き戻り値 — 回収経路の応対復元 (autonomy_wiring) と
+            inject_persona_event が読む。
         """
-        pulse_controller = getattr(self.manager, "pulse_controller", None)
-        if pulse_controller is None:
-            LOGGER.warning(
-                "[dispatcher] phenomenon_event: pulse_controller unavailable (persona=%s)",
-                persona_id,
-            )
-            return
-        try:
-            pulse_controller.submit_schedule(
-                persona_id=persona_id,
-                building_id=building_id,
-                user_input=user_input,
-                metadata=metadata,
-                meta_playbook=meta_playbook,
-                args=args,
-            )
-        except Exception:
-            LOGGER.exception(
-                "[dispatcher] phenomenon_event dispatch failed: persona=%s",
-                persona_id,
-            )
+        result = self.dispatch_schedule_fire(
+            persona_id=persona_id,
+            building_id=building_id,
+            user_input=user_input,
+            metadata=metadata,
+            meta_playbook=meta_playbook,
+            args=args,
+        )
+        return (
+            result.get("action") == "queued"
+            or result.get("runtime_outcome") in ("completed", "cancelled")
+        )
 
     # ------------------------------------------------------------------
     # 自律 tick — AutonomyManager の定期 tick (2b, v2 で watchdog に縮退)

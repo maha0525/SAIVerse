@@ -373,6 +373,41 @@ def test_fire_precondition_rejection_marks_failed_and_next_claim_runs(
     assert len(manager.pulse_controller.calls) == 1
 
 
+def test_fire_precondition_exit_does_not_break_a_running_winner(session_factory):
+    """入口側の離脱は prepared 限定 CAS — 勝者の running 台帳を壊さない。
+
+    claim_execution は既存 prepared 行を再利用するため、ほぼ同時の二重 claim は
+    同じ execution_id を両方へ返す。敗者側の precondition 離脱が無条件
+    mark_failed だと、勝者が LLM 実行中の running 台帳を failed に上書きし、
+    finalize の applied 遷移が失敗して結果の証跡が消える
+    (docs/issues/judgment_seat_contention_and_event_loss.md ②)。
+    """
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_finalizing_ledger(manager, session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+
+    stolen: List[str] = []
+
+    def _steal_seat_then_reject():
+        # Lock 下・claim 後に走る precondition を「もう一人の claimant が同じ
+        # 席を先に running へ進めた」瞬間の再現に使う
+        rows = ledger.list_prepared("judgment.")
+        assert rows, "claim 済みの prepared 行があるはず"
+        eid = rows[0]["execution_id"]
+        assert ledger.try_mark_running(eid)
+        stolen.append(eid)
+        return False
+
+    result = wiring.fire_judgment_point(
+        manager, PERSONA_ID, "day_open", precondition=_steal_seat_then_reject,
+    )
+    assert result["submitted"] is False
+    # 席を放棄できなかった = 結末不明 (呼び出し側は代替経路を走らせない)
+    assert result["outcome"] == wiring.OUTCOME_INDETERMINATE
+    # 勝者の running 台帳は無傷
+    assert ledger.get_execution(stolen[0])["status"] == XL.STATUS_RUNNING
+
+
 def test_fire_force_bypasses_idempotency_key(session_factory):
     """force=True はキーを None に落とし、debug 明示発火が duplicate に阻まれない。"""
     manager, _ = _make_manager(session_factory)
@@ -810,6 +845,147 @@ def test_external_event_indeterminate_seat_avoids_double_handling(
     )
     assert route == wiring.ROUTE_NONE_INDETERMINATE
     assert dispatched == []
+
+
+def test_external_event_freezes_dispatch_envelope_into_context(
+    session_factory, monkeypatch,
+):
+    """応対の材料 (組み立て済み user_input / playbook / args) が判断 context に
+    同乗する — 台帳 payload に凍結され、回復 tick の回収が初回とまったく同じ
+    入力で応対を再構成できる (Codex 四巡目 medium)。"""
+    manager, _ = _make_manager(session_factory)
+    captured: Dict[str, Any] = {}
+
+    def _fake(mgr, pid, kind, context=None, **kw):
+        captured["context"] = context
+        return {"submitted": True, "applied_events": []}
+
+    monkeypatch.setattr(wiring, "fire_judgment_point", _fake)
+    envelope = {
+        "user_input": "<system>\n[外部イベント通知]\n差出人: X\n</system>",
+        "event_type": "x_mention",
+        "meta_playbook": "track_user_conversation",
+        "args": {"trigger_author_name": "X"},
+    }
+    wiring.handle_external_event(
+        manager, PERSONA_ID, "掲示板の告知",
+        dispatch_direct=lambda: None,
+        dispatch_envelope=envelope,
+    )
+    assert captured["context"]["dispatch_envelope"] == envelope
+    assert captured["context"]["event_text"] == "掲示板の告知"
+
+
+def test_recovered_response_dispatch_result_is_typed(session_factory):
+    """応対復元は dispatch の顛末を三値で返す — 副作用ゼロ確定 (safe_failure)
+    だけが再試行対象で、実行中の例外 (unknown = LLM が動いたか不明) は二重応対を
+    避けて再試行しない (Codex 五巡目 high2 / 六巡目 high1)。"""
+    manager, _ = _make_manager(session_factory)
+    # Beat 関所閉鎖 = 副作用ゼロ確定 → 再試行してよい
+    manager.pulse_dispatcher = SimpleNamespace(
+        dispatch_schedule_fire=lambda **kw: {
+            "action": "execute", "runtime_outcome": "gate_closed", "error": None,
+        },
+    )
+    assert wiring._dispatch_recovered_event_response(
+        manager, PERSONA_ID, {"event_text": "x"},
+    ) == wiring.RECOVERED_DISPATCH_SAFE_FAILURE
+    # 実行中の例外 = LLM が動いたか不明 → 再試行禁止
+    manager.pulse_dispatcher = SimpleNamespace(
+        dispatch_schedule_fire=lambda **kw: {
+            "action": "execute", "runtime_outcome": "error", "error": "boom",
+        },
+    )
+    assert wiring._dispatch_recovered_event_response(
+        manager, PERSONA_ID, {"event_text": "x"},
+    ) == wiring.RECOVERED_DISPATCH_UNKNOWN
+
+    sent = []
+    manager.pulse_dispatcher = SimpleNamespace(
+        dispatch_schedule_fire=lambda **kw: (sent.append(kw), {
+            "action": "execute", "runtime_outcome": "completed", "error": None,
+        })[1],
+    )
+    envelope = {"user_input": "<system>原文</system>", "event_type": "sensor",
+                "meta_playbook": "track_user_conversation", "args": {"k": 1}}
+    assert wiring._dispatch_recovered_event_response(
+        manager, PERSONA_ID,
+        {"event_text": "x", "dispatch_envelope": envelope},
+    ) == wiring.RECOVERED_DISPATCH_OK
+    # envelope の実物がそのまま再送される (再構成の別テキストに化けない)
+    assert sent[0]["user_input"] == "<system>原文</system>"
+    assert sent[0]["args"] == {"k": 1}
+    assert sent[0]["metadata"]["event_type"] == "sensor"
+    assert sent[0]["metadata"]["recovered"] is True
+
+
+def test_recovered_response_failure_schedules_bounded_retry(
+    session_factory, monkeypatch,
+):
+    """回収応対の明示失敗 (submit が起動しなかった) は揮発予約の bounded backoff
+    で再試行される — 判断台帳は completed 済みで prepared 回収に戻れないため、
+    ここで諦めるとイベント応対が黙って消える (Codex 五巡目 high3)。"""
+    manager, _ = _make_manager(session_factory)
+    monkeypatch.setattr(
+        wiring, "fire_judgment_point",
+        lambda *a, **kw: {
+            "submitted": True, "execution_id": "exec-9",
+            "applied_events": [{
+                "type": "judgment_applied", "extras": ["reaction=engage_now"],
+            }],
+        },
+    )
+    calls = {"n": 0}
+
+    def _flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 初回は関所閉鎖 (副作用ゼロ確定の明示失敗)
+            return {"action": "execute", "runtime_outcome": "gate_closed",
+                    "error": None}
+        return {"action": "execute", "runtime_outcome": "completed",
+                "error": None}
+
+    manager.pulse_dispatcher = SimpleNamespace(dispatch_schedule_fire=_flaky)
+    wiring.refire_judgment_from_recovery(
+        manager, PERSONA_ID, "on_event", {"event_text": "x"}, "exec-9",
+    )
+    assert calls["n"] == 1
+    entry = manager.event_scheduler._entries_by_key.get(
+        "recovered_response:exec-9"
+    )
+    assert entry is not None  # 再試行が予約されている
+    entry.callback()  # backoff 発火 → 再試行成功
+    assert calls["n"] == 2
+    # 成功したので次の再試行は積まれない (キーは同じ予約の消費で終わる)
+
+
+def test_recovered_response_unknown_outcome_is_not_retried(
+    session_factory, monkeypatch,
+):
+    """実行中の例外 (unknown = LLM が動いたか不明) は再試行を積まない — 発話や
+    記憶更新まで進んだ応対の再実行は二重応対になる (Codex 六巡目 high1。台帳の
+    unknown = 自動再実行禁止と同じ規律)。"""
+    manager, _ = _make_manager(session_factory)
+    monkeypatch.setattr(
+        wiring, "fire_judgment_point",
+        lambda *a, **kw: {
+            "submitted": True, "execution_id": "exec-8",
+            "applied_events": [{
+                "type": "judgment_applied", "extras": ["reaction=engage_now"],
+            }],
+        },
+    )
+    manager.pulse_dispatcher = SimpleNamespace(
+        dispatch_schedule_fire=lambda **kw: {
+            "action": "execute", "runtime_outcome": "error", "error": "boom",
+        },
+    )
+    wiring.refire_judgment_from_recovery(
+        manager, PERSONA_ID, "on_event", {"event_text": "x"}, "exec-8",
+    )
+    assert "recovered_response:exec-8" not in \
+        manager.event_scheduler._entries_by_key
 
 
 def test_external_event_unknown_reaction_avoids_double_handling(

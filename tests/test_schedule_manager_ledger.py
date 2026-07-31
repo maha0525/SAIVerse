@@ -395,6 +395,121 @@ def test_judgment_duplicate_is_settled_skip(env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 6b. 判断点の席の競合: indeterminate / duplicate:running は前進させない
+# ---------------------------------------------------------------------------
+
+
+def test_classify_judgment_outcome_seat_contention_mappings():
+    """精算分類の契約 (judgment_seat_contention_and_event_loss ①②の呼び出し側)。
+
+    - indeterminate = 席を放棄できなかった。この dispatch 自身は副作用ゼロだが
+      実処理の失敗ではない — waiting (attempt を消費しない backoff 再試行)。
+      再試行の claim が勝者の終端を照合する。
+    - duplicate:running = 勝者がまだ実行中。settled_skip で前進させると、勝者が
+      後で failed になったとき当営業日分が回収不能になる (Codex 二巡目 high) —
+      waiting で待つ。
+    - duplicate:applied / completed = 判断は済んだ — settled_skip (前進)。
+    - duplicate:unknown = LLM が動いたか不明 — unknown (自動再実行禁止)。
+    """
+    from saiverse.judgment_points import OUTCOME_INDETERMINATE
+    from saiverse.schedule_manager import ScheduleManager
+
+    classify = ScheduleManager._classify_judgment_outcome
+    assert classify({"submitted": False, "reason": "duplicate:applied"})[0] \
+        == "settled_skip"
+    assert classify({"submitted": False, "reason": "duplicate:completed"})[0] \
+        == "settled_skip"
+    assert classify({"submitted": False, "reason": "duplicate:running"})[0] \
+        == "waiting"
+    assert classify({"submitted": False, "reason": "duplicate:unknown"})[0] \
+        == "unknown"
+    assert classify({
+        "submitted": False, "reason": "seat taken by another claimant",
+        "outcome": OUTCOME_INDETERMINATE,
+    })[0] == "waiting"
+    # 既存のゲート裁定は不変
+    assert classify({"submitted": False, "reason": "precondition not met"})[0] \
+        == "settled_skip"
+
+
+def test_judgment_indeterminate_retries_and_recovers(env, monkeypatch):
+    """席が indeterminate だった occurrence は backoff 再試行され、勝者の終端後に
+    判断が回収される — 前進もブロックもしない (Codex 一巡目 high1 と二巡目 high の
+    両立: 再試行の claim が勝者の終端の照合になる)。"""
+    from saiverse.judgment_points import OUTCOME_INDETERMINATE
+
+    sid = _add_schedule(
+        env.session_factory,
+        SCHEDULE_TYPE="periodic",
+        META_PLAYBOOK="judgment_day_open",
+        SCHEDULED_DATETIME=None,
+        TIME_OF_DAY=_past_time_of_day(),
+    )
+    results = [
+        # 1 回目: 敗者 (勝者が実行中)
+        {"submitted": False, "reason": "seat taken by another claimant",
+         "outcome": OUTCOME_INDETERMINATE},
+        # 再試行: 勝者は failed に終わっていた → claim がキーを退避して再実行
+        {"submitted": True},
+    ]
+    monkeypatch.setattr(
+        wiring, "handle_scheduled_judgment",
+        lambda *a, **kw: results.pop(0),
+    )
+    env.sm.register_schedule(sid)
+    key = _occurrence_key_of(env, _entry(env, sid), sid)
+    _fire(env, sid)
+
+    # 1 回目: failed + 同日 backoff (~120 秒。前進もブロックもしない)
+    assert _ledger_row(env, key)["status"] == "failed"
+    retry = _entry(env, sid)
+    assert 60 < retry.fire_at_ts - time.time() < 600
+
+    _fire(env, sid)  # backoff 再試行 → 判断が走った
+    assert results == []
+    assert _ledger_row(env, key)["status"] == "completed"
+
+
+def test_judgment_waiting_does_not_consume_retry_attempts(env, monkeypatch):
+    """勝者待ち (duplicate:running / indeterminate) は attempt を消費しない —
+    勝者が全 backoff のあいだ running のままでも occurrence を放棄しない
+    (Codex 三巡目 high2: 通常の上限で待機を打ち切ると、勝者 failed 後の当日
+    occurrence を回収する経路が無くなる)。待機ループの終端は台帳の running
+    期限監視 (1 時間で unknown 化) が別途保証する。"""
+    from saiverse.schedule_manager import SCHEDULE_DISPATCH_MAX_ATTEMPTS
+
+    sid = _add_schedule(
+        env.session_factory,
+        SCHEDULE_TYPE="periodic",
+        META_PLAYBOOK="judgment_day_open",
+        SCHEDULED_DATETIME=None,
+        TIME_OF_DAY=_past_time_of_day(),
+    )
+    monkeypatch.setattr(
+        wiring, "handle_scheduled_judgment",
+        lambda *a, **kw: {"submitted": False, "reason": "duplicate:running"},
+    )
+    env.sm.register_schedule(sid)
+
+    # 上限を大きく超える回数待たされても、backoff 再試行が積まれ続ける
+    for _ in range(SCHEDULE_DISPATCH_MAX_ATTEMPTS + 2):
+        _fire(env, sid)
+        retry = _entry(env, sid)
+        assert retry is not None
+        assert 60 < retry.fire_at_ts - time.time() < 600  # backoff (放棄しない)
+
+    # 勝者が終端した (completed) → settled_skip で前進する
+    monkeypatch.setattr(
+        wiring, "handle_scheduled_judgment",
+        lambda *a, **kw: {"submitted": False, "reason": "duplicate:completed"},
+    )
+    _fire(env, sid)
+    nxt = _entry(env, sid)
+    assert nxt is not None
+    assert nxt.fire_at_ts - time.time() > 3600  # 次 occurrence (翌日)
+
+
+# ---------------------------------------------------------------------------
 # 7. 同一 occurrence の二重発火 → dispatch 1 回のみ
 # ---------------------------------------------------------------------------
 

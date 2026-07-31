@@ -50,6 +50,14 @@ SCHEDULE_DISPATCH_LEDGER_KIND = "schedule.dispatch"
 SCHEDULE_DISPATCH_RETRY_BACKOFF_SECONDS = 120.0
 SCHEDULE_DISPATCH_MAX_ATTEMPTS = 3
 
+#: waiting (勝者の judgment の終端待ち — attempt 非消費) の failed 行に刻む
+#: ERROR 接頭辞。mark_failed と揮発 backoff 予約の間で crash した waiting 行を、
+#: 回収 (_collect_failed_periodic_schedule_dispatch) が通常の失敗と区別して
+#: attempt を据え置いたまま refire するための durable な印 —
+#: 印なしだと回収の attempt+1 が待機を失敗として数え、上限到達で当日
+#: occurrence を失う (Codex 四巡目 high1)。
+SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX = "waiting:"
+
 # reconciliation (handoff D6) で「次回 occurrence の再登録」をブロックする台帳
 # status。running = 実行中 (>60s の長 Pulse) への二重登録防止 / applied・
 # completed = 既に済んだ occurrence / unknown = 裁定待ちの自動再実行禁止
@@ -803,13 +811,26 @@ class ScheduleManager:
                 # periodic 次回)。commit 済みなので ORM の期限切れ再読込が
                 # 最新行 (実行中の再設定を含む) を反映する。
                 self._do_register(schedule, session)
-            elif outcome_class == "failed":
-                # 副作用ゼロ確定 — schedule 状態は前進させず backoff 再試行 (D5)
+            elif outcome_class in ("failed", "waiting"):
+                # どちらも副作用ゼロ確定 — schedule 状態は前進させず backoff
+                # 再試行 (D5)。waiting (勝者の judgment が実行中 / 席が
+                # indeterminate) は実処理の失敗ではないので attempt を消費しない
+                # — 通常の上限で待機を打ち切ると、勝者が長時間 running のまま
+                # attempt が尽き、勝者 failed 後の当日 occurrence を失う
+                # (Codex 三巡目 high2)。待機の終端は台帳の running 期限監視
+                # (1 時間で unknown 化 → duplicate:unknown → unknown 終端)。
                 if ledger is not None:
-                    ledger.mark_failed(exec_id, detail)
+                    # waiting は ERROR に接頭辞を刻む — crash 後の failed 回収が
+                    # attempt を据え置いたまま refire できるように (durable な印)
+                    ledger.mark_failed(
+                        exec_id,
+                        detail if outcome_class == "failed"
+                        else f"{SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX}{detail}",
+                    )
                 self._retry_or_give_up(
                     schedule, session, instance_token, occurrence_token,
                     generation, attempt, detail,
+                    consume_attempt=(outcome_class == "failed"),
                 )
             else:  # unknown
                 # LLM が動いたか不明 — 前進なし・再予約なし。occurrence は
@@ -833,20 +854,29 @@ class ScheduleManager:
         generation: int,
         attempt: int,
         detail: str,
+        *,
+        consume_attempt: bool = True,
     ) -> None:
-        """failed (副作用ゼロ) の backoff 再試行 (W3 D5)。
+        """failed / waiting (いずれも副作用ゼロ) の backoff 再試行 (W3 D5)。
 
         attempt+1 が上限内なら同一 occurrence closure を backoff 後に再予約する
         (claim が failed キーを退避するので再実行は安全)。尽きたら periodic は
         次 occurrence (翌日) を登録し、oneshot / interval は登録せず
         reconciliation の周期 (Chunk C、60 秒) に委ねる — 恒久故障は cadence が
         落ちて継続する (handoff「引き受ける歪み①」)。
+
+        Args:
+            consume_attempt: False = waiting (勝者の judgment の終端待ち)。
+                実処理の失敗ではないので attempt を据え置く — 上限は失敗の
+                打ち切り用で、待機に適用すると勝者が長い running のあいだに
+                occurrence を放棄してしまう。待機ループの終端は台帳の running
+                期限監視 (1 時間で unknown 化) が保証する。
         """
         from saiverse import clock
 
         schedule_id = schedule.SCHEDULE_ID
         scheduler = getattr(self.manager, "event_scheduler", None)
-        next_attempt = attempt + 1
+        next_attempt = attempt + 1 if consume_attempt else attempt
         if next_attempt <= SCHEDULE_DISPATCH_MAX_ATTEMPTS and scheduler is not None:
             retry_at = clock.now() + timedelta(
                 seconds=SCHEDULE_DISPATCH_RETRY_BACKOFF_SECONDS
@@ -960,9 +990,34 @@ class ScheduleManager:
         if result.get("submitted"):
             return "executed", "submitted"
         reason = str(result.get("reason") or "")
+        if reason.startswith("duplicate:"):
+            # 同じ判断キーの既存実行の状態ごとに精算を分ける
+            # (docs/issues/judgment_seat_contention_and_event_loss.md ①②)。
+            # backoff 再試行の claim 自体が「勝者の終端の照合」になっている:
+            # applied/completed → 判断は済んだ = 前進 / failed → claim がキーを
+            # 退避して再実行 (duplicate としてここへは来ない) / running →
+            # まだ終わっていない — settled_skip で前進させると、勝者が後で
+            # failed になったとき当営業日分が回収不能になるため、waiting
+            # (attempt を消費しない backoff 再試行) で勝者の終端を待つ。
+            # 待機の終端は台帳の running 期限監視 (回復 tick が 1 時間で
+            # unknown 化) が保証する — running は永続しない。
+            status = reason.split(":", 1)[1]
+            if status == "running":
+                return "waiting", reason
+            if status == "unknown":
+                # LLM が動いたか不明 — 自動再実行禁止 (intent §2.5)
+                return "unknown", reason
+            return "settled_skip", reason
+        # indeterminate = 判断の席を放棄できなかった (別 claimant が同じ判断を
+        # LLM 実行中 / 台帳が応答しない)。この dispatch 自身は副作用ゼロだが、
+        # 実処理の失敗ではないので waiting — 再試行の claim が上の duplicate
+        # 分類で勝者の終端を照合する。settled_skip (前進) にしてはならない。
+        from saiverse.judgment_points import OUTCOME_INDETERMINATE
+
+        if result.get("outcome") == OUTCOME_INDETERMINATE:
+            return "waiting", reason or "judgment seat indeterminate"
         if (
-            reason.startswith("duplicate:")
-            or reason in cls._JUDGMENT_GATE_REASONS
+            reason in cls._JUDGMENT_GATE_REASONS
             or reason.startswith("conversation had no exchange")
         ):
             return "settled_skip", reason
@@ -1017,6 +1072,8 @@ class ScheduleManager:
             "executed" (実行完走) / "accepted" (queue 受付済みで消えない) /
             "settled_skip" (実行しないと裁定済み) /
             "failed" (副作用ゼロ確定 — 再試行安全) /
+            "waiting" (副作用ゼロだが勝者の judgment の終端待ち — attempt を
+            消費しない backoff 再試行) /
             "unknown" (LLM が動いたか不明 — 自動再実行禁止)。
         """
         persona_id = schedule.PERSONA_ID
