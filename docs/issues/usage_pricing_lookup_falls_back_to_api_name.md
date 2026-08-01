@@ -10,9 +10,11 @@
 
 Codex 設定の API 名 (`gpt-5.6-terra`) は従量課金版設定のキーと同一なので、`UsageInfo.model` に API 名が入った瞬間、従量単価が引き当てられる。
 
-- **現状で実害は出ていない**: `92ead95` と本セッションの llama cache 修正で、usage を記録する経路の `config_key` は factory 由来の設定キーに揃っている。確認したのは `openai` / `anthropic` / `xai` / `ollama` / `gemini` / `openai_codex` と `LlamaCachedClient` 経由。
-- **残っているのは構造**: 価格引き当ての側が API 名を受け付ける限り、`config_key` が空になる経路が将来入れば同じ誤課金が再発する。防御が「呼ぶ側が正しい値を渡す」ことだけに依存している。
+- **実害は実際に出ていた**: 起票時に「現状で実害は出ていない」と書いたが**誤りだった** (2026-08-01、Codex 三巡目の指摘で判明)。`scripts/` の CLI 6 箇所が `find_model_config` の返す設定キーを持ちながら、factory には API 名 (`actual_model_id`) を渡していた。factory は第一引数を `client.config_key` にするため、Codex 設定を CLI で使うと使用量が `gpt-5.6-terra` に帰属し、**この節のフォールバックが従量単価を引き当てていた**。1M input / 1M output で 0 円ではなく 14.0 USD が記録される。呼び出し側は `5301701` の次のコミットで修正済み。
+- **残っているのは構造**: 価格引き当ての側が API 名を受け付ける限り、`config_key` に API 名が入る経路が将来また入れば同じ誤課金が再発する。防御が「呼ぶ側が正しい値を渡す」ことだけに依存している点は変わっていない。上記の CLI はまさにその「呼ぶ側が間違えた」実例。
 - `sea/runtime_context.py` の送信前見積もりは `persona.model` を渡す。これは `get_llm_client()` に渡る値と同じ設定キーなので現状は一致するが、正規化を経ていない点は同じ構造。
+
+**この誤りの出方**: `llm_clients/` の内部だけを調べて「usage を記録する経路の config_key は設定キーに揃っている」と断定し、**factory に何が渡されるか (呼び出し側) を調べていなかった**。調べた範囲の外を「問題なし」と書く形で、同セッション内に二度出た誤り (もう一件は [`structured_output_usage_not_recorded.md`](structured_output_usage_not_recorded.md) の訂正記録)。
 
 **修正の方向 (裁定待ち)**: 課金計算用の価格検索を設定キー完全一致に限定し、API 名での検索は表示・設定解決の用途に分離する。設定キーで引けない使用量は暗黙に 0 円扱いせず、未帰属として明示する。
 

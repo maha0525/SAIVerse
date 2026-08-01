@@ -389,7 +389,6 @@ def regenerate_entry_from_messages(
     if not model_config:
         raise ValueError(f"Model '{model_name}' not found in config. Use --list-models to see available options.")
     
-    actual_model_id = model_config.get("model", model_name)
     auto_provider = model_config.get("provider")
     if not auto_provider:
         raise ValueError(f"Model '{model_name}' is missing 'provider' in config.")
@@ -398,7 +397,10 @@ def regenerate_entry_from_messages(
     context_length = model_config.get("context_length", 128000)
     
     # Get LLM client
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    # factory の第一引数は設定キー。API 名を渡すと client.config_key が API 名になり、
+    # 使用量が同名の従量課金版設定の単価で記録される (docs/intent/
+    # model_provider_management.md「使用量の帰属」)。API 名は config から解決される。
+    client = get_llm_client(model_id, provider, context_length, config=model_config)
     
     # Generate Chronicle entry
     new_entry = generate_level1_arasuji(
@@ -580,9 +582,8 @@ def run_cli() -> None:
     # Handle --estimate (見積もりのみ、LLM 呼び出しなし・書き込みなし)
     if args.estimate:
         resolved_model_id, model_config = find_model_config(args.model)
-        estimate_model_name = args.model
-        if resolved_model_id:
-            estimate_model_name = model_config.get("model", resolved_model_id)
+        # 価格は設定キーで引く。API 名を渡すと同名の従量課金版設定の単価が出る。
+        estimate_model_name = resolved_model_id or args.model
         print_cost_estimate(
             conn,
             args.persona_id,
@@ -681,7 +682,8 @@ def run_cli() -> None:
     estimate = print_cost_estimate(
         conn,
         args.persona_id,
-        model_name=actual_model_id,
+        # 価格は設定キーで引く (API 名だと同名の従量課金版設定の単価が出る)。
+        model_name=resolved_model_id,
     )
     if not args.dry_run and not args.yes:
         answer = input("\nこの内容で Chronicle 生成を実行しますか？ [y/N]: ").strip().lower()
@@ -745,7 +747,8 @@ def run_cli() -> None:
     # Import factory directly to avoid circular import
     from llm_clients.factory import get_llm_client
 
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    # 第一引数は設定キー (API 名を渡すと使用量が従量課金版の単価で記録される)。
+    client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
 
     def progress_callback(processed: int, total: int) -> None:
         if total > 0:

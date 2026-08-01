@@ -257,7 +257,8 @@ JSON形式で回答してください。"""
     LOGGER.info(f"Using model: {actual_model_id}")
     LOGGER.info(f"Using provider: {provider}")
 
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    # 第一引数は設定キー (API 名を渡すと使用量が従量課金版の単価で記録される)。
+    client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
 
     try:
         result = get_llm_response(client, prompt, response_schema)

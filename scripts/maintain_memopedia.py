@@ -922,7 +922,8 @@ def main():
         LOGGER.info(f"Using model: {actual_model_id}")
 
         from llm_clients.factory import get_llm_client
-        client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+        # 第一引数は設定キー (API 名を渡すと使用量が従量課金版の単価で記録される)。
+        client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
 
     # Results tracking
     results = {

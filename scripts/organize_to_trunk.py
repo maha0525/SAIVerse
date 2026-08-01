@@ -293,7 +293,8 @@ JSON形式で回答してください。"""
     # Import factory directly to avoid circular import
     from llm_clients.factory import get_llm_client
 
-    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    # 第一引数は設定キー (API 名を渡すと使用量が従量課金版の単価で記録される)。
+    client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
 
     # Load context from Memopedia and Chronicle (like build_arasuji.py)
     memopedia_context = ""

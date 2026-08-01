@@ -1335,5 +1335,34 @@ class TestLlamaCachedClientUsageAttribution(unittest.TestCase):
             self.assertEqual(wrapper.config_key, "preset-config-key")
 
 
+class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
+    """CLI が factory へ API 名でなく設定キーを渡すこと。
+
+    get_llm_client の第一引数はそのまま client.config_key になる。API 名を渡すと、
+    同じ API 名を持つ従量課金版の設定があるモデル (Codex 等) で、使用量がその単価で
+    記録される。2026-08-01 時点で scripts/ の 6 箇所がこの形だった。
+
+    変数名での検査なので万能ではない (別名で同じ誤りを書けば素通りする)。実際に
+    起きた書き方の再発を止めるための歯止め。
+    """
+
+    def test_no_script_passes_api_model_name_to_factory(self):
+        import re
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        pattern = re.compile(r"get_llm_client\(\s*actual_model_id\b")
+        offenders = [
+            str(path.relative_to(repo_root))
+            for path in sorted((repo_root / "scripts").rglob("*.py"))
+            if pattern.search(path.read_text(encoding="utf-8", errors="replace"))
+        ]
+        self.assertEqual(
+            offenders, [],
+            "factory の第一引数は設定キー。API 名 (actual_model_id) を渡すと使用量が "
+            "従量課金版の単価で記録される: " + ", ".join(offenders),
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
