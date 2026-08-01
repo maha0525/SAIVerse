@@ -121,9 +121,14 @@ class LlamaCachedClient(LLMClient):
 
     def __init__(self, inner: LLMClient, cache: LlamaCacheManager) -> None:
         # config_key は inner へ委譲する property なので、基底の __init__ が
-        # self.config_key = "" を実行する時点で _inner が要る。
+        # self.config_key = "" を実行する時点で _inner が要る。ただしその代入は
+        # setter 経由で inner へ届いてしまうため、設定済みの client を包む場合に
+        # 備えて退避・復元する (factory は未設定の inner を包むので現状の経路では
+        # 差は出ないが、任意の LLMClient を包む契約なので消してはならない)。
         self._inner = inner
+        preserved_config_key = getattr(inner, "config_key", "")
         super().__init__(supports_images=getattr(inner, "supports_images", False))
+        inner.config_key = preserved_config_key
         self._cache = cache
 
     @property

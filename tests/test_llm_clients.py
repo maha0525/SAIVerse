@@ -1304,6 +1304,36 @@ class TestLlamaCachedClientUsageAttribution(unittest.TestCase):
             usage = client.consume_usage()
             self.assertEqual(usage.model, self.CONFIG_KEY)
 
+    def test_wrapping_preserves_existing_config_key(self):
+        """設定済みの client を包んでも config_key が消えないこと。
+
+        config_key は inner へ委譲する property なので、基底 __init__ の
+        self.config_key = "" も setter 経由で inner へ届く。退避・復元しないと
+        wrap した瞬間に既存の帰属が失われ、以後の usage が API 名へ戻る。
+        """
+        import tempfile
+
+        from llm_clients.llama_cache import LlamaCacheManager, LlamaCachedClient
+
+        class _FakeInner(LLMClient):
+            def __init__(self):
+                super().__init__()
+                self.model = "api-name"
+
+            def generate(self, *args, **kwargs):
+                return ""
+
+            def generate_stream(self, *args, **kwargs):
+                yield ""
+
+        inner = _FakeInner()
+        inner.config_key = "preset-config-key"
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LlamaCacheManager("http://localhost:18099/v1", tmp, 1)
+            wrapper = LlamaCachedClient(inner, cache)
+            self.assertEqual(inner.config_key, "preset-config-key")
+            self.assertEqual(wrapper.config_key, "preset-config-key")
+
 
 if __name__ == '__main__':
     unittest.main()
