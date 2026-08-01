@@ -1210,5 +1210,46 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(config_kwargs.get("response_mime_type"), "application/json")
         self.assertIn("response_schema", config_kwargs)
 
+class TestOpenAICodexUsageAttribution(unittest.TestCase):
+    """Codex はサブスクで賄われるので、使用量は設定キーで記録されなければならない。
+
+    Codex 設定の API モデル名 (例 "gpt-5.6-terra") は従量課金の API 版モデル設定の
+    キーと衝突する。usage をその名前で記録すると API 版の単価が引き当てられ、
+    課金されていない呼び出しに金額が付く。
+    """
+
+    def _finalized_usage(self, api_model: str, config_key: str):
+        from llm_clients.openai_codex import OpenAICodexClient
+
+        client = OpenAICodexClient(api_model)
+        client.config_key = config_key
+        client._finalize(
+            {
+                "usage_input": 1_000_000,
+                "usage_output": 1_000_000,
+                "usage_cached": 0,
+                "reasoning_summary_text": "",
+                "reasoning_full_text": "",
+                "text": "",
+                "function_calls": [],
+            },
+            None,
+        )
+        return client.consume_usage()
+
+    def test_usage_is_attributed_to_config_key(self):
+        usage = self._finalized_usage("gpt-5.6-terra", "codex-gpt-5.6-terra")
+        self.assertEqual(usage.model, "codex-gpt-5.6-terra")
+
+    def test_subscription_call_costs_nothing(self):
+        from saiverse import model_configs
+
+        usage = self._finalized_usage("gpt-5.6-terra", "codex-gpt-5.6-terra")
+        cost = model_configs.calculate_cost(
+            usage.model, usage.input_tokens, usage.output_tokens
+        )
+        self.assertEqual(cost, 0.0)
+
+
 if __name__ == '__main__':
     unittest.main()

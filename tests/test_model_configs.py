@@ -71,6 +71,24 @@ class TestCalculateCost(unittest.TestCase):
         cost = model_configs.calculate_cost("nonexistent-model-xyz", 1_000_000, 1_000_000)
         self.assertEqual(cost, 0.0)
 
+    def test_subscription_backed_configs_are_unpriced(self):
+        """Codex はサブスク課金なので、単価を書くと使用画面に架空の金額が出る。
+
+        Codex 設定の API モデル名は従量課金版の設定キーと衝突するため、価格は
+        必ず設定キー側 (codex-*) で引かれ、そこが無価格である必要がある。
+        """
+        codex_keys = [
+            key for key, config in model_configs.MODEL_CONFIGS.items()
+            if config.get("provider_ref") == "openai_codex"
+        ]
+        self.assertTrue(codex_keys, "no openai_codex models found — check the fixture set")
+        for key in codex_keys:
+            with self.subTest(model=key):
+                self.assertIsNone(model_configs.MODEL_CONFIGS[key].get("pricing"))
+                self.assertEqual(
+                    model_configs.calculate_cost(key, 1_000_000, 1_000_000), 0.0
+                )
+
 
 class TestModelSupportsImages(unittest.TestCase):
     def test_vision_capable_model(self):

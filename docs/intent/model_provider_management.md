@@ -93,6 +93,7 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **責任境界**: モデル JSON は capability の正典、provider client は最終送信の番人とする。UI に項目がないことだけを安全境界にせず、直接引数や古い user override が来ても provider が非対応値を送らない。
 - **会話の完全性**: provider が不正な末尾 role を自動で user role に変えたり、架空の user message を追加したりしてはならない。API が禁止する prefilled model turn は送信前に検出し、原因が追える `invalid_request` とログで停止する。
 - **関数呼び出しの同一性**: 上流が発行した tool call ID は Gemini の `FunctionCall.id` / `FunctionResponse.id` まで同一値で運ぶ。名前だけの照合へ情報を落とさない。
+- **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
 ## 設計

@@ -879,10 +879,13 @@ class OpenAICodexClient(LLMClient):
         tools: Optional[List[Any]],
     ) -> None:
         """Persist usage, reasoning, and tool detection from the streamed state."""
+        # model= は渡さない。渡すと base._store_usage の config_key 優先が無効化され、
+        # 価格の引き当てが API 名 (例 "gpt-5.6-terra") で行われる。この名前は従量課金の
+        # API 版モデル設定のキーと同一なので、サブスクで賄われる Codex 経由の呼び出しに
+        # API 版の単価が当たってしまう。config_key ("codex-gpt-5.6-terra") に任せる。
         self._store_usage(
             input_tokens=state["usage_input"],
             output_tokens=state["usage_output"],
-            model=self.model,
             cached_tokens=state["usage_cached"],
         )
 
