@@ -241,6 +241,32 @@ def canonicalize_spell_name(name: str) -> str:
     return name
 
 
+def canonicalize_tool_name(name: str) -> str:
+    """Map a possibly-bare tool name to its actual TOOL_REGISTRY key.
+
+    Same resolution contract as :func:`canonicalize_spell_name`, but over the
+    whole registry instead of spell tools only. Playbook TOOL / tool_call
+    nodes reference tools by bare name (e.g. ``x_post_tweet``,
+    ``generate_image_local``); when the tool ships in an addon it is
+    registered under ``<addon>__<name>``, so the bare reference must resolve
+    here or the node fails with "not found".
+
+      1. Exact match → returned as-is (builtin/user_data tools, or an
+         already-prefixed reference).
+      2. Unique ``<addon>__<name>`` match → returned.
+      3. Unknown or ambiguous (two addons expose the same bare name) →
+         returned unchanged so the caller reports an unknown tool rather
+         than firing the wrong one.
+    """
+    if name in TOOL_REGISTRY:
+        return name
+    suffix = "__" + name
+    matches = [key for key in TOOL_REGISTRY if key.endswith(suffix)]
+    if len(matches) == 1:
+        return matches[0]
+    return name
+
+
 def _register_multiple_tools(module: Any, addon_name: Optional[str] = None) -> bool:
     """Register multiple tools from a module with schemas() function.
 

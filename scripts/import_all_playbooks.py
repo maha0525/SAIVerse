@@ -140,8 +140,32 @@ def import_playbooks_from_directory(
                             updated_count += 1
                             logging.info(f"Updated playbook '{name}' (router_callable={router_callable})")
                     else:
-                        logging.info(f"Playbook '{name}' already exists, skipping (use --force to update)")
-                        skipped_count += 1
+                        # --force なしでも source_file の付け替えだけは行う:
+                        # 提供元の層が移動した (例: builtin → addon 切り出し) 後に
+                        # 旧パスを残すと、後段 prune が提供元ありの Playbook を
+                        # 孤児と誤認して削除するため。記録先が実在する場合は
+                        # 触らない (高優先層を先に走査するので先勝ちが正)。
+                        recorded = Path(existing.source_file) if existing.source_file else None
+                        if recorded is not None and not recorded.is_absolute():
+                            recorded = ROOT / recorded
+                        if (
+                            existing.source_file
+                            and existing.source_file != source_rel
+                            and (recorded is None or not recorded.exists())
+                        ):
+                            if dry_run:
+                                logging.info(
+                                    f"[DRY RUN] Would repoint source_file of '{name}' -> {source_rel}"
+                                )
+                            else:
+                                existing.source_file = source_rel
+                                updated_count += 1
+                                logging.info(
+                                    f"Repointed source_file of '{name}' -> {source_rel}"
+                                )
+                        else:
+                            logging.info(f"Playbook '{name}' already exists, skipping (use --force to update)")
+                            skipped_count += 1
                     continue
 
                 # Import new playbook

@@ -11,7 +11,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
-    from tools import TOOL_REGISTRY
+    from tools import TOOL_REGISTRY, canonicalize_tool_name
     from tools.context import persona_context
     from tools.core import parse_tool_result
     from tools.mcp_client import maybe_await_tool_result
@@ -42,7 +42,9 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
         if not isinstance(tool_args, dict):
             LOGGER.warning("[sea][tool_call] tool_args is not a dict (%s), using empty args", type(tool_args).__name__)
             tool_args = {}
-        tool_func = TOOL_REGISTRY.get(tool_name)
+        # アドオン由来のツールは <addon>__<name> キーで登録されるため、
+        # 素名参照を一意なら名前空間キーへ解決する。
+        tool_func = TOOL_REGISTRY.get(canonicalize_tool_name(tool_name))
         if tool_func is None:
             error_msg = f"[sea][tool_call] Tool '{tool_name}' not found in registry"
             LOGGER.error(error_msg)

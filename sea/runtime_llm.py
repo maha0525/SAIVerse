@@ -34,7 +34,13 @@ from saiverse.usage_tracker import get_usage_tracker
 # binding these names at module import time, we freeze the references to
 # the real SAIVerse ``tools`` package regardless of later sys.modules
 # manipulation. See memory/project_tts_import_pollution.md.
-from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY, canonicalize_spell_name
+from tools import (
+    SPELL_TOOL_NAMES,
+    SPELL_TOOL_SCHEMAS,
+    TOOL_REGISTRY,
+    canonicalize_spell_name,
+    canonicalize_tool_name,
+)
 from tools.core import parse_tool_result
 from tools.context import persona_context
 from sea.mode_spell_permissions import check_spell_permission
@@ -1343,8 +1349,8 @@ def _execute_handy_tool_inline(
     }
     messages.append(tool_call_msg)
 
-    # Execute the tool
-    tool_func = TOOL_REGISTRY.get(tool_name)
+    # Execute the tool (素名参照は一意なら <addon>__<name> キーへ解決)
+    tool_func = TOOL_REGISTRY.get(canonicalize_tool_name(tool_name))
     if not tool_func:
         result_str = f"Tool '{tool_name}' not found in registry"
         LOGGER.error("[sea][handy] %s", result_str)

@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
 from sea.runtime_utils import _format, _resolve_template_arg
-from tools import TOOL_REGISTRY
+from tools import TOOL_REGISTRY, canonicalize_tool_name
 from tools.context import persona_context
 from tools.core import parse_tool_result
 from tools.mcp_client import maybe_await_tool_result
@@ -41,7 +41,10 @@ class RuntimeEngine:
             node_id = getattr(node_def, "id", "tool")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            tool_func = TOOL_REGISTRY.get(tool_name)
+            # アドオン由来のツールは <addon>__<name> キーで登録されるため、
+            # Playbook 内の素名参照を一意なら名前空間キーへ解決する。
+            tool_key = canonicalize_tool_name(tool_name)
+            tool_func = TOOL_REGISTRY.get(tool_key)
             persona_obj = state.get("_persona_obj") or persona
             persona_id = getattr(persona_obj, "persona_id", "unknown")
 

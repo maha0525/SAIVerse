@@ -233,6 +233,18 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
                     LOGGER.info(
                         "playbook_sync: updated '%s' from %s", name, info["source_rel"]
                     )
+                elif existing.source_file != info["source_rel"]:
+                    # 内容は同一だが提供元の層が移動している (例: builtin → addon
+                    # へ切り出し)。source_file を旧パスのまま残すと、直後の
+                    # orphan prune が「提供元あり」の Playbook を孤児と誤認して
+                    # 削除し、PlaybookPermission も道連れになる (こちらは再
+                    # import では戻らない)。内容は触らず提供元だけ付け替える。
+                    existing.source_file = info["source_rel"]
+                    counts["updated"] += 1
+                    LOGGER.info(
+                        "playbook_sync: repointed source_file of '%s' -> %s",
+                        name, info["source_rel"],
+                    )
                 else:
                     # 差分なし
                     counts["skipped"] += 1
