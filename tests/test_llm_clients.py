@@ -1348,15 +1348,34 @@ class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
 
     def test_no_script_passes_api_model_name_to_factory(self):
         import re
+        import subprocess
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parent.parent
+        # git 管理下のファイルだけを見る。rglob だと gitignore された仮想環境まで
+        # 舐めてしまい (2026-08-01 実測: 管理下 59 に対し 2144 ファイル)、結果も
+        # 実行時間もローカル環境に依存する。
+        try:
+            listed = subprocess.run(
+                ["git", "ls-files", "scripts/*.py"],
+                cwd=repo_root, capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.skipTest(f"git ls-files unavailable: {exc}")
+        if listed.returncode != 0:
+            self.skipTest(f"git ls-files failed: {listed.stderr.strip()}")
+
         pattern = re.compile(r"get_llm_client\(\s*actual_model_id\b")
-        offenders = [
-            str(path.relative_to(repo_root))
-            for path in sorted((repo_root / "scripts").rglob("*.py"))
-            if pattern.search(path.read_text(encoding="utf-8", errors="replace"))
-        ]
+        offenders = []
+        for rel in listed.stdout.splitlines():
+            rel = rel.strip()
+            if not rel:
+                continue
+            path = repo_root / rel
+            if not path.exists():
+                continue
+            if pattern.search(path.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(rel)
         self.assertEqual(
             offenders, [],
             "factory の第一引数は設定キー。API 名 (actual_model_id) を渡すと使用量が "

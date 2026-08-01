@@ -36,9 +36,16 @@ Codex 設定の API 名 (`gpt-5.6-terra`) は従量課金版設定のキーと�
 
 そのため API 名が設定として保存された場合、**実行系と価格系で結果が食い違う**。provider や context_length の解決は失敗するか誤った設定を選ぶのに、見積もりと価格表示だけは従量課金版へ解決されて金額が出る。
 
-- 設定の保存側 (`default_model` / `lightweight_model` / `memory_weave_model`) は任意文字列をそのまま受け入れる。`api/routes/people/arasuji.py` の見積もりは `persona.memory_weave_model` か env `MEMORY_WEAVE_MODEL` を正規化せず `estimate_chronicle_generation_cost` へ渡す。
-- 現状 `memory_weave_model` に入る値は設定キー (tutorial の既定値も全て設定キー形式) なので、**env に API 名を書いた場合だけ**この食い違いに入る。実際にそう設定された記録は確認していない。
+- 設定の保存側は任意文字列をそのまま受け入れる。`api/routes/people/config.py` の PATCH は `default_model` / `lightweight_model` / `memory_weave_model` などを空文字判定だけ通して保存し、設定キーとして解決できるかを見ない。UI からは一覧選択なので通常は設定キーが入るが、API を直接叩けば任意の文字列が入る。
+- `api/routes/people/arasuji.py` の見積もりは `persona.memory_weave_model` か env `MEMORY_WEAVE_MODEL` を正規化せず `estimate_chronicle_generation_cost` へ渡し、`sai_memory/arasuji/estimate.py` から第1節のフォールバックへ到達する。
+- 現状 `memory_weave_model` に入る値は設定キー (tutorial の既定値も全て設定キー形式) なので、**env か API 直叩きで API 名を入れた場合だけ**この食い違いに入る。実際にそう設定された記録は確認していない。
 
-**修正の方向 (裁定待ち)**: モデル設定の保存境界で API 名を設定キーへ正規化し、未解決の値を保存しない。lookup API の入力契約を設定キーへ統一し、API 名の解決は明示的な resolver 一本に限定する。
+**修正の方向 (裁定待ち)**: モデル設定の保存境界で `find_model_config` により設定キーへ正規化し、解決できない値は拒否する。lookup API の入力契約を設定キーへ統一し、API 名の解決は明示的な resolver 一本に限定する。
 
-なお `a631096` で factory 境界に「設定キーでない値を渡された」ことを検出する警告を入れた。これは呼び出し側の取り違えを見つける関所であって、本節の契約不統一そのものは解消していない。
+## 補足 — factory 境界を「警告」に留めた理由
+
+`30ab9eb` で factory に「設定キーでない値を渡された」ことを検出する警告を入れた。Codex は**明示的に失敗させる**ことを勧めているが、警告に留めている。
+
+- `config` を直接渡す呼び出しには正当なものがある (テスト、動的に組んだ設定)。失敗させると壊れる範囲が読み切れない。
+- 呼び出し側は `a631096` で全て設定キーへ直した。現時点で失敗させる必要のある呼び出しは残っていない。
+- 一方で警告には強制力が無く、ログを見なければ気づかない。**強制化するかどうかは裁定待ち** (第3節の「保存境界で正規化する」と同時にやる方が筋が良い — 入口で正規化されるなら factory で弾いても壊れない)。
