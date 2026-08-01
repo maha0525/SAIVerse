@@ -678,19 +678,24 @@ class OpenAIClient(LLMClient):
                 self._store_reasoning_details(merge_streaming_reasoning_details(reasoning_details_raw))
             return
 
+        # response_schema があると generate_stream は stream=False で投げるため、
+        # 構造化出力はこの非ストリーム分岐を通る。ここで usage を保存しないと、
+        # judgment/router など構造化出力を使う呼び出しが使用量と費用から丸ごと
+        # 落ちる (docs/intent/model_provider_management.md「使用量の帰属」)。
+        #
+        # 保存は choices の取り出しと content_filter 判定より前に置く。応答が来た
+        # 時点で課金は成立しているので、その後の解釈が例外で終わっても使用量は
+        # 残さなければならない。
+        openai_runtime.store_usage_from_response(
+            resp,
+            lambda i, o, c: self._store_usage(input_tokens=i, output_tokens=o, cached_tokens=c),
+        )
+
         choice = resp.choices[0]
         if choice.finish_reason == "content_filter":
             logging.warning("[openai] Output blocked by content filter. finish_reason=%s", choice.finish_reason)
             openai_runtime.raise_content_filter_error(context="output")
 
-        # response_schema があると generate_stream は stream=False で投げるため、
-        # 構造化出力はこの非ストリーム分岐を通る。ここで usage を保存しないと、
-        # judgment/router など構造化出力を使う呼び出しが使用量と費用から丸ごと
-        # 落ちる (docs/intent/model_provider_management.md「使用量の帰属」)。
-        openai_runtime.store_usage_from_response(
-            resp,
-            lambda i, o, c: self._store_usage(input_tokens=i, output_tokens=o, cached_tokens=c),
-        )
         text_body, reasoning_entries, reasoning_details = extract_reasoning_from_message(choice.message)
         if not text_body:
             text_body = choice.message.content or ""

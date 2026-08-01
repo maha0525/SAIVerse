@@ -1377,6 +1377,31 @@ class TestStructuredOutputRecordsUsage(unittest.TestCase):
         # 帰属は API 名でなく設定キーへ
         self.assertEqual(usage.model, "gpt-4.1-nano")
 
+    def test_usage_survives_content_filter(self):
+        """content_filter で例外になっても使用量が残ること。
+
+        応答が来た時点で課金は成立している。解釈より前に保存しないと、弾かれた
+        呼び出しのトークンが使用量から消える。
+        """
+        from llm_clients.exceptions import LLMError
+
+        resp = self._fake_response()
+        resp.choices[0].finish_reason = "content_filter"
+
+        client = OpenAIClient("gpt-4.1-nano")
+        client.config_key = "gpt-4.1-nano"
+        with self.assertRaises(LLMError):
+            list(client._stream_text_mode(
+                resp=resp,
+                history_snippets=[],
+                req_kwargs={"stream": False},
+                response_schema={"type": "object"},
+                reasoning_chunks=[],
+            ))
+        usage = client.consume_usage()
+        self.assertIsNotNone(usage, "usage was lost when the response was filtered")
+        self.assertEqual(usage.input_tokens, 1234)
+
 
 class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
     """CLI が factory へ API 名でなく設定キーを渡すこと。
