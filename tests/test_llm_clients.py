@@ -1355,15 +1355,28 @@ class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
         # git 管理下のファイルだけを見る。rglob だと gitignore された仮想環境まで
         # 舐めてしまい (2026-08-01 実測: 管理下 59 に対し 2144 ファイル)、結果も
         # 実行時間もローカル環境に依存する。
+        # git そのものが無い環境 (配布物からの実行など) だけ skip。git があるのに
+        # エラーで終わった場合は fail — 検査不能を成功扱いにすると、走査ゼロ件でも
+        # green になり「違反が無い」ことの証拠にならない。
+        if not (repo_root / ".git").exists():
+            self.skipTest("not a git checkout; scan requires git ls-files")
         try:
             listed = subprocess.run(
                 ["git", "ls-files", "scripts/*.py"],
                 cwd=repo_root, capture_output=True, text=True, timeout=30,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            self.skipTest(f"git ls-files unavailable: {exc}")
-        if listed.returncode != 0:
-            self.skipTest(f"git ls-files failed: {listed.stderr.strip()}")
+        except FileNotFoundError:
+            self.skipTest("git executable not available")
+        except subprocess.SubprocessError as exc:
+            self.fail(f"git ls-files did not complete: {exc}")
+        self.assertEqual(
+            listed.returncode, 0,
+            f"git ls-files failed, scan could not run: {listed.stderr.strip()}",
+        )
+        self.assertTrue(
+            listed.stdout.strip(),
+            "git ls-files returned no scripts/*.py — the scan would vacuously pass",
+        )
 
         pattern = re.compile(r"get_llm_client\(\s*actual_model_id\b")
         offenders = []
@@ -1392,17 +1405,26 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
     """
 
     BASE_CONFIG = {
-        "model": "factory-guard-api-name",
+        "model": "vendor/guard-api-name",
         "provider": "openai",
         "base_url": "http://localhost:18099/v1",
         "api_key_required": False,
     }
+    # 設定キー "guard-config-key" が API 名 "vendor/guard-api-name" を持つ registry。
+    # API 名を factory へ渡すと、この設定の単価が使用量に付く状況を再現する。
+    FAKE_CONFIGS = {"guard-config-key": dict(BASE_CONFIG)}
 
-    def test_warns_when_given_api_model_name(self):
-        with self.assertLogs(level="WARNING") as captured:
-            get_llm_client(
-                "factory-guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
-            )
+    def _patched_configs(self, configs):
+        from saiverse import model_configs as model_configs_module
+
+        return patch.object(model_configs_module, "MODEL_CONFIGS", configs)
+
+    def test_warns_when_api_name_collides_with_another_config(self):
+        with self._patched_configs(dict(self.FAKE_CONFIGS)):
+            with self.assertLogs(level="WARNING") as captured:
+                get_llm_client(
+                    "vendor/guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
+                )
         self.assertTrue(
             any("not a config key" in line for line in captured.output),
             captured.output,
@@ -1411,16 +1433,65 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
     def test_does_not_warn_for_config_key(self):
         import logging as _logging
 
-        with self.assertLogs(level="WARNING") as captured:
-            # assertLogs は 1 件も出ないと失敗するので番兵を入れる
-            _logging.getLogger("test.sentinel").warning("sentinel")
-            get_llm_client(
-                "factory-guard-config-key", "openai", 4096, config=dict(self.BASE_CONFIG)
-            )
+        with self._patched_configs(dict(self.FAKE_CONFIGS)):
+            with self.assertLogs(level="WARNING") as captured:
+                # assertLogs は 1 件も出ないと失敗するので番兵を入れる
+                _logging.getLogger("test.sentinel").warning("sentinel")
+                get_llm_client(
+                    "guard-config-key", "openai", 4096, config=dict(self.BASE_CONFIG)
+                )
         self.assertFalse(
             any("not a config key" in line for line in captured.output),
             captured.output,
         )
+
+    def test_does_not_warn_for_unknown_key_without_collision(self):
+        """設定キーとして未知でも、その名前を API 名に持つ設定が無ければ騒がない。
+
+        動的に組んだ設定やテスト用の架空キーで誤検出しないための境界。
+        """
+        import logging as _logging
+
+        with self._patched_configs(dict(self.FAKE_CONFIGS)):
+            with self.assertLogs(level="WARNING") as captured:
+                _logging.getLogger("test.sentinel").warning("sentinel")
+                get_llm_client(
+                    "totally-unknown-key", "openai", 4096, config=dict(self.BASE_CONFIG)
+                )
+        self.assertFalse(
+            any("not a config key" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_detection_follows_reloaded_registry(self):
+        """reload_configs() 後の registry を見ること。
+
+        model_configs.reload_configs() は MODEL_CONFIGS を新しい辞書へ再束縛する。
+        factory が import 時の辞書を掴んでいると、再読込で追加された設定を見落として
+        検出が古いままになる。
+        """
+        with self._patched_configs({}):
+            # 空 registry では衝突相手が居ないので警告は出ない
+            with self.assertLogs(level="WARNING") as before:
+                import logging as _logging
+
+                _logging.getLogger("test.sentinel").warning("sentinel")
+                get_llm_client(
+                    "vendor/guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
+                )
+            self.assertFalse(
+                any("not a config key" in line for line in before.output), before.output
+            )
+
+        # 別の辞書へ差し替えた後は、その内容で判定されること
+        with self._patched_configs(dict(self.FAKE_CONFIGS)):
+            with self.assertLogs(level="WARNING") as after:
+                get_llm_client(
+                    "vendor/guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
+                )
+            self.assertTrue(
+                any("not a config key" in line for line in after.output), after.output
+            )
 
 
 if __name__ == '__main__':

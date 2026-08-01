@@ -5,7 +5,8 @@ import logging
 import os
 from typing import Dict
 
-from saiverse.model_configs import MODEL_CONFIGS, get_model_config, get_model_parameter_defaults
+from saiverse import model_configs as _model_configs
+from saiverse.model_configs import get_model_config, get_model_parameter_defaults
 
 from .anthropic import AnthropicClient
 from .gemini import GeminiClient
@@ -55,6 +56,31 @@ def _supports_images(provider: str, config: Dict | None) -> bool:
     if isinstance(config, dict) and "supports_images" in config:
         return bool(config["supports_images"])
     return provider == "gemini"
+
+
+def _api_name_collides_with_other_config(model: str) -> bool:
+    """``model`` が設定キーとして実在せず、別設定の API モデル名と一致するか。
+
+    真になるのは「設定キーのつもりで API 名を渡した結果、その API 名を持つ別設定の
+    単価が使用量に付く」状況そのもの。設定キーとして実在する値 (動的に組んだ設定や
+    テスト用の架空キーを含む) では偽になるので、正当な呼び出しを騒がせない。
+
+    ``MODEL_CONFIGS`` はモジュール属性として都度読む。``reload_configs()`` が新しい
+    辞書へ再束縛するため、import 時の辞書を掴むと再読込後に古い一覧で判定してしまう。
+
+    **限界**: API 名がそれ自体別設定のキーでもある場合 (``gpt-5.6-terra`` は Codex 設定の
+    API 名であり、同時に従量課金版設定のキーでもある) は偽を返す。factory から見ると
+    有効な設定キーを渡されただけで、呼び出し側がどちらを意図したかは判定できない。
+    その取り違えは呼び出し側と設定の保存境界で防ぐしかない
+    (docs/issues/usage_pricing_lookup_falls_back_to_api_name.md)。
+    """
+    configs = _model_configs.MODEL_CONFIGS
+    if not model or model in configs:
+        return False
+    return any(
+        isinstance(cfg, dict) and cfg.get("model") == model
+        for cfg in configs.values()
+    )
 
 
 def get_llm_client(model: str, provider: str, context_length: int, config: Dict | None = None) -> LLMClient:
@@ -269,15 +295,11 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     # (docs/intent/model_provider_management.md「使用量の帰属」)。2026-08-01 に
     # scripts/ の 6 箇所が実際にこの形だった。呼び出し側の変数名やディレクトリに
     # 依存せずに検出できるのはこの境界だけなので、ここで警告する。
-    if (
-        isinstance(config, dict)
-        and model not in MODEL_CONFIGS
-        and config.get("model") == model
-    ):
+    if _api_name_collides_with_other_config(model):
         logging.warning(
-            "[factory] model='%s' is an API model name, not a config key. "
-            "Usage will be attributed to that name and priced by any config sharing it. "
-            "Pass the config key (the model JSON filename) instead.",
+            "[factory] model='%s' is an API model name shared by another model config, "
+            "not a config key. Usage would be attributed to that name and priced by the "
+            "config sharing it. Pass the config key (the model JSON filename) instead.",
             model,
         )
     client.config_key = model
