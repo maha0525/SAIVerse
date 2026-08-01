@@ -383,7 +383,7 @@ Track の上で「作って → 評価して → 直す」を繰り返す汎用�
 | `NoteMessage` (テーブル) | 実装フェーズで判断。audience 自動メンバーシップ用途は残る可能性あり |
 | `NotePage` (テーブル) | 実装フェーズで判断。page_ref エントリと役割が重複 |
 | Memopedia Fragment | 別物として共存。Fragment は自動抽出、memo エントリは手動記録 |
-| `generate_image_local` ツール | パラメータ拡充（seed, steps 等）。ツール自体は存続 |
+| `generate_image_local` ツール | パラメータ拡充（seed, steps 等）。ツール自体は存続 (2026-08-01 に saiverse-comfyui-addon へ移設) |
 | `generate_image` ツール | 存続。クラウド API のパラメータ制約は変わらない |
 | 反復改善 Playbook 群 | 新規作成 |
 

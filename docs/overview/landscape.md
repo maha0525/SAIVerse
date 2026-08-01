@@ -373,7 +373,7 @@ graph TD
 
 ### Addon（拡張パッケージ）
 
-Tools / Playbooks / Phenomena / MCP サーバー / ペルソナフックを束ねて配布・導入・管理する単位。`addon.json`（manifest v2）で宣言し、永続データは `~/.saiverse/user_data/addon_data/<addon_id>/` に置く。導入は審査済みレジストリ経由のワンタッチ UI または手動 git clone。既存アドオン（Elyth / voice-tts / stack-chan / X）は v2 化済み。**カタログ機構は Phase 1〜4 実装済**。
+Tools / Playbooks / Phenomena / MCP サーバー / ペルソナフックを束ねて配布・導入・管理する単位。`addon.json`（manifest v2）で宣言し、永続データは `~/.saiverse/user_data/addon_data/<addon_id>/` に置く。導入は審査済みレジストリ経由のワンタッチ UI または手動 git clone。既存アドオン（Elyth / voice-tts / stack-chan / X / ComfyUI ローカル画像生成）は v2 化済み。**カタログ機構は Phase 1〜4 実装済**。ローカル画像生成 (`generate_image_local`) は 2026-08-01 に builtin からアドオン (saiverse-comfyui-addon) へ切り出された — ComfyUI・生成モデルの別途導入が前提の機能を builtin に置かないため。
 
 ### MCP（外部ツールサーバー）
 

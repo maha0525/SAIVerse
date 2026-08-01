@@ -53,7 +53,6 @@ MetaLayer が Track/persona 状態から決定論的に選ぶ（→ [concepts/me
 | Playbook | 表示名 | 用途 |
 |---|---|---|
 | `generate_image` | 画像生成 | Gemini / GPT Image / Grok で画像生成（canonical 実装例） |
-| `generate_image_local` | ローカル画像生成 | ローカル ComfyUI（Anima モデル）で画像生成 |
 | `web_research` | Webリサーチ | 検索 + verbatim 引用抽出。親へは厳選引用と出典のみ返す |
 | `document_create` | ドキュメント作成 | テキスト内容のドキュメントアイテム作成 |
 | `document_search` | ドキュメント内検索 | ドキュメント内をパターン/行番号で検索 |
