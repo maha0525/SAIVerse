@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Dict
 
-from saiverse.model_configs import get_model_config, get_model_parameter_defaults
+from saiverse.model_configs import MODEL_CONFIGS, get_model_config, get_model_parameter_defaults
 
 from .anthropic import AnthropicClient
 from .gemini import GeminiClient
@@ -263,6 +263,23 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)
+    #
+    # 呼び出し側が設定キーでなく API モデル名を渡すと、その名前が config_key になり、
+    # 同じ API 名を持つ別設定 (Codex 版と従量課金版など) の単価で使用量が記録される
+    # (docs/intent/model_provider_management.md「使用量の帰属」)。2026-08-01 に
+    # scripts/ の 6 箇所が実際にこの形だった。呼び出し側の変数名やディレクトリに
+    # 依存せずに検出できるのはこの境界だけなので、ここで警告する。
+    if (
+        isinstance(config, dict)
+        and model not in MODEL_CONFIGS
+        and config.get("model") == model
+    ):
+        logging.warning(
+            "[factory] model='%s' is an API model name, not a config key. "
+            "Usage will be attributed to that name and priced by any config sharing it. "
+            "Pass the config key (the model JSON filename) instead.",
+            model,
+        )
     client.config_key = model
     logging.debug("[factory] Set client.config_key='%s' for pricing lookup", model)
 

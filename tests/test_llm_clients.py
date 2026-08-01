@@ -1364,5 +1364,45 @@ class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
         )
 
 
+class TestFactoryFlagsApiModelName(unittest.TestCase):
+    """factory が「設定キーでなく API 名を渡された」ことを検出すること。
+
+    scripts/ の走査検査は既に起きた書き方しか止められない (別名変数や他ディレクトリは
+    素通りする)。呼び出し側の変数名にもディレクトリにも依存せずに検出できるのは
+    factory の境界だけなので、そこにも置く。
+    """
+
+    BASE_CONFIG = {
+        "model": "factory-guard-api-name",
+        "provider": "openai",
+        "base_url": "http://localhost:18099/v1",
+        "api_key_required": False,
+    }
+
+    def test_warns_when_given_api_model_name(self):
+        with self.assertLogs(level="WARNING") as captured:
+            get_llm_client(
+                "factory-guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
+            )
+        self.assertTrue(
+            any("not a config key" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_does_not_warn_for_config_key(self):
+        import logging as _logging
+
+        with self.assertLogs(level="WARNING") as captured:
+            # assertLogs は 1 件も出ないと失敗するので番兵を入れる
+            _logging.getLogger("test.sentinel").warning("sentinel")
+            get_llm_client(
+                "factory-guard-config-key", "openai", 4096, config=dict(self.BASE_CONFIG)
+            )
+        self.assertFalse(
+            any("not a config key" in line for line in captured.output),
+            captured.output,
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -27,3 +27,18 @@ Codex 設定の API 名 (`gpt-5.6-terra`) は従量課金版設定のキーと�
 - DB に「Codex 経由か従量 API 経由か」を区別する情報が無い。同じ API 名の従量課金呼び出しも同一の `MODEL_ID` を持つため、**API 名を Codex キーへ一括置換するのは安全でない**(本物の従量課金行まで 0 円になる)。
 
 **判断が要る点 (まはー裁定待ち)**: 過去行をどう扱うか。候補は「出所を証明できない行を legacy として費用・RPD 双方から除外する」「表示上 legacy と明示して残す」「手を触れない」。いずれにせよ一括置換は選ばない。将来行に設定キーを保存する方針自体は `92ead95` で満たされている。
+
+## 3. モデル識別子の入力契約が lookup API ごとに揃っていない
+
+(2026-08-01 追記、Codex 四巡目の指摘3)
+
+`get_model_provider` / `get_context_length` / `get_cache_config` などは設定キーを直接引く。一方 **`get_model_pricing` だけが API 名フォールバックを持つ** (第1節)。同じ「モデル識別子」を受け取る API なのに、受理する値の範囲が違う。
+
+そのため API 名が設定として保存された場合、**実行系と価格系で結果が食い違う**。provider や context_length の解決は失敗するか誤った設定を選ぶのに、見積もりと価格表示だけは従量課金版へ解決されて金額が出る。
+
+- 設定の保存側 (`default_model` / `lightweight_model` / `memory_weave_model`) は任意文字列をそのまま受け入れる。`api/routes/people/arasuji.py` の見積もりは `persona.memory_weave_model` か env `MEMORY_WEAVE_MODEL` を正規化せず `estimate_chronicle_generation_cost` へ渡す。
+- 現状 `memory_weave_model` に入る値は設定キー (tutorial の既定値も全て設定キー形式) なので、**env に API 名を書いた場合だけ**この食い違いに入る。実際にそう設定された記録は確認していない。
+
+**修正の方向 (裁定待ち)**: モデル設定の保存境界で API 名を設定キーへ正規化し、未解決の値を保存しない。lookup API の入力契約を設定キーへ統一し、API 名の解決は明示的な resolver 一本に限定する。
+
+なお `a631096` で factory 境界に「設定キーでない値を渡された」ことを検出する警告を入れた。これは呼び出し側の取り違えを見つける関所であって、本節の契約不統一そのものは解消していない。
