@@ -125,7 +125,7 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
     """Generate a summary of messages using LLM."""
     try:
         from llm_clients import get_llm_client
-        from saiverse.model_configs import get_model_config
+        from saiverse.model_configs import find_model_config, get_context_length, get_model_provider
 
         # Use lightweight model for summary
         model_name = getattr(persona, "lightweight_model", None)
@@ -134,8 +134,19 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
             from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
             model_name = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
-        config = get_model_config(model_name)
-        client = get_llm_client(model_name, config)
+        # get_llm_client は (model, provider, context_length, config) を取る。
+        # 第一引数はそのまま config_key になるので設定キーを渡す — API 名を渡すと
+        # 同名の別設定の単価で使用量が記録される
+        # (docs/intent/model_provider_management.md「使用量の帰属」)。
+        config_key, config = find_model_config(model_name)
+        if not config_key:
+            config_key, config = model_name, {}
+        client = get_llm_client(
+            config_key,
+            get_model_provider(config_key),
+            get_context_length(config_key),
+            config=config,
+        )
 
         # Build prompt
         messages_text = []

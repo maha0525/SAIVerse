@@ -58,29 +58,52 @@ def _supports_images(provider: str, config: Dict | None) -> bool:
     return provider == "gemini"
 
 
-def _api_name_collides_with_other_config(model: str) -> bool:
-    """``model`` が設定キーとして実在せず、別設定の API モデル名と一致するか。
+def _config_key_looks_wrong(model: str, config: Dict | None) -> str | None:
+    """``model`` を設定キーとして受け取ってよいか検分し、疑わしければ理由を返す。
 
-    真になるのは「設定キーのつもりで API 名を渡した結果、その API 名を持つ別設定の
-    単価が使用量に付く」状況そのもの。設定キーとして実在する値 (動的に組んだ設定や
-    テスト用の架空キーを含む) では偽になるので、正当な呼び出しを騒がせない。
+    第一引数はそのまま ``client.config_key`` になり、価格引き当ての正典として使われる
+    (docs/intent/model_provider_management.md「使用量の帰属」)。設定キーのつもりで
+    API モデル名を渡すと、その名前を持つ別設定の単価が使用量に付く。
+
+    見るのは二つ。
+
+    1. **設定キーとして未知で、その名前を API 名に持つ設定がある** — 取り違えの疑い。
+    2. **設定キーとしては実在するが、渡された config がその設定と食い違う** —
+       呼び出し側は同じ API 名を持つ別の設定を意図している。2026-08-01 に実害が出た
+       ``scripts/`` の呼び出しがこの形だった (``gpt-5.6-terra`` は従量課金版のキーとして
+       実在するので 1 では捕まらないが、渡していた config は ``provider_ref`` が
+       ``openai_codex`` で、キーに登録された設定の ``openai`` と食い違う)。
 
     ``MODEL_CONFIGS`` はモジュール属性として都度読む。``reload_configs()`` が新しい
     辞書へ再束縛するため、import 時の辞書を掴むと再読込後に古い一覧で判定してしまう。
 
-    **限界**: API 名がそれ自体別設定のキーでもある場合 (``gpt-5.6-terra`` は Codex 設定の
-    API 名であり、同時に従量課金版設定のキーでもある) は偽を返す。factory から見ると
-    有効な設定キーを渡されただけで、呼び出し側がどちらを意図したかは判定できない。
-    その取り違えは呼び出し側と設定の保存境界で防ぐしかない
+    残る死角は「model 文字列だけが渡され、config からも意図が読めない」場合。そこは
+    呼び出し側と設定の保存境界で防ぐしかない
     (docs/issues/usage_pricing_lookup_falls_back_to_api_name.md)。
     """
+    if not model:
+        return None
     configs = _model_configs.MODEL_CONFIGS
-    if not model or model in configs:
-        return False
-    return any(
-        isinstance(cfg, dict) and cfg.get("model") == model
-        for cfg in configs.values()
-    )
+    known = configs.get(model)
+
+    if known is None:
+        shares_api_name = any(
+            isinstance(cfg, dict) and cfg.get("model") == model
+            for cfg in configs.values()
+        )
+        if shares_api_name:
+            return "it is an API model name shared by another model config"
+        return None
+
+    if isinstance(config, dict) and isinstance(known, dict) and config is not known:
+        for field in ("provider_ref", "provider"):
+            passed, registered = config.get(field), known.get(field)
+            if passed and registered and passed != registered:
+                return (
+                    f"the passed config has {field}={passed!r} but the config registered "
+                    f"under this key has {field}={registered!r}"
+                )
+    return None
 
 
 def get_llm_client(model: str, provider: str, context_length: int, config: Dict | None = None) -> LLMClient:
@@ -295,12 +318,13 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     # (docs/intent/model_provider_management.md「使用量の帰属」)。2026-08-01 に
     # scripts/ の 6 箇所が実際にこの形だった。呼び出し側の変数名やディレクトリに
     # 依存せずに検出できるのはこの境界だけなので、ここで警告する。
-    if _api_name_collides_with_other_config(model):
+    suspect_reason = _config_key_looks_wrong(model, config)
+    if suspect_reason:
         logging.warning(
-            "[factory] model='%s' is an API model name shared by another model config, "
-            "not a config key. Usage would be attributed to that name and priced by the "
-            "config sharing it. Pass the config key (the model JSON filename) instead.",
-            model,
+            "[factory] model='%s' does not look like the right config key: %s. "
+            "Usage will be attributed to that name and priced accordingly. "
+            "Pass the config key (the model JSON filename) of the config you mean.",
+            model, suspect_reason,
         )
     client.config_key = model
     logging.debug("[factory] Set client.config_key='%s' for pricing lookup", model)

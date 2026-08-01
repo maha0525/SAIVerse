@@ -1355,40 +1355,51 @@ class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
         # git 管理下のファイルだけを見る。rglob だと gitignore された仮想環境まで
         # 舐めてしまい (2026-08-01 実測: 管理下 59 に対し 2144 ファイル)、結果も
         # 実行時間もローカル環境に依存する。
-        # git そのものが無い環境 (配布物からの実行など) だけ skip。git があるのに
-        # エラーで終わった場合は fail — 検査不能を成功扱いにすると、走査ゼロ件でも
-        # green になり「違反が無い」ことの証拠にならない。
-        if not (repo_root / ".git").exists():
-            self.skipTest("not a git checkout; scan requires git ls-files")
-        try:
-            listed = subprocess.run(
-                ["git", "ls-files", "scripts/*.py"],
-                cwd=repo_root, capture_output=True, text=True, timeout=30,
-            )
-        except FileNotFoundError:
-            self.skipTest("git executable not available")
-        except subprocess.SubprocessError as exc:
-            self.fail(f"git ls-files did not complete: {exc}")
+        # git そのものが無い / checkout でない環境だけ skip。git があるのにエラーで
+        # 終わった場合は fail — 検査不能を成功扱いにすると、一つも読まずに green に
+        # なり「違反が無い」ことの証拠にならない。
+        def _git(*args):
+            try:
+                return subprocess.run(
+                    ["git", *args], cwd=repo_root,
+                    capture_output=True, text=True, timeout=30,
+                )
+            except FileNotFoundError:
+                self.skipTest("git executable not available")
+            except subprocess.SubprocessError as exc:
+                self.fail(f"git {' '.join(args)} did not complete: {exc}")
+
+        inside = _git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            self.skipTest("not inside a git work tree; scan requires git ls-files")
+
+        listed = _git("ls-files", "scripts/*.py")
         self.assertEqual(
             listed.returncode, 0,
             f"git ls-files failed, scan could not run: {listed.stderr.strip()}",
         )
+        rels = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
         self.assertTrue(
-            listed.stdout.strip(),
-            "git ls-files returned no scripts/*.py — the scan would vacuously pass",
+            rels, "git ls-files returned no scripts/*.py — the scan would vacuously pass"
         )
 
         pattern = re.compile(r"get_llm_client\(\s*actual_model_id\b")
         offenders = []
-        for rel in listed.stdout.splitlines():
-            rel = rel.strip()
-            if not rel:
-                continue
+        missing = []
+        for rel in rels:
             path = repo_root / rel
             if not path.exists():
+                # sparse checkout などで index にはあるが実体が無い。黙って飛ばすと
+                # 一件も読まないまま green になるので、読めなかった事実を持ち帰る。
+                missing.append(rel)
                 continue
             if pattern.search(path.read_text(encoding="utf-8", errors="replace")):
                 offenders.append(rel)
+        self.assertEqual(
+            missing, [],
+            "listed by git but missing on disk (sparse checkout?); scan was incomplete: "
+            + ", ".join(missing),
+        )
         self.assertEqual(
             offenders, [],
             "factory の第一引数は設定キー。API 名 (actual_model_id) を渡すと使用量が "
@@ -1426,7 +1437,32 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
                     "vendor/guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
                 )
         self.assertTrue(
-            any("not a config key" in line for line in captured.output),
+            any("does not look like the right config key" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_warns_when_passed_config_disagrees_with_registered_key(self):
+        """実在する設定キーでも、渡した config がその設定と食い違えば警告すること。
+
+        2026-08-01 に実害が出た scripts/ の呼び出しがこの形だった。gpt-5.6-terra は
+        従量課金版のキーとして実在するので「未知のキー」では捕まらないが、渡していた
+        config は Codex 設定 (provider_ref が別) だった。
+        """
+        registry = {
+            "shared-api-name": {"model": "shared-api-name", "provider_ref": "openai"},
+            "codex-shared": {"model": "shared-api-name", "provider_ref": "openai_codex"},
+        }
+        # provider_ref を書くと base_url は provider 定義と一致していなければならない
+        # (provider_security.validate_model_config_connection)。ここでは書かない。
+        codex_config = {
+            "model": "shared-api-name",
+            "provider_ref": "openai_codex",
+        }
+        with self._patched_configs(registry):
+            with self.assertLogs(level="WARNING") as captured:
+                get_llm_client("shared-api-name", "openai", 4096, config=codex_config)
+        self.assertTrue(
+            any("provider_ref" in line for line in captured.output),
             captured.output,
         )
 
@@ -1441,7 +1477,7 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
                     "guard-config-key", "openai", 4096, config=dict(self.BASE_CONFIG)
                 )
         self.assertFalse(
-            any("not a config key" in line for line in captured.output),
+            any("does not look like the right config key" in line for line in captured.output),
             captured.output,
         )
 
@@ -1459,7 +1495,7 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
                     "totally-unknown-key", "openai", 4096, config=dict(self.BASE_CONFIG)
                 )
         self.assertFalse(
-            any("not a config key" in line for line in captured.output),
+            any("does not look like the right config key" in line for line in captured.output),
             captured.output,
         )
 
@@ -1480,7 +1516,8 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
                     "vendor/guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
                 )
             self.assertFalse(
-                any("not a config key" in line for line in before.output), before.output
+                any("does not look like the right config key" in line for line in before.output),
+                before.output,
             )
 
         # 別の辞書へ差し替えた後は、その内容で判定されること
@@ -1490,7 +1527,7 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
                     "vendor/guard-api-name", "openai", 4096, config=dict(self.BASE_CONFIG)
                 )
             self.assertTrue(
-                any("not a config key" in line for line in after.output), after.output
+                any("does not look like the right config key" in line for line in after.output), after.output
             )
 
 
