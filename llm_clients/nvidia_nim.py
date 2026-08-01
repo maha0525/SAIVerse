@@ -168,6 +168,20 @@ class NvidiaNIMClient(OpenAIClient):
         from .base import get_llm_logger
         get_llm_logger().debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))
 
+        # この経路は生 HTTP なので親の usage 保存を通らない。ここで記録しないと NIM の
+        # 構造化出力が使用量と費用から丸ごと落ちる
+        # (docs/intent/model_provider_management.md「使用量の帰属」)。
+        # 以降の抽出は例外を投げうるが、API 呼び出しは既に成立して課金されているので、
+        # 抽出の成否より手前で一度だけ記録する。
+        usage_json = resp_json.get("usage") or {}
+        if usage_json:
+            prompt_details = usage_json.get("prompt_tokens_details") or {}
+            self._store_usage(
+                input_tokens=usage_json.get("prompt_tokens", 0) or 0,
+                output_tokens=usage_json.get("completion_tokens", 0) or 0,
+                cached_tokens=prompt_details.get("cached_tokens", 0) or 0,
+            )
+
         # Extract tool call arguments
         choices = resp_json.get("choices", [])
         if not choices:

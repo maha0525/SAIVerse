@@ -1335,6 +1335,49 @@ class TestLlamaCachedClientUsageAttribution(unittest.TestCase):
             self.assertEqual(wrapper.config_key, "preset-config-key")
 
 
+class TestStructuredOutputRecordsUsage(unittest.TestCase):
+    """構造化出力の経路でも使用量が記録されること。
+
+    generate_stream は response_schema があると stream=False で投げるので、構造化
+    出力は _stream_text_mode の非ストリーム分岐を通る。そこが usage を保存しないと、
+    judgment / router など構造化出力を使う呼び出しが使用量と費用から丸ごと落ちる。
+    """
+
+    def _fake_response(self):
+        message = MagicMock()
+        message.content = '{"ok": true}'
+        message.tool_calls = None
+        choice = MagicMock()
+        choice.finish_reason = "stop"
+        choice.message = message
+        usage = MagicMock()
+        usage.prompt_tokens = 1234
+        usage.completion_tokens = 56
+        usage.prompt_tokens_details = None
+        resp = MagicMock()
+        resp.choices = [choice]
+        resp.usage = usage
+        return resp
+
+    def test_non_stream_structured_branch_stores_usage(self):
+        client = OpenAIClient("gpt-4.1-nano")
+        client.config_key = "gpt-4.1-nano"
+        consumed = list(client._stream_text_mode(
+            resp=self._fake_response(),
+            history_snippets=[],
+            req_kwargs={"stream": False},
+            response_schema={"type": "object"},
+            reasoning_chunks=[],
+        ))
+        self.assertTrue(consumed)
+        usage = client.consume_usage()
+        self.assertIsNotNone(usage, "structured output path recorded no usage")
+        self.assertEqual(usage.input_tokens, 1234)
+        self.assertEqual(usage.output_tokens, 56)
+        # 帰属は API 名でなく設定キーへ
+        self.assertEqual(usage.model, "gpt-4.1-nano")
+
+
 class TestScriptsPassConfigKeyToFactory(unittest.TestCase):
     """CLI が factory へ API 名でなく設定キーを渡すこと。
 

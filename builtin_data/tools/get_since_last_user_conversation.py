@@ -139,8 +139,10 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
         # 同名の別設定の単価で使用量が記録される
         # (docs/intent/model_provider_management.md「使用量の帰属」)。
         config_key, config = find_model_config(model_name)
-        if not config_key:
-            config_key, config = model_name, {}
+        if not config_key or not config:
+            # 未登録のキーで getter を呼ぶと解決できず、後段が読みにくい失敗になる。
+            # ここで打ち切って呼び出し元のフォールバックに渡す。
+            raise ValueError(f"model config not found for {model_name!r}")
         client = get_llm_client(
             config_key,
             get_model_provider(config_key),
@@ -174,9 +176,12 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
 
 要約:"""
 
+        # LLMClient の公開 API は generate / generate_stream。chat は存在しない。
         llm_messages = [{"role": "user", "content": prompt}]
-        response = client.chat(llm_messages, model=model_name)
-        return response.strip()
+        response = client.generate(llm_messages)
+        if isinstance(response, dict):
+            response = response.get("text") or response.get("content") or ""
+        return str(response).strip()
 
     except Exception as exc:
         LOGGER.warning("Failed to generate summary: %s", exc)
