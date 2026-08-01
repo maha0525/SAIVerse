@@ -120,9 +120,26 @@ class LlamaCachedClient(LLMClient):
     """Wraps any LLMClient with llama.cpp slot restore-before / save-after each inference."""
 
     def __init__(self, inner: LLMClient, cache: LlamaCacheManager) -> None:
-        super().__init__(supports_images=getattr(inner, "supports_images", False))
+        # config_key は inner へ委譲する property なので、基底の __init__ が
+        # self.config_key = "" を実行する時点で _inner が要る。
         self._inner = inner
+        super().__init__(supports_images=getattr(inner, "supports_images", False))
         self._cache = cache
+
+    @property
+    def config_key(self) -> str:
+        """価格引き当ての設定キー。
+
+        usage を記録するのは inner なので、factory が wrapper へ代入した設定キーを
+        inner まで通す。通さないと inner の _store_usage が self.model (API 名) へ
+        フォールバックし、同名の従量課金版設定の単価が引き当てられる
+        (docs/intent/model_provider_management.md「使用量の帰属」)。
+        """
+        return self._inner.config_key
+
+    @config_key.setter
+    def config_key(self, value: str) -> None:
+        self._inner.config_key = value
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         self._inner.configure_parameters(parameters)

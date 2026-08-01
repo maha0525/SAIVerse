@@ -71,16 +71,26 @@ class TestCalculateCost(unittest.TestCase):
         cost = model_configs.calculate_cost("nonexistent-model-xyz", 1_000_000, 1_000_000)
         self.assertEqual(cost, 0.0)
 
+    @staticmethod
+    def _codex_config_keys(configs):
+        """Codex 設定を列挙する。
+
+        provider_ref だけを見ると、legacy の provider フィールドしか持たない設定
+        (factory は今もこれを有効な protocol として扱う) と、provider_ref を落とした
+        user_data override を取りこぼす。
+        """
+        return [
+            key for key, config in configs.items()
+            if "openai_codex" in (config.get("provider_ref"), config.get("provider"))
+        ]
+
     def test_subscription_backed_configs_are_unpriced(self):
         """Codex はサブスク課金なので、単価を書くと使用画面に架空の金額が出る。
 
         Codex 設定の API モデル名は従量課金版の設定キーと衝突するため、価格は
         必ず設定キー側 (codex-*) で引かれ、そこが無価格である必要がある。
         """
-        codex_keys = [
-            key for key, config in model_configs.MODEL_CONFIGS.items()
-            if config.get("provider_ref") == "openai_codex"
-        ]
+        codex_keys = self._codex_config_keys(model_configs.MODEL_CONFIGS)
         self.assertTrue(codex_keys, "no openai_codex models found — check the fixture set")
         for key in codex_keys:
             with self.subTest(model=key):
@@ -88,6 +98,23 @@ class TestCalculateCost(unittest.TestCase):
                 self.assertEqual(
                     model_configs.calculate_cost(key, 1_000_000, 1_000_000), 0.0
                 )
+
+    def test_legacy_provider_form_is_enumerated(self):
+        """provider_ref を持たない Codex 設定も上の検査に入ること。
+
+        legacy 形式 (provider フィールドのみ) と provider_ref を落とした user_data
+        override はどちらも実在しうる。列挙が provider_ref だけを見ていると、
+        そこに価格が書かれていても検査をすり抜ける。
+        """
+        configs = {
+            "codex-legacy-form": {"model": "gpt-5.6-terra", "provider": "openai_codex"},
+            "codex-ref-form": {"model": "gpt-5.6-terra", "provider_ref": "openai_codex"},
+            "unrelated": {"model": "gpt-4.1", "provider": "openai"},
+        }
+        self.assertEqual(
+            sorted(self._codex_config_keys(configs)),
+            ["codex-legacy-form", "codex-ref-form"],
+        )
 
 
 class TestModelSupportsImages(unittest.TestCase):

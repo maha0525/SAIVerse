@@ -1216,13 +1216,18 @@ class TestOpenAICodexUsageAttribution(unittest.TestCase):
     Codex 設定の API モデル名 (例 "gpt-5.6-terra") は従量課金の API 版モデル設定の
     キーと衝突する。usage をその名前で記録すると API 版の単価が引き当てられ、
     課金されていない呼び出しに金額が付く。
+
+    client は factory 経由で作る。config_key を手で代入して検証すると、実運用で
+    唯一 config_key を立てている factory の代入が消えてもテストが通ってしまう。
     """
 
-    def _finalized_usage(self, api_model: str, config_key: str):
-        from llm_clients.openai_codex import OpenAICodexClient
+    CONFIG_KEY = "codex-gpt-5.6-terra"
+    API_MODEL = "gpt-5.6-terra"
 
-        client = OpenAICodexClient(api_model)
-        client.config_key = config_key
+    def _codex_client(self):
+        return get_llm_client(self.CONFIG_KEY, "openai_codex", 372000)
+
+    def _finalized_usage(self, client):
         client._finalize(
             {
                 "usage_input": 1_000_000,
@@ -1237,18 +1242,67 @@ class TestOpenAICodexUsageAttribution(unittest.TestCase):
         )
         return client.consume_usage()
 
+    def test_factory_sets_config_key(self):
+        client = self._codex_client()
+        self.assertEqual(client.config_key, self.CONFIG_KEY)
+        # API 名は設定キーと別物。同名の従量課金版設定が builtin に存在する。
+        self.assertEqual(client.model, self.API_MODEL)
+
     def test_usage_is_attributed_to_config_key(self):
-        usage = self._finalized_usage("gpt-5.6-terra", "codex-gpt-5.6-terra")
-        self.assertEqual(usage.model, "codex-gpt-5.6-terra")
+        usage = self._finalized_usage(self._codex_client())
+        self.assertEqual(usage.model, self.CONFIG_KEY)
 
     def test_subscription_call_costs_nothing(self):
         from saiverse import model_configs
 
-        usage = self._finalized_usage("gpt-5.6-terra", "codex-gpt-5.6-terra")
+        usage = self._finalized_usage(self._codex_client())
         cost = model_configs.calculate_cost(
             usage.model, usage.input_tokens, usage.output_tokens
         )
         self.assertEqual(cost, 0.0)
+
+
+class TestLlamaCachedClientUsageAttribution(unittest.TestCase):
+    """wrapper 越しでも使用量が設定キーへ帰属すること。
+
+    factory は inner を LlamaCachedClient で包んでから config_key を代入する。
+    wrapper がその値を inner へ通さないと、usage を実際に記録する inner 側は
+    self.model (API 名) へフォールバックし、API 名と同名の設定があればその単価が
+    引き当てられる。
+    """
+
+    CONFIG_KEY = "llama-cache-config-key"
+    API_MODEL = "llama-cache-api-name"
+
+    def _cached_client(self, slot_save_path):
+        config = {
+            "model": self.API_MODEL,
+            "provider": "openai",
+            "base_url": "http://localhost:18099/v1",
+            "api_key_required": False,
+            "llama_slot_save_path": slot_save_path,
+        }
+        return get_llm_client(self.CONFIG_KEY, "openai", 4096, config=config)
+
+    def test_config_key_reaches_inner(self):
+        import tempfile
+
+        from llm_clients.llama_cache import LlamaCachedClient
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._cached_client(tmp)
+            self.assertIsInstance(client, LlamaCachedClient)
+            self.assertEqual(client._inner.config_key, self.CONFIG_KEY)
+
+    def test_usage_is_attributed_to_config_key(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._cached_client(tmp)
+            # usage を記録するのは inner。wrapper の consume_usage は委譲するだけ。
+            client._inner._store_usage(input_tokens=100, output_tokens=50)
+            usage = client.consume_usage()
+            self.assertEqual(usage.model, self.CONFIG_KEY)
 
 
 if __name__ == '__main__':
