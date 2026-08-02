@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | llama-server idle 停止の busy 判定修正 (処理中サーバー射殺の根治) | 実装は現ブランチへ取り込み済み (busy 判定を /health から /slots の三値化へ、貸出札と ensure_running の高速/低速分離、専用テスト46件)。次 = ①実機で長時間推論が停止されず完走することの確認 ②intent「受け入れた限界」8項のまはー裁定 ③止血で入れた idle_timeout:0 を戻すかの判断。 | まはー (実機検証・限界8項の裁定) | [llama_server_auto_launch.md](../intent/llama_server_auto_launch.md) | 2026-08-11 |
 | 🟣 検証待ち | Chronicle 退場の適用側拒否権デッドロック根治 | 二つの顔 (編纂対象ゼロ fold の吸収限定退場 / あらすじ手動削除の道連れ) とも実装済み・回帰緑。次 = 実機で通常 Metabolism の退行がないことの確認。 | まはー (実機検証) | [issue](../issues/chronicle_eviction_applier_veto_deadlock.md) / [chronicle_eviction.md](../intent/chronicle_eviction.md) §2/§5-5/§6 | 2026-07-27 |
 | 🟣 検証待ち | あらすじのレベル制 (記憶の川の一本化) | 実装完了。エリスは実機修復と初編纂まで成功、air は点検の結果修復不要。次 = aifi の再編纂 (未編纂期間の消化、汎用ツール整備済み) と LLM 束ね品質の本番初発火の観察。提示側の簡素化は presentation_gap 実機検証後へ先送り (intent §12-7)。 | まはー (aifi 実施のタイミング) | [intent](../intent/arasuji_levels.md) | 2026-07-29 |
 | 🟣 検証待ち | 編纂入口の一本化 (arasuji_levels §13) | §13 (入口一本化) と §14 (冷えた anchor の保守経路) とも実装済み・レビュー消し込み完了・全テスト緑。派生の新 issue (関所閉鎖の slot 消費) は裁定待ち・別件。次 = 実機検証 (会話開始で「1件」ダイアログが出ない / 整理ボタンが直近を残して畳む)。 | まはー (実機検証) | [intent](../intent/arasuji_levels.md) §13-§14 | 2026-07-29 |
