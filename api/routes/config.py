@@ -136,6 +136,37 @@ def reload_models():
         "models": [{"id": mid, "name": name} for mid, name in choices],
     }
 
+class SlotKindInfo(BaseModel):
+    """コマ種別カタログの 1 定義 (saiverse/slot_kind_catalog.py)。"""
+    id: str
+    name: str                       # 時間割の kind 値そのもの (日本語)
+    execution_type: str             # work_session / outing / stay_home / free_choice
+    description: str
+    builtin: bool = False
+
+
+@router.get("/slot-kinds", response_model=List[SlotKindInfo])
+def get_slot_kinds():
+    """コマ種別カタログの一覧 (timetable_redesign.md §5.5)。
+
+    3 層 (user_data > expansion > builtin) を畳んだ有効なカタログを、
+    カタログ順 (= 時間割 enum の提示順) で返す。習慣テンプレート編集 UI の
+    kind セレクトが選択肢として読む。
+    """
+    from saiverse.slot_kind_catalog import SLOT_KIND_CATALOG
+
+    return [
+        SlotKindInfo(
+            id=d["id"],
+            name=d["name"],
+            execution_type=d["execution_type"],
+            description=d.get("description") or "",
+            builtin=bool(d.get("builtin")),
+        )
+        for d in SLOT_KIND_CATALOG.values()
+    ]
+
+
 @router.get("/playbooks", response_model=List[PlaybookInfo])
 def get_playbooks(
     router_callable: Optional[bool] = None,

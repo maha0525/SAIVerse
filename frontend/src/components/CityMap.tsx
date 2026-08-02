@@ -9,6 +9,7 @@ import ScheduleModal from './ScheduleModal';
 import TasksModal from './TasksModal';
 import SettingsModal from './SettingsModal';
 import LifeSettingsModal from './LifeSettingsModal';
+import TimetableTemplateModal from './TimetableTemplateModal';
 import InventoryModal from './InventoryModal';
 
 interface Occupant {
@@ -116,6 +117,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     const [showTasks, setShowTasks] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [showLifeSettings, setShowLifeSettings] = useState(false);
+    const [showTimetableTemplate, setShowTimetableTemplate] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
 
     const cancelledRef = useRef(false);
@@ -621,12 +623,12 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     };
 
     // RightSidebar と同様: 別ペルソナのモーダルが既に開いていたら閉じてから開き直す
-    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'lifeSettings' | 'inventory') => {
+    const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'lifeSettings' | 'timetableTemplate' | 'inventory') => {
         if (!selectedPersona) return;
         const newId = selectedPersona.id;
         const newName = selectedPersona.name;
 
-        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showInventory;
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showLifeSettings || showTimetableTemplate || showInventory;
         const sameTarget = anyOpen && activeModalPersonaId === newId;
 
         const applyOpen = () => {
@@ -637,6 +639,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             if (type === 'tasks') setShowTasks(true);
             if (type === 'settings') setShowSettings(true);
             if (type === 'lifeSettings') setShowLifeSettings(true);
+            if (type === 'timetableTemplate') setShowTimetableTemplate(true);
             if (type === 'inventory') setShowInventory(true);
         };
 
@@ -648,6 +651,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             setShowTasks(false);
             setShowSettings(false);
             setShowLifeSettings(false);
+            setShowTimetableTemplate(false);
             setShowInventory(false);
             setTimeout(applyOpen, 0);
             return;
@@ -948,6 +952,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                     onOpenTasks={() => openModal('tasks')}
                     onOpenSettings={() => openModal('settings')}
                     onOpenLifeSettings={() => openModal('lifeSettings')}
+                    onOpenTimetableTemplate={() => openModal('timetableTemplate')}
                     onOpenInventory={() => openModal('inventory')}
                 />
             )}
@@ -978,6 +983,12 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                     <LifeSettingsModal
                         isOpen={showLifeSettings}
                         onClose={() => setShowLifeSettings(false)}
+                        personaId={activeModalPersonaId}
+                        personaName={activeModalPersonaName || undefined}
+                    />
+                    <TimetableTemplateModal
+                        isOpen={showTimetableTemplate}
+                        onClose={() => setShowTimetableTemplate(false)}
                         personaId={activeModalPersonaId}
                         personaName={activeModalPersonaName || undefined}
                     />

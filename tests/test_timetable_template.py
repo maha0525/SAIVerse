@@ -522,3 +522,40 @@ def test_api_unknown_persona_is_404(client):
         "/api/people/nobody/timetable-template",
         json={"slots": [{"start": "09:00"}]},
     ).status_code == 404
+    assert client.get(
+        "/api/people/nobody/timetable-template/facilities"
+    ).status_code == 404
+
+
+def test_api_facilities_match_judgment_enum(client, manager):
+    """場所セレクトの選択肢 = 起床判断の facility enum と同じ集合 (T2b)。"""
+    from saiverse import judgment_points as jp
+
+    res = client.get(f"/api/people/{PERSONA_ID}/timetable-template/facilities")
+    assert res.status_code == 200
+    options = res.json()
+    assert [o["id"] for o in options] == jp.collect_facility_ids(manager)
+    names = {o["id"]: o["name"] for o in options}
+    assert names["library"] == "図書館"
+    assert names["own_room"] == "自室"
+
+
+def test_api_slot_kinds_lists_catalog():
+    """kind セレクトの選択肢 = コマ種別カタログの語彙 (提示順も一致、T2b)。
+
+    config ルーターは manager 非依存の /slot-kinds だけを叩く。
+    """
+    from api.routes import config as config_route
+    from saiverse import slot_kind_catalog
+
+    app = FastAPI()
+    app.include_router(config_route.router, prefix="/api/config")
+    with TestClient(app) as c:
+        res = c.get("/api/config/slot-kinds")
+    assert res.status_code == 200
+    body = res.json()
+    assert [k["name"] for k in body] == list(slot_kind_catalog.kind_names())
+    assert [k["name"] for k in body] == list(day_plan.all_kinds())
+    for entry in body:
+        assert entry["execution_type"] in slot_kind_catalog.EXECUTION_TYPES
+        assert entry["description"]

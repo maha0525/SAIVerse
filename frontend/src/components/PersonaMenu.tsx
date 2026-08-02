@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, Calendar, Settings, X, RefreshCw, Network, Package, Sparkles, Activity, Heart, Clock } from 'lucide-react';
+import { Home, Brain, Calendar, CalendarClock, Settings, X, RefreshCw, Network, Package, Sparkles, Activity, Heart, Clock } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -25,13 +25,15 @@ interface PersonaMenuProps {
     onOpenInventory?: () => void;
     /** ライフ設定 (起床・就寝・予算を1画面で)。life.md v0.5 §9.2-1 */
     onOpenLifeSettings?: () => void;
+    /** 習慣テンプレート (毎日の時間割の枠)。timetable_redesign.md §5.1 */
+    onOpenTimetableTemplate?: () => void;
     /** dismiss 成功直後に呼ばれる。 親 (RightSidebar → ChatPage) が
      * 滞在ペルソナ表示を即時更新するための callback。 省略すると
      * 10 秒ポーリングか building 切替まで古い表示のままになる。 */
     onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenLifeView, onOpenProfile, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onOpenLifeSettings, onDismissed }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenLifeView, onOpenProfile, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory, onOpenLifeSettings, onOpenTimetableTemplate, onDismissed }: PersonaMenuProps) {
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
 
@@ -208,6 +210,22 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                         <div className={styles.label}>
                             <span>Life Settings</span>
                             <span className={styles.subtext}>起床・就寝・予算</span>
+                        </div>
+                    </button>
+
+                    <button
+                        className={`${styles.actionBtn} ${!onOpenTimetableTemplate ? styles.disabled : ''}`}
+                        onClick={() => {
+                            if (onOpenTimetableTemplate) {
+                                onOpenTimetableTemplate();
+                                onClose();
+                            }
+                        }}
+                    >
+                        <CalendarClock size={20} />
+                        <div className={styles.label}>
+                            <span>Habits</span>
+                            <span className={styles.subtext}>習慣テンプレート・毎日の枠</span>
                         </div>
                     </button>
 

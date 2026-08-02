@@ -126,6 +126,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/config/playbooks/{name}/params` | Get playbook parameters with resolved enum options. |
 | GET | `/api/config/reembed-check` | Return list of personas that need re-embedding due to model changes. |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
+| GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
 | GET | `/api/config/startup-warnings` | Return warnings collected during startup (e.g. failed persona loads). |
 | GET | `/api/config/update-check` | Get update check monitoring status. |
 | POST | `/api/config/update-check` | Toggle update availability check on/off. |
@@ -276,6 +277,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
 | POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. subline (全体) / autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止). |
 | POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | running の wait_response Track を pause + メタ判断発火 (wait_response timeout 相当を即時). |
+| GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
+| GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |
 | GET | `/api/people/{persona_id}/import/extension/status` | Get the status of extension import task. |
 | POST | `/api/people/{persona_id}/import/native` | Import native SAIVerse JSON. |
@@ -348,6 +351,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを返す。未設定なら null。 |
 | PUT | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを検証して保存する。 |
 | DELETE | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを削除する (以後の起床判断は従来の全生成に戻る)。 |
+| GET | `/api/people/{persona_id}/timetable-template/facilities` | テンプレート編集 UI の場所セレクト用: 行ける場所の一覧 (id + 表示名)。 |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |
 | DELETE | `/api/people/{persona_id}/track-logs/{log_id}` | Delete a single track_local_log row. |
 | GET | `/api/people/{persona_id}/tracks` | List ActionTracks for the persona, with status-count summary. |

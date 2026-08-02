@@ -7,8 +7,11 @@
 - GET    /{persona_id}/timetable-template : 取得 (未設定は null)
 - PUT    /{persona_id}/timetable-template : 保存 (検証エラーは 422)
 - DELETE /{persona_id}/timetable-template : 削除 (以後は従来の全生成に戻る)
+- GET    /{persona_id}/timetable-template/facilities : コマの場所セレクト用の
+  行ける場所一覧 (id + 表示名)
 
-フロント UI は T2b (別途)。
+フロント UI は T2b (``frontend/src/components/TimetableTemplateModal.tsx``)。
+kind セレクトの選択肢は ``GET /api/config/slot-kinds`` (コマ種別カタログ) から。
 """
 import logging
 from typing import Any, Dict, List, Optional
@@ -87,6 +90,39 @@ def put_timetable_template(
         persona_id, len(saved["slots"]), saved["enabled"],
     )
     return saved
+
+
+class FacilityOption(BaseModel):
+    """コマの場所セレクトの選択肢 1 件。"""
+
+    id: str
+    name: str
+
+
+@router.get(
+    "/{persona_id}/timetable-template/facilities",
+    response_model=List[FacilityOption],
+)
+def list_timetable_facilities(
+    persona_id: str, manager=Depends(get_manager)
+) -> List[FacilityOption]:
+    """テンプレート編集 UI の場所セレクト用: 行ける場所の一覧 (id + 表示名)。
+
+    候補集合は起床判断の facility enum
+    (``saiverse.judgment_points.collect_facility_ids``) と同じ供給元
+    (``facility_map.candidate_buildings`` + own_room) から出す — UI で選べるのに
+    朝の判断では行けない (逆も) という食い違いを作らないため。
+    """
+    _require_persona(manager, persona_id)
+    from saiverse.day_plan import FACILITY_OWN_ROOM
+    from saiverse.facility_map import candidate_buildings
+
+    options = [
+        FacilityOption(id=b.building_id, name=getattr(b, "name", None) or b.building_id)
+        for b in candidate_buildings(manager)
+    ]
+    options.append(FacilityOption(id=FACILITY_OWN_ROOM, name="自室"))
+    return options
 
 
 @router.delete("/{persona_id}/timetable-template")
