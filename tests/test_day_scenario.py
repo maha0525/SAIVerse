@@ -963,7 +963,9 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
     with p_names, p_exec:
         result = ScenarioPlayer().run(manager, scenario)
 
-    # day_open + コマ 2 (暮らし/休む) + day_close = 4。LLM は一度も呼ばれない
+    # day_open + コマ 2 (出かける/自室で過ごす) + day_close = 4。LLM は一度も
+    # 呼ばれない (軽い一手 Pulse はこのスタブに pulse_dispatcher が無いため
+    # 起動できず、presence_only の正直記録に落ちる — T3 の fail-open)
     assert result.executed_events == 4
     assert [j["kind"] for j in result.judgments] == ["day_open", "day_close"]
     assert manager._session_llm.calls == 0
@@ -971,13 +973,19 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
 
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["status"] for s in slots] == ["done", "done"]
+    # 穴 (own_room) の出かけるコマは、公共施設から決定論で行き先が選ばれて
+    # 外へ出る (T3 — 自室は「出かける」の意味論から除外)。行き先は slot に
+    # 永続化され、帳簿がそれを読む
+    dest = slots[0]["facility"]
+    assert dest in ("library", "workshop")
+    dest_label = {"library": "図書館", "workshop": "工房"}[dest]
 
     # レポートは穴なく出る (データの無い節は「（なし）」)
     report = generate_day_report(manager, PERSONA_ID, PLAN_DATE)
     assert "の一日新聞 — 2026-07-04" in report
-    # 暮らし/休む (スタブ) は「実行済み」でなく「時間を過ごした（詳細な記録
-    # なし）」— していない活動の詳細をペルソナに捏造させない (異常 #4 回帰)
-    assert "| 10:00 | 静かに過ごす | 時間を過ごした（詳細な記録なし） | 出かける ／ 自分の部屋 ／ 静かな時間 |" in report
+    # Pulse の起動できなかったコマは「実行済み」でなく「時間を過ごした（詳細な
+    # 記録なし）」— していない活動の詳細をペルソナに捏造させない (異常 #4 回帰)
+    assert f"| 10:00 | 静かに過ごす | 時間を過ごした（詳細な記録なし） | 出かける ／ {dest_label} ／ 静かな時間 |" in report
     assert "| 20:00 | 自室で過ごす | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report  # title なし → kind 代替
     assert "## 作業セッションの成果" in report
     assert "（なし）" in report

@@ -821,9 +821,12 @@ def test_stub_slots_record_presence_only(manager):
 
 
 def test_free_choice_slot_degrades_to_stay_home_with_warning(manager, caplog):
-    """自由時間スタブ: 選択機構が無い間は自室で過ごす相当に縮退し、WARNING で明示する。
+    """自由時間: 選択が成立しないときは自室で過ごす相当に縮退し、WARNING で明示する。
 
-    静かな別物化をしない — 縮退であることをログに残す (T1 の honest stub)。
+    静かな別物化をしない — 縮退であることをログに残す (T3。選択→委譲の本線は
+    tests/test_free_slot_handlers.py が検証する)。この manager スタブには
+    pulse_dispatcher が無いため、縮退先の軽い一手 Pulse も起動できず
+    presence_only の正直記録に落ちる (fail-open の二段縮退)。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "10:00", "kind": "自由時間", "ref": "none",
@@ -831,7 +834,9 @@ def test_free_choice_slot_degrades_to_stay_home_with_warning(manager, caplog):
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
 
-    with caplog.at_level("WARNING", logger="saiverse.day_plan"):
+    with patch.object(
+        day_plan, "_choose_free_time_kind", return_value=None,
+    ), caplog.at_level("WARNING", logger="saiverse.day_plan"):
         DaySimulator(
             manager.event_scheduler,
             start=BASE + timedelta(hours=9),
@@ -842,7 +847,7 @@ def test_free_choice_slot_degrades_to_stay_home_with_warning(manager, caplog):
     assert slots[0]["status"] == "done"
     assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
     assert any(
-        "free-choice slot" in r.message and "not" in r.message
+        "free-choice slot" in r.message and "degrading to stay-home" in r.message
         for r in caplog.records
     )
 

@@ -2,8 +2,11 @@
 
 「駆動の実体は、朝、自分で組む時間割」— 起床判断 (day_open) の成果物として
 編成された一日のコマ配列を保存し、各コマの開始時刻を EventScheduler へ push
-する。以後の駆動は決定論であり、**コマ開始は判断点ではない = LLM を呼ばない**
-(docs/intent/persona_cognition/judgment_points.md §2、設計原理 6)。
+する。以後の駆動の骨格 (発火・移動・帳簿) は決定論であり、**コマ開始は判断点
+ではない = 時間割を書き換える構造化判断の LLM を呼ばない**
+(docs/intent/persona_cognition/judgment_points.md §2、設計原理 6)。コマの
+「実行本体」がハンドラの中で LLM を使うことはある (作業セッション、出かける/
+自室で過ごす の軽い一手 Pulse、自由時間の種別選択 — 時間割改修 T3)。
 
 コマ発火 (``_fire_slot``) の処理:
 1. ユーザー会話中なら繰り下げ (10 分後に再 push、上限 3 回で skipped)
@@ -32,13 +35,15 @@ kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。kind 
 - 作業セッション系 (execution_type='work_session': 調べる/絵を描く/日記を書く/
   随筆を書く): カタログの指示書テンプレートで指示書を組み ``run_work_session``
   を運転 (予算ゲート対象)
-- 「出かける」「自室で過ごす」「自由時間」: T1 の honest stub (実行本体は
-  後続フェーズ)。施設への実移動 (presence) だけは本物なので status=done と
-  するが、完了時に slot へ ``record_level='presence_only'`` を永続化し、
-  表示側 (一日新聞 / 就寝判断の状況テキスト) が「実行済み」でなく「時間を
-  過ごした（詳細な記録なし）」と正直に提示する — していない活動の詳細を
-  ペルソナがふりかえりで捏造しないため (soft-confabulation、2026-07-05
-  実 LLM シム 異常 #4。旧 暮らし/休む スタブの流儀の継承 = intent §9-3)
+- 「出かける」「自室で過ごす」: 実移動 (presence) + 一回の軽い Pulse (T3。
+  既存 schedule 型 Pulse 経路の再利用 — 「組み込みハンドラ」節の冒頭コメント
+  参照)。「自由時間」: 開始時に本人が軽量構造化出力で種別を選び、選んだ種別の
+  ハンドラへ委譲する (選択失敗は自室で過ごす相当へ縮退)。Pulse が起動でき
+  なかったコマは slot へ ``record_level='presence_only'`` を永続化し、表示側
+  (一日新聞 / 就寝判断の状況テキスト) が「実行済み」でなく「時間を過ごした
+  （詳細な記録なし）」と正直に提示する — していない活動の詳細をペルソナが
+  ふりかえりで捏造しないため (soft-confabulation、2026-07-05 実 LLM シム
+  異常 #4。旧 暮らし/休む スタブの流儀の継承 = intent §9-3)
 未登録 kind のコマは WARN + skipped (``skip_reason='no_handler'``)。旧語彙
 (六型 + 暮らし/休む) は封印済み (intent §5.5) でハンドラを持たない — 移行前に
 保存された旧 kind のコマが発火した場合はこの経路で正直に skipped になる。
@@ -59,6 +64,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 import re
 import uuid
 from datetime import date, datetime, time as dt_time, timedelta
@@ -175,10 +181,11 @@ SKIP_REASON_LABELS = {
 }
 
 #: slot の record_level: 完了記録の詳しさ。presence_only は「その場に居た
-#: (施設への実移動) 以外の詳細な実行記録が無い」— スタブハンドラ (出かける/
-#: 自室で過ごす/自由時間。旧 暮らし/休む も同様だった) が完了時に付ける。
-#: マーカーの無い done (旧データ / セッション系) は従来どおり「実行済み」
-#: (後方互換)。
+#: (施設への実移動) 以外の詳細な実行記録が無い」— 出かける/自室で過ごす/
+#: 自由時間 のハンドラが、軽い一手 Pulse を起動できなかったとき (T3 の
+#: fail-open。旧 暮らし/休む スタブは常時) に付ける。Pulse が走ったコマには
+#: 付けない — 実際の思考記録が SAIMemory に残るため。マーカーの無い done
+#: (旧データ / セッション系) は従来どおり「実行済み」(後方互換)。
 RECORD_LEVEL_PRESENCE_ONLY = "presence_only"
 
 #: record_level='presence_only' な done コマ (スタブハンドラ) の実績ラベル。
@@ -289,10 +296,11 @@ _LEDGER_MISSING_WARNED: set = set()
 def register_slot_handler(kind: str, fn: SlotHandler, *, consumes_budget: bool = False) -> None:
     """kind に対するコマ発火ハンドラを登録する (同 kind は上書き)。
 
-    組み込みではカタログの作業セッション系 (execution_type='work_session') が
-    作業セッション運転、出かける/自室で過ごす/自由時間 がスタブとして登録される
-    (モジュール末尾の :func:`_rebuild_kind_vocabulary`)。後続フェーズ (出かける
-    の実行本体・自由時間の種別選択 等) はここへ上書き登録することで配線に乗る。
+    組み込みではカタログの execution_type ごとに、作業セッション運転
+    (work_session) / 実移動 + 軽い一手 Pulse (outing / stay_home) / 開始時
+    選択 + 委譲 (free_choice) が登録される (モジュール末尾の
+    :func:`_rebuild_kind_vocabulary`)。差し替えたい実装はここへ上書き登録する
+    ことで配線に乗る (シムの ScenarioPlayer が使う口)。
 
     Args:
         consumes_budget: True なら予算ゲートの対象 (v2 §4.5)。発火前に日次
@@ -3227,9 +3235,9 @@ def _episode_kind_for_slot(slot_kind: Any) -> str:
     作業セッション系のコマは中の作業セッションが別の出来事
     (kind='work_session') を開くため、コマの実行区間そのものは kind='slot'
     として並存させる (セッション側の origin_ref がコマ出来事を指して親子が
-    読める)。それ以外 (出かける/自室で過ごす/自由時間 = T1 スタブ) は
-    「その場に居た」以上の実行記録が無いので presence (旧 暮らし/休む と
-    同じ扱い)。
+    読める)。それ以外 (出かける/自室で過ごす/自由時間) は presence — 実行の
+    中身 (軽い一手 Pulse の思考) は SAIMemory 側に残り、出来事としては
+    「その場に居た」区間の記録でよい (旧 暮らし/休む と同じ扱い)。
     """
     from saiverse import episodes
 
@@ -3373,7 +3381,9 @@ def _fire_slot(
     index: int,
     slot_id: Optional[str] = None,
 ) -> None:
-    """コマ発火。判断点ではないため LLM を呼ばない (judgment_points.md §2)。
+    """コマ発火。判断点ではない — 発火の骨格 (繰り下げ・予算・移動・帳簿) は
+    LLM を呼ばない (judgment_points.md §2。実行本体 = ハンドラの中の LLM 使用は
+    別 — モジュール docstring 参照)。
 
     1. ユーザー会話中 → 繰り下げ (10 分後に同 key 再 push、上限 3 回で skipped)
     2. 予算ゲート (consumes_budget な kind のみ): 残高で切り詰め / 残高 0 は skipped
@@ -3482,7 +3492,10 @@ def _fire_slot(
             return
         slot = gated_slot
 
-    # (c) 施設へ移動 (型 → 行き先の実行。移動自体が接地した行動 — v2 §6.1)
+    # (c) 施設へ移動 (型 → 行き先の実行。移動自体が接地した行動 — v2 §6.1)。
+    # 「出かける」コマの行き先の穴 (own_room のまま) は移動の前に決定論で
+    # 確定する (T3。LLM は使わない — 行き先の具体は着いた場所が与える)。
+    slot = _resolve_outing_destination(manager, persona_id, plan_date_str, index, slot)
     _move_to_facility(manager, persona_id, slot)
 
     # (d) コマ発火を実行台帳で包む (A5/A6, W2 Chunk B)。台帳の無い環境
@@ -4613,11 +4626,12 @@ def _handle_worker_slot(
 def _record_presence_only(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「詳細な実行記録が無い」ことを slot に永続化する (スタブ共通の正直表示)。
+    """「詳細な実行記録が無い」ことを slot に永続化する (fail-open の正直表示)。
 
-    表示側 (一日新聞 / 就寝判断の状況テキスト) が「実行済み」と偽らず
-    「時間を過ごした（詳細な記録なし）」と提示するための刻印
-    (:data:`RECORD_LEVEL_PRESENCE_ONLY`、intent §9-3)。
+    軽い一手 Pulse が起動できなかったコマ (T3) と、中身が空の track コマの
+    presence 縮退が使う。表示側 (一日新聞 / 就寝判断の状況テキスト) が
+    「実行済み」と偽らず「時間を過ごした（詳細な記録なし）」と提示するための
+    刻印 (:data:`RECORD_LEVEL_PRESENCE_ONLY`、intent §9-3)。
     """
     _update_slot(
         manager, persona_id, plan_date_str, index,
@@ -4626,58 +4640,484 @@ def _record_presence_only(
     )
 
 
+# ---------------------------------------------------------------------------
+# 出かける / 自室で過ごす / 自由時間 の実行本体 (T3):
+# presence (実移動) + 一回の軽い Pulse
+#
+# Pulse は既存の schedule 型経路 (PulseDispatcher.dispatch_schedule_fire →
+# PulseController → SEARuntime.run_meta_user → 既定 Playbook
+# track_user_conversation = LLM ノード 1 個) をそのまま使う — エリスが
+# 「朝が来ました」だけのスケジュール Pulse でタイムラインを見る習慣を自作した
+# 実証 (intent timetable_redesign §4-6) と同じ経路・同じ粒度で、新しい Pulse
+# 機構は発明しない。状況テキストは場所と状況の提示のみで、行動・発話の義務を
+# 課さない (「必ず何か書け」と迫る文面は充填独白 — v2 §2.1「LLM は構造的に
+# 沈黙できない」— を呼び戻すため禁止)。反応の材料は run_meta_user の知覚検知
+# (フィード新着等のバッファ) と visual context (施設の STATE_JSON) が Pulse の
+# 中で自然に供給する。
+#
+# Pulse が起動できなかった場合 (ペルソナ未ロード / dispatcher 無し / 関所閉鎖
+# 等) は従来どおり record_level='presence_only' を刻む (fail-open の正直記録)。
+# Pulse が走った場合は presence_only を付けない — 実際の思考記録が SAIMemory に
+# 残るため、「実行済み」表示が正直になる。
+# ---------------------------------------------------------------------------
+
+
+def _building_display_name(manager: Any, building_id: Optional[str]) -> str:
+    """Building の表示名 (見つからなければ id をそのまま返す)。"""
+    if not building_id:
+        return "どこか"
+    for b in getattr(manager, "buildings", None) or []:
+        if getattr(b, "building_id", None) == building_id:
+            return getattr(b, "name", "") or building_id
+    return building_id
+
+
+def _resolve_outing_destination(
+    manager: Any, persona_id: str, plan_date_str: str, index: int, slot: Dict[str, Any]
+) -> Dict[str, Any]:
+    """「出かける」コマの行き先を移動前に確定し、確定後の slot を返す (T3)。
+
+    - facility が実在施設で確定していればそのまま (テンプレ / 朝の埋めの決定を
+      尊重する)。
+    - own_room (穴の既定埋め) のままなら、ペルソナが行ける公共施設
+    (:func:`saiverse.facility_map.candidate_buildings` — head の「行ける場所」と
+      同じ集合) から**決定論の乱数**で選ぶ。LLM に選ばせない (行き先の中身は
+      着いた場所が与える — intent §5.3「場所を確定、種別・方針は未定」の鏡像)。
+      乱数の種は (persona, 日付, コマ id) — 日ごとに変わり、同じコマの繰り下げ
+      再発火では同じ行き先に落ちる (冪等)。自室は「出かける」の意味論から除外
+      する (明示的に own_room が書かれていても穴と同じ扱いで外へ出す)。
+    - 候補が無い環境 (施設ゼロの City 等) は WARN してそのまま (移動なし =
+      presence は現在地。正直記録は軽い一手 Pulse 側の fail-open が担う)。
+
+    選んだ行き先は slot に永続化する — 帳簿 (一日新聞 / 就寝ふりかえり) が
+    「実際にどこへ行ったか」を読めるようにするため。
+    """
+    definition = slot_kind_catalog.get_kind_by_name(str(slot.get("kind") or ""))
+    if not definition or definition.get("execution_type") != slot_kind_catalog.EXECUTION_OUTING:
+        return slot
+    facility = str(slot.get("facility") or "").strip()
+    if facility and facility != FACILITY_OWN_ROOM:
+        return slot
+
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    private_room = getattr(persona, "private_room_id", None) if persona is not None else None
+    from saiverse.facility_map import candidate_buildings
+
+    candidates: List[str] = []
+    for b in candidate_buildings(manager):
+        bid = getattr(b, "building_id", None)
+        if bid and bid != private_room:
+            candidates.append(bid)
+    if not candidates:
+        LOGGER.warning(
+            "[day_plan] outing slot has no destination candidates; staying in "
+            "place (persona=%s date=%s index=%d)",
+            persona_id, plan_date_str, index,
+        )
+        return slot
+
+    rng = random.Random(f"{persona_id}:{plan_date_str}:{slot.get('id') or index}")
+    target = rng.choice(candidates)
+    LOGGER.info(
+        "[day_plan] outing destination resolved: persona=%s date=%s index=%d "
+        "facility=%r -> %s (deterministic pick from %d candidates)",
+        persona_id, plan_date_str, index, facility, target, len(candidates),
+    )
+    updated = _update_slot(
+        manager, persona_id, plan_date_str, index,
+        expected_id=slot.get("id"), facility=target,
+    )
+    return updated if updated is not None else {**slot, "facility": target}
+
+
+def _dispatch_slot_pulse(
+    manager: Any, persona_id: str, slot: Dict[str, Any], situation_text: str
+) -> bool:
+    """コマの「軽い一手」Pulse を一回だけ起動する。走った (走る) なら True。
+
+    経路は schedule 型 Pulse (:meth:`PulseDispatcher.dispatch_schedule_fire`、
+    meta_playbook 省略 = 既定の track_user_conversation)。状況テキストは
+    schedule Pulse の流儀でペルソナ自身の履歴にのみ記録され (他ペルソナには
+    見えない)、知覚バッファと visual context は run_meta_user が注入する。
+
+    戻り値の判定は :meth:`PulseDispatcher.dispatch_phenomenon_event` と同じ —
+    True = 実行完走 or 受付済みで消えない (queued / 中断復帰 queue 入りの
+    cancelled)。False = 起動していない (dispatcher / pulse_controller 不在・
+    関所閉鎖・例外)。False のとき呼び出し側は presence_only の正直記録に落ちる。
+    """
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    if persona is None:
+        LOGGER.warning(
+            "[day_plan] slot pulse skipped: persona %s not loaded", persona_id,
+        )
+        return False
+    building_id = getattr(persona, "current_building_id", None)
+    if not building_id:
+        LOGGER.warning(
+            "[day_plan] slot pulse skipped: persona %s has no current building",
+            persona_id,
+        )
+        return False
+    dispatcher = getattr(manager, "pulse_dispatcher", None)
+    if dispatcher is None:
+        LOGGER.warning(
+            "[day_plan] slot pulse skipped: manager has no pulse_dispatcher "
+            "(persona=%s)", persona_id,
+        )
+        return False
+    try:
+        result = dispatcher.dispatch_schedule_fire(
+            persona_id=persona_id,
+            building_id=building_id,
+            user_input=situation_text,
+            metadata={
+                "source": "day_plan_slot",
+                "slot_kind": str(slot.get("kind") or ""),
+                "slot_id": str(slot.get("id") or ""),
+            },
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] slot pulse dispatch raised (persona=%s kind=%s); "
+            "falling back to presence-only record",
+            persona_id, slot.get("kind"), exc_info=True,
+        )
+        return False
+    ran = (
+        result.get("action") == "queued"
+        or result.get("runtime_outcome") in ("completed", "cancelled")
+    )
+    if not ran:
+        LOGGER.warning(
+            "[day_plan] slot pulse did not start (persona=%s kind=%s action=%s "
+            "outcome=%s error=%s); falling back to presence-only record",
+            persona_id, slot.get("kind"), result.get("action"),
+            result.get("runtime_outcome"), result.get("error"),
+        )
+    return ran
+
+
+def _run_slot_light_pulse(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    slot: Dict[str, Any],
+    index: int,
+    situation_text: str,
+) -> None:
+    """軽い一手 Pulse を起動し、帳簿 (record_level / ライフ予算) を正直に揃える。
+
+    - 走った: record_level は付けない (思考記録が SAIMemory に残る) + 標準
+      パルス 1 回をライフ予算へ積算 (:func:`consume_life_pulse`。予算が数える
+      のは「実際に標準 LLM が呼ばれた瞬間」だけ — life.md v0.5 §5.3。この
+      関数の想定呼び出し元だった「暮らし Pulse」の後継が、この軽い一手)
+    - 走らなかった: 従来どおり presence_only を刻む (fail-open の正直記録)
+    """
+    if _dispatch_slot_pulse(manager, persona_id, slot, situation_text):
+        try:
+            consume_life_pulse(
+                manager, persona_id, plan_date_str, at_time=slot.get("start"),
+            )
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] consume_life_pulse failed for slot pulse "
+                "(persona=%s date=%s index=%d); continuing",
+                persona_id, plan_date_str, index, exc_info=True,
+            )
+        return
+    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+
+
 def _handle_outing_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「出かける」コマ: T1 の honest stub — 実行本体は後続フェーズ。
+    """「出かける」コマの実行本体 (T3): 実移動 + 軽い一手 Pulse。
 
-    恒久実装ではない。施設への実移動 (presence) は ``_fire_slot`` (c) で
-    済んでおり、それだけは本物 — 行き先に実際に居ることが遭遇のきっかけに
-    なる (旧 暮らし スタブから継承した唯一の実挙動)。出かけた先での知覚・
-    desire への積み込み (intent §4-3) は後続フェーズでここに刺さる。
+    行き先は ``_fire_slot`` (c) の :func:`_resolve_outing_destination` で確定・
+    移動済み (自由時間からの委譲時は委譲側が同じ手順を踏む)。ここでは移動後の
+    **実際の現在地**から状況テキストを組む — 移動に失敗して外へ出られなかった
+    場合も、出たふりをせずその事実を提示する (接地原則)。
     """
-    LOGGER.info(
-        "[day_plan] outing slot (stub — 実行本体は後続フェーズ): "
-        "persona=%s date=%s index=%d note=%r",
-        persona_id, plan_date_str, index, slot.get("note"),
-    )
-    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    current = getattr(persona, "current_building_id", None) if persona is not None else None
+    if persona is None or not current:
+        LOGGER.warning(
+            "[day_plan] outing slot: persona not loaded or unplaced; "
+            "presence-only record (persona=%s date=%s index=%d)",
+            persona_id, plan_date_str, index,
+        )
+        _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+        return
+    private_room = getattr(persona, "private_room_id", None)
+    place = _building_display_name(manager, current)
+    if private_room is not None and current == private_room:
+        # 移動できず自室に留まっている (満員 / 候補なし等)。出かけたことに
+        # しない — 状況の正直な提示だけを行う。
+        text = (
+            "<system>\n"
+            f"出かける時間でしたが、移動できずに「{place}」にいます。\n"
+            "</system>"
+        )
+    else:
+        text = f"<system>\n出かけて、「{place}」に来ました。\n</system>"
+    _run_slot_light_pulse(manager, persona_id, plan_date_str, slot, index, text)
 
 
 def _handle_stay_home_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「自室で過ごす」コマ: T1 の honest stub — 実行本体は後続フェーズ。
+    """「自室で過ごす」コマの実行本体 (T3): own_room で軽い一手 Pulse。
 
-    恒久実装ではない。知覚バッファへのフィード未読投入を前提とした休息
-    (intent §5.5) は後続フェーズでここに刺さる。それまでは旧 休む スタブと
-    同じく presence の記録だけを残す。
+    「休む」(接触ゼロが合法) との違いは、知覚バッファに世界 (フィード新着等)
+    が流れ込む前提で休むこと (intent §5.5) — その流れ込みは Pulse 側
+    (run_meta_user の知覚検知) が担うので、ここは状況の提示だけをする。
+    desire への積み込みは**許可形の一文**で促すにとどめる (「積んでいい」。
+    義務形は充填独白 v2 §2.2 を呼び戻すため使わない — intent §5.5 確定)。
     """
-    LOGGER.info(
-        "[day_plan] stay-home slot (stub — 実行本体は後続フェーズ): "
-        "persona=%s date=%s index=%d note=%r",
-        persona_id, plan_date_str, index, slot.get("note"),
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    current = getattr(persona, "current_building_id", None) if persona is not None else None
+    if persona is None or not current:
+        LOGGER.warning(
+            "[day_plan] stay-home slot: persona not loaded or unplaced; "
+            "presence-only record (persona=%s date=%s index=%d)",
+            persona_id, plan_date_str, index,
+        )
+        _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+        return
+    private_room = getattr(persona, "private_room_id", None)
+    desire_line = (
+        "思いついたことがあれば、やりたいこと候補に積んでおいてもいい時間です。"
     )
-    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+    if private_room is not None and current == private_room:
+        text = f"<system>\n自室で過ごす時間です。{desire_line}\n</system>"
+    else:
+        # 自室へ戻れなかった (部屋なし / 移動失敗)。居る場所を偽らない。
+        place = _building_display_name(manager, current)
+        text = (
+            "<system>\n"
+            f"自室で過ごす時間ですが、部屋に戻れず「{place}」で過ごしています。"
+            f"{desire_line}\n"
+            "</system>"
+        )
+    _run_slot_light_pulse(manager, persona_id, plan_date_str, slot, index, text)
+
+
+def _free_time_choices(manager: Any, persona_id: str, plan_date_str: str) -> List[str]:
+    """自由時間コマで選べる kind の一覧 (カタログ順の決定論)。
+
+    カタログの実行可能種別 (ハンドラ登録済み) から、自由時間系
+    (execution_type='free_choice') 自身を除いたもの。日次予算の残高が 0 の
+    ときは予算ゲート対象 (作業セッション系) も外す — 選ばせてから予算切れで
+    転ばせない (読み取り専用の粗いゲート。厳密な per-life 判定はしない)。
+    """
+    choices: List[str] = []
+    for definition in slot_kind_catalog.SLOT_KIND_CATALOG.values():
+        name = definition.get("name")
+        if definition.get("execution_type") == slot_kind_catalog.EXECUTION_FREE_CHOICE:
+            continue
+        if not name or name not in _SLOT_HANDLERS:
+            continue
+        choices.append(name)
+    try:
+        state = get_budget_state(manager, persona_id, plan_date_str)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] budget state unavailable for free-time choices; "
+            "keeping all kinds (persona=%s)", persona_id, exc_info=True,
+        )
+        state = None
+    if state is not None and state["remaining"] <= 0:
+        choices = [c for c in choices if c not in _BUDGET_GATED_KINDS]
+    return choices
+
+
+def _resolve_free_choice_client(persona: Any) -> Tuple[Optional[Any], str]:
+    """自由時間の種別選択に使う軽量 LLM クライアントを ``(client, model名)`` で返す。
+
+    ペルソナの LIGHTWEIGHT_MODEL があればそのクライアント
+    (``persona.lightweight_llm_client``)、無ければ既定軽量モデル
+    (:func:`sea.pulse_context.default_lightweight_model`) から構築する。
+    構造化出力に対応しないモデルは None (呼び出し側が縮退する) — 対応可否は
+    ``saiverse.model_configs.supports_structured_output`` が正典。
+    """
+    from saiverse.model_configs import (
+        get_context_length,
+        get_model_provider,
+        supports_structured_output,
+    )
+    from sea.pulse_context import default_lightweight_model
+
+    model = getattr(persona, "lightweight_model", None) or default_lightweight_model()
+    if not supports_structured_output(model):
+        return None, model
+    if getattr(persona, "lightweight_model", None):
+        client = getattr(persona, "lightweight_llm_client", None)
+        if client is not None:
+            return client, model
+    from llm_clients import get_llm_client
+
+    return (
+        get_llm_client(model, get_model_provider(model), get_context_length(model)),
+        model,
+    )
+
+
+def _choose_free_time_kind(
+    manager: Any, persona_id: str, slot: Dict[str, Any], choices: List[str]
+) -> Optional[str]:
+    """自由時間の kind を本人 (軽量モデルの構造化出力一発) に選ばせる。
+
+    失敗 (クライアント不在 / 非対応モデル / LLM エラー / enum 外の出力) は
+    None — 呼び出し側が「自室で過ごす」相当へ縮退する (WARNING)。選択は
+    行動の実行の一部であって、時間割を書き換える判断点ではない。
+    """
+    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
+    if persona is None:
+        LOGGER.warning(
+            "[day_plan] free-time choice skipped: persona %s not loaded", persona_id,
+        )
+        return None
+    try:
+        client, model = _resolve_free_choice_client(persona)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] free-time choice: failed to resolve lightweight client "
+            "(persona=%s)", persona_id, exc_info=True,
+        )
+        return None
+    if client is None:
+        LOGGER.warning(
+            "[day_plan] free-time choice: model %r does not support structured "
+            "output (persona=%s)", model, persona_id,
+        )
+        return None
+
+    lines: List[str] = []
+    for name in choices:
+        definition = slot_kind_catalog.get_kind_by_name(name) or {}
+        description = str(definition.get("description") or "").strip()
+        lines.append(f"- {name}: {description}" if description else f"- {name}")
+    persona_name = str(getattr(persona, "persona_name", "") or persona_id)
+    parts = [
+        f"あなたは {persona_name} です。自由時間になりました。"
+        "今から何をするか、次の種別から一つ選んでください。",
+        "\n".join(lines),
+    ]
+    note = str(slot.get("note") or "").strip()
+    if note:
+        parts.append(f"このコマの方針メモ: {note}")
+    schema = {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": list(choices)}},
+        "required": ["kind"],
+    }
+    try:
+        raw = client.generate(
+            [{"role": "user", "content": "\n\n".join(parts)}],
+            response_schema=schema,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] free-time choice LLM call failed (persona=%s model=%s)",
+            persona_id, model, exc_info=True,
+        )
+        return None
+    data: Any = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            data = None
+    kind = data.get("kind") if isinstance(data, dict) else None
+    if kind not in choices:
+        LOGGER.warning(
+            "[day_plan] free-time choice returned invalid kind %r (persona=%s "
+            "model=%s choices=%s)", kind, persona_id, model, choices,
+        )
+        return None
+    LOGGER.info(
+        "[day_plan] free-time choice: persona=%s chose %r (model=%s)",
+        persona_id, kind, model,
+    )
+    return kind
 
 
 def _handle_free_choice_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
-) -> None:
-    """「自由時間」コマ: T1 の honest stub — 種別選択の機構は後続フェーズ。
+) -> Optional[int]:
+    """「自由時間」コマの実行本体 (T3): 開始時に本人が選び、選んだ種別へ委譲する。
 
-    恒久実装ではない。本来は他のコマ種別から本人が選んで実行する
-    (intent §5.3 の「種別の穴の名前付き版」。選択タイミングは §11-11 で未決) が、
-    選択機構が無い間は自室で過ごす相当の presence 記録に縮退する — 縮退で
-    あることを WARNING で明示する (静かな別物化をしない)。
+    intent §5.3 の「種別の穴の名前付き版」。§11-11 (選択タイミング: 朝の埋めか
+    コマ開始時か) の決着はこの実装の形 — **テンプレの kind の穴は朝の判断で
+    埋まり** (T2 ``timetable_template._default_hole_kind`` は穴のままの kind を
+    「自由時間」に落とす)、**自由時間コマは開始時に本人が選ぶ**。「朝に決める
+    穴」と「開始時に決める自由時間」の両方が共存するのが自然な決着である。
+
+    選択は軽量モデルの構造化出力一発 (:func:`_choose_free_time_kind`)。失敗時は
+    「自室で過ごす」相当へ縮退する (WARNING — 静かな別物化をしない)。委譲先が
+    予算ゲート対象 (作業セッション系) のときは、実測ラウンドを台帳へ積算する
+    (自由時間自身は非ゲートのため ``_fire_slot`` の精算では数えられない —
+    legacy 経路の実測積算と同じ二本 (:func:`consume_budget` /
+    :func:`consume_life_rounds`) をここで呼ぶ)。
+
+    Returns:
+        委譲先ハンドラの戻り値 (実測ラウンド数など)。縮退時は None。
     """
-    LOGGER.warning(
-        "[day_plan] free-choice slot fired but the choice mechanism is not "
-        "implemented yet (T1 stub) — degrading to stay-home behaviour: "
-        "persona=%s date=%s index=%d note=%r",
-        persona_id, plan_date_str, index, slot.get("note"),
+    choices = _free_time_choices(manager, persona_id, plan_date_str)
+    chosen = (
+        _choose_free_time_kind(manager, persona_id, slot, choices)
+        if choices else None
     )
-    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+    handler = _SLOT_HANDLERS.get(chosen) if chosen else None
+    if chosen is None or handler is None:
+        LOGGER.warning(
+            "[day_plan] free-choice slot could not settle a choice "
+            "(chosen=%r handler=%s) — degrading to stay-home behaviour: "
+            "persona=%s date=%s index=%d",
+            chosen, "yes" if handler else "no", persona_id, plan_date_str, index,
+        )
+        _move_to_facility(manager, persona_id, {**slot, "facility": FACILITY_OWN_ROOM})
+        _handle_stay_home_slot(manager, persona_id, plan_date_str, slot, index)
+        return None
+
+    chosen_slot = {**slot, "kind": chosen}
+    definition = slot_kind_catalog.get_kind_by_name(chosen) or {}
+    execution_type = definition.get("execution_type")
+    if execution_type == slot_kind_catalog.EXECUTION_OUTING:
+        # 委譲先が「出かける」系: _fire_slot (c) は自由時間としての facility で
+        # 移動済みなので、ここで行き先を確定して出直す。
+        chosen_slot = _resolve_outing_destination(
+            manager, persona_id, plan_date_str, index, chosen_slot,
+        )
+        _move_to_facility(manager, persona_id, chosen_slot)
+    elif execution_type == slot_kind_catalog.EXECUTION_STAY_HOME:
+        chosen_slot = {**chosen_slot, "facility": FACILITY_OWN_ROOM}
+        _move_to_facility(manager, persona_id, chosen_slot)
+    # 作業セッション系は現在地で実施する (コマの facility は (c) で反映済み)
+
+    used = handler(manager, persona_id, plan_date_str, chosen_slot, index)
+
+    if chosen in _BUDGET_GATED_KINDS and isinstance(used, int) \
+            and not isinstance(used, bool) and used > 0:
+        try:
+            consume_budget(manager, persona_id, plan_date_str, used)
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] consume_budget failed for delegated free-time work "
+                "(persona=%s date=%s index=%d); continuing",
+                persona_id, plan_date_str, index,
+            )
+        try:
+            consume_life_rounds(
+                manager, persona_id, plan_date_str, used, at_time=slot.get("start"),
+            )
+        except Exception:
+            LOGGER.exception(
+                "[day_plan] consume_life_rounds failed for delegated free-time "
+                "work (persona=%s date=%s index=%d); continuing",
+                persona_id, plan_date_str, index,
+            )
+    return used
 
 
 # ---------------------------------------------------------------------------
