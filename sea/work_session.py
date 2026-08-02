@@ -42,7 +42,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from saiverse import clock
 from saiverse.usage_tracker import get_usage_tracker
@@ -113,6 +113,34 @@ class WorkSessionResult:
     extra: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class SessionCloseContext:
+    """締めフック (``close_hook``) に渡す、セッション終了直後の実行文脈。
+
+    コマ締めの一手 (帰属判定 + 経験値ノート、timetable_redesign.md §5.4 /
+    experience_ledger.md §4) が「セッションと同じ model・同じ messages
+    (直前コールで prefix cache が熱い)」のまま構造化出力を 1 発追加するための
+    受け渡し。``messages`` はセッションの生文脈そのもの (head + 履歴 + 指示書 +
+    各ラウンド) — 最終応答 (``final_continuation``) はループが append しない
+    ため別フィールドで渡す (使う側が assistant として積んでから続ける)。
+    """
+
+    manager: Any
+    persona: Any
+    runtime: Any
+    llm_client: Any
+    execution_context: Any
+    state: Dict[str, Any]
+    messages: List[Dict[str, Any]]
+    pulse_ctx: Any
+    building_id: str
+    episode_ref: Optional[str]
+    artifacts: List[str]
+    rounds_used: int
+    ended_reason: str
+    final_continuation: str
+
+
 def run_work_session(
     persona_id: str,
     instruction: str,
@@ -123,6 +151,7 @@ def run_work_session(
     manager: Optional[Any] = None,
     track_id: Optional[str] = None,
     title: Optional[str] = None,
+    close_hook: Optional[Callable[[SessionCloseContext], None]] = None,
 ) -> WorkSessionResult:
     """指示書とラウンド予算を渡して作業セッションを 1 本運転する。
 
@@ -143,6 +172,10 @@ def run_work_session(
         title: セッションの短い表題 (コマの title / タスク題)。出来事
             (Episode) の ``meta.title`` に透過する (meta 書式契約
             life_concept_map.md §14)。省略可。
+        close_hook: セッション終了直後 (Beat ロック内・prefix cache が熱い
+            まま) に一度だけ呼ばれる締めの一手 (:class:`SessionCloseContext`
+            を受ける)。コマ締めの帰属判定 + 経験値ノート (T4) の注入点。
+            フックの失敗はセッションの結果を壊さない (WARNING + スキップ)。
 
     Returns:
         WorkSessionResult。例外は握り潰さず LOGGER に記録した上で
@@ -378,6 +411,36 @@ def run_work_session(
 
             # ---- artifacts: 終了時点との差分 ----
             artifacts = _collect_new_item_ids(manager, persona_id, items_before)
+
+            # ---- コマ締めの一手 (T4: 帰属判定 + 経験値ノート) ----
+            # セッションと同じ messages / model のまま (直前コールで prefix が
+            # 熱い — gold_panning の defer-to-hot と同じ理由) 呼び出し側の
+            # close_hook に構造化出力 1 発を委ねる。hold_beat の内側 = 記録は
+            # ロック下で、の不変条件に従う。締めは油であって燃料ではない —
+            # 失敗はコマ (セッション) の完了を壊さない。
+            if close_hook is not None:
+                try:
+                    close_hook(SessionCloseContext(
+                        manager=manager,
+                        persona=persona,
+                        runtime=runtime,
+                        llm_client=llm_client,
+                        execution_context=execution_context,
+                        state=state,
+                        messages=messages,
+                        pulse_ctx=pulse_ctx,
+                        building_id=building_id,
+                        episode_ref=episode_ref,
+                        artifacts=artifacts,
+                        rounds_used=rounds_used,
+                        ended_reason=ended_reason,
+                        final_continuation=continuation or "",
+                    ))
+                except Exception:
+                    LOGGER.warning(
+                        "[work_session] close hook failed (persona=%s) — "
+                        "session result unaffected", persona_id, exc_info=True,
+                    )
 
             ended_at = clock.now()
 

@@ -139,13 +139,19 @@ def create_theme_page(
     title: str,
     member_refs: list,
     origin: str = "naming",
+    content: Optional[str] = None,
 ) -> str:
-    """P4-b 命名によって新規テーマページを作成する（冪等）。
+    """新規テーマページを作成する（冪等）。
+
+    呼び出し元は二系統: P4-b 命名 (origin="naming"、content 省略 =
+    member_refs 一覧と定型文) と、コマ締めの経験値ノートの lazy creation
+    (origin="slot_close"、experience_ledger.md §5「初経験がページを開く」—
+    命名由来ではないので content を明示で渡す)。
 
     root_theme 配下に category='theme' のページを作成し、metadata に
     ``{"origin": origin, "member_refs": [...]}`` を刻む。
-    content は member_refs の一覧（「- task:N」形式）と定型文。
-    edit_source="naming" で編集来歴に記録する。
+    content 省略時は member_refs の一覧（「- task:N」形式）と定型文。
+    edit_source=origin で編集来歴に記録する。
 
     同名のテーマページが root_theme 配下に既にあれば作成せず既存 id を返す（冪等）。
 
@@ -165,13 +171,14 @@ def create_theme_page(
 
     from sai_memory.memopedia.storage import create_page, record_page_edit, generate_diff
 
-    # content: member_refs の一覧 + 定型
-    ref_lines = "\n".join(f"- {ref}" for ref in (member_refs or []))
-    content = (
-        f"{ref_lines}\n\n（命名により束ねられたテーマ）"
-        if ref_lines
-        else "（命名により束ねられたテーマ）"
-    )
+    # content 省略時 (命名経路): member_refs の一覧 + 定型
+    if content is None:
+        ref_lines = "\n".join(f"- {ref}" for ref in (member_refs or []))
+        content = (
+            f"{ref_lines}\n\n（命名により束ねられたテーマ）"
+            if ref_lines
+            else "（命名により束ねられたテーマ）"
+        )
     meta: Dict[str, Any] = {
         "origin": origin,
         "member_refs": list(member_refs or []),

@@ -300,7 +300,7 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
 
     def fake_run_work_session(persona_id, instruction, budget_rounds, task_ref=None,
                               metadata=None, *, manager=None, track_id=None,
-                              title=None):
+                              title=None, close_hook=None):
         calls.append({
             "at": clock.now(),
             "persona_id": persona_id,

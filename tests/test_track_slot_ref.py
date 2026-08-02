@@ -196,7 +196,8 @@ def test_track_slot_builds_instruction_from_track_context(manager, running_track
     calls: List[Dict[str, Any]] = []
 
     def fake_ws(persona_id, instruction, budget_rounds, task_ref=None,
-                metadata=None, *, manager=None, track_id=None, title=None):
+                metadata=None, *, manager=None, track_id=None, title=None,
+                close_hook=None):
         calls.append({
             "instruction": instruction, "task_ref": task_ref,
             "track_id": track_id, "budget_rounds": budget_rounds,
@@ -276,7 +277,8 @@ def test_empty_track_slot_with_note_runs_session(manager, empty_track):
     calls: List[Dict[str, Any]] = []
 
     def fake_ws(persona_id, instruction, budget_rounds, task_ref=None,
-                metadata=None, *, manager=None, track_id=None, title=None):
+                metadata=None, *, manager=None, track_id=None, title=None,
+                close_hook=None):
         calls.append({"instruction": instruction, "track_id": track_id})
         return _mock_ws_result(track_id=track_id)
 
@@ -303,7 +305,8 @@ def test_task_ref_slot_still_uses_template_path(manager, running_track):
     calls: List[Dict[str, Any]] = []
 
     def fake_ws(persona_id, instruction, budget_rounds, task_ref=None,
-                metadata=None, *, manager=None, track_id=None, title=None):
+                metadata=None, *, manager=None, track_id=None, title=None,
+                close_hook=None):
         calls.append({"instruction": instruction, "task_ref": task_ref,
                       "track_id": track_id})
         return _mock_ws_result(task_ref=task_ref)

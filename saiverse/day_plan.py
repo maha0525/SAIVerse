@@ -4544,10 +4544,17 @@ def run_worker_slot_session(
         )
 
     from sea.work_session import run_work_session
+    from saiverse.slot_close import make_close_hook
 
     # track:N コマではセッションの対象タスクは無い (Track 単位の取り組み)。
     # task_ref を track 参照で埋めると post_session の task_verdict が偽対象を
     # 裁定してしまうため、track_id 側に流す。
+    #
+    # close_hook = コマ締めの一手 (T4: 帰属判定 + 経験値ノート、同一コール)。
+    # v1 で締めコールを持つのは作業セッション系コマ (=この関数) のみ — 軽い
+    # 一手コマ (出かける/自室で過ごす) は Pulse 記録が SAIMemory に残り、
+    # あらすじ→関与タグは代謝側 (B2) の担当なので、コマごとの LLM コスト
+    # 倍化を避けて締めコールを足さない (saiverse/slot_close.py 冒頭)。
     is_track_ref = track_id is not None
     result = run_work_session(
         persona_id,
@@ -4558,6 +4565,7 @@ def run_worker_slot_session(
         manager=manager,
         track_id=track_id,
         title=str(slot.get("title") or "").strip() or None,
+        close_hook=make_close_hook(manager, persona_id, plan_date_str, slot, index),
     )
     LOGGER.info(
         "[day_plan] work session for slot finished: persona=%s date=%s index=%d kind=%s "
