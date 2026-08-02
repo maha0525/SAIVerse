@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 import openai
@@ -323,9 +324,46 @@ class OpenAIClient(LLMClient):
         self.structured_output_backend = structured_output_backend
         self.structured_output_mode = structured_output_mode or "native"
         self.reasoning_passback_field = reasoning_passback_field
+        self._llama_server_base: Optional[str] = None
+        self._llama_server_config: Optional[Dict[str, Any]] = None
+
+    def bind_llama_server(self, server_base: str, config: Dict[str, Any]) -> None:
+        """llama-server 管理下のモデルとして紐付ける。
+
+        以後、リクエスト送信のたびに ensure_running を通す。サーバーが idle
+        自動停止で消えていれば再起動し、生きていれば last_activity を更新して
+        idle checker に「使用中」を知らせる。activity 更新は停止判定と同じ
+        ロックの中で行われるため、先に名乗ったリクエストが停止に撃たれる
+        ことはない (キャッシュ済みクライアントが停止済みポートへ送信し続ける
+        2026-08-03 の欠陥への対処)。
+        """
+        self._llama_server_base = server_base
+        self._llama_server_config = config
+
+    def ensure_backend(self) -> None:
+        if self._llama_server_config is not None:
+            from .llama_server import get_server_manager
+            get_server_manager().ensure_running(
+                self._llama_server_base, self._llama_server_config
+            )
+
+    @contextmanager
+    def backend_lease(self):
+        if self._llama_server_config is None:
+            yield
+            return
+        from .llama_server import get_server_manager
+        with get_server_manager().request_lease(
+            self._llama_server_base, self._llama_server_config
+        ):
+            yield
 
     def _create_completion(self, **kwargs: Any):
-        return self.client.chat.completions.create(**kwargs)
+        self.ensure_backend()
+        # 貸出札を掛けて送信 — 札がある間は idle 自動停止に撃たれない。
+        # 返却 (with 脱出) が完了時刻の申告を兼ねる
+        with self.backend_lease():
+            return self.client.chat.completions.create(**kwargs)
 
     def _add_additional_properties(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively add additionalProperties: false and normalize schema for OpenAI strict mode."""
@@ -943,7 +981,20 @@ class OpenAIClient(LLMClient):
             self._store_reasoning_details(merge_streaming_reasoning_details(reasoning_details_raw))
         self._store_stream_tool_detection_from_buffer(call_buffer)
 
-    def generate_stream(
+    def generate_stream(self, *args: Any, **kwargs: Any) -> Iterator[str]:
+        """ストリーム版の外殻。生成の間ずっと貸出札を掛ける。
+
+        札より先に ensure — サーバーが idle 停止済みなら先に再起動しないと、
+        札が「不在のサーバー」に対して空発行され、実ストリームが無防備になる。
+        札の返却 (中断時も finally で確実) が完了時刻の申告を兼ねるため、
+        idle_timeout を超える長い生成の完走直後に idle 停止が発火しない
+        (実装本体は _generate_stream_impl)。
+        """
+        self.ensure_backend()
+        with self.backend_lease():
+            yield from self._generate_stream_impl(*args, **kwargs)
+
+    def _generate_stream_impl(
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[list] | None = None,

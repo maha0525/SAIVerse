@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -56,6 +57,25 @@ class LLMClient:
         self.supports_video = supports_video
         self.model: str = ""  # Set by subclasses (API model name)
         self.config_key: str = ""  # Config file key for pricing lookup
+
+    def ensure_backend(self) -> None:
+        """リクエスト送信前にバックエンドの存在を保証するフック (既定は何もしない)。
+
+        llama-server 管理下の OpenAIClient が override する。ラッパー
+        (LlamaCachedClient 等) は、サーバーへ副リクエスト (slot restore 等) を
+        送る**前に**これを呼ぶこと — inner の送信時点まで待つと、停止済み
+        サーバーへ先に副リクエストが飛ぶ。
+        """
+
+    @contextmanager
+    def backend_lease(self):
+        """リクエスト実行中の貸出札フック (既定は何もしない no-op)。
+
+        llama-server 管理下の OpenAIClient が override し、札が出ている間は
+        idle 自動停止がそのサーバーを撃てなくなる。送信〜後処理 (slot save 等)
+        の全体をこの with で覆うこと。返却 (with 脱出) が完了時刻の申告を兼ねる。
+        """
+        yield
 
     def _inject_unsupported_media_summaries(
         self, messages: List[Dict[str, Any]]

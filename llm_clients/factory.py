@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 from saiverse import model_configs as _model_configs
 from saiverse.model_configs import get_model_config, get_model_parameter_defaults
@@ -263,16 +263,20 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         if supports_images and "max_image_bytes" not in extra_kwargs:
             extra_kwargs["max_image_bytes"] = 5 * 1024 * 1024
 
+        llama_server_base: Optional[str] = None
         if isinstance(config, dict) and config.get("llama_server"):
             from .llama_server import get_server_manager
-            server_base = config.get("base_url", "http://127.0.0.1:8080/v1")
-            get_server_manager().ensure_running(server_base, config)
+            llama_server_base = config.get("base_url", "http://127.0.0.1:8080/v1")
+            get_server_manager().ensure_running(llama_server_base, config)
 
         logging.debug(
             "Creating OpenAI client for model '%s' with kwargs: %s",
             api_model, _loggable_kwargs(extra_kwargs),
         )
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
+        if llama_server_base is not None:
+            # 毎リクエスト前に ensure_running を通す (idle 停止からの自動復帰)
+            client.bind_llama_server(llama_server_base, config)
 
         # Wrap with llama.cpp slot cache if configured
         if isinstance(config, dict) and config.get("llama_slot_save_path"):

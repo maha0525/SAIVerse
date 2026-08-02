@@ -162,17 +162,24 @@ class LlamaCachedClient(LLMClient):
         **kwargs: Any,
     ) -> str | Dict[str, Any]:
         persona_id = get_active_persona_id() or "unknown"
-        slot = self._cache.acquire_slot()
-        try:
-            self._cache.restore(slot, persona_id)
-            result = self._inner.generate(
-                messages, tools=tools, response_schema=response_schema,
-                temperature=temperature, **kwargs,
-            )
-            self._cache.save(slot, persona_id)
-            return result
-        finally:
-            self._cache.release_slot(slot)
+        # restore (slot キャッシュ読込) より先にサーバーの存在を保証する。
+        # idle 自動停止後は inner の送信時点では遅い — restore が先に
+        # 停止済みポートへ飛んでしまう
+        self._inner.ensure_backend()
+        # restore〜save の全体に貸出札を掛ける。/slots は save 中も「暇」を
+        # 返すため、札なしだと保存中のサーバーを idle 停止が撃てる
+        with self._inner.backend_lease():
+            slot = self._cache.acquire_slot()
+            try:
+                self._cache.restore(slot, persona_id)
+                result = self._inner.generate(
+                    messages, tools=tools, response_schema=response_schema,
+                    temperature=temperature, **kwargs,
+                )
+                self._cache.save(slot, persona_id)
+                return result
+            finally:
+                self._cache.release_slot(slot)
 
     def generate_stream(
         self,
@@ -184,24 +191,26 @@ class LlamaCachedClient(LLMClient):
         **kwargs: Any,
     ) -> Iterator[str]:
         persona_id = get_active_persona_id() or "unknown"
-        slot = self._cache.acquire_slot()
-        stream_completed = False
-        try:
-            self._cache.restore(slot, persona_id)
-            for chunk in self._inner.generate_stream(
-                messages, tools=tools, response_schema=response_schema,
-                temperature=temperature, **kwargs,
-            ):
-                yield chunk
-            stream_completed = True
-            self._cache.save(slot, persona_id)
-        finally:
-            if not stream_completed:
-                logger.warning(
-                    "[llama_cache] Stream interrupted for %s — slot %d cache not saved",
-                    persona_id, slot,
-                )
-            self._cache.release_slot(slot)
+        self._inner.ensure_backend()  # restore より先 (generate と同じ理由)
+        with self._inner.backend_lease():  # restore〜save 全体 (generate と同じ理由)
+            slot = self._cache.acquire_slot()
+            stream_completed = False
+            try:
+                self._cache.restore(slot, persona_id)
+                for chunk in self._inner.generate_stream(
+                    messages, tools=tools, response_schema=response_schema,
+                    temperature=temperature, **kwargs,
+                ):
+                    yield chunk
+                stream_completed = True
+                self._cache.save(slot, persona_id)
+            finally:
+                if not stream_completed:
+                    logger.warning(
+                        "[llama_cache] Stream interrupted for %s — slot %d cache not saved",
+                        persona_id, slot,
+                    )
+                self._cache.release_slot(slot)
 
 
 __all__ = ["LlamaCacheManager", "LlamaCachedClient"]
