@@ -553,6 +553,17 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 
+## persona_timetable_template
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `id` | INTEGER | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | FK→ai.AIID, NOT NULL |  |
+| `SLOTS_JSON` | TEXT | NOT NULL |  |
+| `ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `CREATED_AT` | DATETIME | NOT NULL |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
+
 ## playbooks
 
 | カラム | 型 | 制約 | 説明 |

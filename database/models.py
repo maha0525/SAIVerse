@@ -1174,6 +1174,34 @@ class PersonaDayPlan(Base):
     updated_at = Column(DateTime, nullable=False)
 
 
+class PersonaTimetableTemplate(Base):
+    """習慣テンプレート: 時間割の枠 (時間割改修 T2、timetable_redesign.md §5.1)。
+
+    1 ペルソナ 1 行。SLOTS_JSON はコマ雛形の配列 (JSON):
+    [{start: "HH:MM" (必須),
+      kind: コマ種別カタログの名前 | 省略/null,
+      title: str | 省略/null, facility: building_id|"own_room" | 省略/null,
+      note: str | 省略/null, budget_rounds: int | 省略/null,
+      ref: "task:N"|"desire:N"|"track:N"|"none" | 省略/null}, ...]
+    null / 欠落 = **穴** (朝、起床判断でペルソナが埋める。intent §5.3)。
+
+    不変条件 (intent §9-1): このテーブルを書き換える唯一の経路は
+    ``saiverse.timetable_template.save_template`` / ``delete_template`` で、
+    呼び出し元はユーザー API のみ。**LLM の出力が直接ここを書き換える経路は
+    作らない** (変更はユーザー承認の相談ルートのみ)。
+
+    NOTE: 時刻刻印はコード側で ``saiverse.clock.now()`` を書き込む
+    (PersonaDayPlan と同じ判断 — 一日シミュレータの仮想時刻を尊重)。
+    """
+    __tablename__ = "persona_timetable_template"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), nullable=False, unique=True)
+    SLOTS_JSON = Column(Text, nullable=False)
+    ENABLED = Column(Boolean, default=True, nullable=False)
+    CREATED_AT = Column(DateTime, nullable=False)
+    UPDATED_AT = Column(DateTime, nullable=False)
+
+
 class Episode(Base):
     """出来事 (Episode): 実際に時間を満たしたものの「薄い封筒」。
 

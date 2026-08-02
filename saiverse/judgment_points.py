@@ -1014,17 +1014,63 @@ def build_day_open_situation_text(
     else:
         life_line = f"現在 {now_hhmm}。"
 
+    # 習慣テンプレート (時間割改修 T2、timetable_redesign.md §5.1/§5.2):
+    # テンプレートのあるペルソナの起床判断は「組む」でなく「埋める」— 雛形を
+    # 穴の位置つきで提示し、指示を穴埋め + 例外調整の提案に変える。response_schema
+    # は従来どおり timetable 全体 (枠の保証はプロンプトでなく finalize の
+    # テンプレート整合強制が担う — saiverse/timetable_template.py)。
+    template = None
+    try:
+        from saiverse.timetable_template import (
+            get_active_template,
+            render_template_situation_lines,
+        )
+        template = get_active_template(manager, persona_id)
+    except Exception:
+        LOGGER.warning(
+            "[judgment] failed to load timetable template (persona=%s); "
+            "falling back to free composition", persona_id, exc_info=True,
+        )
+        template = None
+
+    if template:
+        instruction_lines = [
+            "今日の時間割には、あなたとユーザーとで決めた習慣テンプレート"
+            " (下の雛形) があります。",
+            "雛形のコマをそのまま timetable に写して出力し、＜空欄＞の項目"
+            "だけを、昨日の自分からのメモと常に手元にある一覧を見て埋めて"
+            "ください。",
+            "確定済みの項目 (時刻・種別・場所など) は変更できません — 出力で"
+            "変えても雛形の値に戻されます。枠を変えたい・例外の調整が必要だと"
+            "感じたら、monologue に提案として書いてください (テンプレートの"
+            "変更はユーザーとの相談で決まります)。",
+            "各コマには「○○をする」という短い表題 (title) を付けてください — "
+            "あなたの一日の予定表にそのまま載ります (表題が確定済みのコマは"
+            "それを写します)。",
+            "既に開始時刻を過ぎたコマは「流れた」として記録され、今の時刻"
+            "以降のコマから今日が始まります。",
+            "",
+            "[今日の習慣テンプレート]",
+            *render_template_situation_lines(template["slots"]),
+        ]
+    else:
+        # テンプレ未設定 (または無効) のペルソナは従来どおりの全生成 —
+        # 移行の安全弁 (intent §5.2 の fallback)。
+        instruction_lines = [
+            "昨日の自分からのメモと、常に手元にある一覧 (進行中のことと、やりたいこと / "
+            "行ける場所) を見て、今日の時間割を編成してください。",
+            "各コマには「○○をする」という短い表題 (title) を付けてください — "
+            "あなたの一日の予定表にそのまま載ります。",
+            "コマの ref には具体的なタスク (task:N) のほか、関心そのもの (track:N) も"
+            "指せます — その場合、何をするかはコマが始まる時にその関心の状況を見て"
+            "決めます。",
+        ]
+
     parts = [
         "[起床判断]",
         f"おはようございます。今日 ({today}) の一日が始まります。",
         life_line,
-        "昨日の自分からのメモと、常に手元にある一覧 (進行中のことと、やりたいこと / "
-        "行ける場所) を見て、今日の時間割を編成してください。",
-        "各コマには「○○をする」という短い表題 (title) を付けてください — "
-        "あなたの一日の予定表にそのまま載ります。",
-        "コマの ref には具体的なタスク (task:N) のほか、関心そのもの (track:N) も"
-        "指せます — その場合、何をするかはコマが始まる時にその関心の状況を見て"
-        "決めます。",
+        *instruction_lines,
         "",
         "[昨日の自分からのメモ]",
         memo or "(メモはありません)",

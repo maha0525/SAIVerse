@@ -151,6 +151,10 @@ SLOT_STATUSES = (
 SKIP_REASON_NO_HANDLER = "no_handler"          # kind の実行手段が未登録 (システム側)
 SKIP_REASON_BUDGET_EXHAUSTED = "budget_exhausted"  # 日次予算の残高ゼロ
 SKIP_REASON_DEFERRAL_LIMIT = "deferral_limit"  # 会話優先の繰り下げ上限で流れた
+# 起床判断が開始時刻より後に走った (サーバー未起動等) ため発火機会が無かった
+# テンプレートコマ (時間割改修 T2、timetable_redesign.md §11-12 裁定)。
+# 過去コマは現在時刻へ丸めず「流れた」と正直に記録して今の時刻から合流する。
+SKIP_REASON_MISSED_START = "missed_start"
 
 #: コマ status → 実績ラベル (skipped 以外)。skipped は skip_reason で細分化する
 #: ため :func:`slot_result_label` を使うこと。
@@ -167,6 +171,7 @@ SKIP_REASON_LABELS = {
     SKIP_REASON_NO_HANDLER: "実行できず（システム側の問題: このコマ種別の実行手段が未実装）",
     SKIP_REASON_BUDGET_EXHAUSTED: "実行できず（作業ラウンドの日次予算切れ）",
     SKIP_REASON_DEFERRAL_LIMIT: "流れた（ユーザーとの会話を優先したため）",
+    SKIP_REASON_MISSED_START: "流れた（サーバーが起動していなかったため）",
 }
 
 #: slot の record_level: 完了記録の詳しさ。presence_only は「その場に居た
@@ -510,6 +515,7 @@ def _validate_and_normalize_for_save(
     slots: List[Dict[str, Any]],
     *,
     fresh_ids: bool = False,
+    ledger_prefix: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """保存前の検証 + ライフ範囲正規化 (``save_day_plan`` / ``replace_day_plan`` 共通)。
 
@@ -525,22 +531,32 @@ def _validate_and_normalize_for_save(
             全置換 (:func:`replace_day_plan`) 用 — 旧コマの id 持ち越しによる
             予約 key 衝突を契約レベルで封じる。保存・編集 (:func:`save_day_plan`)
             は False で既存 id を保持する。
+        ledger_prefix: 先頭のこの件数を**帳簿区間** (消化済み扱い) として検証する
+            (時間割改修 T2)。テンプレート経路の「流れた」コマ (status=skipped、
+            :data:`SKIP_REASON_MISSED_START`) がここに入る — 帳簿区間は昇順・
+            kind 語彙の検証を受けず (``_validate_and_normalize_slots`` の
+            ``ascending_from`` と同じ意味論)、**組織化範囲の丸め・除外もしない**
+            (過去開始のまま「流れた」と正直に記録するのが §11-12 裁定。丸めは
+            pending 区間の数分のズレ救済に限定)。0 (既定) = 全コマを通常検証。
 
     Returns:
         ``(kept, notes)``。``kept`` は生き残ったコマ、``notes`` は日常語の調整メモ。
 
     Raises:
         ValueError: コマ配列の書式検証失敗 / 正規化後にコマが 1 件も残らなかった
-            場合。
+            場合 (帳簿区間だけが残った場合は正当 — 全コマが流れた日も記録する)。
     """
     lives = get_lives(manager, persona_id, plan_date_str)
     normalized = _validate_and_normalize_slots(
-        slots, order_key=lambda h: day_order_minutes(lives, h),
+        slots, ascending_from=ledger_prefix,
+        order_key=lambda h: day_order_minutes(lives, h),
         fresh_ids_from=0 if fresh_ids else None,
     )
-    kept, notes = _normalize_slots_within_organized_range(
-        manager, persona_id, plan_date_str, normalized,
+    ledger_part = normalized[:ledger_prefix]
+    kept_new, notes = _normalize_slots_within_organized_range(
+        manager, persona_id, plan_date_str, normalized[ledger_prefix:],
     )
+    kept = ledger_part + kept_new
     if not kept:
         reasons = "; ".join(n.strip("（）") for n in notes) or "コマが活動時間の範囲外でした"
         raise ValueError(f"編成できる範囲 (今〜就寝) に収まるコマがありませんでした ({reasons})")
@@ -2966,13 +2982,23 @@ def replace_remaining_slots(
 
 
 def replace_day_plan(
-    manager: Any, persona_id: str, plan_date: Any, new_slots: List[Dict[str, Any]]
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    new_slots: List[Dict[str, Any]],
+    *,
+    ledger_prefix: int = 0,
 ) -> Tuple[int, List[str]]:
     """時間割を ``new_slots`` で原子的に全置換する (A1、起床判断 day_open の finalize)。
 
     :func:`replace_remaining_slots` (残りコマの置換) の全置換版。消化済みコマの
     帳簿を残さない — day_open は一日の最初の編成なので、旧 plan (前回の day_open
     のやり直し等) はまるごと ``new_slots`` に差し替える。
+
+    ``ledger_prefix`` (時間割改修 T2): ``new_slots`` の先頭のこの件数を帳簿区間
+    (消化済み扱い — テンプレート経路の「流れた」コマ) として扱い、昇順・kind
+    語彙・組織化範囲の丸めを免除する (:func:`_validate_and_normalize_for_save`
+    参照)。帳簿区間は pending でないため EventScheduler へは push されない。
 
     **原子性 (A1 の是正) — 保存を先に**: 「旧 plan は可視なのに予約だけ消えた」孤児を
     どの失敗経路でも作らないため、**cancel より先に保存**する:
@@ -3014,6 +3040,7 @@ def replace_day_plan(
     # (2026-07-20 Codex レビュー第四陣 P2)。
     kept, notes = _validate_and_normalize_for_save(
         manager, persona_id, plan_date_str, new_slots, fresh_ids=True,
+        ledger_prefix=ledger_prefix,
     )
     # 旧予約 cancel 用に、置換で消える旧コマの id を保存前に控える (保存後は
     # DB から旧 plan が消えるため後からは引けない)。

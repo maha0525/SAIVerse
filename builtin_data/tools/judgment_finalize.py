@@ -279,13 +279,50 @@ def _finalize_day_open(
     )
     warnings.extend(tt_warnings)
 
+    # --- 習慣テンプレート (時間割改修 T2、timetable_redesign.md §5.2) ------
+    # テンプレートのあるペルソナは「組む」でなく「埋める」: LLM 出力は穴の値の
+    # 供給源にすぎず、確定フィールドが食い違えばテンプレート値で矯正する。
+    # 「枠は LLM 出力で直接変わらない」(intent §9-1) をプロンプトへの信頼で
+    # なくこの構造で保証する。過ぎたテンプレートコマは「流れた」帳簿
+    # (ledger_prefix 区間) として先頭に置く (§11-12)。テンプレ未設定 (または
+    # 無効) のペルソナは template=None → 従来どおりの全生成 (移行の安全弁)。
+    template = None
+    template_corrections: List[str] = []
+    ledger_prefix = 0
+    try:
+        from saiverse.timetable_template import (
+            compose_timetable_from_template,
+            get_active_template,
+        )
+        template = get_active_template(manager, persona_id)
+    except Exception:
+        LOGGER.exception(
+            "[judgment_finalize] failed to load timetable template; "
+            "falling back to free composition"
+        )
+        template = None
+    if template is not None:
+        ledger, pending, template_corrections = compose_timetable_from_template(
+            manager, persona_id, plan_date, template["slots"], slots,
+        )
+        slots = ledger + pending
+        ledger_prefix = len(ledger)
+        # 矯正は monologue (本人の独白) と別のログ = 適用サマリ (lines) と
+        # サーバーログの両方へ残す。
+        for note in template_corrections:
+            LOGGER.info(
+                "[judgment_finalize] template enforcement: persona=%s %s",
+                persona_id, note,
+            )
+
     # 予算合計の検証はソフト制約 (judgment_points.md §3.2)。超過は WARN のみで
     # 保存は通す — 予算ゲート (v2 §4.5) が発火時に日次残高でラウンドを切り詰める。
+    # テンプレ経路では「流れた」帳簿区間 (発火しない) を合計に含めない。
     daily_budget = ctx.get("daily_budget_rounds")
     if not isinstance(daily_budget, int) or isinstance(daily_budget, bool) or daily_budget <= 0:
         from saiverse.judgment_points import DEFAULT_DAILY_BUDGET_ROUNDS
         daily_budget = DEFAULT_DAILY_BUDGET_ROUNDS
-    total = sum(s["budget_rounds"] for s in slots)
+    total = sum(s["budget_rounds"] for s in slots[ledger_prefix:])
     if total > daily_budget:
         warnings.append(
             f"budget_rounds 合計 {total} が日次予算 {daily_budget} を超過 (保存は続行)"
@@ -311,6 +348,7 @@ def _finalize_day_open(
         try:
             pushed, range_notes = day_plan_mod.replace_day_plan(
                 manager, persona_id, plan_date, slots,
+                ledger_prefix=ledger_prefix,
             )
         except ValueError as exc:
             # 何も変更されていない — 旧 plan / 旧予約はそのまま残る。applied は
@@ -336,6 +374,10 @@ def _finalize_day_open(
             for s in saved_slots:
                 lines.append(_format_slot_line(s))
             for note in range_notes:
+                lines.append(note)
+            # テンプレート整合の矯正・流れたコマの記録 (T2)。monologue とは
+            # 別の適用サマリとして、実際に保存されたときだけ載せる。
+            for note in template_corrections:
                 lines.append(note)
             # 日次予算台帳の初期化 (v2 §4.5)。total を書き、消費済み (used) は
             # 保持する — 発火時の予算ゲートがこの残高でラウンドを切り詰める。

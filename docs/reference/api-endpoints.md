@@ -345,6 +345,9 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/people/{persona_id}/threads/{thread_id}/export-native` | Export a single thread as native SAIVerse JSON. |
 | GET | `/api/people/{persona_id}/threads/{thread_id}/messages` | List messages in a thread with pagination. |
 | POST | `/api/people/{persona_id}/threads/{thread_id}/messages` | Add a new message to a thread. |
+| GET | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを返す。未設定なら null。 |
+| PUT | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを検証して保存する。 |
+| DELETE | `/api/people/{persona_id}/timetable-template` | 習慣テンプレートを削除する (以後の起床判断は従来の全生成に戻る)。 |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |
 | DELETE | `/api/people/{persona_id}/track-logs/{log_id}` | Delete a single track_local_log row. |
 | GET | `/api/people/{persona_id}/tracks` | List ActionTracks for the persona, with status-count summary. |

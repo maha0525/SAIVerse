@@ -9,6 +9,7 @@ from . import schedule, tasks, inventory, arasuji
 from . import pulse_logs, memory_notes, working_memory, autonomy
 from . import storage_layers, tracks, cache_status, context_status, debug, pulse_timeline
 from . import activity, realtime_spell, core_memory, life, life_settings
+from . import timetable_template
 
 router = APIRouter()
 
@@ -66,3 +67,4 @@ router.include_router(realtime_spell.router, tags=["people"])
 router.include_router(core_memory.router, tags=["people"])
 router.include_router(life.router, tags=["people"])
 router.include_router(life_settings.router, tags=["people"])
+router.include_router(timetable_template.router, tags=["people"])
