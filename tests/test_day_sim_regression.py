@@ -86,13 +86,13 @@ class DayStandardRegressionTest(unittest.TestCase):
                 )
 
     def test_create_slots_produce_real_items(self):
-        """「作る」コマの成果物が実在する (接地原則 — やったフリ検知)。"""
+        """「随筆を書く」コマの成果物が実在する (接地原則 — やったフリ検知)。"""
         from database.models import Item
         create_slots = [
             s for s in self.plan["slots"]
-            if s.get("kind") == "作る" and s.get("status") == "done"
+            if s.get("kind") == "随筆を書く" and s.get("status") == "done"
         ]
-        self.assertGreater(len(create_slots), 0, "シナリオに done の作るコマが無い")
+        self.assertGreater(len(create_slots), 0, "シナリオに done の随筆を書くコマが無い")
         db = self.manager.SessionLocal()
         try:
             item_count = db.query(Item).count()

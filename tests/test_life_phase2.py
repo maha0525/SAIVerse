@@ -152,7 +152,7 @@ def _mock_result(**over):
     return SimpleNamespace(**base)
 
 
-def _slot(start, *, kind="知る", ref="task:1", facility="library",
+def _slot(start, *, kind="調べる", ref="task:1", facility="library",
           budget_rounds=5, note=""):
     return {"start": start, "kind": kind, "ref": ref,
             "facility": facility, "budget_rounds": budget_rounds, "note": note}
@@ -205,7 +205,7 @@ def test_get_lives_empty_when_not_declared(manager):
 
 def test_save_and_get_lives_round_trip(manager, task_ref):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("09:00"), _slot("15:00", ref="none", kind="休む", facility="own_room",
+        _slot("09:00"), _slot("15:00", ref="none", kind="自室で過ごす", facility="own_room",
               budget_rounds=0),
     ])
     saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, _default_lives())
@@ -328,7 +328,7 @@ def test_save_day_plan_excludes_slot_outside_life_window_when_sole_slot(manager,
     ])
     with pytest.raises(ValueError, match="活動時間の外"):
         day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            _slot("13:00", ref="none", kind="休む", facility="own_room",
+            _slot("13:00", ref="none", kind="自室で過ごす", facility="own_room",
                   budget_rounds=0),
         ])
     # save_lives が meta 行 (slots_json="[]") を既に作っているため空配列
@@ -346,7 +346,7 @@ def test_save_day_plan_rounds_slot_before_current_time_to_now(manager, task_ref)
     ])
     clock.enable_virtual(BASE + timedelta(hours=21))  # 21 時起動 (遅発)
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("08:00", ref="none", kind="休む", facility="own_room",
+        _slot("08:00", ref="none", kind="自室で過ごす", facility="own_room",
               budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -355,7 +355,7 @@ def test_save_day_plan_rounds_slot_before_current_time_to_now(manager, task_ref)
 
     # 現在時刻以降のコマはそのまま通る (無調整)
     notes2 = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("21:30", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("21:30", ref="none", kind="自室で過ごす", facility="own_room", budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["start"] for s in slots] == ["21:30"]
@@ -371,8 +371,8 @@ def test_save_day_plan_rounds_multiple_past_slots_keeping_ascending_order(manage
     ])
     clock.enable_virtual(BASE + timedelta(hours=1, minutes=3))  # 01:03
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("01:00", ref="none", kind="休む", facility="own_room", budget_rounds=0),
-        _slot("01:02", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("01:00", ref="none", kind="自室で過ごす", facility="own_room", budget_rounds=0),
+        _slot("01:02", ref="none", kind="自室で過ごす", facility="own_room", budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["start"] for s in slots] == ["01:03", "01:04"]
@@ -390,9 +390,9 @@ def test_save_day_plan_partial_rescue_excludes_unroundable_slot(manager, task_re
     ])
     clock.enable_virtual(BASE + timedelta(hours=8, minutes=5))  # 08:05
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("08:00", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("08:00", ref="none", kind="自室で過ごす", facility="own_room", budget_rounds=0),
         _slot("10:00"),
-        _slot("13:00", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("13:00", ref="none", kind="自室で過ごす", facility="own_room", budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     # 1番目は丸め、2番目はそのまま、3番目 (就寝後) だけ除外される
@@ -411,7 +411,7 @@ def test_save_day_plan_rounds_across_overnight_life(manager, task_ref):
     ])
     clock.enable_virtual(BASE + timedelta(hours=24, minutes=10))  # 翌日 00:10 (深夜帯)
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("23:50", ref="none", kind="休む", facility="own_room", budget_rounds=0),
+        _slot("23:50", ref="none", kind="自室で過ごす", facility="own_room", budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["start"] for s in slots] == ["00:10"]
@@ -450,10 +450,10 @@ def test_save_day_plan_keeps_overnight_timetable_intact(manager, task_ref):
     ])
     clock.enable_virtual(BASE + timedelta(hours=7))  # 07:00 = 起床判断の時刻
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        _slot("07:30", kind="暮らし", ref="none", facility="own_room"),
+        _slot("07:30", kind="出かける", ref="none", facility="own_room"),
         _slot("09:00"),
         _slot("13:00"),
-        _slot("00:30", kind="休む", ref="none", facility="own_room", budget_rounds=0),
+        _slot("00:30", kind="自室で過ごす", ref="none", facility="own_room", budget_rounds=0),
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["start"] for s in slots] == ["07:30", "09:00", "13:00", "00:30"]
@@ -470,11 +470,11 @@ def test_sanitize_timetable_sorts_bedtime_last_in_overnight_life(manager, task_r
         {"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"},
     ])
     raw = [
-        {"start": "00:30", "kind": "休む", "ref": "none", "facility": "own_room",
+        {"start": "00:30", "kind": "自室で過ごす", "ref": "none", "facility": "own_room",
          "budget_rounds": 0, "title": "眠る"},
-        {"start": "07:30", "kind": "暮らし", "ref": "none", "facility": "own_room",
+        {"start": "07:30", "kind": "出かける", "ref": "none", "facility": "own_room",
          "budget_rounds": 1, "title": "朝のルーティン"},
-        {"start": "13:00", "kind": "知る", "ref": "task:1", "facility": "own_room",
+        {"start": "13:00", "kind": "調べる", "ref": "task:1", "facility": "own_room",
          "budget_rounds": 3, "title": "調べる"},
     ]
     slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, raw, PLAN_DATE)
@@ -505,7 +505,7 @@ def test_replace_remaining_slots_excludes_slot_outside_life_window_when_sole_slo
     ])
     with pytest.raises(ValueError, match="活動時間の外"):
         day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-            _slot("15:00", ref="none", kind="休む", facility="own_room",
+            _slot("15:00", ref="none", kind="自室で過ごす", facility="own_room",
                   budget_rounds=0),
         ])
 
@@ -1033,7 +1033,7 @@ def test_day_open_finalize_ignores_llm_provided_lives(manager, finalize_mod, tmp
         "lives": [
             {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
         ],
-        "timetable": [_slot("08:30", ref="none", kind="休む", facility="own_room",
+        "timetable": [_slot("08:30", ref="none", kind="自室で過ごす", facility="own_room",
                              budget_rounds=0)],
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "daily_budget_rounds": 40})

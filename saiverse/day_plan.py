@@ -26,19 +26,22 @@ user_conversation 種別かで判定していたが、Track はもう時間経�
 動かさない (running のまま残り続けうる) ため、この述語には使えなくなった —
 「いま」の真実は Track ではなく開いている出来事が持つ。
 
-kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。本モジュールが
-組み込みで登録するのは:
-- 六型 (話す/聞く/作る/知る/経験する/自分を更新する): 型別の決定論テンプレート
-  (v2 §9.2-8) で指示書を組み ``run_work_session`` を運転 (予算ゲート対象)。
-  社交機構 (対ペルソナ会話) が未実装の「話す」「聞く」は、伝えたいことの文章化・
-  読む/調べる、という現時点で実際にできる接地行動に指示書を限定する
-- 「暮らし」「休む」: ログのみのスタブ (暮らし Pulse / 判断点は後続フェーズ)。
-  施設への実移動 (presence) だけは本物なので status=done とするが、完了時に
-  slot へ ``record_level='presence_only'`` を永続化し、表示側 (一日新聞 /
-  就寝判断の状況テキスト) が「実行済み」でなく「時間を過ごした（詳細な記録
-  なし）」と正直に提示する — していない活動の詳細をペルソナがふりかえりで
-  捏造しないため (soft-confabulation、2026-07-05 実 LLM シム 異常 #4)
-未登録 kind のコマは WARN + skipped (``skip_reason='no_handler'``)。
+kind 別ハンドラはレジストリ方式 (``register_slot_handler``)。kind の語彙は
+コマ種別カタログ (``saiverse.slot_kind_catalog``、timetable_redesign.md §5.5)
+から組み立てられ、本モジュールが組み込みで登録するのは:
+- 作業セッション系 (execution_type='work_session': 調べる/絵を描く/日記を書く/
+  随筆を書く): カタログの指示書テンプレートで指示書を組み ``run_work_session``
+  を運転 (予算ゲート対象)
+- 「出かける」「自室で過ごす」「自由時間」: T1 の honest stub (実行本体は
+  後続フェーズ)。施設への実移動 (presence) だけは本物なので status=done と
+  するが、完了時に slot へ ``record_level='presence_only'`` を永続化し、
+  表示側 (一日新聞 / 就寝判断の状況テキスト) が「実行済み」でなく「時間を
+  過ごした（詳細な記録なし）」と正直に提示する — していない活動の詳細を
+  ペルソナがふりかえりで捏造しないため (soft-confabulation、2026-07-05
+  実 LLM シム 異常 #4。旧 暮らし/休む スタブの流儀の継承 = intent §9-3)
+未登録 kind のコマは WARN + skipped (``skip_reason='no_handler'``)。旧語彙
+(六型 + 暮らし/休む) は封印済み (intent §5.5) でハンドラを持たない — 移行前に
+保存された旧 kind のコマが発火した場合はこの経路で正直に skipped になる。
 
 コマの skipped はシステム都合とペルソナ判断を区別して記録する (``skip_reason``)。
 システム都合のスキップ (ハンドラ未登録 / 予算切れ / 会話優先の流れ) を
@@ -63,7 +66,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from saiverse import clock
+from saiverse import clock, slot_kind_catalog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,7 +74,24 @@ LOGGER = logging.getLogger(__name__)
 # 定数
 # ---------------------------------------------------------------------------
 
-# 六型 (autonomous_behavior_v2.md §5.1)
+# ---------------------------------------------------------------------------
+# kind 語彙 (時間割改修 T1、timetable_redesign.md §5.5)
+#
+# 時間割の有効な kind 語彙はコマ種別カタログ (saiverse.slot_kind_catalog、
+# 3 層ローダ) が供給する。モジュールロード時に末尾の
+# :func:`_rebuild_kind_vocabulary` でキャッシュし、カタログを reload したら
+# :func:`reload_kind_vocabulary` で再構築する。
+#
+# 旧語彙 (六型 + 暮らし/休む) は時間割の kind としては**封印** (intent §5.5) —
+# 新規時間割の検証 (_validate_and_normalize_slots / sanitize_timetable) では
+# 拒否される。定数として残すのは:
+# - 欲求の六型分類 (desire_engine.DESIRE_TYPES / purpose_seed) が**別概念**と
+#   してこの語彙を使い続けるため (欲求タクソノミの再設計は T1 のスコープ外)
+# - 旧 kind で保存済みの時間割の表示・帳簿保持を壊さないため (表示経路は
+#   kind 文字列を素通しする)
+# ---------------------------------------------------------------------------
+
+# 旧・六型 (autonomous_behavior_v2.md §5.1。時間割 kind としては封印済み)
 KIND_TALK = "話す"
 KIND_LISTEN = "聞く"
 KIND_CREATE = "作る"
@@ -84,11 +104,36 @@ SIX_KINDS = (
     KIND_LEARN, KIND_EXPERIENCE, KIND_SELF_UPDATE,
 )
 
-# 六型以外のコマ (judgment_points.md §3.2)
+# 旧・六型以外のコマ (時間割 kind としては封印済み)
 KIND_LIVING = "暮らし"
 KIND_REST = "休む"
 
-ALL_KINDS = SIX_KINDS + (KIND_LIVING, KIND_REST)
+#: 封印された旧語彙 (帳簿・表示の後方互換の識別にのみ使う)
+LEGACY_KINDS = SIX_KINDS + (KIND_LIVING, KIND_REST)
+
+#: 時間割の有効な kind (カタログ順)。実体はモジュール末尾の
+#: :func:`_rebuild_kind_vocabulary` が構築する。他モジュールからは値の
+#: from-import ではなく :func:`all_kinds` / :func:`worker_session_kinds` を
+#: 使うこと (reload 後も最新の語彙が見える)。
+ALL_KINDS: Tuple[str, ...] = ()
+
+#: 作業セッション運転で処理する kind (execution_type='work_session'。予算
+#: ゲート対象)。ScenarioPlayer のセッション終了判断ラップもこの集合を使う。
+WORKER_SESSION_KINDS: Tuple[str, ...] = ()
+
+#: kind → 指示書テンプレート (カタログの instruction_template。{note} と
+#: {target} を展開する)。
+_WORKER_INSTRUCTION_TEMPLATES: Dict[str, str] = {}
+
+
+def all_kinds() -> Tuple[str, ...]:
+    """時間割の有効な kind 語彙 (カタログ駆動・reload 追従の読み取り口)。"""
+    return ALL_KINDS
+
+
+def worker_session_kinds() -> Tuple[str, ...]:
+    """作業セッション系 kind の集合 (カタログ駆動・reload 追従の読み取り口)。"""
+    return WORKER_SESSION_KINDS
 
 # コマ status
 STATUS_PENDING = "pending"
@@ -125,14 +170,15 @@ SKIP_REASON_LABELS = {
 }
 
 #: slot の record_level: 完了記録の詳しさ。presence_only は「その場に居た
-#: (施設への実移動) 以外の詳細な実行記録が無い」— 暮らし/休む のスタブ
-#: ハンドラが完了時に付ける。マーカーの無い done (旧データ / セッション系) は
-#: 従来どおり「実行済み」(後方互換)。
+#: (施設への実移動) 以外の詳細な実行記録が無い」— スタブハンドラ (出かける/
+#: 自室で過ごす/自由時間。旧 暮らし/休む も同様だった) が完了時に付ける。
+#: マーカーの無い done (旧データ / セッション系) は従来どおり「実行済み」
+#: (後方互換)。
 RECORD_LEVEL_PRESENCE_ONLY = "presence_only"
 
-#: record_level='presence_only' な done コマの実績ラベル。「実行済み」と
-#: 提示すると、ペルソナが就寝ふりかえりで具体的な活動内容 (食事の選定等) を
-#: 捏造する (soft-confabulation、2026-07-05 実 LLM シムで観測)。
+#: record_level='presence_only' な done コマ (スタブハンドラ) の実績ラベル。
+#: 「実行済み」と提示すると、ペルソナが就寝ふりかえりで具体的な活動内容
+#: (食事の選定等) を捏造する (soft-confabulation、2026-07-05 実 LLM シムで観測)。
 LABEL_DONE_PRESENCE_ONLY = "時間を過ごした（詳細な記録なし）"
 
 
@@ -150,7 +196,7 @@ def slot_result_label(slot: Dict[str, Any]) -> str:
         return SKIP_REASON_LABELS.get(reason, "実行されず（理由の記録なし）")
     if status == STATUS_DONE \
             and str(slot.get("record_level") or "") == RECORD_LEVEL_PRESENCE_ONLY:
-        # 詳細な実行記録の無い done (暮らし/休む スタブ)。「実行済み」と提示
+        # 詳細な実行記録の無い done (presence スタブ)。「実行済み」と提示
         # するとペルソナが活動内容を捏造してふりかえる (soft-confabulation)。
         return LABEL_DONE_PRESENCE_ONLY
     return SLOT_STATUS_LABELS.get(status, status)
@@ -238,9 +284,10 @@ _LEDGER_MISSING_WARNED: set = set()
 def register_slot_handler(kind: str, fn: SlotHandler, *, consumes_budget: bool = False) -> None:
     """kind に対するコマ発火ハンドラを登録する (同 kind は上書き)。
 
-    組み込みでは六型すべてが作業セッション運転、暮らし/休む がスタブとして
-    登録される (モジュール末尾)。後続フェーズ (対ペルソナ社交・暮らし Pulse) は
-    ここへ上書き登録することで配線に乗る。
+    組み込みではカタログの作業セッション系 (execution_type='work_session') が
+    作業セッション運転、出かける/自室で過ごす/自由時間 がスタブとして登録される
+    (モジュール末尾の :func:`_rebuild_kind_vocabulary`)。後続フェーズ (出かける
+    の実行本体・自由時間の種別選択 等) はここへ上書き登録することで配線に乗る。
 
     Args:
         consumes_budget: True なら予算ゲートの対象 (v2 §4.5)。発火前に日次
@@ -286,8 +333,10 @@ def _validate_and_normalize_slots(
     - start は "HH:MM" で、一日の流れ順に厳密昇順 (同時刻も不可)。
       「流れ順」の基準は ``order_key`` が決める — 深夜跨ぎのライフでは暦の
       時刻順と一致しないため (:func:`day_order_minutes` 参照)
-    - kind は六型 + 暮らし/休む のみ
-    - ref は "task:N" / "desire:N" / "none"。暮らし/休む は "none" 必須
+    - kind はコマ種別カタログの有効な語彙 (:data:`ALL_KINDS`) のみ。封印済みの
+      旧語彙 (六型 + 暮らし/休む) は拒否する
+    - ref は "task:N" / "desire:N" / "none"。作業セッション系でない kind は
+      "none" 必須
     - facility は非空文字列 (building_id or "own_room")
     - budget_rounds は非負 int (bool は不可)
     - title は文字列 (「○○をする」という短い表題。旧データは無いので省略可 = "")
@@ -300,7 +349,11 @@ def _validate_and_normalize_slots(
             境界を跨いだ比較はしない (直前に消化したコマと同時刻・過去時刻の
             新コマは正当な組み替えであり、EventScheduler は過去時刻を即時扱い
             する。予約 key はコマの不変 id ベースなので同時刻でも衝突しない)。
-            index < ascending_from のコマもフィールド検証は全て受ける。
+            index < ascending_from のコマは**消化済みの帳簿**であり、昇順に
+            加えて kind 語彙・kind/ref 整合の検証も受けない (kind は非空文字列
+            であればよい) — 封印前の旧 kind で消化されたコマを含む時間割の
+            日中組み替えを、歴史の語彙を理由に全却下しないため (時間割改修 T1
+            の移行互換。他のフィールドの構造検証は全て受ける)。
             2026-07-05 実 LLM シム 3回目: 消化済み 13:30 コマの直後に 13:30 の
             新コマを置く組み替えが「昇順でない」で全却下された不具合の修正。
         order_key: "HH:MM" を並び順の数値へ変換する関数。省略時は暦の時刻順
@@ -341,15 +394,28 @@ def _validate_and_normalize_slots(
             prev_minutes = minutes
 
         kind = slot.get("kind")
-        if kind not in ALL_KINDS:
-            raise ValueError(f"slot[{i}].kind={kind!r} is not a valid kind {ALL_KINDS}")
+        if i >= ascending_from:
+            if kind not in ALL_KINDS:
+                raise ValueError(
+                    f"slot[{i}].kind={kind!r} is not a valid kind {ALL_KINDS}"
+                )
+        elif not isinstance(kind, str) or not kind:
+            # 帳簿区間 (消化済み) は旧語彙を含め素通し — ただし文字列であること
+            raise ValueError(
+                f"slot[{i}].kind must be a non-empty string (got {kind!r})"
+            )
 
         ref = slot.get("ref", REF_NONE)
         if not isinstance(ref, str) or (ref != REF_NONE and not _REF_RE.match(ref)):
             raise ValueError(
                 f"slot[{i}].ref={ref!r} must be 'task:N', 'desire:N', 'track:N' or 'none'"
             )
-        if kind in (KIND_LIVING, KIND_REST) and ref != REF_NONE:
+        if (
+            i >= ascending_from
+            and kind not in WORKER_SESSION_KINDS
+            and ref != REF_NONE
+        ):
+            # 目的参照 (予算・帰属) は作業セッション系のコマだけが持てる
             raise ValueError(
                 f"slot[{i}]: kind={kind!r} must have ref='none' (got {ref!r})"
             )
@@ -3131,16 +3197,18 @@ def _effective_budget_rounds(slot: Dict[str, Any]) -> int:
 def _episode_kind_for_slot(slot_kind: Any) -> str:
     """コマ種別 → 出来事 kind の写像。
 
-    暮らし/休む は「その場に居た」以上の実行記録が無いスタブなので presence。
-    六型の作業コマは中の作業セッションが別の出来事 (kind='work_session') を
-    開くため、コマの実行区間そのものは kind='slot' として並存させる
-    (セッション側の origin_ref がコマ出来事を指して親子が読める)。
+    作業セッション系のコマは中の作業セッションが別の出来事
+    (kind='work_session') を開くため、コマの実行区間そのものは kind='slot'
+    として並存させる (セッション側の origin_ref がコマ出来事を指して親子が
+    読める)。それ以外 (出かける/自室で過ごす/自由時間 = T1 スタブ) は
+    「その場に居た」以上の実行記録が無いので presence (旧 暮らし/休む と
+    同じ扱い)。
     """
     from saiverse import episodes
 
-    if slot_kind in (KIND_LIVING, KIND_REST):
-        return episodes.KIND_PRESENCE
-    return episodes.KIND_SLOT
+    if slot_kind in WORKER_SESSION_KINDS:
+        return episodes.KIND_SLOT
+    return episodes.KIND_PRESENCE
 
 
 def _slot_origin_ref(persona_id: str, plan_date_str: str, index: int) -> str:
@@ -4362,58 +4430,13 @@ def _build_track_instruction(
 # 組み込みハンドラ
 # ---------------------------------------------------------------------------
 
-# 型別の決定論テンプレート (v2 §9.2-8 の 6 種)。「実際に起きたこと以外を
-# 書かせない」文言を含める (接地原則 §3-1)。社交機構 (対ペルソナ会話) が
-# 未実装の「話す」「聞く」は、現時点で実際にできる接地行動 (文章化 / 読む) に
-# 指示書を限定し、していない対話を「した」と書かせない。
-_WORKER_INSTRUCTION_TEMPLATES = {
-    KIND_TALK: (
-        "目的: {note}。対象: {target}。"
-        "相手とその場で直接話す手段はまだありません。伝えたいことを実際に文章に"
-        "整えること (必要なら document_create 等のスペルで実際に書き残すこと)。"
-        "完成条件: 伝えたい内容が読み返せる形で残っていること。"
-        "実際に話していない相手に「話した」「伝えた」と書かないこと。"
-    ),
-    KIND_LISTEN: (
-        "目的: {note}。対象: {target}。"
-        "memory_recall や searxng_search、その場に置かれた文書の読み込み等の"
-        "スペルで実際に読む・調べること。"
-        "完成条件: 実際に読んで得られた内容だけを短い覚え書きにまとめてあること。"
-        "読めていない・聞けていない内容を「聞いた」と書かないこと。"
-    ),
-    KIND_CREATE: (
-        "目的: {note}。対象: {target}。"
-        "成果物を document_create で実際に作成すること。"
-        "完成条件: 成果物が実在し、読み直して整えてあること。"
-        "実際に作成・確認できたこと以外を「やった」と書かないこと。"
-    ),
-    KIND_LEARN: (
-        "目的: {note}。対象: {target}。"
-        "memory_recall や searxng_search 等のスペルで実際に調べること。"
-        "完成条件: 実際に調べて得られた内容だけを短い覚え書きにまとめてあること。"
-        "調べていないこと・確認できていないことを書かないこと。"
-    ),
-    KIND_EXPERIENCE: (
-        "目的: {note}。対象: {target}。"
-        "その場でスペルにより実際に確認・実行できたことだけを行うこと。"
-        "完成条件: 実際に見聞き・実行できたことだけを短い覚え書きに残してあること。"
-        "実際に起きていない体験を「した」と書かないこと。"
-    ),
-    KIND_SELF_UPDATE: (
-        "目的: {note}。対象: {target}。"
-        "memory_recall 等のスペルで実際に記憶を確かめ、得られた気づきを整理すること。"
-        "整理した内容は document_create 等のスペルで実際に書き残すこと。"
-        "完成条件: 実際に確かめた記憶に基づく覚え書きが読み返せる形で残っていること。"
-        "実際に確かめ・書き残したこと以外を「更新した」と書かないこと。"
-    ),
-}
-
-#: 作業セッション運転で処理する kind (= 六型すべて。予算ゲート対象)。
-#: ScenarioPlayer のセッション終了判断ラップもこの集合を使う。
-WORKER_SESSION_KINDS = SIX_KINDS
-assert set(WORKER_SESSION_KINDS) == set(_WORKER_INSTRUCTION_TEMPLATES), (
-    "worker session kinds and instruction templates must stay in sync"
-)
+# 作業セッション系の指示書テンプレートはコマ種別カタログ
+# (slot_kind_catalog、builtin_data/slot_kinds/*.json) の instruction_template
+# から組む — 実体はモジュール末尾の :func:`_rebuild_kind_vocabulary` が
+# :data:`_WORKER_INSTRUCTION_TEMPLATES` へ構築する。builtin 4 種 (調べる/
+# 絵を描く/日記を書く/随筆を書く) は「実際に起きたこと以外を書かせない」
+# 接地文言 (接地原則 §3-1) を含む。{note} / {target} プレースホルダ契約は
+# 旧・六型テンプレートから継承。
 
 _NO_REF_TARGET = "(参照タスクなし。目的の記述に従うこと)"
 
@@ -4421,9 +4444,10 @@ _NO_REF_TARGET = "(参照タスクなし。目的の記述に従うこと)"
 def run_worker_slot_session(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Any:
-    """六型の作業コマの作業セッション 1 本を運転し、結果をそのまま返す。
+    """作業セッション系コマの作業セッション 1 本を運転し、結果をそのまま返す。
 
-    型別の決定論テンプレートで指示書を組み ``run_work_session`` を呼ぶ実体。組み込み
+    種別別の決定論テンプレート (カタログの instruction_template) で指示書を組み
+    ``run_work_session`` を呼ぶ実体。組み込み
     ハンドラ (:func:`_handle_worker_slot`) と、セッション終了判断へ接続する
     上位層 (``saiverse.day_scenario.ScenarioPlayer`` のラップハンドラ) が共有する
     — 後者は post_session 判断の入力として ``WorkSessionResult`` 全体が要る。
@@ -4515,7 +4539,7 @@ def worker_session_rounds_used(result: Any) -> int:
 def _handle_worker_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Optional[int]:
-    """六型の作業コマの組み込みハンドラ (本番の恒久配線)。
+    """作業セッション系コマの組み込みハンドラ (本番の恒久配線)。
 
     セッション運転の後に **セッション終了判断 (post_session)** を撃つ
     (v2 §4.2 の背骨。かつては ScenarioPlayer のラップハンドラだけが担っていた
@@ -4559,49 +4583,138 @@ def _handle_worker_slot(
     return worker_session_rounds_used(result)
 
 
-def _handle_living_slot(
+def _record_presence_only(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「暮らし」コマ: ログのみのスタブ。暮らし Pulse は後続フェーズで刺さる。
+    """「詳細な実行記録が無い」ことを slot に永続化する (スタブ共通の正直表示)。
 
-    施設への実移動 (presence) は ``_fire_slot`` (c) で済んでおり、それだけは
-    本物 — カフェ等に実際に居ることが遭遇と会話のきっかけになる (まはー決定
-    2026-07-05)。ここでは「詳細な実行記録が無い」ことを slot に永続化し、
-    表示側が「実行済み」と偽らないようにする。
+    表示側 (一日新聞 / 就寝判断の状況テキスト) が「実行済み」と偽らず
+    「時間を過ごした（詳細な記録なし）」と提示するための刻印
+    (:data:`RECORD_LEVEL_PRESENCE_ONLY`、intent §9-3)。
+    """
+    _update_slot(
+        manager, persona_id, plan_date_str, index,
+        expected_id=slot.get("id"),
+        record_level=RECORD_LEVEL_PRESENCE_ONLY,
+    )
+
+
+def _handle_outing_slot(
+    manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
+) -> None:
+    """「出かける」コマ: T1 の honest stub — 実行本体は後続フェーズ。
+
+    恒久実装ではない。施設への実移動 (presence) は ``_fire_slot`` (c) で
+    済んでおり、それだけは本物 — 行き先に実際に居ることが遭遇のきっかけに
+    なる (旧 暮らし スタブから継承した唯一の実挙動)。出かけた先での知覚・
+    desire への積み込み (intent §4-3) は後続フェーズでここに刺さる。
     """
     LOGGER.info(
-        "[day_plan] living slot (stub — 暮らし Pulse は後続フェーズ): "
+        "[day_plan] outing slot (stub — 実行本体は後続フェーズ): "
         "persona=%s date=%s index=%d note=%r",
         persona_id, plan_date_str, index, slot.get("note"),
     )
-    _update_slot(
-        manager, persona_id, plan_date_str, index,
-        expected_id=slot.get("id"),
-        record_level=RECORD_LEVEL_PRESENCE_ONLY,
-    )
+    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
 
 
-def _handle_rest_slot(
+def _handle_stay_home_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> None:
-    """「休む」コマ: 何もしない。不作為の可視化として INFO で記録する (v2 §4.2)。
+    """「自室で過ごす」コマ: T1 の honest stub — 実行本体は後続フェーズ。
 
-    暮らしと同じく、詳細な実行記録が無いことを slot に永続化する
-    (:data:`RECORD_LEVEL_PRESENCE_ONLY`)。
+    恒久実装ではない。知覚バッファへのフィード未読投入を前提とした休息
+    (intent §5.5) は後続フェーズでここに刺さる。それまでは旧 休む スタブと
+    同じく presence の記録だけを残す。
     """
     LOGGER.info(
-        "[day_plan] rest slot: persona=%s date=%s index=%d — 何もしない "
-        "(コマとして明示的に選ばれた休息) note=%r",
+        "[day_plan] stay-home slot (stub — 実行本体は後続フェーズ): "
+        "persona=%s date=%s index=%d note=%r",
         persona_id, plan_date_str, index, slot.get("note"),
     )
-    _update_slot(
-        manager, persona_id, plan_date_str, index,
-        expected_id=slot.get("id"),
-        record_level=RECORD_LEVEL_PRESENCE_ONLY,
+    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+
+
+def _handle_free_choice_slot(
+    manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
+) -> None:
+    """「自由時間」コマ: T1 の honest stub — 種別選択の機構は後続フェーズ。
+
+    恒久実装ではない。本来は他のコマ種別から本人が選んで実行する
+    (intent §5.3 の「種別の穴の名前付き版」。選択タイミングは §11-11 で未決) が、
+    選択機構が無い間は自室で過ごす相当の presence 記録に縮退する — 縮退で
+    あることを WARNING で明示する (静かな別物化をしない)。
+    """
+    LOGGER.warning(
+        "[day_plan] free-choice slot fired but the choice mechanism is not "
+        "implemented yet (T1 stub) — degrading to stay-home behaviour: "
+        "persona=%s date=%s index=%d note=%r",
+        persona_id, plan_date_str, index, slot.get("note"),
+    )
+    _record_presence_only(manager, persona_id, plan_date_str, slot, index)
+
+
+# ---------------------------------------------------------------------------
+# kind 語彙の構築 (カタログ → ALL_KINDS / テンプレート / ハンドラ配線)
+# ---------------------------------------------------------------------------
+
+#: execution_type → (組み込みハンドラ, 予算ゲート対象か)
+_EXECUTION_TYPE_HANDLERS: Dict[str, Tuple[SlotHandler, bool]] = {
+    slot_kind_catalog.EXECUTION_WORK_SESSION: (_handle_worker_slot, True),
+    slot_kind_catalog.EXECUTION_OUTING: (_handle_outing_slot, False),
+    slot_kind_catalog.EXECUTION_STAY_HOME: (_handle_stay_home_slot, False),
+    slot_kind_catalog.EXECUTION_FREE_CHOICE: (_handle_free_choice_slot, False),
+}
+
+
+def _rebuild_kind_vocabulary() -> None:
+    """コマ種別カタログから kind 語彙・指示書テンプレート・ハンドラ配線を構築する。
+
+    モジュールロード時 (末尾) と :func:`reload_kind_vocabulary` から呼ばれる。
+    カタログから消えた kind のハンドラは掃除する (reload 経路)。
+    """
+    global ALL_KINDS, WORKER_SESSION_KINDS, _WORKER_INSTRUCTION_TEMPLATES
+
+    previous_kinds = set(ALL_KINDS)
+    names = slot_kind_catalog.kind_names()
+    worker = slot_kind_catalog.kind_names_for_execution(
+        slot_kind_catalog.EXECUTION_WORK_SESSION
+    )
+    templates = slot_kind_catalog.instruction_templates()
+    # カタログのローダが work_session の instruction_template 必須を検証して
+    # いるため通常は成立する。破れたらここで止める (旧 assert の新構成での維持)。
+    assert set(worker) == set(templates), (
+        "worker session kinds and instruction templates must stay in sync"
     )
 
+    ALL_KINDS = tuple(names)
+    WORKER_SESSION_KINDS = tuple(worker)
+    _WORKER_INSTRUCTION_TEMPLATES = dict(templates)
 
-for _kind in WORKER_SESSION_KINDS:
-    register_slot_handler(_kind, _handle_worker_slot, consumes_budget=True)
-register_slot_handler(KIND_LIVING, _handle_living_slot)
-register_slot_handler(KIND_REST, _handle_rest_slot)
+    for definition in slot_kind_catalog.SLOT_KIND_CATALOG.values():
+        handler, gated = _EXECUTION_TYPE_HANDLERS[definition["execution_type"]]
+        register_slot_handler(definition["name"], handler, consumes_budget=gated)
+    for stale_kind in previous_kinds - set(names):
+        _SLOT_HANDLERS.pop(stale_kind, None)
+        _BUDGET_GATED_KINDS.discard(stale_kind)
+        LOGGER.info(
+            "[day_plan] slot handler removed (kind no longer in catalog): %s",
+            stale_kind,
+        )
+
+
+def reload_kind_vocabulary() -> Tuple[str, ...]:
+    """カタログをディスクから読み直し、kind 語彙とハンドラ配線を再構築する。
+
+    Returns:
+        再構築後の :data:`ALL_KINDS`。
+    """
+    slot_kind_catalog.reload_catalog()
+    _rebuild_kind_vocabulary()
+    LOGGER.info(
+        "[day_plan] kind vocabulary reloaded: %d kinds (%d work-session)",
+        len(ALL_KINDS), len(WORKER_SESSION_KINDS),
+    )
+    return ALL_KINDS
+
+
+_rebuild_kind_vocabulary()

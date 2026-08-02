@@ -136,7 +136,7 @@ def _mock_result(**over):
     return SimpleNamespace(**base)
 
 
-def _save_single_slot(manager, *, kind="知る", ref="task:1", facility="library",
+def _save_single_slot(manager, *, kind="調べる", ref="task:1", facility="library",
                       budget_rounds=12, start="09:00"):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [{
         "start": start, "kind": kind, "ref": ref,
@@ -289,7 +289,7 @@ def test_rest_slot_runs_even_with_zero_remaining(manager):
     # 休む は consumes_budget でないため、残高 0 でも skipped にならない
     day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 0)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [{
-        "start": "09:00", "kind": "休む", "ref": "none",
+        "start": "09:00", "kind": "自室で過ごす", "ref": "none",
         "facility": "own_room", "budget_rounds": 0, "note": "",
     }])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -315,9 +315,9 @@ def test_day_open_to_fire_to_consume_end_to_end(manager, task_ref, tmp_path, cap
     output = {
         "monologue": "午前は記事、午後は下書き。",
         "timetable": [
-            {"start": "09:00", "kind": "知る", "ref": "task:1",
+            {"start": "09:00", "kind": "調べる", "ref": "task:1",
              "facility": "library", "budget_rounds": 5, "note": "記事の続き"},
-            {"start": "14:00", "kind": "作る", "ref": "none",
+            {"start": "14:00", "kind": "随筆を書く", "ref": "none",
              "facility": "workshop", "budget_rounds": 6, "note": "下書き"},
         ],
     }

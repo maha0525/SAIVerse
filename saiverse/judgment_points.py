@@ -48,19 +48,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from saiverse import clock
 from saiverse.day_plan import (
-    ALL_KINDS,
     FACILITY_OWN_ROOM,
-    KIND_LIVING,
-    KIND_REST,
     REF_NONE,
     STATUS_DEFERRED,
     STATUS_PENDING,
+    all_kinds,
     day_order_minutes,
     get_lives,
     is_in_user_conversation,
     life_consumed,
     load_day_plan,
     load_plan_meta,
+    worker_session_kinds,
 )
 from saiverse.desire_engine import (
     DESIRE_TYPES,
@@ -216,7 +215,8 @@ def collect_slot_ref_enum(manager: Any, persona_id: str) -> List[str]:
 
     コマは目的の木を任意の階層で指せる (life_concept_map.md §3.1):
     task:N (採用済みタスク・欲求候補 — 同一符号) と track:N (大枝 = 関心
-    そのもの。中身はその場の判断)。「暮らし」「休む」は 'none'。
+    そのもの。中身はその場の判断)。作業セッション系でないコマ (出かける/
+    自室で過ごす/自由時間) は 'none'。
     """
     refs: List[str] = []
     for t in list_backlog_tasks(manager, persona_id):
@@ -448,7 +448,7 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
                 "type": "string",
                 "description": "開始時刻 HH:MM (24時間制)。コマは開始時刻の厳密昇順に並べる",
             },
-            "kind": {"type": "string", "enum": list(ALL_KINDS)},
+            "kind": {"type": "string", "enum": list(all_kinds())},
             "title": {
                 "type": "string",
                 "description": "このコマの表題。「○○をする」という形の短い一文 (一日の予定表にそのまま載る)",
@@ -459,7 +459,8 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
                 "description": (
                     "取り組む対象。タスク/欲求候補 (task:N) のほか、関心そのもの"
                     " (track:N) も指せる — その場合コマの中身は発火時にその関心の"
-                    "机メモと配下のタスクを見て決める。「暮らし」「休む」は 'none'"
+                    "机メモと配下のタスクを見て決める。作業セッション系でない"
+                    "コマ (出かける/自室で過ごす/自由時間) は 'none'"
                 ),
             },
             "facility": {
@@ -469,7 +470,7 @@ def _build_slot_schema(ref_enum: List[str], facility_enum: List[str]) -> Dict[st
             },
             "budget_rounds": {
                 "type": "integer",
-                "description": "このコマの作業ラウンド予算 (暮らし/休む は 0)",
+                "description": "このコマの作業ラウンド予算 (作業セッション系のコマのみ。それ以外は 0)",
             },
             "note": {"type": "string", "description": "このコマで何をするかの短い覚え書き"},
         },
@@ -1280,7 +1281,7 @@ def build_on_event_situation_text(
     # 何日も前に終わった会話について「ユーザーと会話中です」とペルソナへ渡してしまう
     # (2026-07-29 修正。同じ漏れの実害は起動時タイマー再確立の側で観測済み)。
     # 判定は day_plan.is_in_user_conversation に一本化する — 二つ目の実装を作らない。
-    activity = "手すきです（暮らし）。"
+    activity = "手すきです。"
     if is_in_user_conversation(manager, persona_id):
         activity = "ユーザーと会話中です。"
     else:
@@ -1392,7 +1393,7 @@ def build_day_results_text(manager: Any, persona_id: str, plan_date: str) -> str
     システム都合 (実行手段未実装 / 予算切れ / 会話優先) を明示し、本人の
     「見送り」判断として提示しない (してもいない判断の理由をペルソナに
     捏造させないため。接地原則 v2 §3-1)。同様に、詳細な実行記録の無い done
-    (暮らし/休む スタブ、record_level='presence_only') は「実行済み」でなく
+    (presence スタブ、record_level='presence_only') は「実行済み」でなく
     「時間を過ごした（詳細な記録なし）」— していない活動の内容をふりかえりで
     捏造させない (soft-confabulation 防止、2026-07-05)。
     """
@@ -2195,9 +2196,10 @@ def sanitize_timetable(
     不正な項目は **該当コマだけ棄却** して警告に積む (判断全体を落とさない。
     握り潰さない — 呼び出し側が WARN ログに流す):
 
-    - dict でない / start が HH:MM でない / kind が未知 → コマ棄却
+    - dict でない / start が HH:MM でない / kind が未知 (封印済みの旧 kind を
+      含む) → コマ棄却
     - ref が実在しない (task:N / desire:N が解決不能) → コマ棄却
-    - 暮らし/休む に ref が付いている → ref='none' に矯正 (コマは残す)
+    - 作業セッション系でないコマに ref が付いている → ref='none' に矯正 (コマは残す)
     - facility が実在しない → 'own_room' に矯正 (コマは残す)
     - 時刻の重複 → 後のコマを棄却 (ソート後に判定)
 
@@ -2228,12 +2230,12 @@ def sanitize_timetable(
             warnings.append(f"slot[{i}] rejected: start={start!r} is not 'HH:MM'")
             continue
         kind = slot.get("kind")
-        if kind not in ALL_KINDS:
+        if kind not in all_kinds():
             warnings.append(f"slot[{i}] rejected: unknown kind={kind!r}")
             continue
 
         ref = str(slot.get("ref") or REF_NONE).strip() or REF_NONE
-        if kind in (KIND_LIVING, KIND_REST):
+        if kind not in worker_session_kinds():
             if ref != REF_NONE:
                 warnings.append(
                     f"slot[{i}]: kind={kind!r} には ref を付けられません; ref='none' に矯正"

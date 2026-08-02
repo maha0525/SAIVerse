@@ -259,13 +259,13 @@ class LifeViewApiTest(unittest.TestCase):
         from saiverse.day_plan import consume_budget, init_budget_ledger, save_day_plan
 
         save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "作る", "ref": "none",
+            {"start": "08:00", "kind": "随筆を書く", "ref": "none",
              "facility": "own_room", "budget_rounds": 4,
              "title": "詩を書く", "note": "朝の静けさで", "status": "done"},
-            {"start": "12:00", "kind": "暮らし", "ref": "none",
+            {"start": "12:00", "kind": "出かける", "ref": "none",
              "facility": "cafe", "budget_rounds": 0, "title": "昼を過ごす",
              "note": "", "status": "done", "record_level": "presence_only"},
-            {"start": "15:00", "kind": "知る", "ref": "none",
+            {"start": "15:00", "kind": "調べる", "ref": "none",
              "facility": "cafe", "budget_rounds": 4, "title": "調べ物",
              "note": "", "status": "skipped", "skip_reason": "budget_exhausted"},
         ])
@@ -311,7 +311,7 @@ class LifeViewApiTest(unittest.TestCase):
         )
 
         save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "作る", "ref": "none", "facility": "own_room",
+            {"start": "08:00", "kind": "随筆を書く", "ref": "none", "facility": "own_room",
              "budget_rounds": 4, "title": "詩を書く", "note": ""},
         ])
         save_lives(self.manager, "air", TEST_DATE, [
@@ -355,9 +355,9 @@ class LifeViewApiTest(unittest.TestCase):
         from saiverse.day_plan import consume_life_pulse, save_day_plan, save_lives
 
         save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "作る", "ref": "none", "facility": "own_room",
+            {"start": "08:00", "kind": "随筆を書く", "ref": "none", "facility": "own_room",
              "budget_rounds": 4, "title": "詩を書く", "note": ""},
-            {"start": "15:00", "kind": "知る", "ref": "none", "facility": "cafe",
+            {"start": "15:00", "kind": "調べる", "ref": "none", "facility": "cafe",
              "budget_rounds": 4, "title": "調べ物", "note": ""},
         ])
         save_lives(self.manager, "air", TEST_DATE, [
@@ -396,9 +396,9 @@ class LifeViewApiTest(unittest.TestCase):
         from saiverse.day_plan import save_day_plan, save_lives
 
         save_day_plan(self.manager, "air", TEST_DATE, [
-            {"start": "08:00", "kind": "作る", "ref": "none", "facility": "own_room",
+            {"start": "08:00", "kind": "随筆を書く", "ref": "none", "facility": "own_room",
              "budget_rounds": 4, "title": "詩を書く", "note": ""},
-            {"start": "15:00", "kind": "知る", "ref": "none", "facility": "cafe",
+            {"start": "15:00", "kind": "調べる", "ref": "none", "facility": "cafe",
              "budget_rounds": 4, "title": "調べ物", "note": ""},
         ])
         save_lives(self.manager, "air", TEST_DATE, [

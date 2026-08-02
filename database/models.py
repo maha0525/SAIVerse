@@ -1146,9 +1146,12 @@ class PersonaDayPlan(Base):
     """時間割 (day plan): 起床判断が編成した一日の駆動データ (自律行動 v2 §4.2)。
 
     1 ペルソナ 1 日 1 行 (複合 PK)。slots_json はコマの配列 (JSON):
-    [{start: "HH:MM", kind: 六型|"暮らし"|"休む", ref: "task:N"|"desire:N"|"none",
+    [{start: "HH:MM", kind: コマ種別カタログの名前 (saiverse/slot_kind_catalog.py、
+      builtin は 調べる/絵を描く/日記を書く/随筆を書く/出かける/自室で過ごす/自由時間),
+      ref: "task:N"|"desire:N"|"none",
       facility: building_id|"own_room", budget_rounds: int, note: str,
       status: "pending"|"fired"|"deferred"|"skipped"|"done", defer_count: int}, ...]
+    旧語彙 (六型/暮らし/休む) は封印済みだが、既存行の帳簿としては残りうる。
 
     コマ開始の駆動は saiverse/day_plan.py が EventScheduler へ push する決定論
     処理であり、コマ開始は判断点ではない = LLM を呼ばない

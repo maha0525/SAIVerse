@@ -398,7 +398,7 @@ class TestDayPlanTouchWiring:
         task = _add_desire(ptm, desire_type="作る")
         plan_date = clock.now().date().isoformat()
         day_plan.save_day_plan(manager, PERSONA_ID, plan_date, [{
-            "start": "09:00", "kind": "作る",
+            "start": "09:00", "kind": "随筆を書く",
             # 欲求も task:N に統一。_fire_slot は task: ref で touch_desire を呼ぶ。
             "ref": task["task_ref"],
             "facility": "own_room", "budget_rounds": 2, "note": "標本集",

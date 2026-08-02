@@ -496,7 +496,7 @@ def test_delayed_day_open_confirms_full_window_and_rounds_past_slots(manager, se
     assert lives[0]["end"] == "22:00"  # 起床からの窓そのまま (今からではない)
 
     notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "kind": "休む", "ref": "none", "facility": "own_room",
+        {"start": "08:00", "kind": "自室で過ごす", "ref": "none", "facility": "own_room",
          "budget_rounds": 0, "title": "", "note": ""},
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -504,7 +504,7 @@ def test_delayed_day_open_confirms_full_window_and_rounds_past_slots(manager, se
     assert notes == ["（1番目の予定は開始時刻を21:00に調整しました）"]
 
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "21:30", "kind": "休む", "ref": "none", "facility": "own_room",
+        {"start": "21:30", "kind": "自室で過ごす", "ref": "none", "facility": "own_room",
          "budget_rounds": 0, "title": "", "note": ""},
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)

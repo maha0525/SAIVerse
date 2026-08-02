@@ -130,7 +130,7 @@ def empty_track(manager):
 
 def _track_slot(ref="track:1", **over):
     slot = {
-        "start": "10:00", "kind": "作る", "ref": ref,
+        "start": "10:00", "kind": "随筆を書く", "ref": ref,
         "facility": "own_room", "budget_rounds": 4,
         "title": "標本集を進める", "note": "続きから",
     }
@@ -315,4 +315,4 @@ def test_task_ref_slot_still_uses_template_path(manager, running_track):
 
     assert calls[0]["task_ref"] == "task:1"
     assert calls[0]["track_id"] is None
-    assert "document_create で実際に作成すること" in calls[0]["instruction"]
+    assert "document_create で実際に書き残すこと" in calls[0]["instruction"]

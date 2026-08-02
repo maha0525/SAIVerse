@@ -243,7 +243,7 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         facility_enum = slot_props.get("facility", {}).get("enum", ["own_room"])
 
         def _pick_facility(kind_name: str) -> str:
-            preferred = {"知る": "library", "作る": "workshop"}.get(kind_name)
+            preferred = {"調べる": "library", "随筆を書く": "workshop"}.get(kind_name)
             if preferred and preferred in facility_enum:
                 return preferred
             return facility_enum[-1]  # own_room が末尾
@@ -251,8 +251,8 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         timetable: List[Dict[str, Any]] = []
         hour = 10
         for i, ref in enumerate(ref_enum[:3]):
-            slot_kind = "作る" if i % 2 else "知る"
-            verb = "作業を進める" if slot_kind == "作る" else "調べ物をする"
+            slot_kind = "随筆を書く" if i % 2 else "調べる"
+            verb = "作業を進める" if slot_kind == "随筆を書く" else "調べ物をする"
             timetable.append({
                 "start": f"{hour:02d}:00", "kind": slot_kind,
                 "title": f"{ref} の{verb} (mock)", "ref": ref,
@@ -261,12 +261,12 @@ def _default_mock_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
             })
             hour += 2
         timetable.append({
-            "start": f"{hour:02d}:00", "kind": "暮らし", "ref": "none",
+            "start": f"{hour:02d}:00", "kind": "出かける", "ref": "none",
             "title": "静かに過ごす (mock)",
             "facility": "own_room", "budget_rounds": 0, "note": "静かな時間 (mock)",
         })
         timetable.append({
-            "start": "20:00", "kind": "休む", "ref": "none", "title": "休む (mock)",
+            "start": "20:00", "kind": "自室で過ごす", "ref": "none", "title": "自室で過ごす (mock)",
             "facility": "own_room", "budget_rounds": 0, "note": "",
         })
         return {

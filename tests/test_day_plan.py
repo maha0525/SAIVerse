@@ -3,8 +3,8 @@
 一時 DB (in-memory SQLite; Windows のファイルロック問題を構造的に回避) +
 mock run_work_session + DaySimulator (仮想クロック) で検証する:
 
-- 3 コマ (9:00 知る / 14:00 作る / 20:00 休む) が仮想時刻順に発火し、
-  作る/知るコマが mock run_work_session を正しい指示書引数で呼ぶ
+- 3 コマ (9:00 調べる / 14:00 随筆を書く / 20:00 自室で過ごす) が仮想時刻順に
+  発火し、作業セッション系コマが mock run_work_session を正しい指示書引数で呼ぶ
 - ユーザー会話中 (running user_conversation Track) は繰り下げ → 10 分後に
   再発火。繰り下げ 3 回で skipped。会話終了 (pause) 後は再発火で実行される
 - reschedule_pending_slots の冪等性 (二重 push で二重発火しない)
@@ -125,7 +125,7 @@ def manager(session_factory):
 
 @pytest.fixture
 def task_refs(manager):
-    """task:1 (知る用) と desire:2 (作る用: desire ノート内の候補) を用意する。"""
+    """task:1 (調べる用) と desire:2 (随筆用: desire ノート内の候補) を用意する。"""
     task_manager = PersonaTaskManager(manager.SessionLocal)
     t1 = task_manager.create_task(
         persona_id=PERSONA_ID,
@@ -158,17 +158,17 @@ def _mock_work_session_result(**over):
 def _three_slots(task_refs) -> List[Dict[str, Any]]:
     return [
         {
-            "start": "09:00", "kind": "知る", "ref": task_refs["task"],
+            "start": "09:00", "kind": "調べる", "ref": task_refs["task"],
             "facility": "library", "budget_rounds": 5,
             "note": "記事の続きを調べる",
         },
         {
-            "start": "14:00", "kind": "作る", "ref": task_refs["desire"],
+            "start": "14:00", "kind": "随筆を書く", "ref": task_refs["desire"],
             "facility": "workshop", "budget_rounds": 12,
             "note": "標本集の下書きを作る",
         },
         {
-            "start": "20:00", "kind": "休む", "ref": "none",
+            "start": "20:00", "kind": "自室で過ごす", "ref": "none",
             "facility": "own_room", "budget_rounds": 0, "note": "",
         },
     ]
@@ -214,7 +214,7 @@ def test_save_accepts_date_object(manager, task_refs):
         (lambda s: s.__setitem__(1, {**s[1], "start": "09:00"}), "ascending"),
         # 不正 kind
         (lambda s: s.__setitem__(0, {**s[0], "kind": "遊ぶ"}), "kind"),
-        # 休む に ref が付いている (kind/ref 不整合)
+        # 自室で過ごす に ref が付いている (kind/ref 不整合)
         (lambda s: s.__setitem__(2, {**s[2], "ref": "task:1"}), "ref='none'"),
         # ref 書式不正
         (lambda s: s.__setitem__(0, {**s[0], "ref": "task-1"}), "ref"),
@@ -236,6 +236,51 @@ def test_save_rejects_invalid_slots(manager, task_refs, mutate, match):
 def test_save_rejects_empty_slots(manager):
     with pytest.raises(ValueError, match="non-empty"):
         day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [])
+
+
+@pytest.mark.parametrize("legacy_kind", list(day_plan.LEGACY_KINDS))
+def test_save_rejects_legacy_kinds(manager, legacy_kind):
+    """封印済みの旧 kind (六型 + 暮らし/休む) は新規時間割の検証で拒否される。
+
+    封印は「カタログに存在しない」で実現する (timetable_redesign.md §5.5/§9-2)。
+    """
+    with pytest.raises(ValueError, match="kind"):
+        day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "09:00", "kind": legacy_kind, "ref": "none",
+             "facility": "own_room", "budget_rounds": 0, "note": ""},
+        ])
+
+
+def test_legacy_kind_history_survives_remaining_slot_replacement(manager):
+    """消化済みの旧 kind コマ (帳簿) は残りコマ全置換の再検証を素通しする。
+
+    封印前に保存された時間割 (旧語彙) の日中組み替えを、歴史の語彙を理由に
+    全却下しない — 帳簿区間は kind 語彙の検証対象外 (時間割改修 T1 の移行互換)。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "10:00", "kind": "調べる", "ref": "none",
+         "facility": "library", "budget_rounds": 4, "note": "調べもの"},
+    ])
+
+    # 帳簿を旧語彙へ書き換えて「封印前に消化された日」を再現する
+    def _make_legacy_done(slots):
+        slots[0]["kind"] = "知る"
+        slots[0]["status"] = day_plan.STATUS_DONE
+        return True
+
+    assert day_plan._mutate_slots_cas(
+        manager, PERSONA_ID, PLAN_DATE, _make_legacy_done, context="test",
+    )
+
+    day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert [s["kind"] for s in slots] == ["知る", "自室で過ごす"]
+    assert slots[0]["status"] == day_plan.STATUS_DONE
+    # 表示経路 (実績ラベル) も旧 kind の帳簿で壊れない
+    assert day_plan.slot_result_label(slots[0]) == "実行済み"
 
 
 def test_schedule_without_plan_returns_zero(manager):
@@ -276,9 +321,9 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
         total = sim.run()
 
     assert total == 3
-    assert len(calls) == 2  # 休む は run_work_session を呼ばない
+    assert len(calls) == 2  # 自室で過ごす は run_work_session を呼ばない
 
-    # 知る (9:00): 仮想時刻・指示書・予算・task_ref
+    # 調べる (9:00): 仮想時刻・指示書・予算・task_ref
     learn = calls[0]
     assert learn["at"] == BASE + timedelta(hours=9)
     assert learn["persona_id"] == PERSONA_ID
@@ -287,17 +332,17 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
     assert "記事の続きを調べる" in learn["instruction"]          # slot.note
     assert "蒸留記事の続きを読む" in learn["instruction"]        # ref のタイトル
     assert "要点を覚え書きにする" in learn["instruction"]        # ref の goal
-    assert "実際に調べて得られた内容だけ" in learn["instruction"]  # 接地文言
+    assert "実際に読んで得られた内容だけ" in learn["instruction"]  # 接地文言
 
-    # 作る (14:00)
+    # 随筆を書く (14:00)
     create = calls[1]
     assert create["at"] == BASE + timedelta(hours=14)
     assert create["budget_rounds"] == 12
     assert create["task_ref"] == "desire:2"
     assert "標本集の下書きを作る" in create["instruction"]
     assert "言葉の標本集" in create["instruction"]  # desire:2 のタイトル
-    assert "document_create で実際に作成すること" in create["instruction"]
-    assert "完成条件: 成果物が実在し、読み直して整えてあること" in create["instruction"]
+    assert "document_create で実際に書き残すこと" in create["instruction"]
+    assert "完成条件: 随筆が実在し" in create["instruction"]
 
     # 施設移動: 自室→図書館→工房→自室 (own_room は private_room_id に解決)
     assert manager.occupancy_manager.moves == [
@@ -306,7 +351,7 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
         (PERSONA_ID, "ai", "workshop", "alice_room"),
     ]
 
-    # status 更新: 全コマ done。休む (スタブ) には「詳細な実行記録なし」の
+    # status 更新: 全コマ done。自室で過ごす (スタブ) には「詳細な実行記録なし」の
     # マーカーが付き、セッションを実際に運転した作業コマには付かない
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["status"] for s in slots] == ["done", "done", "done"]
@@ -359,7 +404,7 @@ def _end_user_conversation(manager) -> None:
 def test_slot_deferred_three_times_then_skipped(manager, task_refs):
     _start_user_conversation(manager)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -387,7 +432,7 @@ def test_slot_deferred_three_times_then_skipped(manager, task_refs):
 def test_deferred_slot_fires_after_conversation_ends(manager, task_refs):
     _start_user_conversation(manager)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -431,7 +476,7 @@ def test_deferred_slot_fires_after_conversation_ends(manager, task_refs):
 def test_own_room_slot_skips_move_when_already_home(manager):
     """own_room は private_room_id に解決され、既に自室なら移動しない。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "休む", "ref": "none",
+        {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -451,7 +496,7 @@ def test_own_room_without_private_room_warns_and_continues(manager, caplog):
     """private_room_id の無いペルソナの own_room コマは移動スキップ (WARN) + ハンドラ実行。"""
     manager.personas[PERSONA_ID].private_room_id = None
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "作る", "ref": "none",
+        {"start": "09:00", "kind": "随筆を書く", "ref": "none",
          "facility": "own_room", "budget_rounds": 3, "note": "下書き"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -487,7 +532,7 @@ def test_move_updates_persona_current_building(manager, task_refs):
     persona = manager.personas[PERSONA_ID]
     assert persona.current_building_id == "alice_room"
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -520,7 +565,7 @@ def test_move_failure_runs_in_place_and_notifies_persona(manager, task_refs):
     )
     manager.occupancy_manager.fail_with = "図書館は定員オーバーです"
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5,
          "title": "記事を調べる", "note": "調べもの"},
     ])
@@ -555,9 +600,9 @@ def test_move_failure_runs_in_place_and_notifies_persona(manager, task_refs):
 
 def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
-        {"start": "20:00", "kind": "休む", "ref": "none",
+        {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     # reschedule は clock.now() の日付で当日 plan を引くため、仮想時刻を先に立てる
@@ -577,17 +622,17 @@ def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
             end=BASE + timedelta(hours=24),
         ).run()
 
-    assert mock_ws.call_count == 1  # 知る 1 回のみ (二重発火しない)
+    assert mock_ws.call_count == 1  # 調べる 1 回のみ (二重発火しない)
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["status"] for s in slots] == ["done", "done"]
 
 
 def test_reschedule_repushes_deferred_and_skips_done(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの",
          "status": "deferred", "defer_count": 1},
-        {"start": "14:00", "kind": "休む", "ref": "none",
+        {"start": "14:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "",
          "status": "done"},
     ])
@@ -615,36 +660,54 @@ def test_reschedule_repushes_deferred_and_skips_done(manager, task_refs):
 
 
 def test_all_kinds_have_registered_handlers():
-    """六型 + 暮らし/休む の全 kind にハンドラが解決する (バグ2(a) 回帰)。
+    """カタログの全 kind にハンドラが解決する (バグ2(a) 回帰)。
 
-    2026-07-05 の実 LLM シムで「自分を更新する」コマが no handler で skipped
-    になり、就寝判断がそれを本人の「見送り」として作話した。全 kind が組み込みで
-    処理されることを固定する。
+    2026-07-05 の実 LLM シムで、有効な kind のコマが no handler で skipped
+    になり、就寝判断がそれを本人の「見送り」として作話した。カタログの全 kind が
+    組み込みで処理されることを固定する。
     """
+    assert day_plan.ALL_KINDS, "kind vocabulary must not be empty"
     for kind in day_plan.ALL_KINDS:
         assert kind in day_plan._SLOT_HANDLERS, f"kind={kind!r} has no handler"
-    # 六型は作業セッション運転 = 予算ゲート対象
-    for kind in day_plan.SIX_KINDS:
+    # 作業セッション系 (execution_type='work_session') は予算ゲート対象
+    assert day_plan.WORKER_SESSION_KINDS
+    for kind in day_plan.WORKER_SESSION_KINDS:
         assert kind in day_plan._BUDGET_GATED_KINDS, f"kind={kind!r} not budget-gated"
-        assert kind in day_plan.WORKER_SESSION_KINDS
-    # 暮らし/休む はスタブ (予算を消費しない)
-    assert day_plan.KIND_LIVING not in day_plan._BUDGET_GATED_KINDS
-    assert day_plan.KIND_REST not in day_plan._BUDGET_GATED_KINDS
+        assert kind in day_plan.ALL_KINDS
+    # それ以外 (出かける/自室で過ごす/自由時間) はスタブ (予算を消費しない)
+    for kind in set(day_plan.ALL_KINDS) - set(day_plan.WORKER_SESSION_KINDS):
+        assert kind not in day_plan._BUDGET_GATED_KINDS, f"kind={kind!r} budget-gated"
+    # WORKER_SESSION_KINDS と指示書テンプレートの同期 (旧 assert の回帰固定)
+    assert set(day_plan.WORKER_SESSION_KINDS) == set(
+        day_plan._WORKER_INSTRUCTION_TEMPLATES
+    )
+
+
+def test_legacy_kinds_are_sealed():
+    """封印済みの旧語彙 (六型 + 暮らし/休む) は kind 語彙からもハンドラからも消えている。
+
+    封印は「プロンプトで禁止」ではなく「選択肢として存在しない」で実現する
+    (timetable_redesign.md §9-2)。
+    """
+    for kind in day_plan.LEGACY_KINDS:
+        assert kind not in day_plan.ALL_KINDS, f"legacy kind={kind!r} still valid"
+        assert kind not in day_plan._SLOT_HANDLERS, f"legacy kind={kind!r} has handler"
+        assert kind not in day_plan._BUDGET_GATED_KINDS
 
 
 @pytest.mark.parametrize(
     "kind, grounding",
     [
-        ("話す", "「話した」「伝えた」と書かないこと"),
-        ("聞く", "「聞いた」と書かないこと"),
-        ("経験する", "実際に起きていない体験を「した」と書かないこと"),
-        ("自分を更新する", "「更新した」と書かないこと"),
+        ("調べる", "「読んだ」「調べた」と書かないこと"),
+        ("絵を描く", "実際に生成できていない絵を「描いた」と書かないこと"),
+        ("日記を書く", "実際に起きていない出来事を日記に書かないこと"),
+        ("随筆を書く", "実際に経験・読んでいないことを事実として書かないこと"),
     ],
 )
 def test_new_worker_kinds_run_sessions_with_grounded_instruction(
     manager, task_refs, kind, grounding
 ):
-    """話す/聞く/経験する/自分を更新する も作業セッションとして発火する (バグ2(a))。"""
+    """カタログの作業セッション系 4 種が接地文言つきの指示書で発火する。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "09:00", "kind": kind, "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 4, "note": "取り組む"},
@@ -681,13 +744,13 @@ def test_unregistered_kind_is_skipped_with_system_reason(manager, task_refs, cap
     slot_result_label 側のテストで固定する。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "経験する", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "絵を描く", "ref": task_refs["task"],
          "facility": "park", "budget_rounds": 0, "note": "公園を歩く"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
 
     with patch.dict(day_plan._SLOT_HANDLERS):
-        del day_plan._SLOT_HANDLERS["経験する"]
+        del day_plan._SLOT_HANDLERS["絵を描く"]
         with caplog.at_level("WARNING", logger="saiverse.day_plan"):
             DaySimulator(
                 manager.event_scheduler,
@@ -722,17 +785,18 @@ def test_slot_result_label_distinguishes_system_skips():
     assert day_plan.slot_result_label({}) == "未実施"
 
 
-def test_living_and_rest_slots_record_presence_only(manager):
-    """暮らし/休む スタブ: done + record_level='presence_only' を永続化する。
+def test_stub_slots_record_presence_only(manager):
+    """出かける/自室で過ごす スタブ: done + record_level='presence_only' を永続化する。
 
     スタブでも施設への実移動 (presence) は本物として行う — カフェ等に実際に
-    居ることが遭遇と会話のきっかけになる (まはー決定 2026-07-05)。詳細な
-    実行記録が無いことだけをマーカーで残し、表示側が「実行済み」と偽らない。
+    居ることが遭遇と会話のきっかけになる (まはー決定 2026-07-05、旧 暮らし/休む
+    スタブから継承)。詳細な実行記録が無いことだけをマーカーで残し、表示側が
+    「実行済み」と偽らない。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "10:00", "kind": "暮らし", "ref": "none",
+        {"start": "10:00", "kind": "出かける", "ref": "none",
          "facility": "cafe", "budget_rounds": 0, "note": "カフェで過ごす"},
-        {"start": "20:00", "kind": "休む", "ref": "none",
+        {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -756,8 +820,35 @@ def test_living_and_rest_slots_record_presence_only(manager):
     ]
 
 
+def test_free_choice_slot_degrades_to_stay_home_with_warning(manager, caplog):
+    """自由時間スタブ: 選択機構が無い間は自室で過ごす相当に縮退し、WARNING で明示する。
+
+    静かな別物化をしない — 縮退であることをログに残す (T1 の honest stub)。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "10:00", "kind": "自由時間", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": "好きに過ごす"},
+    ])
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with caplog.at_level("WARNING", logger="saiverse.day_plan"):
+        DaySimulator(
+            manager.event_scheduler,
+            start=BASE + timedelta(hours=9),
+            end=BASE + timedelta(hours=12),
+        ).run()
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+    assert any(
+        "free-choice slot" in r.message and "not" in r.message
+        for r in caplog.records
+    )
+
+
 def test_slot_result_label_presence_only_done():
-    """実績ラベル: 詳細記録の無い done (暮らし/休む スタブ) を「実行済み」と偽らない。
+    """実績ラベル: 詳細記録の無い done (presence スタブ) を「実行済み」と偽らない。
 
     「実行済み」と提示すると、ペルソナが就寝ふりかえりでしていない活動の
     内容 (食事の選定等) を捏造する (soft-confabulation、2026-07-05 実 LLM シム
@@ -777,14 +868,14 @@ def test_slot_result_label_presence_only_done():
 def test_record_level_survives_remaining_slot_replacement(manager):
     """record_level は帳簿の一部 — 残りコマ全置換の再検証を通っても保持される。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "10:00", "kind": "暮らし", "ref": "none",
+        {"start": "10:00", "kind": "出かける", "ref": "none",
          "facility": "cafe", "budget_rounds": 0, "note": "カフェで過ごす",
          "status": "done", "record_level": day_plan.RECORD_LEVEL_PRESENCE_ONLY},
-        {"start": "14:00", "kind": "休む", "ref": "none",
+        {"start": "14:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "20:00", "kind": "休む", "ref": "none",
+        {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "早めに休む"},
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -797,14 +888,14 @@ def test_record_level_survives_remaining_slot_replacement(manager):
 def test_skip_reason_survives_remaining_slot_replacement(manager, task_refs):
     """skip_reason は帳簿の一部 — 残りコマ全置換の再検証を通っても保持される。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 4, "note": "調べもの",
          "status": "skipped", "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
-        {"start": "14:00", "kind": "休む", "ref": "none",
+        {"start": "14:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "20:00", "kind": "休む", "ref": "none",
+        {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "早めに休む"},
     ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -823,19 +914,19 @@ def test_replace_remaining_allows_restart_at_consumed_slot_time(manager, task_re
     区間のみに適用し、消化済み区間 (歴史) は保護したまま置換を通す。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:30", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:30", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 4, "note": "調べもの",
          "status": "done"},
-        {"start": "13:30", "kind": "作る", "ref": task_refs["task"],
+        {"start": "13:30", "kind": "随筆を書く", "ref": task_refs["task"],
          "facility": "workshop", "budget_rounds": 6, "note": "済んだコマ",
          "status": "done"},
-        {"start": "15:30", "kind": "休む", "ref": "none",
+        {"start": "15:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     pushed, notes = day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "13:30", "kind": "作る", "ref": task_refs["desire"],
+        {"start": "13:30", "kind": "随筆を書く", "ref": task_refs["desire"],
          "facility": "workshop", "budget_rounds": 4, "note": "ref を直してやり直す"},
-        {"start": "15:30", "kind": "休む", "ref": "none",
+        {"start": "15:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     assert pushed == 2
@@ -855,18 +946,18 @@ def test_replace_remaining_allows_restart_at_consumed_slot_time(manager, task_re
 def test_replace_remaining_still_rejects_unordered_new_slots(manager, task_refs):
     """新コマ区間そのものが昇順でない置換は従来どおり全却下 (plan も予約も不変)。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:30", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:30", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 4, "note": "",
          "status": "done"},
-        {"start": "15:30", "kind": "休む", "ref": "none",
+        {"start": "15:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
     with pytest.raises(ValueError, match="not strictly ascending"):
         day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "16:00", "kind": "休む", "ref": "none",
+            {"start": "16:00", "kind": "自室で過ごす", "ref": "none",
              "facility": "own_room", "budget_rounds": 0, "note": ""},
-            {"start": "15:00", "kind": "休む", "ref": "none",
+            {"start": "15:00", "kind": "自室で過ごす", "ref": "none",
              "facility": "own_room", "budget_rounds": 0, "note": ""},
         ])
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -880,7 +971,7 @@ def test_replace_remaining_still_rejects_unordered_new_slots(manager, task_refs)
 
 def test_handler_failure_leaves_slot_fired(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "作る", "ref": "none",
+        {"start": "09:00", "kind": "随筆を書く", "ref": "none",
          "facility": "workshop", "budget_rounds": 3, "note": "下書き"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -937,9 +1028,9 @@ def test_schedule_resolves_wake_for_overnight_slot(manager, monkeypatch):
     # 「万一 start < wake のコマが存在した場合に翌暦日で予約される」
     # 防御 (wake 自己解決) だけを検証する。
     slots = [
-        {"start": "00:30", "kind": "休む", "ref": "none",
+        {"start": "00:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "深夜の一息"},
-        {"start": "09:00", "kind": "休む", "ref": "none",
+        {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ]
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, slots)
@@ -996,7 +1087,7 @@ def _slot_exec_id(manager, kind="slot.fire"):
 
 def _save_single_gated_slot(manager, task_refs, *, budget_rounds=5):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": budget_rounds, "note": "調べもの"},
     ])
 
@@ -1112,9 +1203,9 @@ def test_mutate_slots_cas_preserves_concurrent_replacement(manager, task_refs):
     """CAS 更新 (第五陣 P1): 読みと書きの間に別の書き手が置換を commit したら、
     古い配列を書き戻さず (= 置換を消さず)、最新 plan で変異をやり直す。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "13:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "13:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 3, "note": "A"},
-        {"start": "15:00", "kind": "休む", "ref": "none",
+        {"start": "15:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "B"},
     ])
     calls = {"n": 0}
@@ -1124,7 +1215,7 @@ def test_mutate_slots_cas_preserves_concurrent_replacement(manager, task_refs):
         if calls["n"] == 1:
             # 読みの後・書きの前に、別の書き手が A/B → C の置換を commit する
             day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-                {"start": "18:00", "kind": "休む", "ref": "none",
+                {"start": "18:00", "kind": "自室で過ごす", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": "C"},
             ])
             slots[0]["status"] = "deferred"  # 古い配列への変異 — 書かれてはいけない
@@ -1149,9 +1240,9 @@ def test_update_slot_does_not_resurrect_replaced_plan(manager, task_refs):
     が A/B → C を commit しても、古い A/B の書き戻しで C が消えない (A の deferred
     化は対象消失として中止される)。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "13:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "13:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 3, "note": "A"},
-        {"start": "15:00", "kind": "休む", "ref": "none",
+        {"start": "15:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "B"},
     ])
     a_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
@@ -1164,7 +1255,7 @@ def test_update_slot_does_not_resurrect_replaced_plan(manager, task_refs):
         if not state["fired"] and row is not None:
             state["fired"] = True
             day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-                {"start": "18:00", "kind": "休む", "ref": "none",
+                {"start": "18:00", "kind": "自室で過ごす", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": "C"},
             ])
         return row
@@ -1195,7 +1286,7 @@ def test_reserve_conflict_preserves_replacement_and_aborts_fire(manager, task_re
         if not state["fired"] and row is not None:
             state["fired"] = True
             day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-                {"start": "10:00", "kind": "休む", "ref": "none",
+                {"start": "10:00", "kind": "自室で過ごす", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": "C"},
             ])
         return row
@@ -1405,9 +1496,9 @@ def test_fire_slot_follows_identity_when_index_shifts(manager, task_refs):
     _attach_ledger(manager)
     day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "X"},
-        {"start": "10:00", "kind": "休む", "ref": "none",
+        {"start": "10:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "Y"},
     ])
     x_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
@@ -1602,9 +1693,9 @@ def _slot_ids(manager, plan_date=PLAN_DATE):
 
 def _seed_two_slot_plan(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "13:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "13:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 3, "note": "旧1"},
-        {"start": "15:00", "kind": "休む", "ref": "none",
+        {"start": "15:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -1617,7 +1708,7 @@ def test_replace_day_plan_success_swaps_reservations(manager, task_refs):
     old_ids = _slot_ids(manager)
 
     pushed, notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "18:00", "kind": "休む", "ref": "none",
+        {"start": "18:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     assert pushed == 1
@@ -1685,9 +1776,9 @@ def test_replace_remaining_mints_fresh_ids_for_new_slots(manager, task_refs):
     """残りコマ置換: 新コマ区間は入力が id を写していても新世代を採番する。
     消化済み区間 (帳簿) は既存 id を保持する (精算・回復の逆引き対象のため)。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:30", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:30", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 4, "note": "", "status": "done"},
-        {"start": "15:30", "kind": "休む", "ref": "none",
+        {"start": "15:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     before = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -1708,7 +1799,7 @@ def test_replace_day_plan_format_failure_leaves_plan_and_reservations(manager, t
 
     with pytest.raises(ValueError):
         day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "9時", "kind": "休む", "ref": "none",  # start 書式不正
+            {"start": "9時", "kind": "自室で過ごす", "ref": "none",  # start 書式不正
              "facility": "own_room", "budget_rounds": 0, "note": ""},
         ])
 
@@ -1728,7 +1819,7 @@ def test_replace_day_plan_all_excluded_by_life_leaves_plan_and_reservations(mana
     with pytest.raises(ValueError):
         # 23:00 は就寝 (22:00) より後 — 丸めようが無く全除外 → kept 空
         day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "23:00", "kind": "休む", "ref": "none",
+            {"start": "23:00", "kind": "自室で過ごす", "ref": "none",
              "facility": "own_room", "budget_rounds": 0, "note": ""},
         ])
 
@@ -1835,9 +1926,9 @@ def test_settle_marks_slot_by_id_after_midhandler_reshuffle(manager, task_refs):
     ledger = _attach_ledger(manager)
     day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "kind": "休む", "ref": "none",
+        {"start": "08:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "defer"},
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "work"},
     ])
     # index 0 を deferred にして「index 0=deferred / index 1=実行中」の状況を作る。
@@ -1849,7 +1940,7 @@ def test_settle_marks_slot_by_id_after_midhandler_reshuffle(manager, task_refs):
         # ハンドラ中の残り時間割置換: 実行中コマ (fired) が index 0 へ前詰めされ、
         # 新コマ (20:00) が index 1 に入る。
         day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "20:00", "kind": "休む", "ref": "none",
+            {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
              "facility": "own_room", "budget_rounds": 0, "note": "new"},
         ])
         return _mock_work_session_result(rounds_used=3)
@@ -1890,7 +1981,7 @@ def test_slot_idempotency_key_is_stable_id_not_index(manager, task_refs):
 
     # 別コマを同じ index 0 に置く (id は別) → 冪等キーが id ベースなので発火できる。
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "10:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "10:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "second"},
     ])
     second_id = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]["id"]
@@ -1995,7 +2086,7 @@ def test_replace_day_plan_persistent_save_failure_keeps_old_plan_and_reservation
     with patch("saiverse.day_plan._upsert_plan_slots", side_effect=RuntimeError("save fail")):
         with pytest.raises(RuntimeError):
             day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-                {"start": "18:00", "kind": "休む", "ref": "none",
+                {"start": "18:00", "kind": "自室で過ごす", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": "new"},
             ])
 
@@ -2011,7 +2102,7 @@ def test_replace_day_plan_persistent_repush_failure_converges_to_new_plan(manage
 
     with patch("saiverse.day_plan.schedule_day_plan", side_effect=RuntimeError("push fail")):
         pushed, _notes = day_plan.replace_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "18:00", "kind": "休む", "ref": "none",
+            {"start": "18:00", "kind": "自室で過ごす", "ref": "none",
              "facility": "own_room", "budget_rounds": 0, "note": "new"},
         ])
 
@@ -2037,7 +2128,7 @@ def test_reserve_aborts_when_slot_vanishes_between_claim_and_reservation(manager
     def reshuffle_then_reserve(*a, **k):
         # claim 後・予約 tx 実行の直前に当該コマ (pending) を時間割から外す。
         day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "20:00", "kind": "休む", "ref": "none",
+            {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
              "facility": "own_room", "budget_rounds": 0, "note": "other"},
         ])
         return real_reserve(*a, **k)

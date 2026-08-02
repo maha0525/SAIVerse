@@ -1,0 +1,7 @@
+{
+  "id": "paint",
+  "name": "絵を描く",
+  "execution_type": "work_session",
+  "description": "画像生成で絵を実際に描き、作品として残す",
+  "instruction_template": "目的: {note}。対象: {target}。run_playbook スペルで Playbook「generate_image」を実際に実行して絵を生成すること (例: /run_playbook(name=\"generate_image\"))。完成条件: 生成された画像がアイテムとして実在すること。実際に生成できていない絵を「描いた」と書かないこと。実際にやったこと以外を「やった」と書かないこと。"
+}

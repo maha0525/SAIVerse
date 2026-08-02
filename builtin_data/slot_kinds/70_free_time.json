@@ -1,0 +1,6 @@
+{
+  "id": "free_time",
+  "name": "自由時間",
+  "execution_type": "free_choice",
+  "description": "他のコマ種別の中から、そのとき好きなものを選んで過ごす"
+}

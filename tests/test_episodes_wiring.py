@@ -7,7 +7,7 @@
   occurrence_id の同一 Building 共有、全時刻が仮想クロック経由
 - 作業セッション: run_work_session の open→close、meta.title / meta.artifacts /
   digest_ref (meta 書式契約)、エラー終了でも閉じる、開いている slot 出来事が出自
-- コマ: _fire_slot の open→close、暮らし/休む = presence + record_level 透過、
+- コマ: _fire_slot の open→close、presence スタブ = presence + record_level 透過、
   skip (no_handler) は出来事を作らない、六型コマは kind='slot'
 - 層0: SEARuntime._store_memory が開いている出来事の episode_ref を
   metadata.origin_episode に付与する / 無ければ何も付けない
@@ -457,7 +457,7 @@ def test_living_slot_creates_presence_episode_with_record_level(session_factory)
     start = datetime(2026, 7, 4, 12, 0, 0)
     clock.enable_virtual(start)
     plan_date = _save_single_slot_plan(manager, {
-        "start": "12:00", "kind": "暮らし", "ref": "none",
+        "start": "12:00", "kind": "出かける", "ref": "none",
         "facility": BUILDING, "budget_rounds": 0, "title": "お昼をとる",
     })
 
@@ -472,7 +472,7 @@ def test_living_slot_creates_presence_episode_with_record_level(session_factory)
     assert ep.ORIGIN_REF == f"day_plan:{PERSONA_ID}:{plan_date}:0"
     meta = json.loads(ep.META_JSON)
     assert meta["title"] == "お昼をとる"
-    assert meta["slot_kind"] == "暮らし"
+    assert meta["slot_kind"] == "出かける"
     # record_level (presence_only) がスタブハンドラから透過される
     assert meta["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
 
@@ -481,7 +481,7 @@ def test_worker_slot_creates_slot_episode(session_factory):
     manager = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
     plan_date = _save_single_slot_plan(manager, {
-        "start": "10:00", "kind": "作る", "ref": "none",
+        "start": "10:00", "kind": "随筆を書く", "ref": "none",
         "facility": BUILDING, "budget_rounds": 2, "title": "下書きを書く",
     })
 
@@ -507,15 +507,15 @@ def test_skipped_slot_creates_no_episode(session_factory):
     manager = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
     plan_date = _save_single_slot_plan(manager, {
-        "start": "10:00", "kind": "作る", "ref": "none",
+        "start": "10:00", "kind": "随筆を書く", "ref": "none",
         "facility": BUILDING, "budget_rounds": 2, "title": "下書きを書く",
     })
 
     saved_handlers = dict(day_plan._SLOT_HANDLERS)
     saved_gated = set(day_plan._BUDGET_GATED_KINDS)
     try:
-        day_plan._SLOT_HANDLERS.pop("作る", None)
-        day_plan._BUDGET_GATED_KINDS.discard("作る")
+        day_plan._SLOT_HANDLERS.pop("随筆を書く", None)
+        day_plan._BUDGET_GATED_KINDS.discard("随筆を書く")
         day_plan._fire_slot(manager, PERSONA_ID, plan_date, 0)
     finally:
         day_plan._SLOT_HANDLERS.clear()
@@ -532,7 +532,7 @@ def test_handler_error_still_closes_slot_episode(session_factory):
     manager = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
     plan_date = _save_single_slot_plan(manager, {
-        "start": "10:00", "kind": "作る", "ref": "none",
+        "start": "10:00", "kind": "随筆を書く", "ref": "none",
         "facility": BUILDING, "budget_rounds": 2, "title": "下書きを書く",
     })
 

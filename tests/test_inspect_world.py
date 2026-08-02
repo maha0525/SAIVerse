@@ -86,9 +86,9 @@ def _make_world_db(path: Path) -> None:
         session.add(PersonaDayPlan(
             persona_id="alice", plan_date="2026-07-05",
             slots_json=json.dumps([
-                {"start": "10:00", "kind": "知る", "title": "調べ物", "ref": "task:1",
+                {"start": "10:00", "kind": "調べる", "title": "調べ物", "ref": "task:1",
                  "facility": "lobby", "budget_rounds": 4, "status": "done"},
-                {"start": "20:00", "kind": "休む", "title": "休む", "ref": "none",
+                {"start": "20:00", "kind": "自室で過ごす", "title": "休む", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "status": "skipped",
                  "skip_reason": "就寝が先に来た"},
             ]),

@@ -206,7 +206,7 @@ def _assert_no_additional_properties(schema: Any, path: str = "$"):
 
 
 def _rest_slot(start="21:00"):
-    return {"start": start, "kind": "休む", "ref": "none",
+    return {"start": start, "kind": "自室で過ごす", "ref": "none",
             "facility": "own_room", "budget_rounds": 0, "note": ""}
 
 
@@ -486,7 +486,7 @@ def test_new_track_from_conversation_is_selectable_for_timetable(manager):
 
     # 検証側 (sanitize) も同じ Track を受理する = enum と検証が一致
     slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, [{
-        "start": "10:00", "kind": "作る", "title": "関心に取り組む",
+        "start": "10:00", "kind": "随筆を書く", "title": "関心に取り組む",
         "ref": ref, "facility": "own_room", "note": "",
     }])
     assert warnings == []
@@ -517,9 +517,9 @@ def test_day_open_finalize_saves_plan_and_rejects_bad_ref(
     output = {
         "monologue": "今日は記事の続きから入って、夜は休もう。",
         "timetable": [
-            {"start": "09:00", "kind": "知る", "ref": "task:1",
+            {"start": "09:00", "kind": "調べる", "ref": "task:1",
              "facility": "library", "budget_rounds": 5, "note": "記事の続き"},
-            {"start": "14:00", "kind": "作る", "ref": "task:99",  # 実在しない
+            {"start": "14:00", "kind": "随筆を書く", "ref": "task:99",  # 実在しない
              "facility": "workshop", "budget_rounds": 8, "note": "?"},
             _rest_slot("21:00"),
         ],
@@ -561,7 +561,7 @@ def test_day_open_finalize_empty_timetable_saves_nothing(
     output = {
         "monologue": "……",
         "timetable": [
-            {"start": "9時", "kind": "知る", "ref": "task:1",
+            {"start": "9時", "kind": "調べる", "ref": "task:1",
              "facility": "library", "budget_rounds": 5, "note": ""},  # start 不正
         ],
     }
@@ -589,7 +589,7 @@ def test_day_open_finalize_all_excluded_keeps_existing_plan_atomically(
     ])
     # 既存 plan (09:00 のコマ) を編成して予約まで作る
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": task_refs["task"],
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "旧予定"},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -636,7 +636,7 @@ def test_day_open_finalize_rounds_and_excludes_slots_with_life_declared(
     output = {
         "monologue": "今日は記事の続きから入って、夜は休もう。",
         "timetable": [
-            {"start": "07:30", "kind": "知る", "ref": task_refs["task"],
+            {"start": "07:30", "kind": "調べる", "ref": task_refs["task"],
              "facility": "library", "budget_rounds": 5, "note": "", "title": "記事の続き"},
             _rest_slot("12:00"),
             _rest_slot("23:00"),  # ライフ終了 (22:00) より後 — 丸めようが無い
@@ -993,7 +993,7 @@ def test_post_session_remaining_timetable_replaces_and_cancels_stale(
     """残りコマの全置換: 消化済みは残り、pending は差し替わり、旧予約は消える。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {**_rest_slot("09:00"), "status": "done"},
-        {"start": "14:00", "kind": "知る", "ref": "task:1",
+        {"start": "14:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
         _rest_slot("20:00"),
     ])
@@ -1004,7 +1004,7 @@ def test_post_session_remaining_timetable_replaces_and_cancels_stale(
         "monologue": "残りは 16 時に一本にまとめる。",
         "task_verdict": {"status": "continue", "desk_memo": "続きから"},
         "remaining_timetable": [
-            {"start": "16:00", "kind": "知る", "ref": "task:1",
+            {"start": "16:00", "kind": "調べる", "ref": "task:1",
              "facility": "library", "budget_rounds": 4, "note": "続き"},
         ],
     }
@@ -1036,7 +1036,7 @@ def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
     『昇順でない』で全却下 → ペルソナは組み替えたつもりのまま、が直っている。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "13:30", "kind": "作る", "ref": "task:1",
+        {"start": "13:30", "kind": "随筆を書く", "ref": "task:1",
          "facility": "workshop", "budget_rounds": 6, "note": "済んだコマ",
          "status": "done"},
         _rest_slot("17:00"),
@@ -1046,7 +1046,7 @@ def test_post_session_remaining_timetable_restart_at_consumed_time_applies(
     output = {
         "monologue": "13:30 のコマは対象を直してやり直す。",
         "remaining_timetable": [
-            {"start": "13:30", "kind": "作る", "ref": "task:2",
+            {"start": "13:30", "kind": "随筆を書く", "ref": "task:2",
              "facility": "workshop", "budget_rounds": 4, "note": "対象を直した"},
             _rest_slot("17:00"),
         ],
@@ -1090,7 +1090,7 @@ def test_post_session_remaining_timetable_rounds_and_excludes_with_life_declared
     output = {
         "monologue": "夕方は早めに休もう。",
         "remaining_timetable": [
-            {"start": "13:00", "kind": "作る", "ref": "task:1",
+            {"start": "13:00", "kind": "随筆を書く", "ref": "task:1",
              "facility": "workshop", "budget_rounds": 4, "note": "続き"},
             _rest_slot("18:00"),
             _rest_slot("23:00"),  # ライフ終了 (22:00) より後 — 丸めようが無い
@@ -1124,7 +1124,7 @@ def test_post_session_remaining_timetable_rejection_reaches_persona(
     output = {
         "monologue": "残りを組み替えるつもり。",
         "remaining_timetable": [
-            {"start": "15:00", "kind": "作る", "ref": "task:99",  # 実在しない
+            {"start": "15:00", "kind": "随筆を書く", "ref": "task:99",  # 実在しない
              "facility": "workshop", "budget_rounds": 4, "note": "?"},
         ],
     }
@@ -1252,9 +1252,9 @@ def test_sanitize_timetable_rejects_completed_task_ref(manager, ptm, task_refs):
                            actor="test", persona_id=PERSONA_ID)
 
     slots, warnings = jp.sanitize_timetable(manager, PERSONA_ID, [
-        {"start": "10:00", "kind": "作る", "ref": "task:1",
+        {"start": "10:00", "kind": "随筆を書く", "ref": "task:1",
          "facility": "workshop", "budget_rounds": 4, "note": "完了済みを指す"},
-        {"start": "12:00", "kind": "作る", "ref": "task:2",
+        {"start": "12:00", "kind": "随筆を書く", "ref": "task:2",
          "facility": "workshop", "budget_rounds": 4, "note": "生きている欲求"},
     ])
     assert [s["ref"] for s in slots] == ["task:2"]
@@ -1466,7 +1466,7 @@ def test_post_conversation_remaining_timetable_full_replace(
     manager, task_refs, finalize_mod, tmp_path
 ):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "14:00", "kind": "知る", "ref": "task:1",
+        {"start": "14:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
         _rest_slot("20:00"),
     ])
@@ -1478,7 +1478,7 @@ def test_post_conversation_remaining_timetable_full_replace(
         "picked_tasks": [],
         "new_desires": [],
         "remaining_timetable": [
-            {"start": "16:00", "kind": "知る", "ref": "task:1",
+            {"start": "16:00", "kind": "調べる", "ref": "task:1",
              "facility": "library", "budget_rounds": 4, "note": "続き"},
         ],
     }
@@ -1504,7 +1504,7 @@ def test_post_conversation_resume_now_inserts_immediate_slot(
         persona_id=PERSONA_ID, track_type="autonomous", title="調べ物",
     )
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "06:30", "kind": "知る", "ref": "task:1",
+        {"start": "06:30", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "朝の調べもの",
          "status": "fired"},
         _rest_slot("21:00"),
@@ -1531,7 +1531,7 @@ def test_post_conversation_resume_now_inserts_immediate_slot(
         ("06:30", "fired"), ("07:00", "pending"), ("21:00", "pending"),
     ]
     inserted = slots[1]
-    assert inserted["kind"] == "知る"           # 元コマから引き継ぎ
+    assert inserted["kind"] == "調べる"           # 元コマから引き継ぎ
     assert inserted["ref"] == "task:1"
     assert inserted["facility"] == "library"    # 元コマから引き継ぎ
     assert inserted["budget_rounds"] == 5       # 元コマから引き継ぎ
@@ -1726,7 +1726,7 @@ def test_on_event_finalize_insert_slot_and_time_validation(
     output = {
         "monologue": "今は手が離せないから午後に見よう。",
         "reaction": {"type": "insert_slot", "slot": {
-            "start": "15:00", "kind": "知る", "ref": "task:1",
+            "start": "15:00", "kind": "調べる", "ref": "task:1",
             "facility": "library", "budget_rounds": 4, "note": "届いた資料を読む",
         }},
     }
@@ -1746,7 +1746,7 @@ def test_on_event_finalize_insert_slot_and_time_validation(
     output_past = {
         "monologue": "……",
         "reaction": {"type": "insert_slot", "slot": {
-            "start": "06:00", "kind": "知る", "ref": "task:1",
+            "start": "06:00", "kind": "調べる", "ref": "task:1",
             "facility": "library", "budget_rounds": 4, "note": "x",
         }},
     }
@@ -1806,7 +1806,7 @@ def test_on_event_finalize_alert_rejects_non_engage(
     output = {
         "monologue": "後回しにしたい。",
         "reaction": {"type": "insert_slot", "slot": {
-            "start": "15:00", "kind": "知る", "ref": "task:1",
+            "start": "15:00", "kind": "調べる", "ref": "task:1",
             "facility": "library", "budget_rounds": 4, "note": "x",
         }},
     }
@@ -1833,7 +1833,7 @@ def test_day_close_dispatch_schema_and_situation(
     from saiverse.desire_engine import touch_desire
 
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": "task:1",
+        {"start": "09:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
         {**_rest_slot("21:00"), "status": "pending"},
@@ -1887,10 +1887,10 @@ def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
     ペルソナが「あえて見送る判断をした」と理由まで捏造した (接地原則違反)。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": "task:1",
+        {"start": "09:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
-        {"start": "21:00", "kind": "自分を更新する", "ref": task_refs["desire"],
+        {"start": "21:00", "kind": "日記を書く", "ref": task_refs["desire"],
          "facility": "own_room", "budget_rounds": 8, "note": "気づきの整理",
          "status": "skipped",
          "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
@@ -1904,19 +1904,19 @@ def test_day_close_situation_shows_system_skip_honestly(manager, task_refs):
 
 
 def test_day_close_situation_shows_presence_only_honestly(manager, task_refs):
-    """詳細記録の無い done (暮らし/休む スタブ) を「実行済み」として提示しない。
+    """詳細記録の無い done (presence スタブ) を「実行済み」として提示しない。
 
     2026-07-05 の実 LLM シム回帰 (異常 #4): スタブで何も実行していない暮らし
     コマが「→ 実行済み」と提示され、ペルソナが「食事の選定を行った」等、
     していない活動を自分の成果としてふりかえった (soft-confabulation)。
     """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "12:00", "kind": "暮らし", "ref": "none",
+        {"start": "12:00", "kind": "出かける", "ref": "none",
          "facility": "cafe", "budget_rounds": 0, "note": "昼の時間",
          "status": "done",
          "record_level": day_plan.RECORD_LEVEL_PRESENCE_ONLY},
         # マーカーの無い done (旧データ / セッション系) は従来どおり (後方互換)
-        {"start": "14:00", "kind": "知る", "ref": "task:1",
+        {"start": "14:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
     ])
@@ -1963,7 +1963,7 @@ def test_day_close_finalize_and_day_open_linkage(
     from saiverse.desire_engine import touch_desire
 
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "kind": "知る", "ref": "task:1",
+        {"start": "09:00", "kind": "調べる", "ref": "task:1",
          "facility": "library", "budget_rounds": 5, "note": "記事の続き",
          "status": "done"},
     ])

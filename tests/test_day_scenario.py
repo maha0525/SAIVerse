@@ -2,16 +2,16 @@
 
 mock LLM (LLM コストゼロ) で一日を端から端まで回す配線テスト:
 
-- 標準の一日: 9:00 起床 (day_open が時間割を編成) → 10:00 知る (図書館) →
-  14:00 作る (工房、mock 成果物 = 実 Item) → 15:00 ユーザー会話割り込み →
-  15:30 会話終了 (post_conversation) → 20:00 休む → 22:00 就寝 (day_close)
+- 標準の一日: 9:00 起床 (day_open が時間割を編成) → 10:00 調べる (図書館) →
+  14:00 随筆を書く (工房、mock 成果物 = 実 Item) → 15:00 ユーザー会話割り込み →
+  15:30 会話終了 (post_conversation) → 20:00 自室で過ごす → 22:00 就寝 (day_close)
   - 成果物 Item が DB に実在する
   - タスクが artifact_refs 付きで completed になる
   - 日次予算台帳が実測ラウンドで消費される
   - day_close の tomorrow_memo が翌日 day_open の状況テキストに出る (連結)
   - 一日レポートに予定 vs 実績・成果物 (saiverse:// URI)・明日の自分へのメモが含まれる
   - 実時間 30 秒未満で完走する
-- 終日不在 + 空バックログ: 全コマ 暮らし/休む でもクラッシュせずレポートが出る
+- 終日不在 + 空バックログ: 全コマ 出かける/自室で過ごす でもクラッシュせずレポートが出る
 
 判断点の LLM は MockJudgmentPulseController (judge_fn) が代替し、作業セッションの
 LLM はスクリプト応答 (document_create スペル発動テキスト → mock スペルが Item を
@@ -319,11 +319,11 @@ def _patched_spells(session_factory, created_item_ids):
 
 
 _TIMETABLE = [
-    {"start": "10:00", "kind": "知る", "title": "標本の材料を探す", "ref": "task:2",
+    {"start": "10:00", "kind": "調べる", "title": "標本の材料を探す", "ref": "task:2",
      "facility": "library", "budget_rounds": 3, "note": "図鑑コーナーを中心に見る"},
-    {"start": "14:00", "kind": "作る", "title": "共有文の下書きを書く", "ref": "task:1",
+    {"start": "14:00", "kind": "随筆を書く", "title": "共有文の下書きを書く", "ref": "task:1",
      "facility": "workshop", "budget_rounds": 8, "note": "命令調にしないこと"},
-    {"start": "20:00", "kind": "休む", "ref": "none",
+    {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
      "facility": "own_room", "budget_rounds": 0, "note": ""},
 ]
 
@@ -375,8 +375,8 @@ def _standard_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
 #: 作業セッションの mock LLM 応答 (発火順)。digest 専用コールは廃止 (D9) —
 #: ダイジェストは _standard_judge の post_session 出力が書く:
-#: セッション 1 (知る): searxng スペル → 締め
-#: セッション 2 (作る): document_create スペル → 締め
+#: セッション 1 (調べる): searxng スペル → 締め
+#: セッション 2 (随筆を書く): document_create スペル → 締め
 _SESSION_RESPONSES = [
     "まず記事を探す。\n/spell name='searxng_search' args={\"query\": \"言葉 標本 蒸留\"}",
     "めぼしい記事を確認した。今日はここまでにする。",
@@ -477,7 +477,7 @@ def test_standard_day_artifact_item_exists_and_task_completed(standard_run):
     assert task["status"] == "completed"
     assert task["artifact_refs"] == created_item_ids
 
-    # 知る コマの desire 参照 → 再訪が帳簿に載る
+    # 調べる コマの desire 参照 → 再訪が帳簿に載る
     desire = ptm.get_task(
         ptm.resolve_task_ref(PERSONA_ID, "task:2"), persona_id=PERSONA_ID,
     )
@@ -515,11 +515,11 @@ def test_standard_day_report_contents(standard_run, tmp_path):
     # 時間割: 主役 3 列は「時刻 | やること (表題) | 実績」。型・場所・参照・
     # 予算・予定メモは補足列 (まはーフィードバック #1/#2)
     assert "| 時刻 | やること | 実績 | 補足 |" in report
-    assert "| 10:00 | 標本の材料を探す | 実行済み | 知る ／ 図書館 ／ 参照: task:2 ／ 予算: 3 ／ 図鑑コーナーを中心に見る |" in report
-    assert "| 14:00 | 共有文の下書きを書く | 実行済み | 作る ／ 工房 ／ 参照: task:1 ／ 予算: 8 ／ 命令調にしないこと |" in report
+    assert "| 10:00 | 標本の材料を探す | 実行済み | 調べる ／ 図書館 ／ 参照: task:2 ／ 予算: 3 ／ 図鑑コーナーを中心に見る |" in report
+    assert "| 14:00 | 共有文の下書きを書く | 実行済み | 随筆を書く ／ 工房 ／ 参照: task:1 ／ 予算: 8 ／ 命令調にしないこと |" in report
     # title の無いコマ (休む) は kind で代替表示、場所は表示名 (後方互換)。
     # 休む (スタブ) は「実行済み」と偽らず、詳細記録が無いことを正直に示す
-    assert "| 20:00 | 休む | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report
+    assert "| 20:00 | 自室で過ごす | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report
     # 節順序: 時間割 → 就寝のふりかえり → システム的な節 (フィードバック #3)
     assert report.index("## 時間割") < report.index("## 就寝のふりかえり") \
         < report.index("## 作業セッションの成果") < report.index("## 作業予算")
@@ -618,7 +618,7 @@ def test_standard_day_episodes_recorded(standard_run):
     assert conv.BUILDING_ID == "workshop"
     assert conv.OCCURRENCE_ID == f"conv:workshop:{conv.STARTED_AT}"
 
-    # 休むコマ: presence + record_level 透過 (「実行済み」と偽らない)
+    # 自室で過ごすコマ: presence + record_level 透過 (「実行済み」と偽らない)
     rest = rows[5]
     meta_rest = json.loads(rest.META_JSON)
     assert meta_rest["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
@@ -914,7 +914,7 @@ def test_day_report_shows_system_skip_honestly(session_factory, tmp_path):
     """一日新聞: システム都合の skipped を「見送り」(本人判断) として表示しない。"""
     manager = _make_manager(session_factory, tmp_path, _standard_judge, [])
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "21:00", "kind": "自分を更新する", "ref": "none",
+        {"start": "21:00", "kind": "日記を書く", "ref": "none",
          "facility": "own_room", "budget_rounds": 8, "note": "気づきの整理",
          "title": "気づきを整理する", "status": "skipped",
          "skip_reason": day_plan.SKIP_REASON_NO_HANDLER},
@@ -934,11 +934,11 @@ def _idle_judge(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "monologue": "急ぐものは何もない。静かに過ごす。",
             "timetable": [
-                {"start": "10:00", "kind": "暮らし", "title": "静かに過ごす",
+                {"start": "10:00", "kind": "出かける", "title": "静かに過ごす",
                  "ref": "none", "facility": "own_room", "budget_rounds": 0,
                  "note": "静かな時間"},
                 # title なし (旧データ互換): 新聞は kind で代替表示する
-                {"start": "20:00", "kind": "休む", "ref": "none",
+                {"start": "20:00", "kind": "自室で過ごす", "ref": "none",
                  "facility": "own_room", "budget_rounds": 0, "note": ""},
             ],
         }
@@ -977,8 +977,8 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
     assert "の一日新聞 — 2026-07-04" in report
     # 暮らし/休む (スタブ) は「実行済み」でなく「時間を過ごした（詳細な記録
     # なし）」— していない活動の詳細をペルソナに捏造させない (異常 #4 回帰)
-    assert "| 10:00 | 静かに過ごす | 時間を過ごした（詳細な記録なし） | 暮らし ／ 自分の部屋 ／ 静かな時間 |" in report
-    assert "| 20:00 | 休む | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report  # title なし → kind 代替
+    assert "| 10:00 | 静かに過ごす | 時間を過ごした（詳細な記録なし） | 出かける ／ 自分の部屋 ／ 静かな時間 |" in report
+    assert "| 20:00 | 自室で過ごす | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report  # title なし → kind 代替
     assert "## 作業セッションの成果" in report
     assert "（なし）" in report
     assert "明日の自分へのメモ: 明日も同じように" in report

@@ -1,0 +1,7 @@
+{
+  "id": "research",
+  "name": "調べる",
+  "execution_type": "work_session",
+  "description": "フィードや文書を実際に読み、引っかかったものを深掘りして覚える",
+  "instruction_template": "目的: {note}。対象: {target}。memory_recall や searxng_search、その場に置かれた文書・フィードの読み込み等のスペルで実際に読む・調べること。完成条件: 実際に読んで得られた内容だけを短い覚え書きにまとめてあること。読めていない・調べていないことを「読んだ」「調べた」と書かないこと。実際にやったこと以外を「やった」と書かないこと。"
+}

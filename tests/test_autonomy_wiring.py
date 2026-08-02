@@ -1178,7 +1178,7 @@ def test_watchdog_noop_when_plan_and_reservations_intact(session_factory, monkey
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "11:00", "kind": "休む", "ref": "none",
+        {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -1193,10 +1193,10 @@ def test_watchdog_reschedules_lost_slot_reservations(session_factory, monkeypatc
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:30", "kind": "休む", "ref": "none",
+        {"start": "09:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": "",
          "status": "done"},
-        {"start": "11:00", "kind": "休む", "ref": "none",
+        {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     # 予約を積んでいない (= 再起動で失われた状態)。done コマは対象外。
@@ -1234,7 +1234,7 @@ def test_builtin_worker_slot_handler_fires_post_session(session_factory, monkeyp
         lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
         or {"submitted": True},
     )
-    slot = {"start": "10:00", "kind": "作る", "ref": "task:1",
+    slot = {"start": "10:00", "kind": "随筆を書く", "ref": "task:1",
             "facility": "own_room", "budget_rounds": 5, "note": ""}
     used = day_plan._handle_worker_slot(manager, PERSONA_ID, PLAN_DATE, slot, 0)
 
@@ -1265,7 +1265,7 @@ def test_builtin_worker_slot_handler_survives_judgment_failure(
         raise RuntimeError("judgment down")
 
     monkeypatch.setattr(wiring, "fire_judgment_point", _boom)
-    slot = {"start": "10:00", "kind": "知る", "ref": "none",
+    slot = {"start": "10:00", "kind": "調べる", "ref": "none",
             "facility": "own_room", "budget_rounds": 3, "note": ""}
     used = day_plan._handle_worker_slot(manager, PERSONA_ID, PLAN_DATE, slot, 0)
     assert used == 2
@@ -1373,7 +1373,7 @@ def test_slots_fire_on_real_dispatch_thread(session_factory):
     today = datetime.now().date().isoformat()
     past = (datetime.now()).strftime("%H:%M")  # 過去/現在時刻 → 即時発火
     day_plan.save_day_plan(manager, PERSONA_ID, today, [
-        {"start": past, "kind": "休む", "ref": "none",
+        {"start": past, "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     pushed = day_plan.schedule_day_plan(manager, PERSONA_ID, today)
@@ -1520,7 +1520,7 @@ def test_watchdog_overnight_midnight_with_plan_reschedules(session_factory, monk
     # 前日 (営業日) の plan を保存
     yesterday = "2026-07-04"
     day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
-        {"start": "00:30", "kind": "休む", "ref": "none",
+        {"start": "00:30", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     # 予約は push していない (= 消失状態)

@@ -927,24 +927,28 @@ def _apply_resume_now(
 
     **妥協点** (judgment_points.md §5): セッションの凍結コンテキストを復元する
     「再開機構」は未実装のため、resume_now は「凍結済み作業メモ付きタスクを参照
-    する『作る/知る』コマの現在時刻への即時挿入」で表現する。kind / facility /
-    予算は今日の時間割で同じタスクを指していた元コマから引き継ぐ (無ければ
-    「作る」/ own_room / 既定予算)。挿入されたコマは即時発火し、作業メモは
-    セッション指示書の参照先 (Track metadata) に残ったまま新セッションが走る。
+    する作業セッション系コマの現在時刻への即時挿入」で表現する。kind / facility /
+    予算は今日の時間割で同じタスクを指していた元コマから引き継ぐ (元コマが無い /
+    元コマの kind が現行の作業セッション系でない場合は「調べる」/ own_room /
+    既定予算 — 挿入コマは検証を通る有効な kind でなければならず、読み・想起
+    ベースの「調べる」が再開の既定として最も接地が破れにくい)。挿入されたコマは
+    即時発火し、作業メモはセッション指示書の参照先 (Track metadata) に残ったまま
+    新セッションが走る。
     """
     task_ref = str(resume_ctx.get("task_ref") or "").strip()
     if not task_ref:
         warnings.append("resume_now rejected: 再開対象の task_ref が不明です")
         return False
 
-    kind = day_plan_mod.KIND_CREATE
+    worker_kinds = day_plan_mod.worker_session_kinds()
+    kind = "調べる" if "調べる" in worker_kinds else worker_kinds[0]
     facility = day_plan_mod.FACILITY_OWN_ROOM
     budget = day_plan_mod.DEFAULT_BUDGET_ROUNDS
     norm = normalize_task_ref(task_ref)
     for s in day_plan_mod.load_day_plan(manager, persona_id, plan_date) or []:
         if normalize_task_ref(str(s.get("ref") or "")) == norm:
-            if s.get("kind") == day_plan_mod.KIND_LEARN:
-                kind = day_plan_mod.KIND_LEARN
+            if s.get("kind") in worker_kinds:
+                kind = s["kind"]
             facility = s.get("facility") or facility
             if int(s.get("budget_rounds") or 0) > 0:
                 budget = int(s["budget_rounds"])
