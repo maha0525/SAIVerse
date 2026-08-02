@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Anchor } from 'lucide-react';
+import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Anchor, Footprints } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
@@ -7,6 +7,7 @@ import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
 import CoreMemoryScene from './memory/CoreMemoryScene';
 import ArasujiViewer from './memory/ArasujiViewer';
+import ExperienceLedgerViewer from './memory/ExperienceLedgerViewer';
 import PulseTimelineViewer from './memory/PulseTimelineViewer';
 import ModalOverlay from './common/ModalOverlay';
 
@@ -17,7 +18,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'core_memory' | 'arasuji' | 'memopedia' | 'pulse_timeline' | 'import' | 'debug';
+type Tab = 'browser' | 'core_memory' | 'arasuji' | 'memopedia' | 'experience' | 'pulse_timeline' | 'import' | 'debug';
 
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -63,6 +64,16 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         <Book size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
                         Memopedia
                     </button>
+                    {/* 経験の台帳 (experience_ledger.md §3)。コア記憶タブ拡張でなく
+                        新タブ: コア記憶=常駐・編集可の実データ / 台帳=参照専用の
+                        動的合成ビュー、という性質差を画面でも分ける。 */}
+                    <button
+                        className={`${styles.tab} ${activeTab === 'experience' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('experience')}
+                    >
+                        <Footprints size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        経験
+                    </button>
                     <button
                         className={`${styles.tab} ${activeTab === 'pulse_timeline' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('pulse_timeline')}
@@ -91,6 +102,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {activeTab === 'core_memory' && <CoreMemoryScene personaId={personaId} />}
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
+                    {activeTab === 'experience' && <ExperienceLedgerViewer personaId={personaId} />}
                     {activeTab === 'pulse_timeline' && <PulseTimelineViewer personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}
