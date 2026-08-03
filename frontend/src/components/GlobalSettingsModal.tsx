@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes } from 'lucide-react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
 import ModelManagementPanel from './settings/ModelManagementPanel';
+import FeedManagementPanel from './settings/FeedManagementPanel';
 import ModalOverlay from './common/ModalOverlay';
 
 interface GlobalSettingsModalProps {
@@ -46,7 +47,7 @@ interface PlaybookPermEntry {
     permission_level: string;
 }
 
-type TabId = 'env' | 'world' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
+type TabId = 'env' | 'world' | 'feeds' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
 type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
@@ -538,6 +539,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             <Globe size={18} /> ワールドエディタ
                         </div>
                         <div
+                            className={`${styles.navItem} ${activeTab === 'feeds' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('feeds')}
+                        >
+                            <Rss size={18} /> フィード
+                        </div>
+                        <div
                             className={`${styles.navItem} ${activeTab === 'models' ? styles.active : ''}`}
                             onClick={() => setActiveTab('models')}
                         >
@@ -872,6 +879,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {modelMgmtSubTab === 'models' && <ModelManagementPanel />}
                             </div>
                         )}
+
+                        {activeTab === 'feeds' && <FeedManagementPanel />}
 
                         {activeTab === 'playbooks' && (
                             <div className={styles.envContainer}>

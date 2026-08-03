@@ -906,6 +906,89 @@ class ObserverMetric(Base):
     )
 
 
+# --- Feed intake (RSS/Atom) — docs/intent/rss_feed_intake.md ---
+
+class FeedSubscription(Base):
+    """フィード購読 1 本。持ち主は Fixture (intent §10-1 裁定: Building 直でなく Fixture)。
+
+    ETAG / LAST_MODIFIED は条件付き GET (304) 用のキャッシュ帳簿。
+    CONSECUTIVE_FAILURES / LAST_ERROR は健康チェック (連続失敗フィードの検出) 用。
+    これらは内部帳簿であり、ペルソナに見える Fixture.STATE_JSON へは書かない。
+    """
+    __tablename__ = "feed_subscription"
+    SUBSCRIPTION_ID = Column(String(36), primary_key=True)
+    FIXTURE_ID = Column(String(36), ForeignKey("fixture.FIXTURE_ID"), nullable=False)
+    FEED_URL = Column(String(512), nullable=False)
+    SITE_URL = Column(String(512), nullable=True)
+    TITLE = Column(String(255), default="", nullable=False)
+    ENABLED = Column(Boolean, default=True, nullable=False)
+    ETAG = Column(String(255), nullable=True)
+    LAST_MODIFIED = Column(String(255), nullable=True)
+    LAST_OK_AT = Column(DateTime, nullable=True)
+    LAST_ERROR = Column(String(512), nullable=True)
+    CONSECUTIVE_FAILURES = Column(Integer, default=0, nullable=False)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        Index('idx_feed_sub_fixture', 'FIXTURE_ID'),
+        # 同一 Fixture への同一 URL 購読の重複防止 (add_subscription は
+        # get-or-create、この制約は DB 側の最終防衛線)。既存 DB へは
+        # migrate.py の _ensure_feed_tables が UNIQUE INDEX として適用する。
+        UniqueConstraint('FIXTURE_ID', 'FEED_URL', name='uq_feed_sub_fixture_url'),
+    )
+
+
+class FeedItem(Base):
+    """取得済みフィード記事 1 件。転載のみ (要約・言い換えなし — intent 不変条件 1)。
+
+    (SUBSCRIPTION_ID, GUID) 一意で再取得時の重複保存を防ぐ。id (autoincrement) が
+    ペルソナ既読カーソル (FeedReadCursor.LAST_ITEM_ID) の座標になる。
+    カーソル (id > LAST_ITEM_ID) と剪定の id 上限ガードは「一度使った id は
+    再利用されない」単調性を前提にするため、SQLite の AUTOINCREMENT を明示する
+    (sqlite_autoincrement) — 素の INTEGER PRIMARY KEY は最大 id の行を削除
+    (published 順の剪定・購読削除) すると次の INSERT が同じ id を再利用し、
+    カーソルより小さい id の新着が永久に配送から漏れる (二十巡目 V1)。
+    既存 DB のテーブルへは migrate.py の _rebuild_feed_item_with_autoincrement
+    が再構築で適用する。
+    """
+    __tablename__ = "feed_item"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    SUBSCRIPTION_ID = Column(
+        String(36), ForeignKey("feed_subscription.SUBSCRIPTION_ID"), nullable=False
+    )
+    GUID = Column(String(512), nullable=False)
+    TITLE = Column(Text, default="", nullable=False)
+    SUMMARY = Column(Text, default="", nullable=False)
+    LINK = Column(String(512), default="", nullable=False)
+    PUBLISHED_AT = Column(DateTime, nullable=True)
+    FETCHED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint('SUBSCRIPTION_ID', 'GUID', name='uq_feed_item_sub_guid'),
+        Index('idx_feed_item_sub', 'SUBSCRIPTION_ID', 'id'),
+        # CREATE TABLE に AUTOINCREMENT を出す (id 単調性 — docstring 参照)
+        {"sqlite_autoincrement": True},
+    )
+
+
+class FeedReadCursor(Base):
+    """ペルソナごとの「ここまで見た」カーソル (intent §13)。
+
+    既読状態はペルソナの持ち物 — Building を共有しても既読は混ざらない
+    (intent 不変条件 3)。フィード (購読) ごとに位置を 1 つ持つ。
+    """
+    __tablename__ = "feed_read_cursor"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    PERSONA_ID = Column(String(255), nullable=False)
+    SUBSCRIPTION_ID = Column(
+        String(36), ForeignKey("feed_subscription.SUBSCRIPTION_ID"), nullable=False
+    )
+    LAST_ITEM_ID = Column(Integer, nullable=False, default=0)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint('PERSONA_ID', 'SUBSCRIPTION_ID', name='uq_feed_cursor_persona_sub'),
+    )
+
+
 class RealtimeSpellBinding(Base):
     """リアルタイム情報枠に自動挿入するスペルの設定。
 

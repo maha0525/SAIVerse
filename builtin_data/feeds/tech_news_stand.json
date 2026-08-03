@@ -1,0 +1,12 @@
+{
+  "id": "tech_news_stand",
+  "name": "技術ニューススタンド",
+  "description": "技術系の読み物が届く新聞スタンド",
+  "fixture_name": "技術ニューススタンド",
+  "fixture_description": "技術系の読み物が届く新聞スタンド。新着記事のタイトルが並んでいて、気になったものはリンク先で全文を読める。",
+  "feeds": [
+    {"url": "https://zenn.dev/feed", "title": "Zennのトレンド"},
+    {"url": "https://www.publickey1.jp/atom.xml", "title": "Publickey"},
+    {"url": "https://pc.watch.impress.co.jp/data/rss/1.0/pcw/feed.rdf", "title": "PC Watch"}
+  ]
+}

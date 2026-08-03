@@ -262,12 +262,84 @@ def migrate_database_in_place(db_path: str):
                 logging.warning(f"  - ソースにテーブル '{table_name}' が存在しないため、スキップします。")
                 continue
 
+            # フィード 3 テーブルは新スキーマで unique 制約 + NOT NULL 付きに
+            # なるため、開発期 DB の重複行・NULL 入り行をそのままコピーすると
+            # INSERT が IntegrityError → migration 全体がロールバックして
+            # 起動不能になる。コピーの SELECT 自体を「勝者行のみ + 既定値
+            # backfill」の決定論フィルタに置き換えて塞ぐ
+            # (_feed_copy_filter_select)。ソース = バックアップには一切
+            # 書かない — 後続の移行失敗時のロールバックが「無傷の元」を
+            # 復元できることがバックアップの存在意義のため。
+            missing_feed_keys = _feed_copy_missing_key_columns(
+                source_inspector, table_name
+            )
+            if missing_feed_keys:
+                # フィルタ SQL が参照するキー列を欠く部分スキーマの野生 DB。
+                # 存在しない列を含む SQL は生成しない (実行した時点で
+                # "no such column" → migration 全体が落ちる — 二十二巡目 Z1)。
+                # 空表なら 0 行コピーで続行、行があるなら重複・孤児の判定
+                # 自体が不能 = 修復不能な部分スキーマとして明示的に止める。
+                with source_engine.connect() as src_conn:
+                    partial_rows = src_conn.execute(text(
+                        f'SELECT COUNT(*) FROM "{table_name}"'
+                    )).scalar() or 0
+                if partial_rows:
+                    # AA2 (二十三巡目): feed_item の id 欠落は「判定不能」
+                    # ではなく「コピー時の自動採番で id が振り直され、配送
+                    # カーソルの座標を復元できない」のが停止理由 — 指針に
+                    # それを書く ("id" は feed_item のキー列にのみ含まれる)
+                    if "id" in missing_feed_keys:
+                        reason = (
+                            "id 列の無い記事表はコピー時の自動採番で id が"
+                            "振り直され、配送カーソルの座標を復元できない"
+                        )
+                    else:
+                        reason = "重複・孤児の判定ができない"
+                    raise RuntimeError(
+                        f"テーブル '{table_name}' はキー列 "
+                        f"{', '.join(missing_feed_keys)} を欠く部分スキーマの"
+                        f"まま {partial_rows} 行を持っており、{reason}ため"
+                        "移行できません。移行は中止され元 DB が復元されます "
+                        "— 当該テーブルの行を退避・削除するか、キー列を"
+                        "補ってから再実行してください。"
+                    )
+                logging.warning(
+                    "テーブル '%s' はキー列 %s を欠く部分スキーマですが空の"
+                    "ため、0 行コピーで続行します (新スキーマで空のまま"
+                    "作り直されます)",
+                    table_name, ", ".join(missing_feed_keys),
+                )
+                continue
+            feed_filter_sql = _feed_copy_filter_select(
+                table_name,
+                source_inspector=source_inspector,
+                dialect=source_engine.dialect,
+            )
+
             try:
                 # ソーステーブルからデータを読み取る
                 with source_engine.connect() as src_conn:
-                    result = src_conn.execute(text(f'SELECT * FROM "{table_name}"'))
+                    total_rows = None
+                    if feed_filter_sql is not None:
+                        total_rows = src_conn.execute(text(
+                            f'SELECT COUNT(*) FROM "{table_name}"'
+                        )).scalar() or 0
+                    result = src_conn.execute(text(
+                        feed_filter_sql
+                        if feed_filter_sql is not None
+                        else f'SELECT * FROM "{table_name}"'
+                    ))
                     source_columns = list(result.keys())
                     rows = result.fetchall()
+
+                if total_rows is not None and total_rows > len(rows):
+                    # 黙って間引かない: 何件をコピー対象から外したか表明する
+                    logging.warning(
+                        "テーブル '%s' の重複・親なし・必須キー NULL の"
+                        "フィード行 %d 件をコピー対象から除外しました "
+                        "(バックアップ側には全行が残っています)",
+                        table_name, total_rows - len(rows),
+                    )
 
                 if not rows:
                     logging.info(f"  - テーブル '{table_name}' は空なので、スキップします。")
@@ -339,6 +411,11 @@ def migrate_database_in_place(db_path: str):
 
         # Post-migration: assign world-global short_ids to existing items.
         _backfill_item_short_ids(target_engine)
+
+        # Post-migration: feed_item の採番高水位をソース (剪定前の真の値) と
+        # 配送カーソルから継承する — コピーだけでは sequence が現存行の最大
+        # id までしか進まず、剪定済みの高 id を指すカーソルを下回る (Y1)。
+        _inherit_feed_item_sequence_high_water(source_engine, target_engine)
 
         # Post-migration: demote legacy STATUS_WAITING Tracks to 'pending'.
         # waiting_for / waiting_timeout_at columns are dropped by the schema
@@ -1075,6 +1152,686 @@ def ensure_episode_inheritance_table(db_path: str) -> None:
     engine = create_engine(f"sqlite:///{db_path}")
     try:
         _ensure_episode_inheritance_table(engine)
+    finally:
+        engine.dispose()
+
+
+def _ensure_feed_tables(engine) -> None:
+    """フィード取り込み 3 テーブル (feed_subscription / feed_item / feed_read_cursor)
+    を軽量パスで現行スキーマへ収束させる。
+
+    docs/intent/rss_feed_intake.md。新規テーブルは needs_migration →
+    try_additive_migration の汎用パス (missing_tables → CREATE TABLE) でも作られる
+    が、実行台帳・Building Memory と同様「テーブル追加は素早く確実に適用したい」
+    ため冪等な軽量シンク経路を別途持つ。既存 DB へはテーブル追加 (購読 0 本で
+    無害) に加え、欠落列の補修・既存 NULL の既定値埋め (二十二巡目 Z3)・
+    重複修復・feed_item の AUTOINCREMENT 再構築・採番高水位の継承・一意
+    index 補修で現行スキーマへ収束させる。
+
+    全工程を**単一 transaction** で行う (二十一巡目 Y2)。以前は列補修を
+    schema_sync (engine 単位・独立 commit) に委ねていたが、nullable・default
+    なしの ALTER が先に確定すると、後段の再構築 INSERT SELECT が NOT NULL 列の
+    NULL で失敗 → rollback しても ALTER だけが残り、次回起動も同じ地点で失敗
+    する「起動不能の固定化」になる。単一 transaction なら途中で何が失敗しても
+    DB は手つかずの旧形に戻り、原因解消後の再実行で最初からやり直せる。
+
+    一意 index 3 本の明示補修 (models.py の uq_feed_sub_fixture_url /
+    uq_feed_item_sub_guid / uq_feed_cursor_persona_sub) について:
+    UniqueConstraint は既存テーブルに ALTER で足せないため、既存 dev 環境にも
+    効くよう UNIQUE INDEX で適用する。現行モデルの CREATE TABLE には制約が
+    入っているため通常は既在で no-op — 制約なしの旧形テーブルへの収束用。
+
+    index 作成の前に、同一キーの重複行を決定論で削除修復する。野生の重複は
+    この機能の開発期の DB にのみ存在しうる。記事・カーソルは再取得で再生
+    する消耗データなので、決定論の削除修復が安全。重複を例外で表明して
+    migration を止めると Web UI が起動できず、「UI から削除して再実行」の
+    案内自体が実行不能になる (2026-08-03 裁定)。
+
+    修復後の index 作成失敗は migration 失敗として例外で表明する (続行
+    しない) — 修復済みの DB で作成が失敗する正当な理由は無い。index 無しで
+    走ると add_subscription の IntegrityError 収束 (同時 POST の
+    get-or-create) が効かず、重複購読を黙って作る。一時ロック等の一過性の
+    失敗も、握り潰すのではなく migration の再実行で解決するのが正しい。
+    """
+    from database.models import FeedSubscription, FeedItem, FeedReadCursor
+    try:
+        with engine.begin() as conn:
+            # pysqlite (既定の legacy isolation) は BEGIN の発行を最初の DML
+            # まで遅延し、それより前の DDL は engine.begin() の中でも
+            # autocommit で即確定する (rollback で戻らない — 実測)。冒頭で
+            # 明示 BEGIN を発行し、以降の CREATE / ALTER / 再構築 / index
+            # 作成を全て同一 transaction に収める。
+            raw = conn.connection.dbapi_connection
+            if raw is not None and not getattr(raw, "in_transaction", False):
+                conn.exec_driver_sql("BEGIN")
+            # FK (feed_item / feed_read_cursor → feed_subscription) があるため
+            # 購読を先に作る
+            for table in (
+                FeedSubscription.__table__,
+                FeedItem.__table__,
+                FeedReadCursor.__table__,
+            ):
+                _sync_feed_table_schema(conn, table)
+            # 列補修の直後・重複修復より前に、既存行の NULL を既定値で埋める
+            # (二十二巡目 Z3)。NULL の LAST_ITEM_ID は重複カーソル修復の
+            # 大小比較を壊すため、修復より前であることに意味がある
+            _backfill_feed_null_columns(conn)
+            _repair_duplicate_feed_rows(conn)
+            # 重複修復の後・index 補修の前に呼ぶ — 新テーブルは unique 制約
+            # 付きのため、重複が残っていると再構築のコピー INSERT が
+            # IntegrityError になる (関数 docstring 参照)
+            _rebuild_feed_item_with_autoincrement(conn)
+            # 採番の高水位をカーソルから継承する (二十一巡目 Y1)。再構築の
+            # 有無に関わらず毎回検査する冪等な補修 — 過去に低く戻った
+            # sequence もここで治る
+            _bump_feed_item_sequence(conn)
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS uq_feed_sub_fixture_url '
+                'ON feed_subscription ("FIXTURE_ID", "FEED_URL")'
+            ))
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS uq_feed_item_sub_guid '
+                'ON feed_item ("SUBSCRIPTION_ID", "GUID")'
+            ))
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS uq_feed_cursor_persona_sub '
+                'ON feed_read_cursor ("PERSONA_ID", "SUBSCRIPTION_ID")'
+            ))
+    except Exception as e:
+        logging.error(
+            "フィードテーブルの整備に失敗しました (全工程を rollback): %s",
+            e, exc_info=True,
+        )
+        raise
+
+
+def _sync_feed_table_schema(conn, table) -> None:
+    """feed 表 1 枚の CREATE / 欠落列 ALTER / index 補修を、呼び出し元の
+    transaction 内 (connection 上) で行う。
+
+    schema_sync.ensure_table_columns_indexes と同じ収束 (未作成なら CREATE /
+    列不足なら ALTER / index 不足なら CREATE INDEX) の feed 専用版。共有の
+    schema_sync は engine 単位で ALTER を独立 commit するため、後段の再構築が
+    失敗して rollback しても ALTER だけが残る (_ensure_feed_tables docstring の
+    「起動不能の固定化」)。feed 表は列補修〜再構築〜index 補修を単一
+    transaction に収める必要があり、connection を受ける自前実装を持つ。
+
+    ALTER の列定義は try_additive_migration と同じ規則: スカラー default を
+    持つ列は DEFAULT を付ける (NOT NULL ならそれも付け、既存行は default 値で
+    埋まる)。それ以外 (server_default = CURRENT_TIMESTAMP 等は SQLite の
+    ADD COLUMN に載せられない) は素の nullable 列として足す — feed_item の
+    既存行に残る NULL は _rebuild_feed_item_with_autoincrement のコピーが
+    COALESCE で埋める。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    insp = sa_inspect(conn)
+    if not insp.has_table(table.name):
+        # 現行モデル DDL そのまま (unique 制約 + AUTOINCREMENT + index 込み)
+        table.create(bind=conn)
+        logging.info("%s テーブルを新規作成しました", table.name)
+        return
+    existing_cols = {c["name"] for c in insp.get_columns(table.name)}
+    for col in table.columns:
+        if col.name in existing_cols:
+            continue
+        ddl = (
+            f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" '
+            f'{col.type.compile(dialect=conn.dialect)}'
+        )
+        default_sql = _render_default_sql(col)
+        if default_sql is not None:
+            if not col.nullable:
+                ddl += " NOT NULL"
+            ddl += f" DEFAULT {default_sql}"
+        conn.execute(text(ddl))
+        logging.info("ALTER TABLE %s: 列追加 %s", table.name, col.name)
+    existing_idx = {idx["name"] for idx in insp.get_indexes(table.name)}
+    for idx in table.indexes:
+        if idx.name not in existing_idx:
+            idx.create(bind=conn)
+            logging.info("CREATE INDEX: %s", idx.name)
+
+
+def _backfill_feed_null_columns(conn) -> None:
+    """フィード 3 表の「モデル上 NOT NULL かつ安全な既定値を持つ列」に残る
+    NULL を既定値で埋める UPDATE (冪等・軽量、毎起動実行)。
+
+    _ensure_feed_tables の同一 transaction 内、列補修の直後・重複修復の前に
+    呼ばれる。過去の補修が残した NULL — 例えば AUTOINCREMENT 化済みの
+    feed_item は再構築 (COALESCE backfill 込み) がもう走らないため、旧版の
+    補修が nullable ALTER で足した列の NULL が残存し続ける — を放置すると、
+    後日の全書換 migration のコピーで NOT NULL 違反として表面化する
+    (二十二巡目 Z3)。また NULL の LAST_ITEM_ID は重複カーソル修復
+    (_repair_duplicate_feed_rows) の大小比較を NULL にして修復漏れ →
+    一意 index 作成失敗を起こすため、修復より前に埋める。
+
+    nullability の DDL (NOT NULL 制約の付け直し) までは行わない — SQLite の
+    制約変更は表の再構築が必要で、NULL さえ残っていなければ実害が無い
+    (将来の全書換 migration が新 DDL の表を作って正す)。安全な既定値の無い
+    参照キー列 (GUID 等) の NULL もここでは触らない — 行の削除は重複・孤児
+    と違い「消耗データの再生」で正当化できず、軽量シンクの越権になる。
+    全書換時はコピーフィルタが当該行をスキップする (Z2)。
+    """
+    from database.models import FeedSubscription, FeedItem, FeedReadCursor
+    repaired = []
+    for table in (
+        FeedSubscription.__table__,
+        FeedItem.__table__,
+        FeedReadCursor.__table__,
+    ):
+        for col in table.columns:
+            if col.nullable or col.primary_key:
+                continue
+            backfill_sql = _feed_not_null_backfill_sql(col, conn.dialect)
+            if backfill_sql is None:
+                continue
+            count = conn.execute(text(
+                f'UPDATE {table.name} SET "{col.name}" = {backfill_sql} '
+                f'WHERE "{col.name}" IS NULL'
+            )).rowcount
+            if count:
+                repaired.append(f"{table.name}.{col.name} = {count} 行")
+    if repaired:
+        # 黙って直さない: どの列を何行埋めたか表明する
+        logging.warning(
+            "フィード表の NOT NULL 列に残っていた NULL をモデル既定値で"
+            "埋めました: %s", " / ".join(repaired),
+        )
+
+
+def _bump_feed_item_sequence(conn, extra_high: int = 0) -> None:
+    """feed_item の採番 (sqlite_sequence) を配送カーソルの高水位以上へ進める。
+
+    配送カーソル (FeedReadCursor.LAST_ITEM_ID) の座標系は「過去に採番された
+    どの id も再利用されない」が前提だが、剪定・購読削除は最大 id の行を普通に
+    消すため、**現存行だけからは剪定済みの高水位を復元できない**。再構築や
+    全書換のコピーで sqlite_sequence が「現存行の最大 id」まで戻ると、剪定済み
+    の高 id を指すカーソルより小さい id が新規記事に振られ、`id > LAST_ITEM_ID`
+    の配送から永久に漏れる (空表なら採番が 1 から再開して非再利用も崩れる —
+    二十一巡目 Y1)。現存 feed_item.id の最大・全カーソルの LAST_ITEM_ID の
+    最大・既存 sequence 値・呼び出し元が知る追加の高水位 (extra_high、全書換の
+    ソース側 sequence 値) の最大まで明示的に進める。下げる方向には触らない。
+    """
+    if conn.execute(text(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'sqlite_sequence'"
+    )).fetchone() is None:
+        # AUTOINCREMENT 表が 1 つも無い DB には sqlite_sequence 自体が無い。
+        # feed_item は直前の CREATE / 再構築で AUTOINCREMENT 化済みのはずで
+        # 通常は到達しない (防御のみ)
+        return
+    max_id = conn.execute(
+        text('SELECT MAX(id) FROM feed_item')
+    ).scalar() or 0
+    max_cursor = conn.execute(
+        text('SELECT MAX("LAST_ITEM_ID") FROM feed_read_cursor')
+    ).scalar() or 0
+    row = conn.execute(text(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'feed_item'"
+    )).fetchone()
+    cur_seq = int(row[0]) if row is not None and row[0] is not None else 0
+    high = max(int(max_id), int(max_cursor), int(extra_high))
+    if high <= cur_seq:
+        return
+    if row is None:
+        conn.execute(
+            text("INSERT INTO sqlite_sequence (name, seq) "
+                 "VALUES ('feed_item', :high)"),
+            {"high": high},
+        )
+    else:
+        conn.execute(
+            text("UPDATE sqlite_sequence SET seq = :high "
+                 "WHERE name = 'feed_item'"),
+            {"high": high},
+        )
+    logging.info(
+        "feed_item の採番高水位を %d から %d へ進めました "
+        "(配送カーソルの前提 = id 非再利用の維持)", cur_seq, high,
+    )
+
+
+def _repair_duplicate_feed_rows(conn) -> None:
+    """一意 index 作成前の、フィード 3 テーブルの重複行の決定論修復。
+
+    _ensure_feed_tables の同一 transaction 内で呼ばれる (3 表とも存在)。
+    移行済み (または軽量シンク済み) の DB 自身に対する操作であり、全書換
+    migration のソース = バックアップには触れない (そちらはコピー時フィルタ
+    _feed_copy_filter_select が同じ決定論規則で間引く。ただし孤児の子行の
+    扱いだけ異なる — 修復は既存 DB の行を残す = 消すのは重複解消に必要な
+    分だけ、コピーは新 DB へ運ばない)。修復規則:
+
+    - feed_subscription: 同一 (FIXTURE_ID, FEED_URL) は最古の 1 行
+      (rowid 最小) を残して後発を削除。従属する feed_item /
+      feed_read_cursor も同一 transaction で道連れ削除。
+    - feed_item: 同一 (SUBSCRIPTION_ID, GUID) は rowid 最小を残す。
+    - feed_read_cursor: 同一 (PERSONA_ID, SUBSCRIPTION_ID) は既読が
+      最も進んだ行 (LAST_ITEM_ID 最大、同値なら rowid 最小) を残す —
+      巻き戻すと配送済み記事の重複配送になるため。
+
+    何行消したかは WARNING ログで表明する (黙って消さない)。
+    """
+    # 後発の重複購読 (rowid 最小でない行) を特定する述語
+    loser_subs = (
+        'SELECT "SUBSCRIPTION_ID" FROM feed_subscription WHERE rowid NOT IN ('
+        'SELECT MIN(rowid) FROM feed_subscription '
+        'GROUP BY "FIXTURE_ID", "FEED_URL")'
+    )
+    orphan_items = conn.execute(text(
+        f'DELETE FROM feed_item WHERE "SUBSCRIPTION_ID" IN ({loser_subs})'
+    )).rowcount
+    orphan_cursors = conn.execute(text(
+        f'DELETE FROM feed_read_cursor WHERE "SUBSCRIPTION_ID" IN ({loser_subs})'
+    )).rowcount
+    dup_subs = conn.execute(text(
+        'DELETE FROM feed_subscription WHERE rowid NOT IN ('
+        'SELECT MIN(rowid) FROM feed_subscription '
+        'GROUP BY "FIXTURE_ID", "FEED_URL")'
+    )).rowcount
+    dup_items = conn.execute(text(
+        'DELETE FROM feed_item WHERE rowid NOT IN ('
+        'SELECT MIN(rowid) FROM feed_item GROUP BY "SUBSCRIPTION_ID", "GUID")'
+    )).rowcount
+    dup_cursors = conn.execute(text(
+        'DELETE FROM feed_read_cursor AS c WHERE EXISTS ('
+        'SELECT 1 FROM feed_read_cursor AS k '
+        'WHERE k."PERSONA_ID" = c."PERSONA_ID" '
+        'AND k."SUBSCRIPTION_ID" = c."SUBSCRIPTION_ID" '
+        'AND (k."LAST_ITEM_ID" > c."LAST_ITEM_ID" '
+        'OR (k."LAST_ITEM_ID" = c."LAST_ITEM_ID" AND k.rowid < c.rowid)))'
+    )).rowcount
+    if dup_subs or dup_items or dup_cursors or orphan_items or orphan_cursors:
+        logging.warning(
+            "フィードの重複行を修復しました: 重複購読 %d 行 (従属記事 %d 行・"
+            "従属カーソル %d 行を道連れ削除) / 重複記事 %d 行 / "
+            "重複カーソル %d 行",
+            dup_subs, orphan_items, orphan_cursors, dup_items, dup_cursors,
+        )
+
+
+def _rebuild_feed_item_with_autoincrement(conn) -> None:
+    """feed_item テーブルに AUTOINCREMENT が無ければ再構築して付与する (冪等)。
+
+    FeedItem.id は配送カーソル (FeedReadCursor.LAST_ITEM_ID より新しいか) と
+    剪定の id 上限ガードの座標で、「一度使った id は再利用されない」単調性が
+    前提。素の INTEGER PRIMARY KEY (rowid の別名) は最大 id の行を削除すると
+    次の INSERT が同じ id を再利用する — 剪定は published 順で残す行を選ぶため
+    最大 id の行 (newest-first 初回取り込みの最古記事) を普通に消すし、購読
+    削除も記事を丸ごと消す。再利用が起きるとカーソルより小さい id の新着が
+    永久に配送から漏れる (二十巡目 V1)。
+
+    models.py は sqlite_autoincrement で新規 CREATE に AUTOINCREMENT を出すが
+    (全書換 migration の Base.metadata.create_all 経路も同じ定義で作る)、
+    それ以前に作られた既存テーブルには SQLite の制約上 ALTER で足せず、
+    再構築 (rename → 新 CREATE → INSERT SELECT → DROP) でしか直せない。
+    本機能は未リリースで対象は開発期 dev DB のみ。呼び出し元
+    (_ensure_feed_tables) の同一 transaction 内で行い、失敗すれば丸ごと
+    rollback する。行と id は保存される。コピー INSERT が進める
+    sqlite_sequence は「現存行の最大 id」まで — 剪定済みの高 id を指す配送
+    カーソルには届かないため、直後に _bump_feed_item_sequence が高水位を
+    継承する (二十一巡目 Y1)。
+
+    順序の前提: _repair_duplicate_feed_rows の**後**に呼ぶこと — 新テーブルは
+    unique 制約 (uq_feed_item_sub_guid) 付きのため、重複行が残っていると
+    コピー INSERT が IntegrityError で失敗する。
+
+    必須キー (SUBSCRIPTION_ID / GUID — 既定値で救えない NOT NULL 列) が
+    NULL の行は、全書換のコピーフィルタ (Z2) と同じ規則でコピーから
+    スキップし、件数を WARNING で表明する (二十三巡目 AA1)。素通しすると
+    新テーブルの NOT NULL 制約でコピー INSERT が失敗し、migration 全体が
+    rollback → 毎起動同じ地点で失敗する起動不能になる。起動時 backfill
+    (_backfill_feed_null_columns) は既定値のある列しか埋めないため、
+    ここに必ず届きうる。
+    """
+    from sqlalchemy.schema import CreateTable
+    from database.models import FeedItem
+
+    row = conn.execute(text(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'feed_item'"
+    )).fetchone()
+    if row is None or "AUTOINCREMENT" in (row[0] or "").upper():
+        return
+    conn.execute(text('ALTER TABLE feed_item RENAME TO feed_item_pre_autoinc'))
+    # 現行モデル定義そのままの DDL (AUTOINCREMENT + unique 制約 + FK 込み)
+    conn.execute(text(str(CreateTable(FeedItem.__table__).compile(conn.engine))))
+    # NOT NULL 列は COALESCE でモデル既定値へ backfill する (二十一巡目 Y2)。
+    # 旧形テーブルへの列補修 (_sync_feed_table_schema) は server_default
+    # (FETCHED_AT の CURRENT_TIMESTAMP) を ADD COLUMN に載せられず nullable で
+    # 足すため、既存行の当該列は NULL のまま — 素通しでコピーすると新テーブル
+    # の NOT NULL 制約で migration 全体が失敗する
+    cols = []
+    select_exprs = []
+    for col in FeedItem.__table__.columns:
+        cols.append(f'"{col.name}"')
+        expr = f'"{col.name}"'
+        if not col.nullable and not col.primary_key:
+            backfill_sql = _feed_not_null_backfill_sql(col, conn.dialect)
+            if backfill_sql is not None:
+                expr = f'COALESCE("{col.name}", {backfill_sql})'
+        select_exprs.append(expr)
+    # 必須キー NULL 行のスキップ (AA1 — 規則は docstring 参照)。述語は旧表の
+    # 実在列から組む (直前の _sync_feed_table_schema で列は補修済みだが、
+    # 存在しない列を参照する SQL は生成しないという Z1 の規律に合わせる)
+    old_cols = {
+        r[1] for r in conn.execute(text(
+            "PRAGMA table_info('feed_item_pre_autoinc')"
+        ))
+    }
+    required_pred = _feed_required_key_predicate(
+        "feed_item", old_cols, conn.dialect,
+    )
+    skipped = conn.execute(text(
+        'SELECT COUNT(*) FROM feed_item_pre_autoinc '
+        f'WHERE NOT ({required_pred})'
+    )).scalar() or 0
+    if skipped:
+        # 黙って間引かない: 何行をコピー対象から外したか表明する
+        logging.warning(
+            "feed_item の AUTOINCREMENT 再構築で、必須キーが NULL の %d 行を"
+            "コピー対象から除外しました (既定値で救えない修復不能行)",
+            skipped,
+        )
+    conn.execute(text(
+        f'INSERT INTO feed_item ({", ".join(cols)}) '
+        f'SELECT {", ".join(select_exprs)} FROM feed_item_pre_autoinc '
+        f'WHERE {required_pred}'
+    ))
+    # DROP は旧テーブルに付いていた index (idx_feed_item_sub / 補修済みの
+    # uq_feed_item_sub_guid) も道連れに消す — 新テーブル側へここで作り直す
+    # (uq index は直後の _ensure_feed_tables の補修が立てる)
+    conn.execute(text('DROP TABLE feed_item_pre_autoinc'))
+    conn.execute(text(
+        'CREATE INDEX IF NOT EXISTS idx_feed_item_sub '
+        'ON feed_item ("SUBSCRIPTION_ID", "id")'
+    ))
+    logging.info(
+        "feed_item テーブルを AUTOINCREMENT 付きで再構築しました "
+        "(配送カーソルの前提 = id 単調性の獲得)"
+    )
+
+
+def _feed_not_null_backfill_sql(column, dialect) -> "str | None":
+    """フィード表の NOT NULL 列の NULL を埋める既定値 SQL (モデル定義から導出)。
+
+    feed_item の再構築コピー・全書換コピーフィルタの COALESCE (Z2)・起動時の
+    NULL 埋め UPDATE (Z3) が共用する。スカラー default (TITLE / SUMMARY /
+    LINK の '') は _render_default_sql、server_default (FETCHED_AT 等の
+    CURRENT_TIMESTAMP) は SQL 式としてコンパイルして返す。どちらも無い列
+    (SUBSCRIPTION_ID / GUID — NULL ならその行自体が壊れている) は None =
+    backfill しない (行の扱いは呼び出し元の責務)。
+    """
+    default_sql = _render_default_sql(column)
+    if default_sql is not None:
+        return default_sql
+    server_default = getattr(column, "server_default", None)
+    arg = getattr(server_default, "arg", None)
+    if arg is None:
+        return None
+    try:
+        return str(arg.compile(dialect=dialect))
+    except Exception:
+        return None
+
+
+def _inherit_feed_item_sequence_high_water(source_engine, target_engine) -> None:
+    """全書換 migration 後、feed_item の採番高水位をソース DB から継承する。
+
+    全書換は新 DB (Base.metadata.create_all) を作ってから行をコピーするため、
+    sqlite_sequence は「コピーされた行の最大 id」までしか進まない。剪定済みの
+    高 id を指す配送カーソル (FeedReadCursor.LAST_ITEM_ID) がそれを上回って
+    いると、新規記事がカーソル未満の id で採番され `id > LAST_ITEM_ID` の
+    配送から永久に漏れる (二十一巡目 Y1 — 理由の詳細は
+    _bump_feed_item_sequence の docstring)。コピー後のターゲット側で、現存
+    最大 id・カーソル最大値に加え、ソース側 sqlite_sequence の値 (剪定前の
+    真の高水位を含む) 以上へ明示的に進める。
+    """
+    src_seq = 0
+    with source_engine.connect() as conn:
+        if conn.execute(text(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'sqlite_sequence'"
+        )).fetchone() is not None:
+            src_seq = conn.execute(text(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'feed_item'"
+            )).scalar() or 0
+    with target_engine.begin() as conn:
+        _bump_feed_item_sequence(conn, extra_high=int(src_seq))
+
+
+# _feed_copy_filter_select が生成する SQL の参照するキー列 (自表側) に加え、
+# コピーが意味を保つために欠けてはならない必須コピーキー列。部分スキーマの
+# 野生 DB でこれらが欠けていると、生成した SQL 自体が "no such column" で
+# 落ちるか、コピー結果が意味を失う。呼び出し元は生成前に
+# _feed_copy_missing_key_columns で実列を検査する (二十二巡目 Z1)。
+#
+# feed_item の id はフィルタ SQL には現れないが必須コピーキー (二十三巡目
+# AA2): id 列の無い表をコピーすると INSERT の自動採番で id が振り直され、
+# 剪定済みの旧 id を指しうる配送カーソル (FeedReadCursor.LAST_ITEM_ID) の
+# 座標系が壊れる。旧 id → 新 id の決定的な移送は実装しない — models.py は
+# feed_item を常に id 付きで CREATE するため id 列の無い表はこのコード系譜
+# から生まれ得ず、万一の野生 DB への防衛は明示停止 (行があれば移行エラー、
+# 空なら 0 行コピー) で足りる。
+_FEED_COPY_KEY_COLUMNS = {
+    "feed_subscription": ("SUBSCRIPTION_ID", "FIXTURE_ID", "FEED_URL"),
+    "feed_item": ("id", "SUBSCRIPTION_ID", "GUID"),
+    "feed_read_cursor": ("PERSONA_ID", "SUBSCRIPTION_ID", "LAST_ITEM_ID"),
+}
+
+
+def _feed_copy_missing_key_columns(source_inspector, table_name):
+    """フィード表のコピーフィルタが参照するキー列のうち、ソース表に実在
+    しない列名の tuple。フィード表でない・表自体が無い場合は空 tuple
+    (このケースの扱いは呼び出し元の責務)。"""
+    key_cols = _FEED_COPY_KEY_COLUMNS.get(table_name)
+    if key_cols is None or not source_inspector.has_table(table_name):
+        return ()
+    existing = {c["name"] for c in source_inspector.get_columns(table_name)}
+    return tuple(c for c in key_cols if c not in existing)
+
+
+def _feed_copy_required_not_null_columns(table_name, dialect):
+    """モデル上 NOT NULL かつ安全な既定値 (backfill SQL) の無い列名リスト。
+
+    これらの列が NULL の行は backfill でも救えない (新スキーマの NOT NULL
+    制約で INSERT が失敗する) ため、コピーフィルタの WHERE で行ごとスキップ
+    する (二十二巡目 Z2 — 参照キーの無い行は修復不能な消耗データ)。
+    Integer PK (rowid の別名) は SQLite 上 NULL になりえないため除外。
+    """
+    from sqlalchemy import Integer
+    table = Base.metadata.tables[table_name]
+    out = []
+    for col in table.columns:
+        if col.nullable:
+            continue
+        if col.primary_key and isinstance(col.type, Integer):
+            continue
+        if _feed_not_null_backfill_sql(col, dialect) is None:
+            out.append(col.name)
+    return out
+
+
+def _feed_required_key_predicate(
+    table_name, existing_columns, dialect, prefix="",
+):
+    """必須キー列 (_feed_copy_required_not_null_columns) が全て非 NULL の行
+    だけを通す WHERE 述語 SQL。
+
+    全書換のコピーフィルタ (二十二巡目 Z2) と feed_item の AUTOINCREMENT
+    再構築コピー (二十三巡目 AA1) が「必須キー NULL 行はスキップ」の同じ
+    規則を共用する。existing_columns に無い列は述語から外す (モデル改定で
+    必須列が増えた直後の旧表への防衛 — 存在しない列を参照する SQL は
+    生成しない)。対象列が無ければ SQL が壊れない恒真式を返す。
+    """
+    preds = [
+        f'{prefix}"{c}" IS NOT NULL'
+        for c in _feed_copy_required_not_null_columns(table_name, dialect)
+        if c in existing_columns
+    ]
+    if not preds:
+        # 現行モデルでは常に非空。空でも SQL が壊れない恒真式を返す
+        return "1 = 1"
+    return " AND ".join(preds)
+
+
+def _feed_copy_select_exprs(table_name, source_inspector, dialect, prefix=""):
+    """コピーフィルタ SELECT の列リストを、ソースに実在する列から組み立てる。
+
+    モデル上 NOT NULL で安全な既定値を持つ列は COALESCE で backfill する
+    (二十二巡目 Z2) — nullable の旧形テーブルに残った NULL を素通しで
+    コピーすると、新スキーマの NOT NULL 制約で migration 全体が落ちる。
+    モデルに無いソース列 (廃止列) も素通しで並べる — どの列を新 DB へ
+    運ぶかは呼び出し元の列突合 (target との交差) が決める。全列に AS を
+    付け、prefix (別名参照) 越しでも結果の列名が素の列名になるようにする。
+    """
+    model_table = Base.metadata.tables[table_name]
+    exprs = []
+    for info in source_inspector.get_columns(table_name):
+        name = info["name"]
+        ref = f'{prefix}"{name}"'
+        expr = ref
+        col = model_table.columns.get(name)
+        if col is not None and not col.nullable and not col.primary_key:
+            backfill_sql = _feed_not_null_backfill_sql(col, dialect)
+            if backfill_sql is not None:
+                expr = f'COALESCE({ref}, {backfill_sql})'
+        exprs.append(f'{expr} AS "{name}"')
+    return exprs
+
+
+def _feed_copy_filter_select(table_name: str, *, source_inspector, dialect):
+    """全書換 migration のコピーで使う、フィード 3 テーブルの「勝者行のみ +
+    既定値 backfill」SELECT 文を返す。フィード表以外は None (通常の
+    SELECT * でコピー)。
+
+    ソース = バックアップ DB は読み取り専用のまま、コピーされる行だけを
+    起動時修復 (_repair_duplicate_feed_rows) と同じ決定論規則で選ぶ
+    (孤児の子行の扱いだけ修復より厳しい — 修復は残す、コピーは落とす。
+    下の docstring 末尾参照):
+
+    - feed_subscription: 同一 (FIXTURE_ID, FEED_URL) は最古 (rowid 最小) のみ。
+      FEED_URL は保存時に正規化済み (FeedManager._normalize_feed_url) なので
+      格納値どおりの比較でよい — 一意 index (uq_feed_sub_fixture_url) も
+      格納値に対して立つため、index が通す行を余分に落とさない。
+    - feed_item: 勝者購読に親を持つ行に限定し、同一
+      (SUBSCRIPTION_ID, GUID) は rowid 最小のみ。
+    - feed_read_cursor: 勝者購読に親を持つ行に限定し、同一 (PERSONA_ID,
+      SUBSCRIPTION_ID) は既読が最も進んだ行 (LAST_ITEM_ID 最大、同値なら
+      rowid 最小) のみ — 巻き戻すと配送済み記事の重複配送になるため。
+      LAST_ITEM_ID の大小比較は COALESCE でモデル既定値 (0) に落として
+      から行う — NULL のままだと比較が NULL になり、重複がどちらも
+    「敗者にならず」に両方コピーされて unique 制約で落ちる。
+
+    NULL の扱い (二十二巡目 Z2 — nullable の旧形テーブルへの防衛):
+
+    - スカラー default / server default を持つ NOT NULL 列 (TITLE /
+      FETCHED_AT / CREATED_AT 等) の NULL は SELECT 列側の COALESCE で
+      既定値へ backfill してコピーする (_feed_copy_select_exprs)。
+    - 安全な既定値の無い NOT NULL 列 (SUBSCRIPTION_ID / GUID / PERSONA_ID
+      等の参照キー) が NULL の行は WHERE でスキップする — 修復不能な
+      消耗データで、素通しすると新スキーマの NOT NULL で migration 全体が
+      落ちる。キー NULL の購読はコピーされないため、その購読を親に持つ
+      子行も勝者述語のキー非 NULL 条件で道連れに除外する (孤児を新 DB へ
+      持ち込まない)。除外件数は呼び出し側が WARNING で表明する。
+
+    敗者購読の記事・健康状態 (失敗回数等) を勝者へマージすることはしない —
+    重複行は unique 制約導入前の開発期 DB にのみ存在しうる消耗データで、
+    記事は再取得で再生する。
+
+    子表 (feed_item / feed_read_cursor) のコピーは「勝者購読への EXISTS」で
+    限定する — 敗者を除外する NOT IN 形だと、親購読が存在しない子行 (孤児)
+    を素通しし、親表が空のときは述語が常に真になって全子行が通ってしまう
+    (十二巡目 Q1)。孤児の子行は新 DB でも永遠に不活性 (取得・配送・UI の
+    どの経路も購読 join で到達しない) なので、コピーしない。同じ理由で
+    購読表が無い・購読表がキー列を欠く部分スキーマの野生 DB では子行を
+    一切コピーしない — 親が存在しえない以上、全行が孤児確定のため
+    (存在しない表・列への副問い合わせが SQLite のエラーになる事情も兼ねる)。
+
+    前提: 自表のキー列 (_FEED_COPY_KEY_COLUMNS) は呼び出し元が
+    _feed_copy_missing_key_columns で実在を確認済み (二十二巡目 Z1)。
+    """
+    if table_name not in _FEED_COPY_KEY_COLUMNS:
+        return None
+    # 参照キーが NULL の行を落とす述語 (Z2)。キー列は呼び出し元が実在を
+    # 確認済みだが、モデル改定で必須列が増えた場合に備え実在列に絞る。
+    # 生成は AUTOINCREMENT 再構築コピー (AA1) と共通のヘルパで行う
+    existing = {c["name"] for c in source_inspector.get_columns(table_name)}
+
+    def required_pred(prefix=""):
+        return _feed_required_key_predicate(
+            table_name, existing, dialect, prefix=prefix,
+        )
+
+    # 親表 = 購読表が使えるか。表が無い場合に加え、キー列を欠く部分
+    # スキーマも「使えない」— 勝者述語の SQL が組めない (Z1)
+    has_subscription = (
+        source_inspector.has_table("feed_subscription")
+        and not _feed_copy_missing_key_columns(
+            source_inspector, "feed_subscription"
+        )
+    )
+    # 勝者購読 (同一 (FIXTURE_ID, FEED_URL) の rowid 最小、かつキー非 NULL =
+    # 親自身がコピーされる行) に親を持つ子行だけを通す述語。{col} には
+    # 子表側の SUBSCRIPTION_ID 列参照が入る。SUBSCRIPTION_ID が NULL の
+    # 親は等号比較 (w."SUBSCRIPTION_ID" = {col}) 自体が成立しない
+    winner_parent_pred = (
+        'EXISTS ('
+        'SELECT 1 FROM feed_subscription AS w '
+        'WHERE w."SUBSCRIPTION_ID" = {col} '
+        'AND w."FIXTURE_ID" IS NOT NULL AND w."FEED_URL" IS NOT NULL '
+        'AND w.rowid IN ('
+        'SELECT MIN(rowid) FROM feed_subscription '
+        'GROUP BY "FIXTURE_ID", "FEED_URL"))'
+    )
+    if table_name == "feed_subscription":
+        exprs = _feed_copy_select_exprs(table_name, source_inspector, dialect)
+        return (
+            f'SELECT {", ".join(exprs)} FROM feed_subscription '
+            'WHERE rowid IN ('
+            'SELECT MIN(rowid) FROM feed_subscription '
+            'GROUP BY "FIXTURE_ID", "FEED_URL") AND ' + required_pred()
+        )
+    if table_name == "feed_item":
+        if not has_subscription:
+            # 親表が使えない → 全子行が孤児確定 (docstring 参照)。コピーしない
+            return 'SELECT * FROM feed_item WHERE 1 = 0'
+        exprs = _feed_copy_select_exprs(table_name, source_inspector, dialect)
+        return (
+            f'SELECT {", ".join(exprs)} FROM feed_item WHERE rowid IN ('
+            'SELECT MIN(rowid) FROM feed_item '
+            'GROUP BY "SUBSCRIPTION_ID", "GUID") AND '
+            + required_pred() + ' AND '
+            + winner_parent_pred.format(col='feed_item."SUBSCRIPTION_ID"')
+        )
+    # feed_read_cursor
+    if not has_subscription:
+        # 親表が使えない → 全子行が孤児確定 (docstring 参照)。コピーしない
+        return 'SELECT * FROM feed_read_cursor WHERE 1 = 0'
+    exprs = _feed_copy_select_exprs(
+        table_name, source_inspector, dialect, prefix="c."
+    )
+    last_item_default = _render_default_sql(
+        Base.metadata.tables["feed_read_cursor"].columns["LAST_ITEM_ID"]
+    ) or "0"
+    cmp_k = f'COALESCE(k."LAST_ITEM_ID", {last_item_default})'
+    cmp_c = f'COALESCE(c."LAST_ITEM_ID", {last_item_default})'
+    return (
+        f'SELECT {", ".join(exprs)} FROM feed_read_cursor AS c '
+        'WHERE NOT EXISTS ('
+        'SELECT 1 FROM feed_read_cursor AS k '
+        'WHERE k."PERSONA_ID" = c."PERSONA_ID" '
+        'AND k."SUBSCRIPTION_ID" = c."SUBSCRIPTION_ID" '
+        f'AND ({cmp_k} > {cmp_c} '
+        f'OR ({cmp_k} = {cmp_c} AND k.rowid < c.rowid))) '
+        'AND ' + required_pred("c.") + ' AND '
+        + winner_parent_pred.format(col='c."SUBSCRIPTION_ID"')
+    )
+
+
+def ensure_feed_tables(db_path: str) -> None:
+    """フィードテーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_feed_tables(engine)
     finally:
         engine.dispose()
 

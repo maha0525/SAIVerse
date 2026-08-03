@@ -459,6 +459,43 @@ class SAIMemoryAdapter:
                 reduce_key=reduce_key, salient=salient, media=media, metadata=metadata,
             )
 
+    def count_pending_perceptions(self, kind: str) -> Optional[int]:
+        """未消費の知覚バッファにある指定 kind の件数。
+
+        フィード配送の膨張ガード (saiverse/feed_manager.py) の読み口。未 ready の
+        ときは 0 でなく **None** を返す — 呼び出し側は「数えられない」を「空」と
+        区別して配送を見送る (0 を返すと上限ガードが素通りするため)。
+        """
+        if not self._ready:
+            return None
+        from sai_memory.perception_buffer import count_pending
+        with self._db_lock:
+            return count_pending(self.conn, kind)
+
+    def has_pending_perception_marker(self, key: str, value: str) -> bool:
+        """未消費の知覚バッファに metadata[key] == value の項目があるかを返す。
+
+        フィード配送 (saiverse/feed_manager.py) 等の冪等ガード用の読み口。
+        push_ledger_perception の outbox_id 照合と同じ流儀 (LIKE で絞って
+        JSON parse で確定)。消費済み (messages へ flush 済み) の分は照合しない —
+        消費済み位置の管理は呼び出し側のカーソル等が担う。
+        """
+        if not self._ready or not key or not value:
+            return False
+        with self._db_lock:
+            rows = self.conn.execute(
+                "SELECT metadata FROM perception_buffer WHERE metadata LIKE ?",
+                (f"%{value}%",),
+            ).fetchall()
+        for row in rows:
+            try:
+                meta = json.loads(row[0]) if row[0] else None
+            except (TypeError, ValueError):
+                continue
+            if isinstance(meta, dict) and meta.get(key) == value:
+                return True
+        return False
+
     def flush_perception_buffer(self) -> bool:
         """未消費の知覚を型別 reduce して 1 メッセージで SAIMemory へ書き出す (Pulse 消費)。
 

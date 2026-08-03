@@ -24,8 +24,9 @@ api_router.include_router(system.router, prefix="/system", tags=["system"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
 api_router.include_router(episodes.router, prefix="/episodes", tags=["episodes"])
 
-from api.routes import observer
+from api.routes import observer, feeds
 api_router.include_router(observer.router, prefix="/observer", tags=["observer"])
+api_router.include_router(feeds.router, prefix="/feeds", tags=["feeds"])
 
 from api.routes import addon, addon_actions, addon_catalog, addon_events, oauth
 # addon_events(/events など固定パス)を addon(/{addon_name} キャッチオール)より

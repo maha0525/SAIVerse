@@ -30,6 +30,12 @@ imageio-ffmpeg>=0.6.0
 # PDF processing
 pypdf>=4.0.0
 
+# RSS/Atom feed intake (saiverse/feed_fetch.py)
+feedparser>=6.0
+# HTML autodiscovery (<link rel="alternate"> の解析、discover_feed)。markdownify の
+# 従属でも入るが、直接 import する依存は直接宣言する
+beautifulsoup4>=4.12
+
 # xAI (Grok) native SDK
 xai-sdk>=1.6.0
 

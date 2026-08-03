@@ -1,0 +1,11 @@
+{
+  "id": "news_stand",
+  "name": "ニューススタンド",
+  "description": "国内外の報道が届く新聞スタンド",
+  "fixture_name": "ニューススタンド",
+  "fixture_description": "報道各社のニュースが届く新聞スタンド。新着記事の見出しが並んでいて、気になったものはリンク先で全文を読める。",
+  "feeds": [
+    {"url": "https://news.yahoo.co.jp/rss/media/yonnana/all.xml", "title": "47NEWS"},
+    {"url": "https://news.yahoo.co.jp/rss/media/business/all.xml", "title": "日経ビジネス"}
+  ]
+}

@@ -416,6 +416,11 @@ class SAIVerseManager(
         from saiverse.observer_manager import ObserverManager
         self.observer_manager = ObserverManager(self)
 
+        # Feed: RSS/Atom フィード取り込み (docs/intent/rss_feed_intake.md)。
+        # 構築のみ — 定期取得の登録は start() で行う。
+        from saiverse.feed_manager import FeedManager
+        self.feed_manager = FeedManager(self)
+
         # ⚠️ 構築 / 起動 分離の不変条件:
         #   背景ループ (schedule_manager / phenomenon / integration /
         #   internal_alert_poller / event_scheduler /
@@ -570,6 +575,9 @@ class SAIVerseManager(
 
         # Observer: Fixture/Observer の定期実行・push 受信・通知。
         self.observer_manager.start_pull_observers()
+
+        # Feed: フィード定期取得 (起動時にまず 1 回取得 → 以後 interval 周期)。
+        self.feed_manager.start()
 
         # 冷えたウィンドウの見張り (arasuji_levels.md §14-4): 全 anchor が
         # 冷え切って提示ウィンドウが育っている persona を先回りで畳む。
@@ -1153,6 +1161,16 @@ class SAIVerseManager(
                 logging.exception("Failed to cancel SDS / DB polling on shutdown")
         self.db_polling_stop_event.set()
         logging.info("SDS / DB polling event-scheduler entries cancelled.")
+
+        # Stop feed manager (定期取得の解除 + 実行中 worker の join)。
+        # persona 保存 / DB teardown より前に済ませる — worker が閉じかけの
+        # リソースへ配送しないようにする。
+        if getattr(self, "feed_manager", None):
+            try:
+                self.feed_manager.stop()
+                logging.info("FeedManager stopped.")
+            except Exception:
+                logging.exception("Failed to stop FeedManager")
 
         # Stop all conversation managers
         for manager in self.conversation_managers.values():

@@ -150,6 +150,18 @@ def list_pending(conn: sqlite3.Connection) -> List[PerceptionItem]:
     return [_row_to_item(row) for row in rows]
 
 
+def count_pending(conn: sqlite3.Connection, kind: str) -> int:
+    """未消費の知覚のうち指定 ``kind`` の件数を返す。
+
+    フィード配送の膨張ガード (saiverse/feed_manager.py) が「これ以上積まない」
+    判定に使う読み口。
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM perception_buffer WHERE kind = ?", (kind,)
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def delete_perceptions(conn: sqlite3.Connection, ids: List[int]) -> None:
     """指定 id の知覚をバッファから削除する (消費完了時に呼ぶ)。"""
     if not ids:
@@ -188,6 +200,7 @@ def reduce_perceptions(items: List[PerceptionItem]) -> List[PerceptionItem]:
 _KIND_HEADERS = {
     "core_memory_correction": "[コア記憶の更新通知]",
     "world_state": "[システム通知]",       # 世界状態の差分 (入退室・アイテム・スペル 等)
+    "feed": "[フィード]",                  # フィード施設の新着記事 (rss_feed_intake.md)
     "persona_recall": "",                     # 入室時の過去会話想起 (本文が自己完結)
     "surroundings": "",                       # 移動先の様子 (本文が <system> 見出し込みで自己完結)
 }

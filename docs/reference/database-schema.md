@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 46
+**テーブル数**: 49
 
 ## addon_config
 
@@ -424,6 +424,24 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `DIGEST_REF` | VARCHAR(255) | — |  |
 | `META_JSON` | TEXT | — |  |
 
+## feed_subscription
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `SUBSCRIPTION_ID` | VARCHAR(36) | PK, NOT NULL |  |
+| `FIXTURE_ID` | VARCHAR(36) | FK→fixture.FIXTURE_ID, NOT NULL |  |
+| `FEED_URL` | VARCHAR(512) | NOT NULL |  |
+| `SITE_URL` | VARCHAR(512) | — |  |
+| `TITLE` | VARCHAR(255) | NOT NULL, default='' |  |
+| `ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `ETAG` | VARCHAR(255) | — |  |
+| `LAST_MODIFIED` | VARCHAR(255) | — |  |
+| `LAST_OK_AT` | DATETIME | — |  |
+| `LAST_ERROR` | VARCHAR(512) | — |  |
+| `CONSECUTIVE_FAILURES` | INTEGER | NOT NULL, default=0 |  |
+| `CREATED_AT` | DATETIME | NOT NULL |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
+
 ## line_head_snapshot
 
 | カラム | 型 | 制約 | 説明 |
@@ -600,6 +618,29 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `LAST_TUTORIAL_VERSION` | INTEGER | NOT NULL, default=1 |  |
 | `SELECTED_META_PLAYBOOK` | VARCHAR(255) | — |  |
 | `FAVORITE_MODELS` | TEXT | — |  |
+
+## feed_item
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `id` | INTEGER | PK, NOT NULL |  |
+| `SUBSCRIPTION_ID` | VARCHAR(36) | FK→feed_subscription.SUBSCRIPTION_ID, NOT NULL |  |
+| `GUID` | VARCHAR(512) | NOT NULL |  |
+| `TITLE` | TEXT | NOT NULL, default='' |  |
+| `SUMMARY` | TEXT | NOT NULL, default='' |  |
+| `LINK` | VARCHAR(512) | NOT NULL, default='' |  |
+| `PUBLISHED_AT` | DATETIME | — |  |
+| `FETCHED_AT` | DATETIME | NOT NULL |  |
+
+## feed_read_cursor
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `id` | INTEGER | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | NOT NULL |  |
+| `SUBSCRIPTION_ID` | VARCHAR(36) | FK→feed_subscription.SUBSCRIPTION_ID, NOT NULL |  |
+| `LAST_ITEM_ID` | INTEGER | NOT NULL, default=0 |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
 
 ## observer_metrics
 
