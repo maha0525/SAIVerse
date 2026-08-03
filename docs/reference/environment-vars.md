@@ -54,6 +54,22 @@
 | `SAIVERSE_DB_BACKUP_KEEP` | `10` | 保持するバックアップ数 |
 | `SAIMEMORY_BACKUP_ON_START` | `true` | 起動時に persona memory.db を rdiff-backup |
 
+## RSS フィード取り込み
+
+詳細: [`docs/intent/rss_feed_intake.md`](../intent/rss_feed_intake.md)
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `SAIVERSE_FEED_FETCH_INTERVAL_SEC` | `1800` | フィード定期取得の間隔（秒）。起動時にも一度取得する |
+| `SAIVERSE_FEED_FETCH_TIMEOUT` | `15` | 取得 1 リクエストのタイムアウト（秒）。不正値は既定へ |
+| `SAIVERSE_FEED_CYCLE_BUDGET_SEC` | `300` | 取得サイクル全体（全購読の逐次取得）の壁時計予算（秒）。超過で残り購読の取得を打ち切る（取得済みぶんの表示更新・配送・剪定は実行）。0 以下で無制限 |
+| `SAIVERSE_FEED_MAX_BYTES` | `10485760` | フィード応答の最大サイズ（バイト）。超過は取得失敗 |
+| `SAIVERSE_FEED_MAX_ITEMS_PER_PUSH` | `3` | 1 回の配送でペルソナの知覚に積む新着記事数の上限。0 以下で配送無効 |
+| `SAIVERSE_FEED_MAX_PENDING` | `10` | ペルソナの知覚バッファに未消化のまま溜められるフィード記事数の上限。到達中は配送を見送る |
+| `SAIVERSE_FEED_ITEM_KEEP` | `200` | 購読ごとに保存する記事数の上限（古い側から剪定）。0 以下で剪定無効 |
+| `SAIVERSE_FEED_MAX_SUBSCRIPTIONS_PER_FIXTURE` | `10` | 施設 1 つが持てる購読数の上限 |
+| `SAIVERSE_FEED_ALLOW_PRIVATE` | 未設定 | `1` でローカル/プライベート宛フィード URL の取得を許可（自宅サーバー等の上級者向け。既定は SSRF 防止のため拒否） |
+
 ## モデル / ランタイム
 
 | 変数 | 説明 |
