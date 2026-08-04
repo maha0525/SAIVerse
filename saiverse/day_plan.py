@@ -3160,7 +3160,7 @@ def _record_move_failure(
         )
 
 
-def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> None:
+def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> bool:
     """facility が現在地と違えば OccupancyManager で移動する。
 
     移動の実体 (occupancy / DB / host メッセージ) も
@@ -3171,11 +3171,17 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> No
 
     移動失敗 (満員等) は「移動せず現在地で実行」に倒すが、黙って現在地に
     ならないようその事実を WARN + ペルソナへの system 通知で記録する。
+
+    Returns:
+        True = コマの場所に居る (移動成功 / 既に現地 / 移動の指定なし)。
+        False = 移動が必要だったのにできなかった (handler が「出かけた」体の
+        記録を書かないための事実。呼び出し側は ``_apply_slot_move`` 経由で
+        一時キー ``_move_failed`` として handler へ運ぶ)。
     """
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     if persona is None:
         LOGGER.warning("[day_plan] persona %s not loaded; skipping facility move", persona_id)
-        return
+        return False
 
     target = slot.get("facility")
     if target == FACILITY_OWN_ROOM:
@@ -3185,15 +3191,15 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> No
                 "[day_plan] persona %s has no private_room_id; skipping facility move",
                 persona_id,
             )
-            return
+            return False
     current = getattr(persona, "current_building_id", None)
     if not target or target == current:
-        return
+        return True
 
     occupancy = getattr(manager, "occupancy_manager", None)
     if occupancy is None:
         LOGGER.warning("[day_plan] manager has no occupancy_manager; skipping facility move")
-        return
+        return False
     try:
         ok, msg = occupancy.move_entity(persona_id, "ai", current, target)
     except Exception:
@@ -3202,20 +3208,42 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> No
             persona_id, current, target, exc_info=True,
         )
         _record_move_failure(manager, persona, slot, current, target, "内部エラー")
-        return
+        return False
     if not ok:
         LOGGER.warning(
             "[day_plan] facility move failed (persona=%s %s -> %s): %s — continuing in place",
             persona_id, current, target, msg,
         )
         _record_move_failure(manager, persona, slot, current, target, msg)
-        return
+        return False
 
     # 位置属性と cursor 儀式 (_mark_entry / _save_session_metadata) は
     # move_entity が canonical sync 済み (W7 柱5)
     LOGGER.info(
         "[day_plan] moved for slot: persona=%s %s -> %s", persona_id, current, target
     )
+    return True
+
+
+def _apply_slot_move(
+    manager: Any, persona_id: str, slot: Dict[str, Any]
+) -> Dict[str, Any]:
+    """コマの場所へ移動し、結果を一時キーで slot に載せて返す。
+
+    - ``_outing_unresolved`` (行き先未解決) のコマは移動しない — own_room を
+      「自室へ移動」と誤読して逆移動しないため。
+    - 移動が必要だったのにできなかったときは ``_move_failed`` を立てる。
+      handler はこれを見て「出かけて来ました」体の捏造を避け、実際の現在地の
+      事実だけを提示する (接地原則)。
+
+    どちらの一時キーも in-memory 限りで永続化されない (:func:`_update_slot` は
+    明示フィールドだけを書く)。
+    """
+    if slot.get("_outing_unresolved"):
+        return slot
+    if _move_to_facility(manager, persona_id, slot):
+        return slot
+    return {**slot, "_move_failed": True}
 
 
 def _effective_budget_rounds(slot: Dict[str, Any]) -> int:
@@ -3496,7 +3524,7 @@ def _fire_slot(
     # 「出かける」コマの行き先の穴 (own_room のまま) は移動の前に決定論で
     # 確定する (T3。LLM は使わない — 行き先の具体は着いた場所が与える)。
     slot = _resolve_outing_destination(manager, persona_id, plan_date_str, index, slot)
-    _move_to_facility(manager, persona_id, slot)
+    slot = _apply_slot_move(manager, persona_id, slot)
 
     # (d) コマ発火を実行台帳で包む (A5/A6, W2 Chunk B)。台帳の無い環境
     # (旧テストスタブ) は従来挙動へ縮退する。
@@ -3710,7 +3738,9 @@ def _fire_slot_legacy(
         expected_id=slot.get("id"), status=STATUS_FIRED,
     )
     if updated is not None:
-        slot = updated
+        # 一時キー (_outing_unresolved / _move_failed 等、"_" 始まり) は永続化
+        # されない — ストアからの読み直しで落とさず引き継ぐ (handler が読む)。
+        slot = {**updated, **{k: v for k, v in slot.items() if k.startswith("_")}}
     LOGGER.info(
         "[day_plan] slot fired (no-ledger): persona=%s date=%s index=%d kind=%s "
         "ref=%s facility=%s",
@@ -4694,8 +4724,12 @@ def _resolve_outing_destination(
       乱数の種は (persona, 日付, コマ id) — 日ごとに変わり、同じコマの繰り下げ
       再発火では同じ行き先に落ちる (冪等)。自室は「出かける」の意味論から除外
       する (明示的に own_room が書かれていても穴と同じ扱いで外へ出す)。
-    - 候補が無い環境 (施設ゼロの City 等) は WARN してそのまま (移動なし =
-      presence は現在地。正直記録は軽い一手 Pulse 側の fail-open が担う)。
+    - 候補が無い環境 (施設ゼロの City 等) は WARN し、一時キー
+      ``_outing_unresolved`` を立てて返す。own_room は下流
+      (:func:`_move_to_facility`) では「自室へ移動」という有効な値なので、
+      失敗をそのまま (facility=own_room) で返すと自室へ逆移動してしまう —
+      未解決は帯域外のフラグで運び、移動をスキップして handler が正直に
+      記録する (このキーは in-memory 限り、永続化しない)。
 
     選んだ行き先は slot に永続化する — 帳簿 (一日新聞 / 就寝ふりかえり) が
     「実際にどこへ行ったか」を読めるようにするため。
@@ -4709,12 +4743,18 @@ def _resolve_outing_destination(
 
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     private_room = getattr(persona, "private_room_id", None) if persona is not None else None
+    current = getattr(persona, "current_building_id", None) if persona is not None else None
     from saiverse.facility_map import candidate_buildings
 
+    # 自室に加えて現在地も除外する — 立っている場所へは「出かけ」られない
+    # (現在地を選ぶと移動ゼロのまま「出かけて来ました」の捏造記録になる)。
+    # 繰り下げ再発火時に現在地が変わっていれば候補集合も変わりうる (決定論の
+    # 種は同じでも choice の母集団が違う) — 行き先の同一性より記録の正直さを
+    # 優先する。
     candidates: List[str] = []
     for b in candidate_buildings(manager):
         bid = getattr(b, "building_id", None)
-        if bid and bid != private_room:
+        if bid and bid != private_room and bid != current:
             candidates.append(bid)
     if not candidates:
         LOGGER.warning(
@@ -4722,7 +4762,7 @@ def _resolve_outing_destination(
             "place (persona=%s date=%s index=%d)",
             persona_id, plan_date_str, index,
         )
-        return slot
+        return {**slot, "_outing_unresolved": True}
 
     rng = random.Random(f"{persona_id}:{plan_date_str}:{slot.get('id') or index}")
     target = rng.choice(candidates)
@@ -4858,9 +4898,18 @@ def _handle_outing_slot(
         return
     private_room = getattr(persona, "private_room_id", None)
     place = _building_display_name(manager, current)
-    if private_room is not None and current == private_room:
-        # 移動できず自室に留まっている (満員 / 候補なし等)。出かけたことに
-        # しない — 状況の正直な提示だけを行う。
+    if slot.get("_outing_unresolved"):
+        # 行き先候補ゼロ (施設の無い City 等)。移動していないので「出かけた」
+        # 体にしない — 事実だけを提示する。
+        text = (
+            "<system>\n"
+            f"出かける時間でしたが、いま行ける場所が見つからないため"
+            f"「{place}」で過ごします。\n"
+            "</system>"
+        )
+    elif slot.get("_move_failed") or (private_room is not None and current == private_room):
+        # 移動が必要だったのにできなかった (満員 / 移動エラー等)。現在地が
+        # 自室とは限らない — どこに居ようと「移動できずここにいる」が事実。
         text = (
             "<system>\n"
             f"出かける時間でしたが、移動できずに「{place}」にいます。\n"
@@ -5097,10 +5146,10 @@ def _handle_free_choice_slot(
         chosen_slot = _resolve_outing_destination(
             manager, persona_id, plan_date_str, index, chosen_slot,
         )
-        _move_to_facility(manager, persona_id, chosen_slot)
+        chosen_slot = _apply_slot_move(manager, persona_id, chosen_slot)
     elif execution_type == slot_kind_catalog.EXECUTION_STAY_HOME:
         chosen_slot = {**chosen_slot, "facility": FACILITY_OWN_ROOM}
-        _move_to_facility(manager, persona_id, chosen_slot)
+        chosen_slot = _apply_slot_move(manager, persona_id, chosen_slot)
     # 作業セッション系は現在地で実施する (コマの facility は (c) で反映済み)
 
     used = handler(manager, persona_id, plan_date_str, chosen_slot, index)

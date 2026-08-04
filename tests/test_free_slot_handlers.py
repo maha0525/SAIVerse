@@ -241,6 +241,56 @@ def test_outing_move_failure_text_stays_honest(manager):
     assert "アリスの部屋" in text  # 実際の現在地
 
 
+def test_outing_move_failure_away_from_home_stays_honest(manager):
+    """自室以外での移動失敗も「出かけた」体にしない (現在地の事実だけを提示)。"""
+    manager.personas[PERSONA_ID].current_building_id = "cafe"
+    manager.occupancy_manager.fail_with = "満員です"
+    _save_single_slot(manager, "出かける", "library")
+    day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+    text = _pulse_text(manager)
+    assert "出かけて、" not in text
+    assert "移動できず" in text
+    assert "カフェ" in text  # 実際の現在地 (自室ではない)
+
+
+def test_outing_no_candidates_does_not_move_backwards(manager):
+    """行き先候補ゼロ: own_room を「自室へ移動」と誤読して逆移動しない。
+
+    ペルソナが外出中 (cafe) で公共施設が一つも無い City の場合、以前は
+    facility=own_room のまま _move_to_facility に渡って自室へ連れ戻された。
+    移動ゼロ + 正直な文面 (「行ける場所が見つからない」) が正しい挙動。
+    """
+    manager.personas[PERSONA_ID].current_building_id = "cafe"
+    manager.buildings = [
+        SimpleNamespace(building_id=OWN_ROOM, name="アリスの部屋", facility_roles=[]),
+    ]
+    _save_single_slot(manager, "出かける", "own_room")
+    day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert manager.occupancy_manager.moves == []  # 逆移動しない
+    text = _pulse_text(manager)
+    assert "出かけて、" not in text
+    assert "行ける場所が見つからない" in text
+    # 実際の現在地 (cafe は buildings から消してあるので表示名は素の id に落ちる)
+    assert "cafe" in text
+
+
+def test_outing_no_candidates_without_private_room_no_fabrication(manager):
+    """行き先候補ゼロ + 自室なし: 移動ゼロなのに「出かけて来ました」と書かない。"""
+    manager.personas[PERSONA_ID].private_room_id = None
+    manager.buildings = [
+        SimpleNamespace(building_id="somewhere", name="どこか", facility_roles=[]),
+    ]
+    manager.personas[PERSONA_ID].current_building_id = "somewhere"
+    _save_single_slot(manager, "出かける", "own_room")
+    day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert manager.occupancy_manager.moves == []
+    text = _pulse_text(manager)
+    assert "出かけて、" not in text
+    assert "行ける場所が見つからない" in text
+
+
 # ---------------------------------------------------------------------------
 # 自室で過ごす
 # ---------------------------------------------------------------------------
