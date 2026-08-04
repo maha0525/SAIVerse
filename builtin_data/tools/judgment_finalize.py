@@ -1445,12 +1445,17 @@ def _apply_naming_reviews(
         cand = valid_clusters[cluster_id]
         member_refs = list(cand.get("member_refs") or [])
         try:
-            page_id = create_theme_page(
-                mem_conn,
-                title=name,
-                member_refs=member_refs,
-                origin="naming",
-            )
+            # create_theme_page の get-or-create (check-then-insert) の原子性は
+            # プロセス内ロックが担う — slot_close 側と同じ規律で _db_lock を
+            # 保持する (Codex 一巡目 #6。無ロック呼び出しは同名ページの重複
+            # 作成の窓になる)。
+            with adapter._db_lock:
+                page_id = create_theme_page(
+                    mem_conn,
+                    title=name,
+                    member_refs=member_refs,
+                    origin="naming",
+                )
             applied = True
             lines.append(
                 f"テーマ「{name}」が棚に立ちました（{len(member_refs)} 件まとめて, page_id={page_id[:8]}）"

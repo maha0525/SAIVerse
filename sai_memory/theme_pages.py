@@ -155,6 +155,14 @@ def create_theme_page(
 
     同名のテーマページが root_theme 配下に既にあれば作成せず既存 id を返す（冪等）。
 
+    **呼び出し契約 (Codex 一巡目 #6 裁定)**: この冪等性は check-then-insert で
+    実装されており、原子性は呼び出し側が保持するプロセス内ロック
+    (``adapter._db_lock``) が担う。全呼び出し元 (slot_close /
+    judgment_finalize の naming_reviews) はロック下で呼ぶこと。DB の一意制約は
+    張らない — Note 移行由来のページは旧 Note の同名を正当に持ちうるため、
+    制約を入れるには先に同名ページの統合移行が必要になり、現時点では
+    釣り合わない (memory.db は単一プロセスからのみ書かれる前提)。
+
     返り値: 作成（または既存）ページの id。
     """
     ensure_root_theme(conn)
