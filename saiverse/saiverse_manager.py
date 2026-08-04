@@ -1281,7 +1281,10 @@ class SAIVerseManager(
             if persona is not None and bool(getattr(persona, "autonomy_enabled", False)):
                 from saiverse.day_plan import reschedule_pending_slots
 
-                reschedule_pending_slots(self, persona_id)
+                # downtime_recovery: ここはプロセス起動時の再確立 — サーバーが
+                # 落ちていた間に開始時刻を過ぎたコマは遅延実行せず「流れた」に
+                # 確定する (起床判断の途中起動と同じ意味論。Codex 一巡目 #2)。
+                reschedule_pending_slots(self, persona_id, downtime_recovery=True)
         except Exception:
             logging.exception(
                 "[on_persona_registered] Failed to reschedule day-plan slots: %s",

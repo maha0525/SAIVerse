@@ -226,6 +226,13 @@ FACILITY_OWN_ROOM = "own_room"
 DEFER_MINUTES = 10
 MAX_DEFERRALS = 3
 
+#: 開始時刻からこの分数を超えて過ぎたコマは「流れた」(missed_start) — 丸め
+#: (現在時刻へのクランプ) による救済は数分のズレに限定する (§11-12 裁定)。
+#: 起床判断の途中起動 (timetable_template の compose) と、再起動後の予約回復
+#: (:func:`reschedule_pending_slots` の downtime_recovery) が同じ閾値を見る —
+#: 同じ停止に対して入口ごとに意味が割れないため (Codex 一巡目 #2)。
+MISSED_GRACE_MINUTES = 10
+
 #: budget_rounds が 0 / 未指定の作業コマに使う既定ラウンド予算
 DEFAULT_BUDGET_ROUNDS = 8
 
@@ -2764,6 +2771,7 @@ def reschedule_pending_slots(
     plan_date: Any = None,
     *,
     wake: Optional[str] = None,
+    downtime_recovery: bool = False,
 ) -> int:
     """当日 (営業日) plan の pending / deferred コマを再 push する (watchdog / 再起動後の再接続)。
 
@@ -2782,6 +2790,16 @@ def reschedule_pending_slots(
             で算出した date を渡すこと。
         wake: 起床時刻 "HH:MM"。_slot_fire_at に透過し、深夜帯コマの暦日補正
             に使う。
+        downtime_recovery: True = プロセス再起動後の回復 (サーバーが落ちていた
+            ことが確実な入口 — saiverse_manager.on_persona_registered)。開始
+            時刻を :data:`MISSED_GRACE_MINUTES` (+ 繰り下げ済みぶんの猶予
+            defer_count×DEFER_MINUTES) を超えて過ぎたコマは遅延実行せず
+            「流れた（サーバーが起動していなかったため）」に確定する —
+            起床判断の途中起動 (compose) と同じ意味論 (Codex 一巡目 #2。
+            停止がどのタイミングかで「流れた」と「遅れて実行」に割れない)。
+            watchdog のプロセス内回復 (予約途絶) では False のまま — サーバーは
+            生きているので同じ理由文が嘘になる (長セッション待ち等の遅れを
+            停止と誤記しない)。
     """
     if wake is None:
         wake = _resolve_wake(manager, persona_id)
@@ -2799,19 +2817,61 @@ def reschedule_pending_slots(
         return 0
 
     slots = _ensure_slot_ids(manager, persona_id, plan_date_str, slots)
+    now_order: Optional[int] = None
+    lives = None
+    if downtime_recovery:
+        try:
+            lives = get_lives(manager, persona_id, plan_date_str)
+            now_order = day_order_minutes(lives, clock.now().strftime("%H:%M"))
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] downtime grace check unavailable; falling back to "
+                "plain re-push (persona=%s date=%s)",
+                persona_id, plan_date_str, exc_info=True,
+            )
+            now_order = None
     pushed = 0
-    for slot in slots:
+    reclassified = 0
+    for index, slot in enumerate(slots):
         if slot.get("status") not in (STATUS_PENDING, STATUS_DEFERRED):
             continue
+        if now_order is not None:
+            late_by: Optional[int] = None
+            try:
+                late_by = now_order - day_order_minutes(
+                    lives, str(slot.get("start") or ""),
+                )
+            except Exception:
+                late_by = None
+            allowance = MISSED_GRACE_MINUTES \
+                + int(slot.get("defer_count") or 0) * DEFER_MINUTES
+            if late_by is not None and late_by > allowance:
+                updated = _update_slot(
+                    manager, persona_id, plan_date_str, index,
+                    expected_id=slot.get("id"),
+                    status=STATUS_SKIPPED, skip_reason=SKIP_REASON_MISSED_START,
+                )
+                if updated is None:
+                    # CAS 失敗 = 並走で状態が動いた。push も確定もせず次の
+                    # watchdog / 回復に委ねる。
+                    LOGGER.info(
+                        "[day_plan] missed-start reclassify lost CAS; leaving "
+                        "slot as-is (persona=%s date=%s index=%d)",
+                        persona_id, plan_date_str, index,
+                    )
+                    continue
+                reclassified += 1
+                continue
         _push_slot(
             manager, persona_id, plan_date_str, slot["id"],
             _slot_fire_at(plan_date_str, slot, wake=wake),
         )
         pushed += 1
-    if pushed:
+    if pushed or reclassified:
         LOGGER.info(
-            "[day_plan] rescheduled pending slots: persona=%s date=%s pushed=%d",
-            persona_id, plan_date_str, pushed,
+            "[day_plan] rescheduled pending slots: persona=%s date=%s pushed=%d "
+            "missed_start=%d",
+            persona_id, plan_date_str, pushed, reclassified,
         )
     return pushed
 

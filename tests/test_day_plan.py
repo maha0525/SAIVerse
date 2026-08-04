@@ -627,6 +627,69 @@ def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
     assert [s["status"] for s in slots] == ["done", "done"]
 
 
+def test_downtime_recovery_reclassifies_grace_exceeded_slots(manager, task_refs):
+    """再起動回復: grace 超過の pending は遅延実行せず「流れた」に確定 (Codex一巡目 #2)。
+
+    起床判断の途中起動 (compose の missed_start) と同じ意味論 — 停止が
+    「組む前」か「組んだ後」かで、同じ停止時間の扱いが割れない。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+        {"start": "13:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    # 09:00 開始のコマが 3 時間過去 = サーバーが落ちていた間に流れた
+    clock.enable_virtual(BASE + timedelta(hours=12))
+
+    pushed = day_plan.reschedule_pending_slots(
+        manager, PERSONA_ID, downtime_recovery=True,
+    )
+
+    assert pushed == 1  # 13:00 (未来) だけが再 push される
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_MISSED_START
+    assert slots[1]["status"] == "pending"
+
+
+def test_downtime_recovery_respects_defer_allowance(manager, task_refs):
+    """繰り下げ済みコマは defer_count ぶんの猶予を足して判定する (正当な遅れを流さない)。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:45", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの",
+         "status": "deferred", "defer_count": 1},
+    ])
+    # 15 分過去: 素の grace (10 分) は超えるが、繰り下げ 1 回ぶんの猶予
+    # (10+10=20 分) 以内 → 流さず再 push
+    clock.enable_virtual(BASE + timedelta(hours=10))
+
+    pushed = day_plan.reschedule_pending_slots(
+        manager, PERSONA_ID, downtime_recovery=True,
+    )
+
+    assert pushed == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "deferred"  # 流れていない
+
+
+def test_watchdog_recovery_keeps_late_slots_running(manager, task_refs):
+    """プロセス内回復 (downtime_recovery なし) は従来どおり遅延実行に倒す。
+
+    サーバーは生きているので「サーバーが起動していなかったため」という理由での
+    確定はできない — 長セッション待ち等の遅れを停止と誤記しない。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=12))
+
+    assert day_plan.reschedule_pending_slots(manager, PERSONA_ID) == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "pending"  # 再 push され、流れてはいない
+
+
 def test_reschedule_repushes_deferred_and_skips_done(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],

@@ -52,7 +52,8 @@ TEMPLATE_SLOT_FIELDS = (
 
 #: 起床判断の遅発がこの分数以内なら「流れた」にせず既存の丸め (現在時刻への
 #: クランプ) に委ねる — §11-12「丸めは数分のズレ救済に限定」の閾値。
-MISSED_GRACE_MINUTES = 10
+#: 正典は day_plan 側 (再起動後の予約回復と同じ閾値を共有する — Codex 一巡目 #2)。
+MISSED_GRACE_MINUTES = day_plan.MISSED_GRACE_MINUTES
 
 #: 穴のままのフィールドが LLM 出力でも埋まらなかったときの表示語 (流れたコマの
 #: 帳簿にのみ現れる。pending コマの kind の穴は既定種別で埋まる)。
