@@ -81,3 +81,11 @@ Pure Python 実装の `dulwich` で clone/pull を Python 側で完結させる�
 
 - 2026-05-23: issue 起票。案 1 を実装 (Windows 自動インストール + .gitattributes 追加)。実機テスト未実施。
 - 2026-07-19: **update 経路の PortableGit 断線を修正**。`setup.bat` は自身のセッション内で `.git-portable\cmd` を PATH に前置きするが、`update.bat` / `update.sh` は**別セッション**で起動され、実体の `scripts/update_engine.py` は `shutil.which("git")` と `["git", ...]` を直接叩く。よって「PortableGit しか無い (システム/winget Git 無し)」ユーザーは、後日 update を回すと git 未検出で `assert_git_update_ready` が中断していた。修正: `update_engine._ensure_portable_git_on_path(project_dir)` を新設し `run_update()` 冒頭 (git readiness チェック前) で呼ぶ。`<project>/.git-portable/cmd/git.exe` が在れば同 cmd ディレクトリを PATH 先頭へ前置き (既存なら no-op、非 Windows は `.git-portable` 自体が無いので no-op)。update.bat/update.sh/self_update.py は 3 者とも update_engine.py に委譲するので単一箇所の修正で parity 維持。回帰 `tests/test_update_engine_safety.py` に 3 件追加 (存在時前置き / 不在時 no-op / 冪等)。**setup 経路の自動インストール自体は 2026-05-23 実装のまま。残るはクリーン環境実機テスト (まはー) と README 書き直し。**
+
+## 経緯: ZIP インストールの Git 自動導入 (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+コードは実装済み(setup.bat の自動 git インストール=winget→PortableGit fallback+git init/fetch/reset / update 経路の PortableGit PATH 通し=2026-07-19 修正 / README を「Git 不要」前提に更新済み)。
+残=**クリーン Windows(git 未導入)での実機テスト**: winget 経路・PortableGit fallback・再実行無害・`git reset origin/main` 後の status clean(.gitattributes×ZIP 展開の line ending)。
+**次バージョンリリース時にまはーと一緒に実機確認**予定

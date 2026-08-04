@@ -77,3 +77,14 @@ upgrade registry import失敗、handler遷移graphの穴、未来version、変�
 - frontend `tsc --noEmit`: pass。ESLintは0 errors（既存warnings 243）。
 - `scripts/gen_reference_docs.py --check`: pass。`git diff --check`: pass。
 - 全体回帰中に発見したテスト側の `SAIVERSE_HOME` 復元漏れ3箇所と、閉じたevent loopを再利用する順序依存も修正した。
+
+## 経緯: 監査第二陣・共通境界hardening (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+Discordを除く第二陣を実装。
+中央実行時認可、user command durability/idempotency、外部retry commit point、LAN owner認証、secret/path/upload/provider境界、world snapshot/restore/updater正典化、upgrade chain/City versionを回帰固定。
+**自動回帰2419件+subtest 34件成功、ruff/tsc/生成doc整合も通過**。
+監査対象外の外部Stack-chan addonは現実装と旧avatar test 118件が不整合。
+残る外部作業は公式Addon registryのEd25519鍵生成・署名済みenvelope publish・public key配布。
+非Git updaterは署名済みrelease manifest設計までfail-closed

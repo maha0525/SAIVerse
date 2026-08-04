@@ -431,3 +431,103 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 7. **（次）episode.md まはーレビュー → 両 intent の実装順確定 → 実装**。
 
 **現時点で実装には入らない。** 先行独立2件（B4 / redundant 症状止め）はレビューと並行して着手可。
+
+## 経緯: 自律行動v2 実機初日の前提レベル設計課題 (棚卸し) (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+v2実装+概念再編を**動かして初めて見えた**「そもそもこの仕様でいいのか」層の課題群。
+個々のバグ(fixes §3/§6)とは別層。
+まはー発散→メティス受け・調査で出そろい、共通根**A(単位の世代交代: Pulse→できごと/コマ/日)** と **B(世界に向く last mileの断線)** の2本に束ねてドキュメント化済(A1ダイジェスト正史の二重誤り+生ログ廃棄/A2 volatile畳みをMetabolismタイミング+できごと単位LoD/A3予算=コマ+ラウンド×係数/A4キャッシュ生存の1時間窓/B1チャットに出ない/B2 Item Open共有とVisual context圧迫/B3勝手移動と会話導線+ペルソナ指定ジャンプ/B4型→施設移動が休眠=resolve_facility未配線+施設タグ0を実機で確認)。
+**概念再編(⑥)残件の棚卸し+合流も完了**: 既存open issue 6本(general_chronicle_metabolism_trigger/short_term_to_long_term_memory_filtering/spell_round_limit_redesign/autonomous_work_single_pulse_completion/beat_concept/working_memory→Session)がAに束なる=個別放置されてた共通根が浮いた、Bは既存issue薄い盲点と判明。
+⑥本体はlanded(実機検証待ち)でA/Bはその次。
+A×B交差(X1=チャットUIでのBeat/Pulse/Beat見せ方)も記入。
+**2026-07-13 まはー詰め: 束A方向確定(頂点=新概念「ライフ」=ライフ→エピソード→パルス→ビート、A1外部監査役+危険マーク→AUTONOMOUSアスペクト化、A2できごと単位LoD+畳読スペル=memory_read統合、A3/4予算・キャッシュをライフに吸収・モデル別均等/自由モード)、束B裁定(B1+X1統合UX=エピソード枠投下→クリックで詳細→概要=Lv1 Chronicle・他ペルソナ冒頭通知のみ / B2スコープアウト / B3神モードUI待ち / B4独立早め)、そして第3の根 束C「Track意味論の再整理」浮上(Track=進行状態でなく目的の指し示し・時間で勝手にpendingするな、[redundant_track_switch]が症状・早め対応)**。
+**2026-07-13 Fable検分**: 束C=life_concept_map §10.1既裁定(running/alert→出来事へ移管)の実行と判明・Session×ライフは「制御プレーン/データプレーン」関係(育てる先ではない)・A1のAUTONOMOUS化はキャッシュ構造変更を伴う(二本目で数字検討)。
+**パッケージング合意: 先行独立2件(B4 / redundant症状止め) + intent二本(一本目=ライフ[A3/A4+束C] / 二本目=エピソードの記憶と見せ方[A1/A2+B1/X1、未決世界観判断はこちらに集約])**。
+**intent一本目 [life.md](../intent/life.md) v0.2 レビュー済(2026-07-13)**: 時間階層(ライフ→エピソード→パルス→ビート)・宣言(時刻+コマ予算+均等/自由モード)・session.md §6回答・束C=案Y(「いま」の読み出しを開いているエピソードへ一本化・wait_responseのpause除去→redundant構造的根治)・予算=コマ+ラウンド×κのライフ台帳。
+**まはー裁定: 案Y承認・keep-aliveライフ従属GO・動的ライフ自動生成なし・惜しい谷の猶予なし・ペルソナ提示はtailシステム通知**。
+Track Chronicle=head搭載のget_running参照を§7.3に記録(挙動不変)、読み込み側世代交代+書き込み側のLv1 Chronicle統合は二本目の主題。
+**intent二本目 [episode.md](../intent/episode.md) v0.1 起草済(2026-07-13)**: エピソードに三つの顔(記憶LoD/世界への露出/監査)、概要=エピソードLv1 Chronicle を共有部品化(close時即生成・件数triggerを世代交代)、作業セッションAUTONOMOUS化(生ログ正史化、A2畳みとセットで成立・WORKERは会話中の分身用に残す)、外部監査役+危険マーク(エピソードラベル→メッセージへJOINで降ろす+想起時定型文)、チャット三段露出(枠投下→ライブ詳細→概要)、Beat型化=runtime_llm分割Phase 1のBeatExecution採用、既存issue 6本吸収(各issueにポインタ済)、Track Chronicle書き込み/読み込み両側の世代交代を確定。
+**両intentレビュー済(2026-07-13 まはー)**: life=案Y承認+裁定3件 / episode=メッセージ単位マーク将来許可(X・外部有害対応へ転用視野)+枠投下語彙は型ベース確定(補完2件レビュー残)+§6.3にhead搭載退役の根拠明記。
+**実装開始(lifeから、4フェーズ)**: **Phase 1=案Y手術 完了(6257b6a)** — wait_response pause撤去・会話中判定エピソード移管・meta_layer自己ゲート例外(social救済)・redundant根治(回帰固定・194 passed)。
+使い捨て症状止めは不要化で作らず。
+**Phase 2=ライフの器(lives永続化+day_open宣言+境界イベント+台帳世代交代) 実装完了・検証待ち**(サブエージェント実装、新規 tests/test_life_phase2.py 42件+既存系全緑)。
+**Phase 3=キャッシュ連動 実装完了・検証待ち**(サブエージェント実装、検収差し戻し1巡=「anchor即時失効」「TTL即時clear」は惜しい谷(終了直後〜TTL内の再訪)の生きたキャッシュを捨てる欠陥と判明→life.md v0.4に訂正して修正済: keep-aliveのライフ従属を`day_plan.is_keepalive_allowed`に集約し`run_cache_keepalive`唯一の呼び出し点でゲート/ライフ終端の能動作業はkeep-alive予約cancelとTTL override遅延解除予約のみ・**anchorは触らない**(touchが止まればTTLで自然失効→Metabolismは失効後の最初のCase 3が実行)/均等モードはcache TTLを1hにoverride(`clear_persona_cache_override`新設、明示override優先で保護)し解除は終端+anchor validity秒後に遅延(即時に5mへ戻すとanchor生存評価が実キャッシュ寿命とズレるため)・次ライフがTTL経過前に始まれば開始側が予約cancel——global既定5mのままだと間隔上限50分を大きく下回り3〜4分おきのartificial keep-aliveが必要になる調査結果を受けた配線。
+新規 tests/test_life_phase3.py 18件+既存系全緑)。
+**Phase 4=見せ方 実装完了・検証待ち**(判定源`day_plan.get_life_status_now`を新設しoccupantsの常在インジケータ(`api/routes/info.py`)とday-plan API(`api/routes/people/life.py`のlives/life_status)が共有、フロントはRightSidebar.tsx(話しかけやすさチップ)/LifeView.tsx(ライフ帯の括り直し)。
+新規tests/test_info_life_state.py 3件+test_life_phase2.py追加5件+test_life_view_api.py追加4件+既存系全緑)。
+**life.md 4フェーズとも実装完了**→**実機初日(2026-07-13夜)でv0.4の宣言設計が破綻**: ①現在時刻を渡さず21時に朝からの時間割を編成 ②過去コマ3連即時発火+AIを呼ばない暮らしコマ発火が予算を食い「4/4」(予算が「コマ開始回数」を数えていた——正しくは実LLM呼び出し回数) ③コマ間隔50分検証は実パルスが無く空回り ④判断点が同じ財布から引き構造的に不足。
+**まはー裁定→life.md v0.5に全面改訂(設計中に差し戻し)**: ライフ=ユーザーが設定する起床・就寝の区間(PersonaScheduleが器・ペルソナの宣言口廃止=不正な値は口をなくして排除)/予算=ライフ長の最低値制約付きユーザー設定/ペルソナは時間割だけ(編成範囲=今〜就寝)/モードは物理から自動/暮らしコマ実体化(暮らしPulse)/判断点は予算外・別枠観測/UX最優先で再構築(ライフ設定画面新設=起床就寝+予算統合、v1亡霊掃除同梱=自律行動マネージャー間隔・ライフビュー間隔2種・手動Pulse・タイマー停止、Phase 1追従漏れ文言修正)。
+Phase 1(案Y)とPhase 3物理層は無傷、宣言まわり巻き戻し(明細=§11.2)。
+**v0.5「改修A」実装完了(2026-07-13)**: LLM宣言口(day_openのlivesスキーマ+sanitize_lives+検証群)を削除しPersonaScheduleの起床・就寝+ユーザー設定予算からシステムが`day_plan.confirm_life_for_today`で確定(呼び出しは`autonomy_wiring.fire_judgment_point`のday_open/day_close発火経路に一本化=本番のhandle_scheduled_judgment/watchdog再発火の両方をカバー)、予算消費点を作り直し(コマ発火のconsume_life_pulse呼び出しを撤去、判断点発火は新設`record_judgment_pulse`で`judgment_pulses`という別枠に記帳しused_pulsesは触らない)、専用のライフ境界イベント予約(schedule_lives/_fire_life_boundary/find_lost_life_reservations)を削除し`_handle_life_start`/`_handle_life_end`をday_open/day_close発火直下に統合、深夜跨ぎ窓を正常形として`get_life_for_time`を書き直し(`autonomy_wiring.in_waking_window`と同じ意味論)、遅発day_open対策として状況テキストに現在時刻+確定済み活動時間を明記し`save_day_plan`/`replace_remaining_slots`に「今〜就寝」範囲外を拒否する検証を追加。
+新規`tests/test_life_confirmation.py`15件+`test_life_phase2.py`全面書き換え(39件)+`test_life_phase3.py`回帰更新(18件)、既存系全緑(pre-existing failureのtest_avatar_pipeline.py 118件/test_addon_config_mcp_reconnect.py 8件/test_slots_fire_on_real_dispatch_thread間欠のみ)。
+**「改修B」のうちUI側(ライフ設定画面新設・v1亡霊掃除・judgment_pulsesのフロント別枠表示) 実装完了(2026-07-14)**: 新設`frontend/src/components/LifeSettingsModal.tsx`+`api/routes/people/life_settings.py`(GET/PUT `/life-settings`、モード上書き`life_mode_override`を`daily_budget_pulses`と同じday_openスケジュール行params経由で3発火経路(_confirm_life_at_day_open/handle_scheduled_judgment/watchdog_tick)に配線)。
+v1亡霊(SettingsModal間隔UI・LifeView間隔2種フォーム+`PUT /activity/intervals`・DebugPanelの自律Pulse/SubLineトグル)を削除。
+ライフ帯ラベル改善+tail文言確定。
+新規/更新テスト20件、既存系全緑、フロントtsc/lint(0 errors)/build成功。
+**実機二夜目(2026-07-14深夜)の破綻→即日修正(96062ce)**: aifi 01:00-02:00臨時ライフ・01:03発火でslot=01:00が3分のズレで時間割全体を保存拒否+リカバリ経路ゼロ(watchdogの再発火判定が「行なし」でライフ確定済みの行を編成済みと誤認)。
+修正=保存検証を**丸め+部分救済**に作り直し(過去開始→現在時刻へクランプ・衝突は順序保持・丸め先なしのみ個別除外・調整はエコーに日常語)+watchdog判定を「行なし or コマ0件」に。
+再現テスト固定・フル2316 passed。
+**掃除の追加裁定(2026-07-14)**: まはーの言った「タイマー停止」=DebugPanelの完全手動モードと判明→[issue起票](debug_full_manual_mode_v1_ghost.md)(退役or実態縮退は実需確認後)。
+SettingsModalのAutonomy start/stopボタン(ACTIVITY_STATE駆動と重複)も掃除候補のまま保留。
+**実機三夜目(2026-07-14朝)の不具合3件→同日修正**: ①**時間割が00:30〜00:35の6分間に潰れた**(air_city_a、ライフ07:00〜01:00)。
+真因は深夜跨ぎで**同じ"00:30"を前半と後半が正反対に解釈**していたこと——前半(day_openのLLM指示「開始時刻の厳密昇順」・`sanitize_timetable`の文字列ソート・`_validate_and_normalize_slots`の暦順検証)は就寝00:30を「一日の最初」、後半(96062ceの丸め=ライフ拡張分基準)は「一日の最後(ext=1050)」。
+就寝が先頭に固定され、丸めがそれを最後尾と信じて後続を全部00:31,00:32...へ1分刻みに押し込んだ(丸めは正しく動いた結果=犯人は並び順の基準の不統一)。
+なお「暦の時刻で厳密昇順」は深夜跨ぎライフでは**達成不可能な要求**でLLMに強制されていた。
+修正=「一日の始まり=最初のライフの開始時刻を起点にした経過分」(`day_plan.day_order_minutes`)を整列・検証・丸めの全段に通し、LLM指示も「一日の流れの順(就寝が0時台でも先頭に置かない)」へ(playbook import済)。
+ライフ未宣言日は暦順に退化=後方互換。
+実機事故の再現テスト+「日付を渡さねば暦順に退化」の対を固定(関連214 passed)。
+②**ライフビューのメタ判断がほぼ全部「次にすることを考えた → 現状を続けることにした」**。
+これは判断結果ですらなく「判断が1件も見つからなかった時の既定文」だった: b07c520(2026-07-08、まはー指摘のfew-shot汚染回避)が`meta_judgment_finalize`の保存名義をassistant→user(`<system>`ナレーション)へ変えた際、`api/routes/people/activity.py`のクエリが`role='assistant'`で絞ったまま取り残され、以来**MetaLayer判断が常に0件**。
+判断点側(day_open等)は見つかってはいたがv1語彙のみの変換で同じ既定文に落ちる二重欠陥。
+修正=roleフィルタ撤去(両finalizeが設計上別roleを使うため`line_role`+`pulse_id`で十分)+`metadata.judgment.kind`から節目を日常語化(「今日一日をどう過ごすか考えた」等)。
+フロントは文字列を出すだけなので変更なし。
+③**Memopedia索引「常時表示(旧方式)」トグルの概要消失**: P4-d(b3f568b)が`MEMOPEDIA_INDEX_ENABLED`の描画を`_get_memopedia_context`(summaryあり・深さ無制限)から`_build_toc_markdown`(summaryなし・深さ2)へ**トグルの意味ごとすり替え**、旧実装は本番から呼ばれない死にコード化(概要だけでなく深い階層のタイトルも消えていた)。
+まはー裁定=後方互換の趣旨どおり旧方式相当へ復元(器は`MemopediaIndexSection`のまま=head規律`refresh_on_events=frozenset()`維持)。
+summary復活+深さ無制限+category`extractable`(旧実装と同じ集合、`in_tree`との差は"theme"のみと実測確認)、[OPEN]/★/件数はP4-dの改善として残す、死にコード(`_get_memopedia_context`/`include_memopedia`/`memopedia_index_limit`)を一掃。
+付随発見=`AI.MEMOPEDIA_INDEX_LIMIT`はどこからも読まれない死んだ列(別件、コメントのみ)。
+**④ ACTIVITY_STATE の解体(同日、まはー裁定)**: ③の症状(滞在ペルソナ欄で緑ドット+「活動中」が2重表示)の原因究明から、まはーが「もはやアクティビティ状態という一つの弁でやってるのが間違いでは？」と根本設計に差し戻し。
+調査結果=**4値のうち実装上の意味があるのは「Active か否か」だけ**だった: 全ゲート(`autonomy_wiring`/`meta_layer`/`saiverse_manager`/`sea/runtime`のkeep-alive)が`== "Active"`の二値判定のみでStop/Sleep/Idleは互いに無区別、**「Stop=機能停止」は実装ゼロ**(`run_sea_user`/chat APIに状態ゲートが存在せずStopでも返答していた)、**「Sleep=ユーザー発言で起きる」も実装ゼロ**(実体は自室移動の副作用のみ)、**`SLEEP_ON_CACHE_EXPIRE`は本体から一行も読まれない死んだ列**(intentに設計・DBに列・コメントに仕様、実装だけ無い)。
+ライフ導入で「Sleep=寝てる」はライフの谷と意味が重複しており、1列に**元栓(動かす許可)・蛇口(いまその時間か)・温度計(キャッシュ)** が同居していたと判明。
+裁定=**`ACTIVITY_STATE`と`SLEEP_ON_CACHE_EXPIRE`を列ごと削除し`AUTONOMY_ENABLED`(真偽値・既定ON)1本へ**。
+ユーザー返答ON/OFF・他ペルソナ返答ON/OFFは需要確認まで作らない(前者は「無くて誰も困っていない」=需要が無い証拠、後者は機能ごと未実装)。
+Sleepの自室移動は削除(システムが勝手に体を動かすのは誤り、やるなら将来Phenomenon)。
+既定ONの安全性は事実確認済(`watchdog_tick`が"no day_open schedule"でskip・`confirm_life_for_today`が起床/就寝未設定ならライフを作らない=**実質の起動条件はライフ設定**)。
+migrationは全書換パス(`try_additive_migration`が削除列を検出してFalse)に落ちるため`_migrate_activity_state_to_autonomy_enabled`を新設('Active'→True/他→False、放置すると全ペルソナ既定Trueで一斉稼働する罠)、旧`_migrate_interaction_mode_to_*`も消える列を叩かないよう直接変換へ改修。
+フロントは③を根治(常時表示は**ライフ由来の活動中/休憩中だけ**・自律はOFF時のみ「自律行動を止めています」=ブレーカー方式)。
+検収で回帰2件を修正: **`activity_label`(いま何をしているか)が道連れ削除されていたのを復活**(`build_activity_label`の空時フォールバック"活動中"がライフと文言衝突していた真因も断ち、Noneを返して黙る形へ)、LifeViewバッジ「自律行動 中」→「オン」(元栓を蛇口の言葉で呼ばない)。
+docs 21ファイル棚卸し(歴史記録は保存、現行仕様の記述のみ改訂)、landscape §9に解体を記録、CLAUDE.md・自動生成schema も同期。
+**副産物**: `persona_activity_view.md`が削除済み`SubLineScheduler`を根拠に書かれていた/`persona_action_tracks.md`の定期発火節が二重に古い(tick自体が停止済み)ことも発見・修正。
+教訓「**実装しない設計を、列とコメントの形で残してはいけない**」をintentに明記。
+**⑤ 添付メディアの自動想起 (同日、まはー裁定)**: 「Memopedia にある物を撮って見せても初見のリアクション」の設計課題。
+調査で真因が**2階建て**と判明: (1)概要は Item description → visual_context 経由でプロンプトに載るが、`auto_recall._is_conversational_message` が `__visual_context__` を「今話している内容でない」として**明示除外**しており想起クエリに一切入らない、(2)そもそも `chat.py._store_image_attachment` が概要生成を**バックグラウンドスレッド**で回し応答生成が待たないため**初見の画像では間に合っていない**(2回目以降は `.summary.txt` キャッシュで即読める)。
+想起は応答より前に走る+埋め込み(multilingual-e5-small)がテキスト専用で画像を直接クエリにできないため、**概要生成の同期化が原理的に不可避**と判明。
+**音声・動画は画像と構造が非対称**とも判明: `ensure_audio/video_summary` は `llm_clients/{gemini,utils}.py` から**モデルが非対応のときだけ**呼ばれ(対応モデルにはメディア本体を送る)、chat.py 側に生成経路が無い——ただし `.summary.txt` サイドカーキャッシュを共用するので chat 側で先に呼べば二重生成にならない。
+裁定=**グローバル設定**に「添付したメディアの内容を自動想起に使う」を新設(ペルソナ単位でなく・**既定OFF**=「待つ方がオプション」・数秒遅延の注意書き併記)、対象は**画像/音声/動画のみ**(ドキュメントは本文プレビューが既に取れており前提が異なる+別途調査事項があるため今回不介入)、クエリに入れるのは**今添付されたものだけ**(`__visual_context__` 除外は維持=部屋の全アイテム説明が混ざるとクエリが汚染される)。
+実装の鍵=**添付情報は既に `metadata["images"]`/`["media"]` で運ばれていた**ため概要を各エントリの `summary` キーに相乗りさせ、`build_query` が**最新 user メッセージの metadata のみ**から拾う(「今添付されたものだけ」が構造的に成立・過去は拾わない)。
+器は `set_image_default_quality` を雛形に `manager.state` + `write_env_updates` で `.env` 永続化(`os.environ` 即時反映も実装済みを確認、再起動不要)。
+OFF時は二重ガード(chat.py が summary キー自体を載せない + `build_query` が env フラグで遮断)。
+新規テスト6件(OFF既定/ON付加/本文空/過去除外/音声動画/summary無し)。
+**⑥ 案Y追従漏れ=起動時タイマー再確立(2026-07-29、実機ログ起点)**: まはーが話しかけていないのに aifi_city_a が「会話終了の振り返り」を撃った症状の調査から、**Phase 1(案Y)の running 参照点棚卸しに漏れが1件**あったと判明。
+案Yで Track 不動化した結果、対ユーザー会話 Track は会話終了後も running のまま残るのに、`saiverse_manager._on_persona_registered` §3 の `ensure_wait_response_timeout` は条件が **running のまま**据え置きだった → 再起動のたびに全ペルソナぶん「起動+30分」の空タイムアウトが発火し、何日も前に終わった会話へ post_conversation が空撃ちされていた(実測: 07-29 03:44起動→04:15にaifiが最終発言07-22の会話を「たった今ひと区切りついた」として独白し**やりたいこと1件を本人名義で生成**、同時刻にair含む計6体一斉。
+前セッション07-28 23:04起動→23:34も同一)。
+修正=`_should_rearm_wait_response_timeout` 新設、対ユーザー会話は**開いているconversationエピソードがある時だけ**再確立(fail-closed=読めなければ張らない。
+空撃ちはペルソナ名義の記憶を汚すのでタイマー欠落より害が重い)。
+**この条件はprovider/`_schedule_wait_response_timeout`側には置けない** — create/activateが`_schedule_`を`on_track_activated`(=エピソードを開く点)より先に呼ぶため会話開始時に必ず未オープン判定になる。
+**同型の漏れをもう1件同日修正**: `judgment_points.build_on_event_situation_text` がイベント到着判断の「いまの活動」を running Track の種別で決めており、終了済み会話について「ユーザーと会話中です」をペルソナへ渡していた(判定を `day_plan.is_in_user_conversation` へ一本化、`_is_in_user_conversation` を公開名へ改称して実装を1つに保つ)。
+**Codex攻撃レビュー3件**: 判定不能(DB読取失敗)を「張らない」で終わらせると開いた会話が永久に閉じない件を同日修正(判定を`Optional[bool]`化、None は判断を撃たず読み取りのみ30/120/300秒でバックオフ再試行 — 当初あてにした「次のユーザー発話で張り直される」は別Track running時に発話がalert経路へ入るため常には成立しないと判明)。
+残り2件はまはー裁定でissue化=[孤児化した会話の出来事](open_conversation_orphaned_by_track_displacement.md)(high・押し出しでタイマーだけ消え出来事が閉じない→コマ繰り下げ上限で予定行動が消える。
+**この修正が作った欠陥ではなく既存**)と[再起動ごとの期限延長](wait_response_deadline_extends_on_every_restart.md)(medium)。
+**再レビューでさらに1件を同日修正**: その再試行が、待つ間にユーザー発話で張られたタイマーを同キーで上書きし期限を最大300秒後退させる競合を持ち込んでいた(当初「同じ家族の穴」として期限延長issueへ先送りしたが、あちらは案Y以前からの`base_time`の話=**別物を同じ箱に入れた誤った仕分け**)。
+`_wait_response_timer_already_armed`で「有効な予約が既にあるなら再確立しない」歯止め。
+当初テストが`None→True`の単純経路しか踏まず競合を検出できなかった点も指摘どおりでユーザー発話の割り込み筋を回帰に追加。
+**3巡目**でその歯止めが`has_key`→`ensure_`のcheck-then-act(間にTrackと設定DBの読み直しがあり隙間が実在)と指摘され、`EventScheduler.schedule_if_absent`(判定と登録を同一ロック区間・既存`schedule`は無変更)を追加し`ensure_wait_response_timeout(only_if_absent=True)`経由で復旧経路だけが使うよう配線、check-then-actの歯止めは撤去(二重判定を残さない)。
+**復旧=「失われた予約を埋める」操作であって生きている予約を置き換える操作ではない**がAPIの意味論。
+**4〜5巡目の指摘は全てテストの弱さ**(実装側の破綻は3巡目以降ゼロ): ①単一スレッド回帰ではcheck-then-act実装でも全緑 → 実物TrackManager×実物EventSchedulerの境界テスト追加(復旧が上書き側APIに落ちたら失敗することを実測) ②`run_due`同期発火しか通さず`notify()`削除でも通る → 実dispatchスレッドで発火を待つテスト追加(削ると落ちることを実測) ③barrier 50回競合テストは**原子性を検証できていなかった**(非原子的mutantで1000回失敗ゼロとCodexが実測)ため削除——「原子性を担保する」は誇張だった。
+**教訓: サボタージュで自作テストの強度を測るとき、壊す場所が浅いとテストの強さも浅くしか測れない**(私は歯止めの内側だけ壊して満足し、配線の端から端は見ていなかった)。
+回帰追加(gate/track_manager/event_scheduler/judgment_points)、life.md §7.3表(2行)+改訂履歴に記録。
+**Codexレビュー運用の教訓**: 1回目の`--wait`は即返りし、2回目はプロセスが異常終了したのに台帳が`running`表示のまま9時間45分カウントし続けた(死んだプロセスの残像を見張っていた)。
+ジョブの生死は台帳でなく**プロセス実在(PID)で確認する**。
+まはー実機検証待ち。
+次: まはー実機再検証(エア起床時刻設定済・明日の朝が自然な検証) → **暮らしPulseのプロンプト設計(私→まはーレビュー)** → episode.md実装 → B4

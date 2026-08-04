@@ -156,3 +156,16 @@ head は capture→store→render で既にこの規律を卒業している (�
 2. Chronicle 生成の episode 整列化 (バッチ降格 + 束ねルール + 恒等圧縮) = **計画書 W4 — 実装済み・実機検証待ち** (2026-07-21)。整列計画 `sai_memory/arasuji/alignment.py` + チャンク実行 `executor.py` + 列のあふれ束ね・帰化 `bands.py`。旧 20 件バッチ経路 (ArasujiGenerator ほか) と Track Chronicle 生成 (§11-10) は撤去。走行メモ = [W4 handoff](../handoff/2026-07-21_w4_metabolism_ledger_handoff.md)。**実機検証で §4-6 の不変条件 (次数 k ≒ U×B^(k-1)) が破れていることが判明 (2026-07-24)**: 一次あらすじの実測が 9〜6,344 字 — 退場の刻み幅が U より細かいとき、§4-2 で「隣接と束ねる」べき豆粒が §4-3 の恒等圧縮に落ちる (端数を次の退場まで持ち越す器が無い) → [`chronicle_undersized_lv1_chunks`](../issues/chronicle_undersized_lv1_chunks.md)
 3. 継承エッジの器 (テーブル + 記帳) = **計画書 W13 — 実装済み・実機検証待ち** (2026-07-22)。`episode_inheritance` テーブル (子→親 0..n、層 = fact/digest、anchor_ref = 分岐点の pulse 関節、UNIQUE(子,親,層))。`open_episode(predecessors=...)` が範囲オープンの同一 tx で機械的に記帳 (§11-4) — 選択なしはエッジ 0 本 = 直列の縮退で既存データ無害。操作は `saiverse/experience_inheritance.py` (record_edges / get_parents / get_children / get_ancestors)。回帰 = `tests/test_experience_inheritance.py` 21 件。**残 = 消費者の配線** (継承チェーン閉じ生成・分岐再生成 UI・メティス取り込み) は後続 wave
 4. 知覚レンダリング = **計画書 W14** (perception_buffer 後続 Phase)
+
+## 経緯: 体験の構造 (記憶系の統一 intent) (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+2026-07-18〜19 の設計対話の結晶。
+三層 (事実/咀嚼/解釈)・Chronicle ツリー (包含の木×digest 統合、Lv 廃止)・圧縮七原則・継承 DAG (層付きエッジ)。
+**v0.4: 全主要裁定完了** — digest正準=咀嚼層 / 移行=再生成なし帰化 / 継承エッジ=アクティブスレッド選択型 / 束ねアルゴリズム=サイズ+列のあふれ駆動 (air 実ログのモック可視化でまはー検証済み、U=1万字・B=10) / MAv2=並置 (境界線記帳済) / Track Chronicle=廃止方向 (再訪問題は [track_episode_continuity](../issues/track_episode_continuity.md) へ分離) / 知覚側=§7 に原則のみ・実装は perception_buffer 後続 Phase に分離。
+実装順=§12: (0)モック済 → **(1) (a')=W1 同工区で実装済・実機検証待ち(2026-07-19、コミットe0ee4ff)**: digest専用コール廃止(3→2)・post_sessionが原本からdigest生成・原本注入コールローカル化・`saimemory.append_digest`配送+`set_digest_ref`後段確定・`episode_read`スペル(origin_episode専用列) → **(2) Chronicle生成のepisode整列化=W4で実装済・実機検証待ち(2026-07-21)**: 整列計画(alignment)+チャンク実行(executor: 恒等転写/恒等圧縮/LLM束ね、チャンク単一tx)+列のあふれ束ね・帰化(bands: 親子単一tx・壁・coverage backfill)+退場時圧縮(evict boundary)+退役のepisodeスナップ+Track Chronicle生成廃止(§11-10)。
+圧縮七原則を回帰固定 → **(3) 継承エッジの器=W13で実装済・実機検証待ち(2026-07-22)**: `episode_inheritance`テーブル(子→親0..n・層=fact/digest・anchor_ref=分岐点pulse関節・UNIQUE(子,親,層))+`saiverse/experience_inheritance.py`(record_edges/get_parents/get_children/get_ancestors)+`open_episode(predecessors=)`が範囲オープンの同一tx(session=予約txにも相乗り)で機械的記帳。
+選択なし=エッジ0本=直列の縮退で既存データ無害。
+回帰=tests/test_experience_inheritance.py 21件。
+消費者配線(継承チェーン閉じ生成・分岐再生成UI・メティス取り込み)は後続 → (4) 知覚レンダリング(W14)

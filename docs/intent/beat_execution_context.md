@@ -133,3 +133,26 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
 2. ~~通知要否判定の単純化~~ → **判定なし・常に通知**。ペルソナ体験（自分の操作の通知が届く）を判定で対策しきれない以上、無理に効率化しない。操作起点の push 型へ（§3.3）
 3. ~~lightweight Session の Metabolism 閾値~~ → 普通にモデル依存。実行 model のモデル設定から導出（§3.2）
 4. ~~memory_weave / chronicle_index の diff 未整理~~ → 本工事に含める。「後に残してもあんま良いこと無い。結局全部やる作業なんだから分かってる時点で潰す」（§3.3）
+
+## 経緯: Beat/ExecutionContext (SEA実行基盤の一本化) (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+実行台帳と対を成すSEA側の統合工事。
+**intent v0.2=まはーレビュー1巡で全論点解決(2026-07-16)**: 通知は判定なし常時+操作起点push型+経路はoutbox→知覚バッファ→tail / 割り込みはBeat境界待ち(課金保護、即時中断は将来の明示操作) / Metabolism閾値はモデル依存 / memory_weave・chronicle_index未整理も本工事に包含。
+同じ場所に住む4問題を一度に解く: 柱2(Session (persona,model)正典への実装追従=headキー/anchor/TTL/last_notifiedのフルキー化+実model記帳)/柱1 Phase 0の実装点(Beatロック+関所の配置)/S4(threadのExecutionContext化・Stelis push/pop)/head操作の内容型通知(issue解消: renderと同一関数から生成し「寸分たがわず」を構造保証、際どければ通知に倒す、outbox配送)。
+**Metabolism二層分離**=編纂はpersonaに一度(実行台帳の冪等claim=M1)・退役はmodelごと・可視化はmodelの節目(prefixキャッシュ保護、S2も同時に閉じる)。
+中核=ExecutionContext(persona/thread/line/aspect/model/pulse_id/execution_id、Beat開始時に一度解決・再推測禁止)。
+headキーにlineは含めない(キャッシュ共用の思想、session.md改訂)。
+**§6-1 ExecutionContext導入=実装・検収済(2026-07-16、コミット77e81e6)**: 型+resolve+select_llm_clientの(client,model)化+結線4箇所(LLM node/work_session/gold_panning/keepalive)、挙動不変を全体スイート2474 passedで確認。
+事前調査の副産物=Beatロック再入(RLock)裁定・PulseContext.thread_id死に値の発見をintentへ反映。
+**§6-2 Beatロック+関所+main/META解体=実装・検収済(2026-07-17)**: sea/beat_gate.py(persona単位RLock+最外周のみ関所flush+境界の解放/再取得)+取得点4系統(run_meta_user/work_session/metabolism/gold_panningクローズ)+spellループ周境界+周間cancel評価点+PulseController並列レーン意味論の解体+回帰17件。
+スレッドモデル実測=主要経路は同一スレッドでboundary有効、running-loopレガシー分岐のみ挟み込み劣化(直列性は無傷、恒久化は§6-6のトークン化で)。
+**§6-3a anchor行分離+実model記帳=実装・検収済(2026-07-17)**: session_anchorテーブル(PK=(persona,model))+冪等backfill+旧METABOLISM_ANCHORS経路撤去+usage.model記帳(S1/S8根治)+watchdog予約key model化+ライフ終端cancelのprefix一括化。
+**§6-3b head snapshot+last_notifiedキー化=実装・検収済(2026-07-17)**: session_head_snapshotテーブル(PK=(persona,model))+冪等backfill(衝突はline='main'優先→UPDATED_AT最新)+in-memory/store全経路切替+model_keyのprepare_context結線。
+発見バグ=旧MODEL_KEY全行'default'(存在しないpersona.default_model参照)→persona.model修正でanchor-TTL再captureが初めて機能。
+**§6-4 内容型通知=実装・検収済(2026-07-17)**: sea/head_pipeline/notify.py(本文=capture→renderのtextそのもの+outbox配送+B全Session行前進)+4sectionツール結線(META finalize自動カバー=issue head_mutation_notification_gap解消・実機検証待ち)+S5/S3修正(backstop diff通知のoutbox化+B前進を配送確定後へ)。
+**§6-5 Metabolism二層分離=実装・検収済(2026-07-17)**: 編纂の冪等claim(台帳kind=metabolism.run、key=persona:提示コンテキスト末尾ID — M1根治)+S2ガード(statusベース、anchor退役はok/disabledのみ・failedは据え置き自然再試行)+metabolism_anchor_message_id全廃(call-local化=記憶監査第4片根治)+閾値/退役/可視化のmodel化+chronicle_index件数ラベルdiff退役。
+**§6-6a thread push/pop化=実装・検収済(2026-07-17)**: PulseContextのthreadスタック+graph finallyで入口深さへ巻き戻し(例外/cancelでもStelis親復元=S4根治)+pulse_scoped_parentマーカーでクラッシュ孤児の起動時復旧(登録経路opt-in)+PulseContext.thread_id死に値廃止。
+**§6-7 正典改訂=完了(2026-07-17)**: session.md/dynamic_state_sync.md/concepts-metabolism.mdを実装に同期。
+残: §6-6b Beatロックのトークン化(分離裁定=劣化軽微vs デッドロックリスク、材料はhandoff §6) → 全wave完了後にgen_reference_docs一括再実行

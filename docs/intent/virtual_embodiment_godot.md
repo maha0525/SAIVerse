@@ -538,3 +538,39 @@ Idleも一枚の無限loopへ固定しない。呼吸・瞬き・視線は軽量
 7. ~~`MotionStyleProfile` とBody Commandの一回限り `action_instruction` を契約へ追加し、現在の単一 `misaki_walk.json` 優先をペルソナ別asset解決へ置き換える。~~ 完了（本人だけが更新できる永続profile Spell、決定論的asset ID、Godotのaction→base→legacy→synthetic解決、理由付きfallbackを隔離E2Eで実証）。
 8. 一体分のbase walk/run/idleを実ARDYで生成して合成fixtureから差し替え、移動中loop・立位遷移・root移動速度の整合と足滑りを実映像で検証する（実base walk/action/idle生成、loop trim、実測速度同期、Idle遷移、自然完了・中断E2Eまで完了。残りは実HMD映像での接地・足滑り確認）。
 9. ~~一回限りinstructionからARDY派生assetを動的生成し、生成待ちlifecycle、base styleとのprompt合成、速度metadata、到着時表現までをE2Eで検証する。~~ 完了（1-worker生成キュー、同一asset coalescing、`accepted→generating→ready→playing→completed`、生成中stop、fake/実ARDY action asset、到着Idleを隔離E2Eで実証）。日本語/英語A/Bの結果を受け、当面はSpell説明でARDY向け指示の英語記述を求め、品質不明の自動翻訳は行わない。
+
+## 経緯: Godot / ARDY 仮想身体デモ (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+Godot 4.6.3 + OpenXR + VRM/MToon、Core27→Humanoid、RTX 3090実ARDY、Gateway/Body Spell、`body_move_to`距離制御・中断・知覚配送を隔離E2E済み。
+`MotionStyleProfile` v1に加え、1-workerの動的ARDY生成キュー、同一asset要求のcoalescing、生成待ち`accepted→generating→ready→playing→completed`、生成中`body_stop`を実装。
+fake generatorとRTX 3090実生成の双方で合成`e2e_persona`のaction asset選択・約0.73m移動・到着Idleを実Godotで完走した。
+日本語原文E2Eは実測速度`0.0256 m/s`、同条件の英語指示は`1.3722 m/s`で、ARDYの英語指示優位を確認。
+Spell説明で歩行・Idle・一回限り指示を英語記述に統一し例示し、入力原文は翻訳しない。
+さらに`body_gesture(action_instruction)`の任意英語gesture生成を実装。
+preset waveを維持しつつ、persona別asset ID・非loop/in-place変換・metadata検証・生成待ち非同期・cache済み完了待ち・生成中stopを共通契約へ載せた。
+fake/実ARDY E2Eを完走し、実生成の両腕は139–150°変化、水平root移動0m。
+プレイヤー側のWASD/矢印・gamepad移動、Q/E・右stick旋回、別slotの`player.vrm`/簡易humanoidも実装した。
+プレイヤー身体は専用render layerで本人の一人称から隠し、ペルソナ視点には表示する。
+VRM 0.x `-Z`／VRM 1.0・Godot model `+Z`／Camera3D `-Z`を分離し、眼球Rest位置による正面自動正規化、`use_model_front`注視、PersonaView・player camera mountを実装。
+差し替えたVRM 1.0二体はいずれも補正0°、対面・両camera alignment `1.0`。
+複数Skeletonと`UpperArm_R`系aliasもHumanoid一致数で解決し、ARDY 23骨・右手0.544mを再検証した。
+`body_see(focus)`は左右眼中央＋前方4cmから一枚だけ1024×1024 PNGを撮像し、ペルソナ自己layerを除外して既存media metadataで次のLLM roundへ渡す。
+`player.vrm`の白化はUTS 2.09材質からMToonへshader参照だけを切り替え、shade・normal・emission・matcap parameterを移植しないままexportしたことが根因。
+Vesselのランタイム材質補正は誤った対処として撤去し、VRM記録どおりの描画へ戻した。
+再exportした`player.vrm`は5材質すべてのshade、服・髪のnormal/emission/matcapを保持し、Godot 4.6.3隔離import・runtime material検査・RTX 3090 Forward+実描画で白化解消を確認した。
+本体project cacheは検査時点で未再importのため、player slotとペルソナ一人称撮像を通す最終integration証拠は残る。
+プレイヤーにはARDY Core8生成の`grounded`・`soft`・`neutral` Idleを追加し、性別推測なしで選択・crossfadeできる。
+`player.vrm`のSkeleton3D内Z-upと誤ったimport `motion_scale=0.0292m`を解剖学的Rest basisと腰―足scaleで吸収し、Y-upの`persona.vrm`では恒等変換と既存scaleを維持。
+実VRM数値テストとForward+録画でTポーズ解消、root drift、既存wave/歩行回帰を確認した。
+8MiB WebSocket送信bufferを含む撮像transport E2Eは通過済み。
+外部LLM/本番ペルソナ/本番記憶には接触していない。
+desktopは1920×1080・リサイズ可能。
+表情は新VRMの740 Blend Shapeを列挙し、旧profile 23 targetを安定名で全件復旧。
+F4 Expression Studioで検索・配合・ID/説明/channel/fade編集・v2 profile保存（VRM hash付き）を実装した。
+`body_gesture(expression_preset, expression_intensity)`は実ARDYとfade同期し、完了・失敗・stopで開始前の顔へ戻る。
+合成persona実WebSocket E2E、Python 39件、ruff、Godot parse、実VRM遷移（happy途中最大差0.30・復帰差0.0）を通過。
+次はplayer locomotionの`idle ↔ walk/run`、自動瞬き・ユーザー追従視線、実HMD locomotion、発話同期`/emote`／viseme、Idle複数clip scheduler、接地・足滑り確認。
+2026-07-17の本番`eris_city_a`接触は無承認の同意違反事故であり検証証拠から除外。
+本番ペルソナを用いる確認は操作ごとの明示承認がある場合のみ

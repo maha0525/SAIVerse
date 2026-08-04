@@ -232,3 +232,38 @@ Lite のパートナー画面のモデル指定は、自由入力からカタロ
 2026-07-23、SAIVerse Lite の不具合調査から派生。Lite が本体の既存解決を参照せずに再実装していた件をまはーが指摘し、「モデル定義を別の場所に置いて自動取得できないか、ただしそれは『まはーがいなくなっても SAIVerse は使い続けられる』という思想に面倒を持ち込む」という懸念とともに議論した。
 
 不変条件2（接続情報を外部から持ち込ませない）は、この議論の中で私が挙げた乗っ取り時のリスクに対して、まはーが「もともと分かれているプロバイダとモデルのうち、モデルだけを外部から持ってくる形にすれば改修が小さい」と応じたことで形が決まった。
+
+## 経緯: モデル定義の外部配布とカタログ (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+intent v0.1 起草済み。
+本体を更新せずにモデル定義を足せるようにし、SAIVerse Lite とも共有する。
+設計を決めているのは不変条件2「接続情報 (`base_url` / `api_key_env` / `protocol`) は外部から持ち込ませない」— 配布元が乗っ取られるとプロンプトとAPIキーの送り先を攻撃者が決められるため。
+**段階1〜2=実装・検証済み(2026-07-23)**: `builtin_data/providers/openrouter.json` を新規追加し、同梱モデル定義を3陣に分けて `provider_ref` へ移行 — 第1陣61件(接続情報を直接持つ: openrouter 39/nvidia_nim 16/xai 6)、第2陣41件(`provider` だけ旧形式: openai 24/anthropic 9/openai_codex 8)、第3陣20件(gemini)。
+**副産物で欠陥1件を根治**: `builtin_data/providers/gemini.json` の `api_key_env_alternates`(無料枠キー `GEMINI_FREE_API_KEY`)が**コードのどこからも読まれていない死んだ宣言**で、実際に「どちらか一方でよい」を成立させていたのは `_get_required_env_vars()` のプロバイダ名ハードコード表だった。
+そのまま移行すると継承した `api_key_env` が単一キー枝に落ち、**無料枠キーのみの環境で Gemini 20件がモデル一覧から消える**。
+宣言側に合わせて `_INHERITABLE_FIELDS` に alternates を追加＋主キーと代替キーを併せて返すよう修正(ACTIVITY_STATE 解体の教訓「実装しない設計を列とコメントの形で残すな」が provider 定義で再発した型)。
+検証=全122件で `_get_required_env_vars()` 不変・第2陣は factory 注入の実効 `max_image_bytes` も不変・新規テスト11件・全体スイート3111 passed・ruff clean。
+**成果: `provider_ref` 採用4件→130件、同梱モデルから接続情報が消滅**(恒久検査 `test_builtin_models_carry_no_connection_info` で固定)＝段階3の前提が成立。
+**副産物で欠陥2件目を根治(ollama)**: 当初「移行すると `OLLAMA_BASE_URL` が効かなくなる」として保留したが、まはーの指摘で問題設定の誤りが判明 — **守るべきは現状の動きでなく、現状のほうがおかしかった**。
+LM Studio 等のユーザー作成プロバイダは UI で `base_url` を編集できるのに、**同梱の Ollama だけ環境変数でしか接続先を変えられない**逆転状態(`PUT /api/providers/ollama` は user_data 上書きを作るのに、モデルが `provider_ref` でそこを見ていないので編集値がどこにも届かない)。
+`provider_ref` 化は環境変数を殺すものではなく **UI 設定を届かせる前提条件**だった。
+対処=①同梱プロバイダ定義から `base_url` を削除(書くと全 ollama モデルが常時「設定済み」になり環境変数も自動探索も無効化される)②ollama モデル2件に `provider_ref`③**設定アドレスは探索を上書きでなく限定**(従来は指定先が落ちていると黙って localhost に繋ぎ替えていた→指定があればそこだけ試し、応答無しでもそのアドレスを保持して警告)。
+URL正規化を `_normalize_ollama_url` に括り出し(片経路だけ正規化される状態の排除)。
+新規 `tests/test_ollama_endpoint.py` 14件、既存 `test_ollama_compat_inheritance` は期待値だけ書き換えず「空が仕様」の理由を書いて更新。
+**派生: ローカル LLM サーバーの同梱プロバイダ化(まはー提案)**。
+`lmstudio` を同梱。
+当初「Ollama と同じ作業」と見込んだが**逆**で、LM Studio は `openai_compat` のため `base_url` を**書かねばならず**(空だと OpenAI 本家へ接続=事故)、かつ `openai.py` がキーを必ず要求する(無いと起動時 `AuthenticationError`)。
+`docs/custom_providers.md` は「キー欄は空欄で OK」と案内していたが**その通りに設定すると動かない**状態だった。
+→ **`api_key_required: false` を新設**(認証しないバックエンドの宣言、`lmstudio`/`llama_cpp_server` に付与): ①キー未設定でもモデル一覧に出る ②factory が OpenAI 互換クライアントにプレースホルダキーを渡す(SDK が空キーを拒否するため)。
+`api_key_env` の環境変数が設定されていればそちら優先(ローカルに認証を掛ける利用者を潰さない)。
+同梱 `lmstudio.json` は `api_key_env` を**書かない** — 書くと UI 編集時に user_data 上書き=非builtin となり `provider_security` の資格情報束縛(`SAIVERSE_PROVIDER_<ID>_API_KEY` のみ許可)で400になるため。
+UI にもチェックボックス追加(自作プロバイダでも宣言可、`false` は `exclude_none` で落ちないので解除も保存される)。
+`ollama_compat` を別プロトコルにしている理由も確認済み(`num_ctx` を毎リクエスト必須・`options` 入れ子とパラメータ名差異・`/v1` と `/api/chat` を用途で逆順に使い分け・`think`)=統合不可。
+新規 `TestKeylessProviders` 8件。
+**注意: まはーの環境には既に user_data 版 `lmstudio.json` があり同梱版は隠れる**(UI の削除で復活。
+user_data 版は `api_key_env` を持つため `provider_ref` 利用時は資格情報束縛で拒否される)。
+**フロント UI の実挙動は未確認**(バックエンド起動が本番ペルソナを動かしうるため。
+API レスポンスは TestClient で確認済み)。
+残る未決3点(配布元を独立リポジトリにするか / カタログを別スキーマにするか / 取得時差分提示)は段階3以降でまはーレビュー待ち

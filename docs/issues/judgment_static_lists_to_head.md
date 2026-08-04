@@ -106,3 +106,29 @@ head は prefix キャッシュ保護のため凍結される。**head に入れ
 - `tests/test_head_purpose_backlog.py`（新規）— render・増減/状態変化の通知・鮮度ドリフトの沈黙・取得失敗の伝播・直列化
 - `tests/test_facility_map.py` — head の一覧が enum と同じ候補集合を出すこと（旧 `_format_facilities` のテストを移設先へ向け直した）＋増減・改名の通知
 - `tests/test_judgment_points.py` — 状況テキストに一覧が**再送されていない**こと。表示 ref と enum の整合検査（2026-07-05 の実 LLM シムの回帰）は、表示側が head へ移ったので移設先を跨いで継続
+
+## 経緯: 判断プロンプトの静的一覧を head へ (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**実装完了 (2026-07-30)**: 起床判断・会話終了判断が毎回貼り直していた一覧 (行ける場所 / Track・タスク・やりたいこと候補) を head の新設 2 Section へ移し、凍結中の増減は同 Section の差分通知で届ける対にした。
+既存の Pulse 冒頭 diff 経路にそのまま乗るので通知機構の新設はなし。
+実装で決めたこと = **本人が増やしたものも通知する** (head 凍結下では通知が無いと台帳が嘘になる。
+DeskSection とは逆方針) / **鮮度・再訪回数では通知しない** (通知が一覧の再送に化ける) / **`LifePurposeSection` の第一階層メニューを吸収** (同じ Track が head 内に二度、しかも旧メニューは差分通知を持たず食い違う) / 候補集合の決定を 1 箇所に集約 (head=読む情報 と enum=選べる選択肢 の別実装化を防ぐ)。
+**Codex レビューで初版の欠陥 3 件を消し込み (2026-07-30)**: high1 = タスク・欲求の取得失敗を空リストへ変換しており「全件消えた」という嘘の snapshot が保存・通知され、Metabolism では pipeline の stale-but-real を迂回して永続化していた (直し = 例外の握りつぶしを撤去し `tracks_unavailable` フラグごと削除。
+pipeline が元から持つ機構に任せる) / high2 = head の Track 一覧が「生きている Track 全部 + 参照子未採番は UUID 先頭 8 桁」で、判断で選べる集合 (running/alert/pending かつ採番済み) と食い違い、**移設前より退化**していた — LLM が head で見た track:N を書けず別 Track か 'new' に滑って重複 Track を作る経路 (直し = `list_pickable_tracks` を head と enum で共用) / medium3 = 復旧時に既読基準が前進しない (high1 の撤去で経路ごと消滅)。
+教訓は自分の報告と実装の食い違い — 「候補集合を 1 箇所に寄せた」「取得失敗と空を区別した」と書きながら、どちらも Track だけの適用だった。
+**二巡目でさらに 4 件 (2026-07-30)**: high1 = `capture_all` が B を新 A で丸ごと初期化するため、capture 失敗で古い A を再利用した Section の既読基準が巻き戻り、復旧後に届け済みの変化を再通知する (一巡目で握りつぶしを外した結果この既存の穴を日常的に踏むようになった。
+直し = stale 再利用分は B も据え置く) / **high2 = 一巡目の直し方そのものが誤り** — `judgment_finalize` が「新しい関心として立てる」で作る Track は必ず unstarted、`sanitize_timetable` は unstarted を受理する、つまり狭かったのは選択肢の側で、head を狭めて揃えたことで「立てたばかりの関心に翌朝コマを割り当てられない」という既存の欠陥を隠しテストで固定していた (直し = `PICKABLE_TRACK_STATUSES` を `LIVE_STATUSES` へ統合。
+**「歯止めの条件は目的から導く。
+種類で書くな」の再演** — 集合を揃える先も目的から決める) / high3 = Track 取得だけの障害でタスク・欲求まで head から消え、enum だけが意味不明な ref を判断へ渡す (直し = enum 側の握りつぶしも撤去し 3 系統を fail-closed で揃える) / medium4 = 成果物参照が付いても通知されず head の「なし」が残る。
+**三巡目 1 件**: 握りつぶしを外した副作用で、引数の組み立ての DB 障害が `run_judgment_point` の外へ例外として漏れ、claim 済みの席が `prepared` のまま残って呼び出し元の代替経路 (on_event の direct fallback) も回復 tick の再発火も両方動きうる状態だった (直し = LLM 開始前の失敗境界として包み `failed` + `submitted=False`。
+併せて**呼び出し側の契約違反は畳まず上げる**よう `validate_judgment_context` へ分離 — 例外の種類でなく検査の置き場で目的から分ける)。
+**四巡目 3 件**: 三巡目の直しが浅く、①席の終端に `mark_failed` を使っていた (running を上書きしうる。
+この用途には `abandon_prepared` の prepared 限定 CAS が元からあった) うえ終端失敗でも `submitted=False` を返し代替経路と回復 tick が二重に走りえた → 放棄できなければ結末 `indeterminate` として代替経路を止める ②claim 後の早期 return 3 経路 (ペルソナ未ロード/現在地なし/pulse_controller なし) が席を prepared のまま残す — **閉じようとした穴と同型の穴を「自分の退化ではない」と外した判断が甘かった** → pre-dispatch の離脱を 1 本に集約 ③契約検査が post_session の `session_result` を見ておらず、**起きていないセッションを前提に裁定と時間割変更が永続化**されうる (本番の発火側は撃たないので判断点側だけ穴)、かつ検査位置が環境チェックの後で「契約違反は必ず表面化」を満たしていなかった → 検査を追加し kind 解決直後へ移動。
+**五巡目 4 件 → 1 件を閉じ 3 件を切り出し**: 指摘が移設を離れ実行台帳の競合制御へ移ったので線を引いた。
+閉じたのは自分が作った穴 (契約検査の例外が claim 済みの席を孤児化 → 検査を `fire_judgment_point` の claim 前へ)。
+切り出しは [judgment_seat_contention_and_event_loss](judgment_seat_contention_and_event_loss.md) — ①席取りが CAS でない (`mark_running`→`try_mark_running`) ②発火側の離脱が勝者の running 台帳を壊す ③**代替経路を止めたことでイベントが永久に消えうる** (③は移設の対処が作った経路、①②は移設前から。
+**二重応対と消失のどちらを取るかはまはー裁定待ち**)。
+テスト新規 42 件。
+**残 = 実機観察 + 切り出し先の裁定** (head に 2 節が出ること / 判断プロンプトが痩せたこと / 一覧を変えた次の Pulse に通知が届くこと / prefix キャッシュが節目まで持つこと)

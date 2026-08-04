@@ -43,3 +43,13 @@ air は前日にタスクを全部完了させた状態で、day_open が 13:00�
 ## 補足
 
 experience_structure の実装で作業セッションの digest / episode まわりが変わるため、対処は W1〜W4 の工事と時期を揃えるのが自然。
+
+## 経緯: track:N コマの空 Track 無音縮退 修正 (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**実装済(2026-07-19、方向1)**: `_build_track_instruction` が note を縮退判定の後で読んでいた急所を修正 — 縮退条件を `not live_tasks and not memo and not note` にし、note があればそれを目標にセッションを回す(生存タスク一覧が無い経路は締め文言も分岐)。
+実害=air が「構想を練る」と note を書いた午後の track:7 コマが、前日タスク全完了で生存タスク不在→無音縮退し午後がまるごと消えた。
+回帰 tests/test_track_slot_ref.py(真に空=縮退 / note あり=回る)。
+experience_structure の digest/episode 工事と独立の day_plan 局所修正。
+残: まはー実機再検証(track コマが縮退せず回るか)

@@ -63,3 +63,13 @@
 - **既知の限界（C 案スコープ、意図的に作らない）**: 判断の終端と応対 submit の間で**プロセスが落ちる**と応対は失われる（生存プロセス内の明示失敗は上記③で再試行される）。この窓は通常経路（`handle_external_event` の dispatch_direct）にも同じ形で存在し、埋めるには応対要求を finalize と同一トランザクションの outbox に永続化する C 案の機構が要る。裁定 B の範囲外として受け入れ、WARNING / ERROR で観察可能にした。
 - 回帰: `tests/test_judgment_points.py` / `tests/test_autonomy_wiring.py` / `tests/test_execution_ledger_wiring.py` / `tests/test_schedule_manager_ledger.py` / `tests/test_schedule_reconciliation.py` に再現テストを追加、5 ファイル 237 件緑。
 - 残: 実機検証。
+
+## 経緯: 判断点の席の競合制御とイベントの取りこぼし (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**裁定 B + 実装完了・Codex 11 巡 (2026-07-31)**: ①席取りを prepared 限定 CAS 化 (敗者は台帳に書かず離脱) ②入口離脱も CAS 統一 ③回収は保持+再試行窓 (裁定 B — 一時障害が直ればイベントは処理される)。
+巡回で拡張: schedule の waiting 精算 (勝者の終端を claim で照合・attempt 非消費)、回収応対の envelope 復元と三値成否、復帰 request の args コピー (pre_spells は副作用のため除外)、CITYNAME 自動修復の関所 (稼働中 DB の乗っ取り防止・単一 City 限定)。
+範囲外は [issue](event_delivery_reachability_gaps.md) ①〜⑥へ切り出し。
+フルスイート 3449 件緑。
+残 = 収束判定 (十一巡目まで消化済) → コミット → 実機検証

@@ -161,3 +161,90 @@
 2. wave の状態遷移: 着手で ▶、検収コミットで ☑、実機検証通過で ✅
 3. wave 内で新 finding や設計課題が出たら、この計画書に行を足すのではなく issue / intent に置き、該当 wave のスコープ行から参照する (この文書は薄く保つ)
 4. handoff 文書 (docs/handoff/日付_*.md) はセッション固有の走行メモ (走行中エージェントの検収手順など)。セッションを跨ぐ工程情報は書かず、ここへ書く
+
+## 経緯: コードレビュー運用・残存finding修正 (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**一次監査は全8サブシステム完了(2026-07-16)**。
+migration/API/外部連携は第二陣まで消し込み済み、Spell監査もP1×3+P2×1修正済(P1×1部分修正)。
+**残存=実質P1×30前後/P2×7を8本の柱に整理(2026-07-16)**: 柱1=偽成功・不可逆先行16件(→実行台帳、別行)/柱2=model別Session(**裁定済: フルキー化=実装を正典に追いつかせる→統合工事、別行**)/柱3=multi-city生死/柱4=native import意味論/柱5=位置占有/柱6=時刻/柱7=完全手動モード/柱8=独立小物。
+**副産物: head操作通知の現行の抜けを発見・issue化**([head_mutation_notification_gap](../issues/head_mutation_notification_gap.md)、METAの生きる目的書き換えが内容不達)。
+**柱3=裁定済(multi-city凍結、入口封鎖タスク化)/柱4=裁定済(復元/移植の分離)** — 8柱すべて方針確定(2026-07-16)。
+**柱3封鎖=実装済(2026-07-16)**: inter-city/persona-proxy API 503+凍結メッセージ・VisitingAI/ThinkingRequest polling 不起動・dispatch_persona/return_visiting_persona 入口ガード・回帰テスト(tests/test_multi_city_freeze.py 6件)・docs 同期(sds/landscape §8/roadmap/inter-city/CLAUDE.md)。
+**柱4分離=実装済(2026-07-17)**: native import の復元/移植分離 — 復元は source/target 不一致を書き込み前拒否(API 400/CLI 即エラー)・移植は明示フラグ+原子写像+transplanted_from provenance・replace 単一トランザクション化・embedding 非生成化(M4/M5/M6 消し込み、回帰 tests/test_native_import_separation.py 10件)。
+**柱2=統合工事§6で完結(2026-07-17)**。
+**以降の工程管理は [完了計画書](audit_remediation_plan.md) に一本化 (W1〜W14)** — セッション開始はまず計画書の「現在地」から。
+**W1(台帳Phase 1判断点=A2/A7/A8/A9/A11 + digest統合)=実装済・実機検証待ち(2026-07-19)**。
+**W2(台帳Phase 2時間割/予算=A1/A5/A6)=実装済・実機検証待ち(2026-07-20)**: Codexレビュー7巡(5+2+2+2+1+1+1件)を全て修正・回帰固定 — 第三陣=予約keyのslot id化+二重claimの勝者一意化、第四陣=発火照準のid一貫化+置換のid新世代化、第五陣=slots書き込みの世代CAS化、第六陣=meta_jsonもCAS対象に、第七陣=増分計算をCASの内側へ(mutate_plan_meta新設、並走積算の消失閉塞)。
+本体スイート2749 passed。
+**W3(台帳Phase 3 schedule=A12/A13)=実装済・実機検証待ち(2026-07-21)**: 発火claim(`schedule.dispatch`台帳実行=claim→席取り→型付きoutcome→精算単一commit、failed=backoff×3・unknown=自動再実行禁止) + 世代列`SYNC_GENERATION`+行一生`INSTANCE_TOKEN`+回復tick #7 reconciliation(60秒自己回復)+API `scheduler_synced`。
+Codexレビュー10巡27件消し込み(受諾24/裁定却下3 — キー三軸化/tri-state応答/両境界の冪等マーカー+失敗伝播/periodicのprepared・failed回収/精算フェンス/applied sweep/世代のサーバー側インクリメント)。
+**W4(台帳Phase 4 Metabolism残片=体験の構造 工程(2)に統合)=実装済・実機検証待ち(2026-07-21)**: Chronicle生成をepisode整列チャンク(alignment/executor/bands)へ世代交代し M2残片5欠陥(親子別commit二重生成/提示コンテキスト内圧縮/digest再圧縮/source重複/dismantle複合更新)を消化+Track Chronicle生成廃止+API生成ジョブへM1 claim結線。
+Codexレビュー5巡20件消し込み(受諾20/却下0)。
+圧縮七原則を回帰固定(新規66件)。
+**W5(台帳Phase 5 配送系と移動)=実装済・実機検証待ち(2026-07-21)**: S5完了化(perception flushのNone静的失敗でpendingを消さない)+M8(Building転記cursorの後行確定+provenance冪等、副産物=auto_ingestのingested_by非永続化バグ根治)+ライフ境界通知のoutbox化(W3第六陣恒久解: マーカーと通知を単一commit)+B1(move_entity台帳化: 位置遷移+イベント+後処理outboxを単一commit、commit後にFalseを返さない)。
+**Codexレビュー1巡4件消し込み(受諾4/却下0)**: P1×2=後処理outboxハンドラが誘発する再帰的flush_pending_for_personaが非再入ロックでデッドロック(実装直後に発見、再入検知で解消)、P2×2=post-move失敗のoutbox未伝播+provenance照会失敗の重複保存リスク。
+回帰計24件。
+**W6(head fail-closed化=S6)=実装済・実機検証待ち(2026-07-21)**: required Section(common_prompt/persona_self/core_memory)のcapture/render/persist失敗時は`HeadNotReadyError`でLLM実行前にPulse中断(人格に属さない発話が本人履歴に混ざる経路の封鎖)、自己修復=欠損限定recapture+persist再試行(durable版>=描画版の単調性)、store.save成否bool化+版条件付きUPDATE、core_memoryの内部握り撤去。
+Codexレビュー5巡(受諾9/裁定却下1)。
+回帰=test_head_fail_closed.py 27件。
+**W7(柱5 位置・占有)=実装済・実機検証待ち(2026-07-21)**: 分離監査の非凍結finding全消し込み — occupancy部分一意index+起動時修復(参照整合行優先)+move_entityの書き込み時仲裁(条件付きUPDATE/guarded INSERT)+属性更新のservice集約(呼び出し側6箇所撤去)+chat境界(/send現在地専用409+発言永続化tx内の現在地検証+添付cleanup+撤去補記)+Region入口不変条件(parent変更同期・直接再所属拒否・所有一意index)+Building CITYID immutable化+event_key台帳採番+startup checker分類化。
+Codexレビュー9巡18件消し込み(受諾18/却下0)。
+回帰=新規47件+既存ファイルに9件追加。
+**W8(柱6 時刻)のS7=実装済・実機検証待ち(2026-07-22)**: messagesの正典順序キーを`(created_at, rowid)`に確定し、anchor境界キーセット化+履歴/pagination/Chronicle/提示コンテキスト/表示系の全クエリ統一+native export/importの往復順序保存(seq運搬+明示rowid復元)。
+Codexレビュー4巡(受諾3/スコープ外1=前セッションGemini作業への指摘、申し送り済)。
+回帰=新規18件+native import系4件追加。
+時刻系findingの棚卸し完了 — 残=A3(host/City時差、未実装・潜伏)の着手裁定。
+**W4の実機検証で欠陥1件が出た(2026-07-24)**: エリスのChronicle一覧に単独発言のエントリが並んでいるというまはーの観察から調査 — (a)一次あらすじが標準被覆U=1万字に対し実測9〜6,344字に崩れており、退場の刻み幅がUより細かいとき「まだ相手が退場していない端数」を「束ねる相手がいない豆粒」と同一視して確定してしまう(二次以上のあらすじ側の`bands.py`には持ち越し規律があるのに一次あらすじだけ無い非対称)→[chronicle_undersized_lv1_chunks](../issues/chronicle_undersized_lv1_chunks.md)、(b)発端の2エントリ自体はW4の欠陥ではなく、W5/M8で根治済みの`ingested_by`非永続化バグが7/18に作った重複user行をW4の集合ベース未処理判定が正しく拾った結果(データ掃除のみ残)→[chronicle_orphan_duplicate_user_messages](../issues/chronicle_orphan_duplicate_user_messages.md)。
+**(a)は再設計→設計確定(2026-07-25)**: 当初の借用案(一次あらすじ端数を提示中の生ログで最小限巻き込む)はCodexレビューで**open episode分断のP1**が出て撤回。
+まはーとの対話で退場の粒度を**episode単位・文字数水位**に変える上流の解へ到達し、Intent [chronicle_eviction.md](../intent/chronicle_eviction.md) が**まはーレビュー通過→2026-07-25 実装完了・実機検証待ち**(open単独digest/closed束ね・三水位 低4万/目標6万/高12万・直近の保護範囲・pulse関節細分§6・digest置き換えレンダリング+圧縮マーク注釈)。
+**実装の形**: 借用実装は撤回済み。
+新規 `sea/eviction_plan.py`(退場計画=純関数)/`sea/session_window.py`(圧縮区間と digest 置き換え、`SessionWindow`=anchor+生ログ+提示)、`session_anchor.FOLDED_RANGES_JSON`(圧縮区間は(persona,model)の持ち物=退役がmodelごとだから)、編纂は`generate_chronicle(compile_groups=...)`で**退場する集合と編纂する集合を一致**させ下限を手続き保証、head の Chronicle 枠からは inline 表示中のあらすじを除外(二重化防止)。
+旧メッセージ数水位は**単位ごと廃止**(モデルJSON 120件・API `/max-history-messages`・manager override・フロントUI。
+landscape §9 に記録)。
+回帰: `tests/test_eviction_plan.py`(13件)+`tests/test_session_window_folds.py`(12件)+`test_metabolism_two_layer.py`書き直し、本体スイート3193 passed。
+**レビュー=Codexクレジット切れのためClaudeサブエージェントで代行・2巡14件消し込み**(受諾14/却下0。
+P1=①圧縮区間の先頭が提示コンテキスト外で体験消失 ②digestを引けない圧縮区間の無限積み上がり、P2=③ロック外の提示コンテキストでRMW ④子episode open/closeの非原子 ⑤force-closeの歯止め ⑥置き換え本文の未計上 ⑦anchorが退場経路外で動くと提示コンテキストにもheadにも出ない体験ができる ⑧disabledで子episodeだけ増殖。
+明細は[レビュー台帳](code_review_ledger.md)のP0記憶行)。
+**監査工程上はW4の差し戻し行として一本化**(完了計画書に記載): W4検証項目のうちevict boundary/openスナップは世代交代・恒等転写/列のあふれ束ね/M2-a/c/d/eは有効のまま、柱2 §6-5「Metabolism閾値はモデル依存」裁定は三水位で上書き(beat_execution_context §3.2注記済)。
+**🔴 ただし上段(二次以上のあらすじ)との接続が未設計と判明(2026-07-25 まはー指摘→調査で確定)**: 本実装が扱うのは「生ログ→一次あらすじ」まで。
+一次あらすじを束ねる既存機構(`bands.py`)と噛み合っておらず、①束ねの連続判定は上の次数の壁しか見ないため**まだあらすじになっていない生ログの期間を跨いで前後が同じ二次あらすじに束ねられうる**(§4-5 偽の隣接=時系列の嘘。
+提示コンテキストの途中を畳めるようにした本実装が束ね側の前提を壊した) ②圧縮区間を列の上限の勘定にどう置くか未定義(headに出していないのに列の上限を圧迫) ③圧縮区間の置き換えが Chronicle 側の束ねと連動していない(旧記述「上へ畳む道が無い」は §4-4 の限定を落とした誤読 → 2026-07-25 訂正。
+道は最初からあり、壊れているのは提示側が一次あらすじの id を名指しで握っていること=②と同根)。
+加えて**圧縮区間の記録が更新頻度の違う二箇所(提示コンテキスト=毎回/head抑止=節目で凍結)で共有**されており、キャッシュ切れ経路でその範囲が提示コンテキストにもheadにも出ない状態が生まれく(レビューP2-Aの対処が別のズレを作った形)。
+**まはー判定=二次以上のあらすじの畳み方を丸ごと再考、調査と案出しから。
+用語の作り直しは実施済み(圧縮区間→圧縮区間 / 級→一次・二次あらすじ / 提示コンテキスト→提示コンテキスト / 帯→用語廃止)**(短い常用漢字を用語にすると地の文で判別不能・説明の分かりにくさの一因)。
+**2026-07-25 後半 = 用語改名 + 退場の判断基準を全面改訂**: ①用語を作り直し (穴→圧縮区間 / 級→一次・二次あらすじ / 窓→提示コンテキスト / 帯→用語廃止。
+`level` は DB の metadata キーなので改名せず)。
+②§4-4「同一レベルの再圧縮禁止」の本文から限定が落ちていたのを修復 — この誤読が「圧縮区間を上へ畳む道が無い」という**存在しない行き止まり**を作っていた。
+③**未解決③(置き換えの溜まり)は議題から外した** — 算術で残骸は畳んだ量の12%、目標水位を埋めるには生ログ50万字ぶん必要=急ぎでない。
+④**退場の判断基準を改訂 (まはー裁定)**: U は「優先度」の材料であって「畳んでいいか」の材料ではない。
+計画を二段構えにし、一段目 (U 以上のみ) で目標に届かなければ**二段目で U 未満の open も一回だけ畳む**。
+先頭に U 未満の端数が居座ると anchor が永久に進まないのが病巣で、後続を圧縮しても置き換えが積もるだけだった。
+代償 (小粒の一次あらすじ / 進行中会話の要約 / 極小の子 episode) は受容 — anchor 停止の方が重篤。
+**強制クローズ(旧§5-5)は撤去** (本来は episode 側のタイムアウト検知の仕事、landscape §9 へ)。
+⑤実装中に**既存の欠陥を1件発見・修正**: 畳み済み unit を透明に素通りさせていたため、前後の closed がそれを飛び越えて束ねられた (§4-5 偽の隣接。
+U 以上を畳み切った時にも成立していた)。
+⑥**新 issue**: 分裂した episode の digest が同じ出来事を二回記述する ([chronicle_split_episode_digest_double_description](../issues/chronicle_split_episode_digest_double_description.md)、まはー「別セッションでまた訊く」)。
+⑦自動想起 (会話 episode に戻ったとき要約済み部分を想起する仕組み) は**別途組む・未着手**。
+**コードレビュー消し込み (Codex 3巡 + Claudeサブエージェント1巡)**: Codex=①anchor恒久停止の境界ケース(手前が未吸収なら端数を畳んでも進まず、置き換えが壁になって恒久デッドロック) ②壁修正が大きいopenの続きを畳めなくする回帰 ③修正が別の恒久デッドロックを新造(最後の手段をopen限定にしたため「先頭がU未満closed+直後がU未満open」で計画が永久に空。
+→**種類を問わず未畳みの先頭を畳む**へ) ④二段構えでfoldsの時系列順が崩れ子episodeの記録順が逆転。
+Codexは4巡目でクレジット上限(OpenAI障害と同時)→サブエージェントへ交代。
+サブエージェント=93,312通り総当たりで**計画側の契約違反・偽の隣接・無限ループ0件**を確認したうえで、⑤最後の手段がanchor非停滞の回にも発火(手前を今回畳んでいても前提が真になる→**日常経路で小粒ノードを作り観測フラグも死ぬ**。
+修正済) + **本変更以前から在る欠陥2件を発見→issue化のみ**: [applier_veto_deadlock](../issues/chronicle_eviction_applier_veto_deadlock.md)(適用側の拒否権2つを計画側が知らず永久ループ。
+強制クローズでも救えなかった経路) / [run_boundary_lost_by_excluded_tag](../issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)(編纂のrun境界がfold先頭id依存で除外タグ1件で消え、離れたfoldが一つのあらすじに=§4-5偽の隣接。
+**2026-07-27解決**=境界を先頭idでなく所属foldで持つ形へ交代し、先頭が編纂対象から落ちても境界が立つ。
+純関数側と実DB側の両方に「先頭が居ない群」の回帰を追加。
+Codex攻撃レビュー4巡で契約違反時の縮退も固め=所属不明(重複/未所属)は孤立させ束ねない・群の連続性の検算は提示コンテキストの完全な並びを持つ退場計画側(`compile_groups_from_folds`)へ配置。
+**残った構造課題は新issue** [fold_range_and_chronicle_entry_not_one_to_one](../issues/fold_range_and_chronicle_entry_not_one_to_one.md)(P2=検算した分割が退場適用へ伝播しない/`_attach_chronicle_refs`が包含でなく重なりでentryを付ける。
+現行`plan_eviction`は連続foldしか作らないので今日の経路では未発生))。
+教訓=**歯止めの条件は目的から導く。
+種類で書くと「達成しない発火」と「達成できるのに発火しない穴」の両方が開く**(同一変更で2回踏んだ)。
+回帰=本体3251 passed・ruff clean。
+**残=まはー実機検証** — 当時の残件は二つとも消化済み: ①W4 発掘の P1 = applier_veto_deadlock は **2026-07-27 実装完了** (`fadd6de`。
+検証待ちは[専用行](../issues/chronicle_eviction_applier_veto_deadlock.md)が持つ) ②上段(二次以上のあらすじ)の偽の隣接と二箇所のズレも同日 chronicle_consolidation で実装完了 (`f19553f`) → **2026-07-28 に[あらすじのレベル制](../intent/arasuji_levels.md)へ世代交代**(そちらの専用行が真実を持つ)。
+よって退場側 intent §9 (a)〜(d) の実機検証を止めていた条件も解けている。
+走行メモ=[2026-07-25](../handoff/2026-07-25_chronicle_eviction_handoff.md)。
+W1〜W3/W5〜W8の実機検証は退場経路と独立なので並行消化可。
+aifi/air会話本線異常(eris42通vs aifi10/air14通)はチップtask_a3a22c08に分離

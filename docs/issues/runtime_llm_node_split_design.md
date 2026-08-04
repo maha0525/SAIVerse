@@ -264,3 +264,12 @@ Branch A/B × stream/sync を §3.2 の4関数に分割。`node` 本体は
 - 2026-07-22: Phase 1（④確定部の抽出 + `BeatExecution` 導入）実装。
   閉包は 1,651 → 1,241 行。Beat 型は器として立ち上がったが、
   「対」が揃うのは Phase 2（display_text の書き手が生成経路側にあるため）。
+
+## 経緯: runtime_llm.py 巨大 node 分割 (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**Phase 0(重複ヘルパ抽出) + Phase 1(④確定部抽出 + `BeatExecution` 導入) 実装済(2026-07-22)** — 閉包 1,651→1,241 行、回帰 49 件新設 + tests/ 全緑(3110)。
+次: **まはー実機スモーク**(通常会話 streaming on / spell 入り発話 / TOOL ノード playbook / streaming off の 4 パターン、llm_io.log と Building 履歴・SAIMemory が分割前と同型か)。
+その後 Phase 2(4 経路の分離。
+ここで Beat の「対」display_text が揃う)

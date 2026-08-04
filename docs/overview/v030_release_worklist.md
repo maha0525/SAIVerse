@@ -261,3 +261,11 @@
 - ~~③ の `open_notes` head セクションのキャッシュ制御~~ → **決着**: `visual_context`/`memory_weave` 同方式（capture 凍結→末尾通知→Metabolism 再 capture）で実装・検証済。
 - ~~③ の desire ノートの "消えない" をどう担保するか~~ → 実装済み（singleton `ensure_desire_note`）。実機一巡で消えないこと確認済。
 - ④ で `self_reflection` を足すか否か、`autonomy_*` を Track 機構へ寄せるか廃すか。 ← **残る唯一の設計未決**。
+
+## 経緯: v0.3.0 ④ オートノミー整理 (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**実装済(2026-07-10、⑥P2c-3)**: 退役2/archive 4・upgrade handler dev4(PersonaSchedule+SELECTED_META_PLAYBOOK 巻き取り)・VERSION dev4・docs 追従(CLAUDE.md/autonomous-mode 等)。
+dry-run で prune 6件確認。
+残: **実機再起動で巻き取り+prune の本走行確認**(まはー)

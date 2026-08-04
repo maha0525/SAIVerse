@@ -50,3 +50,15 @@
 
 - 2026-07-29: 発見・原因特定 (上記二経路) → 同日実装。
 - 2026-07-30: 二重起票の整理。`arasuji_list_limit_hides_newest.md` を archive へ移し、本 issue に一本化。同ファイルに同居していた別件 (被覆の範囲表示が歯抜けを表現できない) は [chronicle_coverage_range_hides_gaps](chronicle_coverage_range_hides_gaps.md) として独立させた。
+
+## 経緯: Chronicle タブが最新エントリを表示しない (500件切り詰め) (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+**実装済 (`a537441`、2026-07-29)**: 一覧 API を「新しい側を `ORDER BY start_time DESC` + SQL LIMIT で取り、表示順へ反転」に変更 (limit が DB 読み取り量も抑える — Codex 再レビュー反映)。
+隠すのは**古い側の L1** だけで上位レベル (L2+) は隠さない契約、切り詰め時は件数を応答で明示 (`hidden_oldest`/`total_available`)。
+COUNT と行フェッチは同一読み取り tx (並行編纂で件数がずれると黙った切り詰めが再発する — Codex 三巡目)。
+フロントに切り詰めバナー追加 (ライト/ダーク両対応)。
+**2026-07-30: 二重起票を整理** — 同一バグの `arasuji_list_limit_hides_newest.md` を archive へ移し、両方の発見経緯を本 issue へ統合。
+同居していた別件 (被覆の範囲表示が歯抜けを表現できない) は [chronicle_coverage_range_hides_gaps](chronicle_coverage_range_hides_gaps.md) として独立 (未着手・台帳外)。
+残 = 実機でエリス 513 件の最新 (7/29) が見えること

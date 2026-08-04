@@ -44,3 +44,10 @@ item ref 未解決）。読み取り専用で低リスクだが、`document_edit
 - visual_context (800) / building_items (1000) / building_occupants (1100) / memopedia_index (1200) / chronicle_index (1300)
 
 コンテキストプレビューでは別枠表示のため、レビュー時は組み上がりテキストを別途取得すること。
+
+## 経緯: head スペル一覧ダイエット (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+統合ダイエット(document 7→4・item 2→1、二重実装/アイソレーション漏れ解消)は**実機確認済**(2026-07-09、まはー)。
+残(本 issue 本線): 使用頻度の低いスペルの `visible=false` 化 + `addon_spell_help` 型の遅延開示を builtin にも(候補=life_purpose_set / observer_read / messagelog_get_around / send_email_to_user)

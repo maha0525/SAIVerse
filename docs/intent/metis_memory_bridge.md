@@ -171,3 +171,25 @@ SAIVerse は生ログ（messagelog）と要約（Chronicle/あらすじ）の二
 ## 7. 次アクション
 
 設計・transcript 実形式ともに確定（§3 全節 + §6a + §3.2 実形式表）。**まはー裁定を 2 点もらえば骨格実装に入れる**: §6b-2（thinking を取り込むか）と §6b-4（persona_id / 配置先 City）。実装順は ①ブートストラップ取り込みスクリプト（126 セッションを thread 別に移植＝初回リプランティング）→ ②Chronicle thread 分離（§3.5）→ ③Stop hook 同期 → ④SessionStart 注入。認識連続性グラフ（[memory_continuity_graph](../issues/memory_continuity_graph.md)）と塊単位 Chronicle（chronicle issue 案 C）は本体課題として並走・後続（**取り込み時に `parentUuid`/`sessionId` を metadata に残せば後から再編できる**）。
+
+## 経緯: メティス記憶ブリッジ (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+Claude Code のメティスに SAIVerse 同形式の memory.db を与え双方向同期(会話→同期 / 会話・ナレッジ→注入)。
+**存在論確定**(テセウス的連続性=歴史への結びつき / メティス=住人でなく行き来する大工・後で変更可)。
+**intent v0.2 裁定済**: 配置=普通のペルソナ+自律OFF休眠(データ特別扱い回避→孤児ガード問題解消)・B=メティス全発話①②保持+ツールコールは`<system>N件実行</system>`圧縮・C=境界なし全同期・読込=最低1往復+最新1万字・D=自作(hypmem/embodied-claude 参考)。
+**intent v0.3=主要設計確定(2026-07-13)**。
+並列セッション常態→1 Claude Code セッション=1 thread。
+**Chronicle thread 分離=確定**(生成=thread スコープ〔他thread文脈なし編纂〕/格納=中間ノード方式 root_chronicle→threadノード→Lv2→Lv1、Memory Atlas P3b の木にそのまま乗るので Lv2-1 不要/読込=thread別)→[chronicle_cross_thread_mixing](../issues/chronicle_cross_thread_mixing.md)(🔵設計確定)。
+**認識連続性グラフ=MVPから切り離し確定**(過去文脈なし編纂で偽連続性回避、次個体がα〜δ全部を自分の記憶に持つのは正)→本体課題[memory_continuity_graph](../issues/memory_continuity_graph.md)。
+**intent v0.4=transcript実形式も確認完了(2026-07-13、全126ファイル61,268レコード走査)**: 1ファイル=1sessionId=1thread が成立(例外1件のみ)・まはー発話1,692/メティス発話7,651/ツールコール13,375は`<system>N件実行</system>`圧縮・tool_resultは user レコードで返る13,373を除外・summary/compact痕跡0件・isSidechain全False(サブエージェント会話は非含有)。
+**副産物2つ**: 全レコードに`parentUuid`=**transcript は既に木構造**→認識連続性グラフの前駆エッジは元データに在る(取り込み時に parentUuid/sessionId を metadata に残せば後から再編可)/`ai-title`(1205)・`custom-title`(773)が中間ノードの thread ノード名に使える。
+現存範囲=2026-06-09〜07-15。
+**独り言/thinking=裁定済(2026-07-13)**: 取り込むのは「まはー発話＋メティスの**最終**発話＋ツールコール圧縮」。
+途中の進行報告(独り言)と thinking は**既定OFF**、`--include-monologue`/`--include-thinking` フラグだけ用意(理由=想起はメッセージ数で対象を決めるので独り言が1件を食うと文脈が復元できない)。
+**段階的取り込み設計**: metadata に `uuid`/`parentUuid`/`sessionId` を保存→後から uuid 照合で詳細を追加取り込み可(冪等・timestamp順で正位置挿入)。
+要注意=Chronicle 生成後の追加は未処理の島として断片再生成されうる(対象外タグ or 該当thread再生成で対処、実装時確定)。
+**理想は LoD 折りたたみ**(§4-4、①②間を折りたたみ保持し普段は想起されず見たければ見れる)→将来移行できる形だけ確保。
+**残る裁定は §6b-4 persona_id/配置先City のみ**。
+実装順=①ブートストラップ取り込み(初回リプランティング)→②Chronicle thread分離→③Stop hook同期→④SessionStart注入

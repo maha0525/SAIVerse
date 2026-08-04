@@ -418,3 +418,42 @@ P2c の前提となる消費者棚卸しは **[docs/handoff/2026-07-10_memory_at
 - [`persona_cognition/unified_task_model.md`](persona_cognition/unified_task_model.md) — Task＋Desire の統合（実装済み: `PersonaTask`）
 - [`../overview/landscape.md`](../overview/landscape.md) — 俯瞰地図。⑥で現在地に追従させる対象（本文が自律行動v2 を反映しておらず §9 と矛盾中）
 - [`../overview/in_flight.md`](../overview/in_flight.md) — 進行中台帳
+
+## 経緯: ⑥ 概念再編（九龍城の解体） (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+大物＝記憶概念の統合 → **Memory Atlas**(土地=生ログ/地図帳=編纂物/クリップ=統一参照)。
+概念骨格確定・**実装順序 v0.1 合意済(2026-07-10)**: P1クリップ → P2ファサード+統一スペル → P3物理統合(コア記憶→Chronicle→目的の木) → P4代謝配線。
+①との交差は **(i) P3cを①実機テストより先に**で確定。
+**P1〜P2c・landscape v2.0・P3a(コア記憶)・P3b(Chronicle)=完了**(2026-07-11)。
+**P3c=X案裁定済**(物理移動せず。
+可搬性は [issue](../issues/persona_memory_not_self_contained.md) へ)——再定義スコープ: **P3c-0 desire 正規化=実装完了+実DBコピーで移行予行済(2026-07-11、コミット dadb866+41ad35e)**。
+stage 書き込み時刻印・読み手6箇所 stage 起点切替・main DB 移行(帳簿バックフィル込)・ensure_desire_note 撤去。
+pytest 203 通過。
+**P3c①②(Note→テーマノード移行+全退役 / task:N 机開閉)=実装完了(2026-07-11)**: Note(person/project/vocation)→per-persona memory.db テーマノードページ(trunk root_theme・参照は通常の memopedia:N)へ`_on_persona_registered`扇形移行、note_manager.py/note スペル4本/open_notes section をモジュールごと削除、DeskSection に task:N 開閉(完了/中止ノードは soft-delete と同じ「無い」扱いで自動closeも実装)、migrate.py に空テーブルDROPステップ追加。
+**副産物の発見**: DeskSection が enabled_sections 系の2箇所に未登録で実は本番描画されていなかった不具合を同時修正。
+**実機検証済(2026-07-11 まはー): 移行4冊・机の head 掲載を確認、追修正2件(テーマの UI 表示 5923458 / 開く＝読む 298bb66)も実機 OK**。
+**P4 代謝配線=全片実装完了(2026-07-11深夜)**: P4-0 レジストリ(5種ドリフト解消)/c vividness除去+vivid→机移行+机ボタン/a **編纂**三層(検知→就寝裁定→睡眠バッチ、本文保存則・実データE2E=「まはー」重複統合で紐づけ継承確認)/b 命名(ゼロコール、root_theme に立つ)/d 目次 opt-in(MEMOPEDIA_INDEX_ENABLED、[OPEN]=机、memory_architecture_v2 §7.1 改訂)。
+**副産物**: head セクション配線漏れの恒久検査 test_head_section_wiring 新設(Desk/Index で二度起きた型を封じ)・再会システムの個人ページ重複根治+ユーザーも想起対象に(まはー裁定)。
+pytest 2138 passed。
+**2026-07-12 コードレビュー(Sol)で編纂(P4-a)に P1×3 → 同日修正・回帰固定済み**(2faf7b2: fold refs 契約/1プラン1トランザクション/lossless split。
+[修正記録](../handoff/2026-07-12_concept_consolidation_code_review.md))。
+**副産物: カテゴリルート is_trunk 播種漏れも修正**(63d3a63、実DBでルートへの fold 提案を防止)。
+全体スイート 2168 passed。
+**2026-07-15: 参照文法の統合 + 写真→クリップ改名**。
+発端=ペルソナ(アイフィ)が自動想起の URI `saiverse://self/memopedia/45` を不変条件 I2 に従って `memopedia:45` へ**正しく**変換したのに Atlas が蹴った事故。
+真因=Atlas(2026-07-10)が「m:N は現役の慣行」という**書かれた時点で既に誤りだった前提**(4日前の一括切替 6ea9d44「m: 残存も一掃」が廃止済み)で自前パースしていた ＝ 7/06 切替のリグレッション。
+修正: (a) `_parse_ref` を統一グラマー(`saiverse/references.py`)へ委譲 — URI・旧prefix を受理し、他ペルソナ URI は取り違え防止で拒否。
+ (b) `RefKind.aliases` 新設 ＝ **A1「入口は広く、出口は一本」**(intent の Q4「旧記法の受理は残さない」を**上書き**。
+理由: ペルソナの記憶本文に旧prefix が 180 件焼き付いており、移行不能な生産者が世界の中にいる。
+Q4 は「全生産者を制御できる」前提が破れただけで判断自体は誤りでない)。
+ (c) `clip`/`core` を kind 登記。
+ (d) 机(`desk_items.ref`)と `clips.pasted_to` の backfill(実DBコピーで予行 ＝ 12件全移行・旧記法残 0)。
+ **副産物で本物のバグ 2 件**: make_clip の touch が `startswith("m:")` で空振り／`sea/runtime.py` が `add_photos` を呼び続け hasattr ガードで**黙ってクリップ 0 枚**(語境界 `\bphoto\b` が `_` を跨げず調査から漏れる型 ＝ 二度目)。
+恒久検査 `RefGrammarAcceptanceTests` 新設(旧prefix・URI・正典が同じページに着くことを固定)。
+**まはー裁定で 写真→クリップに全面改名**(カメラ画像と紛らわしい。
+比喩の放棄でなく抽象化。
+動詞=「切り出して貼る」) — `photos`テーブル→`clips`(ALTER RENAME)・`p:N`→`clip:N`・landscape §9 に死語登録。
+pytest 2357 passed / ruff clean / tsc clean。
+残: まはー実機検証(就寝判断の棚の乱れ/テーマの芽・朝の報告・エアの目次 **＋ 改名後の初回起動で机 12 件の移行ログ**) → ①実機テスト

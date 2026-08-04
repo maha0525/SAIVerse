@@ -235,3 +235,34 @@ CREATE TABLE execution_outbox (
 解決済み（v0.3 後続）: ~~Beat ロックの実装点~~ → 柱 2（model 別 Session）・S4（Stelis）と合流した統合工事 intent [`beat_execution_context.md`](beat_execution_context.md) として起草（2026-07-16）。Beat ロックと関所の配置は同 intent §3.4。
 解決済み（v0.2）: ~~回復 tick の住処~~ → 独立の世界レベル定期ジョブ（§2.4。watchdog 相乗りは自律 OFF ペルソナへの配送が死ぬため不採用）。~~配送遅延の時系列~~ → Pulse 前 flush の必須関所化で構造的に消滅（§2.2 / 不変条件 8）。
 解決済み（v0.3）: ~~並行実行と配送失敗の合成による過去挿入~~ / ~~「配送時刻の位置に書く」案~~ → 後者は「遅れて届いた過去が今記録されるのは不自然」として却下（まはー）。persona 内の生成処理を Beat 単位で直列化することで、並行書き込みそのものを全廃（§2.3 / 不変条件 9）。実行時刻のまま刻んで矛盾が生じない。
+
+## 経緯: 実行台帳 (execution ledger) (2026-08-04 in_flight 台帳より移送)
+
+> 台帳の器の再設計 (次アクション欄=前向きのみ) に伴い、それまで台帳セルに積もっていた経緯の全文をここへ移した。時系列の生の堆積であり、整理はしていない。
+
+監査P1×16の共通根「偽成功・不可逆先行」(LLM実行と結果記録が別々に確定し、間で転ぶと現実と記録が分裂)への共通基盤。
+**intent v0.2(2026-07-16、まはーレビュー1巡反映)**。
+2部品=実行台帳(execution_id+状態機械+冪等キーUNIQUE)+送信トレイ(world DB↔memory.db跨ぎの配達保証)、大原則=**LLM自動再実行禁止**(再試行は記録のみ)。
+**v0.2裁定: 記憶の順序一貫性=Pulse前flushを必須関所にfail-closed化**(未配達が残るペルソナは活動を開始しない、記憶が書けないペルソナは活動停止を引き受ける)。
+**v0.3裁定: 記憶書き込みのBeat単位直列化**=「一直線に並んだ記録は前を踏まえて書かれたことを含意する」ため、persona内の並行生成(main/META並走含む)を全廃し、Beat(関所→読み→生成→記録)をpersona単位ロックで直列化。
+Beat概念に初めて型が付く。
+どの記録も直前の記録を読んでから生成される=実行時刻のまま刻んで矛盾ゼロ。
+副次: Stelis thread混線(S4)の構造的緩和、「作業中に話しかけたら応答」が自然に成立。
+**回復処理の仕様確定**: 仕事7種を「掃除/行動を生む」に二分(手動モードgateは後者のみ止める)、住処=独立の世界レベル定期ジョブ。
+段階移行: Phase 0基盤(Beatロック含む)→1判断点→2時間割/予算→3schedule→4Metabolism→5配送/移動。
+**Beatロック実装点は[beat_execution_context.md](beat_execution_context.md)に確定、§11小物4点はPhase 1実装時確定でまはー了承済み**。
+**Phase 0の器=実装・検収済(2026-07-16、コミットae357e7)**: テーブル2+状態機械強制+冪等begin+persona単位FIFO配送器+関所flush+回復骨格(期限監視/起動時sweep)+回帰25件。
+**結線前半=実装済(2026-07-16)**: manager所有(execution_ledger_wiring.py)+起動時回復(前世代running sweep+pending全量配送をstart()冒頭でpulse前に同期実行)+60秒掃除tick(掃除のみ=手動モードでも止めない)+実ハンドラ2種(saimemory.append/perception.push、冪等キー=outbox_idを配送先metadataに刻印、配送失敗は例外で表明=None握り禁止)+回帰15件。
+**Beat関所=結線済(2026-07-17、§6-2後半)**: beat_gate が最外周ロック取得時に flush_pending_for_persona を fail-closed 実行 — **Phase 0 (基盤+Beatロック+全結線) 完了**。
+**Phase 1判断点=実装済・実機検証待ち(2026-07-19、W1、コミット3f76619/7b2436c/e0ee4ff)**: claim_executionの境界claim(A2重複抑止)・`_submit_meta_lane`の例外再送出+証跡ベース成功判定(A7)・finalizeのmark_applied+outbox化(A8)・complete_with_artifact単一commit(A9)・SpellOutcome(A11)・回復tick #2(prepared回収)。
+同工区でpost_session×digest統合+episode_readスペル(体験の構造 工程(1))。
+§11小物4点確定。
+回帰41件・本体スイート2666 passed。
+**Phase 2時間割/予算=実装済・実機検証待ち(2026-07-20、W2)**: コマ発火を`slot.fire`実行で包む三区間化(予約tx→ハンドラ→精算tx)+`replace_day_plan`保存先行+コマ不変id導入。
+Codexレビュー7巡消し込み — 予約keyのslot id化・二重claimの勝者一意化・発火照準のid一貫化・置換のid新世代化・slots/meta書き込みの世代CAS化・増分計算のCAS内側化(mutate_plan_meta)。
+回帰約67件・本体スイート2749 passed。
+**Phase 3 schedule=実装済・実機検証待ち(2026-07-21、W3)**: 発火を`schedule.dispatch`で包み完了化は成功証跡後のみ(A13)+世代/行トークン+reconciliation(A12)。
+Codexレビュー10巡27件消し込み。
+**Phase 4 Metabolism=実装済・実機検証待ち(2026-07-21、W4)**: M2残片をepisode整列の新設経路で消化(体験の構造 工程(2)と統合) — チャンク単一tx・列のあふれ束ね親子単一tx・evict boundary・digest材料除外・API生成ジョブのM1 claim結線。
+**Phase 5 配送系と移動=実装済・実機検証待ち(2026-07-21、W5)**: S5(perception flushのNone検査)+M8(転記cursor後行確定+provenance冪等)+ライフ境界通知outbox化(マーカーと単一commit)+B1(move.entity台帳化) — **これで段階移行計画Phase 0〜5が全段実装済み**。
+残: まはー実機検証

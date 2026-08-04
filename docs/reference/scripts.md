@@ -81,4 +81,5 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 | `set_version.py` | バージョン刻印 |
 | `snapshot.py` | world snapshot format v2のsave/list/inspect/restore/delete。restoreは停止状態だけで実行 |
 | `run_discord_gateway_tests.py` | Discord Gateway テスト |
+| `check_in_flight.py` | in_flight 台帳の関所 — 次アクション欄の字数超過と過去形マーカー(日付・コミットハッシュ)混入を検査。台帳を触ったセッションの終わりに回す。2026-08-04 解体時の未移送3行のみ行指紋一致の間だけ警告扱い(exit 0=警告のみ可 / exit 1=免除外の違反・表構造不正) |
 | `download_searxng_source.py` / `merge_searxng_settings.py` | SearXNG セットアップ |
