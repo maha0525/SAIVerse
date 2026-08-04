@@ -13,7 +13,17 @@
 
 ### Codex レビューの線引き (まはー承認 2026-08-03 朝)
 
-RSS は 23 巡 (指摘計 80 件超を消し込み、テスト 52→219 件)。二十三巡目消し込みを最後に線を引いた — 以降の指摘は「未リリース機能の開発期 DB にしか存在し得ない仮想端 (migration 自衛層の際限ない磨き)」に移っており、実機検証の方が発見効率が高い判断。**受容として記録: 二十四巡目以降は回していない。** 時間割ブランチのレビューは未実施 (スコープ指定の調査から — 残作業 §4)。
+RSS は 23 巡 (指摘計 80 件超を消し込み、テスト 52→219 件)。二十三巡目消し込みを最後に線を引いた — 以降の指摘は「未リリース機能の開発期 DB にしか存在し得ない仮想端 (migration 自衛層の際限ない磨き)」に移っており、実機検証の方が発見効率が高い判断。**受容として記録: 二十四巡目以降は回していない。**
+
+### 時間割ブランチのレビュー完了 (2026-08-04、八巡でまはー裁定により打ち切り)
+
+`--scope branch --base 8722526` で八巡、指摘計 29 件 (推移 7→2→8→5→3→3→1→2)。**22 件を修正 (コミット 0ed2d71〜1ebf64c の 12 本)**、5 件を裁定つき却下 (各コミットメッセージに記録: 旧kind意味マッピングしない / watchdogプロセス内回復に grace 適用しない / outbox 機構化しない / テーマページ DB 一意制約張らない / サーバー側 revision CAS 導入しない)、**残 2 件 (八巡目) は [timetable_wake_change_recovery_edges.md](../issues/timetable_wake_change_recovery_edges.md) に記録して打ち切り** — 「起床設定の日中変更 × 深夜再起動 / 一時 DB 障害」の狭い縁で、実害は回復の空振り (捏造ではない)。
+
+修正の柱: 出かけるの虚偽記録排除 / 旧語彙の正直な退役 / 再起動回復の missed_start (実日時比較・fail-closed) / 締めの結果 (close_outcome) のプロセス内手渡し+帰属二重宣言の抑止 / 自由時間委譲の予算ゲート / **順序基準の一本化** (保存→GET→編成→検証→予約の全経路が「当日確定ライフ > PersonaSchedule > 暦順」の同一基準)。
+
+フルスイート (worktree、.env なし環境): **3598 緑 + 1 件** — 失敗 1 件は契約外状態の暦日解釈が七巡目の基準一本化に追従していなかったテストで、意味論を更新して該当ファイル 58 件緑 (1ebf64c。製品コードは無変更のため再フルは省略)。
+
+**新運用 (2026-08-04 まはー裁定)**: モデルが Fable のセッションはレビュー 1 回のみ → ハンドオフ記入 → **Opus の別セッションが消し込み往復を担う** (memory `project_codex_review_gate_workflow` に恒久化)。今回の残 2 件も、直すなら Opus セッションで上記 issue から。
 
 ---
 
@@ -45,8 +55,8 @@ RSS は 23 巡 (指摘計 80 件超を消し込み、テスト 52→219 件)。�
 
 ## 4. 残作業 (優先順)
 
-1. **時間割ブランチの Codex レビュー**: `../SAIVerse-timetable` を cwd に companion を回す (コミット済みブランチのため `--scope working-tree` では拾えない — スコープ指定オプションの調査から。RSS の教訓: 観点を絞り、仮想端に入ったら早めに線を引く)
-2. **統合**: RSS コミット後の main 系へ `feature/timetable-redesign` を rebase (`git merge-base` でベース確認 → conflict は models.py/migrate.py/api routes の登録部が候補)。worktree の EOL 見かけ差分 3 ファイル (layout.tsx/tsconfig.json/chatlog_fix.py) は**コミットに含めていない**ので触らず放置でよい
+1. ~~時間割ブランチの Codex レビュー~~ → **完了 (2026-08-04、八巡・上の節参照)**。残指摘 2 件は issue 化済み — 直すなら Opus セッションで
+2. **統合**: RSS コミット後の main 系へ `feature/timetable-redesign` を rebase (`git merge-base` でベース確認 → conflict は models.py/migrate.py/api routes の登録部が候補。プロバイダ並走作業のコミットにも注意)。worktree の EOL 見かけ差分 3 ファイル (layout.tsx/tsconfig.json/chatlog_fix.py) は**コミットに含めていない**ので触らず放置でよい。generate_image 修正 (main a2c769c = worktree 9a34d56 の cherry-pick) は rebase が patch-id 一致で自動 skip する
 3. **playbook 再取込** (§3-0) と、worktree 側 `docs/reference/api-endpoints.md` の再生成統合
 4. **意図的な未着手 2 件** (順序条件つき、着手しない判断も記録済み): 想起用タグの B2 相乗り (chronicle_eviction 実機検証が先) / gold_panning の就寝移行 (経験値ノート実機実証が先)
 5. City 作成時のフィード施設選択 UI (意図的スコープ外 — 管理タブからの作成で v1 は足りる)
