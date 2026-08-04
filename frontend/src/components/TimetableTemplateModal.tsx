@@ -120,9 +120,15 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
     const [loadedPersonaId, setLoadedPersonaId] = useState<string | null>(null);
     const personaIdRef = useRef<string>(personaId);
     personaIdRef.current = personaId;
+    // モーダルの世代番号: 開くたびに進める。in-flight の fetch (読み込み・
+    // 保存・削除) の応答は、発行時の世代と一致するときだけ state に適用する —
+    // A の保存中に閉じて B (または同じ A) で開き直したとき、古い応答が
+    // 新しいフォームを上書きしない (Codex 三巡目)。
+    const generationRef = useRef(0);
 
     useEffect(() => {
         if (isOpen && personaId) {
+            generationRef.current += 1;
             setLoadedPersonaId(null);
             setIsEditing(false);
             setErrorMessage(null);
@@ -135,7 +141,10 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
     const loadAll = async () => {
         setIsLoading(true);
         const targetPersonaId = personaIdRef.current;
-        const isStale = () => targetPersonaId !== personaIdRef.current;
+        const generation = generationRef.current;
+        const isStale = () =>
+            targetPersonaId !== personaIdRef.current
+            || generation !== generationRef.current;
         try {
             const [tplRes, kindsRes, facRes] = await Promise.all([
                 fetch(`/api/people/${targetPersonaId}/timetable-template`),
@@ -232,20 +241,28 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
         setIsSaving(true);
         setErrorMessage(null);
         setSavedMessage(null);
+        const targetPersonaId = personaId;
+        const generation = generationRef.current;
+        const isStale = () =>
+            targetPersonaId !== personaIdRef.current
+            || generation !== generationRef.current;
         try {
-            const res = await fetch(`/api/people/${personaId}/timetable-template`, {
+            const res = await fetch(`/api/people/${targetPersonaId}/timetable-template`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ slots: rows.map(toPayloadSlot), enabled }),
             });
+            if (isStale()) return;
             if (res.ok) {
                 const saved = await res.json();
+                if (isStale()) return;
                 setHasTemplate(true);
                 setRows((saved.slots || []).map(toRow));
                 setEnabled(saved.enabled !== false);
                 setSavedMessage('保存しました。次の朝からこのテンプレートで一日が始まります。');
             } else {
                 const err = await res.json().catch(() => ({}));
+                if (isStale()) return;
                 const detail = typeof err.detail === 'string'
                     ? err.detail
                     : JSON.stringify(err.detail ?? err);
@@ -253,8 +270,9 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
             }
         } catch (e) {
             console.error(e);
-            setErrorMessage('サーバーとの通信に失敗しました。');
+            if (!isStale()) setErrorMessage('サーバーとの通信に失敗しました。');
         } finally {
+            // isSaving は世代を跨いでも必ず畳む (spinner の出しっぱなし防止)
             setIsSaving(false);
         }
     };
@@ -265,19 +283,26 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
         setIsDeleting(true);
         setErrorMessage(null);
         setSavedMessage(null);
+        const targetPersonaId = personaId;
+        const generation = generationRef.current;
+        const isStale = () =>
+            targetPersonaId !== personaIdRef.current
+            || generation !== generationRef.current;
         try {
-            const res = await fetch(`/api/people/${personaId}/timetable-template`, { method: 'DELETE' });
+            const res = await fetch(`/api/people/${targetPersonaId}/timetable-template`, { method: 'DELETE' });
+            if (isStale()) return;
             if (res.ok) {
                 setHasTemplate(false);
                 setIsEditing(false);
                 setRows([]);
             } else {
                 const err = await res.json().catch(() => ({}));
+                if (isStale()) return;
                 setErrorMessage(`削除に失敗しました: ${err.detail || res.status}`);
             }
         } catch (e) {
             console.error(e);
-            setErrorMessage('サーバーとの通信に失敗しました。');
+            if (!isStale()) setErrorMessage('サーバーとの通信に失敗しました。');
         } finally {
             setIsDeleting(false);
         }

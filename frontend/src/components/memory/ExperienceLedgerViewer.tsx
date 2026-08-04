@@ -5,7 +5,7 @@
 // コア記憶タブの拡張でなく新タブにした理由: コア記憶は常駐 (head 常設)・
 // 編集可の実データで、台帳は参照専用の動的合成ビュー — 性質が違うものを
 // 同じ画面に混ぜない (intent §7-5 の実装時判断)。
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Footprints, Layers, Link2 } from 'lucide-react';
 import styles from './ExperienceLedgerViewer.module.css';
 
@@ -129,7 +129,21 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
     const [isLoadingPage, setIsLoadingPage] = useState(false);
     const [pageError, setPageError] = useState<string | null>(null);
 
+    // ページ fetch の世代番号: 連打・ペルソナ切替・一覧へ戻る、のたびに進める。
+    // 応答は発行時の番号と一致するときだけ state に適用する — A を開いた直後に
+    // B を開くと A の遅い応答が B のページとして表示される競合の防止
+    // (Codex 三巡目)。
+    const pageRequestRef = useRef(0);
+
     useEffect(() => {
+        // ペルソナ切替: 選択ページ・表示データを破棄し、in-flight のページ
+        // fetch も無効化する (前のペルソナのページを引き継がない)。
+        pageRequestRef.current += 1;
+        setSelectedPageId(null);
+        setPageData(null);
+        setPageError(null);
+        setIsLoadingPage(false);
+
         let cancelled = false;
         const load = async () => {
             setIsLoadingIndex(true);
@@ -152,6 +166,8 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
     }, [personaId]);
 
     const openPage = useCallback(async (pageId: string) => {
+        const requestId = ++pageRequestRef.current;
+        const isStale = () => requestId !== pageRequestRef.current;
         setSelectedPageId(pageId);
         setIsLoadingPage(true);
         setPageError(null);
@@ -160,19 +176,26 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
             const res = await fetch(
                 `/api/people/${personaId}/experience-ledger/${encodeURIComponent(pageId)}`
             );
+            if (isStale()) return;
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            setPageData(await res.json());
+            const data = await res.json();
+            if (isStale()) return;
+            setPageData(data);
         } catch (e) {
-            setPageError(`ページを読み込めませんでした (${e})`);
+            if (!isStale()) setPageError(`ページを読み込めませんでした (${e})`);
         } finally {
-            setIsLoadingPage(false);
+            if (!isStale()) setIsLoadingPage(false);
         }
     }, [personaId]);
 
     const backToIndex = () => {
+        // in-flight のページ fetch を無効化してから一覧へ (戻った後に遅い応答で
+        // ページビューへ引き戻されない)
+        pageRequestRef.current += 1;
         setSelectedPageId(null);
         setPageData(null);
         setPageError(null);
+        setIsLoadingPage(false);
     };
 
     // ---- 合成ページビュー ----
