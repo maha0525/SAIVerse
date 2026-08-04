@@ -4635,6 +4635,29 @@ def worker_session_rounds_used(result: Any) -> int:
     return int(rounds_used)
 
 
+def _reload_slot_field(
+    manager: Any, persona_id: str, plan_date_str: str, slot_id: Any, field: str
+) -> Any:
+    """保存済み plan から id 一致のコマの 1 フィールドを読み直す (無ければ None)。
+
+    close_hook がセッション内で永続化した close_outcome を、handler 側の
+    (発火時点の) stale な slot dict を経由せず読むための小道具。
+    """
+    if not slot_id:
+        return None
+    try:
+        slots = load_day_plan(manager, persona_id, plan_date_str) or []
+        for s in slots:
+            if s.get("id") == slot_id:
+                return s.get(field)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to reload slot field %r (persona=%s date=%s id=%s)",
+            field, persona_id, plan_date_str, slot_id, exc_info=True,
+        )
+    return None
+
+
 def _handle_worker_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Optional[int]:
@@ -4659,6 +4682,28 @@ def _handle_worker_slot(
         # 中身が空の track コマの presence 縮退 (P5)。セッションが走っていない
         # ので判断点も撃たない (偽前提の状況テキストは作話を誘発する)。
         return 0
+
+    # --- 締めの結果 (close_outcome) の回収 (Codex 一巡目 #3/#5) ---
+    # エラー終了は close_hook 自体が呼ばれない — 「締めが走らなかった」ことも
+    # 状態として残す (欠落の沈黙化を防ぐ)。帰属が確定済みのセッションでは
+    # post_session の層2 棚入れ欄を出させない (同一セッションの二重帰属宣言は
+    # revisit_count の偽増加 = recall 順位の汚染)。
+    from saiverse.slot_close import (
+        ATTRIBUTION_SETTLED_OUTCOMES,
+        CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR,
+    )
+
+    close_outcome = _reload_slot_field(
+        manager, persona_id, plan_date_str, slot.get("id"), "close_outcome",
+    )
+    if close_outcome is None and getattr(result, "error", None):
+        _update_slot(
+            manager, persona_id, plan_date_str, index,
+            expected_id=slot.get("id"),
+            close_outcome=CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR,
+        )
+        close_outcome = CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR
+
     try:
         from saiverse.autonomy_wiring import fire_judgment_point
         from saiverse.judgment_points import KIND_POST_SESSION
@@ -4667,6 +4712,7 @@ def _handle_worker_slot(
         context: Dict[str, Any] = {
             "session_result": result,
             "budget_rounds": int(slot.get("budget_rounds") or 0) or None,
+            "episode_attribution_done": close_outcome in ATTRIBUTION_SETTLED_OUTCOMES,
         }
         # track:N コマの対象は Track (WorkSessionResult.track_id 経由で判断点へ
         # 届く)。task_ref に track 参照を入れると task_verdict が壊れる。

@@ -442,6 +442,98 @@ def test_adapter_not_ready_skips_before_llm(manager, persona, adapter):
 
 
 # ---------------------------------------------------------------------------
+# 締めの結果 (close_outcome — Codex 一巡目 #3/#5)
+# ---------------------------------------------------------------------------
+
+
+def _run_close_outcome(manager, persona, response, *, episode_ref=EPISODE_REF):
+    client = FakeCloseClient(response)
+    ctx = _make_ctx(manager, persona, client, episode_ref=episode_ref)
+    return slot_close.run_slot_close(
+        ctx, manager=manager, persona_id=PERSONA_ID,
+        plan_date_str=PLAN_DATE, slot=_slot(), index=0,
+    )
+
+
+def test_outcome_done_on_success(manager, persona, adapter):
+    """帰属タグ + ノートが書けたら done。"""
+    outcome = _run_close_outcome(
+        manager, persona, {"belongs_to": "task:1", "note": "学び。"},
+    )
+    assert outcome == slot_close.CLOSE_OUTCOME_DONE
+
+
+def test_outcome_done_when_nothing_to_write(manager, persona, adapter):
+    """belongs=none + 空 note も正常な締め (done) — 「書かない」は判断の結果。"""
+    outcome = _run_close_outcome(manager, persona, {"belongs_to": "none", "note": ""})
+    assert outcome == slot_close.CLOSE_OUTCOME_DONE
+
+
+def test_outcome_failed_on_llm_error(manager, persona, adapter):
+    """締めコールの失敗は failed — post_session の帰属代替に道を残す。"""
+    outcome = _run_close_outcome(manager, persona, RuntimeError("boom"))
+    assert outcome == slot_close.CLOSE_OUTCOME_FAILED
+
+
+def test_outcome_failed_when_tag_unpersistable(manager, persona, adapter):
+    """帰属先は出たのに書けない (episode 無し) — 「済み」にしない (failed)。"""
+    outcome = _run_close_outcome(
+        manager, persona, {"belongs_to": "task:1", "note": ""}, episode_ref=None,
+    )
+    assert outcome == slot_close.CLOSE_OUTCOME_FAILED
+
+
+def test_outcome_skipped_no_memory(manager, persona, adapter):
+    """memory.db が使えないときは skipped_no_memory (LLM も焚かない)。"""
+    persona.sai_memory = SimpleNamespace()
+    client = FakeCloseClient({"belongs_to": "none", "note": ""})
+    ctx = _make_ctx(manager, persona, client)
+    outcome = slot_close.run_slot_close(
+        ctx, manager=manager, persona_id=PERSONA_ID,
+        plan_date_str=PLAN_DATE, slot=_slot(), index=0,
+    )
+    assert outcome == slot_close.CLOSE_OUTCOME_SKIPPED_NO_MEMORY
+
+
+def test_make_close_hook_persists_outcome(manager, persona, adapter):
+    """フックは成否を問わず close_outcome を slot に永続化する。"""
+    written: Dict[str, Any] = {}
+
+    def fake_update(mgr, pid, date, index, *, expected_id=None, **fields):
+        written.update(fields)
+        return None
+
+    hook = slot_close.make_close_hook(
+        manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+    )
+    client = FakeCloseClient({"belongs_to": "none", "note": ""})
+    ctx = _make_ctx(manager, persona, client)
+    with patch("saiverse.day_plan._update_slot", side_effect=fake_update):
+        hook(ctx)
+
+    assert written.get("close_outcome") == slot_close.CLOSE_OUTCOME_DONE
+
+
+def test_make_close_hook_persists_failed_outcome(manager, persona, adapter):
+    """締めが失敗しても結果 (failed) は状態として残る — 欠落を沈黙させない。"""
+    written: Dict[str, Any] = {}
+
+    def fake_update(mgr, pid, date, index, *, expected_id=None, **fields):
+        written.update(fields)
+        return None
+
+    hook = slot_close.make_close_hook(
+        manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+    )
+    client = FakeCloseClient(RuntimeError("boom"))
+    ctx = _make_ctx(manager, persona, client)
+    with patch("saiverse.day_plan._update_slot", side_effect=fake_update):
+        hook(ctx)
+
+    assert written.get("close_outcome") == slot_close.CLOSE_OUTCOME_FAILED
+
+
+# ---------------------------------------------------------------------------
 # work_session の close_hook 契約
 # ---------------------------------------------------------------------------
 
@@ -589,3 +681,86 @@ def test_worker_slot_passes_close_hook(manager, persona):
         day_plan.run_worker_slot_session(manager, PERSONA_ID, PLAN_DATE, _slot(), 0)
 
     assert callable(seen.get("close_hook"))
+
+
+def _ws_result(**over):
+    base = dict(
+        artifacts=[], rounds_used=1, ended_reason="finished",
+        task_ref=None, track_id=None, episode_ref="episode:7", error=None,
+        budget_rounds=4,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_worker_slot_suppresses_shelving_when_close_done(manager, persona):
+    """帰属が締めで確定済み → post_session context に済みフラグが立つ (#5)。"""
+    from saiverse import day_plan
+
+    captured: Dict[str, Any] = {}
+
+    def fake_fire(mgr, pid, kind, context):
+        captured.update(context)
+
+    with patch.object(day_plan, "run_worker_slot_session",
+                      return_value=_ws_result()), \
+         patch.object(day_plan, "_reload_slot_field",
+                      return_value=slot_close.CLOSE_OUTCOME_DONE), \
+         patch("saiverse.autonomy_wiring.fire_judgment_point",
+               side_effect=fake_fire):
+        day_plan._handle_worker_slot(
+            manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+        )
+
+    assert captured.get("episode_attribution_done") is True
+
+
+def test_worker_slot_keeps_shelving_when_close_failed(manager, persona):
+    """締めが失敗したセッションでは棚入れを抑止しない (帰属の代替経路)。"""
+    from saiverse import day_plan
+
+    captured: Dict[str, Any] = {}
+
+    def fake_fire(mgr, pid, kind, context):
+        captured.update(context)
+
+    with patch.object(day_plan, "run_worker_slot_session",
+                      return_value=_ws_result()), \
+         patch.object(day_plan, "_reload_slot_field",
+                      return_value=slot_close.CLOSE_OUTCOME_FAILED), \
+         patch("saiverse.autonomy_wiring.fire_judgment_point",
+               side_effect=fake_fire):
+        day_plan._handle_worker_slot(
+            manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+        )
+
+    assert captured.get("episode_attribution_done") is False
+
+
+def test_worker_slot_records_not_run_on_session_error(manager, persona):
+    """エラー終了 (close_hook 不発) は not_run_session_error を状態に残す (#3)。"""
+    from saiverse import day_plan
+
+    written: Dict[str, Any] = {}
+    captured: Dict[str, Any] = {}
+
+    def fake_update(mgr, pid, date, index, *, expected_id=None, **fields):
+        written.update(fields)
+        return None
+
+    def fake_fire(mgr, pid, kind, context):
+        captured.update(context)
+
+    with patch.object(day_plan, "run_worker_slot_session",
+                      return_value=_ws_result(
+                          ended_reason="error", error="RuntimeError: boom")), \
+         patch.object(day_plan, "_reload_slot_field", return_value=None), \
+         patch.object(day_plan, "_update_slot", side_effect=fake_update), \
+         patch("saiverse.autonomy_wiring.fire_judgment_point",
+               side_effect=fake_fire):
+        day_plan._handle_worker_slot(
+            manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+        )
+
+    assert written.get("close_outcome") == slot_close.CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR
+    assert captured.get("episode_attribution_done") is False

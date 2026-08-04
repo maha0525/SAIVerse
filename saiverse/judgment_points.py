@@ -1685,9 +1685,17 @@ def build_judgment_args(
         track_id = context.get("track_id") or _ws_get(sr, "track_id", None)
         # 層2 棚入れ (§9.1) と digest 配送 (D9-5) の対象 = このセッションの出来事。
         # WorkSessionResult.episode_ref が主経路 (呼び出し側 context の明示指定が優先)。
+        # コマ締め (slot_close) で帰属が確定済みのセッションでは棚入れ欄を
+        # 出さない — 同一セッションの二重帰属宣言は「再訪」ではないのに
+        # revisit_count を偽増加させ recall の順位を汚染する (Codex 一巡目 #5。
+        # 締めが失敗/不発だったセッションでは従来どおり欄を出し、帰属の
+        # 代替経路として機能する)。
         episode_ref = _resolve_session_episode_ref(context)
         purpose_refs = collect_purpose_refs(manager, persona_id) if episode_ref else []
-        shelving = bool(episode_ref and purpose_refs)
+        shelving = bool(
+            episode_ref and purpose_refs
+            and not context.get("episode_attribution_done")
+        )
         # コールローカル注入 (D9-3): LLM に渡る situation_text だけが原本を含む。
         # 保存用 (paired_situation_text) は episode 参照 + 読み口の一行に留める
         # (adapter の paired_action 展開で以後の Pulse 文脈に載り続けるため)。
