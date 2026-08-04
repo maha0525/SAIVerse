@@ -38,6 +38,9 @@ factory で client を作って `generate` するだけの箇所は、`consume_u
 - `sai_memory/curation_ops.py`
 - `sai_memory/memory/entity_extractor.py`
 - CLI 群（`scripts/` 配下。`maintain_memopedia.py` は 2026-08-05 に削除済み）
+- `saiverse/day_plan.py` `_choose_free_time_kind` (自由時間コマの種別選択、
+  軽量構造化出力 1 発。時間割改修 T3 で追加 — Codex 時間割五巡目 #3 で検出。
+  経路個別の ad-hoc 記帳はこの issue の反パターンなので足していない)
 
 ## 修正の方向 (設計裁定が要る)
 

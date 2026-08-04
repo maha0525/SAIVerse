@@ -224,6 +224,32 @@ def test_template_ascending_follows_wake_origin(manager, session_factory):
         ])
 
 
+def test_active_template_reorders_after_wake_change(manager, session_factory):
+    """起床時刻の変更で旧基準の並びが崩れても、現在基準へ並べ直して返す (Codex五巡目 #2)。
+
+    起床未設定 (暦順) で 00:30 → 23:00 を保存した後に起床 07:00 を設定すると、
+    現在基準の流れ順は 23:00 → 00:30。並べ直さず返すと compose 後の保存検証が
+    昇順違反で拒否し、初回 day_open が時間割を保存できない。
+    """
+    tt.save_template(manager, PERSONA_ID, [
+        {"start": "00:30"}, {"start": "23:00"},
+    ])
+    db = session_factory()
+    try:
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_open", TIME_OF_DAY="07:00",
+            ENABLED=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    template = tt.get_active_template(manager, PERSONA_ID)
+    assert template is not None
+    assert [s["start"] for s in template["slots"]] == ["23:00", "00:30"]
+
+
 # ---------------------------------------------------------------------------
 # 「埋める」化: compose 単体
 # ---------------------------------------------------------------------------

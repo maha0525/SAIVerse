@@ -304,9 +304,42 @@ def get_active_template(manager: Any, persona_id: str) -> Optional[Dict[str, Any
     (``judgment_finalize._finalize_day_open``) はここから読む。None のときは
     従来どおりの全生成 (移行の安全弁 — テンプレ未設定のペルソナの挙動は
     T2 前と変わらない)。
+
+    保存後に起床時刻 (一日の流れの基準) が変わると、保存時に昇順だった並びが
+    現在基準では昇順でなくなりうる — そのまま compose へ渡すと保存検証が
+    拒否して day_open が時間割を保存できない (Codex 五巡目 #2)。コマの中身は
+    有効なままなので、**現在基準で並べ直して**返す (集合は変えない — 順序の
+    解釈だけが起床基準に従う)。並べ直しても厳密昇順にならない場合 (同時刻の
+    重複等) だけ None (従来生成へ退避、WARN)。
     """
     template = get_template(manager, persona_id)
     if template is None or not template.get("enabled"):
+        return None
+    slots = template["slots"]
+    try:
+        order = _template_order_key(manager, persona_id)
+        keyed = [(order(s.get("start") or ""), i, s) for i, s in enumerate(slots)]
+        keyed.sort(key=lambda t: (t[0], t[1]))
+        sorted_slots = [s for _, _, s in keyed]
+        minutes = [k for k, _, _ in keyed]
+        if any(b <= a for a, b in zip(minutes, minutes[1:])):
+            LOGGER.warning(
+                "[timetable_template] template slots cannot form a strictly "
+                "ascending day order under the current wake basis; falling "
+                "back to free composition (persona=%s)", persona_id,
+            )
+            return None
+        if sorted_slots != slots:
+            LOGGER.info(
+                "[timetable_template] template slots reordered under the "
+                "current wake basis (persona=%s)", persona_id,
+            )
+            template = {**template, "slots": sorted_slots}
+    except Exception:
+        LOGGER.warning(
+            "[timetable_template] failed to normalize template order; falling "
+            "back to free composition (persona=%s)", persona_id, exc_info=True,
+        )
         return None
     return template
 
