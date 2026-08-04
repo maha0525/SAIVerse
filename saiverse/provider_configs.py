@@ -17,41 +17,48 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
 from .data_paths import (
     BUILTIN_DATA_DIR,
+    LAYER_BUILTIN,
+    LAYER_EXPANSION,
+    LAYER_USER_DATA,
     PROVIDERS_DIR,
     USER_DATA_DIR,
-    iter_files,
+    iter_files_with_layer,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 _SAFE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
-
-def _is_builtin_path(path: Path) -> bool:
-    """Return True if path is under builtin_data/."""
-    try:
-        path.resolve().relative_to(BUILTIN_DATA_DIR.resolve())
-        return True
-    except ValueError:
-        return False
+# Which data layer a provider definition was loaded from. Credential policy is
+# decided from this (see saiverse/provider_security.py), so it is always the
+# root the loader actually walked — not re-derived from the path afterwards,
+# which a symlink or Windows junction could point at another layer, and not
+# read out of the file, which would let a definition name its own layer.
+SOURCE_BUILTIN = LAYER_BUILTIN
+SOURCE_EXPANSION = LAYER_EXPANSION
+SOURCE_USER_DATA = LAYER_USER_DATA
+# For a config that never came through the loader (e.g. a pending API payload).
+# Untrusted by default so that forgetting to stamp one fails closed.
+SOURCE_UNKNOWN = "unknown"
 
 
 def load_configs() -> dict[str, dict]:
     """Load provider configurations from all sources, respecting priority.
 
     Returns:
-        Dict mapping provider_id -> provider config dict.
-        Configs loaded from builtin_data automatically get ``builtin: True``.
+        Dict mapping provider_id -> provider config dict, each stamped with the
+        ``source`` layer it was loaded from.
     """
     configs: dict[str, dict] = {}
     seen_keys: set[str] = set()
 
-    for config_file in iter_files(PROVIDERS_DIR, "*.json"):
+    for config_file, layer in iter_files_with_layer(PROVIDERS_DIR, "*.json"):
         try:
             config_data = json.loads(config_file.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -72,13 +79,18 @@ def load_configs() -> dict[str, dict]:
         if provider_id in seen_keys:
             continue
 
-        if _is_builtin_path(config_file):
-            config_data["builtin"] = True
+        # Taken from the root this file was walked from, never from its
+        # contents: a definition must not be able to claim a layer it was not
+        # loaded from. ``builtin`` was the previous marker, and it lived inside
+        # the file — so it is dropped rather than trusted.
+        config_data.pop("builtin", None)
+        config_data["source"] = layer
 
         configs[provider_id] = config_data
         seen_keys.add(provider_id)
         LOGGER.debug(
-            "Loaded provider config: %s from %s", provider_id, config_file,
+            "Loaded provider config: %s from %s (source=%s)",
+            provider_id, config_file, config_data["source"],
         )
 
     LOGGER.info("Loaded %d provider configurations", len(configs))
@@ -113,7 +125,21 @@ def is_builtin(provider_id: str) -> bool:
     config = PROVIDER_CONFIGS.get(provider_id)
     if config is None:
         return False
-    return bool(config.get("builtin"))
+    return config.get("source") == SOURCE_BUILTIN
+
+
+def reload_models_after_provider_change() -> None:
+    """Re-resolve model configs after a provider definition changed.
+
+    ``model_configs`` inlines a provider's ``base_url`` / ``api_key_env`` into
+    every model that names it, once, at load time. Reloading only the providers
+    would leave those copies pointing at the old endpoint — and the credential
+    check compares the two, so every model on an edited provider would start
+    failing until the next restart.
+    """
+    from .model_configs import reload_configs as reload_model_configs
+
+    reload_model_configs()
 
 
 def save_provider(provider_id: str, config: dict) -> None:
@@ -137,16 +163,30 @@ def save_provider(provider_id: str, config: dict) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     target_file = target_dir / f"{provider_id}.json"
 
-    # Strip auto-injected fields; user_data files are never marked builtin
-    save_data = {k: v for k, v in config.items() if k != "builtin"}
+    # Strip the derived layer markers; they are re-stamped from the path on load
+    save_data = {
+        k: v for k, v in config.items() if k not in ("source", "builtin")
+    }
     save_data["id"] = provider_id  # Ensure id is consistent with filename
 
-    target_file.write_text(
-        json.dumps(save_data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # Written beside the target and moved into place, never truncated in place:
+    # a crash partway through a direct write leaves half a JSON file, and a file
+    # that fails to parse does not fall back to the layer underneath — it takes
+    # the provider out of the list entirely (see
+    # docs/issues/malformed_provider_json_breaks_provider_list.md).
+    staged = target_dir / f"{provider_id}.json.tmp"
+    try:
+        staged.write_text(
+            json.dumps(save_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(staged, target_file)
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
     LOGGER.info("Saved provider %s to %s", provider_id, target_file)
     reload_configs()
+    reload_models_after_provider_change()
 
 
 def delete_provider(provider_id: str) -> None:
@@ -174,6 +214,7 @@ def delete_provider(provider_id: str) -> None:
     target_file.unlink()
     LOGGER.info("Deleted provider %s (file: %s)", provider_id, target_file)
     reload_configs()
+    reload_models_after_provider_change()
 
 
 def list_models_using_provider(provider_id: str) -> list[str]:
@@ -202,8 +243,13 @@ def list_provider_choices() -> list[tuple[str, str]]:
 
 __all__ = [
     "PROVIDER_CONFIGS",
+    "SOURCE_BUILTIN",
+    "SOURCE_EXPANSION",
+    "SOURCE_USER_DATA",
+    "SOURCE_UNKNOWN",
     "load_configs",
     "reload_configs",
+    "reload_models_after_provider_change",
     "get_provider",
     "is_builtin",
     "save_provider",

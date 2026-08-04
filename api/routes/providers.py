@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from saiverse import provider_configs
-from saiverse.provider_security import validate_provider_config
+from saiverse.provider_security import validate_provider_config, validate_provider_url
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
@@ -116,7 +116,7 @@ def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
         protocol=cfg.get("protocol", "unknown"),
         base_url=cfg.get("base_url"),
         api_key_env=api_key_env,
-        builtin=bool(cfg.get("builtin")),
+        builtin=cfg.get("source") == provider_configs.SOURCE_BUILTIN,
         api_key_configured=api_key_configured,
         api_key_required=cfg.get("api_key_required"),
         default_request_kwargs=cfg.get("default_request_kwargs"),
@@ -165,7 +165,11 @@ def create_provider(req: ProviderCreateRequest):
         )
     payload = req.model_dump(exclude={"id"}, exclude_none=True)
     try:
-        validate_provider_config(req.id, payload)
+        # save_provider always writes to user_data, so validate it as the
+        # layer it is about to land in.
+        validate_provider_config(
+            req.id, {**payload, "source": provider_configs.SOURCE_USER_DATA}
+        )
         provider_configs.save_provider(req.id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -189,8 +193,9 @@ def update_provider(provider_id: str, req: ProviderUpdateRequest):
     merged = dict(existing)
     update_data = req.model_dump(exclude_none=True)
     merged.update(update_data)
-    # builtin flag is auto-injected on load; never persist it
-    merged.pop("builtin", None)
+    # The edit always lands in user_data, whatever layer it was read from.
+    # save_provider() strips this again before writing.
+    merged["source"] = provider_configs.SOURCE_USER_DATA
 
     if merged.get("protocol") not in ALL_PROTOCOLS:
         raise HTTPException(
@@ -237,8 +242,14 @@ def list_models_for_provider(provider_id: str):
 
 @router.post("/reload", response_model=list[ProviderInfo])
 def reload_providers():
-    """Reload provider configurations from disk."""
+    """Reload provider configurations from disk.
+
+    Models inline their provider's endpoint and credential at load time, so
+    they are re-resolved here too; otherwise they would keep pointing at the
+    definition this call just replaced.
+    """
     provider_configs.reload_configs()
+    provider_configs.reload_models_after_provider_change()
     return [
         _to_provider_info(pid, cfg)
         for pid, cfg in provider_configs.PROVIDER_CONFIGS.items()
@@ -251,7 +262,7 @@ def _run_connection_test(
     api_key_env: Optional[str],
     *,
     provider_id: Optional[str] = None,
-    builtin: bool = False,
+    source: Optional[str] = None,
 ) -> ConnectionTestResponse:
     """Execute the actual connection probe. Shared by inline and saved-provider routes."""
     base_url = (base_url or "").rstrip("/")
@@ -262,14 +273,23 @@ def _run_connection_test(
         )
 
     try:
-        validate_provider_config(
-            provider_id or "inline",
-            {
-                "base_url": base_url,
-                "api_key_env": api_key_env,
-                "builtin": builtin,
-            },
-        )
+        if api_key_env:
+            # A credential really does leave the machine here, so the full
+            # policy applies: this name must be allowed to reach this host.
+            validate_provider_config(
+                provider_id or "inline",
+                {
+                    "base_url": base_url,
+                    "api_key_env": api_key_env,
+                    "source": source,
+                },
+            )
+        else:
+            # Nothing is sent, so only the destination is checked. This answers
+            # "can I reach this endpoint", not "would this config be accepted on
+            # save" — a definition that saving would reject can still be probed,
+            # as long as the probe carries no credential.
+            validate_provider_url(base_url)
     except ValueError as exc:
         return ConnectionTestResponse(success=False, error=str(exc))
 
@@ -353,12 +373,29 @@ def test_inline_connection(req: InlineConnectionTestRequest):
     treat "test" as a path parameter.
     """
     existing = provider_configs.get_provider(req.provider_id) if req.provider_id else None
+
+    # Unlike saving, this route reads the named environment variable and sends
+    # it to the requested host, and a loopback start has no owner
+    # authentication in front of it. The provider_id is just a value in the
+    # request body, so naming a saved provider must not by itself confer that
+    # provider's trust — otherwise "provider_id: openrouter" plus someone
+    # else's base_url would ship a shipped key anywhere. Trust is inherited
+    # only when the payload still points where the saved provider points, with
+    # the same credential. Anything else is probed as untrusted, which allows
+    # no credential beyond this id's own namespaced variable (a probe with no
+    # api_key_env sends nothing and stays allowed).
+    def _same(a: object, b: object) -> bool:
+        return str(a or "").rstrip("/") == str(b or "").rstrip("/")
+
+    unchanged = bool(existing) and _same(req.base_url, existing.get("base_url")) \
+        and _same(req.api_key_env, existing.get("api_key_env"))
+
     return _run_connection_test(
         req.protocol,
         req.base_url,
         req.api_key_env,
         provider_id=req.provider_id,
-        builtin=bool(existing and existing.get("builtin")),
+        source=existing.get("source") if unchanged else None,
     )
 
 
@@ -373,5 +410,5 @@ def test_provider_connection(provider_id: str):
         base_url=cfg.get("base_url"),
         api_key_env=cfg.get("api_key_env"),
         provider_id=provider_id,
-        builtin=bool(cfg.get("builtin")),
+        source=cfg.get("source"),
     )

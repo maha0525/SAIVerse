@@ -102,9 +102,32 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 
 - **最終結果**: SAIVerse を OpenRouter 経由で使うユーザーは、自分の利用が SAIVerse というアプリの利用として集計されることを、事前に知った上で使える。集計されるのはトークン量であって会話の内容ではない。
 - **責任境界**: ヘッダーは**接続（プロバイダ）に属する**。リクエストパラメータ (`request_kwargs`) ではない。プロバイダからの継承はフィールド単位なので、ヘッダーを `request_kwargs` に混ぜると、自前の `request_kwargs` を持つモデル（GLM-5 が reasoning をこの形で有効化している）だけが申告から漏れる。同じ理由で、モデル JSON 側に個別記載させる形も採らない — OpenRouter モデルが1枚増えるたびに書き忘れが穴になる。
-- **不変条件**: 申告は宣伝であって機能ではない。**ヘッダーの不備で会話が止まってはならない。** 壊れた値は警告付きで落とし、呼び出しはそのまま通す (`llm_clients/factory.py: _coerce_default_headers`)。
+- **不変条件**: 申告は宣伝であって機能ではない。**ヘッダーの不備で会話が止まってはならない。** 壊れた値は警告付きで落とし、呼び出しはそのまま通す (`llm_clients/openai.py: _strip_reserved_headers`)。この約束は型だけ検べても守れない — HTTP ヘッダーは ASCII でエンコードされるので、日本語を書いた `str` は型として正しいまま送信時に例外を投げて会話を止める。**「壊れている」の判定は、送信路が受け付ける形かどうかで決める。**
+- **資格情報の所有権**: ヘッダーは**接続の身元を名乗る器であって、資格情報を差し替える器ではない**。OpenAI SDK は設定由来のヘッダーを自前のヘッダーより後にマージする (per-request `extra_headers` > client `default_headers` > `api_key` 由来の認証) ため、`Authorization` を素通しすると `api_key_env` で解決したキーではない値が送信され、§9「使用量の帰属」と `provider_security` の接続先検証 (`api_key_env` と `base_url` しか見ない) を設定ファイルから迂回できてしまう。予約ヘッダーは落とす — 資格情報 (`Authorization` / `Proxy-Authorization`)、**課金の帰属先** (`OpenAI-Organization` / `OpenAI-Project`。SDK が環境変数から設定する。誰に請求されるかを設定ファイルが決められるのは、鍵を差し替えられるのと同じ穴)、経路と本文の枠 (`Host` / `Content-Length` / `Content-Type` / `Transfer-Encoding`)。
+- **関所は一箇所、入口は全部そこを通す**: 上の判定は `llm_clients/openai.py: _strip_reserved_headers` だけが持ち、`default_headers` と `request_kwargs.extra_headers` の**両方**が通る。片方だけ守ると、不変条件が一方の経路で真・他方で偽になり、それは不変条件ではない。設定を読む側 (`factory`) は形だけ検べて中身の可否を判定しない — 二箇所に同じ規則を置けば必ず片方が古くなる。
+- **経路の網羅**: SDK を通らない経路を作ったら、そこにも明示的に乗せる。NVIDIA NIM の structured output は生 HTTP でヘッダーを手組みしており、放置すると「structured output を頼んだときだけヘッダーが変わる」形になっていた。**同じ経路は body 側でも同じ穴を開けており** (モデルの `extra_body` が落ちる — [issue](../issues/nim_structured_output_drops_request_kwargs.md))、根治は SDK 経路との組み立て共有。LLM 呼び出しではない補助 HTTP (llama.cpp の slot cache 制御) はヘッダーが乗らないうえ認証も付かず、認証付きサーバーで cache が黙って死ぬ ([issue](../issues/llama_cache_control_requests_unauthenticated.md))。
 - **透明性**: 他人の API キーで送られる申告なので、集計対象になることを `docs/api-keys/openrouter.md` に明記する。黙って計上しない。
+- **名乗りは奪わない**: 予約ヘッダーに**帰属ヘッダー自体は含めない**。モデルの `extra_headers` で `HTTP-Referer` を書けば、その利用は SAIVerse ではなく書いた人のアプリとして集計される — これは穴ではなく設計。守るのは資格情報と課金の帰属先であって、SAIVerse のランキング順位ではない。**そして SAIVerse は OSS なので、ここを塞いでもコードを書き換えれば済む** (まはー裁定 2026-08-04)。塞ぎきれないものに歯止めを置くと、目的を達成しないまま利用者の自由だけが削れる。宣伝の都合で防御を足したくなったら、まずそれが本当に防げるものかを問う。
 - **静かに失敗する性質**: 認識されないカテゴリ名は OpenRouter 側で**エラーにならず無視される**。綴りを間違えてもランキングに出ないだけで、API 呼び出しは成功し続ける。出荷物のヘッダー値はテストで固定する (`tests/test_provider_configs.py: TestOpenRouterAppAttribution`)。
+
+### 11. 資格情報の束縛は「同梱かどうか」ではなく「どの層が宣言したか」で決める
+
+API キーを無関係な送信先と結び付けさせない、という束縛は維持する。ただし**誰から守るのかを基準に据え直す**。
+
+分かれ目は**誰がその定義を書いたか**である。`builtin_data/` は SAIVerse が同梱するもの、`user_data/` は本人が UI か手書きで置くもので、どちらも「鍵の名前と送信先の組」を承知の上で選んでいる。SAIVerse が本人から本人を守る筋合いは無い。守るべき相手は**持ち込まれた定義**——アドオンが同梱と同じ id のプロバイダ JSON を置くと3層優先で同梱を押しのけられるため、そこで同梱の鍵名を名乗られると利用者のキーが任意の宛先へ送られる。
+
+- **最終結果**: 利用者は自分のプロバイダ設定を UI から自由に編集できる。同梱プロバイダを上書きしても、同梱の鍵名(`OPENROUTER_API_KEY` 等)をそのまま使い続けられる。一方、アドオンが**同梱を装った JSON を置く**ことで利用者の既知のキーを自分の宛先へ向けることはできない。
+- **保護範囲の限界(明示)**: これはアドオンの**宣言**を縛るものであって、アドオンの**動作**を縛るものではない。アドオンのツールは同一プロセスで `exec_module` により実行されるため、アドオンのコードは `os.environ` を直接読み、独自に通信し、`user_data/` へ書き込むこともできる。これは旧設計でも同じで、本変更が広げた面ではない。**アドオンのコードを未信頼として扱うなら、それは別プロセス/権限制御という別の機構の仕事であり、この不変条件を「アドオンの隔離」と読んではならない。**
+- **責任境界**: 層の判定は `provider_configs.load_configs()` が**実際に辿ったルート**をそのまま `source` として刻む(`data_paths.iter_files_with_layer()`)。読み込み後にパスから導出し直してはならない — `expansion_data/` 配下の symlink や Windows junction が別層へ解決されると、置いた場所ではなく解決先の層で信用してしまう。ファイル内に書かれた `source` / `builtin` は読み込み時に捨てる。刻印の無い設定は信用しない(fail-closed)。
+- **非信頼層では「書かない」も許さない**: `api_key_env` を空にすると OpenAI 互換クライアントは `OPENAI_API_KEY` へフォールバックする (`llm_clients/openai.py`)。したがって未記入は中立ではなく「利用者の既定キーをこの `base_url` へ送れ」という宣言と同義になる。非信頼層の定義は、名前空間付き変数を名乗るか `api_key_required: false` を明記するかの**いずれかを必ず選ばせる**。歯止めの条件をプロトコル種別で書いてはならない — 目的は「非信頼の定義が、自分で名指ししていない資格情報を送らせないこと」であって、特定プロトコルの都合ではない。
+- **モデル設定にも同じ層を刻む**: 資格情報を送るかどうかを決めるのはプロバイダだけではない。モデル JSON も `base_url` を直書きでき、その場合 `api_key_env` を書かなければクライアントが同梱の変数へフォールバックする。したがってモデルも `model_configs.load_configs()` で `source` を刻み、**接続先を自分で名指しする非信頼層のモデルには、プロバイダと同じ二択（自分専用の `SAIVERSE_MODEL_<キー>_API_KEY` を名乗るか、本物の `api_key_required: false` を明記するか）を課す**。`user_data` のモデルは本人が書いたものなので従来どおり自由。ファイル内に書かれた `source` は読み込み時に捨てる。
+    - この規則を「同梱モデルに該当例が無いから不要」と判断してはならない。出荷物に無いことは、利用者やアドオンが後から足すモデルへの境界を何ら保証しない。
+- **名前空間の一意性**: `SAIVERSE_PROVIDER_<ID>_API_KEY` の `<ID>` は非英数字を `_` に潰すため、`addon-bar` と `addon_bar` は同じ変数名に落ちる。非信頼層の定義が他パッケージ用に設定された変数を読めてしまうので、衝突する id が同時に読み込まれている場合は非信頼側を拒否する。
+- **反映の範囲を約束しすぎない**: プロバイダを保存・削除・再読込すると、設定の辞書とモデル側の解決結果は更新される。しかし **すでに動いているペルソナは作成済みの LLM クライアントを持ち続ける**（`persona/core.py` が `_llm_client` と `_lightweight_llm_client` を初回生成時にそれぞれ独立してキャッシュする）。効く・効かないの境目は「過去に会話したか」ではなく **今のプロセスでそのクライアントを既に生成したか**であり、通常用と軽量用は別々に切り替わるので**同一ペルソナ内でも新旧が混在しうる**。まだ生成していないペルソナは新しい設定で動く。**この API は「保存された」ことを返すのであって「今この瞬間から全員に効く」ことは返さない。** 走行中のリクエストと競合させずにクライアントを差し替える仕組みは別途必要で、[`docs/issues/provider_change_does_not_reach_live_personas.md`](../issues/provider_change_does_not_reach_live_personas.md) に記録した。
+- **保存経路と実送信経路は別扱い**: 保存 (`PUT`/`POST /api/providers`) は user_data へ落ちるので本人の宣言として扱う。一方、接続テスト (`POST /api/providers/test`) は**指定された環境変数の値を指定されたホストへ実際に送る**。既定の loopback 起動では owner 認証が入らない (`main.py` は LAN モード時のみ `OwnerAuthMiddleware` を付ける)。**`provider_id` はリクエスト本文の一値にすぎないので、既知の id を名乗るだけでその層の信頼を得てはならない** — さもなくば `provider_id: "openrouter"` と他人の `base_url` の組で同梱キーを任意の宛先へ送れる。信頼を引き継ぐのは、`base_url` と `api_key_env` の両方が保存済みの値と一致するときだけ。変更した組み合わせは非信頼として扱う (変数名を書かない疎通確認は何も送らないので従来どおり通る)。保存はできるがテストは通らない組み合わせが生じるが、秘密の実送信を先に緩める側には倒さない。
+- **不変条件**: 判定基準は `provider_security.validate_provider_config` の一箇所に置く。保存時だけの検査にしてはならない — 同じ関数が `llm_clients/factory.py` の client 構築時にも呼ばれるため、保存経路だけを緩めると「保存は通るのに次の発話で落ちる」状態になる。
+- **旧設計との差**: 2026-08-04 以前は `builtin` フラグの有無で判定していた。UI の上書き編集は保存前にこのフラグを落とすため、`api_key_env` を持つ同梱プロバイダ8種は**値を変えずに保存するだけで必ず 400** になっていた(不変条件 4 が定めた「編集 = user_data へコピーしてから編集」が成立していなかった)。またフラグがファイル内の記述から読まれていたため、アドオンが `"builtin": true` と自筆するだけで束縛を素通りできた。
+- **検証**: 同梱12種すべてが無変更の保存で 200 を返すこと、アドオン層の定義が同梱の鍵名を借りられないこと、自筆の層刻印が無視されること、刻印の無い設定が拒否されること、上書き後もそのプロバイダを参照するモデルが構築できることを、外部 API を呼ばないテストで固定する(`tests/test_provider_configs.py: TestCredentialLayerBinding`)。
 
 ## 設計
 
@@ -146,10 +169,11 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
   "id": "anthropic",
   "display_name": "Anthropic",
   "protocol": "anthropic_native",
-  "api_key_env": "CLAUDE_API_KEY",
-  "builtin": true
+  "api_key_env": "CLAUDE_API_KEY"
 }
 ```
+
+どの層のファイルかは**ファイル自身には書かない**。読み込み時に `source` として刻まれる（不変条件 11）。
 
 **フィールド説明**:
 
@@ -160,7 +184,7 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **`api_key_required`**: `false` なら認証しないバックエンド（LM Studio / llama.cpp server などのローカルサーバー）。キー未設定でもモデル一覧に出し、OpenAI 互換クライアントにはプレースホルダのキーを渡す（SDK が空キーを拒否するため）。`api_key_env` が併記され、その環境変数が設定されていればそちらが優先される
 - **`default_*`**: モデル JSON 側で `request_kwargs` / `convert_system_to_user` 等が未指定の場合のフォールバック値
 - **`default_headers`**: そのバックエンドへの全リクエストに乗せるヘッダー（文字列のペア）。リクエストごとの引数ではなくクライアント生成時に渡すので、`request_kwargs` とは独立して効く。OpenRouter のアプリ帰属ヘッダーがこれ（§10）。`openai_compat` と `nvidia_nim` で有効
-- **`builtin`**: true なら UI から編集・削除不可（builtin_data 配下のものは自動的に true 扱い）
+- **`source`**（JSON には書かない・読み込み時に付く）: そのファイルを読み出した層（`builtin` / `expansion` / `user_data`）。資格情報の許容範囲をここで決める（不変条件 11）。**ファイルに書いても捨てられる。** API 応答の `builtin` フィールドはこれを `source == "builtin"` として導出した表示用の値で、UI はこれを見て「上書き編集」表示と削除の可否を決める
 
 ### B. モデル JSON の `provider_ref` 対応
 
@@ -204,7 +228,7 @@ def list_models_using_provider(provider_id: str) -> list[str]: ...  # 削除前�
 def is_builtin(provider_id: str) -> bool: ...
 ```
 
-`load_configs()` は `iter_files(PROVIDERS_DIR, "*.json")` で 3 層優先順位読み込み。`builtin_data/providers/` 配下は自動で `builtin: true`。
+`load_configs()` は `iter_files_with_layer(PROVIDERS_DIR, "*.json")` で 3 層優先順位読み込み。走査したルートが `(path, layer)` で返るので、その `layer` をそのまま `source` として刻む。**ファイル内に書かれた `source` / `builtin` は捨てる**（不変条件 11）。API 応答の `builtin` フィールドは `source == "builtin"` から導出した表示用の値。
 
 ### D. factory.py の更新
 
@@ -335,7 +359,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: dict 
 ```
 builtin_data/
 ├── providers/
-│   ├── anthropic.json       ← protocol: anthropic_native, builtin: true
+│   ├── anthropic.json       ← protocol: anthropic_native（層は読み込み時に付く）
 │   ├── gemini.json          ← protocol: gemini_native
 │   ├── openai.json          ← protocol: openai_compat (公式 OpenAI)
 │   ├── ollama.json          ← protocol: ollama_compat (localhost:11434)

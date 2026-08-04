@@ -95,13 +95,14 @@ def load_configs() -> Dict[str, Dict]:
     2. builtin_data/models/
     3. models/ (legacy, for backwards compatibility)
     """
-    from .data_paths import iter_files, MODELS_DIR
-    
+    from .data_paths import iter_files_with_layer, LAYER_USER_DATA, MODELS_DIR
+
     configs: Dict[str, Dict] = {}
     seen_keys: set[str] = set()
-    
-    # Load from user_data and builtin_data (iter_files handles priority)
-    for config_file in iter_files(MODELS_DIR, "*.json"):
+
+    # Load from user_data and builtin_data (the iterator handles priority and
+    # reports which root each file came from)
+    for config_file, layer in iter_files_with_layer(MODELS_DIR, "*.json"):
         try:
             config_data = json.loads(config_file.read_text(encoding="utf-8"))
 
@@ -111,10 +112,18 @@ def load_configs() -> Dict[str, Dict]:
                 LOGGER.warning("Model config %s missing 'model' field, skipping", config_file.name)
                 continue
 
+            # Which layer declared this model decides what credentials it may
+            # name (see saiverse/provider_security.py). Taken from the root the
+            # loader walked and written unconditionally, so a definition cannot
+            # claim a layer it was not loaded from.
+            config_data.pop("source", None)
+
             # Use filename (without extension) as config key
             config_key = config_file.stem
             if config_key not in seen_keys:
-                configs[config_key] = _resolve_provider_ref(config_data)
+                resolved = _resolve_provider_ref(config_data)
+                resolved["source"] = layer
+                configs[config_key] = resolved
                 seen_keys.add(config_key)
                 LOGGER.debug("Loaded model config: %s (model=%s) from %s", config_key, model_id, config_file)
         except Exception as exc:
@@ -130,7 +139,12 @@ def load_configs() -> Dict[str, Dict]:
                     continue
                 config_key = config_file.stem
                 if config_key not in seen_keys:
-                    configs[config_key] = _resolve_provider_ref(config_data)
+                    config_data.pop("source", None)
+                    resolved = _resolve_provider_ref(config_data)
+                    # The legacy in-repo models/ directory predates the three
+                    # layers; it is the owner's own checkout, so treat it as such.
+                    resolved["source"] = LAYER_USER_DATA
+                    configs[config_key] = resolved
                     seen_keys.add(config_key)
             except Exception as exc:
                 LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)

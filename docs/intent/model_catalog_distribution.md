@@ -155,11 +155,13 @@ LM Studio はコンテキスト長をアプリ側でモデルロード時に決�
 1. `_get_required_env_vars()` が空を返す → キー未設定でもモデル一覧に出る
 2. factory が OpenAI 互換クライアントにプレースホルダのキーを渡す(SDK が空キーを拒否するため)。ただし `api_key_env` の環境変数が設定されていればそちらを優先 — ローカルサーバーに認証を掛ける利用者を潰さないため
 
-`lmstudio` / `llama_cpp_server` の両方に付けた。同梱の `lmstudio.json` は **`api_key_env` を書いていない**。書くと、UI で編集した瞬間に user_data 上書きとなって同梱扱いが外れ、`provider_security.validate_provider_config` の資格情報束縛(カスタムプロバイダは `SAIVERSE_PROVIDER_<ID>_API_KEY` のみ許可)に弾かれて 400 になるため。この経路は回帰テストで固定した。
+`lmstudio` / `llama_cpp_server` の両方に付けた。同梱の `lmstudio.json` は **`api_key_env` を書いていない** — 認証しないサーバーなので名指しする変数が無いため。
+
+> **2026-08-04 に前提が変わった**: 当初この「書かない」判断には、書くと UI 編集時に user_data 上書き=非 builtin となって資格情報束縛に弾かれ 400 になる、という理由も併記していた。資格情報束縛の判定基準が「同梱フラグ」から「どの層に置かれたか」へ変わり、user_data は本人の領域として自由になったので、その理由は消滅した。判断自体は上の理由で維持する。詳細は `model_provider_management.md` の不変条件 11。
 
 UI(モデル管理 > プロバイダ)にも「API キーなしで接続できるサーバー」チェックボックスを追加し、自作プロバイダでも同じ宣言ができるようにした。API は `ProviderInfo` / Create / Update の3箇所に通してある(`false` は `exclude_none` で落ちないため、チェックを外す操作も保存される)。
 
-**まはーの環境での注意**: `~/.saiverse/user_data/providers/lmstudio.json` が既に存在する(表示名 `LM Studio (Local)`、`api_key_env: LMSTUDIO_API_KEY`)。3層優先で user_data が勝つため、同梱版は隠れたままになる。UI の「削除」で user_data 版を消すと同梱版が現れる。なお user_data 版は `api_key_env` を持つため、`provider_ref: "lmstudio"` を使うモデルを作ると上記の資格情報束縛で拒否される。
+**まはーの環境での注意**: `~/.saiverse/user_data/providers/lmstudio.json` が既に存在する(表示名 `LM Studio (Local)`、`api_key_env: LMSTUDIO_API_KEY`)。3層優先で user_data が勝つため、同梱版は隠れたままになる。UI の「削除」で user_data 版を消すと同梱版が現れる。なお user_data 版が持つ `api_key_env` は、2026-08-04 以降は拒否されない(本人が自分の領域に置いた宣言として扱う)。それ以前は `provider_ref: "lmstudio"` を使うモデルが資格情報束縛で拒否されていた。
 
 #### 検証
 
@@ -258,12 +260,12 @@ URL正規化を `_normalize_ollama_url` に括り出し(片経路だけ正規化
 `docs/custom_providers.md` は「キー欄は空欄で OK」と案内していたが**その通りに設定すると動かない**状態だった。
 → **`api_key_required: false` を新設**(認証しないバックエンドの宣言、`lmstudio`/`llama_cpp_server` に付与): ①キー未設定でもモデル一覧に出る ②factory が OpenAI 互換クライアントにプレースホルダキーを渡す(SDK が空キーを拒否するため)。
 `api_key_env` の環境変数が設定されていればそちら優先(ローカルに認証を掛ける利用者を潰さない)。
-同梱 `lmstudio.json` は `api_key_env` を**書かない** — 書くと UI 編集時に user_data 上書き=非builtin となり `provider_security` の資格情報束縛(`SAIVERSE_PROVIDER_<ID>_API_KEY` のみ許可)で400になるため。
+同梱 `lmstudio.json` は `api_key_env` を**書かない**(認証しないサーバーなので名指しする変数が無い。当時はさらに、書くと UI 編集時に 400 になるという理由もあった → 2026-08-04 に資格情報束縛が層基準へ変わり消滅)。
 UI にもチェックボックス追加(自作プロバイダでも宣言可、`false` は `exclude_none` で落ちないので解除も保存される)。
 `ollama_compat` を別プロトコルにしている理由も確認済み(`num_ctx` を毎リクエスト必須・`options` 入れ子とパラメータ名差異・`/v1` と `/api/chat` を用途で逆順に使い分け・`think`)=統合不可。
 新規 `TestKeylessProviders` 8件。
 **注意: まはーの環境には既に user_data 版 `lmstudio.json` があり同梱版は隠れる**(UI の削除で復活。
-user_data 版は `api_key_env` を持つため `provider_ref` 利用時は資格情報束縛で拒否される)。
+user_data 版が持つ `api_key_env` は 2026-08-04 以降は拒否されない。それ以前は `provider_ref` 利用時に資格情報束縛で拒否されていた)。
 **フロント UI の実挙動は未確認**(バックエンド起動が本番ペルソナを動かしうるため。
 API レスポンスは TestClient で確認済み)。
 残る未決3点(配布元を独立リポジトリにするか / カタログを別スキーマにするか / 取得時差分提示)は段階3以降でまはーレビュー待ち

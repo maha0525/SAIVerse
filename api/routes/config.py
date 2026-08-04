@@ -1022,15 +1022,24 @@ def _validate_model_key(key: str) -> None:
 
 
 def _strip_runtime_fields(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove fields that are auto-injected at load time and shouldn't persist."""
-    return {k: v for k, v in config.items() if k != "builtin"}
+    """Remove fields that are auto-injected at load time and shouldn't persist.
+
+    ``source`` records which of the three data directories a definition was
+    read from, so writing it into the file would let the file claim its own
+    origin on the next load. ``builtin`` was the older form of the same marker.
+    """
+    return {k: v for k, v in config.items() if k not in ("source", "builtin")}
 
 
 def _validate_model_connection(key: str, config: Dict[str, Any]) -> None:
+    from saiverse.provider_configs import SOURCE_USER_DATA
     from saiverse.provider_security import validate_model_config_connection
 
     try:
-        validate_model_config_connection(key, config)
+        # Model files written from here always land in user_data, so judge the
+        # payload as that layer. Without it the config looks like it came from
+        # nowhere, and an unplaced definition is treated as untrusted.
+        validate_model_config_connection(key, {**config, "source": SOURCE_USER_DATA})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

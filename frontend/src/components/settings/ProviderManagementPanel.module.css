@@ -171,3 +171,14 @@
 :global([data-theme="dark"]) .deleteBtn {
     color: #fca5a5;
 }
+
+.notice {
+    padding: 8px 12px;
+    background: var(--bg-secondary, #fafafa);
+    color: inherit;
+    border: 1px solid var(--border-color, #ddd);
+    border-left: 3px solid var(--primary, #4a7eb5);
+    border-radius: 4px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}

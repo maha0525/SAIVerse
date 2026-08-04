@@ -83,17 +83,15 @@ SAIVerse は OpenRouter へのリクエストに「SAIVerse」というアプリ
   "display_name": "OpenRouter",
   "protocol": "openai_compat",
   "base_url": "https://openrouter.ai/api/v1",
-  "api_key_env": "SAIVERSE_PROVIDER_OPENROUTER_API_KEY"
+  "api_key_env": "OPENROUTER_API_KEY"
 }
 ```
 
-**2.** `.env` の API キーを、この設定が参照する名前に変更する。
+**2.** SAIVerse を再起動する。稼働中のプロセスは起動時に読み込んだ設定で動き続けるため、**ファイルを置いただけでは申告は止まりません**。
 
-```
-SAIVERSE_PROVIDER_OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+`.env` の API キーはそのままで構いません。接続情報を書き写す必要があるのは、ユーザー設定が同梱設定とのマージではなく**丸ごと差し替え**になるためです。アプリ名のヘッダーだけを書かないことで、申告が止まります。
 
-手順が2段になる理由は2つあります。ユーザー設定は同梱設定とのマージではなく**丸ごと差し替え**なので接続情報も書く必要があること。そして**利用者が作ったプロバイダ設定は、同梱設定と同じ環境変数名を使えない**こと（API キーが本来と無関係な送信先と結び付けられるのを防ぐ仕組みで、`SAIVERSE_PROVIDER_<プロバイダID大文字>_API_KEY` という名前だけが許されます）。
+この編集は今のところファイルを置く形でしか行えません。グローバル設定 > モデル管理 > プロバイダの編集画面にはアプリ名ヘッダーの項目がなく、そこから保存すると同梱のヘッダーがそのまま引き継がれます。
 
 ## 環境変数
 

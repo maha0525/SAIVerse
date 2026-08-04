@@ -45,6 +45,12 @@ USER_DATA_DIR = Path(_user_data_env) if _user_data_env else get_saiverse_home() 
 BUILTIN_DATA_DIR = PROJECT_ROOT / "builtin_data"
 EXPANSION_DATA_DIR = PROJECT_ROOT / "expansion_data"
 
+# Names for the three layers, in priority order. Used by callers that must know
+# which root a definition came from (see saiverse/provider_security.py).
+LAYER_USER_DATA = "user_data"
+LAYER_EXPANSION = "expansion"
+LAYER_BUILTIN = "builtin"
+
 # Subdirectory names
 TOOLS_DIR = "tools"
 PHENOMENA_DIR = "phenomena"
@@ -120,6 +126,45 @@ def find_file(subdir: str, filename: str) -> Path | None:
     return None
 
 
+def iter_files_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Path, str]]:
+    """Same as :func:`iter_files`, but also reports which layer yielded the file.
+
+    The layer is the root this loop actually walked — not something re-derived
+    from the path afterwards. Callers that make trust decisions per layer need
+    it this way: a symlink or Windows junction under ``expansion_data/`` may
+    resolve into another root, but the definition was still shipped by the
+    add-on that placed it there.
+    """
+    seen_names: set[str] = set()
+
+    # 1. User data (highest priority)
+    user_path = USER_DATA_DIR / subdir
+    if user_path.exists():
+        for file_path in user_path.glob(pattern):
+            if file_path.is_file():
+                seen_names.add(file_path.name)
+                yield file_path, LAYER_USER_DATA
+
+    # 2. Expansion data - project-based structure
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            exp_path = project_dir / subdir
+            if exp_path.exists():
+                for file_path in exp_path.glob(pattern):
+                    if file_path.is_file() and file_path.name not in seen_names:
+                        seen_names.add(file_path.name)
+                        yield file_path, LAYER_EXPANSION
+
+    # 3. Builtin data (lowest priority)
+    builtin_path = BUILTIN_DATA_DIR / subdir
+    if builtin_path.exists():
+        for file_path in builtin_path.glob(pattern):
+            if file_path.is_file() and file_path.name not in seen_names:
+                yield file_path, LAYER_BUILTIN
+
+
 def iter_files(subdir: str, pattern: str = "*") -> Iterator[Path]:
     """Iterate over files in user_data, expansion_data, and builtin_data.
 
@@ -134,34 +179,8 @@ def iter_files(subdir: str, pattern: str = "*") -> Iterator[Path]:
     Yields:
         Path objects for matching files
     """
-    seen_names: set[str] = set()
-
-    # 1. User data (highest priority)
-    user_path = USER_DATA_DIR / subdir
-    if user_path.exists():
-        for file_path in user_path.glob(pattern):
-            if file_path.is_file():
-                seen_names.add(file_path.name)
-                yield file_path
-
-    # 2. Expansion data - project-based structure
-    if EXPANSION_DATA_DIR.exists():
-        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
-            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
-                continue
-            exp_path = project_dir / subdir
-            if exp_path.exists():
-                for file_path in exp_path.glob(pattern):
-                    if file_path.is_file() and file_path.name not in seen_names:
-                        seen_names.add(file_path.name)
-                        yield file_path
-
-    # 3. Builtin data (lowest priority)
-    builtin_path = BUILTIN_DATA_DIR / subdir
-    if builtin_path.exists():
-        for file_path in builtin_path.glob(pattern):
-            if file_path.is_file() and file_path.name not in seen_names:
-                yield file_path
+    for file_path, _layer in iter_files_with_layer(subdir, pattern):
+        yield file_path
 
 
 def iter_directories(subdir: str) -> Iterator[Path]:
@@ -460,6 +479,10 @@ __all__ = [
     "get_all_data_paths",
     "find_file",
     "iter_files",
+    "iter_files_with_layer",
+    "LAYER_USER_DATA",
+    "LAYER_EXPANSION",
+    "LAYER_BUILTIN",
     "iter_directories",
     "iter_project_files",
     "iter_project_subdirs",

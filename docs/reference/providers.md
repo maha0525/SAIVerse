@@ -32,7 +32,7 @@
 
 ### OpenRouter だけアプリ名を名乗る
 
-`openrouter` プロバイダは `default_headers` を持ち、全リクエストに次の3つを乗せる。OpenRouter はこれを見て呼び出し元アプリを判別し、[公開アプリランキング](https://openrouter.ai/apps) に集計する。
+`openrouter` プロバイダは `default_headers` を持ち、LLM 呼び出しに次の3つを乗せる。OpenRouter はこれを見て呼び出し元アプリを判別し、[公開アプリランキング](https://openrouter.ai/apps) に集計する。
 
 | ヘッダー | 値 | 役割 |
 |---|---|---|
@@ -41,6 +41,13 @@
 | `X-OpenRouter-Categories` | `roleplay,general-chat` | カテゴリ。カンマ区切りで最大2つ |
 
 `default_headers` はプロバイダ設定の汎用項目で、`openai_compat` と `nvidia_nim` で有効。**接続時に一度渡す**ため、モデル JSON 側の `request_kwargs` とは独立して効く（`request_kwargs` に混ぜると、自前の `request_kwargs` を持つモデルだけヘッダーが落ちる）。値が壊れていてもその項目を捨てて呼び出しは続行する — 申告は宣伝であって機能ではないため。
+
+効く範囲には次の4つの限界がある。
+
+- **予約ヘッダーは書いても捨てられる** — `Authorization` / `Proxy-Authorization` / `OpenAI-Organization` / `OpenAI-Project` / `Host` / `Content-Length` / `Content-Type` / `Transfer-Encoding`。資格情報・課金の帰属先・経路・本文の枠はクライアントが所有する。特に `Authorization` は、SDK が `api_key_env` から組んだ資格情報より**後に**マージされるため、素通しすると設定ファイルから送信キーを差し替えられてしまう。判定はクライアント境界の一箇所 (`llm_clients/openai.py: _strip_reserved_headers`) にあり、モデル側の `request_kwargs.extra_headers` も同じ関所を通る
+- **値に書けるのは ASCII だけ** — HTTP ヘッダーは ASCII でエンコードされるため、日本語などを入れるとリクエストを組み立てる時点で失敗する。関所が送信前に捨てるので会話は止まらず、その項目の申告が消えるだけになる（改行を含む値も同様に捨てる）
+- **申告そのものは利用者が上書きできる（意図してそうしている）** — `request_kwargs.extra_headers` はリクエスト単位で `default_headers` に勝つため、モデル側に `HTTP-Referer` などを書けば、そのモデルの利用は SAIVerse ではなく別アプリとして集計される。**SAIVerse をフォークして自分のアプリ名で名乗る道を塞がないための設計**で、名乗りを予約ヘッダー扱いにはしない。同梱の OpenRouter モデルはどれも書いておらず、テストで見張っている
+- **クライアント外の補助 HTTP には乗らない** — llama.cpp の slot cache 制御 (`llm_clients/llama_cache.py`) は認証ヘッダーも含めて何も付けずに飛ぶ。認証を要求する remote サーバーで `llama_slot_save_path` を使うと、会話は通るのに cache の保存・復元だけが失敗して黙って無効化される（[未解決 issue](../issues/llama_cache_control_requests_unauthenticated.md)）
 
 カテゴリ名を綴り間違えても**エラーにならず無視される**（ランキングに出ないだけ）。出荷値は `tests/test_provider_configs.py: TestOpenRouterAppAttribution` で固定している。設計の経緯は `docs/intent/model_provider_management.md` §10、利用者向けの説明は `docs/api-keys/openrouter.md`。
 
@@ -73,6 +80,30 @@
 
 - **UI**: グローバル設定 > モデル管理 > プロバイダタブ →「新規追加」→ protocol 選択 → base_url / api_key_env 入力 → 接続テスト
 - **手動**: `~/.saiverse/user_data/providers/*.json` に配置（3層優先で builtin を上書き）
-- 反映: `POST /api/providers/reload` または再起動
+- 反映: `POST /api/providers/reload` または再起動。ただし **起動後に既にそのプロバイダで喋ったペルソナは、作成済みの接続を再起動まで使い続ける**（通常用と軽量用は別々に作られるので、同じペルソナ内で新旧が混ざることもある。[未解決 issue](../issues/provider_change_does_not_reach_live_personas.md)）。接続先や鍵を変えたら再起動するのが確実
 
 3層優先順位: `~/.saiverse/user_data/providers/` > `expansion_data/<addon>/providers/` > `builtin_data/providers/`
+
+同梱プロバイダも UI の「上書き編集」から変更できる。同梱ファイル自体は書き換わらず、同じ id の JSON が `user_data` に作られて次回ロードから優先される。元に戻したいときは UI の「削除」でその上書きを消す。**上書きに書けるのは編集画面にある項目だけ**で、`default_headers` のような項目は同梱の値がそのまま引き継がれる。それを消したいときはファイルを直接置く（例: [`docs/api-keys/openrouter.md`](../api-keys/openrouter.md) のアプリ名申告の停止手順）。
+
+## API キー名の縛りは「誰が宣言したか」で変わる
+
+`api_key_env` に書ける環境変数名には制限があるが、**その制限は自分で置いた設定には掛からない**。
+
+| 設定の置き場所 | `api_key_env` に書ける名前 |
+|---|---|
+| `builtin_data/` | 制限なし（SAIVerse が同梱するもの） |
+| `~/.saiverse/user_data/` | 制限なし（本人が置いたもの） |
+| `expansion_data/<addon>/` | 自分専用の名前のみ。鍵を使わないなら `api_key_required: false` と明記する（**無記入は不可**） |
+
+同じ規則が**プロバイダ設定とモデル設定の両方**に掛かる。専用の名前は、プロバイダなら `SAIVERSE_PROVIDER_<プロバイダID大文字>_API_KEY`、接続先を直書きするモデルなら `SAIVERSE_MODEL_<設定キー大文字>_API_KEY`。モデルが `provider_ref` で参照する形なら、参照先プロバイダの宣言をそのまま継ぐので何も書かなくてよい。
+
+分かれ目は「誰が書いたか」。`builtin_data` は SAIVerse が同梱するもの、`user_data` は本人が UI か手書きで置くもの。どちらも書いた本人が承知の上で選んだ組み合わせなので、そのまま通す。同梱プロバイダを上書きして `OPENROUTER_API_KEY` のような同梱の鍵名を使い続けることもできる。
+
+縛る相手はアドオンのほう。アドオンは同梱と同じ id のプロバイダ JSON を置けて3層優先で同梱を押しのけられるため、そこで同梱の鍵名を名乗られると利用者のキーが任意の宛先へ送られてしまう。だからアドオン由来の定義は自分専用の変数名しか使えない。
+
+**書かない、も許されない。** `api_key_env` を空にすると OpenAI 互換クライアントは既定で `OPENAI_API_KEY` を使うため（`llm_clients/openai.py`）、無記入は「利用者の OpenAI キーをこの宛先へ送れ」と書いたのと同じになる。だからアドオン層の定義は、自分専用の変数名を書くか、`api_key_required: false` と明記して鍵が要らないことを宣言するかの、どちらかを必ず選ばなければならない。
+
+判定に使う層は、`saiverse/provider_configs.py: load_configs()` が**実際に辿ったディレクトリ**をそのまま `source` として刻む。あとからパスを解決し直して判定はしない（`expansion_data` に置いたシンボリックリンクやジャンクションが `user_data` を指していると、解決先の層で信用してしまうため）。**JSON の中に `"source"` や `"builtin"` を書いても読み込み時に捨てられる**ので、定義が自分で層を名乗ることもできない。検査は `saiverse/provider_security.py: validate_provider_config` の一箇所にあり、保存時とクライアント構築時（＝毎回の LLM 呼び出し）の両方が通る。
+
+**この仕組みが縛るのはアドオンの「宣言」であって、アドオンの「動作」ではない。** アドオンのツールは同一プロセスで Python として実行される（`tools/__init__.py` が `exec_module` で読み込む）ので、アドオンのコードは環境変数を直接読むことも、独自に通信することも、`user_data` に書き込むこともできる。ここはアドオンを隔離する仕組みではない。設計の経緯は `docs/intent/model_provider_management.md` の不変条件 11。
