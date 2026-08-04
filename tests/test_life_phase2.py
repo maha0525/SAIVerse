@@ -637,7 +637,14 @@ def test_life_budget_gate_does_not_clamp_rounds(manager, task_ref):
 
 
 def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, task_ref):
-    """save_lives の谷検証を経ずに直接台帳を触った防御的経路 (通す + WARN)。"""
+    """save_lives の谷検証を経ずに直接台帳を触った防御的経路 (通す + WARN)。
+
+    NOTE: 予約の暦日補正は当日確定ライフの開始を基準にする (Codex 七巡目、
+    _resolve_wake_for_plan)。この契約外状態 (コマ 09:00 / ライフ 13:00〜) では
+    09:00 は「営業日の深夜帯明け = 翌暦日の朝」と解釈されて翌日 09:00 に発火
+    する — 並び・検証と同じ物差しの帰結。防御 (ゲートは通す + WARN) 自体は
+    変わらない。
+    """
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00", budget_rounds=5)])
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
@@ -656,7 +663,8 @@ def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, tas
         mock_ws.return_value = _mock_result(rounds_used=5)
         DaySimulator(
             manager.event_scheduler,
-            start=BASE + timedelta(hours=8), end=BASE + timedelta(hours=10),
+            start=BASE + timedelta(hours=8),
+            end=BASE + timedelta(days=1, hours=10),
         ).run()
     mock_ws.assert_called_once()
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
