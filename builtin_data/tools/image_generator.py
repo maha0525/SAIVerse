@@ -543,7 +543,7 @@ def generate_image(
             - saiverse://building/current/image
 
     Returns:
-        Tuple of (text, ToolResult, file_path, metadata)
+        Tuple of (text, ToolResult, file_path, metadata, item_id)
     """
     from tools.context import get_active_manager, get_active_persona_id, get_active_playbook_name
 
@@ -572,7 +572,7 @@ def generate_image(
                 "利用可能な画像生成モデルがありません。"
                 "GEMINI_API_KEY、OPENAI_API_KEY、XAI_API_KEY のいずれかを設定してください。"
             )
-            return error_text, ToolResult(None), None, None
+            return error_text, ToolResult(None), None, None, None
 
         # Pick the best available model from fallback order
         fallback_model = next(
