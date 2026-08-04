@@ -627,6 +627,29 @@ def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
     assert [s["status"] for s in slots] == ["done", "done"]
 
 
+def test_close_outcome_survives_replan(manager, task_refs):
+    """close_outcome は帳簿の一部 — 残りコマ全置換の再検証を通っても消えない (Codex二巡目 #1)。
+
+    消えると「帰属済みなのに未済扱い → post_session が再棚入れ」の二重宣言
+    (revisit_count 偽増加) が並走リプランで復活する。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの",
+         "status": "done", "close_outcome": "done"},
+        {"start": "14:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    day_plan.replace_remaining_slots(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "15:00", "kind": "絵を描く", "ref": "none",
+         "facility": "own_room", "budget_rounds": 3, "note": ""},
+    ])
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
+    assert slots[0]["close_outcome"] == "done"
+
+
 def test_downtime_recovery_reclassifies_grace_exceeded_slots(manager, task_refs):
     """再起動回復: grace 超過の pending は遅延実行せず「流れた」に確定 (Codex一巡目 #2)。
 
@@ -671,6 +694,53 @@ def test_downtime_recovery_respects_defer_allowance(manager, task_refs):
     assert pushed == 1
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "deferred"  # 流れていない
+
+
+def test_downtime_recovery_handles_midnight_crossing(manager, task_refs):
+    """深夜跨ぎ営業日: 前夜のコマを「未来」と誤読して即時実行しない (Codex二巡目 #2)。
+
+    営業日 7/4 (起床 07:00)・現在 7/5 00:30 のとき、23:00 のコマは 1.5 時間
+    過去 (流れた)、00:45 の深夜帯コマは未来 (再 push)。時刻文字列の相対順序
+    比較では 23:00 > 00:30 で未来と誤読していた。
+    """
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "01:30", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "23:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+        {"start": "00:45", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))  # 7/5 00:30
+
+    pushed = day_plan.reschedule_pending_slots(
+        manager, PERSONA_ID, PLAN_DATE, wake="07:00", downtime_recovery=True,
+    )
+
+    assert pushed == 1  # 00:45 (深夜帯 = 7/5 00:45、未来) だけが再 push
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_MISSED_START
+    assert slots[1]["status"] == "pending"
+
+
+def test_recovery_fails_closed_on_broken_start(manager, task_refs):
+    """start が解釈できないコマは押さない (fail-closed) — 遅延実行に化けない。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    day_plan._update_slot(manager, PERSONA_ID, PLAN_DATE, 0, start="broken")
+    clock.enable_virtual(BASE + timedelta(hours=12))
+
+    pushed = day_plan.reschedule_pending_slots(
+        manager, PERSONA_ID, downtime_recovery=True,
+    )
+
+    assert pushed == 0
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "pending"  # 実行も確定もされず保留
 
 
 def test_watchdog_recovery_keeps_late_slots_running(manager, task_refs):

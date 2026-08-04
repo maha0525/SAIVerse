@@ -488,6 +488,12 @@ def _validate_and_normalize_slots(
                 f"slot[{i}].record_level must be a string (got {type(record_level).__name__})"
             )
 
+        close_outcome = slot.get("close_outcome", "")
+        if not isinstance(close_outcome, str):
+            raise ValueError(
+                f"slot[{i}].close_outcome must be a string (got {type(close_outcome).__name__})"
+            )
+
         # 不変 ID (コマの stable identity)。既存を保持し、無ければ採番する。
         # 配列 index はハンドラ中の時間割組み替え (post_session の
         # replace_remaining_slots) で移動しうるため、発火・精算・回復・冪等キー・
@@ -519,12 +525,16 @@ def _validate_and_normalize_slots(
             "status": status,
             "defer_count": defer_count,
         }
-        # skipped の理由と完了記録の詳しさは帳簿の一部 — 消化済みコマを残す
-        # 全置換 (replace_remaining_slots) の再検証を通っても保持する。
+        # skipped の理由・完了記録の詳しさ・締めの結果は帳簿の一部 — 消化済み
+        # コマを残す全置換 (replace_remaining_slots) の再検証を通っても保持する
+        # (close_outcome の欠落は「帰属済みなのに未済扱い → post_session が
+        # 再棚入れ」の二重宣言を招く。Codex 二巡目 #1)。
         if skip_reason:
             normalized_slot["skip_reason"] = skip_reason
         if record_level:
             normalized_slot["record_level"] = record_level
+        if close_outcome:
+            normalized_slot["close_outcome"] = close_outcome
         normalized.append(normalized_slot)
     return normalized
 
@@ -2817,35 +2827,33 @@ def reschedule_pending_slots(
         return 0
 
     slots = _ensure_slot_ids(manager, persona_id, plan_date_str, slots)
-    now_order: Optional[int] = None
-    lives = None
-    if downtime_recovery:
-        try:
-            lives = get_lives(manager, persona_id, plan_date_str)
-            now_order = day_order_minutes(lives, clock.now().strftime("%H:%M"))
-        except Exception:
-            LOGGER.warning(
-                "[day_plan] downtime grace check unavailable; falling back to "
-                "plain re-push (persona=%s date=%s)",
-                persona_id, plan_date_str, exc_info=True,
-            )
-            now_order = None
+    now = clock.now()
     pushed = 0
     reclassified = 0
     for index, slot in enumerate(slots):
         if slot.get("status") not in (STATUS_PENDING, STATUS_DEFERRED):
             continue
-        if now_order is not None:
-            late_by: Optional[int] = None
-            try:
-                late_by = now_order - day_order_minutes(
-                    lives, str(slot.get("start") or ""),
-                )
-            except Exception:
-                late_by = None
+        try:
+            # 発火予定時刻の正典 (:func:`_slot_fire_at` — 深夜跨ぎの暦日補正
+            # 込み)。grace 判定も同じ解釈を使う — day_order (時刻文字列の相対
+            # 順序) 比較は暦日を無視するため、深夜跨ぎ営業日で前夜のコマを
+            # 「未来」と誤読して即時実行していた (Codex 二巡目 #2)。
+            fire_at = _slot_fire_at(plan_date_str, slot, wake=wake)
+        except Exception:
+            # 時刻が解釈できないコマは fail-closed — 遅延実行に化けさせず
+            # 保留する (押さなければ実行もされない)。
+            LOGGER.warning(
+                "[day_plan] cannot interpret slot start; leaving unscheduled "
+                "(persona=%s date=%s index=%d start=%r)",
+                persona_id, plan_date_str, index, slot.get("start"),
+                exc_info=True,
+            )
+            continue
+        if downtime_recovery:
+            late_minutes = (now - fire_at).total_seconds() / 60.0
             allowance = MISSED_GRACE_MINUTES \
                 + int(slot.get("defer_count") or 0) * DEFER_MINUTES
-            if late_by is not None and late_by > allowance:
+            if late_minutes > allowance:
                 updated = _update_slot(
                     manager, persona_id, plan_date_str, index,
                     expected_id=slot.get("id"),
@@ -2862,10 +2870,7 @@ def reschedule_pending_slots(
                     continue
                 reclassified += 1
                 continue
-        _push_slot(
-            manager, persona_id, plan_date_str, slot["id"],
-            _slot_fire_at(plan_date_str, slot, wake=wake),
-        )
+        _push_slot(manager, persona_id, plan_date_str, slot["id"], fire_at)
         pushed += 1
     if pushed or reclassified:
         LOGGER.info(
