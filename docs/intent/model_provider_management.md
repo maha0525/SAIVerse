@@ -1,6 +1,6 @@
 # Intent: モデル＆プロバイダ管理 UI
 
-**ステータス**: 実装完了（Phase 1-4 完了、2026-05-11）。実機検証はまはー側で実施。
+**ステータス**: 実装完了（Phase 1-4 完了、2026-05-11）。実機検証はまはー側で実施。§10（アプリ帰属ヘッダー）のみ実装済み・実機検証待ち。
 
 ## これは何か
 
@@ -96,6 +96,16 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
+### 10. アプリ名の申告 (`default_headers`) — 接続に属し、会話には属さない
+
+一部のバックエンドは、呼び出し元アプリを名乗るヘッダーを受け取り、それを公開ランキングに集計する。OpenRouter がこれで、`HTTP-Referer`（アプリの識別子）・`X-OpenRouter-Title`（表示名）・`X-OpenRouter-Categories`（カテゴリ、カンマ区切りで最大2つ）を送ったアプリだけが `openrouter.ai/apps` に載る。SAIVerse はここに `roleplay` と `general-chat` の二枚看板で並ぶことで、同種のアプリを探しているユーザーからの発見経路を得る。
+
+- **最終結果**: SAIVerse を OpenRouter 経由で使うユーザーは、自分の利用が SAIVerse というアプリの利用として集計されることを、事前に知った上で使える。集計されるのはトークン量であって会話の内容ではない。
+- **責任境界**: ヘッダーは**接続（プロバイダ）に属する**。リクエストパラメータ (`request_kwargs`) ではない。プロバイダからの継承はフィールド単位なので、ヘッダーを `request_kwargs` に混ぜると、自前の `request_kwargs` を持つモデル（GLM-5 が reasoning をこの形で有効化している）だけが申告から漏れる。同じ理由で、モデル JSON 側に個別記載させる形も採らない — OpenRouter モデルが1枚増えるたびに書き忘れが穴になる。
+- **不変条件**: 申告は宣伝であって機能ではない。**ヘッダーの不備で会話が止まってはならない。** 壊れた値は警告付きで落とし、呼び出しはそのまま通す (`llm_clients/factory.py: _coerce_default_headers`)。
+- **透明性**: 他人の API キーで送られる申告なので、集計対象になることを `docs/api-keys/openrouter.md` に明記する。黙って計上しない。
+- **静かに失敗する性質**: 認識されないカテゴリ名は OpenRouter 側で**エラーにならず無視される**。綴りを間違えてもランキングに出ないだけで、API 呼び出しは成功し続ける。出荷物のヘッダー値はテストで固定する (`tests/test_provider_configs.py: TestOpenRouterAppAttribution`)。
+
 ## 設計
 
 ### A. プロバイダ JSON スキーマ
@@ -149,6 +159,7 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **`api_key_env_alternates`**: `api_key_env` の代わりに受け付ける環境変数名の配列。**どれか1つでも設定されていればそのモデルは利用可能**として扱う。Gemini が該当（`GEMINI_API_KEY` に加えて無料枠の `GEMINI_FREE_API_KEY`）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()` → `is_model_available()` で、`GET /api/models` がモデル一覧に出すかどうかを決める
 - **`api_key_required`**: `false` なら認証しないバックエンド（LM Studio / llama.cpp server などのローカルサーバー）。キー未設定でもモデル一覧に出し、OpenAI 互換クライアントにはプレースホルダのキーを渡す（SDK が空キーを拒否するため）。`api_key_env` が併記され、その環境変数が設定されていればそちらが優先される
 - **`default_*`**: モデル JSON 側で `request_kwargs` / `convert_system_to_user` 等が未指定の場合のフォールバック値
+- **`default_headers`**: そのバックエンドへの全リクエストに乗せるヘッダー（文字列のペア）。リクエストごとの引数ではなくクライアント生成時に渡すので、`request_kwargs` とは独立して効く。OpenRouter のアプリ帰属ヘッダーがこれ（§10）。`openai_compat` と `nvidia_nim` で有効
 - **`builtin`**: true なら UI から編集・削除不可（builtin_data 配下のものは自動的に true 扱い）
 
 ### B. モデル JSON の `provider_ref` 対応

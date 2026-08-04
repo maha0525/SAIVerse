@@ -30,6 +30,20 @@
 
 ローカルサーバー側に認証を掛けている場合は `api_key_env` を併記すれば、そちらが優先される（プレースホルダは環境変数が空のときだけ使われる）。この項目は UI（モデル管理 > プロバイダ > 「API キーなしで接続できるサーバー」）からも設定できる。
 
+### OpenRouter だけアプリ名を名乗る
+
+`openrouter` プロバイダは `default_headers` を持ち、全リクエストに次の3つを乗せる。OpenRouter はこれを見て呼び出し元アプリを判別し、[公開アプリランキング](https://openrouter.ai/apps) に集計する。
+
+| ヘッダー | 値 | 役割 |
+|---|---|---|
+| `HTTP-Referer` | `https://saiverse.net` | アプリの識別子。**これが無いとアプリのページ自体が作られない** |
+| `X-OpenRouter-Title` | `SAIVerse` | ランキング上の表示名 |
+| `X-OpenRouter-Categories` | `roleplay,general-chat` | カテゴリ。カンマ区切りで最大2つ |
+
+`default_headers` はプロバイダ設定の汎用項目で、`openai_compat` と `nvidia_nim` で有効。**接続時に一度渡す**ため、モデル JSON 側の `request_kwargs` とは独立して効く（`request_kwargs` に混ぜると、自前の `request_kwargs` を持つモデルだけヘッダーが落ちる）。値が壊れていてもその項目を捨てて呼び出しは続行する — 申告は宣伝であって機能ではないため。
+
+カテゴリ名を綴り間違えても**エラーにならず無視される**（ランキングに出ないだけ）。出荷値は `tests/test_provider_configs.py: TestOpenRouterAppAttribution` で固定している。設計の経緯は `docs/intent/model_provider_management.md` §10、利用者向けの説明は `docs/api-keys/openrouter.md`。
+
 ### Ollama の接続先だけ決め方が違う
 
 他のプロバイダは `base_url` が固定だが、Ollama は待ち受けアドレスが環境によってばらつくため **未設定なら自動探索する**（`llm_clients/ollama.py` の `_probe_base`）。優先順位:

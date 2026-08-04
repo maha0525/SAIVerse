@@ -213,6 +213,78 @@ class TestResolveProviderRef(unittest.TestCase):
         # see tests/test_ollama_endpoint.py.
         self.assertIsNone(out.get("base_url"))
 
+    def test_default_headers_are_inherited_by_models(self):
+        """Every OpenRouter model must inherit the app-attribution headers.
+
+        The headers live on the provider so one file covers the whole model
+        catalog; a model that has to opt in individually would silently drop
+        out of the ranking the day someone adds a new OpenRouter model JSON.
+        """
+        out = model_configs._resolve_provider_ref(
+            {"model": "z-ai/glm-5", "provider_ref": "openrouter"}
+        )
+        self.assertEqual(
+            out["default_headers"]["X-OpenRouter-Title"], "SAIVerse",
+        )
+
+    def test_default_headers_survive_a_model_that_sets_request_kwargs(self):
+        """Inheritance is per-field, so request_kwargs must not shadow headers.
+
+        Provider defaults are only inherited where the model leaves the field
+        unset. Several OpenRouter models ship their own request_kwargs (GLM-5
+        enables reasoning that way); putting the headers inside that same field
+        would have excluded exactly those models from the attribution.
+        """
+        out = model_configs._resolve_provider_ref(
+            {
+                "model": "z-ai/glm-5",
+                "provider_ref": "openrouter",
+                "request_kwargs": {"extra_body": {"reasoning": {"enabled": True}}},
+            }
+        )
+        self.assertEqual(
+            out["request_kwargs"], {"extra_body": {"reasoning": {"enabled": True}}},
+        )
+        self.assertIn("HTTP-Referer", out["default_headers"])
+
+
+class TestOpenRouterAppAttribution(unittest.TestCase):
+    """What SAIVerse ships as its identity on the OpenRouter app ranking.
+
+    These headers are how SAIVerse appears on openrouter.ai/apps. The values
+    are constrained by OpenRouter's documented rules, and a silent typo means
+    the app simply never shows up — the API call succeeds either way.
+    """
+
+    # https://openrouter.ai/docs/app-attribution — unrecognized categories are
+    # silently ignored, so a typo here fails without any error to notice.
+    RECOGNIZED_CATEGORIES = {
+        "cli-agent", "ide-extension", "cloud-agent", "programming-app",
+        "native-app-builder", "creative-writing", "video-gen", "image-gen",
+        "audio-gen", "writing-assistant", "general-chat", "personal-agent",
+        "legal", "roleplay", "game",
+    }
+    MAX_CATEGORIES = 2
+
+    def setUp(self):
+        self.headers = _read_builtin_provider("openrouter")["default_headers"]
+
+    def test_referer_is_the_public_site(self):
+        # HTTP-Referer is the primary identifier; without it no app page is
+        # created at all, and the title alone does not produce a ranking entry.
+        self.assertEqual(self.headers["HTTP-Referer"], "https://saiverse.net")
+
+    def test_title_is_the_product_name(self):
+        self.assertEqual(self.headers["X-OpenRouter-Title"], "SAIVerse")
+
+    def test_categories_are_recognized_and_within_the_limit(self):
+        categories = self.headers["X-OpenRouter-Categories"].split(",")
+        self.assertLessEqual(len(categories), self.MAX_CATEGORIES)
+        for category in categories:
+            # No surrounding whitespace: the value is sent as a raw header.
+            self.assertEqual(category, category.strip())
+            self.assertIn(category, self.RECOGNIZED_CATEGORIES)
+
 
 class TestKeylessProviders(unittest.TestCase):
     """Local OpenAI-compatible servers that accept any API key.

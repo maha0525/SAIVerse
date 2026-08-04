@@ -58,6 +58,37 @@ def _supports_images(provider: str, config: Dict | None) -> bool:
     return provider == "gemini"
 
 
+def _coerce_default_headers(config: Dict | None) -> Dict[str, str] | None:
+    """Read ``default_headers`` off a resolved model config, dropping bad entries.
+
+    These headers identify the app to the backend (OpenRouter's attribution
+    headers are the reason this exists) and are not part of the conversation.
+    A malformed entry must therefore not take the LLM call down with it: bad
+    pairs are dropped with a warning and the call proceeds without them.
+    """
+    if not isinstance(config, dict):
+        return None
+    raw = config.get("default_headers")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        logging.warning(
+            "[factory] default_headers must be an object of string pairs, got %s; ignoring",
+            type(raw).__name__,
+        )
+        return None
+
+    headers: Dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and isinstance(value, str) and key:
+            headers[key] = value
+        else:
+            logging.warning(
+                "[factory] dropping non-string default_headers entry %r", key,
+            )
+    return headers or None
+
+
 def _config_key_looks_wrong(model: str, config: Dict | None) -> str | None:
     """``model`` を設定キーとして受け取ってよいか検分し、疑わしければ理由を返す。
 
@@ -201,6 +232,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
                 extra_kwargs["timeout"] = float(timeout)
                 logging.info("Using custom timeout=%.0fs for model '%s'", float(timeout), api_model)
 
+            default_headers = _coerce_default_headers(config)
+            if default_headers:
+                extra_kwargs["default_headers"] = default_headers
+
         # Default max_image_bytes for OpenAI provider: 5MB.  OpenAI APIs
         # accept up to 20MB but very large images (e.g. 18MB) cause vision
         # recognition failures despite 200 OK responses.  Resizing client-
@@ -258,6 +293,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             reasoning_passback = config.get("reasoning_passback_field")
             if isinstance(reasoning_passback, str) and reasoning_passback.strip():
                 extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
+
+            default_headers = _coerce_default_headers(config)
+            if default_headers:
+                extra_kwargs["default_headers"] = default_headers
 
         logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = NvidiaNIMClient(api_model, supports_images=supports_images, **extra_kwargs)

@@ -179,6 +179,7 @@ class OpenAIClient(LLMClient):
         structured_output_mode: Optional[str] = None,
         reasoning_passback_field: Optional[str] = None,
         timeout: Optional[float] = None,
+        default_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -194,6 +195,11 @@ class OpenAIClient(LLMClient):
             client_kwargs["base_url"] = base_url
         if timeout is not None:
             client_kwargs["timeout"] = timeout
+        # Sent on every request to this backend. Used for provider-side app
+        # identification (OpenRouter attribution headers); belongs to the
+        # connection, not to individual request parameters.
+        if default_headers:
+            client_kwargs["default_headers"] = dict(default_headers)
 
         self.client = OpenAI(**client_kwargs)
         self.model = model

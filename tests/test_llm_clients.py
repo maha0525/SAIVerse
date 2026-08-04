@@ -109,6 +109,79 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs["reasoning_passback_field"], "reasoning_details")
 
     @patch('llm_clients.openai.OpenAI')
+    def test_default_headers_reach_the_openai_sdk(self, mock_openai):
+        """default_headers must land on the SDK client, not on request kwargs.
+
+        OpenRouter identifies the calling app by these headers, so they have to
+        ride every request to the backend rather than a single call.
+        """
+        os.environ['OPENROUTER_API_KEY'] = 'test_or_key'
+        self.addCleanup(lambda: os.environ.pop('OPENROUTER_API_KEY', None))
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {"HTTP-Referer": "https://saiverse.net"},
+            # Shaped after the shipped OpenRouter models (GLM-5 turns reasoning
+            # on this way): headers must survive next to request_kwargs, which
+            # is why they are not merged into that field.
+            "request_kwargs": {"extra_body": {"reasoning": {"enabled": True}}},
+        }
+
+        client = get_llm_client("openrouter-test-model", "openai", 8192, config=config)
+
+        _, kwargs = mock_openai.call_args
+        self.assertEqual(
+            kwargs["default_headers"], {"HTTP-Referer": "https://saiverse.net"},
+        )
+        self.assertEqual(
+            client._request_kwargs, {"extra_body": {"reasoning": {"enabled": True}}},
+        )
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_malformed_default_headers_do_not_break_the_call(self, mock_openai):
+        """A broken header entry is dropped; the LLM call still goes through.
+
+        Attribution is advertising, not function. A user_data override with a
+        bad value must not take every conversation down with it.
+        """
+        os.environ['OPENROUTER_API_KEY'] = 'test_or_key'
+        self.addCleanup(lambda: os.environ.pop('OPENROUTER_API_KEY', None))
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {"HTTP-Referer": ["not", "a", "string"], "X-OpenRouter-Title": "SAIVerse"},
+        }
+
+        get_llm_client("openrouter-test-model", "openai", 8192, config=config)
+
+        _, kwargs = mock_openai.call_args
+        self.assertEqual(kwargs["default_headers"], {"X-OpenRouter-Title": "SAIVerse"})
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_default_headers_of_wrong_type_are_ignored(self, mock_openai):
+        os.environ['OPENROUTER_API_KEY'] = 'test_or_key'
+        self.addCleanup(lambda: os.environ.pop('OPENROUTER_API_KEY', None))
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": "HTTP-Referer: https://saiverse.net",
+        }
+
+        get_llm_client("openrouter-test-model", "openai", 8192, config=config)
+
+        _, kwargs = mock_openai.call_args
+        self.assertNotIn("default_headers", kwargs)
+
+    @patch('llm_clients.openai.OpenAI')
     @patch('llm_clients.openai_message_preparer.prepare_openai_messages')
     def test_nvidia_nim_generate_uses_openai_message_preparer_contract(self, mock_prepare, mock_openai):
         mock_prepare.return_value = [{"role": "user", "content": "prepared"}]

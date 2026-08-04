@@ -33,6 +33,7 @@ class NvidiaNIMClient(OpenAIClient):
         max_image_bytes: Optional[int] = None,
         convert_system_to_user: bool = False,
         reasoning_passback_field: Optional[str] = None,
+        default_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Nvidia NIM doesn't need structured_output_backend parameter
         super().__init__(
@@ -46,6 +47,7 @@ class NvidiaNIMClient(OpenAIClient):
             convert_system_to_user=convert_system_to_user,
             structured_output_backend=None,  # Not used for NIM
             reasoning_passback_field=reasoning_passback_field,
+            default_headers=default_headers,
         )
         self._nim_base_url = base_url or "https://integrate.api.nvidia.com/v1"
         self._nim_api_key = api_key
