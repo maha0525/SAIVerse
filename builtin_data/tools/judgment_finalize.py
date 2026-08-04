@@ -294,7 +294,7 @@ def _finalize_day_open(
             compose_timetable_from_template,
             get_active_template,
         )
-        template = get_active_template(manager, persona_id)
+        template = get_active_template(manager, persona_id, plan_date)
     except Exception:
         LOGGER.exception(
             "[judgment_finalize] failed to load timetable template; "

@@ -65,14 +65,28 @@ UNDECIDED_LABEL = "未定"
 # ---------------------------------------------------------------------------
 
 
-def _template_order_key(manager: Any, persona_id: str) -> Callable[[str], int]:
+def _template_order_key(
+    manager: Any, persona_id: str, plan_date: Any = None,
+) -> Callable[[str], int]:
     """テンプレートの流れ順キー: 起床時刻を一日の起点 (0) とした経過分。
 
-    テンプレートは日付を持たないため、その日のライフでなく PersonaSchedule の
-    起床時刻 (``day_plan._resolve_wake``) を起点にする — day_plan の
-    :func:`~saiverse.day_plan.day_order_minutes` (ライフ起点) と同じ意味論。
+    ``plan_date`` が与えられ、その日の**確定済みライフ**があるときはそれを
+    唯一の基準にする (適用先の保存検証 ``day_order_minutes(lives, ...)`` と
+    同じ物差し — 起床時刻の設定変更後に同日を再実行しても基準が分裂しない。
+    Codex 六巡目 #1)。無い場合はテンプレートは日付を持たないため
+    PersonaSchedule の起床時刻 (``day_plan._resolve_wake``) を起点にする。
     起床未設定なら暦の時刻順に退化する。
     """
+    if plan_date is not None:
+        try:
+            lives = day_plan.get_lives(manager, persona_id, plan_date)
+        except Exception:
+            lives = []
+        if lives:
+            def order_by_lives(hhmm: str) -> int:
+                return day_plan.day_order_minutes(lives, hhmm)
+            return order_by_lives
+
     wake = day_plan._resolve_wake(manager, persona_id)
     origin = day_plan._life_minutes(wake) if wake else 0
 
@@ -99,6 +113,15 @@ def validate_template_slots(
     """
     if not isinstance(slots, list) or not slots:
         raise ValueError("slots must be a non-empty list")
+
+    # 保存前の順序正規化: 現在基準で並べ直せるなら並べ直してから検証する —
+    # 起床時刻の設定変更後、ユーザーが内容を変えない保存 (取得 → そのまま
+    # 保存) が旧基準の並びのせいで 422 にならないため (Codex 六巡目 #2)。
+    # 並べ直せない場合 (同時刻重複・不正 start) は生の並びのまま検証し、
+    # 個別の正直なエラーを出す。
+    presorted = sort_slots_by_current_basis(manager, persona_id, slots)
+    if presorted is not None:
+        slots = presorted
 
     order = _template_order_key(manager, persona_id)
     valid_kinds = day_plan.all_kinds()
@@ -296,7 +319,38 @@ def delete_template(manager: Any, persona_id: str) -> bool:
     return bool(deleted)
 
 
-def get_active_template(manager: Any, persona_id: str) -> Optional[Dict[str, Any]]:
+def sort_slots_by_current_basis(
+    manager: Any, persona_id: str, slots: List[Dict[str, Any]],
+    plan_date: Any = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """コマ雛形配列を現在の流れ順基準で並べ直す (集合は変えない)。
+
+    基準は :func:`_template_order_key` (当日の確定済みライフ > plan_date の
+    有効スケジュール > 暦順)。並べ直しても厳密昇順にならない場合 (同時刻の
+    重複等)・基準が解決できない場合は None。
+
+    適用経路 (:func:`get_active_template`) と編集 API の GET/保存正規化が
+    同じ実装を共有する — 画面と適用で順序の解釈が割れない (Codex 六巡目 #2)。
+    """
+    try:
+        order = _template_order_key(manager, persona_id, plan_date)
+        keyed = [(order(s.get("start") or ""), i, s) for i, s in enumerate(slots)]
+        keyed.sort(key=lambda t: (t[0], t[1]))
+        minutes = [k for k, _, _ in keyed]
+        if any(b <= a for a, b in zip(minutes, minutes[1:])):
+            return None
+        return [s for _, _, s in keyed]
+    except Exception:
+        LOGGER.warning(
+            "[timetable_template] failed to sort template slots by current "
+            "basis (persona=%s)", persona_id, exc_info=True,
+        )
+        return None
+
+
+def get_active_template(
+    manager: Any, persona_id: str, plan_date: Any = None,
+) -> Optional[Dict[str, Any]]:
     """起床判断が使う有効なテンプレート (enabled のみ)。無効・未設定は None。
 
     読み取り専用の入口 — 起床判断の状況テキスト
@@ -309,38 +363,30 @@ def get_active_template(manager: Any, persona_id: str) -> Optional[Dict[str, Any
     現在基準では昇順でなくなりうる — そのまま compose へ渡すと保存検証が
     拒否して day_open が時間割を保存できない (Codex 五巡目 #2)。コマの中身は
     有効なままなので、**現在基準で並べ直して**返す (集合は変えない — 順序の
-    解釈だけが起床基準に従う)。並べ直しても厳密昇順にならない場合 (同時刻の
-    重複等) だけ None (従来生成へ退避、WARN)。
+    解釈だけが基準に従う)。基準は ``plan_date`` の確定済みライフを最優先
+    (適用先の保存検証と同じ物差し — Codex 六巡目 #1)。並べ直しても厳密昇順に
+    ならない場合だけ None (従来生成へ退避、WARN)。
     """
     template = get_template(manager, persona_id)
     if template is None or not template.get("enabled"):
         return None
     slots = template["slots"]
-    try:
-        order = _template_order_key(manager, persona_id)
-        keyed = [(order(s.get("start") or ""), i, s) for i, s in enumerate(slots)]
-        keyed.sort(key=lambda t: (t[0], t[1]))
-        sorted_slots = [s for _, _, s in keyed]
-        minutes = [k for k, _, _ in keyed]
-        if any(b <= a for a, b in zip(minutes, minutes[1:])):
-            LOGGER.warning(
-                "[timetable_template] template slots cannot form a strictly "
-                "ascending day order under the current wake basis; falling "
-                "back to free composition (persona=%s)", persona_id,
-            )
-            return None
-        if sorted_slots != slots:
-            LOGGER.info(
-                "[timetable_template] template slots reordered under the "
-                "current wake basis (persona=%s)", persona_id,
-            )
-            template = {**template, "slots": sorted_slots}
-    except Exception:
+    sorted_slots = sort_slots_by_current_basis(
+        manager, persona_id, slots, plan_date,
+    )
+    if sorted_slots is None:
         LOGGER.warning(
-            "[timetable_template] failed to normalize template order; falling "
-            "back to free composition (persona=%s)", persona_id, exc_info=True,
+            "[timetable_template] template slots cannot form a strictly "
+            "ascending day order under the current basis; falling back to "
+            "free composition (persona=%s)", persona_id,
         )
         return None
+    if sorted_slots != slots:
+        LOGGER.info(
+            "[timetable_template] template slots reordered under the "
+            "current basis (persona=%s)", persona_id,
+        )
+        template = {**template, "slots": sorted_slots}
     return template
 
 

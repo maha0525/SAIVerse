@@ -188,7 +188,9 @@ def test_template_crud_roundtrip(manager, task_refs):
 @pytest.mark.parametrize("slots, match", [
     ([], "non-empty"),
     ([{"start": "9:00"}], "HH:MM"),
-    ([{"start": "10:00"}, {"start": "09:00"}], "ascending"),
+    # 順序は start から導出されるデータ — 逆順入力は保存前の正規化で並べ
+    # 直されるため、昇順違反として残るのは同時刻の重複だけ (Codex 六巡目 #2)
+    ([{"start": "09:00"}, {"start": "09:00"}], "ascending"),
     ([{"start": "09:00", "kind": "暮らし"}], "catalog"),   # 封印済み旧 kind
     ([{"start": "09:00", "kind": "作る"}], "catalog"),     # 封印済み旧 kind
     ([{"start": "09:00", "budget_rounds": -1}], "non-negative"),
@@ -217,11 +219,11 @@ def test_template_ascending_follows_wake_origin(manager, session_factory):
         {"start": "23:00"}, {"start": "00:30"},
     ])
     assert [s["start"] for s in saved["slots"]] == ["23:00", "00:30"]
-    # 暦順 (起床起点なし) では逆順になる並びが、起床起点で通っている
-    with pytest.raises(ValueError, match="ascending"):
-        tt.save_template(manager, PERSONA_ID, [
-            {"start": "08:00"}, {"start": "07:30"},
-        ])
+    # 起床起点 (07:00) では 07:30 が一日の先頭側 — 保存前の正規化で並べ直る
+    saved = tt.save_template(manager, PERSONA_ID, [
+        {"start": "08:00"}, {"start": "07:30"},
+    ])
+    assert [s["start"] for s in saved["slots"]] == ["07:30", "08:00"]
 
 
 def test_active_template_reorders_after_wake_change(manager, session_factory):
@@ -248,6 +250,61 @@ def test_active_template_reorders_after_wake_change(manager, session_factory):
     template = tt.get_active_template(manager, PERSONA_ID)
     assert template is not None
     assert [s["start"] for s in template["slots"]] == ["23:00", "00:30"]
+
+
+def test_active_template_prefers_confirmed_lives_basis(manager, session_factory):
+    """当日の確定済みライフがある日は、それを唯一の順序基準にする (Codex六巡目 #1)。
+
+    起床時刻の設定を日中に変えても、既に確定した当日のライフ (= 適用先の保存
+    検証が使う物差し) と並べ替えの基準が分裂しない。
+    """
+    # 当日のライフは旧起床 07:00 基準で確定済み (深夜跨ぎ)
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "01:30", "budget_pulses": 20, "mode": "free"},
+    ])
+    tt.save_template(manager, PERSONA_ID, [
+        {"start": "08:00"}, {"start": "23:00"}, {"start": "00:30"},
+    ])
+    # その後、スケジュールの起床を 23:00 へ変更 (現在スケジュール基準だと
+    # 23:00 → 00:30 → 08:00 の順になってしまう)
+    db = session_factory()
+    try:
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_open", TIME_OF_DAY="23:00",
+            ENABLED=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    # plan_date 付きの読み出しは確定済みライフ基準 (旧 07:00 起点) を守る
+    template = tt.get_active_template(manager, PERSONA_ID, PLAN_DATE)
+    assert template is not None
+    assert [s["start"] for s in template["slots"]] == ["08:00", "23:00", "00:30"]
+
+
+def test_unchanged_save_passes_after_wake_change(manager, session_factory):
+    """起床変更後の「取得 → 無変更保存」が 422 にならない (Codex六巡目 #2)。"""
+    tt.save_template(manager, PERSONA_ID, [
+        {"start": "00:30"}, {"start": "23:00"},
+    ])
+    db = session_factory()
+    try:
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_open", TIME_OF_DAY="07:00",
+            ENABLED=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    # 旧基準の並び (保存済みのまま) を再保存 → 保存前の正規化で通る
+    saved = tt.save_template(manager, PERSONA_ID, [
+        {"start": "00:30"}, {"start": "23:00"},
+    ])
+    assert [s["start"] for s in saved["slots"]] == ["23:00", "00:30"]
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +620,8 @@ def test_api_roundtrip(client, manager, task_refs):
 
 
 @pytest.mark.parametrize("slots, needle", [
-    ([{"start": "10:00"}, {"start": "09:00"}], "ascending"),
+    # 逆順は保存前の正規化で並べ直るため、422 に残るのは同時刻の重複
+    ([{"start": "09:00"}, {"start": "09:00"}], "ascending"),
     ([{"start": "09:00", "kind": "暮らし"}], "暮らし"),      # カタログ外 kind の明示
     ([{"start": "09:00", "budget_rounds": -1}], "budget_rounds"),
 ])

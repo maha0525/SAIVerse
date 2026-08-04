@@ -59,9 +59,23 @@ class TimetableTemplateRequest(BaseModel):
 def get_timetable_template(
     persona_id: str, manager=Depends(get_manager)
 ) -> Optional[Dict[str, Any]]:
-    """習慣テンプレートを返す。未設定なら null。"""
+    """習慣テンプレートを返す。未設定なら null。
+
+    並びは現在の流れ順基準へ正規化して返す — 起床時刻の設定変更後に旧基準の
+    並びで表示され、無変更保存が 422 になる齟齬を防ぐ (Codex 六巡目 #2。
+    適用経路 get_active_template と同じ実装を共有)。正規化できない並び
+    (同時刻重複等) は保存時の検証に委ねて生のまま返す。
+    """
     _require_persona(manager, persona_id)
-    return timetable_template.get_template(manager, persona_id)
+    template = timetable_template.get_template(manager, persona_id)
+    if template is None:
+        return None
+    sorted_slots = timetable_template.sort_slots_by_current_basis(
+        manager, persona_id, template["slots"],
+    )
+    if sorted_slots is not None and sorted_slots != template["slots"]:
+        template = {**template, "slots": sorted_slots}
+    return template
 
 
 @router.put("/{persona_id}/timetable-template")

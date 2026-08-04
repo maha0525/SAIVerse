@@ -149,6 +149,12 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
             setIsSaving(false);
             setIsDeleting(false);
             loadAll();
+        } else if (!isOpen) {
+            // 閉じた時点で in-flight の PUT/DELETE も中断する — 再オープン後の
+            // 新しい保存を、閉じる前の古い PUT が後着で上書きする窓を閉じる
+            // (Codex 六巡目 #3。世代も進めて遅延応答の state 適用を無効化)
+            generationRef.current += 1;
+            abortInflight();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, personaId]);

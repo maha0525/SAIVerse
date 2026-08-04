@@ -1025,7 +1025,7 @@ def build_day_open_situation_text(
             get_active_template,
             render_template_situation_lines,
         )
-        template = get_active_template(manager, persona_id)
+        template = get_active_template(manager, persona_id, today)
     except Exception:
         LOGGER.warning(
             "[judgment] failed to load timetable template (persona=%s); "
