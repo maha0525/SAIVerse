@@ -8,6 +8,10 @@ saiverse.judgment_points の供給関数 (head の一覧・判断 enum と同じ
 から引き、統計だけ memory.db の purpose_tags (episode → 目的の帰属タグ) で
 付けて索引に合流させる。目的ノードは memopedia ページではないため、
 動的合成 (ページを開く) の対象は v1 では実体ページ / テーマページのみ。
+
+memory.db (adapter.conn) の読み取りは live adapter の書き込みと並走しうる
+ため、他の people ルート (activity / core_memory) と同じく ``adapter._db_lock``
+の下で行う (Codex 一巡目 #7 — 慣行逸脱の追従)。
 """
 import logging
 from typing import Any, Dict, List
@@ -23,38 +27,46 @@ from .utils import get_adapter
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
 
+_ZERO_STATS = {"record_count": 0, "first_date": None, "last_date": None}
 
-def _purpose_tag_stats(conn, purpose_ref: str) -> Dict[str, Any]:
-    """purpose_tags から目的ノード 1 件の経験統計を引く (決定論)。
 
-    record_count = この目的に帰属した出来事等 (target) の行数。
+def _purpose_tag_stats_bulk(conn) -> Dict[str, Dict[str, Any]]:
+    """purpose_tags 全体を一度の GROUP BY で集計する (決定論)。
+
+    目的ノード数に比例した個別クエリを発行しない (Codex 一巡目 #7)。
+    record_count = その目的に帰属した出来事等 (target) の行数。
     first/last_date はタグ初回付与日 (created_at は初回付与を保持する仕様)。
     """
-    row = conn.execute(
+    rows = conn.execute(
         """
-        SELECT COUNT(*),
+        SELECT purpose_ref,
+               COUNT(*),
                MIN(date(created_at, 'unixepoch', 'localtime')),
                MAX(date(created_at, 'unixepoch', 'localtime'))
         FROM purpose_tags
-        WHERE purpose_ref = ?
-        """,
-        (purpose_ref,),
-    ).fetchone()
+        GROUP BY purpose_ref
+        """
+    ).fetchall()
     return {
-        "record_count": int(row[0] or 0),
-        "first_date": row[1],
-        "last_date": row[2],
+        str(r[0]): {
+            "record_count": int(r[1] or 0),
+            "first_date": r[2],
+            "last_date": r[3],
+        }
+        for r in rows
     }
 
 
 def _collect_purpose_rows(
-    manager: Any, persona_id: str, conn
+    manager: Any, persona_id: str, stats_by_ref: Dict[str, Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """生きた目的ノード (タスク / 欲求候補 / Track) の索引行。
 
     供給は判断 enum・head 一覧と同じ関数 (judgment_points) — 台帳だけ違う
     集合を見せない。main DB が引けない環境 (テストの薄い manager 等) では
     空リスト (索引の memory.db 分は独立して返る。フェイルオープン)。
+    統計は集計済みの ``stats_by_ref`` から引くだけ (ここでは memory.db に
+    触らない — ロック区間を短く保つ)。
     """
     rows: List[Dict[str, Any]] = []
     try:
@@ -72,7 +84,7 @@ def _collect_purpose_rows(
                         "ref": ref,
                         "title": t.get("title") or "(無題)",
                         "kind": "task",
-                        "stats": _purpose_tag_stats(conn, ref),
+                        "stats": stats_by_ref.get(ref, dict(_ZERO_STATS)),
                     }
                 )
         for t in list_desire_tasks(manager, persona_id):
@@ -83,7 +95,7 @@ def _collect_purpose_rows(
                         "ref": ref,
                         "title": t.get("title") or "(無題)",
                         "kind": "desire",
-                        "stats": _purpose_tag_stats(conn, ref),
+                        "stats": stats_by_ref.get(ref, dict(_ZERO_STATS)),
                     }
                 )
         for tr in list_pickable_tracks(manager, persona_id):
@@ -93,7 +105,7 @@ def _collect_purpose_rows(
                     "ref": ref,
                     "title": getattr(tr, "title", None) or "(無題)",
                     "kind": "track",
-                    "stats": _purpose_tag_stats(conn, ref),
+                    "stats": stats_by_ref.get(ref, dict(_ZERO_STATS)),
                 }
             )
     except Exception:
@@ -112,12 +124,16 @@ def get_experience_ledger_index(persona_id: str, manager=Depends(get_manager)):
     """台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。"""
     with get_adapter(persona_id, manager) as adapter:
         try:
-            index_rows = build_ledger_index(adapter.conn)
-            purposes = _collect_purpose_rows(manager, persona_id, adapter.conn)
+            with adapter._db_lock:
+                index_rows = build_ledger_index(adapter.conn)
+                stats_by_ref = _purpose_tag_stats_bulk(adapter.conn)
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Experience ledger error: {e}"
             )
+
+    # 目的ノードの列挙は main DB 側 — memory.db のロックを持たずに行う
+    purposes = _collect_purpose_rows(manager, persona_id, stats_by_ref)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in index_rows:
@@ -143,7 +159,8 @@ def get_experience_ledger_page(
     """ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。"""
     with get_adapter(persona_id, manager) as adapter:
         try:
-            page = build_ledger_page(adapter.conn, page_id)
+            with adapter._db_lock:
+                page = build_ledger_page(adapter.conn, page_id)
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Experience ledger error: {e}"
