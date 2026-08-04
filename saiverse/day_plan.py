@@ -227,6 +227,23 @@ FACILITY_OWN_ROOM = "own_room"
 DEFER_MINUTES = 10
 MAX_DEFERRALS = 3
 
+def _coerce_defer_count(slot: Dict[str, Any]) -> int:
+    """slot の defer_count を安全に読む (保存 JSON 由来 — 型不正は 0 扱い)。
+
+    通常発火の繰り下げと再起動回復の両方が使う。不正値 1 件で発火 callback や
+    回復ループを例外死させない (コマ単位の隔離。Codex 四巡目 #5)。
+    """
+    raw = slot.get("defer_count")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    if raw is not None:
+        LOGGER.warning(
+            "[day_plan] invalid defer_count %r; treating as 0 (slot id=%s)",
+            raw, slot.get("id"),
+        )
+    return 0
+
+
 #: 開始時刻からこの分数を超えて過ぎたコマは「流れた」(missed_start) — 丸め
 #: (現在時刻へのクランプ) による救済は数分のズレに限定する (§11-12 裁定)。
 #: 起床判断の途中起動 (timetable_template の compose) と、再起動後の予約回復
@@ -2852,12 +2869,8 @@ def reschedule_pending_slots(
             continue
         if downtime_recovery:
             late_minutes = (now - fire_at).total_seconds() / 60.0
-            # defer_count は保存 JSON 由来 — 型不正で回復ループ全体を落とさない
-            # (不正は猶予 0 扱い。コマ単位の隔離 — Codex 三巡目)。
-            raw_defer = slot.get("defer_count")
-            defer_count = raw_defer if isinstance(raw_defer, int) \
-                and not isinstance(raw_defer, bool) and raw_defer >= 0 else 0
-            allowance = MISSED_GRACE_MINUTES + defer_count * DEFER_MINUTES
+            allowance = MISSED_GRACE_MINUTES \
+                + _coerce_defer_count(slot) * DEFER_MINUTES
             if late_minutes > allowance:
                 updated = _update_slot(
                     manager, persona_id, plan_date_str, index,
@@ -3566,7 +3579,7 @@ def _fire_slot(
 
     # (a) ユーザー会話中なら繰り下げ (v2 §4.2「割り込み」/ 会話の至上性)
     if is_in_user_conversation(manager, persona_id):
-        defer_count = int(slot.get("defer_count", 0))
+        defer_count = _coerce_defer_count(slot)
         if defer_count >= MAX_DEFERRALS:
             _update_slot(
                 manager, persona_id, plan_date_str, index, expected_id=slot_id,
@@ -4694,6 +4707,7 @@ def run_worker_slot_session(
     # あらすじ→関与タグは代謝側 (B2) の担当なので、コマごとの LLM コスト
     # 倍化を避けて締めコールを足さない (saiverse/slot_close.py 冒頭)。
     is_track_ref = track_id is not None
+    close_hook = make_close_hook(manager, persona_id, plan_date_str, slot, index)
     result = run_work_session(
         persona_id,
         instruction,
@@ -4703,8 +4717,15 @@ def run_worker_slot_session(
         manager=manager,
         track_id=track_id,
         title=str(slot.get("title") or "").strip() or None,
-        close_hook=make_close_hook(manager, persona_id, plan_date_str, slot, index),
+        close_hook=close_hook,
     )
+    # 締めの結果のプロセス内手渡し (Codex 四巡目 #2): slot への永続化 (第二
+    # 経路) が CAS 競合等で欠けても、帰属抑止の判定はこの値が担う。
+    try:
+        result.close_outcome_inproc = getattr(close_hook, "last_outcome", None)
+    except Exception:
+        LOGGER.debug("[day_plan] failed to attach in-process close outcome",
+                     exc_info=True)
     LOGGER.info(
         "[day_plan] work session for slot finished: persona=%s date=%s index=%d kind=%s "
         "ended_reason=%s rounds=%d artifacts=%d",
@@ -4791,9 +4812,13 @@ def _handle_worker_slot(
         CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR,
     )
 
-    close_outcome = _reload_slot_field(
-        manager, persona_id, plan_date_str, slot.get("id"), "close_outcome",
-    )
+    # 第一経路: run_worker_slot_session が result に載せた in-process の締め結果
+    # (永続化の成否に依らない)。無いとき (旧経路・シム等) だけ slot から読み戻す。
+    close_outcome = getattr(result, "close_outcome_inproc", None)
+    if close_outcome is None:
+        close_outcome = _reload_slot_field(
+            manager, persona_id, plan_date_str, slot.get("id"), "close_outcome",
+        )
     if close_outcome is _RELOAD_FAILED:
         # 読めなかった = 帰属が済んでいるか分からない。二重帰属 (revisit の
         # 偽増加 = 恒久的な汚染) より帰属の欠落 (状態から追える) の方が軽い —
@@ -5276,6 +5301,49 @@ def _choose_free_time_kind(
     return kind
 
 
+def _delegation_budget_clamp(
+    manager: Any, persona_id: str, plan_date_str: str, index: int,
+    slot: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """自由時間の委譲先 (作業セッション系) の予算判定 (Codex 四巡目 #3)。
+
+    通常発火の (b) ゲート (:func:`_apply_budget_gate`) と同じ基準だが、
+    **slot への skip 書き込みはしない** — 委譲は :func:`_fire_slot` の精算
+    (slot_id で done を書く) の内側で走るため、ここで skipped を書いても精算が
+    done で上書きして記録が矛盾する。
+
+    Returns:
+        通す場合は slot (残高超過は budget_rounds をクランプした複製)。
+        拒否 (残高なし) は None — 呼び出し側が自室縮退する。
+    """
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if lives:
+        # ライフ日はパルス残の二値判定 (ラウンドのクランプはしない —
+        # _apply_life_budget_gate と同じ理由: 単位が異なる)
+        idx = get_life_for_time(lives, slot["start"])
+        if idx is None:
+            return slot
+        life = lives[idx]
+        remaining = int(life.get("budget_pulses") or 0) - life_consumed(life)
+        return slot if remaining > 0 else None
+    state = get_budget_state(manager, persona_id, plan_date_str)
+    if state is None:
+        return slot
+    remaining = state["remaining"]
+    if remaining <= 0:
+        return None
+    requested = _effective_budget_rounds(slot)
+    if remaining < requested:
+        LOGGER.warning(
+            "[day_plan] free-choice delegation budget clamped to remaining "
+            "daily budget: %d -> %d (persona=%s date=%s index=%d kind=%s)",
+            requested, remaining, persona_id, plan_date_str, index,
+            slot.get("kind"),
+        )
+        return {**slot, "budget_rounds": remaining}
+    return slot
+
+
 def _handle_free_choice_slot(
     manager: Any, persona_id: str, plan_date_str: str, slot: Dict[str, Any], index: int
 ) -> Optional[int]:
@@ -5315,6 +5383,26 @@ def _handle_free_choice_slot(
         return None
 
     chosen_slot = {**slot, "kind": chosen}
+    # 委譲先が予算ゲート対象 (作業セッション系) なら、通常発火 (b) と同じ
+    # 判定を通す — 自由時間経由だけ残高チェックとクランプを迂回して
+    # 残高超過の実行・消費ができてしまう穴を塞ぐ (Codex 四巡目 #3。
+    # _free_time_choices の除外は残高 0 の粗い篩いで、残 1 でも作業を選べる)。
+    # 拒否時は選択失敗と同じ自室縮退 (自由時間コマ自体は presence として完了)。
+    if chosen in _BUDGET_GATED_KINDS:
+        clamped_slot = _delegation_budget_clamp(
+            manager, persona_id, plan_date_str, index, chosen_slot,
+        )
+        if clamped_slot is None:
+            LOGGER.warning(
+                "[day_plan] free-choice delegation blocked by budget "
+                "(persona=%s date=%s index=%d chosen=%s) — degrading to "
+                "stay-home behaviour",
+                persona_id, plan_date_str, index, chosen,
+            )
+            _move_to_facility(manager, persona_id, {**slot, "facility": FACILITY_OWN_ROOM})
+            _handle_stay_home_slot(manager, persona_id, plan_date_str, slot, index)
+            return None
+        chosen_slot = clamped_slot
     definition = slot_kind_catalog.get_kind_by_name(chosen) or {}
     execution_type = definition.get("execution_type")
     if execution_type == slot_kind_catalog.EXECUTION_OUTING:

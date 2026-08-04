@@ -627,6 +627,23 @@ def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
     assert [s["status"] for s in slots] == ["done", "done"]
 
 
+def test_malformed_defer_count_does_not_break_normal_defer(manager, task_refs):
+    """保存 JSON の defer_count 型不正が通常発火の繰り下げを例外死させない (Codex四巡目 #5)。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    day_plan._update_slot(manager, PERSONA_ID, PLAN_DATE, 0, defer_count="banana")
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch.object(day_plan, "is_in_user_conversation", return_value=True):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "deferred"       # 例外死せず繰り下げ成立
+    assert slots[0]["defer_count"] == 1           # 不正値は 0 起点で数え直し
+
+
 def test_close_outcome_survives_replan(manager, task_refs):
     """close_outcome は帳簿の一部 — 残りコマ全置換の再検証を通っても消えない (Codex二巡目 #1)。
 

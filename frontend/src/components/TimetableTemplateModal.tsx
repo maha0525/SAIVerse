@@ -124,15 +124,30 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
     // 保存・削除) の応答は、発行時の世代と一致するときだけ state に適用する —
     // A の保存中に閉じて B (または同じ A) で開き直したとき、古い応答が
     // 新しいフォームを上書きしない (Codex 三巡目)。
+    // さらに世代交代時は in-flight のリクエスト自体を abort する — 古い
+    // PUT/DELETE が後着してサーバー側の新しい保存を巻き戻す窓を最小化する
+    // (Codex 四巡目 #1。サーバー側の revision CAS はローカル単一ユーザー UI に
+    // 対して過大と裁定 — abort + 世代ガードで実用上の窓を閉じる)。
     const generationRef = useRef(0);
+    const inflightRef = useRef<AbortController[]>([]);
+
+    const abortInflight = () => {
+        for (const ctrl of inflightRef.current) {
+            try { ctrl.abort(); } catch { /* already settled */ }
+        }
+        inflightRef.current = [];
+    };
 
     useEffect(() => {
         if (isOpen && personaId) {
             generationRef.current += 1;
+            abortInflight();
             setLoadedPersonaId(null);
             setIsEditing(false);
             setErrorMessage(null);
             setSavedMessage(null);
+            setIsSaving(false);
+            setIsDeleting(false);
             loadAll();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -145,11 +160,13 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
         const isStale = () =>
             targetPersonaId !== personaIdRef.current
             || generation !== generationRef.current;
+        const ctrl = new AbortController();
+        inflightRef.current.push(ctrl);
         try {
             const [tplRes, kindsRes, facRes] = await Promise.all([
-                fetch(`/api/people/${targetPersonaId}/timetable-template`),
-                fetch('/api/config/slot-kinds'),
-                fetch(`/api/people/${targetPersonaId}/timetable-template/facilities`),
+                fetch(`/api/people/${targetPersonaId}/timetable-template`, { signal: ctrl.signal }),
+                fetch('/api/config/slot-kinds', { signal: ctrl.signal }),
+                fetch(`/api/people/${targetPersonaId}/timetable-template/facilities`, { signal: ctrl.signal }),
             ]);
             if (isStale()) return;
             if (!tplRes.ok || !kindsRes.ok || !facRes.ok) {
@@ -179,6 +196,7 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
             console.error(e);
             if (!isStale()) setErrorMessage('サーバーとの通信に失敗しました。');
         } finally {
+            inflightRef.current = inflightRef.current.filter(c => c !== ctrl);
             if (!isStale()) setIsLoading(false);
         }
     };
@@ -246,11 +264,14 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
         const isStale = () =>
             targetPersonaId !== personaIdRef.current
             || generation !== generationRef.current;
+        const ctrl = new AbortController();
+        inflightRef.current.push(ctrl);
         try {
             const res = await fetch(`/api/people/${targetPersonaId}/timetable-template`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ slots: rows.map(toPayloadSlot), enabled }),
+                signal: ctrl.signal,
             });
             if (isStale()) return;
             if (res.ok) {
@@ -272,8 +293,10 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
             console.error(e);
             if (!isStale()) setErrorMessage('サーバーとの通信に失敗しました。');
         } finally {
-            // isSaving は世代を跨いでも必ず畳む (spinner の出しっぱなし防止)
-            setIsSaving(false);
+            inflightRef.current = inflightRef.current.filter(c => c !== ctrl);
+            // 世代交代後の後発操作の spinner を消さない — 現行世代だけ畳む
+            // (旧世代の畳み忘れは開くたびの effect が setIsSaving(false) で拾う)
+            if (!isStale()) setIsSaving(false);
         }
     };
 
@@ -288,8 +311,10 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
         const isStale = () =>
             targetPersonaId !== personaIdRef.current
             || generation !== generationRef.current;
+        const ctrl = new AbortController();
+        inflightRef.current.push(ctrl);
         try {
-            const res = await fetch(`/api/people/${targetPersonaId}/timetable-template`, { method: 'DELETE' });
+            const res = await fetch(`/api/people/${targetPersonaId}/timetable-template`, { method: 'DELETE', signal: ctrl.signal });
             if (isStale()) return;
             if (res.ok) {
                 setHasTemplate(false);
@@ -304,7 +329,8 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
             console.error(e);
             if (!isStale()) setErrorMessage('サーバーとの通信に失敗しました。');
         } finally {
-            setIsDeleting(false);
+            inflightRef.current = inflightRef.current.filter(c => c !== ctrl);
+            if (!isStale()) setIsDeleting(false);
         }
     };
 

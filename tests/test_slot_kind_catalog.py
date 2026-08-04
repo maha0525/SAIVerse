@@ -243,6 +243,33 @@ def test_broken_upper_layer_file_falls_back_to_builtin(tmp_path):
         assert set(slot_kind_catalog.SLOT_KIND_CATALOG) == {"user_kind"}
 
 
+def test_duplicate_rejected_upper_file_falls_back_to_builtin(tmp_path):
+    """id/name 重複で読み飛ばされた上位ファイルも下位を隠さない (Codex四巡目 #4)。
+
+    構造は正当でも重複棄却された定義にファイル名の縄張りを主張させると、
+    同名の正常な builtin 定義まで消える。縄張りは実際にカタログへ採用された
+    定義だけが持つ。
+    """
+    builtin = tmp_path / "builtin_data"
+    user = tmp_path / "user_data"
+    _write_kind(
+        builtin / "slot_kinds", "20_kind.json",
+        **_valid_kind("builtin_kind", "組み込みの種別"),
+    )
+    # user 層: 05 が先に読まれ、20 は同じ id のため重複棄却される
+    _write_kind(
+        user / "slot_kinds", "05_first.json",
+        **_valid_kind("dup_kind", "先勝ちの種別"),
+    )
+    _write_kind(
+        user / "slot_kinds", "20_kind.json",
+        **_valid_kind("dup_kind", "重複で棄却される種別"),
+    )
+
+    with _catalog_dirs(user, tmp_path / "e", builtin):
+        assert set(slot_kind_catalog.SLOT_KIND_CATALOG) == {"dup_kind", "builtin_kind"}
+
+
 # ---------------------------------------------------------------------------
 # day_plan との統合 (kind 語彙とハンドラ配線の reload)
 # ---------------------------------------------------------------------------

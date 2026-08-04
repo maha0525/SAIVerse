@@ -433,3 +433,51 @@ def test_free_choice_budget_exhausted_excludes_work_kinds(manager):
     choices = day_plan._free_time_choices(manager, PERSONA_ID, PLAN_DATE)
     assert "調べる" not in choices
     assert "出かける" in choices and "自室で過ごす" in choices
+
+
+def test_free_choice_delegation_clamps_to_remaining_budget(manager):
+    """委譲先の作業セッションは残高でクランプされる (Codex四巡目 #3)。
+
+    選択肢の除外は残高 0 の粗い篩いなので、残 1 でも作業を選べる — その場合に
+    既定 8 ラウンドのまま実行して残高超過で消費する迂回を塞ぐ。
+    """
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 10)
+    day_plan.consume_budget(manager, PERSONA_ID, PLAN_DATE, 9)  # 残 1
+    _save_single_slot(manager, "自由時間", "own_room")
+
+    session_result = SimpleNamespace(
+        digest="d", artifacts=[], rounds_used=1, ended_reason="finished",
+    )
+    with patch.object(
+        day_plan, "_choose_free_time_kind", return_value="調べる",
+    ), patch(
+        "sea.work_session.run_work_session", return_value=session_result,
+    ) as run_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    assert run_ws.call_count == 1
+    # budget_rounds (第 3 位置引数) が残高 1 にクランプされている
+    assert run_ws.call_args[0][2] == 1
+    state = day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)
+    assert state["remaining"] == 0
+
+
+def test_free_choice_delegation_degrades_when_budget_empty(manager):
+    """残高 0 で作業が選ばれてしまった場合は実行せず自室縮退 (Codex四巡目 #3)。"""
+    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 5)
+    day_plan.consume_budget(manager, PERSONA_ID, PLAN_DATE, 5)  # 残 0
+    _save_single_slot(manager, "自由時間", "own_room")
+
+    with patch.object(
+        day_plan, "_choose_free_time_kind", return_value="調べる",
+    ), patch(
+        "sea.work_session.run_work_session",
+    ) as run_ws:
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    run_ws.assert_not_called()  # 作業セッションは走らない
+    state = day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)
+    assert state["remaining"] == 0  # 消費もされない
+    # 自室縮退の Pulse (自室で過ごす文面) が走っている
+    assert len(manager.pulse_dispatcher.calls) == 1
+    assert "自室" in _pulse_text(manager)

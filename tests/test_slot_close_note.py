@@ -693,6 +693,47 @@ def _ws_result(**over):
     return SimpleNamespace(**base)
 
 
+def test_close_hook_hands_outcome_in_process(manager, persona, adapter):
+    """フックは結果を hook.last_outcome でも手渡す (slot 永続化の成否に依らない)。
+
+    close_outcome の slot 書き込みが CAS 競合等で欠けても、帰属抑止の判定は
+    この in-process 値が担う (Codex 四巡目 #2)。
+    """
+    hook = slot_close.make_close_hook(
+        manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+    )
+    assert hook.last_outcome is None
+    client = FakeCloseClient({"belongs_to": "none", "note": ""})
+    ctx = _make_ctx(manager, persona, client)
+    # slot への永続化が全滅しても in-process 値は残る
+    with patch("saiverse.day_plan._update_slot", return_value=None):
+        hook(ctx)
+    assert hook.last_outcome == slot_close.CLOSE_OUTCOME_DONE
+
+
+def test_worker_slot_prefers_in_process_outcome_over_reload(manager, persona):
+    """result に載った in-process の締め結果が読み戻しより優先される (#2)。"""
+    from saiverse import day_plan
+
+    captured: Dict[str, Any] = {}
+
+    def fake_fire(mgr, pid, kind, context):
+        captured.update(context)
+
+    result = _ws_result()
+    result.close_outcome_inproc = slot_close.CLOSE_OUTCOME_DONE
+    with patch.object(day_plan, "run_worker_slot_session", return_value=result), \
+         patch.object(day_plan, "_reload_slot_field",
+                      side_effect=AssertionError("reload should not be needed")), \
+         patch("saiverse.autonomy_wiring.fire_judgment_point",
+               side_effect=fake_fire):
+        day_plan._handle_worker_slot(
+            manager, PERSONA_ID, PLAN_DATE, _slot(id="s1"), 0,
+        )
+
+    assert captured.get("episode_attribution_done") is True
+
+
 def test_worker_slot_suppresses_shelving_when_close_done(manager, persona):
     """帰属が締めで確定済み → post_session context に済みフラグが立つ (#5)。"""
     from saiverse import day_plan

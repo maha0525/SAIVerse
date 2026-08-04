@@ -88,10 +88,16 @@ def make_close_hook(
                 index=index,
             )
         finally:
+            # プロセス内の第一経路: 結果を hook 属性で直接手渡す (呼び出し側の
+            # run_worker_slot_session が result に載せる)。slot への永続化は
+            # 再起動を跨ぐ可視性のための第二経路 — CAS 競合等で書けなくても
+            # 帰属抑止の判定は in-process 値が担う (Codex 四巡目 #2)。
+            _hook.last_outcome = outcome  # type: ignore[attr-defined]
             _persist_close_outcome(
                 manager, persona_id, plan_date_str, slot, index, outcome,
             )
 
+    _hook.last_outcome = None  # type: ignore[attr-defined]
     return _hook
 
 
@@ -107,10 +113,20 @@ def _persist_close_outcome(
     try:
         from saiverse import day_plan
 
-        day_plan._update_slot(
+        updated = day_plan._update_slot(
             manager, persona_id, plan_date_str, index,
             expected_id=slot.get("id"), close_outcome=outcome,
         )
+        if updated is None:
+            # CAS 競合 / コマ消失 — マーカーは残らないが、帰属抑止の判定は
+            # in-process の手渡し (hook.last_outcome) が担うので二重帰属には
+            # ならない。再起動後の可視性だけが欠ける (WARNING で追える)。
+            LOGGER.warning(
+                "[slot_close] close_outcome=%s not persisted (slot moved or "
+                "vanished); in-process handoff still carries it "
+                "(persona=%s date=%s index=%d)",
+                outcome, persona_id, plan_date_str, index,
+            )
     except Exception:
         LOGGER.warning(
             "[slot_close] failed to persist close_outcome=%s "

@@ -177,10 +177,6 @@ def load_catalog() -> dict[str, dict]:
             )
             continue
 
-        # ここまで来た定義だけがファイル名の縄張り (下位層の同名を隠す権利) を
-        # 主張できる。
-        claimed_filenames.add(config_file.name)
-
         kind_id = data["id"]
         name = data["name"].strip()
         if kind_id in catalog:
@@ -203,6 +199,11 @@ def load_catalog() -> dict[str, dict]:
 
         catalog[kind_id] = data
         seen_names.add(name)
+        # ファイル名の縄張り (下位層の同名を隠す権利) は**実際にカタログへ
+        # 採用された**定義だけが主張できる — 構造は正当でも id/name 重複で
+        # 読み飛ばした上位定義に主張させると、下位の正常な同名ファイルまで
+        # 消える (Codex 四巡目 #4)。
+        claimed_filenames.add(config_file.name)
         LOGGER.debug("Loaded slot kind: %s (%s) from %s", kind_id, name, config_file)
 
     LOGGER.info("Loaded %d slot kind definitions", len(catalog))
