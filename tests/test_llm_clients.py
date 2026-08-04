@@ -115,8 +115,7 @@ class TestLLMClients(unittest.TestCase):
         OpenRouter identifies the calling app by these headers, so they have to
         ride every request to the backend rather than a single call.
         """
-        os.environ['OPENROUTER_API_KEY'] = 'test_or_key'
-        self.addCleanup(lambda: os.environ.pop('OPENROUTER_API_KEY', None))
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
         config = {
             "model": "test/model",
@@ -147,8 +146,7 @@ class TestLLMClients(unittest.TestCase):
         Attribution is advertising, not function. A user_data override with a
         bad value must not take every conversation down with it.
         """
-        os.environ['OPENROUTER_API_KEY'] = 'test_or_key'
-        self.addCleanup(lambda: os.environ.pop('OPENROUTER_API_KEY', None))
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
         config = {
             "model": "test/model",
@@ -165,8 +163,7 @@ class TestLLMClients(unittest.TestCase):
 
     @patch('llm_clients.openai.OpenAI')
     def test_default_headers_of_wrong_type_are_ignored(self, mock_openai):
-        os.environ['OPENROUTER_API_KEY'] = 'test_or_key'
-        self.addCleanup(lambda: os.environ.pop('OPENROUTER_API_KEY', None))
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
         config = {
             "model": "test/model",
@@ -180,6 +177,291 @@ class TestLLMClients(unittest.TestCase):
 
         _, kwargs = mock_openai.call_args
         self.assertNotIn("default_headers", kwargs)
+
+    def _set_env(self, name, value):
+        """Set an env var for one test, restoring any pre-existing value after.
+
+        Plain assignment plus a pop() in cleanup would delete a real key the
+        developer had exported, leaking that loss into later tests in the run.
+        """
+        patcher = patch.dict(os.environ, {name: value})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _wire_headers_for(self, mock_openai, config, key="openrouter-test-model"):
+        """Build the client through factory, then run OpenAIClient.generate for real.
+
+        Two reasons this cannot be shortened to inspecting constructor
+        arguments. The SDK merges its own headers with the configured ones and
+        which side wins is the whole question; and extra_headers does not ride
+        the client at all — it travels through _request_kwargs into each call
+        site, so only the real path shows whether it still arrives.
+        """
+        from openai import OpenAI as _RealOpenAI
+
+        client = get_llm_client(key, "openai", 8192, config=config)
+
+        captured = []
+
+        def handler(request):
+            captured.append(dict(request.headers))
+            return httpx.Response(200, json={
+                "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop",
+                }],
+            })
+
+        # Swap the mocked SDK for a real one built from the very kwargs factory
+        # produced, so everything downstream of construction runs for real.
+        client.client = _RealOpenAI(
+            **mock_openai.call_args.kwargs,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        client.generate([{"role": "user", "content": "hi"}], tools=[])
+        return captured[-1]
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_attribution_headers_reach_the_wire(self, mock_openai):
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {
+                "HTTP-Referer": "https://saiverse.net",
+                "X-OpenRouter-Title": "SAIVerse",
+                "X-OpenRouter-Categories": "roleplay,general-chat",
+            },
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
+        self.assertEqual(sent.get("x-openrouter-title"), "SAIVerse")
+        self.assertEqual(sent.get("x-openrouter-categories"), "roleplay,general-chat")
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_default_headers_cannot_replace_the_credential(self, mock_openai):
+        """A config file must not be able to swap the API key for another value.
+
+        The SDK merges custom default headers *after* the ones it derives from
+        api_key, so an Authorization entry would otherwise be the value that
+        actually ships — pairing an endpoint vetted by provider_security with a
+        credential it never saw.
+        """
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {
+                "Authorization": "Bearer HIJACKED",
+                "Host": "evil.example",
+                # Decides which tenant gets billed — same class of hole.
+                "OpenAI-Organization": "org-someone-else",
+                "HTTP-Referer": "https://saiverse.net",
+            },
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        self.assertEqual(sent.get("authorization"), "Bearer test_or_key")
+        self.assertEqual(sent.get("host"), "openrouter.ai")
+        self.assertIsNone(sent.get("openai-organization"))
+        # The legitimate entry in the same object still goes through.
+        self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_extra_headers_cannot_replace_the_credential(self, mock_openai):
+        """The per-request door onto the credential passes the same gate.
+
+        extra_headers outranks both default_headers and the SDK's own auth
+        header, so guarding only default_headers would leave the invariant
+        ("credentials belong to the client") true on one path and false on
+        the other — which is not an invariant.
+        """
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "request_kwargs": {"extra_headers": {
+                "Authorization": "Bearer HIJACKED",
+                "X-Trace": "keep-me",
+            }},
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        self.assertEqual(sent.get("authorization"), "Bearer test_or_key")
+        # A non-reserved entry in the same object is untouched.
+        self.assertEqual(sent.get("x-trace"), "keep-me")
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_override_works_across_header_name_spellings(self, mock_openai):
+        """Overriding must not depend on matching the shipped capitalisation.
+
+        Header names are case-insensitive, but the SDK merges default_headers
+        and extra_headers by exact key — so a differently-spelled override
+        would put *both* values on the wire instead of replacing.
+        """
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {"HTTP-Referer": "https://saiverse.net"},
+            "request_kwargs": {"extra_headers": {"http-referer": "https://other.example"}},
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        self.assertEqual(sent.get("http-referer"), "https://other.example")
+        self.assertNotIn("saiverse.net", sent.get("http-referer", ""))
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_non_ascii_header_value_is_dropped_not_raised(self, mock_openai):
+        """httpx encodes header values as ASCII, so a Japanese value would
+        raise while building the request and stop the conversation — the exact
+        outcome "attribution is advertising, not function" rules out.
+        """
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {
+                "X-OpenRouter-Title": "サイヴァース",
+                "X-Broken": "line\nbreak",
+                "HTTP-Referer": "https://saiverse.net",
+            },
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        self.assertIsNone(sent.get("x-openrouter-title"))
+        self.assertIsNone(sent.get("x-broken"))
+        self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_header_shapes_h11_rejects_are_dropped(self, mock_openai):
+        """Values that only fail on the way out still have to fail open.
+
+        h11 validates names and values when it serializes the request — not
+        when httpx builds it — so these forms would surface to the user as a
+        failed conversation rather than a missing header. Measured against
+        h11 0.16.0; inner spaces and tabs are legal and must survive.
+        """
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_headers": {
+                "X Bad Name": "v",          # space in the name
+                "X-Trailing-LF\n": "v",     # regex anchored with $ would pass this
+                "X-Nul": "a\x00b",          # NUL in the value
+                "X-Vt": "a\x0bb",           # vertical tab
+                "X-Ff": "a\x0cb",           # form feed
+                "X-Blank": "   ",           # whitespace-only value
+                "X-Leading": " v",          # leading whitespace
+                "X-Inner": "a b\tc",        # legal: inner space and tab
+                "HTTP-Referer": "https://saiverse.net",
+            },
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        for dropped in ("x bad name", "x-trailing-lf\n", "x-nul", "x-vt", "x-ff",
+                        "x-blank", "x-leading"):
+            self.assertIsNone(sent.get(dropped), f"{dropped} should have been dropped")
+        self.assertEqual(sent.get("x-inner"), "a b\tc")
+        self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_extra_headers_of_wrong_shape_does_not_break_the_call(self, mock_openai):
+        """A string where an object belongs must not reach the SDK.
+
+        The SDK raises on it, which would turn a config typo into a failed
+        conversation — and the raw value would already have been written to
+        the DEBUG log by then.
+        """
+        self._set_env('OPENROUTER_API_KEY', 'test_or_key')
+
+        config = {
+            "model": "test/model",
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "request_kwargs": {"extra_headers": "Authorization: Bearer SECRET"},
+        }
+
+        sent = self._wire_headers_for(mock_openai, config)
+
+        self.assertEqual(sent.get("authorization"), "Bearer test_or_key")
+
+    def test_debug_log_never_carries_header_values(self):
+        """The user runs at DEBUG, so this line lands in a persisted log."""
+        from llm_clients.factory import _loggable_kwargs
+
+        for shape in ({"Authorization": "Bearer SECRET"}, "Authorization: Bearer SECRET"):
+            rendered = repr(_loggable_kwargs({
+                "default_headers": {"Authorization": "Bearer SECRET"},
+                "request_kwargs": {"extra_headers": shape},
+            }))
+            self.assertNotIn("SECRET", rendered)
+
+    @patch('llm_clients.openai.OpenAI')
+    @patch('httpx.Client')
+    def test_nim_structured_output_path_carries_default_headers(self, mock_httpx, mock_openai):
+        """NIM's structured output bypasses the SDK and builds headers by hand.
+
+        Without this the same backend would see different headers depending on
+        whether the caller asked for structured output.
+        """
+        self._set_env('NVIDIA_API_KEY', 'test_nim_key')
+        from llm_clients.nvidia_nim import NvidiaNIMClient
+
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"tool_calls": [
+                {"function": {"arguments": '{"a": 1}'}},
+            ]}}],
+        }
+        mock_httpx.return_value.__enter__.return_value.post.return_value = response
+
+        client = NvidiaNIMClient(
+            "m",
+            api_key_env="NVIDIA_API_KEY",
+            base_url="https://integrate.api.nvidia.com/v1",
+            default_headers={"HTTP-Referer": "https://saiverse.net"},
+        )
+        client._create_nim_structured_output_via_tool(
+            [{"role": "user", "content": "x"}],
+            {"type": "object", "properties": {"a": {"type": "integer"}}},
+            None,
+        )
+
+        _, post_kwargs = mock_httpx.return_value.__enter__.return_value.post.call_args
+        self.assertEqual(post_kwargs["headers"].get("HTTP-Referer"), "https://saiverse.net")
+        # Credentials stay owned by the client even on this hand-built path.
+        self.assertEqual(post_kwargs["headers"].get("Authorization"), "Bearer test_nim_key")
 
     @patch('llm_clients.openai.OpenAI')
     @patch('llm_clients.openai_message_preparer.prepare_openai_messages')

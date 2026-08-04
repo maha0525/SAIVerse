@@ -58,13 +58,14 @@ def _supports_images(provider: str, config: Dict | None) -> bool:
     return provider == "gemini"
 
 
-def _coerce_default_headers(config: Dict | None) -> Dict[str, str] | None:
-    """Read ``default_headers`` off a resolved model config, dropping bad entries.
+def _read_default_headers(config: Dict | None) -> Dict | None:
+    """Read ``default_headers`` off a resolved model config.
 
-    These headers identify the app to the backend (OpenRouter's attribution
-    headers are the reason this exists) and are not part of the conversation.
-    A malformed entry must therefore not take the LLM call down with it: bad
-    pairs are dropped with a warning and the call proceeds without them.
+    Only the shape is checked here. Which entries are admissible is decided at
+    the client boundary (``llm_clients/openai.py: _strip_reserved_headers``),
+    because per-request ``extra_headers`` is the same door onto the credential
+    and has to pass the same gate — a second copy of the rule here would drift
+    away from that one.
     """
     if not isinstance(config, dict):
         return None
@@ -77,16 +78,35 @@ def _coerce_default_headers(config: Dict | None) -> Dict[str, str] | None:
             type(raw).__name__,
         )
         return None
+    return raw or None
 
-    headers: Dict[str, str] = {}
-    for key, value in raw.items():
-        if isinstance(key, str) and isinstance(value, str) and key:
-            headers[key] = value
-        else:
-            logging.warning(
-                "[factory] dropping non-string default_headers entry %r", key,
+
+def _loggable_kwargs(kwargs: Dict[str, object]) -> Dict[str, object]:
+    """Copy of ``kwargs`` with header *values* replaced by their key names.
+
+    This log line runs before the client boundary drops inadmissible entries,
+    and the user runs at DEBUG — so a config that (wrongly) carries a token in
+    ``Authorization`` would have it written to a persisted log even though the
+    request never sends it. Key names are enough to debug a header problem.
+    """
+    safe = dict(kwargs)
+    for field in ("default_headers", "request_kwargs"):
+        value = safe.get(field)
+        if not isinstance(value, dict):
+            continue
+        if field == "default_headers":
+            safe[field] = f"<{len(value)} headers: {sorted(value)}>"
+        elif "extra_headers" in value:
+            # Mask whatever shape it has: a string here would print in full.
+            headers = value["extra_headers"]
+            inner = dict(value)
+            inner["extra_headers"] = (
+                f"<{len(headers)} headers: {sorted(headers)}>"
+                if isinstance(headers, dict)
+                else f"<{type(headers).__name__}, not an object>"
             )
-    return headers or None
+            safe[field] = inner
+    return safe
 
 
 def _config_key_looks_wrong(model: str, config: Dict | None) -> str | None:
@@ -232,7 +252,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
                 extra_kwargs["timeout"] = float(timeout)
                 logging.info("Using custom timeout=%.0fs for model '%s'", float(timeout), api_model)
 
-            default_headers = _coerce_default_headers(config)
+            default_headers = _read_default_headers(config)
             if default_headers:
                 extra_kwargs["default_headers"] = default_headers
 
@@ -248,7 +268,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             server_base = config.get("base_url", "http://127.0.0.1:8080/v1")
             get_server_manager().ensure_running(server_base, config)
 
-        logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        logging.debug(
+            "Creating OpenAI client for model '%s' with kwargs: %s",
+            api_model, _loggable_kwargs(extra_kwargs),
+        )
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
 
         # Wrap with llama.cpp slot cache if configured
@@ -294,11 +317,14 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             if isinstance(reasoning_passback, str) and reasoning_passback.strip():
                 extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
 
-            default_headers = _coerce_default_headers(config)
+            default_headers = _read_default_headers(config)
             if default_headers:
                 extra_kwargs["default_headers"] = default_headers
 
-        logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        logging.debug(
+            "Creating Nvidia NIM client for model '%s' with kwargs: %s",
+            api_model, _loggable_kwargs(extra_kwargs),
+        )
         client = NvidiaNIMClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif protocol == "anthropic_native":
         client = AnthropicClient(api_model, config=config, supports_images=supports_images)
@@ -348,6 +374,19 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             f"Unknown protocol '{protocol}' (resolved from provider='{provider}') for model '{model}'. "
             f"Valid protocols: openai_compat, openai_codex, nvidia_nim, anthropic_native, "
             f"gemini_native, xai_native, ollama_compat"
+        )
+
+    # default_headers is inherited by any model regardless of protocol, but only
+    # the two protocols above send it. Silence here would let a hand-written
+    # config look like it took effect when nothing carries it.
+    if (
+        isinstance(config, dict)
+        and config.get("default_headers")
+        and protocol not in ("openai_compat", "nvidia_nim")
+    ):
+        logging.warning(
+            "[factory] model '%s' sets default_headers but protocol '%s' does not "
+            "send them; the entries are ignored.", model, protocol,
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)

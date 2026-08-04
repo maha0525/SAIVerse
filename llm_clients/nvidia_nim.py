@@ -121,7 +121,16 @@ class NvidiaNIMClient(OpenAIClient):
         if "max_tokens" in self._request_kwargs:
             body["max_tokens"] = self._request_kwargs["max_tokens"]
 
+        # This path bypasses the SDK, so the client's default_headers have to be
+        # applied by hand or the backend sees different headers depending on
+        # whether structured output was requested. Credentials and framing are
+        # written last: they belong to the client, not to configuration.
+        per_request_headers = self._request_kwargs.get("extra_headers")
         headers = {
+            **self._default_headers,
+            # Already sanitized in __init__; kept here so this path sees the
+            # same headers the SDK path would send.
+            **(per_request_headers if isinstance(per_request_headers, dict) else {}),
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._nim_api_key}",
         }

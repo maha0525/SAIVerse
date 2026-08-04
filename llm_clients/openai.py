@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -160,6 +161,96 @@ def _validate_required_schema_keys(payload: Dict[str, Any], schema: Dict[str, An
     return _validate(payload, schema)
 
 
+#: Header names configuration may never set, on any path into this client.
+#: The OpenAI SDK merges configured headers *after* the ones it builds itself
+#: — per-request ``extra_headers`` outranking client ``default_headers``, both
+#: outranking the credential derived from ``api_key`` — so anything left open
+#: here lets a config file decide what credential actually ships. That would
+#: slip past ``saiverse/provider_security.py``, which only inspects
+#: ``api_key_env`` and ``base_url``. The rest govern routing and body framing.
+#: ``openai-organization`` / ``openai-project`` are here because the SDK sets
+#: them from OPENAI_ORG_ID / OPENAI_PROJECT_ID: they decide which tenant gets
+#: billed, so letting configuration replace them is the same class of hole as
+#: replacing the credential itself.
+_RESERVED_HEADERS = frozenset({
+    "authorization", "proxy-authorization", "host", "content-length",
+    "content-type", "transfer-encoding",
+    "openai-organization", "openai-project",
+})
+
+
+#: RFC 7230 token — the only shape a header name may take. Verified against
+#: h11 0.16.0, which rejects anything else with "Illegal header name" at send
+#: time (not at request construction, so httpx's MockTransport won't show it).
+#: Matched with fullmatch(): with `$`, a trailing newline slips through.
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+#: C0 controls except HTAB. Of these, h11 0.16.0 actually rejects only NUL, LF,
+#: VT, FF and CR (measured) — the rest are dropped as a deliberate safety
+#: margin: a control character in a header value has no legitimate use here,
+#: and the next transport in the chain (a proxy, a different HTTP stack) need
+#: not be as permissive. Erring wide costs a header; erring narrow costs a
+#: conversation.
+_FORBIDDEN_VALUE_CHARS = frozenset(chr(code) for code in range(0x20) if code != 0x09)
+
+
+def _strip_reserved_headers(headers: Any, where: str) -> Dict[str, str]:
+    """Drop entries this client owns, and anything a request cannot carry.
+
+    Warns rather than raises: these headers are supplementary (app attribution,
+    routing hints), so a bad entry must not take the LLM call down with it.
+    That promise is what makes the shape checks part of this gate rather than
+    a nicety: httpx encodes values as ASCII, and h11 refuses malformed names
+    and values that are or begin with whitespace — measured, and raised on the
+    way out, so they would surface to the user as a failed conversation rather
+    than a missing header. Control characters are cut wider than h11 strictly
+    requires; see _FORBIDDEN_VALUE_CHARS.
+    """
+    if not isinstance(headers, dict):
+        if headers:
+            logging.warning(
+                "[llm] ignoring %s: expected an object of string pairs, got %s",
+                where, type(headers).__name__,
+            )
+        return {}
+
+    kept: Dict[str, str] = {}
+    for key, value in headers.items():
+        if not (isinstance(key, str) and isinstance(value, str) and key):
+            logging.warning("[llm] dropping non-string %s entry %r", where, key)
+            continue
+        if key.strip().lower() in _RESERVED_HEADERS:
+            logging.warning(
+                "[llm] %s may not set %r; credentials, tenant attribution, "
+                "routing and body framing belong to the client. Dropping it.",
+                where, key,
+            )
+            continue
+        try:
+            key.encode("ascii")
+            value.encode("ascii")
+        except UnicodeEncodeError:
+            logging.warning(
+                "[llm] dropping %s entry %r: header values must be ASCII", where, key,
+            )
+            continue
+        if not _HEADER_NAME_RE.fullmatch(key):
+            logging.warning(
+                "[llm] dropping %s entry %r: not a valid header name", where, key,
+            )
+            continue
+        # Inner spaces and tabs are legal; leading/trailing ones are not, and a
+        # value that is only whitespace is rejected outright.
+        if value != value.strip(" \t") or _FORBIDDEN_VALUE_CHARS & set(value):
+            logging.warning(
+                "[llm] dropping %s entry %r: value is not a valid header value",
+                where, key,
+            )
+            continue
+        kept[key] = value
+    return kept
+
+
 class OpenAIClient(LLMClient):
     """Client for OpenAI-compatible chat completions API."""
 
@@ -198,12 +289,34 @@ class OpenAIClient(LLMClient):
         # Sent on every request to this backend. Used for provider-side app
         # identification (OpenRouter attribution headers); belongs to the
         # connection, not to individual request parameters.
-        if default_headers:
-            client_kwargs["default_headers"] = dict(default_headers)
+        self._default_headers = _strip_reserved_headers(
+            default_headers or {}, "default_headers",
+        )
+        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
+        # extra_headers is applied per request and outranks default_headers, so
+        # it is the same door onto the credential — it goes through the same gate.
+        if "extra_headers" in self._request_kwargs:
+            per_request = _strip_reserved_headers(
+                self._request_kwargs["extra_headers"], "request_kwargs.extra_headers",
+            )
+            self._request_kwargs["extra_headers"] = per_request
+            # Header names are case-insensitive, but the SDK merges the two
+            # dicts by exact key: "HTTP-Referer" here and "http-referer" there
+            # would both reach the wire instead of the per-request one
+            # replacing it. Drop the shadowed default so overriding works
+            # whatever spelling the config used. This has to happen before the
+            # client is built, since default_headers is fixed at construction.
+            shadowed = {name.lower() for name in per_request}
+            self._default_headers = {
+                name: value for name, value in self._default_headers.items()
+                if name.lower() not in shadowed
+            }
+
+        if self._default_headers:
+            client_kwargs["default_headers"] = dict(self._default_headers)
 
         self.client = OpenAI(**client_kwargs)
         self.model = model
-        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
         self.max_image_bytes = max_image_bytes
         self.max_image_embeds = max_image_embeds
         self.convert_system_to_user = convert_system_to_user
