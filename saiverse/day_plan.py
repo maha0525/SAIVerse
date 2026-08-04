@@ -157,6 +157,11 @@ SLOT_STATUSES = (
 SKIP_REASON_NO_HANDLER = "no_handler"          # kind の実行手段が未登録 (システム側)
 SKIP_REASON_BUDGET_EXHAUSTED = "budget_exhausted"  # 日次予算の残高ゼロ
 SKIP_REASON_DEFERRAL_LIMIT = "deferral_limit"  # 会話優先の繰り下げ上限で流れた
+# kind がカタログの現行語彙に存在しない (旧バージョンの語彙 / 無効化された
+# アドオンの種別)。意味の分からない旧 kind を新語彙へ勝手に読み替える移行は
+# しない — どの目的の行動だったかの推測は意図の捏造になる (Codex 一巡目 #1 の
+# 裁定)。正直に「もう無い種別」と記録し、翌朝から新語彙で組み直される。
+SKIP_REASON_KIND_NOT_IN_VOCABULARY = "kind_not_in_vocabulary"
 # 起床判断が開始時刻より後に走った (サーバー未起動等) ため発火機会が無かった
 # テンプレートコマ (時間割改修 T2、timetable_redesign.md §11-12 裁定)。
 # 過去コマは現在時刻へ丸めず「流れた」と正直に記録して今の時刻から合流する。
@@ -178,6 +183,7 @@ SKIP_REASON_LABELS = {
     SKIP_REASON_BUDGET_EXHAUSTED: "実行できず（作業ラウンドの日次予算切れ）",
     SKIP_REASON_DEFERRAL_LIMIT: "流れた（ユーザーとの会話を優先したため）",
     SKIP_REASON_MISSED_START: "流れた（サーバーが起動していなかったため）",
+    SKIP_REASON_KIND_NOT_IN_VOCABULARY: "実行できず（このコマ種別は現在の時間割では使われていません）",
 }
 
 #: slot の record_level: 完了記録の詳しさ。presence_only は「その場に居た
@@ -3501,6 +3507,21 @@ def _fire_slot(
     kind = slot.get("kind")
     handler = _SLOT_HANDLERS.get(kind)
     if handler is None:
+        if slot_kind_catalog.get_kind_by_name(str(kind or "")) is None:
+            # 現行カタログに無い kind (旧語彙 / 無効化されたアドオン種別)。
+            # システム障害ではなく語彙の世代交代 — 理由を分けて正直に記録する
+            # (勝手な旧→新読み替えはしない。定数定義部の裁定コメント参照)。
+            _update_slot(
+                manager, persona_id, plan_date_str, index, expected_id=slot_id,
+                status=STATUS_SKIPPED,
+                skip_reason=SKIP_REASON_KIND_NOT_IN_VOCABULARY,
+            )
+            LOGGER.info(
+                "[day_plan] slot kind %r is not in the current catalog "
+                "vocabulary; slot skipped honestly (persona=%s date=%s index=%d)",
+                kind, persona_id, plan_date_str, index,
+            )
+            return
         _update_slot(
             manager, persona_id, plan_date_str, index, expected_id=slot_id,
             status=STATUS_SKIPPED, skip_reason=SKIP_REASON_NO_HANDLER,

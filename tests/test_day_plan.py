@@ -766,6 +766,37 @@ def test_unregistered_kind_is_skipped_with_system_reason(manager, task_refs, cap
     assert manager.occupancy_manager.moves == []
 
 
+def test_old_vocabulary_kind_is_skipped_honestly(manager, task_refs, caplog):
+    """旧語彙 (カタログに無い kind) の未消化コマは専用理由で正直にスキップされる。
+
+    語彙再編前のバージョンが保存した plan には旧 kind (暮らし 等) の pending が
+    残りうる (Codex 一巡目 #1)。旧→新の勝手な読み替え (意図の捏造) はせず、
+    no_handler (システム障害) とも区別した kind_not_in_vocabulary で記録する。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "絵を描く", "ref": "none",
+         "facility": "park", "budget_rounds": 0, "note": ""},
+    ])
+    # 旧バージョンの保存データを再現 (保存検証は旧 kind を弾くため直接書き換え)
+    day_plan._update_slot(manager, PERSONA_ID, PLAN_DATE, 0, kind="暮らし")
+    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
+
+    with caplog.at_level("INFO", logger="saiverse.day_plan"):
+        DaySimulator(
+            manager.event_scheduler,
+            start=BASE + timedelta(hours=8),
+            end=BASE + timedelta(hours=10),
+        ).run()
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_KIND_NOT_IN_VOCABULARY
+    # システム障害 (no_handler) の WARNING ではなく語彙世代交代の INFO
+    assert not any("no handler registered" in r.message for r in caplog.records)
+    assert any("not in the current catalog" in r.message for r in caplog.records)
+    assert manager.occupancy_manager.moves == []
+
+
 def test_slot_result_label_distinguishes_system_skips():
     """実績ラベル: システム都合の skipped を本人判断の「見送り」として見せない。"""
     assert day_plan.slot_result_label(
@@ -777,6 +808,10 @@ def test_slot_result_label_distinguishes_system_skips():
     assert day_plan.slot_result_label(
         {"status": "skipped", "skip_reason": day_plan.SKIP_REASON_DEFERRAL_LIMIT}
     ) == "流れた（ユーザーとの会話を優先したため）"
+    assert day_plan.slot_result_label(
+        {"status": "skipped",
+         "skip_reason": day_plan.SKIP_REASON_KIND_NOT_IN_VOCABULARY}
+    ) == "実行できず（このコマ種別は現在の時間割では使われていません）"
     # 理由の無い旧データは中立表現 (「見送り」に倒さない)
     legacy = day_plan.slot_result_label({"status": "skipped"})
     assert "見送り" not in legacy
