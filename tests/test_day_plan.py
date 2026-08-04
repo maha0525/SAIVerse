@@ -627,6 +627,42 @@ def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
     assert [s["status"] for s in slots] == ["done", "done"]
 
 
+def test_fire_at_uses_confirmed_lives_wake_not_current_schedule(manager, task_refs, session_factory):
+    """予約の暦日補正は当日確定ライフの起床を基準にする (Codex七巡目)。
+
+    確定ライフ 07:00 起点の日に現行スケジュールの起床だけを 23:00 へ変えると、
+    旧実装は 08:00 のコマを「start < wake」で翌暦日 08:00 に予約していた
+    (丸一日の遅延)。確定ライフ基準なら当日 08:00 のまま。
+    """
+    from database.models import PersonaSchedule
+
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    db = session_factory()
+    try:
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_open", TIME_OF_DAY="23:00",
+            ENABLED=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    assert day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE) == 1
+    fire_ts = min(
+        e.fire_at_ts for e in manager.event_scheduler._entries_by_key.values()
+    )
+    expected = (BASE + timedelta(hours=8)).timestamp()  # 当日 08:00 (翌日に送らない)
+    assert fire_ts == expected
+
+
 def test_malformed_defer_count_does_not_break_normal_defer(manager, task_refs):
     """保存 JSON の defer_count 型不正が通常発火の繰り下げを例外死させない (Codex四巡目 #5)。"""
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [

@@ -2648,6 +2648,10 @@ def _resolve_wake(manager: Any, persona_id: str) -> Optional[str]:
 
     深夜跨ぎリズムの暦日補正 (_slot_fire_at) に使う。呼び出し元が wake を
     明示しなくても、コマ予約の全経路が跨ぎ対応になるようにするための自己解決。
+
+    NOTE: 当日 plan に対する予約では :func:`_resolve_wake_for_plan` を使うこと —
+    確定済みライフのある日は現行スケジュールでなくライフの開始が基準
+    (Codex 七巡目)。
     """
     try:
         from saiverse.autonomy_wiring import _find_day_schedules
@@ -2658,6 +2662,29 @@ def _resolve_wake(manager: Any, persona_id: str) -> Optional[str]:
             exc_info=True,
         )
         return None
+
+
+def _resolve_wake_for_plan(
+    manager: Any, persona_id: str, plan_date_str: str
+) -> Optional[str]:
+    """当日 plan の予約 (暦日補正) に使う起床基準。
+
+    **確定済みライフのある日はライフの開始時刻を最優先する** — 編成・検証
+    (day_order_minutes(lives, ...)) と同じ物差し。plan を確定した後に
+    PersonaSchedule の起床だけが変わると、並び (確定ライフ基準) と予約の
+    暦日補正 (現行 wake 基準) が分裂し、start < 現行 wake のコマが翌暦日へ
+    丸一日ずれて予約される (Codex 七巡目)。ライフの無い日は従来どおり
+    PersonaSchedule から解決する。
+    """
+    try:
+        lives = get_lives(manager, persona_id, plan_date_str)
+    except Exception:
+        lives = []
+    if lives:
+        start = str(lives[0].get("start") or "")
+        if is_valid_hhmm(start):
+            return start
+    return _resolve_wake(manager, persona_id)
 
 
 def _slot_fire_at(
@@ -2766,8 +2793,9 @@ def schedule_day_plan(
     plan_date_str = _normalize_plan_date(plan_date)
     if wake is None:
         # 呼び出し元 (起床判断 finalize 等) に配線を強要しない — 深夜跨ぎの
-        # 暦日補正はコマ予約の全経路で常に効くべき (検収追加 2026-07-12)
-        wake = _resolve_wake(manager, persona_id)
+        # 暦日補正はコマ予約の全経路で常に効くべき (検収追加 2026-07-12)。
+        # 基準は当日確定ライフ優先 (Codex 七巡目)。
+        wake = _resolve_wake_for_plan(manager, persona_id, plan_date_str)
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None:
         LOGGER.warning(
@@ -2829,8 +2857,6 @@ def reschedule_pending_slots(
             生きているので同じ理由文が嘘になる (長セッション待ち等の遅れを
             停止と誤記しない)。
     """
-    if wake is None:
-        wake = _resolve_wake(manager, persona_id)
     if plan_date is None:
         # 深夜跨ぎリズムでは now.date() でなく営業日で引く (自己解決)
         from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
@@ -2840,6 +2866,10 @@ def reschedule_pending_slots(
         ).isoformat()
     else:
         plan_date_str = _normalize_plan_date(plan_date)
+    if wake is None:
+        # 予約の暦日補正の基準は当日確定ライフ優先 (Codex 七巡目 —
+        # schedule_day_plan と同じ物差し)
+        wake = _resolve_wake_for_plan(manager, persona_id, plan_date_str)
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None:
         return 0
