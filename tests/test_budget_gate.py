@@ -301,6 +301,21 @@ def test_rest_slot_runs_even_with_zero_remaining(manager):
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 0
 
 
+def test_effective_budget_total_counts_defaults_and_gated_only():
+    """予算検算の正典: 空欄の作業コマは実効値 (既定 8) で数え、非ゲート kind は数えない。
+
+    保存値の素朴な合計だと「空欄の作業コマ複数 = 合計 0 表示なのに実行時は
+    各 8 ラウンド」の不一致が出る (Codex 三巡目)。
+    """
+    slots = [
+        {"kind": "調べる", "budget_rounds": 0},      # 空欄 → 実効 8
+        {"kind": "随筆を書く", "budget_rounds": 5},  # 明示 5
+        {"kind": "出かける", "budget_rounds": 0},    # 非ゲート → 数えない
+    ]
+    assert day_plan.effective_budget_total(slots) == \
+        day_plan.DEFAULT_BUDGET_ROUNDS + 5
+
+
 # ---------------------------------------------------------------------------
 # 通し: day_open finalize (台帳初期化) → 発火 → 消費
 # ---------------------------------------------------------------------------

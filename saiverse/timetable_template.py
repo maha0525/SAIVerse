@@ -398,6 +398,30 @@ def _materialize_missed_slot(tslot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _materialize_retired_kind_slot(tslot: Dict[str, Any]) -> Dict[str, Any]:
+    """現行カタログに無い確定 kind のテンプレートコマを帳簿コマにする。
+
+    カタログの変更 (アドオン無効化・語彙再編) でテンプレートに残った旧種別が
+    pending 区間へ入ると、保存検証 (kind 語彙) が全体を拒否して日次編成ごと
+    止まる (Codex 三巡目)。帳簿区間は kind 語彙検証を受けないため、そこへ
+    「この種別は現在使われていない」として正直に置き、日の残りは動かす。
+    自動で別種別へ読み替えない (発火時の kind_not_in_vocabulary と同じ裁定 —
+    読み替えは意図の捏造)。毎日の一日新聞に残り続けるので、ユーザーが
+    テンプレートを直すまで可視の修復待ちになる。
+    """
+    return {
+        "start": tslot["start"],
+        "kind": tslot.get("kind") or UNDECIDED_LABEL,
+        "ref": tslot.get("ref") or day_plan.REF_NONE,
+        "facility": tslot.get("facility") or day_plan.FACILITY_OWN_ROOM,
+        "budget_rounds": tslot.get("budget_rounds") or 0,
+        "title": tslot.get("title") or "",
+        "note": tslot.get("note") or "",
+        "status": day_plan.STATUS_SKIPPED,
+        "skip_reason": day_plan.SKIP_REASON_KIND_NOT_IN_VOCABULARY,
+    }
+
+
 _FIELD_LABELS = {
     "start": "開始時刻",
     "kind": "種別",
@@ -455,17 +479,33 @@ def compose_timetable_from_template(
     now_order = order(clock.now().strftime("%H:%M"))
     corrections: List[str] = []
 
+    valid_kinds = set(day_plan.all_kinds())
     ledger: List[Dict[str, Any]] = []
     future_tslots: List[Dict[str, Any]] = []
+    missed_count = 0
+    retired_count = 0
     for tslot in template_slots:
-        if now_order - order(tslot["start"]) > MISSED_GRACE_MINUTES:
+        fixed_kind = tslot.get("kind")
+        if fixed_kind is not None and fixed_kind not in valid_kinds:
+            # 現行カタログに無い確定種別 — pending に入れると保存検証が日次
+            # 編成ごと拒否する。帳簿区間へ正直に置き、日の残りは動かす。
+            ledger.append(_materialize_retired_kind_slot(tslot))
+            retired_count += 1
+        elif now_order - order(tslot["start"]) > MISSED_GRACE_MINUTES:
             ledger.append(_materialize_missed_slot(tslot))
+            missed_count += 1
         else:
             future_tslots.append(tslot)
-    if ledger:
+    if missed_count:
         corrections.append(
-            f"（テンプレートの {len(ledger)} コマは開始時刻を過ぎていたため"
+            f"（テンプレートの {missed_count} コマは開始時刻を過ぎていたため"
             "「流れた（サーバーが起動していなかったため）」として記録しました）"
+        )
+    if retired_count:
+        corrections.append(
+            f"（テンプレートの {retired_count} コマの種別は現在の時間割では"
+            "使われていないため実行できません。習慣テンプレートの種別を"
+            "選び直してください）"
         )
 
     # --- LLM 出力との対応付け: start 完全一致 → 残りは流れ順の位置 ---------

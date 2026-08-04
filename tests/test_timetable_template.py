@@ -284,6 +284,40 @@ def test_compose_frame_survives_empty_llm_output(manager, task_refs):
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, pending)
 
 
+def test_compose_quarantines_retired_kind_slots(manager, task_refs):
+    """カタログに無い確定種別のコマは帳簿へ隔離し、日の残りは動かす (Codex三巡目)。
+
+    カタログ変更 (語彙再編・アドオン無効化) でテンプレートに残った旧種別が
+    pending 区間へ入ると保存検証が日次編成ごと拒否していた。自動で別種別へ
+    読み替えない (意図の捏造) — 帳簿に「使われていない種別」として毎日残り、
+    ユーザーが直すまで可視の修復待ちになる。
+    """
+    template = [
+        {"start": "09:00", "kind": "作る", "title": "何か作る"},  # 旧語彙
+        {"start": "13:00", "kind": "調べる", "title": "調べ物",
+         "facility": "library"},
+    ]
+    ledger, pending, corrections = tt.compose_timetable_from_template(
+        manager, PERSONA_ID, PLAN_DATE, template, [],
+    )
+
+    assert len(ledger) == 1
+    assert ledger[0]["kind"] == "作る"
+    assert ledger[0]["status"] == "skipped"
+    assert ledger[0]["skip_reason"] == day_plan.SKIP_REASON_KIND_NOT_IN_VOCABULARY
+    assert [s["start"] for s in pending] == ["13:00"]
+    assert any("使われていない" in c for c in corrections)
+
+    # 保存検証を通る形 (帳簿区間は kind 語彙検証を受けない) — 日次編成は止まらない
+    day_plan.replace_day_plan(
+        manager, PERSONA_ID, PLAN_DATE, ledger + pending,
+        ledger_prefix=len(ledger),
+    )
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_KIND_NOT_IN_VOCABULARY
+    assert slots[1]["status"] == "pending"
+
+
 def test_compose_drops_extra_llm_slots(manager, task_refs):
     """テンプレートに無いコマは追加されない (枠は LLM 出力で変わらない)。"""
     template = tt.save_template(manager, PERSONA_ID, _template_slots())["slots"]

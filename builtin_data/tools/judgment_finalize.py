@@ -318,14 +318,17 @@ def _finalize_day_open(
     # 予算合計の検証はソフト制約 (judgment_points.md §3.2)。超過は WARN のみで
     # 保存は通す — 予算ゲート (v2 §4.5) が発火時に日次残高でラウンドを切り詰める。
     # テンプレ経路では「流れた」帳簿区間 (発火しない) を合計に含めない。
+    # 合計は保存値の素朴な和ではなく**実効値** (ゲート対象 kind のみ・0/未指定は
+    # 実行時と同じ既定 8) — 表示とゲートの単位を揃える (Codex 三巡目)。
     daily_budget = ctx.get("daily_budget_rounds")
     if not isinstance(daily_budget, int) or isinstance(daily_budget, bool) or daily_budget <= 0:
         from saiverse.judgment_points import DEFAULT_DAILY_BUDGET_ROUNDS
         daily_budget = DEFAULT_DAILY_BUDGET_ROUNDS
-    total = sum(s["budget_rounds"] for s in slots[ledger_prefix:])
+    total = day_plan_mod.effective_budget_total(slots[ledger_prefix:])
     if total > daily_budget:
         warnings.append(
-            f"budget_rounds 合計 {total} が日次予算 {daily_budget} を超過 (保存は続行)"
+            f"作業コマの実効予算合計 {total} ラウンドが日次予算 {daily_budget} を"
+            "超過 (保存は続行。発火時に残高で切り詰められます)"
         )
 
     if not slots:

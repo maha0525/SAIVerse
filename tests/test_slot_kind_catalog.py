@@ -214,6 +214,35 @@ def test_invalid_definitions_are_skipped_not_fatal(tmp_path):
         assert set(slot_kind_catalog.SLOT_KIND_CATALOG) == {"ok_kind"}
 
 
+def test_broken_upper_layer_file_falls_back_to_builtin(tmp_path):
+    """壊れた上位層の同名ファイルは builtin の正常定義を隠さない (Codex三巡目)。
+
+    ファイル名の縄張り (層間シャドーイング) を検証より先に主張すると、user
+    層の部分書き込み・設定ミス 1 枚で builtin kind が消え、既存テンプレートや
+    穴埋め経路が壊れる。隠してよいのは検証に通った定義だけ。
+    """
+    builtin = tmp_path / "builtin_data"
+    user = tmp_path / "user_data"
+    _write_kind(
+        builtin / "slot_kinds", "10_kind.json",
+        **_valid_kind("builtin_kind", "組み込みの種別"),
+    )
+    # user 層に同名ファイル — JSON として壊れている
+    (user / "slot_kinds").mkdir(parents=True, exist_ok=True)
+    (user / "slot_kinds" / "10_kind.json").write_text("{not json", encoding="utf-8")
+
+    with _catalog_dirs(user, tmp_path / "e", builtin):
+        assert set(slot_kind_catalog.SLOT_KIND_CATALOG) == {"builtin_kind"}
+
+    # 正常な上位定義は従来どおり下位を隠す (シャドーイング自体の回帰)
+    _write_kind(
+        user / "slot_kinds", "10_kind.json",
+        **_valid_kind("user_kind", "ユーザーの種別"),
+    )
+    with _catalog_dirs(user, tmp_path / "e", builtin):
+        assert set(slot_kind_catalog.SLOT_KIND_CATALOG) == {"user_kind"}
+
+
 # ---------------------------------------------------------------------------
 # day_plan との統合 (kind 語彙とハンドラ配線の reload)
 # ---------------------------------------------------------------------------

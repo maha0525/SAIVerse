@@ -66,6 +66,7 @@ import logging
 import math
 import random
 import re
+import threading
 import uuid
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -2851,8 +2852,12 @@ def reschedule_pending_slots(
             continue
         if downtime_recovery:
             late_minutes = (now - fire_at).total_seconds() / 60.0
-            allowance = MISSED_GRACE_MINUTES \
-                + int(slot.get("defer_count") or 0) * DEFER_MINUTES
+            # defer_count は保存 JSON 由来 — 型不正で回復ループ全体を落とさない
+            # (不正は猶予 0 扱い。コマ単位の隔離 — Codex 三巡目)。
+            raw_defer = slot.get("defer_count")
+            defer_count = raw_defer if isinstance(raw_defer, int) \
+                and not isinstance(raw_defer, bool) and raw_defer >= 0 else 0
+            allowance = MISSED_GRACE_MINUTES + defer_count * DEFER_MINUTES
             if late_minutes > allowance:
                 updated = _update_slot(
                     manager, persona_id, plan_date_str, index,
@@ -3321,6 +3326,23 @@ def _effective_budget_rounds(slot: Dict[str, Any]) -> int:
     """コマの実効ラウンド予算 (0 / 未指定は既定値 DEFAULT_BUDGET_ROUNDS)。"""
     budget = int(slot.get("budget_rounds") or 0)
     return budget if budget >= 1 else DEFAULT_BUDGET_ROUNDS
+
+
+def effective_budget_total(slots: Iterable[Dict[str, Any]]) -> int:
+    """予算ゲート対象コマの実効ラウンド合計。
+
+    表示・警告 (judgment_finalize の日次予算検算) が、実行時のゲート
+    (:func:`_apply_budget_gate` が引く実効値 — 0/未指定は既定
+    :data:`DEFAULT_BUDGET_ROUNDS`) と同じ単位・同じ値で合計するための正典
+    (Codex 三巡目 — 保存値の素朴な合計は「空欄の作業コマ複数=合計 0 表示なのに
+    実行時は各 8 ラウンド」の不一致を生む)。非ゲート kind (出かける等) は
+    予算を消費しないため数えない。
+    """
+    total = 0
+    for s in slots:
+        if str(s.get("kind") or "") in _BUDGET_GATED_KINDS:
+            total += _effective_budget_rounds(s)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -4700,13 +4722,23 @@ def worker_session_rounds_used(result: Any) -> int:
     return int(rounds_used)
 
 
+#: :func:`_reload_slot_field` の「読み出し自体が失敗した」印。「値が未設定
+#: (None)」と区別する — close_outcome の読者は失敗を未設定と混同すると、
+#: 帰属済みセッションへ post_session の代替帰属を重ねてしまう (Codex 三巡目)。
+_RELOAD_FAILED = object()
+
+
 def _reload_slot_field(
     manager: Any, persona_id: str, plan_date_str: str, slot_id: Any, field: str
 ) -> Any:
-    """保存済み plan から id 一致のコマの 1 フィールドを読み直す (無ければ None)。
+    """保存済み plan から id 一致のコマの 1 フィールドを読み直す。
 
     close_hook がセッション内で永続化した close_outcome を、handler 側の
     (発火時点の) stale な slot dict を経由せず読むための小道具。
+
+    Returns:
+        フィールド値 (未設定・コマ不在は None)。**読み出し自体の失敗は**
+        :data:`_RELOAD_FAILED` — 「無い」と「読めなかった」を混同しない。
     """
     if not slot_id:
         return None
@@ -4715,12 +4747,13 @@ def _reload_slot_field(
         for s in slots:
             if s.get("id") == slot_id:
                 return s.get(field)
+        return None
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to reload slot field %r (persona=%s date=%s id=%s)",
             field, persona_id, plan_date_str, slot_id, exc_info=True,
         )
-    return None
+        return _RELOAD_FAILED
 
 
 def _handle_worker_slot(
@@ -4761,13 +4794,25 @@ def _handle_worker_slot(
     close_outcome = _reload_slot_field(
         manager, persona_id, plan_date_str, slot.get("id"), "close_outcome",
     )
-    if close_outcome is None and getattr(result, "error", None):
-        _update_slot(
-            manager, persona_id, plan_date_str, index,
-            expected_id=slot.get("id"),
-            close_outcome=CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR,
+    if close_outcome is _RELOAD_FAILED:
+        # 読めなかった = 帰属が済んでいるか分からない。二重帰属 (revisit の
+        # 偽増加 = 恒久的な汚染) より帰属の欠落 (状態から追える) の方が軽い —
+        # 抑止側 (済み扱い) に倒す。
+        LOGGER.warning(
+            "[day_plan] close_outcome unreadable; suppressing post_session "
+            "shelving to avoid double attribution (persona=%s date=%s index=%d)",
+            persona_id, plan_date_str, index,
         )
-        close_outcome = CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR
+        attribution_done = True
+    else:
+        if close_outcome is None and getattr(result, "error", None):
+            _update_slot(
+                manager, persona_id, plan_date_str, index,
+                expected_id=slot.get("id"),
+                close_outcome=CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR,
+            )
+            close_outcome = CLOSE_OUTCOME_NOT_RUN_SESSION_ERROR
+        attribution_done = close_outcome in ATTRIBUTION_SETTLED_OUTCOMES
 
     try:
         from saiverse.autonomy_wiring import fire_judgment_point
@@ -4777,7 +4822,7 @@ def _handle_worker_slot(
         context: Dict[str, Any] = {
             "session_result": result,
             "budget_rounds": int(slot.get("budget_rounds") or 0) or None,
-            "episode_attribution_done": close_outcome in ATTRIBUTION_SETTLED_OUTCOMES,
+            "episode_attribution_done": attribution_done,
         }
         # track:N コマの対象は Track (WorkSessionResult.track_id 経由で判断点へ
         # 届く)。task_ref に track 参照を入れると task_verdict が壊れる。
@@ -5322,50 +5367,67 @@ _EXECUTION_TYPE_HANDLERS: Dict[str, Tuple[SlotHandler, bool]] = {
 }
 
 
+#: 語彙・ハンドラ再構築の直列化 (reload の並走と、構築途中の観測を防ぐ)。
+#: 現状ランタイムの reload 経路は無い (呼ぶのは起動時とテストのみ) が、
+#: 将来 API 経由の reload が生えたときに備えて配線順とロックを固めておく
+#: (Codex 三巡目)。
+_VOCAB_REBUILD_LOCK = threading.RLock()
+
+
 def _rebuild_kind_vocabulary() -> None:
     """コマ種別カタログから kind 語彙・指示書テンプレート・ハンドラ配線を構築する。
 
     モジュールロード時 (末尾) と :func:`reload_kind_vocabulary` から呼ばれる。
     カタログから消えた kind のハンドラは掃除する (reload 経路)。
+
+    配線順: **ハンドラを先に登録してから語彙 (ALL_KINDS) を公開する** —
+    「語彙にあるのに未配線」の窓を作ると、その瞬間の発火が no_handler の
+    偽スキップ (システム障害扱い) でコマを焼く。
     """
     global ALL_KINDS, WORKER_SESSION_KINDS, _WORKER_INSTRUCTION_TEMPLATES
 
-    previous_kinds = set(ALL_KINDS)
-    names = slot_kind_catalog.kind_names()
-    worker = slot_kind_catalog.kind_names_for_execution(
-        slot_kind_catalog.EXECUTION_WORK_SESSION
-    )
-    templates = slot_kind_catalog.instruction_templates()
-    # カタログのローダが work_session の instruction_template 必須を検証して
-    # いるため通常は成立する。破れたらここで止める (旧 assert の新構成での維持)。
-    assert set(worker) == set(templates), (
-        "worker session kinds and instruction templates must stay in sync"
-    )
-
-    ALL_KINDS = tuple(names)
-    WORKER_SESSION_KINDS = tuple(worker)
-    _WORKER_INSTRUCTION_TEMPLATES = dict(templates)
-
-    for definition in slot_kind_catalog.SLOT_KIND_CATALOG.values():
-        handler, gated = _EXECUTION_TYPE_HANDLERS[definition["execution_type"]]
-        register_slot_handler(definition["name"], handler, consumes_budget=gated)
-    for stale_kind in previous_kinds - set(names):
-        _SLOT_HANDLERS.pop(stale_kind, None)
-        _BUDGET_GATED_KINDS.discard(stale_kind)
-        LOGGER.info(
-            "[day_plan] slot handler removed (kind no longer in catalog): %s",
-            stale_kind,
+    with _VOCAB_REBUILD_LOCK:
+        previous_kinds = set(ALL_KINDS)
+        names = slot_kind_catalog.kind_names()
+        worker = slot_kind_catalog.kind_names_for_execution(
+            slot_kind_catalog.EXECUTION_WORK_SESSION
         )
+        templates = slot_kind_catalog.instruction_templates()
+        # カタログのローダが work_session の instruction_template 必須を検証して
+        # いるため通常は成立する。破れたらここで止める (旧 assert の新構成での維持)。
+        assert set(worker) == set(templates), (
+            "worker session kinds and instruction templates must stay in sync"
+        )
+
+        for definition in slot_kind_catalog.SLOT_KIND_CATALOG.values():
+            handler, gated = _EXECUTION_TYPE_HANDLERS[definition["execution_type"]]
+            register_slot_handler(definition["name"], handler, consumes_budget=gated)
+
+        ALL_KINDS = tuple(names)
+        WORKER_SESSION_KINDS = tuple(worker)
+        _WORKER_INSTRUCTION_TEMPLATES = dict(templates)
+
+        for stale_kind in previous_kinds - set(names):
+            _SLOT_HANDLERS.pop(stale_kind, None)
+            _BUDGET_GATED_KINDS.discard(stale_kind)
+            LOGGER.info(
+                "[day_plan] slot handler removed (kind no longer in catalog): %s",
+                stale_kind,
+            )
 
 
 def reload_kind_vocabulary() -> Tuple[str, ...]:
     """カタログをディスクから読み直し、kind 語彙とハンドラ配線を再構築する。
 
+    カタログの置換と語彙の再構築を同一ロック区間で行う (reload の並走で
+    片方だけ新しい状態を観測させない)。
+
     Returns:
         再構築後の :data:`ALL_KINDS`。
     """
-    slot_kind_catalog.reload_catalog()
-    _rebuild_kind_vocabulary()
+    with _VOCAB_REBUILD_LOCK:
+        slot_kind_catalog.reload_catalog()
+        _rebuild_kind_vocabulary()
     LOGGER.info(
         "[day_plan] kind vocabulary reloaded: %d kinds (%d work-session)",
         len(ALL_KINDS), len(WORKER_SESSION_KINDS),

@@ -71,21 +71,23 @@ def _is_builtin_path(path: Path) -> bool:
 
 
 def _iter_catalog_files():
-    """カタログ JSON を優先順 (user > expansion > builtin) で列挙する。
+    """カタログ JSON を優先順 (user > expansion > builtin) で全件列挙する。
 
     ``data_paths.iter_files`` と同じ 3 層走査だが、**各層の中をファイル名で
     ソート**する — カタログの並び順はそのまま kind 語彙 (時間割 enum) の並び順に
     なるため、決定論でなければ head / response_schema の文字列が起動ごとに揺れる
     (prefix キャッシュ破壊)。builtin のファイル名は数字プレフィクス
     (``10_research.json`` 等) で意図した提示順を固定している。
-    """
-    seen_names: set[str] = set()
 
+    同名ファイルの層間シャドーイング (上位が下位を隠す) はここではやらない —
+    隠してよいのは**正常に検証できた**上位定義だけ (壊れた上位ファイルが
+    builtin の正常定義まで消さないため。Codex 三巡目)。判定は
+    :func:`load_catalog` 側が検証後に行う。
+    """
     user_path = USER_DATA_DIR / SLOT_KINDS_DIR
     if user_path.exists():
         for file_path in sorted(user_path.glob("*.json")):
             if file_path.is_file():
-                seen_names.add(file_path.name)
                 yield file_path
 
     if EXPANSION_DATA_DIR.exists():
@@ -95,14 +97,13 @@ def _iter_catalog_files():
             exp_path = project_dir / SLOT_KINDS_DIR
             if exp_path.exists():
                 for file_path in sorted(exp_path.glob("*.json")):
-                    if file_path.is_file() and file_path.name not in seen_names:
-                        seen_names.add(file_path.name)
+                    if file_path.is_file():
                         yield file_path
 
     builtin_path = BUILTIN_DATA_DIR / SLOT_KINDS_DIR
     if builtin_path.exists():
         for file_path in sorted(builtin_path.glob("*.json")):
-            if file_path.is_file() and file_path.name not in seen_names:
+            if file_path.is_file():
                 yield file_path
 
 
@@ -135,6 +136,9 @@ def _validate_definition(data: dict, source_name: str) -> str | None:
 def load_catalog() -> dict[str, dict]:
     """コマ種別カタログを全層から読み込む (id → 定義 dict)。
 
+    - 同名ファイルの層間シャドーイング (user > expansion > builtin) は
+      **検証に通った定義だけ**が主張できる — 壊れた上位ファイルは下位の正常な
+      同名定義へフォールバックする (Codex 三巡目)。
     - id / name の重複は先勝ち (優先層・ファイル名昇順の先に読まれた方が勝つ)。
     - 不正定義は WARN + skip (1 枚の壊れた定義でカタログ全体を落とさない)。
     - builtin_data 由来の定義には ``builtin: True`` を付ける。
@@ -142,8 +146,15 @@ def load_catalog() -> dict[str, dict]:
     """
     catalog: dict[str, dict] = {}
     seen_names: set[str] = set()
+    claimed_filenames: set[str] = set()
 
     for config_file in _iter_catalog_files():
+        if config_file.name in claimed_filenames:
+            LOGGER.debug(
+                "Slot kind file %s shadowed by a valid higher-layer definition",
+                config_file,
+            )
+            continue
         try:
             data = json.loads(config_file.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -165,6 +176,10 @@ def load_catalog() -> dict[str, dict]:
                 "Slot kind definition %s rejected: %s", config_file.name, reason,
             )
             continue
+
+        # ここまで来た定義だけがファイル名の縄張り (下位層の同名を隠す権利) を
+        # 主張できる。
+        claimed_filenames.add(config_file.name)
 
         kind_id = data["id"]
         name = data["name"].strip()
