@@ -26,7 +26,7 @@ P4-a の三層（検知 → 裁定 → 実行）のうち「裁定から実行�
 テーブル定義（冪等）:
     id          TEXT PRIMARY KEY         -- UUID
     created_at  INTEGER                  -- epoch 秒
-    kind        TEXT                     -- "split" | "merge" | "fold"
+    kind        TEXT                     -- "split" | "merge"（"fold" は 2026-08-05 に撤去）
     op_id       TEXT                     -- 検知層が付けた決定論の一意 ID
     refs_json   TEXT                     -- JSON 配列 [m:N, ...] ページ参照
     status      TEXT DEFAULT 'pending'   -- "pending"|"done"|"failed"|"rejected"
@@ -50,6 +50,10 @@ STATUS_PENDING = "pending"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_REJECTED = "rejected"
+
+#: 編纂プランとして受け付ける操作。"fold"（過小ページを親へ畳む）は
+#: 2026-08-05 に機構ごと撤去した（docs/issues/curation_duplicate_pages_loop.md）。
+VALID_PLAN_KINDS = frozenset({"split", "merge"})
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +110,7 @@ def enqueue_plan(
 
     Args:
         conn:   per-persona memory.db の接続
-        kind:   "split" | "merge" | "fold"
+        kind:   "split" | "merge"（"fold" は 2026-08-05 に撤去。受理しない）
         op_id:  検知層が付けた決定論の一意 ID（例: "split:m:12"）
         refs:   操作対象ページの参照ラベル（例: ["m:12"]）
 
@@ -118,6 +122,14 @@ def enqueue_plan(
         - split 本体（段落ブロック割り当て + コード逐語移動 + 保存則機械検証）
         - status を "done"/"failed" に更新し result_json / executed_at を書く
     """
+    if kind not in VALID_PLAN_KINDS:
+        # fold は 2026-08-05 に撤去。撤去した機構の行を新規に作れる口を残さない
+        # （runner の未知 kind ガードは最後の砦であって入口の検査ではない）。
+        raise ValueError(
+            f"enqueue_plan: 未知の kind: {kind!r}"
+            f"（有効なのは {sorted(VALID_PLAN_KINDS)}）"
+        )
+
     # 既存 pending を検索
     cur = conn.execute(
         "SELECT id FROM curation_plans WHERE op_id = ? AND status = ?",
@@ -165,7 +177,7 @@ def list_pending(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         SELECT id, created_at, kind, op_id, refs_json
         FROM curation_plans
         WHERE status = ?
-        ORDER BY created_at
+        ORDER BY created_at, id
         """,
         (STATUS_PENDING,),
     )
@@ -214,6 +226,34 @@ def _update_plan_status(
 # ---------------------------------------------------------------------------
 # 段落ブロック分割ヘルパ（split の前処理）
 # ---------------------------------------------------------------------------
+
+
+def _assert_active(conn: sqlite3.Connection, page_id: str, role: str) -> None:
+    """閉架（soft-delete）済みページへの編纂を拒否する。
+
+    `get_page` は `is_deleted` を見ない（ごみ箱からの復元経路が読むため）。
+    編纂が閉架ページを掴むと、統合先が閉架ページになって本文が現役の棚に
+    届かない・削除済みページを分割する、といった無言の取りこぼしになる。
+    実行の入口で弾いてプランを failed にし、「ページは変更されていません」を
+    事実にする（Codex 指摘 2026-08-05）。
+    """
+    row = conn.execute(
+        "SELECT COALESCE(is_deleted, 0) FROM memopedia_pages WHERE id = ?",
+        (page_id,),
+    ).fetchone()
+    if row is not None and row[0]:
+        raise ValueError(
+            f"編纂の対象が閉架済みです（{role}: {page_id}）。この操作を棄却します。"
+        )
+
+
+def normalize_title(title: str) -> str:
+    """タイトル同一判定の正規化（空白除去＋小文字化）。
+
+    「同名」を判定する唯一の入口。検知層 (`saiverse.curation`) と分割の適用
+    (`plan_split` / `apply_split`) が同じ規則で「同じ名前」を決めるために共有する。
+    """
+    return re.sub(r"\s+", "", title or "").lower()
 
 
 def _split_into_blocks(content: str) -> List[str]:
@@ -335,6 +375,36 @@ def _plan_transaction(conn: sqlite3.Connection):
 # ---------------------------------------------------------------------------
 
 
+def build_merged_content(
+    *,
+    survivor_content: str,
+    absorbed_title: str,
+    absorbed_summary: str,
+    absorbed_content: str,
+) -> str:
+    """統合後の本文を組み立てる（完全決定論・LLM ゼロ）。
+
+    **検知層と実行層が同じ規則を使うための唯一の入口**。健全性規則の
+    「統合した結果が肥大するなら候補にしない」（concept_consolidation.md）は
+    検知の時点で結果の文字数を知る必要があり、そこで別式を書くと実行結果と
+    ずれる。`saiverse.curation` はこの関数の戻り値の長さで判定する。
+    """
+    # **入力の本文には一切触らない**。中身があるかの判定にだけ strip を使い、
+    # 連結には原文を渡す——rstrip / strip は末尾改行・行末スペース（Markdown の
+    # ハードブレーク）・インデントを落とす＝本文の改変であり、「編纂は本文を
+    # 生成しない、移動と結合のみ」の保存則に反する（Codex 指摘 2026-08-05、
+    # 分割側の追記で同じ誤りを直したのと同じ型）。区切りの空行は separator が持つ。
+    separator = f"\n\n## 統合: 旧「{absorbed_title}」より\n\n"
+    # 欠損扱いにするのは「文字が 1 つも無い」場合だけ。空白や改行だけの本文も
+    # 保存則の対象（吸収側はこの直後に閉架されるので、ここで捨てると現役の棚に
+    # 原文が残らない。Codex 指摘 2026-08-05）。
+    absorbed_parts: List[str] = [
+        part for part in (absorbed_summary, absorbed_content) if part
+    ]
+    absorbed_body = "\n\n".join(absorbed_parts) if absorbed_parts else "（本文なし）"
+    return (survivor_content or "") + separator + absorbed_body
+
+
 def execute_merge(
     conn: sqlite3.Connection,
     survivor_page_id: str,
@@ -354,7 +424,11 @@ def execute_merge(
     4. キーワードを和集合にして残す側に書き込む
     5. 吸収側を soft-delete（Memopedia.delete_page, edit_source="curation"）
 
-    fold（過小ページを親へ統合）は survivor=親、absorbed=子として呼べばよい。
+    **親子を渡して fold の代わりに使わないこと**。fold（過小ページを親へ統合）は
+    2026-08-05 に撤去した機構で、この関数はその後継ではない。消える側が実際の
+    ページを親に持つ組み合わせは検知層が候補にしない（健全性規則）——ここに
+    「親子でも呼べる」と書いてあると、撤去した操作を merge 名義で再現する道案内に
+    なる（Codex 指摘 2026-08-05）。
 
     Returns:
         dict: {
@@ -367,6 +441,13 @@ def execute_merge(
 
     Raises:
         ValueError: ページが見つからない、または同一ページへの操作
+
+    Note:
+        「消える側が実際のページを親にも子にも持たない」「統合後が肥大しない」
+        は**検知層** (`saiverse.curation`) が候補の段階で保証する（健全性規則
+        2026-08-05、まはー裁定「もっと前に見て候補から外せる」）。実行部で
+        再判定しないのは、承認済みのプランを実行時に覆すと「承認したのに
+        失敗した」がペルソナに返るため——不変条件は候補生成側が持つ。
     """
     from sai_memory.memopedia.storage import get_page, get_children, move_pages_to_parent
 
@@ -383,6 +464,20 @@ def execute_merge(
     if absorbed is None:
         raise ValueError(f"execute_merge: absorbed ページが見つかりません: {absorbed_page_id}")
 
+    # 同じ晩の先行プランで閉架された相手を掴んでいないか（1 ページ 1 晩 1 操作を
+    # 検知側で守っているが、実行側でも閉架だけは弾く）
+    _assert_active(conn, survivor.id, "survivor")
+    _assert_active(conn, absorbed.id, "absorbed")
+
+    # 親子の統合＝撤去した fold そのもの。健全性の再判定ではなく「もう存在しない
+    # 操作を merge 名義で実行させない」ための拒否。検知層は親子を候補にしないので、
+    # ここに来るのは直接呼び出しか壊れた/古いプラン行だけ（Codex 指摘 2026-08-05）。
+    if survivor.id == absorbed.parent_id or absorbed.id == survivor.parent_id:
+        raise ValueError(
+            "execute_merge: 親子ページの統合は撤去済みの操作 (fold) です"
+            f"（survivor={survivor_page_id} absorbed={absorbed_page_id}）。棄却します。"
+        )
+
     # 1. 吸収側の子ページを残す側へ付け替え
     children = get_children(conn, absorbed_page_id)
     child_ids = [c.id for c in children]
@@ -395,19 +490,12 @@ def execute_merge(
         )
 
     # 2. 本文の逐語連結（保存則: LLM は呼ばない）
-    separator = f"\n\n## 統合: 旧「{absorbed.title}」より\n\n"
-    absorbed_parts: List[str] = []
-    if absorbed.summary and absorbed.summary.strip():
-        absorbed_parts.append(absorbed.summary.strip())
-    if absorbed.content and absorbed.content.strip():
-        absorbed_parts.append(absorbed.content.strip())
-    absorbed_body = "\n\n".join(absorbed_parts) if absorbed_parts else ""
-
-    survivor_base = (survivor.content or "").rstrip()
-    if absorbed_body:
-        new_content = survivor_base + separator + absorbed_body
-    else:
-        new_content = survivor_base + separator + "（本文なし）"
+    new_content = build_merged_content(
+        survivor_content=survivor.content or "",
+        absorbed_title=absorbed.title,
+        absorbed_summary=absorbed.summary or "",
+        absorbed_content=absorbed.content or "",
+    )
 
     # 3. キーワードの和集合
     kw_survivor = set(survivor.keywords or [])
@@ -502,11 +590,16 @@ def plan_split(
             LLM 呼び出しの失敗、応答に sections が無い
     """
     import json as _json
-    from sai_memory.memopedia.storage import get_page
+    from sai_memory.memopedia.storage import get_children, get_page
 
-    page = get_page(conn, page_id)
+    # 参照の受理は runner と同じ一本（m:N / memopedia:N / 素の数字 / UUID）。
+    # ここで独自解決を書くと、同じ候補ラベルが経路によって通ったり通らなかったり
+    # する（Codex 指摘 2026-08-05）。
+    resolved_id = _resolve_page_id_from_ref(conn, page_id)
+    page = get_page(conn, resolved_id) if resolved_id else None
     if page is None:
         raise ValueError(f"execute_split: ページが見つかりません: {page_id}")
+    _assert_active(conn, page.id, "split 対象")
 
     content = page.content or ""
     blocks = _split_into_blocks(content)
@@ -520,23 +613,59 @@ def plan_split(
             f"execute_split: 段落ブロックが 1 つしかないため分割できません: {page_id}"
         )
 
+    # 既存の子ページ（同名の子を新規に作らせず、既にある棚へ入れさせるため）。
+    # get_children は参照解決を持たないので解決済みの page.id で引く。
+    existing_children = get_children(conn, page.id)
+    # 同名の兄弟が複数いる場合はいちばん古い 1 枚を指す（apply_split と同じ規則）
+    existing_by_title: Dict[str, Any] = {}
+    for _child in sorted(existing_children, key=lambda c: (c.created_at, c.id)):
+        existing_by_title.setdefault(normalize_title(_child.title), _child)
+
     # --- LLM へのプロンプト（ブロック割当ラベルのみ要求。本文を出力させない） ---
     # 表示は strip して整える（プロンプト表示のみ。割当・移動は原文ブロック）。
     numbered_blocks = "\n\n".join(
         f"[ブロック{i}]\n{b.strip()}" for i, b in enumerate(blocks)
     )
+    # 既存の子ページを見せる理由（健全性規則 2026-08-05）: 見せないと LLM は
+    # 毎回ゼロから分類軸を立て、同じ対象のページからは内容が違っても同じ軸が
+    # 立つ。実機 aifi_city_a で同名ページが 5 枚まで増えた（互いに共通行ゼロ＝
+    # 中身は別物）。ただしこれは応答の質の改善であって保証ではない——同名を
+    # 作れなくするのは apply 側の物理拘束が担う。
+    if existing_children:
+        # 提示は正規化タイトルごとに 1 行、実際の追記先（最古の 1 枚）の概要を出す。
+        # 既に同名の兄弟が並んでいる棚で全部を素の順（get_children は title 順で
+        # 同名の間は未定義）に出すと、提示順が実行ごとに変わり、同じ名前が二度
+        # 並んで LLM が区別できない（Codex 指摘 2026-08-05）。
+        children_lines = "\n".join(
+            f"- 「{c.title}」: {(c.summary or '（概要なし）').strip()}"
+            for c in sorted(
+                existing_by_title.values(), key=lambda c: (c.created_at, c.id)
+            )
+        )
+        existing_section = (
+            f"\nこのページには既に次の子ページがあります。\n"
+            f"{children_lines}\n"
+            f"**新しく立てるより既存の子ページに入れる方が適切なブロックは、"
+            f"その子ページのタイトルをそのまま使ってください**"
+            f"（その子ページに追記されます）。\n"
+        )
+    else:
+        existing_section = ""
     prompt = (
         f"以下のページ「{page.title}」の内容を、内容のまとまりに応じて"
         f"子ページへ分割してください。\n"
-        f"全部で {total_blocks} 個のブロックがあります（番号は 0 始まり）。\n\n"
+        f"全部で {total_blocks} 個のブロックがあります（番号は 0 始まり）。\n"
+        f"{existing_section}\n"
         f"手順:\n"
-        f"1. child_pages: 作る子ページのタイトルと概要を**先に全部**挙げてください。\n"
+        f"1. child_pages: 割り当て先の子ページのタイトルと概要を**先に全部**"
+        f"挙げてください（既存の子ページを使う場合もここに挙げます）。\n"
         f"   概要は、そのページを開かなくても何が書かれているか分かる 1〜2 文。\n"
         f"2. sections: 1 で挙げたタイトルごとに、そのページに含めるブロックの"
         f"番号リストを返してください。\n\n"
         f"同じブロックを複数の子ページに挙げないでください。\n"
         f"どの子ページにも当てはまらないブロックは、挙げなくて構いません"
         f"（親ページの本文に残ります）。\n"
+        f"親ページと同じタイトル「{page.title}」を子ページに使わないでください。\n"
         f"本文テキストは出力しないでください。ブロック番号の割り当てのみ出力してください。\n\n"
         f"本文:\n{numbered_blocks}"
     )
@@ -653,6 +782,9 @@ def plan_split(
     # index 順の素の連結（"".join）で原文が保たれる。
     section_plans: List[Dict[str, Any]] = []
     section_pos_map: Dict[int, int] = {}  # 元の section 位置 → section_plans の位置
+    plan_pos_by_title: Dict[str, int] = {}  # 正規化タイトル → section_plans の位置
+    parent_title_key = normalize_title(page.title)
+    dropped_same_as_parent: List[str] = []
     for si, sec in enumerate(sections):
         indices = sorted(i for i in range(total_blocks) if owner[i] == si)
         if not indices:
@@ -660,12 +792,35 @@ def plan_split(
             continue
         raw_title = str(sec.get("title") or "").strip()
         sec_title = raw_title or "(無題)"
+        title_key = normalize_title(sec_title)
+
+        # 親と同名の子は作らない（健全性規則 2026-08-05）。ブロックは親に残る
+        # ——入れ子が一段深くなるだけで整理が進まないため。やり直しはさせない
+        # （同じ応答が返れば無限ループになる。まはー裁定）。
+        if title_key == parent_title_key:
+            dropped_same_as_parent.append(sec_title)
+            continue
+
+        # 同じ応答の中で同じタイトルが二度挙がったら 1 枚に束ねる
+        # （同名ページを作れない、を応答内でも守る）。
+        pos = plan_pos_by_title.get(title_key)
+        if pos is not None:
+            plan = section_plans[pos]
+            plan["indices"] = sorted(set(plan["indices"]) | set(indices))
+            plan["content"] = "".join(blocks[i] for i in plan["indices"])
+            section_pos_map[si] = pos
+            continue
+
+        existing = existing_by_title.get(title_key)
         section_pos_map[si] = len(section_plans)
+        plan_pos_by_title[title_key] = len(section_plans)
         section_plans.append({
             "title": sec_title,
             "summary": declared_summary.get(raw_title, ""),
             "indices": indices,
             "content": "".join(blocks[i] for i in indices),
+            # 既存の同名の子がいれば新規作成せずそこへ追記する（apply_split）。
+            "existing_child_id": existing.id if existing is not None else None,
         })
     # 捨てた子を指していた owner を親の残りへ寄せ、位置を section_plans 基準へ詰め直す
     owner = {i: section_pos_map.get(si, -1) for i, si in owner.items()}
@@ -697,6 +852,12 @@ def plan_split(
             "元本文を復元できません（文字レベル不一致）。この分割を棄却します。"
         )
 
+    if dropped_same_as_parent:
+        LOGGER.info(
+            "[curation_ops] plan_split: 親と同名の子 %d 件を棄却 (page=%s title=%r)",
+            len(dropped_same_as_parent), page_id, page.title,
+        )
+
     return {
         "page_id": page.id,
         "title": page.title,
@@ -705,6 +866,7 @@ def plan_split(
         "remaining_indices": remaining_sorted,
         "remaining_content": remaining_content,
         "total_blocks": total_blocks,
+        "dropped_same_as_parent": dropped_same_as_parent,
     }
 
 
@@ -722,32 +884,87 @@ def apply_split(
     防御: 割当案の作成（LLM 呼び出し）と適用の間に本文が変わっていたら
     ValueError で棄却する（別スレッドの編集との競合で保存則が壊れるのを防ぐ）。
 
+    **同名の子ページは作らない**（健全性規則 2026-08-05）: 割り当て先の
+    タイトルが既存の子と同じなら、新規作成せずそのページへ逐語で追記する。
+    判定は**この関数が適用の直前に引き直す**——plan_split の印は手がかりで
+    あって保証ではない（LLM の応答の質に依存しない物理拘束をここに置く）。
+
     Returns:
         dict: {
             "page_id": str,
-            "sections": [{"title": str, "child_id": str, "block_count": int}],
+            "sections": [{"title": str, "child_id": str, "block_count": int,
+                          "appended": bool}],
             "remaining_block_count": int,
             "total_blocks": int,
+            "dropped_same_as_parent": [str],
+            "no_change": bool,   # 子が 1 枚も作られず親も変えなかった
         }
 
     Raises:
         ValueError: ページが見つからない、割当案作成後に本文が変更された
     """
-    from sai_memory.memopedia.storage import get_page
+    from sai_memory.memopedia.storage import get_children, get_page
 
     page_id = split_plan["page_id"]
     page = get_page(conn, page_id)
     if page is None:
         raise ValueError(f"execute_split: ページが見つかりません: {page_id}")
+    _assert_active(conn, page.id, "split 対象")
     if (page.content or "") != split_plan["content"]:
         raise ValueError(
             f"execute_split: 割当案の作成後に本文が変更されています: {page_id}。"
             "この分割を棄却します。"
         )
+    # 親のタイトルが変わっていたら棄却する。plan_split は「親と同名の子を作らない」
+    # を**プラン時点の親タイトル**で判定しており、その後に親が改名されると同名の子が
+    # 作れてしまう。ここで落とすと段落の行き先が消えて保存則が壊れるので、
+    # 部分棄却ではなくプランごと棄却する（Codex 指摘 2026-08-05）。
+    if page.title != split_plan.get("title"):
+        raise ValueError(
+            f"execute_split: 割当案の作成後にページ名が変更されています: {page_id}"
+            f"（{split_plan.get('title')!r} → {page.title!r}）。この分割を棄却します。"
+        )
 
-    # --- 逐語でブロックを移動して子ページを作成 ---
+    dropped_same_as_parent = list(split_plan.get("dropped_same_as_parent") or [])
+
+    # 同名判定は適用の直前に引き直す（plan からの時間差・別経路の作成に耐える）。
+    # 既に同名の兄弟が複数いる実データ（輪が回った後の棚）では、追記先が行順に
+    # 依存すると同じ入力で結果が変わる。**いちばん古い 1 枚**に寄せる——統合の
+    # 「残す側は古い方」と同じ向きで、重複が徐々に古い側へ畳まれていく
+    # （Codex 指摘 2026-08-05）。
+    children_by_title: Dict[str, Any] = {}
+    for child in sorted(get_children(conn, page_id), key=lambda c: (c.created_at, c.id)):
+        children_by_title.setdefault(normalize_title(child.title), child)
+
+    # --- 逐語でブロックを移動（既存の同名の子があれば追記、無ければ作成） ---
     created_sections: List[Dict[str, Any]] = []
     for sec in split_plan["sections"]:
+        title_key = normalize_title(sec["title"])
+        existing = children_by_title.get(title_key)
+        if existing is not None:
+            # 既存本文は一文字も触らない（rstrip は末尾の改行・行末スペースを
+            # 消す＝本文の改変。編纂は移動と結合のみ、が保存則）。区切りの空行を
+            # 足すだけにする（Codex 指摘 2026-08-05）。
+            base = existing.content or ""
+            merged = (base + "\n\n" + sec["content"]) if base else sec["content"]
+            memopedia.update_page(
+                existing.id,
+                content=merged,
+                edit_source="curation",
+            )
+            created_sections.append({
+                "title": existing.title,
+                "child_id": existing.id,
+                "block_count": len(sec["indices"]),
+                "appended": True,
+            })
+            LOGGER.info(
+                "[curation_ops] split: appended to existing child id=%s title=%r "
+                "block_count=%d",
+                existing.id, existing.title, len(sec["indices"]),
+            )
+            continue
+
         child_page = memopedia.create_page(
             parent_id=page_id,
             title=sec["title"],
@@ -755,24 +972,38 @@ def apply_split(
             content=sec["content"],
             edit_source="curation",
         )
+        children_by_title[title_key] = child_page
         created_sections.append({
             "title": sec["title"],
             "child_id": child_page.id,
             "block_count": len(sec["indices"]),
+            "appended": False,
         })
         LOGGER.debug(
             "[curation_ops] split: created child page id=%s title=%r block_count=%d",
             child_page.id, sec["title"], len(sec["indices"]),
         )
 
+    # 子が 1 枚も無い＝分けられなかった。親に触らず「変更なし」で返す
+    # （空の導線を足して updated_at だけ動かすと、来歴に中身のない編集が残る）。
+    if not created_sections:
+        LOGGER.info(
+            "[curation_ops] split: 分割先が 1 枚も無いため変更なし "
+            "(page_id=%s total_blocks=%d dropped_same_as_parent=%d)",
+            page_id, split_plan["total_blocks"], len(dropped_same_as_parent),
+        )
+        return {
+            "page_id": page_id,
+            "sections": [],
+            "remaining_block_count": split_plan["total_blocks"],
+            "total_blocks": split_plan["total_blocks"],
+            "dropped_same_as_parent": dropped_same_as_parent,
+            "no_change": True,
+        }
+
     # --- 親は remaining ブロック ＋ 子への導線 ---
-    guide_lines: List[str] = []
-    for sec in created_sections:
-        guide_lines.append(f"- [{sec['title']}]（子ページ）")
-    if guide_lines:
-        guide_section = "\n\n## 分割された節\n\n" + "\n".join(guide_lines)
-    else:
-        guide_section = ""
+    guide_lines = [f"- [{sec['title']}]（子ページ）" for sec in created_sections]
+    guide_section = "\n\n## 分割された節\n\n" + "\n".join(guide_lines)
     new_parent_content = split_plan["remaining_content"] + guide_section
 
     memopedia.update_page(
@@ -792,6 +1023,8 @@ def apply_split(
         "sections": created_sections,
         "remaining_block_count": len(split_plan["remaining_indices"]),
         "total_blocks": split_plan["total_blocks"],
+        "dropped_same_as_parent": dropped_same_as_parent,
+        "no_change": False,
     }
 
 
@@ -933,9 +1166,9 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
         )
 
         try:
-            if kind in ("merge", "fold"):
+            if kind == "merge":
                 if len(refs) < 2:
-                    raise ValueError(f"merge/fold には 2 つの refs が必要 (got {refs})")
+                    raise ValueError(f"merge には 2 つの refs が必要 (got {refs})")
                 survivor_ref, absorbed_ref = refs[0], refs[1]
                 survivor_id = _resolve_page_id_from_ref(mem_conn, survivor_ref)
                 absorbed_id = _resolve_page_id_from_ref(mem_conn, absorbed_ref)
@@ -975,12 +1208,33 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
                     with _plan_transaction(mem_conn):
                         result = apply_split(tx_conn, tx_memopedia, split_plan)
                         _update_plan_status(tx_conn, plan_id, STATUS_DONE, result)
-                section_names = [s["title"] for s in result.get("sections", [])]
-                report_lines.append(
-                    f"- [split] {page_ref} を {len(section_names)} 件の子ページに分割しました"
-                    f"（{', '.join(section_names[:3])}{'…' if len(section_names) > 3 else ''}）。"
-                    "編集来歴から差し戻せます。"
-                )
+                sections = result.get("sections") or []
+                if result.get("no_change"):
+                    # 分割先が作れなかった＝失敗ではない。事実を事実として言う
+                    # （ペルソナに「失敗しました」と嘘の報告を届けない）。
+                    report_lines.append(
+                        f"- [split] {page_ref} は分けられませんでした"
+                        "（内容がひとまとまりで、分割先を作れませんでした）。"
+                        "ページは変更していません。"
+                    )
+                else:
+                    created = [s["title"] for s in sections if not s.get("appended")]
+                    appended = [s["title"] for s in sections if s.get("appended")]
+                    parts: List[str] = []
+                    if created:
+                        parts.append(
+                            f"{len(created)} 件の子ページに分割"
+                            f"（{', '.join(created[:3])}{'…' if len(created) > 3 else ''}）"
+                        )
+                    if appended:
+                        parts.append(
+                            f"既存の {len(appended)} 件へ追記"
+                            f"（{', '.join(appended[:3])}{'…' if len(appended) > 3 else ''}）"
+                        )
+                    report_lines.append(
+                        f"- [split] {page_ref} を{'、'.join(parts)}しました。"
+                        "編集来歴から差し戻せます。"
+                    )
             else:
                 raise ValueError(f"未知の kind: {kind!r}")
 

@@ -27,11 +27,13 @@ from sai_memory.curation_ops import (
     STATUS_FAILED,
     STATUS_PENDING,
     _split_into_blocks,
+    apply_split,
     enqueue_plan,
     execute_merge,
     execute_split,
     init_curation_tables,
     list_pending,
+    plan_split,
     run_pending_plans,
 )
 
@@ -355,6 +357,82 @@ class TestExecuteMerge:
         survivor = get_page(conn, "survivor")
         # absorbed の summary も含まれるはず
         assert "サマリB" in survivor.content
+
+    def test_parent_child_merge_is_refused(self):
+        """親子の統合＝撤去した fold。merge 名義でも実行させない。"""
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="parent", title="親", content="親の本文",
+            parent_id="root", short_id=1,
+        )
+        _insert_page(
+            conn, page_id="child", title="親の子", content="子の本文",
+            parent_id="parent", short_id=2,
+        )
+        memopedia = _make_memopedia_stub(conn)
+
+        with pytest.raises(ValueError, match="fold"):
+            execute_merge(conn, "parent", "child", memopedia)
+        # 逆向き（子を残して親を吸う）も同じく拒否
+        with pytest.raises(ValueError, match="fold"):
+            execute_merge(conn, "child", "parent", memopedia)
+
+        from sai_memory.memopedia.storage import get_page
+        assert "子の本文" not in get_page(conn, "parent").content
+        row = conn.execute(
+            "SELECT is_deleted FROM memopedia_pages WHERE id = 'child'"
+        ).fetchone()
+        assert row[0] == 0
+
+    def test_whitespace_only_absorbed_body_is_preserved(self):
+        """空白だけの本文も捨てない（吸収側は直後に閉架されるので原文が消える）。"""
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="survivor", title="SAIVerse", content="残る側",
+            parent_id="root", short_id=1,
+        )
+        ws = "   \n\t\n"
+        _insert_page(
+            conn, page_id="absorbed", title="SAIVerseの詳細", content=ws,
+            parent_id="root", short_id=2,
+        )
+        memopedia = _make_memopedia_stub(conn)
+
+        execute_merge(conn, "survivor", "absorbed", memopedia)
+
+        from sai_memory.memopedia.storage import get_page
+        merged = get_page(conn, "survivor").content
+        assert merged.endswith(ws), "空白だけの本文が (本文なし) に置換された"
+
+    def test_merge_preserves_both_bodies_verbatim(self):
+        """統合は本文を一文字も変えない（保存則）。
+
+        末尾改行・行末スペース（Markdown のハードブレーク）・先頭インデントを
+        持つ本文で、両側が逐語のまま連結されることを固定する。1 巡目までは
+        survivor を rstrip、absorbed を strip していて落としていた。
+        """
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        keep_body = "残る側の本文  \n\n"          # 行末スペース + 末尾の空行
+        drop_body = "    消える側の本文\n"        # 先頭インデント + 末尾改行
+        _insert_page(
+            conn, page_id="survivor", title="SAIVerse",
+            content=keep_body, parent_id="root", short_id=1,
+        )
+        _insert_page(
+            conn, page_id="absorbed", title="SAIVerseの詳細",
+            content=drop_body, parent_id="root", short_id=2,
+        )
+        memopedia = _make_memopedia_stub(conn)
+
+        execute_merge(conn, "survivor", "absorbed", memopedia)
+
+        from sai_memory.memopedia.storage import get_page
+        merged = get_page(conn, "survivor").content
+        assert merged.startswith(keep_body), "残る側の末尾が削られている"
+        assert merged.endswith(drop_body), "消える側の先頭/末尾が削られている"
 
     def test_keywords_are_union(self):
         conn, memopedia = self._setup()
@@ -993,65 +1071,333 @@ class TestExecuteMergeMetadata:
 
 
 # ---------------------------------------------------------------------------
-# 修正1の回帰: fold の検知 → enqueue → run_pending_plans 統合
+# 分割の健全性規則（まはー裁定 2026-08-05）
 # ---------------------------------------------------------------------------
 
 
-class TestFoldIntegration:
-    """fold の refs 契約 (refs=[親, 過小ページ]) が検知から実行まで通ることを固定する。
+class TestSplitNeverCreatesDuplicateTitles:
+    """同名の子ページを「作れない」ことを固定する。
 
-    レビュー指摘 [P1]: 検知が refs 1 件で候補を作り、実行が 2 件を要求するため
-    fold は承認しても必ず失敗していた。
+    実機 aifi_city_a では同名ページが 5 枚まで増えた。分割は既存の子を知らない
+    まま毎回ゼロから分類軸を立て、子は新規作成しかできなかったため。
+    LLM に既存の子を見せるのは質の改善であって保証ではない——保証は
+    apply_split の物理拘束が持つ、というのがこのクラスの主張。
+    経緯: docs/issues/curation_duplicate_pages_loop.md
     """
 
-    def test_detect_enqueue_run_fold_succeeds(self):
-        from saiverse.curation import STALE_DAYS, detect_curation_candidates
-
+    def _setup(self, content: str, *, parent_title: str = "大きなページ") -> tuple:
         conn = _make_full_conn()
-        stale = int(time.time()) - (STALE_DAYS + 1) * 86400
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="target", title=parent_title,
+            content=content, parent_id="root", short_id=1,
+        )
+        return conn, _make_memopedia_stub(conn)
+
+    def test_existing_sibling_title_appends_instead_of_creating(self):
+        content = "ブロック0\n\nブロック1\n\nブロック2\n\nブロック3"
+        conn, memopedia = self._setup(content)
+        _insert_page(
+            conn, page_id="child_a", title="子A", content="既存の中身",
+            parent_id="target", short_id=2,
+        )
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子A", "summary": "概要"}],
+            "sections": [{"title": "子A", "block_indices": [0, 1]}],
+        })
+
+        result = execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children, get_page
+        children = get_children(conn, "target")
+        assert len(children) == 1, f"同名の子ページが増えている: {[c.title for c in children]}"
+        child = get_page(conn, "child_a")
+        assert "既存の中身" in child.content, "既存の本文が失われている"
+        assert "ブロック0" in child.content and "ブロック1" in child.content
+        assert result["sections"][0]["appended"] is True
+        assert result["sections"][0]["child_id"] == "child_a"
+
+    def test_child_titled_same_as_parent_is_dropped(self):
+        content = "ブロック0\n\nブロック1\n\nブロック2\n\nブロック3"
+        conn, memopedia = self._setup(content)
+        llm = _make_mock_llm({
+            "child_pages": [
+                {"title": "大きなページ", "summary": "親と同名"},
+                {"title": "子B", "summary": "概要"},
+            ],
+            "sections": [
+                {"title": "大きなページ", "block_indices": [0, 1]},
+                {"title": "子B", "block_indices": [2]},
+            ],
+        })
+
+        result = execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children, get_page
+        children = get_children(conn, "target")
+        assert [c.title for c in children] == ["子B"]
+        assert result["dropped_same_as_parent"] == ["大きなページ"]
+        # 棄却した子のブロックは親に残る（保存則）
+        parent = get_page(conn, "target")
+        assert "ブロック0" in parent.content and "ブロック1" in parent.content
+        assert "ブロック3" in parent.content
+
+    def test_all_sections_same_as_parent_reports_no_change(self):
+        """8/3 に実機で起きた形: 単一テーマのページが自分と同名の子 1 枚を産んだ。"""
+        content = "ブロック0\n\nブロック1\n\nブロック2\n\nブロック3"
+        conn, memopedia = self._setup(content)
+        before = _snapshot_state(conn)
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "大きなページ", "summary": "親と同名"}],
+            "sections": [{"title": "大きなページ", "block_indices": [0, 1, 2, 3]}],
+        })
+
+        result = execute_split(conn, "target", memopedia, llm)
+
+        assert result["no_change"] is True
+        assert result["sections"] == []
+        from sai_memory.memopedia.storage import get_children
+        assert get_children(conn, "target") == []
+        # 親にも触らない（来歴に中身のない編集を残さない）
+        assert _snapshot_state(conn) == before
+
+    def test_duplicate_titles_in_one_response_become_one_page(self):
+        content = "ブロック0\n\nブロック1\n\nブロック2\n\nブロック3"
+        conn, memopedia = self._setup(content)
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子A", "summary": "概要"}],
+            "sections": [
+                {"title": "子A", "block_indices": [0]},
+                {"title": "子A", "block_indices": [1]},
+            ],
+        })
+
+        execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_children
+        children = get_children(conn, "target")
+        assert len(children) == 1, f"同名の子が 2 枚できた: {[c.title for c in children]}"
+        assert "ブロック0" in children[0].content
+        assert "ブロック1" in children[0].content
+
+    def test_append_preserves_existing_body_verbatim(self):
+        """既存の子への追記で、元の本文が一文字も変わらない（保存則）。"""
+        content = "ブロック0\n\nブロック1"
+        conn, memopedia = self._setup(content)
+        original = "既存の中身  \n\n\n"  # 行末スペース・末尾の空行つき
+        _insert_page(
+            conn, page_id="child_a", title="子A", content=original,
+            parent_id="target", short_id=2,
+        )
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子A", "summary": "概要"}],
+            "sections": [{"title": "子A", "block_indices": [0]}],
+        })
+
+        execute_split(conn, "target", memopedia, llm)
+
+        from sai_memory.memopedia.storage import get_page
+        after = get_page(conn, "child_a").content
+        assert after.startswith(original), (
+            "既存本文の末尾が改変されている（rstrip などで空白・改行を落とした）"
+        )
+
+    def test_append_target_is_the_oldest_same_titled_sibling(self):
+        """同名の兄弟が既に複数いても、追記先は決定論的に古い方。"""
+        content = "ブロック0\n\nブロック1"
+        conn, memopedia = self._setup(content)
+        _insert_page(
+            conn, page_id="child_new", title="子A", content="新しい方",
+            parent_id="target", short_id=3, created_at=2000,
+        )
+        _insert_page(
+            conn, page_id="child_old", title="子A", content="古い方",
+            parent_id="target", short_id=2, created_at=1000,
+        )
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子A", "summary": "概要"}],
+            "sections": [{"title": "子A", "block_indices": [0]}],
+        })
+
+        result = execute_split(conn, "target", memopedia, llm)
+
+        assert result["sections"][0]["child_id"] == "child_old"
+        from sai_memory.memopedia.storage import get_page
+        assert "ブロック0" in get_page(conn, "child_old").content
+        assert "ブロック0" not in get_page(conn, "child_new").content
+
+    def test_no_duplicate_when_planned_target_moves_away(self):
+        """割当案の作成後に追記先が別の親へ移っても、同名の兄弟は生まれない。
+
+        plan の `existing_child_id` は手がかりで、保証は apply が引き直す現役の
+        直下子。移動・閉架・改名のどれが起きても「この親の下に同名の兄弟が 2 枚」
+        にはならない——ここが守るべき不変条件（Codex 4 巡目が「同名増殖が再発する」
+        と指摘したので、実際に走らせて確認した）。
+        """
+        content = "ブロック0\n\nブロック1"
+        conn, memopedia = self._setup(content)
+        _insert_page(conn, page_id="other", title="別の親", content="よそ",
+                     parent_id="root", short_id=9)
+        _insert_page(conn, page_id="child_a", title="子A", content="既存の中身",
+                     parent_id="target", short_id=2)
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子A", "summary": "概要"}],
+            "sections": [{"title": "子A", "block_indices": [0]}],
+        })
+        plan = plan_split(conn, "target", llm)
+        assert plan["sections"][0]["existing_child_id"] == "child_a"
+
+        # 適用の直前に、追記先が別の親へ移された
+        conn.execute("UPDATE memopedia_pages SET parent_id = 'other' WHERE id = 'child_a'")
+        conn.commit()
+
+        apply_split(conn, memopedia, plan)
+
+        from sai_memory.memopedia.storage import get_children
+        titles = [c.title for c in get_children(conn, "target")]
+        assert len(titles) == len(set(titles)), f"同名の兄弟ができた: {titles}"
+        # 移った先も汚していない
+        assert [c.title for c in get_children(conn, "other")] == ["子A"]
+
+    def test_no_duplicate_when_planned_target_is_closed(self):
+        """追記先が閉架されても、現役の同名兄弟は 2 枚にならない。"""
+        content = "ブロック0\n\nブロック1"
+        conn, memopedia = self._setup(content)
+        _insert_page(conn, page_id="child_a", title="子A", content="既存の中身",
+                     parent_id="target", short_id=2)
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子A", "summary": "概要"}],
+            "sections": [{"title": "子A", "block_indices": [0]}],
+        })
+        plan = plan_split(conn, "target", llm)
+
+        conn.execute("UPDATE memopedia_pages SET is_deleted = 1 WHERE id = 'child_a'")
+        conn.commit()
+
+        apply_split(conn, memopedia, plan)
+
+        from sai_memory.memopedia.storage import get_children
+        titles = [c.title for c in get_children(conn, "target")]
+        assert len(titles) == len(set(titles)), f"同名の兄弟ができた: {titles}"
+
+    def test_rename_between_plan_and_apply_is_rejected(self):
+        """割当案の作成後に親が改名されたら棄却する（同名の子を作らせない）。"""
+        content = "ブロック0\n\nブロック1\n\nブロック2"
+        conn, memopedia = self._setup(content)
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子B", "summary": "概要"}],
+            "sections": [{"title": "子B", "block_indices": [0]}],
+        })
+        plan = plan_split(conn, "target", llm)
+
+        # LLM 呼び出しの間に、親が子の予定タイトルへ改名された
+        conn.execute("UPDATE memopedia_pages SET title = '子B' WHERE id = 'target'")
+        conn.commit()
+
+        with pytest.raises(ValueError, match="ページ名が変更"):
+            apply_split(conn, memopedia, plan)
+
+        from sai_memory.memopedia.storage import get_children
+        assert get_children(conn, "target") == [], "棄却したのに子が作られた"
+
+    def test_closed_page_is_not_split(self):
+        """閉架済みページは分割しない。"""
+        content = "ブロック0\n\nブロック1"
+        conn, memopedia = self._setup(content)
+        conn.execute("UPDATE memopedia_pages SET is_deleted = 1 WHERE id = 'target'")
+        conn.commit()
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子B", "summary": "概要"}],
+            "sections": [{"title": "子B", "block_indices": [0]}],
+        })
+        with pytest.raises(ValueError, match="閉架"):
+            execute_split(conn, "target", memopedia, llm)
+
+    def test_existing_children_are_shown_to_the_llm(self):
+        content = "ブロック0\n\nブロック1\n\nブロック2"
+        conn, _ = self._setup(content)
+        _insert_page(
+            conn, page_id="child_a", title="既にある棚", content="中身",
+            parent_id="target", short_id=2,
+        )
+        llm = _make_mock_llm({
+            "child_pages": [{"title": "子B", "summary": "概要"}],
+            "sections": [{"title": "子B", "block_indices": [0]}],
+        })
+
+        plan_split(conn, "target", llm)
+
+        prompt = llm.generate.call_args.kwargs["messages"][0]["content"]
+        assert "既にある棚" in prompt, "既存の子ページがプロンプトに出ていない"
+        assert "大きなページ" in prompt  # 親と同名を使わせない指示
+
+
+# ---------------------------------------------------------------------------
+# fold 撤去の回帰（まはー裁定 2026-08-05）
+# ---------------------------------------------------------------------------
+
+
+class TestFoldRemoved:
+    """過小ページを親へ畳む機構は撤去済み。実行側にも経路が残っていないこと。
+
+    経緯: docs/issues/curation_duplicate_pages_loop.md — 統合先を親に固定した
+    時点で対象が「実親を持つページ」に縮み、実機ではそれが全て分割の子だった。
+    """
+
+    def _setup(self) -> sqlite3.Connection:
+        conn = _make_full_conn()
         _insert_page(
             conn, page_id="trunk", title="トランク", category="people",
             is_trunk=True, short_id=0,
         )
-        # 実親（非 trunk）
         _insert_page(
             conn, page_id="p_parent", title="週の記録", category="people",
             content="親ページの本文" * 40, parent_id="trunk", short_id=1,
         )
-        # 過小・低参照の子ページ
         _insert_page(
             conn, page_id="p_small", title="金曜日のメモ", category="people",
             content="小さなメモ", parent_id="p_parent", short_id=2,
-            updated_at=stale, last_referenced_at=stale,
         )
+        return conn
 
-        # 検知: fold 候補の refs は [survivor=親, absorbed=過小ページ]
-        candidates = detect_curation_candidates(conn, "alice")
-        fold = [c for c in candidates if c["kind"] == "fold"]
-        assert len(fold) == 1, f"fold 候補が検知されない: {candidates}"
-        cand = fold[0]
-        assert cand["refs"] == ["memopedia:1", "memopedia:2"], (
-            f"fold の refs 契約違反 (survivor=親, absorbed=過小ページ): {cand['refs']}"
-        )
-
-        # enqueue → 実行
-        enqueue_plan(conn, kind=cand["kind"], op_id=cand["op_id"], refs=cand["refs"])
-        manager, messages = _make_run_manager(conn)
-        result = run_pending_plans(manager, "alice")
-
-        assert result["failed"] == [], f"fold プランが失敗した: {result['report_lines']}"
-        assert len(result["done"]) == 1
-
+    def _assert_untouched(self, conn: sqlite3.Connection) -> None:
         from sai_memory.memopedia.storage import get_page
-        # survivor=親: 過小ページの本文が親へ逐語で統合されている
-        parent_after = get_page(conn, "p_parent")
-        assert "小さなメモ" in parent_after.content
-        assert "金曜日のメモ" in parent_after.content  # 区切り見出しに旧タイトル
-        # absorbed=過小ページ: soft-delete されている
+        assert "小さなメモ" not in get_page(conn, "p_parent").content
         row = conn.execute(
             "SELECT is_deleted FROM memopedia_pages WHERE id = 'p_small'"
         ).fetchone()
-        assert row[0] == 1, "過小ページが soft-delete されていない"
+        assert row[0] == 0, "撤去した機構がページを閉架している"
+
+    def test_enqueue_refuses_fold(self):
+        """入口: 撤去した機構のプランは新規に作れない。"""
+        conn = self._setup()
+        with pytest.raises(ValueError, match="fold"):
+            enqueue_plan(
+                conn, kind="fold", op_id="fold:memopedia:2",
+                refs=["memopedia:1", "memopedia:2"],
+            )
+        assert list_pending(conn) == []
+        self._assert_untouched(conn)
+
+    def test_legacy_fold_row_is_rejected_by_runner(self):
+        """最後の砦: 既存 DB に残った fold 行を掴んでも実行しない。
+
+        入口の検査を通さず直接行を書いて、旧データが流れ込む経路を再現する。
+        """
+        conn = self._setup()
+        conn.execute(
+            "INSERT INTO curation_plans (id, created_at, kind, op_id, refs_json, status) "
+            "VALUES ('legacy', 1, 'fold', 'fold:memopedia:2', ?, 'pending')",
+            (json.dumps(["memopedia:1", "memopedia:2"]),),
+        )
+        conn.commit()
+
+        manager, messages = _make_run_manager(conn)
+        result = run_pending_plans(manager, "alice")
+
+        assert result["done"] == []
+        assert len(result["failed"]) == 1
+        self._assert_untouched(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -1351,14 +1697,37 @@ class TestSplitRealWorldResponse:
         return [int(m) for m in re.findall(r"ブロック(\d+)の本文", text)]
 
     def test_real_response_preserves_content_verbatim(self):
-        """子ページ全部＋親の残り＝元の全ブロック（各ブロックがちょうど一度）。"""
+        """子ページ全部＋親の残り＝元の全ブロック（各ブロックがちょうど一度）。
+
+        番号の集合だけでなく**文字レベル**で照合する。番号だけを比べていた頃は、
+        ブロックの間の空白・改行が壊れても通っていた（保存則の中心契約に対して
+        誤った安心感になる。Codex 指摘 2026-08-05）。
+        """
         conn, content, result = self._run()
         from sai_memory.memopedia.storage import get_page, get_children
 
+        blocks = _split_into_blocks(content)
+
         seen: List[int] = []
         for child in get_children(conn, "target"):
-            seen += self._block_numbers(child.content)
-        seen += self._block_numbers(get_page(conn, "target").content)
+            nums = self._block_numbers(child.content)
+            seen += nums
+            assert child.content == "".join(blocks[i] for i in nums), (
+                f"{child.title}: 本文が逐語でない（区切りの空白・改行が変わった）"
+            )
+
+        parent_content = get_page(conn, "target").content
+        parent_nums = self._block_numbers(parent_content)
+        seen += parent_nums
+        expected_remaining = "".join(blocks[i] for i in parent_nums)
+        assert parent_content.startswith(expected_remaining), (
+            "親の残り本文が逐語でない"
+        )
+        # 残りの後ろに付くのは子への導線だけ
+        tail = parent_content[len(expected_remaining):]
+        assert tail.startswith("\n\n## 分割された節\n\n"), f"想定外の追記: {tail[:60]!r}"
+        for child in get_children(conn, "target"):
+            assert f"- [{child.title}]（子ページ）" in tail
 
         assert sorted(seen) == list(range(self.TOTAL_BLOCKS)), (
             "ブロックの取りこぼし／複製がある"

@@ -2,9 +2,10 @@
 
 検証対象:
 - 肥大検知 (content > OVERSIZED_THRESHOLD → split 候補)
-- 過小検知 (content < UNDERSIZED_THRESHOLD + 低参照 + 実親あり → fold 候補)
-- trunk 直下の過小ページは候補にならない
+- 過小検知 (fold) は 2026-08-05 に機構ごと撤去 — 復活していないことを固定
 - 類似検知 (キーワード共起 >= SIMILAR_MIN_KEYWORDS → merge 候補、残す側=古い方)
+- 健全性規則 (2026-08-05): 消える側は実親も子も持たない / 統合後が肥大しない /
+  分割待ちは統合に使わない / 同じ残す側は一晩 1 件
 - metabolizable 外カテゴリ (theme/core) は対象外
 - 最大 3 件
 - 決定論 (同入力 → 同出力)
@@ -12,7 +13,7 @@
 - build_day_close_schema: 候補ゼロでフィールドが無い
 - judgment_finalize: approve → curation_plans に pending 行、skip → 行なし
 - judgment_finalize: 重複 approve → 行は 1 件のまま
-- 閾値一元化: memopedia_health / maintain_memopedia が curation.py の定数を参照
+- 閾値一元化: memopedia_health が curation.py の定数を参照
 """
 from __future__ import annotations
 
@@ -27,8 +28,6 @@ from saiverse.curation import (
     MAX_CANDIDATES,
     OVERSIZED_THRESHOLD,
     SIMILAR_MIN_KEYWORDS,
-    STALE_DAYS,
-    UNDERSIZED_THRESHOLD,
     detect_curation_candidates,
 )
 from sai_memory.curation_ops import (
@@ -122,13 +121,8 @@ def _insert_page(
 
 
 def _stale_ts() -> int:
-    """STALE_DAYS + 1 日前の epoch 秒（確実に「低参照」と判定される）。"""
-    return int(time.time()) - (STALE_DAYS + 1) * 86400
-
-
-def _fresh_ts() -> int:
-    """1日前の epoch 秒（「低参照」にならない）。"""
-    return int(time.time()) - 86400
+    """31 日前の epoch 秒（旧・過小検知が「低参照」と判定していた古さ）。"""
+    return int(time.time()) - 31 * 86400
 
 
 # ---------------------------------------------------------------------------
@@ -187,70 +181,49 @@ class TestDetectOversized:
         assert candidates == []
 
 
-class TestDetectUndersized:
-    def test_small_stale_page_with_real_parent_is_fold_candidate(self):
+class TestFoldRemoved:
+    """過小ページを親へ畳む機構 (fold) の撤去（まはー裁定 2026-08-05）。
+
+    統合先を親に固定した時点で対象が「実親を持つページ」に縮み、実機では
+    それが全て分割の子だった＝構造的に分割の巻き戻ししかできなかった。
+    経緯: docs/issues/curation_duplicate_pages_loop.md
+    """
+
+    def test_small_stale_child_produces_no_candidate(self):
         conn = _make_conn()
         stale = _stale_ts()
-        # trunk
         _insert_page(conn, page_id="root_people", title="人物", category="people", is_trunk=True, short_id=0)
-        # 非 trunk の親
         _insert_page(
             conn, page_id="p_parent", title="週の記録", category="people",
             content="中程度の内容", parent_id="root_people", short_id=1,
             updated_at=stale, last_referenced_at=stale,
         )
-        # 過小・低参照の子ページ
         _insert_page(
             conn, page_id="p_small", title="金曜日のメモ", category="people",
-            content="a" * (UNDERSIZED_THRESHOLD - 1),
-            parent_id="p_parent", short_id=2,
+            content="a" * 60, parent_id="p_parent", short_id=2,
             updated_at=stale, last_referenced_at=stale,
         )
         candidates = detect_curation_candidates(conn, "alice")
-        fold_candidates = [c for c in candidates if c["kind"] == "fold"]
-        assert len(fold_candidates) == 1
-        c = fold_candidates[0]
-        assert "memopedia:2" in c["op_id"]
-        assert "[過小]" in c["line"]
-        assert "統合" in c["line"]
-        # 実行契約 (run_pending_plans): refs[0]=survivor(親), refs[1]=absorbed(過小ページ)
-        assert c["refs"] == ["memopedia:1", "memopedia:2"], (
-            f"fold の refs は [親, 過小ページ] の 2 件が必要: {c['refs']}"
-        )
+        assert [c for c in candidates if c["kind"] == "fold"] == []
+        assert candidates == [], f"過小ページが何かの候補になっている: {candidates}"
 
-    def test_trunk_direct_child_not_undersized_candidate(self):
-        """trunk 直下の過小ページは候補にしない（決定論の統合先が無い）。"""
+    def test_fold_kind_never_emitted(self):
+        """どんな組み合わせでも kind='fold' は出ない。"""
         conn = _make_conn()
         stale = _stale_ts()
         _insert_page(conn, page_id="root_people", title="人物", category="people", is_trunk=True, short_id=0)
         _insert_page(
-            conn, page_id="p_small", title="孤立した小ページ", category="people",
-            content="a" * (UNDERSIZED_THRESHOLD - 1),
-            parent_id="root_people", short_id=1,  # trunk が親
-            updated_at=stale, last_referenced_at=stale,
+            conn, page_id="p_parent", title="親", category="people",
+            content="a" * (OVERSIZED_THRESHOLD + 10), parent_id="root_people", short_id=1,
         )
+        for n in range(3):
+            _insert_page(
+                conn, page_id=f"p_small{n}", title=f"小ページ{n}", category="people",
+                content="a" * 10, parent_id="p_parent", short_id=10 + n,
+                updated_at=stale, last_referenced_at=stale,
+            )
         candidates = detect_curation_candidates(conn, "alice")
-        fold_candidates = [c for c in candidates if c["kind"] == "fold"]
-        assert fold_candidates == []
-
-    def test_fresh_small_page_not_candidate(self):
-        """最近参照されたページは過小でも候補にしない。"""
-        conn = _make_conn()
-        fresh = _fresh_ts()
-        _insert_page(conn, page_id="root_people", title="人物", category="people", is_trunk=True, short_id=0)
-        _insert_page(
-            conn, page_id="p_parent", title="親ページ", category="people",
-            content="十分な内容のある親ページ", parent_id="root_people", short_id=1,
-        )
-        _insert_page(
-            conn, page_id="p_small", title="新鮮な小ページ", category="people",
-            content="a" * (UNDERSIZED_THRESHOLD - 1),
-            parent_id="p_parent", short_id=2,
-            updated_at=fresh, last_referenced_at=fresh,
-        )
-        candidates = detect_curation_candidates(conn, "alice")
-        fold_candidates = [c for c in candidates if c["kind"] == "fold"]
-        assert fold_candidates == []
+        assert all(c["kind"] != "fold" for c in candidates), candidates
 
 
 class TestDetectSimilar:
@@ -339,6 +312,176 @@ class TestDetectSimilar:
         candidates = detect_curation_candidates(conn, "alice")
         merge_candidates = [c for c in candidates if c["kind"] == "merge"]
         assert merge_candidates == []
+
+
+class TestMergeHealthRules:
+    """統合候補の健全性規則（まはー裁定 2026-08-05）。
+
+    実機 aifi_city_a で、分割が作った子が統合で親や別の人物ページへ吸い戻され、
+    太った親がまた分割されて同名ページが増える輪が回っていた。
+    経緯: docs/issues/curation_duplicate_pages_loop.md
+    """
+
+    def _pair(self, conn, *, a_kw=None, b_kw=None, a_content="a" * 100,
+              b_content="b" * 100, a_parent="root_terms", b_parent="root_terms",
+              a_title="SAIVerse機能一覧", b_title="SAIVerse"):
+        """タイトル包含で類似になるペア（古い方 = a = 残す側）。"""
+        _insert_page(conn, page_id="root_terms", title="用語", category="terms",
+                     is_trunk=True, short_id=0)
+        _insert_page(conn, page_id="p_a", title=a_title, category="terms",
+                     content=a_content, keywords=a_kw, parent_id=a_parent,
+                     short_id=1, created_at=1000, updated_at=1000)
+        _insert_page(conn, page_id="p_b", title=b_title, category="terms",
+                     content=b_content, keywords=b_kw, parent_id=b_parent,
+                     short_id=2, created_at=2000, updated_at=2000)
+
+    def _merges(self, conn):
+        return [c for c in detect_curation_candidates(conn, "alice") if c["kind"] == "merge"]
+
+    def test_shelf_level_pair_is_still_a_candidate(self):
+        """棚直下どうし（表記ゆれの回収）＝統合本来の仕事は通る。"""
+        conn = _make_conn()
+        self._pair(conn)
+        assert len(self._merges(conn)) == 1
+
+    def test_absorbed_with_real_parent_is_not_a_candidate(self):
+        """消える側が実際のページの子なら統合しない（親子・兄弟・横取りを一本で塞ぐ）。"""
+        conn = _make_conn()
+        _insert_page(conn, page_id="root_people", title="人物", category="people",
+                     is_trunk=True, short_id=50)
+        _insert_page(conn, page_id="owner", title="まはー", category="terms",
+                     content="人物ページ", parent_id="root_people", short_id=51,
+                     created_at=500, updated_at=500)
+        self._pair(conn, b_parent="owner")
+        assert self._merges(conn) == []
+
+    def test_absorbed_with_a_child_is_not_a_candidate(self):
+        """木として根を張り始めたページは吸われない。"""
+        conn = _make_conn()
+        self._pair(conn)
+        _insert_page(conn, page_id="p_b_child", title="子ページ", category="terms",
+                     content="子の中身", parent_id="p_b", short_id=3)
+        assert self._merges(conn) == []
+
+    def test_child_of_a_closed_parent_is_not_absorbed(self):
+        """閉架された親にぶら下がる現役の子は吸われない（fail-closed）。
+
+        `Memopedia.delete_page` は soft-delete で**子に波及しない**ため、閉架
+        された親の下に現役の子が残る。木の形を候補一覧（未削除のみ）から引くと
+        この親が見えず「親なし＝吸ってよい」に倒れていた（Codex 指摘 2026-08-05）。
+        """
+        conn = _make_conn()
+        self._pair(conn, b_parent="closed_parent")
+        # 閉架された実親（_pair が棚を作るので後から足す）
+        _insert_page(conn, page_id="closed_parent", title="閉じた親", category="terms",
+                     content="親の本文", parent_id="root_terms", short_id=4,
+                     is_deleted=True)
+        assert self._merges(conn) == [], "閉架された親を持つ現役の子が吸われた"
+
+    def test_page_with_unresolvable_parent_is_not_absorbed(self):
+        """親 id が解決できないページも吸わない（分からないものは触らない）。"""
+        conn = _make_conn()
+        self._pair(conn, b_parent="does_not_exist")
+        assert self._merges(conn) == []
+
+    def test_page_whose_only_child_is_closed_can_still_be_absorbed(self):
+        """対照: 子が閉架だけなら根を張っていないので吸える（塞ぎすぎない）。"""
+        conn = _make_conn()
+        self._pair(conn)
+        _insert_page(conn, page_id="dead_child", title="閉じた子", category="terms",
+                     content="子の本文", parent_id="p_b", short_id=4,
+                     is_deleted=True)
+        assert len(self._merges(conn)) == 1
+
+    def test_merge_that_would_be_oversized_is_not_a_candidate(self):
+        """統合した結果が肥大するなら統合しない（統合が分割を呼ばない）。"""
+        conn = _make_conn()
+        self._pair(conn, a_content="a" * 3000, b_content="b" * 3000)
+        assert self._merges(conn) == []
+
+    def test_merge_just_under_the_line_is_still_a_candidate(self):
+        """境界の反対側: 結果が閾値以下なら通る（規則が効きすぎていない）。"""
+        conn = _make_conn()
+        self._pair(conn, a_content="a" * 1000, b_content="b" * 1000)
+        assert len(self._merges(conn)) == 1
+
+    def test_split_pending_page_is_not_used_in_merge(self):
+        """分割待ちのページに何かを足さない。"""
+        conn = _make_conn()
+        self._pair(conn, a_content="a" * (OVERSIZED_THRESHOLD + 10))
+        assert self._merges(conn) == []
+
+    def test_a_page_is_never_both_survivor_and_absorbed(self):
+        """1 ページ 1 晩 1 操作。A←B と B←C を同じ晩に出さない。
+
+        両方承認されると、先に閉架された B へ C の本文が流し込まれ、現役の棚に
+        届かない（`get_page` は soft-delete を弾かない）。Codex 指摘 2026-08-05。
+        """
+        conn = _make_conn()
+        _insert_page(conn, page_id="root_terms", title="用語", category="terms",
+                     is_trunk=True, short_id=0)
+        # A ⊃ B ⊃ C の包含関係（どの隣接ペアも類似になる）
+        for pid, title, sid, created in (
+            ("p_a", "SAIVerseの機能一覧について", 1, 1000),
+            ("p_b", "SAIVerseの機能一覧", 2, 2000),
+            ("p_c", "SAIVerseの機能", 3, 3000),
+        ):
+            _insert_page(conn, page_id=pid, title=title, category="terms",
+                         content="x" * 100, parent_id="root_terms", short_id=sid,
+                         created_at=created, updated_at=created)
+        merges = self._merges(conn)
+        used = [ref for m in merges for ref in m["refs"]]
+        assert len(used) == len(set(used)), (
+            f"同じページが複数の統合に現れた: {[m['op_id'] for m in merges]}"
+        )
+
+    def test_child_of_a_split_pending_page_is_not_used_in_merge(self):
+        """分割待ちページの子も統合に使わない（操作の種類を跨いだ 1 ページ 1 操作）。
+
+        分割は同名の既存の子へ追記するので、同じ晩にその子を残す側にした統合が
+        走ると、統合の見積もり（検知時点の本文）より子が太る。
+        """
+        conn = _make_conn()
+        _insert_page(conn, page_id="root_terms", title="用語", category="terms",
+                     is_trunk=True, short_id=0)
+        # 肥大した親
+        _insert_page(conn, page_id="p_big", title="大きなページ", category="terms",
+                     content="a" * (OVERSIZED_THRESHOLD + 10),
+                     parent_id="root_terms", short_id=1)
+        # その子（統合の残す側になれてしまうと衝突する）
+        _insert_page(conn, page_id="p_child", title="SAIVerse機能一覧", category="terms",
+                     content="b" * 100, parent_id="p_big", short_id=2,
+                     created_at=1000, updated_at=1000)
+        # 棚直下の相手（子を持たず実親も無い＝消える側になれる）
+        _insert_page(conn, page_id="p_other", title="SAIVerse", category="terms",
+                     content="c" * 100, parent_id="root_terms", short_id=3,
+                     created_at=2000, updated_at=2000)
+
+        assert self._merges(conn) == [], "分割待ちページの子が統合に使われた"
+
+    def test_candidate_order_is_deterministic_for_same_second_pages(self):
+        """同秒作成でも候補列が安定する（残す側の tie-breaker）。"""
+        conn = _make_conn()
+        self._pair(conn, a_title="SAIVerse機能一覧", b_title="SAIVerse")
+        # 2 枚を同じ created_at に揃える
+        conn.execute("UPDATE memopedia_pages SET created_at = 1000 WHERE id IN ('p_a','p_b')")
+        conn.commit()
+        first = [c["op_id"] for c in self._merges(conn)]
+        assert first, "候補が出ていない"
+        for _ in range(5):
+            assert [c["op_id"] for c in self._merges(conn)] == first
+
+    def test_one_merge_per_survivor_per_night(self):
+        """同じ残す側への積み上げは一晩 1 件（候補は晩の最初に一度しか組まれない）。"""
+        conn = _make_conn()
+        self._pair(conn)
+        # 3枚目も「SAIVerse機能一覧」に包含されるタイトル（残す側は同じ p_a）
+        _insert_page(conn, page_id="p_c", title="機能一覧", category="terms",
+                     content="c" * 100, parent_id="root_terms", short_id=3,
+                     created_at=3000, updated_at=3000)
+        merges = self._merges(conn)
+        assert len(merges) == 1, f"同じ残す側の統合が複数出た: {[m['op_id'] for m in merges]}"
+        assert merges[0]["op_id"].startswith("merge:memopedia:1+")
 
 
 class TestCategoryFiltering:
@@ -570,15 +713,15 @@ class TestCurationReviewsFinalize:
     def test_skip_creates_no_plan(self, mem_conn):
         candidates = [
             {
-                "op_id": "fold:memopedia:12",
-                "kind": "fold",
-                "refs": ["memopedia:12"],
-                "line": "[過小] memopedia:12「金曜日のメモ」 60字 — 統合を提案",
+                "op_id": "merge:memopedia:11+memopedia:12",
+                "kind": "merge",
+                "refs": ["memopedia:11", "memopedia:12"],
+                "line": "[類似] memopedia:11「週の記録」と memopedia:12「金曜日のメモ」 — 統合を提案",
             }
         ]
         output = {
             "curation_reviews": [
-                {"op_id": "fold:memopedia:12", "verdict": "skip"},
+                {"op_id": "merge:memopedia:11+memopedia:12", "verdict": "skip"},
             ]
         }
         applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
@@ -640,7 +783,8 @@ class TestCurationReviewsFinalize:
 
 
 # ---------------------------------------------------------------------------
-# 閾値一元化: memopedia_health / maintain_memopedia が curation.py を参照
+# 閾値一元化: memopedia_health が curation.py を参照
+# （maintain_memopedia.py は 2026-08-05 に削除。閾値の参照元も無くなった）
 # ---------------------------------------------------------------------------
 
 
@@ -651,13 +795,6 @@ class TestThresholdImports:
 
         assert mh_mod.HEALTH_LARGE_THRESHOLD is HEALTH_LARGE_THRESHOLD
         assert mh_mod.HEALTH_OVERSIZED_THRESHOLD is HEALTH_OVERSIZED_THRESHOLD
-
-    def test_maintain_memopedia_uses_curation_threshold(self):
-        """maintain_memopedia.SPLIT_THRESHOLD は curation.OVERSIZED_THRESHOLD の alias。"""
-        from scripts import maintain_memopedia as mm_mod
-        from saiverse.curation import OVERSIZED_THRESHOLD
-
-        assert mm_mod.SPLIT_THRESHOLD == OVERSIZED_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
