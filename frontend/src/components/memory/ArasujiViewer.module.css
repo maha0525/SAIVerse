@@ -39,14 +39,6 @@
     border-bottom: 1px solid #333;
 }
 
-.truncationNotice {
-    padding: 0.5rem 1rem;
-    background-color: rgba(250, 176, 5, 0.1);
-    border-bottom: 1px solid rgba(250, 176, 5, 0.25);
-    font-size: 0.8rem;
-    color: #fab005;
-}
-
 .levelSelect {
     width: 100%;
     padding: 8px 12px;
@@ -800,12 +792,6 @@
 
 :global([data-theme="light"]) .filterRow {
     border-bottom-color: #e2e8f0;
-}
-
-:global([data-theme="light"]) .truncationNotice {
-    background-color: rgba(217, 119, 6, 0.08);
-    border-bottom-color: rgba(217, 119, 6, 0.25);
-    color: #b45309;
 }
 
 :global([data-theme="light"]) .levelSelect {

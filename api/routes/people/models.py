@@ -434,15 +434,11 @@ class ArasujiEntryItem(BaseModel):
     source_end_num: Optional[int] = None    # last message number
 
 class ArasujiListResponse(BaseModel):
+    # 一覧は常に全件を返す (2026-08-05, docs/issues/arasuji_modal_500_limit_truncation.md)。
+    # 件数上限とその通知フィールド (total_available / hidden_oldest) は撤去した。
     entries: List[ArasujiEntryItem]
     total: int
     level_filter: Optional[int] = None
-    # 一覧の切り詰め情報 (2026-07-29, docs/issues/arasuji_modal_500_limit_truncation.md):
-    # 総数が limit を超えたときは**古い側の L1 から**隠し、その事実を明示する。
-    # 旧実装は並び (level DESC, start_time ASC) の末尾 = 最新の L1 から黙って
-    # 欠けていた。
-    total_available: int = 0   # 切り詰め前の総件数
-    hidden_oldest: int = 0     # 隠した古い側 L1 の件数 (0 = 切り詰めなし)
 
 class SourceMessageItem(BaseModel):
     id: str

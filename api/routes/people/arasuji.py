@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from typing import Dict, List, Optional
 from api.deps import get_manager
 from saiverse.data_paths import get_persona_memory_db
@@ -374,18 +374,17 @@ def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
 def list_arasuji_entries(
     persona_id: str,
     level: Optional[int] = None,
-    limit: int = Query(500, ge=1, le=5000),
     manager = Depends(get_manager)
 ):
     """List Chronicle entries for a persona (part of Memory Weave).
 
-    切り詰め契約 (2026-07-29、docs/issues/arasuji_modal_500_limit_truncation.md):
-    総数が ``limit`` を超えたら**古い側の L1** から隠し、``hidden_oldest`` /
-    ``total_available`` で明示する。最新のエントリは決して黙って欠けない。
-    上位レベル (L2+) は件数が log で有界な全体像の骨格なので隠さない — 上位
-    レベルだけで limit を超える異常な形は、そのまま返して WARNING を残す
-    (応答件数が limit を超えるのはこのケースのみ)。``level`` 指定時も同じ
-    「古い側から隠す」契約を適用する。
+    件数上限を持たない (2026-08-05、docs/issues/arasuji_modal_500_limit_truncation.md)。
+    Chronicle はペルソナの記憶そのものなので、一覧から到達できないエントリを作る
+    理由が無い。旧実装は既定 500 件で切り、超過分を「隠しています」と画面に出して
+    いたが、UI に上限を変える口が無く、隠された側への到達手段が存在しなかった。
+    エリス実測で全 513 件 (本文 + source_ids) が 522KB であり、上限に見合う実害も
+    無かった。将来一覧が重くなった場合は、黙って切るのではなく一覧 UI 側 (仮想
+    スクロール等) で解く。
     """
     from sai_memory.arasuji.storage import _row_to_entry
 
@@ -393,62 +392,25 @@ def list_arasuji_entries(
     if not conn:
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
-    # 「古い側から隠す」を SQL で行う — 旧実装の ORDER BY level DESC,
-    # start_time ASC + LIMIT は末尾 (最新の L1) から黙って欠けた (2026-07-29
-    # 実害)。新しい側を DESC + LIMIT で取り、表示順 (昇順) へ反転することで、
-    # limit が DB からの読み取り量も抑える (Codex 再レビュー)。
     _SELECT = (
         "SELECT id, level, content, source_ids_json, start_time, end_time, "
         "source_count, message_count, parent_id, is_consolidated, created_at "
         "FROM arasuji_entries"
     )
-    _NEWEST_FIRST = " ORDER BY start_time DESC, created_at DESC, id DESC"
+    _OLDEST_FIRST = " ORDER BY start_time ASC, created_at ASC, id ASC"
 
     try:
-        # COUNT と行フェッチを同じ読み取りスナップショットで行う (Codex 三巡:
-        # 別スナップショットだと並行編纂の insert で hidden_oldest がずれ、
-        # 「黙った切り詰め」が再発する)。BEGIN で読み取り tx を開き、finally の
-        # rollback で閉じる (読みだけなので rollback = 終了)。
-        conn.execute("BEGIN")
-        hidden_oldest = 0
         if level is not None:
-            total_available = conn.execute(
-                "SELECT COUNT(*) FROM arasuji_entries WHERE level = ?", (level,)
-            ).fetchone()[0]
-            cur = conn.execute(
-                _SELECT + " WHERE level = ?" + _NEWEST_FIRST + " LIMIT ?",
-                (level, limit),
-            )
-            entries = [_row_to_entry(row) for row in cur.fetchall()][::-1]
-            hidden_oldest = max(0, total_available - len(entries))
+            cur = conn.execute(_SELECT + " WHERE level = ?" + _OLDEST_FIRST, (level,))
+            entries = [_row_to_entry(row) for row in cur.fetchall()]
         else:
-            # 上位レベル (L2+) は件数が log で有界な全体像の骨格なので全件返す。
-            # L1 だけを「古い側から隠す」対象にする。
-            l1_total = conn.execute(
-                "SELECT COUNT(*) FROM arasuji_entries WHERE level = 1"
-            ).fetchone()[0]
+            # 表示順は「上位レベル (全体像の骨格) が先、その後に L1 を時系列で」。
             cur = conn.execute(
                 _SELECT + " WHERE level != 1 ORDER BY level DESC, start_time ASC"
             )
             upper = [_row_to_entry(row) for row in cur.fetchall()]
-            total_available = len(upper) + l1_total
-            if total_available <= limit:
-                l1_keep = l1_total
-            else:
-                l1_keep = max(0, limit - len(upper))
-                if len(upper) > limit:
-                    LOGGER.warning(
-                        "[arasuji-list] upper levels alone exceed limit=%d "
-                        "(persona=%s, upper=%d); returning them unhidden per contract",
-                        limit, persona_id, len(upper),
-                    )
-            cur = conn.execute(
-                _SELECT + " WHERE level = 1" + _NEWEST_FIRST + " LIMIT ?",
-                (l1_keep,),
-            )
-            level1 = [_row_to_entry(row) for row in cur.fetchall()][::-1]
-            hidden_oldest = l1_total - len(level1)
-            entries = upper + level1
+            cur = conn.execute(_SELECT + " WHERE level = 1" + _OLDEST_FIRST)
+            entries = upper + [_row_to_entry(row) for row in cur.fetchall()]
 
         # Build message number map for level 1 entries
         msg_num_map = None
@@ -489,16 +451,10 @@ def list_arasuji_entries(
             entries=items,
             total=len(items),
             level_filter=level,
-            total_available=total_available,
-            hidden_oldest=hidden_oldest,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list Chronicle entries: {e}")
     finally:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
         conn.close()
 
 @router.get("/{persona_id}/arasuji/{entry_id}", response_model=ArasujiEntryItem, tags=["Chronicle"])

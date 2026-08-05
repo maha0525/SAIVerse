@@ -47,9 +47,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [entryCache, setEntryCache] = useState<Record<string, ArasujiEntry>>({});
     const [selectedEntry, setSelectedEntry] = useState<ArasujiEntry | null>(null);
     const [levelFilter, setLevelFilter] = useState<number | null>(null);
-    // 一覧APIの切り詰め情報 (総数が上限超過時、古い側のL1が隠される)
-    const [hiddenOldest, setHiddenOldest] = useState(0);
-    const [totalAvailable, setTotalAvailable] = useState(0);
     const [isLoadingStats, setIsLoadingStats] = useState(false);
     const [isLoadingEntries, setIsLoadingEntries] = useState(false);
     const [showList, setShowList] = useState(true);
@@ -428,8 +425,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             if (res.ok) {
                 const data = await res.json();
                 setEntries(data.entries);
-                setHiddenOldest(data.hidden_oldest ?? 0);
-                setTotalAvailable(data.total_available ?? data.entries.length);
             }
         } catch (error) {
             console.error("Failed to load arasuji entries", error);
@@ -486,13 +481,6 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         )}
                     </div>
                 </div>
-
-                {/* Truncation notice: 総数が上限を超え、古い側のL1が隠れているとき */}
-                {hiddenOldest > 0 && (
-                    <div className={styles.truncationNotice}>
-                        表示上限を超えたため、古い {hiddenOldest} 件を隠しています（全 {totalAvailable} 件）
-                    </div>
-                )}
 
                 {/* Generation Progress */}
                 {generationJob && (generationJob.status === 'running' || generationJob.status === 'started') && (
