@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Search, Loader2, AlertCircle, Brain, Trash2, Plus, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
+import MemopediaConversion from './MemopediaConversion';
 
 interface MemoryRecallProps {
     personaId: string;
@@ -963,6 +964,9 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                     {exportImportResult}
                 </div>
             )}
+
+            {/* v0.2.x Memopedia → v0.3.x 変換（本文 → Fragment） */}
+            <MemopediaConversion personaId={personaId} />
 
             {/* Danger Zone: Bulk Delete */}
             <div className={styles.dangerZone}>

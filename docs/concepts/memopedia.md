@@ -23,6 +23,15 @@ Fragment は単独では生成されない。**[Metabolism](metabolism.md) 発�
 
 > これが「Chronicle 二重パイプライン統合」の実体。**記憶の「圧縮（Chronicle）」と「知識化（Fragment）」は Metabolism という同じ節目で連動する。**
 
+### v0.2.x の本文からの変換
+
+v0.2.x までは、抽出した知識をページ本文（`content`）へ `## YYYY-MM-DD` の日付ブロックとして追記していた。そのため**機構が書いた知識と、ペルソナやユーザーが自分で書いた記述が同じ文字列に混在する**。
+
+これを Fragment へ移す変換が、メモリーモーダルの**デバッグタブ**にある（自動マイグレーションではない）。判定は三段で、**編集来歴が「機構が足した」と裏づけた行だけを機械が変換し、記法しか根拠のない行はユーザーが 1 行ずつ決める**。実行後は実行単位で丸ごと取り消せる。
+
+- 設計: intent [`memopedia_body_to_fragment.md`](../intent/memopedia_body_to_fragment.md)
+- 実装: `sai_memory/memopedia/body_to_fragment.py`、API は `/api/people/{id}/debug/memopedia-conversion/*`
+
 ### 実装状況メモ
 
 - air_city_a 実 DB で `memopedia_fragments` は稼働中（1000件超）

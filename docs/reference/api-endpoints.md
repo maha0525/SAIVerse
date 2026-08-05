@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 354（tag グループ: 25）
+**エンドポイント数**: 358（tag グループ: 25）
 
 ## addon
 
@@ -269,6 +269,10 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/debug/fire-meta-judgment` | メタ判断 (on_periodic_tick) を 1 回手動発火. force=True で抑止 (Active/wait_response) を無視. |
 | POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | (廃止) 旧 autonomous Track の sub_line Pulse 手動起動。 |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
+| POST | `/api/people/{persona_id}/debug/memopedia-conversion/apply` | 変換を実行する。逐語の検算に落ちたら何も書かずに 409 を返す。 |
+| GET | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 下見: 変換したら何がどうなるかを、DB へ書かずに返す。 |
+| POST | `/api/people/{persona_id}/debug/memopedia-conversion/revert` | 変換を丸ごと取り消す。 |
+| GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
 | POST | `/api/people/{persona_id}/debug/scheduler` | タイマー制御. subline (全体) / autonomy (per-persona) / manual_mode (per-persona の wait_response timeout 停止). |
 | POST | `/api/people/{persona_id}/debug/wrap-up-conversation` | running の wait_response Track を pause + メタ判断発火 (wait_response timeout 相当を即時). |

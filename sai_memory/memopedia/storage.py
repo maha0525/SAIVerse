@@ -1064,12 +1064,18 @@ def record_page_edit(
     before_title: Optional[str] = None,
     before_summary: Optional[str] = None,
     before_content: Optional[str] = None,
+    commit: bool = True,
 ) -> str:
     """Record an edit history entry for a page.
 
     The before_* arguments capture the page state immediately before this
     edit. They are used by rollback_page to restore the page reliably. For
     'create' edits the before state is empty strings (the page didn't exist).
+
+    ``commit=False`` は呼び出し側が複数ページの書き込みを単一トランザクションへ
+    束ねるとき用 (``create_page`` と同じ流儀)。その場合、呼び出し側が
+    ``conn.commit()`` / ``rollback()`` の責任を持つ。一括変換のように途中失敗で
+    部分適用が残ると困る経路では必ず ``False`` にすること。
     """
     edit_id = str(uuid.uuid4())
     now = int(time.time())
@@ -1085,7 +1091,8 @@ def record_page_edit(
             edit_type, edit_source, before_title, before_summary, before_content,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return edit_id
 
 
