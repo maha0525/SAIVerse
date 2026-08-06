@@ -7,7 +7,9 @@
  *
  * 判定は三段。①編集来歴が「抽出器が足した」と裏づけた行は自動で Fragment、
  * ②記法だけが根拠の行は保留、③保留行は 1 行ずつユーザーが決める。
- * 判断を渡さなかった保留行は本文に残る（機械が代わりに決めない）。
+ * 画面では保留行を最初から全チェック（=移行）で出し、ユーザーは手書きの行の
+ * チェックを外す。エンジン側の契約（判断を渡さない行は本文に残る）は変えず、
+ * チェック状態を明示的な判断として常に送る。
  */
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -20,7 +22,7 @@ type Choice = 'fragment' | 'body';
 interface PendingLine {
     line_no: number;
     content: string;
-    /** pending=判断が要る / fragment=記録あり / body=そのまま本文に残る（文脈） */
+    /** pending=判断が要る / fragment=移行する（文脈） / body=本文に残る（文脈） */
     role: 'fragment' | 'pending' | 'body';
 }
 
@@ -55,6 +57,7 @@ interface Preview {
     fingerprint: string;
     decided_count: number;
     verbatim_breaches: VerbatimBreach[];
+    total_page_count: number;
     page_count: number;
     fragment_count: number;
     /** 同じ内容の Fragment が既にあり、新しくは作らず本文から抜くだけの行数 */
@@ -84,6 +87,20 @@ interface Run {
     dedup_count: number;
 }
 
+/** 保留行をすべて「移行する」に初期化した判断セット。 */
+const initialDecisions = (p: Preview): Record<string, Record<number, Choice>> => {
+    const init: Record<string, Record<number, Choice>> = {};
+    p.pending_pages.forEach((page) => {
+        const lines: Record<number, Choice> = {};
+        page.blocks.forEach((b) =>
+            b.lines.filter((l) => l.role === 'pending')
+                .forEach((l) => { lines[l.line_no] = 'fragment'; })
+        );
+        if (Object.keys(lines).length > 0) init[page.page_id] = lines;
+    });
+    return init;
+};
+
 export default function MemopediaConversion({ personaId }: { personaId: string }) {
     const [preview, setPreview] = useState<Preview | null>(null);
     const [decisions, setDecisions] = useState<Record<string, Record<number, Choice>>>({});
@@ -98,6 +115,8 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
     const base = `/api/people/${personaId}/debug/memopedia-conversion`;
     const decisionsRef = useRef(decisions);
     decisionsRef.current = decisions;
+    // サーバの数字が反映済みの判断セット。同じ内容の数え直しを避ける
+    const syncedRef = useRef<string>('');
 
     const call = async (path: string, init?: RequestInit) => {
         const res = await fetch(`${base}${path}`, init);
@@ -111,7 +130,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
             const data = await call('/runs');
             setRuns(data.runs || []);
         } catch {
-            /* 一覧が取れなくても下見・実行はできる */
+            /* 一覧が取れなくても確認・実行はできる */
         }
     };
 
@@ -121,12 +140,24 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
         setResult(null);
         setConfirming(false);
         try {
-            const data = await call('/preview');
-            setPreview(data);
-            setDecisions({});
+            const data: Preview = await call('/preview');
+            // 保留行は全チェック（=移行）が初期状態。画面に出す数字も
+            // 最初からその前提で数えたものを出す
+            const init = initialDecisions(data);
+            let shown = data;
+            if (Object.keys(init).length > 0) {
+                shown = await call('/preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decisions: init }),
+                });
+            }
+            syncedRef.current = JSON.stringify(init);
+            setPreview(shown);
+            setDecisions(init);
             await loadRuns();
         } catch (e) {
-            setError(e instanceof Error ? e.message : '下見に失敗しました');
+            setError(e instanceof Error ? e.message : '確認に失敗しました');
         } finally {
             setBusy(null);
         }
@@ -175,24 +206,29 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
         }
     };
 
-    // 保留行を選ぶと、変換されるページ数や本文が空になるページ数も変わる。
-    // 最初の下見の数字を出したままだと、自分の選択で何が起きるか見えない。
+    // チェックを外すと、移行するページ数や行数も変わる。最初の数字を出したままだと
+    // 自分の選択で何が起きるか見えないので、選択のたびに数え直す。
     useEffect(() => {
         if (!preview) return;
         if (Object.keys(decisions).length === 0) return;
+        if (JSON.stringify(decisions) === syncedRef.current) return;
         // 選択が連打されたら前のリクエストを中断する。遅れて返ってきた古い数字が
         // 新しい選択の結果を上書きすると、画面と実行内容が食い違う。
         const controller = new AbortController();
         const timer = setTimeout(async () => {
             setRestating(true);
             try {
+                const sent = JSON.stringify(decisionsRef.current);
                 const data = await call('/preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ decisions: decisionsRef.current }),
                     signal: controller.signal,
                 });
-                if (!controller.signal.aborted) setPreview(data);
+                if (!controller.signal.aborted) {
+                    syncedRef.current = sent;
+                    setPreview(data);
+                }
             } catch {
                 /* 数字の更新に失敗しても、選択と実行は続けられる */
             } finally {
@@ -222,11 +258,12 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
     };
 
     const choiceOf = (pageId: string, lineNo: number): Choice =>
-        decisions[pageId]?.[lineNo] ?? 'body';
+        decisions[pageId]?.[lineNo] ?? 'fragment';
 
     const decidedCount = Object.values(decisions).reduce(
         (n, page) => n + Object.values(page).filter((c) => c === 'fragment').length, 0
     );
+    const keptCount = preview ? preview.pending_count - decidedCount : 0;
 
     return (
         <div className={styles.section}>
@@ -235,9 +272,8 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                 <div>
                     <h3 className={styles.title}>v0.2.x の Memopedia を v0.3.x 用に変換</h3>
                     <p className={styles.description}>
-                        ページ本文に積まれた日付ブロックを Fragment（箇条書き 1 行 = 1 件）へ移します。
-                        文字を移すだけで、要約も言い換えもしません（LLM を呼びません）。
-                        実行後は実行単位で丸ごと取り消せます。
+                        旧バージョンで自動生成された Memopedia ページを、記憶想起・検索に適した形式に変換します。
+                        費用は掛かりません。
                         <br />
                         <strong>変換中は、このペルソナのメモリーを他の画面から編集しないでください。</strong>
                         書き込みがぶつかると、変換が終わるまで待たされるか失敗します。
@@ -247,9 +283,12 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
 
             <button className={styles.primaryButton} onClick={handlePreview} disabled={busy !== null}>
                 {busy === 'preview'
-                    ? <><Loader2 size={16} className={styles.loader} /> 下見しています...</>
-                    : '下見する（ページと Fragment は変えません）'}
+                    ? <><Loader2 size={16} className={styles.loader} /> 確認しています...</>
+                    : '変換対象を確認'}
             </button>
+            <p className={styles.subtle}>
+                確認した後、変換を実行可能になります。確認処理はデータを一切変更しません。
+            </p>
 
             {error && (
                 <div className={styles.error}>
@@ -289,38 +328,13 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                     <div className={styles.summary}>
                         <div className={styles.summaryRow}>
                             <span className={styles.summaryLabel}>
-                                ① 来歴が裏づけた行（そのまま Fragment に）
-                                <span className={styles.subtle}>
-                                    　日付の分かる箇条書きで、<em>同じ文を会話から自動で書き出した記録が残っている</em>もの。
-                                    本文から移しても、ページ配下の Fragment として残ります
-                                </span>
-                            </span>
-                            <span className={styles.summaryValue}>{preview.confirmed_count} 行</span>
-                        </div>
-                        <div className={styles.summaryRow}>
-                            <span className={styles.summaryLabel}>
-                                ② 記法だけが根拠の行（<strong>誰が書いたか未確定</strong>・要判断）
-                            </span>
-                            <span className={`${styles.summaryValue} ${preview.pending_count ? styles.warn : ''}`}>
-                                {preview.pending_count} 行
-                            </span>
-                        </div>
-                        <div className={styles.summaryRow}>
-                            <span className={styles.summaryLabel}>
-                                本文が変わるページ
-                                {restating && <span className={styles.subtle}>　選択を反映して数え直しています…</span>}
-                            </span>
-                            <span className={styles.summaryValue}>
-                                {preview.page_count} 枚（本文が空になる {preview.emptied_count} / 本文が残る {preview.kept_body_count}）
-                            </span>
-                        </div>
-                        <div className={styles.summaryRow}>
-                            <span className={styles.summaryLabel}>逐語の検算（行が消えない・増えない）</span>
-                            <span className={`${styles.summaryValue} ${preview.is_safe ? styles.ok : styles.bad}`}>
-                                {preview.conservation.before_lines} 行 → {preview.conservation.after_lines} 行
-                                {preview.is_safe
-                                    ? '（消失 0・捏造 0）'
-                                    : `（消えた ${preview.conservation.lost_count} / 現れた ${preview.conservation.gained_count}）`}
+                                全 {preview.total_page_count} ページ中 {preview.page_count} ページに対して移行処理を行います
+                                {preview.kept_body_count > 0 && (
+                                    <>（うち {preview.kept_body_count} 件は手動での編集内容を保持します）</>
+                                )}。
+                                {restating && (
+                                    <span className={styles.subtle}>選択を反映して数え直しています…</span>
+                                )}
                             </span>
                         </div>
                     </div>
@@ -329,9 +343,9 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                         <div className={styles.error}>
                             <AlertTriangle size={16} />
                             <span>
-                                逐語の検算に通らないため実行できません。
+                                変換の前後で本文の内容が一致しないため、実行できません（データは変更されていません）。
                                 {preview.verbatim_breaches.length > 0 && (
-                                    <> 原文とずれたページ {preview.verbatim_breaches.length} 枚
+                                    <> ずれのあるページ {preview.verbatim_breaches.length} 枚
                                     （例: {preview.verbatim_breaches[0].title} — {preview.verbatim_breaches[0].detail}）</>
                                 )}
                             </span>
@@ -356,14 +370,11 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                             <div className={styles.pendingHeader}>
                                 <AlertTriangle size={16} className={styles.warnIcon} />
                                 <div>
-                                    <strong>
-                                        この {preview.pending_count} 行を、Fragment へ移してよいか決めてください。
-                                    </strong>
+                                    <strong>自動生成かどうか確認できなかった行があります。</strong>
                                     <div className={styles.pendingHint}>
-                                        日付の分かる箇条書きの形をしていますが、同じ文を自動で書き出した記録が見つかりません。
-                                        <strong>本文に残しておきたいものが混ざっていないか</strong>を見て、1 行ずつ選んでください。
-                                        選ばなかった行は本文に残ります。
-                                        薄い字の行は判断の要らない行で、同じブロックの前後を文脈として並べています。
+                                        この {preview.pending_count} 行に、あなたやペルソナが手動で書いた文が混入していないか確認してください。
+                                        移行したくない行はチェックを外してください。外した行は本文に残ります。
+                                        薄い字の行は前後の文脈で、判断は要りません。
                                     </div>
                                 </div>
                             </div>
@@ -374,10 +385,10 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                                         <span className={styles.pageTitle}>{page.title}</span>
                                         <span className={styles.bulkButtons}>
                                             <button onClick={() => setPageChoice(page, 'fragment')}>
-                                                すべて Fragment に
+                                                すべてチェック
                                             </button>
                                             <button onClick={() => setPageChoice(page, 'body')}>
-                                                すべて本文に残す
+                                                すべて外す
                                             </button>
                                         </span>
                                     </div>
@@ -392,32 +403,25 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                                                         line.role === 'pending' ? styles.lineRow : styles.lineRowConfirmed
                                                     }
                                                 >
-                                                    <span className={styles.lineText}>{line.content}</span>
                                                     {line.role === 'pending' ? (
-                                                        <span className={styles.lineChoice}>
-                                                            <button
-                                                                className={
-                                                                    choiceOf(page.page_id, line.line_no) === 'fragment'
-                                                                        ? styles.choiceActive : styles.choice
-                                                                }
-                                                                onClick={() => setChoice(page.page_id, line.line_no, 'fragment')}
-                                                            >
-                                                                Fragment に
-                                                            </button>
-                                                            <button
-                                                                className={
-                                                                    choiceOf(page.page_id, line.line_no) === 'body'
-                                                                        ? styles.choiceActive : styles.choice
-                                                                }
-                                                                onClick={() => setChoice(page.page_id, line.line_no, 'body')}
-                                                            >
-                                                                本文に残す
-                                                            </button>
-                                                        </span>
+                                                        <label className={styles.lineCheck}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={choiceOf(page.page_id, line.line_no) === 'fragment'}
+                                                                onChange={(e) => setChoice(
+                                                                    page.page_id, line.line_no,
+                                                                    e.target.checked ? 'fragment' : 'body',
+                                                                )}
+                                                            />
+                                                            <span className={styles.lineText}>{line.content}</span>
+                                                        </label>
                                                     ) : (
-                                                        <span className={styles.confirmedTag}>
-                                                            {line.role === 'fragment' ? '記録あり' : '本文に残ります'}
-                                                        </span>
+                                                        <>
+                                                            <span className={styles.lineText}>{line.content}</span>
+                                                            <span className={styles.confirmedTag}>
+                                                                {line.role === 'fragment' ? '移行します' : '本文に残ります'}
+                                                            </span>
+                                                        </>
                                                     )}
                                                 </div>
                                             ))}
@@ -430,13 +434,11 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
 
                     <div className={styles.applyArea}>
                         <div className={styles.applyNote}>
-                            実行すると {preview.confirmed_count + decidedCount} 行を本文から Fragment へ移します
-                            （来歴の裏づけ {preview.confirmed_count} + 判断済み {decidedCount}）。
+                            移行対象: {preview.confirmed_count + decidedCount} 行　保留: {keptCount} 行
                             {preview.dedup_count > 0 && (
-                                <> うち {preview.dedup_count} 行は同じ内容の Fragment が既にあるため、新しくは作りません。</>
-                            )}
-                            {preview.pending_count - decidedCount > 0 && (
-                                <> 残り {preview.pending_count - decidedCount} 行は本文に残します。</>
+                                <span className={styles.subtle}>
+                                    移行対象のうち {preview.dedup_count} 行は同じ内容が記録済みのため、重複させずにまとめます。
+                                </span>
                             )}
                         </div>
                         {!confirming ? (
@@ -445,11 +447,11 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                                 onClick={() => setConfirming(true)}
                                 disabled={busy !== null || !preview.is_safe}
                             >
-                                実行する
+                                変換を実行
                             </button>
                         ) : (
                             <div className={styles.confirmRow}>
-                                <span>本当に実行しますか？（あとで取り消せます）</span>
+                                <span>本当に実行しますか？</span>
                                 <button className={styles.confirmYes} onClick={handleApply} disabled={busy !== null}>
                                     {busy === 'apply'
                                         ? <><Loader2 size={14} className={styles.loader} /> 変換中...</>
@@ -466,14 +468,13 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
 
             {runs.length > 0 && (
                 <div className={styles.runs}>
-                    <div className={styles.runsTitle}>取り消せる変換</div>
+                    <div className={styles.runsTitle}>実行履歴</div>
                     {runs.map((run) => (
                         <div key={run.run_id} className={styles.runRow}>
                             <span className={styles.runId}>{run.run_id}</span>
                             <span className={styles.runInfo}>
                                 {new Date(run.converted_at * 1000).toLocaleString('ja-JP')} ／
-                                {run.page_count} ページ・Fragment {run.fragment_count} 件
-                                {run.dedup_count > 0 && <>・既存へ寄せた {run.dedup_count} 行</>}
+                                {run.page_count} ページ・{run.fragment_count + run.dedup_count} 行を移行
                             </span>
                             <button
                                 className={styles.revertButton}

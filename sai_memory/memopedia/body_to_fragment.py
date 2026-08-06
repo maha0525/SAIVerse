@@ -975,6 +975,13 @@ def preview_conversion(
         moved_all = _already_moved_out(conn)
         frag_index = _existing_fragment_index(conn)
         rows = _target_pages(conn)
+        # 画面の「全 N ページ中」の分母。生きているページ全部 (変換対象外も含む)。
+        # trunk はカテゴリの器でありユーザーの目に「ページ」として映らないので外す
+        total_page_count = conn.execute(
+            "SELECT COUNT(*) FROM memopedia_pages "
+            "WHERE (is_deleted = 0 OR is_deleted IS NULL) "
+            "  AND (is_trunk = 0 OR is_trunk IS NULL)"
+        ).fetchone()[0]
         fingerprint = _fingerprint_of(
             rows, attested_all, _ledger_state(conn), frag_index
         )
@@ -1055,6 +1062,7 @@ def preview_conversion(
     is_safe = not conservation["lost"] and not conservation["gained"] and not breaches
     return {
         "fingerprint": fingerprint,
+        "total_page_count": total_page_count,
         "page_count": len(pages),
         "fragment_count": taken_total - dedup_total,
         "dedup_count": dedup_total,

@@ -272,33 +272,19 @@
     white-space: pre-wrap;
 }
 
-.lineChoice {
+.lineCheck {
     display: flex;
-    gap: 0.35rem;
-    flex-shrink: 0;
-}
-
-.choice,
-.choiceActive {
-    padding: 0.25rem 0.6rem;
-    border-radius: 6px;
-    font-size: 0.75rem;
+    align-items: flex-start;
+    gap: 0.6rem;
+    flex: 1;
     cursor: pointer;
-    white-space: nowrap;
-    border: 1px solid #444;
-    background: transparent;
-    color: #999;
 }
 
-.choice:hover {
-    border-color: #666;
-    color: #ccc;
-}
-
-.choiceActive {
-    border-color: #4dabf7;
-    background: rgba(77, 171, 247, 0.15);
-    color: #4dabf7;
+.lineCheck input {
+    margin-top: 0.25rem;
+    flex-shrink: 0;
+    accent-color: #4dabf7;
+    cursor: pointer;
 }
 
 .confirmedTag {
@@ -474,11 +460,6 @@
 :global([data-theme="light"]) .lineRowConfirmed,
 :global([data-theme="light"]) .confirmedTag {
     color: #adb5bd;
-}
-
-:global([data-theme="light"]) .choice {
-    border-color: #ced4da;
-    color: #868e96;
 }
 
 :global([data-theme="light"]) .markKind,

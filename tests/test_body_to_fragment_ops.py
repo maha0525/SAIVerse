@@ -122,6 +122,8 @@ def test_preview_separates_confirmed_from_pending(conn):
 
     assert preview["confirmed_count"] == 1
     assert preview["pending_count"] == 1
+    # UI の「全 N ページ中」の分母 — 対象外ページも含めた生存ページ数
+    assert preview["total_page_count"] == 1
     assert preview["is_safe"] is True
     assert preview["conservation"]["before_lines"] == preview["conservation"]["after_lines"]
 
@@ -145,6 +147,9 @@ def test_preview_skips_chronicle_pages_and_trunks(conn):
     preview = preview_conversion(conn)
     assert preview["page_count"] == 0
     assert preview["pending_count"] == 0
+    # 対象外の Chronicle ページも分母には数えられる（ユーザーから見れば存在する
+    # ページ）が、trunk はカテゴリの器なので数えない
+    assert preview["total_page_count"] == 1
 
 
 # --------------------------------------------------------------------------

@@ -366,6 +366,7 @@ def _run_preview(persona_id: str, manager, decisions):
 
     conservation = preview["conservation"]
     return {
+        "total_page_count": preview["total_page_count"],
         "page_count": preview["page_count"],
         "fragment_count": preview["fragment_count"],
         "dedup_count": preview["dedup_count"],
