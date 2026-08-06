@@ -3213,6 +3213,18 @@ class SessionLifecycle:
         except Exception as exc:
             LOGGER.warning("[metabolism] Entity extraction setup failed: %s", exc)
 
+        # 前回までに失敗した抽出の拾い直し (付箋 backlog)。確定済みチャンクの
+        # 抽出は本編の再実行では二度と発火しないので、ここが唯一の回収点
+        # (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+        if note_callback is not None:
+            try:
+                from sai_memory.memory.entity_extractor import retry_extraction_backlog
+                retry_extraction_backlog(adapter.conn, note_callback)
+            except Exception:
+                LOGGER.warning(
+                    "[metabolism] extraction backlog の拾い直しに失敗", exc_info=True
+                )
+
         from sai_memory.arasuji.bands import run_band_overflow
         from sai_memory.arasuji.executor import execute_plan
 
@@ -3288,7 +3300,7 @@ class SessionLifecycle:
         if exec_result.extraction_failures:
             LOGGER.error(
                 "[metabolism] entity extraction failed for %d chunks (entries=%s) — "
-                "この分の Fragment 抽出は自動では回収されない",
+                "付箋 (backlog) に記録済み。次回の Metabolism の頭で拾い直す",
                 len(exec_result.extraction_failures),
                 ",".join(e[:8] for e in exec_result.extraction_failures),
             )
@@ -3317,7 +3329,7 @@ class SessionLifecycle:
             if exec_result.extraction_failures:
                 content += (
                     f"⚠ うち {len(exec_result.extraction_failures)} 件で知識の"
-                    "書き出しに失敗しました（ログを確認してください）。"
+                    "書き出しに失敗しました。次回の記憶の整理で自動的にやり直します。"
                 )
             event_callback({
                 "type": "metabolism",

@@ -289,6 +289,11 @@ class TestBatchCallback(ExecutorTestBase):
         self.assertEqual(result.created_count, 2)
         # 1 チャンク目だけ失敗 → その entry id が記録され、2 チャンク目は載らない
         self.assertEqual(result.extraction_failures, [calls[0]])
+        # 付箋 (backlog) にも貼られている — 次の Metabolism が拾い直す
+        backlog = self.conn.execute(
+            "SELECT entry_id, attempts FROM entity_extraction_backlog"
+        ).fetchall()
+        self.assertEqual(backlog, [(calls[0], 1)])
 
 
 if __name__ == "__main__":

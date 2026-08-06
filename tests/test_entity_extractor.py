@@ -310,5 +310,111 @@ class TestBatchCallbackContract(unittest.TestCase):
         memo_cls.assert_called_once_with(conn, db_lock=lock)
 
 
+class TestExtractionBacklog(unittest.TestCase):
+    """抽出失敗の付箋 — 貼る・拾い直す・上限で止まる (まはー裁定 2026-08-06)。"""
+
+    def setUp(self):
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.memory.storage import init_db
+
+        self.conn = init_db(":memory:")
+        init_arasuji_tables(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _entry_with_messages(self, entry_id="entry-1"):
+        """メッセージ 2 件と、それを source に持つ Chronicle entry を作る。"""
+        from sai_memory.arasuji.storage import create_entry
+        from sai_memory.memory.storage import add_message
+
+        m1 = add_message(self.conn, "t", "user", "こんにちは", created_at=1000)
+        m2 = add_message(self.conn, "t", "assistant", "やあ", created_at=1001)
+        create_entry(
+            self.conn, level=1, content="挨拶した",
+            source_ids=[m1, m2], source_count=2, message_count=2,
+            entry_id=entry_id,
+        )
+        return entry_id
+
+    def test_retry_recovers_and_clears_the_note(self):
+        """⭐ 拾い直しに成功したら付箋が剥がれる。callback には元メッセージが届く。"""
+        from sai_memory.memory.entity_extractor import (
+            record_extraction_failure,
+            retry_extraction_backlog,
+        )
+
+        entry_id = self._entry_with_messages()
+        record_extraction_failure(self.conn, entry_id)
+
+        seen = []
+        stats = retry_extraction_backlog(
+            self.conn, lambda messages, eid: seen.append((len(messages), eid))
+        )
+        self.assertEqual(stats["recovered"], 1)
+        self.assertEqual(seen, [(2, entry_id)])
+        left = self.conn.execute(
+            "SELECT COUNT(*) FROM entity_extraction_backlog"
+        ).fetchone()[0]
+        self.assertEqual(left, 0)
+
+    def test_retry_failure_keeps_the_note_and_counts_attempts(self):
+        from sai_memory.memory.entity_extractor import (
+            record_extraction_failure,
+            retry_extraction_backlog,
+        )
+
+        entry_id = self._entry_with_messages()
+        record_extraction_failure(self.conn, entry_id)
+
+        def bad_callback(messages, eid):
+            raise RuntimeError("still down")
+
+        stats = retry_extraction_backlog(self.conn, bad_callback)
+        self.assertEqual(stats["failed"], 1)
+        attempts = self.conn.execute(
+            "SELECT attempts FROM entity_extraction_backlog WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()[0]
+        self.assertEqual(attempts, 2)
+
+    def test_exhausted_note_is_skipped_but_not_deleted(self):
+        """⭐ 上限を超えた付箋は LLM を呼ばずスキップ。ただし剥がさない (黙って諦めない)。"""
+        from sai_memory.memory.entity_extractor import (
+            record_extraction_failure,
+            retry_extraction_backlog,
+        )
+
+        entry_id = self._entry_with_messages()
+        for _ in range(4):  # 上限 (3) を超える失敗回数
+            record_extraction_failure(self.conn, entry_id)
+
+        calls = []
+        stats = retry_extraction_backlog(
+            self.conn, lambda messages, eid: calls.append(eid)
+        )
+        self.assertEqual(stats["exhausted"], 1)
+        self.assertEqual(calls, [])
+        left = self.conn.execute(
+            "SELECT COUNT(*) FROM entity_extraction_backlog"
+        ).fetchone()[0]
+        self.assertEqual(left, 1)
+
+    def test_note_for_a_vanished_entry_is_dropped(self):
+        """entry や元メッセージが消えていたら拾いようがない — 剥がして進む。"""
+        from sai_memory.memory.entity_extractor import (
+            record_extraction_failure,
+            retry_extraction_backlog,
+        )
+
+        record_extraction_failure(self.conn, "no-such-entry")
+        stats = retry_extraction_backlog(self.conn, lambda m, e: None)
+        self.assertEqual(stats["dropped"], 1)
+        left = self.conn.execute(
+            "SELECT COUNT(*) FROM entity_extraction_backlog"
+        ).fetchone()[0]
+        self.assertEqual(left, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

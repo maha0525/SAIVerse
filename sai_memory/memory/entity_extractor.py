@@ -447,6 +447,129 @@ def extract_and_reflect(
     )
 
 
+# ---------------------------------------------------------------------------
+# 抽出失敗の付箋 (backlog)
+#
+# 抽出が発火するのは「そのチャンクが Chronicle として確定する瞬間」の一度きりで、
+# 確定済みチャンクは再実行で冪等スキップされる — 失敗した抽出には二度と番が
+# 回ってこない。だから失敗した entry id をここに貼っておき、次の Metabolism の
+# 頭で source_ids からメッセージを読み直して拾い直す (まはー裁定 2026-08-06、
+# docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+# ---------------------------------------------------------------------------
+
+#: 拾い直しの上限。壊れたデータで毎晩 LLM 課金し続けないための天井。
+#: 超えた付箋は剥がさず残す (黙って諦めない) — retry は WARN でスキップする。
+MAX_EXTRACTION_RETRIES = 3
+
+
+def init_extraction_backlog_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entity_extraction_backlog (
+            entry_id  TEXT PRIMARY KEY,
+            failed_at INTEGER NOT NULL,
+            attempts  INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.commit()
+
+
+def record_extraction_failure(conn: sqlite3.Connection, entry_id: str) -> None:
+    """抽出の失敗を付箋に貼る (既にあれば失敗回数を重ねる)。"""
+    init_extraction_backlog_table(conn)
+    conn.execute(
+        "INSERT INTO entity_extraction_backlog (entry_id, failed_at, attempts) "
+        "VALUES (?, ?, 1) "
+        "ON CONFLICT(entry_id) DO UPDATE SET "
+        "  attempts = attempts + 1, failed_at = excluded.failed_at",
+        (entry_id, int(time.time())),
+    )
+    conn.commit()
+
+
+def retry_extraction_backlog(
+    conn: sqlite3.Connection,
+    callback: Callable[[List[Message], Optional[str]], None],
+    *,
+    max_retries: int = MAX_EXTRACTION_RETRIES,
+) -> Dict[str, int]:
+    """付箋の拾い直し。次の Metabolism の頭で呼ぶ。
+
+    entry の source_ids からメッセージを読み直し、確定時と同じ callback
+    (:func:`make_batch_callback` の戻り) で抽出をやり直す。成功したら付箋を
+    剥がす。失敗したら回数を重ね、``max_retries`` を超えた付箋は WARN で
+    スキップ (行は残す — 黙って諦めない)。
+
+    LLM コールは付箋 1 枚につき 1 回。付箋の数は「一度は確定と共に承認された
+    抽出のうち失敗した分」を超えないので、承認済みの範囲の拾い直しに収まる。
+
+    Returns:
+        ``{"recovered": n, "failed": n, "dropped": n, "exhausted": n}``。
+        dropped は entry かメッセージが消えていて拾いようがなかった付箋。
+    """
+    init_extraction_backlog_table(conn)
+    from sai_memory.memory.storage import get_messages_by_ids
+
+    stats = {"recovered": 0, "failed": 0, "dropped": 0, "exhausted": 0}
+    rows = conn.execute(
+        "SELECT entry_id, attempts FROM entity_extraction_backlog "
+        "ORDER BY failed_at ASC, entry_id ASC"
+    ).fetchall()
+    for entry_id, attempts in rows:
+        if attempts > max_retries:
+            stats["exhausted"] += 1
+            LOGGER.warning(
+                "[extraction-backlog] entry=%s は %d 回失敗して上限超え — "
+                "拾い直しを止めています (付箋は残る)",
+                entry_id[:8], attempts,
+            )
+            continue
+        row = conn.execute(
+            "SELECT source_ids_json FROM arasuji_entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        source_ids = []
+        if row is not None:
+            try:
+                source_ids = json.loads(row[0] or "[]")
+            except (TypeError, ValueError):
+                source_ids = []
+        messages = get_messages_by_ids(conn, source_ids) if source_ids else []
+        if not messages:
+            # entry が消えたか元メッセージが辿れない — 拾いようがないので剥がす
+            conn.execute(
+                "DELETE FROM entity_extraction_backlog WHERE entry_id = ?",
+                (entry_id,),
+            )
+            conn.commit()
+            stats["dropped"] += 1
+            LOGGER.warning(
+                "[extraction-backlog] entry=%s の元メッセージを辿れないため"
+                "付箋を剥がしました", entry_id[:8],
+            )
+            continue
+        try:
+            callback(messages, entry_id)
+        except Exception:
+            record_extraction_failure(conn, entry_id)
+            stats["failed"] += 1
+            LOGGER.exception(
+                "[extraction-backlog] entry=%s の拾い直しに失敗 (attempts=%d)",
+                entry_id[:8], attempts + 1,
+            )
+            continue
+        conn.execute(
+            "DELETE FROM entity_extraction_backlog WHERE entry_id = ?",
+            (entry_id,),
+        )
+        conn.commit()
+        stats["recovered"] += 1
+    if any(stats.values()):
+        LOGGER.info("[extraction-backlog] 拾い直し結果: %s", stats)
+    return stats
+
+
 def make_batch_callback(
     client,
     conn: sqlite3.Connection,

@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sai_memory.logging_utils import debug
 
@@ -1310,7 +1310,24 @@ def count_messages(conn: sqlite3.Connection) -> int:
     return int(cur.fetchone()[0])
 
 
-    return int(cur.fetchone()[0])
+def get_messages_by_ids(
+    conn: sqlite3.Connection, message_ids: Sequence[str]
+) -> List[Message]:
+    """id 指定でメッセージを取り出す (正典順 = created_at, rowid)。
+
+    Chronicle entry の source_ids からの読み直し (Fragment 抽出の付箋の
+    拾い直しなど) 用。存在しない id は黙って落ちる。
+    """
+    if not message_ids:
+        return []
+    ph = ",".join("?" for _ in message_ids)
+    rows = conn.execute(
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        f"FROM messages WHERE id IN ({ph}) "
+        "ORDER BY created_at ASC, rowid ASC",
+        tuple(message_ids),
+    ).fetchall()
+    return [_row_to_message(r) for r in rows]
 
 
 def delete_thread(conn: sqlite3.Connection, thread_id: str) -> bool:

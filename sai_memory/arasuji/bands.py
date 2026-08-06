@@ -678,6 +678,15 @@ def _fire_identity_fragment_callbacks(
         except Exception:
             if extraction_failures is not None:
                 extraction_failures.append(entry.id)
+            try:
+                from sai_memory.memory.entity_extractor import (
+                    record_extraction_failure,
+                )
+                record_extraction_failure(conn, entry.id)
+            except Exception:
+                LOGGER.warning(
+                    "[bands] extraction backlog の記帳に失敗", exc_info=True
+                )
             LOGGER.exception(
                 "[bands] fragment callback failed for identity child %s",
                 entry.id[:8],
@@ -685,16 +694,9 @@ def _fire_identity_fragment_callbacks(
 
 
 def _load_messages_by_ids(conn: sqlite3.Connection, message_ids: Sequence[str]):
-    from sai_memory.memory.storage import _row_to_message
+    from sai_memory.memory.storage import get_messages_by_ids
 
-    ph = ",".join("?" for _ in message_ids)
-    rows = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-        f"FROM messages WHERE id IN ({ph}) "
-        "ORDER BY created_at ASC, rowid ASC",
-        tuple(message_ids),
-    ).fetchall()
-    return [_row_to_message(r) for r in rows]
+    return get_messages_by_ids(conn, message_ids)
 
 
 def _consolidate_fold(

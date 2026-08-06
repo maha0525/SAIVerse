@@ -33,7 +33,9 @@
 3. **`generator.py` / `estimate.py`**: `db_lock` パラメータを追加し、届く呼び出し元（API ルート）から渡した。`scripts/` 配下は単独 DB なので渡さない（従来どおり）
 4. **失敗を失敗として扱う**（本体）: 握り潰しは三層あった —— callback 自身の `warning`、`executor.execute_plan` の `exception`＋continue、`bands._fire_identity_fragment_callbacks` の `exception`＋continue。callback の握り潰しを撤去し、executor は `ExecutionResult.extraction_failures` に entry id を記録、bands は out-param（`extraction_failures` リスト）で同じ器に積む。Metabolism は完了時に **ERROR ログ + 実行台帳の result + 画面通知**で表へ出す
 
-**失敗を「Chronicle の failed」に畳み込まなかった理由**: チャンクは確定済みで、failed 再実行しても `source_ids` の冪等スキップにより抽出は再発火しない。丸ごと failed にすると「Chronicle は成功したのに失敗と記録され、再実行しても抽出は戻らない」という嘘の状態になる。だから成否は分離し、失敗の事実だけを消えない形で残す。抽出の自動再試行（回収キュー）はここでは作らない —— 必要になったら別案件
+**失敗を「Chronicle の failed」に畳み込まなかった理由**: チャンクは確定済みで、failed 再実行しても `source_ids` の冪等スキップにより抽出は再発火しない。丸ごと failed にすると「Chronicle は成功したのに失敗と記録され、再実行しても抽出は戻らない」という嘘の状態になる。だから成否は分離し、失敗の事実だけを消えない形で残す
+
+5. **拾い直し**（まはー裁定 2026-08-06: 「失敗した部分は次回実行で再処理される」が期待される姿）: 失敗した entry id を付箋テーブル `entity_extraction_backlog`（persona memory.db）に貼り、**次の Metabolism の頭**で entry の `source_ids` からメッセージを読み直して同じ抽出をやり直す。成功したら付箋を剥がす。やり直しは 3 回まで（壊れたデータで毎晩 LLM 課金し続けない天井）—— 上限後も付箋は剥がさず残し、WARN で見え続ける（黙って諦めない）。entry や元メッセージが消えていて拾いようのない付箋だけは剥がして進む
 
 ## 経緯
 

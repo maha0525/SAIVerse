@@ -43,8 +43,9 @@ class ExecutionResult:
     cancelled: bool = False
     #: 抽出 (batch_callback) が失敗したチャンクの Chronicle entry id。
     #: チャンク自体は確定済みで、再実行では source_ids の冪等スキップにより
-    #: batch_callback が再発火しない —— つまりここに載った抽出は自動では
-    #: 回収されない。呼び出し元が failed として扱う (握り潰さない) こと
+    #: batch_callback が再発火しない。失敗は付箋 (entity_extraction_backlog)
+    #: にも記録され、次の Metabolism の頭で拾い直される。このリストは
+    #: 呼び出し元への当回ぶんの報告用 (握り潰さない)
     #: (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
     extraction_failures: List[str] = field(default_factory=list)
 
@@ -293,9 +294,19 @@ def execute_plan(
             except Exception:
                 # Chronicle のチャンクは確定済みなので生成は続ける。ただし失敗を
                 # ここで消さない —— 確定済みチャンクは再実行で冪等スキップされる
-                # ため、この抽出は自動では回収されず、記録しなければ記憶が
-                # 黙って落ちる (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+                # ため、この抽出は放っておくと回収されない。結果に載せて呼び出し元へ
+                # 伝え、付箋 (backlog) に貼って次の Metabolism が拾い直す
+                # (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
                 result.extraction_failures.append(entry.id)
+                try:
+                    from sai_memory.memory.entity_extractor import (
+                        record_extraction_failure,
+                    )
+                    record_extraction_failure(conn, entry.id)
+                except Exception:
+                    LOGGER.warning(
+                        "[executor] extraction backlog の記帳に失敗", exc_info=True
+                    )
                 LOGGER.exception(
                     "[executor] batch_callback failed (entry=%s); continuing",
                     entry.id[:8],
