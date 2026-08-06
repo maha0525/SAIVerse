@@ -5,7 +5,7 @@
 
 REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
 
-**エンドポイント数**: 358（tag グループ: 25）
+**エンドポイント数**: 366（tag グループ: 25）
 
 ## addon
 
@@ -271,7 +271,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/people/{persona_id}/debug/fire-subline-pulse` | (廃止) 旧 autonomous Track の sub_line Pulse 手動起動。 |
 | POST | `/api/people/{persona_id}/debug/generate-embeddings` | Chronicle / Memopedia page / Fragment の未生成 embedding をバッチ生成. |
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/apply` | 変換を実行する。逐語の検算に落ちたら何も書かずに 409 を返す。 |
-| GET | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 下見: 変換したら何がどうなるかを、DB へ書かずに返す。 |
+| GET | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 下見: 変換したら何がどうなるかを、ページと Fragment を変えずに返す。 |
+| POST | `/api/people/{persona_id}/debug/memopedia-conversion/preview` | 判断を織り込んだ下見。 |
 | POST | `/api/people/{persona_id}/debug/memopedia-conversion/revert` | 変換を丸ごと取り消す。 |
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
 | GET | `/api/people/{persona_id}/debug/scheduler` | タイマーの稼働状態を返す. |
