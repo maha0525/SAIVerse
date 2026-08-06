@@ -649,6 +649,7 @@ def _fire_identity_fragment_callbacks(
     conn: sqlite3.Connection,
     entries: Sequence[ArasujiEntry],
     batch_callback: Optional[Callable],
+    extraction_failures: Optional[List[str]] = None,
 ) -> None:
     """恒等圧縮の子の Fragment 抽出 (既存データ互換)。
 
@@ -656,6 +657,11 @@ def _fire_identity_fragment_callbacks(
     要約に変わる**この瞬間が「生ログが要約に置き換わる瞬間に一度だけ抽出」の
     実行点。LLM 束ね済みの子の範囲は既に抽出済みなので走らせない (Fragment
     の重複と参照切れを避ける)。chronicle_entry_id は恒等圧縮の子自身。
+
+    失敗しても残りの子と束ねは続けるが、失敗を消さない —— 束ねが確定した子は
+    二度と「初めて要約に変わる瞬間」を迎えないので、この抽出は自動では回収
+    されない。``extraction_failures`` に entry id を積んで呼び出し元へ返す
+    (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
     """
     if batch_callback is None:
         return
@@ -670,6 +676,8 @@ def _fire_identity_fragment_callbacks(
             if messages:
                 batch_callback(messages, entry.id)
         except Exception:
+            if extraction_failures is not None:
+                extraction_failures.append(entry.id)
             LOGGER.exception(
                 "[bands] fragment callback failed for identity child %s",
                 entry.id[:8],
@@ -697,6 +705,7 @@ def _consolidate_fold(
     persona_id: Optional[str],
     batch_callback: Optional[Callable] = None,
     known_ids: Optional[Set[str]] = None,
+    extraction_failures: Optional[List[str]] = None,
 ) -> Optional[ArasujiEntry]:
     """畳み 1 件を親ノードに確定する (親 + 子を単一 tx)。"""
     entries = [i.entry for i in fold.items if i.entry is not None]
@@ -821,7 +830,9 @@ def _consolidate_fold(
         len(entries), fold.level, target_level, total_coverage, parent.id[:8],
     )
     # Fragment 抽出は commit 後 (executor.py の batch_callback と同型の位置)。
-    _fire_identity_fragment_callbacks(conn, entries, batch_callback)
+    _fire_identity_fragment_callbacks(
+        conn, entries, batch_callback, extraction_failures
+    )
     return parent
 
 
@@ -834,6 +845,7 @@ def run_band_overflow(
     excluded_entry_ids: Optional[Set[str]] = None,
     batch_callback: Optional[Callable] = None,
     max_folds: Optional[int] = None,
+    extraction_failures: Optional[List[str]] = None,
 ) -> int:
     """レベル別の並びを検査し、予算超過の畳みを実行する。
 
@@ -853,6 +865,8 @@ def run_band_overflow(
             dry より増えることがあり、承認・課金見込みを実行が超えてはいけない
             (Codex レビュー 2026-07-28 high2)。積み残しは次回の Metabolism の
             dry が数え直して、次の承認のもとで畳まれる (収束は崩れない)。
+        extraction_failures: 渡すと、Fragment 抽出に失敗した entry id を
+            ここへ積む (戻り値の契約を変えずに失敗を呼び出し元へ返す)。
 
     Returns:
         作った親ノード数。
@@ -883,7 +897,7 @@ def run_band_overflow(
         parent = _consolidate_fold(
             conn, client, fold,
             persona_id=persona_id, batch_callback=batch_callback,
-            known_ids=known_ids,
+            known_ids=known_ids, extraction_failures=extraction_failures,
         )
         if parent is None:
             break

@@ -37,6 +37,7 @@ def estimate_chronicle_generation_cost(
     *,
     model_name: str,
     excluded_entry_ids: Optional[frozenset] = frozenset(),
+    db_lock=None,
 ) -> ChronicleCostEstimate:
     """未処理メッセージから Chronicle を生成した場合の費用を見積もる。
 
@@ -50,6 +51,9 @@ def estimate_chronicle_generation_cost(
             **None = 照会失敗 (fold の有無が不明)** — 生成経路が束ねを見送る
             のと同形に、束ねコールを 0 と見積もる。既定の空集合は
             「fold という概念ごと無い環境」(CLI / テスト) 用
+        db_lock: 同じ DB を書く adapter がいる場合、その ``_db_lock``。見積もり
+            自体は読むだけだが、Memopedia の初期化はテーブル作成の書き込みを伴う
+            (docs/issues/memopedia_writers_bypass_adapter_lock.md)
     """
     from sai_memory.arasuji.alignment import (
         chronicle_band_budget,
@@ -127,7 +131,7 @@ def estimate_chronicle_generation_cost(
     try:
         from sai_memory.memopedia import Memopedia, init_memopedia_tables
         init_memopedia_tables(conn)
-        memopedia = Memopedia(conn)
+        memopedia = Memopedia(conn, db_lock=db_lock)
         text = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
         if text and text != "(まだページはありません)":
             memopedia_tokens = len(text) / 3.5

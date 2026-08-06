@@ -265,5 +265,50 @@ class TestReflectToMemopedia(unittest.TestCase):
             )
 
 
+class TestBatchCallbackContract(unittest.TestCase):
+    """docs/issues/memopedia_writers_bypass_adapter_lock.md の契約。"""
+
+    def _msg(self):
+        return Message(id="m1", thread_id="t", role="user", content="hi",
+                       resource_id="r", created_at=1000, metadata={})
+
+    def test_extraction_failure_propagates_to_caller(self):
+        """⭐ callback は失敗を握り潰さない。
+
+        記録するのは呼び出し元 (executor.ExecutionResult.extraction_failures)。
+        ここで warning に畳むと、ペルソナの記憶追記が黙って落ちる。
+        """
+        import sqlite3
+        from sai_memory.memory.entity_extractor import make_batch_callback
+
+        conn = sqlite3.connect(":memory:")
+        callback = make_batch_callback(MagicMock(), conn)
+        with patch(
+            "sai_memory.memory.entity_extractor.extract_and_reflect",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                callback([self._msg()], "entry-1")
+
+    def test_extract_and_reflect_passes_the_shared_lock(self):
+        """⭐ adapter の _db_lock が Memopedia まで届くこと。
+
+        渡さないと Memopedia が自前の RLock を作り、同じ接続への他所の
+        commit と排他が成立しない。
+        """
+        import sqlite3
+        import threading
+        from sai_memory.memory.entity_extractor import extract_and_reflect
+
+        lock = threading.RLock()
+        conn = sqlite3.connect(":memory:")
+        with patch("sai_memory.memopedia.Memopedia") as memo_cls, patch(
+            "sai_memory.memory.entity_extractor.extract_entities",
+            return_value=[],
+        ):
+            extract_and_reflect(MagicMock(), conn, [self._msg()], db_lock=lock)
+        memo_cls.assert_called_once_with(conn, db_lock=lock)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3205,6 +3205,10 @@ class SessionLifecycle:
             note_callback = make_entity_callback(
                 client, adapter.conn,
                 persona_id=persona_id_str,
+                # adapter.conn を使う以上、adapter と同じロックで書く。渡さないと
+                # Memopedia が自前のロックを作り、同じ接続への他所の commit と
+                # 排他が成立しない (docs/issues/memopedia_writers_bypass_adapter_lock.md)
+                db_lock=adapter._db_lock,
             )
         except Exception as exc:
             LOGGER.warning("[metabolism] Entity extraction setup failed: %s", exc)
@@ -3264,6 +3268,9 @@ class SessionLifecycle:
                     # 確認ゲートに提示した dry 件数を実行の上限にする —
                     # 実出力長のブレで連鎖が増えても承認回数を超えない。
                     max_folds=band_plan_count,
+                    # 束ね側の抽出失敗も同じ器に積む — 下の報告 (ERROR ログ /
+                    # 台帳 / 画面通知) が executor 側とまとめて拾う。
+                    extraction_failures=exec_result.extraction_failures,
                 )
             except Exception:
                 LOGGER.exception("[bands] consolidation failed; continuing")
@@ -3274,6 +3281,17 @@ class SessionLifecycle:
             exec_result.created_count, exec_result.skipped_duplicates,
             consolidated_count,
         )
+        # 抽出の失敗は Chronicle の成否に畳み込まない (チャンクは確定済みで、
+        # failed 再実行しても冪等スキップにより抽出は再発火しない = 嘘の失敗)。
+        # 代わりに握り潰さず表へ出す: ERROR ログ + 台帳 + 画面通知
+        # (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+        if exec_result.extraction_failures:
+            LOGGER.error(
+                "[metabolism] entity extraction failed for %d chunks (entries=%s) — "
+                "この分の Fragment 抽出は自動では回収されない",
+                len(exec_result.extraction_failures),
+                ",".join(e[:8] for e in exec_result.extraction_failures),
+            )
         if ledger is not None and execution_id:
             try:
                 result_payload = dict(plan.summary)
@@ -3283,6 +3301,10 @@ class SessionLifecycle:
                     "cancelled": exec_result.cancelled,
                     "bands_consolidated": consolidated_count,
                 })
+                if exec_result.extraction_failures:
+                    result_payload["extraction_failures"] = list(
+                        exec_result.extraction_failures
+                    )
                 ledger.mark_applied(execution_id, result=result_payload)
                 # outbox を積まない実行なので completed へ明示遷移して閉じる。
                 ledger.mark_completed(execution_id)
@@ -3291,10 +3313,16 @@ class SessionLifecycle:
 
         # Notify frontend that generation is complete
         if event_callback:
+            content = f"Chronicle生成完了: {exec_result.created_count}件のエントリを作成しました。"
+            if exec_result.extraction_failures:
+                content += (
+                    f"⚠ うち {len(exec_result.extraction_failures)} 件で知識の"
+                    "書き出しに失敗しました（ログを確認してください）。"
+                )
             event_callback({
                 "type": "metabolism",
                 "status": "completed",
-                "content": f"Chronicle生成完了: {exec_result.created_count}件のエントリを作成しました。",
+                "content": content,
             })
         return "ok"
 

@@ -122,12 +122,16 @@ def estimate_chronicle_cost(
             LOGGER.warning("[cost-estimate] folded-range collection failed", exc_info=True)
             folded_entry_ids = None
 
+        # Memopedia 初期化はテーブル作成の書き込みを伴うため、ロード済みなら
+        # adapter のロックで直列化する (memopedia_writers_bypass_adapter_lock)
+        _adapter = getattr(persona, "sai_memory", None)
         estimate = estimate_chronicle_generation_cost(
             conn,
             model_name=model_name,
             excluded_entry_ids=(
                 frozenset(folded_entry_ids) if folded_entry_ids is not None else None
             ),
+            db_lock=_adapter._db_lock if _adapter is not None else None,
         )
 
         return ChronicleCostEstimate(

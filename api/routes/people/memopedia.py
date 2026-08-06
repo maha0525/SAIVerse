@@ -31,9 +31,26 @@ _memopedia_jobs_lock = threading.Lock()
 
 
 def _get_memopedia(adapter):
-    """Helper to get Memopedia instance from adapter."""
+    """Helper to get Memopedia instance from adapter.
+
+    adapter.conn を使う以上、adapter と同じロックで書く。渡さないと Memopedia が
+    自前の RLock を作り、同じ接続への他所の commit と排他が成立しない
+    (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+    """
     from sai_memory.memopedia import Memopedia
-    return Memopedia(adapter.conn)
+    return Memopedia(adapter.conn, db_lock=adapter._db_lock)
+
+
+def _adapter_db_lock(manager, persona_id: str):
+    """ロード済みペルソナの adapter ロックを返す (未ロードなら None)。
+
+    バックグラウンドワーカーは専用接続を開くが、同じ DB へ adapter 経由の
+    書き手が同居しうる。ロックを共有すれば、ロックを尊重する書き手同士は
+    接続が別でも直列化される (debug.py の ``_memopedia_session`` と同じ流儀)。
+    """
+    persona = manager.personas.get(persona_id) if manager else None
+    adapter = getattr(persona, "sai_memory", None)
+    return adapter._db_lock if adapter is not None else None
 
 
 @router.get("/{persona_id}/memopedia/tree")
@@ -495,8 +512,15 @@ def _run_memopedia_generation(
     context_window: int,
     with_chronicle: bool,
     model_name: str | None,
+    db_lock=None,
 ) -> None:
-    """Background worker for Memopedia page generation."""
+    """Background worker for Memopedia page generation.
+
+    Args:
+        db_lock: ペルソナがロード済みなら adapter の ``_db_lock``。接続は専用でも、
+            ロックを共有すればロックを尊重する書き手 (adapter 経由の追記) と
+            直列化される (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+    """
     from sai_memory.memory.storage import init_db
     from sai_memory.memopedia import init_memopedia_tables
     from sai_memory.memopedia.generator import generate_memopedia_page
@@ -568,6 +592,7 @@ def _run_memopedia_generation(
             context_window=context_window,
             with_chronicle=with_chronicle,
             progress_callback=progress_callback,
+            db_lock=db_lock,
         )
         
         conn.close()
@@ -632,7 +657,7 @@ async def start_memopedia_generation(
     persona_dir = get_personas_dir() / persona_id
     if not persona_dir.exists():
         raise HTTPException(status_code=404, detail=f"Persona not found: {persona_id}")
-    
+
     # Create job
     job_id = str(uuid.uuid4())
     with _memopedia_jobs_lock:
@@ -646,7 +671,7 @@ async def start_memopedia_generation(
             "result": None,
             "error": None,
         }
-    
+
     # Start background task
     background_tasks.add_task(
         _run_memopedia_generation,
@@ -659,8 +684,9 @@ async def start_memopedia_generation(
         context_window=request.context_window,
         with_chronicle=request.with_chronicle,
         model_name=request.model,
+        db_lock=_adapter_db_lock(manager, persona_id),
     )
-    
+
     return {"job_id": job_id, "status": "running"}
 
 
@@ -691,8 +717,14 @@ def _run_build_memopedia_from_logs(
     limit: int,
     start_after: float,
     model_name: str | None,
+    db_lock=None,
 ) -> None:
-    """Background worker for building Memopedia from chat logs."""
+    """Background worker for building Memopedia from chat logs.
+
+    Args:
+        db_lock: ペルソナがロード済みなら adapter の ``_db_lock``
+            (``_adapter_db_lock`` 参照)。
+    """
     import json
     import time as _time
     from sai_memory.memory.storage import init_db, Message
@@ -793,7 +825,7 @@ def _run_build_memopedia_from_logs(
             message=f"{len(messages)} メッセージを {total_batches} バッチで処理開始",
         )
 
-        memopedia = Memopedia(conn)
+        memopedia = Memopedia(conn, db_lock=db_lock)
         total_entities = 0
         total_new_pages = 0
         total_updated_pages = 0
@@ -905,6 +937,7 @@ async def start_build_memopedia_from_logs(
         limit=request.limit,
         start_after=request.start_after,
         model_name=request.model,
+        db_lock=_adapter_db_lock(manager, persona_id),
     )
 
     return {"job_id": job_id, "status": "running"}

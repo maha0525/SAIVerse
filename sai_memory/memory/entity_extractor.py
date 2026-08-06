@@ -401,6 +401,7 @@ def extract_and_reflect(
     episode_context: str = "",
     persona_id: Optional[str] = None,
     chronicle_entry_id: Optional[str] = None,
+    db_lock: Optional[Any] = None,
 ) -> List[EntityExtractionResult]:
     """Extract entities from messages and reflect them to Memopedia in one call.
 
@@ -413,13 +414,17 @@ def extract_and_reflect(
         episode_context: Chronicle context for surrounding events.
         persona_id: Optional persona ID for usage tracking.
         chronicle_entry_id: ID of the Chronicle Lv-1 entry for Fragment linkage.
+        db_lock: SAIMemoryAdapter の ``_db_lock``。``conn`` が adapter と共有なら
+            必須 —— 渡さないと Memopedia が自前の RLock を作り、同じ接続への
+            他所の commit と排他が成立しない (docs/issues/
+            memopedia_writers_bypass_adapter_lock.md)。
 
     Returns:
         List of results describing what was created/updated.
     """
     from sai_memory.memopedia import Memopedia, init_memopedia_tables
     init_memopedia_tables(conn)
-    memopedia = Memopedia(conn)
+    memopedia = Memopedia(conn, db_lock=db_lock)
 
     existing_pages = _format_page_list(memopedia)
 
@@ -447,6 +452,7 @@ def make_batch_callback(
     conn: sqlite3.Connection,
     *,
     persona_id: Optional[str] = None,
+    db_lock: Optional[Any] = None,
 ) -> Callable[[List[Message], Optional[str]], None]:
     """Create a batch callback for Chronicle generation.
 
@@ -459,45 +465,50 @@ def make_batch_callback(
         client: LLM client for entity extraction.
         conn: Database connection.
         persona_id: Optional persona ID for usage tracking.
+        db_lock: SAIMemoryAdapter の ``_db_lock`` (``extract_and_reflect`` 参照)。
 
     Returns:
         Callback function accepting (batch_messages, chronicle_entry_id).
+
+    Note:
+        失敗はここで握り潰さない。ペルソナの記憶追記が黙って落ちる穴だった
+        (docs/issues/memopedia_writers_bypass_adapter_lock.md)。例外はそのまま
+        呼び出し元 (executor.execute_plan) へ届き、あちらが「どのチャンクの
+        抽出が失敗したか」を ExecutionResult に記録する。
     """
     def callback(batch_messages: List[Message], chronicle_entry_id: Optional[str] = None) -> None:
         if not batch_messages:
             return
 
+        from sai_memory.arasuji.context import get_episode_context_for_timerange
+        start_time = min(m.created_at for m in batch_messages)
+        end_time = max(m.created_at for m in batch_messages)
+
+        ep_ctx = ""
         try:
-            from sai_memory.arasuji.context import get_episode_context_for_timerange
-            start_time = min(m.created_at for m in batch_messages)
-            end_time = max(m.created_at for m in batch_messages)
-
-            ep_ctx = ""
-            try:
-                ep_ctx = get_episode_context_for_timerange(
-                    conn, start_time=start_time, end_time=end_time, max_entries=10,
-                )
-            except Exception:
-                pass
-
-            results = extract_and_reflect(
-                client, conn, batch_messages,
-                episode_context=ep_ctx,
-                persona_id=persona_id,
-                chronicle_entry_id=chronicle_entry_id,
+            ep_ctx = get_episode_context_for_timerange(
+                conn, start_time=start_time, end_time=end_time, max_entries=10,
             )
+        except Exception:
+            pass
 
-            if results:
-                new_count = sum(1 for r in results if r.is_new_page)
-                update_count = sum(1 for r in results if not r.is_new_page)
-                total_notes = sum(r.notes_appended for r in results)
-                LOGGER.info(
-                    "Entity extraction batch complete: %d entities (%d new, %d updated), "
-                    "%d notes total, chronicle_entry=%s",
-                    len(results), new_count, update_count, total_notes,
-                    chronicle_entry_id[:12] if chronicle_entry_id else None,
-                )
-        except Exception as exc:
-            LOGGER.warning("Entity extraction batch callback failed: %s", exc, exc_info=True)
+        results = extract_and_reflect(
+            client, conn, batch_messages,
+            episode_context=ep_ctx,
+            persona_id=persona_id,
+            chronicle_entry_id=chronicle_entry_id,
+            db_lock=db_lock,
+        )
+
+        if results:
+            new_count = sum(1 for r in results if r.is_new_page)
+            update_count = sum(1 for r in results if not r.is_new_page)
+            total_notes = sum(r.notes_appended for r in results)
+            LOGGER.info(
+                "Entity extraction batch complete: %d entities (%d new, %d updated), "
+                "%d notes total, chronicle_entry=%s",
+                len(results), new_count, update_count, total_notes,
+                chronicle_entry_id[:12] if chronicle_entry_id else None,
+            )
 
     return callback

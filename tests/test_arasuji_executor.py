@@ -266,6 +266,30 @@ class TestBatchCallback(ExecutorTestBase):
                               batch_callback=bad_callback)
         self.assertEqual(result.created_count, 2)
 
+    def test_callback_failure_is_recorded_not_swallowed(self):
+        """⭐ 抽出の失敗は握り潰さず ExecutionResult に entry id で残す。
+
+        確定済みチャンクは再実行で冪等スキップされ batch_callback が再発火しない
+        ため、記録しなければ記憶の抽出が黙って落ちる
+        (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+        """
+        calls = []
+
+        def flaky_callback(messages, entry_id):
+            calls.append(entry_id)
+            if len(calls) == 1:
+                raise RuntimeError("extractor down")
+
+        plan = _plan(
+            _chunk([_msg("m1", "a" * 50)]),
+            _chunk([_msg("m2", "b" * 50)]),
+        )
+        result = execute_plan(plan, _CountingClient(), self.conn,
+                              batch_callback=flaky_callback)
+        self.assertEqual(result.created_count, 2)
+        # 1 チャンク目だけ失敗 → その entry id が記録され、2 チャンク目は載らない
+        self.assertEqual(result.extraction_failures, [calls[0]])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,12 @@ class ExecutionResult:
     created: List[ArasujiEntry] = field(default_factory=list)
     skipped_duplicates: int = 0
     cancelled: bool = False
+    #: 抽出 (batch_callback) が失敗したチャンクの Chronicle entry id。
+    #: チャンク自体は確定済みで、再実行では source_ids の冪等スキップにより
+    #: batch_callback が再発火しない —— つまりここに載った抽出は自動では
+    #: 回収されない。呼び出し元が failed として扱う (握り潰さない) こと
+    #: (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+    extraction_failures: List[str] = field(default_factory=list)
 
     @property
     def created_count(self) -> int:
@@ -285,6 +291,11 @@ def execute_plan(
             try:
                 batch_callback(chunk.messages, entry.id)
             except Exception:
+                # Chronicle のチャンクは確定済みなので生成は続ける。ただし失敗を
+                # ここで消さない —— 確定済みチャンクは再実行で冪等スキップされる
+                # ため、この抽出は自動では回収されず、記録しなければ記憶が
+                # 黙って落ちる (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+                result.extraction_failures.append(entry.id)
                 LOGGER.exception(
                     "[executor] batch_callback failed (entry=%s); continuing",
                     entry.id[:8],

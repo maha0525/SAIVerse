@@ -354,6 +354,7 @@ def generate_memopedia_page(
     context_window: int = 10,
     with_chronicle: bool = True,
     progress_callback=None,
+    db_lock=None,
 ) -> Optional[Dict[str, Any]]:
     """Generate a Memopedia page by iteratively collecting information.
 
@@ -372,6 +373,9 @@ def generate_memopedia_page(
         context_window: Messages to fetch around each selected hit (default: 10)
         with_chronicle: Whether to include Chronicle context for better understanding
         progress_callback: Optional callback(loop, max_loops, message)
+        db_lock: 同じ DB を書く adapter がいる場合、その ``_db_lock``。渡さないと
+            Memopedia が自前のロックを作り排他が成立しない
+            (docs/issues/memopedia_writers_bypass_adapter_lock.md)
 
     Returns:
         Page data dict or None if failed
@@ -394,7 +398,7 @@ def generate_memopedia_page(
         except Exception as e:
             LOGGER.warning(f"Failed to load Chronicle context: {e}")
 
-    memopedia = Memopedia(conn)
+    memopedia = Memopedia(conn, db_lock=db_lock)
 
     # Get existing Memopedia pages for context
     existing_pages = ""
