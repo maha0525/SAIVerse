@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import threading
@@ -25,6 +26,10 @@ from sai_memory.memopedia.storage import CATEGORY_DEFS, category_keys
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
 
+#: ログからの再構築を打ち切る連続失敗数。たまたま落ちた 1 バッチでは止めず、
+#: DB が壊れている等で全部落ちる状態では partial の顔で終わらせない。
+_MAX_CONSECUTIVE_BATCH_FAILURES = 3
+
 # In-memory job store for Memopedia generation
 _memopedia_jobs: Dict[str, Dict[str, Any]] = {}
 _memopedia_jobs_lock = threading.Lock()
@@ -33,8 +38,8 @@ _memopedia_jobs_lock = threading.Lock()
 def _get_memopedia(adapter):
     """Helper to get Memopedia instance from adapter.
 
-    adapter.conn を使う以上、adapter と同じロックで書く。渡さないと Memopedia が
-    自前の RLock を作り、同じ接続への他所の commit と排他が成立しない
+    adapter と同じ錠前で書く。渡さなくても Memopedia が DB ファイルの錠前を
+    配り所から取るので同じものになるが、既に手元にあるなら渡すほうが素直
     (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
     """
     from sai_memory.memopedia import Memopedia
@@ -42,15 +47,21 @@ def _get_memopedia(adapter):
 
 
 def _adapter_db_lock(manager, persona_id: str):
-    """ロード済みペルソナの adapter ロックを返す (未ロードなら None)。
+    """このペルソナの memory.db の錠前を返す。
 
     バックグラウンドワーカーは専用接続を開くが、同じ DB へ adapter 経由の
-    書き手が同居しうる。ロックを共有すれば、ロックを尊重する書き手同士は
-    接続が別でも直列化される (debug.py の ``_memopedia_session`` と同じ流儀)。
+    書き手が同居しうる。錠前は DB ファイルに紐づく (``sai_memory.db_locks``)
+    ので、**ペルソナがロード済みかどうかに関係なく同じものが返る** —— ジョブの
+    実行中にペルソナがロードされても、後から現れた adapter と同じ錠前を共有する
+    (まはー裁定 2026-08-06、案A)。
     """
+    from sai_memory.db_locks import lock_for_path
+
     persona = manager.personas.get(persona_id) if manager else None
     adapter = getattr(persona, "sai_memory", None)
-    return adapter._db_lock if adapter is not None else None
+    if adapter is not None:
+        return adapter._db_lock
+    return lock_for_path(str(get_personas_dir() / persona_id / "memory.db"))
 
 
 @router.get("/{persona_id}/memopedia/tree")
@@ -538,9 +549,15 @@ def _run_memopedia_generation(
             _update_memopedia_job(job_id, status="failed", error=f"Database not found: {db_path}")
             return
         
-        conn = init_db(str(db_path), check_same_thread=False)
-        init_memopedia_tables(conn)
-        
+        # テーブルの用意は generate_memopedia_page の中の Memopedia が
+        # **ロックの内側で**行う (ここで先に呼ぶと commit がロック外で走る)
+        # init_db は列の追加や既存行の補完まで行う書き込み。接続は専用でも DB は
+        # 共有なので、ロード済みペルソナの書き手と同じ錠前の内側で行う
+        # (Codex 八巡 #5)。テーブルの用意は generate_memopedia_page の中の
+        # Memopedia が同じ錠前で行う
+        with (db_lock or contextlib.nullcontext()):
+            conn = init_db(str(db_path), check_same_thread=False)
+
         # Initialize LLM client
         _update_memopedia_job(job_id, message="Initializing LLM client...")
         
@@ -718,12 +735,18 @@ def _run_build_memopedia_from_logs(
     start_after: float,
     model_name: str | None,
     db_lock=None,
+    start_after_rowid: int = 0,
 ) -> None:
     """Background worker for building Memopedia from chat logs.
 
     Args:
         db_lock: ペルソナがロード済みなら adapter の ``_db_lock``
             (``_adapter_db_lock`` 参照)。
+        start_after: 再開位置の時刻。``start_after_rowid`` と対で使う。
+        start_after_rowid: 再開位置の行番号。時刻だけでは同じ秒のメッセージの
+            順序を表せず、「その時刻より後」だと同秒の行を取りこぼし、
+            「その時刻から」だと同じバッチを何度も処理し続ける
+            (Codex 四巡 #1)。
     """
     import json
     import time as _time
@@ -731,6 +754,7 @@ def _run_build_memopedia_from_logs(
     from sai_memory.memopedia import Memopedia, init_memopedia_tables
     from sai_memory.arasuji import init_arasuji_tables
     from sai_memory.memory.entity_extractor import (
+        ExtractionFailed,
         extract_entities,
         reflect_to_memopedia,
         _format_page_list,
@@ -747,9 +771,13 @@ def _run_build_memopedia_from_logs(
             _update_memopedia_job(job_id, status="failed", error=f"Database not found: {db_path}")
             return
 
-        conn = init_db(str(db_path), check_same_thread=False)
-        init_arasuji_tables(conn)
-        init_memopedia_tables(conn)
+        # init_db も列の追加や既存行の補完まで行う書き込み。接続は専用でも DB は
+        # 共有なので、ロード済みペルソナの書き手と同じ錠前の内側で行う
+        # (Codex 五巡 #3 / 七巡 #5)。Memopedia のテーブルは下の
+        # Memopedia(conn, db_lock=...) が同じ錠前で用意する
+        with (db_lock or contextlib.nullcontext()):
+            conn = init_db(str(db_path), check_same_thread=False)
+            init_arasuji_tables(conn)
 
         # Initialize LLM client
         _update_memopedia_job(job_id, message="LLMクライアントを初期化中...")
@@ -783,14 +811,18 @@ def _run_build_memopedia_from_logs(
         _update_memopedia_job(job_id, message="メッセージを取得中...")
 
         query = """
-            SELECT id, thread_id, role, content, resource_id, created_at, metadata
+            SELECT rowid, id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
             WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
         """
         params = []
         if start_after > 0:
-            query += " AND created_at > ?"
-            params.append(start_after)
+            # (時刻, 行番号) の組で「その先」を指す。時刻だけだと、同じ秒の
+            # メッセージがバッチの境目をまたいだとき、「より後」では境目の行が
+            # 落ち、「その時刻から」では同じバッチを永久に処理し続ける
+            # (Codex 三巡 #2 / 四巡 #1)
+            query += " AND (created_at > ? OR (created_at = ? AND rowid > ?))"
+            params.extend([start_after, start_after, start_after_rowid])
         query += " ORDER BY created_at ASC, rowid ASC"
         if limit > 0:
             query += " LIMIT ?"
@@ -798,8 +830,11 @@ def _run_build_memopedia_from_logs(
 
         cur = conn.execute(query, params)
         messages = []
+        # メッセージ id → 行番号。再開位置を (時刻, 行番号) で記録するため
+        rowid_of: dict[str, int] = {}
         for row in cur.fetchall():
-            msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
+            row_id, msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
+            rowid_of[msg_id] = row_id
             metadata = {}
             if metadata_raw:
                 try:
@@ -829,12 +864,25 @@ def _run_build_memopedia_from_logs(
         total_entities = 0
         total_new_pages = 0
         total_updated_pages = 0
+        total_deduped = 0
         batch_count = 0
+        failed_batches = 0
+        consecutive_failures = 0
+        # 「処理した」は抽出まで通ったバッチ／メッセージだけ。失敗も、小さすぎて
+        # 飛ばした末尾も、この数には入れない (画面に出る数字なので実態と合わせる)
+        processed_batches = 0
+        processed_messages = 0
+        skipped_messages = 0
+        failed_ranges: list[tuple[float, float]] = []
+        # 次回の再開位置 (時刻, 行番号)。「連続して成功したところまで」で止める
+        checkpoint_ts = start_after
+        checkpoint_rowid = start_after_rowid
 
         for i in range(0, len(messages), batch_size):
             batch = messages[i:i + batch_size]
             if len(batch) < batch_size // 2 and i > 0:
                 LOGGER.info("Skipping small final batch (%d messages)", len(batch))
+                skipped_messages += len(batch)
                 continue
 
             batch_count += 1
@@ -858,41 +906,104 @@ def _run_build_memopedia_from_logs(
 
             existing_pages = _format_page_list(memopedia)
 
-            entities = extract_entities(
-                client, batch,
-                episode_context=ep_ctx,
-                existing_pages=existing_pages,
-                persona_id=persona_id,
-            )
+            # 抽出と反映を**ひとつの try** で捕まえる。反映側 (DB ロック /
+            # スキーマ / 接続) の例外が外へ抜けると、そのバッチだけでなく
+            # 再構築全体が止まる (Codex 六巡 #3)
+            try:
+                entities = extract_entities(
+                    client, batch,
+                    episode_context=ep_ctx,
+                    existing_pages=existing_pages,
+                    persona_id=persona_id,
+                )
+                results = reflect_to_memopedia(
+                    entities, memopedia,
+                    source_time=int(end_time),
+                ) if entities else []
+            except Exception:
+                # 一つのバッチの失敗で再構築全体を止めない。ただし黙って飛ばさず
+                # 数えて、完了メッセージに出す (失敗を成功の顔で終わらせない)。
+                # 再開位置 (checkpoint_ts) はここで止める —— 先へ進めると、
+                # 次回この範囲が取得されず、失敗した範囲は二度と拾えない。
+                failed_batches += 1
+                consecutive_failures += 1
+                failed_ranges.append((start_time, end_time))
+                LOGGER.warning(
+                    "[memopedia-build] バッチ %d/%d (%s〜) が失敗しました",
+                    batch_count, total_batches, time_str, exc_info=True,
+                )
+                if consecutive_failures >= _MAX_CONSECUTIVE_BATCH_FAILURES:
+                    # たまたま落ちた 1 バッチと、DB が壊れている状態は別物。
+                    # 続けて落ちるなら後者なので、partial の顔で終わらせずに
+                    # 止める (Codex 七巡 #3)
+                    raise RuntimeError(
+                        f"{consecutive_failures} バッチ続けて失敗したため中断しました"
+                        "（データベースかモデルの側に継続的な問題があります）"
+                    )
+                continue
+
+            consecutive_failures = 0
+            processed_batches += 1
+            processed_messages += len(batch)
+            # 再開位置を進めるのは**反映まで終わってから**。抽出だけ済んだ時点で
+            # 進めると、反映で落ちた範囲が次回に取得されない
+            if failed_batches == 0:
+                # 失敗が一度も無いあいだだけ再開位置を進める (連続して成功した
+                # ところまでが、次回に安全に飛ばせる範囲)。位置は「このバッチで
+                # 最後に処理したメッセージ」そのもの
+                last_in_batch = batch[-1]
+                checkpoint_ts = last_in_batch.created_at
+                checkpoint_rowid = rowid_of.get(last_in_batch.id, checkpoint_rowid)
 
             if not entities:
                 continue
 
-            results = reflect_to_memopedia(
-                entities, memopedia,
-                source_time=int(end_time),
-            )
-
             total_entities += len(entities)
             total_new_pages += sum(1 for r in results if r.is_new_page)
             total_updated_pages += sum(1 for r in results if not r.is_new_page)
+            # 「既にある」で作らなかった分。数として見せないと、重複検査が
+            # 黙って落としているように見える
+            total_deduped += sum(r.notes_deduped for r in results)
 
         conn.close()
 
-        last_ts = messages[-1].created_at if messages else 0
+        # 再開位置は「連続して成功したバッチの最後のメッセージ」。実際に処理した
+        # ところまでしか進めない —— 失敗した範囲も、小さすぎて飛ばした末尾も、
+        # 再開位置の向こう側へ置き去りにしない (Codex 三巡 #2)
+        last_ts = checkpoint_ts
+
         _update_memopedia_job(
-            job_id, status="completed", progress=total_batches, total=total_batches,
+            job_id,
+            # 末尾が小さくて次回に回した分も「まだ全部は終わっていない」。
+            # completed にすると画面が続きの再開位置を捨て、その末尾は
+            # 何度実行しても飛ばされ続ける (Codex 七巡 #7)
+            status="partial" if (failed_batches or skipped_messages) else "completed",
+            progress=total_batches, total=total_batches,
             message=(
                 f"完了: {total_entities} エンティティ抽出, "
                 f"{total_new_pages} 新規ページ, {total_updated_pages} 更新"
+                + (
+                    f"（{failed_batches} バッチは抽出に失敗しました。"
+                    "再開位置は最初の失敗の手前で止めてあるので、"
+                    "もう一度実行すると、そこからやり直します）"
+                    if failed_batches else ""
+                )
             ),
             result={
                 "total_entities": total_entities,
                 "new_pages": total_new_pages,
                 "updated_pages": total_updated_pages,
-                "batches_processed": batch_count,
-                "messages_processed": len(messages),
+                "deduped_notes": total_deduped,
+                "failed_batches": failed_batches,
+                "failed_ranges": [
+                    {"start": s, "end": e} for s, e in failed_ranges
+                ],
+                "batches_processed": processed_batches,
+                "messages_processed": processed_messages,
+                "messages_fetched": len(messages),
+                "messages_skipped": skipped_messages,
                 "last_message_timestamp": last_ts,
+                "last_message_rowid": checkpoint_rowid,
             },
         )
 
@@ -936,6 +1047,7 @@ async def start_build_memopedia_from_logs(
         batch_size=request.batch_size,
         limit=request.limit,
         start_after=request.start_after,
+        start_after_rowid=request.start_after_rowid,
         model_name=request.model,
         db_lock=_adapter_db_lock(manager, persona_id),
     )

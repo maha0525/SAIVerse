@@ -34,8 +34,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
@@ -650,6 +651,8 @@ def _fire_identity_fragment_callbacks(
     entries: Sequence[ArasujiEntry],
     batch_callback: Optional[Callable],
     extraction_failures: Optional[List[str]] = None,
+    db_lock: Optional[Any] = None,
+    extraction_failures_unrecorded: Optional[List[str]] = None,
 ) -> None:
     """恒等圧縮の子の Fragment 抽出 (既存データ互換)。
 
@@ -673,8 +676,21 @@ def _fire_identity_fragment_callbacks(
             continue
         try:
             messages = _load_messages_by_ids(conn, entry.source_ids)
-            if messages:
-                batch_callback(messages, entry.id)
+            # 引けなかった id を**集合で**見る。件数の比較だと source_ids に
+            # 同じ id が重複していたときに誤って欠損と判定する
+            missing = set(entry.source_ids) - {m.id for m in messages}
+            if missing:
+                # 元メッセージが欠けている。残った分だけで抽出すると、欠けた分の
+                # 知識が「抽出済み」の顔で落ちる (この子が要約に変わる瞬間は
+                # 二度と来ない)。部分的な成功にせず失敗として扱い、付箋へ回す
+                # —— 元メッセージが本当に消えていれば、拾い直しが「辿れない」
+                # として正直に剥がす (Codex 六巡 #6)
+                raise RuntimeError(
+                    f"identity child {entry.id[:8]}: "
+                    f"{len(missing)} of {len(set(entry.source_ids))} "
+                    f"source messages are missing"
+                )
+            batch_callback(messages, entry.id)
         except Exception:
             if extraction_failures is not None:
                 extraction_failures.append(entry.id)
@@ -682,10 +698,17 @@ def _fire_identity_fragment_callbacks(
                 from sai_memory.memory.entity_extractor import (
                     record_extraction_failure,
                 )
-                record_extraction_failure(conn, entry.id)
+                record_extraction_failure(conn, entry.id, db_lock=db_lock)
             except Exception:
-                LOGGER.warning(
-                    "[bands] extraction backlog の記帳に失敗", exc_info=True
+                # 付箋に残せなければ、この抽出には二度と番が回らない
+                # (束ねが確定した子は「初めて要約に変わる瞬間」を二度と迎えない)。
+                # 拾い直しの対象にならないので、報告のときに分けて扱う
+                if extraction_failures_unrecorded is not None:
+                    extraction_failures_unrecorded.append(entry.id)
+                LOGGER.error(
+                    "[bands] 抽出失敗の付箋を残せませんでした (entry=%s) — "
+                    "この範囲の知識は自動では拾い直されません",
+                    entry.id[:8], exc_info=True,
                 )
             LOGGER.exception(
                 "[bands] fragment callback failed for identity child %s",
@@ -708,6 +731,8 @@ def _consolidate_fold(
     batch_callback: Optional[Callable] = None,
     known_ids: Optional[Set[str]] = None,
     extraction_failures: Optional[List[str]] = None,
+    db_lock: Optional[Any] = None,
+    extraction_failures_unrecorded: Optional[List[str]] = None,
 ) -> Optional[ArasujiEntry]:
     """畳み 1 件を親ノードに確定する (親 + 子を単一 tx)。"""
     entries = [i.entry for i in fold.items if i.entry is not None]
@@ -743,97 +768,103 @@ def _consolidate_fold(
         "digest_origin": "band",
         "coverage_chars": total_coverage,
     }
-    try:
-        # tx 内再検査: BEGIN IMMEDIATE で write ロックを取ってから子の未統合を
-        # 確認する — SELECT は暗黙 BEGIN を張らないため、ロックなしでは二接続が
-        # 同時に「全子未統合」を読める。既に tx 内なら参加する (呼び出し側の契約)。
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")
-        if not _all_children_unconsolidated(conn, child_ids):
-            conn.rollback()
-            LOGGER.warning(
-                "[bands] consolidation abandoned: children consolidated "
-                "concurrently (level=%d)", fold.level,
-            )
-            return None
-        # ギャップ不変条件の tx 内再検査 (Codex レビュー 2026-07-28 三〜四巡):
-        # 計画〜LLM 応答の間に別経路 (CLI / API / Metabolism) が畳み区間へ
-        # 挿入を行っていると、古い計画のまま確定すれば跨ぎ親 = 恒久孤児化に
-        # なる。write ロック取得後に検査し直し、増えていたら放棄する
-        # (次の発火が再計画する)。2 段:
-        #
-        # 1. 未編纂メッセージ / 下位レベルノードの境界 (計画時と同じ判定)。
-        # 2. 親の時間範囲に内包される**計画後に新規出現した未統合ノード**
-        #    (レベル不問 — 同一レベルの並走挿入は 1 に掛からない。四巡 high)。
-        #    判定は計画時スナップショット (``known_ids``) との差分 — 計画時から
-        #    居たノード (同一秒に並ぶ畳まれない兄弟や、境界の向こうの区間) を
-        #    侵入と誤認すると、状態が変わらないまま毎回 LLM 課金して放棄する
-        #    永久停止になる (五巡 high)。読み直しは孤児除外済みの _load_rows —
-        #    既存の孤児 (旧データ) を誤検知しないため。
-        for item in fold.items:
-            item.gap_before = False
-        _mark_uncompiled_gaps(conn, fold.level, list(fold.items))
-        if any(item.gap_before for item in fold.items):
-            conn.rollback()
-            LOGGER.warning(
-                "[bands] consolidation abandoned: a gap appeared inside the "
-                "fold while waiting for the LLM (level=%d)", fold.level,
-            )
-            return None
-        span_start = min(starts) if starts else None
-        span_end = max(ends) if ends else None
-        if span_start is not None and span_end is not None:
-            child_id_set = set(child_ids)
-            planned_known = known_ids or set()
-            fresh_rows = _load_rows(conn)
-            for fresh_row in fresh_rows.values():
-                for fresh in fresh_row:
-                    e = fresh.entry
-                    if (
-                        e is None or e.id in child_id_set
-                        or e.id in planned_known
-                        or e.start_time is None or e.end_time is None
-                    ):
-                        continue
-                    if span_start <= e.start_time and e.end_time <= span_end:
-                        conn.rollback()
-                        LOGGER.warning(
-                            "[bands] consolidation abandoned: an unplanned "
-                            "unconsolidated node appeared inside the fold span "
-                            "while waiting for the LLM (level=%d, intruder=%s)",
-                            fold.level, e.id[:8],
-                        )
-                        return None
-        parent = create_entry(
-            conn,
-            level=target_level,
-            content=content,
-            source_ids=child_ids,
-            start_time=min(starts) if starts else None,
-            end_time=max(ends) if ends else None,
-            source_count=len(entries),
-            message_count=sum(e.message_count for e in entries),
-            extra_metadata=extra_metadata,
-            commit=False,
-        )
-        mark_consolidated(conn, child_ids, parent.id, commit=False)
-        conn.commit()
-    except Exception:
+    # BEGIN IMMEDIATE は **DB の**書き込みロック。同じ接続を共有する別スレッド
+    # (Pulse / API) の commit までは止められないので、検査〜commit の区間は
+    # adapter の錠前の内側で走らせる (Codex 七巡 #4)。LLM 呼び出しはこの手前で
+    # 終わっているので、錠を持って待たせることはない。
+    with (db_lock or nullcontext()):
         try:
-            conn.rollback()
+            # tx 内再検査: BEGIN IMMEDIATE で write ロックを取ってから子の未統合を
+            # 確認する — SELECT は暗黙 BEGIN を張らないため、ロックなしでは二接続が
+            # 同時に「全子未統合」を読める。既に tx 内なら参加する (呼び出し側の契約)。
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            if not _all_children_unconsolidated(conn, child_ids):
+                conn.rollback()
+                LOGGER.warning(
+                    "[bands] consolidation abandoned: children consolidated "
+                    "concurrently (level=%d)", fold.level,
+                )
+                return None
+            # ギャップ不変条件の tx 内再検査 (Codex レビュー 2026-07-28 三〜四巡):
+            # 計画〜LLM 応答の間に別経路 (CLI / API / Metabolism) が畳み区間へ
+            # 挿入を行っていると、古い計画のまま確定すれば跨ぎ親 = 恒久孤児化に
+            # なる。write ロック取得後に検査し直し、増えていたら放棄する
+            # (次の発火が再計画する)。2 段:
+            #
+            # 1. 未編纂メッセージ / 下位レベルノードの境界 (計画時と同じ判定)。
+            # 2. 親の時間範囲に内包される**計画後に新規出現した未統合ノード**
+            #    (レベル不問 — 同一レベルの並走挿入は 1 に掛からない。四巡 high)。
+            #    判定は計画時スナップショット (``known_ids``) との差分 — 計画時から
+            #    居たノード (同一秒に並ぶ畳まれない兄弟や、境界の向こうの区間) を
+            #    侵入と誤認すると、状態が変わらないまま毎回 LLM 課金して放棄する
+            #    永久停止になる (五巡 high)。読み直しは孤児除外済みの _load_rows —
+            #    既存の孤児 (旧データ) を誤検知しないため。
+            for item in fold.items:
+                item.gap_before = False
+            _mark_uncompiled_gaps(conn, fold.level, list(fold.items))
+            if any(item.gap_before for item in fold.items):
+                conn.rollback()
+                LOGGER.warning(
+                    "[bands] consolidation abandoned: a gap appeared inside the "
+                    "fold while waiting for the LLM (level=%d)", fold.level,
+                )
+                return None
+            span_start = min(starts) if starts else None
+            span_end = max(ends) if ends else None
+            if span_start is not None and span_end is not None:
+                child_id_set = set(child_ids)
+                planned_known = known_ids or set()
+                fresh_rows = _load_rows(conn)
+                for fresh_row in fresh_rows.values():
+                    for fresh in fresh_row:
+                        e = fresh.entry
+                        if (
+                            e is None or e.id in child_id_set
+                            or e.id in planned_known
+                            or e.start_time is None or e.end_time is None
+                        ):
+                            continue
+                        if span_start <= e.start_time and e.end_time <= span_end:
+                            conn.rollback()
+                            LOGGER.warning(
+                                "[bands] consolidation abandoned: an unplanned "
+                                "unconsolidated node appeared inside the fold span "
+                                "while waiting for the LLM (level=%d, intruder=%s)",
+                                fold.level, e.id[:8],
+                            )
+                            return None
+            parent = create_entry(
+                conn,
+                level=target_level,
+                content=content,
+                source_ids=child_ids,
+                start_time=min(starts) if starts else None,
+                end_time=max(ends) if ends else None,
+                source_count=len(entries),
+                message_count=sum(e.message_count for e in entries),
+                extra_metadata=extra_metadata,
+                commit=False,
+            )
+            mark_consolidated(conn, child_ids, parent.id, commit=False)
+            conn.commit()
         except Exception:
-            pass
-        LOGGER.exception(
-            "[bands] consolidation tx failed (level=%d); rolled back", fold.level,
-        )
-        return None
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            LOGGER.exception(
+                "[bands] consolidation tx failed (level=%d); rolled back", fold.level,
+            )
+            return None
     LOGGER.info(
         "[bands] fold: %d nodes level %d -> %d (coverage=%d chars, parent=%s)",
         len(entries), fold.level, target_level, total_coverage, parent.id[:8],
     )
     # Fragment 抽出は commit 後 (executor.py の batch_callback と同型の位置)。
     _fire_identity_fragment_callbacks(
-        conn, entries, batch_callback, extraction_failures
+        conn, entries, batch_callback, extraction_failures, db_lock=db_lock,
+        extraction_failures_unrecorded=extraction_failures_unrecorded,
     )
     return parent
 
@@ -848,6 +879,8 @@ def run_band_overflow(
     batch_callback: Optional[Callable] = None,
     max_folds: Optional[int] = None,
     extraction_failures: Optional[List[str]] = None,
+    db_lock: Optional[Any] = None,
+    extraction_failures_unrecorded: Optional[List[str]] = None,
 ) -> int:
     """レベル別の並びを検査し、予算超過の畳みを実行する。
 
@@ -869,6 +902,8 @@ def run_band_overflow(
             dry が数え直して、次の承認のもとで畳まれる (収束は崩れない)。
         extraction_failures: 渡すと、Fragment 抽出に失敗した entry id を
             ここへ積む (戻り値の契約を変えずに失敗を呼び出し元へ返す)。
+        db_lock: SAIMemoryAdapter の ``_db_lock``。抽出失敗の付箋を書くときに
+            使う (ロック外の commit は他所の開いた tx を途中で確定させる)。
 
     Returns:
         作った親ノード数。
@@ -900,6 +935,8 @@ def run_band_overflow(
             conn, client, fold,
             persona_id=persona_id, batch_callback=batch_callback,
             known_ids=known_ids, extraction_failures=extraction_failures,
+            db_lock=db_lock,
+            extraction_failures_unrecorded=extraction_failures_unrecorded,
         )
         if parent is None:
             break

@@ -504,26 +504,26 @@ class UriResolver:
 
         # saiverse://self/memopedia/{key}  (key = AI 可視の short_id が主、UUID も可)
         # または ?title=... 。旧 page/ 階層は平坦化済み。
-        page = None
+        # ページ・本文・子一覧は page_snapshot で**同じロック区間**から撮る
+        # (ばらばらに読むと混成表示になる — Sol レビュー 2026-08-06 F8)。
+        snapshot = None
         identifier = "?"
         if len(path) >= 1:
-            from sai_memory.memopedia.storage import resolve_page_ref
-
             # 平坦化した末尾セグメントがキー。旧 `page/{id}` も後方互換で拾う。
             key = path[1] if path[0] == "page" and len(path) >= 2 else path[0]
             identifier = key
             if key.isdigit():
                 key = f"memopedia:{key}"
-            resolved = resolve_page_ref(memopedia.conn, key)
-            page = memopedia.get_page(resolved) if resolved else None
+            snapshot = memopedia.page_snapshot(page_ref=key)
         elif "title" in params:
             identifier = params.get("title", "?")
-            page = memopedia.find_by_title(unquote(params["title"]))
+            snapshot = memopedia.page_snapshot(title=unquote(params["title"]))
 
-        if not page:
+        if not snapshot:
             return self._error(parsed.raw, f"Memopedia page not found: {identifier}")
 
-        content = self._format_memopedia_page(memopedia, page)
+        page = snapshot["page"]
+        content = self._format_memopedia_page(snapshot)
         return ResolvedContent(
             uri=parsed.raw,
             content=content,
@@ -987,14 +987,18 @@ class UriResolver:
             lines.append(f"[{role}] {ts}: {content}{marker}")
         return "\n\n".join(lines) if lines else "(no messages)"
 
-    def _format_memopedia_page(self, memopedia, page) -> str:
+    def _format_memopedia_page(self, snapshot: dict) -> str:
         """Memopediaページをフォーマット。
 
         本文は ``render_page_body`` で描く——v0.3.x はページの知識が Fragment
         側にあり、``page.content`` を直に出すと変換済みページが全部 "(empty)"
         に見える。子ページの一覧も親子関係からここで組み立てる（本文には
         導線を書かない設計の表示側、memopedia_body_to_fragment.md §7 (a)）。
+
+        受け取るのは :meth:`Memopedia.page_snapshot` の戻り——ページ・本文・
+        子一覧が同じ時点の姿であることは、撮る側が保証している。
         """
+        page = snapshot["page"]
         lines = [
             f"【Memopedia】{page.title}",
             f"ID: {page.id}",
@@ -1006,14 +1010,8 @@ class UriResolver:
         if page.summary:
             lines.append(f"Summary: {page.summary}")
         lines.append("")
-        body = memopedia.render_page_body(page.id)
-        lines.append(body or "(empty)")
-        try:
-            from sai_memory.memopedia.storage import get_children
-            children = get_children(memopedia.conn, page.id)
-        except Exception:
-            LOGGER.debug("Failed to list children for %s", page.id, exc_info=True)
-            children = []
+        lines.append(snapshot["body"] or "(empty)")
+        children = snapshot["children"]
         if children:
             lines.append("")
             lines.append("子ページ:")

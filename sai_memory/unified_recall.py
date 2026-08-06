@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -335,6 +336,7 @@ def embed_chronicle_entries(
     *,
     level: int = 1,
     batch_size: int = 64,
+    db_lock: Optional[Any] = None,
 ) -> int:
     """Generate and store embeddings for Chronicle entries that don't have them.
 
@@ -360,9 +362,13 @@ def embed_chronicle_entries(
         texts = [content for _, content in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        for (entry_id, _), vec in zip(batch, vectors):
-            store_chronicle_embedding(conn, entry_id, list(vec))
-            total += 1
+        # 埋め込みの計算は錠の外 (重い)。DB への書き込みと commit だけを
+        # adapter の錠前の内側で行う —— 共有接続なので、錠外の commit は
+        # 他所の開いたトランザクションを途中で確定させる (Codex 八巡 #1)
+        with (db_lock or nullcontext()):
+            for (entry_id, _), vec in zip(batch, vectors):
+                store_chronicle_embedding(conn, entry_id, list(vec))
+                total += 1
 
     LOGGER.info("Embedded %d Chronicle entries", total)
     return total
@@ -373,6 +379,7 @@ def embed_memopedia_pages(
     embedder,
     *,
     batch_size: int = 64,
+    db_lock: Optional[Any] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia pages that don't have them.
 
@@ -400,9 +407,10 @@ def embed_memopedia_pages(
                  for _, title, summary in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        for (page_id, _, _), vec in zip(batch, vectors):
-            store_memopedia_embedding(conn, page_id, list(vec))
-            total += 1
+        with (db_lock or nullcontext()):
+            for (page_id, _, _), vec in zip(batch, vectors):
+                store_memopedia_embedding(conn, page_id, list(vec))
+                total += 1
 
     LOGGER.info("Embedded %d Memopedia pages", total)
     return total
@@ -413,6 +421,7 @@ def embed_memopedia_fragments(
     embedder,
     *,
     batch_size: int = 64,
+    db_lock: Optional[Any] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia fragments that don't have them.
 
@@ -442,9 +451,10 @@ def embed_memopedia_fragments(
         ]
         vectors = embedder.embed(texts, is_query=False)
 
-        for (frag_id, _, _), vec in zip(batch, vectors):
-            store_fragment_embedding(conn, frag_id, list(vec))
-            total += 1
+        with (db_lock or nullcontext()):
+            for (frag_id, _, _), vec in zip(batch, vectors):
+                store_fragment_embedding(conn, frag_id, list(vec))
+                total += 1
 
     LOGGER.info("Embedded %d Memopedia fragments", total)
     return total

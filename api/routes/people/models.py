@@ -482,7 +482,11 @@ class BuildMemopediaFromLogsRequest(BaseModel):
     """ログからMemopediaを構築するリクエスト"""
     batch_size: int = 20  # バッチサイズ
     limit: int = 0  # 処理対象メッセージ上限 (0=全件)
-    start_after: float = 0  # このタイムスタンプ以降のメッセージを処理
+    # 再開位置。時刻だけだと同じ秒のメッセージの順序を表せないので、行番号
+    # (rowid) と対で持つ。前回の結果の last_message_timestamp /
+    # last_message_rowid をそのまま渡す
+    start_after: float = 0
+    start_after_rowid: int = 0
     model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
 
 

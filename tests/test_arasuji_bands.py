@@ -501,6 +501,58 @@ class TestFragmentCallback(BandTestBase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][0], 1)
 
+    def test_missing_source_messages_are_a_failure_not_a_partial_success(self):
+        """⭐ 元メッセージが欠けていたら、残った分だけ抽出して成功にしない。
+
+        束ねが確定した子は「初めて要約に変わる瞬間」を二度と迎えない。部分的な
+        抽出を成功として通すと、欠けた分の知識が抽出済みの顔で落ちる。
+        """
+        from sai_memory.memory.storage import add_message
+        mid = add_message(self.conn, "main", "user", "生ログ本文", created_at=900)
+        _entry(self.conn, start=1000, coverage=900, origin="identity",
+               source_ids=[mid, "消えたメッセージ"])
+        for i in range(9):
+            _entry(self.conn, start=2000 + i * 100, coverage=10_000)
+
+        seen = []
+        failures = []
+        created = run_band_overflow(
+            self.conn, _Client(),
+            batch_callback=lambda msgs, eid: seen.append(eid),
+            extraction_failures=failures,
+        )
+        self.assertEqual(created, 1, "束ね自体は成立する")
+        self.assertEqual(seen, [], "欠けたまま抽出を走らせている")
+        self.assertEqual(len(failures), 1, "失敗として記録されていない")
+        # 付箋にも載る — 拾い直しが「辿れない」として正直に片づける
+        backlog = self.conn.execute(
+            "SELECT COUNT(*) FROM entity_extraction_backlog"
+        ).fetchone()[0]
+        self.assertEqual(backlog, 1)
+
+    def test_duplicated_source_ids_are_not_mistaken_for_missing(self):
+        """同じ id が source_ids に重複していても「欠損」と誤判定しない。
+
+        件数で見ると重複のぶんだけ引けた数が減り、正常な束ねが毎回失敗として
+        付箋に積まれる。見るのは引けなかった id そのもの。
+        """
+        from sai_memory.memory.storage import add_message
+        mid = add_message(self.conn, "main", "user", "生ログ本文", created_at=900)
+        _entry(self.conn, start=1000, coverage=900, origin="identity",
+               source_ids=[mid, mid])
+        for i in range(9):
+            _entry(self.conn, start=2000 + i * 100, coverage=10_000)
+
+        seen = []
+        failures = []
+        run_band_overflow(
+            self.conn, _Client(),
+            batch_callback=lambda msgs, eid: seen.append(eid),
+            extraction_failures=failures,
+        )
+        self.assertEqual(len(seen), 1, "正常な束ねを失敗として扱っている")
+        self.assertEqual(failures, [])
+
 
 class TestPlanProperties(unittest.TestCase):
     """一本規則の性質 (プロパティテスト — DB なしの純計画で検査)。

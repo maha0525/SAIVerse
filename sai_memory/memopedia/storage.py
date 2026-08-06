@@ -625,8 +625,14 @@ def update_page(
     is_important: Optional[bool] = None,
     metadata: Optional[Dict[str, Any]] = None,
     parent_id: Optional[str] = ...,  # Use ... as sentinel for "not provided"
+    commit: bool = True,
 ) -> Optional[MemopediaPage]:
-    """Update a page's fields. Only provided fields are updated."""
+    """Update a page's fields. Only provided fields are updated.
+
+    ``commit=False`` は呼び出し側が複数書き込みを単一トランザクションに束ねる
+    とき用 (``create_page`` と同じ流儀)。その場合、呼び出し側が
+    ``conn.commit()`` / ``rollback()`` の責任を持つ。
+    """
     page = get_page(conn, page_id)
     if page is None:
         return None
@@ -650,7 +656,8 @@ def update_page(
         """,
         (new_title, new_summary, new_content, json.dumps(new_keywords), new_vividness, int(new_is_trunk), int(new_is_important), new_parent_id, now, json.dumps(new_metadata), page_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_page(conn, page_id)
 
 
@@ -1301,8 +1308,13 @@ def create_fragment(
     content: str,
     chronicle_entry_id: Optional[str] = None,
     source_date: Optional[str] = None,
+    commit: bool = True,
 ) -> MemopediaFragment:
-    """Create a new fragment linked to an entity page."""
+    """Create a new fragment linked to an entity page.
+
+    ``commit=False`` は呼び出し側が複数書き込みを単一トランザクションに束ねる
+    とき用 (``create_page`` と同じ流儀)。
+    """
     frag_id = str(uuid.uuid4())
     now = int(time.time())
     conn.execute(
@@ -1312,7 +1324,8 @@ def create_fragment(
         """,
         (frag_id, content, entity_id, chronicle_entry_id, source_date, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return MemopediaFragment(
         id=frag_id,
         content=content,
@@ -1322,6 +1335,42 @@ def create_fragment(
         source_date=source_date,
         created_at=now,
     )
+
+
+def fragment_exists(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    content: str,
+    chronicle_entry_id: Optional[str],
+    source_date: Optional[str] = None,
+) -> bool:
+    """同じ出所 (Chronicle entry) から同じ文の Fragment が既にあるか。
+
+    拾い直し (``entity_extraction_backlog``) が同じチャンクをもう一度抽出した
+    とき、同じ知識を新しい UUID で二重に挿さないための検査。
+
+    出所を持たない抽出 (ログからの一括再構築 —— Chronicle エントリを経由しない)
+    は、**出所なしの Fragment の中で**同じページ・同じ文・**同じ日付**があるかを
+    見る。再構築を二度走らせても同じ知識が二重にならない。日付まで見るのは、
+    同じ文が別の日に出てきたら「別の日に同じことが分かった」記録であって、重複
+    ではないから (日付は Fragment に保存され、表示にも使われる)。出所のある
+    Fragment とは突き合わせない —— 同じ理由で、出所が違えば別の記録。
+    """
+    if chronicle_entry_id is None:
+        row = conn.execute(
+            "SELECT 1 FROM memopedia_fragments "
+            "WHERE entity_id = ? AND chronicle_entry_id IS NULL AND content = ? "
+            "AND source_date IS ? LIMIT 1",
+            (entity_id, content, source_date),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM memopedia_fragments "
+            "WHERE entity_id = ? AND chronicle_entry_id = ? AND content = ? LIMIT 1",
+            (entity_id, chronicle_entry_id, content),
+        ).fetchone()
+    return row is not None
 
 
 def get_fragments_for_entity(

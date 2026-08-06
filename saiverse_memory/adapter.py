@@ -146,7 +146,12 @@ class SAIMemoryAdapter:
 
         resolved_resource = resource_id or (base_settings.resource_id or persona_id)
         self.settings = replace(base_settings, db_path=str(db_path), resource_id=resolved_resource)
-        self._db_lock = threading.RLock()
+        # 錠前は「この DB ファイルのもの」。配り所から取るので、同じ persona の
+        # memory.db を開く他の書き手 (API のバックグラウンドワーカー、Memopedia、
+        # ツール) は、渡されなくても同じ錠前を持つ (まはー裁定 2026-08-06、案A。
+        # docs/issues/memopedia_writers_bypass_adapter_lock.md)
+        from sai_memory.db_locks import lock_for_path
+        self._db_lock = lock_for_path(str(db_path))
 
         if not self.settings.memory_enabled:
             LOGGER.warning("SAIMemory disabled via settings; adapter will no-op")

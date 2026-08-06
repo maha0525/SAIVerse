@@ -112,11 +112,19 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
     const [forceRun, setForceRun] = useState<string | null>(null);
 
     const [restating, setRestating] = useState(false);
+    const [restateFailed, setRestateFailed] = useState(false);
     const base = `/api/people/${personaId}/debug/memopedia-conversion`;
     const decisionsRef = useRef(decisions);
     decisionsRef.current = decisions;
-    // サーバの数字が反映済みの判断セット。同じ内容の数え直しを避ける
+    // サーバの数字が反映済みの判断セット。同じ内容の数え直しを避ける。
+    // 画面の「実行」ボタンの可否にも使うので state で持つ（ref だけだと
+    // 数え直しが終わってもボタンの状態が変わらない）
+    const [syncedKey, setSyncedKey] = useState<string>('');
     const syncedRef = useRef<string>('');
+    const syncDecisions = (key: string) => {
+        syncedRef.current = key;
+        setSyncedKey(key);
+    };
 
     const call = async (path: string, init?: RequestInit) => {
         const res = await fetch(`${base}${path}`, init);
@@ -139,6 +147,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
         setError(null);
         setResult(null);
         setConfirming(false);
+        setRestateFailed(false);
         try {
             const data: Preview = await call('/preview');
             // 保留行は全チェック（=移行）が初期状態。画面に出す数字も
@@ -152,7 +161,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                     body: JSON.stringify({ decisions: init }),
                 });
             }
-            syncedRef.current = JSON.stringify(init);
+            syncDecisions(JSON.stringify(init));
             setPreview(shown);
             setDecisions(init);
             await loadRuns();
@@ -175,7 +184,9 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
             setResult(data.message || '変換しました');
             setPreview(null);
             setDecisions({});
+            syncDecisions('');
             setConfirming(false);
+            setRestateFailed(false);
             await loadRuns();
         } catch (e) {
             setError(e instanceof Error ? e.message : '変換に失敗しました');
@@ -226,11 +237,15 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                     signal: controller.signal,
                 });
                 if (!controller.signal.aborted) {
-                    syncedRef.current = sent;
+                    syncDecisions(sent);
+                    setRestateFailed(false);
                     setPreview(data);
                 }
             } catch {
-                /* 数字の更新に失敗しても、選択と実行は続けられる */
+                // 数え直しに失敗したら、画面の数字は選択より古いまま。その状態で
+                // 実行させると「見えている数字と実行内容が違う」ので、下の実行
+                // ボタンを止めて確認からやり直してもらう
+                if (!controller.signal.aborted) setRestateFailed(true);
             } finally {
                 if (!controller.signal.aborted) setRestating(false);
             }
@@ -264,6 +279,11 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
         (n, page) => n + Object.values(page).filter((c) => c === 'fragment').length, 0
     );
     const keptCount = preview ? preview.pending_count - decidedCount : 0;
+    // 画面の数字がいまの選択を反映していないあいだは実行させない。サーバ側は
+    // 送られた選択で計算し直して指紋も確かめるので危険な変換は通らないが、
+    // 「画面に出ている件数」と「実行される内容」が食い違ったまま押させない
+    const unsynced = JSON.stringify(decisions) !== syncedKey;
+    const canApply = !!preview && preview.is_safe && !restating && !unsynced && !restateFailed;
 
     return (
         <div className={styles.section}>
@@ -441,18 +461,32 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                                 </span>
                             )}
                         </div>
+                        {restateFailed && (
+                            <div className={styles.error}>
+                                <AlertCircle size={16} />
+                                <span>
+                                    選択を反映した件数を数え直せませんでした。表示中の数字は
+                                    いまの選択と合っていないため、実行できません。
+                                    「変換対象を確認」からやり直してください。
+                                </span>
+                            </div>
+                        )}
                         {!confirming ? (
                             <button
                                 className={styles.primaryButton}
                                 onClick={() => setConfirming(true)}
-                                disabled={busy !== null || !preview.is_safe}
+                                disabled={busy !== null || !canApply}
                             >
-                                変換を実行
+                                {restating ? '数え直しています...' : '変換を実行'}
                             </button>
                         ) : (
                             <div className={styles.confirmRow}>
                                 <span>本当に実行しますか？</span>
-                                <button className={styles.confirmYes} onClick={handleApply} disabled={busy !== null}>
+                                <button
+                                    className={styles.confirmYes}
+                                    onClick={handleApply}
+                                    disabled={busy !== null || !canApply}
+                                >
                                     {busy === 'apply'
                                         ? <><Loader2 size={14} className={styles.loader} /> 変換中...</>
                                         : 'はい、実行する'}

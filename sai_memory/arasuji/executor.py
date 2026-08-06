@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from sai_memory.arasuji.alignment import (
     AlignmentPlan,
@@ -48,6 +49,10 @@ class ExecutionResult:
     #: 呼び出し元への当回ぶんの報告用 (握り潰さない)
     #: (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
     extraction_failures: List[str] = field(default_factory=list)
+    #: そのうち**付箋にも残せなかった**もの。これらは拾い直しの対象にならない
+    #: —— 「次回の記憶の整理でやり直します」と報告してはいけない相手
+    #: (Codex 五巡 #1)。分けて持たないと、画面の約束が嘘になる。
+    extraction_failures_unrecorded: List[str] = field(default_factory=list)
 
     @property
     def created_count(self) -> int:
@@ -178,6 +183,7 @@ def execute_plan(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     batch_callback: Optional[Callable[[List, Optional[str]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    db_lock: Optional[Any] = None,
 ) -> ExecutionResult:
     """整列計画を実行して一次あらすじを確定する。
 
@@ -190,6 +196,9 @@ def execute_plan(
             (entity_extractor) 用。全チャンクで呼ぶ (現設計は全チャンクが
             LLM 圧縮 — 恒等圧縮の廃止で抽出の発火点はここに一本化された)。
         cancel_check: True を返すと以降のチャンクを中断 (確定済みは残る)。
+        db_lock: SAIMemoryAdapter の ``_db_lock``。抽出失敗の付箋を書くときに
+            使う —— ``conn`` が adapter と共有なら、ロック外の commit は他所の
+            開いたトランザクションを途中で確定させる (Codex 四巡 #2)。
 
     Returns:
         ExecutionResult (created は確定順)。
@@ -235,6 +244,7 @@ def execute_plan(
             include_timestamp=include_timestamp,
             memopedia_context=memopedia_context,
         )
+        skipped_in_tx = False
         try:
             # tx 内再検査 (Codex W4 #1 / 二巡 #1 / 三巡 #1): BEGIN IMMEDIATE で
             # write ロックを先に取ってから検査する — sqlite3 は SELECT では
@@ -243,41 +253,51 @@ def execute_plan(
             # (呼び出し元が開いた tx) なら参加する。それ以外の失敗
             # (database is locked = busy_timeout 超過) は握り潰さず raise —
             # ロック無しで検査に進むと原子化が無効になる。
-            if not conn.in_transaction:
-                conn.execute("BEGIN IMMEDIATE")
-            if _is_already_compiled(conn, chunk.messages[0].id):
-                conn.rollback()
-                LOGGER.warning(
-                    "[executor] chunk skipped in-tx: first source compiled "
-                    "concurrently (first_id=%s kind=%s)",
-                    chunk.messages[0].id, chunk.kind,
-                )
-                result.skipped_duplicates += 1
-                processed += len(chunk.messages)
-                continue
-            entry = create_entry(
-                conn,
-                level=1,
-                content=content,
-                source_ids=chunk.message_ids,
-                start_time=min(m.created_at for m in chunk.messages),
-                end_time=max(m.created_at for m in chunk.messages),
-                source_count=len(chunk.messages),
-                message_count=len(chunk.messages),
-                extra_metadata={
-                    "digest_origin": chunk.kind,
-                    "coverage_chars": chunk.coverage_chars,
-                    "episode_refs": chunk.episode_refs,
-                },
-                commit=False,
-            )
-            conn.commit()
+            #
+            # BEGIN IMMEDIATE は **DB の**書き込みロック。同じ接続を共有する
+            # 別スレッド (Pulse / API) の commit までは止められないので、
+            # 検査〜commit の区間は adapter の錠前 (db_lock) の内側で走らせる
+            # (Codex 七巡 #4)。LLM 呼び出し (_chunk_content) は錠の外のまま。
+            with (db_lock or nullcontext()):
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                if _is_already_compiled(conn, chunk.messages[0].id):
+                    conn.rollback()
+                    LOGGER.warning(
+                        "[executor] chunk skipped in-tx: first source compiled "
+                        "concurrently (first_id=%s kind=%s)",
+                        chunk.messages[0].id, chunk.kind,
+                    )
+                    skipped_in_tx = True
+                else:
+                    entry = create_entry(
+                        conn,
+                        level=1,
+                        content=content,
+                        source_ids=chunk.message_ids,
+                        start_time=min(m.created_at for m in chunk.messages),
+                        end_time=max(m.created_at for m in chunk.messages),
+                        source_count=len(chunk.messages),
+                        message_count=len(chunk.messages),
+                        extra_metadata={
+                            "digest_origin": chunk.kind,
+                            "coverage_chars": chunk.coverage_chars,
+                            "episode_refs": chunk.episode_refs,
+                        },
+                        commit=False,
+                    )
+                    conn.commit()
         except Exception:
             try:
                 conn.rollback()
             except Exception:
                 pass
             raise
+
+        if skipped_in_tx:
+            result.skipped_duplicates += 1
+            processed += len(chunk.messages)
+            continue
 
         result.created.append(entry)
         processed += len(chunk.messages)
@@ -302,10 +322,16 @@ def execute_plan(
                     from sai_memory.memory.entity_extractor import (
                         record_extraction_failure,
                     )
-                    record_extraction_failure(conn, entry.id)
+                    record_extraction_failure(conn, entry.id, db_lock=db_lock)
                 except Exception:
-                    LOGGER.warning(
-                        "[executor] extraction backlog の記帳に失敗", exc_info=True
+                    # 付箋に残せなければ、この抽出には二度と番が回らない
+                    # (確定済みチャンクは再実行で冪等スキップされる)。
+                    # warning に畳むと「拾い直す」という約束が黙って破れる
+                    result.extraction_failures_unrecorded.append(entry.id)
+                    LOGGER.error(
+                        "[executor] 抽出失敗の付箋を残せませんでした "
+                        "(entry=%s) — この範囲の知識は自動では拾い直されません",
+                        entry.id[:8], exc_info=True,
                     )
                 LOGGER.exception(
                     "[executor] batch_callback failed (entry=%s); continuing",

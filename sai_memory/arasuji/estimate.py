@@ -129,8 +129,9 @@ def estimate_chronicle_generation_cost(
     # --- Memopedia 文脈トークン (Level 1 のみ) ---
     memopedia_tokens = 0.0
     try:
-        from sai_memory.memopedia import Memopedia, init_memopedia_tables
-        init_memopedia_tables(conn)
+        from sai_memory.memopedia import Memopedia
+        # テーブルの用意は Memopedia のコンストラクタが**ロックの内側で**行う
+        # (ここで先に呼ぶと同じ commit がロック外で走る)
         memopedia = Memopedia(conn, db_lock=db_lock)
         text = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
         if text and text != "(まだページはありません)":

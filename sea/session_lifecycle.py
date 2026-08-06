@@ -2601,6 +2601,16 @@ class SessionLifecycle:
         chronicle_enabled = (
             memory_weave_enabled and self.is_chronicle_enabled_for_persona(persona)
         )
+        # 前回までに失敗した抽出の拾い直し (付箋 backlog) は**この位置** —
+        # 編纂の計画・確認・claim より手前で、手動入口の早期 return よりも手前。
+        # 畳むものが無い回でも回収は走り、走らないときは「止まっている」ことを
+        # 知らせる (Codex 四巡 #4: 手動入口の return を素通りしていた)。
+        self._retry_extraction_backlog(
+            persona,
+            event_callback=event_callback,
+            chronicle_enabled=chronicle_enabled,
+        )
+
         if stop_when_disabled and not chronicle_enabled:
             LOGGER.info(
                 "[metabolism] manual compaction stopped: chronicle disabled "
@@ -2769,6 +2779,151 @@ class SessionLifecycle:
             # "failed" / "deferred" をそのまま返す (手動入口が結果報告に使う)
             return chronicle_status
 
+    def _retry_extraction_backlog(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        chronicle_enabled: bool = True,
+    ) -> None:
+        """失敗した抽出の拾い直し（付箋 backlog）。Metabolism の頭で呼ぶ。
+
+        抽出が発火するのは「チャンクが Chronicle として確定する瞬間」の一度きり
+        で、確定済みチャンクは再実行で冪等スキップされる —— 失敗した抽出には
+        本編の再実行では二度と番が回らない。だから回収は**編纂の計画・確認・
+        claim から独立**させ、Metabolism の頭に置く。編纂対象が無い夜も、確認を
+        断った回も、claim が競合した回も回収は走る。
+
+        （Sol レビュー 2026-08-06 F4: 以前は generate_chronicle の中ほどにあり、
+        「編纂対象なし → return」の向こう側だった —— 静かな夜が続くと付箋は
+        永久に残り、「次回の記憶の整理でやり直します」という画面の約束が嘘に
+        なっていた。）
+
+        **課金の同意について**: ここは編纂の確認ダイアログより手前なので、
+        拾い直しの LLM コールはそのダイアログの承認を通らない。通せない ——
+        通すと元の穴 (確認を断つと永久に回収されない) が戻る。代わりに
+        次の三つで縛る:
+
+        1. 走ってよいのは「確認なしで編纂してよい」と設定されている persona
+           だけ (``AUTONOMOUS_CHRONICLE_ENABLED``)。拾い直しは常に確認ダイアログ
+           の外側で起きるので、判断材料はこの設定しかない。**Pulse の種別は
+           見ない** —— ``_current_pulse_type`` は Pulse の外 (§14 の先回り畳み
+           など) で残留値になり、認可の根拠にできない (Codex 二巡 #1)。
+        2. 対象は「一度は確定と共に承認された抽出のうち失敗した分」だけ。
+           付箋 1 枚につき LLM 1 回、1 枚あたり 3 回まで (それ以上は止まる)。
+        3. 走ったことは画面通知に出す (黙って課金しない)。
+
+        止めるときは**止まっていることを見せる**。Chronicle 自体を切っている
+        persona では抽出も拾い直しも走らないが、付箋が残っているなら WARN で
+        毎回知らせる —— 黙って永久に溜まるのが元の欠陥だった (Codex 三巡 #3)。
+
+        LLM クライアントは、拾い直せる付箋が実際にあるときだけ用意する。
+        """
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            return
+        persona_id = getattr(persona, "persona_id", None)
+
+        try:
+            from sai_memory.memory.entity_extractor import (
+                count_extraction_backlog,
+                make_batch_callback,
+                retry_extraction_backlog,
+            )
+
+            counts = count_extraction_backlog(
+                adapter.conn, db_lock=adapter._db_lock,
+            )
+            pending, total = counts["claimable"], counts["total"]
+            if not total:
+                # 付箋が無い回も一行だけ残す。何も出ないと「頭で呼ばれている」
+                # こと自体が実機で確かめられない (まはーは常に DEBUG で見ている)
+                LOGGER.debug(
+                    "[extraction-backlog] 付箋なし — 拾い直しは不要 (persona=%s)",
+                    persona_id,
+                )
+                return
+
+            if pending < total:
+                # 上限まで試して止まっている付箋。拾い直しは走らないので、
+                # 残っていること自体を毎回知らせる (黙って諦めない)
+                LOGGER.warning(
+                    "[extraction-backlog] 上限まで試して止まっている付箋が "
+                    "%d 件あります (persona=%s) — この範囲の知識は自動では"
+                    "拾い直されません", total - pending, persona_id,
+                )
+            if not chronicle_enabled:
+                LOGGER.warning(
+                    "[extraction-backlog] 失敗した抽出が %d 件残っていますが、"
+                    "Chronicle を切っているので拾い直しは止まっています "
+                    "(persona=%s)。Chronicle を戻すと再開します",
+                    total, persona_id,
+                )
+                return
+            if not self.is_autonomous_chronicle_enabled_for_persona(persona):
+                LOGGER.warning(
+                    "[extraction-backlog] 失敗した抽出が %d 件残っていますが、"
+                    "確認なしの編纂を切っているので拾い直しは止まっています "
+                    "(persona=%s)",
+                    total, persona_id,
+                )
+                return
+            if not pending:
+                return
+
+            from saiverse.memory_weave_llm import (
+                build_memory_weave_client,
+                resolve_memory_weave_config,
+            )
+            try:
+                model_id, model_config, _source = resolve_memory_weave_config(
+                    persona, purpose="chronicle",
+                )
+            except LookupError as exc:
+                LOGGER.warning(
+                    "[extraction-backlog] %s — 拾い直しは次回へ持ち越し "
+                    "(付箋 %d 枚, persona=%s)", exc, pending, persona_id,
+                )
+                return
+            client = build_memory_weave_client(model_id, model_config)
+            callback = make_batch_callback(
+                client, adapter.conn,
+                persona_id=persona_id,
+                db_lock=adapter._db_lock,
+            )
+            LOGGER.info(
+                "[extraction-backlog] 拾い直しを開始 (persona=%s, 付箋 %d 枚)",
+                persona_id, pending,
+            )
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": (
+                        f"前回失敗した知識の書き出しを {pending} 件やり直しています..."
+                    ),
+                })
+            stats = retry_extraction_backlog(
+                adapter.conn, callback, db_lock=adapter._db_lock,
+            )
+            if event_callback and stats.get("recovered"):
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": (
+                        f"失敗していた知識の書き出しを {stats['recovered']} 件"
+                        "やり直しました。"
+                    ),
+                })
+        except Exception:
+            # 拾い直しそのものが落ちた回。付箋は残るので次の Metabolism で
+            # もう一度番が回る —— Metabolism 本体は続ける (編纂を巻き添えに
+            # しない)。ただし WARN に畳まない: 記憶の追記が今回落ちている
+            LOGGER.error(
+                "[extraction-backlog] 拾い直しが実行できませんでした "
+                "(persona=%s) — 付箋は残るので次回もう一度試みます",
+                persona_id, exc_info=True,
+            )
+
     def is_chronicle_enabled_for_persona(self, persona) -> bool:
         """Check per-persona Chronicle auto-generation toggle from DB."""
         persona_id = getattr(persona, "persona_id", None)
@@ -2886,18 +3041,23 @@ class SessionLifecycle:
             LOGGER.warning("[metabolism] SAIMemory not available for Chronicle generation")
             return "failed"
 
-        init_arasuji_tables(adapter.conn)
-
         # 帰化バックフィル (W4 D7): 既存 entry に coverage_chars を刻む
         # (一回きり・冪等・LLM なし)。**dry 予測より前に**実行する — dry が
         # 近似値で動くと実測 backfill 後の列のあふれ判定と食い違い、
         # 「予測 0 → 早期 return → backfill に永久に到達しない」が成立する
         # (Codex W4 三巡 #3)。帰化はメタデータ補完で確認ゲートの対象外。
+        #
+        # テーブルの用意も backfill も DDL / commit を伴う書き込み。共有接続
+        # なので adapter の錠前の内側で行う —— ロック外の commit は他所の開いた
+        # トランザクションを途中で確定させる (Codex 六巡 #2)。LLM は呼ばないので
+        # 錠を持ったままでも待たせない。
         from sai_memory.arasuji.bands import backfill_coverage
-        try:
-            backfill_coverage(adapter.conn)
-        except Exception:
-            LOGGER.exception("[metabolism] coverage backfill failed; continuing")
+        with adapter._db_lock:
+            init_arasuji_tables(adapter.conn)
+            try:
+                backfill_coverage(adapter.conn)
+            except Exception:
+                LOGGER.exception("[metabolism] coverage backfill failed; continuing")
 
         # Fetch ALL messages suitable for Chronicle (shared filter logic).
         from sai_memory.memory.storage import get_messages_for_chronicle
@@ -3205,25 +3365,16 @@ class SessionLifecycle:
             note_callback = make_entity_callback(
                 client, adapter.conn,
                 persona_id=persona_id_str,
-                # adapter.conn を使う以上、adapter と同じロックで書く。渡さないと
-                # Memopedia が自前のロックを作り、同じ接続への他所の commit と
-                # 排他が成立しない (docs/issues/memopedia_writers_bypass_adapter_lock.md)
+                # adapter と同じ錠前で書く (渡さなくても DB ファイルの錠前に
+                # なるが、付箋の書き込みなど Memopedia を通らない経路にも要る)
                 db_lock=adapter._db_lock,
             )
         except Exception as exc:
             LOGGER.warning("[metabolism] Entity extraction setup failed: %s", exc)
 
-        # 前回までに失敗した抽出の拾い直し (付箋 backlog)。確定済みチャンクの
-        # 抽出は本編の再実行では二度と発火しないので、ここが唯一の回収点
-        # (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
-        if note_callback is not None:
-            try:
-                from sai_memory.memory.entity_extractor import retry_extraction_backlog
-                retry_extraction_backlog(adapter.conn, note_callback)
-            except Exception:
-                LOGGER.warning(
-                    "[metabolism] extraction backlog の拾い直しに失敗", exc_info=True
-                )
+        # (付箋 backlog の拾い直しは Metabolism の頭 —— `_retry_extraction_backlog`。
+        #  ここに置くと「編纂対象なし」の早期 return の向こう側になり、静かな夜が
+        #  続くと永久に回収されない: Sol レビュー 2026-08-06 F4)
 
         from sai_memory.arasuji.bands import run_band_overflow
         from sai_memory.arasuji.executor import execute_plan
@@ -3235,6 +3386,8 @@ class SessionLifecycle:
                 progress_callback=progress_fn,
                 cancel_check=cancel_fn,
                 batch_callback=note_callback,
+                # 抽出失敗の付箋も adapter と同じ錠前で書く (Codex 四巡 #2)
+                db_lock=adapter._db_lock,
             )
         except Exception as exc:
             LOGGER.exception("[metabolism] Chronicle generation raised")
@@ -3283,6 +3436,10 @@ class SessionLifecycle:
                     # 束ね側の抽出失敗も同じ器に積む — 下の報告 (ERROR ログ /
                     # 台帳 / 画面通知) が executor 側とまとめて拾う。
                     extraction_failures=exec_result.extraction_failures,
+                    db_lock=adapter._db_lock,
+                    extraction_failures_unrecorded=(
+                        exec_result.extraction_failures_unrecorded
+                    ),
                 )
             except Exception:
                 LOGGER.exception("[bands] consolidation failed; continuing")
@@ -3297,13 +3454,26 @@ class SessionLifecycle:
         # failed 再実行しても冪等スキップにより抽出は再発火しない = 嘘の失敗)。
         # 代わりに握り潰さず表へ出す: ERROR ログ + 台帳 + 画面通知
         # (docs/issues/memopedia_writers_bypass_adapter_lock.md)。
+        unrecorded = set(exec_result.extraction_failures_unrecorded)
         if exec_result.extraction_failures:
-            LOGGER.error(
-                "[metabolism] entity extraction failed for %d chunks (entries=%s) — "
-                "付箋 (backlog) に記録済み。次回の Metabolism の頭で拾い直す",
-                len(exec_result.extraction_failures),
-                ",".join(e[:8] for e in exec_result.extraction_failures),
-            )
+            recorded = [
+                e for e in exec_result.extraction_failures if e not in unrecorded
+            ]
+            if recorded:
+                LOGGER.error(
+                    "[metabolism] entity extraction failed for %d chunks (entries=%s) — "
+                    "付箋 (backlog) に記録済み。次回の Metabolism の頭で拾い直す",
+                    len(recorded), ",".join(e[:8] for e in recorded),
+                )
+            if unrecorded:
+                # 付箋に残せなかった分は拾い直しの対象にならない。
+                # 「次回やり直します」と一緒くたに報告してはいけない
+                LOGGER.error(
+                    "[metabolism] entity extraction failed for %d chunks "
+                    "(entries=%s) — **付箋にも残せなかった**。この範囲の知識は"
+                    "自動では拾い直されない (手動の再構築が要る)",
+                    len(unrecorded), ",".join(e[:8] for e in sorted(unrecorded)),
+                )
         if ledger is not None and execution_id:
             try:
                 result_payload = dict(plan.summary)
@@ -3317,6 +3487,10 @@ class SessionLifecycle:
                     result_payload["extraction_failures"] = list(
                         exec_result.extraction_failures
                     )
+                if unrecorded:
+                    result_payload["extraction_failures_unrecorded"] = sorted(
+                        unrecorded
+                    )
                 ledger.mark_applied(execution_id, result=result_payload)
                 # outbox を積まない実行なので completed へ明示遷移して閉じる。
                 ledger.mark_completed(execution_id)
@@ -3326,10 +3500,18 @@ class SessionLifecycle:
         # Notify frontend that generation is complete
         if event_callback:
             content = f"Chronicle生成完了: {exec_result.created_count}件のエントリを作成しました。"
-            if exec_result.extraction_failures:
+            retriable = len(exec_result.extraction_failures) - len(unrecorded)
+            if retriable > 0:
                 content += (
-                    f"⚠ うち {len(exec_result.extraction_failures)} 件で知識の"
+                    f"⚠ うち {retriable} 件で知識の"
                     "書き出しに失敗しました。次回の記憶の整理で自動的にやり直します。"
+                )
+            if unrecorded:
+                # ここで「やり直します」と言えない相手。嘘をつかない
+                content += (
+                    f"⚠ うち {len(unrecorded)} 件は書き出しに失敗したうえ、"
+                    "やり直しの記録も残せませんでした。この範囲は自動では"
+                    "やり直せません（ログを確認してください）。"
                 )
             event_callback({
                 "type": "metabolism",
@@ -3362,11 +3544,23 @@ class SessionLifecycle:
             )
             from sai_memory.arasuji import init_arasuji_tables
             from sai_memory.memopedia import init_memopedia_tables
-            init_arasuji_tables(adapter.conn)
-            init_memopedia_tables(adapter.conn)
-            n_chr = embed_chronicle_entries(adapter.conn, adapter.embedder, level=1)
-            n_page = embed_memopedia_pages(adapter.conn, adapter.embedder)
-            n_frag = embed_memopedia_fragments(adapter.conn, adapter.embedder)
+            # テーブルの用意は commit を伴う。共有接続なので adapter のロックの
+            # 内側で行う (ロック外の commit は他所の開いた tx を途中で確定させる)
+            with adapter._db_lock:
+                init_arasuji_tables(adapter.conn)
+                init_memopedia_tables(adapter.conn)
+            # 埋め込みの計算は錠の外、保存だけ錠の内側 (db_lock を渡す)。
+            # 共有接続なので、錠外の commit は他所の開いたトランザクションを
+            # 途中で確定させる (Codex 八巡 #1)
+            n_chr = embed_chronicle_entries(
+                adapter.conn, adapter.embedder, level=1, db_lock=adapter._db_lock,
+            )
+            n_page = embed_memopedia_pages(
+                adapter.conn, adapter.embedder, db_lock=adapter._db_lock,
+            )
+            n_frag = embed_memopedia_fragments(
+                adapter.conn, adapter.embedder, db_lock=adapter._db_lock,
+            )
             if n_chr or n_page or n_frag:
                 LOGGER.info(
                     "[metabolism] Embeddings generated: chronicle=%d, pages=%d, fragments=%d",

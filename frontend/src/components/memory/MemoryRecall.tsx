@@ -254,23 +254,42 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [buildMemopediaResult, setBuildMemopediaResult] = useState<string | null>(null);
     const [buildMemopediaError, setBuildMemopediaError] = useState<string | null>(null);
     const buildMemopediaPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 途中で終わった実行の続き位置。次の実行でここから再開する。持たずに毎回
+    // 先頭から流すと、成功済みの範囲まで LLM をもう一度通すことになる
+    const [buildMemopediaResume, setBuildMemopediaResume] = useState<
+        { ts: number; rowid: number } | null
+    >(null);
+    // 進行中の問い合わせが、切り替えた後のペルソナの画面へ結果を書き込まない
+    // ようにするための現在地
+    const currentPersonaRef = useRef(personaId);
+    currentPersonaRef.current = personaId;
 
-    const handleBuildMemopediaFromLogs = async () => {
+    const handleBuildMemopediaFromLogs = async (resume = false) => {
         setIsBuildingMemopedia(true);
         setBuildMemopediaProgress(null);
         setBuildMemopediaResult(null);
         setBuildMemopediaError(null);
+        const from = resume ? buildMemopediaResume : null;
         try {
             const res = await fetch(`/api/people/${personaId}/memopedia/build-from-logs`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ batch_size: 20, limit: 0, start_after: 0 }),
+                body: JSON.stringify({
+                    batch_size: 20,
+                    limit: 0,
+                    start_after: from?.ts ?? 0,
+                    start_after_rowid: from?.rowid ?? 0,
+                }),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || `HTTP ${res.status}`);
             }
             const data = await res.json();
+            // 開始の応答を待っている間にペルソナが替わっていたら、この実行は
+            // いま見えている画面のものではない。古い job の監視を新しい画面へ
+            // 登録しない
+            if (currentPersonaRef.current !== personaId) return;
             const jobId = data.job_id;
             setBuildMemopediaJobId(jobId);
             setBuildMemopediaProgress('開始しました...');
@@ -280,29 +299,60 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 try {
                     const statusRes = await fetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
                     if (!statusRes.ok) return;
+                    // 応答を待っている間にペルソナが替わっていたら、この結果は
+                    // いま見えている画面のものではない
+                    if (currentPersonaRef.current !== personaId) return;
                     const status = await statusRes.json();
                     const progressText = status.total > 0
                         ? `${status.progress}/${status.total} バッチ処理中: ${status.message || ''}`
                         : (status.message || '処理中...');
                     setBuildMemopediaProgress(progressText);
 
-                    if (status.status === 'completed' || status.status === 'failed') {
+                    // partial = 一部のバッチで抽出に失敗したが、残りは終わった状態。
+                    // ここに入れないとポーリングが終わらず、画面が回り続ける
+                    if (status.status === 'completed' || status.status === 'partial'
+                        || status.status === 'failed') {
                         if (buildMemopediaPollRef.current) {
                             clearInterval(buildMemopediaPollRef.current);
                             buildMemopediaPollRef.current = null;
                         }
                         setIsBuildingMemopedia(false);
-                        if (status.status === 'completed') {
+                        if (status.status === 'failed') {
+                            // 失敗した回の続き位置は信用できない (どこまで
+                            // 反映されたか分からない)。持ち越さない
+                            setBuildMemopediaResume(null);
+                            setBuildMemopediaError(status.error || '失敗しました');
+                        } else {
                             const r = status.result;
+                            // 途中で終わったときだけ「続きから」を持つ。全部
+                            // 終わっていれば続きは無い
+                            setBuildMemopediaResume(
+                                r && status.status === 'partial'
+                                    ? { ts: r.last_message_timestamp || 0, rowid: r.last_message_rowid || 0 }
+                                    : null
+                            );
                             if (r) {
+                                // 取得した件数と処理した件数は違う（失敗した範囲と、
+                                // 小さすぎて次回に回した末尾がある）。処理した数だけ
+                                // 出すと、残りがあることが画面から消える
+                                const leftovers: string[] = [];
+                                if (r.failed_batches) {
+                                    leftovers.push(`${r.failed_batches} バッチは失敗しました。「続きから再構築」を押すと、最初の失敗の手前からやり直します`);
+                                }
+                                if (r.messages_skipped) {
+                                    leftovers.push(`${r.messages_skipped} メッセージは今回の分量に満たないため次回に回しました`);
+                                }
+                                if (r.deduped_notes) {
+                                    leftovers.push(`${r.deduped_notes} 件は同じ内容が記録済みのため新しくは作りませんでした`);
+                                }
                                 setBuildMemopediaResult(
-                                    `${r.total_entities} エンティティ抽出, ${r.new_pages} 新規, ${r.updated_pages} 更新 (${r.batches_processed} バッチ, ${r.messages_processed} メッセージ)`
+                                    `${r.total_entities} エンティティ抽出, ${r.new_pages} 新規, ${r.updated_pages} 更新`
+                                    + ` (${r.messages_fetched ?? r.messages_processed} メッセージ中 ${r.messages_processed} 件を ${r.batches_processed} バッチで処理)`
+                                    + (leftovers.length ? ` ／ ${leftovers.join('。')}。` : '')
                                 );
                             } else {
                                 setBuildMemopediaResult(status.message || '完了');
                             }
-                        } else {
-                            setBuildMemopediaError(status.error || '失敗しました');
                         }
                     }
                 } catch {
@@ -323,6 +373,22 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             }
         };
     }, []);
+
+    // ペルソナが替わったら、前のペルソナの続き位置と実行状態を捨てる。
+    // 持ち越すと、別のペルソナの DB へ前のペルソナの位置を送って、その範囲を
+    // 丸ごと飛ばすことになる
+    useEffect(() => {
+        if (buildMemopediaPollRef.current) {
+            clearInterval(buildMemopediaPollRef.current);
+            buildMemopediaPollRef.current = null;
+        }
+        setBuildMemopediaResume(null);
+        setBuildMemopediaJobId(null);
+        setBuildMemopediaProgress(null);
+        setBuildMemopediaResult(null);
+        setBuildMemopediaError(null);
+        setIsBuildingMemopedia(false);
+    }, [personaId]);
 
     // Chronicle diagnosis state
     const [isDiagnosing, setIsDiagnosing] = useState(false);
@@ -849,7 +915,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
 
             <button
                 className={styles.executeButton}
-                onClick={handleBuildMemopediaFromLogs}
+                onClick={() => handleBuildMemopediaFromLogs(false)}
                 disabled={isBuildingMemopedia}
                 style={{ background: '#6b46c1' }}
             >
@@ -859,6 +925,17 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                     <><Brain size={16} /> ログからMemopediaを構築</>
                 )}
             </button>
+
+            {/* 前回が途中で終わったときだけ出る。押さなければ先頭から流れる */}
+            {buildMemopediaResume && !isBuildingMemopedia && (
+                <button
+                    className={styles.executeButton}
+                    onClick={() => handleBuildMemopediaFromLogs(true)}
+                    style={{ background: '#4c1d95', marginLeft: '0.5rem' }}
+                >
+                    <Brain size={16} /> 続きから再構築
+                </button>
+            )}
 
             {buildMemopediaProgress && isBuildingMemopedia && (
                 <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#a78bfa' }}>

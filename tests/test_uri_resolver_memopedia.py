@@ -28,8 +28,8 @@ def conn():
 
 def _render(memopedia: Memopedia, page_id: str) -> str:
     resolver = UriResolver(manager=None)
-    page = memopedia.get_page(page_id)
-    return resolver._format_memopedia_page(memopedia, page)
+    snapshot = memopedia.page_snapshot(page_ref=page_id)
+    return resolver._format_memopedia_page(snapshot)
 
 
 def test_fragments_appear_in_page_view(conn):
@@ -64,3 +64,34 @@ def test_page_without_anything_is_empty(conn):
     text = _render(memopedia, page.id)
     assert "(empty)" in text
     assert "子ページ:" not in text
+
+
+def test_handwritten_body_is_verbatim(conn):
+    """⭐ 手書き本文は原文のまま出る (先頭の字下げ・行末の空白・末尾の改行)。
+
+    表示の都合で削ると、AI が読む本文が書かれたものと変わる。行末の空白は
+    Markdown の改行なので、削ると意味まで変わる。
+    """
+    body = "  字下げした行\n行末に空白  \n\n最後は改行で終わる\n"
+    page = create_page(conn, parent_id=None, title="手書き", content=body, category="people")
+    memopedia = Memopedia(conn)
+
+    assert memopedia.render_page_body(page.id) == body
+    assert body in _render(memopedia, page.id)
+
+
+def test_snapshot_reads_page_body_and_children_together(conn):
+    """ページ・本文・子一覧が一つのスナップショットで返る。"""
+    parent = create_page(conn, parent_id=None, title="親", content="本文", category="people")
+    child = create_page(conn, parent_id=parent.id, title="子", content="", category="people")
+    create_fragment(conn, entity_id=parent.id, content="断片", source_date="2026-08-06")
+    memopedia = Memopedia(conn)
+
+    snapshot = memopedia.page_snapshot(page_ref=parent.id)
+    assert snapshot["page"].id == parent.id
+    assert "本文" in snapshot["body"]
+    assert "- 断片" in snapshot["body"]
+    assert [c.id for c in snapshot["children"]] == [child.id]
+
+    assert memopedia.page_snapshot(title="親")["page"].id == parent.id
+    assert memopedia.page_snapshot(page_ref="no-such-page") is None

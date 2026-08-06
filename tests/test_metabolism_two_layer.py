@@ -1254,5 +1254,170 @@ class ChronicleIndexDiffRetiredTest(unittest.TestCase):
         self.assertEqual(section.diff_to_notifications(old, new), [])
 
 
+# ---------------------------------------------------------------------------
+# ⑦ 失敗した抽出の拾い直しは「Metabolism の頭」— 編纂の有無に依存しない
+#    (Sol レビュー 2026-08-06 F4)
+# ---------------------------------------------------------------------------
+
+
+class ExtractionBacklogRecoveryPointTest(unittest.TestCase):
+    """付箋の回収点。
+
+    抽出の失敗は「次の記憶の整理でやり直します」と画面が約束している。回収を
+    編纂の計画・確認・claim の後ろに置くと、畳むものが無い夜が続いただけで
+    その約束が果たされない (以前は generate_chronicle の中ほどにあり、
+    「編纂対象なし → return」の向こう側だった)。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        persona_path = Path(self._tmp.name) / "personas" / PERSONA_ID
+        persona_path.mkdir(parents=True, exist_ok=True)
+        os.environ["SAIMEMORY_MEMORY"] = "1"
+        self.addCleanup(self._cleanup_temp)
+
+        patcher = patch("saiverse_memory.adapter.Embedder", DummyEmbedder)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+        from saiverse_memory import SAIMemoryAdapter
+        self.adapter = SAIMemoryAdapter(
+            PERSONA_ID, persona_dir=persona_path, resource_id=PERSONA_ID,
+        )
+        self.addCleanup(self._close_adapter)
+
+        self.session_factory, self._engine = _make_session_factory()
+
+    def _close_adapter(self):
+        try:
+            self.adapter.close()
+        except Exception:
+            pass
+
+    def _cleanup_temp(self):
+        import gc
+        gc.collect()
+        os.environ.pop("SAIMEMORY_MEMORY", None)
+        try:
+            self._engine.dispose()
+        except Exception:
+            pass
+        try:
+            self._tmp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _note_a_failed_extraction(self, entry_id="entry-1"):
+        """メッセージと Chronicle entry を作り、その抽出失敗を付箋に貼る。"""
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.storage import create_entry
+        from sai_memory.memory.entity_extractor import record_extraction_failure
+        from sai_memory.memory.storage import add_message
+
+        init_arasuji_tables(self.adapter.conn)
+        m1 = add_message(self.adapter.conn, "t", "user", "こんにちは", created_at=1000)
+        create_entry(
+            self.adapter.conn, level=1, content="挨拶した",
+            source_ids=[m1], source_count=1, message_count=1, entry_id=entry_id,
+        )
+        record_extraction_failure(self.adapter.conn, entry_id)
+        return entry_id
+
+    def _persona(self, messages=()):
+        return SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="エア", model="std-model",
+            sai_memory=self.adapter, history_manager=_history_manager(messages),
+        )
+
+    def test_recovered_even_when_there_is_nothing_to_compile(self):
+        """⭐ 畳むものが無い回でも付箋は拾い直される。"""
+        entry_id = self._note_a_failed_extraction()
+
+        manager = SimpleNamespace(SessionLocal=self.session_factory)
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        # 編纂が走ったら分かるように失敗を仕込む (走らないことが期待)
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "failed"
+        lifecycle.ensure_recall_embeddings = lambda p: None
+
+        seen = []
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch("saiverse.memory_weave_llm.resolve_memory_weave_config",
+                      return_value=("mock-model", {"provider": "mock"}, "test")), \
+                patch("saiverse.memory_weave_llm.build_memory_weave_client",
+                      return_value=SimpleNamespace()), \
+                patch("sai_memory.memory.entity_extractor.make_batch_callback",
+                      return_value=lambda msgs, eid, **_: seen.append(eid)):
+            # 提示コンテキストが空 = 畳むものが無い夜
+            status = lifecycle.run_metabolism(
+                self._persona(), "b", _window([]),
+                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                model_key="std-model",
+            )
+
+        self.assertEqual(status, "nothing")
+        self.assertEqual(seen, [entry_id], "静かな夜に付箋が拾い直されていない")
+        left = self.adapter.conn.execute(
+            "SELECT COUNT(*) FROM entity_extraction_backlog"
+        ).fetchone()[0]
+        self.assertEqual(left, 0)
+
+    def test_skipped_when_unattended_chronicle_is_not_allowed(self):
+        """⭐ 「勝手に編纂するな」と言われている persona では拾い直しも走らない。
+
+        拾い直しは確認ダイアログより手前にあるので、この設定が唯一の同意の関所。
+        判定に Pulse の種別は使わない —— ``_current_pulse_type`` は Pulse の外
+        (§14 の先回り畳みなど) で残留値になり、認可の根拠にならない。ここでは
+        残留値として最も危険な "user" を置いて、それでも走らないことを見る。
+        """
+        self._note_a_failed_extraction()
+
+        manager = SimpleNamespace(SessionLocal=self.session_factory)
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.is_autonomous_chronicle_enabled_for_persona = lambda p: False
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
+        lifecycle.ensure_recall_embeddings = lambda p: None
+
+        persona = self._persona()
+        persona._current_pulse_type = "user"  # Pulse 外に残った値のつもり
+
+        built = []
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch("saiverse.memory_weave_llm.build_memory_weave_client",
+                      side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
+            lifecycle.run_metabolism(
+                persona, "b", _window([]),
+                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                model_key="std-model",
+            )
+
+        self.assertEqual(built, [], "確認なしの編纂を断っている persona で課金している")
+        left = self.adapter.conn.execute(
+            "SELECT COUNT(*) FROM entity_extraction_backlog"
+        ).fetchone()[0]
+        self.assertEqual(left, 1, "付箋は残る (諦めない)")
+
+    def test_no_llm_client_is_built_when_there_are_no_notes(self):
+        """付箋が無い回は LLM クライアントを用意しない (毎回の無駄打ちを避ける)。"""
+        manager = SimpleNamespace(SessionLocal=self.session_factory)
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: True
+        lifecycle.generate_chronicle = lambda p, cb=None, **kw: "ok"
+        lifecycle.ensure_recall_embeddings = lambda p: None
+
+        built = []
+        with patch.dict(os.environ, {"ENABLE_MEMORY_WEAVE_CONTEXT": "true"}), \
+                patch("saiverse.memory_weave_llm.build_memory_weave_client",
+                      side_effect=lambda *a, **k: built.append(a) or SimpleNamespace()):
+            lifecycle.run_metabolism(
+                self._persona(), "b", _window([]),
+                Watermarks(low=2_000, target=2_000, high=4_000), None,
+                model_key="std-model",
+            )
+
+        self.assertEqual(built, [])
+
+
 if __name__ == "__main__":
     unittest.main()

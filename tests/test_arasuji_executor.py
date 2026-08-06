@@ -294,6 +294,33 @@ class TestBatchCallback(ExecutorTestBase):
             "SELECT entry_id, attempts FROM entity_extraction_backlog"
         ).fetchall()
         self.assertEqual(backlog, [(calls[0], 1)])
+        # 付箋に残せた分は「やり直せない側」に入らない
+        self.assertEqual(result.extraction_failures_unrecorded, [])
+
+    def test_a_failure_that_cannot_be_noted_is_reported_separately(self):
+        """⭐ 付箋にも残せなかった失敗は、拾い直せる失敗と分けて返す。
+
+        分けないと「次回の記憶の整理でやり直します」という画面の報告が、
+        やり直しようのない相手にも出てしまう (嘘の約束になる)。
+        """
+        from unittest.mock import patch
+
+        def bad_callback(messages, entry_id):
+            raise RuntimeError("extractor down")
+
+        plan = _plan(_chunk([_msg("m1", "a" * 50)]))
+        with patch(
+            "sai_memory.memory.entity_extractor.record_extraction_failure",
+            side_effect=RuntimeError("backlog table is gone"),
+        ):
+            result = execute_plan(plan, _CountingClient(), self.conn,
+                                  batch_callback=bad_callback)
+
+        self.assertEqual(result.created_count, 1)
+        self.assertEqual(len(result.extraction_failures), 1)
+        self.assertEqual(
+            result.extraction_failures_unrecorded, result.extraction_failures,
+        )
 
 
 if __name__ == "__main__":

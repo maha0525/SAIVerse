@@ -270,15 +270,16 @@ class ApplyConversionRequest(BaseModel):
 def _memopedia_session(persona_id: str, manager, *, read_only: bool = False):
     """変換のための **専用の DB 接続** を開く。
 
-    SAIMemory の接続 (``adapter.conn``) は他の経路と共有されていて、それぞれが
-    自前のロックで守っている (例: ``api/routes/people/memopedia.py`` は
-    ``Memopedia(adapter.conn)`` で新しい RLock を作る)。同じ接続へ他所から
-    ``commit()`` が入ると、変換の ``BEGIN IMMEDIATE`` の途中までが確定し、
+    SAIMemory の接続 (``adapter.conn``) は他の経路と共有されている。同じ接続へ
+    他所から ``commit()`` が入ると、変換の ``BEGIN IMMEDIATE`` の途中までが確定し、
     その後 rollback しても戻らない —— 部分適用が残る (Codex 指摘 2026-08-05)。
 
-    ロックを配って回っても、将来の書き手が取り忘れれば同じ穴が開く。**接続を
-    分ければ SQLite の書き込みロック自体が排他になる** ので、他の経路が何を
-    しようと変換のトランザクションは割られない。
+    **接続を分ければ SQLite の書き込みロック自体が排他になる** ので、他の経路が
+    何をしようと変換のトランザクションは割られない。
+
+    (2026-08-06 以降、錠前は DB ファイルに紐づく = 取り忘れが起きない
+    ``sai_memory.db_locks``。それでも接続を分けるのは、Python の錠前が守るのは
+    同一プロセスの中だけで、別プロセスの書き手には効かないため。)
     """
     persona = manager.personas.get(persona_id)
     if persona is None:

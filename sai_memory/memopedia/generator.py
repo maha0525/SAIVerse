@@ -374,7 +374,7 @@ def generate_memopedia_page(
         with_chronicle: Whether to include Chronicle context for better understanding
         progress_callback: Optional callback(loop, max_loops, message)
         db_lock: 同じ DB を書く adapter がいる場合、その ``_db_lock``。渡さないと
-            Memopedia が自前のロックを作り排他が成立しない
+            省いても DB ファイルの錠前が使われる (sai_memory.db_locks)
             (docs/issues/memopedia_writers_bypass_adapter_lock.md)
 
     Returns:
@@ -710,32 +710,28 @@ def generate_memopedia_page(
         LOGGER.error("Missing required fields in page data")
         return None
 
-    # Save to Memopedia
-    existing = memopedia.find_by_title(page_data["title"], page_data.get("category"))
+    # Save to Memopedia。
+    # 「探す → 本文を繋ぐ → 書く」を別々のロック区間でやると、その隙間に別の
+    # 書き手が同じページへ書けてしまい、片方の追記が消えるか同名ページが二枚
+    # できる。upsert_page_by_title が 1 ロック・1 トランザクションで行う
+    # (Sol レビュー 2026-08-06 F6)。
+    _cat_to_root = {k: f"root_{k}" for k in category_keys("extractable")}
+    category_root = _cat_to_root.get(page_data.get("category", "terms"), "root_terms")
 
-    if existing:
-        memopedia.update_page(
-            existing.id,
-            content=existing.content + "\n\n" + page_data["content"],
-            summary=page_data.get("summary", existing.summary),
-        )
-        page_data["page_id"] = existing.id
-        page_data["action"] = "updated"
-        LOGGER.info(f"Updated existing page: {page_data['title']}")
-    else:
-        _cat_to_root = {k: f"root_{k}" for k in category_keys("extractable")}
-        category_root = _cat_to_root.get(page_data.get("category", "terms"), "root_terms")
-
-        new_page = memopedia.create_page(
-            parent_id=category_root,
-            title=page_data["title"],
-            summary=page_data.get("summary", ""),
-            content=page_data["content"],
-            keywords=page_data.get("keywords", [keyword]),
-        )
-        page_data["page_id"] = new_page.id
-        page_data["action"] = "created"
-        LOGGER.info(f"Created new page: {page_data['title']}")
+    page, is_new = memopedia.upsert_page_by_title(
+        title=page_data["title"],
+        parent_id=category_root,
+        category=page_data.get("category"),
+        summary=page_data.get("summary"),
+        append_content=page_data["content"],
+        keywords=page_data.get("keywords", [keyword]),
+    )
+    page_data["page_id"] = page.id
+    page_data["action"] = "created" if is_new else "updated"
+    LOGGER.info(
+        "%s page: %s",
+        "Created new" if is_new else "Updated existing", page_data["title"],
+    )
 
     return page_data
 
