@@ -57,6 +57,8 @@ interface Preview {
     verbatim_breaches: VerbatimBreach[];
     page_count: number;
     fragment_count: number;
+    /** 同じ内容の Fragment が既にあり、新しくは作らず本文から抜くだけの行数 */
+    dedup_count: number;
     confirmed_count: number;
     pending_count: number;
     emptied_count: number;
@@ -79,6 +81,7 @@ interface Run {
     converted_at: number;
     page_count: number;
     fragment_count: number;
+    dedup_count: number;
 }
 
 export default function MemopediaConversion({ personaId }: { personaId: string }) {
@@ -177,6 +180,9 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
     useEffect(() => {
         if (!preview) return;
         if (Object.keys(decisions).length === 0) return;
+        // 選択が連打されたら前のリクエストを中断する。遅れて返ってきた古い数字が
+        // 新しい選択の結果を上書きすると、画面と実行内容が食い違う。
+        const controller = new AbortController();
         const timer = setTimeout(async () => {
             setRestating(true);
             try {
@@ -184,15 +190,19 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ decisions: decisionsRef.current }),
+                    signal: controller.signal,
                 });
-                setPreview(data);
+                if (!controller.signal.aborted) setPreview(data);
             } catch {
                 /* 数字の更新に失敗しても、選択と実行は続けられる */
             } finally {
-                setRestating(false);
+                if (!controller.signal.aborted) setRestating(false);
             }
         }, 600);
-        return () => clearTimeout(timer);
+        return () => {
+            clearTimeout(timer);
+            controller.abort();
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [decisions]);
 
@@ -420,8 +430,11 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
 
                     <div className={styles.applyArea}>
                         <div className={styles.applyNote}>
-                            実行すると Fragment {preview.confirmed_count + decidedCount} 件を作ります
+                            実行すると {preview.confirmed_count + decidedCount} 行を本文から Fragment へ移します
                             （来歴の裏づけ {preview.confirmed_count} + 判断済み {decidedCount}）。
+                            {preview.dedup_count > 0 && (
+                                <> うち {preview.dedup_count} 行は同じ内容の Fragment が既にあるため、新しくは作りません。</>
+                            )}
                             {preview.pending_count - decidedCount > 0 && (
                                 <> 残り {preview.pending_count - decidedCount} 行は本文に残します。</>
                             )}
@@ -460,6 +473,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                             <span className={styles.runInfo}>
                                 {new Date(run.converted_at * 1000).toLocaleString('ja-JP')} ／
                                 {run.page_count} ページ・Fragment {run.fragment_count} 件
+                                {run.dedup_count > 0 && <>・既存へ寄せた {run.dedup_count} 行</>}
                             </span>
                             <button
                                 className={styles.revertButton}

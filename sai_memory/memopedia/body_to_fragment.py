@@ -39,7 +39,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
@@ -209,13 +209,17 @@ class BodySplit:
 
         1. Fragment へ移す行
         2. 中身が全部出ていったブロックの日付見出し
-        3. **そのブロックを前と隔てていた空行** —— ブロックが消えるなら、その
-           区切りも役目を終える
+        3. **その見出しの直上に連なる空白行の帯** —— 各見出しは自分の直上の
+           空白帯 (前のブロックとの区切り。空白・全角空白だけの行を含み、
+           連続していれば複数行) を所有していて、見出しが消えるときは帯ごと
+           消える。ファイル先頭のブロックでは、先頭に積まれた空白行がその帯に
+           あたる。見出しが残るなら帯もそのまま残る
 
         3 を一緒に抜くのが要点 (まはー 2026-08-06)。抜いたあとで「残った文字列が
         空っぽか」を判定する後始末をやると、「空っぽとは何か」を定義する羽目に
-        なり、全角空白のような *書かれた空白* まで消してしまう。**抜くときに
-        正しく抜けば、判定そのものが要らない。**
+        なり、消える見出しと無関係な場所の *書かれた空白* まで消してしまう。
+        この規則が触るのは消える見出しの直上だけで、残る本文の中の空白行には
+        一切触れない。**抜くときに正しく抜けば、判定そのものが要らない。**
         """
         decisions = decisions or {}
         drop = set()
@@ -740,7 +744,7 @@ def _already_moved_out(conn: sqlite3.Connection) -> Dict[str, Dict[str, int]]:
     moved: Dict[str, Dict[str, int]] = {}
     for page_id, digest in conn.execute(
         "SELECT c.page_id, c.attest_digest FROM memopedia_body_conversion c "
-        "WHERE c.kind = 'fragment' AND c.page_id IS NOT NULL "
+        "WHERE c.kind IN ('fragment', 'dedup') AND c.page_id IS NOT NULL "
         "  AND c.attest_digest IS NOT NULL "
         "  AND EXISTS (SELECT 1 FROM memopedia_fragments f "
         "              WHERE f.id = c.ref_id AND f.entity_id = c.page_id)"
@@ -748,6 +752,61 @@ def _already_moved_out(conn: sqlite3.Connection) -> Dict[str, Dict[str, int]]:
         bucket = moved.setdefault(page_id, {})
         bucket[digest] = bucket.get(digest, 0) + 1
     return moved
+
+
+def _existing_fragment_index(
+    conn: sqlite3.Connection,
+) -> Dict[str, Dict[Tuple[str, Optional[str]], List[str]]]:
+    """ページごとに、既にある Fragment を (本文, 日付) で引ける索引にする。
+
+    Fragment 移行期の抽出器は、本文への追記と Fragment の作成を同時に行っていた
+    (コミット e1866ef)。その時期のデータでは、本文の行と同じ内容の Fragment が
+    既に存在する —— 照合せずに作ると同じ記憶が二重になり、想起の重複と過重評価を
+    招く (Codex 指摘 2026-08-06)。
+
+    キーの日付は Fragment の ``source_date``。値は Fragment id のリスト
+    (挿入順)。同じ内容が複数あれば、その数だけ照合に使える。
+    """
+    index: Dict[str, Dict[Tuple[str, Optional[str]], List[str]]] = {}
+    for frag_id, entity_id, content, source_date in conn.execute(
+        "SELECT id, entity_id, content, source_date FROM memopedia_fragments "
+        "ORDER BY rowid"
+    ):
+        index.setdefault(entity_id, {}).setdefault(
+            (content, source_date or None), []
+        ).append(frag_id)
+    return index
+
+
+def _partition_drafts(
+    drafts: List[FragmentDraft],
+    existing: Optional[Dict[Tuple[str, Optional[str]], List[str]]],
+) -> Tuple[List[FragmentDraft], List[Tuple[FragmentDraft, str]]]:
+    """Fragment にする行を「新しく作る」と「既にあるものへ寄せる」に分ける。
+
+    同じページに、同じ本文・両立する日付 (同じ日付か、日付なし) の Fragment が
+    既にあれば、新しくは作らず **本文から抜くだけ** にする。記憶は既に Fragment 側に
+    あるので、ユーザーとして失うものは無い (まはー裁定 2026-08-05:
+    本質は「本文に残しておかないとまずいものかどうか」)。
+
+    既存 Fragment 1 つが照合に使えるのは 1 回だけ —— 同じ行が 2 回観測されて
+    いれば、1 行は既存へ寄り、もう 1 行は新しく作られる。
+    """
+    pool = {key: list(ids) for key, ids in (existing or {}).items()}
+    to_create: List[FragmentDraft] = []
+    dedup: List[Tuple[FragmentDraft, str]] = []
+    for draft in drafts:
+        keys = [(draft.content, draft.source_date or None)]
+        if draft.source_date:
+            keys.append((draft.content, None))
+        for key in keys:
+            ids = pool.get(key)
+            if ids:
+                dedup.append((draft, ids.pop(0)))
+                break
+        else:
+            to_create.append(draft)
+    return to_create, dedup
 
 
 def _attestation_budget(
@@ -837,7 +896,10 @@ def _ledger_state(conn: sqlite3.Connection) -> List[tuple]:
 
 
 def _fingerprint_of(
-    rows, attested_all: Dict[str, Dict[str, int]], ledger: Optional[List[tuple]] = None
+    rows,
+    attested_all: Dict[str, Dict[str, int]],
+    ledger: Optional[List[tuple]] = None,
+    frag_index: Optional[Dict[str, Dict[Tuple[str, Optional[str]], List[str]]]] = None,
 ) -> str:
     """読み取ったその行そのものから指紋を作る。
 
@@ -855,6 +917,16 @@ def _fingerprint_of(
         for text, count in sorted((attested_all.get(page_id) or {}).items()):
             digest.update(f"{count}:{text}".encode("utf-8"))
             digest.update(SEP)
+        # 既にある Fragment は「新しく作るか、既存へ寄せるか」の判定に効く。
+        # 下見のあとで Fragment が増減したら、選んだ行の行き先が変わりうるので
+        # 再下見を要求する (台帳に載らない移行期の Fragment は _ledger_state では
+        # 捕まらない)。
+        for (text, frag_date), ids in sorted(
+            (frag_index or {}).get(page_id, {}).items(),
+            key=lambda kv: (kv[0][1] or "", kv[0][0]),
+        ):
+            digest.update(f"{len(ids)}:{frag_date or ''}:{text}".encode("utf-8"))
+            digest.update(SEP)
         digest.update(END)
     # 既に外へ出した分は判定に効くので、台帳が変われば指紋も変わるべき
     for row in ledger or ():
@@ -871,7 +943,10 @@ def conversion_fingerprint(conn: sqlite3.Connection) -> str:
     ユーザーが「本文に残す」と決めた行が確証あり側へ回って勝手に変換される。
     """
     return _fingerprint_of(
-        _target_pages(conn), attested_machine_lines(conn), _ledger_state(conn)
+        _target_pages(conn),
+        attested_machine_lines(conn),
+        _ledger_state(conn),
+        _existing_fragment_index(conn),
     )
 
 
@@ -898,8 +973,11 @@ def preview_conversion(
     try:
         attested_all = attested_machine_lines(conn)
         moved_all = _already_moved_out(conn)
+        frag_index = _existing_fragment_index(conn)
         rows = _target_pages(conn)
-        fingerprint = _fingerprint_of(rows, attested_all, _ledger_state(conn))
+        fingerprint = _fingerprint_of(
+            rows, attested_all, _ledger_state(conn), frag_index
+        )
     finally:
         if own_snapshot:
             conn.rollback()
@@ -910,7 +988,8 @@ def preview_conversion(
     breaches: List[Dict[str, str]] = []
     before: Dict[str, int] = {}
     after: Dict[str, int] = {}
-    fragment_count = pending_count = decided_count = emptied = kept_body = 0
+    taken_total = dedup_total = pending_count = decided_count = 0
+    emptied = kept_body = 0
 
     for page_id, title, _summary, content, category in rows:
         split = split_page_body(
@@ -919,10 +998,13 @@ def preview_conversion(
         page_decisions = _page_decisions(decisions, page_id)
         body = split.render_body(page_decisions)
         taken = split.taken(page_decisions)
+        _to_create, dedup = _partition_drafts(taken, frag_index.get(page_id))
         decided_count += sum(1 for d in taken if d.evidence == "notation")
 
         _record_lines(before, content)
         _record_lines(after, body)
+        # 既存 Fragment へ寄せる行も含めて数える —— どちらの行き先でも、その記述は
+        # 逐語で Fragment 側に存在する (寄せる先は同一内容の照合で選ばれている)。
         for draft in taken:
             key = _line_key("- " + draft.content)
             after[key] = after.get(key, 0) + 1
@@ -938,6 +1020,12 @@ def preview_conversion(
                 "kind": mark.kind, "page_id": page_id, "page_title": title,
                 "line_no": mark.line_no, "text": mark.text, "note": mark.note,
             })
+        for draft, _frag_id in dedup:
+            marks.append({
+                "kind": "already_fragment", "page_id": page_id, "page_title": title,
+                "line_no": draft.line_no, "text": draft.content,
+                "note": "同じ内容が Fragment に既にあるため、新しくは作らず本文からだけ抜きます",
+            })
 
         blocks = _block_view(split)
         if blocks:
@@ -949,14 +1037,16 @@ def preview_conversion(
 
         if not taken:
             continue
-        fragment_count += len(taken)
+        taken_total += len(taken)
+        dedup_total += len(dedup)
         if body.strip():
             kept_body += 1
         else:
             emptied += 1
         pages.append({
             "page_id": page_id, "title": title, "category": category,
-            "fragment_count": len(taken),
+            "fragment_count": len(taken) - len(dedup),
+            "dedup_count": len(dedup),
             "before_chars": len(content or ""),
             "after_chars": len(body),
         })
@@ -966,8 +1056,9 @@ def preview_conversion(
     return {
         "fingerprint": fingerprint,
         "page_count": len(pages),
-        "fragment_count": fragment_count,
-        "confirmed_count": fragment_count - decided_count,
+        "fragment_count": taken_total - dedup_total,
+        "dedup_count": dedup_total,
+        "confirmed_count": taken_total - decided_count,
         "pending_count": pending_count,
         "decided_count": decided_count,
         "emptied_count": emptied,
@@ -1040,7 +1131,7 @@ def apply_conversion(
     run = run_id or uuid.uuid4().hex[:12]
     edit_source = f"{CONVERSION_SOURCE}:{run}"
     now = int(time.time())
-    page_n = frag_n = 0
+    page_n = frag_n = dedup_n = 0
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -1053,6 +1144,7 @@ def apply_conversion(
             )
         attested_all = attested_machine_lines(conn)
         moved_all = _already_moved_out(conn)
+        frag_index = _existing_fragment_index(conn)
         for page_id, title, summary, content, _category in _target_pages(conn):
             split = split_page_body(
                 content, _attestation_budget(attested_all, moved_all, page_id)
@@ -1061,6 +1153,7 @@ def apply_conversion(
             drafts = split.taken(page_decisions)
             if not drafts:
                 continue
+            to_create, dedup = _partition_drafts(drafts, frag_index.get(page_id))
             body = split.render_body(page_decisions)
 
             # 変換前の姿を編集来歴へ。取り消しはここから復元する。
@@ -1089,7 +1182,7 @@ def apply_conversion(
             )
             page_n += 1
 
-            for draft in drafts:
+            for draft in to_create:
                 frag_id = str(uuid.uuid4())
                 # 列の並びは storage.create_fragment と同じ。あちらが正典で、ここは
                 # 一括変換を 1 トランザクションに収めるための同型の書き込み。
@@ -1107,6 +1200,19 @@ def apply_conversion(
                      _digest_of(_attest_key(draft.content))),
                 )
                 frag_n += 1
+            for draft, existing_id in dedup:
+                # 同じ内容の Fragment が既にある行 (移行期の二重書き込み)。新しくは
+                # 作らず、本文から抜いた事実だけを台帳に刻む。ref_id は寄せた先の
+                # 既存 Fragment —— 取り消しは本文の復元だけ行い、この Fragment には
+                # 触らない (変換が作ったものではないから)。
+                conn.execute(
+                    "INSERT INTO memopedia_body_conversion "
+                    "(run_id, kind, ref_id, converted_at, digest, page_id, attest_digest) "
+                    "VALUES (?, 'dedup', ?, ?, ?, ?, ?)",
+                    (run, existing_id, now, _digest_of(draft.content), page_id,
+                     _digest_of(_attest_key(draft.content))),
+                )
+                dedup_n += 1
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1114,14 +1220,16 @@ def apply_conversion(
         raise
 
     LOGGER.info(
-        "[body_to_fragment] 変換完了 run=%s pages=%d fragments=%d (来歴確証 %d / 判断済 %d) marks=%d",
-        run, page_n, frag_n, preview["confirmed_count"], preview["decided_count"],
-        len(preview["marks"]),
+        "[body_to_fragment] 変換完了 run=%s pages=%d fragments=%d dedup=%d "
+        "(来歴確証 %d / 判断済 %d) marks=%d",
+        run, page_n, frag_n, dedup_n, preview["confirmed_count"],
+        preview["decided_count"], len(preview["marks"]),
     )
     return {
         "run_id": run,
         "page_count": page_n,
         "fragment_count": frag_n,
+        "dedup_count": dedup_n,
         "confirmed_count": preview["confirmed_count"],
         "decided_count": preview["decided_count"],
         "pending_left": preview["pending_count"] - preview["decided_count"],
@@ -1247,6 +1355,10 @@ def revert_conversion(
             raise ValueError(f"変換の記録が見つかりません: run_id={run_id}")
 
         frag_ids = [r[1] for r in rows if r[0] == "fragment"]
+        # dedup 行は「既存 Fragment へ寄せて本文から抜いた」記録。取り消しでは
+        # 本文の復元 (page 行) に含まれて戻るだけで、寄せた先の Fragment は
+        # 変換が作ったものではないから消さない。
+        dedup_count = sum(1 for r in rows if r[0] == "dedup")
         page_rows = [(r[1], r[2]) for r in rows if r[0] == "page"]
         page_ids = [r[1] for r in rows if r[0] == "page"]
         edit_source = f"{CONVERSION_SOURCE}:{run_id}"
@@ -1386,6 +1498,7 @@ def revert_conversion(
         "run_id": run_id,
         "restored_pages": restored,
         "deleted_fragments": len(frag_ids),
+        "restored_dedup_lines": dedup_count,
         "overwritten_pages": blocked,
     }
 
@@ -1399,12 +1512,14 @@ def list_conversion_runs(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             "converted_at": row[1],
             "page_count": row[2],
             "fragment_count": row[3],
+            "dedup_count": row[4],
         }
         for row in conn.execute(
             """
             SELECT run_id, MIN(converted_at),
                    SUM(CASE WHEN kind = 'page' THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN kind = 'fragment' THEN 1 ELSE 0 END)
+                   SUM(CASE WHEN kind = 'fragment' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN kind = 'dedup' THEN 1 ELSE 0 END)
             FROM memopedia_body_conversion
             GROUP BY run_id ORDER BY MIN(converted_at) DESC
             """

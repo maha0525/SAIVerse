@@ -803,3 +803,133 @@ def test_fingerprint_changes_when_a_ledger_fragment_is_deleted(conn):
     conn.commit()
 
     assert preview_conversion(conn)["fingerprint"] != before
+
+
+# --------------------------------------------------------------------------
+# 既存 Fragment との照合（移行期の二重書き込み対策、intent §5.4 (a-6)）
+# --------------------------------------------------------------------------
+
+def _dual_era_page(conn, *, frag_date="2026-05-15"):
+    """移行期の状態を再現: 本文の行と同内容の Fragment が既に併存するページ。"""
+    from sai_memory.memopedia.storage import create_fragment
+
+    page = _page_with_extractor_history(
+        conn, "アイフィ",
+        "## 2026-05-15\n",
+        "## 2026-05-15\n- 移行期に二重で書かれた行\n",
+    )
+    frag = create_fragment(
+        conn, entity_id=page.id, content="移行期に二重で書かれた行",
+        source_date=frag_date,
+    )
+    return page, frag
+
+
+def test_apply_reuses_an_existing_identical_fragment(conn):
+    """⭐ 同内容の Fragment が既にあれば、新しくは作らず本文から抜くだけ。
+
+    移行期の抽出器は本文への追記と Fragment の作成を同時に行っていた
+    (コミット e1866ef)。照合せずに作ると同じ記憶が 2 件になる
+    (Codex 指摘 2026-08-06)。
+    """
+    page, frag = _dual_era_page(conn)
+
+    preview = preview_conversion(conn)
+    assert preview["dedup_count"] == 1
+    assert preview["fragment_count"] == 0
+    assert any(m["kind"] == "already_fragment" for m in preview["marks"])
+
+    result = _apply(conn)
+    assert result["dedup_count"] == 1
+    assert result["fragment_count"] == 0
+
+    remaining = get_fragments_for_entity(conn, page.id)
+    assert [f.id for f in remaining] == [frag.id], "Fragment が二重になった"
+    assert get_page(conn, page.id).content == ""
+
+
+def test_dedup_matches_a_fragment_without_a_date(conn):
+    """日付を持たない既存 Fragment も、同内容なら寄せ先になる。"""
+    page, frag = _dual_era_page(conn, frag_date=None)
+    _apply(conn)
+    assert [f.id for f in get_fragments_for_entity(conn, page.id)] == [frag.id]
+
+
+def test_dedup_does_not_match_a_different_date(conn):
+    """日付が食い違う同文は別の観測。寄せずに新しく作る。"""
+    page, frag = _dual_era_page(conn, frag_date="2026-07-01")
+    result = _apply(conn)
+    assert result["dedup_count"] == 0
+    assert result["fragment_count"] == 1
+    assert len(get_fragments_for_entity(conn, page.id)) == 2
+
+
+def test_one_existing_fragment_dedups_only_one_of_two_identical_lines(conn):
+    """既存 Fragment 1 つが照合に使えるのは 1 回だけ。"""
+    from sai_memory.memopedia.storage import create_fragment
+
+    page = _page_with_extractor_history(
+        conn, "アイフィ",
+        "## 2026-05-15\n",
+        "## 2026-05-15\n- 二回観測された行\n- 二回観測された行\n",
+    )
+    create_fragment(
+        conn, entity_id=page.id, content="二回観測された行", source_date="2026-05-15",
+    )
+
+    result = _apply(conn)
+    assert result["dedup_count"] == 1
+    assert result["fragment_count"] == 1
+    assert len(get_fragments_for_entity(conn, page.id)) == 2
+
+
+def test_revert_restores_dedup_lines_without_deleting_the_existing_fragment(conn):
+    """⭐ 取り消しは本文だけ戻す。寄せた先の Fragment は変換が作ったものではない。"""
+    page, frag = _dual_era_page(conn)
+    before_body = get_page(conn, page.id).content
+
+    result = _apply(conn)
+    revert = revert_conversion(conn, result["run_id"])
+    assert revert["restored_dedup_lines"] == 1
+    assert revert["deleted_fragments"] == 0
+
+    assert get_page(conn, page.id).content == before_body
+    assert [f.id for f in get_fragments_for_entity(conn, page.id)] == [frag.id]
+    assert list_conversion_runs(conn) == []
+
+
+def test_fingerprint_changes_when_a_matching_fragment_appears(conn):
+    """⭐ 下見のあとに同内容の Fragment ができたら、行の行き先が変わる。再下見。"""
+    from sai_memory.memopedia.storage import create_fragment
+
+    page = _page_with_extractor_history(
+        conn, "アイフィ",
+        "## 2026-05-15\n",
+        "## 2026-05-15\n- 抽出された行\n",
+    )
+    preview = preview_conversion(conn)
+
+    create_fragment(
+        conn, entity_id=page.id, content="抽出された行", source_date="2026-05-15",
+    )
+    with pytest.raises(ValueError, match="変わりました"):
+        apply_conversion(
+            conn, decisions=None, expected_fingerprint=preview["fingerprint"]
+        )
+
+
+def test_dedup_lines_still_count_as_moved_out(conn):
+    """⭐ 寄せた行も「外に出した」勘定に入る。書き直しは保留に落ちること。"""
+    page, _frag = _dual_era_page(conn)
+    _apply(conn)
+
+    # ユーザーが同じ記述を本文へ書き直した
+    conn.execute(
+        "UPDATE memopedia_pages SET content = ? WHERE id = ?",
+        ("## 2026-05-20\n- 移行期に二重で書かれた行\n", page.id),
+    )
+    conn.commit()
+
+    preview = preview_conversion(conn)
+    assert preview["confirmed_count"] == 0
+    assert preview["pending_count"] == 1

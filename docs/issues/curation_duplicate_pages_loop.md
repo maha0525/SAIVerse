@@ -141,6 +141,10 @@ Codex はサンドボックスの都合で pytest を実行できておらず、
 - **候補組み立てが一貫したスナップショットになっていない**: 実在。`_fetch_metabolizable_pages` と `fetch_page_structure` は別々の SELECT で、間にページの追加・移動が挟まると `live_parents` が古いまま統合候補が作られうる。**リスクは正直に書く**——木の形が古いまま「消える側に現役の子や実親がない」と判定した候補が提案され、ペルソナが承認すれば実行される。窓は 2 つの SELECT の間（マイクロ秒）で、書き手は Metabolism と UI。塞ぐには候補生成を adapter の共有ロックか単一 read transaction で包む必要があり、`detect_curation_candidates` の引数契約（生の conn を受け取る）を変える話になる。編纂まわりの並行性としては pending プランの claim 欠如と同じ束なので、[curation_plan_double_execution.md](curation_plan_double_execution.md) に併記した
 - **`fetch_page_structure` の全表走査**: 実測して見送り。実データで**全 435〜1219 行・0.4〜2.6 ms**（aifi 668 行 / エリス 1219 行 / air 435 行）。同じ晩に数秒かかる LLM コールが走る中の 2.6 ms で、走査対象は `memopedia_pages` のみ（編集来歴のテーブルは触らない。閉架ページは全体の 7% 前後）。クエリを複雑にする側のコストの方が高い
 
+### 追加巡（2026-08-06、Sol・コミット後の一巡）
+
+**統合が吸収側の Fragment を想起不能にしていた（high、修正済み）**: `execute_merge` は本文の連結とキーワード・metadata の和集合だけで、Fragment の付け替えを持たないまま吸収側を soft-delete していた。Fragment の想起可視性は親ページの生存に従う（`unified_recall._FRAGMENT_VISIBILITY_*`）ため、吸収側の Fragment は DB に残ったまま keyword / embedding 検索から恒久的に消える。intent（本文→Fragment）は当初から「統合＝Fragment の所属替え」と書いており、コードが追いついていなかった。統合トランザクション内で `entity_id` を survivor へ付け替え、旧親タイトル込みで生成されていた embedding は削除して再生成経路（`embed_memopedia_fragments`）へ載せる形で修正。統合後も Fragment が通常想起に出る回帰テストを追加した。なお本番 aifi は編纂を巻き戻し済みのため、この穴による実害は残っていない。
+
 ## 同じ穴を持っていた別経路 → 削除済み
 
 `scripts/maintain_memopedia.py` の `run_split_large` は編纂とは**別の分割実装**で、`create_page` を直接呼ぶため同名の子を作れた（今回の規則が届かない）。さらに、この経路は LLM に子ページの**本文そのものを生成させていた**（`sec["content"]` をそのまま保存）——2026-07-11 に確立した本文保存則（編纂は本文を生成しない、移動と結合のみ）に違反する。

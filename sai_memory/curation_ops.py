@@ -529,14 +529,41 @@ def execute_merge(
         from sai_memory.memopedia.storage import update_page as _storage_update_page
         _storage_update_page(conn, survivor_page_id, metadata=merged_metadata)
 
+    # 5.5 吸収側の Fragment を survivor へ付け替える。Fragment の想起可視性は
+    # 親ページの生存に従う (unified_recall の _FRAGMENT_VISIBILITY_*) ため、
+    # 付け替えずに soft-delete すると吸収側の Fragment は DB に残ったまま
+    # keyword / embedding 検索から恒久的に消える (Codex 指摘 2026-08-06)。
+    # embedding は「親タイトル: 本文」で生成されているので、旧親タイトルを含む
+    # 既存ベクトルは捨てる —— 未生成の Fragment を拾う既存経路
+    # (embed_memopedia_fragments) が survivor のタイトルで作り直す。
+    moved_frag_ids = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM memopedia_fragments WHERE entity_id = ?",
+            (absorbed_page_id,),
+        )
+    ]
+    if moved_frag_ids:
+        conn.execute(
+            "UPDATE memopedia_fragments SET entity_id = ? WHERE entity_id = ?",
+            (survivor_page_id, absorbed_page_id),
+        )
+        for i in range(0, len(moved_frag_ids), 500):
+            chunk = moved_frag_ids[i:i + 500]
+            holes = ",".join("?" for _ in chunk)
+            conn.execute(
+                f"DELETE FROM memopedia_fragment_embeddings "
+                f"WHERE fragment_id IN ({holes})",
+                chunk,
+            )
+
     # 6. 吸収側を soft-delete
     memopedia.delete_page(absorbed_page_id, edit_source="curation")
 
     LOGGER.info(
         "[curation_ops] merge done: survivor=%s absorbed=%s (absorbed_title=%r) "
-        "merged_content_len=%d children_moved=%d",
+        "merged_content_len=%d children_moved=%d fragments_moved=%d",
         survivor_page_id, absorbed_page_id, absorbed.title,
-        len(new_content), children_moved,
+        len(new_content), children_moved, len(moved_frag_ids),
     )
     return {
         "survivor_id": survivor_page_id,
@@ -545,6 +572,7 @@ def execute_merge(
         "absorbed_title": absorbed.title,
         "merged_content_len": len(new_content),
         "children_moved": children_moved,
+        "fragments_moved": len(moved_frag_ids),
     }
 
 

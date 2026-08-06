@@ -197,6 +197,56 @@ def test_empty_content():
 
 
 # --------------------------------------------------------------------------
+# 空白帯の所有 — 各日付見出しは自分の直上の空白行を所有する (intent §5.4 (a-5))
+#
+# 見出しが消えるときは帯ごと消え、見出しが残るなら帯も残る。この規則が触るのは
+# 消える見出しの直上だけで、残る本文の中の空白行には一切触れない。
+# --------------------------------------------------------------------------
+
+def test_blank_lines_at_the_head_of_the_file_leave_with_the_first_block():
+    """ファイル先頭に積まれた空白行は、先頭ブロックの帯。全部出ていけば真の空。"""
+    content = "\n\n## 2026-05-15\n- 出ていく行\n"
+    split = split_page_body(content, attest("- 出ていく行"))
+    assert split.render_body() == ""
+
+
+def test_full_width_space_line_above_a_dead_heading_leaves_with_it():
+    """全角空白だけの行も帯の一部。見出しと共に消える (Codex 指摘 2026-08-06)。"""
+    content = "　\n## 2026-05-15\n- 出ていく行\n"
+    split = split_page_body(content, attest("- 出ていく行"))
+    assert split.render_body() == ""
+
+
+def test_multiple_consecutive_blanks_above_a_dead_heading_all_leave():
+    """帯は連続していれば複数行。1 行だけ残すと空白だけのページが再発する。"""
+    content = "## 2026-05-10\n- 残る行\n\n\n\n## 2026-05-15\n- 出ていく行\n"
+    split = split_page_body(content, attest("- 出ていく行"))
+    assert split.render_body() == "## 2026-05-10\n- 残る行\n"
+
+
+def test_blank_band_above_a_surviving_heading_stays():
+    """残る見出しの帯はそのまま残る。触るのは消える見出しの直上だけ。"""
+    content = "## 2026-05-10\n- 出ていく行\n\n## 2026-05-15\n- 残る行\n"
+    split = split_page_body(content, attest("- 出ていく行"))
+    # 消えた前ブロックとの区切りだった空白行は、残る見出しの所有物として残る
+    assert split.render_body() == "\n## 2026-05-15\n- 残る行\n"
+
+
+def test_dead_block_between_two_survivors_leaves_no_double_blank():
+    """挟まれたブロックが消えても、残る両隣の区切りは一重のまま。"""
+    content = (
+        "## 2026-05-10\n- 残る行\n"
+        "\n## 2026-05-12\n- 出ていく行\n"
+        "\n## 2026-05-15\n- 残る行その二\n"
+    )
+    split = split_page_body(content, attest("- 出ていく行"))
+    assert split.render_body() == (
+        "## 2026-05-10\n- 残る行\n"
+        "\n## 2026-05-15\n- 残る行その二\n"
+    )
+
+
+# --------------------------------------------------------------------------
 # 記法から外れる行 (保留にもならず本文へ)
 # --------------------------------------------------------------------------
 

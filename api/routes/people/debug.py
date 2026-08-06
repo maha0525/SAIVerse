@@ -368,6 +368,7 @@ def _run_preview(persona_id: str, manager, decisions):
     return {
         "page_count": preview["page_count"],
         "fragment_count": preview["fragment_count"],
+        "dedup_count": preview["dedup_count"],
         "confirmed_count": preview["confirmed_count"],
         "pending_count": preview["pending_count"],
         "decided_count": preview["decided_count"],
@@ -423,17 +424,20 @@ def apply_memopedia_conversion(
         raise HTTPException(status_code=500, detail=f"変換に失敗しました: {exc}")
 
     left = result["pending_left"]
+    dedup = result["dedup_count"]
     return {
         "success": True,
         "run_id": result["run_id"],
         "page_count": result["page_count"],
         "fragment_count": result["fragment_count"],
+        "dedup_count": dedup,
         "confirmed_count": result["confirmed_count"],
         "decided_count": result["decided_count"],
         "pending_left": left,
         "message": (
             f"変換しました: {result['page_count']} ページ / Fragment {result['fragment_count']} 件"
             f"（来歴の裏づけ {result['confirmed_count']} 行 + 判断済み {result['decided_count']} 行）"
+            + (f" / 既に Fragment があった {dedup} 行は本文から抜くだけにしました" if dedup else "")
             + (f" / 判断していない保留 {left} 行は本文に残しました" if left else "")
             + f" (run_id={result['run_id']})"
         ),
@@ -445,7 +449,7 @@ def list_memopedia_conversion_runs(persona_id: str, manager=Depends(get_manager)
     """取り消せる変換の一覧 (新しい順)。"""
     from sai_memory.memopedia.body_to_fragment import list_conversion_runs
 
-    with _memopedia_session(persona_id, manager) as conn:
+    with _memopedia_session(persona_id, manager, read_only=True) as conn:
         return {"runs": list_conversion_runs(conn)}
 
 

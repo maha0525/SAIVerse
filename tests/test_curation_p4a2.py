@@ -484,6 +484,53 @@ class TestExecuteMerge:
             assert row is not None
             assert row[0] == "survivor", f"{child_id} の親が survivor でない: {row[0]}"
 
+    def test_fragments_follow_the_survivor_and_stay_recallable(self):
+        """⭐ 吸収側の Fragment は survivor へ付け替える。
+
+        Fragment の想起可視性は親ページの生存に従う (unified_recall の
+        _FRAGMENT_VISIBILITY_*)。付け替えずに soft-delete すると、吸収側の
+        Fragment は DB に残ったまま検索から恒久的に消える (Codex 指摘 2026-08-06)。
+        """
+        conn, memopedia = self._setup()
+        from sai_memory.memopedia.storage import create_fragment
+        from sai_memory.unified_recall import (
+            get_fragment_embeddings,
+            get_fragments_without_embeddings,
+            store_fragment_embedding,
+        )
+
+        frag = create_fragment(
+            conn, entity_id="absorbed", content="吸収側の記憶",
+            source_date="2026-05-15",
+        )
+        # 旧親タイトル込みで生成された embedding がある状態を再現
+        store_fragment_embedding(conn, frag.id, [0.1, 0.2])
+        keeper = create_fragment(
+            conn, entity_id="survivor", content="残る側の記憶",
+        )
+        store_fragment_embedding(conn, keeper.id, [0.3, 0.4])
+
+        result = execute_merge(conn, "survivor", "absorbed", memopedia)
+        assert result["fragments_moved"] == 1
+
+        row = conn.execute(
+            "SELECT entity_id FROM memopedia_fragments WHERE id = ?", (frag.id,)
+        ).fetchone()
+        assert row[0] == "survivor", "吸収側の Fragment が付け替えられていない"
+
+        # 旧親タイトルで作られた embedding は捨てられ、再生成の対象に載る
+        pending = {r[0] for r in get_fragments_without_embeddings(conn)}
+        assert frag.id in pending
+        # survivor 側の embedding は巻き添えにしない
+        visible = {r[0] for r in get_fragment_embeddings(conn)}
+        assert keeper.id in visible
+        assert frag.id not in visible  # 再生成されるまでは embedding 検索に出ない
+
+    def test_merge_without_fragments_reports_zero_moved(self):
+        conn, memopedia = self._setup()
+        result = execute_merge(conn, "survivor", "absorbed", memopedia)
+        assert result["fragments_moved"] == 0
+
     def test_same_id_raises(self):
         conn = _make_full_conn()
         _insert_page(conn, page_id="p", title="P", content="X", short_id=1)
