@@ -354,7 +354,6 @@ def _detect_similar(
                 # 統合した結果が肥大するなら統合しない（統合が分割を呼ばない）
                 merged_len = len(build_merged_content(
                     survivor_content=keep["content"],
-                    absorbed_title=discard["title"],
                     absorbed_summary=discard.get("summary") or "",
                     absorbed_content=discard["content"],
                 ))

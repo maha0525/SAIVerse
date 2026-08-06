@@ -77,3 +77,9 @@
 - コミット後に Codex（Sol）で追加レビュー一巡。指摘 4 件の裁定と対応は intent §8 経緯（2026-08-06 の項）と [issue](../issues/curation_duplicate_pages_loop.md) の追加巡の節にある。うち「統合が吸収側の Fragment を想起不能にする」は §3 の見立て（統合＝Fragment の所属替え）をコードが実装していなかった穴で、今回修正した
 - (a)(b) は未着手のまま。編纂の再開前に要る（intent §7）
 - SAIVerse は停止中で、全ペルソナの自律行動も off。編纂は発火しない
+
+## 7. 追記（2026-08-06 夕、完走の記録）
+
+- **(c) は本番 aifi_city_a へ適用済み**（run_id=b1810360cbb8、294 ページ / Fragment 1893 件。DB 検算で逐語 1911 行の完全一致を確認）。intent のステータスは完了
+- **(a)(b) も実装済み**: 分割は導線を書かず remaining だけ、統合は見出しなしの素の連結（吸収側に文字が無ければ本文に触れない）。表示側は `uri_resolver._format_memopedia_page` が render_page_body（content+Fragment）+ 子ページ一覧に切替（変換後のページが "(empty)" に見える穴も同時に塞いだ）
+- 残る判断待ちは issue の 3 件（既存重複の掃除 / 旧 maintain CLI / 同名 split の再提示）と、**編纂の再開そのもの**（まはー判断）

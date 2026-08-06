@@ -434,6 +434,40 @@ class TestExecuteMerge:
         assert merged.startswith(keep_body), "残る側の末尾が削られている"
         assert merged.endswith(drop_body), "消える側の先頭/末尾が削られている"
 
+    def test_merge_writes_no_section_heading(self):
+        """⭐ 統合は区切り見出しを書かない (memopedia_body_to_fragment.md §7 (b))。
+
+        統合したらそれはもう単一のページ。由来は編集来歴が持つ。
+        """
+        conn, memopedia = self._setup()
+        execute_merge(conn, "survivor", "absorbed", memopedia)
+        from sai_memory.memopedia.storage import get_page
+        merged = get_page(conn, "survivor").content
+        assert "## 統合" not in merged, f"撤去済みの区切り見出しがある: {merged!r}"
+
+    def test_merge_with_textless_absorbed_leaves_survivor_untouched(self):
+        """吸収側に文字が無いなら本文は変えない (埋め草「（本文なし）」も書かない)。
+
+        v0.3.x では知識が Fragment 側にあり、本文空のページ同士の統合が普通に
+        起きる。空の統合のたびに survivor の本文へ何かが増えてはいけない。
+        """
+        conn = _make_full_conn()
+        _insert_page(conn, page_id="root", title="root", is_trunk=True, short_id=0)
+        _insert_page(
+            conn, page_id="survivor", title="SAIVerse", content="残る側の本文",
+            parent_id="root", short_id=1,
+        )
+        _insert_page(
+            conn, page_id="absorbed", title="SAIVerseの詳細", content="",
+            parent_id="root", short_id=2,
+        )
+        memopedia = _make_memopedia_stub(conn)
+        execute_merge(conn, "survivor", "absorbed", memopedia)
+        from sai_memory.memopedia.storage import get_page
+        merged = get_page(conn, "survivor").content
+        assert merged == "残る側の本文", f"空の統合で本文が変わった: {merged!r}"
+        assert "本文なし" not in merged
+
     def test_keywords_are_union(self):
         conn, memopedia = self._setup()
         execute_merge(conn, "survivor", "absorbed", memopedia)
@@ -1623,8 +1657,6 @@ class TestSplitLossless:
     完全一致で復元できることを固定する（intent の本文保存則が正）。
     """
 
-    _GUIDE_MARKER = "\n\n## 分割された節"
-
     def _split_and_reconstruct(
         self, content: str, llm_response: Dict[str, Any],
     ) -> tuple:
@@ -1642,10 +1674,12 @@ class TestSplitLossless:
         from sai_memory.memopedia.storage import get_children, get_page
         children = get_children(conn, "target")
         parent = get_page(conn, "target")
-        idx = parent.content.find(self._GUIDE_MARKER)
-        assert idx >= 0, f"親に子への導線が無い: {parent.content!r}"
-        remaining_out = parent.content[:idx]
-        return children, remaining_out
+        # 親の本文は remaining だけ。子への導線は本文に書かない
+        # (memopedia_body_to_fragment.md §7 (a) — 表示側が親子関係から組み立てる)
+        assert "## 分割された節" not in parent.content, (
+            f"撤去済みの導線が親に書かれている: {parent.content!r}"
+        )
+        return children, parent.content
 
     def test_review_minimal_repro_is_preserved(self):
         """レビュー指摘の最小再現: 先頭末尾空白・3連改行・末尾改行を含む本文。"""
@@ -1767,14 +1801,11 @@ class TestSplitRealWorldResponse:
         parent_nums = self._block_numbers(parent_content)
         seen += parent_nums
         expected_remaining = "".join(blocks[i] for i in parent_nums)
-        assert parent_content.startswith(expected_remaining), (
-            "親の残り本文が逐語でない"
+        # 親の本文は remaining と逐語一致。子への導線は書かない
+        # (memopedia_body_to_fragment.md §7 (a))
+        assert parent_content == expected_remaining, (
+            f"親の残り本文が逐語でない: 末尾 {parent_content[len(expected_remaining):][:60]!r}"
         )
-        # 残りの後ろに付くのは子への導線だけ
-        tail = parent_content[len(expected_remaining):]
-        assert tail.startswith("\n\n## 分割された節\n\n"), f"想定外の追記: {tail[:60]!r}"
-        for child in get_children(conn, "target"):
-            assert f"- [{child.title}]（子ページ）" in tail
 
         assert sorted(seen) == list(range(self.TOTAL_BLOCKS)), (
             "ブロックの取りこぼし／複製がある"

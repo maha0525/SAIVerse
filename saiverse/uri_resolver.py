@@ -523,7 +523,7 @@ class UriResolver:
         if not page:
             return self._error(parsed.raw, f"Memopedia page not found: {identifier}")
 
-        content = self._format_memopedia_page(page)
+        content = self._format_memopedia_page(memopedia, page)
         return ResolvedContent(
             uri=parsed.raw,
             content=content,
@@ -987,8 +987,14 @@ class UriResolver:
             lines.append(f"[{role}] {ts}: {content}{marker}")
         return "\n\n".join(lines) if lines else "(no messages)"
 
-    def _format_memopedia_page(self, page) -> str:
-        """Memopediaページをフォーマット。"""
+    def _format_memopedia_page(self, memopedia, page) -> str:
+        """Memopediaページをフォーマット。
+
+        本文は ``render_page_body`` で描く——v0.3.x はページの知識が Fragment
+        側にあり、``page.content`` を直に出すと変換済みページが全部 "(empty)"
+        に見える。子ページの一覧も親子関係からここで組み立てる（本文には
+        導線を書かない設計の表示側、memopedia_body_to_fragment.md §7 (a)）。
+        """
         lines = [
             f"【Memopedia】{page.title}",
             f"ID: {page.id}",
@@ -1000,7 +1006,20 @@ class UriResolver:
         if page.summary:
             lines.append(f"Summary: {page.summary}")
         lines.append("")
-        lines.append(page.content or "(empty)")
+        body = memopedia.render_page_body(page.id)
+        lines.append(body or "(empty)")
+        try:
+            from sai_memory.memopedia.storage import get_children
+            children = get_children(memopedia.conn, page.id)
+        except Exception:
+            LOGGER.debug("Failed to list children for %s", page.id, exc_info=True)
+            children = []
+        if children:
+            lines.append("")
+            lines.append("子ページ:")
+            for child in children:
+                ref = f"m:{child.short_id}" if getattr(child, "short_id", None) else child.id
+                lines.append(f"- {child.title} ({ref})")
         return "\n".join(lines)
 
     def _format_chronicle_entry(self, entry) -> str:

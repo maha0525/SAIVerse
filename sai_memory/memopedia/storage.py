@@ -678,18 +678,18 @@ def delete_page(conn: sqlite3.Connection, page_id: str) -> bool:
 
 def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[MemopediaPage]:
     """Get all non-deleted direct children of a page."""
+    # 列は _PAGE_SELECT_COLS に揃える。旧: 独自の短い列リストで metadata /
+    # short_id が欠け、get_children 経由のページだけ short_id=None になっていた
     if parent_id is None:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE parent_id IS NULL AND (is_deleted = 0 OR is_deleted IS NULL)
                ORDER BY title""",
         )
     else:
         cur = conn.execute(
-            """SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
-                      keywords, vividness, is_trunk, is_important, last_referenced_at
+            f"""SELECT {_PAGE_SELECT_COLS}
                FROM memopedia_pages
                WHERE parent_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
                ORDER BY title""",

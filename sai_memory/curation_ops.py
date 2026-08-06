@@ -378,7 +378,6 @@ def _plan_transaction(conn: sqlite3.Connection):
 def build_merged_content(
     *,
     survivor_content: str,
-    absorbed_title: str,
     absorbed_summary: str,
     absorbed_content: str,
 ) -> str:
@@ -388,21 +387,28 @@ def build_merged_content(
     「統合した結果が肥大するなら候補にしない」（concept_consolidation.md）は
     検知の時点で結果の文字数を知る必要があり、そこで別式を書くと実行結果と
     ずれる。`saiverse.curation` はこの関数の戻り値の長さで判定する。
+
+    区切り見出し（旧 `## 統合: 旧「X」より`）は書かない——統合したらそれは
+    もう単一のページであり、由来は編集来歴が持つ（まはー裁定 2026-08-05、
+    memopedia_body_to_fragment.md §7 (b)）。
     """
-    # **入力の本文には一切触らない**。中身があるかの判定にだけ strip を使い、
+    # **入力の本文には一切触らない**。中身があるかの判定にだけ真偽値を使い、
     # 連結には原文を渡す——rstrip / strip は末尾改行・行末スペース（Markdown の
     # ハードブレーク）・インデントを落とす＝本文の改変であり、「編纂は本文を
-    # 生成しない、移動と結合のみ」の保存則に反する（Codex 指摘 2026-08-05、
-    # 分割側の追記で同じ誤りを直したのと同じ型）。区切りの空行は separator が持つ。
-    separator = f"\n\n## 統合: 旧「{absorbed_title}」より\n\n"
+    # 生成しない、移動と結合のみ」の保存則に反する（Codex 指摘 2026-08-05）。
     # 欠損扱いにするのは「文字が 1 つも無い」場合だけ。空白や改行だけの本文も
     # 保存則の対象（吸収側はこの直後に閉架されるので、ここで捨てると現役の棚に
     # 原文が残らない。Codex 指摘 2026-08-05）。
     absorbed_parts: List[str] = [
         part for part in (absorbed_summary, absorbed_content) if part
     ]
-    absorbed_body = "\n\n".join(absorbed_parts) if absorbed_parts else "（本文なし）"
-    return (survivor_content or "") + separator + absorbed_body
+    if not absorbed_parts:
+        # 吸収側に文字が無い＝保存すべき本文が無い。埋め草も区切りも書かない
+        return survivor_content or ""
+    absorbed_body = "\n\n".join(absorbed_parts)
+    if not (survivor_content or ""):
+        return absorbed_body
+    return (survivor_content or "") + "\n\n" + absorbed_body
 
 
 def execute_merge(
@@ -413,8 +419,8 @@ def execute_merge(
 ) -> Dict[str, Any]:
     """merge 実行（完全決定論・LLM ゼロ）。
 
-    **本文保存則**: 残す側本文 ＋ 区切り見出し ＋ 吸収側 summary（あれば）
-    ＋ 吸収側本文を逐語で連結して残す側に書き込む。
+    **本文保存則**: 残す側本文 ＋ 吸収側 summary（あれば）＋ 吸収側本文を
+    逐語で連結して残す側に書き込む（区切り見出しは書かない — 由来は編集来歴）。
     LLM は呼ばない——「新しい文章を生成しない」が不変条件。
 
     処理の流れ:
@@ -492,7 +498,6 @@ def execute_merge(
     # 2. 本文の逐語連結（保存則: LLM は呼ばない）
     new_content = build_merged_content(
         survivor_content=survivor.content or "",
-        absorbed_title=absorbed.title,
         absorbed_summary=absorbed.summary or "",
         absorbed_content=absorbed.content or "",
     )
@@ -1029,14 +1034,13 @@ def apply_split(
             "no_change": True,
         }
 
-    # --- 親は remaining ブロック ＋ 子への導線 ---
-    guide_lines = [f"- [{sec['title']}]（子ページ）" for sec in created_sections]
-    guide_section = "\n\n## 分割された節\n\n" + "\n".join(guide_lines)
-    new_parent_content = split_plan["remaining_content"] + guide_section
-
+    # --- 親は remaining ブロックだけ。子への導線は本文に書かない ---
+    # 子の一覧は親子関係 (parent_id) から表示側が組み立てる（まはー裁定
+    # 2026-08-05、memopedia_body_to_fragment.md §7 (a)。本文に書くと分割の
+    # たびに前回の導線が積もり、消すにはペルソナの本文を削る操作になる）。
     memopedia.update_page(
         page_id,
-        content=new_parent_content,
+        content=split_plan["remaining_content"],
         edit_source="curation",
     )
 
