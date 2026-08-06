@@ -15,7 +15,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import check_in_flight  # noqa: E402
-from check_in_flight import GRANDFATHERED, LEDGER, check, main  # noqa: E402
+from check_in_flight import (  # noqa: E402
+    GRANDFATHERED,
+    LEDGER,
+    _fingerprint,
+    check,
+    main,
+)
 
 SPLIT_RE = re.compile(r"(?<!\\)\|")
 
@@ -159,13 +165,27 @@ class TestGrandfathering:
                 return i
         return None
 
+    def _find_exempt_row(self, lines, name):
+        """免除がまだ生きている行の位置。生きていなければ skip する。
+
+        免除が役目を終える形は 2 つある: 行が台帳から消える、または**行が残った
+        まま器に収まって指紋が変わる**（`check_in_flight` のコメントいわく
+        「該当セッションが行を器に合わせた時点で消えるのが正常系」＝名簿の手動
+        解除は不要）。後者を skip 条件に入れていなかったため、時間割の行が器に
+        収まった時点で経過措置のテストが落ちていた（2026-08-05 に修正）。
+        """
+        idx = self._find_row(lines, name)
+        if idx is None:
+            pytest.skip("経過措置行が台帳から消えている (免除が役目を終えた)")
+        if GRANDFATHERED.get(name) != _fingerprint(lines[idx]):
+            pytest.skip("経過措置行が器に収まって免除が失効している (正常系)")
+        return idx
+
     @pytest.mark.parametrize("name", sorted(GRANDFATHERED))
     def test_any_column_edit_expires_exemption(self, tmp_path, name):
         """免除は行全体の指紋 — 次アクション欄以外の列の変更でも失効する。"""
         lines = self._real_lines()
-        idx = self._find_row(lines, name)
-        if idx is None:
-            pytest.skip("経過措置行が台帳から消えている (免除が役目を終えた)")
+        idx = self._find_exempt_row(lines, name)
         cols = SPLIT_RE.split(lines[idx])
         cols[6] = " 9999-12-31 "
         lines[idx] = "|".join(cols)
@@ -177,9 +197,7 @@ class TestGrandfathering:
     @pytest.mark.parametrize("name", sorted(GRANDFATHERED))
     def test_duplicated_exempt_row_rejected(self, tmp_path, name):
         lines = self._real_lines()
-        idx = self._find_row(lines, name)
-        if idx is None:
-            pytest.skip("経過措置行が台帳から消えている (免除が役目を終えた)")
+        idx = self._find_exempt_row(lines, name)
         lines.insert(idx + 1, lines[idx])
         p = tmp_path / "ledger.md"
         p.write_text("\n".join(lines), encoding="utf-8")
@@ -187,13 +205,14 @@ class TestGrandfathering:
         assert any("1 行限り" in x and name in x for x in v)
 
     @pytest.mark.parametrize("name", sorted(GRANDFATHERED))
-    def test_exempt_row_currently_warns_not_fails(self, tmp_path, name):
-        """免除中の行は (行が実在する間) 警告として表面化し、違反にはならない。"""
-        _v, w = check(LEDGER)
-        idx = self._find_row(self._real_lines(), name)
-        if idx is None:
-            pytest.skip("経過措置行が台帳から消えている (免除が役目を終えた)")
+    def test_exempt_row_currently_warns_not_fails(self, name):
+        """免除中の行は (免除が生きている間) 警告として表面化し、違反にはならない。"""
+        v, w = check(LEDGER)
+        self._find_exempt_row(self._real_lines(), name)
         assert any(name in x for x in w)
+        # 名前どおり「違反にはならない」側も検査する — 警告だけを見ていると、
+        # 免除が違反側へ漏れても緑のまま通る
+        assert not any(name in x for x in v)
 
 
 class TestMainExitCode:

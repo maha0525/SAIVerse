@@ -37,7 +37,7 @@ factory で client を作って `generate` するだけの箇所は、`consume_u
 - `saiverse/media_summary.py` (複数箇所)
 - `sai_memory/curation_ops.py`
 - `sai_memory/memory/entity_extractor.py`
-- `scripts/maintain_memopedia.py` ほか CLI 群
+- CLI 群（`scripts/` 配下。`maintain_memopedia.py` は 2026-08-05 に削除済み）
 
 ## 修正の方向 (設計裁定が要る)
 

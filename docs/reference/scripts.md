@@ -40,7 +40,9 @@ python scripts/tag_conversation_messages.py air --auto
 
 ## Memopedia / Chronicle
 
-> ⚠️ Memopedia / Chronicle の生成・整理は、現在はペルソナの自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で**自動的に**行われる。`build_memopedia.py` / `maintain_memopedia.py` 等の手動構築スクリプトは**旧フロー**で、通常は使わない（`export_memopedia.py` などの export 系のみ補助的に残る）。
+> ⚠️ Memopedia / Chronicle の生成・整理は、現在はペルソナの自律行動（`autonomy_memory_organization` / `fragment_organize`）や Metabolism の中で**自動的に**行われる。`build_memopedia.py` 等の手動構築スクリプトは**旧フロー**で、通常は使わない（`export_memopedia.py` などの export 系のみ補助的に残る）。
+>
+> 手動保守 CLI `maintain_memopedia.py` は **2026-08-05 に削除**した。分割・統合は編纂（P4-a）が後継で、旧 CLI 側は LLM に本文を生成させており本文保存則に違反していた（landscape §9）。
 >
 > `build_arasuji.py` は例外的に現役: インポート直後など、Chronicle をまとめて前倒し生成したい場合の任意ツールとして使う。`--estimate` で LLM を呼ばずに未処理メッセージ数・コール数・概算費用（pricing 設定済みモデルのみ）を表示でき、通常実行時も生成前に同じ見積もりを表示したうえで確認を求める（`--yes` でスキップ可）。
 >
