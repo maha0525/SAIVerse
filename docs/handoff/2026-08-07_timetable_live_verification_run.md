@@ -24,11 +24,13 @@ Chronicle タブ全件表示 ([issue](../issues/arasuji_modal_500_limit_truncati
 
 ## Step 0 — 起動前 (サーバー停止状態でやる)
 
-- [ ] **playbook 再取込 (必須)**。これをやらないと T1 の文面改稿と T2 の一文が DB に載らず、時間割検証の大半が旧文面で走る:
+- [ ] **playbook が新版か確認**。起動時の自動同期 (`playbook_sync`) がファイルのハッシュ差分で自動更新するため、通常は再取込不要 (2026-08-07 実機で自動取込済みを確認)。例外は過去に `save_playbook` で DB 側を直接編集した Playbook (ユーザー優先でファイル上書きから保護される)。確認はこれで — `match: True` なら新版:
 
 ```bash
-.venv/Scripts/python.exe scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_day_open.json
+.venv/Scripts/python.exe -c "import sqlite3,json,hashlib,os;d=json.load(open('builtin_data/playbooks/public/judgment_day_open.json',encoding='utf-8'));h=hashlib.sha256(json.dumps(d,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()[:16];con=sqlite3.connect('file:'+os.path.expanduser('~/.saiverse/user_data/database/saiverse.db').replace(chr(92),'/')+'?mode=ro',uri=True);n=con.execute(\"SELECT nodes_json FROM playbooks WHERE name='judgment_day_open'\").fetchone()[0];print('match:',hashlib.sha256(json.dumps(json.loads(n),sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()[:16]==h)"
 ```
+
+  一致しない場合のみ手動で: `.venv/Scripts/python.exe scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_day_open.json`
 
 - [ ] **フロント再ビルド**。ライフ設定モーダル・経験タブ・kind バッジ・できごと畳み込み・フィードタブは全部ビルド後にしか見えない (:3000 は本番ビルド):
 
