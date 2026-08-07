@@ -73,3 +73,4 @@
 範囲外は [issue](event_delivery_reachability_gaps.md) ①〜⑥へ切り出し。
 フルスイート 3449 件緑。
 残 = 収束判定 (十一巡目まで消化済) → コミット → 実機検証
+**コミット済みを確認 (2026-08-07)**: 実装は 8d0ee00 / 15da635 として既にコミット済みだった (台帳の「コミット待ち」が stale)。残 = 実機検証のみ。観察項目は [統合検証手順](../handoff/2026-08-07_timetable_live_verification_run.md) Step 3 の横断観察に相乗り。
