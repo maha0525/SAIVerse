@@ -1577,6 +1577,7 @@ class FeedDeliveryTest(unittest.TestCase):
         self.addCleanup(self.adapter.close)
 
         persona = SimpleNamespace(
+            persona_id=self.PERSONA_ID,
             sai_memory=self.adapter, current_building_id=BUILDING_ID,
         )
         self.fake.personas = {self.PERSONA_ID: persona}
@@ -1867,6 +1868,33 @@ class FeedDeliveryTest(unittest.TestCase):
             self.assertEqual(self.fm.deliver_new_items(), 0)
         self.assertEqual(len(self._pending()), 0)  # 投入は失敗
         self.assertEqual(self._cursor().LAST_ITEM_ID, 2)  # カーソルは前進済み
+
+    def test_deliver_unread_on_entry_pushes_and_shares_cursor(self):
+        """入室配送 (deliver_unread_on_entry) は本人へ未読を積み、定期サイクル
+        (deliver_new_items) と同じ既読カーソルを共有するため二重配送しない
+        (issue feed_arrival_pulse_cannot_see_articles)。"""
+        self._seed_items(2)
+        persona = self.fake.personas[self.PERSONA_ID]
+        self.assertEqual(self.fm.deliver_unread_on_entry(persona, BUILDING_ID), 2)
+        self.assertEqual(len(self._pending()), 2)
+        self.assertEqual(self._cursor().LAST_ITEM_ID, 2)
+        # 直後の定期サイクルは同じ記事を配り直さない (カーソル共有)
+        self.assertEqual(self.fm.deliver_new_items(), 0)
+        self.assertEqual(len(self._pending()), 2)
+        # 逆順 (サイクル後の入室) も同様に空振り
+        self.assertEqual(
+            self.fm.deliver_unread_on_entry(persona, BUILDING_ID), 0,
+        )
+
+    def test_deliver_unread_on_entry_no_feed_building_is_noop(self):
+        """フィード施設の無い Building への入室では何も配送しない。"""
+        self._seed_items(2)
+        persona = self.fake.personas[self.PERSONA_ID]
+        self.assertEqual(
+            self.fm.deliver_unread_on_entry(persona, "building_without_feed"), 0,
+        )
+        self.assertEqual(len(self._pending()), 0)
+        self.assertIsNone(self._cursor())
 
     def test_pending_limit_blocks_delivery_and_cursor(self):
         """F5: 未消費の feed 知覚が上限以上なら投入もカーソル前進もしない。"""

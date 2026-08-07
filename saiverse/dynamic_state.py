@@ -151,6 +151,17 @@ class DynamicStateManager:
             )
             ok = False
 
+        # 入室配送: 移動先にフィード施設があれば、その未読記事を本人の知覚
+        # バッファへ積む (「移動先の様子」への相乗り —
+        # issue feed_arrival_pulse_cannot_see_articles)。読まれるのは次の Beat 頭:
+        # 出かけるコマなら到着直後のコマ Pulse、スペル移動なら同じラウンドの
+        # 次の Beat。既読カーソルが台帳なので定期サイクル配送と重複しない。
+        # 失敗しても入室処理は止めない (fail-open — deliver_unread_on_entry 内で
+        # WARN 済み)。
+        feed_mgr = getattr(manager, "feed_manager", None)
+        if feed_mgr is not None:
+            feed_mgr.deliver_unread_on_entry(persona, building_id)
+
         if not _dispatch_head_event(persona, manager, building_id, "building_entered"):
             ok = False
         return ok

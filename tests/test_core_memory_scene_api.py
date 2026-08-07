@@ -436,6 +436,22 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(meta.get("media"), media)
         self.assertIn("perception", meta.get("tags", []))
 
+    def test_flush_payload_returns_message_body(self):
+        # Beat 頭のラウンド途中消費 (sea/runtime_llm.py の spell ループ) 用:
+        # 消費した合成メッセージ本体が返り、作業中 messages への append と
+        # SAIMemory への書き込みが同じ内容になる。
+        media = [{"path": "/img/x.png", "mime_type": "image/png", "role": "image"}]
+        self.adapter.push_perception("surroundings", "移動先の様子テスト", media=media)
+        payload = self.adapter.flush_perception_buffer_payload()
+        self.assertIsNotNone(payload)
+        self.assertIn("移動先の様子テスト", payload["content"])
+        self.assertTrue(payload["content"].startswith("<system>"))
+        self.assertEqual(payload["media"], media)
+        self.assertEqual(self._pending_perceptions(), [])
+        # 空バッファでは None (bool ラッパーは False)
+        self.assertIsNone(self.adapter.flush_perception_buffer_payload())
+        self.assertFalse(self.adapter.flush_perception_buffer())
+
     def test_confirm_does_not_push(self):
         mid = self._seed_core_memory("未確認", confirmed=0)
         confirm_core_memory_item("tester", mid, manager=self.manager)

@@ -502,14 +502,27 @@ class SAIMemoryAdapter:
         return False
 
     def flush_perception_buffer(self) -> bool:
-        """未消費の知覚を型別 reduce して 1 メッセージで SAIMemory へ書き出す (Pulse 消費)。
+        """未消費の知覚を型別 reduce して 1 メッセージで SAIMemory へ書き出す (Beat 消費)。
 
-        Pulse 開始時に呼ばれる。書き出しに成功した項目だけバッファから削除する
-        (append 失敗時は残して次 Pulse で再試行 = 永続バッファゆえ知覚を落とさない)。
+        Beat の頭 (Pulse 開始 = 最初の Beat / スペルループの周の切れ目 = 続く Beat、
+        perception_buffer.md §4.2 の 2026-08-08 改訂) で呼ばれる。書き出しに成功した
+        項目だけバッファから削除する (append 失敗時は残して次 Beat で再試行 =
+        永続バッファゆえ知覚を落とさない)。
         Returns: 1 件以上消費したら True。
         """
+        return self.flush_perception_buffer_payload() is not None
+
+    def flush_perception_buffer_payload(self) -> Optional[dict]:
+        """flush_perception_buffer の本体。消費した合成メッセージを返す。
+
+        戻り値は ``{"content": "<system>…</system>", "media": [...]}``
+        (消費するものが無い / 書き出し失敗時は None)。ラウンド途中の Beat 頭
+        消費 (sea/runtime_llm.py の spell ループ) は、この戻り値をそのまま
+        作業中の messages に append して「SAIMemory に書いた内容」と「続きの
+        生成が見る内容」を一致させる。
+        """
         if not self._ready:
-            return False
+            return None
         from sai_memory.perception_buffer import (
             delete_perceptions,
             format_perception_message,
@@ -519,7 +532,7 @@ class SAIMemoryAdapter:
         with self._db_lock:
             items = list_pending(self.conn)
         if not items:
-            return False
+            return None
         reduced = reduce_perceptions(items)
         text = format_perception_message(reduced)
         # reduce 後の全知覚の添付メディア (画像等) を集約して 1 メッセージに載せる。
@@ -556,21 +569,21 @@ class SAIMemoryAdapter:
                 "[perception_buffer] flush append failed; keeping %d item(s) for retry",
                 len(items), exc_info=True,
             )
-            return False
+            return None
         if not mid:
             # _append_message は DB/embedding 例外を内部で握って None を返す
             # (= 通常の保存失敗は例外として届かない)。message id が取れて
-            # いない = commit されていないので、pending を保持して次 Pulse で
+            # いない = commit されていないので、pending を保持して次 Beat で
             # 再試行する (SEA 監査 S5: None を成功扱いすると知覚が不可逆に
             # 消える)。
             LOGGER.warning(
                 "[perception_buffer] flush append returned no message id; "
                 "keeping %d item(s) for retry", len(items),
             )
-            return False
+            return None
         with self._db_lock:
             delete_perceptions(self.conn, [it.id for it in items])
-        return True
+        return {"content": message["content"], "media": media}
 
     # ------------------------------------------------------------------
     # 実行台帳の配送口 (Execution Ledger outbox delivery)

@@ -2132,6 +2132,48 @@ async def _run_spell_loop(
             if _beat_gate is not None and _beat_persona_id:
                 _beat_gate.boundary(_beat_persona_id, _beat_cancel_token)
 
+            # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2 2026-08-08 改訂) ----
+            # boundary の関所に知覚バッファの消費が同席する。この周のスペルが
+            # 世界を変えた帰結 (移動先の様子・入室配送など) を、次の生成が始まる
+            # 前に SAIMemory へ書き出し、同じ内容を作業中の messages にも append
+            # して「記憶に書いた内容」と「続きの生成が見る内容」を一致させる。
+            # 消費は最外周の認知 Beat のみ (子ラインは親 Beat の一部。gate の
+            # 保持深さ 1 = このスレッドが最外周保持者のときだけ。gate の無い
+            # テスト環境では無条件)。失敗は WARN で続行 — 知覚は永続バッファに
+            # 残り、次の Beat 頭で再試行される。
+            try:
+                _sai_mem = getattr(persona, "sai_memory", None)
+                # 部分構築の persona (テストの SimpleNamespace 等) は消費なし —
+                # getattr で沈黙スキップ (毎周の WARN を撒かない)。
+                _flush_payload_fn = getattr(
+                    _sai_mem, "flush_perception_buffer_payload", None,
+                )
+                _is_outermost_beat = _beat_gate is None or (
+                    _beat_persona_id
+                    and _beat_gate.held_depth(_beat_persona_id) == 1
+                )
+                if _flush_payload_fn is not None and _is_outermost_beat:
+                    _perception_payload = _flush_payload_fn()
+                    if _perception_payload:
+                        _perc_msg: Dict[str, Any] = {
+                            "role": "user",
+                            "content": _perception_payload["content"],
+                        }
+                        if _perception_payload.get("media"):
+                            _perc_msg["metadata"] = {
+                                "media": _perception_payload["media"],
+                            }
+                        messages.append(_perc_msg)
+                        LOGGER.info(
+                            "[sea][spell] Beat-head perception flush injected "
+                            "into context after round %d", loop_count,
+                        )
+            except Exception:
+                LOGGER.warning(
+                    "[sea][spell] Beat-head perception flush failed; continuing",
+                    exc_info=True,
+                )
+
             # Re-invoke LLM once for the entire round.
             # Pipeline Streaming で呼ばれた時 (= pipeline_streaming_state が
             # 非 None) は generate_stream + helper 経由で chunk を流しながら

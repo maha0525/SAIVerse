@@ -639,6 +639,24 @@ def get_visual_context(
                     import json as _json
                     try:
                         state = _json.loads(f.STATE_JSON)
+                        if isinstance(state, dict):
+                            # feed_stand キー (feed_manager.update_fixture_display が
+                            # 唯一の書き手) は観測値形式 (value_num/value_text) では
+                            # ないため専用に描画する。購読タイトルと直近見出しは
+                            # 書き手側で件数・文字数を制御済み (5 件 × 100 字)。
+                            feed_display = state.pop("feed_stand", None)
+                            if isinstance(feed_display, dict):
+                                subs_titles = feed_display.get("subscriptions")
+                                if isinstance(subs_titles, list) and subs_titles:
+                                    text_parts.append(
+                                        "  購読フィード: "
+                                        + " / ".join(str(s) for s in subs_titles)
+                                    )
+                                latest_titles = feed_display.get("latest")
+                                if isinstance(latest_titles, list) and latest_titles:
+                                    text_parts.append("  新着記事の見出し:")
+                                    for t in latest_titles:
+                                        text_parts.append(f"  - {t}")
                         if state:
                             state_parts = []
                             for k, v in state.items():

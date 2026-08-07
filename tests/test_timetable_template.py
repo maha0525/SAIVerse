@@ -197,10 +197,23 @@ def test_template_crud_roundtrip(manager, task_refs):
     ([{"start": "09:00", "budget_rounds": True}], "non-negative"),
     ([{"start": "09:00", "ref": "foo"}], "ref"),
     ([{"start": "09:00", "facility": "  "}], "facility"),
+    # 種別×場所の整合: 自室で過ごす系の場所は own_room か未指定のみ
+    # (issue timetable_template_kind_facility_consistency)
+    ([{"start": "09:00", "kind": "自室で過ごす", "facility": "library"}], "自室"),
 ])
 def test_save_template_rejects_invalid_slots(manager, slots, match):
     with pytest.raises(ValueError, match=match):
         tt.save_template(manager, PERSONA_ID, slots)
+
+
+def test_save_template_stay_home_accepts_own_room_and_hole(manager):
+    """自室で過ごす系は facility=own_room と未指定 (穴) を受け付ける。"""
+    saved = tt.save_template(manager, PERSONA_ID, [
+        {"start": "09:00", "kind": "自室で過ごす", "facility": "own_room"},
+        {"start": "13:00", "kind": "自室で過ごす"},
+    ])
+    assert saved["slots"][0]["facility"] == "own_room"
+    assert "facility" not in saved["slots"][1]
 
 
 def test_template_ascending_follows_wake_origin(manager, session_factory):

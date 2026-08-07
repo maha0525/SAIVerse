@@ -276,7 +276,15 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
             const res = await fetch(`/api/people/${targetPersonaId}/timetable-template`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ slots: rows.map(toPayloadSlot), enabled }),
+                body: JSON.stringify({
+                    // stay_home 系の場所は自室固定 — セレクトは鎖しているが、
+                    // 修正前に保存された矛盾値 (自室で過ごす + 別施設) が row に
+                    // 残っていても、送信時にここで正規化して 422 を踏ませない。
+                    slots: rows.map(r => toPayloadSlot(
+                        isStayHomeKind(r.kind) ? { ...r, facility: OWN_ROOM_ID } : r,
+                    )),
+                    enabled,
+                }),
                 signal: ctrl.signal,
             });
             if (isStale()) return;
@@ -344,6 +352,12 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
     // 値を勝手に書き換えず「今は選べない」ラベル付きで表示する (fail-open 表示)。
     const kindOptionMissing = (value: string) =>
         value !== MORNING_CHOICE && !kinds.some(k => k.name === value);
+    // 「自室で過ごす」系 (execution_type=stay_home) は場所が自室のみ —
+    // 矛盾した組み合わせを選べないようセレクトを鎖す (バックエンドの保存検証
+    // と対。issue timetable_template_kind_facility_consistency)。
+    const OWN_ROOM_ID = 'own_room';
+    const isStayHomeKind = (kindName: string) =>
+        kinds.some(k => k.name === kindName && k.execution_type === 'stay_home');
     const facilityOptionMissing = (value: string) =>
         value !== MORNING_CHOICE && !facilities.some(f => f.id === value);
 
@@ -408,7 +422,12 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
                                                 <select
                                                     className={styles.select}
                                                     value={row.kind}
-                                                    onChange={e => updateRow(i, { kind: e.target.value })}
+                                                    onChange={e => {
+                                                        const next = e.target.value;
+                                                        updateRow(i, isStayHomeKind(next)
+                                                            ? { kind: next, facility: OWN_ROOM_ID }
+                                                            : { kind: next });
+                                                    }}
                                                 >
                                                     <option value={MORNING_CHOICE}>{MORNING_LABEL}</option>
                                                     {kinds.map(k => (
@@ -423,8 +442,12 @@ export default function TimetableTemplateModal({ isOpen, onClose, personaId, per
                                                 <label className={styles.fieldLabel}>場所</label>
                                                 <select
                                                     className={styles.select}
-                                                    value={row.facility}
+                                                    value={isStayHomeKind(row.kind) ? OWN_ROOM_ID : row.facility}
                                                     onChange={e => updateRow(i, { facility: e.target.value })}
+                                                    disabled={isStayHomeKind(row.kind)}
+                                                    title={isStayHomeKind(row.kind)
+                                                        ? 'この種別の場所は自室のみです'
+                                                        : undefined}
                                                 >
                                                     <option value={MORNING_CHOICE}>{MORNING_LABEL}</option>
                                                     {facilities.map(f => (

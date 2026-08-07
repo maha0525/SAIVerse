@@ -171,6 +171,26 @@ def validate_template_slots(
                 )
             entry["facility"] = facility.strip()
 
+        # 種別×場所の整合 (issue timetable_template_kind_facility_consistency):
+        # 「自室で過ごす」系 (execution_type=stay_home) の場所は自室のみ。
+        # 矛盾した予定 (自室で過ごす + 図書館) を書けると、実行が律儀に
+        # 図書館へ移動して「部屋に戻れず」と演じる。UI はセレクトを鎖すが、
+        # API 直書きにも保存の口で効かせる (器の原則: 不正値は書ける口をなくす)。
+        if entry.get("kind") is not None and "facility" in entry:
+            from saiverse.slot_kind_catalog import (
+                EXECUTION_STAY_HOME,
+                kind_names_for_execution,
+            )
+            if (
+                entry["kind"] in kind_names_for_execution(EXECUTION_STAY_HOME)
+                and entry["facility"] != day_plan.FACILITY_OWN_ROOM
+            ):
+                raise ValueError(
+                    f"slot[{i}]: kind={entry['kind']!r} の場所は「自室」"
+                    f"('{day_plan.FACILITY_OWN_ROOM}') か未指定のみ "
+                    f"(got {entry['facility']!r})"
+                )
+
         budget = slot.get("budget_rounds")
         if budget is not None:
             if isinstance(budget, bool) or not isinstance(budget, int) or budget < 0:

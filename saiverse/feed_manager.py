@@ -867,73 +867,157 @@ class FeedManager:
                 persona = personas.get(occupant_id)
                 if persona is None:
                     continue  # ユーザーやローカルに実体の無い occupant は対象外
-                # 退室者への誤配送の再確認は購読ごと・カーソル commit 直前に
-                # 行う (_deliver_subscription_to_persona 内)。
-                adapter = getattr(persona, "sai_memory", None)
-                if adapter is None or not adapter.is_ready():
-                    # 黙って欠落させない: 投入もカーソル前進もしないことを明示する
-                    LOGGER.warning(
-                        "[feed] SAIMemory adapter not ready for %s; "
-                        "delivery skipped (cursor not advanced)", occupant_id,
-                    )
-                    continue
-                # 知覚バッファの膨張ガード: 未消費の feed 知覚が上限以上なら
-                # このペルソナへの投入を見送る (カーソルも前進させない —
-                # 次の機会に新しいものから届く)。
-                pending = adapter.count_pending_perceptions("feed")
-                if pending is None:
-                    LOGGER.warning(
-                        "[feed] pending count unavailable for %s; "
-                        "delivery skipped (cursor not advanced)", occupant_id,
-                    )
-                    continue
-                # 残り枠はペルソナ単位の共有予算: 未消費 (pending) + この
-                # サイクルでの投入合計が max_pending を超えないよう、購読を
-                # またいで共有する (購読ごとに pending を読み直す方式だと
-                # 購読数 × N で上限を突き抜ける)。
-                remaining = max_pending - pending
-                if remaining <= 0:
-                    LOGGER.info(
-                        "[feed] %s has %d pending feed perception(s) (>= %d); "
-                        "delivery deferred", occupant_id, pending, max_pending,
-                    )
-                    continue
-                for sub in subs:
-                    if remaining <= 0:
-                        # 予算を使い切った: 以降の購読は見送り (カーソルも
-                        # 据え置き — 次の機会に新しいものから届く)
-                        LOGGER.debug(
-                            "[feed] pending budget exhausted for %s; "
-                            "remaining subscriptions deferred", occupant_id,
-                        )
-                        break
-                    try:
-                        pushed = self._deliver_subscription_to_persona(
-                            persona=persona,
-                            building_id=building_id,
-                            persona_id=occupant_id,
-                            adapter=adapter,
-                            subscription_id=sub["subscription_id"],
-                            subscription_title=sub["title"],
-                            max_items=min(max_items, remaining),
-                        )
-                    except Exception:
-                        # 購読単位の失敗隔離 (_fetch_all の N2 と同じ形):
-                        # スナップショット競合等の DB 例外 1 件で cycle 全体
-                        # (他の購読・他のペルソナへの配送) を殺さない。例外が
-                        # 逃げられるのはカーソル commit までの DB 区間だけ
-                        # (知覚投入は commit 後で、記事単位に握られている) —
-                        # つまりこの購読は書き込み全スキップで、カーソルも
-                        # 動いていない。次の機会に新しいものから届く。
-                        LOGGER.warning(
-                            "[feed] delivery failed for subscription %s to %s; "
-                            "skipped (no cursor advance, no perception push)",
-                            sub["subscription_id"], occupant_id, exc_info=True,
-                        )
-                        pushed = 0
-                    delivered_total += pushed
-                    remaining -= pushed
+                delivered_total += self._deliver_subs_to_persona(
+                    persona=persona,
+                    persona_id=occupant_id,
+                    building_id=building_id,
+                    subs=subs,
+                    max_items=max_items,
+                    max_pending=max_pending,
+                )
         return delivered_total
+
+    def _deliver_subs_to_persona(
+        self,
+        *,
+        persona: Any,
+        persona_id: str,
+        building_id: str,
+        subs: List[Dict[str, str]],
+        max_items: int,
+        max_pending: int,
+    ) -> int:
+        """1 ペルソナへの購読リスト配送 (ガード + 予算 + 購読ループ)。
+
+        定期サイクル (deliver_new_items) と入室配送 (deliver_unread_on_entry) が
+        共有する配送本体。既読カーソルが唯一の台帳なので、両者が重なっても
+        同じ記事は一度しか届かない。
+        """
+        # 退室者への誤配送の再確認は購読ごと・カーソル commit 直前に
+        # 行う (_deliver_subscription_to_persona 内)。
+        adapter = getattr(persona, "sai_memory", None)
+        if adapter is None or not adapter.is_ready():
+            # 黙って欠落させない: 投入もカーソル前進もしないことを明示する
+            LOGGER.warning(
+                "[feed] SAIMemory adapter not ready for %s; "
+                "delivery skipped (cursor not advanced)", persona_id,
+            )
+            return 0
+        # 知覚バッファの膨張ガード: 未消費の feed 知覚が上限以上なら
+        # このペルソナへの投入を見送る (カーソルも前進させない —
+        # 次の機会に新しいものから届く)。
+        pending = adapter.count_pending_perceptions("feed")
+        if pending is None:
+            LOGGER.warning(
+                "[feed] pending count unavailable for %s; "
+                "delivery skipped (cursor not advanced)", persona_id,
+            )
+            return 0
+        # 残り枠はペルソナ単位の共有予算: 未消費 (pending) + この
+        # 配送での投入合計が max_pending を超えないよう、購読を
+        # またいで共有する (購読ごとに pending を読み直す方式だと
+        # 購読数 × N で上限を突き抜ける)。
+        remaining = max_pending - pending
+        if remaining <= 0:
+            LOGGER.info(
+                "[feed] %s has %d pending feed perception(s) (>= %d); "
+                "delivery deferred", persona_id, pending, max_pending,
+            )
+            return 0
+        delivered = 0
+        for sub in subs:
+            if remaining <= 0:
+                # 予算を使い切った: 以降の購読は見送り (カーソルも
+                # 据え置き — 次の機会に新しいものから届く)
+                LOGGER.debug(
+                    "[feed] pending budget exhausted for %s; "
+                    "remaining subscriptions deferred", persona_id,
+                )
+                break
+            try:
+                pushed = self._deliver_subscription_to_persona(
+                    persona=persona,
+                    building_id=building_id,
+                    persona_id=persona_id,
+                    adapter=adapter,
+                    subscription_id=sub["subscription_id"],
+                    subscription_title=sub["title"],
+                    max_items=min(max_items, remaining),
+                )
+            except Exception:
+                # 購読単位の失敗隔離 (_fetch_all の N2 と同じ形):
+                # スナップショット競合等の DB 例外 1 件で配送全体
+                # (他の購読・他のペルソナへの配送) を殺さない。例外が
+                # 逃げられるのはカーソル commit までの DB 区間だけ
+                # (知覚投入は commit 後で、記事単位に握られている) —
+                # つまりこの購読は書き込み全スキップで、カーソルも
+                # 動いていない。次の機会に新しいものから届く。
+                LOGGER.warning(
+                    "[feed] delivery failed for subscription %s to %s; "
+                    "skipped (no cursor advance, no perception push)",
+                    sub["subscription_id"], persona_id, exc_info=True,
+                )
+                pushed = 0
+            delivered += pushed
+            remaining -= pushed
+        return delivered
+
+    def deliver_unread_on_entry(self, persona: Any, building_id: str) -> int:
+        """入室した本人へ、その Building の購読の未読を配送する (入室配送)。
+
+        on_building_entered (saiverse/dynamic_state.py) の「移動先の様子」push に
+        相乗りする呼び出し口 ([issue feed_arrival_pulse_cannot_see_articles] —
+        出かけるコマ・スペル移動の到着直後、次の Beat 頭の知覚消費で読まれる)。
+        定期サイクル (deliver_new_items) と同じ配送本体・同じ既読カーソルを使う
+        ため、両者が重なっても同じ記事は一度しか届かない。失敗は WARN + 0
+        (入室処理を止めない)。
+        """
+        try:
+            max_items = self._read_max_items_env()
+            if max_items <= 0:
+                return 0
+            persona_id = getattr(persona, "persona_id", None)
+            if not persona_id or not building_id:
+                return 0
+            db: Session = self.manager.SessionLocal()
+            try:
+                rows = (
+                    db.query(FeedSubscription)
+                    .join(
+                        Fixture,
+                        FeedSubscription.FIXTURE_ID == Fixture.FIXTURE_ID,
+                    )
+                    .filter(
+                        Fixture.BUILDING_ID == building_id,
+                        FeedSubscription.ENABLED == True,  # noqa: E712
+                        Fixture.FIXTURE_ID.in_(
+                            city_feed_fixture_ids(db, self.manager.city_id)
+                        ),
+                    )
+                    .all()
+                )
+                subs = [
+                    {"subscription_id": s.SUBSCRIPTION_ID, "title": s.TITLE or ""}
+                    for s in rows
+                ]
+            finally:
+                db.close()
+            if not subs:
+                return 0
+            return self._deliver_subs_to_persona(
+                persona=persona,
+                persona_id=persona_id,
+                building_id=building_id,
+                subs=subs,
+                max_items=max_items,
+                max_pending=self._read_max_pending_env(),
+            )
+        except Exception:
+            LOGGER.warning(
+                "[feed] entry delivery failed for %s -> %s; skipped",
+                getattr(persona, "persona_id", "?"), building_id, exc_info=True,
+            )
+            return 0
 
     def _deliver_subscription_to_persona(
         self,

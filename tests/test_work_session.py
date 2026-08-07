@@ -566,3 +566,89 @@ def test_initial_llm_call_runs_inside_beat_hold(session_factory, persona):
     assert events.index("generate") < events.index("hold_exit")
     # hold は一度だけ (組成〜初回〜ループが同じ直列域)
     assert events.count("hold_enter") == 1
+
+
+def test_beat_head_perception_flush_injected(session_factory, persona):
+    """スペル実行後の Beat 頭で知覚バッファが消費され、SAIMemory へ書いた内容と
+    同じものが次ラウンドの messages に入る (perception_buffer.md §4.2
+    2026-08-08 改訂: 消費点 = Beat の頭)。"""
+    media = [{"path": "/img/scene.png", "mime_type": "image/png", "role": "image"}]
+    payloads = [{
+        "content": "<system>[知覚] 移動先で新着記事テストが見えた</system>",
+        "media": media,
+    }]
+    persona.sai_memory = SimpleNamespace(
+        get_current_thread=lambda: "p1:persona_main",
+        flush_perception_buffer_payload=(
+            lambda: payloads.pop(0) if payloads else None
+        ),
+    )
+    responses = [
+        _spell_line("草稿"),
+        "記事を読んだ。今日はこれで終わり。",
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=3)
+
+    assert result.ended_reason == ENDED_FINISHED
+    # 2 回目の呼び出し (spell 後の継続) のコンテキストに知覚が入っている
+    retry_messages = client.calls[1]
+    idx_perception = [
+        i for i, m in enumerate(retry_messages)
+        if "新着記事テスト" in str(m.get("content", ""))
+    ]
+    assert idx_perception, "Beat 頭で消費した知覚が継続コンテキストに無い"
+    idx_spell_result = [
+        i for i, m in enumerate(retry_messages)
+        if "作成しました" in str(m.get("content", ""))
+    ]
+    assert idx_spell_result and idx_spell_result[0] < idx_perception[0], (
+        "知覚はこの周のスペル結果より後に並ぶ (行動 → 帰結の順)"
+    )
+    # media (移動先の内装画像など) も一緒に運ばれる
+    perc_msg = retry_messages[idx_perception[0]]
+    assert (perc_msg.get("metadata") or {}).get("media") == media
+    # 消費は一度きり (使い切り)
+    assert payloads == []
+
+
+def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):
+    """子ライン相当 (beat_gate の保持深さが 1 でない) では Beat 頭の知覚消費を
+    行わない — 子は親 Beat の一部 (beat_execution_context.md §3.4)。"""
+    flush_calls: List[int] = []
+    persona.sai_memory = SimpleNamespace(
+        get_current_thread=lambda: "p1:persona_main",
+        flush_perception_buffer_payload=(
+            lambda: flush_calls.append(1) or None
+        ),
+    )
+    responses = [
+        _spell_line("草稿"),
+        "終わり。",
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    # runtime.manager 経由で beat_gate が見える構成にし、深さ 2 (ネスト中) を装う
+    import contextlib
+
+    @contextlib.contextmanager
+    def _hold(persona_id, purpose=None, check_gate=True):
+        yield
+
+    manager.beat_gate = SimpleNamespace(
+        held_depth=lambda pid: 2,
+        boundary=lambda pid, tok=None: None,
+        hold=_hold,
+    )
+    runtime.manager = manager
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=3)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert flush_calls == [], "ネスト中の Beat で知覚を消費してはいけない"
