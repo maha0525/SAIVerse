@@ -41,6 +41,8 @@ ExecutionContext:
 
 execution_ledger §2.3 で定義した「関所（pending flush）→ コンテキスト読み → 1 回の生成 → 記録」の一続き。既存コードでは spell ループ 1 周が実体。本工事で初めて型（ExecutionContext を保持する実行単位）になる。
 
+**2026-08-08 追記（まはー裁定）**: Beat の頭の関所に**知覚バッファの消費**が同席する。従来「Pulse の頭で一回」だった知覚消費（perception_buffer §4.2）は「Beat の頭」へ精密化され、スペルが世界を変えた帰結（移動先の様子・入室配送など）は次の Beat の頭で同じラウンドに流れ込む。詳細と動機は [perception_buffer.md](perception_buffer.md) §4.2 の改訂節。
+
 - **persona 単位の Beat ロック**で直列化。main 会話・META 判断・自律・作業セッションの各 Beat は交互に挟まり、同時には走らない（不変条件: 記憶の一直線性）。
 - PulseController の main/META 並行 submit は解体し、META lane は「main の Beat 境界で挟まる直列 Beat」になる。
 
