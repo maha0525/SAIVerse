@@ -155,6 +155,31 @@ def _mock_work_session_result(**over):
     return SimpleNamespace(**base)
 
 
+def _add_day_open_schedule(session_factory, wake: str, close: str = None) -> None:
+    """現行 PersonaSchedule (起床 / 就寝) を登録する。
+
+    「日中に起床設定を変えた」状況の再現に使う — 確定ライフはその日の朝の値で
+    保存済み、PersonaSchedule だけが新しい値、という分裂を作る。
+    """
+    from database.models import PersonaSchedule
+
+    db = session_factory()
+    try:
+        db.add(PersonaSchedule(
+            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+            META_PLAYBOOK="judgment_day_open", TIME_OF_DAY=wake, ENABLED=True,
+        ))
+        if close is not None:
+            db.add(PersonaSchedule(
+                PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+                META_PLAYBOOK="judgment_day_close", TIME_OF_DAY=close,
+                ENABLED=True,
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+
 def _three_slots(task_refs) -> List[Dict[str, Any]]:
     return [
         {
@@ -634,8 +659,10 @@ def test_fire_at_uses_confirmed_lives_wake_not_current_schedule(manager, task_re
     旧実装は 08:00 のコマを「start < wake」で翌暦日 08:00 に予約していた
     (丸一日の遅延)。確定ライフ基準なら当日 08:00 のまま。
     """
-    from database.models import PersonaSchedule
-
+    # ライフ宣言日の保存は「今〜就寝」の範囲へコマを丸める (save_day_plan) —
+    # 仮想時刻を**保存より先に**立てないと、実時刻が 08:00 を回っている実行では
+    # コマが実時刻へクランプされ、この回帰が黙って無効化される。
+    clock.enable_virtual(BASE + timedelta(hours=7))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
     ])
@@ -643,24 +670,228 @@ def test_fire_at_uses_confirmed_lives_wake_not_current_schedule(manager, task_re
         {"start": "08:00", "kind": "調べる", "ref": task_refs["task"],
          "facility": "library", "budget_rounds": 5, "note": "調べもの"},
     ])
-    db = session_factory()
-    try:
-        db.add(PersonaSchedule(
-            PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
-            META_PLAYBOOK="judgment_day_open", TIME_OF_DAY="23:00",
-            ENABLED=True,
-        ))
-        db.commit()
-    finally:
-        db.close()
+    _add_day_open_schedule(session_factory, "23:00")
 
-    clock.enable_virtual(BASE + timedelta(hours=7))
     assert day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE) == 1
     fire_ts = min(
         e.fire_at_ts for e in manager.event_scheduler._entries_by_key.values()
     )
     expected = (BASE + timedelta(hours=8)).timestamp()  # 当日 08:00 (翌日に送らない)
     assert fire_ts == expected
+
+
+# ---------------------------------------------------------------------------
+# 営業日の解決 (resolve_business_day) — 起床設定の日中変更 × 再起動回復
+# ---------------------------------------------------------------------------
+
+
+def _seed_overnight_life_plan(manager, session_factory):
+    """営業日 7/4 の確定ライフ 23:00〜06:00 + コマ 2 件を作り、その後に
+    起床設定だけを 07:00〜22:00 (跨がないリズム) へ変えた状況を作る。
+
+    保存はライフの中 (7/4 23:10) で行う — ライフ宣言日の保存は「今〜就寝」へ
+    コマを丸めるため、仮想時刻を先に立てないと保存内容が実時刻に依存する。
+    """
+    clock.enable_virtual(BASE + timedelta(hours=23, minutes=10))
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "23:30", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+        {"start": "01:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    # 日中に起床設定を変更 (跨ぎリズムをやめた)
+    _add_day_open_schedule(session_factory, "07:00", close="22:00")
+
+
+def test_business_day_follows_confirmed_life_not_current_schedule(
+    manager, session_factory,
+):
+    """営業日の選択も当日確定ライフ基準 (Codex八巡目 #1)。
+
+    確定ライフ 23:00〜06:00 の営業日 7/4 に対し、現行スケジュールを 07:00〜22:00
+    へ変えた後の 7/5 00:30。現行スケジュールで営業日を選ぶと「7/5」と読み、7/4 の
+    pending コマは検査されないまま回復が空振りする。
+    """
+    _seed_overnight_life_plan(manager, session_factory)
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))  # 7/5 00:30
+
+    basis = day_plan.resolve_business_day(manager, PERSONA_ID)
+
+    assert basis.plan_date == PLAN_DATE   # 7/4 (現行スケジュールなら 7/5)
+    assert basis.wake == "23:00"          # 起点も同じ解決器から
+    assert basis.source == "life"
+
+
+def test_business_day_falls_back_to_schedule_without_lives(
+    manager, session_factory,
+):
+    """ライフの無い日は従来どおり現行 PersonaSchedule の営業日 (後方互換)。"""
+    _add_day_open_schedule(session_factory, "07:00", close="01:00")
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))  # 7/5 00:30
+
+    basis = day_plan.resolve_business_day(manager, PERSONA_ID)
+
+    assert basis.plan_date == PLAN_DATE   # 跨ぎリズムの深夜帯 = 前日が営業日
+    assert basis.wake == "07:00"
+    assert basis.source == "schedule"
+
+
+def test_downtime_recovery_finds_previous_business_day_after_wake_change(
+    manager, session_factory,
+):
+    """再起動回復が確定ライフの営業日を見る (回復 0 件で静かに終わらない)。
+
+    旧実装は営業日を 7/5 と読んで plan 無し → 0 件。7/4 の 23:30 コマ (流れた) も
+    01:00 コマ (これから) も、検査されないまま取り残されていた。
+    """
+    _seed_overnight_life_plan(manager, session_factory)
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))  # 7/5 00:30
+
+    pushed = day_plan.reschedule_pending_slots(
+        manager, PERSONA_ID, downtime_recovery=True,
+    )
+
+    assert pushed == 1
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    # 23:30 は 1 時間過去 (grace 超過) → 流れた / 01:00 は深夜帯の未来 → 再 push
+    assert slots[0]["status"] == "skipped"
+    assert slots[0]["skip_reason"] == day_plan.SKIP_REASON_MISSED_START
+    assert slots[1]["status"] == "pending"
+    # 起点 23:00 基準の暦日補正が効いている (01:00 は翌暦日 = 7/5 01:00)
+    fire_ts = min(
+        e.fire_at_ts for e in manager.event_scheduler._entries_by_key.values()
+    )
+    assert fire_ts == (BASE + timedelta(days=1, hours=1)).timestamp()
+
+
+def test_recovery_does_not_touch_slots_when_lives_are_unreadable(
+    manager, task_refs,
+):
+    """ライフ読取の一時失敗は「ライフなし」に畳まない (Codex八巡目 #2)。
+
+    現行スケジュール基準へ黙って落ちると、深夜帯コマを grace 超過と誤判定して
+    「流れた」に確定しうる。読めないときは予約も再分類もせず次の watchdog へ。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=12))  # 3 時間過去 = 通常なら「流れた」
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.reschedule_pending_slots(
+            manager, PERSONA_ID, downtime_recovery=True,
+        ) == 0
+
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "pending"   # 「流れた」に確定していない
+    assert manager.event_scheduler.pending_count() == 0
+
+
+def test_schedule_day_plan_pushes_nothing_when_lives_are_unreadable(
+    manager, task_refs,
+):
+    """起点が分からないまま push しない (暦日補正が丸一日ずれるより保留)。"""
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=8))
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE) == 0
+
+    assert manager.event_scheduler.pending_count() == 0
+    # 予約が張られていない = watchdog の途絶検出が拾い直す対象として残る
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == [0]
+
+
+def test_zero_length_life_is_not_a_business_day_candidate(manager, session_factory):
+    """区間として成立しないライフは営業日を名乗れない (Codex十巡目 #2)。
+
+    書き手 (save_lives) は start == end を「長さ 0 のライフ」として拒否する。
+    手編集・旧データで残った行を、読み手が跨ぎ規約で 24 時間ライフと読み替えると、
+    その日が一日中「走行中のライフ」を名乗り、watchdog の窓・曜日ゲートまで外す。
+    """
+    with pytest.raises(ValueError):   # 書ける口は閉じている
+        day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+            {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free"},
+        ])
+    # 台帳を直接壊す (手編集・旧データの再現)
+    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {
+        day_plan.META_LIVES: [
+            {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free",
+             "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
+        ],
+    })
+    _add_day_open_schedule(session_factory, "09:00", close="18:00")
+    clock.enable_virtual(BASE + timedelta(hours=12))
+
+    basis = day_plan.resolve_business_day(manager, PERSONA_ID)
+
+    assert basis.source == "schedule"   # 24 時間ライフを名乗らせない
+    assert basis.plan_date == PLAN_DATE
+
+
+def test_corrupt_meta_json_is_unreadable_not_missing(manager, task_refs):
+    """壊れた台帳を「ライフ未宣言の日」と読まない (Codex九巡目 #2)。
+
+    読取の失敗は例外だけではない — load_plan_meta は不正 JSON を空 dict へ
+    縮退させるため、番兵が例外経路しか見ていないと壊れた行が「ライフなし」に
+    化け、現行スケジュール基準で別の営業日を駆動してしまう。
+    """
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "kind": "調べる", "ref": task_refs["task"],
+         "facility": "library", "budget_rounds": 5, "note": "調べもの"},
+    ])
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(PersonaDayPlan)
+            .filter_by(persona_id=PERSONA_ID, plan_date=PLAN_DATE)
+            .first()
+        )
+        row.meta_json = '{"lives": [{"start": "07:00"'   # 途中で切れた JSON
+        db.commit()
+    finally:
+        db.close()
+    clock.enable_virtual(BASE + timedelta(hours=12))  # 3 時間過去 = 通常なら「流れた」
+
+    # 寛容な既定の読み口は従来どおり縮退する (表示・ゲート系の後方互換)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
+    # 営業日の選択だけは厳格に読み、壊れていることを検出する
+    with pytest.raises(ValueError):
+        day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE, strict=True)
+    assert day_plan.resolve_business_day(manager, PERSONA_ID) is None
+
+    assert day_plan.reschedule_pending_slots(
+        manager, PERSONA_ID, downtime_recovery=True,
+    ) == 0
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "pending"   # 「流れた」に確定していない
+
+
+def test_resolve_wake_for_plan_separates_missing_from_unreadable(manager):
+    """三状態: ライフあり "HH:MM" / 無し (スケジュールへ) / 読めない (印)。"""
+    clock.enable_virtual(BASE + timedelta(hours=8))
+    # ライフ無し = None (PersonaSchedule も無い)
+    assert day_plan._resolve_wake_for_plan(manager, PERSONA_ID, PLAN_DATE) is None
+
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    assert day_plan._resolve_wake_for_plan(manager, PERSONA_ID, PLAN_DATE) == "07:00"
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan._resolve_wake_for_plan(
+            manager, PERSONA_ID, PLAN_DATE,
+        ) is day_plan._LIVES_UNREADABLE
+    assert day_plan.resolve_business_day(manager, PERSONA_ID) is not None
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.resolve_business_day(manager, PERSONA_ID) is None
 
 
 def test_malformed_defer_count_does_not_break_normal_defer(manager, task_refs):

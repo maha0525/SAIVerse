@@ -1331,6 +1331,12 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     day_open / day_close の PersonaSchedule が無いペルソナ (v2 の一日リズム
     未設定) では何もしない。発火時は必ず INFO ログを残す。
 
+    見張る対象の営業日は :func:`day_plan.resolve_business_day` が決める (現在
+    時刻を含む確定ライフ優先。ライフを読めなければ ``skip`` して次の tick へ
+    委ねる)。「いま何かすべき時間帯か」を決める窓・曜日のゲートは、走っている
+    確定ライフが無いときだけ現行 PersonaSchedule で判定する — 走っているライフ
+    があるなら、その区間そのものがそのペルソナの起きている時間帯。
+
     Returns:
         ``{"action": "none"|"skip"|"day_open_refire"|"reschedule", ...}``
         (観察・テスト用)。
@@ -1347,27 +1353,43 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     hhmm = now.strftime("%H:%M")
     close = sched.get("close")
 
-    if not in_waking_window(hhmm, wake, close):
-        # 起きていない時間帯 — before wake か after close か
-        if not is_overnight(wake, close):
-            reason = "before wake" if hhmm < wake else "after close"
-        else:
-            # 跨ぎリズムで窓外 = close <= hhmm < wake の帯 (前日就寝後・未起床)
-            reason = "before wake" if hhmm < wake else "after close"
-        return {"action": "none", "reason": reason}
-
-    wake_days = sched.get("wake_days")
-    if wake_days is not None:
-        # 跨ぎリズムの深夜帯 (hhmm < wake) は「前日の weekday」が正しい対照日
-        check_date = effective_plan_date(now, wake, close)
-        if check_date.weekday() not in wake_days:
-            return {"action": "none", "reason": "not a scheduled day"}
-
     from saiverse import day_plan
 
-    # 営業日 (覚醒日) の plan を引く
-    plan_date = effective_plan_date(now, wake, close)
-    today = plan_date.isoformat()
+    # 営業日 (覚醒日) と、その日の暦日補正の起点を同じ解決器から取る
+    # (day_plan.resolve_business_day — 現在時刻を含む確定ライフ優先)。起床設定を
+    # 日中に変えた日でも「いま駆動中の時間割」を取り違えないため、かつ再起動
+    # 回復 (reschedule_pending_slots の自己解決) と同じ答えを使うため
+    # (Codex 八巡目 #1)。
+    basis = day_plan.resolve_business_day(manager, persona_id, now=now)
+    if basis is None:
+        # ライフを読めなかった = どの営業日を見ているか分からない。plan の
+        # 判定も予約の再 push もせず次の tick へ委ねる (Codex 八巡目 #2)。
+        LOGGER.warning(
+            "[watchdog] lives unreadable; skipping this tick (persona=%s)",
+            persona_id,
+        )
+        return {"action": "skip", "reason": "lives unreadable"}
+
+    # 窓・曜日のゲートは**確定ライフが走っていない場合だけ**現行 PersonaSchedule
+    # で判定する。走っている確定ライフがあるなら、その区間こそがそのペルソナの
+    # 起きている時間帯 — 日中に起床設定を変えた日は、まだ続いている前日のライフ
+    # (例: 確定 23:00〜06:00 / 変更後の設定 07:00〜22:00 の深夜 00:30) が現行設定
+    # の窓の外に落ち、その営業日の予約途絶を**二度と**検出できなくなる (次に窓が
+    # 開く 07:00 にはライフが終わっていて解決器も当日へ退く。Codex 九巡目 #1)。
+    if basis.source != "life":
+        if not in_waking_window(hhmm, wake, close):
+            # 起きていない時間帯 — before wake か after close か
+            reason = "before wake" if hhmm < wake else "after close"
+            return {"action": "none", "reason": reason}
+
+        wake_days = sched.get("wake_days")
+        if wake_days is not None:
+            # 跨ぎリズムの深夜帯 (hhmm < wake) は「前日の weekday」が正しい対照日
+            check_date = effective_plan_date(now, wake, close)
+            if check_date.weekday() not in wake_days:
+                return {"action": "none", "reason": "not a scheduled day"}
+
+    today = basis.plan_date
     plan = day_plan.load_day_plan(manager, persona_id, today)
     if not plan:
         # 行そのものが無い (None) だけでなく、行はあるがコマ 0 件 ([]) も
@@ -1376,16 +1398,22 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         # 行が存在したまま slots_json="[]" で残る。plan is None だけを見ると
         # この日は永久にリカバリ経路が無くなる (2026-07-14 実機の教訓)。
         #
-        # day_open 再発火の制約: hhmm >= wake の帯 (起床後の通常帯) でのみ撃つ。
-        # 深夜帯 (跨ぎの尻尾、hhmm < wake) は「前日の覚醒日に plan が無い」状態
-        # だが、ここで新しい day_open を 00:30 に撃つのは誤り — 起きなかった日に
-        # 深夜に plan を作っても時間割が即発火してしまう。
-        if is_overnight(wake, close) and hhmm < wake:
+        # day_open 再発火の制約: 見ている営業日が**暦日と同じとき**だけ撃つ。
+        # 違うとき = 前の営業日がまだ終わっていない (深夜跨ぎの尻尾、または
+        # 日付を跨いで続いている確定ライフ)。そこで新しい day_open を 00:30 に
+        # 撃つのは誤り — 起きなかった日の深夜に plan を作れば時間割が即発火
+        # するうえ、day_open が編成するのは**暦日**の時間割 (_day_open_plan_date)
+        # なので、前日の空は埋まらないまま毎 tick 撃ち続けることになる。
+        if today != now.date().isoformat():
             LOGGER.debug(
-                "[watchdog] overnight tail: no plan for %s but in midnight zone; "
-                "skipping day_open refire (persona=%s)", today, persona_id,
+                "[watchdog] previous business day (%s) still in effect and has no "
+                "plan; skipping day_open refire (persona=%s basis=%s)",
+                today, persona_id, basis.source,
             )
-            return {"action": "none", "reason": "overnight tail: no refire in midnight zone"}
+            return {
+                "action": "none",
+                "reason": "previous business day still in effect: no day_open refire",
+            }
 
         LOGGER.info(
             "[watchdog] no day plan (or zero organized slots) for today; "
@@ -1426,7 +1454,9 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             "[watchdog] %d slot reservation(s) lost; re-scheduling pending slots "
             "(persona=%s date=%s indices=%s)", len(lost), persona_id, today, lost,
         )
-        pushed = day_plan.reschedule_pending_slots(manager, persona_id, plan_date)
+        pushed = day_plan.reschedule_pending_slots(
+            manager, persona_id, today, wake=basis.wake,
+        )
         return {"action": "reschedule", "pushed": pushed, "lost": lost}
 
     return {"action": "none"}

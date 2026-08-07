@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -1505,7 +1506,7 @@ def test_watchdog_overnight_midnight_no_plan_does_not_refire(session_factory, mo
     calls = _fake_fire(monkeypatch, {"submitted": True})
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["action"] == "none"
-    assert out["reason"] == "overnight tail: no refire in midnight zone"
+    assert out["reason"] == "previous business day still in effect: no day_open refire"
     assert calls == []
 
 
@@ -1534,6 +1535,244 @@ def test_watchdog_overnight_midnight_with_plan_reschedules(session_factory, monk
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["action"] == "reschedule"
     assert rescheduled == [PERSONA_ID]
+
+
+def test_watchdog_watches_the_business_day_of_the_running_life(
+    session_factory, monkeypatch,
+):
+    """見張る営業日は確定ライフ基準 (Codex八巡目 #1)。
+
+    確定ライフ 7/4 20:00〜10:00 が 7/5 08:00 の時点でまだ続いているとき、現行
+    スケジュール (07:00〜22:00) で営業日を選ぶと 7/5 を見て「plan が無い」と
+    判定し、走っているライフの最中に day_open を撃ち直してしまう。正しくは
+    7/4 の plan の予約途絶を見張る。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 8, 0, 0))
+
+    yesterday = "2026-07-04"
+    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
+        {"start": "20:00", "end": "10:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
+        {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    # 予約は push していない (= 再起動で消失した状態)
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
+
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    rescheduled: List[Any] = []
+    monkeypatch.setattr(
+        day_plan, "reschedule_pending_slots",
+        lambda mgr, pid, plan_d=None, **kw: rescheduled.append((plan_d, kw)) or 1,
+    )
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out["action"] == "reschedule"
+    assert calls == []                              # day_open は撃たない
+    assert rescheduled == [(yesterday, {"wake": "20:00"})]
+
+
+def test_watchdog_still_watches_a_life_that_the_new_schedule_window_excludes(
+    session_factory, monkeypatch,
+):
+    """走っている確定ライフは現行設定の窓ゲートで遮断しない (Codex九巡目 #1)。
+
+    確定ライフ 7/4 23:00〜7/5 06:00 の最中に起床設定を 07:00〜22:00 へ変えると、
+    深夜 00:30 は新しい窓の外に落ちる。ここで tick を打ち切ると、7/4 の予約途絶は
+    **二度と**検出されない — 次に窓が開く 07:00 にはライフが終わっていて、解決器も
+    当日 (7/5) へ退くため。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
+    assert not wiring.in_waking_window("00:30", "07:00", "22:00")  # 現行設定では窓外
+
+    yesterday = "2026-07-04"
+    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
+        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
+        {"start": "01:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
+
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    rescheduled: List[Any] = []
+    monkeypatch.setattr(
+        day_plan, "reschedule_pending_slots",
+        lambda mgr, pid, plan_d=None, **kw: rescheduled.append((plan_d, kw)) or 1,
+    )
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out["action"] == "reschedule"
+    assert calls == []                              # day_open は撃たない
+    assert rescheduled == [(yesterday, {"wake": "23:00"})]
+
+
+def test_watchdog_really_repushes_the_running_lifes_slots(session_factory, monkeypatch):
+    """窓の外の走行中ライフでも、実物の再 push が EventScheduler まで届く。
+
+    上のゲート回帰は reschedule を lambda に差し替えているため、押した「つもり」で
+    緑になりうる (Codex十巡目 #3)。ここは差し替えずに通し、途絶が実際に解消する
+    ところまで見る。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
+
+    yesterday = "2026-07-04"
+    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
+        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
+        {"start": "01:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out == {"action": "reschedule", "pushed": 1, "lost": [0]}
+    assert calls == []
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == []
+    # 深夜帯コマは起点 23:00 基準で翌暦日 (7/5 01:00) に張られる
+    entry = list(manager.event_scheduler._entries_by_key.values())[0]
+    assert entry.fire_at_ts == datetime(2026, 7, 5, 1, 0, 0).timestamp()
+
+
+def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
+    session_factory, monkeypatch,
+):
+    """走行中ライフの営業日に plan が無くても day_open は撃たない。
+
+    ゲートを外した先で最も危険な並び — 前営業日のライフが続いている最中に
+    新しい一日を開くと、時間割が即発火する (Codex十巡目 #3)。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
+    day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
+        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    # 時間割は 1 コマも無い (編成が全滅した日)
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out["action"] == "none"
+    assert out["reason"] == "previous business day still in effect: no day_open refire"
+    assert calls == []
+
+
+def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
+    session_factory, monkeypatch,
+):
+    """曜日ゲートも走行中ライフには適用しない (ライフがある日 = 起きた日)。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(
+        session_factory, "judgment_day_open", "07:00", days_of_week=[0],  # 月曜のみ
+    )
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 8, 0, 0))   # 日曜 (weekday=6)
+
+    yesterday = "2026-07-04"
+    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
+        {"start": "20:00", "end": "10:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
+        {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out["action"] == "reschedule"    # 旧: "not a scheduled day"
+    assert calls == []
+
+
+def test_watchdog_keeps_the_window_gate_for_a_zero_length_life(
+    session_factory, monkeypatch,
+):
+    """区間として成立しないライフはゲートを外す資格がない (Codex十巡目 #2)。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 23, 30, 0))   # 現行設定では窓外
+    day_plan.update_plan_meta(manager, PERSONA_ID, "2026-07-04", {
+        day_plan.META_LIVES: [
+            {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free",
+             "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
+        ],
+    })
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out == {"action": "none", "reason": "after close"}
+    assert calls == []
+
+
+def test_watchdog_skips_the_tick_when_lives_are_unreadable(
+    session_factory, monkeypatch,
+):
+    """ライフを読めない tick は何もしない (Codex八巡目 #2)。
+
+    どの営業日を見ているか分からないまま plan の有無を判定すると、day_open の
+    撃ち直しにも予約の再 push にも化けうる。次の tick へ委ねる。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out == {"action": "skip", "reason": "lives unreadable"}
+    assert calls == []
+
+
+def test_watchdog_recovers_the_slots_that_unreadable_lives_left_unscheduled(
+    session_factory, monkeypatch,
+):
+    """「押さずに次の watchdog へ委ねる」の**委ね先が実在する**ことの回帰。
+
+    ライフ読取が失敗した瞬間の予約は 1 件も張られない (day_plan 側の fail-closed)。
+    その状態を回復するのは watchdog の予約途絶検出 — 読めるようになった次の
+    tick で拾い直せなければ、コマは永久に走らない。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
+         "facility": "own_room", "budget_rounds": 0, "note": ""},
+    ])
+
+    # ライフ読取が失敗している間の予約は 1 件も張られない
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE) == 0
+    assert manager.event_scheduler.pending_count() == 0
+
+    # 読めるようになった次の tick が途絶として拾い直す (実物の再 push を通す)
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out["action"] == "reschedule"
+    assert out["pushed"] == 1
+    assert calls == []
+    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == []
 
 
 # ---------------------------------------------------------------------------

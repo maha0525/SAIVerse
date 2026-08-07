@@ -69,7 +69,7 @@ import re
 import threading
 import uuid
 from datetime import date, datetime, time as dt_time, timedelta
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -891,11 +891,23 @@ def _update_slot(
 # ---------------------------------------------------------------------------
 
 
-def load_plan_meta(manager: Any, persona_id: str, plan_date: Any) -> Dict[str, Any]:
+def load_plan_meta(
+    manager: Any, persona_id: str, plan_date: Any, *, strict: bool = False
+) -> Dict[str, Any]:
     """plan 行の付帯情報 (meta_json) を dict で返す。行なし / 不正 JSON は空 dict。
 
     就寝判断 (day_close) が書いた ``tomorrow_memo`` 等を、翌朝の起床判断
     (day_open) が読む入口 (judgment_points.md §4/§8)。
+
+    Args:
+        strict: True で「壊れていて読めない」(不正 JSON / dict でない) を
+            例外にする。既定 (False) は空 dict へ縮退 = 従来どおり
+            「付帯情報が無い日」と同じ扱い。**壊れた行を「無い」と読むと
+            危険な判断** (:func:`resolve_business_day` の営業日選択) だけが
+            True で呼ぶ — 行が無い日と壊れた行を混同しないため。
+
+    Raises:
+        ValueError: ``strict`` かつ meta_json が壊れている場合。
     """
     plan_date_str = _normalize_plan_date(plan_date)
     from database.models import PersonaDayPlan
@@ -912,12 +924,24 @@ def load_plan_meta(manager: Any, persona_id: str, plan_date: Any) -> Dict[str, A
         try:
             meta = json.loads(row.meta_json)
         except (TypeError, ValueError):
+            if strict:
+                raise ValueError(
+                    f"meta_json is not valid JSON (persona={persona_id} "
+                    f"date={plan_date_str})"
+                )
             LOGGER.warning(
                 "[day_plan] meta_json is not valid JSON (persona=%s date=%s); returning {}",
                 persona_id, plan_date_str,
             )
             return {}
-        return meta if isinstance(meta, dict) else {}
+        if not isinstance(meta, dict):
+            if strict:
+                raise ValueError(
+                    f"meta_json is not a JSON object (persona={persona_id} "
+                    f"date={plan_date_str} got={type(meta).__name__})"
+                )
+            return {}
+        return meta
     finally:
         db.close()
 
@@ -1204,16 +1228,38 @@ def _life_minutes(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[3:])
 
 
-def get_lives(manager: Any, persona_id: str, plan_date: Any) -> List[Dict[str, Any]]:
+def get_lives(
+    manager: Any, persona_id: str, plan_date: Any, *, strict: bool = False
+) -> List[Dict[str, Any]]:
     """保存済みライフ宣言 (meta_json.lives) を返す。無ければ空リスト。
 
     「lives が無い日 (旧データ・宣言なし) は検証もゲートも従来挙動」の判定は
     すべてこの関数の戻り値が空かどうかで行う (life.md §4.1)。
+
+    Args:
+        strict: True で「壊れていて読めない」を例外にする (:func:`load_plan_meta`
+            の strict + lives が list でない / 要素が dict でない)。営業日の
+            選択だけが True で呼ぶ — 壊れた台帳を「ライフ未宣言の日」と読むと、
+            現行スケジュール基準で別の営業日を駆動してしまう。既定 (False) は
+            従来どおり空リスト / 不正要素の除去へ縮退する。
+
+    Raises:
+        ValueError: ``strict`` かつ台帳が壊れている場合。
     """
-    meta = load_plan_meta(manager, persona_id, plan_date)
+    meta = load_plan_meta(manager, persona_id, plan_date, strict=strict)
     lives = meta.get(META_LIVES)
     if not isinstance(lives, list):
+        if strict and lives is not None:
+            raise ValueError(
+                f"meta_json.{META_LIVES} is not a list (persona={persona_id} "
+                f"got={type(lives).__name__})"
+            )
         return []
+    if strict and any(not isinstance(life, dict) for life in lives):
+        raise ValueError(
+            f"meta_json.{META_LIVES} contains non-object entries "
+            f"(persona={persona_id})"
+        )
     return [life for life in lives if isinstance(life, dict)]
 
 
@@ -2664,9 +2710,54 @@ def _resolve_wake(manager: Any, persona_id: str) -> Optional[str]:
         return None
 
 
+#: ライフを**読めなかった**ことの印。「その日にライフが宣言されていない」
+#: (空リスト) と厳密に区別する — 混同すると、DB ロック等で読み出しが一時的に
+#: 失敗しただけの日に現行 PersonaSchedule 基準へ黙って落ち、起床設定を変えた
+#: 日は予約の暦日補正が丸一日ずれる (深夜帯コマを「流れた」と誤確定しうる)。
+#: close_outcome の :data:`_RELOAD_FAILED` と同じ三状態化 (Codex 八巡目 #2)。
+_LIVES_UNREADABLE = object()
+
+
+def _load_lives_or_unreadable(
+    manager: Any, persona_id: str, plan_date_str: str
+) -> Any:
+    """基準解決のためのライフ読み出し。読めなければ :data:`_LIVES_UNREADABLE`。
+
+    読取の失敗は例外 (DB ロック等) だけではない — 壊れた meta_json は
+    :func:`load_plan_meta` の既定経路では空 dict へ縮退し、「ライフ未宣言の日」と
+    区別がつかなくなる。ここは ``strict=True`` で読み、**壊れている**も
+    **読めなかった**側に数える (縮退したまま現行スケジュール基準で別の営業日を
+    駆動する方が害が大きい。Codex 九巡目 #2)。
+
+    Returns:
+        ライフ配列 (宣言なしは空リスト) / :data:`_LIVES_UNREADABLE` (読取失敗)。
+    """
+    try:
+        return get_lives(manager, persona_id, plan_date_str, strict=True)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to read lives (persona=%s date=%s); callers must "
+            "not fall back to the current schedule — the basis would split",
+            persona_id, plan_date_str, exc_info=True,
+        )
+        return _LIVES_UNREADABLE
+
+
+def _wake_from_lives(lives: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """確定ライフ基準の起点 (最初のライフの開始時刻)。使えなければ None。
+
+    並び順の起点 (:func:`day_order_minutes` の origin) と同じ「最初のライフの
+    開始」— 予約の暦日補正と並びで物差しを割らないため (Codex 六〜七巡目)。
+    """
+    if not lives:
+        return None
+    start = str(lives[0].get("start") or "")
+    return start if is_valid_hhmm(start) else None
+
+
 def _resolve_wake_for_plan(
     manager: Any, persona_id: str, plan_date_str: str
-) -> Optional[str]:
+) -> Any:
     """当日 plan の予約 (暦日補正) に使う起床基準。
 
     **確定済みライフのある日はライフの開始時刻を最優先する** — 編成・検証
@@ -2675,16 +2766,132 @@ def _resolve_wake_for_plan(
     暦日補正 (現行 wake 基準) が分裂し、start < 現行 wake のコマが翌暦日へ
     丸一日ずれて予約される (Codex 七巡目)。ライフの無い日は従来どおり
     PersonaSchedule から解決する。
+
+    Returns:
+        起床時刻 "HH:MM" / None (ライフも PersonaSchedule の起床も無い) /
+        :data:`_LIVES_UNREADABLE` (ライフを読めなかった)。**読めなかったときに
+        現行 PersonaSchedule へ落ちてはいけない** — 呼び出し元は予約も再分類も
+        進めず、次の watchdog へ委ねること (Codex 八巡目 #2)。
     """
-    try:
-        lives = get_lives(manager, persona_id, plan_date_str)
-    except Exception:
-        lives = []
-    if lives:
-        start = str(lives[0].get("start") or "")
-        if is_valid_hhmm(start):
-            return start
-    return _resolve_wake(manager, persona_id)
+    lives = _load_lives_or_unreadable(manager, persona_id, plan_date_str)
+    if lives is _LIVES_UNREADABLE:
+        return _LIVES_UNREADABLE
+    return _wake_from_lives(lives) or _resolve_wake(manager, persona_id)
+
+
+class BusinessDay(NamedTuple):
+    """:func:`resolve_business_day` の答え — 営業日と、その日の暦日補正の起点。"""
+
+    #: 営業日 "YYYY-MM-DD"
+    plan_date: str
+    #: 起点となる起床時刻 "HH:MM" (解決できなければ None)
+    wake: Optional[str]
+    #: 由来: ``"life"`` = 現在時刻を含む確定ライフ / ``"schedule"`` = 現行
+    #: PersonaSchedule (ライフが無い日・どのライフの中でもない時刻)
+    source: str
+
+
+def _life_start_covering(
+    plan_date: date, lives: List[Dict[str, Any]], now_dt: datetime
+) -> Optional[datetime]:
+    """``now_dt`` を含むライフの開始 datetime (含むものが無ければ None)。
+
+    ライフは営業日 ``plan_date`` の暦日に錨を下ろす: 開始は plan_date の start、
+    終端は跨ぎ (end <= start) なら翌暦日。"HH:MM" だけで判定する
+    :func:`get_life_for_time` は暦日を持たないため、「その時刻はどの営業日の
+    ライフに属するか」を問うここでは使えない (07-04 の 23:00〜06:00 と
+    07-05 の 23:00〜06:00 を区別できない)。
+
+    複数が該当する場合は**開始が最も新しいもの**を返す (直近に始まったライフ =
+    いま駆動中の営業日)。
+
+    **区間として成立しないライフは候補にしない** (start == end / 不正な "HH:MM")。
+    書き手 (:func:`_validate_and_normalize_lives`) は start == end を「長さ 0 の
+    ライフ」として拒否しており、読み手がそれを ``_life_span_minutes`` の跨ぎ規約
+    (end <= start は +24h) で 24 時間ライフと読み替えるのは書き手の契約に反する。
+    壊れた行 (手編集・旧データ) がその日の営業日を名乗り、watchdog の窓・曜日
+    ゲートまで外してしまう (Codex 十巡目 #2)。候補から外れた日は「ライフが
+    現在時刻を含まない日」と同じ扱い = 現行 PersonaSchedule へ退く。暦日補正の
+    起点 (:func:`_wake_from_lives`) は候補選択と独立なので、ここで外しても
+    並び順・予約の物差しは割れない。
+    """
+    latest: Optional[datetime] = None
+    for life in lives:
+        start, end = life.get("start"), life.get("end")
+        if not is_valid_hhmm(start) or not is_valid_hhmm(end) or start == end:
+            continue
+        start_dt = datetime.combine(
+            plan_date, dt_time(int(start[:2]), int(start[3:])),
+        )
+        end_dt = start_dt + timedelta(minutes=_life_span_minutes(life))
+        if start_dt <= now_dt < end_dt and (latest is None or start_dt > latest):
+            latest = start_dt
+    return latest
+
+
+def resolve_business_day(
+    manager: Any, persona_id: str, *, now: Optional[datetime] = None
+) -> Optional[BusinessDay]:
+    """いま駆動中の営業日と、その日の暦日補正の起点を**一度に**決める。
+
+    営業日と起点 (wake) を別々に解決すると基準が割れる: 現行 PersonaSchedule で
+    営業日を選んでから確定ライフで wake を引くと、**日中に起床設定を変えた日**は
+    営業日そのものを取り違える。例 — 営業日 D の確定ライフが 23:00〜06:00、
+    設定変更後の現行スケジュールが 07:00〜22:00 のとき、D+1 の 00:30 に再起動
+    すると (現行スケジュールは跨ぎでないので) 営業日を D+1 と読み、D の pending
+    コマは検査されないまま回復 0 件で静かに終わる (Codex 八巡目 #1)。
+
+    そこで候補は**確定ライフ**: 暦日とその前日のライフを読み、現在時刻を区間に
+    含むライフのある日を営業日とする (:func:`_life_start_covering`)。含むライフ
+    が無ければ従来どおり現行 PersonaSchedule の営業日
+    (:func:`~autonomy_wiring.effective_plan_date`) へ退く。
+
+    **「その日に plan がある」ことは候補の選択に使わない** — 複数日に plan が
+    あるのは普通で (昨日と今日)、存在の有無は「いまどちらの日を生きているか」を
+    区別しない。日ごとに記録された時間の基準は確定ライフだけであり、ライフの
+    無い日には基準そのものが存在しない (現行スケジュールが唯一の手掛かり)。
+
+    Returns:
+        :class:`BusinessDay` / **None = ライフを読めなかった** (読取失敗)。
+        None のとき呼び出し元は予約も再分類も進めず、次の watchdog へ委ねること
+        (Codex 八巡目 #2)。
+    """
+    now_dt = now or clock.now()
+    today = now_dt.date()
+    lives_by_date: Dict[date, List[Dict[str, Any]]] = {}
+    chosen: Optional[Tuple[datetime, date]] = None
+    # 候補は暦日と前日の 2 日 — 前日が要るのは深夜跨ぎライフの尻尾
+    # (effective_plan_date が返しうるのもこの 2 日)。
+    for candidate in (today, today - timedelta(days=1)):
+        lives = _load_lives_or_unreadable(
+            manager, persona_id, candidate.isoformat(),
+        )
+        if lives is _LIVES_UNREADABLE:
+            return None
+        lives_by_date[candidate] = lives
+        start_dt = _life_start_covering(candidate, lives, now_dt)
+        if start_dt is not None and (chosen is None or start_dt > chosen[0]):
+            chosen = (start_dt, candidate)
+
+    if chosen is not None:
+        plan_date = chosen[1]
+        wake = _wake_from_lives(lives_by_date[plan_date])
+        return BusinessDay(
+            plan_date.isoformat(), wake or _resolve_wake(manager, persona_id),
+            "life",
+        )
+
+    from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
+
+    sched = _find_day_schedules(manager, persona_id)
+    plan_date = effective_plan_date(now_dt, sched.get("wake"), sched.get("close"))
+    # 現在時刻はどのライフの中でもないが、その営業日にライフがあれば起点は
+    # ライフ優先 (:func:`_resolve_wake_for_plan` と同じ物差し。既読なので
+    # 引き直さない)。
+    wake = _wake_from_lives(lives_by_date.get(plan_date))
+    return BusinessDay(
+        plan_date.isoformat(), wake or sched.get("wake"), "schedule",
+    )
 
 
 def _slot_fire_at(
@@ -2795,7 +3002,18 @@ def schedule_day_plan(
         # 呼び出し元 (起床判断 finalize 等) に配線を強要しない — 深夜跨ぎの
         # 暦日補正はコマ予約の全経路で常に効くべき (検収追加 2026-07-12)。
         # 基準は当日確定ライフ優先 (Codex 七巡目)。
-        wake = _resolve_wake_for_plan(manager, persona_id, plan_date_str)
+        resolved = _resolve_wake_for_plan(manager, persona_id, plan_date_str)
+        if resolved is _LIVES_UNREADABLE:
+            # 起点が分からないまま push すると、深夜帯コマの暦日補正が丸一日
+            # ずれる。押さなければ実行もされない — 予約途絶として watchdog
+            # (find_lost_slot_reservations) が拾い直す (Codex 八巡目 #2)。
+            LOGGER.warning(
+                "[day_plan] schedule_day_plan: lives unreadable; scheduling "
+                "nothing and leaving it to the next watchdog (persona=%s date=%s)",
+                persona_id, plan_date_str,
+            )
+            return 0
+        wake = resolved
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None:
         LOGGER.warning(
@@ -2840,12 +3058,12 @@ def reschedule_pending_slots(
     plan が無ければ 0。
 
     Args:
-        plan_date: 引く営業日 (date / datetime / "YYYY-MM-DD")。None のとき
-            ``clock.now().date()`` を使う (後方互換)。深夜跨ぎリズムでは呼び
-            出し元 (watchdog_tick) が :func:`~autonomy_wiring.effective_plan_date`
-            で算出した date を渡すこと。
+        plan_date: 引く営業日 (date / datetime / "YYYY-MM-DD")。None のときは
+            :func:`resolve_business_day` が営業日と起点 (wake) を一度に自己解決
+            する (確定ライフ優先)。呼び出し元 (watchdog_tick) も同じ解決器の
+            答えを渡すので、経路によって営業日の解釈が割れない。
         wake: 起床時刻 "HH:MM"。_slot_fire_at に透過し、深夜帯コマの暦日補正
-            に使う。
+            に使う。省略時は営業日と同じ解決器から取る。
         downtime_recovery: True = プロセス再起動後の回復 (サーバーが落ちていた
             ことが確実な入口 — saiverse_manager.on_persona_registered)。開始
             時刻を :data:`MISSED_GRACE_MINUTES` (+ 繰り下げ済みぶんの猶予
@@ -2857,19 +3075,40 @@ def reschedule_pending_slots(
             生きているので同じ理由文が嘘になる (長セッション待ち等の遅れを
             停止と誤記しない)。
     """
+    basis: Optional[BusinessDay] = None
     if plan_date is None:
-        # 深夜跨ぎリズムでは now.date() でなく営業日で引く (自己解決)
-        from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
-        sched = _find_day_schedules(manager, persona_id)
-        plan_date_str = effective_plan_date(
-            clock.now(), sched.get("wake"), sched.get("close"),
-        ).isoformat()
+        # 営業日と起点は同じ解決器から一度に取る (:func:`resolve_business_day`)
+        # — 別々に解決すると、日中に起床設定を変えた日は営業日そのものを
+        # 取り違えて回復が空振りする (Codex 八巡目 #1)。
+        basis = resolve_business_day(manager, persona_id)
+        if basis is None:
+            LOGGER.warning(
+                "[day_plan] cannot resolve the business day (lives unreadable); "
+                "leaving pending slots untouched for the next watchdog "
+                "(persona=%s)", persona_id,
+            )
+            return 0
+        plan_date_str = basis.plan_date
     else:
         plan_date_str = _normalize_plan_date(plan_date)
     if wake is None:
         # 予約の暦日補正の基準は当日確定ライフ優先 (Codex 七巡目 —
         # schedule_day_plan と同じ物差し)
-        wake = _resolve_wake_for_plan(manager, persona_id, plan_date_str)
+        if basis is not None:
+            wake = basis.wake  # 同じ解決器の答え (二度引かない)
+        else:
+            resolved = _resolve_wake_for_plan(manager, persona_id, plan_date_str)
+            if resolved is _LIVES_UNREADABLE:
+                # 起点が分からない = grace 判定の基準も分からない。押さず、
+                # 「流れた」への再分類もせず次の watchdog へ委ねる
+                # (Codex 八巡目 #2)。
+                LOGGER.warning(
+                    "[day_plan] lives unreadable; neither rescheduling nor "
+                    "reclassifying slots (persona=%s date=%s)",
+                    persona_id, plan_date_str,
+                )
+                return 0
+            wake = resolved
     slots = load_day_plan(manager, persona_id, plan_date_str)
     if slots is None:
         return 0
