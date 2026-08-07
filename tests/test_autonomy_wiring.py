@@ -1721,6 +1721,33 @@ def test_watchdog_keeps_the_window_gate_for_a_zero_length_life(
     assert calls == []
 
 
+def test_watchdog_opens_the_new_day_even_after_yesterdays_life_ended(
+    session_factory, monkeypatch,
+):
+    """朝の day_open が失敗した日は、ちゃんと撃ち直される。
+
+    営業日の解決に「最後に始まったライフの日」という段を入れたとき、それを無条件に
+    採ると 7/5 08:00 (7/4 のライフは終了済み、7/5 にはまだライフ無し) で前日 7/4 を
+    指し、watchdog が「前の営業日がまだ続いている」と読んで撃たなくなる — 一日が
+    始まらないまま止まる。一日は前へしか進まない (設定が言う営業日の方が新しければ
+    そちらを採る) の逆側の見張り (Codex十二巡目)。
+    """
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+    day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+
+    clock.enable_virtual(datetime(2026, 7, 5, 8, 0, 0))
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out["action"] == "day_open_refire"
+    assert calls[0][0] == "day_open"
+
+
 def test_watchdog_skips_the_tick_when_lives_are_unreadable(
     session_factory, monkeypatch,
 ):

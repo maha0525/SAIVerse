@@ -1123,6 +1123,145 @@ def test_life_status_now_defaults_undeclared_on_lookup_failure():
 
 
 # ---------------------------------------------------------------------------
+# ライフ台帳・表示の営業日も予約と同じ解決器から (resolve_business_day)
+# ---------------------------------------------------------------------------
+
+
+def _life_running_past_a_changed_wake(manager, session_factory):
+    """確定ライフ 7/4 23:00〜7/5 06:00 の最中に起床設定を 07:00〜22:00 へ変えた状況。
+
+    現行スケジュールで営業日を決めると 7/5 を読み、ライフの真っ最中なのに
+    「ライフ未宣言の日」に見える。
+    """
+    clock.enable_virtual(BASE + timedelta(hours=23, minutes=10))
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    _set_day_schedules(manager, session_factory, wake="07:00", close="22:00")
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))   # 7/5 00:30
+
+
+def test_life_status_now_follows_the_running_life_after_wake_change(
+    manager, session_factory,
+):
+    """走行中の確定ライフを「未宣言」と表示しない (話しかけやすさの誤表示)。"""
+    _life_running_past_a_changed_wake(manager, session_factory)
+
+    status = day_plan.get_life_status_now(manager, PERSONA_ID)
+
+    assert status["plan_date"] == PLAN_DATE   # 現行スケジュールなら 7/5
+    assert status["lives_declared"] is True
+    assert status["in_life"] is True
+    assert status["life"]["start"] == "23:00"
+
+
+def test_life_status_now_undeclared_when_lives_are_unreadable(manager):
+    """読めない = 判定不能。嘘の「話しかけやすい」を出さない側へ倒す。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        status = day_plan.get_life_status_now(manager, PERSONA_ID)
+
+    assert status["lives_declared"] is False
+    assert status["in_life"] is False
+    assert status["plan_date"] is None
+
+
+def test_judgment_pulse_lands_on_the_running_lifes_day(manager, session_factory):
+    """判断点の記帳先も同じ営業日 — 別の日へ積むと台帳が空振りする。"""
+    _life_running_past_a_changed_wake(manager, session_factory)
+
+    result = day_plan.record_judgment_pulse(manager, PERSONA_ID)
+
+    assert result is not None
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["judgment_pulses"] == 1
+
+
+def test_judgment_pulse_is_not_recorded_when_lives_are_unreadable(manager):
+    """どの日か分からないまま積まない (他人の帳簿に乗った数字は追えない)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.record_judgment_pulse(manager, PERSONA_ID) is None
+
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["judgment_pulses"] == 0
+
+
+def test_keepalive_stops_in_the_valley_after_switching_to_an_overnight_rhythm(
+    manager, session_factory,
+):
+    """ライフが終わったら温めるのを止める — 課金の出る経路なので契約を直接見る。
+
+    7/4 のライフは 07:00〜10:00 で確定済み。その後ユーザーが起床設定を跨ぎリズム
+    (23:00〜06:00) へ変えると、現行設定だけで営業日を決める旧実装は 7/4 12:00 を
+    「7/3 の深夜帯」と読む。7/3 にライフは無いので「未宣言の日」に落ち、終わった
+    ライフを温め続けていた。
+    """
+    clock.enable_virtual(BASE + timedelta(hours=8))
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "10:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    _set_day_schedules(manager, session_factory, wake="23:00", close="06:00")
+
+    clock.enable_virtual(BASE + timedelta(hours=9))    # ライフ中
+    assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is True
+
+    clock.enable_virtual(BASE + timedelta(hours=12))   # ライフ終了後 (谷)
+    assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is False
+    status = day_plan.get_life_status_now(manager, PERSONA_ID)
+    assert status["plan_date"] == PLAN_DATE     # 終わったライフの日を指したまま
+    assert status["lives_declared"] is True     # 「未宣言」ではない
+    assert status["in_life"] is False
+
+
+def test_keepalive_allows_when_lives_are_unreadable(manager):
+    """読めないときは温め続ける側 (延命を止める方に倒さない — docstring の方針)。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=12))   # 谷 (通常なら False)
+    assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is False
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is True
+
+
+def test_life_pulse_lands_on_the_running_lifes_day(manager, session_factory):
+    """暗黙の営業日で積むパルスも同じ解決器を通る (record_judgment_pulse と対)。"""
+    _life_running_past_a_changed_wake(manager, session_factory)
+
+    result = day_plan.consume_life_pulse(manager, PERSONA_ID)
+
+    assert result is not None
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["used_pulses"] == 1
+
+
+def test_life_pulse_is_not_recorded_when_lives_are_unreadable(manager):
+    """どの日か分からないまま予算を減らさない。"""
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+    ])
+    clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
+
+    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
+        assert day_plan.consume_life_pulse(manager, PERSONA_ID) is None
+
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["used_pulses"] == 0
+
+
+
+
+# ---------------------------------------------------------------------------
 # 実行台帳で包む発火の予算精算 (W2 Chunk B, A5) — ライフのある日は
 # lives[].used_rounds 正典に一本化し、旧 budget_used_rounds を書かない。
 # ---------------------------------------------------------------------------

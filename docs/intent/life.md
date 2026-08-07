@@ -75,7 +75,7 @@ Track は概念再編（life_concept_map §10）で「目的の木の第一階�
 **ライフとは、ユーザーが設定する起床・就寝の区間そのもの**。ユーザーは既に PersonaSchedule でエアの起床 07:00・就寝 01:00 を設定しており、ユーザーのメンタルモデルでは「エアは 7 時に起きて 1 時に寝る」——その区間がエアの一日であり、それがライフである。v0.4 までの「ペルソナが毎朝ライフを宣言する」設計は、この既にある器の横に並行の仕組みを発明していた（実機初日の教訓）。
 
 - **境界イベント＝起床・就寝そのもの**。ライフ開始＝起床判断（day_open）、ライフ終了＝就寝判断（day_close）。別立ての「ライフ境界イベント予約」は持たない
-- 深夜跨ぎ（close < wake）は営業日の既存意味論（`autonomy_wiring.effective_plan_date`）をそのまま使う。ただし**その日の確定ライフがあるときは、それが営業日の基準**（`day_plan.resolve_business_day`）——ユーザーが日中に起床設定を変えても、走っている一日は朝に確定したライフのままだから
+- 深夜跨ぎ（close < wake）は営業日の既存意味論（`autonomy_wiring.effective_plan_date`）をそのまま使う。ただし**その日の確定ライフがあるときは、それが営業日の基準**（`day_plan.resolve_business_day`）——ユーザーが日中に起床設定を変えても、走っている一日は朝に確定したライフのままだから。決め方は「走っているライフの日。無ければ、最後に始まったライフの日と現行設定の営業日の**遅い方**（一日は前へしか進まない）」。コマ予約・watchdog・話しかけやすさ表示・ライフ台帳（keep-alive / パルス記帳）は**すべてこの一つの解決器を通る**。ライフを読めないときは解決器が「決められない」を返し、各経路が自分の安全方向へ倒す（予約は押さない／表示は未宣言／記帳はしない／keep-alive は温め続ける）
 
 ### 4.2 予算 — ライフの長さが最低値を決める
 
@@ -269,7 +269,7 @@ alert は本書のスコープ外（呼びかけへの分化は life_concept_map
 | 予算ゲート・台帳 | `day_plan.py` init/get/consume_budget ＋発火時切り詰め | 参照先をライフ台帳へ差し替え |
 | keep-alive touch | life_concept_map §14 A3 実装済（意味的に不活性な極小 touch） | 作動条件をライフ従属に変更（§5.2） |
 | explicit cache TTL 運転 | cache_lifecycle_control.md 連続モード（Anthropic 1h・再送延命） | 均等モードの物理的根拠 |
-| コマ予約・営業日 | `day_plan.py` EventScheduler push ＋ `resolve_business_day`（確定ライフ優先、退避先が `autonomy_wiring` effective_plan_date） | ライフ区間の予約・跨ぎ対応をそのまま継承 |
+| 営業日の解決（予約・watchdog・表示・台帳の共通口） | `day_plan.resolve_business_day`（確定ライフ優先、退避先が `autonomy_wiring` effective_plan_date） | ライフ区間の予約・跨ぎ対応をそのまま継承 |
 | ライフビュー | `persona_activity_view.md` 系 UI | 括り直しの土台（§9.2） |
 
 ### 11.2 v0.5 の作り直し（Phase 2〜4 実装の巻き戻しと転用）

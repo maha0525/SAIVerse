@@ -1359,14 +1359,17 @@ def is_keepalive_allowed(manager: Any, persona_id: str) -> bool:
 
     ``sea.runtime.SEARuntime.run_cache_keepalive`` が唯一の呼び出し元
     (keep-alive 連鎖の判定を 1 箇所に集約する設計、life.md Phase3)。
+
+    見る営業日は :func:`resolve_business_day` — 予約・watchdog と同じ解決器
+    (現在時刻を含む確定ライフ優先)。ここだけ現行 PersonaSchedule で日を決めると、
+    起床設定を日中に変えた日はライフの真っ最中に「ライフ未宣言の日」を読む。
     """
     try:
-        plan_date_str = _resolve_current_plan_date(manager, persona_id)
-        lives = get_lives(manager, persona_id, plan_date_str)
-        if not lives:
+        basis = resolve_business_day(manager, persona_id)
+        if basis is None or not basis.lives:
             return True
         hhmm = clock.now().strftime("%H:%M")
-        return get_life_for_time(lives, hhmm) is not None
+        return get_life_for_time(basis.lives, hhmm) is not None
     except Exception:
         LOGGER.warning(
             "[day_plan] is_keepalive_allowed failed (persona=%s); defaulting to allow",
@@ -1396,23 +1399,37 @@ def get_life_status_now(manager: Any, persona_id: str) -> Dict[str, Any]:
         (不変条件5)。is_keepalive_allowed の「失敗時は許可側 (True)」とは
         安全方向が逆であることに注意 (あちらは延命を止めない方が安全、
         こちらは嘘の「話しかけやすい」を出さない方が安全)。
+
+    見る営業日は :func:`resolve_business_day` — 予約・watchdog と同じ解決器。
+    起床設定を日中に変えた日の深夜、ペルソナが確定ライフの真っ最中でも
+    「未宣言」と表示していたのはここが現行 PersonaSchedule で日を決めていたため。
     """
     try:
-        plan_date_str = _resolve_current_plan_date(manager, persona_id)
-        lives = get_lives(manager, persona_id, plan_date_str)
-        if not lives:
+        basis = resolve_business_day(manager, persona_id)
+        if basis is None:
+            # ライフを読めない = どの営業日の状態も判定できない。「未宣言」
+            # (何も出さない) 側へ倒す — 上の Returns の方針そのもの。
+            LOGGER.warning(
+                "[day_plan] get_life_status_now: lives unreadable (persona=%s); "
+                "reporting lives_declared=False", persona_id,
+            )
             return {
                 "lives_declared": False, "in_life": False,
-                "life_index": None, "life": None, "plan_date": plan_date_str,
+                "life_index": None, "life": None, "plan_date": None,
+            }
+        if not basis.lives:
+            return {
+                "lives_declared": False, "in_life": False,
+                "life_index": None, "life": None, "plan_date": basis.plan_date,
             }
         hhmm = clock.now().strftime("%H:%M")
-        idx = get_life_for_time(lives, hhmm)
+        idx = get_life_for_time(basis.lives, hhmm)
         return {
             "lives_declared": True,
             "in_life": idx is not None,
             "life_index": idx,
-            "life": lives[idx] if idx is not None else None,
-            "plan_date": plan_date_str,
+            "life": basis.lives[idx] if idx is not None else None,
+            "plan_date": basis.plan_date,
         }
     except Exception:
         LOGGER.warning(
@@ -1805,20 +1822,26 @@ def confirm_life_for_today(
     return life
 
 
-def _resolve_current_plan_date(manager: Any, persona_id: str) -> str:
-    """いま現在時刻が属する営業日 (plan_date) を解決する (深夜跨ぎ対応の自己解決)。"""
-    try:
-        from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
-        sched = _find_day_schedules(manager, persona_id)
-        return effective_plan_date(
-            clock.now(), sched.get("wake"), sched.get("close"),
-        ).isoformat()
-    except Exception:
+def _ledger_plan_date(
+    manager: Any, persona_id: str, plan_date: Any, *, what: str
+) -> Optional[str]:
+    """ライフ台帳へ記帳する対象の営業日。省略時は自己解決する。
+
+    解決器は予約・watchdog・表示と同じ :func:`resolve_business_day` (現在時刻を
+    含む確定ライフ優先)。**解決できないときは None** — 呼び出し元は記帳しない
+    こと。どの日か分からないまま積むと、別のライフの帳簿に数字が乗る (欠落は
+    後から追えるが、他人の帳簿に乗った数字は追えない)。
+    """
+    if plan_date is not None:
+        return _normalize_plan_date(plan_date)
+    basis = resolve_business_day(manager, persona_id)
+    if basis is None:
         LOGGER.warning(
-            "[day_plan] failed to resolve current plan_date (persona=%s); "
-            "using calendar date", persona_id, exc_info=True,
+            "[day_plan] cannot resolve the business day (lives unreadable); "
+            "not recording %s (persona=%s)", what, persona_id,
         )
-        return clock.now().date().isoformat()
+        return None
+    return basis.plan_date
 
 
 def consume_life_pulse(
@@ -1842,13 +1865,14 @@ def consume_life_pulse(
     / パルス時刻がどのライフにも属さない場合は no-op (None、後方互換)。
 
     Args:
-        plan_date: 省略時は現在時刻が属する営業日を自己解決する。
+        plan_date: 省略時は現在時刻が属する営業日を自己解決する
+            (:func:`resolve_business_day`)。解決できない (ライフを読めない) ときは
+            記帳せず no-op + WARN — 別のライフの帳簿へ積むより欠落の方が軽い。
         at_time: パルス時刻 "HH:MM"。省略時は ``clock.now()``。
     """
-    plan_date_str = (
-        _normalize_plan_date(plan_date) if plan_date is not None
-        else _resolve_current_plan_date(manager, persona_id)
-    )
+    plan_date_str = _ledger_plan_date(manager, persona_id, plan_date, what="pulse")
+    if plan_date_str is None:
+        return None
     hhmm = at_time or clock.now().strftime("%H:%M")
     return _increment_life_field(
         manager, persona_id, plan_date_str, hhmm, "used_pulses", 1, what="pulse",
@@ -2222,13 +2246,16 @@ def record_judgment_pulse(
     (None、:func:`consume_life_pulse` と同じ判定)。
 
     Args:
-        plan_date: 省略時は現在時刻が属する営業日を自己解決する。
+        plan_date: 省略時は現在時刻が属する営業日を自己解決する
+            (:func:`resolve_business_day`)。解決できない (ライフを読めない) ときは
+            記帳せず no-op + WARN — 別のライフの帳簿へ積むより欠落の方が軽い。
         at_time: 発火時刻 "HH:MM"。省略時は ``clock.now()``。
     """
-    plan_date_str = (
-        _normalize_plan_date(plan_date) if plan_date is not None
-        else _resolve_current_plan_date(manager, persona_id)
+    plan_date_str = _ledger_plan_date(
+        manager, persona_id, plan_date, what="judgment pulse",
     )
+    if plan_date_str is None:
+        return None
     hhmm = at_time or clock.now().strftime("%H:%M")
     return _increment_life_field(
         manager, persona_id, plan_date_str, hhmm, "judgment_pulses", 1,
@@ -2786,45 +2813,75 @@ class BusinessDay(NamedTuple):
     plan_date: str
     #: 起点となる起床時刻 "HH:MM" (解決できなければ None)
     wake: Optional[str]
-    #: 由来: ``"life"`` = 現在時刻を含む確定ライフ / ``"schedule"`` = 現行
-    #: PersonaSchedule (ライフが無い日・どのライフの中でもない時刻)
+    #: 由来: ``"life"`` = 現在時刻を含む確定ライフ (いま起きている) /
+    #: ``"life_ended"`` = その日のライフは始まっていたが今は区間の外 (谷・就寝後) /
+    #: ``"schedule"`` = ライフの記録が無く現行 PersonaSchedule から決めた日。
+    #: **ゲートを外してよいのは ``"life"`` だけ** (watchdog の窓・曜日判定)。
     source: str
+    #: その営業日の確定ライフ (宣言なしは空リスト)。解決器が既に読んだものを
+    #: そのまま持たせる — 消費側が引き直すと、営業日を決めた読みと表示・記帳の
+    #: 読みが別世代になりうるうえ、10 秒ポーリングの表示経路で無駄な問い合わせが
+    #: 増える。
+    lives: List[Dict[str, Any]]
+
+
+def _life_span_at(
+    plan_date: date, life: Dict[str, Any]
+) -> Optional[Tuple[datetime, datetime]]:
+    """営業日 ``plan_date`` の暦日に錨を下ろしたライフの区間 ``[開始, 終了)``。
+
+    開始は plan_date の start、終端は跨ぎ (end <= start) なら翌暦日。"HH:MM" だけ
+    で判定する :func:`get_life_for_time` は暦日を持たないため、「その時刻はどの
+    営業日のライフに属するか」を問う経路では使えない (07-04 の 23:00〜06:00 と
+    07-05 の 23:00〜06:00 を区別できない)。
+
+    **区間として成立しないライフは None** (start == end / 不正な "HH:MM")。
+    書き手 (:func:`_validate_and_normalize_lives`) は start == end を「長さ 0 の
+    ライフ」として拒否しており、読み手がそれを ``_life_span_minutes`` の跨ぎ規約
+    (end <= start は +24h) で 24 時間ライフと読み替えるのは書き手の契約に反する。
+    壊れた行 (手編集・旧データ) がその日の営業日を名乗り、watchdog の窓・曜日
+    ゲートまで外してしまう (Codex 十巡目 #2)。
+    """
+    start, end = life.get("start"), life.get("end")
+    if not is_valid_hhmm(start) or not is_valid_hhmm(end) or start == end:
+        return None
+    start_dt = datetime.combine(plan_date, dt_time(int(start[:2]), int(start[3:])))
+    return start_dt, start_dt + timedelta(minutes=_life_span_minutes(life))
 
 
 def _life_start_covering(
     plan_date: date, lives: List[Dict[str, Any]], now_dt: datetime
 ) -> Optional[datetime]:
-    """``now_dt`` を含むライフの開始 datetime (含むものが無ければ None)。
+    """``now_dt`` を**区間に含む**ライフの開始 datetime (無ければ None)。
 
-    ライフは営業日 ``plan_date`` の暦日に錨を下ろす: 開始は plan_date の start、
-    終端は跨ぎ (end <= start) なら翌暦日。"HH:MM" だけで判定する
-    :func:`get_life_for_time` は暦日を持たないため、「その時刻はどの営業日の
-    ライフに属するか」を問うここでは使えない (07-04 の 23:00〜06:00 と
-    07-05 の 23:00〜06:00 を区別できない)。
-
-    複数が該当する場合は**開始が最も新しいもの**を返す (直近に始まったライフ =
-    いま駆動中の営業日)。
-
-    **区間として成立しないライフは候補にしない** (start == end / 不正な "HH:MM")。
-    書き手 (:func:`_validate_and_normalize_lives`) は start == end を「長さ 0 の
-    ライフ」として拒否しており、読み手がそれを ``_life_span_minutes`` の跨ぎ規約
-    (end <= start は +24h) で 24 時間ライフと読み替えるのは書き手の契約に反する。
-    壊れた行 (手編集・旧データ) がその日の営業日を名乗り、watchdog の窓・曜日
-    ゲートまで外してしまう (Codex 十巡目 #2)。候補から外れた日は「ライフが
-    現在時刻を含まない日」と同じ扱い = 現行 PersonaSchedule へ退く。暦日補正の
-    起点 (:func:`_wake_from_lives`) は候補選択と独立なので、ここで外しても
-    並び順・予約の物差しは割れない。
+    複数が該当する場合は開始が最も新しいもの (直近に始まったライフ)。
     """
     latest: Optional[datetime] = None
     for life in lives:
-        start, end = life.get("start"), life.get("end")
-        if not is_valid_hhmm(start) or not is_valid_hhmm(end) or start == end:
+        span = _life_span_at(plan_date, life)
+        if span is None:
             continue
-        start_dt = datetime.combine(
-            plan_date, dt_time(int(start[:2]), int(start[3:])),
-        )
-        end_dt = start_dt + timedelta(minutes=_life_span_minutes(life))
+        start_dt, end_dt = span
         if start_dt <= now_dt < end_dt and (latest is None or start_dt > latest):
+            latest = start_dt
+    return latest
+
+
+def _latest_life_start(
+    plan_date: date, lives: List[Dict[str, Any]], now_dt: datetime
+) -> Optional[datetime]:
+    """**もう始まっている**ライフのうち、開始が最も新しいもの (無ければ None)。
+
+    区間に含まれていなくてよい — 「今日はもう終わったライフ」も数える。まだ
+    始まっていないライフ (今日の起床前に確定だけ済んでいる等) は数えない。
+    """
+    latest: Optional[datetime] = None
+    for life in lives:
+        span = _life_span_at(plan_date, life)
+        if span is None:
+            continue
+        start_dt = span[0]
+        if start_dt <= now_dt and (latest is None or start_dt > latest):
             latest = start_dt
     return latest
 
@@ -2841,10 +2898,22 @@ def resolve_business_day(
     すると (現行スケジュールは跨ぎでないので) 営業日を D+1 と読み、D の pending
     コマは検査されないまま回復 0 件で静かに終わる (Codex 八巡目 #1)。
 
-    そこで候補は**確定ライフ**: 暦日とその前日のライフを読み、現在時刻を区間に
-    含むライフのある日を営業日とする (:func:`_life_start_covering`)。含むライフ
-    が無ければ従来どおり現行 PersonaSchedule の営業日
-    (:func:`~autonomy_wiring.effective_plan_date`) へ退く。
+    そこで基準は**確定ライフ**。暦日とその前日のライフを読み、次の順で決める:
+
+    1. ``"life"`` — 現在時刻を**区間に含む**ライフのある日 (いま起きている日)
+    2. ライフが走っていないときは、**最後に始まったライフの日**と、現行
+       PersonaSchedule の営業日 (:func:`~autonomy_wiring.effective_plan_date`) の
+       **遅い方** — 一日は前へしか進まないから。選んだ日にライフの記録があれば
+       ``"life_ended"``、無ければ ``"schedule"``
+
+    「最後に始まったライフの日」が要るのは、起床設定を変えた日の谷で設定だけを
+    見ると**過去の日**を指してしまうから (例: 確定ライフ D 07:00〜10:00、変更後の
+    設定が跨ぎリズム、現在 D 12:00 → effective_plan_date は D-1)。そこにライフが
+    無いので「ライフ未宣言の日」と読まれ、keep-alive が終わったライフを温め続ける
+    (Codex 十二巡目 #1)。逆に「遅い方」を採らないと、朝の day_open が失敗した日
+    (D+1 08:00、D のライフは終了済み、D+1 にライフ無し) に前日 D を指し、watchdog
+    が「前の営業日がまだ続いている」と読んで day_open を撃ち直さなくなる — 一日が
+    始まらないまま止まる。通常運用 (設定を触らない日) では両者は一致する。
 
     **「その日に plan がある」ことは候補の選択に使わない** — 複数日に plan が
     あるのは普通で (昨日と今日)、存在の有無は「いまどちらの日を生きているか」を
@@ -2859,9 +2928,12 @@ def resolve_business_day(
     now_dt = now or clock.now()
     today = now_dt.date()
     lives_by_date: Dict[date, List[Dict[str, Any]]] = {}
-    chosen: Optional[Tuple[datetime, date]] = None
+    started: Optional[Tuple[datetime, date]] = None
     # 候補は暦日と前日の 2 日 — 前日が要るのは深夜跨ぎライフの尻尾
-    # (effective_plan_date が返しうるのもこの 2 日)。
+    # (effective_plan_date が返しうるのもこの 2 日)。暦日を先に見て、そこに
+    # 走っているライフがあれば前日は読まない: 前日のライフの開始は必ず暦日の
+    # それより前なので、暦日が勝つと決まっている (表示は 10 秒ポーリングで
+    # 呼ばれるため、無駄な問い合わせを残さない。Codex 十二巡目 #2)。
     for candidate in (today, today - timedelta(days=1)):
         lives = _load_lives_or_unreadable(
             manager, persona_id, candidate.isoformat(),
@@ -2869,28 +2941,51 @@ def resolve_business_day(
         if lives is _LIVES_UNREADABLE:
             return None
         lives_by_date[candidate] = lives
-        start_dt = _life_start_covering(candidate, lives, now_dt)
-        if start_dt is not None and (chosen is None or start_dt > chosen[0]):
-            chosen = (start_dt, candidate)
-
-    if chosen is not None:
-        plan_date = chosen[1]
-        wake = _wake_from_lives(lives_by_date[plan_date])
-        return BusinessDay(
-            plan_date.isoformat(), wake or _resolve_wake(manager, persona_id),
-            "life",
-        )
+        if _life_start_covering(candidate, lives, now_dt) is not None:
+            return _business_day_from_lives(
+                manager, persona_id, candidate, lives, "life",
+            )
+        start_dt = _latest_life_start(candidate, lives, now_dt)
+        if start_dt is not None and (started is None or start_dt > started[0]):
+            started = (start_dt, candidate)
 
     from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
 
     sched = _find_day_schedules(manager, persona_id)
     plan_date = effective_plan_date(now_dt, sched.get("wake"), sched.get("close"))
-    # 現在時刻はどのライフの中でもないが、その営業日にライフがあれば起点は
-    # ライフ優先 (:func:`_resolve_wake_for_plan` と同じ物差し。既読なので
-    # 引き直さない)。
-    wake = _wake_from_lives(lives_by_date.get(plan_date))
+    if started is not None and started[1] > plan_date:
+        plan_date = started[1]
+    # 起点はその日のライフを優先する — 並び (day_order_minutes) が lives[0].start を
+    # 起点にする以上、ここで現行スケジュールの起床を返すと予約の暦日補正と並びが
+    # 割れる (七巡目の欠陥)。まだ始まっていないライフ (起床前に確定だけ済んだ日)
+    # の起点もこれで拾う。
+    lives = lives_by_date.get(plan_date) or []
+    wake = _wake_from_lives(lives)
+    # 由来は「その日に**始まったライフ**があるか」で決める (区間として成立しない
+    # 行や、まだ始まっていない行は数えない — 名乗りが実態とずれないように)。
+    source = "life_ended" if started is not None and started[1] == plan_date \
+        else "schedule"
     return BusinessDay(
-        plan_date.isoformat(), wake or sched.get("wake"), "schedule",
+        plan_date.isoformat(), wake or sched.get("wake"), source, lives,
+    )
+
+
+def _business_day_from_lives(
+    manager: Any,
+    persona_id: str,
+    plan_date: date,
+    lives: List[Dict[str, Any]],
+    source: str,
+) -> BusinessDay:
+    """ライフ基準で決まった営業日の :class:`BusinessDay` を組む。
+
+    起点 (wake) は最初のライフの開始 — 並び順の起点 (:func:`day_order_minutes`)
+    と同じ物差し。ライフの開始が使えないときだけ現行 PersonaSchedule へ退く。
+    """
+    wake = _wake_from_lives(lives)
+    return BusinessDay(
+        plan_date.isoformat(), wake or _resolve_wake(manager, persona_id),
+        source, lives,
     )
 
 
