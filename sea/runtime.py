@@ -228,6 +228,19 @@ class SEARuntime:
                     })
                 return [f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"]
         else:
+            if pulse_type != "user":
+                # 席違いフォールバックの機械検査 (autonomous_pulse_vehicle.md §D)。
+                # 「auto 系 Pulse は必ず meta_playbook 指定」という不変条件は従来
+                # docstring の散文にしか無く、破られても無音で会話の器に落ちて
+                # いた (2026-08-08 のコマ開始 Pulse がこれで発話化した)。禁止は
+                # しない — リマインド等、会話の器を意図して使う schedule があり
+                # 得るため、まず観測可能にする。
+                LOGGER.warning(
+                    "[sea] non-user pulse fell back to the default conversation "
+                    "playbook (type=%s persona=%s, meta_playbook unspecified) — "
+                    "自律系 Pulse は器を明示すること",
+                    pulse_type, getattr(persona, "persona_id", None),
+                )
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         # Build effective args: auto-include user_input as "input" if not explicitly set
         effective_args = dict(args or {})
@@ -2258,8 +2271,10 @@ class SEARuntime:
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
         """Resolve playbook by kind with DB→disk→fallback.
 
-        kind="user" のみサポート。auto pulse は必ず meta_playbook 指定で
-        run_meta_user 経由で実行されるため、ここに来ることはない。
+        kind="user" のみサポート。auto 系 Pulse は meta_playbook 指定で走るのが
+        不変条件だが、未指定のままここへ落ちる呼び出しは**存在しうる** —
+        run_meta_user 側が pulse_type を見て WARNING を出す (散文の不変条件は
+        破られても無音だった実績あり、autonomous_pulse_vehicle.md §D)。
 
         対ユーザー会話の Pulse は UserConversationTrackHandler が事前に
         対ユーザー Track を running 化 + Track コンテキストを注入してから

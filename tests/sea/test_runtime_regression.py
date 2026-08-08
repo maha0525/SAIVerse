@@ -359,3 +359,53 @@ def test_lg_stelis_nodes_manage_thread_state() -> None:
     assert state["stelis_chronicle"] == "summary"
     assert active_calls == ["child-thread", "parent-thread"]
 
+
+
+def test_non_user_pulse_without_meta_playbook_warns(caplog) -> None:
+    """自律系 (非 user) Pulse が meta_playbook 未指定で既定の会話 Playbook に
+    落ちるとき WARNING が出る (席違いフォールバックの機械検査、
+    autonomous_pulse_vehicle.md §D)。禁止はしない — 実行自体は続く。"""
+    import logging
+
+    runtime, persona = _runtime_and_persona()
+    persona.history_manager.add_to_persona_only = Mock()
+    playbook = SimpleNamespace(name="track_user_conversation", start_node="exec", context_requirements=None)
+    runtime._choose_playbook = Mock(return_value=playbook)
+    runtime._prepare_context = Mock(return_value=[])
+    runtime._compile_with_langgraph = Mock(return_value=["ok"])
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
+
+    with caplog.at_level(logging.WARNING, logger="sea.runtime"):
+        result = runtime.run_meta_user(
+            persona=persona, user_input="situation", building_id="b1",
+            pulse_type="schedule",
+        )
+
+    assert result == ["ok"]
+    assert any(
+        "fell back to the default conversation playbook" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_user_pulse_without_meta_playbook_does_not_warn(caplog) -> None:
+    """通常のユーザー会話 (pulse_type='user') の既定 Playbook 解決は正規経路 —
+    警告を出さない。"""
+    import logging
+
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="track_user_conversation", start_node="exec", context_requirements=None)
+    runtime._choose_playbook = Mock(return_value=playbook)
+    runtime._prepare_context = Mock(return_value=[])
+    runtime._compile_with_langgraph = Mock(return_value=["ok"])
+    runtime.session_lifecycle.maybe_run_metabolism = Mock()
+
+    with caplog.at_level(logging.WARNING, logger="sea.runtime"):
+        runtime.run_meta_user(
+            persona=persona, user_input="hello", building_id="b1",
+        )
+
+    assert not any(
+        "fell back to the default conversation playbook" in rec.getMessage()
+        for rec in caplog.records
+    )

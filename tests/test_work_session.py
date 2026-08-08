@@ -697,3 +697,46 @@ def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):
     assert flush_calls == [], (
         "ネスト中の Beat で知覚を消費してはいけない (セッション頭・周の切れ目とも)"
     )
+
+
+def test_life_profile_no_episode_and_permissive_instruction(session_factory, persona):
+    """暮らしプロファイル (autonomous_pulse_vehicle.md §A): 出来事を開かず、
+    指示の包みは許可形 — 作業セッションの指示書・義務形ルールを含まない。"""
+    from database.models import Episode
+
+    responses = ["静かな時間だ。届いたものを眺めよう。"]  # spell なし → 自然終了
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = run_work_session(
+            "p1", "出かけて、「カフェ」に来ました。", 1,
+            manager=manager, profile="life",
+        )
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert result.rounds_used == 0
+    # 出来事は開かない (コマ発火の kind='presence' が実行区間の記録を持つ)
+    assert result.episode_ref is None
+    db = session_factory()
+    try:
+        assert db.query(Episode).count() == 0
+    finally:
+        db.close()
+    # 指示の包み: 状況文がそのまま入り、作業の指示書・義務形ルールは無い
+    instruction_msg = client.calls[0][-1]["content"]
+    assert "出かけて、「カフェ」に来ました。" in instruction_msg
+    assert "指示書" not in instruction_msg
+    assert "作業してください" not in instruction_msg
+    assert "必要はありません" in instruction_msg  # 生産義務を課さない許可形
+    # 器は作業コマと同じ WORKER ライン (モデル階層とスペルゲートの前提)
+    assert runtime.selected_aspects == [Aspect.WORKER]
+
+
+def test_invalid_profile_returns_error_result(session_factory, persona):
+    """profile の不正値は raise しない契約どおり error 結果に落ちる。"""
+    manager, runtime, client = _make_env(session_factory, persona, ["x"])
+    result = run_work_session("p1", "状況", 1, manager=manager, profile="nope")
+    assert result.ended_reason == ENDED_ERROR
+    assert "profile" in (result.error or "")

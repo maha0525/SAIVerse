@@ -152,6 +152,7 @@ def run_work_session(
     track_id: Optional[str] = None,
     title: Optional[str] = None,
     close_hook: Optional[Callable[[SessionCloseContext], None]] = None,
+    profile: str = "work",
 ) -> WorkSessionResult:
     """指示書とラウンド予算を渡して作業セッションを 1 本運転する。
 
@@ -176,6 +177,12 @@ def run_work_session(
             まま) に一度だけ呼ばれる締めの一手 (:class:`SessionCloseContext`
             を受ける)。コマ締めの帰属判定 + 経験値ノート (T4) の注入点。
             フックの失敗はセッションの結果を壊さない (WARNING + スキップ)。
+        profile: ``"work"`` (既定) / ``"life"``。運転機構は同一で、暮らし
+            プロファイル (autonomous_pulse_vehicle.md) は次の 2 点だけ変わる:
+            指示書の包みが許可形 (作業ルール・成果義務を課さない) になり、
+            kind='work_session' の出来事を開かない (コマ発火が開いた
+            kind='presence' が実行区間の記録を既に持つため)。予算・締めの
+            有無は既存パラメータ (budget_rounds / close_hook) で表現する。
 
     Returns:
         WorkSessionResult。例外は握り潰さず LOGGER に記録した上で
@@ -212,6 +219,8 @@ def run_work_session(
             raise ValueError("instruction must be a non-empty string")
         if not isinstance(budget_rounds, int) or budget_rounds < 1:
             raise ValueError(f"budget_rounds must be a positive int (got {budget_rounds!r})")
+        if profile not in ("work", "life"):
+            raise ValueError(f"profile must be 'work' or 'life' (got {profile!r})")
 
         personas = getattr(manager, "personas", {}) or {}
         persona = personas.get(persona_id)
@@ -236,9 +245,12 @@ def run_work_session(
         # コマ発火から呼ばれた場合、開いている kind='slot' の出来事が「出自」。
         # コマ外 (直接呼び出し) では task_ref を出自として残す。出来事は記録
         # 専用でセッションの運転には影響しない — 失敗は WARN のみ。
-        episode_ref = _open_ws_episode(
-            manager, persona_id, building_id, task_ref=task_ref, title=title,
-        )
+        # 暮らしプロファイルは開かない: コマ発火が開いた kind='presence' が
+        # 実行区間の記録を既に持ち、二重の出来事は経験台帳の読みを濁す。
+        if profile == "work":
+            episode_ref = _open_ws_episode(
+                manager, persona_id, building_id, task_ref=task_ref, title=title,
+            )
 
         # ---- PulseContext + WORKER ライン ----
         pulse_id = str(uuid.uuid4())
@@ -317,9 +329,14 @@ def run_work_session(
                 context_meta=_context_meta,
                 persona_voiced=True,
             )
-            instruction_content = _build_instruction_message(
-                str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
-            )
+            if profile == "life":
+                instruction_content = _build_life_instruction_message(
+                    str(instruction).strip(), budget_rounds
+                )
+            else:
+                instruction_content = _build_instruction_message(
+                    str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
+                )
             messages: List[Dict[str, Any]] = list(base_messages)
             messages.append({"role": "user", "content": instruction_content})
 
@@ -369,8 +386,9 @@ def run_work_session(
 
             # ---- 初回 LLM 呼び出し ----
             LOGGER.info(
-                "[work_session] start: persona=%s budget=%d task_ref=%s track_id=%s pulse_id=%s",
-                persona_id, budget_rounds, task_ref, track_id, pulse_id,
+                "[work_session] start: persona=%s profile=%s budget=%d task_ref=%s "
+                "track_id=%s pulse_id=%s",
+                persona_id, profile, budget_rounds, task_ref, track_id, pulse_id,
             )
             initial_result = llm_client.generate(
                 messages,
@@ -665,6 +683,27 @@ def _build_instruction_message(
     )
 
 
+def _build_life_instruction_message(situation: str, budget_rounds: int) -> str:
+    """暮らしプロファイルの状況提示 (autonomous_pulse_vehicle.md §A)。
+
+    作業の指示書と違い、目的・成果義務・作業ルールを課さない。許可形のみで
+    書く (義務形は充填独白 v1 を呼び戻す — timetable_redesign §5.5)。
+    形式は :func:`_build_instruction_message` と同じ「user role + <system>」。
+    """
+    spell_line = (
+        f"気になったことがあればスペルを使ってもかまいません（最大 {budget_rounds} 回）。"
+        if budget_rounds > 0 else ""
+    )
+    return (
+        "<system>"
+        f"{situation}\n"
+        "この時間の過ごし方は自由です。目に入るもの・流れてきたものを眺めて、"
+        "感じたことがあればそのまま書き留めておけます。何かを作ったり成果を"
+        f"出したりする必要はありません。{spell_line}\n"
+        "</system>"
+    )
+
+
 def _extract_text(result: Any) -> str:
     """LLM client の generate 戻り値 (str または dict) から text を取り出す。"""
     if isinstance(result, dict):
@@ -681,11 +720,13 @@ def _record_llm_usage(
     persona: Any,
     building_id: str,
     node_type: str,
+    playbook_name: str = WORK_SESSION_PLAYBOOK_NAME,
 ) -> None:
     """LLM 1 コール分の usage を計上する (usage_tracker + Pulse accumulator)。
 
     sea/runtime_llm.py の spell-retry usage 計上と同じ形。usage が無い
-    (mock クライアント等) 場合は no-op。
+    (mock クライアント等) 場合は no-op。tell スペルの 1 Beat
+    (builtin_data/tools/tell.py) も同じ器で計上する — playbook_name だけ変わる。
     """
     usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
     if not usage:
@@ -701,7 +742,7 @@ def _record_llm_usage(
         persona_id=persona_id,
         building_id=building_id,
         node_type=node_type,
-        playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+        playbook_name=playbook_name,
         category="persona_speak",
     )
     from sea.runtime_llm import _maybe_record_cache_storage

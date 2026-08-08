@@ -1,14 +1,15 @@
 """出かける / 自室で過ごす / 自由時間 コマの実行本体 (時間割改修 T3) のテスト。
 
-T1 の honest stub (presence 記録のみ) を置き換えた「実移動 + 一回の軽い一手
-Pulse」の検証。Pulse は schedule 型経路 (PulseDispatcher.dispatch_schedule_fire)
-のスタブで受け、LLM は呼ばない:
+暮らしコマのコマ開始の Pulse はセッション運転の暮らしプロファイル
+(autonomous_pulse_vehicle.md §A) で走る。テストでは
+``sea.work_session.run_work_session`` を記録スタブに差し替え、LLM は呼ばない:
 
 - 出かける: facility 確定ならそこへ / 穴 (own_room) なら公共施設から決定論で
-  選ぶ (own_room 除外・選んだ行き先の slot 永続化)。移動は実発生。Pulse が
-  起動できなければ presence_only の正直記録に縮退する
-- 自室で過ごす: own_room へ移動 + Pulse。文面は場所と状況の提示のみで義務形
-  (「〜してください」) を含まない — 充填独白の禁忌 (v2 §2.1) の回帰検査
+  選ぶ (own_room 除外・選んだ行き先の slot 永続化)。移動は実発生。セッションが
+  走れなければ presence_only の正直記録に縮退する
+- 自室で過ごす: own_room へ移動 + 暮らしセッション。状況文は場所と状況の提示
+  のみで義務形 (「〜してください」) を含まない — 充填独白の禁忌 (v2 §2.1) の
+  回帰検査
 - 自由時間: 開始時に本人が軽量構造化出力で選び、選んだ種別のハンドラへ委譲。
   選択失敗は自室で過ごす相当へ縮退 (WARNING)。作業セッション系へ委譲したら
   実測ラウンドを予算台帳へ積算する
@@ -62,22 +63,27 @@ def _reset_clock():
     clock.disable_virtual()
 
 
-class StubDispatcher:
-    """PulseDispatcher.dispatch_schedule_fire の型付き戻り値スタブ。"""
+class StubLifeSession:
+    """``run_work_session`` (暮らしプロファイル) の記録スタブ。"""
 
     def __init__(self):
         self.calls: List[Dict[str, Any]] = []
-        self.result: Dict[str, Any] = {
-            "action": "execute", "runtime_outcome": "completed", "error": None,
-        }
+        self.result: Any = SimpleNamespace(
+            ended_reason="finished", rounds_used=1, artifacts=[], error=None,
+        )
 
-    def dispatch_schedule_fire(self, **kwargs):
-        self.calls.append(kwargs)
-        return dict(self.result)
+    def __call__(self, persona_id, instruction, budget_rounds, *args, **kwargs):
+        self.calls.append({
+            "persona_id": persona_id,
+            "instruction": instruction,
+            "budget_rounds": budget_rounds,
+            **kwargs,
+        })
+        return self.result
 
 
 @pytest.fixture
-def manager(session_factory):
+def manager(session_factory, monkeypatch):
     """day_plan の T3 ハンドラが触る実属性のみの SAIVerseManager スタブ。
 
     buildings にロールタグ付きの公共施設 2 つ (cafe / library) と、タグなしの
@@ -118,6 +124,8 @@ def manager(session_factory):
             return True, "ok"
 
     personas = {PERSONA_ID: persona}
+    stub = StubLifeSession()
+    monkeypatch.setattr("sea.work_session.run_work_session", stub)
     return SimpleNamespace(
         SessionLocal=session_factory,
         personas=personas,
@@ -129,7 +137,7 @@ def manager(session_factory):
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない
         track_manager=TrackManager(session_factory=session_factory),
-        pulse_dispatcher=StubDispatcher(),
+        life_session=stub,
     )
 
 
@@ -144,7 +152,7 @@ def _save_single_slot(manager, kind: str, facility: str, **over) -> Dict[str, An
 
 
 def _pulse_text(manager, i: int = 0) -> str:
-    return manager.pulse_dispatcher.calls[i]["user_input"]
+    return manager.life_session.calls[i]["instruction"]
 
 
 # ---------------------------------------------------------------------------
@@ -153,21 +161,24 @@ def _pulse_text(manager, i: int = 0) -> str:
 
 
 def test_outing_fixed_facility_moves_and_pulses(manager):
-    """facility 確定の出かけるコマ: 確定先へ実移動し、軽い一手 Pulse が一回走る。"""
+    """facility 確定の出かけるコマ: 確定先へ実移動し、暮らしセッションが一回走る。"""
     _save_single_slot(manager, "出かける", "cafe")
     day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
     # 実移動 (presence) は本物
     assert manager.occupancy_manager.moves == [(PERSONA_ID, "ai", OWN_ROOM, "cafe")]
-    # Pulse は一回。文面は場所の提示のみ (表示名で書かれる)
-    assert len(manager.pulse_dispatcher.calls) == 1
+    # セッションは一回。文面は場所の提示のみ (表示名で書かれる)
+    assert len(manager.life_session.calls) == 1
     text = _pulse_text(manager)
     assert "出かけて" in text
     assert "カフェ" in text
     assert "ください" not in text  # 行動・発話の義務を課さない (充填独白の禁忌)
-    call = manager.pulse_dispatcher.calls[0]
-    assert call["building_id"] == "cafe"  # 移動後の現在地で Pulse
-    assert call["metadata"]["source"] == "day_plan_slot"
+    call = manager.life_session.calls[0]
+    # 暮らしプロファイル: 予算 1・締めなし (autonomous_pulse_vehicle.md §A)
+    assert call["profile"] == "life"
+    assert call["budget_rounds"] == 1
+    assert call["close_hook"] is None
+    assert call["metadata"]["day_plan"]["kind"] == "出かける"
 
     # Pulse が走ったので presence_only は付かない (「実行済み」表示が正直)
     slot = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]
@@ -192,7 +203,7 @@ def test_outing_hole_picks_public_facility_excluding_own_room(manager):
     assert slot["facility"] == expected
     assert slot["status"] == "done"
     assert "record_level" not in slot
-    assert len(manager.pulse_dispatcher.calls) == 1
+    assert len(manager.life_session.calls) == 1
 
 
 def test_outing_destination_resolution_is_deterministic(manager):
@@ -206,9 +217,11 @@ def test_outing_destination_resolution_is_deterministic(manager):
     assert first["facility"] in ("cafe", "library")  # own_room は選ばれない
 
 
-def test_outing_without_pulse_dispatcher_degrades_to_presence_only(manager):
-    """Pulse が起動できない環境 (dispatcher 無し) は presence_only の正直記録。"""
-    del manager.pulse_dispatcher
+def test_outing_session_error_degrades_to_presence_only(manager):
+    """セッションがエラー終了 (ended_reason='error') → presence_only の正直記録。"""
+    manager.life_session.result = SimpleNamespace(
+        ended_reason="error", rounds_used=0, artifacts=[], error="RuntimeError: boom",
+    )
     _save_single_slot(manager, "出かける", "cafe")
     day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
@@ -219,11 +232,9 @@ def test_outing_without_pulse_dispatcher_degrades_to_presence_only(manager):
     assert slot["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
 
 
-def test_outing_pulse_not_started_degrades_to_presence_only(manager):
-    """dispatch は返ったが Pulse が起動していない (関所閉鎖等) → presence_only。"""
-    manager.pulse_dispatcher.result = {
-        "action": "skipped", "runtime_outcome": None, "error": None,
-    }
+def test_outing_session_none_degrades_to_presence_only(manager):
+    """セッションが結果を返さない防御分岐 (None) も presence_only へ落ちる。"""
+    manager.life_session.result = None
     _save_single_slot(manager, "出かける", "cafe")
     day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
     slot = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]
@@ -303,7 +314,7 @@ def test_stay_home_moves_home_and_pulses_with_permissive_wording(manager):
     day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
     assert manager.occupancy_manager.moves == [(PERSONA_ID, "ai", "cafe", OWN_ROOM)]
-    assert len(manager.pulse_dispatcher.calls) == 1
+    assert len(manager.life_session.calls) == 1
     text = _pulse_text(manager)
     assert "自室で過ごす" in text
     # desire への積み込みは許可形 (intent §5.5「積んでいい」)。義務形は禁忌
@@ -316,8 +327,10 @@ def test_stay_home_moves_home_and_pulses_with_permissive_wording(manager):
     assert "record_level" not in slot
 
 
-def test_stay_home_without_pulse_dispatcher_degrades_to_presence_only(manager):
-    del manager.pulse_dispatcher
+def test_stay_home_session_error_degrades_to_presence_only(manager):
+    manager.life_session.result = SimpleNamespace(
+        ended_reason="error", rounds_used=0, artifacts=[], error="RuntimeError: boom",
+    )
     _save_single_slot(manager, "自室で過ごす", "own_room")
     day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
     slot = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]
@@ -475,9 +488,11 @@ def test_free_choice_delegation_degrades_when_budget_empty(manager):
     ) as run_ws:
         day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
 
-    run_ws.assert_not_called()  # 作業セッションは走らない
+    # 作業セッションは走らない — 走ったのは自室縮退の暮らしセッション 1 回だけ
+    # (統合後は縮退先も run_work_session を通るため、呼び出しゼロではなく
+    # 「work プロファイルの呼び出しが無い」ことを検査する)
+    assert run_ws.call_count == 1
+    assert run_ws.call_args.kwargs.get("profile") == "life"
+    assert "自室で過ごす" in run_ws.call_args.args[1]
     state = day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)
     assert state["remaining"] == 0  # 消費もされない
-    # 自室縮退の Pulse (自室で過ごす文面) が走っている
-    assert len(manager.pulse_dispatcher.calls) == 1
-    assert "自室" in _pulse_text(manager)

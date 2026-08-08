@@ -325,7 +325,7 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
 
     def fake_run_work_session(persona_id, instruction, budget_rounds, task_ref=None,
                               metadata=None, *, manager=None, track_id=None,
-                              title=None, close_hook=None):
+                              title=None, close_hook=None, profile="work"):
         calls.append({
             "at": clock.now(),
             "persona_id": persona_id,
@@ -334,6 +334,7 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
             "task_ref": task_ref,
             "metadata": metadata,
             "title": title,
+            "profile": profile,
         })
         return _mock_work_session_result(rounds_used=budget_rounds)
 
@@ -346,7 +347,10 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
         total = sim.run()
 
     assert total == 3
-    assert len(calls) == 2  # 自室で過ごす は run_work_session を呼ばない
+    # 統合後は「自室で過ごす」も run_work_session を通る (暮らしプロファイル)
+    assert len(calls) == 3
+    assert [c["profile"] for c in calls] == ["work", "work", "life"]
+    assert calls[2]["budget_rounds"] == 1  # 暮らしは予算 1 の一手
 
     # 調べる (9:00): 仮想時刻・指示書・予算・task_ref
     learn = calls[0]
@@ -376,13 +380,13 @@ def test_three_slots_fire_in_virtual_time_order(manager, task_refs):
         (PERSONA_ID, "ai", "workshop", "alice_room"),
     ]
 
-    # status 更新: 全コマ done。自室で過ごす (スタブ) には「詳細な実行記録なし」の
-    # マーカーが付き、セッションを実際に運転した作業コマには付かない
+    # status 更新: 全コマ done。統合後は自室で過ごすも暮らしセッションが実際に
+    # 走る (fake が finished を返す) ため、presence_only マーカーは付かない
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["status"] for s in slots] == ["done", "done", "done"]
     assert "record_level" not in slots[0]
     assert "record_level" not in slots[1]
-    assert slots[2]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+    assert "record_level" not in slots[2]
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +651,12 @@ def test_reschedule_pending_slots_is_idempotent(manager, task_refs):
             end=BASE + timedelta(hours=24),
         ).run()
 
-    assert mock_ws.call_count == 1  # 調べる 1 回のみ (二重発火しない)
+    # 統合後は「自室で過ごす」も run_work_session (暮らしプロファイル) を通る。
+    # 冪等性の検査対象は「同じコマの二重発火が無い」こと — 調べる (work) 1 回
+    # + 自室 (life) 1 回のちょうど 2 回で、どちらも重複しない。
+    assert mock_ws.call_count == 2
+    profiles = [c.kwargs.get("profile", "work") for c in mock_ws.call_args_list]
+    assert sorted(profiles) == ["life", "work"]
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert [s["status"] for s in slots] == ["done", "done"]
 

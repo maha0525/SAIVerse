@@ -956,19 +956,23 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
         "sleep": "21:00",
         "user_events": [{"type": "absent_all_day"}],
     })
-    manager = _make_manager(session_factory, tmp_path, _idle_judge, [])
+    # 暮らしコマ 2 つ (出かける/自室で過ごす) が各 1 Beat の独白を書く
+    # (統合後の暮らしプロファイル — autonomous_pulse_vehicle.md §A)
+    manager = _make_manager(session_factory, tmp_path, _idle_judge, [
+        "静かな場所だ。ゆっくり眺めよう。",
+        "今日は何も無い日だった。それでいい。",
+    ])
     created: List[str] = []
     p_names, p_exec = _patched_spells(session_factory, created)
 
     with p_names, p_exec:
         result = ScenarioPlayer().run(manager, scenario)
 
-    # day_open + コマ 2 (出かける/自室で過ごす) + day_close = 4。LLM は一度も
-    # 呼ばれない (軽い一手 Pulse はこのスタブに pulse_dispatcher が無いため
-    # 起動できず、presence_only の正直記録に落ちる — T3 の fail-open)
+    # day_open + コマ 2 (出かける/自室で過ごす) + day_close = 4。LLM は
+    # 暮らしコマの 1 Beat ずつ、計 2 回だけ呼ばれる (成果義務なしの独白)
     assert result.executed_events == 4
     assert [j["kind"] for j in result.judgments] == ["day_open", "day_close"]
-    assert manager._session_llm.calls == 0
+    assert manager._session_llm.calls == 2
     assert created == []
 
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
@@ -983,10 +987,9 @@ def test_absent_all_day_with_empty_backlog(session_factory, tmp_path):
     # レポートは穴なく出る (データの無い節は「（なし）」)
     report = generate_day_report(manager, PERSONA_ID, PLAN_DATE)
     assert "の一日新聞 — 2026-07-04" in report
-    # Pulse の起動できなかったコマは「実行済み」でなく「時間を過ごした（詳細な
-    # 記録なし）」— していない活動の詳細をペルソナに捏造させない (異常 #4 回帰)
-    assert f"| 10:00 | 静かに過ごす | 時間を過ごした（詳細な記録なし） | 出かける ／ {dest_label} ／ 静かな時間 |" in report
-    assert "| 20:00 | 自室で過ごす | 時間を過ごした（詳細な記録なし） | 自分の部屋 |" in report  # title なし → kind 代替
+    # 統合後は暮らしコマも 1 Beat が実際に走る (fake 応答あり) ため「実行済み」
+    assert f"| 10:00 | 静かに過ごす | 実行済み | 出かける ／ {dest_label} ／ 静かな時間 |" in report
+    assert "| 20:00 | 自室で過ごす | 実行済み | 自分の部屋 |" in report  # title なし → kind 代替
     assert "## 作業セッションの成果" in report
     assert "（なし）" in report
     assert "明日の自分へのメモ: 明日も同じように" in report

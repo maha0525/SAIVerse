@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 135（うち Spell 化: 91）
+**登録ツール数**: 136（うち Spell 化: 92）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -91,6 +91,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `searxng_search` | Search the web via SearXNG and return concise results. | `query*`: string, `max_results`: integer, `category`: string, `engines`: string, `language`: string, `safe`: integer | — |
 | `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
+| `tell` | Speak out loud to someone here, in your own voice. Specify who it is for: 'user' (the user), 'all' (everyone in this … | `target*`: string, `gist`: string | 声をかける |
 | `track_abort` | Abort a track without completion. Use when giving up on the work. Persistent core tracks (user_conversation, social) … | `track_id*`: string | トラック中止 |
 | `track_activate` | Activate a track (set its status to 'running'). If another track was running, it is automatically moved to 'pending'.… | `track_id*`: string | トラック起動 |
 | `track_complete` | Mark a running track as 'completed'. The track must be currently running. Persistent core tracks (user_conversation, … | `track_id*`: string | トラック完了 |
