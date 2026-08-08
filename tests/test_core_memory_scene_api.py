@@ -501,6 +501,86 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertEqual(self._pending_perceptions(), [])
         self.assertEqual(self._count_flush_messages("S5例外"), 1)
 
+    # ------------------------------------------------------------------
+    # Codex レビュー #2 (2026-08-08): 「書き終えたのに pending が残った」回の
+    # 再試行で、同じ知覚が二度 SAIMemory へ入らないこと。
+    # ------------------------------------------------------------------
+
+    def test_embedding_failure_after_commit_still_returns_message_id(self):
+        # 埋め込みは行の commit 後に作る派生物 — その失敗を「保存できなかった」
+        # として None で返すと、呼び出し側が保存済みの行を書き直しに来る。
+        self.adapter.push_perception("world_state", "埋め込み失敗検証: 行は入る")
+        with patch.object(
+            self.adapter.embedder, "embed", side_effect=RuntimeError("cuda oom"),
+        ) as embed_mock:
+            payload = self.adapter.flush_perception_buffer_payload()
+        self.assertTrue(embed_mock.called)  # 埋め込みを本当に通っている
+        # 保存は成功扱い → 本体が返り、pending も消える (二度書きの機会が無い)
+        self.assertIsNotNone(payload)
+        self.assertIn("埋め込み失敗検証", payload["content"])
+        self.assertEqual(self._count_flush_messages("埋め込み失敗検証"), 1)
+        self.assertEqual(self._pending_perceptions(), [])
+
+    def _commit_then_lose_id(self):
+        """行は commit されるのに mid が失われる append の再現。
+
+        「書けたか不明」で pending を残す経路 (SEA 監査 S5) をなぞる — その
+        再試行が二度書きにならないことを確かめるための仕掛け。
+        """
+        real = self.adapter.append_persona_message
+
+        def _wrapper(message, **kwargs):
+            real(message, **kwargs)
+            return None
+
+        return patch.object(
+            self.adapter, "append_persona_message", side_effect=_wrapper,
+        )
+
+    def test_flush_does_not_duplicate_when_id_lost_after_commit(self):
+        self.adapter.push_perception("world_state", "重複検証: 行は残った")
+        with self._commit_then_lose_id():
+            self.assertFalse(self.adapter.flush_perception_buffer())
+        # 呼び出し側には失敗として届くので pending は残る (S5) が、行は在る
+        self.assertEqual(self._count_flush_messages("重複検証"), 1)
+        self.assertEqual(len(self._pending_perceptions()), 1)
+        # 次の Beat 頭: 書き終えている分と見分けて、削除だけやり直す
+        self.assertFalse(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._count_flush_messages("重複検証"), 1)
+        self.assertEqual(self._pending_perceptions(), [])
+
+    def test_flush_delivers_payload_then_cleans_up_when_delete_fails(self):
+        # ローカルレビューの保留と同根: append 済み・delete 失敗。書き出しは
+        # 成功しているので本体は返し (その Beat で読める)、pending の後始末は
+        # 次の Beat 頭へ回す — 書き直しはしない。
+        self.adapter.push_perception("world_state", "削除失敗検証: 消えなかった")
+        with patch(
+            "sai_memory.perception_buffer.delete_perceptions",
+            side_effect=RuntimeError("delete down"),
+        ):
+            payload = self.adapter.flush_perception_buffer_payload()
+        self.assertIsNotNone(payload)
+        self.assertIn("削除失敗検証", payload["content"])
+        self.assertEqual(self._count_flush_messages("削除失敗検証"), 1)
+        self.assertEqual(len(self._pending_perceptions()), 1)
+        # 次の Beat 頭: 書き直さず削除だけやり直す (差し込みは済んでいるので None)
+        self.assertFalse(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._count_flush_messages("削除失敗検証"), 1)
+        self.assertEqual(self._pending_perceptions(), [])
+
+    def test_flush_after_interrupted_flush_still_delivers_new_perceptions(self):
+        # 後始末が新しい知覚を巻き添えにしない (裏返しの失敗の検査)。
+        self.adapter.push_perception("world_state", "中断分: 書き終えた知覚")
+        with self._commit_then_lose_id():
+            self.assertFalse(self.adapter.flush_perception_buffer())
+        self.adapter.push_perception("world_state", "新着分: まだ書いていない知覚")
+        self.assertEqual(len(self._pending_perceptions()), 2)
+
+        self.assertTrue(self.adapter.flush_perception_buffer())
+        self.assertEqual(self._pending_perceptions(), [])
+        self.assertEqual(self._count_flush_messages("中断分"), 1)   # 書き直さない
+        self.assertEqual(self._count_flush_messages("新着分"), 1)   # 届く
+
 
 if __name__ == "__main__":
     unittest.main()

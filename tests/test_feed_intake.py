@@ -1896,6 +1896,62 @@ class FeedDeliveryTest(unittest.TestCase):
         self.assertEqual(len(self._pending()), 0)
         self.assertIsNone(self._cursor())
 
+    def test_delivery_serialized_per_persona(self):
+        """#3-(ii) 回帰: 定期サイクル (worker スレッド) と入室配送 (移動した
+        スレッド) が同じペルソナへ並走しても、カーソルの読み〜commit〜投入が
+        交錯しない — ペルソナ単位の配送ロックで直列化される。"""
+        self._seed_items(2)
+        persona = self.fake.personas[self.PERSONA_ID]
+        entered = threading.Event()   # サイクル側が配送本体に入った
+        release = threading.Event()   # そこで待たせておく解除
+        real_deliver = self.fm._deliver_subscription_to_persona
+        # 止めるのは最初に入った 1 回 (= サイクル側) だけ。二人目まで止めると
+        # 「配送ロックで待っている」のか「この仕掛けで待っている」のか区別が
+        # つかず、ロックを外しても通るテストになる。
+        blocked_once: list = []
+        gate = threading.Lock()
+
+        def _blocking_deliver(**kwargs):
+            with gate:
+                is_first = not blocked_once
+                blocked_once.append(True)
+            if is_first:
+                entered.set()
+                release.wait(timeout=10)
+            return real_deliver(**kwargs)
+
+        entry_result: list = []
+        with patch.object(
+            self.fm, "_deliver_subscription_to_persona",
+            side_effect=_blocking_deliver,
+        ):
+            cycle = threading.Thread(target=self.fm.deliver_new_items)
+            cycle.start()
+            self.addCleanup(release.set)  # 失敗しても待ちスレッドを残さない
+            self.assertTrue(entered.wait(timeout=10))
+
+            entry = threading.Thread(
+                target=lambda: entry_result.append(
+                    self.fm.deliver_unread_on_entry(persona, BUILDING_ID)
+                ),
+            )
+            entry.start()
+            entry.join(timeout=0.5)
+            # サイクルが配送中の間、入室配送はロック待ちで何も配れていない
+            self.assertTrue(entry.is_alive())
+            self.assertEqual(len(self._pending()), 0)
+
+            release.set()
+            cycle.join(timeout=10)
+            entry.join(timeout=10)
+            self.assertFalse(cycle.is_alive())
+            self.assertFalse(entry.is_alive())
+
+        # 記事は一度だけ届く (入室配送はカーソル前進後なので空振り)
+        self.assertEqual(len(self._pending()), 2)
+        self.assertEqual(entry_result, [0])
+        self.assertEqual(self._cursor().LAST_ITEM_ID, 2)
+
     def test_pending_limit_blocks_delivery_and_cursor(self):
         """F5: 未消費の feed 知覚が上限以上なら投入もカーソル前進もしない。"""
         for i in range(10):  # 既定上限 (SAIVERSE_FEED_MAX_PENDING=10) まで積む

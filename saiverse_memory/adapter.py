@@ -501,6 +501,80 @@ class SAIMemoryAdapter:
                 return True
         return False
 
+    #: 知覚の消費 (flush) で event_message の metadata に刻む冪等キー。値は
+    #: この消費で書き出した知覚 id の配列。
+    #:
+    #: append の行 commit と perception_buffer の delete は別 commit なので、
+    #: その間で失敗すると「SAIMemory には在るのに pending も残る」状態になる
+    #: (delete 自体の失敗 / 二つの commit の間でのプロセス死)。次の flush は
+    #: この刻印だけを手がかりに「もう書いた分」を見分けられる — 無ければ同じ
+    #: 知覚をもう一度 event_message として書く (Codex レビュー #2, 2026-08-08。
+    #: 当時はもう一つ、行の commit 後の embedding 失敗が「保存失敗」として
+    #: 返る経路があり、これが最も頻度の高い供給源だった — そちらは
+    #: _append_message 側で塞いだ)。
+    #:
+    #: 前提: **flush は Beat の内側でしか呼ばれない** (Pulse 頭 = sea/runtime.py の
+    #: run_meta_user、ラウンド途中 = sea/runtime_llm.py のスペルループ。どちらも
+    #: beat_gate の persona 単位ロックを保持している)。だから「照合 → 書く →
+    #: 削る」の間に同じペルソナの別の flush は割り込まない。この照合はプロセスを
+    #: 跨ぐ排他ではないので、flush の呼び出し口を Beat の外や別プロセスへ増やす
+    #: なら、ここは DB 側の一意制約で claim する形に作り替えが要る。
+    PERCEPTION_IDS_META_KEY = "perception_ids"
+
+    #: 上の照合で遡る余裕 (秒)。知覚が積まれた時刻と、それを書き出した
+    #: event_message の時刻は別々の壁時計読み取りなので、NTP 補正等で時計が
+    #: 巻き戻ると「後で書いた行の方が古い」並びが起こりうる。余裕なしだと
+    #: そのとき照合が黙って空振りし、二度書きを止められない。
+    PERCEPTION_LOOKBACK_SLACK_SEC = 3600
+
+    def _already_written_perception_ids(self, items: list) -> set:
+        """``items`` のうち、既に SAIMemory へ書き終えている知覚 id を返す。
+
+        走査は「最古の未消費知覚が積まれた時刻 (− 余裕) 以降」に絞る — 中断した
+        flush の event_message は、それが書き出した知覚より後に書かれているので
+        この窓の中にいる。(resource_id, created_at) の索引に乗るため、通常
+        (中断が無い運転) は直近の数行しか読まない。
+
+        照会自体に失敗したときは空集合 = 「重複ガードなしで従来どおり書く」。
+        知覚を届けないより、壊れた DB での二重書き込みを受ける (fail-open)。
+        """
+        if not items:
+            return set()
+        cutoff = (
+            min(int(it.created_at) for it in items)
+            - self.PERCEPTION_LOOKBACK_SLACK_SEC
+        )
+        try:
+            with self._db_lock:
+                rows = self.conn.execute(
+                    "SELECT metadata FROM messages "
+                    "WHERE resource_id = ? AND created_at >= ? AND metadata LIKE ?",
+                    (
+                        self.settings.resource_id,
+                        cutoff,
+                        f"%{self.PERCEPTION_IDS_META_KEY}%",
+                    ),
+                ).fetchall()
+        except Exception:
+            LOGGER.warning(
+                "[perception_buffer] could not look up already-written "
+                "perceptions; proceeding without the duplicate guard",
+                exc_info=True,
+            )
+            return set()
+        written: set = set()
+        for row in rows:
+            try:
+                meta = json.loads(row[0]) if row[0] else None
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            ids = meta.get(self.PERCEPTION_IDS_META_KEY)
+            if isinstance(ids, list):
+                written.update(i for i in ids if isinstance(i, int))
+        return written
+
     def flush_perception_buffer(self) -> bool:
         """未消費の知覚を型別 reduce して 1 メッセージで SAIMemory へ書き出す (Beat 消費)。
 
@@ -520,6 +594,9 @@ class SAIMemoryAdapter:
         消費 (sea/runtime_llm.py の spell ループ) は、この戻り値をそのまま
         作業中の messages に append して「SAIMemory に書いた内容」と「続きの
         生成が見る内容」を一致させる。
+
+        再試行の冪等性: 直前の消費が「書き出し済み・削除未達」で中断していた
+        分は、書き直さず削除だけやり直す (PERCEPTION_IDS_META_KEY 参照)。
         """
         if not self._ready:
             return None
@@ -533,6 +610,37 @@ class SAIMemoryAdapter:
             items = list_pending(self.conn)
         if not items:
             return None
+        # 中断した flush の後始末: SAIMemory へ書き終えているのに pending に
+        # 残っている分は、削除だけやり直して今回の書き出しからは外す
+        # (二度書かない = PERCEPTION_IDS_META_KEY の役目)。
+        written = self._already_written_perception_ids(items)
+        if written:
+            stale_ids = [it.id for it in items if it.id in written]
+            items = [it for it in items if it.id not in written]
+            LOGGER.warning(
+                "[perception_buffer] %d item(s) were already written to "
+                "SAIMemory by an interrupted flush; deleting them without "
+                "re-appending (ids=%s)", len(stale_ids), stale_ids,
+            )
+            try:
+                with self._db_lock:
+                    delete_perceptions(self.conn, stale_ids)
+            except Exception:
+                # 削除できなくても書き直しはしない (今回の対象から外し済み)。
+                # 次の Beat 頭で同じ後始末をやり直す。
+                LOGGER.warning(
+                    "[perception_buffer] could not delete already-written "
+                    "item(s); retrying the cleanup at the next Beat head",
+                    exc_info=True,
+                )
+            if not items:
+                # 新しく書き出すものは無いので None (呼び出し側は何も差し込ま
+                # ない)。ここへ来る並びでは、後始末した知覚は**既にペルソナの
+                # 目に入っている**: 削除だけ失敗した回は書き出した本体を呼び出し
+                # 側へ返して差し込み済み、プロセスが落ちた回は再起動後の提示
+                # コンテキスト構築が SAIMemory から読む。改めて差し込むと、
+                # 後者で同じ通知が二度見えることになる。
+                return None
         reduced = reduce_perceptions(items)
         text = format_perception_message(reduced)
         # reduce 後の全知覚の添付メディア (画像等) を集約して 1 メッセージに載せる。
@@ -551,7 +659,12 @@ class SAIMemoryAdapter:
         # tz-aware UTC ISO 必須 (naive だと system TZ 解釈で ±9h ずれる)。
         # event_message = Track 横断メタログ (origin_track_id は付けない)。
         from datetime import datetime, timezone
-        metadata: dict = {"tags": ["internal", "event_message", "perception"]}
+        metadata: dict = {
+            "tags": ["internal", "event_message", "perception"],
+            # 冪等キー: この消費で買い取った知覚 id (reduce で畳まれて本文に
+            # 出なかった分も、delete の対象なので全部刻む)。
+            self.PERCEPTION_IDS_META_KEY: [it.id for it in items],
+        }
         if media:
             metadata["media"] = media
         message = {
@@ -571,18 +684,31 @@ class SAIMemoryAdapter:
             )
             return None
         if not mid:
-            # _append_message は DB/embedding 例外を内部で握って None を返す
-            # (= 通常の保存失敗は例外として届かない)。message id が取れて
-            # いない = commit されていないので、pending を保持して次 Beat で
-            # 再試行する (SEA 監査 S5: None を成功扱いすると知覚が不可逆に
-            # 消える)。
+            # _append_message は DB 例外を内部で握って None を返す (= 通常の
+            # 保存失敗は例外として届かない)。None は「行が入らなかった」の意味
+            # なので、pending を保持して次 Beat で再試行する (SEA 監査 S5:
+            # None を成功扱いすると知覚が不可逆に消える)。行の commit 後に
+            # embedding が落ちた回はここへ来ない — 保存は成功として id が返る
+            # (2026-08-08 に _append_message 側で分離。それ以前はここへ落ちて、
+            # 再試行が同じ知覚の二度書きになっていた)。
             LOGGER.warning(
                 "[perception_buffer] flush append returned no message id; "
                 "keeping %d item(s) for retry", len(items),
             )
             return None
-        with self._db_lock:
-            delete_perceptions(self.conn, [it.id for it in items])
+        try:
+            with self._db_lock:
+                delete_perceptions(self.conn, [it.id for it in items])
+        except Exception:
+            # 書き出しは成功している。ここで例外を投げると、呼び出し側は
+            # 「書けたのに受け取れない」= その Beat では知覚を見られない。
+            # pending は残るが、次の Beat 頭の後始末 (冒頭の照合) が
+            # 書き直さずに削除だけやり直すので、二度書きにはならない。
+            LOGGER.warning(
+                "[perception_buffer] flush wrote the message but could not "
+                "clear %d item(s); cleanup deferred to the next Beat head",
+                len(items), exc_info=True,
+            )
         return {"content": message["content"], "media": media}
 
     # ------------------------------------------------------------------
@@ -2635,6 +2761,10 @@ class SAIMemoryAdapter:
         step can later promote the row from ``scope='discardable'`` to
         ``'committed'`` without re-querying. Legacy callers ignoring the
         return value are unaffected.
+
+        ``None`` は「行が入らなかった」ときだけ返す。行の commit 後に作る
+        埋め込みの失敗は WARN のみで、id は返す (2026-08-08) — 派生物の失敗を
+        保存の失敗として返すと、呼び出し側が保存済みの行を書き直しに来る。
         """
         if not self._ready:
             return None
@@ -2701,15 +2831,28 @@ class SAIMemoryAdapter:
                     spell_seq=spell_seq,
                 )
                 if (not skip_embedding) and content and content.strip() and self.embedder is not None:
-                    chunks = chunk_text(
-                        content,
-                        min_chars=self.settings.chunk_min_chars,
-                        max_chars=self.settings.chunk_max_chars,
-                    )
-                    payload = [c.strip() for c in chunks if c and c.strip()]
-                    if payload:
-                        vectors = self.embedder.embed(payload, is_query=False)
-                        replace_message_embeddings(self.conn, mid, vectors)
+                    # 埋め込みは**行の commit 後に作る派生物**。ここの失敗を
+                    # 「メッセージを保存できなかった」として None で返すと、
+                    # 呼び出し側は保存済みの行をもう一度書きに来る (知覚バッファ
+                    # の消費で実際に起きた二重書き込みの根 — Codex レビュー #2)。
+                    # 行が入った事実は正直に返し、失われるのは検索用の索引だけに
+                    # とどめる (再作成は reembed API で可能)。
+                    try:
+                        chunks = chunk_text(
+                            content,
+                            min_chars=self.settings.chunk_min_chars,
+                            max_chars=self.settings.chunk_max_chars,
+                        )
+                        payload = [c.strip() for c in chunks if c and c.strip()]
+                        if payload:
+                            vectors = self.embedder.embed(payload, is_query=False)
+                            replace_message_embeddings(self.conn, mid, vectors)
+                    except Exception as embed_exc:
+                        LOGGER.warning(
+                            "SAIMemory message %s stored but embedding failed "
+                            "(building=%s): %s", mid, building_id, embed_exc,
+                            exc_info=True,
+                        )
             LOGGER.debug(
                 "SAIMemory upserted message=%s thread=%s role=%s", mid, thread_id, role
             )

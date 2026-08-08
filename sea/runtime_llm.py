@@ -2141,6 +2141,17 @@ async def _run_spell_loop(
             # 保持深さ 1 = このスレッドが最外周保持者のときだけ。gate の無い
             # テスト環境では無条件)。失敗は WARN で続行 — 知覚は永続バッファに
             # 残り、次の Beat 頭で再試行される。
+            #
+            # ⚠️ 既知の縮退 (Codex レビュー #1 の裁定, 2026-08-08): held_depth は
+            # スレッドローカルなので、「呼び出し元に running loop がある」
+            # レガシー分岐 (runtime_graph.py の executor 退避) では深さ 0 =
+            # 消費が飛ぶ。直上の boundary も同じ条件で no-op になる分岐で、
+            # 「所有が確認できない Beat では動かない」保守則にこちらを揃えた
+            # 意図的な形 (beat_execution_context.md §3.4 末尾の実測帰結 —
+            # 主要経路は同一スレッド)。実害はその分岐で本改修が効かず旧挙動
+            # (次 Pulse の頭で消費) に戻ることだけで、直列性も知覚の生存も
+            # 壊れない。恒久解はロック所有をスレッドから実行トークンへ移す
+            # §6-6b (Beat ロックのトークン化) — そこへ合流させる。
             try:
                 _sai_mem = getattr(persona, "sai_memory", None)
                 # 部分構築の persona (テストの SimpleNamespace 等) は消費なし —

@@ -616,14 +616,57 @@ def test_beat_head_perception_flush_injected(session_factory, persona):
     assert payloads == []
 
 
+def test_session_start_consumes_perceptions_before_context(session_factory, persona):
+    """作業セッションの開始も Beat の頭 — コンテキストを組む前に知覚を消費する。
+
+    周の切れ目 (_run_spell_loop) だけに消費点があると、スペルの無い応答では
+    セッション中ずっと消費されず、開始時点で届いていた「移動先の様子」や
+    フィードの未読が最初の生成に入らない (Codex レビュー 2026-08-08)。
+
+    ここで固定するのは**消費と組成の順序**だけ (この呼び出し点が負う契約)。
+    「書き出した event_message が続く履歴読みに載る」ことはこのフェイク
+    ランタイム (_prepare_context が定型を返す) では確かめられない — そちらは
+    Pulse 頭の消費 (sea/runtime.py) と同じ経路で、知覚がペルソナへ届く道その
+    ものなので実運用で成立している。
+    """
+    events: List[str] = []
+    persona.sai_memory = SimpleNamespace(
+        get_current_thread=lambda: "p1:persona_main",
+        flush_perception_buffer=lambda: events.append("flush") or True,
+    )
+    # スペル無しの応答 1 回 = 周が一度も成立しない運転
+    manager, runtime, client = _make_env(session_factory, persona, ["調べ終えた。"])
+
+    orig_prepare = runtime._prepare_context
+
+    def _recording_prepare(*args, **kwargs):
+        events.append("prepare_context")
+        return orig_prepare(*args, **kwargs)
+
+    runtime._prepare_context = _recording_prepare
+
+    result = _run(manager, budget=2)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert events == ["flush", "prepare_context"], (
+        "セッション頭の消費がコンテキスト組成より先に一度だけ走ること"
+    )
+
+
 def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):
     """子ライン相当 (beat_gate の保持深さが 1 でない) では Beat 頭の知覚消費を
-    行わない — 子は親 Beat の一部 (beat_execution_context.md §3.4)。"""
+    行わない — 子は親 Beat の一部 (beat_execution_context.md §3.4)。
+
+    セッション頭 (run_work_session) と周の切れ目 (_run_spell_loop) の両方の
+    消費点が同じ規則に従うこと。"""
     flush_calls: List[int] = []
     persona.sai_memory = SimpleNamespace(
         get_current_thread=lambda: "p1:persona_main",
+        flush_perception_buffer=(
+            lambda: flush_calls.append("session_head") or True
+        ),
         flush_perception_buffer_payload=(
-            lambda: flush_calls.append(1) or None
+            lambda: flush_calls.append("round_boundary") or None
         ),
     )
     responses = [
@@ -651,4 +694,6 @@ def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):
         result = _run(manager, budget=3)
 
     assert result.ended_reason == ENDED_FINISHED
-    assert flush_calls == [], "ネスト中の Beat で知覚を消費してはいけない"
+    assert flush_calls == [], (
+        "ネスト中の Beat で知覚を消費してはいけない (セッション頭・周の切れ目とも)"
+    )

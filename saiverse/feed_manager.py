@@ -171,6 +171,16 @@ class FeedManager:
         # 永続化に値する状態ではない)。書き込みは取得サイクル worker のみ
         # (同時 1 本 — _start_worker が保証) なので lock 不要。
         self._cycle_first_sub_id: Optional[str] = None
+        # 配送の直列化点 (ペルソナ単位)。配送の書き手は定期サイクル worker
+        # だけではなくなった — 入室配送 (deliver_unread_on_entry) が移動した
+        # スレッドから同じペルソナへ走る。既読カーソルの「読み → commit →
+        # 知覚投入」は原子ではないので、並走すると両者が同じカーソル値を
+        # 読んで同じ記事を二度届けうる (Codex レビュー #3-(ii), 2026-08-08)。
+        # 粒度をペルソナにするのは、pending 予算 (max_pending) もペルソナ単位
+        # の共有資源で、購読単位のロックでは守れないため。
+        # 辞書はペルソナ数ぶんしか増えない (世界の住人は有界)。
+        self._delivery_locks: Dict[str, threading.Lock] = {}
+        self._delivery_locks_guard = threading.Lock()
 
     @staticmethod
     def _read_interval_env() -> int:
@@ -877,6 +887,15 @@ class FeedManager:
                 )
         return delivered_total
 
+    def _delivery_lock_for(self, persona_id: str) -> threading.Lock:
+        """このペルソナへの配送を直列化するロック (無ければ作る)。"""
+        with self._delivery_locks_guard:
+            lock = self._delivery_locks.get(persona_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._delivery_locks[persona_id] = lock
+            return lock
+
     def _deliver_subs_to_persona(
         self,
         *,
@@ -891,8 +910,34 @@ class FeedManager:
 
         定期サイクル (deliver_new_items) と入室配送 (deliver_unread_on_entry) が
         共有する配送本体。既読カーソルが唯一の台帳なので、両者が重なっても
-        同じ記事は一度しか届かない。
+        同じ記事は一度しか届かない — ただし**両者が同時に走らないこと**が
+        その前提。カーソルの「読み → commit → 知覚投入」は原子ではないため、
+        ペルソナ単位のロックで配送を直列化する (__init__ の _delivery_locks)。
+        待たされるのは同じペルソナへの配送だけで、他のペルソナへの配送は
+        並走したまま。ロック内で外部 I/O (記事取得) はしない — DB と知覚
+        バッファの書き込みだけなので、保持時間は有界。
         """
+        with self._delivery_lock_for(persona_id):
+            return self._deliver_subs_to_persona_locked(
+                persona=persona,
+                persona_id=persona_id,
+                building_id=building_id,
+                subs=subs,
+                max_items=max_items,
+                max_pending=max_pending,
+            )
+
+    def _deliver_subs_to_persona_locked(
+        self,
+        *,
+        persona: Any,
+        persona_id: str,
+        building_id: str,
+        subs: List[Dict[str, str]],
+        max_items: int,
+        max_pending: int,
+    ) -> int:
+        """_deliver_subs_to_persona の本体 (配送ロック保持中に呼ばれる)。"""
         # 退室者への誤配送の再確認は購読ごと・カーソル commit 直前に
         # 行う (_deliver_subscription_to_persona 内)。
         adapter = getattr(persona, "sai_memory", None)

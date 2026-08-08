@@ -270,6 +270,34 @@ def run_work_session(
         from sea.runtime_llm import _parse_spell_lines, _run_spell_loop
 
         with hold_beat(manager, persona_id, purpose="work_session"):
+            # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2) ----
+            # 作業セッションの開始も Beat の頭。直前の移動で届いた「移動先の
+            # 様子」やフィードの未読を、最初の生成が見るコンテキストに入れる。
+            # ここで SAIMemory へ書き出してから _prepare_context を組むので、
+            # 続く履歴読みが自然に拾う (run_meta_user と同じ並び — こちらは
+            # 作業中コンテキストへの差し込みが要らない)。周の切れ目の消費
+            # (_run_spell_loop) だけでは、スペルの無い応答や spell 無効の
+            # ペルソナでセッション中ずっと消費されない (Codex レビュー、
+            # 2026-08-08)。子ライン相当の入れ子では消費しない (§4.2 (a):
+            # 子は親 Beat の一部)。失敗は WARN で続行 — 知覚は永続バッファに
+            # 残り、次の Beat 頭で再試行される。
+            try:
+                _gate = getattr(manager, "beat_gate", None)
+                _outermost = (
+                    _gate is None
+                    or not persona_id
+                    or _gate.held_depth(persona_id) == 1
+                )
+                _sai_mem = getattr(persona, "sai_memory", None)
+                _flush_fn = getattr(_sai_mem, "flush_perception_buffer", None)
+                if _outermost and _flush_fn is not None:
+                    _flush_fn()
+            except Exception:
+                LOGGER.warning(
+                    "[work_session] Beat-head perception flush failed for %s; "
+                    "continuing", persona_id, exc_info=True,
+                )
+
             # ---- context: 通常のペルソナ文脈 (head + 会話履歴) + 指示書 ----
             # 作業セッションの出力はペルソナ本人の発話・思考として記録される
             # (assistant role + session_digest / post_session 判断の材料) ため、
