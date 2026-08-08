@@ -15,6 +15,10 @@
 - **世界の状態に触らない**: 会話エピソードを開かない・Track に触らない・
   無応答タイムアウトを装填しない。返事はユーザーの通常入力が既存機構で
   会話を開く (「喋る」と「会話が始まる」は別の出来事)。
+- **親 Beat の内側で走る**: スペルとして唱えられる以上、関所も Beat ロックも
+  親 (会話 Pulse / セッション) が済ませている。ここで ``hold_beat`` を取り
+  直してはいけない — 冗長なだけでなく、executor スレッドへ逃げた spell
+  ループから取ると永久ブロックする (:func:`tell` 内のコメント参照)。
 """
 from __future__ import annotations
 
@@ -102,104 +106,183 @@ def tell(target: str, gist: str = "") -> str:
 
     # 会話中の相手への tell は実行しない (返答との二重発話の防止)。
     # 会話中でも別の相手 (同席ペルソナ / all) への一言は正当なので許す。
+    # 会話中か確認できなかったときは発声を見送る (fail-closed): 二重発話は
+    # ユーザーに届いてしまえば取り消せないが、見送りは次の機会に唱え直せる。
     if target_norm == TARGET_USER:
         try:
-            from saiverse.day_plan import is_in_user_conversation
-            if is_in_user_conversation(manager, persona_id):
-                return (
-                    "ユーザーとはいま会話の最中です。伝えたいことは、"
-                    "返答にそのまま書けば届きます。"
-                )
+            from saiverse.day_plan import get_user_conversation_state
+            conversation_state = get_user_conversation_state(manager, persona_id)
         except Exception:
-            LOGGER.warning("[tell] conversation check failed; continuing", exc_info=True)
+            LOGGER.warning("[tell] conversation check failed", exc_info=True)
+            conversation_state = None
+        if conversation_state is None:
+            return (
+                "いまユーザーと会話中かどうかを確認できませんでした。行き違いで"
+                "二重に話しかけないよう、今回は見送ります。時間をおいて試せます。"
+            )
+        if conversation_state:
+            return (
+                "ユーザーとはいま会話の最中です。伝えたいことは、"
+                "返答にそのまま書けば届きます。"
+            )
 
     runtime = getattr(manager, "sea_runtime", None)
     if runtime is None:
         return "声を出す仕組み (runtime) が利用できません。"
 
-    from sea.beat_gate import hold_beat
     from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
     from sea.work_session import _extract_text, _record_llm_usage
 
     pulse_id = str(uuid.uuid4())
     pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
     pulse_ctx.push_line(aspect=Aspect.CONVERSATION, track_id=None)
+    # 投函が済んだ後の失敗を「何も起きなかった」と報告しないための印。
+    # 声は取り消せないので、届いた後のエラーは「届いた + 記録で失敗」と返す。
+    delivered = False
     try:
         # CONVERSATION フレームが active な状態で解決 → 標準モデルが導出される
         # (aspect → tier の既存規則。ここが B 案の「構造で鉄則を守る」本体)。
         execution_context = resolve_execution_context(persona, pulse_ctx)
-        with hold_beat(manager, persona_id, purpose="tell"):
-            # 呼び出し元のセッション Beat の内側から唱えられた場合は再入
-            # (子 Beat 扱い)。知覚消費は最外 Beat の頭が担うのでここではしない。
-            messages = list(runtime._prepare_context(
-                persona, building_id, None, pulse_id=pulse_id,
-                model_key=execution_context.model_key,
-                persona_voiced=True,
-            ))
-            directive = _build_directive(target_display, (gist or "").strip())
-            messages.append({"role": "user", "content": directive})
 
-            state: Dict[str, Any] = {
-                "_pulse_id": pulse_id,
-                "_pulse_type": "tell",
-                "_pulse_context": pulse_ctx,
-                "_execution_context": execution_context,
-                "_messages": messages,
-            }
-            node_def = SimpleNamespace(id="tell_speech", memorize=None, speak=True)
-            llm_client, selected_model = runtime.select_llm_client(
-                node_def, persona, execution_context=execution_context, state=state,
-            )
-            if selected_model != execution_context.model_key:
-                execution_context = execution_context.with_model(selected_model)
-                state["_execution_context"] = execution_context
+        # ---- Beat ロックは取らない (beat_execution_context.md §2.2/§3.4) ----
+        # スペルは定義上つねに親 Beat (会話 Pulse / 作業・暮らしセッション) の
+        # 内側で唱えられる。関所も直列化も親が済ませており、子ラインは別 Beat
+        # ではなく親 Beat の一部 — ここで取り直すのは設計上も冗長。
+        # さらに実害がある: 同期スペルは常に executor スレッドで実行される
+        # (sea/runtime_llm.py の ``run_in_executor(None, _run)``。作業・暮らし
+        # セッションではその手前の spell ループ自体も別スレッドへ逃げる —
+        # sea/work_session._run_coro_sync)。RLock の再入は取得したスレッドで
+        # しか効かないため、別スレッドから取り直すと「親スレッドは結果待ち・
+        # ツールスレッドはロック待ち」で永久に固まる (Codex レビュー
+        # 2026-08-08 critical)。知覚消費も最外 Beat の頭が担う。
+        messages = list(runtime._prepare_context(
+            persona, building_id, None, pulse_id=pulse_id,
+            model_key=execution_context.model_key,
+            persona_voiced=True,
+        ))
+        directive = _build_directive(target_display, (gist or "").strip())
+        messages.append({"role": "user", "content": directive})
 
-            pulse_ctx.append(PulseLogEntry(
-                role="user", content=directive,
-                node_id="tell_directive", playbook_name=_PLAYBOOK_NAME,
-            ))
-            result = llm_client.generate(
-                messages,
-                tools=[],
-                temperature=runtime._default_temperature(persona),
-                **runtime._get_cache_kwargs(persona_id),
-            )
-            _record_llm_usage(
-                runtime, state, llm_client, persona, building_id,
-                "llm_tell", playbook_name=_PLAYBOOK_NAME,
-            )
-            text = _extract_text(result).strip()
-            try:
-                runtime._dump_llm_io(_PLAYBOOK_NAME, "tell_speech", persona, messages, text)
-            except Exception:
-                LOGGER.warning("[tell] failed to dump LLM I/O", exc_info=True)
-            if not text:
-                return "言葉が出てきませんでした (生成が空)。もう一度試せます。"
-
-            tell_meta: Dict[str, Any] = {"tell_target": target_norm}
-            if gist and gist.strip():
-                tell_meta["tell_gist"] = gist.strip()
-            # 投函: Building 履歴 + UI + TTS/Unity (既存の発話経路がそのまま効く)
-            runtime._emit_say(
-                persona, building_id, text, pulse_id=pulse_id, metadata=dict(tell_meta),
-            )
-            # 本人の記憶にも発話として残す (CONVERSATION フレーム下 = committed)
-            runtime._store_memory(
-                persona, text, role="assistant",
-                pulse_id=pulse_id, metadata=dict(tell_meta),
-                playbook_name=_PLAYBOOK_NAME, pulse_context=pulse_ctx,
-            )
-            pulse_ctx.append(PulseLogEntry(
-                role="assistant", content=text,
-                node_id="tell_speech", playbook_name=_PLAYBOOK_NAME,
-            ))
-        LOGGER.info(
-            "[tell] delivered: persona=%s building=%s target=%s len=%d",
-            persona_id, building_id, target_norm, len(text),
+        state: Dict[str, Any] = {
+            "_pulse_id": pulse_id,
+            "_pulse_type": "tell",
+            "_pulse_context": pulse_ctx,
+            "_execution_context": execution_context,
+            "_messages": messages,
+        }
+        node_def = SimpleNamespace(id="tell_speech", memorize=None, speak=True)
+        llm_client, selected_model = runtime.select_llm_client(
+            node_def, persona, execution_context=execution_context, state=state,
         )
+        if selected_model != execution_context.model_key:
+            execution_context = execution_context.with_model(selected_model)
+            state["_execution_context"] = execution_context
+
+        pulse_ctx.append(PulseLogEntry(
+            role="user", content=directive,
+            node_id="tell_directive", playbook_name=_PLAYBOOK_NAME,
+        ))
+        result = llm_client.generate(
+            messages,
+            tools=[],
+            temperature=runtime._default_temperature(persona),
+            **runtime._get_cache_kwargs(persona_id),
+        )
+        _record_llm_usage(
+            runtime, state, llm_client, persona, building_id,
+            "llm_tell", playbook_name=_PLAYBOOK_NAME,
+        )
+        text = _extract_text(result).strip()
+        try:
+            runtime._dump_llm_io(_PLAYBOOK_NAME, "tell_speech", persona, messages, text)
+        except Exception:
+            LOGGER.warning("[tell] failed to dump LLM I/O", exc_info=True)
+        if not text:
+            return "言葉が出てきませんでした (生成が空)。もう一度試せます。"
+
+        tell_meta: Dict[str, Any] = {"tell_target": target_norm}
+        if gist and gist.strip():
+            tell_meta["tell_gist"] = gist.strip()
+        # 投函: Building 履歴 + UI + TTS/Unity (既存の発話経路がそのまま効く)。
+        # **ここを呼んだ時点で「言ってしまった」**— `_emit_say` は履歴の保存に
+        # 失敗しても gateway (Discord 等) と Unity へは送る (sea/runtime_emitters.py
+        # の emit_say: gateway 送信と unity 通知は insert の成否を見ない)。
+        # したがって戻り値から分かるのは「届いたか」ではなく **「この場の記録に
+        # 残ったか」**だけ。記録の成否によらず本人の記憶には残す — 自分が言った
+        # ことを知らないまま次を喋ると、同じ話を二度することになる。
+        emitted = runtime._emit_say(
+            persona, building_id, text, pulse_id=pulse_id, metadata=dict(tell_meta),
+        )
+        delivered = True
+        # 記録に残った印は **message_id の有無**。dict が返ったこと自体は証拠に
+        # ならない — `HistoryManager.add_to_building_only` は DB insert が失敗
+        # しても渡した dict をそのまま返す (`building_msg or for_insert`)。
+        # message_id は DB 採番なので insert が通ったときにしか付かない。既存の
+        # 消費者 (sea/runtime.py の say イベント / sea/runtime_llm.py の
+        # `_last_message_id`) も同じ印で判定している。
+        emitted_id = emitted.get("message_id") if isinstance(emitted, dict) else None
+        if not emitted_id:
+            LOGGER.error(
+                "[tell] utterance went out but was not persisted to the building "
+                "history (persona=%s building=%s target=%s)",
+                persona_id, building_id, target_norm,
+            )
+        # Pulse ログ (監査記録) は記憶の保存より先に積む — 記憶の保存が例外を
+        # 投げると、後ろに置いた append は実行されず「何を言ったか」の記録だけが
+        # 欠ける (指示文だけが残る)。
+        pulse_ctx.append(PulseLogEntry(
+            role="assistant", content=text,
+            node_id="tell_speech", playbook_name=_PLAYBOOK_NAME,
+        ))
+        # 本人の記憶に発話として残す (CONVERSATION フレーム下 = committed)。
+        # ``return_message_id=True`` で受ける — 既定の bool 戻り値は例外が
+        # 出なければ True になり、SAIMemory adapter が None を返す静かな
+        # 挿入失敗 (sea/runtime.py `_store_memory` の insert 経路) を成功と
+        # 取り違える。id が返ったことだけが行の存在の証拠。
+        stored_id = runtime._store_memory(
+            persona, text, role="assistant",
+            pulse_id=pulse_id, metadata=dict(tell_meta),
+            playbook_name=_PLAYBOOK_NAME, pulse_context=pulse_ctx,
+            return_message_id=True,
+        )
+        LOGGER.info(
+            "[tell] spoken: persona=%s building=%s target=%s len=%d "
+            "history=%s memory=%s",
+            persona_id, building_id, target_norm, len(text),
+            bool(emitted_id), bool(stored_id),
+        )
+        if not emitted_id:
+            # 記録に残らなかった = 相手に届いたかどうかも確かめられない。
+            # 外への配送 (gateway / Unity) は履歴と別経路で走るうえ、宛先が
+            # 繋がっていない構成では黙って no-op になる — 「届いた」とも
+            # 「届いていない」とも言えない。断定せず、判断の材料だけ返す。
+            return (
+                f"「{target_display}」への声は、この場の履歴に残せませんでした。"
+                "相手に届いたかどうかも確認できません。もう一度言うと二重に"
+                "聞こえるおそれがあるので、繰り返すかは慎重に決めてください。"
+            )
+        if not stored_id:
+            # 記録には残ったが本人の記憶に入らなかった。次の文脈に出てこない
+            # ので、繰り返さないよう本人に伝える。
+            LOGGER.error(
+                "[tell] spoken but not stored in SAIMemory "
+                "(persona=%s target=%s)", persona_id, target_norm,
+            )
+            return (
+                f"「{target_display}」に声は届きましたが、自分の記憶には"
+                "残せませんでした。同じ話を繰り返さないよう気をつけてください。"
+            )
         return f"「{target_display}」に声をかけました。"
     except Exception:
         LOGGER.exception("[tell] failed (persona=%s target=%s)", persona_id, target)
+        if delivered:
+            # 投函の後で転んだ。声はもう出したあとなので「かけられません
+            # でした」は嘘になる (届いた話をもう一度しに行かせてしまう)。
+            return (
+                f"「{target_display}」へ声を出したあと、記録の途中で内部エラーが"
+                "起きました。届いているかもしれないので、繰り返すかは慎重に"
+                "決めてください。"
+            )
         return "声をかけられませんでした (内部エラー)。時間をおいて試せます。"
     finally:
         try:

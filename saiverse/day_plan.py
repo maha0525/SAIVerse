@@ -1851,18 +1851,27 @@ def consume_life_pulse(
     *,
     at_time: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """標準パルス 1 回をその時刻が属するライフの予算へ積算する
-    (life.md v0.5 §5.3/§8.2)。
+    """自発活動 1 回をその時刻が属するライフの予算へ積算する
+    (life.md §5.3/§8.2、2026-08-08 追補で単位を改訂)。
 
-    予算が数えるのは **実際に標準 (DEFAULT_MODEL) の LLM が呼ばれた瞬間**
-    だけ (v0.5 の設計原理 4/§5.3)。コマの発火 (開始時刻が来ただけ) や判断点
-    (起床・会話終了・セッション終了・イベント・就寝) の発火はこの関数を
-    呼ばない — 判断点の回数は別枠 (:func:`record_judgment_pulse`) で観測する。
+    予算が数えるのは **ペルソナが自分から動いた 1 回** — 利用者向けの意味は
+    「その日の自発活動の回数 (used / budget)」。
 
-    現段階でこの関数を呼ぶ実体は無い (暮らし Pulse 未実装。life.md §5.2-1・
-    §11.2・§12-4「実装前にまはーレビュー必須」)。台帳プリミティブとして
-    先に用意しておき、暮らし Pulse 実装時にそこから呼ぶ想定。lives が無い日
-    / パルス時刻がどのライフにも属さない場合は no-op (None、後方互換)。
+    **現在この関数を呼ぶ実体は :func:`_run_slot_life_session` 1 つだけ**
+    (暮らしコマ = 出かける / 自室で過ごす、1 コマ 1 消費)。器の統合
+    (autonomous_pulse_vehicle.md §A) で暮らしの一手は WORKER アスペクト =
+    軽量モデルになったが、計上単位はコマのまま維持している — 利用者が数えて
+    いるのは呼ばれたモデルの階層ではなく活動の回数だから。作業セッション系
+    コマは今のところラウンド台帳 (:func:`consume_life_rounds`) にしか計上
+    されず、``used_pulses`` へは入らない (life.md §5.3「数える予定 (未実装)」)。
+
+    数えないもの: コマの発火そのもの (開始時刻が来ただけで AI を呼ばない
+    presence 記録・移動・keep-alive) と、判断点 (起床・会話終了・セッション
+    終了・イベント・就寝) の発火 — 判断点の回数は別枠
+    (:func:`record_judgment_pulse`) で観測する。
+
+    lives が無い日 / パルス時刻がどのライフにも属さない場合は no-op
+    (None、後方互換)。
 
     Args:
         plan_date: 省略時は現在時刻が属する営業日を自己解決する
@@ -3540,8 +3549,38 @@ def replace_day_plan(
 # ---------------------------------------------------------------------------
 
 
+def get_user_conversation_state(manager: Any, persona_id: str) -> Optional[bool]:
+    """ユーザー会話中か。**読めなかったときは None** (不明) を返す三値版。
+
+    :func:`is_in_user_conversation` の実装本体。判定そのものはここ 1 つに保つ
+    (下の docstring 参照)。「不明」を「会話していない」へ丸めるかは呼び出し側の
+    判断なので、丸めない生の答えをここが返す:
+
+    - 既定の呼び出し側 (時間割・判断点) は fail-open で構わない — 会話でない
+      前提で自律を進めても、取り返しのつかない出来事は起きない
+    - ユーザーへ声を出す側 (tell スペル) は fail-closed にする — 会話中に
+      重ねて話しかける失敗は届いた後では取り消せない
+    """
+    try:
+        from saiverse import episodes
+
+        ep = episodes.get_open_episode(
+            manager, persona_id, kind=episodes.KIND_CONVERSATION,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] get_open_episode failed (persona=%s); conversation state unknown",
+            persona_id, exc_info=True,
+        )
+        return None
+    return ep is not None
+
+
 def is_in_user_conversation(manager: Any, persona_id: str) -> bool:
     """ユーザー会話中か。開いている kind='conversation' の出来事があれば True。
+
+    読み取りに失敗したときは False (fail-open)。不明と「会話していない」を
+    区別したい呼び出し側は :func:`get_user_conversation_state` を使う。
 
     **「いま会話中か」を判定したい全ての箇所はこの関数を使うこと** (2026-07-29 公開化)。
     running Track の種別を見る旧判定が `judgment_points.build_on_event_situation_text`
@@ -3554,19 +3593,7 @@ def is_in_user_conversation(manager: Any, persona_id: str) -> bool:
     user_conversation 種別か) は、Track がもう時間経過で pending に落ちない
     (running のまま残り続けうる) ため使えない。
     """
-    try:
-        from saiverse import episodes
-
-        ep = episodes.get_open_episode(
-            manager, persona_id, kind=episodes.KIND_CONVERSATION,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[day_plan] get_open_episode failed (persona=%s); treating as not in conversation",
-            persona_id, exc_info=True,
-        )
-        return False
-    return ep is not None
+    return get_user_conversation_state(manager, persona_id) is True
 
 
 def _building_display_name(manager: Any, building_id: Any) -> str:
@@ -5395,6 +5422,17 @@ def _run_slot_life_session(
         )
         _record_presence_only(manager, persona_id, plan_date_str, slot, index)
         return
+    # 暮らしコマは締め (close_hook) を持たないため、この間に作られた成果物は
+    # どのタスク・Track にも帰属しないまま残る。遮断はしない (「暮らしの中で
+    # 世界に触れてよい」は意図した自由) が、無帳簿で増えるのは見えるようにする
+    # — 帰属の器を暮らしにも付けるかは未裁定 (Codex レビュー 2026-08-08 #5)。
+    artifacts = list(getattr(result, "artifacts", None) or [])
+    if artifacts:
+        LOGGER.warning(
+            "[day_plan] life session produced artifacts with no attribution step "
+            "(persona=%s date=%s index=%d kind=%s artifacts=%s)",
+            persona_id, plan_date_str, index, slot.get("kind"), artifacts,
+        )
     try:
         consume_life_pulse(
             manager, persona_id, plan_date_str, at_time=slot.get("start"),

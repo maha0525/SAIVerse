@@ -60,6 +60,33 @@ meta_playbook 未指定の Pulse は無言で `track_user_conversation` に落�
   - 30 分待機の問題も半分溶ける: 「ペルソナが自分で開いた会話の返事待ち 30 分」は発生しなくなり、残るのは「実際の会話をいつ閉じるか」= [conversation_timeout_eats_short_life_window.md](conversation_timeout_eats_short_life_window.md) の本来の問いだけに純化される
 - 統合の設計詳細 (プロファイルの持ち方 = カタログの execution_type 統合か別フィールドか、記録の tag、発話の有無) は intent 起こしで詰める
 
+## レビュー消し込み (2026-08-09)
+
+実装コミット 4188082 に対するレビュー 2 巡の結果。1 巡目 (Codex 6 件) の裁定表は
+[ハンドオフ](../handoff/2026-08-08_autonomous_pulse_vehicle_handoff.md) §2、以下は消し込みの結果と、直さずに残した論点。
+
+**直したもの**:
+
+- **tell の Beat ロック撤去 (1 巡目 critical)** — スペルは親 Beat の内側で唱えられ、同期スペルは常に executor スレッドで実行される (`sea/runtime_llm.py` の `run_in_executor`)。RLock の再入は取得スレッドでしか効かないので、tell が取り直すと親スレッドと相互に待って固まる。回帰テストは実 BeatGate を親スレッドで保持したまま別スレッドから tell を呼ぶ形 (`tests/test_tell_spell.py`)
+- **投函の成否判定 (1 巡目 high → 2 巡目 high で判定の甘さを再指摘 → 3 巡目で判定の意味を訂正)** — Building 履歴は `message_id` の有無で判定する (`add_to_building_only` は DB insert 失敗でも渡した dict を返すため truthy 性は保存の証拠にならない)。SAIMemory は `return_message_id=True` で挿入 id を要求する (既定の bool は例外が無ければ True になり、adapter の静かな挿入失敗を拾えない)。**ただし `_emit_say` は履歴保存に失敗しても gateway (Discord 等) と Unity へは送るので、戻り値が示すのは「届いたか」ではなく「この場の記録に残ったか」**。よって記録の成否によらず本人の記憶には残し (自分の発言を知らないと同じ話を二度する)、記録の成否は結果文で分けて返す
+- **会話判定の fail-closed (1 巡目 medium)** — `day_plan.get_user_conversation_state` を三値 (True/False/None=不明) で新設し、tell だけ不明で見送る。既存の呼び出し側は `is_in_user_conversation` 経由で従来どおり fail-open
+- **ライフ予算の意味論 (1 巡目 high)** — life.md §5.3/§8.2 と `consume_life_pulse` の docstring を「自発活動の回数」へ。あわせて 2 巡目の指摘で「セッション系コマ内の標準パルスを数える」が**未実装**である事実 (現在 `used_pulses` を積むのは暮らしコマのみ、作業系はラウンド台帳) を明記
+- **暮らしセッションの成果物 (1 巡目 medium)** — 遮断せず WARN で観測可能に
+
+**直さずに残した論点** (実装せずここに記録):
+
+- **暮らしセッションの割り込み優先 (1 巡目 high)** — 受容。作業コマと同じ直接呼び出しで、会話の割り込みは PulseController でなく Beat 境界が担う契約。暮らしは予算 1 = 1 Beat なので待ちは最小。cancellation token の伝搬は作業コマ共通の将来課題
+- **ライフ予算の記帳失敗 (2 巡目 high)** — `consume_life_pulse` が例外で失敗しても WARN のみで、コマは done になる。結果は `used_pulses` の過少計上 (予算ゲートが後の活動を余分に通しうる)。記帳とコマ精算を単一の回復可能な状態機械にするのが正攻法だが、例外経路を精巧にする前に「そこまでの精度が要るか」がまはー裁定待ち。現状は WARN が観測点
+- **不明が続く間 tell が出せない (2 巡目 medium)** — fail-closed の裏返し。出来事の読みが壊れ続けると user 宛の tell は毎回見送られる (再送はしない)。ただし同室ペルソナ / all 宛は塞がないので「部屋で喋れない」状態にはならない。pending キューでの再送は 1 巡目 #2 で過剰装備として却下した outbox と同族なので採らない
+- **⚠️ 暮らしコマが標準モデルのキャッシュを温めなくなった (3 巡目で発覚、まはー裁定待ち)** — 器の統合で暮らしコマは WORKER アスペクト = 軽量モデルになった。[life.md](../intent/life.md) §5.2-1 は暮らしコマを「均等モードで標準キャッシュを繋ぐ第一の供給源」と位置づけていたので、その役割が抜けている (残るのは keep-alive touch だけ)。最低予算の式 `ceil(窓長/50 分)` も標準パルスがその間隔で撃たれる前提だった。方向は (a) 暮らしを標準アスペクトへ戻す (統合の利点と衝突) / (b) キャッシュ延命は keep-alive に任せ §5.2 の順位を書き換える / (c) 暮らしコマ内で標準を 1 回触る仕掛けを足す。コードは現状のまま、life.md §5.2 に注記済み
+- **tell の標準呼び出しを予算に数えるか** — まはー裁定待ち (現状は数えない)。暮らしコマから成果物が出たときの帰属も同様 (現状は WARN のみ。3 巡目は「禁止するか帰属記録を作れ」と踏み込んだが、暮らしで世界に触れる自由を残す方が本筋なので裁定待ちに置く)
+- **配送の成否は誰も知らない (4 巡目 high、まはー裁定待ち)** — `_emit_say` が返すのは履歴保存の結果だけで、外への配送 (gateway は mapping/runtime 不在で黙って return、Unity は gateway 不在で return、接続時も `create_task` で完了を待たない、TTS hook は message_id がある時だけ) の成否は戻ってこない。したがって tell は「届いた」と断定できない。現状は結果文を断定しない書き方に倒し (「届いたかどうかも確認できません」)、再送の可否はペルソナの判断に委ねている。正攻法は transport ごとの受理結果 (accepted / unknown / disabled) を emitter が返す契約だが、これは発話経路全体の作り替えなので別件
+- **記録の分裂 (4 巡目 high、上と同じ根)** — 履歴保存に失敗した発話も本人の記憶には committed で入るため、本人と Chronicle は「言った」、Building の共有履歴と他ペルソナの文脈には無い、という状態が起きうる。逆に記憶へ入れないと本人が二度言う。どちらも欠けのある選択で、現状は「二度言わせない」側を採った。pending 状態を作って head/Chronicle から除外するのは記憶基盤側の設計
+- **テストが実配送を通っていない (4 巡目 medium)** — 新規テストの `FakeRuntime._emit_say` は gateway も Unity も呼ばない。no-op 構成での挙動は fake の前提が代入されているだけで、実 emitter では検証していない。実 emitter + transport スタブのテストは、上の配送契約を決めてから書くのが順序
+- **`_flush_pulse_logs` の context 漏れ (4 巡目 medium、本件の外)** — SAIMemory adapter が使えないとき `sea/runtime.py` の `_flush_pulse_logs` は早期 return し、`_cleanup_pulse_context` を通らない。tell に限らず全呼び出し元で `runtime._pulse_contexts` に PulseContext が残り続ける
+- **同族の潜在欠陥 (本件の外)** — `HistoryManager.add_to_building_only` が insert 失敗時に `for_insert` を返す構造は、戻り値を見ない呼び出し側 (`sea/runtime_llm.py` の会話発話 3 箇所) では発話が履歴から静かに消えても誰も気づかないことを意味する。本件では tell 側で判定したが、所有者側 (履歴保存の成否を明示する戻り値) の整理は別件
+- **テストの実時刻依存 (消し込み中に踏んだ、本件の外)** — `tests/test_day_plan.py::test_downtime_recovery_handles_midnight_crossing` が実時刻 0 時台に走ると落ちる。原因はテスト側の順序: 仮想時計を入れる前に `save_lives` + `save_day_plan` を呼んでいたため、「ライフ宣言のある日は過去開始のコマを現在時刻へ丸める」正規化が**実時刻**で効き、23:00 のコマが 00:5x へ書き換わって検証の前提が壊れる。この 1 件は保存を仮想時計の下で行う形に直したが、同ファイルには `save_lives` → `save_day_plan` → `enable_virtual` の順で書かれたテストが他にもあり、同じ時間帯に落ちうる (未監査)
+
 ## 関連
 
 - [feed_arrival_pulse_cannot_see_articles.md](feed_arrival_pulse_cannot_see_articles.md) (この観測が出た検証) / [conversation_timeout_eats_short_life_window.md](conversation_timeout_eats_short_life_window.md) (②と同じ会話状態機構の隣接論点)

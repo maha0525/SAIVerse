@@ -19,6 +19,7 @@ manager スタブ)。
 """
 from __future__ import annotations
 
+import logging
 import random
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -336,6 +337,27 @@ def test_stay_home_session_error_degrades_to_presence_only(manager):
     slot = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]
     assert slot["status"] == "done"
     assert slot["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+
+
+def test_life_session_artifacts_are_warned_as_unattributed(manager, caplog):
+    """暮らしコマは締めを持たない = 成果物がどこにも帰属しない。
+
+    遮断はしない (暮らしの中で世界に触れる自由は意図的) が、無帳簿で増える
+    のは観測できる状態にしておく (Codex レビュー 2026-08-08 #5)。
+    """
+    manager.life_session.result = SimpleNamespace(
+        ended_reason="finished", rounds_used=1, artifacts=["item-7"], error=None,
+    )
+    _save_single_slot(manager, "自室で過ごす", "own_room")
+    with caplog.at_level(logging.WARNING, logger="saiverse.day_plan"):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("no attribution" in m and "item-7" in m for m in warnings), warnings
+    # 記録そのものは正常終了のまま (WARN は観測であって縮退ではない)
+    slot = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)[0]
+    assert slot["status"] == "done"
+    assert "record_level" not in slot
 
 
 # ---------------------------------------------------------------------------
