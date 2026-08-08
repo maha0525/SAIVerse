@@ -996,6 +996,11 @@ def test_downtime_recovery_handles_midnight_crossing(manager, task_refs):
     過去 (流れた)、00:45 の深夜帯コマは未来 (再 push)。時刻文字列の相対順序
     比較では 23:00 > 00:30 で未来と誤読していた。
     """
+    # 保存を仮想時計の下で行う。ライフ宣言のある日の save_day_plan は
+    # 「過去開始のコマを現在時刻へ丸める」正規化を通すため、実時刻のまま
+    # 保存すると 23:00 のコマが実行時の時刻へ書き換わる (実時刻が 0 時台の
+    # とき 23:00 → 00:5x になり、この検証の前提が壊れて落ちていた)。
+    clock.enable_virtual(BASE + timedelta(hours=22))  # 7/4 22:00 (両コマとも未来)
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "07:00", "end": "01:30", "budget_pulses": 20, "mode": "free"},
     ])
@@ -1005,7 +1010,7 @@ def test_downtime_recovery_handles_midnight_crossing(manager, task_refs):
         {"start": "00:45", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
-    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))  # 7/5 00:30
+    clock.advance_to(BASE + timedelta(days=1, minutes=30))  # 7/5 00:30
 
     pushed = day_plan.reschedule_pending_slots(
         manager, PERSONA_ID, PLAN_DATE, wake="07:00", downtime_recovery=True,
