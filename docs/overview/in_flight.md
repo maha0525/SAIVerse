@@ -95,6 +95,6 @@
 | 🟣 検証待ち | 編纂が同名ページを増やす輪の根治 | 再開の前提だった (a) 導線廃止・(b) 統合見出し廃止も実装済みで、書き手側の工事は出揃った。次 = まはーが編纂の再開を判断し、夜間の編纂一回分を実機で確認する。 | まはー (再開判断と実機検証) | [issue](../issues/curation_duplicate_pages_loop.md) / [handoff](../handoff/2026-08-05_curation_loop_and_fragment_shift.md) | 2026-08-06 |
 | 🟡 検証待ち | Memopedia 書き込みのロック漏れ (抽出器ほか) | 錠前を DB ファイルの持ち物にする工事まで完了。次 = まはーが実機で確認 (ログの `extraction-backlog` 行が整理のたびに出るか / 失敗を作って拾い直しが走るか、手順は issue の「実機で見ること」)。 | まはー (実機検証) | [issue](../issues/memopedia_writers_bypass_adapter_lock.md) / [handoff](../handoff/2026-08-06_sol_review_backlog_lock_findings.md) | 2026-08-06 |
 | 🟣 検証待ち | ZIP インストールの Git 自動導入 | コード実装済み (setup.bat の自動 git 導入 winget→PortableGit fallback / update 経路の PATH 通し / README 更新)。次 = クリーン Windows (git 未導入) での実機テスト — 次バージョンリリース時にまはーと一緒に確認。 | まはー(次リリース時 実機テスト) | [git_required_for_zip_install](../issues/git_required_for_zip_install.md) | 2026-07-19 |
-| 🟢 実装中 | v0.3.0 の門 (リリース範囲と実施順序) | 事前裁定はすべて解消し実行フェーズへ。次 = メティスが Wave 0 並行実装 (user 帰属付与・Building ID・畳み 1:1・混線分離・孤児 close・quick_spell・アラーム名称) と stale 掃除を消化。まはー側 = 実機検証の夜の再開と、設計議論一本目 (エピソードの単位) の開始。 | メティス (Wave 0) | [v030_release_gate.md](v030_release_gate.md) | 2026-08-09 |
+| 🟢 実装中 | v0.3.0 の門 (リリース範囲と実施順序) | 事前裁定はすべて解消し実行フェーズへ。実機検証は再設計後 (Wave 5) に集約する計画へ修正済み。次 = メティスが Wave 0 並行実装 (user 帰属付与・Building ID・畳み 1:1・混線分離・孤児 close・quick_spell・アラーム名称) と stale 掃除を消化。まはー側 = 設計議論一本目 (エピソードの単位) の開始。 | メティス (Wave 0) | [v030_release_gate.md](v030_release_gate.md) | 2026-08-09 |
 
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Track解体(目的の木), Social Track 入口(Phase 5) など -->
