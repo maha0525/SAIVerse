@@ -424,12 +424,15 @@ def _parse_spell_lines(content: str) -> List[Dict[str, Any]]:
     正準形式 ``/spell name='track_activate' args={"track_id": "t:3"}`` を解釈する。
     runtime の堅牢なパーサ (正準/fuzzy 両対応) に委譲して二重実装を避ける。
     戻り値: [{"name": "track_activate", "args": {"track_id": "t:3"}}]
+
+    ``ParsedSpell`` は属性で読む — 位置アンパックにすると runtime 側がフィールドを
+    足すたびに ValueError で黙って壊れる (実際 quick フィールド追加で退行した)。
     """
     from sea.runtime_llm import _parse_spell_lines as _runtime_parse
 
     return [
-        {"name": tool_name, "args": tool_args}
-        for tool_name, tool_args, _match, _normalized in _runtime_parse(content, quiet=True)
+        {"name": parsed.name, "args": parsed.args}
+        for parsed in _runtime_parse(content, quiet=True)
     ]
 
 
