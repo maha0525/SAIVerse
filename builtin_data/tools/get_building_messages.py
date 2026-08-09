@@ -48,6 +48,19 @@ def _open_episode_ref(manager: Any, persona_id: str) -> Optional[str]:
     sea/runtime._store_memory の層0タグと同じ構え: 記録専用で、解決失敗は
     転記を止めない。get_open_episode は per-persona キャッシュ持ちなので
     高頻度呼び出しでも DB を引かない。
+
+    **参照失敗でも転記を止めない (fail-open) — 2026-08-09 裁定。** 失敗した行の
+    帰属は再試行されず永久に欠けるが、それでもこちらを取る:
+
+    - 失敗しても *誤った* 帰属は生まれない。:func:`_stamp_layer0` は話し手から
+      継承した値を無条件に捨て、解決できたときだけ刻む。帰結は「タグが無い」
+      だけで、無帰属の行も編纂 (sea/eviction_plan) の畳みには入る。
+    - fail-closed (参照失敗でラウンドを止めて次周回に回す) にすると、
+      get_open_episode が恒常的に落ちる不具合を踏んだ日に、ペルソナがユーザーの
+      言葉を一切聞かなくなる。失う側が「タグ」から「会話」へ跳ね上がる。
+
+    失敗は WARNING で残す。ただしこれは事後の調査手段であって歯止めではない —
+    誰も見ていなければ欠落は静かに残る。
     """
     if manager is None or getattr(manager, "SessionLocal", None) is None:
         return None
@@ -57,9 +70,11 @@ def _open_episode_ref(manager: Any, persona_id: str) -> Optional[str]:
         if open_ep:
             return open_ep.get("episode_ref")
     except Exception:
-        LOGGER.debug(
+        # 「開いている出来事が無い」(正常・無ログ) と参照失敗を区別する
+        LOGGER.warning(
             "[building_ingest] open-episode lookup failed (persona=%s); "
-            "transcribing without origin_episode", persona_id, exc_info=True,
+            "transcribing without origin_episode — these rows keep no episode "
+            "attribution and are not retried", persona_id, exc_info=True,
         )
     return None
 
