@@ -12,6 +12,14 @@ W5/M8 (記憶監査「Building→個人記憶の転記が cursor を先行確定
   規律により常に高々 1 件 = 次ラウンドの最初の転記候補なので、その 1 件だけ
   memory.db へ provenance 照会し、既在なら append を跳ばして marker の修復のみ
   行う (再起動を跨いでも欠落も重複もしない)。
+
+帰属 (層0タグ、2026-08-09 まはー裁定):
+
+- 転記 entry には**転記先ペルソナ**の開いている出来事 (origin_episode) と
+  line_role / scope (main_line / committed) を刻む (:func:`_stamp_layer0`)。
+  これが無かったことで user 発言 (会話の相手側) が出来事の記録に構造上
+  一件も入らなかった (docs/issues/user_messages_missing_episode_attribution.md)。
+- 過去分のバックフィルはしない — 事後の帰属は推測 = 捏造に近づく。
 """
 from __future__ import annotations
 
@@ -32,6 +40,53 @@ BUILDING_MSG_REF_KEY = "building_msg_ref"
 
 class _TranscribeFailed(RuntimeError):
     """転記の失敗 (memory 書き込みが failed)。ラウンドはここで停止する。"""
+
+
+def _open_episode_ref(manager: Any, persona_id: str) -> Optional[str]:
+    """転記先ペルソナの開いている出来事の episode_ref を返す (無ければ None)。
+
+    sea/runtime._store_memory の層0タグと同じ構え: 記録専用で、解決失敗は
+    転記を止めない。get_open_episode は per-persona キャッシュ持ちなので
+    高頻度呼び出しでも DB を引かない。
+    """
+    if manager is None or getattr(manager, "SessionLocal", None) is None:
+        return None
+    try:
+        from saiverse.episodes import get_open_episode
+        open_ep = get_open_episode(manager, persona_id)
+        if open_ep:
+            return open_ep.get("episode_ref")
+    except Exception:
+        LOGGER.debug(
+            "[building_ingest] open-episode lookup failed (persona=%s); "
+            "transcribing without origin_episode", persona_id, exc_info=True,
+        )
+    return None
+
+
+def _stamp_layer0(entry: Dict[str, Any], origin_episode_ref: Optional[str]) -> None:
+    """転記 entry に層0タグ (origin_episode / line_role / scope) を刻む。
+
+    - origin_episode: **転記先ペルソナ**の開いている出来事のみ有効。episode_ref
+      (``episode:N``) の N はペルソナ内連番なので、話し手側 metadata の deepcopy
+      で継承された値は受信側では別の出来事を指す — 無条件に捨てて受信側の値で
+      刻み直す。
+    - line_role / scope: 欠落 (NULL) は読み出し側で main_line / committed に
+      救済されるが、補完 SQL の完全一致が転記行を構造的に落とした実害がある
+      (user_conversation_preserver、2026-07-29) ため明示する。
+    """
+    metadata = entry.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        inherited = metadata.pop("origin_episode", None)
+        if inherited is not None and inherited != origin_episode_ref:
+            LOGGER.debug(
+                "[building_ingest] dropped inherited origin_episode %r "
+                "(receiver's open episode: %r)", inherited, origin_episode_ref,
+            )
+        if origin_episode_ref:
+            metadata["origin_episode"] = origin_episode_ref
+    entry.setdefault("line_role", "main_line")
+    entry.setdefault("scope", "committed")
 
 
 def _msg_seq(msg: Dict[str, Any]) -> int:
@@ -155,6 +210,7 @@ def _transcribe_message(
     id_to_name_map: Dict[str, str],
     origin_track_id: Optional[str],
     check_provenance: bool,
+    origin_episode_ref: Optional[str] = None,
 ) -> Tuple[str, Optional[str], bool]:
     """building message 1 件をペルソナ記憶へ転記する (tool 版 / auto 版の共通核)。
 
@@ -199,6 +255,7 @@ def _transcribe_message(
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
+        _stamp_layer0(entry, origin_episode_ref)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
@@ -249,7 +306,10 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         # host event は世界の変化通知 = Track 横断のメタログ扱いで
-        # origin_track_id は付けない (handoff_2026-05-10)。
+        # origin_track_id は付けない (handoff_2026-05-10)。origin_episode は
+        # 付ける — Track と違い「そのとき何の出来事の中に居たか」の軸なので、
+        # 出来事の最中に知覚した世界の変化はその出来事の記録に属する。
+        _stamp_layer0(entry, origin_episode_ref)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
@@ -267,6 +327,7 @@ def _transcribe_message(
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
+        _stamp_layer0(entry, origin_episode_ref)
         _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
@@ -334,6 +395,9 @@ def _ingest_round(
     ingested_count = 0
     private_count = 0
     perceived: Dict[str, int] = {}
+    # 帰属 (層0タグ) はラウンドで一度だけ解決する — 1 ラウンドの転記は同じ
+    # 「いま」の知覚なので、途中で出来事が切り替わっても snapshot を貫く。
+    origin_episode_ref = _open_episode_ref(manager, persona_id)
     # 最初の転記候補だけ provenance 照会 (M8: 宙に浮いた転記は高々 1 件で、
     # 必ず次ラウンドの最初の転記候補になる — 走査をラウンド 1 回に有界化)。
     provenance_pending = True
@@ -347,6 +411,7 @@ def _ingest_round(
                 building_id=building_id, history_manager=history_manager,
                 id_to_name_map=id_to_name_map, origin_track_id=origin_track_id,
                 check_provenance=provenance_pending,
+                origin_episode_ref=origin_episode_ref,
             )
         except Exception:
             LOGGER.warning(

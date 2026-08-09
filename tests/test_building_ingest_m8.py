@@ -308,6 +308,79 @@ class BuildingIngestM8Test(unittest.TestCase):
         self.assertIn("2件の新規メッセージを認識しました", summary)
         self.assertIn("話し手", summary)
 
+    # ------------------------------------------------------------------
+    # 帰属 (層0タグ) — origin_episode / line_role / scope の刻印
+    # (docs/issues/user_messages_missing_episode_attribution.md、2026-08-09 裁定)
+    # ------------------------------------------------------------------
+
+    def _appended_by_needle(self, needle: str):
+        matches = [m for m in self.adapter.appended if needle in m.get("content", "")]
+        self.assertEqual(len(matches), 1, f"exactly one entry for {needle!r}")
+        return matches[0]
+
+    def test_transcription_stamps_line_role_and_scope(self):
+        """エピソードが開いていなくても line_role / scope は常に明示される。"""
+        self._insert("user", "帰属テストのユーザー発言")
+        self._insert("assistant", "帰属テストの他ペルソナ発話", persona_id="speaker")
+        self._insert("host", "<b>帰属テストの世界イベント</b>")
+        count = auto_ingest_building_messages(self.persona, self.manager)
+        self.assertEqual(count, 3)
+        for needle in ("ユーザー発言", "他ペルソナ発話", "世界イベント"):
+            entry = self._appended_by_needle(needle)
+            self.assertEqual(entry.get("line_role"), "main_line", needle)
+            self.assertEqual(entry.get("scope"), "committed", needle)
+            # 開いている出来事が無ければ origin_episode は付けない
+            self.assertNotIn("origin_episode", entry.get("metadata") or {}, needle)
+
+    def test_transcription_stamps_open_episode(self):
+        """転記先ペルソナの開いている出来事が全転記種別に刻まれる (会話の
+        第一声 = user 発言が出来事の記録に入る)。"""
+        from saiverse import episodes
+
+        ep = episodes.open_conversation_episode(
+            self.manager, self.LISTENER, building_id=self.BID,
+            participants=[self.LISTENER, "user_owner"],
+        )
+        self.assertTrue(ep.get("episode_ref"))
+        self._insert("user", "第一声のユーザー発言")
+        self._insert("assistant", "相手ペルソナの返事", persona_id="speaker")
+        self._insert("host", "<b>会話中の世界イベント</b>")
+        count = auto_ingest_building_messages(self.persona, self.manager)
+        self.assertEqual(count, 3)
+        for needle in ("第一声のユーザー発言", "相手ペルソナの返事", "会話中の世界イベント"):
+            entry = self._appended_by_needle(needle)
+            self.assertEqual(
+                (entry.get("metadata") or {}).get("origin_episode"),
+                ep["episode_ref"], needle,
+            )
+
+    def test_inherited_origin_episode_is_replaced(self):
+        """話し手側 metadata から deepcopy で継承された origin_episode は、
+        受信側では別の出来事 (episode_ref はペルソナ内連番) を指すため、
+        受信側の開いている出来事で刻み直す。"""
+        from saiverse import episodes
+
+        ep = episodes.open_conversation_episode(
+            self.manager, self.LISTENER, building_id=self.BID,
+        )
+        msg = {
+            "role": "assistant",
+            "content": "話し手の出来事参照を運ぶ発話",
+            "persona_id": "speaker",
+            "timestamp": "2026-08-09T12:00:00+00:00",
+            "heard_by": [self.LISTENER],
+            "metadata": {"origin_episode": "episode:999"},
+        }
+        saved = insert_building_message(self.SessionLocal, self.BID, msg)
+        assert saved and saved.get("message_id")
+        count = auto_ingest_building_messages(self.persona, self.manager)
+        self.assertEqual(count, 1)
+        entry = self._appended_by_needle("話し手の出来事参照を運ぶ発話")
+        self.assertEqual(
+            (entry.get("metadata") or {}).get("origin_episode"),
+            ep["episode_ref"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
