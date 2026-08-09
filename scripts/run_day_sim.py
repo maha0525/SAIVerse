@@ -219,8 +219,8 @@ def _make_mock_spell_executor(session_factory):
                 db.commit()
             finally:
                 db.close()
-            return (f"文書「{title}」を作成しました。アイテムID: {item_id}", None)
-        return (f"スペル {tool_name} を実行しました (mock)。", None)
+            return (f"文書「{title}」を作成しました。アイテムID: {item_id}", None, True)
+        return (f"スペル {tool_name} を実行しました (mock)。", None, True)
 
     return _fake_spell
 
