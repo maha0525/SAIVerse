@@ -152,23 +152,33 @@ def plan_alignment(
     #    使う形は、その先頭が Chronicle 除外対象で messages に居ないと境界が
     #    一度も立たず、離れた範囲が黙って一つのあらすじに混ざる
     #    (docs/issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)。
+    #    さらに **thread 境界でも必ず切る** — created_at 一列化で並走スレッドの
+    #    発話が交互に並んでいても、別スレッドの発話を一つのあらすじに束ねない
+    #    (docs/issues/chronicle_cross_thread_mixing.md の下限。時系列の嘘 =
+    #    「γ の後に δ をやった」という偽の隣接を生成物へ焼き込まないための
+    #    安全装置で、どの上位設計 — thread 単位取得 / episode 単位ソート —
+    #    を採っても成立し続ける不変条件)。
     group_keys = _run_group_keys(messages, run_groups)
     runs: List[List[Message]] = []
     current: List[Message] = []
     current_group: object = None
+    current_thread: object = None
     for msg in messages:
         if msg.id in processed_ids:
             if current:
                 runs.append(current)
                 current = []
                 current_group = None
+                current_thread = None
             continue
         group = group_keys.get(msg.id)
-        if current and group != current_group:
+        thread = getattr(msg, "thread_id", None)
+        if current and (group != current_group or thread != current_thread):
             runs.append(current)
             current = []
         current.append(msg)
         current_group = group
+        current_thread = thread
     if current:
         runs.append(current)
 

@@ -64,7 +64,7 @@ doc: [`open_conversation_orphaned_by_track_displacement.md`](../issues/open_conv
 ### 記憶の汚染源 (実装 4 + 裁定 1)
 
 **7. Chronicle のスレッド混線**
-現状: 設計確定・実装待ち (メティス記憶ブリッジ MVP の一部)。
+現状: **下限実装済み (2026-08-09、Wave 0)**。編纂のチャンク計画 (plan_alignment) に「thread 境界で必ず切る」を追加 — 別スレッドの発話が一つのあらすじに束ねられる経路は塞がった。前提の再検証で、issue の本命案 (案 A) が名指しした生成器は 7/28 に退役済みと判明し、現行機構での下限に置き直した。残り (取得スコープ化・文脈スコープ化・サブツリー) はメティスブリッジ MVP へ、理想形 (episode 単位ソート) は Wave 1 の議論へ。
 理由: 並走スレッドの発話が混ざったあらすじは、書かれた後は削除→再生成でしか直らない (air/aifi 修復と同種の手術になる)。
 doc: [`chronicle_cross_thread_mixing.md`](../issues/chronicle_cross_thread_mixing.md)
 

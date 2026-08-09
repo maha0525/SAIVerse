@@ -24,11 +24,11 @@ from sai_memory.memory.storage import Message
 TARGET = 100
 
 
-def _msg(mid, content, episode=None, created_at=None):
+def _msg(mid, content, episode=None, created_at=None, thread_id="main"):
     """テストメッセージ。episode は metadata 側 (実運用の主経路) に置く。"""
     return Message(
         id=mid,
-        thread_id="main",
+        thread_id=thread_id,
         role="user",
         content=content,
         resource_id=None,
@@ -87,6 +87,27 @@ class TestRunSplitting(unittest.TestCase):
         """同じ群 (退場 fold) の中は連続 — 群を渡しただけでは切れない。"""
         msgs = [_msg("m1", "a" * 30), _msg("m2", "b" * 30)]
         plan = _plan(msgs, run_groups=[["m1", "m2"]])
+        self.assertEqual([c.message_ids for c in plan.chunks], [["m1", "m2"]])
+
+    def test_thread_boundary_splits_runs(self):
+        """並走スレッドが created_at で交互に並んでも、別スレッドの発話を
+        一つのあらすじに束ねない (chronicle_cross_thread_mixing.md の下限)。"""
+        msgs = [
+            _msg("m1", "a" * 30, thread_id="alpha"),
+            _msg("m2", "b" * 30, thread_id="beta"),   # 別スレッド → 境界
+            _msg("m3", "c" * 30, thread_id="alpha"),  # 戻っても再び境界
+        ]
+        plan = _plan(msgs)
+        self.assertEqual(
+            [c.message_ids for c in plan.chunks], [["m1"], ["m2"], ["m3"]],
+        )
+
+    def test_same_thread_contiguous_is_not_split(self):
+        msgs = [
+            _msg("m1", "a" * 30, thread_id="alpha"),
+            _msg("m2", "b" * 30, thread_id="alpha"),
+        ]
+        plan = _plan(msgs)
         self.assertEqual([c.message_ids for c in plan.chunks], [["m1", "m2"]])
 
     def test_different_run_groups_split(self):

@@ -1,6 +1,11 @@
 # Issue: Chronicle 生成がスレッド横断で混線する
 
-**ステータス**: 🔵 設計確定（実装待ち。メティス記憶ブリッジ MVP の一部として実装）
+**ステータス**: 🟡 下限は実装済み・本命は実装待ち
+
+> **2026-08-09 追記 (v0.3.0 の門 Wave 0)**: 前提の再検証と下限の実装。
+> 1. **前提は生存**: `get_messages_for_chronicle` は今もスレッド無差別 (Stelis 除外のみ・created_at 一列)。ただし本 issue の案 A が名指しした `generate_unprocessed` は 2026-07-28 の恒等圧縮廃止で**退役済み**で、現行の編纂は `plan_alignment` (sai_memory/arasuji/alignment.py) がチャンク計画を組む。
+> 2. **下限を実装** (旧案 B の現行版): `plan_alignment` の run 分割に **thread 境界で必ず切る**条件を追加。並走スレッドが created_at で交互に並んでも、別スレッドの発話が一つのあらすじに束ねられることは無くなった = 時系列の嘘 (偽の隣接) を生成物へ焼き込まない不変条件。細切れの懸念は交互並びの病的入力にだけ発生し、それは束ねてはいけない入力そのもの。どの上位設計 (案 A/C) を採っても成立し続ける。
+> 3. **残り**: 案 A の取得スコープ化・上位文脈参照の thread スコープ化・中間ノード方式のサブツリー挿入はメティス記憶ブリッジ MVP の実装時に。案 C (episode 単位ソート) は v0.3.0 の門 Wave 1「エピソードの単位」の議論と同じ土俵にある。
 **優先度**: medium（本体の潜在欠陥。メティス記憶ブリッジが顕在化の契機）
 **作成日**: 2026-07-12
 **関連**: [`../intent/metis_memory_bridge.md`](../intent/metis_memory_bridge.md) §6 / [`general_chronicle_metabolism_trigger.md`](general_chronicle_metabolism_trigger.md)（trigger 軸・別問題）
