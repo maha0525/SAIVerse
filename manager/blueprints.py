@@ -248,6 +248,18 @@ class BlueprintMixin:
             )
             db.add(new_occupancy_log)
 
+            # in-memory の Building は commit 前に組む。commit 後に ORM 属性を
+            # 読むと expire-on-commit で再フェッチが走り、DB が確定した後に
+            # 失敗しうる箇所が増える
+            new_building_obj = Building(
+                building_id=private_room_model.BUILDINGID,
+                name=private_room_model.BUILDINGNAME,
+                capacity=private_room_model.CAPACITY,
+                system_instruction=private_room_model.SYSTEM_INSTRUCTION,
+                description=private_room_model.DESCRIPTION,
+            )
+            in_this_city = blueprint.CITYID == self.city_id
+
             # DB を先に確定させてから、インメモリの世界状態と PersonaCore に触る。
             # 逆順だと、失敗した生成 (ID 衝突など) が rollback 後も building_map /
             # occupants / personas に残り、既存の部屋と占有者を上書きしたままになる
@@ -255,14 +267,7 @@ class BlueprintMixin:
             # AI 行を読める点も manager/persona.py の create_persona と揃う。
             db.commit()
 
-            if blueprint.CITYID == self.city_id:
-                new_building_obj = Building(
-                    building_id=private_room_model.BUILDINGID,
-                    name=private_room_model.BUILDINGNAME,
-                    capacity=private_room_model.CAPACITY,
-                    system_instruction=private_room_model.SYSTEM_INSTRUCTION,
-                    description=private_room_model.DESCRIPTION,
-                )
+            if in_this_city:
                 self.buildings.append(new_building_obj)
                 self.building_map[private_room_id] = new_building_obj
                 self.capacities[private_room_id] = new_building_obj.capacity
@@ -277,7 +282,7 @@ class BlueprintMixin:
                 )
                 self.building_histories[private_room_id] = []
 
-            if blueprint.CITYID == self.city_id:
+            if in_this_city:
                 blueprint_model = self.model
                 blueprint_provider = get_model_provider(blueprint_model)  # Get provider for model
                 blueprint_context_length = get_context_length(blueprint_model)

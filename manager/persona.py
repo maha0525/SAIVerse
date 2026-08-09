@@ -535,6 +535,17 @@ class PersonaMixin:
                 "DB: Added initial occupancy for '%s' in their room.", name
             )
 
+            # in-memory の Building は commit 前に組む。commit 後に ORM 属性を
+            # 読むと expire-on-commit で再フェッチが走り、DB が確定した後に
+            # 失敗しうる箇所が増える (組み立て自体は plain object なので失敗しない)
+            new_building_obj = Building(
+                building_id=new_building_model.BUILDINGID,
+                name=new_building_model.BUILDINGNAME,
+                capacity=new_building_model.CAPACITY,
+                system_instruction=new_building_model.SYSTEM_INSTRUCTION,
+                description=new_building_model.DESCRIPTION,
+            )
+
             # Auto-link user if there is exactly one user
             user_count = db.query(User).count()
             if user_count == 1:
@@ -550,17 +561,10 @@ class PersonaMixin:
             # find the AI record.
             db.commit()
 
-            # インメモリの世界状態はここから — commit が通ってから触る。
+            # インメモリの世界状態への*登録*はここから — commit が通ってから触る。
             # commit 前に登録すると、失敗した作成 (ID 衝突など) が rollback 後も
             # building_map / occupants に残り、既存ペルソナの部屋と占有者を
             # 上書きしたままになる (DB は巻き戻るのにキャッシュは巻き戻らない)。
-            new_building_obj = Building(
-                building_id=new_building_model.BUILDINGID,
-                name=new_building_model.BUILDINGNAME,
-                capacity=new_building_model.CAPACITY,
-                system_instruction=new_building_model.SYSTEM_INSTRUCTION,
-                description=new_building_model.DESCRIPTION,
-            )
             self.buildings.append(new_building_obj)
             self.building_map[new_building_id] = new_building_obj
             self.capacities[new_building_id] = new_building_obj.capacity

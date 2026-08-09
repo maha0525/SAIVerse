@@ -118,6 +118,47 @@ class RegionAdminTestCase(unittest.TestCase):
         self.assertIsNotNone(region)
         self.assertEqual(region.ENTRANCE_BUILDING_ID, "entrance_region_2_city_a")
 
+    def _add_building(self, building_id, name="無関係な建物"):
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingModel(CITYID=1, BUILDINGID=building_id, BUILDINGNAME=name))
+            db.commit()
+        finally:
+            db.close()
+
+    def test_explicit_entrance_with_the_reserved_derived_id_is_rejected(self):
+        # entrance_<region_id> は自動生成入口の予約名。delete_region は ID の形
+        # だけで自動生成物かを判定して消すので、ユーザー所有の Building がこの
+        # 名前で入口になると Region 削除の巻き添えで消える
+        self._add_building("entrance_r1", "ユーザーが作った建物")
+        result = self.svc.create_region(
+            "X", "", "generic", 1, region_id="r1", entrance_building_id="entrance_r1",
+        )
+        self.assertIn("Error", result)
+        self.assertIsNone(self._get_region("r1"))
+        self.assertIsNotNone(self._get_building("entrance_r1"))
+
+    def test_explicit_entrance_does_not_reserve_the_derived_entrance_id(self):
+        # 入口を自動作成しない分岐は entrance_<rid> を使わない。無関係な同名
+        # Building があっても連番を飛ばさない
+        self._add_building("entrance_region_1_city_a")
+        result = self.svc.create_region(
+            "霧降りの森", "", "generic", 1, entrance_building_id="bldg_a",
+        )
+        self.assertNotIn("Error", result)
+        region = self._get_region("region_1_city_a")
+        self.assertIsNotNone(region)
+        self.assertEqual(region.ENTRANCE_BUILDING_ID, "bldg_a")
+
+    def test_game_top_region_does_not_reserve_the_derived_entrance_id(self):
+        # game のトップ Region の入口は create_ruler の控室なのでここでは作らない
+        self._add_building("entrance_region_1_city_a")
+        result = self.svc.create_region("霧の谷", "", "game", 1)
+        self.assertNotIn("Error", result)
+        region = self._get_region("region_1_city_a")
+        self.assertIsNotNone(region)
+        self.assertIsNone(region.ENTRANCE_BUILDING_ID)
+
     def test_existing_non_ascii_region_id_still_loads_updates_and_deletes(self):
         # 既存の非 ASCII ID は裁定どおり放置する (作成の口だけ塞ぐ)。作成時
         # 検証を足したことで既存データの読み・更新・削除が壊れていないことを、

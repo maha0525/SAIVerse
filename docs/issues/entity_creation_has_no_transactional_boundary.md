@@ -1,0 +1,63 @@
+# ペルソナ生成が DB・インメモリ世界状態・PersonaCore を跨いだ一貫性を持たない
+
+**ステータス: 未着手** (2026-08-09 起票。Wave 0 の Building ID 工事のレビューで浮上)
+
+## 症状
+
+`AdminService._create_persona` (`manager/persona.py`) と `BlueprintMixin.spawn_entity_from_blueprint`
+(`manager/blueprints.py`) は、一つの「ペルソナが誕生する」という出来事を、性質の違う
+四つの書き込みで組み立てている。
+
+1. DB 行 (AI / Building / BuildingOccupancyLog / UserAiLink)
+2. インメモリの世界状態 (`buildings` / `building_map` / `capacities` / `occupants` / `building_memory_paths` / `building_histories`)
+3. `PersonaCore` の生成と `personas` / `persona_map` / `id_to_name_map` への登録
+4. 建物イベント (到着メッセージ) とファイル保存
+
+**この四つを一つの成功・失敗として扱う仕組みが無い。** どの順に並べても、途中で
+失敗すれば「一部だけ起きた誕生」が残る。
+
+## 経緯 — 順序を入れ替えても消えない
+
+2026-08-09 のレビューで、両経路が **commit より前にインメモリ状態を書き換えて**
+いたことが分かった。ID 衝突で commit が落ちると、DB は巻き戻るのにキャッシュは
+巻き戻らず、**既存ペルソナの部屋と占有者を上書きした状態が残る**。これは実在の
+正しい状態を壊すので、同日 commit を先に出す順序へ変えた。
+
+次のレビューで、その裏返しが指摘された: commit 後に `get_model_provider` や
+`PersonaCore` の初期化が失敗すると、DB に行が残ったままキャッシュに載らない。
+
+順序の入れ替えは**どちらの穴を開けるかの選択**であって、穴を塞いではいない。
+現在の並び (DB 先) を採っているのは、二つの壊れ方の重さが違うため:
+
+- **旧 (キャッシュ先)**: 既存ペルソナの部屋と占有者が上書きされる = *正しい状態の破壊*
+- **現 (DB 先)**: DB に行はあるがメモリに載らない = *孤児*。次回起動の
+  `_load_single_persona` が正常に読むので、再起動で自然に回復する
+
+なお `create_persona` では `get_model_provider` / `PersonaCore` の失敗窓は
+**この変更の前から commit の後ろ**にあり、順序変更が新設したものではない。
+
+## 直すときの論点
+
+1. **本当に必要か**: 現状の残存リスクは「作成が途中で失敗し、再起動まで孤児が残る」。
+   単一ユーザーのローカルアプリで、作成は手動操作。補償・再開機構を建てる前に、
+   この頻度と実害で機構を持つ価値があるかを先に問う (CLAUDE.md 把握可能性: 例外処理が
+   本体を覆い始めたら止まる)。
+2. **供給源を減らす方向**: commit 後に失敗しうる処理 (モデル設定解決・PersonaCore
+   初期化) を commit より前へ寄せ、DB 確定後は失敗しない処理だけを残す。機構を
+   足さずに窓を狭める案。
+3. **機構を建てる方向**: 生成を provisioning 状態として記録し、失敗時は補償削除か
+   再開可能な状態にする。2 で足りない場合の選択肢。
+4. **観測**: いずれを採っても、孤児が生まれたことを起動時に検出できるか
+   (DB にあるが `personas` に載らない AI 行) は別途の問い。
+
+## 検証の空白
+
+`_create_persona` / `spawn_entity_from_blueprint` にはこのリポジトリに**統合テストが
+1 本も無い**。2026-08-09 の修正 (私室 ID の衝突回避・commit 順序) はヘルパの単体
+テストと Region 経路の統合テストでしか押さえられておらず、呼び出し側の配線は実機で
+未確認。この issue に着手するなら、まずここに足場を作るのが先。
+
+## 関連
+
+- `docs/issues/building_id_no_charset_constraint.md` — この issue が浮上した工事
+- `docs/intent/region.md` §3.1 — 同じ「出自を永続化していない」形の問題 (入口 Building)

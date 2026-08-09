@@ -572,6 +572,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     # 入れ子は 1 段まで (モデル定義のコメント参照)。アプリ層で強制する
                     return "Error: Nesting is limited to one level; the parent is already a SubRegion."
 
+            # 入口を自動作成する分岐に入るか (下の入口決定と同じ条件)。ID 候補を
+            # 選ぶ前に確定させる — 自動作成しないのに入口 ID を予約すると、
+            # 使える番号を無意味に飛ばす
+            will_auto_create_entrance = (
+                not (entrance_building_id and entrance_building_id.strip())
+                and not (region_type == "game" and not parent_region_id)
+            )
+
             # Region ID も Building ID と同じ文字種契約に従う (manager/ids.py)。
             # 入口 Building の ID は entrance_<region_id> なので、ここが素通しだと
             # Building 側の契約ごと破れる — game_create_subregion (Ruler ペルソナが
@@ -582,13 +590,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     return charset_error("Region ID", region_id)
             else:
                 def _region_id_taken(rid: str) -> bool:
+                    if db.query(RegionModel).filter_by(REGION_ID=rid).first():
+                        return True
+                    if not will_auto_create_entrance:
+                        return False
                     # 派生する入口 Building の ID も一緒に予約する。Region 側が
                     # 空いていても entrance_<rid> が埋まっていると、下の入口自動
                     # 作成がエラーで止まる — 連番を一つ進めれば避けられる衝突なので
                     # 候補選びの段階で見る (Region を消しても入口 Building が残る
                     # 経路があり、連番の若い番号ほど当たりやすい)。
-                    if db.query(RegionModel).filter_by(REGION_ID=rid).first():
-                        return True
                     return db.query(BuildingModel).filter_by(
                         BUILDINGID=entrance_id_for(rid)
                     ).first() is not None
@@ -608,6 +618,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             entrance_note = ""
             if entrance_building_id and entrance_building_id.strip():
                 entrance_building_id = entrance_building_id.strip()
+                # entrance_<region_id> は自動生成入口の予約名。delete_region は
+                # 「入口の ID がこの形か」だけで自動生成物かを判定して削除するので、
+                # ユーザー所有の Building にこの名前を持たせると Region 削除で
+                # 巻き添えに消える。判定へ provenance を持たせるのが本筋だが列の
+                # 追加が要るため、まず曖昧さの供給源 (同名を許すこと) を塞ぐ。
+                if entrance_building_id == entrance_id_for(region_id):
+                    return (
+                        f"Error: '{entrance_building_id}' is reserved for the "
+                        f"auto-created entrance of region '{region_id}'. Use a "
+                        "building with a different ID, or omit entrance_building_id "
+                        "to have the entrance created for you."
+                    )
                 entrance = db.query(BuildingModel).filter_by(
                     BUILDINGID=entrance_building_id
                 ).first()
