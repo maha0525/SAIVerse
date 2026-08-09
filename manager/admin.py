@@ -90,11 +90,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.get_conversing_personas = runtime.get_conversing_personas
         self.get_persona_pending_events = manager.get_persona_pending_events
         self.archive_persona_events = manager.archive_persona_events
-        # PersonaMixin._create_persona / BlueprintMixin.spawn_entity_from_blueprint が
-        # commit 後に呼ぶ統一フック。実体を持つのは SAIVerseManager だけなので、
-        # ここで委譲を張らないと UI からのペルソナ作成が
-        # 「DB には作られたのに AttributeError で失敗を返す」状態になる
+        # --- ミックスインが self. で読むが、実体は SAIVerseManager 側にあるもの ---
+        # AdminService は PersonaMixin / BlueprintMixin / HistoryMixin を継承する
+        # 「もう一つの土台」なので、ミックスインのコードが触る状態はここで揃える。
+        # 欠けると commit 後に AttributeError になり、DB には作られたのに失敗を
+        # 返す形で壊れる (2026-08-09 に _on_persona_registered で実際に発生)。
+        # 欠落は tests/test_mixin_host_contract.py が機械的に検査する。
         self._on_persona_registered = manager._on_persona_registered
+        self.quarantined_buildings = manager.quarantined_buildings
+        self.startup_warnings = manager.startup_warnings
         self.occupancy_manager = manager.occupancy_manager
         self.conversation_managers = manager.conversation_managers
         self._save_building_histories = manager._save_building_histories
