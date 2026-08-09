@@ -1,11 +1,14 @@
 """Regression tests for ``_run_spell_tool_async`` return-value normalization.
 
 native tool が返す各種戻り値型が ``_run_spell_tool_async`` で正しく
-``(content, metadata)`` に展開されるかを検証する。
+``(content, metadata, ok)`` に展開されるかを検証する。
 
 特に 4-tuple ``(text, ToolResult, file_path, metadata)`` (see.py 等の
 multimodal tool で使われる形) が tuple repr 文字列化されずに content と
 metadata に分離される regression を担保する。
+
+``ok`` (第 3 要素、quick_spell.md §3.3 Phase 1) は機械的失敗 —
+実行中の例外 / レジストリ未登録 — で False になる。
 
 詳細: docs/issues/native_tool_return_4tuple_bug.md
 """
@@ -40,7 +43,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _invoke(tool_func) -> tuple[str, dict | None]:
+def _invoke(tool_func) -> tuple[str, dict | None, bool]:
     """Helper: register tool_func in TOOL_REGISTRY and run the spell."""
     with patch.dict("sea.runtime_llm.TOOL_REGISTRY", {"_test_tool": tool_func}, clear=False):
         return _run(_run_spell_tool_async(
@@ -54,18 +57,20 @@ def _invoke(tool_func) -> tuple[str, dict | None]:
 
 
 def test_str_return() -> None:
-    """str 戻り値は (str, None) になる。"""
-    result_str, result_meta = _invoke(lambda: "plain text result")
+    """str 戻り値は (str, None, True) になる。"""
+    result_str, result_meta, ok = _invoke(lambda: "plain text result")
     assert result_str == "plain text result"
     assert result_meta is None
+    assert ok is True
 
 
 def test_str_dict_tuple_return() -> None:
     """(str, dict) 戻り値は dict が metadata に乗る。"""
     media = [{"type": "image", "path": "/tmp/foo.jpg"}]
-    result_str, result_meta = _invoke(lambda: ("画像を生成した", {"media": media}))
+    result_str, result_meta, ok = _invoke(lambda: ("画像を生成した", {"media": media}))
     assert result_str == "画像を生成した"
     assert result_meta == {"media": media}
+    assert ok is True
 
 
 def test_four_tuple_return_unpacks_correctly() -> None:
@@ -86,7 +91,7 @@ def test_four_tuple_return_unpacks_correctly() -> None:
             {"media": media},
         )
 
-    result_str, result_meta = _invoke(tool)
+    result_str, result_meta, ok = _invoke(tool)
 
     # content だけが str に乗る (tuple repr ではなく)
     assert result_str == "目の前の光景を見た。"
@@ -95,6 +100,7 @@ def test_four_tuple_return_unpacks_correctly() -> None:
 
     # metadata は 4 番目の dict をそのまま受け取る
     assert result_meta == {"media": media}
+    assert ok is True
 
 
 def test_three_tuple_return_no_metadata() -> None:
@@ -102,22 +108,24 @@ def test_three_tuple_return_no_metadata() -> None:
     def tool():
         return ("結果", ToolResult(history_snippet="snip"), "/tmp/x.txt")
 
-    result_str, result_meta = _invoke(tool)
+    result_str, result_meta, ok = _invoke(tool)
     assert result_str == "結果"
     assert result_meta is None
+    assert ok is True
 
 
 def test_tool_result_only_return() -> None:
     """ToolResult 単体戻り値は content 空文字 + metadata None になる。"""
-    result_str, result_meta = _invoke(lambda: ToolResult(history_snippet="snip only"))
+    result_str, result_meta, ok = _invoke(lambda: ToolResult(history_snippet="snip only"))
     assert result_str == ""
     assert result_meta is None
+    assert ok is True
 
 
 def test_unknown_tool_returns_error_string() -> None:
-    """TOOL_REGISTRY に存在しない tool は error string を返す。"""
+    """TOOL_REGISTRY に存在しない tool は error string + ok=False を返す。"""
     with patch.dict("sea.runtime_llm.TOOL_REGISTRY", {}, clear=True):
-        result_str, result_meta = _run(_run_spell_tool_async(
+        result_str, result_meta, ok = _run(_run_spell_tool_async(
             tool_name="_does_not_exist",
             tool_args={},
             persona=None,
@@ -127,15 +135,21 @@ def test_unknown_tool_returns_error_string() -> None:
         ))
     assert "not found in registry" in result_str
     assert result_meta is None
+    assert ok is False
 
 
 def test_tool_exception_returns_error_string() -> None:
-    """tool が raise した時は error string を返し、 metadata=None。"""
+    """tool が raise した時は error string + ok=False を返し、 metadata=None。
+
+    quick_spell.md §3.3 の既存バグ修正: 従来は例外が文字列に溶けて成功と
+    区別できず、[Spell Result] の顔をして注入されていた。
+    """
     def tool():
         raise RuntimeError("boom")
 
-    result_str, result_meta = _invoke(tool)
+    result_str, result_meta, ok = _invoke(tool)
     assert "Spell error" in result_str
     assert "RuntimeError" in result_str
     assert "boom" in result_str
     assert result_meta is None
+    assert ok is False

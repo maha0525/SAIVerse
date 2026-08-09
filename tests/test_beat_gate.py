@@ -406,7 +406,7 @@ def test_spell_loop_cancel_between_rounds_raises():
     async def fake_spell(tool_name, tool_args, persona, state, playbook_name,
                          event_callback, messages=None):
         token.cancel(interrupted_by="user")  # spell 実行中 (round 1) に割り込み
-        return ("done", None)
+        return ("done", None, True)
 
     # retry は spell 入りを返す = ペルソナは round 2 を続けたがっている
     client = ScriptedClient([SPELL_TEXT])
@@ -430,7 +430,7 @@ def test_spell_loop_calls_boundary_between_rounds():
 
     async def fake_spell(tool_name, tool_args, persona, state, playbook_name,
                          event_callback, messages=None):
-        return ("done", None)
+        return ("done", None, True)
 
     client = ScriptedClient(["おわり。"])  # retry は spell なし → 自然終了
     runtime = SpellLoopRuntime(manager=SimpleNamespace(beat_gate=SpyGate()))
@@ -452,7 +452,7 @@ def test_spell_loop_boundary_gate_closed_propagates():
 
     async def fake_spell(tool_name, tool_args, persona, state, playbook_name,
                          event_callback, messages=None):
-        return ("done", None)
+        return ("done", None, True)
 
     client = ScriptedClient([])  # 生成に到達しないはず
     runtime = SpellLoopRuntime(manager=SimpleNamespace(beat_gate=ClosingGate()))

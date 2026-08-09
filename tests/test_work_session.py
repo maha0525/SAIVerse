@@ -234,7 +234,7 @@ def _make_fake_spell(session_factory, created_ids: List[str]):
             tool_args.get("name", "doc"),
         )
         created_ids.append(item_id)
-        return (f"文書「{tool_args.get('name', 'doc')}」を作成しました。アイテムID: {item_id}", None)
+        return (f"文書「{tool_args.get('name', 'doc')}」を作成しました。アイテムID: {item_id}", None, True)
 
     return fake_spell
 

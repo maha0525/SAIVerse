@@ -1,7 +1,7 @@
 # /quick_spell — スペルループの終端宣言
 
-**version**: v0.1 draft（2026-07-07 設計議論の決着を反映、まはーレビュー待ち）
-**status**: 方針確定・実装待ち（実装は別セッション / サブエージェントに委譲予定）
+**version**: v0.2（2026-07-07 設計決着 → 2026-08-09 実装、v0.3.0 の門 Wave 0）
+**status**: 実装済み・レビューと実機検証待ち。Phase 1（ok フラグ 3-tuple 化 = 例外死の [Spell Error] 化）+ Phase 2（/quick_spell パース・全 quick 終端・失敗昇格）+ Phase 3（head 規約文 — §3.6 たたき台の文言のまま。**最終文言のまはーレビューは §7-2/7-3 のまま残っている**）+ metadata `error: true` 契約の機構側と開発者ガイド記載まで。**Phase 4 の帳簿系ツールへの宣言追加は未着手** — 導入範囲が §7-4 (未決) のため、ツール側は宣言した時点から効く additive な追い工事として残す。回帰は `tests/test_quick_spell.py`。
 **関連**:
 - `docs/issues/spell_loop_continuation_contract.md` — 発端の事故と設計議論の経緯
 - `docs/intent/gold_panning.md` §3.8・不変条件8/9 — 事故の根因（assistant 名義記録の自己像汚染）の解説

@@ -92,6 +92,8 @@ def schemas() -> list[ToolSchema]:
 
 > **規約**: 戻り値テキストはキャラ付けせず、客観 + 丁寧語で書く（例: 「温度: 32.3°C」）。4-tuple は避ける（→ [issue](../issues/native_tool_return_4tuple_bug.md)）。
 
+> **論理的失敗の宣言** (`/quick_spell` 対応、[quick_spell intent](../intent/quick_spell.md) §3.3): 例外を投げずに丁寧語の失敗文を返すツール（「該当するメモが見つかりませんでした」等）は、`(str, dict)` 形式の metadata に **`{"error": true}`** を積んで失敗を宣言できる。宣言があると、`/quick_spell`（完了宣言つきの唱え方）で唱えられていても継続ラウンドへ昇格し、失敗が沈黙で飲み込まれない。additive な規約で、宣言しないツールの挙動は従来と同一。機構側は戻り値文面の文字列判定を**行わない**ため、失敗をエスカレーションさせたいツールはこの宣言が唯一の口。
+
 ## コンテキストの利用
 
 実行時のペルソナ・マネージャ参照は `tools/context.py` の**関数**で取得する（contextvars 経由）:

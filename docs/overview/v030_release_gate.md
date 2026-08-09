@@ -57,7 +57,7 @@ doc: [`user_messages_missing_episode_attribution.md`](../issues/user_messages_mi
 doc: [`work_session_digest_never_reaches_chronicle.md`](../issues/work_session_digest_never_reaches_chronicle.md)
 
 **6. 孤児エピソードを閉じる者**
-現状: 未着手 (2026-07-29 裁定で issue 化)。
+現状: 未着手。**Wave 0 から Wave 1 へ移動 (2026-08-09)** — issue に未裁定の設計判断が残っていた: 会話の出来事の寿命を Track に従属させる (A) か独立させる (B) か。これは Wave 1「エピソードの単位と正史」の寿命意味論そのものなので、そこで裁定してから実装する。
 理由: 別 Track に押し出された会話エピソードは誰も閉じず、digest されず、Chronicle にも入らないまま累積する。
 doc: [`open_conversation_orphaned_by_track_displacement.md`](../issues/open_conversation_orphaned_by_track_displacement.md)
 
@@ -69,7 +69,7 @@ doc: [`open_conversation_orphaned_by_track_displacement.md`](../issues/open_conv
 doc: [`chronicle_cross_thread_mixing.md`](../issues/chronicle_cross_thread_mixing.md)
 
 **8. quick_spell — スペルループ終端の契約**
-現状: 方針確定・実装待ち + 既存汚染のデータ修復待ち。
+現状: **実装済み (2026-08-09、Wave 0)**。/quick_spell 動詞 + 全 quick 終端 + 失敗昇格 + ok フラグ (例外死の [Spell Error] 化) + metadata error 契約。残 = head 文言の最終レビュー (§7-2/3)・帳簿系ツールへの宣言追加 (§7-4 裁定待ち・additive)・クオンのデータ修復 (まはー GO 待ち)。
 理由: 偽のシステム通知がペルソナ本人名義の committed 記憶として生成され続ける = 自己像の汚染。実機で発生済み。
 doc: [`quick_spell.md`](../intent/quick_spell.md) / [`spell_loop_continuation_contract.md`](../issues/spell_loop_continuation_contract.md)
 
@@ -79,7 +79,7 @@ doc: [`quick_spell.md`](../intent/quick_spell.md) / [`spell_loop_continuation_co
 出典: [`2026-07-28_arasuji_pipeline_audit.md`](../handoff/2026-07-28_arasuji_pipeline_audit.md) §7-6
 
 **10. 畳み範囲とあらすじの一対一を強制する**
-現状: 未解決 (2026-07-27 Codex 発掘)。
+現状: 未解決。**Wave 0 から Wave 1 へ移動 (2026-08-09)** — issue の症状 2 の直し方は「下限 (退場は必ず編纂) と合わせて決める」と明記されており、下限の再裁定は §2-9 = Wave 1 の議題。症状 1 は現行経路では到達不能 (回帰テストで固定済み) なので先行実装の緊急性も無い。
 理由: 圧縮区間とそれを覆うあらすじの対応が崩れたまま記憶に固定され、偽の隣接が提示層に残る。
 doc: [`fold_range_and_chronicle_entry_not_one_to_one.md`](../issues/fold_range_and_chronicle_entry_not_one_to_one.md)
 
@@ -189,7 +189,7 @@ doc: [`memory_continuity_graph.md`](../issues/memory_continuity_graph.md)
 ### Wave 構成
 
 **Wave 0 — 地均し (裁定不要、いま動ける)**
-- 私の並行実装 (裁定済み・独立): user 発言の帰属付与 (§2-4) / Building ID 制約 (§2-11) / 畳み範囲 1:1 (§2-10) / スレッド混線分離 (§2-7) / 孤児エピソード close (§2-6) / quick_spell (§2-8) / アラーム名称変更 (§2-15)
+- 私の並行実装 (裁定済み・独立): user 発言の帰属付与 (§2-4) / Building ID 制約 (§2-11) / 畳み範囲 1:1 (§2-10) / スレッド混線分離 (§2-7) / quick_spell (§2-8) / アラーム名称変更 (§2-15)。孤児エピソード close (§2-6) は A/B 未裁定が見つかり Wave 1 へ移動
 - 掃除: stale issue の確認→archive (§6) / doc 追従 (mode_spell_permissions・unified_memory_architecture・roadmap_status)
 - 実機検証はここではやらない (§4 — 再設計後にまとめる。器統合の消し込みは完了済み §2-12)
 

@@ -78,7 +78,7 @@ class TestMultilineArgsRescue(unittest.TestCase):
         parsed = _parse_spell_lines(text, malformed_out=malformed)
         self.assertEqual(malformed, [])
         self.assertEqual(len(parsed), 1)
-        name, args, span, norm = parsed[0]
+        name, args, span, norm, _quick = parsed[0]
         self.assertEqual(name, "document_create")
         self.assertEqual(args["title"], "メモ")
         self.assertEqual(args["content"], "1行目\n2行目\n\n3行目")

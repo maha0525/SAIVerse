@@ -298,8 +298,8 @@ def _make_fake_spell(session_factory, created_item_ids: List[str]):
             finally:
                 db.close()
             created_item_ids.append(item_id)
-            return (f"文書「{title}」を作成しました。アイテムID: {item_id}", None)
-        return ("検索結果: 標本と蒸留に関する記事が 3 件見つかりました。", None)
+            return (f"文書「{title}」を作成しました。アイテムID: {item_id}", None, True)
+        return ("検索結果: 標本と蒸留に関する記事が 3 件見つかりました。", None, True)
 
     return fake_spell
 

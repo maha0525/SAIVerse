@@ -11,7 +11,7 @@ import re
 import tokenize
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
@@ -592,8 +592,11 @@ def _resolve_tool_call_id(result: Dict[str, Any]) -> str:
 _MAX_SPELL_LOOPS = int(os.getenv("SAIVERSE_SPELL_MAX_ROUNDS", "3"))
 
 # Canonical form: /spell name='tool' args={...}
+# /quick_spell (quick_spell.md): 同形の別動詞 = 「この発話で完了」の宣言。
+# (?:quick_)? は非捕獲 — 既存の group 番号 (1=name, 2=args) を保つため、
+# quick 判定は match.group(0) の動詞接頭辞で行う (_is_quick_match)。
 _SPELL_PATTERN = re.compile(
-    r"^/spell\s+name='([^']+)'\s+args=(.+)$",
+    r"^/(?:quick_)?spell\s+name='([^']+)'\s+args=(.+)$",
     re.MULTILINE,
 )
 # Args-omitted form (no explicit ``args=``): ``/spell name='X'``
@@ -608,9 +611,17 @@ _SPELL_PATTERN_NO_ARGS = re.compile(
 )
 # Fuzzy form: /spell tool_name key='value' key2='value2' ...
 _SPELL_PATTERN_FUZZY = re.compile(
-    r"^/spell\s+(\w+)\s+(.+)$",
+    r"^/(?:quick_)?spell\s+(\w+)\s+(.+)$",
     re.MULTILINE,
 )
+
+
+def _is_quick_match(m: Any) -> bool:
+    """この spell マッチが /quick_spell 動詞で唱えられたか (quick_spell.md §3.1)。"""
+    try:
+        return m.group(0).startswith("/quick_")
+    except (AttributeError, IndexError):
+        return False
 # key=value pair within fuzzy args (value may be single/double-quoted, dict literal, or bare word)
 _KV_PATTERN = re.compile(
     r"(\w+)="
@@ -934,9 +945,14 @@ def _coerce_spell_args(tool_name: str, tool_args: dict) -> dict:
     return coerced
 
 
-def _normalize_spell_line(tool_name: str, tool_args: dict) -> str:
-    """Produce the canonical /spell line for a given tool name and args dict."""
-    return f"/spell name='{tool_name}' args={json.dumps(tool_args, ensure_ascii=False)}"
+def _normalize_spell_line(tool_name: str, tool_args: dict, quick: bool = False) -> str:
+    """Produce the canonical /spell line for a given tool name and args dict.
+
+    ``quick=True`` は ``/quick_spell`` 動詞を保つ — SAIMemory に残る正規化行が
+    本人の宣言 (この発話で完了) を書き換えないため (quick_spell.md §3.1)。
+    """
+    verb = "/quick_spell" if quick else "/spell"
+    return f"{verb} name='{tool_name}' args={json.dumps(tool_args, ensure_ascii=False)}"
 
 
 def _parse_spell_line(text: str):
@@ -1050,17 +1066,29 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
     return None
 
 
+class ParsedSpell(NamedTuple):
+    """1 つの /spell (または /quick_spell) 呼び出しのパース結果。"""
+
+    name: str
+    args: dict
+    m: Any  # re.Match または _SpellSpan
+    norm: str
+    quick: bool
+
+
 def _parse_spell_lines(
     text: str, *, quiet: bool = False,
     malformed_out: Optional[List[Tuple[str, str, Any]]] = None,
-) -> List[Tuple[str, dict, Any, str]]:
+) -> List[ParsedSpell]:
     """Parse ALL /spell invocations in *text*, including fuzzy (informal) syntax.
 
-    Returns list of ``(tool_name, tool_args, match, normalized_line)``.
-    - ``match`` points to the original text position (for text_before calculation).
+    Returns list of :class:`ParsedSpell` ``(name, args, m, norm, quick)``.
+    - ``m`` points to the original text position (for text_before calculation).
       複数行 args を救済したエントリは ``_SpellSpan`` (start/end/span のみ) になる。
-    - ``normalized_line`` is the canonical ``/spell name='...' args={...}`` form,
+    - ``norm`` is the canonical ``/spell name='...' args={...}`` form,
       which is used in SAIMemory storage so the persona learns correct syntax.
+    - ``quick`` = ``/quick_spell`` 動詞で唱えられた行 (quick_spell.md)。fuzzy
+      救済・複数行 args 救済を通っても保持される。
     Unparseable entries are skipped from the return value; canonical-form
     entries whose args failed to parse (after the multiline rescue) are
     reported via ``malformed_out`` when the caller passes a list — the spell
@@ -1072,7 +1100,7 @@ def _parse_spell_lines(
     stored meta-judgment messages on every poll) where the same historical text
     is parsed repeatedly and the log noise is pure spam.
     """
-    found: List[Tuple[str, dict, Any, str]] = []
+    found: List[ParsedSpell] = []
     matched_spans: List[Tuple[int, int]] = []
 
     # Pass 1: canonical form
@@ -1080,24 +1108,25 @@ def _parse_spell_lines(
         # 直前の複数行救済が飲み込んだ範囲内 (= args の本文中) の再マッチは無視
         if any(s <= m.start() < e for s, e in matched_spans):
             continue
+        quick = _is_quick_match(m)
         args_raw = m.group(2).strip()
         tool_args = _parse_spell_args(args_raw, silent=quiet, mute=quiet)
         if tool_args is not None:
-            normalized = _normalize_spell_line(m.group(1), tool_args)
-            found.append((m.group(1), tool_args, m, normalized))
+            normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
+            found.append(ParsedSpell(m.group(1), tool_args, m, normalized, quick))
             matched_spans.append(m.span())
             continue
         # 1 行で読めない args: 文字列値に生改行を含む複数行 JSON/dict を救済
         rescued = _rescue_multiline_args(text, m)
         if rescued is not None:
             tool_args, span = rescued
-            normalized = _normalize_spell_line(m.group(1), tool_args)
+            normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
             if not quiet:
                 LOGGER.info(
                     "[sea][spell] Rescued multiline args for spell '%s' → %s",
                     m.group(1), normalized[:200],
                 )
-            found.append((m.group(1), tool_args, span, normalized))
+            found.append(ParsedSpell(m.group(1), tool_args, span, normalized, quick))
             matched_spans.append(span.span())
             continue
         if malformed_out is not None:
@@ -1109,16 +1138,17 @@ def _parse_spell_lines(
         if any(s <= span[0] < e for s, e in matched_spans):
             continue
         tool_name = m.group(1)
+        quick = _is_quick_match(m)
         tool_args = _parse_fuzzy_spell_args(m.group(2).strip(), mute=quiet)
         if tool_args is not None:
-            normalized = _normalize_spell_line(tool_name, tool_args)
+            normalized = _normalize_spell_line(tool_name, tool_args, quick=quick)
             if not quiet:
                 LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
-            found.append((tool_name, tool_args, m, normalized))
+            found.append(ParsedSpell(tool_name, tool_args, m, normalized, quick))
             matched_spans.append(span)
 
     # Sort by position in text so rounds process spells in order
-    found.sort(key=lambda x: x[2].start())
+    found.sort(key=lambda x: x.m.start())
     return found
 
 
@@ -1427,8 +1457,12 @@ async def _run_spell_tool_async(
     playbook_name: str,
     event_callback: Optional[Callable],
     messages: Optional[list] = None,
-) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """Execute a single spell tool. Returns ``(result_string, metadata)``.
+) -> Tuple[str, Optional[Dict[str, Any]], bool]:
+    """Execute a single spell tool. Returns ``(result_string, metadata, ok)``.
+
+    ``ok=False`` は機械的失敗 (実行中の例外 / レジストリ未登録) — quick_spell.md
+    §3.3 Phase 1。従来は例外が文字列に溶けて成功と区別できず、例外死が
+    ``[Spell Result]`` の顔をして注入されていた既存バグの修正を兼ねる。
 
     Tool return values are normalized via ``tools.core.parse_tool_result``,
     which accepts:
@@ -1443,8 +1477,9 @@ async def _run_spell_tool_async(
     画像 / ファイル等を multimodal で受け取る。 snippet と file_path は
     受け取るだけで未使用 (別 Phase で SAIMemory 経路を設計予定)。
 
-    Errors become ``(error_message, None)`` so the spell loop can continue
-    and the persona's original utterance still reaches Building/SAIMemory.
+    Errors become ``(error_message, None, False)`` so the spell loop can
+    continue and the persona's original utterance still reaches
+    Building/SAIMemory.
     """
     from pathlib import Path
 
@@ -1452,7 +1487,7 @@ async def _run_spell_tool_async(
     if not tool_func:
         result_str = f"Spell '{tool_name}' not found in registry"
         LOGGER.error("[sea][spell] %s", result_str)
-        return result_str, None
+        return result_str, None, False
 
     # LLM がクオートした数値 / 真偽値 (``"index": "2"``) を schema 宣言型へ正規化。
     # これを怠ると ``index < 0`` が ``str < int`` で TypeError になる。
@@ -1495,11 +1530,11 @@ async def _run_spell_tool_async(
         content, _snippet, _file_path, result_metadata = parse_tool_result(raw_result)
         result_str = content
         LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
-        return result_str, result_metadata
+        return result_str, result_metadata, True
     except Exception as exc:
         result_str = f"Spell error ({tool_name}): {type(exc).__name__}: {exc}"
         LOGGER.exception("[sea][spell] %s failed", tool_name)
-        return result_str, None
+        return result_str, None, False
 
 
 def _emit_bubble1_early(
@@ -1834,14 +1869,14 @@ async def _run_spell_loop(
             # into unknown_spells below. The span (m) and normalized echo (norm)
             # keep the persona's original text.
             _classified = [
-                (canonicalize_spell_name(name), args, m, norm)
-                for name, args, m, norm in all_parsed
+                ParsedSpell(canonicalize_spell_name(p.name), p.args, p.m, p.norm, p.quick)
+                for p in all_parsed
             ]
             valid_spells = [
-                t for t in _classified if t[0] in SPELL_TOOL_NAMES
+                t for t in _classified if t.name in SPELL_TOOL_NAMES
             ]
             unknown_spells = [
-                t for t in _classified if t[0] not in SPELL_TOOL_NAMES
+                t for t in _classified if t.name not in SPELL_TOOL_NAMES
             ]
 
             # Nothing spell-like at all → normal speech, exit the loop. Unknown
@@ -1954,7 +1989,7 @@ async def _run_spell_loop(
             # Sort by match position so results stay aligned with textual order;
             # the downstream zip()/round_records logic (which re-sorts by
             # m.start()) is unaffected.
-            valid_spells.sort(key=lambda s: s[2].start())
+            valid_spells.sort(key=lambda s: s.m.start())
             # モード (aspect) 別スペル権限ゲート (mode_spell_permissions.md §6)。
             # アクティブラインの aspect を引き、Track/Task 操作スペルが不許可なら
             # 実行せずゲット文を結果に差し込む (executed=False で × ブロック表示)。
@@ -1966,39 +2001,43 @@ async def _run_spell_loop(
             # valid_results: (result_text, result_meta, executed)。executed=False は
             # ゲートでブロックされた spell (round_records で success=False になる)。
             valid_results: List[Tuple[str, Optional[Dict[str, Any]], bool]] = []
-            for _name, _args, _m, _norm in valid_spells:
-                _block_msg = check_spell_permission(_name, _active_aspect)
+            for _spell in valid_spells:
+                _block_msg = check_spell_permission(_spell.name, _active_aspect)
                 if _block_msg is not None:
                     LOGGER.info(
                         "[sea][spell] Spell '%s' blocked by mode gate (aspect=%s)",
-                        _name, _active_aspect.value if _active_aspect else None,
+                        _spell.name, _active_aspect.value if _active_aspect else None,
                     )
                     valid_results.append((_block_msg, None, False))
                     continue
-                _rtext, _rmeta = await _run_spell_tool_async(
-                    _name, _args, persona, state, playbook.name,
+                # ok=False (実行中の例外 / レジストリ未登録) は success=False として
+                # round_records へ流れ、[Spell Error] + × ブロックになる (Phase 1)。
+                _rtext, _rmeta, _ok = await _run_spell_tool_async(
+                    _spell.name, _spell.args, persona, state, playbook.name,
                     event_callback, messages=messages,
                 )
-                valid_results.append((_rtext, _rmeta, True))
+                valid_results.append((_rtext, _rmeta, _ok))
 
             # Unified, position-ordered record per spell line this round.
             # Unknown spells are not executed — each gets a corrective error
             # (``_build_unknown_spell_error``) that is fed back to the LLM and
             # shown to the user as a failure (×) block, so the persona can retry.
             round_records: List[Dict[str, Any]] = []
-            for (name, args, m, norm), (result_text, result_meta, executed) in zip(valid_spells, valid_results):
+            for spell, (result_text, result_meta, executed) in zip(valid_spells, valid_results):
                 round_records.append({
-                    "name": name, "args": args, "m": m, "norm": norm,
+                    "name": spell.name, "args": spell.args, "m": spell.m,
+                    "norm": spell.norm, "quick": spell.quick,
                     "result": result_text, "meta": result_meta, "success": executed,
                 })
-            for name, args, m, norm in unknown_spells:
-                error_text = _build_unknown_spell_error(name, persona, building_id)
+            for spell in unknown_spells:
+                error_text = _build_unknown_spell_error(spell.name, persona, building_id)
                 LOGGER.warning(
                     "[sea][spell] Unknown spell '%s' → returning error to persona for retry",
-                    name,
+                    spell.name,
                 )
                 round_records.append({
-                    "name": name, "args": args, "m": m, "norm": norm,
+                    "name": spell.name, "args": spell.args, "m": spell.m,
+                    "norm": spell.norm, "quick": spell.quick,
                     "result": error_text, "meta": None, "success": False,
                 })
             for name, args_raw, m in malformed_spells:
@@ -2010,10 +2049,22 @@ async def _run_spell_loop(
                 )
                 round_records.append({
                     "name": name, "args": {}, "m": m,
-                    "norm": text[m.start():m.end()],
+                    "norm": text[m.start():m.end()], "quick": _is_quick_match(m),
                     "result": error_text, "meta": None, "success": False,
                 })
             round_records.sort(key=lambda r: r["m"].start())
+
+            # ---- /quick_spell の終端・昇格判定の材料 (quick_spell.md §3.2-3.4) ----
+            # 全行 quick + 全成功 → 後段で LLM 再呼び出しをスキップして終端。
+            # 失敗 = 機械的 (success=False: 例外 / 未登録 / unknown / malformed /
+            # ゲート) または論理的 (metadata "error": true のツール宣言)。文字列
+            # ヒューリスティックは使わない (不変条件 4)。
+            _all_quick = all(rec["quick"] for rec in round_records)
+            _round_has_failure = any(
+                (not rec["success"])
+                or (isinstance(rec["meta"], dict) and rec["meta"].get("error") is True)
+                for rec in round_records
+            )
 
             # メタ判断 Pulse の発動 spell + 結果をバッファに記録 (失敗も含む)
             if _is_meta_judgment_pulse:
@@ -2039,9 +2090,19 @@ async def _run_spell_loop(
                     media_list = result_meta.get("media")
                     if isinstance(media_list, list):
                         aggregated_media.extend(media_list)
+            # quick 宣言に反して応答機会を返すときだけ、理由の事実文を注入の
+            # 先頭に付ける (§3.4)。注入のみで SAIMemory へ記録する
+            # combined_results には混ぜない (不変条件 5)。
+            _injected_results = combined_results
+            if _all_quick and _round_has_failure:
+                _injected_results = (
+                    "/quick_spell で唱えたスペルに失敗があったため、"
+                    "結果を確認できるよう応答機会を返しています。\n"
+                    + combined_results
+                )
             spell_result_msg: Dict[str, Any] = {
                 "role": "user",
-                "content": f"<system>{combined_results}</system>",
+                "content": f"<system>{_injected_results}</system>",
             }
             if aggregated_media:
                 spell_result_msg["metadata"] = {"media": aggregated_media}
@@ -2120,6 +2181,21 @@ async def _run_spell_loop(
                 )
             if text_after:
                 merged_parts.append(text_after)
+
+            # ---- /quick_spell 終端 (quick_spell.md §3.2) ----
+            # ラウンドの全行が /quick_spell かつ失敗ゼロ = 「この発話で完了」の
+            # 宣言どおり LLM 再呼び出しをスキップして終端する。結果は上で記録
+            # 済みで、本人には次の Pulse で anchor 経由で見える (§3.5)。
+            # final_continuation は空文字 (空応答は既存機構で正規終端 —
+            # _store_memory は空文字を no-op で返す)。失敗があるラウンドは
+            # 従来フローへ昇格し、下の再呼び出しで結果を見せる (不変条件 2)。
+            if _all_quick and not _round_has_failure:
+                LOGGER.info(
+                    "[sea][spell] Round %d: all-quick round succeeded; "
+                    "skipping LLM re-invocation (declared complete)", loop_count,
+                )
+                text = ""
+                break
 
             # ---- Beat 境界 (beat_execution_context.md §2.2 / §3.4) ----
             # ここが Beat の切れ目: この周の生成と spell 結果の記録 (上の
@@ -2476,7 +2552,7 @@ async def _execute_pre_spells(
             continue
         parsed = _parse_spell_lines(entry)
         if parsed:
-            for name, args, _, normalized in parsed:
+            for name, args, _, normalized, _quick in parsed:
                 # Bare addon spell names persisted before namespacing (or written
                 # without the prefix) resolve to their <addon>__<name> key here.
                 name = canonicalize_spell_name(name)
@@ -2556,11 +2632,12 @@ async def _execute_pre_spells(
             )
             results.append((_block_msg, None, False))
             continue
-        _rtext, _rmeta = await _run_spell_tool_async(
+        # ok=False (例外 / 未登録) は [Spell Error] として注入される (Phase 1)
+        _rtext, _rmeta, _ok = await _run_spell_tool_async(
             name, args, persona, state, playbook.name, event_callback,
             messages=messages,
         )
-        results.append((_rtext, _rmeta, True))
+        results.append((_rtext, _rmeta, _ok))
 
     triggered_lines = [norm for _, _, norm in valid_specs]
     result_lines = [
@@ -2696,7 +2773,7 @@ async def _execute_realtime_spells(
             continue
 
         try:
-            result_text, result_meta = await _run_spell_tool_async(
+            result_text, result_meta, _ok = await _run_spell_tool_async(
                 spell_name, args, persona, state, "__realtime__", event_callback,
                 messages=messages,
             )

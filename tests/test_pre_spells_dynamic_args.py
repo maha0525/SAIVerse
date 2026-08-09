@@ -53,7 +53,7 @@ def test_no_args_entry_invokes_decider() -> None:
     state = _make_state()
     playbook = SimpleNamespace(name="track_user_conversation")
 
-    spell_run_mock = AsyncMock(return_value=("ok", None))
+    spell_run_mock = AsyncMock(return_value=("ok", None, True))
 
     with patch("sea.runtime_llm._decide_spell_args_via_playbook", decider_mock), \
          patch("sea.runtime_llm._run_spell_tool_async", spell_run_mock), \
@@ -77,7 +77,7 @@ def test_no_args_entry_invokes_decider() -> None:
 def test_decider_returning_none_skips_spell() -> None:
     """decider が None を返した場合、その Spell は skip され例外にならない。"""
     decider_mock = AsyncMock(return_value=None)
-    spell_run_mock = AsyncMock(return_value=("ok", None))
+    spell_run_mock = AsyncMock(return_value=("ok", None, True))
 
     runtime = SimpleNamespace(_store_memory=lambda *args, **kwargs: None)
     persona = SimpleNamespace(persona_id="pid")
@@ -100,7 +100,7 @@ def test_decider_returning_none_skips_spell() -> None:
 def test_fully_specified_entry_does_not_invoke_decider() -> None:
     """args 指定済みエントリは decider を呼ばずに直接実行される。"""
     decider_mock = AsyncMock()
-    spell_run_mock = AsyncMock(return_value=("ok", None))
+    spell_run_mock = AsyncMock(return_value=("ok", None, True))
 
     runtime = SimpleNamespace(_store_memory=lambda *args, **kwargs: None)
     persona = SimpleNamespace(persona_id="pid")
@@ -145,7 +145,7 @@ def test_unknown_spell_in_no_args_form_is_skipped() -> None:
 def test_mixed_entries_handled_independently() -> None:
     """確定値 + 引数なし + 不明 が混在しても、有効なものは全部実行される。"""
     decider_mock = AsyncMock(return_value={"k": "decided"})
-    spell_run_mock = AsyncMock(return_value=("ok", None))
+    spell_run_mock = AsyncMock(return_value=("ok", None, True))
 
     runtime = SimpleNamespace(_store_memory=lambda *args, **kwargs: None)
     persona = SimpleNamespace(persona_id="pid")

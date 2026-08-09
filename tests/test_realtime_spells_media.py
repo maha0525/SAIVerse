@@ -100,7 +100,7 @@ class RealtimeSpellMediaTest(unittest.TestCase):
         media_descriptor = {"path": "/tmp/see.jpg", "mime_type": "image/jpeg"}
 
         async def fake_spell(spell_name, args, persona, state, marker, cb, messages=None):
-            return "目の前の光景を見た。", {"media": [media_descriptor]}
+            return "目の前の光景を見た。", {"media": [media_descriptor]}, True
 
         messages, _ = self._run([_FakeBinding("see", label="see")], fake_spell)
 
@@ -116,7 +116,7 @@ class RealtimeSpellMediaTest(unittest.TestCase):
 
     def test_text_only_spell_attaches_no_media(self):
         async def fake_spell(spell_name, args, persona, state, marker, cb, messages=None):
-            return "気圧: 1008.8 hPa", {}
+            return "気圧: 1008.8 hPa", {}, True
 
         messages, _ = self._run([_FakeBinding("see", label="気圧")], fake_spell)
 
