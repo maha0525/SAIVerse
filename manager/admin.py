@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime
@@ -27,6 +28,27 @@ from manager.persona import PersonaMixin
 from manager.state import CoreState
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
+
+#: Building ID の文字種契約 (docs/issues/building_id_no_charset_constraint.md):
+#: ID はログのフォルダパス・saiverse:// URI・API パス引数に素で入る永続キーの
+#: ため、ASCII 英数字 + '_' + '-' (先頭は英数字) のみを許す。
+_BUILDING_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _slugify_identifier(text: str) -> str:
+    """名前を ID 用の ASCII slug に落とす (小文字化・空白→'_'・対象外文字は除去)。
+
+    日本語名のように ASCII が残らない入力では空文字列を返す — 呼び出し元が
+    連番フォールバックに切り替える。
+    """
+    out = []
+    for ch in text.lower().strip():
+        if ch.isascii() and (ch.isalnum() or ch in "_-"):
+            out.append(ch)
+        elif ch.isspace():
+            out.append("_")
+    slug = re.sub(r"_{2,}", "_", "".join(out))
+    return slug.strip("_-")
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
@@ -358,13 +380,38 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return f"Error: A building named '{name}' already exists in that city."
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
-            
-            # Use custom ID if provided, otherwise generate
+
+            # Use custom ID if provided, otherwise generate. Either way the ID
+            # must satisfy the charset contract (_BUILDING_ID_RE) — it goes
+            # verbatim into log folder paths, saiverse:// URIs and API paths.
             if building_id and building_id.strip():
                 building_id = building_id.strip()
+                if not _BUILDING_ID_RE.match(building_id):
+                    return (
+                        "Error: Building ID may contain only ASCII letters, "
+                        "digits, '_' and '-', and must start with a letter or "
+                        f"digit (got: '{building_id}')."
+                    )
             else:
-                building_id = f"{name.lower().replace(' ', '_')}_{city.CITYNAME}"
-            
+                name_slug = _slugify_identifier(name)
+                city_slug = _slugify_identifier(city.CITYNAME)
+                if name_slug:
+                    building_id = f"{name_slug}_{city_slug}" if city_slug else name_slug
+                else:
+                    # 日本語名など slug が空になる名前は連番でフォールバック
+                    # (issue の論点 1: 読み変換は導入せず、まず口を塞ぐ)
+                    n = 1
+                    while True:
+                        candidate = (
+                            f"building_{n}_{city_slug}" if city_slug else f"building_{n}"
+                        )
+                        if not db.query(BuildingModel).filter_by(
+                            BUILDINGID=candidate
+                        ).first():
+                            break
+                        n += 1
+                    building_id = candidate
+
             if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
                 return (
                     f"Error: A building with the ID '{building_id}' "
