@@ -162,7 +162,11 @@ class RegionAdminTestCase(unittest.TestCase):
     def test_existing_non_ascii_region_id_still_loads_updates_and_deletes(self):
         # 既存の非 ASCII ID は裁定どおり放置する (作成の口だけ塞ぐ)。作成時
         # 検証を足したことで既存データの読み・更新・削除が壊れていないことを、
-        # 散文の裁定でなく実行可能な形で固定する
+        # 散文の裁定でなく実行可能な形で固定する。
+        # fixture の入口は**自動生成された入口**を模したもの (ID も名前も自動
+        # 生成の規則どおり) なので、削除で Region と運命を共にするのが正。
+        # ユーザー指定の入口がたまたま同じ ID を持つ場合の巻き添えは別問題で、
+        # 出自を永続化しないと区別できない (docs/intent/region.md §3.1)
         db = self.SessionLocal()
         try:
             db.add(RegionModel(

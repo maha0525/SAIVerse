@@ -259,6 +259,10 @@ class BlueprintMixin:
                 description=private_room_model.DESCRIPTION,
             )
             in_this_city = blueprint.CITYID == self.city_id
+            # commit 後に読む blueprint の値もここで取り出す (expire-on-commit で
+            # 再フェッチが走るのを避ける)
+            base_system_prompt = blueprint.BASE_SYSTEM_PROMPT
+            base_avatar = blueprint.BASE_AVATAR
 
             # DB を先に確定させてから、インメモリの世界状態と PersonaCore に触る。
             # 逆順だと、失敗した生成 (ID 衝突など) が rollback 後も building_map /
@@ -293,8 +297,8 @@ class BlueprintMixin:
                     city_name=self.city_name,
                     persona_id=new_ai_id,
                     persona_name=entity_name,
-                    persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT,
-                    avatar_image=blueprint.BASE_AVATAR,
+                    persona_system_instruction=base_system_prompt,
+                    avatar_image=base_avatar,
                     buildings=self.buildings,
                     common_prompt_path=common_prompt_file,
                     building_histories=self.building_histories,

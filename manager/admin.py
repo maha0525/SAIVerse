@@ -665,6 +665,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         "cannot auto-create the entrance."
                     )
                 entrance_id = entrance_id_for(region_id)
+                # ここへ来る衝突は「名前から導いた ID」か「カスタム ID」の場合。
+                # どちらもユーザーが選んだものなので、連番で黙って別 ID にせず
+                # エラーで返す (上の予約は、機械が選ぶ連番候補にだけ効く)。
                 if db.query(BuildingModel).filter_by(BUILDINGID=entrance_id).first():
                     return f"Error: A building with the ID '{entrance_id}' already exists."
                 db.add(BuildingModel(
