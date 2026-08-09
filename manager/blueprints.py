@@ -14,6 +14,7 @@ from database.models import (
     City as CityModel,
     Tool as ToolModel,
 )
+from manager.ids import build_identifier
 from persona.core import PersonaCore
 from saiverse.buildings import Building
 from saiverse.model_configs import get_context_length, get_model_provider
@@ -192,7 +193,19 @@ class BlueprintMixin:
                     f"An entity with the generated ID '{new_ai_id}' already exists.",
                 )
 
-            private_room_id = f"{new_ai_id}_room"
+            # 私室の Building ID は文字種契約を独立に満たす (manager/ids.py) —
+            # entity_name は Blueprint 生成時にユーザー / ペルソナが決めるので
+            # 日本語が来る。AIID 側の文字種は issue 論点 3 で未着手。
+            private_room_id = build_identifier(
+                entity_name,
+                home_city.CITYNAME,
+                "room",
+                stem="persona",
+                exists=lambda bid: db.query(BuildingModel)
+                .filter_by(BUILDINGID=bid)
+                .first()
+                is not None,
+            )
             private_room_model = BuildingModel(
                 CITYID=blueprint.CITYID,
                 BUILDINGID=private_room_id,

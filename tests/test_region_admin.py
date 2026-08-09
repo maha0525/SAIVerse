@@ -61,6 +61,40 @@ class RegionAdminTestCase(unittest.TestCase):
         self.assertNotIn("Error", result)
         self.assertIsNotNone(self._get_region("custom_id"))
 
+    # --- 文字種契約 (docs/issues/building_id_no_charset_constraint.md 論点 1) ---
+    # Region ID は入口 Building の ID (entrance_<region_id>) の材料なので、
+    # ここが素通しだと Building ID 側の契約ごと破れる。日本語名の SubRegion は
+    # game_create_subregion (Ruler ペルソナの口) から実際に来る。
+
+    def test_japanese_region_name_generates_ascii_id_and_entrance(self):
+        result = self.svc.create_region("霧降りの森", "", "generic", 1)
+        self.assertNotIn("Error", result)
+        region = self._get_region("region_1_city_a")
+        self.assertIsNotNone(region)
+        self.assertEqual(region.NAME, "霧降りの森")
+        # 入口 Building の ID も ASCII に収まる
+        self.assertEqual(region.ENTRANCE_BUILDING_ID, "entrance_region_1_city_a")
+        entrance = self._get_building("entrance_region_1_city_a")
+        self.assertIsNotNone(entrance)
+        self.assertEqual(entrance.BUILDINGNAME, "霧降りの森: 入口")
+
+    def test_japanese_region_names_get_distinct_numbered_ids(self):
+        self.assertNotIn("Error", self.svc.create_region("霧降りの森", "", "generic", 1))
+        self.assertNotIn("Error", self.svc.create_region("白霧の社", "", "generic", 1))
+        self.assertIsNotNone(self._get_region("region_1_city_a"))
+        self.assertIsNotNone(self._get_region("region_2_city_a"))
+
+    def test_custom_japanese_region_id_rejected(self):
+        result = self.svc.create_region("森", "", "generic", 1, region_id="霧降りの森")
+        self.assertIn("Error", result)
+        self.assertIsNone(self._get_region("霧降りの森"))
+        # 入口 Building も作られない
+        self.assertIsNone(self._get_building("entrance_霧降りの森"))
+
+    def test_custom_region_id_with_slash_rejected(self):
+        result = self.svc.create_region("X", "", "generic", 1, region_id="a/b")
+        self.assertIn("Error", result)
+
     def test_create_region_invalid_type(self):
         result = self.svc.create_region("X", "", "dungeon", 1)
         self.assertIn("Error", result)

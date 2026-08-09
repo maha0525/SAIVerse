@@ -17,6 +17,7 @@ from database.models import (
     User,
     UserAiLink,
 )
+from manager.ids import build_identifier
 from persona.core import PersonaCore
 from saiverse.model_configs import get_context_length, get_model_provider
 
@@ -465,11 +466,20 @@ class PersonaMixin:
                     None,
                 )
 
-            # Building ID based on AI ID
-            if custom_ai_id:
-                new_building_id = f"{custom_ai_id}_{self.city_name}_room"
-            else:
-                new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
+            # 私室の Building ID は AI ID 由来だが、文字種契約は Building 側で
+            # 独立に満たす (manager/ids.py) — AIID の文字種は issue 論点 3 で未着手
+            # なので、日本語名のペルソナでは AI ID と私室 ID の形が揃わない。
+            # 揃わないことより、パス・URI に日本語が入らないことを取る。
+            new_building_id = build_identifier(
+                custom_ai_id or name,
+                self.city_name,
+                "room",
+                stem="persona",
+                exists=lambda bid: db.query(BuildingModel)
+                .filter_by(BUILDINGID=bid)
+                .first()
+                is not None,
+            )
 
             new_ai_model = AIModel(
                 AIID=new_ai_id,

@@ -13,7 +13,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import Base, Building as BuildingModel, City as CityModel
-from manager.admin import AdminService, _slugify_identifier
+from manager.admin import AdminService
+from manager.ids import build_identifier, is_valid_identifier, slugify_identifier
 
 
 class BuildingAdminIdTestCase(unittest.TestCase):
@@ -91,13 +92,93 @@ class BuildingAdminIdTestCase(unittest.TestCase):
         result = self._create("店", building_id="-shop")
         self.assertIn("Error", result)
 
-    # --- slug ヘルパ ---
+
+class IdentifierHelperTestCase(unittest.TestCase):
+    """manager/ids.py — 全作成経路が共有する契約と生成式。"""
 
     def test_slugify_identifier(self):
-        self.assertEqual(_slugify_identifier("Tea  House"), "tea_house")
-        self.assertEqual(_slugify_identifier("鉄腕の道具店"), "")
-        self.assertEqual(_slugify_identifier("Bob's Bar"), "bobs_bar")
-        self.assertEqual(_slugify_identifier("  _edge-_ "), "edge")
+        self.assertEqual(slugify_identifier("Tea  House"), "tea_house")
+        self.assertEqual(slugify_identifier("鉄腕の道具店"), "")
+        self.assertEqual(slugify_identifier("Bob's Bar"), "bobs_bar")
+        self.assertEqual(slugify_identifier("  _edge-_ "), "edge")
+
+    def test_is_valid_identifier(self):
+        self.assertTrue(is_valid_identifier("tool_shop"))
+        self.assertTrue(is_valid_identifier("a-b-1"))
+        self.assertFalse(is_valid_identifier(""))
+        self.assertFalse(is_valid_identifier("鉄腕"))
+        self.assertFalse(is_valid_identifier("a/b"))
+        self.assertFalse(is_valid_identifier("-shop"))
+
+    # 各作成経路が渡す形をここで固定する (呼び出し側の引数ミスは
+    # それぞれの経路のテストが受け持つ)
+
+    def test_building_shape(self):
+        taken = set()
+        self.assertEqual(
+            build_identifier("Tea House", "city_a", stem="building",
+                             exists=taken.__contains__),
+            "tea_house_city_a",
+        )
+        self.assertEqual(
+            build_identifier("鉄腕の道具店", "city_a", stem="building",
+                             exists=taken.__contains__),
+            "building_1_city_a",
+        )
+
+    def test_region_shape_keeps_prefix_in_both_branches(self):
+        taken = set()
+        self.assertEqual(
+            build_identifier("Mist Valley", "city_a", prefix="region",
+                             exists=taken.__contains__),
+            "region_mist_valley_city_a",
+        )
+        self.assertEqual(
+            build_identifier("霧降りの森", "city_a", prefix="region",
+                             exists=taken.__contains__),
+            "region_1_city_a",
+        )
+
+    def test_private_room_shape(self):
+        taken = set()
+        self.assertEqual(
+            build_identifier("sophie", "city_a", "room", stem="persona",
+                             exists=taken.__contains__),
+            "sophie_city_a_room",
+        )
+        self.assertEqual(
+            build_identifier("エア", "city_a", "room", stem="persona",
+                             exists=taken.__contains__),
+            "persona_1_city_a_room",
+        )
+
+    def test_numbered_fallback_skips_taken(self):
+        taken = {"building_1_city_a", "building_2_city_a"}
+        self.assertEqual(
+            build_identifier("霧雨の宿亭", "city_a", stem="building",
+                             exists=taken.__contains__),
+            "building_3_city_a",
+        )
+
+    def test_non_ascii_city_drops_out_of_the_tail(self):
+        # City 名の文字種は issue 論点 3 で未着手 — tail に日本語が来ても
+        # ID には混ぜない (混ぜると Building ID の契約が City 経由で破れる)
+        taken = set()
+        generated = build_identifier("Tea House", "都", stem="building",
+                                     exists=taken.__contains__)
+        self.assertEqual(generated, "tea_house")
+        self.assertTrue(is_valid_identifier(generated))
+
+    def test_every_branch_satisfies_the_contract(self):
+        taken = set()
+        for head in ("Tea House", "鉄腕の道具店", "Bob's Bar", "  ", "Cafe 森"):
+            for kwargs in ({"stem": "building"}, {"prefix": "region"}):
+                generated = build_identifier(head, "city_a",
+                                             exists=taken.__contains__, **kwargs)
+                self.assertTrue(
+                    is_valid_identifier(generated),
+                    f"{head!r} {kwargs} -> {generated!r} が契約を満たさない",
+                )
 
 
 if __name__ == "__main__":

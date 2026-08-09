@@ -25,30 +25,11 @@ from database.models import (
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
+from manager.ids import build_identifier, charset_error, is_valid_identifier
 from manager.state import CoreState
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
 
-#: Building ID の文字種契約 (docs/issues/building_id_no_charset_constraint.md):
-#: ID はログのフォルダパス・saiverse:// URI・API パス引数に素で入る永続キーの
-#: ため、ASCII 英数字 + '_' + '-' (先頭は英数字) のみを許す。
-_BUILDING_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-
-
-def _slugify_identifier(text: str) -> str:
-    """名前を ID 用の ASCII slug に落とす (小文字化・空白→'_'・対象外文字は除去)。
-
-    日本語名のように ASCII が残らない入力では空文字列を返す — 呼び出し元が
-    連番フォールバックに切り替える。
-    """
-    out = []
-    for ch in text.lower().strip():
-        if ch.isascii() and (ch.isalnum() or ch in "_-"):
-            out.append(ch)
-        elif ch.isspace():
-            out.append("_")
-    slug = re.sub(r"_{2,}", "_", "".join(out))
-    return slug.strip("_-")
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
@@ -117,7 +98,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     def _validate_city_name(name: str) -> Optional[str]:
         """Validate city name is ASCII alphanumeric + underscore only.
         Returns an error message string if invalid, None if valid."""
-        import re
         if not name or not name.strip():
             return "Error: City name cannot be empty."
         if not re.match(r'^[a-zA-Z0-9_]+$', name):
@@ -382,35 +362,24 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
 
             # Use custom ID if provided, otherwise generate. Either way the ID
-            # must satisfy the charset contract (_BUILDING_ID_RE) — it goes
+            # must satisfy the charset contract (manager/ids.py) — it goes
             # verbatim into log folder paths, saiverse:// URIs and API paths.
             if building_id and building_id.strip():
                 building_id = building_id.strip()
-                if not _BUILDING_ID_RE.match(building_id):
-                    return (
-                        "Error: Building ID may contain only ASCII letters, "
-                        "digits, '_' and '-', and must start with a letter or "
-                        f"digit (got: '{building_id}')."
-                    )
+                if not is_valid_identifier(building_id):
+                    return charset_error("Building ID", building_id)
             else:
-                name_slug = _slugify_identifier(name)
-                city_slug = _slugify_identifier(city.CITYNAME)
-                if name_slug:
-                    building_id = f"{name_slug}_{city_slug}" if city_slug else name_slug
-                else:
-                    # 日本語名など slug が空になる名前は連番でフォールバック
-                    # (issue の論点 1: 読み変換は導入せず、まず口を塞ぐ)
-                    n = 1
-                    while True:
-                        candidate = (
-                            f"building_{n}_{city_slug}" if city_slug else f"building_{n}"
-                        )
-                        if not db.query(BuildingModel).filter_by(
-                            BUILDINGID=candidate
-                        ).first():
-                            break
-                        n += 1
-                    building_id = candidate
+                # 日本語名など slug が空になる名前は building_<連番>_<city> へ
+                # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)
+                building_id = build_identifier(
+                    name,
+                    city.CITYNAME,
+                    stem="building",
+                    exists=lambda cid: db.query(BuildingModel)
+                    .filter_by(BUILDINGID=cid)
+                    .first()
+                    is not None,
+                )
 
             if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
                 return (
@@ -598,10 +567,24 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     # 入れ子は 1 段まで (モデル定義のコメント参照)。アプリ層で強制する
                     return "Error: Nesting is limited to one level; the parent is already a SubRegion."
 
+            # Region ID も Building ID と同じ文字種契約に従う (manager/ids.py)。
+            # 入口 Building の ID は entrance_<region_id> なので、ここが素通しだと
+            # Building 側の契約ごと破れる — game_create_subregion (Ruler ペルソナが
+            # 自分で SubRegion を作る口) は日本語名をそのまま渡してくる。
             if region_id and region_id.strip():
                 region_id = region_id.strip()
+                if not is_valid_identifier(region_id):
+                    return charset_error("Region ID", region_id)
             else:
-                region_id = f"region_{name.lower().replace(' ', '_')}_{city.CITYNAME}"
+                region_id = build_identifier(
+                    name,
+                    city.CITYNAME,
+                    prefix="region",
+                    exists=lambda rid: db.query(RegionModel)
+                    .filter_by(REGION_ID=rid)
+                    .first()
+                    is not None,
+                )
 
             if db.query(RegionModel).filter_by(REGION_ID=region_id).first():
                 return f"Error: A region with the ID '{region_id}' already exists."
