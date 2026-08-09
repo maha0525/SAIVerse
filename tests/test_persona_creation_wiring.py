@@ -192,6 +192,32 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         self.assertEqual(ai_id2, "識別子_city_a")
         self.assertEqual(room_id2, "persona_1_city_a_room")
 
+    # --- AIID はフォルダ名になる (パス境界) ---
+
+    def test_ai_id_that_escapes_the_persona_directory_is_rejected(self):
+        # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になるため、区切り文字が
+        # 通ると保存先が SAIVERSE_HOME の外へ出る。
+        # なお custom_ai_id が ".." 単体でも AIID は ".._city_a" になり、脱出でき
+        # ない普通のフォルダ名なので通る (検査は AIID 全体に対して行う)
+        for bad in ("../../outside", "a/b", "a\\b", "a:b", "a|b"):
+            ok, msg, _ai, _room = self._create("X", custom_ai_id=bad)
+            self.assertFalse(ok, f"{bad!r} が通ってしまった")
+            self.assertIn("Error", msg)
+            self.assertEqual(self.svc.building_map, {}, f"{bad!r} で世界状態が動いた")
+
+    def test_name_derived_ai_id_is_also_checked(self):
+        # 自動生成側 (custom_ai_id なし) も同じ境界を通る
+        ok, msg, _ai, _room = self._create("../escape")
+        self.assertFalse(ok)
+        self.assertIn("Error", msg)
+
+    def test_japanese_ai_id_is_still_allowed(self):
+        # 文字種を ASCII へ統一するかは未決 (issue 論点 3)。ここで塞ぐのは
+        # パス境界だけで、日本語 ID は従来どおり通す
+        ok, _msg, ai_id, _room = self._create("エア")
+        self.assertTrue(ok)
+        self.assertEqual(ai_id, "エア_city_a")
+
     # --- DB とキャッシュの整合 ---
 
     def test_cache_matches_db_after_success(self):

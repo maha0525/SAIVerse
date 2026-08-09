@@ -55,6 +55,35 @@ def entrance_id_for(region_id: str) -> str:
     return f"entrance_{region_id}"
 
 
+#: 単一のパス要素として使えない文字 (Windows の禁止文字を含む)
+_UNSAFE_PATH_CHARS = frozenset('/\\:*?"<>|')
+
+
+def is_safe_path_component(value: str) -> bool:
+    """``value`` を 1 階層のフォルダ名としてそのまま使っても安全か。
+
+    :func:`is_valid_identifier` の文字種契約とは**別の、より緩い検査**。
+    ID を ASCII に統一するかは設計判断 (issue 論点 3) で未決だが、
+    「ディレクトリを脱出できないこと」だけは決着を待たずに要る — ペルソナ ID は
+    ``~/.saiverse/personas/<id>/`` のフォルダ名になるため、区切り文字や ``..`` が
+    通ると保存先が SAIVERSE_HOME の外へ出る。
+    """
+    if not value or value in {".", ".."}:
+        return False
+    if any(ch in _UNSAFE_PATH_CHARS for ch in value):
+        return False
+    return not any(ord(ch) < 32 for ch in value)
+
+
+def path_component_error(kind: str, value: str) -> str:
+    """パス要素として危険な ID を拒むエラー文字列。"""
+    return (
+        f"Error: {kind} is used as a folder name, so it may not contain path "
+        f"separators, control characters, or any of {''.join(sorted(_UNSAFE_PATH_CHARS))} "
+        f"(got: '{value}')."
+    )
+
+
 def charset_error(kind: str, value: str) -> str:
     """契約違反を伝えるエラー文字列 (API・ツールの戻り値にそのまま出る)。"""
     return (

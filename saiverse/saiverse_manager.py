@@ -2310,7 +2310,12 @@ class SAIVerseManager(
             )
             return
 
-        self.buildings = new_buildings
+        # in-place で入れ替える。CoreState / AdminService / RuntimeService /
+        # 既存 PersonaCore はこのリスト**そのもの**を参照で共有しているので、
+        # 新しいリストへ差し替えると manager だけが新しい中身を見て、他は古い
+        # まま取り残される (下の building_map 等を in-place 更新しているのと
+        # 同じ理由)。
+        self.buildings[:] = new_buildings
         new_building_map = {b.building_id: b for b in self.buildings}
 
         # Diff-based update: remove deleted, add/update existing — avoids
@@ -2329,11 +2334,13 @@ class SAIVerseManager(
         new_capacities = {b.building_id: b.capacity for b in self.buildings}
         self.capacities.update(new_capacities)
 
-        # Update building memory paths
-        self.building_memory_paths = {
+        # Update building memory paths (こちらも in-place — 参照の共有先が
+        # 古いパス表を握り続けないように)
+        self.building_memory_paths.clear()
+        self.building_memory_paths.update({
             b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
             for b in self.buildings
-        }
+        })
 
         # Initialize occupants and building_histories for new buildings
         for building_id in self.building_map:

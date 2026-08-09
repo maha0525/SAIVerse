@@ -14,7 +14,11 @@ from database.models import (
     City as CityModel,
     Tool as ToolModel,
 )
-from manager.ids import build_identifier
+from manager.ids import (
+    build_identifier,
+    is_safe_path_component,
+    path_component_error,
+)
 from persona.core import PersonaCore
 from saiverse.buildings import Building
 from saiverse.model_configs import get_context_length, get_model_provider
@@ -187,6 +191,11 @@ class BlueprintMixin:
 
             home_city = db.query(CityModel).filter_by(CITYID=blueprint.CITYID).first()
             new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITYNAME}"
+            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる
+            # (manager/persona.py の同じ検査と対)
+            if not is_safe_path_component(new_ai_id):
+                return False, path_component_error("Entity ID", new_ai_id)
+
             if db.query(AIModel).filter_by(AIID=new_ai_id).first():
                 return (
                     False,

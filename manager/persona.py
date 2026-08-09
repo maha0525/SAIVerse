@@ -17,7 +17,11 @@ from database.models import (
     User,
     UserAiLink,
 )
-from manager.ids import build_identifier
+from manager.ids import (
+    build_identifier,
+    is_safe_path_component,
+    path_component_error,
+)
 from persona.core import PersonaCore
 from saiverse.model_configs import get_context_length, get_model_provider
 
@@ -457,6 +461,13 @@ class PersonaMixin:
                 new_ai_id = f"{custom_ai_id}_{self.city_name}"
             else:
                 new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+
+            # AIID は ~/.saiverse/personas/<id>/ のフォルダ名になる。文字種を
+            # ASCII へ統一するかは未決 (issue 論点 3) だが、区切り文字や '..' で
+            # SAIVERSE_HOME の外へ書けてしまう穴は決着を待たずに塞ぐ
+
+            if not is_safe_path_component(new_ai_id):
+                return (False, path_component_error("Persona ID", new_ai_id), None, None)
 
             if db.query(AIModel).filter_by(AIID=new_ai_id).first():
                 return (

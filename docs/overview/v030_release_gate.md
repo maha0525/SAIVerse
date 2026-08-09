@@ -84,7 +84,7 @@ doc: [`quick_spell.md`](../intent/quick_spell.md) / [`spell_loop_continuation_co
 doc: [`fold_range_and_chronicle_entry_not_one_to_one.md`](../issues/fold_range_and_chronicle_entry_not_one_to_one.md)
 
 **11. Building ID の文字種制約**
-現状: **実装済み (2026-08-09、Wave 0)**。契約を `manager/ids.py` 一枚に集約し、Building を作る 4 経路すべて (Building 作成・Region 入口の自動作成・ペルソナ個室・ブループリント個室) が通るようにした。カスタム ID は非 ASCII を拒否、日本語名は連番へフォールバック。Region ID も同じ契約に従う (入口 ID の材料のため)。既存の日本語 ID 3 件は裁定どおり放置。残 = City ID / ペルソナ ID (AIID) 自体の文字種 (issue 論点 3)。
+現状: **実装済み (2026-08-09、Wave 0)**。契約を `manager/ids.py` 一枚に集約し、Building を作る 4 経路すべて (Building 作成・Region 入口の自動作成・ペルソナ個室・ブループリント個室) が通るようにした。カスタム ID は非 ASCII を拒否、日本語名は連番へフォールバック。Region ID も同じ契約に従う (入口 ID の材料のため)。既存の日本語 ID 3 件は裁定どおり放置。AIID は**パス境界の検査だけ先に入れた** (フォルダ名になるため区切り文字で SAIVERSE_HOME の外へ書けた) — 文字種を ASCII へ統一するかは論点 3 として未決のまま。City ID は既に ASCII 強制済みで穴なし。**レビューで派生した構造課題 2 件は別 issue へ**: [ペルソナ生成の一貫性](../issues/entity_creation_has_no_transactional_boundary.md) (作成が DB・キャッシュ・PersonaCore を跨いだ一貫性を持たない) と [region.md §3.1](../intent/region.md) (入口の出自を永続化していない)。どちらも未着手・裁定待ち。
 理由: ID は記憶側からも参照される永続キー。出荷後に増えるほど、後から制約を入れたときの改名移行 (参照の全面書き換え) が重くなる。作成時の制約は小さい工事。
 doc: [`building_id_no_charset_constraint.md`](../issues/building_id_no_charset_constraint.md)
 
