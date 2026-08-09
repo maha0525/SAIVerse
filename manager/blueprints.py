@@ -196,11 +196,15 @@ class BlueprintMixin:
             # 私室の Building ID は文字種契約を独立に満たす (manager/ids.py) —
             # entity_name は Blueprint 生成時にユーザー / ペルソナが決めるので
             # 日本語が来る。AIID 側の文字種は issue 論点 3 で未着手。
+            # ensure_unique=True の理由は manager/persona.py の同じ箇所と同じ:
+            # slug 化は情報を落とすので、上の名前・AIID 重複検査を通った別個体が
+            # 同じ私室 ID に落ちうる。
             private_room_id = build_identifier(
                 entity_name,
                 home_city.CITYNAME,
                 "room",
                 stem="persona",
+                ensure_unique=True,
                 exists=lambda bid: db.query(BuildingModel)
                 .filter_by(BUILDINGID=bid)
                 .first()
@@ -243,6 +247,13 @@ class BlueprintMixin:
                 ENTRY_TIMESTAMP=datetime.now(),
             )
             db.add(new_occupancy_log)
+
+            # DB を先に確定させてから、インメモリの世界状態と PersonaCore に触る。
+            # 逆順だと、失敗した生成 (ID 衝突など) が rollback 後も building_map /
+            # occupants / personas に残り、既存の部屋と占有者を上書きしたままになる
+            # (DB は巻き戻るのにキャッシュは巻き戻らない)。PersonaCore が別セッションで
+            # AI 行を読める点も manager/persona.py の create_persona と揃う。
+            db.commit()
 
             if blueprint.CITYID == self.city_id:
                 new_building_obj = Building(
@@ -319,7 +330,6 @@ class BlueprintMixin:
             )
             self._save_modified_buildings()
 
-            db.commit()
             return (
                 True,
                 f"Entity '{entity_name}' spawned successfully in "

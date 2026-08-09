@@ -470,11 +470,17 @@ class PersonaMixin:
             # 独立に満たす (manager/ids.py) — AIID の文字種は issue 論点 3 で未着手
             # なので、日本語名のペルソナでは AI ID と私室 ID の形が揃わない。
             # 揃わないことより、パス・URI に日本語が入らないことを取る。
+            #
+            # ensure_unique=True が要る: slug 化は情報を落とすので、上の AIID 重複
+            # 検査を通った別ペルソナ (「A店」と「A森」など) が同じ私室 ID に落ちうる。
+            # 素通しにすると PK 衝突で commit が落ち、既存ペルソナの部屋を指す ID の
+            # まま下のインメモリ登録が走る。
             new_building_id = build_identifier(
                 custom_ai_id or name,
                 self.city_name,
                 "room",
                 stem="persona",
+                ensure_unique=True,
                 exists=lambda bid: db.query(BuildingModel)
                 .filter_by(BUILDINGID=bid)
                 .first()
@@ -529,6 +535,25 @@ class PersonaMixin:
                 "DB: Added initial occupancy for '%s' in their room.", name
             )
 
+            # Auto-link user if there is exactly one user
+            user_count = db.query(User).count()
+            if user_count == 1:
+                sole_user = db.query(User).first()
+                db.add(UserAiLink(USERID=sole_user.USERID, AIID=new_ai_id))
+                logging.info(
+                    "Auto-linked user '%s' to new persona '%s'.",
+                    sole_user.USERNAME, new_ai_id,
+                )
+
+            # Commit DB records before creating PersonaCore so that
+            # load_session_data (which opens a separate DB session) can
+            # find the AI record.
+            db.commit()
+
+            # インメモリの世界状態はここから — commit が通ってから触る。
+            # commit 前に登録すると、失敗した作成 (ID 衝突など) が rollback 後も
+            # building_map / occupants に残り、既存ペルソナの部屋と占有者を
+            # 上書きしたままになる (DB は巻き戻るのにキャッシュは巻き戻らない)。
             new_building_obj = Building(
                 building_id=new_building_model.BUILDINGID,
                 name=new_building_model.BUILDINGNAME,
@@ -549,21 +574,6 @@ class PersonaMixin:
                 / "log.json"
             )
             self.building_histories[new_building_id] = []
-
-            # Auto-link user if there is exactly one user
-            user_count = db.query(User).count()
-            if user_count == 1:
-                sole_user = db.query(User).first()
-                db.add(UserAiLink(USERID=sole_user.USERID, AIID=new_ai_id))
-                logging.info(
-                    "Auto-linked user '%s' to new persona '%s'.",
-                    sole_user.USERNAME, new_ai_id,
-                )
-
-            # Commit DB records before creating PersonaCore so that
-            # load_session_data (which opens a separate DB session) can
-            # find the AI record.
-            db.commit()
 
             # Determine linked user name for PersonaCore
             linked_user_name = "the user"

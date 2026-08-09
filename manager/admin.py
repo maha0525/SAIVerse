@@ -25,7 +25,12 @@ from database.models import (
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
-from manager.ids import build_identifier, charset_error, is_valid_identifier
+from manager.ids import (
+    build_identifier,
+    charset_error,
+    entrance_id_for,
+    is_valid_identifier,
+)
 from manager.state import CoreState
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
@@ -576,14 +581,23 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 if not is_valid_identifier(region_id):
                     return charset_error("Region ID", region_id)
             else:
+                def _region_id_taken(rid: str) -> bool:
+                    # 派生する入口 Building の ID も一緒に予約する。Region 側が
+                    # 空いていても entrance_<rid> が埋まっていると、下の入口自動
+                    # 作成がエラーで止まる — 連番を一つ進めれば避けられる衝突なので
+                    # 候補選びの段階で見る (Region を消しても入口 Building が残る
+                    # 経路があり、連番の若い番号ほど当たりやすい)。
+                    if db.query(RegionModel).filter_by(REGION_ID=rid).first():
+                        return True
+                    return db.query(BuildingModel).filter_by(
+                        BUILDINGID=entrance_id_for(rid)
+                    ).first() is not None
+
                 region_id = build_identifier(
                     name,
                     city.CITYNAME,
                     prefix="region",
-                    exists=lambda rid: db.query(RegionModel)
-                    .filter_by(REGION_ID=rid)
-                    .first()
-                    is not None,
+                    exists=_region_id_taken,
                 )
 
             if db.query(RegionModel).filter_by(REGION_ID=region_id).first():
@@ -628,7 +642,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         f"Error: A building named '{entrance_name}' already exists; "
                         "cannot auto-create the entrance."
                     )
-                entrance_id = f"entrance_{region_id}"
+                entrance_id = entrance_id_for(region_id)
                 if db.query(BuildingModel).filter_by(BUILDINGID=entrance_id).first():
                     return f"Error: A building with the ID '{entrance_id}' already exists."
                 db.add(BuildingModel(
@@ -774,7 +788,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # 自動生成された入口 (ID 規約 entrance_<region_id>) は Region と運命を
             # 共にする。ユーザー指定の既存 Building が入口の場合は残す。
             note = ""
-            if entrance_id == f"entrance_{region_id}":
+            if entrance_id == entrance_id_for(region_id):
                 entrance_result = self.delete_building(entrance_id)
                 if entrance_result.startswith("Error"):
                     note = f" Note: auto-created entrance could not be removed: {entrance_result}"

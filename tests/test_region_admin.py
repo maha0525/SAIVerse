@@ -95,6 +95,62 @@ class RegionAdminTestCase(unittest.TestCase):
         result = self.svc.create_region("X", "", "generic", 1, region_id="a/b")
         self.assertIn("Error", result)
 
+    def test_numbered_region_id_skips_candidate_whose_entrance_is_taken(self):
+        # Region が消えても入口 Building が残る経路がある — delete_region は
+        # Region の削除を commit した後で入口を消しにいき、そこが失敗しても
+        # 続行する。その孤児が若い連番に居座ると、Region 側が空いていても
+        # 入口作成の段で作成が止まる。候補選びで入口 ID ごと予約して避ける
+        db = self.SessionLocal()
+        try:
+            db.add(BuildingModel(
+                CITYID=1,
+                BUILDINGID="entrance_region_1_city_a",
+                BUILDINGNAME="孤児になった入口",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        result = self.svc.create_region("霧降りの森", "", "generic", 1)
+        self.assertNotIn("Error", result)
+        self.assertIsNone(self._get_region("region_1_city_a"))
+        region = self._get_region("region_2_city_a")
+        self.assertIsNotNone(region)
+        self.assertEqual(region.ENTRANCE_BUILDING_ID, "entrance_region_2_city_a")
+
+    def test_existing_non_ascii_region_id_still_loads_updates_and_deletes(self):
+        # 既存の非 ASCII ID は裁定どおり放置する (作成の口だけ塞ぐ)。作成時
+        # 検証を足したことで既存データの読み・更新・削除が壊れていないことを、
+        # 散文の裁定でなく実行可能な形で固定する
+        db = self.SessionLocal()
+        try:
+            db.add(RegionModel(
+                REGION_ID="霧降りの森",
+                CITYID=1,
+                NAME="霧降りの森",
+                DESCRIPTION="",
+                REGION_TYPE="generic",
+                ENTRANCE_BUILDING_ID="entrance_霧降りの森",
+            ))
+            db.add(BuildingModel(
+                CITYID=1,
+                BUILDINGID="entrance_霧降りの森",
+                BUILDINGNAME="霧降りの森: 入口",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        self.assertIsNotNone(self._get_region("霧降りの森"))
+        self.assertNotIn(
+            "Error", self.svc.update_region("霧降りの森", "改名後", "d", "generic"),
+        )
+        self.assertEqual(self._get_region("霧降りの森").NAME, "改名後")
+        self.assertNotIn("Error", self.svc.delete_region("霧降りの森"))
+        self.assertIsNone(self._get_region("霧降りの森"))
+        # 自動生成の規則に合致する入口なので Region と運命を共にする
+        self.assertIsNone(self._get_building("entrance_霧降りの森"))
+
     def test_create_region_invalid_type(self):
         result = self.svc.create_region("X", "", "dungeon", 1)
         self.assertIn("Error", result)

@@ -7,6 +7,13 @@
 - **2026-08-09 初回実装**: 作成の口を `create_building` 一箇所と見なして契約を置いた。
 - **同日 レビュー (Codex) で漏れが発覚**: `create_region` が入口 Building を `db.add` で直接作っており、`create_building` を通らない。しかも `region_id` 自体が無検証で、`game_create_subregion` (Ruler ペルソナが自分で SubRegion を作る口) から日本語名がそのまま渡ってくる — 手動 UI 限定ではなく、ペルソナが自律で踏む経路だった。
 - **消し込み時に族として点検**: 同じ形の口をさらに 2 つ発見 (ペルソナ個室・ブループリント個室)。いずれも `f"{name.lower().replace(' ','_')}_{city}_room"` で ID を自作していた。契約が `manager/admin.py` のプライベート定数に閉じていたことが、他の口が漏れた原因 — だから消し込みでは定数を移すのではなく、契約と生成式を共有モジュールへ集約する形にした。
+- **同日 レビュー第 2 巡で、族への拡大が作った退行が見つかった**: slug 化は情報を落とす写像 (「A店」と「A森」はどちらも `a`) なので、私室 ID が「重複検査済みの AIID の純粋関数」でなくなった。検査を通った別ペルソナが同じ Building ID に落ち、PK 衝突で commit が失敗する。しかも `create_persona` / `spawn_entity_from_blueprint` はどちらも **commit より前にインメモリの世界状態 (`building_map` / `occupants` / `personas`) を更新していた**ため、rollback してもキャッシュ側は既存ペルソナの部屋を上書きしたまま残る。派生 ID 用の `ensure_unique` で衝突自体を塞ぎ、両経路のインメモリ更新を commit の後ろへ移した。
+- **未検証の境界 (正直な記録)**: `create_persona` / `spawn_entity_from_blueprint` にはこのリポジトリに統合テストが 1 本も無く、上記の修正は `manager/ids.py` のヘルパ単体テストと、Region 経路の統合テストでしか押さえられていない。**呼び出し側の配線 (引数の渡し方・commit の順序) は実機で未確認。**
+
+## 残っている論点 3 の中身
+
+- **City ID**: `AdminService._validate_city_name` が既に ASCII 英数字 + `_` を強制している (作成・更新の両方)。文字種の穴は無い。
+- **ペルソナ ID (AIID)**: 無検証。`custom_ai_id` も名前由来の自動生成も日本語が通る。AIID は `~/.saiverse/personas/<id>/` のフォルダ名になるため Building ID と同じ性質の永続キー。**ここが論点 3 の実体。**
 
 ## 症状
 

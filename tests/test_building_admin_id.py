@@ -14,7 +14,12 @@ from sqlalchemy.orm import sessionmaker
 
 from database.models import Base, Building as BuildingModel, City as CityModel
 from manager.admin import AdminService
-from manager.ids import build_identifier, is_valid_identifier, slugify_identifier
+from manager.ids import (
+    build_identifier,
+    entrance_id_for,
+    is_valid_identifier,
+    slugify_identifier,
+)
 
 
 class BuildingAdminIdTestCase(unittest.TestCase):
@@ -151,6 +156,40 @@ class IdentifierHelperTestCase(unittest.TestCase):
                              exists=taken.__contains__),
             "persona_1_city_a_room",
         )
+
+    # ensure_unique — ユーザーが ID を選んでいない派生 ID (私室) 用
+
+    def test_ensure_unique_falls_to_numbered_when_name_derived_is_taken(self):
+        # slug 化は情報を落とすので「A店」と「A森」はどちらも a になる。
+        # 名前・AIID の重複検査を通っても私室 ID は衝突しうる
+        taken = {"a_city_a_room"}
+        self.assertEqual(
+            build_identifier("A森", "city_a", "room", stem="persona",
+                             ensure_unique=True, exists=taken.__contains__),
+            "persona_1_city_a_room",
+        )
+
+    def test_ensure_unique_keeps_name_derived_when_free(self):
+        taken = set()
+        self.assertEqual(
+            build_identifier("A森", "city_a", "room", stem="persona",
+                             ensure_unique=True, exists=taken.__contains__),
+            "a_city_a_room",
+        )
+
+    def test_without_ensure_unique_the_collision_is_left_to_the_caller(self):
+        # Building / Region はユーザーが名前を選ぶので、衝突は呼び出し元が
+        # 「already exists」で伝える (連番で黙って別 ID にしない)
+        taken = {"tea_house_city_a"}
+        self.assertEqual(
+            build_identifier("Tea House", "city_a", stem="building",
+                             exists=taken.__contains__),
+            "tea_house_city_a",
+        )
+
+    def test_entrance_id_is_derived_in_one_place(self):
+        self.assertEqual(entrance_id_for("region_1_city_a"),
+                         "entrance_region_1_city_a")
 
     def test_numbered_fallback_skips_taken(self):
         taken = {"building_1_city_a", "building_2_city_a"}

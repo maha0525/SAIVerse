@@ -41,6 +41,20 @@ def is_valid_identifier(value: str) -> bool:
     return bool(value) and bool(IDENTIFIER_RE.match(value))
 
 
+def entrance_id_for(region_id: str) -> str:
+    """Region の入口 Building の ID。Region ID から決定的に導く。
+
+    導出をここに置くのは、同じ文字列を組む場所が三箇所あるため — Region ID を
+    選ぶ側 (入口 ID ごと空きを予約する)、入口を作る側、削除で「自動生成された
+    入口か」を判定する側。一箇所だけ変えると、予約した ID と実際に作る ID が
+    ずれたり、消えるはずの入口が孤児として残る。
+
+    ``entrance_building_id`` と名付けない — AdminService.create_region が同名の
+    引数を持っており、import を影にする。
+    """
+    return f"entrance_{region_id}"
+
+
 def charset_error(kind: str, value: str) -> str:
     """契約違反を伝えるエラー文字列 (API・ツールの戻り値にそのまま出る)。"""
     return (
@@ -55,6 +69,7 @@ def build_identifier(
     exists: Callable[[str], bool],
     prefix: str = "",
     stem: str = "",
+    ensure_unique: bool = False,
 ) -> str:
     """``head`` (名前由来) を slug 化し、``tail`` と ``_`` で連結した ID を返す。
 
@@ -69,15 +84,25 @@ def build_identifier(
         Building: stem="building"    → tea_house_city_a  / building_1_city_a
         Region:   prefix="region"    → region_mist_valley_city_a / region_1_city_a
 
-    ``head`` が slug 化できた通常経路では ``exists`` を呼ばない。ID 衝突は
-    呼び出し元が既存の「already exists」エラーで扱う (連番で黙って避けると、
-    ユーザーが指定した名前と違う ID が無言で生まれる)。
+    ``ensure_unique=False`` (既定) では、``head`` が slug 化できた通常経路で
+    ``exists`` を呼ばない。ID 衝突は呼び出し元が既存の「already exists」エラーで
+    扱う — ユーザーが名前を選んだ ID (Building / Region) はこちら。連番で黙って
+    避けると、指定した名前と違う ID が無言で生まれる。
+
+    ``ensure_unique=True`` では通常経路でも空きを確かめ、埋まっていれば連番へ
+    落ちる。**ユーザーが ID を選んでいない派生 ID (ペルソナ私室) はこちらを使う。**
+    slug 化は情報を落とす写像なので (``A店`` と ``A森`` はどちらも ``a``)、名前の
+    一意性を検査済みでも派生 ID は衝突しうる。既存の行を指す ID を作らせない責任は
+    ここにある — 呼び出し元の重複検査は別の文字列 (AIID・名前) を見ているため
+    素通しになる。
     """
     lead = [s for s in [slugify_identifier(prefix or "")] if s]
     tail_slugs = [s for s in (slugify_identifier(t or "") for t in tail) if s]
     head_slug = slugify_identifier(head or "")
     if head_slug:
-        return "_".join([*lead, head_slug, *tail_slugs])
+        candidate = "_".join([*lead, head_slug, *tail_slugs])
+        if not ensure_unique or not exists(candidate):
+            return candidate
 
     stem_slug = slugify_identifier(stem or "")
     n = 1
