@@ -1,6 +1,7 @@
 # Issue: SubLineScheduler が ACTIVITY_STATE を見ずに sub_line Pulse を回す
 
-**ステータス**: 🔲 未着手
+**ステータス**: ❌ 対象消滅により閉鎖 (2026-08-09 archive、v0.3.0 の門 §6 の棚卸しで確認)
+— SubLineScheduler (`saiverse/pulse_scheduler.py`) は 2026-07-06 に削除され (v1→v2 切り替え、commit eb5ccca)、ACTIVITY_STATE カラム自体も 2026-07-14 に撤去された (landscape §9)。指摘の主語と述語の両方が存在しないため、修正対象なし。
 **優先度**: medium
 **作成日**: 2026-05-25
 **関連**: `saiverse/pulse_scheduler.py:156-180` (`_tick_persona`)、`saiverse/meta_layer.py:377-384` (on_periodic_tick の Active 抑止)、`docs/intent/persona_cognition/04_handlers.md`

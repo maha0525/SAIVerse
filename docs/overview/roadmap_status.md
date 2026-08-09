@@ -1,6 +1,6 @@
 # SAIVerse 進捗マップ (Roadmap Status)
 
-> **ステータス**: v1.2 (2026-05-29 — ユーザー導入導線 (オンボーディング) を追加)
+> **ステータス**: v1.3 (2026-08-09 — 7 月の大工事 (自律行動 v2 / 実行台帳 W 系 / 時間割改修 / あらすじレベル制 / RSS) を反映し、リリース範囲の正典を v0.3.0 の門へ移譲)
 > **位置づけ**: 「何が予定されていて、いまどこにいるか」を一望する。概念の関係を示す
 > [`landscape.md`](landscape.md) と対をなす、実装の現在地の地図。
 > **ステータス記法**: ✅ 完了 / 🟡 進行中 / 🔵 起草中 / 🔲 着手前 / 💤 冬眠
@@ -11,10 +11,10 @@
 
 > まはーが最近手を動かしている領域。思いつきで着手が分散しがちなので、現在地をここに集約する。
 
-- 📌 **v0.3.0 リリースに向けた残タスクは [`v030_release_worklist.md`](v030_release_worklist.md) に集約**（2026-06-27）。自律稼働を「止まらず回り続ける」状態にするための ①メタ判断リカバリ ②トラック操作スペルの権限制御 ③やることを決める Track のプリセット常設 ④オートノミー系↔Track 整理。思いつきで逸れたらここに戻る
-- 🟡 **認知モデル更新** — Track / aspect 実装済、session（短期記憶）起草中。次の山は **Social Track 入口（ペルソナ間会話）**（§2）
-- 🔵 **Observer / Fixture** — SwitchBot 連携中に浮上した「定期観測する固定設置物」概念（§5）。`observer.md` v0.1、骨子合意済み・未実装
-- 🟡 **スタックチャン → Vessel** — ペルソナを物理デバイスに降ろす Vessel 統合。アドオン Phase 4.5 実装済み。**本体の汎用 Vessel システムへの昇格**が次（§5）
+- 📌 **v0.3.0 のリリース範囲と実施順序は [`v030_release_gate.md`](v030_release_gate.md) が正典**（2026-08-09 確立。旧 [`v030_release_worklist.md`](v030_release_worklist.md) (6/27) の①〜④は全て実装済みで、門に置き換えられた）。門の篩 = 「後から入れるとユーザーのペルソナに遡及できない傷かマイグレーションを残すか」
+- 🟢 **Wave 0 (地均し) 実装中** — 裁定不要の独立小物 (user 発言の帰属 / Building ID 制約 / quick_spell / スレッド混線下限 / アラーム名称) と stale 掃除
+- 🔜 **設計議論の一本目 = エピソードの単位と正史** (門 Wave 1)。二本目 = モデル格 (声/監督/手足) と保温 (Wave 2)
+- 進行中案件の逐次状態は [`in_flight.md`](in_flight.md)
 
 ---
 
@@ -23,12 +23,11 @@
 > v0.3.0 の中心軸は「**自律稼働**（AI が連続して動き続ける）」。
 > 以下に並ぶ認知モデル整備・記憶階層は、すべてこの自律稼働を実現するための手段である。
 
-- **目標**: 4 月完遂
 - ✅ **Phase 1**: pulse_logs / Important フラグ / 自動タグ付け / サブエージェント隔離
 - ✅ **Phase 2**: Chronicle / Memopedia 実装 / Spell 化吸収
-- 🟡 **Phase 3**: 自律バイオリズム（1 時間サイクル、活動種別 = conversation / creation / memory_organization / web_research / self_reflection、Claude 検収 + 意思決定 → 軽量実行 → 検収レポート。割り込みはタスク一時停止 → 対応 → 再開で並列しない）
-- 🔲 **Phase 4**: 恒常入力処理（カメラ、X 等）
-- 🔲 **Phase 5**: 認知モデル本格化（最初の達成目標 = UC-2 割り込みと復帰）
+- ✅ **自律行動 v2 (旧 Phase 3 の後継)** — 旧「自律バイオリズム (1 時間サイクル)」構想は v1/v2 の実機診断を経て**時間割モデル**に置き換わった: 習慣テンプレート (ユーザーとペルソナの合意で固定した一日の枠) + 判断点 (起床/就寝、専用 Playbook) + 予算付き作業セッション + コマ種別カタログ ([`timetable_redesign.md`](../intent/timetable_redesign.md))。骨格・時間割改修・実行台帳 (W1〜W8) まで実装済み — **実機検証は門の Wave 5 (モデル格再設計の後) に集約**
+- 🟡 **モデル格 (Aspect) 再設計** — v1 由来の 4 席を「声 (会話・標準) / 監督 (標準・発注検収・キャッシュ保温) / 手足 (軽量)」へ引き直す。門 §2-1、設計議論は Wave 2
+- 🔲 **Phase 4 相当: 恒常入力処理** — RSS フィード施設 (§7) が第一弾として実装済み。カメラ / X 等は v0.4+
 
 ---
 
@@ -36,15 +35,14 @@
 
 > Intent: `docs/intent/persona_cognition/`。概念は [`landscape.md`](landscape.md) §3〜§4 を参照。
 
-- ✅ **Track** 実装・拡張中
+- ✅ **Track** 実装済 — ただし方向は**役割縮小 → 溶解** ([`recall_tags_and_track_reduction.md`](../intent/persona_cognition/recall_tags_and_track_reduction.md))。行動への指令をやめ、体験の帳簿になる
 - ✅ **入れ子サブライン Spell**（`/run_playbook`、深さ4段、`report_to_parent`）実装済（v0.24）
-- ✅ **aspect** v0.2 実装済・実機検証済 (2026-07-08)
-- 🔵 **session（= 短期記憶 / ワーキングメモリ）** 起草中（`docs/intent/session.md` v0.1）— 統一制御単位はコード未実装。Session は「節と節の間」という時間区間に留まらず、**ペルソナが今見ている短期記憶**（長期記憶の末尾・head・進行中 Beat・外界入力・システム通知の集約）であり、全 LLM 判断の入力ハブ
-- 🟡 **Metabolism / head / Anchor** 機構は Phase 1 実装済（`sea/head_pipeline/`）。Session 概念への統合は検討中
-- 🔲 **Social Track 入口（ペルソナ間会話）** — `SocialTrackHandler` と Track 自動作成（ensure_track）はあるが、**「他ペルソナ発話イベントの受け口」が未実装**（Phase B-Y）。「相手は誰か」判定もこれから。ペルソナ間会話の機序はここが入るまで成立しない
-- 🔲 **短期記憶 → 長期記憶の選別**（システム通知を長期記憶に渡さない入口選別 → [issue](../issues/short_term_to_long_term_memory_filtering.md)）
-- 🔲 **Beat の型導入**（概念は確立、実装に型なし → [issue](../issues/beat_concept_not_typed_in_implementation.md)）
-- 🔲 **Phase 5 土台**: A=tick/パラメータ/内部alert、B=時間差ツール、C=Social 運用化（UC-2 は C 軸）
+- ✅ **aspect** v0.2 実装済・実機検証済 (2026-07-08)。**再設計 (3 席化) が門 §2-1 で予定されている** (§1)
+- ✅ **エピソード (出来事)** — 記憶と世界の共通単位。開き/閉じ・層0タグ (origin_episode)・Lv1 整列生成まで実装済み。**単位の確定と LoD 搭載制御が門 Wave 1 の設計議論** ([`episode.md`](../intent/episode.md))
+- 🟡 **Metabolism / head / Anchor** 実装済 (`sea/head_pipeline/`)。編纂の発火は予算超過一本 + 保守経路
+- 🔲 **Social Track 入口（ペルソナ間会話）** — 凍結継続 (6/27 の線でも既にスコープ外、門 §5)。ペルソナ間会話の機序はここが入るまで成立しない
+- 🔲 **短期記憶 → 長期記憶の選別**（→ [issue](../issues/short_term_to_long_term_memory_filtering.md)）
+- 🔲 **Beat の型導入**（概念は確立、実装に型なし → [issue](../issues/beat_concept_not_typed_in_implementation.md)。Beat 境界の知覚問題は門 §2-1 に相乗り）
 
 ---
 
@@ -53,7 +51,10 @@
 > 概念は [`landscape.md`](landscape.md) §5 を参照。
 
 - ✅ **Chronicle 二重パイプライン統合**（Metabolism 時に Chronicle 生成と Fragment 生成が同バッチ連動）
-- 🟡 **Memopedia Fragment 化**（稼働中、air_city_a で 1162 件）。Fragment 専用 embedding 生成フローは未実装
+- ✅ **Memory Atlas** — 記憶概念の統合 (編纂三層 + 統一スペル + 目次 + レジストリ)。P4 全片完了 (2026-07-11)
+- ✅ **あらすじのレベル制** (W4、2026-07-28) — 恒等圧縮を廃止し「小さくても要約する」整列計画 (`sai_memory/arasuji/`) に世代交代。実機検証は門 Wave 5
+- 🟡 **Memopedia Fragment 化**（稼働中）。Fragment 専用 embedding 生成フローは未実装
+- 🔲 **想起用タグ** — 記憶接続の要 (門 §2-2、Wave 4 実装予定)。遡及不能のため出荷前必須
 - 🔲 旧 `note_extractor` の整理（本番経路は `entity_extractor` に移行済、名残の掃除）
 - ✅ **Building log の DB 化**（`saiverse.db` への building_messages テーブル化 + 視点別レンダリング）
 
@@ -90,6 +91,7 @@
 ## 6. ユーザー導入導線（オンボーディング）
 
 > 新規ユーザーが SAIVerse を導入・習熟するまでの導線。現状チュートリアルとマニュアルが手薄なのが課題。
+> **2026-08-09 まはー裁定**: 必要になるが独立して出来る作業のため、**v0.3.0 の門とは切り離して進める**。
 
 - 🟡 **チュートリアル** — `frontend/src/components/tutorial/`（PersonaWizard / StepPersonaChoice 等）。最低限のみ実装。**拡充が課題**
 - 🔲 **ユーザー向けマニュアル** — 利用者目線の概念解説（開発者向けリファレンス §10 とは別物）が存在しない。導入のハードルになっている
@@ -101,6 +103,7 @@
 
 > 外部イベント統合の優先度や詳細は各 intent doc / memory を参照。
 
+- ✅ **RSS フィード施設** — Building 単位の購読 + プリセット施設化 + 知覚バッファ投入 (`rss_feed_intake.md`、2026-08-03 実装完了)。世界の供給側の第一弾。実機検証は門 Wave 5
 - 🟡 **SwitchBot**（Intent doc draft 済、レビュー待ち。Cloud API v1.1 / 入出力両経路。Observer の利用者）
 - 🟡 **voice-tts**（GPT-SoVITS、実装済。GIL 飢餓問題対応中）
 - 🟡 **stack-chan**（Vessel 統合 §5 + 能動入力 BLE HID リモコン構想）

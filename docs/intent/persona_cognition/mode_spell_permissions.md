@@ -4,7 +4,7 @@
 > **親**: [`line_tag_responsibility.md`](line_tag_responsibility.md) §10（アスペクト体系）
 > **関連**: [`01_concepts.md`](01_concepts.md) 不変条件3 / [`02_mechanics.md`](02_mechanics.md) /
 > [`../../overview/v030_release_worklist.md`](../../overview/v030_release_worklist.md) §②
-> **実装状況**: 未着手（本ドキュメント確定後に実装）
+> **実装状況**: ✅ 実装・実機検証済み（2026-06-28。本行は 2026-08-09 の棚卸しで追従 — 「未着手」の記載が実態と乖離したまま残っていた。実装は `sea/mode_spell_permissions.py` の `check_spell_permission`、呼び出しは `sea/runtime_llm.py` のスペルループ / 事前実行スペルのモードゲート）
 
 ---
 
