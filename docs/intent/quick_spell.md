@@ -160,6 +160,24 @@ metadata `error: true`）があれば、従来と同じ結果注入 → LLM 再�
 
 ### 3.7 適用範囲外
 
+- **`output_key` / `output_keys` を後段ノードが読む Playbook**: quick 終端では
+  `final_continuation` が空文字なので、`state[output_key]` にも空文字が入る
+  (`sea/runtime_llm.py` の「output_key に生テキストを格納」分岐)。後続ノードが
+  その key を消費する Playbook で quick を唱えると空入力になる。
+  **これは quick 固有の欠陥ではない。** spell が走った Beat の `output_key` は
+  以前から「最終ラウンドの継続発話だけ」で、text_before もスペル結果ブロックも
+  元々入っていない（`_finalize_beat` の不変条件「記録へ行くのは continuation
+  だけ」と同じ変数を共有しているため）。quick はその値を*部分的*から*空*へ
+  変えただけで、混同そのものは前からある。
+  正すには「発話本文」という第 3 の姿（merged 全文でも継続発話でもないもの）に
+  名前と置き場を与える必要があり、それは Beat の型付け
+  （`docs/issues/beat_concept_not_typed_in_implementation.md` /
+  `runtime_llm_node_split_design.md` の `display_text` / `memory_text` の対）の
+  仕事。型の無いホットパスに 4 つ目のテキスト形を足すことはしない。
+  実害の範囲: 会話の主経路（speak 終端）は前倒し assistant 記録と merged emit が
+  済んでいるので影響なし。露出するのは「LLM ノード + output_key + 後段の消費
+  ノード」を持つ Playbook — builtin では `novel_writing` の章ノードのみ — で
+  ペルソナが quick を唱えた場合に限られる。
 - **`_execute_pre_spells`（応答前スペル経路）**: 適用外・無変更。ユーザー起動の
   事前実行であり、継続はその Pulse の本応答そのもの — 「完了宣言」が成立しない
 - **構造化出力内**: 従来通りスペル自体が使用不可
@@ -241,9 +259,13 @@ metadata `error: true`）があれば、従来と同じ結果注入 → LLM 再�
 
 ## 7. 未決事項
 
-1. quick 終端ラウンドの `final_continuation` の厳密な定義 — 空文字を第一候補
-   とするが、`state["last"]` → 後段 memorize ノードの経路で発話本文の記録が
-   欠けないこと（前倒し assistant 記録が持っている前提の検証）を実装時に確認
+1. ~~quick 終端ラウンドの `final_continuation` の厳密な定義~~ — **決着
+   (2026-08-09、レビュー指摘⑤の裁定)**。空文字で確定した。`state["last"]` →
+   後段 memorize の経路は `SEARuntime._store_memory` が空文字を no-op 成功で
+   返す（`sea/runtime.py`）ので、発話本文の記録は前倒し assistant 記録が持つ
+   ままで取りこぼしはない。`output_key` 経由の後段消費だけは空入力になるが、
+   これは spell 全般の既存挙動であり quick 固有ではないため、§3.7 の適用範囲外
+   として記録した（正す場所は Beat の型付け側）
 2. head 規約文の最終文言（§3.6 たたき台のまはーレビュー）
 3. 昇格時の説明文の最終文言（§3.4。客観・丁寧語、キャラ付けなし）
 4. metadata error 宣言を初回でどこまで一括導入するか（帳簿系のみか、
