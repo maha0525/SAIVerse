@@ -90,6 +90,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.get_conversing_personas = runtime.get_conversing_personas
         self.get_persona_pending_events = manager.get_persona_pending_events
         self.archive_persona_events = manager.archive_persona_events
+        # PersonaMixin._create_persona / BlueprintMixin.spawn_entity_from_blueprint が
+        # commit 後に呼ぶ統一フック。実体を持つのは SAIVerseManager だけなので、
+        # ここで委譲を張らないと UI からのペルソナ作成が
+        # 「DB には作られたのに AttributeError で失敗を返す」状態になる
+        self._on_persona_registered = manager._on_persona_registered
         self.occupancy_manager = manager.occupancy_manager
         self.conversation_managers = manager.conversation_managers
         self._save_building_histories = manager._save_building_histories

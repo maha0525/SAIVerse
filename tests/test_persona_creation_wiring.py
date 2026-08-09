@@ -43,6 +43,28 @@ class _StubPersonaCore:
         self.persona_role = None
 
 
+class AdminServiceHookWiringTestCase(unittest.TestCase):
+    """AdminService が生成経路の必要フックを実際に持っているか。
+
+    `_create_persona` は commit の後で `self._on_persona_registered` を呼ぶが、
+    このフックの実体を持つのは `SAIVerseManager` だけ。UI からのペルソナ作成は
+    `SAIVerseManager.create_ai` → `AdminService.create_ai` → `_create_persona`
+    と流れるので、`AdminService` に委譲が無いと **DB には作られたのに
+    AttributeError で失敗が返る**。ミックスイン越しに `self.` で呼ぶフックは、
+    どの土台に載っても解決できることを別途押さえないと落ちる。
+    """
+
+    def test_admin_service_delegates_the_persona_registration_hook(self):
+        from unittest.mock import MagicMock
+
+        from manager.admin import AdminService
+
+        manager = MagicMock()
+        svc = AdminService(manager, MagicMock(), MagicMock())
+        svc._on_persona_registered("persona_1")
+        manager._on_persona_registered.assert_called_once_with("persona_1")
+
+
 class PersonaCreationWiringTestCase(unittest.TestCase):
     def setUp(self):
         fd, self.db_path = tempfile.mkstemp(suffix=".db")
