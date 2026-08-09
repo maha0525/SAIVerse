@@ -955,20 +955,6 @@ def _normalize_spell_line(tool_name: str, tool_args: dict, quick: bool = False) 
     return f"{verb} name='{tool_name}' args={json.dumps(tool_args, ensure_ascii=False)}"
 
 
-def _parse_spell_line(text: str):
-    """Parse the first /spell invocation in *text* (canonical form only).
-
-    Returns ``(tool_name, tool_args, match)`` or ``None``.
-    """
-    m = _SPELL_PATTERN.search(text)
-    if not m:
-        return None
-    tool_args = _parse_spell_args(m.group(2).strip())
-    if tool_args is None:
-        return None
-    return m.group(1), tool_args, m
-
-
 class _SpellSpan:
     """``re.Match`` 互換の最小スパン (複数行 args 救済用)。
 
