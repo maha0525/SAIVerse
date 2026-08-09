@@ -90,9 +90,8 @@ doc: [`building_id_no_charset_constraint.md`](../issues/building_id_no_charset_c
 
 ### 手配済み
 
-**12. 器統合の消し込み (tell の関所デッドロック他 6 件)**
-現状: ハンドオフ済み・Opus セッション待ち。実機検証の再開はこの消し込み後。
-doc: [`2026-08-08_autonomous_pulse_vehicle_handoff.md`](../handoff/2026-08-08_autonomous_pulse_vehicle_handoff.md)
+**12. ✅ 完了 (2026-08-08) — 器統合の消し込み**
+消し込みは Opus セッションで終了 (フルスイート緑)。まはー判断で打ち切り — キャッシュの件 (§2-1) で変わる箇所をこれ以上磨く意味が薄いため。残る論点は §2-1 が引き取り済み。実機検証は §4 の夜に相乗り。
 
 ### 境界からの編入 (まはー裁定 2026-08-09)
 
@@ -188,7 +187,7 @@ doc: [`memory_continuity_graph.md`](../issues/memory_continuity_graph.md)
 ### Wave 構成
 
 **Wave 0 — 地均し (裁定不要、いま動ける)**
-- 器統合の消し込み (§2-12、Opus ハンドオフ済み) → **実機検証の夜を再開** (統合手順の残り。arasuji_levels 検証 = 想起用タグの解禁条件もここで消える)
+- ~~器統合の消し込み~~ (完了済み — §2-12) → **実機検証の夜はいつでも再開できる** (統合手順の残り。arasuji_levels 検証 = 想起用タグの解禁条件もここで消える)
 - 私の並行実装 (裁定済み・独立): Building ID 制約 (§2-11) / 畳み範囲 1:1 (§2-10) / スレッド混線分離 (§2-7) / 孤児エピソード close (§2-6) / quick_spell (§2-8) / アラーム名称変更 (§2-15)
 - 掃除: stale issue の確認→archive (§6) / doc 追従 (mode_spell_permissions・unified_memory_architecture・roadmap_status)
 
