@@ -44,6 +44,8 @@
 
 ## 4. 生ログの正史化 — 作業セッションの AUTONOMOUS 化（A1 前半）
 
+> **⚠️ 再裁定対象（まはー 2026-08-09 朝）**: 本節の 2026-07-13 裁定は古い前提（Track 解体・監督役構想より前）に立っている可能性があるため、裁定を見直す。「作業セッションをどの文脈系列に積むか」は Aspect/モデル格 再設計（v0.3.0 の門 §2-1）の設計議論で改めて決める。
+
 ### 4.1 何が変わるか
 
 作業セッションのアスペクトを **WORKER（sub_line / volatile / lightweight）から AUTONOMOUS（main_line / committed / lightweight 運転は維持）へ**変更する（まはー裁定）。現状のハードコード点は `sea/work_session.py` L201 `pulse_ctx.push_line(aspect=Aspect.WORKER, track_id=...)`。
