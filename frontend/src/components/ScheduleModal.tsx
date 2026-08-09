@@ -322,7 +322,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     };
 
     const handleDelete = async (id: number) => {
-        if (!confirm('このスケジュールを削除しますか？')) return;
+        if (!confirm('このアラームを削除しますか？')) return;
         try {
             const res = await fetch(`/api/people/${personaId}/schedules/${id}`, { method: 'DELETE' });
             if (!res.ok) {
@@ -380,7 +380,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>スケジュール管理: {personaId}</h2>
+                    <h2 className={styles.title}>アラーム管理: {personaId}</h2>
                     <button className={styles.closeButton} onClick={onClose}><X size={20} /></button>
                 </div>
 
@@ -388,12 +388,12 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                     {/* List Section */}
                     <div className={styles.listSection}>
                         <div className={styles.sectionTitle}>
-                            <span>登録済みスケジュール</span>
+                            <span>登録済みアラーム</span>
                             <button onClick={loadSchedules} style={{ background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer' }}>更新</button>
                         </div>
                         <div className={styles.tableContainer}>
                             {schedules.length === 0 ? (
-                                <div className={styles.emptyState}>スケジュールがありません</div>
+                                <div className={styles.emptyState}>アラームがありません</div>
                             ) : (
                                 <table className={styles.table}>
                                     <thead>
@@ -446,7 +446,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                     {/* Form Section */}
                     <div className={styles.formSection}>
                         <div className={styles.sectionTitle}>
-                            {editingId !== null ? 'スケジュールを編集' : '新規スケジュール追加'}
+                            {editingId !== null ? 'アラームを編集' : '新規アラーム追加'}
                             {editingId !== null && (
                                 <button
                                     onClick={resetForm}
@@ -458,7 +458,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                         </div>
                         <div className={styles.formGrid}>
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>スケジュール種別</label>
+                                <label className={styles.label}>アラーム種別</label>
                                 <select
                                     className={styles.select}
                                     value={formType}
@@ -680,7 +680,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                         </div>
 
                         <button className={styles.submitBtn} onClick={handleSave}>
-                            {editingId !== null ? 'スケジュールを更新' : 'スケジュールを追加'}
+                            {editingId !== null ? 'アラームを更新' : 'アラームを追加'}
                         </button>
                     </div>
                 </div>

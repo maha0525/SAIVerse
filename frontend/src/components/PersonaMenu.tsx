@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, Calendar, CalendarClock, Settings, X, RefreshCw, Network, Package, Sparkles, Activity, Heart, Clock } from 'lucide-react';
+import { Home, Brain, AlarmClock, CalendarClock, Settings, X, RefreshCw, Network, Package, Sparkles, Activity, Heart, Clock } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -190,10 +190,10 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                             }
                         }}
                     >
-                        <Calendar size={20} />
+                        <AlarmClock size={20} />
                         <div className={styles.label}>
-                            <span>Schedule</span>
-                            <span className={styles.subtext}>スケジュール管理</span>
+                            <span>Alarm</span>
+                            <span className={styles.subtext}>アラーム管理</span>
                         </div>
                     </button>
 
