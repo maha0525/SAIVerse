@@ -59,6 +59,14 @@ def entrance_id_for(region_id: str) -> str:
 _UNSAFE_PATH_CHARS = frozenset('/\\:*?"<>|')
 
 
+#: Windows がデバイスとして解釈する名前 (拡張子を付けても同じ扱いになる)
+_DOS_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
 def is_safe_path_component(value: str) -> bool:
     """``value`` を 1 階層のフォルダ名としてそのまま使っても安全か。
 
@@ -67,12 +75,25 @@ def is_safe_path_component(value: str) -> bool:
     「ディレクトリを脱出できないこと」だけは決着を待たずに要る — ペルソナ ID は
     ``~/.saiverse/personas/<id>/`` のフォルダ名になるため、区切り文字や ``..`` が
     通ると保存先が SAIVERSE_HOME の外へ出る。
+
+    Windows と POSIX で解釈が割れる形も弾く: 末尾のドットと空白は Windows が
+    黙って落とすため別名になり (``alice.`` と ``alice`` が同じ場所を指す)、
+    ``CON`` などの DOS デバイス名は拡張子を付けてもデバイス扱いになる。
+
+    ⚠️ **これは作成の口の検査であって、パス境界そのものの保証ではない。**
+    永続化済みの ID (旧データ・import・DB 直編集) はこの関数を通らないまま
+    パス組み立てへ流れる。境界の保証は組み立て側に置く必要がある —
+    docs/issues/persona_path_boundary_not_enforced_at_use.md。
     """
     if not value or value in {".", ".."}:
         return False
     if any(ch in _UNSAFE_PATH_CHARS for ch in value):
         return False
-    return not any(ord(ch) < 32 for ch in value)
+    if any(ord(ch) < 32 for ch in value):
+        return False
+    if value[-1] in {".", " "}:
+        return False
+    return value.split(".")[0].upper() not in _DOS_DEVICE_NAMES
 
 
 def path_component_error(kind: str, value: str) -> str:

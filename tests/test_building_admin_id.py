@@ -187,6 +187,21 @@ class IdentifierHelperTestCase(unittest.TestCase):
             "tea_house_city_a",
         )
 
+    def test_windows_hostile_names_are_rejected_as_path_components(self):
+        from manager.ids import is_safe_path_component
+
+        # 末尾のドット・空白は Windows が黙って落とすので別名になる
+        self.assertFalse(is_safe_path_component("alice."))
+        self.assertFalse(is_safe_path_component("alice "))
+        # DOS デバイス名は拡張子を付けてもデバイス扱い
+        self.assertFalse(is_safe_path_component("CON"))
+        self.assertFalse(is_safe_path_component("con.txt"))
+        self.assertFalse(is_safe_path_component("LPT1"))
+        # 普通の名前は通る (日本語は文字種の話であってパス境界の話ではない)
+        self.assertTrue(is_safe_path_component("alice_city_a"))
+        self.assertTrue(is_safe_path_component("エア_city_a"))
+        self.assertTrue(is_safe_path_component("console_city_a"))
+
     def test_entrance_id_is_derived_in_one_place(self):
         self.assertEqual(entrance_id_for("region_1_city_a"),
                          "entrance_region_1_city_a")
