@@ -76,8 +76,11 @@ async def stop_instance(
 ) -> Dict[str, Any]:
     """Force-stop a specific instance, ignoring refcount.
 
-    The instance may be restarted on the next tool call (per_persona
-    scope) or remain stopped until a referrer is re-added (global scope).
+    per_persona instances are restarted at that persona's **next Pulse head**
+    (the Pulse head opens the connection it needs to read the live tool list),
+    so a manual stop does not hold while the persona is active — disable the
+    addon to keep it down. global instances remain stopped until a referrer is
+    re-added. Detail: docs/issues/mcp_per_persona_manual_stop_revives.md
     """
     from tools.mcp_client import get_mcp_manager, run_on_mcp_loop
 

@@ -1264,6 +1264,20 @@ class MCPClientManager:
                 )
                 return False
 
+        # 版の検査は **登録より先**。await の間に無効化 (停止・鍵消失・アドオン
+        # 入れ直し) が入っていたら、この取得は「もう古い世界の話」なので所属も
+        # 登録もしない。登録を先にやると、一覧は捨てても TOOL_REGISTRY /
+        # SPELL_TOOL_SCHEMAS へ足した wrapper は残り、未評価の別ペルソナが
+        # config 近似でそれを見てしまう (Codex レビュー 2026-08-10)。
+        if self._persona_membership_version.get(membership_key, 0) != version_at_start:
+            LOGGER.info(
+                "MCP: discarding tool list for '%s' (persona=%s) — membership "
+                "was invalidated while the refresh was running",
+                qualified_name,
+                persona_id,
+            )
+            return False
+
         # 新規ツールの wrapper 登録 (登録済みの名前は skip される)。
         self._register_tools(connection, qualified_name, instance_key, persona_id)
 
@@ -1272,16 +1286,6 @@ class MCPClientManager:
             for tool in connection.tools
             if getattr(tool, "name", None)
         )
-        if self._persona_membership_version.get(membership_key, 0) != version_at_start:
-            # 走行中に無効化された。取得した一覧は書き戻さない (書き戻すと
-            # 「停止したのにツールが復活する」= fail-open 反転)。
-            LOGGER.info(
-                "MCP: discarding tool list for '%s' (persona=%s) — membership "
-                "was invalidated while the refresh was running",
-                qualified_name,
-                persona_id,
-            )
-            return False
         old_names = self._persona_tool_names.get(membership_key)
         self._persona_tool_names[membership_key] = new_names
         if old_names is None:
@@ -1639,24 +1643,49 @@ class MCPClientManager:
         self._refs.clear()
         self._server_meta.clear()
 
-    async def _shutdown_instance(self, instance_key: str, *, force: bool = False) -> None:
+    async def _shutdown_instance(
+        self, instance_key: str, *, force: bool = False, recoverable: bool = False,
+    ) -> None:
+        """この instance の生きた接続を落とし、接続から導かれる帳簿を畳む。
+
+        常にやるのは「接続が無くなったら真になること」だけ — 登録簿からツールを
+        外し、所属 (派生状態) を無効化する。接続が既に無い instance_key でも
+        帳簿の畳みは走る (呼ばれた意味は「この instance は生きていない」であって、
+        辞書に居るかではない)。
+
+        **``recoverable`` が畳む理由を運ぶ。** 片付けの範囲は「なぜ畳むのか」で
+        変わり、一つの関数で両方を表すと必ずどちらかが壊れる
+        (Codex レビュー 2026-08-10 で実際に壊した):
+
+        - ``recoverable=False`` (既定、恒久的な撤去): 参照も落とす。アドオン無効化・
+          手動停止・refcount 0 のように「もう在るべきでない」と決まった場合。
+        - ``recoverable=True`` (一時的な失敗): 参照を残す。設定の一時的な欠落や
+          再接続の失敗で落とした instance は「まだ在るべきもの」なので、
+          参照を消すと refcount 0 の invariant を壊したまま復旧させることになり、
+          再接続ボタン (:py:meth:`reconnect_server`) からも見えなくなる。
+
+        どちらの場合も ``${instance.*}`` の context は忘れない。context を捨てるのは
+        「この instance はもう使わない」と決めた :py:meth:`stop_instance` の責務で、
+        そこが明示的に pop している。ここで一緒に捨てると、設定が戻っても名前付き
+        instance が再登録なしには復旧できなくなる。
+        """
         connection = self._connections.pop(instance_key, None)
-        if connection is None:
-            return
-        # in-flight のツールコールが disconnect のキャンセルで失敗しても、
-        # call_tool の auto-reconnect でこの接続を蘇生させない (孤児 subprocess
-        # 防止)。disconnect が例外を投げる前に立てておく必要がある。
-        connection._closed = True
+        if connection is not None:
+            # in-flight のツールコールが disconnect のキャンセルで失敗しても、
+            # call_tool の auto-reconnect でこの接続を蘇生させない (孤児 subprocess
+            # 防止)。disconnect が例外を投げる前に立てておく必要がある。
+            connection._closed = True
         if not force:
             await self._unregister_instance_tools(instance_key)
-        try:
-            await connection.disconnect()
-        except Exception as exc:
-            LOGGER.debug(
-                "MCP: failed to disconnect instance '%s': %s", instance_key, exc
-            )
-        self._refs.pop(instance_key, None)
-        self._instance_contexts.pop(instance_key, None)
+        if connection is not None:
+            try:
+                await connection.disconnect()
+            except Exception as exc:
+                LOGGER.debug(
+                    "MCP: failed to disconnect instance '%s': %s", instance_key, exc
+                )
+        if not recoverable:
+            self._refs.pop(instance_key, None)
         # 所属 (per_persona ツール一覧) は接続から導かれる派生状態なので、
         # 接続を殺すこの関所が道連れで無効化する。残すと「切れた接続の一覧」が
         # 真実の顔で is_tool_available_for_persona から出続ける。次の Pulse 頭の
@@ -1769,10 +1798,22 @@ class MCPClientManager:
             resolve_config_placeholders,
         )
 
-        matching = [
-            key for key in self._connections
-            if self._qualified_from_instance_key(key) == qualified_name
-        ]
+        # 対象は「今繋がっている instance」+「在るべきなのに落ちている instance」。
+        # 後者を入れないと、一度落ちた instance は再接続ボタンから見えなくなる
+        # (matching が作れず即 False) — 落とした側が復旧の道を塞ぐ形になる。
+        # 在るべきかどうかの根拠は参照 (_refs = まだ誰かが要求している) と
+        # 失敗記録 (_failed_instances = 直近で落ちた) の 2 つ。
+        matching: List[str] = []
+        seen: Set[str] = set()
+        for key in list(self._connections) + list(self._refs) + list(
+            self._failed_instances
+        ):
+            if key in seen:
+                continue
+            if self._qualified_from_instance_key(key) != qualified_name:
+                continue
+            seen.add(key)
+            matching.append(key)
         if not matching:
             return False
 
@@ -1826,6 +1867,22 @@ class MCPClientManager:
         for instance_key in matching:
             connection = self._connections.get(instance_key)
             if connection is None:
+                # 落ちている instance は「繋ぎ直す」のではなく「立て直す」。
+                # 設定の再解決も未解決検査も _start_instance → connect() の
+                # 関所が済ませる (失敗記録と backoff も同経路)。
+                try:
+                    await self._start_instance(
+                        instance_key,
+                        qualified_name,
+                        persona_id=self._persona_id_from_instance_key(instance_key),
+                    )
+                except Exception:
+                    success = False
+                    continue
+                self._clear_failure(instance_key)
+                LOGGER.info(
+                    "MCP: restarted down instance '%s' via reconnect", instance_key,
+                )
                 continue
 
             # Resolve persona-specific placeholders on top of the freshly
@@ -1877,7 +1934,10 @@ class MCPClientManager:
                         instance_key,
                         user_msg,
                     )
-                    await self._shutdown_instance(instance_key)
+                    # recoverable: 設定不足は「もう使わない」という決定ではない。
+                    # 鍵を入れ直せば per_persona は次の Pulse 頭、global / 名前付きは
+                    # 再接続ボタンで戻れる道を残す。
+                    await self._shutdown_instance(instance_key, recoverable=True)
                     success = False
                     continue
                 connection.config = new_config
@@ -1889,13 +1949,47 @@ class MCPClientManager:
                 persona_id = self._persona_id_from_instance_key(instance_key)
                 self._register_tools(connection, qualified_name, instance_key, persona_id)
             except Exception as exc:
+                # 再接続に失敗した instance を掴んだままにしない。掴んだままだと
+                # (a) ツール wrapper の遅延起動は「_connections にキーがあるか」
+                # しか見ないので、切れた接続へ送り続けて必ず失敗し、
+                # (b) 失敗記録が付かないので UI の失敗一覧にも出ず、backoff も
+                # 効かない。畳めば per_persona は次の Pulse 頭が、名前付き
+                # instance は保持された context 付きで遅延起動 / retry が
+                # やり直せる (Codex レビュー 2026-08-10 high)。
+                # 構造的な統合 (再接続を _start_instance の共通経路へ寄せる) は
+                # docs/issues/mcp_remote_connection_recovery_gaps.md の 1。
+                category = _classify_error(exc)
+                user_msg = _build_user_error_message(
+                    qualified_name,
+                    meta.get("addon_name") if meta else None,
+                    category,
+                    str(exc),
+                )
+                self._record_failure(instance_key, category, user_msg, exc)
                 LOGGER.warning(
-                    "MCP: reconnect failed for instance '%s': %s",
+                    "MCP: reconnect failed for instance '%s' (%s); dropping the "
+                    "dead connection so it can be restarted: %s",
                     instance_key,
+                    category,
                     exc,
                 )
+                # recoverable: 参照を残す (「まだ在るべきもの」)。参照まで落とすと
+                # refcount 0 の invariant を壊したまま復旧させることになり、
+                # 再接続ボタンからも見えなくなる。
+                await self._shutdown_instance(instance_key, recoverable=True)
                 success = False
-        if success:
+        # ready は「このサーバーを今から呼べるか」の合図なので、全 instance の
+        # 成功ではなく **1 つでも生きているか** で立てる。複数 instance (ペルソナ
+        # ごと / vessel ごと) のうち 1 つが失敗しただけで、生きている instance の
+        # 購読者 (avatar_loader 等) を待たせ続ける理由はない。戻り値の success は
+        # 従来どおり「全 instance が繋ぎ直せたか」を意味する (呼び出し元の報告用)。
+        any_alive = False
+        for instance_key in matching:
+            conn = self._connections.get(instance_key)
+            if conn is not None and conn.connected:
+                any_alive = True
+                break
+        if any_alive:
             self._fire_server_ready(qualified_name)
         return success
 
@@ -1945,8 +2039,19 @@ class MCPClientManager:
     async def manual_stop_instance(self, instance_key: str) -> bool:
         """Force-stop a specific instance, ignoring refcount.
 
-        The instance may be restarted on the next tool call (for per_persona)
-        or require a process restart (for global).
+        ⚠️ **per_persona instances come back on that persona's next Pulse
+        head**, not on the next tool call: the Pulse head opens the connection
+        it needs to read the live tool list (§I). While the persona is active,
+        a manual stop therefore lasts minutes at most — use *addon disable* to
+        keep it down. See
+        ``docs/issues/mcp_per_persona_manual_stop_revives.md`` (recorded as
+        low priority: the stop button is rarely used and nothing is sent
+        externally without a resolvable key).
+
+        global instances stay down until a referrer is re-added (or the
+        process restarts); named instances (``:instance:``) can be restarted
+        by a tool call or retry because their ``${instance.*}`` context is
+        kept — only :py:meth:`stop_instance` forgets it.
         """
         if instance_key not in self._connections:
             return False

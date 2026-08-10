@@ -967,6 +967,172 @@ class MCPConfigTestCase(unittest.TestCase):
             mgr._persona_membership_version.get(("srv", "air_city_a"), 0), 0
         )
 
+    def test_reconnect_failure_drops_dead_connection_and_records_it(self) -> None:
+        """再接続に失敗した instance を掴んだままにしない。
+
+        掴んだままだと (a) ツール wrapper の遅延起動は「_connections にキーが
+        あるか」しか見ないので切れた接続へ送り続け、(b) 失敗記録が無いので UI の
+        失敗一覧にも出ず backoff も効かない (Codex レビュー 2026-08-10 high)。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post"])
+        mgr._connections["srv:persona:air_city_a"] = fake
+        mgr._refs["srv:persona:air_city_a"] = {"persona:air_city_a"}
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"post"})
+
+        async def _failing_connect():
+            fake.connect_count += 1
+            raise RuntimeError("connection refused")
+
+        fake.connect = _failing_connect
+        ready_fired: list[str] = []
+        mgr._on_server_ready["srv"] = [lambda: ready_fired.append("srv")]
+
+        with mock.patch(
+            "saiverse.addon_config.get_params",
+            return_value={"api_key": "k"},
+        ):
+            ok = asyncio.run(mgr.reconnect_server("srv"))
+
+        self.assertFalse(ok)
+        self.assertEqual(fake.connect_count, 1)
+        # 死んだ接続を掴み続けない = 遅延起動 / 次の Pulse 頭がやり直せる
+        self.assertNotIn("srv:persona:air_city_a", mgr._connections)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+        # UI の失敗一覧と backoff に載る
+        entry = mgr._failed_instances["srv:persona:air_city_a"]
+        self.assertTrue(entry["last_message"])
+        self.assertTrue(mgr._is_in_backoff("srv:persona:air_city_a"))
+        # 生きた instance が 1 つも無いので ready は立てない
+        self.assertEqual(ready_fired, [])
+
+    def test_reconnect_can_restart_a_down_instance(self) -> None:
+        """一度落ちた instance も再接続ボタンから立て直せる。
+
+        落とした側が復旧の道を塞ぐと、失敗した instance は「_connections に
+        居ない」だけで再接続の対象から消え、global / 名前付き instance は
+        プロセス再起動まで戻れなくなる (自分の畳み方が作った裏返し)。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        # 直近で落ちた記録だけがある状態 (接続オブジェクトは無い)
+        mgr._failed_instances["srv:persona:air_city_a"] = {
+            "attempts": 1, "next_retry_at": 0,
+            "last_category": "network", "last_message": "boom",
+            "last_exception": None,
+        }
+        started: list[str] = []
+
+        async def _fake_start(self_, instance_key, qualified_name, persona_id=None, **kw):
+            started.append(instance_key)
+            mgr._connections[instance_key] = self._FakeLiveConnection(tools=["post"])
+
+        with mock.patch(
+            "saiverse.addon_config.get_params",
+            return_value={"api_key": "k"},
+        ), mock.patch.object(
+            MCPClientManager, "_start_instance", new=_fake_start
+        ):
+            ok = asyncio.run(mgr.reconnect_server("srv"))
+
+        self.assertTrue(ok)
+        self.assertEqual(started, ["srv:persona:air_city_a"])
+        # 立て直せたので失敗記録は消える (UI の失敗一覧から外れる)
+        self.assertNotIn("srv:persona:air_city_a", mgr._failed_instances)
+
+    def test_recoverable_shutdown_keeps_references(self) -> None:
+        """一時的な失敗で畳んだ instance は「まだ在るべきもの」として参照を残す。
+
+        参照まで落とすと refcount 0 の invariant を壊したまま復旧させることになり、
+        再接続の対象からも消える。恒久的な撤去 (手動停止・アドオン無効化) だけが
+        参照を落とす。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        key = "srv:persona:air_city_a"
+
+        mgr._connections[key] = self._FakeLiveConnection(tools=["post"])
+        mgr._refs[key] = {"persona:air_city_a"}
+        asyncio.run(mgr._shutdown_instance(key, recoverable=True))
+        self.assertEqual(mgr._refs.get(key), {"persona:air_city_a"})
+
+        mgr._connections[key] = self._FakeLiveConnection(tools=["post"])
+        asyncio.run(mgr._shutdown_instance(key))
+        self.assertNotIn(key, mgr._refs)
+
+    def test_shutdown_keeps_named_instance_context(self) -> None:
+        """設定不足で畳んだ名前付き instance は、context を保って復旧できる。
+
+        ``${instance.*}`` の context を忘れるのは「もう使わない」と決めた
+        stop_instance の責務。_shutdown_instance が一緒に捨てると、設定が戻っても
+        再登録なしには復旧できなくなる (Codex レビュー 2026-08-10)。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["gw"] = {
+            "scope": "instance_template", "addon_name": "vessel-addon",
+            "raw_config": {"url": "http://127.0.0.1:${instance.ws_port}"},
+        }
+        fake = self._FakeLiveConnection(tools=["speak"])
+        mgr._connections["gw:instance:v1"] = fake
+        mgr._instance_contexts["gw:instance:v1"] = {"ws_port": "9001"}
+
+        asyncio.run(mgr._shutdown_instance("gw:instance:v1"))
+
+        self.assertNotIn("gw:instance:v1", mgr._connections)
+        self.assertEqual(
+            mgr._instance_contexts["gw:instance:v1"], {"ws_port": "9001"}
+        )
+
+        # 明示的な停止 (vessel の解除) だけが context を忘れる
+        mgr._connections["gw:instance:v1"] = self._FakeLiveConnection(tools=["speak"])
+        asyncio.run(mgr.stop_instance("gw:instance:v1"))
+        self.assertNotIn("gw:instance:v1", mgr._instance_contexts)
+
+    def test_invalidated_refresh_does_not_register_tools(self) -> None:
+        """走行中に無効化された取得は、登録簿にも触らない。
+
+        版の検査が _register_tools の後だと、一覧は捨てても TOOL_REGISTRY へ
+        足した wrapper が残り、未評価の別ペルソナが config 近似でそれを見る
+        (Codex レビュー 2026-08-10)。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post", "read"])
+
+        async def _start_then_invalidate(
+            self_, instance_key, qualified_name, persona_id=None, **kw
+        ):
+            mgr._connections[instance_key] = fake
+            mgr._mark_persona_tools_unavailable(("srv", "air_city_a"))
+
+        registered: list[str] = []
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={"api_key": "k"},
+        ), mock.patch.object(
+            MCPClientManager, "_start_instance", new=_start_then_invalidate
+        ), mock.patch(
+            "tools.register_external_tool",
+            side_effect=lambda name, schema, fn: registered.append(name) or True,
+        ):
+            changed = asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+
+        self.assertFalse(changed)
+        self.assertEqual(registered, [])
+        self.assertEqual(mgr._registered_tools, {})
+
     def test_sync_bridge_timeout_is_fail_closed(self) -> None:
         """取得が timeout で返らなかった Pulse では、ツールを提示しない。
 

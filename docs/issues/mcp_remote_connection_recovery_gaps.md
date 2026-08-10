@@ -10,6 +10,12 @@
 > - `reconnect_server` は未解決 config で畳む / 解決不能なら触らない、の 2 分岐を持つようになったが、**依然として `_start_instance` の共通経路には載っていない** (成功時の failure clear や backoff 記録が付かない)。
 >
 > 残る修正方向は「遅延起動の判定を実接続で行う」と「`reconnect_server` を `_start_instance` の共通経路へ寄せる」の 2 本。加えて、**接続断で所属 (`_persona_tool_names`) を空集合化する無効化コールバックを一元化する**と、Beat 頭の結論待ちに頼らず接続が死んだ瞬間に提示が畳める (§I の「派生状態の無効化は元の値を書き換える側に置く」と同じ原則)。
+>
+> **2026-08-10 追記 3 (Codex 再レビュー後)**: 1 のうち **「再接続に失敗した instance を掴み続ける」部分は解消**した — 失敗時に `_record_failure` (UI の失敗一覧 + backoff) を付けて `_shutdown_instance` で畳むので、遅延起動と次の Pulse 頭がやり直せる。同時に `_shutdown_instance` は `${instance.*}` の context を捨てるのをやめた (捨てるのは `stop_instance` = 恒久撤去の責務。一時的な失敗で畳んだ名前付き instance が再登録なしに復旧できなくなるため)。
+>
+> **1 に残るのは (a) だけ**: ツール wrapper の遅延起動判定が今も「`_connections` にキーがあるか」で、`call_tool` 失敗後の死んだ接続がキーに残っている間は迂回される (per_persona は次の Pulse 頭が張り直すので窓は 1 Pulse。global / 名前付き instance には自己修復の頭が無い)。**「切れているなら掴んでいても無いものとして扱う」1 箇所の判定変更で済む** — 次に触るときの筆頭候補。
+>
+> (b) の「`reconnect_server` が `_start_instance` を通らない」は**部分的に解消**した: 落ちている instance (参照が残っている / 失敗記録がある) も再接続の対象に含め、接続オブジェクトが無いものは `_start_instance` で立て直す形にしたので、少なくとも**落ちた instance が再接続ボタンから見えなくなる穴は無い**。生きている接続を繋ぎ直す経路は従来どおり `_start_instance` を通らない (config の再解決 → `disconnect` → `connect` を自前で行う) ため、共通化そのものは残課題。
 
 ## 症状
 

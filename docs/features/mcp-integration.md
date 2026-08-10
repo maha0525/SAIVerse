@@ -178,7 +178,8 @@ MCP サーバーが公開するツールは、すべて `TOOL_REGISTRY` に登�
 - ユーザー設定 (`user_data/`) と builtin からのサーバーは起動中ずっと参照されます。
 - アドオンを **無効化** すると、そのアドオン由来サーバーの参照が外れ、refcount がゼロになったプロセスは停止します。
 - アドオンを **有効化** し直すと、global スコープは再起動します。per_persona スコープは各ペルソナの次の Pulse 頭で自分のキーによりツール一覧を取り直します。
-- UI から**手動停止**することもできます（次回呼び出しで再起動可能）。ただし **per_persona スコープの手動停止は、そのペルソナが次に Pulse を打った時点で自動的に張り直されます** — 一覧を本人の生きた接続から取る設計 (§I) の帰結です。恒久的に止めたい場合はアドオンを無効化してください（`docs/issues/mcp_per_persona_manual_stop_revives.md`）。
+- UI から**手動停止**することもできます。**per_persona スコープの手動停止は、そのペルソナが次に Pulse を打った時点で自動的に張り直されます** — 一覧を本人の生きた接続から取る設計 (§I) の帰結です。恒久的に止めたい場合はアドオンを無効化してください（`docs/issues/mcp_per_persona_manual_stop_revives.md`）。global スコープは参照が再追加されるまで停止したままです。
+- 再接続 (`POST /api/mcp/servers/{server_name}/reconnect`) に失敗したインスタンスは、切れた接続を掴み続けずに畳まれ、失敗一覧（`GET /api/mcp/failures`）に出ます。per_persona は次の Pulse 頭が、名前付きインスタンスはツール呼び出しか `POST /api/mcp/instances/retry` がやり直します。
 
 ## エラー分類
 

@@ -211,3 +211,20 @@ M docs/intent/mcp_protocol_coverage.md
 **残した判断**: 手動停止の自動復活は低優先度 issue に切り出した (`docs/issues/mcp_per_persona_manual_stop_revives.md`、まはー裁定: 停止をほぼ使わないので実害が浮上しない)。
 
 **次**: 再レビュー (Codex 1 巡) → まはーの実機検証 (§6 + intent §I「検証の旅」— 鍵削除後に外部へ何も出ないことと、作業セッション経由での提示が新規項目)。
+
+### 2 巡目 (再レビュー) の結果と対応
+
+判定 needs-attention、**high 1 / medium 3**。1 巡目の 5 件は再指摘なし (関所・取得点・fail-closed・所属の位置づけは通った)。出たのは接続ライフサイクル側で、**high と medium 1 件は同じ根** — 「接続を落とす経路が、復旧に必要な情報まで一緒に捨てる / 捨てるべき死んだ接続を残す」。
+
+| 指摘 | 裁定と対応 |
+|---|---|
+| [high] 再接続失敗後も死んだ接続・旧所属が残り、失敗記録も backoff も付かない | **妥当**。失敗時に `_record_failure` + `_shutdown_instance` で畳む形に。既存 issue (1) の一部を解消 (残りは構造の統合 = issue 側に明記) |
+| [medium] `_shutdown_instance` が名前付き instance の `${instance.*}` context まで捨てて復旧不能にする | **妥当**。context を忘れるのは `stop_instance` (恒久撤去) の責務へ寄せた。`_shutdown_instance` は「接続が無くなったら常に真になること」だけを負う |
+| [medium] 版の検査が `_register_tools` の後 (無効化後も wrapper が登録簿に残る) | **妥当**。検査を登録より前へ移動 |
+| [medium] 手動停止が次の Pulse 頭で自動復活し、API の説明と食い違う | **機構はまはー裁定で低優先度 issue のまま**。ただし **docstring と API の説明が「次の tool call まで停止」のままだったのは私の書き残した嘘**なので、同じコミットで実装に合わせた |
+
+ついでに `_fire_server_ready` を「全 instance 成功」から「1 つでも生きている」へ (複数 instance の 1 つの失敗で生きている購読者を待たせない)。
+
+**指摘を直した後、自分で裏返しを歩いて 1 件見つけた** (Codex は指摘していない): 失敗した instance を畳むようにしたら、**畳んだ instance が再接続ボタンから見えなくなる** (対象を `_connections` から採っていたため) — 自己修復の頭を持たない global / 名前付き instance がプロセス再起動まで戻れない退行だった。対象に「参照が残っている / 失敗記録がある」ものを含め、接続オブジェクトが無いものは `_start_instance` で立て直す形にして閉じた。畳みの範囲も `recoverable` 引数で「一時的な失敗 = 参照を残す / 恒久的な撤去 = 落とす」に分けた。回帰テスト計 5 本追加。
+
+**この巡の教訓**: 1 巡目の修正 (fail-closed 化) が 2 巡目の指摘を作り、2 巡目の修正 (畳む) が 3 つ目の裏返しを作った。**手近な既存の片付け関数を借りるときは「それが何を忘れるか」を読む** — memory の `feedback_safety_devices_fail_in_both_directions` に追記した。
