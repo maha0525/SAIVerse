@@ -2116,7 +2116,10 @@ class MCPClientManager:
                 "addon_name": meta.get("addon_name"),
                 "source_path": meta.get("source_path"),
             })
-        # Also include configured-but-not-started servers (scope=per_persona in Phase 2a)
+        # Also include per_persona servers that have no instance yet: they are
+        # configured but nobody's connection is open (nothing connects at boot —
+        # 設計 I). Without this row the UI would show no trace of a configured
+        # server at all.
         for qualified, meta in sorted(self._server_meta.items()):
             scope = meta.get("scope", "global")
             if scope != "per_persona":
@@ -2141,7 +2144,10 @@ class MCPClientManager:
                 "referenced_by": [],
                 "addon_name": meta.get("addon_name"),
                 "source_path": meta.get("source_path"),
-                "note": "per_persona scope: will start on first tool call (Phase 2c pending)",
+                "note": (
+                    "per_persona scope: each persona opens its own connection at "
+                    "its next Pulse head (nothing is connected at boot)"
+                ),
             })
         return status
 
@@ -2206,9 +2212,11 @@ def _make_mcp_tool_wrapper(
     """Build the async callable that SEA/LLM invokes for this MCP tool.
 
     For global scope, the call is routed to the single global instance.
-    For per_persona scope (Phase 2c), the active persona is read from
-    ``tools.context`` and used to resolve (or lazy-start) the appropriate
-    per-persona instance.
+    For per_persona scope, the active persona is read from ``tools.context``
+    and used to resolve (or lazy-start) that persona's own instance —
+    execution always goes through the caller's own key, never a borrowed one
+    (設計 I). Normally the instance is already open because the Pulse head
+    opened it; the lazy start here covers calls outside that path.
     """
     async def _mcp_tool_wrapper(**kwargs: Any) -> str:
         # building_ids の execute-time gate は ``tools.__init__._add_registered_tool``
@@ -2467,7 +2475,8 @@ async def initialize_mcp() -> Optional[MCPClientManager]:
     manager = MCPClientManager()
     await manager.start_all()
     # Return the manager even if no tools were registered yet — per_persona
-    # scoped servers register their tools lazily (Phase 2c).
+    # scoped servers register nothing at boot; each persona's tools appear
+    # when its own connection is opened at its Pulse head (設計 I).
     _manager = manager
     return _manager
 
