@@ -18,6 +18,7 @@ from saiverse.model_configs import get_model_parameter_defaults
 from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
+from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
 from sea.runtime_context import prepare_context as prepare_context_impl
@@ -174,15 +175,13 @@ class SEARuntime:
         # 張った生きた接続だけ (docs/intent/mcp_addon_integration.md §I)。
         # ここで本人の接続を張って一覧を取得してから、下の検知が走る順序が肝 —
         # 逆だと一覧の変動が知覚バッファに積まれず、次の Pulse まで届かない。
+        # notify=False: 直後の検知フェーズが無条件で全 Section を見るので、
+        # ここで検知器を呼ぶと同じ差分を二度検知することになる。
         # per_persona サーバーが無い環境では has_per_persona_servers の
         # 前置き判定だけで即戻る。
-        try:
-            from tools.mcp_client import refresh_persona_tools_sync
-            refresh_persona_tools_sync(
-                getattr(persona, "persona_id", "") or "", connect=True,
-            )
-        except Exception:
-            LOGGER.exception("[mcp] per-persona tool refresh failed in run_meta_user")
+        refresh_mcp_tools_at_head(
+            persona, self.manager, building_id, connect=True, notify=False,
+        )
 
         # --- 知覚の「検知」フェーズ (バッファへ push、まだ消費しない) ---
         # 世界状態の差分 (入退室・アイテム・スペル 等) と入室時想起を検知し、知覚
@@ -207,8 +206,12 @@ class SEARuntime:
         # --- 知覚の「消費」フェーズ (flush) ---
         # 未消費の知覚 (REST 由来のメタ記憶訂正 + 上で検知した world_state/persona_recall)
         # を型別 reduce して 1 メッセージで SAIMemory へ書き出す。主観時間は Pulse でのみ
-        # 進むので、ここが消費点。全 Pulse タイプ (user/schedule/auto) が run_meta_user を
-        # 通る (pulse_controller.py) ため、ここ 1 箇所で全 Pulse の消費が成立する。
+        # 進むので、ここが消費点。会話・schedule・auto の Pulse は全部 run_meta_user を
+        # 通る (pulse_controller.py) ため、この 1 箇所でそれらの消費が成立する。
+        # ⚠️ 「全ての Pulse がここを通る」ではない — 作業セッション
+        # (sea/work_session.py) は自分の PulseContext を作る別の Pulse root で、
+        # 頭の処理 (知覚消費・MCP ツール取得) を自前で持っている。頭に一手
+        # 増やすときは両方に入れる (片方だけ直して素通しを作った実績あり)。
         # 検知 (上) → 消費 (ここ) の順序が重要 (同 Pulse 内で検知分も消費するため)。
         try:
             sai_mem = getattr(persona, "sai_memory", None)

@@ -653,6 +653,59 @@ def test_session_start_consumes_perceptions_before_context(session_factory, pers
     )
 
 
+def test_session_head_fetches_mcp_tools_before_consuming(session_factory, persona):
+    """作業セッションは Pulse root — 頭で本人の接続を張ってツール一覧を取る。
+
+    ツール一覧の真実はサーバー側にあり、証言できるのは本人の鍵で張った生きた
+    接続だけ (mcp_addon_integration.md §I)。会話 Pulse (run_meta_user) にだけ
+    取得を置いていたため、作業セッションは接続ゼロのまま head を組んでいた
+    (Codex レビュー 2026-08-10)。スペルを一度も撃たないセッションでは
+    _run_spell_loop の Beat 境界にも到達しないので、ここが唯一の取得点。
+
+    並びも固定する: 取得 → 検知 → 消費 (flush) → head 組成。取得が消費より
+    後だと、一覧の変動が知覚バッファに積まれたまま次の Beat まで読まれない。
+    """
+    events: List[str] = []
+    calls: List[Dict[str, Any]] = []
+    persona.sai_memory = SimpleNamespace(
+        get_current_thread=lambda: "p1:persona_main",
+        flush_perception_buffer=lambda: events.append("flush") or True,
+    )
+    manager, runtime, client = _make_env(session_factory, persona, ["調べ終えた。"])
+
+    def _fake_refresh(p, m, building_id, *, connect, notify=True):
+        events.append("mcp_refresh")
+        calls.append({
+            "persona_id": getattr(p, "persona_id", None),
+            "building_id": building_id,
+            "connect": connect,
+            "manager_passed": m is manager,
+        })
+        return False
+
+    orig_prepare = runtime._prepare_context
+
+    def _recording_prepare(*args, **kwargs):
+        events.append("prepare_context")
+        return orig_prepare(*args, **kwargs)
+
+    runtime._prepare_context = _recording_prepare
+
+    # 呼ぶ側の名前を差し替える (work_session は module-level で束縛している —
+    # 壊れた配備を Pulse の途中ではなく起動時に落とすため)
+    with patch("sea.work_session.refresh_mcp_tools_at_head", _fake_refresh):
+        result = _run(manager, budget=2)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assert events == ["mcp_refresh", "flush", "prepare_context"]
+    assert calls == [{
+        "persona_id": "p1",
+        "building_id": "b1",
+        "connect": True,          # Pulse 頭 = 接続を張る回
+        "manager_passed": True,   # 検知器へ渡す manager
+    }]
+
+
 def test_beat_head_flush_skipped_when_not_outermost(session_factory, persona):
     """子ライン相当 (beat_gate の保持深さが 1 でない) では Beat 頭の知覚消費を
     行わない — 子は親 Beat の一部 (beat_execution_context.md §3.4)。

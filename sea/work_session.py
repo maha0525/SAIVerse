@@ -46,6 +46,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from saiverse import clock
 from saiverse.usage_tracker import get_usage_tracker
+from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 
 LOGGER = logging.getLogger(__name__)
 
@@ -282,6 +283,17 @@ def run_work_session(
         from sea.runtime_llm import _parse_spell_lines, _run_spell_loop
 
         with hold_beat(manager, persona_id, purpose="work_session"):
+            # ---- Pulse 頭の per_persona MCP ツール取得 (mcp_addon_integration.md §I) ----
+            # 作業セッションは自分の PulseContext を作る Pulse root なので、
+            # 会話 Pulse (run_meta_user) と同じく「本人の鍵で接続を張って一覧を
+            # 取得する」のはここ。スペルを 1 度も呼ばないセッションだと
+            # _run_spell_loop の Beat 境界にも到達しないため、ここが唯一の
+            # 取得点になる (Codex レビュー 2026-08-10 で素通しが判明)。
+            # 並びは「取得 → 検知 → 消費 (下の flush) → head 組成」。
+            refresh_mcp_tools_at_head(
+                persona, manager, building_id, connect=True,
+            )
+
             # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2) ----
             # 作業セッションの開始も Beat の頭。直前の移動で届いた「移動先の
             # 様子」やフィードの未読を、最初の生成が見るコンテキストに入れる。

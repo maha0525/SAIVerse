@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
+from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
@@ -2202,20 +2203,10 @@ async def _run_spell_loop(
             # 一覧を変えるサーバー (モードチェンジ型) の変動をここで拾う。
             # 並びは「取得 → 検知 → flush → 生成」— 検知が flush より後だと
             # 変動の知覚が次の Beat まで読まれない。
-            try:
-                from tools.mcp_client import refresh_persona_tools_sync
-                if _beat_persona_id and refresh_persona_tools_sync(
-                    _beat_persona_id, connect=False, timeout=8.0,
-                ):
-                    from sea.head_pipeline import inject_diff_notifications
-                    inject_diff_notifications(
-                        persona, getattr(runtime, "manager", None), building_id,
-                    )
-            except Exception:
-                LOGGER.warning(
-                    "[sea][spell] Beat-head MCP tool refresh failed; continuing",
-                    exc_info=True,
-                )
+            refresh_mcp_tools_at_head(
+                persona, getattr(runtime, "manager", None), building_id,
+                connect=False,
+            )
 
             # ---- Beat 頭の知覚消費 (perception_buffer.md §4.2 2026-08-08 改訂) ----
             # boundary の関所に知覚バッファの消費が同席する。この周のスペルが

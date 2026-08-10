@@ -14,8 +14,16 @@ Design overview (see ``docs/intent/mcp_addon_integration.md``):
   use it). When refcount hits zero, the instance is shut down.
 - ``scope: "global"`` servers start at initialization time (refcount starts
   at 1, attributed to the config source — addon / user_data / builtin).
-- ``scope: "per_persona"`` servers defer startup to the first tool call from
-  that persona (implemented in Phase 2c; currently skipped with a warning).
+- ``scope: "per_persona"`` servers are owned by the persona whose key opens
+  them (§I). Nothing is connected at boot: the persona's own connection is
+  opened at its Pulse head and its tool list is re-asked at every Beat head
+  (``refresh_persona_tools``). The tool names that persona may see are
+  recorded per (server, persona) in ``_persona_tool_names`` — a presentation
+  filter derived from that live connection, never a substitute for it.
+- Config placeholders (``${persona.addon.x.y}`` etc.) are resolved per
+  instance, and the boundary check that no unresolved placeholder ever
+  reaches an MCP server lives in :meth:`MCPServerConnection.connect` — the
+  single point where config values leave this process.
 """
 from __future__ import annotations
 
@@ -115,8 +123,29 @@ _STARTUP_BACKOFF_MAX = 60.0
 _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 
 
+class MCPUnresolvedConfigError(RuntimeError):
+    """接続しようとした config に未解決の ``${...}`` が残っていた。
+
+    未解決のまま繋ぐと、``${persona.addon.x.y}`` という文字列そのものが
+    remote MCP の Authorization ヘッダーや subprocess の env に載って外部へ
+    出る。検査は「値が外へ出る場所」= :meth:`MCPServerConnection.connect` の
+    直前に 1 箇所だけ置き (Codex レビュー 2026-08-10)、そこから本例外を投げる。
+    起動側の入口で数え上げる形にすると、入口を一つ見落とすたびに漏れる
+    (実際に reconnect 経路が漏れていた)。
+    """
+
+    def __init__(self, server_name: str, placeholders: List[str]) -> None:
+        self.server_name = server_name
+        self.placeholders = sorted(set(placeholders))
+        super().__init__(
+            "未解決のプレースホルダー: " + ", ".join(self.placeholders)
+        )
+
+
 def _classify_error(exc: Exception) -> str:
     """Heuristically categorize an MCP startup exception."""
+    if isinstance(exc, MCPUnresolvedConfigError):
+        return ERROR_CATEGORY_MISSING_CONFIG
     exc_str = str(exc).lower()
 
     if isinstance(exc, FileNotFoundError):
@@ -492,6 +521,17 @@ class MCPServerConnection:
     async def connect(self) -> None:
         if self.connected:
             return
+
+        # --- 境界の関所: 未解決 placeholder を外へ出さない ---
+        # ここが config の値がこのプロセスから出る唯一の場所 (subprocess の env
+        # / remote のヘッダー)。起動側・再接続側それぞれの入口で検査する形では、
+        # 入口を一つ見落とした時点で漏れる (reconnect_server が実際に素通しだった
+        # — Codex レビュー 2026-08-10)。呼び出し元は本例外を通常の接続失敗として
+        # 扱えばよい (_classify_error が missing_config に分類する)。
+        unresolved = _find_unresolved_placeholders(self.config)
+        if unresolved:
+            raise MCPUnresolvedConfigError(self.server_name, unresolved)
+
         # 明示 stop 後に (reconnect_server 等で) 意図的に繋ぎ直す場合は復活を許す。
         self._closed = False
 
@@ -886,6 +926,12 @@ class MCPClientManager:
         # 放置された取得と次の Pulse の取得が同じ接続開始を重ねないための
         # ガード (MCP ループ単一スレッド上でのみ触る)。
         self._persona_refresh_inflight: Set[Tuple[str, str]] = set()
+        # (qualified_name, persona_id) -> 所属の版番号。意図的な無効化 (接続を
+        # 殺した / 鍵が解決できなくなった / アドオン入れ直し) が版を上げ、走行中の
+        # 取得は開始時に見た版と違っていたら結果を捨てる。これが無いと、sync 側が
+        # timeout で見放した取得が「停止した後」に古い一覧を書き戻してツールを
+        # 蘇生させる (fail-open 反転、Codex レビュー 2026-08-10)。
+        self._persona_membership_version: Dict[Tuple[str, str], int] = {}
         # qualified_name -> subscribers waiting for this server to become ready
         self._on_server_ready: Dict[str, List[Callable[[], None]]] = {}
         # qualified_names currently ready (reset on disconnect, set on connect)
@@ -1134,6 +1180,9 @@ class MCPClientManager:
         membership_key: Tuple[str, str],
         connect: bool,
     ) -> bool:
+        # 開始時の版。走行中に意図的な無効化 (停止・鍵の消滅・アドオン入れ直し)
+        # が入ったら、この取得の結果は「もう古い世界の話」なので書き込まない。
+        version_at_start = self._persona_membership_version.get(membership_key, 0)
         connection = self._connections.get(instance_key)
         alive = connection is not None and connection.connected
 
@@ -1142,6 +1191,20 @@ class MCPClientManager:
                 # Beat 頭は「生きた接続に聞き直す」だけ。接続を作るのは
                 # Pulse 頭の仕事 (§I) — ここで張り直すと、未設定ペルソナの
                 # resolve (DB 引き) が Beat 頻度で走ってしまう。
+                if connection is not None:
+                    # 接続オブジェクトはあるのに connected でない = ツール
+                    # コールの失敗等でこの Pulse の途中に死んだ接続。証言者が
+                    # いない以上、所属は「確認済み・利用不可」に倒す (提示だけ
+                    # 残ると、死んだ接続のツールが真実の顔で並び続ける)。次の
+                    # Pulse 頭の取得が張り直して復元する。
+                    LOGGER.info(
+                        "MCP: connection for '%s' (persona=%s) is dead at the "
+                        "beat head; dropping its tool membership until the "
+                        "next pulse head reconnects",
+                        qualified_name,
+                        persona_id,
+                    )
+                    return self._mark_persona_tools_unavailable(membership_key)
                 return False
 
             from tools.mcp_config import resolve_config_placeholders
@@ -1209,6 +1272,16 @@ class MCPClientManager:
             for tool in connection.tools
             if getattr(tool, "name", None)
         )
+        if self._persona_membership_version.get(membership_key, 0) != version_at_start:
+            # 走行中に無効化された。取得した一覧は書き戻さない (書き戻すと
+            # 「停止したのにツールが復活する」= fail-open 反転)。
+            LOGGER.info(
+                "MCP: discarding tool list for '%s' (persona=%s) — membership "
+                "was invalidated while the refresh was running",
+                qualified_name,
+                persona_id,
+            )
+            return False
         old_names = self._persona_tool_names.get(membership_key)
         self._persona_tool_names[membership_key] = new_names
         if old_names is None:
@@ -1216,6 +1289,28 @@ class MCPClientManager:
             # 変わった」ので検知に値する (head 側の近似からの置き換わり検出)。
             return bool(new_names)
         return old_names != new_names
+
+    def presume_persona_tools_unavailable(self, persona_id: str) -> None:
+        """このペルソナの「まだ一度も取得していない」所属を空集合へ倒す。
+
+        Pulse 頭の取得を投げる直前に呼ぶ。取得が timeout で見放されたとき、
+        所属が未評価 (None) のままだと ``is_tool_available_for_persona`` が
+        config 近似 (= 鍵が解決できれば使える顔) へ戻り、一度も繋げていない
+        ツールを提示してしまう。§I の「取得できなかった Pulse はツール無し」を
+        守るため、取得の結果が出るまでは空集合を置く (fail-closed)。
+
+        版番号は上げない — これは推定であって無効化ではなく、走行中の取得が
+        直後に本物の一覧を書き込むのは正しい自己修復だから。既に実績のある
+        所属 (空集合含む) には触らない (setdefault)。
+        """
+        if not persona_id:
+            return
+        for qualified_name, meta in list(self._server_meta.items()):
+            if str(meta.get("scope")) != "per_persona":
+                continue
+            self._persona_tool_names.setdefault(
+                (qualified_name, str(persona_id)), frozenset()
+            )
 
     def _mark_persona_tools_unavailable(
         self, membership_key: Tuple[str, str]
@@ -1233,9 +1328,16 @@ class MCPClientManager:
         """
         old = self._persona_tool_names.get(membership_key)
         self._persona_tool_names[membership_key] = frozenset()
+        self._bump_membership_version(membership_key)
         # None (未取得 = 近似が True を返していたかもしれない) → 空集合も
         # 可視状態の変化になりうるので変化ありとして返す。空→空だけが不変。
         return old is None or bool(old)
+
+    def _bump_membership_version(self, membership_key: Tuple[str, str]) -> int:
+        """所属の版を進める (走行中の取得の書き込みを無効にする)。"""
+        version = self._persona_membership_version.get(membership_key, 0) + 1
+        self._persona_membership_version[membership_key] = version
+        return version
 
     def _purge_persona_tools(self, qualified_name: str) -> None:
         """qualified server の全ペルソナ所属を白紙に戻す (addon toggle 用)。"""
@@ -1243,6 +1345,8 @@ class MCPClientManager:
             k for k in self._persona_tool_names if k[0] == qualified_name
         ]:
             self._persona_tool_names.pop(key, None)
+            # 走行中の取得が白紙化を無かったことにしないよう版を進める。
+            self._bump_membership_version(key)
 
     async def _start_instance(
         self,
@@ -1277,22 +1381,9 @@ class MCPClientManager:
             raw_config, persona_id=persona_id, instance_context=instance_context
         )
 
-        unresolved = _find_unresolved_placeholders(resolved)
-        if unresolved:
-            category = ERROR_CATEGORY_MISSING_CONFIG
-            detail = "未解決のプレースホルダー: " + ", ".join(sorted(set(unresolved)))
-            user_msg = _build_user_error_message(
-                qualified_name, meta.get("addon_name"), category, detail
-            )
-            self._record_failure(instance_key, category, user_msg)
-            LOGGER.error(
-                "MCP startup error: instance=%s category=%s msg=%s",
-                instance_key,
-                category,
-                user_msg,
-            )
-            raise RuntimeError(detail)
-
+        # 未解決 placeholder の検査は connect() の関所が持つ (missing_config に
+        # 分類されて下の except 分岐が失敗記録 + backoff を済ませる)。ここで
+        # 二重に数えると、検査の条件が二箇所で食い違う余地を作る。
         connection = MCPServerConnection(
             qualified_name, resolved, instance_key=instance_key
         )
@@ -1738,25 +1829,58 @@ class MCPClientManager:
                 continue
 
             # Resolve persona-specific placeholders on top of the freshly
-            # AddonConfig-interpolated raw_config. On failure fall through
-            # to reconnect with the existing config so we at least try a
-            # restart, rather than leaving the subprocess stale.
+            # AddonConfig-interpolated raw_config.
+            #
+            # 解決に失敗した回は、この instance を触らずに送る (旧 config で
+            # 繋ぎ直さない)。再接続の目的は「現在の設定値を subprocess / ヘッダー
+            # へ押し込む」ことで、現在の値が分からないなら kill + respawn は
+            # 目的を果たさないまま生きている接続を殺すだけになる。今動いている
+            # 接続をそのまま残すのが最も無害 (成功扱いにはしない)。
             if raw_config is not None:
                 persona_id = self._persona_id_from_instance_key(instance_key)
                 instance_context = self._instance_contexts.get(instance_key)
                 try:
-                    connection.config = resolve_config_placeholders(
+                    new_config = resolve_config_placeholders(
                         raw_config,
                         persona_id=persona_id,
                         instance_context=instance_context,
                     )
                 except Exception as exc:
                     LOGGER.warning(
-                        "MCP: placeholder re-resolution failed for '%s' "
-                        "before reconnect (will use cached config): %s",
+                        "MCP: placeholder re-resolution failed for '%s'; "
+                        "leaving the current connection as-is (not reconnecting "
+                        "with stale values): %s",
                         instance_key,
                         exc,
                     )
+                    success = False
+                    continue
+                # 鍵が消された等で解決しきれなかった場合は、旧鍵の入った
+                # 現行接続も畳む。「使えなくした」という利用者の意図に対し、
+                # 起動時に焼き込まれた旧鍵で喋り続ける接続を残す方が有害
+                # (connect() の関所は未解決の送信を止めるが、既存接続は
+                # 止めない — 派生状態の所属も _shutdown_instance が畳む)。
+                unresolved = _find_unresolved_placeholders(new_config)
+                if unresolved:
+                    category = ERROR_CATEGORY_MISSING_CONFIG
+                    user_msg = _build_user_error_message(
+                        qualified_name,
+                        meta.get("addon_name") if meta else None,
+                        category,
+                        "未解決のプレースホルダー: "
+                        + ", ".join(sorted(set(unresolved))),
+                    )
+                    self._record_failure(instance_key, category, user_msg)
+                    LOGGER.warning(
+                        "MCP: reconnect of '%s' aborted (unresolved config); "
+                        "shutting the instance down instead: %s",
+                        instance_key,
+                        user_msg,
+                    )
+                    await self._shutdown_instance(instance_key)
+                    success = False
+                    continue
+                connection.config = new_config
 
             await self._unregister_instance_tools(instance_key)
             try:
@@ -2179,12 +2303,25 @@ def refresh_persona_tools_sync(
     False (= 変化なし扱い) — 取得の失敗で Pulse を止めない。timeout で
     抜けた場合も coroutine 自体は MCP ループ上で走り続け、完了すれば
     所属は更新される (次の Beat / Pulse の取得が拾う)。
+
+    ``connect=True`` の回は投げる前に「未評価の所属を空集合へ倒す」
+    (presume_persona_tools_unavailable)。timeout で結果を受け取れなかった
+    ときに config 近似へ戻ってしまうと、一度も繋げていないツールを提示する
+    ことになる (§I: 取得できなかった Pulse はツール無し)。
     """
     manager = get_mcp_manager()
     if manager is None or _loop is None or not persona_id:
         return False
     if not manager.has_per_persona_servers():
         return False
+    if connect:
+        try:
+            manager.presume_persona_tools_unavailable(persona_id)
+        except Exception:
+            LOGGER.exception(
+                "MCP: failed to presume per-persona tool unavailability "
+                "(persona=%s)", persona_id,
+            )
     try:
         current_loop = None
         try:

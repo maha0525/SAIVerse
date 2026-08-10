@@ -10,6 +10,7 @@ import uuid
 from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, register_external_tool, unregister_external_tool
 from tools.core import ToolSchema
 from tools.mcp_client import (
+    ERROR_CATEGORY_MISSING_CONFIG,
     MCPClientManager,
     MCPServerConnection,
     _make_instance_key,
@@ -523,6 +524,8 @@ class MCPConfigTestCase(unittest.TestCase):
 
             self.config = {"url": "https://x.test"}
             self.session = object()
+            self.connect_count = 0
+            self._closed = False
             self._connected = True
             self.tools = [
                 SimpleNamespace(name=n, description="d", inputSchema={})
@@ -550,6 +553,13 @@ class MCPConfigTestCase(unittest.TestCase):
                 raise self._refresh_error
             if self._next_tools is not None:
                 self.tools = self._next_tools
+
+        async def connect(self):
+            self.connect_count += 1
+            self._connected = True
+
+        async def disconnect(self):
+            self._connected = False
 
     def test_refresh_skips_connect_when_key_unset(self) -> None:
         """鍵未設定のペルソナでは接続を張らず、失敗としても記録しない。
@@ -785,6 +795,231 @@ class MCPConfigTestCase(unittest.TestCase):
         self.assertEqual(
             mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
         )
+
+    # -- 未解決 placeholder の関所 (Codex レビュー 2026-08-10) -------------
+    #
+    # 起動側の入口で数え上げる形は、入口を一つ見落とした時点で漏れる。実際に
+    # reconnect_server が素通しで、鍵を消した後の再接続で ${...} の literal が
+    # remote のヘッダーに載った。検査は値が外へ出る場所 = connect() に置く。
+
+    def test_connect_refuses_unresolved_placeholders(self) -> None:
+        """未解決の ${...} を持つ config では接続そのものを拒む。"""
+        import asyncio
+
+        from tools.mcp_client import MCPUnresolvedConfigError, _classify_error
+
+        conn = MCPServerConnection(
+            "srv",
+            {
+                "url": "https://x.test",
+                "headers": {
+                    "Authorization": "Bearer ${persona.addon.my-addon.api_key}"
+                },
+            },
+        )
+        with self.assertRaises(MCPUnresolvedConfigError) as caught:
+            asyncio.run(conn.connect())
+
+        self.assertIn("persona.addon.my-addon.api_key", str(caught.exception))
+        self.assertFalse(conn.connected)
+        # 呼び出し元が「設定不足」として扱えること (UI の失敗一覧の分類)
+        self.assertEqual(
+            _classify_error(caught.exception), ERROR_CATEGORY_MISSING_CONFIG
+        )
+
+    def test_start_instance_reports_missing_config_from_the_guard(self) -> None:
+        """入口の事前検査を関所へ寄せても、失敗記録の分類は missing_config のまま。"""
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+
+        with mock.patch("saiverse.addon_config.get_params", return_value={}):
+            with self.assertRaises(Exception):
+                asyncio.run(
+                    mgr._start_instance(
+                        "srv:persona:air_city_a", "srv", persona_id="air_city_a"
+                    )
+                )
+
+        entry = mgr._failed_instances["srv:persona:air_city_a"]
+        self.assertEqual(entry["last_category"], ERROR_CATEGORY_MISSING_CONFIG)
+        self.assertIn("persona.addon.my-addon.api_key", entry["last_message"])
+
+    def test_reconnect_shuts_down_instance_when_key_removed(self) -> None:
+        """鍵を消した後の再接続は、未解決の値で繋がず instance を畳む。
+
+        旧挙動は再解決した config を検査なしで connect() に渡していたため、
+        ``${persona.addon...}`` の literal が remote のヘッダーに載って外部へ
+        出た。かつ「起動時に焼き込まれた旧鍵で喋り続ける接続」を残すのも、
+        鍵を消した利用者の意図に反する。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post"])
+        mgr._connections["srv:persona:air_city_a"] = fake
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"post"})
+
+        with mock.patch("saiverse.addon_config.get_params", return_value={}):
+            ok = asyncio.run(mgr.reconnect_server("srv"))
+
+        self.assertFalse(ok)
+        self.assertEqual(fake.connect_count, 0)
+        self.assertNotIn("srv:persona:air_city_a", mgr._connections)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+        self.assertEqual(
+            mgr._failed_instances["srv:persona:air_city_a"]["last_category"],
+            ERROR_CATEGORY_MISSING_CONFIG,
+        )
+
+    def test_beat_refresh_drops_membership_when_connection_is_dead(self) -> None:
+        """死んだ接続が残っている Beat 頭では、所属を「利用不可」に倒す。
+
+        ツールコールの失敗で接続は disconnect されるが _connections には残る
+        (call_tool の except 分岐)。証言者がいないのに一覧だけ残すと、死んだ
+        接続のツールが真実の顔で並び続ける (Codex レビュー 2026-08-10)。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post"])
+        fake._connected = False  # ツールコール失敗で死んだ接続
+        mgr._connections["srv:persona:air_city_a"] = fake
+        mgr._persona_tool_names[("srv", "air_city_a")] = frozenset({"post"})
+
+        with mock.patch("saiverse.addon_config.get_params") as mock_params:
+            changed = asyncio.run(
+                mgr.refresh_persona_tools("air_city_a", connect=False)
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+        # Beat 頭は接続を張り直さない (鍵の再解決もしない) — Pulse 頭の仕事
+        mock_params.assert_not_called()
+        self.assertEqual(fake.connect_count, 0)
+
+    def test_late_refresh_result_is_discarded_after_invalidation(self) -> None:
+        """走行中に無効化された取得は、一覧を書き戻さない (fail-open 反転の防止)。
+
+        sync 側が timeout で見放した取得は MCP ループ上で走り続ける。その間に
+        停止や鍵の消滅が入ったのに完了時の一覧を書き込むと、「止めたのにツールが
+        復活する」。所属の版番号で、無効化を跨いだ書き込みを捨てる。
+        """
+        import asyncio
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        fake = self._FakeLiveConnection(tools=["post", "read"])
+
+        async def _start_then_invalidate(
+            self_, instance_key, qualified_name, persona_id=None, **kw
+        ):
+            mgr._connections[instance_key] = fake
+            # 接続を張っている間に「停止」が入った状況の再現
+            mgr._mark_persona_tools_unavailable(("srv", "air_city_a"))
+
+        with mock.patch(
+            "saiverse.addon_config.get_params", return_value={"api_key": "k"},
+        ), mock.patch.object(
+            MCPClientManager, "_start_instance", new=_start_then_invalidate
+        ), mock.patch("tools.register_external_tool", return_value=True):
+            changed = asyncio.run(mgr.refresh_persona_tools("air_city_a"))
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+
+    def test_presume_unavailable_covers_unevaluated_only(self) -> None:
+        """Pulse 頭の取得を投げる前に、未評価の所属だけを空集合へ倒す。
+
+        timeout で結果を受け取れなかったときに config 近似 (鍵が解決できれば
+        使える顔) へ戻らないための fail-closed。既に実績のある所属は触らない。
+        """
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._server_meta["glob"] = {
+            "scope": "global", "addon_name": None, "raw_config": {},
+        }
+        mgr._server_meta["srv2"] = self._per_persona_meta()
+        mgr._persona_tool_names[("srv2", "air_city_a")] = frozenset({"post"})
+
+        mgr.presume_persona_tools_unavailable("air_city_a")
+
+        self.assertEqual(
+            mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+        )
+        # 実績のある所属は保つ (推定で本物の一覧を消さない)
+        self.assertEqual(
+            mgr._persona_tool_names[("srv2", "air_city_a")], frozenset({"post"})
+        )
+        # global スコープは対象外 (ペルソナ単位の所属を持たない)
+        self.assertNotIn(("glob", "air_city_a"), mgr._persona_tool_names)
+        # 推定は「無効化」ではないので版は進めない (走行中の取得の結果は有効)
+        self.assertEqual(
+            mgr._persona_membership_version.get(("srv", "air_city_a"), 0), 0
+        )
+
+    def test_sync_bridge_timeout_is_fail_closed(self) -> None:
+        """取得が timeout で返らなかった Pulse では、ツールを提示しない。
+
+        以前は所属が未評価 (None) のままだったので config 近似 (鍵が解決できる
+        = 使える顔) へ戻り、一度も繋げていないツールを提示していた
+        (Codex レビュー 2026-08-10 の fail-open)。橋を渡す前に「未評価の所属を
+        空集合へ倒す」ことで、結果が来ない Pulse は正直にツール無しになる。
+        """
+        import asyncio
+
+        import tools.mcp_client as mcp_mod
+
+        mgr = MCPClientManager()
+        mgr._server_meta["srv"] = self._per_persona_meta()
+        mgr._registered_tools["srv__post"] = {
+            "qualified_server_name": "srv",
+            "tool_name": "post",
+            "scope": "per_persona",
+            "building_ids": None,
+        }
+
+        async def _slow_refresh(self_, persona_id, *, connect=True):
+            await asyncio.sleep(1.0)
+            return True
+
+        prev_manager = mcp_mod._manager
+        prev_loop = mcp_mod._loop
+        prev_thread = mcp_mod._loop_thread
+        loop = mcp_mod._ensure_loop_thread()
+        mcp_mod._manager = mgr
+        try:
+            with mock.patch(
+                "saiverse.addon_config.get_params",
+                return_value={"api_key": "k"},
+            ), mock.patch.object(
+                MCPClientManager, "refresh_persona_tools", new=_slow_refresh
+            ):
+                changed = mcp_mod.refresh_persona_tools_sync(
+                    "air_city_a", connect=True, timeout=0.05,
+                )
+
+            self.assertFalse(changed)
+            self.assertEqual(
+                mgr._persona_tool_names[("srv", "air_city_a")], frozenset()
+            )
+            self.assertFalse(
+                mgr.is_tool_available_for_persona("srv__post", "air_city_a")
+            )
+        finally:
+            mcp_mod._manager = prev_manager
+            loop.call_soon_threadsafe(loop.stop)
+            mcp_mod._loop = prev_loop
+            mcp_mod._loop_thread = prev_thread
 
     def test_membership_overrides_config_approximation(self) -> None:
         """所属記録がある間は、config 近似ではなく本人の一覧が真実 (§I)。

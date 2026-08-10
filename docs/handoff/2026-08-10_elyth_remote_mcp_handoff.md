@@ -190,3 +190,24 @@ M docs/intent/mcp_protocol_coverage.md
 
 - 1 と 5 は §I 以前からの構造 (再接続・切断ライフサイクル) に §I の観点が当たって顕在化したもの。2 と 3 は今回の実装の取り残し。4 は設計の明文化不足。
 - Codex の総評「出荷不可」は上記 5 件を全部 high と数えた場合の評価。私の見立てでは、実害の即時性が高いのは 1 (鍵削除→再接続で外部送信) と 2 (作業セッションの提示が近似のまま) の 2 件。ただし**打ち切り判定は観測でのみ** — 消し込み後の再レビューで確認すること。
+
+---
+
+## 9. 消し込み結果 (2026-08-10、Opus セッション)
+
+§8 の 6 件すべてに手を入れた。設計上の答えは intent §I の「レビューの消し込みで確定した点」に移し、ここには対応の対照表だけ置く。
+
+| §8 | 対応 |
+|---|---|
+| 1. reconnect の placeholder 迂回 | 検査を `MCPServerConnection.connect()` の 1 箇所へ移設 (`MCPUnresolvedConfigError` → `missing_config` 分類)。入口側の重複検査は撤去。reconnect は「未解決なら現行接続も畳む / 再解決が落ちたら触らない」の 2 分岐に |
+| 2. work_session が Pulse 頭を迂回 | 頭の一手を `sea/mcp_tool_refresh.refresh_mcp_tools_at_head` に切り出し、`run_meta_user` (notify=False) / `run_work_session` (connect=True) / Beat 境界 (connect=False) の 3 箇所から呼ぶ形に |
+| 3. 同期橋 timeout の fail-open | 橋を渡る前に未評価の所属を空集合へ倒す (`presume_persona_tools_unavailable`) + 所属に版番号を持たせ、無効化を跨いだ遅延書き込みを捨てる |
+| 4. 所属と実行時認可 | §I 機構 5 として明文化 (所属は提示のフィルタ、実行の認可は本人の接続にサーバーが応じるか)。3 の fail-closed で「未評価のまま提示」も消えた |
+| 5. 死んだ接続と所属 | Beat 頭で「接続はあるが生きていない」を結論として所属を空集合化。接続ライフサイクル本体は既存 issue に修正方向を追記して残す |
+| 6. 旧 docstring | `tools/mcp_client.py` 冒頭を §I の内容に更新 |
+
+**新規テスト 15 本** (`test_mcp_config.py` +7 / `test_mcp_tool_refresh.py` 新設 8 本) と `test_work_session.py` の順序テスト 1 本。関連スイート緑・ruff 緑・フルスイートはコミット前に 1 回。
+
+**残した判断**: 手動停止の自動復活は低優先度 issue に切り出した (`docs/issues/mcp_per_persona_manual_stop_revives.md`、まはー裁定: 停止をほぼ使わないので実害が浮上しない)。
+
+**次**: 再レビュー (Codex 1 巡) → まはーの実機検証 (§6 + intent §I「検証の旅」— 鍵削除後に外部へ何も出ないことと、作業セッション経由での提示が新規項目)。
